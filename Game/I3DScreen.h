@@ -3,6 +3,7 @@
 #include "I3DObject.h"
 #include <vector>
 /////////////////////////////////////////////////////////////////////////////////////
+class CParty;
 class CI3DScreen : public CI3DObject
 {
 protected:
@@ -17,6 +18,8 @@ public:
     virtual void OnDeactivate() = 0;
 
     virtual void OnExitFromModal(DWORD dwRetValue) {}
+    virtual CParty *GetPartyView() { return nullptr; }
+    virtual bool LiveCommerce() const { return false; }
 
     virtual void NewHooveredItems(CList<CItem *, CItem *> &newItems, int nArrivedBucks,
                                   bool bCrippled)

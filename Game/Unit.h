@@ -1,5 +1,6 @@
 #pragma once
 namespace SaveSchema { class Writer; class Reader; }
+namespace Settlement { struct TradeAccess; }
 /////////////////////////////////////////////////////////////////////////////////////
 #include "MapObject.h"
 #include "Inventory.h"
@@ -194,6 +195,7 @@ class CUnit : public CMapObject
         DWORD dwWeaponsID[QI_MAX_WEAPONS];
         DWORD dwArmorsID[RPG_NUM_ARMOR_TYPES];
     };
+    friend struct Settlement::TradeAccess;
     friend class CUnitSpecific;
     friend class CUnitClientSpecific;
     friend class CUnitServer;

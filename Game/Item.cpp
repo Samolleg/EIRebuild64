@@ -60,6 +60,7 @@ CItem::~CItem()
 BOOL CItem::Create()
 {
     nCount = 1;
+    tradeOrigin = 0;
     pSpell = 0;
     return TRUE;
 }
@@ -75,6 +76,7 @@ BOOL CItem::Compare(CItem *lpItem)
 {
     if (lpItem == this)
         return TRUE;
+    if (tradeOrigin != lpItem->tradeOrigin) return FALSE;
     if (GetTypeID() != lpItem->GetTypeID())
         return FALSE;
     if (GetSubtypeID() != lpItem->GetSubtypeID())
@@ -150,6 +152,7 @@ BOOL CItem::Duplicate(CItem *lpItem, CSpellManager *pSpellManager) const
         lpItem->pSpell = 0;
     // set number of stocked items to 1
     lpItem->nCount = 1;
+    lpItem->tradeOrigin = tradeOrigin;
 
     return TRUE;
 }

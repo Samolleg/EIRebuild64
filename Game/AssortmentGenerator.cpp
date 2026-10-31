@@ -41,6 +41,24 @@ public:
 }; // namespace NAssortmentGenerator
 using namespace NAssortmentGenerator;
 /////////////////////////////////////////////////////////////////////////////////////
+void CAssortmentGenerator::CopyState(const CAssortmentGenerator &source)
+{
+    auto *owner=pWorld;
+    *this=source;
+    pWorld=owner;
+}
+void CAssortmentGenerator::SwapState(CAssortmentGenerator &other) noexcept
+{
+    using std::swap;
+    swap(nShopID,other.nShopID);
+    armorShapes.swap(other.armorShapes); weaponShapes.swap(other.weaponShapes);
+    quickitemShapes.swap(other.quickitemShapes); materials.swap(other.materials);
+    spellPrototypes.swap(other.spellPrototypes); spellModifiers.swap(other.spellModifiers);
+    cspells.swap(other.cspells); runes.swap(other.runes);
+    for (int i=0;i<RPG_NUM_MAGIC_SUBTYPES;++i) {
+        swap(fMinSkills[i],other.fMinSkills[i]); swap(fMaxSkills[i],other.fMaxSkills[i]);
+    }
+}
 void CAssortmentGenerator::Clear()
 {
     nShopID = 0;

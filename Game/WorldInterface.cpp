@@ -301,6 +301,7 @@ void CWorldClientInterface::GSGetVars(const char *pszName, CGSVariableSet &vars)
 /////////////////////////////////////////////////////////////////////////////////////
 CParty &CWorldClientInterface::GetParty()
 {
+    if (CParty *view = theInterface.GetPartyView()) return *view;
     return theWorld.GetPlayer()->GetPlayer()->party;
 }
 /////////////////////////////////////////////////////////////////////////////////////

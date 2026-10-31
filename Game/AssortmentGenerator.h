@@ -85,6 +85,8 @@ public:
     ~CAssortmentGenerator() { pWorld = 0; }
     // clear all shapes and materials
     void Clear();
+    void CopyState(const CAssortmentGenerator &source);
+    void SwapState(CAssortmentGenerator &other) noexcept;
     //
     void SetShopID(int _nShopID) { nShopID = _nShopID - 1; }
     // adding shapes

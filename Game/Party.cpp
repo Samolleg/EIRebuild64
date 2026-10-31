@@ -447,7 +447,7 @@ CItem *CParty::AddItemToWagon(CItem *pItem, bool bMoveAllStack, bool bNeedStack)
         for (i = 0; i < allWagonItems.GetSize(); i++)
         {
             // if its possible to stack item - do it
-            if (allWagonItems[i]->Compare(pItem))
+            if (allWagonItems[i]->TradeOrigin() == pItem->TradeOrigin() && allWagonItems[i]->Compare(pItem))
             {
                 allWagonItems[i]->SetCount(allWagonItems[i]->GetCount() + num);
                 return allWagonItems[i];

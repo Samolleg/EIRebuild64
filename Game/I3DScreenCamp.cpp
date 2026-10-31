@@ -2,6 +2,8 @@
 #include "CorePerf.h"
 #include "OwnedRender/E4Camp.h"
 #include "GameJournal.h"
+#include "WorldServer.h"
+#include "DynamicSave.h"
 #include "ModPackage.h"
 #include "ModRuntime.h"
 #include "ModStatRules.h"
@@ -13,7 +15,14 @@
 #include "Object3DClientSpecific.h"
 #include "WideScreen.h"
 static const char LOCAL_FILE[] = __FILE__;
-namespace { void RefreshCampEquipmentPose(CUnit*, CPersonage*, bool); }
+namespace {
+void RefreshCampEquipmentPose(CUnit*, CPersonage*, bool);
+struct MerchantPresentationRandom {
+    bool active; SaveSchema::RandomState saved;
+    explicit MerchantPresentationRandom(bool live):active(live) { if(active)saved=SaveSchema::RandomState::Capture(); }
+    ~MerchantPresentationRandom() { if(active)saved.Apply(); }
+};
+}
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenCamp.h"
 #include "ModProgression.h"
@@ -50,8 +59,26 @@ const COLORREF CAMP_COLOR_HEADER = RGB(255, 255, 255);
 const COLORREF CONSTR_COLOR_PRICE = RGB(255, 255, 255);
 const COLORREF CONSTR_COLOR_NUMBERS = RGB(255, 255, 255);
 /////////////////////////////////////////////////////////////////////////////////////
+CI3DScreenCamp::CI3DScreenCamp(CInterface3D *ui, CWorldServer &world, std::uint64_t token)
+    : CI3DScreenCamp(ui, true)
+{
+    tradeWorld=&world; tradeToken=token;
+    tradeParty=world.Settlements().TradeParty(token);
+    tradeShop=world.Settlements().TradeShop(token);
+    tradeLifetime=world.Settlements().TradeLifetime(token);
+}
+void CI3DScreenCamp::TradeFailure()
+{
+    // Retire the draft after a rejected transaction; the owner has not changed.
+    tradeFailed=true;
+    auto *message=dbgnew CI3DScreenMessageBox(pI3D,bIsItemConstr?"mode_itemtrade":"mode_spelltrade","camp_current_money",0,MBF_OK);
+    const wchar_t *wide=L"\u0421\u0434\u0435\u043b\u043a\u0430 \u043d\u0435 \u043f\u0440\u0438\u043c\u0435\u043d\u0435\u043d\u0430. \u041e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044e \u0437\u0430\u043d\u043e\u0432\u043e.";
+    char local[256]{}; WideCharToMultiByte(1251,0,wide,-1,local,sizeof(local),nullptr,nullptr);
+    message->SetText(local); pI3D->DoModal(message);
+}
 void CI3DScreenCamp::OnActivate()
 {
+    MerchantPresentationRandom presentationRandom(LiveCommerce());
     struct SFieldCampCommerceGuard {
         bool active;
         SFieldCampCommerceGuard() : active(IWorldClient.BeginFieldCampCommerceSuppression()) {}
@@ -66,11 +93,11 @@ void CI3DScreenCamp::OnActivate()
     //
     pShop = 0;
     // get current shop
-    int nShop = (int)IWorldClient.GSGetVar("constr.current");
+    int nShop = LiveCommerce() ? tradeShop->nID : (int)IWorldClient.GSGetVar("constr.current");
     GameJournal::Event("SHOP", "select", "constr.current=%d suppressed=%d", nShop, commerceGuard.active);
     if (nShop > 0)
     {
-        pShop = theHat.shops.GetShop(nShop);
+        pShop = LiveCommerce() ? tradeShop : theHat.shops.GetShop(nShop);
         if (!pShop)
         {
             IWorldClient.FinishConstructing();
@@ -310,6 +337,10 @@ void CI3DScreenCamp::OnActivate()
             personages.Add(&party.people[i]);
     }
     IWorldClient.DeployClientPersonages(personages);
+    if (LiveCommerce()) for(int i=0;i<party.people.GetSize();++i) {
+        auto *unit=IWorldClient.GetUnit(party.people[i].nID);
+        tradePreviews.push_back(unit?unit->GetRTID():0);
+    }
 
     // all non-human pUnits will be zeros
     pUnits.SetSize(nAllPeople);
@@ -325,7 +356,7 @@ void CI3DScreenCamp::OnActivate()
             const SADEntry *pEntry = pUnits[i]->GetSpecialAnimationEntry(33);
             if (pEntry)
                 pUnits[i]->LowStartAnimationExtended(0xffffffffu, pEntry->dwEntryIndex,
-                                             (timeGetTime() / 1024.0f) * 15 - random.Get(0, 50), 0);
+                                             (timeGetTime() / 1024.0f) * 15 - (theInterface.LiveCommerce() ? 0 : random.Get(0, 50)), 0);
             pUnits[i]->ChangeWeapon(-1);
             pUnits[i]->GetUnitSpecific()->NotifyWeaponUpdated();
             pUnits[i]->GetUnitSpecific()->NewAnimationWasReceived((timeGetTime() / 1024.0f) * 15);
@@ -374,9 +405,9 @@ void CI3DScreenCamp::OnActivate()
 
     CheckValidTransaction();
 #ifdef NODEBUGINFO
-    if (pShop && pShop->bNeedUpdate)
+    if (!LiveCommerce() && pShop && pShop->bNeedUpdate)
 #else
-    if (pShop)
+    if (!LiveCommerce() && pShop)
 #endif // NODEBUGINFO
     {
         float fMinLevels[RPG_NUM_MAGIC_SUBTYPES], fMaxLevels[RPG_NUM_MAGIC_SUBTYPES];
@@ -405,7 +436,7 @@ void CI3DScreenCamp::OnActivate()
 
     if (auto *mod = ModRuntime::Current())
     {
-        if (mod->CombatSetting("JMVShopUpdate"))
+        if (!LiveCommerce() && mod->CombatSetting("JMVShopUpdate"))
         {
             CUnit *current = nCurPers >= 0 && nCurPers < pUnits.GetSize() ? pUnits[nCurPers] : 0;
             if (current)
@@ -447,7 +478,7 @@ void CI3DScreenCamp::OnActivate()
     GameJournal::Event("music", "camp_selector", "zone=%s selector=%s zone_found=%d",
                        GameJournal::Quote(szMusicZone).c_str(),
                        GameJournal::Quote(szMusicSelector).c_str(), pZone != nullptr);
-    theWorld.GetMusicSystem()->SetConstructorMode(szMusicSelector);
+    if (!LiveCommerce()) theWorld.GetMusicSystem()->SetConstructorMode(szMusicSelector);
     // set antialiasing - artists want it!!!
     /*theRenderer.GetD3D()->GetDeviceDesc(devdesc);
     if (devdesc.dpcTriCaps.dwRasterCaps & D3DPRASTERCAPS_ANTIALIASSORTINDEPENDENT)
@@ -473,17 +504,20 @@ void CI3DScreenCamp::OnActivate()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenCamp::OnDeactivate()
 {
+    MerchantPresentationRandom presentationRandom(LiveCommerce());
     E4CampAccess::Deactivate(this);
-    IWorld.CombatPause(false);
+    if (!LiveCommerce() || tradeWorld->Settlements().TradeValid(*tradeWorld,tradeToken)) IWorld.CombatPause(false);
     // remove antializasing
     theRenderer.SetRenderState(D3DRENDERSTATE_ANTIALIAS, D3DANTIALIAS_NONE);
     // remove
     CPersonages personages;
-    CParty &party = IWorldClient.GetParty();
+    CParty &party = LiveCommerce() ? *tradeParty : IWorldClient.GetParty();
     for (int i = 0; i < party.people.GetSize(); i++)
     {
         party.people[i].nID += 100000000;
-        personages.Add(&party.people[i]);
+        auto *preview=LiveCommerce()?theWorld.GetUnit(party.people[i].nID):nullptr;
+        if (!LiveCommerce() || (i<int(tradePreviews.size()) && preview && preview->GetRTID()==tradePreviews[i]))
+            personages.Add(&party.people[i]);
     }
     IWorldClient.RemoveClientPersonages(personages);
 
@@ -502,6 +536,8 @@ void CI3DScreenCamp::OnDeactivate()
 
     pConstrInfo->SetItem(0);
     pItemInfo->SetItem(0);
+
+    if (LiveCommerce()) RemoveAllObjects();
 
     //	pSpellsAssort->Destroy();
     //	delete pSpellsAssort;
@@ -522,10 +558,18 @@ void CI3DScreenCamp::OnDeactivate()
     delete pItemsConstr;
     pItemsRepair->Destroy();
     delete pItemsRepair;
+    if (LiveCommerce()) {
+        // The lease also survives replacement of the authoritative world.
+        tradePreviews.clear();
+        tradeWorld->Settlements().EndTrade(tradeToken);
+        tradeParty=nullptr; tradeShop=nullptr; tradeLifetime.reset();
+    }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenCamp::OnExitFromModal(DWORD dwRetValue)
 {
+    if (tradeFailed) { pI3D->ExitFromModal(); return; }
+    if (LiveCommerce()) return;
     switch (dwRetValue)
     {
     case 0x00010001: {
@@ -720,6 +764,7 @@ void CI3DScreenCamp::Draw2D()
 }
 BOOL CI3DScreenCamp::Draw(CRenderer *pRend)
 {
+    if (LiveCommerce() && !tradeWorld->Settlements().TradeValid(*tradeWorld,tradeToken)) return FALSE;
     CorePerf::Scope coreTiming(CorePerf::ScreenCamp);
     E4CampAccess::BeginDraw(this);
     OwnedRender::E4::Frame campFrame(pRend);
@@ -908,6 +953,9 @@ void CI3DScreenCamp::OnKeyUp(UINT nChar, UINT nRepCnt, UINT nFlags)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenCamp::OnIdle()
 {
+    if (LiveCommerce() && !tradeWorld->Settlements().TradeValid(*tradeWorld,tradeToken)) {
+        pI3D->ExitFromModal(); return;
+    }
     CI3DScreen::OnIdle();
     if (nLock == 1)
         fPersAngle = (float)fmod(fPersAngle + GetFrameTime() * 2.f, FP_2PI);
@@ -1141,6 +1189,14 @@ void NotifyCampEquipment(CUnit* unit)
 
 void CI3DScreenCamp::InventoryToPers(CItem *pItem)
 {
+    if (LiveCommerce() && !applyingTrade) {
+        if (!tradeWorld->Settlements().CommitTrade(*tradeWorld,tradeToken,*this,Settlement::TradeAction::Equip,pItem)) TradeFailure();
+        return;
+    }
+    InventoryToPersDraft(pItem);
+}
+void CI3DScreenCamp::InventoryToPersDraft(CItem *pItem)
+{
     pI3D->BeginFX("buttons\\camp\\put_on.wav");
 
     CPersonage *pPers = GetCurrentPers();
@@ -1213,6 +1269,15 @@ void CI3DScreenCamp::InventoryToPers(CItem *pItem)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CItem *CI3DScreenCamp::PersToInventory(CItem *pItem)
+{
+    if (LiveCommerce() && !applyingTrade) {
+        CItem *result=nullptr;
+        if (!tradeWorld->Settlements().CommitTrade(*tradeWorld,tradeToken,*this,Settlement::TradeAction::Unequip,pItem,&result)) TradeFailure();
+        return result;
+    }
+    return PersToInventoryDraft(pItem);
+}
+CItem *CI3DScreenCamp::PersToInventoryDraft(CItem *pItem)
 {
     CItem *pItemRes = 0;
     BOOL bStack = FALSE;
@@ -1778,8 +1843,14 @@ void CI3DScreenCamp::ClickOnSlot(int nSlotType, EItemScreenParts eFrom)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenCamp::TransactionOK()
 {
+    if (LiveCommerce()) {
+        if (!tradeWorld->Settlements().CommitTrade(*tradeWorld,tradeToken,*this)) TradeFailure();
+    } else ApplyDraftTransaction();
+}
+bool CI3DScreenCamp::ApplyDraftTransaction()
+{
     GameJournal::Event("TRADE", "request", "mode=%d shop=%d price=%d money=%d valid=%d", int(eScreenMode), pShop ? pShop->nID : 0, nPrice, IWorldClient.GetParty().nMoney, bValidOK);
-    if(SkillTransactionBlocked()){bValidOK=false;return;}
+    if(SkillTransactionBlocked()){bValidOK=false;return false;}
     pI3D->BeginFX("buttons\\camp\\buy.wav");
 
     CItem *pItem;
@@ -1799,9 +1870,9 @@ void CI3DScreenCamp::TransactionOK()
 
     case ISM_SPELLS:
         if(auto* mod=ModRuntime::Current();mod && mod->CombatSetting("JMVPerks") &&
-           !ModProgression::CampAffordable(pPerks->GetExpPrice(),pPerks->GetExpTotal())){bValidOK=false;return;}
+           !ModProgression::CampAffordable(pPerks->GetExpPrice(),pPerks->GetExpTotal())){bValidOK=false;return false;}
         pPerks->Confirm(true);
-        return;
+        return true;
 
     case ISM_ITEMREPAIR: {
         ModCampRepair::RestoreItems(nativeRepair,ModCampRepair::Mode::Selected,repairShop,pItemsRepair->allWagonItems.GetSize(),
@@ -1846,7 +1917,7 @@ void CI3DScreenCamp::TransactionOK()
             ModAlchemy::Scroll(pSpellsConstr->allWagonItems[0]);
         if (bDeconstruct)
         {
-            if(scroll){if(!DeconstructItemIn(pSpellsConstr,pConstrItem))return;}
+            if(scroll){if(!DeconstructItemIn(pSpellsConstr,pConstrItem))return false;}
             else DeconstructSpell();
         }
         else
@@ -1974,7 +2045,7 @@ void CI3DScreenCamp::TransactionOK()
         if (bDeconstruct)
         {
             if (!DeconstructItem())
-                return;
+                return false;
         }
         else
         {
@@ -1996,6 +2067,7 @@ void CI3DScreenCamp::TransactionOK()
     if(eScreenMode==ISM_ITEMTRADE || eScreenMode==ISM_SPELLTRADE) GameJournal::TradeCommit(this, pShop?pShop->nID:0, nPrice);
     IWorldClient.GetParty().nMoney -= nPrice;
     GameJournal::Event("TRADE", "committed", "mode=%d shop=%d price=%d money=%d", int(eScreenMode), pShop ? pShop->nID : 0, nPrice, IWorldClient.GetParty().nMoney);
+    return true;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenCamp::TransactionCancel()
@@ -2036,9 +2108,23 @@ void CI3DScreenCamp::TransactionCancel()
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CI3DScreenCamp::AccumulatePrice(std::int64_t amount)
+{
+    const auto total=std::int64_t(nPrice)+amount;
+    if (LiveCommerce() && (total>INT_MAX || total<INT_MIN)) {
+        quoteOverflow=true; nPrice=total>0?INT_MAX:-INT_MAX;
+    } else nPrice=int(total);
+}
 void CI3DScreenCamp::CheckValidTransaction()
 {
+    // Construction previews are repeated during Draw. They cannot advance world RNG.
+    struct PreviewRandom {
+        bool active; SaveSchema::RandomState saved;
+        PreviewRandom(bool live):active(live) { if (active) saved=SaveSchema::RandomState::Capture(); }
+        ~PreviewRandom() { if (active) saved.Apply(); }
+    } randomScope(LiveCommerce());
     GameJournal::TradeReset(this);
+    quoteOverflow=false;
     CString szActionToDo, szAmount("camp_current_money");
     nPrice = 0;
     bValidOK = false;
@@ -2053,18 +2139,23 @@ void CI3DScreenCamp::CheckValidTransaction()
             return ModCampItemPrice::WeaponArmor(item->GetPrice(),fPriceKoeffs[coefficient],fPriceKoeffs[ISK_ITEM_REPAIR],item->GetHP(),item->GetMaxHP());
         return GetItemPrice(item,coefficient);
     };
+    auto repairQuote=[&](int count,auto metal,auto price) {
+        std::int64_t total=0;
+        for(int i=0;i<count;++i)if(!nativeRepair || ModCampRepair::QuoteAllowed(repairShop,metal(i)))total+=price(i);
+        return total;
+    };
     switch (eScreenMode)
     {
     case ISM_WEAPONS:
         if (bIsItemConstr && !bCrapNoConstr)
         {
             CPersonage *pPers = GetCurrentPers();
-            nPrice += ModCampRepair::Quote(nativeRepair,repairShop,pPers->weapons.GetSize(),
+            AccumulatePrice(repairQuote(pPers->weapons.GetSize(),
                 [&](int i){return CampRepairMetal(pPers->weapons[i]);},
-                [&](int i){return quotePrice(pPers->weapons[i],ISK_ITEM_REPAIR);});
-            nPrice += ModCampRepair::Quote(nativeRepair,repairShop,pPers->armors.GetSize(),
+                [&](int i){return quotePrice(pPers->weapons[i],ISK_ITEM_REPAIR);}));
+            AccumulatePrice(repairQuote(pPers->armors.GetSize(),
                 [&](int i){return CampRepairMetal(pPers->armors[i]);},
-                [&](int i){return quotePrice(pPers->armors[i],ISK_ITEM_REPAIR);});
+                [&](int i){return quotePrice(pPers->armors[i],ISK_ITEM_REPAIR);}));
 
             bValidOK = (nPrice > 0);
             if (bValidOK)
@@ -2096,14 +2187,14 @@ void CI3DScreenCamp::CheckValidTransaction()
                 pItem = pSpellsBuy->allWagonItems[i];
                 const int journalPrice=quotePrice(pItem, ISK_SPELL_BUY);
                 GameJournal::TradeQuote(this, pItem, "buy", journalPrice);
-                nPrice += journalPrice * pItem->GetCount();
+                AccumulatePrice(std::int64_t(journalPrice) * pItem->GetCount());
             }
             for (int i = 0; i < pSpellsSell->allWagonItems.GetSize(); i++)
             {
                 pItem = pSpellsSell->allWagonItems[i];
                 const int journalPrice=quotePrice(pItem, ISK_SPELL_SELL);
                 GameJournal::TradeQuote(this, pItem, "sell", journalPrice);
-                nPrice -= journalPrice * pItem->GetCount();
+                AccumulatePrice(-(std::int64_t(journalPrice) * pItem->GetCount()));
             }
         }
     }
@@ -2122,10 +2213,10 @@ void CI3DScreenCamp::CheckValidTransaction()
             for (int i = 0; i < pSpellsConstr->allWagonItems.GetSize(); i++)
             {
                 CItem *pItem = pSpellsConstr->allWagonItems[i];
-                nPrice += quotePrice(pItem, ISK_SPELL_CREATE);
+                AccumulatePrice(quotePrice(pItem, ISK_SPELL_CREATE));
                 if (pItem->GetUserData() &&
                     static_cast<CRotateItem *>(pItem->GetUserData())->bIncludePrice)
-                    nPrice += quotePrice(pItem, ISK_SPELL_BUY);
+                    AccumulatePrice(quotePrice(pItem, ISK_SPELL_BUY));
                 if (IsItemSpell(pItem) || ModAlchemy::Scroll(pItem))
                 {
                     bValidOK = true;
@@ -2133,7 +2224,7 @@ void CI3DScreenCamp::CheckValidTransaction()
                     nPrice = quotePrice(pItem, ISK_SPELL_DESTROY);
                     if (pItem->GetUserData() &&
                         static_cast<CRotateItem *>(pItem->GetUserData())->bIncludePrice)
-                        nPrice += quotePrice(pItem, ISK_SPELL_BUY);
+                        AccumulatePrice(quotePrice(pItem, ISK_SPELL_BUY));
                     bDeconstruct = true;
                     pConstrInfo->SetItem(pItem);
                     bIsThereItemWhichWeNeedToShowInInfoView = true;
@@ -2169,14 +2260,14 @@ void CI3DScreenCamp::CheckValidTransaction()
                 pItem = pItemsBuy->allWagonItems[i];
                 const int journalPrice=quotePrice(pItem, ISK_ITEM_BUY);
                 GameJournal::TradeQuote(this, pItem, "buy", journalPrice);
-                nPrice += journalPrice * pItem->GetCount();
+                AccumulatePrice(std::int64_t(journalPrice) * pItem->GetCount());
             }
             for (int i = 0; i < pItemsSell->allWagonItems.GetSize(); i++)
             {
                 pItem = pItemsSell->allWagonItems[i];
                 const int journalPrice=quotePrice(pItem, ISK_ITEM_SELL);
                 GameJournal::TradeQuote(this, pItem, "sell", journalPrice);
-                nPrice -= journalPrice * pItem->GetCount();
+                AccumulatePrice(-(std::int64_t(journalPrice) * pItem->GetCount()));
             }
         }
     }
@@ -2186,9 +2277,9 @@ void CI3DScreenCamp::CheckValidTransaction()
         if (pItemsRepair->allWagonItems.GetSize() > 0)
         {
             if(!nativeRepair||pShop)
-                nPrice += ModCampRepair::Quote(nativeRepair,repairShop,pItemsRepair->allWagonItems.GetSize(),
+                AccumulatePrice(repairQuote(pItemsRepair->allWagonItems.GetSize(),
                     [&](int i){return CampRepairMetal(pItemsRepair->allWagonItems[i]);},
-                    [&](int i){CItem* item=pItemsRepair->allWagonItems[i];return quotePrice(item,ISK_ITEM_REPAIR)*item->GetCount();});
+                    [&](int i){CItem* item=pItemsRepair->allWagonItems[i];return std::int64_t(quotePrice(item,ISK_ITEM_REPAIR))*item->GetCount();}));
             const auto valid=ModCampRepair::SelectedValidity(nativeRepair,pItemsRepair->allWagonItems.GetSize(),nPrice);
             bValidOK=valid.confirm;bValidCancel=valid.cancel;
             if(bValidOK)szActionToDo = "camp_item_repair";
@@ -2209,10 +2300,10 @@ void CI3DScreenCamp::CheckValidTransaction()
             for (int i = 0; i < pItemsConstr->allWagonItems.GetSize(); i++)
             {
                 CItem *pItem = pItemsConstr->allWagonItems[i];
-                nPrice += quotePrice(pItem, ISK_ITEM_CREATE);
+                AccumulatePrice(quotePrice(pItem, ISK_ITEM_CREATE));
                 if (pItem->GetUserData() &&
                     static_cast<CRotateItem *>(pItem->GetUserData())->bIncludePrice)
-                    nPrice += quotePrice(pItem, ISK_ITEM_BUY);
+                    AccumulatePrice(quotePrice(pItem, ISK_ITEM_BUY));
                 if (IsItemConstructed(pItem))
                 {
                     bValidOK = true;
@@ -2220,7 +2311,7 @@ void CI3DScreenCamp::CheckValidTransaction()
                     nPrice = quotePrice(pItem, ISK_ITEM_DESTROY);
                     if (pItem->GetUserData() &&
                         static_cast<CRotateItem *>(pItem->GetUserData())->bIncludePrice)
-                        nPrice += quotePrice(pItem, ISK_ITEM_BUY);
+                        AccumulatePrice(quotePrice(pItem, ISK_ITEM_BUY));
                     bDeconstruct = true;
                     pConstrInfo->SetItem(pItem);
                     bIsThereItemWhichWeNeedToShowInInfoView = true;
@@ -2281,7 +2372,7 @@ void CI3DScreenCamp::CheckValidTransaction()
     pSurf->ReleaseDC();
 #endif // NOGETDC
 
-    if(SkillTransactionBlocked())bValidOK=false;
+    if(SkillTransactionBlocked() || quoteOverflow)bValidOK=false;
     if (bValidOK)
         figures[0]->SetAmbient(1, 1, 1);
     else
@@ -2572,6 +2663,7 @@ bool CI3DScreenCamp::DeconstructItemIn(CParty* party,CItem*& result)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenCamp::GenerateCheatAssortment()
 {
+    if (LiveCommerce()) return;
     CStringArray szTmpArray, szMatNames;
     int i, j;
     theWorld.GetItemManager()->GetMaterialNames(szMatNames);

@@ -372,6 +372,7 @@ namespace Settlement { class World; }
 class CUnitServer : public CUnitSpecific
 {
     friend class Settlement::World;
+    friend struct Settlement::TradeAccess;
     bool SettlementCommandAllowed(const SUnitCommand &command, bool executing);
     friend class CModPackage;
     friend class CUnit;

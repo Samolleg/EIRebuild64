@@ -214,6 +214,13 @@ class CAArray : public CArray<TYPE, ARG_TYPE>
 {
 public:
     CAArray() {}
+    void Swap(CAArray &other) noexcept
+    {
+        std::swap(this->m_pData, other.m_pData);
+        std::swap(this->m_nSize, other.m_nSize);
+        std::swap(this->m_nMaxSize, other.m_nMaxSize);
+        std::swap(this->m_nGrowBy, other.m_nGrowBy);
+    }
     CAArray(const CAArray &a)
     {
         this->SetSize(a.GetSize());

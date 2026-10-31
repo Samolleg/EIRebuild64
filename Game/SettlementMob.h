@@ -5,6 +5,7 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <memory>
 
 class CWorldServer;
 class CScript;
@@ -12,10 +13,17 @@ class CUnit;
 class CMapObject;
 class CSpell;
 class CPlot3D;
+class CParty;
+class CShop;
+class CItem;
+class CI3DScreenCamp;
 struct SUnitBasicCmd;
 namespace SaveSchema { class Writer; class Reader; }
 
 namespace Settlement {
+struct TradeState;
+struct TradeAccess;
+enum class TradeAction { Deal, Equip, Unequip };
 
 // Public identities never depend on the order in which MOBs were loaded.
 struct Name
@@ -93,6 +101,8 @@ public:
 
 class World
 {
+    friend struct TradeAccess;
+    std::shared_ptr<TradeState> trade;
     struct Instance
     {
         std::string signature;
@@ -164,6 +174,14 @@ public:
     bool FinishDialogue(CWorldServer &world, std::uint64_t token);
     bool AcceptDialogueCompletion(int player, const char *key);
     void EndDialogue(std::uint64_t token);
+    bool BeginTrade(CWorldServer &world, std::uint64_t token, const std::string &topic);
+    bool TradeValid(CWorldServer &world, std::uint64_t token) const;
+    CParty *TradeParty(std::uint64_t token) const;
+    CShop *TradeShop(std::uint64_t token) const;
+    std::shared_ptr<void> TradeLifetime(std::uint64_t token) const;
+    bool CommitTrade(CWorldServer &world, std::uint64_t token, CI3DScreenCamp &screen,
+                     TradeAction action = TradeAction::Deal, CItem *item = nullptr, CItem **result = nullptr);
+    void EndTrade(std::uint64_t token);
     bool DialogueActive() const { return dialogue.token != 0; }
     const DialogueSession &Dialogue() const { return dialogue; }
 };

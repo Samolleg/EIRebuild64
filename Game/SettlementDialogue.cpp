@@ -25,9 +25,8 @@ std::vector<DialogueTopic> World::DialogueTopics(CWorldServer &world, int player
             !Contains(actor.settlement)) continue;
         const auto &def = GetDefinition(actor.settlement);
         const auto binding = def.briefings.find(name.local);
-        // Shop-only bindings belong to the trade stage; never enter the camp UI.
         if (!def.peace.Enabled() || AreaAt(unit->GetCP()) != actor.settlement ||
-            binding == def.briefings.end() || binding->second.text.empty()) continue;
+            binding == def.briefings.end() || (binding->second.text.empty() && !binding->second.shop)) continue;
         if (Object(world, 0, topic.actor, true) != target) continue;
         topic.binding = binding->second;
         result.push_back(std::move(topic));
@@ -134,6 +133,7 @@ void World::EndDialogue(std::uint64_t token)
     if (!token || dialogue.token != token) return;
     GameJournal::Event("SETTLEMENT", "dialogue_close", "token=%llu completion_consumed=%d",
         static_cast<unsigned long long>(token), dialogue.consumed);
+    EndTrade(token);
     dialogue = {};
 }
 }

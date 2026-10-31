@@ -83,6 +83,7 @@ public:
 
     void FillStartAssortment();
     void SetAssortmentParameters(float *fMinLevels, float *fMaxLevels);
+    void SetAssortmentParameters(CParty &party, float *fMinLevels, float *fMaxLevels);
     void GenerateItems();
     void GenerateSpells();
 

@@ -632,6 +632,18 @@ void CInterface3D::DestroyScreens()
     NGame::bNeedRender = false;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+CParty *CInterface3D::GetPartyView()
+{
+    for (auto i=pScreens.rbegin();i!=pScreens.rend();++i)
+        if (auto *party=(*i)->GetPartyView()) return party;
+    return nullptr;
+}
+bool CInterface3D::LiveCommerce() const
+{
+    for (auto i=pScreens.rbegin();i!=pScreens.rend();++i)
+        if ((*i)->LiveCommerce()) return true;
+    return false;
+}
 CI3DScreen *CInterface3D::GetCurrentScreen()
 {
     if (!pScreens.empty())

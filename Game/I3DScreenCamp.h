@@ -1,6 +1,8 @@
 #pragma once
 
 #include "I3DScreenConstructor.h"
+#include "SettlementMob.h"
+#include <memory>
 /////////////////////////////////////////////////////////////////////////////////////
 class CUnit;
 class CParty;
@@ -9,6 +11,17 @@ class CShop;
 class CI3DScreenCamp : public CI3DItemScreen
 {
     friend struct E4CampAccess;
+    friend struct Settlement::TradeAccess;
+    CWorldServer *tradeWorld = nullptr;
+    std::uint64_t tradeToken = 0;
+    CParty *tradeParty = nullptr;
+    CShop *tradeShop = nullptr;
+    std::shared_ptr<void> tradeLifetime;
+    bool applyingTrade = false, tradeFailed = false, quoteOverflow = false;
+    std::vector<std::uint64_t> tradePreviews;
+    void AccumulatePrice(std::int64_t amount);
+    void TradeFailure();
+    bool ApplyDraftTransaction();
 private:
     EItemScreenModes eScreenMode;
 
@@ -74,7 +87,9 @@ private:
     void SetScreenMode(EItemScreenModes eCampMode);
 
     void InventoryToPers(CItem *pItem);
+    void InventoryToPersDraft(CItem *pItem);
     CItem *PersToInventory(CItem *pItem);
+    CItem *PersToInventoryDraft(CItem *pItem);
     void DropFromSpellConstr(CItem *pItem);
     void DropFromItemConstr(CItem *pItem);
 
@@ -99,6 +114,9 @@ public:
         , mbLocal(bLocal)
     {
     }
+    CI3DScreenCamp(CInterface3D *ui, CWorldServer &world, std::uint64_t token);
+    CParty *GetPartyView() override { return tradeParty; }
+    bool LiveCommerce() const override { return tradeToken != 0; }
     virtual void OnActivate();
     virtual void OnDeactivate();
     virtual void OnExitFromModal(DWORD dwRetValue);

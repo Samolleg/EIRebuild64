@@ -37,6 +37,7 @@ static const char LOCAL_FILE[] = __FILE__;
 bool ModSpellAddonAllowsSave();
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenMission.h"
+#include "I3DScreenSettlementDialogue.h"
 
 #include "I3DScreenMessageBox.h"
 #include "I3DScreenMainMenu.h"
@@ -253,6 +254,9 @@ void CI3DScreenMission::OnExitFromModal(DWORD dwRetValue)
 {
     switch (dwRetValue)
     {
+    case CI3DScreenSettlementDialogue::Closed:
+        UpdateAllObjects();
+        break;
     case 0x00010001:
         IWorldClient.ExitZone(nCheckExit);
         break;

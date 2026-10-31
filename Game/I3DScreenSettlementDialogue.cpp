@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "I3DScreenSettlementDialogue.h"
+#include "I3DScreenCamp.h"
 #include "I3DScreenMission.h"
 #include "I3DMain.h"
 #include "I3DScrollText.h"
@@ -290,16 +291,7 @@ void CI3DScreenSettlementDialogue::OnActivate()
         theWorld.SetCombatPause(true);
         const auto &session=world->Settlements().Dialogue();
         presentation=std::make_unique<Presentation>(session.hero,session.target);
-        topics=world->Settlements().DialogueTopics(*world,0,target);
-        for (const auto &topic:topics) {
-            CString caption;
-            if (theWorld.GetTextManager()->GetText(CString("briefing ")+topic.binding.text.c_str()))
-                theWorld.GetTextManager()->GetLine(caption);
-            if (caption.IsEmpty()) throw std::runtime_error("missing briefing title");
-            labels.push_back(caption);
-        }
-        topicScroll->SetRange((std::max)(0,int(topics.size())+1-Rows)); topicScroll->SetPos(0);
-        RedrawTopics();
+        LoadTopics();
         if (!forced.empty()) {
             auto found=std::find_if(topics.begin(),topics.end(),[&](const auto &topic){return topic.key==forced;});
             if (found==topics.end()) throw std::runtime_error("forced topic is unavailable");
@@ -327,6 +319,30 @@ void CI3DScreenSettlementDialogue::Fail(const char *detail)
     StopVoice(); presentation.reset(); phase=Phase::Error;
     GameJournal::Event("SETTLEMENT","dialogue_error","target=%d detail=%s",target,GameJournal::Quote(detail).c_str());
     topicScroll->Show(FALSE); surfaces[0]->Show(FALSE); text->Show(TRUE); text->SetText(Unavailable());
+}
+void CI3DScreenSettlementDialogue::LoadTopics()
+{
+    topics=world->Settlements().DialogueTopics(*world,0,target);
+    labels.clear(); offset=0;
+    for (const auto &topic:topics) {
+        CString caption;
+        if (!topic.binding.text.empty() && theWorld.GetTextManager()->GetText(CString("briefing ")+topic.binding.text.c_str()))
+            theWorld.GetTextManager()->GetLine(caption);
+        if (caption.IsEmpty() && topic.binding.shop && theWorld.GetTextManager()->GetText("briefing constr"))
+            theWorld.GetTextManager()->GetLine(caption);
+        if (caption.IsEmpty()) throw std::runtime_error("missing briefing title");
+        labels.push_back(caption);
+    }
+    phase=Phase::Topics; text->Show(FALSE); topicScroll->Show(TRUE); surfaces[0]->Show(TRUE);
+    topicScroll->SetRange((std::max)(0,int(topics.size())+1-Rows)); topicScroll->SetPos(0);
+    RedrawTopics();
+}
+void CI3DScreenSettlementDialogue::OnExitFromModal(DWORD)
+{
+    try {
+        if (!world || !world->Settlements().DialogueValid(*world,token)) { Fail("trade context retired"); return; }
+        LoadTopics();
+    } catch (const std::exception &error) { Fail(error.what()); }
 }
 void CI3DScreenSettlementDialogue::RedrawTopics()
 {
@@ -421,8 +437,14 @@ void CI3DScreenSettlementDialogue::ReadProgram(const Settlement::DialogueTopic &
 
 void CI3DScreenSettlementDialogue::SelectTopic(int index)
 {
-    if (index<0 || index>=int(topics.size())) { phase=Phase::Closing; pI3D->ExitFromModal(); return; }
+    if (index<0 || index>=int(topics.size())) { phase=Phase::Closing; pI3D->ExitFromModal(Closed); return; }
     try {
+        if (topics[index].binding.shop) {
+            StopVoice();
+            if (!world->Settlements().BeginTrade(*world,token,topics[index].key)) throw std::runtime_error("trade opening rejected");
+            pI3D->DoModal(dbgnew CI3DScreenCamp(pI3D,*world,token));
+            return;
+        }
         ReadProgram(topics[index]);
         if (!world->Settlements().SelectDialogueTopic(*world,token,topics[index].key)) throw std::runtime_error("topic conditions changed");
         resource=topics[index].binding.text; next=0; phase=Phase::Phrase;
@@ -479,7 +501,7 @@ void CI3DScreenSettlementDialogue::Confirm()
         if (next<commands.size()) Advance();
         if (!world->Settlements().FinishDialogue(*world,token)) { Fail("completion rejected"); return; }
     }
-    phase=Phase::Closing; pI3D->ExitFromModal();
+    phase=Phase::Closing; pI3D->ExitFromModal(Closed);
 }
 void CI3DScreenSettlementDialogue::ShowProp(const Command &command)
 {
@@ -538,7 +560,7 @@ void CI3DScreenSettlementDialogue::OnKeyDown(UINT key,UINT repeat,UINT flags)
     if (flags&0x4000) { SetProcessed(); return; }
     if (key==VK_ESCAPE || key==VK_RETURN) {
         if (phase==Phase::Phrase) Skip();
-        else if (phase==Phase::Topics || phase==Phase::Error) { phase=Phase::Closing; pI3D->ExitFromModal(); }
+        else if (phase==Phase::Topics || phase==Phase::Error) { phase=Phase::Closing; pI3D->ExitFromModal(Closed); }
         else Confirm();
     } else if (key==VK_SPACE && phase!=Phase::Topics) Confirm();
     SetProcessed();

@@ -33,6 +33,7 @@ class CI3DScreenSettlementDialogue : public CI3DScreen
     struct Prop { std::string name; CI3DFigure *figure, *frame, *back; CTexture *texture; };
     std::vector<Prop> props;
     void RedrawTopics();
+    void LoadTopics();
     void ReadProgram(const Settlement::DialogueTopic &topic);
     void SelectTopic(int index);
     void Advance();
@@ -43,10 +44,13 @@ class CI3DScreenSettlementDialogue : public CI3DScreen
     void ShowProp(const Command &command);
     void HideProp(const std::string &name);
 public:
+    // Refresh cached mission slots before their next draw after an interaction.
+    static constexpr DWORD Closed = 0x50454143;
     CI3DScreenSettlementDialogue(CInterface3D *ui, int npc, std::string topic = {});
     ~CI3DScreenSettlementDialogue() override;
     void OnActivate() override;
     void OnDeactivate() override;
+    void OnExitFromModal(DWORD result) override;
     BOOL Draw(CRenderer *renderer) override;
     void OnIdle() override;
     void OnLButtonDown(UINT flags, CPoint point) override;

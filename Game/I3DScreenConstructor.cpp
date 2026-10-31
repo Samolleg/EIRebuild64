@@ -2346,6 +2346,7 @@ void CI3DObjectNameStats::OutputHLAbsorb(CRect &rc, LPCTSTR pszHLName, ERPGHitLo
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectNameStats::OnLButtonDown(UINT nFlags, CPoint point)
 {
+    if (pScreen->LiveCommerce()) return;
     int ht = HitTest(point);
     JournalHit(ht);
     if (eCurMode == ISM_SKIN)
@@ -3051,6 +3052,7 @@ void CI3DObjectPerks::RedrawPerks()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DObjectPerks::OnLButtonDown(UINT nFlags, CPoint point)
 {
+    if (pScreen->LiveCommerce()) return;
     int ht = HitTest(point);
     JournalHit(ht);
 

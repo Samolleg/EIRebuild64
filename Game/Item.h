@@ -1,5 +1,6 @@
 #pragma once
 namespace SaveSchema { class Writer; class Reader; }
+namespace Settlement { struct TradeAccess; }
 
 #include "GameBase.h"
 #include "PacketIDs.h"
@@ -26,6 +27,12 @@ namespace SaveSchema { class Writer; class Reader; }
 // --------------------------------------------------------------------------------------------
 class CItem : public CGameBase
 {
+    friend struct Settlement::TradeAccess;
+    // Ephemeral provenance of isolated merchant copies; never stored or sent.
+    std::uint64_t tradeOrigin = 0;
+public:
+    std::uint64_t TradeOrigin() const { return tradeOrigin; }
+    void SetTradeOrigin(std::uint64_t origin) { tradeOrigin = origin; }
 private:
     CPtr<CObjectBase> pUserData;
 

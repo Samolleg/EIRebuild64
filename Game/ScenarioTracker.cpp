@@ -182,9 +182,13 @@ void CShop::Serialize(CStructureSaver &)
 }
 void CShop::SetAssortmentParameters(float *fMinLevels, float *fMaxLevels)
 {
+    SetAssortmentParameters(IWorldClient.GetParty(), fMinLevels, fMaxLevels);
+}
+void CShop::SetAssortmentParameters(CParty &party, float *fMinLevels, float *fMaxLevels)
+{
     if(auto* mod=ModRuntime::Current();mod&&mod->AdvancedUI("useLS_SetAssortmentParameters")){
         const int limit=mod->ShopConstructLimit(nID);
-        auto& people=IWorldClient.GetParty().people;std::vector<const SRPGUnitStats*> stats;
+        auto& people=party.people;std::vector<const SRPGUnitStats*> stats;
         stats.reserve(people.GetSize());for(int person=0;person<people.GetSize();++person)stats.push_back(&people[person].stats);
         ModAssortment::Apply(stats,limit,[](int maximum){return ModNativeCrtRandom::Random(maximum);},itemGenerator,spellGenerator);return;
     }

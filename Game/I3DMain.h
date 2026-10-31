@@ -136,6 +136,8 @@ public:
     void SetScreensMustDie() { bScreensMustDie = true; }
     void CheckScreensMustDie();
     CI3DScreen *GetCurrentScreen();
+    CParty *GetPartyView();
+    bool LiveCommerce() const;
     int GetScreensNum() const { return pScreens.size(); }
 
     bool GetModalPause() { return bModalPause; }
