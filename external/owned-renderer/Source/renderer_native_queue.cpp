@@ -130,10 +130,15 @@ bool native_record_takes_impostor(const NativeGeometryView& view,NativeOpacityCl
  return view.world.impostor&&sphere_block&&view.world.object_space&&opacity==NativeOpacityClass::cutout&&
   view.ordering==NativeOrdering::reorderable;
 }
-static bool samgbur_lod_resource(const ResourceIdentity* identity) noexcept {
- if(!identity)return false;
- const auto at=identity->canonical_name.find("samgbur01.mod/");
- return at!=std::string::npos&&(at==0||identity->canonical_name[at-1]=='/');
+static bool samgbur_lod_source(const NativeGeometryView& view) noexcept {
+ // In x64 the selected FIG identity names only the part. The typed pose owns
+ // the model identity; this tag belongs to the draw, never its shared mesh.
+ if(view.world.pose&&view.world.pose->binding&&view.world.pose->binding->model)
+  return _stricmp(view.world.pose->binding->model->visual_reference.c_str(),"samgbur01")==0;
+ if(!view.world.identity)return false;
+ const auto& name=view.world.identity->canonical_name;
+ const auto at=name.find("samgbur01.mod/");
+ return at!=std::string::npos&&(at==0||name[at-1]=='/');
 }
 bool native_record_takes_lod(const NativeGeometryView& view,NativeOpacityClass opacity,UINT lod_levels) noexcept{
  const bool reorderable=view.ordering==NativeOrdering::reorderable ||
@@ -798,7 +803,6 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
      prebuilt.index_count==view.index_count&&prebuilt.decoded_channels==view.decoded_channels&&
      !view.diffuse&&!view.specular&&prebuilt.shape_count==shape_count){
    NativeMesh mesh{};
-   mesh.samgbur_lod=samgbur_lod_resource(view.world.identity);
    mesh.allocation={prebuilt.page,prebuilt.offset,prebuilt.bytes};
    mesh.position_offset=prebuilt.position_offset;mesh.normal_offset=prebuilt.normal_offset;
    mesh.component_offset=prebuilt.component_offset;mesh.texture_coordinate_offset=prebuilt.texture_coordinate_offset;
@@ -982,7 +986,6 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
   }
  }
  NativeMesh mesh{};UINT cursor=0,lod_table_at=0;
- mesh.samgbur_lod=samgbur_lod_resource(view.world.identity);
  std::array<UINT,kStaticLodMaxLevels> lod_at{};
  auto reserve=[&](std::uint64_t bytes,UINT& offset){
   if(!align_up_checked(cursor,16,cursor)||cursor>native_geometry_page_limit()||
@@ -3478,7 +3481,7 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
  auto object_to_clip=view.object_to_clip;
  if(widescreen::interface_owned&&!view.world.enabled)
   widescreen::compose_hud_clip(object_to_clip.data(),widescreen::hud_blit,float(canvas_width()),float(canvas_height()));
- NativeQueuedDraw draw{};if(widescreen::interface_owned)draw.hud_composition=widescreen::hud_blit;draw.mesh=mesh;draw.geometry_page=mesh->allocation.page;draw.index_count=view.index_count;draw.component_count=view.component_count;std::memcpy(&draw.instance.object_to_clip,object_to_clip.data(),sizeof(draw.instance.object_to_clip));jitter_clip(&draw.instance.object_to_clip._11);if(view.lighting.enabled)std::memcpy(&draw.instance.object_to_world,view.lighting.object_to_world.data(),sizeof(draw.instance.object_to_world));draw.instance.geometry_offsets={mesh->position_offset,mesh->normal_offset,mesh->texture_coordinate_offset,mesh->component_offset};draw.instance.color_offsets={mesh->diffuse_offset,mesh->specular_offset};draw.instance.uv_shift[0]=view.u_shift;draw.instance.uv_shift[1]=view.v_shift;draw.instance.flags=view.flags&~native_preview_specular_rgb_flag;draw.instance.default_diffuse=view.default_diffuse;draw.instance.default_specular=view.default_specular;draw.instance.morph_offset=morph_offset;draw.instance.morph_count=view.morph_count;draw.instance.terrain_vertex_offset=mesh->terrain_vertex_offset;draw.instance.terrain_phase_offset=terrain_phase_offset;native_terrain_values(draw.instance,view.terrain,view.semantic_kind==SemanticKind::terrain && !configured_boolean(debug_overlay_.config(),"terrain_normal_sunlight",true));draw.instance.lighting_enabled=view.lighting.enabled;std::copy(view.lighting.emissive.begin(),view.lighting.emissive.end(),draw.instance.emissive);std::copy(view.lighting.specular.begin(),view.lighting.specular.end(),draw.instance.specular);draw.instance.material_alpha=view.lighting.material_alpha;std::copy(view.lighting.material_diffuse.begin(),view.lighting.material_diffuse.end(),draw.instance.material_diffuse);
+ NativeQueuedDraw draw{};if(widescreen::interface_owned)draw.hud_composition=widescreen::hud_blit;draw.mesh=mesh;draw.samgbur_lod=samgbur_lod_source(view);draw.samgbur_object=view.prepared_identity.signed_id;draw.samgbur_part=view.world.pose_node;draw.geometry_page=mesh->allocation.page;draw.index_count=view.index_count;draw.component_count=view.component_count;std::memcpy(&draw.instance.object_to_clip,object_to_clip.data(),sizeof(draw.instance.object_to_clip));jitter_clip(&draw.instance.object_to_clip._11);if(view.lighting.enabled)std::memcpy(&draw.instance.object_to_world,view.lighting.object_to_world.data(),sizeof(draw.instance.object_to_world));draw.instance.geometry_offsets={mesh->position_offset,mesh->normal_offset,mesh->texture_coordinate_offset,mesh->component_offset};draw.instance.color_offsets={mesh->diffuse_offset,mesh->specular_offset};draw.instance.uv_shift[0]=view.u_shift;draw.instance.uv_shift[1]=view.v_shift;draw.instance.flags=view.flags&~native_preview_specular_rgb_flag;draw.instance.default_diffuse=view.default_diffuse;draw.instance.default_specular=view.default_specular;draw.instance.morph_offset=morph_offset;draw.instance.morph_count=view.morph_count;draw.instance.terrain_vertex_offset=mesh->terrain_vertex_offset;draw.instance.terrain_phase_offset=terrain_phase_offset;native_terrain_values(draw.instance,view.terrain,view.semantic_kind==SemanticKind::terrain && !configured_boolean(debug_overlay_.config(),"terrain_normal_sunlight",true));draw.instance.lighting_enabled=view.lighting.enabled;std::copy(view.lighting.emissive.begin(),view.lighting.emissive.end(),draw.instance.emissive);std::copy(view.lighting.specular.begin(),view.lighting.specular.end(),draw.instance.specular);draw.instance.material_alpha=view.lighting.material_alpha;std::copy(view.lighting.material_diffuse.begin(),view.lighting.material_diffuse.end(),draw.instance.material_diffuse);
  std::uint32_t preview_rgb=0;
  if(camp_inventory_preview_specular_rgb(preview_rgb)){
   draw.instance.flags|=native_preview_specular_rgb_flag;
@@ -3787,91 +3790,146 @@ bool Renderer::ensure_samgbur_lod_diagnostic() noexcept {
  return true;
 }
 
+void Renderer::begin_samgbur_lod_frame() noexcept {
+ // Present-only frames keep the last actual scene, including its GPU samples.
+ samgbur_lod_target_=UINT_MAX;
+ if(!samgbur_lod_records_.empty()){
+  const auto index=debug_overlay_.settings_open()?debug_overlay_.samgbur_lod_instance():
+   static_cast<unsigned>(samgbur_lod_cursor_%samgbur_lod_records_.size());
+  if(index<samgbur_lod_records_.size())samgbur_lod_target_=samgbur_lod_records_[index];
+  if(!debug_overlay_.settings_open())++samgbur_lod_cursor_;
+ }
+ // Retained records stay valid across skipped world passes and modal settings.
+}
+
+SamgburLodSnapshot Renderer::samgbur_lod_snapshot() const noexcept {
+ SamgburLodSnapshot result{};
+ result.instances=static_cast<UINT>(samgbur_lod_records_.size());
+ if(!result.instances)return result;
+ result.state=SamgburLodSnapshot::waiting;
+ const auto selected=debug_overlay_.samgbur_lod_instance();
+ if(selected>=samgbur_lod_records_.size())return result;
+ const auto found=samgbur_lod_samples_.find(samgbur_lod_records_[selected]);
+ if(found==samgbur_lod_samples_.end())return result;
+ result=found->second.sample;result.instances=static_cast<UINT>(samgbur_lod_records_.size());
+ result.instance=selected+1;
+ result.age_frames=presentation_frame_index_>=result.sample_frame?presentation_frame_index_-result.sample_frame:0;
+ return result;
+}
+
 void Renderer::begin_samgbur_lod_capture(const NativeSubmissionLayout& layout) noexcept try {
  samgbur_lod_capture_=false;
- if(!debug_overlay_.settings_open())return;
- if(!samgbur_lod_open_){samgbur_lod_open_=true;samgbur_lod_failed_=false;++samgbur_lod_epoch_;}
- if(samgbur_lod_frame_!=presentation_frame_index_){
-  samgbur_lod_frame_=presentation_frame_index_;samgbur_lod_records_.clear();
- }
  for(const auto& work:layout.work){
   if(work.record>=native_instance_records_.size()||(work.flags&0xff00u)==0)continue;
-  const auto& record=native_instance_records_[work.record];
-  if(!record.occupied||!record.command.mesh||!record.command.mesh->samgbur_lod)continue;
+  const auto& record=native_instance_records_[work.record];const auto& command=record.command;
+  if(!record.occupied||!command.mesh||!command.samgbur_lod)continue;
   if(std::find(samgbur_lod_records_.begin(),samgbur_lod_records_.end(),work.record)==samgbur_lod_records_.end())
    samgbur_lod_records_.push_back(work.record);
+  auto& entry=samgbur_lod_samples_[work.record];
+  if(entry.mesh!=command.mesh||record.owner.owner_before(entry.owner)||entry.owner.owner_before(record.owner)||
+     entry.revision!=command.mesh->geometry_revision){
+   entry={};entry.mesh=command.mesh;entry.owner=record.owner;entry.revision=command.mesh->geometry_revision;
+   entry.epoch=++samgbur_lod_epoch_;entry.sample.state=SamgburLodSnapshot::waiting;
+   entry.sample.record=work.record;entry.sample.object_id=command.samgbur_object;entry.sample.part=command.samgbur_part;
+  }
+
  }
- samgbur_lod_snapshot_.instances=static_cast<UINT>(samgbur_lod_records_.size());
- const auto selected=debug_overlay_.samgbur_lod_instance();
- if(selected>=samgbur_lod_records_.size())return;
- const UINT record=samgbur_lod_records_[selected];
- const auto& command=native_instance_records_[record].command;
- const auto& owner=native_instance_records_[record].owner;
- if(record!=samgbur_lod_snapshot_.record||command.mesh!=samgbur_lod_mesh_||
-    owner.owner_before(samgbur_lod_owner_)||samgbur_lod_owner_.owner_before(owner)||
-    command.mesh->geometry_revision!=samgbur_lod_revision_||
-    samgbur_lod_snapshot_.instance!=selected+1){
-  ++samgbur_lod_epoch_;samgbur_lod_snapshot_={};samgbur_lod_snapshot_.state=SamgburLodSnapshot::waiting;
-  samgbur_lod_snapshot_.record=record;samgbur_lod_snapshot_.instance=selected+1;
-  samgbur_lod_mesh_=command.mesh;samgbur_lod_owner_=owner;
-  samgbur_lod_revision_=command.mesh->geometry_revision;
- }
- samgbur_lod_snapshot_.instances=static_cast<UINT>(samgbur_lod_records_.size());
- if(samgbur_lod_copied_frame_==presentation_frame_index_)return;
- if(std::none_of(layout.work.begin(),layout.work.end(),[&](const NativeDrawWorkGpu& work){return work.record==record;}))return;
- if(!ensure_samgbur_lod_diagnostic()){samgbur_lod_snapshot_.state=SamgburLodSnapshot::unavailable;return;}
+ if(samgbur_lod_records_.empty()||samgbur_lod_copied_frame_==presentation_frame_index_)return;
+ if(samgbur_lod_target_==UINT_MAX)samgbur_lod_target_=samgbur_lod_records_.front();
+ const UINT record=samgbur_lod_target_;
+ const auto found=samgbur_lod_samples_.find(record);
+ if(found==samgbur_lod_samples_.end())return;
+ if(std::none_of(layout.work.begin(),layout.work.end(),[&](const NativeDrawWorkGpu& work){return work.record==record&&(work.flags&0xff00u);}))return;
+ auto& entry=found->second;
+ if(!ensure_samgbur_lod_diagnostic()){entry.sample.state=SamgburLodSnapshot::unavailable;return;}
  UINT slot=0;while(slot<samgbur_lod_readbacks_.size()&&samgbur_lod_readbacks_[slot].pending)++slot;
  if(slot==samgbur_lod_readbacks_.size())return;
  samgbur_lod_nonce_=(samgbur_lod_nonce_+1)&0x3fffffffu;if(!samgbur_lod_nonce_)++samgbur_lod_nonce_;
  samgbur_lod_slot_=slot;samgbur_lod_record_=record;
- samgbur_lod_meta_=(samgbur_lod_nonce_<<2)|(command.mesh->lod_levels&3u);
+ samgbur_lod_meta_=(samgbur_lod_nonce_<<2)|(entry.mesh->lod_levels&3u);
  const UINT zero[4]{};context_->ClearUnorderedAccessViewUint(samgbur_lod_uav_.Get(),zero);
  samgbur_lod_capture_=true;
-} catch(...) {samgbur_lod_capture_=false;samgbur_lod_snapshot_.state=SamgburLodSnapshot::unavailable;}
+} catch(...) {samgbur_lod_capture_=false;}
 
 void Renderer::finish_samgbur_lod_capture(bool success) noexcept {
  if(!samgbur_lod_capture_)return;
  samgbur_lod_capture_=false;
- ID3D11UnorderedAccessView* none=nullptr;context_->CSSetUnorderedAccessViews(4,1,&none,nullptr);
- if(!success)return;
+ if(context_){ID3D11UnorderedAccessView* empty=nullptr;context_->CSSetUnorderedAccessViews(4,1,&empty,nullptr);}
+ if(!success||!context_)return;
+ const auto found=samgbur_lod_samples_.find(samgbur_lod_record_);
+ if(found==samgbur_lod_samples_.end())return;
  auto& slot=samgbur_lod_readbacks_[samgbur_lod_slot_];
  context_->CopyResource(slot.buffer.Get(),samgbur_lod_buffer_.Get());
- slot.pending=true;slot.nonce=samgbur_lod_nonce_;slot.epoch=samgbur_lod_epoch_;
+ slot.pending=true;slot.nonce=samgbur_lod_nonce_;slot.epoch=found->second.epoch;
  slot.record=samgbur_lod_record_;slot.frame=presentation_frame_index_;
  samgbur_lod_copied_frame_=presentation_frame_index_;
 }
 
 void Renderer::poll_samgbur_lod() noexcept {
- const bool open=debug_overlay_.settings_open();
- if(!open&&samgbur_lod_open_){
-  samgbur_lod_open_=false;++samgbur_lod_epoch_;samgbur_lod_snapshot_={};
-  samgbur_lod_records_.clear();samgbur_lod_frame_=UINT64_MAX;
+ // A sample never pins a game object or survives its record/geometry owner.
+ for(auto it=samgbur_lod_samples_.begin();it!=samgbur_lod_samples_.end();){
+  const UINT id=it->first;const auto& entry=it->second;
+  const std::weak_ptr<const void> empty_owner;
+  const bool has_owner=entry.owner.owner_before(empty_owner)||empty_owner.owner_before(entry.owner);
+  bool current=id<native_instance_records_.size()&&(!has_owner||!entry.owner.expired());
+  if(current){const auto& record=native_instance_records_[id];
+   current=record.occupied&&record.command.samgbur_lod&&record.command.mesh==entry.mesh&&
+    !record.owner.owner_before(entry.owner)&&!entry.owner.owner_before(record.owner)&&
+    record.command.mesh->geometry_revision==entry.revision;
+  }
+  if(current)++it;else it=samgbur_lod_samples_.erase(it);
  }
+ samgbur_lod_records_.erase(std::remove_if(samgbur_lod_records_.begin(),samgbur_lod_records_.end(),
+  [&](UINT id){return samgbur_lod_samples_.find(id)==samgbur_lod_samples_.end();}),samgbur_lod_records_.end());
  for(auto& slot:samgbur_lod_readbacks_){
   if(!slot.pending||!context_)continue;
   D3D11_MAPPED_SUBRESOURCE mapped{};
   const HRESULT hr=context_->Map(slot.buffer.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped);
   if(hr==DXGI_ERROR_WAS_STILL_DRAWING)continue;
   slot.pending=false;
-  if(FAILED(hr)){if(open)samgbur_lod_snapshot_.state=SamgburLodSnapshot::unavailable;continue;}
+  const auto found=samgbur_lod_samples_.find(slot.record);
+  if(FAILED(hr)){if(found!=samgbur_lod_samples_.end())found->second.sample.state=SamgburLodSnapshot::unavailable;continue;}
   std::array<UINT,16> value{};std::memcpy(value.data(),mapped.pData,sizeof(value));context_->Unmap(slot.buffer.Get(),0);
-  if(!open||slot.epoch!=samgbur_lod_epoch_||slot.record!=samgbur_lod_snapshot_.record||
+  if(found==samgbur_lod_samples_.end()||slot.epoch!=found->second.epoch||
      value[0]!=slot.nonce||value[14]!=slot.record||value[15]!=0x4c4f4431u||value[2]>3)continue;
-  if(samgbur_lod_snapshot_.state==SamgburLodSnapshot::ready&&slot.frame<samgbur_lod_snapshot_.sample_frame)continue;
-  auto& result=samgbur_lod_snapshot_;result.state=SamgburLodSnapshot::ready;
-  result.visible=value[1]!=0;result.levels=value[2];result.first=value[3];result.second=value[4];
-  result.coverage=value[5];for(unsigned i=0;i<4;++i)result.triangles[i]=value[6+i];
+  auto& result=found->second.sample;
+  if(result.state==SamgburLodSnapshot::ready&&slot.frame<result.sample_frame)continue;
+  result.state=SamgburLodSnapshot::ready;result.visible=value[1]!=0;result.levels=value[2];
+  result.first=value[3];result.second=value[4];result.coverage=value[5];
+  for(unsigned i=0;i<4;++i)result.triangles[i]=value[6+i];
   result.mode=value[12];result.sample_frame=slot.frame;
+ }
+ // Changes only, round-robin across parts, globally bounded to ten events/s.
+ const auto now=GetTickCount64();
+ if(now<samgbur_lod_log_after_ms_||samgbur_lod_records_.empty())return;
+ for(std::size_t i=0;i<samgbur_lod_records_.size();++i){
+  const auto index=(samgbur_lod_log_cursor_+i)%samgbur_lod_records_.size();
+  const auto found=samgbur_lod_samples_.find(samgbur_lod_records_[index]);
+  if(found==samgbur_lod_samples_.end())continue;
+  auto& entry=found->second;const auto& value=entry.sample;const auto& old=entry.logged;
+  if(value.state!=SamgburLodSnapshot::ready)continue;
+  if(entry.has_logged&&value.visible==old.visible&&value.levels==old.levels&&value.first==old.first&&
+     value.second==old.second&&value.mode==old.mode&&value.triangles==old.triangles)continue;
+  char detail[512];
+  std::snprintf(detail,sizeof(detail),
+   "model=samgbur01 object=%d part=%u record=%u generation=%u visible=%u reduced_levels=%u first=%u second=%u transition_pct=%u lod_enabled=%u eligible=%u L0=%u L1=%u L2=%u L3=%u sample_frame=%llu",
+   value.object_id,value.part,value.record,entry.epoch,value.visible?1u:0u,value.levels,value.first,value.second,
+   (value.coverage*100u+127u)/255u,(value.mode&2u)?1u:0u,(value.mode&1u)?1u:0u,
+   value.triangles[0],value.triangles[1],value.triangles[2],value.triangles[3],
+   static_cast<unsigned long long>(value.sample_frame));
+  bridge_report_event("model_lod",detail);entry.logged=value;entry.has_logged=true;
+  samgbur_lod_log_after_ms_=now+100;samgbur_lod_log_cursor_=index+1;break;
  }
 }
 
 void Renderer::reset_samgbur_lod_diagnostic() noexcept {
  samgbur_lod_buffer_.Reset();samgbur_lod_uav_.Reset();
  for(auto& slot:samgbur_lod_readbacks_)slot={};
- samgbur_lod_records_.clear();samgbur_lod_snapshot_={};samgbur_lod_mesh_=nullptr;samgbur_lod_revision_={};
- samgbur_lod_frame_=samgbur_lod_copied_frame_=UINT64_MAX;samgbur_lod_owner_.reset();
- ++samgbur_lod_epoch_;samgbur_lod_record_=UINT_MAX;samgbur_lod_meta_=0;
- samgbur_lod_capture_=samgbur_lod_failed_=samgbur_lod_open_=false;
+ samgbur_lod_records_.clear();samgbur_lod_samples_.clear();
+ samgbur_lod_copied_frame_=UINT64_MAX;
+ samgbur_lod_cursor_=samgbur_lod_log_cursor_=samgbur_lod_log_after_ms_=0;
+ samgbur_lod_target_=samgbur_lod_record_=UINT_MAX;samgbur_lod_meta_=0;
+ samgbur_lod_capture_=samgbur_lod_failed_=false;
 }
 
 } // namespace owned

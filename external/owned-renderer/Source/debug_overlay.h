@@ -84,6 +84,8 @@ struct SamgburLodSnapshot {
     enum State : std::uint8_t { absent, waiting, ready, unavailable };
     State state = absent;
     std::uint32_t instances = 0, instance = 0, record = UINT32_MAX;
+    std::int32_t object_id = 0;
+    std::uint32_t part = UINT32_MAX;
     std::uint32_t levels = 0, first = 0, second = UINT32_MAX, coverage = 0, mode = 0;
     std::array<std::uint32_t, 4> triangles{};
     std::uint64_t sample_frame = 0, age_frames = 0;

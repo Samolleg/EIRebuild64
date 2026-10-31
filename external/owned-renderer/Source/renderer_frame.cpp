@@ -833,6 +833,7 @@ HRESULT Renderer::begin_engine_frame_at(std::uint64_t world_epoch){
  }
  reap_tile_family_jobs(); // dropped tile family jobs, once each has stopped
  ++native_frame_index_;advance_dlss_jitter();begin_dlss_object_motion();
+ begin_samgbur_lod_frame();
  native_hiz_frame_=UINT64_MAX;native_world_clip_dirty_=true;
  scene_composited_=false;scene_updated_=false;deferred_ground_marks_.clear();
  rtv_=scene_composite_.target();dsv_=world_dsv_;

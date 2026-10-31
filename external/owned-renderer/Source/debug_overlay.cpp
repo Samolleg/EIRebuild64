@@ -1957,7 +1957,7 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
 void draw_samgbur_lod(DebugOverlay::Implementation& state,const SamgburLodSnapshot& data) {
     if(!state.settings_filter.PassFilter("samgbur01 LOD"))return;
     if(!ImGui::CollapsingHeader("samgbur01 LOD",ImGuiTreeNodeFlags_DefaultOpen))return;
-    if(!data.instances){ImGui::TextDisabled("%s",ui_text("No samgbur01 submitted this frame."));return;}
+    if(!data.instances){ImGui::TextDisabled("%s",ui_text("No rendered samgbur01 recorded for this world."));return;}
     state.samgbur_lod_instance=std::clamp(state.samgbur_lod_instance,0,static_cast<int>(data.instances)-1);
     int instance=state.samgbur_lod_instance+1;
     if(data.instances>1&&ImGui::SliderInt(ui_text("LOD instance"),&instance,1,static_cast<int>(data.instances)))
@@ -1966,6 +1966,7 @@ void draw_samgbur_lod(DebugOverlay::Implementation& state,const SamgburLodSnapsh
     if(data.state!=SamgburLodSnapshot::ready||data.instance!=static_cast<unsigned>(state.samgbur_lod_instance+1)){
         ImGui::TextDisabled("%s",ui_text("Waiting for GPU LOD sample..."));return;
     }
+    ImGui::Text(ui_text("Model object: %d, part: %u"),data.object_id,data.part);
     if(!data.visible)ImGui::TextUnformatted(ui_text("Instance is not visible in the color pass."));
     else if(data.mode&16u)ImGui::TextUnformatted(ui_text("Impostor (not a triangle LOD)."));
     else if(data.second!=UINT32_MAX)
