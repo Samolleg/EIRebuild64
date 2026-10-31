@@ -1119,8 +1119,12 @@ BOOL CWorldServer::Segment()
         for (; pPlayer; pPlayer = playerIter.GetNext())
             ((CPlayerServer *)pPlayer->GetPlayerSpecific())->FormNewVisibleSet();
         //
-        CScriptObjectGroup vis;
-        script.GetGlobalVars().gVars.GetVar("Heroes", vis);
+        // PartyTravel parks Heroes references without a live object during camp.
+        // Keep those script slots for redeployment, but publish only actual units.
+        CScriptObjectGroup heroes, vis;
+        script.GetGlobalVars().gVars.GetVar("Heroes", heroes);
+        for (int i = 0; i < heroes.GetSize(); ++i)
+            vis.Add(heroes.GetAt(i).GetUnit());
         pPlayer = playerIter.GetFirst((CPlayerManager *)GetPlayerManager());
         for (; pPlayer; pPlayer = playerIter.GetNext())
         {
