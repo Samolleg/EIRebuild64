@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Compile the engine once. The offline executable links those exact objects:
+       MPR/MOB/BASE extraction, body sizing, profiles, Recast and serialization. -->
+  <Import Project="EI_Rebuild.vcxproj" />
+  <PropertyGroup>
+    <ProjectGuid>{7D770D60-B31E-4A77-AF67-BAFD6209B00A}</ProjectGuid>
+    <TargetName>EIRebuild64NavBake</TargetName>
+    <TargetFileName>$(TargetName)$(TargetExt)</TargetFileName>
+    <TargetPath>$(OutDir)$(TargetFileName)</TargetPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <ClCompile Remove="@(ClCompile)" />
+    <ResourceCompile Remove="@(ResourceCompile)" />
+    <ClCompile Include="Game\NavBakeMain.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ProjectReference Include="EI_Rebuild.vcxproj">
+      <Project>{042A52A4-CF8B-4868-B551-448520F97F44}</Project>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+    </ProjectReference>
+  </ItemGroup>
+  <ItemDefinitionGroup>
+    <Link><SubSystem>Console</SubSystem><EntryPointSymbol>wmainCRTStartup</EntryPointSymbol></Link>
+  </ItemDefinitionGroup>
+  <Target Name="LinkSharedNavigationHost" BeforeTargets="Link">
+    <ItemGroup>
+      <Link Include="$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\*.obj" Exclude="$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\Navigation_Cache.obj;$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\DetourTileCache*.obj" />
+    </ItemGroup>
+    <Error Condition="!Exists('$(MSBuildThisFileDirectory)out\obj\x64\$(Configuration)\EI_Rebuild\NavigationWorld.obj')" Text="Build the EI_Rebuild project before linking NavBake." />
+  </Target>
+</Project>

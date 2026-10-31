@@ -1475,15 +1475,19 @@ int CUMFear::GetPower(CAIUnitLogic &logic)
                         if (fpLeng != 0)
                             majorLook *= 5 / fpLeng;
                         float fpRandomShift = 3;
-                        CPlot3D ptRandomShift(random.GetFloat(-fpRandomShift, fpRandomShift),
-                                              random.GetFloat(-fpRandomShift, fpRandomShift), 0);
-                        CPlot3D ptPlace = unitPos - majorLook + ptRandomShift;
+                        const CPlot3D center = unitPos - majorLook;
+                        Navigation::Point goal;
+                        const bool reachable = theWorldServer.aiMap.Navigation().RandomGoal(
+                            pThis, {center.x, center.y, 0}, fpRandomShift, goal,
+                            Navigation::RandomShape::Square);
+                        CPlot3D ptPlace(reachable ? goal.x : unitPos.x,
+                                       reachable ? goal.y : unitPos.y, 0);
                         // check is not path too long
                         SAIPath fakePath;
                         float fpDist = fabs(ptPlace - unitPos);
                         float fpMaxPathLength = fpDist * 3 + 10;
-                        if (theWorldServer.aiMap.NewPath(pThis, ptPlace, fakePath, fpMaxPathLength,
-                                                         3))
+                        if (reachable && theWorldServer.aiMap.NewPath(pThis, ptPlace, fakePath,
+                                                                      fpMaxPathLength, 3))
                         {
                             if (fakePath.nPathCost <= 5000 * Meter2AITile(fpDist))
                             {
@@ -1595,7 +1599,8 @@ void CUMFear::CommandUnit(CAIUnitLogic &logic)
         // walk away
         if (!logic.GetUnitServer()->HasMove())
         {
-            CPlot3D ptPlace;
+            CPlot3D ptPlace = unitPos;
+            bool reachable = true;
             if (ptPreparedRunaway.z != 0)
             {
                 ptPlace = ptPreparedRunaway;
@@ -1608,15 +1613,18 @@ void CUMFear::CommandUnit(CAIUnitLogic &logic)
                 fpRandomShift = Min(fpFearRadius * 2.5f, fpRandomShift);
                 if (fpLeng != 0)
                     majorLook *= 5 / fpLeng;
-                CPlot3D ptRandomShift(random.GetFloat(-fpRandomShift, fpRandomShift),
-                                      random.GetFloat(-fpRandomShift, fpRandomShift), 0);
-                ptPlace = unitPos - majorLook + ptRandomShift;
+                const CPlot3D center = unitPos - majorLook;
+                Navigation::Point goal;
+                reachable = theWorldServer.aiMap.Navigation().RandomGoal(
+                    logic.GetUnit(), {center.x, center.y, 0}, fpRandomShift, goal,
+                    Navigation::RandomShape::Square);
+                if (reachable) ptPlace = CPlot3D(goal.x, goal.y, 0);
             }
             // check is not path too long
             SAIPath fakePath;
             float fpMaxPathLength = fabs(ptPlace - unitPos) * 3 + 10;
-            if (theWorldServer.aiMap.NewPath(logic.GetUnit(), ptPlace, fakePath, fpMaxPathLength,
-                                             3))
+            if (reachable && theWorldServer.aiMap.NewPath(logic.GetUnit(), ptPlace, fakePath,
+                                                          fpMaxPathLength, 3))
                 logic.StartMove(ptPlace);
             fpRandomShift *= 2;
         }
@@ -3666,18 +3674,9 @@ bool CAIUnitLogic::GenerateGuardRallyPoint(const CPlot3D &ptCenter, float fpRadi
         nGuardPntFail--;
         return false;
     }
-    float fpX, fpY;
-    int nSafeCounter = 10;
-    do
-    {
-        fpX = random.GetFloat(-fpRadius, fpRadius);
-        fpY = random.GetFloat(-fpRadius, fpRadius);
-        if (--nSafeCounter < 0)
-            break;
-    } while (sqr(fpX) + sqr(fpY) > sqr(fpRadius));
-    fpX = ptCenter.x + fpX;
-    fpY = ptCenter.y + fpY;
-    ptRes = CPlot3D(fpX, fpY, 0);
+    Navigation::Point goal;
+    if(!theWorldServer.aiMap.Navigation().RandomGoal(GetUnit(),{ptCenter.x,ptCenter.y,ptCenter.z},fpRadius,goal))return false;
+    ptRes=CPlot3D(goal.x,goal.y,0);
     // check if terrain is flat enough
     if (theWorldServer.aiMap.GetTerrainGrad(ptRes) > 0.3f)
         return FALSE;

@@ -40,6 +40,7 @@ public:
     virtual bool CloseFile(LPBYTE pFileImage);
     virtual BOOL CheckFileExist(LPCSTR pszFileName);
     virtual void CloseAllFiles();
+    void GetFileList(CStringArray& names,LPCSTR mask);
     // resource description string
     virtual LPCSTR GetResourceDescription() const = 0;
 };

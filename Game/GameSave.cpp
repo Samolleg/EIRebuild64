@@ -466,6 +466,8 @@ void CUnit::Store(SaveSchema::Writer &w) const
     Field(w, dwPossibleEnemies);
     Field(w, questItems);
     Field(w, fpCollisionDistance);
+    w.UInt64(navLocation.surface);w.Float32(navLocation.position.x);w.Float32(navLocation.position.y);w.Float32(navLocation.position.z);
+    w.Float32(navLocation.radius);w.Float32(navLocation.height);
     Field(w, aggression);
     Field(w, dwVoicePrototype);
 }
@@ -508,6 +510,9 @@ void CUnit::Load(SaveSchema::Reader &r)
     Field(r, dwPossibleEnemies);
     Field(r, questItems);
     Field(r, fpCollisionDistance);
+    navLocation.surface=r.UInt64();navLocation.position={r.Float32(),r.Float32(),r.Float32()};
+    navLocation.radius=r.Float32();navLocation.height=r.Float32();navLocation.polygon=navLocation.generation=0;
+    if((navLocation.surface>1 && (navLocation.surface>>32)==0) || !Navigation::Finite(navLocation.position))throw SaveSchema::Error(SaveSchema::ErrorCode::Invalid,"invalid saved navigation address");
     Field(r, aggression);
     Field(r, dwVoicePrototype);
     rpgUserUnitStats.Clear();
@@ -1622,6 +1627,10 @@ void CParty::DiscardSave()
 
 void CCamera::Store(SaveSchema::Writer &w) const
 {
+    Store(w,true);
+}
+void CCamera::Store(SaveSchema::Writer &w, bool withCarrier) const
+{
     Field(w, ptAnchorPoint);
     Field(w, fAnchorHeight);
     Field(w, qRotate);
@@ -1631,9 +1640,11 @@ void CCamera::Store(SaveSchema::Writer &w) const
     Field(w, rotate);
     Field(w, pitch);
     Field(w, zoom);
-    w.MapReference(dwCarrierID);
+    // The departing zone no longer owns the party followed by this camera.
+    // Keep the same nullable-reference wire field, without weakening full saves.
+    if(withCarrier)w.MapReference(dwCarrierID);else w.UInt64(0);
     Field(w, shortcuts);
-    w.UInt32(GetFlags());
+    w.UInt32(withCarrier?GetFlags():GetFlags()&~CAM_FPS_MODE);
     w.Bool(campPlacementValid);
     if(campPlacementValid){
         Field(w,campPlacement.position);Field(w,campPlacement.anchor);

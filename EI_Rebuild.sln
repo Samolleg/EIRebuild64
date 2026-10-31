@@ -11,11 +11,15 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "OwnedRenderer", "OwnedRende
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "RendererShaders", "OwnedRenderer\RendererShaders.vcxproj", "{F9F236B9-5E99-4BD6-B032-D727834B2329}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "EIRebuild64NavBake", "EIRebuild64NavBake.vcxproj", "{7D770D60-B31E-4A77-AF67-BAFD6209B00A}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Release|x64 = Release|x64
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{7D770D60-B31E-4A77-AF67-BAFD6209B00A}.Release|x64.ActiveCfg = Release|x64
+		{7D770D60-B31E-4A77-AF67-BAFD6209B00A}.Release|x64.Build.0 = Release|x64
 		{042A52A4-CF8B-4868-B551-448520F97F44}.Release|x64.ActiveCfg = Release|x64
 		{042A52A4-CF8B-4868-B551-448520F97F44}.Release|x64.Build.0 = Release|x64
 		{2714E7B7-71E0-484A-81DF-495CFDB463AD}.Release|x64.ActiveCfg = Release|x64

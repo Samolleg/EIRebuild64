@@ -187,6 +187,7 @@ public:
     virtual void GetUsePoints(CArray<CPlot3D, CPlot3D &> &points, float fpUnitRadius);
     //
     int GetCurrentState() const { return nCurrentState; }
+    bool IsNavigationDoor() const { return bIsDoor; }
     virtual float GetAttackDistance();
     // новое состояние (-1)-следующее и время, за которое рычаг должен переключится в это состояние
     void SwitchState(int nState, float fpTime = -10);

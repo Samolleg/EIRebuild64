@@ -376,12 +376,11 @@ void Slot::PrepareWorld(Document &d)
         player->party.Destroy();player->party.CreateSavedOwners(p.party.item,p.party.spell);
         BindParty(d,player->party,world);d.owners->prepared.emplace(p.id,object);
     }
-    // Load only immutable terrain/graph resources. No MOB object factory, global
+    // Load only immutable terrain/navigation source resources. No MOB object factory, global
     // SetWeather, camera, script execution, RNG initialization or renderer calls.
     if(!d.terrain.IsEmpty()) {
         if(!world->aiMap.Load(world->GetFullMobName(d.terrain)))Invalid("cannot load saved terrain");
-        CMemorySave graph;if(!world->LoadAIGraph(d.terrain,d.mob,graph))Invalid("missing saved AI graph resource");
-        graph.Seek(0);if(!world->aiMap.LoadGraph(graph))Invalid("invalid saved AI graph resource");
+        world->aiMap.Navigation().Scene(d.terrain,d.mob);
     }
     world->szZoneFileName=d.terrain;world->szMobFileName=d.mob;world->szCurrentZoneName=d.zone;
     world->aiMap.SetGraphRebuild(false);
@@ -404,24 +403,7 @@ void Slot::World(Writer &w,const CWorldServer &v)
     // Item-origin keys point into their owning party, independently of map IDs.
     std::vector<CItem *> sources;v.pItemManager->ForEach([&](CGameBase *o){auto *item=dynamic_cast<CItem *>(o);if(item&&item->GetUserData())sources.push_back(item);});
     Count(w,sources.size());for(auto *item:sources){w.GameReference(item);w.Int32(static_cast<CItemSrcInfo *>(item->GetUserData())->nSrcItemID);}
-    // v1 is single-player: LMP corpse transport is not part of the slot.
-    auto &map=const_cast<CAIMap &>(v.aiMap);auto &g=map.aiGraph;
-    CMemorySave resource;CAIGraph base;
-    if(!v.szZoneFileName.IsEmpty()){
-        if(!const_cast<CWorldServer &>(v).LoadAIGraph(v.szZoneFileName,v.szMobFileName,resource))Invalid("missing baseline AI graph");
-        resource.Seek(0);if(!base.Load(resource))Invalid("invalid baseline AI graph");
-    }
-    if(g.XSize()!=base.XSize()||g.YSize()!=base.YSize())Invalid("AI graph baseline dimensions changed");
-    w.UInt32(g.XSize());w.UInt32(g.YSize());
-    struct Cell{int kind,x,y;};std::vector<Cell> changed;
-    for(int k=0;k<N_AI_UNIT_KINDS;++k)for(int y=0;y<g.YSize();++y)for(int x=0;x<g.XSize();++x){
-        bool different=g.places[k][y][x].nX!=base.places[k][y][x].nX||g.places[k][y][x].nY!=base.places[k][y][x].nY||g.colors[k][y][x]!=base.colors[k][y][x];
-        for(int n=0;n<8;++n)different|=g.vertices[k][y][x].nWeights[n]!=base.vertices[k][y][x].nWeights[n];
-        if(different)changed.push_back({k,x,y});
-    }
-    Count(w,changed.size());for(const auto &c:changed){w.UInt32(c.kind);w.UInt32(c.x);w.UInt32(c.y);
-        for(auto weight:g.vertices[c.kind][c.y][c.x].nWeights)w.Int16(weight);
-        w.UInt8(g.places[c.kind][c.y][c.x].nX);w.UInt8(g.places[c.kind][c.y][c.x].nY);w.UInt16(g.colors[c.kind][c.y][c.x]);}
+    w.UInt32(Navigation::ContainerVersion); // rebuild derived tiles/routes from source, never graph deltas
     v.StoreFieldCamp(w);
 }
 void Slot::World(Reader &r,CWorldServer &v)
@@ -444,14 +426,7 @@ void Slot::World(Reader &r,CWorldServer &v)
     v.aiMap.marks.Load(r);v.aiMap.marks.BindSavedMap(v.aiMap);v.script.LoadScript(r);v.scriptTemp.LoadScript(r);v.fof.Load(r);v.waterLevels.Load(r);
     v.szLoadedMobs.SetSize(r.Count());for(INT_PTR i=0;i<v.szLoadedMobs.GetSize();++i)Field(r,v.szLoadedMobs[i]);
     const auto n=r.Count();for(std::uint32_t i=0;i<n;++i){auto *item=r.GameReferenceAs<CItem>();if(!item||item->GetManager()!=v.pItemManager||item->GetUserData())Invalid("invalid item origin");auto *info=new CItemSrcInfo;info->nSrcItemID=r.Int32();item->AttachUserData(info);}
-    auto &g=v.aiMap.aiGraph;auto width=r.UInt32(),height=r.UInt32();if(width!=g.XSize()||height!=g.YSize())Invalid("saved graph size mismatch");
-    const auto cells=r.Count();std::set<std::uint64_t> seen;
-    for(std::uint32_t i=0;i<cells;++i){auto k=r.UInt32(),x=r.UInt32(),y=r.UInt32();
-        if(k>=N_AI_UNIT_KINDS||x>=width||y>=height||!seen.insert((std::uint64_t(k)*height+y)*width+x).second)Invalid("invalid graph delta cell");
-        for(auto &weight:g.vertices[k][y][x].nWeights)weight=r.Int16();
-        auto px=r.UInt8(),py=r.UInt8();if(px>15||py>15)Invalid("invalid graph node placement");
-        g.places[k][y][x].nX=px;g.places[k][y][x].nY=py;g.colors[k][y][x]=r.UInt16();
-    }
+    if(r.UInt32()!=Navigation::ContainerVersion)Invalid("incompatible Nav64 world");
     v.LoadFieldCamp(r);v.bTransferItemCreates=true;v.bLoadDynamic=v.bLoadStatic=true;
 }
 
@@ -477,7 +452,14 @@ void Slot::FinalizeWorld(Document &d)
                     d.world->aiMap.AddObject(object);
                 }
                 for(const auto &x:d.world->effects){x.second->SetUpdateMask();x.second->UpdateFrame();}
-                d.world->aiMap.SetGraphRebuild(true);
+                if(!d.terrain.IsEmpty()) {
+                    if(!d.world->aiMap.Navigation().Load())Invalid(d.world->aiMap.Navigation().Error().c_str());
+                    for(const auto& entry:d.world->mapObjects)if(auto* unit=dynamic_cast<CUnit*>(entry.second)) {
+                        d.world->aiMap.Navigation().Restore(unit,d.world->aiMap);
+                        if(!static_cast<CUnitServer*>(unit->GetUnitSpecific())->RestoreNavigation())Invalid("saved navigation route is unavailable");
+                    }
+                }
+                d.world->aiMap.SetGraphRebuild(false);
                 // Static objects are sent once by NewZone, outside visibility updates.
                 auto snapshotPlayer=std::unique_ptr<CPlayer,void(*)(CPlayer *)>(
                     static_cast<CPlayerManager *>(d.world->GetPlayerManager())->CreatePlayer(),
@@ -689,7 +671,9 @@ bool Slot::HasZone(const char *name){return visited.find(name)!=visited.end();}
 bool Slot::StoreZone(const char *name)
 {
     CheckedName(name);Document d;BindWorld(d,{&theWorldServer,[](CWorldServer *){}},true);
-    visited[name]=Encode(d,[&](Writer &w){World(w,theWorldServer);theCamera.Store(w);if(auto *mod=ModRuntime::Current())mod->StoreSaveState(w);else Invalid("missing mod");});
+    // Party objects have already been removed from this zone. The arriving
+    // party selects its own camera carrier; only the view belongs to the zone.
+    visited[name]=Encode(d,[&](Writer &w){World(w,theWorldServer);theCamera.Store(w,false);if(auto *mod=ModRuntime::Current())mod->StoreSaveState(w);else Invalid("missing mod");});
     return true;
 }
 bool Slot::LoadZone(const char *name)

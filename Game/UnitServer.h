@@ -370,6 +370,9 @@ typedef void (*ServerAnimationSwitchCallback)(CUnit *pUnit);
 /////////////////////////////////////////////////////////////////////////////////////
 class CUnitServer : public CUnitSpecific
 {
+    unsigned navigationWait=0;
+    unsigned navigationRejects=0; // transient; turns do not erase a failed-move retry
+
     friend class CModPackage;
     friend class CUnit;
 
@@ -461,7 +464,7 @@ private:
     void LowNewPose(EUnitPose pose);
     void LowNewWishPose(EUnitPose pose);
     bool LowFindPath(const CPlot3D &ptDest, SAIPath &res, BOOL bFastPath,
-                     float fpMaxPathLength = 1e6f);
+                     float fpMaxPathLength = 1e6f, Navigation::GoalPolicy goalPolicy = Navigation::GoalPolicy::Exact);
     void LowRemoveUnitsForPathFind(CUnitList &units, const CPlot3D &ptDest, bool bGroup);
     // LEVEL 0 of unit control
     bool L0ShiftAnimations();
@@ -831,6 +834,7 @@ public:
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CUnitServer"; }
     SL0AnimationSeq *GetExtendedAnimationSequence(unsigned kind);
+    bool RestoreNavigation();
     virtual EClassIDs WhoAmI() const { return HPC_UNITSERVERSPECIFIC; }
 public:
     virtual void Store(SaveSchema::Writer &) const;

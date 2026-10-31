@@ -176,7 +176,8 @@ Texture2D<float> gcTrail:register(t44);
 StructuredBuffer<GcFootprint> gcFootprints:register(t45);
 // The previous smoothed trail state (ping-pong partner or the outgrown texture).
 Texture2D<float> gcTrailPrevious:register(t46);
-Texture2D<float2> gcTrailSources:register(t49);
+// xy: recovering low-cover sources/markers; z: current bodies only.
+Texture2D<float4> gcTrailSources:register(t49);
 // Snow trails for the vertex and placement stages (the pixel stage reads
 // nativeSnowTrail at t8; t51 there is a point-shadow page).
 #ifdef GC_VS
@@ -427,6 +428,15 @@ float gcTrailCoverage(float2 p){
  return gcTrail.Load(int3(int2(floor(uv*float2(w,h))),0));
 }
 
+// Tall cover follows only bodies present now, never the accumulated path.
+// Filtering the radial field keeps its direction continuous between texels.
+float gcBodyCoverage(float2 p){
+ if(gcView.w==0)return 0;
+ float2 uv=(p-gcTrailWindow.xy)*gcTrailWindow.zw;
+ if(any(uv<0)||any(uv>=1))return 0;
+ return gcTrailSources.SampleLevel(gcClamp,uv,0).z;
+}
+
 // snowTrailSlope (snow_trails.h) with one inlined field read.
 float2 gcSnowTrailSlope(float2 p){
  const float d=1/gcSnowWindow.z;float4 h=0;
@@ -474,7 +484,7 @@ float4 gcTrailFullVS(uint vertex:SV_VertexID):SV_Position{
  float2 u=float2((vertex<<1)&2,vertex&2);return float4(u*float2(2,-2)+float2(-1,1),0,1);
 }
 float gcTrailDecayPS(float4 p:SV_Position):SV_Target{
- float2 source=gcTrailSources.Load(int3(int2(p.xy),0));
+ float2 source=gcTrailSources.Load(int3(int2(p.xy),0)).xy;
  return gcTrailRecovery(gcTrailBefore(p.xy),source.x,source.y,gcTrailStep.w);
 }
 )" R"(
@@ -541,14 +551,15 @@ float2 gcSnowRecoverPS(float4 p:SV_Position):SV_Target{
  int2 t=int2(p.xy)+int2(gcSnowStep.xy);uint w,h;gcSnowPrevious.GetDimensions(w,h);
  return any(t<0)||t.x>=int(w)||t.y>=int(h)?0:snowTrailRecover(gcSnowPrevious.Load(int3(t,0)),gcSnowStep.z);
 }
-float2 gcTrailPS(GcTrailOut i):SV_Target{
+float4 gcTrailPS(GcTrailOut i):SV_Target{
  const float target=gcPressTexel(i.local,i.rectangle.zw,i.effect,gcView.yz);
  const float before=gcTrailBefore(i.p.xy);
  // Live and retained body stamps share the same immediate radial press.
  float pressed=i.effect.w!=0?target:min(before+gcTrailStep.z,target);
  float4 full=i.effect;full.z=1;
  float marked=i.effect.w<0&&gcPressTexel(i.local,i.rectangle.zw,full,gcView.yz)>0?1:0;
- return float2(pressed,marked);
+ // Lasting game markers affect low cover/snow, not standing tall stems.
+ return float4(pressed,marked,i.effect.w>=0?target:0,0);
 }
 
 )" R"(
@@ -1077,28 +1088,31 @@ void gcBuildOf(GcSurvivor c){
 #endif
  const float z=ground-sink;
  if(gcOutside(float3(p,z+.5*s*szs)+gcOrigin.xyz,s*max(sxs,1)+.3))return;
- // Live bodies part the blades around them.
+ // Use the authored rule height, independent of LOD growth or near/far mesh.
+ // Reeds, cattails and tall underwater grass stand; low meadow tufts keep tracks.
+ const bool parting=tuft&&rule.scaleMax*rule.szMax>=.8;
  float2 push=0;float flatten=0;
 #if GC_F_TRAIL&&GC_BUILD_TRAILS
  if(tuft||rule.mesh==10u){
-  // Visible game tracks and visible live bodies share the recovering mask.
-  const float pressed=gcTrailCoverage(p+gcOrigin.xy);
+  const float pressed=parting?gcBodyCoverage(p+gcOrigin.xy):gcTrailCoverage(p+gcOrigin.xy);
   // Snow trails lay tufts down along the trough, away from its centre line.
   const float2 snowRaw=snowTrailRaw(gcSnowTrail,gcSnowWindow,gcSnowTiles,p+gcOrigin.xy);
-  if(snowRaw.x>0){
+  if(!parting&&snowRaw.x>0){
    const float packed=snowTrailCompaction(snowRaw);
    const float2 rise=gcSnowTrailSlope(p+gcOrigin.xy);const float rl=length(rise);
-   push+=(rl>1e-4?rise/rl:float2(cos(yaw),sin(yaw)))*packed;flatten=max(flatten,packed);
+   push+=rise/max(rl,.1)*packed;flatten=max(flatten,packed);
   }
   if(pressed>0){
    float2 step=gcView.yz, world=p+gcOrigin.xy;
    float2 gradient=0;
    [loop]for(uint axis=0;axis<2;++axis){
-    const float2 d=axis==0?float2(step.x,0):float2(0,step.y);const float g=gcTrailCoverage(world+d)-gcTrailCoverage(world-d);
+    const float2 d=axis==0?float2(step.x,0):float2(0,step.y);const float g=parting?gcBodyCoverage(world+d)-gcBodyCoverage(world-d):gcTrailCoverage(world+d)-gcTrailCoverage(world-d);
     if(axis==0)gradient.x=g;else gradient.y=g;
    }
    float l=length(gradient);
-   float2 away=l>1e-4?-gradient/l:float2(cos(yaw),sin(yaw));
+   // Fade the direction at flat mask centres: normalizing tiny gradients
+   // or switching to random tuft yaw made blades flip as a unit moved.
+   float2 away=-gradient/max(l,.1);
    push+=away*pressed;flatten=max(flatten,pressed);
   }
   float l=length(push);if(l>1)push/=l;
@@ -1119,7 +1133,7 @@ void gcBuildOf(GcSurvivor c){
  const float3 shadeAt=float3(p,z+.5*s*szs)+gcOrigin.xyz;const float2 shadeSlope=-n.xy/max(n.z,.2);
  const uint4 shade=uint4(asuint(shadeAt.z),asuint(shadeSlope),gcHash(seed^0x9e3779b9u));
  o.extra=uint4(asuint(ground+gcOrigin.z),gcPack2(blend,contact),
-  (uint(rule.material)&15u)|(uint(saturate(rule.frost)*15+.5)<<4)|(uint(saturate(rule.align)*15+.5)<<8)|(uint(saturate(normalBlend)*15+.5)<<12)|(tuft?0x10000u:0u),
+  (uint(rule.material)&15u)|(uint(saturate(rule.frost)*15+.5)<<4)|(uint(saturate(rule.align)*15+.5)<<8)|(uint(saturate(normalBlend)*15+.5)<<12)|(tuft?0x10000u:0u)|(parting?0x20000u:0u),
   gcHash(seed));
  // Pool overflow (the demand readback grows the pool a few frames later)
  // thins a stable subset in the distance thinning's own order instead of
@@ -1472,7 +1486,10 @@ GcVertexFrame gcVertexFrame(uint vertexId,uint instanceId){
  float bend=v.ex.y*scale;
  offset.xy+=gcWind.xy*bend*gcWind.z*drawInput.extra.y*(1-tint.a);
  // Units and current game-visible tracks part/press blades (per instance).
- offset.xy+=push*bend*1.6;offset.z-=tint.a*bend*.9;
+ // Standing stems lean sideways with only a small height loss. At a flat
+ // mask centre the push fades to zero (no arbitrary or reversed direction).
+ const bool parting=(bits&0x20000u)!=0;
+ offset.xy+=push*bend*(parting?.55:1.6);offset.z-=tint.a*bend*(parting?.12:.9);
  // Snow follows the actual height field at every vertex, including the rim;
  // snow trails cut it down to their floor and heap it into their berms.
  if(GC_VS_SNOW){
@@ -2747,7 +2764,7 @@ HRESULT Renderer::ensure_ground_cover_pipeline() noexcept {
     trail_target.BlendEnable = TRUE; trail_target.SrcBlend = trail_target.DestBlend = D3D11_BLEND_ONE;
     trail_target.BlendOp = trail_target.BlendOpAlpha = D3D11_BLEND_OP_MAX;
     trail_target.SrcBlendAlpha = trail_target.DestBlendAlpha = D3D11_BLEND_ONE;
-    trail_target.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED|D3D11_COLOR_WRITE_ENABLE_GREEN;
+    trail_target.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED|D3D11_COLOR_WRITE_ENABLE_GREEN|D3D11_COLOR_WRITE_ENABLE_BLUE;
     D3D11_DEPTH_STENCIL_DESC trail_depth{}; trail_depth.DepthFunc = D3D11_COMPARISON_ALWAYS;
     D3D11_SAMPLER_DESC clamp{}; clamp.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     clamp.AddressU = clamp.AddressV = clamp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; clamp.MaxLOD = D3D11_FLOAT32_MAX;
@@ -3453,7 +3470,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
         }
         char detail[320]; std::snprintf(detail, sizeof(detail), "%s: %lld sand slots (%s)",
             type ? "terrain type or sand family" : "terrain type only", static_cast<long long>(count), tile_families_.source.c_str());
-        bridge_append_probe_event("ground_cover_beach_sand", detail);
+        bridge_report_event("ground_cover_beach_sand", detail);
     }
     if (FAILED(update_ground_cover_maps(inputs)))
         return fail("EID3D11 ground cover: terrain fields or colour map unavailable; ground cover omitted.");
@@ -3616,8 +3633,10 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     // Reuse the authoritative shown, grounded, live-unit snapshot. Hidden,
     // undetected and invisible units were rejected by that bridge (the unit
     // drawing rule) and never stamp here, so cover cannot reveal them.
-    for (const auto& unit : gc_unit_input_)
-        gc_footprint_input_.push_back(live_unit_splat(unit[0], unit[1], unit[3]));
+    for (std::size_t k = 0; k < gc_unit_input_.size(); ++k) {
+        const auto& unit = gc_unit_input_[k];
+        gc_footprint_input_.push_back(live_body_splat(unit[0], unit[1], gc_unit_trails_[k].half_extent));
+    }
     if (gc_footprint_input_.size() > UINT_MAX / sizeof(FootprintSplat))
         return fail("EID3D11 ground cover: footprint buffer exceeds D3D11 addressable size; cover omitted.");
     const UINT footprint_count = static_cast<UINT>(gc_footprint_input_.size());
@@ -3658,7 +3677,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
                     return fail("EID3D11 ground cover: footprint mask allocation failed; cover omitted.");
             }
             gc_trail_sources_.Reset();gc_trail_sources_rtv_.Reset();gc_trail_sources_srv_.Reset();
-            if(FAILED(make_texture(device_.Get(),gc_trail_width_,gc_trail_height_,DXGI_FORMAT_R16G16_FLOAT,1,
+            if(FAILED(make_texture(device_.Get(),gc_trail_width_,gc_trail_height_,DXGI_FORMAT_R16G16B16A16_FLOAT,1,
                     D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE,0,gc_trail_sources_))||
                FAILED(device_->CreateRenderTargetView(gc_trail_sources_.Get(),nullptr,&gc_trail_sources_rtv_))||
                FAILED(device_->CreateShaderResourceView(gc_trail_sources_.Get(),nullptr,&gc_trail_sources_srv_)))
@@ -4147,6 +4166,8 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     context_->CSSetShaderResources(27, 18, place_srvs);
     context_->CSSetShaderResources(47, 1, gc_trees_srv_.GetAddressOf());
     context_->CSSetShaderResources(48, 1, gc_object_srv_.GetAddressOf());
+    ID3D11ShaderResourceView* body_srv = trail_active ? gc_trail_sources_srv_.Get() : nullptr;
+    context_->CSSetShaderResources(49, 1, &body_srv);
     context_->CSSetShaderResources(50, 1, gc_zone_srv_.GetAddressOf());
     context_->CSSetShaderResources(51, 1, &snow_srv);
     // This frame's sun cascades for the per-instance blocker search (gcSunGap).
@@ -4336,6 +4357,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     context_->CSSetShaderResources(27, 18, no_srvs);
     context_->CSSetShaderResources(47, 1, no_srvs);
     context_->CSSetShaderResources(48, 1, no_srvs);
+    context_->CSSetShaderResources(49, 1, no_srvs);
     context_->CSSetShaderResources(51, 1, no_srvs);
     context_->CSSetShaderResources(9, 1, no_srvs);
     restore_cs_shadow();

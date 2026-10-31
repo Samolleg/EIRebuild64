@@ -27,16 +27,18 @@ bool build_static_lods(const FigureCpuAsset& figure, NativeMeshLods& output) noe
     output = {};
     const std::size_t index_count = figure.indices.size();
     const std::size_t vertex_count = figure.components.size();
-    if (figure.shape_count != 8 || index_count % 3 || index_count / 3 < kStaticLodMinTriangles ||
+    const std::uint32_t shape_count = figure.shape_count;
+    if ((shape_count != 1 && shape_count != 8) || index_count % 3 || index_count / 3 < kStaticLodMinTriangles ||
         !vertex_count || figure.position_groups == 0 ||
-        figure.positions.size() != std::size_t(figure.position_groups) * 8u)
+        figure.positions.size() != std::size_t(figure.position_groups) * shape_count)
         return false;
     const std::size_t position_count = std::size_t(figure.position_groups) * 4u;
     const std::size_t normal_count = figure.normals.size() * 4u;
     // Per component: the mean shape's position, then normal and UV.
     std::vector<float> positions(vertex_count * 3), shape_positions(vertex_count * 3), attributes(vertex_count * 5);
     float largest_scale = 0;
-    for (std::uint32_t shape = 0; shape < 8; ++shape) {
+    const float shape_weight = 1.0f / float(shape_count);
+    for (std::uint32_t shape = 0; shape < shape_count; ++shape) {
         for (std::size_t vertex = 0; vertex < vertex_count; ++vertex) {
             const auto& component = figure.components[vertex];
             if (component.position >= position_count || component.normal >= normal_count ||
@@ -48,7 +50,7 @@ bool build_static_lods(const FigureCpuAsset& figure, NativeMeshLods& output) noe
             for (unsigned axis = 0; axis < 3; ++axis) {
                 if (!std::isfinite(value[axis])) return false;
                 shape_positions[vertex * 3 + axis] = value[axis];
-                positions[vertex * 3 + axis] += value[axis] * 0.125f;
+                positions[vertex * 3 + axis] += value[axis] * shape_weight;
             }
         }
         largest_scale = (std::max)(largest_scale, meshopt_simplifyScale(shape_positions.data(), vertex_count, 12));

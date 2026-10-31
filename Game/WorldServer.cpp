@@ -997,6 +997,7 @@ void CWorldServer::StartServer(EServerMode mode)
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::WorldSegment(bool bForceScriptRun)
 {
+    aiMap.Navigation().Advance();
     CorePerf::Scope coreTiming(CorePerf::WorldSegment);
     POSITION pos;
     CEffect *pEff;
@@ -1938,6 +1939,7 @@ void CWorldServer::DeployPlayerParty(CPlayer *pPlayer, SDeployPlayerInfo *pInfo,
     rot.FromAxisAngle(CPlot3D(0, 0, 1), fPersAngle);
     // deploy itself
     DeployPersonages(pPlayer, pers, ptPlace, rot, pInfo);
+    for(const auto& entry:mapObjects)if(entry.second->WhoAmI()==HPC_UNIT)aiMap.Navigation().Place(static_cast<CUnit*>(entry.second),aiMap);
     if (pInfo)
         pInfo->Clear();
     // set camera position for objects send
@@ -3297,11 +3299,7 @@ BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneN
         access(ModRuntime::MapPath(GetMobPath() + pszMobName).c_str(), 0) == -1)
         return FALSE;
 
-    coreOperation.Stage("ai_graph");
-    CMemorySave graphChunk;
-    if (!ModCliTool::GeneratingGraph() && !LoadAIGraph(pszMapName, pszMobName, graphChunk))
-        return ReportError("CWorldServer::LoadMap.\n Can't load AIGraph.\n");
-
+    CMemorySave graphChunk; // obsolete parameter, no legacy graph input
     coreOperation.Stage("static_mob");
     szLoadedMobs.RemoveAll();
     StartZoneLoading();
@@ -3311,6 +3309,7 @@ BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneN
     C2DScreenWait::Step(6);
     coreOperation.Stage("finalize");
     FinishZoneLoading();
+    if(!aiMap.Navigation().Load()) { bMapLoaded=FALSE;return ReportError("Nav64: cannot enter zone: %s",aiMap.Navigation().Error().c_str()); }
     C2DScreenWait::Step(7);
     if (pszZoneName)
         szCurrentZoneName = pszZoneName;
@@ -3432,7 +3431,7 @@ CString CWorldServer::GetFullMobName(const char *pszFileName)
 // aiMap.StartDelayConvert should be called before this function (use StartZoneLoading() )
 // script and fof are cleared if requested static only
 BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
-                               CMemorySave &graphChunk, bool bStaticOnly)
+                               CMemorySave &graphChunk, bool bStaticOnly, bool skipScripts)
 {
     OwnedRender::E1MobSource ownedSource(pszMprName, pszMobName);
     // load ai map if changed
@@ -3446,10 +3445,7 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
         szMobFileName = "";
     }
 
-    // unconditionally load aiGraph
-    graphChunk.Seek(0);
-    if (graphChunk.GetSize() > 0 && !aiMap.LoadGraph(graphChunk))
-        return FALSE;
+    aiMap.Navigation().Scene(pszMprName,pszMobName);
 
     // prepare for map objects loading
     if (szMobFileName.CompareNoCase(pszMobName) == 0)
@@ -3480,7 +3476,7 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
     if (bLoadStatic || bLoadDynamic)
     {
         szMobFileName = pszMobName;
-        if (!LoadMapObjects(pszMobName, !bLoadDynamic))
+        if (!LoadMapObjects(pszMobName, !bLoadDynamic || skipScripts))
             return FALSE;
         if (!bLoadDynamic)
         {
@@ -3503,6 +3499,17 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+bool CWorldServer::LoadNavigationScene(const char* mpr,const char* mob)
+{
+    // Offline data import calls the same MPR/MOB/BASE path as NewZone. It never
+    // starts a server, compiles/runs MOB scripts, deploys a party or enters UI.
+    szLoadedMobs.RemoveAll();
+    StartZoneLoading();
+    CMemorySave unusedGraph;
+    if(!LoadMainMob(mpr,mob,unusedGraph,false,true))return false;
+    FinishZoneLoading();
+    return true;
+}
 BOOL CWorldServer::LoadMapObjects(LPCSTR pszMobName, bool bSkipScript)
 {
     CGameMOBFile reader;

@@ -102,6 +102,7 @@ public:
     void BeginFrame();
     bool BeginWorld(const EIRenderWorldFrameV2& frame);
     void EndWorld();
+    void BeginInterface();
     void RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals = nullptr);
     void SubmitC56PointLights(const std::vector<owned::RetainedWorldPointLight>& lights,
                               double worldTime);

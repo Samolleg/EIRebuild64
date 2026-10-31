@@ -45,6 +45,7 @@ public:
 };
 
 // --------------------------------------------------------------------------------------------
+class CTextManager;
 class CGlobalMap
 {
 private:
@@ -54,6 +55,7 @@ private:
 public:
     void Init();
     bool LoadZones(const char *pszFileName);
+    bool LoadZones(const char *pszFileName,CTextManager& texts);
 
     SScenarioAllod *GetAllod(int i) { return &allAllods[i]; }
     SScenarioAllod *GetAllodByName(LPCTSTR pszName);

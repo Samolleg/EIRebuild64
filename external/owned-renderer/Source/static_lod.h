@@ -90,7 +90,7 @@ bool build_impostor_source(const FigureCpuAsset& figure, NativeImpostorSource& o
 struct NativeMeshLods {
     std::uint32_t levels = 0; // reduced levels, coarser in turn
     std::array<std::vector<std::uint32_t>, kStaticLodMaxLevels> indices;
-    // Largest deviation of each level, object units, over all eight shapes;
+    // Largest deviation of each level, object units, over every stored shape;
     // never smaller than the previous level's.
     std::array<float, kStaticLodMaxLevels> error{};
 };

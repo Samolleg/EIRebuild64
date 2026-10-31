@@ -23,6 +23,7 @@ enum Id {
     VisualResources, Skeleton, VisualPose, PosePublish, Picking, FootprintInputs, VisualFrameRun,
     SceneObjectWalk, SceneSubmit, RenderTerrain, EffectsFog, EffectsParticles, EffectsLightning, EffectsWeather,
     LockFrameWait, SceneSyncWait, PresentSlotWait, LimiterWait, IdleWait,
+    NavigationTotal, NavigationPath, NavigationPlace, NavigationStep, NavigationRestore, NavigationFrame,
     Count
 };
 inline const char* Name(Id id) noexcept {
@@ -44,7 +45,8 @@ inline const char* Name(Id id) noexcept {
         "prepare.pose_walk", "visual.resources", "visual.skeleton", "visual.pose", "visual.pose_publish",
         "visual.picking", "prepare.footprints", "render.visual_frame",
         "scene_inputs.objects", "scene_inputs.submit", "render.terrain", "effects.fog", "effects.particles", "effects.lightning", "effects.weather",
-        "wait.lock_frame", "wait.scene_sync", "wait.present_slot", "wait.limiter", "wait.idle"
+        "wait.lock_frame", "wait.scene_sync", "wait.present_slot", "wait.limiter", "wait.idle",
+        "nav.total", "nav.path", "nav.place", "nav.step", "nav.restore", "nav.frame"
     };
     return names[id];
 }
@@ -90,6 +92,7 @@ struct State {
     bool drew3D = false;
     TickData* tick = nullptr;
     TickData worst{};
+    LONGLONG navigationFrame = 0;
     bool inFrame = false;
     std::uint64_t frameTicks = 0, histogram[4]{}, hitches = 0;
     std::uint64_t dynamicTotal = 0, activeTotal = 0, dynamicMax = 0, activeMax = 0;
@@ -102,6 +105,7 @@ inline State* Main() noexcept {
 }
 inline void Record(State& s, Id id, LONGLONG elapsed) noexcept {
     s.scopes[id].Add(elapsed);
+    if(id==NavigationTotal&&s.inFrame)s.navigationFrame+=elapsed;
     for (TickData* tick = s.tick; tick; tick = tick->parent) tick->scopes[id].Add(elapsed);
 }
 class Scope {
@@ -279,11 +283,12 @@ class Frame {
     State* state = Main();
     Scope timing{IdleFrame};
 public:
-    Frame() noexcept { if (state) { state->frameTicks = 0; state->drew3D = false; state->inFrame = true; } }
+    Frame() noexcept { if (state) { state->frameTicks = 0; state->navigationFrame = 0; state->drew3D = false; state->inFrame = true; } }
     Frame(const Frame&) = delete;
     ~Frame() noexcept {
         timing.Finish();
         if (state) {
+            state->scopes[NavigationFrame].Add(state->navigationFrame);
             ++state->histogram[state->frameTicks < 3 ? state->frameTicks : 3];
             if (!state->drew3D) ++state->emptyFrames;
             state->inFrame = false;

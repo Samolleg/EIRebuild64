@@ -930,6 +930,7 @@ BOOL CUnit::UpdateFrom(EUpdateType tip)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnit::NewVerticalPos(float fpZ)
 {
+    navLocation.surface=0; // An authoritative placement discards an earlier visual support.
     fpBaseZ = fpZ;
     cp.z = CalcZ(cp.x, cp.y);
 }
@@ -1078,6 +1079,16 @@ void CUnit::SetExactPosition(float fpTime)
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+bool CUnit::GetRoutePosition(float time,CPlot3D &position)
+{
+    auto& route=*lpUnitSpecific->GetRoute();
+    if(!route.IsMoving()||route.route.route.GetCount()<2)return false;
+    position=GetCP();position.x=Meter2AITile(position.x);position.y=Meter2AITile(position.y);
+    CPlot3D direction;float speed=0,supportZ=0;bool rotating=false;int tileX=-1,tileY=-1;
+    walker.GetPosition(GetWorldBase(),route,time,rotating,position,direction,speed,tileX,tileY,&supportZ);
+    position.x=AITile2Meter(position.x);position.y=AITile2Meter(position.y);position.z=supportZ;
+    return true;
+}
 CPlot3D CUnit::GetFuturePosition(int nSegment)
 {
     CAIFullRoute &route = *lpUnitSpecific->GetRoute();
@@ -1267,13 +1278,16 @@ const SADEntry *CUnit::GetAnimationByIndex(DWORD nIndex)
 /////////////////////////////////////////////////////////////////////////////////////
 float CUnit::CalcZ(float fpX, float fpY)
 {
+    const bool supported=navLocation.surface>=1 &&
+        std::abs(fpX-navLocation.position.x)<.01f && std::abs(fpY-navLocation.position.y)<.01f;
+    if(supported && rpgUserUnitStats.cLocomotion!=2 && rpgUserUnitStats.cLocomotion!=3)return navLocation.position.z;
     CWorldBase *pWorld = GetWorldBase();
-    if (rpgUserUnitStats.cLocomotion == 2)
+    if ((rpgUserUnitStats.cLocomotion == 2 || rpgUserUnitStats.cLocomotion == 3))
     {
         if (lpUnitSpecific->WhoAmI() == HPC_UNITSERVERSPECIFIC)
-            return pWorld->GetBridgeSurfaceZValue(fpX, fpY) + cp.z;
+            return (supported?navLocation.position.z:pWorld->GetBridgeSurfaceZValue(fpX, fpY)) + cp.z;
         else
-            return pWorld->GetBridgeSurfaceZValue(fpX, fpY) + fpBaseZ;
+            return (supported?navLocation.position.z:pWorld->GetBridgeSurfaceZValue(fpX, fpY)) + fpBaseZ;
     }
     else
         return pWorld->GetBridgeZValue(fpX, fpY);
@@ -1365,7 +1379,7 @@ void CUnit::RecalcAIParams()
     else
     {
         // NOTE actually on client ai class and attack distance are not of much interest
-        if (rpgUserUnitStats.cLocomotion == 2)
+        if ((rpgUserUnitStats.cLocomotion == 2 || rpgUserUnitStats.cLocomotion == 3))
             nAIClass = 0;
         else
             nAIClass = 3;

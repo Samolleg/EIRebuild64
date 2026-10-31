@@ -1,0 +1,12 @@
+{
+  "name": "RecastNavigation",
+  "repository": "https://github.com/recastnavigation/recastnavigation",
+  "tag": "v1.6.0",
+  "commit": "6dc1667f580357e8a2154c28b7867bea7e8ad3a7",
+  "archive": "https://codeload.github.com/recastnavigation/recastnavigation/zip/refs/tags/v1.6.0",
+  "sha256": "8b50c62177249554b226514b307e6c529934a62b3926822777bf6abb8906a155",
+  "license": "zlib",
+  "modules": ["Recast", "Detour", "DetourCrowd"],
+  "local_source_changes": false,
+  "abi": {"architecture": "x64", "crt": "MD", "DT_POLYREF64": true, "DT_VIRTUAL_QUERYFILTER": false}
+}

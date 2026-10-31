@@ -146,6 +146,40 @@ bool texture_alpha_texel_cut(const TextureAlphaPixels& source,
     }
 }
 
+bool texture_alpha_texel_empty(const TextureAlphaPixels& source,
+                               std::uint32_t x, std::uint32_t y) noexcept {
+    if (!source.data || x >= source.width || y >= source.height ||
+        source.format == TextureAlphaFormat::cut_bits) return false;
+    if (source.format == TextureAlphaFormat::bc1)
+        return texture_alpha_texel_cut(source, x, y);
+    if (source.format == TextureAlphaFormat::packed) {
+        if (source.pixel_bytes < 2 || source.pixel_bytes > 4) return false;
+        const std::size_t offset = std::size_t(y) * source.pitch + std::size_t(x) * source.pixel_bytes;
+        if (offset + source.pixel_bytes > source.bytes) return false;
+        std::uint32_t raw = 0;
+        std::memcpy(&raw, source.data + offset, source.pixel_bytes);
+        return (source.alpha_mask && !(raw & source.alpha_mask)) ||
+            (source.has_color_key && raw >= source.key_low && raw <= source.key_high);
+    }
+    const std::size_t offset = std::size_t(y / 4) * source.pitch + std::size_t(x / 4) * 16u;
+    if (offset + 16u > source.bytes) return false;
+    const auto* block = source.data + offset;
+    const unsigned texel = (y % 4) * 4 + x % 4;
+    std::uint64_t alpha = 0;
+    if (source.format == TextureAlphaFormat::bc2) {
+        std::memcpy(&alpha, block, 8);
+        return ((alpha >> (texel * 4)) & 15) == 0;
+    }
+    if (source.format != TextureAlphaFormat::bc3) return false;
+    std::memcpy(&alpha, block + 2, 6);
+    const unsigned selector = unsigned((alpha >> (texel * 3)) & 7);
+    if (selector < 2) return block[selector] == 0;
+    if (block[0] > block[1])
+        return ((8 - selector) * unsigned(block[0]) + (selector - 1) * unsigned(block[1])) / 7 == 0;
+    if (selector >= 6) return selector == 6;
+    return ((6 - selector) * unsigned(block[0]) + (selector - 1) * unsigned(block[1])) / 5 == 0;
+}
+
 std::shared_ptr<const std::vector<std::uint8_t>> texture_alpha_cut_mask(
     const TextureAlphaPixels& source) {
     if (!source.width || !source.height) return nullptr;
@@ -1069,15 +1103,55 @@ bool parse_figure_asset(const ResourceBlob& blob, FigureCpuAsset& figure,
     }
     const auto& bytes = *blob.bytes;
     // The game tests only the "FIG" prefix: exactly "FIG8" has eight shapes
-    // and every other fourth byte is read as one shape. A file without the
-    // prefix is the game's older headerless format, which we do not decode.
+    // and every other fourth byte is read as one shape.
     const std::uint32_t signature = read_u32(bytes.data());
     const std::uint32_t shape_count = (signature & 0x00ffffffu) != (kFig1 & 0x00ffffffu) ? 0u :
         signature == kFigureSignature8 ? 8u : 1u;
     if (!shape_count) {
-        fail(failure, ResourceFailureCode::parse,
-             "FIG uses the older headerless figure format, which is not decoded");
-        return false;
+        // CFigureMapLoaded::LoadOldFigure: six corners (weak/strong/fat,
+        // short/tall), counted channels and an unused 52-byte CFace stream.
+        // Its interpolation is bilinear in strength/grace and linear in tall.
+        // Duplicate each fat corner into both strength corners at grace=1;
+        // this gives exactly the same polynomial in the eight-corner layout.
+        // This is a format decoder, with the same channel validation below.
+        try {
+            std::vector<std::uint8_t> converted(40,0);
+            std::size_t cursor=0;
+            const auto take=[&](std::size_t count) {
+                if(cursor>bytes.size()||count>bytes.size()-cursor)throw std::runtime_error("headerless FIG channel is truncated");
+                const auto first=cursor;cursor+=count;return first;
+            };
+            const auto count=[&]() {const auto at=take(4);return read_u32(bytes.data()+at);};
+            const auto set=[&](std::size_t at,std::uint32_t value) {
+                for(unsigned i=0;i<4;++i)converted[at+i]=static_cast<std::uint8_t>(value>>(i*8));
+            };
+            const auto append=[&](std::size_t at,std::size_t size) {
+                if(size)converted.insert(converted.end(),bytes.begin()+at,bytes.begin()+at+size);
+            };
+            const auto material=count(),texture=count();
+            set(0,kFigureSignature8);set(32,material);set(36,texture);
+            constexpr unsigned corner[]={0,1,2,2,3,4,5,5};
+            for(unsigned channel=0;channel<4;++channel) {
+                const std::size_t width=channel==3?4:12;const auto first=take(6*width);
+                for(unsigned s:corner)append(first+s*width,width);
+            }
+            const auto positions=count();set(4,positions);
+            if(positions>(bytes.size()-cursor)/(6*12*4))throw std::runtime_error("headerless FIG position count is invalid");
+            for(unsigned group=0;group<positions;++group)for(unsigned axis=0;axis<3;++axis) {
+                const auto first=take(6*4*4);for(unsigned s:corner)append(first+s*16,16);
+            }
+            const auto normals=count();set(8,normals);auto first=take(std::size_t(normals)*64);append(first,std::size_t(normals)*64);
+            const auto uv=count();set(12,uv);first=take(std::size_t(uv)*8);append(first,std::size_t(uv)*8);
+            const auto faces=count();take(std::size_t(faces)*52);
+            const auto components=count();set(20,components);const auto componentBytes=std::size_t(components)*6;const auto componentAt=take(componentBytes);
+            const auto morphs=count();set(24,morphs);const auto morphBytes=std::size_t(morphs)*4;const auto morphAt=take(morphBytes);
+            const auto indices=count();set(16,indices);const auto indexBytes=std::size_t(indices)*2;first=take(indexBytes);
+            append(first,indexBytes);append(componentAt,componentBytes);append(morphAt,morphBytes);
+            ResourceBlob decoded=blob;decoded.bytes=std::make_shared<const std::vector<std::uint8_t>>(std::move(converted));
+            return parse_figure_asset(decoded,figure,failure);
+        } catch(const std::exception& e) {
+            fail(failure,ResourceFailureCode::parse,e.what());return false;
+        }
     }
     const std::uint32_t position_groups = read_u32(bytes.data() + 4);
     const std::uint32_t normal_groups = read_u32(bytes.data() + 8);

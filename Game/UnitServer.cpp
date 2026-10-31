@@ -23,6 +23,7 @@
 #include <cctype>
 #include <cmath>
 #include <string>
+#include <sstream>
 #include "ModRuntime.h"
 static const char LOCAL_FILE[] = __FILE__;
 namespace {
@@ -440,7 +441,7 @@ void CUnitServer::LowNewWishPose(EUnitPose pose)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CUnitServer::LowFindPath(const CPlot3D &ptDest, SAIPath &res, BOOL bFastPath,
-                              float fpMaxPathLength)
+                              float fpMaxPathLength, Navigation::GoalPolicy goalPolicy)
 {
     CorePerf::Scope coreTiming(CorePerf::FindPath);
     CWorldServer *pWS = (CWorldServer *)GetWorld();
@@ -452,8 +453,34 @@ bool CUnitServer::LowFindPath(const CPlot3D &ptDest, SAIPath &res, BOOL bFastPat
     //
     BOOL bSaveFastPath = lpUnit->bNeedFastPath;
     lpUnit->bNeedFastPath = bFastPath;
-    bool bFound = pWS->aiMap.NewPath(lpUnit, ptDest, res, fpMaxPathLength);
+    const bool journal=lpUnit->IsHero() && &res==&path;
+    Navigation::Route detail;
+    bool bFound = pWS->aiMap.NewPath(lpUnit, ptDest, res, fpMaxPathLength,0,goalPolicy,journal?&detail:nullptr);
     lpUnit->bNeedFastPath = bSaveFastPath;
+    if(bFound&&journal&&!detail.points.empty()) {
+        std::ostringstream points;unsigned turns=0,printed=0;
+        for(size_t i=0;i<detail.points.size();++i) {
+            const auto& current=detail.points[i];
+            if(i&&i+1<detail.points.size()) {
+                const auto& a=detail.points[i-1];const auto& b=detail.points[i+1];
+                const float ax=current.position.x-a.position.x,ay=current.position.y-a.position.y,
+                    bx=b.position.x-current.position.x,by=b.position.y-current.position.y;
+                const float lengths=std::hypot(ax,ay)*std::hypot(bx,by);
+                if(lengths>1.e-10f&&ax*bx+ay*by>0&&std::abs(ax*by-ay*bx)<.052336f*lengths&&
+                    a.area==current.area&&current.area==b.area&&a.surface==current.surface&&current.surface==b.surface)continue;
+                ++turns;
+            }
+            if(printed>=23&&i+1<detail.points.size())continue;
+            if(printed++)points<<';';
+            points<<current.position.x<<','<<current.position.y<<','<<current.position.z<<'/'<<current.area<<'/'<<current.surface;
+        }
+        const auto& from=detail.points.front();const auto& to=detail.points.back();
+        GameJournal::Event("NAV","route_ready","unit=%d mode=%s pose=%d requested=(%.3f,%.3f) from=(%.3f,%.3f,%.3f) accepted=(%.3f,%.3f,%.3f) length=%.3f planned_cost=%.3f selected_cost=%.3f straight_cost=%.3f straightened=%d polygons=%zu points=%zu bends=%u printed=%u corners=%s",
+            lpUnit->GetID(),bFastPath?"flat":"material",int(lpUnit->GetCurrentPose()),ptDest.x,ptDest.y,
+            from.position.x,from.position.y,from.position.z,to.position.x,to.position.y,to.position.z,
+            detail.length,detail.plannedCost,detail.cost,detail.straightCost,int(detail.straightened),
+            detail.corridor.size(),detail.points.size(),turns,printed,GameJournal::Quote(points.str().c_str()).c_str());
+    }
     return bFound;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -722,6 +749,12 @@ void CUnitServer::L1StandStill()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::L1StopMovement(bool bFailed)
 {
+    navigationRejects=navigationWait=0;
+    if(path.curSegment.GetMoveType()==CAIFullRoute::Rotate) {
+        const auto facing=-lpUnit->GetYAxis();
+        GameJournal::Event("UNIT","turn_finished","unit=%d failed=%d requested=%.6f actual=%.6f",
+                           lpUnit->GetID(),int(bFailed),std::atan2(curCommand.ptTarget.y,curCommand.ptTarget.x),std::atan2(facing.y,facing.x));
+    }
     L1StandStill();
     L1SetPhase(UL1_NONE);
     bL1MovementFailed = bFailed;
@@ -752,6 +785,21 @@ void CUnitServer::L1NewPathSegment()
     L1StartRotateAnimation();
 }
 /////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::RestoreNavigation()
+{
+    if(!path.curSegment.IsMoving())return true;
+    auto* world=static_cast<CWorldServer*>(GetWorld());auto goal=path.ptDestination;
+    if(distanceXY2(lpUnit->GetCP(),goal)<.0009f) {
+        path.CreateStand(lpUnit);L1SetPhase(UL1_NONE);lpUnit->LowNewRoute();return true;
+    }
+    path.toGo.Clear();
+    if(!lpUnit->navLocation.surface||!world->aiMap.NewPath(lpUnit,goal,path)) {
+        // A derived route may become unavailable after world reconstruction.
+        // Keep the loaded unit, stop this move; a new command can request a path.
+        path.CreateStand(lpUnit);L1SetPhase(UL1_NONE);
+    }
+    lpUnit->LowNewRoute();return true;
+}
 void CUnitServer::L1ExecMove()
 {
     CorePerf::Scope coreTiming(CorePerf::MoveCollisions);
@@ -765,14 +813,12 @@ void CUnitServer::L1ExecMove()
     int nTime = pWS->GetSegmentTimeCounter();
     CAIFullRoute &segment = path.curSegment;
 
-    pos = lpUnit->GetCP();
-    pos.x = Meter2AITile(pos.x);
-    pos.y = Meter2AITile(pos.y);
-    bSegmentFinished = !lpUnit->walker.GetPosition(pWS, segment, pWS->GetSegmentTimeCounter(),
-                                                   bRotating, pos, vec, fpSpeed, nCheckTileX,
-                                                   nCheckTileY);
-    pos.x = AITile2Meter(pos.x);
-    pos.y = AITile2Meter(pos.y);
+    NavigationWorld::Movement movement;
+    const auto from=pWS->aiMap.Navigation().Position(lpUnit,pWS->aiMap);
+    const bool accepted=pWS->aiMap.Navigation().Move(lpUnit,path,float(nTime),navigationWait,movement);
+    pos=lpUnit->GetCP();pos.x=movement.support.position.x;pos.y=movement.support.position.y;
+    vec=CPlot3D(movement.direction.x,movement.direction.y,0);
+    bRotating=movement.rotating;bSegmentFinished=movement.finished;fpSpeed=movement.speed;
 
     if (!bRotating && !bL1MoveAnimationSet)
     {
@@ -801,93 +847,40 @@ void CUnitServer::L1ExecMove()
         }
     }
 
-    if (nCheckTileX >= 0)
-    {
-        CUnit *pObstacle;
-        pWS->aiMap.RemoveObject(lpUnit);
-        bMoved = pWS->aiMap.CanMoveTo(lpUnit, nCheckTileX, nCheckTileY, lock);
-        if (!bMoved)
-        {
-            pObstacle = pWS->aiMap.CheckCircleCollision(lpUnit, pos);
-            if (pObstacle)
-            {
-                bool bTestMore = true;
-                if (lpUnit->GetOwner() && pObstacle->GetOwner() == lpUnit->GetOwner())
-                {
-                    CUnitServer *pOb = (CUnitServer *)pObstacle->GetUnitSpecific();
-                    if (pOb->logic.GetPlayerLeader() == lpUnit &&
-                        theWorldServer.GetSegmentTimeCounter() < nCommandExecStart + 2)
-                    {
-                        lock = AI_LOCK_DYNAMIC;
-                        bTestMore = false;
-                    }
-                }
-                if (bTestMore)
-                {
-                    if (train.bIsTrain && pObstacle == train.master)
-                        lock = AI_LOCK_DYNAMIC;
-                    else
-                    {
-                        CUnitServer *pMaster = (CUnitServer *)pObstacle->GetUnitSpecific();
-                        if (pObstacle->GetPlayerNum() == GetUnit()->GetPlayerNum() &&
-                            IsAttacking() && pMaster->IsAttacking() &&
-                            (CMapObject *)pMaster->curCommand.pTarget == curCommand.pTarget &&
-                            pObstacle->GetAIClass() == GetUnit()->GetAIClass() &&
-                            !pMaster->L1IsAttacking() &&
-                            fabs2(curCommand.pTarget->GetCP() - lpUnit->GetCP()) > 60)
-                        {
-                            bool bCanTrain = true;
-                            // проверим не приведет ли огранизация паровоза к зацикленному
-                            // локомотиву
-                            CUnitServer *pTest = pMaster;
-                            while (pTest->train.bIsTrain)
-                            {
-                                if (pTest->train.master == 0)
-                                    break;
-                                if (pTest->train.master == lpUnit)
-                                {
-                                    bCanTrain = false; // однако приведет
-                                    break;
-                                }
-                                pTest = (CUnitServer *)pTest->train.master->GetUnitSpecific();
-                            }
-                            //
-                            if (!bCanTrain)
-                            {
-                                // we can run into problems - break train
-                                pMaster->train.bIsTrain = false;
-                                pMaster->train.master = 0;
-                                train.bIsTrain = false;
-                                train.master = 0;
-                                lock = AI_LOCK_STATIC;
-                                bConvertLocks = TRUE;
-                            }
-                            else
-                            {
-                                train.bIsTrain = true;
-                                train.master = pObstacle;
-                                lock = AI_LOCK_DYNAMIC;
-                            }
-                        }
-                        else
-                        {
-                            if (GetUnit()->GetSpeed() > pObstacle->GetSpeed() &&
-                                lock == AI_LOCK_DYNAMIC)
-                            {
-                                lock = AI_LOCK_STATIC;
-                                bConvertLocks = TRUE;
-                            }
-                        }
-                    }
-                }
-            }
-            else
-                bMoved = true;
+    auto support=movement.support;
+    if(!accepted) {
+        if(movement.blocker>=0) {
+            GameJournal::Event("NAV","queue_stopped","unit=%d blocker=%d reason=no_detour",lpUnit->GetID(),movement.blocker);
+            L1StopMovement(true);return;
         }
-        pWS->aiMap.AddObject(lpUnit);
+        path.ClearCalcedPath();
+        if(++navigationRejects>1) {
+            GameJournal::Event("NAV","step_replan","unit=%d result=stopped reason=repeated_rejection",lpUnit->GetID());
+            L1StopMovement(true);return;
+        }
+        bool replanned=LowFindPath(path.ptDestination,path,lpUnit->bNeedFastPath,path.ptDestination.z);
+        // Reject an unchanged first movement immediately; rebuilding the same
+        // path every tick otherwise leaves a permanently running animation.
+        if(replanned)for(POSITION i=path.curSegment.route.route.GetHeadPosition();i;) {
+            const auto& node=path.curSegment.route.route.GetNext(i);
+            Navigation::Point next{AITile2Meter(node.point.x),AITile2Meter(node.point.y),from.z};
+            const float length=std::hypot(next.x-from.x,next.y-from.y);if(length<.001f)continue;
+            const float fraction=(std::min)(1.f,.05f/length);next.x=from.x+(next.x-from.x)*fraction;next.y=from.y+(next.y-from.y)*fraction;
+            Navigation::Location probe;replanned=pWS->aiMap.Navigation().Step(lpUnit,from,next,probe,&path.curSegment.route);break;
+        }
+        GameJournal::Event("NAV","step_replan","unit=%d result=%s",lpUnit->GetID(),replanned?"ready":"stopped");
+        if(replanned)L1NewPathSegment();else L1StopMovement(true);
+        return;
     }
-    else
-        bMoved = true;
+    if(movement.replanned){L1NewPathSegment();return;}
+    if(movement.waiting) {
+        segment.Freeze(1);lpUnit->SetUpdateMask(CMapObject::VLD_MASK_ROUTE);
+        L0Freeze(true);LowSetMoving(FALSE);
+        if(navigationWait==1)GameJournal::Event("NAV","queue_wait","unit=%d blocker=%d",lpUnit->GetID(),movement.blocker);
+        return;
+    }
+    L0Freeze(false);bMoved=true;
+    lock=bMoved?AI_LOCK_NO:AI_LOCK_DYNAMIC;
     // юнит вступил в дерьмо, а может он мог бы это избежать ??! - repath in this case
     if (eL1State == UL1_MOVE && pWS->aiMap.IsDangerous(pos) &&
         segment.GetStartSegment() < pWS->aiMap.GetLastDangerAddTime())
@@ -904,6 +897,11 @@ void CUnitServer::L1ExecMove()
         bMoved = pWS->aiMap.MoveObject(
             lpUnit,
             pos); // SetCP( pos ); setcp нельзя использовать, теперь только aimap::moveobject
+        if(bMoved) {
+            lpUnit->navLocation=support;
+            if(std::hypot(support.position.x-from.x,support.position.y-from.y)>.001f)navigationRejects=0;
+        }
+        else lock=AI_LOCK_STATIC;
         ASSERT(bMoved);
     }
     if (!bMoved)
@@ -939,7 +937,7 @@ void CUnitServer::L1ExecMove()
             break;
         case AI_LOCK_DYNAMIC:
             // подождем, пока динамический лок от движущегося юнита снимут
-            if (rpgUnitStats.dwLocomotion == 2)
+            if ((rpgUnitStats.dwLocomotion == 2 || rpgUnitStats.dwLocomotion == 3))
                 L0FreezeMovement(true);
             else
                 L0Freeze(true);
@@ -1057,11 +1055,18 @@ bool CUnitServer::L1StartMove(const CPlot3D &ptTarget, float fpMaxPathLength)
     bL1SpeedChanged = false;
     bL1MovementFailed = false;
     path.Clear();
-    if (!LowFindPath(ptTarget, path, lpUnit->bNeedFastPath, fpMaxPathLength))
+    const auto goalPolicy=curCommand.cmd==UC_MOVETO&&lpUnit->IsHero()?Navigation::GoalPolicy::ClosestReachable:Navigation::GoalPolicy::Exact;
+    if (!LowFindPath(ptTarget, path, lpUnit->bNeedFastPath, fpMaxPathLength,goalPolicy))
     {
         bL1MoveAnimationSet = false;
         L1StopMovement(path.bRouteFailed == TRUE);
         return false;
+    }
+    if(!path.curSegment.IsMoving()) {
+        // Already at the nearest reachable point: successful no-op, not a
+        // refusal and not a standing segment left in the movement phase.
+        const auto accepted=path.ptDestination;
+        L1StopMovement(false);path.CreateStand(lpUnit);path.ptDestination=accepted;return true;
     }
     path.ptDestination.z = fpMaxPathLength;
     nL1RunFailCounter = 0;
@@ -1730,6 +1735,10 @@ bool CUnitServer::LcChangePose()
         }
     }
     lpUnit->RecalcAIParams();
+    if (bChangePose && lpUnit->GetOwner())
+        GameJournal::Event("UNIT", "pose_changed", "unit=%d previous=%d current=%d at=(%.3f,%.3f)",
+                           lpUnit->GetID(), int(prevPose.Get()), int(currentPose.Get()),
+                           lpUnit->GetCPX(), lpUnit->GetCPY());
     LcRestartCommand();
     return true;
 }
@@ -2513,12 +2522,23 @@ float CUnitServer::GetHitDist(const SUnitBasicCmd &cmd)
             if (((CUnit *)pTarget)->GetOwner() && lpUnit->GetOwner())
                 fpWeaponRange -= 0.4f;
             fpWeaponRange = Max(GetCurrentWeaponRange(), fpWeaponRange);
-            fpHitDist = lpUnit->GetCollisionDistance() +
-                        ((CUnit *)pTarget)->GetCollisionDistance() + fpWeaponRange;
+            // Preserve the existing weapon/natural reach. Only melee bodies
+            // use the same measured radii as placement and crowd avoidance.
+            const bool bodyMelee = cmd.cmd == UC_ATTACK && !HasRangedAttack() &&
+                                   GetCurrentWeaponType() != RPGWST_MAGIC;
+            auto& navigation = ((CWorldServer *)GetWorld())->aiMap.Navigation();
+            fpHitDist = (bodyMelee ? navigation.Radius(lpUnit) : lpUnit->GetCollisionDistance()) +
+                        (bodyMelee ? navigation.Radius((CUnit *)pTarget) :
+                                     ((CUnit *)pTarget)->GetCollisionDistance()) + fpWeaponRange;
         }
         else
-            fpHitDist = lpUnit->GetAttackDistance() + pTarget->GetAttackDistance() +
-                        GetCurrentWeaponRange();
+        {
+            const bool bodyMelee = cmd.cmd == UC_ATTACK && !HasRangedAttack() &&
+                                   GetCurrentWeaponType() != RPGWST_MAGIC;
+            const float body = bodyMelee ? ((CWorldServer *)GetWorld())->aiMap.Navigation().Radius(lpUnit) + 0.05f
+                                        : lpUnit->GetAttackDistance();
+            fpHitDist = body + pTarget->GetAttackDistance() + GetCurrentWeaponRange();
+        }
         break;
     }
     return fpHitDist;
@@ -2538,8 +2558,12 @@ float CUnitServer::GetCloseAttackDist(const SUnitBasicCmd &cmd)
         // выпрыгивает на половину собственной длины)
         float fpAttackKoef = rpgUnitStats.fpAttackDistance;
         // fpAttackKoef = ( 1 - complection.tall ) + complection.tall * fpAttackKoef;
+        const bool bodyMelee = !HasRangedAttack() && GetCurrentWeaponType() != RPGWST_MAGIC;
+        auto& navigation = ((CWorldServer *)GetWorld())->aiMap.Navigation();
+        if (bodyMelee) fpAttackDistance = navigation.Radius(lpUnit) + 0.05f;
         fpAttackDistance *= (1 + fpAttackKoef);
-        fpHitDist = fpAttackDistance + ((CUnit *)pTarget)->GetCollisionDistance();
+        fpHitDist = fpAttackDistance + (bodyMelee ? navigation.Radius((CUnit *)pTarget) :
+                                                 ((CUnit *)pTarget)->GetCollisionDistance());
     }
     return fpHitDist;
 }
@@ -2656,6 +2680,11 @@ bool CUnitServer::IsTargetReachable(const SUnitBasicCmd &cmd)
         return true;
     if (pTarget->IsDead())
         return true;
+    if(lpUnit->GetUserUnitStats()->cLocomotion==3||pTarget->GetUserUnitStats()->cLocomotion==3) {
+        if(cmd.cmd==UC_ATTACK&&IsCurrentWeaponABow())return true;
+        const auto a=lpUnit->GetCP(),b=pTarget->GetCP();
+        return std::abs(lpUnit->CalcZ(a.x,a.y)-pTarget->CalcZ(b.x,b.y))<1.5f;
+    }
     if (pTarget->GetAIClass() != 0)
         return true;
     // now we have to check heights
@@ -3380,7 +3409,7 @@ void CUnitServer::ShowFoundMovePath(SAIPath &move, bool bFound)
     {
         move.GetWholeRoute(full);
         float fpLength = distanceXY2(lpUnit->GetCP(), move.ptDestination);
-        if (distanceXY2(move.GetFinalPoint(), move.ptDestination) < sqr(0.1f) * fpLength)
+        if (distanceXY2(move.GetFinalPoint(), move.ptDestination) <= (std::max)(sqr(.001f), sqr(0.1f) * fpLength))
         {
             ShowFoundPath(full, move.ptDestination, CPlayer::PPT_MOVE, CPlayer::PPR_OK);
             if (!logic.GetPlayerLeader())
@@ -4391,7 +4420,7 @@ void CUnitServer::GetCastAnimation(SL0AnimationSeq &res, int &nHit, EUnitCommand
         {
             // if this is a levitating unit then it should continue previous animation (rotate)
             // until its possible to play cast animation
-            if (rpgUnitStats.dwLocomotion == 2)
+            if ((rpgUnitStats.dwLocomotion == 2 || rpgUnitStats.dwLocomotion == 3))
             {
                 nHit = GetAnimationHit(pEntry->dwEntryIndex);
                 int nPause = nLength - GetAnimationLength(pEntry->dwEntryIndex);
@@ -5283,7 +5312,7 @@ void CUnitServer::SetRPGStats(SRPGUnitStats *lpRPGNewUnitStats)
 void CUnitServer::RecalcAIClass()
 {
     ASSERT(lpUnit->bv.fpRadius > 0);
-    if (rpgUnitStats.dwLocomotion == 2)
+    if ((rpgUnitStats.dwLocomotion == 2 || rpgUnitStats.dwLocomotion == 3))
     {
         rpgUnitStats.wAIClassLie = 0;
         rpgUnitStats.wAIClassStay = 0;
@@ -5956,6 +5985,9 @@ void CUnitServer::InitializeUnit()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::CmdRotate(const CPlot3D &vecDest, float fpAngSpeed)
 {
+    const auto facing=-lpUnit->GetYAxis();
+    GameJournal::Event("CMD","rotate","unit=%d requested=%.6f previous=%.6f speed=%.6f",
+                       lpUnit->GetID(),std::atan2(vecDest.y,vecDest.x),std::atan2(facing.y,facing.x),fpAngSpeed);
     nextCommand.Clear();
     nextCommand.cmd = UC_ROTATE;
     nextCommand.ptTarget = vecDest;
@@ -6008,7 +6040,8 @@ void CUnitServer::CmdShowMove(const CPlot3D &ptDest, bool bGroupCmd, bool bRun, 
         pWS->aiMap.AddObject(lpUnit);
     }
     //
-    bool bFound = LowFindPath(ptDest, pathFake, pWS->aiMap.IsWater(lpUnit->GetCP()), fpMaxPathDist);
+    bool bFound = LowFindPath(ptDest, pathFake, pWS->aiMap.IsWater(lpUnit->GetCP()), fpMaxPathDist,
+                             lpUnit->IsHero()?Navigation::GoalPolicy::ClosestReachable:Navigation::GoalPolicy::Exact);
     //
     if (bRun)
     {
@@ -6159,6 +6192,10 @@ void CUnitServer::CmdRest()
 
 void CUnitServer::CmdNewPose(EUnitPose pose)
 {
+    if (lpUnit->GetOwner())
+        GameJournal::Event("CMD", "pose", "unit=%d current=%d requested=%d at=(%.3f,%.3f)",
+                           lpUnit->GetID(), int(currentPose.Get()), int(pose),
+                           lpUnit->GetCPX(), lpUnit->GetCPY());
     nBoredCounter = 0;
     lpUnit->wishPose = pose;
     if (LcCanChangePose(pose))

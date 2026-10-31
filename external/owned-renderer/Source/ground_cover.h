@@ -200,7 +200,7 @@ inline GroundCoverRule make_rule(std::uint32_t mesh, std::uint32_t areas, float 
 }
 
 // The rule table: C-v4 with the user's review decisions. Lush grass ("C");
-// leaves near trees; small stones; broken twigs; dead bushes; reeds and
+// leaves near trees; small stones; broken twigs; reeds and
 // rotten wood in a band around swamps (nothing on the swamp itself); kelp and
 // shells on open-water shores and seagrass under open water (never rivers);
 // snow piles in Ingos only. No leaves on snow tiles anywhere; the snow region
@@ -313,10 +313,10 @@ inline const std::array<GroundCoverRule, 61>& rule_table() noexcept {
         own(tws, .6f, .58f, .55f);
         auto* lg = add(make_rule(gm_log, grass | bare, .012f, .8f, 1.3f)); lg->near_trees = 2; lg->zones = tw->zones;
         auto* lga = add(make_rule(gm_log, bare, .003f, .8f, 1.3f)); lga->zones = tw->zones; lga->near_trees = 2;
-        // Dead bushes: sparse on bare ground, sand and dry grass; the Dead City has more.
-        auto* db = add(make_rule(gm_dead_bush, bare | dry, .007f, .7f, 1.2f)); db->zones = woods;
-        auto* dbc = add(*db); dbc->zones = dead_city; dbc->density = .02f;
-        dbc->scale_min /= 3; dbc->scale_max /= 3;
+        // Removed dead-bush rules. Reserve their seed slots so all other
+        // cover keeps its placement; neither slot has any habitat or candidates.
+        add(GroundCoverRule{});
+        add(GroundCoverRule{});
         // Snow piles in Ingos only, rounded and soft (receive shadows only).
         auto* mound = add(make_rule(gm_mound, snow, .06f, .6f, 1.4f)); mound->zones = zone_bit(zone_snow); tint(mound, 1.06f, 1.06f, 1.05f);
         mound->blend_height = .2f;
@@ -686,6 +686,14 @@ inline bool unit_presses_cover(std::uint8_t locomotion) noexcept { return locomo
 inline FootprintSplat live_unit_splat(float x, float y, float envelope_radius) noexcept {
     const Push push = unit_push(envelope_radius);
     return {{x, y, push.radius, push.radius}, {1.f, 0.f, push.strength, 1.f}};
+}
+
+// Live bodies use the unit's stable collision footprint, never the animated
+// model envelope. Every grounded body presses fully, with the same radial
+// falloff and recovery for every stance and gait.
+inline FootprintSplat live_body_splat(float x, float y, float half_extent) noexcept {
+    const float radius = std::clamp(half_extent, .3f, 2.5f) + .4f;
+    return {{x, y, radius, radius}, {1.f, 0.f, 1.f, 1.f}};
 }
 
 // GPU recovery of the shared body field in game seconds. Lasting markers

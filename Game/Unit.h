@@ -1,4 +1,5 @@
 #pragma once
+#include "../Navigation/Types.h"
 namespace SaveSchema { class Writer; class Reader; }
 /////////////////////////////////////////////////////////////////////////////////////
 #include "MapObject.h"
@@ -189,6 +190,9 @@ inline void CUnitSpecific::Destroy()
 /////////////////////////////////////////////////////////////////////////////////////
 class CUnit : public CMapObject
 {
+public:
+    Navigation::Location navLocation;
+private:
     struct SItemIDs
     {
         DWORD dwWeaponsID[QI_MAX_WEAPONS];
@@ -197,6 +201,7 @@ class CUnit : public CMapObject
     friend class CUnitSpecific;
     friend class CUnitClientSpecific;
     friend class CUnitServer;
+    friend class NavigationWorld;
     friend struct ModNpcMigrationAccess;
     friend struct OwnedPreviewSourceAccess;
 
@@ -433,6 +438,7 @@ public:
     virtual void SetStunFlag(BOOL bStun);
     // position prediction, server only
     virtual CPlot3D GetFuturePosition(int nSegment);
+    bool GetRoutePosition(float time,CPlot3D &position);
     virtual CPlot3D GetTargetCP();
 
     // рассчитать высоту юнита над землей в точке (x,y)

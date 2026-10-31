@@ -873,21 +873,33 @@ void CUnitClientSpecific::SetUnitPosition(float fpTime, float fpStep)
     pos = lpUnit->GetCP();
     pos.x = Meter2AITile(pos.x);
     pos.y = Meter2AITile(pos.y);
+    float supportZ=0;
+    const bool supported=route.IsMoving() && route.route.route.GetCount()>=2;
     bMoved = lpUnit->walker.GetPosition(GetWorldBase(), route, fpTime, bRotating, pos, vec, fpSpeed,
-                                        nX, nY);
+                                        nX, nY, supported?&supportZ:nullptr);
     // ASSERT( bMoved );
     pos.x = AITile2Meter(pos.x);
     pos.y = AITile2Meter(pos.y);
-    pos.z = lpUnit->CalcZ(pos.x, pos.y) + lpUnit->fpBaseZ;
+    // The single-player server owns the mesh. Resolve the interpolated XY on
+    // its original support, instead of asking the BV bridge manager for a top.
+    if(auto* server=theWorldServer.GetUnit(lpUnit->GetID())) {
+        Navigation::Location location;
+        const float z=supported?supportZ:server->navLocation.position.z;
+        if(theWorldServer.aiMap.Navigation().Support(server,{pos.x,pos.y,z},location))lpUnit->navLocation=location;
+        else if(supported) return;
+        else {pos=lpUnit->GetCP();}
+    } else return;
+    // Flying CalcZ already includes its database-relative altitude once.
+    pos.z = lpUnit->CalcZ(pos.x, pos.y) + (lpUnit->GetUserUnitStats()->cLocomotion==3?0.f:lpUnit->fpBaseZ);
     GetWorldBase()->MoveObject(lpUnit, pos);
     // we don't need orientation in the object viewer
     if (bFirstSetpos)
     {
         bFirstSetpos = false;
-        lpUnit->OrientInYDirection(vec, FALSE);
+        lpUnit->SetOrientationXY(vec);
     }
     if (lpUnit->CheckFlag(UNIT_OLDROTATE))
-        lpUnit->OrientInYDirection(vec, TRUE);
+        lpUnit->SetOrientationXY(vec);
     else if (fpStep > 0)
     {
         CPlot3D ptYDir = lpUnit->GetYAxis();
@@ -935,7 +947,8 @@ void CUnitClientSpecific::SetExactPosition(float fpTime)
     if (fpStep < 0)
     {
         CPlot3D pos = lpUnit->GetCP();
-        pos.z = lpUnit->CalcZ(pos.x, pos.y) + lpUnit->fpBaseZ;
+        // Flying CalcZ already includes its database-relative altitude once.
+    pos.z = lpUnit->CalcZ(pos.x, pos.y) + (lpUnit->GetUserUnitStats()->cLocomotion==3?0.f:lpUnit->fpBaseZ);
         GetWorldBase()->MoveObject(lpUnit, pos);
         // ASSERT(0&&"Wrong time counting");
         return;
