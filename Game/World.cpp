@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "MapResources.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "World.h"
@@ -75,7 +76,7 @@ CItem *CWorld::DuplicateItem(CItem *pItem)
 /////////////////////////////////////////////////////////////////////////////////////
 CString CWorld::GetMobPath()
 {
-    return CString(GetWorkPath()) + "maps\\";
+    return CString(GetWorkPath()) + MapResources::Directory + "\\";
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorld::InitCurrentDir(const char *dataRoot)

@@ -1,5 +1,6 @@
 #pragma once
 #include "WorldBackgroundDecorWorker.h"
+#include "../MapResources.h"
 #include "WorldBackgroundPrefetch.h"
 #include "WorldBackgroundRetirement.h"
 #include "Capacity.h"
@@ -32,7 +33,7 @@ template<class Package> Input CaptureInput(const Package& package,const std::wst
     bool signature=false;for(const auto& p:database){auto name=MapName(p);if(name=="databasejmv.res")signature=true;}
     if(!signature)throw std::runtime_error("No verified Jamais Vu resource profile");
     result.files.profile="deja-vu";result.files.layoutRoot=wide(package.Directory());
-    result.files.mapRoots={result.files.layoutRoot+L"/Maps",workRoot+L"/Maps"};
+    result.files.mapRoots={result.files.layoutRoot+L"/"+MapResources::WideDirectory};
     result.files.textureArchives=chain("textures.res");result.files.materialArchives=chain("materials.res");
     // Config::fileListFig flattens figure replacements, then menu replacements
     // into resReplaceFig. Original figures + menus follow this combined chain.

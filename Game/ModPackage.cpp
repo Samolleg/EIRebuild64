@@ -7,6 +7,7 @@
 #include "ModNativeCrtRandom.h"
 #include "ScenarioTracker.h"
 #include "ModPackage.h"
+#include "MapResources.h"
 #include "SettingsProfile.h"
 #include "ModNpcEquipment.h"
 #include "ModHitHistory.h"
@@ -159,8 +160,13 @@ void CModPackage::Load(const std::string &directory){
  for(const auto &kv:cameras)if(!fs::is_regular_file(kv.second))throw std::runtime_error("Missing camera: "+kv.second);
  mainScript="main.lua";combatSettings["JMVGoCamp"]=1;auto ai=configs.find("ai.reg");if(ai!=configs.end()){CFileRegistry r;if(!r.Open(ai->second.c_str()))throw std::runtime_error("Cannot read addon AI registry");worldBackground=ModConfiguration::Bool(r,"Addon","JMVWorldBackground",true);combatSettings["JMVGoCamp"]=int(ModConfiguration::Bool(r,"Addon","JMVGoCamp",true));mainScript=(LPCSTR)r.GetString("Addon","LuaMainScriptPath","main.lua");}
  if(!fs::is_regular_file(Join(root,mainScript)))throw std::runtime_error("Missing main script");
- fs::path mapRoot=fs::path(root)/"Maps";
- if(fs::exists(mapRoot))for(const auto &entry:fs::recursive_directory_iterator(mapRoot))if(entry.is_regular_file())maps[Lower(fs::relative(entry.path(),mapRoot).string())]=entry.path().string();
+ fs::path mapRoot=fs::path(root)/MapResources::Directory;
+ if(!fs::is_directory(mapRoot))throw std::runtime_error("Missing x64 map directory: "+mapRoot.string());
+ for(const auto &entry:fs::recursive_directory_iterator(mapRoot))if(entry.is_regular_file()) {
+  if(entry.is_symlink())throw std::runtime_error("Maps64 cannot contain resource links: "+entry.path().string());
+  const auto key=MapResources::Key(fs::relative(entry.path(),mapRoot).string());
+  if(!maps.emplace(key,entry.path().string()).second)throw std::runtime_error("Duplicate Maps64 resource: "+key);
+ }
  // Load data first. InitializeScript separately registers typed engine bindings.
  state=luaL_newstate();if(!state)throw std::bad_alloc();luaL_openlibs(state);
  Stack stack(state);lua_getglobal(state,"package");std::string path=root+"/?.lua;"+root+"/lua/?.lua";

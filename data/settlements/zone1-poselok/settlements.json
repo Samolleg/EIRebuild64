@@ -1,0 +1,572 @@
+{
+  "version": 1,
+  "settlements": [
+    {
+      "id": 1,
+      "revision": 3,
+      "map": "zone1",
+      "object_imports": {
+        "hero": "Hero",
+        "vgate": 1725,
+        "merc3": "Merc3",
+        "merc4": "Merc4",
+        "merc5": "Merc5",
+        "merc6": "Merc6",
+        "merc7": "Merc7",
+        "merc8": "Merc8",
+        "merc9": "Merc9",
+        "merc10": "Merc10"
+      },
+      "group_imports": {
+        "Heroes": "Heroes"
+      },
+      "peace": {
+        "polygon": [
+          [
+            150.78,
+            159.54
+          ],
+          [
+            151.24,
+            155.37
+          ],
+          [
+            169.97,
+            120.12
+          ],
+          [
+            172.08,
+            116.73
+          ],
+          [
+            178.84,
+            112.54
+          ],
+          [
+            182.8,
+            112.16
+          ],
+          [
+            216.79,
+            111.09
+          ],
+          [
+            220.77,
+            111.22
+          ],
+          [
+            231.31,
+            116.87
+          ],
+          [
+            235.5,
+            123.63
+          ],
+          [
+            236.73,
+            154.59
+          ],
+          [
+            236.56,
+            157.57
+          ],
+          [
+            221.46,
+            185.73
+          ],
+          [
+            214.7,
+            189.92
+          ],
+          [
+            202.74,
+            190.56
+          ],
+          [
+            178.75,
+            191.32
+          ],
+          [
+            174.77,
+            191.18
+          ],
+          [
+            153.66,
+            179.86
+          ],
+          [
+            151.57,
+            176.5
+          ]
+        ],
+        "min_z": -2,
+        "max_z": 6,
+        "hysteresis": 0.4,
+        "quiet_seconds": 5,
+        "faction": 2,
+        "alarm_key": "Alarm",
+        "gate": {
+          "object": 1725,
+          "exit": 2,
+          "a": [
+            185.3,
+            112.0813
+          ],
+          "b": [
+            190.3,
+            111.9239
+          ],
+          "inside": [
+            187.9,
+            116
+          ],
+          "legacy_zone": "bz1g",
+          "legacy_entrances": [
+            0,
+            1
+          ]
+        }
+      },
+      "mob": "settlements/1m_poselok.mob",
+      "aliases": {
+        "podmaster": 927062,
+        "sg1": 341484,
+        "elder": 1000054752,
+        "human9": 534153,
+        "merc1": 1000059184,
+        "merc2": 1000059185,
+        "human11": 481569,
+        "humanhighfigh": 999742,
+        "human2": 732495,
+        "bgoblinc": 1006565532,
+        "smith": 1000063817,
+        "human4": 326331,
+        "human1": 196568,
+        "human3": 469697,
+        "dogredf12-422369": 183332,
+        "human6": 386717,
+        "human10": 686200,
+        "nsheriff": 1007671245,
+        "pig": 1000002436,
+        "doggreyf6-819337": 831510,
+        "sheriff": 1001577495,
+        "sg2": 85297,
+        "human5": 812970,
+        "human8": 601927,
+        "human7": 143005,
+        "dogfight": 149,
+        "dogfighter": 157,
+        "boec1": 158,
+        "boec2": 159,
+        "boec3": 160,
+        "boec4": 161,
+        "luc3": 168,
+        "luc2": 169,
+        "luc1": 170,
+        "alkash": 1000262112
+      },
+      "state_imports": {
+        "q.": "q.",
+        "z.": "z.",
+        "jmv.": "jmv.",
+        "FirstComing": "FirstComing",
+        "techTime": "techTime",
+        "merc1": "merc1",
+        "merc2": "merc2",
+        "merc3": "merc3",
+        "merc4": "merc4",
+        "merc5": "merc5",
+        "merc6": "merc6",
+        "merc7": "merc7",
+        "merc8": "merc8",
+        "merc9": "merc9",
+        "merc10": "merc10",
+        "b.Hunter.Hunter0": "b.Hunter.Hunter0",
+        "b.bz2g.z0": "b.bz2g.z0",
+        "b.bz2g.z1": "b.bz2g.z1",
+        "b.cz1g.Hunter0": "b.cz1g.Hunter0",
+        "b.merc10.n8_10": "b.merc10.n8_10",
+        "b.merc3.n3_10": "b.merc3.n3_10",
+        "b.merc3.n3_2": "b.merc3.n3_2",
+        "b.merc3.n8_3": "b.merc3.n8_3",
+        "b.merc4.n8_4": "b.merc4.n8_4",
+        "b.merc5.n8_5": "b.merc5.n8_5",
+        "b.merc6.n8_6": "b.merc6.n8_6",
+        "b.merc7.n8_7": "b.merc7.n8_7",
+        "b.merc8.n8_8": "b.merc8.n8_8",
+        "b.merc9.n8_9": "b.merc9.n8_9",
+        "b.witch.z1": "b.witch.z1",
+        "b.witch.z12_1": "b.witch.z12_1",
+        "b.witch.z12_2": "b.witch.z12_2",
+        "b.witch.z13_1": "b.witch.z13_1",
+        "b.witch.z13_2": "b.witch.z13_2",
+        "b.witch.z14": "b.witch.z14",
+        "b.witch.z19": "b.witch.z19",
+        "b.witch.z1_2": "b.witch.z1_2",
+        "b.witch.z1_2b": "b.witch.z1_2b",
+        "b.witch.z24": "b.witch.z24",
+        "b.witch.z24_1": "b.witch.z24_1",
+        "b.witch.z25": "b.witch.z25",
+        "b.witch.z26": "b.witch.z26",
+        "b.witch.z27": "b.witch.z27"
+      },
+      "briefings": {
+        "Alkash0": {
+          "text": "Alkash0"
+        },
+        "nv26": {
+          "text": "nv26"
+        },
+        "nv27_1": {
+          "text": "nv27_1"
+        },
+        "gogo0": {
+          "text": "gogo0"
+        },
+        "gogo1": {
+          "text": "gogo1",
+          "reward": "gogo1"
+        },
+        "m7_1": {
+          "text": "m7_1",
+          "reward": "m7_1"
+        },
+        "s1": {
+          "text": "s1",
+          "reward": "s1"
+        },
+        "s0": {
+          "text": "s0"
+        },
+        "s11": {
+          "text": "s11"
+        },
+        "s12": {
+          "text": "s12",
+          "reward": "s12"
+        },
+        "s12_1": {
+          "text": "s12_1",
+          "reward": "s12_1"
+        },
+        "s12_3": {
+          "text": "s12_3",
+          "reward": "s12_3"
+        },
+        "s12_4": {
+          "text": "s12_4",
+          "reward": "s12_4"
+        },
+        "s12_4b": {
+          "text": "s12_4b",
+          "reward": "s12_4b"
+        },
+        "s12_5": {
+          "text": "s12_5",
+          "reward": "s12_5"
+        },
+        "s13_0": {
+          "text": "s13_0",
+          "reward": "s13_0"
+        },
+        "s13_1": {
+          "text": "s13_1"
+        },
+        "s13_2": {
+          "text": "s13_2"
+        },
+        "s13_3": {
+          "text": "s13_3"
+        },
+        "s19": {
+          "text": "s19"
+        },
+        "s1_2": {
+          "text": "s1_2",
+          "reward": "s1_2"
+        },
+        "s1_3": {
+          "text": "s1_3",
+          "reward": "s1_3"
+        },
+        "s21": {
+          "text": "s21"
+        },
+        "s21_1": {
+          "text": "s21_1",
+          "reward": "s21_1"
+        },
+        "s24": {
+          "text": "s24",
+          "reward": "s24"
+        },
+        "s24_2": {
+          "text": "s24_2"
+        },
+        "s24_3": {
+          "text": "s24_3",
+          "reward": "s24_3"
+        },
+        "s25_1": {
+          "text": "s25_1"
+        },
+        "s25_2": {
+          "text": "s25_2"
+        },
+        "s25_3": {
+          "text": "s25_3",
+          "reward": "s25_3"
+        },
+        "s26": {
+          "text": "s26"
+        },
+        "s26_1": {
+          "text": "s26_1"
+        },
+        "s3": {
+          "text": "s3",
+          "reward": "s3"
+        },
+        "s4": {
+          "text": "s4",
+          "reward": "s4"
+        },
+        "s6": {
+          "text": "s6",
+          "reward": "s6"
+        },
+        "s6_1": {
+          "text": "s6_1",
+          "reward": "s6_1"
+        },
+        "s6_2": {
+          "text": "s6_2",
+          "reward": "s6_2"
+        },
+        "s6_3": {
+          "text": "s6_3",
+          "reward": "s6_3"
+        },
+        "s6b": {
+          "text": "s6b",
+          "reward": "s6b"
+        },
+        "s7_1": {
+          "text": "s7_1",
+          "reward": "s7_1"
+        },
+        "s7_4": {
+          "text": "s7_4",
+          "reward": "s7_4"
+        },
+        "s8_1": {
+          "text": "s8_1",
+          "reward": "s8_1"
+        },
+        "s8_2": {
+          "text": "s8_2",
+          "reward": "s8_2"
+        },
+        "n1_1": {
+          "text": "n1_1"
+        },
+        "n1_10": {
+          "text": "n1_10"
+        },
+        "n1_2": {
+          "text": "n1_2"
+        },
+        "n1_3": {
+          "text": "n1_3"
+        },
+        "n2_1": {
+          "text": "n2_1"
+        },
+        "n3_1": {
+          "text": "n3_1"
+        },
+        "n8_1": {
+          "text": "n8_1"
+        },
+        "n2_2": {
+          "text": "n2_2"
+        },
+        "n3_2": {
+          "text": "n3_2"
+        },
+        "n8_2": {
+          "text": "n8_2"
+        },
+        "atqb1": {
+          "text": "atqb1",
+          "reward": "atqb1"
+        },
+        "atqb1_1": {
+          "text": "atqb1_1",
+          "reward": "atqb1_1"
+        },
+        "nv23": {
+          "text": "nv23",
+          "reward": "nv23"
+        },
+        "p0": {
+          "text": "p0",
+          "reward": "p0"
+        },
+        "p1": {
+          "text": "p1"
+        },
+        "v0": {
+          "text": "v0"
+        },
+        "v1": {
+          "text": "v1",
+          "reward": "v1"
+        },
+        "v13_0": {
+          "text": "v13_0",
+          "reward": "v13_0"
+        },
+        "v13_1": {
+          "text": "v13_1",
+          "reward": "v13_1"
+        },
+        "v13_2": {
+          "text": "v13_2",
+          "reward": "v13_2"
+        },
+        "v19": {
+          "text": "v19"
+        },
+        "v19_1": {
+          "text": "v19_1",
+          "reward": "v19_1"
+        },
+        "v3": {
+          "text": "v3",
+          "reward": "v3"
+        },
+        "v3_1": {
+          "text": "v3_1",
+          "reward": "v3_1"
+        },
+        "v3_3": {
+          "text": "v3_3",
+          "reward": "v3_3"
+        },
+        "v4": {
+          "text": "v4",
+          "reward": "v4"
+        },
+        "v4_b": {
+          "text": "v4_b",
+          "reward": "v4_b"
+        },
+        "v5": {
+          "text": "v5",
+          "reward": "v5"
+        },
+        "v5_b": {
+          "text": "v5_b",
+          "reward": "v5_b"
+        },
+        "constr_1": {
+          "shop": 1
+        },
+        "m0": {
+          "text": "m0"
+        },
+        "m1": {
+          "text": "m1",
+          "reward": "m1"
+        },
+        "m12": {
+          "text": "m12",
+          "reward": "m12"
+        },
+        "m12_1": {
+          "text": "m12_1",
+          "reward": "m12_1"
+        },
+        "m12_4": {
+          "text": "m12_4"
+        },
+        "m13_1": {
+          "text": "m13_1"
+        },
+        "m13_2": {
+          "text": "m13_2",
+          "reward": "m13_2"
+        },
+        "m13_3": {
+          "text": "m13_3",
+          "reward": "m13_3"
+        },
+        "m13_4": {
+          "text": "m13_4",
+          "reward": "m13_4"
+        },
+        "m15": {
+          "text": "m15",
+          "reward": "m15"
+        },
+        "m16": {
+          "text": "m16",
+          "reward": "m16"
+        },
+        "m19": {
+          "text": "m19"
+        },
+        "m1_1": {
+          "text": "m1_1"
+        },
+        "m1_2": {
+          "text": "m1_2",
+          "reward": "m1_2"
+        },
+        "m21": {
+          "text": "m21"
+        },
+        "m21_1": {
+          "text": "m21_1"
+        },
+        "m24": {
+          "text": "m24"
+        },
+        "m24_2": {
+          "text": "m24_2"
+        },
+        "m24_3": {
+          "text": "m24_3",
+          "reward": "m24_3"
+        },
+        "m26": {
+          "text": "m26"
+        },
+        "m4": {
+          "text": "m4",
+          "reward": "m4"
+        },
+        "m5_1": {
+          "text": "m5_1",
+          "reward": "m5_1"
+        },
+        "m5_3": {
+          "text": "m5_3",
+          "reward": "m5_3"
+        },
+        "m5_4": {
+          "text": "m5_4",
+          "reward": "m5_4"
+        },
+        "m6": {
+          "text": "m6",
+          "reward": "m6"
+        },
+        "m6_1": {
+          "text": "m6_1"
+        }
+      }
+    }
+  ]
+}

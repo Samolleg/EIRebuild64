@@ -110,7 +110,8 @@ std::string MapName(const std::string &text)
 {
     std::string result = Lower(text);
     std::replace(result.begin(), result.end(), '\\', '/');
-    if (result.compare(0, 5, "maps/") == 0) result.erase(0, 5);
+    if (result.compare(0, 7, "maps64/") == 0) result.erase(0, 7);
+    else if (result.compare(0, 5, "maps/") == 0) result.erase(0, 5);
     if (result.size() > 4 && (result.compare(result.size() - 4, 4, ".mpr") == 0 ||
                               result.compare(result.size() - 4, 4, ".mob") == 0)) result.resize(result.size() - 4);
     return result;

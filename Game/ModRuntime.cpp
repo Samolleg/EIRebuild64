@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "ModRuntime.h"
+#include "MapResources.h"
 #include "GameJournal.h"
 #include "SettingsProfile.h"
 #include "ModWorldBackground/Native.h"
@@ -46,10 +47,13 @@ std::string MoviePath(const char*path){return resources?resources->ResolveMovie(
 std::string SaveRoot(const char*fallback){return resources?resources->ResolveSaveRoot(fallback):fallback;}
 bool SinglePlayerAllowed(){return !resources||resources->SinglePlayerAllowed();}
 std::string MapPath(const char*path){
- if(!resources)return path;std::string normalized=path;for(char&c:normalized){if(c=='/')c='\\';else if(c>='A'&&c<='Z')c+=32;}
- auto ext=std::filesystem::path(normalized).extension().string();if(ext!=".mpr"&&ext!=".mob"&&ext!=".mq")return path;
- auto pos=normalized.rfind("\\maps\\");std::string key=pos==std::string::npos?std::filesystem::path(normalized).filename().string():normalized.substr(pos+6);
- if(normalized.rfind("maps\\",0)==0)key=normalized.substr(5);return resources->ResolveMap(key,path);
+ if(!resources)return path;
+ std::string extension=std::filesystem::path(path).extension().string();
+ std::transform(extension.begin(),extension.end(),extension.begin(),[](unsigned char c){return char(std::tolower(c));});
+ if(extension!=".mpr"&&extension!=".mob"&&extension!=".mq"&&extension!=".grp")return path;
+ const auto key=MapResources::Key(path);
+ const auto missing=(std::filesystem::path(resources->Directory())/MapResources::Directory/key).string();
+ return resources->ResolveMap(key,missing);
 }
 Host::Host(const std::string&directory){
  if(resources||current)throw std::runtime_error("A mod host is already active");

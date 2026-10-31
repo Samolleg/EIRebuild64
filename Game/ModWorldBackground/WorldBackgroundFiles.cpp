@@ -1,4 +1,5 @@
 #include "WorldBackgroundFiles.h"
+#include "../MapResources.h"
 #include <fstream>
 #include <set>
 #include <stdexcept>
@@ -50,16 +51,14 @@ bool ReadArchiveMember(const std::wstring& archive,const std::string& requested,
 Blob ProfileFiles::LayoutMap(const std::string& requestedProfile,const std::string& path,bool mob)const{
     Check(Key(requestedProfile)==Key(profile)&&!profile.empty(),"Layout resource profile mismatch");
     Check(!path.empty()&&path.size()<32768&&path.find('\0')==std::string::npos,"Invalid layout path");
-    const int count=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path.data(),int(path.size()),nullptr,0);
+    const auto relative=MapResources::Key(path);
+    const int count=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,relative.data(),int(relative.size()),nullptr,0);
     Check(count>0,"Invalid UTF8 layout path");std::wstring wide(size_t(count),L'\0');
-    Check(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,path.data(),int(path.size()),&wide[0],count)==count,"Invalid UTF8 layout path");
-    for(auto& c:wide)if(c==L'/')c=L'\\';
-    const auto lower=Key(path);const auto suffix=mob?".mob":".mpr";
-    Check(lower.size()>=4&&lower.substr(lower.size()-4)==suffix,"Wrong layout map extension");
-    const bool drive=wide.size()>2&&wide[1]==L':'&&wide[2]==L'\\';
-    const bool unc=wide.size()>2&&wide[0]==L'\\'&&wide[1]==L'\\';
-    if(!drive&&!unc){Check(!layoutRoot.empty()&&wide[0]!=L'\\'&&wide.find(L':')==std::wstring::npos,"Ambiguous layout path");wide=layoutRoot+L"/"+wide;}
-    return ReadFileBounded(wide,(mob?64u:128u)*1024u*1024u);
+    Check(MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,relative.data(),int(relative.size()),&wide[0],count)==count,"Invalid UTF8 layout path");
+    const auto suffix=mob?".mob":".mpr";
+    Check(relative.size()>=4&&relative.substr(relative.size()-4)==suffix,"Wrong layout map extension");
+    Check(mapRoots.size()==1,"Layout requires one Maps64 provider");
+    return ReadFileBounded(mapRoots.front()+L"/"+wide,(mob?64u:128u)*1024u*1024u);
 }
 Blob ProfileFiles::Mpr(const Identity& identity)const{
     Check(Key(identity.profile)==Key(profile)&&!Key(profile).empty(),"Resource profile mismatch");

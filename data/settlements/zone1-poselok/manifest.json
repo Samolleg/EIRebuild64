@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "status": "PREPARED - NOT INSTALLED - ENGINE/GAME ACCEPTANCE OPEN",
+  "approved_edits_sha256": "1E263F2385DF5985C3B41C710370CD5CE0328360BD5453336D852F9D08FD42FF",
+  "source_mob_sha256": {
+    "basecam": "4C9BB79FF1DA011B4A7536143B03C32ECB319805E782A3C6113A39A13198768D",
+    "zone1": "40FE653B83B3A9853868AB3B3741E6DBAD76C68344871F2A64566C72A1030DD0"
+  },
+  "copied_inputs": {
+    "zone1.mpr": {
+      "bytes": 1552871,
+      "sha256": "1FB56A7B45C9180757FBF91865E96E6D12CBB21AA8206F9C6D4B64100AFDE2E7"
+    },
+    "AutoRunSpellAddon123.mob": {
+      "bytes": 68075,
+      "sha256": "0B6E5AE179CE7CCBD7E7E746468E4F571881BCF6BE4BB322C2A25F7C65622571"
+    },
+    "Autozone1cyclopus.mob": {
+      "bytes": 2908,
+      "sha256": "4E62961E9D9934A5B448EB4CD60E5DEF811C6F6CE3F6DEE0A728F3AA6823D344"
+    },
+    "Autozone1newhunterscamp.mob": {
+      "bytes": 10775,
+      "sha256": "5C7D7031826DAD7C40A5B957CD390B8214FAAB1CBA42C7DDBCF310CAA139B1E2"
+    }
+  },
+  "npcs": 51,
+  "points": 348,
+  "script_edits": {
+    "basecam": 322,
+    "zone1": 10
+  },
+  "map_directory": "Maps64",
+  "files": {
+    "Maps64/AutoRunSpellAddon123.mob": {
+      "bytes": 68075,
+      "sha256": "0B6E5AE179CE7CCBD7E7E746468E4F571881BCF6BE4BB322C2A25F7C65622571"
+    },
+    "Maps64/Autozone1cyclopus.mob": {
+      "bytes": 2908,
+      "sha256": "4E62961E9D9934A5B448EB4CD60E5DEF811C6F6CE3F6DEE0A728F3AA6823D344"
+    },
+    "Maps64/Autozone1newhunterscamp.mob": {
+      "bytes": 10775,
+      "sha256": "5C7D7031826DAD7C40A5B957CD390B8214FAAB1CBA42C7DDBCF310CAA139B1E2"
+    },
+    "Maps64/settlements/1m_poselok.mob": {
+      "bytes": 174164,
+      "sha256": "3EA6600D3DD9B5D903433536003A2C8768CF749B23E351CAA2F24899CA529C94"
+    },
+    "Maps64/zone1.mob": {
+      "bytes": 1701735,
+      "sha256": "014C4CCABE772241AE38925B801EDD58BAAB869778743310B6DC96EF6DCF6F00"
+    },
+    "Maps64/zone1.mpr": {
+      "bytes": 1552871,
+      "sha256": "1FB56A7B45C9180757FBF91865E96E6D12CBB21AA8206F9C6D4B64100AFDE2E7"
+    },
+    "settlements.json": {
+      "bytes": 12383,
+      "sha256": "18CBC52C217E0063386B530C58A6D8488EB766872AC88CAA1B809D54E42EEEAB"
+    }
+  }
+}
