@@ -366,6 +366,7 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
             float speed=0,angular=0;unit->GetSpeeds(speed,angular);
             unit->walker.SetSpeeds(speed,angular);unit->walker.CreateWalkerRoute(path.curSegment);
         };
+        CUnit* const defaultNeighbour=neighbour;
         auto movementRows=nlohmann::json::array();unsigned requiredFailures=0;
         const auto oldTime=world.GetSegmentTimeCounter();
         for(const auto& record:records) {
@@ -411,6 +412,8 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
             Point previousDirection;float previousStep=0;unsigned unplannedTurns=0;
             auto positions=nlohmann::json::array();
             const bool beside=record.value("neighbour",false);
+            neighbour=record.contains("neighbour_unit")?world.GetUnit(record.at("neighbour_unit").get<int>()):defaultNeighbour;
+            if(beside&&(!neighbour||neighbour==unit))throw std::runtime_error("Nav64: release neighbour is unavailable");
             if(ok&&beside&&neighbour) {
                 auto n=neighbour->GetCP();const auto here=unit->GetCP();
                 Point direction{1,0,0};
@@ -499,6 +502,7 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
             result["planned_cost"]=decision.plannedCost;result["selected_cost"]=decision.cost;
             result["straight_cost"]=decision.straightCost;result["straightened"]=decision.straightened;
             result["unit_used"]=unit->GetID();result["radius_used"]=Radius(unit);result["height_used"]=Height(unit);
+            if(beside){result["neighbour_unit_used"]=neighbour->GetID();result["neighbour_radius_used"]=Radius(neighbour);}
             result["complete"]=ok;result["failure"]=failure;result["ticks"]=ticks;result["wait_ticks"]=waitTicks;result["avoid_ticks"]=avoidTicks;result["avoidance_attempts"]=avoidAttempts;result["detour_max_ms"]=detourMaxMs;result["max_delta"]=maxDelta;
             result["planned_points"]=nlohmann::json::array();for(auto p:plannedPoints)result["planned_points"].push_back({p.x,p.y,p.z});
             result["straight_length"]=straightLength;result["walked_length"]=walkedLength;result["unplanned_turns"]=unplannedTurns;result["positions"]=positions;
