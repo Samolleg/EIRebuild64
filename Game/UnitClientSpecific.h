@@ -31,6 +31,7 @@ struct SAckDescriptor
     bool bBlockUnit;
 };
 /////////////////////////////////////////////////////////////////////////////////////
+class CI3DScreenSettlementDialogue;
 class CUnitClientSpecific : public CUnitSpecific
 {
     friend class CUnit;
@@ -55,6 +56,8 @@ private:
     int nBloodyPrintsType;
     int nBloodyPrintsCounter;
     //
+    friend class CI3DScreenSettlementDialogue;
+    bool dialoguePresentation = false;
     HSOUND hLastStoredIdleSFX;
     HSOUND hLastStoredAttackSFX;
     HSOUND hLastAttackSound;   // this can be ack or attack sound

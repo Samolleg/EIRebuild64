@@ -76,6 +76,7 @@ private:
     int nLastLightningTime;
 
 public:
+    bool IsCombatPause() { return CWorldBase::IsCombatPause() || settlementMobs.DialogueActive(); }
     Settlement::World &Settlements() { return settlementMobs; }
     const Settlement::World &Settlements() const { return settlementMobs; }
     CHoover *pHoover = nullptr; // just stuff hoover :)

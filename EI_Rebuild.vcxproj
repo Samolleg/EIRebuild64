@@ -93,6 +93,8 @@
     <ClCompile Include="Game\SaveSlot.cpp" />
     <ClCompile Include="Game\SettlementMob.cpp" />
     <ClCompile Include="Game\SettlementPeace.cpp" />
+    <ClCompile Include="Game\SettlementDialogue.cpp" />
+    <ClCompile Include="Game\I3DScreenSettlementDialogue.cpp" />
     <ClInclude Include="Game\SaveSlot.h" />
     <ClCompile Include="Game\MoviePlayback.cpp" />
     <ClCompile Include="Game\VideoPlayer.cpp" />

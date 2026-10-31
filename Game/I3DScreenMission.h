@@ -105,6 +105,11 @@ private:
 
     CArray<int, int> selectionIDs; // when we load game here we store the selection
 
+    int settlementTalkTarget = -1, settlementTalkStart = 0, settlementTalkMove = 0;
+    std::uint64_t settlementTalkIdentity = 0;
+    std::string settlementForcedTopic;
+    bool RequestSettlementDialogue(int target, const std::string &topic = {});
+    bool UpdateSettlementDialogue();
     std::map<int, CString> localNames; // all personages' names
 
     int nQuestSound;
@@ -128,6 +133,7 @@ public:
         : CI3DScreen(pI)
     {
     }
+    virtual void ForceBriefing(LPCTSTR briefing) override;
     virtual void OnActivate();
     virtual void OnDeactivate();
     virtual void OnExitFromModal(DWORD dwRetValue);

@@ -256,7 +256,7 @@ const Definition &World::GetDefinition(std::uint32_t id) const
     if (!definition || !Contains(id)) Fail("unregistered settlement: " + std::to_string(id));
     return *definition;
 }
-void World::Clear() { instances.clear(); visitors.clear(); admitting = false; }
+void World::Clear() { dialogue = {}; instances.clear(); visitors.clear(); admitting = false; }
 void World::ValidateActor(std::uint32_t id, const std::string &local) const
 {
     const auto &def = GetDefinition(id);

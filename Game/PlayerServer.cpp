@@ -860,6 +860,7 @@ void CPlayerServer::GainExp(int nID, float fpExp)
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 void CPlayerServer::LeaveToZone(const char *pszZone, int nZoneEntrance)
 {
+    if (GetWorldServer()->Settlements().DialogueActive()) return;
     if (GetWorldServer()->Settlements().LocalTravel(pszZone, nZoneEntrance)) return;
     ASSERT(status == PSS_ACTIVE);
     if (status != PSS_ACTIVE)
@@ -1009,6 +1010,7 @@ BOOL CPlayerServer::PrsUnitCommandAggresion()
     pkt.Read(nID);
     pUnit = GetWorldServer()->GetUnit(nID);
     pkt.Read(cAggr);
+    if (GetWorldServer()->Settlements().DialogueActive()) return TRUE;
     if (pUnit)
         pUnit->SetAggression((EUnitAggression)cAggr);
     return TRUE;
@@ -1063,6 +1065,7 @@ BOOL CPlayerServer::PrsUnitCommandSwarm()
     ReadUnitArray(pkt, units);
     pkt.Read(bRun);
     pkt.Read(&ptTarget, sizeof(ptTarget));
+    if (GetWorldServer()->Settlements().DialogueActive()) return TRUE;
     CalcOffsets(units, offsets);
     for (int i = 0; i < units.GetSize(); i++)
     {
@@ -1084,6 +1087,7 @@ BOOL CPlayerServer::PrsUnitCommandMoveTo()
     ReadUnitArray(pkt, units);
     pkt.Read(bRun);
     pkt.Read(&ptTarget, sizeof(ptTarget));
+    if (GetWorldServer()->Settlements().DialogueActive()) return TRUE;
     CalcOffsets(units, offsets);
     for (int i = 0; i < units.GetSize(); i++)
     {
@@ -1107,6 +1111,7 @@ BOOL CPlayerServer::PrsUnitCommandAttack()
     pkt.Read(bRun);
     pkt.Read(&hl, sizeof(hl));
     pkt.Read(nID);
+    if (GetWorldServer()->Settlements().DialogueActive()) return TRUE;
     pTarget = theWorldServer.GetMapObject(nID);
     if (!pTarget)
         return TRUE;
@@ -1183,6 +1188,7 @@ BOOL CPlayerServer::PrsUnitCommandSkill()
     pkt.Read(nSkill);
     pkt.Read(nItemID);
     pkt.Read(nID);
+    if (GetWorldServer()->Settlements().DialogueActive()) return TRUE;
     pTarget = theWorldServer.GetMapObject(nID);
     //
     CUnit *pActor = ChooseSkillExecutor(units, pTarget, nSkill);
@@ -1206,6 +1212,7 @@ BOOL CPlayerServer::PrsUnitCommandCastTarget()
 {
     SNP_CMD_CAST_UNIT cast;
     pkt.Read(&cast, sizeof(cast));
+    if (GetWorldServer()->Settlements().DialogueActive()) return TRUE;
 
     CMapObject *pCastTarget = GetWorldServer()->GetMapObject(cast.targetID);
     CUnit *pUnit = GetWorldServer()->GetUnit(cast.mapobjID);
@@ -1227,6 +1234,7 @@ BOOL CPlayerServer::PrsUnitCommandCastPoint()
 {
     SNP_CMD_CAST_POINT cast;
     pkt.Read(&cast, sizeof(cast));
+    if (GetWorldServer()->Settlements().DialogueActive()) return TRUE;
 
     CUnit *pUnit = GetWorldServer()->GetUnit(cast.mapobjID);
     if (!pUnit)
@@ -1247,6 +1255,7 @@ BOOL CPlayerServer::PrsUnitCommandSelWeapon()
 {
     SNP_CMD_SELWEAPON cmd;
     pkt.Read(&cmd, sizeof(cmd));
+    if (GetWorldServer()->Settlements().DialogueActive()) return TRUE;
 
     CUnit *pUnit = GetWorldServer()->GetUnit(cmd.mapobjID);
     if (!pUnit)
@@ -1262,6 +1271,7 @@ BOOL CPlayerServer::PrsUnitCommandPose()
 {
     SNP_CMD_PHASE cmd;
     pkt.Read(&cmd, sizeof(cmd));
+    if (GetWorldServer()->Settlements().DialogueActive()) return TRUE;
     CUnit *pUnit = GetWorldServer()->GetUnit(cmd.mapobjID);
     if (!pUnit)
         return TRUE;
@@ -1277,6 +1287,7 @@ BOOL CPlayerServer::PrsUnitCommandTrap()
     int nID, nQItemNum;
     pkt.Read(&nID, 4);
     pkt.Read(&nQItemNum, 4);
+    if (GetWorldServer()->Settlements().DialogueActive()) return TRUE;
     CUnit *pUnit = GetWorldServer()->GetUnit(nID);
     if (!pUnit)
         return TRUE;

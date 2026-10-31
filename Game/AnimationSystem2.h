@@ -163,8 +163,10 @@ public:
 typedef void (*AnimationSwitchCallback)(CUnit *pUnit);
 class CObject3D;
 /////////////////////////////////////////////////////////////////////////////////////
+class CI3DScreenSettlementDialogue;
 class CAnimationSystem2 : public CGameBase
 {
+    friend class CI3DScreenSettlementDialogue;
     friend class CObject3D;
     OwnedRender::E1SkeletonSources ownedSkeleton;
     std::unique_ptr<OwnedRender::E1AnimationSelectionCache> ownedAnimationSelection;

@@ -120,8 +120,10 @@ struct SEarthquakeEffect
     float fAttenuationCoeff;
 };
 /////////////////////////////////////////////////////////////////////////////////////
+class CI3DScreenSettlementDialogue;
 class CCamera : public CBase3D
 {
+    friend class CI3DScreenSettlementDialogue;
     friend class SaveSchema::Slot;
 private:
     // different camera restrictions and params

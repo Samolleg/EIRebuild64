@@ -817,6 +817,7 @@ ERPGHitLocations CI3DScreenMission::GetCShotState()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnIdle()
 {
+    if (UpdateSettlementDialogue()) return;
     static int fieldCampHeroId = -1;
     static DWORD fieldCampFinalizeStart = 0;
     static bool fieldCampMusicReady = false;
@@ -953,6 +954,7 @@ void CI3DScreenMission::ResetInputState()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenMission::OnLButtonDown(UINT nFlags, CPoint point)
 {
+    settlementTalkTarget = -1;
     // Addon LS_MissionOnLButtonDown/DoubleClickExtendedSpells intercepts the
     // icon before native screen routing; single click only selects a target mode.
     if (ModRuntime::Current() && pSpells && pSpells->IsVisible()) {
@@ -1138,6 +1140,7 @@ void CI3DScreenMission::PerformAction(CUnit *pU, CPoint point)
                         SelectionUpdate(i);
                     return;
                 }
+            if (RequestSettlementDialogue(pU->GetID())) return;
             if (pUnits.GetSize() && pUnits[0] && pUnits[0]->IsEnemy(pU))
                 AllAttack(pU, pI3D->IsLDblClk());
             else
@@ -1384,7 +1387,9 @@ void CI3DScreenMission::CheckAction(CUnit *pU, CPoint point)
                 theCursor.SetMode(CT_USE);
                 return;
             }
-            if (pUnits.GetSize() && pUnits[0] && pUnits[0]->IsEnemy(pU))
+            if (theWorldServer.Settlements().DialogueAvailable(theWorldServer, 0, pU->GetID()))
+                theCursor.SetMode(CT_USE);
+            else if (pUnits.GetSize() && pUnits[0] && pUnits[0]->IsEnemy(pU))
                 theCursor.SetMode(CT_ATTACK);
         }
         else

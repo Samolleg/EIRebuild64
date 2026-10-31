@@ -517,6 +517,7 @@ void Slot::LoadParty(CSave &file,CParty &party)
 }
 void Slot::StoreWorld(CSave &file,CWorldServer &world)
 {
+    if(world.Settlements().DialogueActive())Invalid("finish the dialogue before saving");
     Document d;BindWorld(d,{&world,[](CWorldServer *){}});
     const auto bytes=Encode(d,[&](Writer &w){World(w,world);theCamera.Store(w);if(auto *mod=ModRuntime::Current())mod->StoreSaveState(w);else Invalid("missing mod");});
     if(!bytes.empty())file.Write(bytes.data(),static_cast<UINT>(bytes.size()));
@@ -692,6 +693,7 @@ void Slot::Shutdown()
 bool Slot::HasZone(const char *name){return visited.find(name)!=visited.end();}
 bool Slot::StoreZone(const char *name)
 {
+    if(theWorldServer.Settlements().DialogueActive())return false;
     CheckedName(name);Document d;BindWorld(d,{&theWorldServer,[](CWorldServer *){}},true);
     visited[name]=Encode(d,[&](Writer &w){World(w,theWorldServer);theCamera.Store(w);if(auto *mod=ModRuntime::Current())mod->StoreSaveState(w);else Invalid("missing mod");});
     return true;
@@ -736,6 +738,7 @@ bool Slot::Save(const char *name)
 {
     try{
         CheckedName(name);if(theWorldServer.GetServerMode()!=SERV_MODE_LOCAL)Invalid("save requires a local world");
+        if(theWorldServer.Settlements().DialogueActive())Invalid("finish the dialogue before saving");
         auto *player=theWorldServer.GetPlayer(0);if(!player)Invalid("save requires a local player");
         // Keep the existing gameplay snapshot operations, before capturing RNG.
         if(auto *mod=ModRuntime::Current())mod->SaveSkillCooldowns(player->party.vars);

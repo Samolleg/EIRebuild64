@@ -1000,6 +1000,7 @@ void CWorldServer::StartServer(EServerMode mode)
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::WorldSegment(bool bForceScriptRun)
 {
+    if (settlementMobs.DialogueActive()) return;
     CorePerf::Scope coreTiming(CorePerf::WorldSegment);
     POSITION pos;
     CEffect *pEff;
@@ -2285,6 +2286,7 @@ void CWorldServer::BriefingComplete(int nPlayer, const char *pszBriefing)
     const SQDBBriefing *pBrief = 0;
     NStrProc::SplitString(pszBriefing, szParts, '.');
     const auto settlement = settlementMobs.BriefingOwner(pszBriefing);
+    if (settlement ? !settlementMobs.AcceptDialogueCompletion(nPlayer, pszBriefing) : settlementMobs.DialogueActive()) return;
     if (szParts.GetSize() == 3) {
         if (settlement) {
             const auto &binding = settlementMobs.ResolveBriefing((LPCSTR)szParts[2]);
@@ -2908,6 +2910,7 @@ void CWorldServer::InvokeAlarm(int nAlarm, const CPlot3D &ptOrigin, bool bForceA
 /////////////////////////////////////////////////////////////////////////////////////
 bool CWorldServer::CanBeginFieldCamp()
 {
+    if (settlementMobs.DialogueActive()) return false;
     const auto availability = [](bool value, const char* reason, int enemy = -1, float distance = 0.f) {
         static const char* lastReason = nullptr;
         static DWORD lastTick = 0;

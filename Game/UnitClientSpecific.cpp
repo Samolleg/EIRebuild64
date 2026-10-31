@@ -930,6 +930,7 @@ void CUnitClientSpecific::NewRouteReceived()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitClientSpecific::SetExactPosition(float fpTime)
 {
+    if (dialoguePresentation) return;
     // calc time step
     float fpStep = fpTime - fpPrevSetPosTime;
     if (fpStep < 0)

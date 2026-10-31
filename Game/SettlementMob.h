@@ -33,6 +33,19 @@ struct Briefing
     std::string reward;
     int shop = 0;
 };
+struct DialogueTopic
+{
+    std::string key, actor, name;
+    Briefing binding;
+};
+struct DialogueSession
+{
+    std::uint64_t token = 0, targetIdentity = 0, heroIdentity = 0;
+    std::uint32_t settlement = 0;
+    int player = -1, target = -1, hero = -1;
+    std::string topic;
+    bool completing = false, consumed = false;
+};
 
 struct Point { float x = 0, y = 0; };
 struct PeaceArea
@@ -100,6 +113,8 @@ class World
     std::map<std::uint32_t, Instance> instances;
     std::map<int, Presence> visitors;
     bool admitting = false;
+    DialogueSession dialogue;
+    std::uint64_t nextDialogue = 0;
     const Definition &GetDefinition(std::uint32_t id) const;
     void ValidateActor(std::uint32_t id, const std::string &local) const;
     int ImportedObject(CWorldServer &world, const std::string &target) const;
@@ -140,6 +155,17 @@ public:
                      CSpell *spell, bool trap, bool executing);
     void DamageAt(CWorldServer &world, CUnit *victim);
     void AlarmAt(CWorldServer &world, int alarm, const CPlot3D &point);
+    std::vector<DialogueTopic> DialogueTopics(CWorldServer &world, int player, int target) const;
+    bool DialogueAvailable(CWorldServer &world, int player, int target) const;
+    bool DialogueReady(CWorldServer &world, int player, int target) const;
+    std::uint64_t BeginDialogue(CWorldServer &world, int player, int target);
+    bool DialogueValid(CWorldServer &world, std::uint64_t token) const;
+    bool SelectDialogueTopic(CWorldServer &world, std::uint64_t token, const std::string &key);
+    bool FinishDialogue(CWorldServer &world, std::uint64_t token);
+    bool AcceptDialogueCompletion(int player, const char *key);
+    void EndDialogue(std::uint64_t token);
+    bool DialogueActive() const { return dialogue.token != 0; }
+    const DialogueSession &Dialogue() const { return dialogue; }
 };
 
 }
