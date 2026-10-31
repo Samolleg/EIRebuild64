@@ -27,6 +27,9 @@
 #include "ModRuntime.h"
 static const char LOCAL_FILE[] = __FILE__;
 namespace {
+// Additional unit melee separation, shared by approach and attack planning.
+constexpr float FP_MELEE_SPACING = 0.15f;
+
 bool IsEquippedRangedWeapon(CItemWeapon *weapon)
 {
     if (!weapon)
@@ -2532,14 +2535,15 @@ float CUnitServer::GetHitDist(const SUnitBasicCmd &cmd)
             if (((CUnit *)pTarget)->GetOwner() && lpUnit->GetOwner())
                 fpWeaponRange -= 0.4f;
             fpWeaponRange = Max(GetCurrentWeaponRange(), fpWeaponRange);
-            // Preserve the existing weapon/natural reach. Only melee bodies
-            // use the same measured radii as placement and crowd avoidance.
+            // Keep weapon range unchanged; only unit melee gains approach spacing.
+            // Use the same measured radii as placement and crowd avoidance.
             const bool bodyMelee = cmd.cmd == UC_ATTACK && !HasRangedAttack() &&
                                    GetCurrentWeaponType() != RPGWST_MAGIC;
             auto& navigation = ((CWorldServer *)GetWorld())->aiMap.Navigation();
             fpHitDist = (bodyMelee ? navigation.Radius(lpUnit) : lpUnit->GetCollisionDistance()) +
                         (bodyMelee ? navigation.Radius((CUnit *)pTarget) :
                                      ((CUnit *)pTarget)->GetCollisionDistance()) + fpWeaponRange;
+            if (bodyMelee) fpHitDist += FP_MELEE_SPACING;
         }
         else
         {
@@ -2574,6 +2578,7 @@ float CUnitServer::GetCloseAttackDist(const SUnitBasicCmd &cmd)
         fpAttackDistance *= (1 + fpAttackKoef);
         fpHitDist = fpAttackDistance + (bodyMelee ? navigation.Radius((CUnit *)pTarget) :
                                                  ((CUnit *)pTarget)->GetCollisionDistance());
+        if (bodyMelee) fpHitDist += FP_MELEE_SPACING;
     }
     return fpHitDist;
 }
