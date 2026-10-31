@@ -2177,11 +2177,17 @@ void CWorldClient::RemoveClientPersonages(CPersonages &people)
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+LPCTSTR CWorldClient::GetExitZoneName(int nExitPoint) const
+{
+    if (theWorldServer.Settlements().LocalExit(nExitPoint)) return "none";
+    return exits[nExitPoint].szZone;
+}
+
 BOOL CWorldClient::IsExitPoint(const CPlot3D &ptCheck, int *nExitPoint)
 {
     for (int i = 0; i < exits.GetSize(); i++)
     {
-        if (exits[i].IsIn(ptCheck.x, ptCheck.y) && exits[i].szZone != "none")
+        if (exits[i].IsIn(ptCheck.x, ptCheck.y) && strcmp(GetExitZoneName(i), "none") != 0)
         {
             if (nExitPoint)
                 nExitPoint[0] = i;
@@ -2206,7 +2212,7 @@ void CWorldClient::SpawnExitZoneEffects()
     exitParticles.SetSize(exits.GetSize());
     for (int i = 0; i < exits.GetSize(); i++)
     {
-        if (exits[i].szZone.CompareNoCase("none") == 0)
+        if (_stricmp(GetExitZoneName(i), "none") == 0)
             continue;
         CParticle *pParticle = ((CParticleManager *)theWorld.GetParticleManager())
                                    ->CreateParticleSystem(PTID_ZONEEXIT);

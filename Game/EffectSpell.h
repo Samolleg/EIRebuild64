@@ -23,6 +23,7 @@ const int DW_SPELL_HIDE_CASTER = 1; // подписыватся ли под повреждениями
 // --------------------------------------------------------------------------------------------
 class CEffectSpell : public CFundament //: public CBase3D
 {
+    friend class Settlement::World;
     CWorldServer *pWS;
     static CWorldServer *pWSstatic;
     DWORD dwFlags;

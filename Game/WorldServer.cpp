@@ -1055,6 +1055,7 @@ void CWorldServer::WorldSegment(bool bForceScriptRun)
     scriptTemp.Segment(); }
     // Call segment for map objects
     ActiveObjectsSegment();
+    settlementMobs.Segment(*this);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldServer::Segment()
@@ -2879,6 +2880,7 @@ void CWorldServer::InvokeAlarm(int nAlarm, const CPlot3D &ptOrigin, bool bForceA
     ASSERT(nAlarm >= 0 && nAlarm < N_NUMBER_OF_ALARM);
     if (nAlarm < 0 || nAlarm >= N_NUMBER_OF_ALARM)
         return;
+    if (!(nAlarm == 0 && bForceAlarm)) settlementMobs.AlarmAt(*this, nAlarm, ptOrigin);
     if (alarms[nAlarm].bActivated && !bForceAlarm)
         return;
     if (nAlarm == 0 && bForceAlarm)

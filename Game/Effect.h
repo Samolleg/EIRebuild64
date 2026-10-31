@@ -1,5 +1,6 @@
 #pragma once
 namespace SaveSchema { class Writer; class Reader; }
+namespace Settlement { class World; }
 
 /*==========================================================================================================
 
@@ -336,6 +337,7 @@ public:
 // --------------------------------------------------------------------------------------------
 class CEffectArrowBase : public CEffect
 {
+    friend class Settlement::World;
 protected:
     BOOL bDelivered;
     int nTargetID;
@@ -404,6 +406,7 @@ public:
 // --------------------------------------------------------------------------------------------
 class CEffectArrowFigure : public CEffectArrowBase
 {
+    friend class Settlement::World;
     CMapObjectPtr pMapObj;
     bool attackProcessed;
     bool explosivePending=false;

@@ -1614,6 +1614,7 @@ struct PreparedAttackSnapshot {
 
 void CUnitServer::LcAttackCallback(ERPGHitLocations eAttackLocation, bool bCalledShot, bool leftHand, AttackCallbackOrigin origin)
 {
+    if (!SettlementCommandAllowed(curCommand, true)) { LcCancelCommand(); return; }
     int pointSkill=PrepareExplosiveShot();if(pointSkill){LcCancelCommand();return;}
     const CMapObjectPtr target = curCommand.pTarget;
     auto* mod = ModRuntime::Current();
@@ -1757,7 +1758,11 @@ bool CUnitServer::LcCanChangePose(EUnitPose p)
 // конвертировать позы - текущую и желаемую из нескольких источников
 void CUnitServer::LcConvertPoses()
 {
-    if (curCommand.IsAttack()) //|| curCommand.cmd == UC_SKILL )
+    auto *peaceWorld = static_cast<CWorldServer *>(GetWorld());
+    const auto settlementMode = peaceWorld->Settlements().ModeFor(*peaceWorld, lpUnit);
+    const bool settlementCombat = lpUnit->GetOwner() &&
+        (settlementMode == Settlement::Mode::Alarm || settlementMode == Settlement::Mode::Hostile);
+    if (curCommand.IsAttack() || settlementCombat)
         SetAggression(true);
     else
     {
@@ -2995,6 +3000,7 @@ void CUnitServer::MoveToTarget()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::StartAttack()
 {
+    if (!SettlementCommandAllowed(curCommand, false)) { LcCancelCommand(); return; }
     CPlot3D ptFuture;
     int nCurSegment = GetWorldBase()->GetSegmentTimeCounter();
     bLcChangingPoseToAttack = false;
@@ -3399,6 +3405,7 @@ void CUnitServer::ShowFoundMovePath(SAIPath &move, bool bFound)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::UseTrap()
 {
+    if (!SettlementCommandAllowed(curCommand, true)) return;
     int nQItemIdx = curCommand.nQSpellNum;
     CItemQuick *pTrap = lpUnit->GetQItem(nQItemIdx);
     if (!pTrap || pTrap->GetQuickItemType() != IDB_TRAP)
@@ -3424,6 +3431,7 @@ void CUnitServer::UsePotion(int nQSpellNum, CMapObject *pTarget, const CPlot3D &
     ASSERT(pSpell);
     if (!pSpell)
         return;
+    if (!pWS->Settlements().AllowAction(*pWS, lpUnit, pTarget, ptCastTo, pSpell, false, true)) return;
     if (CModPackage *mod = ModRuntime::Current())
         if (mod->CombatSetting("usePotionAcks"))
         {
@@ -3488,6 +3496,7 @@ void CUnitServer::UseSpell()
         ptCastTo = cmd.ptTarget;
     else
         ptCastTo = cmd.pTarget->GetTargetCP();
+    if (!SettlementCommandAllowed(cmd, true)) return;
     // Mana may have changed while the casting animation was running.
     if(ModRuntime::Current()&&!IsCastPossible(cmd)){cmd.nQSpellNum=-1;return;}
     // perform cast
@@ -3767,6 +3776,7 @@ void CUnitServer::UseAttack(CMapObject *pTarget, SRPGAttackPortion &attackPortio
     }
     // Keep the launch weapon alive through delivery and its trigger spell.
     struct Cleanup{CModPackage*mod;SRPGAttackPortion&ap;~Cleanup(){if(mod)mod->ForgetAttack(ap);}} cleanup{mod,attackPortion};
+    if (!pWS->Settlements().AllowAction(*pWS, lpUnit, pTarget, pTarget->GetCP(), nullptr, false, true)) return;
     // Keep JMV staff projectiles; the retail/ASI path uses an arrow figure.
     const bool staffProjectile = mod && mod->CombatSetting("JMVAttacks") && usedWeapon &&
         (usedWeapon->GetWeaponType() == RPGWST_HANDS3 || usedWeapon->GetWeaponType() == RPGWST_HANDS7);
@@ -5614,6 +5624,7 @@ void CUnitServer::TakeDamage(CUnit *pAttacker, BOOL bAreaSpell)
 {
     StopAnimationLoop();
     const bool wasDead = lpUnit->IsDead() != FALSE;
+    static_cast<CWorldServer *>(GetWorld())->Settlements().DamageAt(*static_cast<CWorldServer *>(GetWorld()), lpUnit);
     CPlot3D ptDamageFrom;
     CWorldServer *pWS = (CWorldServer *)GetWorld();
     // float fpForward, fpRight;
@@ -6023,11 +6034,30 @@ void CUnitServer::CmdShowMove(const CPlot3D &ptDest, bool bGroupCmd, bool bRun, 
     ShowFoundMovePath(pathFake, bFound);
 }
 
+bool CUnitServer::SettlementCommandAllowed(const SUnitCommand &command, bool executing)
+{
+    auto *world = static_cast<CWorldServer *>(GetWorld());
+    if (world->Settlements().Empty()) return true;
+    CSpell *spell = command.IsCast() ? GetSpell(command) : nullptr;
+    const int skill = command.IsAttack() ? ModSkills::Slot(command.dwParam) : -1;
+    if (skill >= 0) spell = GetSpell(skill);
+    const bool trap = command.cmd == UC_TRAP;
+    const bool hostileSkill = command.IsSkill() &&
+        (command.nQSpellNum == RPGMSKL_STEALING || command.nQSpellNum == RPGMSKL_TAME);
+    if (!command.IsAttack() && !command.IsCast() && !trap && !hostileSkill) return true;
+    const auto point = trap ? lpUnit->GetCP() : command.GetTargetCP();
+    if (world->Settlements().AllowAction(*world, lpUnit, command.pTarget, point, spell, trap, executing)) return true;
+    InformFailure(ACK_HERO_REFUSE_CANT_CAST);
+    return false;
+}
+
 void CUnitServer::CmdAttack(CMapObject *pTarget, ERPGHitLocations hl, bool bRun, DWORD dwAck)
 {
     ASSERT(pTarget != lpUnit);
     if (pTarget == 0 || pTarget == lpUnit)
         return;
+    SUnitCommand peaceCommand; peaceCommand.MakeAttack(pTarget);
+    if (!SettlementCommandAllowed(peaceCommand, false)) return;
     if (pTarget->WhoAmI() == HPC_UNIT && hl < RPGHL_ALL)
     {
         CUnit *pT = (CUnit *)pTarget;
@@ -6054,6 +6084,8 @@ void CUnitServer::CmdAttack(CMapObject *pTarget, ERPGHitLocations hl, bool bRun,
 void CUnitServer::CmdCast(int nQSpellNum, const CPlot3D &pointToCast, bool bRun)
 {
     CPlot3D ptCastTo = pointToCast;
+    SUnitCommand peaceCommand; peaceCommand.MakeCast(nQSpellNum, ptCastTo);
+    if (!SettlementCommandAllowed(peaceCommand, false)) return;
     if (IsPotion(nQSpellNum))
     {
         UsePotion(nQSpellNum, 0, pointToCast);
@@ -6079,6 +6111,8 @@ void CUnitServer::CmdCast(int nQSpellNum, const CPlot3D &pointToCast, bool bRun)
 void CUnitServer::CmdCast(int nQSpellNum, CMapObject *pTarget, bool bRun)
 {
     if(!pTarget)return;
+    SUnitCommand peaceCommand; peaceCommand.MakeCast(nQSpellNum, pTarget);
+    if (!SettlementCommandAllowed(peaceCommand, false)) return;
     auto*mod=ModRuntime::Current();CUnit*target=pTarget->WhoAmI()==HPC_UNIT?static_cast<CUnit*>(pTarget):nullptr;
     CSpell*tacticalSpell=target&&ModTactical::Enabled(lpUnit)?ModTactical::Spell(lpUnit,nQSpellNum):nullptr;ModSkills::Config active;
     bool track=tacticalSpell&&!mod->SkillConfig(tacticalSpell,active);
@@ -6178,6 +6212,8 @@ void CUnitServer::CmdNewWeapon(DWORD dwWeapon)
 
 void CUnitServer::CmdSkill(CMapObject *pTarget, int nSkill, DWORD dwParam, bool bRun, DWORD dwAck)
 {
+    SUnitCommand peaceCommand; peaceCommand.MakeSkill(pTarget, nSkill);
+    if (!SettlementCommandAllowed(peaceCommand, false)) return;
     nextCommand.Clear();
     nextCommand.cmd = UC_SKILL;
     nextCommand.pTarget = pTarget;
@@ -6301,6 +6337,8 @@ void CUnitServer::CmdPlayAnimation(const char *pszAnimation)
 
 void CUnitServer::CmdUseTrap(int nQItemNum)
 {
+    SUnitCommand peaceCommand; peaceCommand.cmd = UC_TRAP;
+    if (!SettlementCommandAllowed(peaceCommand, false)) return;
     nextCommand.Clear();
     nextCommand.cmd = UC_TRAP;
     nextCommand.nQSpellNum = nQItemNum;

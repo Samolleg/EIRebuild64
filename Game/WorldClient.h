@@ -308,7 +308,7 @@ public:
     void RemoveClientPersonages(CPersonages &people);
     BOOL IsExitPoint(const CPlot3D &ptCheck, int *nExitPoint = NULL);
     BOOL ArePersonagesAtExit(CPersonages &people, int nExitPoint, CPersonages &exitingPeople);
-    LPCTSTR GetExitZoneName(int nExitPoint) const { return exits[nExitPoint].szZone; }
+    LPCTSTR GetExitZoneName(int nExitPoint) const;
     int GetNumExits() { return exits.GetSize(); }
     CPlot2D GetExitCenter(int nExit);
     bool IsCaveZone() const { return eZoneSky == GMS_CAVE; }

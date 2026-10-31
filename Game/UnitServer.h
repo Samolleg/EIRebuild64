@@ -368,8 +368,11 @@ struct SUCTraceInfo
 /////////////////////////////////////////////////////////////////////////////////////
 typedef void (*ServerAnimationSwitchCallback)(CUnit *pUnit);
 /////////////////////////////////////////////////////////////////////////////////////
+namespace Settlement { class World; }
 class CUnitServer : public CUnitSpecific
 {
+    friend class Settlement::World;
+    bool SettlementCommandAllowed(const SUnitCommand &command, bool executing);
     friend class CModPackage;
     friend class CUnit;
 

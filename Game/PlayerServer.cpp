@@ -580,7 +580,11 @@ BOOL CPlayerServer::SendVisibleUnitsList()
     while (pUnit)
     {
         // switch mode to warry if we are close to range
-        if (!pUnit->sensesDetection.IsRatherSafe(fpSafetyMulDist))
+        const auto settlementMode = GetWorldServer()->Settlements().ModeFor(*GetWorldServer(), pUnit);
+        if (settlementMode == Settlement::Mode::Alarm || settlementMode == Settlement::Mode::Hostile)
+            dangerState = WDS_COMBAT;
+        else if (settlementMode != Settlement::Mode::Peaceful && dangerState == WDS_NORMAL &&
+                 !pUnit->sensesDetection.IsRatherSafe(fpSafetyMulDist))
             dangerState = WDS_WARRY;
         pUnit = unitIter.GetNext();
     }
@@ -856,6 +860,7 @@ void CPlayerServer::GainExp(int nID, float fpExp)
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 void CPlayerServer::LeaveToZone(const char *pszZone, int nZoneEntrance)
 {
+    if (GetWorldServer()->Settlements().LocalTravel(pszZone, nZoneEntrance)) return;
     ASSERT(status == PSS_ACTIVE);
     if (status != PSS_ACTIVE)
         return;
@@ -1327,6 +1332,7 @@ BOOL CPlayerServer::PrsExitZone()
     int nExit, nZoneEntrance;
     CString szZone;
     pkt.Read(nExit);
+    if (theWorldServer.Settlements().LocalExit(nExit)) return TRUE;
     // determine where should player leave via this exit
     if (!theWorldServer.GetExitDirection(nExit, szZone, nZoneEntrance))
         return FALSE;

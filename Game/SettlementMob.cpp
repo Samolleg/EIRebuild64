@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cctype>
 #include <climits>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -137,7 +138,7 @@ void Catalog::Load(const std::string &directory)
     if (document.at("settlements").size() > 4096) Fail("too many settlements");
     for (const auto &row : document.at("settlements")) {
         Keys(row, {"id", "revision", "map", "mob", "dependencies", "object_imports", "group_imports",
-                   "state_imports", "aliases", "briefings"});
+                   "state_imports", "aliases", "briefings", "peace"});
         Definition def;
         def.id = Integer(row.at("id"), 1);
         Integer(row.at("revision"), 1); // Data authors bump this when module content changes.
@@ -153,7 +154,45 @@ void Catalog::Load(const std::string &directory)
             if (!row.at("dependencies").is_array()) Fail("dependencies must be an array");
             for (const auto &dependency : row.at("dependencies")) addMob(dependency);
         }
-        addMob(row.at("mob"));
+        if (row.contains("mob")) addMob(row.at("mob"));
+        else if (!def.mobs.empty()) Fail("dependencies require a main settlement MOB");
+        if (row.contains("peace")) {
+            const auto &peace = row.at("peace");
+            Keys(peace, {"polygon", "min_z", "max_z", "hysteresis", "quiet_seconds", "faction", "alarm_key", "gate"});
+            auto real = [&](const Json &value) {
+                if (!value.is_number() || !std::isfinite(value.get<float>())) Fail("invalid peace area coordinate");
+                return value.get<float>();
+            };
+            auto point = [&](const Json &value) {
+                if (!value.is_array() || value.size() != 2) Fail("peace area points require two coordinates");
+                return Point{real(value[0]), real(value[1])};
+            };
+            if (!peace.at("polygon").is_array()) Fail("peace polygon must be an array");
+            for (const auto &p : peace.at("polygon")) def.peace.polygon.push_back(point(p));
+            def.peace.minZ = real(peace.at("min_z")); def.peace.maxZ = real(peace.at("max_z"));
+            if (peace.contains("hysteresis")) def.peace.hysteresis = real(peace.at("hysteresis"));
+            if (peace.contains("quiet_seconds")) def.peace.quietSeconds = real(peace.at("quiet_seconds"));
+            def.peace.faction = Integer(peace.at("faction"));
+            def.peace.alarmKey = Prefix(def.id) + peace.value("alarm_key", std::string("Alarm"));
+            SymbolName(def.peace.alarmKey.substr(Prefix(def.id).size()));
+            for (const auto *output : {"AlarmActive", "AlarmReasons", "Inside", "Mode"})
+                if (Lower(def.peace.alarmKey) == Lower(Prefix(def.id) + output)) Fail("alarm_key shadows a peace output");
+            const auto &gate = peace.at("gate");
+            Keys(gate, {"object", "exit", "a", "b", "inside", "legacy_zone", "legacy_entrances"});
+            def.peace.gateObject = Integer(gate.at("object")); def.peace.exit = Integer(gate.at("exit"));
+            def.peace.gateA = point(gate.at("a")); def.peace.gateB = point(gate.at("b"));
+            def.peace.inside = point(gate.at("inside"));
+            def.peace.legacyZone = Lower(gate.at("legacy_zone").get<std::string>());
+            if (!gate.at("legacy_entrances").is_array()) Fail("legacy entrances must be an array");
+            std::set<int> entrances;
+            for (const auto &value : gate.at("legacy_entrances")) {
+                const int entrance = Integer(value);
+                if (!entrances.insert(entrance).second) Fail("duplicate legacy entrance");
+                def.peace.legacyEntrances.push_back(entrance);
+            }
+            ValidatePeaceArea(def.peace);
+        }
+        if (def.mobs.empty() && !def.peace.Enabled()) Fail("settlement needs a MOB or peace area");
         if (def.mobs.size() > 256) Fail("too many MOB dependencies");
         auto imports = [&](const char *field, std::map<std::string, std::string> &target, bool objects) {
             if (!row.contains(field)) return;
@@ -217,7 +256,7 @@ const Definition &World::GetDefinition(std::uint32_t id) const
     if (!definition || !Contains(id)) Fail("unregistered settlement: " + std::to_string(id));
     return *definition;
 }
-void World::Clear() { instances.clear(); admitting = false; }
+void World::Clear() { instances.clear(); visitors.clear(); admitting = false; }
 void World::ValidateActor(std::uint32_t id, const std::string &local) const
 {
     const auto &def = GetDefinition(id);
@@ -526,6 +565,7 @@ bool World::Load(CWorldServer &world)
             GameJournal::Event("ZONE", "settlement_mob", "namespace=%s sources=%zu objects=%zu",
                 Prefix(module.id).c_str(), module.sources.size(), instances.at(module.id).objects.size());
         }
+        InitializePeace(world);
         return true;
     } catch (CException *error) {
         error->Delete();
@@ -546,6 +586,7 @@ void World::Store(SaveSchema::Writer &writer, CWorldServer &world) const
     writer.Count(static_cast<std::uint32_t>(instances.size()));
     for (const auto &entry : instances) {
         writer.UInt32(entry.first); writer.String(entry.second.signature);
+        writer.Bool(entry.second.alarm); writer.UInt32(entry.second.reasons); writer.Int32(entry.second.lastIncident);
         writer.Count(static_cast<std::uint32_t>(entry.second.objects.size()));
         for (const auto &object : entry.second.objects) {
             writer.Int32(object.first); writer.Int32(object.second);
@@ -555,6 +596,16 @@ void World::Store(SaveSchema::Writer &writer, CWorldServer &world) const
         }
         writer.Count(static_cast<std::uint32_t>(entry.second.names.size()));
         for (const auto &name : entry.second.names) { writer.String(name.first); writer.Int32(name.second); }
+    }
+    const auto liveVisit = [&](const auto &entry) {
+        const auto *unit = world.GetUnit(entry.first);
+        return unit && !unit->IsDead() && unit->GetRTID() == entry.second.identity;
+    };
+    writer.Count(static_cast<std::uint32_t>(std::count_if(visitors.begin(), visitors.end(), liveVisit)));
+    for (const auto &entry : visitors) {
+        if (!liveVisit(entry)) continue;
+        writer.Int32(entry.first); writer.UInt64(entry.second.identity); writer.UInt32(entry.second.settlement);
+        for (float coordinate : entry.second.previous) writer.Float32(coordinate);
     }
 }
 void World::Restore(SaveSchema::Reader &reader, CWorldServer &world)
@@ -569,6 +620,11 @@ void World::Restore(SaveSchema::Reader &reader, CWorldServer &world)
         if (!def || def->map != MapName(static_cast<const char *>(world.szZoneFileName))) Fail("saved settlement does not belong to this map");
         Instance instance; instance.signature = reader.String(); instance.mobs = def->mobs;
         if (instance.signature != def->signature) Fail("settlement definition changed since save");
+        instance.alarm = reader.Bool(); instance.reasons = reader.UInt32(); instance.lastIncident = reader.Int32();
+        if ((instance.reasons & ~63u) || instance.lastIncident < -1 || instance.lastIncident > world.GetSegmentTimeCounter() ||
+            (instance.alarm ? (!def->peace.Enabled() || !instance.reasons || instance.lastIncident < 0) :
+                              (instance.reasons != 0 || instance.lastIncident != -1)))
+            Fail("invalid saved settlement alarm");
         const auto objects = reader.Count();
         if (objects > 1000000) Fail("invalid saved settlement objects");
         for (std::uint32_t j = 0; j < objects; ++j) {
@@ -592,9 +648,24 @@ void World::Restore(SaveSchema::Reader &reader, CWorldServer &world)
         }
         if (!instances.emplace(id, std::move(instance)).second) Fail("duplicate saved settlement");
     }
+    const auto members = reader.Count();
+    if (members > 1000000) Fail("invalid saved settlement visitors");
+    for (std::uint32_t i = 0; i < members; ++i) {
+        const int id = reader.Int32(); Presence presence;
+        presence.identity = reader.UInt64(); presence.settlement = reader.UInt32();
+        for (auto &coordinate : presence.previous) {
+            coordinate = reader.Float32();
+            if (!std::isfinite(coordinate)) Fail("invalid saved settlement position");
+        }
+        const auto *unit = world.GetUnit(id);
+        if (!unit || unit->GetRTID() != presence.identity ||
+            (presence.settlement && (!Contains(presence.settlement) || !GetDefinition(presence.settlement).peace.Enabled())) ||
+            !visitors.emplace(id, presence).second) Fail("invalid saved settlement membership");
+    }
     for (const auto &entry : CurrentCatalog().All())
         if (entry.second.map == MapName(static_cast<const char *>(world.szZoneFileName)) && !Contains(entry.first))
             Fail("settlement added since save; a new map state is required");
+    InitializePeace(world);
 }
 
 }
