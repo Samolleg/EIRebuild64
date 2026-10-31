@@ -186,7 +186,10 @@ void Catalog::Load(const std::string &directory)
                 if (Lower(def.peace.alarmKey) == Lower(Prefix(def.id) + output)) Fail("alarm_key shadows a peace output");
             const auto &gate = peace.at("gate");
             Keys(gate, {"object", "exit", "a", "b", "inside", "legacy_zone", "legacy_entrances"});
-            def.peace.gateObject = Integer(gate.at("object")); def.peace.exit = Integer(gate.at("exit"));
+            def.peace.gateObject = Integer(gate.at("object"));
+            const int exitNumber=Integer(gate.at("exit"));
+            if (exitNumber<1) Fail("gate.exit must be a one-based #exit number");
+            def.peace.exit=exitNumber-1; // map.txt numbers exits from 1; world arrays use 0.
             def.peace.gateA = point(gate.at("a")); def.peace.gateB = point(gate.at("b"));
             def.peace.inside = point(gate.at("inside"));
             def.peace.legacyZone = Lower(gate.at("legacy_zone").get<std::string>());
@@ -690,7 +693,7 @@ bool World::CompleteMercBriefing(CWorldServer &world,int player,const std::strin
 
 bool World::Load(CWorldServer &world, const CParty *campaign)
 {
-    if (!Empty()) return ReportError("Settlement MOBs are already loaded in this world.\n");
+    if (!Empty()) throw LoadError("Settlement MOBs are already loaded in this world");
     struct Source
     {
         Source() = default;
@@ -857,12 +860,12 @@ bool World::Load(CWorldServer &world, const CParty *campaign)
         world.script.Clear(); world.scriptTemp.Clear(); world.bMapLoaded = FALSE;
         for (auto it = admitted.rbegin(); it != admitted.rend(); ++it) world.RemoveMapObject(*it);
         Clear();
-        return ReportError("Cannot load settlement MOB: file/resource error.\n");
+        throw LoadError("Cannot load settlement MOB: file/resource error");
     } catch (const std::exception &error) {
         world.script.Clear(); world.scriptTemp.Clear(); world.bMapLoaded = FALSE;
         for (auto it = admitted.rbegin(); it != admitted.rend(); ++it) world.RemoveMapObject(*it);
         Clear();
-        return ReportError("Cannot load settlement MOB: %s\n", error.what());
+        throw LoadError(std::string("Cannot load settlement MOB: ")+error.what());
     }
 }
 

@@ -3367,7 +3367,7 @@ BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneN
     szLoadedMobs.RemoveAll();
     StartZoneLoading();
     memset(alarms, 0, sizeof(alarms));
-    if (!LoadMainMob(pszMapName, pszMobName, graphChunk, false))
+    if (!LoadMainMob(pszMapName, pszMobName, graphChunk, false, pszZoneName))
         return ReportError("CWorldServer::NewZone()\n Can't load map.\n");
     C2DScreenWait::Step(6);
     coreOperation.Stage("finalize");
@@ -3495,7 +3495,7 @@ CString CWorldServer::GetFullMobName(const char *pszFileName)
 // aiMap.StartDelayConvert should be called before this function (use StartZoneLoading() )
 // script and fof are cleared if requested static only
 BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
-                               CMemorySave &graphChunk, bool bStaticOnly)
+                               CMemorySave &graphChunk, bool bStaticOnly, const char *scenarioZone)
 {
     auto ownedSource = std::make_unique<OwnedRender::E1MobSource>(pszMprName, pszMobName);
     // load ai map if changed
@@ -3566,6 +3566,13 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
     }
     bLoadDynamic = true;
     bLoadStatic = true;
+    // RemoveEverything clears the previous exits. The settlement validates its
+    // gate during admission, before LoadZoneState can assign these exits again.
+    if (hasSettlement && !bStaticOnly) {
+        auto *zone=scenarioZone ? theMap.GetZoneByName(scenarioZone) : nullptr;
+        if (!zone) throw Settlement::LoadError("Settlement map requires a scenario zone");
+        SetExits(zone->exits);
+    }
     ownedSource->Succeeded(true);
     ownedSource.reset(); // Publish the main source before any supplemental MOB.
     auto &campaign=theHat.GetSinglePlayerPartySet();

@@ -962,6 +962,14 @@ BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
     }
     catch (const CSaveReadError &e)
     { if (applying && iface != IFACE_MAINMENU) GoMainMenu(); return SaveReadFailure(failedPath, e); }
+    catch (const Settlement::LoadError &e)
+    {
+        GameJournal::Event("ZONE", "settlement_load_failed", "detail=%s", GameJournal::Quote(e.what()).c_str());
+        // Unwind the module admission first; retire through the ordinary world
+        // transition, while renderer services are alive, rather than CRT exit.
+        if (applying && iface != IFACE_MAINMENU) GoMainMenu();
+        return ReportRecoverableError("%s", e.what());
+    }
     catch (CException *e)
     { e->Delete(); if (applying && iface != IFACE_MAINMENU) GoMainMenu(); return SaveLoadFailure(failedPath, "file_or_memory_error", 0); }
     catch (const std::bad_alloc &)

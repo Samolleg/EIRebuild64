@@ -115,7 +115,7 @@ private:
     BOOL LoadAIGraph(LPCSTR pszMapName, LPCSTR pszMobName, CMemorySave &graphChunk);
     BOOL LoadMapObjects(LPCSTR pszMobName, bool bSkipScript);
     BOOL LoadMainMob(const char *pszMprName, const char *pszMobName, CMemorySave &graphChunk,
-                     bool bStaticOnly);
+                     bool bStaticOnly, const char *scenarioZone);
     void StartZoneLoading();
     void FinishZoneLoading();
     void SetChangedFlags(DWORD dwFlags);

@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <memory>
+#include <stdexcept>
 
 class CWorldServer;
 class CScript;
@@ -21,6 +22,11 @@ struct SUnitBasicCmd;
 namespace SaveSchema { class Writer; class Reader; }
 
 namespace Settlement {
+// Let the zone owner retire a rejected world before presenting the error.
+class LoadError final : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 struct TradeState;
 struct TradeAccess;
 void StorePartyIds(SaveSchema::Writer &writer, const CParty &party);
