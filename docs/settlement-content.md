@@ -1,5 +1,8 @@
 # Посёлок на Zone1: кандидат содержимого, этап 6
 
+Этап 8: подготовлен [полный комплект для игровой проверки](settlement-playtest.md);
+ниже сохранён контракт исходного кандидата этапа 6.
+
 Ветка `task/X64PEACE01`. Подготовлен отдельный набор
 [`data/settlements/zone1-poselok`](../data/settlements/zone1-poselok/README_RU.md).
 Владелец подтвердил весь [точный список](../../../supervision/X64PEACE01/stage6/EDITS.md);
