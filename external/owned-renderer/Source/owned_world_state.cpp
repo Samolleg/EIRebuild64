@@ -33,7 +33,6 @@ namespace owned {
 thread_local BridgeFrameSample g_bridge_sample{};
 
 OwnedShadowSettings g_owned_shadow_settings{};
-std::uint64_t g_owned_shadow_settings_revision = 1;
 float g_point_shadow_merge_distance=1.5f; // world units; 0 disables shadow merging
 // Moving-caster overlays: this many lamps nearest the view focus refresh every
 // frame, the others every third frame (staggered); 0 refreshes all every frame.
@@ -345,20 +344,13 @@ void bridge_set_merge_character_parts(bool enabled) noexcept { g_merge_character
 
 
 void bridge_set_shadow_settings(std::uint32_t map_side,
-    std::uint8_t close_cascades,bool far_shadows,bool point_shadows,bool sun_shadows) noexcept {
-    if (g_owned_shadow_settings.map_side == map_side &&
-        g_owned_shadow_settings.close_cascades == close_cascades &&
-        g_owned_shadow_settings.far_shadows == far_shadows &&
-        g_owned_shadow_settings.point_shadows == point_shadows &&
-        g_owned_shadow_settings.sun_shadows == sun_shadows) return;
-    const float close_range=g_owned_shadow_settings.close_range;
-    g_owned_shadow_settings={map_side,close_cascades,far_shadows,point_shadows,sun_shadows,close_range};
-    if (++g_owned_shadow_settings_revision == 0) ++g_owned_shadow_settings_revision;
+    std::uint8_t close_cascades,bool far_shadows,bool point_shadows) noexcept {
+    auto& settings=g_owned_shadow_settings;
+    settings.map_side=map_side;settings.close_cascades=close_cascades;
+    settings.far_shadows=far_shadows;settings.point_shadows=point_shadows;
 }
 void bridge_set_shadow_close_range(float metres) noexcept {
-    if(!std::isfinite(metres)||metres<8||g_owned_shadow_settings.close_range==metres)return;
-    g_owned_shadow_settings.close_range=metres;
-    if (++g_owned_shadow_settings_revision == 0) ++g_owned_shadow_settings_revision;
+    if(std::isfinite(metres)&&metres>=8)g_owned_shadow_settings.close_range=metres;
 }
 
 void bridge_set_point_shadow_fast_overlays(int count) noexcept { g_point_shadow_fast_overlays=count<0?0:count; }

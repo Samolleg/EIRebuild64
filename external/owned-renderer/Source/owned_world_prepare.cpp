@@ -495,7 +495,7 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
         append_cell_merged_receivers(receiver_cell,static_receivers,unions,receivers);
     } else append_cell_merged_receivers(receiver_cell,static_receivers,receivers);
 
-    if (shadows_enabled && g_owned_shadow_settings.sun_shadows) {
+    if (shadows_enabled) {
         const TerrainCpuAsset* base_source=nullptr;
         const std::array<float,16>* base_transform=nullptr;std::uint64_t base_generation=0;
         current_base_terrain_quality_reference(base_source,base_transform,base_generation);

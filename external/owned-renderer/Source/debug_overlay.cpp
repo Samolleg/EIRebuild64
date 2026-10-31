@@ -150,70 +150,24 @@ int active_upscaler(const RendererConfig& config) {
 // An option that has no effect under the current value of the one it
 // depends on: drawn greyed with a note, its own value kept for later.
 const char* blocked_option_note(const RendererConfig& config, const char* key) {
-    const auto is = [&](const char* value) { return std::strcmp(key, value) == 0; };
-    const auto starts = [&](const char* value) { return std::strncmp(key, value, std::strlen(value)) == 0; };
-    const auto boolean = [&](const char* value, bool fallback = false) {
-        const auto* option = config.find(value);
-        return option && option->type == RendererOptionType::boolean ? option->boolean_value : fallback;
-    };
-    const auto integer = [&](const char* value) { return configured_value(config, value); };
 #ifdef EID3D11_EMBEDDED
-    if (is("render_thread") || is("render_thread_frame_latency"))
+    if (std::strcmp(key, "render_thread") == 0 || std::strcmp(key, "render_thread_frame_latency") == 0)
         return "Scene thread is not yet available in EIRebuild";
-
 #endif
-    if (boolean("water_simple") && (is("water_reflections") || is("water_reflection_quality") || is("water_physical")))
-        return "turn off Stock-look water to use this option";
-    if (!boolean("water_reflections", true) && (is("water_reflection_quality") || is("water_physical")))
-        return "needs water reflections";
-    if (!boolean("shadows", true) && (is("shadow_cascade_quality") || is("shadow_close_cascades") || is("shadow_far") || is("shadow_far_foliage_opaque") || is("shadow_sun_angle")))
-        return "needs sun shadows";
-    if (is("shadow_far_foliage_opaque") && !boolean("shadow_far", true)) return "needs distant shadows";
-    if (!boolean("point_shadows", true) && starts("point_shadow_")) return "needs lamp and torch shadows";
-    if (is("shadow_softness") && !boolean("shadows", true) && !boolean("point_shadows", true))
-        return "needs sun or lamp shadows";
-    if (integer("shadow_softness") == 0 && (is("shadow_sun_angle") || is("point_shadow_light_size")))
-        return "needs soft shadows";
-    if ((is("terrain_antitile") || is("terrain_height_blend")) && integer("terrain_quality") == 0)
-        return "needs High terrain detail";
-    if (is("terrain_cliffs") && integer("terrain_blend") == 0) return "needs terrain blending";
-    if (starts("cliff_") && (!boolean("terrain_cliffs", true) || integer("terrain_blend") == 0))
-        return "needs cliff texturing and terrain blending";
-    if (is("terrain_far_detile") && integer("terrain_blend") == 0) return "needs terrain blending";
-    if (starts("terrain_bake_") && integer("terrain_bake") == 0) return "needs terrain baking";
-    if ((starts("neighbour_fog_") || is("terrain_blend_neighbours") || is("terrain_bake_neighbours")) && !boolean("neighbour_maps", true))
-        return "needs neighbouring maps";
-    if (is("terrain_blend_neighbours") && integer("terrain_blend") == 0) return "needs terrain blending";
-    if (is("ground_cover_distance") && integer("ground_cover") == 0) return "needs grass and ground cover";
-    if (starts("ambient_particle_") && integer("ambient_particles") == 0) return "needs ambient particles";
-    if (is("tree_sway_strength") && !boolean("tree_sway", true)) return "needs swaying trees";
-    if (starts("ao_") && !is("ao_quality") && integer("ao_quality") == 0) return "needs ambient occlusion";
-    if (starts("sky_") && !is("sky_clouds") && !is("sky_weather_test") && integer("sky_clouds") == 0)
-        return "needs the animated sky";
-    if (is("sky_weather_test") && integer("sky_clouds") == 0) return "needs the animated sky; main menu only";
-    if (is("fog_volume_quality") && integer("fog_preset") < 2) return "needs Volumetric fog";
-    if (starts("fog_") && !is("fog_preset") && !is("fog_volume_quality") && integer("fog_preset") == 0)
-        return "needs Atmospheric or Volumetric fog";
-    if (is("sun_shaft_strength") && integer("sun_shafts") == 0) return "needs sun shafts";
-    if (is("bloom_strength") || is("bloom_threshold") || is("bloom_debug_view"))
-        if (integer("bloom") == 0) return "needs bloom";
-    if (is("emissive_light_strength") && integer("emissive_lights") == 0) return "needs emissive lighting";
-    if (is("depth_of_field_strength") && integer("depth_of_field") == 0) return "needs depth of field";
-    if (is("lod_pixel_error") && !boolean("lod", true)) return "needs object LOD";
-    if (starts("impostor_") && !boolean("impostors", true)) return "needs crown impostors";
-    if (const char* suffix = std::strstr(key, "_fade_transparency")) {
-        const std::string parent = std::string(key, suffix) + "_auto_fade";
-        if (!boolean(parent.c_str())) return "needs this widget's auto fade";
-    }
-    // The Upscaling method (dlss_frame.h): DLSS needs NGX on an
+    // Terrain cliffs need the material blend (configured_terrain_cliffs).
+    if (std::strcmp(key, "terrain_cliffs") == 0 && configured_value(config, "terrain_blend") <= 0)
+        return "needs material blend";
+    // The 64-bit render host cannot run on 32-bit Windows or without its exe.
+    if (std::strcmp(key, "x64_render_host") == 0) return x64remote::host_unavailable_reason();
+    // The Upscaling method (dlss_frame.h): DLSS runs in the 64-bit host on an
     // RTX card, FSR on any Direct3D 11.3 card; greyed only when neither can.
     // A saved unavailable DLSS must still be changeable to Off in this menu.
     if (std::strcmp(key, "upscaler") == 0 && dlss_unavailable_reason() && fsr_unavailable_reason()
-        && integer("upscaler") != kUpscalerDlss)
+        && configured_value(config, "upscaler") != kUpscalerDlss)
         return "no upscaler available";
     const int upscaler = active_upscaler(config);
     if (upscaler == kUpscalerDlss && dlss_unavailable_reason() &&
-        (is("upscaler_quality") || is("upscale_sharpness"))) return dlss_unavailable_reason();
+        (std::strcmp(key, "upscaler_quality") == 0 || std::strcmp(key, "upscale_sharpness") == 0)) return dlss_unavailable_reason();
     // Quality and sharpening belong to a running upscaler.
     if ((std::strcmp(key, "upscaler_quality") == 0 || std::strcmp(key, "upscale_sharpness") == 0) &&
         upscaler == kUpscalerOff)
@@ -1785,12 +1739,17 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
     ImGui::TableNextColumn();
     ImGui::PushID(setting.key);
     ImGui::SetNextItemWidth(-FLT_MIN);
-    const char* note = blocked_option_note(config, setting.key);
-    ImGui::BeginDisabled(note != nullptr);
     switch (option->type) {
     case RendererOptionType::boolean: {
         bool value = option->boolean_value;
+        const char* note = blocked_option_note(config, setting.key);
+        ImGui::BeginDisabled(note != nullptr);
         if (ImGui::Checkbox("##value", &value)) config.set_boolean(setting.key, value);
+        ImGui::EndDisabled();
+        if (note) { ImGui::SameLine(); ImGui::TextDisabled("%s", ui_text(note)); }
+        // The renderer this session actually runs (read-only).
+        if (g_running_renderer && std::strcmp(setting.key, "x64_render_host") == 0)
+            ImGui::TextDisabled(ui_text("Running: %s"), ui_text(g_running_renderer));
         // A switch with a "<key>_weight" percent option (critter types) shows
         // that weight beside it, greyed while the switch is off.
         const RendererOption* weight = config.find((std::string(setting.key) + "_weight").c_str());
@@ -1806,7 +1765,6 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
             ImGui::EndDisabled();
             ImGui::SetItemTooltip("%s", ui_text("How often this type is picked against the other types that fit the place. "
                                                 "100% is the normal mix; 0% keeps it away. The number of critters stays the same."));
-            ImGui::EndDisabled();
             ImGui::PopID();
             return;
         }
@@ -1921,8 +1879,6 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
         break;
     }
     }
-    ImGui::EndDisabled();
-    if (note) ImGui::TextDisabled("%s", ui_text(note));
     ImGui::SetItemTooltip("%s", tooltip);
     ImGui::PopID();
 }

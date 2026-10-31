@@ -477,7 +477,7 @@ HRESULT Renderer::composite_world(){
   else if(scene_composite_.scaled()){
    transition_profile_pass("scene_upscale");
    (void)plan_pass("scene_upscale",backbuffer_rtv_.Get(),interface_dsv_.Get()!=world_dsv_.Get()?interface_dsv_.Get():nullptr,plan_read(PlanTarget::world_color)|plan_read(PlanTarget::world_depth));
-   // At native AA size the world depth is also the interface depth.
+   // DLAA (a failed DLSS frame) renders at output size: the world depth is the interface depth.
    const bool separate_depth=interface_dsv_.Get()!=world_dsv_.Get();
    scene_composite_.upscale(context_.Get(),backbuffer_rtv_.Get(),separate_depth?depth_srv_.Get():nullptr,separate_depth?interface_dsv_.Get():nullptr);
    profiler_.add_draw(1,1);profiler_.add_batch();
@@ -931,7 +931,7 @@ void Renderer::begin_scene_renderer(){
   native_shadows_enabled_=shadows;native_shadow_side_=shadow_side;
   native_point_shadow_side_=point_side;native_close_shadow_cascades_=close_cascades;
   native_far_shadows_enabled_=far_shadows;native_point_shadows_enabled_=point_shadows;
-  bridge_set_shadow_settings(shadow_side,close_cascades,far_shadows,point_shadows,shadows);
+  bridge_set_shadow_settings(shadow_side,close_cascades,far_shadows,point_shadows);
   shadow_history_valid_=false;native_shadow_valid_.fill(false);native_shadow_frame_={};
   native_shadow_dirty_mask_=native_shadow_cleared_mask_=0;native_shadow_failed_=false;
   native_shadow_constants_dirty_=true;

@@ -16,6 +16,13 @@ source commit supplies the exact modified-tree identity. EID3D11 renderer by
 Ilufus. Upstream LICENSE.md and NOTICE.md, including all Required Notice
 lines, are preserved beside this document.
 
+Rework 1 (2026-10-31): cave sun retirement, cached-domain selection and
+receiver admission follow ef7e1246 exactly. The local sun_shadows bridge
+field/argument and its settings-revision domain gate are removed. The
+upstream shadows option, its labels and config persistence are preserved.
+Conflict blocks use upstream code with the necessary embedded texture,
+device, memory-counter, DLSS-refusal and unavailable-scene-thread seams.
+
 Preserved local integration:
 - EID3D11_EMBEDDED typed inputs, source-managed world/UI/text/preview and
   active mounts; no retail-x86 address readers, hooks or inline/naked asm
@@ -25,7 +32,7 @@ Preserved local integration:
 - FIG1/FIG8 static LOD, retained world-space indexing, pose-node scale from
   X64NAVFIX01, opacity batching and asynchronous samgbur01 GPU/F10 readback.
 - Immutable resource sharing/retirement, embedded texture composition,
-  neighbour border fog and shadow-domain settings revision/invalidation.
+  neighbour border fog and upstream cave shadow-domain selection.
 - Native NGX backend with the EIRebuild64 ProjectID and explicit DLSS refusal.
   Upstream Host/dlss lifetime fix and dedicated NGX worker are adapted here
   without the remote protocol. All NGX entry points execute on that worker;

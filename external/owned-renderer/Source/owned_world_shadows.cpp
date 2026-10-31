@@ -1386,7 +1386,7 @@ bool execute_owned_shadow_pass(bool terrain_enabled,
  PERF06_SCOPE("sun_shadow_total");
     auto& frame=g_owned_visual_world_frame;
     frame.shadow_attempted=true;
-    if(!frame.shadows_enabled || !g_owned_shadow_settings.sun_shadows){frame.shadow_ready=true;return true;}
+    if(!frame.shadows_enabled){frame.shadow_ready=true;return true;}
     // Caves have no sun (cave_lighting.h): retire the sun maps once on entry
     // (an empty frame) and schedule no cascade while the zone stays a cave.
     static thread_local bool cave_sun_retired=false;
@@ -2363,11 +2363,10 @@ bool prepare_owned_world_shadows_from(OwnedShadowInputs in,
         const bool terrain_enabled=(flags&0x100u)!=0 && g_owned_terrain_frame.source_values.terrain;
         std::vector<NativeWorldBounds> receivers;
         CityRetainedOwnerGuard decision_timing(CityRetainedOwner::shadow_input_decision);
-        // Caves have no sun; point shadows retain their independent setting.
-        const bool sun=pass.shadows_enabled && g_owned_shadow_settings.sun_shadows && !g_native_world_lighting_frame.cave;
-        const auto configured_domain=sun ? shadow_scene.shadow_input_domain() : nullptr;
-        const auto cached=configured_domain && configured_domain->settings_revision==g_owned_shadow_settings_revision
-            ? configured_domain : nullptr;
+        // Caves have no sun (cave_lighting.h): no sun maps, receivers or
+        // retained sun domain there; point shadows keep pass.shadows_enabled.
+        const bool sun=pass.shadows_enabled && !g_native_world_lighting_frame.cave;
+        const auto cached=sun ? shadow_scene.shadow_input_domain() : nullptr;
         const auto changes=shadow_scene.shadow_source_changes(cached?cached->source_revision:0);
         std::shared_ptr<const RetainedVisualFrame> values=std::move(in.values);
         CityRetainedOwnerGuard point_lighting_timing(CityRetainedOwner::lighting_publish);
@@ -2447,7 +2446,6 @@ bool prepare_owned_world_shadows_from(OwnedShadowInputs in,
             try {
                 auto next=std::make_shared<RetainedShadowInputDomain>();
                 next->source_revision=shadow_source_revision;
-                next->settings_revision=g_owned_shadow_settings_revision;
                 next->world_to_clip=world_to_clip;
                 next->lighting=shadow_lighting;
                 next->class_flags=flags;

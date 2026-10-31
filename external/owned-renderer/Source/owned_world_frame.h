@@ -415,7 +415,6 @@ struct OwnedShadowSettings {
     std::uint8_t close_cascades = 3;
     bool far_shadows = true;
     bool point_shadows = true;
-    bool sun_shadows = true;
     float close_range = 80;  // close shadow band length (m), shadow_close_range
 };
 
@@ -543,7 +542,6 @@ extern thread_local NativeShadowTerrainBakeFn g_native_sink_shadow_terrain_bake;
 extern thread_local NativeGeometrySubmitFn g_native_sink_submit;
 extern thread_local std::uint64_t g_object_render_presentation_serial;
 extern OwnedShadowSettings g_owned_shadow_settings;
-extern std::uint64_t g_owned_shadow_settings_revision;
 void report_owned_shadow_pass_failure(const char* reason) noexcept;
 extern int g_point_shadow_fast_overlays;
 extern float g_point_shadow_merge_distance;

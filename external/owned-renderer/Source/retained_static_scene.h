@@ -570,7 +570,6 @@ struct RetainedShadowActiveTerrainValue {
 // material/mesh pointers never enter this durable value.
 struct RetainedShadowInputDomain {
     std::uint64_t source_revision = 0;
-    std::uint64_t settings_revision = 0;
     std::array<float,16> world_to_clip{};
     NativeWorldLighting lighting{};
     std::uint32_t class_flags = 0;

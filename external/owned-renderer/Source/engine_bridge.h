@@ -1353,7 +1353,7 @@ void bridge_profile_api_entry(const char* kind, const void* caller);
 void bridge_set_profile_enabled(bool enabled);
 void bridge_set_shadow_close_range(float metres) noexcept;
 void bridge_set_shadow_settings(std::uint32_t map_side,
-    std::uint8_t close_cascades,bool far_shadows,bool point_shadows,bool sun_shadows = true) noexcept;
+    std::uint8_t close_cascades,bool far_shadows,bool point_shadows) noexcept;
 void bridge_set_point_shadow_merge_distance(float distance) noexcept;
 void bridge_set_point_shadow_fast_overlays(int count) noexcept;
 // Renderer-owned game cursor: the game keeps choosing cursor id, animation,
