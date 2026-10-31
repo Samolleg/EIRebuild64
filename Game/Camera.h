@@ -322,6 +322,7 @@ public:
     virtual EClassIDs WhoAmI() const { return HPC_CAMERA; };
 public:
     virtual void Store(SaveSchema::Writer &) const;
+    void Store(SaveSchema::Writer &, bool withCarrier) const;
     virtual void Load(SaveSchema::Reader &);
     virtual void DiscardSave();
 };

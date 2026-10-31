@@ -43,6 +43,10 @@ void CI3DScreenGlobalMap::StoreSpecific()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenGlobalMap::OnActivate()
 {
+    // The global map has no hero objects; detach the departed mission carrier
+    // before a manual save or the activation autosave captures the camera.
+    theCamera.ResetTracking();
+
     bNeedAutosave = false;
     if (interfaceState.GetSize())
         interfaceState.SetSize(0);

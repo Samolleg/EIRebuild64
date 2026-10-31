@@ -695,7 +695,9 @@ bool Slot::StoreZone(const char *name)
 {
     if(theWorldServer.Settlements().DialogueActive())return false;
     CheckedName(name);Document d;BindWorld(d,{&theWorldServer,[](CWorldServer *){}},true);
-    visited[name]=Encode(d,[&](Writer &w){World(w,theWorldServer);theCamera.Store(w);if(auto *mod=ModRuntime::Current())mod->StoreSaveState(w);else Invalid("missing mod");});
+    // Party objects have already been removed from this zone. The arriving
+    // party selects its own camera carrier; only the view belongs to the zone.
+    visited[name]=Encode(d,[&](Writer &w){World(w,theWorldServer);theCamera.Store(w,false);if(auto *mod=ModRuntime::Current())mod->StoreSaveState(w);else Invalid("missing mod");});
     return true;
 }
 bool Slot::LoadZone(const char *name)

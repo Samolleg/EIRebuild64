@@ -1625,6 +1625,10 @@ void CParty::DiscardSave()
 
 void CCamera::Store(SaveSchema::Writer &w) const
 {
+    Store(w,true);
+}
+void CCamera::Store(SaveSchema::Writer &w, bool withCarrier) const
+{
     Field(w, ptAnchorPoint);
     Field(w, fAnchorHeight);
     Field(w, qRotate);
@@ -1634,9 +1638,11 @@ void CCamera::Store(SaveSchema::Writer &w) const
     Field(w, rotate);
     Field(w, pitch);
     Field(w, zoom);
-    w.MapReference(dwCarrierID);
+    // The departing zone no longer owns the party followed by this camera.
+    // Keep the same nullable-reference wire field, without weakening full saves.
+    if(withCarrier)w.MapReference(dwCarrierID);else w.UInt64(0);
     Field(w, shortcuts);
-    w.UInt32(GetFlags());
+    w.UInt32(withCarrier?GetFlags():GetFlags()&~CAM_FPS_MODE);
     w.Bool(campPlacementValid);
     if(campPlacementValid){
         Field(w,campPlacement.position);Field(w,campPlacement.anchor);
