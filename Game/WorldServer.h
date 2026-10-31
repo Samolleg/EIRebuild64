@@ -281,7 +281,7 @@ public:
     void SetupTrap(CItemQuick *pTrap, CUnit *pWho);
     // segment
     BOOL Segment();
-    void WorldSegment(bool bForceScriptRun = false);
+    void WorldSegment(bool bForceScriptRun = false, bool runScripts = true);
     // active objects handling
     void AddActiveSpot(const CPlot3D &ptCenter, float fpRadius);
     // load secondary script

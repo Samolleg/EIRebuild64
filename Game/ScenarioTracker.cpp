@@ -130,6 +130,7 @@ void SPartySet::SetPartyFromServer(CParty &res)
     for (int i = 0; i < parties.size(); i++)
     {
         parties[i]->heroes.vars = vars;
+        parties[i]->heroes.settlementIds = res.settlementIds;
         parties[i]->heroes.szCurrentZone = szZone;
         parties[i]->heroes.nEntrance = res.nEntrance;
     }

@@ -1138,6 +1138,7 @@ void CI3DScreenMission::PerformAction(CUnit *pU, CPoint point)
                 if (pU == pUnits[i])
                 {
                     pI3D->BeginFX("buttons\\battle\\on_off.wav");
+                    if (pI3D->IsLDblClk() && RequestSettlementDialogue(pU->GetID())) return;
                     if (pI3D->IsLDblClk())
                         CenterCamera(i);
                     else

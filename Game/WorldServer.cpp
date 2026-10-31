@@ -998,7 +998,7 @@ void CWorldServer::StartServer(EServerMode mode)
 
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CWorldServer::WorldSegment(bool bForceScriptRun)
+void CWorldServer::WorldSegment(bool bForceScriptRun, bool runScripts)
 {
     if (settlementMobs.DialogueActive()) return;
     CorePerf::Scope coreTiming(CorePerf::WorldSegment);
@@ -1050,9 +1050,9 @@ void CWorldServer::WorldSegment(bool bForceScriptRun)
     }
     coreSpells.Finish();
     // CRAP - single player only, in mission run script only if party is deployed
-    if (bCanRunScript || bForceScriptRun) // curInterface != IFACE_MISSION || bCanRunScript )
+    if (runScripts && (bCanRunScript || bForceScriptRun)) // curInterface != IFACE_MISSION || bCanRunScript )
     { CorePerf::Scope coreScript(CorePerf::Script); script.Segment(); }
-    { CorePerf::Scope coreTiming(CorePerf::ScriptTemp);
+    if (runScripts) { CorePerf::Scope coreTiming(CorePerf::ScriptTemp);
     scriptTemp.Segment(); }
     // Call segment for map objects
     ActiveObjectsSegment();
@@ -1491,6 +1491,9 @@ void CWorldServer::DeployPersonages(CPlayer *pPlayer, CPersonages &people, const
         }
         //
         me.p_nID = pers.nID; // if ID is -1 it is assigned automatically
+        Settlement::Name origin;
+        if (Settlement::ParseName((LPCSTR)pers.szInternalName,origin) && GetMapObject(me.p_nID))
+            throw SaveSchema::Error(SaveSchema::ErrorCode::Identity,"travelling settlement actor collides with map object");
         ASSERT(!GetMapObject(me.p_nID));
         if (GetMapObject(me.p_nID))
             RemoveMapObject(me.p_nID);
@@ -1750,12 +1753,15 @@ void CWorldServer::RemovePersonages(CPersonages &people, CWorld *pParty, SDeploy
                         pers.AddWeapon(
                             CSmartPtr<CItemWeapon>((CItemWeapon *)pParty->DuplicateItem(pWeapon)));
                 }
+                std::map<CItemArmor *,CItemArmor *> savedArmor;
                 for (k = 0; k < RPG_NUM_ARMOR_TYPES; k++)
                 {
                     CItemArmor *pItem = pUnit->GetQArmor(k);
-                    if (pItem)
-                        pers.AddArmor(
-                            CSmartPtr<CItemArmor>((CItemArmor *)pParty->DuplicateItem(pItem)));
+                    if (pItem) {
+                        auto *copy=static_cast<CItemArmor *>(pParty->DuplicateItem(pItem));
+                        savedArmor.emplace(pItem,copy);
+                        pers.AddArmor(CSmartPtr<CItemArmor>(copy));
+                    }
                 }
                 for (k = 0; k < QI_MAX_ITEMS; k++)
                 {
@@ -1776,6 +1782,14 @@ void CWorldServer::RemovePersonages(CPersonages &people, CWorld *pParty, SDeploy
                             CSmartPtr<CItemSpell>((CItemSpell *)pParty->DuplicateItem(pItem)));
                 }
                 pUS->GetRPGStats(&pers.stats);
+                // Hit-location references must follow the persistent equipment,
+                // not the live items that are about to leave this world.
+                for (auto &hit:pers.stats.hls) for (auto &layer:hit.layers) for (auto &item:layer.lpItems)
+                    if (item) {
+                        const auto found=savedArmor.find(dynamic_cast<CItemArmor *>(item));
+                        if (found==savedArmor.end()) throw SaveSchema::Error(SaveSchema::ErrorCode::Identity,"party armor outside departing unit");
+                        item=found->second;
+                    }
                 if (curInterface == IFACE_MISSION)
                 {
                     pers.pose = pUnit->GetShowPose();
@@ -1905,6 +1919,7 @@ void CWorldServer::DeployPlayerParty(CPlayer *pPlayer, SDeployPlayerInfo *pInfo,
     if (!pPlayer)
         return;
 
+    settlementMobs.RememberIds(pPlayer->party);
     DeployPlayerItems(pPlayer);
     //
     if (curInterface != IFACE_MISSION && curInterface != IFACE_BASE)
@@ -1955,7 +1970,11 @@ void CWorldServer::DeployPlayerParty(CPlayer *pPlayer, SDeployPlayerInfo *pInfo,
     }
     pPlayer->nTimeWasAddedSegment = GetSegmentTimeCounter();
 
-    if (curInterface == IFACE_BASE)
+    if (!settlementMobs.Empty()) {
+        script.PartyTravel(pPlayer->party,false);
+        scriptTemp.PartyTravel(pPlayer->party,false);
+    }
+    if (curInterface == IFACE_BASE || !settlementMobs.Empty())
         RecalcMercBriefings();
     // CRAP, single player only version, solves problems with hide/unhide on base script
     if (bExecScript)
@@ -1998,6 +2017,12 @@ void CWorldServer::RemovePlayerParty(CPlayer *pPlayer, SDeployPlayerInfo *pInfo)
     }
     for (i = 0; i < pPlayer->party.people.GetSize(); i++)
         pers.Add(&pPlayer->party.people[i]);
+    // Retain script bindings while these living actors travel outside the map.
+    if (!settlementMobs.Empty()) {
+        settlementMobs.RememberIds(pPlayer->party);
+        script.PartyTravel(pPlayer->party,true);
+        scriptTemp.PartyTravel(pPlayer->party,true);
+    }
     // get items and stats from alive ones
     RemovePersonages(pers, &pPlayer->party, pInfo);
 }
@@ -2109,6 +2134,7 @@ bool CWorldServer::HasMerc(CPlayer *pPlayer, int nID)
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::RecalcMercBriefings()
 {
+    settlementMobs.RecalcMercBriefings(*this);
     const auto* mod = ModRuntime::Current();
     const int mercLimit = mod && mod->SpellAddon().Feature12() >= 1 ? 5 : 2;
     CPlayerIterator playerIter;
@@ -2298,6 +2324,7 @@ void CWorldServer::BriefingComplete(int nPlayer, const char *pszBriefing)
     }
     CPlayer *pPlayer = GetPlayer(nPlayer);
     if (settlement && (!pPlayer || pPlayer->party.vars.GetVar(pszBriefing) != 1.f)) return;
+    if (settlement && !settlementMobs.CompleteMercBriefing(*this,nPlayer,pszBriefing)) return;
     CString szRunBrf;
     if (settlement)
         szRunBrf.Format("WorldScript( #OnBriefingComplete( %i, \"%s\" ) )", nPlayer, pszBriefing);
@@ -3538,7 +3565,8 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
     bLoadStatic = true;
     ownedSource->Succeeded(true);
     ownedSource.reset(); // Publish the main source before any supplemental MOB.
-    if (!bStaticOnly && !settlementMobs.Load(*this)) return FALSE;
+    auto &campaign=theHat.GetSinglePlayerPartySet();
+    if (!bStaticOnly && !settlementMobs.Load(*this,campaign.GetParty(campaign.szCurrentParty))) return FALSE;
     if (hasSettlement && !bStaticOnly) CreateInitialUpdate();
     if(auto*mod=ModRuntime::Current())mod->ResetRuntimeState();
     return TRUE;

@@ -7,6 +7,8 @@ namespace SaveSchema { class Writer; class Reader; }
 #include "GSVars.h"
 #include "RPGSystem.h"
 #include "Object.h"
+#include <map>
+#include <string>
 #include "ServerConsts.h"
 
 /////////////////////////////////////////////////////////////////////////////////////
@@ -99,6 +101,8 @@ public:
     CPartySaveArray<CItem *, CSimplyArray<CItem *, CItem *>> allWagonItems;
     int nMoney; // типа общие деньги
     CGSVariableSet vars;
+    // Campaign-wide qualified local IDs, including absent and dead actors.
+    std::map<std::string, int> settlementIds;
     CString szCurrentZone; // имя текущей зоны
     int nEntrance;         // номер входа, через который группа должна попасть на зону
 

@@ -206,7 +206,7 @@ void Slot::CopyParty(CParty &dst,const CParty &src)
     for(INT_PTR i=0;i<dst.people.GetSize();++i)
         for(auto &hit:dst.people[i].stats.hls)for(auto &layer:hit.layers)for(auto &item:layer.lpItems)
             if(item){auto found=copies.find(dynamic_cast<CItem *>(item));if(found==copies.end())Invalid("party armor reference outside inventory");item=found->second;}
-    dst.nMoney=src.nMoney;dst.vars=src.vars;dst.szCurrentZone=src.szCurrentZone;dst.nEntrance=src.nEntrance;
+    dst.nMoney=src.nMoney;dst.vars=src.vars;dst.settlementIds=src.settlementIds;dst.szCurrentZone=src.szCurrentZone;dst.nEntrance=src.nEntrance;
 
 }
 void Slot::BindParty(Document &d,CParty &party,std::shared_ptr<void> owner)
@@ -806,7 +806,20 @@ bool Slot::Load(const char *name)
             PrepareScenario(state->scenario);Decode(state->scenario,[&](Reader &r){Scenario(r,*state->scenario.scenario);});
             for(auto &d:state->zones){PrepareWorld(d);d.camera=std::make_unique<CCamera>();d.camera->detachedSave=true;Decode(d,[&](Reader &r){World(r,*d.world);d.camera->Load(r);d.mod=CModPackage::LoadSaveState(r);});
             }
-            for(auto &d:state->zones)FinalizeWorld(d);
+            auto *campaign=state->scenario.scenario->singleParty.GetParty(state->scenario.scenario->singleParty.szCurrentParty);
+            if(!campaign)Invalid("missing settlement campaign");
+            for(auto &d:state->zones){
+                const auto before=campaign->settlementIds;
+                d.world->Settlements().RememberIds(*campaign);
+                if(before!=campaign->settlementIds)Invalid("saved zone has identities absent from campaign");
+                d.world->GetPlayerManager()->ForEach([&](CGameBase *object){
+                    auto *player=dynamic_cast<CPlayer *>(object);if(!player)return;
+                    const auto ids=player->party.settlementIds;
+                    d.world->Settlements().RememberIds(player->party);
+                    if(ids!=player->party.settlementIds || ids!=campaign->settlementIds)Invalid("saved player settlement identity mismatch");
+                });
+                FinalizeWorld(d);
+            }
             state->next=ObjectIdentity::GetNext();
         }
         state->zones.erase(std::remove_if(state->zones.begin(),state->zones.end(),[&](const Document &d){return d.zone!=state->current.c_str();}),state->zones.end());

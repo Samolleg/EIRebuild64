@@ -280,6 +280,7 @@ void CScriptObject::Clear()
         pObject->Release();
     }
     pObject = NULL;
+    travellingId = -1;
 }
 
 void CScriptObject::SetObject(CMapObject *pObj)
@@ -293,8 +294,27 @@ void CScriptObject::SetObject(CMapObject *pObj)
 void CScriptObject::Copy(const CScriptObject &a)
 {
     pObject = a.pObject;
+    travellingId = a.travellingId;
     if (pObject)
         pObject->AddRef();
+}
+
+// Only explicit party departure can park a reference. Ordinary death/deletion
+// keeps the usual invalid-reference behavior and cannot resurrect an actor.
+void CScriptObject::PartyTravel(CWorldServer &world, const CParty &party, bool leaving)
+{
+    if (leaving) {
+        if (!pObject) return;
+        for (int i=0;i<party.people.GetSize();++i)
+            if (party.people[i].nID==pObject->GetID() && !pObject->IsDead()) {
+                const int id=pObject->GetID(); Clear(); travellingId=id; return;
+            }
+    } else if (travellingId>=0) {
+        const int id=travellingId;
+        bool member=false;
+        for (int i=0;i<party.people.GetSize();++i) member|=party.people[i].nID==id;
+        SetObject(member ? world.GetUnit(id) : nullptr);
+    }
 }
 
 /*CMapObject* CScriptObject::GetObject()
@@ -551,7 +571,7 @@ void CScriptObjectGroup::CheckObjectRefs()
     for (i = 0; i < members.GetSize();)
     {
         members[i].CheckObjectRefs();
-        if (members[i].GetObject())
+        if (members[i].GetObject() || members[i].TravellingId()>=0)
             i++;
         else
             members.RemoveAt(i);
@@ -1901,6 +1921,14 @@ BOOL CScriptThreadState::Segment(CScript *pScript)
                 pUnit->SetOwner(NULL);
             break;
         case SC_ADDUNITTOPARTY: // relies on local hat, single only
+            if (script.CurrentSettlement()) {
+                Settlement::Name name;
+                const std::string value=(LPCSTR)pCmd->szParams[0];
+                const auto actor=Settlement::ParseName(value,name) ? value : Settlement::Prefix(script.CurrentSettlement())+value;
+                if (!theWorldServer.Settlements().Recruit(theWorldServer,int(pCmd->params[0]),actor))
+                    ReportError("Cannot recruit settlement actor: %s",actor.c_str());
+                break;
+            }
             pPlayer = theWorldServer.GetPlayer((int)pCmd->params[0]);
             if (pPlayer)
             {
@@ -1911,6 +1939,14 @@ BOOL CScriptThreadState::Segment(CScript *pScript)
             }
             break;
         case SC_REMOVEUNITFROMPARTY: // relies on local hat, single only
+            if (script.CurrentSettlement()) {
+                Settlement::Name name;
+                const std::string value=(LPCSTR)pCmd->szParams[0];
+                const auto actor=Settlement::ParseName(value,name) ? value : Settlement::Prefix(script.CurrentSettlement())+value;
+                if (!theWorldServer.Settlements().Dismiss(theWorldServer,int(pCmd->params[0]),actor))
+                    ReportError("Cannot dismiss settlement actor: %s",actor.c_str());
+                break;
+            }
             pPlayer = theWorldServer.GetPlayer((int)pCmd->params[0]);
             if (pPlayer)
             {
@@ -3133,6 +3169,25 @@ void CScript::CheckObjectRefs()
         runningScripts.GetNext(pos).CheckObjectRefs();
     globalVars.CheckObjectRefs();
     ReleaseTemp();
+}
+
+void CScript::PartyTravel(const CParty &party, bool leaving)
+{
+    auto object=[&](CScriptObject &value){value.PartyTravel(theWorldServer,party,leaving);};
+    auto group=[&](CScriptObjectGroup &value){
+        for(int i=0;i<value.members.GetSize();++i)object(value.members[i]);
+        if(!leaving)value.CheckObjectRefs();
+    };
+    auto variables=[&](SScriptVariablesSet &v){
+        for(int i=0;i<v.oVars.GetSize();++i)object(v.oVars[i]);
+        for(int i=0;i<v.gVars.GetSize();++i)group(v.gVars[i]);
+    };
+    variables(globalVars);
+    for(int i=0;i<scripts.GetSize();++i)variables(scripts[i].vars);
+    for(POSITION p=runningScripts.GetHeadPosition();p;)variables(runningScripts.GetNext(p).vars);
+    for(POSITION p=runningThreads.GetHeadPosition();p;)variables(runningThreads.GetNext(p).variables);
+    for(POSITION p=tempObjects.GetHeadPosition();p;)object(tempObjects.GetNext(p));
+    for(POSITION p=tempGroups.GetHeadPosition();p;)group(tempGroups.GetNext(p));
 }
 
 void CScript::Segment()

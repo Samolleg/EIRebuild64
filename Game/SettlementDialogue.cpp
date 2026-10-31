@@ -70,6 +70,7 @@ bool World::DialogueReady(CWorldServer &world, int player, int target) const
 }
 std::uint64_t World::BeginDialogue(CWorldServer &world, int player, int target)
 {
+    RecalcMercBriefings(world);
     if (!DialogueReady(world, player, target)) return 0;
     const auto topics = DialogueTopics(world, player, target);
     Name name; ParseName(topics.front().name, name);

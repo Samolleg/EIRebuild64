@@ -23,6 +23,8 @@ namespace SaveSchema { class Writer; class Reader; }
 namespace Settlement {
 struct TradeState;
 struct TradeAccess;
+void StorePartyIds(SaveSchema::Writer &writer, const CParty &party);
+void LoadPartyIds(SaveSchema::Reader &reader, CParty &party);
 enum class TradeAction { Deal, Equip, Unequip };
 
 // Public identities never depend on the order in which MOBs were loaded.
@@ -140,7 +142,12 @@ public:
     bool Contains(std::uint32_t id) const { return instances.count(id) != 0; }
     bool Reserved(int runtimeId) const;
     bool Admitting() const { return admitting; }
-    bool Load(CWorldServer &world);
+    bool Load(CWorldServer &world, const CParty *campaign);
+    void RememberIds(CParty &party) const;
+    void RecalcMercBriefings(CWorldServer &world);
+    bool CompleteMercBriefing(CWorldServer &world, int player, const std::string &key);
+    bool Recruit(CWorldServer &world, int player, const std::string &actor);
+    bool Dismiss(CWorldServer &world, int player, const std::string &actor, bool goodbye = false);
     bool HasMob(std::uint32_t id, const std::string &mob) const;
     bool UsesMob(const std::string &mob) const;
     std::string ObjectName(CWorldServer &world, std::uint32_t context, int runtimeId) const;

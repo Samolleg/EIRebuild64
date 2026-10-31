@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <string>
 class CWorldServer;
+class CParty;
 #include "SaveSchema.h"
 /*==========================================================================================================
 
@@ -194,6 +195,8 @@ struct SOneScript;
 // одна переменная скрипта описывающая объект
 class CScriptObject
 {
+    friend struct SaveSchema::ScriptCodec;
+    int travellingId = -1;
     CMapObject *pObject; // указатель на объект в случае ptObject, для этого объекта делаетс
                          // AddRef() для сохранения валидности ссылки
 
@@ -211,6 +214,8 @@ public:
         return *this;
     }
     void SetObject(CMapObject *pObj);
+    int TravellingId() const { return travellingId; }
+    void PartyTravel(CWorldServer &world, const CParty &party, bool leaving);
     CMapObject *GetObject() const { return pObject; }
     CMapObjectServer *GetSpecific();
     CUnit *GetUnit();
@@ -227,6 +232,7 @@ public:
 // по возрастанию порядке
 class CScriptObjectGroup
 {
+    friend class CScript;
     friend struct SaveSchema::ScriptCodec;
     CAArray<CScriptObject, CScriptObject &> members;
 
@@ -760,6 +766,7 @@ public:
 
     void Segment();
     void CheckObjectRefs();
+    void PartyTravel(const CParty &party, bool leaving);
 
     // Load/Store
     // считать скрипт из памяти, первичный либо вторичный( если один LoadText уже был )

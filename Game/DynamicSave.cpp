@@ -624,8 +624,14 @@ struct ScriptCodec
         const auto count=r.Count();
         for (std::uint32_t i=0; i<count; ++i) field(a.GetAt(a.AddTail(T{})));
     }
-    static void Object(Writer &w, const CScriptObject &v) { w.GameReference(v.GetObject()); }
-    static void Object(Reader &r, CScriptObject &v) { v.SetObject(r.GameReferenceAs<CMapObject>()); }
+    static void Object(Writer &w, const CScriptObject &v) {
+        w.GameReference(v.GetObject()); w.Int32(v.travellingId);
+    }
+    static void Object(Reader &r, CScriptObject &v) {
+        v.SetObject(r.GameReferenceAs<CMapObject>()); v.travellingId=r.Int32();
+        if(v.travellingId < -1 || (v.travellingId>=0 && (v.GetObject() || !v.travellingId)))
+            Invalid("invalid travelling party reference");
+    }
     static void Group(Writer &w, const CScriptObjectGroup &v)
     {
         Items(w,v.members,[&](const CScriptObject &o){Object(w,o);});

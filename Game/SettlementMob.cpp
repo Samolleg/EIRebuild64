@@ -8,6 +8,12 @@
 #include "SaveSchema.h"
 #include "GameJournal.h"
 #include "UnitServer.h"
+#include "PlayerServer.h"
+#include "PlayerClient.h"
+#include "WorldClient.h"
+#include "Item.h"
+#include "Party.h"
+#include "MapObjectServer.h"
 #include "OwnedRender/E1MobSource.h"
 #include <algorithm>
 #include <cctype>
@@ -287,6 +293,24 @@ int World::Object(CWorldServer &world, std::uint32_t context, const std::string 
         if (ParseName(local, name)) { context = name.settlement; local = name.local; actorName = true; }
         if (!context) return actorName ? GetPersonageIDByName(local.c_str()) : Number(local);
         if (!visited.emplace(context, Lower(local)).second) Fail("cyclic object import: " + reference);
+        if (!Contains(context)) {
+            // A recruited actor remains addressable from another map by its public ID.
+            const auto *def=CurrentCatalog().Find(context);
+            auto *player=world.GetPlayer(0);
+            if (!def || !player) Fail("settlement actor is not available: "+reference);
+            int id=-1;
+            if (LocalObjectID(local)) id=Number(local.substr(2));
+            else {
+                const auto alias=def->aliases.find(Lower(local));
+                if (alias!=def->aliases.end())id=alias->second;
+            }
+            const auto key=Prefix(context)+"id"+std::to_string(id);
+            const auto found=player->party.settlementIds.find(key);
+            if (found==player->party.settlementIds.end())Fail("unknown travelling actor: "+reference);
+            const auto *person=player->party.GetPersonage(found->second);
+            if (!person || person->szInternalName!=key.c_str())Fail("actor is not travelling with this party: "+reference);
+            return found->second;
+        }
         const auto &def = GetDefinition(context);
         const auto &instance = instances.at(context);
         if (actorName) {
@@ -316,6 +340,12 @@ std::string World::ObjectName(CWorldServer &world, std::uint32_t context, int ru
     for (const auto &instance : instances)
         for (const auto &object : instance.second.objects)
             if (object.second == runtimeId) return Prefix(instance.first) + "id" + std::to_string(object.first);
+    if (auto *player=world.GetPlayer(0))
+        for (const auto &binding:player->party.settlementIds)
+            if (binding.second==runtimeId) {
+                const auto *person=player->party.GetPersonage(runtimeId);
+                if (person && person->szInternalName==binding.first.c_str())return binding.first;
+            }
     if (context) {
         for (const auto &import : GetDefinition(context).objectImports)
             if (ImportedObject(world, import.second) == runtimeId) return Prefix(context) + import.first;
@@ -428,7 +458,237 @@ void World::RestoreRenderSources(CWorldServer &world) const noexcept try
     }
 } catch (...) { GameJournal::AllocationFailureInCatch("Settlement renderer restoration"); }
 
-bool World::Load(CWorldServer &world)
+namespace {
+void ValidatePartyIds(const CParty &party)
+{
+    std::set<int> used;
+    for (const auto &binding : party.settlementIds) {
+        Name name;
+        if (!ParseName(binding.first,name) || !LocalObjectID(name.local) ||
+            Prefix(name.settlement)+"id"+std::to_string(Number(name.local.substr(2)))!=binding.first ||
+            binding.second<=0 || IsIDofPersonage(Number(name.local.substr(2)))!=IsIDofPersonage(binding.second) ||
+            !used.insert(binding.second).second) Fail("invalid campaign settlement identity");
+    }
+    for (int i=0;i<party.people.GetSize();++i) {
+        const auto &person=party.people[i]; Name name;
+        if (!ParseName((LPCSTR)person.szInternalName,name)) continue;
+        const auto found=party.settlementIds.find((LPCSTR)person.szInternalName);
+        if (found==party.settlementIds.end() || found->second!=person.nID)
+            Fail("recruited actor lost its campaign identity");
+    }
+}
+int MercLimit()
+{
+    const auto *mod=ModRuntime::Current();
+    return mod && mod->SpellAddon().Feature12()>=1 ? 5 : 2;
+}
+std::string MercKey(std::uint32_t settlement, int merc, int topic)
+{
+    return "b."+Prefix(settlement)+"merc"+std::to_string(merc)+"."+Prefix(settlement)+
+        "n"+std::to_string(topic)+"_"+std::to_string(merc);
+}
+// Persistent equipment is a backing snapshot, not replacement live equipment.
+void CaptureRecruit(CPersonage &person, CParty &party, CUnit &unit, const std::string &key,
+                    const CString &appearance)
+{
+    auto *server=static_cast<CUnitServer *>(unit.GetUnitSpecific());
+    auto *common=server->GetMapObjectServer();
+    person.szInternalName=key.c_str(); person.nID=unit.GetID(); person.szName=unit.GetName();
+    person.szPrototype=unit.GetPrototype()->szName; person.szTemplate=appearance;
+    person.szVoicePrototype=unit.GetVoicePrototype() ? unit.GetVoicePrototype()->szName : person.szPrototype;
+    person.szPrimTexture=common->szPrimTexture; person.szSecondTexture=common->szSecTexture;
+    person.complection=unit.GetBaseComplection(); person.pose=unit.GetShowPose();
+    person.dwCurrentWeapon=unit.GetCurrentWeaponSlotIndex();person.aggression=unit.GetAggression();
+    server->GetRPGStats(&person.stats);
+    std::map<const CItem *,CItem *> copies;
+    auto clone=[&](CItem *item)->CItem * {
+        auto *copy=party.DuplicateItem(item); copy->SetCount(item->GetCount());copies.emplace(item,copy);return copy;
+    };
+    for(int i=0;i<QI_MAX_WEAPONS;++i)if(auto *item=unit.GetQWeapon(i))
+        person.AddWeapon(CSmartPtr<CItemWeapon>(static_cast<CItemWeapon *>(clone(item))));
+    for(int i=0;i<RPG_NUM_ARMOR_TYPES;++i)if(auto *item=unit.GetQArmor(i))
+        person.AddArmor(CSmartPtr<CItemArmor>(static_cast<CItemArmor *>(clone(item))));
+    for(int i=0;i<QI_MAX_ITEMS;++i)if(auto *item=unit.GetQItem(i))
+        person.AddQuick(CSmartPtr<CItemQuick>(static_cast<CItemQuick *>(clone(item))));
+    for(int i=0;i<QI_MAX_SPELLS;++i)if(auto *item=unit.GetQSpellItem(i))
+        person.AddSpell(CSmartPtr<CItemSpell>(static_cast<CItemSpell *>(clone(item))));
+    for(auto &hit:person.stats.hls)for(auto &layer:hit.layers)for(auto &item:layer.lpItems)
+        if(item) {
+            const auto found=copies.find(dynamic_cast<CItem *>(item));
+            if(found==copies.end())Fail("recruited armor outside equipment");item=found->second;
+        }
+}
+void Heroes(CScript &script,CUnit *unit,bool add)
+{
+    auto &vars=script.GetGlobalVars().gVars;
+    const int index=vars.GetVariableIndex("Heroes");
+    if(index<0)return;
+    if(add)vars[index].Add(unit);else vars[index].Remove(unit);
+}
+}
+void StorePartyIds(SaveSchema::Writer &writer,const CParty &party)
+{
+    ValidatePartyIds(party);
+    writer.Count(static_cast<std::uint32_t>(party.settlementIds.size()));
+    for(const auto &binding:party.settlementIds){writer.String(binding.first);writer.Int32(binding.second);}
+}
+void LoadPartyIds(SaveSchema::Reader &reader,CParty &party)
+{
+    party.settlementIds.clear();
+    const auto count=reader.Count();
+    for(std::uint32_t i=0;i<count;++i) {
+        const auto key=reader.String(); const auto id=reader.Int32();
+        if(!party.settlementIds.emplace(key,id).second)Fail("duplicate campaign settlement identity");
+    }
+    ValidatePartyIds(party);
+}
+void World::RememberIds(CParty &party) const
+{
+    auto staged=party.settlementIds;
+    for(const auto &instance:instances)for(const auto &object:instance.second.objects) {
+        const auto key=Prefix(instance.first)+"id"+std::to_string(object.first);
+        const auto found=staged.emplace(key,object.second);
+        if(!found.second && found.first->second!=object.second)Fail("settlement identity differs from campaign: "+key);
+    }
+    std::set<int> used;
+    for(const auto &binding:staged)if(!used.insert(binding.second).second)Fail("settlement campaign ID collision");
+    party.settlementIds.swap(staged);
+    ValidatePartyIds(party);
+}
+bool World::Recruit(CWorldServer &world,int player,const std::string &actor)
+{
+    Name name;
+    if(!ParseName(actor,name) || !Contains(name.settlement))return false;
+    auto *owner=world.GetPlayer(player);
+    auto *unit=world.GetUnit(Object(world,0,actor,true));
+    if(!owner || !unit || unit->IsDead() || unit->GetTypeID()!=MOTID_HUMAN)return false;
+    auto &instance=instances.at(name.settlement);
+    const auto binding=std::find_if(instance.objects.begin(),instance.objects.end(),[&](const auto &o){return o.second==unit->GetID();});
+    if(binding==instance.objects.end())return false; // Imports are not local recruits.
+    const auto key=Prefix(name.settlement)+"id"+std::to_string(binding->first);
+    if(auto *person=owner->party.GetPersonage(unit->GetID()))
+        return person->szInternalName==key.c_str() && unit->GetOwner()==owner;
+    if(unit->GetOwner() || world.GetMercsNumber(player)>=MercLimit() || !CanInteract(world,player,name.settlement,unit))return false;
+    auto *client=theWorld.GetPlayer();auto *peer=client ? client->GetPlayer() : nullptr;
+    auto *view=theWorld.GetUnit(unit->GetID());
+    if(!peer || peer->GetPlayerNumber()!=player || !view || peer->party.GetPersonage(unit->GetID()))return false;
+    // Read only the admitted module's appearance. Stats and equipment come from
+    // the living unit, so recruiting never restores a template's initial values.
+    struct Objects : CBasicObjectMap {~Objects(){for(const auto &o:*this)delete o.second;}} objects;
+    CGameMOBFile reader;CString scriptText,appearance;bool found=false;
+    const auto &source=instance.sources.at(binding->first);
+    if(!reader.Open(world.GetFullMobName(source.c_str()),CFile::modeRead|CFile::shareDenyWrite|CFile::typeBinary) ||
+        !reader.ReadModule(objects,scriptText))return false;
+    reader.Close();
+    for(const auto &object:objects)if(object.second->p_nID==binding->first && object.second->m_eType==MEOT_UNIT) {
+        appearance=static_cast<CMEUnit *>(object.second)->p_szTemplate;found=true;break;
+    }
+    if(!found)return false;
+    RememberIds(owner->party);
+    const auto serverSize=owner->party.people.GetSize(),peerSize=peer->party.people.GetSize();
+    try {
+        owner->party.people.SetSize(serverSize+1);peer->party.people.SetSize(peerSize+1);
+        CaptureRecruit(owner->party.people[serverSize],owner->party,*unit,key,appearance);
+        CaptureRecruit(peer->party.people[peerSize],peer->party,*unit,key,appearance);
+        peer->party.settlementIds=owner->party.settlementIds;
+    } catch(...) {
+        owner->party.people.SetSize(serverSize);peer->party.people.SetSize(peerSize);throw;
+    }
+    auto *control=static_cast<CUnitServer *>(unit->GetUnitSpecific());
+    control->CmdWait();control->logic.SetPlayer();unit->SetPlayerNum(player);unit->SetOwner(owner);
+    view->SetPlayerNum(player);view->SetOwner(peer);
+    Heroes(world.script,unit,true);Heroes(world.scriptTemp,unit,true);
+    GameJournal::Event("SETTLEMENT","recruit","actor=%s map_id=%d object_id=%llu player=%d",key.c_str(),
+        unit->GetID(),static_cast<unsigned long long>(unit->GetRTID()),player);
+    return true;
+}
+bool World::Dismiss(CWorldServer &world,int player,const std::string &actor,bool goodbye)
+{
+    Name name;if(!ParseName(actor,name) || !Contains(name.settlement))return false;
+    auto *owner=world.GetPlayer(player);auto *unit=world.GetUnit(Object(world,0,actor,true));
+    if(!owner || !unit || unit->IsDead() || owner->party.people.GetSize()<2 ||
+        owner->party.people[0].nID==unit->GetID() || !CanInteract(world,player,name.settlement,unit))return false;
+    const auto *person=owner->party.GetPersonage(unit->GetID());
+    const auto key=ObjectName(world,name.settlement,unit->GetID());
+    if(!person || person->szInternalName!=key.c_str() || unit->GetOwner()!=owner)return false;
+    auto *client=theWorld.GetPlayer();auto *peer=client ? client->GetPlayer() : nullptr;
+    auto *view=theWorld.GetUnit(unit->GetID());
+    if(!peer || !view || !peer->party.GetPersonage(unit->GetID()))return false;
+    owner->party.RemovePersonage(unit->GetID());peer->party.RemovePersonage(unit->GetID());
+    Heroes(world.script,unit,false);Heroes(world.scriptTemp,unit,false);
+    unit->SetOwner(nullptr);view->SetOwner(nullptr);
+    unit->SetPlayerNum(GetDefinition(name.settlement).peace.faction);
+    view->SetPlayerNum(GetDefinition(name.settlement).peace.faction);
+    auto *control=static_cast<CUnitServer *>(unit->GetUnitSpecific());
+    control->CmdWait();control->logic.SetIdle();
+    GameJournal::Event("SETTLEMENT",goodbye ? "goodbye" : "dismiss","actor=%s map_id=%d object_id=%llu",
+        key.c_str(),unit->GetID(),static_cast<unsigned long long>(unit->GetRTID()));
+    if(goodbye)world.RemoveMapObject(unit->GetID());
+    return true;
+}
+void World::RecalcMercBriefings(CWorldServer &world)
+{
+    auto *owner=world.GetPlayer(0);if(!owner)return;
+    auto *server=static_cast<CPlayerServer *>(owner->GetPlayerSpecific());
+    auto &vars=owner->party.vars;
+    const int total=world.GetMercsNumber(0);
+    for(const auto &instance:instances)for(int merc=1;merc<=10;++merc) {
+        const auto actor="merc"+std::to_string(merc);
+        if(!instance.second.names.count(actor))continue;
+        const auto &def=GetDefinition(instance.first);
+        auto key=[&](int topic){return MercKey(instance.first,merc,topic);};
+        auto set=[&](int topic,int value){
+            if(def.briefings.count("n"+std::to_string(topic)+"_"+std::to_string(merc)))server->SetVar(key(topic).c_str(),float(value));
+        };
+        const int id=Object(world,instance.first,actor,true);auto *unit=world.GetUnit(id);
+        const bool member=owner->party.GetPersonage(id)!=nullptr;
+        // Keep the native 1=available / 2=previously hired states in this namespace.
+        const auto available=StateKey(instance.first,"amerc_"+std::to_string(merc));
+        const float avail=vars.GetVar(available.c_str());
+        const bool goodbye=vars.GetVar(key(10).c_str())!=0;
+        const bool hi=vars.GetVar(key(8).c_str())==1;
+        set(11,0);
+        if(member) {
+            set(8,0);set(1,0);set(3,0);set(9,0);set(2,goodbye ? 0 : 1);
+        } else if(goodbye || !unit || unit->IsDead()) {
+            set(8,0);set(1,0);set(2,0);set(3,0);set(9,0);set(10,0);
+            if(goodbye)server->SetVar(available.c_str(),0);
+        } else if(avail!=0 && !hi) {
+            set(8,0);set(2,0);set(1,total<MercLimit() && avail==1);
+            set(3,total<MercLimit() && avail!=1);set(9,total>=MercLimit());
+        } else if(hi) {
+            set(1,0);set(2,0);set(3,0);set(9,0);set(10,0);
+        } else {set(11,1);}
+    }
+}
+bool World::CompleteMercBriefing(CWorldServer &world,int player,const std::string &key)
+{
+    const auto settlement=BriefingOwner(key);
+    for(int merc=1;merc<=10;++merc) {
+        const auto actor="merc"+std::to_string(merc);
+        if(!instances.at(settlement).names.count(actor))continue;
+        auto match=[&](int topic){return key==MercKey(settlement,merc,topic);};
+        auto *owner=world.GetPlayer(player);auto *server=static_cast<CPlayerServer *>(owner->GetPlayerSpecific());
+        const auto available=StateKey(settlement,"amerc_"+std::to_string(merc));
+        if(match(8)) {
+            // The authored greeting is the recruitment unlock (Zone1's tutorial
+            // already controls when that greeting becomes available).
+            server->SetVarMax(available.c_str(),1);
+            server->SetVar(key.c_str(),0);
+        }
+        if(match(1) || match(3)) {
+            const float availability=owner->party.vars.GetVar(available.c_str());
+            if((match(1) && availability!=1) || (match(3) && availability!=2) ||
+                !Recruit(world,player,Prefix(settlement)+actor))return false;
+            server->SetVar(available.c_str(),2);
+        }
+        if((match(2) || match(10)) && !Dismiss(world,player,Prefix(settlement)+actor,match(10)))return false;
+    }
+    RecalcMercBriefings(world);
+    return true;
+}
+
+bool World::Load(CWorldServer &world, const CParty *campaign)
 {
     if (!Empty()) return ReportError("Settlement MOBs are already loaded in this world.\n");
     struct Source
@@ -453,6 +713,10 @@ bool World::Load(CWorldServer &world)
     Clear();
     try {
         std::set<int> reserved;
+        if (campaign) {
+            for (const auto &binding : campaign->settlementIds) reserved.insert(binding.second);
+            for (int i=0;i<campaign->people.GetSize();++i) reserved.insert(campaign->people[i].nID);
+        }
         // Explicit imports can name a hero/mercenary that has not deployed yet.
         // Its world ID must never be allocated to a local module object.
         for (const auto &entry : CurrentCatalog().All()) {
@@ -487,11 +751,21 @@ bool World::Load(CWorldServer &world)
                 for (const auto &object : source.objects) {
                     const int local = object->p_nID;
                     if (local < 0 || instance.objects.count(local)) Fail("duplicate/invalid local ID in " + Prefix(def.id));
+                    const auto key=Prefix(def.id)+"id"+std::to_string(local);
+                    if (campaign) {
+                        const auto saved=campaign->settlementIds.find(key);
+                        if (saved!=campaign->settlementIds.end()) {
+                            if (world.GetMapObject(saved->second)) Fail("settlement ID collides with the current map: "+key);
+                            instance.objects.emplace(local,saved->second);
+                        }
+                    }
                     int &candidate = IsIDofPersonage(local) ? personage : ordinary;
                     const int minimum = IsIDofPersonage(local) ? 1000000000 : 1;
                     while (candidate >= minimum && (reserved.count(candidate) || world.GetMapObject(candidate))) --candidate;
                     if (candidate < minimum) Fail("runtime map ID space exhausted");
-                    instance.objects.emplace(local, candidate); reserved.insert(candidate--);
+                    if (!instance.objects.count(local)) {
+                        instance.objects.emplace(local, candidate); reserved.insert(candidate--);
+                    }
                     instance.sources.emplace(local, mob);
                     const auto name = Lower(static_cast<const char *>(object->p_szName));
                     if (!name.empty() && name != "none") {
@@ -530,6 +804,16 @@ bool World::Load(CWorldServer &world)
                 for (auto &object : source.objects) {
                     const int local = object->p_nID;
                     object->p_nID = instance.objects.at(local);
+                    // Travelling members are deployed by the party, never by the MOB.
+                    bool travelling=false;
+                    if (campaign) for (int i=0;i<campaign->people.GetSize();++i) {
+                        const auto &person=campaign->people[i];
+                        if (person.nID!=object->p_nID) continue;
+                        if (person.szInternalName!=CString((Prefix(module.id)+"id"+std::to_string(local)).c_str()))
+                            Fail("party ID collides with a settlement actor");
+                        travelling=true;
+                    }
+                    if (travelling) continue;
                     if (object->m_eType == MEOT_MAGIC_TRAP) {
                         auto *trap = static_cast<CMEMagicTrap *>(object.get());
                         if (trap->p_nPlayer < 0 || trap->p_nPlayer >= N_MAX_PLAYERS) Fail("invalid trap faction");

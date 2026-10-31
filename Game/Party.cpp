@@ -97,6 +97,9 @@ void CPersonage::CopyFrom(CPersonage &src, CWorld *pMyWorld)
     szPrimTexture = src.szPrimTexture;
     szSecondTexture = src.szSecondTexture;
     szPrototype = src.szPrototype;
+    szInternalName = src.szInternalName;
+    szVoicePrototype = src.szVoicePrototype;
+    nFollowToID = src.nFollowToID;
     nID = src.nID;
     stats = src.stats;
     complection = src.complection;
@@ -104,6 +107,13 @@ void CPersonage::CopyFrom(CPersonage &src, CWorld *pMyWorld)
     CopyItemArray(*(CItemArray *)&items, *(CItemArray *)&src.items, pMyWorld);
     CopyItemArray(*(CItemArray *)&armors, *(CItemArray *)&src.armors, pMyWorld);
     CopyItemArray(*(CItemArray *)&spells, *(CItemArray *)&src.spells, pMyWorld);
+    for (auto &hit:stats.hls) for (auto &layer:hit.layers) for (auto &item:layer.lpItems)
+        if (item) {
+            int index=0;
+            while (index<src.armors.GetSize() && src.armors[index]!=item) ++index;
+            if (index==src.armors.GetSize()) throw SaveSchema::Error(SaveSchema::ErrorCode::Identity,"copied personage armor outside inventory");
+            item=armors[index];
+        }
     pose = src.pose;
     aggression = src.aggression;
 
@@ -291,7 +301,7 @@ BOOL CParty::Create()
 void CParty::SwapSavedState(CParty &other) noexcept
 {
     people.Swap(other.people);allWagonItems.Swap(other.allWagonItems);
-    vars.swap(other.vars);std::swap(szCurrentZone,other.szCurrentZone);
+    vars.swap(other.vars);settlementIds.swap(other.settlementIds);std::swap(szCurrentZone,other.szCurrentZone);
     std::swap(nMoney,other.nMoney);std::swap(nEntrance,other.nEntrance);
     std::swap(pItemManager,other.pItemManager);std::swap(pSpellManager,other.pSpellManager);
     std::swap(pItemConstructor,other.pItemConstructor);std::swap(pSpellConstructor,other.pSpellConstructor);
@@ -388,8 +398,10 @@ void CParty::Clear(BOOL bDelVars, BOOL bDestructor)
             ((CBaseManager *)pSpellManager)->Create(this);
     }
     people.RemoveAll();
-    if (bDelVars)
+    if (bDelVars) {
         vars.clear();
+        settlementIds.clear();
+    }
     szCurrentZone = "";
     nEntrance = 0;
     nMoney = 0;

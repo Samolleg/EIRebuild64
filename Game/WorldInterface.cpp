@@ -700,6 +700,7 @@ BOOL CWorldConnector::LoadZoneState(CParty &party, CMemorySave *prepared)
         {
             bRv = SaveSchema::Slot::LoadZone(szZone);
             if (!bRv) return FALSE;
+            theWorldServer.Settlements().RememberIds(party);
             // process world for some time that should pass on zone during us being absent
             if (party.nEntrance >= 0 && party.nEntrance < pZone->exits.GetSize())
             {
@@ -732,7 +733,9 @@ BOOL CWorldConnector::LoadZoneState(CParty &party, CMemorySave *prepared)
                     for (int i = 0; i < nSegments; i++)
                     {
                         theWorldServer.AddActiveSpot(ptActive, fpActivityRadius);
-                        theWorldServer.WorldSegment(true);
+                        // Travellers are not deployed yet. Preserve saved script state
+                        // until their object references have been rebound.
+                        theWorldServer.WorldSegment(true,theWorldServer.Settlements().Empty());
                         if ((i + 1) % 250 == 0)
                             GameJournal::Event("ZONE", "simulate", "progress segments=%d total=%d ms=%lu",
                                 i + 1, nSegments, GetTickCount() - simulateStart);
@@ -755,8 +758,9 @@ BOOL CWorldConnector::LoadZoneState(CParty &party, CMemorySave *prepared)
         coreOperation.Stage("script_and_exits");
         if (pZone->eType == GM_BASE)
             theWorldServer.LoadScriptFromMOB(pZone->szMobName + ".mob");
-        else
+        else if (!party.VisitedZone(szZone) || theWorldServer.Settlements().Empty())
             theWorldServer.script.RestartScript();
+        theWorldServer.Settlements().RememberIds(party);
     }
     theWorldServer.SetExits(pZone->exits);
     { coreOperation.Result(bRv != FALSE); journal.Result(bRv != FALSE); return bRv; }

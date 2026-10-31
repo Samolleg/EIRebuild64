@@ -8,6 +8,7 @@
 #include "Item.h"
 #include "SpellDatabase.h"
 #include "Party.h"
+#include "SettlementMob.h"
 #include "Camera.h"
 #include "UnitStatisticsDriver.h"
 #include "PlayerServer.h"
@@ -1601,6 +1602,7 @@ void CParty::Store(SaveSchema::Writer &w) const
     Field(w, people);
     Field(w, vars);
     Field(w, nMoney);
+    Settlement::StorePartyIds(w, *this);
 }
 void CParty::Load(SaveSchema::Reader &r)
 {
@@ -1613,6 +1615,7 @@ void CParty::Load(SaveSchema::Reader &r)
     Field(r, people);
     Field(r, vars);
     Field(r, nMoney);
+    Settlement::LoadPartyIds(r, *this);
 }
 void CParty::DiscardSave()
 {

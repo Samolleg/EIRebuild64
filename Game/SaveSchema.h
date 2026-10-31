@@ -20,9 +20,9 @@ class CGameBase;
 namespace SaveSchema {
 class Slot;
 using Bytes = std::vector<std::uint8_t>;
-constexpr std::uint32_t Version = 5;
+constexpr std::uint32_t Version = 6;
 constexpr std::uint32_t HeaderBytes = 48;
-// Wire v5 (LE): magic[8], u32 version/headerBytes, u64 payloadBytes,
+// Wire v6 (LE): magic[8], u32 version/headerBytes, u64 payloadBytes,
 // u32 fundamentCount/rootBytes/gameCount/reserved, u64 nextId.
 // CFundament descriptor: u32 type, u64 id, u32 bodyBytes.
 // CGameBase descriptor: same + i32 mapId, u32 runtimeType/subtype/flags, u64 ownerId.
@@ -31,6 +31,7 @@ constexpr std::uint32_t HeaderBytes = 48;
 // v3 defines CStringArray fields (u32 count followed by length-prefixed strings).
 // v4 stores settlement bindings and the namespace of every script thread.
 // v5 adds settlement alarms and party membership, including boundary history.
+// v6 keeps campaign settlement IDs and script references to travelling party members.
 // References = u64; text/blob = u32 length + bytes; Count = u32.
 
 struct Limits
