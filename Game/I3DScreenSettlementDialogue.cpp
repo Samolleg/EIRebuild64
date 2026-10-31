@@ -363,10 +363,15 @@ void CI3DScreenSettlementDialogue::ReadProgram(const Settlement::DialogueTopic &
         if (commands.size()>=4096) throw std::runtime_error("briefing is too large");
         Command command{};
         const auto name=Lower(static_cast<LPCSTR>(words[0]));
+        // Retail NextCommand leaves author notes out of dialogue playback.
+        // Recognize this metadata explicitly; unknown commands still fail below.
+        if (name=="#desc") continue;
         if (name=="#nolips") {
             if (words.GetSize()!=1) throw std::runtime_error("invalid nolips command");
             command.kind=Command::NoLips;
         } else if (name=="#animation") {
+            // Retail ignores a known command without its required operand (n1_2).
+            if (words.GetSize()==1) continue;
             if (words.GetSize()!=2) throw std::runtime_error("invalid animation command");
             command.kind=Command::Animation; command.number=Integer(words[1]);
         } else if (name=="#camera") {
@@ -403,10 +408,17 @@ void CI3DScreenSettlementDialogue::ReadProgram(const Settlement::DialogueTopic &
                 phrase=true;
             } else if (words.GetSize()>=3) {
                 if (command.kind==Command::Hide) {
-                    if (Lower(static_cast<LPCSTR>(words[2]))!="run") throw std::runtime_error("unsupported hide modifier");
+                    // Retail treats any third argument as run for actors, and
+                    // ignores it for props; authored texts also use item slots.
+                    if (Lower(static_cast<LPCSTR>(words[2]))!="run") {
+                        const int slot=Integer(words[2]);
+                        if (slot<1 || slot>21) throw std::runtime_error("unsupported hide modifier");
+                    }
                 } else {
                     command.slot=Integer(words[2])-1;
-                    if (command.slot<0 || command.slot>20) throw std::runtime_error("invalid staging slot");
+                    // Slot zero means the default actor placement, as in s1.
+                    if (command.slot< -1 || command.slot>20 || (command.slot<0 && command.unit<0))
+                        throw std::runtime_error("invalid staging slot");
                     if (words.GetSize()==4) {
                         if (Lower(static_cast<LPCSTR>(words[3]))!="weapon") throw std::runtime_error("unsupported show modifier");
                         command.weapon=true;

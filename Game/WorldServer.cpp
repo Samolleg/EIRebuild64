@@ -3516,11 +3516,14 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
 
     // prepare for map objects loading
     const auto *settlementMod = ModRuntime::Current();
-    bool hasSettlement = !settlementMobs.Empty();
+    const bool hadSettlement = !settlementMobs.Empty();
+    bool hasSettlement = false;
     if (settlementMod)
         for (const auto &entry : settlementMod->Settlements().All())
             hasSettlement |= entry.second.map == Settlement::MapName(pszMprName);
-    if (szMobFileName.CompareNoCase(pszMobName) == 0 && !hasSettlement)
+    // Retire old module objects even when the destination has no settlement.
+    // Only destination bindings require scenario exits and settlement admission.
+    if (szMobFileName.CompareNoCase(pszMobName) == 0 && !hadSettlement && !hasSettlement)
     {
         script.Clear();
         scriptTemp.Clear();
