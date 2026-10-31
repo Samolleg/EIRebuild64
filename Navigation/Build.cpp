@@ -250,7 +250,7 @@ struct RasterBatch {
 }
 static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,const std::string& key,RasterBatch* batch,unsigned workerLimit,int onlyX=-1,int onlyZ=-1,const std::vector<Point>& columns={},bool flightReady=false) {
     if(Flies(p)&&!flightReady) {
-        auto sky=FlightGeometry(g,p);
+        auto sky=FlightGeometry(g,p,onlyX,onlyZ);
         return BuildProfile(sky,p,key,nullptr,workerLimit,onlyX,onlyZ,columns,true);
     }
     const auto buildStart=std::chrono::steady_clock::now();
@@ -1120,7 +1120,9 @@ void IndexSurfaces(Mesh& mesh) {
     // Catalogue storage is shared by all profiles; queries read it in place.
 }
 std::unique_ptr<Mesh> RebuildTile(const Geometry& g,const Profile& p,int x,int z) {
+    const auto start=std::chrono::steady_clock::now();
     auto result=BuildProfile(g,p,"",nullptr,1,x,z);
+    result->buildMs=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
     const auto* tile=result->data->getTileAt(x,z,0);
     if(tile) {
         result->replacementSize=tile->dataSize;
@@ -1133,15 +1135,31 @@ std::unique_ptr<Mesh> RebuildTile(const Geometry& g,const Profile& p,int x,int z
     return result;
 }
 void ReplaceTile(Mesh& mesh,Mesh& replacement,int x,int z) {
-    // No query observes a half-replaced tile: called on the simulation thread.
+    // Stage the complete replacement in the reserved spare capacity first.
+    // Tile hashes use XY; the temporary layer keeps the old address available
+    // until addTile has validated and linked the new data. No query runs here.
     const auto* previous=mesh.data->getTileAt(x,z,0);
-    if(previous)Require(dtStatusSucceed(mesh.data->removeTile(mesh.data->getTileRef(previous),nullptr,nullptr)),"Nav64: cannot remove source tile");
-    mesh.polygonSurfaces.erase({x,z});
+    const auto previousRef=previous?mesh.data->getTileRef(previous):0;
+    const auto key=std::make_pair(x,z);
+    auto surfaces=replacement.polygonSurfaces.extract(key);
+    dtTileRef installed=0;
     if(replacement.replacementData) {
-        mesh.polygonSurfaces[{x,z}]=std::move(replacement.polygonSurfaces.at({x,z}));
-        Require(dtStatusSucceed(mesh.data->addTile(replacement.replacementData,replacement.replacementSize,DT_TILE_FREE_DATA,0,nullptr)),"Nav64: cannot install replacement tile");
+        Require(!surfaces.empty(),"Nav64: replacement has no polygon provenance");
+        auto* header=reinterpret_cast<dtMeshHeader*>(replacement.replacementData);
+        Require(header->x==x&&header->y==z&&header->layer==0&&!mesh.data->getTileAt(x,z,1),"Nav64: invalid replacement tile address");
+        header->layer=previous?1:0;
+        const auto status=mesh.data->addTile(replacement.replacementData,replacement.replacementSize,DT_TILE_FREE_DATA,0,&installed);
+        if(dtStatusFailed(status)){header->layer=0;throw std::runtime_error("Nav64: cannot stage replacement tile; old tile retained");}
         replacement.replacementData=nullptr;
     }
+    if(previousRef&&dtStatusFailed(mesh.data->removeTile(previousRef,nullptr,nullptr))) {
+        if(installed)mesh.data->removeTile(installed,nullptr,nullptr);
+        throw std::runtime_error("Nav64: cannot remove source tile; replacement rolled back");
+    }
+    if(installed)mesh.data->getTileAt(x,z,previousRef?1:0)->header->layer=0;
+    mesh.polygonSurfaces.erase(key);
+    if(installed)mesh.polygonSurfaces.insert(std::move(surfaces));
+    mesh.tiles+=unsigned(installed!=0);mesh.tiles-=unsigned(previousRef!=0);
     for(auto i=mesh.doorFlags.begin();i!=mesh.doorFlags.end();) {
         if(std::get<0>(i->first)==x&&std::get<1>(i->first)==z)i=mesh.doorFlags.erase(i);else ++i;
     }

@@ -441,7 +441,7 @@ void CUnitServer::LowNewWishPose(EUnitPose pose)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CUnitServer::LowFindPath(const CPlot3D &ptDest, SAIPath &res, BOOL bFastPath,
-                              float fpMaxPathLength, Navigation::GoalPolicy goalPolicy)
+                              float fpMaxPathLength, Navigation::GoalPolicy goalPolicy,const Navigation::Location* goalSupport)
 {
     CorePerf::Scope coreTiming(CorePerf::FindPath);
     CWorldServer *pWS = (CWorldServer *)GetWorld();
@@ -455,7 +455,17 @@ bool CUnitServer::LowFindPath(const CPlot3D &ptDest, SAIPath &res, BOOL bFastPat
     lpUnit->bNeedFastPath = bFastPath;
     const bool journal=lpUnit->IsHero() && &res==&path;
     Navigation::Route detail;
-    bool bFound = pWS->aiMap.NewPath(lpUnit, ptDest, res, fpMaxPathLength,0,goalPolicy,journal?&detail:nullptr);
+    Navigation::Location targetSupport;
+    if(!goalSupport&& &res==&path&&curCommand.IsMove()) {
+        if(curCommand.navGoalValid&&std::hypot(curCommand.navGoal.position.x-ptDest.x,curCommand.navGoal.position.y-ptDest.y)<.01f)goalSupport=&curCommand.navGoal;
+        else if(auto* player=logic.GetPlayer())if(const auto* point=player->MoveGoal())if(std::hypot(point->x-ptDest.x,point->y-ptDest.y)<.01f) {
+            targetSupport.position={point->x,point->y,point->z};goalSupport=&targetSupport;
+        }
+    }
+    if(!goalSupport&& &res==&path&&!curCommand.pTarget.IsEmpty()) {
+        if(auto* target=dynamic_cast<CUnit*>(static_cast<CMapObject*>(curCommand.pTarget))){targetSupport=target->navLocation;targetSupport.position=pWS->aiMap.Navigation().Position(target,pWS->aiMap);goalSupport=&targetSupport;}
+    }
+    bool bFound = pWS->aiMap.NewPath(lpUnit, ptDest, res, fpMaxPathLength,0,goalPolicy,journal?&detail:nullptr,goalSupport);
     lpUnit->bNeedFastPath = bSaveFastPath;
     if(bFound&&journal&&!detail.points.empty()) {
         std::ostringstream points;unsigned turns=0,printed=0;
@@ -750,6 +760,7 @@ void CUnitServer::L1StandStill()
 void CUnitServer::L1StopMovement(bool bFailed)
 {
     navigationRejects=navigationWait=0;
+    static_cast<CWorldServer*>(GetWorld())->aiMap.Navigation().Stop(lpUnit->GetID());
     if(path.curSegment.GetMoveType()==CAIFullRoute::Rotate) {
         const auto facing=-lpUnit->GetYAxis();
         GameJournal::Event("UNIT","turn_finished","unit=%d failed=%d requested=%.6f actual=%.6f",
@@ -792,7 +803,6 @@ bool CUnitServer::RestoreNavigation()
     if(distanceXY2(lpUnit->GetCP(),goal)<.0009f) {
         path.CreateStand(lpUnit);L1SetPhase(UL1_NONE);lpUnit->LowNewRoute();return true;
     }
-    path.toGo.Clear();
     if(!lpUnit->navLocation.surface||!world->aiMap.NewPath(lpUnit,goal,path)) {
         // A derived route may become unavailable after world reconstruction.
         // Keep the loaded unit, stop this move; a new command can request a path.
@@ -5996,13 +6006,14 @@ void CUnitServer::CmdRotate(const CPlot3D &vecDest, float fpAngSpeed)
     nextCommand.bDoItFast = false;
 }
 
-void CUnitServer::CmdMoveTo(const CPlot3D &ptDest, bool bRun, bool bGroupCmd, float fpMaxPathDist)
+void CUnitServer::CmdMoveTo(const CPlot3D &ptDest, bool bRun, bool bGroupCmd, float fpMaxPathDist,const Navigation::Location* goalSupport)
 {
     CWorldServer *pWS = (CWorldServer *)GetWorld();
 
     nextCommand.Clear();
     nextCommand.cmd = UC_MOVETO;
     nextCommand.ptTarget = ptDest;
+    if(goalSupport){nextCommand.navGoal=*goalSupport;nextCommand.navGoalValid=true;}
     nextCommand.pTarget = NULL;
     nextCommand.bDoItFast = bRun;
     nextCommand.nQSpellNum = bGroupCmd ? 1 : 0;
@@ -6041,7 +6052,8 @@ void CUnitServer::CmdShowMove(const CPlot3D &ptDest, bool bGroupCmd, bool bRun, 
     }
     //
     bool bFound = LowFindPath(ptDest, pathFake, pWS->aiMap.IsWater(lpUnit->GetCP()), fpMaxPathDist,
-                             lpUnit->IsHero()?Navigation::GoalPolicy::ClosestReachable:Navigation::GoalPolicy::Exact);
+                             lpUnit->IsHero()?Navigation::GoalPolicy::ClosestReachable:Navigation::GoalPolicy::Exact,
+                             nextCommand.navGoalValid?&nextCommand.navGoal:nullptr);
     //
     if (bRun)
     {

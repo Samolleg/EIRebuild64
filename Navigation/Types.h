@@ -7,7 +7,7 @@
 
 namespace Navigation {
 constexpr std::uint32_t ContainerVersion = 10;
-constexpr std::uint32_t AlgorithmVersion = 26;
+constexpr std::uint32_t AlgorithmVersion = 27;
 constexpr std::uint32_t LibraryVersion = 0x010600;
 struct Point { float x = 0, y = 0, z = 0; };
 inline bool Finite(Point p) { return std::isfinite(p.x) && std::isfinite(p.y) && std::isfinite(p.z); }
@@ -62,11 +62,14 @@ enum class RandomShape { Circle, Square };
 constexpr unsigned short ExcludeClass(unsigned aiClass) {
     return aiClass<8?static_cast<unsigned short>(1u<<(aiClass+4)):0x0ff0;
 }
+struct Route;
 struct Request {
     Point source, goal;
     GoalPolicy goalPolicy = GoalPolicy::Exact;
     const Location* start = nullptr; // transient source polygon; never serialized
     const std::vector<Obstacle>* obstacles = nullptr;
+    const Route* reuseRoute = nullptr;
+    const Location* goalSupport = nullptr;
     unsigned short excludedFlags = 0;
     float goalRadius = 0, maxLength = 1.e6f, height = 0;
     float areaCosts[16] = {1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1};
@@ -79,5 +82,6 @@ struct Route {
     float length = 0;
     float cost = 0, plannedCost = 0, straightCost = -1; // Transient query/journal metrics.
     bool straightened = false;
+    std::size_t sampledTail=~std::size_t(0); // Transient: retained, already sampled game-route nodes.
 };
 }

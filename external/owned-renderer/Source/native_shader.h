@@ -789,6 +789,7 @@ void nativeStaticLodSelect(NativeDraw draw,NativeInstance instance,inout uint fi
  float w=dot(instance.objectToClip[3],float4(center,1));
  if(levels==0||w<=1e-3)return;
  float3x3 m=(float3x3)instance.objectToWorld;
+ if(instance.poseNode!=0xffffffffu)m=(float3x3)nativeNodeMatrix(instance.poseNode);
  float scale=max(max(length(float3(m[0][0],m[1][0],m[2][0])),length(float3(m[0][1],m[1][1],m[2][1]))),
                  length(float3(m[0][2],m[1][2],m[2][2])));
  // Screen pixels per object unit at the centre (half the target height per

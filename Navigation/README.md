@@ -117,14 +117,14 @@ separate from this baker contract.
 
 ## Wire format
 
-- <mpr>--<mob>.<profile>.nav64: container 10, algorithm 26, Recast 0x010600,
+- <mpr>--<mob>.<profile>.nav64: container 10, algorithm 27, Recast 0x010600,
   DT_POLYREF64, names/profile, ready shuffled/LZMS tiles and surface schema.
   In the expanded tile stream, each tile blob is followed by a u32 polygon
   support count (must equal polyCount). Each polygon has u32 source-count and
   that many u64 source IDs (low/high u32), primary first, connected neighbours
   afterwards. These records belong to that tile's polygon order and move with
-  tile replacement. Algorithm 26 requires rebaking all six profiles, sources
-  and body tables together; 24/25 data cannot be reused with this runtime.
+  tile replacement. Algorithm 27 requires rebaking all six profiles, sources
+  and body tables together; 24/25/26 data cannot be reused with this runtime.
   No layer section exists. Loader validates exact profile, bounds and ABI.
 - <mpr>--<mob>.navworld: JSON version 4, baked static NIDs, ground dynamic boxes and flight_dynamic visual boxes.
 - <mpr>--<mob>.navgeom: shared NSRC version 8 (four parallel LZMS blocks), inner section 7,
@@ -140,7 +140,7 @@ separate from this baker contract.
   Placement/step/restore and the local client resolve original terrain/BASE
   triangles through polygon provenance. Gameplay acceptance remains separate.
   Off-mesh records remain reserved, not linked.
-- bodies.navbody: BODY version 1, algorithm 26, resource-derived models and
+- bodies.navbody: BODY version 1, algorithm 27, resource-derived models and
   full morph grids, including non-un* models actually used by MOB creatures.
   Runtime never measures bodies. Save field sizes and movement speeds remain.
 
@@ -226,10 +226,12 @@ A stationary blocking unit triggers a bypass on the first blocked step.
 Moving neighbours retain the bounded 27-tick queue. Circumscribed rings include
 connected neighbouring footprints, including bodies outside the original route;
 a bypass around one body must also be able to route around its whole group.
-Each visibility edge is a normal Find corridor checked against every supplied
-body. Material costs, max length, class/height filters and physical radii remain
-unchanged. At most twelve rings (146 vertices) bound the secondary query. A*
-uses an admissible distance/material-cost bound to avoid unnecessary corridors.
+Only the first blocking cluster inside 24 m enters the local graph. Visibility
+edges use a bounded, class/height-filtered mesh raycast and actual material
+crossings, without A*. The already sampled far route and query scratch are
+reused. Material costs, max length and physical radii remain unchanged. At most
+twelve rings (146 vertices) bound the query; the graph uses an admissible
+distance/material-cost bound.
 An unavailable/limited bypass fails the movement command and returns control
 to its owner; queue_detour records the actual query status and endpoints.
 
@@ -240,7 +242,7 @@ Release walk records may set neighbour_distance, release_after_wait (0 keeps
 the neighbour standing) and require_detour. Their results include detour_max_ms.
 
 
-## Six profiles and automatic flight (algorithm 26)
+## Six profiles and automatic flight (algorithm 27)
 
 Profiles are small, human, large, giant, levitate and flying. Tiny bodies use
 small; levitating bodies share the remaining 0.5 m levitate profile. Profile
@@ -264,8 +266,10 @@ query/step/render support. Ground and levitation keep original triangle support.
 Flight routes sample the detail height every 0.25 m; serialized per-node speeds
 account for 3D length while the existing XY walker and commands remain in use.
 Crowd and melee admission use actual flight height. Ordinary units keep their
-previous rules. World changes rebuild the flying mesh once on the existing
-worker and publish it atomically; ground changes remain scoped to affected tiles.
+previous rules. Runtime loads and updates flying only for actual consumers.
+World changes rebuild affected sky tiles on the existing worker, including
+the conservative height-propagation halo; the lattice keeps world alignment.
+Inactive changes coalesce in constant storage until a consumer appears.
 
 NavBake validates the released flight detail against original terrain/water and
 visual upper bounds, and traces flight over the real gate, forest and mountain.
@@ -276,5 +280,16 @@ acceptance must be reviewed with the future database bindings.
 Dynamic flight geometry retains all transformed part BVs, independently of
 ground blocking flags, in navworld flight_dynamic. The live-object diff
 compares those bounds too; removing, moving or turning a passable visual part
-queues one worker sky rebuild. Static upper bounds remain measured from FIG.
+queues affected sky tiles. Static upper bounds remain measured from FIG.
 Ground collision BVs and their tile rebuild policy are unchanged.
+
+A worker/apply failure retains its dirty key and logs profile/tile/stage. Two
+delayed retries follow the first attempt; a third failure waits for a new
+change, with the task still queued. Replacement is staged through addTile
+before the old tile/provenance is removed. The temporary layer uses existing
+spare tile capacity, without concurrent queries or a new persisted layer.
+
+NewPath accepts world support separately from command distance. Player clicks,
+unit targets and existing route endpoints retain that support; untyped AI
+points resolve original mesh support without a legacy tile/bridge height.
+The saved fields remain v4. Ground profile/radius policy is unchanged here.

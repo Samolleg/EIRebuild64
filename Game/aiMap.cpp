@@ -2148,13 +2148,13 @@ bool CAIMap::BiWaveFindPath(CAIRoute &res, int *nResCost)
     return bRv;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-bool CAIMap::NavRoute(CUnit* unit, Navigation::Point from, Navigation::Point goal, CAIRoute& result, float maxLength, float goalRadius, int aiClass, Navigation::Location* source, Navigation::GoalPolicy goalPolicy, Navigation::Route* detail)
+bool CAIMap::NavRoute(CUnit* unit, Navigation::Point from, Navigation::Point goal, CAIRoute& result, float maxLength, float goalRadius, int aiClass, Navigation::Location* source, Navigation::GoalPolicy goalPolicy, Navigation::Route* detail,const Navigation::Location* goalSupport)
 {
     result.Clear();
     float costs[16];SRouteCostsInfo info;
     if(unit)GetRouteCostsPathFind(unit,info);else GetRouteCosts(aiClass,info);
     costs[0]=1;for(int i=1;i<16;++i)costs[i]=float(info.pTerrainCosts[i])/1024.f;
-    const auto route=navigation.Find(unit,from,goal,maxLength,goalRadius,costs,aiClass,goalPolicy);
+    const auto route=navigation.Find(unit,from,goal,maxLength,goalRadius,costs,aiClass,goalPolicy,goalSupport);
     if(detail)*detail=route;
     if(route.status!=Navigation::Status::Complete)return false;
     if(source&&!route.points.empty())*source=route.points.front();
@@ -2166,7 +2166,7 @@ bool CAIMap::NavRoute(CUnit* unit, Navigation::Point from, Navigation::Point goa
     };
     for(size_t i=0;i<route.points.size();++i) {
         auto p=route.points[i].position;
-        if(i){auto a=route.points[i-1].position;int n=(std::max)(1,int(std::ceil(Navigation::Distance(a,p)/.25f)));
+        if(i&&i<route.sampledTail){auto a=route.points[i-1].position;int n=(std::max)(1,int(std::ceil(Navigation::Distance(a,p)/.25f)));
             if(result.route.GetCount()+n>60000){result.Clear();return false;}
             for(int k=1;k<n;++k){float f=float(k)/n;append({a.x+(p.x-a.x)*f,a.y+(p.y-a.y)*f,a.z+(p.z-a.z)*f},route.points[i-1].area);}}
         append(p,route.points[i].area);
@@ -2387,16 +2387,29 @@ void CAIMap::CreatePathSegment(CUnit *pUnit, SAIPath &path)
     // Speeds and exact corner points were assigned before segmenting.
 }
 /////////////////////////////////////////////////////////////////////////////////////
-bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpMaxPathLength, float fpMinDistance, Navigation::GoalPolicy goalPolicy, Navigation::Route* detail)
+bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpMaxPathLength, float fpMinDistance, Navigation::GoalPolicy goalPolicy, Navigation::Route* detail,const Navigation::Location* goalSupport)
 {
+    Navigation::Location destination;bool known=goalSupport!=nullptr;
+    if(goalSupport)destination=*goalSupport;
+    else {
+        destination.position={ptDst.x,ptDst.y,navigation.Position(pUnit,*this).z};
+        // Replans/load retain the accepted endpoint stored in existing nodes.
+        const auto* remaining=res.toGo.route.GetCount()?&res.toGo.route:
+            res.curSegment.route.route.GetCount()?&res.curSegment.route.route:nullptr;
+        if(remaining) {
+            const auto& last=remaining->GetTail();
+            if(std::hypot(AITile2Meter(last.point.x)-ptDst.x,AITile2Meter(last.point.y)-ptDst.y)<.01f){destination.position.z=last.supportZ;known=true;}
+        }
+    }
     res.toGo.Clear();res.ptDestination=ptDst;res.bRouteFailed=false;
     if(!std::isfinite(ptDst.x)||!std::isfinite(ptDst.y))return false;
     const bool inside=ptDst.x>=0&&ptDst.y>=0&&ptDst.x<AITile2Meter(float(XSize()))&&ptDst.y<AITile2Meter(float(YSize()));
     if(!inside&&goalPolicy==Navigation::GoalPolicy::Exact)return false;
+    if(!known)navigation.Goal(pUnit,destination.position,destination);
     auto from=navigation.Position(pUnit,*this);
     // ptDst.z is a command distance, not world height.
-    Navigation::Point goal{ptDst.x,ptDst.y,inside?GetTileHeight(ptDst):from.z};
-    if(!NavRoute(pUnit,from,goal,res.toGo,fpMaxPathLength,fpMinDistance,3,nullptr,goalPolicy,detail)) {res.bRouteFailed=true;return false;}
+    Navigation::Point goal{ptDst.x,ptDst.y,destination.position.z};
+    if(!NavRoute(pUnit,from,goal,res.toGo,fpMaxPathLength,fpMinDistance,3,nullptr,goalPolicy,detail,&destination)) {res.bRouteFailed=true;return false;}
     auto& last=res.toGo.route.GetTail();res.ptFinish=last.point;
     if(goalPolicy==Navigation::GoalPolicy::ClosestReachable) {
         // Replans and crowd avoidance must retain the accepted endpoint.

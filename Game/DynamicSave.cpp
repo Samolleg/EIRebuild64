@@ -956,6 +956,7 @@ void SUnitBasicCmd::Store(SaveSchema::Writer &w) const
 }
 void SUnitBasicCmd::Load(SaveSchema::Reader &r)
 {
+    navGoal={};navGoalValid=false;
     cmd=static_cast<EUnitCommand>(r.Int32()); nQSpellNum=r.Int32();
     pTarget=r.GameReferenceAs<CMapObject>(); r.Value(ptTarget); bUsePoint=r.Bool();
     if(cmd<UC_IDLE || cmd>UC_REST) throw SaveSchema::Error(SaveSchema::ErrorCode::Invalid,"invalid unit command");

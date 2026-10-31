@@ -61,6 +61,8 @@ public:
     int nQSpellNum;        // number of quick spell to cast
     CMapObjectPtr pTarget; // command target if there is one
     CPlot3D ptTarget;      // command destination
+    Navigation::Location navGoal; // Transient world support, separate from command distance.
+    bool navGoalValid=false;
     bool bUsePoint;        // flag if cmd should be done from ptTarget
 
     void Clear()
@@ -69,7 +71,7 @@ public:
         nQSpellNum = 0;
         ptTarget = CPlot3D(0, 0, 0);
         pTarget.Clear();
-        bUsePoint = false;
+        bUsePoint = false;navGoal={};navGoalValid=false;
     }
     SUnitBasicCmd() { Clear(); }
     //
@@ -464,7 +466,7 @@ private:
     void LowNewPose(EUnitPose pose);
     void LowNewWishPose(EUnitPose pose);
     bool LowFindPath(const CPlot3D &ptDest, SAIPath &res, BOOL bFastPath,
-                     float fpMaxPathLength = 1e6f, Navigation::GoalPolicy goalPolicy = Navigation::GoalPolicy::Exact);
+                     float fpMaxPathLength = 1e6f, Navigation::GoalPolicy goalPolicy = Navigation::GoalPolicy::Exact,const Navigation::Location* goalSupport=nullptr);
     void LowRemoveUnitsForPathFind(CUnitList &units, const CPlot3D &ptDest, bool bGroup);
     // LEVEL 0 of unit control
     bool L0ShiftAnimations();
@@ -738,7 +740,7 @@ public:
     bool IsTamed() const { return tameLevel != UTL_NONE; }
     void CmdRotate(const CPlot3D &vecDest, float fpAngSpeed);
     void CmdMoveTo(const CPlot3D &ptDest, bool bRun, bool bGroupCmd = false,
-                   float fpMaxPathDist = 1e6f);
+                   float fpMaxPathDist = 1e6f,const Navigation::Location* goalSupport=nullptr);
     void CmdShowMove(const CPlot3D &ptDest, bool bGroupCmd, bool bRun, float fpMaxPathDist = 1e6f);
     void CmdAttack(CMapObject *pTarget, ERPGHitLocations hl, bool bRun, DWORD dwAck);
     void CmdCast(int nQSpellNum, const CPlot3D &pointToCast, bool bRun);
