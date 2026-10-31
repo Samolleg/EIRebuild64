@@ -947,7 +947,7 @@ native_shadow_softness_=shadow_softness_constants(configured_integer(config,"sha
 // The common coverage/scheduler and the GPU consume the same settings,
 // including when EIRebuild supplies the scene directly.
 bridge_set_shadow_settings(native_shadow_side_,native_close_shadow_cascades_,
- native_far_shadows_enabled_,native_point_shadows_enabled_,native_shadows_enabled_);
+ native_far_shadows_enabled_,native_point_shadows_enabled_);
 // Core mode, game process: the host applies the shadow switch at its
 // BeginScene (begin_scene_renderer never runs here), so the flag the world
 // capture reads (native_shadows_enabled) follows the same option here (#204).
