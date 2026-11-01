@@ -167,10 +167,30 @@ std::unique_ptr<NeighbourMapUpload> decode_neighbour(OwnedResourceLoader& loader
         ",55:"+std::to_string(drawn[55])+",60:"+std::to_string(drawn[60])+" omitted_reasons=";
     for(const auto& [reason,count]:omitted)upload->decoration_summary+=reason+":"+std::to_string(count)+",";
     if(omitted.empty())upload->decoration_summary+="none";else upload->decoration_summary.pop_back();
-    // Which models/textures failed to load (issue #136 gaps).
+    // Emit the complete bounded list once per decoded map. Keep details out
+    // of the renderer's 1536-byte upload summary; aggregate repeated reasons
+    // and chunk them so the journal's counter budget is not spent per asset.
     if(!map->failures.empty()) {
-        upload->decoration_summary+=" load_failures="+std::to_string(map->failures.size());
-        for(std::size_t i=0;i<map->failures.size()&&i<3;++i)upload->decoration_summary+=(i?",":":")+map->failures[i];
+        std::map<std::string,std::size_t> reasons;
+        for(const auto& failure:map->failures)++reasons[failure];
+        constexpr std::size_t limit=256, line_limit=1024, reason_limit=512;
+        const auto shown=(std::min)(reasons.size(),limit);
+        upload->decoration_summary+=" load_failures="+std::to_string(map->failures.size())+
+            " failure_reasons="+std::to_string(reasons.size())+
+            " failure_reasons_omitted="+std::to_string(reasons.size()-shown);
+        const std::string prefix="map="+n.placement.mpr+" load_failure_details=";
+        std::string line=prefix;std::size_t emitted=0;
+        for(const auto& [reason,count]:reasons) {
+            if(emitted==limit)break;
+            std::string item=reason.size()>reason_limit?reason.substr(0,reason_limit)+"...":reason;
+            item+=" count="+std::to_string(count);
+            if(line.size()>prefix.size() && line.size()+item.size()+3>line_limit) {
+                bridge_neighbour_diagnostic(line.c_str());line=prefix;
+            }
+            if(line.size()>prefix.size())line+=" | ";
+            line+=item;++emitted;
+        }
+        if(line.size()>prefix.size())bridge_neighbour_diagnostic(line.c_str());
     }
     return upload;
 }
