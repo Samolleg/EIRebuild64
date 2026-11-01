@@ -1202,19 +1202,17 @@ BOOL CUnit::IsHero() const
 /////////////////////////////////////////////////////////////////////////////////////
 bool CUnit::HasRestAnimations() const
 {
-    const SADBFileHeader *header = SetADFileHdr();
-    if (!header)
-        return false;
-    for (DWORD index = 0; index < header->dwCount; ++index)
+    for (DWORD index = 0;; ++index)
     {
-        const SADEntry *entry = header->GetEntry(index);
+        const SADEntry *entry = GetAnimationEntryByIndex(index);
+        if (!entry)
+            return false;
         if (entry->GetAction() != 0 &&
             (entry->GetState() == ADB_STATE_REST ||
              (entry->GetAction() == ADB_ACTION_CROSS &&
               (entry->dwFlags & ADB_MODIFIERS) == ADB_MODIFIER_CROSS_TO_REST)))
             return true;
     }
-    return false;
 }
 // No RNG or equipment remapping is performed by the capability check above.
 const SADEntry *CUnit::GetAnimation(DWORD dwAnimationFlags, bool bWeapon, bool reportMissing)
