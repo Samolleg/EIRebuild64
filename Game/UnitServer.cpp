@@ -4339,7 +4339,12 @@ void CUnitServer::GetAttackAnimation(SL0AnimationSeq &res, int &nHit, EUnitComma
     if ( (dwAnimationFlags & ADB_ACTIONS) != ADB_ACTION_SPECIAL )
             dwAnimationFlags |= ADB_MODIFIER_HDIRECTION1_MIDDLE | ADB_MODIFIER_VDIRECTION1_MIDDLE;
     */
-    pEntry = lpUnit->GetAnimation(dwAnimationFlags, false);
+    const DWORD requestedFlags = dwAnimationFlags;
+    const bool directedAttack = cmd == UC_ATTACK &&
+        (dwAttackFlags & ADB_MODIFIERS) !=
+            (ADB_MODIFIER_HDIRECTION1_MIDDLE | ADB_MODIFIER_VDIRECTION1_MIDDLE);
+    pEntry = lpUnit->GetAnimation(dwAnimationFlags, false, !directedAttack);
+    const bool missingDirection = directedAttack && !pEntry;
     if ((pEntry == 0 || (pEntry->dwFlags & dwWeaponFlags) != dwWeaponFlags) && cmd == UC_ATTACK)
     {
         // OutputDebugString( "no attack animation found, using mm\n" );
@@ -4347,6 +4352,9 @@ void CUnitServer::GetAttackAnimation(SL0AnimationSeq &res, int &nHit, EUnitComma
         dwAnimationFlags = dwAttackFlags | dwWeaponFlags | ADB_ACTION_ATTACK | ADB_STAGE_UNIQUE |
                            ADB_STATE_ATTACK;
         pEntry = lpUnit->GetAnimation(dwAnimationFlags);
+        if (missingDirection)
+            GameJournal::MissingAnimation(lpUnit->GetMaskName(), requestedFlags,
+                pEntry ? GameJournal::AnimationGapResult::Ordinary : GameJournal::AnimationGapResult::Missing);
         if (pEntry == 0)
         {
             OutputDebugString(
@@ -4538,7 +4546,9 @@ void CUnitServer::GetSufferAnimation(SL0AnimationSeq &res, int nSufferDirection,
         dwAnimationFlags |= ADB_ACTION_DEATH | ADB_STAGE_UNIQUE;
     else
         dwAnimationFlags |= ADB_ACTION_SUFFER | ADB_STAGE_UNIQUE;
-    pEntry = lpUnit->GetAnimation(dwAnimationFlags);
+    const DWORD requestedFlags = dwAnimationFlags;
+    const bool directedDeath = bDiyng && (dwAnimationFlags & ADB_MODIFIER_DIRECTION2_MASK) != 0;
+    pEntry = lpUnit->GetAnimation(dwAnimationFlags, true, !directedDeath);
 
     // try to find 'MM' animation for dying
     if (bDiyng && (pEntry == 0))
@@ -4546,6 +4556,9 @@ void CUnitServer::GetSufferAnimation(SL0AnimationSeq &res, int nSufferDirection,
         dwAnimationFlags &= ~ADB_MODIFIER_DIRECTION2_MASK;
         dwAnimationFlags |= ADB_MODIFIER_DIRECTION2_MM;
         pEntry = lpUnit->GetAnimation(dwAnimationFlags);
+        if (directedDeath)
+            GameJournal::MissingAnimation(lpUnit->GetMaskName(), requestedFlags,
+                pEntry ? GameJournal::AnimationGapResult::Ordinary : GameJournal::AnimationGapResult::Missing);
     }
 
     // TODO: Эта проверка в текущей версии довольно часто фейлится, что приводит к раздражающе
@@ -4750,6 +4763,12 @@ bool CUnitServer::GetTransAnimation(SL0AnimationSeq &res, const SL1Pose &srcPose
     case UP_REST:
         dwAnimationFlags |= ADB_MODIFIER_CROSS_TO_REST;
         break;
+    }
+    if ((srcPose.pose == UP_REST || dstPose.pose == UP_REST) && !lpUnit->HasRestAnimations())
+    {
+        GameJournal::MissingAnimation(lpUnit->GetMaskName(), dwAnimationFlags,
+            GameJournal::AnimationGapResult::SkipTransition);
+        return false;
     }
     pEntry = lpUnit->GetAnimation(dwAnimationFlags);
     // ASSERT( pEntry );

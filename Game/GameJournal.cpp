@@ -59,6 +59,7 @@ struct Lock {
 struct Entry { std::string line; bool important; };
 struct Repeat { DWORD time; unsigned count; std::string detail; };
 struct Counter { DWORD time; unsigned count; std::string category, event, key; };
+struct AnimationGap { unsigned long long ordinary=0, missing=0, skipped=0, idle=0; };
 struct CombatPair {
     DWORD started, last; int attacker, target; std::string attackerPrototype, targetPrototype;
     float damage=0, healing=0; unsigned hits=0, misses=0, blocked=0, critical=0, unknown=0;
@@ -69,6 +70,7 @@ struct State {
     std::map<std::string, Repeat> repeats;
     std::map<std::string, Repeat> notifications;
     std::map<std::string, Counter> counters;
+    std::map<std::pair<std::string, DWORD>, AnimationGap> animationGaps;
     std::map<std::pair<int,int>, CombatPair> combat;
     bool fighting=false;
     DWORD lastCombat=0;
@@ -575,6 +577,19 @@ void Stop() noexcept {
     if(s->memoryEnded)return;s->memoryEnded=true;
     MemorySnapshot("session_end");
     CombatBoundary("session_end");
+    try {
+        Lock guard(s->queueLock);
+        for (const auto& item : s->animationGaps) {
+            const auto& gap = item.second;
+            auto entry = Line("ANIMATION", "missing_summary", Utf8((
+                "model=" + Quote(item.first.first.c_str()) + " request=" + std::to_string(item.first.second) +
+                " ordinary_mm=" + std::to_string(gap.ordinary) + " missing=" + std::to_string(gap.missing) +
+                " skipped_transition=" + std::to_string(gap.skipped) + " ordinary_idle=" + std::to_string(gap.idle)).c_str()));
+            entry.important = false;
+            Append(*s, std::move(entry));
+        }
+        s->animationGaps.clear();
+    } catch (...) {}
     Event("SESSION","end");s->stopping=true;SetEvent(s->wake);
     WaitForSingleObject(s->thread,3000);
     // State intentionally has process lifetime: late shutdown observers remain safe.
@@ -619,6 +634,20 @@ void Notification(const char* type, const char* text, const char* extra) noexcep
         auto entry = Line("ERROR", "notification", detail); entry.important = false;
         Append(*s, std::move(entry));
         s->notifications.emplace(std::move(key), Repeat{GetTickCount(), 0, std::move(detail)});
+    } catch (...) {}
+}
+void MissingAnimation(const char* model, unsigned long request, AnimationGapResult result) noexcept {
+    State* s = current.load(); if (!s || s->stopping) return;
+    try {
+        Lock guard(s->queueLock);
+        if (s->stopping) return;
+        auto& gap = s->animationGaps[std::make_pair(std::string(model ? model : ""), request)];
+        switch (result) {
+        case AnimationGapResult::Ordinary: ++gap.ordinary; break;
+        case AnimationGapResult::Missing: ++gap.missing; break;
+        case AnimationGapResult::SkipTransition: ++gap.skipped; break;
+        case AnimationGapResult::OrdinaryIdle: ++gap.idle; break;
+        }
     } catch (...) {}
 }
 void FlushCritical() noexcept{State* s=current.load();if(s)Synchronize(*s);}
