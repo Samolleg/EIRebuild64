@@ -22,6 +22,8 @@
 namespace owned {
 namespace {
 
+constexpr std::uint32_t kFigureSignature1 = 0x31474946u;
+
 std::array<float, 4> retained_visual_emissive(
     const VisualTickValues& values, bool quest_light_active,
     const MaterialCpuAsset& material) noexcept {
@@ -71,6 +73,8 @@ float select_endpoint(const float* values,
 std::array<float, 3> selected_bone(
     const ModelNodeCpuAsset& node,
     const std::array<float, 3>& selector) noexcept {
+    if (node.bone_positions.size() == 3u)
+        return {{node.bone_positions[0], node.bone_positions[1], node.bone_positions[2]}};
     std::array<float, 3> result{};
     for (std::size_t axis = 0; axis < result.size(); ++axis) {
         float endpoints[8]{};
@@ -83,6 +87,7 @@ std::array<float, 3> selected_bone(
 
 FigureBounds selected_bounds(const FigureCpuAsset& figure,
                              const std::array<float, 3>& selector) noexcept {
+    if (figure.shape_count == 1u) return figure.bounds.front();
     FigureBounds result{};
     for (std::size_t axis = 0; axis < 3; ++axis) {
         float center[8]{}, minimum[8]{}, maximum[8]{};
@@ -113,18 +118,18 @@ FigureBounds selected_bounds(const FigureCpuAsset& figure,
 }
 
 bool selected_groups(const std::vector<NativePackedGroup>& endpoints,
-                     std::uint32_t groups,
+                     std::uint32_t groups, std::uint32_t shapes,
                      const std::array<float, 3>& selector,
                      std::vector<NativePackedGroup>& output) {
-    if (groups == 0 || endpoints.size() !=
-            static_cast<std::size_t>(groups) * 8u)
+    if (groups == 0 || (shapes != 1u && shapes != 8u) || endpoints.size() !=
+            static_cast<std::size_t>(groups) * shapes)
         return false;
     output.resize(groups);
     for (std::size_t group = 0; group < output.size(); ++group) {
         NativePackedGroup& selected = output[group];
         for (std::size_t lane = 0; lane < 4; ++lane) {
             float x[8]{}, y[8]{}, z[8]{}, w[8]{};
-            for (std::size_t shape = 0; shape < 8; ++shape) {
+            for (std::size_t shape = 0; shape < shapes; ++shape) {
                 const NativePackedGroup& endpoint =
                     endpoints[shape * groups + group];
                 x[shape] = endpoint.x[lane];
@@ -132,10 +137,10 @@ bool selected_groups(const std::vector<NativePackedGroup>& endpoints,
                 z[shape] = endpoint.z[lane];
                 w[shape] = endpoint.w[lane];
             }
-            selected.x[lane] = select_endpoint(x, selector);
-            selected.y[lane] = select_endpoint(y, selector);
-            selected.z[lane] = select_endpoint(z, selector);
-            selected.w[lane] = select_endpoint(w, selector);
+            selected.x[lane] = shapes == 1u ? x[0] : select_endpoint(x, selector);
+            selected.y[lane] = shapes == 1u ? y[0] : select_endpoint(y, selector);
+            selected.z[lane] = shapes == 1u ? z[0] : select_endpoint(z, selector);
+            selected.w[lane] = shapes == 1u ? w[0] : select_endpoint(w, selector);
             if (!finite_value(selected.x[lane]) ||
                 !finite_value(selected.y[lane]) ||
                 !finite_value(selected.z[lane]) ||
@@ -282,8 +287,7 @@ const char* retained_static_structure_omission(
     const auto model = snapshot.models.find(source.visual_reference);
     if (model == snapshot.models.end() || !model->second) return "model_lookup";
     if (model->second->nodes.empty() ||
-        model->second->links.size() != model->second->nodes.size() ||
-        !model->second->static_shape_parameterized)
+        model->second->links.size() != model->second->nodes.size())
         return "model_structure";
     for (const float selector : source.shape)
         if (!finite_value(selector)) return "source_values";
@@ -310,18 +314,19 @@ const char* retained_static_structure_omission(
         const ModelLink& link = model->second->links[index];
         if (link.parent_index != UINT_MAX && link.parent_index >= index)
             return "parent_order";
-        if (node.bone_positions.size() != 24u) return "figure_structure";
+        if (node.bone_positions.size() != 3u && node.bone_positions.size() != 24u)
+            return "figure_structure";
         if (!retained_static_node_selected(source, *model->second, index)) continue;
         drawn = true;
-        if (node.figure.signature != kFigureSignature8 ||
-            node.figure.shape_count != 8 ||
+        if (node.figure.signature != (node.figure.shape_count == 1u ? kFigureSignature1 : kFigureSignature8) ||
+            (node.figure.shape_count != 1u && node.figure.shape_count != 8u) ||
             node.figure.position_groups == 0 ||
             node.figure.positions.size() !=
-                static_cast<std::size_t>(node.figure.position_groups) * 8u ||
+                static_cast<std::size_t>(node.figure.position_groups) * node.figure.shape_count ||
             node.figure.normal_groups == 0 ||
             node.figure.normals.size() !=
                 static_cast<std::size_t>(node.figure.normal_groups) ||
-            node.figure.bounds.size() != 8u ||
+            node.figure.bounds.size() != node.figure.shape_count ||
             node.figure.positions.empty() || node.figure.normals.empty() ||
             node.figure.components.empty() || node.figure.indices.empty() ||
             node.figure.texture_coordinates.empty() ||
@@ -475,8 +480,7 @@ bool prepare_retained_static_candidate(
                 diagnostic, RetainedStaticPrepareResult::model_lookup,
                 source_index, kRetainedStaticPrepareNoIndex, signed_id);
         const ModelCpuAsset& model = *model_found->second;
-        if (model.links.size() != model.nodes.size() || model.nodes.empty() ||
-            !model.static_shape_parameterized)
+        if (model.links.size() != model.nodes.size() || model.nodes.empty())
             return prepare_failed(
                 diagnostic, RetainedStaticPrepareResult::model_structure,
                 source_index, kRetainedStaticPrepareNoIndex, signed_id);
@@ -519,15 +523,15 @@ bool prepare_retained_static_candidate(
             const FigureCpuAsset& figure = source_node.figure;
             // A node outside the MOB part list contributes only its offset.
             const bool drawn = retained_static_node_selected(object, model, index);
-            if (source_node.bone_positions.size() != 24u ||
-                (drawn && (figure.signature != kFigureSignature8 ||
-                figure.shape_count != 8 || figure.position_groups == 0 ||
+            if ((source_node.bone_positions.size() != 3u && source_node.bone_positions.size() != 24u) ||
+                (drawn && (figure.signature != (figure.shape_count == 1u ? kFigureSignature1 : kFigureSignature8) ||
+                (figure.shape_count != 1u && figure.shape_count != 8u) || figure.position_groups == 0 ||
                 figure.normal_groups == 0 ||
                 figure.positions.size() !=
-                    static_cast<std::size_t>(figure.position_groups) * 8u ||
+                    static_cast<std::size_t>(figure.position_groups) * figure.shape_count ||
                 figure.normals.size() !=
                     static_cast<std::size_t>(figure.normal_groups) ||
-                figure.bounds.size() != 8u ||
+                figure.bounds.size() != figure.shape_count ||
                 figure.texture_coordinates.empty() ||
                 figure.components.empty() || figure.indices.empty() ||
                 figure.indices.size() % 3u != 0u)))
@@ -594,7 +598,7 @@ bool prepare_retained_static_candidate(
                     return prepare_failed(
                         diagnostic, RetainedStaticPrepareResult::node_bounds,
                         source_index, index, signed_id);
-            if (!selected_groups(figure.positions, figure.position_groups,
+            if (!selected_groups(figure.positions, figure.position_groups, figure.shape_count,
                                  object.shape, node.positions))
                 return prepare_failed(
                     diagnostic, RetainedStaticPrepareResult::position_selection,

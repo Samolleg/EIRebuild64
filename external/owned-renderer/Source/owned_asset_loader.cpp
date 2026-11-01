@@ -985,6 +985,7 @@ std::string compact_failure(const char* kind, const std::string& name,
     output += name;
     output += ':';
     output += resource_failure_code_name(failure.code);
+    if (!failure.message.empty()) output += ":" + failure.message;
     return output;
 }
 
@@ -2818,50 +2819,22 @@ bool decode_model_resources(const ResourceBlob& mod_blob,
         !bone_archive.open(bone_blob, failure))
         return false;
     ResourceBlob lnk_blob;
-    if (!mod_archive.resolve(visual_reference, lnk_blob, failure) ||
-        !parse_lnk(lnk_blob, model.links, failure))
-        return false;
-    try { model.nodes.reserve(model.links.size()); } catch (...) {
-        fail(failure, ResourceFailureCode::parse, "model node allocation failed");
-        return false;
-    }
-    for (const ModelLink& link : model.links) {
+    if (!mod_archive.resolve(visual_reference, lnk_blob, failure)) return false;
+    // BON endpoints describe the skeleton, independently of FIG shape count.
+    // Use the same LNK/BON decoder as the active map's selected sources.
+    if (!decode_selected_skeleton(lnk_blob, visual_reference,
+        [&](const std::string& name, ResourceBlob& selected, ResourceFailure& error) {
+            return bone_archive.resolve(name, selected, error);
+        }, model, failure)) return false;
+    for (ModelNodeCpuAsset& node : model.nodes) {
         ResourceBlob fig_blob;
-        ResourceBlob node_bones;
-        ModelNodeCpuAsset node{};
-        node.name = link.child;
-        if (!mod_archive.resolve(link.child, fig_blob, failure) ||
-            !parse_figure_asset(fig_blob, node.figure, failure) ||
-            !bone_archive.resolve(link.child, node_bones, failure))
-            return false;
-        const std::uint64_t expected_bone_bytes =
-            static_cast<std::uint64_t>(node.figure.shape_count) * 3u * sizeof(float);
-        if (!node_bones.bytes || node_bones.bytes->size() != expected_bone_bytes) {
-            fail(failure, ResourceFailureCode::parse,
-                 "BON node does not contain three floats per FIG shape");
+        if (!mod_archive.resolve(node.name, fig_blob, failure) ||
+            !parse_figure_asset(fig_blob, node.figure, failure)) {
+            failure.message = node.name + ": " + failure.message;
             return false;
         }
-        try { node.bone_positions.resize(node.figure.shape_count * 3u); }
-        catch (...) {
-            fail(failure, ResourceFailureCode::parse,
-                 "BON node allocation failed");
-            return false;
-        }
-        for (std::size_t index = 0; index < node.bone_positions.size(); ++index) {
-            node.bone_positions[index] = read_float(
-                node_bones.bytes->data() + index * sizeof(float));
-            // The game uses BON endpoints unchecked; zero a non-finite one.
-            if (!std::isfinite(node.bone_positions[index])) {
-                node.bone_positions[index] = 0.0f;
-                bridge_append_probe_event("bon_endpoint_repaired",
-                    (visual_reference + "/" + link.child + ": non-finite BON endpoint zeroed").c_str());
-            }
-        }
-        model.static_shape_parameterized = model.static_shape_parameterized ||
-            node.figure.shape_count == 8;
-        model.nodes.push_back(std::move(node));
+        model.static_shape_parameterized |= node.figure.shape_count == 8;
     }
-    model.visual_reference = visual_reference;
     model.model_container = mod_blob.identity;
     model.bone_container = bone_blob.identity;
     model.source_bytes = mod_blob.identity.bytes + bone_blob.identity.bytes;
