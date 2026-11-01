@@ -221,7 +221,9 @@ BOOL SItemDatabase::Load(LPCSTR pszPath, LPCSTR pszFName)
         quickMaterialGraphics.clear();
         res.CloseFile(pData);
         res.CloseResource();
-        return ReportError("Cannot load inventory material graphics (items.idb): %.800s", error.what());
+        // Malformed database input must also stop startup with AntiCrash enabled;
+        // GameMain does not check the return value of this loader.
+        return ReportError(E_INVALIDARG, "Cannot load inventory material graphics (items.idb): %.800s", error.what());
     }
     //
     res.CloseFile(pData);
