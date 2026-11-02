@@ -898,7 +898,20 @@ HRESULT Renderer::update_contact_blend_maps() noexcept try{
   }
   source=host_atlas.Get();
 #else
-  for(const auto& entry:native_texture_arrays_){
+  // Embedded terrain publishes immutable surfaces. Their array slots are
+  // keyed by GPU backing, not by surface id, and carry generation 1. Resolve
+  // the original uploaded texture by the same key as get_native_owned_texture.
+  const std::string surface_key="surface:"+std::to_string(surface->id);
+  for(const char* mips:{"|mips=full","|mips=authored"}){
+   const auto found=native_owned_textures_.find(surface_key+mips);
+   if(found!=native_owned_textures_.end()&&found->second.generation==surface->generation&&found->second.texture){
+    source=found->second.texture.Get();break;
+   }
+  }
+  // Retail surfaces use the mutable array cache. Its id namespace must not
+  // be confused with immutable GPU backing ids, even when numbers coincide.
+  if(!source)for(const auto& entry:native_texture_arrays_){
+   if(entry.first.immutable_values)continue;
    for(const auto& page:entry.second){
     const auto found=page.slots.find(surface->id);
     if(found!=page.slots.end()&&found->second.generation==surface->generation){
@@ -924,7 +937,11 @@ HRESULT Renderer::update_contact_blend_maps() noexcept try{
    contact_incompatible_logged_=true;
    char text[256];
    std::snprintf(text,sizeof(text),"terrain atlas format or size differs (%s); affected contact art omitted",detail);
+#ifdef EID3D11_EMBEDDED
+   embedded_report_render_failure("contact_blend_atlas_incompatible",text);
+#else
    bridge_append_probe_event("contact_blend_atlas_incompatible",text);
+#endif
   }
  }
  return S_OK;

@@ -1602,6 +1602,43 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
      bind_tessellation(tessellated_batch); // the steep region
     }
     if(terrain_batch)context_->PSSetShader(live_ps,nullptr,0);
+#ifdef EID3D11_EMBEDDED
+    // Inspect the actual pixel-stage inputs once per world, at a settled
+    // active-ground draw. Empty optional pools are expected; no state changes.
+    if(terrain_batch&&!part&&!scene_composited_&&!bucket.material_key.contact_map&&tile_blend_ready_&&!contact_maps_.pending){
+     static std::uint64_t reported_epoch=UINT64_MAX;
+     const auto epoch=bridge_current_world_epoch();
+     if(reported_epoch!=epoch){
+      reported_epoch=epoch;
+      char text[768];
+      std::snprintf(text,sizeof(text),"epoch=%llu table_entry=%.0f maps=%u rows=%u styles=%llu ready=%016llx",
+       static_cast<unsigned long long>(epoch),constants.layout_origin[3],terrain2_table_count_,tile_blend_rows_?1u:0u,
+       static_cast<unsigned long long>(terrain2_map_.style_serial),static_cast<unsigned long long>(contact_maps_.ready));
+      bool missing=constants.layout_origin[3]<=0||!terrain2_table_count_||!tile_blend_rows_||!terrain2_map_.style_serial;
+      for(const UINT slot:{85u,86u,87u,88u,89u,90u,91u,92u,93u,119u,121u,127u}){
+       ComPtr<ID3D11ShaderResourceView> view;context_->PSGetShaderResources(slot,1,&view);
+       const bool required=slot==85u||slot==127u||(contact_maps_.pool>=0&&slot==86u+UINT(contact_maps_.pool));
+       missing=missing||(required&&!view);
+       char resource_text[96];
+       if(!view)std::snprintf(resource_text,sizeof(resource_text)," t%u=null",slot);
+       else{
+        ComPtr<ID3D11Resource> resource;view->GetResource(&resource);
+        ComPtr<ID3D11Texture2D> texture;
+        if(SUCCEEDED(resource.As(&texture))){
+         D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);
+         std::snprintf(resource_text,sizeof(resource_text)," t%u=%ux%u/m%u/a%u/f%u",slot,d.Width,d.Height,d.MipLevels,d.ArraySize,unsigned(d.Format));
+        }else{
+         D3D11_SHADER_RESOURCE_VIEW_DESC d{};view->GetDesc(&d);
+         std::snprintf(resource_text,sizeof(resource_text)," t%u=buffer/f%u",slot,unsigned(d.Format));
+        }
+       }
+       const auto used=std::strlen(text);std::snprintf(text+used,sizeof(text)-used,"%s",resource_text);
+      }
+      bridge_report_event("terrain2_bindings",text);
+      if(missing)embedded_report_render_failure("terrain2_bindings_missing",text);
+     }
+    }
+#endif
     // The flat region of a split batch has its own scope (live_flat).
     const TerrainProfilePart live_part=split&&!part?TerrainProfilePart::live_flat:TerrainProfilePart::live;
     if(trail_split&&!part){
