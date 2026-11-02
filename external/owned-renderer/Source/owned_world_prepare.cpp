@@ -202,6 +202,19 @@ std::uint64_t owned_static_key(const RetainedVisualSample& sample) noexcept;
 // entity that silently leaves the frame's list never lingers as a ghost.
 std::unordered_map<std::uint64_t,std::uint64_t> g_owned_static_registry;
 
+// The persistent static record was built from other values or another pose
+// than the sample now carries (a script moved, rotated or reshaped it).
+bool owned_static_registration_stale(const RetainedVisualSample& sample) noexcept {
+    if(!sample.prepared || !sample.prepared->color_packet.static_registered)return false;
+    const auto& prepared=*sample.prepared;
+    const auto& packet=prepared.color_packet;
+    return !sample.assembly || packet.assembly!=sample.assembly.get() ||
+        packet.assembly_revision!=sample.assembly->revision ||
+        !prepared.derived_pose_valid || packet.pose_generation!=prepared.derived_pose_generation ||
+        !owned_visual_pose_key_matches(prepared.derived_pose_key,sample) ||
+        std::memcmp(&packet.values,&sample.values,sizeof(packet.values))!=0;
+}
+
 } // namespace
 thread_local OwnedAdmissionCache g_owned_admission_cache;
 namespace {
@@ -539,6 +552,13 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
             prepared.casting_parts &&
             owned_point_shadow_influence(prepared.bounds,frame.values->world_point_lights);
 
+        // A registered static set record keeps drawing (GPU-culled) at the
+        // pose it was built with. Only colour-contributing entities are
+        // resubmitted to the set, so an object that changed since and now
+        // lies outside the camera would keep its old record: retire it; it
+        // registers again when it is in view.
+        if (!prepared.contribution.color && owned_static_registration_stale(sample))
+            retire_owned_static_color(sample);
         if (!prepared.contribution.color && !prepared.contribution.light_mask && !point_caster) {
             frame.shadow_considered+=prepared.casting_parts;
             if(frame.diagnostic.profile_frame)++frame.diagnostic.contribution_rejected;

@@ -85,7 +85,7 @@ class CombatUiRenderer {
 public:
     CombatUiRenderer();
     ~CombatUiRenderer();
-    void initialize(ID3D11Device* device, ID3D11DeviceContext* context);
+    void initialize();
     void shutdown() noexcept;
     bool prepare(RendererConfig& config);
     void draw(RendererConfig& config, bool interactive = true);

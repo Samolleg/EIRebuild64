@@ -54,6 +54,21 @@ constexpr PlayerGraphicsSetting kSettings[] = {
     {"upscale_sharpness", kCategories[0], "Sharpening",
      "Sharpens the image after the upscaler, DLSS or FSR. Keep it low to stay close to the original look; 0 turns it off.",
      nullptr, false, {.2f, .2f, .2f, .2f}},
+    {"frame_generation", kCategories[0], "Frame generation",
+     "Adds one generated frame between each two rendered frames: about double the frames on screen for about one rendered frame "
+     "of extra delay. Needs DLSS or FSR upscaling and the Direct3D 12 renderer. DLSS Frame Generation needs a GeForce RTX 40 or 50; "
+     "FSR frame generation runs on any Direct3D 12 card. It pauses on full-screen menus and below the minimum FPS.",
+     "Off\0" "NVIDIA DLSS Frame Generation\0" "AMD FSR frame generation\0", false, {0, 0, 0, 0}},
+    {"frame_generation_min_fps", kCategories[0], "Frame generation minimum FPS",
+     "Frame generation pauses while the rendered frame rate is below this (generated frames at low rates feel sluggish), and resumes above it.",
+     nullptr, false, {30, 30, 30, 30}},
+    {"latency_pacing", kCategories[0], "Latency pacing",
+     "Starts each game frame later, by as much as it would otherwise wait, so input is read closer to when the frame is shown. "
+     "Lower input delay at the same frame rate; never a frame cap. Direct3D 12 renderer.",
+     "Off\0" "On\0", false, {0, 0, 0, 0}},
+    {"reflex", kCategories[0], "NVIDIA Reflex",
+     "NVIDIA cards, Direct3D 12 renderer: keeps the GPU queue short for lower input delay. Boost also waits before releasing the next game frame.",
+     "Off\0" "On\0" "On + Boost\0", false, {0, 0, 0, 0}},
     {"render_scale", kCategories[0], "Render scale",
      "The 3D world renders at this share of the screen resolution and is sharpened back up to it. "
      "The interface, text and cursor always stay at full resolution. Lower is faster. Only with Upscaling off.",
@@ -78,6 +93,9 @@ constexpr PlayerGraphicsSetting kSettings[] = {
      "(fewer out-of-memory crashes on big maps); DLSS needs it. Applies after restarting the game. "
      "If the host does not start, the option turns itself off.",
      nullptr, false, {0, 0, 0, 0}},
+    {"renderer_backend", kCategories[0], "Renderer",
+     "Direct3D 12 runs in the 64-bit render host and is needed for frame generation and NVIDIA Reflex. Applies after restarting the game. A graphics card that cannot start Direct3D 12 stays on Direct3D 11 (the reason shows in F10 and host.log).",
+     "Direct3D 11\0" "Direct3D 12\0", false, {0, 0, 0, 0}},
     {"background_frame_limit", kCategories[0], "Background frame rate limit",
      "Caps the frame rate while another window is in front, so a game left running idles quietly. Off is uncapped.",
      nullptr, false, {0, 0, 0, 0}},
@@ -87,6 +105,10 @@ constexpr PlayerGraphicsSetting kSettings[] = {
      nullptr, false, {0, 0, 0, 0}},
     {"shadows", kCategories[1], "Sun shadows",
      "Shadows cast by the sun and moon.", nullptr, true, {1, 1, 1, 1}},
+    {"material_quality", kCategories[1], "Material quality",
+     "Metal, leather, cloth and bone on characters, and stone, wood and plaster on buildings and props, catch the sun, the sky and lamps "
+     "differently. Off keeps the plain image. The painted colours and the game's lighting stay.",
+     "Off\0" "Low\0" "Medium\0" "High\0", true, {0, 1, 2, 3}},
     {"shadow_cascade_quality", kCategories[1], "Shadow resolution",
      "Sharpness of sun shadows. Higher uses more video memory.",
      "Low\0" "Medium\0" "High\0", true, {0, 1, 1, 2}},
@@ -123,10 +145,10 @@ constexpr PlayerGraphicsSetting kSettings[] = {
     // Terrain
     {"terrain_quality", kCategories[2], "Terrain detail",
      "Ground texture quality: less visible tiling and sharper transitions.",
-     "Low\0" "High\0", true, {0, 0, 1, 1}},
+     "Low\0" "Medium\0" "High\0", true, {0, 1, 2, 2}},
     {"terrain_blend", kCategories[2], "Terrain blending",
      "Natural, irregular edges between ground materials instead of repeating tile shapes.",
-     "Off\0" "Fast\0" "Full\0", true, {0, 1, 1, 2}},
+     "Off\0" "On\0", true, {0, 1, 1, 1}},
     {"terrain_cliffs", kCategories[2], "Cliff texturing",
      "Cliffs show the map's own ground art without stretching. Needs terrain blending.", nullptr, true, {0, 1, 1, 1}},
     {"contact_blend", kCategories[2], "Ground contact blend",
@@ -164,7 +186,7 @@ constexpr PlayerGraphicsSetting kSettings[] = {
     {"ground_cover_distance", kCategories[4], "Ground cover distance (m)",
      "How far grass and ground cover reach. Shorter is faster.", nullptr, true, {75, 100, 200, 300}},
     {"ground_cover_shadows", kCategories[4], "Ground cover shadows",
-     "Sun shadows of the ground cover. Large only: snow and sand piles, fallen branches, dead bushes and cave roots. "
+     "Sun shadows of the ground cover. Large only: fallen branches, dead bushes and cave roots. "
      "All adds grass, flowers and small debris; costs noticeably more.",
      "Off\0" "Large only\0" "All\0", false, {1, 1, 1, 1}},
     {"tree_sway", kCategories[4], "Swaying trees",
@@ -203,6 +225,9 @@ constexpr PlayerGraphicsSetting kSettings[] = {
      "Off\0" "Low\0" "High\0", true, {0, 1, 1, 2}},
     {"wind_trails", kCategories[6], "Wind streaks",
      "Faint streaks that trace strong gusts.", "Off\0" "Normal\0" "Dense\0", true, {0, 1, 1, 2}},
+    {"fur_mode", kCategories[6], "Fur and hair",
+     "Creatures get layered fur and characters get hair strands grown from the scalp instead of flat hair meshes. "
+     "The middle level is lighter and keeps the original hair.", "Off\0" "Creature fur and fur armour\0" "Full: fur, fur armour and hair strands\0", true, {0, 1, 2, 2}},
     {"precipitation", kCategories[6], "Rain and snow",
      "Rain streaks and snowflakes drawn by the renderer. Higher levels draw denser rain; Off draws no rain or snow.",
      "Off\0" "Low\0" "Medium\0" "High\0" "Ultra\0", true, {1, 2, 3, 4}},
@@ -300,6 +325,11 @@ constexpr PlayerGraphicsSetting kSettings[] = {
      "Centered (original)\0" "Top to bottom\0" "Bottom to top\0" "Left to right\0" "Right to left\0", false, {}},
     {"message_panel_text_scale", kCategories[8], "Info panel text scale (%)",
      "Size of loot and quest text. Panel resizing changes wrapping; global HUD scale multiplies this size.", nullptr, false, {}},
+    {"portrait_head", kCategories[8], "Party portraits: real head",
+     "The party portraits show each member's own head and hair, with the same hair, materials and expressions as in the world, "
+     "instead of the baked portrait faces.", nullptr, false, {1, 1, 1, 1}},
+    {"portrait_helmet", kCategories[8], "Party portraits: helmet",
+     "Portraits wear the helmet the member wears. Off (the original look) shows the bare head and hair.", nullptr, false, {0, 0, 0, 0}},
     {"hud_width", kCategories[8], "HUD width",
      "On ultrawide screens, keeps the map, portrait, spells and weapons within a 16:9 or 21:9 area "
      "around the centre instead of at the far edges. Applies after restarting the game.",
@@ -346,6 +376,20 @@ constexpr PresetRowBeforeVersion1 kPresetRowsBeforeVersion1[] = {
 // on a named preset never held them (shadow_neighbour_casters, candidate-72).
 constexpr PresetRowBeforeVersion1 kPresetRowsBeforeVersion2[] = {
     {"shadow_neighbour_casters", false, {0, 0, 0, 0}},
+};
+
+// settings_version 4 split terrain_quality Low/High into Low/Medium/High;
+// migrate_settings has already moved an older file's value up one step (old
+// Low is Medium, old High is High) when the preset is detected.
+constexpr PresetRowBeforeVersion1 kPresetRowsBeforeVersion4[] = {
+    {"terrain_quality", true, {1, 1, 2, 2}},
+};
+
+// settings_version 5 put material_quality and fur_mode into the presets: an
+// older file saved on a named preset held their defaults, not a choice.
+constexpr PresetRowBeforeVersion1 kPresetRowsBeforeVersion5[] = {
+    {"material_quality", false, {2, 2, 2, 2}},
+    {"fur_mode", false, {0, 0, 0, 0}},
 };
 
 bool option_matches(const RendererOption& option, float value) noexcept {
@@ -424,6 +468,12 @@ GraphicsPreset detect_preset(const RendererConfig& config, int saved_version) no
             if (saved_version < 2)
                 for (const auto& row : kPresetRowsBeforeVersion2)
                     if (std::strcmp(row.key, setting.key) == 0) { in_preset = row.in_preset; values = row.values; }
+            if (saved_version < 4)
+                for (const auto& row : kPresetRowsBeforeVersion4)
+                    if (std::strcmp(row.key, setting.key) == 0) { in_preset = row.in_preset; values = row.values; }
+            if (saved_version < 5)
+                for (const auto& row : kPresetRowsBeforeVersion5)
+                    if (std::strcmp(row.key, setting.key) == 0) { in_preset = row.in_preset; values = row.values; }
             if (!in_preset) continue;
             const RendererOption* option = config.find(setting.key);
             if (option && !option_matches(*option, values[index])) { matches = false; break; }
@@ -435,7 +485,7 @@ GraphicsPreset detect_preset(const RendererConfig& config, int saved_version) no
 } // namespace
 
 GraphicsPreset detect_graphics_preset(const RendererConfig& config) noexcept {
-    return detect_preset(config, 2);
+    return detect_preset(config, 5); // the current table
 }
 
 GraphicsPreset reapply_graphics_preset_before(RendererConfig& config, int saved_version) noexcept {

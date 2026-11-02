@@ -19,7 +19,7 @@
 namespace x64remote {
 
 constexpr std::uint32_t kMagic = 0x44524945u; // 'EIRD'
-constexpr std::uint32_t kVersion = 20; // 20: cave flag in NativeWorldLightingFrame (#208); 19: zone-mask HitTestFrame (#200); 18: candidate-1025 (S7 17 + grass-cull WorldScene camera anchor height); 17: S7, the call-stream ops, queries, prefetch and neighbour status removed; 16: game_clean_exit; 15: combined-1
+constexpr std::uint32_t kVersion = 22; // 22: host_window_work removed again; 21: Control::host_window_work, release_delay_us; 20: cave flag in NativeWorldLightingFrame (#208); 19: zone-mask HitTestFrame (#200); 18: candidate-1025 (S7 17 + grass-cull WorldScene camera anchor height); 17: S7, the call-stream ops, queries, prefetch and neighbour status removed; 16: game_clean_exit; 15: combined-1
 constexpr std::uint32_t kHarnessAcks = 16;              // harness step acks in flight (one step runs at a time)
 constexpr std::uint32_t kSurfaceRequests = 1024;         // surface writes the host asked for, in flight
 constexpr std::uint32_t kOverlayInputs = 64;             // window messages for the host's F10 overlay, in flight
@@ -119,7 +119,7 @@ struct alignas(64) Control {
     volatile std::uint64_t presents_done;
     volatile std::uint64_t reply_serial;
     volatile long reply_hr;
-    std::uint32_t reserved1;
+    volatile long release_delay_us;              // latency_pacing: the game waits this long after each present wait (host-set)
     char host_reason[128];                       // why the host failed the device (written before device_removed)
     // video memory (seqlocked, host-written) and the host's presented frames
     alignas(64) volatile long stats_sequence;

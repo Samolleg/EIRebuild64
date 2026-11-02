@@ -1463,6 +1463,65 @@ bool texture_alpha_pixels(const TextureCpuAsset& texture, std::size_t index,
     return true;
 }
 
+bool texture_rgb_pixels(const TextureCpuAsset& texture, std::size_t index, std::uint32_t& width,
+                        std::uint32_t& height, std::vector<std::uint8_t>& rgb) noexcept try {
+    width = height = 0; rgb.clear();
+    if (!texture.source || index >= texture.mips.size()) return false;
+    const auto& mip = texture.mips[index];
+    if (mip.byte_offset > texture.source->size() || mip.bytes > texture.source->size() - mip.byte_offset ||
+        !mip.width || !mip.height) return false;
+    const std::uint8_t* data = texture.source->data() + mip.byte_offset;
+    const std::uint32_t w = mip.width, h = mip.height;
+    if (texture.format == MmpFormat::dxt1 || texture.format == MmpFormat::dxt3 || texture.format == MmpFormat::dxt5) {
+        // The colour half of each block (DXT3/5: after their 8 alpha bytes).
+        const unsigned block = texture.format == MmpFormat::dxt1 ? 8u : 16u;
+        const std::uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
+        if (mip.bytes < std::size_t(bw) * bh * block) return false;
+        rgb.assign(std::size_t(w) * h * 3, 0);
+        for (std::uint32_t by = 0; by < bh; ++by) for (std::uint32_t bx = 0; bx < bw; ++bx) {
+            const std::uint8_t* b = data + (std::size_t(by) * bw + bx) * block + (block - 8);
+            const unsigned c0 = b[0] | (b[1] << 8), c1 = b[2] | (b[3] << 8);
+            unsigned pal[4][3];
+            const auto expand = [](unsigned c, unsigned* o) {
+                o[0] = ((c >> 11) & 31) * 255 / 31; o[1] = ((c >> 5) & 63) * 255 / 63; o[2] = (c & 31) * 255 / 31;
+            };
+            expand(c0, pal[0]); expand(c1, pal[1]);
+            for (int k = 0; k < 3; ++k) {
+                // DXT3/5 colour blocks always use the four-colour mode.
+                if (c0 > c1 || block == 16) { pal[2][k] = (2 * pal[0][k] + pal[1][k]) / 3; pal[3][k] = (pal[0][k] + 2 * pal[1][k]) / 3; }
+                else { pal[2][k] = (pal[0][k] + pal[1][k]) / 2; pal[3][k] = 0; }
+            }
+            const std::uint32_t bits = b[4] | (b[5] << 8) | (b[6] << 16) | (std::uint32_t(b[7]) << 24);
+            for (unsigned i = 0; i < 16; ++i) {
+                const std::uint32_t x = bx * 4 + i % 4, y = by * 4 + i / 4;
+                if (x >= w || y >= h) continue;
+                const unsigned sel = (bits >> (2 * i)) & 3;
+                for (int k = 0; k < 3; ++k) rgb[(std::size_t(y) * w + x) * 3 + k] = std::uint8_t(pal[sel][k]);
+            }
+        }
+    } else {
+        // Packed 16/32-bit texels; the masks are in the file's A, R, G, B order.
+        // PNT3 is expanded at parse into BGRA bytes and keeps no masks.
+        const unsigned bpp = texture.bit_count / 8;
+        if ((bpp != 2 && bpp != 4) || mip.bytes < std::size_t(w) * h * bpp) return false;
+        const bool bgra = texture.format_signature == 0x33544e50u;  // 'PNT3'
+        if (!bgra)
+            for (int c = 1; c < 4; ++c) if (!texture.masks[c] || !texture.channel_bits[c] || texture.channel_bits[c] > 8) return false;
+        rgb.assign(std::size_t(w) * h * 3, 0);
+        for (std::size_t i = 0; i < std::size_t(w) * h; ++i) {
+            const std::uint8_t* q = data + i * bpp;
+            if (bgra) { rgb[i * 3] = q[2]; rgb[i * 3 + 1] = q[1]; rgb[i * 3 + 2] = q[0]; continue; }
+            const std::uint32_t v = bpp == 2 ? std::uint32_t(q[0] | (q[1] << 8)) :
+                std::uint32_t(q[0] | (q[1] << 8) | (q[2] << 16)) | (std::uint32_t(q[3]) << 24);
+            for (int c = 0; c < 3; ++c)
+                rgb[i * 3 + c] = std::uint8_t(((v & texture.masks[1 + c]) >> texture.shifts[1 + c]) * 255u /
+                                              ((1u << texture.channel_bits[1 + c]) - 1));
+        }
+    }
+    width = w; height = h;
+    return true;
+} catch (...) { rgb.clear(); width = height = 0; return false; }
+
 static void establish_texture_alpha(TextureCpuAsset& texture) noexcept {
     texture.opaque_mips = 0;
     TextureAlphaPixels input;
@@ -3950,11 +4009,14 @@ bool write_owned_loader_receipt(const OwnedMapSnapshot& snapshot,
 
 bool shipped_node_link_matches(const ModelLink& recipe, std::size_t index,
     const void* node, const void* head, const void* game_parent,
-    const void* recipe_parent) noexcept {
+    const void* recipe_parent, bool later_root) noexcept {
     if (recipe.parent_index != UINT_MAX)
         return recipe.parent_index < index && game_parent && game_parent == recipe_parent;
-    if (recipe.parent.empty()) return node == head && !game_parent;
-    return node != head && !game_parent;  // its named parent came later
+    // The first node without a parent name is the head. A later one stays
+    // unlinked like a node whose named parent came later (multi-part models
+    // such as Dejavu's gz19g wrecks, levers and gates list every part as a root).
+    if (recipe.parent.empty() && !later_root) return node == head && !game_parent;
+    return node != head && !game_parent;
 }
 
 } // namespace owned

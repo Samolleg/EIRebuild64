@@ -21,6 +21,7 @@
 namespace owned {
 
 struct RetainedStaticSourceCandidate;
+struct FurProfile;
 
 enum class MobSourceRole : std::uint8_t {
     main,
@@ -67,6 +68,9 @@ struct VisualPartAsset {
     std::uint32_t skeleton_node = UINT_MAX;
     std::shared_ptr<const TextureCpuAsset> texture;
     std::string texture_source_name;
+    // The game texture's own name (CTexture name) for surface and value
+    // parts alike: the key of its material composition (material classes).
+    std::string material_name;
     std::shared_ptr<const OwnedVisualSurface> surface;
     bool source_available = true;
     std::shared_ptr<const MaterialCpuAsset> material;
@@ -81,6 +85,22 @@ struct VisualPartAsset {
     bool arrow = false;
     bool explicitly_hidden = false;
     bool casts_shadow = true;
+};
+
+// The ordered source layers of one composed character atlas (the game's
+// CTextureManager::ComposeTexture or the addon's memory compose), keyed by
+// the composite's texture name. Material classes come from these layers.
+struct MaterialComposition {
+    std::vector<std::string> layers;  // composition order, the selected file names
+    // Addon packed attachment atlas: the layer index placed in each 512
+    // quadrant (right hand, left hand, helm, shield); -1 none. All -1: every
+    // layer covers the whole composite (body atlases, stock secondary atlas).
+    std::array<std::int32_t, 4> slots{{-1, -1, -1, -1}};
+    std::uint32_t dimension = 0;      // composite side, texels
+    // The set's user data: 12-byte item tags {type, item, ...} (0x3004
+    // weapon, 0x3005 armor; item = shape << 16 | material row).
+    std::vector<std::uint8_t> user_data;
+    std::uint64_t serial = 0;         // changes when the layer list changes
 };
 
 // Immutable semantic appearance, built from cold named parts. The skeleton
@@ -315,6 +335,10 @@ struct VisualPreparedResources {
     std::vector<MergedGroup> merged_groups;           // never resized after build: records borrow its identities
     std::vector<std::int32_t> merged_part_group;      // part index -> group, or -1 (drawn per part)
     std::shared_ptr<const VisualAssemblyAsset> merged_assembly;
+    bool merged_fur_hair = false;                    // built with hair parts kept apart (fur_mode 2)
+    // Fur prototype (fur.h): the profile of fur_assembly, built once per assembly.
+    std::shared_ptr<const FurProfile> fur_profile;
+    std::shared_ptr<const VisualAssemblyAsset> fur_assembly;
     AdmissionKey derived_admission_key{};
     std::vector<PartAdmission> derived_admission_parts;
     WorldBoundsKey derived_world_bounds_key{};
@@ -855,6 +879,9 @@ public:
     bool visual_publish_tick_values(VisualResourceIncarnation resource,
         const VisualTickValues& values, const char** failure = nullptr) noexcept;
     bool visual_publish_detection(VisualResourceIncarnation resource, bool detected) noexcept;
+    // Render visibility at the scene walk: the detection bit the game's own
+    // draw-list build reads in that same scene. Publishes only on a change.
+    void visual_publish_scene_detection(std::int32_t signed_id, bool detected) noexcept;
     void visual_reject_detection(VisualResourceIncarnation resource, const char* predicate) noexcept;
     void visual_reject_detected_unit_detection(const char* predicate) noexcept;
     bool visual_tick_values(VisualResourceIncarnation resource,
@@ -863,6 +890,12 @@ public:
     // The clip selection an object preview shows (view 0: character panel,
     // 1: inventory), published by the game process when the preview
     // re-anchors and recorded, so the host's replica draws the same pose.
+    // Material compositions (material classes, S1): the latest layer list per
+    // composite name. Kept across map changes: composites outlive maps.
+    void material_publish_composition(const std::string& name, MaterialComposition value) noexcept;
+    bool material_composition(const std::string& name, MaterialComposition& value) const noexcept;
+    // Changes whenever any composition's layer list changes.
+    std::uint64_t material_composition_revision() const noexcept;
     void visual_publish_preview(VisualResourceIncarnation resource, std::uint32_t view,
         const VisualClipSelection& selection) noexcept;
     bool visual_preview_selection(VisualResourceIncarnation resource, std::uint32_t view,
@@ -1192,6 +1225,8 @@ private:
     bool replica_ = false;
     // visual_publish_preview: per (resource id, view) the incarnation and selection.
     std::unordered_map<std::uint64_t, std::pair<VisualResourceIncarnation, VisualClipSelection>> preview_selections_;
+    std::unordered_map<std::string, MaterialComposition> material_compositions_;
+    std::uint64_t material_composition_serial_ = 0;
     RetainedPublicationRecorder* recorder() const noexcept {
         return recorder_.load(std::memory_order_relaxed);
     }

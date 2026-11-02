@@ -29,6 +29,7 @@
 #include "character_pane_owned_text.h"
 #include "owned_resource_runtime.h"
 #include "neighbour_maps.h"
+#include "fur.h"
 #include "native_prebuilt.h"
 #include "neighbour_client.h"
 #include "neighbour_piece.h"
@@ -221,12 +222,17 @@ HRESULT Renderer::retire_stale_native_geometry(std::uint64_t before){
 void Renderer::release_empty_native_geometry_pages() noexcept{
  for(UINT index=0;index<native_geometry_pages_.size();++index){
   auto& page=native_geometry_pages_[index];
-  if(page.dedicated||!page.buffer||page.capacity<=16)continue;
+  if(page.dedicated||(!page.buffer&&!page.d3d12)||page.capacity<=16)continue;
   const bool empty=page.high_water<=16||(page.free.size()==1&&page.free[0].offset==16&&
    page.free[0].bytes==page.high_water-16u);
   if(!empty)continue;
   if(index){
-   page.buffer.Reset();page.srv.Reset();page.capacity=0;
+   page.buffer.Reset();page.srv.Reset();page.d3d12.reset();page.capacity=0;
+  }else if(d3d12_){
+   D3D12BufferRef buffer;
+   if(FAILED(d3d12_->create_buffer(16,0,0,buffer)))continue;
+   // The executor defers the previous resource's release to its fence.
+   page.d3d12=std::move(buffer);page.capacity=16;
   }else{
    ComPtr<ID3D11Buffer> buffer;ComPtr<ID3D11ShaderResourceView> srv;
    if(FAILED(create_native_geometry_resource(16,buffer,srv)))continue;
@@ -242,11 +248,14 @@ void Renderer::adopt_prebuilt_pages(const NeighbourPiece& upload) noexcept try{
  for(std::size_t slot=0;slot<slots.size();++slot){
   UINT index=UINT_MAX;
   for(UINT i=1;i<native_geometry_pages_.size();++i)
-   if(native_geometry_pages_[i].dedicated&&!native_geometry_pages_[i].buffer){index=i;break;}
+   if(native_geometry_pages_[i].dedicated&&!native_geometry_pages_[i].buffer&&!native_geometry_pages_[i].d3d12){index=i;break;}
   if(index==UINT_MAX){native_geometry_pages_.emplace_back();index=static_cast<UINT>(native_geometry_pages_.size()-1);}
   const auto& source=upload.pages[slot];
   auto& page=native_geometry_pages_[index];
   page.buffer=source.buffer;page.srv=source.srv;page.capacity=source.bytes;page.high_water=source.bytes;
+  if(d3d12_&&source.d3d12){ // D3D12 backend: the stream created the page; only its copy is recorded here
+   if(FAILED(d3d12_->finish_buffer(*source.d3d12,0,0,page.d3d12))){page.d3d12.reset();page.capacity=0;}
+  }
   page.free.clear();page.dedicated=true;page.live=0;slots[slot]=index;
  }
  const auto adopt=[&](const NativePrebuiltMesh& mesh){
@@ -258,7 +267,7 @@ void Renderer::adopt_prebuilt_pages(const NeighbourPiece& upload) noexcept try{
  native_mesh_resident_bytes_=native_geometry_live_bytes_;
  for(const UINT index:slots){ // a page no mesh lives on is released at once
   auto& page=native_geometry_pages_[index];
-  if(!page.live){page.buffer.Reset();page.srv.Reset();page.capacity=0;page.high_water=16;}
+  if(!page.live){page.buffer.Reset();page.srv.Reset();page.d3d12.reset();page.capacity=0;page.high_water=16;}
  }
 }catch(...){}
 
@@ -267,6 +276,22 @@ void Renderer::adopt_prebuilt_pages(const NeighbourPiece& upload) noexcept try{
 // active map) wins and the duplicate is dropped.
 void Renderer::adopt_prebuilt_textures(const NeighbourPiece& upload) noexcept{
  for(const auto& made:upload.prebuilt_textures)try{
+  if(d3d12_){ // D3D12 backend: the stream created the texture; only its copies are recorded here
+   if(!made.d3d12)continue;
+   const auto existing=native_owned_textures_.find(made.key);
+   if(existing!=native_owned_textures_.end()&&existing->second.generation==made.generation&&existing->second.d3d12)continue;
+   if(native_owned_texture_serial_>=((1ull<<63)-1))continue;
+   D3D12TextureRef texture;
+   if(FAILED(d3d12_->finish_texture(*made.d3d12,texture)))continue;
+   NativeOwnedTexture value{};
+   value.backing=(1ull<<63)|++native_owned_texture_serial_;
+   value.generation=made.generation;value.format=made.format;value.width=made.width;value.height=made.height;
+   value.mip_count=made.mip_count;value.last_used=native_queue_epoch_;value.last_used_frame=native_frame_index_;value.d3d12=texture;
+   neighbour_texture_resident(made.key,true);
+   {std::lock_guard<std::mutex> guard(native_owned_textures_lock_);native_owned_textures_.insert_or_assign(made.key,std::move(value));}
+   ++native_owned_texture_uploads_;
+   continue;
+  }
   if(!made.texture||!made.srv)continue;
   const auto existing=native_owned_textures_.find(made.key);
   if(existing!=native_owned_textures_.end()&&existing->second.generation==made.generation)continue;
@@ -331,7 +356,8 @@ void Renderer::retire_dedicated_geometry() noexcept{
 // camera-motion churn of issue #57.)
 HRESULT Renderer::trim_native_mesh_cache(){
  if(!native_pending_draws_.empty())return E_UNEXPECTED;
- update_vram_budget(); // every kPollFrames presents (renderer_vram_budget.cpp)
+ // Budget reductions still operate on D3D11 textures and shadow pools.
+ if(!d3d12_)update_vram_budget(); // every kPollFrames presents
  const std::uint64_t released=native_released_mesh_slots_;
  retire_native_source_values();
  trim_native_tables();
@@ -1212,7 +1238,7 @@ HRESULT Renderer::ensure_native_stream_buffers(UINT dynamic_bytes,UINT draw_coun
 
 HRESULT Renderer::get_native_material_group(const NativeMaterialKey& key,const FixedState& state,
  ID3D11ShaderResourceView* texture,bool texture_array,SemanticKind semantic,
- NativeOpacityClass opacity,std::uint64_t state_key,UINT& group){
+ NativeOpacityClass opacity,std::uint64_t state_key,UINT& group,const D3D12TextureRef* d3d12_texture){
  const auto found=native_state_lookup_.find(key);
  if(found!=native_state_lookup_.end()){group=found->second;return S_OK;}
  group=UINT_MAX;
@@ -1224,6 +1250,7 @@ HRESULT Renderer::get_native_material_group(const NativeMaterialKey& key,const F
    group=static_cast<UINT>(native_state_buckets_.size());native_state_buckets_.emplace_back();
   }else group=static_cast<UINT>(available-native_state_buckets_.begin());
   auto& bucket=native_state_buckets_[group];bucket.state=state;bucket.texture_srv=texture;
+  bucket.texture_d3d12=d3d12_texture?*d3d12_texture:nullptr;
   bucket.material_key=key;bucket.semantic_kind=semantic;bucket.opacity=opacity;
   bucket.state_key=state_key;bucket.texture_array=texture_array;bucket.occupied=true;
   native_state_lookup_.emplace(key,group);
@@ -1293,7 +1320,7 @@ HRESULT Renderer::resolve_native_prepared_material(
  ID3D11ShaderResourceView* texture_srv,bool texture_array,
  NativeOpacityClass opacity,bool reorderable,
  const NativeMaterialKey& material_key,std::uint64_t state_key,
- UINT& state_bucket){
+ UINT& state_bucket,const D3D12TextureRef* d3d12_texture){
  state_bucket=UINT_MAX;
  if(!view.prepared_material||
     !valid_prepared_identity(view.prepared_identity))return E_INVALIDARG;
@@ -1354,7 +1381,7 @@ HRESULT Renderer::resolve_native_prepared_material(
  slot->owner=view.world.owner?*view.world.owner:std::weak_ptr<const void>{};
  UINT bucket_index=UINT_MAX;
  const HRESULT hr=get_native_material_group(material_key,st,texture_srv,texture_array,
-  view.semantic_kind,opacity,state_key,bucket_index);if(FAILED(hr))return hr;
+  view.semantic_kind,opacity,state_key,bucket_index,d3d12_texture);if(FAILED(hr))return hr;
  slot->queue_epoch=native_queue_epoch_;slot->state_bucket=bucket_index;
  state_bucket=bucket_index;return S_OK;
 }
@@ -1419,7 +1446,10 @@ HRESULT Renderer::get_native_skeleton_asset(
   try{native_skeleton_assets_.emplace(std::move(key),std::move(asset));}
   catch(...){native_animation_ranges_[allocation].owned=false;native_range_freed(native_animation_ranges_,allocation);throw;}
   D3D11_BOX box{};box.left=start;box.right=start+static_cast<UINT>(bytes.size());box.bottom=box.back=1;
-  context_->UpdateSubresource(native_animation_.Get(),0,&box,bytes.data(),0,0);profiler_.add_upload(bytes.size());
+  if(d3d12_){ // D3D12 backend: the skeleton asset into the executor's animation buffer
+   const HRESULT written=d3d12_->write_buffer(*native12_.animation,start,bytes.data(),bytes.size());if(FAILED(written))return written;
+  }else context_->UpdateSubresource(native_animation_.Get(),0,&box,bytes.data(),0,0);
+  profiler_.add_upload(bytes.size());
   offset=start;
   return S_OK;
  }catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
@@ -1430,6 +1460,12 @@ HRESULT Renderer::ensure_native_animation_buffer(UINT required){
  if(required>UINT_MAX-15u)return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
  const UINT capacity=static_cast<UINT>((std::min)(std::uint64_t(UINT_MAX-15u),
   (std::max)({std::uint64_t(required),std::uint64_t(native_animation_capacity_)*2,65536ull})));
+ if(d3d12_){ // D3D12 backend: a raw buffer on the executor, kept across growth
+  const UINT bytes=align_up(capacity,16);
+  const HRESULT hr=native_d3d12_persistent(native12_.animation,bytes,0,native_animation_used_);
+  if(SUCCEEDED(hr))native_animation_capacity_=bytes;
+  return hr;
+ }
  ComPtr<ID3D11Buffer> buffer;ComPtr<ID3D11ShaderResourceView> srv;
  ComPtr<ID3D11UnorderedAccessView> uav;
  const auto create=[&](UINT bytes){
@@ -1585,6 +1621,12 @@ HRESULT Renderer::ensure_native_pose_nodes(UINT required){
  if(required>limit)return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
  UINT capacity=static_cast<UINT>((std::min)(std::uint64_t(limit),
   (std::max)({std::uint64_t(required),std::uint64_t(native_pose_node_capacity_)*2,1024ull})));
+ if(d3d12_){ // D3D12 backend: structured nodes on the executor, kept across growth
+  const HRESULT hr=native_d3d12_persistent(native12_.pose_nodes,UINT64(capacity)*sizeof(NativePoseNodeGpu),sizeof(NativePoseNodeGpu),
+   UINT64(native_pose_node_used_)*sizeof(NativePoseNodeGpu));
+  if(SUCCEEDED(hr))native_pose_node_capacity_=capacity;
+  return hr;
+ }
  ComPtr<ID3D11Buffer> buffer;ComPtr<ID3D11ShaderResourceView> srv;ComPtr<ID3D11UnorderedAccessView> uav;
  const auto create=[&](UINT count){buffer.Reset();srv.Reset();uav.Reset();
   D3D11_BUFFER_DESC description{};description.ByteWidth=count*sizeof(NativePoseNodeGpu);
@@ -1754,8 +1796,15 @@ HRESULT Renderer::resolve_native_instance(const NativeGeometryView& view,NativeQ
  if(!view.world.record_revision)return S_OK;
  if(!view.prepared_material||view.prepared_material->slot>=native_prepared_material_slots_.size())return E_INVALIDARG;
  auto& material=native_prepared_material_slots_[view.prepared_material->slot];
- return store_native_instance(material.persistent_instance[native_shadow_collecting_?1:0],
-  view.world.owner?*view.world.owner:std::weak_ptr<const void>{},draw);
+ UINT& current=material.persistent_instance[native_shadow_collecting_?1:0];
+ const HRESULT hr=store_native_instance(current,view.world.owner?*view.world.owner:std::weak_ptr<const void>{},draw);
+ // Fur prototype: an owned preview part's profile (its colour record only;
+ // never its wound layer, see queue_native_records).
+ if(SUCCEEDED(hr)&&!native_shadow_collecting_&&current<native_instance_records_.size()){
+  auto& record=native_instance_records_[current];
+  record.fur=view.fur&&!view.wound_surface_interface?*view.fur:nullptr;record.fur_node_base=view.fur_node_base;
+ }
+ return hr;
 }
 
 HRESULT Renderer::store_native_instance(UINT& current,const std::weak_ptr<const void>& owner,NativeQueuedDraw& draw){
@@ -1826,7 +1875,7 @@ void Renderer::release_native_instance(UINT index) noexcept{
    if(!--group.references)native_material_groups_dirty_=true;
    record.group_bound=false;
   }
-  record.owner.reset();record.command={};record.occupied=false;record.uploaded=false;native_instance_free_.push_back(index);
+  record.owner.reset();record.fur.reset();record.command={};record.occupied=false;record.uploaded=false;native_instance_free_.push_back(index);
   std::push_heap(native_instance_free_.begin(),native_instance_free_.end(),std::greater<UINT>());
  }
 }
@@ -1852,6 +1901,35 @@ Renderer::NativeDrawGpu Renderer::native_draw_descriptor(const NativeQueuedDraw&
  return value;
 }
 
+// The world-clip constants (b3, NativeWorldClip) both executors upload.
+void Renderer::native_world_clip_values(std::array<std::uint8_t,sizeof(std::array<float,16>)*2+64>& values){
+ float distance_cull=native_draw_distance_;
+ if(fog_cull_distance_>0&&fog_cull_frame_+1>=native_frame_index_)distance_cull=(std::min)(distance_cull,fog_cull_distance_);
+ std::uint8_t* const out=values.data();
+ // The drawn camera clip carries the upscaler jitter; the cull clip does not.
+ const auto drawn_clip=jittered_clip(native_world_clip_);
+ std::memcpy(out,drawn_clip.data(),sizeof(native_world_clip_));
+ std::memcpy(out+sizeof(native_world_clip_),
+  (native_cull_frozen_?native_cull_clip_:native_world_clip_).data(),sizeof(native_world_clip_));
+ const float cull_params[4]={float(width_),float(height_),native_cull_min_screen_,native_shadow_cull_min_texels_};
+ std::memcpy(out+sizeof(native_world_clip_)*2,cull_params,sizeof(cull_params));
+ const float hiz_params[4]={native_occlusion_active()?1.f:0.f,float(native_hiz_width_),float(native_hiz_height_),float(native_hiz_mips_)};
+ std::memcpy(out+sizeof(native_world_clip_)*2+16,hiz_params,sizeof(hiz_params));
+ // Clip w grows by the length of its row per metre of planar view depth.
+ const auto& cull=native_cull_frozen_?native_cull_clip_:native_world_clip_;
+ const float w_per_metre=std::sqrt(cull[12]*cull[12]+cull[13]*cull[13]+cull[14]*cull[14]);
+ // z, w: the static LOD pixel limit (0: full detail) and its crossfade band
+ // (nativeStaticLodSelect), a fraction of the limit.
+ const float distance_params[4]={distance_cull>0&&std::isfinite(w_per_metre)?distance_cull*w_per_metre:0.f,distance_cull,
+  native_lod_error_px_,kStaticLodBand};
+ std::memcpy(out+sizeof(native_world_clip_)*2+32,distance_params,sizeof(distance_params));
+ // The crown impostor size (0: off) and crossfade band (nativeImpostorSelect).
+ const float impostor_params[4]={native_impostor_pixels_,kImpostorBand,native_impostor_debug_?1.f:0.f,0.f};
+ std::memcpy(out+sizeof(native_world_clip_)*2+48,impostor_params,sizeof(impostor_params));
+ native_distance_cull_uploaded_=distance_cull;native_lod_error_uploaded_=native_lod_error_px_;
+ native_impostor_pixels_uploaded_=native_impostor_pixels_;native_impostor_debug_uploaded_=native_impostor_debug_;
+}
+
 HRESULT Renderer::upload_native_instances(){
  PERF06_SCOPE("upload_instances");
  // Draw distance, or nearer where the last world frame's fog fully covers.
@@ -1863,30 +1941,10 @@ HRESULT Renderer::upload_native_instances(){
   if(!native_world_clip_constants_){D3D11_BUFFER_DESC description{};description.ByteWidth=sizeof(native_world_clip_)*2+64;
    description.Usage=D3D11_USAGE_DYNAMIC;description.BindFlags=D3D11_BIND_CONSTANT_BUFFER;description.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
    HRESULT hr=device_->CreateBuffer(&description,nullptr,&native_world_clip_constants_);if(FAILED(hr))return hr;}
+  std::array<std::uint8_t,sizeof(native_world_clip_)*2+64> values;native_world_clip_values(values);
   D3D11_MAPPED_SUBRESOURCE mapped{};HRESULT hr=context_->Map(native_world_clip_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped);
   if(FAILED(hr))return hr;
-  // The drawn camera clip carries the upscaler jitter; the cull clip does not.
-  const auto drawn_clip=jittered_clip(native_world_clip_);
-  std::memcpy(mapped.pData,drawn_clip.data(),sizeof(native_world_clip_));
-  std::memcpy(static_cast<std::uint8_t*>(mapped.pData)+sizeof(native_world_clip_),
-   (native_cull_frozen_?native_cull_clip_:native_world_clip_).data(),sizeof(native_world_clip_));
-  const float cull_params[4]={float(width_),float(height_),native_cull_min_screen_,native_shadow_cull_min_texels_};
-  std::memcpy(static_cast<std::uint8_t*>(mapped.pData)+sizeof(native_world_clip_)*2,cull_params,sizeof(cull_params));
-  const float hiz_params[4]={native_occlusion_active()?1.f:0.f,float(native_hiz_width_),float(native_hiz_height_),float(native_hiz_mips_)};
-  std::memcpy(static_cast<std::uint8_t*>(mapped.pData)+sizeof(native_world_clip_)*2+16,hiz_params,sizeof(hiz_params));
-  // Clip w grows by the length of its row per metre of planar view depth.
-  const auto& cull=native_cull_frozen_?native_cull_clip_:native_world_clip_;
-  const float w_per_metre=std::sqrt(cull[12]*cull[12]+cull[13]*cull[13]+cull[14]*cull[14]);
-  // z, w: the static LOD pixel limit (0: full detail) and its crossfade band
-  // (nativeStaticLodSelect), a fraction of the limit.
-  const float distance_params[4]={distance_cull>0&&std::isfinite(w_per_metre)?distance_cull*w_per_metre:0.f,distance_cull,
-   native_lod_error_px_,kStaticLodBand};
-  std::memcpy(static_cast<std::uint8_t*>(mapped.pData)+sizeof(native_world_clip_)*2+32,distance_params,sizeof(distance_params));
-  // The crown impostor size (0: off) and crossfade band (nativeImpostorSelect).
-  const float impostor_params[4]={native_impostor_pixels_,kImpostorBand,native_impostor_debug_?1.f:0.f,0.f};
-  std::memcpy(static_cast<std::uint8_t*>(mapped.pData)+sizeof(native_world_clip_)*2+48,impostor_params,sizeof(impostor_params));
-  native_distance_cull_uploaded_=distance_cull;native_lod_error_uploaded_=native_lod_error_px_;
-  native_impostor_pixels_uploaded_=native_impostor_pixels_;native_impostor_debug_uploaded_=native_impostor_debug_;
+  std::memcpy(mapped.pData,values.data(),values.size());
   context_->Unmap(native_world_clip_constants_.Get(),0);native_world_clip_dirty_=false;profiler_.add_upload(sizeof(native_world_clip_)*2);
  }
  if(native_instance_dirty_.empty())return S_OK;
@@ -2002,6 +2060,7 @@ void Renderer::retire_native_poses() noexcept{
  native_pose_ranges_.clear();native_world_ranges_.clear();native_animation_ranges_.clear();
  for(auto& free_ranges:native_free_ranges_)free_ranges.clear();native_free_ranges_complete_.fill(true);
  native_world_states_.Reset();native_world_state_srv_.Reset();native_world_state_uav_.Reset();native_world_state_capacity_=0;
+ native12_.world_states.reset(); // D3D12: the states go with their ranges (release_world_state)
  native_pose_inputs_.Reset();native_pose_input_srv_.Reset();native_pose_nodes_.Reset();native_pose_node_srv_.Reset();native_pose_node_uav_.Reset();
  native_animation_.Reset();native_animation_srv_.Reset();native_pose_input_capacity_=native_pose_node_capacity_=native_pose_node_used_=0;
  native_animation_capacity_=0;native_animation_used_=16;
@@ -2038,6 +2097,14 @@ HRESULT Renderer::ensure_native_world_buffer(UINT required){
  constexpr UINT addressable=UINT_MAX/sizeof(NativeWorldVertexGpu);
  if(!required)return S_OK;
  if(required>addressable)return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+ if(d3d12_){ // D3D12 backend: the same growth on the executor's buffer
+  if(native12_.world_vertices&&required<=native_world_vertex_capacity_)return S_OK;
+  const UINT capacity=grow_capacity(required,64u*1024u,addressable);
+  const HRESULT hr=native_d3d12_persistent(native12_.world_vertices,UINT64(capacity)*sizeof(NativeWorldVertexGpu),sizeof(NativeWorldVertexGpu),
+   UINT64(native_world_vertex_used_)*sizeof(NativeWorldVertexGpu));
+  if(SUCCEEDED(hr))native_world_vertex_capacity_=capacity;
+  return hr;
+ }
  if(!device_||!context_)return E_FAIL;
  if(native_world_vertices_&&required<=native_world_vertex_capacity_)return S_OK;
  UINT capacity=grow_capacity(required,64u*1024u,addressable);
@@ -2117,6 +2184,12 @@ HRESULT Renderer::ensure_native_world_states(){
  try{
   const UINT capacity=static_cast<UINT>((std::min)(std::uint64_t(UINT_MAX/sizeof(NativeWorldStateGpu)),
    (std::max)({std::uint64_t(native_world_ranges_.size()),std::uint64_t(native_world_state_capacity_)*2,64ull})));
+  if(d3d12_){ // D3D12 backend: committed buffers start zeroed; the old states are kept
+   const HRESULT hr=native_d3d12_persistent(native12_.world_states,UINT64(capacity)*sizeof(NativeWorldStateGpu),sizeof(NativeWorldStateGpu),
+    UINT64(native_world_state_capacity_)*sizeof(NativeWorldStateGpu));
+   if(SUCCEEDED(hr))native_world_state_capacity_=capacity;
+   return hr;
+  }
   std::vector<NativeWorldStateGpu> zero(capacity);
   D3D11_BUFFER_DESC description{};description.ByteWidth=capacity*sizeof(NativeWorldStateGpu);description.Usage=D3D11_USAGE_DEFAULT;
   description.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
@@ -2578,6 +2651,21 @@ HRESULT Renderer::queue_native_owned_impl(const NativeGeometryView& view,const F
     (!view.owned_texture.surface&&(!view.owned_texture.mip_count||(!view.owned_texture.mips&&
      (view.owned_texture.value_source!=1||!view.owned_texture.resource)))))
   return native_geometry_failure(result,E_INVALIDARG,"texture.descriptor",true);
+ if(d3d12_){
+  // D3D12 backend: the owned texture as a D3D12 texture on the same key.
+  D3D12TextureRef d3d12_texture;std::uint64_t d3d12_backing=0;
+  const HRESULT d3d12_hr=get_native_owned_texture_d3d12(view.owned_texture,d3d12_texture,d3d12_backing,result,
+   !view.owned_texture.camp_surface_alias&&!scene_composited_&&view.semantic_kind!=SemanticKind::ui);
+  if(FAILED(d3d12_hr))return d3d12_hr;
+  ++native_generic_ingress_calls_;
+  // A retained figure part's composed atlas: its material profile (as below).
+  // A client surface's texture is keyed by the surface itself (2<<62|id, no
+  // owned-texture entry): its profile goes with the surface (retire_surface).
+  if(!native_shadow_collecting_&&view.owned_texture.material_name)
+   note_material_texture(*view.owned_texture.material_name,d3d12_backing,(view.flags&native_unit_flag)!=0,
+    view.owned_texture.surface&&d3d12_backing==((2ull<<62)|view.owned_texture.identity));
+  return queue_native_impl(view,st,nullptr,result,false,nullptr,d3d12_backing,view.owned_texture.generation,false,0,registered,&d3d12_texture);
+ }
  ComPtr<ID3D11ShaderResourceView> texture;
  std::uint64_t backing=0;
  HRESULT hr=get_native_owned_texture(view.owned_texture,texture,backing,result,
@@ -2588,6 +2676,8 @@ HRESULT Renderer::queue_native_owned_impl(const NativeGeometryView& view,const F
  // Alpha-tested shadow casters sample the same owned texture as the colour
  // pass: one texture per image, no shadow texture-array copy (#142).
  if(!native_shadow_collecting_)++native_generic_ingress_calls_;
+ // A retained figure part's composed atlas: its material profile (colour only).
+ if(!native_shadow_collecting_&&view.owned_texture.material_name)note_material_texture(*view.owned_texture.material_name,backing,(view.flags&native_unit_flag)!=0);
  return queue_native_impl(view,st,nullptr,result,false,texture.Get(),
   backing,view.owned_texture.generation,false,0,registered);
 }
@@ -2727,11 +2817,11 @@ HRESULT Renderer::queue_native_terrain(const NativeGeometryView& view,const Fixe
    else if((draw.instance.world_geometry&native_world_lod)&&!view.world.object_space)
     draw.instance.second_morph_offset=draw.world_base;
    const auto key=native_material_key(*material_state,SemanticKind::terrain,opacity,view.lighting.enabled!=0,
-    group.texture_srv!=nullptr,group.texture_array,group.material_key.texture_backing,group.material_key.texture_generation,group.material_key.contact_map);
+    group.texture_srv!=nullptr||group.texture_d3d12,group.texture_array,group.material_key.texture_backing,group.material_key.texture_generation,group.material_key.contact_map);
    if(!(key==group.material_key)){
-    const auto srv=group.texture_srv;const bool array=group.texture_array;
+    const auto srv=group.texture_srv;const bool array=group.texture_array;const D3D12TextureRef texture12=group.texture_d3d12;
     if(FAILED(hr=get_native_material_group(key,*material_state,srv.Get(),array,SemanticKind::terrain,opacity,
-       native_material_state_key(key),draw.state_bucket)))return fail(hr,"terrain.material_group");
+       native_material_state_key(key),draw.state_bucket,texture12?&texture12:nullptr)))return fail(hr,"terrain.material_group");
    }
    draw.reorderable=view.ordering==NativeOrdering::reorderable||
     (view.ordering==NativeOrdering::derive_from_state&&opacity!=NativeOpacityClass::ordered);
@@ -2859,11 +2949,12 @@ HRESULT Renderer::queue_native_depth(const NativeDepthSubmission& submission,
   if(!group.occupied)return E_FAIL;
   FixedState state=group.state;state.stage[0][D3DTSS_MIPFILTER]=inherited_mip;
   const auto key=native_material_key(state,group.semantic_kind,group.opacity,false,
-   group.texture_srv!=nullptr,group.texture_array,group.material_key.texture_backing,
+   group.texture_srv!=nullptr||group.texture_d3d12,group.texture_array,group.material_key.texture_backing,
    group.material_key.texture_generation);
   if(!(key==group.material_key)){
    NativeQueuedDraw draw=record.command;
    const auto texture=group.texture_srv;const bool texture_array=group.texture_array;
+   const D3D12TextureRef texture12=group.texture_d3d12; // the D3D12 texture stays with the re-keyed bucket
    const auto semantic=group.semantic_kind;const auto opacity=group.opacity;
    const auto owner=record.owner;const auto source_revision=record.source_revision;
    const auto values_revision=record.values_revision;const auto depth_revision=record.depth_revision;
@@ -2877,7 +2968,7 @@ HRESULT Renderer::queue_native_depth(const NativeDepthSubmission& submission,
    const auto terrain_texture_generation=record.terrain_texture_generation;
    const bool terrain_texture_owned=record.terrain_texture_owned;
    HRESULT hr=get_native_material_group(key,state,texture.Get(),texture_array,semantic,opacity,
-    native_material_state_key(key),draw.state_bucket);
+    native_material_state_key(key),draw.state_bucket,texture12?&texture12:nullptr);
    if(FAILED(hr))return hr;
    if(FAILED(hr=store_native_instance(material.persistent_instance[1],owner,draw)))return hr;
    index=draw.persistent_instance;
@@ -3062,6 +3153,10 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
    if(!part||!part->source||!part->values_revision)return fail(E_INVALIDARG,"records.part");
    const auto& source=*part->source;const auto& values=part->values;
    if(!part->contribution.known)return fail(E_INVALIDARG,"records.contribution");
+   // Fur prototype, strands (fur.h): a unit's hair part is drawn by the fur
+   // pass. Only its colour record takes alpha 0 (its fragments fail the
+   // alpha test); its sun shadow caster keeps the part's own alpha.
+   const float alpha=!pass&&fur_strand_hair_record(part->fur.get(),part->fur_node_base,values.flags,g_fur_mode)?0.f:values.alpha;
    const UINT passes=(!pass&&part->contribution.color?1u:0u)|
     (UINT(part->contribution.light_mask&(pass?native_shadow_dirty_mask_:31u))<<8);
    if(!passes){++native_contribution_rejects_;continue;}
@@ -3110,7 +3205,7 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
     view.contribution=part->contribution;view.bounds_minimum=part->bounds.minimum;view.bounds_maximum=part->bounds.maximum;
     view.contact_world_height=submission.pose->contact_world_height;
     view.flags=values.flags;view.default_diffuse=values.default_diffuse;view.default_specular=values.default_specular;
-    view.lighting.enabled=values.lighting_enabled;view.lighting.material_alpha=values.alpha;
+    view.lighting.enabled=values.lighting_enabled;view.lighting.material_alpha=alpha;
     view.lighting.material_diffuse=values.diffuse;view.lighting.emissive=values.emissive;view.lighting.specular=values.specular;
     view.u_shift=values.u_shift;view.v_shift=values.v_shift;
     view.ordering=wound?NativeOrdering::preserve:static_cast<NativeOrdering>(values.ordering);
@@ -3131,7 +3226,7 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
     mesh_slot.last_used_frame=native_frame_index_;mesh_slot.mesh->last_used_frame=native_frame_index_;
     if(mesh_slot.world_valid)++native_world_reused_records_;
     bool material_changed=old.inherited_state!=inherited;
-    if(!material_changed&&old.values_revision!=part->values_revision){
+    if(!material_changed&&(old.values_revision!=part->values_revision||old.command.instance.material_alpha!=alpha)){
      // Color and depth share the producer revision, but retain separate commands.
      // A change for the other pass need not reconstruct this pass's material.
      const auto& retained=old.command.instance;
@@ -3141,7 +3236,7 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
       (ordering==NativeOrdering::derive_from_state&&group.opacity!=NativeOpacityClass::ordered);
      material_changed=retained.flags!=values.flags||retained.default_diffuse!=values.default_diffuse||
       retained.default_specular!=values.default_specular||retained.lighting_enabled!=values.lighting_enabled||
-      retained.material_alpha!=values.alpha||
+      retained.material_alpha!=alpha||
       !std::equal(values.diffuse.begin(),values.diffuse.end(),retained.material_diffuse)||
       !std::equal(values.emissive.begin(),values.emissive.end(),retained.emissive)||
       !std::equal(values.specular.begin(),values.specular.end(),retained.specular)||
@@ -3176,7 +3271,7 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
 #endif
       auto& value=draw.instance;value.flags=values.flags&~native_preview_specular_rgb_flag;value.default_diffuse=values.default_diffuse;
       value.default_specular=values.default_specular;value.lighting_enabled=values.lighting_enabled;
-      value.material_alpha=values.alpha;std::copy(values.diffuse.begin(),values.diffuse.end(),value.material_diffuse);
+      value.material_alpha=alpha;std::copy(values.diffuse.begin(),values.diffuse.end(),value.material_diffuse);
       std::copy(values.emissive.begin(),values.emissive.end(),value.emissive);
       std::copy(values.specular.begin(),values.specular.end(),value.specular);
       value.uv_shift[0]=values.u_shift;value.uv_shift[1]=values.v_shift;
@@ -3192,16 +3287,17 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
       state.render[D3DRENDERSTATE_ALPHAFUNC]=source.owned_fixed_state.alpha_func;
       state.render[D3DRENDERSTATE_ALPHAREF]=source.owned_fixed_state.alpha_ref;
       const FixedState* material_state=nullptr;
-      const auto opacity=native_material_state(state,values.alpha,
+      const auto opacity=native_material_state(state,alpha,
        native_alpha_evidence(source,state,!wound,&values),native_shadow_collecting_,state,material_state);
       const auto key=native_material_key(state,source.semantic_kind,opacity,values.lighting_enabled!=0,
-       group.texture_srv!=nullptr,group.texture_array,group.material_key.texture_backing,group.material_key.texture_generation,group.material_key.contact_map);
+       group.texture_srv!=nullptr||group.texture_d3d12,group.texture_array,group.material_key.texture_backing,group.material_key.texture_generation,group.material_key.contact_map);
       const auto ordering=wound?NativeOrdering::preserve:static_cast<NativeOrdering>(values.ordering);
       draw.reorderable=ordering==NativeOrdering::reorderable||
        (ordering==NativeOrdering::derive_from_state&&opacity!=NativeOpacityClass::ordered);
       draw.preserve_order=ordering==NativeOrdering::preserve;
+      {const D3D12TextureRef texture12=group.texture_d3d12; // the D3D12 texture stays with the re-keyed bucket
       if(FAILED(hr=get_native_material_group(key,state,group.texture_srv.Get(),group.texture_array,source.semantic_kind,
-          opacity,native_material_state_key(key),draw.state_bucket)))return fail(hr,"records.material");
+          opacity,native_material_state_key(key),draw.state_bucket,texture12?&texture12:nullptr)))return fail(hr,"records.material");}
      }
      NativeGeometryView lod_view=source;
      lod_view.ordering=wound?NativeOrdering::preserve:static_cast<NativeOrdering>(values.ordering);
@@ -3219,6 +3315,10 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
    auto& record=native_instance_records_[current];
    record.source_revision=source.world.record_revision;record.values_revision=part->values_revision;
    record.inherited_state=inherited;record.wound_id=wound?wound->id:0;record.wound_generation=wound?wound->generation:0;
+   // Fur grows from the part's own colour record only. The wound layer is a
+   // second record of the same mesh with the blended wound texture (black
+   // where it carries no blood): fur on it drew hurt and dead creatures black.
+   if(!pass){record.fur=wound?nullptr:part->fur;record.fur_node_base=part->fur_node_base;}
    if((!record.uploaded||!record.descriptor_uploaded)&&!record.scheduled){
     native_instance_dirty_.push_back(current);record.scheduled=true;
    }
@@ -3474,7 +3574,7 @@ std::uint64_t Renderer::native_material_state_key(const NativeMaterialKey& mater
  return state_key;
 }
 
-HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedState& st,SurfaceImage* texture,NativeGeometryResult* result,bool prepared,ID3D11ShaderResourceView* direct_texture,std::uint64_t direct_texture_identity,std::uint64_t direct_texture_generation,bool direct_array,UINT direct_slice,UINT* registered){
+HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedState& st,SurfaceImage* texture,NativeGeometryResult* result,bool prepared,ID3D11ShaderResourceView* direct_texture,std::uint64_t direct_texture_identity,std::uint64_t direct_texture_generation,bool direct_array,UINT direct_slice,UINT* registered,const D3D12TextureRef* d3d12_texture){
  if(result)*result={};
  const auto fail=[&](HRESULT hr,const char* operation,bool texture_failure=false){
   return native_geometry_failure(result,hr,operation,texture_failure);
@@ -3501,7 +3601,7 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
      !valid_prepared_identity(view.prepared_identity))return fail(E_INVALIDARG,"world.prepared_identity");
   prepared=true;
  }else if(view.contribution.known&&!view.contribution.color)return fail(E_INVALIDARG,"contribution.non_world_light");
- PerfScope perf(&perf_draw_ticks_);if(perf_enabled())++perf_draw_calls_;remember_debug_projection(st,view.semantic_kind);if(!native_vs_||!native_ps_||!native_build_cs_)return fail(E_NOTIMPL,"native_pipeline");NativeMesh* mesh=nullptr;HRESULT hr=prepared?get_native_prepared_mesh(view,mesh):get_native_mesh(view,mesh);if(FAILED(hr)||!mesh)return fail(FAILED(hr)?hr:E_FAIL,prepared?"get_native_prepared_mesh":"get_native_mesh");const std::size_t upload_start=native_pending_upload_.size();UINT morph_offset=0,terrain_phase_offset=0;if(FAILED(hr=append_native_dynamic(view,morph_offset,terrain_phase_offset)))return fail(hr,"append_native_dynamic");
+ PerfScope perf(&perf_draw_ticks_);if(perf_enabled())++perf_draw_calls_;remember_debug_projection(st,view.semantic_kind);if(d3d12_?!native12_.ready:(!native_vs_||!native_ps_||!native_build_cs_))return fail(E_NOTIMPL,"native_pipeline");NativeMesh* mesh=nullptr;HRESULT hr=prepared?get_native_prepared_mesh(view,mesh):get_native_mesh(view,mesh);if(FAILED(hr)||!mesh)return fail(FAILED(hr)?hr:E_FAIL,prepared?"get_native_prepared_mesh":"get_native_mesh");const std::size_t upload_start=native_pending_upload_.size();UINT morph_offset=0,terrain_phase_offset=0;if(FAILED(hr=append_native_dynamic(view,morph_offset,terrain_phase_offset)))return fail(hr,"append_native_dynamic");
  if(view.lighting.enabled&&!native_world_lighting_valid_){native_pending_upload_.resize(upload_start);return fail(E_INVALIDARG,"world_lighting");}
  if(view.semantic_kind==SemanticKind::terrain&&view.terrain.fog_enabled){
   if(!std::isfinite(view.terrain.fog_distance)||view.terrain.fog_distance<=0){native_pending_upload_.resize(upload_start);return fail(E_INVALIDARG,"terrain.fog_distance");}
@@ -3567,7 +3667,8 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
   draw.bounds_min[2]-=maximum*0.25f;draw.bounds_max[2]+=maximum*0.25f;
  }
  if(result&&(view.flags&1u)){RECT extents{};const HRESULT extent_hr=calculate_native_aabb_screen_extents(draw.bounds_min,draw.bounds_max,object_to_clip,st.viewport,extents);if(FAILED(extent_hr)){native_pending_upload_.resize(upload_start);return fail(extent_hr,"screen_extents");}result->visible=extent_hr==S_OK;result->screen_extents_valid=true;result->screen_extents=extents;}
- ComPtr<ID3D11ShaderResourceView> texture_srv;bool texture_array=direct_array;UINT texture_slice=direct_slice;if(direct_texture){texture_srv=direct_texture;}if(view.semantic_kind==SemanticKind::terrain){if(view.ordering==NativeOrdering::reorderable)++native_frame_stats_.native_terrain_reorderable_contracts;else ++native_frame_stats_.native_terrain_preserve_contracts;if(texture||direct_texture)++native_frame_stats_.native_terrain_textured_draws;else ++native_frame_stats_.native_terrain_untextured_draws;}if(texture&&!direct_texture){texture->world_mip_use=!scene_composited_&&view.semantic_kind!=SemanticKind::ui;if(!texture->world_mip_use)texture->static_mip_hint=false;if(view.semantic_kind==SemanticKind::terrain&&view.ordering==NativeOrdering::reorderable){hr=get_native_texture_array_slice(*texture,texture_srv,texture_slice,view.terrain_page,view.terrain_page_count);if(hr==S_OK)texture_array=true;else if(FAILED(hr)){native_pending_upload_.resize(upload_start);return fail(hr,"get_native_texture_array_slice",true);}}if(!texture_array){if(FAILED(hr=upload(*texture))){native_pending_upload_.resize(upload_start);return fail(hr,"upload_surface_texture",true);}texture_srv=texture->srv;}}draw.instance.padding[0]=texture_slice;draw.instance.padding[1]=texture_array?1u:0u;
+ D3D12TextureRef surface_d3d12; // D3D12 backend: a bound surface's texture (never an array slice there)
+ ComPtr<ID3D11ShaderResourceView> texture_srv;bool texture_array=direct_array;UINT texture_slice=direct_slice;if(direct_texture){texture_srv=direct_texture;}if(view.semantic_kind==SemanticKind::terrain){if(view.ordering==NativeOrdering::reorderable)++native_frame_stats_.native_terrain_reorderable_contracts;else ++native_frame_stats_.native_terrain_preserve_contracts;if(texture||direct_texture)++native_frame_stats_.native_terrain_textured_draws;else ++native_frame_stats_.native_terrain_untextured_draws;}if(texture&&!direct_texture){texture->world_mip_use=!scene_composited_&&view.semantic_kind!=SemanticKind::ui;if(!texture->world_mip_use)texture->static_mip_hint=false;if(!d3d12_&&view.semantic_kind==SemanticKind::terrain&&view.ordering==NativeOrdering::reorderable){hr=get_native_texture_array_slice(*texture,texture_srv,texture_slice,view.terrain_page,view.terrain_page_count);if(hr==S_OK)texture_array=true;else if(FAILED(hr)){native_pending_upload_.resize(upload_start);return fail(hr,"get_native_texture_array_slice",true);}}if(!texture_array){if(d3d12_&&view.semantic_kind==SemanticKind::terrain){if(FAILED(hr=terrain_texture_d3d12(*texture,view.terrain_page,surface_d3d12))){native_pending_upload_.resize(upload_start);return fail(hr,"terrain_texture_d3d12",true);}}else{if(FAILED(hr=upload(*texture))){native_pending_upload_.resize(upload_start);return fail(hr,"upload_surface_texture",true);}texture_srv=texture->srv;if(d3d12_)surface_d3d12=texture->d3d12;}}}draw.instance.padding[0]=texture_slice;draw.instance.padding[1]=texture_array?1u:0u;
  const std::uint64_t current_texture_backing=direct_texture_identity?direct_texture_identity:(texture_array?
   static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(texture_srv.Get())):
   (texture&&texture->id?texture->id:
@@ -3620,16 +3721,44 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
   }
  }
  if(!prepared_material_hit){
+  // D3D12 backend (bindless): the texture is the draw's own index, not part
+  // of its bucket, so draws of one state share a batch across textures.
   const auto material_key=native_material_key(*material_state,view.semantic_kind,opacity,view.lighting.enabled!=0,
-   texture_srv!=nullptr,texture_array,current_texture_backing,current_texture_generation,view.contact_map);
+   texture_srv!=nullptr||(d3d12_texture&&*d3d12_texture)||surface_d3d12,texture_array,d3d12_?0:current_texture_backing,
+   d3d12_?0:current_texture_generation,view.contact_map);
   const auto state_key=native_material_state_key(material_key);
   if(prepared){
    hr=resolve_native_prepared_material(view,*material_state,texture,texture_srv.Get(),
-    texture_array,opacity,reorderable,material_key,state_key,bucket_index);
+    texture_array,opacity,reorderable,material_key,state_key,bucket_index,
+    d3d12_texture?d3d12_texture:(surface_d3d12?&surface_d3d12:nullptr));
    if(FAILED(hr)){native_pending_upload_.resize(upload_start);return fail(hr,"resolve_native_prepared_material");}
   }else{
-   hr=get_native_material_group(material_key,*material_state,texture_srv.Get(),texture_array,view.semantic_kind,opacity,state_key,bucket_index);
+   hr=get_native_material_group(material_key,*material_state,texture_srv.Get(),texture_array,view.semantic_kind,opacity,state_key,bucket_index,d3d12_texture?d3d12_texture:(surface_d3d12?&surface_d3d12:nullptr));
    if(FAILED(hr)){native_pending_upload_.resize(upload_start);return fail(hr,"material_bucket_allocation");}
+  }
+ }
+ if(d3d12_){
+  // The material texture's bindless index in the instance's texture
+  // reference (x: index, y: 0); NATIVE_SAMPLE reads it (native_shader.h).
+  const D3D12TextureRef* texture12=d3d12_texture&&*d3d12_texture?d3d12_texture:(surface_d3d12?&surface_d3d12:nullptr);
+  if(texture12){
+   const std::uint32_t index=d3d12_->bindless_index(**texture12);
+   if(index==UINT32_MAX){native_pending_upload_.resize(upload_start);return fail(E_OUTOFMEMORY,"bindless_index");}
+   draw.instance.padding[0]=index;
+   // Its material profile (S1) by bindless index, 0 none; refreshed on the
+   // record when the profiles change (refresh_material_profile_indices_d3d12).
+   draw.material_backing=current_texture_backing;draw.instance.padding[1]=material_profile_index_d3d12(current_texture_backing);
+   // The record holds the texture its index names: a D3D12 material group
+   // keeps only its first draw's texture, so a warm record (no lookup) lost
+   // its texture to retire_world_textures after a reload and sampled a freed
+   // bindless index (the flickering HUD meshes and figures).
+   draw.texture12=*texture12;
+  }else{
+   // No D3D12 texture: the executor's permanent null view (index 0 used to
+   // be whichever texture first took it, a stale descriptor once freed: the
+   // cave TDR). A textured material without one is named, never hidden.
+   draw.instance.padding[0]=kD3D12NullTextureIndex;draw.instance.padding[1]=0;
+   if(texture_srv!=nullptr||texture_array)d3d12_->omit("native draw textures with no D3D12 texture (drawn with the null view)",false);
   }
  }
  draw.state_bucket=bucket_index;draw.reorderable=reorderable;draw.preserve_order=view.ordering==NativeOrdering::preserve;
@@ -3647,7 +3776,7 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
 #endif
   }
   if(registered){*registered=record_index;return S_OK;}
-  enqueue_native_record({record_index,passes});
+  enqueue_native_record({record_index,passes,view.semantic_kind==SemanticKind::ui||view.interface_preview});
    if(texture&&!direct_texture)sampled_surface_pixels(*texture);}
 
  catch(const std::bad_alloc&){

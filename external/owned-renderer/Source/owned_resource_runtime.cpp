@@ -117,6 +117,7 @@ struct RuntimeState {
     std::shared_ptr<OwnedResourceLoader> loader;
     ResourceStoreConfig mounts;
     ResourceStoreConfig text_mounts;
+    ResourceStoreConfig data_mounts; // database.res family (items.idb: material classes)
     bool mounts_adopted = false; // x64 host: mounts from the game process, no loader
     std::vector<PendingLoad> pending;
     PendingLoad active;
@@ -485,8 +486,8 @@ bool read_mount_config(const std::wstring& path, std::vector<std::uint8_t>& byte
 }
 
 // The config.reg [RES] families the owned mounts follow.
-enum Family : unsigned { kFigures, kTextures, kTexts, kRedress, kMenus, kFamilies };
-constexpr const char* kFamilyNames[kFamilies] = {"figures.res", "textures.res", "texts.res", "redress.res", "menus.res"};
+enum Family : unsigned { kFigures, kTextures, kTexts, kRedress, kMenus, kDatabase, kFamilies };
+constexpr const char* kFamilyNames[kFamilies] = {"figures.res", "textures.res", "texts.res", "redress.res", "menus.res", "database.res"};
 
 // Compiled REG files have little-endian counts/offsets and length-prefixed
 // strings. Decode the figure and texture managers' families (kFamilyNames)
@@ -566,11 +567,12 @@ bool visual_archive_lists(const std::vector<std::uint8_t>& bytes,
 }
 
 bool configuration(const wchar_t* game_registry_key, ResourceStoreConfig& mounts,
-                   ResourceFailure& failure, ResourceStoreConfig& text_mounts) {
+                   ResourceFailure& failure, ResourceStoreConfig& text_mounts, ResourceStoreConfig& data_mounts) {
 #ifdef EID3D11_EMBEDDED
     (void)game_registry_key;
     mounts = embedded_host_configuration().snapshot().mounts;
-    text_mounts = mounts;
+    text_mounts = embedded_host_configuration().snapshot().text_mounts;
+    data_mounts = embedded_host_configuration().snapshot().data_mounts;
 #else
     // The mounts a player install has: the active game's registry paths and
     // the mod's config.reg, in the game's per-manager order.
@@ -596,7 +598,7 @@ bool configuration(const wchar_t* game_registry_key, ResourceStoreConfig& mounts
             failure = {ResourceFailureCode::file_read, "active mod config.reg could not be read"};
             return false;
         }
-        if (!derive_owned_resource_mounts(work, resources, addon, config, mounts, failure, &text_mounts))
+        if (!derive_owned_resource_mounts(work, resources, addon, config, mounts, failure, &text_mounts, &data_mounts))
             return false;
     }
     // A configured archive that is missing stays in the game's list, empty
@@ -705,7 +707,7 @@ bool registry_root_loads_starter_addon(const wchar_t* game_registry_key) noexcep
 bool derive_owned_resource_mounts(const std::wstring& work_path,
     const std::wstring& resource_path, const std::wstring& addon_path,
     const std::vector<std::uint8_t>& config, ResourceStoreConfig& mounts,
-    ResourceFailure& failure, ResourceStoreConfig* text_mounts) {
+    ResourceFailure& failure, ResourceStoreConfig* text_mounts, ResourceStoreConfig* data_mounts) {
     mounts = {};
     failure = {};
     std::array<std::vector<std::wstring>, kFamilies> lists;
@@ -763,6 +765,19 @@ bool derive_owned_resource_mounts(const std::wstring& work_path,
         }
         if (!ignore_base[kTexts]) text_mounts->archives.push_back(child_path(resource_path,L"texts.res"));
     }
+    // The game's database family (items.idb), mod values first.
+    if (data_mounts) {
+        *data_mounts={};
+        for (const auto& relative:lists[kDatabase]) {
+            std::wstring path;
+            if (!full_path(child_path(addon_path,relative),path)) {
+                failure={ResourceFailureCode::invalid_name,"mod database archive path could not be resolved"};
+                return false;
+            }
+            data_mounts->archives.push_back(std::move(path));
+        }
+        if (!ignore_base[kDatabase]) data_mounts->archives.push_back(child_path(resource_path,L"database.res"));
+    }
     mounts = std::move(derived);
     return true;
 }
@@ -773,9 +788,9 @@ void owned_resource_runtime_acquire(const wchar_t* game_registry_key) noexcept {
     ++state.users;
     if (state.users != 1 || !enabled()) return;
     try {
-        ResourceStoreConfig mounts{},text_mounts{};
+        ResourceStoreConfig mounts{},text_mounts{},data_mounts{};
         ResourceFailure failure{};
-        if (!configuration(game_registry_key, mounts, failure, text_mounts)) {
+        if (!configuration(game_registry_key, mounts, failure, text_mounts, data_mounts)) {
             log_loader_failure(failure.message.c_str());
             return;
         }
@@ -788,6 +803,7 @@ void owned_resource_runtime_acquire(const wchar_t* game_registry_key) noexcept {
         state.generation = 0;
         state.mounts = std::move(mounts);
         state.text_mounts = std::move(text_mounts);
+        state.data_mounts = std::move(data_mounts);
         state.loader = std::move(loader);
     } catch (...) {
         log_loader_failure("owned loader startup allocation failed");
@@ -804,6 +820,12 @@ bool owned_visual_resource_mounts(ResourceStoreConfig& mounts) {
 bool owned_text_resource_mounts(ResourceStoreConfig& mounts) {
     auto& state=runtime(); std::lock_guard<std::mutex> guard(state.lock);
     mounts=state.text_mounts;
+    return !mounts.archives.empty();
+}
+
+bool owned_data_resource_mounts(ResourceStoreConfig& mounts) {
+    auto& state=runtime(); std::lock_guard<std::mutex> guard(state.lock);
+    mounts=state.data_mounts;
     return !mounts.archives.empty();
 }
 
@@ -841,6 +863,7 @@ void owned_resource_runtime_release() noexcept {
         state.generation = 0;
         state.mounts = {};
         state.text_mounts = {};
+        state.data_mounts = {};
         state.pending.clear();
         state.active = {};
         state.scene.reset();
@@ -874,16 +897,18 @@ bool owned_resource_runtime_mounts(ResourceStoreConfig& mounts) noexcept {
 }
 
 void owned_resource_runtime_adopt_mounts(const ResourceStoreConfig& mounts,
-    const ResourceStoreConfig& text_mounts) noexcept {
+    const ResourceStoreConfig& text_mounts, const ResourceStoreConfig& data_mounts) noexcept {
     RuntimeState& state = runtime();
     std::lock_guard<std::mutex> guard(state.lock);
     try {
         state.mounts = mounts;
         state.text_mounts = text_mounts;
+        state.data_mounts = data_mounts;
         state.mounts_adopted = true;
     } catch (...) {
         state.mounts = {};
         state.text_mounts = {};
+        state.data_mounts = {};
         state.mounts_adopted = false;
     }
 }
@@ -907,8 +932,11 @@ std::uint64_t retained_static_begin_source(
     // stops the previous stream, whose decoders read the published source
     // under this lock (deadlock while it was held).
     struct NeighbourStart {
-        bool armed = false; std::string terrain; std::uint64_t epoch = 0; ResourceStoreConfig mounts;
-        ~NeighbourStart() { if (armed) neighbour_client_begin(terrain, epoch, mounts); }
+        bool armed = false, restart = false; std::string terrain; std::uint64_t epoch = 0; ResourceStoreConfig mounts;
+        ~NeighbourStart() {
+            if (armed && restart) neighbour_client_restart(terrain, epoch, mounts);
+            else if (armed) neighbour_client_begin(terrain, epoch, mounts);
+        }
     } neighbour_start;
     std::lock_guard<std::mutex> guard(state.lock);
     if (!state.users || !state.loader) return 0;
@@ -922,7 +950,22 @@ std::uint64_t retained_static_begin_source(
     // one owned loader generation and its deferred secondary queue.
     retire_active(state);
     state.pending.clear();
-    if (reused_existing || !selected_mob || !selected_mob[0])
+    if (reused_existing) {
+        // A reload of the published map keeps its source and generation (no
+        // owned load, no begin). Its neighbours prepare for the coming world
+        // now, during the game's load, not after the world change.
+        try {
+            const auto published = state.scene.terrain_source_snapshot();
+            if (published.map && !published.map->terrain_resource.empty()) {
+                neighbour_start.terrain = published.map->terrain_resource;
+                neighbour_start.epoch = published.map->generation;
+                neighbour_start.mounts = state.mounts;
+                neighbour_start.armed = neighbour_start.restart = true;
+            }
+        } catch (...) {} // allocation: the restart waits for the world change as before
+        return transaction;
+    }
+    if (!selected_mob || !selected_mob[0])
         return transaction;
     try {
         if (state.generation == (std::numeric_limits<std::uint64_t>::max)()) {

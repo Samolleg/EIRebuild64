@@ -93,6 +93,15 @@ struct FigureBounds {
     float radius = 0.0f;
 };
 
+// Whether a FIG's texture number selects its unit's primary texture rather
+// than the secondary one: the shipped 51B31F/51B460 selector, including its
+// default-to-secondary branch.
+inline bool figure_primary_texture(std::uint32_t texture_number) noexcept {
+    constexpr bool primary[16] = {
+        true,false,true,true,false,true,true,true,true,false,true,false,true,true,true,true};
+    return texture_number && texture_number <= 16 && primary[texture_number-1];
+}
+
 struct FigureCpuAsset {
     ResourceIdentity identity;
     std::uint32_t signature = 0;
@@ -135,7 +144,7 @@ struct ModelLink {
 // children before their parent.
 bool shipped_node_link_matches(const ModelLink& recipe, std::size_t index,
     const void* node, const void* head, const void* game_parent,
-    const void* recipe_parent) noexcept;
+    const void* recipe_parent, bool later_root = false) noexcept;
 
 struct ModelNodeCpuAsset {
     std::string name;
@@ -316,6 +325,11 @@ struct TextureCpuAsset {
 // Alpha description of one immutable texture mip.
 bool texture_alpha_pixels(const TextureCpuAsset& texture, std::size_t mip,
                           TextureAlphaPixels& alpha) noexcept;
+// One mip's colour as 8-bit RGB triples, row-major (DXT1/3/5 colour blocks,
+// or packed 16/32-bit texels through the file's channel masks). False for a
+// texture without source bytes or an unsupported layout.
+bool texture_rgb_pixels(const TextureCpuAsset& texture, std::size_t mip, std::uint32_t& width,
+                        std::uint32_t& height, std::vector<std::uint8_t>& rgb) noexcept;
 
 enum class MaterialValueSource : std::uint8_t { archive, completed_native };
 
@@ -487,14 +501,30 @@ struct TerrainLiquidOutflow; // owned_terrain_front_end.h
 // of this terrain (0 y=0, 1 y=max, 2 x=0, 3 x=max; one entry a vertex along
 // the side): this terrain's flow blends to it over kTerrainEdgeFlowBand
 // vertices, so both maps carry identical flow on their shared edge.
+// downstream: the adjoining level-reach field's direction (unit; 0 where it
+// has none), which an adjoining map follows across a seam with the active
+// map (whose field never changes once decoded).
 struct TerrainEdgeFlow {
-    float current[2]{}; float bend = 0, cascade = 0, impact = 0, drop = 0, fill = 0;
+    float current[2]{}; float downstream[2]{}; float bend = 0, cascade = 0, impact = 0, drop = 0, fill = 0;
     bool valid = false;
+};
+// One vertex of a shared map edge as the level-reach field treats it, per
+// side and vertex along it as edge_flow. seam: another placed map lies beyond
+// it, so it is never a map-edge outlet of its own. role 1: the adjoining map's
+// water drains away there (an outlet whose drain potential continues the
+// adjoining map's: its level, distance to its exit, the exit's level, and
+// whether its way down crosses moving water); 2: the adjoining map's water
+// runs in (a source).
+struct TerrainEdgeSeam {
+    bool seam = false, running = false;
+    std::uint8_t role = 0;
+    float level = 0, distance = 0, outlet_level = 0;
 };
 struct TerrainOutsideLiquid {
     int reach = 0;
     std::vector<float> heights;
     std::array<std::vector<TerrainEdgeFlow>, 4> edge_flow;
+    std::array<std::vector<TerrainEdgeSeam>, 4> seams;
 };
 struct TerrainCpuAsset {
     ResourceIdentity identity;
@@ -537,6 +567,11 @@ struct TerrainCpuAsset {
     // derived once from this immutable asset on first use.
     mutable std::shared_ptr<const ProceduralFallMap> procedural_falls;
     TerrainOutsideLiquid outside_liquid;
+    // Sides (bit 0 x=0, 1 x=w, 2 y=0, 3 y=h) welded onto an adjoining map
+    // (neighbour_weld_edge_heights). The wall-foot terms cannot see across
+    // such an edge and its outer rows are the map's authored rim, so they
+    // fade out toward it (owned_terrain_foot_rise, owned_terrain_wall_above).
+    std::uint8_t welded_sides = 0;
     // River flow of level liquid reaches, built on first use from the liquid
     // surface then shown (owned_terrain_liquid_outflow); created with the
     // descriptor, reset when a neighbour's seam is set. Added to

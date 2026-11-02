@@ -135,6 +135,20 @@ HRESULT create_completed_surface_texture(ID3D11Device* device, const SurfaceImag
     return hr;
 }
 
+HRESULT prepare_surface_upload(SurfaceImage& image, bool full, UINT block_bytes, RECT& rect,
+                               PreparedUpload& output) {
+    if (!image.width || !image.height || image.pitch <= 0) return E_INVALIDARG;
+    const UINT source_rows = block_bytes ? std::max<UINT>(1, (image.height + 3) / 4) : image.height;
+    const std::size_t required = static_cast<std::size_t>(image.pitch) * source_rows;
+    try {
+        if (image.pixels.size() < required) image.pixels.resize(required);
+    } catch (const std::bad_alloc&) {
+        return E_OUTOFMEMORY;
+    }
+    rect = normalize_dirty_rect(image, full, block_bytes);
+    return prepare_upload(image, rect, block_bytes, output);
+}
+
 HRESULT upload_surface_image(ID3D11Device* device, ID3D11DeviceContext* context,
                              SurfaceImage& image, SurfaceUploadResult* result) {
     if (result) *result = {};

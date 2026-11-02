@@ -84,6 +84,10 @@ static void report_hud_frame_layer_failure(const char* reason) noexcept {
  bridge_report_event("hud_frame_layer_failed",detail);
 }
 void Renderer::begin_scene_game(){
+ // Owned party portraits are chosen on the game thread (engine_bridge.cpp),
+ // in core mode too, where begin_scene_renderer runs on the host.
+ bridge_set_portrait_options(configured_boolean(debug_overlay_.config(),"portrait_head",true),
+  configured_boolean(debug_overlay_.config(),"portrait_helmet",false));
  widescreen_set_hud_frame_sink(this,[](void* owner) noexcept {
   auto& renderer=*static_cast<Renderer*>(owner);
   const auto layer=[&renderer](const std::vector<HudAssetFrame>* frames){
@@ -628,6 +632,7 @@ void Renderer::core_send_mounts() noexcept try{
  scene_core::ResourceMounts mounts;
  if(!owned_resource_runtime_mounts(mounts.mounts))return;
  owned_text_resource_mounts(mounts.text_mounts);
+ owned_data_resource_mounts(mounts.data_mounts);
  std::vector<std::uint8_t> encoded=scene_wire::encode(mounts);
  if(encoded==core_mounts_sent_)return;
  std::vector<std::uint8_t> bytes{0};bytes.insert(bytes.end(),encoded.begin(),encoded.end());
@@ -782,7 +787,21 @@ HRESULT Renderer::core_present(){
    }
    core_f11_down_=down;}
   command.serial=++core_present_serial_;
-  command.game_foreground=!hwnd_||GetForegroundWindow()==hwnd_;
+  {const HWND front=GetForegroundWindow();
+   command.game_foreground=!hwnd_||front==hwnd_;
+   // Which window took the front (one event per change): frame generation,
+   // the background limit and the interface's input stop while it is not ours.
+   if(front!=core_foreground_logged_){core_foreground_logged_=front;
+    char cls[64]{},title[64]{},exe[MAX_PATH]{};DWORD pid=0;
+    if(front){GetClassNameA(front,cls,sizeof(cls));GetWindowTextA(front,title,sizeof(title));GetWindowThreadProcessId(front,&pid);}
+    if(pid){if(HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid)){DWORD size=MAX_PATH;
+      if(QueryFullProcessImageNameA(process,0,exe,&size)){const char* slash=std::strrchr(exe,'\\');if(slash)std::memmove(exe,slash+1,std::strlen(slash));}
+      CloseHandle(process);}}
+    char text[400];std::snprintf(text,sizeof(text),"present %llu: game window %s; foreground %p class '%s' title '%s' pid %lu %s%s (root owner %p)",
+     static_cast<unsigned long long>(core_present_serial_),command.game_foreground?"in front":"NOT in front",static_cast<void*>(front),cls,title,
+     static_cast<unsigned long>(pid),exe,pid==GetCurrentProcessId()?" (game process)":"",front?static_cast<void*>(GetAncestor(front,GA_ROOTOWNER)):nullptr);
+    bridge_report_event("game_foreground",text);}}
+  command.frame_start_qpc=core_frame_start_qpc_;
   if(!bridge_capture_frame_values(inputs.bridge))return E_FAIL;
   inputs.recorder_present_entry=perf_now();
   inputs.game_frame=fa_game_frame_;
@@ -793,7 +812,19 @@ HRESULT Renderer::core_present(){
   // Records reach the host only when published (the writer batches up to
   // 256 KB): the present closes the frame, so it publishes everything.
   x64remote::publish();
-  {const stall_watch::Exempt wait;const frame_acct::Scope wait_scope(frame_acct::wait_present_slot);x64remote::wait_presents(command.serial);}
+  {const stall_watch::Exempt wait;const frame_acct::Scope wait_scope(frame_acct::wait_present_slot);x64remote::wait_presents(command.serial);
+   // latency_pacing (host-set): start the next frame later, so its present
+   // reaches the host when it can take it instead of queueing in the ring.
+   // A high-resolution timer to the last half millisecond, then a spin.
+   if(const long delay_us=x64remote::control().release_delay_us;delay_us>0){
+    const std::int64_t frequency=perf_frequency(),deadline=perf_now()+std::int64_t(delay_us)*frequency/1000000;
+    static HANDLE timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
+    const std::int64_t spin=frequency/2000,left=deadline-perf_now();
+    if(timer&&left>spin){LARGE_INTEGER due{};due.QuadPart=-static_cast<LONGLONG>((left-spin)*10000000/frequency);
+     if(SetWaitableTimerEx(timer,&due,0,nullptr,nullptr,nullptr,0))WaitForSingleObject(timer,100);}
+    while(perf_now()<deadline)YieldProcessor();
+   }}
+  core_frame_start_qpc_=perf_now();  // the next frame starts here (the host's latency measurement)
  }catch(...){
   x64remote::lose_device("core mode: a present could not be sent (allocation)");
  }

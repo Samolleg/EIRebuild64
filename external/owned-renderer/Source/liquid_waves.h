@@ -65,7 +65,10 @@ float waveTrailAt(float2 q){
  if(waveCourant==0){waveOut[p]=c;return;}
  float laplacian=waveLoad(s+int2(1,0)).x+waveLoad(s-int2(1,0)).x+
                  waveLoad(s+int2(0,1)).x+waveLoad(s-int2(0,1)).x-4*c.x;
- float h=(2*c.x-c.y+waveCourant*laplacian)*waveDamping;
+ // precise (no fast-math flags): on D3D12 (NVIDIA r610.85) the queued step
+ // began computing 2*c.x+c.y after ~2 s with correct inputs and constants
+ // (9c8b7e43 wave probe); a driver fast-math miscompile is suspected.
+ precise float h=(2*c.x-c.y+waveCourant*laplacian)*waveDamping;
  float2 world=waveOrigin+(float2(p)+.5)*waveCell;
  // River current here: the units' feet currents, weighted by distance.
  float2 current=0;float weight=1e-4;

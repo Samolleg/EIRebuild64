@@ -1,0 +1,7 @@
+Terrain 2.0 edge masks (terrain2.h, camp_art.rc EID3D11_T2M_*).
+The project owner's own EI Mapper assets (ei-mapper-endurance,
+assets/resources/terrain_blend_masks): for each blend style and topology the
+final reviewed choice of the Mapper's reviewedCanonicalMask approval order
+(r155, r123, r77, r76, r75, then older rounds; first match wins). Edge and
+outer/inside corner masks only (diagonal masks unused). 256 px grayscale,
+white = the style's material. Files are unmodified copies.

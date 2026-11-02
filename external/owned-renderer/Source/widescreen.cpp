@@ -3170,6 +3170,58 @@ std::size_t widescreen_hud_portrait_slots(HudPortraitSlot* slots,std::size_t cap
         return published;
     } __except(EXCEPTION_EXECUTE_HANDLER){return 0;}
 }
+// CI3DObjectFaces (shipped 1a4b3fe0): figures[0] is the camera marker and
+// each face i owns figures 5i+1 (face), +2 HP, +3 MP, +4 selection frame,
+// +5 hit flash. The faces vector begins at +0x158, stride 0x78 (PlayTex
+// 0x641050); OnIdle compares (0x641461) and stores (0x641465) nCurTex at [face+0x44]
+// right before ChangeFaceTexture(i, nCurTex) at 0x641470; ChangeFaceTexture
+// 0x640670 reads szTexName (CString) at [face+0x40].
+bool widescreen_hud_portrait_face(const void* figure,HudPortraitFace& face) noexcept {
+    face={};
+    if(!figure || panel_index(t_visual_object)!=int(HudPanel::portraits))return false;
+    const auto* object=static_cast<const std::uint8_t*>(t_visual_object);
+    __try {
+        const unsigned count=*reinterpret_cast<const unsigned*>(object+0x10C);
+        const auto* figures=*reinterpret_cast<const void* const* const*>(object+0x108);
+        const auto* screen=*reinterpret_cast<const std::uint8_t* const*>(object+0x148);
+        const auto* units=*reinterpret_cast<const std::uint8_t* const* const*>(screen+0x16C);
+        const unsigned faces=(std::min)(*reinterpret_cast<const unsigned*>(object+0x14C),
+            *reinterpret_cast<const unsigned*>(screen+0x170));
+        const auto* states=*reinterpret_cast<const std::uint8_t* const*>(object+0x158);
+        for(unsigned i=0;i<faces && 5*i+1<count;++i) {
+            if(figures[5*i+1]!=figure)continue;
+            if(!units[i] || !states)return false;
+            const auto* state=states+std::size_t(i)*0x78;
+            face.slot=i;face.unit=units[i];
+            face.id=*reinterpret_cast<const std::int32_t*>(units[i]+0x0C);
+            face.expression=*reinterpret_cast<const std::int32_t*>(state+0x44);
+            const char* name=*reinterpret_cast<const char* const*>(state+0x40);
+            if(name)for(std::size_t c=0;c+1<sizeof(face.texture) && name[c];++c)face.texture[c]=name[c];
+            return true;
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER){face={};}
+    return false;
+}
+// Portrait slot i's frame (its area on screen), shown or not.
+static bool portrait_slot_frame(const std::uint8_t* object,unsigned i,HudAssetFrame& frame) noexcept {
+    const unsigned figure_count=*reinterpret_cast<const unsigned*>(object+0x10C);
+    const unsigned area_count=*reinterpret_cast<const unsigned*>(object+0x12C);
+    if(i>=(std::min)(area_count,figure_count?((figure_count-1)/5):0u))return false;
+    const auto* areas=*reinterpret_cast<const std::uint8_t* const* const*>(object+0x128);
+    const auto r=*reinterpret_cast<const RECT*>(areas[i]+0x14);
+    const auto* shift=reinterpret_cast<const LONG*>(areas[i]+0x28);
+    auto h=panel_composition(unsigned(HudPanel::portraits),object);
+    if(!portrait_slot_composition(i,object,h))return false;
+    HudPanelBounds b{widescreen::compose_x(widescreen::placed_to_screen_x(g_layout,float(r.left+shift[0])),h),
+        widescreen::compose_y(widescreen::placed_to_screen_y(g_layout,float(r.top+shift[1])),h),
+        float(r.right-r.left)*g_layout.unit*h.scale,float(r.bottom-r.top)*g_layout.unit*h.scale};
+    frame={b,5.f*g_layout.unit*g_layout.scale,15,true,widescreen_hud_opacity(HudPanel::portraits)};
+    return true;
+}
+bool widescreen_hud_portrait_frame(unsigned slot,HudAssetFrame& frame) noexcept {
+    const auto* object=current_panel(unsigned(HudPanel::portraits));
+    return object && portrait_slot_frame(object,slot,frame);
+}
 void widescreen_hud_asset_frames(std::vector<HudAssetFrame>& frames) {
     frames.clear();
     for(const auto panel:{HudPanel::minimap,HudPanel::character_info,HudPanel::messages}) {
@@ -3180,20 +3232,13 @@ void widescreen_hud_asset_frames(std::vector<HudAssetFrame>& frames) {
     const unsigned figure_count=*reinterpret_cast<const unsigned*>(object+0x10C);
     const unsigned area_count=*reinterpret_cast<const unsigned*>(object+0x12C);
     const auto* figures=*reinterpret_cast<const std::uint8_t* const* const*>(object+0x108);
-    const auto* areas=*reinterpret_cast<const std::uint8_t* const* const*>(object+0x128);
     const unsigned count=(std::min)(area_count,figure_count?((figure_count-1)/5):0u);
     for(unsigned i=0;i<count;++i) {
         // The final Show() flag is authoritative, including multi-selection.
         // Read current owner values here; retain no engine pointers or selection copy.
         if(!*reinterpret_cast<const BOOL*>(figures[5*i+4]+0x220))continue;
-        const auto r=*reinterpret_cast<const RECT*>(areas[i]+0x14);
-        const auto* shift=reinterpret_cast<const LONG*>(areas[i]+0x28);
-        auto h=panel_composition(unsigned(HudPanel::portraits),object);
-        if(!portrait_slot_composition(i,object,h))continue;
-        HudPanelBounds b{widescreen::compose_x(widescreen::placed_to_screen_x(g_layout,float(r.left+shift[0])),h),
-            widescreen::compose_y(widescreen::placed_to_screen_y(g_layout,float(r.top+shift[1])),h),
-            float(r.right-r.left)*g_layout.unit*h.scale,float(r.bottom-r.top)*g_layout.unit*h.scale};
-        frames.push_back({b,5.f*g_layout.unit*g_layout.scale,15,true,widescreen_hud_opacity(HudPanel::portraits)});
+        HudAssetFrame frame;
+        if(portrait_slot_frame(object,i,frame))frames.push_back(frame);
     }
 }
 

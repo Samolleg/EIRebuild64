@@ -18,6 +18,8 @@
 #include "debug_overlay_config.h"
 #include "graphics_settings.h"
 
+struct ImDrawData;
+
 namespace owned {
 
 // Read the input owner registered on this HWND; no second control-state flag.
@@ -93,6 +95,11 @@ struct SamgburLodSnapshot {
 struct RendererResourceSnapshot {
     SamgburLodSnapshot samgbur_lod{};
     std::uint64_t presentation_frame = 0;
+    // Frame generation (DLSS-G) on: measured presents per second, all and
+    // real (0: off). Shown beside the rendered rate, never assumed 2x.
+    double fg_presented_fps = 0.0, fg_real_fps = 0.0;
+    int fg_mode = 0;  // 1 DLSS-G (our pacer), 2 FSR (FidelityFX proxy swap chain)
+    int fg_auto_off_fps = 0;  // non-zero: generation paused, rendered rate below this minimum
     double present_interval_ms = 0.0;
     double present_smoothed_ms = 0.0;
     std::uint64_t rolling_frame_samples = 0;
@@ -125,6 +132,9 @@ struct RendererResourceSnapshot {
     std::uint64_t cpu_surface_bytes = 0;
     std::uint64_t gpu_texture_bytes = 0;
     std::uint64_t double_resident_bytes = 0;
+    // renderer_backend=d3d12: surface GPU homes are D3D12 textures that the
+    // surface accounting (D3D11 texture bytes) does not count.
+    bool d3d12_backend = false;
     // GPU-primary surfaces whose CPU bytes are dropped, and the counted
     // staging readbacks that restored them (cumulative since start).
     std::uint64_t released_surface_bytes = 0;
@@ -245,6 +255,17 @@ struct RendererResourceSnapshot {
 // scene thread while holding it.
 std::recursive_mutex& debug_overlay_lock() noexcept;
 
+// The overlay's renderer when it is not the D3D11 ImGui backend: the x64
+// host's D3D12 executor (d3d12_frame.h). init/shutdown bracket the ImGui
+// context's use; render draws one frame's lists (and their texture updates).
+class OverlayRenderer {
+public:
+    virtual ~OverlayRenderer() = default;
+    virtual bool init() = 0;
+    virtual void shutdown() noexcept = 0;
+    virtual void render(ImDrawData* data) = 0;
+};
+
 class DebugOverlay {
 public:
     DebugOverlay();
@@ -266,6 +287,10 @@ public:
     // set_external_focus (the game window in front).
     HRESULT initialize_host(HWND window, ID3D11Device* device, ID3D11DeviceContext* context,
                             const wchar_t* config_path);
+    // Before initialize: the overlay draws through renderer instead of the
+    // D3D11 backend (the device then only answers adapter queries). The combat
+    // UI's icon atlas is an ImGui user texture, so it draws on either.
+    void set_renderer(OverlayRenderer* renderer) noexcept { renderer_ = renderer; }
     void set_external_focus(bool focused) noexcept;
     void process_forwarded_input(UINT message, WPARAM wparam, LPARAM lparam) noexcept;
     // Core mode, game process: the window hook only (camp input, focus
@@ -290,6 +315,10 @@ public:
     // before Present. The upstream DX11 backend restores every state it changes;
     // this wrapper additionally preserves the shader stages it intentionally
     // clears. Hidden mode starts an ImGui frame only for visible combat UI.
+    // Frame generation: this frame's overlay draw lists drawn again (onto the
+    // generated image); nothing when render did not draw this frame.
+    void render_again() noexcept;
+    void forget_rendered_frame() noexcept { rendered_frame_ = false; }
     HRESULT render(const RenderProfileSnapshot* profile,
                    const BridgeProfileSnapshot* bridge,
                    const RendererResourceSnapshot& resources,
@@ -363,6 +392,8 @@ public:
 
 private:
     bool initialize_host_child_ = false;
+    OverlayRenderer* renderer_ = nullptr;
+    bool rendered_frame_ = false;  // render drew this frame (render_again may repeat it)
     bool core_save_requested_ = false;  // game process, core mode: a save for the host to make
     std::unique_ptr<Implementation> implementation_;
     RendererConfig config_;
@@ -372,6 +403,8 @@ private:
 // The renderer this session runs, shown read-only beside the 64-bit render
 // host option (a static text; core: the option does not apply).
 void debug_overlay_set_running_renderer(const char* text, bool core) noexcept;
+// The Direct3D 12 backend draws this session (the options that need it unlock).
+void debug_overlay_set_running_d3d12(bool running) noexcept;
 // Core mode, host: the game process's address space in use and its largest
 // free block (MB; 0: not sampled), sent through the control block. The F10
 // memory line reads the latest values.

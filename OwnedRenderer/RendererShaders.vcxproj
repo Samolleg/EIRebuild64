@@ -24,7 +24,8 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_ambient_occlusion.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_fog.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_sky.cpp" />
-    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_terrain_bake.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_fur.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_terrain2_cache.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_impostors.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_point_shadows.cpp" />
     <ClInclude Include="$(OwnedRendererRoot)Source\frame_plan.h" />

@@ -38,7 +38,16 @@ cbuffer Precipitation:register(b0){
  float4 pcSand2;    // x ground streak strength (veil), y canyon protection (1 on), z drop index offset (the near sand grain draw)
  float4 pcFogRange;float4 pcFogControl;float4 pcFogColor;float4 pcDepth;
  float4 pcFogSeam;float4 pcFogCurve;float4 pcFogSpanLo;float4 pcFogSpanHi; // neighbour seam fog (neighbour_fog.h)
+ float4 pcSnowLight;// snow material: rgb ambient (tinted), w 1 while the scene's lamps light the flakes
+ float4 pcSnowSun;  // rgb sun or moon light (tinted), w sparkle strength
 };
+// The world's lamps (the native shader's records, b5/t17/t18, bound by the
+// precipitation draw while pcSnowLight.w is set): falling snow takes the
+// surfaces' lamp law per flake.
+cbuffer PcLamps:register(b5){uint pcLampCount;uint2 pcLampGridSize;uint pcLampGlowCount;float2 pcLampGridOrigin;float pcLampGridInverseCell;float pcLampGridTail;};
+struct PcLamp{float4 centerInverseRadiusSquared;float4 color;float4 shadowCenter;float4 shadowSlots;};
+StructuredBuffer<PcLamp> pcLamps:register(t18);
+StructuredBuffer<uint> pcLampGrid:register(t17);
 Texture2D<float> pcHeight:register(t0);
 Texture2D<float> pcSceneDepth:register(t2);
 Texture2D<float> pcShelter:register(t3);
@@ -79,6 +88,42 @@ float3 pcFogged(float3 rgb,float border,float4 position){
  rgb=rgb*f+borderFogColor(position,pcFogColor.rgb)*(1-f);
  float3 added=0;float t=nativeAtmosphere(added,position,pcFogColor.rgb);
  return rgb*t+added;
+}
+// A snow crystal lit as a material, once per flake (all four corners
+// alike): a thin two-sided ice plate that falls roughly level and tumbles.
+// The world ambient, the sun or moon through the cloud shadow at its
+// tilted normal, the scene's lamps by the surfaces' law (1 - d^2/r^2,
+// squared, eased over the last fifth of the radius, game lamps at .65), a
+// GGX glint off the plate (F0 .02, roughness .35: an occasional sparkle,
+// not a highlight on every flake) and the forward scatter toward the light.
+float3 pcSnowLit(float3 p,float3 v,uint seed,float toward){
+ float3 n=normalize(float3(float2(pcRandom(seed^0x0b4f3a71u),pcRandom(seed^0x5bd1e995u))*1.6-.8,1));
+ n=dot(n,v)>0?-n:n; // the face toward the eye (v runs from the eye)
+ float3 l=pcSunDir.xyz,e=-v;
+ float sunVisible=skyCloudVisibility(p);
+ float nl=abs(dot(n,l));
+ float3 h=normalize(l+e);float nh=saturate(dot(n,h)),a2=.35*.35*.35*.35;
+ float d=nh*nh*(a2-1)+1;
+ float glint=a2/(3.14159*d*d)*(.02+.98*pow(1-saturate(dot(e,h)),5))*saturate(dot(n,l))*.25;
+ float3 light=pcSnowLight.rgb+pcSnowSun.rgb*sunVisible*nl;
+ [branch]if(pcSnowLight.w>.5){
+  float2 cell=floor((p.xy-pcLampGridOrigin)*pcLampGridInverseCell);
+  [branch]if(all(cell>=0)&&all(cell<(float2)pcLampGridSize)){
+   uint index=(uint)cell.y*pcLampGridSize.x+(uint)cell.x;
+   uint first=pcLampGrid[index],last=pcLampGrid[index+1];
+   [loop]for(uint k=first;k<last;++k){
+    PcLamp lamp=pcLamps[pcLampGrid[k]];
+    if(lamp.color.w<0)continue; // emissive surfaces light nothing here
+    float3 delta=lamp.centerInverseRadiusSquared.xyz-p;
+    float reach=1-dot(delta,delta)*lamp.centerInverseRadiusSquared.w;
+    if(reach<=0)continue;
+    float facing=.35+.65*abs(dot(n,normalize(delta)));
+    light+=lamp.color.rgb*(reach*reach*smoothstep(0,.36,reach)*facing*(lamp.color.w>0?.65:1));
+   }
+  }
+ }
+ float albedo=.85+.15*pcRandom(seed^0x165667b1u);
+ return light*albedo+pcSnowSun.rgb*sunVisible*(glint*pcSnowSun.w+.4*pow(toward,6));
 }
 )" R"(
 PcOut precipitationVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
@@ -137,8 +182,17 @@ PcOut precipitationVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
   float2 heading=pcMotion.xy+float2(-pcMotion.y,pcMotion.x)*(pcRandom(cycleSeed^0x5851f42du)-.5)*.25;
   float2 xy=tileOrigin+pcDrift.xy+float2(pcRandom(cycleSeed),pcRandom(cycleSeed^0x68bc21ebu))*period+heading*pcSnow.y*pace*a*pcSnow.w;
   float lift=pcRandom(cycleSeed^0x165667b1u);
-  p=float3(xy,pcGround(xy)+.05+pcSnow.z*lift*lift*(.6+.4*sin(a*3.14159)));
+  float groundHere=pcGround(xy);
+  p=float3(xy,groundHere+.05+pcSnow.z*lift*lift*(.6+.4*sin(a*3.14159)));
   velocity=float3(pcMotion.xy*pcSnow.y,-.3);drifterFade=sin(a*3.14159);runA=a;
+  // Blown snow skims open, gentle ground only: it fades out on slopes from
+  // about 17 to 31 degrees, so a drift never climbs a cliff face (it rode the
+  // height field straight up walls, 1102 user report). Sand keeps its own
+  // band slope test and billows at walls.
+  [branch]if(pcShape.z<2.5){
+   float2 rise=float2(pcGround(xy+float2(.6,0))-pcGround(xy-float2(.6,0)),pcGround(xy+float2(0,.6))-pcGround(xy-float2(0,.6)))/1.2;
+   drifterFade*=1-smoothstep(.3,.6,length(rise));
+  }
  }
  // Billows: sand that the wind drives against a building wall (the shelter
  // map's top just downwind) or up a steep slope (the ground rising downwind)
@@ -246,16 +300,24 @@ PcOut precipitationVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
   // A band reaching under a roof or into a building is not drawn.
   if(pcShelterTop(p.xy+axis.xy*halfLength)>p.z||pcShelterTop(p.xy-axis.xy*halfLength)>p.z)fade=0;
  } else if(snow){
-  // Flakes face the camera; in strong wind they lean a little along their
-  // motion (a flake, never a line).
-  float3 right=normalize(cross(view,float3(0,0,1)));
-  axis=normalize(cross(right,view));across=right;
+  // Flakes always face the camera (the quad lies across the view ray); in
+  // strong wind they lean along their motion as seen on screen (the motion's
+  // part across the view ray), so a flake falling toward or away from the eye
+  // keeps its full crystal. The lean axis was the 3D motion itself: looking
+  // along the snowfall the quad turned edge-on into a thin strip (1102 user
+  // note). A view straight down takes the screen's x as its reference.
+  float3 forward=view/max(dist,1e-4);
+  float3 right=cross(forward,float3(0,0,1));
+  right=dot(right,right)>1e-6?normalize(right):float3(1,0,0);
+  axis=cross(right,forward);across=right;
   float stretch=saturate((length(velocity.xy)-3)/8);
-  float3 direction=normalize(velocity),side=cross(direction,view);float l=length(side);
-  if(stretch>.05&&l>1e-6){axis=direction;across=side/l;}
+  // Sand grains keep their 3D motion trail (fine flecks, not crystals).
+  float3 drift=pcShape.z>2.5?velocity:velocity-forward*dot(velocity,forward);float driftLength=length(drift);
+  float3 side=cross(drift,forward);float l=length(side);
+  if(stretch>.05&&driftLength>1e-3&&l>1e-6){axis=drift/driftLength;across=side/l;}
   // Sand grains: fine flecks with a short motion trail (9b32ff4a user note:
   // "very coarse and blurry"), flakes a longer lean.
-  halfLength=stretch*(pcShape.z>2.5?.004:.012)*length(velocity);
+  halfLength=stretch*(pcShape.z>2.5?.004:.012)*driftLength;
  } else {
   axis=normalize(velocity);across=cross(axis,view);float l=length(across);
   across=l>1e-6?across/l:float3(1,0,0);
@@ -265,9 +327,14 @@ PcOut precipitationVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
  float size=pcShape.x*(.6+.8*pcRandom(cycleSeed^0x7f4a7c15u));
  if(puff)size=halfLength*(groundSheet?.6:.45);
  if(billow)size=.15+.45*runA;
+ // Blown snow: fine powder, half a falling flake, its lean at most
+ // twice its own size (a world size, so it shrinks with distance like the
+ // flakes and never draws as a long line up close).
+ bool powder=drifter&&pcShape.z<2.5;
+ if(powder){size*=.5;halfLength=min(halfLength,2*size);}
  // Drops right in front of the eye are out of focus: wider and softer.
- // (Sand grains stay crisp: no near blur.)
- float nearBlur=pcShape.z>2.5?1:1+2.5*saturate((6-dist)/5);
+ // (Sand grains and blown snow stay crisp: no near blur.)
+ float nearBlur=pcShape.z>2.5||powder?1:1+2.5*saturate((6-dist)/5);
  size*=nearBlur;
  float shown=max(size,pcShape.y*max(centre.w,.05)/max(pcEye.w,1e-3));
  fade*=size/shown/sqrt(nearBlur);
@@ -287,7 +354,8 @@ PcOut precipitationVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
  // light and only a weak forward glow (ce6849f4: the lifted, sun-glinted
  // bands read as white surf at night).
  float3 lit=pcColor.rgb*(.8+.4*pcRandom(cycleSeed^0x165667b1u))+pcGlint.rgb*(pcShape.z>2.5?.15:snow?.25:1)*pow(toward,6);
- float opacity=billow?pcSheet.w*.5*(1-runA)*saturate(runA*6):puff?pcSheet.w:pcShape.w;
+ [branch]if(snow&&pcShape.z<2.5&&fade>0)lit=pcSnowLit(p,view/max(dist,1e-3),cycleSeed,toward);
+ float opacity=billow?pcSheet.w*.5*(1-runA)*saturate(runA*6):puff?pcSheet.w:pcShape.w*(powder?.6:1);
  // The atmosphere per corner (border fog, haze and draw fade folded into the
  // colour): per pixel it sampled the fog volume under every band's
  // overdraw. Exact for premultiplied output: the PS only scales by alpha.
@@ -306,8 +374,9 @@ PcOut precipitationVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
  o.flake=float4(1,0,0,groundSheet?-2:-1); // w -2: a ground sheet (close soft depth)
  if(pcShape.z>1.5&&pcShape.z<2.5&&!drifter){
   float t=pcMotion.w,spin=(pcRandom(cycleSeed^0x6c8e9cf5u)-.5)*3,turn=pcRandom(cycleSeed^0x5f356495u)*6.2832+t*spin;
-  float roll=.45+.55*abs(cos(t*(.8+1.6*pcRandom(cycleSeed^0x2f8b2c1du))+turn));
-  // z: atlas column plus the roll (.45-1) in its fraction.
+  float roll=.6+.4*abs(cos(t*(.8+1.6*pcRandom(cycleSeed^0x2f8b2c1du))+turn));
+  // z: atlas column plus the roll (.6-1, a slight tumble: the crystal never
+  // squashes toward a line) in its fraction.
   o.flake=float4(cos(turn),sin(turn),floor(pcRandom(cycleSeed^0x4cf5ad43u)*3.999)+roll*.999,log2(nearBlur)*1.6);
  }
  return o;
@@ -544,11 +613,14 @@ float4 precipitationVeilPS(float4 position:SV_Position):SV_Target{
 
 // Soft shelter map for the snow and wet surfaces (filter_native_rain_shelter,
 // eight separable passes per bake). In: the raw straight-down depth (0 slab
-// top, 1 empty). Out: r closed depth, g distance inside the closed footprint
-// (to its silhouette, /4 m), b crown flag (filled leaf gaps a real share
-// within 2 m, spread over 3 m), a the local crown radius (largest inside distance within 3 m, /4 m).
+// top, 1 empty) and the bake's foliage mask (1 where the top caster is
+// foliage). Out: r closed depth (only foliage is closed: an opening in a
+// roof or a roofless building stays open), g distance inside the closed footprint
+// (to its silhouette, /4 m), b crown flag (closed foliage a real share
+// within 2 m, spread over 2 m) packed with the leaf density (shelterCrown),
+// a the local crown radius (largest inside distance within 3 m, /4 m).
 // Every pass is one row or column window: a group of 256 texels loads its
-// line segment plus a 32-texel apron into groupshared memory once, and each
+// line segment plus a 64-texel apron into groupshared memory once, and each
 // texel's window reads only that (one global read and write per texel and
 // pass; the brute-force version read every window texel from memory, 1-4 ms).
 // sfMode: x pass, yz direction (1,0 rows, 0,1 columns), w side. sfRadius: x
@@ -557,15 +629,16 @@ constexpr char kShelterFilterShader[] = R"(
 cbuffer ShelterFilter:register(b0){int4 sfMode;float4 sfRadius;};
 Texture2D<float> sfRaw:register(t0);
 Texture2D<float4> sfSource:register(t1);
+Texture2D<float> sfFoliage:register(t2);
 RWTexture2D<unorm float4> sfOut:register(u0);
 #define SF_LINE 256
-#define SF_APRON 32
-groupshared float2 sfCache[SF_LINE+2*SF_APRON]; // the two channels this pass reads
-// The channels a pass's windows read: closing depth; distance rows: depth
-// and filled gaps; distance columns: row run and gap max; radius: inside
-// distance, then its row max.
-float2 sfWindowChannels(int mode,float4 v){
- return mode<=3?float2(v.r,0):mode==4?v.rg:mode==5?v.gb:mode==6?v.gb:v.ab;
+#define SF_APRON 64
+groupshared float3 sfCache[SF_LINE+2*SF_APRON]; // the channels this pass reads
+// The channels a pass's windows read: closing depth; distance rows: depth,
+// filled gaps and closed foliage; distance columns: row run and the two row
+// shares; radius: inside distance, then its row max, with the packed crown.
+float3 sfWindowChannels(int mode,float4 v){
+ return mode<=3?float3(v.r,0,0):mode==4?v.rgb:mode==5?v.gba:mode==6?float3(v.gb,0):float3(v.ab,0);
 }
 [numthreads(SF_LINE,1,1)]
 void shelterFilterCS(uint3 groupId:SV_GroupID,uint3 thread:SV_GroupThreadID){
@@ -574,21 +647,29 @@ void shelterFilterCS(uint3 groupId:SV_GroupID,uint3 thread:SV_GroupThreadID){
  // Line segment plus apron (clamped at the map's edge).
  for(int c=int(thread.x);c<SF_LINE+2*SF_APRON;c+=SF_LINE){
   int2 q=clamp(dir*(along0+c-SF_APRON)+across*lineIndex,0,side-1);
-  sfCache[c]=sfWindowChannels(mode,mode==0?float4(sfRaw.Load(int3(q,0)),0,0,0):sfSource.Load(int3(q,0)));
+  sfCache[c]=sfWindowChannels(mode,mode==0?float4(sfFoliage.Load(int3(q,0))>.5?sfRaw.Load(int3(q,0)):1,0,0,0):sfSource.Load(int3(q,0)));
  }
  GroupMemoryBarrierWithGroupSync();
  int i=int(thread.x)+SF_APRON;int2 p=dir*(along0+int(thread.x))+across*lineIndex;
  if(p.x>=side||p.y>=side)return;
  int r=min(int(sfRadius.x),SF_APRON),gapReach=min(int(sfRadius.y),SF_APRON),reach=min(int(sfRadius.z),SF_APRON);
+ // Window passes over the 3 m distance reach step 2 texels past 32 texels
+ // (2048 maps: 4.7 cm texels), keeping their tap count; the field they read
+ // is a smooth distance, so the coarser step moves it by under a texel.
+ int step=reach>32?2:1;
  float4 s=mode==0?float4(sfCache[i].x,0,0,0):sfSource.Load(int3(p,0)),o=s;
  if(mode<=3){
-  // Closing: dilate (the highest surface spreads: min depth), then erode by
-  // the same radius (max depth): leaf gaps up to 1 m close at the crown's
-  // height and solid outlines return to their size.
+  // Closing of the foliage alone: dilate (the highest leaves spread: min
+  // depth), then erode by the same radius (max depth): leaf gaps up to 2.5 m
+  // close at the crown's height and crown outlines return to their size.
+  // Solid casters keep their raw outline: the closing of every caster
+  // filled any opening under 2.5 m at the height of the walls or roof
+  // around it, so rain never reached inside a roof hole or a roofless
+  // building (e4ab0f76 user note, Dead City).
   float m=mode<=1?1:0;
   for(int k=-r;k<=r;++k)m=mode<=1?min(m,sfCache[i+k].x):max(m,sfCache[i+k].x);
   o=float4(m,0,0,0);
-  if(mode==3){float raw=sfRaw.Load(int3(p,0));o.g=m<1&&raw>m+.008?1:0;}
+  if(mode==3){float raw=sfRaw.Load(int3(p,0));o.r=min(m,raw);o.g=m<1&&raw>m+.008?1:0;o.b=m<1?1:0;}
  }else if(mode==4){
   // Exact distance transform, row pass: texels to the nearest empty texel
   // along the row (within reach); the crown share's row max.
@@ -597,19 +678,25 @@ void shelterFilterCS(uint3 groupId:SV_GroupID,uint3 thread:SV_GroupThreadID){
    run=float(reach);
    for(int k=1;k<=reach;++k)if(sfCache[i+k].x>=1||sfCache[i-k].x>=1){run=float(k);break;}
   }
-  float gap=0;for(int g=-gapReach;g<=gapReach;++g)gap+=sfCache[i+g].y;
-  o=float4(s.r,run/float(reach),gap/float(2*gapReach+1),0);
+  float gap=0,closed=0;for(int g=-gapReach;g<=gapReach;++g){gap+=sfCache[i+g].y;closed+=sfCache[i+g].z;}
+  o=float4(s.r,run/float(reach),gap/float(2*gapReach+1),closed/float(2*gapReach+1));
  }else if(mode==5){
   // Column pass: the Euclidean inside distance (min of row run^2 + k^2);
   // the crown share's column max.
-  float best=float(reach*reach),gap=0;
-  for(int k=-reach;k<=reach;++k){float run=sfCache[i+k].x*float(reach);best=min(best,run*run+float(k*k));}
-  for(int g=-gapReach;g<=gapReach;++g)gap+=sfCache[i+g].y;
-  // A crown: filled leaf gaps are a real share of the area within 2 m
-  // (a roof's few closed corners, or a chimney's, are not: 9252c204 user
-  // note, the max of any filled gap made roofs crowns that filled in).
-  float crown=smoothstep(.06,.18,gap/float(2*gapReach+1));
-  o=float4(s.r,s.r<1?saturate(sqrt(best)/sfRadius.w/4):0,crown,0);
+  float best=float(reach*reach),gap=0,closed=0;
+  for(int k=-reach;k<=reach;k+=step){float run=sfCache[i+k].x*float(reach);best=min(best,run*run+float(k*k));}
+  for(int g=-gapReach;g<=gapReach;++g){gap+=sfCache[i+g].y;closed+=sfCache[i+g].z;}
+  // A crown: closed foliage (the bake's foliage mask) is a real share of the
+  // area within 2 m. The filled-gap share stood in for it before the mask
+  // and missed dense crowns, whose few gaps left them on the roof rule (full
+  // cover, hard edge: v3 route, pine2 at t300); roofs are never foliage.
+  float crown=smoothstep(.04,.15,closed/float(2*gapReach+1));
+  // Leaf density: the share of the closed crown within 2 m that the bake
+  // drew as leaves (not filled gaps), the straight-down cover a crown
+  // really gives. Packed below the crown flag in the 16-bit channel (8 bits
+  // each), so the spread passes' max keeps the strongest crown.
+  float density=closed>0?saturate(1-gap/closed):1;
+  o=float4(s.r,s.r<1?saturate(sqrt(best)/sfRadius.w/4):0,(round(crown*255)*256+round(density*255))/65535,0);
  }else{
   // Local crown radius: the largest inside distance within reach (row,
   // then column), so one crown takes one radius.
@@ -618,10 +705,128 @@ void shelterFilterCS(uint3 groupId:SV_GroupID,uint3 thread:SV_GroupThreadID){
   // The crown flag spreads 2 m (not the 3 m radius window) and stays inside
   // the closed outline (a5650978: more crown texels than occupied ones).
   float m=0,crown=0;
-  for(int k=-reach;k<=reach;++k){m=max(m,sfCache[i+k].x);if(abs(k)<=gapReach)crown=max(crown,sfCache[i+k].y);}
+  for(int k=-reach;k<=reach;k+=step)m=max(m,sfCache[i+k].x);
+  for(int c=-gapReach;c<=gapReach;++c)crown=max(crown,sfCache[i+c].y);
   o=float4(s.r,s.g,s.r<1?crown:0,m);
  }
  sfOut[p]=o;
+}
+// Pre-filtered cover (blur_native_rain_shelter: one pass per bake, and when
+// the crown fill-in moves by 1/256). In t1 the soft map; out u0: r the rain
+// cover, g the snow cover (each texel's rule, shelterTexelKeep), b the caster
+// depth and a the caster share, all Gaussian-blurred (sfRadius x radius, y
+// sigma in texels, z the fill-in). The pixel shaders take one bilinear read
+// (nativeShelterCover, gcShelterKeep): b/a is the mean caster depth there.
+// A group blurs one 16 x 16 tile: the tile plus an 8-texel apron into
+// groupshared memory, a row pass over the apron rows, then the columns.
+#define SB_TILE 16
+#define SB_APRON 8
+#define SB_SPAN (SB_TILE+2*SB_APRON)
+groupshared float4 sbTexel[SB_SPAN*SB_SPAN];
+groupshared float4 sbRow[SB_SPAN*SB_TILE];
+// The soft map's b channel (shelterFilterCS): the crown flag and the crown's
+// leaf density, 8 bits each.
+float2 shelterCrown(float b){
+ float packed=round(b*65535);
+ return float2(floor(packed/256)/255,fmod(packed,256)/255);
+}
+// Shelter at one texel of the soft map for build-up fill 0..1: roofs and
+// other solids take a 0.25 m feather inside their outline; crowns (filled
+// leaf gaps nearby) shelter from the centre out, and as snow builds up it
+// fills in from the rim toward the trunk, by distance inside the closed
+// crown outline, down to a core of half the crown's radius (frame_001039:
+// the blurred occupancy, mixed with the roof edge by a varying crown share,
+// sheltered the rim more than the inner ring).
+// Crowns fill in slowly (the square of the build-up) and keep a bare core
+// of half their radius (9252c204 user note: the core vanished within
+// minutes); roofs and other solids never fill in.
+// Crowns: a soft edge over rim of their radius from the rim, moving in by
+// at most a quarter of the radius, so the inner 40% always stays sheltered
+// (c6c05f03: a fill by distance in metres against 2-3 m crowns left
+// nothing); roofs over 0.25 m.
+// rim: the crown edge's width as a share of its radius (snow .35; rain wet
+// .65, so rain reaches in toward the trunk: bfa1e170 drew a hard dry polygon).
+// leak (rain 1, snow 0): crowns pass rain through their leaf gaps, so a
+// crown covers at most .85 of its leaf density (user note on e4ab0f76:
+// trees should not give perfect cover; the .15 stands for drip and wind).
+float shelterTexelKeep(float4 m,float fill,float rim,float leak){
+ float2 crown=shelterCrown(m.b);
+ float inside=m.g*4,radius=max(m.a*4,.5);
+ float start=fill*.25*radius;
+ float crownKeep=smoothstep(start,start+rim*radius,inside)*lerp(1,.85*crown.y,leak);
+ return lerp(smoothstep(0,.25,inside),crownKeep,crown.x);
+}
+float sbWeight(int k,float sigma){return exp(-float(k*k)/(2*sigma*sigma));}
+[numthreads(SB_TILE,SB_TILE,1)]
+void shelterBlurCS(uint3 groupId:SV_GroupID,uint3 thread:SV_GroupThreadID,uint index:SV_GroupIndex){
+ int side=sfMode.w,r=min(int(sfRadius.x),SB_APRON);float sigma=max(sfRadius.y,.5),fill=sfRadius.z;
+ int2 origin=int2(groupId.xy)*SB_TILE-SB_APRON;
+ for(int c=int(index);c<SB_SPAN*SB_SPAN;c+=SB_TILE*SB_TILE){
+  float4 m=sfSource.Load(int3(clamp(origin+int2(c%SB_SPAN,c/SB_SPAN),0,side-1),0));
+  sbTexel[c]=m.r<1?float4(shelterTexelKeep(m,fill,.65,1),shelterTexelKeep(m,fill,.35,0),m.r,1):0;
+ }
+ GroupMemoryBarrierWithGroupSync();
+ float total=0;for(int t=-r;t<=r;++t)total+=sbWeight(t,sigma);
+ for(int e=int(index);e<SB_SPAN*SB_TILE;e+=SB_TILE*SB_TILE){
+  int x=e%SB_TILE,y=e/SB_TILE;float4 a=0;
+  for(int k=-r;k<=r;++k)a+=sbWeight(k,sigma)*sbTexel[y*SB_SPAN+x+SB_APRON+k];
+  sbRow[e]=a/total;
+ }
+ GroupMemoryBarrierWithGroupSync();
+ int2 p=int2(groupId.xy)*SB_TILE+int2(thread.xy);
+ if(p.x>=side||p.y>=side)return;
+ float4 a=0;
+ for(int k=-r;k<=r;++k)a+=sbWeight(k,sigma)*sbRow[(int(thread.y)+SB_APRON+k)*SB_TILE+int(thread.x)];
+ sfOut[p]=saturate(a/total);
+}
+)";
+
+// Rain rings for wet ground (Renderer::update_native_rain_rings): the height
+// gradient of the water's drop rings (liquid_surface.hlsl liquidRainRipples,
+// the same drop, dimple and ring terms and constants) rendered into one
+// tiling 6.25 m texture, 5 x 5 drop cells of 1.25 m per layer, four offset
+// layers summed. The cells wrap at the tile edge, so the texture tiles
+// seamlessly; the layers' grids are axis-aligned (a rotated grid would not
+// tile). Re-rendered only when the game time or the rain amount changes, so
+// it freezes on pause. rrTime: x game seconds, y rain 0..1, z texels per side.
+constexpr char kRainRingsShader[] = R"(
+cbuffer RainRings:register(b0){float4 rrTime;};
+RWTexture2D<float2> rrOut:register(u0);
+static const uint rrCells=5;
+static const float rrCell=1.25,rrLife=.9,rrWavelength=.11,rrRingSlope=.55,rrDimpleSize=.07,rrDimpleSlope=.5,rrDensity=.9;
+static const float2 rrRadius=float2(.04,.5);
+uint rrHash(uint x){x^=x>>16;x*=0x7feb352du;x^=x>>15;x*=0x846ca68bu;x^=x>>16;return x;}
+float rrUnit(uint h){return (h>>8)*(1.0/16777216.0);}
+[numthreads(8,8,1)]
+void rainRingsCS(uint3 id:SV_DispatchThreadID){
+ float side=rrTime.z,seconds=rrTime.x,rain=rrTime.y;
+ if(float(id.x)>=side||float(id.y)>=side)return;
+ float2 q0=(float2(id.xy)+.5)/side*rrCells,result=0;
+ [unroll]for(uint layer=0;layer<4;++layer){
+  float2 q=q0+float2(.37,.71)*layer;
+  float2 cell=floor(q),local=q-cell;
+  uint2 wrapped=uint2(cell)%rrCells;
+  uint key=rrHash(wrapped.x*0x9e3779b1u^rrHash(wrapped.y+layer*0x632be5abu));
+  float cycle=seconds/rrLife+rrUnit(key);
+  uint drop=rrHash(key^asuint(int(floor(cycle)))*0x85ebca77u);
+  if(rrUnit(drop)>=rain*rrDensity)continue;
+  float age=frac(cycle);
+  uint place=rrHash(drop);
+  float2 center=.3+.4*float2(rrUnit(place),rrUnit(rrHash(place)));
+  float2 d=(local-center)*rrCell;
+  float r=length(d);
+  float2 edge=min(center,1-center)*rrCell;
+  float fit=saturate((min(edge.x,edge.y)-r)/rrWavelength);
+  float x=(r-rrRadius.x-rrRadius.y*age)/rrWavelength;
+  float u=r/rrDimpleSize;
+  if(fit<=0||(abs(x)>2.6&&u>2.5))continue;
+  float envelope=exp(-x*x*.7);
+  float decay=smoothstep(0,.05,age)*pow(1-age,1.5);
+  float ring=rrRingSlope*decay*envelope*(-sin(6.2831853*x)-cos(6.2831853*x)*x*.22);
+  float dimple=rrDimpleSlope*2.33*u*exp(-u*u)*(1-smoothstep(0,.2,age));
+  result+=d/max(r,1e-4)*(ring+dimple)*fit;
+ }
+ rrOut[id.xy]=result;
 }
 )";
 } // namespace owned::precipitation

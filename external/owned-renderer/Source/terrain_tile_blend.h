@@ -254,10 +254,56 @@ inline void terrain_tile_borrow_cells(const TerrainTileFamilies& families, const
 // family's material class (3 bits) and bit 15 for a liquid-bed family.
 constexpr std::uint32_t terrain_tile_blend_none = 0xffffu;
 constexpr std::uint32_t terrain_tile_blend_bed = 0x8000u;
+// Page 63 is never a terrain page in a cell: it marks a folded cell.
+constexpr std::uint32_t terrain_tile_fold_page = 63u;
 inline std::uint32_t terrain_tile_blend_cell(std::uint32_t slot, std::uint32_t material_class = tile_ground, bool bed = false) {
-    const std::uint32_t cell = slot / 64u < 64u && material_class < 8u
+    const std::uint32_t cell = slot / 64u < terrain_tile_fold_page && material_class < 8u
         ? (slot % 64u) | ((slot / 64u) << 6) | (material_class << 12) | (bed ? terrain_tile_blend_bed : 0u) : terrain_tile_blend_none;
     return cell;
+}
+
+// Folded cells: a family with no plain slot of its own draws its own art from
+// one corner quadrant of a transition slot the map draws, mirror-folded into
+// a tile (terrainTileBlendCellFrom). save1162: zone9 has no plain "Stone /
+// Light", drew borrowed "Stone / Grayish" art, and met zone8's light stone
+// in a line along the shared edge. The cell's page is terrain_tile_fold_page
+// and its position the table index; a table entry (slot 6+6 bits, quadrant =
+// signature corner NW/NE/SE/SW in bits 12-13) fills one extra row of the
+// contact tile grid. Per family: the drawn transition slot with most of its
+// corners (more drawn first on a tie) and, with three, the corner opposite
+// the odd one (the farthest from the other material).
+inline void terrain_tile_fold_cells(const TerrainTileFamilies& families, const std::vector<std::uint32_t>& usage,
+    const std::vector<bool>& usable, std::map<std::uint32_t, std::uint32_t>& cells, const std::set<std::uint32_t>& bed,
+    std::size_t capacity, std::vector<std::uint32_t>& table) {
+    table.clear();
+    capacity = (std::min<std::size_t>)(capacity, 64u);
+    struct Pick { std::uint32_t slot = 0, count = 0, use = 0, corner = 0; };
+    std::map<std::uint32_t, Pick> best;
+    for (std::uint32_t s = 0; s < families.signatures.size(); ++s) {
+        if (s >= usable.size() || !usable[s] || s / 64u >= terrain_tile_fold_page) continue;
+        const std::uint32_t use = s < usage.size() ? usage[s] : 0u;
+        if (!use) continue;
+        const auto& g = families.signatures[s];
+        for (unsigned k = 0; k < 4; ++k) {
+            const std::uint32_t f = g[k];
+            if (!f || cells.count(f)) continue;
+            std::uint32_t count = 0;
+            for (unsigned j = 0; j < 4; ++j) count += g[j] == f;
+            if (count == 4) continue;
+            std::uint32_t corner = k;
+            if (count == 3) for (unsigned j = 0; j < 4; ++j) if (g[j] != f) corner = (j + 2u) % 4u;
+            auto& p = best[f];
+            if (count > p.count || (count == p.count && use > p.use)) p = {s, count, use, corner};
+        }
+    }
+    for (const auto& [f, p] : best) {
+        if (table.size() >= capacity) break;
+        const auto name = families.names.find(f);
+        const std::uint32_t material_class = terrain_tile_material_class(name != families.names.end() ? name->second : std::string());
+        cells[f] = std::uint32_t(table.size()) | (terrain_tile_fold_page << 6) | (material_class << 12) |
+                   (bed.count(f) ? terrain_tile_blend_bed : 0u);
+        table.push_back((p.slot % 64u) | ((p.slot / 64u) << 6) | (p.corner << 12));
+    }
 }
 
 inline void terrain_tile_borrow_cells(const TerrainTileFamilies& families, const std::vector<std::uint32_t>& family_usage_order,
@@ -314,6 +360,23 @@ void terrain_cliff_blend_values(const Value& value, float& rock_detail, float cl
 // vertices kTerrainTileBlendReach tiles out (and one more on the far side).
 constexpr int kTerrainTileBlendReach = 2;
 
+// Seam margin (update_terrain_tile_blend_seams, terrain_tile_seam_margin_count): past
+// an edge another map continues, the field reads that map's vertices this
+// many rings out (warp 1.25 tiles plus the kernel's vertex beyond the
+// nearest). They fill kTerrainTileSeamMarginRows rows of the contact tile
+// grid between the blend rows and the fold row, two 16-bit cells a lane, in
+// the order the y<0 rings, the y>h rings (x from -R to w+R), the x<0 rings,
+// the x>w rings (y from 0 to h). The shader's copy is contactMarginRows.
+constexpr int kTerrainTileSeamMargin = 3;
+constexpr unsigned kTerrainTileSeamMarginRows = 6;
+inline std::size_t terrain_tile_seam_margin_count(unsigned width, unsigned height) {
+    const std::size_t r = kTerrainTileSeamMargin;
+    return 2 * r * (std::size_t(width) + 1 + 2 * r) + 2 * r * (std::size_t(height) + 1);
+}
+inline bool terrain_tile_seam_margin_fits(unsigned width, unsigned height) {
+    return width > 0 && terrain_tile_seam_margin_count(width, height) <= std::size_t(kTerrainTileSeamMarginRows) * width * 8;
+}
+
 // Per tile of a width x height grid (the shader's rows [h/2,h) of the contact
 // tile grid):
 //   x = material cells of the tile's grid vertices (0,0) | (1,0) << 16,
@@ -338,6 +401,8 @@ constexpr int kTerrainTileBlendReach = 2;
 //       bits 8-11 vertex k (0,0) (1,0) (0,1) (1,1) is a single-vertex paint
 //       (its material differs from all 8 neighbouring vertices: the shader
 //       keeps a blob of it on the vertex),
+//       bits 12-13 plain depth (tiles to the nearest tile that is not plain
+//       of this tile's material, 0..3),
 //       bits 16-31 (steep tiles) the cell of the material at the bottom
 //       (terrain_tile_blend_none on every other tile).
 // A face shows only materials of its own cliff: its tile's corners and the
@@ -391,12 +456,14 @@ inline std::vector<std::uint32_t> terrain_tile_vertex_families(std::uint32_t wid
 // or the family a shared map edge gives it) has a plain cell; a tile is known
 // when its four corner families are known and every one of its vertices
 // carries a material. Every tile's x/y come from the same vertex values, so
-// neighbours see one field.
+// neighbours see one field. vertex_cells (terrain 2.0): each vertex's cell
+// given by the caller (a family's plain variants as their own materials).
 inline std::vector<std::array<std::uint32_t, 4>> terrain_tile_blend_rows(std::uint32_t width, std::uint32_t height,
     const std::vector<std::array<std::uint32_t, 4>>& corners, const std::vector<std::uint32_t>& family,
     const std::map<std::uint32_t, std::uint32_t>& cells,
     const std::vector<bool>& steep = {}, const std::vector<float>& heights = {},
-    const std::vector<bool>& underwater = {}, bool rock_hard_only = false) {
+    const std::vector<bool>& underwater = {}, bool rock_hard_only = false,
+    const std::vector<std::uint32_t>& vertex_cells = {}) {
     // Unknown tiles: no flags, no top or bottom material (0xffff).
     const std::array<std::uint32_t, 4> none{~0u, ~0u, 0xffff0000u, ~0u};
     std::vector<std::array<std::uint32_t, 4>> rows(std::size_t(width) * height, none);
@@ -407,7 +474,8 @@ inline std::vector<std::array<std::uint32_t, 4>> terrain_tile_blend_rows(std::ui
         return c[0] && c[1] && c[2] && c[3];
     };
     std::vector<std::uint32_t> vertex(family.size(), terrain_tile_blend_none);
-    for (std::size_t i = 0; i < family.size(); ++i) {
+    if (vertex_cells.size() == family.size()) vertex = vertex_cells;
+    else for (std::size_t i = 0; i < family.size(); ++i) {
         const auto found = family[i] ? cells.find(family[i]) : cells.end();
         if (found != cells.end()) vertex[i] = found->second;
     }
@@ -440,7 +508,8 @@ inline std::vector<std::array<std::uint32_t, 4>> terrain_tile_blend_rows(std::ui
             };
             const int dx[4] = {-1, 1, 0, 0}, dy[4] = {0, 0, -1, 1};
             const bool faces = t < steep.size() && steep[t];
-            const bool border = x == 0 || y == 0 || x + 1 == width || y + 1 == height;
+            // Three tiles in (the shader's seam cross-fade band, tileBlendSeamBand).
+            const bool border = x < 3 || y < 3 || x + 3 >= width || y + 3 >= height;
             std::uint32_t flags = 1u | (plain[t] ? 2u : 0u) | (active || faces || border ? 4u : 0u) | (faces ? 8u : 0u);
             for (unsigned e = 0; e < 4; ++e) {
                 // The map edge is no unknown tile: the field runs to the edge
@@ -494,7 +563,25 @@ inline std::vector<std::array<std::uint32_t, 4>> terrain_tile_blend_rows(std::ui
                     for (int i = -1; alone && i <= 1; ++i) alone = (i == 0 && j == 0) || at(vx + i, vy + j) != v;
                 if (alone) lone |= 256u << k;
             }
-            rows[t][3] = 0xffu | lone | (bottom << 16);
+            // Plain depth (bits 12-13): tiles to the nearest tile that is not
+            // plain of this tile's material (0 on non-plain tiles, at most 3;
+            // tiles past the map edge count as the same). The shader
+            // interpolates it between tile centres for the own-art share, so
+            // that share fades in over a smooth contour inside plain areas.
+            std::uint32_t depth = 0;
+            if (plain[t]) {
+                depth = 3;
+                for (int r = 1; r <= 2 && depth == 3; ++r)
+                    for (int j = -r; j <= r && depth == 3; ++j)
+                        for (int i = -r; i <= r && depth == 3; ++i) {
+                            if ((std::max)(std::abs(i), std::abs(j)) != r) continue;
+                            const int nx = int(x) + i, ny = int(y) + j;
+                            if (nx < 0 || ny < 0 || nx >= int(width) || ny >= int(height)) continue;
+                            const std::size_t n = std::size_t(ny) * width + nx;
+                            if (!plain[n] || at(nx, ny) != first) depth = std::uint32_t(r);
+                        }
+            }
+            rows[t][3] = 0xffu | lone | (depth << 12) | (bottom << 16);
         }
     // Exposed rock of every tile (unknown ones too: a face beside them reads
     // their row): among its six cliff cells (corners, then top and bottom on

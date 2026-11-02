@@ -50,6 +50,10 @@ WtOut windTrailVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
  float fade=smoothstep(0,.35,age)*smoothstep(0,.6,t2.w-age)*(width/shown);
  fade*=saturate((dist-2)/3)*saturate((wtDepth.w-dist)/(.3*wtDepth.w));
  if(clipP.w<=.05)fade=0;
+ // Wind trails skim open ground: they fade out where it rises steeper than
+ // about 20-35 degrees instead of riding the height field up a cliff (1102).
+ float2 rise=float2(wtGround(p.xy+float2(.6,0))-wtGround(p.xy-float2(.6,0)),wtGround(p.xy+float2(0,.6))-wtGround(p.xy-float2(0,.6)))/1.2;
+ fade*=1-smoothstep(.35,.7,length(rise));
  float fog=1;
  if(wtFogControl.y!=0&&wtFogControl.x>0){
   fog=1-borderFogDensity(p.xy,wtFogRange,wtFogControl.x,wtFogSeam,wtFogCurve,wtFogSpanLo,wtFogSpanHi);

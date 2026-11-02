@@ -696,16 +696,20 @@ void apply_camera(const HarnessCommand& command) {
     State& s = state();
     std::uint8_t* camera = s.image + kCameraRva;
     const float radians = kPi / 180.0f;
+    // "-" (NaN): keep the current yaw (read before SetCameraAs) or anchor coordinate.
+    const float* q = &field<float>(camera, kCameraRotation);
+    const float yaw = std::isnan(command.number[2]) ? 2.0f * std::atan2(q[3], q[0]) * 180.0f / kPi : command.number[2];
+    const float anchor[3] = {std::isnan(command.number[0]) ? field<float>(camera, kCameraAnchor) : command.number[0],
+                             std::isnan(command.number[1]) ? field<float>(camera, kCameraAnchor + 4) : command.number[1],
+                             field<float>(camera, kCameraAnchor + 8)};
     // SCameraShortcut as SetCameraAs reads it: distance, rotation (unused), pitch.
     const float shortcut[6] = {command.number[4], 1.0f, 0.0f, 0.0f, 0.0f,
                                command.number[3] * radians};
     reinterpret_cast<SetCameraAsFn>(s.image + kSetCameraAsRva)(camera, shortcut);
     field<std::uint32_t>(camera, kCameraFlags) &= ~kCameraJumpClearedFlag;
     reinterpret_cast<SetCarrierFn>(s.image + kSetCarrierRva)(camera, 0xffffffffu);
-    const float anchor[3] = {command.number[0], command.number[1],
-                             field<float>(camera, kCameraAnchor + 8)};
     reinterpret_cast<SetAnchorPointFn>(s.image + kSetAnchorPointRva)(camera, anchor);
-    reinterpret_cast<InitRotateFn>(s.image + kInitRotateRva)(camera, command.number[2] * radians);
+    reinterpret_cast<InitRotateFn>(s.image + kInitRotateRva)(camera, yaw * radians);
 }
 
 void apply_clock(std::uint8_t* world) {

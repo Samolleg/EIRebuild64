@@ -12,6 +12,9 @@
 #include <string>
 #include "x64_remote_protocol.h"
 
+struct ID3D12GraphicsCommandList;
+struct ID3D12Resource;
+
 namespace x64remote {
 
 // The host executable: EI_RENDERER_X64_HOST, else eid3d11_x64_host.exe next
@@ -99,8 +102,36 @@ struct DlssEvaluate {
 // change; NGX preserves the immediate context state (Programming Guide
 // 5.2.5). Motion vectors are render resolution (MVLowRes), unjittered.
 HRESULT dlss_evaluate(ID3D11DeviceContext* ctx, const DlssEvaluate& e) noexcept;
+// The D3D12 backend: one evaluation recorded into list (D3D12Frame::
+// record_external). resources: colour, depth, motion, output, already in
+// their states; the D3D11 pointers of e are not read.
+HRESULT dlss_evaluate_d3d12(ID3D12GraphicsCommandList* list, ID3D12Resource* const* resources, const DlssEvaluate& e) noexcept;
 // Releases the host's DLSS feature and its memory (DLSS turned off).
 void dlss_release() noexcept;
+// DLSS Frame Generation (D3D12 backend in the host only). One generated
+// frame between the previous and this real frame. Matrices are row-major
+// for row vectors (v' = v * M, the SDK's "row-major, post-multiplication"),
+// without jitter. resources: backbuffer (the real frame), depth, motion,
+// HUD-less, interpolated output; the inputs already in shader-read state,
+// the output in unordered access (D3D12Frame::record_external).
+struct DlssgEvaluate {
+    UINT width, height;              // backbuffer = output size
+    UINT render_w, render_h;         // depth and motion size
+    float clip_to_prev_clip[16], prev_clip_to_clip[16], view_to_clip[16], clip_to_view[16];
+    float position[3], up[3], right[3], forward[3];
+    float near_plane, far_plane, fov_y, aspect;
+    float jitter_x, jitter_y;        // clip space
+    float mv_scale_x, mv_scale_y;
+    bool reset;
+    bool depth_inverted;
+};
+struct DlssgCaps { bool available; int multi_frame_max; char reason[160]; };
+bool dlssg_caps(DlssgCaps& out) noexcept;
+HRESULT dlssg_evaluate_d3d12(ID3D12GraphicsCommandList* list, ID3D12Resource* const* resources, const DlssgEvaluate& e) noexcept;
+// Releases the frame generation feature (turned off; NGX stays initialised).
+void dlssg_release() noexcept;
+// NGX's VRAM estimate for the feature at a size (0: unknown).
+std::uint64_t dlssg_vram_estimate(UINT width, UINT height, UINT render_w, UINT render_h) noexcept;
 // True once the host has presented at least one frame (the renderer defers
 // host DLSS until then; see Renderer::render_dlss).
 bool host_presented() noexcept;

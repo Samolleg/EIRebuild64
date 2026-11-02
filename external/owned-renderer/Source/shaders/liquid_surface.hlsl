@@ -206,7 +206,13 @@ cbuffer LiquidReflectionFrame:register(b7) {
 // Slice 1: the previous frame's finished world colour with mips (reflections;
 // it holds the particles and transparent passes drawn after the water, #140).
 Texture2DArray<float4> liquidSceneColor:register(t3);
+#ifdef EID3D12
+// D3D12: one t table serves every stage; the world vertex programs read t19
+// (nativeTerrainLayerShifts), so the DXIL reads the scene depth at t112.
+Texture2D<float> liquidSceneDepth:register(t112);
+#else
 Texture2D<float> liquidSceneDepth:register(t19);
+#endif
 // The previous frame's nearest visible game-particle screen depth (1: none),
 // drawn with liquidHistoryClip; particles never write the scene depth.
 Texture2D<float> liquidParticleDepth:register(t28);
@@ -1400,10 +1406,15 @@ float3 liquidRainRipples(float2 position,float seconds,float rain,float footprin
   float2 edge=min(center,1-center)*liquidRainCell;
   float fit=saturate((min(edge.x,edge.y)-r)/liquidRainWavelength);
   float x=(r-liquidRainRadius.x-liquidRainRadius.y*age)/liquidRainWavelength;
+  float u=r/liquidRainDimpleSize;
+  // Off the ring's envelope and past the dimple (both about 1% of their
+  // peak), or at the cell border: no visible slope, skip the wave terms.
+  // Most pixels of a cell lie there (rain-shelter cost runs: the rings on
+  // every wet flat face cost about 0.4 ms of 4K terrain and figures).
+  if(fit<=0||(abs(x)>2.6&&u>2.5))continue;
   float envelope=exp(-x*x*.7);
   float decay=smoothstep(0,.05,age)*pow(1-age,1.5);
   float ring=liquidRainRingSlope*decay*envelope*(-sin(6.2831853*x)-cos(6.2831853*x)*x*.22);
-  float u=r/liquidRainDimpleSize;
   float dimple=liquidRainDimpleSlope*2.33*u*exp(-u*u)*(1-smoothstep(0,.2,age));
   // d is in this layer's rotated grid. Gradients transform by its
   // transpose, so return to the world basis before adding layers.

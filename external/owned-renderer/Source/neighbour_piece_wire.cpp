@@ -16,7 +16,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
 constexpr std::uint32_t kWireMagic = 0x5045494eu; // 'NIEP'
-constexpr std::uint32_t kWireVersion = 1;
+constexpr std::uint32_t kWireVersion = 2; // 2: the terrain_bake cell tables left the ground cover inputs
 
 // Plain record types travel as bytes; both builds must agree on their sizes.
 template<class T> constexpr bool plain = std::is_trivially_copyable_v<T> && !std::is_pointer_v<T>;
@@ -203,9 +203,6 @@ template<class A> void visit_ground_cover(A& a, GroundCoverNeighbourInputs& v) {
     optional(a, v.blend_input, [](A& b, TerrainTileBlendInput& t) {
         b.pod(t.tiles_x); b.pod(t.tiles_y); b.pod(t.slots); b.vec(t.slot); b.vec(t.lanes); b.vec(t.wet);
         b.bits(t.steep); b.bits(t.underwater); b.vec(t.heights); b.vec(t.usage); b.bits(t.usable);
-    });
-    optional(a, v.bake_cells, [](A& b, TerrainBakeCells& c) {
-        b.pod(c.cells_x); b.pod(c.cells_y); b.vec(c.low); b.vec(c.high); b.vec(c.rise_x); b.vec(c.rise_y);
     });
     a.vec(v.contact_tiles); a.pod(v.contact_used); a.pod(v.lowest); a.pod(v.highest);
     a.pod(v.texture_count); a.pod(v.tiles_per_texture_side); a.vec(v.atlas_textures); a.pod(v.grids_valid);

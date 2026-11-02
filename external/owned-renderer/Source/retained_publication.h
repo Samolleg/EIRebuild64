@@ -48,7 +48,7 @@ enum class RetainedOp : std::uint8_t {
     visual_publish_forced_weapon_ids, visual_publish_bridges, visual_publish_quest_lights,
     visual_publish_highlight, visual_publish_world_point_lights, visual_reject, visual_reject_all,
     visual_commit_tick, publish_terrain_geometry, publish_terrain_texture,
-    visual_publish_preview,
+    visual_publish_preview, material_publish_composition,
     end
 };
 

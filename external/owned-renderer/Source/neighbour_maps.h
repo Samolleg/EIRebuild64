@@ -13,10 +13,15 @@
 #include <string>
 
 namespace owned {
+struct D3D12PreparedUpload;  // d3d12_frame.h
+class D3D12Preparer;
 // One dedicated geometry page a worker created with its final contents.
 struct NativePrebuiltPage {
     Microsoft::WRL::ComPtr<ID3D11Buffer> buffer;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+    // D3D12 backend: the page created and its bytes in upload memory on the
+    // worker; the render thread only records the copy (finish_buffer).
+    std::shared_ptr<D3D12PreparedUpload> d3d12;
     std::uint32_t bytes = 0;
 };
 // Packs decoded meshes into pages of at most 64 MB of CPU staging, creating
@@ -34,13 +39,30 @@ struct NativePrebuiltTexture {
     std::uint64_t bytes = 0;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;
+    // D3D12 backend: the texture created and every level in upload memory on
+    // the worker; the render thread only records the copies (finish_texture).
+    std::shared_ptr<D3D12PreparedUpload> d3d12;
 };
 // The texture cache key of an archive member (get_native_owned_texture).
 std::string native_owned_archive_texture_key(const ResourceIdentity& resource,
     std::uint64_t generation, bool full_mips);
-// Creates one prebuilt texture (block-compressed formats with authored mips
-// only); false when the source does not qualify or creation failed.
-bool build_native_prebuilt_texture(ID3D11Device* device, const NativeOwnedTextureView& source,
+// The texture cache key of an owned source with CPU levels
+// (get_native_owned_texture_d3d12): generated is its box-filtered BGRA8
+// chain, else its authored levels as they are.
+std::string native_owned_mip_texture_key(const NativeOwnedTextureView& source, bool generated);
+// The DXGI format of an uncompressed owned format (UNKNOWN for the rest) and
+// its bytes per pixel.
+DXGI_FORMAT native_owned_uncompressed_format(NativeOwnedTextureFormat format, UINT& pixel_bytes) noexcept;
+// The generated chain of a one-level uncompressed source: level 0 expanded
+// to BGRA8, then each level the 2x2 box of the one above (clamped at odd
+// edges, rounded), down to 1x1. False when the source does not qualify.
+bool native_owned_box_mips(const NativeOwnedTextureView& source, std::vector<std::vector<std::uint32_t>>& levels);
+// Creates one prebuilt texture (block-compressed formats with authored mips;
+// D3D12 backend also uncompressed ones, as the render thread would create
+// them: the generated chain or the authored levels, under its key); false
+// when the source does not qualify or creation failed.
+// D3D12 backend: d3d12 prepares it instead (device null).
+bool build_native_prebuilt_texture(ID3D11Device* device, D3D12Preparer* d3d12, const NativeOwnedTextureView& source,
     NativePrebuiltTexture& output) noexcept;
 // Keys resident in the renderer's owned texture cache, so the stream does
 // not create textures the cache already holds (a stale answer only costs a
@@ -50,6 +72,7 @@ void neighbour_textures_clear() noexcept;
 bool neighbour_texture_is_resident(const std::string& key) noexcept;
 struct NativePrebuiltBuilder {
     Microsoft::WRL::ComPtr<ID3D11Device> device;
+    std::shared_ptr<D3D12Preparer> d3d12;  // D3D12 backend (no device): pages are prepared uploads
     std::vector<std::uint8_t> blob;
     std::vector<NativePrebuiltPage> pages;
     bool failed = false;
@@ -206,6 +229,9 @@ std::string neighbour_map_name(const std::string& mpr);
 inline float neighbour_layout_tile_origin(double value) noexcept {return float(2.0*std::round(value*.5));}
 // The device the stream creates prebuilt geometry pages on (null: none).
 void neighbour_maps_set_device(ID3D11Device* device) noexcept;
+// D3D12 backend: the stream creates its pages and textures through the
+// executor's preparer (null: none), so the render thread only records copies.
+void neighbour_maps_set_d3d12(std::shared_ptr<D3D12Preparer> preparer) noexcept;
 // The neighbour terrain's commands as upload would submit them, with a decode
 // that is safe on a worker (no live game reads, no frame state).
 void bridge_prepare_neighbour_terrain(const NeighbourMapUpload& upload,
@@ -283,6 +309,16 @@ void neighbour_maps_stop() noexcept;
 // releases the uploaded neighbours; a reload of the same map keeps its
 // generation, so its drained stream must go or begin() would reuse it.
 void neighbour_maps_stop_epoch(std::uint64_t epoch) noexcept;
+// A reload of the same map, where the game's main load starts (it keeps its
+// generation, so no begin): the stream restarts for the coming world (one
+// nothing was taken from yet is kept as it is) and is held, delivering
+// nothing to the world being left, until the world change releases it. Its
+// neighbours then prepare during the game's load instead of after it.
+void neighbour_maps_restart(const std::string& mpr, std::uint64_t epoch,
+    const ResourceStoreConfig& mounts, NeighbourStreamSource source) noexcept;
+// The renderer's world change (release_world_state): a held stream is
+// released to the new world; otherwise neighbour_maps_stop_epoch.
+void neighbour_maps_world_changed(std::uint64_t epoch) noexcept;
 // The next neighbour's piece in layout order (neighbour_piece.h).
 std::unique_ptr<NeighbourPiece> neighbour_maps_take(std::uint64_t epoch) noexcept;
 void neighbour_maps_uploaded(std::uint64_t epoch) noexcept;

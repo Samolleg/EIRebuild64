@@ -70,7 +70,10 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_ambient_occlusion.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_fog.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_sky.cpp" />
-    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_terrain_bake.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_fur.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_materials.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_native_d3d12.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_terrain2_cache.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\surface_upload.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\lifecycle_probe.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\frame_statistics.cpp" />
@@ -104,7 +107,6 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\embedded_remote_stubs.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\dlss_backend.cpp" />
     <ClInclude Include="$(OwnedRendererRoot)Source\dlss_backend.h" />
-    <ClCompile Include="$(OwnedRendererRoot)Source\terrain_bake_cells.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\build_version.cpp" />
   </ItemGroup>
 

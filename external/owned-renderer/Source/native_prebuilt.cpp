@@ -3,6 +3,8 @@
 // mode) and in the x64 render host (remote mode). Pure CPU layout plus
 // ID3D11Device creation; no immediate context, no renderer state.
 #include "native_prebuilt.h"
+#include "d3d12_frame.h"
+#include "texture_mips.h"
 
 #include <algorithm>
 #include <cmath>
@@ -26,6 +28,12 @@ bool finish_native_prebuilt_page(NativePrebuiltBuilder& builder) noexcept {
  description.BindFlags=D3D11_BIND_SHADER_RESOURCE;description.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
  const D3D11_SUBRESOURCE_DATA initial{builder.blob.data(),0,0};
  NativePrebuiltPage page;page.bytes=bytes;
+ if(builder.d3d12){ // D3D12 backend: created and in upload memory here; the render thread records the copy
+  if(FAILED(builder.d3d12->prepare_buffer(bytes,builder.blob.data(),page.d3d12))){builder.failed=true;return false;}
+  try{builder.pages.push_back(std::move(page));}catch(...){builder.failed=true;return false;}
+  builder.blob.clear();
+  return true;
+ }
  D3D11_SHADER_RESOURCE_VIEW_DESC view{};view.Format=DXGI_FORMAT_R32_TYPELESS;
  view.ViewDimension=D3D11_SRV_DIMENSION_BUFFEREX;view.BufferEx.NumElements=bytes/4;
  view.BufferEx.Flags=D3D11_BUFFEREX_SRV_FLAG_RAW;
@@ -51,7 +59,7 @@ std::uint8_t native_liquid_vertex_types(const NativeTerrainVertex& vertex) noexc
 bool build_native_prebuilt_mesh(NativePrebuiltBuilder& builder,const NativeGeometryView& view,
  NativePrebuiltMesh& output) noexcept try{
  output={};
- if(builder.failed||!builder.device||!view.position_groups||!view.normal_groups||!view.component_count||
+ if(builder.failed||(!builder.device&&!builder.d3d12)||!view.position_groups||!view.normal_groups||!view.component_count||
     !view.texture_coordinate_count||!view.index_count||view.diffuse||view.specular||view.decode_colors||
     view.component_parts||view.morphs||view.morph_count||
     (view.world.enabled&&view.world.shape_count!=1&&view.world.shape_count!=8)||
@@ -219,20 +227,122 @@ std::string native_owned_archive_texture_key(const ResourceIdentity& resource,
  return key;
 }
 
+std::string native_owned_mip_texture_key(const NativeOwnedTextureView& source,bool generated){
+ return std::to_string(source.value_source)+":"+std::to_string(source.identity)+"|generation="+std::to_string(source.generation)+
+  (generated?"|mips=full":"|mips=authored");
+}
+
+DXGI_FORMAT native_owned_uncompressed_format(NativeOwnedTextureFormat format,UINT& pixel_bytes) noexcept{
+ switch(format){
+ case NativeOwnedTextureFormat::rgb565:pixel_bytes=2;return DXGI_FORMAT_B5G6R5_UNORM;
+ case NativeOwnedTextureFormat::argb1555:pixel_bytes=2;return DXGI_FORMAT_B5G5R5A1_UNORM;
+ case NativeOwnedTextureFormat::argb4444:pixel_bytes=2;return DXGI_FORMAT_B4G4R4A4_UNORM;
+ case NativeOwnedTextureFormat::argb8888:pixel_bytes=4;return DXGI_FORMAT_B8G8R8A8_UNORM;
+ default:pixel_bytes=0;return DXGI_FORMAT_UNKNOWN;
+ }
+}
+
+namespace {
+// One channel to 8 bits (renderer_internal.h expand_channel, the same math).
+std::uint32_t expand_bits(std::uint32_t value,std::uint32_t mask,std::uint32_t absent){
+ if(!mask)return absent;unsigned long shift=0;_BitScanForward(&shift,mask);const std::uint32_t maximum=mask>>shift;
+ return static_cast<std::uint8_t>(((value&mask)>>shift)*255u/maximum);
+}
+} // namespace
+
+bool native_owned_box_mips(const NativeOwnedTextureView& source,std::vector<std::vector<std::uint32_t>>& levels){
+ levels.clear();
+ UINT pixel_bytes=0;
+ if(!source.mips||source.mip_count!=1||native_owned_uncompressed_format(source.format,pixel_bytes)==DXGI_FORMAT_UNKNOWN)return false;
+ const NativeOwnedTextureMip& top=source.mips[0];
+ const UINT width=top.width,height=top.height;
+ if(!width||!height||width>16384||height>16384||!top.data||std::uint64_t(width)*height*pixel_bytes>top.bytes)return false;
+ std::vector<std::uint32_t> level(std::size_t(width)*height);
+ if(pixel_bytes==4)std::memcpy(level.data(),top.data,level.size()*4);
+ else{
+  const std::uint32_t rm=source.format==NativeOwnedTextureFormat::rgb565?0xf800:source.format==NativeOwnedTextureFormat::argb1555?0x7c00:0x0f00;
+  const std::uint32_t gm=source.format==NativeOwnedTextureFormat::rgb565?0x07e0:source.format==NativeOwnedTextureFormat::argb1555?0x03e0:0x00f0;
+  const std::uint32_t bm=source.format==NativeOwnedTextureFormat::argb4444?0x000f:0x001f;
+  const std::uint32_t am=source.format==NativeOwnedTextureFormat::argb1555?0x8000:source.format==NativeOwnedTextureFormat::argb4444?0xf000:0;
+  for(std::size_t i=0;i<level.size();++i){std::uint16_t raw;std::memcpy(&raw,top.data+i*2,2);
+   level[i]=(expand_bits(raw,am,255)<<24)|(expand_bits(raw,rm,0)<<16)|(expand_bits(raw,gm,0)<<8)|expand_bits(raw,bm,0);}
+ }
+ const UINT count=full_mip_count(width,height);
+ levels.reserve(count);
+ UINT w=width,h=height;
+ for(UINT index=0;;++index){
+  levels.push_back(std::move(level));
+  if(index+1>=count)return true;
+  const std::vector<std::uint32_t>& above=levels.back();
+  const UINT nw=(std::max)(1u,w/2),nh=(std::max)(1u,h/2);
+  level.assign(std::size_t(nw)*nh,0);
+  for(UINT y=0;y<nh;++y){
+   const std::uint32_t* const r0=above.data()+std::size_t((std::min)(y*2,h-1))*w;
+   const std::uint32_t* const r1=above.data()+std::size_t((std::min)(y*2+1,h-1))*w;
+   for(UINT x=0;x<nw;++x){
+    const UINT x0=(std::min)(x*2,w-1),x1=(std::min)(x*2+1,w-1);
+    const std::uint32_t a=r0[x0],b=r0[x1],c=r1[x0],d=r1[x1];
+    std::uint32_t out=0;
+    for(UINT shift=0;shift<32;shift+=8)
+     out|=((((a>>shift)&255u)+((b>>shift)&255u)+((c>>shift)&255u)+((d>>shift)&255u)+2u)/4u)<<shift;
+    level[std::size_t(y)*nw+x]=out;
+   }
+  }
+  w=nw;h=nh;
+ }
+}
+
+namespace {
+// D3D12 backend: an uncompressed archive member as get_native_owned_texture_d3d12
+// creates it for a world draw (world_mips): one level becomes the generated
+// BGRA8 chain, authored levels stay as they are; under that branch's key.
+bool prepare_uncompressed_d3d12(D3D12Preparer& d3d12,const NativeOwnedTextureView& source,NativePrebuiltTexture& output){
+ UINT pixel_bytes=0;
+ const DXGI_FORMAT format=native_owned_uncompressed_format(source.format,pixel_bytes);
+ const UINT width=source.mips[0].width,height=source.mips[0].height;
+ if(format==DXGI_FORMAT_UNKNOWN||!width||!height||width>16384||height>16384)return false;
+ const bool generated=source.mip_count==1;
+ std::vector<std::vector<std::uint32_t>> chain;
+ std::vector<const void*> levels;std::vector<UINT> pitches;std::uint64_t bytes=0;
+ if(generated){
+  if(!native_owned_box_mips(source,chain))return false;
+  UINT w=width;
+  for(const auto& level:chain){levels.push_back(level.data());pitches.push_back(w*4u);bytes+=level.size()*4u;w=(std::max)(1u,w/2);}
+  if(FAILED(d3d12.prepare_texture(width,height,DXGI_FORMAT_B8G8R8A8_UNORM,static_cast<UINT>(chain.size()),levels.data(),pitches.data(),
+     output.d3d12)))return false;
+ }else{
+  for(UINT index=0;index<source.mip_count;++index){
+   const NativeOwnedTextureMip& mip=source.mips[index];
+   if(!mip.data||mip.width!=(std::max)(1u,width>>index)||mip.height!=(std::max)(1u,height>>index)||
+      std::uint64_t(mip.width)*pixel_bytes*mip.height>mip.bytes)return false;
+   levels.push_back(mip.data);pitches.push_back(mip.width*pixel_bytes);bytes+=std::uint64_t(mip.width)*pixel_bytes*mip.height;
+  }
+  if(FAILED(d3d12.prepare_texture(width,height,format,source.mip_count,levels.data(),pitches.data(),output.d3d12)))return false;
+ }
+ // The values the render-thread branch stores for its cache entry.
+ output.key=native_owned_mip_texture_key(source,generated);
+ output.generation=source.generation;output.format=format;
+ output.width=width;output.height=height;output.mip_count=source.mip_count;output.bytes=bytes;
+ return true;
+}
+} // namespace
+
 // The immutable-upload branch of get_native_owned_texture (authored mips of a
 // block-compressed archive member), on a worker: the same descriptor, layout
-// checks and initial data.
-bool build_native_prebuilt_texture(ID3D11Device* device,const NativeOwnedTextureView& source,
+// checks and initial data. D3D12 backend: also the uncompressed branch.
+bool build_native_prebuilt_texture(ID3D11Device* device,D3D12Preparer* d3d12,const NativeOwnedTextureView& source,
  NativePrebuiltTexture& output) noexcept try{
  output={};
- if(!device||source.value_source!=1||!source.resource||!source.identity||!source.generation||source.surface||
+ if(source.value_source!=1||!source.resource||!source.identity||!source.generation||source.surface||
     !source.mips||!source.mip_count||source.mip_count>32)return false;
  DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;UINT block_bytes=0;
  switch(source.format){
  case NativeOwnedTextureFormat::dxt1:format=DXGI_FORMAT_BC1_UNORM;block_bytes=8;break;
  case NativeOwnedTextureFormat::dxt3:format=DXGI_FORMAT_BC2_UNORM;block_bytes=16;break;
  case NativeOwnedTextureFormat::dxt5:format=DXGI_FORMAT_BC3_UNORM;block_bytes=16;break;
- default:return false; // other formats may take generated mips on the render thread
+ default: // D3D11: other formats may take generated mips on the render thread
+  if(device||!d3d12||!prepare_uncompressed_d3d12(*d3d12,source,output)){output={};return false;}
+  return true;
  }
  const UINT width=source.mips[0].width,height=source.mips[0].height;
  if(!width||!height||width>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION||height>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)return false;
@@ -248,6 +358,16 @@ bool build_native_prebuilt_texture(ID3D11Device* device,const NativeOwnedTexture
   if(required>mip.bytes)return false;
   subresources[index]={mip.data,row_pitch,static_cast<UINT>(required)};
   bytes+=required;
+ }
+ if(!device){ // D3D12 backend: created with every level in upload memory here
+  if(!d3d12)return false;
+  std::vector<const void*> levels(source.mip_count);std::vector<UINT> pitches(source.mip_count);
+  for(UINT index=0;index<source.mip_count;++index){levels[index]=subresources[index].pSysMem;pitches[index]=subresources[index].SysMemPitch;}
+  if(FAILED(d3d12->prepare_texture(width,height,format,source.mip_count,levels.data(),pitches.data(),output.d3d12))){output={};return false;}
+  output.key=native_owned_archive_texture_key(*source.resource,source.generation,false);
+  output.generation=source.generation;output.format=format;
+  output.width=width;output.height=height;output.mip_count=source.mip_count;output.bytes=bytes;
+  return true;
  }
  D3D11_TEXTURE2D_DESC description{};description.Width=width;description.Height=height;
  description.MipLevels=source.mip_count;description.ArraySize=1;description.Format=format;

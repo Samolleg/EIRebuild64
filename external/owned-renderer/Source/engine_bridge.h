@@ -475,7 +475,6 @@ enum NativeTerrainVertexFlag : std::uint32_t {
     // per tile, the authored cliff art): no blend, material or cliff stage;
     // only the far de-tiling (terrainLongFar) and the material cache.
     native_terrain_long_tile = 1u << 12,
-    // Bits 8-11: owned_terrain_fill_flags() plain-fill corners of the tile.
     // Liquid tiles also carry their 3x3 liquid-neighbour mask (bits 16-24) and
     // the vertex's place in its tile in half-tile steps (x bits 25-26, y 27-28).
     native_terrain_liquid_edge = 1u << 15,
@@ -577,6 +576,9 @@ struct NativeOwnedTextureView {
     // Only a camp-owned completed source may share its current GPU home.
     // Other surface consumers keep their detached snapshot semantics.
     bool camp_surface_alias = false;
+    // The game texture name of a retained figure part (VisualPartAsset::
+    // material_name): the key of its material composition. Null: none.
+    const std::string* material_name = nullptr;
 };
 
 struct NativeOwnedFixedState {
@@ -823,8 +825,14 @@ struct NativePrebuiltMesh {
     std::uint32_t steep_first_triangle = UINT32_MAX; // NativeMesh::steep_first_triangle
 };
 
+struct FurProfile;
 struct NativeGeometryView {
     float contact_world_height = 0;
+    // Fur prototype: an owned preview's part record carries its fur profile
+    // here (the submission's own shared pointer, valid for the submit call;
+    // the renderer keeps a copy in the record) and the part's node.
+    const std::shared_ptr<const FurProfile>* fur = nullptr;
+    std::uint32_t fur_node_base = 0;
     const NativePrebuiltMesh* prebuilt_mesh = nullptr;
     // Reduced index levels (static_lod.h) stored after the full index list.
     const struct NativeMeshLods* lods = nullptr;
@@ -856,6 +864,9 @@ struct NativeGeometryView {
     // is the renderer-owned IDirectDrawSurface7 backing the live wound layer.
     std::uintptr_t wound_surface_interface = 0;
     bool wound_only = false;
+    // An owned preview's part (panel doll, outfit, portrait): interface, never
+    // drawn in a world flush (Renderer::flush_native).
+    bool interface_preview = false;
     // Create (or find) the world mesh only: nothing is queued or drawn
     // (terrain far-shadow mesh prewarm, engine_bridge.cpp).
     bool prepare_only = false;
@@ -958,6 +969,11 @@ static_assert(sizeof(NativePreparedPartValues)==80,"Compact owned material value
 
 struct NativePreparedPartSubmission {
     const NativeGeometryView* source = nullptr;
+    // Fur prototype (fur.h): the unit's fur profile while F10 fur_mode is on,
+    // and the skeleton node of this record's components with partNode 0
+    // (the part's node; 0 for a merged group, whose components name theirs).
+    std::shared_ptr<const FurProfile> fur;
+    std::uint32_t fur_node_base = 0;
     NativePreparedPartValues values;
     std::uint64_t values_revision = 0;
     NativeContribution contribution;
@@ -1380,6 +1396,9 @@ void bridge_set_skip_scenery_draw_walk(bool enabled) noexcept;
 void bridge_set_merge_character_parts(bool enabled) noexcept;
 bool bridge_skip_scenery_draw_walk_enabled() noexcept;
 bool bridge_change_driven_poses_enabled() noexcept;
+void bridge_set_fur_mode(int mode) noexcept;
+// Owned party portraits (engine_bridge.cpp submit_owned_portrait).
+void bridge_set_portrait_options(bool owned, bool helmet) noexcept;
 void bridge_set_highlight_options(bool briefing, bool selected, bool hover_characters,
                                   bool hover_objects) noexcept;
 void bridge_set_change_driven_poses(bool enabled) noexcept;

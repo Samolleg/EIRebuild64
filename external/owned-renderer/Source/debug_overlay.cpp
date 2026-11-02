@@ -131,6 +131,7 @@ int configured_value(const RendererConfig& config, const char* key) {
 // The renderer this session runs (debug_overlay_set_running_renderer).
 const char* g_running_renderer = nullptr;
 bool g_running_core = false;
+bool g_running_d3d12 = false;
 // Core mode, host: the game process's address space (MB) from the control block.
 std::atomic<std::uint32_t> g_core_game_va_used_mb{0}, g_core_game_va_free_mb{0};
 
@@ -157,8 +158,26 @@ const char* blocked_option_note(const RendererConfig& config, const char* key) {
     // Terrain cliffs need the material blend (configured_terrain_cliffs).
     if (std::strcmp(key, "terrain_cliffs") == 0 && configured_value(config, "terrain_blend") <= 0)
         return "needs material blend";
+    // The portrait helmet belongs to the owned portrait head (renderer_game.cpp, default on).
+    if (std::strcmp(key, "portrait_helmet") == 0) {
+        const RendererOption* head = config.find("portrait_head");
+        if (head && head->type == RendererOptionType::boolean && !head->boolean_value) return "needs real head portraits";
+    }
     // The 64-bit render host cannot run on 32-bit Windows or without its exe.
     if (std::strcmp(key, "x64_render_host") == 0) return x64remote::host_unavailable_reason();
+    // Direct3D 12 runs in the 64-bit render host.
+    if (std::strcmp(key, "renderer_backend") == 0) {
+        if (const char* reason = x64remote::host_unavailable_reason()) return reason;
+        const RendererOption* host = config.find("x64_render_host");
+        if (host && host->type == RendererOptionType::boolean && !host->boolean_value) return "needs 64-bit render host";
+    }
+    // Frame generation, its floor, Reflex and latency pacing exist on the
+    // Direct3D 12 backend only (a changed Renderer starts after a restart).
+    if (!g_running_d3d12 && (std::strcmp(key, "frame_generation") == 0 || std::strcmp(key, "frame_generation_min_fps") == 0 ||
+                             std::strcmp(key, "reflex") == 0 || std::strcmp(key, "latency_pacing") == 0))
+        return configured_value(config, "renderer_backend") != 1 ? "needs Direct3D 12 renderer" :
+               g_running_renderer && std::strstr(g_running_renderer, "Direct3D 12 refused") ? "Direct3D 12 could not start (Direct3D 11 runs)" :
+               "Direct3D 12 starts after a restart";
     // The Upscaling method (dlss_frame.h): DLSS runs in the 64-bit host on an
     // RTX card, FSR on any Direct3D 11.3 card; greyed only when neither can.
     // A saved unavailable DLSS must still be changeable to Off in this menu.
@@ -168,6 +187,12 @@ const char* blocked_option_note(const RendererConfig& config, const char* key) {
     const int upscaler = active_upscaler(config);
     if (upscaler == kUpscalerDlss && dlss_unavailable_reason() &&
         (std::strcmp(key, "upscaler_quality") == 0 || std::strcmp(key, "upscale_sharpness") == 0)) return dlss_unavailable_reason();
+    // Frame generation (dlss_frame.h): DLSS-G on the D3D12 backend of the
+    // host; it takes the upscaler's depth and motion vectors.
+    if (std::strcmp(key, "frame_generation") == 0) {
+        if (const char* reason = frame_generation_unavailable_reason()) return reason;
+        if (upscaler == kUpscalerOff) return "needs DLSS or FSR upscaling (motion vectors)";
+    }
     // Quality and sharpening belong to a running upscaler.
     if ((std::strcmp(key, "upscaler_quality") == 0 || std::strcmp(key, "upscale_sharpness") == 0) &&
         upscaler == kUpscalerOff)
@@ -547,6 +572,14 @@ void draw_compact_monitor(const RenderProfileSnapshot* profile, const BridgeProf
         else
             ImGui::Text(ui_text("EID3D11  %.0f FPS / %.2f ms  Render CPU %.2f ms  GPU n/a"),
                         fps, interval_ms, profile->frame_cpu_ms);
+        if (resources.fg_presented_fps > 0.0 && resources.fg_mode == 2)
+            ImGui::Text(ui_text("FSR frame generation: presented %.0f FPS, of them real %.0f; rendered %.0f FPS (GPU excludes FidelityFX's present queue)"),
+                        resources.fg_presented_fps, resources.fg_real_fps, fps);
+        else if (resources.fg_presented_fps > 0.0)
+            ImGui::Text(ui_text("Frame generation (DLSS-G): presented %.0f FPS, of them real %.0f; rendered %.0f FPS"),
+                        resources.fg_presented_fps, resources.fg_real_fps, fps);
+        if (resources.fg_mode && resources.fg_auto_off_fps)
+            ImGui::Text(ui_text("Frame generation paused: rendered rate below %d FPS (frame_generation_min_fps)"), resources.fg_auto_off_fps);
         std::uint64_t draws = 0, triangles = 0, batches = 0;
         for (UINT index = 0; index < profile->pass_count && index < profile->passes.size(); ++index) {
             draws += profile->passes[index].counters.draws;
@@ -628,6 +661,14 @@ void draw_performance_tab(DebugOverlay::Implementation& state, const RenderProfi
     ImGui::SameLine();
     if (profile->gpu_valid) ImGui::Text(ui_text("|  GPU %.3f ms"), profile->frame_gpu_ms);
     else ImGui::TextUnformatted(ui_text("|  GPU unavailable"));
+    if (resources.fg_presented_fps > 0.0 && resources.fg_mode == 2)
+        ImGui::Text(ui_text("FSR frame generation: presented %.1f FPS, of them real %.1f (rendered %.1f; GPU excludes FidelityFX's present queue)"),
+                    resources.fg_presented_fps, resources.fg_real_fps, fps);
+    else if (resources.fg_presented_fps > 0.0)
+        ImGui::Text(ui_text("Frame generation (DLSS-G): presented %.1f FPS, of them real %.1f (rendered %.1f)"),
+                    resources.fg_presented_fps, resources.fg_real_fps, fps);
+    if (resources.fg_mode && resources.fg_auto_off_fps)
+        ImGui::Text(ui_text("Frame generation paused: rendered rate below %d FPS (frame_generation_min_fps)"), resources.fg_auto_off_fps);
 
     std::array<float, kFrameHistorySize> cpu{};
     std::array<float, kFrameHistorySize> gpu{};
@@ -2274,14 +2315,16 @@ HRESULT DebugOverlay::initialize(HWND window, ID3D11Device* device, ID3D11Device
     style.WindowRounding = 4.0f;
     style.FrameRounding = 3.0f;
 
-    if (!ImGui_ImplWin32_Init(window) || !ImGui_ImplDX11_Init(device, context)) {
+    const bool platform = ImGui_ImplWin32_Init(window);
+    if (!platform || !(renderer_ ? renderer_->init() : ImGui_ImplDX11_Init(device, context))) {
         if (ImGui::GetIO().BackendPlatformUserData) ImGui_ImplWin32_Shutdown();
-        if (ImGui::GetIO().BackendRendererUserData) ImGui_ImplDX11_Shutdown();
+        if (renderer_) renderer_->shutdown();
+        else if (ImGui::GetIO().BackendRendererUserData) ImGui_ImplDX11_Shutdown();
         ImGui::DestroyContext(state->imgui);
         return E_FAIL;
     }
     implementation_ = std::move(state);
-    implementation_->combat_ui.initialize(device, context);
+    implementation_->combat_ui.initialize();
     if (initialize_host_child_) {
         implementation_->host_child = true;
         return S_OK;
@@ -2364,7 +2407,6 @@ void DebugOverlay::shutdown() noexcept {
     if (!implementation_) return;
     if (implementation_->imgui) ImGui::SetCurrentContext(implementation_->imgui);
     remove_quit_hook();
-    implementation_->combat_ui.shutdown();
     if (!implementation_->host_child) {
         release_cursor_confinement(implementation_->cursor_confinement);
         if (GetCapture() == implementation_->window) ReleaseCapture();
@@ -2373,7 +2415,10 @@ void DebugOverlay::shutdown() noexcept {
     }
     if (implementation_->imgui) {
         ImGui::SetCurrentContext(implementation_->imgui);
-        ImGui_ImplDX11_Shutdown();
+        if (renderer_) renderer_->shutdown(); else ImGui_ImplDX11_Shutdown();
+        // After the backend: it releases its copy of the combat icon atlas
+        // (an ImGui user texture) before the atlas goes.
+        implementation_->combat_ui.shutdown();
         ImGui_ImplWin32_Shutdown();
         ImGui::DestroyContext(implementation_->imgui);
     }
@@ -2400,7 +2445,7 @@ HRESULT DebugOverlay::render(const RenderProfileSnapshot* profile,
     if (!combat_visible && !visible() && resources.critters.labels.empty() && !notice_ && !capture_notice) return S_FALSE;
 
     apply_ui_language(*implementation_, config_);
-    ImGui_ImplDX11_NewFrame();
+    if (!renderer_) ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
     ImGuiIO& io = ImGui::GetIO();
@@ -2462,15 +2507,23 @@ HRESULT DebugOverlay::render(const RenderProfileSnapshot* profile,
     }
     ImGui::Render();
 
-    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    if (renderer_) renderer_->render(ImGui::GetDrawData()); else ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    rendered_frame_ = true;
     return S_OK;
+}
+
+// Frame generation: the same draw lists once more onto the generated image
+// (the overlay then shows on every presented frame, without flicker).
+void DebugOverlay::render_again() noexcept {
+    if (!std::exchange(rendered_frame_, false) || !renderer_ || !ImGui::GetCurrentContext()) return;
+    if (ImDrawData* data = ImGui::GetDrawData(); data && data->Valid) renderer_->render(data);
 }
 
 void DebugOverlay::render_shader_preparation(std::size_t done, std::size_t total) noexcept {
     if (!implementation_ || !implementation_->imgui) return;
     ImGui::SetCurrentContext(implementation_->imgui);
     apply_ui_language(*implementation_, config_);
-    ImGui_ImplDX11_NewFrame();
+    if (!renderer_) ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
     ImGuiIO& io = ImGui::GetIO();
@@ -2489,7 +2542,7 @@ void DebugOverlay::render_shader_preparation(std::size_t done, std::size_t total
     }
     ImGui::End();
     ImGui::Render();
-    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    if (renderer_) renderer_->render(ImGui::GetDrawData()); else ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 }
 
 // F11 with the overlay hidden: frame timing is off then, so run it for
@@ -2783,6 +2836,10 @@ bool DebugOverlay::initialized() const noexcept {
 void debug_overlay_set_running_renderer(const char* text, bool core) noexcept {
     g_running_renderer = text;
     g_running_core = core;
+}
+
+void debug_overlay_set_running_d3d12(bool running) noexcept {
+    g_running_d3d12 = running;
 }
 
 void debug_overlay_set_game_address_space(std::uint32_t used_mb, std::uint32_t largest_free_mb) noexcept {

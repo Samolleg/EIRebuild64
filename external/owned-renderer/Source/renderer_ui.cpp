@@ -100,7 +100,7 @@ template<class Blit> void ui_quads(std::vector<Blit>& pendings,const scene_ui::S
 // Scene thread: a typed quad back into the renderer's queued blit.
 template<class Blit> void ui_blit(scene_ui::Quad& quad,const scene_ui::Residency& residency,Blit& pending){
  scene_ui::blit_values(quad,pending);
- if(const auto* home=residency.find(quad.home)){pending.texture=home->texture;pending.srv=home->srv;}
+ if(const auto* home=residency.find(quad.home)){pending.texture=home->texture;pending.srv=home->srv;pending.d3d12=home->d3d12;}
 }
 }  // namespace
 
@@ -144,8 +144,9 @@ HRESULT Renderer::draw_hud_asset_frames(const std::vector<HudAssetFrame>* captur
  NativeOwnedTextureView view{};view.identity=asset.identity.container_incarnation;view.generation=1;
  view.format=format;view.mips=mips.data();view.mip_count=UINT(mips.size());view.resource=&asset.identity;
  view.value_source=1;view.opaque_mips=asset.opaque_mips;
- ComPtr<ID3D11ShaderResourceView> texture;std::uint64_t backing=0;
- if(FAILED(get_native_owned_texture(view,texture,backing,nullptr)))return failure("HUD frame atlas upload failed; owned frames omitted.");
+ ComPtr<ID3D11ShaderResourceView> texture;D3D12TextureRef texture12;std::uint64_t backing=0;
+ if(FAILED(d3d12_?get_native_owned_texture_d3d12(view,texture12,backing,nullptr):get_native_owned_texture(view,texture,backing,nullptr)))
+  return failure("HUD frame atlas upload failed; owned frames omitted.");
  // Independently authored screen geometry. The shipped atlas uses one full
  // strip per side, clockwise U and inward V, with mitred corners.
  struct HudVertex {float x,y,z,rhw;DWORD diffuse,specular;float u,v;};
@@ -175,6 +176,26 @@ HRESULT Renderer::draw_hud_asset_frames(const std::vector<HudAssetFrame>* captur
  state.stage[0][D3DTSS_COLOROP]=state.stage[0][D3DTSS_ALPHAOP]=D3DTOP_MODULATE;
  state.stage[0][D3DTSS_COLORARG1]=state.stage[0][D3DTSS_ALPHAARG1]=D3DTA_TEXTURE;
  state.stage[0][D3DTSS_COLORARG2]=state.stage[0][D3DTSS_ALPHAARG2]=D3DTA_DIFFUSE;
+ if(d3d12_){
+  // D3D12 backend: the same quads through the UI pass (the Vertex layout is
+  // XYZRHW, diffuse, specular, one UV), over the canvas viewport as draw() maps them.
+  Constants block{};block.viewport[2]=(float)canvas_width();block.viewport[3]=(float)canvas_height();
+  block.texture_factor[0]=block.texture_factor[1]=block.texture_factor[2]=block.texture_factor[3]=1.0f;block.transformed=TRUE;block.textured=TRUE;
+  block.color_op=state.stage[0][D3DTSS_COLOROP];block.alpha_op=state.stage[0][D3DTSS_ALPHAOP];
+  block.color_arg1=state.stage[0][D3DTSS_COLORARG1];block.color_arg2=state.stage[0][D3DTSS_COLORARG2];
+  block.alpha_arg1=state.stage[0][D3DTSS_ALPHAARG1];block.alpha_arg2=state.stage[0][D3DTSS_ALPHAARG2];
+  block.alpha_func=D3DCMP_ALWAYS;block.hud_opacity=1.0f;
+  D3D12UiDraw quads;quads.texture=texture12.get();quads.program=D3D12UiProgram::game;
+  quads.blend=fixed_blend_choice(TRUE,D3DBLEND_SRCALPHA,D3DBLEND_INVSRCALPHA,false);
+  quads.sampler=world_texture_sampler(state.stage[0][D3DTSS_MINFILTER],state.stage[0][D3DTSS_MAGFILTER],state.stage[0][D3DTSS_MIPFILTER],
+   state.stage[0][D3DTSS_ADDRESSU],state.stage[0][D3DTSS_ADDRESSV],false,1).description;
+  quads.triangle_list=true;quads.vertex_count=UINT(vertices.size());
+  D3D12UiPass pass;pass.vertices=vertices.data();pass.vertex_bytes=UINT(vertices.size()*sizeof(HudVertex));pass.vertex_stride=sizeof(HudVertex);
+  pass.constants=&block;pass.constant_block_bytes=sizeof(Constants);pass.constant_blocks=1;pass.draws=&quads;pass.draw_count=1;
+  const HRESULT drawn=d3d12_->draw_ui(pass);
+  if(SUCCEEDED(drawn))hud_frames_frame_=native_frame_index_;
+  return drawn;
+ }
  // draw() binds everything else it reads; nothing found is restored (frame_plan.h).
  (void)plan_pass("hud_asset_frames",rtv_.Get(),dsv_.Get());
  context_->GSSetShader(nullptr,nullptr,0);context_->HSSetShader(nullptr,nullptr,0);context_->DSSetShader(nullptr,nullptr,0);
@@ -275,6 +296,12 @@ HRESULT Renderer::load_camp_art(){
      FAILED(hr=converter->Initialize(frame.Get(),GUID_WICPixelFormat32bppBGRA,WICBitmapDitherTypeNone,nullptr,0,WICBitmapPaletteTypeCustom)))return hr;
   std::vector<BYTE> pixels(static_cast<size_t>(width)*height*4);
   if(FAILED(hr=converter->CopyPixels(nullptr,width*4,static_cast<UINT>(pixels.size()),pixels.data())))return hr;
+  if(d3d12_){
+   D3D12TextureRef& art=camp_art_d3d12_[asset];
+   if(FAILED(hr=d3d12_->create_texture(width,height,DXGI_FORMAT_B8G8R8A8_UNORM,art))||
+      FAILED(hr=d3d12_->write_texture(*art,RECT{0,0,LONG(width),LONG(height)},pixels.data(),width*4))){art.reset();return hr;}
+   continue;
+  }
   D3D11_TEXTURE2D_DESC td{};td.Width=width;td.Height=height;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;
   td.Format=DXGI_FORMAT_B8G8R8A8_UNORM;td.Usage=D3D11_USAGE_IMMUTABLE;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
   const D3D11_SUBRESOURCE_DATA initial{pixels.data(),width*4,0};
@@ -291,6 +318,22 @@ HRESULT Renderer::load_camp_art(){
 HRESULT Renderer::begin_camp_popup(bool clear) {
  if(scene_queue()&&core_mode_){core_post_command(scene_ui::BeginCampPopup{clear},"begin_camp_popup");return S_OK;}
  if(scene_queue()){scene_post_frame([this,command=scene_ui::BeginCampPopup{clear}]{report_scene_failure("begin_camp_popup",begin_camp_popup(command.clear));});return S_OK;}
+ // D3D12 backend: the popup target through the executor; native draws and
+ // UI blits go there until end_camp_popup (as rtv_/dsv_ do on D3D11).
+ if(d3d12_){
+  if(camp_popup_active_||(!clear&&!camp_popup_ready_))return E_UNEXPECTED;
+  HRESULT hr=composite_world();if(FAILED(hr))return hr;
+  if(camp_popup_width_!=output_width_||camp_popup_height_!=output_height_||!camp_popup_d3d12_){
+   reset_camp_popup();
+   if(FAILED(hr=d3d12_->create_target(output_width_,output_height_,camp_popup_d3d12_))){reset_camp_popup();return hr;}
+   camp_popup_width_=output_width_;camp_popup_height_=output_height_;
+  }
+  d3d12_->set_target(camp_popup_d3d12_.get());
+  const float background[]{0,0,0,1};
+  d3d12_->clear_target(clear?background:nullptr,true);
+  camp_popup_active_=true;camp_popup_ready_=false;
+  return S_OK;
+ }
  if(camp_popup_active_||!context_||!device_||(!clear&&!camp_popup_ready_))return E_UNEXPECTED;
  HRESULT hr=composite_world();if(FAILED(hr))return hr;
  if(camp_popup_width_!=output_width_||camp_popup_height_!=output_height_||!camp_popup_rtv_){
@@ -321,6 +364,7 @@ HRESULT Renderer::begin_camp_popup(bool clear) {
 void Renderer::end_camp_popup(bool complete) noexcept {
  if(scene_queue()&&core_mode_){core_post_command(scene_ui::EndCampPopup{complete},"end_camp_popup");return;}
  if(scene_queue()){scene_post_frame([this,command=scene_ui::EndCampPopup{complete}]{end_camp_popup(command.complete);});return;}
+ if(d3d12_){if(camp_popup_active_){d3d12_->set_target(nullptr);camp_popup_active_=false;camp_popup_ready_=complete;}return;}
  if(!camp_popup_active_)return;
  rtv_=camp_popup_saved_rtv_;dsv_=camp_popup_saved_dsv_;
  context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
@@ -333,12 +377,13 @@ void Renderer::reset_camp_popup() noexcept {
  if(camp_popup_active_)end_camp_popup(false);
  camp_popup_srv_.Reset();camp_popup_rtv_.Reset();camp_popup_dsv_.Reset();
  camp_popup_color_.Reset();camp_popup_depth_.Reset();
+ camp_popup_d3d12_.reset();
  camp_popup_width_=camp_popup_height_=0;camp_popup_ready_=false;
 }
 
 void Renderer::queue_camp_decoration(const CampDecoration& frame, bool include_popup) noexcept {
  const auto previous_size=pending_blits_.size();
- const bool publish_popup=include_popup&&frame.card_count&&camp_popup_ready_&&camp_popup_srv_;
+ const bool publish_popup=include_popup&&frame.card_count&&camp_popup_ready_&&(camp_popup_srv_||camp_popup_d3d12_);
  if(include_popup)camp_popup_ready_=false;
  if(include_popup&&frame.card_count&&!publish_popup)camp_inventory_popup_failed();
  try{
@@ -349,7 +394,8 @@ void Renderer::queue_camp_decoration(const CampDecoration& frame, bool include_p
   const auto nine_slice=[&](const RECT& r,bool control,float frame_corner){
    const auto& texture=control?camp_control_texture_:camp_art_texture_;
    const auto& srv=control?camp_control_srv_:camp_art_srv_;
-   if(!srv)return;
+   const auto& art12=camp_art_d3d12_[control?1:0];
+   if(!srv&&!art12)return;
    constexpr float frame_x[]{44,202,1334,1492},frame_y[]{78,232,792,946};
    constexpr float control_x[]{527,559,959,991},control_y[]{219,251,346,378};
    const auto* xs=control?control_x:frame_x;
@@ -362,7 +408,7 @@ void Renderer::queue_camp_decoration(const CampDecoration& frame, bool include_p
    for(unsigned y=0;y<3;++y)for(unsigned x=0;x<3;++x){
     if(!control&&x==1&&y==1)continue;
     if(dx[x+1]<=dx[x]||dy[y+1]<=dy[y])continue;
-    PendingBlit piece{};piece.gpu=true;piece.texture=texture;piece.srv=srv;
+    PendingBlit piece{};piece.gpu=true;piece.texture=texture;piece.srv=srv;piece.d3d12=art12;
     piece.width=1536;piece.height=1024;
     piece.destination={LONG(std::lround(dx[x])),LONG(std::lround(dy[y])),LONG(std::lround(dx[x+1])),LONG(std::lround(dy[y+1]))};
     piece.u0=xs[x]/1536;piece.u1=xs[x+1]/1536;piece.v0=ys[y]/1024;piece.v1=ys[y+1]/1024;
@@ -375,8 +421,8 @@ void Renderer::queue_camp_decoration(const CampDecoration& frame, bool include_p
    nine_slice(frame.panels[panel].bounds,false,frame.panels[panel].corner);
   }
   for(unsigned thumb=0;thumb<frame.thumb_count;++thumb)nine_slice(frame.thumbs[thumb],true,0);
-  if(camp_control_srv_)for(unsigned divider=0;divider<frame.divider_count;++divider){
-   PendingBlit piece{};piece.gpu=true;piece.texture=camp_control_texture_;piece.srv=camp_control_srv_;
+  if(camp_control_srv_||camp_art_d3d12_[1])for(unsigned divider=0;divider<frame.divider_count;++divider){
+   PendingBlit piece{};piece.gpu=true;piece.texture=camp_control_texture_;piece.srv=camp_control_srv_;piece.d3d12=camp_art_d3d12_[1];
    piece.width=1536;piece.height=1024;piece.destination=frame.dividers[divider].bounds;
    piece.quarter_turn=frame.dividers[divider].quarter_turn;
    piece.u0=1036.f/1536;piece.u1=1504.f/1536;piece.v0=265.f/1024;piece.v1=356.f/1024;
@@ -385,7 +431,7 @@ void Renderer::queue_camp_decoration(const CampDecoration& frame, bool include_p
   if(publish_popup)for(unsigned card=0;card<frame.card_count;++card){
    const auto& r=frame.cards[card];
    PendingBlit popup{};popup.gpu=true;popup.force_opaque_alpha=true;
-   popup.texture=camp_popup_color_;popup.srv=camp_popup_srv_;
+   popup.texture=camp_popup_color_;popup.srv=camp_popup_srv_;popup.d3d12=camp_popup_d3d12_;
    popup.width=camp_popup_width_;popup.height=camp_popup_height_;popup.destination=r;
    // Card bounds use canvas pixels; the popup target uses output pixels.
    // Normalize through the canvas so Apply preserves the rendered crop.
@@ -394,8 +440,8 @@ void Renderer::queue_camp_decoration(const CampDecoration& frame, bool include_p
    pending_blits_.push_back(std::move(popup));
    nine_slice(r,false,15);
   }
-  if(publish_popup&&frame.construction_icon_visible&&camp_construction_srv_){
-   PendingBlit icon{};icon.gpu=true;icon.texture=camp_construction_texture_;icon.srv=camp_construction_srv_;
+  if(publish_popup&&frame.construction_icon_visible&&(camp_construction_srv_||camp_art_d3d12_[2])){
+   PendingBlit icon{};icon.gpu=true;icon.texture=camp_construction_texture_;icon.srv=camp_construction_srv_;icon.d3d12=camp_art_d3d12_[2];
    icon.width=icon.height=1254;icon.destination=frame.construction_icon;
    icon.u0=icon.v0=0;icon.u1=icon.v1=1;
    pending_blits_.push_back(std::move(icon));
@@ -416,11 +462,11 @@ HRESULT Renderer::queue_cursor(std::uint64_t cache_key,const std::vector<std::ui
   return S_OK;
  }
  pending_cursor_={};cursor_pending_=false;
- if(!swap_||!context_||!width||!height||pixels.size()!=(size_t)width*height)return S_OK;
+ if((!swap_&&!d3d12_)||!context_||!width||!height||pixels.size()!=(size_t)width*height)return S_OK;
  RECT clipped{std::max<LONG>(0,destination.left),std::max<LONG>(0,destination.top),std::min<LONG>((LONG)output_width_,destination.right),std::min<LONG>((LONG)output_height_,destination.bottom)};
  if(clipped.right<=clipped.left||clipped.bottom<=clipped.top)return S_OK;
  const auto cached=overlay_textures_.find(cache_key);
- const bool cacheHit=cached!=overlay_textures_.end()&&cached->second.texture&&cached->second.generation==1&&cached->second.width==width&&cached->second.height==height;
+ const bool cacheHit=cached!=overlay_textures_.end()&&cached->second.resident()&&cached->second.generation==1&&cached->second.width==width&&cached->second.height==height;
  const float dw=(float)(destination.right-destination.left),dh=(float)(destination.bottom-destination.top);
  try{PendingBlit pending{};pending.native_canvas=false;pending.source_id=cache_key;pending.cache_key=cache_key;pending.generation=1;pending.cached=cacheHit;pending.source=RECT{0,0,(LONG)width,(LONG)height};pending.destination=clipped;pending.width=width;pending.height=height;pending.pitch=width*4;
   pending.u0=(clipped.left-destination.left)/dw;pending.v0=(clipped.top-destination.top)/dh;pending.u1=(clipped.right-destination.left)/dw;pending.v1=(clipped.bottom-destination.top)/dh;
@@ -752,7 +798,7 @@ HRESULT Renderer::queue_character_pane_text(
 #else
  constexpr bool unscoped_test=false;
 #endif
- if(!swap_||!context_||((!ui_epoch||!frame_serial)&&!unscoped_test)||!frame.width||!frame.height)return E_INVALIDARG;
+ if((!swap_&&!d3d12_)||!context_||((!ui_epoch||!frame_serial)&&!unscoped_test)||!frame.width||!frame.height)return E_INVALIDARG;
  RECT sr=source_rect?*source_rect:RECT{0,0,(LONG)frame.width,(LONG)frame.height};sr.left=std::clamp<LONG>(sr.left,0,(LONG)frame.width);sr.top=std::clamp<LONG>(sr.top,0,(LONG)frame.height);sr.right=std::clamp<LONG>(sr.right,sr.left,(LONG)frame.width);sr.bottom=std::clamp<LONG>(sr.bottom,sr.top,(LONG)frame.height);const LONG dw=destination.right-destination.left,dh=destination.bottom-destination.top,sw=sr.right-sr.left,sh=sr.bottom-sr.top;if(dw<=0||dh<=0||sw<=0||sh<=0)return S_OK;
  const widescreen::HudComposition composition=interface_space&&widescreen::interface_owned?widescreen::hud_blit:widescreen::HudComposition{};
  const std::size_t checkpoint=pending_blits_.size();
@@ -798,7 +844,7 @@ HRESULT Renderer::queue_character_pane_text(
      std::min<LONG>({glyph.right,std::lround(map_x(clip_right)),(LONG)output_width_}),std::min<LONG>({glyph.bottom,std::lround(map_y(clip_bottom)),(LONG)output_height_})};
     if(visible.right<=visible.left||visible.bottom<=visible.top)continue;
     const double glyph_width=double(glyph.right-glyph.left),glyph_height=double(glyph.bottom-glyph.top);
-    std::uint64_t cache_key=command.asset->identity^0x4350474c59504831ull;auto cached=overlay_textures_.find(cache_key);bool cache_hit=cached!=overlay_textures_.end()&&cached->second.texture&&cached->second.generation==command.asset->generation&&cached->second.revision==command.asset->revision&&cached->second.width==command.asset->width&&cached->second.height==command.asset->height;if(!cache_hit&&!queued_assets.insert(cache_key).second)cache_hit=true;
+    std::uint64_t cache_key=command.asset->identity^0x4350474c59504831ull;auto cached=overlay_textures_.find(cache_key);bool cache_hit=cached!=overlay_textures_.end()&&cached->second.resident()&&cached->second.generation==command.asset->generation&&cached->second.revision==command.asset->revision&&cached->second.width==command.asset->width&&cached->second.height==command.asset->height;if(!cache_hit&&!queued_assets.insert(cache_key).second)cache_hit=true;
     PendingBlit pending{};pending.source_id=command.asset->identity;pending.cache_key=cache_key;pending.generation=command.asset->generation;pending.revision=command.asset->revision;pending.ui_epoch=ui_epoch;pending.frame_serial=frame_serial;pending.cached=cache_hit;pending.batchable_text=command.atlas_page_index!=static_cast<std::size_t>(-1);pending.source=command.source;pending.destination=visible;pending.composition=composition;pending.width=command.asset->width;pending.height=command.asset->height;pending.pitch=command.asset->width*4u;pending.diffuse=command.color;
     pending.native_canvas=false;pending.output_space=true;pending.filtered_text=!exact;
     pending.u0=float((command.source.left+(visible.left-glyph.left)*source_width/glyph_width)/command.asset->width);pending.u1=float((command.source.left+(visible.right-glyph.left)*source_width/glyph_width)/command.asset->width);
@@ -822,7 +868,7 @@ HRESULT Renderer::queue_character_pane_text(
    RECT mapped{destination.left+MulDiv(pane_clip.left-sr.left,dw,sw),destination.top+MulDiv(pane_clip.top-sr.top,dh,sh),destination.left+MulDiv(pane_clip.right-sr.left,dw,sw),destination.top+MulDiv(pane_clip.bottom-sr.top,dh,sh)};RECT clipped=clip_ui_destination(mapped,composition,canvas_width(),canvas_height());if(clipped.right<=clipped.left||clipped.bottom<=clipped.top)continue;
    const float source_u0=(command.source.left+(pane_clip.left-placed.left)*(float)asset_source_width/command_width)/command.asset->width,source_v0=(command.source.top+(pane_clip.top-placed.top)*(float)asset_source_height/command_height)/command.asset->height,source_u1=(command.source.left+(pane_clip.right-placed.left)*(float)asset_source_width/command_width)/command.asset->width,source_v1=(command.source.top+(pane_clip.bottom-placed.top)*(float)asset_source_height/command_height)/command.asset->height;
    const float mapped_width=(float)(mapped.right-mapped.left),mapped_height=(float)(mapped.bottom-mapped.top);if(mapped_width<=0||mapped_height<=0)continue;
-   std::uint64_t cache_key=command.asset->identity^0x4350474c59504831ull;auto cached=overlay_textures_.find(cache_key);bool cache_hit=cached!=overlay_textures_.end()&&cached->second.texture&&cached->second.generation==command.asset->generation&&cached->second.revision==command.asset->revision&&cached->second.width==command.asset->width&&cached->second.height==command.asset->height;if(!cache_hit&&!queued_assets.insert(cache_key).second)cache_hit=true;
+   std::uint64_t cache_key=command.asset->identity^0x4350474c59504831ull;auto cached=overlay_textures_.find(cache_key);bool cache_hit=cached!=overlay_textures_.end()&&cached->second.resident()&&cached->second.generation==command.asset->generation&&cached->second.revision==command.asset->revision&&cached->second.width==command.asset->width&&cached->second.height==command.asset->height;if(!cache_hit&&!queued_assets.insert(cache_key).second)cache_hit=true;
    PendingBlit pending{};pending.source_id=command.asset->identity;pending.cache_key=cache_key;pending.generation=command.asset->generation;pending.revision=command.asset->revision;pending.ui_epoch=ui_epoch;pending.frame_serial=frame_serial;pending.cached=cache_hit;pending.batchable_text=command.atlas_page_index!=static_cast<std::size_t>(-1);pending.source=command.source;pending.destination=clipped;pending.composition=composition;pending.width=command.asset->width;pending.height=command.asset->height;pending.pitch=command.asset->width*4u;pending.diffuse=command.color;pending.u0=source_u0+(clipped.left-mapped.left)*(source_u1-source_u0)/mapped_width;pending.v0=source_v0+(clipped.top-mapped.top)*(source_v1-source_v0)/mapped_height;pending.u1=source_u1-(mapped.right-clipped.right)*(source_u1-source_u0)/mapped_width;pending.v1=source_v1-(mapped.bottom-clipped.bottom)*(source_v1-source_v0)/mapped_height;
    if(!cache_hit)pending.text_asset=command.asset;
    pending_blits_.push_back(std::move(pending));
@@ -913,6 +959,8 @@ void Renderer::retire_surface(std::uint64_t surface_id) noexcept {
   return;
  }
  scene_mip_textures_.erase(surface_id);
+ // D3D12: a material profile keyed by this surface (note_material_texture).
+ if(d3d12_&&!material_profiles_.empty()&&material_profiles_.erase((2ull<<62)|surface_id))++material_profiles_revision_;
  // A completed Blt owns its queued pixels even if its source is released
  // before the UI flush. Keep cache hits alive only through those queued draws.
  for(auto& pending:pending_blits_){
@@ -921,7 +969,7 @@ void Renderer::retire_surface(std::uint64_t surface_id) noexcept {
   if((pending.cached||pending.partial)&&!pending.gpu){
    const auto cached=overlay_textures_.find(pending.cache_key);
    if(cached!=overlay_textures_.end()){
-    pending.texture=cached->second.texture;pending.srv=cached->second.srv;
+    pending.texture=cached->second.texture;pending.srv=cached->second.srv;pending.d3d12=cached->second.d3d12;
     pending.gpu=pending.cached;
    }
   }
@@ -961,19 +1009,24 @@ void Renderer::drop_native_texture_array_slots(std::uint64_t id,bool immutable) 
 // sweep: owned values (archive members, generated MMPs, detached copies) not
 // looked up since the world began and not drawn through a material group
 // since then. Warm records draw through their group without a lookup, so a
-// group selected in this world keeps its texture. Live client-surface entries
+// group selected in this world keeps its texture (D3D11: the group holds it;
+// D3D12: groups span textures, each record holds its own, texture12). Live client-surface entries
 // go with their surface (retire_surface), never by age: a detach needs them.
 // A retired entry is re-created from its view's CPU source on its next use.
 void Renderer::retire_world_textures(std::uint64_t since) noexcept try{
  std::unordered_set<ID3D11ShaderResourceView*> drawn;
- for(const auto& bucket:native_state_buckets_)
-  if(bucket.occupied&&bucket.texture_srv&&bucket.selection_epoch>=since)drawn.insert(bucket.texture_srv.Get());
+ std::unordered_set<const D3D12Texture*> drawn12;
+ for(const auto& bucket:native_state_buckets_){
+  if(!bucket.occupied||bucket.selection_epoch<since)continue;
+  if(bucket.texture_srv)drawn.insert(bucket.texture_srv.Get());
+  if(bucket.texture_d3d12)drawn12.insert(bucket.texture_d3d12.get());
+ }
  std::uint64_t retired=0;
  std::lock_guard<std::mutex> guard(native_owned_textures_lock_);
  for(auto entry=native_owned_textures_.begin();entry!=native_owned_textures_.end();){
   const auto& value=entry->second;
   if(value.camp_surface_alias||(value.surface_id&&!value.detached_copy)||value.last_used>=since||
-     drawn.count(value.srv.Get())){++entry;continue;}
+     drawn.count(value.srv.Get())||drawn12.count(value.d3d12.get())){++entry;continue;}
   drop_native_texture_array_slots(value.backing,true);
   neighbour_texture_resident(entry->first,false);
   entry=native_owned_textures_.erase(entry);++retired;
@@ -1014,6 +1067,25 @@ HRESULT Renderer::flush_ui(){
  if(scene_queue()){scene_ui_pending_=false;if(core_mode_){core_post_command(scene_ui::FlushUi{},"flush_ui");return S_OK;}scene_post_frame([this,command=scene_ui::FlushUi{}]{(void)command;report_scene_failure("flush_ui",flush_ui());});return S_OK;}
  SceneRendererTimingScope scene_timing(SceneRendererTimingKind::ui_flush);
  return render_pending_blits();
+}
+
+void Renderer::write_ui_vertices(void* destination,const std::vector<UINT>& vertex_starts) const noexcept{
+ auto* vertices=static_cast<Vertex*>(destination);
+ for(std::size_t index=0;index<pending_blits_.size();++index){
+  const auto& pending=pending_blits_[index];const auto& r=pending.destination;auto* quad=vertices+vertex_starts[index];
+  // An anchored HUD widget's surfaces compose at the UI scale around its pivot.
+  const auto& composition=pending.composition;
+  const float sx=pending.native_canvas?float(output_width_)/canvas_width():1.f,sy=pending.native_canvas?float(output_height_)/canvas_height():1.f;
+  // Output-space quads (output-size glyphs) are already placed in pixels.
+  const float x0=pending.output_space?float(r.left):widescreen::compose_x(float(r.left),composition)*sx,y0=pending.output_space?float(r.top):widescreen::compose_y(float(r.top),composition)*sy;
+  const float x1=pending.output_space?float(r.right):widescreen::compose_x(float(r.right),composition)*sx,y1=pending.output_space?float(r.bottom):widescreen::compose_y(float(r.bottom),composition)*sy;
+  const Vertex top_left{x0,y0,0,1,pending.diffuse,0xffffffffu,pending.u0,pending.quarter_turn?pending.v1:pending.v0};
+  const Vertex top_right{x1,y0,0,1,pending.diffuse,0xffffffffu,pending.quarter_turn?pending.u0:pending.u1,pending.v0};
+  const Vertex bottom_left{x0,y1,0,1,pending.diffuse,0xffffffffu,pending.quarter_turn?pending.u1:pending.u0,pending.v1};
+  const Vertex bottom_right{x1,y1,0,1,pending.diffuse,0xffffffffu,pending.u1,pending.quarter_turn?pending.v0:pending.v1};
+  quad[0]=top_left;quad[1]=top_right;quad[2]=bottom_left;
+  if(pending.batchable_text){quad[3]=bottom_left;quad[4]=top_right;quad[5]=bottom_right;}else quad[3]=bottom_right;
+ }
 }
 
 HRESULT Renderer::render_pending_blits(){
@@ -1094,6 +1166,15 @@ HRESULT Renderer::render_pending_blits(){
   }
  }
  if(pending_blits_.empty())return S_OK;
+ if(d3d12_){ // the composite marks the interface boundary, as on D3D11
+  (void)composite_world();
+  // Named, not silent (a flicker report): quads recorded while the world
+  // target is still bound land in the world image, not the output.
+  if(world_d3d12_bound_)d3d12_->omit("interface quads recorded into the world target (no composite before them)",false);
+  const HRESULT hr=render_pending_blits_d3d12();
+  if(FAILED(hr))d3d12_->omit("interface quads (the UI batch failed before drawing)",false);
+  return hr;
+ }
  const HRESULT composite_hr=composite_world();if(FAILED(composite_hr))return composite_hr;
  transition_profile_pass("ui_composition");
  if(!device_||!context_)return E_FAIL;
@@ -1174,22 +1255,7 @@ HRESULT Renderer::render_pending_blits(){
  if(dynamic_vertex_offset_+vertex_bytes>dynamic_vertex_capacity_){dynamic_vertex_offset_=0;discard_vertices_=true;}
  const UINT vertex_offset=dynamic_vertex_offset_;
  D3D11_MAPPED_SUBRESOURCE mapped{};HRESULT hr=context_->Map(dynamic_vertices_.Get(),0,discard_vertices_?D3D11_MAP_WRITE_DISCARD:D3D11_MAP_WRITE_NO_OVERWRITE,0,&mapped);if(FAILED(hr))return hr;
- auto* vertices=reinterpret_cast<Vertex*>(static_cast<std::uint8_t*>(mapped.pData)+vertex_offset);
- for(std::size_t index=0;index<pending_blits_.size();++index){
-  const auto& pending=pending_blits_[index];const auto& r=pending.destination;auto* quad=vertices+vertex_starts[index];
-  // An anchored HUD widget's surfaces compose at the UI scale around its pivot.
-  const auto& composition=pending.composition;
-  const float sx=pending.native_canvas?float(output_width_)/canvas_width():1.f,sy=pending.native_canvas?float(output_height_)/canvas_height():1.f;
-  // Output-space quads (output-size glyphs) are already placed in pixels.
-  const float x0=pending.output_space?float(r.left):widescreen::compose_x(float(r.left),composition)*sx,y0=pending.output_space?float(r.top):widescreen::compose_y(float(r.top),composition)*sy;
-  const float x1=pending.output_space?float(r.right):widescreen::compose_x(float(r.right),composition)*sx,y1=pending.output_space?float(r.bottom):widescreen::compose_y(float(r.bottom),composition)*sy;
-  const Vertex top_left{x0,y0,0,1,pending.diffuse,0xffffffffu,pending.u0,pending.quarter_turn?pending.v1:pending.v0};
-  const Vertex top_right{x1,y0,0,1,pending.diffuse,0xffffffffu,pending.quarter_turn?pending.u0:pending.u1,pending.v0};
-  const Vertex bottom_left{x0,y1,0,1,pending.diffuse,0xffffffffu,pending.quarter_turn?pending.u1:pending.u0,pending.v1};
-  const Vertex bottom_right{x1,y1,0,1,pending.diffuse,0xffffffffu,pending.u1,pending.quarter_turn?pending.v0:pending.v1};
-  quad[0]=top_left;quad[1]=top_right;quad[2]=bottom_left;
-  if(pending.batchable_text){quad[3]=bottom_left;quad[4]=top_right;quad[5]=bottom_right;}else quad[3]=bottom_right;
- }
+ write_ui_vertices(static_cast<std::uint8_t*>(mapped.pData)+vertex_offset,vertex_starts);
  context_->Unmap(dynamic_vertices_.Get(),0);
  dynamic_vertex_offset_=(vertex_offset+vertex_bytes+15u)&~15u;discard_vertices_=false;
 
@@ -1239,6 +1305,202 @@ HRESULT Renderer::render_pending_blits(){
  pending_blits_.clear();return S_OK;
 }
 
+
+// x64 host, renderer_backend=d3d12: render_pending_blits' upload and draw
+// half on the D3D12 executor, from the same filtered quads. CPU quads keep
+// their overlay cache entries (the D3D12 texture in OverlayTexture::d3d12);
+// GPU quads carry their surface's D3D12 texture from the residency.
+HRESULT Renderer::render_pending_blits_d3d12(){
+ std::vector<const D3D12Texture*> views;
+ std::vector<std::uint32_t> text_atlas_pixels;
+ try{views.reserve(pending_blits_.size());}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+ for(auto& pending:pending_blits_){
+  if(pending.presentation_fill){views.push_back(nullptr);continue;}
+  const D3D12Texture* view=pending.d3d12.get();
+  if(!pending.gpu){
+   OverlayTexture transient;
+   const auto surface_id=pending.source_is_surface?pending.source_id:0;
+   if(pending.source_destroyed&&pending.partial){
+    transient.d3d12=pending.d3d12;
+    transient.surface_id=surface_id;transient.generation=pending.base_generation;
+    transient.width=pending.width;transient.height=pending.height;
+   }
+   auto& cached=pending.source_destroyed?transient:overlay_textures_[pending.cache_key];
+   if(pending.partial&&(!cached.d3d12||cached.width!=pending.width||cached.height!=pending.height||cached.surface_id!=surface_id||cached.generation<pending.base_generation||cached.generation>pending.generation))return E_UNEXPECTED;
+   if(!cached.d3d12||cached.surface_id!=surface_id||cached.width!=pending.width||cached.height!=pending.height){
+    cached={};cached.surface_id=surface_id;cached.width=pending.width;cached.height=pending.height;
+    const HRESULT hr=d3d12_->create_texture(pending.width,pending.height,DXGI_FORMAT_B8G8R8A8_UNORM,cached.d3d12);
+    if(FAILED(hr)){cached={};return hr;}
+   }
+   if(!pending.cached){
+    const std::uint32_t* upload=pending.pixels.data();
+    if(pending.text_asset){
+     if(pending.text_asset->identity!=pending.source_id||pending.text_asset->generation!=pending.generation||pending.text_asset->revision!=pending.revision||pending.text_asset->width!=pending.width||pending.text_asset->height!=pending.height||pending.text_asset->coverage.size()!=static_cast<std::size_t>(pending.width)*pending.height||pending.text_asset->coverage.size()>kMaximumCharacterPaneAtlasPixels)return E_INVALIDARG;
+     try{text_atlas_pixels.resize(pending.text_asset->coverage.size());}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+     for(std::size_t index=0;index<pending.text_asset->coverage.size();++index)text_atlas_pixels[index]=(static_cast<std::uint32_t>(pending.text_asset->coverage[index])<<24u)|0x00ffffffu;
+     upload=text_atlas_pixels.data();
+    }
+    const RECT whole{0,0,LONG(pending.width),LONG(pending.height)};
+    const RECT& u=pending.partial?pending.update:whole;
+    if(u.right>u.left&&u.bottom>u.top){
+     // A partial quad's pixels hold only its update rect (as UpdateSubresource reads them).
+     if(!upload)return E_INVALIDARG;
+     const HRESULT hr=d3d12_->write_texture(*cached.d3d12,u,upload,pending.pitch);if(FAILED(hr))return hr;
+    }
+    cached.surface_id=pending.source_is_surface?pending.source_id:0;cached.generation=pending.generation;cached.revision=pending.revision;cached.source=pending.source;cached.keyed=pending.keyed;cached.color_key=pending.color_key;
+   }
+   view=cached.d3d12.get();
+   if(pending.source_destroyed){pending.d3d12=cached.d3d12;pending.gpu=true;}
+  }
+  if(!view)return E_FAIL;
+  views.push_back(view);
+ }
+ for(std::size_t index=0;index<pending_blits_.size();++index){
+  if(!pending_blits_[index].presentation_fill)continue;
+  if(index+1>=views.size()||pending_blits_[index+1].presentation_fill||!views[index+1])return E_UNEXPECTED;
+  views[index]=views[index+1];
+ }
+ std::vector<UINT> vertex_starts;
+ std::vector<Vertex> vertices;
+ std::vector<Constants> constants;
+ std::vector<D3D12UiDraw> draws;
+ try{
+  std::uint64_t required=0;vertex_starts.reserve(pending_blits_.size());
+  for(const auto& pending:pending_blits_){vertex_starts.push_back(static_cast<UINT>(required));required+=pending.batchable_text?6u:4u;}
+  if(required>(std::numeric_limits<UINT>::max)()/sizeof(Vertex))return E_OUTOFMEMORY;
+  vertices.resize(static_cast<std::size_t>(required));
+  draws.reserve(pending_blits_.size());
+ }catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+ write_ui_vertices(vertices.data(),vertex_starts);
+ // Frame generation's full-screen interface signal: the quads' cover.
+ for(std::size_t index=0;index<pending_blits_.size();++index){
+  const auto& pending=pending_blits_[index];
+  const Vertex* quad=vertices.data()+vertex_starts[index];  // top left, top right, bottom left, bottom right (text: its first glyph)
+  RECT clip{};const bool clipped=ui_clip_rect(pending.composition,{},clip);
+  float x0=std::min(quad[0].x,quad[3].x),x1=std::max(quad[0].x,quad[3].x),y0=std::min(quad[0].y,quad[3].y),y1=std::max(quad[0].y,quad[3].y);
+  if(clipped){x0=std::max(x0,float(clip.left));y0=std::max(y0,float(clip.top));x1=std::min(x1,float(clip.right));y1=std::min(y1,float(clip.bottom));}
+  mark_interface_cells(x0,y0,x1,y1);
+ }
+ FixedState overlay{};overlay.stage[0][D3DTSS_COLOROP]=D3DTOP_MODULATE;
+ // The UI sampler of the D3D11 path after its world composite (world=false).
+ const D3D11_SAMPLER_DESC sampler=world_texture_sampler(overlay.stage[0][D3DTSS_MINFILTER],overlay.stage[0][D3DTSS_MAGFILTER],
+  overlay.stage[0][D3DTSS_MIPFILTER],overlay.stage[0][D3DTSS_ADDRESSU],overlay.stage[0][D3DTSS_ADDRESSV],false,1).description;
+ D3D11_SAMPLER_DESC backdrop_sampler{};backdrop_sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+ backdrop_sampler.AddressU=backdrop_sampler.AddressV=backdrop_sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;backdrop_sampler.MaxLOD=D3D11_FLOAT32_MAX;
+ DWORD current_alpha_operation=0;float current_opacity=-1.f;
+ try{
+  for(std::size_t index=0;index<pending_blits_.size();){
+   const auto& first=pending_blits_[index];
+   const DWORD alpha_operation=ui_blit_alpha_operation(first.force_opaque_alpha);
+   const float opacity=first.composition.opacity;
+   if(alpha_operation!=current_alpha_operation||opacity!=current_opacity||constants.empty()){
+    Constants block{};block.world=overlay.transform[D3DTRANSFORMSTATE_WORLD];block.view=overlay.transform[D3DTRANSFORMSTATE_VIEW];block.projection=overlay.transform[D3DTRANSFORMSTATE_PROJECTION];
+    block.viewport[2]=(float)output_width_;block.viewport[3]=(float)output_height_;
+    block.texture_factor[0]=block.texture_factor[1]=block.texture_factor[2]=1.0f;block.transformed=TRUE;block.textured=TRUE;
+    block.color_op=overlay.stage[0][D3DTSS_COLOROP];block.alpha_op=alpha_operation;block.color_arg1=overlay.stage[0][D3DTSS_COLORARG1];block.color_arg2=overlay.stage[0][D3DTSS_COLORARG2];
+    block.alpha_arg1=overlay.stage[0][D3DTSS_ALPHAARG1];block.alpha_arg2=overlay.stage[0][D3DTSS_ALPHAARG2];block.alpha_func=D3DCMP_ALWAYS;block.hud_opacity=opacity;block.texture_factor[3]=opacity;
+    constants.push_back(block);current_alpha_operation=alpha_operation;current_opacity=opacity;
+   }
+   const bool output_space=first.output_space;
+   std::size_t end=index+1u;
+   if(first.batchable_text)while(end<pending_blits_.size()&&pending_blits_[end].batchable_text&&views[end]==views[index]&&pending_blits_[end].output_space==output_space&&pending_blits_[end].filtered_text==first.filtered_text&&widescreen::same_composition(pending_blits_[end].composition,first.composition)&&ui_blit_alpha_operation(pending_blits_[end].force_opaque_alpha)==alpha_operation)++end;
+   D3D12UiDraw draw;draw.texture=views[index];
+   draw.program=first.backdrop?D3D12UiProgram::backdrop:output_space&&first.filtered_text?D3D12UiProgram::interface_text:
+    !output_space&&widescreen::composition_scaled(first.composition)?D3D12UiProgram::interface_scaled:D3D12UiProgram::game;
+   draw.blend=fixed_blend_choice(TRUE,D3DBLEND_SRCALPHA,D3DBLEND_INVSRCALPHA,opacity<1.f);
+   draw.sampler=first.backdrop?backdrop_sampler:sampler;
+   draw.scissor=ui_clip_rect(first.composition,{},draw.scissor_rect);
+   draw.constants=static_cast<UINT>(constants.size()-1);
+   draw.first_vertex=vertex_starts[index];
+   draw.triangle_list=first.batchable_text;
+   draw.vertex_count=first.batchable_text?static_cast<UINT>(end-index)*6u:4u;
+   draws.push_back(draw);
+   index=end;
+  }
+ }catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+ D3D12UiPass pass;
+ pass.vertices=vertices.data();pass.vertex_bytes=static_cast<UINT>(vertices.size()*sizeof(Vertex));pass.vertex_stride=sizeof(Vertex);
+ pass.constants=constants.data();pass.constant_block_bytes=sizeof(Constants);pass.constant_blocks=static_cast<UINT>(constants.size());
+ pass.draws=draws.data();pass.draw_count=draws.size();
+ const HRESULT hr=d3d12_->draw_ui(pass);
+ if(perf_enabled())perf_draw_calls_+=draws.size();
+ ui_blit_pixel_spares_.clear();
+ for(auto& pending:pending_blits_)if(pending.pixels.capacity()){try{ui_blit_pixel_spares_.push_back(std::move(pending.pixels));}catch(const std::bad_alloc&){break;}}
+ pending_blits_.clear();
+ return hr;
+}
+
+// Frame generation: the cells of the 64x36 output grid this opaque
+// interface rectangle (output pixels) covers whole.
+void Renderer::mark_interface_cells(float x0,float y0,float x1,float y1) noexcept{
+ if(!output_width_||!output_height_||x1<=x0||y1<=y0)return;
+ const float cw=float(output_width_)/float(kUiCoverageColumns),ch=float(output_height_)/float(kUiCoverageRows);
+ const int c0=std::max(0,int(std::ceil(x0/cw-1e-3f))),c1=std::min(int(kUiCoverageColumns),int(std::floor(x1/cw+1e-3f)));
+ const int r0=std::max(0,int(std::ceil(y0/ch-1e-3f))),r1=std::min(int(kUiCoverageRows),int(std::floor(y1/ch+1e-3f)));
+ if(c1<=c0||r1<=r0)return;
+ const std::uint64_t bits=(c1-c0>=64?~0ull:((1ull<<(c1-c0))-1ull))<<c0;
+ for(int row=r0;row<r1;++row)ui_quad_cells_[row]|=bits;
+}
+float Renderer::interface_coverage() const noexcept{
+ unsigned cells=0;
+ for(const std::uint64_t row:ui_quad_cells_){std::uint64_t v=row;while(v){v&=v-1;++cells;}}
+ return float(cells)/float(kUiCoverageColumns*kUiCoverageRows);
+}
+
+// x64 host, renderer_backend=d3d12: the stock screen rectangle (fades,
+// frames) as UI quads over a white texel, with the D3D11 path's game-pixel
+// to output mapping and source-alpha blend. grid_step > 0 adds the HUD
+// editor's alignment grid and centre guides (draw_screen_rectangle's).
+HRESULT Renderer::draw_screen_rectangle_d3d12(const ScreenRectangleRequest& request,const D3DVIEWPORT7& viewport,float grid_step){
+ ScreenRectangleQuad request_quads[5]{};
+ const unsigned quad_count=screen_rectangle_quads(request,request_quads);
+ if(!quad_count)return S_OK;
+ if(!d3d12_white_){
+  HRESULT hr=d3d12_->create_texture(1,1,DXGI_FORMAT_B8G8R8A8_UNORM,d3d12_white_);if(FAILED(hr))return hr;
+  const std::uint32_t white=0xffffffffu;
+  if(FAILED(hr=d3d12_->write_texture(*d3d12_white_,RECT{0,0,1,1},&white,4))){d3d12_white_.reset();return hr;}
+ }
+ std::vector<ScreenRectangleQuad> quads;std::vector<Vertex> vertices;
+ try{
+  quads.assign(request_quads,request_quads+quad_count);
+  if(grid_step>0){
+   for(float x=0;x<viewport.dwWidth;x+=grid_step)quads.push_back({int(x),0,int(x)+1,int(viewport.dwHeight),0x40808080u});
+   for(float y=0;y<viewport.dwHeight;y+=grid_step)quads.push_back({0,int(y),int(viewport.dwWidth),int(y)+1,0x40808080u});
+   // Brighter two-pixel guides identify the centre independently of grid spacing.
+   const int centre_x=int(viewport.dwWidth)/2,centre_y=int(viewport.dwHeight)/2;
+   quads.push_back({centre_x-1,0,centre_x+1,int(viewport.dwHeight),0xC0FFCC66u});
+   quads.push_back({0,centre_y-1,int(viewport.dwWidth),centre_y+1,0xC0FFCC66u});
+  }
+  vertices.resize(quads.size()*6u);
+ }catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+ const float sx=float(output_width_)/float(std::max<DWORD>(1,viewport.dwWidth)),sy=float(output_height_)/float(std::max<DWORD>(1,viewport.dwHeight));
+ FixedState overlay{};overlay.stage[0][D3DTSS_COLOROP]=D3DTOP_MODULATE;
+ Constants block{};block.viewport[2]=(float)output_width_;block.viewport[3]=(float)output_height_;
+ block.texture_factor[0]=block.texture_factor[1]=block.texture_factor[2]=block.texture_factor[3]=1.0f;block.transformed=TRUE;block.textured=TRUE;
+ block.color_op=D3DTOP_MODULATE;block.alpha_op=D3DTOP_MODULATE;block.color_arg1=overlay.stage[0][D3DTSS_COLORARG1];block.color_arg2=overlay.stage[0][D3DTSS_COLORARG2];
+ block.alpha_arg1=overlay.stage[0][D3DTSS_ALPHAARG1];block.alpha_arg2=overlay.stage[0][D3DTSS_ALPHAARG2];block.alpha_func=D3DCMP_ALWAYS;block.hud_opacity=1.0f;
+ D3D11_SAMPLER_DESC sampler{};sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT;
+ sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
+ // One triangle-list draw for every quad (they share texture, blend and program).
+ for(std::size_t index=0;index<quads.size();++index){
+  const auto& q=quads[index];
+  const float x0=(float(q.left)-float(viewport.dwX))*sx,x1=(float(q.right)-float(viewport.dwX))*sx;
+  const float y0=(float(q.top)-float(viewport.dwY))*sy,y1=(float(q.bottom)-float(viewport.dwY))*sy;
+  const Vertex a{x0,y0,0,1,q.color,0xffffffffu,0,0},b{x1,y0,0,1,q.color,0xffffffffu,1,0};
+  const Vertex c{x0,y1,0,1,q.color,0xffffffffu,0,1},d{x1,y1,0,1,q.color,0xffffffffu,1,1};
+  Vertex* quad=vertices.data()+index*6u;
+  quad[0]=a;quad[1]=b;quad[2]=d;quad[3]=a;quad[4]=d;quad[5]=c;
+ }
+ D3D12UiDraw draw;
+ draw.texture=d3d12_white_.get();draw.program=D3D12UiProgram::game;
+ draw.blend=fixed_blend_choice(TRUE,D3DBLEND_SRCALPHA,D3DBLEND_INVSRCALPHA,false);
+ draw.sampler=sampler;draw.triangle_list=true;draw.first_vertex=0;draw.vertex_count=static_cast<UINT>(vertices.size());
+ D3D12UiPass pass;
+ pass.vertices=vertices.data();pass.vertex_bytes=static_cast<UINT>(vertices.size()*sizeof(Vertex));pass.vertex_stride=sizeof(Vertex);
+ pass.constants=&block;pass.constant_block_bytes=sizeof(Constants);pass.constant_blocks=1;
+ pass.draws=&draw;pass.draw_count=1;
+ return d3d12_->draw_ui(pass);
+}
 
 // ---- Queued UI bodies (standard-mode closures and the core-mode host) -------
 void Renderer::ui_run_blits(std::vector<scene_ui::Quad>& quads,const scene_ui::Residency& residency){
@@ -1307,7 +1569,7 @@ std::shared_ptr<SurfaceImage> Renderer::core_surface_snapshot(std::uint64_t id,s
 std::shared_ptr<SurfaceImage> Renderer::core_surface_snapshot(std::uint64_t id,std::uint64_t generation){
  const auto found=core_surfaces_.find(id);
  const SurfaceImage* image=found!=core_surfaces_.end()?found->second.get():nullptr;
- if(!image||image->generation!=generation||!image->srv){
+ if(!image||image->generation!=generation||!(image->srv||image->d3d12)){
   static std::uint64_t misses=0;
   if(++misses<=16||!(misses&(misses-1))){
    char detail[160];std::snprintf(detail,sizeof(detail),"surface=%llu generation=%llu host_generation=%llu misses=%llu (omitted)",
@@ -1329,7 +1591,8 @@ HRESULT Renderer::core_resolve_surface(std::uint64_t id,std::uint64_t generation
  SurfaceImage*& image) noexcept{
  texture.Reset();image=nullptr;
  const auto found=core_surfaces_.find(id);
- if(found==core_surfaces_.end()||!found->second||found->second->generation!=generation||!found->second->texture)return E_PENDING;
+ // D3D12 backend: an image with its pixels (the caller uploads it).
+ if(found==core_surfaces_.end()||!found->second||found->second->generation!=generation||(d3d12_?!found->second->d3d12&&found->second->cpu_released:!found->second->texture))return E_PENDING;
  texture=found->second->texture;image=found->second.get();
  return S_OK;
 }
@@ -1347,7 +1610,8 @@ scene_ui::Residency Renderer::core_residency(const std::vector<scene_ui::Surface
   auto snapshot=core_surface_snapshot(handle.id,handle.generation);
   if(!snapshot)continue;
   ComPtr<ID3D11Texture2D> texture=snapshot->texture;ComPtr<ID3D11ShaderResourceView> srv=snapshot->srv;
-  residency.add({handle,std::move(snapshot),std::move(texture),std::move(srv)});
+  D3D12TextureRef d3d12=snapshot->d3d12;
+  residency.add({handle,std::move(snapshot),std::move(texture),std::move(srv),std::move(d3d12)});
  }
  return residency;
 }
@@ -1447,6 +1711,55 @@ std::map<PreparedKey,PreparedHandles> g_core_prepared;
 std::uint64_t g_core_prepared_epoch=0;
 }
 void Packet::run(Renderer& renderer){
+ if(renderer.d3d12_){
+  // D3D12 backend: interface packets are queued: the owned HUD meshes and
+  // every plain packet after the frame's world composite (the interface 3D;
+  // the D3D11 frame draws it after the composite as well), with a bound
+  // surface texture or an owned mip chain. World packets wait for the world
+  // (named, the marker colour).
+  const bool interface_time=renderer.scene_composited_||view.semantic_kind==SemanticKind::ui;
+  const bool plain=!camp_surface_present&&!prepared_handles&&!view.world.enabled&&!view.static_submission&&
+   !view.prepared_submission&&!view.depth_submission&&
+   (!view.owned_texture.identity||(!view.owned_texture.surface&&!mips.empty()));
+  // A camp icon packet (the popup's item icons) samples its host-decoded
+  // icon through the owned texture cache, as on D3D11.
+  const bool camp=camp_surface_present&&!prepared_handles&&view.owned_texture.camp_surface_alias;
+  // A plain world packet queues as well: the flush draws its terrain
+  // batches and names every other world batch by kind (not the whole packet).
+  if(!(plain||(camp&&interface_time))){
+   // Named by the first unported kind, so a log says which packets they are.
+   const char* name=
+    prepared_handles||view.prepared_submission?(interface_time?"scene_packet (interface: prepared)":"scene_packet (world: prepared)"):
+    view.static_submission?(interface_time?"scene_packet (interface: static submission)":"scene_packet (world: static submission)"):
+    view.depth_submission?(interface_time?"scene_packet (interface: depth submission)":"scene_packet (world: depth submission)"):
+    view.world.enabled?(interface_time?"scene_packet (interface: world-lit)":"scene_packet (world: world-lit)"):
+    camp_surface_present?(interface_time?"scene_packet (interface: camp surface)":"scene_packet (world: camp surface)"):
+    (interface_time?"scene_packet (interface: surface-owned texture)":"scene_packet (world: surface-owned texture)");
+   renderer.d3d12_->omit(name,!interface_time);
+   return;
+  }
+  if(!interface_time){
+   renderer.d3d12_->count("world packets queued");
+   std::shared_ptr<SurfaceImage> world_bound=bound.present?renderer.core_surface_snapshot(bound.id,bound.generation):nullptr;
+   std::shared_ptr<SurfaceImage> world_wound=wound.present?renderer.core_surface_snapshot(wound.id,wound.generation):nullptr;
+   submit_scene_packet(renderer,*this,std::move(world_bound),std::move(world_wound));
+   return;
+  }
+  if(camp){
+   bool opaque=false;
+   if(core_camp_icon_opaque(camp_surface.id,camp_surface.generation,opaque)){
+    camp_surface.alpha_fully_opaque=opaque;view.owned_texture.opaque_mips=opaque?1u:0u;
+   }
+   renderer.d3d12_->count("interface packets queued (camp icons)");
+   submit_scene_packet(renderer,*this,nullptr,nullptr);
+   return;
+  }
+  std::shared_ptr<SurfaceImage> bound_image=bound.present?renderer.core_surface_snapshot(bound.id,bound.generation):nullptr;
+  renderer.d3d12_->count(view.semantic_kind==SemanticKind::ui?"interface packets queued (owned HUD meshes)":"interface packets queued (after the composite)");
+  std::shared_ptr<SurfaceImage> wound_image=wound.present?renderer.core_surface_snapshot(wound.id,wound.generation):nullptr;
+  submit_scene_packet(renderer,*this,std::move(bound_image),std::move(wound_image));
+  return;
+ }
  if(prepared_handles){
   const auto& identity=view.prepared_identity;
   if(identity.world_epoch!=g_core_prepared_epoch){g_core_prepared.clear();g_core_prepared_epoch=identity.world_epoch;}
@@ -1471,6 +1784,22 @@ void Packet::run(Renderer& renderer){
 
 void Capture::run(Renderer& renderer){
  auto& entry=renderer.core_surfaces_[target.id];
+ if(renderer.d3d12_){
+  // The D3D12 frame drawn so far into the surface's own D3D12 texture.
+  if(!entry||entry->width!=width||entry->height!=height||!entry->d3d12){
+   entry=std::make_shared<SurfaceImage>();entry->id=target.id;entry->width=width;entry->height=height;entry->pitch=LONG(width*4);
+   entry->format.dwSize=sizeof(DDPIXELFORMAT);entry->format.dwFlags=DDPF_RGB;entry->format.dwRGBBitCount=32;
+   entry->format.dwRBitMask=0x00ff0000;entry->format.dwGBitMask=0x0000ff00;entry->format.dwBBitMask=0x000000ff;
+   if(FAILED(renderer.d3d12_->create_texture(width,height,DXGI_FORMAT_B8G8R8A8_UNORM,entry->d3d12))){
+    renderer.core_surfaces_.erase(target.id);Renderer::report_scene_failure("capture",E_FAIL);return;
+   }
+  }
+  HRESULT hr=renderer.render_pending_blits();
+  if(SUCCEEDED(hr))hr=renderer.d3d12_->capture(*entry->d3d12,x,y,RECT{LONG(box_left),LONG(box_top),LONG(box_right),LONG(box_bottom)});
+  if(SUCCEEDED(hr)){entry->generation=target.generation;entry->uploaded_generation=target.generation;entry->gpu_captured=true;++entry->texture_serial;}
+  Renderer::report_scene_failure("capture",hr);
+  return;
+ }
  if(!entry||entry->width!=width||entry->height!=height||!entry->texture){
   entry=std::make_shared<SurfaceImage>();entry->id=target.id;entry->width=width;entry->height=height;entry->pitch=LONG(width*4);
   entry->format.dwSize=sizeof(DDPIXELFORMAT);entry->format.dwFlags=DDPF_RGB;entry->format.dwRGBBitCount=32;

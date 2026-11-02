@@ -20,6 +20,10 @@ namespace owned::snow_trails {
 // 12.5 cm texels over an 80 m square (R16G16_FLOAT: trough depth, berm height).
 constexpr float kTexel = .125f;
 constexpr unsigned kSide = 640;
+// The field's slot on D3D12 (nativeSnowTrail): one t table serves every
+// stage there and the world vertex programs read t8 (nativeWorldVertices),
+// so the DXIL reads t116, which no program uses.
+constexpr unsigned kFieldSlotD3D12 = 116;
 // A unit moving further than this in one frame was placed, not walking.
 constexpr float kLongestStep = 4.f;
 // Shape of one unit's trough (metres) from the larger half extent of the
@@ -109,7 +113,11 @@ constexpr char kShader[] = R"(
 // The field (snow_trails.h): R trough depth, G berm height, metres. t8 is
 // free in the pixel, hull and domain stages (the world vertices are a
 // vertex-stage input; t10-t15 carry fog, sky and contact maps).
+#ifdef EID3D12
+Texture2D<float2> nativeSnowTrail:register(t116); // kFieldSlotD3D12
+#else
 Texture2D<float2> nativeSnowTrail:register(t8);
+#endif
 // window: xy world origin of texel (0,0), z texels per metre, w side in texels (0: no field).
 // tiles: the active 8 m tiles (bit y*10+x, snow_trails.h ActiveTiles); any
 // other point returns 0 before a texture read. Manual bilinear (no sampler

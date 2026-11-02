@@ -345,9 +345,15 @@ bool link_start(HWND game_window, UINT device_flags, char* error, std::size_t er
     l.reply = event(L"reply");
     l.present = event(L"present");
     if (!l.work || !l.space || !l.reply || !l.present) return fail("event creation failed");
-    wchar_t command[MAX_PATH + 96];
-    swprintf_s(command, L"\"%s\" --remote --pid %lu --hwnd %llu", host_path.c_str(), pid,
-               static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(game_window)));
+    // renderer_backend=d3d12 (opt-in, experimental): the host draws with its
+    // D3D12 backend, or stays on D3D11 naming why (host.log).
+    wchar_t backend[16]{};
+    GetPrivateProfileStringW(L"graphics", L"renderer_backend", L"d3d11", backend, 16, owned::renderer_config_path().c_str());
+    const bool d3d12 = _wcsicmp(backend, L"d3d12") == 0 || _wcsicmp(backend, L"1") == 0;   // F10 Renderer: 1; older ini files: d3d12
+    wchar_t command[MAX_PATH + 128];
+    swprintf_s(command, L"\"%s\" --remote --pid %lu --hwnd %llu%s", host_path.c_str(), pid,
+               static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(game_window)), d3d12 ? L" --backend d3d12" : L"");
+    if (d3d12) log("renderer_backend=d3d12: the host is asked for its Direct3D 12 backend");
     STARTUPINFOW startup{sizeof(startup)};
     PROCESS_INFORMATION process{};
     if (!CreateProcessW(nullptr, command, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process))
@@ -443,7 +449,16 @@ bool dlss_caps(DlssCaps& out) noexcept {
 }
 bool dlss_render_size(UINT, UINT, int, UINT&, UINT&) noexcept { return false; }
 HRESULT dlss_evaluate(ID3D11DeviceContext*, const DlssEvaluate&) noexcept { return E_NOTIMPL; }
+HRESULT dlss_evaluate_d3d12(ID3D12GraphicsCommandList*, ID3D12Resource* const*, const DlssEvaluate&) noexcept { return E_NOTIMPL; }
 void dlss_release() noexcept {}
+bool dlssg_caps(DlssgCaps& out) noexcept {
+    out = {};
+    strncpy_s(out.reason, "needs the 64-bit render host", _TRUNCATE);
+    return false;
+}
+HRESULT dlssg_evaluate_d3d12(ID3D12GraphicsCommandList*, ID3D12Resource* const*, const DlssgEvaluate&) noexcept { return E_NOTIMPL; }
+void dlssg_release() noexcept {}
+std::uint64_t dlssg_vram_estimate(UINT, UINT, UINT, UINT) noexcept { return 0; }
 bool host_presented() noexcept { return false; }
 
 Writer::Writer(Op op, std::uint32_t payload_bytes) noexcept {

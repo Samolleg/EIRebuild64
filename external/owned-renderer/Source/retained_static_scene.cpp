@@ -2038,6 +2038,21 @@ bool RetainedStaticScene::visual_publish_detection(
     return true;
 }
 
+void RetainedStaticScene::visual_publish_scene_detection(
+    std::int32_t signed_id, bool detected) noexcept {
+    VisualResourceIncarnation resource{};
+    {
+        SharedLock guard(lock_);
+        const auto found = visuals_.find(signed_id);
+        if (found == visuals_.end()) return;
+        const auto& entity = found->second;
+        if (!entity.tick.unit || entity.detection_unavailable ||
+            ((entity.tick.object_flags & 0x00400000u) != 0) == detected) return;
+        resource = entity.resource;
+    }
+    (void)visual_publish_detection(resource, detected);
+}
+
 void RetainedStaticScene::visual_reject_detection_unlocked(
     VisualEntity& entity, const char* predicate) noexcept {
     if (!entity.tick.unit || entity.detection_unavailable ||
@@ -2085,15 +2100,46 @@ void RetainedStaticScene::visual_publish_preview(VisualResourceIncarnation resou
         if (auto* r = recorder()) r->delta(RetainedOp::visual_publish_preview, [&](RetainedDeltaOut& d) {
             put_resource(d, resource); io(d.out, view); delta_io(d, selection);
         });
-        const std::uint64_t key = (std::uint64_t(std::uint32_t(resource.signed_id)) << 1) | (view & 1u);
+        const std::uint64_t key = (std::uint64_t(std::uint32_t(resource.signed_id)) << 8) | (view & 0xffu);
         preview_selections_[key] = {resource, selection};
     } catch (...) {}
+}
+
+void RetainedStaticScene::material_publish_composition(const std::string& name,
+    MaterialComposition value) noexcept {
+    try {
+        if (name.empty()) return;
+        ExclusiveLock guard(lock_);
+        if (auto* r = recorder()) r->delta(RetainedOp::material_publish_composition, [&](RetainedDeltaOut& d) {
+            io(d.out, name); io(d.out, value.layers); io(d.out, value.slots); io(d.out, value.dimension);
+            io(d.out, value.user_data);
+        });
+        auto& stored = material_compositions_[name];
+        if (stored.serial && stored.layers == value.layers && stored.slots == value.slots &&
+            stored.dimension == value.dimension && stored.user_data == value.user_data) return;
+        value.serial = ++material_composition_serial_;
+        stored = std::move(value);
+    } catch (...) {}
+}
+
+std::uint64_t RetainedStaticScene::material_composition_revision() const noexcept {
+    SharedLock guard(lock_);
+    return material_composition_serial_;
+}
+
+bool RetainedStaticScene::material_composition(const std::string& name,
+    MaterialComposition& value) const noexcept {
+    SharedLock guard(lock_);
+    const auto found = material_compositions_.find(name);
+    if (found == material_compositions_.end()) return false;
+    try { value = found->second; } catch (...) { return false; }
+    return true;
 }
 
 bool RetainedStaticScene::visual_preview_selection(VisualResourceIncarnation resource, std::uint32_t view,
     VisualClipSelection& selection) const noexcept {
     SharedLock guard(lock_);
-    const std::uint64_t key = (std::uint64_t(std::uint32_t(resource.signed_id)) << 1) | (view & 1u);
+    const std::uint64_t key = (std::uint64_t(std::uint32_t(resource.signed_id)) << 8) | (view & 0xffu);
     const auto found = preview_selections_.find(key);
     if (found == preview_selections_.end() || found->second.first.signed_id != resource.signed_id ||
         found->second.first.serial != resource.serial) return false;

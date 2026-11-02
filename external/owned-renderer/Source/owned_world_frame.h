@@ -578,6 +578,27 @@ struct OwnedPreviewPart {
     std::uintptr_t wound = 0;
     std::shared_ptr<SurfaceImage> wound_texture;
 };
+// Owned party portrait expression: the texels of the expression face picture
+// that differ from the neutral one, laid out in the unit atlas's UV space
+// (the face pictures share the layout and scale of the atlas's head block,
+// at (0, 28/256) and half the atlas side). Drawn over the head part as a
+// second record of the same mesh and pose (owned_world_state.cpp).
+struct OwnedPortraitOverlay {
+    std::shared_ptr<const TextureCpuAsset> texture;
+    std::array<NativeOwnedTextureMip,32> mips{};
+    NativePreparedMaterialHandle material{}, wound_material{};
+};
+std::shared_ptr<OwnedPortraitOverlay> build_owned_portrait_overlay(const TextureCpuAsset& neutral,
+    const TextureCpuAsset& expression, const char*& reason) noexcept;
+// The expression picture of a neutral face picture name (ChangeFaceTexture
+// 0x640670: 1 happy +"a", 2 pain +"c", 3 tired +"b"); empty for neutral.
+std::string owned_portrait_expression_name(const std::string& neutral, std::int32_t expression);
+// Bare-head portrait (portrait_helmet off): a copy of the unit's assembly in
+// which each helmet head/hair part (hd.armorTT, hr.HH.armorTT) is replaced in
+// place by its bare part (hd, hr.HH) from the unit's model archive. Ordinals
+// stay those of the unit's assembly.
+std::shared_ptr<const VisualAssemblyAsset> build_owned_portrait_bare_assembly(
+    const VisualAssemblyAsset& unit, const ResourceBlob& model, const char*& reason) noexcept;
 struct OwnedPreviewCommand {
     RetainedVisualSample sample;
     double texture_time = 0;
@@ -587,6 +608,8 @@ struct OwnedPreviewCommand {
     std::vector<std::shared_ptr<void>> sets;
     std::vector<OwnedPreviewPart> parts;
     BridgeSceneHandoff handoff;
+    std::shared_ptr<OwnedPortraitOverlay> portrait_overlay;   // portraits only
+    bool portrait = false;   // a party portrait: its records keep HUD submission order
 };
 void run_owned_preview_command(OwnedPreviewCommand& command) noexcept;
 // One object's wound layer (owned_world_state.cpp): the parts and wound

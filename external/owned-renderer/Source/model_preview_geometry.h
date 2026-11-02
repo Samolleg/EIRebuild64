@@ -23,6 +23,8 @@ inline bool prepare_model_preview_geometry(const RetainedVisualSample& sample,
     view.contribution = {true,true,0};
     view.bounds_minimum = bounds.minimum; view.bounds_maximum = bounds.maximum;
     view.prepared_identity.presentation_serial = presentation_serial;
+    view.fur = record->fur ? &record->fur : nullptr;
+    view.fur_node_base = record->fur_node_base;
     view.u_shift = record->values.u_shift; view.v_shift = record->values.v_shift;
     return true;
 }

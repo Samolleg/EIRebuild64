@@ -238,6 +238,10 @@ void Renderer::pump_pipeline_warmup() noexcept try {
             add(native_shadow_vs_.Get(), nullptr, nullptr, nullptr, WarmTargets{}, depth);
             add(native_shadow_vs_.Get(), nullptr, nullptr, native_shadow_ps_.Get(), WarmTargets{}, depth);
         }
+    // The precipitation shelter bake: every caster with the pixel stage into
+    // its R8 foliage mask over D32 depth.
+    if (configured_integer(config, "precipitation", 3) > 0 && native_shadow_vs_)
+        add(native_shadow_vs_.Get(), nullptr, nullptr, native_shadow_ps_.Get(), WarmTargets{{DXGI_FORMAT_R8_UNORM}, 1}, DXGI_FORMAT_D32_FLOAT);
 
     std::uint64_t signature = 14695981039346656037ull;
     for (const WarmItem& item : items) signature = item_hash(signature, item);

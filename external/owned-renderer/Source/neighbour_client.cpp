@@ -4,15 +4,24 @@
 #include "neighbour_piece.h"
 #include "owned_resource_runtime.h"
 namespace owned {
-void neighbour_client_begin(const std::string& mpr, std::uint64_t epoch, const ResourceStoreConfig& mounts) noexcept {
+namespace {
+NeighbourStreamSource embedded_neighbour_source(std::uint64_t epoch) {
         NeighbourStreamSource source;
         try {source.layout_file = neighbour_layout_file();} catch (...) {} // the stream reports the missing addon
         source.active_terrain = [epoch]() -> std::shared_ptr<const TerrainCpuAsset> {
             const auto published = retained_static_terrain_source_snapshot();
             return published.map && published.terrain && published.map->generation == epoch ? published.terrain : nullptr;
         };
-        neighbour_maps_begin(mpr, epoch, mounts, std::move(source));
+        return source;
 }
+}
+void neighbour_client_begin(const std::string& mpr, std::uint64_t epoch, const ResourceStoreConfig& mounts) noexcept {
+    neighbour_maps_begin(mpr, epoch, mounts, embedded_neighbour_source(epoch));
+}
+void neighbour_client_restart(const std::string& mpr, std::uint64_t epoch, const ResourceStoreConfig& mounts) noexcept {
+    neighbour_maps_restart(mpr, epoch, mounts, embedded_neighbour_source(epoch));
+}
+void neighbour_client_world_changed(std::uint64_t epoch) noexcept { neighbour_maps_world_changed(epoch); }
 std::unique_ptr<NeighbourPiece> neighbour_client_take(std::uint64_t epoch) noexcept { return neighbour_maps_take(epoch); }
 void neighbour_client_uploaded(std::uint64_t epoch) noexcept { neighbour_maps_uploaded(epoch); }
 void neighbour_client_stop() noexcept { neighbour_maps_stop(); }
@@ -57,24 +66,30 @@ template <class C> void core_send(scene_core::Command id, const C& command) noex
 }
 } // namespace
 
+// Under g_remote_lock.
+static void core_begin(const std::string& mpr, std::uint64_t epoch, const ResourceStoreConfig& mounts, bool restart) noexcept {
+    try {
+        NeighbourRemoteBegin begin;
+        begin.mpr = mpr;
+        try {begin.layout_file = neighbour_layout_file();} catch (...) {} // the host stream reports it
+        begin.no_sea_maps = neighbour_maps_no_sea_maps();
+        begin.mounts = mounts;
+        scene_core::NeighbourBegin command;
+        command.epoch = epoch;
+        command.inputs = encode_neighbour_begin(begin);
+        command.restart = restart;
+        core_send(scene_core::Command::neighbour_begin, command);
+        g_remote_epoch.store(epoch);
+    } catch (...) {
+        x64remote::lose_device("core mode: neighbour stream begin allocation failed");
+    }
+}
+
 void neighbour_client_begin(const std::string& mpr, std::uint64_t epoch, const ResourceStoreConfig& mounts) noexcept {
     if (core()) {
         std::lock_guard<std::mutex> guard(g_remote_lock);
         if (g_remote_epoch.load() == epoch || !neighbour_maps_enabled()) return;
-        try {
-            NeighbourRemoteBegin begin;
-            begin.mpr = mpr;
-            try {begin.layout_file = neighbour_layout_file();} catch (...) {} // the host stream reports it
-            begin.no_sea_maps = neighbour_maps_no_sea_maps();
-            begin.mounts = mounts;
-            scene_core::NeighbourBegin command;
-            command.epoch = epoch;
-            command.inputs = encode_neighbour_begin(begin);
-            core_send(scene_core::Command::neighbour_begin, command);
-            g_remote_epoch.store(epoch);
-        } catch (...) {
-            x64remote::lose_device("core mode: neighbour stream begin allocation failed");
-        }
+        core_begin(mpr, epoch, mounts, false);
         return;
     }
     // This process's stream: the layout next to its addon.dll and the
@@ -111,6 +126,19 @@ void neighbour_client_stop() noexcept {
 void neighbour_client_stop_epoch(std::uint64_t epoch) noexcept {
     if (core()) { if (epoch && g_remote_epoch.load() == epoch) neighbour_client_stop(); return; }
     neighbour_maps_stop_epoch(epoch);
+}
+
+void neighbour_client_restart(const std::string& mpr, std::uint64_t epoch, const ResourceStoreConfig& mounts) noexcept {
+    if (!core() || !epoch) return;
+    std::lock_guard<std::mutex> guard(g_remote_lock);
+    if (neighbour_maps_enabled()) core_begin(mpr, epoch, mounts, true);
+}
+
+void neighbour_client_world_changed(std::uint64_t epoch) noexcept {
+    // Core mode: the host Renderer's world change releases its own stream
+    // (this process's Renderer forwards its frames and has none).
+    if (core()) return;
+    neighbour_maps_world_changed(epoch);
 }
 
 bool neighbour_client_settled(std::uint64_t epoch) noexcept {

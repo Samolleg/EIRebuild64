@@ -63,44 +63,16 @@ std::uint32_t terrain_facet_flatness(const Position& position, int x, int y) {
     return q(best)|(q(sum/count)<<8);
 }
 
-// Plain fill tiles for the anti-tiling edge rule. A tile is plain fill when
-// it and its eight neighbours carry the same tile id (rotation ignored):
-// shipped maps place such tiles next to themselves in every relative
-// rotation, so a world-space read of that one tile has no authored seam to
-// break. Bit cy*2+cx is set when every tile touching grid corner
-// (tx+cx,ty+cy) is plain fill; the shader interpolates these corners, so
-// borrowed detail yields to the authored detail along any edge shared with a
-// tile that keeps its authored image.
-// `id(x,y)` returns the base tile id on the zone grid, or -1 outside it.
-template<class TileId>
-std::uint32_t terrain_fill_corners(const TileId& id, int tx, int ty) {
-    bool pure[3][3]{};
-    for (int y = 0; y < 3; ++y)
-        for (int x = 0; x < 3; ++x) {
-            const int cx = tx + x - 1, cy = ty + y - 1, value = id(cx, cy);
-            bool same = value >= 0;
-            for (int dy = -1; same && dy <= 1; ++dy)
-                for (int dx = -1; same && dx <= 1; ++dx)
-                    same = id(cx + dx, cy + dy) == value;
-            pure[y][x] = same;
-        }
-    std::uint32_t corners = 0;
-    for (int cy = 0; cy < 2; ++cy)
-        for (int cx = 0; cx < 2; ++cx)
-            if (pure[cy][cx] && pure[cy][cx + 1] && pure[cy + 1][cx] && pure[cy + 1][cx + 1])
-                corners |= 1u << (cy * 2 + cx);
-    return corners;
-}
-
-// terrain_quality: 1 (high, default) honours each terrain material switch;
-// 0 (low) drops anti-repetition and transition sharpening and draws the
-// authored tile mapping. (The material's own side projection,
+// terrain_quality: 2 (high, default) honours each terrain material switch;
+// 1 (medium) and 0 (low) drop the large-scale variation (antitile) and
+// Terrain 2.0's fine warp and noise octaves (height_blend); low also takes
+// Terrain 2.0's Low path (terrain2.hlsl T2_LOW). (The material's own side projection,
 // terrain_triplanar, is gone: Terrain cliffs replaced it on every tile while
 // on, and without them it smeared faces. The large-scale variation,
 // terrain_macro_variation, is gone too: no visible tiling change in play.)
 struct TerrainMaterialSwitches { bool antitile, height_blend; };
 inline TerrainMaterialSwitches terrain_material_switches(int quality, bool antitile, bool height_blend) {
-    return {quality >= 1 && antitile, quality >= 1 && height_blend};
+    return {quality >= 2 && antitile, quality >= 2 && height_blend};
 }
 
 // Shared verbatim by the production native shader and its GPU regression.
@@ -118,13 +90,8 @@ static const float terrainTileUnits = 2;         // A base MPR tile covers 2x2 w
 static const float terrainTileMargin = .125;     // Atlas padding a tile (decoder: 8 texels of the 64-texel MPR tile; HD pages scale it).
 static const float terrainLowpassTexels = 5.66;  // Coarse image kept exactly: ~5.7 texels a tile.
 static const float terrainHexLattice = .28867513; // Lattice units a tile: neighbouring cells one tile apart.
-static const float terrainMatchNear = .035;      // Coarse-colour distance that still borrows detail.
-static const float terrainMatchFar = .11;        // ...and where borrowing stops (other material).
 static const float terrainDetailGainLimit = 1.6; // Variance-preserving blend never boosts beyond this.
-static const float terrainBandRadius = .22;      // Transition probe radius in tile units.
-static const float terrainBandStrength = 6;      // Height-bias strength against the transition span.
 static const float terrainMacroAmount = .12;     // Peak-to-peak world-space brightness variation.
-static const float terrainEdgeBand = .12;        // Tile units over which hex detail yields to the tile's own at an edge.
 
 float3 terrainSlopeNormal(uint packed){
  float2 xy=float2(int(packed<<16)>>16,int(packed)>>16)/32767.0;
@@ -156,22 +123,6 @@ float2x2 terrainHexRotation(int2 v){
  float c=cos(angle),s=sin(angle);
  return float2x2(c,-s,s,c);
 }
-float2 terrainHexSampleCoord(float2 p,int2 v){
- float2 c=terrainHexCentre(v)/terrainHexLattice;
- return mul(terrainHexRotation(v),p-c)+c+terrainHash2(v);
-}
-float3 terrainHexWeights(float3 w){
- float3 k=pow(max(w,0),7);return k/(k.x+k.y+k.z);
-}
-
-// Transition sharpening: p' = p + b p(1 - p), b = clamp(strength*top*h, +-.5).
-// `p` is the fraction of material A, `h` the pixel's height excess of A over B.
-// Zero inside a pure material and on cliffs (top = 0).
-float terrainHeightShift(float p,float h,float strength,float top){
- float b=clamp(strength*top*h,-.5,.5);
- return b*p*(1-p);
-}
-
 // Value noise from a texture (terrain_noise_texture): uniform random lattice
 // values in a tileable 1024 x 1024 R8 texture, read with one gather of the
 // four corners and the same smoothstep interpolation the hashed lattice used
@@ -211,94 +162,6 @@ float terrainMacro(float2 p){
  return 1+terrainMacroAmount*(n-.5);
 }
 
-float terrainFillWeight(uint corners,float2 q){
- q=saturate(q);
- float4 c=float4(corners&1u,(corners>>1)&1u,(corners>>2)&1u,(corners>>3)&1u);
- return lerp(lerp(c.x,c.y,q.x),lerp(c.z,c.w,q.x),q.y);
-}
-struct TerrainTileFrame{float2 origin;float2 margin;float2 inner;float2 size;float lowLod;};
-float2 terrainTileUv(TerrainTileFrame f,float2 q){return f.origin+f.margin+q*f.inner;}
-float terrainFootprintLod(TerrainTileFrame f,float2 dx,float2 dy){
- return log2(max(max(length(dx*f.size),length(dy*f.size)),1e-6));
-}
-// Detail (fine minus coarse) of the tile repeated through `s` (tile units).
-float3 terrainWrappedDetail(uint2 ref,TerrainTileFrame f,float2 s,float2 sDx,float2 sDy,out float3 low){
- float2 uv=terrainTileUv(f,frac(s)),dx=sDx*f.inner,dy=sDy*f.inner;
- low=terrainTapLevel(ref,uv,max(f.lowLod,terrainFootprintLod(f,dx,dy))).rgb;
- return terrainTapGrad(ref,uv,dx,dy).rgb-low;
-}
-float3 terrainHexDetail(uint2 ref,TerrainTileFrame f,float2 p,float2 pDx,float2 pDy,float3 lowOrig,float3 origDetail){
- float3 w;int2 v1,v2,v3;
- terrainHexGrid(p*terrainHexLattice,w,v1,v2,v3);
- w=terrainHexWeights(w);
- int2 cells[3]={v1,v2,v3};
- float3 sum=0;float total=0,squares=0;
- [unroll]for(int k=0;k<3;++k){
-  // Cells under 1/1024 of the blend are not read.
-  [branch]if(w[k]>=1.0/1024){
-   float2x2 r=terrainHexRotation(cells[k]);
-   float3 low;
-   float3 detail=terrainWrappedDetail(ref,f,terrainHexSampleCoord(p,cells[k]),mul(r,pDx),mul(r,pDy),low);
-   // Borrow detail only where the turned read lands on the same coarse
-   // colour; transition tiles keep their own detail elsewhere.
-   float a=w[k]*(1-smoothstep(terrainMatchNear,terrainMatchFar,distance(low,lowOrig)));
-   sum+=a*detail;total+=a;squares+=a*a;
-  }
- }
- // Zero-mean detail blended with variance preservation keeps its contrast.
- float3 hex=squares>0?sum*min(total*rsqrt(squares),terrainDetailGainLimit):0;
- return hex+(1-total)*origDetail;
-}
-float3 terrainBandSharpen(uint2 ref,TerrainTileFrame f,float2 q,float3 lowOrig,float3 color,float3 detail,float top){
- float3 result=color;
- float2 at=clamp(q,.02,.98);
- [branch]if(top>=.05){
-  float r=terrainBandRadius;
-  float3 gx=terrainTapLevel(ref,terrainTileUv(f,clamp(at+float2(r,0),0,1)),f.lowLod).rgb-lowOrig;
-  float3 gy=terrainTapLevel(ref,terrainTileUv(f,clamp(at+float2(0,r),0,1)),f.lowLod).rgb-lowOrig;
-  float xx=dot(gx,gx),xy=dot(gx,gy),yy=dot(gy,gy);
-  [branch]if(xx+yy>=.0009){
-   // Principal direction of the coarse colour change.
-   float angle=.5*atan2(2*xy,xx-yy);
-   float2 d=float2(cos(angle),sin(angle))*r;
-   float3 a=terrainTapLevel(ref,terrainTileUv(f,clamp(at+d,0,1)),f.lowLod).rgb;
-   float3 b=terrainTapLevel(ref,terrainTileUv(f,clamp(at-d,0,1)),f.lowLod).rgb;
-   float3 span=a-b;float spanSquared=max(dot(span,span),1e-6);
-   float p=saturate(dot(lowOrig-b,span)/spanSquared);
-   float h=dot(detail,span)/spanSquared;
-   result+=span*terrainHeightShift(p,h,terrainBandStrength,top)*smoothstep(.002,.02,spanSquared);
-  }
- }
- return result;
-}
-
-// Far plain fill (anti-tiling, settings.y): once the fine detail has faded
-// (a pixel covers the tile's ~5.7-texel coarse image), the coarse image
-// itself repeats every tile and the ground looks tiled at a distance, live
-// and cached alike. Inside plain fill (same art on every side, so no
-// transition or path to keep) the coarse image is rebuilt from turned and
-// shifted hex reads of it, blended about the tile's mean with variance kept,
-// taking over as the fine detail fades.
-float3 terrainFarFill(uint2 ref,TerrainTileFrame f,float2 p,float lod,float3 orig){
- float meanLod=log2(max(f.size.x*(f.inner.x+2*f.margin.x),1));
- float3 mean=terrainTapLevel(ref,terrainTileUv(f,float2(.5,.5)),meanLod).rgb;
- float3 w;int2 v1,v2,v3;
- terrainHexGrid(p*terrainHexLattice,w,v1,v2,v3);
- // Softer than the fine detail's weights: coarse colour must not change
- // across a cell edge in a line.
- w=pow(max(w,0),3);w/=max(w.x+w.y+w.z,1e-6);
- int2 cells[3]={v1,v2,v3};
- float3 sum=0;float total=0,squares=0;
- [unroll]for(int k=0;k<3;++k){
-  [branch]if(w[k]>=1.0/256){
-   float3 c=terrainTapLevel(ref,terrainTileUv(f,frac(terrainHexSampleCoord(p,cells[k]))),lod).rgb;
-   sum+=w[k]*(c-mean);total+=w[k];squares+=w[k]*w[k];
-  }
- }
- // Variance-preserving blend of the deviations about the mean.
- return squares>0?saturate(mean+sum*min(rsqrt(squares),terrainDetailGainLimit/max(total,1e-4))):orig;
-}
-
 // Long tiles (native_terrain_long_tile: a 1 x 8 strip of a long texture on
 // one tile, the authored cliff art) take no material stage, so a distant
 // cliff of them shows the strip repeating every tile. Once a pixel covers
@@ -334,57 +197,6 @@ float4 terrainLongFar(uint2 ref,float2 uv,float2 uvDx,float2 uvDy,float3 p,float
  return float4(lerp(orig.rgb,color,far),orig.a);
 }
 
-float4 terrainDetailColor(uint2 ref,float2 uv,float2 uvDx,float2 uvDy,float3 p,float3 pDx,float3 pDy,
-  float tiles,uint fillCorners,float4 settings,float4 orig){
- TerrainTileFrame f;float levels;
- f.size=terrainTapSize(ref,levels);
- float tileTexels=f.size.x/max(tiles,1);
- f.lowLod=log2(tileTexels/terrainLowpassTexels);
- float fineLod=terrainFootprintLod(f,uvDx,uvDy);
- float fade=saturate(f.lowLod-.5-fineLod);
- if(tiles<1||tileTexels<32||levels<f.lowLod+1)fade=0;
- float4 result=orig;
- const float coarseLod=f.lowLod;
- float2 cell=floor(uv*tiles);
- f.origin=cell/tiles;f.margin=terrainTileMargin/tiles;f.inner=1/tiles-2*f.margin;
- float2 q=(uv-f.origin-f.margin)/f.inner;
- // Far plain fill weight (0 near, where the fine detail runs fully).
- float far=settings.y>0&&tiles>=1&&tileTexels>=32&&levels>=coarseLod+1?(1-fade)*terrainFillWeight(fillCorners,q):0;
- [branch]if(fade>0){
-  f.lowLod=max(f.lowLod,fineLod);
-  float3 lowOrig=terrainTapLevel(ref,uv,f.lowLod).rgb;
-  float3 origDetail=orig.rgb-lowOrig;
-  float2 e=smoothstep(0,terrainEdgeBand,min(q,1-q));
-  float edge=max(e.x*e.y,terrainFillWeight(fillCorners,q));
-  float3 detail=origDetail;
-  [branch]if(settings.y>0){
-   float3 hex=terrainHexDetail(ref,f,p.xy/terrainTileUnits,pDx.xy/terrainTileUnits,pDy.xy/terrainTileUnits,lowOrig,origDetail);
-   // A neighbour with another tile id borrows from its own art, so at a
-   // shared edge both keep their authored detail; only edges between plain
-   // fill tiles (same art on both sides) keep the borrowed detail.
-   detail=lerp(origDetail,hex,edge);
-  }
-  float3 color=lowOrig+detail;
-  [branch]if(settings.z>0)color=terrainBandSharpen(ref,f,q,lowOrig,color,detail,1);
-  if(settings.y>0)color*=terrainMacro(p.xy);
-  result.rgb=lerp(orig.rgb,saturate(color),fade);
- }
- [branch]if(far>.001){
-  TerrainTileFrame g=f;g.lowLod=coarseLod;
-  result.rgb=lerp(result.rgb,terrainFarFill(ref,g,p.xy/terrainTileUnits,max(coarseLod,fineLod),orig.rgb),far);
- }
- return result;
-}
-// settings: x unused (0; was the removed side projection), y anti-tiling (hex
-// cells + faint brightness variation), z height blend, w unused (0; was the
-// removed large-scale variation, terrain_macro_variation). Each switch off
-// keeps the previous result exactly.
-float4 terrainMaterialColor(uint2 ref,float2 uv,float2 uvDx,float2 uvDy,float3 p,float3 pDx,float3 pDy,
-  float tiles,uint fillCorners,float4 settings,float4 orig){
- float4 result=orig;
- [branch]if(any(settings.yz>0))result=terrainDetailColor(ref,uv,uvDx,uvDy,p,pDx,pDy,tiles,fillCorners,settings,orig);
- return result;
-}
 )";
 
 } // namespace owned

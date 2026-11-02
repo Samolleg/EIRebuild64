@@ -13,8 +13,11 @@
 // go through append_bridge_event (bridge.jsonl in the DLL, host.log in the
 // host). Reads only the frame copies (owned_world_frame.h); host-buildable.
 #include "owned_world_frame.h"
+#include "owned_resource_store.h"
 #include "neighbour_maps.h"
 #include "owned_terrain_views.h"
+#include "native_instance_flags.h"
+#include "fur.h"
 
 #include <algorithm>
 #include <array>
@@ -341,6 +344,13 @@ bool owned_merged_member(const RetainedVisualSample& sample,std::size_t part) no
     return part<map.size() && map[part]>=0;
 }
 void bridge_set_merge_character_parts(bool enabled) noexcept { g_merge_character_parts = enabled; }
+// Fur prototype (fur.h): F10 fur_mode: 0 off, 1 creature fur only, 2 full (creature fur, fur armour, hair strands).
+int g_fur_mode = 0;
+void bridge_set_fur_mode(int mode) noexcept { g_fur_mode = mode < 0 ? 0 : mode > 3 ? 3 : mode; }
+// Owned party portraits (F10 portrait_head / portrait_helmet; engine_bridge.cpp).
+bool g_owned_portraits = true;
+bool g_portrait_helmet = false;
+void bridge_set_portrait_options(bool owned, bool helmet) noexcept { g_owned_portraits = owned; g_portrait_helmet = helmet; }
 
 
 void bridge_set_shadow_settings(std::uint32_t map_side,
@@ -900,6 +910,162 @@ bool bridge_neighbour_world_transform(std::array<float,16>& placement) noexcept 
 }
 
 #endif // !EID3D11_EMBEDDED
+std::shared_ptr<const VisualAssemblyAsset> build_owned_portrait_bare_assembly(
+    const VisualAssemblyAsset& unit, const ResourceBlob& model, const char*& reason) noexcept {
+    try {
+        if (!unit.skeleton) { reason = "bare_head_skeleton"; return nullptr; }
+        MemoryResourceArchive archive;
+        ResourceFailure failure;
+        if (!archive.open(model, failure)) { reason = "bare_head_model_archive"; return nullptr; }
+        auto bare = std::make_shared<VisualAssemblyAsset>(unit);
+        for (auto& part : bare->parts) {
+            const auto stem = fur_part_stem(part.name);
+            const auto armor = part.name.find(".armor");
+            if (armor == std::string::npos || (stem != "hd" && !fur_hair_stem(stem))) continue;
+            const std::string name = part.name.substr(0, armor);
+            // A helmet piece worn over the bare part (hd.armorTT beside hd):
+            // the bare part is already there, so the piece only goes.
+            if (std::any_of(unit.parts.begin(), unit.parts.end(),
+                    [&](const VisualPartAsset& other) { return other.name == name; })) {
+                part.explicitly_hidden = true;
+                continue;
+            }
+            ResourceBlob blob;
+            std::shared_ptr<const FigureCpuAsset> geometry;
+            if (!archive.resolve(name, blob, failure) || !(geometry = retained_visual_figure_asset(blob, failure))) {
+                reason = "bare_head_part_missing"; return nullptr;
+            }
+            // Its own node; the shipped LNK/BON (unhuma) link hd.armorTT,
+            // hr.HH and hr.HH.armorTT to hd, and hr.HH and hr.HH.armorTT share
+            // one bone offset, so bare hair may take its helmet variant's node.
+            std::uint32_t node = UINT_MAX;
+            for (std::uint32_t i = 0; i < unit.skeleton->nodes.size(); ++i)
+                if (unit.skeleton->nodes[i].name == name) { node = i; break; }
+            if (node == UINT_MAX && fur_hair_stem(stem)) node = part.skeleton_node;
+            if (node == UINT_MAX || !unit.skeleton->nodes[node].transform_available) {
+                reason = "bare_head_node_missing"; return nullptr;
+            }
+            // The bare figure samples the unit's primary or secondary atlas by
+            // its own texture number: take that atlas from a part using it.
+            const bool primary = figure_primary_texture(geometry->texture_number);
+            const VisualPartAsset* donor = nullptr;
+            for (const auto& other : unit.parts)
+                if (other.geometry && !other.weapon && figure_primary_texture(other.texture_type) == primary &&
+                    (!donor || fur_part_stem(other.name) == "bd")) donor = &other;
+            if (!donor) { reason = "bare_head_texture"; return nullptr; }
+            part.name = name;
+            part.geometry = geometry;
+            part.skeleton_node = node;
+            part.texture_type = geometry->texture_number;
+            part.texture = donor->texture; part.texture_source_name = donor->texture_source_name;
+            part.material_name = donor->material_name; part.surface = donor->surface;
+            part.source_available = donor->source_available;
+            part.explicitly_hidden = geometry->indices.empty();
+        }
+        static std::atomic<std::uint64_t> revision{0};
+        bare->revision = 0x7f00000000000000ull | ++revision;
+        return bare;
+    } catch (...) { reason = "bare_head_exception"; return nullptr; }
+}
+
+std::string owned_portrait_expression_name(const std::string& neutral, std::int32_t expression) {
+    switch (expression) {
+    case 1: return neutral + "a";
+    case 2: return neutral + "c";
+    case 3: return neutral + "b";
+    default: return {};
+    }
+}
+
+std::shared_ptr<OwnedPortraitOverlay> build_owned_portrait_overlay(const TextureCpuAsset& neutral,
+    const TextureCpuAsset& expression, const char*& reason) noexcept {
+    try {
+        std::uint32_t w = 0, h = 0, ew = 0, eh = 0;
+        std::vector<std::uint8_t> a, b;
+        if (!texture_rgb_pixels(neutral, 0, w, h, a) || !texture_rgb_pixels(expression, 0, ew, eh, b)) {
+            reason = "face_picture_pixels"; return nullptr;
+        }
+        if (w != ew || h != eh || w < 8 || h < 8 || w > 2048 || h > 2048) { reason = "face_picture_sizes"; return nullptr; }
+        // Changed texels (mouth, eyes, brows), grown by 2 texels per 128 and feathered.
+        std::vector<float> mask(std::size_t(w) * h);
+        for (std::size_t i = 0; i < mask.size(); ++i) {
+            int d = 0;
+            for (int c = 0; c < 3; ++c) d = (std::max)(d, std::abs(int(a[i*3+c]) - int(b[i*3+c])));
+            mask[i] = d > 20 ? 1.f : 0.f;
+        }
+        const int grow = (std::max)(1, int(w) / 64);
+        for (int pass = 0; pass < 2; ++pass) {
+            std::vector<float> next(mask.size());
+            for (std::uint32_t y = 0; y < h; ++y) for (std::uint32_t x = 0; x < w; ++x) {
+                float v = 0.f, sum = 0.f; int n = 0;
+                for (int dy = -grow; dy <= grow; ++dy) for (int dx = -grow; dx <= grow; ++dx) {
+                    const int sx = int(x) + dx, sy = int(y) + dy;
+                    if (sx < 0 || sy < 0 || sx >= int(w) || sy >= int(h)) continue;
+                    const float m = mask[std::size_t(sy) * w + sx];
+                    v = (std::max)(v, m); sum += m; ++n;
+                }
+                next[std::size_t(y) * w + x] = pass == 0 ? v : sum / float(n);   // dilate, then feather
+            }
+            mask.swap(next);
+        }
+        const std::uint32_t side_w = 2 * w, side_h = 2 * h, top = (28u * side_h + 128u) / 256u;
+        std::vector<std::uint32_t> offsets;
+        std::uint64_t bytes = 0;
+        for (std::uint32_t mw = side_w, mh = side_h;; mw = (std::max)(1u, mw / 2), mh = (std::max)(1u, mh / 2)) {
+            offsets.push_back(static_cast<std::uint32_t>(bytes)); bytes += std::uint64_t(mw) * mh * 4;
+            if (mw == 1 && mh == 1) break;
+        }
+        if (offsets.size() > 32) { reason = "overlay_mips"; return nullptr; }
+        auto source = std::make_shared<std::vector<std::uint8_t>>(static_cast<std::size_t>(bytes), std::uint8_t(0));
+        auto* base = source->data();
+        for (std::uint32_t y = 0; y < h; ++y) for (std::uint32_t x = 0; x < w; ++x) {
+            const std::size_t i = std::size_t(y) * w + x;
+            if (mask[i] <= 0.f) continue;
+            auto* q = base + (std::size_t(top + y) * side_w + x) * 4;
+            q[0] = b[i*3+2]; q[1] = b[i*3+1]; q[2] = b[i*3]; q[3] = std::uint8_t(std::lround(255.f * mask[i]));
+        }
+        auto texture = std::make_shared<TextureCpuAsset>();
+        std::uint32_t mw = side_w, mh = side_h;
+        for (std::size_t level = 0; level < offsets.size(); ++level) {
+            texture->mips.push_back({mw, mh, offsets[level], mw * mh * 4});
+            if (level + 1 == offsets.size()) break;
+            // Alpha-weighted box filter: no dark fringe at the feathered edge.
+            const std::uint32_t nw = (std::max)(1u, mw / 2), nh = (std::max)(1u, mh / 2);
+            const auto* from = base + offsets[level];
+            auto* to = base + offsets[level + 1];
+            for (std::uint32_t y = 0; y < nh; ++y) for (std::uint32_t x = 0; x < nw; ++x) {
+                float c[3]{}, alpha = 0;
+                for (std::uint32_t k = 0; k < 4; ++k) {
+                    const std::uint32_t sx = (std::min)(mw - 1, 2 * x + (k & 1)), sy = (std::min)(mh - 1, 2 * y + (k >> 1));
+                    const auto* p = from + (std::size_t(sy) * mw + sx) * 4;
+                    const float wgt = p[3] / 255.f;
+                    for (int ch = 0; ch < 3; ++ch) c[ch] += p[ch] * wgt;
+                    alpha += wgt;
+                }
+                auto* q = to + (std::size_t(y) * nw + x) * 4;
+                for (int ch = 0; ch < 3; ++ch) q[ch] = alpha > 0 ? std::uint8_t(std::lround(c[ch] / alpha)) : 0;
+                q[3] = std::uint8_t(std::lround(255.f * alpha / 4));
+            }
+            mw = nw; mh = nh;
+        }
+        static std::atomic<std::uint64_t> serial{0};
+        texture->value_source = TextureValueSource::generated_memory;
+        texture->value_serial = 0x7f00000000000000ull | ++serial;   // own namespace beside the game's generated MMPs
+        texture->source_name = "portrait_expression";
+        texture->width = side_w; texture->height = side_h; texture->bit_count = 32;
+        texture->format_signature = 0x33544e50u; texture->format = MmpFormat::argb8888;
+        texture->texel_offset = 0; texture->opaque_mips = 0;
+        texture->source = std::move(source);
+        auto overlay = std::make_shared<OwnedPortraitOverlay>();
+        for (std::size_t level = 0; level < texture->mips.size(); ++level) {
+            const auto& mip = texture->mips[level];
+            overlay->mips[level] = {texture->source->data() + mip.byte_offset, mip.width, mip.height, mip.bytes};
+        }
+        overlay->texture = std::move(texture);
+        return overlay;
+    } catch (...) { reason = "overlay_exception"; return nullptr; }
+}
+
 // One object preview through its captured device-state sets.
 void run_owned_preview_command(OwnedPreviewCommand& command) noexcept {
     if (command.sets.empty()) return;
@@ -908,40 +1074,76 @@ void run_owned_preview_command(OwnedPreviewCommand& command) noexcept {
     install_owned_scene_inputs(sinks, handoff, nullptr, nullptr, nullptr, 0);
     bool transaction = false, ok = false;
     try {
-        transaction = g_native_sink_begin_object && g_native_sink_begin_object(g_native_sink_context);
-        const ModelPreviewInput input{command.sample, command.base_world, command.world_to_clip,
-            command.texture_time, command.fog, command.presentation_serial};
-        ModelPartResult result;
-        ok = transaction && produce_model_preview(input, command.parts.size(),
-            [&](std::size_t i, ModelPartFacts& facts) {
-                facts.texture_set = static_cast<std::uint32_t>(command.parts[i].set);
-                return true;
-            },
-            [&](std::uint32_t set) {
-                if (set >= command.sets.size()) return false;
-                return true;
-            },
-            [&](std::size_t i, ModelPreviewPart& output) {
-                const auto& part = command.parts[i];
-                // Restore this captured state for every part, including after a wound draw.
-                if (handoff.adopt_sinks) handoff.adopt_sinks(sinks, command.sets[part.set].get());
-                output.ordinal = part.ordinal;
-                output.fixed_state = part.material;
-                output.fixed_state_supplied = true;
-                output.material = {part.uses_default_colors, (part.material_flags & 0x10u) != 0,
-                    part.default_diffuse, part.default_specular, part.lighting,
-                    part.wound ? NativeOrdering::preserve : NativeOrdering::derive_from_state};
-                output.wound = part.wound;
-                return true;
-            },
-            [&](const NativeGeometryView& view, const ModelPreviewPart&) {
-                NativeGeometryResult result{};
-                return g_native_sink_submit(g_native_sink_context, view, result);
-            },
-            [&](std::size_t i, const ModelPreviewPart& part) {
-                if (handoff.set_wound) handoff.set_wound(sinks, part.wound, command.parts[i].wound_texture);
-                return true;
-            }, result);
+        auto& sample = command.sample;
+        NativeWorldGeometry::Pose* pose = nullptr;
+        ok = retained_visual_gpu_pose(sample, pose) && pose;
+        if (ok) {
+            pose->root_to_world = command.base_world;
+            transaction = g_native_sink_begin_object && g_native_sink_begin_object(g_native_sink_context);
+            ok = transaction;
+        }
+        for (std::size_t i = 0; ok && i < command.parts.size(); ++i) {
+            const auto& part = command.parts[i];
+            if (handoff.adopt_sinks) handoff.adopt_sinks(sinks, command.sets[part.set].get());
+            NativeWorldBounds bounds{};
+            NativePreparedPartSubmission* record = nullptr;
+            if (!retained_visual_part_bounds(sample, part.ordinal, bounds) ||
+                !retained_visual_part_submission(sample, part.ordinal, bounds, {true,true,0},
+                    command.texture_time, command.fog, record)) { ok = false; break; }
+            NativeGeometryView view = *record->source;
+            view.owned_fixed_state = part.material;
+            view.world.pose = pose; view.world.owner = &pose->owner;
+            view.world.shape = pose->shape; view.world.object_to_world = command.base_world;
+            view.world.world_to_clip = command.world_to_clip; view.object_to_clip = command.world_to_clip;
+            view.contribution = {true,true,0};
+            view.bounds_minimum = bounds.minimum; view.bounds_maximum = bounds.maximum;
+            view.prepared_identity.presentation_serial = command.presentation_serial;
+            // The part's unit flag stays (materials, snow): a preview is a unit, not a world object.
+            view.flags = (record->values.flags&native_unit_flag) | (part.uses_default_colors?4u:0u) | ((part.material_flags&0x10u)?8u:0u);
+            view.default_diffuse = part.default_diffuse; view.default_specular = part.default_specular;
+            view.lighting = part.lighting;
+            view.owned_fixed_state.specular_enable = (part.material_flags&0x10u) ? TRUE : FALSE;
+            view.u_shift = record->values.u_shift; view.v_shift = record->values.v_shift;
+            // Fur: the part's profile reaches the record; strand hair hides its mesh colour.
+            view.fur = record->fur ? &record->fur : nullptr; view.fur_node_base = record->fur_node_base;
+            if (fur_strand_hair_record(record->fur.get(), record->fur_node_base, 0, g_fur_mode)) {
+                // As in the world (renderer_native_queue.cpp): the hidden hair
+                // mesh's fragments fail the alpha test. Without an alpha test in
+                // the interface state it inherits, the invisible mesh writes depth
+                // at the hair surface over the undercoat and the strands lying on it.
+                view.lighting.material_alpha = 0;
+                view.owned_fixed_state.alpha_test_enable = TRUE;
+                view.owned_fixed_state.alpha_func = 5u;  // D3DCMP_GREATER
+                view.owned_fixed_state.alpha_ref = 0;
+                view.owned_fixed_state.z_write_enable = FALSE;
+            }
+            view.ordering = part.wound || command.portrait ? NativeOrdering::preserve : NativeOrdering::derive_from_state;
+            view.interface_preview = true;   // a preview is interface (panel doll, outfit, portrait)
+            NativeGeometryResult result{};
+            if (!g_native_sink_submit(g_native_sink_context, view, result)) { ok = false; break; }
+            if (command.portrait_overlay && fur_part_stem(sample.assembly->parts[part.ordinal].name) == "hd") {
+                // The expression over the head: same mesh and pose, its own texture and material binding.
+                auto& overlay = *command.portrait_overlay;
+                const auto& texture = *overlay.texture;
+                NativeGeometryView over = view;
+                over.owned_texture = {};
+                over.owned_texture.value_source = static_cast<UINT>(TextureValueSource::generated_memory) + 1;
+                over.owned_texture.identity = texture.value_serial; over.owned_texture.generation = 1;
+                over.owned_texture.format = NativeOwnedTextureFormat::argb8888;
+                over.owned_texture.mips = overlay.mips.data();
+                over.owned_texture.mip_count = static_cast<UINT>(texture.mips.size());
+                over.prepared_material = &overlay.material; over.prepared_wound_material = &overlay.wound_material;
+                over.prepared_identity.part_index = view.prepared_identity.part_index | 0x40000000u;
+                over.fur = nullptr; over.ordering = NativeOrdering::preserve;
+                over.flags &= ~4u;   // the overlay's own texels, never default colours
+                if (!g_native_sink_submit(g_native_sink_context, over, result)) { ok = false; break; }
+            }
+            if (part.wound) {
+                if (handoff.set_wound) handoff.set_wound(sinks, part.wound, part.wound_texture);
+                view.wound_surface_interface = part.wound; view.wound_only = true;
+                if (!g_native_sink_submit(g_native_sink_context, view, result)) { ok = false; break; }
+            }
+        }
     } catch (...) { ok = false; }
     if (!ok) {
         static volatile LONG reported = 0;

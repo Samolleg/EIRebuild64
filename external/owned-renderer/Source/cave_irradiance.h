@@ -577,6 +577,10 @@ struct CaveGlowConstants {
 };
 static_assert(sizeof(CaveGlowConstants) == 16, "cave glow constant layout");
 constexpr char kCaveExitGlowHlsl[] = R"(
+#ifndef NATIVE_LOOP_GUARD
+#define NATIVE_LOOP_GUARD(id,iteration,bound)
+#define NATIVE_LOOP_ALIVE
+#endif
 struct CaveExit{float4 centre;float4 across;float4 inwardHeight;float4 colour;};
 // The daylight haze of the cave exits seen along the view ray from the eye
 // toward p (to the far plane for the glow pass): per exit its outdoor colour
@@ -587,7 +591,7 @@ struct CaveExit{float4 centre;float4 across;float4 inwardHeight;float4 colour;};
 // ground strip at a mouth blends into the glowing opening.
 float3 caveExitGlow(StructuredBuffer<CaveExit> exits,uint count,float3 eye,float3 d){
  float3 glow=0;
- [loop]for(uint n=0;n<count;++n){
+ [loop]for(uint n=0;n<count;++n){NATIVE_LOOP_GUARD(9u,n,count)
   CaveExit e=exits[n];
   float2 inward=e.inwardHeight.xy;float halfWidth=length(e.across.xy);
   float3 outside=e.centre.xyz+float3(-inward*6,.5*e.inwardHeight.z);

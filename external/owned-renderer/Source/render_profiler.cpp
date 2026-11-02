@@ -382,6 +382,9 @@ HRESULT RenderProfiler::initialize(ID3D11Device* device, ID3D11DeviceContext* co
     }
     refresh_enabled();
 
+    // D3D12 backend: stamps instead of queries; the adopted D3D11 device
+    // creates nothing.
+    if (timestamps_) return S_OK;
     D3D11_QUERY_DESC disjoint_desc{D3D11_QUERY_TIMESTAMP_DISJOINT, 0};
     D3D11_QUERY_DESC timestamp_desc{D3D11_QUERY_TIMESTAMP, 0};
     for (auto& slot : slots_) {
@@ -691,6 +694,13 @@ void RenderProfiler::request_capture_next(const BridgeProfileSnapshot* bridge,
                 static_cast<unsigned long long>(resources->geometry_page_bytes),
                 static_cast<unsigned long long>(resources->geometry_live_bytes));
             metadata += line;
+            // D3D12: surface homes are executor textures the surface accounting
+            // does not count; those two fields read 0 and are not GPU totals.
+            if (resources->d3d12_backend && !metadata.empty() && metadata.back() == '}') {
+                metadata.pop_back();
+                metadata += ",\"unavailable_on_d3d12\":{\"surface_gpu_bytes\":\"surface accounting counts D3D11 textures; D3D12 surface textures are not counted (reads 0)\","
+                            "\"surface_double_resident_bytes\":\"derived from surface_gpu_bytes (reads 0)\"}}";
+            }
         }
         char lifecycle_json[3072]{};
         if (bridge &&
@@ -791,6 +801,23 @@ void RenderProfiler::request_capture_next(const BridgeProfileSnapshot* bridge,
     }
 }
 
+void RenderProfiler::mark(QueryPair& pair, bool end) noexcept {
+    if (timestamps_) (end ? pair.end_stamp : pair.begin_stamp) = timestamps_->stamp();
+    else context_->End(end ? pair.end.Get() : pair.begin.Get());
+}
+
+bool RenderProfiler::read(const QueryPair& pair, bool end, UINT64& ticks) noexcept {
+    if (timestamps_) {
+        const std::uint64_t stamp = end ? pair.end_stamp : pair.begin_stamp;
+        std::uint64_t value = 0;
+        if (!stamp || !timestamps_->value(stamp, value)) return false;
+        ticks = value;
+        return true;
+    }
+    return context_->GetData(end ? pair.end.Get() : pair.begin.Get(), &ticks, sizeof(ticks),
+                             D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK;
+}
+
 void RenderProfiler::begin_frame(UINT width, UINT height) {
     if (!enabled_ || frame_active_ || !context_) return;
     FrameSlot& slot = slots_[next_frame_ % kBufferedFrames];
@@ -846,10 +873,10 @@ void RenderProfiler::begin_frame(UINT width, UINT height) {
         capture_directory_.clear();
     }
 
-    context_->Begin(slot.disjoint.Get());
+    if (!timestamps_) context_->Begin(slot.disjoint.Get());
     if (attribution_.enabled() && attribution_.begin_interval(next_frame_)) {
         attribution_.record_device_begin();
-        context_->End(slot.device_span.begin.Get());
+        mark(slot.device_span, false);
     }
     frame_active_ = true;
 }
@@ -874,8 +901,8 @@ void RenderProfiler::begin_pass(const char* name) {
     if (current_pass_ >= current_->queries.size()) {
         QueryPair pair;
         const D3D11_QUERY_DESC timestamp_desc{D3D11_QUERY_TIMESTAMP, 0};
-        if (FAILED(device_->CreateQuery(&timestamp_desc, &pair.begin)) ||
-            FAILED(device_->CreateQuery(&timestamp_desc, &pair.end))) {
+        if (!timestamps_ && (FAILED(device_->CreateQuery(&timestamp_desc, &pair.begin)) ||
+            FAILED(device_->CreateQuery(&timestamp_desc, &pair.end)))) {
             if (attribution_.enabled()) attribution_.mark_invalid(attribution_scope_overflow);
             return;
         }
@@ -887,7 +914,7 @@ void RenderProfiler::begin_pass(const char* name) {
     strncpy_s(pass.name.data(), pass.name.size(), name ? name : "unnamed", _TRUNCATE);
     pass.cpu_begin = qpc_now();
     if (attribution_.enabled()) pass.attribution_begin = attribution_.sample_point();
-    context_->End(current_->queries[current_pass_].begin.Get());
+    mark(current_->queries[current_pass_], false);
     pass_active_ = true;
 }
 
@@ -939,8 +966,8 @@ void RenderProfiler::sub_scope(const char* name) {
         QueryPair pair;
         const D3D11_QUERY_DESC timestamp_desc{D3D11_QUERY_TIMESTAMP, 0};
         // A failed creation only loses the diagnostic split, never a pass total.
-        if (FAILED(device_->CreateQuery(&timestamp_desc, &pair.begin)) ||
-            FAILED(device_->CreateQuery(&timestamp_desc, &pair.end))) {
+        if (!timestamps_ && (FAILED(device_->CreateQuery(&timestamp_desc, &pair.begin)) ||
+            FAILED(device_->CreateQuery(&timestamp_desc, &pair.end)))) {
             ++subs.dropped;
             return;
         }
@@ -951,7 +978,7 @@ void RenderProfiler::sub_scope(const char* name) {
     record = {};
     strncpy_s(record.name.data(), record.name.size(), label, _TRUNCATE);
     record.parent = current_pass_;
-    context_->End(subs.queries[subs.count].begin.Get());
+    mark(subs.queries[subs.count], false);
     sub_active_ = true;
 }
 
@@ -965,7 +992,7 @@ void RenderProfiler::add_sub_draw(std::uint64_t draws, std::uint64_t triangles) 
 
 void RenderProfiler::end_sub_scope() {
     if (!sub_active_ || !current_subs_) return;
-    context_->End(current_subs_->queries[current_subs_->count].end.Get());
+    mark(current_subs_->queries[current_subs_->count], true);
     ++current_subs_->count;
     sub_active_ = false;
 }
@@ -974,7 +1001,7 @@ void RenderProfiler::end_pass(ID3D11Texture2D* capture_source) {
     if (!pass_active_ || !current_) return;
     end_sub_scope();
     PassRecord& pass = current_->passes[current_pass_];
-    context_->End(current_->queries[current_pass_].end.Get());
+    mark(current_->queries[current_pass_], true);
     pass.cpu_end = qpc_now();
     if (attribution_.enabled()) {
         pass.attribution_end = attribution_.sample_point();
@@ -986,7 +1013,8 @@ void RenderProfiler::end_pass(ID3D11Texture2D* capture_source) {
                                pass.counters.capture_calls, pass.counters.capture_bytes,
                                pass.counters.packets_created, pass.counters.packets_appended);
     }
-    if (capture_active_ && capture_source) capture_pass(capture_source, pass, current_pass_);
+    // D3D12: no D3D11 back buffer to copy; the pass manifest is still written.
+    if (capture_active_ && (capture_source || timestamps_)) capture_pass(capture_source, pass, current_pass_);
     ++current_pass_;
     current_->pass_count = current_pass_;
     pass_active_ = false;
@@ -1090,10 +1118,11 @@ void RenderProfiler::end_frame(UINT present_interval, UINT present_flags) {
     if (!frame_active_ || !current_) return;
     if (pass_active_) end_pass();
     if (attribution_.enabled() && attribution_.interval_open()) {
-        context_->End(current_->device_span.end.Get());
+        mark(current_->device_span, true);
         attribution_.record_device_end();
     }
-    context_->End(current_->disjoint.Get());
+    if (timestamps_) current_->frame_stamp = timestamps_->stamp();
+    else context_->End(current_->disjoint.Get());
     if (attribution_.enabled()) attribution_.record_present_enter(present_interval, present_flags);
     current_->pending = true;
     present_slot_ = current_;
@@ -1158,6 +1187,13 @@ bool RenderProfiler::resolve(FrameSlot& slot, bool wait) {
     // readbacks: a GPU that stops completing work must not hang the caller.
     const ULONGLONG wait_start = GetTickCount64();
     do {
+        if (timestamps_) {
+            // D3D12: the frame's last stamp done means all of its stamps are.
+            std::uint64_t ticks = 0;
+            disjoint.Frequency = timestamps_->frequency();
+            disjoint.Disjoint = FALSE;
+            ready = !slot.frame_stamp || timestamps_->value(slot.frame_stamp, ticks) ? S_OK : S_FALSE;
+        } else
         ready = context_->GetData(slot.disjoint.Get(), &disjoint, sizeof(disjoint),
                                   wait ? 0 : D3D11_ASYNC_GETDATA_DONOTFLUSH);
         if (ready == S_FALSE && wait) {
@@ -1208,10 +1244,7 @@ bool RenderProfiler::resolve(FrameSlot& slot, bool wait) {
         UINT64 gpu_begin = 0;
         UINT64 gpu_end = 0;
         const bool gpu_ready = !disjoint.Disjoint &&
-            context_->GetData(slot.queries[index].begin.Get(), &gpu_begin, sizeof(gpu_begin),
-                              D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
-            context_->GetData(slot.queries[index].end.Get(), &gpu_end, sizeof(gpu_end),
-                              D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK;
+            read(slot.queries[index], false, gpu_begin) && read(slot.queries[index], true, gpu_end);
         const double cpu_ms = 1000.0 * static_cast<double>(pass.cpu_end - pass.cpu_begin) /
                               static_cast<double>(qpc_frequency_);
         const double gpu_ms = gpu_ready && gpu_end >= gpu_begin && disjoint.Frequency
@@ -1239,10 +1272,7 @@ bool RenderProfiler::resolve(FrameSlot& slot, bool wait) {
             if (record.parent >= snapshot.pass_count) continue;
             UINT64 gpu_begin = 0, gpu_end = 0;
             const bool gpu_ready = !disjoint.Disjoint && disjoint.Frequency &&
-                context_->GetData(subs.queries[index].begin.Get(), &gpu_begin, sizeof(gpu_begin),
-                                  D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
-                context_->GetData(subs.queries[index].end.Get(), &gpu_end, sizeof(gpu_end),
-                                  D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
+                read(subs.queries[index], false, gpu_begin) && read(subs.queries[index], true, gpu_end) &&
                 gpu_end >= gpu_begin;
             const double gpu_ms = gpu_ready
                 ? 1000.0 * static_cast<double>(gpu_end - gpu_begin) / static_cast<double>(disjoint.Frequency)
@@ -1272,10 +1302,7 @@ bool RenderProfiler::resolve(FrameSlot& slot, bool wait) {
     if (attribution_.enabled() && slot.attribution_present_returned) {
         UINT64 span_begin = 0, span_end = 0;
         const bool span_ready = !disjoint.Disjoint &&
-            context_->GetData(slot.device_span.begin.Get(), &span_begin, sizeof(span_begin),
-                              D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
-            context_->GetData(slot.device_span.end.Get(), &span_end, sizeof(span_end),
-                              D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK;
+            read(slot.device_span, false, span_begin) && read(slot.device_span, true, span_end);
         std::sort(gpu_intervals.begin(), gpu_intervals.begin() + gpu_interval_count,
                   [](const GpuInterval& left, const GpuInterval& right) { return left.begin < right.begin; });
         std::uint64_t named_union = 0;
@@ -1571,7 +1598,8 @@ void RenderProfiler::capture_pass(ID3D11Texture2D* source, const PassRecord& pas
     static const bool all_passes = [] { char value[4]{};
         return GetEnvironmentVariableA("EI_RENDERER_CAPTURE_ALL_PASSES", value, sizeof(value)) && value[0] == '1'; }();
     const bool image = all_passes || std::strcmp(sanitize(pass.name.data()).c_str(), "ui_composition") == 0;
-    if (image && !write_bmp(image_path, source)) return;
+    if (image && source && !write_bmp(image_path, source)) return;
+    const bool image_written = image && source;
 
     const std::string manifest_path = capture_directory_ + "\\passes.jsonl";
     FILE* file = nullptr;
@@ -1583,7 +1611,7 @@ void RenderProfiler::capture_pass(ID3D11Texture2D* source, const PassRecord& pas
                  "{\"ordinal\":%u,\"name\":\"%s\",\"image\":\"%s\",\"cpu_ms\":%.4f,"
                  "\"draws\":%llu,\"triangles\":%llu,\"batches\":%llu,\"uploads\":%llu,"
                  "\"upload_bytes\":%llu}\n",
-                 ordinal, sanitize(pass.name.data()).c_str(), image ? image_name : "", cpu_ms,
+                 ordinal, sanitize(pass.name.data()).c_str(), image_written ? image_name : "", cpu_ms,
                  static_cast<unsigned long long>(pass.counters.draws),
                  static_cast<unsigned long long>(pass.counters.triangles),
                  static_cast<unsigned long long>(pass.counters.batches),

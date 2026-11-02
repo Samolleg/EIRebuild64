@@ -229,6 +229,10 @@ bool retained_visual_gpu_pose(const RetainedVisualSample& sample,
     NativeWorldGeometry::Pose*& pose);
 bool retained_visual_combat_anchor(const RetainedVisualSample& sample,
     std::array<float,3>& anchor);
+// Owned party portrait: the box of the listed parts in the neutral pose, in
+// the pose root's space (the space the portrait's root_to_world places).
+bool retained_visual_neutral_parts_box(const RetainedVisualSample& sample,
+    const std::vector<std::size_t>& parts,std::array<float,3>& minimum,std::array<float,3>& maximum);
 bool retained_visual_part_bounds(const RetainedVisualSample& sample,
     std::size_t part_index,NativeWorldBounds& bounds);
 bool retained_visual_part_submission(const RetainedVisualSample& sample,

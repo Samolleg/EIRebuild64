@@ -82,6 +82,9 @@ struct NeighbourPieceImpostor {
     std::uint32_t figure = 0, texture = 0;
     Microsoft::WRL::ComPtr<ID3D11Buffer> vertices, indices;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> vertex_view;
+    // D3D12 backend: both buffers created with their bytes in upload memory
+    // on the stream worker; the bake records their copies (finish_buffer).
+    std::shared_ptr<D3D12PreparedUpload> vertices12, indices12;
     std::uint32_t index_count = 0;
     std::array<float, 4> sphere{};
 };
@@ -126,8 +129,10 @@ NativeOwnedTextureView neighbour_piece_texture_view(const NeighbourPieceTexture&
     std::vector<NativeOwnedTextureMip>& mips);
 
 // Condenses a decoded, welded and prebuilt neighbour into its piece, creating
-// its impostor buffers on `device`. The upload keeps its decoded map; the
-// caller drops it afterwards.
-std::unique_ptr<NeighbourPiece> make_neighbour_piece(NeighbourMapUpload& upload, ID3D11Device* device);
+// its impostor buffers on `device` (D3D12 backend, no device: preparing them
+// through `d3d12`). The upload keeps its decoded map; the caller drops it
+// afterwards.
+std::unique_ptr<NeighbourPiece> make_neighbour_piece(NeighbourMapUpload& upload, ID3D11Device* device,
+    D3D12Preparer* d3d12 = nullptr);
 
 } // namespace owned

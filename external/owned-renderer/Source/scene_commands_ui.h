@@ -315,6 +315,7 @@ struct Residency {
         std::shared_ptr<SurfaceImage> snapshot;           // scene_surface snapshot
         ComPtr<ID3D11Texture2D> texture;                  // a blit's or capture's GPU home
         ComPtr<ID3D11ShaderResourceView> srv;
+        D3D12TextureRef d3d12;                            // x64 host, renderer_backend=d3d12
     };
     std::vector<Home> homes;
     std::vector<std::shared_ptr<const CharacterPaneGlyphAsset>> glyph_assets;

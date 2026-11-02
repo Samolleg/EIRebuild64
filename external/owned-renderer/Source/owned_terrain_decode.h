@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -111,10 +112,15 @@ std::set<std::string> owned_terrain_tile_blend_drawable(const TerrainTileBlendIn
 // input's slots). edge_families: per grid vertex the family a shared map
 // edge gives it (0: its own; empty: none), used where this map has a plain
 // cell for it; the others go to `unmatched`. bed_families: liquid-bed
-// families on this map (terrain_tile_bed_name).
+// families on this map (terrain_tile_bed_name). fold_table: the folded
+// cells' table (terrain_tile_fold_cells), the grid's extra row; borrowed:
+// families that still borrow another family's art. slot_variants (terrain
+// 2.0): each vertex draws the plain slot its own plain tiles place.
 std::vector<std::array<std::uint32_t,4>> owned_terrain_tile_blend_rows(const TerrainTileBlendInput& input,
     const TerrainTileFamilies& families,const std::vector<std::uint32_t>& edge_families,
-    std::size_t& blended,std::size_t& plain_materials,std::size_t& bed_families,std::set<std::uint32_t>& unmatched);
+    std::size_t& blended,std::size_t& plain_materials,std::size_t& bed_families,std::set<std::uint32_t>& unmatched,
+    std::vector<std::uint32_t>& fold_table,std::set<std::uint32_t>& borrowed,
+    std::map<std::uint32_t,std::uint32_t>* family_cells=nullptr,bool slot_variants=false);
 // What the tile family load needs from the map, copied on the calling thread:
 // its atlas (space: terrain_tile_family_space, slot count), its own base tile
 // placements and file name, ETERRTYPE per slot and the animated slots.

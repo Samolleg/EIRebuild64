@@ -1,5 +1,8 @@
 #pragma once
 #include "contact_blend.h"
+#include "fur.h"
+#include "native_instance_flags.h"
+#include <d3d.h>
 #include "model_draw.h"
 #include "model_preview_geometry.h"
 #include "model_preview_material.h"
@@ -51,7 +54,16 @@ bool produce_model_preview(const ModelPreviewInput& input, std::size_t count,
             if (!input.ground_contact) view.flags &= ~native_ground_contact_flag;
             view.fog = input.fog;
             if (part.fixed_state_supplied) view.owned_fixed_state = part.fixed_state;
+            const auto unit_flag = view.flags & native_unit_flag;
             apply_model_preview_material(view, part.material);
+            view.flags |= unit_flag;
+            if (fur_strand_hair_record(view.fur ? view.fur->get() : nullptr, view.fur_node_base, 0, g_fur_mode)) {
+                view.lighting.material_alpha = 0;
+                view.owned_fixed_state.alpha_test_enable = TRUE;
+                view.owned_fixed_state.alpha_func = D3DCMP_GREATER;
+                view.owned_fixed_state.alpha_ref = 0;
+                view.owned_fixed_state.z_write_enable = FALSE;
+            }
             if (!submit(view, part)) return false;
             if (part.wound) {
                 if (!wound(index, part)) return false;

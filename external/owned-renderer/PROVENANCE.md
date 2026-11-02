@@ -1,3 +1,26 @@
+# X64RUPD02 renderer source provenance (2026-11-02)
+
+Upstream final main tree: `b1ffc736d4792eb36f3528a8d8ee2c358da80d54`,
+fetched read-only from Ilufus/evil-islands-owned-renderer. Ancestor:
+`ef7e12467db17ef673f8ce3b105063b4b3b16417`. Local source base:
+`4f716b512677ef192cf9b2af6c453c4f2f706f2c`, task/X64RUPD02.
+Imported as a file-level three-way merge, without Git merge.
+
+This is a modified embedded EIRebuild64 renderer by Ilufus, labelled
+`eirebuild64-X64RUPD02-b1ffc736`; LICENSE.md and NOTICE.md are preserved.
+Common materials, fur, terrain 2.0, liquid seams and shader bodies follow
+the final upstream tree. Necessary typed resource/device/preview inputs,
+native NGX lifecycle, C56 hit target, camera anchor, source gamma, packed
+normals, FIG1/FIG8 and retained LOD remain local. The FIG1 neighbour patch
+has not landed upstream; its existing X64DECOR01 implementation is kept.
+The separate Host/Core transport, D3D12 presentation/NGX/FG owner and retail
+hooks remain excluded from the embedded D3D11 target. No substitute
+backend, transport stub, fallback or local configuration option is added.
+The normal shader producer builds from the same source with runtime-only
+bodies excluded. Runtime and visual acceptance remain open.
+
+## Historical integration notes
+
 # Renderer source provenance
 
 X64RUPD01 (2026-10-31): current upstream source baseline is main commit

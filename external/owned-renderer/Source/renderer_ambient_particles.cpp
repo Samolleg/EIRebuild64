@@ -58,12 +58,18 @@ bool Renderer::update_ambient_liquid_level(const std::vector<float>& shifts) noe
     const auto previous_emissive = emissive_tiles_.size();
     if (!apply_liquid_level(ambient_liquid_level_, &shifts, ambient_height_, ambient_area_, emissive_tiles_)) return false;
     const UINT tiles_x = ambient_tiles_x_, verts_x = tiles_x*2u+1u;
-    const auto upload = [&](ID3D11ShaderResourceView* view, const void* data, UINT pitch) {
+    const auto upload = [&](ID3D11ShaderResourceView* view, D3D12Texture* texture12, const void* data, UINT pitch) {
+        if (d3d12_) {  // D3D12 backend: the same rewrite of its textures, in stream order
+            UINT w = 0, h = 0, mips = 0;DXGI_FORMAT format{};
+            if (texture12 && d3d12_->texture_info(*texture12,w,h,mips,format))
+                (void)d3d12_->write_texture(*texture12,RECT{0,0,LONG(w),LONG(h)},data,pitch);
+            return;
+        }
         ComPtr<ID3D11Resource> resource;view->GetResource(&resource);
         context_->UpdateSubresource(resource.Get(),0,nullptr,data,pitch,0);
     };
-    upload(ambient_area_srv_.Get(),ambient_area_.data(),tiles_x);
-    upload(ambient_height_srv_.Get(),ambient_height_.data(),verts_x*4u);
+    upload(ambient_area_srv_.Get(),ambient12_.area.get(),ambient_area_.data(),tiles_x);
+    upload(ambient_height_srv_.Get(),ambient12_.height.get(),ambient_height_.data(),verts_x*4u);
     // Lava lights follow only a changed lava tile set (none on most maps).
     if (previous_emissive || !emissive_tiles_.empty()) emissive_generation_ = UINT64_MAX;
     ++ambient_liquid_level_updates_;
@@ -98,6 +104,8 @@ void append_ambient_particle_shader_programs(std::vector<ShaderProgram>& out) {
 // results are generation-checked.
 void Renderer::release_ambient_world() noexcept {
     ambient_terrain_.reset(); ambient_geometry_.reset(); ambient_source_map_.reset();
+    ambient12_.area.reset(); ambient12_.height.reset(); ambient12_.ground.reset(); ambient12_.sources.reset();
+    ambient12_.fall_tiles.reset(); ambient12_.falls.reset(); ambient12_.shells.reset();
     ambient_area_srv_.Reset(); ambient_height_srv_.Reset(); ambient_ground_srv_.Reset(); ambient_type_srv_.Reset();
     ambient_sources_srv_.Reset(); ambient_fall_tiles_srv_.Reset(); ambient_falls_srv_.Reset(); ambient_fall_shell_srv_.Reset();
     ambient_fall_tile_count_ = ambient_fall_impact_count_ = ambient_fall_count_ = 0; ambient_fall_shell_vertices_ = 0;
@@ -109,8 +117,7 @@ void Renderer::release_ambient_world() noexcept {
     emissive_generation_ = UINT64_MAX; emissive_published_ = 0;
     decltype(native_contact_cell_high_)().swap(native_contact_cell_high_);
     native_contact_cells_x_ = native_contact_cells_y_ = 0; ++native_contact_generation_;
-    terrain_bake_cells_.reset(); terrain_bake_cells_generation_ = 0;
-    release_terrain_bake();
+    release_terrain2_cache();
     release_contact_blend_maps(); decltype(contact_tile_rows_)().swap(contact_tile_rows_);
     liquid_swamp_frame_srv_.Reset(); liquid_swamp_frame_generation_ = UINT64_MAX;
     liquid_surf_active_.reset(); liquid_surf_generation_ = UINT64_MAX; ++liquid_surf_serial_;
@@ -134,7 +141,9 @@ bool Renderer::rebuild_ambient_particle_map(const AmbientWorldSource& inputs, co
     // layer shift step is a bounded in-place update.
     const bool same_map = !ambient_source_map_.owner_before(inputs.map) && !inputs.map.owner_before(ambient_source_map_);
     if (same && same_map && ambient_geometry_) {
-        const bool ready = ambient_area_srv_ && ambient_height_srv_ && ambient_ground_srv_ && ambient_type_srv_ && ambient_sources_srv_;
+        // D3D12 backend: its own resources of the same grids (rebuild_ambient_grids_d3d12).
+        const bool ready = d3d12_ ? ambient12_.area && ambient12_.height && ambient12_.ground && ambient12_.sources
+                                  : ambient_area_srv_ && ambient_height_srv_ && ambient_ground_srv_ && ambient_type_srv_ && ambient_sources_srv_;
         if (!ready) return false;
         if (ambient_geometry_->layer_shifts != inputs.geometry->layer_shifts &&
             !update_ambient_liquid_level(inputs.geometry->layer_shifts)) return false;
@@ -162,10 +171,16 @@ bool Renderer::rebuild_ambient_particle_map(const AmbientWorldSource& inputs, co
     ambient_liquid_level_ = std::move(grids.level);
     ambient_area_ = std::move(grids.area);emissive_tiles_ = std::move(grids.emissive);
     ambient_height_ = std::move(grids.height);ambient_tiles_x_ = tiles_x;ambient_tiles_y_ = tiles_y;
-    start_terrain_bake_cells(); // the terrain material cache's cell tables, on a worker
     // Waterfall sources (impact, lip) of every tile a level can flood, from
     // the flow of the surface shown at map build (ambient_particle_frame.h).
     ambient_fall_sources(terrain,inputs.geometry.get(),ambient_liquid_level_.liquid_area,tiles_x,ambient_sources_);
+    if (d3d12_) { // D3D12 backend: the same grids and lists as D3D12 resources
+        if (!rebuild_ambient_grids_d3d12(terrain, grids.ground)) return false;
+        ambient_geometry_ = inputs.geometry;
+        ambient_source_map_ = inputs.map;
+        emissive_generation_ = UINT64_MAX;
+        return true;
+    }
     {
         auto fall_tiles = ambient_fall_tiles(ambient_sources_,tiles_x,ambient_fall_impact_count_);
         ambient_fall_tile_count_ = std::uint32_t(fall_tiles.size());
@@ -226,6 +241,62 @@ bool Renderer::rebuild_ambient_particle_map(const AmbientWorldSource& inputs, co
     return false;
 }
 
+// rebuild_ambient_particle_map's GPU half on the D3D12 backend: the grids
+// (area t0, liquid-surface height t1, base ground t2, sources t3) and the
+// waterfall lists (tiles t4, falls t5, shells t6) the composite_world
+// effects read, the same values and formats as the D3D11 views. A layer
+// shift rewrites area and height in place (update_ambient_liquid_level).
+bool Renderer::rebuild_ambient_grids_d3d12(const TerrainCpuAsset& terrain, const std::vector<float>& ground) noexcept try {
+    auto& a = ambient12_;
+    a.area.reset();a.height.reset();a.ground.reset();a.sources.reset();
+    a.fall_tiles.reset();a.falls.reset();a.shells.reset();
+    ambient_fall_tile_count_ = ambient_fall_impact_count_ = ambient_fall_count_ = 0;ambient_fall_shell_vertices_ = 0;
+    const UINT tx = ambient_tiles_x_, ty = ambient_tiles_y_, vx = tx*2u+1u, vy = ty*2u+1u;
+    if (ambient_area_.size() != std::size_t(tx)*ty || ambient_height_.size() != std::size_t(vx)*vy ||
+        ground.size() != std::size_t(vx)*vy || ambient_sources_.size() != std::size_t(tx)*ty) return false;
+    const auto texture = [&](D3D12TextureRef& out, UINT w, UINT h, DXGI_FORMAT format, const void* data, UINT pitch) {
+        D3D12TextureRef created;
+        HRESULT hr = d3d12_->create_texture(w,h,format,created);
+        if (SUCCEEDED(hr)) hr = d3d12_->write_texture(*created,RECT{0,0,LONG(w),LONG(h)},data,pitch);
+        if (SUCCEEDED(hr)) out = std::move(created);
+        return SUCCEEDED(hr);
+    };
+    const auto buffer = [&](D3D12BufferRef& out, const void* data, UINT64 bytes, UINT stride) {
+        D3D12BufferRef created;
+        HRESULT hr = d3d12_->create_buffer(bytes,stride,kD3D12BufferTyped,created);
+        if (SUCCEEDED(hr)) hr = d3d12_->write_buffer(*created,0,data,bytes);
+        if (SUCCEEDED(hr)) out = std::move(created);
+        return SUCCEEDED(hr);
+    };
+    auto fall_tiles = ambient_fall_tiles(ambient_sources_,tx,ambient_fall_impact_count_);
+    ambient_fall_tile_count_ = std::uint32_t(fall_tiles.size());
+    if (fall_tiles.empty()) fall_tiles.push_back(0); // a valid one-element buffer, never read
+    const auto& falls = procedural_fall_map(terrain)->falls;
+    const auto list = ambient_fall_list(falls);
+    ambient_fall_count_ = std::uint32_t(falls.size());
+    const auto& shells = procedural_fall_map(terrain)->shells;
+    if (!texture(a.area,tx,ty,DXGI_FORMAT_R8_UINT,ambient_area_.data(),tx) ||
+        !texture(a.height,vx,vy,DXGI_FORMAT_R32_FLOAT,ambient_height_.data(),vx*4u) ||
+        !texture(a.ground,vx,vy,DXGI_FORMAT_R32_FLOAT,ground.data(),vx*4u) ||
+        !texture(a.sources,tx,ty,DXGI_FORMAT_R8G8B8A8_UNORM,ambient_sources_.data(),tx*4u) ||
+        !buffer(a.fall_tiles,fall_tiles.data(),fall_tiles.size()*4u,4) ||
+        !buffer(a.falls,list.data(),list.size()*16u,16)) {
+        a.area.reset();a.height.reset();a.ground.reset();a.sources.reset();a.fall_tiles.reset();a.falls.reset();
+        ambient_fall_tile_count_ = ambient_fall_count_ = 0;
+        d3d12_->omit("ambient grids and waterfall lists (D3D12 resource creation failed)",false);
+        return false;
+    }
+    // Waterfall shells: their foam is omitted alone when this buffer fails.
+    if (!shells.empty()) {
+        if (buffer(a.shells,shells.data(),shells.size()*16u,16)) ambient_fall_shell_vertices_ = UINT(shells.size()/3u);
+        else d3d12_->omit("waterfall shells (buffer creation failed)",false);
+    }
+    return true;
+} catch (const std::bad_alloc&) {
+    d3d12_->omit("ambient grids (CPU allocation failed)",false);
+    return false;
+}
+
 void Renderer::render_ambient_particles() {
     const int level = configured_integer(debug_overlay_.config(),"ambient_particles",1);
     // F10 line: the outcome of this pass, or the first reason it drew nothing.
@@ -239,7 +310,7 @@ void Renderer::render_ambient_particles() {
     // Only a frame whose world terrain was drawn has a world camera and depth.
     if (ambient_terrain_frame_ != native_frame_index_) return status(true,"Particles: no terrain frame this frame");
     if (!native_world_clip_valid_) return status(true,"Particles: no world camera");
-    if (!depth_srv_ || !rtv_) return status(true,"Particles: no scene depth/target");
+    if (!world_effect_targets()) return status(true,"Particles: no scene depth/target");
     AmbientWorldSource inputs;
     if (!bridge_ambient_world_source(inputs) || !inputs.terrain) return status(true,"Particles: no terrain source");
     // The one environment reader shared with the fog (clock, cave, region,
@@ -256,7 +327,7 @@ void Renderer::render_ambient_particles() {
         ambient_failed_ = true; OutputDebugStringA(reason);
         status(true,"Particles: disabled after a resource/shader failure (see debug output)");
     };
-    if (!ambient_vs_) {
+    if (!d3d12_ && !ambient_vs_) {
         ComPtr<ID3DBlob> vs, ps, errors;
         std::vector<ShaderProgram> programs;
         append_ambient_particle_shader_programs(programs);
@@ -335,7 +406,25 @@ void Renderer::render_ambient_particles() {
     // Waterfall shells (procedural_falls.h build_fall_shell): each fall's
     // foam as its own curtain over the map's liquid overlay, depth tested
     // against the world (read only), drawn before the spray and mist.
-    if (ambient_fall_shell_srv_ && ambient_fall_shell_vertices_ && world_dsv_ && SUCCEEDED(ensure_liquid_normal_map())) {
+    auto& programs12 = ambient12_.ambient;  // D3D12: ambientVS/PS, fallShellVS/PS
+    if (d3d12_ && programs12.empty()) append_ambient_particle_shader_programs(programs12);
+    if (d3d12_ && programs12.size() < 4) return status(true,"Particles: D3D12 programs missing (omitted)");
+    if (d3d12_ && ambient12_.shells && ambient_fall_shell_vertices_ && SUCCEEDED(ensure_liquid_normal_map())) {
+        // The same draw on D3D12: shells t6, liquid detail t7 (s0), the world depth tested read-only.
+        transition_profile_pass("waterfall_shells");
+        bind_world_effect_d3d12(true);
+        d3d12_->set_constants(0,&c,sizeof(c));
+        d3d12_->set_resource(6,ambient12_.shells.get());d3d12_->set_resource(7,liquid12_.detail.get());
+        D3D11_SAMPLER_DESC sampling{};sampling.Filter=D3D11_FILTER_ANISOTROPIC;sampling.MaxAnisotropy=8;
+        sampling.AddressU=sampling.AddressV=sampling.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;sampling.MaxLOD=D3D11_FLOAT32_MAX;
+        d3d12_->set_sampler(0,sampling);
+        const HRESULT hr = d3d12_->draw_instanced(programs12[2],programs12[3],world_effect_state_d3d12(true),nullptr,
+                                                  ambient_fall_shell_vertices_,1,false);
+        d3d12_->clear_slots();bind_world_targets_d3d12();
+        if (FAILED(hr)) d3d12_->omit("waterfall shells (draw failed)",false);
+        else if (hr == S_FALSE) d3d12_->omit("waterfall shells (pipeline not ready)",false);
+        else if (hr == S_OK) { d3d12_->count("waterfall shell draws");profiler_.add_draw(ambient_fall_shell_vertices_/3u,1);profiler_.add_batch(1); }
+    } else if (!d3d12_ && ambient_fall_shell_srv_ && ambient_fall_shell_vertices_ && world_dsv_ && SUCCEEDED(ensure_liquid_normal_map())) {
         if (!fall_shell_vs_) {
             ComPtr<ID3DBlob> vs, ps, errors;
             std::vector<ShaderProgram> programs;
@@ -381,6 +470,15 @@ void Renderer::render_ambient_particles() {
     // Runs inside composite_world. It binds every state it reads, restores
     // nothing and unbinds its views after (every following pass binds its own).
     transition_profile_pass("ambient_particles");
+    const D3D12NativeState state12 = d3d12_ ? world_effect_state_d3d12(false) : D3D12NativeState{};
+    if (d3d12_) {
+        // The same inputs on D3D12; the vertex stage's base ground reads t8
+        // (ambient_particles.hlsl: one t table serves both stages, t2 is the depth).
+        bind_world_effect_d3d12(false);
+        d3d12_->set_resource(0,ambient12_.area.get());d3d12_->set_resource(1,ambient12_.height.get());
+        d3d12_->set_resource(8,ambient12_.ground.get());d3d12_->set_resource(3,ambient12_.sources.get());
+        d3d12_->set_resource(4,ambient12_.fall_tiles.get());d3d12_->set_resource(5,ambient12_.falls.get());
+    } else {
     bind_plan_targets(plan_pass("ambient_particles",rtv_.Get(),nullptr,plan_read(PlanTarget::world_depth))); // depth is read as a texture
     D3D11_VIEWPORT viewport = target_viewport();context_->RSSetViewports(1,&viewport);
     context_->RSSetState(ambient_raster_.Get());context_->OMSetDepthStencilState(nullptr,0);
@@ -394,6 +492,7 @@ void Renderer::render_ambient_particles() {
                                        ambient_fall_tiles_srv_.Get(),ambient_falls_srv_.Get()};
     context_->VSSetShaderResources(0,6,grids);context_->PSSetShaderResources(2,1,depth_srv_.GetAddressOf());
     bind_owned_sky_pixel_inputs();  // borderFogColor reads the sky probe
+    }
     // Sand gust fronts travel with the shared wind's effective force (the
     // wind floor keeps zero-force maps gusting), spell speed and pulse; game
     // time, so pause holds them; integrated so speed changes never jump them.
@@ -452,10 +551,16 @@ void Renderer::render_ambient_particles() {
         ambient_emitter_constants(c,e,style,table,mushroom,pool,scale,displacement.data(),velocity);
         const float window_x = c.window[0];
         if (waterfall_emitter(e)) c.window[0] = float(fall_first);
-        if (FAILED(push_constants(constant_vs|constant_ps,0,&c,sizeof(c),ambient_constants_.Get()))) break;
         const unsigned count = waterfall_emitter(e) ? pool*fall_count : pool*columns*rows;
+        if (d3d12_) {
+            d3d12_->set_constants(0,&c,sizeof(c));
+            const HRESULT hr = d3d12_->draw_instanced(programs12[0],programs12[1],state12,nullptr,4,count,true);
+            if (FAILED(hr)) { d3d12_->omit("ambient particles (draw failed)",false);break; }
+            if (hr != S_OK) { if (hr == S_FALSE) d3d12_->omit("ambient particles (pipeline not ready)",false);break; }
+        } else if (FAILED(push_constants(constant_vs|constant_ps,0,&c,sizeof(c),ambient_constants_.Get()))) break;
         c.window[0] = window_x;
-        context_->DrawInstanced(4,count,0,0);++draws;instances += count;
+        if (!d3d12_) context_->DrawInstanced(4,count,0,0);
+        ++draws;instances += count;
         if (status_text) {
             const std::size_t used = std::strlen(drawn);
             std::snprintf(drawn+used,sizeof(drawn)-used,"%s%s %u",used?", ":"",kNames[index],count);
@@ -469,8 +574,13 @@ void Renderer::render_ambient_particles() {
     status(draws == 0,"Particles L%d: %s | %s, focus %s trees %u | h%.1f night %.2f rain %.2f snow %.2f | %ux%u tiles to %.0f m | env %s | %s",
         level,draws ? "drawn" : "nothing matches here",kZones[zone < zone_count ? zone : 0],kAreas[(at&15u) < area_count ? (at&15u) : 0],
         unsigned(at>>4),environment.hour,night,weather.rain,weather.snow,columns,rows,reach,environment_source,draws ? drawn : "-");
-    ID3D11ShaderResourceView* no_views[6]{};
-    context_->VSSetShaderResources(0,6,no_views);context_->PSSetShaderResources(2,1,no_views);
+    if (d3d12_) {
+        d3d12_->clear_slots();bind_world_targets_d3d12();
+        if (draws) d3d12_->count("ambient particle draws");
+    } else {
+        ID3D11ShaderResourceView* no_views[6]{};
+        context_->VSSetShaderResources(0,6,no_views);context_->PSSetShaderResources(2,1,no_views);
+    }
     profiler_.add_draw(draws,draws);profiler_.add_batch(draws);
 }
 

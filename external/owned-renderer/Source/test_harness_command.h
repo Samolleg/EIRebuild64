@@ -21,7 +21,7 @@ enum class HarnessVerb : std::uint8_t {
     config,        // config <key> <value>: F10 option, overlay or debug_view
     load_save,     // load_save <dialog name, slot, or slot file>
     list_saves,    // the Load dialog's save directories and display names
-    console,       // console <text>: the game's console parser
+    console,       // console <text>: the game's console parser; walk <x> <y> issues @MoveToPoint(GetLeader(),x,y)
     quit,          // the game's own QuitProgram
     pause,         // pause on|off: the game's mission pause, set (not toggled)
     godmode,       // godmode on|off: the GodMode script flag of player 0

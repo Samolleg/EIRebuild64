@@ -6,6 +6,7 @@
 #include "visual_highlight.h"
 #include "contact_blend.h"
 #include "native_instance_flags.h"
+#include "fur.h"
 
 #include <algorithm>
 #include <atomic>
@@ -2407,6 +2408,39 @@ bool retained_visual_combat_anchor(const RetainedVisualSample& sample,
     return finite_value(anchor[0]) && finite_value(anchor[1]) && finite_value(anchor[2]);
 }
 
+bool retained_visual_neutral_parts_box(const RetainedVisualSample& sample,
+    const std::vector<std::size_t>& parts,std::array<float,3>& minimum,std::array<float,3>& maximum) {
+    if (!sample.assembly||!sample.assembly->skeleton) return false;
+    const auto& assembly=*sample.assembly;
+    VisualClipSelection neutral{}; neutral.neutral=true;
+    const auto& shape=retained_visual_shape(sample);
+    std::vector<VisualNodeSample> nodes;
+    if (!sample_visual_skeleton(*assembly.skeleton,neutral,shape,assembly.center_shift,0,nodes,false)) return false;
+    VisualPoseState root;
+    root.tilted_facing=root.root_rotation_valid=true;
+    root.root_rotation={1,0,0,0};
+    minimum={FLT_MAX,FLT_MAX,FLT_MAX}; maximum={-FLT_MAX,-FLT_MAX,-FLT_MAX};
+    for (const auto index:parts) {
+        if (index>=assembly.parts.size()) return false;
+        const auto& part=assembly.parts[index];
+        if (!part.geometry||part.geometry->bounds.empty()||part.skeleton_node>=nodes.size()) continue;
+        const auto box=part.geometry->shape_count==1?part.geometry->bounds.front():selected_bounds(*part.geometry,shape);
+        std::array<float,16> local{};
+        if (!visual_node_world_matrix(root,nodes[part.skeleton_node],{1,1,1},local)) return false;
+        for (unsigned corner=0;corner<8;++corner) {
+            std::array<float,3> p{};
+            for (unsigned axis=0;axis<3;++axis)
+                p[axis]=(corner>>axis)&1u?box.maximum[axis]:box.minimum[axis];   // FIG boxes are absolute
+            for (unsigned axis=0;axis<3;++axis) {
+                const float value=local[axis*4+3]+local[axis*4]*p[0]+local[axis*4+1]*p[1]+local[axis*4+2]*p[2];
+                minimum[axis]=(std::min)(minimum[axis],value); maximum[axis]=(std::max)(maximum[axis],value);
+            }
+        }
+    }
+    return minimum[0]<=maximum[0]&&minimum[1]<=maximum[1]&&minimum[2]<=maximum[2]&&
+        finite_value(minimum[0])&&finite_value(maximum[2]);
+}
+
 bool retained_visual_part_bounds(const RetainedVisualSample& sample,std::size_t index,NativeWorldBounds& bounds) {
     bounds={};
     if (!sample.assembly||!sample.prepared||index>=sample.prepared->parts.size()) return false;
@@ -2461,6 +2495,8 @@ bool retained_visual_part_values(const RetainedVisualSample& sample,const Visual
     if (sample.assembly && sample.assembly->sways && !sample.values.unit &&
         retained_visual_part_sway(part).foliage)
         values.flags |= native_foliage_part_flag;
+    // Fur prototype, strands: a unit's hair part keeps its alpha here (its sun
+    // shadow); only its colour record is hidden (fur_strand_hair_record).
     return retained_visual_texture_shift(part.texture_type,time,values.u_shift,values.v_shift);
 }
 
@@ -2614,6 +2650,325 @@ void sway_tree_assembly(VisualAssemblyAsset& assembly) noexcept {
     assembly.sway_root = root;
 }
 
+namespace {
+// A figure vertex in its node space at the unit's own shape (the 8-shape
+// trilinear blend the geometry uses, select_endpoint; shape 0 for a
+// single-shape figure). Only positions the components reference: padding
+// lanes hold no vertex. The shapes differ widely (tiger bd: radius 0.455 at
+// shapes 0-3, 1.259 at 4-7), so sizes from shape 0 alone are wrong.
+bool fur_position(const FigureCpuAsset& figure, const std::array<float,3>& shape, std::uint32_t index, float (&v)[3]) noexcept {
+    const std::size_t groups = figure.position_groups, group = index >> 2;
+    if (index >= groups * 4u) return false;
+    const unsigned lane = index & 3u;
+    const bool blended = figure.shape_count == 8 && figure.positions.size() >= groups * 8u;
+    if (!blended) {
+        if (group >= figure.positions.size()) return false;
+        const auto& g = figure.positions[group];
+        v[0] = g.x[lane]; v[1] = g.y[lane]; v[2] = g.z[lane];
+    } else {
+        float x[8], y[8], z[8];
+        for (std::size_t k = 0; k < 8; ++k) {
+            const auto& g = figure.positions[k * groups + group];
+            x[k] = g.x[lane]; y[k] = g.y[lane]; z[k] = g.z[lane];
+        }
+        v[0] = select_endpoint(x, shape); v[1] = select_endpoint(y, shape); v[2] = select_endpoint(z, shape);
+    }
+    return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+}
+// A figure's vertex box in its node space at the unit's shape.
+bool fur_figure_box(const FigureCpuAsset& figure, const std::array<float,3>& shape, float (&lo)[3], float (&hi)[3]) noexcept {
+    for (unsigned a = 0; a < 3; ++a) { lo[a] = FLT_MAX; hi[a] = -FLT_MAX; }
+    bool any = false;
+    for (const auto& component : figure.components) {
+        float v[3];
+        if (!fur_position(figure, shape, component.position, v)) continue;
+        for (unsigned a = 0; a < 3; ++a) { lo[a] = (std::min)(lo[a], v[a]); hi[a] = (std::max)(hi[a], v[a]); }
+        any = true;
+    }
+    return any;
+}
+// A figure's vertex sphere in its node space (centre, radius) at the unit's
+// shape, from the decoded positions: the authored FIG bounds can be empty or
+// zero (menu run 2026-10-29: every human head and the tiger read radius 0).
+bool fur_figure_sphere(const FigureCpuAsset& figure, const std::array<float,3>& shape, std::array<float,4>& sphere) noexcept {
+    sphere = {};
+    float lo[3], hi[3];
+    if (!fur_figure_box(figure, shape, lo, hi)) return false;
+    for (unsigned a = 0; a < 3; ++a) sphere[a] = (lo[a] + hi[a]) * .5f;
+    float r2 = 0;
+    for (const auto& component : figure.components) {
+        float v[3];
+        if (!fur_position(figure, shape, component.position, v)) continue;
+        const float d[3]{v[0] - sphere[0], v[1] - sphere[1], v[2] - sphere[2]};
+        r2 = (std::max)(r2, d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+    }
+    sphere[3] = std::sqrt(r2);
+    return sphere[3] > 0;
+}
+// The hair mesh's strand axis (FurProfile::hair_axis): the UV direction
+// whose surface tangent is closer to vertical, weighted by triangle area.
+std::uint32_t fur_hair_axis(const FigureCpuAsset& figure) noexcept {
+    const std::size_t groups = figure.position_groups;
+    double vertical[2]{};
+    const auto position = [&](std::uint32_t index, double (&v)[3]) {
+        const std::size_t group = index >> 2;
+        if (index >= groups * 4u || group >= figure.positions.size()) return false;
+        const auto& g = figure.positions[group]; const unsigned lane = index & 3u;
+        v[0] = g.x[lane]; v[1] = g.y[lane]; v[2] = g.z[lane];
+        return std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]);
+    };
+    for (std::size_t t = 0; t + 2 < figure.indices.size(); t += 3) {
+        double p[3][3], uv[3][2]; bool ok = true;
+        for (unsigned k = 0; k < 3 && ok; ++k) {
+            const auto ci = figure.indices[t + k];
+            if (ci >= figure.components.size()) { ok = false; break; }
+            const auto& c = figure.components[ci];
+            ok = position(c.position, p[k]) && c.texture < figure.texture_coordinates.size();
+            if (ok) { uv[k][0] = figure.texture_coordinates[c.texture].u; uv[k][1] = figure.texture_coordinates[c.texture].v; }
+        }
+        if (!ok) continue;
+        double e1[3], e2[3];
+        for (unsigned d = 0; d < 3; ++d) { e1[d] = p[1][d] - p[0][d]; e2[d] = p[2][d] - p[0][d]; }
+        const double d1u = uv[1][0] - uv[0][0], d1v = uv[1][1] - uv[0][1], d2u = uv[2][0] - uv[0][0], d2v = uv[2][1] - uv[0][1];
+        const double det = d1u * d2v - d2u * d1v;
+        if (std::abs(det) < 1e-12) continue;
+        const double cx = e1[1]*e2[2] - e1[2]*e2[1], cy = e1[2]*e2[0] - e1[0]*e2[2], cz = e1[0]*e2[1] - e1[1]*e2[0];
+        const double area = .5 * std::sqrt(cx*cx + cy*cy + cz*cz);
+        for (unsigned axis = 0; axis < 2; ++axis) {
+            double tangent[3];
+            for (unsigned d = 0; d < 3; ++d)
+                tangent[d] = axis == 0 ? (e1[d] * d2v - e2[d] * d1v) / det : (e2[d] * d1u - e1[d] * d2u) / det;
+            const double length = std::sqrt(tangent[0]*tangent[0] + tangent[1]*tangent[1] + tangent[2]*tangent[2]);
+            if (length > 1e-12) vertical[axis] += area * std::abs(tangent[2]) / length;
+        }
+    }
+    return vertical[1] >= vertical[0] ? 1u : 0u;
+}
+// Appends each vertex's (component's) distance to the hair mesh's open border
+// to out (FurProfile::hair_border), in node units at the unit's shape.
+// Vertices weld by position, so texture seams are not borders. A border edge
+// counts only where strands cross it: an edge of one triangle running more
+// than 45 degrees off that triangle's strand direction (the painted texture
+// axis, fur_hair_axis), on the vertex's own connected piece (lock). Hair
+// meshes are mostly separate card strips whose long sides are borders along
+// the strands; counting those clamped nearly every strand to nothing (fur_debug
+// 3 run, 97523671). Rims, hairlines and lock ends cross the strands.
+// Returns the counted border edge count.
+std::size_t fur_hair_border(const FigureCpuAsset& figure, const std::array<float,3>& shape, std::uint32_t axis,
+                            std::vector<float>& out) {
+    const std::size_t count = figure.components.size();
+    std::vector<std::array<float,3>> p(count);
+    std::vector<std::uint32_t> weld(count, UINT32_MAX);
+    std::map<std::array<std::uint32_t,3>, std::uint32_t> ids;
+    for (std::size_t c = 0; c < count; ++c) {
+        float v[3];
+        if (!fur_position(figure, shape, figure.components[c].position, v)) continue;
+        p[c] = {v[0], v[1], v[2]};
+        std::array<std::uint32_t,3> key{}; std::memcpy(key.data(), v, sizeof(v));
+        weld[c] = ids.emplace(key, static_cast<std::uint32_t>(ids.size())).first->second;
+    }
+    // Connected pieces over welded vertices (union-find).
+    std::vector<std::uint32_t> piece(ids.size());
+    for (std::uint32_t k = 0; k < piece.size(); ++k) piece[k] = k;
+    const auto root = [&](std::uint32_t k) { while (piece[k] != k) k = piece[k] = piece[piece[k]]; return k; };
+    struct Edge { unsigned uses = 0; std::uint32_t a = 0, b = 0; bool crosses = false; };
+    std::map<std::pair<std::uint32_t,std::uint32_t>, Edge> edges;
+    for (std::size_t t = 0; t + 2 < figure.indices.size(); t += 3) {
+        const std::uint32_t c[3]{figure.indices[t], figure.indices[t + 1], figure.indices[t + 2]};
+        if (c[0] >= count || c[1] >= count || c[2] >= count) continue;
+        const std::uint32_t w[3]{weld[c[0]], weld[c[1]], weld[c[2]]};
+        if (w[0] == UINT32_MAX || w[1] == UINT32_MAX || w[2] == UINT32_MAX || w[0] == w[1] || w[1] == w[2] || w[2] == w[0]) continue;
+        piece[root(w[1])] = root(w[0]); piece[root(w[2])] = root(w[0]);
+        // The triangle's strand direction (furHairTangent's rule).
+        float tangent[3]{};
+        bool has_tangent = false;
+        {
+            const auto& tc = figure.texture_coordinates;
+            const auto texture = [&](unsigned k) { return figure.components[c[k]].texture; };
+            if (texture(0) < tc.size() && texture(1) < tc.size() && texture(2) < tc.size()) {
+                const float d1u = tc[texture(1)].u - tc[texture(0)].u, d1v = tc[texture(1)].v - tc[texture(0)].v;
+                const float d2u = tc[texture(2)].u - tc[texture(0)].u, d2v = tc[texture(2)].v - tc[texture(0)].v;
+                const float det = d1u * d2v - d2u * d1v;
+                if (std::abs(det) > 1e-12f) {
+                    float length = 0;
+                    for (unsigned a = 0; a < 3; ++a) {
+                        const float e1 = p[c[1]][a] - p[c[0]][a], e2 = p[c[2]][a] - p[c[0]][a];
+                        tangent[a] = axis == 0 ? (e1 * d2v - e2 * d1v) / det : (e2 * d1u - e1 * d2u) / det;
+                        length += tangent[a] * tangent[a];
+                    }
+                    has_tangent = length > 1e-20f;
+                    if (has_tangent) for (float& value : tangent) value /= std::sqrt(length);
+                }
+            }
+        }
+        for (unsigned k = 0; k < 3; ++k) {
+            const unsigned j = (k + 1) % 3;
+            auto& edge = edges[{(std::min)(w[k], w[j]), (std::max)(w[k], w[j])}];
+            ++edge.uses; edge.a = c[k]; edge.b = c[j];
+            float e[3], length = 0, along = 0;
+            for (unsigned a = 0; a < 3; ++a) { e[a] = p[c[j]][a] - p[c[k]][a]; length += e[a] * e[a]; along += e[a] * tangent[a]; }
+            edge.crosses = has_tangent && length > 0 && std::abs(along) < .7071f * std::sqrt(length);
+        }
+    }
+    // Counted border edges per piece.
+    std::map<std::uint32_t, std::vector<std::pair<std::array<float,3>, std::array<float,3>>>> border;
+    std::size_t counted = 0;
+    for (const auto& edge : edges)
+        if (edge.second.uses == 1 && edge.second.crosses) {
+            border[root(edge.first.first)].push_back({p[edge.second.a], p[edge.second.b]});
+            ++counted;
+        }
+    for (std::size_t c = 0; c < count; ++c) {
+        float best = 1e9f;
+        const auto own = weld[c] != UINT32_MAX ? border.find(root(weld[c])) : border.end();
+        if (own != border.end())
+            for (const auto& segment : own->second) {
+                float d[3], e[3], dd = 0, de = 0;
+                for (unsigned a = 0; a < 3; ++a) {
+                    d[a] = p[c][a] - segment.first[a]; e[a] = segment.second[a] - segment.first[a];
+                    dd += d[a] * e[a]; de += e[a] * e[a];
+                }
+                const float f = de > 0 ? std::clamp(dd / de, 0.f, 1.f) : 0.f;
+                float r2 = 0;
+                for (unsigned a = 0; a < 3; ++a) { const float q = d[a] - e[a] * f; r2 += q * q; }
+                best = (std::min)(best, std::sqrt(r2));
+            }
+        out.push_back(best);
+    }
+    return counted;
+}
+}  // namespace
+
+// Fur prototype (fur.h): the unit's fur profile, built once per assembly
+// while fur_mode is on. Null for units with neither a furry model nor hair.
+std::shared_ptr<const FurProfile> retained_visual_fur_profile(const RetainedVisualSample& sample) {
+    if (g_fur_mode <= 0 || !sample.values.unit || !sample.assembly || !sample.prepared) return nullptr;
+    auto& prepared = *sample.prepared;
+    if (prepared.fur_assembly == sample.assembly) return prepared.fur_profile;
+    prepared.fur_assembly = sample.assembly; prepared.fur_profile.reset();
+    const auto& assembly = *sample.assembly;
+    if (!assembly.skeleton) return nullptr;
+    auto profile = std::make_shared<FurProfile>();
+    profile->model = assembly.skeleton->visual_reference;
+    float coat = 0;
+    bool head_fur = true;
+    for (const auto& model : kFurModels)
+        if (profile->model.find(model.model) != std::string::npos) { coat = model.length; head_fur = model.head; break; }
+    const float scale = (std::max)({std::abs(assembly.scale[0]), std::abs(assembly.scale[1]), std::abs(assembly.scale[2])});
+    // Creature size: the largest part's vertex sphere (the body) at the unit's
+    // own shape, scaled.
+    // VisualAssemblyAsset::envelope_radius is not filled for units (0 in the
+    // menu run), and the sample's envelope includes animation reach.
+    float part_radius = 0;
+    for (const auto& part : assembly.parts) {
+        std::array<float,4> sphere{};
+        if (part.geometry && !part.weapon && !part.arrow && fur_figure_sphere(*part.geometry, assembly.shape, sphere))
+            part_radius = (std::max)(part_radius, sphere[3]);
+    }
+    const float radius = part_radius * scale;
+    // The paw/hoof is each limb chain's highest segment present in this assembly.
+    int terminal[4]{};
+    for (const auto& part : assembly.parts) {
+        int segment = 0;
+        const int chain = fur_limb_chain(fur_part_stem(part.name), segment);
+        if (chain >= 0) terminal[chain] = (std::max)(terminal[chain], segment);
+    }
+    int tail_segment = 10;
+    bool has_hair = false;
+    std::vector<std::uint8_t> hair_parts;   // hair parts per node (a shared node gets no border list)
+    std::size_t border_edges = 0;
+    for (const auto& part : assembly.parts) {
+        // A hidden part (no triangles, or a helmet piece a bare portrait head
+        // hides) grows nothing and must not set the head sphere.
+        if (!part.geometry || part.explicitly_hidden || part.skeleton_node == UINT_MAX || part.weapon || part.arrow) continue;
+        if (part.skeleton_node >= 4096) continue;
+        if (profile->nodes.size() <= part.skeleton_node) profile->nodes.resize(part.skeleton_node + 1);
+        const std::string stem = fur_part_stem(part.name);
+        auto& node = profile->nodes[part.skeleton_node];
+        if (stem == "hd") {
+            profile->head_node = part.skeleton_node;
+            profile->head_sphere_valid = fur_figure_sphere(*part.geometry, assembly.shape, profile->head_sphere);
+        }
+        if (fur_hair_stem(stem)) {
+            node.role = float(fur_role_hair);
+            if (hair_parts.size() <= part.skeleton_node) hair_parts.resize(part.skeleton_node + 1);
+            if (!has_hair) profile->hair_axis = fur_hair_axis(*part.geometry);
+            if (hair_parts[part.skeleton_node]++ == 0) {
+                node.border = float(profile->hair_border.size());
+                border_edges += fur_hair_border(*part.geometry, assembly.shape, profile->hair_axis, profile->hair_border);
+            } else node.border = -1;   // two hair parts on one node: its records' vertices are not one list
+            has_hair = true;
+            continue;
+        }
+        if (coat <= 0) {
+#if EID3D11_FUR_ARMOUR
+            // Not a furry creature: every other part may wear fur armour. The
+            // fur pass grows strands only on texels of a strand material class
+            // (the S1 class texture), so a part without fur grows nothing.
+            if (node.role == float(fur_role_none)) {
+                node.role = float(fur_role_armour);
+                node.length = kFurArmourCoat * radius;
+                profile->armour = profile->armour || node.length > 0;
+            }
+#endif
+            continue;
+        }
+        int segment = 0;
+        const int chain = fur_limb_chain(stem, segment);
+        FurRole role = chain >= 0 ? (segment < terminal[chain] ? fur_role_limb : fur_role_none) : fur_stem_role(stem);
+        if (role == fur_role_head && !head_fur) role = fur_role_none;
+        if (role == fur_role_tail && stem[2] - '0' < tail_segment) { tail_segment = stem[2] - '0'; profile->tail_node = part.skeleton_node; }
+        if (stem == "hp" && tail_segment == 10) profile->tail_node = part.skeleton_node;
+        node.role = float(role);
+        node.length = coat * radius * fur_role_factor(role) * (stem == "nc" ? 1.4f : 1.f);   // neck ruff
+        profile->fur = profile->fur || node.length > 0;
+    }
+    if (has_hair) {
+        // Shell fuzz on the hair mesh: a fraction of the head size.
+        const float hair = profile->head_sphere_valid ? profile->head_sphere[3] * .12f : radius * .02f;
+        for (auto& node : profile->nodes)
+            if (node.role == float(fur_role_hair)) node.length = hair;
+        profile->hair = true;
+    }
+    if (coat <= 0 && !has_hair && !profile->armour) return nullptr;
+    unsigned fur_nodes = 0, hair_nodes = 0;
+    for (const auto& node : profile->nodes) {
+        fur_nodes += node.length > 0 && node.role != float(fur_role_hair);
+        hair_nodes += node.role == float(fur_role_hair);
+    }
+    unsigned shared_hair_nodes = 0;
+    for (const auto parts : hair_parts) shared_hair_nodes += parts > 1;
+    char text[384];
+    std::snprintf(text, sizeof(text), "model=%s shape=%.2f,%.2f,%.2f scale=%.2f fur_nodes=%u hair_nodes=%u head=%d tail=%d radius=%.3f coat=%.3f head_r=%.3f hair_axis=%c armour=%d hair_border_edges=%u shared_hair_nodes=%u",
+        profile->model.c_str(), assembly.shape[0], assembly.shape[1], assembly.shape[2], scale, fur_nodes, hair_nodes,
+        int(profile->head_node), int(profile->tail_node), radius, coat, profile->head_sphere[3],
+        profile->hair_axis ? 'v' : 'u', int(profile->armour), unsigned(border_edges), shared_hair_nodes);
+    bridge_append_probe_event("fur_profile", text);
+    // Logged for every unit whose model is listed or has hair, kept only when it grows something.
+    if (!profile->fur && !profile->hair && !profile->armour) return nullptr;
+    profile->radius = radius;
+    prepared.fur_profile = std::move(profile);
+    return prepared.fur_profile;
+}
+
+namespace {
+// The record's profile when any of its nodes grows fur or hair, else null.
+// Fur armour grows only in the strand modes: in mode 1 an armour node alone
+// attaches nothing (the fur pass would run its vertex stage for nothing).
+std::shared_ptr<const FurProfile> fur_record_profile(const RetainedVisualSample& sample,
+    const std::uint32_t* parts, std::size_t count) {
+    auto profile = retained_visual_fur_profile(sample);
+    if (!profile) return nullptr;
+    const bool armour = fur_hair_strands(g_fur_mode);
+    for (std::size_t k = 0; k < count; ++k) {
+        const auto node = sample.assembly->parts[parts[k]].skeleton_node;
+        if (node < profile->nodes.size() && profile->nodes[node].length > 0 &&
+            (armour || profile->nodes[node].role != float(fur_role_armour))) return profile;
+    }
+    return nullptr;
+}
+}  // namespace
+
 bool retained_visual_part_submission(const RetainedVisualSample& sample,std::size_t index,
     const NativeWorldBounds& bounds,NativeContribution contribution,
     double time,std::uint8_t fog,NativePreparedPartSubmission*& output) {
@@ -2652,6 +3007,7 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
             view.owned_texture.format=texture_format(texture.format);view.owned_texture.mip_count=static_cast<UINT>(texture.mips.size());
             view.owned_texture.opaque_mips=texture.opaque_mips;
         } else return false;
+        if (!part.material_name.empty()) view.owned_texture.material_name=&part.material_name;
         target.bound_assembly=sample.assembly;
         if (++target.record_revision==0) ++target.record_revision;
         view.world.record_revision=target.record_revision;view.world.owner=&prepared.gpu_pose.owner;
@@ -2679,6 +3035,8 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
     if(!submission.values_revision||std::memcmp(&submission.values,&values,sizeof(values))!=0){
         submission.values=values;if(++submission.values_revision==0)++submission.values_revision;
     }
+    {const auto part_index=static_cast<std::uint32_t>(index);
+     submission.fur=fur_record_profile(sample,&part_index,1);submission.fur_node_base=part.skeleton_node;}
     submission.source=&view;submission.bounds=bounds;submission.contribution=contribution;
     output=&submission;return true;
 }
@@ -2688,7 +3046,10 @@ namespace {
 // texture surface, material values, flags, texture type and shape layout.
 // Weapons and arrows toggle visibility in the field and time-scrolled
 // texture types (13, 14, 16) shift UVs per part, so they stay per part.
-bool merge_part_eligible(const VisualPartAsset& part) noexcept {
+bool merge_part_eligible(const VisualPartAsset& part) {
+    // Fur prototype, strands: a unit's hair part stays its own record (its
+    // strands and undercoat; retained_visual_part_values).
+    if (fur_hair_strands(g_fur_mode) && fur_hair_stem(fur_part_stem(part.name))) return false;
     return part.source_available && part.geometry && part.material && part.surface && !part.weapon && !part.arrow &&
         !part.explicitly_hidden && part.texture_type!=13 && part.texture_type!=14 && part.texture_type!=16 &&
         part.geometry->position_groups && part.geometry->shape_count &&
@@ -2734,7 +3095,9 @@ std::shared_ptr<const VisualPreparedResources::MergedGeometry> merged_geometry(c
 bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
     if (!sample.assembly || !sample.prepared || !sample.values.unit) return false;
     auto& prepared=*sample.prepared;const auto& assembly=*sample.assembly;
-    if (prepared.merged_assembly==sample.assembly) return true;
+    const bool fur_hair=fur_hair_strands(g_fur_mode);
+    if (prepared.merged_assembly==sample.assembly && prepared.merged_fur_hair==fur_hair) return true;
+    prepared.merged_fur_hair=fur_hair;prepared.merged_assembly=nullptr;
     if (!prepared.gpu_pose.binding) return false;
     prepared.merged_groups.clear();prepared.merged_part_group.assign(assembly.parts.size(),-1);
     // Without a pose binding yet the parts draw singly for now; do not record
@@ -2843,6 +3206,7 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
         retained_visual_part_fixed_state(sample,view.owned_fixed_state);
         view.owned_texture.identity=part.surface->id;view.owned_texture.generation=part.surface->generation;
         view.owned_texture.surface=part.surface.get();
+        if (!part.material_name.empty()) view.owned_texture.material_name=&part.material_name;
         if (++group.record_revision==0) ++group.record_revision;
         view.world.record_revision=group.record_revision;view.world.owner=&prepared.gpu_pose.owner;
         view.prepared_identity={sample.lifecycle.id,sample.lifecycle.generation,sample.lifecycle.positive_world_epoch,
@@ -2865,6 +3229,7 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
     if(!submission.values_revision||std::memcmp(&submission.values,&values,sizeof(values))!=0){
         submission.values=values;if(++submission.values_revision==0)++submission.values_revision;
     }
+    submission.fur=fur_record_profile(sample,group.parts.data(),group.parts.size());submission.fur_node_base=0;
     submission.source=&view;submission.bounds=bounds;submission.contribution=contribution;
     output=&submission;return true;
 }

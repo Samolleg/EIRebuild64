@@ -119,6 +119,7 @@ float4 compositePS(V i) : SV_Target {
 // Caller saves/restores pipeline state; slots used: VS/PS b0, PS t0-t2, PS s0.
 class BloomPass {
     template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
+public: // the constants the D3D12 backend's bloom shares
     static constexpr UINT kMaxMips = 6;
     static constexpr float kWide = 1.2f; // per-level boost of the wider blur levels
     // Gain on the extracted excess. Emissive light here sits only a little
@@ -128,6 +129,7 @@ class BloomPass {
     static constexpr float kGain = 4.f;
     // Share of additive particle light (fire, magic) fed to the glow.
     static constexpr float kGlow = .5f;
+private:
     Ptr<ID3D11Texture2D> mip_[kMaxMips];
     Ptr<ID3D11RenderTargetView> mip_rtv_[kMaxMips];
     Ptr<ID3D11ShaderResourceView> mip_srv_[kMaxMips];

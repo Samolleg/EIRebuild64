@@ -99,6 +99,8 @@ void owned_resource_runtime_acquire(const wchar_t* game_registry_key = nullptr) 
 void owned_resource_runtime_poll() noexcept;
 bool owned_visual_resource_mounts(ResourceStoreConfig& mounts);
 bool owned_text_resource_mounts(ResourceStoreConfig& mounts);
+// The database family (items.idb), mod archives first.
+bool owned_data_resource_mounts(ResourceStoreConfig& mounts);
 void owned_resource_runtime_release() noexcept;
 
 bool retained_static_runtime_requested() noexcept;
@@ -113,12 +115,13 @@ bool registry_root_loads_starter_addon(const wchar_t* game_registry_key) noexcep
 bool derive_owned_resource_mounts(const std::wstring& work_path,
     const std::wstring& resource_path, const std::wstring& addon_path,
     const std::vector<std::uint8_t>& config, ResourceStoreConfig& mounts,
-    ResourceFailure& failure, ResourceStoreConfig* text_mounts = nullptr);
+    ResourceFailure& failure, ResourceStoreConfig* text_mounts = nullptr,
+    ResourceStoreConfig* data_mounts = nullptr);
 bool owned_resource_runtime_mounts(ResourceStoreConfig& mounts) noexcept;
 // x64 host (core mode): the game process's mounts (scene_core::ResourceMounts);
 // the host runs no loader of its own.
 void owned_resource_runtime_adopt_mounts(const ResourceStoreConfig& mounts,
-    const ResourceStoreConfig& text_mounts) noexcept;
+    const ResourceStoreConfig& text_mounts, const ResourceStoreConfig& data_mounts) noexcept;
 std::uint64_t retained_static_begin_source(MobSourceRole role,
                                            const char* name,
                                            const char* selected_mob = nullptr) noexcept;

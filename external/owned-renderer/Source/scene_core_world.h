@@ -208,11 +208,19 @@ struct Preview {
     std::uint64_t presentation_serial = 0;
     std::vector<OwnedPreviewPart> parts;
     std::vector<SceneSinkState> sets;
+    // Owned portraits: the face pictures of a non-neutral expression (the
+    // host loads them from its store and draws the changed texels over the head).
+    std::string face_neutral, face_expression;
+    std::uint32_t bare_head = 0;   // 1: portrait_helmet off on a helmeted unit (bare hd / hr.HH)
+    // Owned portraits: the frame's inner rectangle (native canvas pixels; left,
+    // top, right, bottom), where the portrait's depth is its own.
+    std::array<float, 4> portrait_clip{};
     void run(Renderer& renderer);
 };
 template <class A> void fields(A& a, Preview& v) {
     scene_wire::fields_of(a, v.resource.signed_id, v.resource.serial, v.lifecycle, v.view, v.phase, v.texture_time, v.fog,
-                          v.base_world, v.world_to_clip, v.presentation_serial, v.parts, v.sets);
+                          v.base_world, v.world_to_clip, v.presentation_serial, v.parts, v.sets,
+                          v.face_neutral, v.face_expression, v.bare_head, v.portrait_clip);
 }
 
 }  // namespace scene_core

@@ -39,7 +39,7 @@ std::uint64_t Renderer::native_point_shadow_bytes() const noexcept {
  std::uint64_t bytes=0;
  const std::uint64_t width=point_atlas_width(native_point_shadow_side_);
  for(const auto& page:native_point_shadow_pages_)
-  bytes+=std::uint64_t(page.dsv.size())*width*width*(page.overlay?4u:2u);
+  bytes+=std::uint64_t(point_atlas_slices(static_cast<UINT>(page.used.size())))*width*width*(page.overlay?4u:2u);
  return bytes;
 }
 void Renderer::point_shadow_capacity_failure(const char* reason,HRESULT hr) noexcept {
@@ -57,13 +57,25 @@ HRESULT Renderer::grow_native_point_shadow_page(std::size_t index,UINT cubes,boo
  if(width>D3D11_REQ_TEXTURE2D_U_OR_V_DIMENSION)return E_INVALIDARG;
  auto& old=native_point_shadow_pages_[index];
  const UINT slices=point_atlas_slices(cubes);
- const auto bytes=std::uint64_t(width)*width*(slices-std::min<UINT>(slices,static_cast<UINT>(old.dsv.size())))*(overlay?4u:2u);
- if(adapter3_){DXGI_QUERY_VIDEO_MEMORY_INFO memory{};
+ const UINT old_slices=point_atlas_slices(static_cast<UINT>(old.used.size()));
+ const auto bytes=std::uint64_t(width)*width*(slices-std::min(slices,old_slices))*(overlay?4u:2u);
+ // adapter3_ belongs to the helper D3D11 device, not necessarily the D3D12
+ // device. D3D12 allocation failures still take the existing fade/retry path.
+ if(!d3d12_&&adapter3_){DXGI_QUERY_VIDEO_MEMORY_INFO memory{};
   if(SUCCEEDED(adapter3_->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&memory))&&memory.Budget&&
      bytes>memory.Budget-std::min(memory.Budget,memory.CurrentUsage))return HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY);
  }
  NativePointShadowPage next;next.overlay=overlay;next.used=old.used;
  next.used.resize(std::min(PointShadowTextureLayout::cubes_per_atlas,slices*PointShadowTextureLayout::faces_per_slice/6u),false);
+ if(d3d12_){
+  transition_profile_pass("point_shadow_pool_growth");
+  const frame_acct::Scope growth_scope(frame_acct::point_pool_growth);
+  HRESULT hr=d3d12_->create_depth_array(width,slices,next.depth12,kPointShadowDepthFormats[overlay?1:0]);
+  if(FAILED(hr))return hr;
+  if(old.depth12)for(UINT slice=0;slice<old_slices;++slice)
+   if(FAILED(hr=d3d12_->copy_texture(*next.depth12,slice,*old.depth12,slice)))return hr;
+  old=std::move(next);return S_OK;
+ }
  D3D11_TEXTURE2D_DESC desc{};desc.Width=desc.Height=width;desc.ArraySize=slices;
  desc.MipLevels=1;desc.Format=overlay?DXGI_FORMAT_R32_TYPELESS:DXGI_FORMAT_R16_TYPELESS;desc.SampleDesc.Count=1;
  desc.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;
@@ -95,7 +107,7 @@ bool Renderer::allocate_native_point_shadow(bool overlay,int& slot) noexcept {SC
   const int base=overlay?static_cast<int>(PointShadowTextureLayout::cubes_per_atlas):0;
   for(unsigned s=0;s<page.used.size();++s)if(!page.used[s]){page.used[s]=true;slot=base+static_cast<int>(s);return true;}
   if(page.used.size()>=PointShadowTextureLayout::cubes_per_atlas){
-   point_shadow_capacity_failure("point shadow atlas full (D3D11 2048-slice limit)",E_OUTOFMEMORY);return false;}
+   point_shadow_capacity_failure("point shadow atlas full (2048-slice limit)",E_OUTOFMEMORY);return false;}
   const auto required=static_cast<UINT>(page.used.size()+1);
   const auto target=std::min(PointShadowTextureLayout::cubes_per_atlas,std::max(required,static_cast<UINT>(page.used.size()*2)));
   HRESULT failure=grow_native_point_shadow_page(p,target,overlay);
@@ -116,14 +128,19 @@ void Renderer::release_native_point_shadow(std::uint64_t generation,int slot) no
  if(p>=native_point_shadow_pages_.size()||s>=native_point_shadow_pages_[p].used.size())return;
  auto& page=native_point_shadow_pages_[p];page.used[s]=false;
  if(std::none_of(page.used.begin(),page.used.end(),[](bool used){return used;})){
-  ID3D11ShaderResourceView* empty=nullptr;
-  context_->PSSetShaderResources(PointShadowTextureLayout::first_srv+p,1,&empty);page={};page.overlay=p!=0;
+  if(d3d12_)d3d12_->set_resource(PointShadowTextureLayout::first_srv+p,static_cast<const D3D12Texture*>(nullptr));
+  else{ID3D11ShaderResourceView* empty=nullptr;
+   context_->PSSetShaderResources(PointShadowTextureLayout::first_srv+p,1,&empty);}
+  page={};page.overlay=p!=0;
  }
 }
 bool Renderer::begin_native_point_shadow_batch(std::uint64_t& generation,bool* pressure) noexcept {SCENE_ENTRY("begin_native_point_shadow_batch");
  if(pressure)*pressure=false;
  if(native_shadow_collecting_||native_point_shadow_active_||!native_point_shadows_enabled_)return false;
  if(FAILED(flush_native()))return false;
+ if(d3d12_)for(UINT page=0;page<PointShadowTextureLayout::array_bindings;++page)
+  d3d12_->set_resource(PointShadowTextureLayout::first_srv+page,static_cast<const D3D12Texture*>(nullptr));
+ if(!d3d12_){
  std::array<ID3D11ShaderResourceView*,PointShadowTextureLayout::array_bindings> empty{};
  context_->PSSetShaderResources(PointShadowTextureLayout::first_srv,static_cast<UINT>(empty.size()),empty.data());
  if(!native_point_shadow_constants_){
@@ -138,9 +155,10 @@ bool Renderer::begin_native_point_shadow_batch(std::uint64_t& generation,bool* p
   sampler.ComparisonFunc=D3D11_COMPARISON_LESS_EQUAL;sampler.MaxLOD=D3D11_FLOAT32_MAX;
   if(FAILED(device_->CreateSamplerState(&sampler,&native_point_shadow_sampler_)))return false;
  }
+ }
  if(!native_point_shadow_generation_)native_point_shadow_generation_=g_point_shadow_pool_generation.fetch_add(1,std::memory_order_relaxed)+1;
  generation=native_point_shadow_generation_;
- if(adapter3_&&pressure){DXGI_QUERY_VIDEO_MEMORY_INFO memory{};
+ if(!d3d12_&&adapter3_&&pressure){DXGI_QUERY_VIDEO_MEMORY_INFO memory{};
   if(SUCCEEDED(adapter3_->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&memory))&&memory.Budget&&memory.CurrentUsage>memory.Budget){
    *pressure=true;point_shadow_capacity_failure("live WDDM budget pressure",HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY));
   }
@@ -214,8 +232,9 @@ bool Renderer::begin_native_point_shadow_faces(UINT slot,UINT light_index,
  const UINT page=slot/PointShadowTextureLayout::cubes_per_atlas,cube=slot%PointShadowTextureLayout::cubes_per_atlas;
  if(native_shadow_collecting_||native_point_shadow_active_||page>=native_point_shadow_pages_.size()||
     cube>=native_point_shadow_pages_[page].used.size()||!native_point_shadow_pages_[page].used[cube]||
-    light_index>=native_point_lights_.size()||!native_point_shadow_constants_||!native_depth_clear_vs_)return false;
- if(!native_point_clear_raster_){
+    light_index>=native_point_lights_.size()||
+    (d3d12_?!native_point_shadow_pages_[page].depth12:!native_point_shadow_constants_||!native_depth_clear_vs_))return false;
+ if(!d3d12_&&!native_point_clear_raster_){
   D3D11_RASTERIZER_DESC raster{};raster.FillMode=D3D11_FILL_SOLID;raster.CullMode=D3D11_CULL_NONE;raster.DepthClipEnable=TRUE;
   if(FAILED(device_->CreateRasterizerState(&raster,&native_point_clear_raster_)))return false;
  }
@@ -238,7 +257,7 @@ bool Renderer::end_native_point_shadow_faces(bool commit) noexcept {
  native_shadow_dirty_mask_=native_shadow_cleared_mask_=0;native_shadow_failed_=false;
  // Directional frame, valid bits and buffer were never modified. Color binds its
  // own b2 at submission; there is no directional save/restore operation here.
- return SUCCEEDED(hr);
+ return hr==S_OK;
 }
 
 // Typed collection aborts (scene_commands_world.h). The directional abort's
@@ -327,7 +346,7 @@ void Renderer::update_cave_irradiance() noexcept try {
  // never the global map screen or its zone hit-test frame, whose flat zone
  // colours the bounce would overwrite (08638187 frames 029214/035403).
  const bool world_frame=!hit_test_active_&&ambient_terrain_frame_!=UINT64_MAX&&native_frame_index_-ambient_terrain_frame_<=1;
- const bool wanted=quality>0&&!ambient_menu_&&world_frame&&feature_level_>=D3D_FEATURE_LEVEL_11_0&&!cave_volume_failed_;
+ const bool wanted=quality>0&&!ambient_menu_&&world_frame&&(d3d12_||feature_level_>=D3D_FEATURE_LEVEL_11_0)&&!cave_volume_failed_;
  if(!wanted){cave_volume_active_=false;cave_glow_pending_=false;return;}
  const bool outdoor=!native_world_cave_;
  // Per map: the terrain bounds and, for a cave, its exits to normal-sky
@@ -360,11 +379,14 @@ void Renderer::update_cave_irradiance() noexcept try {
  if(!layout.valid()){cave_volume_active_=false;return;}
  // The terrain height grid (1 m vertices) of this map, once built.
  const std::uint32_t height_width=ambient_tiles_x_*2u+1u,height_height=ambient_tiles_y_*2u+1u;
- ID3D11ShaderResourceView* heights=ambient_tiles_x_&&ambient_height_srv_&&ambient_height_.size()==std::size_t(height_width)*height_height?
-  ambient_height_srv_.Get():nullptr;
+ // (D3D12: the shared grid texture ambient12_.height.)
+ const bool height_grid=ambient_tiles_x_&&ambient_height_.size()==std::size_t(height_width)*height_height;
+ ID3D11ShaderResourceView* heights_view=!d3d12_&&height_grid&&ambient_height_srv_?ambient_height_srv_.Get():nullptr;
+ const D3D12Texture* heights12=d3d12_&&height_grid?ambient12_.height.get():nullptr;
+ const bool heights=heights_view||heights12;
  // The height grid arrives after the map's first frames: fill again then.
  if(heights&&!cave_volume_heights_)full=true;
- cave_volume_heights_=heights!=nullptr;
+ cave_volume_heights_=heights;
  const auto height_at=[&](float x,float y){
   const auto ix=std::clamp<long>(std::lround(x),0,long(height_width)-1),iy=std::clamp<long>(std::lround(y),0,long(height_height)-1);
   return ambient_height_[std::size_t(iy)*height_width+std::size_t(ix)];
@@ -424,7 +446,14 @@ void Renderer::update_cave_irradiance() noexcept try {
   std::fprintf(stderr,"Bounce light volume: %s failed (0x%08lx); bounce light omitted.\n",what,static_cast<unsigned long>(result));
   bridge_append_probe_event("cave_gi_failed",what);
  };
- if(!cave_inject_cs_){
+ // D3D12 backend: the same grids, buffers and dispatch through the executor
+ // (cave12_); the CPU sources, grid, virtual lights and exits are shared.
+ auto& cave12=cave12_;
+ if(d3d12_){
+  if(cave12.programs.empty())append_cave_irradiance_shader_programs(cave12.programs);
+  if(cave12.programs.size()<3)return fail(E_FAIL,"inject shader");
+  if(!d3d12_->storage_supported(DXGI_FORMAT_R16G16B16A16_FLOAT))return fail(E_FAIL,"volume format not writable by compute");
+ }else if(!cave_inject_cs_){
   std::vector<ShaderProgram> programs;append_cave_irradiance_shader_programs(programs);
   ComPtr<ID3DBlob> code,errors;
   if(FAILED(hr=compile_shader(programs[0],&code,&errors))||
@@ -445,15 +474,22 @@ void Renderer::update_cave_irradiance() noexcept try {
   for(auto& t:cave_volume_)t.Reset();
   for(auto& v:cave_volume_srv_)v.Reset();
   for(auto& v:cave_volume_uav_)v.Reset();
+  for(auto& t:cave12.volume)t.reset();
   cave_volume_size_={};
-  D3D11_TEXTURE3D_DESC description{};description.Width=layout.size[0];description.Height=layout.size[1];
-  description.Depth=layout.size[2];description.MipLevels=1;description.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;
-  description.Usage=D3D11_USAGE_DEFAULT;description.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
-  for(int c=0;c<3;++c){
-   if(FAILED(hr=device_->CreateTexture3D(&description,nullptr,&cave_volume_[c]))||
-      FAILED(hr=device_->CreateShaderResourceView(cave_volume_[c].Get(),nullptr,&cave_volume_srv_[c]))||
-      FAILED(hr=device_->CreateUnorderedAccessView(cave_volume_[c].Get(),nullptr,&cave_volume_uav_[c])))
-    return fail(hr,"volume textures");
+  if(d3d12_){
+   for(int c=0;c<3;++c)
+    if(FAILED(hr=d3d12_->create_storage_texture(layout.size[0],layout.size[1],layout.size[2],DXGI_FORMAT_R16G16B16A16_FLOAT,cave12.volume[c])))
+     return fail(hr,"volume textures");
+  }else{
+   D3D11_TEXTURE3D_DESC description{};description.Width=layout.size[0];description.Height=layout.size[1];
+   description.Depth=layout.size[2];description.MipLevels=1;description.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;
+   description.Usage=D3D11_USAGE_DEFAULT;description.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
+   for(int c=0;c<3;++c){
+    if(FAILED(hr=device_->CreateTexture3D(&description,nullptr,&cave_volume_[c]))||
+       FAILED(hr=device_->CreateShaderResourceView(cave_volume_[c].Get(),nullptr,&cave_volume_srv_[c]))||
+       FAILED(hr=device_->CreateUnorderedAccessView(cave_volume_[c].Get(),nullptr,&cave_volume_uav_[c])))
+     return fail(hr,"volume textures");
+   }
   }
   cave_volume_size_=layout.size;full=true;
  }
@@ -483,22 +519,44 @@ void Renderer::update_cave_irradiance() noexcept try {
   if(uav&&FAILED(result=device_->CreateUnorderedAccessView(next.Get(),nullptr,uav->ReleaseAndGetAddressOf())))return result;
   buffer=std::move(next);srv=std::move(view);capacity=count;return S_OK;
  };
+ // D3D12: a demand-sized structured buffer (contents not kept on growth:
+ // the caller uploads again then; capacity counts its elements).
+ const auto ensure_buffer12=[&](D3D12BufferRef& buffer,UINT& capacity,UINT count,UINT stride)->HRESULT{
+  if(count<=capacity&&buffer)return S_OK;
+  D3D12BufferRef next;
+  const HRESULT result=d3d12_->create_buffer(UINT64(count)*stride,stride,0,next);
+  if(FAILED(result))return result;
+  buffer=std::move(next);capacity=count;return S_OK;
+ };
  const UINT source_count=static_cast<UINT>(sources.size());
  const UINT buffer_count=std::max<UINT>(source_count,1),grid_entries=static_cast<UINT>(std::max<std::size_t>(grid.data.size(),1));
  const UINT vpl_count=quality>=2?32u:16u;
- if(FAILED(hr=ensure_buffer(cave_source_buffer_,cave_source_srv_,cave_source_capacity_,buffer_count,sizeof(NativePointLightGpu),true,nullptr))||
+ if(d3d12_){
+  if(FAILED(hr=ensure_buffer12(cave12.sources,cave_source_capacity_,buffer_count,sizeof(NativePointLightGpu)))||
+     FAILED(hr=ensure_buffer12(cave12.grid,cave_grid_capacity_,grid_entries,sizeof(UINT)))||
+     FAILED(hr=ensure_buffer12(cave12.vpls,cave_vpl_capacity_,buffer_count*vpl_count,sizeof(CaveVirtualLight))))
+   return fail(hr,"bounce buffers");
+ }else if(FAILED(hr=ensure_buffer(cave_source_buffer_,cave_source_srv_,cave_source_capacity_,buffer_count,sizeof(NativePointLightGpu),true,nullptr))||
     FAILED(hr=ensure_buffer(cave_grid_buffer_,cave_grid_srv_,cave_grid_capacity_,grid_entries,sizeof(UINT),true,nullptr))||
     FAILED(hr=ensure_buffer(cave_vpl_buffer_,cave_vpl_srv_,cave_vpl_capacity_,buffer_count*vpl_count,sizeof(CaveVirtualLight),true,nullptr)))
   return fail(hr,"bounce buffers");
  D3D11_MAPPED_SUBRESOURCE mapped{};
  if(source_count&&(sources_changed||cave_source_capacity_!=cave_sources_uploaded_capacity_)){
   cave_sources_uploaded_=sources;cave_sources_uploaded_capacity_=cave_source_capacity_;
-  if(FAILED(hr=context_->Map(cave_source_buffer_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return fail(hr,"source map");
-  std::memcpy(mapped.pData,sources.data(),source_count*sizeof(NativePointLightGpu));context_->Unmap(cave_source_buffer_.Get(),0);
-  if(FAILED(hr=context_->Map(cave_grid_buffer_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return fail(hr,"grid map");
-  if(!grid.data.empty())std::memcpy(mapped.pData,grid.data.data(),grid.data.size()*sizeof(UINT));
-  else std::memset(mapped.pData,0,sizeof(UINT));
-  context_->Unmap(cave_grid_buffer_.Get(),0);
+  if(d3d12_){
+   const UINT zero=0;
+   if(FAILED(hr=d3d12_->write_buffer(*cave12.sources,0,sources.data(),UINT64(source_count)*sizeof(NativePointLightGpu)))||
+      FAILED(hr=d3d12_->write_buffer(*cave12.grid,0,grid.data.empty()?&zero:grid.data.data(),
+                                     grid.data.empty()?sizeof(UINT):UINT64(grid.data.size())*sizeof(UINT))))
+    return fail(hr,"source upload");
+  }else{
+   if(FAILED(hr=context_->Map(cave_source_buffer_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return fail(hr,"source map");
+   std::memcpy(mapped.pData,sources.data(),source_count*sizeof(NativePointLightGpu));context_->Unmap(cave_source_buffer_.Get(),0);
+   if(FAILED(hr=context_->Map(cave_grid_buffer_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return fail(hr,"grid map");
+   if(!grid.data.empty())std::memcpy(mapped.pData,grid.data.data(),grid.data.size()*sizeof(UINT));
+   else std::memset(mapped.pData,0,sizeof(UINT));
+   context_->Unmap(cave_grid_buffer_.Get(),0);
+  }
  }
  // The lamps' virtual lights, from the CPU height grid, rebuilt when the
  // sources, the grid (a new map or a water level step) or the count change.
@@ -518,9 +576,14 @@ void Renderer::update_cave_irradiance() noexcept try {
     if(cave_lamp_virtual_lights(light.center_inverse_radius_squared.data(),radius,light.color.data(),strength,
        ambient_height_.data(),height_width,height_height,vpl_count,&cave_vpls_[std::size_t(n)*vpl_count]))++cave_vpl_lit_;
    }
-   if(FAILED(hr=context_->Map(cave_vpl_buffer_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return fail(hr,"virtual light map");
-   std::memcpy(mapped.pData,cave_vpls_.data(),cave_vpls_.size()*sizeof(CaveVirtualLight));
-   context_->Unmap(cave_vpl_buffer_.Get(),0);
+   if(d3d12_){
+    if(FAILED(hr=d3d12_->write_buffer(*cave12.vpls,0,cave_vpls_.data(),UINT64(cave_vpls_.size())*sizeof(CaveVirtualLight))))
+     return fail(hr,"virtual light upload");
+   }else{
+    if(FAILED(hr=context_->Map(cave_vpl_buffer_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return fail(hr,"virtual light map");
+    std::memcpy(mapped.pData,cave_vpls_.data(),cave_vpls_.size()*sizeof(CaveVirtualLight));
+    context_->Unmap(cave_vpl_buffer_.Get(),0);
+   }
   }
  }
  // The cave exits for the glow pass and the border fog (CaveExitGpu).
@@ -536,17 +599,24 @@ void Renderer::update_cave_irradiance() noexcept try {
   }
   cave_exit_count_=static_cast<UINT>(exits.size());
   if(!exits.empty()){
-   if(FAILED(hr=ensure_buffer(cave_exit_buffer_,cave_exit_srv_,cave_exit_capacity_,cave_exit_count_,sizeof(CaveExitGpu),true,nullptr)))
-    return fail(hr,"exit buffer");
-   if(FAILED(hr=context_->Map(cave_exit_buffer_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return fail(hr,"exit map");
-   std::memcpy(mapped.pData,exits.data(),exits.size()*sizeof(CaveExitGpu));context_->Unmap(cave_exit_buffer_.Get(),0);
+   if(d3d12_){
+    if(FAILED(hr=ensure_buffer12(cave12.exits,cave_exit_capacity_,cave_exit_count_,sizeof(CaveExitGpu)))||
+       FAILED(hr=d3d12_->write_buffer(*cave12.exits,0,exits.data(),UINT64(exits.size())*sizeof(CaveExitGpu))))
+     return fail(hr,"exit buffer");
+   }else{
+    if(FAILED(hr=ensure_buffer(cave_exit_buffer_,cave_exit_srv_,cave_exit_capacity_,cave_exit_count_,sizeof(CaveExitGpu),true,nullptr)))
+     return fail(hr,"exit buffer");
+    if(FAILED(hr=context_->Map(cave_exit_buffer_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return fail(hr,"exit map");
+    std::memcpy(mapped.pData,exits.data(),exits.size()*sizeof(CaveExitGpu));context_->Unmap(cave_exit_buffer_.Get(),0);
+   }
   }
  }
  // Sun cascades for the sun bounce, outdoors, unless the depth array is
  // still the bound depth target (a read-write hazard D3D11 resolves by
- // unbinding the read).
+ // unbinding the read; the D3D12 executor transitions the array itself).
  bool sun_maps=false;
- if(outdoor&&native_shadow_depth_srv_&&native_shadow_constants_){
+ if(d3d12_)sun_maps=outdoor&&shadow12_.maps!=nullptr;
+ else if(outdoor&&native_shadow_depth_srv_&&native_shadow_constants_){
   ComPtr<ID3D11DepthStencilView> bound;context_->OMGetRenderTargets(0,nullptr,&bound);
   ComPtr<ID3D11Resource> target,depth;
   if(bound)bound->GetResource(&target);
@@ -554,15 +624,17 @@ void Renderer::update_cave_irradiance() noexcept try {
   sun_maps=!target||target.Get()!=depth.Get();
  }
  // The painted ground colour (albedo), once the ground cover painted it for this map.
- ID3D11ShaderResourceView* ground_color=gc_color_srv_&&gc_map_generation_==ambient_map_generation_&&!gc_color_unpainted_?
+ ID3D11ShaderResourceView* ground_color=!d3d12_&&gc_color_srv_&&gc_map_generation_==ambient_map_generation_&&!gc_color_unpainted_?
   gc_color_srv_.Get():nullptr;
+ const D3D12Texture* ground_color12=d3d12_&&gc12_.map.color&&gc12_.map.color_ready&&gc12_.map.generation==ambient_map_generation_?
+  gc12_.map.color.get():nullptr;
  CaveInjectConstants values{};
  for(int k=0;k<3;++k){values.origin[k]=layout.origin[k];values.size[k]=layout.size[k];}
  values.cell=layout.cell;values.vpl_count=vpl_count;
  values.grid_origin[0]=grid.origin[0];values.grid_origin[1]=grid.origin[1];values.grid_inverse_cell=grid.inverse_cell;
  values.albedo=kCaveBounceAlbedo;values.grid_width=grid.width;values.grid_height=grid.height;
  values.light_count=source_count;
- values.mode=(outdoor?kCaveModeOutdoor:0u)|(sun_maps?kCaveModeSunMaps:0u)|(ground_color?kCaveModeGroundColor:0u)|
+ values.mode=(outdoor?kCaveModeOutdoor:0u)|(sun_maps?kCaveModeSunMaps:0u)|(ground_color||ground_color12?kCaveModeGroundColor:0u)|
   (heights?kCaveModeHeights:0u);
  {
   const auto& d=native_world_lighting_.sunlight_direction;
@@ -589,23 +661,45 @@ void Renderer::update_cave_irradiance() noexcept try {
   cave_volume_slab_=(cave_volume_slab_+1)%slab_count;
  }else cave_volume_slab_=0;
  values.slab_first=first_row*4u;
- if(FAILED(hr=context_->Map(cave_inject_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return fail(hr,"inject constants map");
- std::memcpy(mapped.pData,&values,sizeof(values));context_->Unmap(cave_inject_constants_.Get(),0);
  transition_profile_pass("cave_gi_inject");
- {ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(80,5,empty); // the grids become UAVs
-  context_->VSSetShaderResources(80,5,empty);context_->CSSetShaderResources(80,5,empty);}
- ID3D11Buffer* constant_buffers[2]={cave_inject_constants_.Get(),sun_maps?native_shadow_constants_.Get():nullptr};
- ID3D11ShaderResourceView* inputs[7]={source_count?cave_source_srv_.Get():nullptr,source_count?cave_grid_srv_.Get():nullptr,nullptr,
-  heights,ground_color,sun_maps?native_shadow_depth_srv_.Get():nullptr,cave_vpl_srv_.Get()};
- context_->CSSetConstantBuffers(0,2,constant_buffers);
- context_->CSSetShaderResources(0,7,inputs);
- ID3D11UnorderedAccessView* outputs[3]={cave_volume_uav_[0].Get(),cave_volume_uav_[1].Get(),cave_volume_uav_[2].Get()};
- context_->CSSetUnorderedAccessViews(0,3,outputs,nullptr);
- context_->CSSetShader(cave_inject_cs_.Get(),nullptr,0);
- if(rows)context_->Dispatch(groups_x,rows,groups_z);
- ID3D11ShaderResourceView* no_inputs[7]{};ID3D11UnorderedAccessView* no_outputs[4]{};ID3D11Buffer* no_constants[2]{};
- context_->CSSetUnorderedAccessViews(0,4,no_outputs,nullptr);context_->CSSetShaderResources(0,7,no_inputs);
- context_->CSSetConstantBuffers(0,2,no_constants);context_->CSSetShader(nullptr,nullptr,0);
+ if(d3d12_){
+  // A slab still compiling leaves the grids as they were (a full fill is
+  // retried next frame); the bounce shows once a fill has run.
+  d3d12_->clear_slots();
+  d3d12_->set_constants(0,&values,sizeof(values));
+  if(sun_maps)d3d12_->set_constants(1,&shadow12_.constants,sizeof(shadow12_.constants));
+  d3d12_->set_resource(0,source_count?cave12.sources.get():nullptr);
+  d3d12_->set_resource(1,source_count?cave12.grid.get():nullptr);
+  d3d12_->set_resource(3,heights12);
+  d3d12_->set_resource(4,ground_color12);
+  d3d12_->set_resource(5,sun_maps?shadow12_.maps.get():nullptr);
+  d3d12_->set_resource(6,cave12.vpls.get());
+  for(UINT c=0;c<3;++c)d3d12_->set_unordered(c,cave12.volume[c].get());
+  hr=rows?d3d12_->dispatch(cave12.programs[0],groups_x,rows,groups_z):S_OK;
+  d3d12_->clear_slots();
+  if(FAILED(hr))return fail(hr,"inject dispatch");
+  if(hr!=S_OK){
+   d3d12_->count("bounce light injections waiting for their pipeline");
+   if(full){cave_volume_active_=false;cave_glow_pending_=false;return;} // nothing filled yet: a full fill again next frame
+  }
+ }else{
+  if(FAILED(hr=context_->Map(cave_inject_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return fail(hr,"inject constants map");
+  std::memcpy(mapped.pData,&values,sizeof(values));context_->Unmap(cave_inject_constants_.Get(),0);
+  {ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(80,5,empty); // the grids become UAVs
+   context_->VSSetShaderResources(80,5,empty);context_->CSSetShaderResources(80,5,empty);}
+  ID3D11Buffer* constant_buffers[2]={cave_inject_constants_.Get(),sun_maps?native_shadow_constants_.Get():nullptr};
+  ID3D11ShaderResourceView* inputs[7]={source_count?cave_source_srv_.Get():nullptr,source_count?cave_grid_srv_.Get():nullptr,nullptr,
+   heights_view,ground_color,sun_maps?native_shadow_depth_srv_.Get():nullptr,cave_vpl_srv_.Get()};
+  context_->CSSetConstantBuffers(0,2,constant_buffers);
+  context_->CSSetShaderResources(0,7,inputs);
+  ID3D11UnorderedAccessView* outputs[3]={cave_volume_uav_[0].Get(),cave_volume_uav_[1].Get(),cave_volume_uav_[2].Get()};
+  context_->CSSetUnorderedAccessViews(0,3,outputs,nullptr);
+  context_->CSSetShader(cave_inject_cs_.Get(),nullptr,0);
+  if(rows)context_->Dispatch(groups_x,rows,groups_z);
+  ID3D11ShaderResourceView* no_inputs[7]{};ID3D11UnorderedAccessView* no_outputs[4]{};ID3D11Buffer* no_constants[2]{};
+  context_->CSSetUnorderedAccessViews(0,4,no_outputs,nullptr);context_->CSSetShaderResources(0,7,no_inputs);
+  context_->CSSetConstantBuffers(0,2,no_constants);context_->CSSetShader(nullptr,nullptr,0);
+ }
  cave_volume_origin_=layout.origin;cave_volume_cell_=layout.cell;
  cave_volume_quality_=quality;cave_volume_outdoor_=outdoor;cave_volume_active_=true;
  cave_glow_pending_=!outdoor&&cave_exit_count_>0;
@@ -673,6 +767,44 @@ void Renderer::draw_cave_exit_glow() noexcept try {
  ID3D11ShaderResourceView* none=nullptr;context_->PSSetShaderResources(0,1,&none);
  profiler_.add_draw(1,1);profiler_.add_batch();
 }catch(...){}
+
+// draw_cave_exit_glow on D3D12: the same program, constants and fixed state
+// (additive colour, depth tested LESS_EQUAL, never written, no cull or depth
+// clip) into the bound world targets, once per frame where the sky draws.
+void Renderer::draw_cave_exit_glow_d3d12() noexcept try {
+ if(!cave_glow_pending_||scene_composited_||!world_d3d12_bound_||!cave12_.exits)return;
+ cave_glow_pending_=false;
+ if(cave12_.programs.size()<3)return;
+ const CaveGlowConstants values{cave_exit_count_,1.f,{0,0}};
+ transition_profile_pass("cave_glow");
+ d3d12_->clear_slots();
+ d3d12_->set_constants(0,&values,sizeof(values));
+ d3d12_->set_constants(10,&fog_frame_d3d12_,sizeof(fog_frame_d3d12_));
+ d3d12_->set_resource(0,cave12_.exits.get());
+ D3D12NativeState state;
+ state.raster.FillMode=D3D11_FILL_SOLID;state.raster.CullMode=D3D11_CULL_NONE;state.raster.DepthClipEnable=FALSE;
+ state.depth.DepthEnable=TRUE;state.depth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;state.depth.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;
+ auto& blend=state.custom_blend;blend.custom=1;
+ blend.source=blend.destination=blend.source_alpha=blend.destination_alpha=D3D11_BLEND_ONE;
+ blend.write_mask=D3D11_COLOR_WRITE_ENABLE_RED|D3D11_COLOR_WRITE_ENABLE_GREEN|D3D11_COLOR_WRITE_ENABLE_BLUE;
+ const HRESULT hr=d3d12_->draw(cave12_.programs[1],cave12_.programs[2],state,nullptr,3);
+ d3d12_->clear_slots();
+ if(FAILED(hr))d3d12_->omit("cave exit glow (draw failed)",false);
+ else if(hr!=S_OK)d3d12_->count("cave exit glows waiting for their pipeline");
+ else{d3d12_->count("cave exit glows");profiler_.add_draw(1,1);profiler_.add_batch();}
+}catch(...){}
+
+// The grids, the exits and their sampler for every D3D12 stage that runs the
+// native source (bind_cave_irradiance_stages; one table serves all stages):
+// none while the volume is off (the sampling strength is 0 then).
+void Renderer::bind_cave_irradiance_d3d12() noexcept {
+ for(UINT c=0;c<3;++c)d3d12_->set_resource(80+c,cave_volume_active_?cave12_.volume[c].get():nullptr);
+ d3d12_->set_resource(84,cave_volume_active_&&cave_exit_count_?cave12_.exits.get():nullptr);
+ D3D11_SAMPLER_DESC sampler{};sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+ sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
+ sampler.ComparisonFunc=D3D11_COMPARISON_NEVER;sampler.MaxLOD=D3D11_FLOAT32_MAX;
+ d3d12_->set_sampler(13,sampler);
+}
 
 // The sampling constants (the tail of the point-light constants): the layout
 // the grids were injected with, or strength 0. The strengths are applied at

@@ -87,6 +87,14 @@ struct HudPreviewSlot {HudPanelBounds bounds;unsigned index=0;};
 // consumers publish values and never retain these addresses.
 struct HudPortraitSlot {const void* unit=nullptr;std::int32_t id=0;HudPanelBounds bounds;};
 std::size_t widescreen_hud_portrait_slots(HudPortraitSlot* slots,std::size_t capacity) noexcept;
+// The portraits panel face figure (CI3DObjectFaces figures[5i+1]) being drawn
+// now: its slot, unit, current expression (faces[i].nCurTex: 0 neutral,
+// 1 happy, 2 pain, 3 tired) and face picture name (faces[i].szTexName).
+struct HudPortraitFace {
+    unsigned slot=0;const void* unit=nullptr;std::int32_t id=0;std::int32_t expression=0;
+    char texture[32]{};
+};
+bool widescreen_hud_portrait_face(const void* figure,HudPortraitFace& face) noexcept;
 void widescreen_hud_preview_slots(HudPanel panel,std::vector<HudPreviewSlot>& slots);
 // Scope each synchronous native figure call; keeps slot glyphs upright and bindings intact.
 void widescreen_apply_hud_figure_layout(const void* figure) noexcept;
@@ -101,6 +109,8 @@ void widescreen_hud_position_percent(HudPanel panel,float left,float top,float w
 struct HudAssetFrame { HudPanelBounds bounds; float thickness=0.f; unsigned edges=15; bool portrait=false; float opacity=1.f; };
 void widescreen_hud_asset_frames(std::vector<HudAssetFrame>& frames);
 bool widescreen_hud_asset_frame(HudPanel panel,HudAssetFrame& frame) noexcept;
+// A party portrait slot's frame (HudPortraitFace::slot), its selection frame shown or not.
+bool widescreen_hud_portrait_frame(unsigned slot,HudAssetFrame& frame) noexcept;
 bool widescreen_replaces_hud_frame(const void* figure) noexcept;
 // The verified screen tooltip boundary follows all normal HUD submissions.
 void widescreen_set_hud_frame_sink(void* owner,void (*sink)(void*) noexcept) noexcept;

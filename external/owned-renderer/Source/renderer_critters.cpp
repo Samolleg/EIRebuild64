@@ -967,57 +967,16 @@ std::array<float, 4> atlas_box(int region) {
 
 struct Image { unsigned w = 0, h = 0; std::vector<std::uint8_t> rgb; };
 
-// DXT1 or DXT3 colour (block: 8 or 16 bytes, DXT3's colour after its alpha).
-bool decode_dxt(const std::uint8_t* data, std::size_t bytes, unsigned w, unsigned h, unsigned block, Image& out) {
-    if (w % 4 || h % 4 || bytes < std::size_t(w / 4) * (h / 4) * block) return false;
-    out.w = w; out.h = h; out.rgb.assign(std::size_t(w) * h * 3, 0);
-    for (unsigned by = 0; by < h / 4; ++by)
-        for (unsigned bx = 0; bx < w / 4; ++bx) {
-            const std::uint8_t* b = data + (std::size_t(by) * (w / 4) + bx) * block + (block - 8);
-            const unsigned c0 = b[0] | (b[1] << 8), c1 = b[2] | (b[3] << 8);
-            float pal[4][3];
-            const auto rgb = [](unsigned c, float* o) {
-                o[0] = float(((c >> 11) & 31) * 255 / 31); o[1] = float(((c >> 5) & 63) * 255 / 63); o[2] = float((c & 31) * 255 / 31);
-            };
-            rgb(c0, pal[0]); rgb(c1, pal[1]);
-            for (int k = 0; k < 3; ++k) {
-                if (c0 > c1) { pal[2][k] = (2 * pal[0][k] + pal[1][k]) / 3; pal[3][k] = (pal[0][k] + 2 * pal[1][k]) / 3; }
-                else { pal[2][k] = (pal[0][k] + pal[1][k]) / 2; pal[3][k] = 0; }
-            }
-            const std::uint32_t bits = b[4] | (b[5] << 8) | (b[6] << 16) | (std::uint32_t(b[7]) << 24);
-            for (unsigned i = 0; i < 16; ++i) {
-                const unsigned sel = (bits >> (2 * i)) & 3, x = bx * 4 + i % 4, y = by * 4 + i / 4;
-                for (int k = 0; k < 3; ++k) out.rgb[(std::size_t(y) * w + x) * 3 + k] = std::uint8_t(pal[sel][k]);
-            }
-        }
-    return true;
-}
-
-// Recolour towards rgb keeping the painted light/dark variation (keep 0.9).
 // A creature skin's top mip in any MMP format the loader accepts: DXT1,
 // DXT3, or packed 16/32-bit with per-channel masks (Dejavu's bat is a
-// 512 px ARGB1555). Masks are in the file's A, R, G, B order.
+// 512 px ARGB1555): the loader's shared colour decode.
 bool decode_skin_texture(const TextureCpuAsset& t, Image& out) {
-    if (t.mips.empty() || !t.source) return false;
-    const auto& mip = t.mips[0];
-    if (mip.byte_offset > t.source->size() || mip.bytes > t.source->size() - mip.byte_offset) return false;
-    const std::uint8_t* data = t.source->data() + mip.byte_offset;
-    if (t.format == MmpFormat::dxt1) return decode_dxt(data, mip.bytes, mip.width, mip.height, 8, out);
-    if (t.format == MmpFormat::dxt3 || t.format == MmpFormat::dxt5) return decode_dxt(data, mip.bytes, mip.width, mip.height, 16, out);
-    const unsigned bpp = t.bit_count / 8;
-    if ((bpp != 2 && bpp != 4) || mip.bytes < std::size_t(mip.width) * mip.height * bpp) return false;
-    out.w = mip.width; out.h = mip.height; out.rgb.assign(std::size_t(out.w) * out.h * 3, 0);
-    for (std::size_t i = 0; i < std::size_t(out.w) * out.h; ++i) {
-        const std::uint8_t* q = data + i * bpp;
-        const std::uint32_t v = bpp == 2 ? std::uint32_t(q[0] | (q[1] << 8)) : std::uint32_t(q[0] | (q[1] << 8) | (q[2] << 16)) | (std::uint32_t(q[3]) << 24);
-        for (int c = 0; c < 3; ++c) {
-            const std::uint32_t mask = t.masks[1 + c], bits = t.channel_bits[1 + c];
-            if (!mask || !bits || bits > 8) return false;
-            out.rgb[i * 3 + c] = std::uint8_t(((v & mask) >> t.shifts[1 + c]) * 255u / ((1u << bits) - 1));
-        }
-    }
+    std::uint32_t w = 0, h = 0;
+    if (!texture_rgb_pixels(t, 0, w, h, out.rgb)) return false;
+    out.w = w; out.h = h;
     return true;
 }
+// Recolour towards rgb keeping the painted light/dark variation (keep 0.9).
 Image tint(const Image& img, const float rgb[3]) {
     Image out = img;
     double mean = 0;
@@ -4024,6 +3983,13 @@ struct Renderer::CritterState {
     ComPtr<ID3D11ShaderResourceView> vertex_srv, baked_srv, instance_srv, bone_srv, skins_srv;
     ComPtr<ID3D11RasterizerState> raster; ComPtr<ID3D11DepthStencilState> depth; ComPtr<ID3D11BlendState> blend;
     ComPtr<ID3D11SamplerState> sampler;
+    // D3D12 backend: the same buffers and skins (no D3D11 objects), the frame
+    // constants kept for the shadow pass, and the crVS/crPS/crShadowVS programs.
+    D3D12BufferRef vertices12, baked12, instances12, bones12;
+    D3D12TextureRef skins12;
+    std::vector<ShaderProgram> programs12;
+    std::vector<std::uint8_t> frame12;
+    UINT skin_mips12 = 1; std::uint32_t skin_mips_done12 = 0;  // slices whose mips the downsample made
     bool ready = false;
     UINT instance_capacity = 0, bone_capacity = 0;
     // Small metadata kept from the asset build (the data itself is on the GPU).
@@ -4127,7 +4093,8 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
     if (critters_failed_) return S_OK; // preserve the original failure
     // The sun shadow pass draws only a frame this call completes.
     if (critters_) critters_->shadow_ready = false;
-    if (!device_ || !context_ || !rtv_ || !dsv_ || scene_composited_) return status("world targets unavailable");
+    if (scene_composited_ || (d3d12_ ? !world_d3d12_bound_ || !world_d3d12_ : !device_ || !context_ || !rtv_ || !dsv_))
+        return status("world targets unavailable");
     try {
         if (!critters_) {
             // Shaders and the game assets build on workers; no frame waits.
@@ -4136,7 +4103,7 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             auto state = std::make_shared<CritterState>();
             std::vector<ShaderProgram> programs;
             append_critter_shader_programs(programs);
-            state->compile = std::async(std::launch::async, [programs = std::move(programs)]() {
+            if (!d3d12_) state->compile = std::async(std::launch::async, [programs = std::move(programs)]() {
                 const BackgroundWorkerPriority priority;
                 std::array<ComPtr<ID3DBlob>, 3> blobs;
                 for (unsigned k = 0; k < 3; ++k) {
@@ -4158,18 +4125,46 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         }
         auto& cr = *critters_;
         if (!cr.ready) {
-            if (cr.compile.wait_for(std::chrono::seconds(0)) != std::future_status::ready ||
+            if ((!d3d12_ && cr.compile.wait_for(std::chrono::seconds(0)) != std::future_status::ready) ||
                 cr.assets.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return status("loading assets/shaders");
-            const auto blobs = cr.compile.get();
             const auto assets = cr.assets.get();
-            if (!blobs[0] || !blobs[1] || !blobs[2]) return fail("shaders unavailable");
             if (!assets || !assets->error.empty()) return fail(assets ? assets->error : std::string("asset build failed"));
+            const auto& a = *assets;
+            if (d3d12_) {
+                // D3D12 backend: the same mesh and clip buffers, and the skins as
+                // one array whose mips the executor's downsample makes (per frame
+                // until every slice is done, before the first draw).
+                append_critter_shader_programs(cr.programs12);
+                if (cr.programs12.size() < 3) return fail("D3D12 programs unavailable");
+                const auto buffer = [&](D3D12BufferRef& out, const void* data, UINT64 bytes, UINT stride) {
+                    D3D12BufferRef created;
+                    HRESULT result = d3d12_->create_buffer(bytes, stride, 0, created);
+                    if (SUCCEEDED(result)) result = d3d12_->write_buffer(*created, 0, data, bytes);
+                    if (SUCCEEDED(result)) out = std::move(created);
+                    return SUCCEEDED(result);
+                };
+                if (!buffer(cr.vertices12, a.vertices.data(), UINT64(a.vertices.size()) * sizeof(CrVertex), sizeof(CrVertex)) ||
+                    !buffer(cr.baked12, a.baked.data(), UINT64(a.baked.size()) * sizeof(Bone), sizeof(Bone)))
+                    return fail("mesh or clip buffers unavailable (D3D12)");
+                cr.skin_mips12 = 1; for (UINT n = kSkin; n > 1; n >>= 1) ++cr.skin_mips12;
+                if (FAILED(d3d12_->create_storage_texture(kSkin, kSkin, 0, DXGI_FORMAT_R8G8B8A8_UNORM, cr.skins12, cr.skin_mips12, s_count)))
+                    return fail("skin texture unavailable (D3D12)");
+                for (unsigned s = 0; s < s_count; ++s) {
+                    D3D12TextureRef slice;
+                    HRESULT result = d3d12_->create_texture(kSkin, kSkin, DXGI_FORMAT_R8G8B8A8_UNORM, slice);
+                    if (SUCCEEDED(result)) result = d3d12_->write_texture(*slice, RECT{0, 0, LONG(kSkin), LONG(kSkin)},
+                        &a.texels[std::size_t(s) * kSkin * kSkin * 4], kSkin * 4);
+                    if (SUCCEEDED(result)) result = d3d12_->copy_texture(*cr.skins12, D3D11CalcSubresource(0, s, cr.skin_mips12), *slice, 0);
+                    if (FAILED(result)) return fail("skin texture upload failed (D3D12)");
+                }
+            } else {
+            const auto blobs = cr.compile.get();
+            if (!blobs[0] || !blobs[1] || !blobs[2]) return fail("shaders unavailable");
             HRESULT hr = S_OK;
             if (FAILED(hr = create_shader(device_.Get(),blobs[0]->GetBufferPointer(), blobs[0]->GetBufferSize(), nullptr, &cr.vs)) ||
                 FAILED(hr = create_shader(device_.Get(),blobs[1]->GetBufferPointer(), blobs[1]->GetBufferSize(), nullptr, &cr.ps)) ||
                 FAILED(hr = create_shader(device_.Get(),blobs[2]->GetBufferPointer(), blobs[2]->GetBufferSize(), nullptr, &cr.shadow_vs)))
                 return fail("shader objects unavailable");
-            const auto& a = *assets;
             if (FAILED(make_buffer(device_.Get(), UINT(a.vertices.size() * sizeof(CrVertex)), D3D11_BIND_SHADER_RESOURCE,
                     D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, sizeof(CrVertex), a.vertices.data(), cr.vertices, D3D11_USAGE_IMMUTABLE)) ||
                 FAILED(make_structured_srv(device_.Get(), cr.vertices.Get(), UINT(a.vertices.size()), cr.vertex_srv)) ||
@@ -4207,6 +4202,7 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
                       xray.DepthFunc = D3D11_COMPARISON_ALWAYS; return FAILED(device_->CreateDepthStencilState(&xray, &cr.depth_xray)); }() ||
                 FAILED(device_->CreateBlendState(&blend, &cr.blend)) || FAILED(device_->CreateSamplerState(&sampler, &cr.sampler)))
                 return fail("pipeline states unavailable");
+            }
             cr.meshes = a.meshes; cr.minis = a.minis; cr.jaw_start = a.jaw_start; cr.jaw_frames = std::max(1u, a.jaw_frames);
             cr.larva_length = a.larva_length; cr.larva_center_z = a.larva_center_z; cr.larva_tail_y = a.larva_tail_y;
             cr.statue = a.statue;
@@ -4762,6 +4758,37 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         cr.instance_upload.clear();
         for (const auto& value : cr.instances_scratch) cr.instance_upload.push_back(value.second);
         const UINT instance_count = UINT(cr.instance_upload.size()), bone_count = std::max<UINT>(1, UINT(cr.bone_scratch.size()));
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        if (d3d12_) {
+            // D3D12: the skin array's mips first (the downsample may still be
+            // compiling: no draw until every slice has them), then the same
+            // demand-sized buffers, written in stream order.
+            const std::uint32_t all_slices = (1u << s_count) - 1u;
+            for (unsigned s = 0; s < s_count && cr.skin_mips_done12 != all_slices; ++s) {
+                if (cr.skin_mips_done12 & (1u << s)) continue;
+                const HRESULT hr = d3d12_->generate_mips(*cr.skins12, d3d12_mip_array_program(), s);
+                if (FAILED(hr)) return fail("skin mips failed (D3D12)");
+                if (hr != S_OK) break;
+                cr.skin_mips_done12 |= 1u << s;
+            }
+            if (cr.skin_mips_done12 != all_slices) return status("skin mips pending (D3D12 downsample not ready)");
+            if (instance_count > cr.instance_capacity || !cr.instances12) {
+                cr.instance_capacity = std::max(cr.instance_capacity, instance_count + instance_count / 2 + 8);
+                cr.instances12.reset();
+                if (FAILED(d3d12_->create_buffer(UINT64(cr.instance_capacity) * sizeof(CrInstance), sizeof(CrInstance), 0, cr.instances12)))
+                    return fail("instance buffer allocation failed (D3D12)");
+            }
+            if (bone_count > cr.bone_capacity || !cr.bones12) {
+                cr.bone_capacity = std::max(cr.bone_capacity, bone_count + bone_count / 2 + 64);
+                cr.bones12.reset();
+                if (FAILED(d3d12_->create_buffer(UINT64(cr.bone_capacity) * sizeof(Bone), sizeof(Bone), 0, cr.bones12)))
+                    return fail("part matrix buffer allocation failed (D3D12)");
+            }
+            if (FAILED(d3d12_->write_buffer(*cr.instances12, 0, cr.instance_upload.data(), UINT64(instance_count) * sizeof(CrInstance))) ||
+                (!cr.bone_scratch.empty() &&
+                 FAILED(d3d12_->write_buffer(*cr.bones12, 0, cr.bone_scratch.data(), UINT64(cr.bone_scratch.size()) * sizeof(Bone)))))
+                return status("instance upload failed (D3D12)");
+        } else {
         if (instance_count > cr.instance_capacity) {
             cr.instance_capacity = instance_count + instance_count / 2 + 8;
             cr.instances.Reset(); cr.instance_srv.Reset();
@@ -4778,12 +4805,12 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
                 FAILED(make_structured_srv(device_.Get(), cr.bones.Get(), cr.bone_capacity, cr.bone_srv)))
                 return fail("part matrix buffer allocation failed");
         }
-        D3D11_MAPPED_SUBRESOURCE mapped{};
         if (FAILED(context_->Map(cr.instances.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return S_OK;
         std::memcpy(mapped.pData, cr.instance_upload.data(), instance_count * sizeof(CrInstance)); context_->Unmap(cr.instances.Get(), 0);
         if (!cr.bone_scratch.empty()) {
             if (FAILED(context_->Map(cr.bones.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return S_OK;
             std::memcpy(mapped.pData, cr.bone_scratch.data(), cr.bone_scratch.size() * sizeof(Bone)); context_->Unmap(cr.bones.Get(), 0);
+        }
         }
         cr.shadow_ready = true;
         CrFrame c{};
@@ -4802,6 +4829,75 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         c.larva0[0] = cr.larva_length; c.larva0[1] = kLarvaStride; c.larva0[2] = .55f; c.larva0[3] = cr.larva_center_z;
         c.larva1[0] = .05f; c.larva1[1] = .035f; c.larva1[2] = .10f; c.larva1[3] = .07f;
         c.larva2[0] = 1.4f;
+        if (d3d12_) {
+            // The same draws on D3D12, into the world colour and depth: the
+            // world flush's light, sun-map, point-light, fog and sky inputs
+            // (renderer_native_d3d12.cpp) plus the critter buffers and skins.
+            (void)bind_world_fog();
+            try { cr.frame12.assign(reinterpret_cast<const std::uint8_t*>(&c), reinterpret_cast<const std::uint8_t*>(&c) + sizeof(c)); }
+            catch (const std::bad_alloc&) { return fail("allocation failed"); }
+            transition_profile_pass("critters");
+            d3d12_->clear_slots();
+            bind_world_targets_d3d12(); // with AO, the ambient share at slot 2 (as D3D11 write_ambient)
+            bind_world_fog_volume_d3d12(); // t11, as bind_world_fog binds it on D3D11
+            bind_cave_irradiance_d3d12(); // the bounce light and the cave fog
+            d3d12_->set_constants(11, &c, sizeof(c));
+            d3d12_->set_resource(27, cr.vertices12.get()); d3d12_->set_resource(28, cr.instances12.get());
+            d3d12_->set_resource(29, cr.bones12.get()); d3d12_->set_resource(30, cr.baked12.get());
+            d3d12_->set_resource(31, cr.skins12.get());
+            D3D11_SAMPLER_DESC wrap{}; wrap.Filter = D3D11_FILTER_ANISOTROPIC; wrap.MaxAnisotropy = 8;
+            wrap.AddressU = wrap.AddressV = wrap.AddressW = D3D11_TEXTURE_ADDRESS_WRAP; wrap.MaxLOD = D3D11_FLOAT32_MAX;
+            d3d12_->set_sampler(8, wrap);
+            d3d12_->set_constants(1, &native_world_lighting_, sizeof(native_world_lighting_));
+            NativeShadowConstants receivers = shadow12_.constants;
+            if (!native_shadow_failed_ && native_shadows_enabled_)
+                for (UINT slice = 0; slice < 5; ++slice)
+                    if (native_shadow_frame_.slices[slice].enabled && !(receivers.control[0] & (1u << slice))) { receivers.bias[4][2] = 0; break; }
+            d3d12_->set_constants(2, &receivers, sizeof(receivers));
+            d3d12_->set_resource(9, shadow12_.maps.get());
+            d3d12_->set_constants(5, native12_.point_light_constants.data(), sizeof(native12_.point_light_constants));
+            d3d12_->set_resource(17, native_point_lights_.empty() ? nullptr : native12_.point_light_grid.get());
+            d3d12_->set_resource(18, native_point_lights_.empty() ? nullptr : native12_.point_lights.get());
+            D3D11_SAMPLER_DESC compare{}; compare.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_MIP_POINT;
+            compare.AddressU = compare.AddressV = compare.AddressW = D3D11_TEXTURE_ADDRESS_BORDER;
+            compare.BorderColor[0] = compare.BorderColor[1] = compare.BorderColor[2] = compare.BorderColor[3] = 1;
+            compare.ComparisonFunc = D3D11_COMPARISON_LESS_EQUAL; compare.MaxLOD = D3D11_FLOAT32_MAX;
+            d3d12_->set_sampler(1, compare);
+            compare.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT; d3d12_->set_sampler(4, compare);
+            D3D11_SAMPLER_DESC gather{}; gather.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+            gather.AddressU = gather.AddressV = gather.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; gather.MaxLOD = D3D11_FLOAT32_MAX;
+            d3d12_->set_sampler(10, gather);
+            d3d12_->set_constants(10, &fog_frame_d3d12_, sizeof(fog_frame_d3d12_));
+            d3d12_->set_resource(kSkyCloudShadowSlotD3D12, sky_inputs_active_ ? sky12_.shadow.get() : nullptr);
+            d3d12_->set_resource(kSkyProbeSlotD3D12, sky_inputs_active_ ? sky12_.probe[sky_index_].get() : nullptr);
+            D3D11_SAMPLER_DESC linear{}; linear.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+            linear.AddressU = linear.AddressV = linear.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; linear.MaxLOD = D3D11_FLOAT32_MAX;
+            d3d12_->set_sampler(7, linear);
+            D3D12NativeState state;
+            state.raster.FillMode = D3D11_FILL_SOLID; state.raster.CullMode = D3D11_CULL_NONE; state.raster.DepthClipEnable = TRUE;
+            state.depth.DepthEnable = TRUE;
+            state.depth.DepthWriteMask = showcase == 3 ? D3D11_DEPTH_WRITE_MASK_ZERO : D3D11_DEPTH_WRITE_MASK_ALL;
+            state.depth.DepthFunc = showcase == 3 ? D3D11_COMPARISON_ALWAYS : D3D11_COMPARISON_LESS_EQUAL;
+            UINT draws = 0; std::uint64_t triangles = 0; HRESULT hr = S_OK;
+            for (std::size_t begin = 0; begin < cr.instances_scratch.size() && hr == S_OK;) {
+                const Mesh mesh = cr.instances_scratch[begin].first;
+                std::size_t end = begin;
+                while (end < cr.instances_scratch.size() && cr.instances_scratch[end].first == mesh) ++end;
+                const auto& range = cr.meshes[mesh];
+                const std::uint32_t values[4]{std::uint32_t(begin), range.first, 0, 0};
+                d3d12_->set_constants(12, values, sizeof(values));
+                hr = d3d12_->draw_instanced(cr.programs12[0], cr.programs12[1], state, nullptr, range.count, UINT(end - begin), false);
+                if (hr == S_OK) { ++draws; triangles += std::uint64_t(range.count / 3) * (end - begin); }
+                begin = end;
+            }
+            d3d12_->clear_slots(); bind_world_targets_d3d12();
+            if (FAILED(hr)) d3d12_->omit("critters (draw failed)", false);
+            else if (hr == S_FALSE) d3d12_->omit("critters (pipeline not ready)", false);
+            if (draws) d3d12_->count("critter draws");
+            profiler_.add_draw(triangles, draws); profiler_.add_batch(draws);
+            scene_updated_ = true;
+            return S_OK;
+        }
         if (FAILED(context_->Map(cr.frame_constants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return S_OK;
         std::memcpy(mapped.pData, &c, sizeof(c)); context_->Unmap(cr.frame_constants.Get(), 0);
 
@@ -4916,6 +5012,44 @@ void Renderer::draw_critter_shadows(UINT slice) noexcept {
     context_->VSSetConstantBuffers(11, 2, no_buffers);
 }
 
+
+// draw_critter_shadows on D3D12 (for the D3D12 shadow flush's per-frame
+// caster layer): the same previous-frame instances through crShadowVS,
+// depth only, into the depth target, viewport and slice constants (b2) the
+// caller bound; scissor is the caller's map rect. Sets b11, b12 and t27-t30
+// and leaves the other slots as they were.
+void Renderer::draw_critter_shadows_d3d12(UINT slice, const RECT* scissor) noexcept {
+    (void)slice;
+    if (!d3d12_ || !critters_ || critters_failed_) return;
+    auto& cr = *critters_;
+    if (!cr.ready || !cr.shadow_ready || cr.programs12.size() < 3 || cr.instances_scratch.empty() || cr.frame12.empty() ||
+        !cr.vertices12 || !cr.instances12 || !cr.baked12)
+        return;
+    if (profiler_.pass_active()) profiler_.sub_scope("critter_shadows");
+    d3d12_->set_constants(11, cr.frame12.data(), UINT(cr.frame12.size()));
+    d3d12_->set_resource(27, cr.vertices12.get()); d3d12_->set_resource(28, cr.instances12.get());
+    d3d12_->set_resource(29, cr.bones12.get()); d3d12_->set_resource(30, cr.baked12.get());
+    D3D12NativeState state;
+    state.raster.FillMode = D3D11_FILL_SOLID; state.raster.CullMode = D3D11_CULL_NONE; state.raster.DepthClipEnable = TRUE;
+    state.depth.DepthEnable = TRUE; state.depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; state.depth.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+    static const ShaderProgram no_pixel{};
+    UINT draws = 0;
+    for (std::size_t begin = 0; begin < cr.instances_scratch.size();) {
+        const Mesh mesh = cr.instances_scratch[begin].first;
+        std::size_t end = begin;
+        while (end < cr.instances_scratch.size() && cr.instances_scratch[end].first == mesh) ++end;
+        const auto& range = cr.meshes[mesh];
+        const std::uint32_t values[4]{std::uint32_t(begin), range.first, 0, 0};
+        d3d12_->set_constants(12, values, sizeof(values));
+        const HRESULT hr = d3d12_->draw_instanced(cr.programs12[2], no_pixel, state, scissor, range.count, UINT(end - begin), false);
+        if (hr != S_OK) { if (FAILED(hr)) d3d12_->omit("critter sun shadow casters (draw failed)", false); break; }
+        ++draws;
+        begin = end;
+    }
+    if (profiler_.pass_active()) profiler_.add_sub_draw(draws, 0);
+    d3d12_->set_resource(27, static_cast<const D3D12Buffer*>(nullptr)); d3d12_->set_resource(28, static_cast<const D3D12Buffer*>(nullptr));
+    d3d12_->set_resource(29, static_cast<const D3D12Buffer*>(nullptr)); d3d12_->set_resource(30, static_cast<const D3D12Buffer*>(nullptr));
+}
 
 bool Renderer::owned_shadow_casters_animate() const noexcept {
     if (critters_ && !critters_failed_ && critters_->shadow_ready && !critters_->instances_scratch.empty()) return true;

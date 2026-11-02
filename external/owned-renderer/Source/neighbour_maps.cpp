@@ -6,6 +6,7 @@
 #include "ground_cover_neighbour.h"
 #include "owned_resource_runtime.h"
 #include "owned_terrain_front_end.h"
+#include "owned_resource_store.h"
 #include "retained_static_scene.h"
 #include "worker_priority.h"
 #include <windows.h>
@@ -20,6 +21,7 @@
 #include <thread>
 
 namespace owned {
+void bridge_append_probe_event(const char* event,const char* detail) noexcept;
 namespace {
 std::atomic<bool> enabled{false}; // default awaits the director's GPU-budget route
 std::atomic<double> fog_state[17]{};
@@ -29,6 +31,13 @@ std::mutex device_lock;
 // COM pointer would Release the device from the DLL's static destructors at
 // process exit, after the threads that may hold D3D locks were killed.
 ID3D11Device* stream_device = nullptr;
+// D3D12 backend: the executor's preparer (under device_lock). Never destroyed
+// (as stream_device, no device reference is released at process exit);
+// neighbour_maps_set_d3d12(nullptr) drops it at the renderer's release.
+std::shared_ptr<D3D12Preparer>& stream_preparer() {
+    static auto* preparer=new std::shared_ptr<D3D12Preparer>();
+    return *preparer;
+}
 std::mutex resident_lock;
 // The active map's saved-layout entry as the stream last read it (its name
 // and origin): the layout file is only known where the addon is loaded (the
@@ -47,6 +56,9 @@ struct Stream {
     std::condition_variable wake;
     std::thread worker;
     bool stop = false, in_upload = false, finished = false;
+    // Restarted for the coming world of a same-map reload: nothing is taken
+    // and it does not settle until the world change (neighbour_maps_restart).
+    bool held = false;
     std::uint64_t epoch = 0;
     // Each started stream has its own id; a stream whose id is no longer
     // current is stopped and never touches the shared state again, so a
@@ -200,8 +212,8 @@ std::unique_ptr<NeighbourMapUpload> decode_neighbour(OwnedResourceLoader& loader
 // as before); a mesh the builder refuses decodes at upload.
 void prebuild_neighbour(NeighbourMapUpload& upload) noexcept {
     NativePrebuiltBuilder builder;
-    {std::lock_guard<std::mutex> guard(device_lock);builder.device=stream_device;}
-    if(!builder.device)return;
+    {std::lock_guard<std::mutex> guard(device_lock);builder.device=stream_device;if(!builder.device)builder.d3d12=stream_preparer();}
+    if(!builder.device&&!builder.d3d12)return;
     const auto drop=[&upload] {
         upload.prebuilt_pages.clear();upload.prebuilt_terrain_keys.clear();
         upload.prebuilt_terrain.clear();upload.prebuilt_figures.clear();
@@ -260,10 +272,14 @@ void prebuild_neighbour(NeighbourMapUpload& upload) noexcept {
         std::unordered_set<std::string> seen;
         const auto texture=[&](const NativeOwnedTextureView& view) {
             if(!view.resource)return;
-            const auto key=native_owned_archive_texture_key(*view.resource,view.generation,false);
+            // D3D12 uncompressed members are keyed by their view (native_owned_mip_texture_key).
+            UINT pixel_bytes=0;
+            const bool by_view=builder.d3d12&&native_owned_uncompressed_format(view.format,pixel_bytes)!=DXGI_FORMAT_UNKNOWN;
+            const auto key=by_view?native_owned_mip_texture_key(view,view.mip_count==1):
+                native_owned_archive_texture_key(*view.resource,view.generation,false);
             if(!seen.insert(key).second)return;
             NativePrebuiltTexture made;
-            if(build_native_prebuilt_texture(builder.device.Get(),view,made))upload.prebuilt_textures.push_back(std::move(made));
+            if(build_native_prebuilt_texture(builder.device.Get(),builder.d3d12.get(),view,made))upload.prebuilt_textures.push_back(std::move(made));
         };
         const auto& map_terrain=*upload.map->terrain;
         for(const auto& page:map_terrain.pages) {
@@ -323,8 +339,65 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
         // appends its own strips. Only the turn holder touches `strips`.
         std::size_t next_weld=0;               // guarded by s.lock
         std::vector<NeighbourEdgeStrip> strips; // turn holder only
+        // Liquid across map seams (turn holder only). Every placed map at a
+        // whole-metre offset from the active map (only those share vertices)
+        // takes part. A river crossing a seam between two neighbours must run
+        // one way whichever is welded first (save1163: gipat2|zone9 halves
+        // ran apart), so each seam's direction comes from both maps' drain
+        // potentials as each map's field gives them with no roles yet (its
+        // seams marked only): forecast[i], read from neighbour i's own file
+        // when a neighbour welded before it adjoins it. welded[i] holds its
+        // final flow, which later maps' edges blend to. The active map's field
+        // never changes, so its neighbours follow its flow.
         std::shared_ptr<const TerrainCpuAsset> active_terrain;
-        const auto weld=[&](NeighbourMapUpload& upload) {
+        TerrainLiquidRim active_rim;
+        std::vector<std::shared_ptr<const TerrainLiquidRim>> forecast(neighbours.size()),welded(neighbours.size());
+        std::vector<std::uint8_t> forecast_read(neighbours.size(),0);
+        const auto whole=[&](std::size_t j){return neighbours[j].x==std::floor(neighbours[j].x)&&neighbours[j].y==std::floor(neighbours[j].y);};
+        const auto touches=[&](std::size_t a,std::size_t b) {
+            const auto& p=neighbours[a];const auto& q=neighbours[b];
+            return p.x<=q.x+q.placement.width&&q.x<=p.x+p.placement.width&&p.y<=q.y+q.placement.height&&q.y<=p.y+p.placement.height;
+        };
+        // Map j's placed neighbours (the active map first, then layout order),
+        // with the rims chosen by rim(k); offsets in j's grid.
+        const auto beside=[&](std::size_t j,const auto& rim) {
+            const int jx=int(neighbours[j].x),jy=int(neighbours[j].y);
+            std::vector<TerrainAdjoiningLiquid> list;
+            TerrainAdjoiningLiquid a;a.offset_x=jx;a.offset_y=jy;
+            a.xmax=int(active_terrain->sector_count_x*32);a.ymax=int(active_terrain->sector_count_y*32);
+            a.rim=rim(SIZE_MAX);a.flows=a.fixed=true;
+            list.push_back(a);
+            for(std::size_t k=0;k<neighbours.size();++k) {
+                if(k==j||!whole(k))continue;
+                TerrainAdjoiningLiquid n;n.offset_x=jx-int(neighbours[k].x);n.offset_y=jy-int(neighbours[k].y);
+                n.xmax=int(neighbours[k].placement.width);n.ymax=int(neighbours[k].placement.height);
+                n.rim=rim(k);n.flows=n.rim&&n.rim==welded[k].get();
+                list.push_back(n);
+            }
+            return list;
+        };
+        const auto no_rims=[](std::size_t){return static_cast<const TerrainLiquidRim*>(nullptr);};
+        // Neighbour j's rim with only its seams marked.
+        const auto forecast_rim=[&](std::size_t j,TerrainCpuAsset& terrain) {
+            owned_terrain_set_outside_liquid(terrain,beside(j,no_rims),nullptr);
+            auto rim=std::make_shared<TerrainLiquidRim>(owned_terrain_liquid_rim(terrain));
+            return std::shared_ptr<const TerrainLiquidRim>(rim->heights.empty()?nullptr:std::move(rim));
+        };
+        // Neighbour j's forecast read from its own MPR, before it is decoded.
+        // A failure is logged and leaves that map's seams with no roles.
+        const auto read_forecast=[&](std::size_t j)->std::shared_ptr<const TerrainLiquidRim> {
+            ResourceStore store;ResourceBlob blob;ResourceFailure failure;
+            TerrainCpuAsset terrain;
+            const auto name=neighbours[j].placement.mpr+".mpr";
+            if(!store.read_loose_file(selected_path(root,neighbours[j].placement.mpr_path,".mpr"),name,blob,failure)||
+               !parse_terrain_asset(blob,name,terrain,failure)||!validate_terrain_asset_descriptor_once(terrain)) {
+                bridge_append_probe_event("liquid_forecast",(name+": "+(failure.message.empty()?std::string("terrain rejected"):failure.message)+
+                    "; its seams take no flow roles").c_str());
+                return nullptr;
+            }
+            return forecast_rim(j,terrain);
+        };
+        const auto weld=[&](NeighbourMapUpload& upload,std::size_t i) {
             if(!active_terrain) {
                 // The active map decodes in parallel inside the game's load;
                 // its terrain is published before the load returns.
@@ -337,17 +410,33 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
                     std::this_thread::sleep_for(std::chrono::milliseconds(5));
                 }
                 strips=neighbour_edge_strips(*active_terrain,0,0);
+                active_rim=owned_terrain_liquid_rim(*active_terrain);
             }
             // Freshly decoded and not yet shared: nothing else reads it.
             auto& terrain=const_cast<TerrainCpuAsset&>(*upload.map->terrain);
             const double x=upload.selection.x,y=upload.selection.y;
+            // Its own forecast from the decoded terrain before any weld edits
+            // it (the same data its file gives).
+            if(whole(i)&&!forecast_read[i]){forecast[i]=forecast_rim(i,terrain);forecast_read[i]=1;}
             neighbour_weld_edge_heights(terrain,x,y,strips);
             neighbour_weld_edge_normals(terrain,x,y,strips);
             neighbour_weld_edge_shading(terrain,x,y,strips);
-            // Its liquid flow reads the active map's liquid across the shared
-            // edge (whole-metre offsets only: the grids then share vertices).
-            if(x==std::floor(x)&&y==std::floor(y))
-                owned_terrain_set_outside_liquid(terrain,int(x),int(y),*active_terrain);
+            // Its liquid reads the liquid of every map beside it across their
+            // shared edges, each seam's role decided as above.
+            if(whole(i)) {
+                for(std::size_t j=i+1;j<neighbours.size();++j)
+                    if(whole(j)&&!forecast_read[j]&&touches(i,j)){forecast_read[j]=1;forecast[j]=read_forecast(j);}
+                const auto rims=[&](std::size_t k)->const TerrainLiquidRim* {
+                    if(k==SIZE_MAX)return active_rim.heights.empty()?nullptr:&active_rim;
+                    return welded[k]?welded[k].get():forecast[k].get();
+                };
+                owned_terrain_set_outside_liquid(terrain,beside(i,rims),forecast[i].get());
+                if(forecast[i]) {
+                    auto rim=std::make_shared<TerrainLiquidRim>(owned_terrain_liquid_rim(terrain));
+                    rim->potential=forecast[i]->potential; // the seam rule reads the forecast
+                    welded[i]=std::move(rim);
+                }
+            }
             for(auto& strip:neighbour_edge_strips(terrain,x,y))strips.push_back(std::move(strip));
             upload.welded=true;
             return true;
@@ -363,7 +452,16 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
                     // slot is free. Claimed indices are always the lowest
                     // unfinished ones, so in-order delivery cannot stall.
                     std::unique_lock<std::mutex> guard(s.lock);
-                    s.wake.wait(guard,[&]{return stopped() || next_claim>=neighbours.size() || s.resident<kDecoders;});
+                    // Held for the coming world, finished pieces wait for the
+                    // world change without a decode slot, so every neighbour
+                    // prepares during the game's load (the 64-bit host only:
+                    // neighbour_client_restart).
+                    const auto slot_free=[&] {
+                        unsigned busy=s.resident;
+                        if(s.held)for(const auto& slot:s.ready)if(slot.second&&busy)--busy;
+                        return busy<kDecoders;
+                    };
+                    s.wake.wait(guard,[&]{return stopped() || next_claim>=neighbours.size() || slot_free();});
                     if(stopped() || next_claim>=neighbours.size())break;
                     index=next_claim++;++s.resident;
                 }
@@ -375,7 +473,7 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
                     std::unique_lock<std::mutex> guard(s.lock);
                     s.wake.wait(guard,[&]{return stopped() || next_weld==index;});
                 }
-                try {if(upload && !weld(*upload))upload.reset();}
+                try {if(upload && !weld(*upload,index))upload.reset();}
                 catch(const std::exception& e) {upload.reset();set_error(s,neighbours[index].placement.zone+": "+e.what());}
                 catch(...) {upload.reset();set_error(s,neighbours[index].placement.zone+": neighbour weld allocation failed");}
                 {
@@ -392,9 +490,9 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
                         upload->ground_cover_inputs=prepare_ground_cover_neighbour_inputs(*upload->map,mounts,&s.cancel);
                         upload->liquid_surf=prepare_liquid_surf_neighbour(upload->ground_cover_inputs.get(),
                             upload->selection.placement.mpr,no_sea_maps);
-                        ID3D11Device* device=nullptr;
-                        {std::lock_guard<std::mutex> guard(device_lock);device=stream_device;if(device)device->AddRef();}
-                        piece=make_neighbour_piece(*upload,device);
+                        ID3D11Device* device=nullptr;std::shared_ptr<D3D12Preparer> d3d12;
+                        {std::lock_guard<std::mutex> guard(device_lock);device=stream_device;if(device)device->AddRef();else d3d12=stream_preparer();}
+                        piece=make_neighbour_piece(*upload,device,d3d12.get());
                         if(device)device->Release();
                     }
                     catch(const std::exception& e) {set_error(s,neighbours[index].placement.zone+": "+e.what());}
@@ -510,6 +608,7 @@ void neighbour_weld_edge_heights(TerrainCpuAsset& terrain,double x,double y,
             if(strip.side!=(side^1u) || strip.line!=edge.line || strip.positions.empty() ||
                strip.start!=std::floor(strip.start) || edge.start!=std::floor(edge.start))continue;
             const double last=double(strip.positions.size()-1);
+            terrain.welded_sides|=std::uint8_t(1u<<side);
             for(std::uint32_t k=0;k<edge.count;++k) {
                 const double along=edge.start+k-strip.start;
                 if(along<0 || along>last)continue;
@@ -605,6 +704,9 @@ void neighbour_textures_clear() noexcept {std::lock_guard<std::mutex> guard(resi
 bool neighbour_texture_is_resident(const std::string& key) noexcept {
     std::lock_guard<std::mutex> guard(resident_lock);return resident_textures.count(key)!=0;
 }
+void neighbour_maps_set_d3d12(std::shared_ptr<D3D12Preparer> preparer) noexcept {
+    std::lock_guard<std::mutex> guard(device_lock);stream_preparer()=std::move(preparer);
+}
 void neighbour_maps_set_device(ID3D11Device* device) noexcept {
     std::lock_guard<std::mutex> guard(device_lock);
     if(device)device->AddRef();
@@ -662,7 +764,7 @@ void neighbour_maps_stop() noexcept {
         if(exited)s.worker.join();
         else {s.worker.detach();OutputDebugStringA("EID3D11 neighbour maps: stream did not stop within 5 s; detached\n");}
     }
-    {std::lock_guard<std::mutex> guard(s.lock);++s.run;s.epoch=0;s.error.clear();s.next_take=0;s.total=0;s.resident=0;}
+    {std::lock_guard<std::mutex> guard(s.lock);++s.run;s.epoch=0;s.held=false;s.error.clear();s.next_take=0;s.total=0;s.resident=0;}
 }
 void neighbour_maps_stop_epoch(std::uint64_t epoch) noexcept {
     auto& s=stream();
@@ -675,16 +777,23 @@ void neighbour_maps_set_no_sea_maps(const std::string& maps) noexcept {
     try {std::lock_guard<std::mutex> guard(g_no_sea_lock);if(g_no_sea_maps!=maps)g_no_sea_maps=maps;} catch(...) {}
 }
 std::string neighbour_maps_no_sea_maps() {std::lock_guard<std::mutex> guard(g_no_sea_lock);return g_no_sea_maps;}
-void neighbour_maps_begin(const std::string& mpr,std::uint64_t epoch,const ResourceStoreConfig& mounts,
-    NeighbourStreamSource source) noexcept {
+static void start_stream(const std::string& mpr,std::uint64_t epoch,const ResourceStoreConfig& mounts,
+    NeighbourStreamSource source,bool restart) noexcept {
     auto& s=stream();
     std::string no_sea_maps;
     try {std::lock_guard<std::mutex> guard(g_no_sea_lock);no_sea_maps=g_no_sea_maps;} catch(...) {}
-    {std::lock_guard<std::mutex> guard(s.lock);if(s.epoch==epoch)return;}
+    {
+        std::lock_guard<std::mutex> guard(s.lock);
+        if(s.epoch==epoch) {
+            if(!restart)return;
+            // Nothing taken from it yet: it serves the coming world as it is.
+            if(s.next_take==0 && !s.in_upload){s.held=true;s.wake.notify_all();return;}
+        }
+    }
     neighbour_maps_stop();if(!enabled.load(std::memory_order_acquire))return;
     std::uint64_t id=0;
     try {
-        {std::lock_guard<std::mutex> guard(s.lock);s.epoch=epoch;s.stop=false;s.finished=false;
+        {std::lock_guard<std::mutex> guard(s.lock);s.epoch=epoch;s.held=restart;s.stop=false;s.finished=false;
             s.ready.clear();s.next_take=0;s.total=0;s.resident=0;s.in_upload=false;id=++s.run;}
         s.cancel.store(false,std::memory_order_relaxed);
         s.worker=std::thread(run,std::ref(s),mpr,epoch,mounts,id,no_sea_maps,std::move(source));
@@ -693,9 +802,26 @@ void neighbour_maps_begin(const std::string& mpr,std::uint64_t epoch,const Resou
         s.error="Neighbour map worker creation failed";s.finished=true;s.exited=(std::max)(s.exited,id);
     }
 }
+void neighbour_maps_begin(const std::string& mpr,std::uint64_t epoch,const ResourceStoreConfig& mounts,
+    NeighbourStreamSource source) noexcept {
+    start_stream(mpr,epoch,mounts,std::move(source),false);
+}
+void neighbour_maps_restart(const std::string& mpr,std::uint64_t epoch,const ResourceStoreConfig& mounts,
+    NeighbourStreamSource source) noexcept {
+    start_stream(mpr,epoch,mounts,std::move(source),true);
+}
+void neighbour_maps_world_changed(std::uint64_t epoch) noexcept {
+    auto& s=stream();
+    {
+        std::lock_guard<std::mutex> guard(s.lock);
+        if(s.held){s.held=false;return;} // restarted for this new world: keep it
+        if(!epoch || s.epoch!=epoch)return;
+    }
+    neighbour_maps_stop();
+}
 std::unique_ptr<NeighbourPiece> neighbour_maps_take(std::uint64_t epoch) noexcept {
     auto& s=stream();std::lock_guard<std::mutex> guard(s.lock);
-    if(s.epoch!=epoch || s.in_upload)return nullptr;
+    if(s.epoch!=epoch || s.in_upload || s.held)return nullptr;
     // The next neighbour in layout order only; failed ones are skipped.
     for(auto slot=s.ready.find(s.next_take);slot!=s.ready.end();slot=s.ready.find(s.next_take)) {
         auto upload=std::move(slot->second);s.ready.erase(slot);++s.next_take;
@@ -710,12 +836,12 @@ void neighbour_maps_uploaded(std::uint64_t epoch) noexcept {
 }
 bool neighbour_maps_settled(std::uint64_t epoch) noexcept {
     auto& s=stream();std::lock_guard<std::mutex> guard(s.lock);
-    return s.epoch!=epoch || (s.finished && s.ready.empty() && !s.in_upload);
+    return s.epoch!=epoch || (!s.held && s.finished && s.ready.empty() && !s.in_upload);
 }
 bool neighbour_maps_remaining(std::uint64_t epoch,std::size_t& remaining) noexcept {
     auto& s=stream();std::lock_guard<std::mutex> guard(s.lock);
     remaining=0;
-    if(s.epoch!=epoch || (s.finished && s.ready.empty() && !s.in_upload))return true;
+    if(s.epoch!=epoch || (!s.held && s.finished && s.ready.empty() && !s.in_upload))return true;
     if(!s.total)return false; // layout not read yet
     remaining=(s.total>s.next_take?s.total-s.next_take:0)+(s.in_upload?1:0);
     if(!remaining)remaining=1; // taken, the stream not finished yet

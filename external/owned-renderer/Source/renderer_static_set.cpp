@@ -167,7 +167,7 @@ HRESULT Renderer::flush_native_static_set(NativeStaticSet& set,const FixedState&
  if(!set.dirty&&!set.added.empty()){
   const auto& current=native_submission_layouts_[set.layout_slot].static_bake;
   const std::size_t threshold=(std::max)(std::size_t{kNativeStaticAddedFold},set.draws.size()/8);
-  if(set.added_draws>threshold||!current.work_srv||current.set_revision!=set.revision||
+  if(set.added_draws>threshold||!(d3d12_?current.work12!=nullptr:current.work_srv!=nullptr)||current.set_revision!=set.revision||
      current.content_revision!=native_static_content_revision_){
    set.dirty=true;
   }
@@ -211,7 +211,7 @@ HRESULT Renderer::flush_native_static_set(NativeStaticSet& set,const FixedState&
  // the static content revision, and is built only from a queue that held
  // exactly the set's draws.
  const auto& bake=native_submission_layouts_[set.layout_slot].static_bake;
- const bool reuse=native_pending_draws_.empty()&&bake.work_srv&&
+ const bool reuse=native_pending_draws_.empty()&&(d3d12_?bake.work12!=nullptr:bake.work_srv!=nullptr)&&
   bake.set_revision==set.revision&&bake.content_revision==native_static_content_revision_;
  if(reuse){
   native_frame_stats_.native_logical_draws+=bake.logical_draws;
@@ -273,6 +273,11 @@ HRESULT Renderer::upload_native_static_work(NativeSubmissionLayout& layout){
  auto& bake=layout.static_bake;
  const UINT count=static_cast<UINT>(layout.work.size());
  if(!count)return S_OK;
+ if(d3d12_){ // D3D12 (the shadow bakes): the same list as an executor buffer
+  const UINT64 bytes=UINT64(count)*sizeof(NativeDrawWorkGpu);
+  const HRESULT hr=native_d3d12_buffer(bake.work12,bytes,sizeof(NativeDrawWorkGpu),0);
+  return FAILED(hr)?hr:d3d12_->write_buffer(*bake.work12,0,layout.work.data(),bytes);
+ }
  if(!bake.work||count>bake.work_capacity){
   constexpr UINT maximum=(std::min)(kNativeRawElementLimit,UINT_MAX/static_cast<UINT>(sizeof(NativeDrawWorkGpu)));
   if(count>maximum)return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
@@ -309,6 +314,22 @@ HRESULT Renderer::flush_native_static(const FixedState& frame,const std::array<f
  ambient_fog_color_=frame.render[D3DRENDERSTATE_FOGCOLOR];
  // Depth now holds opaque terrain (water and objects come later): the
  // occlusion pyramid for this frame's object draws.
+ if(d3d12_){
+  // Native cover runs at the same opaque-terrain boundary as D3D11.
+  if(!set_native_world_clip(world_to_clip))return E_FAIL;
+  {const frame_acct::Scope hiz(frame_acct::ours_static_hiz);(void)build_native_hiz_d3d12();}
+  {const frame_acct::Scope cover(frame_acct::ours_ground_cover);
+   const HRESULT cover_hr=render_ground_cover(frame,world_to_clip);if(FAILED(cover_hr))return cover_hr;}
+  // Ambient critters, as on D3D11 below: opaque, depth-correct, lit like world objects.
+  if(critters_||critters_failed_||configured_integer(debug_overlay_.config(),"critters",2)>0||configured_integer(debug_overlay_.config(),"critter_showcase",0)>0)
+   {const frame_acct::Scope critters(frame_acct::ours_critters);(void)render_critters(frame,world_to_clip);}
+  const HRESULT static_hr=flush_native_static_set(native_static_set_,frame);
+  if(FAILED(static_hr))return static_hr;
+  // Neighbour liquids wait for composite_world_d3d12, as on D3D11 below.
+  neighbour_liquids_pending_=true;neighbour_liquids_frame_index_=native_frame_index_;
+  neighbour_liquids_state_=frame;neighbour_liquids_clip_=world_to_clip;
+  return S_OK;
+ }
  if(!set_native_world_clip(world_to_clip))return E_FAIL;
  {const frame_acct::Scope hiz(frame_acct::ours_static_hiz);build_native_hiz();}
  if(!set_native_world_clip(world_to_clip))return E_FAIL;

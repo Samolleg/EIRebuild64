@@ -23,5 +23,9 @@ constexpr std::uint32_t kVisualNativeResourceGetSlotRva = 0x003432f4;
 // Stock animation-rate test in SetExactPosition: mode 2 scales by the unit
 // coefficient (cmp eax,2 / jne). The addon rewrites it to cmp eax,1 / je.
 constexpr std::uint32_t kVisualNativeAnimationRateTestRva = 0x00135c71;
+// thiscall CTextureManager::ComposeTexture(result, set, desired, alternate,
+// mips, background, format), RET 1Ch: the stock character atlas composer
+// (material classes read its layer list; the addon redirects its callers).
+constexpr std::uint32_t kVisualStockComposeRva = 0x00293180;
 
 } // namespace owned
