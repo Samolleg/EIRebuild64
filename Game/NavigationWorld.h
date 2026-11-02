@@ -24,6 +24,11 @@ class NavigationWorld {
     std::uint64_t generation=0;
     unsigned failures=0,stepFailures=0;
     std::uint64_t nextStepLog=0;
+    // Independent, transient observers: one noisy NPC cannot hide another.
+    enum class AirEvent { Query, RandomGoal, Step };
+    struct AirJournal { std::uint64_t next=0; unsigned suppressed=0; };
+    std::map<int,std::array<AirJournal,3>> airJournal;
+    bool ObserveAir(CUnit* unit,AirEvent event,unsigned& suppressed);
     bool loaded=false;
     Navigation::Authoring authoring;
     std::map<int,std::vector<Navigation::Solid>> liveObjects;
@@ -73,7 +78,7 @@ public:
     bool Load();
     void Advance();
     void Stop(int id) { queues.erase(id); }
-    void ForgetUnit(int id) { Stop(id);flyingUnits.erase(id); }
+    void ForgetUnit(int id) { Stop(id);flyingUnits.erase(id);airJournal.erase(id); }
     bool Goal(CUnit* unit,Navigation::Point reference,Navigation::Location& result);
     float Radius(CUnit* unit) { return (std::max)(.05f,Body(unit).radius); }
     bool RandomGoal(CUnit* unit,Navigation::Point center,float radius,Navigation::Point& goal,Navigation::RandomShape shape=Navigation::RandomShape::Circle);

@@ -40,7 +40,7 @@ Navigation::Geometry* NavigationWorld::Terrain() {return baker?&baker->terrain:n
 void NavigationWorld::Scene(const char* mpr,const char* mob) {
     mapName=Navigation::ResourceName(mpr);mobName=Navigation::ResourceName(mob);
     for(auto& mesh:meshes)mesh.reset();bodySizes.clear();bodyTable.samples.clear();
-    loaded=false;error.clear();failures=stepFailures=0;nextStepLog=0;++generation;queues.clear();queryObstacles=nullptr;queryReuse=nullptr;
+    loaded=false;error.clear();failures=stepFailures=0;nextStepLog=0;++generation;queues.clear();airJournal.clear();queryObstacles=nullptr;queryReuse=nullptr;
     if(sourceJob.valid())try{sourceJob.get();}catch(const std::exception& e){GameJournal::Event("NAV","update_discarded","reason=%s",GameJournal::Quote(e.what()).c_str());}
     sourceRetries.clear();flyingUnits.clear();meshDirectory.clear();flightDeferred=false;sources.reset();absentStatic.clear();sourceDirty.clear();liveDoors.clear();
     liveObjects.clear();appliedObjects.clear();liveFlightObjects.clear();appliedFlightObjects.clear();bakedStatic.clear();dirtyObjects.clear();
@@ -547,6 +547,14 @@ Navigation::Point NavigationWorld::Position(CUnit* unit,CAIMap& map) const {
     if(unit->navLocation.surface>=1 && std::hypot(p.x-unit->navLocation.position.x,p.y-unit->navLocation.position.y)<.1f)p.z=unit->navLocation.position.z;
     return p;
 }
+bool NavigationWorld::ObserveAir(CUnit* unit,AirEvent event,unsigned& suppressed) {
+    if(!unit||ModCliTool::CurrentKind()!=ModCliTool::Kind::None)return false;
+    const auto locomotion=unit->GetUserUnitStats()->cLocomotion;
+    if(locomotion!=2&&locomotion!=3)return false;
+    auto& entry=airJournal[unit->GetID()][size_t(event)];const auto now=GetTickCount64();
+    if(now<entry.next){if(entry.suppressed<UINT_MAX)++entry.suppressed;return false;}
+    suppressed=entry.suppressed;entry.suppressed=0;entry.next=now+2000;return true;
+}
 Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navigation::Point goal,float maxLength,float goalRadius,const float* costs,int aiClass,Navigation::GoalPolicy goalPolicy,const Navigation::Location* goalSupport) {
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationPath);
     auto* mesh=ForUnit(unit,aiClass);if(!mesh){
@@ -561,6 +569,11 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
     request.obstacles=queryObstacles;
     if(costs&&mesh->profile.movement==Navigation::Movement::Ground)std::copy(costs,costs+16,request.areaCosts);
     auto route=Navigation::Find(*mesh,request);
+    unsigned suppressed=0;
+    if(ObserveAir(unit,AirEvent::Query,suppressed)) {
+        const auto end=route.points.empty()?goal:route.points.back().position;
+        GameJournal::Event("NAV","air_query","unit=%d result=%s profile=%s locomotion=%u class=%d pose=%d height=%.3f altitude=%.3f from=(%.3f,%.3f,%.3f) goal=(%.3f,%.3f,%.3f) end=(%.3f,%.3f,%.3f) points=%zu length=%.3f suppressed=%u",unit->GetID(),StatusName(route.status),mesh->profileId.c_str(),unsigned(unit->GetUserUnitStats()->cLocomotion),unit->GetAIClass(),int(unit->GetCurrentPose()),request.height,unit->GetCP().z,from.x,from.y,from.z,goal.x,goal.y,goal.z,end.x,end.y,end.z,route.points.size(),route.length,suppressed);
+    }
     if(route.status==Status::Complete&&route.goalStatus!=Status::Complete&&unit&&unit->IsHero()&&!route.points.empty()) {
         const auto at=route.points.back().position;
         GameJournal::Event("NAV","goal_adjusted","unit=%d reason=%s requested=(%.3f,%.3f,%.3f) accepted=(%.3f,%.3f,%.3f) offset_xy=%.3f profile=%s height=%.3f",unit->GetID(),StatusName(route.goalStatus),goal.x,goal.y,goal.z,at.x,at.y,at.z,std::hypot(at.x-goal.x,at.y-goal.y),mesh->profileId.c_str(),request.height);
@@ -622,6 +635,12 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
     CPlot3D direction;int x=-1,y=-1;float z=0;
     move.finished=!unit->walker.GetPosition(unit->GetWorldBase(),segment,time,move.rotating,pos,direction,move.speed,x,y,&z);
     const auto from=Position(unit,map);
+    auto observed=[&](bool accepted) {
+        unsigned suppressed=0;
+        if(ObserveAir(unit,AirEvent::Step,suppressed))
+            GameJournal::Event("NAV","air_step","unit=%d accepted=%d moving_segment=%d rotating=%d finished=%d waiting=%d replanned=%d blocker=%d speed=%.6f from=(%.3f,%.3f,%.3f) desired=(%.3f,%.3f,%.3f) support=(%.3f,%.3f,%.3f) suppressed=%u",unit->GetID(),int(accepted),int(segment.IsMoving()),int(move.rotating),int(move.finished),int(move.waiting),int(move.replanned),move.blocker,move.speed,from.x,from.y,from.z,move.desired.x,move.desired.y,move.desired.z,move.support.position.x,move.support.position.y,move.support.position.z,suppressed);
+        return accepted;
+    };
     move.desired={AITile2Meter(pos.x),AITile2Meter(pos.y),segment.IsMoving()?z:from.z};
     move.direction={direction.x,direction.y,0};
     // Script/patrol turns do not move the body. A clearance projection must
@@ -629,11 +648,11 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
     if(!segment.IsMoving()) {
         move.desired=from;move.support=unit->navLocation;
         move.support.position=from;wait=0;queues.erase(unit->GetID());
-        return true;
+        return observed(true);
     }
-    if(!Step(unit,from,move.desired,move.support,&segment.route))return false;
+    if(!Step(unit,from,move.desired,move.support,&segment.route))return observed(false);
     pos.x=move.support.position.x;pos.y=move.support.position.y;
-    if(std::hypot(pos.x-from.x,pos.y-from.y)<.00001f)return true;
+    if(std::hypot(pos.x-from.x,pos.y-from.y)<.00001f)return observed(true);
     pos.z=move.support.position.z;
     auto* neighbour=map.CheckCircleCollision(unit,pos);
     if(neighbour) {
@@ -688,20 +707,20 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
                 float speed=0,angular=0;unit->GetSpeeds(speed,angular);
                 unit->walker.SetSpeeds(speed,angular);unit->walker.CreateWalkerRoute(path.curSegment);
                 move.replanned=true;move.finished=false;move.support=unit->navLocation;
-                wait=0;queues.erase(unit->GetID());return true;
+                wait=0;queues.erase(unit->GetID());return observed(true);
             }
             // An impossible detour is a failed movement command. Let its owner
             // choose the next action instead of freezing an unchanged queue.
-            move.blocker=neighbour->GetID();queues.erase(unit->GetID());return false;
+            move.blocker=neighbour->GetID();queues.erase(unit->GetID());return observed(false);
         }
-        move.waiting=true;move.blocker=neighbour->GetID();return true;
+        move.waiting=true;move.blocker=neighbour->GetID();return observed(true);
     }
     wait=0;queues.erase(unit->GetID());
     if(!move.rotating) {
         const float dx=move.support.position.x-from.x,dy=move.support.position.y-from.y,length=std::hypot(dx,dy);
         if(length>.00001f)move.direction={dx/length,dy/length,0};
     }
-    return true;
+    return observed(true);
 }
 bool NavigationWorld::Restore(CUnit* unit,CAIMap& map) {
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationRestore);
@@ -826,7 +845,14 @@ bool NavigationWorld::Place(CUnit* unit,CAIMap& map) {
 bool NavigationWorld::RandomGoal(CUnit* unit,Navigation::Point center,float radius,Navigation::Point& goal,Navigation::RandomShape shape) {
     auto* mesh=ForUnit(unit);if(!mesh)return false;
     auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
-    return Navigation::RandomReachable(*mesh,Position(unit,map),center,radius,Height(unit),[](){return ::random.GetFloat(0.f,1.f);},goal,Navigation::ExcludeClass(unit->GetAIClass()),&unit->navLocation,shape);
+    const auto from=Position(unit,map);
+    const bool found=Navigation::RandomReachable(*mesh,from,center,radius,Height(unit),[](){return ::random.GetFloat(0.f,1.f);},goal,Navigation::ExcludeClass(unit->GetAIClass()),&unit->navLocation,shape);
+    unsigned suppressed=0;
+    if(ObserveAir(unit,AirEvent::RandomGoal,suppressed)) {
+        const auto selected=found?goal:center;
+        GameJournal::Event("NAV","air_random_goal","unit=%d found=%d profile=%s from=(%.3f,%.3f,%.3f) center=(%.3f,%.3f,%.3f) radius=%.3f square=%d selected=(%.3f,%.3f,%.3f) suppressed=%u",unit->GetID(),int(found),mesh->profileId.c_str(),from.x,from.y,from.z,center.x,center.y,center.z,radius,int(shape==Navigation::RandomShape::Square),selected.x,selected.y,selected.z,suppressed);
+    }
+    return found;
 }
 
 void NavigationWorld::UpdateSources(bool initial) {
