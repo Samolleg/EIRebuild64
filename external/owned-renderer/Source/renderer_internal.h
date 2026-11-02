@@ -29,7 +29,6 @@ extern std::atomic<std::uint64_t> g_restore_readbacks;
 extern std::atomic<std::uint64_t> g_restore_readback_qpc;
 extern std::atomic<std::uint64_t> g_pinned_surfaces;
 const std::string& native_shader_source();
-const std::string& native_build_shader_source();
 
 namespace {
 

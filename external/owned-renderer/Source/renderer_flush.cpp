@@ -803,7 +803,7 @@ HRESULT Renderer::flush_native(unsigned layout_slot){
  }
   // Terrain batches bound to the cliff tessellation stages; finish unbinds them.
   bool tessellate_terrain=false,tessellation_bound=false;
-  auto finish=[&](HRESULT result){finish_samgbur_lod_capture(SUCCEEDED(result));flush_anisotropy_=-1;restore_camp_clip();clear_water_reflection_bindings();if(context_){
+  auto finish=[&](HRESULT result){flush_anisotropy_=-1;restore_camp_clip();clear_water_reflection_bindings();if(context_){
    context_->PSSetShader(native_ps_.Get(),nullptr,0); // terrain batches bind a terrain variant
    if(tessellation_bound){
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);context_->VSSetShader(native_vs_.Get(),nullptr,0);
@@ -845,7 +845,6 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
   const bool bake_layout=static_set&&static_bake;
   if(bake_layout&&FAILED(hr=bake_native_static_layout(layout)))return native_flush_failure_line_=__LINE__,finish(hr);
  }
- begin_samgbur_lod_capture(layout);
  const UINT draw_count=static_cast<UINT>(layout.work.size()),triangle_count=layout.triangles,
   component_count=layout.components,batch_count=static_cast<UINT>(layout.batches.size()),
   args_slots=static_cast<UINT>(layout.arguments.size()/4u); // the batches' slots, then split batches' steep slots
@@ -964,18 +963,14 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
  context_->CSSetConstantBuffers(3,1,native_world_clip_constants_.GetAddressOf());
  {ID3D11ShaderResourceView* hiz=native_occlusion_active()?native_hiz_srv_.Get():nullptr;context_->CSSetShaderResources(26,1,&hiz);}
  ID3D11ShaderResourceView* compute_srvs[8]={nullptr,native_dynamic_srv_.Get(),nullptr,nullptr,native_draw_srv_.Get(),nullptr,nullptr,nullptr};context_->CSSetShader(native_build_cs_.Get(),nullptr,0);context_->CSSetConstantBuffers(1,1,native_world_lighting_constants_.GetAddressOf());ID3D11UnorderedAccessView* compute_uavs[4]={native_visible_triangle_uav_.Get(),native_indirect_args_uav_.Get(),native_prepared_vertex_uav_.Get(),native_world_vertex_uav_.Get()};context_->CSSetUnorderedAccessViews(0,4,compute_uavs,nullptr);
- ID3D11UnorderedAccessView* lod_probe=samgbur_lod_capture_?samgbur_lod_uav_.Get():nullptr;
- context_->CSSetUnorderedAccessViews(4,1,&lod_probe,nullptr);
  for(const auto& range:layout.dispatches){
   compute_srvs[0]=native_geometry_page_srv(range.geometry_page);if(!compute_srvs[0])return native_flush_failure_line_=__LINE__,finish(E_FAIL);
   context_->CSSetShaderResources(1,8,compute_srvs);
-  if(FAILED(hr=upload_native_work_range(range,samgbur_lod_capture_?samgbur_lod_record_:UINT_MAX,
-     samgbur_lod_capture_?samgbur_lod_meta_:0)))return native_flush_failure_line_=__LINE__,finish(hr);
+  if(FAILED(hr=upload_native_work_range(range)))return native_flush_failure_line_=__LINE__,finish(hr);
   UINT dispatch_width=0,dispatch_height=0;if(!native_dispatch_dimensions(range.count,dispatch_width,dispatch_height))return native_flush_failure_line_=__LINE__,finish(HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW));
   transition_profile_pass("compute_build");context_->Dispatch(dispatch_width,dispatch_height,1);++perf_native_compute_dispatches_;++native_frame_stats_.native_compute_dispatches;
  }
  context_->CSSetUnorderedAccessViews(0,4,null_uavs,nullptr);context_->CSSetShaderResources(1,8,null_srvs);ID3D11Buffer* null_constant=nullptr;context_->CSSetConstantBuffers(1,1,&null_constant);context_->CSSetConstantBuffers(4,1,&null_constant);context_->CSSetShader(nullptr,nullptr,0);
- finish_samgbur_lod_capture(true);
  const bool history_active=prepare_shadow_history();
  context_->IASetInputLayout(nullptr);context_->IASetVertexBuffers(0,0,nullptr,nullptr,nullptr);context_->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);context_->VSSetShader(native_vs_.Get(),nullptr,0);context_->PSSetShader(native_ps_.Get(),nullptr,0);bind_draw_constants();D3D11_VIEWPORT viewport=target_viewport();context_->RSSetViewports(1,&viewport);context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
  if(static_reuse){

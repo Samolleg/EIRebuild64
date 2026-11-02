@@ -142,16 +142,6 @@ bool Renderer::status_text_wanted() const noexcept {
 }
 RendererResourceSnapshot Renderer::resource_snapshot() const {
  RendererResourceSnapshot snapshot=native_frame_stats_;
- if(debug_overlay_.settings_open()&&samgbur_lod_frame_==presentation_frame_index_){
-  snapshot.samgbur_lod=samgbur_lod_snapshot_;
-  snapshot.samgbur_lod.instances=static_cast<UINT>(samgbur_lod_records_.size());
-  const auto selected=debug_overlay_.samgbur_lod_instance();
-  if(selected>=samgbur_lod_records_.size()||samgbur_lod_records_[selected]!=snapshot.samgbur_lod.record){
-   snapshot.samgbur_lod.state=samgbur_lod_records_.empty()?SamgburLodSnapshot::absent:SamgburLodSnapshot::waiting;
-  }
-  snapshot.samgbur_lod.age_frames=presentation_frame_index_>=snapshot.samgbur_lod.sample_frame?
-   presentation_frame_index_-snapshot.samgbur_lod.sample_frame:0;
- }
  {const auto& grid=native_point_light_grid_;const std::uint64_t cells=std::uint64_t(grid.width)*grid.height;
   snapshot.point_light_grid={native_point_lights_.size(),grid.width,grid.height,
    grid.data.size()>cells?grid.data.size()-cells-1:0,grid.max_per_cell,emissive_published_};}
@@ -1085,7 +1075,6 @@ void Renderer::release_world_state() noexcept try{
  native_visible_triangle_capacity_=0;
  native_prepared_vertices_.Reset();native_prepared_vertex_srv_.Reset();native_prepared_vertex_uav_.Reset();
  native_prepared_vertex_capacity_=0;
- reset_samgbur_lod_diagnostic();
  native_indirect_args_.Reset();native_indirect_args_uav_.Reset();native_indirect_args_capacity_=0;
  release_world_upload_peaks();
  // Geometry: every mesh and morph, and every page (general and neighbour

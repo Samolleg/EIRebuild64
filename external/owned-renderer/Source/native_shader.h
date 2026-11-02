@@ -243,7 +243,7 @@ StructuredBuffer<NativeDraw> nativeDraws:register(t5);
 struct NativeDrawWork{uint record;uint outputTriangleBase;uint indirectArgsByteOffset;uint orderedTriangleOffset;uint flags;uint preparedVertexBase;uint workCount;uint steepOutputTriangleBase;uint steepArgsByteOffset;};
 StructuredBuffer<NativeDrawWork> nativeDrawWork:register(t16);
 cbuffer NativeWorkRange:register(b4){uint nativeWorkBase;uint nativeWorkCount;uint2 nativeWorkPadding;};
-RWStructuredBuffer<NativeDraw> nativeDrawOutput:register(u7);@SAMGBUR_LOD_DECL@
+RWStructuredBuffer<NativeDraw> nativeDrawOutput:register(u7);
 RWByteAddressBuffer nativePhaseOutput:register(u0);
 [numthreads(64,1,1)]void nativeTerrainPhaseCS(uint3 group:SV_GroupID,uint lane:SV_GroupIndex){
  NativeDrawWork work=nativeDrawWork[group.x];
@@ -1194,7 +1194,7 @@ void nativePrepareWorld(NativeDraw draw,NativeInstance instance,uint lane){
  }
 }
 [numthreads(64,1,1)]void nativeBuildCS(uint3 groupId:SV_GroupID,uint3 threadId:SV_GroupThreadID){
- NativeDraw draw;if(!loadNativeDraw(groupId,draw))return;NativeInstance instance=loadNativeInstance(draw.instanceIndex);@SAMGBUR_LOD_INIT@
+ NativeDraw draw;if(!loadNativeDraw(groupId,draw))return;NativeInstance instance=loadNativeInstance(draw.instanceIndex);
  if(instance.worldGeometry!=0){
   nativeCurrentBounds(draw,instance);
   float swayReach=treeSwayReach(instance);
@@ -1223,7 +1223,7 @@ void nativePrepareWorld(NativeDraw draw,NativeInstance instance,uint lane){
  bool impostorSecond=false;
  [branch]if((instance.worldGeometry&@WORLD_IMPOSTOR@)!=0&&nativeImpostorParams.x>0&&draw.preservesOrder==0&&!split)
   nativeImpostorSelect(draw,instance,firstCount,secondCount,fade,impostorSecond);
- uint total=firstCount+secondCount;@SAMGBUR_LOD_SELECTED@
+ uint total=firstCount+secondCount;
  // Every triangle of a visible record is emitted, so the group reserves its
  // whole range (and, when split, its steep range) with one atomic each.
  uint flatCount=split?min(draw.steepFirstTriangle,total):total;
@@ -4049,54 +4049,10 @@ struct NativeShaderFeatures {
     std::string_view liquid_surface = kLiquidSurfaceShader;
 };
 
-// Only the build kernel writes diagnostics; all other shader source keys stay unchanged.
-inline constexpr char kSamgburLodDeclaration[] = R"(
-RWByteAddressBuffer samgburLodDiagnostic:register(u4);
-)";
-inline constexpr char kSamgburLodInitialize[] = R"(
- bool samgburProbe=false;
- [branch]if(nativeWorkPadding.x!=0xffffffffu)
-  samgburProbe=nativeDrawWork[nativeWorkBase+groupId.x+groupId.y*65535u].record==nativeWorkPadding.x;
- if(samgburProbe&&threadId.x==0){
-  uint levels=nativeWorkPadding.y&3u;
-  if(levels!=0)levels=min(nativeGeometry.Load(draw.indexOffset-64),3u);
-  samgburLodDiagnostic.Store4(0,uint4(nativeWorkPadding.y>>2,0,levels,0xffffffffu));
-  samgburLodDiagnostic.Store4(16,uint4(0xffffffffu,0,draw.indexCount/3,0));
-  samgburLodDiagnostic.Store4(32,uint4(0,0,0,0));
-  samgburLodDiagnostic.Store4(48,uint4(0,0,nativeWorkPadding.x,0x4c4f4431u));
-  [unroll]for(uint level=1;level<=3;++level)if(level<=levels)
-   samgburLodDiagnostic.Store(24+level*4,nativeGeometry.Load(draw.indexOffset-64+level*16+4));
- }
-)";
-inline constexpr char kSamgburLodSelected[] = R"(
- if(samgburProbe&&threadId.x==0){
-  uint levels=nativeWorkPadding.y&3u,firstLevel=0,secondLevel=0xffffffffu;
-  [unroll]for(uint level=1;level<=3;++level)if(level<=levels){
-   uint offset=nativeGeometry.Load(draw.indexOffset-64+level*16);
-   if(offset==firstOffset)firstLevel=level;
-   if(secondCount!=0&&!impostorSecond&&offset==secondOffset)secondLevel=level;
-  }
-  uint mode=((instance.worldGeometry&@WORLD_LOD@)!=0?1u:0u)|(nativeDistanceCull.z>0?2u:0u)|
-   (draw.preservesOrder!=0?4u:0u)|(split?8u:0u)|(impostorSecond?16u:0u);
-  samgburLodDiagnostic.Store(4,1);
-  samgburLodDiagnostic.Store(12,firstLevel);
-  samgburLodDiagnostic.Store(16,secondLevel);
-  samgburLodDiagnostic.Store(20,fade&255u);
-  samgburLodDiagnostic.Store(40,firstCount);
-  samgburLodDiagnostic.Store(44,secondCount);
-  samgburLodDiagnostic.Store(48,mode);
- }
-)";
-
 // Generate literal SM5 resource indices from the actual binding contract. This
 // avoids both dynamic resource indexing and MSVC's individual literal limit.
-inline std::string compose_native_shader_source(const NativeShaderFeatures& features = {}, bool lod_diagnostic = false) {
+inline std::string compose_native_shader_source(const NativeShaderFeatures& features = {}) {
   std::string text=kNativeShader;
-  const std::pair<const char*,const char*> lod_hooks[]={
-   {"@SAMGBUR_LOD_DECL@",kSamgburLodDeclaration},
-   {"@SAMGBUR_LOD_INIT@",kSamgburLodInitialize},
-   {"@SAMGBUR_LOD_SELECTED@",kSamgburLodSelected}};
-  for(const auto& hook:lod_hooks){const auto at=text.find(hook.first);text.replace(at,std::char_traits<char>::length(hook.first),lod_diagnostic?hook.second:"");}
   const std::string liquid_marker="@LIQUID_SURFACE@";
   text.replace(text.find(liquid_marker),liquid_marker.size(),std::string(kAtmosphereShader)+kSkyNativeShader+std::string(features.liquid_surface));
   const std::string glow_marker="@CAVE_EXIT_GLOW@";

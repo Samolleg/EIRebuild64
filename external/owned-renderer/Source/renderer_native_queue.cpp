@@ -155,11 +155,6 @@ bool native_record_takes_impostor(const NativeGeometryView& view,NativeOpacityCl
  return view.world.impostor&&sphere_block&&view.world.object_space&&opacity==NativeOpacityClass::cutout&&
   view.ordering==NativeOrdering::reorderable;
 }
-static bool samgbur_lod_resource(const ResourceIdentity* identity) noexcept {
- if(!identity)return false;
- const auto at=identity->canonical_name.find("samgbur01.mod/");
- return at!=std::string::npos&&(at==0||identity->canonical_name[at-1]=='/');
-}
 bool native_record_takes_lod(const NativeGeometryView& view,NativeOpacityClass opacity,UINT lod_levels) noexcept{
  const bool reorderable=view.ordering==NativeOrdering::reorderable ||
   (view.ordering==NativeOrdering::derive_from_state &&
@@ -848,7 +843,6 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
      prebuilt.index_count==view.index_count&&prebuilt.decoded_channels==view.decoded_channels&&
      !view.diffuse&&!view.specular&&prebuilt.shape_count==shape_count){
    NativeMesh mesh{};
-   mesh.samgbur_lod=samgbur_lod_resource(view.world.identity);
    mesh.allocation={prebuilt.page,prebuilt.offset,prebuilt.bytes};
    mesh.position_offset=prebuilt.position_offset;mesh.normal_offset=prebuilt.normal_offset;
    mesh.component_offset=prebuilt.component_offset;mesh.texture_coordinate_offset=prebuilt.texture_coordinate_offset;
@@ -1032,7 +1026,6 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
   }
  }
  NativeMesh mesh{};UINT cursor=0,lod_table_at=0;
- mesh.samgbur_lod=samgbur_lod_resource(view.world.identity);
  std::array<UINT,kStaticLodMaxLevels> lod_at{};
  auto reserve=[&](std::uint64_t bytes,UINT& offset){
   if(!align_up_checked(cursor,16,cursor)||cursor>native_geometry_page_limit()||
@@ -3926,111 +3919,5 @@ void scene_cmd::RollbackNative::run(Renderer& r){
 } // namespace owned
 
 namespace owned {
-
-bool Renderer::ensure_samgbur_lod_diagnostic() noexcept {
- if(samgbur_lod_failed_)return false;
- if(samgbur_lod_buffer_)return true;
- if(!device_||!context_)return false;
- D3D11_BUFFER_DESC desc{};desc.ByteWidth=64;desc.Usage=D3D11_USAGE_DEFAULT;
- desc.BindFlags=D3D11_BIND_UNORDERED_ACCESS;desc.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
- ComPtr<ID3D11Buffer> buffer;ComPtr<ID3D11UnorderedAccessView> uav;
- if(FAILED(device_->CreateBuffer(&desc,nullptr,&buffer))){samgbur_lod_failed_=true;return false;}
- D3D11_UNORDERED_ACCESS_VIEW_DESC view{};view.Format=DXGI_FORMAT_R32_TYPELESS;
- view.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;view.Buffer.NumElements=16;view.Buffer.Flags=D3D11_BUFFER_UAV_FLAG_RAW;
- if(FAILED(device_->CreateUnorderedAccessView(buffer.Get(),&view,&uav))){samgbur_lod_failed_=true;return false;}
- std::array<ComPtr<ID3D11Buffer>,3> staging;
- desc={};desc.ByteWidth=64;desc.Usage=D3D11_USAGE_STAGING;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
- for(auto& item:staging)if(FAILED(device_->CreateBuffer(&desc,nullptr,&item))){samgbur_lod_failed_=true;return false;}
- samgbur_lod_buffer_=std::move(buffer);samgbur_lod_uav_=std::move(uav);
- for(std::size_t i=0;i<staging.size();++i)samgbur_lod_readbacks_[i].buffer=std::move(staging[i]);
- return true;
-}
-
-void Renderer::begin_samgbur_lod_capture(const NativeSubmissionLayout& layout) noexcept try {
- samgbur_lod_capture_=false;
- if(!debug_overlay_.settings_open())return;
- if(!samgbur_lod_open_){samgbur_lod_open_=true;samgbur_lod_failed_=false;++samgbur_lod_epoch_;}
- if(samgbur_lod_frame_!=presentation_frame_index_){
-  samgbur_lod_frame_=presentation_frame_index_;samgbur_lod_records_.clear();
- }
- for(const auto& work:layout.work){
-  if(work.record>=native_instance_records_.size()||(work.flags&0xff00u)==0)continue;
-  const auto& record=native_instance_records_[work.record];
-  if(!record.occupied||!record.command.mesh||!record.command.mesh->samgbur_lod)continue;
-  if(std::find(samgbur_lod_records_.begin(),samgbur_lod_records_.end(),work.record)==samgbur_lod_records_.end())
-   samgbur_lod_records_.push_back(work.record);
- }
- samgbur_lod_snapshot_.instances=static_cast<UINT>(samgbur_lod_records_.size());
- const auto selected=debug_overlay_.samgbur_lod_instance();
- if(selected>=samgbur_lod_records_.size())return;
- const UINT record=samgbur_lod_records_[selected];
- const auto& command=native_instance_records_[record].command;
- const auto& owner=native_instance_records_[record].owner;
- if(record!=samgbur_lod_snapshot_.record||command.mesh!=samgbur_lod_mesh_||
-    owner.owner_before(samgbur_lod_owner_)||samgbur_lod_owner_.owner_before(owner)||
-    command.mesh->geometry_revision!=samgbur_lod_revision_||
-    samgbur_lod_snapshot_.instance!=selected+1){
-  ++samgbur_lod_epoch_;samgbur_lod_snapshot_={};samgbur_lod_snapshot_.state=SamgburLodSnapshot::waiting;
-  samgbur_lod_snapshot_.record=record;samgbur_lod_snapshot_.instance=selected+1;
-  samgbur_lod_mesh_=command.mesh;samgbur_lod_owner_=owner;
-  samgbur_lod_revision_=command.mesh->geometry_revision;
- }
- samgbur_lod_snapshot_.instances=static_cast<UINT>(samgbur_lod_records_.size());
- if(samgbur_lod_copied_frame_==presentation_frame_index_)return;
- if(std::none_of(layout.work.begin(),layout.work.end(),[&](const NativeDrawWorkGpu& work){return work.record==record;}))return;
- if(!ensure_samgbur_lod_diagnostic()){samgbur_lod_snapshot_.state=SamgburLodSnapshot::unavailable;return;}
- UINT slot=0;while(slot<samgbur_lod_readbacks_.size()&&samgbur_lod_readbacks_[slot].pending)++slot;
- if(slot==samgbur_lod_readbacks_.size())return;
- samgbur_lod_nonce_=(samgbur_lod_nonce_+1)&0x3fffffffu;if(!samgbur_lod_nonce_)++samgbur_lod_nonce_;
- samgbur_lod_slot_=slot;samgbur_lod_record_=record;
- samgbur_lod_meta_=(samgbur_lod_nonce_<<2)|(command.mesh->lod_levels&3u);
- const UINT zero[4]{};context_->ClearUnorderedAccessViewUint(samgbur_lod_uav_.Get(),zero);
- samgbur_lod_capture_=true;
-} catch(...) {samgbur_lod_capture_=false;samgbur_lod_snapshot_.state=SamgburLodSnapshot::unavailable;}
-
-void Renderer::finish_samgbur_lod_capture(bool success) noexcept {
- if(!samgbur_lod_capture_)return;
- samgbur_lod_capture_=false;
- ID3D11UnorderedAccessView* none=nullptr;context_->CSSetUnorderedAccessViews(4,1,&none,nullptr);
- if(!success)return;
- auto& slot=samgbur_lod_readbacks_[samgbur_lod_slot_];
- context_->CopyResource(slot.buffer.Get(),samgbur_lod_buffer_.Get());
- slot.pending=true;slot.nonce=samgbur_lod_nonce_;slot.epoch=samgbur_lod_epoch_;
- slot.record=samgbur_lod_record_;slot.frame=presentation_frame_index_;
- samgbur_lod_copied_frame_=presentation_frame_index_;
-}
-
-void Renderer::poll_samgbur_lod() noexcept {
- const bool open=debug_overlay_.settings_open();
- if(!open&&samgbur_lod_open_){
-  samgbur_lod_open_=false;++samgbur_lod_epoch_;samgbur_lod_snapshot_={};
-  samgbur_lod_records_.clear();samgbur_lod_frame_=UINT64_MAX;
- }
- for(auto& slot:samgbur_lod_readbacks_){
-  if(!slot.pending||!context_)continue;
-  D3D11_MAPPED_SUBRESOURCE mapped{};
-  const HRESULT hr=context_->Map(slot.buffer.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped);
-  if(hr==DXGI_ERROR_WAS_STILL_DRAWING)continue;
-  slot.pending=false;
-  if(FAILED(hr)){if(open)samgbur_lod_snapshot_.state=SamgburLodSnapshot::unavailable;continue;}
-  std::array<UINT,16> value{};std::memcpy(value.data(),mapped.pData,sizeof(value));context_->Unmap(slot.buffer.Get(),0);
-  if(!open||slot.epoch!=samgbur_lod_epoch_||slot.record!=samgbur_lod_snapshot_.record||
-     value[0]!=slot.nonce||value[14]!=slot.record||value[15]!=0x4c4f4431u||value[2]>3)continue;
-  if(samgbur_lod_snapshot_.state==SamgburLodSnapshot::ready&&slot.frame<samgbur_lod_snapshot_.sample_frame)continue;
-  auto& result=samgbur_lod_snapshot_;result.state=SamgburLodSnapshot::ready;
-  result.visible=value[1]!=0;result.levels=value[2];result.first=value[3];result.second=value[4];
-  result.coverage=value[5];for(unsigned i=0;i<4;++i)result.triangles[i]=value[6+i];
-  result.mode=value[12];result.sample_frame=slot.frame;
- }
-}
-
-void Renderer::reset_samgbur_lod_diagnostic() noexcept {
- samgbur_lod_buffer_.Reset();samgbur_lod_uav_.Reset();
- for(auto& slot:samgbur_lod_readbacks_)slot={};
- samgbur_lod_records_.clear();samgbur_lod_snapshot_={};samgbur_lod_mesh_=nullptr;samgbur_lod_revision_={};
- samgbur_lod_frame_=samgbur_lod_copied_frame_=UINT64_MAX;samgbur_lod_owner_.reset();
- ++samgbur_lod_epoch_;samgbur_lod_record_=UINT_MAX;samgbur_lod_meta_=0;
- samgbur_lod_capture_=samgbur_lod_failed_=samgbur_lod_open_=false;
-}
 
 } // namespace owned

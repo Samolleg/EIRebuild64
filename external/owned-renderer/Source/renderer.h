@@ -1896,7 +1896,6 @@ private:
         // a record drawing them reserves the first level's triangles more
         // (both levels of the crossfade band).
         UINT lod_levels = 0, lod_extra_triangles = 0;
-        bool samgbur_lod = false;
         // Object-space mesh: its bounding sphere precedes the components.
         bool sphere_block = false;
         float bounds_min[3]{};
@@ -2565,13 +2564,7 @@ private:
                                    const void* data, UINT bytes);
     ID3D11ShaderResourceView* native_geometry_page_srv(UINT page) const noexcept;
     void refresh_native_mesh_records(NativeMesh& mesh) noexcept;
-    HRESULT upload_native_work_range(const NativeDispatchRange& range,
-                                     UINT diagnostic_record = UINT_MAX, UINT diagnostic_meta = 0);
-    bool ensure_samgbur_lod_diagnostic() noexcept;
-    void begin_samgbur_lod_capture(const NativeSubmissionLayout& layout) noexcept;
-    void finish_samgbur_lod_capture(bool success) noexcept;
-    void poll_samgbur_lod() noexcept;
-    void reset_samgbur_lod_diagnostic() noexcept;
+    HRESULT upload_native_work_range(const NativeDispatchRange& range);
     HRESULT trim_native_mesh_cache();
     // Retires unowned geometry last used before frame `before`.
     HRESULT retire_stale_native_geometry(std::uint64_t before);
@@ -4600,24 +4593,6 @@ private:
     ComPtr<ID3D11Buffer> native_indirect_args_;
     ComPtr<ID3D11UnorderedAccessView> native_indirect_args_uav_;
     ComPtr<ID3D11Buffer> native_work_range_constants_;
-    ComPtr<ID3D11Buffer> samgbur_lod_buffer_;
-    ComPtr<ID3D11UnorderedAccessView> samgbur_lod_uav_;
-    struct SamgburLodReadback {
-        ComPtr<ID3D11Buffer> buffer;
-        bool pending = false;
-        UINT nonce = 0, epoch = 0, record = UINT_MAX;
-        std::uint64_t frame = 0;
-    };
-    std::array<SamgburLodReadback, 3> samgbur_lod_readbacks_;
-    std::vector<UINT> samgbur_lod_records_;
-    SamgburLodSnapshot samgbur_lod_snapshot_{};
-    NativeMesh* samgbur_lod_mesh_ = nullptr;
-    std::array<std::uint32_t, 5> samgbur_lod_revision_{};
-    std::uint64_t samgbur_lod_frame_ = UINT64_MAX, samgbur_lod_copied_frame_ = UINT64_MAX;
-    std::weak_ptr<const void> samgbur_lod_owner_;
-    UINT samgbur_lod_epoch_ = 0, samgbur_lod_nonce_ = 0;
-    UINT samgbur_lod_record_ = UINT_MAX, samgbur_lod_meta_ = 0, samgbur_lod_slot_ = 0;
-    bool samgbur_lod_capture_ = false, samgbur_lod_failed_ = false, samgbur_lod_open_ = false;
     ComPtr<ID3D11Buffer> dynamic_vertices_;
     ComPtr<ID3D11Buffer> dynamic_indices_;
     ComPtr<ID3D11Buffer> native_dynamic_;

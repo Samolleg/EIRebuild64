@@ -338,7 +338,6 @@ struct DebugOverlay::Implementation {
     bool panel_resizing = false;
     ImVec2 panel_drag_start{}, panel_size_start{};
     ImGuiTextFilter settings_filter;
-    int samgbur_lod_instance = 0;
     ImGuiTextFilter graphics_filter;
     ImGuiTextFilter diagnostics_filter;
     // The running game.exe has the 4 GB (large-address-aware) flag; else the
@@ -1924,38 +1923,6 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
     ImGui::PopID();
 }
 
-void draw_samgbur_lod(DebugOverlay::Implementation& state,const SamgburLodSnapshot& data) {
-    if(!state.settings_filter.PassFilter("samgbur01 LOD"))return;
-    if(!ImGui::CollapsingHeader("samgbur01 LOD",ImGuiTreeNodeFlags_DefaultOpen))return;
-    if(!data.instances){ImGui::TextDisabled("%s",ui_text("No samgbur01 submitted this frame."));return;}
-    state.samgbur_lod_instance=std::clamp(state.samgbur_lod_instance,0,static_cast<int>(data.instances)-1);
-    int instance=state.samgbur_lod_instance+1;
-    if(data.instances>1&&ImGui::SliderInt(ui_text("LOD instance"),&instance,1,static_cast<int>(data.instances)))
-        state.samgbur_lod_instance=instance-1;
-    if(data.state==SamgburLodSnapshot::unavailable){ImGui::TextDisabled("%s",ui_text("GPU LOD data unavailable."));return;}
-    if(data.state!=SamgburLodSnapshot::ready||data.instance!=static_cast<unsigned>(state.samgbur_lod_instance+1)){
-        ImGui::TextDisabled("%s",ui_text("Waiting for GPU LOD sample..."));return;
-    }
-    if(!data.visible)ImGui::TextUnformatted(ui_text("Instance is not visible in the color pass."));
-    else if(data.mode&16u)ImGui::TextUnformatted(ui_text("Impostor (not a triangle LOD)."));
-    else if(data.second!=UINT32_MAX)
-        ImGui::Text(ui_text("Current level: L%u -> L%u (%u%%)"),data.first,data.second,(data.coverage*100u+127u)/255u);
-    else ImGui::Text(ui_text("Current level: L%u"),data.first);
-    if(ImGui::BeginTable("samgbur_lod_levels",2,ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerH)){
-        ImGui::TableSetupColumn("LOD");ImGui::TableSetupColumn(ui_text("Triangles"));ImGui::TableHeadersRow();
-        for(unsigned level=0;level<4;++level){
-            ImGui::TableNextRow();ImGui::TableNextColumn();ImGui::Text("L%u",level);ImGui::TableNextColumn();
-            if(level==0||level<=data.levels)ImGui::Text("%u",data.triangles[level]);
-            else ImGui::TextDisabled("%s",ui_text("Not built"));
-        }
-        ImGui::EndTable();
-    }
-    if(!data.levels)ImGui::TextWrapped("%s",ui_text("No reduced LOD levels were built."));
-    else if(data.visible&&!(data.mode&2))ImGui::TextUnformatted(ui_text("Object LOD is disabled."));
-    else if(data.visible&&!(data.mode&1))ImGui::TextUnformatted(ui_text("This part is not eligible for LOD."));
-    ImGui::TextDisabled(ui_text("GPU sample age: %llu frames"),static_cast<unsigned long long>(data.age_frames));
-}
-
 void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& config,
                           const RendererResourceSnapshot& resources) {
     const float scale = state.ui_scale;
@@ -2041,7 +2008,6 @@ void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& c
                 hud_profile_controls(state,config);
             }
             if(ImGui::BeginChild(ui_tab?"interface_options":"graphics_options",ImVec2(0,-footer),ImGuiChildFlags_Borders)) {
-            if(!ui_tab)draw_samgbur_lod(state,resources.samgbur_lod);
             std::size_t category_count = 0, setting_count = 0;
             const char* const* categories = player_graphics_categories(category_count);
             const PlayerGraphicsSetting* settings = player_graphics_settings(setting_count);
@@ -2050,7 +2016,7 @@ void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& c
                                          ui_text(setting.category) + " " + ui_setting_tooltip(setting);
                 return state.settings_filter.PassFilter(text.c_str());
             };
-            bool any_match = !ui_tab && state.settings_filter.PassFilter("samgbur01 LOD");
+            bool any_match = false;
             for (std::size_t category = 0; category < category_count; ++category) {
                 if((std::strcmp(categories[category],"Interface")==0)!=ui_tab)continue;
                 bool category_match = false;
@@ -2699,10 +2665,6 @@ bool DebugOverlay::captures_input() const noexcept {return captures_keyboard();}
 bool DebugOverlay::hud_editing() const noexcept {return game_hud_editing();}
 float DebugOverlay::hud_grid_step() const noexcept {
     return hud_editing() && implementation_->hud_grid?24.f*implementation_->ui_scale:0.f;
-}
-
-unsigned DebugOverlay::samgbur_lod_instance() const noexcept {
-    return implementation_?static_cast<unsigned>(std::max(0,implementation_->samgbur_lod_instance)):0u;
 }
 
 bool DebugOverlay::settings_open() const noexcept {

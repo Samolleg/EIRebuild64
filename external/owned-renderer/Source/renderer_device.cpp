@@ -2662,7 +2662,7 @@ void append_native_shader_programs(std::vector<ShaderProgram>& out){
  out.push_back({source,nullptr,nullptr,"nativePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
  for(const char* entry:{"nativeBuildCS","nativeTerrainPhaseCS","nativeInstanceUpdateCS","nativePoseCS","nativeShadowPrepareCS",
                         "nativeShadowCommitCS","nativeShadowBuildCS","nativeShadowVS","nativeShadowPS"})
-  out.push_back({std::strcmp(entry,"nativeBuildCS")==0?native_build_shader_source():source,nullptr,defines,entry,std::strstr(entry,"CS")?"cs_5_0":(std::strstr(entry,"VS")?"vs_5_0":"ps_5_0"),
+  out.push_back({source,nullptr,defines,entry,std::strstr(entry,"CS")?"cs_5_0":(std::strstr(entry,"VS")?"vs_5_0":"ps_5_0"),
                  D3DCOMPILE_OPTIMIZATION_LEVEL3});
  // Then the terrain pixel variant (NATIVE_TERRAIN_PS: tile blend, terrain
  // material, cliffs), bound to terrain batches; then the same
@@ -2769,7 +2769,6 @@ HRESULT Renderer::create_native_pipeline(){
   if(FAILED(result)){if(production_error)std::fwrite(production_error->GetBufferPointer(),1,production_error->GetBufferSize(),stderr);return result;}
  }
 #endif
- reset_samgbur_lod_diagnostic();
  retire_native_poses();native_pose_cs_.Reset();
  retire_native_shadows();
  native_shadow_prepare_cs_.Reset();native_shadow_commit_cs_.Reset();native_shadow_build_cs_.Reset();native_shadow_vs_.Reset();native_shadow_ps_.Reset();
@@ -3298,10 +3297,10 @@ HRESULT Renderer::upload_native_geometry(UINT page_index,UINT offset,const void*
  profiler_.add_upload(bytes);return S_OK;
 }
 
-HRESULT Renderer::upload_native_work_range(const NativeDispatchRange& range,UINT diagnostic_record,UINT diagnostic_meta){
+HRESULT Renderer::upload_native_work_range(const NativeDispatchRange& range){
  PERF06_SCOPE("upload_work");
  if(!context_||!native_work_range_constants_||!range.count)return E_INVALIDARG;
- const std::array<UINT,4> values{range.first,range.count,diagnostic_record,diagnostic_meta};
+ const std::array<UINT,4> values{range.first,range.count,0,0};
  D3D11_MAPPED_SUBRESOURCE mapped{};
  const HRESULT hr=context_->Map(native_work_range_constants_.Get(),0,
   D3D11_MAP_WRITE_DISCARD,0,&mapped);if(FAILED(hr))return hr;
@@ -3447,7 +3446,6 @@ void Renderer::release() {
  native_prepared_vertices_.Reset();
  native_prepared_vertex_srv_.Reset();
  native_prepared_vertex_uav_.Reset();
- reset_samgbur_lod_diagnostic();
  native_indirect_args_.Reset();
  native_indirect_args_uav_.Reset();
  native_geometry_pages_.clear();

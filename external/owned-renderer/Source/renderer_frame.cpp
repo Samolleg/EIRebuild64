@@ -1676,7 +1676,6 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
     requested_debug_view!=DebugResourceView::shadow_cascade_coverage)
   transition_profile_pass("debug_resource_view");
  render_debug_resource_view(requested_debug_view,debug_overlay_mode);
- poll_samgbur_lod();
  if(debug_overlay_.initialized()&&debug_overlay_pass_needed(overlay_visible || combat_ui_has_output(),debug_overlay_.has_status_notice() || widescreen_hud_hovered(HudPanel::game_speed),!critters_summary_.labels.empty())){
   const frame_acct::Scope overlay_scope(frame_acct::pf_overlay);
   const auto shadows=debug_overlay_mode==DebugOverlayMode::full?debug_shadow_info():DebugShadowInfo{};
