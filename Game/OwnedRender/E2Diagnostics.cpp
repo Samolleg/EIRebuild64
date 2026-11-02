@@ -67,7 +67,10 @@ void bridge_report_event(const char* event, const char* detail) noexcept {
     GameJournal::Event(failure ? "ERROR" : "RENDER", "bridge",
         "event=%.96s detail=%.768s", event ? event : "", detail ? detail : "");
 }
-void bridge_append_probe_event(const char*, const char*) noexcept { E2_UNAVAILABLE("retail lifecycle probe"); }
+void bridge_append_probe_event(const char* event, const char* detail) noexcept {
+    // Shared renderer events include terrain/material failures, not just retail probes.
+    bridge_report_event(event, detail);
+}
 void bridge_trace_input_focus(HWND, const char*, UINT, WPARAM, int) noexcept { E2_UNAVAILABLE("retail input focus trace"); }
 // The embedded EIRebuild host publishes its own render inputs directly. Retail
 // game.exe patch-site and semantic-hook checks do not apply to this frontend.

@@ -881,20 +881,24 @@ HRESULT Renderer::update_contact_blend_maps() noexcept try{
   std::shared_ptr<const OwnedVisualSurface> surface;
   if(!bridge_terrain_atlas(material,surface)||!surface)continue;
   ID3D11Texture2D* source=nullptr;UINT source_slice=0;
-  // Embedded terrain publishes immutable surfaces. Their array slots are
-  // keyed by GPU backing, not by surface id, and carry generation 1. Resolve
-  // the original uploaded texture by the same key as get_native_owned_texture.
-  const std::string surface_key="surface:"+std::to_string(surface->id);
-  for(const char* mips:{"|mips=full","|mips=authored"}){
-   const auto found=native_owned_textures_.find(surface_key+mips);
-   if(found!=native_owned_textures_.end()&&found->second.generation==surface->generation&&found->second.texture){
-    source=found->second.texture.Get();break;
-   }
+#ifdef EID3D11_EMBEDDED
+  // Terrain 2.0 reads the host's complete atlas, including its authored mips
+  // and material pages not drawn by the camera. The native draw cache holds
+  // only mip 0 of an immutable surface, not the terrain atlas input.
+  ComPtr<ID3D11Texture2D> host_atlas;
+  SurfaceImage* image=nullptr;
+  hr=surface_texture_resolver_?surface_texture_resolver_(surface_texture_resolver_context_,device_.Get(),
+   surface->id,surface->generation,host_atlas,image):E_FAIL;
+  if(FAILED(hr)||!host_atlas){
+   char text[192];std::snprintf(text,sizeof(text),"material=%u surface=%llu generation=%llu hr=0x%08lx",
+    material,static_cast<unsigned long long>(surface->id),static_cast<unsigned long long>(surface->generation),
+    static_cast<unsigned long>(FAILED(hr)?hr:E_FAIL));
+   embedded_report_render_failure("terrain2_atlas_unavailable",text);
+   continue; // Keep this material pending until its exact host surface is published.
   }
-  // Retail surfaces use the mutable array cache. Its id namespace must not
-  // be confused with immutable GPU backing ids, even when numbers coincide.
-  if(!source)for(const auto& entry:native_texture_arrays_){
-   if(entry.first.immutable_values)continue;
+  source=host_atlas.Get();
+#else
+  for(const auto& entry:native_texture_arrays_){
    for(const auto& page:entry.second){
     const auto found=page.slots.find(surface->id);
     if(found!=page.slots.end()&&found->second.generation==surface->generation){
@@ -903,6 +907,7 @@ HRESULT Renderer::update_contact_blend_maps() noexcept try{
    }
    if(source)break;
   }
+#endif
   if(!source)continue; // not drawn yet: the band keeps the painted colour meanwhile
   char detail[160]{};
   hr=copy_contact_atlas(source,source_slice,material,contact_maps_,detail,sizeof(detail));
