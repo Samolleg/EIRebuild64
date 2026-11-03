@@ -685,19 +685,10 @@ BOOL CWorldConnector::LoadZoneState(CParty &party, CMemorySave *prepared)
     coreOperation.Stage("load_world");
     if (pZone->szTerrainName != "")
     {
-        // special hack for zone6 terrain
-        const char *pszSpecialTerrain = 0;
-        if (szZone.CompareNoCase("gz6g") == 0)
-        {
-            if (party.vars.GetVar("z.gz6g.frozen"))
-                pszSpecialTerrain = "zone6_2.mpr";
-            else
-                pszSpecialTerrain = "zone6.mpr";
-        }
         // check if we have to load zone from .mob or from save
         if (party.VisitedZone(szZone))
         {
-            bRv = SaveSchema::Slot::LoadZone(szZone);
+            bRv = SaveSchema::Slot::LoadZone(szZone,party);
             if (!bRv) return FALSE;
             // process world for some time that should pass on zone during us being absent
             if (party.nEntrance >= 0 && party.nEntrance < pZone->exits.GetSize())
@@ -744,9 +735,7 @@ BOOL CWorldConnector::LoadZoneState(CParty &party, CMemorySave *prepared)
         else
         {
             CString szTerrain = pZone->szTerrainName + ".mpr";
-            if (pszSpecialTerrain)
-                szTerrain = pszSpecialTerrain;
-            if (!theWorldServer.NewZone(szTerrain, pZone->szMobName + ".mob", pZone->szName))
+            if (!theWorldServer.NewZone(szTerrain, pZone->szMobName + ".mob", pZone->szName, &party))
                 return FALSE;
             pZone = theMap.GetZoneByName(szZone);
             theWorldServer.SetWorldTime(4.0f);
@@ -961,6 +950,8 @@ BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
     { e->Delete(); if (applying && iface != IFACE_MAINMENU) GoMainMenu(); return SaveLoadFailure(failedPath, "file_or_memory_error", 0); }
     catch (const std::bad_alloc &)
     { if (applying && iface != IFACE_MAINMENU) GoMainMenu(); return SaveLoadFailure(failedPath, "allocation_failed", 0); }
+    catch (const std::exception &e)
+    { if (applying && iface != IFACE_MAINMENU) GoMainMenu(); return SaveLoadFailure(failedPath, e.what(), 0); }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // main state transition place

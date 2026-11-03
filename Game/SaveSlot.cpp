@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "SaveSlot.h"
+#include "ZoneIce.h"
 #include "WorldServer.h"
 #include "WorldClient.h"
 #include "WorldInterface.h"
@@ -430,7 +431,7 @@ void Slot::World(Reader &r,CWorldServer &v)
     v.LoadFieldCamp(r);v.bTransferItemCreates=true;v.bLoadDynamic=v.bLoadStatic=true;
 }
 
-void Slot::FinalizeWorld(Document &d)
+void Slot::FinalizeWorld(Document &d, CGSVariableSet* arriving)
 {
                 SavedWorldScope lookups(d.world.get());
                 for(const auto &x:d.world->mapObjects){
@@ -453,8 +454,9 @@ void Slot::FinalizeWorld(Document &d)
                 }
                 for(const auto &x:d.world->effects){x.second->SetUpdateMask();x.second->UpdateFrame();}
                 if(!d.terrain.IsEmpty()) {
-                    if(!d.world->aiMap.Navigation().Load())Invalid(d.world->aiMap.Navigation().Error().c_str());
-                    for(const auto& entry:d.world->mapObjects)if(auto* unit=dynamic_cast<CUnit*>(entry.second)) {
+                    const bool iceZone=ZoneIce::Load(*d.world,arriving);
+                    if(!iceZone && !d.world->aiMap.Navigation().Load())Invalid(d.world->aiMap.Navigation().Error().c_str());
+                    for(const auto& entry:d.world->mapObjects)if(!iceZone)if(auto* unit=dynamic_cast<CUnit*>(entry.second)) {
                         d.world->aiMap.Navigation().Restore(unit,d.world->aiMap);
                         if(!static_cast<CUnitServer*>(unit->GetUnitSpecific())->RestoreNavigation())Invalid("saved navigation route is unavailable");
                     }
@@ -638,17 +640,20 @@ void Slot::Commit(std::unique_ptr<State> state)
     // best-effort stop, after acceptance, never a reason to reject a staged slot.
     try{IWorldClient.StopAllSounds();}catch(...){GameJournal::AllocationFailureInCatch("Save64 audio retirement");}
 }
-bool Slot::LoadWorld(CSave &file)
+bool Slot::LoadWorld(CSave &file, CParty* arriving)
 {
+    CGSVariableSet entryVars;if(arriving)entryVars=arriving->vars;
     auto state=std::make_unique<State>();state->zoneOnly=true;state->files=visited;auto bytes=Snapshot(file);
     state->zones.push_back(ReadDocument(bytes));auto &d=state->zones.back();state->current=(LPCSTR)d.zone;
     {
         ObjectIdentity::RestoreNamespace allocation((std::max)(d.next,ObjectIdentity::GetNext()));
         PrepareWorld(d);d.camera=std::make_unique<CCamera>();d.camera->detachedSave=true;
         Decode(d,[&](Reader &r){World(r,*d.world);d.camera->Load(r);d.mod=CModPackage::LoadSaveState(r);});
-        FinalizeWorld(d);state->next=ObjectIdentity::GetNext();state->random=RandomState::Capture();
+        FinalizeWorld(d,arriving?&entryVars:nullptr);state->next=ObjectIdentity::GetNext();state->random=RandomState::Capture();
     }
-    Commit(std::move(state));return true;
+    Commit(std::move(state));
+    if(arriving)arriving->vars.swap(entryVars);
+    return true;
 }
 CString Slot::Directory()
 {
@@ -676,10 +681,10 @@ bool Slot::StoreZone(const char *name)
     visited[name]=Encode(d,[&](Writer &w){World(w,theWorldServer);theCamera.Store(w,false);if(auto *mod=ModRuntime::Current())mod->StoreSaveState(w);else Invalid("missing mod");});
     return true;
 }
-bool Slot::LoadZone(const char *name)
+bool Slot::LoadZone(const char *name, CParty& arriving)
 {
     auto it=visited.find(name);if(it==visited.end())return false;
-    CMemorySave f;Buffer(f,it->second);return LoadWorld(f);
+    CMemorySave f;Buffer(f,it->second);return LoadWorld(f,&arriving);
 }
 void Slot::SetPresentation(const SSaveSlotDesc &desc,CDXGISurface *surface)
 {

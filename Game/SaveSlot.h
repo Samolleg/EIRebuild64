@@ -10,6 +10,7 @@ class CCamera;
 class CAssortmentGenerator;
 struct SSaveSlotDesc;
 class CDXGISurface;
+class CGSVariableSet;
 
 namespace SaveSchema {
 // A single publication boundary for the scenario and all visited zone documents.
@@ -22,12 +23,12 @@ public:
     static void NewGame();
     static void Shutdown();
     static void StoreWorld(CSave &, CWorldServer &);
-    static bool LoadWorld(CSave &);
+    static bool LoadWorld(CSave &, CParty* arriving = nullptr);
     static void CopyParty(CParty &, const CParty &);
     static void StoreParty(CSave &, const CParty &);
     static void LoadParty(CSave &, CParty &);
     static bool StoreZone(const char *name);
-    static bool LoadZone(const char *name);
+    static bool LoadZone(const char *name, CParty& arriving);
     static bool HasZone(const char *name);
     static CString Directory();
     static void SetPresentation(const SSaveSlotDesc &, CDXGISurface *);
@@ -54,7 +55,7 @@ private:
     static void Decode(Document &, const std::function<void(Reader &)> &);
     static Document ReadDocument(const Bytes &);
     static void PrepareWorld(Document &);
-    static void FinalizeWorld(Document &);
+    static void FinalizeWorld(Document &, CGSVariableSet* arriving = nullptr);
     static void PrepareScenario(Document &);
     static void Commit(std::unique_ptr<State>);
     static void CameraAdopt(const CCamera &);

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ZoneIce.h"
 #include "SaveSlot.h"
 #include "CorePerf.h"
 #include "OwnedRender/E1Notices.h"
@@ -3277,7 +3278,7 @@ void CWorldServer::CreateInitialUpdate()
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 // начать функционирование нового сервера
-BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneName)
+BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneName, CParty* arriving)
 {
     CorePerf::Operation coreOperation("world.new_zone", pszZoneName);
     GameJournal::Event("ZONE", "resources", "mpr=%s mob=%s", GameJournal::Quote(pszMapName).c_str(), GameJournal::Quote(pszMobName).c_str());
@@ -3309,7 +3310,8 @@ BOOL CWorldServer::NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneN
     C2DScreenWait::Step(6);
     coreOperation.Stage("finalize");
     FinishZoneLoading();
-    if(!aiMap.Navigation().Load()) { bMapLoaded=FALSE;return ReportError("Nav64: cannot enter zone: %s",aiMap.Navigation().Error().c_str()); }
+    if(pszZoneName)szCurrentZoneName=pszZoneName;
+    if(!ZoneIce::Load(*this,arriving?&arriving->vars:nullptr) && !aiMap.Navigation().Load()) { bMapLoaded=FALSE;return ReportError("Nav64: cannot enter zone: %s",aiMap.Navigation().Error().c_str()); }
     C2DScreenWait::Step(7);
     if (pszZoneName)
         szCurrentZoneName = pszZoneName;
@@ -3382,7 +3384,7 @@ void CWorldServer::FinishZoneLoading()
     aiMap.SetGraphRebuild(true);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-BOOL CWorldServer::AddSecondaryMob(LPCSTR pszMobName)
+BOOL CWorldServer::AddSecondaryMob(LPCSTR pszMobName, bool objectsOnly)
 {
     // check if one is already loaded
     const auto* mod = ModRuntime::Current();
@@ -3396,9 +3398,9 @@ BOOL CWorldServer::AddSecondaryMob(LPCSTR pszMobName)
         }
     }
     //
-    OwnedRender::E1MobSource ownedSource(pszMobName);
+    OwnedRender::E1MobSource ownedSource(detachedSave ? nullptr : pszMobName);
     C2DScreenWait::Ignore(true);
-    if (pszMobName && !LoadMapObjects(pszMobName, false))
+    if (pszMobName && !LoadMapObjects(pszMobName, false, objectsOnly))
     {
         C2DScreenWait::Ignore(false);
         bMapLoaded = FALSE;
@@ -3510,7 +3512,7 @@ bool CWorldServer::LoadNavigationScene(const char* mpr,const char* mob)
     FinishZoneLoading();
     return true;
 }
-BOOL CWorldServer::LoadMapObjects(LPCSTR pszMobName, bool bSkipScript)
+BOOL CWorldServer::LoadMapObjects(LPCSTR pszMobName, bool bSkipScript, bool objectsOnly)
 {
     CGameMOBFile reader;
     BOOL bRv = reader.Open(GetFullMobName(pszMobName),
@@ -3521,7 +3523,7 @@ BOOL CWorldServer::LoadMapObjects(LPCSTR pszMobName, bool bSkipScript)
     else
     {
         OwnedRender::E1MobSource::Parsed(pszMobName);
-        bRv = reader.Load(this, bSkipScript);
+        bRv = reader.Load(this, bSkipScript, objectsOnly);
         reader.Close();
         if (!bRv)
             return ReportError("CWorldServer::LoadMapObjects\nUnable to read file \"%s\"\n",

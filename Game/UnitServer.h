@@ -834,7 +834,7 @@ public:
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CUnitServer"; }
     SL0AnimationSeq *GetExtendedAnimationSequence(unsigned kind);
-    bool RestoreNavigation();
+    bool RestoreNavigation(bool invalidate = false);
     virtual EClassIDs WhoAmI() const { return HPC_UNITSERVERSPECIFIC; }
 public:
     virtual void Store(SaveSchema::Writer &) const;

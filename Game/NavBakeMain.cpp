@@ -90,11 +90,6 @@ int wmain(int argc,wchar_t** argv) {
                 const auto* zone=registry.GetZone(i);
                 if(zone->szTerrainName.IsEmpty()||zone->szMobName.IsEmpty())continue;
                 maps.emplace(Extension((LPCSTR)zone->szTerrainName,".mpr"),Extension((LPCSTR)zone->szMobName,".mob"));
-                // Both authored terrain states selected by WorldInterface.
-                if(zone->szName.CompareNoCase("gz6g")==0) {
-                    maps.emplace("zone6.mpr",Extension((LPCSTR)zone->szMobName,".mob"));
-                    maps.emplace("zone6_2.mpr",Extension((LPCSTR)zone->szMobName,".mob"));
-                }
             }
             maps.emplace("ZoneMainMenuNew.mpr","ZoneMainMenuNew.mob");
         } else {
