@@ -80,6 +80,39 @@ VisualPreparedResources::AdmissionKey owned_visual_admission_key(
     return key;
 }
 
+#if defined(EID3D11_EMBEDDED)
+// Temporary r6 observation at the renderer's actual admission seam; source
+// lists alone cannot establish which service geometry reaches depth/colour.
+void report_weapon_admission(const RetainedVisualSample& sample,
+    const std::vector<VisualPreparedResources::PartAdmission>& parts) noexcept try {
+    static std::uint64_t epoch = 0;
+    static std::array<std::uint64_t, 16> reported{};
+    const auto current = bridge_current_world_epoch();
+    if (epoch != current) { epoch = current; reported = {}; }
+    if (!sample.values.unit || !sample.resource.serial ||
+        std::find(reported.begin(), reported.end(), sample.resource.serial) != reported.end()) return;
+    auto slot = std::find(reported.begin(), reported.end(), 0);
+    if (slot == reported.end() || !std::any_of(sample.assembly->parts.begin(), sample.assembly->parts.end(),
+        [](const VisualPartAsset& part) {
+            return part.name.find(".pike") != std::string::npos || part.name.find(".dpike") != std::string::npos;
+        })) return;
+    const std::string header = "scope=weapon_parts_admission epoch=" + std::to_string(epoch) + " id=" +
+        std::to_string(sample.resource.signed_id) + " serial=" + std::to_string(sample.resource.serial) +
+        " revision=" + std::to_string(sample.assembly->revision) + " name_visible_casts=";
+    std::string detail = header;
+    for (std::size_t i = 0; i < parts.size(); ++i) {
+        if (detail.size() > 500) {
+            embedded_perf06_report(detail.c_str());
+            detail = header;
+        }
+        detail += sample.assembly->parts[i].name + ":" + std::to_string(parts[i].visible) +
+            ":" + std::to_string(parts[i].casts) + ",";
+    }
+    *slot = sample.resource.serial;
+    embedded_perf06_report(detail.c_str());
+} catch (...) {}
+#endif
+
 } // namespace
 bool prepare_owned_visual_admission(const RetainedVisualSample& sample,
     bool draw_undetected,bool shadows_enabled) {
@@ -103,6 +136,9 @@ bool prepare_owned_visual_admission(const RetainedVisualSample& sample,
              retained_visual_effective_alpha(sample,asset)>=254.5f/255.f);
         part.casts=shadows_enabled && owned_visual_part_casts(sample,asset,draw_undetected);
     }
+#if defined(EID3D11_EMBEDDED)
+    report_weapon_admission(sample, parts);
+#endif
     prepared.derived_admission_key=key;
     prepared.derived_admission_parts=std::move(parts);
     prepared.derived_admission_valid=true;
