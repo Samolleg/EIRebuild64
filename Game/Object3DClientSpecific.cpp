@@ -2,6 +2,7 @@
 #include "CorePerf.h"
 #include "OwnedRender/E1PerfDiagnostics.h"
 #include <algorithm>
+#include <cstring>
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "WorldClient.h"
@@ -692,6 +693,34 @@ void CObject3DClientSpecific::InvalidateOwnedAppearance() noexcept
             owned::RetainedVisualStatus::unsupported_appearance,
             "appearance.source_changed", "host.object_appearance");
 }
+// Game spell attachments (Item::GetCastPointName / ModItemSpellPolicy::CastPointNode)
+// and eye points belong to the skeleton even when a template selected their FIG.
+// They are not render parts. Restrict the role to units: BASE also names bridges.
+bool CObject3DClientSpecific::IsOwnedFigureHidden(const CFigure& figure) const noexcept
+{
+    if (figure.CheckFlag(FIG_HIDDEN)) return true;
+    if (!lpObject || lpObject->WhoAmI() != HPC_UNIT) return false;
+    const char* name = figure.GetName();
+    if (!name) return false;
+    if (_strnicmp(name, "l.", 2) == 0) name += 2;
+    if (_stricmp(name, "eyepoint1") == 0 || _stricmp(name, "eyepoint2") == 0 ||
+        _stricmp(name, "baserh3") == 0 || _stricmp(name, "baser_hand3") == 0)
+        return true;
+    static const char* const castPoints[] = {
+        "basesword", "baseaxe", "basedagger", "basepike", "baseclub", "basearrow",
+        "basedsword", "basedaxe", "basedpike", "basedclub", "basestaff", "basedstaff"
+    };
+    for (const char* prefix : castPoints) {
+        const auto length = std::strlen(prefix);
+        if (_strnicmp(name, prefix, length) != 0) continue;
+        const char* number = name + length;
+        if (!*number) continue;
+        while (*number >= '0' && *number <= '9') ++number;
+        if (!*number) return true;
+    }
+    return false;
+}
+
 // Immutable source snapshot, shared by world publication and a private UI view.
 // Reading a negative-id preview never requires registering it in the world.
 std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::BuildOwnedAssembly(
@@ -804,7 +833,7 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
         part.diffuse = figure->GetDefaultColor();
         part.specular = figure->GetDefaultSpecular();
         // Empty FIG parts keep their names and skeleton nodes, but draw nothing.
-        part.explicitly_hidden = figure->CheckFlag(FIG_HIDDEN) || part.geometry->indices.empty();
+        part.explicitly_hidden = IsOwnedFigureHidden(*figure) || part.geometry->indices.empty();
         assembly->parts.push_back(std::move(part));
     }
     return assembly;

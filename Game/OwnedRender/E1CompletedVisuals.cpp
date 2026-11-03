@@ -10,10 +10,6 @@
 #include "../Unit.h"
 #include "../UnitClientSpecific.h"
 #include "embedded_host.h"
-#include "../GameJournal.h"
-#include "owned_asset_loader.h"
-#include <algorithm>
-#include <array>
 
 namespace OwnedRender {
 namespace {
@@ -65,7 +61,7 @@ bool E1CompleteVisualAppearance(CObject3DClientSpecific& specific,
         auto* figure=specific.FindFigure(part.name.c_str());
         if(!material || !figure)return reject("appearance.completed_part");
         auto value=completedMaterial(*material);
-        const bool hidden=figure->CheckFlag(FIG_HIDDEN)!=0 || part.geometry->indices.empty();
+        const bool hidden=specific.IsOwnedFigureHidden(*figure) || part.geometry->indices.empty();
         const auto flags=material->CheckFlag(MAT_USE_SPECULAR)?MAT_USE_SPECULAR:0;
         if(sameMaterial(value,*previous.parts[i].material) &&
            hidden==previous.parts[i].explicitly_hidden && flags==previous.parts[i].material_flags)continue;
@@ -91,48 +87,6 @@ bool E1CompleteVisualAppearance(CObject3DClientSpecific& specific,
 // The retained scene still owns completed object poses; changing a frame's
 // rendering class must never switch the scene to the retail route evaluator.
 namespace {
-// Temporary r6 observation: compare the live selected CFigures with the exact
-// immutable frame given to depth/colour. Never infer visibility from BASE names.
-void reportWeaponParts(CUnit& object, const owned::RetainedVisualSample& sample) noexcept try {
-    static std::uint64_t epoch = 0;
-    static std::array<std::uint64_t, 16> reported{};
-    const auto currentEpoch = owned::bridge_current_world_epoch();
-    if (epoch != currentEpoch) { epoch = currentEpoch; reported = {}; }
-    if (!sample.resource.serial || std::find(reported.begin(), reported.end(),
-            sample.resource.serial) != reported.end()) return;
-    auto slot = std::find(reported.begin(), reported.end(), 0);
-    if (slot == reported.end()) return;
-    const auto spear = [](const std::string& name) {
-        return name.find(".pike") != std::string::npos || name.find(".dpike") != std::string::npos;
-    };
-    bool hostSpear = false;
-    for (int i = 0; i < object.GetNumFigures(); ++i)
-        if (const auto* figure = object.GetFigure(i)) hostSpear |= spear(figure->GetName());
-    if (!hostSpear && !std::any_of(sample.assembly->parts.begin(), sample.assembly->parts.end(),
-            [&](const owned::VisualPartAsset& part) { return spear(part.name); })) return;
-    std::string selected, retained;
-    for (int i = 0; i < object.GetNumFigures(); ++i) {
-        const auto* figure = object.GetFigure(i);
-        if (!figure) continue;
-        selected += std::string(figure->GetName()) + ":" +
-            std::to_string(figure->GetFlags()) + ":" +
-            std::to_string(fabs2(figure->GetCP()) > 1e9f) + ",";
-    }
-    for (const auto& part : sample.assembly->parts) {
-        retained += part.name + ":" + std::to_string(part.skeleton_node) + ":" +
-            (part.geometry ? part.geometry->identity.canonical_name : "missing") + ":" +
-            std::to_string(part.geometry ? part.geometry->indices.size() : 0) + ":" +
-            std::to_string(part.explicitly_hidden) + ",";
-    }
-    *slot = sample.resource.serial;
-    GameJournal::Event("RENDER", "weapon_parts_frame",
-        "epoch=%llu id=%d serial=%llu mask=%s revision=%llu host_name_flags_inactive=%s retained_name_node_asset_indices_hidden=%s",
-        static_cast<unsigned long long>(epoch), sample.resource.signed_id,
-        static_cast<unsigned long long>(sample.resource.serial), object.GetMaskName(),
-        static_cast<unsigned long long>(sample.assembly->revision),
-        GameJournal::Quote(selected.c_str()).c_str(), GameJournal::Quote(retained.c_str()).c_str());
-} catch (...) {} // Observation failure cannot reject an otherwise valid frame.
-
 bool completeVisualFrame(owned::RetainedVisualFrame& frame, bool combat) noexcept try {
     if (combat) E3CombatCatalog();
     for(auto& sample:frame.entities) {
@@ -157,7 +111,6 @@ bool completeVisualFrame(owned::RetainedVisualFrame& frame, bool combat) noexcep
         sample.visibility.casts_shadow=object->CheckFlag(OBJ_NOSHADOW)==0;
         sample.values.object_flags=(sample.values.object_flags&~0x00400000u)|
             (object->CheckFlag(UNIT_VISIBLE)?0x00400000u:0u);
-        reportWeaponParts(*unit, sample);
         // Both the skeleton and its bounds retain the exact host quaternion,
         // complection, animation phase and placement already in object_pose.
     }

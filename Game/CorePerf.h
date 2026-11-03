@@ -81,6 +81,10 @@ struct AsyncCounter {
         const Counter result = value; value = Counter{}; return result;
     }
 };
+// One passive main-thread frame timeline shared by core, host and embedded
+// renderer scopes. Exclusive CPU wall time includes waits, never GPU duration.
+struct FrameDetail { const char* name = nullptr; LONGLONG ticks = 0; };
+struct FrameDetailStack { unsigned slot = 0; LONGLONG checkpoint = 0; };
 struct State {
     const DWORD thread = GetCurrentThreadId();
     LONGLONG frequency = 0, window = Now();
@@ -92,6 +96,12 @@ struct State {
     bool drew3D = false;
     TickData* tick = nullptr;
     TickData worst{};
+    FrameDetail frameDetails[192]{}, worstDetails[3]{};
+    FrameDetailStack detailStack[64]{};
+    unsigned detailCount = 0, detailDepth = 0;
+    bool detailOverflow = false, worstOverflow = false;
+    LONGLONG frameStarted = 0, frameDraw = 0, hitchWindow = Now(), worstFrame = 0, worstDraw = 0;
+    std::uint64_t frameNumber = 0, worstFrameNumber = 0, slowFrames = 0;
     LONGLONG navigationFrame = 0;
     bool inFrame = false;
     std::uint64_t frameTicks = 0, histogram[4]{}, hitches = 0;
@@ -103,7 +113,66 @@ inline void Initialize() noexcept { (void)Get(); }
 inline State* Main() noexcept {
     State& s = Get(); return GetCurrentThreadId() == s.thread && s.frequency > 0 ? &s : nullptr;
 }
+// Tokens are stack depths, valid only until their matching synchronous end.
+// Worker threads are ignored; fixed bounds avoid allocating in render paths.
+inline unsigned BeginFrameDetail(const char* name, LONGLONG now) noexcept {
+    auto* s = Main();
+    if (!s || !s->inFrame) return 0;
+    if (s->detailDepth == 64) { s->detailOverflow = true; return 0; }
+    unsigned slot = 0;
+    while (slot < s->detailCount && std::strcmp(s->frameDetails[slot].name, name)) ++slot;
+    if (slot == s->detailCount) {
+        if (slot == 192) { s->detailOverflow = true; return 0; }
+        s->frameDetails[slot].name = name; ++s->detailCount;
+    }
+    if (s->detailDepth) {
+        auto& parent = s->detailStack[s->detailDepth - 1];
+        s->frameDetails[parent.slot].ticks += now - parent.checkpoint;
+    }
+    s->detailStack[s->detailDepth++] = {slot, now};
+    return s->detailDepth;
+}
+inline void EndFrameDetail(unsigned token, LONGLONG now) noexcept {
+    if (!token) return;
+    auto* s = Main();
+    if (!s || !s->inFrame) return;
+    if (token != s->detailDepth) { s->detailOverflow = true; return; }
+    const auto& current = s->detailStack[--s->detailDepth];
+    s->frameDetails[current.slot].ticks += now - current.checkpoint;
+    if (s->detailDepth) s->detailStack[s->detailDepth - 1].checkpoint = now;
+}
+inline void CompleteFrameDetails(State& s, LONGLONG now) noexcept {
+    const auto elapsed = now - s.frameStarted;
+    if (elapsed * 1000.0 / s.frequency > 33.0) {
+        ++s.slowFrames;
+        if (elapsed > s.worstFrame) {
+            s.worstFrame = elapsed; s.worstDraw = s.frameDraw;
+            s.worstFrameNumber = s.frameNumber; s.worstOverflow = s.detailOverflow || s.detailDepth != 0;
+            for (auto& detail : s.worstDetails) detail = {};
+            for (unsigned i = 0; i < s.detailCount; ++i) {
+                auto candidate = s.frameDetails[i];
+                for (auto& best : s.worstDetails)
+                    if (candidate.ticks > best.ticks) { const auto old = best; best = candidate; candidate = old; }
+            }
+        }
+    }
+    // Keep the worst completed frame per second. Formatting is outside timers;
+    // the event states the exact frame, not unrelated sliding-window maxima.
+    if (now - s.hitchWindow < s.frequency) return;
+    if (s.slowFrames) {
+        const double ms = 1000.0 / s.frequency;
+        const auto& a = s.worstDetails[0]; const auto& b = s.worstDetails[1]; const auto& c = s.worstDetails[2];
+        GameJournal::Event("CORE", "frame_spike",
+            "frame=%llu frame_ms=%.3f draw_ms=%.3f threshold_ms=33 selection=worst_per_second slow_frames=%llu"
+            " top1=%s top1_ms=%.3f top2=%s top2_ms=%.3f top3=%s top3_ms=%.3f self=1 thread=main overflow=%d",
+            s.worstFrameNumber, s.worstFrame * ms, s.worstDraw * ms, s.slowFrames,
+            a.name ? a.name : "none", a.ticks * ms, b.name ? b.name : "none", b.ticks * ms,
+            c.name ? c.name : "none", c.ticks * ms, int(s.worstOverflow));
+    }
+    s.slowFrames = 0; s.worstFrame = 0; s.hitchWindow = now;
+}
 inline void Record(State& s, Id id, LONGLONG elapsed) noexcept {
+    if (id == DrawFrame && s.inFrame) s.frameDraw += elapsed;
     s.scopes[id].Add(elapsed);
     if(id==NavigationTotal&&s.inFrame)s.navigationFrame+=elapsed;
     for (TickData* tick = s.tick; tick; tick = tick->parent) tick->scopes[id].Add(elapsed);
@@ -112,12 +181,14 @@ class Scope {
     State* state = Main();
     Id id;
     LONGLONG started;
+    unsigned detail;
 public:
-    explicit Scope(Id value) noexcept : id(value), started(state ? Now() : 0) {}
+    explicit Scope(Id value) noexcept : id(value), started(state ? Now() : 0),
+        detail(BeginFrameDetail(Name(value), started)) {}
     Scope(const Scope&) = delete;
     Scope& operator=(const Scope&) = delete;
     void Finish() noexcept {
-        if (state) { Record(*state, id, Now() - started); state = nullptr; }
+        if (state) { const auto now = Now(); EndFrameDetail(detail, now); Record(*state, id, now - started); state = nullptr; }
     }
     ~Scope() noexcept { Finish(); }
 };
@@ -126,13 +197,15 @@ class Partition {
     State* state = Main();
     Id id;
     LONGLONG checkpoint;
+    unsigned detail;
 public:
-    explicit Partition(Id value) noexcept : id(value), checkpoint(state ? Now() : 0) {}
+    explicit Partition(Id value) noexcept : id(value), checkpoint(state ? Now() : 0),
+        detail(BeginFrameDetail(Name(value), checkpoint)) {}
     void Stage(Id value) noexcept {
-        if (state) { const auto now = Now(); Record(*state, id, now - checkpoint); checkpoint = now; }
+        if (state) { const auto now = Now(); EndFrameDetail(detail, now); Record(*state, id, now - checkpoint); checkpoint = now; detail = BeginFrameDetail(Name(value), now); }
         id = value;
     }
-    ~Partition() noexcept { if (state) Record(*state, id, Now() - checkpoint); }
+    ~Partition() noexcept { if (state) { const auto now = Now(); EndFrameDetail(detail, now); Record(*state, id, now - checkpoint); } }
 };
 // Renderer waits may also run on its scene thread. Keep that timeline separate
 // from the main thread's inclusive scopes; never add it to frame.draw_3d.
@@ -141,10 +214,13 @@ class AnyThreadScope {
     State* main = Main();
     Id id;
     LONGLONG started = Now();
+    unsigned detail;
 public:
-    explicit AnyThreadScope(Id value) noexcept : id(value) {}
+    explicit AnyThreadScope(Id value) noexcept : id(value), detail(BeginFrameDetail(Name(value), started)) {}
     ~AnyThreadScope() noexcept {
-        const auto elapsed = Now() - started;
+        const auto now = Now();
+        EndFrameDetail(detail, now);
+        const auto elapsed = now - started;
         if (main) Record(state, id, elapsed); else state.async[id].Add(elapsed);
     }
 };
@@ -283,7 +359,11 @@ class Frame {
     State* state = Main();
     Scope timing{IdleFrame};
 public:
-    Frame() noexcept { if (state) { state->frameTicks = 0; state->navigationFrame = 0; state->drew3D = false; state->inFrame = true; } }
+    Frame() noexcept { if (state) {
+        state->frameStarted = Now(); state->frameDraw = 0; ++state->frameNumber;
+        state->detailCount = state->detailDepth = 0; state->detailOverflow = false;
+        for (auto& detail : state->frameDetails) detail = {};
+        state->frameTicks = 0; state->navigationFrame = 0; state->drew3D = false; state->inFrame = true; } }
     Frame(const Frame&) = delete;
     ~Frame() noexcept {
         timing.Finish();
@@ -292,6 +372,7 @@ public:
             ++state->histogram[state->frameTicks < 3 ? state->frameTicks : 3];
             if (!state->drew3D) ++state->emptyFrames;
             state->inFrame = false;
+            CompleteFrameDetails(*state, Now());
             Flush(); // Journal formatting/queueing is outside all frame/tick timers.
         }
     }

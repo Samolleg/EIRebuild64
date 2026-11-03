@@ -114,6 +114,7 @@ public:
         fScaleZ = fSZ;
     }
     void InvalidateOwnedAppearance() noexcept;
+    bool IsOwnedFigureHidden(const CFigure& figure) const noexcept;
     virtual void GetScaleCoeffs(float &fSX, float &fSY, float &fSZ) const
     {
         fSX = fScaleX;

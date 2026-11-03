@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <cstdint>
 #include "../GameJournal.h"
+#include "../CorePerf.h"
 
 namespace OwnedRender {
 // Temporary PERF04 measurement, render thread only. Inclusive scope times;
@@ -15,15 +16,18 @@ class E1PerfScope {
     E1PerfCounter& counter;
     LARGE_INTEGER start{};
     std::uint64_t bytes;
+    unsigned detail = 0;
 public:
     explicit E1PerfScope(E1PerfCounter& value, std::uint64_t copied = 0) noexcept
         : counter(value), bytes(copied) {
         QueryPerformanceCounter(&start);
+        detail = CorePerf::BeginFrameDetail(counter.name, start.QuadPart);
         if (!counter.window) counter.window = start.QuadPart;
     }
     ~E1PerfScope() noexcept {
         LARGE_INTEGER end{};
         QueryPerformanceCounter(&end);
+        CorePerf::EndFrameDetail(detail, end.QuadPart);
         static const LONGLONG frequency = []() {
             LARGE_INTEGER value{}; QueryPerformanceFrequency(&value); return value.QuadPart;
         }();

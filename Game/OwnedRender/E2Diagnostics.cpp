@@ -2,6 +2,7 @@
 #include "test_harness.h"
 #include "res_cache_release.h"
 #include "../GameJournal.h"
+#include "../CorePerf.h"
 #include <atomic>
 #include <array>
 #include <cstring>
@@ -44,6 +45,13 @@ void embedded_report_render_failure(const char* event, const char* reason) noexc
         return;
     }
 } catch (...) {}
+
+unsigned embedded_frame_scope_begin(const char* name, LONGLONG now) noexcept {
+    return CorePerf::BeginFrameDetail(name, now);
+}
+void embedded_frame_scope_end(unsigned token, LONGLONG now) noexcept {
+    CorePerf::EndFrameDetail(token, now);
+}
 
 void embedded_perf06_report(const char* detail) noexcept {
     GameJournal::Event("RENDER", "pipeline_perf", "%s", detail);

@@ -195,8 +195,32 @@ HRESULT E1ParticleSurfaceImage(ID3D11Device* device, ID3D11DeviceContext* contex
             owned::release_surface_memory_accounting(*value);
             delete value;
         });
-    const HRESULT converted = E1SurfaceImage(device, context, id, *next);
-    if (FAILED(converted)) return converted;
+    // Effects only sample the completed surface. Keep an exact, immutable GPU
+    // copy of level 0 instead of synchronously reading it to CPU and uploading
+    // those same bytes again. A separate resource preserves this generation
+    // even when the host later writes to the published texture in place.
+    static E1PerfCounter counter{"particle_surface_snapshot"};
+    E1PerfScope timing(counter);
+    Microsoft::WRL::ComPtr<ID3D11Device> contextDevice;
+    context->GetDevice(&contextDevice);
+    if (contextDevice.Get() != device) return E_INVALIDARG;
+    D3D11_TEXTURE2D_DESC desc{}; published->GetDesc(&desc);
+    if (desc.Width != value->width || desc.Height != value->height ||
+        desc.ArraySize != 1 || desc.SampleDesc.Count != 1) return E_HANDLE;
+    desc.MipLevels = 1; desc.Usage = D3D11_USAGE_DEFAULT;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE; desc.CPUAccessFlags = 0; desc.MiscFlags = 0;
+    HRESULT copied = device->CreateTexture2D(&desc, nullptr, &next->texture);
+    if (FAILED(copied)) return copied;
+    copied = device->CreateShaderResourceView(next->texture.Get(), nullptr, &next->srv);
+    if (FAILED(copied)) return copied;
+    context->CopySubresourceRegion(next->texture.Get(), 0, 0, 0, 0, published.Get(), 0, nullptr);
+    next->id = value->id; next->generation = value->generation;
+    next->width = value->width; next->height = value->height;
+    next->pitch = value->pitch; next->format = value->format;
+    next->uploaded_shape = owned::surface_upload_shape(*next);
+    next->uploaded_generation = next->generation; next->texture_serial = 1;
+    next->gpu_primary = true; next->cpu_released = true; next->dirty_full = false;
+    owned::update_surface_memory_accounting(*next);
     (*cache)[id] = {device, ++serial, next};
     while (cache->size() > 64) {
         auto oldest = cache->begin();
