@@ -15,6 +15,7 @@
 #endif
 #include "renderer.h"
 #include "engine_bridge.h"
+#include "fixed_state_descs.h"
 #include <atomic>
 #include <cstdint>
 #include <string>
@@ -28,7 +29,6 @@ extern std::atomic<std::uint64_t> g_restore_readbacks;
 extern std::atomic<std::uint64_t> g_restore_readback_qpc;
 extern std::atomic<std::uint64_t> g_pinned_surfaces;
 const std::string& native_shader_source();
-const std::string& native_build_shader_source();
 
 namespace {
 
@@ -58,32 +58,28 @@ private:
     SceneRendererTimingToken token_{};
 };
 
-std::uint64_t texture_storage_bytes(ID3D11Texture2D* texture) noexcept {
-    if (!texture) return 0;
-    D3D11_TEXTURE2D_DESC description{};
-    texture->GetDesc(&description);
+// Bytes of one slice of a width x height texture with mip_levels levels.
+std::uint64_t texture_storage_bytes(UINT width, UINT height, UINT mip_levels, DXGI_FORMAT format) noexcept {
     std::uint64_t result = 0;
-    UINT width = description.Width;
-    UINT height = description.Height;
-    const UINT mip_levels = std::max(1u, description.MipLevels);
+    mip_levels = std::max(1u, mip_levels);
     for (UINT mip = 0; mip < mip_levels; ++mip) {
-        if (description.Format == DXGI_FORMAT_BC1_UNORM ||
-            description.Format == DXGI_FORMAT_BC1_UNORM_SRGB) {
+        if (format == DXGI_FORMAT_BC1_UNORM ||
+            format == DXGI_FORMAT_BC1_UNORM_SRGB) {
             result += static_cast<std::uint64_t>(std::max(1u, (width + 3) / 4)) *
                       std::max(1u, (height + 3) / 4) * 8u;
-        } else if (description.Format == DXGI_FORMAT_BC2_UNORM ||
-                   description.Format == DXGI_FORMAT_BC2_UNORM_SRGB ||
-                   description.Format == DXGI_FORMAT_BC3_UNORM ||
-                   description.Format == DXGI_FORMAT_BC3_UNORM_SRGB) {
+        } else if (format == DXGI_FORMAT_BC2_UNORM ||
+                   format == DXGI_FORMAT_BC2_UNORM_SRGB ||
+                   format == DXGI_FORMAT_BC3_UNORM ||
+                   format == DXGI_FORMAT_BC3_UNORM_SRGB) {
             result += static_cast<std::uint64_t>(std::max(1u, (width + 3) / 4)) *
                       std::max(1u, (height + 3) / 4) * 16u;
-        } else if (description.Format == DXGI_FORMAT_R8_UNORM) {
+        } else if (format == DXGI_FORMAT_R8_UNORM) {
             result += static_cast<std::uint64_t>(width) * height;
-        } else if (description.Format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
+        } else if (format == DXGI_FORMAT_R16G16B16A16_FLOAT) {
             result += static_cast<std::uint64_t>(width) * height * 8u;
-        } else if (description.Format == DXGI_FORMAT_B5G6R5_UNORM ||
-                   description.Format == DXGI_FORMAT_B5G5R5A1_UNORM ||
-                   description.Format == DXGI_FORMAT_B4G4R4A4_UNORM) {
+        } else if (format == DXGI_FORMAT_B5G6R5_UNORM ||
+                   format == DXGI_FORMAT_B5G5R5A1_UNORM ||
+                   format == DXGI_FORMAT_B4G4R4A4_UNORM) {
             result += static_cast<std::uint64_t>(width) * height * 2u;
         } else {
             result += static_cast<std::uint64_t>(width) * height * 4u;
@@ -91,7 +87,15 @@ std::uint64_t texture_storage_bytes(ID3D11Texture2D* texture) noexcept {
         width = std::max(1u, width / 2);
         height = std::max(1u, height / 2);
     }
-    return result * std::max(1u, description.ArraySize) * std::max(1u, description.SampleDesc.Count);
+    return result;
+}
+
+std::uint64_t texture_storage_bytes(ID3D11Texture2D* texture) noexcept {
+    if (!texture) return 0;
+    D3D11_TEXTURE2D_DESC description{};
+    texture->GetDesc(&description);
+    return texture_storage_bytes(description.Width, description.Height, description.MipLevels, description.Format) *
+           std::max(1u, description.ArraySize) * std::max(1u, description.SampleDesc.Count);
 }
 
 
@@ -108,7 +112,8 @@ struct Constants {
     UINT combiner[2]{}; float hud_opacity=1.f; UINT combiner_padding=0; // nativeCombiner: fast colour and alpha stage modes (native_fast_combiner_mode)
     // nativeContactLayout: xy the batch map's saved-layout origin on whole
     // tiles (neighbour_layout_tile_origin), the frame of its terrain material
-    // layouts; zw unused.
+    // layouts; z 1 for shelter bake foliage (renderer_shadows.cpp), w the batch
+    // map's terrain 2.0 table entry + 1 (update_terrain2_table; 0 none).
     float layout_origin[4]{};
 };
 
@@ -207,8 +212,6 @@ private:
 };
 
 void identity(D3DMATRIX& m){std::memset(&m,0,sizeof(m));m._11=m._22=m._33=m._44=1;}
-D3D11_COMPARISON_FUNC comparison(DWORD f){return f>=D3DCMP_NEVER&&f<=D3DCMP_ALWAYS?static_cast<D3D11_COMPARISON_FUNC>(f):D3D11_COMPARISON_LESS_EQUAL;}
-D3D11_BLEND blend(DWORD b){switch(b){case D3DBLEND_ZERO:return D3D11_BLEND_ZERO;case D3DBLEND_ONE:return D3D11_BLEND_ONE;case D3DBLEND_SRCCOLOR:return D3D11_BLEND_SRC_COLOR;case D3DBLEND_INVSRCCOLOR:return D3D11_BLEND_INV_SRC_COLOR;case D3DBLEND_SRCALPHA:return D3D11_BLEND_SRC_ALPHA;case D3DBLEND_INVSRCALPHA:return D3D11_BLEND_INV_SRC_ALPHA;case D3DBLEND_DESTALPHA:return D3D11_BLEND_DEST_ALPHA;case D3DBLEND_INVDESTALPHA:return D3D11_BLEND_INV_DEST_ALPHA;case D3DBLEND_DESTCOLOR:return D3D11_BLEND_DEST_COLOR;case D3DBLEND_INVDESTCOLOR:return D3D11_BLEND_INV_DEST_COLOR;default:return D3D11_BLEND_ONE;}}
 D3D11_TEXTURE_ADDRESS_MODE address(DWORD a){return a==D3DTADDRESS_CLAMP?D3D11_TEXTURE_ADDRESS_CLAMP:a==D3DTADDRESS_MIRROR?D3D11_TEXTURE_ADDRESS_MIRROR:D3D11_TEXTURE_ADDRESS_WRAP;}
 bool perf_enabled(){static const bool enabled=[](){char value[8]{};return GetEnvironmentVariableA("EI_RENDERER_PERF_LOG",value,sizeof(value))&&value[0]=='1';}();return enabled;}
 bool placed_hitch_profile_enabled(){static const bool enabled=[](){char value[8]{};return GetEnvironmentVariableA("EI_RENDERER_OUTER_FRAME_GAP_PROFILE",value,sizeof(value))&&value[0]=='1';}();return enabled;}

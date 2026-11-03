@@ -41,7 +41,6 @@
 #include "retained_static_scene.h"
 #include "widescreen.h"
 #include "test_harness.h"
-#include "x64_remote_device.h"
 #include "x64_remote_link.h"
 #include "dlss_frame.h"
 #include "stall_watchdog.h"
@@ -91,6 +90,32 @@ static UINT native_fast_combiner_mode(DWORD op,DWORD arg1,DWORD arg2) noexcept{
 }
 }  // namespace
 
+bool Renderer::ui_clip_rect(const widescreen::HudComposition& hud,const camp::Clip& clip,RECT& rectangle) const noexcept{
+ if(!clip.enabled&&!hud.clip_native_screen)return false;
+ // Both contracts describe native-canvas pixels. Their intersection keeps
+ // framed camp previews inside their cells and HUD apertures intact.
+ camp::Rect bounds{0.f,0.f,float(canvas_width()),float(canvas_height())};
+ if(hud.clip_native_screen){
+  if(hud.clip_right>=0.f)bounds={hud.clip_left,hud.clip_top,hud.clip_right,hud.clip_bottom};
+  else bounds={widescreen::compose_x(0.f,hud),widescreen::compose_y(0.f,hud),
+               widescreen::compose_x(float(canvas_width()),hud),widescreen::compose_y(float(canvas_height()),hud)};
+ }
+ if(clip.enabled){
+  bounds.left=(std::max)(bounds.left,clip.bounds.left);bounds.top=(std::max)(bounds.top,clip.bounds.top);
+  bounds.right=(std::max)(bounds.left,(std::min)(bounds.right,clip.bounds.right));
+  bounds.bottom=(std::max)(bounds.top,(std::min)(bounds.bottom,clip.bounds.bottom));
+ }
+ const float sx=float(target_width())/float(canvas_width()),sy=float(target_height())/float(canvas_height());
+ const auto x=[&](float value){return (std::max)(0.f,(std::min)(float(target_width()),value*sx));};
+ const auto y=[&](float value){return (std::max)(0.f,(std::min)(float(target_height()),value*sy));};
+ // An empty clip stays empty: rounding a zero-width clip outward left a
+ // one-pixel column of a collapsed panel's body (#186).
+ const bool empty=bounds.right<=bounds.left || bounds.bottom<=bounds.top;
+ rectangle=empty?RECT{0,0,0,0}:RECT{LONG(std::floor(x(bounds.left))),LONG(std::floor(y(bounds.top))),
+  LONG(std::ceil(x(bounds.right))),LONG(std::ceil(y(bounds.bottom)))};
+ return true;
+}
+
 HRESULT Renderer::apply_state(const FixedState& s,bool,const widescreen::HudComposition& hud,const camp::Clip& clip){
  restore_camp_clip();
  context_->RSSetScissorRects(0,nullptr);
@@ -100,13 +125,7 @@ HRESULT Renderer::apply_state(const FixedState& s,bool,const widescreen::HudComp
  const std::uint64_t rasterKey=(wireframe?4u:0u)|(cm==D3DCULL_NONE?0u:cm==D3DCULL_CW?1u:2u);
  const auto create_raster=[&](bool scissor,ComPtr<ID3D11RasterizerState>& rs){
   if(rs)return S_OK;
-  D3D11_RASTERIZER_DESC rd{};
-  rd.FillMode=wireframe?D3D11_FILL_WIREFRAME:D3D11_FILL_SOLID;
-  rd.CullMode=cm==D3DCULL_NONE?D3D11_CULL_NONE:D3D11_CULL_BACK;
-  // D3D7 names the winding that is rejected. D3D11 names which winding is
-  // front-facing and then rejects the back face, so the mapping is inverse:
-  // CULL_CW => CCW is front; CULL_CCW => CW is front.
-  rd.FrontCounterClockwise=cm==D3DCULL_CW;rd.DepthClipEnable=TRUE;rd.ScissorEnable=scissor;
+  const D3D11_RASTERIZER_DESC rd=owned::fixed_raster_desc(cm,wireframe,scissor);
   const HRESULT hr=device_->CreateRasterizerState(&rd,&rs);
   if(FAILED(hr)&&clip.enabled&&!camp_raster_failure_reported_){
    camp_raster_failure_reported_=true;
@@ -118,46 +137,21 @@ HRESULT Renderer::apply_state(const FixedState& s,bool,const widescreen::HudComp
  auto& unclipped=raster_states_[rasterKey];
  HRESULT hr=create_raster(false,unclipped);if(FAILED(hr)){context_->RSSetState(nullptr);return hr;}
  context_->RSSetState(unclipped.Get());
-  if(clip.enabled||hud.clip_native_screen){
+  RECT rectangle{};
+  if(ui_clip_rect(hud,clip,rectangle)){
    auto& clipped=raster_states_[rasterKey|8u];
    if(FAILED(hr=create_raster(true,clipped)))return hr;
-   // Both contracts describe native-canvas pixels. Their intersection keeps
-   // framed camp previews inside their cells and HUD apertures intact.
-   camp::Rect bounds{0.f,0.f,float(canvas_width()),float(canvas_height())};
-   if(hud.clip_native_screen){
-    if(hud.clip_right>=0.f)bounds={hud.clip_left,hud.clip_top,hud.clip_right,hud.clip_bottom};
-    else bounds={widescreen::compose_x(0.f,hud),widescreen::compose_y(0.f,hud),
-                 widescreen::compose_x(float(canvas_width()),hud),widescreen::compose_y(float(canvas_height()),hud)};
-   }
-   if(clip.enabled){
-    bounds.left=(std::max)(bounds.left,clip.bounds.left);bounds.top=(std::max)(bounds.top,clip.bounds.top);
-    bounds.right=(std::max)(bounds.left,(std::min)(bounds.right,clip.bounds.right));
-    bounds.bottom=(std::max)(bounds.top,(std::min)(bounds.bottom,clip.bounds.bottom));
-   }
-   const float sx=float(target_width())/float(canvas_width()),sy=float(target_height())/float(canvas_height());
-   const auto x=[&](float value){return (std::max)(0.f,(std::min)(float(target_width()),value*sx));};
-   const auto y=[&](float value){return (std::max)(0.f,(std::min)(float(target_height()),value*sy));};
-   // An empty clip stays empty: rounding a zero-width clip outward left a
-   // one-pixel column of a collapsed panel's body (#186).
-   const bool empty=bounds.right<=bounds.left || bounds.bottom<=bounds.top;
-   const RECT rectangle=empty?RECT{0,0,0,0}:RECT{LONG(std::floor(x(bounds.left))),LONG(std::floor(y(bounds.top))),
-    LONG(std::ceil(x(bounds.right))),LONG(std::ceil(y(bounds.bottom)))};
    camp_unclipped_raster_=unclipped.Get();
    context_->RSSetState(clipped.Get());context_->RSSetScissorRects(1,&rectangle);
  }
- const std::uint64_t depthKey=(std::uint64_t(s.render[D3DRENDERSTATE_ZENABLE])<<32)|(std::uint64_t(s.render[D3DRENDERSTATE_ZWRITEENABLE])<<16)|s.render[D3DRENDERSTATE_ZFUNC];auto& ds=depth_states_[depthKey];if(!ds){D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=s.render[D3DRENDERSTATE_ZENABLE]!=D3DZB_FALSE;dd.DepthWriteMask=s.render[D3DRENDERSTATE_ZWRITEENABLE]?D3D11_DEPTH_WRITE_MASK_ALL:D3D11_DEPTH_WRITE_MASK_ZERO;dd.DepthFunc=comparison(s.render[D3DRENDERSTATE_ZFUNC]);
+ const std::uint64_t depthKey=(std::uint64_t(s.render[D3DRENDERSTATE_ZENABLE])<<32)|(std::uint64_t(s.render[D3DRENDERSTATE_ZWRITEENABLE])<<16)|s.render[D3DRENDERSTATE_ZFUNC];auto& ds=depth_states_[depthKey];if(!ds){const D3D11_DEPTH_STENCIL_DESC dd=owned::fixed_depth_desc(s.render[D3DRENDERSTATE_ZENABLE],s.render[D3DRENDERSTATE_ZWRITEENABLE],s.render[D3DRENDERSTATE_ZFUNC]);
   // A failed state omits the draw (named once) instead of drawing with the D3D default.
   const HRESULT created=device_->CreateDepthStencilState(&dd,&ds);
   if(FAILED(created)){static bool reported=false;if(!reported){reported=true;bridge_append_probe_event("render_state_creation_failed","depth-stencil state creation failed; draws needing it are omitted");}return created;}}
  context_->OMSetDepthStencilState(ds.Get(),0);
  const bool faded=hud.opacity<1.f;
- const DWORD blend_enabled=faded?TRUE:s.render[D3DRENDERSTATE_ALPHABLENDENABLE];
- const DWORD source_blend=faded?D3DBLEND_SRCALPHA:s.render[D3DRENDERSTATE_SRCBLEND];
- const DWORD destination_blend=faded?D3DBLEND_INVSRCALPHA:s.render[D3DRENDERSTATE_DESTBLEND];
- const std::uint64_t blendKey=(std::uint64_t(blend_enabled)<<32)|(std::uint64_t(source_blend)<<16)|destination_blend;auto& bs=blend_states_[blendKey];if(!bs){D3D11_BLEND_DESC bd{};auto& rt=bd.RenderTarget[0];rt.RenderTargetWriteMask=D3D11_COLOR_WRITE_ENABLE_ALL;rt.BlendEnable=blend_enabled!=0;rt.SrcBlend=blend(source_blend);rt.DestBlend=blend(destination_blend);rt.BlendOp=D3D11_BLEND_OP_ADD;
-  // Preserve source alpha in the target. Reusing the RGB blend factors for
-  // alpha makes later legacy passes depend on an artificial destination alpha.
-  rt.SrcBlendAlpha=D3D11_BLEND_ONE;rt.DestBlendAlpha=D3D11_BLEND_ZERO;rt.BlendOpAlpha=D3D11_BLEND_OP_ADD;
+ const owned::FixedBlend choice=owned::fixed_blend_choice(s.render[D3DRENDERSTATE_ALPHABLENDENABLE],s.render[D3DRENDERSTATE_SRCBLEND],s.render[D3DRENDERSTATE_DESTBLEND],faded);
+ const std::uint64_t blendKey=(std::uint64_t(choice.enabled)<<32)|(std::uint64_t(choice.source)<<16)|choice.destination;auto& bs=blend_states_[blendKey];if(!bs){const D3D11_BLEND_DESC bd=owned::fixed_blend_desc(choice);
   const HRESULT created=device_->CreateBlendState(&bd,&bs);
   if(FAILED(created)){static bool reported=false;if(!reported){reported=true;bridge_append_probe_event("render_state_creation_failed","blend state creation failed; draws needing it are omitted");}return created;}}
  float factor[4]={1,1,1,1};context_->OMSetBlendState(bs.Get(),factor,0xffffffffu);
@@ -169,6 +163,7 @@ HRESULT Renderer::apply_state(const FixedState& s,bool,const widescreen::HudComp
  if(!sampler){const HRESULT hr=device_->CreateSamplerState(&sampling.description,&sampler);
   if(FAILED(hr))OutputDebugStringA("EID3D11 sampler creation failed\n");}
  context_->PSSetSamplers(0,1,sampler.GetAddressOf());
+ applied_sampler_=sampler.Get(); // a pass that swaps s0 for one draw puts this back (render_pending_blits)
  return S_OK;
 }
 
@@ -234,9 +229,9 @@ HRESULT Renderer::draw_fixed_function(D3DPRIMITIVETYPE type,std::vector<FixedFun
  const UINT vertexBytes=(UINT)(v.size()*sizeof(Vertex));
  if(!dynamic_vertices_||vertexBytes>dynamic_vertex_capacity_){dynamic_vertex_capacity_=std::max<UINT>(4u*1024u*1024u,vertexBytes);D3D11_BUFFER_DESC vd{};vd.ByteWidth=dynamic_vertex_capacity_;vd.Usage=D3D11_USAGE_DYNAMIC;vd.BindFlags=D3D11_BIND_VERTEX_BUFFER;vd.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;dynamic_vertices_.Reset();HRESULT createHr=device_->CreateBuffer(&vd,nullptr,&dynamic_vertices_);if(FAILED(createHr))return createHr;dynamic_vertex_offset_=0;discard_vertices_=true;}
  if(dynamic_vertex_offset_+vertexBytes>dynamic_vertex_capacity_){dynamic_vertex_offset_=0;discard_vertices_=true;}
- const UINT vertexOffset=dynamic_vertex_offset_;D3D11_MAPPED_SUBRESOURCE vertexMap{};x64remote::declare_map_range(context_.Get(),dynamic_vertices_.Get(),vertexOffset,vertexBytes);HRESULT hr=context_->Map(dynamic_vertices_.Get(),0,discard_vertices_?D3D11_MAP_WRITE_DISCARD:D3D11_MAP_WRITE_NO_OVERWRITE,0,&vertexMap);if(FAILED(hr))return hr;std::memcpy(static_cast<std::uint8_t*>(vertexMap.pData)+vertexOffset,v.data(),vertexBytes);context_->Unmap(dynamic_vertices_.Get(),0);dynamic_vertex_offset_=(vertexOffset+vertexBytes+15u)&~15u;discard_vertices_=false;
- UINT indexOffset=0;if(indices&&index_count){const UINT indexBytes=index_count*2;if(!dynamic_indices_||indexBytes>dynamic_index_capacity_){dynamic_index_capacity_=std::max<UINT>(1024u*1024u,indexBytes);D3D11_BUFFER_DESC id{};id.ByteWidth=dynamic_index_capacity_;id.Usage=D3D11_USAGE_DYNAMIC;id.BindFlags=D3D11_BIND_INDEX_BUFFER;id.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;dynamic_indices_.Reset();if(FAILED(hr=device_->CreateBuffer(&id,nullptr,&dynamic_indices_)))return hr;dynamic_index_offset_=0;discard_indices_=true;}if(dynamic_index_offset_+indexBytes>dynamic_index_capacity_){dynamic_index_offset_=0;discard_indices_=true;}indexOffset=dynamic_index_offset_;D3D11_MAPPED_SUBRESOURCE indexMap{};x64remote::declare_map_range(context_.Get(),dynamic_indices_.Get(),indexOffset,indexBytes);if(FAILED(hr=context_->Map(dynamic_indices_.Get(),0,discard_indices_?D3D11_MAP_WRITE_DISCARD:D3D11_MAP_WRITE_NO_OVERWRITE,0,&indexMap)))return hr;std::memcpy(static_cast<std::uint8_t*>(indexMap.pData)+indexOffset,indices,indexBytes);context_->Unmap(dynamic_indices_.Get(),0);dynamic_index_offset_=(indexOffset+indexBytes+3u)&~3u;discard_indices_=false;}
- Constants c{};c.hud_opacity=hud_composition.opacity;c.world=st.transform[D3DTRANSFORMSTATE_WORLD];c.view=st.transform[D3DTRANSFORMSTATE_VIEW];c.projection=st.transform[D3DTRANSFORMSTATE_PROJECTION];if(!tl&&camp::composing&&camp::primary_output)camp::compose_clip(&c.projection._11,camp::visual,float(canvas_width()),float(canvas_height()),true);c.viewport[0]=(float)st.viewport.dwX;c.viewport[1]=(float)st.viewport.dwY;c.viewport[2]=(float)std::max<DWORD>(1,st.viewport.dwWidth);c.viewport[3]=(float)std::max<DWORD>(1,st.viewport.dwHeight);
+ const UINT vertexOffset=dynamic_vertex_offset_;D3D11_MAPPED_SUBRESOURCE vertexMap{};HRESULT hr=context_->Map(dynamic_vertices_.Get(),0,discard_vertices_?D3D11_MAP_WRITE_DISCARD:D3D11_MAP_WRITE_NO_OVERWRITE,0,&vertexMap);if(FAILED(hr))return hr;std::memcpy(static_cast<std::uint8_t*>(vertexMap.pData)+vertexOffset,v.data(),vertexBytes);context_->Unmap(dynamic_vertices_.Get(),0);dynamic_vertex_offset_=(vertexOffset+vertexBytes+15u)&~15u;discard_vertices_=false;
+ UINT indexOffset=0;if(indices&&index_count){const UINT indexBytes=index_count*2;if(!dynamic_indices_||indexBytes>dynamic_index_capacity_){dynamic_index_capacity_=std::max<UINT>(1024u*1024u,indexBytes);D3D11_BUFFER_DESC id{};id.ByteWidth=dynamic_index_capacity_;id.Usage=D3D11_USAGE_DYNAMIC;id.BindFlags=D3D11_BIND_INDEX_BUFFER;id.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;dynamic_indices_.Reset();if(FAILED(hr=device_->CreateBuffer(&id,nullptr,&dynamic_indices_)))return hr;dynamic_index_offset_=0;discard_indices_=true;}if(dynamic_index_offset_+indexBytes>dynamic_index_capacity_){dynamic_index_offset_=0;discard_indices_=true;}indexOffset=dynamic_index_offset_;D3D11_MAPPED_SUBRESOURCE indexMap{};if(FAILED(hr=context_->Map(dynamic_indices_.Get(),0,discard_indices_?D3D11_MAP_WRITE_DISCARD:D3D11_MAP_WRITE_NO_OVERWRITE,0,&indexMap)))return hr;std::memcpy(static_cast<std::uint8_t*>(indexMap.pData)+indexOffset,indices,indexBytes);context_->Unmap(dynamic_indices_.Get(),0);dynamic_index_offset_=(indexOffset+indexBytes+3u)&~3u;discard_indices_=false;}
+ Constants c{};c.hud_opacity=hud_composition.opacity;c.combiner_padding=hit_test_active_?1u:0u;c.world=st.transform[D3DTRANSFORMSTATE_WORLD];c.view=st.transform[D3DTRANSFORMSTATE_VIEW];c.projection=st.transform[D3DTRANSFORMSTATE_PROJECTION];if(!tl&&camp::composing&&camp::primary_output)camp::compose_clip(&c.projection._11,camp::visual,float(canvas_width()),float(canvas_height()),true);c.viewport[0]=(float)st.viewport.dwX;c.viewport[1]=(float)st.viewport.dwY;c.viewport[2]=(float)std::max<DWORD>(1,st.viewport.dwWidth);c.viewport[3]=(float)std::max<DWORD>(1,st.viewport.dwHeight);
  // The upscaler jitter (jitter_clip): untransformed vertices through the
  // projection (row vectors: columns x and y take dx, dy times column w),
  // pre-transformed ones through their pixel-to-NDC mapping.
@@ -255,6 +250,7 @@ HRESULT Renderer::draw_fixed_function(D3DPRIMITIVETYPE type,std::vector<FixedFun
 // The pipeline objects are made on the first particle call or by the load
 // hold's pipeline warm-up (renderer_warmup.cpp), whichever comes first.
 HRESULT Renderer::ensure_game_particle_pipeline(){
+ if(d3d12_)return S_OK; // D3D12 backend: the executor builds the same programs' pipelines
  if(game_particle_vs_&&game_particle_ps_&&game_particle_constants_&&game_ribbon_vs_&&game_selection_vs_&&game_mesh_vs_&&game_glyph_vs_)return S_OK;
  if(game_particle_pipeline_failed_||feature_level_<D3D_FEATURE_LEVEL_11_0)return E_FAIL;
  game_particle_pipeline_failed_=true;
@@ -311,9 +307,36 @@ HRESULT Renderer::draw_game_particles(const GameParticleView& view,const FixedSt
  }
  GameEffectDraw draw{};draw.object_to_clip=view.object_to_clip.data();
  draw.clip_half_width=view.clip_half_width;draw.clip_half_height=view.clip_half_height;
- draw.element_count=count;draw.vertex_count=count*6u;draw.vertex_shader=game_particle_vs_.Get();
+ draw.element_count=count;draw.vertex_count=count*6u;draw.vertex_shader=game_particle_vs_.Get();draw.vertex_program=WorldSupportShader::game_particle_vs;
  draw.fog=true;draw.reflection_depth=true;draw.profile_pass="owned_game_particles";
  return draw_game_effect(draw,st,texture);
+}
+
+void Renderer::game_effect_constants(const GameEffectDraw& draw,const FixedState& st,bool textured,GameParticleConstants& c) noexcept{
+ c={};
+ std::memcpy(c.object_to_clip,draw.object_to_clip,sizeof(c.object_to_clip));
+ jitter_clip(c.object_to_clip);
+ c.clip_half[0]=draw.clip_half_width;c.clip_half[1]=draw.clip_half_height;c.clip_half[2]=widescreen::interface_owned?widescreen::make_layout((float)output_width_,(float)output_height_).clip_x:1.0f;
+ c.viewport[0]=(float)st.viewport.dwX;c.viewport[1]=(float)st.viewport.dwY;
+ c.viewport[2]=(float)std::max<DWORD>(1,st.viewport.dwWidth);c.viewport[3]=(float)std::max<DWORD>(1,st.viewport.dwHeight);
+ const DWORD fog=st.render[D3DRENDERSTATE_FOGCOLOR],tf=st.render[D3DRENDERSTATE_TEXTUREFACTOR];
+ c.fog_color[0]=((fog>>16)&255)/255.f;c.fog_color[1]=((fog>>8)&255)/255.f;c.fog_color[2]=(fog&255)/255.f;c.fog_color[3]=1;
+ c.texture_factor[0]=((tf>>16)&255)/255.f;c.texture_factor[1]=((tf>>8)&255)/255.f;c.texture_factor[2]=(tf&255)/255.f;c.texture_factor[3]=((tf>>24)&255)/255.f;
+ c.color_op=st.stage[0][D3DTSS_COLOROP];c.alpha_op=st.stage[0][D3DTSS_ALPHAOP];
+ c.color_arg1=st.stage[0][D3DTSS_COLORARG1];c.color_arg2=st.stage[0][D3DTSS_COLORARG2];
+ c.alpha_arg1=st.stage[0][D3DTSS_ALPHAARG1];c.alpha_arg2=st.stage[0][D3DTSS_ALPHAARG2];
+ c.alpha_test=st.render[D3DRENDERSTATE_ALPHATESTENABLE]!=0;c.alpha_func=st.render[D3DRENDERSTATE_ALPHAFUNC];
+ c.alpha_ref=(st.render[D3DRENDERSTATE_ALPHAREF]&255)/256.f;c.textured=textured;c.first=0;c.count=draw.ribbon_points;
+ // World fog as on world surfaces, only for world particles with fog on.
+ // Additive light is attenuated; modulating blends have no neutral to fog.
+ const DWORD source=st.render[D3DRENDERSTATE_SRCBLEND],destination=st.render[D3DRENDERSTATE_DESTBLEND];
+ const bool blended=st.render[D3DRENDERSTATE_ALPHABLENDENABLE]!=0;
+ c.fog_mode=!draw.fog||scene_composited_||st.render[D3DRENDERSTATE_FOGENABLE]==0?0u:
+  blended&&destination==D3DBLEND_ONE?2u:
+  blended&&(source==D3DBLEND_ZERO||source==D3DBLEND_DESTCOLOR)?0u:1u;
+ // Reflection depth coverage; modulating blends (darkening) stay out (3).
+ const bool modulating=blended&&(source==D3DBLEND_ZERO||source==D3DBLEND_DESTCOLOR);
+ c.coverage_mode=modulating?3u:!blended||destination!=D3DBLEND_ONE?0u:source==D3DBLEND_SRCALPHA?1u:2u;
 }
 
 // Shared tail of the game effect draws (particles, lightning ribbons): uploads
@@ -322,6 +345,7 @@ HRESULT Renderer::draw_game_particles(const GameParticleView& view,const FixedSt
 HRESULT Renderer::draw_game_effect(const GameEffectDraw& draw,const FixedState& st,SurfaceImage* texture){
  const UINT count=draw.element_count;
  if(!count||game_effect_elements_.size()<count)return E_INVALIDARG;
+ if(d3d12_)return draw_game_effect_d3d12(draw,st,texture);
  HRESULT hr=S_OK;
  if(!game_particle_buffer_||count>game_particle_capacity_){
   // Sized by demand; one discard-mapped buffer per call keeps earlier draws intact.
@@ -344,30 +368,9 @@ HRESULT Renderer::draw_game_effect(const GameEffectDraw& draw,const FixedState& 
  std::memcpy(mapped.pData,game_effect_elements_.data(),bytes);
  context_->Unmap(game_particle_buffer_.Get(),0);
  profiler_.add_upload(bytes);
- GameParticleConstants c{};
- std::memcpy(c.object_to_clip,draw.object_to_clip,sizeof(c.object_to_clip));
- jitter_clip(c.object_to_clip);
- c.clip_half[0]=draw.clip_half_width;c.clip_half[1]=draw.clip_half_height;c.clip_half[2]=widescreen::interface_owned?widescreen::make_layout((float)output_width_,(float)output_height_).clip_x:1.0f;
- c.viewport[0]=(float)st.viewport.dwX;c.viewport[1]=(float)st.viewport.dwY;
- c.viewport[2]=(float)std::max<DWORD>(1,st.viewport.dwWidth);c.viewport[3]=(float)std::max<DWORD>(1,st.viewport.dwHeight);
- const DWORD fog=st.render[D3DRENDERSTATE_FOGCOLOR],tf=st.render[D3DRENDERSTATE_TEXTUREFACTOR];
- c.fog_color[0]=((fog>>16)&255)/255.f;c.fog_color[1]=((fog>>8)&255)/255.f;c.fog_color[2]=(fog&255)/255.f;c.fog_color[3]=1;
- c.texture_factor[0]=((tf>>16)&255)/255.f;c.texture_factor[1]=((tf>>8)&255)/255.f;c.texture_factor[2]=(tf&255)/255.f;c.texture_factor[3]=((tf>>24)&255)/255.f;
- c.color_op=st.stage[0][D3DTSS_COLOROP];c.alpha_op=st.stage[0][D3DTSS_ALPHAOP];
- c.color_arg1=st.stage[0][D3DTSS_COLORARG1];c.color_arg2=st.stage[0][D3DTSS_COLORARG2];
- c.alpha_arg1=st.stage[0][D3DTSS_ALPHAARG1];c.alpha_arg2=st.stage[0][D3DTSS_ALPHAARG2];
- c.alpha_test=st.render[D3DRENDERSTATE_ALPHATESTENABLE]!=0;c.alpha_func=st.render[D3DRENDERSTATE_ALPHAFUNC];
- c.alpha_ref=(st.render[D3DRENDERSTATE_ALPHAREF]&255)/256.f;c.textured=texture!=nullptr;c.first=0;c.count=draw.ribbon_points;
- // World fog as on world surfaces, only for world particles with fog on.
- // Additive light is attenuated; modulating blends have no neutral to fog.
+ GameParticleConstants c{};game_effect_constants(draw,st,texture!=nullptr,c);
  const DWORD source=st.render[D3DRENDERSTATE_SRCBLEND],destination=st.render[D3DRENDERSTATE_DESTBLEND];
  const bool blended=st.render[D3DRENDERSTATE_ALPHABLENDENABLE]!=0;
- c.fog_mode=!draw.fog||scene_composited_||st.render[D3DRENDERSTATE_FOGENABLE]==0?0u:
-  blended&&destination==D3DBLEND_ONE?2u:
-  blended&&(source==D3DBLEND_ZERO||source==D3DBLEND_DESTCOLOR)?0u:1u;
- // Reflection depth coverage; modulating blends (darkening) stay out (3).
- const bool modulating=blended&&(source==D3DBLEND_ZERO||source==D3DBLEND_DESTCOLOR);
- c.coverage_mode=modulating?3u:!blended||destination!=D3DBLEND_ONE?0u:source==D3DBLEND_SRCALPHA?1u:2u;
  if(FAILED(hr=context_->Map(game_particle_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return hr;
  std::memcpy(mapped.pData,&c,sizeof(c));context_->Unmap(game_particle_constants_.Get(),0);
  if(c.fog_mode&&FAILED(hr=bind_world_fog()))return hr;
@@ -383,11 +386,13 @@ HRESULT Renderer::draw_game_effect(const GameEffectDraw& draw,const FixedState& 
  context_->GSSetShader(nullptr,nullptr,0);context_->HSSetShader(nullptr,nullptr,0);context_->DSSetShader(nullptr,nullptr,0);
  context_->VSSetConstantBuffers(0,1,game_particle_constants_.GetAddressOf());context_->PSSetConstantBuffers(0,1,game_particle_constants_.GetAddressOf());
  D3D11_VIEWPORT viewport=target_viewport();context_->RSSetViewports(1,&viewport);
- // Additive world particles are light: they also feed the bloom glow
- // target (cleared on first use each frame), so fire and magic bloom even
- // where the scene colour stays below the non-emissive ceiling.
+ // Blended world particles also feed the bloom glow target (cleared on
+ // first use each frame): additive ones are light (magic), alpha-blended
+ // ones by their flame key (game_particles.h: torch and campfire flames are
+ // alpha-blended), so fire and magic bloom though the scene colour stays
+ // below the non-emissive ceiling. Modulating blends only darken.
  ID3D11RenderTargetView* targets[2]={rtv_.Get(),nullptr};
- if(!scene_composited_&&blended&&destination==D3DBLEND_ONE&&configured_integer(debug_overlay_.config(),"bloom",0)>0){
+ if(!scene_composited_&&blended&&c.coverage_mode!=3u&&configured_integer(debug_overlay_.config(),"bloom",0)>0){
   if(!glow_||glow_width_!=width_||glow_height_!=height_){
    glow_.Reset();glow_rtv_.Reset();glow_srv_.Reset();glow_width_=width_;glow_height_=height_;
    D3D11_TEXTURE2D_DESC d{};d.Width=width_;d.Height=height_;d.MipLevels=d.ArraySize=d.SampleDesc.Count=1;
@@ -525,7 +530,7 @@ HRESULT Renderer::draw_game_ribbon(const GameRibbonView& view,const FixedState& 
  draw.clip_half_width=view.clip_half_width;draw.clip_half_height=view.clip_half_height;
  draw.element_count=view.count;draw.vertex_count=(view.count-1u)*6u;draw.ribbon_points=view.count;
  // Stock specular alpha 255: bolts are emissive and read through fog unfogged.
- draw.vertex_shader=game_ribbon_vs_.Get();draw.fog=false;draw.reflection_depth=true;draw.profile_pass="owned_game_lightning";
+ draw.vertex_shader=game_ribbon_vs_.Get();draw.vertex_program=WorldSupportShader::game_ribbon_vs;draw.fog=false;draw.reflection_depth=true;draw.profile_pass="owned_game_lightning";
  return draw_game_effect(draw,st,texture);
 }
 
@@ -552,7 +557,7 @@ HRESULT Renderer::draw_game_selection_held(const GameSelectionView& view,const F
  game_selection_gpu(view.marker,game_effect_elements_[0]);
  GameEffectDraw draw{};draw.object_to_clip=view.object_to_clip.data();
  draw.clip_half_width=view.clip_half_width;draw.clip_half_height=view.clip_half_height;
- draw.element_count=1;draw.vertex_count=18;draw.vertex_shader=game_selection_vs_.Get();
+ draw.element_count=1;draw.vertex_count=18;draw.vertex_shader=game_selection_vs_.Get();draw.vertex_program=WorldSupportShader::game_selection_vs;
  // Stock specular alpha 255: the marker is never fogged; a ground indicator,
  // it stays out of water reflections.
  draw.fog=false;draw.reflection_depth=false;draw.profile_pass="owned_game_selection";
@@ -575,7 +580,7 @@ HRESULT Renderer::draw_game_glyphs(const GameGlyphView& view,const FixedState& s
  try{game_effect_elements_.assign(view.glyphs,view.glyphs+view.count);}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
  static const float identity[16]={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
  GameEffectDraw draw{};draw.object_to_clip=identity;draw.clip_half_width=draw.clip_half_height=1;
- draw.element_count=view.count;draw.vertex_count=view.count*6u;draw.vertex_shader=game_glyph_vs_.Get();
+ draw.element_count=view.count;draw.vertex_count=view.count*6u;draw.vertex_shader=game_glyph_vs_.Get();draw.vertex_program=WorldSupportShader::game_glyph_vs;
  // Stock: fog off around the call, specular alpha 255; screen text has no reflection.
  draw.fog=false;draw.reflection_depth=false;draw.profile_pass="owned_combat_text";
  return draw_game_effect(draw,st,texture);
@@ -612,7 +617,7 @@ HRESULT Renderer::draw_game_print_run_held(std::vector<GameParticleGpu> vertices
  GameEffectDraw draw{};draw.object_to_clip=object_to_clip.data();
  draw.clip_half_width=clip_half_width;draw.clip_half_height=clip_half_height;
  const UINT count=static_cast<UINT>(game_effect_elements_.size());
- draw.element_count=count;draw.vertex_count=count;draw.vertex_shader=game_mesh_vs_.Get();
+ draw.element_count=count;draw.vertex_count=count;draw.vertex_shader=game_mesh_vs_.Get();draw.vertex_program=WorldSupportShader::game_mesh_vs;
  // Ground marks fog like the terrain under them; they stay out of reflections.
  draw.fog=true;draw.reflection_depth=false;draw.profile_pass="owned_game_prints";
  return draw_game_effect(draw,st,texture.get());
@@ -705,6 +710,45 @@ void Renderer::bind_draw_constants() noexcept{
  ID3D11Buffer* own=constants_.Get();context_->VSSetConstantBuffers(0,1,&own);context_->PSSetConstantBuffers(0,1,&own);
 }
 
+// A native batch's b0 constants and its contact views (t13-t16), for both
+// executors (the D3D11 flush and flush_native_d3d12).
+void Renderer::native_batch_constants(const NativeBatch& batch,const NativeQueuedDraw& draw,const NativeStateBucket& bucket,
+ ID3D11ShaderResourceView* (&contact_views)[4],bool neighbour_terrain_blend,bool neighbour_fog_skip,bool shadow_coverage,void* output){
+   const bool active_contact=!scene_composited_&&gc_drawn_frame_==native_frame_index_&&gc_map_generation_==ambient_map_generation_;
+   const bool active_art=!scene_composited_&&((contact_maps_.tiles&&contact_maps_.atlas)||(contact_maps_.tiles12&&contact_maps_.atlas12))&&
+    contact_map_generation_==ambient_map_generation_&&contact_constants_generation_==contact_map_generation_;
+   ID3D11ShaderResourceView* views[4]{active_contact?ambient_ground_srv_.Get():nullptr,
+    active_contact?gc_color_srv_.Get():nullptr,active_art?contact_maps_.tiles.Get():nullptr,active_art?contact_maps_.atlas.Get():nullptr};
+   std::array<float,4> contact_origin{0,0,0,1};
+   std::array<float,2> layout_origin=terrain_layout_origin_;
+   std::uint64_t contact_ready=active_art?contact_maps_.ready:0;
+   if(bucket.material_key.contact_map){
+    std::fill(std::begin(views),std::end(views),nullptr);contact_ready=0;layout_origin={0,0};
+    for(const auto& n:gc_neighbours_)if(n.contact_map==bucket.material_key.contact_map){
+     if(n.prepared){views[0]=n.ground.Get();views[1]=n.color.Get();}
+     views[2]=n.contact.tiles.Get();views[3]=n.contact.atlas.Get();
+     contact_origin={n.origin[0],n.origin[1],n.origin[2],0};layout_origin=n.layout_origin;contact_ready=n.contact.ready;break;
+    }
+    // Temporary cost switch: neighbour terrain without its grid and atlas.
+    if(bucket.semantic_kind==SemanticKind::terrain&&!neighbour_terrain_blend){views[2]=views[3]=nullptr;contact_ready=0;}
+   }
+   Constants constants{};constants.hud_opacity=draw.hud_composition.opacity;identity(constants.world);identity(constants.view);identity(constants.projection);const auto& st=bucket.state;constants.viewport[0]=(float)st.viewport.dwX;constants.viewport[1]=(float)st.viewport.dwY;constants.viewport[2]=(float)std::max<DWORD>(1,st.viewport.dwWidth);constants.viewport[3]=(float)std::max<DWORD>(1,st.viewport.dwHeight);const auto& fog_state=native_static_frame_?*native_static_frame_:st;DWORD fog=fog_state.render[D3DRENDERSTATE_FOGCOLOR],tf=st.render[D3DRENDERSTATE_TEXTUREFACTOR];constants.fog_color[0]=((fog>>16)&255)/255.f;constants.fog_color[1]=((fog>>8)&255)/255.f;constants.fog_color[2]=(fog&255)/255.f;constants.fog_color[3]=1;constants.texture_factor[0]=((tf>>16)&255)/255.f;constants.texture_factor[1]=((tf>>8)&255)/255.f;constants.texture_factor[2]=(tf&255)/255.f;constants.texture_factor[3]=((tf>>24)&255)/255.f;constants.transformed=0;constants.textured=bucket.texture_srv||bucket.texture_d3d12?1u:0u;constants.color_op=st.stage[0][D3DTSS_COLOROP];constants.alpha_op=st.stage[0][D3DTSS_ALPHAOP];constants.color_arg1=st.stage[0][D3DTSS_COLORARG1];constants.color_arg2=st.stage[0][D3DTSS_COLORARG2];constants.alpha_arg1=st.stage[0][D3DTSS_ALPHAARG1];constants.alpha_arg2=st.stage[0][D3DTSS_ALPHAARG2];constants.alpha_test=st.render[D3DRENDERSTATE_ALPHATESTENABLE]!=0;constants.alpha_func=st.render[D3DRENDERSTATE_ALPHAFUNC];constants.alpha_ref=(st.render[D3DRENDERSTATE_ALPHAREF]&255)/256.f;constants.fog_enable=!scene_composited_&&fog_state.render[D3DRENDERSTATE_FOGENABLE]!=0;constants.specular_enable=native_specular_addition_enabled(st.render[D3DRENDERSTATE_SPECULARENABLE]);constants.native_triangle_base=batch.output_triangle_base;constants.padding[0]=shadow_coverage?1u:0u;constants.padding[1]=bucket.opacity!=NativeOpacityClass::ordered?1u:0u;constants.liquid_layer=0;constants.combiner_padding=hit_test_active_?1u:0u;constants.combiner[0]=native_fast_combiner_mode(constants.color_op,constants.color_arg1,constants.color_arg2);constants.combiner[1]=native_fast_combiner_mode(constants.alpha_op,constants.alpha_arg1,constants.alpha_arg2);
+   std::copy(contact_origin.begin(),contact_origin.end(),constants.contact_origin);
+   constants.layout_origin[0]=layout_origin[0];constants.layout_origin[1]=layout_origin[1];
+   // Terrain 2.0: the batch map's table entry + 1 (update_terrain2_table; 0 none).
+   if(bucket.semantic_kind==SemanticKind::terrain&&!scene_composited_)
+    for(unsigned k=0;k<terrain2_table_count_;++k)if(terrain2_table_[k]==bucket.material_key.contact_map){constants.layout_origin[3]=float(k+1);break;}
+   constants.contact_padding=neighbour_fog_skip?0u:1u; // temporary A/B switch (nativeContactTail)
+   // Material classes: bit 1 of nativeCombinerTail while the profile is bound at t37.
+   if(material_profile_bound(bucket.material_key.texture_backing))constants.combiner_padding|=2u;
+   // Bit 2: an interface flush (after the world composite): its records sit in their
+   // own space, so the pixel stage takes no world camera, weather or receiver terms.
+   if(scene_composited_)constants.combiner_padding|=4u;
+   constants.contact_materials[0]=static_cast<UINT>(contact_ready);constants.contact_materials[1]=static_cast<UINT>(contact_ready>>32);
+  std::copy(std::begin(views),std::end(views),contact_views);
+  *static_cast<Constants*>(output)=constants;
+}
+
 HRESULT Renderer::flush_native(unsigned layout_slot){
  PERF06_SCOPE("batch_flush");
 #ifdef EID3D11_EMBEDDED
@@ -712,6 +756,21 @@ HRESULT Renderer::flush_native(unsigned layout_slot){
 #endif
 
  if(scene_queue()){scene_native_pending_=false;scene_cmd::FlushNative command;command.layout_slot=layout_slot;scene_post_command(command);return S_OK;}
+ // The invariant check: an interface record (owned HUD mesh, preview) drawn
+ // in a world flush takes the world's fog, atmosphere and targets (black at
+ // night). Named once per session with that flush's count.
+ if(!scene_composited_&&!hit_test_active_&&!native_shadow_collecting_){
+  std::size_t interface_records=0;
+  for(const auto& selected:native_pending_draws_)interface_records+=selected.interface_record?1u:0u;
+  if(interface_records){
+   static bool reported=false;
+   if(!reported){reported=true;char detail[96];std::snprintf(detail,sizeof(detail),"%zu of %zu records",interface_records,native_pending_draws_.size());
+    bridge_append_probe_event("interface_record_in_world_flush",detail);}
+   if(d3d12_)d3d12_->count("interface records drawn in a world flush (invariant violated)");
+  }
+ }
+ if(d3d12_)return flush_native_d3d12(layout_slot); // the native records on the D3D12 executor (interface batches)
+
  const stall_watch::Bracket stall_bracket("flush_native");
  CampClipScope clip_scope{*this};
  auto* color=active_color_resource_;
@@ -730,17 +789,27 @@ HRESULT Renderer::flush_native(unsigned layout_slot){
  const bool static_reuse=native_static_reuse_,static_bake=native_static_bake_;
  native_static_reuse_=native_static_bake_=false;
  if(native_pending_draws_.empty()&&!static_reuse){discard_native();return S_OK;}
- ComPtr<ID3D11SamplerState> previous_point_sampler;
- if(context_)context_->PSGetSamplers(2,1,previous_point_sampler.GetAddressOf());
+ // Material classes: profiles of newly composed atlases, before any batch binds one.
+ prepare_material_profiles();
+ const bool materials_on=material_level()>0;
+ // Every native batch reads the frame values (t127; material level, view and
+ // switches). Only the terrain base uploads and binds them: a frame
+ // without terrain (the equipment and trade screens' previews) relied on
+ // an earlier binding. The flush binds the latest values itself.
+ if(!d3d12_&&native_terrain_frame_srv_){
+  ID3D11ShaderResourceView* frame=native_terrain_frame_srv_.Get();
+  context_->VSSetShaderResources(PointShadowTextureLayout::terrain_frame_srv,1,&frame);
+  context_->PSSetShaderResources(PointShadowTextureLayout::terrain_frame_srv,1,&frame);
+ }
   // Terrain batches bound to the cliff tessellation stages; finish unbinds them.
   bool tessellate_terrain=false,tessellation_bound=false;
-  auto finish=[&](HRESULT result){finish_samgbur_lod_capture(SUCCEEDED(result));flush_anisotropy_=-1;restore_camp_clip();clear_water_reflection_bindings();if(context_){
+  auto finish=[&](HRESULT result){flush_anisotropy_=-1;restore_camp_clip();clear_water_reflection_bindings();if(context_){
    context_->PSSetShader(native_ps_.Get(),nullptr,0); // terrain batches bind a terrain variant
    if(tessellation_bound){
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);context_->VSSetShader(native_vs_.Get(),nullptr,0);
     context_->HSSetShader(nullptr,nullptr,0);context_->DSSetShader(nullptr,nullptr,0);tessellation_bound=false;
    }
-ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);context_->HSSetShaderResources(8,1,empty);context_->DSSetShaderResources(8,1,empty);context_->VSSetShaderResources(36,1,empty);context_->CSSetShaderResources(10,5,empty);context_->VSSetShaderResources(10,1,empty);context_->VSSetShaderResources(12,2,empty);context_->CSSetShaderResources(15,2,empty);context_->CSSetShaderResources(17,1,empty);context_->PSSetShaderResources(18,2,empty);context_->PSSetShaderResources(13,4,empty);context_->PSSetShaderResources(1,2,empty);context_->PSSetShaderResources(4,2,empty);ID3D11SamplerState* restored_point_sampler=previous_point_sampler.Get();context_->PSSetSamplers(2,1,&restored_point_sampler);context_->PSSetShaderResources(20,2,empty);ID3D11SamplerState* empty_history_sampler=nullptr;context_->PSSetSamplers(3,1,&empty_history_sampler);context_->PSSetSamplers(4,1,&empty_history_sampler);context_->PSSetSamplers(10,1,&empty_history_sampler);ID3D11Buffer* empty_history_constants=nullptr;context_->PSSetConstantBuffers(6,1,&empty_history_constants);context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());ID3D11UnorderedAccessView* empty_uav=nullptr;context_->CSSetUnorderedAccessViews(6,1,&empty_uav,nullptr);ID3D11Buffer* empty_constant=nullptr;context_->CSSetConstantBuffers(4,1,&empty_constant);context_->PSSetConstantBuffers(5,1,&empty_constant);}discard_native();
+ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);context_->HSSetShaderResources(8,1,empty);context_->DSSetShaderResources(8,1,empty);context_->VSSetShaderResources(36,1,empty);context_->CSSetShaderResources(10,5,empty);context_->VSSetShaderResources(10,1,empty);context_->VSSetShaderResources(12,2,empty);context_->CSSetShaderResources(15,2,empty);context_->CSSetShaderResources(17,1,empty);context_->PSSetShaderResources(18,2,empty);context_->PSSetShaderResources(13,4,empty);context_->PSSetShaderResources(1,2,empty);context_->PSSetShaderResources(4,2,empty);ID3D11SamplerState* no_point_sampler=nullptr;context_->PSSetSamplers(2,1,&no_point_sampler);context_->PSSetShaderResources(20,2,empty);ID3D11SamplerState* empty_history_sampler=nullptr;context_->PSSetSamplers(3,1,&empty_history_sampler);context_->PSSetSamplers(4,1,&empty_history_sampler);context_->PSSetSamplers(10,1,&empty_history_sampler);ID3D11Buffer* empty_history_constants=nullptr;context_->PSSetConstantBuffers(6,1,&empty_history_constants);context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());ID3D11UnorderedAccessView* empty_uav=nullptr;context_->CSSetUnorderedAccessViews(6,1,&empty_uav,nullptr);ID3D11Buffer* empty_constant=nullptr;context_->CSSetConstantBuffers(4,1,&empty_constant);context_->PSSetConstantBuffers(5,1,&empty_constant);}discard_native();
 #ifdef EID3D11_EMBEDDED
  if(SUCCEEDED(result))native_flush_failure_line_=0;
 #endif
@@ -776,7 +845,6 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
   const bool bake_layout=static_set&&static_bake;
   if(bake_layout&&FAILED(hr=bake_native_static_layout(layout)))return native_flush_failure_line_=__LINE__,finish(hr);
  }
- begin_samgbur_lod_capture(layout);
  const UINT draw_count=static_cast<UINT>(layout.work.size()),triangle_count=layout.triangles,
   component_count=layout.components,batch_count=static_cast<UINT>(layout.batches.size()),
   args_slots=static_cast<UINT>(layout.arguments.size()/4u); // the batches' slots, then split batches' steep slots
@@ -841,18 +909,29 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
     upload_bytes+=entries*sizeof(UINT);
    }
   }
-  if(!native_point_light_constants_)return native_flush_failure_line_=__LINE__,finish(E_FAIL);
-  if(FAILED(hr=context_->Map(native_point_light_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return native_flush_failure_line_=__LINE__,finish(hr);
-  const auto& grid=native_point_light_grid_;
-  // An empty grid (no lights) selects no cell, so no pixel visits a light.
-  // glow: the emissive-surface lights (nativePointLightGlowCount); packed
-  // colour receivers walk the grid only for them.
-  struct{UINT count,width,height,glow;float origin[2],inverse_cell,tail;}values{
-   count,grid.width,grid.height,static_cast<UINT>(emissive_published_),{grid.origin[0],grid.origin[1]},grid.inverse_cell,0};
-  static_assert(sizeof(values)==32,"point-light constant layout");
-  std::memcpy(mapped.pData,&values,sizeof(values));
-  context_->Unmap(native_point_light_constants_.Get(),0);
-  upload_bytes+=sizeof(values);native_point_lights_dirty_=false;
+  native_point_lights_dirty_=false;native_point_constants_dirty_=true;
+ }
+ // Caves: the point lights' first bounce (cave_irradiance.h), from the
+ // lights just uploaded; re-injected only when its inputs changed. Its
+ // sampling constants are the tail of the point-light constants.
+ update_cave_irradiance();
+ {
+  const CaveSampleConstants cave=cave_sample_constants();
+  if(native_point_constants_dirty_||std::memcmp(&cave,&native_cave_constants_written_,sizeof(cave))!=0){
+   if(!native_point_light_constants_)return native_flush_failure_line_=__LINE__,finish(E_FAIL);
+   if(FAILED(hr=context_->Map(native_point_light_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return native_flush_failure_line_=__LINE__,finish(hr);
+   const auto& grid=native_point_light_grid_;
+   // An empty grid (no lights) selects no cell, so no pixel visits a light.
+   // glow: the emissive-surface lights (nativePointLightGlowCount); packed
+   // colour receivers walk the grid only for them.
+   struct{UINT count,width,height,glow;float origin[2],inverse_cell,tail;CaveSampleConstants cave;}values{
+    static_cast<UINT>(native_point_lights_.size()),grid.width,grid.height,static_cast<UINT>(emissive_published_),
+    {grid.origin[0],grid.origin[1]},grid.inverse_cell,0,cave};
+   static_assert(sizeof(values)==64,"point-light constant layout");
+   std::memcpy(mapped.pData,&values,sizeof(values));
+   context_->Unmap(native_point_light_constants_.Get(),0);
+   upload_bytes+=sizeof(values);native_point_constants_dirty_=false;native_cave_constants_written_=cave;
+  }
  }
 #ifdef EID3D11_TESTING
  if(test_native_flush_failure_==2){test_native_flush_failure_=0;return native_flush_failure_line_=__LINE__,finish(E_FAIL);}
@@ -884,18 +963,14 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
  context_->CSSetConstantBuffers(3,1,native_world_clip_constants_.GetAddressOf());
  {ID3D11ShaderResourceView* hiz=native_occlusion_active()?native_hiz_srv_.Get():nullptr;context_->CSSetShaderResources(26,1,&hiz);}
  ID3D11ShaderResourceView* compute_srvs[8]={nullptr,native_dynamic_srv_.Get(),nullptr,nullptr,native_draw_srv_.Get(),nullptr,nullptr,nullptr};context_->CSSetShader(native_build_cs_.Get(),nullptr,0);context_->CSSetConstantBuffers(1,1,native_world_lighting_constants_.GetAddressOf());ID3D11UnorderedAccessView* compute_uavs[4]={native_visible_triangle_uav_.Get(),native_indirect_args_uav_.Get(),native_prepared_vertex_uav_.Get(),native_world_vertex_uav_.Get()};context_->CSSetUnorderedAccessViews(0,4,compute_uavs,nullptr);
- ID3D11UnorderedAccessView* lod_probe=samgbur_lod_capture_?samgbur_lod_uav_.Get():nullptr;
- context_->CSSetUnorderedAccessViews(4,1,&lod_probe,nullptr);
  for(const auto& range:layout.dispatches){
   compute_srvs[0]=native_geometry_page_srv(range.geometry_page);if(!compute_srvs[0])return native_flush_failure_line_=__LINE__,finish(E_FAIL);
   context_->CSSetShaderResources(1,8,compute_srvs);
-  if(FAILED(hr=upload_native_work_range(range,samgbur_lod_capture_?samgbur_lod_record_:UINT_MAX,
-     samgbur_lod_capture_?samgbur_lod_meta_:0)))return native_flush_failure_line_=__LINE__,finish(hr);
+  if(FAILED(hr=upload_native_work_range(range)))return native_flush_failure_line_=__LINE__,finish(hr);
   UINT dispatch_width=0,dispatch_height=0;if(!native_dispatch_dimensions(range.count,dispatch_width,dispatch_height))return native_flush_failure_line_=__LINE__,finish(HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW));
   transition_profile_pass("compute_build");context_->Dispatch(dispatch_width,dispatch_height,1);++perf_native_compute_dispatches_;++native_frame_stats_.native_compute_dispatches;
  }
  context_->CSSetUnorderedAccessViews(0,4,null_uavs,nullptr);context_->CSSetShaderResources(1,8,null_srvs);ID3D11Buffer* null_constant=nullptr;context_->CSSetConstantBuffers(1,1,&null_constant);context_->CSSetConstantBuffers(4,1,&null_constant);context_->CSSetShader(nullptr,nullptr,0);
- finish_samgbur_lod_capture(true);
  const bool history_active=prepare_shadow_history();
  context_->IASetInputLayout(nullptr);context_->IASetVertexBuffers(0,0,nullptr,nullptr,nullptr);context_->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);context_->VSSetShader(native_vs_.Get(),nullptr,0);context_->PSSetShader(native_ps_.Get(),nullptr,0);bind_draw_constants();D3D11_VIEWPORT viewport=target_viewport();context_->RSSetViewports(1,&viewport);context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
  if(static_reuse){
@@ -956,20 +1031,28 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
    char text[128];std::snprintf(text,sizeof(text),"present=0x%03x low=%d snow=%d",present,low_pixels?1:0,snow_ps?1:0);
    bridge_report_event("terrain_pixel_variant_missing",text);
   }
- // Terrain material cache (terrain_bake.h): this flush bakes pages and/or draws from the cache.
- const TerrainBakeFrame terrain_bake=update_terrain_bake();
- if(sky_draw_pending_){
-  draw_owned_sky();
+ // Terrain 2.0 material cache (terrain2_cache.h): this frame's bake, then its views for the terrain pixels.
+ update_terrain2_cache();
+ if(sky_draw_pending_||cave_glow_pending_){
+  if(sky_draw_pending_)draw_owned_sky();
+  draw_cave_exit_glow();
   context_->IASetInputLayout(nullptr);context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
   context_->VSSetShader(native_vs_.Get(),nullptr,0);context_->PSSetShader(native_ps_.Get(),nullptr,0);
   bind_draw_constants();
-  context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
  }
+ // The flush's own targets (frame_plan.h): the batch loop below starts from
+ // "rtv_ and dsv_ bound" (bound_color_targets 0, bound_depth_view dsv_), so
+ // the flush binds them itself instead of relying on the previous pass.
+ bind_plan_targets(plan_pass("native_flush",rtv_.Get(),dsv_.Get()));
  context_->VSSetConstantBuffers(1,1,native_world_lighting_constants_.GetAddressOf());
  context_->PSSetConstantBuffers(1,1,native_world_lighting_constants_.GetAddressOf());
- context_->PSSetConstantBuffers(2,1,native_shadow_constants_.GetAddressOf());
- context_->PSSetConstantBuffers(5,1,native_point_light_constants_.GetAddressOf());
- context_->PSSetConstantBuffers(6,1,shadow_history_constants_.GetAddressOf());
+ // The interface after composition is not in the world: no sun or cloud
+ // shadow, history, lamps or bounce light (unbound b2/b5/b6 read zero), as
+ // renderer_native_d3d12.cpp binds zero blocks; its fog is border fog only.
+ {ID3D11Buffer* const interface_none=nullptr;
+  context_->PSSetConstantBuffers(2,1,scene_composited_?&interface_none:native_shadow_constants_.GetAddressOf());
+  context_->PSSetConstantBuffers(5,1,scene_composited_?&interface_none:native_point_light_constants_.GetAddressOf());
+  context_->PSSetConstantBuffers(6,1,scene_composited_?&interface_none:shadow_history_constants_.GetAddressOf());}
  ID3D11ShaderResourceView* history_srvs[2]={
   history_active?shadow_history_srv_[shadow_history_previous_index_].Get():nullptr,
   history_active?shadow_history_depth_srv_.Get():nullptr};
@@ -981,6 +1064,7 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
  context_->PSSetShaderResources(18,1,&point_lights);
  ID3D11ShaderResourceView* point_light_grid=native_point_lights_.empty()?nullptr:native_point_light_grid_srv_.Get();
  context_->PSSetShaderResources(17,1,&point_light_grid);
+ bind_cave_irradiance();
  if(!scene_composited_)refresh_emissive_lights();
  {
   // Ground contact blend: this frame's terrain height grid and painted colour
@@ -1045,30 +1129,7 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
  // A batch's contact views (t13-t16) and constants.
  const auto batch_constants=[&](const NativeBatch& batch,const NativeQueuedDraw& draw,const NativeStateBucket& bucket,
                                 ID3D11ShaderResourceView* (&contact_views)[4]){
-   const bool active_contact=!scene_composited_&&gc_drawn_frame_==native_frame_index_&&gc_map_generation_==ambient_map_generation_;
-   const bool active_art=!scene_composited_&&contact_maps_.tiles&&contact_maps_.atlas&&
-    contact_map_generation_==ambient_map_generation_&&contact_constants_generation_==contact_map_generation_;
-   ID3D11ShaderResourceView* views[4]{active_contact?ambient_ground_srv_.Get():nullptr,
-    active_contact?gc_color_srv_.Get():nullptr,active_art?contact_maps_.tiles.Get():nullptr,active_art?contact_maps_.atlas.Get():nullptr};
-   std::array<float,4> contact_origin{0,0,0,1};
-   std::array<float,2> layout_origin=terrain_layout_origin_;
-   std::uint64_t contact_ready=active_art?contact_maps_.ready:0;
-   if(bucket.material_key.contact_map){
-    std::fill(std::begin(views),std::end(views),nullptr);contact_ready=0;layout_origin={0,0};
-    for(const auto& n:gc_neighbours_)if(n.contact_map==bucket.material_key.contact_map){
-     if(n.prepared){views[0]=n.ground.Get();views[1]=n.color.Get();}
-     views[2]=n.contact.tiles.Get();views[3]=n.contact.atlas.Get();
-     contact_origin={n.origin[0],n.origin[1],n.origin[2],0};layout_origin=n.layout_origin;contact_ready=n.contact.ready;break;
-    }
-    // Temporary cost switch: neighbour terrain without its grid and atlas.
-    if(bucket.semantic_kind==SemanticKind::terrain&&!neighbour_terrain_blend){views[2]=views[3]=nullptr;contact_ready=0;}
-   }
-   Constants constants{};constants.hud_opacity=draw.hud_composition.opacity;identity(constants.world);identity(constants.view);identity(constants.projection);const auto& st=bucket.state;constants.viewport[0]=(float)st.viewport.dwX;constants.viewport[1]=(float)st.viewport.dwY;constants.viewport[2]=(float)std::max<DWORD>(1,st.viewport.dwWidth);constants.viewport[3]=(float)std::max<DWORD>(1,st.viewport.dwHeight);const auto& fog_state=native_static_frame_?*native_static_frame_:st;DWORD fog=fog_state.render[D3DRENDERSTATE_FOGCOLOR],tf=st.render[D3DRENDERSTATE_TEXTUREFACTOR];constants.fog_color[0]=((fog>>16)&255)/255.f;constants.fog_color[1]=((fog>>8)&255)/255.f;constants.fog_color[2]=(fog&255)/255.f;constants.fog_color[3]=1;constants.texture_factor[0]=((tf>>16)&255)/255.f;constants.texture_factor[1]=((tf>>8)&255)/255.f;constants.texture_factor[2]=(tf&255)/255.f;constants.texture_factor[3]=((tf>>24)&255)/255.f;constants.transformed=0;constants.textured=bucket.texture_srv?1u:0u;constants.color_op=st.stage[0][D3DTSS_COLOROP];constants.alpha_op=st.stage[0][D3DTSS_ALPHAOP];constants.color_arg1=st.stage[0][D3DTSS_COLORARG1];constants.color_arg2=st.stage[0][D3DTSS_COLORARG2];constants.alpha_arg1=st.stage[0][D3DTSS_ALPHAARG1];constants.alpha_arg2=st.stage[0][D3DTSS_ALPHAARG2];constants.alpha_test=st.render[D3DRENDERSTATE_ALPHATESTENABLE]!=0;constants.alpha_func=st.render[D3DRENDERSTATE_ALPHAFUNC];constants.alpha_ref=(st.render[D3DRENDERSTATE_ALPHAREF]&255)/256.f;constants.fog_enable=fog_state.render[D3DRENDERSTATE_FOGENABLE]!=0;constants.specular_enable=native_specular_addition_enabled(st.render[D3DRENDERSTATE_SPECULARENABLE]);constants.native_triangle_base=batch.output_triangle_base;constants.padding[0]=shadow_coverage?1u:0u;constants.padding[1]=bucket.opacity!=NativeOpacityClass::ordered?1u:0u;constants.liquid_layer=0;constants.combiner[0]=native_fast_combiner_mode(constants.color_op,constants.color_arg1,constants.color_arg2);constants.combiner[1]=native_fast_combiner_mode(constants.alpha_op,constants.alpha_arg1,constants.alpha_arg2);
-   std::copy(contact_origin.begin(),contact_origin.end(),constants.contact_origin);
-   constants.layout_origin[0]=layout_origin[0];constants.layout_origin[1]=layout_origin[1];
-   constants.contact_padding=neighbour_fog_skip?0u:1u; // temporary A/B switch (nativeContactTail)
-   constants.contact_materials[0]=static_cast<UINT>(contact_ready);constants.contact_materials[1]=static_cast<UINT>(contact_ready>>32);
-  std::copy(std::begin(views),std::end(views),contact_views);
+  Constants constants;native_batch_constants(batch,draw,bucket,contact_views,neighbour_terrain_blend,neighbour_fog_skip,shadow_coverage,&constants);
   return constants;
  };
 
@@ -1094,11 +1155,9 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
   masked_object_ps&&masked_terrain_ps&&masked_terrain_flat_ps;
  // Settings read once per flush (the batch loops below ran these lookups per batch).
  ++native_flush_serial_;
- const int terrain_bake_route=configured_integer(debug_overlay_.config(),"terrain_bake_route",2);
  const bool water_simple=configured_boolean(debug_overlay_.config(),"water_simple",false);
  const bool water_physical=configured_boolean(debug_overlay_.config(),"water_physical",true);
  flush_anisotropy_=configured_integer(debug_overlay_.config(),"anisotropy",3); // apply_state; finish clears it
- const bool cache_two_pass=terrain_bake.sample&&terrain_bake_route==1;
  const bool prepass_tessellation=terrain_prepass_tess_vs_&&terrain_prepass_hs_&&terrain_prepass_snow_hs_&&terrain_prepass_ds_&&terrain_prepass_snow_ds_;
  bool any_prepass=false;
  try{native_prepass_batches_.assign(native_batch_staging_.size(),0);}catch(const std::bad_alloc&){return native_flush_failure_line_=__LINE__,finish(E_OUTOFMEMORY);}
@@ -1120,7 +1179,7 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
   if(depth_func!=D3DCMP_LESS&&depth_func!=D3DCMP_LESSEQUAL)continue;
   const bool terrain=bucket.semantic_kind==SemanticKind::terrain;
   // Terrain's alpha follows its material stages, which the prepass lacks.
-  if(terrain&&(st.render[D3DRENDERSTATE_ALPHATESTENABLE]!=FALSE||cache_two_pass||(tessellate_terrain&&!prepass_tessellation)))continue;
+  if(terrain&&(st.render[D3DRENDERSTATE_ALPHATESTENABLE]!=FALSE||(tessellate_terrain&&!prepass_tessellation)))continue;
   bool liquid=baked&&baked->liquid;
   for(std::size_t n=batch.first_draw;!baked&&terrain&&!liquid&&n<batch.first_draw+batch.draw_count;++n)
    liquid=native_queued_draw(native_draw_order_[n]).mesh->has_liquid;
@@ -1173,7 +1232,7 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
    const bool prepass_neighbour=bucket.material_key.contact_map!=0;
    // Neighbour-map ground draws untessellated (see the material pass).
    const bool tessellated_batch=tessellate_terrain&&terrain&&!prepass_neighbour;
-   const bool prepass_trail_split=tessellated_batch&&batch.flat_pixels&&snow_terrain_srv_&&!prepass_neighbour&&!terrain_bake.sample&&!terrain_bake.bake;
+   const bool prepass_trail_split=tessellated_batch&&batch.flat_pixels&&snow_terrain_srv_&&!prepass_neighbour;
    prepass_stages(tessellated_batch&&!(batch.flat_pixels&&(!snow_terrain_srv_||prepass_neighbour))&&!prepass_trail_split);
    std::uint64_t logical_triangles=baked?baked->triangles:0;
    for(std::size_t item=batch.first_draw;!baked&&item<batch.first_draw+batch.draw_count;++item)logical_triangles+=native_queued_draw(native_draw_order_[item]).index_count/3u;
@@ -1410,6 +1469,7 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
   // through the ground variant (nativeLiquidLayer bit 3), no reflections.
   const bool stock_water=liquid_batch&&water_simple;
   const bool water_reflections=liquid_batch&&!stock_water&&prepare_water_reflections(st);
+  if(liquid_batch&&!stock_water)bound_color_targets=~0u; // its scene copy may leave the targets unbound
   if(liquid_batch){++water_liquid_batches_;if(water_reflections)++water_reflection_batches_;}
   prepare_liquid_ripples(); // frame time also drives caustics on terrain under water
   if(water_reflections&&!water_ssr_done){
@@ -1421,7 +1481,7 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
   }
   ID3D11DepthStencilView* depth_view=dsv_.Get();
   if(water_bound){ID3D11ShaderResourceView* empty=nullptr;context_->PSSetShaderResources(19,1,&empty);}
-  const bool write_history=history_active&&!scene_composited_&&bucket.opacity!=NativeOpacityClass::ordered;
+  const bool write_history=history_active&&!scene_composited_&&!hit_test_active_&&bucket.opacity!=NativeOpacityClass::ordered;
   const unsigned wanted_targets=(write_history?1u:0u)|(write_ambient?2u:0u);
   if(wanted_targets!=bound_color_targets||depth_view!=bound_depth_view){
    ID3D11RenderTargetView* targets[3]={rtv_.Get(),
@@ -1442,7 +1502,7 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
    context_->PSSetConstantBuffers(7,1,&values);context_->PSSetSamplers(5,1,&sampler);
   }
   water_bound=water_reflections;
-  const bool textured=bucket.texture_srv!=nullptr;if(FAILED(hr=apply_state(st,textured,draw.hud_composition,draw.camp_clip)))return native_flush_failure_line_=__LINE__,finish(hr);ID3D11ShaderResourceView* texture=bucket.texture_array?nullptr:bucket.texture_srv.Get();ID3D11ShaderResourceView* texture_array=bucket.texture_array?bucket.texture_srv.Get():nullptr;context_->PSSetShaderResources(0,1,&texture);context_->PSSetShaderResources(6,1,&texture_array);const char* native_pass=bucket.semantic_kind==SemanticKind::terrain?"gpu_driven_terrain":(draw.instance.lighting_enabled?"gpu_driven_figures":"gpu_driven_object_meshes");transition_profile_pass(liquid_batch?(water_reflections?"liquid_reflections":"liquid_surface"):native_pass);std::uint64_t logical_triangles=baked?baked->triangles:0;if(baked)perf_native_gpu_lit_draws_+=baked->lit_draws;const std::size_t next=batch.first_draw+batch.draw_count;for(std::size_t item=batch.first_draw;!baked&&item<next;++item){auto& queued=native_queued_draw(native_draw_order_[item]);logical_triangles+=queued.index_count/3u;queued.mesh->last_used_frame=native_frame_index_;if(queued.instance.lighting_enabled)++perf_native_gpu_lit_draws_;}profiler_.add_draw(logical_triangles,group_draw_count);profiler_.add_batch();
+  const bool textured=bucket.texture_srv!=nullptr;if(FAILED(hr=apply_state(st,textured,draw.hud_composition,draw.camp_clip)))return native_flush_failure_line_=__LINE__,finish(hr);ID3D11ShaderResourceView* texture=bucket.texture_array?nullptr:bucket.texture_srv.Get();ID3D11ShaderResourceView* texture_array=bucket.texture_array?bucket.texture_srv.Get():nullptr;context_->PSSetShaderResources(0,1,&texture);context_->PSSetShaderResources(6,1,&texture_array);{ID3D11ShaderResourceView* material_profile[2]={materials_on?material_profile_srv(bucket.material_key.texture_backing):nullptr,materials_on?material_relief_srv(bucket.material_key.texture_backing):nullptr};context_->PSSetShaderResources(37,2,material_profile);}const char* native_pass=bucket.semantic_kind==SemanticKind::terrain?"gpu_driven_terrain":(draw.instance.lighting_enabled?"gpu_driven_figures":"gpu_driven_object_meshes");transition_profile_pass(liquid_batch?(water_reflections?"liquid_reflections":"liquid_surface"):native_pass);std::uint64_t logical_triangles=baked?baked->triangles:0;if(baked)perf_native_gpu_lit_draws_+=baked->lit_draws;const std::size_t next=batch.first_draw+batch.draw_count;for(std::size_t item=batch.first_draw;!baked&&item<next;++item){auto& queued=native_queued_draw(native_draw_order_[item]);logical_triangles+=queued.index_count/3u;queued.mesh->last_used_frame=native_frame_index_;if(queued.instance.lighting_enabled)++perf_native_gpu_lit_draws_;}profiler_.add_draw(logical_triangles,group_draw_count);profiler_.add_batch();
   // Terrain batches draw with a terrain pixel variant (with the snow trail
   // code while a trail field exists; the lean one on the Low path),
   // everything else with the lean shader; set per batch: a reflection pass
@@ -1485,9 +1545,8 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
   // untessellated, then tessellated for only its triangles near an active
   // trail tile (nativeTriangleNearTrail; the trail displacement needs the
   // stages there). Neighbour maps take no trails: their flat region stays
-  // untessellated. The material cache's routing keeps the whole region tessellated.
-  const bool trail_split=tessellated_batch&&batch.flat_pixels&&!liquid_batch&&snow_terrain_srv_&&!neighbour_batch&&
-   !terrain_bake.sample&&!terrain_bake.bake;
+  // untessellated.
+  const bool trail_split=tessellated_batch&&batch.flat_pixels&&!liquid_batch&&snow_terrain_srv_&&!neighbour_batch;
   const bool flat_untessellated=tessellated_batch&&batch.flat_pixels&&!liquid_batch&&(!snow_terrain_srv_||neighbour_batch);
   bind_tessellation(tessellated_batch&&!flat_untessellated&&!trail_split);
   // Profiling only: GPU sub-scopes split this pass between draw groups
@@ -1538,36 +1597,45 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
      bind_tessellation(tessellated_batch); // the steep region
     }
     if(terrain_batch)context_->PSSetShader(live_ps,nullptr,0);
-    // Material cache routing (terrain_bake 1/3): active-map terrain's cached
-    // pixels through the lean baked variant first; the live draw skips them.
-    bool routed=false;
-    if(terrain_bake.sample&&terrain_batch){
-     routed=draw_terrain_baked(native_indirect_args_.Get(),args_offset,tessellation_bound,
-      !low_pixels,snow_ps!=nullptr,bucket.material_key.contact_map,terrain_bake_route!=1);
-     if(routed&&terrain_bake_route==1)
-      profiler_.add_sub_draw(group_draw_count,logical_triangles); // the cached scope the two-pass draw opened
-     context_->PSSetShader(live_ps,nullptr,0);
+#ifdef EID3D11_EMBEDDED
+    // Inspect the actual pixel-stage inputs once per world, at a settled
+    // active-ground draw. Empty optional pools are expected; no state changes.
+    if(terrain_batch&&!part&&!scene_composited_&&!bucket.material_key.contact_map&&tile_blend_ready_&&!contact_maps_.pending){
+     static std::uint64_t reported_epoch=UINT64_MAX;
+     const auto epoch=bridge_current_world_epoch();
+     if(reported_epoch!=epoch){
+      reported_epoch=epoch;
+      char text[768];
+      std::snprintf(text,sizeof(text),"epoch=%llu table_entry=%.0f maps=%u rows=%u styles=%llu ready=%016llx",
+       static_cast<unsigned long long>(epoch),constants.layout_origin[3],terrain2_table_count_,tile_blend_rows_?1u:0u,
+       static_cast<unsigned long long>(terrain2_map_.style_serial),static_cast<unsigned long long>(contact_maps_.ready));
+      bool missing=constants.layout_origin[3]<=0||!terrain2_table_count_||!tile_blend_rows_||!terrain2_map_.style_serial;
+      for(const UINT slot:{85u,86u,87u,88u,89u,90u,91u,92u,93u,119u,121u,127u}){
+       ComPtr<ID3D11ShaderResourceView> view;context_->PSGetShaderResources(slot,1,&view);
+       const bool required=slot==85u||slot==127u||(contact_maps_.pool>=0&&slot==86u+UINT(contact_maps_.pool));
+       missing=missing||(required&&!view);
+       char resource_text[96];
+       if(!view)std::snprintf(resource_text,sizeof(resource_text)," t%u=null",slot);
+       else{
+        ComPtr<ID3D11Resource> resource;view->GetResource(&resource);
+        ComPtr<ID3D11Texture2D> texture;
+        if(SUCCEEDED(resource.As(&texture))){
+         D3D11_TEXTURE2D_DESC d{};texture->GetDesc(&d);
+         std::snprintf(resource_text,sizeof(resource_text)," t%u=%ux%u/m%u/a%u/f%u",slot,d.Width,d.Height,d.MipLevels,d.ArraySize,unsigned(d.Format));
+        }else{
+         D3D11_SHADER_RESOURCE_VIEW_DESC d{};view->GetDesc(&d);
+         std::snprintf(resource_text,sizeof(resource_text)," t%u=buffer/f%u",slot,unsigned(d.Format));
+        }
+       }
+       const auto used=std::strlen(text);std::snprintf(text+used,sizeof(text)-used,"%s",resource_text);
+      }
+      bridge_report_event("terrain2_bindings",text);
+      if(missing)embedded_report_render_failure("terrain2_bindings_missing",text);
+     }
     }
-    // Routed: the baked draw wrote the covered pixels' depth through the same
-    // vertex stages, so a strict depth test rejects the live draw there before
-    // its pixel shader runs (with less-equal every covered pixel launched the
-    // full terrain variant only to discard it). Pixels the baked draw
-    // discarded keep the earlier depth and draw live; a covered pixel whose
-    // depth still passes is skipped by the live variant's own cache test.
-    const bool strict_depth=routed&&st.render[D3DRENDERSTATE_ZENABLE]!=D3DZB_FALSE&&st.render[D3DRENDERSTATE_ZWRITEENABLE]&&
-     st.render[D3DRENDERSTATE_ZFUNC]==D3DCMP_LESSEQUAL;
-    const std::uint64_t depth_key=(std::uint64_t(st.render[D3DRENDERSTATE_ZENABLE])<<32)|(std::uint64_t(st.render[D3DRENDERSTATE_ZWRITEENABLE])<<16);
-    if(strict_depth){
-     auto& less=depth_states_[depth_key|D3DCMP_LESS];
-     if(!less){D3D11_DEPTH_STENCIL_DESC dd{};dd.DepthEnable=TRUE;dd.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ALL;dd.DepthFunc=D3D11_COMPARISON_LESS;
-      if(FAILED(device_->CreateDepthStencilState(&dd,&less))&&!strict_depth_failure_reported_){
-       strict_depth_failure_reported_=true;
-       bridge_append_probe_event("render_state_creation_failed","strict-depth state creation failed; routed terrain keeps its less-equal state");}}
-     // Without it the batch keeps its own less-equal state (the cache test still skips covered pixels).
-     if(less)context_->OMSetDepthStencilState(less.Get(),0);
-    }
+#endif
     // The flat region of a split batch has its own scope (live_flat).
-    const TerrainProfilePart live_part=routed?TerrainProfilePart::live_routed:split&&!part?TerrainProfilePart::live_flat:TerrainProfilePart::live;
+    const TerrainProfilePart live_part=split&&!part?TerrainProfilePart::live_flat:TerrainProfilePart::live;
     if(trail_split&&!part){
      // Untessellated with the triangles near an active trail tile collapsed
      // (layer bit 16), then tessellated with only those (bit 32).
@@ -1585,30 +1653,9 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
      if(batch.posed&&bucket.opacity!=NativeOpacityClass::ordered&&draw_dlss_object_motion(args_offset))
       bound_color_targets=~0u;
     }
-    if(strict_depth)context_->OMSetDepthStencilState(depth_states_[depth_key|D3DCMP_LESSEQUAL].Get(),0); // the batch's own (apply_state made it)
-    // The bake frame: active-map terrain drawn again into the material cache,
-    // then this batch's targets, viewport and state come back.
-    if(terrain_bake.bake&&terrain_batch){
-     // Only batches whose draws reach a page baking this frame (world XY ranges,
-     // the same draw bounds the GPU culling uses).
-     float lo[2]{std::numeric_limits<float>::max(),std::numeric_limits<float>::max()},hi[2]{-std::numeric_limits<float>::max(),-std::numeric_limits<float>::max()};
-     if(baked){lo[0]=baked->xy_min[0];lo[1]=baked->xy_min[1];hi[0]=baked->xy_max[0];hi[1]=baked->xy_max[1];}
-     else for(std::size_t n=batch.first_draw;n<batch.first_draw+batch.draw_count;++n){
-      const auto& queued=native_queued_draw(native_draw_order_[n]);
-      for(int axis=0;axis<2;++axis){lo[axis]=std::min(lo[axis],queued.bounds_min[axis]);hi[axis]=std::max(hi[axis],queued.bounds_max[axis]);}
-     }
-     if(terrain_bake_touches(bucket.material_key.contact_map,lo,hi)){
-      draw_terrain_bake(native_indirect_args_.Get(),args_offset,tessellation_bound,bucket.material_key.contact_map);
-      context_->RSSetViewports(1,&viewport);apply_state(st,textured,draw.hud_composition);
-      if(masked)context_->OMSetDepthStencilState(masked_depth_state_.Get(),0);
-      bound_color_targets=~0u;
-     }
-    }
    }
   }
   else if(stock_water){
-   // Liquid batches are never routed (PS b13 0: the live variant draws all).
-   if(terrain_bake.sample)draw_terrain_baked(nullptr,0,false,false,false,0,false);
    // Stock-look water: one draw through the ground variant bound above;
    // the vertex stage gives liquid vertices the game's terrain outputs.
    if(FAILED(hr=layer_constants(8u)))return native_flush_failure_line_=__LINE__,finish(hr);
@@ -1620,7 +1667,6 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
    // (other layer tiles) with the terrain pixel variant bound above, then
    // the liquid surfaces with nativeLiquidPS; the vertex stage collapses
    // the other part each time (nativeLiquidLayer bits 2 and 1).
-   if(terrain_bake.sample)draw_terrain_baked(nullptr,0,false,false,false,0,false);
    if(ground_part){
     if(FAILED(hr=layer_constants(4u)))return native_flush_failure_line_=__LINE__,finish(hr);
     terrain_scope(TerrainProfilePart::ground);
@@ -1662,8 +1708,11 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
    {ID3D11Buffer* full=liquid_ripple_ready_?liquid_ripple_constants_.Get():nullptr;context_->PSSetConstantBuffers(8,1,&full);}
   }
   if(write_history)shadow_history_written_=true;perf_native_draws_+=group_draw_count;++perf_native_batches_;perf_native_vertices_+=logical_triangles*3u;++native_frame_stats_.native_physical_batches;if(group_draw_count==1)++native_frame_stats_.native_one_draw_batches;native_frame_stats_.native_max_batch_draws=std::max<std::uint64_t>(native_frame_stats_.native_max_batch_draws,group_draw_count);}
- ID3D11ShaderResourceView* null_texture=nullptr;context_->PSSetShaderResources(0,1,&null_texture);context_->PSSetShaderResources(6,1,&null_texture);context_->VSSetShaderResources(1,8,null_srvs);
- if(water_ssr_done){ID3D11ShaderResourceView* none[4]{};context_->PSSetShaderResources(29,4,none);}context_->VSSetConstantBuffers(1,1,&null_constant);finish_terrain_bake();end_profile_pass();return native_flush_failure_line_=__LINE__,finish(S_OK);
+ // Fur prototype (renderer_fur.cpp): this flush's unit records with fur,
+ // while their world vertices and the flush's lighting are still bound.
+ draw_fur_records();
+ ID3D11ShaderResourceView* null_texture=nullptr;context_->PSSetShaderResources(0,1,&null_texture);context_->PSSetShaderResources(6,1,&null_texture);context_->PSSetShaderResources(37,1,&null_texture);context_->PSSetShaderResources(38,1,&null_texture);context_->VSSetShaderResources(1,8,null_srvs);trim_material_profiles();
+ if(water_ssr_done){ID3D11ShaderResourceView* none[4]{};context_->PSSetShaderResources(29,4,none);}context_->VSSetConstantBuffers(1,1,&null_constant);end_profile_pass();return native_flush_failure_line_=__LINE__,finish(S_OK);
 }
 
 } // namespace owned

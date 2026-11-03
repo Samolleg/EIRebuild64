@@ -80,6 +80,8 @@ VisualPreparedResources::AdmissionKey owned_visual_admission_key(
     return key;
 }
 
+
+
 } // namespace
 bool prepare_owned_visual_admission(const RetainedVisualSample& sample,
     bool draw_undetected,bool shadows_enabled) {
@@ -201,6 +203,19 @@ std::uint64_t owned_static_key(const RetainedVisualSample& sample) noexcept;
 // admission saw the entity. Entries unseen in a frame are removed, so an
 // entity that silently leaves the frame's list never lingers as a ghost.
 std::unordered_map<std::uint64_t,std::uint64_t> g_owned_static_registry;
+
+// The persistent static record was built from other values or another pose
+// than the sample now carries (a script moved, rotated or reshaped it).
+bool owned_static_registration_stale(const RetainedVisualSample& sample) noexcept {
+    if(!sample.prepared || !sample.prepared->color_packet.static_registered)return false;
+    const auto& prepared=*sample.prepared;
+    const auto& packet=prepared.color_packet;
+    return !sample.assembly || packet.assembly!=sample.assembly.get() ||
+        packet.assembly_revision!=sample.assembly->revision ||
+        !prepared.derived_pose_valid || packet.pose_generation!=prepared.derived_pose_generation ||
+        !owned_visual_pose_key_matches(prepared.derived_pose_key,sample) ||
+        std::memcmp(&packet.values,&sample.values,sizeof(packet.values))!=0;
+}
 
 } // namespace
 thread_local OwnedAdmissionCache g_owned_admission_cache;
@@ -495,14 +510,15 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
         append_cell_merged_receivers(receiver_cell,static_receivers,unions,receivers);
     } else append_cell_merged_receivers(receiver_cell,static_receivers,receivers);
 
-    if (shadows_enabled && g_owned_shadow_settings.sun_shadows) {
+    if (shadows_enabled) {
         const TerrainCpuAsset* base_source=nullptr;
         const std::array<float,16>* base_transform=nullptr;std::uint64_t base_generation=0;
         current_base_terrain_quality_reference(base_source,base_transform,base_generation);
         if(reused_coverage)frame.coverage=*reused_coverage;
         else if (!build_retained_directional_coverage(world_to_clip,lighting,receivers,
             frame.coverage,base_source,base_transform,g_owned_shadow_settings.map_side,
-            g_owned_shadow_settings.close_cascades,base_generation)) {
+            g_owned_shadow_settings.close_cascades,base_generation,g_owned_shadow_settings.close_range,
+            frame.camera_anchor_z)) {
             reject_owned_visual("coverage","receiver_coverage");
             report_object_plan_failure("owned_scene_receiver_coverage");
             return false;
@@ -538,6 +554,13 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
             prepared.casting_parts &&
             owned_point_shadow_influence(prepared.bounds,frame.values->world_point_lights);
 
+        // A registered static set record keeps drawing (GPU-culled) at the
+        // pose it was built with. Only colour-contributing entities are
+        // resubmitted to the set, so an object that changed since and now
+        // lies outside the camera would keep its old record: retire it; it
+        // registers again when it is in view.
+        if (!prepared.contribution.color && owned_static_registration_stale(sample))
+            retire_owned_static_color(sample);
         if (!prepared.contribution.color && !prepared.contribution.light_mask && !point_caster) {
             frame.shadow_considered+=prepared.casting_parts;
             if(frame.diagnostic.profile_frame)++frame.diagnostic.contribution_rejected;
@@ -1096,8 +1119,19 @@ void run_owned_visual_scene(OwnedSceneCommand& command) noexcept {
     g_scene_fog_revision=command.fog_revision;
     g_owned_terrain_frame=std::move(command.terrain);
     g_native_world_lighting_frame=command.lighting;
+    // The captured pass is the game thread's view of the shadow switch; the
+    // renderer that draws applied the switch at its own BeginScene and has the
+    // last word (installed sinks' frame state). Shadows off there means no sun
+    // pass at all, so the world never waits for one it refuses (#204).
+    {
+        NativeFrameState executor{};
+        if(command.inputs.pass.shadows_enabled && g_native_sink_frame_state &&
+           g_native_sink_frame_state(g_native_sink_context,executor) && !executor.shadows_enabled)
+            command.inputs.pass.shadows_enabled=false;
+    }
     auto& frame=g_owned_visual_world_frame;
     frame.active=true;frame.shadow_attempted=true;frame.shadow_source_diagnostic={};
+    frame.camera_anchor_z=command.camera_anchor_z;
     bool ready=false;
     try {
         ready=prepare_owned_world_shadows_from(std::move(command.inputs),command.world_to_clip);

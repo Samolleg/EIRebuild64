@@ -2,6 +2,7 @@
 
 #include "retained_static_scene.h"
 #include "model_draw.h"
+#include "figure_service_nodes.h"
 
 namespace owned {
 
@@ -19,8 +20,8 @@ inline bool uncommitted_draw_clears_world_pick_state(bool preview_route) noexcep
 // A FIG without triangles (Dejavu unanwibo.mod chelust.001/.002) is an
 // explicitly hidden part. It adds no pixels, and the native mesh path rejects
 // a view with no indices, so the preview must skip it as the world path does.
-inline bool preview_submits_part(const VisualPartAsset& part) noexcept {
-    return !part.explicitly_hidden;
+inline bool preview_submits_part(const VisualPartAsset& part, bool unit = false) noexcept {
+    return !part.explicitly_hidden && !(unit && unit_service_node(part.name.c_str()));
 }
 
 } // namespace owned

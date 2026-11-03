@@ -460,7 +460,7 @@ bool CAISpellCaster::CanAttackEnemy(CAIUnitLogic &logic, const CEnemy &target, b
         float fpMinDistance = pAttacker->GetAttackDistance() + target.pEnemy->GetAttackDistance();
         theWorldServer.aiMap.RemoveObject(target.pEnemy);
         if (!theWorldServer.aiMap.NewPath(pAttacker, target.pEnemy->GetCP(), fakePath,
-                                          fpMaxPathLength, fpMinDistance))
+                                          fpMaxPathLength, fpMinDistance,Navigation::GoalPolicy::Exact,nullptr,&target.pEnemy->navLocation))
             ptFrom = pAttacker->GetCP();
         else
             ptFrom = fakePath.GetFinalPoint();
@@ -1700,13 +1700,10 @@ bool CUMPlayer::DoPathExist(CAIUnitLogic &logic, const CPlot3D &ptSrc, const CPl
 {
     if (distanceXY2(ptSrc, ptDst) < 0.01f)
         return false;
-    SAIPath fakePath;
-    float fpMaxPathLength = fabs(ptSrc, ptDst) * 2;
-    CUnit *pThis = logic.GetUnit();
-    CPlot3D ptStore = pThis->GetCP();
-    theWorldServer.aiMap.MoveObject(pThis, ptSrc); // pThis->SetCP( ptSrc );
-    bool bRes = theWorldServer.aiMap.NewPath(logic.GetUnit(), ptDst, fakePath, fpMaxPathLength, 0);
-    theWorldServer.aiMap.MoveObject(pThis, ptStore); // pThis->SetCP( ptStore );
+    CAIRoute fakePath;
+    const float fpMaxPathLength=fabs(ptSrc,ptDst)*2;
+    Navigation::Location goal;goal.position={ptDst.x,ptDst.y,ptDst.z};
+    const bool bRes=theWorldServer.aiMap.NavRoute(logic.GetUnit(),{ptSrc.x,ptSrc.y,ptSrc.z},goal.position,fakePath,fpMaxPathLength,0,3,nullptr,Navigation::GoalPolicy::Exact,nullptr,&goal);
     return bRes;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1724,7 +1721,9 @@ void CUMPlayer::DoMoveTo(CAIUnitLogic &logic, const CPlot3D &ptTarget, bool bGro
         pFollowTo = 0;
     pTarget = 0;
     // StartMoving( logic, bGroup ); // Zarus requested waiting of followers only in swarm mode
-    logic.StartMove(ptSwarmTarget, bRun, bGroup);
+    Navigation::Location goalSupport;goalSupport.position={ptSwarmTarget.x,ptSwarmTarget.y,ptSwarmTarget.z};
+    theWorldServer.aiMap.Navigation().Support(logic.GetUnit(),goalSupport.position,goalSupport);
+    logic.StartMove(ptSwarmTarget,bRun,bGroup,&goalSupport);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMPlayer::DoSwarm(CAIUnitLogic &logic, const CPlot3D &ptTarget, bool bGroup, bool _bRun,
@@ -3525,10 +3524,10 @@ void CAIUnitLogic::StartTurnLook(const SAIRallyPoint &newRally)
     pUnitServer->CmdMoveTo(currentRally.ptPoint, false);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CAIUnitLogic::StartMove(const CPlot3D &ptDest, bool bRun, bool bGroup)
+void CAIUnitLogic::StartMove(const CPlot3D &ptDest, bool bRun, bool bGroup,const Navigation::Location* goalSupport)
 {
     state = US_MOVE;
-    pUnitServer->CmdMoveTo(ptDest, bRun, bGroup);
+    pUnitServer->CmdMoveTo(ptDest,bRun,bGroup,1.e6f,goalSupport);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIUnitLogic::ShowMove(const CPlot3D &ptDest, bool bGroup)

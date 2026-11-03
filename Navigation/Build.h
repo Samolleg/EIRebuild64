@@ -15,6 +15,16 @@ struct QueryDeleter { void operator()(dtNavMeshQuery* query) const { dtFreeNavMe
 struct Mesh {
     std::unique_ptr<dtNavMesh,MeshDeleter> data;
     mutable std::unique_ptr<dtNavMeshQuery,QueryDeleter> query;
+    struct Scratch {
+        std::vector<dtPolyRef> corridor,visible,refs;
+        std::vector<float> points,cost,length;
+        std::vector<unsigned char> flags,closed;
+        std::vector<int> previous;
+        std::vector<Location> nodes;
+        std::vector<Route> incoming;
+        std::vector<Obstacle> obstacles;
+    };
+    mutable Scratch scratch; // Queries on a mesh are serialized by the owner.
     Profile profile;
     std::shared_ptr<const Geometry> sources;
     std::set<int> excludedObjects;

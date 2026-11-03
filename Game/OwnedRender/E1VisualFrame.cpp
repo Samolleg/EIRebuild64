@@ -263,6 +263,7 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     inputs.hover_id = host.hoverId;
     inputs.hover_serial = host.hoverSerial;
     inputs.world_to_clip = host.worldToClip;
+    inputs.camera_anchor_z = host.cameraAnchorZ;
     inputs.lighting.ambient = host.ambient;
     inputs.lighting.sunlight_diffuse = host.sunDiffuse;
     inputs.lighting.sunlight_direction = host.sunDirection;

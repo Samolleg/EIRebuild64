@@ -1754,8 +1754,10 @@ void __fastcall deactivate(void* self, void*) {
 }
 BOOL __fastcall camp_draw(void* self, void*, void* visualizator) {
     publication.begin();result_help=0;
-    if(screen==self&&layout.wide)
+    if(screen==self&&layout.wide){
+        if(session.hover.screen_mode!=mode())result_modifiers=-1;
         session.begin(mode(),item_modifiers()|((GetKeyState(VK_SHIFT)&0x8000)?4u:0u),current_camp_input());
+    }
     if(scroll_drag.window&&(!current_camp_input()||mode()!=scroll_drag.screen_mode))camp_inventory_cancel_drag();
     decoration_pending=false; cards_drawn={};
     popup_submit(CampRenderRequest::invalidate_popup,nullptr,nullptr);

@@ -48,7 +48,7 @@ enum class RetainedOp : std::uint8_t {
     visual_publish_forced_weapon_ids, visual_publish_bridges, visual_publish_quest_lights,
     visual_publish_highlight, visual_publish_world_point_lights, visual_reject, visual_reject_all,
     visual_commit_tick, publish_terrain_geometry, publish_terrain_texture,
-    visual_publish_preview,
+    visual_publish_preview, material_publish_composition,
     end
 };
 
@@ -126,6 +126,15 @@ public:
         if (!value || failed_.load(std::memory_order_relaxed)) return;
         std::lock_guard<std::mutex> guard(lock_);
         try { assets_.id(std::shared_ptr<const T>(value)); } catch (...) { fail("asset allocation"); }
+    }
+    // Defines `full` now and lets `replacement` stand for it from here on
+    // (AssetEncoder::alias). False: the stream has failed.
+    template<class T> bool asset_alias(const std::shared_ptr<const T>& full,
+                                       const std::shared_ptr<const T>& replacement) noexcept {
+        if (!full || failed_.load(std::memory_order_relaxed)) return false;
+        std::lock_guard<std::mutex> guard(lock_);
+        try { assets_.alias(full, replacement); } catch (...) { fail("asset allocation"); return false; }
+        return true;
     }
     // One delta message: the op, then what `write` adds.
     template<class F> void delta(RetainedOp op, F&& write) noexcept {

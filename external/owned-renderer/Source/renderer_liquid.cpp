@@ -40,6 +40,17 @@ HRESULT create_generated_liquid_texture(ID3D11Device* device,UINT size,std::vect
  HRESULT hr=device->CreateTexture2D(&description,data.data(),&texture);if(FAILED(hr))return hr;
  return device->CreateShaderResourceView(texture.Get(),nullptr,&view);
 }
+// The same texture on the D3D12 executor from its CPU levels.
+HRESULT create_generated_liquid_texture_d3d12(D3D12Frame& frame,UINT size,const std::vector<std::vector<std::uint32_t>>& mips,D3D12TextureRef& out) {
+ D3D12TextureRef texture;
+ HRESULT hr=frame.create_texture(size,size,DXGI_FORMAT_R8G8B8A8_UNORM,texture,static_cast<UINT>(mips.size()));if(FAILED(hr))return hr;
+ UINT side=size;
+ for(UINT mip=0;mip<mips.size();++mip){
+  if(FAILED(hr=frame.write_texture(*texture,RECT{0,0,LONG(side),LONG(side)},mips[mip].data(),side*4u,mip)))return hr;
+  side=std::max(1u,side/2);
+ }
+ out=std::move(texture);return S_OK;
+}
 }
 
 // Seamless liquid textures (liquid_maps.h), generated once per device on a
@@ -48,6 +59,24 @@ HRESULT create_generated_liquid_texture(ID3D11Device* device,UINT size,std::vect
 // The device is free-threaded, so the worker creates the immutable textures
 // too; no CPU copy outlives the job.
 void Renderer::start_liquid_maps_job() noexcept {
+ if(d3d12_){ // D3D12: CPU levels only; ensure_liquid_maps_d3d12 uploads them
+  if(liquid_maps_job_.valid()||(liquid12_.normal&&liquid12_.detail))return;
+  try{
+   liquid_maps_job_=std::async(std::launch::async,[]()->LiquidMapsPrepared{
+    const BackgroundWorkerPriority priority;
+    LiquidMapsPrepared out;
+    try{
+     auto levels=generate_liquid_map_levels();
+     out.lava_samples=std::move(levels.lava_samples);
+     out.normal_mips=liquid_map_mips(LiquidMapLevels::normal_size,std::move(levels.normals),true);
+     out.detail_mips=liquid_map_mips(LiquidMapLevels::detail_size,std::move(levels.detail),false);
+     out.hr=S_OK;
+    }catch(const std::bad_alloc&){out.hr=E_OUTOFMEMORY;}
+    return out;
+   });
+  }catch(...){}
+  return;
+ }
  if(liquid_maps_job_.valid()||(liquid_normal_srv_&&liquid_detail_srv_)||!device_)return;
  try{
   liquid_maps_job_=std::async(std::launch::async,[device=device_]()->LiquidMapsPrepared{
@@ -65,6 +94,7 @@ void Renderer::start_liquid_maps_job() noexcept {
 }
 
 HRESULT Renderer::ensure_liquid_normal_map() try {
+ if(d3d12_)return ensure_liquid_maps_d3d12();
  if(liquid_normal_srv_&&liquid_detail_srv_)return S_OK;
  ComPtr<ID3D11ShaderResourceView> normal_view,detail_view;ComPtr<ID3D11SamplerState> sampler;
  HRESULT hr=S_OK;
@@ -86,7 +116,54 @@ HRESULT Renderer::ensure_liquid_normal_map() try {
  liquid_normal_sampler_=std::move(sampler);return S_OK;
 }catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
 
+HRESULT Renderer::ensure_liquid_maps_d3d12() try {
+ if(liquid12_.normal&&liquid12_.detail)return S_OK;
+ LiquidMapsPrepared prepared;
+ if(liquid_maps_job_.valid())prepared=liquid_maps_job_.get();
+ else{
+  auto levels=generate_liquid_map_levels();
+  prepared.lava_samples=std::move(levels.lava_samples);
+  prepared.normal_mips=liquid_map_mips(LiquidMapLevels::normal_size,std::move(levels.normals),true);
+  prepared.detail_mips=liquid_map_mips(LiquidMapLevels::detail_size,std::move(levels.detail),false);
+  prepared.hr=S_OK;
+ }
+ if(FAILED(prepared.hr))return prepared.hr;
+ D3D12TextureRef normal,detail;
+ HRESULT hr=create_generated_liquid_texture_d3d12(*d3d12_,LiquidMapLevels::normal_size,prepared.normal_mips,normal);
+ if(SUCCEEDED(hr))hr=create_generated_liquid_texture_d3d12(*d3d12_,LiquidMapLevels::detail_size,prepared.detail_mips,detail);
+ if(FAILED(hr))return hr;
+ liquid_lava_samples_=std::move(prepared.lava_samples);
+ liquid12_.normal=std::move(normal);liquid12_.detail=std::move(detail);
+ return S_OK;
+}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+
+// The D3D12 world draws' liquid inputs, as the D3D11 flush and
+// prepare_liquid_ripples bind them (the vertex and domain stages read b8 and
+// t62 from the same table).
+void Renderer::bind_liquid_d3d12() {
+ if(liquid_ripple_ready_)d3d12_->set_constants(8,&liquid_ripple_values_,sizeof(liquid_ripple_values_));
+ d3d12_->set_resource(22,liquid12_.normal.get());d3d12_->set_resource(23,liquid12_.detail.get());
+ D3D11_SAMPLER_DESC sampling{};sampling.Filter=D3D11_FILTER_ANISOTROPIC;sampling.MaxAnisotropy=8;
+ sampling.AddressU=sampling.AddressV=sampling.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;sampling.MaxLOD=D3D11_FLOAT32_MAX;
+ d3d12_->set_sampler(6,sampling);
+ d3d12_->set_resource(24,liquid12_.wave[liquid_wave_current_].get());
+ d3d12_->set_resource(33,liquid12_.swamp_frame.get());
+ d3d12_->set_resource(62,liquid12_.surf.get());d3d12_->set_resource(63,liquid12_.surf_level.get());
+}
+
 void Renderer::bind_liquid_swamp_frame() noexcept {
+ if(d3d12_){ // D3D12: the texture only; bind_liquid_d3d12 binds it
+  if(liquid_swamp_frame_generation_==ambient_map_generation_)return;
+  liquid12_.swamp_frame.reset();
+  if(const auto terrain=ambient_terrain_.lock()){
+   liquid_swamp_frame_generation_=ambient_map_generation_;
+   const UINT side=terrain->swamp_frame_side;
+   if(side&&terrain->swamp_frame_texels.size()==std::size_t(side)*side)
+    try{if(FAILED(create_generated_liquid_texture_d3d12(*d3d12_,side,liquid_map_mips(side,terrain->swamp_frame_texels,false),liquid12_.swamp_frame)))liquid12_.swamp_frame.reset();}
+    catch(const std::bad_alloc&){liquid12_.swamp_frame.reset();}
+  }
+  return;
+ }
  if(!device_||!context_)return;
  if(liquid_swamp_frame_generation_!=ambient_map_generation_){
   liquid_swamp_frame_srv_.Reset();
@@ -121,7 +198,19 @@ void Renderer::step_liquid_waves(NativeLiquidRipples& values,double seconds) {
  values.wave={};
  if(liquid_wave_failed_)return;
  const auto fail=[&](const char* reason){liquid_wave_failed_=true;OutputDebugStringA(reason);};
- if(!liquid_wave_cs_) {
+ if(d3d12_){
+  if(!liquid12_.wave[1]){
+   if(liquid12_.wave_program.empty())append_liquid_wave_shader_programs(liquid12_.wave_program);
+   // A first dispatch can return S_FALSE while its pipeline compiles. The
+   // surface can already sample either ping-pong texture before that step;
+   // start both flat, as on D3D11, without depending on a successful dispatch.
+   for(unsigned k=0;k<2;++k)
+    if(FAILED(d3d12_->create_storage_texture(kLiquidWaveSize,kLiquidWaveSize,0,DXGI_FORMAT_R32G32B32A32_FLOAT,liquid12_.wave[k])))
+     return fail("EID3D11 liquid ripples: wave field unavailable; character ripples omitted.\n");
+   const float zero[4]{};for(auto& texture:liquid12_.wave)d3d12_->clear_texture(*texture,zero);
+  }
+ }
+ else if(!liquid_wave_cs_) {
   ComPtr<ID3DBlob> code,errors;std::vector<ShaderProgram> programs;append_liquid_wave_shader_programs(programs);
   if(FAILED(compile_shader(programs[0],&code,&errors))||
      FAILED(create_shader(device_.Get(),code->GetBufferPointer(),code->GetBufferSize(),nullptr,&liquid_wave_cs_)))
@@ -139,6 +228,12 @@ void Renderer::step_liquid_waves(NativeLiquidRipples& values,double seconds) {
   buffer.BindFlags=D3D11_BIND_CONSTANT_BUFFER;buffer.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
   if(FAILED(device_->CreateBuffer(&buffer,nullptr,&liquid_wave_constants_)))
    return fail("EID3D11 liquid ripples: wave constants unavailable; character ripples omitted.\n");
+ }
+ // A new map starts with calm water: the next step reads nothing (first-use
+ // shift) instead of carrying the old map's field over.
+ if(liquid_wave_map_generation_!=ambient_map_generation_){
+  liquid_wave_map_generation_=ambient_map_generation_;
+  liquid_wave_origin_valid_=false;liquid_wave_accumulator_=0;
  }
  // The window follows the mean position of units in water, in whole texels.
  const unsigned count=std::min<unsigned>(static_cast<unsigned>(values.meta[0]),16u);
@@ -160,9 +255,12 @@ void Renderer::step_liquid_waves(NativeLiquidRipples& values,double seconds) {
  unsigned steps=static_cast<unsigned>(liquid_wave_accumulator_/step);liquid_wave_accumulator_-=steps*step;
  const bool copy_only=steps==0;
  if(copy_only&&(shift[0]||shift[1]))steps=1;
- ID3D11ShaderResourceView* none=nullptr;context_->PSSetShaderResources(24,1,&none);
+ ID3D11ShaderResourceView* none=nullptr;
+ if(!d3d12_){
+ context_->PSSetShaderResources(24,1,&none);
  context_->CSSetShader(liquid_wave_cs_.Get(),nullptr,0);
  context_->CSSetConstantBuffers(0,1,liquid_wave_constants_.GetAddressOf());
+ }
  for(unsigned n=0;n<steps;++n) {
   LiquidWaveStepConstants constants{};
   constants.origin[0]=origin[0]*kLiquidWaveCell;constants.origin[1]=origin[1]*kLiquidWaveCell;
@@ -173,6 +271,18 @@ void Renderer::step_liquid_waves(NativeLiquidRipples& values,double seconds) {
    liquid_wave_unit(values.position_speed[u][0],values.position_speed[u][1],values.position_speed[u][3],
                     values.phase[u][1],values.phase[u][0],step_seconds,constants.unit[u]);
    liquid_river_velocity(values.flow[u][0],values.flow[u][1],constants.flow[u]);
+  }
+  if(d3d12_){
+   const unsigned next=liquid_wave_current_^1u;
+   d3d12_->clear_slots();
+   d3d12_->set_constants(0,&constants,sizeof(constants));
+   d3d12_->set_resource(0,liquid12_.wave[liquid_wave_current_].get());
+   d3d12_->set_unordered(0,liquid12_.wave[next].get());
+   const HRESULT hr=d3d12_->dispatch(liquid12_.wave_program[0],kLiquidWaveSize/8,kLiquidWaveSize/8,1);
+   d3d12_->clear_slots();
+   if(hr!=S_OK){if(hr==S_FALSE)d3d12_->count("liquid wave steps waiting for their program");break;}
+   liquid_wave_current_=next;
+   continue;
   }
   D3D11_MAPPED_SUBRESOURCE mapped{};
   if(FAILED(context_->Map(liquid_wave_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))break;
@@ -185,7 +295,7 @@ void Renderer::step_liquid_waves(NativeLiquidRipples& values,double seconds) {
   context_->CSSetShaderResources(0,1,&none);
   liquid_wave_current_=next;
  }
- context_->CSSetShader(nullptr,nullptr,0);
+ if(!d3d12_)context_->CSSetShader(nullptr,nullptr,0);
  values.wave={origin[0]*kLiquidWaveCell,origin[1]*kLiquidWaveCell,1.f/(kLiquidWaveSize*kLiquidWaveCell),1.f};
 }
 
@@ -293,6 +403,16 @@ void Renderer::bind_liquid_ripple_units(const float lo[2],const float hi[2]) {
  }
  if(kept==count)return;
  list[0]=static_cast<std::uint8_t>(kept);
+ if(d3d12_){ // set_constants copies the block: no cached buffer
+  NativeLiquidRipples culled=values;culled.meta[0]=static_cast<float>(kept);
+  for(unsigned n=0;n<kept;++n){
+   const unsigned u=list[1+n];
+   culled.position_speed[n]=values.position_speed[u];culled.phase[n]=values.phase[u];
+   culled.flow[n]=values.flow[u];culled.id[n]=values.id[u];
+  }
+  d3d12_->set_constants(8,&culled,sizeof(culled));
+  return;
+ }
  if(liquid_ripple_batch_serial_!=liquid_ripple_values_serial_||list!=liquid_ripple_batch_list_){
   NativeLiquidRipples culled=values;culled.meta[0]=static_cast<float>(kept);
   for(unsigned n=0;n<kept;++n){
@@ -336,7 +456,7 @@ void Renderer::prepare_liquid_ripples() {
   values.meta[3]=configured_boolean(debug_overlay_.config(),"water_physical",true)?rain:0.f;
   update_liquid_surf();
   values.surf_window=liquid_surf_window_;
-  values.surf_mode={liquid_surf_srv_?1.f:0.f,
+  values.surf_mode={liquid_surf_srv_||liquid12_.surf?1.f:0.f,
                     float(std::clamp(configured_integer(debug_overlay_.config(),"water_surf_debug",0),0,3)+
                           4*std::clamp(configured_integer(debug_overlay_.config(),"water_surf_quality",2),0,2)), // debug + 4 * quality
                     // half a texel in uv (.5/side): with 2 m texels the window's 1/extent
@@ -367,6 +487,7 @@ void Renderer::prepare_liquid_ripples() {
   if(available){step_liquid_waves(values,seconds);ease_liquid_units(values,seconds);}
   liquid_ripple_values_=values;++liquid_ripple_values_serial_;
   for(unsigned u=0;u<16u;++u)liquid_unit_reach_[u]=liquid_unit_reach(values,u);
+  if(d3d12_){liquid_ripple_ready_=true;return;} // bind_liquid_d3d12 sets b8
   HRESULT hr=S_OK;
   if(!liquid_ripple_constants_) {
    D3D11_BUFFER_DESC desc{};desc.ByteWidth=sizeof(values);desc.Usage=D3D11_USAGE_DYNAMIC;
@@ -384,6 +505,7 @@ void Renderer::prepare_liquid_ripples() {
    OutputDebugStringA("EID3D11 liquid ripples: frame values or buffer unavailable; ripples omitted.\n");
   }
  }
+ if(d3d12_)return;
  ID3D11Buffer* buffer=liquid_ripple_ready_?liquid_ripple_constants_.Get():nullptr;
  context_->PSSetConstantBuffers(8,1,&buffer);
  context_->PSSetShaderResources(24,1,liquid_wave_srv_[liquid_wave_current_].GetAddressOf());
@@ -430,6 +552,7 @@ void Renderer::update_liquid_surf() noexcept try {
  if(liquid_surf_built_serial_==liquid_surf_serial_||!device_)return;
  liquid_surf_built_serial_=liquid_surf_serial_;
  liquid_surf_srv_.Reset();liquid_surf_level_srv_.Reset();liquid_surf_window_={};liquid_surf_swell_={};
+ liquid12_.surf.reset();liquid12_.surf_level.reset();
  struct Piece{long x,y;const LiquidSurfField* field;};
  std::vector<Piece> pieces;
  for(const auto& n:liquid_surf_neighbours_)
@@ -595,6 +718,19 @@ void Renderer::update_liquid_surf() noexcept try {
    for(int c=1;c<3;++c)texels[i][c]=static_cast<std::uint8_t>(std::lround(128.f+(texels[i][c]-128.f)*s));
   }
  }
+ if(d3d12_){
+  D3D12TextureRef surf,level;
+  if(FAILED(d3d12_->create_texture(UINT(width),UINT(height),DXGI_FORMAT_R8G8B8A8_UNORM,surf))||
+     FAILED(d3d12_->write_texture(*surf,RECT{0,0,LONG(width),LONG(height)},texels.data(),UINT(width)*4u))||
+     FAILED(d3d12_->create_texture(UINT(width),UINT(height),DXGI_FORMAT_R32G32B32A32_FLOAT,level))||
+     FAILED(d3d12_->write_texture(*level,RECT{0,0,LONG(width),LONG(height)},levels.data(),UINT(width)*16u))){
+   bridge_report_event("water_surf","omitted: texture unavailable; water shows no surf");
+   return;
+  }
+  liquid12_.surf=std::move(surf);liquid12_.surf_level=std::move(level);
+  liquid_surf_window_={float(x0)*2.f,float(y0)*2.f,.5f/float(width),.5f/float(height)};
+  return;
+ }
  D3D11_TEXTURE2D_DESC desc{};desc.Width=UINT(width);desc.Height=UINT(height);desc.MipLevels=desc.ArraySize=1;
  desc.Format=DXGI_FORMAT_R8G8B8A8_UNORM;desc.SampleDesc.Count=1;desc.Usage=D3D11_USAGE_IMMUTABLE;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;
  const D3D11_SUBRESOURCE_DATA data{texels.data(),UINT(width)*4u,0};
@@ -636,7 +772,7 @@ void Renderer::reset_water_reflections() noexcept {
  clear_water_reflection_bindings();
  water_scene_srv_.Reset();water_history_srv_.Reset();water_scene_color_.Reset();water_scene_depth_srv_.Reset();water_scene_dsv_.Reset();water_scene_depth_.Reset();
  water_history_frame_=UINT64_MAX;
- for(UINT slot=0;slot<2;++slot){particle_depth_srv_[slot].Reset();particle_depth_rtv_[slot].Reset();particle_depth_[slot].Reset();}
+ for(UINT slot=0;slot<2;++slot){particle_depth_srv_[slot].Reset();particle_depth_rtv_[slot].Reset();particle_depth_[slot].Reset();} particle_depth12_={};
  particle_depth_width_=particle_depth_height_=0;particle_depth_frame_=particle_depth_history_frame_=UINT64_MAX;
  game_particle_depth_ps_.Reset();particle_depth_blend_.Reset();particle_depth_test_.Reset();particle_depth_failed_=false;
  water_reflection_constants_.Reset();water_reflection_sampler_.Reset();
@@ -735,6 +871,46 @@ HRESULT Renderer::create_water_ssr_targets() {
  bridge_report_event("water_ssr",text);
  return S_OK;
 }
+// The reflection scene copy and depth snapshot on D3D12 (create_water_reflection_targets):
+// two slices of the world target's format, the history with a short mip chain
+// where compute can write the format (generate_mips; else one level, as D3D11
+// keeps formats without mip generation), and a depth-only target of the world
+// depth's format. Remade when the world target's size changes.
+HRESULT Renderer::create_water_reflection_targets_d3d12() {
+ if(!world_d3d12_)return E_FAIL;
+ UINT width=0,height=0,levels=0;DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;
+ if(!d3d12_->texture_info(*world_d3d12_,width,height,levels,format))return E_FAIL;
+ if(water12_.scene&&d3d12_->texture_matches(*water12_.scene,width,height,format))return S_OK;
+ water12_.scene.reset();water12_.depth.reset();
+ const bool mips=d3d12_->storage_supported(format);
+ levels=1;
+ if(mips)for(UINT size=(std::max)(width,height);size>1&&levels<kWaterSceneMipLevels;size>>=1)++levels;
+ D3D12TextureRef scene,depth;
+ HRESULT hr=mips?d3d12_->create_storage_texture(width,height,0,format,scene,levels,2):d3d12_->create_texture_array(width,height,format,1,2,scene);
+ if(FAILED(hr))return hr;
+ if(FAILED(hr=d3d12_->create_target(width,height,depth,DXGI_FORMAT_UNKNOWN,DXGI_FORMAT_D24_UNORM_S8_UINT)))return hr;
+ water12_.scene=std::move(scene);water12_.depth=std::move(depth);
+ water_scene_levels_=levels;water_history_frame_=UINT64_MAX;
+ return S_OK;
+}
+// The half-resolution trace targets on D3D12 (create_water_ssr_targets).
+HRESULT Renderer::create_water_ssr_targets_d3d12() {
+ if(!world_d3d12_)return E_FAIL;
+ UINT world_width=0,world_height=0,levels=0;DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;
+ if(!d3d12_->texture_info(*world_d3d12_,world_width,world_height,levels,format))return E_FAIL;
+ const UINT width=(world_width+1)/2,height=(world_height+1)/2;
+ if(water12_.ssr_depth&&width==water_ssr_width_&&height==water_ssr_height_)return S_OK;
+ for(auto& target:water12_.ssr)target.reset();
+ water12_.ssr_depth.reset();water_ssr_width_=water_ssr_height_=0;
+ HRESULT hr=S_OK;
+ for(unsigned n=0;n<6;++n)
+  if(FAILED(hr=d3d12_->create_target(width,height,water12_.ssr[n],kWaterSsrFormats[n],DXGI_FORMAT_UNKNOWN)))return hr;
+ if(FAILED(hr=d3d12_->create_target(width,height,water12_.ssr_depth,DXGI_FORMAT_UNKNOWN,kWaterSsrDepthFormat)))return hr;
+ water_ssr_width_=width;water_ssr_height_=height;
+ char text[64];std::snprintf(text,sizeof(text),"half-resolution reflection %ux%u",width,height);
+ bridge_report_event("water_ssr",text);
+ return S_OK;
+}
 bool Renderer::prepare_water_reflections(const FixedState& state) {
  const auto unavailable=[&](const char* reason) {
   if(!water_failure_reported_){water_failure_reported_=true;OutputDebugStringA(reason);}
@@ -754,7 +930,7 @@ bool Renderer::prepare_water_reflections(const FixedState& state) {
  if(water_capture_frame_!=native_frame_index_||water_capture_flush_!=native_flush_serial_) {
   water_capture_frame_=native_frame_index_;water_capture_flush_=native_flush_serial_;water_capture_ready_=false;
   if(!enabled)return false;
-  if(!native_world_clip_valid_||FAILED(create_water_reflection_targets()))
+  if(!native_world_clip_valid_||FAILED(d3d12_?create_water_reflection_targets_d3d12():create_water_reflection_targets()))
    {++water_reflection_resource_failures_;return unavailable("EID3D11 water reflections: scene resources unavailable; using analytic sky\n");}
   WaterReflectionConstants constants{};constants.clip=native_world_clip_;
   // Invert the renderer-owned clip matrix; no camera or engine layout inference.
@@ -799,23 +975,30 @@ bool Renderer::prepare_water_reflections(const FixedState& state) {
    std::snprintf(line,sizeof(line),"EID3D11 water reflections: quality %d, %.0f march steps",quality,constants.quality[0]);
    bridge_append_probe_event("water_reflections",line);
   }
+  if(d3d12_){ // D3D12: the constants stay here (b7, set per draw); the copies in stream order
+   water12_.constants=constants;
+   transition_profile_pass("liquid_scene_copy");
+   HRESULT copied=d3d12_->copy_texture(*water12_.scene,0,*world_d3d12_,0); // slice 0, level 0
+   if(SUCCEEDED(copied))copied=d3d12_->copy_depth(*water12_.depth,*world_d3d12_);
+   end_profile_pass();
+   if(FAILED(copied))return unavailable("EID3D11 water reflections: scene copy failed; using analytic sky\n");
+   water_capture_clip_=native_world_clip_;water_capture_ready_=true;
+  }else{
   D3D11_MAPPED_SUBRESOURCE mapped{};
   if(FAILED(context_->Map(water_reflection_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))
    return unavailable("EID3D11 water reflections: constant upload failed; using analytic sky\n");
   std::memcpy(mapped.pData,&constants,sizeof(constants));context_->Unmap(water_reflection_constants_.Get(),0);
   clear_water_reflection_bindings();
   ComPtr<ID3D11Resource> source;rtv_->GetResource(&source);
-  // Preserve the exact ordered submission boundary and current history/AO MRT.
-  ID3D11RenderTargetView* targets[3]{};ID3D11DepthStencilView* depth=nullptr;
-  context_->OMGetRenderTargets(3,targets,&depth);
+  // The copy leaves the targets unbound; the native flush (the only caller)
+  // binds its history/AO targets again for the batch that follows.
   context_->OMSetRenderTargets(0,nullptr,nullptr);
   transition_profile_pass("liquid_scene_copy");
   context_->CopySubresourceRegion(water_scene_color_.Get(),D3D11CalcSubresource(0,0,water_scene_levels_),0,0,0,source.Get(),0,nullptr);
   context_->CopyResource(water_scene_depth_.Get(),depth_.Get());
   end_profile_pass();
-  context_->OMSetRenderTargets(targets[2]?3u:targets[1]?2u:1u,targets,depth);
-  for(auto* target:targets)if(target)target->Release();if(depth)depth->Release();
   water_capture_clip_=native_world_clip_;water_capture_ready_=true;
+  }
  }
  if(!enabled||!water_capture_ready_)return false;
  (void)state; // Depth writes stay as the game sets them; the march reads a depth snapshot.
@@ -834,18 +1017,27 @@ bool Renderer::prepare_water_reflections(const FixedState& state) {
 // frame, so transparent passes drawn after the water are in them). Taken
 // after every world pass and before the composite, SMAA and post effects.
 void Renderer::capture_water_history() {
+ if(d3d12_){
+  if(!water12_.scene||!water_capture_ready_||water_capture_frame_!=native_frame_index_||!world_d3d12_)return;
+  transition_profile_pass("liquid_history_copy");
+  HRESULT copied=d3d12_->copy_texture(*water12_.scene,D3D11CalcSubresource(0,1,water_scene_levels_),*world_d3d12_,0);
+  if(SUCCEEDED(copied)&&water_scene_levels_>1){
+   copied=d3d12_->generate_mips(*water12_.scene,d3d12_mip_array_program(),1);
+   if(copied==S_FALSE)d3d12_->count("water history mips waiting for their program");
+  }
+  end_profile_pass();
+  if(FAILED(copied))return;
+ }else{
  if(!water_scene_srv_||!water_capture_ready_||water_capture_frame_!=native_frame_index_||!rtv_)return;
  clear_water_reflection_bindings();
  ComPtr<ID3D11Resource> source;rtv_->GetResource(&source);
- ID3D11RenderTargetView* targets[3]{};ID3D11DepthStencilView* depth=nullptr;
- context_->OMGetRenderTargets(3,targets,&depth);
+ // Targets stay unbound: the composite steps after it bind their own.
  context_->OMSetRenderTargets(0,nullptr,nullptr);
  transition_profile_pass("liquid_history_copy");
  context_->CopySubresourceRegion(water_scene_color_.Get(),D3D11CalcSubresource(0,1,water_scene_levels_),0,0,0,source.Get(),0,nullptr);
  if(water_scene_levels_>1)context_->GenerateMips(water_history_srv_.Get());
  end_profile_pass();
- context_->OMSetRenderTargets(targets[2]?3u:targets[1]?2u:1u,targets,depth);
- for(auto* target:targets)if(target)target->Release();if(depth)depth->Release();
+ }
  water_history_clip_=water_capture_clip_;water_history_inverse_=water_capture_inverse_;water_history_frame_=native_frame_index_;
  // The particle depth this frame wrote goes with its colour; the next
  // frame writes the other slot.
@@ -920,29 +1112,23 @@ void Renderer::draw_game_particle_depth(UINT vertex_count) {
   particle_depth_width_=width_;particle_depth_height_=height_;
  }
  transition_profile_pass("particle_reflection_depth");
- ID3D11RenderTargetView* targets[3]{};ID3D11DepthStencilView* depth=nullptr;
- context_->OMGetRenderTargets(3,targets,&depth);
- ID3D11BlendState* blend=nullptr;float factor[4]{};UINT mask=0;context_->OMGetBlendState(&blend,factor,&mask);
- ID3D11DepthStencilState* test=nullptr;UINT reference=0;context_->OMGetDepthStencilState(&test,&reference);
- ID3D11PixelShader* pixel=nullptr;context_->PSGetShader(&pixel,nullptr,nullptr);
+ // The second draw of the game particle it follows (same vertex stage and
+ // inputs). It restores nothing: every following draw binds its own targets,
+ // pixel shader, blend and depth state (draw, draw_game_effect, apply_state,
+ // the native flush and the world passes). Its target is unbound after it.
  ID3D11ShaderResourceView* empty=nullptr;context_->PSSetShaderResources(28,1,&empty);
  ID3D11RenderTargetView* const output=particle_depth_rtv_[particle_depth_current_].Get();
  if(particle_depth_frame_!=native_frame_index_) {
   const float far_depth[4]={1,1,1,1};context_->ClearRenderTargetView(output,far_depth);
   particle_depth_frame_=native_frame_index_;
  }
- context_->OMSetRenderTargets(1,&output,dsv_.Get());
+ bind_plan_targets(plan_pass("particle_reflection_depth",output,dsv_.Get()));
  context_->OMSetBlendState(particle_depth_blend_.Get(),nullptr,0xffffffffu);
  context_->OMSetDepthStencilState(particle_depth_test_.Get(),0);
  context_->PSSetShader(game_particle_depth_ps_.Get(),nullptr,0);
  context_->Draw(vertex_count,0);
  profiler_.add_draw(vertex_count/3u,1);profiler_.add_batch();
- context_->PSSetShader(pixel,nullptr,0);
- context_->OMSetDepthStencilState(test,reference);
- context_->OMSetBlendState(blend,factor,mask);
- context_->OMSetRenderTargets(targets[2]?3u:targets[1]?2u:1u,targets,depth);
- for(auto* target:targets)if(target)target->Release();
- if(depth)depth->Release();if(blend)blend->Release();if(test)test->Release();if(pixel)pixel->Release();
+ context_->OMSetRenderTargets(0,nullptr,nullptr);
 }
 
 #endif

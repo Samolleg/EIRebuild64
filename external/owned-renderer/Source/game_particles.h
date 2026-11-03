@@ -290,19 +290,26 @@ float4 gpArg(uint selector,float4 diffuse,float4 textureSample){
 float3 gpColor(uint op,float4 a,float4 b,float3 c){if(op==2)return a.rgb;if(op==3)return b.rgb;if(op==4)return a.rgb*b.rgb;if(op==5)return saturate(2*a.rgb*b.rgb);if(op==7)return saturate(a.rgb+b.rgb);return c;}
 float gpAlpha(uint op,float4 a,float4 b,float c){if(op==2)return a.a;if(op==3)return b.a;if(op==4)return a.a*b.a;if(op==5)return saturate(2*a.a*b.a);if(op==7)return saturate(a.a+b.a);return c;}
 bool gpCompare(float a){if(gpAlphaFunc==1)return false;if(gpAlphaFunc==2)return a<gpAlphaRef;if(gpAlphaFunc==3)return a==gpAlphaRef;if(gpAlphaFunc==4)return a<=gpAlphaRef;if(gpAlphaFunc==5)return a>gpAlphaRef;if(gpAlphaFunc==6)return a!=gpAlphaRef;if(gpAlphaFunc==7)return a>=gpAlphaRef;return true;}
-// Target 1 is the bloom glow target, bound only for additive world
-// particles (light): it receives the same fogged, blended light.
+// Target 1 is the bloom glow target, bound for blended world particles that
+// are not modulating. Additive particles (light) write the same fogged,
+// blended light. Alpha-blended ones write their colour weighted by
+// gpFlameKey under their own alpha: the game's torch and campfire flames
+// (PTID_CAMPFIRE/FIRE, TendriSmoke, not additive) glow, while their grey
+// smoke, blood and dust do not and cover the glow behind them.
+float gpFlameKey(float3 c){float hi=max(c.r,max(c.g,c.b)),lo=min(c.r,min(c.g,c.b));
+ return smoothstep(.5,.9,hi)*smoothstep(.35,.65,(hi-lo)/max(hi,1e-4));}
 struct GameParticlePixel{float4 color:SV_Target0;float4 glow:SV_Target1;};
 GameParticlePixel gameParticlePS(GameParticleOut i){
  float4 t=gpTextured!=0?gpTexture.Sample(gpSampler,i.uv):float4(1,1,1,1),c=i.d;
  c.rgb=gpColor(gpColorOp,gpArg(gpColorArg1,i.d,t),gpArg(gpColorArg2,i.d,t),c.rgb);
  c.a=gpAlpha(gpAlphaOp,gpArg(gpAlphaArg1,i.d,t),gpArg(gpAlphaArg2,i.d,t),c.a);
  if(gpAlphaTest!=0&&!gpCompare(c.a))discard;
+ const float flame=gpCoverageMode==0?gpFlameKey(c.rgb):1; // authored colour, before fog
  // 1: blended like a surface (takes fog colour and in-scatter); 2: additive
  // light, only attenuated.
  [branch]if(gpFogMode==1){c.rgb=lerp(gpFogColor.rgb,c.rgb,nativeFogFactor(1,i.p));nativeAtmosphere(c.rgb,i.p,gpFogColor.rgb);}
  else if(gpFogMode==2){float3 added=0;c.rgb*=nativeFogFactor(1,i.p)*nativeAtmosphere(added,i.p,gpFogColor.rgb);}
- GameParticlePixel o;o.color=c;o.glow=c;return o;
+ GameParticlePixel o;o.color=c;o.glow=float4(c.rgb*flame,c.a);return o;
 }
 // Reflection depth (#140): the particle's screen depth where it covers the
 // pixel visibly, for the next frame's water reflections; min-blended into a

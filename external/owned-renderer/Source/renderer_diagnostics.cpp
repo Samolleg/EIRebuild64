@@ -42,7 +42,6 @@
 #include "retained_static_scene.h"
 #include "widescreen.h"
 #include "test_harness.h"
-#include "x64_remote_device.h"
 #include "x64_remote_link.h"
 #include "dlss_frame.h"
 #include "stall_watchdog.h"
@@ -143,16 +142,6 @@ bool Renderer::status_text_wanted() const noexcept {
 }
 RendererResourceSnapshot Renderer::resource_snapshot() const {
  RendererResourceSnapshot snapshot=native_frame_stats_;
- if(debug_overlay_.settings_open()&&samgbur_lod_frame_==presentation_frame_index_){
-  snapshot.samgbur_lod=samgbur_lod_snapshot_;
-  snapshot.samgbur_lod.instances=static_cast<UINT>(samgbur_lod_records_.size());
-  const auto selected=debug_overlay_.samgbur_lod_instance();
-  if(selected>=samgbur_lod_records_.size()||samgbur_lod_records_[selected]!=snapshot.samgbur_lod.record){
-   snapshot.samgbur_lod.state=samgbur_lod_records_.empty()?SamgburLodSnapshot::absent:SamgburLodSnapshot::waiting;
-  }
-  snapshot.samgbur_lod.age_frames=presentation_frame_index_>=snapshot.samgbur_lod.sample_frame?
-   presentation_frame_index_-snapshot.samgbur_lod.sample_frame:0;
- }
  {const auto& grid=native_point_light_grid_;const std::uint64_t cells=std::uint64_t(grid.width)*grid.height;
   snapshot.point_light_grid={native_point_lights_.size(),grid.width,grid.height,
    grid.data.size()>cells?grid.data.size()-cells-1:0,grid.max_per_cell,emissive_published_};}
@@ -225,6 +214,14 @@ RendererResourceSnapshot Renderer::resource_snapshot() const {
   snapshot.surface_restore_readbacks=residency.restore_readbacks;snapshot.pinned_surfaces=residency.pinned_surfaces;
   snapshot.surface_restore_readback_ms=frequency.QuadPart?1000.0*static_cast<double>(residency.restore_readback_qpc)/static_cast<double>(frequency.QuadPart):0.0;}
  snapshot.transient_upload_bytes=static_cast<std::uint64_t>(dynamic_vertex_capacity_)+dynamic_index_capacity_+native_dynamic_capacity_+(native_world_lighting_constants_?sizeof(NativeWorldLighting):0u)+(native_point_light_constants_?32u:0u)+static_cast<std::uint64_t>(native_point_light_capacity_)*sizeof(NativePointLightGpu)+static_cast<std::uint64_t>(native_point_light_grid_capacity_)*sizeof(UINT)+static_cast<std::uint64_t>(native_draw_work_capacity_)*sizeof(NativeDrawWorkGpu)+static_cast<std::uint64_t>(native_visible_triangle_capacity_)*16u+static_cast<std::uint64_t>(native_prepared_vertex_capacity_)*sizeof(NativePreparedVertexGpu)+static_cast<std::uint64_t>(native_indirect_args_capacity_)*16u;
+ // renderer_backend=d3d12: the native queue's frame buffers on the executor
+ // (the D3D11 capacities above stay zero there).
+ if(d3d12_){
+  snapshot.d3d12_backend=true;
+  for(const auto* buffer:{native12_.dynamic.get(),native12_.work.get(),native12_.arguments.get(),native12_.visible.get(),
+                          native12_.prepared.get(),native12_.point_lights.get(),native12_.point_light_grid.get()})
+   if(buffer)snapshot.transient_upload_bytes+=d3d12_->buffer_bytes(*buffer);
+ }
  for(const auto& pending:pending_blits_)snapshot.transient_upload_bytes+=pending.pixels.capacity()*sizeof(std::uint32_t);
  std::uint64_t overlay_bytes=0;for(const auto& entry:overlay_textures_)overlay_bytes+=texture_storage_bytes(entry.second.texture.Get());std::uint64_t native_texture_array_bytes=0;snapshot.native_texture_array_classes=native_texture_arrays_.size();for(const auto& group:native_texture_arrays_)for(const auto& page:group.second){native_texture_array_bytes+=texture_storage_bytes(page.texture.Get());++snapshot.native_texture_array_pages;snapshot.native_texture_array_slices+=page.used;}
  snapshot.owned_texture_entries=native_owned_textures_.size();snapshot.owned_texture_bytes=native_owned_texture_bytes(false);
@@ -325,9 +322,8 @@ VideoMemoryBreakdown Renderer::video_memory_breakdown() const {
    std::uint64_t(native_point_light_capacity_)*sizeof(NativePointLightGpu)+std::uint64_t(native_point_light_grid_capacity_)*sizeof(UINT)+
    std::uint64_t(native_draw_work_capacity_)*sizeof(NativeDrawWorkGpu)+std::uint64_t(native_visible_triangle_capacity_)*16u+
    std::uint64_t(native_prepared_vertex_capacity_)*sizeof(NativePreparedVertexGpu)+std::uint64_t(native_indirect_args_capacity_)*16u);
-  // Terrain material cache (terrain_bake): atlases, staging and block targets.
-  for(auto* texture:{terrain_bake_near_.Get(),terrain_bake_far_.Get(),terrain_bake_texture_.Get(),terrain_bake_blocks_.Get(),terrain_bake_near_blocks_.Get()})
-   out.terrain_cache_bytes+=resource_video_bytes(texture);
+  // Terrain 2.0 material cache (terrain2_cache): fine slices and coarse atlas.
+  for(auto* texture:{terrain2_cache_fine_.Get(),terrain2_cache_coarse_.Get()})out.terrain_cache_bytes+=resource_video_bytes(texture);
   out.terrain_cache_known=true;
   out.valid=true;
  }catch(const std::bad_alloc&){return video_memory_;}
@@ -529,6 +525,13 @@ Renderer::HarnessRequest Renderer::step_test_harness(const ScenePresentInputs* i
    harness_complete(ok,detail);
   harness_stage_=0;harness_wait_=0;};
  std::string detail;
+ // D3D12 backend: no world yet (wait_ready) and no outer frame recorder
+ // (profile), so these fail at once (named) and the route goes on; captures
+ // (the profiler's pass timings), screenshots, config and paths run.
+ if(d3d12_&&(command->verb==HarnessVerb::profile||command->verb==HarnessVerb::wait_ready)){
+  finish(false,"not on the Direct3D 12 backend yet (no world, no outer frame recorder)");
+  return HarnessRequest::none;
+ }
  switch(command->verb){
  case HarnessVerb::capture:
   if(harness_stage_==0){
@@ -582,10 +585,12 @@ Renderer::HarnessRequest Renderer::step_test_harness(const ScenePresentInputs* i
   }
   return HarnessRequest::none;
  case HarnessVerb::screenshot:{
-  // With critter labels on, the shot is written after this present's
-  // overlay pass so the labels can be checked; otherwise it is the game's image.
+  // With critter labels on (or harness_shot_after_overlay, to check the F10
+  // overlay), the shot is written after this present's overlay pass and
+  // cursor; otherwise it is the game's image.
   if(harness_stage_==1)return HarnessRequest::none;
-  if(configured_integer(debug_overlay_.config(),"critter_labels",0)){
+  if(configured_integer(debug_overlay_.config(),"critter_labels",0)||
+     configured_boolean(debug_overlay_.config(),"harness_shot_after_overlay",false)){
    harness_overlay_shot_=harness_directory()+command->name+".bmp";harness_stage_=1;
    return HarnessRequest::none;
   }
@@ -776,7 +781,8 @@ const char* Renderer::load_reveal_ground_cover_wait() noexcept{
    return "ground cover tile families";
   // Atlases arrive as the game draws its terrain; wait while they still do.
   if(!gc_material_state_.empty()&&gc_painted_frame_+3>native_frame_index_)return "ground cover atlases painting";
-  for(const auto& n:gc_neighbours_)if(!n.prepared||n.families.valid())return "neighbour ground cover";
+  // D3D12: neighbours keep only their blend maps (no cover pass to prepare).
+  for(const auto& n:gc_neighbours_)if((!d3d12_&&!n.prepared)||n.families.valid())return "neighbour ground cover";
  }
  return nullptr;
 }
@@ -966,6 +972,9 @@ void report_game_address_space(std::uint64_t world_epoch) noexcept try{
 // drops them; the next flush recreates each at that world's demand (every
 // use goes through its ensure step, which creates on a null buffer).
 void Renderer::release_world_upload_peaks() noexcept{
+ // These buffers hold only a flush's uploads. Their next use ensures their
+ // size again; D3D12 releases remain deferred behind the recording fence.
+ native12_.dynamic.reset();native12_.work.reset();native12_.pose_inputs.reset();
  native_dynamic_.Reset();native_dynamic_srv_.Reset();native_dynamic_capacity_=0;
  native_draw_work_.Reset();native_draw_work_srv_.Reset();native_draw_work_capacity_=0;
  native_instance_updates_.Reset();native_instance_update_srv_.Reset();native_instance_update_capacity_=0;
@@ -1007,10 +1016,12 @@ template<class Map> void compact_map(Map& map) {
 // stream of the generation whose neighbours are released here is stopped:
 // a reload of the same map reuses its main source and loader generation, and
 // neighbour_maps_begin would otherwise accept that drained stream as current
-// and nothing would be uploaded again.
+// and nothing would be uploaded again. Unless that reload's load start
+// already restarted it for this new world (held: neighbour_maps_restart,
+// core mode), which this releases instead.
 void Renderer::release_world_state() noexcept try{
  // Neighbour draws first: they index the instance records cleared below.
- neighbour_client_stop_epoch(neighbours_.epoch);
+ neighbour_client_world_changed(neighbours_.epoch);
  release_neighbour_maps();
  release_storage(neighbours_.accepted);
  // Prepared handles (invalidate_native_prepared_handles without the stream stop).
@@ -1045,6 +1056,11 @@ void Renderer::release_world_state() noexcept try{
  for(auto& free_ranges:native_free_ranges_)release_storage(free_ranges);native_free_ranges_complete_.fill(true);
  release_storage(native_terrain_phases_);release_storage(native_terrain_phase_lookup_);release_storage(native_terrain_phase_free_);release_storage(native_terrain_phase_work_);release_storage(native_terrain_phase_copies_);
  native_world_states_.Reset();native_world_state_srv_.Reset();native_world_state_uav_.Reset();native_world_state_capacity_=0;
+ // D3D12: the prepared world states and vertices go with their ranges. The
+ // range generations restart, so a kept state of the previous map matched a
+ // new range's generation and its record was never prepared (the screen-
+ // centre streak: a zero world vertex projects to clip (0,0,0,0)).
+ native12_.world_states.reset();native12_.world_vertices.reset();
  native_pose_nodes_.Reset();native_pose_node_srv_.Reset();native_pose_node_uav_.Reset();
  native_pose_node_capacity_=native_pose_node_used_=0;
  native_animation_.Reset();native_animation_srv_.Reset();native_animation_uav_.Reset();
@@ -1059,7 +1075,6 @@ void Renderer::release_world_state() noexcept try{
  native_visible_triangle_capacity_=0;
  native_prepared_vertices_.Reset();native_prepared_vertex_srv_.Reset();native_prepared_vertex_uav_.Reset();
  native_prepared_vertex_capacity_=0;
- reset_samgbur_lod_diagnostic();
  native_indirect_args_.Reset();native_indirect_args_uav_.Reset();native_indirect_args_capacity_=0;
  release_world_upload_peaks();
  // Geometry: every mesh and morph, and every page (general and neighbour
@@ -1080,15 +1095,17 @@ void Renderer::release_world_state() noexcept try{
   entry=native_owned_textures_.erase(entry);
  }}
  neighbour_textures_clear();
+ terrain_textures_d3d12_.clear();terrain_pages_d3d12_={}; // D3D12 backend: the terrain pages of the released world
  {std::lock_guard<std::mutex> guard(native_owned_textures_lock_);compact_map(native_owned_textures_);}compact_map(native_texture_arrays_);
  // Impostor atlas (the bake pipeline and its fixed depth target stay).
  impostors_.albedo.Reset();impostors_.normal.Reset();impostors_.albedo_srv.Reset();impostors_.normal_srv.Reset();
+ impostors_.albedo12.reset();impostors_.normal12.reset(); // D3D12 backend (the bake targets stay)
  impostors_.capacity=impostors_.count=0;release_storage(impostors_.slices);
  // Shadows: static layers and point atlases belong to the world; the maps
  // themselves are sized by settings and stay.
  native_shadow_static_valid_.fill(false);native_shadow_frame_={};native_shadow_dirty_mask_=native_shadow_cleared_mask_=0;
  native_shadow_constants_dirty_=true;shadow_history_valid_=false;
- if(context_){std::array<ID3D11ShaderResourceView*,PointShadowTextureLayout::array_bindings> empty{};
+ if(context_&&!d3d12_){std::array<ID3D11ShaderResourceView*,PointShadowTextureLayout::array_bindings> empty{};
   context_->PSSetShaderResources(PointShadowTextureLayout::first_srv,static_cast<UINT>(empty.size()),empty.data());}
  release_storage(native_point_shadow_pages_);native_point_shadow_generation_=0;
  native_point_shadow_active_=false;native_point_shadow_frame_={};
@@ -1113,7 +1130,7 @@ void Renderer::release_world_state() noexcept try{
  // Give the memory back: unbind everything (bindings hold references), let
  // the driver destroy the released objects, trim its internal allocations,
  // and decommit free process-heap pages.
- if(context_){context_->ClearState();camp_unclipped_raster_=nullptr;context_->Flush();}
+ if(context_&&!d3d12_){context_->ClearState();camp_unclipped_raster_=nullptr;context_->Flush();} // D3D12: the adopted device has no state
  if(device_){ComPtr<IDXGIDevice3> dxgi;if(SUCCEEDED(device_.As(&dxgi)))dxgi->Trim();}
  HeapCompact(GetProcessHeap(),0);
  _heapmin();
@@ -1126,7 +1143,9 @@ void Renderer::release_world_state() noexcept try{
 // world frames of a new epoch show that copy instead until the world is
 // ready. One load_reveal line per load gives its timing and address space.
 void Renderer::apply_load_reveal() noexcept try{
- if(!swap_||!context_||!device_)return;
+ // D3D12: the same hold; the picture is kept and shown through the executor
+ // (capture into load_picture12_, a full-screen interface draw back).
+ if(!d3d12_&&(!swap_||!context_||!device_))return;
  const std::uint64_t draws=bridge_world_draw_completion_counter();
  const bool world_frame=draws!=load_reveal_draws_;load_reveal_draws_=draws;
  const bool picture=load_picture_this_frame_;load_picture_this_frame_=false;
@@ -1135,15 +1154,27 @@ void Renderer::apply_load_reveal() noexcept try{
  // The world Draw entry pauses the game while an epoch is not yet revealed.
  bridge_set_load_reveal(enabled,load_reveal_revealed_epoch_);
  ComPtr<ID3D11Texture2D> back;
- if(FAILED(swap_->GetBuffer(0,IID_PPV_ARGS(&back))))return;
- D3D11_TEXTURE2D_DESC back_desc{};back->GetDesc(&back_desc);
+ D3D11_TEXTURE2D_DESC back_desc{};
+ if(!d3d12_){
+  if(FAILED(swap_->GetBuffer(0,IID_PPV_ARGS(&back))))return;
+  back->GetDesc(&back_desc);
+ }
  const auto picture_matches=[&]{
+  if(d3d12_)return load_picture12_&&d3d12_->texture_matches(*load_picture12_,output_width_,output_height_,DXGI_FORMAT_B8G8R8A8_UNORM);
   if(!load_picture_)return false;
   D3D11_TEXTURE2D_DESC kept{};load_picture_->GetDesc(&kept);
   return kept.Width==back_desc.Width&&kept.Height==back_desc.Height&&kept.Format==back_desc.Format;
  };
  if(picture&&!world_frame){
   if(!enabled)return;
+  if(d3d12_){
+   if(!picture_matches()){
+    load_picture12_.reset();
+    if(FAILED(d3d12_->create_texture(output_width_,output_height_,DXGI_FORMAT_B8G8R8A8_UNORM,load_picture12_))){load_picture12_.reset();return;}
+   }
+   if(FAILED(d3d12_->capture(*load_picture12_,0,0,RECT{0,0,LONG(output_width_),LONG(output_height_)})))load_picture12_.reset();
+   return;
+  }
   if(!picture_matches()){
    D3D11_TEXTURE2D_DESC desc=back_desc;desc.BindFlags=0;desc.CPUAccessFlags=0;desc.MiscFlags=0;
    desc.Usage=D3D11_USAGE_DEFAULT;desc.MipLevels=1;desc.ArraySize=1;desc.SampleDesc={1,0};
@@ -1162,8 +1193,11 @@ void Renderer::apply_load_reveal() noexcept try{
   load_reveal_progress_peak_={};load_reveal_perches_ready_=false;
   (void)take_load_cursor_presents(); // counted from this hold on
   reset_pipeline_warmup();
+  // D3D12: no D3D11 warm-up draws; pipelines build ahead on the executor's
+  // workers from its pipeline library, so the hold does not wait for them.
+  if(d3d12_)warmup_done_=true;
  }
- if(!load_reveal_tracking_){if(world_frame){load_picture_.Reset();load_progress_movie_={};load_progress_movie_valid_=false;cancel_load_progress_decode();}return;}
+ if(!load_reveal_tracking_){if(world_frame){load_picture_.Reset();load_picture12_.reset();load_progress_movie_={};load_progress_movie_valid_=false;cancel_load_progress_decode();}return;}
  std::uint64_t used=0,largest=0;address_space_mb(used,largest,false);
  load_reveal_va_peak_=(std::max)(load_reveal_va_peak_,used);
  if(!world_frame)return; // menus, movies and loading pictures present as they are
@@ -1180,7 +1214,7 @@ void Renderer::apply_load_reveal() noexcept try{
  constexpr double kCapMs=3000.0,kNeighbourCapMs=10000.0,kCapFrameMs=250.0;
  const double frame_ms=(std::min)(kCapFrameMs,static_cast<double>(now-load_reveal_last_world_)*ms_per_tick);
  load_reveal_last_world_=now;
- if(load_reveal_holding_&&(load_reveal_held_ms_<kCapMs||load_reveal_neighbour_held_ms_<kNeighbourCapMs))
+ if(!d3d12_&&load_reveal_holding_&&(load_reveal_held_ms_<kCapMs||load_reveal_neighbour_held_ms_<kNeighbourCapMs))
   pump_pipeline_warmup();
  LoadRevealWait kind=LoadRevealWait::other;
  const char* waiting=load_reveal_waiting_on(kind);
@@ -1193,6 +1227,39 @@ void Renderer::apply_load_reveal() noexcept try{
   }
   if(load_reveal_holding_){
    ++load_reveal_frames_;
+   if(d3d12_){
+    // The held picture over the whole frame (opaque), else black. The
+    // progress movie's later frames are not drawn on this backend (named).
+    if(picture_matches()){
+     const float w=float(output_width_),h=float(output_height_);
+     const Vertex quad[4]={{0,0,0,1,0xffffffffu,0xffffffffu,0,0},{w,0,0,1,0xffffffffu,0xffffffffu,1,0},
+                           {0,h,0,1,0xffffffffu,0xffffffffu,0,1},{w,h,0,1,0xffffffffu,0xffffffffu,1,1}};
+     Constants block{};block.viewport[2]=w;block.viewport[3]=h;
+     block.texture_factor[0]=block.texture_factor[1]=block.texture_factor[2]=block.texture_factor[3]=1.0f;
+     block.transformed=TRUE;block.textured=TRUE;
+     block.color_op=D3DTOP_SELECTARG1;block.color_arg1=D3DTA_TEXTURE;block.color_arg2=D3DTA_CURRENT;
+     block.alpha_op=D3DTOP_SELECTARG1;block.alpha_arg1=D3DTA_TEXTURE;block.alpha_arg2=D3DTA_CURRENT;
+     block.alpha_func=D3DCMP_ALWAYS;block.hud_opacity=1.0f;
+     D3D12UiDraw draw;draw.texture=load_picture12_.get();draw.program=D3D12UiProgram::game;
+     draw.blend=fixed_blend_choice(FALSE,D3DBLEND_ONE,D3DBLEND_ZERO,false);
+     draw.sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT;
+     draw.sampler.AddressU=draw.sampler.AddressV=draw.sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
+     draw.sampler.MaxLOD=D3D11_FLOAT32_MAX;
+     draw.first_vertex=0;draw.vertex_count=4;
+     D3D12UiPass ui;
+     ui.vertices=quad;ui.vertex_bytes=sizeof(quad);ui.vertex_stride=sizeof(Vertex);
+     ui.constants=&block;ui.constant_block_bytes=sizeof(Constants);ui.constant_blocks=1;
+     ui.draws=&draw;ui.draw_count=1;
+     (void)d3d12_->draw_ui(ui);
+     if(load_progress_movie_valid_)d3d12_->omit("load progress movie frames during the hold (the held picture shows)",false);
+    }else{
+     const float black[4]={0,0,0,1};
+     const RECT whole{0,0,LONG(output_width_),LONG(output_height_)};
+     d3d12_->clear_rectangles(&whole,1,black,false,false,1.f,0);
+    }
+    frame_statistics_.reset();
+    return;
+   }
    if(picture_matches()){
     context_->CopyResource(back.Get(),load_picture_.Get());
     // The progress movie's later frames follow the hold's real progress.
@@ -1237,11 +1304,11 @@ void Renderer::apply_load_reveal() noexcept try{
   prepared_ms>0.0?1000.0*load_reveal_frames_/prepared_ms:0.0,take_load_cursor_presents());
  bridge_report_event("load_reveal",text);
  report_address_space_regions();
- load_reveal_tracking_=load_reveal_holding_=false;load_picture_.Reset();
+ load_reveal_tracking_=load_reveal_holding_=false;load_picture_.Reset();load_picture12_.reset();
  load_progress_movie_={};load_progress_movie_valid_=false;cancel_load_progress_decode();
  load_reveal_revealed_epoch_=epoch;bridge_set_load_reveal(enabled,epoch);
 }catch(...){
- load_reveal_tracking_=load_reveal_holding_=false;load_picture_.Reset();
+ load_reveal_tracking_=load_reveal_holding_=false;load_picture_.Reset();load_picture12_.reset();
  load_progress_movie_={};load_progress_movie_valid_=false;cancel_load_progress_decode();
  load_reveal_revealed_epoch_=bridge_current_world_epoch();bridge_set_load_reveal(false,load_reveal_revealed_epoch_);
 }
@@ -1296,11 +1363,53 @@ bool Renderer::apply_harness_config(const HarnessCommand& command,std::string& d
  return ok;
 }
 
+// B8G8R8A8 rows as a 24-bit bottom-up BMP (harness screenshots, both backends).
+static bool write_bgra_bmp(const std::string& path,const std::uint8_t* rows,UINT width,UINT height,UINT pitch,std::string& detail){
+ const UINT row=(width*3u+3u)&~3u;
+ std::vector<std::uint8_t> pixels(std::size_t(row)*height);
+ for(UINT y=0;y<height;++y){
+  const auto* source=rows+std::size_t(height-1u-y)*pitch;
+  auto* target=pixels.data()+std::size_t(y)*row;
+  for(UINT x=0;x<width;++x){target[x*3]=source[x*4];target[x*3+1]=source[x*4+1];target[x*3+2]=source[x*4+2];}
+ }
+ BITMAPINFOHEADER info{};info.biSize=sizeof(info);info.biWidth=LONG(width);info.biHeight=LONG(height);
+ info.biPlanes=1;info.biBitCount=24;info.biCompression=BI_RGB;info.biSizeImage=DWORD(pixels.size());
+ BITMAPFILEHEADER file{};file.bfType=0x4d42;file.bfOffBits=sizeof(file)+sizeof(info);
+ file.bfSize=DWORD(file.bfOffBits+pixels.size());
+ FILE* output=nullptr;
+ if(fopen_s(&output,path.c_str(),"wb")||!output){detail="cannot write "+path;return false;}
+ const bool written=std::fwrite(&file,sizeof(file),1,output)==1&&std::fwrite(&info,sizeof(info),1,output)==1&&
+  std::fwrite(pixels.data(),1,pixels.size(),output)==pixels.size();
+ const bool closed=std::fclose(output)==0;
+ char text[64]{};std::snprintf(text,sizeof(text)," %ux%u",width,height);
+ detail=written&&closed?path+text:"write failed: "+path;
+ return written&&closed;
+}
+
+// fg_frame_image: this frame's HUD-less world copy (D3D12), as a capture image.
+bool Renderer::write_hudless_image(const std::string& path,std::string& detail) noexcept {
+ const stall_watch::Exempt disk_export;
+ try{
+  if(!d3d12_||!hudless_d3d12_){detail="no HUD-less copy";return false;}
+  std::vector<std::uint8_t> bgra;UINT width=0,height=0;
+  if(d3d12_->read_texture(*hudless_d3d12_,bgra,width,height)!=S_OK){detail="HUD-less readback failed";return false;}
+  return write_bgra_bmp(path,bgra.data(),width,height,width*4u,detail);
+ }catch(...){detail="allocation failed";return false;}
+}
+
 // The back buffer as the game composed it this present (before the debug
 // view and overlay), as a 24-bit bottom-up BMP.
 bool Renderer::write_harness_screenshot(const std::string& path,std::string& detail) noexcept {
  const stall_watch::Exempt disk_export;
  try{
+  if(d3d12_){
+   // D3D12 backend: the real back buffer, copied and read back on the GPU queue.
+   std::vector<std::uint8_t> bgra;UINT width=0,height=0;
+   const HRESULT hr=d3d12_->read_back_buffer(bgra,width,height);
+   if(hr==S_FALSE){detail="back buffer unavailable (minimized)";return false;}
+   if(FAILED(hr)){char text[80]{};std::snprintf(text,sizeof(text),"D3D12 back buffer readback failed (%08lx)",static_cast<unsigned long>(hr));detail=text;return false;}
+   return write_bgra_bmp(path,bgra.data(),width,height,width*4u,detail);
+  }
   ComPtr<ID3D11Texture2D> back;
   if(!swap_||FAILED(swap_->GetBuffer(0,IID_PPV_ARGS(&back)))){detail="back buffer unavailable";return false;}
   D3D11_TEXTURE2D_DESC desc{};back->GetDesc(&desc);
@@ -1314,26 +1423,12 @@ bool Renderer::write_harness_screenshot(const std::string& path,std::string& det
   // Bounded (2 s): a GPU that stops completing work fails the harness
   // command (gpu_readback_timeout) instead of hanging the present thread.
   if(FAILED(gpu_map_read_bounded(context_.Get(),device_.Get(),staging.Get(),0,mapped,"harness screenshot",&detail)))return false;
-  const UINT row=(desc.Width*3u+3u)&~3u;
-  std::vector<std::uint8_t> pixels(std::size_t(row)*desc.Height);
-  for(UINT y=0;y<desc.Height;++y){
-   const auto* source=static_cast<const std::uint8_t*>(mapped.pData)+std::size_t(desc.Height-1u-y)*mapped.RowPitch;
-   auto* target=pixels.data()+std::size_t(y)*row;
-   for(UINT x=0;x<desc.Width;++x){target[x*3]=source[x*4];target[x*3+1]=source[x*4+1];target[x*3+2]=source[x*4+2];}
-  }
+  // Copied out of the mapping before Unmap (the D3D11 order of before).
+  std::vector<std::uint8_t> bgra(std::size_t(desc.Width)*4u*desc.Height);
+  for(UINT y=0;y<desc.Height;++y)
+   std::memcpy(bgra.data()+std::size_t(y)*desc.Width*4u,static_cast<const std::uint8_t*>(mapped.pData)+std::size_t(y)*mapped.RowPitch,std::size_t(desc.Width)*4u);
   context_->Unmap(staging.Get(),0);
-  BITMAPINFOHEADER info{};info.biSize=sizeof(info);info.biWidth=LONG(desc.Width);info.biHeight=LONG(desc.Height);
-  info.biPlanes=1;info.biBitCount=24;info.biCompression=BI_RGB;info.biSizeImage=DWORD(pixels.size());
-  BITMAPFILEHEADER file{};file.bfType=0x4d42;file.bfOffBits=sizeof(file)+sizeof(info);
-  file.bfSize=DWORD(file.bfOffBits+pixels.size());
-  FILE* output=nullptr;
-  if(fopen_s(&output,path.c_str(),"wb")||!output){detail="cannot write "+path;return false;}
-  const bool written=std::fwrite(&file,sizeof(file),1,output)==1&&std::fwrite(&info,sizeof(info),1,output)==1&&
-   std::fwrite(pixels.data(),1,pixels.size(),output)==pixels.size();
-  const bool closed=std::fclose(output)==0;
-  char text[64]{};std::snprintf(text,sizeof(text)," %ux%u",desc.Width,desc.Height);
-  detail=written&&closed?path+text:"write failed: "+path;
-  return written&&closed;
+  return write_bgra_bmp(path,bgra.data(),desc.Width,desc.Height,desc.Width*4u,detail);
  }catch(...){detail="allocation failed";return false;}
 }
 

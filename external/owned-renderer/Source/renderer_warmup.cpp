@@ -238,6 +238,10 @@ void Renderer::pump_pipeline_warmup() noexcept try {
             add(native_shadow_vs_.Get(), nullptr, nullptr, nullptr, WarmTargets{}, depth);
             add(native_shadow_vs_.Get(), nullptr, nullptr, native_shadow_ps_.Get(), WarmTargets{}, depth);
         }
+    // The precipitation shelter bake: every caster with the pixel stage into
+    // its R8 foliage mask over D32 depth.
+    if (configured_integer(config, "precipitation", 3) > 0 && native_shadow_vs_)
+        add(native_shadow_vs_.Get(), nullptr, nullptr, native_shadow_ps_.Get(), WarmTargets{{DXGI_FORMAT_R8_UNORM}, 1}, DXGI_FORMAT_D32_FLOAT);
 
     std::uint64_t signature = 14695981039346656037ull;
     for (const WarmItem& item : items) signature = item_hash(signature, item);
@@ -269,24 +273,10 @@ void Renderer::pump_pipeline_warmup() noexcept try {
         return view.Get();
     };
 
-    // The pipeline state this touches, restored afterwards (the frame's
-    // passes after Present set their own, but none relies on a stray stage).
-    ComPtr<ID3D11InputLayout> layout; D3D11_PRIMITIVE_TOPOLOGY topology{};
-    ComPtr<ID3D11VertexShader> vs; ComPtr<ID3D11HullShader> hs; ComPtr<ID3D11DomainShader> ds;
-    ComPtr<ID3D11GeometryShader> gs; ComPtr<ID3D11PixelShader> ps;
-    ComPtr<ID3D11RasterizerState> raster; ComPtr<ID3D11BlendState> blend; float blend_factor[4]{}; UINT sample_mask = 0;
-    ComPtr<ID3D11DepthStencilState> depth_state; UINT stencil_ref = 0;
-    ID3D11RenderTargetView* targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{}; ID3D11DepthStencilView* depth = nullptr;
-    D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
-    UINT viewport_count = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
-    context_->IAGetInputLayout(&layout); context_->IAGetPrimitiveTopology(&topology);
-    context_->VSGetShader(&vs, nullptr, nullptr); context_->HSGetShader(&hs, nullptr, nullptr);
-    context_->DSGetShader(&ds, nullptr, nullptr); context_->GSGetShader(&gs, nullptr, nullptr);
-    context_->PSGetShader(&ps, nullptr, nullptr); context_->RSGetState(&raster);
-    context_->OMGetBlendState(&blend, blend_factor, &sample_mask); context_->OMGetDepthStencilState(&depth_state, &stencil_ref);
-    context_->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets, &depth);
-    context_->RSGetViewports(&viewport_count, viewports);
-
+    // Runs between the frame's last pass and Present. It binds every state it
+    // reads and restores nothing: the gamma pass and the next frame's passes
+    // bind their own. It leaves the tessellation stages null (the legacy and
+    // interface draws never set them) and its scratch targets unbound.
     context_->IASetInputLayout(nullptr);
     context_->GSSetShader(nullptr, nullptr, 0);
     const D3D11_VIEWPORT tiny{0, 0, float(kWarmSide), float(kWarmSide), 0, 1};
@@ -314,15 +304,8 @@ void Renderer::pump_pipeline_warmup() noexcept try {
         if (std::chrono::steady_clock::now() - begin >= kWarmSliceTime) break;
     }
 
-    context_->IASetInputLayout(layout.Get()); context_->IASetPrimitiveTopology(topology);
-    context_->VSSetShader(vs.Get(), nullptr, 0); context_->HSSetShader(hs.Get(), nullptr, 0);
-    context_->DSSetShader(ds.Get(), nullptr, 0); context_->GSSetShader(gs.Get(), nullptr, 0);
-    context_->PSSetShader(ps.Get(), nullptr, 0); context_->RSSetState(raster.Get());
-    context_->OMSetBlendState(blend.Get(), blend_factor, sample_mask); context_->OMSetDepthStencilState(depth_state.Get(), stencil_ref);
-    context_->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets, depth);
-    context_->RSSetViewports(viewport_count, viewport_count ? viewports : nullptr);
-    for (auto* target : targets) if (target) target->Release();
-    if (depth) depth->Release();
+    context_->HSSetShader(nullptr, nullptr, 0); context_->DSSetShader(nullptr, nullptr, 0);
+    context_->OMSetRenderTargets(0, nullptr, nullptr);
 
     // Every draw issued: the hold waits until the GPU has run them.
     if (warmup_next_ >= items.size()) {

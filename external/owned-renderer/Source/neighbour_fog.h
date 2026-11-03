@@ -201,6 +201,10 @@ inline void neighbour_fog_piece_constants(const NeighbourFogField& f, float info
 
 // Same math as border_fog_density for every world shader.
 constexpr char kNeighbourFogHlsl[] = R"(
+#ifndef NATIVE_LOOP_GUARD
+#define NATIVE_LOOP_GUARD(id,iteration,bound)
+#define NATIVE_LOOP_ALIVE
+#endif
 float neighbourSeamFog(float2 p,float4 seam,float4 curve){
  float4 s=float4(seam.xy-p,p-seam.zw);
  float4 u=saturate(s/curve.y);
@@ -217,10 +221,10 @@ float borderFogDensity(float2 p,float4 band,float bandDistance,float4 seam,float
 static const uint NEIGHBOUR_FOG_PIECES=8;
 float neighbourPieceSideCover(float edge,float outward,float along,bool alongY,float d,float4 pieces[NEIGHBOUR_FOG_PIECES],uint count){
  float across=edge+outward*.5,lo=along,hi=along;bool found=false;
- [loop]for(uint k=0;k<count;++k){float4 r=pieces[k];float2 s=alongY?r.yw:r.xz,a=alongY?r.xz:r.yw;
+ [loop]for(uint k=0;k<count;++k){NATIVE_LOOP_GUARD(10u,k,count)float4 r=pieces[k];float2 s=alongY?r.yw:r.xz,a=alongY?r.xz:r.yw;
   if(across>=a.x&&across<=a.y&&along>=s.x&&along<=s.y){found=true;lo=min(lo,s.x);hi=max(hi,s.y);}}
  if(!found)return 0;
- [loop]for(uint sweep=0;sweep<count;++sweep)[loop]for(uint m=0;m<count;++m){float4 r=pieces[m];float2 s=alongY?r.yw:r.xz,a=alongY?r.xz:r.yw;
+ [loop]for(uint sweep=0;sweep<count NATIVE_LOOP_ALIVE;++sweep)[loop]for(uint m=0;m<count;++m){NATIVE_LOOP_GUARD(11u,sweep*count+m,count)float4 r=pieces[m];float2 s=alongY?r.yw:r.xz,a=alongY?r.xz:r.yw;
   if(across>=a.x&&across<=a.y){if(s.x<=hi&&s.y>hi)hi=s.y;if(s.y>=lo&&s.x<lo)lo=s.x;}}
  return saturate(min(along-lo,hi-along)/d);
 }

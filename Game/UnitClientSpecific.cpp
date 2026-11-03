@@ -889,8 +889,8 @@ void CUnitClientSpecific::SetUnitPosition(float fpTime, float fpStep)
         else if(supported) return;
         else {pos=lpUnit->GetCP();}
     } else return;
-    // Flying CalcZ already includes its database-relative altitude once.
-    pos.z = lpUnit->CalcZ(pos.x, pos.y) + (lpUnit->GetUserUnitStats()->cLocomotion==3?0.f:lpUnit->fpBaseZ);
+    // Airborne CalcZ already includes its database-relative altitude once.
+    pos.z = lpUnit->CalcZ(pos.x, pos.y) + (lpUnit->GetUserUnitStats()->cLocomotion>=2&&lpUnit->GetUserUnitStats()->cLocomotion<=3?0.f:lpUnit->fpBaseZ);
     GetWorldBase()->MoveObject(lpUnit, pos);
     // we don't need orientation in the object viewer
     if (bFirstSetpos)
@@ -947,8 +947,8 @@ void CUnitClientSpecific::SetExactPosition(float fpTime)
     if (fpStep < 0)
     {
         CPlot3D pos = lpUnit->GetCP();
-        // Flying CalcZ already includes its database-relative altitude once.
-    pos.z = lpUnit->CalcZ(pos.x, pos.y) + (lpUnit->GetUserUnitStats()->cLocomotion==3?0.f:lpUnit->fpBaseZ);
+        // Airborne CalcZ already includes its database-relative altitude once.
+    pos.z = lpUnit->CalcZ(pos.x, pos.y) + (lpUnit->GetUserUnitStats()->cLocomotion>=2&&lpUnit->GetUserUnitStats()->cLocomotion<=3?0.f:lpUnit->fpBaseZ);
         GetWorldBase()->MoveObject(lpUnit, pos);
         // ASSERT(0&&"Wrong time counting");
         return;

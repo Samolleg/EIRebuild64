@@ -1016,18 +1016,22 @@ BOOL CItemQuick::Duplicate(CItem *lpItem, CSpellManager *pSpellManager) const
 /////////////////////////////////////////////////////////////////////////////////////
 CString CItemQuick::GetI3DTextureName() const
 {
+    const int graphics = GetTypeID() == ITID_ITEM_QUICK
+        ? theItemDatabase.GetQuickGraphicsIndex(GetShape(), GetMaterial()) : GetTTIndex();
     CString szName;
     if (GetShapeEntry() && GetShapeEntry()->szMaterialType.CompareNoCase("none") != 0)
-        szName.Format("qitem%04d.%s", GetTTIndex(), GetMaterialCode());
+        szName.Format("qitem%04d.%s", graphics, GetMaterialCode());
     else
-        szName.Format("qitem%04d", GetTTIndex());
+        szName.Format("qitem%04d", graphics);
     return szName;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CString CItemQuick::GetI3DFigureName() const
 {
+    const int graphics = GetTypeID() == ITID_ITEM_QUICK
+        ? theItemDatabase.GetQuickGraphicsIndex(GetShape(), GetMaterial()) : GetTTIndex();
     CString szName;
-    szName.Format("initqi%ditem", GetTTIndex());
+    szName.Format("initqi%ditem", graphics);
     return szName;
 }
 /////////////////////////////////////////////////////////////////////////////////////

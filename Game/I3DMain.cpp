@@ -304,8 +304,61 @@ BOOL CInterface3D::Draw()
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+// FPS is a complete repaint. Rasterize in CPU memory so updating the counter
+// never acquires a GPU surface DC while the previous frame is using it.
+static void UpdateFpsSurface(CInterface3D& interface3D, CI3DSurface& target, LPCSTR text)
+{
+    auto* surface = target.GetSurface();
+    const UINT width = surface->GetWidth();
+    const UINT height = surface->GetHeight();
+    CDC dc;
+    if (!dc.CreateCompatibleDC(nullptr))
+        AfxThrowResourceException();
+
+    BITMAPINFO info = {};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -LONG(height);
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    DWORD* pixels = nullptr;
+    CBitmap bitmap;
+    if (!bitmap.Attach(CreateDIBSection(dc.GetSafeHdc(), &info, DIB_RGB_COLORS,
+                                       reinterpret_cast<void**>(&pixels), nullptr, 0)))
+        AfxThrowResourceException();
+    CBitmap* previousBitmap = dc.SelectObject(&bitmap);
+    CFont* previousFont = dc.SelectObject(interface3D.GetFont(1));
+    dc.FillSolidRect(0, 0, width, height, target.colorKey);
+    dc.SetBkMode(TRANSPARENT);
+    const auto drawText = [&](LPCSTR value, CRect rectangle, UINT format) {
+        interface3D.VirtualToScreenLocal(rectangle);
+        rectangle.bottom += 2;
+        rectangle.right += 2;
+        CRect shadow = rectangle + CPoint(1, 1);
+        dc.SetTextColor(RGB(8, 8, 8));
+        dc.DrawText(value, -1, shadow, format);
+        dc.SetTextColor(RGB(255, 255, 255));
+        dc.DrawText(value, -1, rectangle, format);
+    };
+    // Preserve the existing two passes, font, shadow, alignment and scaled bounds.
+    drawText("FPS:", CRect(0, 0, 60, 18), DT_LEFT);
+    drawText(text, CRect(0, 0, 70, 18), DT_RIGHT);
+    drawText("FPS:", CRect(0, 0, 60, 18), DT_LEFT);
+    drawText(text, CRect(0, 0, 70, 18), DT_RIGHT);
+    const BOOL flushed = GdiFlush();
+    dc.SelectObject(previousFont);
+    dc.SelectObject(previousBitmap);
+    IfFailedThrowHR(flushed ? S_OK : E_FAIL, "FPS CPU rasterization");
+    for (size_t i = 0; i < size_t(width) * height; ++i)
+        pixels[i] |= 0xff000000u;
+    D3D11_SUBRESOURCE_DATA upload = {pixels, width * UINT(sizeof(DWORD)), 0};
+    surface->UpdateTexture(0, nullptr, &upload);
+}
+
 void CInterface3D::Draw2D()
 {
+    CorePerf::Partition uiTiming(CorePerf::UiRefresh);
     OwnedRender::E3RefreshInterface();
     CDX11 *pDX11 = GetD3D();
     pDX11->GetSpriteBatch()->Begin();
@@ -314,16 +367,23 @@ void CInterface3D::Draw2D()
     CString szString;
     if (!pScreens.empty())
     {
+        uiTiming.Stage(CorePerf::UiScreen);
         pScreens.back()->Draw2D();
+        uiTiming.Stage(CorePerf::UiHudBoundary);
         OwnedRender::E3HudBoundary();
+        uiTiming.Stage(CorePerf::UiTips);
         pScreens.back()->Draw2DTips();
     }
+    uiTiming.Stage(CorePerf::UiEffects);
     m_pEffects->Draw2D();
 
+    uiTiming.Stage(CorePerf::UiTextOver);
     if (pTextOver)
         pTextOver->Draw();
+    uiTiming.Stage(CorePerf::UiFlush);
     pDX11->GetSpriteBatch()->End();
 
+    uiTiming.Stage(CorePerf::UiBackground);
     if (eBGFlag == BG_FLAG_CREATE)
     { // if we have to create background screen
         pBGScreen = std::make_unique<CI3DSurface>(this, 0, 0, nScreenWidth, nScreenHeight, BS_VISIBLE, false);
@@ -348,7 +408,9 @@ void CInterface3D::Draw2D()
 
     pDX11->GetSpriteBatch()->Begin();
 
+    uiTiming.Stage(CorePerf::UiDebug);
     theDebugInfoSystem.Draw2D();
+    uiTiming.Stage(CorePerf::UiFps);
     {
         nCountFrames++;
         DWORD dwNewTime = timeGetTime();
@@ -359,13 +421,7 @@ void CInterface3D::Draw2D()
                 CString szFPS;
                 szFPS.Format("%.1f", nCountFrames * 1000.f / (dwNewTime - dwLastUpdateTime));
 #ifndef NOGETDC
-                pSurfaceFPS->GetDC();
-                pSurfaceFPS->Clear();
-                pSurfaceFPS->DrawText("FPS:", CRect(0, 0, 60, 18), 1, RGB(255, 255, 255), DT_LEFT);
-                pSurfaceFPS->DrawText(szFPS, CRect(0, 0, 70, 18), 1, RGB(255, 255, 255), DT_RIGHT);
-                pSurfaceFPS->DrawText("FPS:", CRect(0, 0, 60, 18), 1, RGB(255, 255, 255), DT_LEFT);
-                pSurfaceFPS->DrawText(szFPS, CRect(0, 0, 70, 18), 1, RGB(255, 255, 255), DT_RIGHT);
-                pSurfaceFPS->ReleaseDC();
+                UpdateFpsSurface(*this, *pSurfaceFPS, szFPS);
 #endif // NOGETDC
             }
             dwLastUpdateTime = dwNewTime;
@@ -374,9 +430,11 @@ void CInterface3D::Draw2D()
         if (pSurfaceFPS)
             pSurfaceFPS->Draw();
     }
+    uiTiming.Stage(CorePerf::UiConsole);
     if (pConsole && pConsole->IsVisible())
         pConsole->Draw2D();
 
+    uiTiming.Stage(CorePerf::UiFlush);
     pDX11->GetSpriteBatch()->End();
 }
 /////////////////////////////////////////////////////////////////////////////////////

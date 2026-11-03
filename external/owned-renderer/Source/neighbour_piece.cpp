@@ -3,6 +3,8 @@
 // renderer DLL or the x64 render host; no renderer state, no game memory.
 #include "neighbour_piece.h"
 
+#include "d3d12_frame.h"
+
 #include "native_instance_flags.h"
 #include "owned_terrain_views.h"
 
@@ -188,8 +190,8 @@ void piece_decorations(PieceBuilder& builder, const NeighbourMapUpload& upload) 
     }
 }
 
-void piece_impostors(PieceBuilder& builder, const NeighbourMapUpload& upload, ID3D11Device* device) {
-    if (!device) return;
+void piece_impostors(PieceBuilder& builder, const NeighbourMapUpload& upload, ID3D11Device* device, D3D12Preparer* d3d12) {
+    if (!device && !d3d12) return;
     for (const auto& [key, source] : upload.impostor_sources) {
         if (source.source.indices.empty() || !source.node || !source.node->texture || !key.first) continue;
         const auto& node = *source.node;
@@ -197,6 +199,18 @@ void piece_impostors(PieceBuilder& builder, const NeighbourMapUpload& upload, ID
         made.figure = builder.figure(*key.first);
         made.texture = builder.texture(node.texture->identity, node.texture_identity, node.texture_format,
             node.texture_mips.data(), static_cast<std::uint32_t>(node.texture_mips.size()));
+        if (!device) {
+            // D3D12 backend: created and filled here; the bake records the copies.
+            if (FAILED(d3d12->prepare_buffer(source.source.vertices.size() * sizeof(float), source.source.vertices.data(),
+                    made.vertices12)) ||
+                FAILED(d3d12->prepare_buffer(source.source.indices.size() * sizeof(std::uint32_t), source.source.indices.data(),
+                    made.indices12)))
+                continue;
+            made.index_count = static_cast<std::uint32_t>(source.source.indices.size());
+            made.sphere = source.source.sphere;
+            builder.piece.impostors.push_back(std::move(made));
+            continue;
+        }
         D3D11_BUFFER_DESC vertices{};
         vertices.ByteWidth = static_cast<UINT>(source.source.vertices.size() * sizeof(float));
         vertices.Usage = D3D11_USAGE_IMMUTABLE;
@@ -242,7 +256,7 @@ void piece_ground_cover(PieceBuilder& builder, const NeighbourMapUpload& upload)
 
 } // namespace
 
-std::unique_ptr<NeighbourPiece> make_neighbour_piece(NeighbourMapUpload& upload, ID3D11Device* device) {
+std::unique_ptr<NeighbourPiece> make_neighbour_piece(NeighbourMapUpload& upload, ID3D11Device* device, D3D12Preparer* d3d12) {
     auto piece = std::make_unique<NeighbourPiece>();
     piece->epoch = upload.epoch;
     piece->selection = upload.selection;
@@ -262,7 +276,7 @@ std::unique_ptr<NeighbourPiece> make_neighbour_piece(NeighbourMapUpload& upload,
     else {
         piece_terrain(builder, upload);
         piece_decorations(builder, upload);
-        piece_impostors(builder, upload, device);
+        piece_impostors(builder, upload, device, d3d12);
     }
     piece_ground_cover(builder, upload);
     piece->pages = std::move(upload.prebuilt_pages);

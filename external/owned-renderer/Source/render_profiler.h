@@ -164,12 +164,28 @@ enum class ShadowTemporalPresentOutcome {
     none, waiting, complete, unavailable, export_failed
 };
 
+// The D3D12 backend's GPU timestamps (its executor) in place of the D3D11
+// queries: stamp() writes one now (0 when none could be written), value()
+// reads it once the GPU finished that work (false while it has not, or when
+// it was lost), frequency() is the ticks per second.
+struct ProfileTimestamps {
+    virtual std::uint64_t stamp() noexcept = 0;
+    virtual bool value(std::uint64_t stamp, std::uint64_t& ticks) noexcept = 0;
+    virtual std::uint64_t frequency() noexcept = 0;
+
+protected:
+    ~ProfileTimestamps() = default;
+};
+
 // Low-overhead continuous timings use delayed D3D11 timestamp queries.  The
 // optional capture path intentionally stalls while copying each pass result;
 // it is a diagnostic action and is never active by default.
 class RenderProfiler {
 public:
     HRESULT initialize(ID3D11Device* device, ID3D11DeviceContext* context);
+    // D3D12 backend (before initialize): passes are timed by these stamps;
+    // the D3D11 queries are created but never issued.
+    void set_timestamps(ProfileTimestamps* timestamps) noexcept { timestamps_ = timestamps; }
     void shutdown();
 
     void begin_frame(UINT width, UINT height);
@@ -248,6 +264,7 @@ private:
     struct QueryPair {
         ComPtr<ID3D11Query> begin;
         ComPtr<ID3D11Query> end;
+        std::uint64_t begin_stamp = 0, end_stamp = 0;  // ProfileTimestamps (D3D12)
     };
     struct SubScopeRecord {
         std::array<char, 40> name{};
@@ -265,6 +282,7 @@ private:
     };
     struct FrameSlot {
         ComPtr<ID3D11Query> disjoint;
+        std::uint64_t frame_stamp = 0;  // ProfileTimestamps: the frame's end, for its readiness
         QueryPair device_span{};
         std::vector<QueryPair> queries;
         std::vector<PassRecord> passes;
@@ -281,6 +299,9 @@ private:
     };
 
     bool resolve(FrameSlot& slot, bool wait);
+    // A query pair's begin or end: the D3D11 query, or a D3D12 stamp.
+    void mark(QueryPair& pair, bool end) noexcept;
+    bool read(const QueryPair& pair, bool end, UINT64& ticks) noexcept;
     void end_sub_scope();
     void refresh_enabled() noexcept;
     void capture_pass(ID3D11Texture2D* source, const PassRecord& pass, UINT ordinal);
@@ -294,6 +315,7 @@ private:
 
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;
+    ProfileTimestamps* timestamps_ = nullptr;
     std::array<FrameSlot, kBufferedFrames> slots_{};
     std::array<SubScopeSlot, kBufferedFrames> sub_slots_{};
     FrameSlot* current_ = nullptr;

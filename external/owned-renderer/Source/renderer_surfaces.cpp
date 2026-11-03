@@ -25,6 +25,7 @@
 #include "cursor_confinement.h"
 #include "combat_ui.h"
 #include "world_texture_sampler.h"
+#include "surface_convert.h"
 #include "texture_mips.h"
 #include "character_pane_owned_text.h"
 #include "owned_resource_runtime.h"
@@ -41,9 +42,7 @@
 #include "retained_static_scene.h"
 #include "widescreen.h"
 #include "test_harness.h"
-#include "x64_remote_device.h"
 #include "x64_remote_link.h"
-#include "x64_remote_surfaces.h"
 #include "dlss_frame.h"
 #include "stall_watchdog.h"
 #include <optional>
@@ -118,6 +117,36 @@ HRESULT Renderer::upload(SurfaceImage& i,SurfaceUploadResult* output){
  // its uploads itself (game_upload); queued commands carry pixel-free
  // snapshots whose GPU home is already current.
  if(scene_queue())return game_upload(i,output);
+ // D3D12 backend: a snapshot carries its surface's D3D12 texture. World use
+ // of a static surface whose texture lacks mips takes one mipped copy per
+ // generation and texture object, as D3D11 below, built from the host
+ // table's pixels of that generation (this backend keeps them).
+ if(d3d12_&&i.scene_snapshot){
+  if(output)*output={};
+  if(!i.d3d12)return E_UNEXPECTED;
+  DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;UINT blocks=0;
+  if(!surface_dxgi_format(i.format,format,blocks))return E_UNEXPECTED;
+  UINT width=0,height=0,levels=0;DXGI_FORMAT stored=DXGI_FORMAT_UNKNOWN;
+  if(!(i.static_mip_hint&&i.world_mip_use&&!i.gpu_captured&&!blocks)||
+     (d3d12_->texture_info(*i.d3d12,width,height,levels,stored)&&levels>1))return S_OK;
+  auto& cached=scene_mip_textures_[i.id];
+  if(!(cached.d3d12&&cached.generation==i.generation&&cached.texture_serial==i.texture_serial)){
+   cached={};
+   const auto found=core_surfaces_.find(i.id);
+   if(found==core_surfaces_.end()||!found->second||found->second->generation!=i.generation||found->second->cpu_released){
+    // The host moved past this snapshot's generation: its bytes are gone.
+    scene_mip_textures_.erase(i.id);
+    d3d12_->omit("world surface textures: a superseded snapshot keeps one level",false);
+    return S_OK;
+   }
+   D3D12TextureRef texture;
+   const HRESULT hr=surface_mips_d3d12(*found->second,texture);
+   if(FAILED(hr)){scene_mip_textures_.erase(i.id);return hr;}
+   cached.generation=i.generation;cached.texture_serial=i.texture_serial;cached.d3d12=std::move(texture);
+  }
+  i.d3d12=cached.d3d12;
+  return S_OK;
+ }
  if(i.scene_snapshot){
   if(output)*output={};
   D3D11_TEXTURE2D_DESC desc{};if(i.texture)i.texture->GetDesc(&desc);
@@ -148,6 +177,7 @@ HRESULT Renderer::upload(SurfaceImage& i,SurfaceUploadResult* output){
    [&](const PendingBlit& blit){return blit.gpu&&blit.source_is_surface&&blit.source_id==i.id;});
   if(queued){const HRESULT flushed=render_pending_blits();if(FAILED(flushed))return flushed;}
  }
+ if(d3d12_)return upload_d3d12(i,output);
  if(i.cpu_released&&(i.uploaded_generation!=i.generation||
     !same_surface_upload_shape(i.uploaded_shape,surface_upload_shape(i)))){
   // A key change re-converts the unchanged CPU bytes (its writer marked them dirty).
@@ -159,14 +189,111 @@ HRESULT Renderer::upload(SurfaceImage& i,SurfaceUploadResult* output){
   const HRESULT detached=detach_shared_surface_texture(i,"upload");if(FAILED(detached))return detached;
  }
  ID3D11Texture2D* const shared_before=i.texture_shared?i.texture.Get():nullptr; // compared only, never dereferenced
- // Remote device: the host converts and uploads at once, in ring order.
- SurfaceUploadResult result{};const HRESULT hr=x64remote::remote_active()?upload_surface_image_remote(device_.Get(),false,i,&result):
-  upload_surface_image(device_.Get(),context_.Get(),i,&result);
+ SurfaceUploadResult result{};const HRESULT hr=upload_surface_image(device_.Get(),context_.Get(),i,&result);
  if(shared_before&&i.texture.Get()!=shared_before)unshare_owned_texture(i,shared_before); // recreated (mip layout)
  if(result.uploaded||FAILED(hr))update_surface_memory_accounting(i);if(SUCCEEDED(hr)&&result.uploaded){if(perf_enabled()){++perf_upload_misses_;perf_upload_bytes_+=result.upload_bytes;}profiler_.add_upload(result.upload_bytes);release_uploaded_surface_pixels(i);}if(output)*output=result;return hr;
 }
 
-void Renderer::release_surface_pixels(SurfaceImage& image) noexcept{if(!image.scene_snapshot)release_uploaded_surface_pixels(image);}
+// x64 host, renderer_backend=d3d12: the surface's D3D12 texture from its CPU
+// pixels (whole on a new shape, else the dirty rows). The pixels stay: this
+// backend has no readback to restore released bytes from.
+HRESULT Renderer::upload_d3d12(SurfaceImage& i,SurfaceUploadResult* output){
+ if(output)*output={};
+ DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;UINT block_bytes=0;
+ if(!surface_dxgi_format(i.format,format,block_bytes))return E_NOTIMPL;
+ const SurfaceUploadShape shape=surface_upload_shape(i);
+ // D3D11 (upload_surface_image): a static surface in world use carries its
+ // full mip chain, rebuilt whole from level 0 on each upload.
+ const bool mips=i.static_mip_hint&&i.world_mip_use&&!i.gpu_captured&&!block_bytes;
+ UINT stored_width=0,stored_height=0,stored_levels=0;DXGI_FORMAT stored_format=DXGI_FORMAT_UNKNOWN;
+ const bool matches=same_surface_upload_shape(i.uploaded_shape,shape)&&i.d3d12&&
+  d3d12_->texture_matches(*i.d3d12,i.width,i.height,format)&&
+  d3d12_->texture_info(*i.d3d12,stored_width,stored_height,stored_levels,stored_format)&&
+  stored_levels==(mips?full_mip_count(i.width,i.height):1u);
+ if(matches&&i.uploaded_generation==i.generation)return S_OK;
+ if(i.cpu_released){
+  // A queued command's pixel-free snapshot (surface_snapshot): the host
+  // table's image of the same generation keeps the bytes on this backend;
+  // it uploads, and the snapshot takes its GPU home.
+  const auto found=core_surfaces_.find(i.id);
+  if(found==core_surfaces_.end()||!found->second||found->second.get()==&i||found->second->generation!=i.generation||
+     found->second->cpu_released)return E_UNEXPECTED;
+  const HRESULT uploaded=upload_d3d12(*found->second,output);if(FAILED(uploaded))return uploaded;
+  i.d3d12=found->second->d3d12;i.texture_serial=found->second->texture_serial;
+  i.uploaded_generation=found->second->uploaded_generation;i.uploaded_shape=found->second->uploaded_shape;
+  return S_OK;
+ }
+ if(mips){
+  D3D12TextureRef texture=matches?i.d3d12:nullptr;
+  const HRESULT hr=surface_mips_d3d12(i,texture);if(FAILED(hr))return hr;
+  if(texture!=i.d3d12){i.d3d12=std::move(texture);++i.texture_serial;}
+  i.uploaded_generation=i.generation;i.uploaded_shape=shape;i.mip_source_used=true;
+  clear_surface_dirty(i);
+  if(output){output->uploaded=true;output->recreated=!matches;output->dirty_rect=RECT{0,0,LONG(i.width),LONG(i.height)};
+   output->upload_bytes=uncompressed_mip_bytes(i.width,i.height,4);output->full_surface=true;}
+  return S_OK;
+ }
+ RECT rect{};surface_convert::Prepared prepared{};
+ HRESULT hr=prepare_surface_upload(i,!matches,block_bytes,rect,prepared);if(FAILED(hr))return hr;
+ D3D12TextureRef texture=matches?i.d3d12:nullptr;
+ if(!texture&&FAILED(hr=d3d12_->create_texture(i.width,i.height,format,texture)))return hr;
+ if(FAILED(hr=d3d12_->write_texture(*texture,rect,prepared.data,prepared.pitch)))return hr;
+ if(texture!=i.d3d12){i.d3d12=std::move(texture);++i.texture_serial;}
+ i.uploaded_generation=i.generation;i.uploaded_shape=shape;i.gpu_captured=false;i.mip_source_used=true;
+ clear_surface_dirty(i);
+ if(output){output->uploaded=true;output->recreated=!matches;output->dirty_rect=rect;output->upload_bytes=prepared.bytes;
+  output->full_surface=rect.left==0&&rect.top==0&&rect.right==LONG(i.width)&&rect.bottom==LONG(i.height);}
+ return S_OK;
+}
+
+HRESULT Renderer::write_box_mips_d3d12(D3D12Texture& texture,std::vector<std::uint32_t>& level,UINT width,UINT height,UINT levels){
+ UINT w=width,h=height;
+ std::vector<std::uint32_t> next;
+ for(UINT index=0;;++index){
+  const HRESULT hr=d3d12_->write_texture(texture,RECT{0,0,LONG(w),LONG(h)},level.data(),w*4u,index);
+  if(FAILED(hr)||index+1>=levels)return hr;
+  const UINT nw=(std::max)(1u,w/2),nh=(std::max)(1u,h/2);
+  try{next.resize(std::size_t(nw)*nh);}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+  for(UINT y=0;y<nh;++y){
+   const std::uint32_t* const r0=level.data()+std::size_t((std::min)(y*2,h-1))*w;
+   const std::uint32_t* const r1=level.data()+std::size_t((std::min)(y*2+1,h-1))*w;
+   for(UINT x=0;x<nw;++x){
+    const UINT x0=(std::min)(x*2,w-1),x1=(std::min)(x*2+1,w-1);
+    const std::uint32_t a=r0[x0],b=r0[x1],c=r1[x0],d=r1[x1];
+    std::uint32_t out=0;
+    for(UINT shift=0;shift<32;shift+=8)
+     out|=((((a>>shift)&255u)+((b>>shift)&255u)+((c>>shift)&255u)+((d>>shift)&255u)+2u)/4u)<<shift;
+    next[std::size_t(y)*nw+x]=out;
+   }
+  }
+  level.swap(next);w=nw;h=nh;
+ }
+}
+
+HRESULT Renderer::surface_mips_d3d12(SurfaceImage& image,D3D12TextureRef& texture){
+ DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;UINT block_bytes=0;
+ if(!surface_dxgi_format(image.format,format,block_bytes)||block_bytes||format!=DXGI_FORMAT_B8G8R8A8_UNORM)return E_INVALIDARG;
+ RECT rect{};surface_convert::Prepared prepared{};
+ HRESULT hr=prepare_surface_upload(image,true,0,rect,prepared);if(FAILED(hr))return hr;
+ const UINT width=image.width,height=image.height,levels=full_mip_count(width,height);
+ std::vector<std::uint32_t> level;
+ if(prepared.data==prepared.converted.data()&&prepared.pitch==width*4u&&prepared.converted.size()>=std::size_t(width)*height)
+  level.swap(prepared.converted);
+ else{
+  try{level.resize(std::size_t(width)*height);}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+  for(UINT y=0;y<height;++y)
+   std::memcpy(level.data()+std::size_t(y)*width,static_cast<const std::uint8_t*>(prepared.data)+std::size_t(y)*prepared.pitch,width*4u);
+ }
+ UINT stored_width=0,stored_height=0,stored_levels=0;DXGI_FORMAT stored_format=DXGI_FORMAT_UNKNOWN;
+ if(!(texture&&d3d12_->texture_info(*texture,stored_width,stored_height,stored_levels,stored_format)&&stored_width==width&&
+      stored_height==height&&stored_levels==levels&&stored_format==format)){
+  texture.reset();
+  if(FAILED(hr=d3d12_->create_texture(width,height,format,texture,levels)))return hr;
+ }
+ return write_box_mips_d3d12(*texture,level,width,height,levels);
+}
+
+void Renderer::release_surface_pixels(SurfaceImage& image) noexcept{if(!image.scene_snapshot&&!d3d12_)release_uploaded_surface_pixels(image);}
 
 HRESULT Renderer::detach_shared_surface_texture(SurfaceImage& image,const char* writer){
  if(!image.texture_shared||!image.texture)return S_OK;
@@ -233,18 +360,14 @@ HRESULT Renderer::game_upload(SurfaceImage& i,SurfaceUploadResult* output){
   scene_sync("surface_restore_for_upload");
   const HRESULT restored=restore_surface_pixels(i);if(FAILED(restored))return restored;
  }
- // Remote device: no deferred context; the surface steps queue on the host
- // until flush_game_uploads' commit (surface protocol).
- const bool remote=x64remote::remote_active();
- if(!remote&&!game_upload_context_){const HRESULT created=device_->CreateDeferredContext(0,&game_upload_context_);if(FAILED(created))return created;}
+ if(!game_upload_context_){const HRESULT created=device_->CreateDeferredContext(0,&game_upload_context_);if(FAILED(created))return created;}
  // A published (possibly shared) GPU home is never written in place.
  if(i.texture_shared&&i.texture&&(i.uploaded_generation!=i.generation||i.dirty_full||i.dirty_rect_valid)){
   const HRESULT detached=scene_detach_surface_texture(i,"upload");if(FAILED(detached))return detached;
  }
  ID3D11Texture2D* const shared_before=i.texture_shared?i.texture.Get():nullptr; // compared only, never dereferenced
  SurfaceUploadResult result{};
- const HRESULT hr=remote?upload_surface_image_remote(device_.Get(),true,i,&result):
-  upload_surface_image(device_.Get(),game_upload_context_.Get(),i,&result);
+ const HRESULT hr=upload_surface_image(device_.Get(),game_upload_context_.Get(),i,&result);
  if(shared_before&&i.texture.Get()!=shared_before){i.texture_shared=false;scene_unshare_surface_texture(i.id,shared_before);} // recreated (mip layout)
  if(result.uploaded||FAILED(hr))update_surface_memory_accounting(i);
  if(SUCCEEDED(hr)&&result.uploaded){
@@ -258,27 +381,6 @@ HRESULT Renderer::game_upload(SurfaceImage& i,SurfaceUploadResult* output){
 
 void Renderer::flush_game_uploads() noexcept{
  if(!game_upload_pending_)return;
- if(x64remote::remote_active()){
-  // Surface protocol: the steps of this batch are already on the ring; the
-  // scene thread releases them on the host at this point of its stream,
-  // after any queued output blit that samples their old contents.
-  const frame_acct::Scope upload_scope(frame_acct::ours_surface_upload);
-  game_upload_pending_=false;
-  std::vector<std::uint64_t> surfaces;surfaces.swap(game_upload_surfaces_);
-  const std::uint64_t bytes=game_upload_bytes_;game_upload_bytes_=0;
-  const std::uint64_t batch=x64remote::surface_close_batch();
-  const auto run=[this,surfaces=std::move(surfaces),bytes,batch]{
-   const bool queued=std::any_of(pending_blits_.begin(),pending_blits_.end(),[&](const PendingBlit& blit){
-    return blit.gpu&&blit.source_is_surface&&std::find(surfaces.begin(),surfaces.end(),blit.source_id)!=surfaces.end();});
-   if(queued)(void)render_pending_blits();
-   x64remote::surface_commit(batch);
-   profiler_.add_upload(bytes);
-  };
-  if(scene_thread_->post(run))return;
-  scene_thread_->sync();
-  run();
-  return;
- }
  if(!game_upload_context_)return;
  const frame_acct::Scope upload_scope(frame_acct::ours_surface_upload);
  game_upload_pending_=false;
@@ -329,14 +431,12 @@ bool Renderer::scene_surface_holds(std::uint64_t id,ID3D11Texture2D* texture) co
 HRESULT Renderer::scene_detach_surface_texture(SurfaceImage& image,const char* writer){
  if(!image.texture_shared||!image.texture)return S_OK;
  if(!device_)return E_FAIL;
- const bool remote=x64remote::remote_active(); // surface protocol: a queued host copy step
- if(!remote&&!game_upload_context_){const HRESULT created=device_->CreateDeferredContext(0,&game_upload_context_);if(FAILED(created))return created;}
+ if(!game_upload_context_){const HRESULT created=device_->CreateDeferredContext(0,&game_upload_context_);if(FAILED(created))return created;}
  D3D11_TEXTURE2D_DESC description{};image.texture->GetDesc(&description);
  ComPtr<ID3D11Texture2D> texture;ComPtr<ID3D11ShaderResourceView> srv;
  HRESULT hr=device_->CreateTexture2D(&description,nullptr,&texture);if(FAILED(hr))return hr;
  if(FAILED(hr=device_->CreateShaderResourceView(texture.Get(),nullptr,&srv)))return hr;
- if(remote)x64remote::surface_copy(true,texture.Get(),srv.Get(),image.texture.Get(),true,false);
- else game_upload_context_->CopyResource(texture.Get(),image.texture.Get());
+ game_upload_context_->CopyResource(texture.Get(),image.texture.Get());
  game_upload_pending_=true;
  const ComPtr<ID3D11Texture2D> previous=image.texture;
  image.texture=std::move(texture);image.srv=std::move(srv);++image.texture_serial;
@@ -383,7 +483,7 @@ std::shared_ptr<SurfaceImage> surface_snapshot(const SurfaceImage& image){
  c.has_color_key=image.has_color_key;c.color_key=image.color_key;c.generation=image.generation;
  c.uploaded_generation=image.uploaded_generation;c.uploaded_shape=image.uploaded_shape;
  c.gpu_captured=image.gpu_captured;c.static_mip_hint=image.static_mip_hint;c.world_mip_use=image.world_mip_use;
- c.mip_source_used=image.mip_source_used;c.texture=image.texture;c.srv=image.srv;
+ c.mip_source_used=image.mip_source_used;c.texture=image.texture;c.srv=image.srv;c.d3d12=image.d3d12;
  c.gpu_primary=image.gpu_primary;c.visual_source=image.visual_source;c.published_generation=image.published_generation;
  c.texture_serial=image.texture_serial;
  // No CPU bytes travel: every scene-thread reader takes the GPU path.
@@ -566,8 +666,12 @@ std::uint64_t Renderer::native_owned_texture_bytes(bool arrays) const {
  if(arrays){for(const auto& group:native_texture_arrays_)if(group.first.immutable_values)
   for(const auto& page:group.second)bytes+=texture_storage_bytes(page.texture.Get());}
  else{
-  for(const auto& item:native_owned_textures_)if(!item.second.camp_surface_alias&&!item.second.surface_shared) // shared: counted as surface bytes
+  for(const auto& item:native_owned_textures_)if(!item.second.camp_surface_alias&&!item.second.surface_shared){ // shared: counted as surface bytes
    bytes+=texture_storage_bytes(item.second.texture.Get());
+   UINT width=0,height=0,mips=0;DXGI_FORMAT format{};  // renderer_backend=d3d12: the executor's texture
+   if(d3d12_&&item.second.d3d12&&d3d12_->texture_info(*item.second.d3d12,width,height,mips,format))
+    bytes+=texture_storage_bytes(width,height,mips,format);
+  }
   // Detached statics keep copies alive after their cache entry retires.
   std::vector<std::shared_ptr<ID3D11Texture2D>> retained;
   retained_visual_scene().visual_detached_surface_textures(retained);
@@ -692,6 +796,20 @@ static bool native_alpha_is_one(const FixedState& state,NativeAlphaEvidence alph
   double(argument(stage[D3DTSS_ALPHAARG2]))>=1.0;
  default:return false;
  }
+}
+
+// Owned figure parts always carry the game's alpha test, also on textures
+// without transparency. With a proved fragment alpha of 1 (every mip of the
+// texture opaque, diffuse alpha 1) and a function that 1 passes for every
+// reference (the shader's reference is at most 255/256), the test rejects
+// nothing: dropping it keeps coverage exact.
+bool native_alpha_test_passes_all(const FixedState& state,NativeAlphaEvidence alpha) noexcept {
+ if(state.render[D3DRENDERSTATE_ALPHATESTENABLE]==FALSE)return false;
+ switch(state.render[D3DRENDERSTATE_ALPHAFUNC]){
+ case D3DCMP_GREATER:case D3DCMP_GREATEREQUAL:case D3DCMP_NOTEQUAL:case D3DCMP_ALWAYS:break;
+ default:return false;
+ }
+ return native_alpha_is_one(state,alpha);
 }
 
 NativeOpacityClass native_opacity_class(const FixedState& state,

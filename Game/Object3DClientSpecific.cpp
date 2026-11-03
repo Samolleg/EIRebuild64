@@ -2,6 +2,7 @@
 #include "CorePerf.h"
 #include "OwnedRender/E1PerfDiagnostics.h"
 #include <algorithm>
+#include <cstring>
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "WorldClient.h"
@@ -1258,8 +1259,9 @@ BOOL CObject3DClientSpecific::IsCanSelect(const CPoint &point)
     {
         if (pObject->figures[i]->CheckFlag(FIG_VISIBLE) &&
             static_cast<CFigureClientSpecific *>(pObject->figures[i]->GetFigureSpecific())
-                ->Get2DClipRect()
-                .PtInRect(point))
+                ->GetPickingBounds().PtInRect(point) &&
+            static_cast<CFigureClientSpecific *>(pObject->figures[i]->GetFigureSpecific())
+                ->Get2DClipRect().PtInRect(point))
             return TRUE;
     }
 
@@ -1279,6 +1281,8 @@ BOOL CObject3DClientSpecific::IsCanSelect(const CRect &rect)
     {
         if (pObject->figures[i]->CheckFlag(FIG_VISIBLE))
         {
+            auto* figure=static_cast<CFigureClientSpecific*>(pObject->figures[i]->GetFigureSpecific());
+            if(!rcIntersect.IntersectRect(figure->GetPickingBounds(),rect))continue;
             rcIntersect.IntersectRect(static_cast<CFigureClientSpecific *>(
                                           pObject->figures[i]->GetFigureSpecific())
                                           ->Get2DClipRect(),

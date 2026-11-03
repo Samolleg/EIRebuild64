@@ -27,15 +27,33 @@ StructuredBuffer<ImpostorBakeVertex> bakeVertices:register(t1);
 Texture2D bakeTexture:register(t0);
 SamplerState bakeSampler:register(s0);
 cbuffer ImpostorBake:register(b0){float4 bakeSphere;uint4 bakeFrame;};
+#ifdef EID3D12
+// D3D12 (Renderer::bake_neighbour_impostors_d3d12): one instanced draw per
+// figure over the slice's whole 4x4 target, an instance a frame, the
+// triangles read through their indices (t2). Each frame lands on the pixels
+// of the D3D11 per-frame viewport: the same NDC-to-cell mapping, and the
+// clip distances clip at the cell's edges as the viewport's clip volume did.
+StructuredBuffer<uint> bakeIndices:register(t2);
+struct ImpostorBakeOutput{float4 p:SV_Position;float3 n:NORMAL0;float2 uv:TEXCOORD0;float4 cell:SV_ClipDistance0;};
+ImpostorBakeOutput impostorBakeVS(uint id:SV_VertexID,uint instance:SV_InstanceID){
+ ImpostorBakeVertex v=bakeVertices[bakeIndices[id]];
+ uint2 frame=uint2(instance%kImpostorFrames,instance/kImpostorFrames);
+#else
 struct ImpostorBakeOutput{float4 p:SV_Position;float3 n:NORMAL0;float2 uv:TEXCOORD0;};
-// The frame's orthographic view along -d over the mean shape's bounding
-// sphere; nearer the viewer is nearer in depth.
 ImpostorBakeOutput impostorBakeVS(uint id:SV_VertexID){
  ImpostorBakeVertex v=bakeVertices[id];
- float3 d=nativeImpostorFrameDirection(bakeFrame.xy);float3 r,u;nativeImpostorBasis(d,r,u);
+ uint2 frame=bakeFrame.xy;
+#endif
+ // The frame's orthographic view along -d over the mean shape's bounding
+ // sphere; nearer the viewer is nearer in depth.
+ float3 d=nativeImpostorFrameDirection(frame);float3 r,u;nativeImpostorBasis(d,r,u);
  float3 q=(v.position-bakeSphere.xyz)/bakeSphere.w;
  ImpostorBakeOutput o;
  o.p=float4(dot(q,r)*kImpostorMargin,dot(q,u)*kImpostorMargin,saturate(.5-.5*dot(q,d)),1);
+#ifdef EID3D12
+ o.cell=float4(1-o.p.x,1+o.p.x,1-o.p.y,1+o.p.y);
+ o.p.xy=float2((frame.x+.5+.5*o.p.x)*2.0/kImpostorFrames-1,1-(frame.y+.5-.5*o.p.y)*2.0/kImpostorFrames);
+#endif
  o.n=v.normal;o.uv=v.uv;return o;
 }
 struct ImpostorBakeTargets{float4 albedo:SV_Target0;float4 normal:SV_Target1;};
@@ -62,89 +80,6 @@ struct ImpostorBakeConstants {
 std::string impostor_key(const ResourceIdentity& figure, std::uint64_t texture) {
     return figure.key() + "|" + std::to_string(texture);
 }
-
-// Saves and restores the pipeline state the bake changes (it runs inside the
-// world pass, between neighbour uploads).
-class ImpostorStateGuard {
-public:
-    explicit ImpostorStateGuard(ID3D11DeviceContext* context) noexcept : context_(context) {
-        context_->IAGetInputLayout(&layout_);
-        context_->IAGetPrimitiveTopology(&topology_);
-        context_->IAGetIndexBuffer(&index_, &index_format_, &index_offset_);
-        context_->VSGetShader(&vs_, nullptr, nullptr);
-        context_->PSGetShader(&ps_, nullptr, nullptr);
-        context_->HSGetShader(&hs_, nullptr, nullptr);
-        context_->DSGetShader(&ds_, nullptr, nullptr);
-        context_->GSGetShader(&gs_, nullptr, nullptr);
-        constants_.save(context_, 0); // with its ring range (constant_ring.h)
-        context_->VSGetShaderResources(1, 1, &vs_resource_);
-        context_->PSGetShaderResources(0, 1, &ps_resource_);
-        context_->PSGetShaderResources(44, 2, ps_atlas_);
-        context_->PSGetSamplers(0, 1, &sampler_);
-        viewport_count_ = D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;
-        context_->RSGetViewports(&viewport_count_, viewports_);
-        context_->RSGetState(&raster_);
-        context_->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets_, &depth_);
-        context_->OMGetBlendState(&blend_, blend_factor_, &sample_mask_);
-        context_->OMGetDepthStencilState(&depth_state_, &stencil_);
-    }
-    ~ImpostorStateGuard() {
-        ID3D11RenderTargetView* none[2]{};
-        context_->OMSetRenderTargets(2, none, nullptr);
-        context_->IASetInputLayout(layout_);
-        context_->IASetPrimitiveTopology(topology_);
-        context_->IASetIndexBuffer(index_, index_format_, index_offset_);
-        context_->VSSetShader(vs_, nullptr, 0);
-        context_->PSSetShader(ps_, nullptr, 0);
-        context_->HSSetShader(hs_, nullptr, 0);
-        context_->DSSetShader(ds_, nullptr, 0);
-        context_->GSSetShader(gs_, nullptr, 0);
-        constants_.restore(context_, 0);
-        constants_.release();
-        context_->VSSetShaderResources(1, 1, &vs_resource_);
-        context_->PSSetShaderResources(0, 1, &ps_resource_);
-        context_->PSSetShaderResources(44, 2, ps_atlas_);
-        context_->PSSetSamplers(0, 1, &sampler_);
-        context_->RSSetViewports(viewport_count_, viewports_);
-        context_->RSSetState(raster_);
-        context_->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT, targets_, depth_);
-        context_->OMSetBlendState(blend_, blend_factor_, sample_mask_);
-        context_->OMSetDepthStencilState(depth_state_, stencil_);
-        IUnknown* held[] = {layout_, index_, vs_, ps_, hs_, ds_, gs_, vs_resource_,
-                            ps_resource_, ps_atlas_[0], ps_atlas_[1], sampler_, raster_, depth_, blend_, depth_state_};
-        for (IUnknown* item : held) if (item) item->Release();
-        for (ID3D11RenderTargetView* target : targets_) if (target) target->Release();
-    }
-    ImpostorStateGuard(const ImpostorStateGuard&) = delete;
-    ImpostorStateGuard& operator=(const ImpostorStateGuard&) = delete;
-private:
-    ID3D11DeviceContext* context_;
-    ID3D11InputLayout* layout_ = nullptr;
-    D3D11_PRIMITIVE_TOPOLOGY topology_ = D3D11_PRIMITIVE_TOPOLOGY_UNDEFINED;
-    ID3D11Buffer* index_ = nullptr;
-    DXGI_FORMAT index_format_ = DXGI_FORMAT_UNKNOWN;
-    UINT index_offset_ = 0;
-    ID3D11VertexShader* vs_ = nullptr;
-    ID3D11PixelShader* ps_ = nullptr;
-    ID3D11HullShader* hs_ = nullptr;
-    ID3D11DomainShader* ds_ = nullptr;
-    ID3D11GeometryShader* gs_ = nullptr;
-    owned::SavedConstantSlot constants_;
-    ID3D11ShaderResourceView* vs_resource_ = nullptr;
-    ID3D11ShaderResourceView* ps_resource_ = nullptr;
-    ID3D11ShaderResourceView* ps_atlas_[2]{};
-    ID3D11SamplerState* sampler_ = nullptr;
-    UINT viewport_count_ = 0;
-    D3D11_VIEWPORT viewports_[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
-    ID3D11RasterizerState* raster_ = nullptr;
-    ID3D11RenderTargetView* targets_[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
-    ID3D11DepthStencilView* depth_ = nullptr;
-    ID3D11BlendState* blend_ = nullptr;
-    FLOAT blend_factor_[4]{};
-    UINT sample_mask_ = 0;
-    ID3D11DepthStencilState* depth_state_ = nullptr;
-    UINT stencil_ = 0;
-};
 
 #endif
 } // namespace
@@ -280,7 +215,9 @@ HRESULT Renderer::bake_neighbour_impostors(const NeighbourPiece& upload) noexcep
         }
     }
     {
-        ImpostorStateGuard guard(context_.Get());
+        // The bake binds every state it reads and restores nothing: each pass
+        // after it (native flushes, legacy draws, the world passes) binds its
+        // own. It runs inside the world pass, between neighbour uploads.
         ID3D11ShaderResourceView* no_atlas[2]{};
         context_->PSSetShaderResources(44, 2, no_atlas);
         context_->IASetInputLayout(nullptr);
@@ -314,6 +251,9 @@ HRESULT Renderer::bake_neighbour_impostors(const NeighbourPiece& upload) noexcep
             context_->ClearRenderTargetView(albedo_target.Get(), zero);
             context_->ClearRenderTargetView(normal_target.Get(), zero);
             context_->ClearDepthStencilView(impostors_.depth_view.Get(), D3D11_CLEAR_DEPTH, 1.f, 0);
+            // Plan record (frame_plan.h): the atlas slice is a view no plan id
+            // names yet; the pass binds both of its targets itself.
+            (void)plan_pass("impostor_bake", albedo_target.Get(), impostors_.depth_view.Get());
             ID3D11RenderTargetView* targets[2] = {albedo_target.Get(), normal_target.Get()};
             context_->OMSetRenderTargets(2, targets, impostors_.depth_view.Get());
             context_->VSSetShaderResources(1, 1, source.vertex_view.GetAddressOf());
@@ -336,11 +276,163 @@ HRESULT Renderer::bake_neighbour_impostors(const NeighbourPiece& upload) noexcep
             ++impostors_.count;
             ++impostors_.baked;
         }
+        // Unbind what references the upload, which dies after registration.
         ID3D11RenderTargetView* none[2]{};
         context_->OMSetRenderTargets(2, none, nullptr);
+        ID3D11ShaderResourceView* no_view = nullptr;
+        context_->VSSetShaderResources(1, 1, &no_view);
+        context_->PSSetShaderResources(0, 1, &no_view);
+        context_->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
         context_->GenerateMips(impostors_.albedo_srv.Get());
         context_->GenerateMips(impostors_.normal_srv.Get());
     }
+    impostors_.bake_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    return S_OK;
+} catch (...) {
+    impostor_failure("impostor bake failed");
+    return S_OK;
+}
+
+// renderer_backend=d3d12: the atlas as two storage arrays (each slice's mips
+// by generate_mips), grown as on D3D11, and the bake targets.
+HRESULT Renderer::ensure_impostor_atlas_d3d12(UINT slices) noexcept try {
+    if (slices <= impostors_.capacity && impostors_.albedo12) return S_OK;
+    if (slices > D3D11_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION) return E_OUTOFMEMORY;
+    const UINT capacity = (std::min)(UINT(D3D11_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION),
+        (std::max)({slices, impostors_.capacity * 2u, 16u}));
+    const UINT side = kImpostorFrames * kImpostorFrameTexels;
+    const DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    if (!d3d12_->storage_supported(format)) return E_NOTIMPL;
+    if (!impostors_.bake_albedo12) {
+        HRESULT hr = d3d12_->create_target(side, side, impostors_.bake_albedo12, format, DXGI_FORMAT_D32_FLOAT);
+        if (SUCCEEDED(hr)) hr = d3d12_->create_target(side, side, impostors_.bake_normal12, format, DXGI_FORMAT_UNKNOWN);
+        if (FAILED(hr)) { impostors_.bake_albedo12.reset(); impostors_.bake_normal12.reset(); return hr; }
+    }
+    D3D12TextureRef albedo, normal;
+    // Not zeroed: a slice is named (slices) only once its frames and every
+    // mip are written, and growth copies only those slices.
+    HRESULT hr = d3d12_->create_storage_texture(side, side, 0, format, albedo, kImpostorMips, capacity, true);
+    if (SUCCEEDED(hr)) hr = d3d12_->create_storage_texture(side, side, 0, format, normal, kImpostorMips, capacity, true);
+    if (FAILED(hr)) return hr;
+    if (impostors_.albedo12)
+        for (UINT slice = 0; slice < impostors_.count; ++slice)
+            for (UINT mip = 0; mip < kImpostorMips; ++mip) {
+                const UINT at = D3D11CalcSubresource(mip, slice, kImpostorMips);
+                if (FAILED(hr = d3d12_->copy_texture(*albedo, at, *impostors_.albedo12, at)) ||
+                    FAILED(hr = d3d12_->copy_texture(*normal, at, *impostors_.normal12, at)))
+                    return hr;
+            }
+    impostors_.albedo12 = std::move(albedo);
+    impostors_.normal12 = std::move(normal);
+    impostors_.capacity = capacity;
+    return S_OK;
+} catch (...) {
+    return E_OUTOFMEMORY;
+}
+
+// The D3D11 bake's frames on D3D12 (the EID3D12 form of impostorBakeVS): per
+// figure one instanced draw of its 16 frames into the bake pair, copied into
+// the figure's slice, then that slice's mips. A figure whose bake or mips
+// cannot be recorded yet (a pipeline still building on a first-ever start)
+// gets no slice: its crowns draw their own triangles, never an empty quad.
+HRESULT Renderer::bake_neighbour_impostors_d3d12(const NeighbourPiece& upload) noexcept try {
+    if (impostors_.failed || upload.impostors.empty() || !d3d12_) return S_OK;
+    const auto start = std::chrono::steady_clock::now();
+    struct Pending {
+        std::string key;
+        const NeighbourPieceImpostor* source = nullptr;
+        D3D12TextureRef texture;
+        D3D12BufferRef vertices, indices;
+    };
+    std::vector<Pending> pending;
+    std::vector<NativeOwnedTextureMip> texture_mips;
+    for (const auto& source : upload.impostors) {
+        if (!source.index_count || !source.vertices12 || !source.indices12) continue;
+        const auto& texture_source = upload.textures[source.texture];
+        std::string name = impostor_key(upload.identities[upload.figures[source.figure].identity], texture_source.view_identity);
+        if (impostors_.slices.count(name)) continue;
+        // The decoration's own texture (the cache entry its records share).
+        const NativeOwnedTextureView view = neighbour_piece_texture_view(texture_source, texture_mips);
+        Pending item{std::move(name), &source, nullptr, nullptr, nullptr};
+        std::uint64_t backing = 0;
+        const HRESULT texture_hr = get_native_owned_texture_d3d12(view, item.texture, backing, nullptr, true);
+        if (FAILED(texture_hr) || !item.texture) continue;
+        // The stream prepared both buffers; their copies are recorded here.
+        const bool finished = SUCCEEDED(d3d12_->finish_buffer(*source.vertices12, 8 * sizeof(float), 0, item.vertices)) &&
+            SUCCEEDED(d3d12_->finish_buffer(*source.indices12, sizeof(std::uint32_t), 0, item.indices));
+        if (!finished) continue;
+        pending.push_back(std::move(item));
+    }
+    if (pending.empty()) return S_OK;
+    HRESULT hr = ensure_impostor_atlas_d3d12(impostors_.count + static_cast<UINT>(pending.size()));
+    if (FAILED(hr)) { impostor_failure("impostor atlas could not be allocated"); return S_OK; }
+    static const std::vector<ShaderProgram> programs = [] {
+        std::vector<ShaderProgram> made;
+        append_impostor_shader_programs(made);
+        return made;
+    }();
+    D3D12NativeState state;
+    state.raster.FillMode = D3D11_FILL_SOLID; state.raster.CullMode = D3D11_CULL_NONE; state.raster.DepthClipEnable = TRUE;
+    state.depth.DepthEnable = TRUE; state.depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; state.depth.DepthFunc = D3D11_COMPARISON_LESS;
+    D3D11_SAMPLER_DESC sampler{};
+    sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    sampler.MaxLOD = D3D11_FLOAT32_MAX;
+    D3D12Texture* targets[2] = {impostors_.bake_albedo12.get(), impostors_.bake_normal12.get()};
+    const float zero[4]{};
+    bool not_ready = false;
+    d3d12_->marker("impostor_bake");
+    d3d12_->set_targets(targets, 2, impostors_.bake_albedo12.get());
+    d3d12_->clear_slots();
+    d3d12_->set_sampler(0, sampler);
+    // Every figure's frames, each copied into the next slice; the mips of all
+    // of them follow in one pass per array.
+    const UINT first = impostors_.count;
+    std::vector<const Pending*> baked;
+    baked.reserve(pending.size());
+    for (auto& item : pending) {
+        const auto& source = *item.source;
+        const UINT slice = first + static_cast<UINT>(baked.size());
+        d3d12_->clear_texture(*impostors_.bake_albedo12, zero);
+        d3d12_->clear_texture(*impostors_.bake_normal12, zero);
+        d3d12_->clear_depth_of(*impostors_.bake_albedo12, 1.f, 0);
+        const ImpostorBakeConstants values{{source.sphere[0], source.sphere[1], source.sphere[2], source.sphere[3]}, {0, 0, 0, 0}};
+        d3d12_->set_constants(0, &values, sizeof(values));
+        d3d12_->set_resource(0, item.texture.get());
+        d3d12_->set_resource(1, item.vertices.get());
+        d3d12_->set_resource(2, item.indices.get());
+        hr = d3d12_->draw_instanced(programs[0], programs[1], state, nullptr, source.index_count,
+                                    kImpostorFrames * kImpostorFrames, false);
+        if (FAILED(hr)) { impostor_failure("impostor bake draw failed"); break; }
+        // Not ready (the pipeline still building, or the frame's rings full):
+        // the rest would fare the same, so none of them is baked now.
+        if (d3d12_not_done(hr)) { not_ready = true; break; }
+        const UINT at = D3D11CalcSubresource(0, slice, kImpostorMips);
+        if (FAILED(hr = d3d12_->copy_texture(*impostors_.albedo12, at, *impostors_.bake_albedo12, 0)) ||
+            FAILED(hr = d3d12_->copy_texture(*impostors_.normal12, at, *impostors_.bake_normal12, 0))) {
+            impostor_failure("impostor bake copy failed");
+            break;
+        }
+        baked.push_back(&item);
+    }
+    if (!baked.empty() && !impostors_.failed) {
+        const UINT count = static_cast<UINT>(baked.size());
+        hr = d3d12_->generate_mips(*impostors_.albedo12, d3d12_mip_array_range_program(), first, count);
+        if (hr == S_OK) hr = d3d12_->generate_mips(*impostors_.normal12, d3d12_mip_array_range_program(), first, count);
+        if (FAILED(hr)) impostor_failure("impostor atlas mips failed");
+        else if (hr != S_OK) not_ready = true; // the slices are baked over by the next bake
+        else for (UINT index = 0; index < count; ++index) {
+            impostors_.slices.emplace(baked[index]->key, first + index);
+            ++impostors_.count;
+            ++impostors_.baked;
+        }
+    }
+    if (not_ready) d3d12_->omit("neighbour crown impostors (bake pipeline not ready: those crowns draw triangles)", false);
+    // Every pass after this binds its own slots; the world targets come back
+    // for the rest of the world pass this adoption runs in.
+    d3d12_->clear_slots();
+    if (world_d3d12_bound_ && world_d3d12_) bind_world_targets_d3d12(world_history_bound12_);
+    else d3d12_->set_target(nullptr);
     impostors_.bake_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     return S_OK;
 } catch (...) {

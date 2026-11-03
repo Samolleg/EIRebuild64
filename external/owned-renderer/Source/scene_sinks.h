@@ -131,7 +131,11 @@ struct SceneSinks {
   try{auto& self=of(context);if(!self.object_active)return;if(!commit)self.renderer->rollback_native(self.checkpoint);else self.renderer->release_native_checkpoint(self.checkpoint);self.object_active=false;}catch(...){}
  }
  static bool frameState(void* context,NativeFrameState& output) noexcept{
-  const auto& self=of(context);if(!self.frame_valid)return false;output=self.frame;return true;
+  const auto& self=of(context);if(!self.frame_valid)return false;output=self.frame;
+  // The renderer that draws decides: shadows run only where its own switch
+  // (applied at its BeginScene) is on as well (#204).
+  output.shadows_enabled=output.shadows_enabled&&self.renderer->native_shadows_enabled();
+  return true;
  }
  static bool worldLighting(void* context,const NativeWorldLighting& lighting) noexcept{
   try{return of(context).renderer->set_native_world_lighting(lighting);}catch(...){return false;}

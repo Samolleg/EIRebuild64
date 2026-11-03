@@ -2689,6 +2689,7 @@ void CWorldServer::RemoveMapObject(int nID)
     if (ppObj == NULL || ppObj[0] == NULL)
         return;
     CMapObject *pMODel = ppObj[0];
+    if(pMODel->WhoAmI()==HPC_UNIT)aiMap.Navigation().ForgetUnit(nID);
     if (pMODel->WhoAmI() != HPC_MAGICTRAP)
         aiMap.RemoveObject(*ppObj);
     RemoveObjectFromActive(nID);

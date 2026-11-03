@@ -9,7 +9,6 @@
 #include "owned_asset_loader.h"
 #include "owned_resource_store.h"
 #include "owned_terrain_decode.h"
-#include "terrain_bake.h"
 #include "terrain_tile_blend.h"
 
 #include <array>
@@ -46,7 +45,6 @@ struct GroundCoverNeighbourInputs {
     std::vector<std::uint16_t> base_slots;
     std::vector<std::uint32_t> slot_types;
     std::shared_ptr<TerrainTileBlendInput> blend_input; // only for 8-tile atlas sides
-    std::shared_ptr<const TerrainBakeCells> bake_cells;  // terrain material cache (terrain_bake.h)
     // Contact grid rows (owned_terrain_contact_tiles) and the materials they use.
     std::vector<std::array<std::uint32_t,4>> contact_tiles;
     std::uint64_t contact_used = 0;

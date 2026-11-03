@@ -104,6 +104,7 @@ public:
     void EndWorld();
     void BeginInterface();
     void RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals = nullptr);
+    void SetC56HitTestFrame(bool begin);
     void SubmitC56PointLights(const std::vector<owned::RetainedWorldPointLight>& lights,
                               double worldTime);
     bool IsOwnedWorldActive() const { return ownedWorldActive; }

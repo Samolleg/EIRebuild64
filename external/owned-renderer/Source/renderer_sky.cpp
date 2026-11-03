@@ -48,6 +48,7 @@ void Renderer::release_owned_sky() noexcept {
     sky_reason_="";sky_status_state_.clear();
     sky_time_ = -1.0;
     sky_lut_inputs_.clear();sky_shadow_inputs_.clear();
+    sky12_ = SkyD3D12{};
 }
 
 #endif
@@ -61,6 +62,7 @@ void append_sky_shader_programs(std::vector<ShaderProgram>& out) {
 
 #if !defined(EID3D11_SHADER_EMBED)
 HRESULT Renderer::ensure_owned_sky(int quality) noexcept {
+    if (d3d12_) return ensure_owned_sky_d3d12(quality);
     HRESULT hr = S_OK;
     auto fail = [&](const char* reason, HRESULT result) { sky_reason_ = reason; return result; };
     if (!sky_ps_) {
@@ -106,10 +108,13 @@ HRESULT Renderer::ensure_owned_sky(int quality) noexcept {
             return fail("sky pipeline objects unavailable: sky omitted", hr);
         }
     }
+    // mips: a full chain (mip 0 written through the UAV, the rest by
+    // GenerateMips) for the material reflection's roughness-selected reads.
     auto texture2d = [&](UINT width, UINT height, DXGI_FORMAT format, ComPtr<ID3D11ShaderResourceView>& srv,
-                         ComPtr<ID3D11UnorderedAccessView>& uav) {
+                         ComPtr<ID3D11UnorderedAccessView>& uav, bool mips = false) {
         D3D11_TEXTURE2D_DESC desc{};desc.Width = width;desc.Height = height;desc.MipLevels = desc.ArraySize = 1;
         desc.SampleDesc.Count = 1;desc.Format = format;desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+        if (mips) { desc.MipLevels = 0;desc.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;desc.BindFlags |= D3D11_BIND_RENDER_TARGET; }
         ComPtr<ID3D11Texture2D> texture;
         HRESULT result = device_->CreateTexture2D(&desc, nullptr, &texture);
         if (SUCCEEDED(result)) result = device_->CreateShaderResourceView(texture.Get(), nullptr, srv.ReleaseAndGetAddressOf());
@@ -174,7 +179,7 @@ HRESULT Renderer::ensure_owned_sky(int quality) noexcept {
             return fail("sky cloud targets could not be created: sky omitted", hr);
         for (unsigned i = 0; i < 2; ++i)
             if (FAILED(hr = texture2d(cloud_width, cloud_height, DXGI_FORMAT_R16G16B16A16_FLOAT, sky_cloud_srv_[i], sky_cloud_uav_[i])) ||
-                FAILED(hr = texture2d(q.probe_width, q.probe_width / 2, DXGI_FORMAT_R16G16B16A16_FLOAT, sky_probe_srv_[i], sky_probe_uav_[i])))
+                FAILED(hr = texture2d(q.probe_width, q.probe_width / 2, DXGI_FORMAT_R16G16B16A16_FLOAT, sky_probe_srv_[i], sky_probe_uav_[i], true)))
                 return fail("sky cloud targets could not be created: sky omitted", hr);
         if (FAILED(hr = texture2d(q.shadow_size, q.shadow_size, DXGI_FORMAT_R16_FLOAT, sky_shadow_srv_, sky_shadow_uav_)) ||
             FAILED(hr = texture2d(q.shadow_size, q.shadow_size, DXGI_FORMAT_R16_FLOAT, sky_shadow_raw_srv_, sky_shadow_raw_uav_)))
@@ -206,6 +211,7 @@ void Renderer::prepare_owned_sky(FogFrameGpu& fog, const WorldEnvironment& env, 
     else if (feature_level_ < D3D_FEATURE_LEVEL_11_0) problem = "feature level below 11_0: sky omitted";
     else if (sky_failed_) problem = sky_reason_;
     else if (FAILED(ensure_owned_sky(quality))) {sky_failed_ = true;problem = sky_reason_;}
+    else if (sky12_.pending) state = "sky programs not ready: sky omitted this frame";
     if (state || problem) {sky_history_valid_ = false;sky_time_ = -1.0;}
     if (!state && !problem) {
         const auto q = sky_quality(quality);
@@ -415,7 +421,13 @@ void Renderer::prepare_owned_sky(FogFrameGpu& fog, const WorldEnvironment& env, 
         frame.control[0] = sky_frame_;frame.control[1] = q.steps;frame.control[2] = q.light_steps;frame.control[3] = sky_probe_width_;
 
         D3D11_MAPPED_SUBRESOURCE mapped{};
-        if (FAILED(context_->Map(sky_constants_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+        bool dispatched = false;
+        if (d3d12_) {
+            const HRESULT result = dispatch_owned_sky_d3d12(frame);
+            if (result == S_OK) dispatched = true;
+            else if (result == S_FALSE) state = "sky programs not ready: sky omitted this frame";
+            else problem = sky_reason_;
+        } else if (FAILED(context_->Map(sky_constants_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
             problem = "sky constant upload failed: sky omitted this frame";
         } else {
             std::memcpy(mapped.pData, &frame, sizeof(frame));context_->Unmap(sky_constants_.Get(), 0);
@@ -494,6 +506,12 @@ void Renderer::prepare_owned_sky(FogFrameGpu& fog, const WorldEnvironment& env, 
             ID3D11Buffer* no_buffer = nullptr;context_->CSSetConstantBuffers(0, 1, &no_buffer);
             ID3D11SamplerState* no_samplers[2]{};context_->CSSetSamplers(0, 2, no_samplers);
             context_->CSSetShader(nullptr, nullptr, 0);
+            // The probe's mips for the material reflection (no reader below mip 0 otherwise).
+            if (material_library_ && material_level()) context_->GenerateMips(sky_probe_srv_[current].Get());
+            dispatched = true;
+        }
+        if (dispatched) {
+            const unsigned current = 1u - sky_index_;
             profiler_.add_draw(5, 5);
             sky_index_ = current;sky_history_valid_ = true;sky_draw_pending_ = sky_inputs_active_ = true;
             fog.cloud[0] = far_cloud_visibility;fog.cloud[1] = origin[0];fog.cloud[2] = origin[1];fog.cloud[3] = 1.f / kSkyShadowExtent;
@@ -548,6 +566,182 @@ void Renderer::draw_owned_sky() noexcept {
     context_->Draw(3, 0);
     ID3D11ShaderResourceView* none[2]{};context_->PSSetShaderResources(3, 2, none);
     profiler_.add_draw(1, 1);profiler_.add_batch();
+}
+
+// ---- D3D12 backend: the same programs, textures and order on the executor.
+// The D3D11 path above is unchanged; these run only with d3d12_ set.
+HRESULT Renderer::ensure_owned_sky_d3d12(int quality) noexcept try {
+    sky12_.pending = false;
+    auto fail = [&](const char* reason, HRESULT result) { sky_reason_ = reason; return result; };
+    if (sky12_.programs.empty()) append_sky_shader_programs(sky12_.programs);  // 9 compute, skyVS, skyPS
+    const auto& programs = sky12_.programs;
+    HRESULT hr = S_OK;
+    if (!sky12_.shape) {
+        // The weather field keeps a full chain (512: 10 levels) as on D3D11.
+        D3D12TextureRef shape, detail, weather, lut;
+        if (FAILED(hr = d3d12_->create_storage_texture(128, 128, 128 * kSkyShapeDepthTiles, DXGI_FORMAT_R8_UNORM, shape)) ||
+            FAILED(hr = d3d12_->create_storage_texture(32, 32, 32, DXGI_FORMAT_R8_UNORM, detail)) ||
+            FAILED(hr = d3d12_->create_storage_texture(512, 512, 0, DXGI_FORMAT_R8G8_UNORM, weather, 10)))
+            return fail("sky noise textures could not be created: sky omitted", hr);
+        if (FAILED(hr = d3d12_->create_storage_texture(kSkyLutWidth, kSkyLutHeight, 0, DXGI_FORMAT_R16G16B16A16_FLOAT, lut)))
+            return fail("sky LUT could not be created: sky omitted", hr);
+        sky12_.shape = std::move(shape);sky12_.detail = std::move(detail);sky12_.weather = std::move(weather);sky12_.lut = std::move(lut);
+        sky12_.noise_ready = false;sky_lut_inputs_.clear();
+    }
+    if (!sky12_.noise_ready) {
+        // Tiling noise volumes and the weather field, generated once on the
+        // GPU; a program still compiling repeats the set next frame.
+        bool waiting = false;
+        const auto run = [&](const ShaderProgram& program, UINT slot, const D3D12Texture* output, UINT x, UINT y, UINT z) {
+            if (FAILED(hr)) return;
+            d3d12_->clear_slots();
+            d3d12_->set_unordered(slot, output);
+            const HRESULT result = d3d12_->dispatch(program, x, y, z);
+            if (FAILED(result)) hr = result;
+            else if (d3d12_not_done(result)) waiting = true;
+        };
+        run(programs[0], 0, sky12_.shape.get(), 128 / 4, 128 / 4, 128 * kSkyShapeDepthTiles / 4);
+        run(programs[1], 0, sky12_.detail.get(), 32 / 4, 32 / 4, 32 / 4);
+        run(programs[2], 1, sky12_.weather.get(), 64, 64, 1);
+        d3d12_->clear_slots();
+        if (SUCCEEDED(hr) && !waiting) {
+            hr = d3d12_->generate_mips(*sky12_.weather, d3d12_mip_program());
+            if (d3d12_not_done(hr)) {waiting = true;hr = S_OK;}
+        }
+        if (FAILED(hr)) return fail("sky noise textures could not be generated: sky omitted", hr);
+        if (waiting) {sky12_.pending = true;d3d12_->count("sky frames waiting for their programs");return S_OK;}
+        sky12_.noise_ready = true;
+    }
+    const auto q = sky_quality(quality);
+    const unsigned divided = (width_ + q.cloud_divisor - 1) / q.cloud_divisor;
+    const unsigned cloud_width = std::max(1u, std::min(divided, q.max_cloud_width));
+    const unsigned cloud_height = std::max(1u, static_cast<unsigned>(std::ceil(double(height_) * cloud_width / width_)));
+    const unsigned march_width = (cloud_width + 1) / 2, march_height = (cloud_height + 1) / 2;
+    if (sky_quality_ != quality || sky_cloud_width_ != cloud_width || sky_cloud_height_ != cloud_height) {
+        sky_history_valid_ = false;sky_quality_ = -1;sky_shadow_inputs_.clear();
+        sky_cloud_width_ = sky_cloud_height_ = sky_march_width_ = sky_march_height_ = sky_shadow_size_ = sky_probe_width_ = 0;
+        const DXGI_FORMAT colour = DXGI_FORMAT_R16G16B16A16_FLOAT;
+        if (FAILED(hr = d3d12_->create_storage_texture(march_width, march_height, 0, colour, sky12_.march)))
+            return fail("sky cloud targets could not be created: sky omitted", hr);
+        for (unsigned i = 0; i < 2; ++i)
+            if (FAILED(hr = d3d12_->create_storage_texture(cloud_width, cloud_height, 0, colour, sky12_.cloud[i])) ||
+                FAILED(hr = d3d12_->create_storage_texture(q.probe_width, q.probe_width / 2, 0, colour, sky12_.probe[i])))
+                return fail("sky cloud targets could not be created: sky omitted", hr);
+        if (FAILED(hr = d3d12_->create_storage_texture(q.shadow_size, q.shadow_size, 0, DXGI_FORMAT_R16_FLOAT, sky12_.shadow)) ||
+            FAILED(hr = d3d12_->create_storage_texture(q.shadow_size, q.shadow_size, 0, DXGI_FORMAT_R16_FLOAT, sky12_.shadow_raw)))
+            return fail("cloud shadow map could not be created: sky omitted", hr);
+        sky_quality_ = quality;sky_cloud_width_ = cloud_width;sky_cloud_height_ = cloud_height;
+        sky_march_width_ = march_width;sky_march_height_ = march_height;
+        sky_shadow_size_ = q.shadow_size;sky_probe_width_ = q.probe_width;
+    }
+    return S_OK;
+} catch (...) {
+    sky_reason_ = "sky programs could not be listed: sky omitted";
+    return E_OUTOFMEMORY;
+}
+
+// prepare_owned_sky's passes on D3D12, in the D3D11 order with the same
+// skips (LUT and shadow field unchanged: not recomputed). The shadow passes
+// read their own constants (the slower shadow drift); set_constants copies
+// each block, so no re-upload follows. S_FALSE: a program is not ready.
+HRESULT Renderer::dispatch_owned_sky_d3d12(const SkyFrameGpu& frame) noexcept try {
+    const auto& programs = sky12_.programs;
+    transition_profile_pass("sky_clouds");
+    const unsigned current = 1u - sky_index_, previous = sky_index_;
+    HRESULT hr = S_OK;
+    bool waiting = false;
+    D3D11_SAMPLER_DESC wrap{};wrap.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;wrap.MaxLOD = D3D11_FLOAT32_MAX;
+    wrap.AddressU = wrap.AddressV = wrap.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    D3D11_SAMPLER_DESC clamp = wrap;
+    clamp.AddressU = clamp.AddressV = clamp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    const auto bind_common = [&](const SkyFrameGpu& constants) {
+        d3d12_->clear_slots();
+        d3d12_->set_constants(0, &constants, sizeof(constants));
+        d3d12_->set_sampler(0, wrap);d3d12_->set_sampler(1, clamp);
+        d3d12_->set_resource(0, sky12_.shape.get());d3d12_->set_resource(1, sky12_.detail.get());
+        d3d12_->set_resource(2, sky12_.weather.get());d3d12_->set_resource(3, sky12_.lut.get());
+    };
+    const auto run = [&](const ShaderProgram& program, UINT slot, const D3D12Texture* output, UINT x, UINT y) {
+        if (FAILED(hr)) return false;
+        d3d12_->set_unordered(slot, output);
+        const HRESULT result = d3d12_->dispatch(program, x, y, 1);
+        d3d12_->set_unordered(slot, static_cast<const D3D12Texture*>(nullptr));
+        if (FAILED(result)) hr = result;
+        else if (d3d12_not_done(result)) waiting = true;
+        return result == S_OK;
+    };
+    // skyLutCS: unchanged inputs (eye height, haze, sun, moon, their LUT scales), the same LUT.
+    {
+        const float* const parts[6] = {&frame.eye[2], &frame.weather[0], frame.sun, frame.moon, frame.lut_sun, frame.lut_moon};
+        const std::size_t sizes[6] = {1, 1, 3, 3, 3, 3};
+        unsigned char key[14 * sizeof(float)];std::size_t used = 0;
+        for (int k = 0; k < 6; ++k) {std::memcpy(key + used, parts[k], sizes[k] * sizeof(float));used += sizes[k] * sizeof(float);}
+        if (sky_lut_inputs_.size() != used || std::memcmp(sky_lut_inputs_.data(), key, used) != 0) {
+            bind_common(frame);
+            d3d12_->set_resource(3, static_cast<const D3D12Texture*>(nullptr));  // the LUT is the output
+            if (run(programs[3], 2, sky12_.lut.get(), (kSkyLutWidth + 7) / 8, (kSkyLutHeight + 7) / 8)) sky_lut_inputs_.assign(key, key + used);
+        }
+    }
+    // The shadow field at its own drift (sky_cloud_shadow_speed); skipped when
+    // its constants, less the frame counter and jitter, are the last ones.
+    SkyFrameGpu shadow_frame = frame;
+    const double shadow_wind[3] = {sky_shadow_offset_[0], sky_shadow_offset_[1], sky_wind_offset_[2]};
+    sky_noise_phases(shadow_wind, shadow_frame.noise_phase);
+    sky_mid_phases(shadow_wind, shadow_frame.mid, shadow_frame.mid_shape);
+    SkyFrameGpu shadow_key = shadow_frame;
+    shadow_key.control[0] = 0;shadow_key.reconstruct[2] = shadow_key.reconstruct[3] = 0;
+    const auto* shadow_bytes = reinterpret_cast<const unsigned char*>(&shadow_key);
+    if (sky_shadow_inputs_.size() != sizeof(shadow_key) || std::memcmp(sky_shadow_inputs_.data(), shadow_bytes, sizeof(shadow_key)) != 0) {
+        bind_common(shadow_frame);
+        const bool raw = run(programs[4], 3, sky12_.shadow_raw.get(), (sky_shadow_size_ + 7) / 8, (sky_shadow_size_ + 7) / 8);
+        d3d12_->set_resource(6, sky12_.shadow_raw.get());
+        if (run(programs[5], 3, sky12_.shadow.get(), (sky_shadow_size_ + 7) / 8, (sky_shadow_size_ + 7) / 8) && raw)
+            sky_shadow_inputs_.assign(shadow_bytes, shadow_bytes + sizeof(shadow_key));
+    }
+    bind_common(frame);
+    d3d12_->set_resource(5, sky12_.probe[previous].get());
+    run(programs[8], 2, sky12_.probe[current].get(), (sky_probe_width_ + 7) / 8, (sky_probe_width_ / 2 + 7) / 8);
+    d3d12_->set_resource(5, static_cast<const D3D12Texture*>(nullptr));
+    run(programs[6], 2, sky12_.march.get(), (sky_march_width_ + 7) / 8, (sky_march_height_ + 7) / 8);
+    d3d12_->set_resource(4, sky12_.march.get());d3d12_->set_resource(5, sky12_.cloud[previous].get());
+    run(programs[7], 2, sky12_.cloud[current].get(), (sky_cloud_width_ + 7) / 8, (sky_cloud_height_ + 7) / 8);
+    d3d12_->clear_slots();
+    if (FAILED(hr)) {sky_reason_ = "sky passes failed on the D3D12 executor: sky omitted this frame";return hr;}
+    if (waiting) {d3d12_->count("sky frames waiting for their programs");return S_FALSE;}
+    const auto* bytes = reinterpret_cast<const unsigned char*>(&frame);
+    sky12_.frame.assign(bytes, bytes + sizeof(frame));
+    d3d12_->count("sky frames");
+    return S_OK;
+} catch (...) {
+    sky_reason_ = "sky constants could not be kept: sky omitted this frame";
+    return E_OUTOFMEMORY;
+}
+
+// draw_owned_sky on D3D12: behind the first world batch of the frame, into
+// the world target, from flush_native_d3d12 before the world's slots.
+void Renderer::draw_owned_sky_d3d12() noexcept {
+    sky_draw_pending_ = false;
+    if (scene_composited_ || sky12_.frame.size() != sizeof(SkyFrameGpu)) return;
+    transition_profile_pass("sky_draw");
+    d3d12_->clear_slots();
+    d3d12_->set_constants(0, sky12_.frame.data(), UINT(sky12_.frame.size()));
+    D3D11_SAMPLER_DESC wrap{};wrap.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;wrap.MaxLOD = D3D11_FLOAT32_MAX;
+    wrap.AddressU = wrap.AddressV = wrap.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    D3D11_SAMPLER_DESC clamp = wrap;
+    clamp.AddressU = clamp.AddressV = clamp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    d3d12_->set_sampler(0, wrap);d3d12_->set_sampler(1, clamp);
+    d3d12_->set_resource(3, sky12_.lut.get());d3d12_->set_resource(4, sky12_.cloud[sky_index_].get());
+    // Behind everything: only pixels still at the cleared far plane, no depth write.
+    D3D12NativeState state{};
+    state.depth.DepthEnable = TRUE;state.depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    state.depth.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+    state.raster.FillMode = D3D11_FILL_SOLID;state.raster.CullMode = D3D11_CULL_NONE;state.raster.DepthClipEnable = FALSE;
+    const HRESULT hr = d3d12_->draw(sky12_.programs[9], sky12_.programs[10], state, nullptr, 3);
+    d3d12_->clear_slots();
+    if (hr == S_OK) {d3d12_->count("sky draws");profiler_.add_draw(1, 1);profiler_.add_batch();}
+    else if (hr == S_FALSE) d3d12_->count("sky draws waiting for their pipeline");
+    else if (hr == kD3D12Dropped) {}  // named by the executor
+    else d3d12_->omit("owned sky (draw failed)", true);
 }
 
 #endif

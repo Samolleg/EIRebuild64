@@ -2,6 +2,7 @@
 #include "test_harness.h"
 #include "res_cache_release.h"
 #include "../GameJournal.h"
+#include "../CorePerf.h"
 #include <atomic>
 #include <array>
 #include <cstring>
@@ -45,6 +46,13 @@ void embedded_report_render_failure(const char* event, const char* reason) noexc
     }
 } catch (...) {}
 
+unsigned embedded_frame_scope_begin(const char* name, LONGLONG now) noexcept {
+    return CorePerf::BeginFrameDetail(name, now);
+}
+void embedded_frame_scope_end(unsigned token, LONGLONG now) noexcept {
+    CorePerf::EndFrameDetail(token, now);
+}
+
 void embedded_perf06_report(const char* detail) noexcept {
     GameJournal::Event("RENDER", "pipeline_perf", "%s", detail);
 }
@@ -67,7 +75,10 @@ void bridge_report_event(const char* event, const char* detail) noexcept {
     GameJournal::Event(failure ? "ERROR" : "RENDER", "bridge",
         "event=%.96s detail=%.768s", event ? event : "", detail ? detail : "");
 }
-void bridge_append_probe_event(const char*, const char*) noexcept { E2_UNAVAILABLE("retail lifecycle probe"); }
+void bridge_append_probe_event(const char* event, const char* detail) noexcept {
+    // Shared renderer events include terrain/material failures, not just retail probes.
+    bridge_report_event(event, detail);
+}
 void bridge_trace_input_focus(HWND, const char*, UINT, WPARAM, int) noexcept { E2_UNAVAILABLE("retail input focus trace"); }
 // The embedded EIRebuild host publishes its own render inputs directly. Retail
 // game.exe patch-site and semantic-hook checks do not apply to this frontend.

@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cfloat>
 #include <climits>
+#include <cstring>
 #include <unordered_map>
 
 namespace owned {
@@ -243,7 +244,8 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                 adopt_prebuilt_textures(*upload);
                 // Crown impostors of its cut-out figures, before they register.
                 const UINT impostors_before=impostors_.baked;const double impostor_ms_before=impostors_.bake_ms;
-                bake_neighbour_impostors(*upload);
+                if(!d3d12_)bake_neighbour_impostors(*upload);
+                else bake_neighbour_impostors_d3d12(*upload);
                 // Prebuilt meshes no draw registered (fog culled, a rejected piece)
                 // are released before the upload dies, also on an exception.
                 struct UnusedPrebuilt {Renderer& self;const NeighbourPiece* upload;
@@ -348,19 +350,22 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     neighbours_.ordered.resize(first_ordered);
                 }
                 // Ground cover inputs while the decoded map is still alive.
-                if(accepted)add_ground_cover_neighbour(*upload,map_placement,first_part+1);
+                if(accepted&&!d3d12_)add_ground_cover_neighbour(*upload,map_placement,first_part+1);
+                else if(accepted)add_neighbour_blend_maps_d3d12(*upload,map_placement,first_part+1); // with its cover map
                 if(accepted)add_liquid_surf_neighbour(*upload,map_placement);
                 neighbours_.geometry_bytes+=native_mesh_resident_bytes_-old_mesh;
                 neighbours_.texture_bytes+=native_owned_texture_bytes(false)+native_owned_texture_bytes(true)-old_texture;
                 native_texture_share_floor_=0;
                 // One line per neighbour; a rejected neighbour is omitted whole.
+                char impostor_split[160]{};
+                if(impostors_.failed)std::snprintf(impostor_split,sizeof(impostor_split)," impostors_failed");
                 char text[1536];std::snprintf(text,sizeof(text),
                     "map=%s accepted=%d failed_step=%s%s%s gpu_geometry=%llu gpu_textures=%llu textures_shared=%llu/%llu decoded_payload_peak=%llu cpu_geometry_retained=0 omitted_decorations=%zu unbuilt_decorations=%u fog_culled=%u impostors=%u/%zu bake_ms=%.1f atlas_slices=%u%s lod=%s figures:%u/%u triangles:%llu>%llu/%llu/%llu lod_ms=%.1f prebuild_ms=%.1f %s",
                     upload->selection.placement.mpr.c_str(),accepted?1:0,accepted?"none":step?step:"unknown",
                     submission.failure?"/":"",submission.failure?submission.failure:"",
                     neighbours_.geometry_bytes,neighbours_.texture_bytes,native_texture_shared_,native_texture_shared_bytes_,neighbours_.peak_decoded_bytes,upload->omitted_decorations,upload->unbuilt_decorations,upload->fog_culled,
                     impostors_.baked-impostors_before,upload->impostors.size(),impostors_.bake_ms-impostor_ms_before,impostors_.count,
-                    impostors_.failed?" impostors_failed":"",
+                    impostor_split,
                     // prebuilt=none: the stream built no pages; the piece was rejected (terrain.prebuild_failed).
                     upload->pages.empty()?"prebuilt=none":"ready",upload->lod_stats.reduced_figures,upload->lod_stats.figures,
                     (unsigned long long)upload->lod_stats.full_triangles,(unsigned long long)upload->lod_stats.level_triangles[0],
@@ -379,7 +384,7 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
             for(auto& n:gc_neighbours_)apply_neighbour_tile_families(n);
             // Contact needs painted neighbour colours even before its cover pass,
             // and also when cover is disabled. Reuse the existing paint pipeline.
-            if(!gc_neighbours_.empty()&&configured_floating_point(debug_overlay_.config(),"contact_blend",.7f)>0&&
+            if(!d3d12_&&!gc_neighbours_.empty()&&configured_floating_point(debug_overlay_.config(),"contact_blend",.7f)>0&&
                 ensure_ground_cover_pipeline()==S_OK){
                 for(auto& n:gc_neighbours_)if(!n.prepared&&FAILED(prepare_ground_cover_neighbour(n))){
                     bridge_neighbour_diagnostic("neighbour contact colour unavailable; contact blend omitted");

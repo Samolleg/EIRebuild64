@@ -144,12 +144,17 @@ LRESULT __fastcall focus_message_handler(UINT message, WPARAM wparam, LPARAM lpa
     if(input_message(message) && (g_hud_editing || renderer_controls_capture_input(window))) {
         if(!window)return 0;
         const LRESULT result=SendMessageW(window,message,wparam,lparam);
-        // The game's loop never translates keys (GetMessage straight into this
-        // handler, no TranslateMessage), so renderer text fields (the F10
-        // filter) never received characters. Each key-down's characters are
-        // made here, with the thread's keyboard state, and delivered as
-        // WM_CHAR; ToUnicode flag 4 leaves the dead-key state alone.
-        if(message==WM_KEYDOWN||message==WM_SYSKEYDOWN){
+        // The game's loop does not translate keys in standard mode (GetMessage
+        // straight into this handler, no TranslateMessage), so renderer text
+        // fields (the F10 filter) never received characters. Each key-down's
+        // characters are made here, with the thread's keyboard state, and
+        // delivered as WM_CHAR; ToUnicode flag 4 leaves the dead-key state
+        // alone. Where the loop does translate (core mode typed every
+        // character twice), TranslateMessage has already queued the key's
+        // WM_CHAR behind it: that one is delivered and none is made.
+        MSG queued{};
+        if((message==WM_KEYDOWN||message==WM_SYSKEYDOWN)&&
+           !PeekMessageW(&queued,window,WM_CHAR,WM_SYSDEADCHAR,PM_NOREMOVE)){
             BYTE state[256]{};
             if(GetKeyboardState(state)){
                 WCHAR characters[4]{};

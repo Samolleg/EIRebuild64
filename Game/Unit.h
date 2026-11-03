@@ -487,7 +487,9 @@ public:
     virtual void Load(CSave &file) = delete;
     virtual void Store(CSave &file) = delete;
     // Animation entry
-    const SADEntry *GetAnimation(DWORD dwAnimationFlags, bool bWeapon = true);
+    bool HasRestAnimations() const;
+    const SADEntry *GetAnimation(DWORD dwAnimationFlags, bool bWeapon = true,
+                                bool reportMissing = true);
     const SADEntry *GetAnimationByIndex(DWORD nIndex);
     // class identification functions
     virtual LPCSTR GetGameClassName() const { return "CUnit"; };

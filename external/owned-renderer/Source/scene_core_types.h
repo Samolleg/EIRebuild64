@@ -128,6 +128,7 @@ template <class A> void fields(A& a, ScenePresentInputs& v) {
 namespace scene_cmd {
 template <class A> void fields(A& a, BeginEngineFrame& v) { scene_wire::field(a, v.world_epoch); }
 template <class A> void fields(A&, MarkLoadPicture&) {}
+template <class A> void fields(A& a, HitTestFrame& v) { scene_wire::field(a, v.begin); }
 template <class A> void fields(A&, BeginScene&) {}
 template <class A> void fields(A&, EndScene&) {}
 template <class A> void fields(A& a, FlushNative& v) { scene_wire::field(a, v.layout_slot); }
@@ -329,10 +330,13 @@ struct Present {
     static constexpr bool frame_values = false;  // the values travel in inputs
     std::uint64_t serial = 0;
     bool game_foreground = true;  // the game window is in front (background frame limit, statistics)
+    // QPC (system-wide clock) when the game thread's previous present wait
+    // returned: this frame's start (the host's latency measurement, reflex.h).
+    std::int64_t frame_start_qpc = 0;
     ScenePresentInputs inputs;
     void run(Renderer& renderer);  // host (core_host.cpp)
 };
-template <class A> void fields(A& a, Present& v) { scene_wire::fields_of(a, v.serial, v.game_foreground, v.inputs); }
+template <class A> void fields(A& a, Present& v) { scene_wire::fields_of(a, v.serial, v.game_foreground, v.frame_start_qpc, v.inputs); }
 
 // The loaded options of the game process's ini, sent whenever its revision
 // moves; the host Renderer sets each registered key it knows.
@@ -362,9 +366,10 @@ struct NeighbourBegin {
     static constexpr bool frame_values = false;
     std::uint64_t epoch = 0;
     std::vector<std::uint8_t> inputs;  // encode_neighbour_begin
+    bool restart = false;              // a same-map reload (neighbour_maps_restart)
     void run(Renderer& renderer);      // host (core_world.cpp)
 };
-template <class A> void fields(A& a, NeighbourBegin& v) { scene_wire::fields_of(a, v.epoch, v.inputs); }
+template <class A> void fields(A& a, NeighbourBegin& v) { scene_wire::fields_of(a, v.epoch, v.inputs, v.restart); }
 struct NeighbourStop {
     static constexpr bool frame_values = false;
     std::uint64_t epoch = 0;           // 0: any
@@ -463,9 +468,12 @@ struct Config {
     DebugOverlayMode overlay_mode = DebugOverlayMode::hidden;
     DebugResourceView debug_resource_view = DebugResourceView::disabled;
     std::wstring config_path;  // the game's ini: the host's F10 overlay loads and saves it
+    // The game process changed options it saves (HUD layout edit end, a
+    // display Apply): the host, the only ini writer, saves them.
+    bool save = false;
     void run(Renderer& renderer);  // host (core_host.cpp)
 };
-template <class A> void fields(A& a, Config& v) { scene_wire::fields_of(a, v.options, v.overlay_mode, v.debug_resource_view, v.config_path); }
+template <class A> void fields(A& a, Config& v) { scene_wire::fields_of(a, v.options, v.overlay_mode, v.debug_resource_view, v.config_path, v.save); }
 
 // The game's resource mounts (owned_resource_runtime): the host has no
 // registry/configuration of its own, so the passes that open game resources
@@ -474,12 +482,13 @@ template <class A> void fields(A& a, Config& v) { scene_wire::fields_of(a, v.opt
 // they change.
 struct ResourceMounts {
     static constexpr bool frame_values = false;
-    ResourceStoreConfig mounts, text_mounts;
+    ResourceStoreConfig mounts, text_mounts, data_mounts;
     void run(Renderer& renderer);  // host (core_host.cpp)
 };
 template <class A> void fields(A& a, ResourceMounts& v) {
     scene_wire::fields_of(a, v.mounts.loose_roots, v.mounts.archives, v.mounts.archive_kinds,
-                          v.text_mounts.loose_roots, v.text_mounts.archives, v.text_mounts.archive_kinds);
+                          v.text_mounts.loose_roots, v.text_mounts.archives, v.text_mounts.archive_kinds,
+                          v.data_mounts.loose_roots, v.data_mounts.archives, v.data_mounts.archive_kinds);
 }
 
 // The combat UI's game-side state (combat_ui_encode_game): units, effects,

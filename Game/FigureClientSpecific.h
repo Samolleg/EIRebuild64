@@ -3,6 +3,7 @@
 #include "Figure.h"
 #include "GeometryInterfaces.h"
 #include "Object.h"
+#include <vector>
 /////////////////////////////////////////////////////////////////////////////////////
 static DWORD FCS_ANIMATED_TEXTURE = MAKE_FLAG(FIG_LAST_BIT, 0);
 
@@ -15,7 +16,13 @@ class CLight;
 class CFigureClientSpecific : public CFigureSpecific
 {
 private:
-    CRect rcClip; // 2D screen clip rectangle
+    mutable CRect rcClip; // 2D screen clip rectangle
+    CRect rcPickBounds;
+    SHMatrix pickingMatrix;
+    int pickingFrame=-1;
+    mutable bool pickingExact=false;
+    mutable std::vector<SXYZW> pickingVertices;
+    mutable std::vector<unsigned char> pickingVisited;
     CPlot3D scale;
 
 private:
@@ -23,9 +30,9 @@ private:
         CSimplyArray<CLight*, CLight*>* lights);
     void RecalcXYAdd(float fpTimeStep);
     void DrawBBox(CRenderer *pRend);
-    void CalculateScreenBounds(CRenderer *pRend, CRect *pRect);
+    void CalculateScreenBounds() const;
 
-    IGeometry *GetGeometry()
+    IGeometry *GetGeometry() const
     {
         if (!pFigure->lpObject)
             return 0;
@@ -51,7 +58,8 @@ public:
     void Calc2DClipRect(CXYZW4Array &homoscreen);
     void Calc2DClipRect(CXYZWArray &homoscreen);
     void Calc2DClipRect(CTLVertexArray &tlscreen);
-    const CRect &Get2DClipRect() const { return rcClip; }
+    const CRect &GetPickingBounds() const { return rcPickBounds; }
+    const CRect &Get2DClipRect() const { if(!pickingExact)CalculateScreenBounds();return rcClip; }
     void PrepareOwnedPicking(CRenderer *pRend, CRect *pRect);
     // drawing
     BOOL Draw(CRenderer *pRend, const CQuaternion &qObject, const CPlot3D &cpObject,

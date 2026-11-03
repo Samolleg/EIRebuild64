@@ -1,4 +1,5 @@
 #include "E3Cursor.h"
+#include "../CorePerf.h"
 #include "cursor_confinement.h"
 #include "../ErrorDialog.h"
 #include <engine_bridge.h>
@@ -135,6 +136,7 @@ void E3CursorPublish(E3CursorState state) {
     cursor.state = std::move(state); ++cursor.revision; cursor.wake.notify_all();
 }
 void E3CursorCanvas(HWND window, unsigned width, unsigned height, bool active) noexcept {
+    CorePerf::Scope timing(CorePerf::UiCursorCanvas);
     std::lock_guard<std::mutex> lock(cursor.mutex);
     if (cursor.window != window || cursor.width != width || cursor.height != height || cursor.active != active) {
         cursor.frame = {}; ++cursor.revision;

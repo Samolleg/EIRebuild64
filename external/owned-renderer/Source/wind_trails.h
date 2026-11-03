@@ -109,10 +109,11 @@ inline bool slot_active(std::uint32_t seed, unsigned slot, std::int64_t cycle, f
 }
 
 // Gust fronts of the grass (ground_cover_interaction.h gcWindSway: eight-metre
-// fronts travelling downwind at .75 x speed); 1 on a front, 0 between.
+// fronts travelling downwind at ground_cover.h kSwayTravel, 1.9 rad per game
+// second); 1 on a front, 0 between.
 inline float gust_front(float x, float y, const WeatherWindGpu& w, double seconds) noexcept {
     const double along = x * w.direction[0] + y * w.direction[1];
-    return static_cast<float>(.5 + .5 * std::sin(along * .78539816 - seconds * .75 * w.speed));
+    return static_cast<float>(.5 + .5 * std::sin(along * .78539816 - seconds * 1.9));
 }
 // Spawn candidates are kept in proportion to this weight.
 inline float spawn_weight(float front) noexcept { return .2f + .8f * front * front; }

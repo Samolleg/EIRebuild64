@@ -14,7 +14,6 @@ static const float terrainWalkLimitZ=.76604444;   // cos 40: the game's walk lim
 static const float terrainFlatEdgeZ=.766;
 static const float terrainCliffFullZ=.57357644;   // cos 55: full side projection @param 0.2 0.9
 static const float terrainCliffPlaneCut=.02;      // side-plane shares under this are dropped (continuously) @param 0 0.5
-static const float terrainCliffEdgeBand=.15;      // tile units over which a tile's detail cross-fades into its neighbour's @param 0 0.5
 static const float terrainTessGentle=.15;         // largest offset on walkable ground (m) @param 0 0.5
 static const float terrainTessShape=.75;          // Phong shape factor (0 flat .. 1 full) @param 0 1
 static const float terrainTessSpacing=.3;         // target spacing of new vertices along a bent edge (m) @param 0.1 1
@@ -64,13 +63,73 @@ float3 terrainCliffProjectionPlanes(float3 n,float2 facets){
  float top=lerp(planes.z,1,raise),side=planes.x+planes.y;
  return side>1e-6?float3(planes.xy*(1-top)/side,top):planes;
 }
-// Share of the neighbouring tile's detail per axis from the position inside
-// the tile (0..1 tile units): .5 on the shared edge, 0 beyond the band, so
-// both tiles compute the same mix at their edge.
-float2 terrainCliffEdgeShare(float2 u){
- return .5*(1-smoothstep(0,terrainCliffEdgeBand,min(u,1-u)));
+static const float terrainCliffFacetSplitStart=.3; // facet/smooth split difference where the facet starts to choose the side plane @param 0 1
+static const float terrainCliffFacetSplitFull=.5;  // difference where the facet chooses alone @param 0 1
+static const float terrainCliffFacetEdgeNear=1;    // output pixels from a triangle edge: the smooth split only @param 0 8
+static const float terrainCliffFacetEdgeFar=6;     // output pixels from a triangle edge: the facet split takes over (risers 12 px wide read one plane) @param 1 32
+static const float terrainCliffFacetCentre=.25;    // smallest barycentric coordinate where the facet split is full (1/3 is the centroid) @param 0.05 0.33
+// Side-plane split from the drawn facet (p derivatives, untessellated) where
+// it disagrees with the smooth slope normal. Walls built as 1 m staircases in
+// plan (caves: risers of 15 m, one cell wide) have risers facing one grid axis
+// while the smoothed normal points between them, so both side planes read and
+// the plane parallel to a riser smeared the art into bands across it. A
+// split difference under terrainCliffFacetSplitStart (facets within ~20
+// degrees of the smooth normal: smooth cliffs, hills) changes nothing, so
+// the facet only decides along real riser corners. The top-down share stays
+// with the smooth normal (a per-pixel facet there drew the triangulation).
+// keep (terrainCliffFacetKeep): 0 on the triangle's edges, 1 inside. On an
+// edge every triangle uses the interpolated smooth split, which both sides
+// share, so a change of facet never draws a line; the facet split takes over
+// within terrainCliffFacetEdgeFar of the edges.
+float3 terrainCliffFacetPlanes(float3 planes,float3 pDx,float3 pDy,float keep){
+ float side=planes.x+planes.y;
+ if(side<=.002)return planes;
+ float3 f=cross(pDx,pDy);float l=length(f);
+ if(!(l>1e-12))return planes;
+ f/=l;
+ // Steep facets (from ~37 degrees, fully past ~60): as ae1ed347, which
+ // removed the stretch on outdoor staircase cliffs too (o_zone3_steep); the
+ // seams it drew came from its sub-pixel metric edge band, now in pixels.
+ float steep=1-smoothstep(.5,.8,abs(f.z));
+ if(steep<=0)return planes;
+ float2 a=abs(f.xy);a*=a;float2 wf=a/max(a.x+a.y,1e-12);
+ wf=max(wf-terrainCliffPlaneCut,0);wf/=max(wf.x+wf.y,1e-6);
+ float2 wv=planes.xy/side;
+ float t=keep*steep*smoothstep(terrainCliffFacetSplitStart,terrainCliffFacetSplitFull,abs(wf.x-wv.x));
+ return float3(lerp(wv,wf,t)*side,planes.z);
 }
-
+// The facet split's weight from the pixel's distance, in output pixels, to
+// the nearest edge of its drawn triangle (b barycentric coordinates, one
+// corner each from nativeVertex; bDx/bDy their screen derivatives). Sized
+// in pixels, the edge blend stays several pixels wide at every distance,
+// so a change of facet never shows as a hard line.
+// The weight also follows the triangle's own size (smallest barycentric
+// coordinate up to terrainCliffFacetCentre): the pixel ramp alone switched
+// the projection, and with it the blend's material decision and rock,
+// between neighbouring triangles within ~10 px at 4K, a hard cut between
+// cliff textures along triangle edges on steep faces (2026-10-30 F11s,
+// zone6 and zone9). Each triangle now eases from the shared smooth split on
+// its edges to its facet split toward its middle.
+float terrainCliffFacetKeep(float3 b,float3 bDx,float3 bDy){
+ float3 g=sqrt(bDx*bDx+bDy*bDy);
+ float3 d=b/max(g,1e-6);
+ float inner=min(b.x,min(b.y,b.z));
+ return smoothstep(terrainCliffFacetEdgeNear,terrainCliffFacetEdgeFar,min(d.x,min(d.y,d.z)))
+       *smoothstep(0,terrainCliffFacetCentre,inner);
+}
+static const float terrainFootContactDepth=.45;  // ambient light removed at the very foot @param 0 1
+static const float terrainFootContactReach=1.2;  // m: the band's height on the wall @param 0.2 4
+// Wall-foot contact darkening, 0..1, from two per-vertex values interpolated
+// across the triangles: rise, the pixel's height over the local floor
+// (owned_terrain_foot_rise), and nearness, how near a wall rises beside it
+// (owned_terrain_wall_above, 0..1, falling off over 3 m). The band runs
+// evenly along the whole foot with no corner point or per-triangle step,
+// fades up the wall over terrainFootContactReach and out onto the floor
+// with the wall's nearness.
+float terrainFootContact(float rise,float nearness){
+ float t=saturate(rise/terrainFootContactReach);
+ return smoothstep(.05,.85,nearness)*(1-t)*(1-t);
+}
 // Cliff tessellation: Phong smoothing of the drawn heightfield from its own
 // per-vertex slope normals, so crests and feet round off while flat and evenly
 // sloped ground (equal normals) stays exactly where it was.

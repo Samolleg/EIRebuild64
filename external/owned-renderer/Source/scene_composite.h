@@ -234,7 +234,10 @@ float2 cameraMotionPS(FullVertex i) : SV_Target {
     float depth = worldDepth.Load(int3(i.position.xy, 0));
     // A posed record wrote its own motion here and is still the visible
     // surface (its depth survived; D24 rounding is far below the tolerance).
-    if (abs(objectDepth.Load(int3(i.position.xy, 0)) - depth) <= 1e-6) return objectMotion.Load(int3(i.position.xy, 0));
+    // Depth -1: fur strands (renderer_fur.cpp), which write no world depth,
+    // cover the pixel with their own motion.
+    const float written = objectDepth.Load(int3(i.position.xy, 0));
+    if (written < 0 || abs(written - depth) <= 1e-6) return objectMotion.Load(int3(i.position.xy, 0));
     float2 uv = pixel / size;
     float4 world = mul(motionClipToWorld, float4(uv.x * 2 - 1, 1 - uv.y * 2, depth, 1));
     float4 previous = mul(motionPreviousWorldToClip, float4(world.xyz / world.w, 1));

@@ -254,7 +254,11 @@ inline const std::array<GroundCoverRule, 61>& rule_table() noexcept {
         // with bare grass between: ~35% of the former evenly clumped flowers,
         // about twice as dense inside a patch.
         auto* fl = add(make_rule(gm_flower, grass, .7f, .26f, .38f)); tint(fl, 1, 1.07f, .9f); fl->jitter = 0;
-        fl->zones=meadow;
+        // No flowers in Dead City (#202): it is a dead zone, and its withered grass
+        // is art only; the map types those tiles as grass (zone9.mpr, tt_grass under
+        // the reported patch), so the tile class cannot tell them apart. The grass
+        // tufts and the dry tufts there stay.
+        fl->zones=meadow & ~dead_city;
         fl->palette = pal_flower; fl->cluster = cl_flower_patch;
         // Sparse grass on bare ground, dry grass on dry tiles and sand, frosted tufts on snow.
         // Placement further limits these tufts to the grass-facing edges;
@@ -439,14 +443,17 @@ inline Push unit_push(float envelope_radius) noexcept {
 // never shakes faster: the gust fronts' phase rate is constant. The shader
 // phase is seconds * travel, so a rate that followed the varying wind speed
 // would also race the phase by elapsed seconds times the rate's change.
-// Speeds up to 1 (calm and mild wind) keep the previous linear drive.
+// Speeds up to 1 (calm and mild wind) keep the linear drive.
+// The fronts (8 m apart) pass every ~3.3 game seconds, ~2.4 m/s: the former
+// ~10 s (.64 rad/s) moved a tuft tip under a pixel per frame at gameplay
+// camera distance, so the cover looked still beyond a few metres.
 struct SwayDrive { float amplitude = 0, travel = 0; };
-constexpr float kSwayTravel = .75f * .85f; // the previous calm rate, radians per game second
+constexpr float kSwayTravel = 1.9f; // radians per game second
 inline SwayDrive sway_drive(float force, float speed, bool sheltered) noexcept {
     constexpr float knee = 1.f, cap = 1.25f;
     const float s = std::max(speed, 0.f);
     const float strength = s <= knee ? s : knee + (cap - knee) * (1 - std::exp(-(s - knee) / (cap - knee)));
-    return {(.06f + .5f * force) * strength * (sheltered ? .2f : 1.f), kSwayTravel};
+    return {(.08f + .6f * force) * strength * (sheltered ? .2f : 1.f), kSwayTravel};
 }
 
 // Compact pressing source: a game-visible track, shown corpse or shown live

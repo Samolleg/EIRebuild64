@@ -459,7 +459,7 @@ struct NativeTerrainVertex {
     // high 16 bits are the liquid over this base vertex (liquid_depth is the
     // signed rest depth; the shader adds the shift and clamps at zero).
     std::uint32_t shift_objects = 0xffffffffu;
-    float liquid_drop = 0.0f; // OwnedLiquidFlow: distance below the fall lip (world units)
+    float liquid_drop = 0.0f; // OwnedLiquidFlow: distance below the fall lip (world units); dry material base vertices: owned_terrain_foot_rise
     float liquid_fill = 0.0f; // Liquid vertices: OwnedLiquidFlow pit depth (the shader lifts the surface by it); dry base vertices: owned_terrain_pit_fill (shadow casters only)
 };
 
@@ -475,7 +475,6 @@ enum NativeTerrainVertexFlag : std::uint32_t {
     // per tile, the authored cliff art): no blend, material or cliff stage;
     // only the far de-tiling (terrainLongFar) and the material cache.
     native_terrain_long_tile = 1u << 12,
-    // Bits 8-11: owned_terrain_fill_flags() plain-fill corners of the tile.
     // Liquid tiles also carry their 3x3 liquid-neighbour mask (bits 16-24) and
     // the vertex's place in its tile in half-tile steps (x bits 25-26, y 27-28).
     native_terrain_liquid_edge = 1u << 15,
@@ -577,6 +576,9 @@ struct NativeOwnedTextureView {
     // Only a camp-owned completed source may share its current GPU home.
     // Other surface consumers keep their detached snapshot semantics.
     bool camp_surface_alias = false;
+    // The game texture name of a retained figure part (VisualPartAsset::
+    // material_name): the key of its material composition. Null: none.
+    const std::string* material_name = nullptr;
 };
 
 struct NativeOwnedFixedState {
@@ -823,8 +825,14 @@ struct NativePrebuiltMesh {
     std::uint32_t steep_first_triangle = UINT32_MAX; // NativeMesh::steep_first_triangle
 };
 
+struct FurProfile;
 struct NativeGeometryView {
     float contact_world_height = 0;
+    // Fur prototype: an owned preview's part record carries its fur profile
+    // here (the submission's own shared pointer, valid for the submit call;
+    // the renderer keeps a copy in the record) and the part's node.
+    const std::shared_ptr<const FurProfile>* fur = nullptr;
+    std::uint32_t fur_node_base = 0;
     const NativePrebuiltMesh* prebuilt_mesh = nullptr;
     // Reduced index levels (static_lod.h) stored after the full index list.
     const struct NativeMeshLods* lods = nullptr;
@@ -856,6 +864,9 @@ struct NativeGeometryView {
     // is the renderer-owned IDirectDrawSurface7 backing the live wound layer.
     std::uintptr_t wound_surface_interface = 0;
     bool wound_only = false;
+    // An owned preview's part (panel doll, outfit, portrait): interface, never
+    // drawn in a world flush (Renderer::flush_native).
+    bool interface_preview = false;
     // Create (or find) the world mesh only: nothing is queued or drawn
     // (terrain far-shadow mesh prewarm, engine_bridge.cpp).
     bool prepare_only = false;
@@ -958,6 +969,11 @@ static_assert(sizeof(NativePreparedPartValues)==80,"Compact owned material value
 
 struct NativePreparedPartSubmission {
     const NativeGeometryView* source = nullptr;
+    // Fur prototype (fur.h): the unit's fur profile while F10 fur_mode is on,
+    // and the skeleton node of this record's components with partNode 0
+    // (the part's node; 0 for a merged group, whose components name theirs).
+    std::shared_ptr<const FurProfile> fur;
+    std::uint32_t fur_node_base = 0;
     NativePreparedPartValues values;
     std::uint64_t values_revision = 0;
     NativeContribution contribution;
@@ -1199,6 +1215,14 @@ using EngineFrameBeginFn = bool (*)(void* context) noexcept;
 void bridge_set_engine_frame_begin_sink(void* context, EngineFrameBeginFn begin) noexcept;
 void bridge_clear_engine_frame_begin_sink(void* context) noexcept;
 
+// The global map's zone hit-test frame (#200): the verified call of
+// CI3DScreenGlobalMap::GenerateHitTestDDS calls this with begin true before
+// and false after (its frame and its mask capture run in between). The
+// active device owns it like the frame begin sink.
+using HitTestFrameFn = void (*)(void* context, bool begin) noexcept;
+void bridge_set_hit_test_frame_sink(void* context, HitTestFrameFn frame) noexcept;
+void bridge_clear_hit_test_frame_sink(void* context) noexcept;
+
 // The sink is render-thread-local. A device registers it only while a D3D7
 // scene is active so an unsupported or out-of-lifecycle call falls back to the
 // original engine path.
@@ -1338,12 +1362,14 @@ void bridge_item_card_text_describe(void* panel,
 void bridge_retire_owned_text_surface(std::uint64_t surface_id) noexcept;
 bool bridge_character_pane_text_epoch_current(
     std::uint64_t ui_epoch, std::uint64_t frame_serial) noexcept;
+bool bridge_character_pane_list_current(std::uint64_t ui_epoch, std::uint64_t frame_serial) noexcept;
 void bridge_profile_begin_frame();
 void bridge_profile_end_frame();
 void bridge_profile_api_entry(const char* kind, const void* caller);
 void bridge_set_profile_enabled(bool enabled);
+void bridge_set_shadow_close_range(float metres) noexcept;
 void bridge_set_shadow_settings(std::uint32_t map_side,
-    std::uint8_t close_cascades,bool far_shadows,bool point_shadows,bool sun_shadows = true) noexcept;
+    std::uint8_t close_cascades,bool far_shadows,bool point_shadows) noexcept;
 void bridge_set_point_shadow_merge_distance(float distance) noexcept;
 void bridge_set_point_shadow_fast_overlays(int count) noexcept;
 // Renderer-owned game cursor: the game keeps choosing cursor id, animation,
@@ -1370,6 +1396,9 @@ void bridge_set_skip_scenery_draw_walk(bool enabled) noexcept;
 void bridge_set_merge_character_parts(bool enabled) noexcept;
 bool bridge_skip_scenery_draw_walk_enabled() noexcept;
 bool bridge_change_driven_poses_enabled() noexcept;
+void bridge_set_fur_mode(int mode) noexcept;
+// Owned party portraits (engine_bridge.cpp submit_owned_portrait).
+void bridge_set_portrait_options(bool owned, bool helmet) noexcept;
 void bridge_set_highlight_options(bool briefing, bool selected, bool hover_characters,
                                   bool hover_objects) noexcept;
 void bridge_set_change_driven_poses(bool enabled) noexcept;
@@ -2028,6 +2057,7 @@ struct EmbeddedVisualFrameInputs {
     std::int32_t hover_id = 0;
     std::uint64_t hover_serial = 0;
     std::array<float, 16> world_to_clip{};
+    float camera_anchor_z = NAN;
     NativeWorldLighting lighting{};
     bool lighting_valid = false;
     // Terrain fog alpha at a world position (0 fogged, 255 clear).

@@ -293,6 +293,12 @@ struct FogFrameGpu {
 };
 static_assert(sizeof(FogFrameGpu) == 432, "fog frame constants must match HLSL");
 
+// The owned sky's inputs to the world pixels: t10 and t12 in DXBC; on D3D12
+// one t table serves every stage and the world vertex programs read t10-t12
+// (nativeAnimation, nativePoses, nativePoseNodes), so the DXIL reads t110 and
+// t111, which no program uses.
+constexpr unsigned kSkyCloudShadowSlotD3D12 = 110, kSkyProbeSlotD3D12 = 111;
+
 // Shared HLSL: frame constants and the forward application used by every
 // native world pixel (native shader) and the froxel passes.
 constexpr char kAtmosphereShader[] = R"(
@@ -303,8 +309,13 @@ Texture3D<float4> fogIntegrated:register(t11);
 SamplerState fogLinearClamp:register(s7);
 // Owned sky probe (sky_clouds.h skyProbeCS): equirectangular display colour,
 // valid while fogTemporal.z is set.
+#ifdef EID3D12
+Texture2D<float4> skyProbe:register(t111);
+Texture2D<float> skyCloudShadow:register(t110);
+#else
 Texture2D<float4> skyProbe:register(t12);
 Texture2D<float> skyCloudShadow:register(t10);
+#endif
 // Cloud shadow (sky_clouds.h): the world-space map holds the ground
 // transmittance along the game's light; a receiver is projected onto it along
 // the same light. The map is pre-blurred (sky_clouds.h skyShadowBlurCS: five
@@ -574,7 +585,7 @@ float3 fogPointScatter(float3 p){
    if(light.shadowSlots.y>0)visibility=min(visibility,lerp(1,nativePointFetchCompare((uint)light.shadowSlots.y-1,cube,face,compareDepth),light.shadowSlots.w));
    visibility=lerp(1,visibility,light.shadowSlots.z);
   }
-  sum+=light.color.rgb*(reach*reach*visibility);
+  sum+=light.color.rgb*(reach*reach*visibility*(light.color.w>0?.65:1)); // the surfaces' lamp law (nativePointLighting)
  }
  return sum*(1/12.566371);
 }

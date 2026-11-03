@@ -41,7 +41,6 @@
 #include "retained_static_scene.h"
 #include "widescreen.h"
 #include "test_harness.h"
-#include "x64_remote_device.h"
 #include "x64_remote_link.h"
 #include "dlss_frame.h"
 #include "stall_watchdog.h"
@@ -108,11 +107,20 @@ Renderer::UpscalerFrame Renderer::begin_upscaler_frame(){
  }
  frame.reset=reset;
  const float* previous=reset||!frame.camera?scene.world_to_clip.data():dlss_previous_clip_.data();
+ // Frame generation takes this frame's depth, motion and camera (D3D12).
+ fg_upscaler_valid_=frame.camera;fg_upscaler_reset_=reset;
+ std::memcpy(fg_clip_to_world_,frame.clip_to_world,sizeof(fg_clip_to_world_));fg_world_to_clip_=frame.world_to_clip;
+ std::memcpy(fg_previous_clip_.data(),previous,sizeof(float)*16);fg_jitter_[0]=dlss_jitter_[0];fg_jitter_[1]=dlss_jitter_[1];
  if(frame.camera){
   transition_profile_pass("scene_dlss_motion");
-  scene_composite_.camera_motion(context_.Get(),depth_srv_.Get(),frame.clip_to_world,previous,dlss_jitter_[0],dlss_jitter_[1]);
+  if(d3d12_)camera_motion_d3d12(frame.clip_to_world,previous);
+  else{
+   (void)plan_pass("scene_motion",nullptr,nullptr,plan_read(PlanTarget::world_depth)); // the upscaler steps bind their own targets
+   scene_composite_.camera_motion(context_.Get(),depth_srv_.Get(),frame.clip_to_world,previous,dlss_jitter_[0],dlss_jitter_[1]);
+  }
   profiler_.add_draw(1,1);profiler_.add_batch();
- }else scene_composite_.clear_motion(context_.Get());
+ }else if(d3d12_){const float zero[4]{};d3d12_->clear_texture(*upscale12_.motion,zero);}
+ else scene_composite_.clear_motion(context_.Get());
  return frame;
 }
 
@@ -121,6 +129,8 @@ Renderer::UpscalerFrame Renderer::begin_upscaler_frame(){
 void Renderer::finish_upscaler_frame(const UpscalerFrame& frame){
  dlss_reset_=false;dlss_previous_valid_=frame.camera&&scene_updated_;if(frame.camera)dlss_previous_clip_=frame.world_to_clip;
  transition_profile_pass("scene_dlss_present");
+ if(d3d12_){present_upscaled_d3d12();return;} // colour only: the D3D12 interface depth is never the world's
+ (void)plan_pass("scene_upscaler_present",backbuffer_rtv_.Get(),interface_dsv_.Get()!=world_dsv_.Get()?interface_dsv_.Get():nullptr,plan_read(PlanTarget::world_depth));
  const bool separate_depth=interface_dsv_.Get()!=world_dsv_.Get();
  scene_composite_.dlss_present(context_.Get(),backbuffer_rtv_.Get(),separate_depth?depth_srv_.Get():nullptr,separate_depth?interface_dsv_.Get():nullptr);
  profiler_.add_draw(1,1);profiler_.add_batch();
@@ -178,6 +188,7 @@ bool Renderer::render_dlss(){
  evaluate.render_w=width_;evaluate.render_h=height_;evaluate.out_w=output_width_;evaluate.out_h=output_height_;
  evaluate.mode=dlss_mode_;evaluate.sharpness=0.f;evaluate.reset=frame.reset;evaluate.hdr=false;evaluate.depth_inverted=false;
  transition_profile_pass("scene_dlss");
+ (void)plan_pass("scene_dlss",nullptr,nullptr,plan_read(PlanTarget::world_color)|plan_read(PlanTarget::world_depth)); // evaluated by the host into the output-size image
  ID3D11ShaderResourceView* empty[4]{};context_->PSSetShaderResources(0,4,empty);context_->OMSetRenderTargets(0,nullptr,nullptr);
  const HRESULT hr=x64remote::dlss_evaluate(context_.Get(),evaluate);
  if(FAILED(hr)){
@@ -233,6 +244,7 @@ bool Renderer::render_fsr(){
  input.sharpness=std::clamp(configured_floating_point(debug_overlay_.config(),"upscale_sharpness",.2f),0.f,1.f);
  input.reset=frame.reset;
  ID3D11ShaderResourceView* empty[4]{};context_->PSSetShaderResources(0,4,empty);context_->OMSetRenderTargets(0,nullptr,nullptr);
+ (void)plan_pass("scene_fsr",nullptr,nullptr,plan_read(PlanTarget::world_color)|plan_read(PlanTarget::world_depth)); // FSR's compute passes, into the output-size image
  fsr_.dispatch(context_.Get(),input,[this](const char* name){transition_profile_pass(name);profiler_.add_draw(1,1);profiler_.add_batch();});
  finish_upscaler_frame(frame);
  return true;
@@ -275,22 +287,7 @@ void Renderer::begin_dlss_object_motion() noexcept {
 // vertex stage bound; the caller rebinds its targets.
 bool Renderer::draw_dlss_object_motion(UINT args_offset){
  if(!scene_composite_.dlss()||scene_composited_||rtv_.Get()!=scene_composite_.target()||!native_motion_vs_||!native_motion_ps_||
-    !dlss_previous_world_srv_||!scene_composite_.object_motion_target())return false;
- if(dlss_motion_constants_frame_!=native_frame_index_){
-  if(!dlss_motion_constants_){
-   D3D11_BUFFER_DESC desc{};desc.ByteWidth=80;desc.Usage=D3D11_USAGE_DYNAMIC;desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
-   desc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
-   if(FAILED(device_->CreateBuffer(&desc,nullptr,&dlss_motion_constants_)))return false;
-  }
-  const auto scene=bridge_scene_world_to_clip_snapshot();
-  const std::array<float,16>& previous=dlss_previous_valid_?dlss_previous_clip_:scene.valid?scene.world_to_clip:native_world_clip_;
-  D3D11_MAPPED_SUBRESOURCE mapped{};
-  if(FAILED(context_->Map(dlss_motion_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return false;
-  float* values=static_cast<float*>(mapped.pData);std::memcpy(values,previous.data(),64);
-  values[16]=dlss_jitter_[0];values[17]=dlss_jitter_[1];values[18]=float(width_);values[19]=float(height_);
-  context_->Unmap(dlss_motion_constants_.Get(),0);
-  dlss_motion_constants_frame_=native_frame_index_;
- }
+    !dlss_previous_world_srv_||!scene_composite_.object_motion_target()||!dlss_motion_constants_current())return false;
  if(!dlss_motion_depth_){
   D3D11_DEPTH_STENCIL_DESC desc{};desc.DepthEnable=TRUE;desc.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;
   desc.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;
@@ -313,11 +310,77 @@ bool Renderer::draw_dlss_object_motion(UINT args_offset){
  return true;
 }
 
+// The object motion constants (b11 NativeMotionConstants: last frame's
+// unjittered world clip, this frame's jitter and render size), written once
+// a world frame.
+bool Renderer::dlss_motion_constants_current(){
+ if(dlss_motion_constants_frame_!=native_frame_index_){
+  if(!dlss_motion_constants_){
+   D3D11_BUFFER_DESC desc{};desc.ByteWidth=80;desc.Usage=D3D11_USAGE_DYNAMIC;desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+   desc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+   if(FAILED(device_->CreateBuffer(&desc,nullptr,&dlss_motion_constants_)))return false;
+  }
+  const auto scene=bridge_scene_world_to_clip_snapshot();
+  const std::array<float,16>& previous=dlss_previous_valid_?dlss_previous_clip_:scene.valid?scene.world_to_clip:native_world_clip_;
+  D3D11_MAPPED_SUBRESOURCE mapped{};
+  if(FAILED(context_->Map(dlss_motion_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return false;
+  float* values=static_cast<float*>(mapped.pData);std::memcpy(values,previous.data(),64);
+  values[16]=dlss_jitter_[0];values[17]=dlss_jitter_[1];values[18]=float(width_);values[19]=float(height_);
+  context_->Unmap(dlss_motion_constants_.Get(),0);
+  dlss_motion_constants_frame_=native_frame_index_;
+ }
+ return true;
+}
+
+// ---- Frame plan (frame_plan.h) ------------------------------------------------
+// The ids name today's views; a view no id names (another file group's
+// target) is carried by the pass as unowned.
+const PlanPass& Renderer::plan_pass(const char* name,ID3D11RenderTargetView* color,ID3D11DepthStencilView* depth,
+                                    std::uint32_t reads) noexcept{
+ PlanPass pass;pass.name=name;pass.reads=reads;
+ if(!color)pass.color=PlanTarget::none;
+ else if(color==scene_composite_.target())pass.color=PlanTarget::world_color;
+ else if(color==backbuffer_rtv_.Get())pass.color=PlanTarget::backbuffer;
+ else if(color==camp_popup_rtv_.Get())pass.color=PlanTarget::camp_popup_color;
+ else{pass.color=PlanTarget::unowned;pass.unowned_color=color;}
+ if(!depth)pass.depth=PlanTarget::none;
+ else if(depth==world_dsv_.Get())pass.depth=PlanTarget::world_depth;
+ else if(depth==interface_dsv_.Get())pass.depth=PlanTarget::interface_depth;
+ else if(depth==camp_popup_dsv_.Get())pass.depth=PlanTarget::camp_popup_depth;
+ else{pass.depth=PlanTarget::unowned;pass.unowned_depth=depth;}
+ return frame_plan_.add(pass);
+}
+ID3D11RenderTargetView* Renderer::plan_rtv(const PlanPass& pass) const noexcept{
+ switch(pass.color){
+ case PlanTarget::world_color:return scene_composite_.target();
+ case PlanTarget::backbuffer:return backbuffer_rtv_.Get();
+ case PlanTarget::camp_popup_color:return camp_popup_rtv_.Get();
+ case PlanTarget::unowned:return pass.unowned_color;
+ default:return nullptr;
+ }
+}
+ID3D11DepthStencilView* Renderer::plan_dsv(const PlanPass& pass) const noexcept{
+ switch(pass.depth){
+ case PlanTarget::world_depth:return world_dsv_.Get();
+ case PlanTarget::interface_depth:return interface_dsv_.Get();
+ case PlanTarget::camp_popup_depth:return camp_popup_dsv_.Get();
+ case PlanTarget::unowned:return pass.unowned_depth;
+ default:return nullptr;
+ }
+}
+void Renderer::bind_plan_targets(const PlanPass& pass) noexcept{
+ ID3D11RenderTargetView* color=plan_rtv(pass);context_->OMSetRenderTargets(1,&color,plan_dsv(pass));
+}
+
 HRESULT Renderer::composite_world(){
  PERF06_SCOPE("post_composite");
 
  if(scene_queue()){scene_native_pending_=false;scene_post_command(scene_cmd::CompositeWorld{});return S_OK;}
+ if(hit_test_active_)return S_OK; // the zone hit-test frame is never composited (#200)
  if(scene_composited_)return S_OK;
+#ifndef EID3D11_EMBEDDED
+ if(d3d12_)return composite_world_d3d12();
+#endif
  const auto checked=[&](const char* operation,auto&& work)->HRESULT{
 #ifdef EID3D11_EMBEDDED
   native_flush_failure_line_=0;
@@ -367,8 +430,13 @@ HRESULT Renderer::composite_world(){
  return checked("composite_world.postprocess",[&]()->HRESULT{
  native_hiz_frame_=UINT64_MAX;native_world_clip_dirty_=true;
  bool dlss_frame_refused=false;
+ // The world composite reads the world colour and depth and writes the
+ // output (and, upscaling with a separate interface depth, that depth). Its
+ // steps bind their own state; nothing found before it is restored after it
+ // (every following pass sets what it reads).
+ (void)plan_pass("composite_world",backbuffer_rtv_.Get(),interface_dsv_.Get()!=world_dsv_.Get()?interface_dsv_.Get():nullptr,
+                 plan_read(PlanTarget::world_color)|plan_read(PlanTarget::world_depth));
  {
-  DebugViewStateGuard guard(context_.Get());
   // AO needs the finished world depth and ambient share, and must precede
   // SMAA and every interface pass.
   if(ao_ambient_written_&&FAILED(render_ambient_occlusion())){
@@ -384,6 +452,7 @@ HRESULT Renderer::composite_world(){
   transition_profile_pass(smaa?"scene_smaa":"scene_copy");
   // Below 100% render scale this is the world-size resolved image.
   ID3D11RenderTargetView* const resolved=scene_composite_.resolve_target(backbuffer_rtv_.Get());
+  (void)plan_pass(smaa?"scene_smaa":"scene_copy",resolved,nullptr,plan_read(PlanTarget::world_color)); // the composite steps bind their own targets
   scene_composite_.render(context_.Get(),resolved,smaa);
   profiler_.add_draw(smaa?3:1,smaa?3:1);profiler_.add_batch(smaa?3:1);
   // Depth of field blends over the resolved world image (world size, before
@@ -392,7 +461,7 @@ HRESULT Renderer::composite_world(){
   if(const int dof=configured_integer(debug_overlay_.config(),"depth_of_field",0);dof>0&&depth_srv_&&fog_prepared_frame_==native_frame_index_*2u){
    const auto clip=bridge_scene_world_to_clip_snapshot();float clip_to_world[16];
    if(clip.valid&&ambient_occlusion_invert(clip.world_to_clip.data(),clip_to_world)){
-    transition_profile_pass("scene_dof");UINT draws=0;
+    transition_profile_pass("scene_dof");UINT draws=0;(void)plan_pass("scene_dof",resolved,nullptr,plan_read(PlanTarget::world_color)|plan_read(PlanTarget::world_depth));
     const double seconds=std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
     if(SUCCEEDED(depth_of_field_.render(device_.Get(),context_.Get(),scene_composite_.color_view(),depth_srv_.Get(),resolved,width_,height_,dof,configured_floating_point(debug_overlay_.config(),"depth_of_field_strength",.2f),clip_to_world,seconds,&draws))){profiler_.add_draw(draws,draws);profiler_.add_batch(draws);}
    }
@@ -401,12 +470,15 @@ HRESULT Renderer::composite_world(){
   // An unregistered option (renderer-only tests) means off; the registered default is high.
   // Screen-space sun rays (sun_shafts.h), prepared with this frame's fog.
   if(sun_rays_frame_==native_frame_index_&&depth_srv_){
-   transition_profile_pass("scene_sun_rays");UINT draws=0;
+   transition_profile_pass("scene_sun_rays");UINT draws=0;(void)plan_pass("scene_sun_rays",resolved,nullptr,plan_read(PlanTarget::world_color)|plan_read(PlanTarget::world_depth));
    if(SUCCEEDED(sun_rays_.render(device_.Get(),context_.Get(),scene_composite_.color_view(),depth_srv_.Get(),resolved,width_,height_,sun_rays_center_,sun_rays_tint_,sun_rays_haze_luma_,&draws))){profiler_.add_draw(draws,draws);profiler_.add_batch(draws);}
   }
-  if(const int bloom=configured_integer(debug_overlay_.config(),"bloom",0);bloom>0){
-   transition_profile_pass("scene_bloom");UINT draws=0;
-   if(SUCCEEDED(bloom_.render(device_.Get(),context_.Get(),scene_composite_.color_view(),depth_srv_.Get(),glow_frame_==native_frame_index_?glow_srv_.Get():nullptr,resolved,width_,height_,bloom,configured_floating_point(debug_overlay_.config(),"bloom_strength",1.f),bloom_ceiling(native_world_lighting_.ambient.data(),native_world_lighting_.sunlight_diffuse.data(),fog_prepared_frame_==native_frame_index_*2u?bloom_fog_headroom_:0.f),configured_floating_point(debug_overlay_.config(),"bloom_threshold",1.f),&draws,configured_boolean(debug_overlay_.config(),"bloom_debug_view",false)))){profiler_.add_draw(draws,draws);profiler_.add_batch(draws);}
+  // Only frames that draw a map's terrain: the global map screen (owned
+  // meshes under the last zone's lighting, no terrain) is no world scene
+  // and bloomed whole (candidate 08638187 frames 000000/035402).
+  if(const int bloom=configured_integer(debug_overlay_.config(),"bloom",0);bloom>0&&ambient_terrain_frame_==native_frame_index_){
+   transition_profile_pass("scene_bloom");UINT draws=0;(void)plan_pass("scene_bloom",resolved,nullptr,plan_read(PlanTarget::world_color)|plan_read(PlanTarget::world_depth));
+   if(SUCCEEDED(bloom_.render(device_.Get(),context_.Get(),scene_composite_.color_view(),depth_srv_.Get(),glow_frame_==native_frame_index_?glow_srv_.Get():nullptr,resolved,width_,height_,bloom,configured_floating_point(debug_overlay_.config(),"bloom_strength",1.f),bloom_ceiling(fog_prepared_frame_==native_frame_index_*2u?bloom_fog_headroom_:0.f),configured_floating_point(debug_overlay_.config(),"bloom_threshold",1.f),&draws,configured_boolean(debug_overlay_.config(),"bloom_debug_view",false)))){profiler_.add_draw(draws,draws);profiler_.add_batch(draws);}
   }
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
   if(dlss_mode_>=0){
@@ -423,7 +495,8 @@ HRESULT Renderer::composite_world(){
 #endif
   else if(scene_composite_.scaled()){
    transition_profile_pass("scene_upscale");
-   // At native AA size the world depth is also the interface depth.
+   (void)plan_pass("scene_upscale",backbuffer_rtv_.Get(),interface_dsv_.Get()!=world_dsv_.Get()?interface_dsv_.Get():nullptr,plan_read(PlanTarget::world_color)|plan_read(PlanTarget::world_depth));
+   // DLAA (a failed DLSS frame) renders at output size: the world depth is the interface depth.
    const bool separate_depth=interface_dsv_.Get()!=world_dsv_.Get();
    scene_composite_.upscale(context_.Get(),backbuffer_rtv_.Get(),separate_depth?depth_srv_.Get():nullptr,separate_depth?interface_dsv_.Get():nullptr);
    profiler_.add_draw(1,1);profiler_.add_batch();
@@ -440,7 +513,7 @@ HRESULT Renderer::composite_world(){
  // a later interface call cannot retry or expose the rejected world image.
  if(dlss_frame_refused){pending_screen_rectangles_.clear();return S_FALSE;}
  // Selection rectangles requested after the world pass and before this
- // composite are the first interface output.
+ // composite are the first interface output (each records its own plan pass).
  for(const auto& pending:pending_screen_rectangles_)
   if(FAILED(draw_screen_rectangle(pending.request,pending.viewport)))
    OutputDebugStringA("EID3D11 owned selection rectangle failed; rectangle omitted\n");
@@ -510,6 +583,10 @@ HRESULT Renderer::resize(UINT w,UINT h){if(core_mode_)return core_resize(w,h);SC
  const UINT old_w=output_width_,old_h=output_height_;
  w=std::max(1u,w);h=std::max(1u,h);
  if(w==old_w && h==old_h)return S_OK;
+ if(d3d12_){
+  const HRESULT hr=d3d12_->resize(w,h);if(FAILED(hr))return hr;
+  output_width_=w;output_height_=h;set_world_size();camp_inventory_output(canvas_width(),canvas_height());return S_OK;
+ }
  if(!device_){output_width_=w;output_height_=h;return S_OK;}
  if(!swap_)return E_UNEXPECTED;
  const auto release_targets=[&]{
@@ -559,6 +636,54 @@ HRESULT Renderer::clear(DWORD rectangle_count,const D3DRECT* rectangles,DWORD fl
    }
   }
   if(!placed.empty())rectangles=placed.data();
+ }
+ // D3D12 backend: no world targets yet. A whole-target colour clear is the
+ // frame's background (what the world composite would show where nothing
+ // is drawn); a whole depth clear clears the interface depth (the native
+ // HUD meshes' target); rectangle clears are named omitted.
+ if(d3d12_){
+  // The depth clear after a completed world traversal is where the D3D11
+  // frame composites the world: the boundary after which game packets are
+  // the interface 3D (Packet::run). Core mode sends no CompositeWorld for it.
+  if((flags&D3DCLEAR_ZBUFFER)&&bridge_world_draw_completion_snapshot().valid)(void)composite_world();
+  const bool whole=!rectangle_count||!rectangles||(rectangle_count==1&&rectangles[0].x1<=0&&rectangles[0].y1<=0&&
+   rectangles[0].x2>=LONG(canvas_width())&&rectangles[0].y2>=LONG(canvas_height()));
+  if(!whole){
+   // As clear_rectangles: the panes' rectangles composed for the wide HUD,
+   // clipped to the canvas, scaled to output pixels.
+   if(!(flags&(D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER|D3DCLEAR_STENCIL)))return S_OK;
+   std::vector<RECT> output;
+   try{output.reserve(rectangle_count);}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+   for(DWORD index=0;index<rectangle_count;++index){
+    D3DRECT source=rectangles[index];D3D11_RECT rectangle{};
+    if(widescreen::interface_owned){const auto& hud=widescreen::hud_blit;
+     source.x1=LONG(std::floor(widescreen::compose_x(float(source.x1),hud)));
+     source.y1=LONG(std::floor(widescreen::compose_y(float(source.y1),hud)));
+     source.x2=LONG(std::ceil(widescreen::compose_x(float(source.x2),hud)));
+     source.y2=LONG(std::ceil(widescreen::compose_y(float(source.y2),hud)));
+    }
+    if(normalize_legacy_clear_rectangle(source,canvas_width(),canvas_height(),rectangle))
+     output.push_back(scale_screen_rectangle(rectangle,canvas_width(),canvas_height(),target_width(),target_height()));
+   }
+   const float colour[4]={float((color>>16)&0xff)/255.f,float((color>>8)&0xff)/255.f,float(color&0xff)/255.f,float((color>>24)&0xff)/255.f};
+   if(!output.empty())d3d12_->clear_rectangles(output.data(),UINT(output.size()),(flags&D3DCLEAR_TARGET)?colour:nullptr,
+    (flags&D3DCLEAR_ZBUFFER)!=0,(flags&D3DCLEAR_STENCIL)!=0,z,UINT8(stencil));
+   return S_OK;
+  }
+  if(flags&D3DCLEAR_TARGET){
+   const float colour[4]={float((color>>16)&0xff)/255.f,float((color>>8)&0xff)/255.f,float(color&0xff)/255.f,1.f};
+   d3d12_->clear(colour);
+  }
+  if(flags&D3DCLEAR_ZBUFFER){
+   d3d12_->clear_depth(z,UINT8(stencil));
+   // At full render scale the D3D11 frame's world and interface share one
+   // depth surface: the interface depth clear after the composite is what
+   // leaves the next world a clear depth. The D3D12 world depth is its own
+   // surface, so the same clear reaches it here.
+   if(world_d3d12_&&!world_d3d12_bound_){d3d12_->clear_depth_of(*world_d3d12_,z,UINT8(stencil));d3d12_->count("world depth clears (with the interface depth)");}
+   else if(world_d3d12_bound_)d3d12_->count("world depth clears (world bound)");
+  }
+  return S_OK;
  }
  if(!context_)return E_FAIL;const LegacyClearScope scope=legacy_clear_scope(rectangle_count,rectangles);
  if(!scope.valid)return E_INVALIDARG;
@@ -629,8 +754,10 @@ HRESULT Renderer::clear(DWORD rectangle_count,const D3DRECT* rectangles,DWORD fl
   }
  }
  if(!scope.full_surface)return clear_rectangles(rectangle_count,rectangles,flags,color,z,stencil);
+ const PlanPass& pass=plan_pass("clear",(flags&D3DCLEAR_TARGET)?rtv_.Get():nullptr,
+                                (flags&(D3DCLEAR_ZBUFFER|D3DCLEAR_STENCIL))?dsv_.Get():nullptr);
  float c[]={((color>>16)&255)/255.f,((color>>8)&255)/255.f,(color&255)/255.f,((color>>24)&255)/255.f};
- if(flags&D3DCLEAR_TARGET)context_->ClearRenderTargetView(rtv_.Get(),c);UINT f=0;
+ if(flags&D3DCLEAR_TARGET)context_->ClearRenderTargetView(plan_rtv(pass),c);UINT f=0;
  if(flags&D3DCLEAR_ZBUFFER)f|=D3D11_CLEAR_DEPTH;if(flags&D3DCLEAR_STENCIL)f|=D3D11_CLEAR_STENCIL;
  // A depth clear clears the stencil too (to 0 unless the game names a value):
  // no game state reaches the stencil (apply_state), and the depth prepass's
@@ -638,10 +765,41 @@ HRESULT Renderer::clear(DWORD rectangle_count,const D3DRECT* rectangles,DWORD fl
  // shared D24S8 surface also keeps the driver from a full fast clear once
  // the stencil has been written.
  if(f&D3D11_CLEAR_DEPTH){if(!(f&D3D11_CLEAR_STENCIL))stencil=0;f|=D3D11_CLEAR_STENCIL;}
- if(f)context_->ClearDepthStencilView(dsv_.Get(),f,z,(UINT8)stencil);return S_OK;
+ if(f)context_->ClearDepthStencilView(plan_dsv(pass),f,z,(UINT8)stencil);return S_OK;
 }
 
 HRESULT Renderer::clear_rectangles(DWORD rectangle_count,const D3DRECT* rectangles,DWORD flags,D3DCOLOR color,float z,DWORD stencil){
+ std::vector<D3D11_RECT> output;
+ try{output.reserve(rectangle_count);}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+ for(DWORD index=0;index<rectangle_count;++index){D3D11_RECT rectangle{};
+  D3DRECT source=rectangles[index];
+  // Compose raw partial pane masks before clipping to the output surface.
+  // Full-surface clears are handled by clear() before this path.
+  if(widescreen::interface_owned){const auto& hud=widescreen::hud_blit;
+   source.x1=LONG(std::floor(widescreen::compose_x(float(source.x1),hud)));
+   source.y1=LONG(std::floor(widescreen::compose_y(float(source.y1),hud)));
+   source.x2=LONG(std::ceil(widescreen::compose_x(float(source.x2),hud)));
+   source.y2=LONG(std::ceil(widescreen::compose_y(float(source.y2),hud)));
+  }
+  if(normalize_legacy_clear_rectangle(source,canvas_width(),canvas_height(),rectangle))
+   output.push_back(scale_screen_rectangle(rectangle,canvas_width(),canvas_height(),target_width(),target_height()));
+ }
+ return clear_target_rectangles(output.data(),DWORD(output.size()),flags,color,z,stencil);
+}
+
+void Renderer::clear_interface_depth(float left,float top,float right,float bottom) noexcept{
+ widescreen::HudComposition hud{};
+ hud.clip_native_screen=true;hud.clip_left=left;hud.clip_top=top;hud.clip_right=right;hud.clip_bottom=bottom;
+ RECT rectangle{};
+ if(!ui_clip_rect(hud,camp::Clip{},rectangle)||rectangle.right<=rectangle.left||rectangle.bottom<=rectangle.top)return;
+ if(d3d12_){d3d12_->clear_rectangles(&rectangle,1,nullptr,true,false,1.f,0);return;}
+ if(!context_)return;
+ const D3D11_RECT target{rectangle.left,rectangle.top,rectangle.right,rectangle.bottom};
+ (void)clear_target_rectangles(&target,1,D3DCLEAR_ZBUFFER,0,1.f,0);
+}
+
+// Rectangles in target pixels.
+HRESULT Renderer::clear_target_rectangles(const D3D11_RECT* rectangles,DWORD rectangle_count,DWORD flags,D3DCOLOR color,float z,DWORD stencil){
  const DWORD supported=D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER|D3DCLEAR_STENCIL;
  if((flags&supported)==0)return S_OK;
  if(!clear_vs_||!clear_ps_||!clear_constants_||!clear_raster_state_||!clear_blend_state_)
@@ -656,35 +814,11 @@ HRESULT Renderer::clear_rectangles(DWORD rectangle_count,const D3DRECT* rectangl
   D3D11_MAP_WRITE_DISCARD,0,&mapped);if(FAILED(hr))return hr;
  std::memcpy(mapped.pData,&constants,sizeof(constants));context_->Unmap(clear_constants_.Get(),0);
 
- ComPtr<ID3D11InputLayout> previous_layout;context_->IAGetInputLayout(&previous_layout);
- ComPtr<ID3D11Buffer> previous_vertex;UINT previous_stride=0,previous_vertex_offset=0;
- context_->IAGetVertexBuffers(0,1,&previous_vertex,&previous_stride,&previous_vertex_offset);
- ComPtr<ID3D11Buffer> previous_index;DXGI_FORMAT previous_index_format=DXGI_FORMAT_UNKNOWN;
- UINT previous_index_offset=0;context_->IAGetIndexBuffer(&previous_index,&previous_index_format,&previous_index_offset);
- D3D11_PRIMITIVE_TOPOLOGY previous_topology{};context_->IAGetPrimitiveTopology(&previous_topology);
- ComPtr<ID3D11VertexShader> previous_vs;ComPtr<ID3D11PixelShader> previous_ps;
- ComPtr<ID3D11GeometryShader> previous_gs;ComPtr<ID3D11HullShader> previous_hs;
- ComPtr<ID3D11DomainShader> previous_ds;context_->VSGetShader(&previous_vs,nullptr,nullptr);
- context_->PSGetShader(&previous_ps,nullptr,nullptr);context_->GSGetShader(&previous_gs,nullptr,nullptr);
- context_->HSGetShader(&previous_hs,nullptr,nullptr);context_->DSGetShader(&previous_ds,nullptr,nullptr);
- ComPtr<ID3D11Buffer> previous_vs_clear_constants,previous_ps_clear_constants;
- context_->VSGetConstantBuffers(7,1,&previous_vs_clear_constants);
- context_->PSGetConstantBuffers(7,1,&previous_ps_clear_constants);
- ComPtr<ID3D11RasterizerState> previous_raster;context_->RSGetState(&previous_raster);
- std::array<D3D11_VIEWPORT,D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE> previous_viewports{};
- UINT previous_viewport_count=static_cast<UINT>(previous_viewports.size());
- context_->RSGetViewports(&previous_viewport_count,previous_viewports.data());
- std::array<D3D11_RECT,D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE> previous_scissors{};
- UINT previous_scissor_count=static_cast<UINT>(previous_scissors.size());
- context_->RSGetScissorRects(&previous_scissor_count,previous_scissors.data());
- ComPtr<ID3D11BlendState> previous_blend;float previous_blend_factor[4]{};UINT previous_sample_mask=0;
- context_->OMGetBlendState(&previous_blend,previous_blend_factor,&previous_sample_mask);
- ComPtr<ID3D11DepthStencilState> previous_depth;UINT previous_stencil_reference=0;
- context_->OMGetDepthStencilState(&previous_depth,&previous_stencil_reference);
- ID3D11RenderTargetView* previous_targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};
- ID3D11DepthStencilView* previous_depth_view=nullptr;
- context_->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,previous_targets,&previous_depth_view);
-
+ // The clear binds everything it draws with and restores nothing: every pass
+ // sets what it reads (frame_plan.h). It leaves GS/HS/DS unbound, VS/PS b7 on
+ // the clear values (b7 readers bind their own) and a scissor only the clear raster uses.
+ const PlanPass& pass=plan_pass("clear_rectangles",(flags&D3DCLEAR_TARGET)?rtv_.Get():nullptr,
+                                (clear_depth||clear_stencil)?dsv_.Get():nullptr);
  context_->IASetInputLayout(nullptr);ID3D11Buffer* no_vertex=nullptr;UINT zero=0;
  context_->IASetVertexBuffers(0,1,&no_vertex,&zero,&zero);context_->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);
  context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -696,45 +830,15 @@ HRESULT Renderer::clear_rectangles(DWORD rectangle_count,const D3DRECT* rectangl
  context_->RSSetViewports(1,&viewport);float blend_factor[4]{};
  context_->OMSetBlendState(clear_blend_state_.Get(),blend_factor,0xffffffffu);
  context_->OMSetDepthStencilState((clear_depth||clear_stencil)?clear_depth_states_[depth_state_index].Get():nullptr,(UINT8)stencil);
- ID3D11RenderTargetView* clear_target=(flags&D3DCLEAR_TARGET)?rtv_.Get():nullptr;
- context_->OMSetRenderTargets(1,&clear_target,(clear_depth||clear_stencil)?dsv_.Get():nullptr);
- for(DWORD index=0;index<rectangle_count;++index){D3D11_RECT rectangle{};
-  D3DRECT source=rectangles[index];
-  // Compose raw partial pane masks before clipping to the output surface.
-  // Full-surface clears are handled by clear() before this path.
-  if(widescreen::interface_owned){const auto& hud=widescreen::hud_blit;
-   source.x1=LONG(std::floor(widescreen::compose_x(float(source.x1),hud)));
-   source.y1=LONG(std::floor(widescreen::compose_y(float(source.y1),hud)));
-   source.x2=LONG(std::ceil(widescreen::compose_x(float(source.x2),hud)));
-   source.y2=LONG(std::ceil(widescreen::compose_y(float(source.y2),hud)));
-  }
-  if(normalize_legacy_clear_rectangle(source,canvas_width(),canvas_height(),rectangle)){
-   rectangle=scale_screen_rectangle(rectangle,canvas_width(),canvas_height(),target_width(),target_height());
-   context_->RSSetScissorRects(1,&rectangle);context_->Draw(3,0);
-  }
+ bind_plan_targets(pass);
+ for(DWORD index=0;index<rectangle_count;++index){
+  context_->RSSetScissorRects(1,&rectangles[index]);context_->Draw(3,0);
  }
-
- context_->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,previous_targets,previous_depth_view);
- context_->OMSetDepthStencilState(previous_depth.Get(),previous_stencil_reference);
- context_->OMSetBlendState(previous_blend.Get(),previous_blend_factor,previous_sample_mask);
- context_->RSSetState(previous_raster.Get());context_->RSSetViewports(previous_viewport_count,previous_viewports.data());
- context_->RSSetScissorRects(previous_scissor_count,previous_scissors.data());
- ID3D11Buffer* restored_vs_constants=previous_vs_clear_constants.Get();
- ID3D11Buffer* restored_ps_constants=previous_ps_clear_constants.Get();
- context_->VSSetConstantBuffers(7,1,&restored_vs_constants);
- context_->PSSetConstantBuffers(7,1,&restored_ps_constants);
- context_->VSSetShader(previous_vs.Get(),nullptr,0);context_->PSSetShader(previous_ps.Get(),nullptr,0);
- context_->GSSetShader(previous_gs.Get(),nullptr,0);context_->HSSetShader(previous_hs.Get(),nullptr,0);
- context_->DSSetShader(previous_ds.Get(),nullptr,0);context_->IASetPrimitiveTopology(previous_topology);
- context_->IASetIndexBuffer(previous_index.Get(),previous_index_format,previous_index_offset);
- ID3D11Buffer* restored_vertex=previous_vertex.Get();context_->IASetVertexBuffers(0,1,&restored_vertex,&previous_stride,&previous_vertex_offset);
- context_->IASetInputLayout(previous_layout.Get());
- for(auto* target:previous_targets)if(target)target->Release();if(previous_depth_view)previous_depth_view->Release();
  return S_OK;
 }
 
-void Renderer::end_profile_pass(){if(!profiler_.pass_active())return;ComPtr<ID3D11Texture2D> back;if(profiler_.capture_active()&&swap_){if(dlss_mode_<0&&!scene_composited_&&backbuffer_rtv_&&scene_composite_.target()){DebugViewStateGuard guard(context_.Get());scene_composite_.render(context_.Get(),scene_composite_.resolve_target(backbuffer_rtv_.Get()),false);scene_composite_.upscale(context_.Get(),backbuffer_rtv_.Get(),nullptr,nullptr);}swap_->GetBuffer(0,IID_PPV_ARGS(&back));}profiler_.end_pass(back.Get());}
-void Renderer::transition_profile_pass(const char* name){if(profiler_.current_pass_is(name))return;end_profile_pass();profiler_.begin_pass(name);}
+void Renderer::end_profile_pass(){if(!profiler_.pass_active())return;ComPtr<ID3D11Texture2D> back;if(profiler_.capture_active()&&swap_){if(!scene_composited_&&backbuffer_rtv_&&scene_composite_.target()){DebugViewStateGuard guard(context_.Get());scene_composite_.render(context_.Get(),scene_composite_.resolve_target(backbuffer_rtv_.Get()),false);scene_composite_.upscale(context_.Get(),backbuffer_rtv_.Get(),nullptr,nullptr);}swap_->GetBuffer(0,IID_PPV_ARGS(&back));}profiler_.end_pass(back.Get());}
+void Renderer::transition_profile_pass(const char* name){if(d3d12_)d3d12_->marker(name);if(profiler_.current_pass_is(name))return;end_profile_pass();profiler_.begin_pass(name);}
 const char* Renderer::terrain_profile_scope(bool neighbour,bool tessellated,TerrainProfilePart part) noexcept{
  static const char* const names[2][2][8]={
   {{"active_live","active_live_routed","active_cached","active_liquid_ground","active_liquid_water","active_liquid_foam","active_stock_water","active_live_flat"},
@@ -820,6 +924,19 @@ HRESULT Renderer::begin_engine_frame(){
 
 // world_epoch 0: no world change is considered (queued frame begins).
 HRESULT Renderer::begin_engine_frame_at(std::uint64_t world_epoch){
+ if(d3d12_){
+  // D3D12 backend: the previous invocation's UI, then a new frame index for
+  // the UI's per-frame bookkeeping and the world target bound (as rtv_/dsv_
+  // are on D3D11) until the composite.
+  const HRESULT hr=SUCCEEDED(flush_native())?render_pending_blits():E_FAIL;
+  // The first engine frame of a new world: a clean slate (as on D3D11).
+  if(SUCCEEDED(hr)&&world_epoch&&world_epoch!=world_state_epoch_&&native_pending_draws_.empty()){world_state_epoch_=world_epoch;release_world_state();dlss_reset_=true;}
+  ++native_frame_index_;advance_dlss_jitter();scene_composited_=false;scene_updated_=false;
+  if(FAILED(hr))return hr;
+  const HRESULT bound=bind_world_d3d12();
+  if(SUCCEEDED(bound))begin_object_motion_d3d12();
+  return bound;
+ }
  if(!context_||!scene_composite_.target()||!world_dsv_)return E_FAIL;
  // Complete the previous invocation before its bridge/UI epoch expires.
  // In particular, a save's screen copy may already have sealed its world
@@ -836,6 +953,7 @@ HRESULT Renderer::begin_engine_frame_at(std::uint64_t world_epoch){
  native_hiz_frame_=UINT64_MAX;native_world_clip_dirty_=true;
  scene_composited_=false;scene_updated_=false;deferred_ground_marks_.clear();
  rtv_=scene_composite_.target();dsv_=world_dsv_;
+ if(hit_test_active_){rtv_=hit_test_rtv_;dsv_=hit_test_dsv_;} // a frame begin inside the zone hit-test frame
  context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
  return S_OK;
 }
@@ -848,6 +966,63 @@ void Renderer::begin_scene(){
 
 // The renderer-state part of begin_scene (the scene thread in scene mode).
 void Renderer::begin_scene_renderer(){
+ // D3D12 backend: the world draw and sun shadow settings, without the D3D11
+ // resources below. The draw distance sets the far fade and cull (it stayed
+ // at 300 once, so every surface past it faded to the border fog colour).
+ // Crown impostors as on D3D11 (bake_neighbour_impostors_d3d12).
+ if(d3d12_){
+  const auto& config=debug_overlay_.config();
+  native_draw_distance_=float(configured_integer(config,"draw_distance",300));
+  native_lod_error_px_=configured_boolean(config,"lod",true)?configured_floating_point(config,"lod_pixel_error",1.f):0.f;
+  native_impostor_pixels_=configured_boolean(config,"impostors",true)&&!impostors_.failed?configured_floating_point(config,"impostor_pixels",64.f):0.f;
+  native_impostor_debug_=configured_boolean(config,"impostor_debug",false);
+  const bool shadows=configured_boolean(config,"shadows",true);
+  const UINT shadow_side=(1024u<<configured_integer(config,"shadow_cascade_quality",1))>>vram_shadow_shift();
+  const UINT point_side=(128u<<configured_integer(config,"point_shadow_quality",2))>>vram_shadow_shift();
+  const auto close_cascades=static_cast<std::uint8_t>(configured_integer(config,"shadow_close_cascades",3));
+  const bool far_shadows=configured_boolean(config,"shadow_far",true);
+  const bool far_foliage_opaque=configured_boolean(config,"shadow_far_foliage_opaque",true);
+  const bool point_shadows=configured_boolean(config,"point_shadows",true);
+  bridge_set_point_shadow_merge_distance(.5f*float(configured_integer(config,"point_shadow_merge",3)));
+  bridge_set_point_shadow_fast_overlays(configured_integer(config,"point_shadow_fast_overlays",4));
+  bridge_set_fur_mode(configured_integer(config,"fur_mode",0)); // fur prototype: the submission side (fur.h)
+  {
+   const int range=configured_integer(config,"shadow_close_range",0);
+   bridge_set_shadow_close_range(float(range>0?range:64+16*std::clamp(configured_integer(config,"shadow_cascade_quality",1),0,2)));
+  }
+  const auto softness=shadow_softness_constants(configured_integer(config,"shadow_softness",1),
+   configured_integer(config,"shadow_sun_angle",15),configured_integer(config,"point_shadow_light_size",100));
+  if(softness!=native_shadow_softness_){native_shadow_softness_=softness;native_shadow_constants_dirty_=true;}
+  // The early-out cells (shadowRange) are not on this backend: never current.
+  native_shadow_early_out_=false;native_shadow_range_mask_=0;
+  if(far_foliage_opaque!=native_far_foliage_opaque_&&SUCCEEDED(flush_native())){
+   native_far_foliage_opaque_=far_foliage_opaque;
+   for(UINT slice=3;slice<5;++slice){native_shadow_valid_[slice]=false;native_shadow_static_valid_[slice]=false;}
+   shadow_history_valid_=false; // as the D3D11 settings path
+   native_layout_changed();
+  }
+  const bool changed=shadows!=native_shadows_enabled_||shadow_side!=native_shadow_side_||
+   point_side!=native_point_shadow_side_||close_cascades!=native_close_shadow_cascades_||
+   far_shadows!=native_far_shadows_enabled_||point_shadows!=native_point_shadows_enabled_;
+  if(changed&&SUCCEEDED(flush_native())){
+   if(shadow_side!=native_shadow_side_){shadow12_.maps.reset();shadow12_.statics.reset();}
+   if(point_side!=native_point_shadow_side_||!point_shadows){
+    for(UINT page=0;page<PointShadowTextureLayout::array_bindings;++page)
+     d3d12_->set_resource(PointShadowTextureLayout::first_srv+page,static_cast<const D3D12Texture*>(nullptr));
+    native_point_shadow_pages_.clear();native_point_shadow_generation_=0;
+   }
+   native_shadows_enabled_=shadows;native_shadow_side_=shadow_side;native_close_shadow_cascades_=close_cascades;
+   native_point_shadow_side_=point_side;native_far_shadows_enabled_=far_shadows;native_point_shadows_enabled_=point_shadows;
+   bridge_set_shadow_settings(shadow_side,close_cascades,far_shadows,point_shadows);
+   shadow_history_valid_=false;native_shadow_valid_.fill(false);native_shadow_static_valid_.fill(false);native_shadow_frame_={};
+   native_shadow_dirty_mask_=native_shadow_cleared_mask_=0;native_shadow_failed_=false;
+   native_shadow_constants_dirty_=true;
+  }
+  if(native_shadow_constants_dirty_&&!native_shadow_collecting_&&SUCCEEDED(upload_native_shadow_constants(0)))
+   native_shadow_constants_dirty_=false;
+  native_frame_stats_.native_shadows_enabled=native_shadows_enabled_;
+  return;
+ }
  // The last authoritative list/publication survives a skipped world pass.
  point_pass_seen_=point_publication_seen_=false;shadow_renderer_seen_.fill(false);
  const auto epoch=bridge_current_world_epoch();
@@ -866,6 +1041,12 @@ void Renderer::begin_scene_renderer(){
  const bool point_shadows=configured_boolean(config,"point_shadows",true);
  bridge_set_point_shadow_merge_distance(.5f*float(configured_integer(config,"point_shadow_merge",3)));
  bridge_set_point_shadow_fast_overlays(configured_integer(config,"point_shadow_fast_overlays",4));
+ bridge_set_fur_mode(configured_integer(config,"fur_mode",0)); // fur prototype: the submission side (fur.h)
+ // Close shadow band length: shadow_close_range metres, 0 by cascade quality.
+ {
+  const int range=configured_integer(config,"shadow_close_range",0);
+  bridge_set_shadow_close_range(float(range>0?range:64+16*std::clamp(configured_integer(config,"shadow_cascade_quality",1),0,2)));
+ }
  // Softness only changes receiver constants; maps and history stay valid.
  const auto softness=shadow_softness_constants(configured_integer(config,"shadow_softness",1),
   configured_integer(config,"shadow_sun_angle",15),configured_integer(config,"point_shadow_light_size",100));
@@ -911,7 +1092,7 @@ void Renderer::begin_scene_renderer(){
   native_shadows_enabled_=shadows;native_shadow_side_=shadow_side;
   native_point_shadow_side_=point_side;native_close_shadow_cascades_=close_cascades;
   native_far_shadows_enabled_=far_shadows;native_point_shadows_enabled_=point_shadows;
-  bridge_set_shadow_settings(shadow_side,close_cascades,far_shadows,point_shadows,shadows);
+  bridge_set_shadow_settings(shadow_side,close_cascades,far_shadows,point_shadows);
   shadow_history_valid_=false;native_shadow_valid_.fill(false);native_shadow_frame_={};
   native_shadow_dirty_mask_=native_shadow_cleared_mask_=0;native_shadow_failed_=false;
   native_shadow_constants_dirty_=true;
@@ -927,6 +1108,7 @@ void Renderer::begin_scene_renderer(){
 }
 void Renderer::end_scene(){
  if(scene_queue()){scene_post_command(scene_cmd::EndScene{});return;}
+ if(d3d12_)return;
  if(!native_point_lights_.empty()){
   if(!point_pass_seen_)++point_pass_skipped_frames_;
   if(!point_publication_seen_)++point_publication_missing_frames_;
@@ -938,6 +1120,67 @@ void Renderer::end_scene(){
 // (or inline in order when a post could not be allocated).
 void scene_cmd::BeginEngineFrame::run(Renderer& r){Renderer::report_scene_failure("begin_engine_frame",r.begin_engine_frame_at(world_epoch));}
 void scene_cmd::MarkLoadPicture::run(Renderer& r){r.load_picture_this_frame_=true;}
+void scene_cmd::HitTestFrame::run(Renderer& r){r.hit_test_frame_apply(begin);}
+
+void Renderer::hit_test_frame(bool begin){
+ if(scene_queue()){scene_post_command(scene_cmd::HitTestFrame{begin});return;}
+ hit_test_frame_apply(begin);
+}
+
+// The zone hit-test frame (#200). CI3DScreenGlobalMap::GenerateHitTestDDS
+// gives every zone figure a flat default colour, (index + 1) * 16 + 8 on all
+// channels, hides everything else, clears to 0, draws one frame without a
+// flip and copies it into its mask, from which hover and click read the zone
+// as ((B >> 4) & 15) - 1. Drawn lit into the HDR world target and through
+// the composite and post chain, the codes drifted (Zone9 of Gipat came out
+// near black). Between begin and end the world draws into an output-size
+// B8G8R8A8 target with its own depth: the vertex stage takes the default
+// colour instead of lighting and the pixel stage writes it with alpha 1
+// (nativeCombinerTail), no jitter, never composited; the game's capture
+// reads this target (capture_source). A target that cannot be created is
+// named once and the mask capture is refused.
+void Renderer::hit_test_frame_apply(bool begin) noexcept{
+ if(!begin)hit_test_failed_=false;
+ if(begin==hit_test_active_||!device_||!context_)return;
+ (void)flush_native();
+ if(!begin){
+  hit_test_active_=false;
+  rtv_=hit_test_saved_rtv_;dsv_=hit_test_saved_dsv_;hit_test_saved_rtv_.Reset();hit_test_saved_dsv_.Reset();
+  context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
+  return;
+ }
+ hit_test_failed_=true;
+ if(!hit_test_color_||hit_test_width_!=output_width_||hit_test_height_!=output_height_){
+  hit_test_color_.Reset();hit_test_rtv_.Reset();hit_test_depth_.Reset();hit_test_dsv_.Reset();hit_test_width_=hit_test_height_=0;
+  D3D11_TEXTURE2D_DESC color{};color.Width=output_width_;color.Height=output_height_;color.MipLevels=color.ArraySize=color.SampleDesc.Count=1;
+  color.Format=DXGI_FORMAT_B8G8R8A8_UNORM;color.Usage=D3D11_USAGE_DEFAULT;color.BindFlags=D3D11_BIND_RENDER_TARGET;
+  D3D11_TEXTURE2D_DESC depth=color;depth.Format=DXGI_FORMAT_D24_UNORM_S8_UINT;depth.BindFlags=D3D11_BIND_DEPTH_STENCIL;
+  if(world_dsv_){D3D11_DEPTH_STENCIL_VIEW_DESC view{};world_dsv_->GetDesc(&view);if(view.Format!=DXGI_FORMAT_UNKNOWN)depth.Format=view.Format;}
+  if(FAILED(device_->CreateTexture2D(&color,nullptr,&hit_test_color_))||FAILED(device_->CreateRenderTargetView(hit_test_color_.Get(),nullptr,&hit_test_rtv_))||
+     FAILED(device_->CreateTexture2D(&depth,nullptr,&hit_test_depth_))||FAILED(device_->CreateDepthStencilView(hit_test_depth_.Get(),nullptr,&hit_test_dsv_))){
+   hit_test_color_.Reset();hit_test_rtv_.Reset();hit_test_depth_.Reset();hit_test_dsv_.Reset();
+   static bool reported=false;
+   if(!reported){reported=true;bridge_report_event("zone_hit_test","target allocation failed; zone mask capture refused");}
+   return;
+  }
+  hit_test_width_=output_width_;hit_test_height_=output_height_;
+ }
+ hit_test_saved_rtv_=rtv_;hit_test_saved_dsv_=dsv_;
+ rtv_=hit_test_rtv_;dsv_=hit_test_dsv_;
+ const float zero[4]{};context_->ClearRenderTargetView(rtv_.Get(),zero);
+ context_->ClearDepthStencilView(dsv_.Get(),D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,1.f,0);
+ context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
+ hit_test_active_=true;hit_test_failed_=false;
+}
+
+HRESULT Renderer::capture_source(ComPtr<ID3D11Texture2D>& source){
+ source.Reset();
+ if(hit_test_failed_)return E_FAIL;
+ if(hit_test_active_){const HRESULT hr=flush_native();if(SUCCEEDED(hr))source=hit_test_color_;return FAILED(hr)?hr:source?S_OK:E_FAIL;}
+ HRESULT hr=composite_world();if(SUCCEEDED(hr))hr=render_pending_blits();
+ if(SUCCEEDED(hr))hr=swap_?swap_->GetBuffer(0,IID_PPV_ARGS(&source)):E_FAIL;
+ return hr;
+}
 void scene_cmd::BeginScene::run(Renderer& r){r.begin_scene_renderer();}
 void scene_cmd::EndScene::run(Renderer& r){r.end_scene();}
 void scene_cmd::CompositeWorld::run(Renderer& r){Renderer::report_scene_failure("composite_world",r.composite_world());}
@@ -1024,6 +1267,13 @@ float4 gammaPS(float4 position:SV_Position):SV_Target{
 )";
 }  // namespace
 
+// gammaVS, gammaPS: apply_gamma_ramp's programs, and the D3D12 backend's
+// (append_d3d12_shader_programs puts them in the host's DXIL table).
+void append_gamma_shader_programs(std::vector<ShaderProgram>& out){
+ out.push_back({{kGammaShader,sizeof(kGammaShader)-1},nullptr,nullptr,"gammaVS","vs_4_0",0});
+ out.push_back({{kGammaShader,sizeof(kGammaShader)-1},nullptr,nullptr,"gammaPS","ps_4_0",0});
+}
+
 void Renderer::set_gamma_ramp(const WORD* red,const WORD* green,const WORD* blue) noexcept{
  if(!red||!green||!blue)return;
  std::lock_guard<std::mutex> lock(gamma_lock_);
@@ -1105,7 +1355,236 @@ HRESULT Renderer::apply_gamma_ramp() noexcept{
  return S_OK;
 }
 
+void Renderer::update_status_notice(const char* reset_notice){
+#ifndef EID3D11_EMBEDDED
+ bridge_verify_renderer_ownership_after_world();
+ debug_overlay_.set_status_notice(!bridge_semantic_slots_installed()?
+  "EID3D11: game.exe not verified - plain D3D wrapper only, no owned visuals (see bridge.jsonl)":
+  x64remote::remote_notice()?x64remote::remote_notice():
+  bridge_takeover_notice()?bridge_takeover_notice():
+  !bridge_game_sites_all_verified()?"EID3D11: some game.exe sites differ - those features are off (see bridge.jsonl)":
+  bridge_addon_notice()?bridge_addon_notice():reset_notice?reset_notice:camp_inventory_notice()?camp_inventory_notice():
+  widescreen::notice?widescreen::notice:bridge_save_id_clash_notice()?bridge_save_id_clash_notice():
+  material_notice_.empty()?nullptr:material_notice_.c_str());
+#else
+ debug_overlay_.set_status_notice(reset_notice?reset_notice:camp_inventory_notice()?camp_inventory_notice():
+  material_notice_.empty()?nullptr:material_notice_.c_str());
+#endif
+}
+
+// x64 host, renderer_backend=d3d12 (M1a): the menu frame on the D3D12
+// executor. The UI, cursor, F10 overlay and present run here; the world,
+// HUD frames, debug views, gamma, the harness and the profiler are not on
+// this backend yet and are omitted by name (F11 lists them).
+#ifndef EID3D11_EMBEDDED
+HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
+ struct PlanFrameEnd{FramePlan& plan;~PlanFrameEnd(){plan.begin_frame();}} plan_frame_end{frame_plan_};
+ const std::int64_t present_tick=perf_now();
+ if(last_present_tick_&&present_tick>last_present_tick_){
+  const double sample=1000.0*static_cast<double>(present_tick-last_present_tick_)/static_cast<double>(perf_frequency());
+  if(std::isfinite(sample)&&sample>0.0&&sample<10000.0){present_interval_ms_=sample;present_smoothed_ms_=present_smoothed_ms_>0.0?present_smoothed_ms_*0.9+sample*0.1:sample;}
+ }
+ last_present_tick_=present_tick;
+ // The profiler's frame and passes, named as on D3D11 so captures line up.
+ const bool overlay_profile=debug_overlay_.wants_profiling();profiler_.set_enabled(overlay_profile);
+ if(!profiler_.frame_active())profiler_.begin_frame(output_width_,output_height_);
+ transition_profile_pass("present_head");
+ // fg_frame_image: the executor takes it from the next frame; the HUD-less
+ // copy follows the same option (released when it is off).
+ // frame_generation 1 (DLSS-G: the frame image and the pacer) or 2 (FSR:
+ // the frame image and the FidelityFX proxy swap chain). DLSS-G's
+ // availability is read once from the host; a mode that failed stays off for
+ // the session. The F10 note shows the selected mode's reason.
+ if(!fg_caps_checked_){fg_caps_checked_=true;x64remote::DlssgCaps caps{};
+  if(!x64remote::dlssg_caps(caps)){caps.reason[sizeof(caps.reason)-1]=0;std::snprintf(fg_dlssg_unavailable_,sizeof(fg_dlssg_unavailable_),"%s",caps.reason[0]?caps.reason:"not available");}}
+ {const int selected=std::clamp(configured_integer(debug_overlay_.config(),"frame_generation",0),0,2);
+  for(int mode=1;mode<=2;++mode)if(const char* failure=d3d12_->frame_generation_failure(mode);failure&&!fg_failed_[mode][0])frame_generation_off(mode,failure);
+  const char* reason=selected==0?nullptr:fg_failed_[selected][0]?fg_failed_[selected]:selected==1&&fg_dlssg_unavailable_[0]?fg_dlssg_unavailable_:nullptr;
+  if(selected!=fg_reason_mode_||reason){fg_reason_mode_=selected;set_frame_generation_unavailable_reason(reason);}
+  frame_generation_mode_=reason?0:selected;}
+ if(frame_generation_mode_!=1&&fg_previous_generated_){fg_previous_generated_=false;x64remote::dlssg_release();}
+ if(frame_generation_mode_!=2)fsr_prepared_=false;
+ fg_frame_image_=configured_boolean(debug_overlay_.config(),"fg_frame_image",false)||frame_generation_mode_;
+ d3d12_->set_frame_image(fg_frame_image_);
+ d3d12_->set_frame_generation(frame_generation_mode_);
+ if(!fg_frame_image_){hudless_d3d12_.reset();hudless_gamma_d3d12_.reset();}
+ HRESULT hr=scene_composited_?flush_native():composite_world();
+ if(SUCCEEDED(hr)){transition_profile_pass("ui_composition");hr=render_pending_blits();}
+ if(FAILED(hr)){bridge_report_event("present_step_failed","step=render_pending_blits (D3D12)");return hr;}
+ if(FAILED(hr=draw_hud_asset_frames(inputs?&inputs->hud_frames:nullptr))){bridge_report_event("present_step_failed","step=hud_asset_frames (D3D12)");return hr;}
+ transition_profile_pass("present_bookkeeping");
+ if(debug_overlay_.initialized())debug_overlay_.maintain();
+ if(debug_overlay_.first_run_pending()){AmbientWorldSource world;if(bridge_ambient_world_source(world)&&world.terrain)debug_overlay_.open_first_run_settings();}
+ // Before the overlay, so a harness screenshot is the game's image (as on D3D11).
+ // A harness capture: the profiler's pass timings (no D3D11 back buffer images).
+ if(step_test_harness(inputs)==HarnessRequest::capture){
+  const RendererResourceSnapshot capture_resources=resource_snapshot();
+  const auto cutout_scope=cutout_shadow_scope_snapshot();
+  profiler_.request_capture_next(bridge_latest_profile(),&capture_resources,&cutout_scope);
+ }
+ // The captured frame's composed image (world and interface, before the
+ // overlay), as the D3D11 capture's ui_composition image: read back from the
+ // back buffer. The captured frame already stalls for its diagnostics; its
+ // normal_frame.json is the frame before.
+ if(profiler_.capture_active()&&!profiler_.capture_directory().empty()){
+  std::string detail;
+  if(!write_harness_screenshot(profiler_.capture_directory()+"\\ui_composition.bmp",detail))
+   bridge_report_event("d3d12_capture",("F11 image not written: "+detail).c_str());
+  // fg_frame_image: frame generation's HUD-less input of this frame.
+  if(hudless_this_present_&&!write_hudless_image(profiler_.capture_directory()+"\\hudless.bmp",detail))
+   bridge_report_event("d3d12_capture",("F11 HUD-less image not written: "+detail).c_str());
+ }
+ // fg_frame_image: the frame image (world and interface: frame generation's
+ // real frame) copied to the swap-chain buffer; the overlay, cursor, load
+ // reveal and gamma below draw there, as they do on the back buffer without it.
+ // Presents frame generation must not interpolate (logged on change while
+ // the inputs are on). Movies come in as loading pictures (present_image).
+ // A full-screen interface (interface quad cover, below) is not one either.
+ fg_not_game_frame_=(world_output_this_present_?0u:unsigned(kFgNotWorld))|(load_picture_this_frame_?unsigned(kFgNotLoadingPicture):0u)|
+  (load_reveal_holding_?unsigned(kFgNotRevealHold):0u)|(hwnd_&&!window_in_front()?unsigned(kFgNotInFront):0u);
+ // Full-screen interface over a live world (trade, outfit, camp): the
+ // interface quads drawn so far this present (the cursor comes later).
+ const float ui_coverage=interface_coverage();
+ ui_quad_cells_.fill(0);
+ if(ui_coverage>=kFullInterfaceCoverage)fg_not_game_frame_|=kFgNotFullInterface;
+ if(world_output_this_present_&&int(ui_coverage*20.f+.5f)!=ui_coverage_logged_){
+  ui_coverage_logged_=int(ui_coverage*20.f+.5f);
+  char text[160];std::snprintf(text,sizeof(text),"present %llu: interface cover %.0f%% (full-screen interface from %.0f%%)",
+   static_cast<unsigned long long>(presentation_frame_index_),double(ui_coverage)*100.0,double(kFullInterfaceCoverage)*100.0);
+  bridge_report_event("fg_ui_coverage",text);
+ }
+ if(fg_frame_image_&&fg_not_game_frame_!=fg_not_game_frame_logged_){
+  fg_not_game_frame_logged_=fg_not_game_frame_;
+  char text[200];
+  std::snprintf(text,sizeof(text),"present %llu: %s%s%s%s%s%s",static_cast<unsigned long long>(presentation_frame_index_),
+   fg_not_game_frame_?"not a game frame:":"game frame",(fg_not_game_frame_&kFgNotWorld)?" no world image":"",
+   (fg_not_game_frame_&kFgNotLoadingPicture)?" loading picture or movie":"",(fg_not_game_frame_&kFgNotRevealHold)?" load reveal hold":"",
+   (fg_not_game_frame_&kFgNotInFront)?" window not in front":"",(fg_not_game_frame_&kFgNotFullInterface)?" full-screen interface":"");
+  bridge_report_event("fg_game_frame",text);
+ }
+ update_frame_generation_auto_off();
+ // frame_generation: the generated frame between the previous real frame and
+ // this one, recorded from the frame image before it is composited.
+ const bool generated=frame_generation_mode_==1&&evaluate_frame_generation_d3d12();
+ fsr_prepared_=frame_generation_mode_==2&&prepare_fsr_frame_generation_d3d12();
+ fg_upscaler_valid_=false;
+ if(fg_frame_image_){transition_profile_pass("fg_frame_composite");d3d12_->composite_frame_image();transition_profile_pass("present_bookkeeping");}
+ world_output_this_present_=hudless_this_present_=false;
+ const char* reset_notice=nullptr;
+ if(debug_overlay_.graphics_reset_notice_pending()){AmbientWorldSource world;
+  reset_notice=debug_overlay_.graphics_reset_notice(bridge_ambient_world_source(world)&&world.terrain);}
+ update_status_notice(reset_notice);
+ const bool overlay_visible=debug_overlay_.initialized()&&debug_overlay_.visible();
+ const bool telemetry_wanted=debug_overlay_.initialized()&&debug_overlay_.mode()!=DebugOverlayMode::hidden;
+ if(telemetry_wanted!=system_telemetry_active_){system_telemetry_.set_active(telemetry_wanted);system_telemetry_active_=telemetry_wanted;}
+ system_telemetry_.try_get_snapshot(system_telemetry_snapshot_);
+ if(debug_overlay_.config().debug_resource_view()!=DebugResourceView::disabled)d3d12_->omit("debug_resource_view",false);
+ if(debug_overlay_.initialized()&&debug_overlay_pass_needed(overlay_visible||combat_ui_has_output(),
+    debug_overlay_.has_status_notice()||widescreen_hud_hovered(HudPanel::game_speed),!critters_summary_.labels.empty())){
+  transition_profile_pass("debug_overlay");
+  RendererResourceSnapshot presented{};presented.present_interval_ms=present_interval_ms_;presented.present_smoothed_ms=present_smoothed_ms_;
+  presented.fg_presented_fps=frame_generation_mode_?fg_presented_fps_:0.0;presented.fg_real_fps=frame_generation_mode_?fg_real_fps_:0.0;
+  presented.fg_mode=frame_generation_mode_;
+  presented.fg_auto_off_fps=frame_generation_mode_&&fg_low_rate_?std::max(1,configured_integer(debug_overlay_.config(),"frame_generation_min_fps",30)):0;
+  debug_overlay_.render(profiler_.latest_snapshot(),bridge_latest_profile(),presented,
+                        DebugResourceViewAvailability{},&profiler_,DebugShadowInfo{});
+ }
+ PendingBlit generated_cursor{};bool generated_cursor_wanted=false;
+ if(cursor_pending_){
+  cursor_pending_=false;
+  if(!debug_overlay_.captures_input()){
+   // Frame generation: the same cursor (render rate) on the generated image,
+   // the newest position on both presents (decision 2026-11-01). A midpoint
+   // cursor would add latency in a click-driven game; a present-time OS
+   // sample needs the cursor drawn on the pacer queue and breaks while the
+   // camera handlers warp the cursor (RMB rotation): the plan if players
+   // report cursor lag with frame generation. FSR takes generated-frame UI
+   // from the real back buffer, so its cursor is the real frame's either way.
+   if(generated){try{generated_cursor=pending_cursor_;generated_cursor_wanted=true;}catch(const std::bad_alloc&){}}
+   try{pending_blits_.push_back(std::move(pending_cursor_));}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+   if(FAILED(hr=render_pending_blits())){bridge_report_event("present_step_failed","step=cursor_composition (D3D12)");return hr;}
+  }
+  pending_cursor_={};
+ }
+ if(!harness_overlay_shot_.empty()){
+  std::string detail;const bool ok=write_harness_screenshot(harness_overlay_shot_,detail);
+  if(inputs){harness_complete_entry(inputs->harness_entry_id,ok,detail+" (after the overlay: critter labels on)");harness_completed_entry_=inputs->harness_entry_id;}
+  else harness_complete(ok,detail+" (after the overlay: critter labels on)");
+  harness_stage_=0;harness_wait_=0;harness_overlay_shot_.clear();
+ }
+ // F11: what this backend omitted so far (the world passes among them).
+ if(debug_overlay_.consume_capture_request()||std::exchange(core_capture_request_,false)){
+  const std::string omitted=d3d12_->omitted();
+  bridge_report_event("d3d12_capture",omitted.empty()?"F11: nothing omitted on the D3D12 backend":("F11: omitted on the D3D12 backend: "+omitted).c_str());
+  const RendererResourceSnapshot capture_resources=resource_snapshot();
+  const auto cutout_scope=cutout_shadow_scope_snapshot();
+  profiler_.request_capture_next(bridge_latest_profile(),&capture_resources,&cutout_scope);
+ }
+ // Loading screens: the game's own pictures draw (present_image); the load
+ // reveal keeps the last one and holds it over world frames until the world
+ // and its neighbours are prepared (apply_load_reveal, as on D3D11).
+ apply_load_reveal();
+ static const bool developer_mode=renderer_developer_mode();
+ const PresentationSettings presentation=presentation_settings(debug_overlay_.config(),developer_mode);
+ static const bool harness_run=[](){char v[8]{};return GetEnvironmentVariableA("EI_RENDERER_HARNESS_DIR",v,sizeof(v))>0;}();
+ int frame_limit=static_cast<int>(presentation.frame_limit);
+ set_background_mode(configured_integer(debug_overlay_.config(),"background_mode",0));
+ if(!harness_run&&hwnd_&&!window_in_front()){
+  const int background=configured_integer(debug_overlay_.config(),"background_frame_limit",30);
+  if(background>0&&(frame_limit<=0||frame_limit>background))frame_limit=background;
+ }
+ // The game's gamma ramp over the finished frame, cursor included (after the
+ // load reveal, as apply_gamma_ramp on D3D11).
+ if(FAILED(apply_gamma_ramp_d3d12()))d3d12_->omit("gamma_ramp (D3D12 pass failed)",false);
+ // Frame generation: the generated image gets the same layers as the real
+ // one (overlay draw lists replayed, the cursor at the real frame's position,
+ // gamma; the load reveal never holds on a generated frame). The pacer
+ // presents it half a real-frame interval before the real image.
+ if(generated){
+  transition_profile_pass("fg_generated_layers");
+  d3d12_->select_generated_screen();
+  debug_overlay_.render_again();
+  if(generated_cursor_wanted){
+   try{pending_blits_.push_back(std::move(generated_cursor));}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+   if(FAILED(hr=render_pending_blits())){bridge_report_event("present_step_failed","step=generated cursor (D3D12)");return hr;}
+  }
+  if(FAILED(apply_gamma_ramp_d3d12()))d3d12_->omit("gamma_ramp on the generated frame (D3D12 pass failed)",false);
+ }else debug_overlay_.forget_rendered_frame();
+ // FSR: the HUD-less image FidelityFX compares with the back buffer (with
+ // the same gamma ramp); null: no generation from this frame.
+ if(frame_generation_mode_==2)d3d12_->set_fsr_hudless(fsr_prepared_?fsr_hudless_d3d12():nullptr);
+ fsr_prepared_=false;
+ update_frame_generation_rates();
+ profiler_.end_frame(presentation.sync_interval,0);
+ frame_limiter_.wait(frame_limit);
+ hr=d3d12_->present(presentation.sync_interval);
+ profiler_.present_return(output_width_,output_height_,presentation.sync_interval,0,hr);
+ HRESULT trim_hr=S_OK;
+ if(SUCCEEDED(hr)){
+  transition_profile_pass("frame_tail");
+  d3d12_->clear_slots();
+  const frame_acct::Scope scope(frame_acct::pf_trim);
+  trim_hr=trim_native_mesh_cache();
+  if(FAILED(trim_hr))bridge_report_event("present_step_failed","step=trim_native_mesh_cache (D3D12)");
+ }
+ // Exclude the host's wait for the next frame's records from renderer work.
+ end_profile_pass();
+ if(SUCCEEDED(hr)&&window_in_front())frame_statistics_.add_present(perf_now(),perf_frequency());else frame_statistics_.reset();
+ ++presentation_frame_index_;
+ // Upscaler option changes take effect between frames (apply_render_scale).
+ apply_upscaler_mode_d3d12();
+ finish_harness_path_row(inputs?inputs->game_frame:fa_game_frame_,nullptr);
+ pending_screen_rectangles_.clear();
+ return FAILED(trim_hr)?trim_hr:hr;
+}
+
+#endif // !EID3D11_EMBEDDED
 HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
+#ifndef EID3D11_EMBEDDED
+ if(d3d12_)return present_frame_d3d12(inputs);
+#endif
+ // The next frame's plan starts when this call returns, on every path.
+ struct PlanFrameEnd{FramePlan& plan;~PlanFrameEnd(){plan.begin_frame();}} plan_frame_end{frame_plan_};
  // The present path's own CPU blocks as passes (present_head, then
  // present_bookkeeping after the UI, frame_tail after Present).
  transition_profile_pass("present_head");
@@ -1177,19 +1656,7 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
  // (it covers the camp grid), then the camp's own statuses. A hook entry or
  // the DirectDraw import held by another module (issue #70) comes right
  // after game.exe: those visuals are not drawn by us.
-#ifndef EID3D11_EMBEDDED
- bridge_verify_renderer_ownership_after_world();
- debug_overlay_.set_status_notice(!bridge_semantic_slots_installed()?
-  "EID3D11: game.exe not verified - plain D3D wrapper only, no owned visuals (see bridge.jsonl)":
-  x64remote::remote_notice()?x64remote::remote_notice():
-  bridge_takeover_notice()?bridge_takeover_notice():
-  !bridge_game_sites_all_verified()?"EID3D11: some game.exe sites differ - those features are off (see bridge.jsonl)":
-  bridge_addon_notice()?bridge_addon_notice():reset_notice?reset_notice:camp_inventory_notice()?camp_inventory_notice():
-  widescreen::notice?widescreen::notice:bridge_save_id_clash_notice());
-#else
- // The host owns its frame and device; it has no retail DirectDraw import or hooks.
- debug_overlay_.set_status_notice(reset_notice?reset_notice:camp_inventory_notice());
-#endif
+ update_status_notice(reset_notice);
  const bool overlay_visible=debug_overlay_.initialized()&&debug_overlay_.visible();
  // Telemetry feeds the developer windows only.
  const bool telemetry_wanted=debug_overlay_.initialized()&&debug_overlay_.mode()!=DebugOverlayMode::hidden;
@@ -1209,11 +1676,12 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
     requested_debug_view!=DebugResourceView::shadow_cascade_coverage)
   transition_profile_pass("debug_resource_view");
  render_debug_resource_view(requested_debug_view,debug_overlay_mode);
- poll_samgbur_lod();
  if(debug_overlay_.initialized()&&debug_overlay_pass_needed(overlay_visible || combat_ui_has_output(),debug_overlay_.has_status_notice() || widescreen_hud_hovered(HudPanel::game_speed),!critters_summary_.labels.empty())){
   const frame_acct::Scope overlay_scope(frame_acct::pf_overlay);
   const auto shadows=debug_overlay_mode==DebugOverlayMode::full?debug_shadow_info():DebugShadowInfo{};
   transition_profile_pass("debug_overlay");
+  // The overlay (Dear ImGui) draws into the bound target: bind it here.
+  bind_plan_targets(plan_pass("debug_overlay",rtv_.Get(),nullptr));
   // HUD borders use the owned UI pass without collecting developer diagnostics.
   const auto overlay_resources=overlay_visible||debug_overlay_.wants_profiling()||!critters_summary_.labels.empty()?resource_snapshot():RendererResourceSnapshot{};
   debug_overlay_.render(profiler_.latest_snapshot(),bridge_latest_profile(),overlay_resources,
@@ -1383,12 +1851,38 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
  apply_load_reveal();
  (void)apply_gamma_ramp();
  frame_bracket.reset();
+#ifdef EID3D11_EMBEDDED
+ FrameLimiter::WaitTiming wait_timing;
  {const frame_acct::Scope scope(frame_acct::pf_limiter);
- #ifdef EID3D11_EMBEDDED
  const CorePerf::AnyThreadScope coreWait(CorePerf::LimiterWait);
- #endif
+ frame_limiter_.wait(frame_limit, &wait_timing);}
+ // At most one pacing sample per second, on policy change or a slow wait.
+ // Keep it outside the wait scope so journal formatting is not wait time.
+ static std::int64_t pacing_report = 0;
+ static int pacing_limit = -1;
+ static UINT pacing_interval = UINT_MAX;
+ static bool pacing_focused = false;
+ const auto pacing_now = perf_now();
+ const auto pacing_frequency = perf_frequency();
+ const bool pacing_changed = pacing_limit != frame_limit ||
+  pacing_interval != interval || pacing_focused != focused;
+ if(pacing_frequency > 0 && (pacing_changed || wait_timing.actual > pacing_frequency * 33 / 1000) &&
+    (!pacing_report || pacing_now - pacing_report >= pacing_frequency)){
+  const double ms = 1000.0 / pacing_frequency;
+  GameJournal::Event("RENDER", "frame_pacing",
+   "frame=%llu limit=%d foreground=%u vsync_interval=%u requested_ms=%.3f actual_ms=%.3f overrun_ms=%.3f",
+   CorePerf::Get().frameNumber, frame_limit, unsigned(focused), interval,
+   wait_timing.requested * ms, wait_timing.actual * ms,
+   (wait_timing.actual - wait_timing.requested) * ms);
+  pacing_report = pacing_now; pacing_limit = frame_limit;
+  pacing_interval = interval; pacing_focused = focused;
+ }
+#else
+ {const frame_acct::Scope scope(frame_acct::pf_limiter);
  frame_limiter_.wait(frame_limit);}
+#endif
  HRESULT hr;
+ (void)plan_pass("present",nullptr,nullptr,plan_read(PlanTarget::backbuffer));
  {const stall_watch::Bracket present_bracket("present");const frame_acct::Scope scope(frame_acct::pf_present_call);hr=swap_->Present(interval,flags);}
  const std::int64_t recorder_present_return=
   placed_hitch_profile_.active()?perf_now():0;

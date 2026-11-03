@@ -7,6 +7,14 @@
 #include <cwchar>
 
 namespace owned {
+struct DlssBackend::InitStorage {
+    wchar_t folder[32768]{};
+    wchar_t data[MAX_PATH]{};
+    const wchar_t* paths[1]{};
+    NVSDK_NGX_FeatureCommonInfo info{};
+};
+DlssBackend::DlssBackend() = default;
+DlssBackend::~DlssBackend() { shutdown(); }
 namespace {
 // EIRebuild64 identity, generated for this engine; never the upstream host ID.
 constexpr char kProjectId[] = "666beccc-e6e1-4a4e-b13e-5bb45c14de81";
@@ -37,8 +45,8 @@ bool DlssBackend::fail(const char* operation, std::uint32_t result) noexcept {
     return false;
 }
 
-bool DlssBackend::initialize(ID3D11Device* device, Log log) noexcept {
-    shutdown();
+bool DlssBackend::initialize_owned(ID3D11Device* device, Log log) noexcept {
+    shutdown_owned();
     log_ = log;
     const auto unavailable = [&](const char* operation, std::uint32_t result) {
         fail(operation, result);
@@ -50,7 +58,9 @@ bool DlssBackend::initialize(ID3D11Device* device, Log log) noexcept {
     };
     if (!device) return unavailable("NGX requires a native D3D11 device", E_INVALIDARG);
     device_ = device; // retain until after Shutdown1, including partial init
-    wchar_t folder[32768]{};
+    try { init_storage_ = std::make_unique<InitStorage>(); }
+    catch (...) { return unavailable("NGX init storage allocation failed", E_OUTOFMEMORY); }
+    auto& folder = init_storage_->folder;
     const DWORD count = GetModuleFileNameW(nullptr, folder, ARRAYSIZE(folder));
     if (!count || count >= ARRAYSIZE(folder)) return unavailable("NGX executable path unavailable", E_FAIL);
     wchar_t* slash = std::wcsrchr(folder, L'\\');
@@ -59,14 +69,14 @@ bool DlssBackend::initialize(ID3D11Device* device, Log log) noexcept {
     wchar_t local[MAX_PATH]{};
     HRESULT hr = SHGetFolderPathW(nullptr, CSIDL_LOCAL_APPDATA, nullptr, SHGFP_TYPE_CURRENT, local);
     if (FAILED(hr)) return unavailable("NGX writable data directory unavailable", hr);
-    wchar_t data[MAX_PATH]{};
+    auto& data = init_storage_->data;
     if (swprintf_s(data, L"%s\\EIRebuild64", local) < 0 || !make_directory(data))
         return unavailable("Cannot create EIRebuild64 NGX data directory", E_FAIL);
     if (swprintf_s(data, L"%s\\EIRebuild64\\NGX", local) < 0 || !make_directory(data))
         return unavailable("Cannot create NGX data directory", E_FAIL);
-    const wchar_t* paths[] = {folder};
-    NVSDK_NGX_FeatureCommonInfo info{};
-    info.PathListInfo.Path = paths;
+    init_storage_->paths[0] = folder;
+    auto& info = init_storage_->info;
+    info.PathListInfo.Path = init_storage_->paths;
     info.PathListInfo.Length = 1;
     auto result = NVSDK_NGX_D3D11_Init_with_ProjectID(kProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM,
         kBuildCommit, data, device_.Get(), &info, NVSDK_NGX_Version_API);
@@ -98,11 +108,11 @@ bool DlssBackend::initialize(ID3D11Device* device, Log log) noexcept {
 bool DlssBackend::device_ready() noexcept {
     if (!capability_.available || !device_) return fail("DLSS backend unavailable", E_FAIL);
     const HRESULT hr = device_->GetDeviceRemovedReason();
-    if (FAILED(hr)) { device_lost(hr); return false; }
+    if (FAILED(hr)) { device_lost_owned(hr); return false; }
     return true;
 }
 
-bool DlssBackend::optimal(unsigned out_w, unsigned out_h, DlssQuality quality,
+bool DlssBackend::optimal_owned(unsigned out_w, unsigned out_h, DlssQuality quality,
                            unsigned& render_w, unsigned& render_h) noexcept {
     render_w = render_h = 0;
     if (!device_ready()) return false;
@@ -118,7 +128,7 @@ bool DlssBackend::optimal(unsigned out_w, unsigned out_h, DlssQuality quality,
     return true;
 }
 
-bool DlssBackend::create_feature(ID3D11DeviceContext* context, const DlssShape& shape) noexcept {
+bool DlssBackend::create_feature_owned(ID3D11DeviceContext* context, const DlssShape& shape) noexcept {
     if (!device_ready()) return false;
     if (!context || context->GetType() != D3D11_DEVICE_CONTEXT_IMMEDIATE || !valid_quality(shape.quality) ||
         !shape.render_width || !shape.render_height || !shape.output_width || !shape.output_height ||
@@ -129,7 +139,7 @@ bool DlssBackend::create_feature(ID3D11DeviceContext* context, const DlssShape& 
     context->GetDevice(&context_device);
     if (context_device.Get() != device_.Get()) return fail("DLSS context belongs to another device", E_INVALIDARG);
     if (feature_ && shape == shape_) return true;
-    release_feature();
+    release_feature_owned();
     NVSDK_NGX_DLSS_Create_Params create{};
     create.Feature.InWidth = shape.render_width;
     create.Feature.InHeight = shape.render_height;
@@ -142,7 +152,7 @@ bool DlssBackend::create_feature(ID3D11DeviceContext* context, const DlssShape& 
         (shape.auto_exposure ? NVSDK_NGX_DLSS_Feature_Flags_AutoExposure : 0);
     const auto result = NGX_D3D11_CREATE_DLSS_EXT(context, &feature_, parameters_, &create);
     if (NVSDK_NGX_FAILED(result) || !feature_) {
-        release_feature();
+        release_feature_owned();
         return fail("DLSS feature creation failed", result);
     }
     shape_ = shape;
@@ -151,11 +161,11 @@ bool DlssBackend::create_feature(ID3D11DeviceContext* context, const DlssShape& 
     return true;
 }
 
-bool DlssBackend::evaluate(ID3D11DeviceContext* context, const DlssFrame& frame) noexcept {
+bool DlssBackend::evaluate_owned(ID3D11DeviceContext* context, const DlssFrame& frame) noexcept {
     if (!frame.color || !frame.depth || !frame.motion || !frame.output)
         return fail("DLSS frame inputs are missing", static_cast<std::uint32_t>(E_INVALIDARG));
     const bool recreated = !feature_ || !(shape_ == frame.shape);
-    if (!create_feature(context, frame.shape)) return false;
+    if (!create_feature_owned(context, frame.shape)) return false;
     // Same NGX contract as upstream Host/dlss.cpp, without wire records/IDs.
     NVSDK_NGX_D3D11_DLSS_Eval_Params eval{};
     eval.Feature.pInColor = frame.color;
@@ -173,14 +183,14 @@ bool DlssBackend::evaluate(ID3D11DeviceContext* context, const DlssFrame& frame)
     eval.InMVScaleY = frame.mv_scale_y;
     const auto result = NGX_D3D11_EVALUATE_DLSS_EXT(context, feature_, parameters_, &eval);
     if (NVSDK_NGX_FAILED(result)) {
-        release_feature();
+        release_feature_owned();
         return fail("DLSS evaluation failed", result);
     }
     error_[0] = 0;
     return true;
 }
 
-void DlssBackend::release_feature() noexcept {
+void DlssBackend::release_feature_owned() noexcept {
     if (feature_) {
         const auto result = NVSDK_NGX_D3D11_ReleaseFeature(feature_);
         if (NVSDK_NGX_FAILED(result)) fail("DLSS feature release failed", result);
@@ -189,7 +199,7 @@ void DlssBackend::release_feature() noexcept {
     shape_ = {};
 }
 void DlssBackend::cleanup() noexcept {
-    release_feature();
+    release_feature_owned();
     if (parameters_) { NVSDK_NGX_D3D11_DestroyParameters(parameters_); parameters_ = nullptr; }
     if (capabilities_) { NVSDK_NGX_D3D11_DestroyParameters(capabilities_); capabilities_ = nullptr; }
     if (initialized_ && device_) {
@@ -197,19 +207,131 @@ void DlssBackend::cleanup() noexcept {
         if (NVSDK_NGX_FAILED(result) && log_) log_("NGX Shutdown1 failed");
     }
     initialized_ = false;
+    init_storage_.reset();
     device_.Reset();
 }
-void DlssBackend::shutdown() noexcept {
+void DlssBackend::shutdown_owned() noexcept {
     cleanup();
     capability_ = {};
     error_[0] = 0;
     log_ = nullptr;
 }
-void DlssBackend::device_lost(HRESULT reason) noexcept {
+void DlssBackend::device_lost_owned(HRESULT reason) noexcept {
     fail("DLSS device lost", static_cast<std::uint32_t>(reason));
     capability_.available = false;
     capability_.result = static_cast<std::uint32_t>(reason);
     std::snprintf(capability_.reason, sizeof(capability_.reason), "%s", error_);
     cleanup();
+}
+// ---- The NGX thread --------------------------------------------------------
+// Every NGX call (init, capability and optimal-size queries, feature create,
+// evaluate, release, shutdown) runs on this one thread; the caller blocks
+// until it has finished, so the immediate context is never used from two
+// threads at once (nvsdk_ngx.h: "Methods in this library are NOT thread
+// safe. It is up to the client to ensure that thread safety is enforced as
+// needed."). The reason it is a separate thread: the NVIDIA D3D11 driver
+// keeps a pointer derived from the sampler description NGX passes when NGX
+// creates its own samplers (in feature creation and in evaluate), and on
+// every later CreateSamplerState from any caller it stores its sampler
+// counter at that address - 4 (RENDERER_ARCHITECTURE.md L-091). With NGX on
+// the replay thread that address was a dead NGX frame of the replay thread's
+// stack, and later renderer frames there were corrupted. On this thread it
+// is this thread's own stack below its wait, where nothing else lives.
+bool DlssBackend::run_raw(void (*job)(void*), void* context) noexcept {
+    if (worker_failed_) return false; // NGX never runs anywhere else (see above)
+    if (worker_.joinable() && GetCurrentThreadId() == worker_id_.load()) { job(context); return true; }
+    if (!worker_.joinable()) {
+        try {
+            stop_ = false;
+            worker_ = std::thread([this] {
+                worker_id_.store(GetCurrentThreadId());
+                std::unique_lock<std::mutex> lock(mutex_);
+                for (;;) {
+                    wake_.wait(lock, [this] { return job_ != nullptr || stop_; });
+                    if (job_) {
+                        job_(job_context_);
+                        job_ = nullptr;
+                        done_.notify_all();
+                        continue;
+                    }
+                    return;
+                }
+            });
+        } catch (...) {
+            // No thread: DLSS is unavailable. NGX is never run on the caller's
+            // thread (that is the crashing path).
+            worker_failed_ = true;
+            if (log_) log_("DLSS unavailable: the NGX thread could not be started");
+            return false;
+        }
+    }
+    std::unique_lock<std::mutex> lock(mutex_);
+    job_context_ = context;
+    job_ = job;
+    wake_.notify_one();
+    done_.wait(lock, [this] { return job_ == nullptr; });
+    return true;
+}
+
+void DlssBackend::stop_worker() noexcept {
+    if (!worker_.joinable()) return;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stop_ = true;
+    }
+    wake_.notify_one();
+    worker_.join();
+    worker_id_.store(0);
+}
+
+bool DlssBackend::initialize(ID3D11Device* device, Log log) noexcept {
+    shutdown();
+    log_ = log;
+    bool result = false;
+    auto job = [&] { result = initialize_owned(device, log); };
+    if (!run(job)) {
+        fail("DLSS unavailable: the NGX thread could not be started", E_FAIL);
+        capability_.available = false;
+        capability_.result = E_FAIL;
+        std::snprintf(capability_.reason, sizeof(capability_.reason), "%s", error_);
+    }
+    return result;
+}
+bool DlssBackend::optimal(unsigned w, unsigned h, DlssQuality quality,
+                          unsigned& render_w, unsigned& render_h) noexcept {
+    bool result = false;
+    render_w = render_h = 0;
+    auto job = [&] { result = optimal_owned(w, h, quality, render_w, render_h); };
+    run(job);
+    return result;
+}
+bool DlssBackend::create_feature(ID3D11DeviceContext* context, const DlssShape& shape) noexcept {
+    bool result = false;
+    auto job = [&] { result = create_feature_owned(context, shape); };
+    run(job);
+    return result;
+}
+bool DlssBackend::evaluate(ID3D11DeviceContext* context, const DlssFrame& frame) noexcept {
+    bool result = false;
+    auto job = [&] { result = evaluate_owned(context, frame); };
+    if (!run(job)) fail("DLSS unavailable: the NGX thread could not be started", E_FAIL);
+    return result;
+}
+void DlssBackend::release_feature() noexcept {
+    if (!worker_.joinable()) return;
+    auto job = [&] { release_feature_owned(); };
+    run(job);
+}
+void DlssBackend::device_lost(HRESULT reason) noexcept {
+    if (!worker_.joinable()) return;
+    auto job = [&] { device_lost_owned(reason); };
+    run(job);
+}
+void DlssBackend::shutdown() noexcept {
+    if (worker_.joinable()) {
+        auto job = [&] { shutdown_owned(); };
+        run(job);
+    }
+    stop_worker();
 }
 } // namespace owned

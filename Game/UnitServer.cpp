@@ -27,6 +27,9 @@
 #include "ModRuntime.h"
 static const char LOCAL_FILE[] = __FILE__;
 namespace {
+// Additional unit melee separation, shared by approach and attack planning.
+constexpr float FP_MELEE_SPACING = 0.15f;
+
 bool IsEquippedRangedWeapon(CItemWeapon *weapon)
 {
     if (!weapon)
@@ -441,7 +444,7 @@ void CUnitServer::LowNewWishPose(EUnitPose pose)
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CUnitServer::LowFindPath(const CPlot3D &ptDest, SAIPath &res, BOOL bFastPath,
-                              float fpMaxPathLength, Navigation::GoalPolicy goalPolicy)
+                              float fpMaxPathLength, Navigation::GoalPolicy goalPolicy,const Navigation::Location* goalSupport)
 {
     CorePerf::Scope coreTiming(CorePerf::FindPath);
     CWorldServer *pWS = (CWorldServer *)GetWorld();
@@ -455,7 +458,17 @@ bool CUnitServer::LowFindPath(const CPlot3D &ptDest, SAIPath &res, BOOL bFastPat
     lpUnit->bNeedFastPath = bFastPath;
     const bool journal=lpUnit->IsHero() && &res==&path;
     Navigation::Route detail;
-    bool bFound = pWS->aiMap.NewPath(lpUnit, ptDest, res, fpMaxPathLength,0,goalPolicy,journal?&detail:nullptr);
+    Navigation::Location targetSupport;
+    if(!goalSupport&& &res==&path&&curCommand.IsMove()) {
+        if(curCommand.navGoalValid&&std::hypot(curCommand.navGoal.position.x-ptDest.x,curCommand.navGoal.position.y-ptDest.y)<.01f)goalSupport=&curCommand.navGoal;
+        else if(auto* player=logic.GetPlayer())if(const auto* point=player->MoveGoal())if(std::hypot(point->x-ptDest.x,point->y-ptDest.y)<.01f) {
+            targetSupport.position={point->x,point->y,point->z};goalSupport=&targetSupport;
+        }
+    }
+    if(!goalSupport&& &res==&path&&!curCommand.pTarget.IsEmpty()) {
+        if(auto* target=dynamic_cast<CUnit*>(static_cast<CMapObject*>(curCommand.pTarget))){targetSupport=target->navLocation;targetSupport.position=pWS->aiMap.Navigation().Position(target,pWS->aiMap);goalSupport=&targetSupport;}
+    }
+    bool bFound = pWS->aiMap.NewPath(lpUnit, ptDest, res, fpMaxPathLength,0,goalPolicy,journal?&detail:nullptr,goalSupport);
     lpUnit->bNeedFastPath = bSaveFastPath;
     if(bFound&&journal&&!detail.points.empty()) {
         std::ostringstream points;unsigned turns=0,printed=0;
@@ -750,6 +763,7 @@ void CUnitServer::L1StandStill()
 void CUnitServer::L1StopMovement(bool bFailed)
 {
     navigationRejects=navigationWait=0;
+    static_cast<CWorldServer*>(GetWorld())->aiMap.Navigation().Stop(lpUnit->GetID());
     if(path.curSegment.GetMoveType()==CAIFullRoute::Rotate) {
         const auto facing=-lpUnit->GetYAxis();
         GameJournal::Event("UNIT","turn_finished","unit=%d failed=%d requested=%.6f actual=%.6f",
@@ -792,7 +806,6 @@ bool CUnitServer::RestoreNavigation()
     if(distanceXY2(lpUnit->GetCP(),goal)<.0009f) {
         path.CreateStand(lpUnit);L1SetPhase(UL1_NONE);lpUnit->LowNewRoute();return true;
     }
-    path.toGo.Clear();
     if(!lpUnit->navLocation.surface||!world->aiMap.NewPath(lpUnit,goal,path)) {
         // A derived route may become unavailable after world reconstruction.
         // Keep the loaded unit, stop this move; a new command can request a path.
@@ -2522,14 +2535,15 @@ float CUnitServer::GetHitDist(const SUnitBasicCmd &cmd)
             if (((CUnit *)pTarget)->GetOwner() && lpUnit->GetOwner())
                 fpWeaponRange -= 0.4f;
             fpWeaponRange = Max(GetCurrentWeaponRange(), fpWeaponRange);
-            // Preserve the existing weapon/natural reach. Only melee bodies
-            // use the same measured radii as placement and crowd avoidance.
+            // Keep weapon range unchanged; only unit melee gains approach spacing.
+            // Use the same measured radii as placement and crowd avoidance.
             const bool bodyMelee = cmd.cmd == UC_ATTACK && !HasRangedAttack() &&
                                    GetCurrentWeaponType() != RPGWST_MAGIC;
             auto& navigation = ((CWorldServer *)GetWorld())->aiMap.Navigation();
             fpHitDist = (bodyMelee ? navigation.Radius(lpUnit) : lpUnit->GetCollisionDistance()) +
                         (bodyMelee ? navigation.Radius((CUnit *)pTarget) :
                                      ((CUnit *)pTarget)->GetCollisionDistance()) + fpWeaponRange;
+            if (bodyMelee) fpHitDist += FP_MELEE_SPACING;
         }
         else
         {
@@ -2564,6 +2578,7 @@ float CUnitServer::GetCloseAttackDist(const SUnitBasicCmd &cmd)
         fpAttackDistance *= (1 + fpAttackKoef);
         fpHitDist = fpAttackDistance + (bodyMelee ? navigation.Radius((CUnit *)pTarget) :
                                                  ((CUnit *)pTarget)->GetCollisionDistance());
+        if (bodyMelee) fpHitDist += FP_MELEE_SPACING;
     }
     return fpHitDist;
 }
@@ -4324,7 +4339,12 @@ void CUnitServer::GetAttackAnimation(SL0AnimationSeq &res, int &nHit, EUnitComma
     if ( (dwAnimationFlags & ADB_ACTIONS) != ADB_ACTION_SPECIAL )
             dwAnimationFlags |= ADB_MODIFIER_HDIRECTION1_MIDDLE | ADB_MODIFIER_VDIRECTION1_MIDDLE;
     */
-    pEntry = lpUnit->GetAnimation(dwAnimationFlags, false);
+    const DWORD requestedFlags = dwAnimationFlags;
+    const bool directedAttack = cmd == UC_ATTACK &&
+        (dwAttackFlags & ADB_MODIFIERS) !=
+            (ADB_MODIFIER_HDIRECTION1_MIDDLE | ADB_MODIFIER_VDIRECTION1_MIDDLE);
+    pEntry = lpUnit->GetAnimation(dwAnimationFlags, false, !directedAttack);
+    const bool missingDirection = directedAttack && !pEntry;
     if ((pEntry == 0 || (pEntry->dwFlags & dwWeaponFlags) != dwWeaponFlags) && cmd == UC_ATTACK)
     {
         // OutputDebugString( "no attack animation found, using mm\n" );
@@ -4332,6 +4352,9 @@ void CUnitServer::GetAttackAnimation(SL0AnimationSeq &res, int &nHit, EUnitComma
         dwAnimationFlags = dwAttackFlags | dwWeaponFlags | ADB_ACTION_ATTACK | ADB_STAGE_UNIQUE |
                            ADB_STATE_ATTACK;
         pEntry = lpUnit->GetAnimation(dwAnimationFlags);
+        if (missingDirection)
+            GameJournal::MissingAnimation(lpUnit->GetMaskName(), requestedFlags,
+                pEntry ? GameJournal::AnimationGapResult::Ordinary : GameJournal::AnimationGapResult::Missing);
         if (pEntry == 0)
         {
             OutputDebugString(
@@ -4523,7 +4546,9 @@ void CUnitServer::GetSufferAnimation(SL0AnimationSeq &res, int nSufferDirection,
         dwAnimationFlags |= ADB_ACTION_DEATH | ADB_STAGE_UNIQUE;
     else
         dwAnimationFlags |= ADB_ACTION_SUFFER | ADB_STAGE_UNIQUE;
-    pEntry = lpUnit->GetAnimation(dwAnimationFlags);
+    const DWORD requestedFlags = dwAnimationFlags;
+    const bool directedDeath = bDiyng && (dwAnimationFlags & ADB_MODIFIER_DIRECTION2_MASK) != 0;
+    pEntry = lpUnit->GetAnimation(dwAnimationFlags, true, !directedDeath);
 
     // try to find 'MM' animation for dying
     if (bDiyng && (pEntry == 0))
@@ -4531,6 +4556,9 @@ void CUnitServer::GetSufferAnimation(SL0AnimationSeq &res, int nSufferDirection,
         dwAnimationFlags &= ~ADB_MODIFIER_DIRECTION2_MASK;
         dwAnimationFlags |= ADB_MODIFIER_DIRECTION2_MM;
         pEntry = lpUnit->GetAnimation(dwAnimationFlags);
+        if (directedDeath)
+            GameJournal::MissingAnimation(lpUnit->GetMaskName(), requestedFlags,
+                pEntry ? GameJournal::AnimationGapResult::Ordinary : GameJournal::AnimationGapResult::Missing);
     }
 
     // TODO: Эта проверка в текущей версии довольно часто фейлится, что приводит к раздражающе
@@ -4735,6 +4763,12 @@ bool CUnitServer::GetTransAnimation(SL0AnimationSeq &res, const SL1Pose &srcPose
     case UP_REST:
         dwAnimationFlags |= ADB_MODIFIER_CROSS_TO_REST;
         break;
+    }
+    if ((srcPose.pose == UP_REST || dstPose.pose == UP_REST) && !lpUnit->HasRestAnimations())
+    {
+        GameJournal::MissingAnimation(lpUnit->GetMaskName(), dwAnimationFlags,
+            GameJournal::AnimationGapResult::SkipTransition);
+        return false;
     }
     pEntry = lpUnit->GetAnimation(dwAnimationFlags);
     // ASSERT( pEntry );
@@ -5996,13 +6030,14 @@ void CUnitServer::CmdRotate(const CPlot3D &vecDest, float fpAngSpeed)
     nextCommand.bDoItFast = false;
 }
 
-void CUnitServer::CmdMoveTo(const CPlot3D &ptDest, bool bRun, bool bGroupCmd, float fpMaxPathDist)
+void CUnitServer::CmdMoveTo(const CPlot3D &ptDest, bool bRun, bool bGroupCmd, float fpMaxPathDist,const Navigation::Location* goalSupport)
 {
     CWorldServer *pWS = (CWorldServer *)GetWorld();
 
     nextCommand.Clear();
     nextCommand.cmd = UC_MOVETO;
     nextCommand.ptTarget = ptDest;
+    if(goalSupport){nextCommand.navGoal=*goalSupport;nextCommand.navGoalValid=true;}
     nextCommand.pTarget = NULL;
     nextCommand.bDoItFast = bRun;
     nextCommand.nQSpellNum = bGroupCmd ? 1 : 0;
@@ -6041,7 +6076,8 @@ void CUnitServer::CmdShowMove(const CPlot3D &ptDest, bool bGroupCmd, bool bRun, 
     }
     //
     bool bFound = LowFindPath(ptDest, pathFake, pWS->aiMap.IsWater(lpUnit->GetCP()), fpMaxPathDist,
-                             lpUnit->IsHero()?Navigation::GoalPolicy::ClosestReachable:Navigation::GoalPolicy::Exact);
+                             lpUnit->IsHero()?Navigation::GoalPolicy::ClosestReachable:Navigation::GoalPolicy::Exact,
+                             nextCommand.navGoalValid?&nextCommand.navGoal:nullptr);
     //
     if (bRun)
     {

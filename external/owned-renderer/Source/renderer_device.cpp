@@ -41,7 +41,6 @@
 #include "retained_static_scene.h"
 #include "widescreen.h"
 #include "test_harness.h"
-#include "x64_remote_device.h"
 #include "x64_remote_link.h"
 #include "dlss_frame.h"
 #include "stall_watchdog.h"
@@ -523,10 +522,11 @@ bool scene_thread_default() noexcept{return std::thread::hardware_concurrency()>
 // default before (bool 0/1): an ini saved before that version that still
 // holds the old default drops it and takes the new one. Any other saved value
 // is a choice and stays. Raise kSettingsVersion with each new entry.
-constexpr int kSettingsVersion=3;
+constexpr int kSettingsVersion=5;
 constexpr struct{const char* key;int version;float old_default;} kChangedDefaults[]={
  {"depth_of_field",1,2.f}, // 2 -> 0, in no preset (candidate-67)
  {"render_thread",1,0.f},  // off -> on, off below 4 logical processors (candidate-71)
+ {"fur_mode",5,0.f},       // prototype off -> full fur (High preset), in the player menu; an old 3 clamps to 2 (full)
 };
 
 // Version 3 split the one Upscaling list (dlss_mode, with FSR's own
@@ -558,15 +558,25 @@ std::string migrate_upscaling(RendererConfig& config) noexcept try{
 
 }  // namespace
 
-// Ensure (the overlay's ini) and core mode's game process (core_ensure,
-// which owns the ini there) run it once after loading.
-void migrate_settings(RendererConfig& config) noexcept try{
+// Ensure (the overlay's ini) runs it once after loading and saves to
+// save_path. Core mode: the game process migrates its copy without saving
+// (null, core_ensure) and the host, the only writer of the ini there,
+// migrates and saves the game's ini (scene_core::Config).
+void migrate_settings(RendererConfig& config,const wchar_t* save_path) noexcept try{
  const int saved=config.settings_version();
  if(saved>=kSettingsVersion)return;
  const std::string upscaling=saved<3?migrate_upscaling(config):std::string("current");
+ // Version 4 split terrain_quality Low (0) / High (1) into Low / Medium /
+ // High: each saved value moves up one step so the look stays (old Low is
+ // the Medium shader, old High is High); only a new choice reaches Low.
+ int terrain_quality=-1;
+ if(saved<4)if(const RendererOption* option=config.find("terrain_quality");option&&option->type==RendererOptionType::integer){
+  terrain_quality=std::min(option->integer_value+1,2);config.set_integer("terrain_quality",terrain_quality);
+ }
  // A file saved on a named preset of the old table takes that preset's
  // current values (graphics_settings.cpp keeps the old rows for version 1).
  const GraphicsPreset preset=reapply_graphics_preset_before(config,saved);
+ if(terrain_quality>=0)config.set_integer("terrain_quality",terrain_quality); // the old Low preset keeps Medium
  std::string reset;
  for(const auto& change:kChangedDefaults){
   if(change.version<=saved)continue;
@@ -578,7 +588,7 @@ void migrate_settings(RendererConfig& config) noexcept try{
   if(old_default&&config.reset_to_default(change.key)){reset+=reset.empty()?"":" ";reset+=change.key;}
  }
  config.set_settings_version(kSettingsVersion);
- if(config.save(renderer_config_path().c_str()))config.clear_dirty();
+ if(save_path&&config.save(save_path))config.clear_dirty();
  char detail[384];
  std::snprintf(detail,sizeof(detail),"settings_version %d -> %d; old defaults reset: %s; preset %s%s; upscaling: %s",saved,kSettingsVersion,
   reset.empty()?"none":reset.c_str(),graphics_preset_name(preset),preset!=GraphicsPreset::custom?" re-applied from the old table":" (no old preset matched)",
@@ -598,40 +608,32 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
  if(!embedded_sky().available_to(this))return E_UNEXPECTED;
 #endif
  output_width_=std::max(1u,w);output_height_=std::max(1u,h);camp_inventory_output(canvas_width(),canvas_height());set_world_size();hwnd_=hwnd;if(device_)return rtv_&&scene_composite_.target()?S_OK:E_FAIL;
- // Core mode (EI_RENDERER_X64_CORE=1): the host's Renderer draws; no device here.
+#ifndef EID3D11_EMBEDDED
+ // Core mode (F10 x64_render_host, or the test override EI_RENDERER_X64_CORE=1):
+ // the x64 host's Renderer draws; no device here. A host that never reached
+ // its first frame turned the option off at this start, with a notice
+ // (x64remote::core_wanted, user decision 2026-10-24): the standard device below.
  if(core_mode_)return x64remote::core_active()?S_OK:E_FAIL;
- if(x64remote::core_requested())return core_ensure();
+ if(x64remote::core_wanted())return core_ensure();
+#endif
  // NVIDIA's threaded optimisation retires shader variants on its worker while
  // their background compiles finish on its pool: an ABBA deadlock inside
  // nvwgf2um (dumps of 2026-10-11..13). Ask the driver to keep its internal
  // threads off this device.
  UINT flags=D3D11_CREATE_DEVICE_BGRA_SUPPORT|D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_0,D3D_FEATURE_LEVEL_10_1,D3D_FEATURE_LEVEL_10_0,D3D_FEATURE_LEVEL_9_3};HRESULT hr;
- // F10 x64_render_host (or EI_RENDERER_X64_REMOTE=1): proxy device, context
- // and swap chain; the x64 host owns the real device (x64_remote_device.h).
- // A host that does not start turns the option off and this session runs
- // on the local device below, with a notice (user decision 2026-10-24).
- bool remote=x64remote::remote_wanted();
- if(remote){
-  hr=x64remote::create_remote_device(hwnd_,flags,&device_,&feature_level_,&context_);
-  if(FAILED(hr)){remote=false;device_.Reset();context_.Reset();}
- }
- if(!remote){
 #if !defined(EID3D11_EMBEDDED) || !defined(_WIN64)
-  delete_recorded_nvidia_cache();
+ delete_recorded_nvidia_cache();
 #endif
-  hr=D3D11CreateDevice(nullptr,driver,nullptr,flags,levels,ARRAYSIZE(levels),D3D11_SDK_VERSION,&device_,&feature_level_,&context_);
- }
+ hr=D3D11CreateDevice(nullptr,driver,nullptr,flags,levels,ARRAYSIZE(levels),D3D11_SDK_VERSION,&device_,&feature_level_,&context_);
  if(FAILED(hr))return hr;
- debug_overlay_set_running_renderer(remote?"64-bit host (call stream)":"32-bit in the game process",false);
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ debug_overlay_set_running_renderer("64-bit embedded",false);
  dlss_backend_.initialize(device_.Get(),[](const char* text){bridge_report_event("dlss_backend",text);});
  set_dlss_unavailable_reason(dlss_backend_.capability().available ? nullptr : dlss_backend_.capability().reason);
 #else
+ debug_overlay_set_running_renderer("32-bit in the game process",false);
  // DLSS runs only in the x64 host; the Upscaling option shows why not.
- if(!remote)set_dlss_unavailable_reason("needs the 64-bit render host");
- else{x64remote::DlssCaps caps{};
-  if(!x64remote::dlss_caps(caps))set_dlss_unavailable_reason("the 64-bit host did not answer");
-  else{caps.reason[sizeof(caps.reason)-1]=0;set_dlss_unavailable_reason(caps.available?nullptr:(caps.reason[0]?caps.reason:"not available"));}}
+ set_dlss_unavailable_reason("needs the 64-bit render host");
 #endif
  // FSR 2 runs on this device in either mode; the Upscaling list shows why not.
  set_fsr_unavailable_reason(Fsr2Upscaler::unavailable_reason(device_.Get()));
@@ -639,8 +641,7 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
  frame_acct::install_device_counters(device_.Get(),context_.Get());
  detect_device_options();
  report_adapter();
- // NVAPI takes the real device: the host owns it in remote mode.
- if(!remote&&FAILED(hr=disable_nvidia_shader_disk_cache()))return hr;
+ if(FAILED(hr=disable_nvidia_shader_disk_cache()))return hr;
  retained_visual_scene().visual_set_surface_texture_retainer(&Renderer::retain_detached_surface_texture,this);
  set_test_initialization_stage("create-swap-chain");
  if(hwnd_&&FAILED(hr=create_swap_chain()))return hr;
@@ -648,7 +649,7 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
  set_test_initialization_stage("register-renderer-settings");
  register_config_options();
  auto& config=debug_overlay_.config();
- if(hwnd_){debug_overlay_.initialize(hwnd_,device_.Get(),context_.Get());if(debug_overlay_.initialized()){migrate_settings(config);debug_overlay_.sync_interface_profile();recover_shader_crash();}}
+ if(hwnd_){debug_overlay_.initialize(hwnd_,device_.Get(),context_.Get());if(debug_overlay_.initialized()){migrate_settings(config,renderer_config_path().c_str());debug_overlay_.sync_interface_profile();recover_shader_crash();}}
  // Record which cache files the driver mapped, for deletion at the next start.
  if(debug_overlay_.initialized()){
   const std::string cache_id=mapped_nvidia_cache_id();
@@ -667,7 +668,7 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
   set_test_initialization_stage("prepare-shaders");
  prepare_shaders();
  start_liquid_maps_job();
- if(!x64remote::remote_active())neighbour_maps_set_device(device_.Get()); // remote mode: the host runs the stream
+ neighbour_maps_set_device(device_.Get());
  if(FAILED(hr=create_targets()))return hr;if(FAILED(hr=create_pipeline()))return hr;if(FAILED(hr=profiler_.initialize(device_.Get(),context_.Get())))return hr;
  frame_statistics_.reset();
  system_telemetry_snapshot_={};
@@ -696,8 +697,15 @@ config.register_integer("render_scale","Render scale (%)","Graphics",100,kRender
 config.register_integer("camp_ui_layout","Camp layout","Interface",1,0,1,1,false,"Switch the open camp without restarting: original UI comparison or inventory grid. Keeps the current mode and transaction; supports compact 16:10 and wider displays.");
 config.register_integer("ui_language","Menu language","Language",0,0,2,1,false,"Language of the renderer's menus. 0: auto (Russian when the Windows display language is Russian or its ANSI code page is 1251), 1: English, 2: Russian. Applies at the next frame.");
 #ifndef EID3D11_EMBEDDED
-config.register_boolean("x64_render_host","64-bit render host","Display",false,true,"Moves the graphics card and driver into a separate 64-bit process, leaving the game more memory (fewer out-of-memory crashes on big maps). Applies after restarting the game. If the host does not start, the option turns itself off.");
+config.register_boolean("x64_render_host","64-bit render host","Display",false,true,"Runs the renderer and the graphics driver in a separate 64-bit process, leaving the game much more memory (fewer out-of-memory crashes on big maps); DLSS needs it. Applies after restarting the game. If the host does not start, the option turns itself off.");
 #endif
+config.register_boolean("harness_shot_after_overlay","Harness shots after the overlay","Diagnostics",false,false,"Test harness: screenshot commands capture the frame after the F10 overlay and the cursor (to check the overlay) instead of the game's image before them.");
+config.register_integer("frame_generation","Frame generation","Presentation",0,0,2,1,false,"0: off. 1: NVIDIA DLSS Frame Generation: one generated frame between each two rendered frames, presented at even spacing by the renderer (the interface, cursor and F10 overlay are drawn on every presented frame); GeForce RTX 40 or 50. 2: AMD FSR 3.1 frame generation (FidelityFX): one generated frame between each two rendered frames, presented and paced by FidelityFX; any Direct3D 12 GPU (interface, cursor and overlay on generated frames are taken from the rendered frame). Both: Direct3D 12 backend of the 64-bit render host; need DLSS or FSR upscaling (its depth and motion vectors); add about one rendered frame of latency. F10 shows presented and rendered FPS.");
+config.register_integer("frame_generation_min_fps","Frame generation minimum FPS","Presentation",30,0,120,5,false,"Frame generation pauses while the rendered rate stays below this for 2 s (only real frames are shown; logged) and resumes once the rendered rate, less what generating costs, clears it by 10% for 3 s. 0: never pauses. AMD designs FSR 3.1 frame generation for 60 rendered FPS and its swap chain for at least 30; below that generated frames show heavy artifacts and add a long rendered frame of latency. Not a frame cap.");
+config.register_integer("reflex","NVIDIA Reflex","Presentation",0,0,2,1,false,"Test (Direct3D 12 backend, NVIDIA GPUs): 0 off. 1: Reflex low latency mode with latency markers (the driver keeps the GPU queue short). 2: also the Reflex sleep before the render host releases the game's next frame. Never a frame cap. host.log reports the game-frame-to-present latency every 5 s in every mode.");
+config.register_integer("latency_pacing","Latency pacing","Presentation",0,0,1,1,false,"Test (Direct3D 12 backend, any GPU): 1 starts the game's next frame later, by as much as its frame would otherwise wait for the render host, so input is read closer to when the frame is drawn. Never a frame cap; the delay stays under 3/4 of a frame. host.log reports the delay and the remaining wait every 5 s.");
+config.register_boolean("fg_frame_image","Frame generation inputs (D3D12)","Diagnostics",false,false,"D3D12 backend: the frame draws into its own image (world and interface) with a HUD-less copy of the world, then is copied to the screen before the F10 overlay, cursor, load reveal and gamma, as frame generation will need. Looks the same; costs two full-screen copies a frame. Harness captures write hudless.bmp beside ui_composition.bmp.");
+config.register_integer("renderer_backend","Renderer","Display",0,0,1,1,false,"0 Direct3D 11. 1 Direct3D 12: Direct3D 12 runs in the 64-bit render host and is needed for frame generation and NVIDIA Reflex. Applies after restarting the game. A graphics card that cannot start Direct3D 12 stays on Direct3D 11 (the reason shows in F10 and host.log).");
 config.register_integer("display_mode","Display mode","Display",0,0,1,1,false,"0: borderless fullscreen on the primary monitor, 1: a movable window of the chosen window size. Use Apply display to change this during gameplay.");
 config.register_integer("window_width","Window width","Display",0,0,16384,1,false,"Client width of the windowed mode (0: the monitor's size). Use Apply display to change this during gameplay.");
 config.register_integer("window_height","Window height","Display",0,0,16384,1,false,"Client height of the windowed mode (0: the monitor's size). Use Apply display to change this during gameplay.");
@@ -770,6 +778,7 @@ for(const auto& type:kCritterTypeSettings){
 config.register_integer("ambient_particles","Ambient particles","Effects",1,0,2,1,false,"Area-tied atmospheric particles: pollen and grass bits over meadows, falling leaves near trees, grey motes in the Dead City, dust and drips in caves, embers and ash over lava, dust in the desert, fireflies on Gipat nights. 0: off, 1: low, 2: high.");
 config.register_floating_point("ambient_particle_density","Ambient particle density","Effects",1.f,0.f,3.f,.05f,false,"Multiplier on the number of ambient particles at the chosen level.");
 config.register_floating_point("ambient_particle_size","Ambient particle size","Effects",1.f,.25f,3.f,.05f,false,"Multiplier on the size of ambient particles.");
+config.register_integer("shadow_close_range","Close shadow range","Shadows",0,0,400,8,false,"Metres covered by the close shadow maps past where the view meets the ground; 0: 64, 80 or 96 by cascade resolution.");
 config.register_integer("shadow_cascade_quality","Cascade resolution","Shadows",1,0,2,1,false,"0: 1024, 1: 2048, 2: 4096 pixels per directional map. Higher quality uses more GPU memory.");
 config.register_integer("shadow_close_cascades","Close cascades","Shadows",3,1,3,1,false,"Use one to three close directional maps; fewer maps reduce shadow draw work.");
 config.register_boolean("shadow_far","Far shadows","Shadows",true,false,"Render the middle and broad directional maps beyond the close cascades.");
@@ -779,6 +788,16 @@ config.register_boolean("shadow_early_out","Shadow filter early-out","Shadows",t
 config.register_boolean("hero_light","Hero light","Graphics",false,false,"Illuminate the area around player-controlled heroes with their attached light. Changes apply at the next world frame; other map lights are unchanged.");
 config.register_boolean("point_shadows","Point-light shadows","Shadows",true,false,"Cast shadows from point lights while keeping their illumination.");
 config.register_integer("point_shadow_quality","Point-shadow resolution","Shadows",2,0,2,1,false,"0: 128, 1: 256, 2: 512 pixels per cube face. Higher quality uses more GPU memory per shadowed lamp.");
+config.register_integer("material_quality","Material quality","Materials",2,0,3,1,false,"Metal, leather, cloth and bone respond differently to the sun, the sky and lamps on characters and equipment. 0 off (the plain image), 1 sun and sky highlights, 2 adds lamp and fire highlights, painted-crevice occlusion and cloth sheen, 3 adds the sky reflection and lamp highlights on world objects. World objects (buildings, rocks, props) get relief, crevices and a rough sun highlight from their own texture from 2 up. The painted colours and the game's lighting stay; the response is added on top.");
+config.register_integer("material_view","Material view","Materials",0,0,3,1,false,"Debug: 0 shaded, 1 roughness, 2 metal (magenta: a lit unit without a material profile), 3 dielectric F0 (red), sheen (green), crevice occlusion (blue).");
+config.register_floating_point("material_reflections","Sky reflection strength","Materials",1.f,0.f,2.f,.1f,false,"Strength of the roughness-filtered owned-sky reflection on material surfaces. It does not reflect nearby objects.");
+config.register_boolean("material_metal_mask","Metal masks","Materials",true,false,"Metal equipment: texels clearly off the layer's metal tint (brown straps, coloured cloth) read as leather or cloth, and dark chain-mail gaps lose their metal shine relative to their surroundings (uniformly dark metals keep it). Off reads each metal layer as uniformly metal.");
+config.register_boolean("material_world","World object materials","Materials",true,false,"Buildings, rocks and props: relief, crevice occlusion and a rough sun highlight derived from their own texture (material_quality 2 and up; 3 adds the sky reflection and lamp highlights). Off draws them as before.");
+config.register_floating_point("material_relief","World relief strength","Materials",1.f,0.f,2.f,.1f,false,"Strength of the relief world objects take from their texture brightness. 0 keeps the flat normal (the highlight and crevices remain).");
+config.register_floating_point("material_world_roughness","World roughness offset","Materials",0.f,-.4f,.2f,.05f,false,"Added to the world objects' base roughness (.75). Negative is glossier.");
+config.register_boolean("material_terrain","Terrain materials","Materials",true,false,"Terrain 2.0 ground: relief from each material's baked height (material_quality 1 and up), a sun highlight at the roughness of its material class with crevices rough (2 and up; dry soil, grass and rock stay near matte), and the sky on smooth snow, ice and mud (3). Off draws it as before.");
+config.register_floating_point("material_terrain_relief","Terrain relief depth","Materials",.06f,0.f,.2f,.01f,false,"Metres of relief per unit of a terrain 2.0 material's baked height. 0 keeps the flat normal.");
+config.register_floating_point("material_terrain_crevices","Terrain crevice roughness","Materials",1.f,0.f,2.f,.1f,false,"How much a terrain texel darker than its material's mean reads rough (no highlight there).");
 config.register_integer("shadow_softness","Shadow softness","Shadows",1,0,2,1,false,"0: fixed soft edge (previous filter). 1: contact-hardening soft shadows, low sample count. 2: high sample count. Penumbrae widen with the distance between caster and receiver.");
 config.register_integer("shadow_sun_angle","Sun size (0.1 degree)","Shadows",15,1,60,1,false,"Angular diameter of the sun in tenths of a degree when shadow softness is on; larger values give wider sun penumbrae.");
 config.register_integer("point_shadow_light_size","Lamp size (%)","Shadows",100,10,400,10,false,"Scales the spherical size of shadow-casting lamps when shadow softness is on; larger lamps give wider penumbrae.");
@@ -800,6 +819,7 @@ config.register_integer("render_thread_frame_latency","Scene thread frame latenc
 config.register_integer("cull_min_screen_permille","Minimum object size","Performance",5,0,50,1,false,"Objects smaller than this many thousandths of the screen height are not drawn (5 = 0.5%). 0 disables.");
 config.register_integer("shadow_cull_min_texels","Minimum shadow caster size","Performance",2,0,8,1,false,"Sun-shadow casters smaller than this many shadow-map texels are not drawn into the map. 0 disables.");
 config.register_boolean("highlight_briefing","Highlight briefing characters","Highlight",false,false,"On the base screen, characters with something to discuss (and the current speakers) glow with the game's white highlight. Off draws them with normal shading.");config.register_boolean("highlight_selected","Highlight selected characters","Highlight",false,false,"Selected party characters glow with the game's white highlight. Off keeps their normal shading and shadows.");config.register_boolean("highlight_hover_characters","Highlight characters under the cursor","Highlight",true,false,"A softer glow on the character the cursor would act on: briefing characters you can talk to on the base screen, enemies you can attack and spell or steal targets on maps. Follows the game's own cursor decision.");config.register_boolean("highlight_hover_objects","Highlight objects under the cursor","Highlight",true,false,"The same softer glow on what the cursor would use: chests, levers, traps and lootable corpses. Follows the game's own cursor decision.");config.register_integer("cursor_scale","Cursor scale (%)","Interface",100,100,400,25,false,"Size of the game cursor. 100 draws the original pixels exactly; larger sizes are smoothed at the edges.");config.register_integer("pillarbox_fill","Pillarbox fill","Interface",1,0,1,1,false,"Loading screens and movies made for another screen shape are shown at their own shape. 0 fills the bars black, 1 with a soft, darkened blur of the same picture.");config.register_integer("ui_scale","UI scale (%)","Interface",100,50,120,5,false,"Size of the in-mission HUD (map, portrait, weapons, spells, skills, stance wheel, clock, chat). Adjusts immediately from 50% to 120% around each screen corner, including clickable areas. Menus, inventory, shops and dialogs keep their size.");config.register_floating_point("message_panel_width","Message panel width (%)","HUD layout",100.f,50.f,800.f,.1f,false,"Logical width of the loot and quest message panel. Resizing reflows its text.");
+config.register_boolean("portrait_head","Party portraits: real head","Interface",true,false,"The party portraits show each member's own head and hair (strand hair, materials, expressions) through the game's face animation instead of the baked portrait faces. A portrait that cannot be drawn shows its face magenta.");config.register_boolean("portrait_helmet","Party portraits: helmet","Interface",false,false,"Portraits wear the helmet the member wears. Off (the original look) shows the bare head and hair.");
 config.register_integer("hud_fade_duration","HUD fade-out duration (ms)","Interface",250,0,10000,50,false,"Shared fade-out duration for all widgets after the idle delay. 0 makes the transition immediate.");
 config.register_integer("hud_fade_in_duration","HUD fade-in duration (ms)","Interface",250,0,2000,50,false,"Shared fade-in duration on hover or meaningful updates. 0 restores visibility immediately. Repeated updates keep the fade moving.");
 config.register_integer("hud_fade_delay","HUD idle time before fade-out (ms)","Interface",2000,0,60000,100,false,"Time without hover or meaningful updates before fading out. A fade-in finishes first, including at 0 idle time.");
@@ -854,6 +874,8 @@ config.register_floating_point("wind_floor","Wind floor","Graphics",kDefaultWind
 config.register_integer("wind_trails","Wind trails","Graphics",1,0,2,1,false,"Thin translucent streaks that trace the gusts near the camera when the wind blows hard: none on calm spells or in caves, more in storms. Dust-tinted in Suslanger, pale specks in the snow. 0: off, 1: default, 2: dense.");
 config.register_integer("precipitation","Precipitation quality","Graphics",3,0,4,1,false,"Rain and snow drawn by the renderer in place of the game's own: rain streaks and snowflakes that fall around the view, stop at the ground, follow the wind and the game clock (frozen while paused). 0: off (no rain or snow is drawn), 1: low, 2: medium, 3: high, 4: ultra. Higher levels draw denser rain.");
 config.register_integer("precip_strength","Rain and snow strength","Graphics",0,0,3,1,false,"How hard it rains or snows. 0: varies per shower, 1: light, 2: medium, 3: heavy. Only the picture changes: the game's rain and snow (sight 0.9) are the same at every strength.");
+
+
 config.register_integer("precip_test","Precipitation test","Diagnostics",0,0,3,1,false,"Render-only: 1 rain, 2 snow, 3 sand storm (its strength from Precipitation strength test, default heavy), whatever the game's weather; 0 follows the game. The whole visual weather follows (drops, fog, sky, wind, water rings); the game's weather and gameplay are untouched.");
 config.register_integer("precip_strength_override","Precipitation strength test","Diagnostics",0,0,3,1,false,"Render-only: 1 light, 2 medium, 3 heavy instead of the Rain and snow strength setting; 0 uses the setting.");
 config.register_floating_point("contact_blend","Ground contact blend","Graphics",.7f,0.f,1.f,.05f,false,"Buildings, rocks, fences, trunks and other rigid objects take an uneven band of the ground's own texture (grass, pebbles, dirt, sand, snow) where they meet the terrain, with slight contact darkening. Grass creeps higher in tufts; bare ground stays low. 0 disables it. Characters are never blended.");
@@ -864,7 +886,12 @@ config.register_floating_point("ao_strength","AO strength","Graphics",.75f,.5f,4
 config.register_floating_point("ao_radius","AO radius (m)","Graphics",1.5f,.25f,4.f,.25f,false,"World-space reach of the occlusion search.");
 config.register_floating_point("ao_low_light_boost","AO low-light boost","Graphics",1.6f,1.f,3.f,.1f,false,"Strength multiplier reached when the ambient light dominates the sun (night, overcast); 1 disables. Radius grows up to 25%.");
 config.register_integer("sky_clouds","Sky and clouds","Graphics",2,0,2,1,false,"Owned sky with volumetric clouds, sun, moon, stars and moving cloud shadows on the ground; follows the game hour, rain and snow, and the region. Water reflects it. 0: the game's original sky, 1: low (quarter-resolution clouds), 2: high (half resolution, more detail).");
-config.register_floating_point("cave_brightness","Cave brightness","Graphics",kDefaultCaveBrightness,.25f,1.25f,.05f,false,"Light level in caves and dungeons: scales the cave ambient and the game's fixed cave light together (1 is the game's own cave table). Lava, torches, lamps and glowing objects add on top unchanged. Outdoor zones are not affected.");
+config.register_floating_point("cave_brightness","Cave brightness","Graphics",kDefaultCaveBrightness,.25f,1.25f,.05f,false,"Light level in caves and dungeons: scales the cave ambient (1 is the game's own cave table). Caves have no sun light or sun shadows; lava, torches, lamps and glowing objects light them and add on top unchanged. Outdoor zones are not affected.");
+config.register_floating_point("cave_ambient_floor","Cave darkness floor","Graphics",kDefaultCaveAmbientFloor,0.f,.6f,.02f,false,"Lowest ambient light in caves (brightest channel, 0-1): keeps unlit cave areas visible. 0 lets them go as dark as the cave table and Cave brightness make them; .30 is the default.");
+config.register_integer("cave_gi","Bounce light","Graphics",2,0,2,1,false,"Light from torches, campfires, lamps, lava and other glowing ground bounces once off the ground, rock and walls and lights the surroundings beyond the lamp's direct reach. Outdoors the sun also bounces off the ground; in caves the exits let in the outdoor light of the hour. It only ever adds light. 0: off, 1: low (4 m grid, cheaper), 2: high (2 m grid). A part of it is recomputed every frame.");
+config.register_boolean("bounce_debug","Bounce light view","Diagnostics",false,false,"Shows the bounce light alone, eight times brighter, in place of the lamps' direct light.");
+config.register_floating_point("sun_bounce_strength","Sun bounce strength","Graphics",kDefaultSunBounceStrength,0.f,4.f,.1f,false,"Brightness of the sunlight bounced off the ground outdoors (1: the physical estimate from the painted ground colour).");
+config.register_floating_point("cave_gi_strength","Bounce light strength","Graphics",kDefaultCaveBounceStrength,0.f,8.f,.1f,false,"Brightness of the bounced light of lamps, campfires and lava (1, the default: the physical estimate from the painted ground colour).");
 config.register_floating_point("sky_brightness","Sky brightness","Graphics",1.f,.5f,2.f,.05f,false,"Exposure of the owned sky and clouds.");
 config.register_floating_point("sky_night_brightness","Night sky brightness","Graphics",1.5f,.5f,3.f,.1f,false,"Moonlight, stars and the deep blue night sky. 1 is the physical estimate; higher is brighter and more readable.");
 config.register_floating_point("sky_cloud_shadows","Cloud shadow strength","Graphics",1.f,0.f,1.f,.05f,false,"How much moving cloud shadows dim the direct sun on the ground and objects. 0 disables them.");
@@ -886,11 +913,11 @@ config.register_boolean("neighbour_maps","Neighbouring maps","Graphics",true,fal
 config.register_boolean("load_reveal_hold","Hold the loading screen until the world is ready","Graphics",true,false,"After a map load, keep the loading picture on screen until the map, its neighbouring maps and its ground cover are prepared (at most 3 s), so nothing pops in after the loading screen. The game keeps running meanwhile. Off shows the world at once.");
 config.register_floating_point("neighbour_fog_range","Neighbour fog range","Graphics",1.f,.5f,4.f,.25f,false,"Over edges with a neighbouring map, fog starts 20 m inside the border, is light at the border and full 80 m into the neighbour; this scales both distances. Higher shows more of the neighbours and costs more; anything in full fog is not drawn. Capped by draw_distance. Changing it reloads the neighbours.");
 config.register_integer("ground_cover_distance","Ground cover distance (m)","Effects",200,50,1000,25,false,"How far grass and other ground cover is drawn, independent of draw_distance. The far sparse level ends here.");
-config.register_integer("ground_cover_shadows","Ground cover shadows","Effects",1,0,2,1,false,"Sun shadows of the procedural ground cover in the close shadow layers. 0: none. 1: large cover only (snow and sand piles, fallen logs and branches, dead bushes, cave wall roots). 2: everything except seagrass, beach wrack and the distant tuft meshes; the swaying grass then redraws the close shadow layers every frame. Needs sun shadows and ground cover. Critters always cast sun shadows when sun shadows are on.");
+config.register_integer("ground_cover_shadows","Ground cover shadows","Effects",1,0,2,1,false,"Sun shadows of the procedural ground cover in the close shadow layers. 0: none. 1: large cover only (fallen logs and branches, dead bushes, cave wall roots). 2: everything except seagrass, beach wrack, snow and sand piles and the distant tuft meshes; the swaying grass then redraws the close shadow layers every frame. Needs sun shadows and ground cover. Critters always cast sun shadows when sun shadows are on.");
 config.register_integer("effect_distance","Effect distance (m)","Effects",300,100,1000,25,false,"How far game effects are kept and drawn: campfires, torches, map particle sources, lights and lightning. Capped by draw_distance. The game itself keeps them only within 100 m.");
 config.register_boolean("impostors","Crown impostors","Graphics",true,false,"Cut-out parts of neighbouring-map objects (tree crowns, bushes) draw a baked camera-facing impostor where they are smaller on screen than the impostor size, crossfading with a screen-door dither. Off draws every triangle.");config.register_floating_point("impostor_pixels","Crown impostor size (px)","Graphics",64.f,16.f,256.f,8.f,false,"On-screen size (pixels across the crown's bounding sphere) below which a crown draws its impostor. The crossfade runs from this size to one and a half times it.");config.register_boolean("impostor_debug","Crown impostor diagnostic view","Graphics",false,false,"Draws every crown impostor quad as a solid magenta square (placement check).");config.register_boolean("lod","Static object LOD","Graphics",true,false,"Opaque parts of neighbouring-map objects draw a reduced triangle level where its largest deviation projects below the pixel limit, crossfading between levels with a screen-door dither. Off draws every triangle.");config.register_floating_point("lod_pixel_error","Static LOD pixel limit","Graphics",1.f,.25f,8.f,.25f,false,"Largest on-screen deviation (pixels at the current resolution) a reduced level may have where it is drawn. The crossfade to the next level runs from this limit to twice it.");config.register_integer("draw_distance","Draw distance (m)","Graphics",300,100,1000,25,false,"How far terrain, objects and neighbouring maps are drawn, in world metres (the unit of the game's FarClipDistance). The last tenth fades into the sky or fog colour; beyond it nothing is drawn, and nearer where fog already hides everything. Shadows inside the range keep their casters. Also caps how deep neighbouring maps load (neighbour_fog_range), so changing it can reload them.");
 config.register_boolean("terrain_lod","Terrain LOD","Graphics",false,false,"Switch terrain detail by distance. Disable to keep the highest detail everywhere; this costs terrain geometry work.");
-config.register_integer("terrain_quality","Terrain detail","Graphics",1,0,1,1,false,"0: low (the authored tile mapping only), 1: high (anti-repetition and transition sharpening, each with its own switch below). Low saves about 0.2 ms of terrain shading at 4K. With Cliff texturing on, faces on low read each tile with one plain tap (its 2 m repeat shows), high through the anti-tiling cells.");
+config.register_integer("terrain_quality","Terrain detail","Graphics",2,0,2,1,false,"Terrain 2.0 ground quality. 2: high (two warp octaves on material edges, fine edge noise, large-scale brightness variation). 1: medium (one warp octave, no fine noise or large-scale variation). 0: low, for weak cards (also hex detail from two cells instead of three, the two strongest materials only, edges decided by noise without the textures' heights, no wall-foot band).");
 config.register_boolean("terrain_antitile","Terrain anti-repetition","Graphics",true,false,"Replace repeated tile detail with randomly turned and shifted reads on a hex lattice, plus faint large-scale brightness variation. Tile colours, paths and transitions are kept. Off is cheapest.");
 config.register_boolean("terrain_cliffs","Terrain cliffs","Graphics",true,false,"Unwalkable slopes (past the game's 40 degree walk limit) show the map's own tile art read through world-space side projections, so it no longer stretches down cliffs. Colours, contrast and the map's tile transitions stay as authored; only the fine detail is re-read, fading in with the slope and cross-faded between neighbouring tiles, so no new edges appear. Walkable ground is unchanged. Only steep pixels pay extra texture reads. Replaces Terrain cliff projection on the current map while on. Off keeps the authored tile mapping. Needs Terrain material blend: with blend 0 cliffs stay off (this value is kept).");
 config.register_floating_point("cliff_rock_amount","Rock amount","Cliff blend",.55f,0.f,1.f,.05f,false,"How much of a steep face shows the nearby ground or stone through its cover (grass, snow, sand). 0: none, 0.5: about half of a vertical face.");
@@ -902,27 +929,18 @@ config.register_floating_point("cliff_steep_full","Rock full at slope (deg)","Cl
 config.register_floating_point("cliff_snow_rock","Rock on snow","Cliff blend",.35f,0.f,1.f,.05f,false,"Rock amount on snow and ice faces, as a share of the normal rock amount (0: snow faces show no rock, 1: as much as other faces). Only a stone or ground material of that cliff can show.");
 config.register_floating_point("cliff_face_warp","Face boundary wander","Cliff blend",.6f,0.f,2.f,.05f,false,"How far material boundaries wander with height on faces (tile units), so they do not run straight down a cliff.");
 config.register_floating_point("cliff_rock_detail","Rock shape detail","Cliff blend",.6f,0.f,1.f,.05f,false,"How much the rock's own texture shapes the patch outlines: 0 smooth noise blobs; 1 bright stone pokes through the cover and dark cracks stay covered along the edges.");
-config.register_integer("terrain_blend_debug","Terrain blend debug view","Diagnostics",0,0,6,1,false,"Temporary. Terrain material blend pixels drawn unlit as: 1 field (red top material weight, green contested, blue tile-art share), 2 plane weights (red YZ side, green XZ side, blue top), 3 masks (red exposed rock, green cover, blue fade), 4 winning material (hashed colour, white where exposed rock wins), 5 every terrain pixel's material class (green material base tile, magenta long tile, cyan animated, red other), 6 candidate overflow (red where a material beyond the blend's four candidate slots carried weight above the tail, brighter with more weight; dim green elsewhere).");
 config.register_boolean("neighbour_fog_skip","Skip blend under neighbour fog","Graphics",true,false,"Temporary A/B switch: neighbour terrain under nearly full seam fog keeps its tile art (no blend or cliffs).");
 config.register_boolean("terrain_blend_neighbours","Terrain blend on neighbour maps","Graphics",true,false,"Temporary cost switch: neighbour maps' terrain reads their own tile grid and atlas for the material blend and cliffs. Off binds none, so neighbour terrain keeps its tile art.");
-config.register_boolean("terrain_far_detile","Terrain blend: far de-tiling","Graphics",true,false,"On: the full blend's steep faces keep their turned anti-repetition reads at every distance (mip-filtered, the larger-scale read added only past the atlas padding), and distant blended ground keeps its larger-scale read instead of the plain 2 m tile. Off: faces switch to one plain read once a texel is under a third of a pixel, and distant ground past the padding fades the plain read to the material's mean (the previous look).");
-config.register_integer("terrain_blend","Terrain material blend","Graphics",1,0,2,1,false,"Tile transitions (a path meeting snow, grass meeting dirt) are redrawn from the plain textures of the materials at the map grid's corners, mixed by a smooth noisy field so edges meander naturally instead of repeating 2 m tile shapes; snow, sand and grass settle into the joints of stone. Corner materials come from the map editor's atlas profile shipped with the map, else its built-in table. Long and animated tiles and maps without tile families keep their art. 0: off, 1: fast (one texture read a material, broad edge noise), 2: full (adds a finer edge-noise octave, a finer boundary warp and turned anti-repetition reads on steep faces; fast reads faces with one plain tap, which costs about a third of the steep-face shading). Steep faces keep their painted cover (grass stays grass, snow stays snow) read through world-space side projections (a second turned read near the camera breaks the repeat), and nearby ground or stone shows through in irregular patches and down-slope streaks where the face is steepest; this takes over Terrain cliffs on those tiles.");
+config.register_integer("terrain_blend","Terrain material blend","Graphics",1,0,1,1,false,"Tile transitions (a path meeting snow, grass meeting dirt) are redrawn from the plain textures of the materials at the map grid's corners, mixed by a smooth noisy field so edges meander naturally instead of repeating 2 m tile shapes; snow, sand and grass settle into the joints of stone. Corner materials come from the map editor's atlas profile shipped with the map, else its built-in table. Long and animated tiles and maps without tile families keep their art. Steep faces keep their painted cover (grass stays grass, snow stays snow) read through world-space side projections, and nearby ground or stone shows through in irregular patches and down-slope streaks where the face is steepest. Terrain 2.0 draws it; 0 also turns off the cliff texturing (an old saved 2 loads as 1).");
 config.register_integer("terrain_tessellation","Terrain cliff tessellation","Graphics",1,0,1,1,false,"Round off the crests and feet of steep terrain with GPU tessellation (smooth Phong surface through the game's own heightfield and slope normals; no texture relief). Subdivision is fixed in world space, so it never changes as the camera moves, and flat or evenly sloped ground is never subdivided. Walkable ground moves at most 15 cm, steeper faces at most 70 cm; nothing moves at the map border. 0: off (standard terrain), 1: on (up to 8x). Shadow maps keep the untessellated terrain. Costs GPU time on every terrain triangle while on.");
-config.register_integer("terrain_bake","Terrain material cache (test)","Diagnostics",0,0,3,1,false,"Terrain material cache. 1: keep the visible ground's finished terrain material in resident pages (baked nearest first within the per-frame budget) and draw the covered pixels through the lean cached variant, the rest through the live material; 0/1 at the same paused camera gives the comparison pair. 2: re-bake at the per-frame budget every frame without using it (the bake's GPU cost, profiler pass terrain_bake). 3: as 1 with every cached pixel tinted magenta (shows what the cache covers). Off frees the cache.");
-config.register_integer("terrain_bake_density","Terrain material cache density cap (texels/m)","Diagnostics",96,16,128,16,false,"Largest cache density; each page otherwise takes the screen's pixels per metre at its nearest point, and steep pages more along their slope. 48 is the HD terrain's own density, 96 twice it.");
-config.register_integer("terrain_bake_reach","Terrain material cache reach (m)","Diagnostics",1000,50,1000,50,false,"Visible terrain within this distance of the eye gets cache pages.");
-config.register_integer("terrain_bake_budget","Terrain material cache budget (MB)","Diagnostics",128,32,1024,32,false,"Largest cache atlas (with mips); the nearest pages are kept when the visible terrain needs more, the rest keeps the live material.");
-config.register_integer("terrain_bake_stretch","Terrain material cache slope stretch limit","Diagnostics",16,1,16,1,false,"Largest density gain along a slope (powers of two). Lower values soften steep faces in the cache and cut its size.");
-config.register_integer("terrain_bake_bc1","Terrain material cache BC1 distance (m)","Diagnostics",60,0,1000,10,false,"Cache pages farther than this keep BC1 (an eighth of the memory); 0 keeps every page uncompressed (beyond ultra).");
-config.register_integer("terrain_bake_near_format","Terrain material cache near format","Diagnostics",1,0,1,1,false,"Cache pages nearer than the BC1 distance: 1 BC7 (a quarter of the memory), 0 uncompressed (with BC1 distance 0: beyond ultra).");
-config.register_integer("terrain_bake_frame_texels","Terrain material cache bake cap per frame (k texels)","Diagnostics",4096,256,4096,256,false,"Largest slot area the cache bakes in one frame (the staging atlas holds 4096 k).");
-config.register_integer("terrain_bake_frame_ms","Terrain material cache bake time per frame (0.1 ms)","Diagnostics",3,1,50,1,false,"GPU time the cache's bake may take per frame while pages are missing, measured with timestamps; nearest pages first, nothing when all are resident.");
-config.register_integer("terrain_bake_route","Terrain material cache routing","Diagnostics",2,1,2,1,false,"1: two passes (cached pixels through the lean variant, then the live variant for the rest; geometry and tessellation run twice). 2: one pass (the live variant uses the cached colour where it covers).");
-config.register_boolean("terrain_bake_neighbours","Terrain material cache on neighbour maps","Diagnostics",false,false,"Cache and route neighbour-map terrain too (a net cost on the perf frame: distant ground is cheap live).");
+config.register_integer("terrain2_cache","Terrain 2.0 material cache","Graphics",0,0,2,1,false,"With terrain 2.0 on. 0: every terrain 2.0 pixel computes its blend (the reference). 1: walkable ground without liquid over it reads a camera-centred cache of the finished blend (world-aligned texel grid at power-of-two densities, re-baked only where the view moves into new ground or the terrain inputs change); faces, rock, wall feet and liquid beds stay per pixel. 2: as 1 with cached pixels tinted by cache level. Switch 0/1 at the same camera for the comparison. Off frees the cache.");
+config.register_integer("terrain2_cache_density","Terrain 2.0 cache size (%)","Graphics",100,25,200,25,false,"Window side of the fine cache levels as a share of the size at which no cached texel is coarser than the per-pixel reference on flat ground (3x the screen's pixels per metre at depth 1). Lower: less video memory, softer ground near each level's edge.");
+config.register_integer("terrain2_cache_bake","Terrain 2.0 cache bake per frame (k texels)","Graphics",4096,256,65536,256,false,"Most cache texels baked in one frame (nearest levels last). While a level is incomplete the pixels that need it stay per pixel.");
+config.register_floating_point("terrain2_cache_bias","Terrain 2.0 cache level bias","Diagnostics",0.f,-1.f,1.f,.25f,false,"Shifts the cache level each pixel reads: negative sharper (needs a larger window), positive softer.");
 config.register_boolean("terrain_height_blend","Terrain transition sharpening","Graphics",true,false,"Bias soft tile transitions by the texture's own detail so the brighter material breaks through. Off is cheapest.");
 config.register_integer("sky_weather_test","Sky weather test","Diagnostics",0,0,2,1,false,"Render-only sky test: 1 builds a rain storm in the owned sky (deck, rain shafts, lightning), 2 clears it, 0 follows the game's weather. The game's rain, fog and gameplay are untouched.");
 config.register_integer("critter_labels","Critter labels","Diagnostics",0,0,1,1,false,"Label every live ambient critter and bird with species, state and distance to the nearest party member, including hidden critters outside party sight. Render only.");
- config.register_integer("critter_showcase","Critter showcase","Diagnostics",0,0,3,1,false,"Debug: one of every critter species, a small flock of every bird and a vulture group (plus a vulture pair on its thermal) in labelled rows a few metres in front of the camera focus, at their normal in-game size (2: twice the size; 3: normal size drawn without the depth test, to tell buried from small). Render only: no simulation, spawn rules or budgets; the ambient critters pause while it is on.");
+config.register_integer("fur_mode","Fur and hair","Graphics",2,0,2,1,false,"0 off; 1 creature fur and fur armour (hair keeps its mesh); 2 full: creature fur, fur armour and hair strands grown from the scalp. Game time sways it; paused freezes it.");config.register_integer("fur_shells","Fur shells","Diagnostics",16,2,48,2,false,"Shell layers per furry triangle (fur mode 1).");config.register_integer("fur_length","Fur length (%)","Diagnostics",100,10,400,10,false,"Fur and hair strand length relative to the creature's coat.");config.register_integer("fur_density","Fur density (%)","Diagnostics",100,10,400,10,false,"Strand density of shells and strands.");config.register_integer("fur_quality","Fur quality","Diagnostics",1,0,1,1,false,"Fur prototype cost level. 0: low (half the strands, fewer strand segments, half the shells, no hair-on-body collision), 1: high.");config.register_integer("critter_showcase","Critter showcase","Diagnostics",0,0,3,1,false,"Debug: one of every critter species, a small flock of every bird and a vulture group (plus a vulture pair on its thermal) in labelled rows a few metres in front of the camera focus, at their normal in-game size (2: twice the size; 3: normal size drawn without the depth test, to tell buried from small). Render only: no simulation, spawn rules or budgets; the ambient critters pause while it is on.");
   set_test_initialization_stage("renderer-settings-registered");
  register_combat_ui_options(config);
 }
@@ -949,7 +967,11 @@ native_shadow_softness_=shadow_softness_constants(configured_integer(config,"sha
 // The common coverage/scheduler and the GPU consume the same settings,
 // including when EIRebuild supplies the scene directly.
 bridge_set_shadow_settings(native_shadow_side_,native_close_shadow_cascades_,
- native_far_shadows_enabled_,native_point_shadows_enabled_,native_shadows_enabled_);
+ native_far_shadows_enabled_,native_point_shadows_enabled_);
+// Core mode, game process: the host applies the shadow switch at its
+// BeginScene (begin_scene_renderer never runs here), so the flag the world
+// capture reads (native_shadows_enabled) follows the same option here (#204).
+if(core_mode_)native_shadows_enabled_=configured_boolean(config,"shadows",true);
 neighbour_maps_enable(configured_boolean(config,"neighbour_maps",true));
 bridge_set_terrain_lod_enabled(configured_boolean(config,"terrain_lod",false));
 bridge_set_owned_sky(configured_integer(config,"sky_clouds",2)>0);
@@ -982,6 +1004,45 @@ HRESULT Renderer::adopt_host_device(ID3D11Device* device,ID3D11DeviceContext* co
  return S_OK;
 }
 
+// x64 host, renderer_backend=d3d12 (M1a): the D3D12 executor owns the swap
+// chain, targets and pipelines; the adopted D3D11 device creates nothing
+// and receives no work (it only answers adapter queries).
+#ifndef EID3D11_EMBEDDED
+HRESULT Renderer::ensure_host_d3d12(HWND window,UINT w,UINT h){
+ core_host_=true;
+ output_width_=std::max(1u,w);output_height_=std::max(1u,h);hwnd_=window;
+ debug_overlay_set_running_renderer("64-bit render host, Direct3D 12",true);debug_overlay_set_running_d3d12(true);
+ // DLSS on the executor's device (core_host.cpp moved the host's NGX there)
+ // and FSR 2 through its compute slots (fsr2_upscaler_d3d12.h).
+ {x64remote::DlssCaps caps{};
+  if(!x64remote::dlss_caps(caps)){caps.reason[sizeof(caps.reason)-1]=0;set_dlss_unavailable_reason(caps.reason[0]?caps.reason:"not available");}
+  else set_dlss_unavailable_reason(nullptr);}
+ set_fsr_unavailable_reason(Fsr2UpscalerD3D12::unavailable_reason(*d3d12_));
+ ComPtr<IDXGIDevice> dxgi_device;if(SUCCEEDED(device_.As(&dxgi_device))){ComPtr<IDXGIAdapter> adapter;if(SUCCEEDED(dxgi_device->GetAdapter(&adapter)))adapter.As(&adapter3_);}
+ register_config_options();
+ apply_config_settings();
+ // No render scale on this backend (100%); the upscaler modes follow the
+ // options from the first frame on (apply_upscaler_mode_d3d12).
+ render_scale_percent_=100;dlss_mode_=configured_dlss_mode();fsr_mode_=configured_fsr_mode();set_world_size();
+ scene_composited_=true;
+ frame_statistics_.reset();
+ system_telemetry_snapshot_={};
+ system_telemetry_active_=false;
+ system_telemetry_.start(adapter3_.Get());
+ // The profiler (F10 performance panel, F11 and harness captures) times
+ // passes with the executor's GPU timestamps; off unless profiling is on.
+ profiler_.set_timestamps(&d3d12_->profile_timestamps());
+ if(FAILED(profiler_.initialize(device_.Get(),context_.Get())))bridge_report_event("d3d12_profiler","the profiler did not start");
+ // The neighbour stream has no device here: it creates its pages and textures
+ // through the executor's preparer; adoption only records their copies.
+ neighbour_maps_set_d3d12(d3d12_->preparer());
+ // The native queue's resources on the executor (interface meshes: the HUD).
+ if(FAILED(native_d3d12_ensure()))bridge_report_event("d3d12_native","the native programs or the first geometry page failed; interface meshes are omitted");
+ // The generated liquid maps on a worker (CPU levels; the first water frame uploads them).
+ start_liquid_maps_job();
+ return S_OK;
+}
+
 // x64 host, core mode (Host/core_host.cpp), after adopt_host_device: the
 // frame resources ensure() creates, presenting into `window` (the host's
 // child of the game window). The game process owns the ini: the options
@@ -989,12 +1050,16 @@ HRESULT Renderer::adopt_host_device(ID3D11Device* device,ID3D11DeviceContext* co
 // first config command, which precedes every frame.
 // Not yet in core mode (listed): DLSS (the host's NGX feature is the
 // call-stream replay's), NVAPI's shader disk cache switch, the debug overlay.
+#endif // !EID3D11_EMBEDDED
 HRESULT Renderer::ensure_host(HWND window,UINT w,UINT h){
  if(!device_||!context_)return E_FAIL;
+#ifndef EID3D11_EMBEDDED
+ if(d3d12_)return ensure_host_d3d12(window,w,h);
+#endif
  if(swap_)return S_OK;
  core_host_=true;
  output_width_=std::max(1u,w);output_height_=std::max(1u,h);hwnd_=window;
- debug_overlay_set_running_renderer("64-bit host (core mode)",true);
+ debug_overlay_set_running_renderer("64-bit render host",true);
  // DLSS on this device (the host's NGX instance, host_bridge.cpp).
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
  set_dlss_unavailable_reason(dlss_backend_.capability().available ? nullptr : dlss_backend_.capability().reason);
@@ -1179,8 +1244,14 @@ namespace {
 // The key's defines (renderer.h key bits).
 constexpr const char* kNativeSpecDefines[]={"NATIVE_OFF_ANTITILE","NATIVE_OFF_HEIGHT_BLEND","NATIVE_OFF_CONTACT","NATIVE_OFF_CLIFFS",
  "NATIVE_OFF_BLEND","NATIVE_OFF_POINT_SHADOWS","NATIVE_OFF_SUN_SHADOWS"};
-// Bits 9-11 (bits 7 and 8 are the fog quality).
-constexpr const char* kNativeSpecDefinesHigh[]={"NATIVE_DEBUG_COVERAGE","NATIVE_OFF_POINT_SOFT","NATIVE_FAST_COMBINER"};
+// Bits 9-12 (bits 7 and 8 are the fog quality).
+// Bit 12: material quality Off (the S1/S2/S3 material code compiled out;
+// D3D11 only: the D3D12 programs test the level uniformly).
+// Bit 13: a second terrain 2.0 pool exists (terrain2.hlsl T2_POOL; D3D11 only).
+// Bit 14: terrain_quality Low (terrain2.hlsl T2_LOW; D3D11 only: the D3D12
+// programs test it uniformly).
+constexpr const char* kNativeSpecDefinesHigh[]={"NATIVE_DEBUG_COVERAGE","NATIVE_OFF_POINT_SOFT","NATIVE_FAST_COMBINER","NATIVE_OFF_MATERIALS",
+ "NATIVE_TERRAIN2_POOLS","NATIVE_TERRAIN_LOW"};
 #if !defined(EID3D11_SHADER_EMBED)
 // The disk cache next to the DLL (eid3d11_shader_cache\<program key>.dxbc).
 std::wstring native_spec_cache_path(const ShaderKey& key){
@@ -1231,7 +1302,9 @@ namespace {
 // The key settings give in play (value(name, fallback) reads one setting).
 template<class Value> std::uint32_t native_play_specialisation_key(const Value& value){
  std::uint32_t key=0;
- if(value("terrain_quality",1.f)<1)key|=1u|2u; // terrain_material_switches: anti-tiling and height blend
+ const float terrain_quality=value("terrain_quality",2.f);
+ if(terrain_quality<2)key|=1u|2u; // terrain_material_switches: anti-tiling and height blend
+ if(terrain_quality<1)key|=16384u; // NATIVE_TERRAIN_LOW
  if(value("contact_blend",.7f)<=0)key|=4u;
  const bool blend=value("terrain_blend",1.f)>0;
  if(!blend||value("terrain_cliffs",1.f)<=0)key|=8u; // configured_terrain_cliffs
@@ -1241,6 +1314,7 @@ template<class Value> std::uint32_t native_play_specialisation_key(const Value& 
  const float fog=value("fog_preset",2.f);
  if(fog<1)key|=128u;else if(fog<2)key|=256u;
  if(value("shadow_softness",1.f)<=0)key|=1024u; // shadowBias[5].z
+ if(value("material_quality",2.f)<=0)key|=4096u; // nativeMaterialLevel 0: no material code
  return key;
 }
 }  // namespace
@@ -1256,6 +1330,11 @@ std::vector<std::uint32_t> native_shipped_specialisation_keys(){
   for(const std::uint32_t base:{key,key|2048u})
    for(const std::uint32_t k:{base,base^32u,base|4u,(base|4u)^32u})
     if(k&&std::find(keys.begin(),keys.end(),k)==keys.end())keys.push_back(k);
+  // Material quality Off (an F10/player choice outside the presets): the
+  // preset's own programs without the material code, so Off draws exactly
+  // the image (and cost) of the build before material classes.
+  for(const std::uint32_t k:{key|4096u,key|6144u})
+   if(std::find(keys.begin(),keys.end(),k)==keys.end())keys.push_back(k);
  }
  return keys;
 }
@@ -1339,6 +1418,8 @@ std::uint32_t Renderer::native_specialisation_key() const noexcept{
  // The cascade coverage debug view (flush_native constants.padding[0]).
  if(debug_overlay_.mode()==DebugOverlayMode::full&&debug_overlay_.config().debug_resource_view()==DebugResourceView::shadow_cascade_coverage)key|=512u;
  if(!native_point_soft_live_)key|=1024u;
+ if(!material_level())key|=4096u; // NATIVE_OFF_MATERIALS (world objects, S2, need no class library)
+ for(unsigned p=1;p<kTerrain2Pools;++p)if(terrain2_pools_[p].atlas)key|=8192u; // NATIVE_TERRAIN2_POOLS
  return key;
 }
 
@@ -1671,6 +1752,8 @@ HRESULT Renderer::create_shadow_history_targets(){
 // when the history is unavailable its constants say so (no reuse, no jitter).
 bool Renderer::prepare_shadow_history() noexcept {
  const auto upload=[this](const NativeShadowHistoryConstants& constants){
+  // D3D12: kept for the passes' b6 (bind_shadow_history_d3d12).
+  if(d3d12_){std::memcpy(shadow_history_constants12_.data(),&constants,sizeof(constants));return true;}
   D3D11_MAPPED_SUBRESOURCE mapped{};
   if(!shadow_history_constants_||FAILED(context_->Map(shadow_history_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))
    return false;
@@ -1679,9 +1762,9 @@ bool Renderer::prepare_shadow_history() noexcept {
   return true;
  };
  const auto disabled=[&]{(void)upload(NativeShadowHistoryConstants{});return false;};
- if(!native_shadows_enabled_||!shadow_history_rtv_[0]||!shadow_history_rtv_[1]||
-    !shadow_history_depth_srv_||!shadow_history_constants_||!shadow_history_sampler_||
-    !native_world_clip_valid_)return disabled();
+ const bool resources=d3d12_?shadow_history_mask12_[0]&&shadow_history_mask12_[1]&&shadow_history_depth12_:
+  shadow_history_rtv_[0]&&shadow_history_rtv_[1]&&shadow_history_depth_srv_&&shadow_history_constants_&&shadow_history_sampler_;
+ if(!native_shadows_enabled_||!resources||!native_world_clip_valid_)return disabled();
  if(debug_overlay_.mode()==DebugOverlayMode::full&&
     debug_overlay_.config().debug_resource_view()==DebugResourceView::shadow_cascade_coverage)
   return disabled();
@@ -1694,7 +1777,8 @@ bool Renderer::prepare_shadow_history() noexcept {
 #endif
   shadow_history_written_=shadow_history_committed_=false;
   const float clear[]{1,0,0,1};
-  context_->ClearRenderTargetView(shadow_history_rtv_[shadow_history_current_index_].Get(),clear);
+  if(d3d12_)d3d12_->clear_texture(*shadow_history_mask12_[shadow_history_current_index_],clear);
+  else context_->ClearRenderTargetView(shadow_history_rtv_[shadow_history_current_index_].Get(),clear);
  }
  if(shadow_history_committed_)return disabled();
  NativeShadowHistoryConstants constants{};
@@ -1703,7 +1787,9 @@ bool Renderer::prepare_shadow_history() noexcept {
   shadow_history_current_epoch_==shadow_history_previous_epoch_&&
   shadow_history_previous_frame_!=UINT64_MAX&&
   shadow_history_previous_frame_+1==native_frame_index_;
- constants.settings={float(width_),float(height_),.8f,can_reuse?1.f:0.f};
+ UINT history_width=width_,history_height=height_;
+ if(d3d12_){UINT levels=0;DXGI_FORMAT format{};(void)d3d12_->texture_info(*shadow_history_mask12_[0],history_width,history_height,levels,format);}
+ constants.settings={float(history_width),float(history_height),.8f,can_reuse?1.f:0.f};
  // Soft-shadow disks rotate per frame only while history can integrate them.
  const float phase=float(native_frame_index_%64u);
  if(can_reuse)constants.jitter={phase*7.f,phase*13.f,0,0};
@@ -1712,7 +1798,8 @@ bool Renderer::prepare_shadow_history() noexcept {
 
 void Renderer::commit_shadow_history() noexcept {
  if(shadow_history_committed_||!shadow_history_written_||
-    shadow_history_current_frame_!=native_frame_index_||!shadow_history_depth_)return;
+    shadow_history_current_frame_!=native_frame_index_||
+    (d3d12_?!shadow_history_depth12_||!world_d3d12_:!shadow_history_depth_))return;
  const auto scene_clip=bridge_scene_world_to_clip_snapshot();
  std::array<float,16> clip{};
  if(scene_clip.valid)clip=scene_clip.world_to_clip;
@@ -1720,14 +1807,23 @@ void Renderer::commit_shadow_history() noexcept {
  else if(test_shadow_history_epoch_&&native_world_clip_valid_)clip=native_world_clip_;
 #endif
  else {shadow_history_valid_=false;shadow_history_committed_=true;return;}
- ID3D11ShaderResourceView* empty[2]{};
- context_->PSSetShaderResources(20,2,empty);
- context_->OMSetRenderTargets(0,nullptr,nullptr);
- context_->CopyResource(shadow_history_depth_.Get(),depth_.Get());
- context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
+ UINT history_width=width_,history_height=height_;
+ if(d3d12_){
+  // The world depth into the history depth, in stream order (executor copy).
+  UINT levels=0;DXGI_FORMAT format{};
+  if(!d3d12_->texture_info(*shadow_history_depth12_,history_width,history_height,levels,format)||
+     FAILED(d3d12_->copy_depth(*shadow_history_depth12_,*world_d3d12_))){
+   shadow_history_valid_=false;shadow_history_committed_=true;return;}
+ }else{
+  ID3D11ShaderResourceView* empty[2]{};
+  context_->PSSetShaderResources(20,2,empty);
+  context_->OMSetRenderTargets(0,nullptr,nullptr);
+  context_->CopyResource(shadow_history_depth_.Get(),depth_.Get());
+  context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
+ }
  // The history was drawn with this frame's DLSS viewport jitter: it reprojects
  // into the jittered image (zero jitter when DLSS is off).
- shadow_history_previous_clip_=dlss_jittered_clip(clip,dlss_jitter_[0],dlss_jitter_[1],width_,height_);
+ shadow_history_previous_clip_=dlss_jittered_clip(clip,dlss_jitter_[0],dlss_jitter_[1],history_width,history_height);
  shadow_history_previous_epoch_=shadow_history_current_epoch_;
  shadow_history_previous_frame_=native_frame_index_;
  shadow_history_previous_index_=shadow_history_current_index_;
@@ -1853,9 +1949,9 @@ HRESULT Renderer::render_debug_texture(DebugResourceView view) noexcept {
  default:return E_INVALIDARG;
  }
  if(!source||!rtv_||!context_)return E_UNEXPECTED;
- DebugViewStateGuard state(context_.Get());
- ID3D11RenderTargetView* target=rtv_.Get();
- context_->OMSetRenderTargets(1,&target,nullptr);
+ // Binds every state it reads and restores nothing; the overlay and cursor
+ // passes after it bind their own.
+ bind_plan_targets(plan_pass("debug_resource_view",rtv_.Get(),nullptr));
  context_->OMSetBlendState(nullptr,nullptr,0xffffffffu);
  context_->OMSetDepthStencilState(nullptr,0);
  context_->RSSetState(nullptr);
@@ -2044,8 +2140,6 @@ constexpr ShaderGroup kShaderGroups[]={
   [](const RendererConfig& c){
   return configured_integer(c,"critters",2)>0||configured_integer(c,"critter_showcase",0)>0;},
   "critters",[](RendererConfig& c){c.set_integer("critters",0);c.set_integer("critter_showcase",0);}},
- // Always prepared at startup: enabling the cache in play must not open a second preparation.
- {"terrain_bake",append_terrain_bake_shader_programs,[](const RendererConfig&){return true;},nullptr,nullptr},
  {"impostors",append_impostor_shader_programs,
   [](const RendererConfig& c){return configured_boolean(c,"impostors",true)&&configured_boolean(c,"neighbour_maps",true);},
   "impostors",[](RendererConfig& c){c.set_boolean("impostors",false);}},
@@ -2060,14 +2154,17 @@ constexpr ShaderGroup kShaderGroups[]={
    const int method=configured_integer(c,"upscaler",kUpscalerOff);
    return method==kUpscalerFsr||(method==kUpscalerDlss&&!dlss_unavailable_reason()&&
     configured_floating_point(c,"upscale_sharpness",.2f)>0.f);},
-  "upscaler",[](RendererConfig& c){
-#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
-   if(configured_integer(c,"upscaler",kUpscalerOff)==kUpscalerDlss){
-    set_dlss_unavailable_reason("DLSS shader preparation failed; selected DLSS world frames are refused");
-    bridge_report_event("dlss_frame_refused",dlss_unavailable_reason());return;
-   }
-#endif
-   c.set_integer("upscaler",kUpscalerOff);}},
+  "upscaler",[](RendererConfig& c){c.set_integer("upscaler",kUpscalerOff);}},
+ {"terrain2",[](std::vector<ShaderProgram>& out){append_terrain2_shader_programs(out);append_terrain2_cover_programs(out);append_snow_surface_program(out);},[](const RendererConfig&){return true;},nullptr,nullptr},
+ // The material cache's bake, with terrain 2.0 (its objects are created after the preparation).
+ {"terrain2_cache",append_terrain2_cache_shader_programs,[](const RendererConfig& c){return configured_integer(c,"terrain2_cache",0)>0;},
+  "terrain2_cache",[](RendererConfig& c){c.set_integer("terrain2_cache",0);}},
+ {"cave_gi",append_cave_irradiance_shader_programs,
+  [](const RendererConfig& c){return configured_integer(c,"cave_gi",2)>0;},
+  "cave_gi",[](RendererConfig& c){c.set_integer("cave_gi",0);}},
+ {"fur",append_fur_shader_programs,
+  [](const RendererConfig& c){return configured_integer(c,"fur_mode",0)>0;},
+  "fur_mode",[](RendererConfig& c){c.set_integer("fur_mode",0);}},
 };
 static_assert(std::size(kShaderGroups)<=32,"one bit per shader group");
 }  // namespace
@@ -2230,8 +2327,43 @@ void Renderer::register_embedded_shaders() noexcept{
  bridge_report_event("shader_table",text);
 }
 
+namespace {
+// The shader table the given groups reach (DX12 plan M0, pipeline table
+// enumeration): programs per group and stage, and the distinct programs.
+// Pipelines pair these with blend/raster/depth/topology/target states,
+// which are not enumerated yet (unknown).
+void report_shader_table(std::uint32_t groups,std::size_t programs_per_set,std::size_t prebuilt_specialised_sets) noexcept try{
+ std::string per_group;std::vector<ShaderKey> keys;
+ unsigned stages[6]{};const char* const stage_names="vpchdg";
+ std::size_t programs=0;
+ for(std::uint32_t group=0;group<std::size(kShaderGroups);++group){
+  if(!(groups&(1u<<group)))continue;
+  std::vector<ShaderProgram> list;kShaderGroups[group].append(list);
+  programs+=list.size();
+  per_group+=' ';per_group+=kShaderGroups[group].name;per_group+='=';per_group+=std::to_string(list.size());
+  for(const auto& program:list){
+   const ShaderKey key=shader_key(program);
+   if(std::find(keys.begin(),keys.end(),key)!=keys.end())continue;
+   keys.push_back(key);
+   if(const char* stage=std::strchr(stage_names,program.profile[0]))++stages[stage-stage_names];
+  }
+ }
+ char head[256];
+ std::snprintf(head,sizeof(head),"programs=%zu distinct=%zu vs=%u ps=%u cs=%u hs=%u ds=%u gs=%u specialised_ps=up to 8 sets x %zu (prebuilt shipped sets %zu) groups:",
+  programs,keys.size(),stages[0],stages[1],stages[2],stages[3],stages[4],stages[5],
+  programs_per_set,prebuilt_specialised_sets);
+ bridge_report_event("shader_table",(head+per_group).c_str());
+}catch(...){}
+}  // namespace
+
 void Renderer::prepare_shaders() noexcept try{
  namespace detail=shader_cache_detail;
+ // What the current settings can reach, reported once a settings change
+ // (preparation time only, never per frame).
+ if(const std::uint32_t reachable=shader_groups_for_settings(debug_overlay_.config(),feature_level_>=D3D_FEATURE_LEVEL_11_0);
+    reachable!=shader_table_reported_){
+  shader_table_reported_=reachable;report_shader_table(reachable,std::tuple_size<NativeSpecialisedSet>::value,native_spec_files_.size());
+ }
  // A feature compiled outside a preparation (a program the embedded table
  // lacks and the group list misses) is a main-thread FXC stall: name it.
  if(const std::uint32_t on_demand=detail::on_demand_compiles.load();on_demand!=shader_on_demand_reported_){
@@ -2274,8 +2406,8 @@ void Renderer::prepare_shaders() noexcept try{
   while(!preparation.wait_for(std::chrono::seconds(1))){}
  else if(!quick){
   shown=true;
-  ComPtr<ID3D11RenderTargetView> previous_target;ComPtr<ID3D11DepthStencilView> previous_depth;
-  context_->OMGetRenderTargets(1,&previous_target,&previous_depth);
+  // Runs between frames (after Present or at device creation): the targets
+  // stay unbound after it; the next frame's passes bind their own.
   do{
    // Keeps Windows from marking the window as not responding without
    // dispatching anything: queued and sent messages wait for the game's loop.
@@ -2291,8 +2423,6 @@ void Renderer::prepare_shaders() noexcept try{
     swap_->Present(0,tearing_supported_?DXGI_PRESENT_ALLOW_TEARING:0u);
    }
   }while(!preparation.wait_for(std::chrono::milliseconds(16)));
-  ID3D11RenderTargetView* restore=previous_target.Get();
-  context_->OMSetRenderTargets(restore?1:0,restore?&restore:nullptr,previous_depth.Get());
   frame_statistics_.reset();
  }
  shader_groups_prepared_|=groups;
@@ -2301,8 +2431,8 @@ void Renderer::prepare_shaders() noexcept try{
  {ShaderMarker& marker=shader_marker();std::lock_guard<std::mutex> lock(marker.mutex);
   marker.program_groups=nullptr;marker.phase="after_preparation";write_shader_marker(marker);}
  // The material cache's shader objects now, within this preparation, never
- // on its first bake frame mid-play (terrain_bake_programs).
- if(feature_level_>=D3D_FEATURE_LEVEL_11_0)(void)ensure_terrain_bake_programs();
+ // on its first bake frame mid-play.
+ if(feature_level_>=D3D_FEATURE_LEVEL_11_0)(void)ensure_terrain2_cache_programs();
  const double ms=1000.0*static_cast<double>(perf_now()-begin)/static_cast<double>(perf_frequency());
  char text[224];
  std::snprintf(text,sizeof(text),"programs=%zu created=%zu compiled=%zu failed=%zu retained=%zu threads=%u ms=%.0f window=%s groups=0x%x",
@@ -2343,6 +2473,7 @@ HRESULT Renderer::queue_screen_rectangle(const ScreenRectangleRequest& request,
                                          const D3DVIEWPORT7& viewport){
  if(scene_queue()&&core_mode_){core_post_command(scene_ui::ScreenRectangle{request,viewport},"queue_screen_rectangle");return S_OK;}
  if(scene_queue()){scene_post_frame([this,command=scene_ui::ScreenRectangle{request,viewport}]{report_scene_failure("queue_screen_rectangle",queue_screen_rectangle(command.request,command.viewport));});return S_OK;}
+ if(d3d12_)return draw_screen_rectangle_d3d12(request,viewport);
  if(!context_)return E_FAIL;
  if(scene_composited_)return draw_screen_rectangle(request,viewport);
  try{pending_screen_rectangles_.push_back({request,viewport});}
@@ -2438,7 +2569,10 @@ HRESULT Renderer::draw_screen_rectangle(const ScreenRectangleRequest& request,
  if(FAILED(hr=context_->Map(screen_rectangle_vertices_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return hr;
  std::memcpy(mapped.pData,vertices,sizeof(ScreenRectangleVertex)*vertex_count);
  context_->Unmap(screen_rectangle_vertices_.Get(),0);
- DebugViewStateGuard guard(context_.Get());
+ // Binds every state it reads and restores nothing: the interface draws
+ // after it bind their own (draw: IA, shaders, targets, viewport, b0;
+ // apply_state: raster, scissor, blend, depth, s0; the UI blits and the
+ // native flush likewise).
  const UINT stride=sizeof(ScreenRectangleVertex),offset=0;
  ID3D11Buffer* buffer=screen_rectangle_vertices_.Get();
  context_->IASetInputLayout(screen_rectangle_layout_.Get());
@@ -2451,7 +2585,7 @@ HRESULT Renderer::draw_screen_rectangle(const ScreenRectangleRequest& request,
  const D3D11_VIEWPORT target_viewport{0,0,(float)target_width(),(float)target_height(),0,1};
  context_->RSSetViewports(1,&target_viewport);
  context_->RSSetState(screen_rectangle_raster_state_.Get());
- context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),nullptr);
+ bind_plan_targets(plan_pass("screen_rectangle",rtv_.Get(),nullptr));
  context_->OMSetBlendState(screen_rectangle_blend_state_.Get(),nullptr,0xffffffffu);
  context_->OMSetDepthStencilState(screen_rectangle_depth_state_.Get(),0);
  context_->Draw(vertex_count,0);
@@ -2528,7 +2662,7 @@ void append_native_shader_programs(std::vector<ShaderProgram>& out){
  out.push_back({source,nullptr,nullptr,"nativePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
  for(const char* entry:{"nativeBuildCS","nativeTerrainPhaseCS","nativeInstanceUpdateCS","nativePoseCS","nativeShadowPrepareCS",
                         "nativeShadowCommitCS","nativeShadowBuildCS","nativeShadowVS","nativeShadowPS"})
-  out.push_back({std::strcmp(entry,"nativeBuildCS")==0?native_build_shader_source():source,nullptr,defines,entry,std::strstr(entry,"CS")?"cs_5_0":(std::strstr(entry,"VS")?"vs_5_0":"ps_5_0"),
+  out.push_back({source,nullptr,defines,entry,std::strstr(entry,"CS")?"cs_5_0":(std::strstr(entry,"VS")?"vs_5_0":"ps_5_0"),
                  D3DCOMPILE_OPTIMIZATION_LEVEL3});
  // Then the terrain pixel variant (NATIVE_TERRAIN_PS: tile blend, terrain
  // material, cliffs), bound to terrain batches; then the same
@@ -2603,6 +2737,28 @@ void append_native_shader_programs(std::vector<ShaderProgram>& out){
  out.push_back({source,nullptr,low,"nativeShadowMaskPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
+// D3D12 (it has no specialisation sets): the native pixel programs again
+// without the S1-S3 material code (NATIVE_OFF_MATERIALS), drawn while
+// material quality is Off. Present but switched off, that code cost ~0.2 ms
+// of the terrain passes on the save1027 frame. The Low programs never carry it.
+void append_native_off_material_programs(std::vector<ShaderProgram>& out){
+ static const auto programs=[]{
+  struct Built{std::vector<ShaderProgram> programs;std::vector<std::vector<D3D_SHADER_MACRO>> macros;};
+  Built built;std::vector<ShaderProgram> general;append_native_shader_programs(general);
+  for(const auto& program:general){
+   if(std::strcmp(program.entry,"nativePS")!=0)continue;
+   std::vector<D3D_SHADER_MACRO> macros;bool low=false;
+   for(const D3D_SHADER_MACRO* define=program.defines;define&&define->Name;++define){macros.push_back(*define);low|=std::strcmp(define->Name,"NATIVE_LOW")==0;}
+   if(low)continue;
+   macros.push_back({"NATIVE_OFF_MATERIALS","1"});macros.push_back({nullptr,nullptr});
+   built.macros.push_back(std::move(macros));built.programs.push_back(program);
+  }
+  for(std::size_t n=0;n<built.programs.size();++n)built.programs[n].defines=built.macros[n].data();
+  return built;
+ }();
+ out.insert(out.end(),programs.programs.begin(),programs.programs.end());
+}
+
 #if !defined(EID3D11_SHADER_EMBED)
 HRESULT Renderer::create_native_pipeline(){
 #ifdef EID3D11_TESTING
@@ -2613,7 +2769,6 @@ HRESULT Renderer::create_native_pipeline(){
   if(FAILED(result)){if(production_error)std::fwrite(production_error->GetBufferPointer(),1,production_error->GetBufferSize(),stderr);return result;}
  }
 #endif
- reset_samgbur_lod_diagnostic();
  retire_native_poses();native_pose_cs_.Reset();
  retire_native_shadows();
  native_shadow_prepare_cs_.Reset();native_shadow_commit_cs_.Reset();native_shadow_build_cs_.Reset();native_shadow_vs_.Reset();native_shadow_ps_.Reset();
@@ -2697,9 +2852,11 @@ HRESULT Renderer::create_native_pipeline(){
   if(FAILED(hr=device_->CreateBuffer(&shadows,nullptr,&native_shadow_constants_))||FAILED(hr=upload_native_shadow_constants(0)))return hr;
   D3D11_BUFFER_DESC lighting{};lighting.ByteWidth=sizeof(NativeWorldLighting);lighting.Usage=D3D11_USAGE_DYNAMIC;lighting.BindFlags=D3D11_BIND_CONSTANT_BUFFER;lighting.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
   if(FAILED(hr=device_->CreateBuffer(&lighting,nullptr,&native_world_lighting_constants_)))return hr;
-  D3D11_BUFFER_DESC point_count{};point_count.ByteWidth=32;point_count.Usage=D3D11_USAGE_DYNAMIC;point_count.BindFlags=D3D11_BIND_CONSTANT_BUFFER;point_count.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
-  const std::array<UINT,8> no_point_lights{};D3D11_SUBRESOURCE_DATA initial_count{};initial_count.pSysMem=no_point_lights.data();
+  // 32 bytes of point-light grid, then the cave volume (cave_irradiance.h).
+  D3D11_BUFFER_DESC point_count{};point_count.ByteWidth=64;point_count.Usage=D3D11_USAGE_DYNAMIC;point_count.BindFlags=D3D11_BIND_CONSTANT_BUFFER;point_count.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+  const std::array<UINT,16> no_point_lights{};D3D11_SUBRESOURCE_DATA initial_count{};initial_count.pSysMem=no_point_lights.data();
   if(FAILED(hr=device_->CreateBuffer(&point_count,&initial_count,&native_point_light_constants_)))return hr;
+  native_point_constants_dirty_=true;
  D3D11_BUFFER_DESC work_range{};work_range.ByteWidth=16;work_range.Usage=D3D11_USAGE_DYNAMIC;
  work_range.BindFlags=D3D11_BIND_CONSTANT_BUFFER;work_range.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
  if(FAILED(hr=device_->CreateBuffer(&work_range,nullptr,&native_work_range_constants_)))return hr;
@@ -2763,6 +2920,16 @@ HRESULT Renderer::create_native_geometry_resource(
 
 HRESULT Renderer::create_native_geometry_arena(){
  if(!device_)return E_FAIL;
+ if(d3d12_){ // D3D12 backend: the first page as a D3D12 buffer (as native_d3d12_ensure makes it)
+  NativeGeometryPage page;page.capacity=16;page.high_water=16;
+  try{page.free.reserve(1);}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+  const HRESULT hr=d3d12_->create_buffer(16,0,0,page.d3d12);if(FAILED(hr))return hr;
+  try{std::vector<NativeGeometryPage> pages;pages.push_back(std::move(page));native_geometry_pages_=std::move(pages);}
+  catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+  native_static_content_changed();native_meshes_.clear();
+  native_geometry_live_bytes_=0;native_mesh_resident_bytes_=0;
+  return S_OK;
+ }
  ComPtr<ID3D11Buffer> buffer;ComPtr<ID3D11ShaderResourceView> srv;
  const HRESULT hr=create_native_geometry_resource(16,buffer,srv);
  if(FAILED(hr))return hr;
@@ -2818,6 +2985,19 @@ HRESULT Renderer::ensure_native_geometry_page_capacity(UINT page_index,UINT requ
  ColorDiagnosticTicks arena_timing(color?&color->arena_ticks:nullptr,
   color&&!color_mesh_active_?&color->nonmesh_arena_ticks:nullptr);
  if(color)++color->arena_grows;
+ if(d3d12_){
+  // D3D12 backend: a larger page buffer with the live bytes copied in stream order.
+  if(!page.d3d12)return E_FAIL;
+  UINT target=demand_growth_capacity(required,page.capacity,limit);
+  if(!target)return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+  D3D12BufferRef replacement;
+  HRESULT hr=d3d12_->create_buffer(target,0,0,replacement);
+  if(FAILED(hr)&&target!=required){target=required;hr=d3d12_->create_buffer(target,0,0,replacement);}
+  if(FAILED(hr))return hr;
+  if(page.high_water&&FAILED(hr=d3d12_->copy_buffer(*replacement,*page.d3d12,page.high_water)))return hr;
+  page.d3d12=std::move(replacement);page.capacity=target;
+  return S_OK;
+ }
  if(!device_||!context_||!page.buffer)return E_FAIL;
  const frame_acct::Scope growth_scope(frame_acct::geometry_growth);
 
@@ -2940,14 +3120,14 @@ HRESULT Renderer::allocate_native_geometry_span(UINT requested,
  ColorDiagnosticTicks arena_timing(color?&color->arena_ticks:nullptr,
   color&&!color_mesh_active_?&color->nonmesh_arena_ticks:nullptr);
  if(color)++color->arena_grows;
- HRESULT hr=create_native_geometry_resource(target,created.buffer,created.srv);
- if(FAILED(hr)&&target!=required){created.buffer.Reset();created.srv.Reset();
-  created.capacity=required;hr=create_native_geometry_resource(required,created.buffer,created.srv);}
+ HRESULT hr=d3d12_?d3d12_->create_buffer(target,0,0,created.d3d12):create_native_geometry_resource(target,created.buffer,created.srv);
+ if(FAILED(hr)&&target!=required){created.buffer.Reset();created.srv.Reset();created.d3d12.reset();
+  created.capacity=required;hr=d3d12_?d3d12_->create_buffer(required,0,0,created.d3d12):create_native_geometry_resource(required,created.buffer,created.srv);}
  if(FAILED(hr))return FAILED(growth_failure)?hr:growth_failure;
  // An empty general slot (release_empty_native_geometry_pages) takes it first.
  UINT page_index=static_cast<UINT>(native_geometry_pages_.size());
  for(UINT i=1;i<native_geometry_pages_.size();++i)
-  if(!native_geometry_pages_[i].dedicated&&!native_geometry_pages_[i].buffer){page_index=i;break;}
+  if(!native_geometry_pages_[i].dedicated&&!native_geometry_pages_[i].buffer&&!native_geometry_pages_[i].d3d12){page_index=i;break;}
  if(page_index<native_geometry_pages_.size())native_geometry_pages_[page_index]=std::move(created);
  else native_geometry_pages_.push_back(std::move(created));
  ++native_geometry_growths_;
@@ -2981,7 +3161,7 @@ bool Renderer::release_native_geometry_span(const NativeGeometrySpan& span) noex
  if(owner.dedicated){
   owner.live=owner.live>span.bytes?owner.live-span.bytes:0;
   if(!owner.live){ // its last mesh: the slot stays, empty, for the next adoption
-   owner.buffer.Reset();owner.srv.Reset();owner.capacity=0;owner.high_water=16;owner.free.clear();
+   owner.buffer.Reset();owner.srv.Reset();owner.d3d12.reset();owner.capacity=0;owner.high_water=16;owner.free.clear();
   }
  }
  return true;
@@ -3096,6 +3276,11 @@ bool Renderer::test_native_prepared_record_addresses_current(
 HRESULT Renderer::upload_native_geometry(UINT page_index,UINT offset,const void* data,UINT bytes){
  PERF06_SCOPE("upload_geometry");
  if(!context_||page_index>=native_geometry_pages_.size()||!data||!bytes)return E_INVALIDARG;
+ if(d3d12_){
+  auto& page=native_geometry_pages_[page_index];
+  if(!page.d3d12||offset>page.capacity||bytes>page.capacity-offset)return E_INVALIDARG;
+  return d3d12_->write_buffer_bulk(*page.d3d12,offset,data,bytes); // load geometry: the bulk upload pool
+ }
 #ifdef EID3D11_TESTING
  if(test_native_geometry_upload_failure_&&!--test_native_geometry_upload_failure_)
   return E_FAIL;
@@ -3112,10 +3297,10 @@ HRESULT Renderer::upload_native_geometry(UINT page_index,UINT offset,const void*
  profiler_.add_upload(bytes);return S_OK;
 }
 
-HRESULT Renderer::upload_native_work_range(const NativeDispatchRange& range,UINT diagnostic_record,UINT diagnostic_meta){
+HRESULT Renderer::upload_native_work_range(const NativeDispatchRange& range){
  PERF06_SCOPE("upload_work");
  if(!context_||!native_work_range_constants_||!range.count)return E_INVALIDARG;
- const std::array<UINT,4> values{range.first,range.count,diagnostic_record,diagnostic_meta};
+ const std::array<UINT,4> values{range.first,range.count,0,0};
  D3D11_MAPPED_SUBRESOURCE mapped{};
  const HRESULT hr=context_->Map(native_work_range_constants_.Get(),0,
   D3D11_MAP_WRITE_DISCARD,0,&mapped);if(FAILED(hr))return hr;
@@ -3148,7 +3333,7 @@ void Renderer::release() {
  camp_inventory_retire_textures();
  // Detached copies belong to this device and must not reach the next one.
  retained_visual_scene().visual_clear_surface_texture_retainer(this);
- neighbour_client_stop();neighbour_maps_set_device(nullptr);release_neighbour_maps();
+ neighbour_client_stop();neighbour_maps_set_device(nullptr);neighbour_maps_set_d3d12(nullptr);release_neighbour_maps();
  // Tile family jobs (CPU only): cancelled and joined before the device goes.
  tile_families_job_={};tile_families_prestart_={};tile_families_prestart_terrain_.reset();
  join_tile_family_jobs();
@@ -3166,16 +3351,34 @@ void Renderer::release() {
  glow_.Reset();glow_rtv_.Reset();glow_srv_.Reset();glow_width_=glow_height_=0;glow_frame_=UINT64_MAX;
  native_terrain_frame_constants_.Reset();native_terrain_frame_srv_.Reset();
  terrain_noise_srv_.Reset();terrain_noise_sampler_.Reset();
+ // Terrain 2.0's session resources (the per-map ones go with the contact maps).
+ terrain2_masks_srv_.Reset();terrain2_mask_sampler_.Reset();terrain2_mask_bits_=0;terrain2_masks_tried_=false;
+ terrain2_style_buffer_.Reset();terrain2_style_srv_.Reset();terrain2_style_uploaded_.fill(0);
+ for(auto& cs:terrain2_bake_cs_)cs.Reset();
+ terrain2_bake_constants_.Reset();terrain2_bake_sampler_.Reset();
+ release_terrain2_cache();terrain2_cache_vs_.Reset();terrain2_cache_ps_.Reset();terrain2_cache_sampler_.Reset();terrain2_cache_raster_.Reset();
+ terrain2_cache_bake_constants_.Reset();terrain2_cache_params_.Reset();terrain2_cache_params_srv_.Reset();
+ terrain2_cache_failed_=false;terrain2_cache_frame_=UINT64_MAX;
  retire_native_shadows();
  native_shadow_prepare_cs_.Reset();native_shadow_commit_cs_.Reset();native_shadow_build_cs_.Reset();native_shadow_vs_.Reset();native_shadow_ps_.Reset();
  finish_placed_hitch_profile(PlacedHitchFinishReason::renderer_release);
  bridge_set_native_terrain_animation_owned(false);
  flush_native();
+ // The lossless mask targets belong to this device, including saved views.
+ hit_test_active_=hit_test_failed_=false;
+ hit_test_color_.Reset();hit_test_rtv_.Reset();hit_test_depth_.Reset();hit_test_dsv_.Reset();
+ hit_test_saved_rtv_.Reset();hit_test_saved_dsv_.Reset();hit_test_width_=hit_test_height_=0;
  system_telemetry_.stop();
  system_telemetry_active_=false;
  system_telemetry_snapshot_={};
  frame_statistics_.reset();
- debug_overlay_.clear_over_budget_marker(); // the only clean-exit path (~DD)
+ // The only clean-exit path (~DD). Core mode: the host writes the ini; it
+ // clears the marker when it sees this flag after the game process exits.
+#ifndef EID3D11_EMBEDDED
+ if(core_mode_)x64remote::signal_clean_exit();
+ else
+#endif
+ debug_overlay_.clear_over_budget_marker();
  close_shader_marker();
  debug_overlay_.shutdown();
  bridge_set_profile_enabled(false);
@@ -3192,6 +3395,7 @@ void Renderer::release() {
  camp_art_srv_.Reset();camp_art_texture_.Reset();camp_art_attempted_=false;
  camp_control_srv_.Reset();camp_control_texture_.Reset();
  camp_construction_srv_.Reset();camp_construction_texture_.Reset();
+ for(auto& art:camp_art_d3d12_)art.reset();
  ui_blit_pixel_spares_.clear();
  native_pending_upload_.clear();
  native_terrain_phase_allocations_.clear();
@@ -3202,9 +3406,10 @@ void Renderer::release() {
  native_world_lighting_dirty_=false;
  native_point_lights_.clear();native_point_light_inputs_.clear();native_point_lights_dirty_=false;native_point_light_capacity_=0;
  native_point_light_grid_={};native_point_light_grid_inputs_.clear();native_point_light_grid_capacity_=0;
+ release_cave_irradiance();native_world_cave_=false;
  for(auto& layout:native_submission_layouts_)layout={};
  native_static_shadow_bake_={};native_terrain_shadow_bake_={};native_neighbour_shadow_bake_={};native_terrain_shadow_records_.clear();
- native_shadow_work_mask_srv_.Reset();native_shadow_work_mask_.Reset();native_shadow_work_mask_capacity_=0;
+ native_shadow_work_mask_srv_.Reset();native_shadow_work_mask_.Reset();native_shadow_work_mask_capacity_=0;native_shadow_work_mask12_.reset();
  native_layout_changed();
  native_frame_stats_={};
  overlay_textures_.clear();
@@ -3241,7 +3446,6 @@ void Renderer::release() {
  native_prepared_vertices_.Reset();
  native_prepared_vertex_srv_.Reset();
  native_prepared_vertex_uav_.Reset();
- reset_samgbur_lod_diagnostic();
  native_indirect_args_.Reset();
  native_indirect_args_uav_.Reset();
  native_geometry_pages_.clear();
@@ -3312,6 +3516,7 @@ void Renderer::release() {
  depth_.Reset();
  rtv_.Reset();backbuffer_rtv_.Reset();scene_composite_.reset();scene_composited_=false;
  dlss_previous_world_.Reset();dlss_previous_world_srv_.Reset();dlss_motion_constants_.Reset();dlss_motion_depth_.Reset();
+ release_fur();
  native_motion_vs_.Reset();native_motion_ps_.Reset();dlss_mode_=-1;fsr_.reset();upscale_sharpen_.reset();fsr_mode_=-1;
  gamma_lut_.Reset();gamma_lut_srv_.Reset();gamma_copy_.Reset();gamma_copy_srv_.Reset();
  gamma_vs_.Reset();gamma_ps_.Reset();gamma_sampler_.Reset();gamma_failed_=false;scene_updated_=false;deferred_ground_marks_.clear();

@@ -235,7 +235,7 @@ Route Find(const Mesh& m,const Request& r) {
     if(r.obstacles&&!r.obstacles->empty())return FindAround(m,r);
     dtPolyRef from=0,to=0;Point source,goal,actual;bool ingress=false;
     if(!Start(m,q,r.source,filter,from,source,actual,ingress,height,r.start)){result.status=Status::NoStart;return result;}
-    if(!Nearest(m,q,r.goal,std::max(.15f,r.goalRadius),4.f,filter,to,goal,0,height)) {
+    if(!Nearest(m,q,r.goal,std::max(.15f,r.goalRadius),4.f,filter,to,goal,r.goalSupport?r.goalSupport->surface:0,height)) {
         if(r.goalPolicy==GoalPolicy::Exact){result.status=Status::NoGoal;return result;}
         Location closest;const auto selected=ClosestGoal(m,q,r.goal,filter,height,closest);
         if(selected!=Status::Complete){result.status=selected;return result;}
@@ -265,15 +265,16 @@ Route Find(const Mesh& m,const Request& r) {
         end[0]=goal.x;end[1]=goal.y;end[2]=goal.z;
         result.goalStatus=Status::NoPath;selectedPartial=true;
     }
-    std::vector<dtPolyRef> corridor(8192);int count=0;
+    auto& corridor=m.scratch.corridor;corridor.resize(8192);int count=0;
     status=selectedPartial?q.finalizeSlicedFindPathPartial(&to,1,corridor.data(),&count,int(corridor.size())):
                            q.finalizeSlicedFindPath(corridor.data(),&count,int(corridor.size()));
     if(Limited(status)){result.status=Status::Limit;return result;}
     if(dtStatusFailed(status)||(!selectedPartial&&dtStatusDetail(status,DT_PARTIAL_RESULT))||!count||corridor[count-1]!=to){result.status=Status::NoPath;return result;}
     corridor.resize(count);
     auto straighten=[&](const std::vector<dtPolyRef>& path,Route& route) {
-        std::vector<float> points(8192*3);std::vector<dtPolyRef> refs(8192);
-        std::vector<unsigned char> flags(8192);int n=0;
+        auto& points=m.scratch.points;points.resize(8192*3);
+        auto& refs=m.scratch.refs;refs.resize(8192);
+        auto& flags=m.scratch.flags;flags.resize(8192);int n=0;
         const auto state=q.findStraightPath(start,end,path.data(),int(path.size()),points.data(),flags.data(),refs.data(),&n,8192,DT_STRAIGHTPATH_ALL_CROSSINGS);
         if(Limited(state))return Status::Limit;
         if(dtStatusFailed(state)||n<1||!(flags[n-1]&DT_STRAIGHTPATH_END))return Status::NoPath;
@@ -298,7 +299,7 @@ Route Find(const Mesh& m,const Request& r) {
         // A polygon-centre A* corridor may contain needless turns even on a
         // clear line. Mixed material costs are not a reason to skip visibility:
         // price both actual portal-crossing paths under the unchanged filter.
-        std::vector<dtPolyRef> visible(512);int visited=0;float t=0,normal[3]{};
+        auto& visible=m.scratch.visible;visible.resize(512);int visited=0;float t=0,normal[3]{};
         const auto ray=q.raycast(from,start,end,&filter,&t,normal,visible.data(),&visited,int(visible.size()));
         if(dtStatusSucceed(ray)&&!Limited(ray)&&t>=1&&visited>0&&visible[visited-1]==to) {
             visible.resize(visited);Route candidate;
@@ -332,118 +333,116 @@ Route Find(const Mesh& m,const Request& r) {
 }
 namespace {
 Route FindAround(const Mesh& mesh,const Request& input) {
-    auto obstacles=*input.obstacles;
+    auto& scratch=mesh.scratch;auto& obstacles=scratch.obstacles;obstacles=*input.obstacles;
     for(auto& obstacle:obstacles) {
-        // Movement stops before a physical collision, but may already be
-        // inside the optional 2 cm planning margin. Never classify that valid
-        // start as occupied; keep the full body radius and add only available
-        // clearance. This does not change collision dimensions or speeds.
-        const float distance=std::hypot(input.source.x-obstacle.position.x,input.source.y-obstacle.position.y);
-        obstacle.radius+=std::clamp(distance-obstacle.radius-.0002f,0.f,.02f);
+        const float d=std::hypot(input.source.x-obstacle.position.x,input.source.y-obstacle.position.y);
+        obstacle.radius+=std::clamp(d-obstacle.radius-.0002f,0.f,.02f);
     }
     Request request=input;request.obstacles=&obstacles;
     Request plain=request;plain.obstacles=nullptr;
-    auto direct=Find(mesh,plain);
-    if(direct.status!=Status::Complete)return direct;
+    auto direct=input.reuseRoute?*input.reuseRoute:Find(mesh,plain);
+    if(direct.status!=Status::Complete||direct.points.empty())return direct;
     auto intersects=[&](Point a,Point b,const Obstacle& obstacle) {
         const float dx=b.x-a.x,dy=b.y-a.y,length=dx*dx+dy*dy;
         const float t=length>0?std::clamp(((obstacle.position.x-a.x)*dx+(obstacle.position.y-a.y)*dy)/length,0.f,1.f):0;
-        // Same floor policy as the live circle-collision query. Never block an
-        // independent bridge/floor with a unit on the terrain below it.
         if(std::abs(a.z+(b.z-a.z)*t-obstacle.position.z)>2.f)return false;
-        // A moving neighbour can overlap the source before this query. Match
-        // CheckCircleCollision: allow only an outward first edge, retaining
-        // the full body radius and rejecting every later re-entry.
         const float ax=a.x-obstacle.position.x,ay=a.y-obstacle.position.y;
         const float before=ax*ax+ay*ay,after=(ax+dx)*(ax+dx)+(ay+dy)*(ay+dy);
-        if(std::hypot(a.x-request.source.x,a.y-request.source.y)<=.001f&&
-           before<obstacle.radius*obstacle.radius&&ax*dx+ay*dy>=0&&after>before+.00001f)return false;
+        if(std::hypot(a.x-request.source.x,a.y-request.source.y)<=.001f&&before<obstacle.radius*obstacle.radius&&ax*dx+ay*dy>=0&&after>before+.00001f)return false;
         return std::hypot(a.x+dx*t-obstacle.position.x,a.y+dy*t-obstacle.position.y)+.0001f<obstacle.radius;
     };
-    auto clearSegment=[&](Point a,Point b) {
-        for(const auto& obstacle:*request.obstacles)if(intersects(a,b,obstacle))return false;
-        return true;
-    };
-    auto clearRoute=[&](const Route& route) {
-        for(size_t i=1;i<route.points.size();++i)if(!clearSegment(route.points[i-1].position,route.points[i].position))return false;
-        return true;
-    };
-    if(clearRoute(direct))return direct;
-    // Query-local visibility vertices: circumscribed dodecagons preserve the
-    // physical radii even on their chords. Every graph edge is a real Find
-    // corridor on the original mesh and is checked against ALL standing units.
-    // No mesh flags or tiles are changed, including the source polygon.
+    auto clearSegment=[&](Point a,Point b) {for(const auto& o:obstacles)if(intersects(a,b,o))return false;return true;};
+    // Bypass only the first blocking cluster. Farther bodies will be observed
+    // when the walker reaches them; the already planned far route is retained.
     std::vector<const Obstacle*> rings;
-    for(const auto& obstacle:*request.obstacles) {
-        bool blocks=false;
-        for(size_t i=1;i<direct.points.size()&&!blocks;++i)blocks=intersects(direct.points[i-1].position,direct.points[i].position,obstacle);
-        if(blocks)rings.push_back(&obstacle);
+    for(size_t i=1;i<direct.points.size()&&rings.empty();++i) {
+        if(Distance(direct.points[i-1].position,request.source)>24.f)break;
+        for(const auto& o:obstacles)if(intersects(direct.points[i-1].position,direct.points[i].position,o)){rings.push_back(&o);break;}
     }
-    std::sort(rings.begin(),rings.end(),[&](const Obstacle* a,const Obstacle* b){return Distance(a->position,request.source)<Distance(b->position,request.source);});
-    // A neighbouring body can cover every bypass vertex without intersecting
-    // the original route. Include the connected inflated footprints as well;
-    // otherwise the visibility graph cannot route around the whole group.
+    if(rings.empty())return direct;
     const auto ringRadius=[](const Obstacle& o){return (o.radius+.025f)/.965925826f;};
     constexpr size_t maxRings=12;
-    if(rings.size()>maxRings){Route failed;failed.status=Status::Limit;return failed;}
-    for(size_t i=0;i<rings.size();++i)for(const auto& obstacle:*request.obstacles) {
-        if(std::find(rings.begin(),rings.end(),&obstacle)!=rings.end()||
-           std::abs(obstacle.position.z-rings[i]->position.z)>2.f)continue;
-        if(std::hypot(obstacle.position.x-rings[i]->position.x,obstacle.position.y-rings[i]->position.y)>
-           ringRadius(obstacle)+ringRadius(*rings[i]))continue;
+    for(size_t i=0;i<rings.size();++i)for(const auto& o:obstacles) {
+        if(std::find(rings.begin(),rings.end(),&o)!=rings.end()||std::abs(o.position.z-rings[i]->position.z)>2.f)continue;
+        if(std::hypot(o.position.x-rings[i]->position.x,o.position.y-rings[i]->position.y)>ringRadius(o)+ringRadius(*rings[i]))continue;
         if(rings.size()==maxRings){Route failed;failed.status=Status::Limit;return failed;}
-        rings.push_back(&obstacle);
+        rings.push_back(&o);
     }
-    std::vector<Location> nodes{direct.points.front(),direct.points.back()};
+    float reach=0;
+    for(const auto* o:rings)reach=std::max(reach,std::hypot(o->position.x-request.source.x,o->position.y-request.source.y)+ringRadius(*o)+1.f);
+    if(reach>24.f){Route failed;failed.status=Status::Limit;return failed;}
     const float height=request.height>0?request.height:mesh.profile.height;
-    for(const auto* obstacle:rings)for(int i=0;i<12;++i) {
-        const float angle=float(i)*6.283185307f/12,radius=ringRadius(*obstacle);
-        Point p{obstacle->position.x+radius*std::cos(angle),obstacle->position.y+radius*std::sin(angle),obstacle->position.z};
-        Location at;
+    Location anchor=direct.points.back();size_t tail=direct.points.size();float along=0;
+    for(size_t i=1;i<direct.points.size();++i) {
+        const auto a=direct.points[i-1].position,b=direct.points[i].position;const float length=std::hypot(b.x-a.x,b.y-a.y);
+        if(length>0&&along+length>=reach) {
+            const float f=std::clamp((reach-along)/length,0.f,1.f);
+            const Point point{a.x+(b.x-a.x)*f,a.y+(b.y-a.y)*f,a.z+(b.z-a.z)*f};
+            if(!Project(mesh,point,.001f,4.f,anchor,height,request.excludedFlags)){Route failed;failed.status=Status::NoGoal;return failed;}
+            tail=i;break;
+        }
+        along+=length;
+    }
+    auto& nodes=scratch.nodes;nodes.clear();Location source;
+    if(!StartLocation(mesh,request.source,source,height,request.excludedFlags)){Route failed;failed.status=Status::NoStart;return failed;}
+    if(!anchor.polygon&&!Project(mesh,anchor.position,.001f,4.f,anchor,height,request.excludedFlags)){Route failed;failed.status=Status::NoGoal;return failed;}
+    nodes.push_back(source);nodes.push_back(anchor);
+    for(const auto* o:rings)for(int i=0;i<12;++i) {
+        const float angle=float(i)*6.283185307f/12,radius=ringRadius(*o);Location at;
+        const Point p{o->position.x+radius*std::cos(angle),o->position.y+radius*std::sin(angle),o->position.z};
         if(Project(mesh,p,.001f,4.f,at,height,request.excludedFlags)&&clearSegment(at.position,at.position))nodes.push_back(at);
     }
-    std::vector<float> cost(nodes.size(),1.e30f),length(nodes.size(),0);
-    std::vector<int> previous(nodes.size(),-1);std::vector<bool> closed(nodes.size(),false);
-    std::vector<Route> incoming(nodes.size());cost[0]=0;
-    // An admissible distance bound avoids searching both sides of every ring.
-    // Edge weights still come from real, class-filtered mesh routes.
-    const float minimumCost=(std::max)(0.f,*std::min_element(std::begin(request.areaCosts),std::end(request.areaCosts)));
+    dtQueryFilter filter;filter.setIncludeFlags(ClearanceMask(mesh.profile,height));filter.setExcludeFlags(ClassFlags(mesh,request.excludedFlags));
+    for(int i=1;i<16;++i)filter.setAreaCost(i,request.areaCosts[i]);
+    auto& refs=scratch.visible;refs.resize(512);
+    auto& points=scratch.points;points.resize(512*3);
+    auto& pointRefs=scratch.refs;pointRefs.resize(512);
+    auto& flags=scratch.flags;flags.resize(512);
+    Route edge;
+    auto segment=[&](const Location& a,const Location& b) {
+        edge.points.clear();edge.corridor.clear();edge.length=edge.cost=0;
+        const auto na=ToNav(a.position),nb=ToNav(b.position);const float start[]={na.x,na.y,na.z},end[]={nb.x,nb.y,nb.z};
+        int count=0;float t=0,normal[3]{};
+        const auto ray=mesh.query->raycast(a.polygon,start,end,&filter,&t,normal,refs.data(),&count,int(refs.size()));
+        if(dtStatusFailed(ray)||Limited(ray)||t<1||count<1||refs[count-1]!=b.polygon)return false;
+        int n=0;const auto status=mesh.query->findStraightPath(start,end,refs.data(),count,points.data(),flags.data(),pointRefs.data(),&n,512,DT_STRAIGHTPATH_ALL_CROSSINGS);
+        if(dtStatusFailed(status)||Limited(status)||n<1||!(flags[n-1]&DT_STRAIGHTPATH_END))return false;
+        for(int i=0;i<n;++i) {
+            const auto at=Address(mesh,{points[i*3],points[i*3+1],points[i*3+2]},pointRefs[i]?pointRefs[i]:b.polygon,height,edge.points.empty()?a.position.z:edge.points.back().position.z);
+            if(!at.surface)return false;
+            if(!edge.points.empty()) {
+                const auto& prev=edge.points.back();if(!clearSegment(prev.position,at.position))return false;
+                const float length=Distance(prev.position,at.position);edge.length+=length;edge.cost+=length*request.areaCosts[prev.area];
+            }
+            edge.points.push_back(at);
+        }
+        if(Distance(edge.points.back().position,b.position)>.003f)return false;
+        edge.corridor.assign(refs.begin(),refs.begin()+count);return true;
+    };
+    auto& cost=scratch.cost;auto& length=scratch.length;auto& previous=scratch.previous;auto& closed=scratch.closed;auto& incoming=scratch.incoming;
+    cost.assign(nodes.size(),1.e30f);length.assign(nodes.size(),0);previous.assign(nodes.size(),-1);closed.assign(nodes.size(),0);incoming.resize(nodes.size());cost[0]=0;
+    const float minimumCost=*std::min_element(std::begin(request.areaCosts),std::end(request.areaCosts));
     for(size_t iteration=0;iteration<nodes.size();++iteration) {
         size_t from=nodes.size();float best=1.e30f;
-        for(size_t i=0;i<nodes.size();++i)if(!closed[i]) {
-            const float estimate=cost[i]+Distance(nodes[i].position,nodes[1].position)*minimumCost;
-            if(estimate<best){best=estimate;from=i;}
-        }
-        if(from==nodes.size()||from==1)break;
-        closed[from]=true;
+        for(size_t i=0;i<nodes.size();++i)if(!closed[i]){const float estimate=cost[i]+Distance(nodes[i].position,nodes[1].position)*minimumCost;if(estimate<best){best=estimate;from=i;}}
+        if(from==nodes.size()||from==1)break;closed[from]=1;
         for(size_t to=1;to<nodes.size();++to) {
-            if(closed[to]||to==from||!clearSegment(nodes[from].position,nodes[to].position))continue;
-            if(cost[from]+Distance(nodes[from].position,nodes[to].position)*minimumCost>=cost[to])continue;
-            Request edge=plain;edge.source=nodes[from].position;edge.start=&nodes[from];
-            edge.goal=nodes[to].position;edge.goalRadius=.001f;edge.maxLength=request.maxLength-length[from];
-            edge.goalPolicy=GoalPolicy::Exact;
-            auto route=Find(mesh,edge);
-            if(route.status!=Status::Complete||!clearRoute(route)||Distance(route.points.back().position,nodes[to].position)>.003f)continue;
-            float weight=0;
-            for(size_t i=1;i<route.points.size();++i)weight+=Distance(route.points[i-1].position,route.points[i].position)*request.areaCosts[route.points[i-1].area];
-            if(cost[from]+weight>=cost[to])continue;
-            cost[to]=cost[from]+weight;length[to]=length[from]+route.length;previous[to]=int(from);incoming[to]=std::move(route);
+            if(closed[to]||to==from||cost[from]+Distance(nodes[from].position,nodes[to].position)*minimumCost>=cost[to]||!clearSegment(nodes[from].position,nodes[to].position))continue;
+            if(!segment(nodes[from],nodes[to])||length[from]+edge.length>request.maxLength||cost[from]+edge.cost>=cost[to])continue;
+            cost[to]=cost[from]+edge.cost;length[to]=length[from]+edge.length;previous[to]=int(from);incoming[to]=edge;
         }
     }
-    Route result;result.status=Status::NoPath;
-    if(previous[1]<0)return result;
-    std::vector<int> chain;for(int i=1;i!=0;i=previous[i])chain.push_back(i);
-    std::reverse(chain.begin(),chain.end());
-    for(int i:chain) {
-        const auto& edge=incoming[i];
-        for(const auto& p:edge.points)if(result.points.empty()||Distance(result.points.back().position,p.position)>.00001f)result.points.push_back(p);
-        for(auto ref:edge.corridor)if(result.corridor.empty()||result.corridor.back()!=ref)result.corridor.push_back(ref);
-        result.length+=edge.length;
-        result.cost+=edge.cost;result.plannedCost+=edge.plannedCost;
-    }
-    result.goalStatus=direct.goalStatus;result.status=Status::Complete;return result;
+    Route result;result.status=Status::NoPath;if(previous[1]<0)return result;
+    std::vector<int> chain;for(int i=1;i!=0;i=previous[i])chain.push_back(i);std::reverse(chain.begin(),chain.end());
+    for(int i:chain)for(const auto& at:incoming[i].points)if(result.points.empty()||Distance(result.points.back().position,at.position)>.00001f)result.points.push_back(at);
+    if(input.reuseRoute)result.sampledTail=result.points.size();
+    for(size_t i=tail;i<direct.points.size();++i)if(Distance(result.points.back().position,direct.points[i].position)>.00001f)result.points.push_back(direct.points[i]);
+    for(size_t i=1;i<result.points.size();++i){const auto& a=result.points[i-1];const float d=Distance(a.position,result.points[i].position);result.length+=d;result.cost+=d*request.areaCosts[a.area];}
+    if(result.length>request.maxLength){result.points.clear();result.status=Status::TooLong;return result;}
+    result.plannedCost=result.cost;result.goalStatus=direct.goalStatus;result.status=Status::Complete;return result;
 }
 }
+
 bool Constrain(const Mesh& m,Point from,Point desired,Location& result,float height,const char** reason,const Location* address,unsigned short excludedFlags) {
     auto reject=[&](const char* text){if(reason)*reason=text;return false;};
     if(reason)*reason="none";
@@ -561,15 +560,16 @@ bool Constrain(const Mesh& m,Point from,Point desired,Location& result,float hei
     if(!selected.surface)return reject(failure);
     result=selected;return true;
 }
-bool Follow(const Mesh& mesh,Point from,Point desired,const std::vector<Point>& path,Location& result,float height,const char** reason,const Location* address,unsigned short excludedFlags) {
+bool Follow(const Mesh& mesh,Point from,Point desired,PathView& path,Location& result,float height,const char** reason,const Location* address,unsigned short excludedFlags) {
     auto progress=[&](Point point,float& along) {
         float best=1.e30f,total=0;along=0;
-        for(size_t i=1;i<path.size();++i) {
-            const auto a=path[i-1],b=path[i];const float dx=b.x-a.x,dy=b.y-a.y,len=std::hypot(dx,dy);
+        path.Reset();Point a,b;if(!path.Next(a))return false;
+        while(path.Next(b)) {
+            const float dx=b.x-a.x,dy=b.y-a.y,len=std::hypot(dx,dy);
             const float f=len>0?std::clamp(((point.x-a.x)*dx+(point.y-a.y)*dy)/(len*len),0.f,1.f):0;
             const float distance=std::hypot(point.x-a.x-dx*f,point.y-a.y-dy*f);
             if(distance<best){best=distance;along=total+len*f;}
-            total+=len;
+            total+=len;a=b;
         }
         return best<=.002f;
     };
@@ -578,13 +578,23 @@ bool Follow(const Mesh& mesh,Point from,Point desired,const std::vector<Point>& 
         if(reason)*reason="off_corridor";return false;
     }
     Location at;if(address)at=*address;Point current=from;float total=0;
-    for(size_t i=1;i<path.size();++i) {
-        total+=std::hypot(path[i].x-path[i-1].x,path[i].y-path[i-1].y);
+    path.Reset();Point a,b;path.Next(a);
+    while(path.Next(b)) {
+        total+=std::hypot(b.x-a.x,b.y-a.y);a=b;
         if(total<=begin+.0001f||total>=end-.0001f)continue;
-        Location next;if(!Constrain(mesh,current,path[i],next,height,reason,at.polygon?&at:nullptr,excludedFlags))return false;
+        Location next;if(!Constrain(mesh,current,b,next,height,reason,at.polygon?&at:nullptr,excludedFlags))return false;
         current=next.position;at=next;
     }
     return Constrain(mesh,current,desired,result,height,reason,at.polygon?&at:nullptr,excludedFlags);
+}
+bool Follow(const Mesh& mesh,Point from,Point desired,const std::vector<Point>& points,Location& result,float height,const char** reason,const Location* address,unsigned short excludedFlags) {
+    struct View final:PathView {
+        const std::vector<Point>& points;size_t index=0;
+        View(const std::vector<Point>& p):points(p){}
+        void Reset() override {index=0;}
+        bool Next(Point& p) override {if(index==points.size())return false;p=points[index++];return true;}
+    } view(points);
+    return Follow(mesh,from,desired,view,result,height,reason,address,excludedFlags);
 }
 bool RandomReachable(const Mesh& mesh,Point source,Point center,float radius,float height,float (*random)(),Point& result,unsigned short excludedFlags,const Location* address,RandomShape shape) {
     if(!mesh.query||!mesh.data||!Finite(source)||!Finite(center)||!std::isfinite(radius)||radius<0||!random)return false;

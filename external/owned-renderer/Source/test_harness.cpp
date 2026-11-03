@@ -52,6 +52,17 @@ constexpr std::uintptr_t kQuitProgramRva = 0x00055f20;
 // at 0057CB08. Requesting a load at Draw entry therefore cannot tear down
 // the world currently being drawn.
 constexpr std::uintptr_t kRequestLoadRva = 0x001816d0;
+constexpr std::uintptr_t kLoadTransitionRva = 0x0017c700;
+// Stock bodies. The Dejavu addon (from its 2026-10-25 build) hooks both
+// entries through its hook builder (RequestLoad: 5 patched bytes, 0057C700:
+// 6), so they are resolved when load_save runs (load_entry_error).
+constexpr std::uint8_t kRequestLoadStock[] = {
+    0x8b,0x44,0x24,0x04,0x56,0x8b,0xf1,0x50,0x8d,0x4e,0x04,
+    0xc7,0x06,0x02,0x00,0x00,0x00,0xe8,0x13,0xf4,0x17,0x00,
+    0x8a,0x44,0x24,0x0c,0x33,0xc9,0x84,0xc0,0x0f,0x95,0xc1,
+    0x89,0x4e,0x78,0x5e,0xc2,0x08,0x00};
+constexpr std::uint8_t kLoadTransitionStock[] = {
+    0x64,0xa1,0x00,0x00,0x00,0x00,0x6a,0xff,0x68,0x74,0x39,0x72,0x00,0x50,0x64,0x89};
 constexpr std::uintptr_t kConnectorRva = 0x003afe20;
 constexpr std::uintptr_t kSavePathCallRva = 0x00255d7e;
 constexpr std::uintptr_t kLoadPathOperandRva = 0x0017ac4e;
@@ -272,14 +283,9 @@ void initialize_game_commands(State& s) {
             s.saves_error = "dialog and native loader save paths differ (0x00655D7E/0x0057AC4E)";
         if (s.saves_error.empty()) s.save_path_cell = reinterpret_cast<const char* const*>(cell);
     }
+    // RequestLoad and 0057C700 are resolved when load_save runs
+    // (load_entry_error): the addon may hook them after this first step.
     s.load_error = s.saves_error;
-    if (s.load_error.empty()) s.load_error = entry_error(s, kRequestLoadRva,
-        {0x8b,0x44,0x24,0x04,0x56,0x8b,0xf1,0x50,0x8d,0x4e,0x04,
-         0xc7,0x06,0x02,0x00,0x00,0x00,0xe8,0x13,0xf4,0x17,0x00,
-         0x8a,0x44,0x24,0x0c,0x33,0xc9,0x84,0xc0,0x0f,0x95,0xc1,
-         0x89,0x4e,0x78,0x5e,0xc2,0x08,0x00});
-    if (s.load_error.empty()) s.load_error = entry_error(s, 0x0017c700,
-        {0x64,0xa1,0x00,0x00,0x00,0x00,0x6a,0xff});
     if (s.load_error.empty()) s.load_error = entry_error(s, 0x0017cb08,
         {0xc7,0x06,0x00,0x00,0x00,0x00});
     if (s.load_error.empty()) s.load_error = entry_error(s, kCurrentZoneRva,
@@ -690,16 +696,20 @@ void apply_camera(const HarnessCommand& command) {
     State& s = state();
     std::uint8_t* camera = s.image + kCameraRva;
     const float radians = kPi / 180.0f;
+    // "-" (NaN): keep the current yaw (read before SetCameraAs) or anchor coordinate.
+    const float* q = &field<float>(camera, kCameraRotation);
+    const float yaw = std::isnan(command.number[2]) ? 2.0f * std::atan2(q[3], q[0]) * 180.0f / kPi : command.number[2];
+    const float anchor[3] = {std::isnan(command.number[0]) ? field<float>(camera, kCameraAnchor) : command.number[0],
+                             std::isnan(command.number[1]) ? field<float>(camera, kCameraAnchor + 4) : command.number[1],
+                             field<float>(camera, kCameraAnchor + 8)};
     // SCameraShortcut as SetCameraAs reads it: distance, rotation (unused), pitch.
     const float shortcut[6] = {command.number[4], 1.0f, 0.0f, 0.0f, 0.0f,
                                command.number[3] * radians};
     reinterpret_cast<SetCameraAsFn>(s.image + kSetCameraAsRva)(camera, shortcut);
     field<std::uint32_t>(camera, kCameraFlags) &= ~kCameraJumpClearedFlag;
     reinterpret_cast<SetCarrierFn>(s.image + kSetCarrierRva)(camera, 0xffffffffu);
-    const float anchor[3] = {command.number[0], command.number[1],
-                             field<float>(camera, kCameraAnchor + 8)};
     reinterpret_cast<SetAnchorPointFn>(s.image + kSetAnchorPointRva)(camera, anchor);
-    reinterpret_cast<InitRotateFn>(s.image + kInitRotateRva)(camera, command.number[2] * radians);
+    reinterpret_cast<InitRotateFn>(s.image + kInitRotateRva)(camera, yaw * radians);
 }
 
 void apply_clock(std::uint8_t* world) {
@@ -722,12 +732,35 @@ void release_clock(std::uint8_t* world) {
     s.clock_pinned = s.clock_saved = false;
 }
 
+// A load entry as a game caller reaches it: stock, or the addon's verified
+// hook chain (addon_hook_chain.h) with the body past its patch still stock.
+// Empty, or the reason for any other bytes.
+std::string load_entry_error(const char* name, std::uintptr_t rva,
+                             const std::uint8_t* stock, std::size_t stock_bytes) {
+    const State& s = state();
+    const EntryResolution owner = resolve_entry_owner(s.image + rva, stock,
+        stock_bytes < 16 ? stock_bytes : 16, 5, &addon_module_contains);
+    if (owner.owner == EntryOwner::rejected)
+        return text_of("%s entry (game.exe+0x%06lX) is neither stock nor a verified addon "
+                       "hook chain: %s", name, static_cast<unsigned long>(rva),
+                       owner.reason ? owner.reason : "unknown");
+    const std::size_t patched = owner.owner == EntryOwner::stock ? 0 : owner.addon_patch_bytes;
+    if (std::memcmp(s.image + rva + patched, stock + patched, stock_bytes - patched) != 0)
+        return text_of("%s body (game.exe+0x%06lX) differs past the entry", name,
+                       static_cast<unsigned long>(rva));
+    return {};
+}
+
 // Runs at present, not at a world Draw: a modal screen (the game-over box,
 // a dialog) stops world frames, yet its own Load button requests exactly this
 // load, and 0057C700 destroys every screen before it loads. The request only
 // queues the action consumed between frames. Returns false with the reason.
 bool request_load(const HarnessCommand& command, std::string& detail) {
     State& s = state();
+    detail = load_entry_error("RequestLoad", kRequestLoadRva, kRequestLoadStock, sizeof(kRequestLoadStock));
+    if (detail.empty()) detail = load_entry_error("load transition", kLoadTransitionRva,
+        kLoadTransitionStock, sizeof(kLoadTransitionStock));
+    if (!detail.empty()) return false;
     const auto lifecycle = lifecycle_observer().snapshot();
     if (!lifecycle.observer_active || !lifecycle.hooks_installed || lifecycle.fail_closed) {
         detail = "verified world lifecycle observer is unavailable; cannot establish load completion";

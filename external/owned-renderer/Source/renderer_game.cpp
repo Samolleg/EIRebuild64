@@ -41,7 +41,6 @@
 #include "retained_static_scene.h"
 #include "widescreen.h"
 #include "test_harness.h"
-#include "x64_remote_device.h"
 #include "x64_remote_link.h"
 #include "dlss_frame.h"
 #include "stall_watchdog.h"
@@ -85,6 +84,10 @@ static void report_hud_frame_layer_failure(const char* reason) noexcept {
  bridge_report_event("hud_frame_layer_failed",detail);
 }
 void Renderer::begin_scene_game(){
+ // Owned party portraits are chosen on the game thread (engine_bridge.cpp),
+ // in core mode too, where begin_scene_renderer runs on the host.
+ bridge_set_portrait_options(configured_boolean(debug_overlay_.config(),"portrait_head",true),
+  configured_boolean(debug_overlay_.config(),"portrait_helmet",false));
  widescreen_set_hud_frame_sink(this,[](void* owner) noexcept {
   auto& renderer=*static_cast<Renderer*>(owner);
   const auto layer=[&renderer](const std::vector<HudAssetFrame>* frames){
@@ -317,9 +320,10 @@ HRESULT Renderer::queue_present(){
 // fallback (the call-stream mode keeps its own, separately selected).
 
 void retained_publication_attach() noexcept; // retained_publication_client.cpp
+void retained_publication_core_textures() noexcept; // retained_publication_client.cpp
 bool retained_publication_failed() noexcept;   // retained_publication_client.cpp
 void report_game_address_space(std::uint64_t world_epoch) noexcept; // renderer_diagnostics.cpp
-void migrate_settings(RendererConfig& config) noexcept; // renderer_device.cpp
+void migrate_settings(RendererConfig& config,const wchar_t* save_path) noexcept; // renderer_device.cpp
 void address_space_mb(std::uint64_t& used,std::uint64_t& largest_free,bool walk) noexcept; // renderer_diagnostics.cpp
 const char* core_decode_progress_pixels(const std::string& path,unsigned width,unsigned height,unsigned frames,
  unsigned shown,std::vector<std::vector<std::uint8_t>>& output); // renderer_load_progress.cpp
@@ -331,11 +335,11 @@ HRESULT Renderer::core_ensure(){
  core_mode_=true;
  register_config_options();
  debug_overlay_.load_config_only();
- migrate_settings(debug_overlay_.config());
+ migrate_settings(debug_overlay_.config(),nullptr); // in memory: the host migrates and saves the ini (it alone writes it)
  apply_config_settings();
  char error[192]{};
  const UINT flags=D3D11_CREATE_DEVICE_BGRA_SUPPORT|D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;
- if(!x64remote::link_start(hwnd_,flags,error,sizeof(error),true)){
+ if(!x64remote::link_start(hwnd_,flags,error,sizeof(error))){
   char reason[256];std::snprintf(reason,sizeof(reason),"core mode: the x64 host did not start: %s",error);
   bridge_report_event("x64_core_failed",reason);
   x64remote::lose_device(reason);
@@ -345,6 +349,7 @@ HRESULT Renderer::core_ensure(){
  // captures there and acks each renderer step (core_present retires them).
  if(harness_enabled())strncpy_s(x64remote::control().harness_directory,harness_directory().c_str(),_TRUNCATE);
  retained_publication_attach(); // the host's retained-scene replica (S2d), which its Renderer prepares from
+ retained_publication_core_textures(); // archive texture bytes live in the host only (S5a)
  // The F10 overlay runs on the host; this process keeps the window hook
  // (camp input, focus swallowing, cursor confinement) and forwards the
  // overlay's messages while it takes input.
@@ -389,13 +394,15 @@ void Renderer::core_send(std::uint16_t command,const std::vector<std::uint8_t>& 
 }
 #endif
 
-// Game thread: every option of the loaded ini, when its revision moved.
+// Game thread: every option of the loaded ini, when its revision moved or
+// this process's overlay has changes to save (the host writes the ini).
 #if defined(EID3D11_EMBEDDED) || defined(EID3D11_SHADER_TOOL)
 void Renderer::core_send_config() noexcept {  }
 #else
 void Renderer::core_send_config() noexcept try{
  const auto& config=debug_overlay_.config();
- if(config.revision()==core_config_revision_)return;
+ const bool save=debug_overlay_.take_core_save_request();
+ if(!save&&config.revision()==core_config_revision_)return;
  core_config_revision_=config.revision();
  scene_core::Config command;
  command.options.reserve(config.options().size());
@@ -408,6 +415,7 @@ void Renderer::core_send_config() noexcept try{
  }
  command.overlay_mode=config.overlay_mode();command.debug_resource_view=config.debug_resource_view();
  command.config_path=renderer_config_path();
+ command.save=save;
  std::vector<std::uint8_t> bytes{0};
  scene_wire::encode_into(bytes,command);
  core_send(static_cast<std::uint16_t>(scene_core::Command::config),bytes);
@@ -624,6 +632,7 @@ void Renderer::core_send_mounts() noexcept try{
  scene_core::ResourceMounts mounts;
  if(!owned_resource_runtime_mounts(mounts.mounts))return;
  owned_text_resource_mounts(mounts.text_mounts);
+ owned_data_resource_mounts(mounts.data_mounts);
  std::vector<std::uint8_t> encoded=scene_wire::encode(mounts);
  if(encoded==core_mounts_sent_)return;
  std::vector<std::uint8_t> bytes{0};bytes.insert(bytes.end(),encoded.begin(),encoded.end());
@@ -778,7 +787,21 @@ HRESULT Renderer::core_present(){
    }
    core_f11_down_=down;}
   command.serial=++core_present_serial_;
-  command.game_foreground=!hwnd_||GetForegroundWindow()==hwnd_;
+  {const HWND front=GetForegroundWindow();
+   command.game_foreground=!hwnd_||front==hwnd_;
+   // Which window took the front (one event per change): frame generation,
+   // the background limit and the interface's input stop while it is not ours.
+   if(front!=core_foreground_logged_){core_foreground_logged_=front;
+    char cls[64]{},title[64]{},exe[MAX_PATH]{};DWORD pid=0;
+    if(front){GetClassNameA(front,cls,sizeof(cls));GetWindowTextA(front,title,sizeof(title));GetWindowThreadProcessId(front,&pid);}
+    if(pid){if(HANDLE process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,FALSE,pid)){DWORD size=MAX_PATH;
+      if(QueryFullProcessImageNameA(process,0,exe,&size)){const char* slash=std::strrchr(exe,'\\');if(slash)std::memmove(exe,slash+1,std::strlen(slash));}
+      CloseHandle(process);}}
+    char text[400];std::snprintf(text,sizeof(text),"present %llu: game window %s; foreground %p class '%s' title '%s' pid %lu %s%s (root owner %p)",
+     static_cast<unsigned long long>(core_present_serial_),command.game_foreground?"in front":"NOT in front",static_cast<void*>(front),cls,title,
+     static_cast<unsigned long>(pid),exe,pid==GetCurrentProcessId()?" (game process)":"",front?static_cast<void*>(GetAncestor(front,GA_ROOTOWNER)):nullptr);
+    bridge_report_event("game_foreground",text);}}
+  command.frame_start_qpc=core_frame_start_qpc_;
   if(!bridge_capture_frame_values(inputs.bridge))return E_FAIL;
   inputs.recorder_present_entry=perf_now();
   inputs.game_frame=fa_game_frame_;
@@ -789,7 +812,19 @@ HRESULT Renderer::core_present(){
   // Records reach the host only when published (the writer batches up to
   // 256 KB): the present closes the frame, so it publishes everything.
   x64remote::publish();
-  {const stall_watch::Exempt wait;const frame_acct::Scope wait_scope(frame_acct::wait_present_slot);x64remote::wait_presents(command.serial);}
+  {const stall_watch::Exempt wait;const frame_acct::Scope wait_scope(frame_acct::wait_present_slot);x64remote::wait_presents(command.serial);
+   // latency_pacing (host-set): start the next frame later, so its present
+   // reaches the host when it can take it instead of queueing in the ring.
+   // A high-resolution timer to the last half millisecond, then a spin.
+   if(const long delay_us=x64remote::control().release_delay_us;delay_us>0){
+    const std::int64_t frequency=perf_frequency(),deadline=perf_now()+std::int64_t(delay_us)*frequency/1000000;
+    static HANDLE timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
+    const std::int64_t spin=frequency/2000,left=deadline-perf_now();
+    if(timer&&left>spin){LARGE_INTEGER due{};due.QuadPart=-static_cast<LONGLONG>((left-spin)*10000000/frequency);
+     if(SetWaitableTimerEx(timer,&due,0,nullptr,nullptr,nullptr,0))WaitForSingleObject(timer,100);}
+    while(perf_now()<deadline)YieldProcessor();
+   }}
+  core_frame_start_qpc_=perf_now();  // the next frame starts here (the host's latency measurement)
  }catch(...){
   x64remote::lose_device("core mode: a present could not be sent (allocation)");
  }

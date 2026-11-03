@@ -114,10 +114,65 @@ float owned_terrain_pit_fill(const TerrainCpuAsset& source,
     if(base>=1089||!source.sector_count_x||!source.sector_count_y)return 0;
     const int x=int(sector.map_x*32+base%33),y=int(sector.map_y*32+base/33);
     const float z=owned_zone_node(source,x,y)[2];
-    const float across=.5f*(owned_zone_node(source,x-1,y)[2]+owned_zone_node(source,x+1,y)[2])-z;
-    const float along=.5f*(owned_zone_node(source,x,y-1)[2]+owned_zone_node(source,x,y+1)[2])-z;
+    // Up to the lower node of each pair: a pit only where all four neighbours
+    // rise above the vertex. The pair means also raised every floor vertex
+    // at the foot of a 1 m staircase wall (one node of each pair on the wall)
+    // by ~1.5 m in the casters, which drew a lit triangle on the floor at
+    // every step of the wall foot (#201).
+    const float across=(std::min)(owned_zone_node(source,x-1,y)[2],owned_zone_node(source,x+1,y)[2])-z;
+    const float along=(std::min)(owned_zone_node(source,x,y-1)[2],owned_zone_node(source,x,y+1)[2])-z;
     const float fill=(std::min)(across,along);
     return finite_value(fill)&&fill>0?fill:0.f;
+}
+
+float owned_authored_height(const TerrainCpuAsset& source,int x,int y) {return owned_zone_node(source,x,y)[2];}
+// 0 on an edge welded to an adjoining map, rising smoothly to 1 at reach
+// nodes inside: the wall-foot terms see neither the other map nor past the
+// authored rim of the outer rows, so a dark contact band ran along zone8's
+// edge with zone9 and stopped at the line (save1162).
+float owned_welded_edge_keep(const TerrainCpuAsset& source,int x,int y,int reach) {
+    if(!source.welded_sides)return 1;
+    const int xmax=int(source.sector_count_x*32),ymax=int(source.sector_count_y*32);
+    const int d[4]={x,xmax-x,y,ymax-y};
+    int nearest=reach;
+    for(int side=0;side<4;++side)if((source.welded_sides>>side)&1)nearest=(std::min)(nearest,d[side]);
+    const float t=(std::clamp)(float(nearest)/float(reach),0.f,1.f);
+    return t*t*(3-2*t);
+}
+
+float owned_terrain_foot_rise(const TerrainCpuAsset& source,
+    const TerrainSectorCpuAsset& sector, std::uint32_t base) noexcept {
+    if(base>=1089||!source.sector_count_x||!source.sector_count_y)return 0;
+    const int x=int(sector.map_x*32+base%33),y=int(sector.map_y*32+base/33);
+    const float z=owned_authored_height(source,x,y);
+    float low=z;
+    for(int dy=-1;dy<=1;++dy)for(int dx=-1;dx<=1;++dx)low=(std::min)(low,owned_authored_height(source,x+dx,y+dy));
+    const float rise=(z-low)*owned_welded_edge_keep(source,x,y,3);
+    return finite_value(rise)&&rise>0?rise:0.f;
+}
+
+float owned_terrain_wall_above(const TerrainCpuAsset& source,
+    const TerrainSectorCpuAsset& sector, std::uint32_t base) noexcept {
+    if(base>=1089||!source.sector_count_x||!source.sector_count_y)return 0;
+    const int x=int(sector.map_x*32+base%33),y=int(sector.map_y*32+base/33);
+    // Nearness of a wall, 0..1: the strongest of the nodes within 3 m, each
+    // its wallness (rising 0.35-1.05 m above this vertex, smoothstepped) times
+    // a smooth distance weight (1-(d/3)^2)^2. A maximum (not a sum, which
+    // peaked in every concave corner) of the same falloff around each wall
+    // node gives an even band along a 1 m staircase foot; the 3x3 height
+    // maximum printed the staircase steps onto the floor (fb34bab3, cw5-ao).
+    constexpr int kReach=3;
+    const float z=owned_authored_height(source,x,y);
+    float nearness=0;
+    for(int dy=-kReach;dy<=kReach;++dy)for(int dx=-kReach;dx<=kReach;++dx){
+        const float d2=float(dx*dx+dy*dy)/float(kReach*kReach);
+        if(d2>=1)continue;
+        const float w=(1-d2)*(1-d2);
+        const float t=(std::clamp)((owned_authored_height(source,x+dx,y+dy)-z-.35f)/.7f,0.f,1.f);
+        nearness=(std::max)(nearness,w*t*t*(3-2*t));
+    }
+    nearness*=owned_welded_edge_keep(source,x,y,kReach);
+    return finite_value(nearness)?nearness:0.f;
 }
 
 std::uint32_t owned_terrain_slope_normal(const TerrainCpuAsset& source,
@@ -170,33 +225,6 @@ void owned_terrain_prepare_shading(TerrainCpuAsset& source) noexcept {
     } catch(...) {
         for(auto& sector:source.sectors){sector.base_slope_normals.clear();sector.base_facet_flatness.clear();}
     }
-}
-
-std::uint32_t owned_terrain_fill_flags(const TerrainCpuAsset& source,
-    const TerrainSectorCpuAsset& sector, const TerrainTileDescriptor& tile,
-    const std::array<NativeTextureCoordinate,9>& uvs) noexcept {
-    const std::uint32_t first = tile.vertex_indices[0];
-    if(tile.transparent||first>=1089||!source.sector_count_x||!source.sector_count_y)return 0;
-    const int xmax=int(source.sector_count_x*16),ymax=int(source.sector_count_y*16);
-    auto id=[&](int x,int y) {
-        if(x<0||y<0||x>=xmax||y>=ymax)return -1;
-        const auto& owner=source.sectors[unsigned(y/16)*source.sector_count_x+unsigned(x/16)];
-        const std::uint16_t value=owner.base_tile_ids[unsigned(y%16)*16+unsigned(x%16)];
-        return value==UINT16_MAX?-1:int(value);
-    };
-    const int tx=int(sector.map_x*16+(first%33)/2),ty=int(sector.map_y*16+(first/33)/2);
-    const std::uint32_t grid=terrain_fill_corners(id,tx,ty);
-    if(!grid)return 0;
-    constexpr std::uint32_t lanes[4]={0,2,6,8}; // Grid corners (cy*2+cx) of the 3x3 lanes.
-    float cu=0,cv=0;
-    for(const auto lane:lanes){cu+=uvs[lane].u*.25f;cv+=uvs[lane].v*.25f;}
-    std::uint32_t flags=0;
-    for(std::uint32_t corner=0;corner<4;++corner){
-        if(!(grid&(1u<<corner)))continue;
-        const auto& uv=uvs[lanes[corner]];
-        flags|=1u<<(8u+(uv.u>cu?1u:0u)+(uv.v>cv?2u:0u));
-    }
-    return flags;
 }
 
 namespace {
@@ -482,40 +510,128 @@ bool OwnedLiquidFlowSector::flow(std::uint32_t base,OwnedLiquidFlow& flow) noexc
     return true;
 }
 
-void owned_terrain_set_outside_liquid(TerrainCpuAsset& terrain,int offset_x,int offset_y,
-    const TerrainCpuAsset& adjoining) {
+TerrainLiquidRim owned_terrain_liquid_rim(const TerrainCpuAsset& terrain) {
+    TerrainLiquidRim rim;
+    if(!terrain.sector_count_x||!terrain.sector_count_y)return rim;
+    rim.xmax=int(terrain.sector_count_x*32);rim.ymax=int(terrain.sector_count_y*32);
+    const int w=rim.xmax+1,h=rim.ymax+1;
+    std::vector<float> heights(std::size_t(w)*std::size_t(h),std::numeric_limits<float>::quiet_NaN());
+    bool any=false;
+    for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+        float z=0;
+        if(liquid_surface_height(terrain,x,y,nullptr,z)){heights[std::size_t(y)*std::size_t(w)+std::size_t(x)]=z;any=true;}
+    }
+    if(!any)return rim;
+    rim.heights=std::move(heights);
+    // Its flow at each perimeter vertex, as its own decode gives it (welded
+    // to the maps it adjoins), so a later map continues exactly that flow.
+    const auto outflow=owned_terrain_liquid_outflow(terrain,nullptr);
+    if(const auto cache=terrain.liquid_outflow){std::lock_guard<std::mutex> guard(cache->lock);rim.potential=cache->potential;}
+    for(unsigned side=0;side<4;++side) {
+        const bool along_x=side<2;const int count=(along_x?rim.xmax:rim.ymax)+1;
+        auto& edge=rim.edge_flow[side];edge.assign(std::size_t(count),TerrainEdgeFlow{});
+        for(int k=0;k<count;++k) {
+            const int x=along_x?k:(side==2?0:rim.xmax),y=along_x?(side==0?0:rim.ymax):k;
+            if(!finite_value(rim.heights[std::size_t(y)*std::size_t(w)+std::size_t(x)]))continue;
+            const auto sx=(std::min)(unsigned(x/32),terrain.sector_count_x-1),sy=(std::min)(unsigned(y/32),terrain.sector_count_y-1);
+            OwnedLiquidFlow flow;
+            if(!owned_terrain_liquid_flow(terrain,sy*terrain.sector_count_x+sx,
+                unsigned(y-int(sy*32))*33+unsigned(x-int(sx*32)),nullptr,flow))continue;
+            owned_terrain_weld_edge_flow(terrain,x,y,flow);
+            auto& e=edge[std::size_t(k)];e.current[0]=flow.current[0];e.current[1]=flow.current[1];
+            e.bend=flow.bend;e.cascade=flow.cascade;e.impact=flow.impact;e.drop=flow.drop;e.fill=flow.fill;e.valid=true;
+            if(outflow&&!outflow->empty()) {
+                const auto& v=(*outflow)[std::size_t(y)*std::size_t(w)+std::size_t(x)];
+                e.downstream[0]=float(v[3])/127.f;e.downstream[1]=float(v[4])/127.f;
+            }
+        }
+    }
+    return rim;
+}
+
+void owned_terrain_set_outside_liquid(TerrainCpuAsset& terrain,
+    const std::vector<TerrainAdjoiningLiquid>& adjoining,const TerrainLiquidRim* own) {
     const int xmax=int(terrain.sector_count_x*32),ymax=int(terrain.sector_count_y*32);
     const int r=kLiquidFlowGradientReach+1,w=xmax+1+2*r,h=ymax+1+2*r;
     TerrainOutsideLiquid outside;outside.reach=r;
     outside.heights.assign(std::size_t(w)*std::size_t(h),std::numeric_limits<float>::quiet_NaN());
+    // An adjoining map's height at this terrain's vertex (x,y).
+    const auto height=[](const TerrainAdjoiningLiquid& a,int x,int y,float& z) {
+        const int ax=x+a.offset_x,ay=y+a.offset_y;
+        if(!a.rim||a.rim->heights.empty()||ax<0||ay<0||ax>a.rim->xmax||ay>a.rim->ymax)return false;
+        z=a.rim->heights[std::size_t(ay)*std::size_t(a.rim->xmax+1)+std::size_t(ax)];
+        return finite_value(z);
+    };
     bool any=false;
     for(int y=-r;y<=ymax+r;++y)for(int x=-r;x<=xmax+r;++x) {
         if(x>=0&&y>=0&&x<=xmax&&y<=ymax)continue;
-        float z=0;
-        if(!liquid_surface_height(adjoining,x+offset_x,y+offset_y,nullptr,z))continue;
-        outside.heights[std::size_t(y+r)*std::size_t(w)+std::size_t(x+r)]=z;any=true;
+        for(const auto& a:adjoining) {
+            float z=0;
+            if(!height(a,x,y,z))continue;
+            outside.heights[std::size_t(y+r)*std::size_t(w)+std::size_t(x+r)]=z;any=true;break;
+        }
     }
-    // The adjoining map's own flow at each shared edge vertex (it was decoded
-    // without this terrain, so its edge reads one-sided; both now carry it).
-    const int axmax=int(adjoining.sector_count_x*32),aymax=int(adjoining.sector_count_y*32);
+    // Whether a drain potential comes first, as one flood over both maps
+    // orders it: the lower level, or within a step (one reach, stored to
+    // each map's height precision) the shorter distance to its exit; ties
+    // within half a metre decide nothing.
+    const auto before=[](const TerrainEdgePotential& a,const TerrainEdgePotential& b) {
+        if(std::abs(a.level-b.level)>kLiquidOutflowStep)return a.level<b.level;
+        return a.distance<b.distance-.5f;
+    };
     for(unsigned side=0;side<4;++side) {
         const bool along_x=side<2;const int count=(along_x?xmax:ymax)+1;
+        // This terrain's outward normal on the side.
+        constexpr int normal[4][2]={{0,-1},{0,1},{-1,0},{1,0}};
         auto& edge=outside.edge_flow[side];edge.assign(std::size_t(count),TerrainEdgeFlow{});
+        auto& seams=outside.seams[side];seams.assign(std::size_t(count),TerrainEdgeSeam{});
         for(int k=0;k<count;++k) {
             const int x=along_x?k:(side==2?0:xmax),y=along_x?(side==0?0:ymax):k;
-            const int ax=x+offset_x,ay=y+offset_y;
-            if(ax<0||ay<0||ax>axmax||ay>aymax)continue;
-            float z=0;if(!liquid_surface_height(adjoining,ax,ay,nullptr,z))continue;
-            const auto sx=(std::min)(unsigned(ax/32),adjoining.sector_count_x-1),sy=(std::min)(unsigned(ay/32),adjoining.sector_count_y-1);
-            OwnedLiquidFlow flow;
-            if(!owned_terrain_liquid_flow(adjoining,sy*adjoining.sector_count_x+sx,
-                unsigned(ay-int(sy*32))*33+unsigned(ax-int(sx*32)),nullptr,flow))continue;
-            auto& e=edge[std::size_t(k)];e.current[0]=flow.current[0];e.current[1]=flow.current[1];
-            e.bend=flow.bend;e.cascade=flow.cascade;e.impact=flow.impact;e.drop=flow.drop;e.fill=flow.fill;e.valid=true;any=true;
+            // The first placed map holding the vertex beyond this edge vertex.
+            const int bx=x+normal[side][0],by=y+normal[side][1];
+            const TerrainAdjoiningLiquid* beside=nullptr;
+            for(const auto& a:adjoining) {
+                const int ax=bx+a.offset_x,ay=by+a.offset_y;
+                if(ax>=0&&ay>=0&&ax<=a.xmax&&ay<=a.ymax){beside=&a;break;}
+            }
+            if(!beside)continue;
+            auto& seam=seams[std::size_t(k)];seam.seam=true;any=true;
+            float z=0;
+            if(!beside->rim||!height(*beside,x,y,z))continue;
+            // The shared vertex on the adjoining map's perimeter (maps never
+            // overlap): its side s and index along it.
+            const int ax=x+beside->offset_x,ay=y+beside->offset_y;
+            const int s=ay==0?0:ay==beside->rim->ymax?1:ax==0?2:ax==beside->rim->xmax?3:-1;
+            if(s<0)continue;
+            const std::size_t along=std::size_t(s<2?ax:ay);
+            const auto& flow=beside->rim->edge_flow[unsigned(s)];
+            // Its final flow, which this terrain's edge flow blends to.
+            if(beside->flows&&along<flow.size()&&flow[along].valid)edge[std::size_t(k)]=flow[along];
+            if(!own)continue;
+            const auto& potentials=beside->rim->potential[unsigned(s)];
+            const TerrainEdgePotential theirs=along<potentials.size()?potentials[along]:TerrainEdgePotential{};
+            const TerrainEdgePotential mine=std::size_t(k)<own->potential[side].size()?own->potential[side][std::size_t(k)]:TerrainEdgePotential{};
+            const auto outlet=[&] {
+                // Their potential is read two vertices in from the shared edge.
+                seam.role=1;seam.level=theirs.level;seam.distance=theirs.distance+2.f;
+                seam.outlet_level=theirs.outlet_level;seam.running=theirs.moving;
+            };
+            if(beside->fixed) {
+                // Its field stays as decoded: continue its flow (downstream
+                // away from this terrain drains this terrain's water into it).
+                if(along>=flow.size()||!flow[along].valid||!theirs.reached)continue;
+                const float d=flow[along].downstream[0]*float(normal[side][0])+flow[along].downstream[1]*float(normal[side][1]);
+                if(d>.25f)outlet();
+                else if(d<-.25f&&theirs.moving)seam.role=2;
+            } else if(theirs.reached&&(!mine.reached||before(theirs,mine))) {
+                outlet(); // the nearer exit is theirs: this side drains into them
+            } else if(mine.reached&&theirs.reached&&before(mine,theirs)&&theirs.moving) {
+                seam.role=2; // the nearer exit is ours: their water runs in
+            }
         }
     }
     terrain.outside_liquid=any?std::move(outside):TerrainOutsideLiquid{};
-    // Rebuild the level-reach current with the seam's outlets and sources.
+    // Rebuild the level-reach current with the seams' outlets and sources.
     if(any)owned_terrain_reset_liquid_outflow(terrain);
 }
 
@@ -540,7 +656,8 @@ void owned_terrain_weld_edge_flow(const TerrainCpuAsset& terrain,int x,int y,Own
 namespace {
 
 // owned_terrain_liquid_outflow on the global vertex grid of one map.
-TerrainLiquidOutflowField build_liquid_outflow(const TerrainCpuAsset& terrain,const OwnedTerrainGeometryValues* values) {
+TerrainLiquidOutflowField build_liquid_outflow(const TerrainCpuAsset& terrain,const OwnedTerrainGeometryValues* values,
+    std::array<std::vector<TerrainEdgePotential>,4>& edge_potential) {
     const int xmax=int(terrain.sector_count_x*32),ymax=int(terrain.sector_count_y*32);
     if(xmax<8||ymax<8)return {};
     const int w=xmax+1,h=ymax+1;
@@ -631,23 +748,30 @@ TerrainLiquidOutflowField build_liquid_outflow(const TerrainCpuAsset& terrain,co
     // raised up the shore are no rapids).
     std::vector<std::uint8_t> running(n,0);
     for(std::size_t i=0;i<n;++i)running[i]=valid[i]&&!still[i]&&slope[i]>kLiquidOutflowSource&&land[i]>=2;
-    // Seam roles (a neighbour map): 1 the adjoining map's flow leaves this map
-    // there (an outlet), 2 it enters (a source).
-    std::vector<std::uint8_t> role(n,0);
+    // Seams (a neighbour map; TerrainEdgeSeam), within 3 vertices of a shared
+    // edge, the nearest edge deciding: no map-edge outlet; role 1 an outlet
+    // seeded with the adjoining map's drain potential (its distance grows by
+    // this vertex's distance to the edge), 2 a source.
+    std::vector<std::uint8_t> role(n,0),seam_cell(n,0);
+    std::vector<const TerrainEdgeSeam*> seam_seed(n,nullptr);
+    std::vector<std::uint8_t> seam_depth(n,0);
     const auto& outside=terrain.outside_liquid;
     for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
         if(!valid[at(x,y)])continue;
         const int distance[4]={y,ymax-y,x,xmax-x},along[4]={x,x,y,y};
-        constexpr float normal[4][2]={{0,-1},{0,1},{-1,0},{1,0}};
-        int best=3;
+        int best=3;bool seam=false;
         for(unsigned side=0;side<4;++side) {
-            const auto& e=outside.edge_flow[side];
-            if(distance[side]>best||std::size_t(along[side])>=e.size()||!e[std::size_t(along[side])].valid)continue;
-            const float d=e[std::size_t(along[side])].current[0]*normal[side][0]+e[std::size_t(along[side])].current[1]*normal[side][1];
-            best=distance[side];
-            role[at(x,y)]=d>.005f?1u:d<-.005f?2u:0u;
+            const auto& e=outside.seams[side];
+            if(distance[side]>best||std::size_t(along[side])>=e.size()||!e[std::size_t(along[side])].seam)continue;
+            const auto& f=e[std::size_t(along[side])];
+            best=distance[side];seam=true;
+            role[at(x,y)]=f.role;seam_seed[at(x,y)]=&f;seam_depth[at(x,y)]=std::uint8_t(distance[side]);
         }
-        if(role[at(x,y)]==2)running[at(x,y)]=1;
+        if(!seam)continue;
+        seam_cell[at(x,y)]=1;
+        // An outlet passes water on as the adjoining map's way down does: over
+        // moving water when that map's water moves there.
+        if(role[at(x,y)]==2||(role[at(x,y)]==1&&seam_seed[at(x,y)]->running))running[at(x,y)]=1;
     }
     // The outer two vertex rows are the shipped maps' height-0 rim
     // (flatten_liquid_rim keeps only rims beside inner liquid): never a level
@@ -693,7 +817,7 @@ TerrainLiquidOutflowField build_liquid_outflow(const TerrainCpuAsset& terrain,co
         for(const auto i:cells) {
             const int x=int(i%unsigned(w)),y=int(i/unsigned(w));
             low[i]=!rim(x,y)&&z[i]<zmin+kLiquidOutflowLevelBand;
-            if(role[i]==1||(low[i]&&on_edge(x,y)&&role[i]!=2)){sink[i]=1;any_sink=any_terminal=true;}
+            if(role[i]==1||(low[i]&&on_edge(x,y)&&!seam_cell[i])){sink[i]=1;any_sink=any_terminal=true;}
             if(low[i]&&land[i]>=kLiquidOutflowWide){sink[i]=1;any_sink=true;}
             if(low[i])widest=(std::max)(widest,land[i]);
         }
@@ -740,6 +864,21 @@ TerrainLiquidOutflowField build_liquid_outflow(const TerrainCpuAsset& terrain,co
     // way round, and an earlier rule drained the loop into a fall's funnel.
     // A fed lake stops being an outlet and passes its water on (repeat while
     // that changes).
+    // A fall's foot: water a fall step (kLiquidFallEdgeDrop) or more below a
+    // liquid neighbour, where higher water pours in. The flood climbs from it
+    // (a rise) but never passes along its level through it, so a reach fed by
+    // a fall runs away from the fall to the exit on each side of it, never
+    // back toward it from a nearer exit beyond it.
+    std::vector<std::uint8_t> fall_foot(n,0);
+    for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
+        const std::size_t i=at(x,y);
+        if(!inner(i))continue;
+        for(int dy=-1;dy<=1&&!fall_foot[i];++dy)for(int dx=-1;dx<=1;++dx) {
+            const int px=x+dx,py=y+dy;
+            if((!dx&&!dy)||px<0||py<0||px>xmax||py>ymax||!valid[at(px,py)])continue;
+            if(z[at(px,py)]>=z[i]+kLiquidFallEdgeDrop){fall_foot[i]=1;break;}
+        }
+    }
     std::vector<float> level(n),exit_distance(n),outlet_level(n);
     std::vector<std::uint32_t> exit_cell(n); // the cell where each level starts (its lip)
     std::vector<double> potential(n);std::vector<std::uint32_t> order;
@@ -753,7 +892,19 @@ TerrainLiquidOutflowField build_liquid_outflow(const TerrainCpuAsset& terrain,co
             bool operator>(const Entry& o) const { return level!=o.level?level>o.level:distance>o.distance; } };
         std::priority_queue<Entry,std::vector<Entry>,std::greater<Entry>> queue;
         for(std::size_t i=0;i<n;++i)if(sink[i]) {
-            level[i]=outlet_level[i]=z[i];exit_distance[i]=0;exit_cell[i]=std::uint32_t(i);queue.push({z[i],0.f,std::uint32_t(i)});
+            level[i]=outlet_level[i]=z[i];exit_distance[i]=0;exit_cell[i]=std::uint32_t(i);
+            if(role[i]==1) {
+                // A seam outlet continues the adjoining map's drain potential,
+                // as one flood over both maps would.
+                // At this map's own surface when the levels agree within a
+                // step: two maps store one reach's height to different
+                // precision (save1163: 5.8132 gipat2, 5.8131 zone9), and the
+                // lower one would settle the whole reach first.
+                const auto& s=*seam_seed[i];
+                level[i]=std::abs(s.level-z[i])<=kLiquidOutflowStep?z[i]:s.level;
+                outlet_level[i]=s.outlet_level;exit_distance[i]=s.distance+float(seam_depth[i]);
+            }
+            queue.push({level[i],exit_distance[i],std::uint32_t(i)});
         }
         while(!queue.empty()) {
             const Entry e=queue.top();queue.pop();
@@ -766,8 +917,15 @@ TerrainLiquidOutflowField build_liquid_outflow(const TerrainCpuAsset& terrain,co
                 if((!dx&&!dy)||px<0||py<0||px>xmax||py>ymax)continue;
                 const std::size_t j=at(px,py);
                 if(!inner(j)||settled[j])continue;
+                // Without a rise the level still climbs to the surface it
+                // enters, so every exit of a reach meets it at the reach's own
+                // level and the nearer exit wins: a chute's level was its
+                // last step below the reach (zone9 5.73-5.77 under 5.81), and
+                // it drained the whole 5.81 reach past the inflow's fall away
+                // from gipat2's nearer lip (save1163).
                 const bool rise=z[j]>e.level+kLiquidOutflowStep;
-                const float l=rise?z[j]:e.level,d=rise?0.f:e.distance+(dx&&dy?diagonal:1.f);
+                if(fall_foot[i]&&!rise)continue;
+                const float l=rise?z[j]:(std::max)(e.level,z[j]),d=rise?0.f:e.distance+(dx&&dy?diagonal:1.f);
                 if(l<level[j]||(l==level[j]&&d<exit_distance[j])) {
                     level[j]=l;exit_distance[j]=d;outlet_level[j]=outlet_level[i];exit_cell[j]=rise?std::uint32_t(j):exit_cell[i];
                     queue.push({l,d,std::uint32_t(j)});
@@ -818,6 +976,20 @@ TerrainLiquidOutflowField build_liquid_outflow(const TerrainCpuAsset& terrain,co
         const bool above=level[i]>outlet_level[i]+kLiquidOutflowLevelBand;
         moving[i]=((drains[i]&&above)||supplied[i])&&level[i]<unreached&&!still[i];
         any_moving=any_moving||moving[i];
+    }
+    // The drain potential two vertices inside each edge (the first its field
+    // covers), for the maps beside this one (TerrainLiquidRim::potential).
+    for(unsigned side=0;side<4;++side) {
+        const bool along_x=side<2;const int count=(along_x?xmax:ymax)+1;
+        edge_potential[side].assign(std::size_t(count),TerrainEdgePotential{});
+        for(int k=0;k<count;++k) {
+            const int x=along_x?(std::clamp)(k,2,xmax-2):(side==2?2:xmax-2);
+            const int y=along_x?(side==0?2:ymax-2):(std::clamp)(k,2,ymax-2);
+            const std::size_t i=at(x,y);
+            if(!valid[i]||level[i]>=unreached)continue;
+            auto& p=edge_potential[side][std::size_t(k)];
+            p.level=level[i];p.distance=exit_distance[i];p.outlet_level=outlet_level[i];p.reached=true;p.moving=moving[i]!=0;
+        }
     }
     if(!any_moving)return {};
     // Downstream: minus the potential gradient (central, one-sided at the
@@ -882,7 +1054,7 @@ TerrainLiquidOutflowField build_liquid_outflow(const TerrainCpuAsset& terrain,co
         }
         return lip_drop[lip]=drop;
     };
-    std::vector<std::array<std::int8_t,3>> result(n,std::array<std::int8_t,3>{});
+    TerrainLiquidOutflowField result(n,TerrainLiquidOutflowField::value_type{});
     bool stored=false;
     for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
         const std::size_t i=at(x,y);
@@ -917,14 +1089,15 @@ TerrainLiquidOutflowField build_liquid_outflow(const TerrainCpuAsset& terrain,co
             const float drop=lip_drop_at(exit_cell[i]);
             approach=smooth((drop-kLiquidLipDrop[0])/(kLiquidLipDrop[1]-kLiquidLipDrop[0]))*(1-smooth(exit_distance[i]/kLiquidLipReach));
         }
-        result[i]={q(sx),q(sy),std::int8_t(std::lround(approach*127.f))};
-        stored=stored||result[i][0]||result[i][1]||result[i][2];
+        result[i]={q(sx),q(sy),std::int8_t(std::lround(approach*127.f)),
+            std::int8_t(std::lround(sx/length*127.f)),std::int8_t(std::lround(sy/length*127.f))};
+        stored=stored||result[i][0]||result[i][1]||result[i][2]||result[i][3]||result[i][4];
     }
     // The rim takes the field of the first inner vertex.
     for(int y=0;y<h;++y)for(int x=0;x<w;++x) {
         if(!valid[at(x,y)]||!rim(x,y))continue;
         result[at(x,y)]=result[at((std::clamp)(x,2,xmax-2),(std::clamp)(y,2,ymax-2))];
-        stored=stored||result[at(x,y)][0]||result[at(x,y)][1]||result[at(x,y)][2];
+        stored=stored||result[at(x,y)][0]||result[at(x,y)][1]||result[at(x,y)][2]||result[at(x,y)][3]||result[at(x,y)][4];
     }
     if(!stored)return {};
     return result;
@@ -945,15 +1118,16 @@ std::shared_ptr<const TerrainLiquidOutflowField> owned_terrain_liquid_outflow(
         cache->built=true;
         const auto start=std::chrono::steady_clock::now();
         try {
-            auto field=build_liquid_outflow(terrain,values);
+            auto field=build_liquid_outflow(terrain,values,cache->potential);
             if(!field.empty())cache->field=std::make_shared<const TerrainLiquidOutflowField>(std::move(field));
-        } catch(...) {cache->field.reset();}
+        } catch(...) {cache->field.reset();for(auto& p:cache->potential)p.clear();}
         std::size_t running=0;
         if(cache->field)for(const auto& v:*cache->field)running+=v[0]||v[1];
         // One line per build with its cost (it runs inside the first decode).
-        char detail[192];
-        std::snprintf(detail,sizeof(detail),"%s: %u level river vertices run, %.1f ms",terrain.identity.canonical_name.c_str(),
-            unsigned(running),std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
+        char detail[256];
+        std::snprintf(detail,sizeof(detail),"%s: %u level river vertices run, %.1f ms",
+            terrain.identity.canonical_name.c_str(),unsigned(running),
+            std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
         bridge_append_probe_event("liquid_outflow",detail);
     }
     return cache->field;

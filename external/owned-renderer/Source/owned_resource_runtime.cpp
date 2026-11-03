@@ -6,6 +6,9 @@
 
 #include "owned_asset_loader.h"
 #include "retained_static_scene.h"
+#ifndef EID3D11_EMBEDDED
+#include "retained_publication.h"
+#endif
 #include "neighbour_maps.h"
 #include "neighbour_client.h"
 
@@ -114,6 +117,7 @@ struct RuntimeState {
     std::shared_ptr<OwnedResourceLoader> loader;
     ResourceStoreConfig mounts;
     ResourceStoreConfig text_mounts;
+    ResourceStoreConfig data_mounts; // database.res family (items.idb: material classes)
     bool mounts_adopted = false; // x64 host: mounts from the game process, no loader
     std::vector<PendingLoad> pending;
     PendingLoad active;
@@ -268,6 +272,71 @@ std::shared_ptr<const Asset> visual_asset(
     return nullptr;
 }
 
+#ifndef EID3D11_EMBEDDED
+// Core mode, game process (retained_visual_textures_to_host): the recorder
+// that defines archive textures and map sources on the x64 host while this
+// process keeps slim stand-ins. Null otherwise.
+std::atomic<RetainedPublicationRecorder*> g_core_host_recorder{nullptr};
+
+// Core mode: `full` is defined on the host now (its source bytes go with it)
+// and this process keeps a stand-in without source bytes, which the stream
+// names as that definition (RetainedPublicationRecorder::asset_alias). Mip 0's
+// cut bits stay for the game-process alpha readers (sway classification).
+// Null: keep `full` (no recorder, or the stand-in could not be made).
+std::shared_ptr<const TextureCpuAsset> texture_host_stand_in(
+    const std::shared_ptr<const TextureCpuAsset>& full) noexcept {
+    auto* recorder = g_core_host_recorder.load(std::memory_order_acquire);
+    if (!recorder || !full->source || full->mips.empty()) return nullptr;
+    std::shared_ptr<const TextureCpuAsset> result;
+    try {
+        auto stand_in = std::make_shared<TextureCpuAsset>(*full);
+        stand_in->source.reset();
+        if (!(full->opaque_mips & 1u)) {
+            TextureAlphaPixels alpha;
+            if (!texture_alpha_pixels(*full, 0, alpha)) return nullptr;
+            stand_in->alpha_cut_mask = texture_alpha_cut_mask(alpha);
+            if (!stand_in->alpha_cut_mask) return nullptr;
+        }
+        result = std::move(stand_in);
+    } catch (...) { return nullptr; }
+    if (!recorder->asset_alias(full, result)) return nullptr;
+    return result;
+}
+
+// Core mode (S5b): the loader's map source is defined on the host as it is,
+// and this process keeps a copy whose terrain has no vertices, tiles, slope
+// tables or page bytes. Per sector it keeps what the game half reads: the
+// descriptors (bounds, materials, counts) and the height fields of every
+// vertex (TerrainSectorCpuAsset::heights) for sample_terrain_height. The
+// stream names the copies as the full definitions. Null: keep `full`.
+std::shared_ptr<const OwnedMapSnapshot> core_slim_source(
+    const std::shared_ptr<const OwnedMapSnapshot>& full) noexcept {
+    auto* recorder = g_core_host_recorder.load(std::memory_order_acquire);
+    if (!recorder || !full || !full->terrain) return nullptr;
+    std::shared_ptr<const OwnedMapSnapshot> snapshot;
+    std::shared_ptr<const TerrainCpuAsset> terrain;
+    try {
+        auto slim = std::make_shared<TerrainCpuAsset>(*full->terrain);
+        for (auto& sector : slim->sectors) {
+            sector.heights.reserve(sector.vertices.size());
+            for (const auto& vertex : sector.vertices) sector.heights.push_back(terrain_height_vertex(vertex));
+            std::vector<TerrainVertex>().swap(sector.vertices);
+            std::vector<TerrainTileDescriptor>().swap(sector.tiles);
+            std::vector<std::uint32_t>().swap(sector.base_slope_normals);
+            std::vector<std::uint32_t>().swap(sector.base_facet_flatness);
+        }
+        for (auto& page : slim->pages) page.release_upload_bytes();
+        terrain = std::move(slim);
+        auto copy = std::make_shared<OwnedMapSnapshot>(*full);
+        copy->terrain = terrain;
+        snapshot = std::move(copy);
+    } catch (...) { return nullptr; }
+    if (!recorder->asset_alias(full, snapshot) || !recorder->asset_alias(full->terrain, terrain)) return nullptr;
+    return snapshot;
+}
+
+#endif // !EID3D11_EMBEDDED
+
 template<class Decode>
 std::shared_ptr<const TextureCpuAsset> visual_texture_asset(RuntimeState& state,
     const std::string& key, bool generated, GeneratedTextureEvent event,
@@ -326,9 +395,14 @@ std::shared_ptr<const TextureCpuAsset> visual_texture_asset(RuntimeState& state,
             return nullptr;
         }
         result->value_serial=source.serial;
-        source.asset=result;
+        std::shared_ptr<const TextureCpuAsset> value=std::move(result);
+        // Archive members only: generated values keep their replacement path.
+#ifndef EID3D11_EMBEDDED
+        if(!generated)if(auto stand_in=texture_host_stand_in(value))value=std::move(stand_in);
+#endif
+        source.asset=value;
         failure={};
-        return result;
+        return value;
     } catch (const std::bad_alloc&) {
         if (!generated) state.visual_textures.erase(key);
         failure={ResourceFailureCode::archive_bounds,"visual texture allocation failed"};
@@ -337,30 +411,6 @@ std::shared_ptr<const TextureCpuAsset> visual_texture_asset(RuntimeState& state,
         failure={ResourceFailureCode::archive_bounds,"visual texture allocation failed"};
     }
     return nullptr;
-}
-
-bool environment(const wchar_t* name, std::wstring& value) {
-    const DWORD required = GetEnvironmentVariableW(name, nullptr, 0);
-    if (!required) return false;
-    value.assign(required, L'\0');
-    const DWORD copied = GetEnvironmentVariableW(name, value.data(), required);
-    if (!copied || copied >= required) return false;
-    value.resize(copied);
-    return true;
-}
-
-std::vector<std::wstring> split_paths(const std::wstring& value) {
-    std::vector<std::wstring> output;
-    std::size_t begin = 0;
-    while (begin <= value.size()) {
-        const std::size_t end = value.find(L';', begin);
-        std::wstring item = value.substr(begin, end == std::wstring::npos
-            ? std::wstring::npos : end - begin);
-        if (!item.empty()) output.push_back(std::move(item));
-        if (end == std::wstring::npos) break;
-        begin = end + 1;
-    }
-    return output;
 }
 
 bool enabled() {
@@ -436,8 +486,8 @@ bool read_mount_config(const std::wstring& path, std::vector<std::uint8_t>& byte
 }
 
 // The config.reg [RES] families the owned mounts follow.
-enum Family : unsigned { kFigures, kTextures, kTexts, kRedress, kMenus, kFamilies };
-constexpr const char* kFamilyNames[kFamilies] = {"figures.res", "textures.res", "texts.res", "redress.res", "menus.res"};
+enum Family : unsigned { kFigures, kTextures, kTexts, kRedress, kMenus, kDatabase, kFamilies };
+constexpr const char* kFamilyNames[kFamilies] = {"figures.res", "textures.res", "texts.res", "redress.res", "menus.res", "database.res"};
 
 // Compiled REG files have little-endian counts/offsets and length-prefixed
 // strings. Decode the figure and texture managers' families (kFamilyNames)
@@ -517,18 +567,15 @@ bool visual_archive_lists(const std::vector<std::uint8_t>& bytes,
 }
 
 bool configuration(const wchar_t* game_registry_key, ResourceStoreConfig& mounts,
-                   ResourceFailure& failure, ResourceStoreConfig& text_mounts) {
+                   ResourceFailure& failure, ResourceStoreConfig& text_mounts, ResourceStoreConfig& data_mounts) {
 #ifdef EID3D11_EMBEDDED
     (void)game_registry_key;
     mounts = embedded_host_configuration().snapshot().mounts;
-    text_mounts = mounts;
+    text_mounts = embedded_host_configuration().snapshot().text_mounts;
+    data_mounts = embedded_host_configuration().snapshot().data_mounts;
 #else
-    std::wstring loose;
-    std::wstring archives;
-    const bool loose_override = environment(L"EI_RENDERER_OWNED_LOADER_LOOSE_ROOTS", loose);
-    const bool archive_override = environment(L"EI_RENDERER_OWNED_LOADER_ARCHIVES", archives);
-    // The launcher overrides visual mounts only. Spell text still follows the
-    // active game's text family and mod precedence, even with both overrides.
+    // The mounts a player install has: the active game's registry paths and
+    // the mod's config.reg, in the game's per-manager order.
     {
         if (!game_registry_key) {
             failure = {ResourceFailureCode::parse, "active game resource registry selection unavailable"};
@@ -551,11 +598,9 @@ bool configuration(const wchar_t* game_registry_key, ResourceStoreConfig& mounts
             failure = {ResourceFailureCode::file_read, "active mod config.reg could not be read"};
             return false;
         }
-        if (!derive_owned_resource_mounts(work, resources, addon, config, mounts, failure, &text_mounts))
+        if (!derive_owned_resource_mounts(work, resources, addon, config, mounts, failure, &text_mounts, &data_mounts))
             return false;
     }
-    if (loose_override) mounts.loose_roots = split_paths(loose);
-    if (archive_override) { mounts.archives = split_paths(archives); mounts.archive_kinds.clear(); }
     // A configured archive that is missing stays in the game's list, empty
     // (CResourceManager::AddArchiveOf ignores the open result): drop it.
     for (std::size_t index = mounts.archives.size(); index-- > 0;) {
@@ -620,7 +665,11 @@ void start_next_load(RuntimeState& state) noexcept {
     request.terrain_resource = state.active.terrain_resource;
     request.mounts = state.mounts;
     request.load_object_assets = false;
-    request.extra_textures = {"tree02", "stone02"}; // ground-cover bark and rock art
+    // Ground-cover bark and rock art, read only from the main map source
+    // (terrain_source_snapshot). A secondary MOB (an AddMob supplement) has
+    // no terrain and nobody reads its textures; loading them there decoded
+    // and streamed ~1.4 MB per supplement again (#203).
+    if (!request.terrain_resource.empty()) request.extra_textures = {"tree02", "stone02"};
     request.prepare_terrain_shading = !request.terrain_resource.empty(); // active map terrain
     ResourceFailure failure{};
     if (!state.loader->request(request, failure, &state.active.token)) {
@@ -658,7 +707,7 @@ bool registry_root_loads_starter_addon(const wchar_t* game_registry_key) noexcep
 bool derive_owned_resource_mounts(const std::wstring& work_path,
     const std::wstring& resource_path, const std::wstring& addon_path,
     const std::vector<std::uint8_t>& config, ResourceStoreConfig& mounts,
-    ResourceFailure& failure, ResourceStoreConfig* text_mounts) {
+    ResourceFailure& failure, ResourceStoreConfig* text_mounts, ResourceStoreConfig* data_mounts) {
     mounts = {};
     failure = {};
     std::array<std::vector<std::wstring>, kFamilies> lists;
@@ -716,6 +765,19 @@ bool derive_owned_resource_mounts(const std::wstring& work_path,
         }
         if (!ignore_base[kTexts]) text_mounts->archives.push_back(child_path(resource_path,L"texts.res"));
     }
+    // The game's database family (items.idb), mod values first.
+    if (data_mounts) {
+        *data_mounts={};
+        for (const auto& relative:lists[kDatabase]) {
+            std::wstring path;
+            if (!full_path(child_path(addon_path,relative),path)) {
+                failure={ResourceFailureCode::invalid_name,"mod database archive path could not be resolved"};
+                return false;
+            }
+            data_mounts->archives.push_back(std::move(path));
+        }
+        if (!ignore_base[kDatabase]) data_mounts->archives.push_back(child_path(resource_path,L"database.res"));
+    }
     mounts = std::move(derived);
     return true;
 }
@@ -726,9 +788,9 @@ void owned_resource_runtime_acquire(const wchar_t* game_registry_key) noexcept {
     ++state.users;
     if (state.users != 1 || !enabled()) return;
     try {
-        ResourceStoreConfig mounts{},text_mounts{};
+        ResourceStoreConfig mounts{},text_mounts{},data_mounts{};
         ResourceFailure failure{};
-        if (!configuration(game_registry_key, mounts, failure, text_mounts)) {
+        if (!configuration(game_registry_key, mounts, failure, text_mounts, data_mounts)) {
             log_loader_failure(failure.message.c_str());
             return;
         }
@@ -741,6 +803,7 @@ void owned_resource_runtime_acquire(const wchar_t* game_registry_key) noexcept {
         state.generation = 0;
         state.mounts = std::move(mounts);
         state.text_mounts = std::move(text_mounts);
+        state.data_mounts = std::move(data_mounts);
         state.loader = std::move(loader);
     } catch (...) {
         log_loader_failure("owned loader startup allocation failed");
@@ -760,6 +823,12 @@ bool owned_text_resource_mounts(ResourceStoreConfig& mounts) {
     return !mounts.archives.empty();
 }
 
+bool owned_data_resource_mounts(ResourceStoreConfig& mounts) {
+    auto& state=runtime(); std::lock_guard<std::mutex> guard(state.lock);
+    mounts=state.data_mounts;
+    return !mounts.archives.empty();
+}
+
 void owned_resource_runtime_poll() noexcept {
     RuntimeState& state = runtime();
     if (!state.polling.load(std::memory_order_acquire)) return;
@@ -772,6 +841,9 @@ void owned_resource_runtime_poll() noexcept {
         return;
     ResourceFailure failure{};
     write_owned_loader_receipt(*snapshot, failure);
+#ifndef EID3D11_EMBEDDED
+    if (auto slim = core_slim_source(snapshot)) snapshot = std::move(slim);
+#endif
     if (!snapshot->mob ||
         (state.active.role == MobSourceRole::main && !snapshot->terrain) ||
         !state.scene.publish_source(state.active.transaction, snapshot)) {
@@ -791,6 +863,7 @@ void owned_resource_runtime_release() noexcept {
         state.generation = 0;
         state.mounts = {};
         state.text_mounts = {};
+        state.data_mounts = {};
         state.pending.clear();
         state.active = {};
         state.scene.reset();
@@ -824,16 +897,18 @@ bool owned_resource_runtime_mounts(ResourceStoreConfig& mounts) noexcept {
 }
 
 void owned_resource_runtime_adopt_mounts(const ResourceStoreConfig& mounts,
-    const ResourceStoreConfig& text_mounts) noexcept {
+    const ResourceStoreConfig& text_mounts, const ResourceStoreConfig& data_mounts) noexcept {
     RuntimeState& state = runtime();
     std::lock_guard<std::mutex> guard(state.lock);
     try {
         state.mounts = mounts;
         state.text_mounts = text_mounts;
+        state.data_mounts = data_mounts;
         state.mounts_adopted = true;
     } catch (...) {
         state.mounts = {};
         state.text_mounts = {};
+        state.data_mounts = {};
         state.mounts_adopted = false;
     }
 }
@@ -857,8 +932,11 @@ std::uint64_t retained_static_begin_source(
     // stops the previous stream, whose decoders read the published source
     // under this lock (deadlock while it was held).
     struct NeighbourStart {
-        bool armed = false; std::string terrain; std::uint64_t epoch = 0; ResourceStoreConfig mounts;
-        ~NeighbourStart() { if (armed) neighbour_client_begin(terrain, epoch, mounts); }
+        bool armed = false, restart = false; std::string terrain; std::uint64_t epoch = 0; ResourceStoreConfig mounts;
+        ~NeighbourStart() {
+            if (armed && restart) neighbour_client_restart(terrain, epoch, mounts);
+            else if (armed) neighbour_client_begin(terrain, epoch, mounts);
+        }
     } neighbour_start;
     std::lock_guard<std::mutex> guard(state.lock);
     if (!state.users || !state.loader) return 0;
@@ -872,7 +950,22 @@ std::uint64_t retained_static_begin_source(
     // one owned loader generation and its deferred secondary queue.
     retire_active(state);
     state.pending.clear();
-    if (reused_existing || !selected_mob || !selected_mob[0])
+    if (reused_existing) {
+        // A reload of the published map keeps its source and generation (no
+        // owned load, no begin). Its neighbours prepare for the coming world
+        // now, during the game's load, not after the world change.
+        try {
+            const auto published = state.scene.terrain_source_snapshot();
+            if (published.map && !published.map->terrain_resource.empty()) {
+                neighbour_start.terrain = published.map->terrain_resource;
+                neighbour_start.epoch = published.map->generation;
+                neighbour_start.mounts = state.mounts;
+                neighbour_start.armed = neighbour_start.restart = true;
+            }
+        } catch (...) {} // allocation: the restart waits for the world change as before
+        return transaction;
+    }
+    if (!selected_mob || !selected_mob[0])
         return transaction;
     try {
         if (state.generation == (std::numeric_limits<std::uint64_t>::max)()) {
@@ -1035,6 +1128,9 @@ void retained_static_finish_source(
             }
             ResourceFailure failure{};
             write_owned_loader_receipt(*snapshot, failure);
+#ifndef EID3D11_EMBEDDED
+            if (auto slim = core_slim_source(snapshot)) snapshot = std::move(slim);
+#endif
             if (!snapshot->mob || !snapshot->terrain ||
                 !state.scene.publish_source(transaction, snapshot))
                 state.scene.abandon_source(transaction);
@@ -1290,6 +1386,12 @@ ResourceStoreStats owned_visual_resource_stats() noexcept {
     std::lock_guard<std::mutex> guard(state.lock);
     return state.selected_resources.stats();
 }
+
+#ifndef EID3D11_EMBEDDED
+void retained_visual_textures_to_host(RetainedPublicationRecorder* recorder) noexcept {
+    g_core_host_recorder.store(recorder, std::memory_order_release);
+}
+#endif
 
 std::uint64_t owned_visual_texture_source_bytes() noexcept {
     auto& state = runtime();

@@ -1,5 +1,4 @@
 #include "x64_remote_link.h"
-#include "x64_remote_device.h"
 #include <psapi.h>
 
 #include <algorithm>
@@ -23,8 +22,7 @@ constexpr DWORD kHostStallMs = 20000;
 
 struct Link {
     bool started = false;
-    bool connected = false;     // a remote device exists
-    bool core = false;          // core mode: scene records, no client device
+    bool connected = false;     // the host runs (core mode: scene records, no device here)
     std::mutex scene_mutex;     // one scene message at a time (its fragments stay contiguous)
     bool attempt_cleared = false; // the start marker was removed after the first present
     std::wstring log_path;
@@ -34,10 +32,8 @@ struct Link {
     Control* control = nullptr;
     std::uint8_t* ring = nullptr;
     std::uint32_t ring_bytes = 0;
-    std::uint8_t* readback = nullptr;   // readback area
+    std::uint8_t* readback = nullptr;   // readback area (synchronous replies)
     std::uint32_t readback_bytes = 0;
-    std::uint8_t* prefetch = nullptr;   // prefetch slots
-    std::vector<std::uint32_t> free_prefetch; // handle_mutex
     std::uint32_t frames_ahead = 1;
     CRITICAL_SECTION ring_lock;
     std::int64_t write_pos = 0, published = 0; // ring lock
@@ -45,28 +41,15 @@ struct Link {
     char lost_reason[160]{}; // written once, before removed is visible to readers of it
     std::mutex reply_mutex;
     std::uint64_t reply_serial = 0; // reply_mutex
-    std::mutex handle_mutex;
-    std::vector<std::uint32_t> free_handles, free_slots;
-    std::uint32_t next_handle = 1, next_slot = 0;
-    // Query result segments 1..: mapped on demand (segment 0 is in Control).
-    std::atomic<QuerySlot*> query_segments[kQuerySegments]{};
-    std::vector<HANDLE> query_mappings; // handle_mutex
-    std::atomic<std::uint64_t> query_serial{0};
     // Statistics (records/bytes under the ring lock, the rest atomic).
     std::uint64_t records = 0, bytes = 0, space_waits = 0;
     double space_wait_ms = 0;
-    std::atomic<std::uint64_t> map_bytes{0}, update_bytes{0}, init_bytes{0}, readbacks{0}, prefetches{0},
-        present_waits{0};
-    std::atomic<std::int64_t> shadow_bytes{0};
-    std::atomic<int> handles{0};
+    std::atomic<std::uint64_t> present_waits{0};
     double present_wait_ms = 0, readback_ms = 0; // present thread / reply mutex
     std::uint64_t frames = 0;
     std::int64_t report_qpc = 0;
-    std::uint64_t report_tsc = 0;
     std::uint64_t report_records = 0, report_bytes = 0, report_host_frames = 0;
     double qpc_to_ms = 0;
-    std::mutex unsupported_mutex;
-    std::vector<std::string> unsupported;
 };
 
 Link& link() noexcept {
@@ -92,8 +75,8 @@ void lose(const char* reason) noexcept {
     long expected = 0;
     if (!l.removed.compare_exchange_strong(expected, static_cast<long>(DXGI_ERROR_DEVICE_REMOVED))) return;
     strncpy_s(l.lost_reason, reason, _TRUNCATE);
-    log("remote device lost: %s", reason);
-    owned::bridge_report_event("x64_remote_lost", reason);
+    log("render host lost: %s", reason);
+    owned::bridge_report_event("x64_host_lost", reason);
 }
 
 bool host_alive() noexcept {
@@ -177,8 +160,6 @@ unsigned env_number(const wchar_t* name, unsigned fallback, unsigned low, unsign
 
 } // namespace
 
-bool remote_requested() noexcept { return env_flag(L"EI_RENDERER_X64_REMOTE"); }
-
 std::wstring host_path() noexcept try {
     wchar_t host[MAX_PATH]{};
     const DWORD length = GetEnvironmentVariableW(L"EI_RENDERER_X64_HOST", host, MAX_PATH);
@@ -242,8 +223,8 @@ const char* host_unavailable_reason() noexcept {
     return reason;
 }
 
-bool remote_wanted() noexcept try {
-    const bool forced = remote_requested();
+bool core_wanted() noexcept try {
+    const bool forced = core_requested();
     wchar_t value[16]{};
     GetPrivateProfileStringW(L"graphics", L"x64_render_host", L"false", value, 16, owned::renderer_config_path().c_str());
     const bool option = _wcsicmp(value, L"true") == 0 || _wcsicmp(value, L"1") == 0;
@@ -255,7 +236,7 @@ bool remote_wanted() noexcept try {
         set_option_off();
         leave_notice("64-bit render host failed to start last time and was turned off (F10 > Display). "
                      "Using the standard renderer.");
-        owned::bridge_report_event("x64_remote_rolled_back", "the previous start left its marker; option turned off");
+        owned::bridge_report_event("x64_host_rolled_back", "the previous start left its marker; option turned off");
         return false;
     }
     if (const char* reason = host_unavailable_reason()) {
@@ -263,23 +244,16 @@ bool remote_wanted() noexcept try {
         char text[200];
         std::snprintf(text, sizeof(text), "64-bit render host unavailable (%s) and turned off. Using the standard renderer.", reason);
         leave_notice(text);
-        owned::bridge_report_event("x64_remote_start_failed", reason);
+        owned::bridge_report_event("x64_host_unavailable", reason);
         return false;
     }
-    // The marker goes down before the host is launched (create_remote_device).
+    // The marker goes down before the host is launched (core_ensure); the
+    // first host frame removes it (note_first_present).
     const HANDLE file = CreateFileW(marker.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
     return true;
 } catch (...) {
     return false;
-}
-
-void remote_start_failed(const char* reason) noexcept {
-    DeleteFileW(attempt_marker().c_str());
-    set_option_off();
-    char text[320];
-    std::snprintf(text, sizeof(text), "64-bit render host could not start (%s) and was turned off. Using the standard renderer.", reason);
-    leave_notice(text);
 }
 
 const char* remote_notice() noexcept {
@@ -314,48 +288,17 @@ void log(const char* format, ...) noexcept {
         std::fprintf(file, "%02u:%02u:%02u.%03u %s\n", now.wHour, now.wMinute, now.wSecond, now.wMilliseconds, text);
         std::fclose(file);
     }
-    OutputDebugStringA("EID3D11 x64 remote: ");
+    OutputDebugStringA("EID3D11 x64 host link: ");
     OutputDebugStringA(text);
     OutputDebugStringA("\n");
 }
 
-namespace {
-// True the first time `what` is seen.
-bool first_report(const char* what) noexcept try {
-    auto& l = link();
-    std::lock_guard<std::mutex> lock(l.unsupported_mutex);
-    for (const auto& seen : l.unsupported)
-        if (seen == what) return false;
-    l.unsupported.emplace_back(what);
-    return true;
-} catch (...) {
-    return true;
-}
-} // namespace
-
-void unsupported(const char* what) noexcept {
-    if (first_report(what)) {
-        log("UNSUPPORTED call in remote mode: %s (the device is lost; the game closes at the next Present)", what);
-        owned::bridge_report_event("x64_remote_unsupported", what);
-    }
-    char reason[160];
-    std::snprintf(reason, sizeof(reason), "unsupported call in remote mode: %s", what);
-    lose(reason);
-}
-
-// A named failure outside the D3D11 call stream (the neighbour client):
-// the device is lost and the game closes at the next Present naming it.
+// A named failure: the device is lost and the game closes at the next
+// Present naming it.
 void lose_device(const char* reason) noexcept { lose(reason); }
 
-void remote_warning(const char* what) noexcept {
-    if (!first_report(what)) return;
-    log("warning (result identical to the local device): %s", what);
-    owned::bridge_report_event("x64_remote_warning", what);
-}
-
-bool link_start(HWND game_window, UINT device_flags, char* error, std::size_t error_bytes, bool core) noexcept try {
+bool link_start(HWND game_window, UINT device_flags, char* error, std::size_t error_bytes) noexcept try {
     auto& l = link();
-    l.core = core;
     const auto fail = [&](const char* text) {
         std::snprintf(error, error_bytes, "%s (%lu)", text, GetLastError());
         log("start failed: %s", error);
@@ -363,7 +306,7 @@ bool link_start(HWND game_window, UINT device_flags, char* error, std::size_t er
         if (l.host_process) { TerminateProcess(l.host_process, 1); CloseHandle(l.host_process); l.host_process = nullptr; }
         return false;
     };
-    if (l.started) return fail("the remote device was already started once");
+    if (l.started) return fail("the render host was already started once");
     l.started = true;
     const std::wstring host_path = x64remote::host_path();
     if (host_path.empty()) return fail("the host executable path is unknown");
@@ -371,14 +314,11 @@ bool link_start(HWND game_window, UINT device_flags, char* error, std::size_t er
     l.ring_bytes = env_number(L"EI_RENDERER_X64_RING_MB", 32, 8, 256) << 20;
     l.frames_ahead = env_number(L"EI_RENDERER_X64_FRAMES_AHEAD", 1, 1, 3);
     l.readback_bytes = env_number(L"EI_RENDERER_X64_READBACK_MB", 4, 1, 64) << 20;
-    g_client_timing = env_flag(L"EI_RENDERER_X64_CLIENT_TIMING");
     const DWORD pid = GetCurrentProcessId();
-    log("---- remote device start: pid=%lu ring=%u MB readback=%u MB prefetch=%u KB frames_ahead=%u control=%u KB", pid,
-        l.ring_bytes >> 20, l.readback_bytes >> 20, (kPrefetchSlots * kPrefetchSlotBytes) >> 10, l.frames_ahead,
-        static_cast<unsigned>(sizeof(Control) >> 10));
+    log("---- render host start: pid=%lu ring=%u MB readback=%u MB frames_ahead=%u control=%u KB", pid,
+        l.ring_bytes >> 20, l.readback_bytes >> 20, l.frames_ahead, static_cast<unsigned>(sizeof(Control) >> 10));
     wchar_t name[96];
-    const std::uint64_t total = sizeof(Control) + std::uint64_t(l.ring_bytes) + l.readback_bytes +
-                                std::uint64_t(kPrefetchSlots) * kPrefetchSlotBytes;
+    const std::uint64_t total = sizeof(Control) + std::uint64_t(l.ring_bytes) + l.readback_bytes;
     swprintf_s(name, L"Local\\eid3d11_x64r_%lu", pid);
     l.mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, static_cast<DWORD>(total), name);
     if (!l.mapping) return fail("shared memory creation failed");
@@ -387,10 +327,7 @@ bool link_start(HWND game_window, UINT device_flags, char* error, std::size_t er
     l.control = reinterpret_cast<Control*>(view);
     l.ring = view + sizeof(Control);
     l.readback = l.ring + l.ring_bytes;
-    l.prefetch = l.readback + l.readback_bytes;
-    for (std::uint32_t slot = kPrefetchSlots; slot-- > 0;) l.free_prefetch.push_back(slot);
     std::memset(l.control, 0, sizeof(Control));
-    std::memset(l.prefetch, 0, std::size_t(kPrefetchSlots) * kPrefetchSlotBytes);
     l.control->magic = kMagic;
     l.control->version = kVersion;
     l.control->ring_bytes = l.ring_bytes;
@@ -398,7 +335,7 @@ bool link_start(HWND game_window, UINT device_flags, char* error, std::size_t er
     l.control->requested_flags = device_flags;
     l.control->frames_ahead = l.frames_ahead;
     l.control->readback_bytes = l.readback_bytes;
-    l.control->core_mode = core ? 1u : 0u;
+    l.control->core_mode = 1u;
     const auto event = [&](const wchar_t* kind) {
         swprintf_s(name, L"Local\\eid3d11_x64r_%s_%lu", kind, pid);
         return CreateEventW(nullptr, FALSE, FALSE, name);
@@ -408,9 +345,15 @@ bool link_start(HWND game_window, UINT device_flags, char* error, std::size_t er
     l.reply = event(L"reply");
     l.present = event(L"present");
     if (!l.work || !l.space || !l.reply || !l.present) return fail("event creation failed");
-    wchar_t command[MAX_PATH + 96];
-    swprintf_s(command, L"\"%s\" --remote --pid %lu --hwnd %llu", host_path.c_str(), pid,
-               static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(game_window)));
+    // renderer_backend=d3d12 (opt-in, experimental): the host draws with its
+    // D3D12 backend, or stays on D3D11 naming why (host.log).
+    wchar_t backend[16]{};
+    GetPrivateProfileStringW(L"graphics", L"renderer_backend", L"d3d11", backend, 16, owned::renderer_config_path().c_str());
+    const bool d3d12 = _wcsicmp(backend, L"d3d12") == 0 || _wcsicmp(backend, L"1") == 0;   // F10 Renderer: 1; older ini files: d3d12
+    wchar_t command[MAX_PATH + 128];
+    swprintf_s(command, L"\"%s\" --remote --pid %lu --hwnd %llu%s", host_path.c_str(), pid,
+               static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(game_window)), d3d12 ? L" --backend d3d12" : L"");
+    if (d3d12) log("renderer_backend=d3d12: the host is asked for its Direct3D 12 backend");
     STARTUPINFOW startup{sizeof(startup)};
     PROCESS_INFORMATION process{};
     if (!CreateProcessW(nullptr, command, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process))
@@ -440,7 +383,7 @@ bool link_start(HWND game_window, UINT device_flags, char* error, std::size_t er
     std::snprintf(detail, sizeof(detail), "host pid=%lu adapter=%s feature_level=%x ring_mb=%u frames_ahead=%u",
                   process.dwProcessId, adapter, l.control->caps.feature_level, l.ring_bytes >> 20, l.frames_ahead);
     log("connected: %s", detail);
-    owned::bridge_report_event("x64_remote_connected", detail);
+    owned::bridge_report_event("x64_host_connected", detail);
     l.connected = true;
     return true;
 } catch (...) {
@@ -451,31 +394,15 @@ bool link_start(HWND game_window, UINT device_flags, char* error, std::size_t er
 Control& control() noexcept { return *link().control; }
 const std::uint8_t* readback_area() noexcept { return link().readback; }
 std::uint32_t readback_bytes() noexcept { return link().readback_bytes; }
-const PrefetchSlot& prefetch_slot(std::uint32_t slot) noexcept {
-    return *reinterpret_cast<const PrefetchSlot*>(link().prefetch + std::size_t(slot) * kPrefetchSlotBytes);
-}
-const std::uint8_t* prefetch_data(std::uint32_t slot) noexcept {
-    return link().prefetch + std::size_t(slot) * kPrefetchSlotBytes + sizeof(PrefetchSlot);
-}
-std::uint32_t allocate_prefetch_slot() noexcept {
-    auto& l = link();
-    std::lock_guard<std::mutex> lock(l.handle_mutex);
-    if (l.free_prefetch.empty()) return kPrefetchSlots;
-    const std::uint32_t slot = l.free_prefetch.back();
-    l.free_prefetch.pop_back();
-    return slot;
-}
-void free_prefetch_slot(std::uint32_t slot) noexcept try {
-    auto& l = link();
-    if (slot >= kPrefetchSlots) return;
-    std::lock_guard<std::mutex> lock(l.handle_mutex);
-    l.free_prefetch.push_back(slot);
-} catch (...) {}
 std::uint32_t chunk_bytes() noexcept { return link().ring_bytes / 4; }
 HRESULT link_removed() noexcept { return link().removed.load(std::memory_order_relaxed); }
-bool remote_active() noexcept { return link().connected && !link().core; }
 bool core_requested() noexcept { return env_flag(L"EI_RENDERER_X64_CORE"); }
-bool core_active() noexcept { return link().connected && link().core; }
+bool core_active() noexcept { return link().connected; }
+void signal_clean_exit() noexcept {
+    if (!core_active() || !link().control) return;
+    MemoryBarrier();
+    InterlockedExchange(&link().control->game_clean_exit, 1);
+}
 std::uint64_t host_private_bytes() noexcept {
     auto& l = link();
     if (!l.connected || !l.host_process) return 0;
@@ -496,7 +423,7 @@ void scene_message(std::uint16_t command, const std::uint8_t* data, std::size_t 
     do {
         const std::size_t part = (std::min)(fragment, bytes - at);
         const SceneFragment header{static_cast<std::uint32_t>(part), command, at + part == bytes ? std::uint16_t(1) : std::uint16_t(0)};
-        Writer w(Op::scene, 0, static_cast<std::uint32_t>(sizeof(header) + part));
+        Writer w(Op::scene, static_cast<std::uint32_t>(sizeof(header) + part));
         w.put(header);
         if (part) w.put(data + at, static_cast<std::uint32_t>(part));
         at += part;
@@ -513,20 +440,33 @@ const char* remote_lost_reason() noexcept {
     auto& l = link();
     return l.removed.load() && l.lost_reason[0] ? l.lost_reason : nullptr;
 }
-bool g_client_timing = false;
-
-ClientTicks& client_ticks() noexcept {
-    thread_local ClientTicks ticks;
-    return ticks;
+// DLSS runs in the host Renderer (host_bridge.cpp); the game process's
+// Renderer never upscales with it (its Upscaling option names why).
+bool dlss_caps(DlssCaps& out) noexcept {
+    out = {};
+    strncpy_s(out.reason, "needs the 64-bit render host", _TRUNCATE);
+    return false;
 }
+bool dlss_render_size(UINT, UINT, int, UINT&, UINT&) noexcept { return false; }
+HRESULT dlss_evaluate(ID3D11DeviceContext*, const DlssEvaluate&) noexcept { return E_NOTIMPL; }
+HRESULT dlss_evaluate_d3d12(ID3D12GraphicsCommandList*, ID3D12Resource* const*, const DlssEvaluate&) noexcept { return E_NOTIMPL; }
+void dlss_release() noexcept {}
+bool dlssg_caps(DlssgCaps& out) noexcept {
+    out = {};
+    strncpy_s(out.reason, "needs the 64-bit render host", _TRUNCATE);
+    return false;
+}
+HRESULT dlssg_evaluate_d3d12(ID3D12GraphicsCommandList*, ID3D12Resource* const*, const DlssgEvaluate&) noexcept { return E_NOTIMPL; }
+void dlssg_release() noexcept {}
+std::uint64_t dlssg_vram_estimate(UINT, UINT, UINT, UINT) noexcept { return 0; }
+bool host_presented() noexcept { return false; }
 
-Writer::Writer(Op op, std::uint16_t context, std::uint32_t payload_bytes) noexcept
-    : start_ticks_(g_client_timing ? __rdtsc() : 0) {
+Writer::Writer(Op op, std::uint32_t payload_bytes) noexcept {
     auto& l = link();
     const std::uint32_t total = (static_cast<std::uint32_t>(sizeof(Record)) + payload_bytes + 7u) & ~7u;
     EnterCriticalSection(&l.ring_lock);
-    // The lock is recursive: a record started inside another (a proxy
-    // released while writing) would interleave the two. Never expected.
+    // The lock is recursive: a record started inside another would
+    // interleave the two. Never expected.
     if (t_in_writer) lose("a record was started inside another record (internal error)");
     t_in_writer = true;
     // Dropped records go to a scratch buffer: the device is gone, a chunking
@@ -548,7 +488,7 @@ Writer::Writer(Op op, std::uint16_t context, std::uint32_t payload_bytes) noexce
         auto* record = reinterpret_cast<Record*>(l.ring + offset);
         record->size = pad;
         record->op = static_cast<std::uint16_t>(Op::pad);
-        record->context = 0;
+        record->reserved = 0;
         l.write_pos += pad;
         offset = 0;
     }
@@ -556,7 +496,7 @@ Writer::Writer(Op op, std::uint16_t context, std::uint32_t payload_bytes) noexce
     auto* record = reinterpret_cast<Record*>(l.ring + offset);
     record->size = total;
     record->op = static_cast<std::uint16_t>(op);
-    record->context = context;
+    record->reserved = 0;
     cursor_ = l.ring + offset + sizeof(Record);
     l.write_pos += total;
     end_ = l.write_pos;
@@ -569,7 +509,6 @@ Writer::~Writer() {
     t_in_writer = false;
     if (l.write_pos - l.published >= kPublishBytes) publish_locked();
     LeaveCriticalSection(&l.ring_lock);
-    if (start_ticks_) client_ticks().writer_ticks += __rdtsc() - start_ticks_;
 }
 
 void publish() noexcept {
@@ -591,7 +530,7 @@ HRESULT wait_reply(std::uint64_t serial) noexcept {
     publish();
     const std::int64_t start = now_qpc();
     const bool ok = wait_until([&] { return l.control->reply_serial >= serial; }, l.control->reply_waiting, l.reply, kHostStallMs);
-    if (!ok && !l.removed.load()) lose("the host did not answer a readback for 20 s");
+    if (!ok && !l.removed.load()) lose("the host did not answer a request for 20 s");
     const HRESULT hr = ok ? static_cast<HRESULT>(l.control->reply_hr) : static_cast<HRESULT>(DXGI_ERROR_DEVICE_REMOVED);
     l.readback_ms += (now_qpc() - start) * l.qpc_to_ms;
     return hr;
@@ -612,85 +551,11 @@ void wait_presents(std::uint64_t serial) noexcept {
     l.present_wait_ms += (now_qpc() - start) * l.qpc_to_ms;
 }
 
-std::int64_t consumed_position() noexcept { return link().control->read_pos; }
-
-std::uint32_t allocate_handle() noexcept {
-    auto& l = link();
-    std::lock_guard<std::mutex> lock(l.handle_mutex);
-    ++l.handles;
-    if (!l.free_handles.empty()) {
-        const std::uint32_t handle = l.free_handles.back();
-        l.free_handles.pop_back();
-        return handle;
-    }
-    return l.next_handle++;
-}
-
-void free_handle(std::uint32_t handle) noexcept try {
-    auto& l = link();
-    std::lock_guard<std::mutex> lock(l.handle_mutex);
-    --l.handles;
-    l.free_handles.push_back(handle);
-} catch (...) {}
-
-std::uint32_t allocate_query_slot() noexcept {
-    auto& l = link();
-    std::lock_guard<std::mutex> lock(l.handle_mutex);
-    if (!l.free_slots.empty()) {
-        const std::uint32_t slot = l.free_slots.back();
-        l.free_slots.pop_back();
-        return slot;
-    }
-    const std::uint32_t segment = l.next_slot / kMaxQueries;
-    if (segment >= kQuerySegments) return kNoQuerySlot; // never reached: the mappings fail first
-    if (segment && !l.query_segments[segment].load(std::memory_order_acquire)) {
-        // A new segment, created before any record names one of its slots.
-        wchar_t name[96];
-        swprintf_s(name, kQuerySegmentName, segment, GetCurrentProcessId());
-        HANDLE mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
-                                            static_cast<DWORD>(kQuerySegmentBytes), name);
-        void* view = mapping ? MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0, kQuerySegmentBytes) : nullptr;
-        if (!view) {
-            log("query result segment %u (slots %u..) could not be mapped: error %lu", segment, l.next_slot, GetLastError());
-            if (mapping) CloseHandle(mapping);
-            return kNoQuerySlot;
-        }
-        try { l.query_mappings.push_back(mapping); } catch (...) {}
-        l.query_segments[segment].store(static_cast<QuerySlot*>(view), std::memory_order_release);
-        log("query result segment %u mapped (%u slots live)", segment, (segment + 1) * kMaxQueries);
-    }
-    return l.next_slot++;
-}
-
-void free_query_slot(std::uint32_t slot) noexcept try {
-    auto& l = link();
-    if (slot == kNoQuerySlot) return;
-    std::lock_guard<std::mutex> lock(l.handle_mutex);
-    l.free_slots.push_back(slot);
-} catch (...) {}
-
-const QuerySlot& query_slot(std::uint32_t slot) noexcept {
-    auto& l = link();
-    const std::uint32_t segment = slot / kMaxQueries;
-    const QuerySlot* base = segment ? l.query_segments[segment].load(std::memory_order_acquire) : l.control->queries;
-    return base[slot % kMaxQueries];
-}
-
-std::uint64_t next_query_serial() noexcept { return ++link().query_serial; }
-
-void count_map(std::uint32_t bytes) noexcept { link().map_bytes += bytes; }
-void count_update(std::uint32_t bytes) noexcept { link().update_bytes += bytes; }
-void count_init(std::uint32_t bytes) noexcept { link().init_bytes += bytes; }
-void count_readback(double) noexcept { ++link().readbacks; }
-void count_prefetch() noexcept { ++link().prefetches; }
-void count_shadow(std::int64_t bytes) noexcept { link().shadow_bytes += bytes; }
-void count_handles(int) noexcept {}
-
 void report_frame() noexcept {
     auto& l = link();
     ++l.frames;
     const std::int64_t now = now_qpc();
-    if (!l.report_qpc) { l.report_qpc = now; l.report_tsc = __rdtsc(); client_ticks() = {}; return; }
+    if (!l.report_qpc) { l.report_qpc = now; return; }
     const double elapsed = (now - l.report_qpc) * l.qpc_to_ms;
     if (elapsed < 2000.0) return;
     std::uint64_t records = 0, bytes = 0, space_waits = 0;
@@ -701,26 +566,11 @@ void report_frame() noexcept {
     LeaveCriticalSection(&l.ring_lock);
     const double frames = static_cast<double>(l.frames);
     const std::uint64_t host_frames = l.control->host_frames;
-    // rdtsc ticks to ms over this report window.
-    const std::uint64_t tsc = __rdtsc();
-    const double tick_ms = l.report_tsc && tsc > l.report_tsc ? elapsed / double(tsc - l.report_tsc) : 0.0;
-    ClientTicks& t = client_ticks();
-    if (g_client_timing) log("client cost on the presenting thread, per frame: calls=%.0f call_ms=%.3f (records written %.3f, dynamic Map/Unmap %.3f, "
-        "remaining state mirror and checks %.3f)",
-        t.calls / frames, t.call_ticks * tick_ms / frames, t.writer_ticks * tick_ms / frames, t.map_ticks * tick_ms / frames,
-        (double(t.call_ticks) - double(t.writer_ticks) - double(t.map_ticks)) * tick_ms / frames);
-    t = {};
-    l.report_tsc = tsc;
-    log("per frame (%llu frames, %.1f/s): records=%.0f KB=%.1f map_KB=%.1f update_KB=%.1f init_KB=%.1f readbacks=%.2f "
-        "prefetches=%.2f | waits: ring=%llu (%.1f ms) ahead=%llu (%.2f ms/frame) readback=%.2f ms/frame | "
-        "map_blocks_MB=%.1f handles=%d host_frames=%llu removed=%08lx",
+    log("per frame (%llu frames, %.1f/s): records=%.0f KB=%.1f | waits: ring=%llu (%.1f ms) ahead=%llu (%.2f ms/frame) "
+        "readback=%.2f ms/frame | host_frames=%llu removed=%08lx",
         static_cast<unsigned long long>(l.frames), frames * 1000.0 / elapsed, (records - l.report_records) / frames,
-        (bytes - l.report_bytes) / frames / 1024.0, l.map_bytes.exchange(0) / frames / 1024.0,
-        l.update_bytes.exchange(0) / frames / 1024.0, l.init_bytes.exchange(0) / frames / 1024.0,
-        l.readbacks.exchange(0) / frames, l.prefetches.exchange(0) / frames,
-        static_cast<unsigned long long>(space_waits), space_ms,
+        (bytes - l.report_bytes) / frames / 1024.0, static_cast<unsigned long long>(space_waits), space_ms,
         static_cast<unsigned long long>(l.present_waits.exchange(0)), l.present_wait_ms / frames, l.readback_ms / frames,
-        l.shadow_bytes.load() / 1048576.0, l.handles.load(),
         static_cast<unsigned long long>(host_frames - l.report_host_frames), static_cast<unsigned long>(l.removed.load()));
     l.report_records = records;
     l.report_bytes = bytes;

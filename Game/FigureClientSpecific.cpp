@@ -17,6 +17,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "model_draw.h"
 #include "model_preview_material.h"
 #include "GameJournal.h"
+#include "CorePerf.h"
 /////////////////////////////////////////////////////////////////////////////////////
 CFigureClientSpecific::CFigureClientSpecific()
 {
@@ -33,7 +34,7 @@ CFigureClientSpecific::~CFigureClientSpecific()
 BOOL CFigureClientSpecific::Create()
 {
     ResetAllFlags();
-    scale = CPlot3D(1, 1, 1);
+    scale = CPlot3D(1, 1, 1);pickingFrame=-1;pickingExact=false;rcPickBounds.SetRectEmpty();
 
     return TRUE;
 }
@@ -289,10 +290,13 @@ BOOL CFigureClientSpecific::Draw(CRenderer *pRend, const CQuaternion &qObject,
     return TRUE; // Rejected owned figures are diagnosed, with no alternate draw.
 }
 //
-void CFigureClientSpecific::CalculateScreenBounds(CRenderer *pRend, CRect *pRect)
+void CFigureClientSpecific::CalculateScreenBounds() const
 {
+    // Deferred until a selection candidate survives the figure BV rectangle.
+    // The captured world matrix belongs to this frame's prepared host pose.
+    CorePerf::Scope timing(CorePerf::Picking);
+    pickingExact=true;rcClip.SetRectEmpty();
     IGeometry *pGeometry = GetGeometry();
-    if (pRect)
     {
         const SXYZW4 *plots = pFigure->plots4;
         const SVertexComponents *components = pFigure->components;
@@ -303,9 +307,8 @@ void CFigureClientSpecific::CalculateScreenBounds(CRenderer *pRend, CRect *pRect
         FigureScreenBounds::Bounds bounds;
         if (haveGeometry && plots && components && indices)
         {
-            CDXGeometryProcessor *gpu = pRend->GetGeometryProcessor();
-            const SHMatrix matrix = gpu->GetWorldToScreenMatrix() *
-                                    gpu->GetMatrix(MAT_STACK_WORLDSPACE);
+            pickingVertices.resize(size_t(count)*4);
+            pickingVisited.assign(size_t(count)*4,0);
             for (DWORD i = 0; i + 2 < indexCount; i += 3)
             {
                 FigureScreenBounds::Point triangle[3];
@@ -314,25 +317,25 @@ void CFigureClientSpecific::CalculateScreenBounds(CRenderer *pRend, CRect *pRect
                 {
                     const DWORD vertex = components[indices[i + j]].gv;
                     if (vertex / 4 >= count) { valid = false; break; }
-                    const SXYZW4 &quad = plots[vertex / 4];
-                    const int lane = vertex % 4;
-                    CPlot3D local(quad.x[lane], quad.y[lane], quad.z[lane]);
-                    if (vertex < DWORD(pFigure->morphs.GetSize())) local += pFigure->morphs[vertex];
-                    const SXYZW projected = matrix.Rotate4Vector(local);
-                    triangle[j] = { projected.x, projected.y, projected.w };
+                    if(!pickingVisited[vertex]) {
+                        const SXYZW4 &quad=plots[vertex/4];const int lane=vertex%4;
+                        CPlot3D local(quad.x[lane],quad.y[lane],quad.z[lane]);
+                        if(vertex<DWORD(pFigure->morphs.GetSize()))local+=pFigure->morphs[vertex];
+                        pickingVertices[vertex]=pickingMatrix.Rotate4Vector(local);pickingVisited[vertex]=1;
+                    }
+                    const auto& projected=pickingVertices[vertex];
+                    triangle[j]={projected.x,projected.y,projected.w};
                 }
                 if (valid) bounds.AddTriangle(triangle);
             }
         }
         if (bounds.valid)
             rcClip.SetRect(bounds.Left(), bounds.Top(), bounds.Right(), bounds.Bottom());
-        *pRect = rcClip;
     }
 }
 
 void CFigureClientSpecific::PrepareOwnedPicking(CRenderer *pRend, CRect *pRect)
 {
-    rcClip.SetRectEmpty();
     if (pRect) pRect->SetRectEmpty();
     pFigure->ResetFlag(FIG_VISIBLE);
     if (pFigure->CheckFlag(FIG_HIDDEN) ||
@@ -342,7 +345,28 @@ void CFigureClientSpecific::PrepareOwnedPicking(CRenderer *pRend, CRect *pRect)
     if (pFigure->GetTextureTypeID() >= TTID_ANIMATED1 &&
         pFigure->GetTextureTypeID() <= TTID_ANIMATED4)
         CalcAnimatedTextureFrame(theWorld.GetPreciseTime());
-    CalculateScreenBounds(pRend, pRect);
+    if(!pRect)return;
+    auto* gpu=pRend->GetGeometryProcessor();
+    const SHMatrix matrix=gpu->GetWorldToScreenMatrix()*gpu->GetMatrix(MAT_STACK_WORLDSPACE);
+    const int frame=theWorld.GetFrameCounter();
+    if(pickingFrame!=frame||memcmp(&pickingMatrix,&matrix,sizeof(matrix))!=0) {
+        pickingFrame=frame;pickingMatrix=matrix;pickingExact=false;
+        FigureScreenBounds::Point vertices[8];const auto& bv=pFigure->bv;
+        for(unsigned i=0;i<8;++i) {
+            const auto low=bv.IsSphere()?bv.ptCenter-CPlot3D(bv.fpRadius,bv.fpRadius,bv.fpRadius):bv.ptMin;
+            const auto high=bv.IsSphere()?bv.ptCenter+CPlot3D(bv.fpRadius,bv.fpRadius,bv.fpRadius):bv.ptMax;
+            const auto p=matrix.Rotate4Vector(CPlot3D((i&1)?high.x:low.x,(i&2)?high.y:low.y,(i&4)?high.z:low.z));
+            vertices[i]={p.x,p.y,p.w};
+        }
+        static constexpr unsigned faces[12][3]={{0,1,3},{0,3,2},{4,6,7},{4,7,5},{0,4,5},{0,5,1},{2,3,7},{2,7,6},{0,2,6},{0,6,4},{1,5,7},{1,7,3}};
+        FigureScreenBounds::Bounds bounds;
+        for(const auto& face:faces) {
+            const FigureScreenBounds::Point triangle[]={vertices[face[0]],vertices[face[1]],vertices[face[2]]};bounds.AddTriangle(triangle);
+        }
+        rcPickBounds.SetRectEmpty();rcClip.SetRectEmpty();
+        if(bounds.valid)rcPickBounds.SetRect(bounds.Left(),bounds.Top(),bounds.Right(),bounds.Bottom());
+    }
+    *pRect=rcPickBounds;
 }
 
 BOOL CFigureClientSpecific::Draw(CRenderer *pRend, CSimplyArray<CLight *, CLight *> &lights,

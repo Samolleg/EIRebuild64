@@ -41,7 +41,6 @@
 #include "retained_static_scene.h"
 #include "widescreen.h"
 #include "test_harness.h"
-#include "x64_remote_device.h"
 #include "x64_remote_link.h"
 #include "dlss_frame.h"
 #include "stall_watchdog.h"
@@ -171,9 +170,6 @@ const std::string& native_shader_source();
 const std::string& owned_native_shader_source(){return native_shader_source();}
 const std::string& native_shader_source(){
  static const std::string source=compose_native_shader_source();return source;
-}
-const std::string& native_build_shader_source(){
- static const std::string source=compose_native_shader_source({},true);return source;
 }
 namespace {
 

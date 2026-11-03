@@ -99,6 +99,8 @@ void owned_resource_runtime_acquire(const wchar_t* game_registry_key = nullptr) 
 void owned_resource_runtime_poll() noexcept;
 bool owned_visual_resource_mounts(ResourceStoreConfig& mounts);
 bool owned_text_resource_mounts(ResourceStoreConfig& mounts);
+// The database family (items.idb), mod archives first.
+bool owned_data_resource_mounts(ResourceStoreConfig& mounts);
 void owned_resource_runtime_release() noexcept;
 
 bool retained_static_runtime_requested() noexcept;
@@ -113,12 +115,13 @@ bool registry_root_loads_starter_addon(const wchar_t* game_registry_key) noexcep
 bool derive_owned_resource_mounts(const std::wstring& work_path,
     const std::wstring& resource_path, const std::wstring& addon_path,
     const std::vector<std::uint8_t>& config, ResourceStoreConfig& mounts,
-    ResourceFailure& failure, ResourceStoreConfig* text_mounts = nullptr);
+    ResourceFailure& failure, ResourceStoreConfig* text_mounts = nullptr,
+    ResourceStoreConfig* data_mounts = nullptr);
 bool owned_resource_runtime_mounts(ResourceStoreConfig& mounts) noexcept;
 // x64 host (core mode): the game process's mounts (scene_core::ResourceMounts);
 // the host runs no loader of its own.
 void owned_resource_runtime_adopt_mounts(const ResourceStoreConfig& mounts,
-    const ResourceStoreConfig& text_mounts) noexcept;
+    const ResourceStoreConfig& text_mounts, const ResourceStoreConfig& data_mounts) noexcept;
 std::uint64_t retained_static_begin_source(MobSourceRole role,
                                            const char* name,
                                            const char* selected_mob = nullptr) noexcept;
@@ -153,6 +156,12 @@ RetainedTerrainSourceIdentity retained_static_terrain_source_identity() noexcept
 ResourceStoreStats owned_visual_resource_stats() noexcept;   // temporary: memory attribution
 // Temporary (#142): CPU texture bytes the live visual textures still hold.
 std::uint64_t owned_visual_texture_source_bytes() noexcept;
+// Core mode, game process: archive textures (S5a) and map sources (S5b) are
+// defined on the x64 host through this recorder and kept here slim.
+class RetainedPublicationRecorder;
+#ifndef EID3D11_EMBEDDED
+void retained_visual_textures_to_host(RetainedPublicationRecorder* recorder) noexcept;
+#endif
 
 #ifdef EID3D11_TESTING
 struct OwnedVisualClipReuseTestStats {

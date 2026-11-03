@@ -13,7 +13,7 @@
 #include "widescreen.h"
 #include "world_fog.h"
 #include "camp_inventory.h"
-#include "x64_remote_device.h"
+#include "x64_remote_link.h"
 #include "dlss_frame.h"
 
 #include <dxgi1_4.h>
@@ -131,6 +131,7 @@ int configured_value(const RendererConfig& config, const char* key) {
 // The renderer this session runs (debug_overlay_set_running_renderer).
 const char* g_running_renderer = nullptr;
 bool g_running_core = false;
+bool g_running_d3d12 = false;
 // Core mode, host: the game process's address space (MB) from the control block.
 std::atomic<std::uint32_t> g_core_game_va_used_mb{0}, g_core_game_va_free_mb{0};
 
@@ -150,70 +151,48 @@ int active_upscaler(const RendererConfig& config) {
 // An option that has no effect under the current value of the one it
 // depends on: drawn greyed with a note, its own value kept for later.
 const char* blocked_option_note(const RendererConfig& config, const char* key) {
-    const auto is = [&](const char* value) { return std::strcmp(key, value) == 0; };
-    const auto starts = [&](const char* value) { return std::strncmp(key, value, std::strlen(value)) == 0; };
-    const auto boolean = [&](const char* value, bool fallback = false) {
-        const auto* option = config.find(value);
-        return option && option->type == RendererOptionType::boolean ? option->boolean_value : fallback;
-    };
-    const auto integer = [&](const char* value) { return configured_value(config, value); };
 #ifdef EID3D11_EMBEDDED
-    if (is("render_thread") || is("render_thread_frame_latency"))
+    if (std::strcmp(key, "render_thread") == 0 || std::strcmp(key, "render_thread_frame_latency") == 0)
         return "Scene thread is not yet available in EIRebuild";
-
 #endif
-    if (boolean("water_simple") && (is("water_reflections") || is("water_reflection_quality") || is("water_physical")))
-        return "turn off Stock-look water to use this option";
-    if (!boolean("water_reflections", true) && (is("water_reflection_quality") || is("water_physical")))
-        return "needs water reflections";
-    if (!boolean("shadows", true) && (is("shadow_cascade_quality") || is("shadow_close_cascades") || is("shadow_far") || is("shadow_far_foliage_opaque") || is("shadow_sun_angle")))
-        return "needs sun shadows";
-    if (is("shadow_far_foliage_opaque") && !boolean("shadow_far", true)) return "needs distant shadows";
-    if (!boolean("point_shadows", true) && starts("point_shadow_")) return "needs lamp and torch shadows";
-    if (is("shadow_softness") && !boolean("shadows", true) && !boolean("point_shadows", true))
-        return "needs sun or lamp shadows";
-    if (integer("shadow_softness") == 0 && (is("shadow_sun_angle") || is("point_shadow_light_size")))
-        return "needs soft shadows";
-    if ((is("terrain_antitile") || is("terrain_height_blend")) && integer("terrain_quality") == 0)
-        return "needs High terrain detail";
-    if (is("terrain_cliffs") && integer("terrain_blend") == 0) return "needs terrain blending";
-    if (starts("cliff_") && (!boolean("terrain_cliffs", true) || integer("terrain_blend") == 0))
-        return "needs cliff texturing and terrain blending";
-    if (is("terrain_far_detile") && integer("terrain_blend") == 0) return "needs terrain blending";
-    if (starts("terrain_bake_") && integer("terrain_bake") == 0) return "needs terrain baking";
-    if ((starts("neighbour_fog_") || is("terrain_blend_neighbours") || is("terrain_bake_neighbours")) && !boolean("neighbour_maps", true))
-        return "needs neighbouring maps";
-    if (is("terrain_blend_neighbours") && integer("terrain_blend") == 0) return "needs terrain blending";
-    if (is("ground_cover_distance") && integer("ground_cover") == 0) return "needs grass and ground cover";
-    if (starts("ambient_particle_") && integer("ambient_particles") == 0) return "needs ambient particles";
-    if (is("tree_sway_strength") && !boolean("tree_sway", true)) return "needs swaying trees";
-    if (starts("ao_") && !is("ao_quality") && integer("ao_quality") == 0) return "needs ambient occlusion";
-    if (starts("sky_") && !is("sky_clouds") && !is("sky_weather_test") && integer("sky_clouds") == 0)
-        return "needs the animated sky";
-    if (is("sky_weather_test") && integer("sky_clouds") == 0) return "needs the animated sky; main menu only";
-    if (is("fog_volume_quality") && integer("fog_preset") < 2) return "needs Volumetric fog";
-    if (starts("fog_") && !is("fog_preset") && !is("fog_volume_quality") && integer("fog_preset") == 0)
-        return "needs Atmospheric or Volumetric fog";
-    if (is("sun_shaft_strength") && integer("sun_shafts") == 0) return "needs sun shafts";
-    if (is("bloom_strength") || is("bloom_threshold") || is("bloom_debug_view"))
-        if (integer("bloom") == 0) return "needs bloom";
-    if (is("emissive_light_strength") && integer("emissive_lights") == 0) return "needs emissive lighting";
-    if (is("depth_of_field_strength") && integer("depth_of_field") == 0) return "needs depth of field";
-    if (is("lod_pixel_error") && !boolean("lod", true)) return "needs object LOD";
-    if (starts("impostor_") && !boolean("impostors", true)) return "needs crown impostors";
-    if (const char* suffix = std::strstr(key, "_fade_transparency")) {
-        const std::string parent = std::string(key, suffix) + "_auto_fade";
-        if (!boolean(parent.c_str())) return "needs this widget's auto fade";
+    // Terrain cliffs need the material blend (configured_terrain_cliffs).
+    if (std::strcmp(key, "terrain_cliffs") == 0 && configured_value(config, "terrain_blend") <= 0)
+        return "needs material blend";
+    // The portrait helmet belongs to the owned portrait head (renderer_game.cpp, default on).
+    if (std::strcmp(key, "portrait_helmet") == 0) {
+        const RendererOption* head = config.find("portrait_head");
+        if (head && head->type == RendererOptionType::boolean && !head->boolean_value) return "needs real head portraits";
     }
-    // The Upscaling method (dlss_frame.h): DLSS needs NGX on an
+    // The 64-bit render host cannot run on 32-bit Windows or without its exe.
+    if (std::strcmp(key, "x64_render_host") == 0) return x64remote::host_unavailable_reason();
+    // Direct3D 12 runs in the 64-bit render host.
+    if (std::strcmp(key, "renderer_backend") == 0) {
+        if (const char* reason = x64remote::host_unavailable_reason()) return reason;
+        const RendererOption* host = config.find("x64_render_host");
+        if (host && host->type == RendererOptionType::boolean && !host->boolean_value) return "needs 64-bit render host";
+    }
+    // Frame generation, its floor, Reflex and latency pacing exist on the
+    // Direct3D 12 backend only (a changed Renderer starts after a restart).
+    if (!g_running_d3d12 && (std::strcmp(key, "frame_generation") == 0 || std::strcmp(key, "frame_generation_min_fps") == 0 ||
+                             std::strcmp(key, "reflex") == 0 || std::strcmp(key, "latency_pacing") == 0))
+        return configured_value(config, "renderer_backend") != 1 ? "needs Direct3D 12 renderer" :
+               g_running_renderer && std::strstr(g_running_renderer, "Direct3D 12 refused") ? "Direct3D 12 could not start (Direct3D 11 runs)" :
+               "Direct3D 12 starts after a restart";
+    // The Upscaling method (dlss_frame.h): DLSS runs in the 64-bit host on an
     // RTX card, FSR on any Direct3D 11.3 card; greyed only when neither can.
     // A saved unavailable DLSS must still be changeable to Off in this menu.
     if (std::strcmp(key, "upscaler") == 0 && dlss_unavailable_reason() && fsr_unavailable_reason()
-        && integer("upscaler") != kUpscalerDlss)
+        && configured_value(config, "upscaler") != kUpscalerDlss)
         return "no upscaler available";
     const int upscaler = active_upscaler(config);
     if (upscaler == kUpscalerDlss && dlss_unavailable_reason() &&
-        (is("upscaler_quality") || is("upscale_sharpness"))) return dlss_unavailable_reason();
+        (std::strcmp(key, "upscaler_quality") == 0 || std::strcmp(key, "upscale_sharpness") == 0)) return dlss_unavailable_reason();
+    // Frame generation (dlss_frame.h): DLSS-G on the D3D12 backend of the
+    // host; it takes the upscaler's depth and motion vectors.
+    if (std::strcmp(key, "frame_generation") == 0) {
+        if (const char* reason = frame_generation_unavailable_reason()) return reason;
+        if (upscaler == kUpscalerOff) return "needs DLSS or FSR upscaling (motion vectors)";
+    }
     // Quality and sharpening belong to a running upscaler.
     if ((std::strcmp(key, "upscaler_quality") == 0 || std::strcmp(key, "upscale_sharpness") == 0) &&
         upscaler == kUpscalerOff)
@@ -241,33 +220,6 @@ FigureFallbackReason dominant_figure_fallback(const BridgeProfileSnapshot& bridg
     }
     return result;
 }
-
-struct ExtraShaderStageState {
-    ID3D11HullShader* hull = nullptr;
-    ID3D11DomainShader* domain = nullptr;
-    ID3D11ComputeShader* compute = nullptr;
-
-    explicit ExtraShaderStageState(ID3D11DeviceContext* context) {
-        if (!context) return;
-        context->HSGetShader(&hull, nullptr, nullptr);
-        context->DSGetShader(&domain, nullptr, nullptr);
-        context->CSGetShader(&compute, nullptr, nullptr);
-    }
-
-    void restore(ID3D11DeviceContext* context) {
-        if (context) {
-            context->HSSetShader(hull, nullptr, 0);
-            context->DSSetShader(domain, nullptr, 0);
-            context->CSSetShader(compute, nullptr, 0);
-        }
-        if (hull) hull->Release();
-        if (domain) domain->Release();
-        if (compute) compute->Release();
-        hull = nullptr;
-        domain = nullptr;
-        compute = nullptr;
-    }
-};
 
 // Segoe UI (Tahoma on older Windows) carries Cyrillic; empty when neither exists.
 std::string system_ui_font_path() {
@@ -386,7 +338,6 @@ struct DebugOverlay::Implementation {
     bool panel_resizing = false;
     ImVec2 panel_drag_start{}, panel_size_start{};
     ImGuiTextFilter settings_filter;
-    int samgbur_lod_instance = 0;
     ImGuiTextFilter graphics_filter;
     ImGuiTextFilter diagnostics_filter;
     // The running game.exe has the 4 GB (large-address-aware) flag; else the
@@ -620,6 +571,14 @@ void draw_compact_monitor(const RenderProfileSnapshot* profile, const BridgeProf
         else
             ImGui::Text(ui_text("EID3D11  %.0f FPS / %.2f ms  Render CPU %.2f ms  GPU n/a"),
                         fps, interval_ms, profile->frame_cpu_ms);
+        if (resources.fg_presented_fps > 0.0 && resources.fg_mode == 2)
+            ImGui::Text(ui_text("FSR frame generation: presented %.0f FPS, of them real %.0f; rendered %.0f FPS (GPU excludes FidelityFX's present queue)"),
+                        resources.fg_presented_fps, resources.fg_real_fps, fps);
+        else if (resources.fg_presented_fps > 0.0)
+            ImGui::Text(ui_text("Frame generation (DLSS-G): presented %.0f FPS, of them real %.0f; rendered %.0f FPS"),
+                        resources.fg_presented_fps, resources.fg_real_fps, fps);
+        if (resources.fg_mode && resources.fg_auto_off_fps)
+            ImGui::Text(ui_text("Frame generation paused: rendered rate below %d FPS (frame_generation_min_fps)"), resources.fg_auto_off_fps);
         std::uint64_t draws = 0, triangles = 0, batches = 0;
         for (UINT index = 0; index < profile->pass_count && index < profile->passes.size(); ++index) {
             draws += profile->passes[index].counters.draws;
@@ -701,6 +660,14 @@ void draw_performance_tab(DebugOverlay::Implementation& state, const RenderProfi
     ImGui::SameLine();
     if (profile->gpu_valid) ImGui::Text(ui_text("|  GPU %.3f ms"), profile->frame_gpu_ms);
     else ImGui::TextUnformatted(ui_text("|  GPU unavailable"));
+    if (resources.fg_presented_fps > 0.0 && resources.fg_mode == 2)
+        ImGui::Text(ui_text("FSR frame generation: presented %.1f FPS, of them real %.1f (rendered %.1f; GPU excludes FidelityFX's present queue)"),
+                    resources.fg_presented_fps, resources.fg_real_fps, fps);
+    else if (resources.fg_presented_fps > 0.0)
+        ImGui::Text(ui_text("Frame generation (DLSS-G): presented %.1f FPS, of them real %.1f (rendered %.1f)"),
+                    resources.fg_presented_fps, resources.fg_real_fps, fps);
+    if (resources.fg_mode && resources.fg_auto_off_fps)
+        ImGui::Text(ui_text("Frame generation paused: rendered rate below %d FPS (frame_generation_min_fps)"), resources.fg_auto_off_fps);
 
     std::array<float, kFrameHistorySize> cpu{};
     std::array<float, kFrameHistorySize> gpu{};
@@ -1812,12 +1779,17 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
     ImGui::TableNextColumn();
     ImGui::PushID(setting.key);
     ImGui::SetNextItemWidth(-FLT_MIN);
-    const char* note = blocked_option_note(config, setting.key);
-    ImGui::BeginDisabled(note != nullptr);
     switch (option->type) {
     case RendererOptionType::boolean: {
         bool value = option->boolean_value;
+        const char* note = blocked_option_note(config, setting.key);
+        ImGui::BeginDisabled(note != nullptr);
         if (ImGui::Checkbox("##value", &value)) config.set_boolean(setting.key, value);
+        ImGui::EndDisabled();
+        if (note) { ImGui::SameLine(); ImGui::TextDisabled("%s", ui_text(note)); }
+        // The renderer this session actually runs (read-only).
+        if (g_running_renderer && std::strcmp(setting.key, "x64_render_host") == 0)
+            ImGui::TextDisabled(ui_text("Running: %s"), ui_text(g_running_renderer));
         // A switch with a "<key>_weight" percent option (critter types) shows
         // that weight beside it, greyed while the switch is off.
         const RendererOption* weight = config.find((std::string(setting.key) + "_weight").c_str());
@@ -1833,7 +1805,6 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
             ImGui::EndDisabled();
             ImGui::SetItemTooltip("%s", ui_text("How often this type is picked against the other types that fit the place. "
                                                 "100% is the normal mix; 0% keeps it away. The number of critters stays the same."));
-            ImGui::EndDisabled();
             ImGui::PopID();
             return;
         }
@@ -1948,42 +1919,8 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
         break;
     }
     }
-    ImGui::EndDisabled();
-    if (note) ImGui::TextDisabled("%s", ui_text(note));
     ImGui::SetItemTooltip("%s", tooltip);
     ImGui::PopID();
-}
-
-void draw_samgbur_lod(DebugOverlay::Implementation& state,const SamgburLodSnapshot& data) {
-    if(!state.settings_filter.PassFilter("samgbur01 LOD"))return;
-    if(!ImGui::CollapsingHeader("samgbur01 LOD",ImGuiTreeNodeFlags_DefaultOpen))return;
-    if(!data.instances){ImGui::TextDisabled("%s",ui_text("No samgbur01 submitted this frame."));return;}
-    state.samgbur_lod_instance=std::clamp(state.samgbur_lod_instance,0,static_cast<int>(data.instances)-1);
-    int instance=state.samgbur_lod_instance+1;
-    if(data.instances>1&&ImGui::SliderInt(ui_text("LOD instance"),&instance,1,static_cast<int>(data.instances)))
-        state.samgbur_lod_instance=instance-1;
-    if(data.state==SamgburLodSnapshot::unavailable){ImGui::TextDisabled("%s",ui_text("GPU LOD data unavailable."));return;}
-    if(data.state!=SamgburLodSnapshot::ready||data.instance!=static_cast<unsigned>(state.samgbur_lod_instance+1)){
-        ImGui::TextDisabled("%s",ui_text("Waiting for GPU LOD sample..."));return;
-    }
-    if(!data.visible)ImGui::TextUnformatted(ui_text("Instance is not visible in the color pass."));
-    else if(data.mode&16u)ImGui::TextUnformatted(ui_text("Impostor (not a triangle LOD)."));
-    else if(data.second!=UINT32_MAX)
-        ImGui::Text(ui_text("Current level: L%u -> L%u (%u%%)"),data.first,data.second,(data.coverage*100u+127u)/255u);
-    else ImGui::Text(ui_text("Current level: L%u"),data.first);
-    if(ImGui::BeginTable("samgbur_lod_levels",2,ImGuiTableFlags_RowBg|ImGuiTableFlags_BordersInnerH)){
-        ImGui::TableSetupColumn("LOD");ImGui::TableSetupColumn(ui_text("Triangles"));ImGui::TableHeadersRow();
-        for(unsigned level=0;level<4;++level){
-            ImGui::TableNextRow();ImGui::TableNextColumn();ImGui::Text("L%u",level);ImGui::TableNextColumn();
-            if(level==0||level<=data.levels)ImGui::Text("%u",data.triangles[level]);
-            else ImGui::TextDisabled("%s",ui_text("Not built"));
-        }
-        ImGui::EndTable();
-    }
-    if(!data.levels)ImGui::TextWrapped("%s",ui_text("No reduced LOD levels were built."));
-    else if(data.visible&&!(data.mode&2))ImGui::TextUnformatted(ui_text("Object LOD is disabled."));
-    else if(data.visible&&!(data.mode&1))ImGui::TextUnformatted(ui_text("This part is not eligible for LOD."));
-    ImGui::TextDisabled(ui_text("GPU sample age: %llu frames"),static_cast<unsigned long long>(data.age_frames));
 }
 
 void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& config,
@@ -2071,7 +2008,6 @@ void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& c
                 hud_profile_controls(state,config);
             }
             if(ImGui::BeginChild(ui_tab?"interface_options":"graphics_options",ImVec2(0,-footer),ImGuiChildFlags_Borders)) {
-            if(!ui_tab)draw_samgbur_lod(state,resources.samgbur_lod);
             std::size_t category_count = 0, setting_count = 0;
             const char* const* categories = player_graphics_categories(category_count);
             const PlayerGraphicsSetting* settings = player_graphics_settings(setting_count);
@@ -2080,7 +2016,7 @@ void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& c
                                          ui_text(setting.category) + " " + ui_setting_tooltip(setting);
                 return state.settings_filter.PassFilter(text.c_str());
             };
-            bool any_match = !ui_tab && state.settings_filter.PassFilter("samgbur01 LOD");
+            bool any_match = false;
             for (std::size_t category = 0; category < category_count; ++category) {
                 if((std::strcmp(categories[category],"Interface")==0)!=ui_tab)continue;
                 bool category_match = false;
@@ -2345,14 +2281,16 @@ HRESULT DebugOverlay::initialize(HWND window, ID3D11Device* device, ID3D11Device
     style.WindowRounding = 4.0f;
     style.FrameRounding = 3.0f;
 
-    if (!ImGui_ImplWin32_Init(window) || !ImGui_ImplDX11_Init(device, context)) {
+    const bool platform = ImGui_ImplWin32_Init(window);
+    if (!platform || !(renderer_ ? renderer_->init() : ImGui_ImplDX11_Init(device, context))) {
         if (ImGui::GetIO().BackendPlatformUserData) ImGui_ImplWin32_Shutdown();
-        if (ImGui::GetIO().BackendRendererUserData) ImGui_ImplDX11_Shutdown();
+        if (renderer_) renderer_->shutdown();
+        else if (ImGui::GetIO().BackendRendererUserData) ImGui_ImplDX11_Shutdown();
         ImGui::DestroyContext(state->imgui);
         return E_FAIL;
     }
     implementation_ = std::move(state);
-    implementation_->combat_ui.initialize(device, context);
+    implementation_->combat_ui.initialize();
     if (initialize_host_child_) {
         implementation_->host_child = true;
         return S_OK;
@@ -2435,7 +2373,6 @@ void DebugOverlay::shutdown() noexcept {
     if (!implementation_) return;
     if (implementation_->imgui) ImGui::SetCurrentContext(implementation_->imgui);
     remove_quit_hook();
-    implementation_->combat_ui.shutdown();
     if (!implementation_->host_child) {
         release_cursor_confinement(implementation_->cursor_confinement);
         if (GetCapture() == implementation_->window) ReleaseCapture();
@@ -2444,7 +2381,10 @@ void DebugOverlay::shutdown() noexcept {
     }
     if (implementation_->imgui) {
         ImGui::SetCurrentContext(implementation_->imgui);
-        ImGui_ImplDX11_Shutdown();
+        if (renderer_) renderer_->shutdown(); else ImGui_ImplDX11_Shutdown();
+        // After the backend: it releases its copy of the combat icon atlas
+        // (an ImGui user texture) before the atlas goes.
+        implementation_->combat_ui.shutdown();
         ImGui_ImplWin32_Shutdown();
         ImGui::DestroyContext(implementation_->imgui);
     }
@@ -2471,7 +2411,7 @@ HRESULT DebugOverlay::render(const RenderProfileSnapshot* profile,
     if (!combat_visible && !visible() && resources.critters.labels.empty() && !notice_ && !capture_notice) return S_FALSE;
 
     apply_ui_language(*implementation_, config_);
-    ImGui_ImplDX11_NewFrame();
+    if (!renderer_) ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
     ImGuiIO& io = ImGui::GetIO();
@@ -2533,17 +2473,23 @@ HRESULT DebugOverlay::render(const RenderProfileSnapshot* profile,
     }
     ImGui::Render();
 
-    ExtraShaderStageState extra_state(implementation_->context);
-    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    extra_state.restore(implementation_->context);
+    if (renderer_) renderer_->render(ImGui::GetDrawData()); else ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    rendered_frame_ = true;
     return S_OK;
+}
+
+// Frame generation: the same draw lists once more onto the generated image
+// (the overlay then shows on every presented frame, without flicker).
+void DebugOverlay::render_again() noexcept {
+    if (!std::exchange(rendered_frame_, false) || !renderer_ || !ImGui::GetCurrentContext()) return;
+    if (ImDrawData* data = ImGui::GetDrawData(); data && data->Valid) renderer_->render(data);
 }
 
 void DebugOverlay::render_shader_preparation(std::size_t done, std::size_t total) noexcept {
     if (!implementation_ || !implementation_->imgui) return;
     ImGui::SetCurrentContext(implementation_->imgui);
     apply_ui_language(*implementation_, config_);
-    ImGui_ImplDX11_NewFrame();
+    if (!renderer_) ImGui_ImplDX11_NewFrame();
     ImGui_ImplWin32_NewFrame();
     ImGui::NewFrame();
     ImGuiIO& io = ImGui::GetIO();
@@ -2562,9 +2508,7 @@ void DebugOverlay::render_shader_preparation(std::size_t done, std::size_t total
     }
     ImGui::End();
     ImGui::Render();
-    ExtraShaderStageState extra_state(implementation_->context);
-    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-    extra_state.restore(implementation_->context);
+    if (renderer_) renderer_->render(ImGui::GetDrawData()); else ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 }
 
 // F11 with the overlay hidden: frame timing is off then, so run it for
@@ -2682,6 +2626,13 @@ void DebugOverlay::maintain() noexcept {
     }
     if (g_quit_seen.load()) config_.set_over_budget_pending(false);  // cleared at WM_QUIT
     if (!implementation_->pending_save) return;
+    // Core mode, game process: the host is the only ini writer; the options
+    // and this request go to it with the next config command.
+    if (core_input) {
+        implementation_->pending_save = false;
+        core_save_requested_ = true;
+        return;
+    }
     if (config_.save(implementation_->config_path.c_str())) {
         config_.clear_dirty();
         implementation_->pending_save = false;
@@ -2714,10 +2665,6 @@ bool DebugOverlay::captures_input() const noexcept {return captures_keyboard();}
 bool DebugOverlay::hud_editing() const noexcept {return game_hud_editing();}
 float DebugOverlay::hud_grid_step() const noexcept {
     return hud_editing() && implementation_->hud_grid?24.f*implementation_->ui_scale:0.f;
-}
-
-unsigned DebugOverlay::samgbur_lod_instance() const noexcept {
-    return implementation_?static_cast<unsigned>(std::max(0,implementation_->samgbur_lod_instance)):0u;
 }
 
 bool DebugOverlay::settings_open() const noexcept {
@@ -2827,6 +2774,18 @@ void DebugOverlay::finish_display_apply(const DisplaySettings& settings, HRESULT
     state.pending_save = true;
 }
 
+bool DebugOverlay::take_core_save_request() noexcept {
+    std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
+    const bool requested = core_save_requested_;
+    core_save_requested_ = false;
+    return requested;
+}
+
+void DebugOverlay::request_save() noexcept {
+    std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
+    if (implementation_) implementation_->pending_save = true;
+}
+
 void DebugOverlay::set_mode(DebugOverlayMode mode) noexcept {
     config_.set_overlay_mode(mode);
     if (implementation_) implementation_->pending_save = true;
@@ -2839,6 +2798,10 @@ bool DebugOverlay::initialized() const noexcept {
 void debug_overlay_set_running_renderer(const char* text, bool core) noexcept {
     g_running_renderer = text;
     g_running_core = core;
+}
+
+void debug_overlay_set_running_d3d12(bool running) noexcept {
+    g_running_d3d12 = running;
 }
 
 void debug_overlay_set_game_address_space(std::uint32_t used_mb, std::uint32_t largest_free_mb) noexcept {

@@ -206,8 +206,9 @@ BOOL CTexture::Load(CRenderer *pRend, SMMPFileHeader *pHdr, DWORD dwFromLevel)
     // adjust dimentions with 'need rescale 512' flag
     if (pHdr->dwFormat == MMP_FORMAT_PNT3)
         dwNumMipLevels = 1;
-    // correct mip-map using
-    if (theSettings.nMipmapping == 0)
+    // Terrain 2.0 needs the authored chain to put mixed-size pages in one
+    // atlas pool. The legacy sampling option must not discard that input.
+    if (theSettings.nMipmapping == 0 && GetTypeID() != TTID_TERRAIN)
         dwNumMipLevels = 1;
     dwSizeX = dwNewSizeX;
     dwSizeY = dwNewSizeY;

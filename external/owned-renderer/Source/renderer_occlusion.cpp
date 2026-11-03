@@ -114,8 +114,49 @@ HRESULT Renderer::build_native_hiz() noexcept {
     return S_OK;
 }
 
+// The same pyramid on D3D12, at the same point of the frame: hizCopyCS from
+// the world depth into level 0, then each level by hizReduceCS through the
+// executor's per-level views (generate_mips: t0 -> u0, 8x8 groups, the
+// levels' read/write barriers). Not built (pipeline compiling, ring full):
+// the frame's build reads no pyramid, as D3D11 without one.
+HRESULT Renderer::build_native_hiz_d3d12() noexcept {
+    if (!native_occlusion_enabled_ || native_hiz_failed_ || !d3d12_ || !world_effect_targets()) return S_FALSE;
+    UINT full_width = 0, full_height = 0, full_mips = 0; DXGI_FORMAT full_format = DXGI_FORMAT_UNKNOWN;
+    if (!d3d12_->texture_info(*world_d3d12_, full_width, full_height, full_mips, full_format)) return E_FAIL;
+    if (native_hiz12_programs_.empty()) {
+        try { append_hiz_shader_programs(native_hiz12_programs_); }
+        catch (const std::bad_alloc&) { native_hiz12_programs_.clear(); return E_OUTOFMEMORY; }
+    }
+    const UINT width = (std::max)(1u, full_width / 2), height = (std::max)(1u, full_height / 2);
+    HRESULT hr = S_OK;
+    if (!native_hiz12_ || native_hiz_width_ != width || native_hiz_height_ != height) {
+        native_hiz12_.reset();
+        UINT mips = 1;
+        for (UINT side = (std::max)(width, height); side > 1; side >>= 1) ++mips;
+        if (FAILED(hr = d3d12_->create_storage_texture(width, height, 0, DXGI_FORMAT_R32_FLOAT, native_hiz12_, mips))) {
+            native_hiz_failed_ = true; return hr;
+        }
+        native_hiz_width_ = width; native_hiz_height_ = height; native_hiz_mips_ = mips;
+    }
+    transition_profile_pass("compute_hiz");
+    d3d12_->clear_slots();
+    d3d12_->set_depth_resource(0, world_d3d12_.get());
+    d3d12_->set_unordered(0, native_hiz12_.get());
+    hr = d3d12_->dispatch(native_hiz12_programs_[0], (width + 7) / 8, (height + 7) / 8, 1);
+    d3d12_->clear_slots();
+    if (hr == S_OK) hr = d3d12_->generate_mips(*native_hiz12_, native_hiz12_programs_[1]);
+    d3d12_->clear_slots();
+    if (FAILED(hr)) return hr;
+    if (hr != S_OK) { d3d12_->omit("occlusion pyramid (pipeline not ready: no occlusion culling)", false); return hr; }
+    native_hiz_frame_ = native_frame_index_;
+    native_hiz_clip_ = native_world_clip_;
+    native_world_clip_dirty_ = true;   // publish the occlusion parameters
+    d3d12_->count("occlusion pyramids");
+    return S_OK;
+}
+
 bool Renderer::native_occlusion_active() const noexcept {
-    return native_occlusion_enabled_ && native_hiz_ && native_hiz_frame_ == native_frame_index_ &&
+    return native_occlusion_enabled_ && (native_hiz_ || native_hiz12_) && native_hiz_frame_ == native_frame_index_ &&
         !native_cull_frozen_ && native_world_clip_valid_ && native_hiz_clip_ == native_world_clip_;
 }
 

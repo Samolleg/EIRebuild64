@@ -35,6 +35,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "PlayerServer.h"
 #include "ModAnimationRules.h"
 #include "EngineDiagnostics.h"
+#include "GameJournal.h"
 /////////////////////////////////////////////////////////////////////////////////////
 #define _NOTIFY_FILE 0
 
@@ -1199,8 +1200,24 @@ BOOL CUnit::IsHero() const
     return lpOwner != NULL;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-const SADEntry *CUnit::GetAnimation(DWORD dwAnimationFlags, bool bWeapon)
+bool CUnit::HasRestAnimations() const
 {
+    for (DWORD index = 0;; ++index)
+    {
+        const SADEntry *entry = GetAnimationEntryByIndex(index);
+        if (!entry)
+            return false;
+        if (entry->GetAction() != 0 &&
+            (entry->GetState() == ADB_STATE_REST ||
+             (entry->GetAction() == ADB_ACTION_CROSS &&
+              (entry->dwFlags & ADB_MODIFIERS) == ADB_MODIFIER_CROSS_TO_REST)))
+            return true;
+    }
+}
+// No RNG or equipment remapping is performed by the capability check above.
+const SADEntry *CUnit::GetAnimation(DWORD dwAnimationFlags, bool bWeapon, bool reportMissing)
+{
+    const DWORD requestedFlags = dwAnimationFlags;
     switch (GetTypeID())
     {
     case MOTID_HUMAN:
@@ -1223,12 +1240,15 @@ const SADEntry *CUnit::GetAnimation(DWORD dwAnimationFlags, bool bWeapon)
             case RPGWST_CROSSBOW: dwAnimationFlags |= ADB_WEAPON_CROSSBOW; break;
             }
         }
-    const SADEntry *pEntry = GetRandomAnimationEntry(dwAnimationFlags);
+    const bool skipRestIdle = (dwAnimationFlags & ADB_STATES) == ADB_STATE_REST &&
+        (dwAnimationFlags & ADB_ACTIONS) == ADB_ACTION_IDLE && !HasRestAnimations();
+    const SADEntry *pEntry = skipRestIdle ? nullptr : GetRandomAnimationEntry(dwAnimationFlags);
     if (!pEntry)
     {
         // анимации с оружием найти не удалось - может есть без оружия ?
         dwAnimationFlags &= ~ADB_WEAPONS;
-        pEntry = GetRandomAnimationEntry(dwAnimationFlags);
+        if (!skipRestIdle)
+            pEntry = GetRandomAnimationEntry(dwAnimationFlags);
         // если не находится rest, то используем обычный neutral или attack
         if (!pEntry && (dwAnimationFlags & ADB_STATES) == ADB_STATE_REST)
         {
@@ -1239,13 +1259,20 @@ const SADEntry *CUnit::GetAnimation(DWORD dwAnimationFlags, bool bWeapon)
                                                  ADB_STATE_ATTACK);
         }
         // попробуем найти анимацию не взирая на оружие
-        if (!pEntry && bWeapon)
+        if (!pEntry && bWeapon && !skipRestIdle)
             pEntry = GetRandomAnimationEntryNoWeapon(dwAnimationFlags);
 
 #if __NOTIFY_FILE__
-        if (pEntry == nullptr)
+        if (pEntry == nullptr && reportMissing)
         {
-            ReportWarning("Can't find animation entry %s for \"%s\"",
+            const bool restRequest = (requestedFlags & ADB_STATES) == ADB_STATE_REST ||
+                ((requestedFlags & ADB_ACTIONS) == ADB_ACTION_CROSS &&
+                 (requestedFlags & ADB_MODIFIERS) == ADB_MODIFIER_CROSS_TO_REST);
+            if (restRequest)
+                GameJournal::MissingAnimation(szMaskName.GetString(), requestedFlags,
+                    GameJournal::AnimationGapResult::Missing);
+            else
+                ReportWarning("Can't find animation entry %s for \"%s\"",
                           AnimationFlagsToString(dwAnimationFlags), szMaskName.GetString());
             // pEntry = GetAnimationEntryByIndex(0);
         }
@@ -1263,6 +1290,9 @@ const SADEntry *CUnit::GetAnimation(DWORD dwAnimationFlags, bool bWeapon)
                 selected ? selected->pszAnimationName : "missing", selected ? selected->dwEntryIndex : 0xffffffffu);
         pEntry = selected;
     }
+    if (skipRestIdle && pEntry)
+        GameJournal::MissingAnimation(szMaskName.GetString(), requestedFlags,
+            GameJournal::AnimationGapResult::OrdinaryIdle);
     return pEntry;
 }
 /////////////////////////////////////////////////////////////////////////////////////

@@ -35,6 +35,11 @@ constexpr std::uint32_t contact_blend_max_materials = 64u;
 // (Dejavu zone1 ships 1024 and 2048 HD pages together); every page is copied
 // from its mip at most this wide, so one array holds them all.
 constexpr std::uint32_t contact_blend_atlas_side = 1024u;
+// The contact ground height and colour maps (native_shader.h contactGround,
+// contactColor): t13 and t14 in DXBC; on D3D12 one t table serves every stage
+// and the world vertex programs read t13/t14 (persistent instances and
+// instance updates), so the DXIL reads t114 and t115, which no program uses.
+constexpr unsigned kContactGroundSlotD3D12 = 114, kContactColorSlotD3D12 = 115;
 
 // Shared by the production object pixel shader and the focused WARP regression.
 constexpr char kContactBlendShader[] = R"(

@@ -70,7 +70,7 @@ void Renderer::render_wind_trails() {
     const Quality quality = quality_level(level);
     if (!quality.slots || wind_trails_failed_) return;
     // Only a frame whose world terrain was drawn has a world camera and depth.
-    if (ambient_terrain_frame_ != native_frame_index_ || !native_world_clip_valid_ || !depth_srv_ || !rtv_) return;
+    if (ambient_terrain_frame_ != native_frame_index_ || !native_world_clip_valid_ || !world_effect_targets()) return;
     AmbientWorldSource inputs;
     if (!bridge_ambient_world_source(inputs) || !inputs.terrain) return;
     WorldEnvironment environment = bridge_world_fog_snapshot().environment;
@@ -80,7 +80,7 @@ void Renderer::render_wind_trails() {
     // zone class and the ground under every trail.
     if (!rebuild_ambient_particle_map(inputs,environment) || ambient_menu_) return;
     const auto fail = [&](const char* reason) { wind_trails_failed_ = true; OutputDebugStringA(reason); };
-    if (!wind_trails_vs_) {
+    if (!d3d12_ && !wind_trails_vs_) {
         ComPtr<ID3DBlob> vs, ps, errors;
         std::vector<ShaderProgram> programs;
         append_wind_trail_shader_programs(programs);
@@ -251,15 +251,31 @@ void Renderer::render_wind_trails() {
 
     // Trails take the shared world atmosphere; without it they are omitted.
     if (FAILED(bind_world_fog())) return;
+    if (d3d12_) {
+        // The same programs and constants on D3D12: height at t0, world depth at t2.
+        auto& programs = ambient12_.wind;
+        if (programs.empty()) append_wind_trail_shader_programs(programs);
+        if (programs.size() < 2 || !ambient12_.height) { d3d12_->omit("wind trails (programs or height grid missing)",false); return; }
+        transition_profile_pass("wind_trails");
+        bind_world_effect_d3d12(false);
+        d3d12_->set_constants(0,&c,sizeof(c));
+        d3d12_->set_resource(0,ambient12_.height.get());
+        const HRESULT hr = d3d12_->draw_instanced(programs[0],programs[1],world_effect_state_d3d12(false),nullptr,
+                                                  2*(kRibbonSegments+1),count,true);
+        d3d12_->clear_slots();bind_world_targets_d3d12();
+        if (FAILED(hr)) d3d12_->omit("wind trails (draw failed)",false);
+        else if (hr == S_FALSE) d3d12_->omit("wind trails (pipeline not ready)",false);
+        else if (hr == S_OK) { d3d12_->count("wind trail draws");profiler_.add_draw(1,1);profiler_.add_batch(1); }
+        return;
+    }
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (FAILED(context_->Map(wind_trails_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped))) return;
     std::memcpy(mapped.pData,&c,sizeof(c));context_->Unmap(wind_trails_constants_.Get(),0);
 
-    // Runs inside composite_world's state guard; the slots it does not save are restored here.
-    ID3D11ShaderResourceView* saved_vs=nullptr;context_->VSGetShaderResources(0,1,&saved_vs);
-    ID3D11ShaderResourceView* saved_ps2=nullptr;context_->PSGetShaderResources(2,1,&saved_ps2);
+    // Runs inside composite_world. It binds every state it reads, restores
+    // nothing and unbinds its views after (every following pass binds its own).
     transition_profile_pass("wind_trails");
-    context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),nullptr); // depth is read as a texture
+    bind_plan_targets(plan_pass("wind_trails",rtv_.Get(),nullptr,plan_read(PlanTarget::world_depth))); // depth is read as a texture
     D3D11_VIEWPORT viewport = target_viewport();context_->RSSetViewports(1,&viewport);
     context_->RSSetState(wind_trails_raster_.Get());context_->OMSetDepthStencilState(nullptr,0);
     const float factor[4]{1,1,1,1};context_->OMSetBlendState(wind_trails_blend_.Get(),factor,~0u);
@@ -271,9 +287,8 @@ void Renderer::render_wind_trails() {
     context_->VSSetShaderResources(0,1,ambient_height_srv_.GetAddressOf());context_->PSSetShaderResources(2,1,depth_srv_.GetAddressOf());
     bind_owned_sky_pixel_inputs();  // borderFogColor reads the sky probe
     context_->DrawInstanced(2*(kRibbonSegments+1),count,0,0);
-    context_->VSSetShaderResources(0,1,&saved_vs);context_->PSSetShaderResources(2,1,&saved_ps2);
-    if (saved_vs) saved_vs->Release();
-    if (saved_ps2) saved_ps2->Release();
+    ID3D11ShaderResourceView* no_view=nullptr;
+    context_->VSSetShaderResources(0,1,&no_view);context_->PSSetShaderResources(2,1,&no_view);
     profiler_.add_draw(1,1);profiler_.add_batch(1);
 }
 

@@ -72,6 +72,101 @@ HRESULT Renderer::ensure_world_fog_volume(int quality) noexcept {
     return S_OK;
 }
 
+// update_world_fog_mist on D3D12: the map's mist grid as an executor texture.
+HRESULT Renderer::update_world_fog_mist_d3d12() noexcept {
+    const auto grid = bridge_world_mist_grid();
+    if (!grid) return S_OK;  // keep the last map's texture until a new one is known
+    if (grid->generation == fog_mist_generation_ && fog12_.mist) return S_OK;
+    fog12_.mist.reset();fog_mist_grid_ = {};fog_mist_generation_ = grid->generation;
+    if (!grid->width || !grid->height || grid->texels.size() < std::size_t(grid->width) * grid->height * 4u) return E_INVALIDARG;
+    D3D12TextureRef texture;
+    HRESULT hr = d3d12_->create_texture(grid->width, grid->height, DXGI_FORMAT_R32G32B32A32_FLOAT, texture);
+    if (SUCCEEDED(hr)) hr = d3d12_->write_texture(*texture, RECT{0, 0, LONG(grid->width), LONG(grid->height)}, grid->texels.data(), grid->width * 16u);
+    if (FAILED(hr)) return hr;
+    fog12_.mist = std::move(texture);
+    fog_mist_grid_ = {grid->origin[0], grid->origin[1], 1.f / (grid->width * grid->cell), 1.f / (grid->height * grid->cell)};
+    fog_terrain_low_z_ = grid->terrain_low_z;
+    return S_OK;
+}
+
+// ensure_world_fog_volume on D3D12: the two scatter volumes (history ping-pong)
+// and the integrated volume as storage textures of the quality's grid.
+HRESULT Renderer::ensure_world_fog_volume_d3d12(int quality) noexcept {
+    if (fog12_.integrated && fog_volume_quality_ == quality) return S_OK;
+    fog12_.scatter[0].reset();fog12_.scatter[1].reset();fog12_.integrated.reset();
+    fog_volume_quality_ = -1;fog_history_valid_ = false;
+    try {
+        if (fog12_.programs.empty()) append_fog_volume_shader_programs(fog12_.programs);
+    } catch (const std::bad_alloc&) {fog_volume_reason_ = "volume programs: out of memory";return E_OUTOFMEMORY;}
+    if (fog12_.programs.size() < 2) {fog_volume_reason_ = "volume programs missing";return E_FAIL;}
+    constexpr DXGI_FORMAT format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    if (!d3d12_->storage_supported(format)) {fog_volume_reason_ = "volume format not writable by compute";return E_FAIL;}
+    const auto grid = fog_volume_grid(quality);
+    HRESULT hr = S_OK;
+    if (FAILED(hr = d3d12_->create_storage_texture(grid.width, grid.height, grid.slices, format, fog12_.scatter[0])) ||
+        FAILED(hr = d3d12_->create_storage_texture(grid.width, grid.height, grid.slices, format, fog12_.scatter[1])) ||
+        FAILED(hr = d3d12_->create_storage_texture(grid.width, grid.height, grid.slices, format, fog12_.integrated))) {
+        fog12_.scatter[0].reset();fog12_.scatter[1].reset();fog12_.integrated.reset();
+        fog_volume_reason_ = "volume textures could not be created";
+        return hr;
+    }
+    fog_volume_quality_ = quality;
+    return S_OK;
+}
+
+// The froxel passes on D3D12 with the D3D11 bindings: inject (frame b10, sun
+// maps b2/t9, point lights b5/t17/t18 and their shadow pages, history t14,
+// mist t15, cloud shadow) into this frame's scatter volume, then the
+// front-to-back integration (t12) into the integrated volume.
+HRESULT Renderer::dispatch_world_fog_volume_d3d12() noexcept {
+    if (!fog12_.integrated || fog12_.programs.size() < 2) return E_FAIL;
+    const auto grid = fog_volume_grid(fog_volume_quality_);
+    const unsigned current = fog_scatter_index_, previous = 1u - current;
+    transition_profile_pass("fog_volume");
+    d3d12_->clear_slots();
+    d3d12_->set_constants(10, &fog_frame_d3d12_, sizeof(fog_frame_d3d12_));
+    d3d12_->set_constants(2, &shadow12_.constants, sizeof(shadow12_.constants));
+    d3d12_->set_constants(5, native12_.point_light_constants.data(), sizeof(native12_.point_light_constants));
+    d3d12_->set_resource(9, shadow12_.maps.get());
+    d3d12_->set_resource(17, native_point_lights_.empty() ? nullptr : native12_.point_light_grid.get());
+    d3d12_->set_resource(18, native_point_lights_.empty() ? nullptr : native12_.point_lights.get());
+    for (UINT page = 0; page < PointShadowTextureLayout::array_bindings; ++page)
+        d3d12_->set_resource(PointShadowTextureLayout::first_srv + page,
+                             page < native_point_shadow_pages_.size() ? native_point_shadow_pages_[page].depth12.get() : nullptr);
+    d3d12_->set_resource(14, fog12_.scatter[previous].get());
+    d3d12_->set_resource(15, fog12_.mist.get());
+    if (sky_inputs_active_) d3d12_->set_resource(kSkyCloudShadowSlotD3D12, sky12_.shadow.get());
+    {D3D11_SAMPLER_DESC compare{};compare.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_MIP_POINT;
+     compare.AddressU = compare.AddressV = compare.AddressW = D3D11_TEXTURE_ADDRESS_BORDER;
+     compare.BorderColor[0] = compare.BorderColor[1] = compare.BorderColor[2] = compare.BorderColor[3] = 1;
+     compare.ComparisonFunc = D3D11_COMPARISON_LESS_EQUAL;compare.MaxLOD = D3D11_FLOAT32_MAX;
+     d3d12_->set_sampler(1, compare);
+     compare.Filter = D3D11_FILTER_COMPARISON_MIN_MAG_LINEAR_MIP_POINT;
+     d3d12_->set_sampler(2, compare);
+     D3D11_SAMPLER_DESC linear{};linear.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+     linear.AddressU = linear.AddressV = linear.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;linear.MaxLOD = D3D11_FLOAT32_MAX;
+     d3d12_->set_sampler(7, linear);}
+    d3d12_->set_unordered(0, fog12_.scatter[current].get());
+    HRESULT hr = d3d12_->dispatch(fog12_.programs[0], (grid.width + 3) / 4, (grid.height + 3) / 4, (grid.slices + 3) / 4);
+    if (hr == S_OK) {
+        d3d12_->set_resource(14, static_cast<const D3D12Texture*>(nullptr));
+        d3d12_->set_resource(12, fog12_.scatter[current].get());
+        d3d12_->set_unordered(0, fog12_.integrated.get());
+        hr = d3d12_->dispatch(fog12_.programs[1], (grid.width + 7) / 8, (grid.height + 7) / 8, 1);
+    }
+    d3d12_->clear_slots();
+    if (hr != S_OK) return hr;
+    fog_scatter_index_ = previous;fog_history_valid_ = true;
+    profiler_.add_draw(2, 2);
+    return S_OK;
+}
+
+// The integrated volume for the world pixel programs (t11, s7 the linear
+// clamp the D3D12 world passes set): only while this frame's volume ran.
+void Renderer::bind_world_fog_volume_d3d12() noexcept {
+    d3d12_->set_resource(11, fog_volume_active_ ? fog12_.integrated.get() : nullptr);
+}
+
 HRESULT Renderer::update_world_fog_mist() noexcept {
     const auto grid = bridge_world_mist_grid();
     if (!grid) return S_OK;  // keep the last map's texture until a new one is known
@@ -114,7 +209,7 @@ HRESULT Renderer::bind_world_fog() noexcept {
             problem = clip.valid ? "camera matrix not invertible" : "no verified world camera this frame";
         } else {
             fog_camera_valid_ = true;
-            if (FAILED(update_world_fog_mist())) problem = "swamp mist texture creation failed";
+            if (FAILED(d3d12_ ? update_world_fog_mist_d3d12() : update_world_fog_mist())) problem = "swamp mist texture creation failed";
             // Camera: the world point that clip space maps to w = 0.
             const float* inv = frame.clip_to_world;
             const float ew = inv[14];
@@ -148,7 +243,7 @@ HRESULT Renderer::bind_world_fog() noexcept {
             const float strength = configured_floating_point(config, "fog_strength", 1.f);
             const auto density = fog_density(.02f * configured_floating_point(config, "fog_density", .1f),
                                              morning, wetness, precipitation, night);
-            const bool map_known = fog_mist_srv_ != nullptr;
+            const bool map_known = fog_mist_srv_ != nullptr || fog12_.mist != nullptr;
             if (!map_known && !problem) problem = "map low ground unknown: height fog and mist off";
             float g[3] = {native_world_lighting_.sunlight_direction[0], native_world_lighting_.sunlight_direction[1],
                           native_world_lighting_.sunlight_direction[2]};
@@ -157,7 +252,11 @@ HRESULT Renderer::bind_world_fog() noexcept {
             if (preset == 0 && !fog.valid && !problem) problem = "faithful preset needs the stock fog read";
             const int quality = configured_integer(config, "fog_volume_quality", 1);
             const auto grid = fog_volume_grid(quality);
-            if (preset >= 2) {
+            if (preset >= 2 && d3d12_) {
+                if (!fog_volume_failed_ && FAILED(ensure_world_fog_volume_d3d12(quality))) fog_volume_failed_ = true;
+                volume = !fog_volume_failed_;
+                if (!volume && !problem) problem = fog_volume_reason_;
+            } else if (preset >= 2) {
                 if (feature_level_ < D3D_FEATURE_LEVEL_11_0) fog_volume_reason_ = "feature level below 11_0";
                 else if (!fog_volume_failed_ && FAILED(ensure_world_fog_volume(quality))) fog_volume_failed_ = true;
                 volume = feature_level_ >= D3D_FEATURE_LEVEL_11_0 && !fog_volume_failed_;
@@ -179,7 +278,12 @@ HRESULT Renderer::bind_world_fog() noexcept {
             const float height = map_known ? strength * density.height : 0.f, mist = map_known ? strength * density.mist : 0.f;
             set4(frame.height, height, fog_terrain_low_z_, 5.f, mist);
             set4(frame.volume, nearDistance, farDistance, invLog, volume ? 1.f : 0.f);
-            set4(frame.screen, 1.f / width_, 1.f / height_, float(grid.slices), 2.5f);
+            // Swamp mist e-folding height above the water surface. A 2.5 m layer
+            // held a column of only ~0.15 optical depth at the dry mist density:
+            // dense along grazing rays, all but gone looking down from the game
+            // camera's height (pitch 35+), so the swamp fog came and went as the
+            // camera pitched. 6 m keeps it readable from every pitch.
+            set4(frame.screen, 1.f / width_, 1.f / height_, float(grid.slices), 6.f);
             // Wisps drift with the shared renderer wind (weather_wind.h).
             set4(frame.volume_cell, .5f / grid.width, .5f / grid.height,
                  static_cast<float>(weather_wind_.wisp[0]), static_cast<float>(weather_wind_.wisp[1]));
@@ -192,7 +296,7 @@ HRESULT Renderer::bind_world_fog() noexcept {
             const float scatter = cave ? 0.f : 1.f;
             set4(frame.sun_color, scatter * native_world_lighting_.sunlight_diffuse[0],
                  scatter * native_world_lighting_.sunlight_diffuse[1], scatter * native_world_lighting_.sunlight_diffuse[2], 1.f);
-            if (fog_mist_srv_) std::memcpy(frame.mist_grid, fog_mist_grid_.data(), sizeof(frame.mist_grid));
+            if (map_known) std::memcpy(frame.mist_grid, fog_mist_grid_.data(), sizeof(frame.mist_grid));
             // frame.cloud and the probe flag are set by the owned sky below.
             std::memcpy(frame.previous_world_to_clip, fog_previous_clip_.data(), sizeof(frame.previous_world_to_clip));
             // No slice jitter for density (it shimmered on thin ground-fog
@@ -308,6 +412,26 @@ HRESULT Renderer::bind_world_fog() noexcept {
                 bridge_report_event("world_fog", fog_status_);
             }
         }
+        if (d3d12_) {
+            // D3D12 backend: the frame values for the D3D12 flush (b10).
+            fog_frame_d3d12_ = frame;
+            fog_cloud_visible_ = frame.cloud[0] > 0.f;
+            fog_volume_active_ = false;
+            if (volume) {
+                // The froxel passes as on D3D11; a pass still compiling leaves
+                // this frame on the analytic atmosphere (the pixels read
+                // fogVolumeRange.w), counted, never an empty volume.
+                const HRESULT hr = dispatch_world_fog_volume_d3d12();
+                fog_volume_active_ = hr == S_OK;
+                if (FAILED(hr)) d3d12_->omit("fog volume (dispatch failed)", false);
+                else if (hr != S_OK) d3d12_->count("fog volume frames waiting for their pipeline");
+                if (!fog_volume_active_) {fog_frame_d3d12_.volume[3] = 0.f;fog_history_valid_ = false;}
+            } else if (!scene_composited_) {
+                fog_history_valid_ = false;
+            }
+            native_spec_fog_bits_ = fog_frame_d3d12_.eye[3] <= .5f ? 128u : fog_frame_d3d12_.volume[3] <= .5f ? 256u : 0u;
+            return S_OK;
+        }
         if (!fog_frame_constants_) {
             D3D11_BUFFER_DESC desc{};desc.ByteWidth = sizeof(FogFrameGpu);desc.Usage = D3D11_USAGE_DYNAMIC;
             desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -368,6 +492,7 @@ HRESULT Renderer::bind_world_fog() noexcept {
             fog_history_valid_ = false;
         }
     }
+    if (d3d12_) return S_OK;  // the D3D12 flush sets b10 itself
     context_->PSSetConstantBuffers(10, 1, fog_frame_constants_.GetAddressOf());
     ID3D11ShaderResourceView* integrated = fog_volume_active_ ? fog_integrated_srv_.Get() : nullptr;
     context_->PSSetShaderResources(11, 1, &integrated);

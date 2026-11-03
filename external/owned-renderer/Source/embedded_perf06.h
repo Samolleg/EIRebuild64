@@ -5,12 +5,14 @@
 namespace owned {
 // Temporary PERF06 bridge, supplied by the embedded host, never retail hooks.
 void embedded_perf06_report(const char* detail) noexcept;
+unsigned embedded_frame_scope_begin(const char* name, LONGLONG now) noexcept;
+void embedded_frame_scope_end(unsigned token, LONGLONG now) noexcept;
 struct Perf06Counter { const char* name; LONGLONG start=0,total=0,peak=0; unsigned long long calls=0; };
 struct Perf06Scope {
-    Perf06Counter& c; LARGE_INTEGER begin{};
-    explicit Perf06Scope(Perf06Counter& value):c(value){ QueryPerformanceCounter(&begin);if(!c.start)c.start=begin.QuadPart; }
+    Perf06Counter& c; LARGE_INTEGER begin{}; unsigned detail=0;
+    explicit Perf06Scope(Perf06Counter& value):c(value){ QueryPerformanceCounter(&begin);detail=embedded_frame_scope_begin(c.name,begin.QuadPart);if(!c.start)c.start=begin.QuadPart; }
     ~Perf06Scope(){
-        LARGE_INTEGER end{};QueryPerformanceCounter(&end);
+        LARGE_INTEGER end{};QueryPerformanceCounter(&end);embedded_frame_scope_end(detail,end.QuadPart);
         static const LONGLONG hz=[](){LARGE_INTEGER f{};QueryPerformanceFrequency(&f);return f.QuadPart;}();
         if(hz<=0)return;
         const auto dt=end.QuadPart-begin.QuadPart;c.total+=dt;if(dt>c.peak)c.peak=dt;++c.calls;

@@ -67,6 +67,8 @@
 #include "hud_native_sites.h"
 #include "visual_native_sites.h"
 #include "precipitation.h"
+#include "x64_remote_link.h"
+#include "fur.h"
 
 #include <bcrypt.h>
 #include <intrin.h>
@@ -419,6 +421,16 @@ constexpr std::size_t kCameraFlagsOffset = 0x008;
 constexpr std::uint32_t kCameraAlternatePitchLimitsFlag = 0x00000200;
 constexpr std::size_t kCameraSettingsOffset = 0x094;
 constexpr std::size_t kCameraPitchAngleOffset = 0x104;
+// Global map zone hit-test frame (#200), game.exe:
+//   0062F856  call CI3DScreenGlobalMap::GenerateHitTestDDS (e8 15 0e 00 00),
+//             the only call; CI3DScreenGlobalMap's per-frame update makes it
+//             when the zones' mask is stale.
+//   00630670  GenerateHitTestDDS (thiscall, no arguments): flat default zone
+//             colours, NGame::DrawFrame(false, false), then GetFromScreen
+//             (0063084A -> 005FD3D0) into the mask surface.
+constexpr std::uint32_t kGlobalMapHitTestCallRva = 0x0022f856;
+constexpr std::uint32_t kGlobalMapHitTestEntryRva = 0x00230670;
+constexpr std::size_t kGlobalMapHitTestCallBytes = 5;
 constexpr std::size_t kCameraPitchMinimumOffset = 0x1d8;
 constexpr std::size_t kCameraPitchMaximumOffset = 0x1dc;
 constexpr std::size_t kCameraAlternatePitchMinimumOffset = 0x134;
@@ -2347,6 +2359,8 @@ std::array<std::uint8_t, kCameraMouseYawCallBytes> g_camera_mouse_yaw_original{}
 bool g_camera_mouse_yaw_installed = false;
 std::array<std::uint8_t, kCameraMousePitchCallBytes> g_camera_mouse_pitch_original{};
 bool g_camera_mouse_pitch_installed = false;
+std::array<std::uint8_t, kGlobalMapHitTestCallBytes> g_global_map_hit_test_original{};
+std::uint8_t* g_global_map_hit_test_image = nullptr;
 std::array<std::uint8_t, 5> g_camera_mouse_normalize_original{};
 bool g_camera_mouse_normalize_installed = false;
 const std::int32_t* g_camera_mouse_effective_width = nullptr;
@@ -2626,6 +2640,8 @@ BOOL __fastcall test_outer_end_frame(void*, void*) {
 #endif
 thread_local void* g_engine_frame_begin_context = nullptr;
 thread_local EngineFrameBeginFn g_engine_frame_begin_sink = nullptr;
+thread_local void* g_hit_test_frame_context = nullptr;
+thread_local HitTestFrameFn g_hit_test_frame_sink = nullptr;
 
 thread_local LifecycleIdentity g_current_object_plan_identity{};
 thread_local bool g_current_object_plan_identity_valid = false;
@@ -2644,6 +2660,17 @@ void record_owned_patch(const void* address, const void* original, std::size_t b
 #if !defined(EID3D11_EMBEDDED)
 const std::uint8_t* game_image_base() noexcept {
     return reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr));
+}
+// The game camera's anchor height for the close shadow band (#196). CCamera
+// is the static object at 0x79B2A8 and its anchor point sits at +0xE0 (x, y, z;
+// SetAnchorPoint 0040F5C0 stores the point and then takes its height from the
+// terrain): the same object and fields the test harness reads, behind the
+// same verified site group. NaN when those sites do not verify.
+float game_camera_anchor_z() noexcept {
+    if (!game_sites_ok(GameSiteGroup::harness)) return NAN;
+    constexpr std::uintptr_t kCameraObjectRva = 0x0039b2a8, kCameraAnchorZ = 0xe0 + 8;
+    const float z = *reinterpret_cast<const float*>(game_image_base() + kCameraObjectRva + kCameraAnchorZ);
+    return std::isfinite(z) ? z : NAN;
 }
 
 std::size_t game_image_size() noexcept {
@@ -2676,7 +2703,7 @@ std::atomic<bool> g_ownership_world_seen{false};
 // forwarded to like an addon chain instead of turning the feature off
 // (Dejavu 2026-10-17 plugin.dll replaced 0050F1E0). Not listed: detours that
 // modify the call, replace it, or rely on nested hooks or return addresses.
-constexpr std::array<std::uint32_t, 46> kObserverEntryRvas{{
+constexpr std::array<std::uint32_t, 47> kObserverEntryRvas{{
     0x1641f0, 0x1647e0, 0x164be0, 0x164e70,                     // lifecycle tick, add, remove, reset
     0x1164b0, 0x1167e0, 0x117700,                               // object plan figures, complection
     0x196030, 0x1927c0,                                         // retained parser, admission
@@ -2689,7 +2716,8 @@ constexpr std::array<std::uint32_t, 46> kObserverEntryRvas{{
     0x1341a0, 0x11cca0, 0x268c50, 0x1352b0, 0x116650,
     0x117500, 0x11b630, 0x11c9f0, 0x116da0, 0x117110,
     0x291630, 0x18dcd0, 0x26e130, 0x18b750,                     // camp texture destroy, close diagnostics
-    0x10e9f0, 0x10f1e0, 0x10f2d0, 0x10f5b0}};                   // server object change writers
+    0x10e9f0, 0x10f1e0, 0x10f2d0, 0x10f5b0,                     // server object change writers
+    0x293180}};                                                 // stock ComposeTexture (material layers)
 
 #if !defined(EID3D11_EMBEDDED)
 bool observer_entry_forwarded(const void* entry, const void* target, const wchar_t* module) noexcept {
@@ -3160,6 +3188,16 @@ bool __stdcall hook_addon_hud_atlas_producer(
 bool hud_draw_receiver(void* receiver, HudVisualLane lane) noexcept;
 void* hud_lane_atlas(void* receiver) noexcept;
 void diagnose_hud_visual_once(std::uint32_t bit, const char* detail) noexcept;
+bool submit_owned_portrait(void* renderer, void* figure, void* material, BYTE fog,
+    const HudPortraitFace& face, const char*& reason) noexcept;
+void report_owned_portrait_failure(const char* reason) noexcept;
+// The portraits panel face figure the current HUD carrier draws (owned
+// portraits). The face figures are no published HUD lane: their
+// CI3DFigure::Draw reaches the placed-figure hook with the carrier itself.
+thread_local HudPortraitFace g_portrait_face{};
+thread_local bool g_portrait_face_active = false;
+thread_local void* g_portrait_carrier = nullptr;
+thread_local bool g_portrait_diagnostic = false;
 
 void repaint_hud_skill_icon(const char* resource_name, int source_width, int source_height,
                             int copy_width, int copy_height, int destination_x,
@@ -3942,10 +3980,18 @@ BOOL __fastcall hook_hud_carrier_draw(void* self, void*, void* renderer) {
 
     const auto previous_composition=widescreen::hud_blit;
     widescreen_apply_hud_figure_layout(self);
+    const bool previous_face_active = g_portrait_face_active;
+    const HudPortraitFace previous_face = g_portrait_face;
+    void* const previous_portrait_carrier = g_portrait_carrier;
+    g_portrait_face_active = g_owned_portraits && widescreen_hud_portrait_face(self, g_portrait_face);
+    g_portrait_carrier = g_portrait_face_active ? self : nullptr;
     BOOL result = FALSE;
     __try {
         result = widescreen_replaces_hud_frame(self) ? TRUE : (g_hud_figure_draw ? g_hud_figure_draw(self, renderer) : FALSE);
     } __finally {
+        g_portrait_face_active = previous_face_active;
+        g_portrait_face = previous_face;
+        g_portrait_carrier = previous_portrait_carrier;
         widescreen::hud_blit=previous_composition;
         draw.current_carrier = previous_carrier;
         draw.current_ordinal = previous_ordinal;
@@ -4827,6 +4873,11 @@ FigureFallbackReason publish_native_world_lighting(void* renderer) noexcept {
     auto& frame = g_world_draw_depth ? g_native_world_lighting_frame : preview;
     if (frame.sampled) return frame.result;
     frame.sampled = true;
+    {
+        WorldEnvironment environment;
+        bridge_read_world_environment(environment);
+        frame.cave = environment.valid && environment.cave;
+    }
 #ifdef EID3D11_EMBEDDED
     if (g_embedded_visual_inputs) {
         if (!g_embedded_visual_inputs->lighting_valid) {
@@ -7170,6 +7221,7 @@ ObjectPlanExecutionStatus execute_owned_object_interaction(
         bool wound_failed = false;
         const bool scene_queue = sample && scene_handoff_active();
         std::vector<OwnedWoundRequest> scene_wounds;
+        bool hidden_changed = false;
         for (std::size_t source_index=0;source_index<plan.parts.size();++source_index) {
             const auto& source=plan.parts[source_index];
             if (source.set != active_set) {
@@ -7195,7 +7247,6 @@ ObjectPlanExecutionStatus execute_owned_object_interaction(
                 if (!apply_object_plan_lighted_authority(owner,source.figure,flags)) { stage="lighted_authority"; success=false; break; }
                 all_lighted = object_render_accumulate_lighted(all_lighted,flags,true);
             }
-            if (flags & kFigureHidden) { any_visible |= flags & kFigureVisible; continue; }
             // The owned part this figure names, when the render sample is usable.
             std::size_t index = static_cast<std::size_t>(-1);
             if (sample) {
@@ -7210,10 +7261,21 @@ ObjectPlanExecutionStatus execute_owned_object_interaction(
                             std::memcmp(part.name.data(),name,name_size)==0;});
                     if(found!=sample->assembly->parts.end())
                         cached=static_cast<std::size_t>(found-sample->assembly->parts.begin());
-                    else report_object_plan_failure("interaction_part_mapping_unresolved");
+                    else if (!(flags & kFigureHidden)) report_object_plan_failure("interaction_part_mapping_unresolved");
                 }
                 if (cached < sample->assembly->parts.size()) index = cached;
             }
+            // A plugin may show and hide figures (+8 0x80) every frame without
+            // any appearance call (gz19g golem damage stages, thrown blades).
+            // The assembly captured the bit when it was published: republish
+            // once the game's current bit differs from it.
+            if (index != static_cast<std::size_t>(-1)) {
+                const auto& part = sample->assembly->parts[index];
+                const bool expected = (!part.weapon && !part.arrow && (flags & kFigureHidden) != 0) ||
+                    !part.geometry || part.geometry->indices.empty();
+                hidden_changed |= expected != part.explicitly_hidden;
+            }
+            if (flags & kFigureHidden) { any_visible |= flags & kFigureVisible; continue; }
             std::array<float,16> placement{};
             if (!refresh_object_plan_placement(source.figure,placement)) { stage="figure_placement"; success=false; break; }
             const auto clip = multiply_object_plan_matrix(base_clip,placement);
@@ -7307,6 +7369,7 @@ ObjectPlanExecutionStatus execute_owned_object_interaction(
                 wound_failed = true; output.submitted_figures = 0;
             }
         }
+        if (hidden_changed) visual_note_appearance(owner, false, false, OuterFrameAppearanceCallback::unknown);
         output.extents=object_extents; output.visible=any_visible; output.have_extents=have_extents;
         output.visual_omitted = !sample || wound_failed;
         output.transaction_required=transaction;
@@ -7453,63 +7516,50 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
                 ordinal = static_cast<std::size_t>(found - sample.assembly->parts.begin());
             }
             part.ordinal = ordinal;
-            part.hidden = !preview_submits_part(sample.assembly->parts[ordinal]);
+            part.hidden = !preview_submits_part(sample.assembly->parts[ordinal], sample.values.unit);
             if (part.hidden) return true;
             NativeFrameState state;
             if (!g_native_sink_frame_state ||
-                !g_native_sink_frame_state(g_native_sink_context, state)) return reject("preview.ui_state");
-            std::uint32_t material_flags = 0;
-            if (!read_object_plan_flags(current.material, material_flags)) return reject("preview.material");
-            const auto* image = g_object_suffix_image;
-            const auto* manager = image ? reinterpret_cast<const std::uint8_t* const*>(image + kRenderStateManagerGlobalRva) : nullptr;
-            part.wound = object_render_wound_surface_for_set(active_set,
-                active_wound_surface_interface(manager, static_cast<const std::uint8_t*>(owner)));
-            part.fixed_state = state.material;
-            part.fixed_state_supplied = true;
-            const auto& context = current.context;
-            part.material = {context.uses_default_colors, (material_flags & 0x10u) != 0,
-                context.default_diffuse, context.default_specular, context.lighting,
-                part.wound ? NativeOrdering::preserve : NativeOrdering::derive_from_state};
-            part.visible = kFigureVisible;
-            return true;
-        };
-        ModelPartResult loop_result;
-        bool produced = false;
-        if (command) {
-            // Capture completed game reads/state changes once. The same producer
-            // executes the immutable parts on the scene thread.
-            produced = produce_model_parts(plan.parts.size(), read, bind,
-                [&](std::size_t i, std::uint32_t& visible) {
-                    ModelPreviewPart prepared;
-                    if (!prepare(i, prepared)) return false;
-                    if (prepared.hidden) return true;
-                    OwnedPreviewPart part;
-                    part.ordinal = prepared.ordinal; part.set = command->sets.size() - 1;
-                    part.material = prepared.fixed_state;
-                    part.uses_default_colors = prepared.material.default_colors;
-                    part.default_diffuse = prepared.material.diffuse;
-                    part.default_specular = prepared.material.secondary;
-                    part.lighting = prepared.material.lighting;
-                    part.material_flags = prepared.material.specular ? 0x10u : 0u;
-                    part.wound = prepared.wound;
-                    if (part.wound) {
-                        part.wound_texture = g_scene_handoff.surface_snapshot(g_scene_handoff.context, part.wound);
-                        if (!part.wound_texture) return reject("preview.wound_snapshot");
-                    }
-                    command->parts.push_back(std::move(part));
-                    visible = prepared.visible;
-                    return true;
-                }, loop_result);
-        } else {
-            const ModelPreviewInput input{sample, base_world, world_to_clip,
-                texture_time, fog, g_bridge_frame_serial};
-            produced = produce_model_preview(input, plan.parts.size(), read, bind, prepare,
-                [&](const NativeGeometryView& view, const ModelPreviewPart&) {
-                    NativeGeometryResult result{};
-                    return g_native_sink_submit(g_native_sink_context, view, result) ||
-                        reject("preview.submission");
-                },
-                [](std::size_t, const ModelPreviewPart&) { return true; }, loop_result);
+                !g_native_sink_frame_state(g_native_sink_context,state)) return fail("preview.ui_state");
+            view.owned_fixed_state=state.material;
+            view.world.pose=pose; view.world.owner=&pose->owner;
+            view.world.shape=pose->shape; view.world.object_to_world=base_world;
+            view.world.world_to_clip=world_to_clip; view.object_to_clip=world_to_clip;
+            view.contribution={true,true,0};
+            view.bounds_minimum=bounds.minimum; view.bounds_maximum=bounds.maximum;
+            view.prepared_identity.presentation_serial=g_bridge_frame_serial;
+            const auto& context=current.context;
+            const auto& lighting=context.lighting;
+            std::uint32_t material_flags=0;
+            if (!read_object_plan_flags(current.material,material_flags)) return fail("preview.material");
+            // The part's unit flag stays (materials, snow): a preview is a unit, not a world object.
+            view.flags=(record->values.flags&native_unit_flag)|(context.uses_default_colors?4u:0u)|((material_flags&0x10u)?8u:0u);
+            view.default_diffuse=context.default_diffuse; view.default_specular=context.default_specular;
+            view.lighting=lighting;
+            view.owned_fixed_state.specular_enable=(material_flags&0x10u)?TRUE:FALSE;
+            view.u_shift=record->values.u_shift; view.v_shift=record->values.v_shift;
+            // Fur: the part's profile reaches the record; strand hair hides its mesh colour.
+            view.fur=record->fur?&record->fur:nullptr; view.fur_node_base=record->fur_node_base;
+            if (fur_strand_hair_record(record->fur.get(),record->fur_node_base,0,g_fur_mode)) {
+                // Its fragments fail the alpha test, as in the world (run_owned_preview_command).
+                view.lighting.material_alpha=0;
+                view.owned_fixed_state.alpha_test_enable=TRUE;
+                view.owned_fixed_state.alpha_func=D3DCMP_GREATER; view.owned_fixed_state.alpha_ref=0;
+                view.owned_fixed_state.z_write_enable=FALSE;
+            }
+            const auto* image=g_object_suffix_image;
+            const auto* manager=image?reinterpret_cast<const std::uint8_t* const*>(image+kRenderStateManagerGlobalRva):nullptr;
+            const auto wound=object_render_wound_surface_for_set(active_set,
+                active_wound_surface_interface(manager,static_cast<const std::uint8_t*>(owner)));
+            view.ordering=wound?NativeOrdering::preserve:NativeOrdering::derive_from_state;
+            NativeGeometryResult result{};
+            if (!g_native_sink_submit(g_native_sink_context,view,result)) return fail("preview.submission");
+            if (wound) {
+                view.wound_surface_interface=wound; view.wound_only=true;
+                if (!g_native_sink_submit(g_native_sink_context,view,result)) return fail("preview.wound_submission");
+            }
+            visible|=kFigureVisible;
+            ++output.submitted_figures;
         }
         if (!produced) return fail(failure?failure:"preview.parts");
         const auto visible=loop_result.visible;
@@ -7549,6 +7599,335 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
         if (!defer_transaction_end) g_native_sink_end_object(g_native_sink_context,true);
         return ObjectPlanExecutionStatus::success;
     } catch (...) { return fail("preview.exception"); }
+}
+
+// Owned party portraits (portrait-owned-head plan). The portraits panel draws
+// one face figure per party member (CI3DObjectFaces figures[5i+1], the baked
+// infa*face FIG). Instead, the member's own retained head and hair parts are
+// drawn in the neutral pose, fitted into that face figure's box and placed by
+// the face figure's complete transform: the game's orientation of the face
+// (default, nod, shake, idle turn, selection tilt) moves the real head.
+// Same records as the world (PBR material name, strand hair profile). A
+// failure is logged once per reason and shows a magenta diagnostic face; the
+// baked face is never drawn instead.
+bool read_owned_world_time(const std::uint8_t* image, double& time) noexcept;
+bool read_portrait_world_time(double& time) noexcept;
+constexpr std::uint32_t kPortraitPreviewView = 2;   // views 0/1: panel and inventory previews
+
+struct OwnedPortraitSlotCache {
+    VisualResourceIncarnation resource{};
+    std::shared_ptr<VisualPreparedResources> prepared;
+    bool published = false;
+    std::string overlay_key;
+    std::shared_ptr<OwnedPortraitOverlay> overlay;
+    std::shared_ptr<const VisualAssemblyAsset> bare_source, bare;   // bare head of this unit assembly
+};
+bool portrait_model_resource(const std::string& model, ResourceBlob& blob) noexcept;
+// The neutral and expression face pictures in one resolution (game thread).
+bool portrait_face_pictures(const std::string& neutral, const std::string& expression,
+    std::shared_ptr<const TextureCpuAsset>& neutral_texture,
+    std::shared_ptr<const TextureCpuAsset>& expression_texture) noexcept;
+
+void report_owned_portrait_failure(const char* reason) noexcept {
+    static std::set<std::string> reported;   // game thread
+    try {
+        if (!reported.insert(reason).second) return;
+        append_bridge_event("owned_portrait_omitted", reason, true);
+    } catch (...) {}
+}
+
+bool submit_owned_portrait(void* renderer, void* figure, void* material, BYTE fog,
+    const HudPortraitFace& face, const char*& reason) noexcept {
+    static std::array<OwnedPortraitSlotCache, 32> caches;
+    try {
+        if (face.slot >= caches.size()) { reason = "slot_range"; return false; }
+        FigureBoundingVolume box{};
+        if (!read_figure_bounding_volume(figure, box) || !(box.maximum[0] > box.minimum[0]) ||
+            !(box.maximum[1] > box.minimum[1]) || !(box.maximum[2] > box.minimum[2])) {
+            reason = "face_figure_bounds"; return false;
+        }
+        const bool scene_queue = scene_handoff_active() && g_scene_handoff.capture_sinks &&
+            g_scene_handoff.bound_texture && g_scene_handoff.surface_snapshot;
+        if (!scene_queue) { reason = "scene_thread_off"; return false; }
+        HudLiveDrawInputs inputs{};
+        std::array<float,16> face_to_clip{};
+        std::uint32_t renderer_diffuse = 0;
+        if (!read_hud_live_draw_inputs(renderer, figure, material, inputs) ||
+            !extract_native_transform(inputs.direct3d, face_to_clip, renderer_diffuse)) {
+            reason = "face_transform"; return false;
+        }
+        if (!widescreen::interface_owned) { reason = "interface_not_owned"; return false; }
+        {
+            const auto& layout = widescreen_layout();
+            widescreen::compose_hud_clip(face_to_clip.data(), widescreen::hud_blit, layout.width, layout.height);
+        }
+        // Everything of the portrait (helmet, long hair, strands) stays inside
+        // its frame's inner rectangle: the slot's area less the frame's width
+        // (draw_hud_asset_frames' rounding), within any panel clip it has.
+        widescreen::HudComposition portrait_hud = widescreen::hud_blit;
+        {
+            HudAssetFrame frame;
+            if (!widescreen_hud_portrait_frame(face.slot, frame)) { reason = "portrait_frame"; return false; }
+            const float w = std::round(frame.thickness);
+            float l = std::round(frame.bounds.left) + w, t = std::round(frame.bounds.top) + w;
+            float r = std::round(frame.bounds.left + frame.bounds.width) - w, b = std::round(frame.bounds.top + frame.bounds.height) - w;
+            if (portrait_hud.clip_native_screen && portrait_hud.clip_right >= 0.f) {
+                l = (std::max)(l, portrait_hud.clip_left); t = (std::max)(t, portrait_hud.clip_top);
+                r = (std::min)(r, portrait_hud.clip_right); b = (std::min)(b, portrait_hud.clip_bottom);
+            }
+            portrait_hud.clip_native_screen = true;
+            portrait_hud.clip_left = l; portrait_hud.clip_top = t;
+            portrait_hud.clip_right = (std::max)(l, r); portrait_hud.clip_bottom = (std::max)(t, b);
+        }
+        LifecycleIdentity identity{};
+        if (!lifecycle_observer().active_identity(face.id, identity)) { reason = "unit_identity"; return false; }
+        auto& scene = retained_visual_scene();
+        const auto resource = scene.visual_resource(face.id);
+        RetainedVisualSample sample;
+        std::uint64_t revision = 0;
+        if (!resource.serial || !scene.visual_preview_source(resource, sample, revision) || !sample.assembly) {
+            reason = "unit_visual_source"; return false;
+        }
+        // Head (stem hd) and hair (stem hr) parts. Without the helmet option
+        // a helmeted head (hd.armorTT, hr.HH.armorTT) needs the bare parts.
+        std::vector<std::size_t> parts;
+        bool head = false, helmeted = false;
+        for (std::size_t i = 0; i < sample.assembly->parts.size(); ++i) {
+            const auto& part = sample.assembly->parts[i];
+            if (!part.source_available || part.explicitly_hidden || !part.geometry || !part.material || part.weapon) continue;
+            const auto stem = fur_part_stem(part.name);
+            if (stem != "hd" && !fur_hair_stem(stem)) continue;
+            head = head || stem == "hd";
+            helmeted = helmeted || part.name.find(".armor") != std::string::npos;
+            parts.push_back(i);
+        }
+        {
+            // Head/hair part names and skeleton nodes per member, once (the
+            // bare-head parts of a helmeted member come from these names).
+            static std::set<std::int32_t> listed;
+            if (listed.size() < 16 && listed.insert(face.id).second) {
+                std::string text = "id=" + std::to_string(face.id) + " model=" +
+                    (sample.assembly->skeleton ? sample.assembly->skeleton->visual_reference : std::string("?")) + " parts:";
+                for (const auto& part : sample.assembly->parts) {
+                    const auto stem = fur_part_stem(part.name);
+                    if (stem == "hd" || fur_hair_stem(stem)) text += ' ' + part.name;
+                }
+                text += " nodes:";
+                if (sample.assembly->skeleton)
+                    for (const auto& node : sample.assembly->skeleton->nodes) {
+                        const auto stem = fur_part_stem(node.name);
+                        if (stem == "hd" || fur_hair_stem(stem))
+                            text += ' ' + node.name + (node.transform_available ? "" : "(no bone)");
+                    }
+                text += std::string(" face=") + face.texture;
+                append_bridge_event("owned_portrait_parts", text.c_str(), false);
+            }
+        }
+        if (!head) { reason = "no_head_part"; return false; }
+        if (face.slot >= caches.size()) { reason = "slot_range"; return false; }
+        const bool bare_head = helmeted && !g_portrait_helmet;
+        // A helmeted member's bare head: drawn with portrait_helmet off, and
+        // with it on the framing (the face sits where the bare head puts it).
+        std::shared_ptr<const VisualAssemblyAsset> bare_fit;
+        if (helmeted) {
+            auto& slot_cache = caches[face.slot];
+            if (slot_cache.bare_source != sample.assembly) {
+                slot_cache.bare_source = sample.assembly; slot_cache.bare.reset();
+                ResourceBlob model;
+                const char* bare_reason = "bare_head_model";
+                if (sample.assembly->skeleton && portrait_model_resource(sample.assembly->skeleton->visual_reference, model))
+                    slot_cache.bare = build_owned_portrait_bare_assembly(*sample.assembly, model, bare_reason);
+                if (!slot_cache.bare) report_owned_portrait_failure(bare_reason);
+            }
+            if (!slot_cache.bare) { reason = bare_head ? "bare_head" : "bare_head_fit"; return false; }
+            if (bare_head) {
+                // portrait_helmet off: the bare hd / hr.HH in place of the helmet parts.
+                sample.assembly = slot_cache.bare;
+                // Helmet pieces worn over the bare head are hidden in the bare assembly.
+                parts.erase(std::remove_if(parts.begin(), parts.end(),
+                    [&](std::size_t index) { return sample.assembly->parts[index].explicitly_hidden; }), parts.end());
+            } else {
+                bare_fit = slot_cache.bare;
+            }
+        }
+        {
+            // Expression changes, first few (the in-game evidence of nCurTex).
+            static std::array<std::int32_t, 32> shown{};
+            static unsigned logged = 0;
+            if (shown[face.slot] != face.expression && face.expression >= 0 && face.expression <= 3 && logged < 24) {
+                ++logged;
+                char detail[96];
+                std::snprintf(detail, sizeof(detail), "slot=%u id=%d expression %d -> %d",
+                    face.slot, face.id, shown[face.slot], face.expression);
+                append_bridge_event("owned_portrait_expression", detail, false);
+            }
+            shown[face.slot] = face.expression;
+        }
+        std::array<float,3> lo{}, hi{}, face_lo{}, face_hi{};
+        {
+            // The fit boxes: the drawn head and hair, or for a shown helmet the
+            // bare head and hair, so the face keeps the bare head's eye line
+            // and scale and the frame clip trims the helmet.
+            const auto drawn = sample.assembly;
+            std::vector<std::size_t> fit_parts = parts, head_parts;
+            if (bare_fit) {
+                sample.assembly = bare_fit;
+                fit_parts.erase(std::remove_if(fit_parts.begin(), fit_parts.end(),
+                    [&](std::size_t index) { return bare_fit->parts[index].explicitly_hidden; }), fit_parts.end());
+            }
+            for (const auto index : fit_parts)
+                if (fur_part_stem(sample.assembly->parts[index].name) == "hd") head_parts.push_back(index);
+            const bool boxed = retained_visual_neutral_parts_box(sample, fit_parts, lo, hi) &&
+                retained_visual_neutral_parts_box(sample, head_parts, face_lo, face_hi);
+            sample.assembly = drawn;
+            if (!boxed) { reason = "head_box"; return false; }
+        }
+        // Axes (first run, 85d2c383): the unit model is Z-up with its face
+        // toward -Y; the face figure is Y-up (its box 1.5 x 2.2 x 1.9 against
+        // the head's 0.24 x 0.30 x 0.35) and the identity showed the scalp.
+        // R: (x, y, z) -> (x, z, -y) stands the head up, face toward the viewer.
+        const float head_height = hi[2] - lo[2], face_height = box.maximum[1] - box.minimum[1];
+        if (!(head_height > 0) || !(face_height > 0)) { reason = "fit_extent"; return false; }
+        // Calibrated on the baked face of the same slot (save1159,
+        // portrait_head 0 vs 1, fur_mode 0, D3D11, 300 px portrait crop at
+        // 4K): baked eye line 137, chin 213, hair top 45; the unscaled fit
+        // (95f4a2ee) had eye-to-chin 78 (baked 76) but the eye line at 80 and
+        // the hair over the frame; 670bbe04 (0.71, 0.24) measured linear
+        // (eye-to-chin 55). 0.97 of the head+hair fit and the head part's
+        // centre 0.22 of the face figure's height below its box centre put
+        // eye line and chin on the baked ones and the hair top at ~40.
+        constexpr float kPortraitScale = .97f, kPortraitDrop = .22f;
+        const float scale = kPortraitScale * face_height / head_height;
+        // The face (the head part without hair) placed where the baked face sits.
+        const std::array<float,3> head_centre{.5f*(face_lo[0]+face_hi[0]), .5f*(face_lo[1]+face_hi[1]), .5f*(face_lo[2]+face_hi[2])};
+        std::array<float,16> base_world{{scale,0,0,0, 0,0,scale,0, 0,-scale,0,0, 0,0,0,1}};
+        const std::array<float,3> rotated_centre{head_centre[0], head_centre[2], -head_centre[1]};
+        for (unsigned axis = 0; axis < 3; ++axis)
+            base_world[axis*4+3] = .5f*(box.minimum[axis]+box.maximum[axis]) - scale*rotated_centre[axis];
+        base_world[1*4+3] -= kPortraitDrop * face_height;
+        {
+            static bool logged = false;
+            if (!logged) {
+                logged = true;
+                NativeFrameState log_state{};
+                if (g_native_sink_frame_state) g_native_sink_frame_state(g_native_sink_context, log_state);
+                const unsigned log_cull = unsigned(log_state.material.cull_mode);
+                char detail[560];
+                const auto& m = log_state.material;
+                std::snprintf(detail, sizeof(detail),
+                    "first portrait: cull=%u atest=%u/%u/%u zwrite=%u blend=%u aop=%u/%u/%u clip_det=%.3g parts=%zu head box (%.3f %.3f %.3f)-(%.3f %.3f %.3f) face box (%.3f %.3f %.3f)-(%.3f %.3f %.3f) scale=%.4f expression=%d face=%s",
+                    log_cull, unsigned(m.alpha_test_enable), unsigned(m.alpha_func), unsigned(m.alpha_ref),
+                    unsigned(m.z_write_enable), unsigned(m.alpha_blend_enable), unsigned(m.alpha_op), unsigned(m.alpha_arg1), unsigned(m.alpha_arg2),
+                    double(face_to_clip[0]*(face_to_clip[5]*face_to_clip[15]-face_to_clip[7]*face_to_clip[13])-
+                           face_to_clip[1]*(face_to_clip[4]*face_to_clip[15]-face_to_clip[7]*face_to_clip[12])+
+                           face_to_clip[3]*(face_to_clip[4]*face_to_clip[13]-face_to_clip[5]*face_to_clip[12])),
+                    parts.size(), lo[0], lo[1], lo[2], hi[0], hi[1], hi[2], box.minimum[0], box.minimum[1], box.minimum[2],
+                    box.maximum[0], box.maximum[1], box.maximum[2], scale, face.expression, face.texture);
+                append_bridge_event("owned_portrait_fit", detail, false);
+            }
+        }
+        auto& cache = caches[face.slot];
+        if (!cache.prepared || cache.resource.signed_id != resource.signed_id || cache.resource.serial != resource.serial) {
+            cache.prepared = std::make_shared<VisualPreparedResources>();
+            cache.resource = resource; cache.published = false;
+        }
+        sample.lifecycle = identity;
+        sample.values.unit = true;
+        sample.selection = {}; sample.selection.neutral = true;
+        sample.pose.phase = 0;
+        sample.prepared = cache.prepared;
+        if (!cache.published) {
+            // The host keeps this view's selection by resource (core mode).
+            scene.visual_publish_preview(resource, kPortraitPreviewView, sample.selection);
+            cache.published = true;
+        }
+        double texture_time = 0;
+        if (!read_portrait_world_time(texture_time)) { reason = "game_clock"; return false; }
+        // The interface lights the game set for this face figure, as the
+        // panel preview publishes them (execute_owned_object_render_plan);
+        // without it the D3D12 interface batches kept the world's (night: black).
+        if (publish_native_world_lighting(renderer) != FigureFallbackReason::none) { reason = "lighting"; return false; }
+        NativeFrameState state;
+        if (!g_native_sink_frame_state || !g_native_sink_frame_state(g_native_sink_context, state)) {
+            reason = "ui_state"; return false;
+        }
+        auto command = std::make_shared<OwnedPreviewCommand>();
+        command->handoff = g_scene_handoff;
+        command->portrait = true;
+        auto sinks = g_scene_handoff.capture_sinks(g_scene_handoff.context);
+        if (!sinks) { reason = "scene_sinks"; return false; }
+        if (g_scene_handoff.bind_texture)
+            g_scene_handoff.bind_texture(sinks.get(), g_scene_handoff.bound_texture(g_scene_handoff.context));
+        command->sets.push_back(std::move(sinks));
+        for (const auto index : parts) {
+            const auto& source = sample.assembly->parts[index];
+            const bool defaults = (source.figure_flags & kFigureUseDefaultColors) != 0u;
+            OwnedPreviewPart part;
+            part.ordinal = index; part.set = 0;
+            part.material = state.material;
+            part.uses_default_colors = defaults;
+            part.default_diffuse = defaults ? source.diffuse : 0xffffffffu;
+            part.default_specular = defaults ? source.specular : std::uint32_t(fog) << 24;
+            part.material_flags = source.material_flags;
+            part.lighting.enabled = defaults ? 0u : 1u;
+            part.lighting.material_alpha = 1;
+            std::copy_n(source.material->diffuse.begin(), 3, part.lighting.material_diffuse.begin());
+            part.lighting.emissive = source.material->emissive;
+            part.lighting.specular = source.material->specular; part.lighting.specular[3] = 1;
+            part.lighting.object_to_world = base_world;
+            command->parts.push_back(std::move(part));
+        }
+        command->sample = std::move(sample);
+        command->texture_time = texture_time; command->fog = fog;
+        command->base_world = base_world; command->world_to_clip = face_to_clip;
+        command->presentation_serial = g_bridge_frame_serial;
+        // Expression (faces[i].nCurTex): the expression picture's changed
+        // texels over the head. Core mode: the host loads the same pictures.
+        const std::string neutral_face = face.texture;
+        const std::string expression_face = owned_portrait_expression_name(neutral_face, face.expression);
+        Renderer* const core_renderer = scene_core_renderer();
+        if (!expression_face.empty() && !core_renderer) {
+            const std::string key = neutral_face + '|' + expression_face;
+            if (cache.overlay_key != key) {
+                cache.overlay_key = key; cache.overlay.reset();
+                std::shared_ptr<const TextureCpuAsset> neutral_texture, expression_texture;
+                const char* overlay_reason = "face_picture_missing";
+                if (portrait_face_pictures(neutral_face, expression_face, neutral_texture, expression_texture))
+                    cache.overlay = build_owned_portrait_overlay(*neutral_texture, *expression_texture, overlay_reason);
+                if (!cache.overlay) report_owned_portrait_failure(overlay_reason);
+            }
+            if (!cache.overlay) { reason = "expression_overlay"; return false; }
+            command->portrait_overlay = cache.overlay;
+        }
+        // The posts carry the game thread's hud_blit (the frame envelope /
+        // scene_post_frame): the portrait's, with its frame clip, for this post.
+        struct HudScope {
+            widescreen::HudComposition held = widescreen::hud_blit;
+            explicit HudScope(const widescreen::HudComposition& h) { widescreen::hud_blit = h; }
+            ~HudScope() { widescreen::hud_blit = held; }
+        } hud_scope(portrait_hud);
+        if (Renderer* core = core_renderer) {
+            scene_core::Preview preview;
+            preview.face_neutral = expression_face.empty() ? std::string() : neutral_face;
+            preview.bare_head = bare_head ? 1u : 0u;
+            // The portrait frame for the host's interface depth clears around the portrait (the HP/MP bars over its hair).
+            preview.portrait_clip = {portrait_hud.clip_left, portrait_hud.clip_top, portrait_hud.clip_right, portrait_hud.clip_bottom};
+            preview.face_expression = expression_face;
+            preview.resource = command->sample.resource; preview.lifecycle = command->sample.lifecycle;
+            preview.view = kPortraitPreviewView;
+            preview.phase = 0; preview.texture_time = command->texture_time;
+            preview.fog = command->fog; preview.base_world = command->base_world;
+            preview.world_to_clip = command->world_to_clip; preview.presentation_serial = command->presentation_serial;
+            preview.parts = std::move(command->parts);
+            for (const auto& set : command->sets) preview.sets.push_back(scene_core_sink_state(set));
+            core->core_post_command(preview, "owned_portrait");
+            return true;
+        }
+        if (!g_scene_handoff.post(g_scene_handoff.context, [command]{ run_owned_preview_command(*command); })) {
+            reason = "scene_queue"; return false;
+        }
+        return true;
+    } catch (...) { reason = "exception"; return false; }
 }
 
 ObjectPlanExecutionStatus execute_owned_object_render_plan(
@@ -8375,6 +8754,9 @@ void lifecycle_note_mutation_nesting() noexcept {
 // World visual publication uses the same retained owner as source/membership
 // publication. Borrowed addresses below never escape an original producer call.
 std::uint8_t* g_visual_game_image = nullptr;
+#ifndef EID3D11_EMBEDDED
+bool read_portrait_world_time(double& time) noexcept { return read_owned_world_time(g_visual_game_image, time); }
+#endif
 bool g_unit_percepts_verified = false;
 bool g_unit_blood_verified = false;
 std::atomic<bool> g_unit_blood_unavailable_reported{false};
@@ -8446,6 +8828,8 @@ using VisualChangeTextureFn = void* (__thiscall*)(void*, void*);
 using VisualHighlightFn = void (__thiscall*)(void*, BOOL);
 using VisualComposeMemoryFn = BOOL (__thiscall*)(void*, void*, const void*,
     const void*, const void*, DWORD, DWORD, DWORD, const void*);
+using VisualStockComposeFn = BOOL (__thiscall*)(void*, void*, const void*,
+    const void*, const void*, DWORD, DWORD, DWORD);
 VisualCreateFn g_visual_base_create = nullptr;
 VisualCreateFn g_visual_create_map_object = nullptr;
 VisualDestroyFn g_visual_base_destroy = nullptr;
@@ -8474,7 +8858,9 @@ VisualCreateFn g_visual_final_data = nullptr;
 VisualLoadTexturesFn g_visual_load_textures = nullptr;
 VisualChangeTextureFn g_visual_change_texture = nullptr;
 VisualHighlightFn g_visual_highlight = nullptr;
+VisualHighlightFn g_visual_select = nullptr; // same __thiscall (BOOL) shape
 VisualComposeMemoryFn g_visual_compose_memory = nullptr;
+VisualStockComposeFn g_visual_stock_compose = nullptr;
 
 struct VisualMaterialAlphaReceipt {
     void* material = nullptr;
@@ -9024,6 +9410,36 @@ bool visual_named_resource(HudResourceRole role, const std::string& name, Resour
 }
 
 bool visual_figure_resource(const std::string& name, ResourceBlob& blob,
+    std::uint64_t& generation, ResourceFailure& failure, const char** predicate,
+    AppearanceDiagnosticContext* appearance,
+    std::vector<std::shared_ptr<const std::vector<std::uint8_t>>>* appearance_backings);
+bool portrait_model_resource(const std::string& model, ResourceBlob& blob) noexcept {
+    try {
+        ResourceFailure failure{}; std::uint64_t generation = 0;
+        return !model.empty() && visual_figure_resource(model + ".mod", blob, generation, failure, nullptr, nullptr, nullptr);
+    } catch (...) { return false; }
+}
+
+bool portrait_face_pictures(const std::string& neutral, const std::string& expression,
+    std::shared_ptr<const TextureCpuAsset>& neutral_texture,
+    std::shared_ptr<const TextureCpuAsset>& expression_texture) noexcept {
+    // The addon's lookup order for character pictures: .x4, .x2, then .mmp;
+    // both pictures in the first resolution that has both.
+    try {
+        for (const char* suffix : {".x4.mmp", ".x2.mmp", ".mmp"}) {
+            ResourceBlob a, b; ResourceFailure failure{}; std::uint64_t generation = 0;
+            if (!visual_named_resource(HudResourceRole::texture, neutral + suffix, a, generation, failure) ||
+                !visual_named_resource(HudResourceRole::texture, expression + suffix, b, generation, failure))
+                continue;
+            neutral_texture = retained_visual_texture_asset(a, failure);
+            expression_texture = retained_visual_texture_asset(b, failure);
+            if (neutral_texture && expression_texture) return true;
+        }
+    } catch (...) {}
+    return false;
+}
+
+bool visual_figure_resource(const std::string& name, ResourceBlob& blob,
     std::uint64_t& generation, ResourceFailure& failure, const char** predicate = nullptr,
     AppearanceDiagnosticContext* appearance = nullptr,
     std::vector<std::shared_ptr<const std::vector<std::uint8_t>>>* appearance_backings = nullptr) {
@@ -9342,10 +9758,7 @@ bool visual_preset_material(void* object, std::uint32_t type,
 #endif // !EID3D11_EMBEDDED
 
 bool visual_primary_texture(std::uint32_t type) noexcept {
-    // 51B31F/51B460, including the default-to-secondary branch.
-    constexpr bool primary[16] = {
-        true,false,true,true,false,true,true,true,true,false,true,false,true,true,true,true};
-    return type && type <= std::size(primary) && primary[type-1];
+    return figure_primary_texture(type);
 }
 
 #if !defined(EID3D11_EMBEDDED)
@@ -9444,6 +9857,45 @@ std::shared_ptr<const TextureCpuAsset> visual_generated_texture(
     return retained_visual_generated_texture_asset(selected, bytes, size, failure);
 }
 
+// Material classes (S1): the layer list of one composed character atlas.
+// STextureSetDescription (game TextureManager and the addon alike, size
+// 28h): CBYTEArray user data at +0 (data +0, size +4), the CStringArray of layer file names at +10h
+// (its data +14h, count +18h), the composite side at +24h. Byte evidence:
+// the addon's compose passes set+10h to PutLayers/PutLayersWeapons and tests
+// [set+18h]; stock AssembleTexture fills the same struct. The optional
+// packed list is the addon's int[4] quadrant assignment (right hand, left
+// hand, helm, shield). Wound overlays (4444) carry no materials.
+constexpr DWORD kMmpFormat4444 = 0x4444;
+constexpr std::uint32_t kComposeLayerLimit = 64;
+void visual_publish_material_composition(void* result_name, const void* description,
+    const std::int32_t* packed, DWORD format) noexcept {
+    if (format == kMmpFormat4444 || !description) return;
+    try {
+        std::string name;
+        if (!visual_string(result_name, 0, name) || name.empty()) return;
+        MaterialComposition value;
+        const void* data = nullptr;
+        std::uint32_t count = 0;
+        if (!visual_read(description, 0x14, data) || !visual_read(description, 0x18, count) ||
+            !visual_read(description, 0x24, value.dimension) || count > kComposeLayerLimit ||
+            (count && !data) || !value.dimension || value.dimension > 4096) return;
+        for (std::uint32_t i = 0; i < count; ++i) {
+            std::string layer;
+            if (!visual_string(data, i*4, layer)) return;
+            value.layers.push_back(std::move(layer));
+        }
+        if (packed) for (std::size_t i = 0; i < 4; ++i)
+            if (!visual_read(packed, i*4, value.slots[i])) return;
+        const void* user = nullptr;
+        std::uint32_t user_size = 0;
+        if (!visual_read(description, 0, user) || !visual_read(description, 4, user_size) ||
+            user_size > 4096 || (user_size && !user)) return;
+        value.user_data.resize(user_size);
+        if (user_size && !visual_read_bytes(user, 0, value.user_data.data(), user_size)) return;
+        retained_visual_scene().material_publish_composition(name, std::move(value));
+    } catch (...) {}
+}
+
 void visual_complete_generated_source(void* result_name, bool success) noexcept {
     if (!g_visual_publication_active) return;
     auto& scene = retained_visual_scene();
@@ -9495,6 +9947,9 @@ bool visual_part_texture(void* specific, void* texture, std::uint32_t type,
     std::string name;
     if (texture) {
         if (!visual_texture_surface(texture,surface,part.texture_flags)) return false;
+        // CTexture::szName (+1Ch) names surface and value textures alike: the
+        // material composition key. Unreadable leaves the part unclassified.
+        if (!visual_string(texture, 0x1c, part.material_name)) part.material_name.clear();
         // A present native surface is the completed source authority. An
         // unavailable/active/GPU-only value must not fall through to old MMPs.
         if (surface) return g_visual_surface_reader && g_visual_surface_reader(surface, part.surface);
@@ -9508,6 +9963,7 @@ bool visual_part_texture(void* specific, void* texture, std::uint32_t type,
         return false;
     if (_stricmp(name.c_str(), "none") == 0) return false;
     part.texture_source_name = name;
+    part.material_name = name;
     if (!selection_changed && previous && previous->source_available && previous->texture &&
         previous->texture_source_name == name) {
         // The retained appearance already owns these immutable source bytes.
@@ -9612,6 +10068,7 @@ bool visual_completed_skeleton(void* object,
     }
     if (!skeleton) return visual_failure(predicate, "skeleton.decode");
     if (skeleton->nodes.size() != nodes.size()) return visual_failure(predicate, "skeleton.node_count");
+    bool root_seen = false;
     for (std::size_t i = 0; i < nodes.size(); ++i) {
         std::string name, parent_name, node_mask;
         void* parent = nullptr;
@@ -9623,7 +10080,10 @@ bool visual_completed_skeleton(void* object,
         // Mirror the game's links exactly: one head, and a node whose named
         // parent is listed after it stays unlinked in the game as well.
         const void* recipe_parent = recipe.parent_index < i ? nodes[recipe.parent_index] : nullptr;
-        if (!shipped_node_link_matches(recipe, i, nodes[i], head, parent, recipe_parent))
+        const bool root = recipe.parent_index == UINT_MAX && recipe.parent.empty();
+        const bool later_root = root && root_seen;
+        root_seen |= root;
+        if (!shipped_node_link_matches(recipe, i, nodes[i], head, parent, recipe_parent, later_root))
             return visual_failure(predicate, recipe.parent_index != UINT_MAX ? "skeleton.parent" :
                 recipe.parent.empty() ? "skeleton.root" : "skeleton.unlinked");
     }
@@ -10437,6 +10897,21 @@ void __fastcall hook_visual_highlight(void* self, void*, BOOL highlight) {
         if (AbnormalTermination()) fail_visual_appearance(scope, "highlight.original_failed"); finish_visual_appearance(scope, !AbnormalTermination()); }
 }
 
+// CObject3DClientSpecific::Select (51C9D0, an empty `ret 4`). The inline
+// CObject3D::Select pushes the white Highlight through Preselect before it
+// sets OBJ_SELECTED, then calls this with the flag already set; deselection
+// clears the flags before this call. The highlight hook's publication
+// therefore carried the flags from before selection, and a standing unit
+// (every party member after a load) kept the stale set, so the highlight
+// policy never saw it selected. Republish the unit's values here, where the
+// flags are current. Non-units and units not yet published keep their state.
+void __fastcall hook_visual_select(void* self, void*, BOOL select) {
+    g_visual_select(self, select);
+    void* object = nullptr;
+    if (visual_read(self,0x1c,object) && object)
+        (void)visual_publish_unit_values(object, nullptr, nullptr);
+}
+
 BOOL __fastcall hook_visual_compose_memory(void* self, void*, void* result_name,
     const void* description, const void* desired, const void* alternate,
     DWORD mips, DWORD background, DWORD format, const void* layers) {
@@ -10445,8 +10920,23 @@ BOOL __fastcall hook_visual_compose_memory(void* self, void*, void* result_name,
         result = g_visual_compose_memory(self, result_name, description, desired,
             alternate, mips, background, format, layers);
     } __finally {
+        if (!AbnormalTermination() && result != FALSE)
+            visual_publish_material_composition(result_name, description,
+                static_cast<const std::int32_t*>(layers), format);
         visual_complete_generated_source(result_name, !AbnormalTermination() && result != FALSE);
     }
+    return result;
+}
+
+// Stock CTextureManager::ComposeTexture (no addon): observe the layer list;
+// the composite itself is the file the native texture manager serves.
+BOOL __fastcall hook_visual_stock_compose(void* self, void*, void* result_name,
+    const void* description, const void* desired, const void* alternate,
+    DWORD mips, DWORD background, DWORD format) {
+    const BOOL result = g_visual_stock_compose(self, result_name, description, desired,
+        alternate, mips, background, format);
+    if (result != FALSE && g_visual_publication_active)
+        visual_publish_material_composition(result_name, description, nullptr, format);
     return result;
 }
 
@@ -11993,7 +12483,51 @@ bool visual_capture_hero_light_id(void* world,void* object,std::int32_t& id,
 }
 #endif // !EID3D11_EMBEDDED
 
+// Campfires and torches are CTorchObject map objects (vtable 0x73E834, ctor
+// 0x52BEE0). CTorchObject::SetSpecific (0x52C2C0) keeps the client torch
+// specific at +0x238 and writes its owner back to specific+0x1C. The client
+// specific (vtable 0x73E954) keeps its CLight at +0x58 (SetLight 0x52D410)
+// and the flame particle scale at +0x28 (unpacked at 0x52C3C2, passed to
+// SetParticles and CParticle::Scale 0x485480). The server sets that scale
+// to the map's strength and the light range to strength * 10 (0x592986).
+// The game places the light at the flame's base, at the particle carrier.
+// PTID_CAMPFIRE (setup at 0x485BD6, segment 0x48EC20) starts each flame
+// particle up to one speed step above the carrier, rises one speed step
+// (0.30 * scale) per tick and shrinks by 0.85 per tick through its eight
+// flame frames (phase 8 on is smoke). The size-weighted mean height of those
+// frames is 0.30 * (0.5 + 2.670) = 0.951 * scale: the visual flame centre.
+constexpr float kTorchFlameCentrePerScale=.951f;
+struct TorchLightLift { std::int32_t source_id=0; float lift=0; };
 
+#ifndef EID3D11_EMBEDDED
+bool visual_capture_torch_light(void* world,void* object,TorchLightLift& result,
+    bool& present,const char** failure) noexcept {
+    present=false;
+    void* specific=nullptr;
+    if (!visual_read(object,0x238,specific)) return visual_failure(failure,"torch_light.specific");
+    if (!specific) return true;
+    void* table=nullptr;void* owner=nullptr;void* light=nullptr;float scale=0;
+    if (!visual_read(specific,0,table)) return visual_failure(failure,"torch_light.specific");
+    if (table!=g_visual_game_image+0x33e954) return true; // the server-side specific
+    if (!visual_read(specific,0x1c,owner) || owner!=object ||
+        !visual_read(specific,0x58,light) || !visual_read(specific,0x28,scale))
+        return visual_failure(failure,"torch_light.attachment");
+    if (!light) return true;
+    if (!std::isfinite(scale) || scale<=0) return visual_failure(failure,"torch_light.scale");
+    void* manager=nullptr;void* world_manager=nullptr;std::uint32_t type=0;
+    if (!visual_read(light,0,table) || table!=g_visual_game_image+0x343afc ||
+        !visual_read(light,0x10,type) || type!=0x31u ||
+        !visual_read(light,0x14,manager) ||
+        !visual_read(world,0x190,world_manager) || !world_manager || manager!=world_manager ||
+        !visual_read(light,0xc,result.source_id))
+        return visual_failure(failure,"torch_light.manager");
+    result.lift=kTorchFlameCentrePerScale*scale;
+    present=true;
+    return true;
+}
+
+
+#endif // !EID3D11_EMBEDDED
 void retain_world_point_lights(std::vector<RetainedWorldPointLight>& lights) noexcept {
     auto& memory=g_world_lamp_memory;
     try {
@@ -12042,7 +12576,7 @@ bool visual_capture_quest_light(void* world,void* object,std::int32_t id,
 // twice per frame). A faulting unit/quest read degrades exactly as the
 // guarded field reads did: not a unit / a quest-light failure.
 struct RawWorldObject {
-    void* object; std::int32_t id; bool unit; bool hero; std::uint8_t quest; // 0 none, 1 candidate or failure
+    void* object; std::int32_t id; bool unit; bool hero; bool torch; std::uint8_t quest; // 0 none, 1 candidate or failure
 };
 enum class RawWalkResult : std::uint8_t { ok, link, tail, fault };
 #if !defined(EID3D11_EMBEDDED)
@@ -12063,6 +12597,7 @@ RawWalkResult raw_walk_world_objects(const std::uint8_t* node,std::uint32_t coun
             auto& item=out[i];
             item.object=const_cast<std::uint8_t*>(object);item.id=raw_field<std::int32_t>(object,0x0c);
             item.unit=false;item.hero=false;item.quest=0;
+            item.torch=raw_field<const std::uint8_t*>(object,0)==image+0x33e834;
             __try {
                 if(raw_field<const std::uint8_t*>(object,0)==image+kObjectSupportedPrimaryVtableRva) {
                     const auto* specific=raw_field<const std::uint8_t*>(object,0x240);
@@ -12091,10 +12626,12 @@ bool publish_visual_object_poses(void* world, const char** failure = nullptr,
     std::uint64_t* manager_objects = nullptr,
     std::vector<RetainedQuestLight>* quest_lights = nullptr,
     bool publish_poses = true,
-    std::vector<std::int32_t>* hero_light_ids = nullptr) noexcept {
+    std::vector<std::int32_t>* hero_light_ids = nullptr,
+    std::vector<TorchLightLift>* torch_lights = nullptr) noexcept {
     if (manager_objects) *manager_objects = 0;
     if (quest_lights) quest_lights->clear();
     if (hero_light_ids) hero_light_ids->clear();
+    if (torch_lights) torch_lights->clear();
     if (world != g_visual_game_image+kVisualClientWorldRva) return visual_failure(failure, "static.world");
     void* manager = nullptr;
     void* owner = nullptr;
@@ -12133,6 +12670,15 @@ bool publish_visual_object_poses(void* world, const char** failure = nullptr,
                 catch (...) { return visual_failure(failure,"hero_light.allocation"); }
             }
         }
+        if (torch_lights && item.torch) {
+            TorchLightLift torch{};bool present=false;const char* light_failure=nullptr;
+            if (!visual_capture_torch_light(world,item.object,torch,present,&light_failure))
+                report_world_point_light_omission(light_failure);
+            if (present) {
+                try { torch_lights->push_back(torch); }
+                catch (...) { return visual_failure(failure,"torch_light.allocation"); }
+            }
+        }
         // Candidates (and read failures) take the full contract check.
         if (quest_lights && item.quest) {
             RetainedQuestLight light{};bool present=false;
@@ -12144,7 +12690,17 @@ bool publish_visual_object_poses(void* world, const char** failure = nullptr,
                 catch (...) { report_quest_light_omission("quest_light.allocation"); }
             }
         }
-        if (!publish_poses || item.unit) continue;
+        if (item.unit) {
+            // The game's draw-list build tests the detection bit while this
+            // scene runs; render visibility follows that same moment, so a
+            // plugin's scene-scoped lease (gz19g bosses) is honoured. Vanilla
+            // writes it only from the visible-unit packet, so it is unchanged.
+            std::uint32_t flags=0;
+            if (publish_poses && visual_read(item.object,8,flags))
+                retained_visual_scene().visual_publish_scene_detection(item.id,(flags&0x00400000u)!=0);
+            continue;
+        }
+        if (!publish_poses) continue;
         objects.push_back({item.object,item.id});
     }
     if(objects.empty())return true;
@@ -12398,6 +12954,7 @@ bool publish_visual_world_tick(void* world, const char** failure = nullptr) noex
         std::uint64_t manager_objects = 0;
         std::vector<RetainedQuestLight> quest_lights;
         std::vector<std::int32_t> hero_light_ids;
+        std::vector<TorchLightLift> torch_lights;
         {
             VisualWorldTickTimingScope objects_timing(
                 VisualWorldTickTimingKind::objects);
@@ -12406,7 +12963,7 @@ bool publish_visual_world_tick(void* world, const char** failure = nullptr) noex
             // the tick-time capture was redundant); the tick collects quest
             // lights only.
             const bool objects_ready = publish_visual_object_poses(
-                world, failure, &manager_objects, &quest_lights, false, &hero_light_ids);
+                world, failure, &manager_objects, &quest_lights, false, &hero_light_ids, &torch_lights);
             objects_timing.finish(manager_objects);
             if (!objects_ready) return false;
         }
@@ -12420,6 +12977,10 @@ bool publish_visual_world_tick(void* world, const char** failure = nullptr) noex
             for (auto& light:world_point_lights) {
                 light.hero=std::find(hero_light_ids.begin(),hero_light_ids.end(),light.source_id)!=hero_light_ids.end();
                 light.attached=light.attached||light.hero;
+                // A campfire or torch lights from its flame centre, not the
+                // flame base where the game puts it (visual_capture_torch_light).
+                for (const auto& torch:torch_lights)
+                    if (torch.source_id==light.source_id) { light.center[2]+=torch.lift; break; }
             }
             retain_world_point_lights(world_point_lights);
         }
@@ -14369,6 +14930,10 @@ BOOL __fastcall hook_retained_main_loader(
     g_retained_source_transaction = transaction;
     g_retained_common_parser_ran = false;
     BOOL result = FALSE;
+    // Load timing (x86_remote.log, the clock of host.log): the game's map
+    // owner and the owned publication wait, ahead of the host's load_reveal.
+    LARGE_INTEGER load_begin{}, load_native{}, load_end{}, load_frequency{};
+    QueryPerformanceCounter(&load_begin);
     const bool native_traced = startup_begin(StartupStage::source_native);
     __try {
         result = g_retained_main_loader
@@ -14379,14 +14944,42 @@ BOOL __fastcall hook_retained_main_loader(
         startup_end(StartupStage::source_native, native_traced,
             AbnormalTermination() ? "unwind" : result ? "true" : "false");
         const bool parser_ran = g_retained_common_parser_ran;
+        QueryPerformanceCounter(&load_native);
         const bool complete_traced = startup_begin(StartupStage::source_complete);
         retained_static_finish_source(transaction, result != FALSE,
                                       parser_ran);
         startup_end(StartupStage::source_complete, complete_traced, "completed");
+        QueryPerformanceCounter(&load_end); QueryPerformanceFrequency(&load_frequency);
+        const double tick_ms = 1000.0 / static_cast<double>(load_frequency.QuadPart);
+        x64remote::log("main load: terrain=%s mob=%s game_owner_ms=%.0f finish_ms=%.0f owned_wait_ms=%.0f",
+            names_valid ? copied_terrain.data() : "?", names_valid ? copied_mob.data() : "?",
+            static_cast<double>(load_native.QuadPart - load_begin.QuadPart) * tick_ms,
+            static_cast<double>(load_end.QuadPart - load_native.QuadPart) * tick_ms,
+            static_cast<double>(retained_static_main_load_timing().owned_wait_qpc) * tick_ms);
         g_retained_source_transaction = previous_transaction;
         g_retained_common_parser_ran = previous_parser;
     }
     return result;
+}
+
+// AddSecondaryMob's stock callers (004B9869 script AddMob, 0057C3B7) push
+// the name from EAX, and the entry keeps it there up to the already-loaded
+// check at 00595ABB. The Spelladdon's infiniteaddmobspawn option patches that
+// check to read the name from EAX: names starting with "Auto" keep the
+// game's check (loaded once), others always load. A plain call through the
+// trampoline left EAX holding the trampoline address, so every
+// AutoRunSpellAddon123.mob AddMob skipped the check and loaded again: one
+// Dead City entry ran its 68 KB script compile 16 times, because each
+// re-entry re-runs every stored zone-entry WorldScript and each holds one
+// AddMob (#203). Forward with EAX = name, whatever the compiler generates.
+__declspec(naked) BOOL __stdcall call_secondary_owner(void*, const char*) {
+    __asm {
+        mov ecx, [esp+4]
+        mov eax, [esp+8]
+        push eax
+        call dword ptr [g_retained_secondary_owner]
+        ret 8
+    }
 }
 
 BOOL __fastcall hook_retained_secondary_owner(
@@ -14402,7 +14995,7 @@ BOOL __fastcall hook_retained_secondary_owner(
     BOOL result = FALSE;
     __try {
         result = g_retained_secondary_owner
-            ? g_retained_secondary_owner(self, name) : FALSE;
+            ? call_secondary_owner(self, name) : FALSE;
     } __finally {
         const bool parser_ran = g_retained_common_parser_ran;
         retained_static_finish_source(transaction, result != FALSE, parser_ran);
@@ -15001,18 +15594,63 @@ BOOL __fastcall hook_simple_geometry(void* self, void*, void* vertices, int vert
     return result;
 }
 
+// The magenta diagnostic of a portrait the owned path could not draw: the
+// face figure's own default-colour state for the one call, restored after.
+bool set_portrait_diagnostic_colour(void* figure, std::uint32_t& flags, std::uint32_t& diffuse) noexcept {
+    __try {
+        auto* bytes = static_cast<std::uint8_t*>(figure);
+        flags = *reinterpret_cast<std::uint32_t*>(bytes + 0x08);
+        diffuse = *reinterpret_cast<std::uint32_t*>(bytes + kFigureDefaultDiffuseOffset);
+        *reinterpret_cast<std::uint32_t*>(bytes + 0x08) = flags | kFigureUseDefaultColors;
+        *reinterpret_cast<std::uint32_t*>(bytes + kFigureDefaultDiffuseOffset) = 0xffff00ffu;
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+void restore_portrait_diagnostic_colour(void* figure, std::uint32_t flags, std::uint32_t diffuse) noexcept {
+    __try {
+        auto* bytes = static_cast<std::uint8_t*>(figure);
+        *reinterpret_cast<std::uint32_t*>(bytes + 0x08) = flags;
+        *reinterpret_cast<std::uint32_t*>(bytes + kFigureDefaultDiffuseOffset) = diffuse;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+BOOL hook_figure_placed_body(void* self, void* figure, const void* rotation,
+                             const void* position, void* material, BYTE fog, void* rect,
+                             const void* return_address, const std::uintptr_t* return_slot);
+
 BOOL __fastcall hook_figure_placed(void* self, void*, void* figure, const void* rotation,
                                    const void* position, void* material, BYTE fog, void* rect) {
+    if (g_portrait_face_active && figure == g_portrait_carrier && !g_portrait_diagnostic) {
+        // Owned portrait: the member's real head replaces the baked face. A
+        // failure draws the face figure magenta (logged), never the baked face.
+        const char* reason = rect ? "extents_requested" : nullptr;
+        if (!rect && submit_owned_portrait(self, figure, material, fog, g_portrait_face, reason)) return TRUE;
+        report_owned_portrait_failure(reason ? reason : "unknown");
+        std::uint32_t flags = 0, diffuse = 0;
+        const bool coloured = set_portrait_diagnostic_colour(figure, flags, diffuse);
+        g_portrait_diagnostic = true;
+        const BOOL result = hook_figure_placed_body(self, figure, rotation, position, material, fog, rect,
+            _ReturnAddress(), reinterpret_cast<const std::uintptr_t*>(_AddressOfReturnAddress()));
+        g_portrait_diagnostic = false;
+        if (coloured) restore_portrait_diagnostic_colour(figure, flags, diffuse);
+        return result;
+    }
+    return hook_figure_placed_body(self, figure, rotation, position, material, fog, rect,
+        _ReturnAddress(), reinterpret_cast<const std::uintptr_t*>(_AddressOfReturnAddress()));
+}
+
+BOOL hook_figure_placed_body(void* self, void* figure, const void* rotation,
+                             const void* position, void* material, BYTE fog, void* rect,
+                             const void* return_address, const std::uintptr_t* return_slot) {
     // The verified placed-figure wrapper at RVA 0x001e5d90 has a fixed frame:
     // its caller's return address is 0x88 bytes above this table-call return.
     // Read only that fail-closed stack slot; this replaces unreliable x86 stack
     // unwinding and is active only in the opt-in profiler build path.
     const void* outer_caller = nullptr;
     if (bridge_profile_enabled()) {
-        const auto* return_slot = reinterpret_cast<const std::uintptr_t*>(_AddressOfReturnAddress());
+        // return_slot: the hook frame's own return-address slot (passed in).
         outer_caller = reinterpret_cast<const void*>(return_slot[0x88 / sizeof(std::uintptr_t)]);
     }
-    SemanticScope scope(SemanticKind::figure, _ReturnAddress(), outer_caller);
+    SemanticScope scope(SemanticKind::figure, return_address, outer_caller);
     const frame_acct::Part accounted_outer = frame_acct::current();
     const frame_acct::Scope accounted(frame_acct::ours_figure_hooks);
     const auto begin = bridge_profile_enabled() ? bridge_now() : 0;
@@ -15682,7 +16320,7 @@ bool capture_owned_terrain_dynamic(
         const std::uint32_t mesh_count = *reinterpret_cast<const std::uint32_t*>(
             bytes + kSectorMeshArrayOffset + 4);
         if (!terrain || !mesh ||
-            mesh_count != source_sector.vertices.size())
+            mesh_count != source_sector.vertex_count())
             return false;
         TerrainContentGenerations generations{};
         if (!terrain_content_generations(live_sector, generations))
@@ -15920,6 +16558,7 @@ bool queue_owned_visual_scene(void* scene,void* renderer,
         command=std::make_shared<OwnedSceneCommand>();
         command->handoff=g_scene_handoff;
         command->world_to_clip=world_to_clip;
+        command->camera_anchor_z=game_camera_anchor_z();
         capture_owned_world_shadow_inputs(scene,renderer,command->inputs);
         command->lighting=g_native_world_lighting_frame;
         // The game's fog function per entity (a game call). The revision is
@@ -15993,7 +16632,8 @@ bool queue_owned_visual_scene(void* scene,void* renderer,
         try {
             scene_core::WorldScene world;
             world.world_sequence=++g_core_world_sequence;
-            world.world_to_clip=command->world_to_clip;world.pass=command->inputs.pass;world.time=command->inputs.time;
+            world.world_to_clip=command->world_to_clip;world.camera_anchor_z=command->camera_anchor_z;
+            world.pass=command->inputs.pass;world.time=command->inputs.time;
             world.flags=command->inputs.flags;world.draw_undetected=command->inputs.draw_undetected;
             world.shadow_source_revision=command->inputs.shadow_source_revision;
             world.terrain=std::move(command->terrain);world.lighting=command->lighting;
@@ -18800,78 +19440,11 @@ void record_character_pane_stats_text(void* surface, const char* text, const REC
 }
 
 #if !defined(EID3D11_EMBEDDED)
-// TEMPORARY (claude/s3-store, remove once settled): which effects the
-// character pane's effect-list tab (pane mode 3) shows for its unit, each
-// time the unit or its effect ids change (at most 10 lines per load).
-// Settles why an effect the portrait row shows is missing from the pane
-// (save "regen", Ctrl+1 Regeneration). Per effect: catalog id, ticks (+4),
-// whether the catalog names it (the pane's valid test), its catalog name and
-// the whole 0x14-byte record in hex.
-#ifndef EID3D11_EMBEDDED
-void report_pane_effects_once(void* unit,std::int32_t id) noexcept {
-    static std::uint64_t reported_epoch=~std::uint64_t{0};
-    static unsigned reported_lines=0;
-    static std::uint64_t reported_key=0;
-    const auto epoch=bridge_current_world_epoch();
-    if (epoch!=reported_epoch) { reported_epoch=epoch; reported_lines=0; reported_key=0; }
-    if (reported_lines>=10) return;
-    try {
-        int count=0; const void* effects=nullptr;
-        if (!visual_read(unit,0x19c,count) || !visual_read(unit,0x198,effects) || count<0 || count>255 || (count && !effects)) {
-            if (reported_key!=1) { reported_key=1; ++reported_lines;
-                append_bridge_event("pane_effects_temporary","unit effect list unreadable",true); }
-            return;
-        }
-        // The unit and its effect ids (not their ticks, which change every tick).
-        std::uint64_t key=1469598103934665603ull^std::uint32_t(id);
-        key=(key^std::uint32_t(count))*1099511628211ull;
-        for (int i=0;i<count;++i) {
-            std::uint8_t effect=0;
-            if (!visual_read(effects,static_cast<std::size_t>(i)*0x14,effect)) break;
-            key=(key^effect)*1099511628211ull;
-        }
-        key|=2; // never the unreadable or initial key
-        if (key==reported_key) return;
-        reported_key=key; ++reported_lines;
-        const void* begin=nullptr; const void* end=nullptr;
-        const bool catalog=g_visual_game_image && visual_read(g_visual_game_image,0x3c8510,begin) &&
-            visual_read(g_visual_game_image,0x3c8514,end) && begin &&
-            reinterpret_cast<std::uintptr_t>(end)>reinterpret_cast<std::uintptr_t>(begin);
-        const std::size_t records=catalog ? (reinterpret_cast<std::uintptr_t>(end)-reinterpret_cast<std::uintptr_t>(begin))/0x84 : 0;
-        char head[96]; std::snprintf(head,sizeof(head),"epoch=%llu unit=%d count=%d catalog=%zu",
-            static_cast<unsigned long long>(epoch),id,count,records);
-        std::string detail=head;
-        for (int i=0;i<count;++i) {
-            std::uint8_t raw[0x14]{};
-            if (!visual_read_bytes(effects,static_cast<std::size_t>(i)*0x14,raw,sizeof(raw))) { detail+=" | unreadable"; break; }
-            std::uint8_t effect=raw[0]; std::int32_t ticks=0; std::memcpy(&ticks,raw+4,4);
-            char name[33]{};
-            if (effect<records) {
-                const char* text=nullptr;
-                if (visual_read(reinterpret_cast<const std::uint8_t*>(begin)+std::size_t(effect)*0x84,4,text) && text)
-                    for (std::size_t n=0;n+1<sizeof(name);++n) {
-                        char c=0; if (!visual_read(text,n,c) || !c) break;
-                        name[n]=(std::isalnum(static_cast<unsigned char>(c)) || c=='_') ? c : '?';
-                    }
-            }
-            char part[160]; int at=std::snprintf(part,sizeof(part)," | id=%u ticks=%d valid=%d name=%s raw=",
-                unsigned(effect),ticks,name[0]?1:0,name[0]?name:"-");
-            for (std::size_t b=0;b<sizeof(raw) && at>0 && at<int(sizeof(part))-2;++b) at+=std::snprintf(part+at,sizeof(part)-at,"%02x",raw[b]);
-            detail+=part;
-        }
-        append_bridge_event("pane_effects_temporary",detail.c_str(),true);
-    } catch (...) {}
-}
-#endif
-
 void __fastcall hook_character_pane_effects(void* pane,void*,void* unit) {
     auto* invocation=current_character_pane_text_invocation();
     if (!invocation || !invocation->armed || invocation->pane!=pane || !unit) return;
     std::int32_t id=0;
     if (!visual_read(unit,0x0c,id)) return;
-#ifndef EID3D11_EMBEDDED
-    report_pane_effects_once(unit,id);
-#endif
     const auto resource=retained_visual_scene().visual_resource(id);
     publish_combat_unit(unit,id,resource.serial,true);
     RECT viewport{0,35,160,215};
@@ -20112,7 +20685,8 @@ bool begin_item_card_getdc(IDirectDrawSurface7* surface,
     session.surface_id = surface_id;
     adopted->second.height = height;
     g_character_pane_text.begin_frame(width, height * kItemCardRecordRows,
-        adopted->second.scale > 0.f ? adopted->second.scale : raster_scale);
+        adopted->second.scale > 0.f ? adopted->second.scale : raster_scale,
+        true);
     return true;
 }
 
@@ -20383,7 +20957,7 @@ bool executable_address(const void* address) noexcept {
 
 // This is a finite patch contract for the supported pair of images. It is
 // deliberately not a detour decoder: an unknown active chain rejects the set.
-constexpr std::size_t kVisualProducerEntries = 29;
+constexpr std::size_t kVisualProducerEntries = 30;
 constexpr std::size_t kVisualProducerPatches = kVisualProducerEntries + 3;
 struct VisualProducerPatch {
     std::uint8_t* entry;
@@ -20505,6 +21079,9 @@ std::array<VisualProducerPatch, kVisualProducerPatches> visual_producer_patches(
             {0x8b,0x51,0x3c,0x33,0xc0}},
         {game+0x268c50, reinterpret_cast<const void*>(&hook_visual_visible_units), 5,
             {0x83,0xec,0x3c,0x53,0x55}},
+        // CObject3DClientSpecific::Select: ret 4, then alignment NOPs.
+        {game+0x11c9d0, reinterpret_cast<const void*>(&hook_visual_select), 5,
+            {0xc2,0x04,0x00,0x90,0x90}},
         {game+0x3999, reinterpret_cast<const void*>(&visual_virtual_create_adapter), 7,
             {0x8b,0x13,0x8b,0xcb,0xff,0x52,0x08}, SIZE_MAX, true},
         {game+0x10ed5c, reinterpret_cast<const void*>(&visual_posrot_read_adapter), 5,
@@ -20530,7 +21107,9 @@ std::array<VisualProducerPatch, kVisualProducerPatches> visual_producer_patches(
                   loaded_address(game, kVisualNativeLoadTexturesHandlerRva));
         // Stock ComposeTexture writes the generated MMP file, which the
         // native texture manager serves by name; there is no memory source.
-        patches[20] = {};
+        // Its entry is observed for the layer list only (material classes).
+        patches[20] = {game+kVisualStockComposeRva,
+            reinterpret_cast<const void*>(&hook_visual_stock_compose), 5, {0x55,0x8b,0xec,0x6a,0xff}};
     }
     return patches;
 }
@@ -20804,7 +21383,9 @@ void assign_visual_originals() noexcept {
     g_visual_load_textures = reinterpret_cast<VisualLoadTexturesFn>(g_visual_trampolines[17]);
     g_visual_change_texture = reinterpret_cast<VisualChangeTextureFn>(g_visual_trampolines[18]);
     g_visual_highlight = reinterpret_cast<VisualHighlightFn>(g_visual_trampolines[19]);
+    g_visual_select = reinterpret_cast<VisualHighlightFn>(g_visual_trampolines[29]);
     g_visual_compose_memory = reinterpret_cast<VisualComposeMemoryFn>(g_visual_trampolines[20]);
+    g_visual_stock_compose = reinterpret_cast<VisualStockComposeFn>(g_visual_trampolines[20]);
     g_visual_shadow_visible_original = g_visual_trampolines[21];
     g_visual_shadow_invisible_original = g_visual_trampolines[22];
     g_visual_shadow_visible_next = g_visual_game_image ? g_visual_game_image+0x16ae14 : nullptr;
@@ -22448,6 +23029,7 @@ bool uninstall_terrain_hooks(std::uint8_t* image) {
 
 void uninstall_camera_mouse_yaw_hook(std::uint8_t* image);
 void uninstall_camera_mouse_pitch_hook(std::uint8_t* image);
+void uninstall_global_map_hit_test_hook(std::uint8_t* image);
 
 // ---- Renderer-owned cursor ----
 // Fields (verified in the draw/update routines): +0x0C shown, +0x10 current
@@ -22600,6 +23182,59 @@ bool install_camera_mouse_yaw_hook(std::uint8_t* image) {
     if (!patched) return false;
     g_camera_mouse_yaw_installed = true;
     return true;
+}
+
+// The zone hit-test frame (#200): the original GenerateHitTestDDS runs
+// unchanged between the renderer's begin and end.
+void __fastcall hook_global_map_hit_test(void* self, void*) {
+    using GenerateHitTestFn = void(__thiscall*)(void*);
+    const auto original = reinterpret_cast<GenerateHitTestFn>(g_global_map_hit_test_image + kGlobalMapHitTestEntryRva);
+    void* const context = g_hit_test_frame_context;
+    const HitTestFrameFn sink = g_hit_test_frame_sink;
+    if (sink) sink(context, true);
+    original(self);
+    if (sink) sink(context, false);
+}
+
+bool install_global_map_hit_test_hook(std::uint8_t* image) {
+    if (!signature(image + kGlobalMapHitTestEntryRva, {0x53, 0x56, 0x8b, 0xf1, 0x33, 0xdb})) return false;
+    auto* call = image + kGlobalMapHitTestCallRva;
+    if (call[0] != 0xe8) return false;
+    std::int32_t relative = 0;
+    std::memcpy(&relative, call + 1, sizeof(relative));
+    if (call + kGlobalMapHitTestCallBytes + relative != image + kGlobalMapHitTestEntryRva) return false;
+    std::memcpy(g_global_map_hit_test_original.data(), call, kGlobalMapHitTestCallBytes);
+    g_global_map_hit_test_image = image;
+    DWORD protection = 0;
+    if (!VirtualProtect(call, kGlobalMapHitTestCallBytes, PAGE_EXECUTE_READWRITE, &protection)) {
+        g_global_map_hit_test_image = nullptr;
+        return false;
+    }
+    const bool patched = write_relative_call(call, reinterpret_cast<const void*>(&hook_global_map_hit_test));
+    DWORD ignored = 0;
+    VirtualProtect(call, kGlobalMapHitTestCallBytes, protection, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), call, kGlobalMapHitTestCallBytes);
+    if (!patched) g_global_map_hit_test_image = nullptr;
+    return patched;
+}
+
+// Restores the call only while it is still ours (a later hook keeps it).
+void uninstall_global_map_hit_test_hook(std::uint8_t* image) {
+    if (!image || g_global_map_hit_test_image != image) return;
+    auto* call = image + kGlobalMapHitTestCallRva;
+    std::int32_t relative = 0;
+    std::memcpy(&relative, call + 1, sizeof(relative));
+    if (call[0] == 0xe8 && call + kGlobalMapHitTestCallBytes + relative ==
+            reinterpret_cast<const std::uint8_t*>(&hook_global_map_hit_test)) {
+        DWORD protection = 0;
+        if (VirtualProtect(call, kGlobalMapHitTestCallBytes, PAGE_EXECUTE_READWRITE, &protection)) {
+            std::memcpy(call, g_global_map_hit_test_original.data(), kGlobalMapHitTestCallBytes);
+            DWORD ignored = 0;
+            VirtualProtect(call, kGlobalMapHitTestCallBytes, protection, &ignored);
+            FlushInstructionCache(GetCurrentProcess(), call, kGlobalMapHitTestCallBytes);
+        }
+    }
+    g_global_map_hit_test_image = nullptr;
 }
 
 bool install_camera_mouse_pitch_hook(std::uint8_t* image) {
@@ -25134,6 +25769,16 @@ bool bridge_character_pane_text_epoch_current(
 #endif // !EID3D11_EMBEDDED
 
 #if !defined(EID3D11_EMBEDDED)
+// The pane's effect list: the latest pane draw's list stays current for two
+// frames, as the game does not redraw the pane every frame (save "regen":
+// every other frame), so an exact frame match left the list empty on the
+// frames between (flicker).
+bool bridge_character_pane_list_current(
+    std::uint64_t ui_epoch, std::uint64_t frame_serial) noexcept {
+    return g_character_pane_hooks_installed && ui_epoch && ui_epoch == g_character_pane_ui_epoch &&
+        frame_serial <= g_bridge_frame_serial && g_bridge_frame_serial - frame_serial <= 2;
+}
+
 const char* figure_fallback_reason_name(FigureFallbackReason reason) noexcept {
     switch (reason) {
     case FigureFallbackReason::none: return "none";
@@ -25282,6 +25927,11 @@ bool EngineBridge::install() {
                camera_mouse_rotation_installed ?
                    "verified_displacement_consumers_and_limits" :
                    "yaw_or_pitch_callsite_or_owner_mismatch");
+        const bool hit_test_installed = install_global_map_hit_test_hook(
+            reinterpret_cast<std::uint8_t*>(image_));
+        report(hit_test_installed ? "zone_hit_test_installed" : "zone_hit_test_rejected",
+               hit_test_installed ? "verified_generate_hit_test_call" :
+                                    "hit_test_call_or_entry_mismatch_mask_is_normal_frame");
         const bool camera_mouse_normalize_installed =
             install_camera_mouse_normalize_hook(
                 reinterpret_cast<std::uint8_t*>(image_));
@@ -25629,6 +26279,7 @@ bool EngineBridge::uninstall() {
 #endif
     uninstall_camera_mouse_pitch_hook(image);
     uninstall_camera_mouse_yaw_hook(image);
+    uninstall_global_map_hit_test_hook(image);
     if (!uninstall_highlight_hooks(image)) {
         report("hover_highlight_uninstall_pending","foreign_call_site_owner_preserved");
         restored = false;
@@ -25694,6 +26345,18 @@ void bridge_clear_engine_frame_begin_sink(void* context) noexcept {
     if (g_engine_frame_begin_context == context) {
         g_engine_frame_begin_context = nullptr;
         g_engine_frame_begin_sink = nullptr;
+    }
+}
+
+void bridge_set_hit_test_frame_sink(void* context, HitTestFrameFn frame) noexcept {
+    g_hit_test_frame_context = context;
+    g_hit_test_frame_sink = frame;
+}
+
+void bridge_clear_hit_test_frame_sink(void* context) noexcept {
+    if (g_hit_test_frame_context == context) {
+        g_hit_test_frame_context = nullptr;
+        g_hit_test_frame_sink = nullptr;
     }
 }
 
@@ -27155,6 +27818,7 @@ bool bridge_embedded_owned_visual_frame(const EmbeddedVisualFrameInputs& inputs,
             report_object_plan_failure("embedded_world_lighting");
             return false;
         }
+        g_owned_visual_world_frame.camera_anchor_z = inputs.camera_anchor_z;
         if (!prepare_owned_world_shadows(&scene_token, nullptr, inputs.world_to_clip)) return false;
         auto& frame = g_owned_visual_world_frame;
         if (!frame.shadow_ready || frame.coverage.world_to_clip != inputs.world_to_clip) {

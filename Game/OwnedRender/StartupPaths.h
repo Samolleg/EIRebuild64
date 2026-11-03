@@ -68,6 +68,17 @@ owned::EmbeddedHostPaths CaptureStartupPaths(const std::filesystem::path& engine
     CaptureGraphicsMounts(paths.mounts, resourceRoot, package, [&](const std::string& replacement) {
         return ResolveProfilePath(std::filesystem::path(replacement), profileDirectory).wstring();
     });
+    const auto captureFamily = [&](const char* name, owned::ResourceStoreConfig& mounts) {
+        std::vector<std::string> replacements;
+        bool ignore = false;
+        if (package) package->ResourcePlan(name, replacements, ignore);
+        for (const auto& replacement : replacements)
+            mounts.archives.push_back(ResolveProfilePath(
+                std::filesystem::path(replacement), profileDirectory).wstring());
+        if (!ignore) mounts.archives.push_back((resourceRoot / name).wstring());
+    };
+    captureFamily("texts.res", paths.text_mounts);
+    captureFamily("database.res", paths.data_mounts);
     return paths;
 }
 }

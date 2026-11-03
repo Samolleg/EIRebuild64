@@ -124,6 +124,20 @@ inline void set_dlss_unavailable_reason(const char* reason) noexcept {
     std::snprintf(dlss_unavailable_storage(), 160, "%s", reason ? reason : "");
 }
 
+// Why frame generation (DLSS-G) cannot run (null: it can): set after device
+// creation, and again when NGX or the pacer fails (frame generation then off).
+inline char* frame_generation_unavailable_storage() noexcept {
+    static char reason[200] = "needs the Direct3D 12 backend of the 64-bit render host";
+    return reason;
+}
+inline const char* frame_generation_unavailable_reason() noexcept {
+    const char* reason = frame_generation_unavailable_storage();
+    return reason[0] ? reason : nullptr;
+}
+inline void set_frame_generation_unavailable_reason(const char* reason) noexcept {
+    std::snprintf(frame_generation_unavailable_storage(), 200, "%s", reason ? reason : "");
+}
+
 // Why the FSR entries of the Upscaling list are unavailable (null: FSR can
 // run). Set after device creation, and again if FSR fails.
 inline char* fsr_unavailable_storage() noexcept {

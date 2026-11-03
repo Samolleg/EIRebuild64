@@ -41,7 +41,6 @@
 #include "retained_static_scene.h"
 #include "widescreen.h"
 #include "test_harness.h"
-#include "x64_remote_device.h"
 #include "x64_remote_link.h"
 #include "dlss_frame.h"
 #include "stall_watchdog.h"
@@ -74,7 +73,8 @@ namespace owned {
 #if !defined(EID3D11_SHADER_EMBED)
 void Renderer::retire_native_shadows() noexcept {
  native_shadow_static_depth_.Reset();for(auto& view:native_shadow_static_dsv_)view.Reset();native_shadow_static_valid_.fill(false);
- if(context_){std::array<ID3D11ShaderResourceView*,PointShadowTextureLayout::array_bindings> empty{};
+ shadow12_.maps.reset();shadow12_.statics.reset();
+ if(context_&&!d3d12_){std::array<ID3D11ShaderResourceView*,PointShadowTextureLayout::array_bindings> empty{};
   context_->PSSetShaderResources(PointShadowTextureLayout::first_srv,static_cast<UINT>(empty.size()),empty.data());}
  native_shadow_valid_.fill(false);native_shadow_frame_={};native_shadow_far_waits_={};
  native_shadow_dirty_mask_=native_shadow_cleared_mask_=0;
@@ -84,10 +84,11 @@ void Renderer::retire_native_shadows() noexcept {
  release_native_shadow_range();native_shadow_reduce_cs_.Reset();native_shadow_dilate_cs_.Reset();
  native_shadow_range_constants_.Reset();native_shadow_range_failed_=false;
  native_point_shadow_pages_.clear();
- native_rain_depth_.Reset();native_rain_dsv_.Reset();native_rain_srv_.Reset();native_rain_constants_.Reset();
+ native_rain_depth_.Reset();native_rain_dsv_.Reset();native_rain_srv_.Reset();native_rain_constants_.Reset(); rain12_={};
+ native_rain_foliage_.Reset();native_rain_foliage_rtv_.Reset();native_rain_foliage_srv_.Reset();
  native_rain_valid_=native_rain_active_=false;native_rain_side_=0;
  for(unsigned k=0;k<2;++k){native_shelter_soft_[k].Reset();native_shelter_soft_srv_[k].Reset();native_shelter_soft_uav_[k].Reset();}
- native_shelter_soft_cs_.Reset();native_shelter_soft_constants_.Reset();native_shelter_soft_side_=0;native_shelter_soft_valid_=native_shelter_soft_failed_=false;
+ native_shelter_soft_cs_.Reset();native_shelter_blur_cs_.Reset();native_shelter_blur_fill_=-1;native_rain_rings_.Reset();native_rain_rings_srv_.Reset();native_rain_rings_uav_.Reset();native_rain_rings_cs_.Reset();native_rain_rings_constants_.Reset();native_rain_rings_key_[0]=native_rain_rings_key_[1]=-1.f;native_rain_rings_failed_=false;native_shelter_soft_constants_.Reset();native_shelter_soft_side_=0;native_shelter_soft_valid_=native_shelter_soft_failed_=false;
  native_point_shadow_generation_=0;
  native_point_shadow_active_=false;native_point_shadow_frame_={};native_point_shadow_constants_.Reset();
  native_shadow_constants_.Reset();native_shadow_sampler_.Reset();native_shadow_far_sampler_.Reset();native_shadow_gather_sampler_.Reset();
@@ -96,13 +97,14 @@ void Renderer::retire_native_shadows() noexcept {
 
 HRESULT Renderer::upload_native_shadow_constants(UINT slice){
  auto* buffer=native_rain_active_?native_rain_constants_.Get():native_point_shadow_active_?native_point_shadow_constants_.Get():native_shadow_constants_.Get();
- if(!context_||!buffer)return E_FAIL;
+ if(!d3d12_&&(!context_||!buffer))return E_FAIL;
  NativeShadowConstants constants{};
  if(native_rain_active_){
   // Shelter map (renderer_precipitation.cpp): its one slice; no sun bits.
   constants.light[0]=native_rain_slice_.world_to_light;constants.camera[0]=native_rain_slice_.camera_slice;
   constants.bias[0]=native_rain_slice_.bias;
   constants.control[1]=slice;constants.control[2]=native_rain_side_;constants.control[3]=native_point_shadow_side_;
+  if(d3d12_){rain12_.constants=constants;return S_OK;} // the D3D12 flush sets it per pass (b2)
   D3D11_MAPPED_SUBRESOURCE mapped{};const HRESULT hr=context_->Map(buffer,0,D3D11_MAP_WRITE_DISCARD,0,&mapped);
   if(FAILED(hr))return hr;
   std::memcpy(mapped.pData,&constants,sizeof(constants));context_->Unmap(buffer,0);return S_OK;
@@ -132,12 +134,25 @@ HRESULT Renderer::upload_native_shadow_constants(UINT slice){
   native_sun_shadows_live_=constants.control[0]!=0||constants.bias[4][2]>.5f; // NATIVE_SUN_SHADOWS_LIVE
   native_point_soft_live_=constants.bias[5][2]>.5f; // nativePointVisibility softQuality
  }
+ if(d3d12_){
+  (native_point_shadow_active_?shadow12_.point_constants:shadow12_.constants)=constants;
+  return S_OK;
+ } // set per pass and draw (b2); point faces never replace the sun receiver frame
  D3D11_MAPPED_SUBRESOURCE mapped{};const HRESULT hr=context_->Map(buffer,0,D3D11_MAP_WRITE_DISCARD,0,&mapped);
  if(FAILED(hr))return hr;
  std::memcpy(mapped.pData,&constants,sizeof(constants));context_->Unmap(buffer,0);return S_OK;
 }
 
 HRESULT Renderer::create_native_shadow_resources(){
+ if(d3d12_){ // D3D12: the five sun maps and their static layer as depth arrays
+  if(shadow12_.maps&&shadow12_.statics)return S_OK;
+  shadow12_.maps.reset();shadow12_.statics.reset();
+  HRESULT hr=d3d12_->create_depth_array(native_shadow_side_,5,shadow12_.maps);
+  if(SUCCEEDED(hr))hr=d3d12_->create_depth_array(native_shadow_side_,5,shadow12_.statics);
+  if(FAILED(hr)){shadow12_.maps.reset();shadow12_.statics.reset();return hr;}
+  native_shadow_static_valid_.fill(false);
+  return S_OK;
+ }
   if(native_shadow_depth_&&native_shadow_depth_srv_&&native_shadow_sampler_&&
      native_shadow_far_sampler_&&native_shadow_gather_sampler_&&native_shadow_static_depth_)return S_OK;
  if(!device_||!context_)return E_FAIL;
@@ -236,7 +251,7 @@ void append_shadow_range_shader_programs(std::vector<ShaderProgram>& out){
 
 #if !defined(EID3D11_SHADER_EMBED)
 void Renderer::release_native_shadow_range() noexcept{
- if(context_){ID3D11ShaderResourceView* empty=nullptr;context_->PSSetShaderResources(64,1,&empty);}
+ if(context_&&!d3d12_){ID3D11ShaderResourceView* empty=nullptr;context_->PSSetShaderResources(64,1,&empty);}
  native_shadow_cells_.Reset();native_shadow_cells_srv_.Reset();native_shadow_cells_uav_.Reset();
  native_shadow_range_.Reset();native_shadow_range_srv_.Reset();native_shadow_range_uav_.Reset();
  native_shadow_range_side_=0;native_shadow_range_mask_=0;
@@ -372,7 +387,7 @@ bool Renderer::begin_native_shadows(const NativeShadowFrame& frame,std::uint8_t&
   if(!animate&&frame.publication_serial &&
      frame.publication_serial==native_shadow_frame_.publication_serial &&
      frame.world_epoch==native_shadow_frame_.world_epoch &&
-     native_shadow_depth_.Get() && native_shadow_depth_srv_.Get()){
+     (d3d12_?shadow12_.maps!=nullptr:native_shadow_depth_.Get() && native_shadow_depth_srv_.Get())){
    bool same=true;std::uint64_t reused=0;
    for(UINT index=0;index<5;++index){
     const auto& next=frame.slices[index];const auto& old=native_shadow_frame_.slices[index];
@@ -667,7 +682,7 @@ std::uint8_t Renderer::set_native_shadow_phase(unsigned phase) noexcept{SCENE_EN
 }
 
 HRESULT Renderer::flush_native_shadows(){
- PERF06_SCOPE("sun_shadow_gpu_submit");
+ if(d3d12_)return flush_native_shadows_d3d12();
  SceneRendererTimingScope scene_timing(
   SceneRendererTimingKind::native_flush);
  // The static sun caster bake draws from its own layout and work buffer
@@ -835,10 +850,15 @@ HRESULT Renderer::flush_native_shadows(){
      context_->VSSetShader(native_depth_clear_vs_.Get(),nullptr,0);context_->PSSetShader(nullptr,nullptr,0);
      context_->Draw(3,0);
      context_->VSSetShader(native_shadow_vs_.Get(),nullptr,0);context_->RSSetViewports(1,&viewport);
-    }else context_->ClearDepthStencilView(depth,D3D11_CLEAR_DEPTH,1,0);
+    }else{
+     context_->ClearDepthStencilView(depth,D3D11_CLEAR_DEPTH,1,0);
+     if(native_rain_active_){const float none[4]{};context_->ClearRenderTargetView(native_rain_foliage_rtv_.Get(),none);}
+    }
     native_shadow_cleared_mask_|=1u<<slice;
    }
-   context_->OMSetRenderTargets(0,nullptr,depth);
+   // The shelter bake also writes its foliage mask (nativeShadowPS colour).
+   if(native_rain_active_)context_->OMSetRenderTargets(1,native_rain_foliage_rtv_.GetAddressOf(),depth);
+   else context_->OMSetRenderTargets(0,nullptr,depth);
    if(records){
     if(FAILED(hr=upload_native_shadow_constants(slice)))return native_flush_failure_line_=__LINE__,finish(hr);
     D3D11_BOX args{};args.right=batches*16;args.bottom=args.back=1;
@@ -868,19 +888,34 @@ HRESULT Renderer::flush_native_shadows(){
      if(shadow_foliage_opaque(native_far_foliage_opaque_,native_point_shadow_active_,slice,
         batch.foliage?native_foliage_part_flag:0u,state.render[D3DRENDERSTATE_ALPHATESTENABLE]!=0))
       state.render[D3DRENDERSTATE_ALPHATESTENABLE]=FALSE;
-     // The shelter bake looks straight down, where crown cards are seen edge-on
-     // and their alpha test samples a coarse mip: the cards dropped out and
-     // crowns left almost nothing in the map (c6c05f03 debug view: no shelter
-     // under pines). Foliage there draws its whole cards.
-     if(native_rain_active_&&batch.foliage)state.render[D3DRENDERSTATE_ALPHATESTENABLE]=FALSE;
+     // The shelter bake looks straight down, where steep crown cards are
+     // foreshortened: their alpha test sampled a coarse mip whose averaged
+     // alpha fell under the game's reference, so the cards dropped out
+     // (c6c05f03 debug view: no shelter under pines). Whole cards (5a63018f)
+     // replaced that with every card's full quad: a pine's dry patch became
+     // the union of its card rectangles, a hard-edged polygon about twice the
+     // foliage (bfa1e170 F11, rain). Foliage in the shelter bake is alpha
+     // tested at a low fixed reference instead, its mip taken along the
+     // card's less foreshortened axis (nativeShadowPS, nativeContactLayout.z),
+     // so only texels that hold leaves cover the ground.
+     const bool shelter_foliage=native_rain_active_&&batch.foliage&&bucket.texture_srv;
+     if(shelter_foliage){
+      state.render[D3DRENDERSTATE_ALPHATESTENABLE]=TRUE;
+      state.render[D3DRENDERSTATE_ALPHAFUNC]=D3DCMP_GREATER;state.render[D3DRENDERSTATE_ALPHAREF]=64; // alpha > 0.25
+     }
      Constants constants{};constants.native_triangle_base=batch.output_triangle_base;
+     // Foliage batches in the shelter bake: the textured cards' mip rule (the
+     // foliage mask itself takes each draw's instance flag, nativeShadowPS).
+     constants.layout_origin[2]=shelter_foliage?1.f:0.f;
      constants.textured=state.render[D3DRENDERSTATE_ALPHATESTENABLE]&&bucket.texture_srv;
      constants.alpha_test=state.render[D3DRENDERSTATE_ALPHATESTENABLE]!=0;constants.alpha_func=state.render[D3DRENDERSTATE_ALPHAFUNC];
      constants.alpha_ref=(state.render[D3DRENDERSTATE_ALPHAREF]&255)/256.f;
      constants.alpha_op=state.stage[0][D3DTSS_ALPHAOP];constants.alpha_arg1=state.stage[0][D3DTSS_ALPHAARG1];constants.alpha_arg2=state.stage[0][D3DTSS_ALPHAARG2];
      constants.texture_factor[3]=(state.render[D3DRENDERSTATE_TEXTUREFACTOR]>>24)/255.f;
      if(FAILED(hr=upload_draw_constants(&constants,sizeof(constants))))return native_flush_failure_line_=__LINE__,finish(hr);
-     apply_state(state,constants.textured!=0);context_->PSSetShader(constants.alpha_test?native_shadow_ps_.Get():nullptr,nullptr,0);
+     // Every shelter caster runs the pixel stage, so the mask holds the top
+     // surface's class (a roof over a crown is solid).
+     apply_state(state,constants.textured!=0);context_->PSSetShader(constants.alpha_test||native_rain_active_?native_shadow_ps_.Get():nullptr,nullptr,0);
      // Terrain sun casters (L-084): the terrain's cull mode leaves only its
      // faces turned away from the sun in the sun maps, so a ground pixel on
      // such a face (a pit wall the smooth lighting normal hides) is compared
@@ -1266,7 +1301,7 @@ HRESULT Renderer::finish_native_shadow_bake(NativeStaticShadowBake& bake) noexce
    hr=upload_native_static_work(layout);
   }
   native_pending_draws_.swap(queued);
-  if(FAILED(hr)){release_native_shadow_bake(bake);layout.static_bake.work_srv.Reset();
+  if(FAILED(hr)){release_native_shadow_bake(bake);layout.static_bake.work_srv.Reset();layout.static_bake.work12.reset();
    layout.static_bake.work.Reset();layout.static_bake.work_capacity=0;return hr;}
  }
  return S_OK;
@@ -1372,11 +1407,20 @@ bool Renderer::update_native_static_shadow_store(const RetainedShadowCasterValue
    [&](const RetainedShadowCasterValue& value){return key_of(value)==key;}),bake.absent.end());
   const auto it=find(key);
   if(it==bake.entries.end()||it->record==UINT_MAX)continue;
-  if(it->work<layout.work.size()&&layout.work[it->work].record!=UINT_MAX&&layout.static_bake.work){
+  // The GPU copy of the entry must go too: its record is released below and
+  // can be reused by another caster, which the stale entry would then draw
+  // with this caster's world preparation (D3D12: the giant streaked shadows
+  // that appeared while panning; the D3D12 bake keeps its work in work12).
+  if(it->work<layout.work.size()&&layout.work[it->work].record!=UINT_MAX&&
+     (d3d12_?layout.static_bake.work12!=nullptr:layout.static_bake.work!=nullptr)){
    layout.work[it->work].record=UINT_MAX;
    const UINT offset=it->work*static_cast<UINT>(sizeof(NativeDrawWorkGpu));
-   const D3D11_BOX box{offset,0,0,offset+static_cast<UINT>(sizeof(NativeDrawWorkGpu)),1,1};
-   context_->UpdateSubresource(layout.static_bake.work.Get(),0,&box,&layout.work[it->work],0,0);
+   if(d3d12_){
+    if(FAILED(d3d12_->write_buffer(*layout.static_bake.work12,offset,&layout.work[it->work],sizeof(NativeDrawWorkGpu))))return false;
+   }else{
+    const D3D11_BOX box{offset,0,0,offset+static_cast<UINT>(sizeof(NativeDrawWorkGpu)),1,1};
+    context_->UpdateSubresource(layout.static_bake.work.Get(),0,&box,&layout.work[it->work],0,0);
+   }
   }
   if(it->record<bake.records.size()){
    auto& selected=bake.records[it->record];
@@ -1509,6 +1553,12 @@ bool Renderer::queue_native_terrain_shadow_bake(const NativeTerrainShadowEntry* 
   if(!any)return true;
   // Per-work map masks (t35): sized by demand, written once per redraw.
   const UINT works=static_cast<UINT>(bake.masks.size());
+  if(d3d12_){ // D3D12: the same masks in an executor buffer, written in stream order before the bake's build
+   const UINT64 bytes=UINT64(works)*sizeof(UINT);
+   if(FAILED(native_d3d12_buffer(native_shadow_work_mask12_,bytes,sizeof(UINT),0))||
+      FAILED(d3d12_->write_buffer(*native_shadow_work_mask12_,0,bake.masks.data(),bytes)))return false;
+   return SUCCEEDED(draw_native_shadow_bake(bake));
+  }
   if(!native_shadow_work_mask_||works>native_shadow_work_mask_capacity_){
    const UINT capacity=demand_growth_capacity(works,native_shadow_work_mask_capacity_,kNativeRawElementLimit);
    native_shadow_work_mask_.Reset();native_shadow_work_mask_srv_.Reset();native_shadow_work_mask_capacity_=0;

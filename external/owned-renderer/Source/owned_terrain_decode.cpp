@@ -390,8 +390,6 @@ bool decode_owned_terrain_tiles(const OwnedTerrainSourceDecodeContext& decode,
                 const bool long_tile = !tile.transparent &&
                     tile.animation_ordinal == UINT_MAX &&
                     tile.material_index >= context->source->texture_count;
-                const std::uint32_t fill_flags = material_tile
-                    ? owned_terrain_fill_flags(*context->source, *context->sector, tile, tile_uvs) : 0u;
                 for (std::uint32_t item = 0; item < vertices_per_tile; ++item) {
                     const std::uint32_t source_lane =
                         lod_vertex_map[context->command.lod][item];
@@ -517,8 +515,18 @@ bool decode_owned_terrain_tiles(const OwnedTerrainSourceDecodeContext& decode,
                         if (!water_tile)
                             terrain_vertex.liquid_fill = owned_terrain_pit_fill(
                                 *context->source, *context->sector, source_index);
+                        // Dry material vertices: liquid_drop holds the rise
+                        // over the local floor (the blend's wall-foot band).
+                        if (!water_tile && material_tile)
+                            terrain_vertex.liquid_drop = owned_terrain_foot_rise(
+                                *context->source, *context->sector, source_index);
+                        // ... and liquid_bend the wall rising beside it
+                        // (wall-foot contact darkening).
+                        if (!water_tile && material_tile)
+                            terrain_vertex.liquid_bend = owned_terrain_wall_above(
+                                *context->source, *context->sector, source_index);
                         if (material_tile)
-                            terrain_vertex.flags |= native_terrain_material_vertex | fill_flags;
+                            terrain_vertex.flags |= native_terrain_material_vertex;
                         else if (long_tile)
                             terrain_vertex.flags |= native_terrain_long_tile;
                     }
@@ -663,23 +671,32 @@ TerrainTileBlendInput owned_terrain_tile_blend_input(const TerrainCpuAsset& terr
  return in;
 }
 
-std::vector<std::array<std::uint32_t,4>> owned_terrain_tile_blend_rows(const TerrainTileBlendInput& in,
-    const TerrainTileFamilies& families,std::size_t& blended,std::size_t& plain_materials,std::size_t& bed_families){
- const std::uint32_t slots=in.slots;
+namespace {
+// Every tile's world-corner families from its slot and corner lanes.
+std::vector<std::array<std::uint32_t,4>> tile_blend_corners(const TerrainTileBlendInput& in,const TerrainTileFamilies& families){
  std::vector<std::array<std::uint32_t,4>> corners(in.slot.size(),std::array<std::uint32_t,4>{});
+ for(std::size_t t=0;t<corners.size();++t){
+  if(in.slot[t]>=in.slots||in.slot[t]>=families.signatures.size())continue;
+  const auto& g=families.signatures[in.slot[t]];
+  for(unsigned k=0;k<4;++k)corners[t][k]=g[(in.lanes[t]>>(2*k))&3u];
+ }
+ return corners;
+}
+
+// Each family's material cell (its plain slot, else a borrowed one) and the
+// liquid-bed families.
+std::map<std::uint32_t,std::uint32_t> tile_blend_cells(const TerrainTileBlendInput& in,const TerrainTileFamilies& families,
+    const std::vector<std::array<std::uint32_t,4>>& corners,std::set<std::uint32_t>& bed,
+    std::vector<std::uint32_t>* fold_table=nullptr,std::set<std::uint32_t>* borrowed=nullptr){
+ const std::uint32_t slots=in.slots;
  // Placed tile corners per family, and those under a liquid at rest.
  std::map<std::uint32_t,std::uint32_t> placed,placed_wet;
- for(std::size_t t=0;t<corners.size();++t){
-  if(in.slot[t]>=slots||in.slot[t]>=families.signatures.size())continue;
-  const auto& g=families.signatures[in.slot[t]];
+ for(std::size_t t=0;t<corners.size();++t)
   for(unsigned k=0;k<4;++k){
-   const std::uint32_t f=g[(in.lanes[t]>>(2*k))&3u];
-   corners[t][k]=f;
+   const std::uint32_t f=corners[t][k];
    if(f){++placed[f];if(in.wet[t]&(1u<<k))++placed_wet[f];}
   }
- }
  // Liquid-bed families (terrain_tile_bed_name, kTerrainTileBedShare).
- std::set<std::uint32_t> bed;
  for(const auto& [family,count]:placed){
   const auto name=families.names.find(family);
   if((name!=families.names.end()&&terrain_tile_bed_name(name->second))||float(placed_wet[family])>=kTerrainTileBedShare*float(count))
@@ -691,16 +708,107 @@ std::vector<std::array<std::uint32_t,4>> owned_terrain_tile_blend_rows(const Ter
   const auto name=families.names.find(family);
   cells[family]=terrain_tile_blend_cell(slot,terrain_tile_material_class(name!=families.names.end()?name->second:std::string()),bed.count(family)!=0);
  }
- // Families without a drawn plain slot borrow a same-word, same-bed family's cell
- // (most drawn first) instead of leaving their tiles as hard-edged art.
- {
-  std::map<std::uint32_t,std::uint32_t> drawn;
-  for(std::uint32_t s=0;s<slots&&s<families.signatures.size();++s)for(const auto f:families.signatures[s])if(f)drawn[f]+=in.usage[s];
-  std::vector<std::uint32_t> order;for(const auto& [f,n]:drawn)order.push_back(f);
-  std::sort(order.begin(),order.end(),[&](std::uint32_t a,std::uint32_t b){return drawn[a]>drawn[b]||(drawn[a]==drawn[b]&&a<b);});
-  terrain_tile_borrow_cells(families,order,cells,bed);
+ // Families without a drawn plain slot fold a quadrant of their own
+ // transition art (terrain_tile_fold_cells; one table entry a grid column).
+ std::map<std::uint32_t,std::uint32_t> drawn;
+ for(std::uint32_t s=0;s<slots&&s<families.signatures.size();++s)for(const auto f:families.signatures[s])if(f)drawn[f]+=in.usage[s];
+ std::vector<std::uint32_t> order;for(const auto& [f,n]:drawn)order.push_back(f);
+ std::sort(order.begin(),order.end(),[&](std::uint32_t a,std::uint32_t b){return drawn[a]>drawn[b]||(drawn[a]==drawn[b]&&a<b);});
+ // Plain-art donors (same word, same bed, most drawn first) for every
+ // family without a plain slot, chosen among the plain cells only.
+ std::map<std::uint32_t,std::uint32_t> donors=cells;
+ terrain_tile_borrow_cells(families,order,donors,bed);
+ std::vector<std::uint32_t> table;
+ terrain_tile_fold_cells(families,in.usage,in.usable,cells,bed,in.tiles_x,table);
+ // A folded family with a donor draws the donor's plain art shifted to the
+ // folded quadrant's mean colour (table entry bits 14-25 the donor slot,
+ // bit 26 set): the mirror-folded quadrant itself repeated as a kaleidoscope
+ // every half tile (cand-1030, rock in save1162).
+ for(const auto& [f,c]:cells){
+  if(c==terrain_tile_blend_none||((c>>6)&63u)!=terrain_tile_fold_page||(c&63u)>=table.size())continue;
+  const auto d=donors.find(f);
+  if(d!=donors.end()&&((d->second>>6)&63u)!=terrain_tile_fold_page)table[c&63u]|=((d->second&4095u)<<14)|(1u<<26);
  }
- auto rows=terrain_tile_blend_rows(in.tiles_x,in.tiles_y,corners,cells,in.steep,in.heights,in.underwater,families.rock_hard_only);
+ if(fold_table)*fold_table=std::move(table);
+ // Families with neither borrow a same-word, same-bed family's cell (most
+ // drawn first) instead of leaving their tiles as hard-edged art.
+ {
+  std::set<std::uint32_t> before;
+  for(const auto& [f,c]:cells)before.insert(f);
+  terrain_tile_borrow_cells(families,order,cells,bed);
+  if(borrowed)for(const auto& [f,c]:cells)if(!before.count(f))borrowed->insert(f);
+ }
+ return cells;
+}
+}
+
+std::vector<std::uint32_t> owned_terrain_tile_vertex_families(const TerrainTileBlendInput& in,const TerrainTileFamilies& families){
+ return terrain_tile_vertex_families(in.tiles_x,in.tiles_y,tile_blend_corners(in,families));
+}
+
+std::set<std::string> owned_terrain_tile_blend_drawable(const TerrainTileBlendInput& in,const TerrainTileFamilies& families){
+ std::set<std::uint32_t> bed;
+ std::set<std::string> names;
+ for(const auto& [family,cell]:tile_blend_cells(in,families,tile_blend_corners(in,families),bed)){
+  const auto name=families.names.find(family);
+  if(name!=families.names.end())names.insert(name->second);
+ }
+ return names;
+}
+
+std::vector<std::array<std::uint32_t,4>> owned_terrain_tile_blend_rows(const TerrainTileBlendInput& in,
+    const TerrainTileFamilies& families,const std::vector<std::uint32_t>& edge_families,
+    std::size_t& blended,std::size_t& plain_materials,std::size_t& bed_families,std::set<std::uint32_t>& unmatched,
+    std::vector<std::uint32_t>& fold_table,std::set<std::uint32_t>& borrowed,
+    std::map<std::uint32_t,std::uint32_t>* family_cells,bool slot_variants){
+ const auto corners=tile_blend_corners(in,families);
+ std::set<std::uint32_t> bed;
+ const auto cells=tile_blend_cells(in,families,corners,bed,&fold_table,&borrowed);
+ if(family_cells)*family_cells=cells;
+ // Shared map edge vertices take the family the edge gives them when this
+ // map has a cell for it; otherwise they keep their own (reported).
+ auto family=terrain_tile_vertex_families(in.tiles_x,in.tiles_y,corners);
+ if(edge_families.size()==family.size())
+  for(std::size_t i=0;i<family.size();++i){
+   const std::uint32_t f=edge_families[i];
+   if(!f||f==family[i])continue;
+   if(cells.count(f))family[i]=f;else unmatched.insert(f);
+  }
+ // Terrain 2.0: every plain slot the map places is its own material. A
+ // vertex takes the plain slot of its family that most of its touching
+ // plain tiles draw (ties: the lower slot), else the family's cell, so a
+ // family's variants meet through the same field and edge masks as any
+ // two materials, where the map placed them (no per-cell hashing).
+ std::vector<std::uint32_t> vertex_cells;
+ if(slot_variants){
+  const std::uint32_t vw=in.tiles_x+1;
+  vertex_cells.assign(family.size(),terrain_tile_blend_none);
+  for(std::size_t i=0;i<family.size();++i){
+   const std::uint32_t f=family[i];
+   const auto own=f?cells.find(f):cells.end();
+   if(own==cells.end())continue;
+   vertex_cells[i]=own->second;
+   const int vx=int(i%vw),vy=int(i/vw);
+   std::uint32_t best=0,count=0,slots[4];unsigned n=0;
+   for(unsigned k=0;k<4;++k){
+    const int tx=vx-int(k&1),ty=vy-int(k>>1);
+    if(tx<0||ty<0||tx>=int(in.tiles_x)||ty>=int(in.tiles_y))continue;
+    const std::uint32_t s=in.slot[std::size_t(ty)*in.tiles_x+tx];
+    if(s>=in.slots||s>=families.signatures.size()||s>=in.usable.size()||!in.usable[s])continue;
+    const auto& g=families.signatures[s];
+    if(g[0]==f&&g[1]==f&&g[2]==f&&g[3]==f)slots[n++]=s;
+   }
+   for(unsigned a=0;a<n;++a){
+    std::uint32_t c=0;for(unsigned b=0;b<n;++b)c+=slots[b]==slots[a];
+    if(c>count||(c==count&&slots[a]<best)){best=slots[a];count=c;}
+   }
+   if(count){
+    const auto name=families.names.find(f);
+    vertex_cells[i]=terrain_tile_blend_cell(best,terrain_tile_material_class(name!=families.names.end()?name->second:std::string()),bed.count(f)!=0);
+   }
+  }
+ }
+ auto rows=terrain_tile_blend_rows(in.tiles_x,in.tiles_y,corners,family,cells,in.steep,in.heights,in.underwater,families.rock_hard_only,vertex_cells);
  blended=0;plain_materials=cells.size();bed_families=bed.size();
  for(const auto& row:rows)blended+=(row[2]&5u)==5u; // known and near a transition
  return rows;

@@ -148,7 +148,9 @@ bool build_retained_directional_coverage(
     const std::array<float, 16>* terrain_to_world = nullptr,
     std::uint32_t map_side = 2048,
     std::uint8_t close_cascades = 3,
-    std::uint64_t base_terrain_generation = 0) noexcept; // base_terrain's source generation
+    std::uint64_t base_terrain_generation = 0, // base_terrain's source generation
+    float close_range = 80,                    // close band length (m) past its near start
+    float camera_anchor_z = NAN) noexcept;     // the game camera's anchor height; NaN unknown
 NativeContribution retained_world_contribution(const NativeWorldBounds& bounds,
     bool casts_shadow, const RetainedDirectionalCoverage& coverage,
     NativeWorldBounds* caster_in_light = nullptr,
@@ -227,6 +229,10 @@ bool retained_visual_gpu_pose(const RetainedVisualSample& sample,
     NativeWorldGeometry::Pose*& pose);
 bool retained_visual_combat_anchor(const RetainedVisualSample& sample,
     std::array<float,3>& anchor);
+// Owned party portrait: the box of the listed parts in the neutral pose, in
+// the pose root's space (the space the portrait's root_to_world places).
+bool retained_visual_neutral_parts_box(const RetainedVisualSample& sample,
+    const std::vector<std::size_t>& parts,std::array<float,3>& minimum,std::array<float,3>& maximum);
 bool retained_visual_part_bounds(const RetainedVisualSample& sample,
     std::size_t part_index,NativeWorldBounds& bounds);
 bool retained_visual_part_submission(const RetainedVisualSample& sample,

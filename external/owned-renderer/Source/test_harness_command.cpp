@@ -1,7 +1,9 @@
 #include "test_harness_command.h"
 
 #include <charconv>
+#include <limits>
 #include <cmath>
+#include <cstdio>
 #include <vector>
 
 namespace owned {
@@ -86,10 +88,23 @@ HarnessCommand parse_harness_command(std::string_view line) {
         }
         command.name = argument;
         command.verb = verb == "load_save" ? HarnessVerb::load_save : HarnessVerb::console;
+    } else if (verb == "walk") {
+        // The game's own move order for the party leader (script MoveToPoint:
+        // the unit logic's StartMove, real steps), through the console parser
+        // like @SetCP; needs the console's script access (thingamabob) first.
+        // Completes on dispatch; the route waits for the walk with wait.
+        float x = 0, y = 0;
+        if (w.size() != 3 || !number(w[1], x) || !number(w[2], y) || x < 0 || y < 0)
+            return rejected("usage: walk <x> <y> (world metres)");
+        char text[96];
+        std::snprintf(text, sizeof(text), "@MoveToPoint(GetLeader(),%.3f,%.3f)", x, y);
+        command.name = text;
+        command.verb = HarnessVerb::console;
     } else if (verb == "camera") {
-        if (w.size() != 6) return rejected("usage: camera x y yaw pitch zoom");
+        if (w.size() != 6) return rejected("usage: camera x y yaw pitch zoom (x y yaw may be - : keep the current one)");
         for (int i = 0; i < 5; ++i)
-            if (!number(w[i + 1], command.number[i])) return rejected("camera: bad number");
+            if (i < 3 && w[i + 1] == "-") command.number[i] = std::numeric_limits<float>::quiet_NaN();
+            else if (!number(w[i + 1], command.number[i])) return rejected("camera: bad number");
         if (command.number[3] < -90.0f || command.number[3] > 90.0f)
             return rejected("camera: pitch outside -90..90 degrees");
         if (command.number[4] <= 0.0f) return rejected("camera: zoom must be positive");

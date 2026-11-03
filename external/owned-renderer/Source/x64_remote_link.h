@@ -1,48 +1,63 @@
 #pragma once
-// Transport of the remote D3D11 device (x86 side): launches the x64 host,
-// owns the shared control block and the command ring, and writes records in
-// call order from any thread. See x64_remote_protocol.h.
+// The game process's link to the x64 render host (core mode): launches the
+// host, owns the shared control block and the record ring (the state
+// channel), and writes records in order from any thread. See
+// x64_remote_protocol.h.
 
 #include <windows.h>
+#include <d3d11.h>
 #include <cstdint>
 #include <cstring>
 #include <intrin.h>
 #include <string>
 #include "x64_remote_protocol.h"
 
+struct ID3D12GraphicsCommandList;
+struct ID3D12Resource;
+
 namespace x64remote {
 
-// EI_RENDERER_X64_REMOTE=1: the test override that forces the remote device.
-bool remote_requested() noexcept;
 // The host executable: EI_RENDERER_X64_HOST, else eid3d11_x64_host.exe next
 // to this DLL (the shipped layout).
 std::wstring host_path() noexcept;
 
 // Launches the host and waits for its capability snapshot. On failure
-// `error` names the reason; nothing falls back to a local device.
-bool link_start(HWND game_window, UINT device_flags, char* error, std::size_t error_bytes, bool core = false) noexcept;
+// `error` names the reason.
+bool link_start(HWND game_window, UINT device_flags, char* error, std::size_t error_bytes) noexcept;
 Control& control() noexcept;
 // Largest payload one record may carry (a quarter of the ring).
 std::uint32_t chunk_bytes() noexcept;
 // Shared readback area (written by the host under a reply) and its size.
 const std::uint8_t* readback_area() noexcept;
 std::uint32_t readback_bytes() noexcept;
-// Prefetch slots: kPrefetchSlots when none is free.
-std::uint32_t allocate_prefetch_slot() noexcept;
-void free_prefetch_slot(std::uint32_t slot) noexcept;
-const PrefetchSlot& prefetch_slot(std::uint32_t slot) noexcept;
-const std::uint8_t* prefetch_data(std::uint32_t slot) noexcept;
 // True once the host died or reported device removal.
 HRESULT link_removed() noexcept;
-// True while the remote call-stream device is in use (the link started
-// without core mode).
-bool remote_active() noexcept;
-// EI_RENDERER_X64_CORE=1: core mode wanted (typed scene records to the
-// host's Renderer). Env-only until S6 brings the overlay back.
+// EI_RENDERER_X64_CORE=1: test-only override (harness routes) that runs core
+// mode without the ini option.
 bool core_requested() noexcept;
+// Core mode for this start: the player option x64_render_host (eid3d11.ini
+// [graphics]) or the test override. Called once, before any device exists.
+// False, with a notice, when the previous start never reached the host's
+// first frame (the option is turned off: rollback) or when the host cannot
+// run here; the game then runs the standard 32-bit renderer.
+bool core_wanted() noexcept;
+// Why the host cannot run on this machine ("needs 64-bit Windows", "64-bit
+// host file missing"), or null. The settings grey the option out with it.
+const char* host_unavailable_reason() noexcept;
+// The rollback or unavailability notice to show (90 s), or null.
+const char* remote_notice() noexcept;
+// Private bytes of the running x64 host process, from the game process; 0
+// when no host runs. The F10 memory line.
+std::uint64_t host_private_bytes() noexcept;
+// Why the link was lost (the host died, reported removal, ...), or null;
+// the device-removed message names it.
+const char* remote_lost_reason() noexcept;
 // True while core mode runs: the link started for scene records and the
 // game process has no D3D11 device.
 bool core_active() noexcept;
+// Core mode, the game's clean exit (~DD): tells the host, which clears the
+// over-budget marker in the ini it alone writes once the game has exited.
+void signal_clean_exit() noexcept;
 // Core mode: one scene message (scene_core.h command id, scene_wire bytes)
 // as Op::scene fragments, with no other scene record between them.
 void scene_message(std::uint16_t command, const std::uint8_t* data, std::size_t bytes) noexcept;
@@ -50,46 +65,82 @@ void scene_message(std::uint16_t command, const std::uint8_t* data, std::size_t 
 // state; called once per Present.
 void check_host() noexcept;
 
-// Client cost on the calling thread (rdtsc ticks), reported per frame for
-// the presenting thread: context calls (all), records written (lock and
-// copy included) and dynamic Map/Unmap. Only with
-// EI_RENDERER_X64_CLIENT_TIMING=1 (the timers cost ~20 ns per call).
-extern bool g_client_timing;
-struct ClientTicks {
-    std::uint64_t calls = 0, call_ticks = 0, writer_ticks = 0, map_ticks = 0;
+// ---- DLSS Super Resolution: NGX lives in the x64 host only ----
+// The host Renderer implements these (Host/host_bridge.cpp); in the game
+// process they report DLSS unavailable.
+struct DlssCaps {
+    bool available;
+    char reason[128]; // why not, when unavailable
 };
-ClientTicks& client_ticks() noexcept;
-class TimedCall {
-public:
-    TimedCall() noexcept : start_(g_client_timing ? __rdtsc() : 0) {}
-    ~TimedCall() {
-        if (!start_) return;
-        auto& t = client_ticks();
-        ++t.calls;
-        t.call_ticks += __rdtsc() - start_;
-    }
-private:
-    std::uint64_t start_;
+// NGX initialised and DLSS available on this GPU and driver.
+bool dlss_caps(DlssCaps& out) noexcept;
+// Optimal render size for an output size and mode (0 performance, 1
+// balanced, 2 quality, 3 ultra performance, 4 DLAA = output size).
+bool dlss_render_size(UINT out_w, UINT out_h, int mode, UINT& render_w, UINT& render_h) noexcept;
+struct DlssEvaluate {
+    ID3D11Resource* color;    // render-res colour input (SRV-capable texture)
+    ID3D11Resource* depth;    // render-res depth (D32/R32 typeless depth texture)
+    ID3D11Resource* motion;   // render-res RG16F motion vectors in render pixels, current -> previous (NGX convention)
+    ID3D11Resource* output;   // output-res texture with UAV bind
+    ID3D11Resource* exposure; // may be null: auto exposure
+    // Passed unchanged as NGX InJitterOffsetX/Y: the jitter applied to the
+    // projection this frame, in render pixels, between -0.5 and +0.5, in the
+    // motion-vector system (origin top left: +x right, +y down). With a D3D
+    // projection (NDC +y up) a pixel jitter (jx, jy) is the NDC offset
+    // (2*jx/render_w, -2*jy/render_h). (DLSS Programming Guide 3.7.)
+    float jitter_x, jitter_y;
+    float mv_scale_x, mv_scale_y; // usually 1, 1 when motion is in render pixels
+    UINT render_w, render_h, out_w, out_h;
+    int mode;
+    float sharpness;
+    bool reset;
+    bool hdr;
+    bool depth_inverted;
 };
-// Map/Unmap time without the records they write (counted as writer time).
-class TimedMap {
-public:
-    TimedMap() noexcept : start_(g_client_timing ? __rdtsc() : 0), writer_(start_ ? client_ticks().writer_ticks : 0) {}
-    ~TimedMap() {
-        if (!start_) return;
-        auto& t = client_ticks();
-        t.map_ticks += (__rdtsc() - start_) - (t.writer_ticks - writer_);
-    }
-private:
-    std::uint64_t start_, writer_;
+// One evaluation on the immediate context. The host recreates its feature
+// when render size, output size, mode, hdr, depth_inverted or auto exposure
+// change; NGX preserves the immediate context state (Programming Guide
+// 5.2.5). Motion vectors are render resolution (MVLowRes), unjittered.
+HRESULT dlss_evaluate(ID3D11DeviceContext* ctx, const DlssEvaluate& e) noexcept;
+// The D3D12 backend: one evaluation recorded into list (D3D12Frame::
+// record_external). resources: colour, depth, motion, output, already in
+// their states; the D3D11 pointers of e are not read.
+HRESULT dlss_evaluate_d3d12(ID3D12GraphicsCommandList* list, ID3D12Resource* const* resources, const DlssEvaluate& e) noexcept;
+// Releases the host's DLSS feature and its memory (DLSS turned off).
+void dlss_release() noexcept;
+// DLSS Frame Generation (D3D12 backend in the host only). One generated
+// frame between the previous and this real frame. Matrices are row-major
+// for row vectors (v' = v * M, the SDK's "row-major, post-multiplication"),
+// without jitter. resources: backbuffer (the real frame), depth, motion,
+// HUD-less, interpolated output; the inputs already in shader-read state,
+// the output in unordered access (D3D12Frame::record_external).
+struct DlssgEvaluate {
+    UINT width, height;              // backbuffer = output size
+    UINT render_w, render_h;         // depth and motion size
+    float clip_to_prev_clip[16], prev_clip_to_clip[16], view_to_clip[16], clip_to_view[16];
+    float position[3], up[3], right[3], forward[3];
+    float near_plane, far_plane, fov_y, aspect;
+    float jitter_x, jitter_y;        // clip space
+    float mv_scale_x, mv_scale_y;
+    bool reset;
+    bool depth_inverted;
 };
+struct DlssgCaps { bool available; int multi_frame_max; char reason[160]; };
+bool dlssg_caps(DlssgCaps& out) noexcept;
+HRESULT dlssg_evaluate_d3d12(ID3D12GraphicsCommandList* list, ID3D12Resource* const* resources, const DlssgEvaluate& e) noexcept;
+// Releases the frame generation feature (turned off; NGX stays initialised).
+void dlssg_release() noexcept;
+// NGX's VRAM estimate for the feature at a size (0: unknown).
+std::uint64_t dlssg_vram_estimate(UINT width, UINT height, UINT render_w, UINT render_h) noexcept;
+// True once the host has presented at least one frame (the renderer defers
+// host DLSS until then; see Renderer::render_dlss).
+bool host_presented() noexcept;
 
 // One record: the constructor takes the ring lock and reserves the whole
-// record, put() fills it in order, the destructor completes it. Never
-// release a proxy (it may write a destroy record) while a Writer is alive.
+// record, put() fills it in order, the destructor completes it.
 class Writer {
 public:
-    Writer(Op op, std::uint16_t context, std::uint32_t payload_bytes) noexcept;
+    Writer(Op op, std::uint32_t payload_bytes) noexcept;
     ~Writer();
     Writer(const Writer&) = delete;
     Writer& operator=(const Writer&) = delete;
@@ -111,7 +162,6 @@ public:
 private:
     std::uint8_t* cursor_ = nullptr;
     std::int64_t end_ = 0;
-    std::uint64_t start_ticks_ = 0;
 };
 
 // Makes every written record visible to the host.
@@ -126,50 +176,14 @@ void end_reply() noexcept;
 // Present bookkeeping: waits until at most frames_ahead presents are
 // queued ahead of the host.
 void wait_presents(std::uint64_t serial) noexcept;
-// Ring position the host has consumed.
-std::int64_t consumed_position() noexcept;
 
-// Handles and query result slots, reused after their destroy record.
-std::uint32_t allocate_handle() noexcept;
-void free_handle(std::uint32_t handle) noexcept;
-// kNoQuerySlot when the result storage could not grow (its mapping failed;
-// the device is lost with that reason). Slots are demand-sized: see
-// kQuerySegments in x64_remote_protocol.h.
-std::uint32_t allocate_query_slot() noexcept;
-void free_query_slot(std::uint32_t slot) noexcept;
-// The result slot of an allocated slot index (any thread).
-const QuerySlot& query_slot(std::uint32_t slot) noexcept;
-std::uint64_t next_query_serial() noexcept;
-
-// Statistics for the periodic report.
-struct Counters {
-    std::uint64_t records, bytes, map_bytes, update_bytes, init_bytes;
-    std::uint64_t readbacks, prefetches, space_waits, present_waits;
-    double space_wait_ms, present_wait_ms, readback_ms;
-};
-void count_map(std::uint32_t bytes) noexcept;
-void count_update(std::uint32_t bytes) noexcept;
-void count_init(std::uint32_t bytes) noexcept;
-void count_readback(double ms) noexcept;
-void count_prefetch() noexcept;
-void count_shadow(std::int64_t bytes) noexcept;
-void count_handles(int delta) noexcept;
 // Once per present: writes the two-second report line.
 void report_frame() noexcept;
 
 // One line in x86_remote.log (next to the host exe) and the debugger.
 void log(const char* format, ...) noexcept;
-// A call the remote device does not support, or cannot execute exactly:
-// logged once per name (x64_remote_unsupported event) and the device is
-// lost with "unsupported call in remote mode: <what>", so the next Present
-// fails and the game closes through the device-removed message naming it.
-// Never a silent skip.
-void unsupported(const char* what) noexcept;
-// A named failure outside the D3D11 call stream: the device is lost with
-// `reason` and the game closes at the next Present through the named box.
+// A named failure: the device is lost with `reason` and the game closes at
+// the next Present through the named box.
 void lose_device(const char* reason) noexcept;
-// A remote-only deviation whose result is provably identical to the local
-// device (only slower): logged once per name, the game continues.
-void remote_warning(const char* what) noexcept;
 
 } // namespace x64remote

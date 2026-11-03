@@ -101,20 +101,60 @@ template<class Height> bool liquid_fall_vertex_at(const Height& height,int x,int
         if(height(x+o[0],y+o[1],z)&&std::abs(z-c)>=edge_drop&&!spike(x+o[0],y+o[1]))return true;}
     return false;
 }
-// Fills terrain.outside_liquid from the map adjoining it, whose vertex (0,0)
-// lies at (-offset_x, -offset_y) of this terrain's grid: liquid flow, cascade
-// and drop then read the adjoining liquid across the shared edge.
-void owned_terrain_set_outside_liquid(TerrainCpuAsset& terrain,int offset_x,int offset_y,
-    const TerrainCpuAsset& adjoining);
+// The level-reach field's drain potential two vertices inside a map edge
+// (the first vertex its field covers), for each vertex along the edge: the
+// level it drains at, its distance to that level's exit, the exit's own
+// level, and whether it moves. reached false: no exit drains it.
+struct TerrainEdgePotential {
+    float level = 0, distance = 0, outlet_level = 0;
+    bool reached = false, moving = false;
+};
+// A placed map's liquid as an adjoining map reads it across a shared edge:
+// its visible liquid surface heights at rest (NaN where it has none; one per
+// global vertex), its flow (welded to its own outside liquid) at its
+// perimeter vertices, per side as in TerrainOutsideLiquid::edge_flow, and its
+// drain potential along each side.
+struct TerrainLiquidRim {
+    int xmax = 0, ymax = 0;
+    std::vector<float> heights;
+    std::array<std::vector<TerrainEdgeFlow>, 4> edge_flow;
+    std::array<std::vector<TerrainEdgePotential>, 4> potential;
+};
+// Empty (no heights) when the map has no visible liquid.
+TerrainLiquidRim owned_terrain_liquid_rim(const TerrainCpuAsset& terrain);
+// A placed map beside this terrain, whose vertex (0,0) lies at (-offset_x,
+// -offset_y) of this terrain's grid and whose grid is xmax x ymax cells.
+// rim: its liquid (null when it has none or is not read). flows: rim's edge
+// flow is its final flow, which this terrain blends to. fixed: its field
+// never changes (the active map), so this terrain follows its flow.
+struct TerrainAdjoiningLiquid {
+    int offset_x = 0, offset_y = 0, xmax = 0, ymax = 0;
+    const TerrainLiquidRim* rim = nullptr;
+    bool flows = false, fixed = false;
+};
+// Fills terrain.outside_liquid from the maps placed beside it (where two hold
+// a vertex the first wins): liquid flow, cascade and drop then read their
+// liquid across the shared edges, their final flow continues into this map,
+// and their edges are no map-edge outlets of its own. With own (this
+// terrain's rim built with only those edges set, before any roles) each seam
+// vertex takes a role: beside a fixed map it follows that map's flow; beside
+// another it compares both maps' drain potentials, the same rule each map
+// applies from the same two values, so a level reach crossing the seam runs
+// one way, toward the nearer exit of the two maps, whichever is welded first.
+void owned_terrain_set_outside_liquid(TerrainCpuAsset& terrain,
+    const std::vector<TerrainAdjoiningLiquid>& adjoining,const TerrainLiquidRim* own);
 // The current of level river reaches: per global liquid vertex (row stride
 // sector_count_x*32+1) the downstream direction times its strength, in units
 // of kLiquidOutflowSlope/127, and how close it runs to a fall lip (0..127,
-// raised into the cascade source); empty when no level water of the map runs.
-using TerrainLiquidOutflowField = std::vector<std::array<std::int8_t,3>>;
+// raised into the cascade source), then its downstream direction before the
+// strength scaling (unit vector times 127; 0 where none), which an adjoining
+// map's seam role reads; empty when no level water of the map runs.
+using TerrainLiquidOutflowField = std::vector<std::array<std::int8_t,5>>;
 struct TerrainLiquidOutflow {
     std::mutex lock;
     bool built = false;
     std::shared_ptr<const TerrainLiquidOutflowField> field;
+    std::array<std::vector<TerrainEdgePotential>, 4> potential; // see TerrainLiquidRim
 };
 // Gives terrain.liquid_outflow an empty cache (descriptor validation), or
 // empties it (a neighbour's seam was set), so the field is (re)built on first
@@ -129,9 +169,8 @@ void owned_terrain_reset_liquid_outflow(TerrainCpuAsset& terrain) noexcept;
 // when its way down crosses moving water (it drains over a fall or rapid) or
 // it lies downstream of moving water. Open water (lakes, sea) and ponds stay
 // still, as do swamp and lava, and a lake fed by moving water passes it on.
-// With terrain.outside_liquid set (a neighbour map), an edge where the
-// adjoining map's flow leaves this map is an outlet and one where it enters
-// is a source, so the flow continues across the seam. CPU only, at decode.
+// With terrain.outside_liquid set (a neighbour map), its seams' roles make
+// the flow continue across them (TerrainEdgeSeam). CPU only, at decode.
 std::shared_ptr<const TerrainLiquidOutflowField> owned_terrain_liquid_outflow(
     const TerrainCpuAsset& terrain,const OwnedTerrainGeometryValues* values) noexcept;
 // Blends a flow decoded at global vertex (x,y) of terrain toward the
@@ -176,22 +215,26 @@ std::uint32_t owned_terrain_slope_normal(const TerrainCpuAsset& source,
 // zone-grid positions, so sector-edge copies agree).
 std::uint32_t owned_terrain_facet_flatness(const TerrainCpuAsset& source,
     const TerrainSectorCpuAsset& sector, std::uint32_t base) noexcept;
-// Depth of a base vertex below both its neighbour pairs (an authored pit that
-// is concave along both grid axes; 0 on slopes, ridges and valleys). The
+// Depth of a base vertex below all four grid neighbours, up to the lowest of
+// them (an authored pit; 0 on slopes, ridges, valleys and wall feet). The
 // one-ring slope normal and the stored lighting normal never see it, so sun
 // and point casters draw the vertex raised by it (L-085). Zone-grid positions.
+// Height of a base vertex over the lowest of its 3x3 grid nodes. Across a
+// face one cell wide (a 1 m staircase riser) both its foot and crest nodes
+// see the floor, so the interpolated value is the pixel's rise above the
+// floor there; the material blend lets the floor climb the wall foot by it.
+float owned_terrain_foot_rise(const TerrainCpuAsset& source,
+    const TerrainSectorCpuAsset& sector, std::uint32_t base) noexcept;
+// Nearness of a wall rising beside a base vertex, 0..1 (the strongest node
+// within 3 m: its rise of 0.35-1.05 m, smoothstepped, times (1-(d/3)^2)^2),
+// for the terrain's wall-foot contact darkening; even along a 1 m staircase.
+float owned_terrain_wall_above(const TerrainCpuAsset& source,
+    const TerrainSectorCpuAsset& sector, std::uint32_t base) noexcept;
 float owned_terrain_pit_fill(const TerrainCpuAsset& source,
     const TerrainSectorCpuAsset& sector, std::uint32_t base) noexcept;
 // Fills every sector's base_slope_normals/base_facet_flatness (several threads),
 // so the terrain decode at the first world frame reads them instead.
 void owned_terrain_prepare_shading(TerrainCpuAsset& source) noexcept;
-
-// terrain_fill_corners() of one base tile over the zone grid, reordered into
-// atlas orientation (bit (v>centre)*2+(u>centre) of the tile's UV corners) and
-// shifted into NativeTerrainVertex::flags bits 8-11.
-std::uint32_t owned_terrain_fill_flags(const TerrainCpuAsset& source,
-    const TerrainSectorCpuAsset& sector, const TerrainTileDescriptor& tile,
-    const std::array<NativeTextureCoordinate,9>& uvs) noexcept;
 
 // Fills terrain.swamp_frame_cover from the loaded BC1 pages (map loader,
 // before the asset is shared). Returns one log line, empty when the map has

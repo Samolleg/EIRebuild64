@@ -1,8 +1,7 @@
 #pragma once
-// The renderer DLL's neighbour stream, wherever it runs: this process's own
-// stream in standard mode (neighbour_maps.h), the x64 render host's in remote
-// device mode (x64_remote_neighbours.h). Either way the renderer adopts the
-// same NeighbourPiece (neighbour_piece.h); in remote mode no decoded
+// The renderer DLL's neighbour stream: this process's own stream in standard
+// mode (neighbour_maps.h); in core mode the x64 host runs it for its own
+// Renderer and this process only sends the inputs and stops, so no decoded
 // neighbour ever exists in the game process.
 #include "owned_resource_store.h"
 
@@ -20,6 +19,15 @@ std::unique_ptr<NeighbourPiece> neighbour_client_take(std::uint64_t epoch) noexc
 void neighbour_client_uploaded(std::uint64_t epoch) noexcept;
 void neighbour_client_stop() noexcept;
 void neighbour_client_stop_epoch(std::uint64_t epoch) noexcept;
+// Game thread, where a main load of the already published map starts (a
+// reload keeps its generation): the stream prepares the coming world's
+// neighbours during the game's load (neighbour_maps_restart). Core mode only:
+// the restarted stream overlaps the neighbours the world being left still
+// holds, which the 32-bit game process's address space is not given; standard
+// mode restarts at the world change as before.
+void neighbour_client_restart(const std::string& mpr, std::uint64_t epoch, const ResourceStoreConfig& mounts) noexcept;
+// The renderer's world change (release_world_state): neighbour_maps_world_changed.
+void neighbour_client_world_changed(std::uint64_t epoch) noexcept;
 bool neighbour_client_settled(std::uint64_t epoch) noexcept;
 bool neighbour_client_remaining(std::uint64_t epoch, std::size_t& remaining) noexcept;
 std::string neighbour_client_error(std::uint64_t epoch);

@@ -33,6 +33,7 @@ struct PrecipitationConstants {
     float thin[4], veil[4], veil_color[4], screen[4], shelter0[4], shelter1[4], shelter2[4], splash[4], snow[4], sheet[4], drift[4], sand[4], band[4], sand2[4];
     float fog_range[4], fog_control[4], fog_color[4], depth[4];
     float fog_seam[4], fog_curve[4], fog_span_lo[4], fog_span_hi[4];
+    float snow_light[4], snow_sun[4];
 };
 static_assert(sizeof(PrecipitationConstants) % 16 == 0);
 
@@ -48,6 +49,8 @@ void append_precipitation_shader_programs(std::vector<ShaderProgram>& out) {
     out.push_back({source, "precipitation", nullptr, "precipitationSplashVS", "vs_4_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
     out.push_back({source, "precipitation", nullptr, "precipitationSplashPS", "ps_4_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
     out.push_back({kShelterFilterShader, "precipitation_shelter", nullptr, "shelterFilterCS", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
+    out.push_back({kShelterFilterShader, "precipitation_shelter", nullptr, "shelterBlurCS", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
+    out.push_back({kRainRingsShader, "precipitation_rings", nullptr, "rainRingsCS", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
 #if !defined(EID3D11_SHADER_EMBED)
@@ -59,8 +62,16 @@ void append_precipitation_shader_programs(std::vector<ShaderProgram>& out) {
 // request's slab, 1 its bottom (the highest surface wins).
 bool Renderer::begin_native_rain_occlusion(const NativeShadowSlice& slice,UINT side) noexcept {
  SCENE_ENTRY("begin_native_rain_occlusion");
- if(native_shadow_collecting_||native_point_shadow_active_||native_rain_active_||!side||!native_shadow_build_cs_)return false;
+ if(native_shadow_collecting_||native_point_shadow_active_||native_rain_active_||!side||(!d3d12_&&!native_shadow_build_cs_))return false;
  if(FAILED(flush_native()))return false;
+ if(d3d12_){ // D3D12 backend: one D32 slice read as Texture2D and its R8 foliage mask, the same flush (flush_native_shadows_d3d12)
+  if(!rain12_.shelter||!rain12_.foliage||native_rain_side_!=side){
+   rain12_.shelter.reset();rain12_.foliage.reset();native_rain_valid_=false;
+   if(FAILED(d3d12_->create_depth_array(side,1,rain12_.shelter,DXGI_FORMAT_D32_FLOAT,true))||
+      FAILED(d3d12_->create_target(side,side,rain12_.foliage,DXGI_FORMAT_R8_UNORM,DXGI_FORMAT_UNKNOWN))){rain12_.shelter.reset();rain12_.foliage.reset();return false;}
+   native_rain_side_=side;
+  }
+ } else {
  if(!native_rain_constants_){
   D3D11_BUFFER_DESC desc{};desc.ByteWidth=sizeof(NativeShadowConstants);
   desc.Usage=D3D11_USAGE_DYNAMIC;desc.BindFlags=D3D11_BIND_CONSTANT_BUFFER;desc.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
@@ -73,12 +84,19 @@ bool Renderer::begin_native_rain_occlusion(const NativeShadowSlice& slice,UINT s
   description.BindFlags=D3D11_BIND_DEPTH_STENCIL|D3D11_BIND_SHADER_RESOURCE;
   D3D11_DEPTH_STENCIL_VIEW_DESC view{};view.Format=DXGI_FORMAT_D32_FLOAT;view.ViewDimension=D3D11_DSV_DIMENSION_TEXTURE2D;
   D3D11_SHADER_RESOURCE_VIEW_DESC srv{};srv.Format=DXGI_FORMAT_R32_FLOAT;srv.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;srv.Texture2D.MipLevels=1;
+  native_rain_foliage_.Reset();native_rain_foliage_rtv_.Reset();native_rain_foliage_srv_.Reset();
+  D3D11_TEXTURE2D_DESC mask=description;mask.Format=DXGI_FORMAT_R8_UNORM;mask.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
   if(FAILED(device_->CreateTexture2D(&description,nullptr,&native_rain_depth_))||
      FAILED(device_->CreateDepthStencilView(native_rain_depth_.Get(),&view,&native_rain_dsv_))||
-     FAILED(device_->CreateShaderResourceView(native_rain_depth_.Get(),&srv,&native_rain_srv_))){
-   native_rain_depth_.Reset();native_rain_dsv_.Reset();native_rain_srv_.Reset();return false;
+     FAILED(device_->CreateShaderResourceView(native_rain_depth_.Get(),&srv,&native_rain_srv_))||
+     FAILED(device_->CreateTexture2D(&mask,nullptr,&native_rain_foliage_))||
+     FAILED(device_->CreateRenderTargetView(native_rain_foliage_.Get(),nullptr,&native_rain_foliage_rtv_))||
+     FAILED(device_->CreateShaderResourceView(native_rain_foliage_.Get(),nullptr,&native_rain_foliage_srv_))){
+   native_rain_depth_.Reset();native_rain_dsv_.Reset();native_rain_srv_.Reset();
+   native_rain_foliage_.Reset();native_rain_foliage_rtv_.Reset();native_rain_foliage_srv_.Reset();return false;
   }
   native_rain_side_=side;
+ }
  }
  native_rain_slice_=slice;native_rain_valid_=false;
  native_shadow_dirty_mask_=1;native_shadow_cleared_mask_=0;
@@ -95,12 +113,13 @@ bool Renderer::end_native_rain_occlusion(bool commit) noexcept {
  catch(...){discard_native();}
  native_shadow_collecting_=false;native_rain_active_=false;
  native_shadow_dirty_mask_=native_shadow_cleared_mask_=0;native_shadow_failed_=false;
- native_rain_valid_=SUCCEEDED(hr);
+ // D3D12: S_FALSE is a pass that waited for its pipeline (map unwritten), never published.
+ native_rain_valid_=d3d12_?hr==S_OK:SUCCEEDED(hr);
  if(native_rain_valid_)++native_rain_bakes_;
  native_shelter_soft_valid_=native_rain_valid_&&filter_native_rain_shelter();
  // The soft map serves the snow and wet surfaces (t70); without it they
  // take no shelter (a filter failure is named in the debug output).
- if(context_){ID3D11ShaderResourceView* shelter=!native_rain_valid_?nullptr:native_shelter_soft_valid_?native_shelter_soft_srv_[1].Get():native_rain_srv_.Get();context_->PSSetShaderResources(70,1,&shelter);}
+ if(context_){ID3D11ShaderResourceView* shelter=!native_rain_valid_?nullptr:native_shelter_soft_valid_?native_shelter_soft_srv_[0].Get():native_rain_srv_.Get();context_->PSSetShaderResources(70,1,&shelter);}
  return native_rain_valid_;
 }
 
@@ -113,6 +132,7 @@ bool Renderer::end_native_rain_occlusion(bool commit) noexcept {
 // inside distance within 3 m is the crown's radius (c3c9fea1: shelter must
 // fall off from the centre to the rim, frame_001039).
 bool Renderer::filter_native_rain_shelter() noexcept {
+ if(d3d12_)return filter_native_rain_shelter_d3d12();
  if(native_shelter_soft_failed_||!native_rain_srv_||!native_rain_side_||!context_)return false;
  const UINT side=native_rain_side_;
  if(!native_shelter_soft_cs_){
@@ -124,12 +144,14 @@ bool Renderer::filter_native_rain_shelter() noexcept {
   D3D11_BUFFER_DESC b{};b.ByteWidth=32;b.Usage=D3D11_USAGE_DYNAMIC;b.BindFlags=D3D11_BIND_CONSTANT_BUFFER;b.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
   HRESULT hr=programs.size()<7?E_FAIL:compile_shader(programs[6],&blob,&errors);const char* step="compile";
   if(SUCCEEDED(hr)){step="shader";hr=device_->CreateComputeShader(blob->GetBufferPointer(),blob->GetBufferSize(),nullptr,&native_shelter_soft_cs_);}
+  if(SUCCEEDED(hr)){step="blur compile";blob.Reset();hr=programs.size()<8?E_FAIL:compile_shader(programs[7],&blob,&errors);}
+  if(SUCCEEDED(hr)){step="blur shader";hr=device_->CreateComputeShader(blob->GetBufferPointer(),blob->GetBufferSize(),nullptr,&native_shelter_blur_cs_);}
   if(SUCCEEDED(hr)){step="constants";hr=device_->CreateBuffer(&b,nullptr,&native_shelter_soft_constants_);}
   if(FAILED(hr)){
    if(errors)OutputDebugStringA(static_cast<const char*>(errors->GetBufferPointer()));
    char reason[128];std::snprintf(reason,sizeof(reason),"step=%s hr=%08lx; snow and wet surfaces use the raw shelter map",step,static_cast<unsigned long>(hr));
    bridge_report_event("precip_shelter_filter_unavailable",reason);
-   native_shelter_soft_failed_=true;native_shelter_soft_cs_.Reset();return false;
+   native_shelter_soft_failed_=true;native_shelter_soft_cs_.Reset();native_shelter_blur_cs_.Reset();return false;
   }
  }
  if(native_shelter_soft_side_!=side){
@@ -150,20 +172,21 @@ bool Renderer::filter_native_rain_shelter() noexcept {
   }
   native_shelter_soft_side_=side;
  }
- // Radii in texels from world metres (the map spans 96 m); the distance
- // reach stops at 32 texels (Ultra: 1.5 m), which bounds the per-bake cost.
+ // Radii in texels from world metres (the map spans 96 m). The distance
+ // reach is 3 m at every map size (64 texels at 2048, read in 2-texel steps
+ // past 32, so the tap count stays bounded); at 32 texels Ultra measured
+ // crowns only to 1.5 m, so a big pine's rim faded over half a metre and
+ // its dry patch read as a hard-edged polygon (bfa1e170 F11).
  const float texels=float(side)/96.f;
  // Closing 1.25 m (a5650978 debug view: with 0.5 m a pine's crown stayed a
  // lace of cards, so its inside distance was a few texels everywhere and the
  // crown rule gave it no cover; up to 2.5 m gaps now close at crown height).
  const int close=(std::min)(32,(std::max)(1,int(1.25f*texels+.5f))),gap_reach=(std::min)(32,(std::max)(2,int(2.f*texels+.5f))),
-           reach=(std::min)(32,(std::max)(2,int(3.f*texels+.5f)));
+           reach=(std::min)(64,(std::max)(2,int(3.f*texels+.5f)));
  // Its own profiler pass (the bake's precip_shelter before it).
  transition_profile_pass("precip_shelter_filter");
- ComPtr<ID3D11ComputeShader> saved_cs;context_->CSGetShader(&saved_cs,nullptr,nullptr);
- ComPtr<ID3D11Buffer> saved_cb;context_->CSGetConstantBuffers(0,1,&saved_cb);
- ID3D11ShaderResourceView* saved_srv[2]{};context_->CSGetShaderResources(0,2,saved_srv);
- ID3D11UnorderedAccessView* saved_uav=nullptr;context_->CSGetUnorderedAccessViews(0,1,&saved_uav);
+ // It binds every compute slot it reads and unbinds them after; every other
+ // compute pass sets its own shader, b0, t0-t1 and u0.
  // The pixel stage must not hold the map while it is written.
  ID3D11ShaderResourceView* none=nullptr;context_->PSSetShaderResources(70,1,&none);
  context_->CSSetShader(native_shelter_soft_cs_.Get(),nullptr,0);
@@ -181,17 +204,187 @@ bool Renderer::filter_native_rain_shelter() noexcept {
   const float radii[4]={float(close),float(gap_reach),float(reach),texels};
   std::memcpy(mapped.pData,mode,sizeof(mode));std::memcpy(static_cast<char*>(mapped.pData)+sizeof(mode),radii,sizeof(radii));context_->Unmap(native_shelter_soft_constants_.Get(),0);
   ID3D11UnorderedAccessView* no_uav=nullptr;context_->CSSetUnorderedAccessViews(0,1,&no_uav,nullptr);
-  ID3D11ShaderResourceView* inputs[2]={native_rain_srv_.Get(),pass?native_shelter_soft_srv_[target^1u].Get():nullptr};
-  context_->CSSetShaderResources(0,2,inputs);
+  ID3D11ShaderResourceView* inputs[3]={native_rain_srv_.Get(),pass?native_shelter_soft_srv_[target^1u].Get():nullptr,native_rain_foliage_srv_.Get()};
+  context_->CSSetShaderResources(0,3,inputs);
   context_->CSSetUnorderedAccessViews(0,1,native_shelter_soft_uav_[target].GetAddressOf(),nullptr);
   context_->Dispatch((side+255)/256,side,1); // one 256-texel line segment per group
  }
  ID3D11UnorderedAccessView* no_uav=nullptr;context_->CSSetUnorderedAccessViews(0,1,&no_uav,nullptr);
- context_->CSSetShaderResources(0,2,saved_srv);for(auto* view:saved_srv)if(view)view->Release();
- context_->CSSetUnorderedAccessViews(0,1,&saved_uav,nullptr);if(saved_uav)saved_uav->Release();
- context_->CSSetConstantBuffers(0,1,saved_cb.GetAddressOf());context_->CSSetShader(saved_cs.Get(),nullptr,0);
- return ok;
+ ID3D11ShaderResourceView* no_inputs[3]{};context_->CSSetShaderResources(0,3,no_inputs);
+ ID3D11Buffer* no_buffer=nullptr;context_->CSSetConstantBuffers(0,1,&no_buffer);context_->CSSetShader(nullptr,nullptr,0);
+ return ok&&blur_native_rain_shelter();
 }
+
+// The pre-filtered cover the pixel shaders read (shelterBlurCS: soft map 1
+// in, map 0 out, one 16 x 16 tile per group), once per bake and again when
+// the crown fill-in has moved by 1/256 (renderer_terrain.cpp; every few game
+// seconds while it rains or snows). The Gaussian's sigma, 0.14 m, matches
+// the spread of the former per-pixel feather (a bilinear centre at 0.4 and
+// six taps at 0.25 m, 0.1 each: 0.0375 m^2 over two axes), cut at 2.5 sigma.
+bool Renderer::blur_native_rain_shelter() noexcept {
+ if(d3d12_)return blur_native_rain_shelter_d3d12();
+ if(!native_shelter_blur_cs_||!native_shelter_soft_side_||!context_)return false;
+ const UINT side=native_shelter_soft_side_;
+ const float texels=float(side)/96.f,sigma=.14f*texels;
+ D3D11_MAPPED_SUBRESOURCE mapped{};
+ if(FAILED(context_->Map(native_shelter_soft_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return false;
+ const int mode[4]={8,0,0,int(side)};
+ const float radii[4]={float((std::min)(8,int(std::ceil(2.5f*sigma)))),sigma,shelter_fill_,texels};
+ std::memcpy(mapped.pData,mode,sizeof(mode));std::memcpy(static_cast<char*>(mapped.pData)+sizeof(mode),radii,sizeof(radii));context_->Unmap(native_shelter_soft_constants_.Get(),0);
+ // The pixel stage must not hold map 0 while it is written.
+ ID3D11ShaderResourceView* none=nullptr;context_->PSSetShaderResources(70,1,&none);
+ context_->CSSetShader(native_shelter_blur_cs_.Get(),nullptr,0);
+ context_->CSSetConstantBuffers(0,1,native_shelter_soft_constants_.GetAddressOf());
+ ID3D11ShaderResourceView* inputs[2]={nullptr,native_shelter_soft_srv_[1].Get()};context_->CSSetShaderResources(0,2,inputs);
+ context_->CSSetUnorderedAccessViews(0,1,native_shelter_soft_uav_[0].GetAddressOf(),nullptr);
+ context_->Dispatch((side+15)/16,(side+15)/16,1);
+ ID3D11UnorderedAccessView* no_uav=nullptr;context_->CSSetUnorderedAccessViews(0,1,&no_uav,nullptr);
+ ID3D11ShaderResourceView* no_inputs[2]{};context_->CSSetShaderResources(0,2,no_inputs);
+ ID3D11Buffer* no_buffer=nullptr;context_->CSSetConstantBuffers(0,1,&no_buffer);context_->CSSetShader(nullptr,nullptr,0);
+ native_shelter_blur_fill_=shelter_fill_;
+ return true;
+}
+
+// The rain ring texture wet ground reads (rainRingsCS, nativeRainRingSlope
+// t71): 512 x 512 RG16F (1 MB) over a 6.25 m tile, 1.2 cm texels, nine per
+// ring wavelength. One dispatch (64 x 64 groups of 8 x 8)
+// dispatch whenever the game time or the rain amount changed (every drawn
+// frame while it rains, nothing while paused). False without it (the
+// failure is named once; wet ground then shows no rings).
+bool Renderer::update_native_rain_rings(float seconds,float rain) noexcept {
+ if(d3d12_)return update_native_rain_rings_d3d12(seconds,rain);
+ if(native_rain_rings_failed_||!device_||!context_)return false;
+ constexpr UINT side=512;
+ if(!native_rain_rings_cs_){
+  std::vector<ShaderProgram> programs;append_precipitation_shader_programs(programs);
+  ComPtr<ID3DBlob> blob,errors;const char* step="compile";
+  HRESULT hr=programs.size()<9?E_FAIL:compile_shader(programs[8],&blob,&errors);
+  if(SUCCEEDED(hr)){step="shader";hr=device_->CreateComputeShader(blob->GetBufferPointer(),blob->GetBufferSize(),nullptr,&native_rain_rings_cs_);}
+  D3D11_BUFFER_DESC b{};b.ByteWidth=16;b.Usage=D3D11_USAGE_DYNAMIC;b.BindFlags=D3D11_BIND_CONSTANT_BUFFER;b.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+  if(SUCCEEDED(hr)){step="constants";hr=device_->CreateBuffer(&b,nullptr,&native_rain_rings_constants_);}
+  D3D11_TEXTURE2D_DESC d{};d.Width=d.Height=side;d.MipLevels=d.ArraySize=1;d.Format=DXGI_FORMAT_R16G16_FLOAT;
+  d.SampleDesc.Count=1;d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
+  if(SUCCEEDED(hr)){step="texture";hr=device_->CreateTexture2D(&d,nullptr,&native_rain_rings_);}
+  if(SUCCEEDED(hr))hr=device_->CreateShaderResourceView(native_rain_rings_.Get(),nullptr,&native_rain_rings_srv_);
+  if(SUCCEEDED(hr))hr=device_->CreateUnorderedAccessView(native_rain_rings_.Get(),nullptr,&native_rain_rings_uav_);
+  if(FAILED(hr)){
+   if(errors)OutputDebugStringA(static_cast<const char*>(errors->GetBufferPointer()));
+   char reason[96];std::snprintf(reason,sizeof(reason),"step=%s hr=%08lx; wet ground shows no rain rings",step,static_cast<unsigned long>(hr));
+   bridge_report_event("precip_rain_rings_unavailable",reason);
+   native_rain_rings_failed_=true;native_rain_rings_cs_.Reset();native_rain_rings_constants_.Reset();
+   native_rain_rings_.Reset();native_rain_rings_srv_.Reset();native_rain_rings_uav_.Reset();return false;
+  }
+ }
+ if(seconds==native_rain_rings_key_[0]&&rain==native_rain_rings_key_[1])return true;
+ D3D11_MAPPED_SUBRESOURCE mapped{};
+ if(FAILED(context_->Map(native_rain_rings_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return false;
+ const float time[4]={seconds,rain,float(side),0.f};std::memcpy(mapped.pData,time,sizeof(time));
+ context_->Unmap(native_rain_rings_constants_.Get(),0);
+ // The pixel stage must not hold the texture while it is written.
+ ID3D11ShaderResourceView* none=nullptr;context_->PSSetShaderResources(71,1,&none);
+ context_->CSSetShader(native_rain_rings_cs_.Get(),nullptr,0);
+ context_->CSSetConstantBuffers(0,1,native_rain_rings_constants_.GetAddressOf());
+ context_->CSSetUnorderedAccessViews(0,1,native_rain_rings_uav_.GetAddressOf(),nullptr);
+ context_->Dispatch(side/8,side/8,1);
+ ID3D11UnorderedAccessView* no_uav=nullptr;context_->CSSetUnorderedAccessViews(0,1,&no_uav,nullptr);
+ ID3D11Buffer* no_buffer=nullptr;context_->CSSetConstantBuffers(0,1,&no_buffer);context_->CSSetShader(nullptr,nullptr,0);
+ native_rain_rings_key_[0]=seconds;native_rain_rings_key_[1]=rain;
+ return true;
+}
+
+// filter_native_rain_shelter on D3D12: the same eight shelterFilterCS passes
+// (radii, modes and ping-pong as above) over the shelter map at t0, into
+// two RGBA16 storage textures; the eighth pass writes soft[1], and the blur
+// (blur_native_rain_shelter_d3d12) writes the cover the shaders read, soft[0].
+// The bake's foliage mask (rain12_.foliage, written beside the slice) at t2.
+bool Renderer::filter_native_rain_shelter_d3d12() noexcept try {
+ if(native_shelter_soft_failed_||!rain12_.shelter||!rain12_.foliage||!native_rain_side_)return false;
+ const UINT side=native_rain_side_;
+ auto& programs=ambient12_.precipitation;
+ if(programs.empty())append_precipitation_shader_programs(programs);
+ const auto unavailable=[&](const char* step,HRESULT hr){
+  char reason[128];std::snprintf(reason,sizeof(reason),"D3D12 step=%s hr=%08lx; snow and wet surfaces use the raw shelter map",step,static_cast<unsigned long>(hr));
+  bridge_report_event("precip_shelter_filter_unavailable",reason);
+  native_shelter_soft_failed_=true;rain12_.soft={};native_shelter_soft_side_=0;return false;
+ };
+ if(programs.size()<7)return unavailable("program",E_FAIL);
+ if(native_shelter_soft_side_!=side||!rain12_.soft[0]||!rain12_.soft[1]){
+  rain12_.soft={};native_shelter_soft_side_=0;
+  if(!d3d12_->storage_supported(DXGI_FORMAT_R16G16B16A16_UNORM))return unavailable("format",E_NOTIMPL);
+  for(auto& map:rain12_.soft)
+   if(const HRESULT hr=d3d12_->create_storage_texture(side,side,0,DXGI_FORMAT_R16G16B16A16_UNORM,map);FAILED(hr))return unavailable("maps",hr);
+  native_shelter_soft_side_=side;
+ }
+ const float texels=float(side)/96.f;
+ const int close=(std::min)(32,(std::max)(1,int(1.25f*texels+.5f))),gap_reach=(std::min)(32,(std::max)(2,int(2.f*texels+.5f))),
+           reach=(std::min)(64,(std::max)(2,int(3.f*texels+.5f)));
+ transition_profile_pass("precip_shelter_filter");
+ const int modes[8][3]={{0,1,0},{1,0,1},{2,1,0},{3,0,1},{4,1,0},{5,0,1},{6,1,0},{7,0,1}};
+ HRESULT hr=S_OK;
+ for(unsigned pass=0;pass<8&&hr==S_OK;++pass){
+  const unsigned target=pass&1u;
+  struct{int mode[4];float radii[4];} values{{modes[pass][0],modes[pass][1],modes[pass][2],int(side)},{float(close),float(gap_reach),float(reach),texels}};
+  d3d12_->clear_slots();
+  d3d12_->set_constants(0,&values,sizeof(values));
+  d3d12_->set_resource(0,rain12_.shelter.get());
+  d3d12_->set_resource(1,pass?rain12_.soft[target^1u].get():nullptr);
+  d3d12_->set_resource(2,rain12_.foliage.get());
+  d3d12_->set_unordered(0,rain12_.soft[target].get());
+  hr=d3d12_->dispatch(programs[6],(side+255)/256,side,1); // one 256-texel line segment per group
+ }
+ d3d12_->clear_slots();
+ if(FAILED(hr))return unavailable("dispatch",hr);
+ if(hr!=S_OK){if(hr==S_FALSE)d3d12_->omit("rain shelter soft map (pipeline not ready)",false);return false;}
+ return blur_native_rain_shelter_d3d12();
+}catch(...){return false;}
+
+// blur_native_rain_shelter on D3D12: shelterBlurCS, soft[1] at t1 into
+// soft[0], with the same constants.
+bool Renderer::blur_native_rain_shelter_d3d12() noexcept try {
+ auto& programs=ambient12_.precipitation;
+ if(programs.size()<8||!native_shelter_soft_side_||!rain12_.soft[0]||!rain12_.soft[1])return false;
+ const UINT side=native_shelter_soft_side_;
+ const float texels=float(side)/96.f,sigma=.14f*texels;
+ struct{int mode[4];float radii[4];} values{{8,0,0,int(side)},{float((std::min)(8,int(std::ceil(2.5f*sigma)))),sigma,shelter_fill_,texels}};
+ d3d12_->clear_slots();
+ d3d12_->set_constants(0,&values,sizeof(values));
+ d3d12_->set_resource(1,rain12_.soft[1].get());
+ d3d12_->set_unordered(0,rain12_.soft[0].get());
+ const HRESULT hr=d3d12_->dispatch(programs[7],(side+15)/16,(side+15)/16,1);
+ d3d12_->clear_slots();
+ if(hr!=S_OK){d3d12_->omit(FAILED(hr)?"rain shelter blur (dispatch failed)":"rain shelter blur (pipeline not ready)",false);return false;}
+ native_shelter_blur_fill_=shelter_fill_;
+ return true;
+}catch(...){return false;}
+
+// update_native_rain_rings on D3D12: rainRingsCS into a 512 x 512 RG16F
+// storage texture (rain12_.rings, t71), keyed on the same game time and rain.
+bool Renderer::update_native_rain_rings_d3d12(float seconds,float rain) noexcept try {
+ if(native_rain_rings_failed_)return false;
+ constexpr UINT side=512;
+ auto& programs=ambient12_.precipitation;
+ if(programs.empty())append_precipitation_shader_programs(programs);
+ if(programs.size()<9)return false;
+ if(!rain12_.rings){
+  native_rain_rings_key_[0]=native_rain_rings_key_[1]=-1.f;
+  HRESULT hr=d3d12_->storage_supported(DXGI_FORMAT_R16G16_FLOAT)?d3d12_->create_storage_texture(side,side,0,DXGI_FORMAT_R16G16_FLOAT,rain12_.rings):E_NOTIMPL;
+  if(FAILED(hr)){
+   char reason[96];std::snprintf(reason,sizeof(reason),"D3D12 texture hr=%08lx; wet ground shows no rain rings",static_cast<unsigned long>(hr));
+   bridge_report_event("precip_rain_rings_unavailable",reason);
+   native_rain_rings_failed_=true;rain12_.rings.reset();return false;
+  }
+ }
+ if(seconds==native_rain_rings_key_[0]&&rain==native_rain_rings_key_[1])return true;
+ const float time[4]={seconds,rain,float(side),0.f};
+ d3d12_->clear_slots();
+ d3d12_->set_constants(0,time,sizeof(time));
+ d3d12_->set_unordered(0,rain12_.rings.get());
+ const HRESULT hr=d3d12_->dispatch(programs[8],side/8,side/8,1);
+ d3d12_->clear_slots();
+ if(hr!=S_OK){d3d12_->omit(FAILED(hr)?"rain rings (dispatch failed)":"rain rings (pipeline not ready)",false);return false;}
+ native_rain_rings_key_[0]=seconds;native_rain_rings_key_[1]=rain;
+ return true;
+}catch(...){return false;}
 
 // The game's weather atlas (CWeather's "RainSnow", rainsnow.mmp through the
 // game's own resource mounts, mods included), uploaded once.
@@ -219,6 +412,12 @@ const char* Renderer::load_precipitation_flakes() noexcept {
         view.format = format;view.mips = mips.data();view.mip_count = UINT(mips.size());view.resource = &asset.identity;
         view.value_source = 1;view.opaque_mips = asset.opaque_mips;
         std::uint64_t backing = 0;
+        if (d3d12_) {  // D3D12 backend: the same atlas through the D3D12 owned-texture ingress
+            if (FAILED(get_native_owned_texture_d3d12(view,ambient12_.flakes,backing,nullptr))) {
+                ambient12_.flakes.reset();return "rainsnow.mmp upload failed";
+            }
+            return nullptr;
+        }
         if (FAILED(get_native_owned_texture(view,precipitation_flakes_srv_,backing,nullptr))) {
             precipitation_flakes_srv_.Reset();return "rainsnow.mmp upload failed";
         }
@@ -271,7 +470,7 @@ void Renderer::render_precipitation() {
         return status(stock != nullptr,"Precipitation: off%s%s",stock_sep,stock_text);
     }
     if (precipitation_failed_) return status(true,"Precipitation: disabled after a resource/shader failure (see debug output)");
-    if (ambient_terrain_frame_ != native_frame_index_ || !native_world_clip_valid_ || !depth_srv_ || !rtv_)
+    if (ambient_terrain_frame_ != native_frame_index_ || !native_world_clip_valid_ || !world_effect_targets())
         return status(stock != nullptr,"Precipitation: no world frame%s%s",stock_sep,stock_text);
     AmbientWorldSource inputs;
     if (!bridge_ambient_world_source(inputs) || !inputs.terrain) return status(true,"Precipitation: no terrain source");
@@ -402,7 +601,7 @@ void Renderer::render_precipitation() {
         precipitation_failed_ = true;OutputDebugStringA(reason);
         status(true,"Precipitation: disabled after a resource/shader failure (see debug output)");
     };
-    if (!precipitation_vs_) {
+    if (!d3d12_ && !precipitation_vs_) {
         ComPtr<ID3DBlob> vs, ps, veil_vs, veil_ps, splash_vs, splash_ps, errors;
         std::vector<ShaderProgram> programs;
         append_precipitation_shader_programs(programs);
@@ -434,11 +633,11 @@ void Renderer::render_precipitation() {
 
     // Snow crystals come from the game's own weather atlas; without it the
     // snow is omitted (named on the F10 line), never drawn as substitutes.
-    if (fall.kind == kind_snow && !precipitation_flakes_srv_ && !precipitation_flakes_failed_) {
+    if (fall.kind == kind_snow && !(d3d12_ ? bool(ambient12_.flakes) : bool(precipitation_flakes_srv_)) && !precipitation_flakes_failed_) {
         const char* why = load_precipitation_flakes();
         if (why) { precipitation_flakes_failed_ = true; bridge_report_event("precipitation_flakes_unavailable", why); }
     }
-    if (fall.kind == kind_snow && !precipitation_flakes_srv_)
+    if (fall.kind == kind_snow && !(d3d12_ ? bool(ambient12_.flakes) : bool(precipitation_flakes_srv_)))
         return status(true,"Precipitation: snow omitted: the game's weather atlas (rainsnow.mmp) is unavailable");
     // Camera, focus and the window of world tiles covering the view.
     ambient::AmbientView view;
@@ -631,6 +830,12 @@ void Renderer::render_precipitation() {
         c.sun_direction[k] = sun_direction[k];
     }
     c.color[3] = strength;
+    // Snow as a material (pcSnowLit): the world ambient and sun as the
+    // surfaces take them (no lift, no floor: dark at night like the snow on
+    // the ground), and the scene's lamps.
+    const bool snow_lamps = snow && !native_point_lights_.empty();
+    for (unsigned k = 0; k < 3; ++k) { c.snow_light[k] = tint[k]*ambient_light[k]; c.snow_sun[k] = tint[k]*sun[k]; }
+    c.snow_light[3] = snow_lamps ? 1.f : 0.f;c.snow_sun[3] = 1.f;
     c.glint[3] = snow ? .25f+.35f*strength : 0.f;
     c.sun_direction[3] = float(sand ? sand_reach : view.reach);
     // Beyond the focus the drops thin to a third and the veil carries the rain.
@@ -725,11 +930,17 @@ void Renderer::render_precipitation() {
     // Blowing snow: up to a third of the flakes skim the ground in a blizzard.
     // Sand: every grain skims the ground, most of them low.
     // Blowing snow only where the game's wind is strong.
-    c.snow[0] = sand ? 1.f : snow ? .35f*strength*strength*std::clamp((push-.4f)/.4f,0.f,1.f) : 0.f;c.snow[1] = sand ? 1.f : 1.8f;
+    // blowing snow (0 none, 1 sparse, 2 full, from the precipitation level): the blown share at full blizzard,
+    // 30% of the flakes at level 2 (a third before, with large near-blurred
+    // blobs: too prominent, 1102 user report).
+    // Blowing snow follows the precipitation level: none at Low, sparse at Medium/High, full at Ultra.
+    const int precipitation_level = configured_integer(config,"precipitation",3);
+    const int snow_drift = precipitation_level <= 1 ? 0 : precipitation_level >= 4 ? 2 : 1;
+    c.snow[0] = sand ? 1.f : snow ? .3f*.5f*float(snow_drift)*strength*strength*std::clamp((push-.4f)/.4f,0.f,1.f) : 0.f;c.snow[1] = sand ? 1.f : 1.8f;
     c.snow[2] = sand ? 1.f+5.f*strength : 1.4f;c.snow[3] = sand ? 1.6f : 2.5f;
     c.splash[0] = float(splash_slots);c.splash[1] = kSplashLife;c.splash[2] = .07f+.04f*strength;c.splash[3] = .55f;
     // The baked shelter map (its own square, which may trail the request by a frame).
-    const bool shelter = native_rain_valid_ && native_rain_srv_;
+    const bool shelter = native_rain_valid_ && (d3d12_ ? bool(rain12_.shelter) : bool(native_rain_srv_));
     if (shelter) {
         const auto& m = native_rain_slice_.world_to_light;
         c.shelter0[0] = m[0];c.shelter0[1] = m[1];c.shelter0[2] = m[3];c.shelter0[3] = 1.f;
@@ -746,15 +957,79 @@ void Renderer::render_precipitation() {
 
     // Precipitation takes the shared world atmosphere; without it it is omitted.
     if (FAILED(bind_world_fog())) return status(true,"Precipitation: world atmosphere unavailable");
+    if (d3d12_) {
+        // The same draws on D3D12, from the same programs: height t0, base
+        // ground t1, shelter t3 (both stages), world depth t2, flakes t4 (s0);
+        // the vertex stage's atmosphere reads the same b10 and sky probe.
+        auto& programs = ambient12_.precipitation;
+        if (programs.empty()) append_precipitation_shader_programs(programs);
+        if (programs.size() < 6 || !ambient12_.height) return status(true,"Precipitation: D3D12 programs or height grid missing (omitted)");
+        const D3D12NativeState state = world_effect_state_d3d12(false);
+        bind_world_effect_d3d12(false);
+        d3d12_->set_constants(0,&c,sizeof(c));
+        d3d12_->set_resource(0,ambient12_.height.get());
+        d3d12_->set_resource(1,ambient12_.ground ? ambient12_.ground.get() : ambient12_.height.get());
+        d3d12_->set_resource(3,shelter ? rain12_.shelter.get() : nullptr);
+        d3d12_->set_resource(4,ambient12_.flakes.get());
+        // Snow as a material (pcSnowLit): the scene's lamp records (b5, t17,
+        // t18); the cloud shadow (t110) is bound by bind_world_effect_d3d12.
+        d3d12_->set_constants(5,native12_.point_light_constants.data(),sizeof(native12_.point_light_constants));
+        d3d12_->set_resource(17,c.snow_light[3] > 0.f ? native12_.point_light_grid.get() : nullptr);
+        d3d12_->set_resource(18,c.snow_light[3] > 0.f ? native12_.point_lights.get() : nullptr);
+        D3D11_SAMPLER_DESC sampler{};sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;sampler.MaxLOD = D3D11_FLOAT32_MAX;
+        d3d12_->set_sampler(0,sampler);
+        const char* problem = nullptr;
+        const auto draw = [&](const char* pass, const ShaderProgram& vs, const ShaderProgram& ps, UINT vertices, UINT count, bool strip) {
+            if (problem || !count) return;
+            transition_profile_pass(pass);
+            const HRESULT hr = d3d12_->draw_instanced(vs,ps,state,nullptr,vertices,count,strip);
+            if (FAILED(hr)) problem = "draw failed";
+            else if (hr == S_FALSE) problem = "pipeline not ready";
+            else if (hr != S_OK) problem = "descriptor ring full";
+            else { profiler_.add_draw(1,1);profiler_.add_batch(1); }
+        };
+        draw("precipitation_veil",programs[2],programs[3],3,1,false);
+        draw("precipitation",programs[0],programs[1],4,instances,true);
+        UINT near_instances = 0;
+        if (sand) {  // the near sand grains, as the D3D11 draw below
+            const unsigned near_per_tile = static_cast<unsigned>(std::ceil(quality.sand_density*.5f*amount*kTilePeriod*kTilePeriod));
+            const float radius = std::clamp(focus_distance*.8f,12.f,32.f);
+            const double nx0 = std::floor((eye[0]-radius)/kTilePeriod), ny0 = std::floor((eye[1]-radius)/kTilePeriod);
+            const unsigned near_columns = unsigned(std::floor((eye[0]+radius)/kTilePeriod)-nx0)+1u;
+            const unsigned near_rows = unsigned(std::floor((eye[1]+radius)/kTilePeriod)-ny0)+1u;
+            near_instances = near_per_tile*near_columns*near_rows;
+            if (near_instances) {
+                c.window[0] = float(nx0*kTilePeriod);c.window[1] = float(ny0*kTilePeriod);c.window[2] = float(near_columns);
+                c.fall[0] = float(near_per_tile);
+                c.thin[0] = radius*(.5f/.8f);c.thin[1] = radius;c.thin[2] = 0.f;
+                c.sheet[1] = 0.f;c.sand[1] = 0.f;c.sand2[2] = float(per_tile);
+                d3d12_->set_constants(0,&c,sizeof(c));
+                draw("precipitation",programs[0],programs[1],4,near_instances,true);
+            }
+        }
+        draw("precipitation_splash",programs[4],programs[5],4,splash_slots*tiles,true);
+        d3d12_->clear_slots();bind_world_targets_d3d12();
+        if (problem) {
+            char name[96];std::snprintf(name,sizeof(name),"rain and snow (%s)",problem);
+            d3d12_->omit(name,false);
+            return status(true,"Precipitation: %s %s on D3D12: omitted this frame",kind_name,problem);
+        }
+        d3d12_->count("precipitation draws");
+        return status(stock != nullptr,"Precipitation: %s %.0f%% strength %.2f, %u drops, %u splashes (%u tiles), shelter %s (%llu bakes), snow cover %.0f%%%s%s%s%s",kind_name,
+               fall.presence*100.f,strength,unsigned(instances+near_instances),splash_slots*tiles,tiles,shelter ? "baked" : native_shadows_enabled_ ? "pending" : "off (sun shadows off)",
+               native_rain_bakes_,snow_cover_*100.f,test ? " [precip_test]" : "",precipitation_paused_ ? " [paused: game time stopped]" : "",
+               stock_sep,stock_text);
+    }
     D3D11_MAPPED_SUBRESOURCE mapped{};
     if (FAILED(context_->Map(precipitation_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))
         return status(true,"Precipitation: constant upload failed");
     std::memcpy(mapped.pData,&c,sizeof(c));context_->Unmap(precipitation_constants_.Get(),0);
 
-    // Runs inside composite_world's state guard; the slots it does not save are restored here.
-    ID3D11ShaderResourceView* saved_vs=nullptr;context_->VSGetShaderResources(0,1,&saved_vs);
-    ID3D11ShaderResourceView* saved_ps2=nullptr;context_->PSGetShaderResources(2,1,&saved_ps2);
-    context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),nullptr); // depth is read as a texture
+    // Runs inside composite_world. It binds every state it reads and restores
+    // nothing; afterwards it unbinds its views and the vertex-stage fog
+    // mirror (every following pass binds its own).
+    bind_plan_targets(plan_pass("precipitation",rtv_.Get(),nullptr,plan_read(PlanTarget::world_depth))); // depth is read as a texture
     D3D11_VIEWPORT viewport = target_viewport();context_->RSSetViewports(1,&viewport);
     context_->RSSetState(precipitation_raster_.Get());context_->OMSetDepthStencilState(nullptr,0);
     const float factor[4]{1,1,1,1};context_->OMSetBlendState(precipitation_blend_.Get(),factor,~0u);
@@ -762,28 +1037,25 @@ void Renderer::render_precipitation() {
     context_->GSSetShader(nullptr,nullptr,0);
     context_->VSSetConstantBuffers(0,1,precipitation_constants_.GetAddressOf());
     context_->PSSetConstantBuffers(0,1,precipitation_constants_.GetAddressOf());
-    ID3D11ShaderResourceView* saved_vs3=nullptr;context_->VSGetShaderResources(3,1,&saved_vs3);
-    ID3D11ShaderResourceView* saved_vs1=nullptr;context_->VSGetShaderResources(1,1,&saved_vs1);
     {ID3D11ShaderResourceView* base = ambient_ground_srv_ ? ambient_ground_srv_.Get() : ambient_height_srv_.Get();context_->VSSetShaderResources(1,1,&base);}
     context_->VSSetShaderResources(0,1,ambient_height_srv_.GetAddressOf());context_->PSSetShaderResources(2,1,depth_srv_.GetAddressOf());
-    ID3D11ShaderResourceView* saved_ps3=nullptr;context_->PSGetShaderResources(3,1,&saved_ps3);
     {ID3D11ShaderResourceView* map = shelter ? native_rain_srv_.Get() : nullptr;context_->VSSetShaderResources(3,1,&map);context_->PSSetShaderResources(3,1,&map);}
     bind_owned_sky_pixel_inputs();  // borderFogColor reads the sky probe
-    ID3D11ShaderResourceView* saved_ps4=nullptr;context_->PSGetShaderResources(4,1,&saved_ps4);
-    ID3D11SamplerState* saved_s0=nullptr;context_->PSGetSamplers(0,1,&saved_s0);
     {ID3D11ShaderResourceView* flakes=precipitation_flakes_srv_.Get();context_->PSSetShaderResources(4,1,&flakes);}
     context_->PSSetSamplers(0,1,precipitation_sampler_.GetAddressOf());
     // The drops take the atmosphere per corner (precipitationVS): the world
-    // fog frame (b10), fog volume (t11), sky probe (t12) and fog sampler (s7)
-    // just bound for the pixel stage, mirrored into the vertex stage.
-    ComPtr<ID3D11Buffer> saved_vs_fog_frame, fog_frame;ComPtr<ID3D11ShaderResourceView> saved_vs_fog[2], fog_views[2];
-    ComPtr<ID3D11SamplerState> saved_vs_fog_sampler, fog_sampler;
-    context_->VSGetConstantBuffers(10,1,&saved_vs_fog_frame);context_->PSGetConstantBuffers(10,1,&fog_frame);
-    {ID3D11ShaderResourceView* views[2]{};context_->VSGetShaderResources(11,2,views);saved_vs_fog[0].Attach(views[0]);saved_vs_fog[1].Attach(views[1]);
-     context_->PSGetShaderResources(11,2,views);fog_views[0].Attach(views[0]);fog_views[1].Attach(views[1]);
-     ID3D11ShaderResourceView* bind[2]{fog_views[0].Get(),fog_views[1].Get()};context_->VSSetShaderResources(11,2,bind);}
-    context_->VSGetSamplers(7,1,&saved_vs_fog_sampler);context_->PSGetSamplers(7,1,&fog_sampler);
-    context_->VSSetConstantBuffers(10,1,fog_frame.GetAddressOf());context_->VSSetSamplers(7,1,fog_sampler.GetAddressOf());
+    // fog frame (b10), fog volume (t11), sky probe (t12) and fog sampler (s7),
+    // from their owners exactly as bind_world_fog binds them for the pixel stage.
+    {ID3D11ShaderResourceView* fog_views[2]{fog_volume_active_ ? fog_integrated_srv_.Get() : nullptr,
+                                            sky_inputs_active_ ? sky_probe_srv_[sky_index_].Get() : nullptr};
+     context_->VSSetShaderResources(11,2,fog_views);}
+    context_->VSSetConstantBuffers(10,1,fog_frame_constants_.GetAddressOf());context_->VSSetSamplers(7,1,fog_sampler_.GetAddressOf());
+    // Snow as a material (pcSnowLit): the cloud shadow (t10) and the scene's
+    // lamp records (b5, t17 grid, t18 lights) for the vertex stage.
+    {ID3D11ShaderResourceView* shadow = sky_inputs_active_ ? sky_shadow_srv_.Get() : nullptr;context_->VSSetShaderResources(10,1,&shadow);
+     ID3D11ShaderResourceView* lamps[2]{c.snow_light[3] > 0.f ? native_point_light_grid_srv_.Get() : nullptr,
+                                        c.snow_light[3] > 0.f ? native_point_light_srv_.Get() : nullptr};
+     context_->VSSetShaderResources(17,2,lamps);context_->VSSetConstantBuffers(5,1,native_point_light_constants_.GetAddressOf());}
     // The veil first (behind every drop), then the drops; each part is its
     // own profiler pass (precipitation_veil / precipitation / _splash).
     transition_profile_pass("precipitation_veil");
@@ -823,18 +1095,10 @@ void Renderer::render_precipitation() {
         context_->DrawInstanced(4,splash_slots*tiles,0,0);
         profiler_.add_draw(1,1);profiler_.add_batch(1);
     }
-    context_->VSSetConstantBuffers(10,1,saved_vs_fog_frame.GetAddressOf());context_->VSSetSamplers(7,1,saved_vs_fog_sampler.GetAddressOf());
-    {ID3D11ShaderResourceView* restore[2]{saved_vs_fog[0].Get(),saved_vs_fog[1].Get()};context_->VSSetShaderResources(11,2,restore);}
-    context_->VSSetShaderResources(0,1,&saved_vs);context_->PSSetShaderResources(2,1,&saved_ps2);
-    context_->VSSetShaderResources(3,1,&saved_vs3);context_->VSSetShaderResources(1,1,&saved_vs1);
-    context_->PSSetShaderResources(4,1,&saved_ps4);context_->PSSetSamplers(0,1,&saved_s0);
-    context_->PSSetShaderResources(3,1,&saved_ps3);if (saved_ps3) saved_ps3->Release();
-    if (saved_ps4) saved_ps4->Release();
-    if (saved_s0) saved_s0->Release();
-    if (saved_vs3) saved_vs3->Release();
-    if (saved_vs1) saved_vs1->Release();
-    if (saved_vs) saved_vs->Release();
-    if (saved_ps2) saved_ps2->Release();
+    {ID3D11Buffer* no_buffer=nullptr;ID3D11SamplerState* no_sampler=nullptr;ID3D11ShaderResourceView* no_views[4]{};
+     context_->VSSetConstantBuffers(10,1,&no_buffer);context_->VSSetConstantBuffers(5,1,&no_buffer);context_->VSSetSamplers(7,1,&no_sampler);
+     context_->VSSetShaderResources(10,3,no_views);context_->VSSetShaderResources(17,2,no_views);context_->VSSetShaderResources(0,2,no_views);context_->VSSetShaderResources(3,1,no_views);
+     context_->PSSetShaderResources(2,3,no_views);}
     profiler_.add_draw(2,2);profiler_.add_batch(2);
     status(stock != nullptr,"Precipitation: %s %.0f%% strength %.2f, %u drops, %u splashes (%u tiles), shelter %s (%llu bakes), snow cover %.0f%%%s%s%s%s",kind_name,
            fall.presence*100.f,strength,unsigned(instances+near_instances),splash_slots*tiles,tiles,shelter ? "baked" : native_shadows_enabled_ ? "pending" : "off (sun shadows off)",

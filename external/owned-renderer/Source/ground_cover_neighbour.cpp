@@ -139,7 +139,6 @@ std::shared_ptr<GroundCoverNeighbourInputs> prepare_ground_cover_neighbour_input
     inputs->tiles = ground_cover_tiles(terrain, tx, ty, inputs->used);
     if (inputs->families_valid) inputs->base_lanes = ground_cover_corner_lanes(inputs->tiles);
     inputs->trees = ground_cover_trees(map, tx, ty);
-    inputs->bake_cells = std::make_shared<const TerrainBakeCells>(terrain_bake_cells(inputs->grids.height, tx, ty));
     if (inputs->families_valid && terrain.tiles_per_texture_side == 8)
         inputs->blend_input = std::make_shared<TerrainTileBlendInput>(owned_terrain_tile_blend_input(terrain, tx, ty));
     inputs->contact_tiles = owned_terrain_contact_tiles(terrain, tx, ty, inputs->contact_used);

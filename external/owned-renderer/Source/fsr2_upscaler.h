@@ -68,8 +68,11 @@ class Fsr2Upscaler {
     Image lanczos_lut_, maximum_bias_lut_;
     UINT render_width_ = 0, render_height_ = 0, output_width_ = 0, output_height_ = 0;
     std::uint32_t frame_ = 0;          // ping-pong parity source (resourceFrameIndex)
-    std::int32_t frame_index_ = 0;     // frames since the last reset
-    float jitter_phase_count_ = 0.f;
+    // The constants' state across frames (frame_constants).
+    struct History {
+        std::int32_t frame_index = 0;     // frames since the last reset
+        float jitter_phase_count = 0.f;
+    } history_;
     bool cleared_ = false;             // every image cleared once after creation
     std::uint64_t storage_bytes_ = 0;
 
@@ -169,11 +172,8 @@ public:
         return hr;
     }
 
-    struct Frame {
-        ID3D11ShaderResourceView* color = nullptr;   // render size, jittered
-        ID3D11ShaderResourceView* depth = nullptr;   // render size, device depth 0 near .. 1 far
-        ID3D11ShaderResourceView* motion = nullptr;  // render size, RG pixels, current -> previous
-        ID3D11UnorderedAccessView* output = nullptr; // output size
+    // The frame's values, the same for both backends (fsr2_upscaler_d3d12.h).
+    struct FrameValues {
         float jitter_x = 0, jitter_y = 0;            // viewport offset of this frame (pixels, right/down)
         float jitter_phases = 8;                     // length of the jitter sequence
         float near_plane = 1, far_plane = 1000, tan_half_fov_y = 1;
@@ -181,6 +181,70 @@ public:
         float sharpness = 0;                         // RCAS 0 (off) .. 1
         bool reset = false;
     };
+    struct Frame : FrameValues {
+        ID3D11ShaderResourceView* color = nullptr;   // render size, jittered
+        ID3D11ShaderResourceView* depth = nullptr;   // render size, device depth 0 near .. 1 far
+        ID3D11ShaderResourceView* motion = nullptr;  // render size, RG pixels, current -> previous
+        ID3D11UnorderedAccessView* output = nullptr; // output size
+    };
+
+    // cbFSR2 and the SPD constants of one frame (ffx_fsr2.cpp fsr2Dispatch,
+    // ffx_spd.h SpdSetup); history carries the frame index and phase count.
+    static void frame_constants(const FrameValues& frame, bool reset, UINT render_width, UINT render_height, UINT output_width,
+                                UINT output_height, History& history, Constants& c, std::uint32_t (&spd)[8]) {
+        c = Constants{};
+        c.render_size[0] = c.max_render_size[0] = c.input_color_size[0] = std::int32_t(render_width);
+        c.render_size[1] = c.max_render_size[1] = c.input_color_size[1] = std::int32_t(render_height);
+        c.display_size[0] = std::int32_t(output_width);
+        c.display_size[1] = std::int32_t(output_height);
+        c.luma_mip_level = std::int32_t(kLuminanceMipShadingChange);
+        c.luma_mip_size[0] = std::int32_t(float(render_width) / float(2u << kLuminanceMipShadingChange));
+        c.luma_mip_size[1] = std::int32_t(float(render_height) / float(2u << kLuminanceMipShadingChange));
+        history.frame_index = reset ? 0 : history.frame_index + 1;
+        c.frame_index = history.frame_index;
+        // Device depth to view depth for a standard (not inverted, finite)
+        // left-handed projection: c, e of the projection's z row.
+        const float aspect = float(render_width) / float(render_height);
+        const float q = frame.far_plane / (frame.near_plane - frame.far_plane);
+        c.device_to_view_depth[0] = -q;
+        c.device_to_view_depth[1] = q * frame.near_plane;
+        c.device_to_view_depth[2] = frame.tan_half_fov_y * aspect;
+        c.device_to_view_depth[3] = frame.tan_half_fov_y;
+        c.jitter[0] = frame.jitter_x;
+        c.jitter[1] = frame.jitter_y;
+        c.motion_vector_scale[0] = 1.f / float(render_width);
+        c.motion_vector_scale[1] = 1.f / float(render_height);
+        c.downscale_factor[0] = float(render_width) / float(output_width);
+        c.downscale_factor[1] = float(render_height) / float(output_height);
+        c.pre_exposure = c.previous_pre_exposure = 1.f;
+        c.tan_half_fov = frame.tan_half_fov_y * aspect;  // horizontal
+        // The phase count follows a changed sequence one step per frame.
+        if (reset || history.jitter_phase_count == 0.f) history.jitter_phase_count = frame.jitter_phases;
+        else if (frame.jitter_phases > history.jitter_phase_count) history.jitter_phase_count += 1.f;
+        else if (frame.jitter_phases < history.jitter_phase_count) history.jitter_phase_count -= 1.f;
+        c.jitter_phase_count = history.jitter_phase_count;
+        c.delta_time = std::clamp(frame.delta_seconds, 0.f, 1.f);
+        c.view_to_meters = 1.f;
+        // SPD over the render rectangle.
+        const std::uint32_t groups_x = (render_width - 1) / 64 + 1, groups_y = (render_height - 1) / 64 + 1;
+        const std::uint32_t values[8] = {
+            std::uint32_t(std::min(std::floor(std::log2(float(std::max(render_width, render_height)))), 12.f)),
+            groups_x * groups_y, 0, 0, render_width, render_height, 0, 0};
+        std::memcpy(spd, values, sizeof(values));
+    }
+    // The R16_SNORM look-up tables (ffx_fsr2.cpp fsr2Create): Lanczos-2
+    // weights over [0, 2], and the upsample maximum bias.
+    static void lanczos_table(std::int16_t (&out)[128]) {
+        for (int i = 0; i < 128; ++i) {
+            const float x = 2.f * float(i) / 127.f, pi = 3.14159265358979f;
+            const float y = std::fabs(x) < 1e-6f ? 1.f : (std::sin(pi * x) / (pi * x)) * (std::sin(.5f * pi * x) / (.5f * pi * x));
+            out[i] = std::int16_t(std::lround(y * 32767.f));
+        }
+    }
+    static constexpr int kMaximumBiasTexels = FFX_FSR2_MAXIMUM_BIAS_TEXTURE_WIDTH * FFX_FSR2_MAXIMUM_BIAS_TEXTURE_HEIGHT;
+    static void maximum_bias_table(std::int16_t (&out)[kMaximumBiasTexels]) {
+        for (int i = 0; i < kMaximumBiasTexels; ++i) out[i] = std::int16_t(std::lround(ffxFsr2MaximumBias[i] / 2.f * 32767.f));
+    }
 
     // One upscale. pass(name) is called before each dispatch (profiler pass
     // boundaries). Leaves no compute stage resource bound.
@@ -197,48 +261,12 @@ public:
         Image& history_read = luma_history_[p ? 1 : 0];
         Image& history_write = luma_history_[p ? 0 : 1];
 
-        // Constants (ffx_fsr2.cpp fsr2Dispatch).
-        Constants c{};
-        c.render_size[0] = c.max_render_size[0] = c.input_color_size[0] = std::int32_t(render_width_);
-        c.render_size[1] = c.max_render_size[1] = c.input_color_size[1] = std::int32_t(render_height_);
-        c.display_size[0] = std::int32_t(output_width_);
-        c.display_size[1] = std::int32_t(output_height_);
-        c.luma_mip_level = std::int32_t(kLuminanceMipShadingChange);
-        c.luma_mip_size[0] = std::int32_t(float(render_width_) / float(2u << kLuminanceMipShadingChange));
-        c.luma_mip_size[1] = std::int32_t(float(render_height_) / float(2u << kLuminanceMipShadingChange));
-        frame_index_ = reset ? 0 : frame_index_ + 1;
-        c.frame_index = frame_index_;
-        // Device depth to view depth for a standard (not inverted, finite)
-        // left-handed projection: c, e of the projection's z row.
-        const float aspect = float(render_width_) / float(render_height_);
-        const float q = frame.far_plane / (frame.near_plane - frame.far_plane);
-        c.device_to_view_depth[0] = -q;
-        c.device_to_view_depth[1] = q * frame.near_plane;
-        c.device_to_view_depth[2] = frame.tan_half_fov_y * aspect;
-        c.device_to_view_depth[3] = frame.tan_half_fov_y;
-        c.jitter[0] = frame.jitter_x;
-        c.jitter[1] = frame.jitter_y;
-        c.motion_vector_scale[0] = 1.f / float(render_width_);
-        c.motion_vector_scale[1] = 1.f / float(render_height_);
-        c.downscale_factor[0] = float(render_width_) / float(output_width_);
-        c.downscale_factor[1] = float(render_height_) / float(output_height_);
-        c.pre_exposure = c.previous_pre_exposure = 1.f;
-        c.tan_half_fov = frame.tan_half_fov_y * aspect;  // horizontal
-        // The phase count follows a changed sequence one step per frame.
-        if (reset || jitter_phase_count_ == 0.f) jitter_phase_count_ = frame.jitter_phases;
-        else if (frame.jitter_phases > jitter_phase_count_) jitter_phase_count_ += 1.f;
-        else if (frame.jitter_phases < jitter_phase_count_) jitter_phase_count_ -= 1.f;
-        c.jitter_phase_count = jitter_phase_count_;
-        c.delta_time = std::clamp(frame.delta_seconds, 0.f, 1.f);
-        c.view_to_meters = 1.f;
+        Constants c;
+        std::uint32_t spd[8];
+        frame_constants(frame, reset, render_width_, render_height_, output_width_, output_height_, history_, c, spd);
         write(context, constants_.Get(), &c, sizeof(c));
-
-        // SPD over the render rectangle (ffx_spd.h SpdSetup).
-        const std::uint32_t groups_x = (render_width_ - 1) / 64 + 1, groups_y = (render_height_ - 1) / 64 + 1;
-        const std::uint32_t spd[8] = {
-            std::uint32_t(std::min(std::floor(std::log2(float(std::max(render_width_, render_height_)))), 12.f)),
-            groups_x * groups_y, 0, 0, render_width_, render_height_, 0, 0};
         write(context, spd_constants_.Get(), spd, sizeof(spd));
+        const std::uint32_t groups_x = (render_width_ - 1) / 64 + 1, groups_y = (render_height_ - 1) / 64 + 1;
 
         const bool sharpen = frame.sharpness > 0.f;
         if (sharpen) {
@@ -432,18 +460,11 @@ private:
         if (FAILED(hr = image(device, default_exposure_, DXGI_FORMAT_R32G32_FLOAT, 1, 1, false, 1, exposure, 8))) return hr;
         const std::uint8_t reactive = 0;
         if (FAILED(hr = image(device, default_reactive_, DXGI_FORMAT_R8_UNORM, 1, 1, false, 1, &reactive, 1))) return hr;
-        // Lanczos-2 weights over [0, 2] and the upsample maximum bias table,
-        // both R16_SNORM (ffx_fsr2.cpp fsr2Create).
         std::int16_t lanczos[128];
-        for (int i = 0; i < 128; ++i) {
-            const float x = 2.f * float(i) / 127.f, pi = 3.14159265358979f;
-            const float y = std::fabs(x) < 1e-6f ? 1.f : (std::sin(pi * x) / (pi * x)) * (std::sin(.5f * pi * x) / (.5f * pi * x));
-            lanczos[i] = std::int16_t(std::lround(y * 32767.f));
-        }
+        lanczos_table(lanczos);
         if (FAILED(hr = image(device, lanczos_lut_, DXGI_FORMAT_R16_SNORM, 128, 1, false, 1, lanczos, sizeof(lanczos)))) return hr;
-        std::int16_t bias[FFX_FSR2_MAXIMUM_BIAS_TEXTURE_WIDTH * FFX_FSR2_MAXIMUM_BIAS_TEXTURE_HEIGHT];
-        for (int i = 0; i < FFX_FSR2_MAXIMUM_BIAS_TEXTURE_WIDTH * FFX_FSR2_MAXIMUM_BIAS_TEXTURE_HEIGHT; ++i)
-            bias[i] = std::int16_t(std::lround(ffxFsr2MaximumBias[i] / 2.f * 32767.f));
+        std::int16_t bias[kMaximumBiasTexels];
+        maximum_bias_table(bias);
         if (FAILED(hr = image(device, maximum_bias_lut_, DXGI_FORMAT_R16_SNORM, FFX_FSR2_MAXIMUM_BIAS_TEXTURE_WIDTH,
                               FFX_FSR2_MAXIMUM_BIAS_TEXTURE_HEIGHT, false, 1, bias,
                               FFX_FSR2_MAXIMUM_BIAS_TEXTURE_WIDTH * sizeof(std::int16_t))))
@@ -452,6 +473,8 @@ private:
         return S_OK;
     }
     friend class UpscaleSharpen;
+    friend class Fsr2UpscalerD3D12;
+    friend class UpscaleSharpenD3D12;
 };
 
 // The player's one Sharpening option after an upscaler that does not

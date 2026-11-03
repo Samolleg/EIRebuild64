@@ -22,6 +22,7 @@ struct E1VisualInputs {
     std::int32_t hoverId = 0;
     std::uint64_t hoverSerial = 0;
     std::array<float, 16> worldToClip{};
+    float cameraAnchorZ = 0; // CCamera anchor height for the close shadow band
     std::array<float, 4> ambient{}, sunDiffuse{}, sunDirection{};
     bool lightingValid = false;
     unsigned char (*fog)(void* context, const float* position) = nullptr;

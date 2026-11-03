@@ -132,12 +132,22 @@ typedef SMMPFileHeader *LPMMPFILEHEADER;
 /////////////////////////////////////////////////////////////////////////////////////
 inline int SMMPFileHeader::ShiftToMipLevel(int nMipLevel) const
 {
-    if (nMipLevel == 0)
-        return dwUserDataShift;
-
-    nMipLevel--;
-    int b = 1 << (2 * (nMipLevel + 1));
-    return dwDimentionX * dwDimentionY * dwBitDepth / 8 * 4 * (b - 1) / (3 * b) + dwUserDataShift;
+    // Sum the stored levels without overflowing the old 32-bit geometric
+    // formula. DXT levels smaller than 4x4 still occupy one complete block.
+    ULONGLONG offset = dwUserDataShift;
+    DWORD width = dwDimentionX, height = dwDimentionY;
+    const bool compressed = (dwFormat & 0x00FFFFFF) == MMP_FORMAT_DXTN;
+    for (int level = 0; level < nMipLevel; ++level)
+    {
+        if (compressed)
+            offset += ULONGLONG((width + 3) / 4) * ((height + 3) / 4) *
+                      (dwFormat == MMP_FORMAT_DXT1 ? 8 : 16);
+        else
+            offset += ULONGLONG(width) * height * dwBitDepth / 8;
+        width = width > 1 ? width / 2 : 1;
+        height = height > 1 ? height / 2 : 1;
+    }
+    return static_cast<int>(offset);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 inline void SMMPFileHeader::InitializeDefaultFormat0000()

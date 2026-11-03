@@ -1,4 +1,5 @@
 #pragma once
+namespace Navigation { struct Location; }
 #include "SaveSchema.h"
 /**********************************************************************
  *<
@@ -509,6 +510,7 @@ private:
 
 public:
     CUMPlayer();
+    const CPlot3D* MoveGoal() const {return cmdState==PC_MOVE?&ptSwarmTarget:nullptr;}
     // cmds
     void DoMoveTo(CAIUnitLogic &logic, const CPlot3D &ptTarget, bool bGroup, bool _bRun,
                   const CPlot3D &ptOffset);
@@ -714,7 +716,7 @@ public:
     int GetSpellNumBeignCast() const { return state == US_CAST ? nSpellBeingCast : -1; }
     // execute different low level commands
     void StartIdle();
-    void StartMove(const CPlot3D &ptDest, bool bRun = false, bool bGroup = false);
+    void StartMove(const CPlot3D &ptDest, bool bRun = false, bool bGroup = false,const Navigation::Location* goalSupport=nullptr);
     void ShowMove(const CPlot3D &ptDest, bool bGroup);
     void StartRotate(const CPlot3D &vecDest, float fpTurnSpeed = 0);
     void StartTurnLook(const SAIRallyPoint &newRally);

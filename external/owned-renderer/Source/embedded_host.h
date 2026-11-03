@@ -10,6 +10,7 @@ void embedded_report_render_failure(const char* event, const char* reason) noexc
 // workers or creating the renderer; no registry or module-discovery fallback.
 struct EmbeddedHostPaths {
     ResourceStoreConfig mounts;
+    ResourceStoreConfig text_mounts, data_mounts;
     std::wstring renderer_config;
     std::wstring world_map_layouts;
 };
@@ -23,6 +24,9 @@ public:
             if (!absolute(path)) throw std::invalid_argument("relative embedded loose root");
         for (const auto& path : paths.mounts.archives)
             if (!absolute(path)) throw std::invalid_argument("relative embedded archive");
+        for (const auto* family : {&paths.text_mounts, &paths.data_mounts})
+            for (const auto& path : family->archives)
+                if (!absolute(path)) throw std::invalid_argument("relative embedded family archive");
         std::lock_guard<std::mutex> guard(lock_);
         if (configured_) throw std::logic_error("embedded renderer already configured");
         paths_ = std::move(paths);

@@ -30,6 +30,9 @@ struct NativeWorldLightingFrame {
     bool sampled = false;
     FigureFallbackReason result = FigureFallbackReason::unavailable;
     NativeWorldLighting lighting{};
+    // The zone is a cave (the game's GMS_CAVE sky type), read with the light:
+    // no sun light and no sun shadow maps there (cave_lighting.h).
+    bool cave = false;
 };
 extern thread_local NativeWorldLightingFrame g_native_world_lighting_frame;
 
@@ -66,6 +69,7 @@ struct OwnedVisualPartCandidate {
 };
 struct OwnedVisualWorldFrame {
     OwnedVisualDiagnostic diagnostic{};
+    float camera_anchor_z = NAN;  // this frame's game camera anchor height (close shadow band); NaN unknown
     NativeShadowSourceDiagnostics shadow_source_diagnostic{};
     std::shared_ptr<const RetainedVisualFrame> values;
     std::vector<OwnedVisualFramePartState> prepared;
@@ -244,6 +248,7 @@ struct OwnedShadowInputs {
 // them from game state and the copied values).
 struct OwnedSceneCommand {
     std::array<float,16> world_to_clip{};
+    float camera_anchor_z = NAN;  // the game camera's anchor height at the seam; NaN unknown
     OwnedShadowInputs inputs;
     OwnedTerrainRuntimeFrame terrain;
     NativeWorldLightingFrame lighting{};
@@ -410,7 +415,7 @@ struct OwnedShadowSettings {
     std::uint8_t close_cascades = 3;
     bool far_shadows = true;
     bool point_shadows = true;
-    bool sun_shadows = true;
+    float close_range = 80;  // close shadow band length (m), shadow_close_range
 };
 
 // These subdivide retained nonqueue; physical flushes and packet/control work
@@ -537,7 +542,6 @@ extern thread_local NativeShadowTerrainBakeFn g_native_sink_shadow_terrain_bake;
 extern thread_local NativeGeometrySubmitFn g_native_sink_submit;
 extern thread_local std::uint64_t g_object_render_presentation_serial;
 extern OwnedShadowSettings g_owned_shadow_settings;
-extern std::uint64_t g_owned_shadow_settings_revision;
 void report_owned_shadow_pass_failure(const char* reason) noexcept;
 extern int g_point_shadow_fast_overlays;
 extern float g_point_shadow_merge_distance;
@@ -574,6 +578,27 @@ struct OwnedPreviewPart {
     std::uintptr_t wound = 0;
     std::shared_ptr<SurfaceImage> wound_texture;
 };
+// Owned party portrait expression: the texels of the expression face picture
+// that differ from the neutral one, laid out in the unit atlas's UV space
+// (the face pictures share the layout and scale of the atlas's head block,
+// at (0, 28/256) and half the atlas side). Drawn over the head part as a
+// second record of the same mesh and pose (owned_world_state.cpp).
+struct OwnedPortraitOverlay {
+    std::shared_ptr<const TextureCpuAsset> texture;
+    std::array<NativeOwnedTextureMip,32> mips{};
+    NativePreparedMaterialHandle material{}, wound_material{};
+};
+std::shared_ptr<OwnedPortraitOverlay> build_owned_portrait_overlay(const TextureCpuAsset& neutral,
+    const TextureCpuAsset& expression, const char*& reason) noexcept;
+// The expression picture of a neutral face picture name (ChangeFaceTexture
+// 0x640670: 1 happy +"a", 2 pain +"c", 3 tired +"b"); empty for neutral.
+std::string owned_portrait_expression_name(const std::string& neutral, std::int32_t expression);
+// Bare-head portrait (portrait_helmet off): a copy of the unit's assembly in
+// which each helmet head/hair part (hd.armorTT, hr.HH.armorTT) is replaced in
+// place by its bare part (hd, hr.HH) from the unit's model archive. Ordinals
+// stay those of the unit's assembly.
+std::shared_ptr<const VisualAssemblyAsset> build_owned_portrait_bare_assembly(
+    const VisualAssemblyAsset& unit, const ResourceBlob& model, const char*& reason) noexcept;
 struct OwnedPreviewCommand {
     RetainedVisualSample sample;
     double texture_time = 0;
@@ -583,6 +608,8 @@ struct OwnedPreviewCommand {
     std::vector<std::shared_ptr<void>> sets;
     std::vector<OwnedPreviewPart> parts;
     BridgeSceneHandoff handoff;
+    std::shared_ptr<OwnedPortraitOverlay> portrait_overlay;   // portraits only
+    bool portrait = false;   // a party portrait: its records keep HUD submission order
 };
 void run_owned_preview_command(OwnedPreviewCommand& command) noexcept;
 // One object's wound layer (owned_world_state.cpp): the parts and wound

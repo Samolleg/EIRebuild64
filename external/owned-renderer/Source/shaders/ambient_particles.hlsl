@@ -16,7 +16,14 @@ cbuffer Ambient:register(b0){
 };
 Texture2D<uint> ambArea:register(t0);
 Texture2D<float> ambHeight:register(t1);
-Texture2D<float> ambSceneDepth:register(t2); // PS: scene depth; VS: base ground height
+Texture2D<float> ambSceneDepth:register(t2); // PS: scene depth; VS: base ground height (DXBC)
+// D3D12 (DXIL): one t table serves both stages, so the base ground has its own slot.
+#ifdef EID3D12
+Texture2D<float> ambBase:register(t8);
+#define AMB_BASE ambBase
+#else
+#define AMB_BASE ambSceneDepth
+#endif
 Texture2D<float4> ambSources:register(t3); // spray, cave drip and mushroom weights per 2 m tile
 // Waterfall kinds (2, 5-7) place their particles in the map's waterfall tiles
 // (ambient_fall_tiles: impact tiles, then fall tiles; packed x | y << 16)
@@ -63,8 +70,8 @@ float ambMushroomAt(float2 p){
 float ambGround(float2 p,bool base=false){
  uint w,h;ambHeight.GetDimensions(w,h);
  float2 c=clamp(p,0,float2(w-1,h-1));int2 i=int2(floor(c));int2 j=min(i+1,int2(w-1,h-1));float2 f=c-i;
- float4 z=base?float4(ambSceneDepth.Load(int3(i,0)),ambSceneDepth.Load(int3(j.x,i.y,0)),
-                     ambSceneDepth.Load(int3(i.x,j.y,0)),ambSceneDepth.Load(int3(j,0))):
+ float4 z=base?float4(AMB_BASE.Load(int3(i,0)),AMB_BASE.Load(int3(j.x,i.y,0)),
+                     AMB_BASE.Load(int3(i.x,j.y,0)),AMB_BASE.Load(int3(j,0))):
                float4(ambHeight.Load(int3(i,0)),ambHeight.Load(int3(j.x,i.y,0)),
                       ambHeight.Load(int3(i.x,j.y,0)),ambHeight.Load(int3(j,0)));
  return lerp(lerp(z.x,z.y,f.x),lerp(z.z,z.w,f.x),f.y);

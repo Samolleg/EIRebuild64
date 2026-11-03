@@ -22,6 +22,7 @@
 #include <cstring>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -31,7 +32,6 @@
 #include "game_sites.h"
 #include "widescreen.h"
 #include "cursor_image.h"
-#include "x64_remote_device.h"
 #include "x64_remote_link.h"
 #include "hud_atlas_mutation.h"
 #include "res_mapping.h"
@@ -988,6 +988,9 @@ public:
  }
  [[noreturn]] void deviceRemovedExit(HRESULT reason) noexcept;
  bool startup_display_pending=true;
+ bool startup_display_applying=false; // inside the startup Apply (pending until it succeeds or fails for good)
+ bool startup_display_wait_logged=false;
+ std::optional<owned::DisplaySettings> startup_display_settings; // read once for the retries
  long core_surface_requests_read_=0; // core mode: Control::surface_requests retired
  void applyDisplay(const owned::DisplaySettings& settings);
  void invalidateVisualOutput() noexcept{if(active_target)active_target->invalidateVisualCpu();if(primary&&primary!=active_target)primary->invalidateVisualCpu();}
@@ -1061,8 +1064,12 @@ public:
     // The native interface has now initialized against its render surface.
     // Apply the saved output aspect through the same completed-frame path as
     // live Apply, including native bounds, viewport and paired input mapping.
-    startup_display_pending=false;
-    applyDisplay(owned::read_display_settings(owned::renderer_config_path().c_str()));
+    // A transient rejection (E_PENDING) retries at the next completed frame:
+    // a single attempt kept a 16:9 game canvas stretched over an 8:3 output.
+    if(!startup_display_settings)startup_display_settings=owned::read_display_settings(owned::renderer_config_path().c_str());
+    startup_display_applying=true;
+    applyDisplay(*startup_display_settings);
+    startup_display_applying=false;
    }
   }
   // DirectDraw callers treat any non-zero Flip result as failure; DXGI success
@@ -1301,9 +1308,10 @@ public:
   RECT client{};const bool sized=GetClientRect(dd_->hwnd,&client)&&client.right>0&&client.bottom>0;
   dd_->renderer.ensure(dd_->hwnd,sized?UINT(client.right):dd_->width,sized?UINT(client.bottom):dd_->height);
   bridge_set_engine_frame_begin_sink(this,&Device::beginEngineFrame);
+  bridge_set_hit_test_frame_sink(this,&Device::hitTestFrame);
   trace("Device.Create");
  }
- ~Device(){bridge_clear_engine_frame_begin_sink(this);bridge_clear_scene_handoff(this);if(scene_){bridge_set_native_geometry_sink(nullptr,nullptr);bridge_set_screen_rectangle_sink(nullptr,nullptr);bridge_set_game_particle_sink(nullptr,nullptr);bridge_set_game_ribbon_sink(nullptr,nullptr);bridge_set_game_selection_sink(nullptr,nullptr);bridge_set_game_print_sink(nullptr,nullptr,nullptr);bridge_set_game_glyph_sink(nullptr,nullptr);camp_inventory_set_popup_sink(nullptr,nullptr);}if(native_object_active_){dd_->renderer.rollback_native(native_object_checkpoint_);native_object_active_=false;}flushNativeVisual();clearPendingDraws();releaseRecordingTextures();for(auto& pair:blocks_)releaseBlock(pair.second);for(auto* t:textures_)if(t)t->Release();if(dd_->active_device==this)dd_->active_device=nullptr;if(dd_->active_target==target_)dd_->active_target=nullptr;if(target_)target_->Release();if(composition_target_)composition_target_->Release();dd_->Release();trace("Device.Destroy");}
+ ~Device(){bridge_clear_engine_frame_begin_sink(this);bridge_clear_hit_test_frame_sink(this);bridge_clear_scene_handoff(this);if(scene_){bridge_set_native_geometry_sink(nullptr,nullptr);bridge_set_screen_rectangle_sink(nullptr,nullptr);bridge_set_game_particle_sink(nullptr,nullptr);bridge_set_game_ribbon_sink(nullptr,nullptr);bridge_set_game_selection_sink(nullptr,nullptr);bridge_set_game_print_sink(nullptr,nullptr,nullptr);bridge_set_game_glyph_sink(nullptr,nullptr);camp_inventory_set_popup_sink(nullptr,nullptr);}if(native_object_active_){dd_->renderer.rollback_native(native_object_checkpoint_);native_object_active_=false;}flushNativeVisual();clearPendingDraws();releaseRecordingTextures();for(auto& pair:blocks_)releaseBlock(pair.second);for(auto* t:textures_)if(t)t->Release();if(dd_->active_device==this)dd_->active_device=nullptr;if(dd_->active_target==target_)dd_->active_target=nullptr;if(target_)target_->Release();if(composition_target_)composition_target_->Release();dd_->Release();trace("Device.Destroy");}
  bool compositionTarget(const Surface* surface)const noexcept{return surface==composition_target_;}
  bool displayResizeIdle() const noexcept {return !scene_ && !recording_ && !native_batch_active_ && !native_object_active_ && pending_draws_.empty();}
  void resizeDisplayViewport(UINT old_width,UINT old_height,UINT width,UINT height) noexcept {
@@ -1366,6 +1374,14 @@ public:
    dd_->renderer.native_flush_failure_line(),dd_->renderer.native_static_draw_count());owned::bridge_append_probe_event("surface_flush_failed",detail);}
  bool visualWritesPending() const noexcept{return native_sequence_||!pending_draws_.empty();}
 private:
+ // The zone hit-test frame (#200): the draws queued so far go to their own
+ // target before the switch and the frame's draws reach the hit-test target
+ // before the switch back.
+ static void hitTestFrame(void* context,bool begin) noexcept {
+  auto& self=*static_cast<Device*>(context);
+  if(self.dd_->active_device!=&self)return;
+  try{(void)self.flushForSurface();self.dd_->renderer.hit_test_frame(begin);}catch(...){}
+ }
  static bool beginEngineFrame(void* context) noexcept {
   auto& self=*static_cast<Device*>(context);
   if(self.dd_->active_device!=&self||self.scene_)return false;
@@ -1842,8 +1858,30 @@ private:
 };
 
 void DD::applyDisplay(const owned::DisplaySettings& settings){
- const auto reject=[&](HRESULT hr,const char* text){renderer.finish_display_apply(settings,hr,text);};
- if(!hwnd || !active_device || !active_device->displayResizeIdle() || renderer.has_pending_ui())
+ // Startup Apply: done on success or a lasting failure; E_PENDING stays
+ // pending. One line for the first wait and one for the outcome.
+ const auto log_startup=[&](HRESULT hr,const char* text){
+  if(!startup_display_applying)return;
+  if(hr==E_PENDING){if(startup_display_wait_logged)return;startup_display_wait_logged=true;}
+  else startup_display_pending=false;
+  RECT client{};if(hwnd)GetClientRect(hwnd,&client);
+  char detail[320];std::snprintf(detail,sizeof(detail),"hr=%08lx canvas=%lux%lu client=%ldx%ld %s",static_cast<unsigned long>(hr),width,height,client.right,client.bottom,text?text:"");
+  owned::bridge_append_probe_event(hr==E_PENDING?"display_startup_apply_waiting":"display_startup_apply",detail);
+ };
+ const auto reject=[&](HRESULT hr,const char* text){
+  log_startup(hr,text);
+  if(startup_display_applying&&hr==E_PENDING)return; // retried next frame, not reported each frame
+  renderer.finish_display_apply(settings,hr,text);
+ };
+ // Apply runs only right after a successful present (presentVisual). In the
+ // queued modes (render thread, core) that present already carried every
+ // command the frame queued, the cursor included, but scene_ui_pending_
+ // stays set until the next BeginEngineFrame, and the owned cursor sets it
+ // on every frame: the check refused every Apply there, at startup and from
+ // F10 alike. The render thread is drained below before any surface changes;
+ // core mode's host executes the commands in order.
+ const bool queued=renderer.scene_queue();
+ if(!hwnd || !active_device || !active_device->displayResizeIdle() || (!queued && renderer.has_pending_ui()))
   return reject(E_PENDING,"Wait for a completed frame, then Apply again.");
  if(const char* blocker=owned::widescreen_display_blocker())return reject(E_PENDING,blocker);
  for(Surface* surface:{primary,active_target,active_target?active_target->displayDepth():nullptr})
@@ -1857,6 +1895,7 @@ void DD::applyDisplay(const owned::DisplaySettings& settings){
  };
  OutputWindowPlacement placement{};
  if(!plan_output_window(hwnd,settings,placement))return reject(E_FAIL,"The requested window size could not be planned. Display unchanged.");
+ if(queued && !renderer.core_mode())renderer.scene_sync("display_apply");
  // Preserve the stock-fit font/raster unit on either side of 4:3. Only the
  // unconstrained canvas span changes to match the actual fitted output.
  const double native_unit=(std::min)(double(width)/800.,double(height)/600.);
@@ -1891,7 +1930,7 @@ void DD::applyDisplay(const owned::DisplaySettings& settings){
  camp_inventory_output(width,height);
  char result[160];std::snprintf(result,sizeof(result),"Applied %ld x %ld %s.",client.right,client.bottom,
   settings.mode==owned::DisplayMode::windowed?"windowed":"borderless");
- trace("Window.LiveApply","%s native_canvas=%lux%lu",result,width,height);renderer.finish_display_apply(settings,S_OK,result);
+ trace("Window.LiveApply","%s native_canvas=%lux%lu",result,width,height);log_startup(S_OK,result);renderer.finish_display_apply(settings,S_OK,result);
 }
 
 namespace {
@@ -2425,6 +2464,54 @@ HRESULT Surface::GetDDInterface(LPVOID* out){if(!out)return DDERR_INVALIDPARAMS;
 
 // Blit/Load sources are CPU composition inputs, even when also sampled by D3D.
 // Pin their exact bytes before restoration; never drop them after a copy.
+// One RGB channel by its mask: bit position and width.
+struct ChannelMask{DWORD mask=0;unsigned shift=0,bits=0;};
+static ChannelMask channel_mask(DWORD mask) noexcept{
+ ChannelMask c{mask,0,0};if(!mask)return c;
+ while(!((mask>>c.shift)&1u))++c.shift;
+ while(c.shift+c.bits<32&&((mask>>(c.shift+c.bits))&1u))++c.bits;
+ return c;
+}
+static DWORD scale_channel(DWORD value,unsigned from,unsigned to) noexcept{
+ if(from==to)return value;if(!from)return 0;
+ // Narrowing rounds to the nearest level (255 -> 31, 128 -> 1 for 1-bit
+ // alpha); widening replicates the high bits so 31 maps to 255.
+ if(from>to){const unsigned long long top=(1ull<<from)-1ull,out=(1ull<<to)-1ull;
+  return (DWORD)((value*out+top/2ull)/top);}
+ DWORD out=0;int left=(int)to;
+ while(left>0){out|=left>=(int)from?value<<(left-(int)from):value>>((int)from-left);left-=(int)from;}
+ return out&((1u<<to)-1u);
+}
+static bool convertible_rgb(const DDPIXELFORMAT& f) noexcept{
+ constexpr DWORD unsupported=DDPF_FOURCC|DDPF_PALETTEINDEXED1|DDPF_PALETTEINDEXED2|DDPF_PALETTEINDEXED4|DDPF_PALETTEINDEXED8|DDPF_PALETTEINDEXEDTO8;
+ return (f.dwFlags&DDPF_RGB)&&!(f.dwFlags&unsupported)&&(f.dwRGBBitCount==16||f.dwRGBBitCount==32)&&
+  f.dwRBitMask&&f.dwGBitMask&&f.dwBBitMask;
+}
+// A plain Blt between 16- and 32-bit RGB surfaces, converted through their
+// masks (DirectDraw Blt itself does not convert). A source without alpha
+// writes opaque alpha. The dialogue mouth copy needs it: the mod addon's
+// composed character atlas is 32-bit, the mouth frames are 16-bit 1555.
+static void convert_rgb_rows(SurfaceImage& d,LONG dx,LONG dy,const SurfaceImage& s,const RECT& r,LONG w,LONG h) noexcept{
+ const auto& df=d.format;const auto& sf=s.format;
+ const ChannelMask sc[4]{channel_mask(sf.dwRBitMask),channel_mask(sf.dwGBitMask),channel_mask(sf.dwBBitMask),
+  channel_mask((sf.dwFlags&DDPF_ALPHAPIXELS)?sf.dwRGBAlphaBitMask:0)};
+ const ChannelMask dc[4]{channel_mask(df.dwRBitMask),channel_mask(df.dwGBitMask),channel_mask(df.dwBBitMask),
+  channel_mask((df.dwFlags&DDPF_ALPHAPIXELS)?df.dwRGBAlphaBitMask:0)};
+ const DWORD sb=sf.dwRGBBitCount/8,db=df.dwRGBBitCount/8;
+ for(LONG y=0;y<h;++y){
+  const std::uint8_t* in=std::as_const(s.pixels).data()+(size_t)(r.top+y)*s.pitch+(size_t)r.left*sb;
+  std::uint8_t* out=d.pixels.data()+(size_t)(dy+y)*d.pitch+(size_t)dx*db;
+  for(LONG x=0;x<w;++x,in+=sb,out+=db){
+   DWORD v=0;std::memcpy(&v,in,sb);DWORD o=0;
+   for(int c=0;c<4;++c){
+    if(!dc[c].mask)continue;
+    const DWORD value=sc[c].mask?scale_channel((v&sc[c].mask)>>sc[c].shift,sc[c].bits,dc[c].bits):dc[c].mask>>dc[c].shift;
+    o|=(value<<dc[c].shift)&dc[c].mask;
+   }
+   std::memcpy(out,&o,db);
+  }
+ }
+}
 static HRESULT copy_rect(Surface& dst,LONG dx,LONG dy,Surface& src,const RECT* sr,bool publish_visual=true){
  RECT r=sr?*sr:RECT{0,0,(LONG)src.image()->width,(LONG)src.image()->height};
  if(r.left<0){dx-=r.left;r.left=0;}if(r.top<0){dy-=r.top;r.top=0;}if(dx<0){r.left-=dx;dx=0;}if(dy<0){r.top-=dy;dy=0;}
@@ -2457,7 +2544,14 @@ static HRESULT copy_rect(Surface& dst,LONG dx,LONG dy,Surface& src,const RECT* s
   if(!shared)for(LONG y=0;y<bh;y++)std::memmove(dst.image()->pixels.data()+(size_t)(dy/4+y)*dst.image()->pitch+(size_t)(dx/4)*bytes,std::as_const(src.image()->pixels).data()+(size_t)(r.top/4+y)*src.image()->pitch+(size_t)(r.left/4)*bytes,(size_t)bw*bytes);
   dst.image()->gpu_captured=false;{const RECT changed{dx,dy,dx+w,dy+h};mark_surface_dirty(*dst.image(),changed);advance_surface_generation(*dst.image(),&changed);}timing.finish((std::uint64_t)w*h);if(publish_visual)dst.completedVisualCpuWrite(dx==0&&dy==0&&w==(LONG)dst.image()->width&&h==(LONG)dst.image()->height,src.visualCpuCurrent());else dst.invalidateVisualCpu();return DD_OK;
  }
- DWORD db=pixel_bytes(dst.image()->format),sb=pixel_bytes(src.image()->format);if(db!=sb)return DDERR_INVALIDPIXELFORMAT;
+ DWORD db=pixel_bytes(dst.image()->format),sb=pixel_bytes(src.image()->format);
+ if(db!=sb){
+  if(!convertible_rgb(dst.image()->format)||!convertible_rgb(src.image()->format))return DDERR_INVALIDPIXELFORMAT;
+  hr=dst.ensurePixelsForWrite(full_overwrite);if(FAILED(hr))return hr;
+  PostEngineSurfaceTimingScope timing(PostEngineSurfaceTimingKind::cpu_rect);
+  convert_rgb_rows(*dst.image(),dx,dy,*src.image(),r,w,h);
+  dst.image()->gpu_captured=false;{const RECT changed{dx,dy,dx+w,dy+h};mark_surface_dirty(*dst.image(),changed);advance_surface_generation(*dst.image(),&changed);}timing.finish((std::uint64_t)w*h);if(publish_visual)dst.completedVisualCpuWrite(dx==0&&dy==0&&w==(LONG)dst.image()->width&&h==(LONG)dst.image()->height,src.visualCpuCurrent());else dst.invalidateVisualCpu();return DD_OK;
+ }
  const bool shared=share_whole_source();
  if(!shared){hr=dst.ensurePixelsForWrite(full_overwrite);if(FAILED(hr))return hr;}
  PostEngineSurfaceTimingScope timing(PostEngineSurfaceTimingKind::cpu_rect);if(!shared)for(LONG y=0;y<h;y++)std::memmove(dst.image()->pixels.data()+(size_t)(dy+y)*dst.image()->pitch+(size_t)dx*db,std::as_const(src.image()->pixels).data()+(size_t)(r.top+y)*src.image()->pitch+(size_t)r.left*sb,(size_t)w*db);dst.image()->gpu_captured=false;{const RECT changed{dx,dy,dx+w,dy+h};mark_surface_dirty(*dst.image(),changed);advance_surface_generation(*dst.image(),&changed);}timing.finish((std::uint64_t)w*h);if(publish_visual)dst.completedVisualCpuWrite(dx==0&&dy==0&&w==(LONG)dst.image()->width&&h==(LONG)dst.image()->height,src.visualCpuCurrent());else dst.invalidateVisualCpu();return DD_OK;

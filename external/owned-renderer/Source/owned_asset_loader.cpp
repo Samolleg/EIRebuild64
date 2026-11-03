@@ -985,6 +985,7 @@ std::string compact_failure(const char* kind, const std::string& name,
     output += name;
     output += ':';
     output += resource_failure_code_name(failure.code);
+    if (!failure.message.empty()) output += ":" + failure.message;
     return output;
 }
 
@@ -1432,6 +1433,17 @@ bool parse_figure_asset(const ResourceBlob& blob, FigureCpuAsset& figure,
 bool texture_alpha_pixels(const TextureCpuAsset& texture, std::size_t index,
                           TextureAlphaPixels& input) noexcept {
     input = {};
+    // A core-mode stand-in (TextureCpuAsset::alpha_cut_mask): mip 0 only.
+    if (!texture.source && index == 0 && !texture.mips.empty() &&
+        (texture.alpha_cut_mask || (texture.opaque_mips & 1u))) {
+        input.format = TextureAlphaFormat::cut_bits;
+        input.width = texture.mips[0].width; input.height = texture.mips[0].height;
+        if (texture.alpha_cut_mask) {
+            input.data = texture.alpha_cut_mask->data();
+            input.bytes = texture.alpha_cut_mask->size();
+        }
+        return true;
+    }
     if (!texture.source || index >= texture.mips.size()) return false;
     switch (texture.format) {
     case MmpFormat::dxt1: input.format = TextureAlphaFormat::bc1; break;
@@ -1450,6 +1462,65 @@ bool texture_alpha_pixels(const TextureCpuAsset& texture, std::size_t index,
             (input.format == TextureAlphaFormat::bc1 ? 8 : 16));
     return true;
 }
+
+bool texture_rgb_pixels(const TextureCpuAsset& texture, std::size_t index, std::uint32_t& width,
+                        std::uint32_t& height, std::vector<std::uint8_t>& rgb) noexcept try {
+    width = height = 0; rgb.clear();
+    if (!texture.source || index >= texture.mips.size()) return false;
+    const auto& mip = texture.mips[index];
+    if (mip.byte_offset > texture.source->size() || mip.bytes > texture.source->size() - mip.byte_offset ||
+        !mip.width || !mip.height) return false;
+    const std::uint8_t* data = texture.source->data() + mip.byte_offset;
+    const std::uint32_t w = mip.width, h = mip.height;
+    if (texture.format == MmpFormat::dxt1 || texture.format == MmpFormat::dxt3 || texture.format == MmpFormat::dxt5) {
+        // The colour half of each block (DXT3/5: after their 8 alpha bytes).
+        const unsigned block = texture.format == MmpFormat::dxt1 ? 8u : 16u;
+        const std::uint32_t bw = (w + 3) / 4, bh = (h + 3) / 4;
+        if (mip.bytes < std::size_t(bw) * bh * block) return false;
+        rgb.assign(std::size_t(w) * h * 3, 0);
+        for (std::uint32_t by = 0; by < bh; ++by) for (std::uint32_t bx = 0; bx < bw; ++bx) {
+            const std::uint8_t* b = data + (std::size_t(by) * bw + bx) * block + (block - 8);
+            const unsigned c0 = b[0] | (b[1] << 8), c1 = b[2] | (b[3] << 8);
+            unsigned pal[4][3];
+            const auto expand = [](unsigned c, unsigned* o) {
+                o[0] = ((c >> 11) & 31) * 255 / 31; o[1] = ((c >> 5) & 63) * 255 / 63; o[2] = (c & 31) * 255 / 31;
+            };
+            expand(c0, pal[0]); expand(c1, pal[1]);
+            for (int k = 0; k < 3; ++k) {
+                // DXT3/5 colour blocks always use the four-colour mode.
+                if (c0 > c1 || block == 16) { pal[2][k] = (2 * pal[0][k] + pal[1][k]) / 3; pal[3][k] = (pal[0][k] + 2 * pal[1][k]) / 3; }
+                else { pal[2][k] = (pal[0][k] + pal[1][k]) / 2; pal[3][k] = 0; }
+            }
+            const std::uint32_t bits = b[4] | (b[5] << 8) | (b[6] << 16) | (std::uint32_t(b[7]) << 24);
+            for (unsigned i = 0; i < 16; ++i) {
+                const std::uint32_t x = bx * 4 + i % 4, y = by * 4 + i / 4;
+                if (x >= w || y >= h) continue;
+                const unsigned sel = (bits >> (2 * i)) & 3;
+                for (int k = 0; k < 3; ++k) rgb[(std::size_t(y) * w + x) * 3 + k] = std::uint8_t(pal[sel][k]);
+            }
+        }
+    } else {
+        // Packed 16/32-bit texels; the masks are in the file's A, R, G, B order.
+        // PNT3 is expanded at parse into BGRA bytes and keeps no masks.
+        const unsigned bpp = texture.bit_count / 8;
+        if ((bpp != 2 && bpp != 4) || mip.bytes < std::size_t(w) * h * bpp) return false;
+        const bool bgra = texture.format_signature == 0x33544e50u;  // 'PNT3'
+        if (!bgra)
+            for (int c = 1; c < 4; ++c) if (!texture.masks[c] || !texture.channel_bits[c] || texture.channel_bits[c] > 8) return false;
+        rgb.assign(std::size_t(w) * h * 3, 0);
+        for (std::size_t i = 0; i < std::size_t(w) * h; ++i) {
+            const std::uint8_t* q = data + i * bpp;
+            if (bgra) { rgb[i * 3] = q[2]; rgb[i * 3 + 1] = q[1]; rgb[i * 3 + 2] = q[0]; continue; }
+            const std::uint32_t v = bpp == 2 ? std::uint32_t(q[0] | (q[1] << 8)) :
+                std::uint32_t(q[0] | (q[1] << 8) | (q[2] << 16)) | (std::uint32_t(q[3]) << 24);
+            for (int c = 0; c < 3; ++c)
+                rgb[i * 3 + c] = std::uint8_t(((v & texture.masks[1 + c]) >> texture.shifts[1 + c]) * 255u /
+                                              ((1u << texture.channel_bits[1 + c]) - 1));
+        }
+    }
+    width = w; height = h;
+    return true;
+} catch (...) { rgb.clear(); width = height = 0; return false; }
 
 static void establish_texture_alpha(TextureCpuAsset& texture) noexcept {
     texture.opaque_mips = 0;
@@ -2470,8 +2541,11 @@ bool finalize_terrain_sector_spatial_descriptor(
 
 namespace {
 
-const TerrainVertex* terrain_vertex(const TerrainCpuAsset& terrain,
-                                    int x, int y, bool layer) noexcept {
+// The height fields of one vertex: from the full record, or from a core-mode
+// slim sector's compact copy of the same values (TerrainSectorCpuAsset::heights).
+const TerrainHeightVertex* terrain_vertex(const TerrainCpuAsset& terrain,
+                                          int x, int y, bool layer,
+                                          TerrainHeightVertex& storage) noexcept {
     if (x < 0 || y < 0 ||
         x > static_cast<int>(terrain.sector_count_x * kTerrainCellsPerSector) ||
         y > static_cast<int>(terrain.sector_count_y * kTerrainCellsPerSector))
@@ -2500,18 +2574,23 @@ const TerrainVertex* terrain_vertex(const TerrainCpuAsset& terrain,
     const std::size_t index = static_cast<std::size_t>(local_y) *
         kTerrainVerticesPerSide + static_cast<std::size_t>(local_x) +
         (layer && sector.has_layers ? kTerrainVerticesPerSector : 0u);
-    return index < sector.vertices.size() ? &sector.vertices[index] : nullptr;
+    if (!sector.vertices.empty()) {
+        if (index >= sector.vertices.size()) return nullptr;
+        storage = terrain_height_vertex(sector.vertices[index]);
+        return &storage;
+    }
+    return index < sector.heights.size() ? &sector.heights[index] : nullptr;
 }
 
-float terrain_cross(const TerrainVertex& center, const TerrainVertex& first,
-                    const TerrainVertex& second) noexcept {
+float terrain_cross(const TerrainHeightVertex& center, const TerrainHeightVertex& first,
+                    const TerrainHeightVertex& second) noexcept {
     return (first.x - center.x) * (second.y - center.y) -
         (first.y - center.y) * (second.x - center.x);
 }
 
-float terrain_plane_height(float x, float y, const TerrainVertex& first,
-                           const TerrainVertex& second,
-                           const TerrainVertex& third) noexcept {
+float terrain_plane_height(float x, float y, const TerrainHeightVertex& first,
+                           const TerrainHeightVertex& second,
+                           const TerrainHeightVertex& third) noexcept {
     const float e1 = second.x - first.x;
     const float e2 = second.y - first.y;
     const float e3 = second.z - first.z;
@@ -2541,12 +2620,13 @@ static bool sample_terrain_layer(const TerrainCpuAsset& terrain, float x, float 
     int cell_x = static_cast<int>(std::nearbyint(x));
     int cell_y = static_cast<int>(std::nearbyint(y));
     for (unsigned attempt = 0; attempt < 10u; ++attempt) {
-        const TerrainVertex* lu = terrain_vertex(terrain, cell_x, cell_y, layer);
-        const TerrainVertex* ru = terrain_vertex(terrain, cell_x + 1, cell_y, layer);
-        const TerrainVertex* ld = terrain_vertex(terrain, cell_x, cell_y + 1, layer);
-        const TerrainVertex* rd = terrain_vertex(terrain, cell_x + 1, cell_y + 1, layer);
-        std::array<TerrainVertex,4> current{};
-        const auto shifted=[&](const TerrainVertex*& vertex, unsigned slot) noexcept {
+        std::array<TerrainHeightVertex,4> read{};
+        const TerrainHeightVertex* lu = terrain_vertex(terrain, cell_x, cell_y, layer, read[0]);
+        const TerrainHeightVertex* ru = terrain_vertex(terrain, cell_x + 1, cell_y, layer, read[1]);
+        const TerrainHeightVertex* ld = terrain_vertex(terrain, cell_x, cell_y + 1, layer, read[2]);
+        const TerrainHeightVertex* rd = terrain_vertex(terrain, cell_x + 1, cell_y + 1, layer, read[3]);
+        std::array<TerrainHeightVertex,4> current{};
+        const auto shifted=[&](const TerrainHeightVertex*& vertex, unsigned slot) noexcept {
             if (!vertex || !layer || !shifts) return true;
             current[slot]=*vertex;
             if (vertex->lighting_object!=UINT16_MAX) {
@@ -2798,50 +2878,22 @@ bool decode_model_resources(const ResourceBlob& mod_blob,
         !bone_archive.open(bone_blob, failure))
         return false;
     ResourceBlob lnk_blob;
-    if (!mod_archive.resolve(visual_reference, lnk_blob, failure) ||
-        !parse_lnk(lnk_blob, model.links, failure))
-        return false;
-    try { model.nodes.reserve(model.links.size()); } catch (...) {
-        fail(failure, ResourceFailureCode::parse, "model node allocation failed");
-        return false;
-    }
-    for (const ModelLink& link : model.links) {
+    if (!mod_archive.resolve(visual_reference, lnk_blob, failure)) return false;
+    // BON endpoints describe the skeleton, independently of FIG shape count.
+    // Use the same LNK/BON decoder as the active map's selected sources.
+    if (!decode_selected_skeleton(lnk_blob, visual_reference,
+        [&](const std::string& name, ResourceBlob& selected, ResourceFailure& error) {
+            return bone_archive.resolve(name, selected, error);
+        }, model, failure)) return false;
+    for (ModelNodeCpuAsset& node : model.nodes) {
         ResourceBlob fig_blob;
-        ResourceBlob node_bones;
-        ModelNodeCpuAsset node{};
-        node.name = link.child;
-        if (!mod_archive.resolve(link.child, fig_blob, failure) ||
-            !parse_figure_asset(fig_blob, node.figure, failure) ||
-            !bone_archive.resolve(link.child, node_bones, failure))
-            return false;
-        const std::uint64_t expected_bone_bytes =
-            static_cast<std::uint64_t>(node.figure.shape_count) * 3u * sizeof(float);
-        if (!node_bones.bytes || node_bones.bytes->size() != expected_bone_bytes) {
-            fail(failure, ResourceFailureCode::parse,
-                 "BON node does not contain three floats per FIG shape");
+        if (!mod_archive.resolve(node.name, fig_blob, failure) ||
+            !parse_figure_asset(fig_blob, node.figure, failure)) {
+            failure.message = node.name + ": " + failure.message;
             return false;
         }
-        try { node.bone_positions.resize(node.figure.shape_count * 3u); }
-        catch (...) {
-            fail(failure, ResourceFailureCode::parse,
-                 "BON node allocation failed");
-            return false;
-        }
-        for (std::size_t index = 0; index < node.bone_positions.size(); ++index) {
-            node.bone_positions[index] = read_float(
-                node_bones.bytes->data() + index * sizeof(float));
-            // The game uses BON endpoints unchecked; zero a non-finite one.
-            if (!std::isfinite(node.bone_positions[index])) {
-                node.bone_positions[index] = 0.0f;
-                bridge_append_probe_event("bon_endpoint_repaired",
-                    (visual_reference + "/" + link.child + ": non-finite BON endpoint zeroed").c_str());
-            }
-        }
-        model.static_shape_parameterized = model.static_shape_parameterized ||
-            node.figure.shape_count == 8;
-        model.nodes.push_back(std::move(node));
+        model.static_shape_parameterized |= node.figure.shape_count == 8;
     }
-    model.visual_reference = visual_reference;
     model.model_container = mod_blob.identity;
     model.bone_container = bone_blob.identity;
     model.source_bytes = mod_blob.identity.bytes + bone_blob.identity.bytes;
@@ -3957,11 +4009,14 @@ bool write_owned_loader_receipt(const OwnedMapSnapshot& snapshot,
 
 bool shipped_node_link_matches(const ModelLink& recipe, std::size_t index,
     const void* node, const void* head, const void* game_parent,
-    const void* recipe_parent) noexcept {
+    const void* recipe_parent, bool later_root) noexcept {
     if (recipe.parent_index != UINT_MAX)
         return recipe.parent_index < index && game_parent && game_parent == recipe_parent;
-    if (recipe.parent.empty()) return node == head && !game_parent;
-    return node != head && !game_parent;  // its named parent came later
+    // The first node without a parent name is the head. A later one stays
+    // unlinked like a node whose named parent came later (multi-part models
+    // such as Dejavu's gz19g wrecks, levers and gates list every part as a root).
+    if (recipe.parent.empty() && !later_root) return node == head && !game_parent;
+    return node != head && !game_parent;
 }
 
 } // namespace owned

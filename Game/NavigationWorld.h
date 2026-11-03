@@ -24,6 +24,11 @@ class NavigationWorld {
     std::uint64_t generation=0;
     unsigned failures=0,stepFailures=0;
     std::uint64_t nextStepLog=0;
+    // Independent, transient observers: one noisy NPC cannot hide another.
+    enum class AirEvent { Query, RandomGoal, Step };
+    struct AirJournal { std::uint64_t next=0; unsigned suppressed=0; };
+    std::map<int,std::array<AirJournal,3>> airJournal;
+    bool ObserveAir(CUnit* unit,AirEvent event,unsigned& suppressed);
     bool loaded=false;
     Navigation::Authoring authoring;
     std::map<int,std::vector<Navigation::Solid>> liveObjects;
@@ -37,10 +42,22 @@ class NavigationWorld {
     std::set<std::tuple<int,int,int>> sourceDirty;
     std::future<std::unique_ptr<Navigation::Mesh>> sourceJob;
     std::tuple<int,int,int> sourceTask;
+    bool sourceChanged=false;
+    struct Retry {unsigned failures=0;std::uint64_t after=0;};
+    std::map<std::tuple<int,int,int>,Retry> sourceRetries;
+    std::set<int> flyingUnits;
+    std::filesystem::path meshDirectory;
+    bool flightDeferred=false;
+    Navigation::Point flightLow,flightHigh;
+    void FlushFlight();
+    void QueueTile(int type,int x,int z);
+    void QueueFlightBox(const Navigation::Solid&);
+    void LoadFlying();
     std::map<int,int> liveDoors;
     struct Queue { Navigation::Point goal;int blocker=0; };
     std::map<int,Queue> queues;
     const std::vector<Navigation::Obstacle>* queryObstacles=nullptr;
+    const Navigation::Route* queryReuse=nullptr;
     void UpdateSources(bool initial);
     bool Load(const std::filesystem::path& directory);
 
@@ -60,12 +77,15 @@ public:
     std::uint64_t Bake(const std::filesystem::path& directory,Navigation::Bytes& table,CWorldServer& world);
     bool Load();
     void Advance();
+    void Stop(int id) { queues.erase(id); }
+    void ForgetUnit(int id) { Stop(id);flyingUnits.erase(id);airJournal.erase(id); }
+    bool Goal(CUnit* unit,Navigation::Point reference,Navigation::Location& result);
     float Radius(CUnit* unit) { return (std::max)(.05f,Body(unit).radius); }
     bool RandomGoal(CUnit* unit,Navigation::Point center,float radius,Navigation::Point& goal,Navigation::RandomShape shape=Navigation::RandomShape::Circle);
     bool Place(CUnit* unit,CAIMap& map);
     const std::string& Error() const { return error; }
     Navigation::Point Position(CUnit* unit,CAIMap& map) const;
-    Navigation::Route Find(CUnit* unit,Navigation::Point from,Navigation::Point goal,float maxLength,float goalRadius,const float* costs=nullptr,int aiClass=3,Navigation::GoalPolicy goalPolicy=Navigation::GoalPolicy::Exact);
+    Navigation::Route Find(CUnit* unit,Navigation::Point from,Navigation::Point goal,float maxLength,float goalRadius,const float* costs=nullptr,int aiClass=3,Navigation::GoalPolicy goalPolicy=Navigation::GoalPolicy::Exact,const Navigation::Location* goalSupport=nullptr);
     bool CanPlace(CUnit* unit,Navigation::Point point,int aiClass=3);
     bool Support(CUnit* unit,Navigation::Point point,Navigation::Location& result);
     bool Step(CUnit* unit,Navigation::Point from,Navigation::Point desired,Navigation::Location& result,const CAIRoute* route=nullptr);

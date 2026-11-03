@@ -1,4 +1,82 @@
+# X64RUPD02 renderer source provenance (2026-11-02)
+
+Upstream final main tree: `b1ffc736d4792eb36f3528a8d8ee2c358da80d54`,
+fetched read-only from Ilufus/evil-islands-owned-renderer. Ancestor:
+`ef7e12467db17ef673f8ce3b105063b4b3b16417`. Local source base:
+`4f716b512677ef192cf9b2af6c453c4f2f706f2c`, task/X64RUPD02.
+Imported as a file-level three-way merge, without Git merge.
+
+This is a modified embedded EIRebuild64 renderer by Ilufus, labelled
+`eirebuild64-X64RUPD02-b1ffc736`; LICENSE.md and NOTICE.md are preserved.
+Common materials, fur, terrain 2.0, liquid seams and shader bodies follow
+the final upstream tree. Necessary typed resource/device/preview inputs,
+native NGX lifecycle, C56 hit target, camera anchor, source gamma, packed
+normals, FIG1/FIG8 and retained LOD remain local. The FIG1 neighbour patch
+has not landed upstream; its existing X64DECOR01 implementation is kept.
+The separate Host/Core transport, D3D12 presentation/NGX/FG owner and retail
+hooks remain excluded from the embedded D3D11 target. No substitute
+backend, transport stub, fallback or local configuration option is added.
+The normal shader producer builds from the same source with runtime-only
+bodies excluded. Runtime and visual acceptance remain open.
+
+## Historical integration notes
+
 # Renderer source provenance
+
+X64RUPD01 (2026-10-31): current upstream source baseline is main commit
+`ef7e12467db17ef673f8ce3b105063b4b3b16417`, read from the existing local
+upstream clone without fetch or modifications. The three-way file merge uses
+upstream `24e5d54828a8bc0a8a1573c4aec68b7aed34838b` as ancestor and the
+EIRebuild64 vendored tree at `7916d68a2882e2c99f0f48cd7bd295c16ea9ccbc`
+(`task/X64NAVFIX01`) as the local side. Work is in `task/X64RUPD01`.
+The 154-commit upstream range is imported as its final tree, so reverted
+temporary diagnostics and experiments are not replayed. The older notes
+below are historical and do not designate the current upstream or platform.
+
+This is a modified embedded EIRebuild64 renderer, not an upstream build.
+Its build label is `eirebuild64-X64RUPD01-ef7e1246`; the complete engine
+source commit supplies the exact modified-tree identity. EID3D11 renderer by
+Ilufus. Upstream LICENSE.md and NOTICE.md, including all Required Notice
+lines, are preserved beside this document.
+
+Rework 1 (2026-10-31): cave sun retirement, cached-domain selection and
+receiver admission follow ef7e1246 exactly. The local sun_shadows bridge
+field/argument and its settings-revision domain gate are removed. The
+upstream shadows option, its labels and config persistence are preserved.
+Conflict blocks use upstream code with the necessary embedded texture,
+device, memory-counter, DLSS-refusal and unavailable-scene-thread seams.
+
+Preserved local integration:
+- EID3D11_EMBEDDED typed inputs, source-managed world/UI/text/preview and
+  active mounts; no retail-x86 address readers, hooks or inline/naked asm
+  enter the embedded build. Remote/core-host transports remain unlinked.
+- X64R00-03/X64P platform fixes, pointer/size and ABI guards, shader producer
+  separation, packed-normal/specular conversion and source gamma ownership.
+- FIG1/FIG8 static LOD, retained world-space indexing, pose-node scale from
+  X64NAVFIX01, opacity batching and asynchronous samgbur01 GPU/F10 readback.
+- Immutable resource sharing/retirement, embedded texture composition,
+  neighbour border fog and upstream cave shadow-domain selection.
+- Native NGX backend with the EIRebuild64 ProjectID and explicit DLSS refusal.
+  Upstream Host/dlss lifetime fix and dedicated NGX worker are adapted here
+  without the remote protocol. All NGX entry points execute on that worker;
+  init info and both path buffers survive through shutdown.
+
+New common frame-plan, terrain/cliff/road, cover/caster/wind, cave bounce,
+alpha-test and UI changes use upstream algorithms and HLSL. Camera anchor
+height comes from CCamera through the typed visual frame; the cave flag,
+hour, region, terrain grid, point lights and mounted text resources are real
+host publications. GenerateHitTestDDS brackets the lossless mask frame from
+source; allocation failure refuses its capture and its targets retire with
+their owning device. Core-only slim texture/terrain transport is excluded. The effect-list age rule
+uses the embedded text session. New upstream labels remain in renderer_ui_ru.h.
+No new local runtime toggle, OpenEI/Miles path or rendering fallback is added.
+The shader build compiles only the common cave shader producer; game resource
+loading and light execution are excluded from EID3D11_SHADER_EMBED.
+
+Standalone Host, proxy hooks, harness, test/build/deployment scripts and
+shader-lab targets are not part of this engine integration. The source and
+build map is maintained privately at work/supervision/X64RUPD01/MAP.md.
+Build and packaging do not establish owner gameplay/visual acceptance.
 
 RUPD01 (2026-10-25): current imported upstream is
 `accepted/water-untess-fix-20261025`, commit

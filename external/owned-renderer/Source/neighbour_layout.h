@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -55,5 +56,9 @@ struct NeighbourEdgeStrip {
     // Base-terrain vertex position (authored XY jitter included) at each
     // edge vertex, in active-map coordinates.
     std::vector<std::array<float, 3>> positions;
+    // The terrain shape values at each edge vertex (owned_terrain_slope_normal
+    // and owned_terrain_facet_flatness: the cliff projection and blend
+    // steepness inputs), packed as the decode stores them.
+    std::vector<std::uint32_t> slopes, flatness;
 };
 }

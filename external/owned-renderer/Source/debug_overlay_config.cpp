@@ -512,7 +512,10 @@ void RendererConfig::apply_value(RendererOption& option, const std::string& valu
     }
     case RendererOptionType::integer: {
         int parsed = 0;
-        if (parse_integer(value.c_str(), parsed))
+        // renderer_backend was a text option ("d3d11"/"d3d12") in older ini files.
+        if (option.key == "renderer_backend" && (value == "d3d11" || value == "d3d12"))
+            option.integer_value = value == "d3d12" ? 1 : 0;
+        else if (parse_integer(value.c_str(), parsed))
             option.integer_value = std::clamp(parsed, option.integer_minimum, option.integer_maximum);
         break;
     }

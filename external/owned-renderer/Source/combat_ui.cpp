@@ -9,6 +9,7 @@
 #include "owned_asset_loader.h"
 #include "owned_resource_runtime.h"
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "scene_wire.h"
 #include <wrl/client.h>
 #include <algorithm>
@@ -31,6 +32,8 @@ struct PlateAnchor { std::int32_t id; float x, y; };
 struct SpellList {
     CombatUnitValue unit;
     std::uint64_t epoch=0,frame=0;
+    bool carried=false; // a copy placed for a later pane draw (never sent, never carried again)
+    std::uint64_t source_frame=0; // carried: the frame of the published list it shows
     RECT local{};
     ImVec2 lo{},hi{},clip_lo{},clip_hi{};
     float opacity=1;
@@ -51,7 +54,7 @@ struct State {
     SpellList& spell_list_slot(std::uint64_t frame) { return spell_lists[frame%spell_lists.size()]; }
     const SpellList* current_spell_list() const {
         for (const auto& list:spell_lists)
-            if (list.placed && bridge_character_pane_text_epoch_current(list.epoch,list.frame)) return &list;
+            if (list.placed && bridge_character_pane_list_current(list.epoch,list.frame)) return &list;
         return nullptr;
     }
     std::array<CombatEffectDefinition, 256> catalog{};
@@ -308,6 +311,18 @@ void combat_ui_place_spell_list(std::uint64_t epoch,std::uint64_t frame,
     unsigned width,unsigned height) noexcept {
     auto& s=state(); std::lock_guard<std::mutex> guard(s.lock);
     auto& list=s.spell_list_slot(frame);
+    // The game does not call the pane's effect-list routine on every pane draw
+    // (save "regen": every other frame, while the pane text is published every
+    // frame), so the draw being placed may have no list of its own. It then
+    // takes the list of the pane draw just before it (at most two frames older)
+    // instead of showing an empty pane.
+    if (list.epoch!=epoch || list.frame!=frame) {
+        const SpellList* previous=nullptr;
+        for (const auto& other:s.spell_lists)
+            if (other.unit.id && !other.carried && other.epoch<epoch && other.frame<=frame && frame-other.frame<=2 &&
+                (!previous || other.epoch>previous->epoch)) previous=&other;
+        if (previous) { SpellList copy=*previous; copy.source_frame=previous->frame; copy.epoch=epoch; copy.frame=frame; copy.placed=false; copy.carried=true; list=copy; }
+    }
     if (list.epoch!=epoch || list.frame!=frame || source.right<=source.left || source.bottom<=source.top) return;
     const auto x=[&](float pixel) { return widescreen::compose_x(destination.left+
         (pixel-source.left)*float(destination.right-destination.left)/(source.right-source.left),h); };
@@ -467,6 +482,13 @@ bool combat_ui_decode_game(const std::uint8_t* data, std::size_t size) noexcept 
     for (std::size_t i = 0; i < lists.size(); ++i) {
         auto& mine = s.spell_lists[i];
         if (mine.epoch == lists[i].epoch && mine.frame == lists[i].frame && mine.unit.id == lists[i].unit.id) continue;
+        // A placed copy carried to a later pane draw keeps its placement (else
+        // the pane shows nothing until the next placement: flicker); the game's
+        // newer list for the same unit only refreshes its effects.
+        if (mine.carried && mine.placed && mine.unit.id == lists[i].unit.id) {
+            if (lists[i].frame > mine.source_frame) { mine.unit = lists[i].unit; mine.source_frame = lists[i].frame; }
+            continue;
+        }
         mine = lists[i];
     }
     if (catalog) { s.catalog = definitions; s.catalog_revision = catalog_revision; }
@@ -541,10 +563,10 @@ void register_combat_ui_options(RendererConfig& config) {
 }
 
 struct CombatUiRenderer::Implementation {
-    ID3D11Device* device = nullptr;
-    ID3D11DeviceContext* context = nullptr;
-    ComPtr<ID3D11Texture2D> atlas;
-    ComPtr<ID3D11ShaderResourceView> atlas_view;
+    // The icon atlas is an ImGui user texture: whichever overlay backend draws
+    // (D3D11, or the x64 host's D3D12) creates and updates its own copy.
+    ImTextureData atlas;
+    bool atlas_registered = false;
     struct Request { unsigned id; std::uint32_t icon; bool hd=false; std::array<char,64> code{}; };
     struct Completed {
         unsigned id; std::vector<std::uint32_t> pixels; bool valid;
@@ -600,6 +622,7 @@ struct CombatUiRenderer::Implementation {
     } popup;
     float popup_wheel=0;
     SpellList spell_list;
+    unsigned spell_list_misses=0; // frames drawn on the last list without a current one
     std::int32_t scroll_unit=0;
     std::uint64_t scroll_incarnation=0;
     float list_scroll=0,list_wheel=0;
@@ -708,21 +731,24 @@ struct CombatUiRenderer::Implementation {
             else failed[value.id] = true;
             return;
         }
-        if (!atlas) {
-            D3D11_TEXTURE2D_DESC desc{};
-            desc.Width = 1024; desc.Height = 1280; desc.MipLevels = desc.ArraySize = desc.SampleDesc.Count = 1;
-            desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM; desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-            if (FAILED(device->CreateTexture2D(&desc, nullptr, &atlas)) ||
-                FAILED(device->CreateShaderResourceView(atlas.Get(), nullptr, &atlas_view))) {
-                if (value.id < 256) failed[value.id] = true;
-                combat_ui_set_status("Combat icon atlas allocation failed."); return;
+        if (!atlas_registered) {
+            atlas.Create(ImTextureFormat_RGBA32, 1024, 1280);
+            ImGui::RegisterUserTexture(&atlas);
+            atlas_registered = true;
+        }
+        // Icons are 64x64 cells; the healthplate art is 256x256 below them.
+        const int size = value.id == 256 ? 256 : 64;
+        const int x = value.id == 256 ? 0 : int(value.id % 16) * 64, y = value.id == 256 ? 1024 : int(value.id / 16) * 64;
+        for (int row = 0; row < size; ++row) {
+            // Decoded pixels are 0xAARRGGBB; the atlas holds RGBA bytes.
+            auto* out = static_cast<std::uint8_t*>(atlas.GetPixelsAt(x, y + row));
+            const std::uint32_t* in = value.pixels.data() + std::size_t(row) * size;
+            for (int column = 0; column < size; ++column, out += 4) {
+                const std::uint32_t p = in[column];
+                out[0] = std::uint8_t(p >> 16); out[1] = std::uint8_t(p >> 8); out[2] = std::uint8_t(p); out[3] = std::uint8_t(p >> 24);
             }
         }
-        D3D11_BOX box{(value.id % 16) * 64, (value.id / 16) * 64, 0,
-                     (value.id % 16 + 1) * 64, (value.id / 16 + 1) * 64, 1};
-        const unsigned size = value.id == 256 ? 256u : 64u;
-        if (value.id == 256) box = {0, 1024, 0, 256, 1280, 1};
-        context->UpdateSubresource(atlas.Get(), 0, &box, value.pixels.data(), size * 4, 0);
+        ImTextureDataQueueUpload(&atlas, x, y, size, size);
         if (value.id == 256) health_art_ready = true;
         else ready[value.id] = true;
     }
@@ -753,8 +779,12 @@ struct CombatUiRenderer::Implementation {
         // Presentation consumes current anchors. Native profiling hooks are
         // optional and cannot own an overlay's lifetime.
         s.plates.clear();
+        // A frame without a current list keeps drawing the last one for up to two
+        // frames: the game redraws the pane only every few frames in some saves
+        // ("regen"), and any frame between them must not blank the list (flicker).
         const auto* current=s.current_spell_list();
-        spell_list=current ? *current : SpellList{};
+        if (current) { spell_list=*current; spell_list_misses=0; }
+        else if (!spell_list.placed || ++spell_list_misses>2) spell_list=SpellList{};
         if (scroll_unit!=spell_list.unit.id || scroll_incarnation!=spell_list.unit.incarnation) {
             scroll_unit=spell_list.unit.id; scroll_incarnation=spell_list.unit.incarnation;
             list_scroll=0; list_wheel=0; list_drag=false;
@@ -765,9 +795,9 @@ struct CombatUiRenderer::Implementation {
 };
 CombatUiRenderer::CombatUiRenderer() = default;
 CombatUiRenderer::~CombatUiRenderer() { shutdown(); }
-void CombatUiRenderer::initialize(ID3D11Device* device, ID3D11DeviceContext* context) {
+void CombatUiRenderer::initialize() {
     shutdown(); implementation_ = std::make_unique<Implementation>();
-    auto& s = *implementation_; s.device = device; s.context = context;
+    auto& s = *implementation_;
     s.priority.fill(-1); s.blacklist.fill(-1);
     s.effect_priorities.fill(100);
     s.buff_override.fill(-1); s.debuff_override.fill(-1);
@@ -791,6 +821,8 @@ void CombatUiRenderer::shutdown() noexcept {
     { std::lock_guard<std::mutex> guard(s.work_lock); s.stopping = true; }
     s.wake.notify_one(); if (s.worker.joinable()) s.worker.join();
     if (s.font) ImGui::GetIO().Fonts->RemoveFont(s.font);
+    // The overlay shuts its backend down first; it has released its atlas copy.
+    if (s.atlas_registered) ImGui::UnregisterUserTexture(&s.atlas);
     implementation_.reset();
 }
 bool CombatUiRenderer::prepare(RendererConfig& config) {
@@ -911,9 +943,9 @@ void CombatUiRenderer::draw(RendererConfig& config,bool interactive) {
     const auto effect_icon=[&](ImDrawList* draw,ImDrawListSplitter& layers,const CombatEffectValue& effect,ImVec2 lo,float size) {
         const ImVec2 hi(lo.x+size,lo.y+size); const unsigned id=effect.id;
         layers.SetCurrentChannel(draw,0); frame(draw,lo,hi,s.debuff(id),false);
-        if (s.ready[id] && s.atlas_view) {
+        if (s.ready[id]) {
             layers.SetCurrentChannel(draw,1);
-            draw->AddImage(ImTextureRef(ImTextureID(reinterpret_cast<std::uintptr_t>(s.atlas_view.Get()))),
+            draw->AddImage(s.atlas.GetTexRef(),
                 lo,hi,
                 ImVec2(((id%16)*64+.5f)/1024.f,((id/16)*64+.5f)/1280.f),
                 ImVec2(((id%16+1)*64-.5f)/1024.f,((id/16+1)*64-.5f)/1280.f),faded(IM_COL32_WHITE));
@@ -1013,7 +1045,7 @@ void CombatUiRenderer::draw(RendererConfig& config,bool interactive) {
         if (!entry.portrait) {
             const ImVec2 lo(x-width*.5f,bar_top),hi(x+width*.5f,bar_bottom);
             layers.SetCurrentChannel(draw,1);
-            const auto texture=ImTextureRef(ImTextureID(reinterpret_cast<std::uintptr_t>(s.atlas_view.Get())));
+            const auto texture=s.atlas.GetTexRef();
             const auto uv=[](float u,float v) { return ImVec2(u/1024.f,(1024.f+v)/1280.f); };
             if (s.health_art_ready) draw->AddImage(texture,ImVec2(lo.x-5*dpi,lo.y),ImVec2(hi.x+5*dpi,hi.y),uv(59,147),uv(169,152),faded(IM_COL32_WHITE));
             else { layers.SetCurrentChannel(draw,0); draw->AddRect(lo,hi,faded(IM_COL32(180,70,60,255)),0,0,dpi); }
@@ -1126,8 +1158,8 @@ void CombatUiRenderer::draw(RendererConfig& config,bool interactive) {
             const auto& effect=list.unit.effects[rows[row]]; const auto id=effect.id;
             const float y=lo.y+(row-s.list_scroll)*row_height;
             const ImVec2 icon_lo(lo.x+8*ux,y+3*uy),icon_hi(lo.x+32*ux,y+27*uy);
-            if (s.ready[id] && s.atlas_view)
-                draw->AddImage(ImTextureRef(ImTextureID(reinterpret_cast<std::uintptr_t>(s.atlas_view.Get()))),icon_lo,icon_hi,
+            if (s.ready[id])
+                draw->AddImage(s.atlas.GetTexRef(),icon_lo,icon_hi,
                     ImVec2(((id%16)*64+.5f)/1024.f,((id/16)*64+.5f)/1280.f),
                     ImVec2(((id%16+1)*64-.5f)/1024.f,((id/16+1)*64-.5f)/1280.f),color(IM_COL32_WHITE));
             else if (s.failed[id]) text(draw,12*uy,icon_lo,color(IM_COL32(255,100,100,255)),"!");

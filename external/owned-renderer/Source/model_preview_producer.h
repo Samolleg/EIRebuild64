@@ -1,6 +1,10 @@
 #pragma once
 #include "contact_blend.h"
+#include "fur.h"
+#include "native_instance_flags.h"
+#include <d3d.h>
 #include "model_draw.h"
+#include "figure_service_nodes.h"
 #include "model_preview_geometry.h"
 #include "model_preview_material.h"
 
@@ -43,7 +47,9 @@ bool produce_model_preview(const ModelPreviewInput& input, std::size_t count,
             ModelPreviewPart part;
             if (!prepare(index, part) || !input.sample.assembly ||
                 part.ordinal >= input.sample.assembly->parts.size()) return false;
-            if (part.hidden) return true;
+            const auto& asset = input.sample.assembly->parts[part.ordinal];
+            if (part.hidden || (input.sample.values.unit && unit_service_node(asset.name.c_str())))
+                return true;
             NativeGeometryView view;
             if (!prepare_model_preview_geometry(input.sample, part.ordinal, *pose,
                     input.object_to_world, input.world_to_clip, input.texture_time,
@@ -51,7 +57,16 @@ bool produce_model_preview(const ModelPreviewInput& input, std::size_t count,
             if (!input.ground_contact) view.flags &= ~native_ground_contact_flag;
             view.fog = input.fog;
             if (part.fixed_state_supplied) view.owned_fixed_state = part.fixed_state;
+            const auto unit_flag = view.flags & native_unit_flag;
             apply_model_preview_material(view, part.material);
+            view.flags |= unit_flag;
+            if (fur_strand_hair_record(view.fur ? view.fur->get() : nullptr, view.fur_node_base, 0, g_fur_mode)) {
+                view.lighting.material_alpha = 0;
+                view.owned_fixed_state.alpha_test_enable = TRUE;
+                view.owned_fixed_state.alpha_func = D3DCMP_GREATER;
+                view.owned_fixed_state.alpha_ref = 0;
+                view.owned_fixed_state.z_write_enable = FALSE;
+            }
             if (!submit(view, part)) return false;
             if (part.wound) {
                 if (!wound(index, part)) return false;

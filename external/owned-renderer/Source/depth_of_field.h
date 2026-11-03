@@ -250,7 +250,9 @@ float4 compositePS(V i) : SV_Target {
 
 class DepthOfFieldPass {
     template<class T> using Ptr = Microsoft::WRL::ComPtr<T>;
+public: // shared with the D3D12 backend's depth of field
     static constexpr float kFocusSeconds = .3f;  // focus time constant (real time)
+private:
     Ptr<ID3D11Texture2D> work_[2], focus_[2];
     Ptr<ID3D11RenderTargetView> work_rtv_[2], focus_rtv_[2];
     Ptr<ID3D11ShaderResourceView> work_srv_[2], focus_srv_[2];
