@@ -7516,7 +7516,7 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
                 ordinal = static_cast<std::size_t>(found - sample.assembly->parts.begin());
             }
             part.ordinal = ordinal;
-            part.hidden = !preview_submits_part(sample.assembly->parts[ordinal]);
+            part.hidden = !preview_submits_part(sample.assembly->parts[ordinal], sample.values.unit);
             if (part.hidden) return true;
             NativeFrameState state;
             if (!g_native_sink_frame_state ||

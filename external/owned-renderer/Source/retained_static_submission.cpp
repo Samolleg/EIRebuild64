@@ -7,6 +7,7 @@
 #include "contact_blend.h"
 #include "native_instance_flags.h"
 #include "fur.h"
+#include "figure_service_nodes.h"
 
 #include <algorithm>
 #include <atomic>
@@ -2028,7 +2029,8 @@ bool retained_figure_position_bounds(const FigureCpuAsset& figure,
 
 bool retained_visual_part_visible(const RetainedVisualSample& sample,
     const VisualPartAsset& part, bool draw_undetected_units) noexcept {
-    if (part.explicitly_hidden || !retained_visual_sample_shown(sample, draw_undetected_units)) return false;
+    if (part.explicitly_hidden || (sample.values.unit && unit_service_node(part.name.c_str())) ||
+        !retained_visual_sample_shown(sample, draw_undetected_units)) return false;
     return !(part.weapon && sample.visibility.hide_weapons) &&
            !(part.arrow && sample.visibility.hide_arrow);
 }

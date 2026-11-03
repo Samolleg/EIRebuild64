@@ -61,7 +61,7 @@ bool E1CompleteVisualAppearance(CObject3DClientSpecific& specific,
         auto* figure=specific.FindFigure(part.name.c_str());
         if(!material || !figure)return reject("appearance.completed_part");
         auto value=completedMaterial(*material);
-        const bool hidden=specific.IsOwnedFigureHidden(*figure) || part.geometry->indices.empty();
+        const bool hidden=figure->CheckFlag(FIG_HIDDEN) || part.geometry->indices.empty();
         const auto flags=material->CheckFlag(MAT_USE_SPECULAR)?MAT_USE_SPECULAR:0;
         if(sameMaterial(value,*previous.parts[i].material) &&
            hidden==previous.parts[i].explicitly_hidden && flags==previous.parts[i].material_flags)continue;

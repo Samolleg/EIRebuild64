@@ -4,6 +4,7 @@
 #include "native_instance_flags.h"
 #include <d3d.h>
 #include "model_draw.h"
+#include "figure_service_nodes.h"
 #include "model_preview_geometry.h"
 #include "model_preview_material.h"
 
@@ -46,7 +47,9 @@ bool produce_model_preview(const ModelPreviewInput& input, std::size_t count,
             ModelPreviewPart part;
             if (!prepare(index, part) || !input.sample.assembly ||
                 part.ordinal >= input.sample.assembly->parts.size()) return false;
-            if (part.hidden) return true;
+            const auto& asset = input.sample.assembly->parts[part.ordinal];
+            if (part.hidden || (input.sample.values.unit && unit_service_node(asset.name.c_str())))
+                return true;
             NativeGeometryView view;
             if (!prepare_model_preview_geometry(input.sample, part.ordinal, *pose,
                     input.object_to_world, input.world_to_clip, input.texture_time,
