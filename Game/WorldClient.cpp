@@ -2910,6 +2910,13 @@ BOOL CWorldClient::Draw()
     pRend->SetProjectionMatrixOne();
     pGPU->PushMainMatrix(pGPU->GetMatrix(MAT_STACK_CAMERA));
     pGPU->PushMatrix(pGPU->GetMatrix(MAT_STACK_CAMERA), MAT_STACK_VIEW2CLIP);
+    // Complete the host weather transition before capturing the frame.
+    // Terrain wetness is initialized from this snapshot on a world change.
+    if (CheckFlag(WC_RENDER_EFFECTS))
+    {
+        CorePerf::Scope coreTiming(CorePerf::EffectsWeather);
+        weather.Draw(&theRenderer);
+    }
     // Publish actual source values after camera/Fallout projection setup and
     // before any sky/terrain geometry. No retail hooks or world pointers cross.
     EIRenderWorldFrameV2 ownedWorld = {};
@@ -3131,10 +3138,9 @@ BOOL CWorldClient::Draw()
         theRenderer.SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
         theRenderer.SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA);
         { CorePerf::Scope coreTiming(CorePerf::EffectsLightning); GetLightningManager()->Draw(&theRenderer); }
-        // weather
+        // Restore blending after the effect draws.
         theRenderer.SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
         theRenderer.SetRenderState(D3DRENDERSTATE_DESTBLEND, D3DBLEND_INVSRCALPHA);
-        { CorePerf::Scope coreTiming(CorePerf::EffectsWeather); weather.Draw(&theRenderer); }
         pRend->SetRenderState(D3DRENDERSTATE_ZWRITEENABLE, TRUE);
     }
     pRend->SetTexturingAlphaMode(AM_VERTEX);
