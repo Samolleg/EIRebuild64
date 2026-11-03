@@ -27,7 +27,10 @@ public:
         if (timer_) CloseHandle(timer_);
     }
 
-    void wait(int fps) noexcept {
+    struct WaitTiming { std::int64_t requested = 0, actual = 0; };
+
+    void wait(int fps, WaitTiming* timing = nullptr) noexcept {
+        if (timing) *timing = {};
         if (fps <= 0) {
             last_ = 0;
             return;
@@ -43,7 +46,9 @@ public:
             last_ = now;
             return;
         }
+        if (timing) timing->requested = deadline - now;
         sleep_until(deadline);
+        if (timing) timing->actual = counter() - now;
         last_ = deadline;
     }
 

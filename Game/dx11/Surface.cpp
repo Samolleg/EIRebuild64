@@ -4,6 +4,7 @@
 #include <io.h>
 #include "RendererDX11.h"
 #include "../FrameDiagnostics.h"
+#include "../CorePerf.h"
 #include "PostProcess.h"
 #include "RetailModalFade.h"
 #ifdef min
@@ -599,6 +600,7 @@ CDXGISurface::~CDXGISurface()
 
 HDC CDXGISurface::AcquirePixelsDC()
 {
+    CorePerf::Scope timing(CorePerf::UiPixelsAcquire);
     Microsoft::WRL::ComPtr<IDXGISurface1> surface;
     IfFailedThrowHR(texture.As(&surface));
     ownedSurface.BeginWrite();
@@ -608,6 +610,7 @@ HDC CDXGISurface::AcquirePixelsDC()
 
 void CDXGISurface::ReleasePixelsDC()
 {
+    CorePerf::Scope timing(CorePerf::UiPixelsRelease);
     Microsoft::WRL::ComPtr<IDXGISurface1> surface;
     IfFailedThrowHR(texture.As(&surface));
     IfFailedThrowHR(surface->ReleaseDC(nullptr));

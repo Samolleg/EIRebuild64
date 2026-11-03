@@ -1851,11 +1851,36 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
  apply_load_reveal();
  (void)apply_gamma_ramp();
  frame_bracket.reset();
+#ifdef EID3D11_EMBEDDED
+ FrameLimiter::WaitTiming wait_timing;
  {const frame_acct::Scope scope(frame_acct::pf_limiter);
- #ifdef EID3D11_EMBEDDED
  const CorePerf::AnyThreadScope coreWait(CorePerf::LimiterWait);
- #endif
+ frame_limiter_.wait(frame_limit, &wait_timing);}
+ // At most one pacing sample per second, on policy change or a slow wait.
+ // Keep it outside the wait scope so journal formatting is not wait time.
+ static std::int64_t pacing_report = 0;
+ static int pacing_limit = -1;
+ static UINT pacing_interval = UINT_MAX;
+ static bool pacing_focused = false;
+ const auto pacing_now = perf_now();
+ const auto pacing_frequency = perf_frequency();
+ const bool pacing_changed = pacing_limit != frame_limit ||
+  pacing_interval != interval || pacing_focused != focused;
+ if(pacing_frequency > 0 && (pacing_changed || wait_timing.actual > pacing_frequency * 33 / 1000) &&
+    (!pacing_report || pacing_now - pacing_report >= pacing_frequency)){
+  const double ms = 1000.0 / pacing_frequency;
+  GameJournal::Event("RENDER", "frame_pacing",
+   "frame=%llu limit=%d foreground=%u vsync_interval=%u requested_ms=%.3f actual_ms=%.3f overrun_ms=%.3f",
+   CorePerf::Get().frameNumber, frame_limit, unsigned(focused), interval,
+   wait_timing.requested * ms, wait_timing.actual * ms,
+   (wait_timing.actual - wait_timing.requested) * ms);
+  pacing_report = pacing_now; pacing_limit = frame_limit;
+  pacing_interval = interval; pacing_focused = focused;
+ }
+#else
+ {const frame_acct::Scope scope(frame_acct::pf_limiter);
  frame_limiter_.wait(frame_limit);}
+#endif
  HRESULT hr;
  (void)plan_pass("present",nullptr,nullptr,plan_read(PlanTarget::backbuffer));
  {const stall_watch::Bracket present_bracket("present");const frame_acct::Scope scope(frame_acct::pf_present_call);hr=swap_->Present(interval,flags);}

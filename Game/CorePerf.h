@@ -24,6 +24,9 @@ enum Id {
     SceneObjectWalk, SceneSubmit, RenderTerrain, EffectsFog, EffectsParticles, EffectsLightning, EffectsWeather,
     LockFrameWait, SceneSyncWait, PresentSlotWait, LimiterWait, IdleWait,
     NavigationTotal, NavigationPath, NavigationPlace, NavigationStep, NavigationRestore, NavigationFrame,
+    UiRefresh, UiPublishInterface, UiPublishHud, UiCursorCanvas, UiScreen,
+    UiHudBoundary, UiTips, UiEffects, UiTextOver, UiFlush, UiBackground,
+    UiDebug, UiFps, UiConsole, UiPixelsAcquire, UiPixelsRelease,
     Count
 };
 inline const char* Name(Id id) noexcept {
@@ -46,7 +49,10 @@ inline const char* Name(Id id) noexcept {
         "visual.picking", "prepare.footprints", "render.visual_frame",
         "scene_inputs.objects", "scene_inputs.submit", "render.terrain", "effects.fog", "effects.particles", "effects.lightning", "effects.weather",
         "wait.lock_frame", "wait.scene_sync", "wait.present_slot", "wait.limiter", "wait.idle",
-        "nav.total", "nav.path", "nav.place", "nav.step", "nav.restore", "nav.frame"
+        "nav.total", "nav.path", "nav.place", "nav.step", "nav.restore", "nav.frame",
+        "ui.refresh", "ui.publish_interface", "ui.publish_hud", "ui.cursor_canvas", "ui.screen", 
+        "ui.hud_boundary", "ui.tips", "ui.effects", "ui.text_over", "ui.sprite_flush", "ui.background_capture", 
+        "ui.debug", "ui.fps", "ui.console", "ui.gdi_acquire", "ui.gdi_release"
     };
     return names[id];
 }

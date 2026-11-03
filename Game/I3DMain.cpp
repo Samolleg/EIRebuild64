@@ -306,6 +306,7 @@ BOOL CInterface3D::Draw()
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::Draw2D()
 {
+    CorePerf::Partition uiTiming(CorePerf::UiRefresh);
     OwnedRender::E3RefreshInterface();
     CDX11 *pDX11 = GetD3D();
     pDX11->GetSpriteBatch()->Begin();
@@ -314,16 +315,23 @@ void CInterface3D::Draw2D()
     CString szString;
     if (!pScreens.empty())
     {
+        uiTiming.Stage(CorePerf::UiScreen);
         pScreens.back()->Draw2D();
+        uiTiming.Stage(CorePerf::UiHudBoundary);
         OwnedRender::E3HudBoundary();
+        uiTiming.Stage(CorePerf::UiTips);
         pScreens.back()->Draw2DTips();
     }
+    uiTiming.Stage(CorePerf::UiEffects);
     m_pEffects->Draw2D();
 
+    uiTiming.Stage(CorePerf::UiTextOver);
     if (pTextOver)
         pTextOver->Draw();
+    uiTiming.Stage(CorePerf::UiFlush);
     pDX11->GetSpriteBatch()->End();
 
+    uiTiming.Stage(CorePerf::UiBackground);
     if (eBGFlag == BG_FLAG_CREATE)
     { // if we have to create background screen
         pBGScreen = std::make_unique<CI3DSurface>(this, 0, 0, nScreenWidth, nScreenHeight, BS_VISIBLE, false);
@@ -348,7 +356,9 @@ void CInterface3D::Draw2D()
 
     pDX11->GetSpriteBatch()->Begin();
 
+    uiTiming.Stage(CorePerf::UiDebug);
     theDebugInfoSystem.Draw2D();
+    uiTiming.Stage(CorePerf::UiFps);
     {
         nCountFrames++;
         DWORD dwNewTime = timeGetTime();
@@ -374,9 +384,11 @@ void CInterface3D::Draw2D()
         if (pSurfaceFPS)
             pSurfaceFPS->Draw();
     }
+    uiTiming.Stage(CorePerf::UiConsole);
     if (pConsole && pConsole->IsVisible())
         pConsole->Draw2D();
 
+    uiTiming.Stage(CorePerf::UiFlush);
     pDX11->GetSpriteBatch()->End();
 }
 /////////////////////////////////////////////////////////////////////////////////////
