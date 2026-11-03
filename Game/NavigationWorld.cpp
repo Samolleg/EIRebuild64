@@ -38,6 +38,7 @@ NavigationWorld::NavigationWorld() {
 NavigationWorld::~NavigationWorld()=default;
 Navigation::Geometry* NavigationWorld::Terrain() {return baker?&baker->terrain:nullptr;}
 void NavigationWorld::Scene(const char* mpr,const char* mob) {
+    ++observerRevision;
     mapName=Navigation::ResourceName(mpr);mobName=Navigation::ResourceName(mob);
     for(auto& mesh:meshes)mesh.reset();bodySizes.clear();bodyTable.samples.clear();
     loaded=false;error.clear();failures=stepFailures=0;nextStepLog=0;++generation;queues.clear();airJournal.clear();queryObstacles=nullptr;queryReuse=nullptr;
@@ -531,13 +532,11 @@ float NavigationWorld::Height(CUnit* unit,int aiClass) {
     const auto& profile=Agents[Type(unit,c)].profile;
     // Geometry chooses clearance; retain the old class's ceiling as an upper
     // bound, so a taller visual does not lose an already permitted passage.
-    constexpr float legacy[]={2,.4f,1,1.6f,2.2f,1.7f,3,6};
+    const float legacy=Navigation::LegacyClassHeight(unsigned(c));
     const int pose=unit?(unit->GetCurrentPose()==UP_LAY?2:unit->GetCurrentPose()==UP_CRAWL?1:0):0;
-    const float height=unit?(std::min)(Body(unit).height[pose],legacy[c]):legacy[c];
-    const auto& tiers=Navigation::ClearanceHeights(profile);float selected=tiers[0];
+    const float height=unit?(std::min)(Body(unit).height[pose],legacy):legacy;
     // A smaller body fits the lowest clearance tier; do not reject it.
-    for(float tier:tiers)if(tier<=height)selected=tier;
-    return selected;
+    return Navigation::SelectedClearance(profile,height);
 }
 Navigation::Point NavigationWorld::Position(CUnit* unit,CAIMap& map) const {
     CorePerf::Scope timing(CorePerf::NavigationTotal);
@@ -736,6 +735,7 @@ bool NavigationWorld::Restore(CUnit* unit,CAIMap& map) {
 }
 
 void NavigationWorld::LoadFlying() {
+    ++observerRevision;
     auto mesh=Navigation::Load(Read(meshDirectory/Navigation::MeshFilename(mapName,mobName,Flying)),Agents[Flying].profile,mapName,mobName,Agents[Flying].name);
     mesh->sources=sources;mesh->generation=generation;IndexSurfaces(*mesh);meshes[Flying]=std::move(mesh);
     FlushFlight();SyncObjects(true);UpdateSources(true);
@@ -782,6 +782,7 @@ void NavigationWorld::QueueBox(const Solid& box) {
 }
 void NavigationWorld::SyncObjects(bool initial) {
     if(!loaded)return;
+    if(!dirtyObjects.empty())++observerRevision;
     const auto start=std::chrono::steady_clock::now();
     while(!dirtyObjects.empty()) {
         const int id=*dirtyObjects.begin();
@@ -867,6 +868,7 @@ void NavigationWorld::UpdateSources(bool initial) {
                 if(!sourceChanged&&(type!=Flying||!flyingUnits.empty())) {
                     const auto start=std::chrono::steady_clock::now();
                     meshes[type]->excludedObjects=absentStatic;
+                    ++observerRevision;
                     ReplaceTile(*meshes[type],*replacement,x,z);
                     const auto* params=meshes[type]->data->getParams();const float width=params->tileWidth;
                     for(const auto& door:sources->doors) {

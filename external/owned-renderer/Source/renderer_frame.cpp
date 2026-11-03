@@ -69,6 +69,10 @@
 #include "renderer_internal.h"
 
 namespace owned {
+#ifdef EID3D11_EMBEDDED
+bool bridge_live_wants_capture() noexcept;
+void bridge_live_capture(ID3D11DeviceContext*,IDXGISwapChain*) noexcept;
+#endif
 namespace {
 bool shadow_temporal_diagnostic_enabled(){static const bool enabled=[](){char value[8]{};return GetEnvironmentVariableA("EI_RENDERER_SHADOW_TEMPORAL_CAPTURE",value,sizeof(value))&&value[0]=='1';}();return enabled;}
 }  // namespace
@@ -1882,6 +1886,10 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
  frame_limiter_.wait(frame_limit);}
 #endif
  HRESULT hr;
+#ifdef EID3D11_EMBEDDED
+ // The host observer copies only the completed composed frame, before Present.
+ if(bridge_live_wants_capture())bridge_live_capture(context_.Get(),swap_.Get());
+#endif
  (void)plan_pass("present",nullptr,nullptr,plan_read(PlanTarget::backbuffer));
  {const stall_watch::Bracket present_bracket("present");const frame_acct::Scope scope(frame_acct::pf_present_call);hr=swap_->Present(interval,flags);}
  const std::int64_t recorder_present_return=

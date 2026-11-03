@@ -59,6 +59,10 @@ public:
     void SetHashTableSize(int nNewSize);
     int GetHashTableSize() const { return hashmap.bucket_count(); }
     int GetCount() const { return hashmap.size(); }
+    // Observers use bucket iterators only during the current game frame.
+    size_t ObserverBucketCount() const noexcept { return hashmap.bucket_count(); }
+    auto ObserverBucketBegin(size_t bucket) const { return hashmap.cbegin(bucket); }
+    auto ObserverBucketEnd(size_t bucket) const { return hashmap.cend(bucket); }
     BOOL IsEmpty() const { return hashmap.empty(); }
     // adding/removing element. clearing hash table, remove all elements
     void SetAt(const KEY &key, const VAL &val);

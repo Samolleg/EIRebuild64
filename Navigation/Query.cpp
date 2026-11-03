@@ -1,4 +1,6 @@
 #include "Query.h"
+#include "LiveQuery.h"
+#include "Profiles.h"
 #include "../external/recastnavigation/Detour/Include/DetourNavMeshQuery.h"
 #include "../external/recastnavigation/Detour/Include/DetourNode.h"
 #include <algorithm>
@@ -17,12 +19,13 @@ dtNavMeshQuery* Query(const Mesh& m) {
 unsigned short ClassFlags(const Mesh& mesh,unsigned short flags) {
     return flags?flags:ExcludeClass(mesh.profile.materialClass);
 }
-Location Address(const Mesh& m,Point p,dtPolyRef ref,float height,float referenceZ) {
+Location Address(const Mesh& m,Point p,dtPolyRef ref,float height,float referenceZ,dtNavMeshQuery* observer=nullptr) {
     Location l;l.position=FromNav(p);l.radius=m.profile.radius;l.height=height;l.polygon=ref;l.generation=m.generation;
     unsigned char area=1;m.data->getPolyArea(ref,&area);l.area=area;
     if(Flies(m.profile)) {
         float point[]={p.x,p.y,p.z},closest[3]{};
-        if(m.query&&dtStatusSucceed(m.query->closestPointOnPoly(ref,point,closest,nullptr))&&std::hypot(closest[0]-p.x,closest[2]-p.z)<=.001f){l.position=FromNav({closest[0],closest[1],closest[2]});l.surface=1;}
+        auto* query=observer?observer:m.query.get();
+        if(query&&dtStatusSucceed(query->closestPointOnPoly(ref,point,closest,nullptr))&&std::hypot(closest[0]-p.x,closest[2]-p.z)<=.001f){l.position=FromNav({closest[0],closest[1],closest[2]});l.surface=1;}
         return l;
     }
     const dtMeshTile* tile=nullptr;const dtPoly* poly=nullptr;
@@ -100,7 +103,7 @@ bool Nearest(const Mesh& m,dtNavMeshQuery& q,Point point,float horizontal,float 
     for(int i=0;i<count;++i) {
         const float input[]={p.x,p.y,p.z};float near[3]{};
         if(dtStatusFailed(q.closestPointOnPoly(refs[i],input,near,nullptr)))continue;
-        auto at=Address(m,{near[0],near[1],near[2]},refs[i],height,point.z);
+        auto at=Address(m,{near[0],near[1],near[2]},refs[i],height,point.z,&q);
         if(!at.surface)continue;
         const float xy=std::hypot(at.position.x-point.x,at.position.y-point.y),dz=std::abs(at.position.z-point.z);
         // The requested horizontal tolerance is the full admission bound.
@@ -184,7 +187,7 @@ bool Start(const Mesh& mesh,dtNavMeshQuery& q,Point p,const dtQueryFilter& filte
         const auto nav=ToNav(p);const float point[]={nav.x,nav.y,nav.z};float closest[3]{};
         if(dtStatusSucceed(q.closestPointOnPoly(address->polygon,point,closest,nullptr))&&
             std::hypot(closest[0]-nav.x,closest[2]-nav.z)<=.001f) {
-            const auto at=Address(mesh,{closest[0],closest[1],closest[2]},address->polygon,height,p.z);
+            const auto at=Address(mesh,{closest[0],closest[1],closest[2]},address->polygon,height,p.z,&q);
             if(at.surface&&std::abs(at.position.z-p.z)<=mesh.profile.climb+.001f) {
                 ref=address->polygon;near=ToNav(at.position);actual=at.position;return true;
             }
@@ -196,7 +199,7 @@ bool Start(const Mesh& mesh,dtNavMeshQuery& q,Point p,const dtQueryFilter& filte
     if(ingress) {
         // The existing 5 cm admission margin is an explicit entry segment,
         // never an unreported replacement of the route's physical origin.
-        const auto at=Address(mesh,ToNav(p),ref,height,p.z);
+        const auto at=Address(mesh,ToNav(p),ref,height,p.z,&q);
         if(!at.surface||std::abs(at.position.z-p.z)>mesh.profile.climb+.001f)return false;
         actual=at.position;
     }
@@ -671,5 +674,7 @@ bool RandomReachable(const Mesh& mesh,Point source,Point center,float radius,flo
     }
     return false;
 }
+
+#include "LiveQuery.inl"
 
 }

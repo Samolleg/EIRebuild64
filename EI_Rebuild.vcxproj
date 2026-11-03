@@ -158,6 +158,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="Game\GameMain.cpp" />
+    <ClCompile Include="Game\LiveObserver.cpp" />
     <ClCompile Include="Game\OwnedRender\E4Camp.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Game\OwnedRender\E4CampHost.cpp" />
     <ClCompile Include="Game\OwnedRender\CampSubmission.cpp" />
