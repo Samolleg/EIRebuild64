@@ -1791,6 +1791,23 @@ HRESULT Renderer::resolve_native_instance(const NativeGeometryView& view,NativeQ
  auto& material=native_prepared_material_slots_[view.prepared_material->slot];
  UINT& current=material.persistent_instance[native_shadow_collecting_?1:0];
  const HRESULT hr=store_native_instance(current,view.world.owner?*view.world.owner:std::weak_ptr<const void>{},draw);
+ if(SUCCEEDED(hr)&&!native_shadow_collecting_&&view.world.enabled&&
+    view.semantic_kind==SemanticKind::figure&&current<native_instance_records_.size()){
+  auto& record=native_instance_records_[current];
+  if(!record.lod_observer){
+   auto identity=std::make_shared<NativeLodIdentity>();
+   if(view.lod_observer)*identity=*view.lod_observer;
+   else{
+    identity->id=view.prepared_identity.signed_id;
+    identity->generation=view.prepared_identity.lifecycle_generation;
+    identity->part=view.prepared_identity.part_index;
+    if(view.world.pose&&view.world.pose->binding&&view.world.pose->binding->model)
+     identity->model=view.world.pose->binding->model->visual_reference;
+    else if(view.world.identity)identity->model=view.world.identity->canonical_name;
+   }
+   record.lod_observer=std::move(identity);
+  }
+ }
  // Fur prototype: an owned preview part's profile (its colour record only;
  // never its wound layer, see queue_native_records).
  if(SUCCEEDED(hr)&&!native_shadow_collecting_&&current<native_instance_records_.size()){
@@ -1868,7 +1885,7 @@ void Renderer::release_native_instance(UINT index) noexcept{
    if(!--group.references)native_material_groups_dirty_=true;
    record.group_bound=false;
   }
-  record.owner.reset();record.fur.reset();record.command={};record.occupied=false;record.uploaded=false;native_instance_free_.push_back(index);
+  record.owner.reset();record.fur.reset();record.lod_observer.reset();record.command={};record.occupied=false;record.uploaded=false;native_instance_free_.push_back(index);
   std::push_heap(native_instance_free_.begin(),native_instance_free_.end(),std::greater<UINT>());
  }
 }
@@ -2035,6 +2052,7 @@ HRESULT Renderer::upload_native_instances(){
 }
 
 void Renderer::retire_native_poses() noexcept{
+ release_native_lod_observer();
  native_instance_update_cs_.Reset();native_persistent_instances_.Reset();native_persistent_instance_srv_.Reset();native_persistent_instance_uav_.Reset();
  native_instance_updates_.Reset();native_instance_update_srv_.Reset();native_world_clip_constants_.Reset();
  native_instance_update_ring_.release();native_pose_input_ring_.release();
@@ -3915,6 +3933,110 @@ void scene_cmd::RollbackNative::run(Renderer& r){
  const Renderer::NativeQueueCheckpoint value=found->second;r.scene_checkpoints_.erase(found);
  r.rollback_native(value);
 }
+
+
+namespace {
+std::mutex lod_snapshot_mutex;
+std::shared_ptr<const NativeLodSnapshot> lod_snapshot;
+std::atomic<std::uint64_t> lod_request_counter{0},lod_requested{0},lod_requested_epoch{0},lod_consumed{0};
+void publish_lod_snapshot(std::shared_ptr<const NativeLodSnapshot> value) noexcept {
+ std::unique_lock<std::mutex> lock(lod_snapshot_mutex,std::try_to_lock);
+ if(lock.owns_lock())lod_snapshot=std::move(value);
+}
+}
+std::shared_ptr<const NativeLodSnapshot> native_lod_snapshot() noexcept {
+ std::unique_lock<std::mutex> lock(lod_snapshot_mutex,std::try_to_lock);
+ return lock.owns_lock()?lod_snapshot:nullptr;
+}
+
+std::uint64_t native_lod_request(std::uint64_t epoch) noexcept {
+ const auto pending=lod_requested.load(std::memory_order_acquire);
+ if(pending>lod_consumed.load(std::memory_order_acquire)&&lod_requested_epoch.load()==epoch)return pending;
+ const auto next=lod_request_counter.fetch_add(1,std::memory_order_relaxed)+1;
+ lod_requested_epoch.store(epoch,std::memory_order_relaxed);lod_requested.store(next,std::memory_order_release);
+ return next;
+}
+void native_lod_acknowledge(std::uint64_t request) noexcept {lod_consumed.store(request,std::memory_order_release);}
+
+void Renderer::release_native_lod_observer() noexcept {
+ native_lod_observations_.Reset();native_lod_observation_uav_.Reset();
+ for(auto& slot:native_lod_readbacks_){slot.buffer.Reset();slot.snapshot.reset();}
+ native_lod_capture_.reset();native_lod_frame_=native_lod_copied_frame_=UINT64_MAX;
+ native_lod_published_frame_=0;native_lod_failed_=false;native_lod_request_=0;
+ publish_lod_snapshot(nullptr);
+}
+
+void Renderer::begin_native_lod_frame() noexcept try {
+ const auto request=lod_requested.load(std::memory_order_acquire);
+ if(!request||request==native_lod_request_||request<=lod_consumed.load(std::memory_order_acquire)||
+    lod_requested_epoch.load(std::memory_order_relaxed)!=world_state_epoch_||!context_||!device_)return;
+ native_lod_request_=request;
+ if(native_lod_failed_){
+  auto failed=std::make_shared<NativeLodSnapshot>();failed->world_epoch=world_state_epoch_;
+  failed->request=request;failed->unavailable=true;publish_lod_snapshot(std::move(failed));return;
+ }
+ if(!native_lod_observations_){
+  D3D11_BUFFER_DESC desc{};desc.ByteWidth=kNativeLodObservationCapacity*sizeof(NativeLodDecisionGpu);
+  desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
+  desc.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+  ComPtr<ID3D11Buffer> buffer;ComPtr<ID3D11UnorderedAccessView> uav;
+  HRESULT hr=device_->CreateBuffer(&desc,nullptr,&buffer);
+  D3D11_UNORDERED_ACCESS_VIEW_DESC view{};view.Format=DXGI_FORMAT_R32_TYPELESS;
+  view.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;view.Buffer.NumElements=desc.ByteWidth/4;
+  view.Buffer.Flags=D3D11_BUFFER_UAV_FLAG_RAW;
+  if(SUCCEEDED(hr))hr=device_->CreateUnorderedAccessView(buffer.Get(),&view,&uav);
+  desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;desc.MiscFlags=0;
+  for(auto& slot:native_lod_readbacks_)if(SUCCEEDED(hr))hr=device_->CreateBuffer(&desc,nullptr,&slot.buffer);
+  if(FAILED(hr)){
+   native_lod_failed_=true;
+   auto failed=std::make_shared<NativeLodSnapshot>();failed->world_epoch=world_state_epoch_;failed->request=request;failed->unavailable=true;
+   publish_lod_snapshot(std::move(failed));return;
+  }
+  native_lod_observations_=std::move(buffer);native_lod_observation_uav_=std::move(uav);
+ }
+ const UINT zero[4]{};context_->ClearUnorderedAccessViewUint(native_lod_observation_uav_.Get(),zero);
+ native_lod_row_indices_.fill(UINT_MAX);
+ native_lod_capture_=std::make_shared<NativeLodSnapshot>();
+ native_lod_capture_->frame=native_frame_index_;native_lod_capture_->world_epoch=world_state_epoch_;
+ native_lod_capture_->request=request;native_lod_frame_=native_frame_index_;
+} catch(...) {native_lod_failed_=true;native_lod_capture_.reset();}
+
+void Renderer::begin_native_lod_capture(const NativeSubmissionLayout& layout) noexcept try {
+ if(!native_lod_capture_||native_lod_frame_!=native_frame_index_||native_lod_failed_)return;
+ for(const auto& work:layout.work){
+  if(work.record>=native_instance_records_.size())continue;
+  const auto& identity=native_instance_records_[work.record].lod_observer;if(!identity)continue;
+  if(work.record>=kNativeLodObservationCapacity){native_lod_capture_->truncated=true;continue;}
+  auto& index=native_lod_row_indices_[work.record];
+  if(index==UINT_MAX){index=UINT(native_lod_capture_->rows.size());native_lod_capture_->rows.push_back({work.record,identity,{}});}
+  else native_lod_capture_->rows[index].identity=identity; // record reused in this frame: last submission wins
+ }
+ context_->CSSetUnorderedAccessViews(4,1,native_lod_observation_uav_.GetAddressOf(),nullptr);
+} catch(...) {native_lod_failed_=true;native_lod_capture_.reset();}
+
+void Renderer::finish_native_lod_frame() noexcept try {
+ if(!context_)return;
+ // Three independent slots: never overwrite an in-flight copy, never Flush or wait.
+ for(auto& slot:native_lod_readbacks_)if(slot.snapshot){
+  D3D11_MAPPED_SUBRESOURCE mapped{};
+  const HRESULT hr=context_->Map(slot.buffer.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped);
+  if(hr==DXGI_ERROR_WAS_STILL_DRAWING)continue;
+  if(SUCCEEDED(hr)){
+   const auto* rows=static_cast<const NativeLodDecisionGpu*>(mapped.pData);
+   for(auto& row:slot.snapshot->rows)row.decision=rows[row.record];
+   context_->Unmap(slot.buffer.Get(),0);
+   if(slot.snapshot->world_epoch==world_state_epoch_&&slot.snapshot->frame>native_lod_published_frame_){
+    native_lod_published_frame_=slot.snapshot->frame;publish_lod_snapshot(slot.snapshot);
+   }
+  }else{slot.snapshot->unavailable=true;publish_lod_snapshot(slot.snapshot);}
+  slot.snapshot.reset();
+ }
+ if(!native_lod_capture_||native_lod_copied_frame_==native_lod_frame_)return;
+ for(auto& slot:native_lod_readbacks_)if(!slot.snapshot&&slot.buffer){
+  context_->CopyResource(slot.buffer.Get(),native_lod_observations_.Get());
+  slot.snapshot=std::move(native_lod_capture_);native_lod_copied_frame_=native_lod_frame_;break;
+ }
+} catch(...) {} // Observation failure must not change the rendering result.
 
 } // namespace owned
 

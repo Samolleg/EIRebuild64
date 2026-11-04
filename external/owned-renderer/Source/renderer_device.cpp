@@ -3300,7 +3300,8 @@ HRESULT Renderer::upload_native_geometry(UINT page_index,UINT offset,const void*
 HRESULT Renderer::upload_native_work_range(const NativeDispatchRange& range){
  PERF06_SCOPE("upload_work");
  if(!context_||!native_work_range_constants_||!range.count)return E_INVALIDARG;
- const std::array<UINT,4> values{range.first,range.count,0,0};
+ const std::array<UINT,4> values{range.first,range.count,
+  native_lod_capture_&&native_lod_frame_==native_frame_index_?1u:0u,0};
  D3D11_MAPPED_SUBRESOURCE mapped{};
  const HRESULT hr=context_->Map(native_work_range_constants_.Get(),0,
   D3D11_MAP_WRITE_DISCARD,0,&mapped);if(FAILED(hr))return hr;

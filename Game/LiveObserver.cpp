@@ -1,5 +1,7 @@
 #include "StdAfx.h"
 #include "LiveObserver.h"
+#include "../external/owned-renderer/Source/native_lod_observer.h"
+#include "../external/owned-renderer/Source/engine_bridge.h"
 #include "RuntimePaths64.h"
 #include "GameJournal.h"
 #include "CorePerf.h"
@@ -60,6 +62,8 @@ struct Job {
     const Navigation::Mesh* mesh=nullptr;
     std::uint64_t navRevision=0;
     int navProfile=0;
+    std::shared_ptr<const owned::NativeLodSnapshot> lodSnapshot;
+    std::uint64_t lodRequest=0;
     std::vector<unsigned char> image;
     // The pipe worker allocates a staging texture using only this copied
     // descriptor/device; it never inspects a game object or context.
@@ -322,7 +326,7 @@ void Frame() noexcept {
         const auto started=Clock::now();
         const auto used=active->captureCost;active->captureCost=Clock::duration{};
         if(used>std::chrono::milliseconds(1)) {
-            GameJournal::Event("ERROR","live_budget","elapsed_us=%lld",static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(used).count()));
+            if(active->method!="lod")GameJournal::Event("ERROR","live_budget","elapsed_us=%lld",static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(used).count()));
             active->budgetExceeded=true;
         }
         const auto remaining=used<FrameBudget?FrameBudget-used:Clock::duration{};
@@ -331,12 +335,12 @@ void Frame() noexcept {
         bool done=false;
         try {done=Step(*active,deadline);}
         catch(const std::exception& e) {
-            GameJournal::Event("ERROR","live_observe","reason=%s",GameJournal::Quote(e.what()).c_str());
+            if(active->method!="lod")GameJournal::Event("ERROR","live_observe","reason=%s",GameJournal::Quote(e.what()).c_str());
             CleanupCapture(*active);active->response=Error(e.what());done=true;
-        } catch(...) {ChannelError("observe_exception",0);CleanupCapture(*active);active->response=Error("observation failed");done=true;}
+        } catch(...) {if(active->method!="lod")ChannelError("observe_exception",0);CleanupCapture(*active);active->response=Error("observation failed");done=true;}
         const auto elapsed=Clock::now()-started+used;
         if(elapsed>std::chrono::milliseconds(1)) {
-            GameJournal::Event("ERROR","live_budget","elapsed_us=%lld",static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()));
+            if(active->method!="lod")GameJournal::Event("ERROR","live_budget","elapsed_us=%lld",static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()));
             active->budgetExceeded=true;
         }
         if(active->cancelled){CleanupCapture(*active);active.reset();return;}
@@ -557,6 +561,82 @@ size_t GetLimit(const json& params,size_t maximum,size_t fallback) {
     if(value<1)throw std::runtime_error("limit must be positive");
     return (std::min)(size_t(value),maximum);
 }
+bool Lod(Job& job,Clock::time_point deadline,CWorldServer& world,const json& params) {
+    const auto name=params.value("name",std::string());
+    if(name.size()>256)throw std::runtime_error("name filter too long");
+    if(params.contains("radius")&&!params["radius"].is_number())throw std::runtime_error("radius must be a number");
+    const double radius=params.value("radius",80.0);
+    if(!std::isfinite(radius)||radius<0||radius>2000)throw std::runtime_error("radius must be between 0 and 2000 metres");
+    const size_t limit=GetLimit(params,200,50);
+    if(!job.phase){
+        job.world=&world;job.worldId=world.GetRTID();job.phase=1;
+        const auto epoch=owned::bridge_current_world_epoch();
+        job.lodRequest=owned::native_lod_request(epoch);
+        job.response={{"ok",true},{"status","waiting"},{"snapshot_frame",nullptr},{"world_epoch",epoch},
+            {"objects",json::array()},{"request_id",job.lodRequest},{"limit",limit},{"truncated",false},{"radius",radius},
+            {"radius_applied",name.empty()},{"camera_anchor",Point(theCamera.GetAnchorPoint())},
+            {"consistency","GPU snapshot; distances from request camera anchor"},
+            {"position_basis","GPU render node origin, world metres"},
+            {"visibility_basis","colour triangles emitted; not a pixel visibility test"}};
+    }
+    if(!SameWorld(job,world)||owned::bridge_current_world_epoch()!=job.response["world_epoch"].get<std::uint64_t>()){
+        job.response=Error("world changed while awaiting LOD snapshot");return true;
+    }
+    if(job.phase==1){
+        job.lodSnapshot=owned::native_lod_snapshot();
+        if(!job.lodSnapshot||job.lodSnapshot->request!=job.lodRequest||
+           job.lodSnapshot->world_epoch!=job.response["world_epoch"].get<std::uint64_t>()){
+            job.lodSnapshot.reset();return ++job.offset>=3;
+        }
+        owned::native_lod_acknowledge(job.lodRequest);
+        if(job.lodSnapshot->unavailable){job.response["status"]="unavailable";return true;}
+        job.response["snapshot_frame"]=job.lodSnapshot->frame;
+        job.response["status"]="ready";job.response["truncated"]=job.lodSnapshot->truncated;job.phase=2;
+    }
+    if(!SameWorld(job,world)||owned::bridge_current_world_epoch()!=job.lodSnapshot->world_epoch){
+        job.response=Error("world changed during LOD scan");return true;
+    }
+    const auto& rows=job.lodSnapshot->rows;
+    const double cameraX=job.response["camera_anchor"][0].get<double>();
+    const double cameraY=job.response["camera_anchor"][1].get<double>();
+    while(job.item<rows.size()&&Clock::now()<deadline){
+        const auto& row=rows[job.item++];const auto& source=*row.identity;const auto& choice=row.decision;
+        if(!Match(source.model,name))continue;
+        // A cleared slot has no GPU sample; no CPU substitute for position or LOD.
+        const bool observed=choice.state!=0;
+        const double dx=choice.position[0]-cameraX,dy=choice.position[1]-cameraY;
+        const double distance=std::sqrt(dx*dx+dy*dy);
+        if(name.empty()&&(!observed||distance>radius))continue;
+        if(job.response["objects"].size()>=limit){job.response["truncated"]=true;return true;}
+        const bool selected=choice.state==2;
+        json value={{"id",source.id},{"id_kind",source.candidate_id?"neighbour_candidate":"game_object"},
+            {"generation",source.generation},{"part",source.part},{"record",row.record},{"model",source.model},
+            {"source",source.neighbour?"neighbour":"active"},
+            {"zone",source.neighbour?source.zone:Text(world.GetJournalZoneName(),256)},
+            {"map",source.neighbour?source.map:Text(world.szZoneFileName,256)},
+            {"mob",source.neighbour?source.mob:Text(world.szMobFileName,256)},
+            {"state",!observed?"not_observed":selected?"selected":"culled"},
+            {"position",nullptr},{"distance",nullptr},{"rendered",nullptr},{"lod",nullptr},
+            {"lod_count",nullptr},{"triangles",nullptr},{"triangles_lod0",nullptr},
+            {"merged",nullptr},{"second_lod",nullptr},{"second_triangles",nullptr},{"impostor",false}};
+        if(observed){
+            value["position"]=choice.position;value["distance"]=distance;
+            value["rendered"]=selected&&(choice.first_triangles+choice.second_triangles)>0;
+            value["lod_count"]=choice.level_count;value["triangles_lod0"]=choice.full_triangles;
+            value["merged"]=bool(choice.merged);
+            value["triangles"]=choice.first_triangles+choice.second_triangles;
+            if(selected){
+                if(choice.first_level!=UINT32_MAX)value["lod"]=choice.first_level;
+                if(choice.second_level<UINT32_MAX-1)value["second_lod"]=choice.second_level;
+                value["second_triangles"]=choice.second_triangles;
+                value["impostor"]=choice.second_level==UINT32_MAX-1;
+                value["crossfade_code"]=choice.fade;
+            }
+        }
+        job.response["objects"].push_back(std::move(value));
+    }
+    return job.item>=rows.size();
+}
 bool Units(Job& job,Clock::time_point deadline,CWorldServer& world,const json& params) {
     const size_t limit=GetLimit(params,UnitLimit,50);
     if(!job.phase) {
@@ -737,6 +817,7 @@ bool Step(Job& job,Clock::time_point deadline) {
             (detail.contains("navigation")&&detail["navigation"].value("truncated",false));
         job.response={{"ok",true},{"unit",std::move(detail)},{"truncated",truncated}};return true;
     }
+    if(method=="lod")return Lod(job,deadline,world,params);
     if(method=="units")return Units(job,deadline,world,params);
     if(method=="globals")return Globals(job,deadline,world,params);
     if(method=="nav"||method=="nav_path")return Nav(job,deadline,world,params,method=="nav_path");

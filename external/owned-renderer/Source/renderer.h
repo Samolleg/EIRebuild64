@@ -1,5 +1,6 @@
 #pragma once
 #include "scene_composite.h"
+#include "native_lod_observer.h"
 #include "fsr2_upscaler.h"
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
 #include "dlss_backend.h"
@@ -2206,6 +2207,7 @@ private:
     };
     struct NativeInstanceRecord {
         NativeQueuedDraw command{};
+        std::shared_ptr<const NativeLodIdentity> lod_observer;
         NativeDrawGpu descriptor{};
         std::weak_ptr<const void> owner;
         UINT references = 0;
@@ -4136,6 +4138,23 @@ private:
     ComPtr<ID3D11Buffer> native_point_light_grid_buffer_;
     ComPtr<ID3D11ShaderResourceView> native_point_light_grid_srv_;
     ComPtr<ID3D11ComputeShader> native_build_cs_;
+    ComPtr<ID3D11Buffer> native_lod_observations_;
+    ComPtr<ID3D11UnorderedAccessView> native_lod_observation_uav_;
+    struct NativeLodReadback {
+        ComPtr<ID3D11Buffer> buffer;
+        std::shared_ptr<NativeLodSnapshot> snapshot;
+    };
+    std::array<NativeLodReadback,3> native_lod_readbacks_;
+    std::shared_ptr<NativeLodSnapshot> native_lod_capture_;
+    std::array<UINT,kNativeLodObservationCapacity> native_lod_row_indices_{};
+    std::uint64_t native_lod_frame_ = UINT64_MAX, native_lod_copied_frame_ = UINT64_MAX;
+    std::uint64_t native_lod_published_frame_ = 0;
+    bool native_lod_failed_ = false;
+    std::uint64_t native_lod_request_ = 0;
+    void begin_native_lod_frame() noexcept;
+    void begin_native_lod_capture(const NativeSubmissionLayout& layout) noexcept;
+    void finish_native_lod_frame() noexcept;
+    void release_native_lod_observer() noexcept;
     ComPtr<ID3D11ComputeShader> native_pose_cs_;
     ComPtr<ID3D11ComputeShader> native_instance_update_cs_;
     ComPtr<ID3D11Buffer> native_persistent_instances_, native_instance_updates_, native_world_clip_constants_;

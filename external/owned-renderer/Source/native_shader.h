@@ -590,6 +590,22 @@ NativeInstance loadNativeInstance(uint index){
   if((update.flags&2)!=0)nativeDrawOutput[update.destination]=update.descriptor;
  }
 }
+// Separate, bounded observation output; one lane writes each record.
+RWByteAddressBuffer nativeLodObservation:register(u4);
+float4x4 nativeNodeMatrix(uint node);
+void nativeObserveLod(NativeDraw draw,NativeInstance instance,uint state,uint firstLevel,uint secondLevel,
+                     uint firstCount,uint secondCount,uint fade){
+ [branch]if(nativeWorkPadding.x==0)return; // uniform request flag, never a shader variant
+ uint bytes;nativeLodObservation.GetDimensions(bytes);
+ uint record=draw.instanceIndex&0x7fffffffu;if(record>=bytes/48u)return;
+ uint levels=(instance.worldGeometry&@WORLD_LOD@)!=0?min(nativeGeometry.Load(draw.indexOffset-64),3u)+1u:1u;
+ float3 position=float3(instance.objectToWorld[0].w,instance.objectToWorld[1].w,instance.objectToWorld[2].w);
+ if(instance.poseNode!=0xffffffffu){float4x4 nodeTransform=nativeNodeMatrix(instance.poseNode);position=float3(nodeTransform[0].w,nodeTransform[1].w,nodeTransform[2].w);}
+ uint at=record*48u;
+ nativeLodObservation.Store4(at,uint4(state,firstLevel,secondLevel,firstCount));
+ nativeLodObservation.Store4(at+16,uint4(secondCount,levels,draw.indexCount/3,fade));
+ nativeLodObservation.Store4(at+32,uint4(asuint(position),(instance.nativeFlags&0x40u)!=0?1u:0u));
+}
 RWStructuredBuffer<uint4> nativeTriangleOutput:register(u0);
 RWByteAddressBuffer nativeIndirectArgs:register(u1);
 RWStructuredBuffer<NativePreparedVertex> nativePreparedOutput:register(u2);
@@ -1020,8 +1036,8 @@ void nativeImpostorSelect(NativeDraw draw,NativeInstance instance,inout uint fir
  fade=512u|coverage;
 }
 void nativeStaticLodSelect(NativeDraw draw,NativeInstance instance,inout uint firstOffset,inout uint firstCount,
-                           out uint secondOffset,out uint secondCount,out uint fade){
- secondOffset=0;secondCount=0;fade=0;
+                           out uint secondOffset,out uint secondCount,out uint fade,out uint firstLevel,out uint secondLevel){
+ secondOffset=0;secondCount=0;fade=0;firstLevel=0;secondLevel=0xffffffffu;
  uint table=draw.indexOffset-64;
  uint levels=min(nativeGeometry.Load(table),3u);
  float3 center=(draw.boundsMin.xyz+draw.boundsMax.xyz)*.5;
@@ -1041,10 +1057,11 @@ void nativeStaticLodSelect(NativeDraw draw,NativeInstance instance,inout uint fi
   if(projected>limit){next=projected;break;}
   chosen=level;
  }
+ firstLevel=chosen;
  if(chosen!=0){uint2 entry=nativeGeometry.Load2(table+chosen*16);firstOffset=entry.x;firstCount=entry.y;}
  if(chosen<levels&&next<fadeEnd){
   uint coverage=(uint)round(saturate((fadeEnd-next)/max(fadeEnd-limit,1e-6))*255);
-  if(coverage!=0){uint2 entry=nativeGeometry.Load2(table+(chosen+1)*16);secondOffset=entry.x;secondCount=entry.y;fade=512u|coverage;}
+  if(coverage!=0){uint2 entry=nativeGeometry.Load2(table+(chosen+1)*16);secondOffset=entry.x;secondCount=entry.y;fade=512u|coverage;secondLevel=chosen+1;}
  }
 }
 void nativeCurrentBounds(inout NativeDraw draw,NativeInstance instance){
@@ -1200,12 +1217,21 @@ void nativePrepareWorld(NativeDraw draw,NativeInstance instance,uint lane){
   float swayReach=treeSwayReach(instance);
   draw.boundsMin.xyz-=swayReach;draw.boundsMax.xyz+=swayReach;
   if(threadId.x==0)nativeGroupVisible=draw.colorVisible!=0&&(draw.preservesOrder!=0||drawVisible(draw,instance));
-  GroupMemoryBarrierWithGroupSync();if(nativeGroupVisible==0)return;
+  GroupMemoryBarrierWithGroupSync();if(nativeGroupVisible==0){
+   if(threadId.x==0)nativeObserveLod(draw,instance,1,0xffffffffu,0xffffffffu,0,0,0);
+   return;
+  }
   if(draw.prepareWorld!=0)nativePrepareWorld(draw,instance,threadId.x);
-  if(draw.colorVisible==0)return;
+  if(draw.colorVisible==0){
+   if(threadId.x==0)nativeObserveLod(draw,instance,1,0xffffffffu,0xffffffffu,0,0,0);
+   return;
+  }
  }else{
   if(threadId.x==0)nativeGroupVisible=draw.preservesOrder!=0||drawVisible(draw,instance);
-  GroupMemoryBarrierWithGroupSync();if(nativeGroupVisible==0)return;
+  GroupMemoryBarrierWithGroupSync();if(nativeGroupVisible==0){
+   if(threadId.x==0)nativeObserveLod(draw,instance,1,0xffffffffu,0xffffffffu,0,0,0);
+   return;
+  }
   for(uint component=threadId.x;component<draw.componentCount;component+=64)
    nativePreparedOutput[draw.preparedVertexBase+component]=prepareNativeVertex(instance,draw.componentOffset+component*16);
  }
@@ -1217,12 +1243,15 @@ void nativePrepareWorld(NativeDraw draw,NativeInstance instance,uint lane){
  bool split=work.steepArgsByteOffset!=0xffffffffu;
  // Static LOD: the record's level (and, in a crossfade band, its successor).
  uint firstOffset=draw.indexOffset,firstCount=triangleCount,secondOffset=0,secondCount=0,fade=0;
+ uint firstLevel=0,secondLevel=0xffffffffu;
  [branch]if((instance.worldGeometry&@WORLD_LOD@)!=0&&nativeDistanceCull.z>0&&draw.preservesOrder==0&&!split)
-  nativeStaticLodSelect(draw,instance,firstOffset,firstCount,secondOffset,secondCount,fade);
+  nativeStaticLodSelect(draw,instance,firstOffset,firstCount,secondOffset,secondCount,fade,firstLevel,secondLevel);
  // Crown impostors: the record's quad far away, both in the crossfade band.
  bool impostorSecond=false;
  [branch]if((instance.worldGeometry&@WORLD_IMPOSTOR@)!=0&&nativeImpostorParams.x>0&&draw.preservesOrder==0&&!split)
   nativeImpostorSelect(draw,instance,firstCount,secondCount,fade,impostorSecond);
+ if(threadId.x==0)nativeObserveLod(draw,instance,2,firstCount!=0?firstLevel:0xffffffffu,
+  impostorSecond?0xfffffffeu:secondLevel,firstCount,secondCount,fade);
  uint total=firstCount+secondCount;
  // Every triangle of a visible record is emitted, so the group reserves its
  // whole range (and, when split, its steep range) with one atomic each.
