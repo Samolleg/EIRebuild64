@@ -3049,6 +3049,8 @@ namespace {
 // Weapons and arrows toggle visibility in the field and time-scrolled
 // texture types (13, 14, 16) shift UVs per part, so they stay per part.
 bool merge_part_eligible(const VisualPartAsset& part) {
+    // Colour/depth submit the whole group, so service FIGs must not enter it.
+    if (unit_service_node(part.name.c_str())) return false;
     // Fur prototype, strands: a unit's hair part stays its own record (its
     // strands and undercoat; retained_visual_part_values).
     if (fur_hair_strands(g_fur_mode) && fur_hair_stem(fur_part_stem(part.name))) return false;

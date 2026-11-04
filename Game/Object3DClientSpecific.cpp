@@ -27,6 +27,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "OwnedRender/E1Surface.h"
 #include "owned_asset_loader.h"
 #include "engine_bridge.h"
+#include "retained_static_submission.h"
 #include "model_draw.h"
 #include "widescreen_layout.h"
 #include "model_preview_geometry.h"
@@ -808,6 +809,8 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
         part.explicitly_hidden = figure->CheckFlag(FIG_HIDDEN) || part.geometry->indices.empty();
         assembly->parts.push_back(std::move(part));
     }
+    // Match the retail bridge's tree classification before publication.
+    if (object->WhoAmI() == HPC_TREE) owned::sway_tree_assembly(*assembly);
     return assembly;
 }
 catch (...) {
@@ -899,8 +902,8 @@ bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
             pose.object_flags |= OBJ_HIDDEN;
     }
 #endif
-    // Respect host source policy without a second shadow renderer.
-    if (!IsNeedShadow()) pose.object_flags |= OBJ_NOSHADOW;
+    // Keep the authored OBJ_NOSHADOW bit. Legacy software-shadow settings
+    // do not govern the owned renderer's sun and point shadow admission.
     float qw = 1.0f, qx = 0.0f, qy = 0.0f, qz = 0.0f;
     orientation.GetComponents(qw, qx, qy, qz);
     pose.quaternion = {{qw, qx, qy, qz}};
