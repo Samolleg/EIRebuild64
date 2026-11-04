@@ -95,6 +95,11 @@ struct State {
     const DWORD thread = GetCurrentThreadId();
     LONGLONG frequency = 0, window = Now();
     Counter scopes[Count]{};
+    // Bounded main-thread history for the live observer; never serialized.
+    Counter liveScopes[Count]{};
+    LONGLONG liveWindow = Now();
+    double liveFrames[120]{};
+    unsigned liveFrameNext = 0, liveFrameCount = 0;
     AsyncCounter async[Count]{};
     VisualSample* visual = nullptr;
     std::uint64_t visualFrames = 0, visualTotals[3]{}, visualMax[3]{};
@@ -180,6 +185,7 @@ inline void CompleteFrameDetails(State& s, LONGLONG now) noexcept {
 inline void Record(State& s, Id id, LONGLONG elapsed) noexcept {
     if (id == DrawFrame && s.inFrame) s.frameDraw += elapsed;
     s.scopes[id].Add(elapsed);
+    s.liveScopes[id].Add(elapsed);
     if(id==NavigationTotal&&s.inFrame)s.navigationFrame+=elapsed;
     for (TickData* tick = s.tick; tick; tick = tick->parent) tick->scopes[id].Add(elapsed);
 }
@@ -282,6 +288,7 @@ public:
         if (!state) return;
         const LONGLONG elapsed = Now() - started;
         state->scopes[ServerSegment].Add(elapsed);
+        state->liveScopes[ServerSegment].Add(elapsed);
         tick.scopes[ServerSegment].Add(elapsed);
         state->tick = tick.parent;
         if (elapsed * 1000.0 / state->frequency > 25.0) {
@@ -378,7 +385,15 @@ public:
             ++state->histogram[state->frameTicks < 3 ? state->frameTicks : 3];
             if (!state->drew3D) ++state->emptyFrames;
             state->inFrame = false;
-            CompleteFrameDetails(*state, Now());
+            const auto completed = Now();
+            state->liveFrames[state->liveFrameNext] = (completed - state->frameStarted) * 1000.0 / state->frequency;
+            state->liveFrameNext = (state->liveFrameNext + 1) % 120;
+            if (state->liveFrameCount < 120) ++state->liveFrameCount;
+            if (completed - state->liveWindow >= state->frequency) {
+                for (auto& scope : state->liveScopes) scope = Counter{};
+                state->liveWindow = completed;
+            }
+            CompleteFrameDetails(*state, completed);
             Flush(); // Journal formatting/queueing is outside all frame/tick timers.
         }
     }

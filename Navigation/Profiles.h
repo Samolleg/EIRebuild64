@@ -14,6 +14,16 @@ inline const Agent Agents[]={
     {"levitate",       {.5f,.2f,60.f,.35f,.1f,.05f,96,0,Movement::Levitate}},
     {"flying",         {1.f,.2f,90.f,.35f,.1f,.05f,96,0,Movement::Flying}}
 };
+// Height selection is shared by unit movement and read-only profile probes.
+inline float LegacyClassHeight(unsigned aiClass) {
+    constexpr float heights[]={2,.4f,1,1.6f,2.2f,1.7f,3,6};
+    return heights[aiClass<8?aiClass:7];
+}
+inline float SelectedClearance(const Profile& profile,float height) {
+    const auto& tiers=ClearanceHeights(profile);float selected=tiers[0];
+    for(float tier:tiers)if(tier<=height)selected=tier;
+    return selected;
+}
 inline int ProfileForRadius(float radius,bool levitate) {
     if(levitate)return Levitate;
     const int first=Small,last=Giant;

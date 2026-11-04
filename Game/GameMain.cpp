@@ -2,6 +2,7 @@
 #include "RuntimePaths64.h"
 #include "SaveSlot.h"
 #include "CorePerf.h"
+#include "LiveObserver.h"
 #include "OwnedRender/E4Camp.h"
 #include "OwnedRender/E3Input.h"
 #include <game_focus.h>
@@ -689,6 +690,7 @@ static bool NGame::ProcessMessages()
             const CPlot3D &anchor = theCamera.GetAnchorPoint();
             FrameDiagnostics::End(ModShadowSchedule::generationTicks, anchor.x, anchor.y);
         }
+        LiveObserver::Frame();
         WaitForIdleWork();
     }
     CorePerf::Scope coreMessages(CorePerf::Messages);
@@ -972,6 +974,7 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     if(InspectModPackageCommandLine(inspectionResult))return inspectionResult;
     CorePerf::Initialize();
     GameJournal::Start();
+    LiveObserver::Start();
 #if defined(__SANITIZE_ADDRESS__)
     ASanReporting64::JournalReady();
 #endif
@@ -979,7 +982,7 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 #if defined(__SANITIZE_ADDRESS__)
         ASanReporting64::Finish();
 #endif
-        CorePerf::Flush(); GameJournal::Stop(); } } journalEnd;
+        LiveObserver::Stop(); CorePerf::Flush(); GameJournal::Stop(); } } journalEnd;
     try { SettingsProfile::Initialize();
         GameJournal::Event("SESSION","settings_source","%s",SettingsProfile::Summary().c_str());
         if (!legacyRun) modHost=ModRuntime::Host::FromCommandLine(); }

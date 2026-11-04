@@ -22,6 +22,8 @@ class NavigationWorld {
     std::unique_ptr<NavigationBake> baker; // Allocated only in the offline tool.
     std::string mapName,mobName,error;
     std::uint64_t generation=0;
+    // Changes whenever a live mesh may have changed. No save data.
+    std::uint64_t observerRevision=0;
     unsigned failures=0,stepFailures=0;
     std::uint64_t nextStepLog=0;
     // Independent, transient observers: one noisy NPC cannot hide another.
@@ -84,6 +86,11 @@ public:
     bool RandomGoal(CUnit* unit,Navigation::Point center,float radius,Navigation::Point& goal,Navigation::RandomShape shape=Navigation::RandomShape::Circle);
     bool Place(CUnit* unit,CAIMap& map);
     const std::string& Error() const { return error; }
+    // Read-only: does not lazy-load the flying profile or touch unit queues.
+    const Navigation::Mesh* ObserverMesh(int profile) const noexcept {
+        return loaded && profile>=0 && profile<Navigation::AgentCount ? meshes[profile].get() : nullptr;
+    }
+    std::uint64_t ObserverRevision() const noexcept { return observerRevision; }
     Navigation::Point Position(CUnit* unit,CAIMap& map) const;
     Navigation::Route Find(CUnit* unit,Navigation::Point from,Navigation::Point goal,float maxLength,float goalRadius,const float* costs=nullptr,int aiClass=3,Navigation::GoalPolicy goalPolicy=Navigation::GoalPolicy::Exact,const Navigation::Location* goalSupport=nullptr);
     bool CanPlace(CUnit* unit,Navigation::Point point,int aiClass=3);
