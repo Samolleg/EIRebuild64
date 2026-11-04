@@ -538,6 +538,11 @@ float NavigationWorld::Height(CUnit* unit,int aiClass) {
     // A smaller body fits the lowest clearance tier; do not reject it.
     return Navigation::SelectedClearance(profile,height);
 }
+float NavigationWorld::CollisionRadius(CUnit* unit) {
+    // The original circle uses the longer body axis. The baked radius measures
+    // transverse passage width and cannot separate long bodies such as boars.
+    return (std::max)(Radius(unit),unit->GetCollisionDistance());
+}
 Navigation::Point NavigationWorld::Position(CUnit* unit,CAIMap& map) const {
     CorePerf::Scope timing(CorePerf::NavigationTotal);
     auto p=GamePoint(unit->GetCP());
@@ -592,6 +597,35 @@ bool NavigationWorld::Goal(CUnit* unit,Navigation::Point reference,Navigation::L
 bool NavigationWorld::Support(CUnit* unit,Navigation::Point point,Navigation::Location& result) {
     auto* mesh=ForUnit(unit);
     return mesh&&Navigation::Project(*mesh,point,.001f,4.f,result,Height(unit),Navigation::ExcludeClass(unit?unit->GetAIClass():3));
+}
+bool NavigationWorld::AttackPosition(CUnit* unit,CUnit* target,Navigation::Point goal,float reach,float maxLength,Navigation::Location& result) {
+    auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
+    const auto from=Position(unit,map),center=Position(target,map);
+    const float inner=CollisionRadius(unit)+CollisionRadius(target)+.01f;
+    const float outer=reach-.01f;
+    if(outer<inner)return false;
+    // Original FindPathDestination order: toward the attacker, then both sides
+    // in 45-degree steps. Each candidate must be free and reachable on Nav64.
+    const float bearing=std::atan2(from.y-goal.y,from.x-goal.x);
+    const int directions[]={0,1,-1,2,-2,3,-3,4};
+    const int rings=(std::max)(1,int(std::ceil((outer-inner)/AITile2Meter(1.f))));
+    for(int ring=0;ring<=rings;++ring) {
+        const float radius=outer-(outer-inner)*float(ring)/float(rings);
+        for(int direction:directions) {
+            const float angle=bearing+float(direction)*FP_PI/4;
+            const Point point{goal.x+radius*std::cos(angle),goal.y+radius*std::sin(angle),center.z};
+            Location candidate;
+            if(!Support(unit,point,candidate))continue;
+            const CPlot3D position(candidate.position.x,candidate.position.y,unit->GetCP().z);
+            // Escaping a loaded overlap may cross its boundary, but its
+            // destination must be completely outside every other body.
+            if(map.CheckCircleCollision(unit,position,&candidate,false))continue;
+            CAIRoute route;
+            if(!map.NavRoute(unit,from,candidate.position,route,maxLength,0,unit->GetAIClass(),nullptr,GoalPolicy::Exact,nullptr,&candidate))continue;
+            result=candidate;return true;
+        }
+    }
+    return false;
 }
 bool NavigationWorld::CanPlace(CUnit* unit,Navigation::Point point,int aiClass) {
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationPlace);
@@ -653,7 +687,7 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
     pos.x=move.support.position.x;pos.y=move.support.position.y;
     if(std::hypot(pos.x-from.x,pos.y-from.y)<.00001f)return observed(true);
     pos.z=move.support.position.z;
-    auto* neighbour=map.CheckCircleCollision(unit,pos);
+    auto* neighbour=map.CheckCircleCollision(unit,pos,&move.support);
     if(neighbour) {
         wait=(std::min)(wait+1,1000000u);
         auto& queue=queues[unit->GetID()];
@@ -673,7 +707,7 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
                 if(other==unit||other->IsDead())continue;
                 const auto at=Position(other,map);
                 if(std::hypot(at.x-from.x,at.y-from.y)>24.f)continue;
-                blockers.push_back({at,Radius(other)+Radius(unit),Height(other),other->GetID()});
+                blockers.push_back({at,CollisionRadius(other)+CollisionRadius(unit),Height(other),other->GetID()});
             }
             if(ModCliTool::CurrentKind()==ModCliTool::Kind::NavBake)for(const auto& obstacle:blockers)
                 printf("DETOUR_INPUT unit=%d from=(%.6f,%.6f,%.6f) obstacle=%d at=(%.6f,%.6f,%.6f) radius=%.6f start_distance=%.6f\n",unit->GetID(),from.x,from.y,from.z,obstacle.id,obstacle.position.x,obstacle.position.y,obstacle.position.z,obstacle.radius,std::hypot(from.x-obstacle.position.x,from.y-obstacle.position.y));
@@ -698,7 +732,7 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
             Navigation::Route detour;const auto destination=reused.points.back();
             const bool found=reused.points.size()>1&&map.NewPath(unit,path.ptDestination,alternate,1.e6f,0,Navigation::GoalPolicy::Exact,&detour,&destination);
             move.detourMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
-            GameJournal::Event("NAV","queue_detour","unit=%d blocker=%d result=%s reason=%s wait=%u blocker_moving=%d distance=%.3f body_radius=%.3f obstacles=%zu ms=%.3f from=(%.3f,%.3f,%.3f) goal=(%.3f,%.3f)",unit->GetID(),neighbour->GetID(),found?"ready":"stopped",Navigation::StatusName(detour.status),wait,int(neighbour->IsMoving()),std::hypot(from.x-Position(neighbour,map).x,from.y-Position(neighbour,map).y),Radius(unit)+Radius(neighbour),blockers.size(),move.detourMs,from.x,from.y,from.z,path.ptDestination.x,path.ptDestination.y);
+            GameJournal::Event("NAV","queue_detour","unit=%d blocker=%d result=%s reason=%s wait=%u blocker_moving=%d distance=%.3f body_radius=%.3f obstacles=%zu ms=%.3f from=(%.3f,%.3f,%.3f) goal=(%.3f,%.3f)",unit->GetID(),neighbour->GetID(),found?"ready":"stopped",Navigation::StatusName(detour.status),wait,int(neighbour->IsMoving()),std::hypot(from.x-Position(neighbour,map).x,from.y-Position(neighbour,map).y),CollisionRadius(unit)+CollisionRadius(neighbour),blockers.size(),move.detourMs,from.x,from.y,from.z,path.ptDestination.x,path.ptDestination.y);
             if(found) {
                 path.curSegment=alternate.curSegment;path.toGo=alternate.toGo;
                 path.ptFinish=alternate.ptFinish;path.bFinished=alternate.bFinished;

@@ -1058,7 +1058,7 @@ void CUnitServer::L1CheckRun()
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-bool CUnitServer::L1StartMove(const CPlot3D &ptTarget, float fpMaxPathLength)
+bool CUnitServer::L1StartMove(const CPlot3D &ptTarget, float fpMaxPathLength, const Navigation::Location *goalSupport)
 {
     CWorldServer *pWS = (CWorldServer *)GetWorld();
 
@@ -1069,7 +1069,7 @@ bool CUnitServer::L1StartMove(const CPlot3D &ptTarget, float fpMaxPathLength)
     bL1MovementFailed = false;
     path.Clear();
     const auto goalPolicy=curCommand.cmd==UC_MOVETO&&lpUnit->IsHero()?Navigation::GoalPolicy::ClosestReachable:Navigation::GoalPolicy::Exact;
-    if (!LowFindPath(ptTarget, path, lpUnit->bNeedFastPath, fpMaxPathLength,goalPolicy))
+    if (!LowFindPath(ptTarget, path, lpUnit->bNeedFastPath, fpMaxPathLength,goalPolicy,goalSupport))
     {
         bL1MoveAnimationSet = false;
         L1StopMovement(path.bRouteFailed == TRUE);
@@ -2535,15 +2535,16 @@ float CUnitServer::GetHitDist(const SUnitBasicCmd &cmd)
             if (((CUnit *)pTarget)->GetOwner() && lpUnit->GetOwner())
                 fpWeaponRange -= 0.4f;
             fpWeaponRange = Max(GetCurrentWeaponRange(), fpWeaponRange);
-            // Keep weapon range unchanged; only unit melee gains approach spacing.
-            // Use the same measured radii as placement and crowd avoidance.
+            // Retain melee reach, with room for the original body circles and
+            // the approved spacing when the transverse radius was too small.
             const bool bodyMelee = cmd.cmd == UC_ATTACK && !HasRangedAttack() &&
                                    GetCurrentWeaponType() != RPGWST_MAGIC;
             auto& navigation = ((CWorldServer *)GetWorld())->aiMap.Navigation();
             fpHitDist = (bodyMelee ? navigation.Radius(lpUnit) : lpUnit->GetCollisionDistance()) +
                         (bodyMelee ? navigation.Radius((CUnit *)pTarget) :
                                      ((CUnit *)pTarget)->GetCollisionDistance()) + fpWeaponRange;
-            if (bodyMelee) fpHitDist += FP_MELEE_SPACING;
+            if (bodyMelee) fpHitDist = Max(fpHitDist + FP_MELEE_SPACING,
+                navigation.CollisionRadius(lpUnit) + navigation.CollisionRadius((CUnit *)pTarget) + FP_MELEE_SPACING);
         }
         else
         {
@@ -2578,7 +2579,8 @@ float CUnitServer::GetCloseAttackDist(const SUnitBasicCmd &cmd)
         fpAttackDistance *= (1 + fpAttackKoef);
         fpHitDist = fpAttackDistance + (bodyMelee ? navigation.Radius((CUnit *)pTarget) :
                                                  ((CUnit *)pTarget)->GetCollisionDistance());
-        if (bodyMelee) fpHitDist += FP_MELEE_SPACING;
+        if (bodyMelee) fpHitDist = Max(fpHitDist + FP_MELEE_SPACING,
+            navigation.CollisionRadius(lpUnit) + navigation.CollisionRadius((CUnit *)pTarget) + FP_MELEE_SPACING);
     }
     return fpHitDist;
 }
@@ -2743,6 +2745,12 @@ bool CUnitServer::CreateAttackPlan(const SUnitBasicCmd &atk, SL1Command &cmd)
     int nRotationTimeMax;
     CSpell *pSpell = 0;
 
+    // Existing overlaps (including loaded ones) must clear before melee can
+    // stop movement and leave both bodies standing inside one another.
+    if (atk.IsAttack() && !atk.HasPointOfUse() && !HasRangedAttack() && GetCurrentWeaponType() != RPGWST_MAGIC &&
+        !atk.pTarget.IsEmpty() && atk.pTarget->WhoAmI() == HPC_UNIT &&
+        ((CWorldServer *)GetWorld())->aiMap.CheckCircleCollision(lpUnit, lpUnit->GetCP()))
+        return false;
     // check if we arrived to use point, if one is specified
     if (atk.HasPointOfUse())
     {
@@ -2955,16 +2963,19 @@ void CUnitServer::MoveToTarget()
     }
     // more conventional path - we have some target and move to it
     CMapObject *pTarget = curCommand.pTarget;
+    const bool bodyMelee = curCommand.IsAttack() && pTarget->WhoAmI() == HPC_UNIT &&
+                           !HasRangedAttack() && GetCurrentWeaponType() != RPGWST_MAGIC;
+    const bool overlapping = bodyMelee && pWS->aiMap.CheckCircleCollision(lpUnit, lpUnit->GetCP());
     fpHitDist = GetHitDist(curCommand);
     CPlot3D ptTargetPos = pTarget->GetTargetCP();
-    if (!pTarget->IsMoving() && distanceXY2(ptTargetPos, lpUnit->GetCP()) <= sqr(fpHitDist) &&
+    if (!overlapping && !pTarget->IsMoving() && distanceXY2(ptTargetPos, lpUnit->GetCP()) <= sqr(fpHitDist) &&
         AttackIsDirect(curCommand, ptTargetPos, nCurSegment))
     {
         L1StartIdle();
         return;
     }
     // проверим, надо ли бежать за движущейсся целью или мы и так успеем и можно отдохнуть
-    if (pTarget->IsMoving())
+    if (pTarget->IsMoving() && !overlapping)
     {
         nTimeToHit = nCanAttackTime + N_MAXIMUM_HIT_FRAME - nCurSegment;
         if (nTimeToHit > 0)
@@ -3010,7 +3021,7 @@ void CUnitServer::MoveToTarget()
         nForwardTime = Max(2, nForwardTime);
         ptDest = pTarget->GetFuturePosition(nCurSegment + nForwardTime);
         if (L1IsMoving() &&
-            distanceXY2(ptDest, path.ptDestination) < sqr(0.1f + fpTargetDist * 0.1f))
+            distanceXY2(ptDest, path.ptDestination) < sqr(0.1f + fpTargetDist * 0.1f + (bodyMelee ? fpHitDist : 0.f)))
         {
             // set maximal path length
             path.ptDestination.z = lpUnit->GetMaxAttackPathLength(fpTargetDist) + 5;
@@ -3020,14 +3031,29 @@ void CUnitServer::MoveToTarget()
         float fpMaxPathLength = lpUnit->GetMaxAttackPathLength(fpTargetDist) + 5;
         // если до цели дойти нельзя, то облом
         bool bGraphRebuild = theWorldServer.aiMap.SetGraphRebuild(false);
-        if (distanceXY2(lpUnit->cp, ptDest) > 0.1f)
+        if (bodyMelee || distanceXY2(lpUnit->cp, ptDest) > 0.1f)
         {
-            theWorldServer.aiMap.RemoveObject(pTarget);
             CPlot3D ptPathDest(lpUnit->GetCP() * 0.001f + ptDest * 0.999f);
             ptPathDest.z = ptDest.z;
-            if (!L1StartMove(ptPathDest, fpMaxPathLength))
+            Navigation::Location approach;
+            bool found = true;
+            if (bodyMelee)
+            {
+                found = pWS->aiMap.Navigation().AttackPosition(lpUnit, (CUnit *)pTarget,
+                    {ptDest.x, ptDest.y, 0}, fpHitDist, fpMaxPathLength, approach);
+                if (found)
+                {
+                    ptPathDest.x = approach.position.x;
+                    ptPathDest.y = approach.position.y;
+                }
+            }
+            else
+                theWorldServer.aiMap.RemoveObject(pTarget);
+            if (!found)
+                L1StopMovement(true);
+            else if (!L1StartMove(ptPathDest, fpMaxPathLength, bodyMelee ? &approach : nullptr))
                 L1SetMoveFailed();
-            theWorldServer.aiMap.AddObject(pTarget);
+            if (!bodyMelee)theWorldServer.aiMap.AddObject(pTarget);
             theWorldServer.aiMap.SetGraphRebuild(bGraphRebuild);
             // если к цели нельзя подойти достаточно близко, то облом
             if (distanceXY2(ptDest, path.GetFinalPoint()) > sqr(fpHitDist))
