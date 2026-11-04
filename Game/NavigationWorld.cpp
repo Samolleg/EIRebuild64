@@ -5,6 +5,7 @@
 #include "../Navigation/Profiles.h"
 #include "aiMap.h"
 #include "Unit.h"
+#include "UnitServer.h"
 #include "StuffMapObjects.h"
 #include "WorldServer.h"
 #include "GameJournal.h"
@@ -40,9 +41,10 @@ Navigation::Geometry* NavigationWorld::Terrain() {return baker?&baker->terrain:n
 void NavigationWorld::Scene(const char* mpr,const char* mob) {
     ++observerRevision;
     mapName=Navigation::ResourceName(mpr);mobName=Navigation::ResourceName(mob);
+    if(sourceJob.valid())try{sourceJob.get();}catch(const std::exception& e){GameJournal::Event("NAV","update_discarded","reason=%s",GameJournal::Quote(e.what()).c_str());}
+    iceVariant=false;
     for(auto& mesh:meshes)mesh.reset();bodySizes.clear();bodyTable.samples.clear();
     loaded=false;error.clear();failures=stepFailures=0;nextStepLog=0;++generation;queues.clear();airJournal.clear();queryObstacles=nullptr;queryReuse=nullptr;
-    if(sourceJob.valid())try{sourceJob.get();}catch(const std::exception& e){GameJournal::Event("NAV","update_discarded","reason=%s",GameJournal::Quote(e.what()).c_str());}
     sourceRetries.clear();flyingUnits.clear();meshDirectory.clear();flightDeferred=false;sources.reset();absentStatic.clear();sourceDirty.clear();liveDoors.clear();
     liveObjects.clear();appliedObjects.clear();liveFlightObjects.clear();appliedFlightObjects.clear();bakedStatic.clear();dirtyObjects.clear();
     if(baker) {
@@ -73,7 +75,7 @@ void NavigationWorld::Scene(const char* mpr,const char* mob) {
     }
 }
 bool NavigationWorld::Load() {return Load({});}
-bool NavigationWorld::Load(const std::filesystem::path& inputDirectory) {
+bool NavigationWorld::Load(const std::filesystem::path& inputDirectory, bool synchronize) {
     if(loaded)return true;
     const auto start=std::chrono::steady_clock::now();
     auto milliseconds=[](auto from){return std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-from).count();};
@@ -82,11 +84,12 @@ bool NavigationWorld::Load(const std::filesystem::path& inputDirectory) {
     double bodyMs=0,catalogueMs=0,sourceReadMs=0,sourceDecodeMs=0;
     try {
         const auto* mod=ModRuntime::Resources();if(!mod)throw std::runtime_error("Nav64: no loaded mod");
-        const auto directory=inputDirectory.empty()?std::filesystem::path(mod->Directory())/"Maps"/"Nav64":inputDirectory;
+        const auto root=inputDirectory.empty()?std::filesystem::path(mod->Directory())/"Maps"/"Nav64":inputDirectory;
+        const auto directory=iceVariant?root/"variants"/"zone6"/"ice":root;
         meshDirectory=directory;
         auto bodiesPending=std::async(std::launch::async,[&] {
             const auto begin=std::chrono::steady_clock::now();
-            auto bytes=Read(directory/Navigation::BodyFilename);const auto size=bytes.size();
+            auto bytes=Read(root/Navigation::BodyFilename);const auto size=bytes.size();
             auto result=std::make_pair(Navigation::LoadBodies(bytes),size);bodyMs=milliseconds(begin);return result;
         });
         auto cataloguePending=std::async(std::launch::async,[&] {
@@ -145,9 +148,9 @@ bool NavigationWorld::Load(const std::filesystem::path& inputDirectory) {
         for(int id:json.at("static")){bakedStatic.insert(id);dirtyObjects.insert(id);liveFlightObjects.erase(id);}
         sources=sourcePending.get();
         for(auto& mesh:meshes)if(mesh){mesh->sources=sources;IndexSurfaces(*mesh);}
-        const auto syncStart=std::chrono::steady_clock::now();loaded=true;SyncObjects(true);
+        const auto syncStart=std::chrono::steady_clock::now();loaded=true;if(synchronize)SyncObjects(true);
         const double syncMs=milliseconds(syncStart);
-        const auto initialTiles=sourceDirty.size();const auto updateStart=std::chrono::steady_clock::now();UpdateSources(true);
+        const auto initialTiles=sourceDirty.size();const auto updateStart=std::chrono::steady_clock::now();if(synchronize)UpdateSources(true);
         if(ModCliTool::CurrentKind()==ModCliTool::Kind::NavBake) {
             printf("LOAD_STAGES bodies_ms=%.3f catalogue_ms=%.3f source_read_ms=%.3f source_decode_ms=%.3f sync_ms=%.3f update_ms=%.3f\n",bodyMs,catalogueMs,sourceReadMs,sourceDecodeMs,syncMs,milliseconds(updateStart));
             printf("LOAD_SOURCE_PHASE unpack_ms=%.3f arrays_ms=%.3f parse_ms=%.3f\n",sourceTimes[0],sourceTimes[1],sourceTimes[2]);
@@ -163,6 +166,33 @@ bool NavigationWorld::Load(const std::filesystem::path& inputDirectory) {
         GameJournal::Event("NAV","loaded","mpr=%s mob=%s profiles=%zu ms=%.3f bytes=%zu generation=%llu source_read_ms=%.3f source_unpack_ms=%.3f source_arrays_ms=%.3f source_meta_ms=%.3f profile_decode_max_ms=%.3f",mapName.c_str(),mobName.c_str(),size_t(std::count_if(meshes.begin(),meshes.end(),[](const auto& mesh){return bool(mesh);})),ms,bytes,static_cast<unsigned long long>(generation),sourceReadMs,sourceTimes[0],sourceTimes[1],sourceTimes[2],profileDecodeMs);
         return true;
     }catch(const std::exception& e){loaded=false;error=e.what();return false;}
+}
+std::unique_ptr<NavigationWorld> NavigationWorld::PrepareVariant(bool ice) {
+    if(mapName!="zone6.mpr" || mobName!="zone6.mob")throw std::runtime_error("Nav64: ice variant requires zone6/zone6");
+    auto candidate=std::make_unique<NavigationWorld>();
+    candidate->mapName=mapName;candidate->mobName=mobName;
+    candidate->generation=generation+1;candidate->iceVariant=ice;
+    candidate->observerRevision=observerRevision+1;
+    candidate->flyingUnits=flyingUnits;
+    if(!candidate->Load({},false))throw std::runtime_error(candidate->Error());
+    for(int id=600001;id<=600019;++id) {
+        if(candidate->bakedStatic.count(id)!=size_t(ice))throw std::runtime_error("Nav64: ice variant static catalogue mismatch");
+        if(ice && !candidate->sources->objectTiles.count(id))throw std::runtime_error("Nav64: ice walkable source is missing");
+    }
+    return candidate;
+}
+void NavigationWorld::CommitVariant(std::unique_ptr<NavigationWorld> candidate, CWorldServer& world) {
+    // Finish the worker before retiring any source meshes. The candidate owns
+    // new queues, source tasks, object bindings and polygon generations.
+    if(sourceJob.valid())sourceJob.get();
+    for(const auto& entry:world.mapObjects)candidate->Object(entry.second,false,world.aiMap);
+    candidate->SyncObjects(true);candidate->UpdateSources(true);
+    *this=std::move(*candidate);
+    for(const auto& entry:world.mapObjects)if(auto* unit=dynamic_cast<CUnit*>(entry.second)) {
+        unit->navLocation.polygon=0;unit->navLocation.generation=0;
+        Restore(unit,world.aiMap);
+        if(auto* server=dynamic_cast<CUnitServer*>(unit->GetUnitSpecific()))server->RestoreNavigation(true);
+    }
 }
 const Navigation::BodySize& NavigationWorld::Body(CUnit* unit) {
     const auto& c=unit->GetComplection();const std::string mask=Navigation::ResourceName(unit->GetMaskName());

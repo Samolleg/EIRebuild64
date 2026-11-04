@@ -66,6 +66,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="Game\NavigationWorld.cpp" />
+    <ClCompile Include="Game\ZoneIce.cpp" />
     <ClCompile Include="Game\NavigationBake.cpp" />
     <ClCompile Include="Navigation\BodyTable.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ObjectFileName>$(IntDir)Navigation_BodyTable.obj</ObjectFileName></ClCompile>
     <ClCompile Include="Navigation\Geometry.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ObjectFileName>$(IntDir)Navigation_Geometry.obj</ObjectFileName></ClCompile>

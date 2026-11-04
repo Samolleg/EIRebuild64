@@ -107,7 +107,7 @@ private:
     // void SendAddedItemsToPlayer( CPlayer *pPlayer, CGameBaseList &items, CGameBaseList &spells );
     void RecalcNightPower();
     BOOL LoadAIGraph(LPCSTR pszMapName, LPCSTR pszMobName, CMemorySave &graphChunk);
-    BOOL LoadMapObjects(LPCSTR pszMobName, bool bSkipScript);
+    BOOL LoadMapObjects(LPCSTR pszMobName, bool bSkipScript, bool objectsOnly = false);
     BOOL LoadMainMob(const char *pszMprName, const char *pszMobName, CMemorySave &graphChunk,
                      bool bStaticOnly, bool skipScripts = false);
     void StartZoneLoading();
@@ -156,9 +156,9 @@ public:
     virtual BOOL IsServer() { return TRUE; }
     EServerMode GetServerMode() { return serverMode; }
     // Load map
-    BOOL NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneName = 0);
+    BOOL NewZone(LPCSTR pszMapName, LPCSTR pszMobName, LPCSTR pszZoneName = 0, CParty* arriving = nullptr);
     // all secondary mobs should be added after NewZone()
-    BOOL AddSecondaryMob(LPCSTR pszMobName);
+    BOOL AddSecondaryMob(LPCSTR pszMobName, bool objectsOnly = false);
     void CheckZone(const char *pszMapName,
                    const char *pszMobName); // for precaching only (on client)
     void RemoveEverythingDynamic();         // prepare server for map change

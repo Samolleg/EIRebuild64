@@ -17,7 +17,7 @@
 class CGameMOBFile : public CChunkFile
 {
 public:
-    bool Load(CWorldServer *pWorldServer, bool bSkipScript = false);
+    bool Load(CWorldServer *pWorldServer, bool bSkipScript = false, bool objectsOnly = false);
     bool Read(CBasicObjectMap &objects, SDiplomation &dipl, CString &szScript);
 
 protected:

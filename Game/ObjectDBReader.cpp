@@ -43,13 +43,15 @@ struct SComplectionContainer
     }
 };
 /////////////////////////////////////////////////////////////////////////////////////
-bool CGameMOBFile::Load(CWorldServer *pWorldServer, bool bSkipScript)
+bool CGameMOBFile::Load(CWorldServer *pWorldServer, bool bSkipScript, bool objectsOnly)
 {
     CBasicObjectMap objects;
     SDiplomation dipl;
     CString szScript;
 
-    if (Read(objects, dipl, szScript))
+    const bool read = Read(objects, dipl, szScript);
+    if(objectsOnly && !read)return false;
+    if (read && !objectsOnly)
     {
         int i, j;
         for (i = 0; i < N_MAX_PLAYERS; i++)
@@ -144,7 +146,7 @@ bool CGameMOBFile::Load(CWorldServer *pWorldServer, bool bSkipScript)
             {
                     ErrorDialog::ShowA(GetActiveWindow(),  "CGameMOBFile::Load\nScript not found." , "EIRebuild", MB_OK | MB_ICONERROR);
             }*/
-    if (!bSkipScript){
+    if (!bSkipScript && !objectsOnly){
         BOOL parsed=theWorldServer.script.LoadText(szScript);
         auto error=theWorldServer.script.GetLastError();
         EngineDiagnostics::Event("MOB script parsed=%d bytes=%d line=%d error=%s",parsed,szScript.GetLength(),error.nLine,(LPCSTR)error.text);

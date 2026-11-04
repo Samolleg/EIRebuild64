@@ -9,6 +9,7 @@
 #include "ModAnimationLoop.h"
 #include "MapObjectManager.h"
 #include "ModRegisteredLoot.h"
+#include "ZoneIce.h"
 #include <cmath>
 #include <stdexcept>
 #include "WorldServer.h"
@@ -121,6 +122,8 @@ inline const Entry registry[]={
  {393,"PartyDisguiseMatches","Fs",true},
  {394,"PlayAnimationLoop","os",true},
  {395,"StopAnimationLoop","o",true},
+ {396,"ZoneIceSync","",true},
+ {397,"ZoneIceFreeze","",true},
 };
 inline const Entry* Find(int id){for(const auto&e:registry)if(e.id==id)return &e;return nullptr;}
 // Native added command 372 owns the direct custom consumer, not recipient virtual dispatch.
@@ -282,6 +285,8 @@ inline bool Group(SSCCmd&cmd,CScriptObjectGroup&result){
 inline bool Action(SSCCmd&cmd){
  auto*unit=UnitArg(cmd);auto*server=ServerArg(cmd);float a=cmd.params.GetSize()?cmd.params[0]:0;
  switch(cmd.command){
+ case 396:ZoneIce::Sync();break;
+ case 397:ZoneIce::Freeze();break;
  case 314:{if(auto*p=PlayerServer(CheckedInt(a)))p->SetVar(cmd.szParams[0],cmd.params[1]);break;}
  case 316:{auto*p=theWorldServer.GetPlayer(CheckedInt(a));if(p)theWorldServer.GainExperience(p,cmd.params[1]);break;}
  case 317:if(server){server->GainExperience(a);if(auto*p=unit->GetOwner())if(auto*ps=dynamic_cast<CPlayerServer*>(p->GetPlayerSpecific()))ps->GainExp(unit->GetID(),a);}break;

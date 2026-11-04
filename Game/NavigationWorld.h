@@ -32,6 +32,7 @@ class NavigationWorld {
     std::map<int,std::array<AirJournal,3>> airJournal;
     bool ObserveAir(CUnit* unit,AirEvent event,unsigned& suppressed);
     bool loaded=false;
+    bool iceVariant=false;
     Navigation::Authoring authoring;
     std::map<int,std::vector<Navigation::Solid>> liveObjects;
     std::map<int,std::vector<Navigation::Solid>> appliedObjects;
@@ -61,7 +62,7 @@ class NavigationWorld {
     const std::vector<Navigation::Obstacle>* queryObstacles=nullptr;
     const Navigation::Route* queryReuse=nullptr;
     void UpdateSources(bool initial);
-    bool Load(const std::filesystem::path& directory);
+    bool Load(const std::filesystem::path& directory, bool synchronize=true);
 
     void QueueBox(const Navigation::Solid& box);
     bool Dynamic(int id) const { return !bakedStatic.count(id); }
@@ -73,6 +74,10 @@ class NavigationWorld {
 public:
     NavigationWorld();
     ~NavigationWorld();
+    NavigationWorld& operator=(NavigationWorld&&) = default;
+    bool IsIceVariant() const { return iceVariant; }
+    std::unique_ptr<NavigationWorld> PrepareVariant(bool ice);
+    void CommitVariant(std::unique_ptr<NavigationWorld> candidate, CWorldServer& world);
     Navigation::Geometry* Terrain(); // Null in game sessions.
     void Scene(const char* mpr,const char* mob);
     void Object(CMapObject* object,bool remove,CAIMap& map);
