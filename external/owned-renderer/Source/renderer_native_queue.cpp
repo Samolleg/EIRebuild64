@@ -3318,9 +3318,11 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
       if(!lod_view.world.object_space)draw.instance.second_morph_offset=draw.world_base;
      }
      auto& slot=native_prepared_material_slots_[handle->slot];
+     const auto lod_observer=old.lod_observer;
      if(FAILED(hr=store_native_instance(slot.persistent_instance[pass],submission.pose->owner,draw)))
       return fail(hr,"records.instance");
      current=draw.persistent_instance;
+     native_instance_records_[current].lod_observer=lod_observer;
     }
    }
    auto& record=native_instance_records_[current];
