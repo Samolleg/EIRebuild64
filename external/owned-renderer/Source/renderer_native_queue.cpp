@@ -3941,9 +3941,10 @@ namespace {
 std::mutex lod_snapshot_mutex;
 std::shared_ptr<const NativeLodSnapshot> lod_snapshot;
 std::atomic<std::uint64_t> lod_request_counter{0},lod_requested{0},lod_requested_epoch{0},lod_consumed{0};
-void publish_lod_snapshot(std::shared_ptr<const NativeLodSnapshot> value) noexcept {
+bool publish_lod_snapshot(std::shared_ptr<const NativeLodSnapshot> value) noexcept {
  std::unique_lock<std::mutex> lock(lod_snapshot_mutex,std::try_to_lock);
- if(lock.owns_lock())lod_snapshot=std::move(value);
+ if(!lock.owns_lock())return false;
+ lod_snapshot=std::move(value);return true;
 }
 }
 std::shared_ptr<const NativeLodSnapshot> native_lod_snapshot() noexcept {
@@ -3975,7 +3976,7 @@ void Renderer::begin_native_lod_frame() noexcept try {
  native_lod_request_=request;
  if(native_lod_failed_){
   auto failed=std::make_shared<NativeLodSnapshot>();failed->world_epoch=world_state_epoch_;
-  failed->request=request;failed->unavailable=true;publish_lod_snapshot(std::move(failed));return;
+  failed->request=request;failed->unavailable=true;native_lod_readbacks_[0].snapshot=std::move(failed);return;
  }
  if(!native_lod_observations_){
   D3D11_BUFFER_DESC desc{};desc.ByteWidth=kNativeLodObservationCapacity*sizeof(NativeLodDecisionGpu);
@@ -3992,7 +3993,7 @@ void Renderer::begin_native_lod_frame() noexcept try {
   if(FAILED(hr)){
    native_lod_failed_=true;
    auto failed=std::make_shared<NativeLodSnapshot>();failed->world_epoch=world_state_epoch_;failed->request=request;failed->unavailable=true;
-   publish_lod_snapshot(std::move(failed));return;
+   native_lod_readbacks_[0].snapshot=std::move(failed);return;
   }
   native_lod_observations_=std::move(buffer);native_lod_observation_uav_=std::move(uav);
  }
@@ -4020,6 +4021,10 @@ void Renderer::finish_native_lod_frame() noexcept try {
  if(!context_)return;
  // Three independent slots: never overwrite an in-flight copy, never Flush or wait.
  for(auto& slot:native_lod_readbacks_)if(slot.snapshot){
+  if(slot.snapshot->unavailable){
+   if(publish_lod_snapshot(slot.snapshot))slot.snapshot.reset();
+   continue;
+  }
   D3D11_MAPPED_SUBRESOURCE mapped{};
   const HRESULT hr=context_->Map(slot.buffer.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped);
   if(hr==DXGI_ERROR_WAS_STILL_DRAWING)continue;
@@ -4028,9 +4033,10 @@ void Renderer::finish_native_lod_frame() noexcept try {
    for(auto& row:slot.snapshot->rows)row.decision=rows[row.record];
    context_->Unmap(slot.buffer.Get(),0);
    if(slot.snapshot->world_epoch==world_state_epoch_&&slot.snapshot->frame>native_lod_published_frame_){
-    native_lod_published_frame_=slot.snapshot->frame;publish_lod_snapshot(slot.snapshot);
+    if(!publish_lod_snapshot(slot.snapshot))continue; // retry next frame without losing the request
+    native_lod_published_frame_=slot.snapshot->frame;
    }
-  }else{slot.snapshot->unavailable=true;publish_lod_snapshot(slot.snapshot);}
+  }else{slot.snapshot->unavailable=true;if(!publish_lod_snapshot(slot.snapshot))continue;}
   slot.snapshot.reset();
  }
  if(!native_lod_capture_||native_lod_copied_frame_==native_lod_frame_)return;
