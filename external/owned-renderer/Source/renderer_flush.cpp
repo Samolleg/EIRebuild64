@@ -963,11 +963,13 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
  context_->CSSetConstantBuffers(3,1,native_world_clip_constants_.GetAddressOf());
  {ID3D11ShaderResourceView* hiz=native_occlusion_active()?native_hiz_srv_.Get():nullptr;context_->CSSetShaderResources(26,1,&hiz);}
  ID3D11ShaderResourceView* compute_srvs[8]={nullptr,native_dynamic_srv_.Get(),nullptr,nullptr,native_draw_srv_.Get(),nullptr,nullptr,nullptr};context_->CSSetShader(native_build_cs_.Get(),nullptr,0);context_->CSSetConstantBuffers(1,1,native_world_lighting_constants_.GetAddressOf());ID3D11UnorderedAccessView* compute_uavs[4]={native_visible_triangle_uav_.Get(),native_indirect_args_uav_.Get(),native_prepared_vertex_uav_.Get(),native_world_vertex_uav_.Get()};context_->CSSetUnorderedAccessViews(0,4,compute_uavs,nullptr);
- begin_native_lod_capture(layout);
+ const bool capture_lod=begin_native_lod_capture(layout);
+ ID3D11UnorderedAccessView* lod_uav=capture_lod?native_lod_observation_uav_.Get():nullptr;
+ context_->CSSetUnorderedAccessViews(4,1,&lod_uav,nullptr);
  for(const auto& range:layout.dispatches){
   compute_srvs[0]=native_geometry_page_srv(range.geometry_page);if(!compute_srvs[0])return native_flush_failure_line_=__LINE__,finish(E_FAIL);
   context_->CSSetShaderResources(1,8,compute_srvs);
-  if(FAILED(hr=upload_native_work_range(range)))return native_flush_failure_line_=__LINE__,finish(hr);
+  if(FAILED(hr=upload_native_work_range(range,capture_lod)))return native_flush_failure_line_=__LINE__,finish(hr);
   UINT dispatch_width=0,dispatch_height=0;if(!native_dispatch_dimensions(range.count,dispatch_width,dispatch_height))return native_flush_failure_line_=__LINE__,finish(HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW));
   transition_profile_pass("compute_build");context_->Dispatch(dispatch_width,dispatch_height,1);++perf_native_compute_dispatches_;++native_frame_stats_.native_compute_dispatches;
  }

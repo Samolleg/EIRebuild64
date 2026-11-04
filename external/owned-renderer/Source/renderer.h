@@ -2566,7 +2566,7 @@ private:
                                    const void* data, UINT bytes);
     ID3D11ShaderResourceView* native_geometry_page_srv(UINT page) const noexcept;
     void refresh_native_mesh_records(NativeMesh& mesh) noexcept;
-    HRESULT upload_native_work_range(const NativeDispatchRange& range);
+    HRESULT upload_native_work_range(const NativeDispatchRange& range, bool capture_lod = false);
     HRESULT trim_native_mesh_cache();
     // Retires unowned geometry last used before frame `before`.
     HRESULT retire_stale_native_geometry(std::uint64_t before);
@@ -4152,7 +4152,7 @@ private:
     bool native_lod_failed_ = false;
     std::uint64_t native_lod_request_ = 0;
     void begin_native_lod_frame() noexcept;
-    void begin_native_lod_capture(const NativeSubmissionLayout& layout) noexcept;
+    bool begin_native_lod_capture(const NativeSubmissionLayout& layout) noexcept;
     void finish_native_lod_frame() noexcept;
     void release_native_lod_observer() noexcept;
     ComPtr<ID3D11ComputeShader> native_pose_cs_;

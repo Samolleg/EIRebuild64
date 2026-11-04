@@ -4004,8 +4004,15 @@ void Renderer::begin_native_lod_frame() noexcept try {
  native_lod_capture_->request=request;native_lod_frame_=native_frame_index_;
 } catch(...) {native_lod_failed_=true;native_lod_capture_.reset();}
 
-void Renderer::begin_native_lod_capture(const NativeSubmissionLayout& layout) noexcept try {
- if(!native_lod_capture_||native_lod_frame_!=native_frame_index_||native_lod_failed_)return;
+bool Renderer::begin_native_lod_capture(const NativeSubmissionLayout& layout) noexcept try {
+ if(!native_lod_capture_||native_lod_frame_!=native_frame_index_||native_lod_failed_||
+    scene_composited_||hit_test_active_||native_shadow_collecting_||native_point_shadow_active_||native_rain_active_||
+    rtv_.Get()!=scene_composite_.target()||dsv_.Get()!=world_dsv_.Get()||!native_world_clip_valid_)return false;
+ // The host publishes the player's world camera before drawing the scene.
+ // Matching both camera and targets admits its split colour flushes (including
+ // neighbours), never a preview, picking or off-screen camera in the same frame.
+ const auto camera=bridge_scene_world_to_clip_snapshot();
+ if(!camera.valid||!camera.scene_frame_serial||camera.world_to_clip!=native_world_clip_)return false;
  for(const auto& work:layout.work){
   if(work.record>=native_instance_records_.size())continue;
   const auto& identity=native_instance_records_[work.record].lod_observer;if(!identity)continue;
@@ -4014,8 +4021,8 @@ void Renderer::begin_native_lod_capture(const NativeSubmissionLayout& layout) no
   if(index==UINT_MAX){index=UINT(native_lod_capture_->rows.size());native_lod_capture_->rows.push_back({work.record,identity,{}});}
   else native_lod_capture_->rows[index].identity=identity; // record reused in this frame: last submission wins
  }
- context_->CSSetUnorderedAccessViews(4,1,native_lod_observation_uav_.GetAddressOf(),nullptr);
-} catch(...) {native_lod_failed_=true;native_lod_capture_.reset();}
+ return true;
+} catch(...) {native_lod_failed_=true;native_lod_capture_.reset();return false;}
 
 void Renderer::finish_native_lod_frame() noexcept try {
  if(!context_)return;
