@@ -1631,23 +1631,25 @@ BYTE CAIMap::GetUnitLockCheck(CUnit *pUnit)
     return GetLockCheckValue(pUnit->GetCollisionDistance());
 }
 /////////////////////////////////////////////////////////////////////////////////////
-CUnit *CAIMap::CheckCircleCollision(CUnit *pUnit, const CPlot3D &newPos)
+CUnit *CAIMap::CheckCircleCollision(CUnit *pUnit, const CPlot3D &newPos, const Navigation::Location *support, bool allowEscape)
 {
-    CUnitList nearUnits;const float radius=navigation.Radius(pUnit);
+    CUnitList nearUnits;const float radius=navigation.CollisionRadius(pUnit);
     mapObjects.GetUnitsNear(newPos,nearUnits,10);
     for(POSITION pos=nearUnits.GetHeadPosition();pos;) {
         auto* other=nearUnits.GetNext(pos);if(other==pUnit||other->IsDead())continue;
-        const float sum=radius+navigation.Radius(other);
+        const float sum=radius+navigation.CollisionRadius(other);
         const float next=distanceXY2(newPos,other->GetCP());
         if(next>=sum*sum)continue;
         const float previous=distanceXY2(pUnit->GetCP(),other->GetCP());
-        if(previous<sum*sum&&next>previous+.00001f)continue;
-        auto first=navigation.Position(pUnit,*this),second=navigation.Position(other,*this);
+        if(allowEscape&&previous<sum*sum&&next>previous+.00001f)continue;
+        auto first=support?support->position:navigation.Position(pUnit,*this);
+        const auto second=navigation.Position(other,*this);
         if(pUnit->GetUserUnitStats()->cLocomotion==3||other->GetUserUnitStats()->cLocomotion==3) {
             // Flying bodies occupy world height; units on the ground below
             // them do not form an XY wall.
             Navigation::Location at;
-            if(!navigation.Support(pUnit,{newPos.x,newPos.y,first.z},at))continue;
+            if(support)at=*support;
+            else if(!navigation.Support(pUnit,{newPos.x,newPos.y,first.z},at))continue;
             const float low=at.position.z+pUnit->GetCP().z,otherLow=second.z+other->GetCP().z;
             if(low>=otherLow+other->GetUnitHeight()||otherLow>=low+pUnit->GetUnitHeight())continue;
         } else if(std::abs(first.z-second.z)>2.f)continue;

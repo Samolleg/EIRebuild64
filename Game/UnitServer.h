@@ -493,7 +493,7 @@ private:
     void L1StartSuffer();
     //  L1 interface
     void L1ResetState();
-    bool L1StartMove(const CPlot3D &ptTarget, float fpMaxPathLength = 1e6f);
+    bool L1StartMove(const CPlot3D &ptTarget, float fpMaxPathLength = 1e6f, const Navigation::Location *goalSupport = nullptr);
     void L1StartRotate(const CPlot3D &vecDest, float fpAngSpeed = 0);
     void L1StartIdle();
     void L1StartSpecialCycle(SL0AnimationSeq animation);
