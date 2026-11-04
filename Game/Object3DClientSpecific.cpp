@@ -899,8 +899,8 @@ bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
             pose.object_flags |= OBJ_HIDDEN;
     }
 #endif
-    // Respect host source policy without a second shadow renderer.
-    if (!IsNeedShadow()) pose.object_flags |= OBJ_NOSHADOW;
+    // Keep the authored OBJ_NOSHADOW bit. Legacy software-shadow settings
+    // do not govern the owned renderer's sun and point shadow admission.
     float qw = 1.0f, qx = 0.0f, qy = 0.0f, qz = 0.0f;
     orientation.GetComponents(qw, qx, qy, qz);
     pose.quaternion = {{qw, qx, qy, qz}};
