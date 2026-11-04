@@ -27,6 +27,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "OwnedRender/E1Surface.h"
 #include "owned_asset_loader.h"
 #include "engine_bridge.h"
+#include "retained_static_submission.h"
 #include "model_draw.h"
 #include "widescreen_layout.h"
 #include "model_preview_geometry.h"
@@ -808,6 +809,8 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
         part.explicitly_hidden = figure->CheckFlag(FIG_HIDDEN) || part.geometry->indices.empty();
         assembly->parts.push_back(std::move(part));
     }
+    // Match the retail bridge's tree classification before publication.
+    if (object->WhoAmI() == HPC_TREE) owned::sway_tree_assembly(*assembly);
     return assembly;
 }
 catch (...) {
