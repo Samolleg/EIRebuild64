@@ -121,6 +121,13 @@ public:
     CAIGraphVertices excludeVertices;
     // насколько сложно по этому пути рассекать, вычисляется routeOptimizer`om
     int nPathCost;
+    // Derived navigation intent; no new save fields. The command destination
+    // above remains the single owner of the latest order.
+    std::uint64_t navigationGeneration=0;
+    bool navigationPending=false;
+    Navigation::Location navigationGoal;
+    Navigation::GoalPolicy navigationPolicy=Navigation::GoalPolicy::Exact;
+    float navigationMaxLength=1.e6f,navigationMinDistance=0;
     void NotMoving(CUnit *pUnit);
 
 public:

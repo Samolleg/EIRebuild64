@@ -4147,8 +4147,8 @@ private:
     std::array<NativeLodReadback,3> native_lod_readbacks_;
     std::shared_ptr<NativeLodSnapshot> native_lod_capture_;
     std::vector<UINT> native_lod_row_indices_;
-    std::uint64_t native_lod_frame_ = UINT64_MAX, native_lod_copied_frame_ = UINT64_MAX;
-    std::uint64_t native_lod_published_frame_ = 0;
+    std::uint64_t native_lod_frame_ = UINT64_MAX;
+    std::uint64_t native_lod_copied_request_ = 0, native_lod_published_request_ = 0;
     bool native_lod_failed_ = false;
     std::uint64_t native_lod_request_ = 0;
     void begin_native_lod_frame() noexcept;

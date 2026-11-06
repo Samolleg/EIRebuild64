@@ -3965,8 +3965,8 @@ void Renderer::release_native_lod_observer() noexcept {
  native_lod_observations_.Reset();native_lod_observation_uav_.Reset();
  native_lod_row_indices_.clear();
  for(auto& slot:native_lod_readbacks_){slot.buffer.Reset();slot.snapshot.reset();}
- native_lod_capture_.reset();native_lod_frame_=native_lod_copied_frame_=UINT64_MAX;
- native_lod_published_frame_=0;native_lod_failed_=false;native_lod_request_=0;
+ native_lod_capture_.reset();native_lod_frame_=UINT64_MAX;
+ native_lod_copied_request_=native_lod_published_request_=0;native_lod_failed_=false;native_lod_request_=0;
  publish_lod_snapshot(nullptr);
 }
 
@@ -3977,11 +3977,16 @@ void Renderer::begin_native_lod_frame() noexcept try {
  const auto capacity=(std::max)(size_t(kNativeLodObservationCapacity),native_instance_records_.size());
  if(capacity>native_lod_row_indices_.size())
   for(const auto& slot:native_lod_readbacks_)if(slot.snapshot)return; // drain old buffers before growing
+ // Allocate the reply before accepting the request. After acceptance every
+ // failure must reach publication; resetting a failed capture strands its ID.
+ auto capture=std::make_shared<NativeLodSnapshot>();
+ capture->frame=native_frame_index_;capture->world_epoch=world_state_epoch_;
+ capture->request=request;capture->record_capacity=UINT(capacity);
+ native_lod_capture_=std::move(capture);native_lod_frame_=native_frame_index_;
  native_lod_request_=request;
  if(capacity>kNativeLodObservationRecordLimit)native_lod_failed_=true;
  if(native_lod_failed_){
-  auto failed=std::make_shared<NativeLodSnapshot>();failed->world_epoch=world_state_epoch_;
-  failed->request=request;failed->unavailable=true;native_lod_readbacks_[0].snapshot=std::move(failed);return;
+  native_lod_capture_->unavailable=true;return;
  }
  if(!native_lod_observations_||capacity>native_lod_row_indices_.size()){
   std::vector<UINT> indices(capacity,UINT_MAX);
@@ -3998,19 +4003,15 @@ void Renderer::begin_native_lod_frame() noexcept try {
   for(auto& slot:native_lod_readbacks_)if(SUCCEEDED(hr))hr=device_->CreateBuffer(&desc,nullptr,&slot.buffer);
   if(FAILED(hr)){
    native_lod_failed_=true;
-   auto failed=std::make_shared<NativeLodSnapshot>();failed->world_epoch=world_state_epoch_;failed->request=request;failed->unavailable=true;
-   native_lod_readbacks_[0].snapshot=std::move(failed);return;
+   native_lod_capture_->unavailable=true;return;
   }
   native_lod_observations_=std::move(buffer);native_lod_observation_uav_=std::move(uav);
   native_lod_row_indices_=std::move(indices);
  }
  const UINT zero[4]{};context_->ClearUnorderedAccessViewUint(native_lod_observation_uav_.Get(),zero);
  std::fill(native_lod_row_indices_.begin(),native_lod_row_indices_.end(),UINT_MAX);
- native_lod_capture_=std::make_shared<NativeLodSnapshot>();
- native_lod_capture_->frame=native_frame_index_;native_lod_capture_->world_epoch=world_state_epoch_;
- native_lod_capture_->request=request;native_lod_frame_=native_frame_index_;
  native_lod_capture_->record_capacity=UINT(native_lod_row_indices_.size());
-} catch(...) {native_lod_failed_=true;native_lod_capture_.reset();}
+} catch(...) {native_lod_failed_=true;if(native_lod_capture_)native_lod_capture_->unavailable=true;}
 
 bool Renderer::begin_native_lod_capture(const NativeSubmissionLayout& layout) noexcept try {
  const auto request=lod_requested.load(std::memory_order_acquire);
@@ -4038,14 +4039,16 @@ bool Renderer::begin_native_lod_capture(const NativeSubmissionLayout& layout) no
   else native_lod_capture_->rows[index].identity=identity; // record reused in this frame: last submission wins
  }
  return true;
-} catch(...) {native_lod_failed_=true;native_lod_capture_.reset();return false;}
+} catch(...) {native_lod_failed_=true;if(native_lod_capture_)native_lod_capture_->unavailable=true;return false;}
 
 void Renderer::finish_native_lod_frame() noexcept try {
- if(!context_)return;
+ if(!context_||(!native_lod_capture_&&native_lod_request_<=native_lod_published_request_))return;
  // Three independent slots: never overwrite an in-flight copy, never Flush or wait.
  for(auto& slot:native_lod_readbacks_)if(slot.snapshot){
   if(slot.snapshot->unavailable){
-   if(publish_lod_snapshot(slot.snapshot))slot.snapshot.reset();
+   if(publish_lod_snapshot(slot.snapshot)){
+    native_lod_published_request_=slot.snapshot->request;slot.snapshot.reset();
+   }
    continue;
   }
   D3D11_MAPPED_SUBRESOURCE mapped{};
@@ -4056,17 +4059,27 @@ void Renderer::finish_native_lod_frame() noexcept try {
    slot.snapshot->observed_rows=0;
    for(auto& row:slot.snapshot->rows){row.decision=rows[row.record];if(row.decision.state)++slot.snapshot->observed_rows;}
    context_->Unmap(slot.buffer.Get(),0);
-   if(slot.snapshot->world_epoch==world_state_epoch_&&slot.snapshot->frame>native_lod_published_frame_){
+   if(slot.snapshot->world_epoch==world_state_epoch_&&slot.snapshot->request>native_lod_published_request_){
     if(!publish_lod_snapshot(slot.snapshot))continue; // retry next frame without losing the request
-    native_lod_published_frame_=slot.snapshot->frame;
+    native_lod_published_request_=slot.snapshot->request;
    }
-  }else{slot.snapshot->unavailable=true;if(!publish_lod_snapshot(slot.snapshot))continue;}
+  }else{
+   slot.snapshot->unavailable=true;if(!publish_lod_snapshot(slot.snapshot))continue;
+   native_lod_published_request_=slot.snapshot->request;
+  }
   slot.snapshot.reset();
  }
- if(!native_lod_capture_||native_lod_copied_frame_==native_lod_frame_)return;
+ if(!native_lod_capture_)return;
+ if(native_lod_capture_->unavailable){
+  if(publish_lod_snapshot(native_lod_capture_)){
+   native_lod_published_request_=native_lod_capture_->request;native_lod_capture_.reset();
+  }
+  return;
+ }
+ if(native_lod_copied_request_==native_lod_capture_->request)return;
  for(auto& slot:native_lod_readbacks_)if(!slot.snapshot&&slot.buffer){
   context_->CopyResource(slot.buffer.Get(),native_lod_observations_.Get());
-  slot.snapshot=std::move(native_lod_capture_);native_lod_copied_frame_=native_lod_frame_;break;
+  native_lod_copied_request_=native_lod_capture_->request;slot.snapshot=std::move(native_lod_capture_);break;
  }
 } catch(...) {} // Observation failure must not change the rendering result.
 

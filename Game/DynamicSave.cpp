@@ -1123,7 +1123,16 @@ void CRouteWalker::Load(SaveSchema::Reader &r)
 }
 void SAIPath::Store(SaveSchema::Writer &w) const
 {
-    w.Value(toGo); w.Value(curSegment); w.Value(ptFinish); w.Value(ptDestination);
+    w.Value(toGo);
+    if(navigationPending) {
+        // Encode the outstanding move using the existing route grammar. Load
+        // reconstructs it against the ready mesh, never executes this segment.
+        auto saved=curSegment;
+        saved.MakeMovement(Meter2AITile(ptDestination.x),Meter2AITile(ptDestination.y));
+        SRouteUnit goal;goal.point=CPlot2D(Meter2AITile(ptDestination.x),Meter2AITile(ptDestination.y));goal.supportZ=navigationGoal.position.z;
+        saved.route.route.AddTail(goal);w.Value(saved);
+    } else w.Value(curSegment);
+    w.Value(ptFinish); w.Value(ptDestination);
     w.Bool(bFinished); w.Bool(bRouteFailed); w.Bool(bTryAnyPath); w.Bool(bFirstTry);
     SaveSchema::WriteCount(w,excludeVertices.GetSize());
     for(int i=0;i<excludeVertices.GetSize();++i) {
@@ -1133,6 +1142,7 @@ void SAIPath::Store(SaveSchema::Writer &w) const
 }
 void SAIPath::Load(SaveSchema::Reader &r)
 {
+    navigationGeneration=0;navigationPending=false;navigationGoal={};navigationPolicy=Navigation::GoalPolicy::Exact;navigationMaxLength=1.e6f;navigationMinDistance=0;
     r.Value(toGo); r.Value(curSegment); r.Value(ptFinish); r.Value(ptDestination);
     bFinished=r.Bool(); bRouteFailed=r.Bool(); bTryAnyPath=r.Bool(); bFirstTry=r.Bool();
     excludeVertices.SetSize(r.Count());

@@ -108,7 +108,7 @@ bool saveIsolated=false; // game thread only; deliberately survives load/new gam
 bool IsCommand(const std::string& method) {
     return method=="load_save"||method=="new_game"||method=="enter_zone"||method=="save_game"||
            method=="unit_move"||method=="unit_teleport"||method=="pause"||method=="quit"||
-           method=="set_global";
+           method=="set_global"||method=="object_transform"||method=="god_mode";
 }
 
 json Error(const char* message) {return {{"ok",false},{"error",message},{"truncated",false}};}
@@ -146,7 +146,7 @@ json ExecutingStatus() {
     std::lock_guard<std::mutex> lock(operationMutex);
     if(!operation.inFlight||(!operation.executing&&operation.applied))return nullptr;
     json result={{"ok",operation.error.empty()},{"pid",GetCurrentProcessId()},
-                 {"status_scope","operation_only"},{"main_thread_responding",false},
+                 {"status_scope","operation_only"},{"main_thread_responding",false},{"god",nullptr},
                  {"operation",OperationJsonLocked()},{"truncated",false}};
     if(!operation.error.empty())result["error"]="game is not responding; see journal";
     return result;
@@ -633,7 +633,7 @@ json UnitDetail(CUnit* unit,CWorldServer& world,CPlayer* player) {
         {"command_target_id",command.GetTargetID()},{"command_point",Point(command.ptTarget)}};
     return result;
 }
-// Readiness is evaluated only for an explicit status request, never each frame.
+// Readiness is evaluated only for a status or command request, never each frame.
 // World construction alone is insufficient: wait for the normal local handshake
 // and the client/server copies of the squad to reach the mission.
 void UpdateOperationReadiness() {
@@ -654,12 +654,16 @@ void UpdateOperationReadiness() {
     auto* server=static_cast<CPlayerServer*>(serverPlayer->GetPlayerSpecific());
     if(!server||(server->GetStatus()!=CPlayerServer::PSS_ACTIVE&&server->GetStatus()!=CPlayerServer::PSS_CAMP))return;
     if(player->curInterface==IFACE_MISSION||player->curInterface==IFACE_BASE) {
-        if(player->party.people.GetSize()==0)return;
+        if(player->party.people.GetSize()!=serverPlayer->party.people.GetSize())return;
         for(int i=0;i<player->party.people.GetSize();++i) {
             const int id=player->party.people[i].nID;
+            if(id!=serverPlayer->party.people[i].nID)return;
             auto* unit=world.GetUnit(id);auto* clientUnit=theWorld.GetUnit(id);
-            if(!unit||unit->IsInvalid()||unit->IsUnreferenced()||
-               !clientUnit||clientUnit->IsInvalid()||clientUnit->IsUnreferenced()||
+            if(!unit||unit->IsInvalid()||unit->IsUnreferenced())return;
+            // A restored corpse need not remain owned or visible on the client.
+            // It is a valid loaded state, including the main hero's death screen.
+            if(unit->IsDead())continue;
+            if(!clientUnit||clientUnit->IsInvalid()||clientUnit->IsUnreferenced()||
                !Squad(unit,serverPlayer)||unit->GetOwner()!=serverPlayer||clientUnit->GetOwner()!=player)return;
             auto* specific=unit->GetUnitSpecific();
             if(!specific||specific->WhoAmI()!=HPC_UNITSERVERSPECIFIC)return;
@@ -674,14 +678,16 @@ json Status() {
     if(!world.bMapLoaded&&currentOperation.at("in_flight").get<bool>())
         return {{"ok",true},{"pid",GetCurrentProcessId()},
                 {"status_scope","operation_only"},{"main_thread_responding",true},
-                {"map_loaded",false},{"operation",currentOperation},{"truncated",false}};
+                {"map_loaded",false},{"god",nullptr},{"operation",currentOperation},{"truncated",false}};
     static const char* const screens[]={"none","mission","main_menu","base","global_map","camp","autoplay","debug","endgame","exchange"};
     const int screen=int(world.curInterface);
     const bool combat=world.IsCombatPause(),modal=theInterface.GetModalPause(),editor=OwnedRender::E3EditorPaused();
     const bool background=OwnedRender::E2BackgroundPaused(NGame::hWnd);
+    const auto* player=world.bMapLoaded?world.GetPlayer(0):nullptr;
     json result={{"ok",true},{"pid",GetCurrentProcessId()},{"map_loaded",bool(world.bMapLoaded)},
                  {"mode",screen},{"screen",screen>=0&&screen<10?screens[screen]:"unknown"},
-                 {"server_mode",int(world.GetServerMode())},{"paused",combat||modal||editor||background},
+                 {"server_mode",int(world.GetServerMode())},{"god",player?json(int(player->bGod)):json(nullptr)},
+                 {"paused",combat||modal||editor||background},
                  {"pause_reasons",{{"combat",combat},{"modal",modal},{"editor",editor},{"background",background}}},
                  {"camera",Point(theCamera.GetCP())},{"camera_anchor",Point(theCamera.GetAnchorPoint())},
                  {"truncated",false}};
@@ -743,6 +749,12 @@ bool Lod(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
             {"consistency","GPU snapshot; distances from request camera anchor"},
             {"position_basis","GPU render node origin, world metres"},
             {"visibility_basis","colour triangles emitted; not a pixel visibility test"}};
+        if(!name.empty()){
+            job.response["name"]=name;
+            job.response["name_scope"]="active_and_neighbour_snapshot";
+            job.response["name_match"]="waiting";
+            job.response["model_presence"]="not_determined";
+        }
     }
     if(!SameWorld(job,world)||owned::bridge_current_world_epoch()!=job.response["world_epoch"].get<std::uint64_t>()){
         job.response=Error("world changed while awaiting LOD snapshot");return true;
@@ -754,12 +766,19 @@ bool Lod(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
             job.lodSnapshot.reset();return ++job.offset>=3;
         }
         owned::native_lod_acknowledge(job.lodRequest);
-        if(job.lodSnapshot->unavailable){job.response["status"]="unavailable";return true;}
+        if(job.lodSnapshot->unavailable){
+            job.response["status"]="unavailable";
+            if(!name.empty())job.response["name_match"]="unavailable";
+            return true;
+        }
         job.response["snapshot_frame"]=job.lodSnapshot->frame;
         job.response["capture"]={{"camera_frame",job.lodSnapshot->camera_frame},
             {"record_capacity",job.lodSnapshot->record_capacity},{"rows",job.lodSnapshot->rows.size()},
             {"observed_rows",job.lodSnapshot->observed_rows}};
         job.response["status"]="ready";job.response["truncated"]=job.lodSnapshot->truncated;job.phase=2;
+        // The snapshot contains submitted render records, not a model catalog.
+        // No matching row cannot establish that a loaded/resource model is absent.
+        if(!name.empty())job.response["name_match"]="not_in_snapshot";
     }
     if(!SameWorld(job,world)||owned::bridge_current_world_epoch()!=job.lodSnapshot->world_epoch){
         job.response=Error("world changed during LOD scan");return true;
@@ -770,6 +789,10 @@ bool Lod(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
     while(job.item<rows.size()&&Clock::now()<deadline){
         const auto& row=rows[job.item++];const auto& source=*row.identity;const auto& choice=row.decision;
         if(!Match(source.model,name))continue;
+        if(!name.empty()){
+            job.response["name_match"]="matched";
+            job.response["model_presence"]="present";
+        }
         // A cleared slot has no GPU sample; no CPU substitute for position or LOD.
         const bool observed=choice.state!=0;
         const double dx=choice.position[0]-cameraX,dy=choice.position[1]-cameraY;
@@ -919,6 +942,9 @@ bool Nav(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
         };
         const auto start=path?point("ax","ay","az"):point("x","y","z");
         const auto goal=path?point("bx","by","bz"):Navigation::Point{};
+        if(navigation.ObserverUpdating(type)) {
+            job.response={{"ok",true},{"profile",profile},{"status","updating"},{"pending",true},{"truncated",false}};return true;
+        }
         job.mesh=navigation.ObserverMesh(type);
         if(!job.mesh){job.response=Error("runtime navigation profile is not loaded");return true;}
         job.world=&world;job.worldId=world.GetRTID();job.navProfile=type;job.navRevision=navigation.ObserverRevision();
@@ -933,7 +959,7 @@ bool Nav(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
         job.response={{"ok",true},{"profile",Navigation::Agents[job.navProfile].name},
             {"status",Navigation::StatusName(result.status)},{"truncated",result.truncated},
             {"dynamic_units_considered",false},{"height_basis","representative profile, not unit body or pose"},
-            {"source",Location(result.source)}};
+            {"source",Location(result.source)},{"navigation_generation",job.mesh->generation},{"pending",false}};
         if(path) {
             job.response["goal"]=Location(result.goal);job.response["points"]=json::array();
             for(const auto& point:result.points)job.response["points"].push_back(Location(point));
@@ -1007,8 +1033,9 @@ bool Command(Job& job) {
     // slot write in this process. Reading an owner's slot remains permitted.
     saveIsolated=true;
     const auto& method=job.method;const auto& params=job.request.at("params");
+    UpdateOperationReadiness();
     {std::lock_guard<std::mutex> lock(operationMutex);
-     if(operation.inFlight&&method!="quit")throw std::runtime_error("another game operation is in progress; query status");}
+     if(operation.inFlight&&method!="quit")throw std::runtime_error("another game operation is in progress");}
     GameJournal::Source source("mcp");
     if(method=="quit") {
         if(!NGame::CanQuit())throw std::runtime_error("game refused to quit");
@@ -1048,6 +1075,17 @@ bool Command(Job& job) {
         job.response=saved?json{{"ok",true},{"status","done"},{"name",name},{"operation_id",id},{"truncated",false}}:Error("save failed; see journal");
         return true;
     }
+    if(method=="god_mode") {
+        const auto& value=params.at("level");
+        if(!value.is_number_integer()||value<0||value>3)
+            throw std::runtime_error("level must be an integer from 0 to 3");
+        auto* player=theWorldServer.GetPlayer(0);
+        const int previous=player->bGod,level=value.get<int>();
+        // The same server-side party player field as SC_GODMODE.
+        player->bGod=static_cast<BYTE>(level);
+        job.response={{"ok",true},{"status","done"},{"player",0},
+            {"previous",previous},{"value",int(player->bGod)},{"truncated",false}};return true;
+    }
     if(method=="set_global") {
         const auto& key=params.at("name");
         if(!key.is_string())throw std::runtime_error("name must be a string");
@@ -1067,6 +1105,20 @@ bool Command(Job& job) {
         server->SetVar(name.c_str(),stored);
         job.response={{"ok",true},{"status","done"},{"scope","party"},{"player",0},
             {"name",name},{"previous",previous},{"value",stored},{"truncated",false}};return true;
+    }
+    if(method=="object_transform") {
+        // Service-only entry; future MOB owners call the same typed Nav seam.
+        const auto& id=params.at("id");
+        if(!id.is_number_integer()||id<0||id>INT_MAX)throw std::runtime_error("invalid scenery id");
+        if(!params.contains("z"))throw std::runtime_error("z is required and is terrain-relative");
+        const auto point=CommandPoint(params);const auto& angle=params.at("yaw");
+        if(!angle.is_number()||!std::isfinite(angle.get<double>())||std::abs(angle.get<double>())>1.e6)
+            throw std::runtime_error("yaw must be finite radians");
+        if(!params.at("present").is_boolean())throw std::runtime_error("present must be boolean");
+        auto& navigation=theWorldServer.aiMap.Navigation();
+        navigation.TransformObject(id.get<int>(),{point.x,point.y,point.z},angle.get<float>(),params.at("present").get<bool>());
+        job.response={{"ok",true},{"status","queued"},{"service",true},{"id",id},{"position",{point.x,point.y,point.z}},
+            {"yaw",angle},{"navigation_present",navigation.ObjectPresent(id.get<int>())},{"truncated",false}};return true;
     }
     if(method=="pause") {
         if(!params.at("on").is_boolean())throw std::runtime_error("on must be boolean");
