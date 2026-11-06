@@ -577,6 +577,8 @@ void CEffectParticle::Clear()
     fpPower = 1;
     fpPower2 = 1;
     typeID = TID_EMPTY;
+    bScriptFlow = false;
+    scriptFlowDirection = CPlot3D(0,0,0);
     ptDest = CPlot3D(0, 0, 0);
     nStartID = -1;
 }
@@ -669,6 +671,8 @@ BOOL CEffectParticle::UpdateFrom(EUpdateType tip, CUpdateHistory &pkt)
     pkt >> nStartID;
     pkt.ReadFloat(fpPower);
     pkt.ReadFloat(fpPower2);
+    pkt.Read(&bScriptFlow,sizeof(bScriptFlow));
+    if(bScriptFlow){pkt.ReadFloat(scriptFlowDirection.x);pkt.ReadFloat(scriptFlowDirection.y);scriptFlowDirection.z=0;}
     SetMoving();
     if (WhoAmI() == HPC_EFFECTPARTICLE && !pkt.UpdateFromIsOk())
         return FALSE;
@@ -695,6 +699,7 @@ void CEffectParticle::UpdateParticleParams()
         pParticle->AttachCarrier(NULL);
         pParticle->SetPower(fpPower);
         pParticle->SetPower2(fpPower2);
+        if(bScriptFlow)pParticle->ConfigureScriptFlow(scriptFlowDirection,fpPower,fpPower2);
         AttachCarrierOnClient();
 
         nTimePass = theWorld.GetSegmentTimeCounter() - nStartSegment;
@@ -724,6 +729,7 @@ void CEffectParticle::UpdateParticleParams()
         pParticle->Scale(fpScale / pParticle->GetScale());
         pParticle->SetPower(fpPower);
         pParticle->SetPower2(fpPower2);
+        if(bScriptFlow)pParticle->ConfigureScriptFlow(scriptFlowDirection,fpPower,fpPower2);
         AttachCarrierOnClient();
     }
 }
@@ -741,6 +747,8 @@ void CEffectParticle::UpdateTo(CUpdateHistory &pkt)
     pkt << nStartID;
     pkt.WriteFloat(fpPower);
     pkt.WriteFloat(fpPower2);
+    pkt.Write(&bScriptFlow,sizeof(bScriptFlow));
+    if(bScriptFlow){pkt.WriteFloat(scriptFlowDirection.x);pkt.WriteFloat(scriptFlowDirection.y);}
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CEffectParticle::Attach(int nObjectID)
@@ -762,6 +770,12 @@ void CEffectParticle::SetPower(float _fpPower, float _fpPower2)
     SetUpdateMask();
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CEffectParticle::SetScriptFlow(const CPlot3D &direction,float length,float width)
+{
+    if(bScriptFlow&&scriptFlowDirection.x==direction.x&&scriptFlowDirection.y==direction.y&&fpPower==length&&fpPower2==width)return;
+    bScriptFlow=true;scriptFlowDirection=direction;fpPower=length;fpPower2=width;SetUpdateMask();
+}
+// The local update stream carries flow values; it is not an x86 wire packet.
 void CEffectParticle::SetDestination(const CPlot3D &_ptDest)
 {
     ptDest = _ptDest;

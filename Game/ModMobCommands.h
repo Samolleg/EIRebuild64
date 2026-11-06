@@ -11,6 +11,7 @@
 #include "ModInvincible.h"
 #include "ModChase.h"
 #include "ModScriptMotion.h"
+#include "ModUnitSpawns.h"
 #include "MapObjectManager.h"
 #include "ModRegisteredLoot.h"
 #include "ZoneIce.h"
@@ -31,6 +32,10 @@ namespace ModMob {
 struct Entry {int id;const char*name;const char*format;bool ready;};
 inline const Entry registry[]={
  {276,"ChaseTrapDamage","offf",true},
+ {279,"SpawnUnitFromDB","fsffff",true},
+ {278,"DespawnUnit","f",true},
+ {290,"SetParticleFlow","fffff",true},
+ {287,"SetParticleSourcePower","fff",true},
  {291,"SetInvincible","osf",true},
  {293,"SetMovementModifier","off",true},
  {286,"SetWindAttackMode","of",true},
@@ -357,7 +362,7 @@ inline bool BranchForward(int&index,int count,bool skip,float amount){
 }
 #include "ModVoiceCommands.h"
 namespace ModMob {
-inline bool Void(SSCCmd&cmd,int*index=nullptr,int count=0,int*sleep=nullptr,BOOL*next=nullptr,bool canDefer=true){
+inline bool Void(SSCCmd&cmd,int*index=nullptr,int count=0,int*sleep=nullptr,BOOL*next=nullptr,bool canDefer=true,CScript* owner=nullptr){
  auto*mod=ModRuntime::Current();if(!mod)return false;auto*e=Find(cmd.command);if(!e)return false;
  if(cmd.command==387||cmd.command==390){Validate(*e,cmd);return Voice(cmd,sleep,next);}
  if(cmd.command==394||cmd.command==395){
@@ -379,6 +384,19 @@ inline bool Void(SSCCmd&cmd,int*index=nullptr,int count=0,int*sleep=nullptr,BOOL
   vars->SetVar(key.c_str(),float(entry->dwEntryIndex+1));
   if(server&&!serverUnit->IsInvalid())server->QueueAnimationLoop(entry->dwEntryIndex);
   return true;
+ }
+ if(cmd.command==279||cmd.command==278){
+  ModUnitSpawns::Status(0,1);
+  try{Validate(*e,cmd);}catch(const ArgumentError& error){return Reject(e->name,error.what());}
+  const auto& a=cmd.params;
+  if(cmd.command==279)ModUnitSpawns::Spawn(a[0],cmd.szParams[0],a[1],a[2],a[3],a[4]);
+  else ModUnitSpawns::Despawn(a[0]);
+  return true;
+ }
+ if(cmd.command==290||cmd.command==287){
+  Validate(*e,cmd);if(!owner)return Reject(e->name,"Missing source script owner");
+  const bool ok=cmd.command==290?owner->SetParticleFlow(cmd):owner->SetParticleSourcePower(cmd);
+  return ok?true:Reject(e->name,"Invalid particle source or parameters");
  }
  if(e->ready&&(cmd.command==391||cmd.command==392)){
   if(!ValidateDispatch(*e,cmd))return true;bool skip=cmd.command==392||cmd.params[0]==0;float amount=cmd.params[cmd.command==391?1:0];

@@ -172,6 +172,7 @@ public:
     virtual ~CParticle() { Destroy(); }
     virtual BOOL Create();
     void ConfigurePowerHit(CUnit*,const CPlot3D&,const CPlot3D&,int);
+    void ConfigureScriptFlow(const CPlot3D&,float length,float width);
     bool IsPowerHitGlow(int hit) const {return createFunc==&CParticle::PowerHitSingleCreate&&fpParam1==0&&locSources.GetSize()==1&&locSources[0].nPhase==hit;}
     void MarkPowerHitDelivered(){if(fpParam2>=0&&fpPower2==0){fpPower2=1;locSources[0].reserved.y=6;}}
     void SetPowerHitWindup(int ticks,std::uintptr_t token){locSources[0].reserved.x=float(ticks);powerHitWeaponToken=token;}
@@ -226,6 +227,9 @@ private:
     void UpdateBV(SSingleParticle *);
     void FinishBV();
     // Single particles processing
+    std::uint32_t scriptFlowRandom=0x13579bdu;
+    BOOL ScriptFlowSingleCreate(SSingleParticle*,int);
+    BOOL ScriptFlowSingleSegment(SSingleParticle*);
     const void* powerHitWorld=nullptr;
     BOOL PowerHitSingleCreate(SSingleParticle*,int);
     BOOL PowerHitSingleSegment(SSingleParticle*);

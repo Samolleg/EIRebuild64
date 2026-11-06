@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "embedded_particle_flow.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Particle.h"
@@ -166,6 +167,7 @@ void CParticle::Clear()
     SetOrientation(QNULL);
     pCarrier = NULL;
     carrierCP = GetCP();
+    scriptFlowRandom = 0x13579bdu;
     nBornProbability = 0;
     nMinTrys = 0;
     nLifeSpan = -1;
@@ -5586,6 +5588,45 @@ void CParticle::StartTransLocSourceSegmentFunc(SLocalSource *pLSrc)
 }
 
 // ------------------------- Segment processing ----------------------------------------------
+namespace {
+owned::ParticleFlowInput FlowInput(const CPlot3D& cp,const CPlot3D& direction,float length,float width){
+    return {{cp.x,cp.y,cp.z},{direction.x,direction.y},length,width};
+}
+void FlowToHost(const owned::ParticleFlowState& p,SSingleParticle& out){
+    out.coord.x=p.position[0];out.coord.y=p.position[1];out.coord.z=p.position[2];out.coord.w=p.size;
+    out.reserved=CPlot3D(p.lateral,p.angle,p.distance);out.reserved2=CPlot3D(p.size,0,0);
+    out.vSpeed=CPlot3D(p.speed,0,0);out.nLifeTime=p.life;out.nPhase=p.phase;out.dwColor=p.color;
+}
+}
+void CParticle::ConfigureScriptFlow(const CPlot3D& direction,float length,float width)
+{
+    if(GetTypeID()!=PTID_SMOKE)return;
+    if(createFunc!=&CParticle::ScriptFlowSingleCreate){
+        pTexture.SetDesc(TTID_SPELL_MAIN,"VisionFog");locSources.SetSize(0);
+        createFunc=&CParticle::ScriptFlowSingleCreate;segmentFunc=&CParticle::ScriptFlowSingleSegment;locSourceSegmentFunc=nullptr;
+        nBornProbability=100;nMinTrys=7;nParticlesMax=180;fpLenToSingleDice=1000;
+        nAnimPhases=15;nAnimPerTexSize=4;nLifeOfPhase=1;bUseAddEffect=FALSE;
+        ResetFlag(PS_NEED_CARRIER_TO_GENERATE|PS_BIND_TO_BODYPART);
+    }
+    ptWallDirection=direction;fpPower=length;fpPower2=width;
+}
+BOOL CParticle::ScriptFlowSingleCreate(SSingleParticle* out,int)
+{
+    *out={};out->nSpecial=0x1ce;out->nPhaseLifeTime=1;
+    owned::ParticleFlowState p;
+    owned::particle_flow_create(FlowInput(carrierCP,ptWallDirection,fpPower,fpPower2),scriptFlowRandom,p);
+    FlowToHost(p,*out);return TRUE;
+}
+BOOL CParticle::ScriptFlowSingleSegment(SSingleParticle* out)
+{
+    if(out->nSpecial!=0x1ce)return FALSE;
+    owned::ParticleFlowState p;
+    p.size=out->reserved2.x;p.lateral=out->reserved.x;p.angle=out->reserved.y;p.distance=out->reserved.z;
+    p.speed=out->vSpeed.x;p.life=out->nLifeTime;p.phase=out->nPhase;
+    if(!owned::particle_flow_segment(FlowInput(carrierCP,ptWallDirection,fpPower,fpPower2),p))return FALSE;
+    FlowToHost(p,*out);return TRUE;
+}
+
 void CParticle::AddNewParticle(SSingleParticle *pPart)
 {
     pPart->nDelFlag = 0;
@@ -5700,7 +5741,8 @@ int CParticle::Segment()
         for (int n = 0; n < nTrys && particles.GetCount() < nParticlesMax; n++)
         {
             // Throw dices
-            int nDice = random.Get(0, 99);
+            // Flow is always born (100%) and uses only its visual RNG.
+            int nDice = createFunc==&CParticle::ScriptFlowSingleCreate?0:random.Get(0, 99);
             // Check dices for create new particles
             if (nDice < nBornProbability)
                 CreateParticle(nParticles++);

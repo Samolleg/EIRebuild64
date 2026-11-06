@@ -108,6 +108,7 @@ public:
     float Radius(CUnit* unit) { return (std::max)(.05f,Body(unit).radius); }
     bool RandomGoal(CUnit* unit,Navigation::Point center,float radius,Navigation::Point& goal,Navigation::RandomShape shape=Navigation::RandomShape::Circle);
     bool Place(CUnit* unit,CAIMap& map);
+    bool Spawn(CUnit* unit,CAIMap& map); // Exact factory placement, no nearby-floor search.
     const std::string& Error() const { return error; }
     // Read-only: does not lazy-load the flying profile or touch unit queues.
     const Navigation::Mesh* ObserverMesh(int profile) const noexcept {
