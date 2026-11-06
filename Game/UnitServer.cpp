@@ -352,6 +352,7 @@ void CUnitServer::Clear()
     bL1MovementFailed = false;
     bL1SpeedChanged = false;
     bL1MoveAnimationSet = false;
+    nL1RunFailCounter = 0;
     currentPose.Clear();
     wishPose.Clear();
     pCastParticle = 0;
