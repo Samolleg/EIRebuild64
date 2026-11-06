@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModEncounter.h"
 #include "ModNativeCrtRandom.h"
 #include "NumericPolicy.h"
 #include "ModRuntime.h"
@@ -2058,6 +2059,7 @@ void CUnitClientSpecific::ClearAcks()
 /////////////////////////////////////////////////////////////////////////////////////
 bool CUnitClientSpecific::BeginPlayAck(SAckDescriptor &ack)
 {
+    if(ModEncounter::AckMuted(lpUnit))return false;
     ModAudioPolicy::AckScope route(lpUnit ? unsigned(lpUnit->GetID()) : 0, ack.dwType,
         ModRuntime::Current() && lpUnit);
     DWORD dwTime = timeGetTime();

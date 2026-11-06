@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModEncounter.h"
 #include "CorePerf.h"
 #include "OwnedRender/E1PerfDiagnostics.h"
 #include <algorithm>
@@ -898,7 +899,8 @@ bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
         const auto* player = client ? client->GetPlayer() : nullptr;
         const bool drawUndetected = !theSettings.nDrawVisibleOnly ||
             (player && player->curInterface != IFACE_MISSION);
-        if (!drawUndetected && !object->CheckFlag(UNIT_VISIBLE))
+        if (ModEncounter::Draw(*object))pose.object_flags |= UNIT_VISIBLE;
+        if (!drawUndetected && !(pose.object_flags & UNIT_VISIBLE))
             pose.object_flags |= OBJ_HIDDEN;
     }
 #endif

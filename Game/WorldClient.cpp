@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModEncounter.h"
 #include "RuntimePaths64.h"
 #include "CorePerf.h"
 #include "ItemApproachCatalog.h"
@@ -3280,7 +3281,7 @@ int CWorldClient::FormVisibilityLists(std::list<CSmartPtr<CMapObject>> *pObjects
                 continue;
             }
             // ... а вот показывать только тех, кого наши персы видят
-            if (!(bDrawInvisibleUnits || pObject->CheckFlag(UNIT_VISIBLE)))
+            if (!(bDrawInvisibleUnits || pObject->CheckFlag(UNIT_VISIBLE) || ModEncounter::Draw(*pObject)))
                 continue;
         }
         // first, check all the objects for visibility

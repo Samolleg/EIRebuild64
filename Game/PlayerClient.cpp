@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModEncounter.h"
 #include "SaveSlot.h"
 #include "GameJournal.h"
 #include "ModRuntime.h"
@@ -1362,6 +1363,7 @@ void CPlayerClient::BriefingComplete(const char *pszBrfVar)
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 void CPlayerClient::GoCamp(int nInterface)
 {
+    if(ModEncounter::AccessLocked())return;
     wpkt.Write(PID_GOCAMP);
     wpkt.Write(nInterface);
     status = CPS_CAMP;

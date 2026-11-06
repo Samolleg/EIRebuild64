@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModEncounter.h"
 #include "GameSave.h"
 #include "Effect.h"
 #include <set>
@@ -1752,6 +1753,7 @@ bool CModPackage::DeathFearExcludedPrototype(const char*prototype){
  return lua_toboolean(state,-1)!=0;
 }
 bool CModPackage::GoCampZoneExcluded(const char*zone){
+ if(ModEncounter::AccessLocked())return true;
  if(!zone||!*zone)return true;CallbackFrame frame(state);BeginCallback("IsGoCampExcludedZone");lua_pushstring(state,zone);Call(1,1);
  if(!lua_isboolean(state,-1))throw std::runtime_error("GoCamp zone policy must return boolean");return lua_toboolean(state,-1)!=0;
 }

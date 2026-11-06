@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "SaveSlot.h"
+#include "ModEncounter.h"
 #include "ZoneIce.h"
 #include "WorldServer.h"
 #include "WorldClient.h"
@@ -724,6 +725,7 @@ bool Slot::Presentation(const char *name,SSaveSlotDesc &desc,Bytes *shot)
 }
 bool Slot::Save(const char *name)
 {
+    if(ModEncounter::AccessLocked())return false;
     // All automatic, quick and manual slot writes converge here. Owner slots
     // are never overwritten after MCP takes control of this process.
     const auto protectedName=LiveObserver::ProtectedSaveSlot(name);name=protectedName.c_str();
