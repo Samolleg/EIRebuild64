@@ -16,7 +16,7 @@ struct Actor {
     bool operator==(const Actor& other) const { return id == other.id && incarnation == other.incarnation; }
 };
 inline Actor Identify(const CUnit& unit) { return {unit.GetID(), unit.GetRTID()}; }
-inline bool Valid(const CUnit* unit) { return unit && !unit->IsInvalid() && unit->GetID() != 0; }
+inline bool Valid(const CUnit* unit) { return unit && !unit->IsInvalid(); }
 
 struct Event {
     std::uint32_t sequence = 0;
@@ -81,6 +81,16 @@ struct State {
 };
 inline State& Journal() { static State state; return state; }
 inline void Reset() { Journal().Reset(); }
+inline void Forget(const CUnit& unit) {
+    // The manager can recycle the same CUnit, including its RTID and map ID.
+    // Forget on removal, as the plugin does on despawn; no actor scan in a frame.
+    const Actor actor = Identify(unit);
+    auto& journal = Journal();
+    for (std::size_t n = 0; n < journal.count; ++n) {
+        auto& event = journal.entries[n];
+        if (event.attacker == actor || event.target == actor) event = {};
+    }
+}
 
 // Simulation-thread context for a spell whose AI-facing attacker is deliberately hidden.
 // It names the exact portion and recipient, so nested unrelated damage cannot inherit it.
@@ -105,6 +115,8 @@ public:
 
 struct Delivery {
     Event event;
+    CUnit* attacker = nullptr;
+    CUnit* target = nullptr;
     std::uint64_t generation = 0;
     float before = 0;
     bool valid = false;
@@ -115,6 +127,7 @@ inline Delivery Begin(const SRPGAttackPortion& portion, CUnit* source, CUnit* ta
     if (!Valid(attacker) || attacker->IsDead() || !Valid(target) || target->IsDead() || !std::isfinite(before))
         return delivery;
     delivery.valid = true; delivery.generation = Journal().generation; delivery.before = before;
+    delivery.attacker = attacker; delivery.target = target;
     delivery.event.attacker = Identify(*attacker); delivery.event.target = Identify(*target);
     delivery.event.physical = portion.fpAttacks[0] > 0 || portion.fpAttacks[1] > 0 || portion.fpAttacks[2] > 0;
     const auto& a = attacker->GetCP(); const auto& t = target->GetCP();
@@ -123,6 +136,10 @@ inline Delivery Begin(const SRPGAttackPortion& portion, CUnit* source, CUnit* ta
 }
 inline void Complete(CWorldServer& world, const Delivery& delivery, float after) {
     if (!delivery.valid || delivery.generation != Journal().generation || !std::isfinite(after)) return;
+    // A removal inside a damage callback must not reinsert the forgotten actor.
+    if (!Valid(delivery.attacker) || !Valid(delivery.target) ||
+        !(Identify(*delivery.attacker) == delivery.event.attacker) ||
+        !(Identify(*delivery.target) == delivery.event.target)) return;
     auto event = delivery.event;
     event.damage = after < delivery.before;
     Journal().Record(world, event);
@@ -134,6 +151,7 @@ inline float Query(CWorldServer& world, int command, CUnit* first, CUnit* second
     if (!radius && (requested > 2 || requested != std::floor(requested))) return 0;
     if (command == 295) std::swap(first, second);
     if (!Valid(first) || !Valid(second)) return 0; // Dead, still present actors remain queryable.
+    if (!first->GetID() || !second->GetID()) return 0;
     auto& journal = Journal(); journal.Sync(world);
     const Actor attacker = Identify(*first), target = Identify(*second);
     for (std::size_t n = 0; n < journal.count; ++n) {
