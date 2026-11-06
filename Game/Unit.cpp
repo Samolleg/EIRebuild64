@@ -13,6 +13,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModInvincible.h"
 #include "ModScriptMotion.h"
 #include "ModArena.h"
+#include "ModFinalGolem.h"
 
 #include "WinRegistry.h"
 #include "FigureManager.h"
@@ -1035,9 +1036,11 @@ void CUnit::GetSpeeds(float &fpMoveSpeed, float &fpRotateSpeed)
     }
     if(auto*mod=ModRuntime::Current()){float factor=mod->CrippledSpeed(*this),fear=mod->DeathFearSpeedFactor(*this);if(fear<factor)factor=fear;auto speeds=ModAttackTiming::ScaleMovement({fpMoveSpeed,fpRotateSpeed},factor);fpMoveSpeed=speeds.move;fpRotateSpeed=speeds.rotate;}
     fpRotateSpeed *= theAIGeneralSettings.fpRotateSpeedMult;
+    if(ModFinalGolem::RamSpeed(*this,fpMoveSpeed))return;
+    fpMoveSpeed=ModFinalGolem::Speed(*this,fpMoveSpeed);
     if(scriptMovementEnabled&&!IsDead()&&std::isfinite(fpMoveSpeed)&&fpMoveSpeed>0)
         fpMoveSpeed=(std::max)(.1f/7.5f,(fpMoveSpeed+scriptMovementOffset/7.5f)*scriptMovementFactor);
-    if(ModEncounter::Arena(theWorldServer)&&!IsDead()&&fpMoveSpeed>0)fpMoveSpeed*=ModArena::Slow(*this);
+    if(ModEncounter::Arena(theWorldServer)&&!IsDead()&&fpMoveSpeed>0)fpMoveSpeed*=ModArena::Slow(*this)*ModFinalGolem::Slow(*this);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 float CUnit::GetShowSpeed()

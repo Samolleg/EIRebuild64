@@ -113,6 +113,26 @@ public:
     }
 };
 
+enum class PortionOrigin { Unknown, Projectile, Spell, MeleeItemSpell, Reflected };
+// Delivery provenance is typed and stack-only. Actual projectile/spell owners
+// re-establish it after load; no ABI padding, weapon reroll or save schema change.
+class PortionOriginScope {
+    const SRPGAttackPortion* portion;
+    const CUnit* recipient;
+    PortionOrigin kind;
+    PortionOriginScope* previous;
+    static PortionOriginScope*& Current() {static PortionOriginScope* scope=nullptr;return scope;}
+public:
+    PortionOriginScope(const SRPGAttackPortion& p,const CUnit& target,PortionOrigin origin)
+        :portion(&p),recipient(&target),kind(origin),previous(Current()){Current()=this;}
+    ~PortionOriginScope(){Current()=previous;}
+    PortionOriginScope(const PortionOriginScope&)=delete;
+    PortionOriginScope& operator=(const PortionOriginScope&)=delete;
+    static PortionOrigin Resolve(const SRPGAttackPortion& p,const CUnit* target) {
+        auto* scope=Current();return scope&&scope->portion==&p&&scope->recipient==target?scope->kind:PortionOrigin::Unknown;
+    }
+};
+
 struct Delivery {
     Event event;
     CUnit* attacker = nullptr;

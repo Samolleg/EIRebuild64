@@ -745,6 +745,9 @@ public:
     void CmdRotate(const CPlot3D &vecDest, float fpAngSpeed);
     bool TurnScriptPath(float radians);
     void ScriptSpeedChanged() { bL1SpeedChanged=true; }
+    float EncounterAttackRange(CUnit* target) {SUnitBasicCmd cmd;cmd.MakeAttack(target);return GetHitDist(cmd);}
+    bool EncounterAttackReady();
+    void EncounterCooldown(int tick) {nCanAttackTime=(std::max)(nCanAttackTime,tick);}
     void SetScriptWindAttack(float mode);
     bool ProcessScriptWindAttack();
     void CancelScriptWindPending();

@@ -169,6 +169,7 @@ void CParticle::Clear()
     carrierCP = GetCP();
     scriptFlowRandom = 0x13579bdu;
     arenaWave = {};
+    golemWall = {};
     nBornProbability = 0;
     nMinTrys = 0;
     nLifeSpan = -1;
@@ -6035,4 +6036,23 @@ BOOL CParticle::PowerHitSingleSegment(SSingleParticle* particle)
     particle->dwColor = RGBA_MAKE(225, 215, 195,
         215 * particle->nLifeTime / nLifeSpan);
     return TRUE;
+}
+void CParticle::ConfigureGolemWall(int side,int tick) {
+    if(GetTypeID()!=PTID_SMOKE||side<0||side>3)return;
+    if(createFunc!=&CParticle::GolemWallSingleCreate) {
+        golemWall={};pTexture.SetDesc(TTID_SPELL_MAIN,"TendriSmoke");locSources.SetSize(0);
+        createFunc=&CParticle::GolemWallSingleCreate;segmentFunc=&CParticle::GolemWallSingleSegment;locSourceSegmentFunc=nullptr;
+        nBornProbability=100;fpLenToSingleDice=1000;nAnimPhases=15;nAnimPerTexSize=4;nLifeOfPhase=1;bUseAddEffect=FALSE;
+        ResetFlag(PS_NEED_CARRIER_TO_GENERATE|PS_UNPAUSABLE|PS_BIND_TO_BODYPART|PS_PAUSE_INVISIBLE|PS_DONT_DRAW);
+        SetFlag(PS_GENERATE_PARTICLES|PS_KEEP_ALIVE);
+    }
+    golemWall.side=side;golemWall.lease_tick=tick;nMinTrys=side%2?40:80;nParticlesMax=1800;
+}
+BOOL CParticle::GolemWallSingleCreate(SSingleParticle* out,int) {
+    golemWall.ground=carrierCP.z;owned::ArenaWaveParticle p;
+    if(!owned::golem_wall_create(golemWall,p,theWorldServer.GetSegmentTimeCounter()))return FALSE;
+    *out={};ArenaToHost(p,*out);return TRUE;
+}
+BOOL CParticle::GolemWallSingleSegment(SSingleParticle* out) {
+    auto p=ArenaFromHost(*out);if(!owned::golem_wall_age(p))return FALSE;ArenaToHost(p,*out);return TRUE;
 }

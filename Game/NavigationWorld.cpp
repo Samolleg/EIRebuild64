@@ -664,6 +664,19 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationPath);
     const auto boundary=ModArena::MovementBoundary(unit);
     if(!boundary.Goal(from,goal)){Navigation::Route route;route.status=Status::NoPath;return route;}
+    if(ModArena::Charge(unit)) {
+        Navigation::Route route;route.status=Status::NoPath;
+        const float ex=ModEncounter::Read(theWorldServer,"FGL.EX"),ey=ModEncounter::Read(theWorldServer,"FGL.EY");
+        if(std::hypot(goal.x-ex,goal.y-ey)>=.1f)return route;
+        Navigation::StraightRequest request;request.source=from;request.distance=std::hypot(ex-from.x,ey-from.y);
+        if(request.distance<.001f)return route;
+        request.direction={(ex-from.x)/request.distance,(ey-from.y)/request.distance,0};
+        request.bodyRadius=(std::max)(.95f,unit->GetCollisionDistance());request.boundaryInset=request.bodyRadius+.16f;request.bodies=ModArena::ChargeBodies();
+        auto trace=TraceStraight(unit,request);route.status=trace.status;
+        if(trace.status!=Status::Complete)return route;
+        if(std::hypot(trace.endpoint.position.x-ex,trace.endpoint.position.y-ey)>.02f){route.status=Status::NoPath;ModArena::Blocked(boundary,trace.endpoint.position,3);return route;}
+        route.points=std::move(trace.points);route.length=request.distance;route.cost=route.plannedCost=route.length;route.sampledTail=0;return route;
+    }
     auto* mesh=ForUnit(unit,aiClass);if(!mesh){
         Navigation::Route route;route.status=Navigation::Status::NoMesh;
         if(unit&&unit->IsHero())GameJournal::Event("NAV","query_failed","unit=%d reason=no_mesh from=(%.3f,%.3f,%.3f) goal=(%.3f,%.3f,%.3f) detail=%s",unit->GetID(),from.x,from.y,from.z,goal.x,goal.y,goal.z,GameJournal::Quote(error.c_str()).c_str());
@@ -784,7 +797,41 @@ bool NavigationWorld::Step(CUnit* unit,Navigation::Point from,Navigation::Point 
         }
         return false;
     }
+    if(ModArena::Charge(unit)&&std::hypot(result.position.x-desired.x,result.position.y-desired.y)>.001f)return false;
     return !boundary.Block(from,result.position);
+}
+Navigation::StraightResult NavigationWorld::TraceStraight(CUnit* unit,const Navigation::StraightRequest& request) {
+    Navigation::StraightResult result;
+    if(!unit||!Finite(request.source)||!Finite(request.direction)||!std::isfinite(request.distance)||request.distance<0||request.distance>100||
+       !std::isfinite(request.bodyRadius)||request.bodyRadius<=0||std::fabs(std::hypot(request.direction.x,request.direction.y)-1)>.001f)return result;
+    auto* mesh=ForUnit(unit);if(!mesh){result.status=Status::NoMesh;return result;}
+    const auto end=Point{request.source.x+request.direction.x*request.distance,request.source.y+request.direction.y*request.distance,request.source.z};
+    if(Pending(Type(unit,unit->GetAIClass()),request.source,end)){result.status=Status::Updating;return result;}
+    Location current;const auto flags=Navigation::ExcludeClass(unit->GetAIClass());
+    if(!StartLocation(*mesh,request.source,current,Height(unit),flags)){result.status=Status::NoStart;return result;}
+    result.endpoint=current;result.points.push_back(current);result.status=Status::Complete;
+    const int count=(std::max)(1,int(std::ceil(request.distance/.08f)));
+    const float extra=(std::max)(0.f,request.bodyRadius-mesh->profile.radius);
+    auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
+    for(int i=1;i<=count;++i) {
+        const float distance=request.distance*float(i)/count;
+        Point wanted{request.source.x+request.direction.x*distance,request.source.y+request.direction.y*distance,current.position.z};
+        const float r=request.boundaryInset;
+        if(wanted.x<request.left+r||wanted.x>request.right-r||wanted.y<request.bottom+r||wanted.y>request.top-r)break;
+        Location next;
+        if(!Constrain(*mesh,current.position,wanted,next,Height(unit),nullptr,&current,flags)||std::hypot(next.position.x-wanted.x,next.position.y-wanted.y)>.001f)break;
+        bool clear=true;
+        for(float side:{-extra,extra})if(extra>.001f) {
+            const Point a{current.position.x-request.direction.y*side,current.position.y+request.direction.x*side,current.position.z};
+            const Point b{wanted.x-request.direction.y*side,wanted.y+request.direction.x*side,next.position.z};
+            Location at,edge;
+            if(!StartLocation(*mesh,a,at,Height(unit),flags)||!Constrain(*mesh,a,b,edge,Height(unit),nullptr,&at,flags)||
+               std::hypot(edge.position.x-b.x,edge.position.y-b.y)>.001f){clear=false;break;}
+        }
+        if(!clear||map.CheckCircleCollision(unit,CPlot3D(wanted.x,wanted.y,unit->GetCP().z),&next,false,&request.bodies))break;
+        result.points.push_back(next);result.endpoint=current=next;
+    }
+    return result;
 }
 bool NavigationWorld::GuardTurn(CUnit* unit,SAIPath& path,float time,bool& pending) {
     pending=false;auto* mesh=ForUnit(unit);if(!mesh)return false;
@@ -879,7 +926,9 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
     pos.x=move.support.position.x;pos.y=move.support.position.y;
     if(std::hypot(pos.x-from.x,pos.y-from.y)<.00001f)return observed(true);
     pos.z=move.support.position.z;
-    auto* neighbour=map.CheckCircleCollision(unit,pos,&move.support);
+    const auto chargeBodies=ModArena::Charge(unit)?ModArena::ChargeBodies():Navigation::BodyPolicy{};
+    auto* neighbour=map.CheckCircleCollision(unit,pos,&move.support,true,ModArena::Charge(unit)?&chargeBodies:nullptr);
+    if(neighbour&&ModArena::Charge(unit)){move.blocker=neighbour->GetID();ModArena::Blocked(boundary,move.desired,4);return observed(false);}
     if(neighbour) {
         if(path.navigationTurned){move.blocker=neighbour->GetID();return observed(false);}
         wait=(std::min)(wait+1,1000000u);

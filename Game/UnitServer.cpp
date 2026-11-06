@@ -1,4 +1,6 @@
 #include "StdAfx.h"
+#include "ModFinalGolem.h"
+#include "ModGolemReflect.h"
 #include "ModEncounter.h"
 #include "ModArenaBoundary.h"
 #include "SaveSchema.h"
@@ -2224,6 +2226,7 @@ bool CUnitServer::IsDanger()
 // !!! SOME WEAPON PARAMS
 /////////////////////////////////////////////////////////////////////////////////////
 // get attack range of the current weapon. If there is no weapon, get Native Attack Weapon range
+bool CUnitServer::EncounterAttackReady() {return eL1State==UL1_IDLE&&theWorldServer.GetSegmentTimeCounter()>=nCanAttackTime;}
 float CUnitServer::GetCurrentWeaponRange()
 {
     CItemWeapon *pWeapon = lpUnit->GetCurrentQWeapon();
@@ -4174,6 +4177,7 @@ BOOL CUnitServer::CreateCurrentWeaponAttackPortion(SRPGAttackPortion &ap, BOOL b
         ap.MakeDeadlyAttack();
     ap.bCalledShot = bCalledShot;
     if(mod&&mod->CombatSetting("JMVAttacks"))mod->RememberAttack(rpgUnitStats,*lpUnit,ap,roll,leftHand);
+    ModFinalGolem::CaptureDamageTypes(lpUnit,ap);
 
     return TRUE;
 }
@@ -6046,11 +6050,14 @@ BOOL CUnitServer::ProcessAttackPortionOwned(SRPGAttackPortion *lpAttackPortion,C
                                           CUnit *pExpDest,bool inheritedDefense,bool explicitCustom)
 {
     CWorldServer *pWS = (CWorldServer *)GetWorld();
+    auto reflection=ModGolemReflect::Begin(lpUnit,ModAttackEvents::AuthorScope::Resolve(*lpAttackPortion,lpUnit,pAttacker),*lpAttackPortion);
     int skillImpact=ModRuntime::Current()?ModRuntime::Current()->TakeSkillImpact(*lpAttackPortion):0;
     float beforeSkillHp=GetMapObjectServer()->GetRPGStats()->ssHP.fpCurrent;
     const auto deliveredAttack = ModAttackEvents::Begin(*lpAttackPortion,pAttacker,lpUnit,beforeSkillHp);
     const auto completeAttack = [&](BOOL result) {
         ModAttackEvents::Complete(*pWS,deliveredAttack,GetMapObjectServer()->GetCurrentHP());
+        ModFinalGolem::MeleeDelivered(deliveredAttack.attacker,lpUnit,*lpAttackPortion);
+        ModGolemReflect::Complete(reflection);
         return result;
     };
     CUnit* policyAuthor = ModAttackEvents::AuthorScope::Resolve(*lpAttackPortion, lpUnit, pAttacker);
@@ -6141,6 +6148,7 @@ BOOL CUnitServer::ProcessAttackPortionOwned(SRPGAttackPortion *lpAttackPortion,C
         historyOwner->CompensateHitHistory(rpgUnitStats,*lpUnit,pAttacker,*lpAttackPortion,apDefender.nDefense,explicitCustom);
     if (lpAttackPortion->fpToHit >= apDefender.nDefense)
     {
+        reflection.accepted=true; // accepted hit, before armour and HP delta
         rpgUnitStats.bFlags |= RPGSTAT_SHOWHPFLY;
         AddUpdateMask(CMapObject::VLD_MASK_UNIT_STATS);
         //

@@ -515,6 +515,13 @@ bool CDX11::FinishC74Effect(HRESULT hr, const char* event)
     }
     return false;
 }
+bool CDX11::SubmitGolemVisual(const owned::EmbeddedGolemInput& input,const std::array<ID3D11ShaderResourceView*,3>& textures)
+{
+    owned::FixedState state;std::shared_ptr<owned::SurfaceImage> unused;
+    HRESULT hr=PrepareC74Effect(true,false,state,unused);
+    if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer){return renderer.draw_embedded_golem(input,state,textures);});
+    return FinishC74Effect(hr,"golem_visual_skipped");
+}
 bool CDX11::SubmitArenaVisual(const owned::EmbeddedArenaInput& input,
     const std::array<ID3D11ShaderResourceView*,8>& textures)
 {

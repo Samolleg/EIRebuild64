@@ -273,7 +273,13 @@ static SLexemeInfo* ModLexemes(){
    bool replaced=false;for(auto&old:result)if(!_stricmp(old.pszAscii,e.name)){old=value;replaced=true;break;}if(!replaced)result.push_back(value);
   }
   result.push_back({nullptr,SC_UNKNOWN,nullptr,nullptr});return result;
- }();return entries.data();
+ }();
+ if(ModMob::ServiceDepth()) {
+  static std::vector<SLexemeInfo> services=[](){auto result=entries;result.pop_back();const auto& e=ModMob::serviceGolem;
+   result.push_back({e.name,static_cast<ESCCmd>(e.id),nullptr,e.format});result.push_back({nullptr,SC_UNKNOWN,nullptr,nullptr});return result;}();
+  return services.data();
+ }
+ return entries.data();
 }
 #define validLexemes ModLexemes()
 

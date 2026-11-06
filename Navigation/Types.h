@@ -55,6 +55,16 @@ enum class Status { Complete, NoMesh, Invalid, NoStart, NoGoal, NoPath, Limit, T
 const char* StatusName(Status status);
 // Physical standing-unit footprint, used only by one synchronous path query.
 struct Obstacle { Point position; float radius=0,height=0; int id=0; };
+// Synchronous straight queries never remove actors from the spatial index.
+struct BodyPolicy {
+    std::array<int,16> ignored{};unsigned count=0;
+    bool Ignores(int id) const {for(unsigned i=0;i<count&&i<ignored.size();++i)if(ignored[i]==id)return true;return false;}
+};
+struct StraightRequest {
+    Point source,direction;float distance=0,bodyRadius=0,boundaryInset=0;
+    float left=28,right=100,bottom=26,top=62;BodyPolicy bodies;
+};
+struct StraightResult {Status status=Status::Invalid;Location endpoint;std::vector<Location> points;};
 // User movement can approach an unavailable click. Exact internal targets
 // (attacks, placement, visibility-graph edges) keep their original contract.
 enum class GoalPolicy { Exact, ClosestReachable };

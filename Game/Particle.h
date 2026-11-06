@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include "embedded_arena_particles.h"
+#include "embedded_golem_particles.h"
 #include "Base3D.h"
 #include "Plot.h"
 #include "typedefs.h"
@@ -175,6 +176,7 @@ public:
     void ConfigurePowerHit(CUnit*,const CPlot3D&,const CPlot3D&,int);
     void ConfigureScriptFlow(const CPlot3D&,float length,float width);
     void ConfigureArenaWave(int kind,float radius,bool charge,int tick);
+    void ConfigureGolemWall(int side,int tick);
     bool IsPowerHitGlow(int hit) const {return createFunc==&CParticle::PowerHitSingleCreate&&fpParam1==0&&locSources.GetSize()==1&&locSources[0].nPhase==hit;}
     void MarkPowerHitDelivered(){if(fpParam2>=0&&fpPower2==0){fpPower2=1;locSources[0].reserved.y=6;}}
     void SetPowerHitWindup(int ticks,std::uintptr_t token){locSources[0].reserved.x=float(ticks);powerHitWeaponToken=token;}
@@ -230,6 +232,9 @@ private:
     void FinishBV();
     // Single particles processing
     owned::ArenaWaveEmitter arenaWave{};
+    owned::GolemWallEmitter golemWall{};
+    BOOL GolemWallSingleCreate(SSingleParticle*,int);
+    BOOL GolemWallSingleSegment(SSingleParticle*);
     BOOL ArenaWaveSingleCreate(SSingleParticle*,int);
     BOOL ArenaWaveSingleSegment(SSingleParticle*);
     std::uint32_t scriptFlowRandom=0x13579bdu;
