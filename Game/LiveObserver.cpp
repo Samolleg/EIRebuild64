@@ -634,13 +634,15 @@ void UpdateOperationReadiness() {
     if(!operation.inFlight||!operation.applied||operation.executing)return;
     auto& world=theWorldServer;auto* client=theWorld.GetPlayer();
     if(!world.bMapLoaded||world.GetServerMode()!=SERV_MODE_LOCAL||!theWorld.IsConnected()||
-       !client||IWorldConnector.HasReq()||client->GetStatus()!=CPlayerClient::CPS_ACTIVE)return;
+       !client||IWorldConnector.HasReq()||
+       (client->GetStatus()!=CPlayerClient::CPS_ACTIVE&&client->GetStatus()!=CPlayerClient::CPS_CAMP))return;
     auto* player=client->GetPlayer();auto* serverPlayer=world.GetPlayer(0);
-    if(!player||!serverPlayer||player->curInterface!=world.curInterface||
+    if(!player||!serverPlayer||player->curInterface==IFACE_NONE||
+       player->curInterface!=serverPlayer->curInterface||
        world.GetCurrentZoneName()!=operation.expectedZone.c_str())return;
     auto* server=static_cast<CPlayerServer*>(serverPlayer->GetPlayerSpecific());
-    if(!server||server->GetStatus()!=CPlayerServer::PSS_ACTIVE)return;
-    if(world.curInterface==IFACE_MISSION) {
+    if(!server||(server->GetStatus()!=CPlayerServer::PSS_ACTIVE&&server->GetStatus()!=CPlayerServer::PSS_CAMP))return;
+    if(player->curInterface==IFACE_MISSION) {
         if(player->party.people.GetSize()==0)return;
         for(int i=0;i<player->party.people.GetSize();++i) {
             const int id=player->party.people[i].nID;
@@ -1033,6 +1035,7 @@ bool Command(Job& job) {
     if(!unit||unit->IsInvalid()||unit->IsUnreferenced()||!Squad(unit,player)||!Squad(unit,serverPlayer)||
        unit->GetPlayerNum()!=player->GetPlayerNumber())throw std::runtime_error("unit is not in the player's squad");
     if(unit->IsDead()||unit->CheckFlag(UNIT_BLOCKED)||world.curInterface!=IFACE_MISSION||
+       player->curInterface!=IFACE_MISSION||serverPlayer->curInterface!=IFACE_MISSION||
        client->GetStatus()!=CPlayerClient::CPS_ACTIVE)throw std::runtime_error("squad unit cannot act in the current state");
     auto* specific=unit->GetUnitSpecific();
     if(!specific||specific->WhoAmI()!=HPC_UNITSERVERSPECIFIC)throw std::runtime_error("unit has no server state");
