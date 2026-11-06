@@ -11,6 +11,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModAttackTiming.h"
 #include "ModItemSpellPolicy.h"
 #include "ModInvincible.h"
+#include "ModScriptMotion.h"
 
 #include "WinRegistry.h"
 #include "FigureManager.h"
@@ -121,6 +122,7 @@ void CUnit::Destroy()
 // clear data (not destroy)
 void CUnit::Clear()
 {
+    scriptMovementEnabled=false;scriptMovementOffset=0;scriptMovementFactor=1;
     szName.Empty();
     dwVoicePrototype = -1;
     //
@@ -277,6 +279,7 @@ void CUnit::SetAggression(EUnitAggression _aggression)
 // - route & walker can be easily found this function marks route for transmission on client
 void CUnit::LowNewRoute()
 {
+    ModScriptMotion::RestoreMovement(*this);
     float fpMove, fpAng;
     CAIFullRoute &route = *lpUnitSpecific->GetRoute();
     route.DoNotTurnToAttack(GetID());
@@ -1031,6 +1034,8 @@ void CUnit::GetSpeeds(float &fpMoveSpeed, float &fpRotateSpeed)
     }
     if(auto*mod=ModRuntime::Current()){float factor=mod->CrippledSpeed(*this),fear=mod->DeathFearSpeedFactor(*this);if(fear<factor)factor=fear;auto speeds=ModAttackTiming::ScaleMovement({fpMoveSpeed,fpRotateSpeed},factor);fpMoveSpeed=speeds.move;fpRotateSpeed=speeds.rotate;}
     fpRotateSpeed *= theAIGeneralSettings.fpRotateSpeedMult;
+    if(scriptMovementEnabled&&!IsDead()&&std::isfinite(fpMoveSpeed)&&fpMoveSpeed>0)
+        fpMoveSpeed=(std::max)(.1f/7.5f,(fpMoveSpeed+scriptMovementOffset/7.5f)*scriptMovementFactor);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 float CUnit::GetShowSpeed()

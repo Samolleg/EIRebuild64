@@ -32,6 +32,8 @@ struct Entry {int id;const char*name;const char*format;bool ready;};
 inline const Entry registry[]={
  {276,"ChaseTrapDamage","offf",true},
  {291,"SetInvincible","osf",true},
+ {293,"SetMovementModifier","off",true},
+ {286,"SetWindAttackMode","of",true},
  {292,"ApplyDirectDamage","of",true},
  {275,"GetCloseAttackEvent","Foof",true},
  {285,"GetPhysicalAttackEvent","Foof",true},
@@ -309,6 +311,8 @@ inline bool Action(SSCCmd&cmd){
  case 291:if(!ModInvincible::Change(unit,cmd.szParams[0],a))return Reject("SetInvincible","Invalid unit, channel or flag");break;
  case 292:if(server)server->ApplyDirectDamage(a);break;
  case 299:ModScriptMotion::SetRotate(cmd.szParams[0],a);break;
+ case 293:ModScriptMotion::SetMovement(unit,a,cmd.params[1]);break;
+ case 286:if(server)server->SetScriptWindAttack(a);break;
  case 298:{
   if(!std::isfinite(a)||a<0||a>3600||!theWorldServer.IsMapLoaded())break;
   const char*name=cmd.szParams[0];EWeather weather;

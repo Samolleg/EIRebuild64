@@ -63,6 +63,7 @@ public:
     CPlot3D ptTarget;      // command destination
     Navigation::Location navGoal; // Transient world support, separate from command distance.
     bool navGoalValid=false;
+    bool windApproach=false; // typed transient command ownership, restored from GS pending
     bool bUsePoint;        // flag if cmd should be done from ptTarget
 
     void Clear()
@@ -71,7 +72,7 @@ public:
         nQSpellNum = 0;
         ptTarget = CPlot3D(0, 0, 0);
         pTarget.Clear();
-        bUsePoint = false;navGoal={};navGoalValid=false;
+        bUsePoint = false;navGoal={};navGoalValid=false;windApproach=false;
     }
     SUnitBasicCmd() { Clear(); }
     //
@@ -372,6 +373,7 @@ typedef void (*ServerAnimationSwitchCallback)(CUnit *pUnit);
 /////////////////////////////////////////////////////////////////////////////////////
 class CUnitServer : public CUnitSpecific
 {
+    bool scriptWindActive=false; // derived GS lease; no lookups for unarmed units
     unsigned navigationWait=0;
     unsigned navigationRejects=0; // transient; turns do not erase a failed-move retry
 
@@ -742,6 +744,10 @@ public:
     bool IsTamed() const { return tameLevel != UTL_NONE; }
     void CmdRotate(const CPlot3D &vecDest, float fpAngSpeed);
     bool TurnScriptPath(float radians);
+    void ScriptSpeedChanged() { bL1SpeedChanged=true; }
+    void SetScriptWindAttack(float mode);
+    bool ProcessScriptWindAttack();
+    void CancelScriptWindPending();
     void FaceScriptRoute(float heading) { path.curSegment.Face(heading);lpUnit->LowNewRoute(); }
     void CmdMoveTo(const CPlot3D &ptDest, bool bRun, bool bGroupCmd = false,
                    float fpMaxPathDist = 1e6f,const Navigation::Location* goalSupport=nullptr);

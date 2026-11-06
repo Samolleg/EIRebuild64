@@ -510,6 +510,7 @@ private:
 
 public:
     CUMPlayer();
+    bool WindAttackIntent() const { return cmdState==PC_IDLE; }
     const CPlot3D* MoveGoal() const {return cmdState==PC_MOVE?&ptSwarmTarget:nullptr;}
     void TurnMoveGoal(const CPlot3D& oldGoal,const CPlot3D& newGoal) {
         if(cmdState==PC_MOVE&&distanceXY2(ptSwarmTarget,oldGoal)<.0001f){ptSwarmTarget.x=newGoal.x;ptSwarmTarget.y=newGoal.y;}

@@ -192,6 +192,9 @@ class CUnit : public CMapObject
 {
 public:
     Navigation::Location navLocation;
+    // Derived from saved MovementModifier GS at command/route/load events.
+    bool scriptMovementEnabled=false;
+    float scriptMovementOffset=0,scriptMovementFactor=1;
 private:
     struct SItemIDs
     {

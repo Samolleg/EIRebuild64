@@ -289,6 +289,26 @@ void CRouteWalker::CreateWalkerRoute(CAIFullRoute &route)
     } else fpDeltaAngle=0;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CRouteWalker::RestartAt(CAIFullRoute& route,CUnit* unit,int tick)
+{
+    float time=float(tick-route.nStartSegment),angle=fpStartAngle;int first=0;
+    for(int i=0;i<points.GetSize()-1;++i) {
+        auto& a=points[i];auto& b=points[i+1];
+        const float desired=a.GetAngle(),delta=std::remainder(desired-angle,FP_2PI);
+        const float turn=std::abs(delta)/(std::max)(.0001f,fpAngularSpeed);
+        const float duration=Distance(a.point,b.point)/a.fpSpeed;
+        first=i;
+        if(time<turn+duration)break;
+        time-=turn+duration;angle=desired;first=i+1;
+    }
+    // Retain the next corner, replacing the consumed prefix by the body position.
+    SRouteUnit node;
+    for(int i=0;i<=first&&!route.route.route.IsEmpty();++i)node=route.route.route.RemoveHead();
+    node.point=CPlot2D(Meter2AITile(unit->GetCP().x),Meter2AITile(unit->GetCP().y));
+    node.nX=short(std::floor(node.point.x));node.nY=short(std::floor(node.point.y));node.supportZ=unit->navLocation.position.z;
+    route.route.route.AddHead(node);route.start=node.point;
+    const auto facing=-unit->GetYAxis();route.fpStartAngle=std::atan2(facing.y,facing.x);route.nStartSegment=tick;
+}
 void CRouteWalker::StartRotation(float fpX, float fpY, float fpAngSpeed)
 {
     float fpAngle;

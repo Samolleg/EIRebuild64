@@ -6,6 +6,33 @@
 #include <climits>
 
 namespace ModScriptMotion {
+inline std::string Key(const CUnit& unit,const char* prefix,const char* field) {
+    char key[160];std::snprintf(key,sizeof(key),"%s.%.80s.%u.%s",prefix,ModInvincible::Map(theWorldServer),unsigned(unit.GetID()),field);return key;
+}
+inline float Read(const CUnit& unit,const char* prefix,const char* field) {
+    auto* player=theWorldServer.GetPlayer(0);return player?player->party.vars.GetVar(Key(unit,prefix,field).c_str()):0;
+}
+inline void Set(const CUnit& unit,const char* prefix,const char* field,float value) {
+    if(auto* player=theWorldServer.GetPlayer(0))player->party.vars.SetVar(Key(unit,prefix,field).c_str(),value);
+}
+inline void RestoreMovement(CUnit& unit) {
+    unit.scriptMovementEnabled=false;unit.scriptMovementOffset=0;unit.scriptMovementFactor=1;
+    if(!ModRuntime::Current()||!theWorldServer.GetPlayer(0)||Read(unit,"MovementModifier","enabled")!=1)return;
+    const float offset=Read(unit,"MovementModifier","offset"),factor=Read(unit,"MovementModifier","factor");
+    if(!std::isfinite(offset)||!std::isfinite(factor)||factor<=0)return;
+    unit.scriptMovementEnabled=true;unit.scriptMovementOffset=offset;unit.scriptMovementFactor=factor;
+}
+inline bool SetMovement(CUnit* unit,float offset,float factor) {
+    if(!ModInvincible::UnitValid(unit)||!std::isfinite(offset)||!std::isfinite(factor)||offset<-10||offset>10||factor<=0||factor>10)return false;
+    const bool enabled=offset!=0||factor!=1;if(enabled&&unit->IsDead())return false;
+    auto* server=dynamic_cast<CUnitServer*>(unit->GetUnitSpecific());if(!server||!theWorldServer.GetPlayer(0))return false;
+    const unsigned protection=ModInvincible::Mask(unit);
+    if(((offset<0||factor<1)&&(protection&ModInvincible::Bad))||((offset>0||factor>1)&&(protection&ModInvincible::Buffs)))return false;
+    const bool changed=Read(*unit,"MovementModifier","enabled")!=(enabled?1.f:0.f)||Read(*unit,"MovementModifier","offset")!=offset||Read(*unit,"MovementModifier","factor")!=factor;
+    Set(*unit,"MovementModifier","offset",offset);Set(*unit,"MovementModifier","factor",factor);Set(*unit,"MovementModifier","enabled",enabled?1.f:0.f);
+    RestoreMovement(*unit);if(changed)server->ScriptSpeedChanged();return true;
+}
+
 inline bool SetRotate(const char* text,float degrees) {
     if(!text||!*text||!std::isfinite(degrees))return false;
     unsigned id=0;

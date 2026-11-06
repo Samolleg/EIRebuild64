@@ -19,6 +19,7 @@
 /////////////////////////////////////////////////////////////////////////////////////
 class CUpdateHistory;
 class CWorldBase;
+class CUnit;
 
 /////////////////////////////////////////////////////////////////////////////////////
 const short N_RT_WATER_FLAG = 1;
@@ -326,6 +327,7 @@ public:
         fpAngularSpeed = 0.1f;
     }
     void CreateWalkerRoute(CAIFullRoute &route);
+    void RestartAt(CAIFullRoute& route,CUnit* unit,int tick);
     // time in segments, speed in tiles per segment, nTileX, nTileY - tile which should be free for
     // this motion nTileX == -1 if no lock check is required return FALSE in case of
     // movement/rotation if action is over

@@ -15,6 +15,7 @@
 #include "ModAttackTiming.h"
 #include "ModAttackEvents.h"
 #include "ModInvincible.h"
+#include "ModScriptMotion.h"
 #include "ModChase.h"
 #include "ModPreparedAttack.h"
 #include "ModItemSpellPolicy.h"
@@ -335,6 +336,7 @@ void CUnitServer::Destroy()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::Clear()
 {
+    scriptWindActive=false;
     ModOutOfCombatRegeneration::Forget(this);
     modLeverTarget=nullptr;modLeverId=0;modLeverRing=false;
     if(auto*mod=ModRuntime::Current())mod->ForgetAttack(level1AP);
@@ -803,6 +805,72 @@ void CUnitServer::L1NewPathSegment()
     L1StartRotateAnimation();
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CUnitServer::CancelScriptWindPending()
+{
+    if(scriptWindActive&&ModScriptMotion::Read(*lpUnit,"WindAttack","pending")!=0)
+        ModScriptMotion::Set(*lpUnit,"WindAttack","pending",0);
+}
+void CUnitServer::SetScriptWindAttack(float mode)
+{
+    if((mode!=0&&mode!=1)||!ModInvincible::UnitValid(lpUnit)||!theWorldServer.GetPlayer(0))return;
+    auto* player=logic.GetPlayer();
+    if(mode==1&&(!player||lpUnit->IsDead()))return;
+    if(mode==0&&ModScriptMotion::Read(*lpUnit,"WindAttack","enabled")!=1)return;
+    scriptWindActive=true;ModScriptMotion::Set(*lpUnit,"WindAttack","enabled",mode);
+    if(mode==1)ModScriptMotion::Set(*lpUnit,"WindAttack","tick",float(GetWorldBase()->GetSegmentTimeCounter()));
+    ProcessScriptWindAttack();
+}
+bool CUnitServer::ProcessScriptWindAttack()
+{
+    if(!scriptWindActive)return false;
+    using namespace ModScriptMotion;
+    const bool pending=Read(*lpUnit,"WindAttack","pending")==1;
+    auto clear=[&](){if(pending)Set(*lpUnit,"WindAttack","pending",0);};
+    const float age=float(GetWorldBase()->GetSegmentTimeCounter())-Read(*lpUnit,"WindAttack","tick");
+    const bool armed=Read(*lpUnit,"WindAttack","enabled")==1&&age>=0&&age<=3&&!lpUnit->IsDead();
+    if(!armed){scriptWindActive=false;Set(*lpUnit,"WindAttack","enabled",0);}
+    auto* player=logic.GetPlayer();auto* target=logic.GetCurrentTarget();
+    if(!player||!player->WindAttackIntent()||!logic.IsAttacking()){clear();return false;}
+    if(!target||target->IsInvalid()||target->IsDead()) {
+        clear();if(pending){CmdWait();player->DoStop(logic);}return false;
+    }
+    const unsigned targetId=unsigned(target->GetID());
+    const bool same=Read(*lpUnit,"WindAttack","targetLo")==float(targetId&65535u)&&Read(*lpUnit,"WindAttack","targetHi")==float(targetId>>16);
+    // A native queued order always wins. Only our typed MOVE can be retained.
+    const bool fresh=nextCommand.IsAttack()&&nextCommand.pTarget==target;
+    if(!nextCommand.IsEmpty()&&!fresh&&!(nextCommand.IsMove()&&nextCommand.windApproach&&pending&&same)){clear();return false;}
+    const bool attacking=curCommand.IsAttack()&&curCommand.pTarget==target;
+    const float savedHit=Read(*lpUnit,"WindAttack","hit");
+    if(pending&&(!std::isfinite(savedHit)||savedHit<0||savedHit>RPGHL_ALL||savedHit!=std::floor(savedHit))){clear();return false;}
+    const bool owned=pending&&same&&(curCommand.windApproach||nextCommand.windApproach);
+    if(!armed) {
+        const int hit=int(Read(*lpUnit,"WindAttack","hit"));const bool run=Read(*lpUnit,"WindAttack","run")!=0;
+        clear();
+        if(owned&&(curCommand.IsMove()||curCommand.IsEmpty())&&(nextCommand.IsEmpty()||nextCommand.windApproach)&&!lpUnit->IsDead())
+            CmdAttack(target,ERPGHitLocations(hit),run,2);
+        return false;
+    }
+    if(!fresh&&!attacking&&!owned){clear();return false;}
+    const auto& chosen=fresh?nextCommand:curCommand;
+    const int hit=(fresh||!owned)?chosen.nQSpellNum:int(Read(*lpUnit,"WindAttack","hit"));
+    const bool run=(fresh||!owned)?chosen.bDoItFast:Read(*lpUnit,"WindAttack","run")!=0;
+    SUnitBasicCmd test;test.MakeAttack(target);test.nQSpellNum=hit;
+    if(CanAttackFrom(test,lpUnit->GetCP())) {
+        clear();if(owned&&!fresh&&!attacking)CmdAttack(target,ERPGHitLocations(hit),run,2);return false;
+    }
+    if(fresh||!owned) {
+        auto dest=target->GetCP();Navigation::Location support;const Navigation::Location* goal=nullptr;
+        const bool bodyMelee=target->WhoAmI()==HPC_UNIT&&!HasRangedAttack()&&GetCurrentWeaponType()!=RPGWST_MAGIC;
+        if(bodyMelee) {
+            if(!static_cast<CWorldServer*>(GetWorld())->aiMap.Navigation().AttackPosition(lpUnit,static_cast<CUnit*>(target),{dest.x,dest.y,0},GetHitDist(test),1.e6f,support)){clear();return false;}
+            dest.x=support.position.x;dest.y=support.position.y;goal=&support;
+        } else if(auto* targetUnit=dynamic_cast<CUnit*>(target)){support=targetUnit->navLocation;goal=&support;}
+        CmdMoveTo(dest,run,false,1.e6f,goal);nextCommand.windApproach=true;
+        Set(*lpUnit,"WindAttack","targetLo",float(targetId&65535u));Set(*lpUnit,"WindAttack","targetHi",float(targetId>>16));
+        Set(*lpUnit,"WindAttack","hit",float(hit));Set(*lpUnit,"WindAttack","run",run?1.f:0.f);Set(*lpUnit,"WindAttack","pending",1);
+    }
+    return true;
+}
 bool CUnitServer::TurnScriptPath(float radians)
 {
     if(!path.curSegment.IsMoving()||path.navigationPending||!std::isfinite(radians)||std::abs(radians)<.0000001f)return false;
@@ -827,6 +895,17 @@ bool CUnitServer::TurnScriptPath(float radians)
 }
 bool CUnitServer::RestoreNavigation(bool invalidate)
 {
+    ModScriptMotion::RestoreMovement(*lpUnit);
+    scriptWindActive=ModScriptMotion::Read(*lpUnit,"WindAttack","enabled")==1;
+    if(scriptWindActive&&ModScriptMotion::Read(*lpUnit,"WindAttack","pending")==1&&logic.IsAttacking()) {
+        auto* player=logic.GetPlayer();auto* target=logic.GetCurrentTarget();
+        if(player&&player->WindAttackIntent()&&target&&!target->IsInvalid()&&
+           ModScriptMotion::Read(*lpUnit,"WindAttack","targetLo")==float(unsigned(target->GetID())&65535u)&&
+           ModScriptMotion::Read(*lpUnit,"WindAttack","targetHi")==float(unsigned(target->GetID())>>16)) {
+            if(curCommand.IsMove())curCommand.windApproach=true;
+            if(nextCommand.IsMove())nextCommand.windApproach=true;
+        }
+    }
     if(invalidate){navigationRejects=navigationWait=0;path.excludeVertices.RemoveAll();}
     if(!path.curSegment.IsMoving()&&!path.navigationPending)return true;
     auto* world=static_cast<CWorldServer*>(GetWorld());auto goal=path.ptDestination;
@@ -1517,7 +1596,10 @@ void CUnitServer::L1Segment()
         L1ChangeWeapon();
         if (bL1SpeedChanged)
         {
-            if (!L1StartMove(path.ptDestination, path.ptDestination.z))
+            if(path.navigationTurned) {
+                lpUnit->walker.RestartAt(path.curSegment,lpUnit,GetWorldBase()->GetSegmentTimeCounter()-1);
+                bL1SpeedChanged=false;lpUnit->LowNewRoute();
+            } else if (!L1StartMove(path.ptDestination, path.ptDestination.z))
                 break;
         }
         L1ExecMove();
@@ -6160,6 +6242,7 @@ void CUnitServer::CmdRotate(const CPlot3D &vecDest, float fpAngSpeed)
     const auto facing=-lpUnit->GetYAxis();
     GameJournal::Event("CMD","rotate","unit=%d requested=%.6f previous=%.6f speed=%.6f",
                        lpUnit->GetID(),std::atan2(vecDest.y,vecDest.x),std::atan2(facing.y,facing.x),fpAngSpeed);
+    CancelScriptWindPending();
     nextCommand.Clear();
     nextCommand.cmd = UC_ROTATE;
     nextCommand.ptTarget = vecDest;
@@ -6183,6 +6266,7 @@ void CUnitServer::CmdMoveTo(const CPlot3D &ptDest, bool bRun, bool bGroupCmd, fl
        path.navigationGeneration==pWS->aiMap.Navigation().Generation()&&sameFloor&&
        curCommand.bDoItFast==bRun&&curCommand.nQSpellNum==(bGroupCmd?1:0)&&curCommand.ptTarget.z==fpMaxPathDist&&
        std::abs(curCommand.ptTarget.x-ptDest.x)<.01f&&std::abs(curCommand.ptTarget.y-ptDest.y)<.01f)return;
+    CancelScriptWindPending();
     nextCommand.Clear();
     nextCommand.cmd = UC_MOVETO;
     nextCommand.ptTarget = ptDest;
@@ -6253,6 +6337,7 @@ void CUnitServer::CmdAttack(CMapObject *pTarget, ERPGHitLocations hl, bool bRun,
         if (pUS->rpgUnitStats.hls[hl].state != RPGALS_ACTIVE)
             hl = RPGHL_ALL;
     }
+    CancelScriptWindPending();
     nextCommand.Clear();
     nextCommand.cmd = UC_ATTACK;
     nextCommand.pTarget = pTarget;
@@ -6282,6 +6367,7 @@ void CUnitServer::CmdCast(int nQSpellNum, const CPlot3D &pointToCast, bool bRun)
         InformFailure(ACK_HERO_REFUSE_TOO_COMPLEX_SPELL_TO_CAST);
         return;
     }
+    CancelScriptWindPending();
     nextCommand.Clear();
     nextCommand.cmd = UC_CASTPOINT;
     nextCommand.pTarget = NULL;
@@ -6317,6 +6403,7 @@ void CUnitServer::CmdCast(int nQSpellNum, CMapObject *pTarget, bool bRun)
         InformFailure(ACK_HERO_REFUSE_TOO_COMPLEX_SPELL_TO_CAST);
         return;
     }
+    CancelScriptWindPending();
     nextCommand.Clear();
     nextCommand.cmd = UC_CASTUNIT;
     nextCommand.pTarget = pTarget;
@@ -6359,6 +6446,7 @@ void CUnitServer::CmdWait()
     if (nextCommand.cmd == UC_PLAYANIM || nextCommand.cmd == UC_PLAYANIMCYCLE)
         return;
     // end of CRAP
+    CancelScriptWindPending();
     nextCommand.Clear();
     nextCommand.cmd = UC_IDLE;
     nextCommand.pTarget = NULL;
@@ -6369,6 +6457,7 @@ void CUnitServer::CmdRest()
 {
     if (curCommand.cmd == UC_REST)
         return;
+    CancelScriptWindPending();
     nextCommand.Clear();
     nextCommand.cmd = UC_REST;
     nextCommand.pTarget = NULL;
@@ -6400,6 +6489,7 @@ void CUnitServer::CmdNewWeapon(DWORD dwWeapon)
 
 void CUnitServer::CmdSkill(CMapObject *pTarget, int nSkill, DWORD dwParam, bool bRun, DWORD dwAck)
 {
+    CancelScriptWindPending();
     nextCommand.Clear();
     nextCommand.cmd = UC_SKILL;
     nextCommand.pTarget = pTarget;
@@ -6512,6 +6602,7 @@ void CUnitServer::CmdPlayAnimation(const char *pszAnimation)
                  ->GetAnimationEntry(GetUnit()->GetMaskName(), pszAnimation);
     if (!pEntry)
         return;
+    CancelScriptWindPending();
     nextCommand.Clear();
     nextCommand.dwParam = pEntry->dwEntryIndex;
     if (pEntry->dwFlags & ADB_STAGE_CYCLE)
@@ -6523,6 +6614,7 @@ void CUnitServer::CmdPlayAnimation(const char *pszAnimation)
 
 void CUnitServer::CmdUseTrap(int nQItemNum)
 {
+    CancelScriptWindPending();
     nextCommand.Clear();
     nextCommand.cmd = UC_TRAP;
     nextCommand.nQSpellNum = nQItemNum;
