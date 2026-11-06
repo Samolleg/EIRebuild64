@@ -42,10 +42,12 @@ NavigationWorld::~NavigationWorld()=default;
 Navigation::Geometry* NavigationWorld::Terrain() {return baker?&baker->terrain:nullptr;}
 void NavigationWorld::Scene(const char* mpr,const char* mob,CWorldServer& world) {
     owner=&world;
+    // LoadMainMob retires old dynamic objects after Scene(). Retain their
+    // detached membership until removal; SourceObject clears reused fresh IDs.
     ++observerRevision;
     mapName=Navigation::ResourceName(mpr);mobName=Navigation::ResourceName(mob);
     if(sourceJob.valid())try{sourceJob.get();}catch(const std::exception& e){GameJournal::Event("NAV","update_discarded","reason=%s",GameJournal::Quote(e.what()).c_str());}
-    iceVariant=false;preparedTiles.clear();originalSources.reset();sourceTransforms.clear();liveTransforms.clear();appliedTransforms.clear();detachedObjects.clear();
+    iceVariant=false;preparedTiles.clear();originalSources.reset();sourceTransforms.clear();liveTransforms.clear();appliedTransforms.clear();
     for(auto& mesh:meshes)mesh.reset();bodySizes.clear();bodyTable.samples.clear();
     loaded=false;error.clear();failures=stepFailures=0;nextStepLog=0;++generation;queues.clear();airJournal.clear();queryObstacles=nullptr;queryReuse=nullptr;
     sourceRetries.clear();flyingUnits.clear();meshDirectory.clear();flightDeferred=false;sources.reset();absentStatic.clear();sourceDirty.clear();liveDoors.clear();
@@ -160,6 +162,9 @@ bool NavigationWorld::Load(const std::filesystem::path& inputDirectory, bool syn
         for(int id:bakedStatic)if(sourceTransforms.count(id))appliedTransforms[id]=sourceTransforms.at(id);
         // Scene() can retain native static objects on a same-zone reload. Their
         // absence from the Add callbacks is not evidence of removal.
+        if(owner)for(auto i=detachedObjects.begin();i!=detachedObjects.end();) {
+            if(!owner->GetMapObject(*i))i=detachedObjects.erase(i);else ++i;
+        }
         if(synchronize&&owner)for(const auto& entry:owner->mapObjects)Object(entry.second,false,owner->aiMap);
         for(auto& mesh:meshes)if(mesh){mesh->sources=sources;IndexSurfaces(*mesh);}
         const auto syncStart=std::chrono::steady_clock::now();loaded=true;if(synchronize)SyncObjects(true);
@@ -255,6 +260,7 @@ void NavigationWorld::Object(CMapObject* object,bool remove,CAIMap& map) {
 }
 void NavigationWorld::SourceObject(const CMEBasicObject& object,CAIMap& map) {
     if(object.p_nID<0)return;
+    if(owner&&!owner->GetMapObject(object.p_nID))detachedObjects.erase(object.p_nID);
     const auto cp=object.p_ptPosition;const auto& q=object.p_qRotation;
     SceneTransform transform;transform.origin={cp.x,cp.y,cp.z+map.GetOriginalTileHeight(cp)};
     transform.axis={GamePoint(q.RotateX()),GamePoint(q.RotateY()),GamePoint(q.RotateZ())};
