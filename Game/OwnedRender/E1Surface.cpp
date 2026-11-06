@@ -44,10 +44,11 @@ namespace OwnedRender {
 E1Surface::E1Surface() : id(++nextId) { registry(); if (!id) id = ++nextId; }
 E1Surface::~E1Surface() { BeginWrite(); }
 void E1Surface::BeginWrite() noexcept { const std::lock_guard<std::mutex> lock(guard()); entries().erase(id); }
-bool E1Surface::Complete(ID3D11Texture2D* texture) noexcept try {
+bool E1Surface::Complete(ID3D11Texture2D* texture, bool alphaFullyOpaque) noexcept try {
     BeginWrite();
     auto value = std::make_shared<owned::OwnedVisualSurface>();
     if (!describe(texture, *value)) return false;
+    value->alpha_fully_opaque = alphaFullyOpaque;
     if (++generation == 0) ++generation;
     value->id = id; value->generation = generation;
     Entry entry; entry.value = std::move(value); entry.texture = texture;

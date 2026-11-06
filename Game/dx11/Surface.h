@@ -54,6 +54,12 @@ public:
         return OwnedRender::E1SurfaceValue(ownedSurface.Id()) != nullptr ||
                ownedSurface.Complete(texture.Get());
     }
+    // Complete a full CPU upload with its verified alpha evidence. Other writes
+    // publish without that proof and remain conservative.
+    bool PublishUploadedOpacity(bool fullyOpaque) noexcept
+    {
+        return ownedSurface.Complete(texture.Get(), fullyOpaque);
+    }
     DWORD GetWidth() const { return dwSurfaceWidth; };
     DWORD GetHeight() const { return dwSurfaceHeight; };
     DWORD GetBPP() const { return dwSurfaceBPP; };
