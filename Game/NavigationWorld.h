@@ -117,6 +117,7 @@ public:
     std::uint64_t ObserverRevision() const noexcept { return observerRevision; }
     bool ObserverUpdating(int profile) const { return Pending(profile); }
     Navigation::Point Position(CUnit* unit,CAIMap& map) const;
+    Navigation::StraightResult TraceStraight(CUnit*,const Navigation::StraightRequest&);
     Navigation::Route Find(CUnit* unit,Navigation::Point from,Navigation::Point goal,float maxLength,float goalRadius,const float* costs=nullptr,int aiClass=3,Navigation::GoalPolicy goalPolicy=Navigation::GoalPolicy::Exact,const Navigation::Location* goalSupport=nullptr);
     // Passage width and unit-to-unit separation have different footprints.
     float CollisionRadius(CUnit* unit);

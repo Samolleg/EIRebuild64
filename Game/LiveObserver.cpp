@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModFinalGolem.h"
 #include "LiveObserver.h"
 #include "AgentBackground.h"
 #include "../external/owned-renderer/Source/native_lod_observer.h"
@@ -111,7 +112,7 @@ bool saveIsolated=false; // game thread only; deliberately survives load/new gam
 bool IsCommand(const std::string& method) {
     return method=="load_save"||method=="new_game"||method=="enter_zone"||method=="save_game"||
            method=="unit_move"||method=="unit_teleport"||method=="pause"||method=="quit"||
-           method=="set_global"||method=="object_transform"||method=="god_mode"||method=="script_run";
+           method=="set_global"||method=="object_transform"||method=="god_mode"||method=="script_run"||method=="final_golem_action";
 }
 
 json Error(const char* message) {return {{"ok",false},{"error",message},{"truncated",false}};}
@@ -1125,6 +1126,13 @@ bool Command(Job& job) {
         player->bGod=static_cast<BYTE>(level);
         job.response={{"ok",true},{"status","done"},{"player",0},
             {"previous",previous},{"value",int(player->bGod)},{"truncated",false}};return true;
+    }
+    if(method=="final_golem_action") {
+        // Service-only C19 signature (object, object, operation); not a MOB token.
+        for(const char* key:{"boss","other","operation"})if(!params.at(key).is_number_integer())throw std::runtime_error("golem service arguments must be integers");
+        const int boss=params.at("boss").get<int>(),other=params.at("other").get<int>(),op=params.at("operation").get<int>();
+        ModFinalGolem::Action(theWorldServer.GetUnit(boss),theWorldServer.GetUnit(other),op);
+        job.response={{"ok",true},{"status","done"},{"service",true},{"boss",boss},{"other",other},{"operation",op},{"truncated",false}};return true;
     }
     if(method=="script_run") {
         const auto& value=params.at("source");

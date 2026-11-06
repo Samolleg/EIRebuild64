@@ -78,4 +78,17 @@ inline void Blocked(const Boundary& boundary,Navigation::Point at,int reason) {
     ModEncounter::Set(world,"FGL.BlockX",at.x);ModEncounter::Set(world,"FGL.BlockY",at.y);
     ModEncounter::Set(world,"FGL.BlockReason",float(reason));ModEncounter::Set(world,"FGL.Blocked",1);
 }
+inline Navigation::BodyPolicy ChargeBodies() {
+    Navigation::BodyPolicy policy;
+    const int count=std::clamp(int(ModEncounter::Read(theWorldServer,"FGL.PartyCount")),0,16);
+    for(int i=0;i<count;++i) {
+        char key[48];std::snprintf(key,sizeof(key),"FGL.Party%d.Lo",i);unsigned id=unsigned(ModEncounter::Read(theWorldServer,key));
+        std::snprintf(key,sizeof(key),"FGL.Party%d.Hi",i);id|=unsigned(ModEncounter::Read(theWorldServer,key))<<16;
+        auto* hero=theWorldServer.GetUnit(int(id));
+        if(ModInvincible::UnitValid(hero,true)&&ModEncounter::Hero(theWorldServer,hero))policy.ignored[policy.count++]=int(id);
+    }
+    return policy;
+}
+inline bool Charge(CUnit* unit) {return unit&&unit->GetID()==990400&&ModEncounter::Arena(theWorldServer)&&
+    ModEncounter::Read(theWorldServer,"FGL.Active")==1&&ModEncounter::Read(theWorldServer,"FGL.Phase")==3;}
 } // namespace ModArena

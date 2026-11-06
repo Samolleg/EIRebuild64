@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModFinalGolem.h"
 #include "ModEncounter.h"
 #include "ModArenaBoundary.h"
 #include "SaveSchema.h"
@@ -2224,6 +2225,7 @@ bool CUnitServer::IsDanger()
 // !!! SOME WEAPON PARAMS
 /////////////////////////////////////////////////////////////////////////////////////
 // get attack range of the current weapon. If there is no weapon, get Native Attack Weapon range
+bool CUnitServer::EncounterAttackReady() {return eL1State==UL1_IDLE&&theWorldServer.GetSegmentTimeCounter()>=nCanAttackTime;}
 float CUnitServer::GetCurrentWeaponRange()
 {
     CItemWeapon *pWeapon = lpUnit->GetCurrentQWeapon();
@@ -4174,6 +4176,7 @@ BOOL CUnitServer::CreateCurrentWeaponAttackPortion(SRPGAttackPortion &ap, BOOL b
         ap.MakeDeadlyAttack();
     ap.bCalledShot = bCalledShot;
     if(mod&&mod->CombatSetting("JMVAttacks"))mod->RememberAttack(rpgUnitStats,*lpUnit,ap,roll,leftHand);
+    ModFinalGolem::CaptureDamageTypes(lpUnit,ap);
 
     return TRUE;
 }
@@ -6051,6 +6054,7 @@ BOOL CUnitServer::ProcessAttackPortionOwned(SRPGAttackPortion *lpAttackPortion,C
     const auto deliveredAttack = ModAttackEvents::Begin(*lpAttackPortion,pAttacker,lpUnit,beforeSkillHp);
     const auto completeAttack = [&](BOOL result) {
         ModAttackEvents::Complete(*pWS,deliveredAttack,GetMapObjectServer()->GetCurrentHP());
+        ModFinalGolem::MeleeDelivered(deliveredAttack.attacker,lpUnit,*lpAttackPortion);
         return result;
     };
     CUnit* policyAuthor = ModAttackEvents::AuthorScope::Resolve(*lpAttackPortion, lpUnit, pAttacker);

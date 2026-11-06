@@ -83,6 +83,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "OwnedRender/E2LoadReveal.h"
 #include "WorldServer.h"
 #include "ModArenaVisual.h"
+#include "ModFinalGolem.h"
 #include "GeometryManager.h"
 
 #include "I3DMain.h"
@@ -636,6 +637,7 @@ void CWorldClient::RemoveQuickItemsAndSpells()
 void CWorldClient::Destroy()
 {
     ModArenaVisual::Reset();
+    ModFinalGolem::ResetVisual();
     InvalidatePicking();
     ItemApproachCatalog::Reset();
     OwnedRender::E1Scene().Retire(this, ownedRenderGeneration);
@@ -3149,6 +3151,7 @@ BOOL CWorldClient::Draw()
     pRend->SetTexturingAlphaMode(AM_VERTEX);
     //
     ModArenaVisual::Draw();
+    ModFinalGolem::Draw();
     coreParts.Stage(CorePerf::WorldFinish);
     DrawPolyLines();
     pRend->GetD3D()->EndWorld(); // compose world before flying HP and other UI

@@ -9,6 +9,7 @@
  *>	Copyright (c) 1998, Nival Enterntainemnt
  **********************************************************************/
 #include "StdAfx.h"
+#include "ModArenaBoundary.h"
 #include "SaveSchema.h"
 #include "EngineDiagnostics.h"
 #include "NavigationBake.h"
@@ -1633,12 +1634,12 @@ BYTE CAIMap::GetUnitLockCheck(CUnit *pUnit)
     return GetLockCheckValue(pUnit->GetCollisionDistance());
 }
 /////////////////////////////////////////////////////////////////////////////////////
-CUnit *CAIMap::CheckCircleCollision(CUnit *pUnit, const CPlot3D &newPos, const Navigation::Location *support, bool allowEscape)
+CUnit *CAIMap::CheckCircleCollision(CUnit *pUnit, const CPlot3D &newPos, const Navigation::Location *support, bool allowEscape,const Navigation::BodyPolicy* bodies)
 {
     CUnitList nearUnits;const float radius=navigation.CollisionRadius(pUnit);
     mapObjects.GetUnitsNear(newPos,nearUnits,10);
     for(POSITION pos=nearUnits.GetHeadPosition();pos;) {
-        auto* other=nearUnits.GetNext(pos);if(other==pUnit||other->IsDead())continue;
+        auto* other=nearUnits.GetNext(pos);if(other==pUnit||other->IsDead()||(bodies&&bodies->Ignores(other->GetID())))continue;
         const float sum=radius+navigation.CollisionRadius(other);
         const float next=distanceXY2(newPos,other->GetCP());
         if(next>=sum*sum)continue;
@@ -2436,7 +2437,9 @@ bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpM
     // Queries, including movement previews, never replace the live support.
     // Only placement and an accepted physical step own navLocation.
     res.nPathCost=int(res.toGo.route.GetCount());res.bFirstTry=false;
-    CalcSpeeds(pUnit,res.toGo);CreatePathSegment(pUnit,res);return true;
+    CalcSpeeds(pUnit,res.toGo);
+    if(ModArena::Charge(pUnit))for(POSITION i=res.toGo.route.GetHeadPosition();i;)res.toGo.route.GetNext(i).terrain=512;
+    CreatePathSegment(pUnit,res);return true;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 bool CAIMap::ContinuePath(CUnit *pUnit, SAIPath &res)
