@@ -268,7 +268,8 @@ static SLexemeInfo* ModLexemes(){
  static std::vector<SLexemeInfo> entries=[](){
   std::vector<SLexemeInfo> result;for(auto*p=baseLexemes;p->pszAscii;++p)result.push_back(*p);
   for(const auto&e:ModMob::registry)if(e.ready){
-   SLexemeInfo value={e.name,static_cast<ESCCmd>(e.id),strchr("FSOG",e.format[0])?e.format:nullptr,strchr("FSOG",e.format[0])?nullptr:e.format};
+   const bool returnsValue=e.format[0]&&strchr("FSOG",e.format[0]);
+   SLexemeInfo value={e.name,static_cast<ESCCmd>(e.id),returnsValue?e.format:nullptr,returnsValue?nullptr:e.format};
    bool replaced=false;for(auto&old:result)if(!_stricmp(old.pszAscii,e.name)){old=value;replaced=true;break;}if(!replaced)result.push_back(value);
   }
   result.push_back({nullptr,SC_UNKNOWN,nullptr,nullptr});return result;
