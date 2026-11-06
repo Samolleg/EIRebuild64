@@ -953,7 +953,7 @@ HRESULT Renderer::begin_engine_frame_at(std::uint64_t world_epoch){
   world_state_epoch_=world_epoch;release_world_state();dlss_reset_=true;dlss_previous_valid_=false;dlss_last_evaluate_ms_=0;
  }
  reap_tile_family_jobs(); // dropped tile family jobs, once each has stopped
- ++native_frame_index_;begin_native_lod_frame();advance_dlss_jitter();begin_dlss_object_motion();
+ ++native_frame_index_;advance_dlss_jitter();begin_dlss_object_motion();
  native_hiz_frame_=UINT64_MAX;native_world_clip_dirty_=true;
  scene_composited_=false;scene_updated_=false;deferred_ground_marks_.clear();
  rtv_=scene_composite_.target();dsv_=world_dsv_;

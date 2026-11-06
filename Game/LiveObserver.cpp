@@ -142,7 +142,7 @@ json OperationJson() {
 }
 json ExecutingStatus() {
     std::lock_guard<std::mutex> lock(operationMutex);
-    if(!operation.executing)return nullptr;
+    if(!operation.inFlight||(!operation.executing&&operation.applied))return nullptr;
     json result={{"ok",operation.error.empty()},{"pid",GetCurrentProcessId()},
                  {"status_scope","operation_only"},{"main_thread_responding",false},
                  {"operation",OperationJsonLocked()},{"truncated",false}};
@@ -637,6 +637,9 @@ json UnitDetail(CUnit* unit,CWorldServer& world,CPlayer* player) {
 void UpdateOperationReadiness() {
     std::lock_guard<std::mutex> lock(operationMutex);
     if(!operation.inFlight||!operation.applied||operation.executing)return;
+    if(!operation.error.empty()) {
+        operation.state="error";operation.stage="game_error";operation.inFlight=false;return;
+    }
     auto& world=theWorldServer;auto* client=theWorld.GetPlayer();
     if(!world.bMapLoaded||world.GetServerMode()!=SERV_MODE_LOCAL||!theWorld.IsConnected()||
        !client||IWorldConnector.HasReq()||
@@ -644,14 +647,20 @@ void UpdateOperationReadiness() {
     auto* player=client->GetPlayer();auto* serverPlayer=world.GetPlayer(0);
     if(!player||!serverPlayer||player->curInterface==IFACE_NONE||
        player->curInterface!=serverPlayer->curInterface||
+       world.curInterface!=serverPlayer->curInterface||
        world.GetCurrentZoneName()!=operation.expectedZone.c_str())return;
     auto* server=static_cast<CPlayerServer*>(serverPlayer->GetPlayerSpecific());
     if(!server||(server->GetStatus()!=CPlayerServer::PSS_ACTIVE&&server->GetStatus()!=CPlayerServer::PSS_CAMP))return;
-    if(player->curInterface==IFACE_MISSION) {
+    if(player->curInterface==IFACE_MISSION||player->curInterface==IFACE_BASE) {
         if(player->party.people.GetSize()==0)return;
         for(int i=0;i<player->party.people.GetSize();++i) {
             const int id=player->party.people[i].nID;
-            if(!world.GetUnit(id)||!theWorld.GetUnit(id))return;
+            auto* unit=world.GetUnit(id);auto* clientUnit=theWorld.GetUnit(id);
+            if(!unit||unit->IsInvalid()||unit->IsUnreferenced()||
+               !clientUnit||clientUnit->IsInvalid()||clientUnit->IsUnreferenced()||
+               !Squad(unit,serverPlayer)||unit->GetOwner()!=serverPlayer||clientUnit->GetOwner()!=player)return;
+            auto* specific=unit->GetUnitSpecific();
+            if(!specific||specific->WhoAmI()!=HPC_UNITSERVERSPECIFIC)return;
         }
     }
     operation.state="done";operation.stage="done";operation.inFlight=false;
@@ -659,6 +668,11 @@ void UpdateOperationReadiness() {
 json Status() {
     UpdateOperationReadiness();
     auto& world=theWorldServer;const auto& perf=CorePerf::Get();
+    const auto currentOperation=OperationJson();
+    if(!world.bMapLoaded&&currentOperation.at("in_flight").get<bool>())
+        return {{"ok",true},{"pid",GetCurrentProcessId()},
+                {"status_scope","operation_only"},{"main_thread_responding",true},
+                {"map_loaded",false},{"operation",currentOperation},{"truncated",false}};
     static const char* const screens[]={"none","mission","main_menu","base","global_map","camp","autoplay","debug","endgame","exchange"};
     const int screen=int(world.curInterface);
     const bool combat=world.IsCombatPause(),modal=theInterface.GetModalPause(),editor=OwnedRender::E3EditorPaused();
@@ -669,7 +683,7 @@ json Status() {
                  {"pause_reasons",{{"combat",combat},{"modal",modal},{"editor",editor},{"background",background}}},
                  {"camera",Point(theCamera.GetCP())},{"camera_anchor",Point(theCamera.GetAnchorPoint())},
                  {"truncated",false}};
-    result["operation"]=OperationJson();result["save_isolation"]=saveIsolated||AgentBackground::Enabled();
+    result["operation"]=currentOperation;result["save_isolation"]=saveIsolated||AgentBackground::Enabled();
     result["background_agent"]=AgentBackground::Enabled();
     result["main_thread_responding"]=true;
     if(world.bMapLoaded) {
@@ -740,6 +754,9 @@ bool Lod(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
         owned::native_lod_acknowledge(job.lodRequest);
         if(job.lodSnapshot->unavailable){job.response["status"]="unavailable";return true;}
         job.response["snapshot_frame"]=job.lodSnapshot->frame;
+        job.response["capture"]={{"camera_frame",job.lodSnapshot->camera_frame},
+            {"record_capacity",job.lodSnapshot->record_capacity},{"rows",job.lodSnapshot->rows.size()},
+            {"observed_rows",job.lodSnapshot->observed_rows}};
         job.response["status"]="ready";job.response["truncated"]=job.lodSnapshot->truncated;job.phase=2;
     }
     if(!SameWorld(job,world)||owned::bridge_current_world_epoch()!=job.lodSnapshot->world_epoch){

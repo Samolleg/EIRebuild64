@@ -8,6 +8,10 @@
 
 namespace owned {
 constexpr std::uint32_t kNativeLodObservationCapacity = 32768;
+// Records also include terrain and shadow passes. Their sparse indices are
+// independent of the bounded number of observed figure rows (48 MiB max,
+// including the three readbacks; allocated only on an observation request).
+constexpr std::uint32_t kNativeLodObservationRecordLimit = 262144;
 struct NativeLodIdentity {
     std::int32_t id = 0;
     std::uint64_t generation = 0;
@@ -32,6 +36,8 @@ struct NativeLodRow {
 };
 struct NativeLodSnapshot {
     std::uint64_t frame = 0, world_epoch = 0, request = 0;
+    std::uint64_t camera_frame = 0;
+    std::uint32_t record_capacity = 0, observed_rows = 0;
     bool truncated = false, unavailable = false;
     std::vector<NativeLodRow> rows;
 };

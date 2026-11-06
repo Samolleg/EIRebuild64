@@ -3963,6 +3963,7 @@ void native_lod_acknowledge(std::uint64_t request) noexcept {lod_consumed.store(
 
 void Renderer::release_native_lod_observer() noexcept {
  native_lod_observations_.Reset();native_lod_observation_uav_.Reset();
+ native_lod_row_indices_.clear();
  for(auto& slot:native_lod_readbacks_){slot.buffer.Reset();slot.snapshot.reset();}
  native_lod_capture_.reset();native_lod_frame_=native_lod_copied_frame_=UINT64_MAX;
  native_lod_published_frame_=0;native_lod_failed_=false;native_lod_request_=0;
@@ -3973,13 +3974,18 @@ void Renderer::begin_native_lod_frame() noexcept try {
  const auto request=lod_requested.load(std::memory_order_acquire);
  if(!request||request==native_lod_request_||request<=lod_consumed.load(std::memory_order_acquire)||
     lod_requested_epoch.load(std::memory_order_relaxed)!=world_state_epoch_||!context_||!device_)return;
+ const auto capacity=(std::max)(size_t(kNativeLodObservationCapacity),native_instance_records_.size());
+ if(capacity>native_lod_row_indices_.size())
+  for(const auto& slot:native_lod_readbacks_)if(slot.snapshot)return; // drain old buffers before growing
  native_lod_request_=request;
+ if(capacity>kNativeLodObservationRecordLimit)native_lod_failed_=true;
  if(native_lod_failed_){
   auto failed=std::make_shared<NativeLodSnapshot>();failed->world_epoch=world_state_epoch_;
   failed->request=request;failed->unavailable=true;native_lod_readbacks_[0].snapshot=std::move(failed);return;
  }
- if(!native_lod_observations_){
-  D3D11_BUFFER_DESC desc{};desc.ByteWidth=kNativeLodObservationCapacity*sizeof(NativeLodDecisionGpu);
+ if(!native_lod_observations_||capacity>native_lod_row_indices_.size()){
+  std::vector<UINT> indices(capacity,UINT_MAX);
+  D3D11_BUFFER_DESC desc{};desc.ByteWidth=UINT(capacity*sizeof(NativeLodDecisionGpu));
   desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_UNORDERED_ACCESS;
   desc.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
   ComPtr<ID3D11Buffer> buffer;ComPtr<ID3D11UnorderedAccessView> uav;
@@ -3996,28 +4002,38 @@ void Renderer::begin_native_lod_frame() noexcept try {
    native_lod_readbacks_[0].snapshot=std::move(failed);return;
   }
   native_lod_observations_=std::move(buffer);native_lod_observation_uav_=std::move(uav);
+  native_lod_row_indices_=std::move(indices);
  }
  const UINT zero[4]{};context_->ClearUnorderedAccessViewUint(native_lod_observation_uav_.Get(),zero);
- native_lod_row_indices_.fill(UINT_MAX);
+ std::fill(native_lod_row_indices_.begin(),native_lod_row_indices_.end(),UINT_MAX);
  native_lod_capture_=std::make_shared<NativeLodSnapshot>();
  native_lod_capture_->frame=native_frame_index_;native_lod_capture_->world_epoch=world_state_epoch_;
  native_lod_capture_->request=request;native_lod_frame_=native_frame_index_;
+ native_lod_capture_->record_capacity=UINT(native_lod_row_indices_.size());
 } catch(...) {native_lod_failed_=true;native_lod_capture_.reset();}
 
 bool Renderer::begin_native_lod_capture(const NativeSubmissionLayout& layout) noexcept try {
- if(!native_lod_capture_||native_lod_frame_!=native_frame_index_||native_lod_failed_||
-    scene_composited_||hit_test_active_||native_shadow_collecting_||native_point_shadow_active_||native_rain_active_||
+ const auto request=lod_requested.load(std::memory_order_acquire);
+ if(!request||request<=lod_consumed.load(std::memory_order_acquire)||
+    (request==native_lod_request_&&(!native_lod_capture_||native_lod_frame_!=native_frame_index_)))return false;
+ if(scene_composited_||hit_test_active_||native_shadow_collecting_||native_point_shadow_active_||native_rain_active_||
     rtv_.Get()!=scene_composite_.target()||dsv_.Get()!=world_dsv_.Get()||!native_world_clip_valid_)return false;
  // The host publishes the player's world camera before drawing the scene.
  // Matching both camera and targets admits its split colour flushes (including
  // neighbours), never a preview, picking or off-screen camera in the same frame.
  const auto camera=bridge_scene_world_to_clip_snapshot();
  if(!camera.valid||!camera.scene_frame_serial||camera.world_to_clip!=native_world_clip_)return false;
+ // Consume a request only in a real main-camera colour pass. Loading/UI-only
+ // frames must not publish a cleared UAV as a successful empty world snapshot.
+ begin_native_lod_frame();
+ if(!native_lod_capture_||native_lod_frame_!=native_frame_index_||native_lod_failed_)return false;
+ native_lod_capture_->camera_frame=camera.scene_frame_serial;
  for(const auto& work:layout.work){
   if(work.record>=native_instance_records_.size())continue;
   const auto& identity=native_instance_records_[work.record].lod_observer;if(!identity)continue;
-  if(work.record>=kNativeLodObservationCapacity){native_lod_capture_->truncated=true;continue;}
+  if(work.record>=native_lod_row_indices_.size()){native_lod_capture_->truncated=true;continue;}
   auto& index=native_lod_row_indices_[work.record];
+  if(index==UINT_MAX&&native_lod_capture_->rows.size()>=kNativeLodObservationCapacity){native_lod_capture_->truncated=true;continue;}
   if(index==UINT_MAX){index=UINT(native_lod_capture_->rows.size());native_lod_capture_->rows.push_back({work.record,identity,{}});}
   else native_lod_capture_->rows[index].identity=identity; // record reused in this frame: last submission wins
  }
@@ -4037,7 +4053,8 @@ void Renderer::finish_native_lod_frame() noexcept try {
   if(hr==DXGI_ERROR_WAS_STILL_DRAWING)continue;
   if(SUCCEEDED(hr)){
    const auto* rows=static_cast<const NativeLodDecisionGpu*>(mapped.pData);
-   for(auto& row:slot.snapshot->rows)row.decision=rows[row.record];
+   slot.snapshot->observed_rows=0;
+   for(auto& row:slot.snapshot->rows){row.decision=rows[row.record];if(row.decision.state)++slot.snapshot->observed_rows;}
    context_->Unmap(slot.buffer.Get(),0);
    if(slot.snapshot->world_epoch==world_state_epoch_&&slot.snapshot->frame>native_lod_published_frame_){
     if(!publish_lod_snapshot(slot.snapshot))continue; // retry next frame without losing the request
