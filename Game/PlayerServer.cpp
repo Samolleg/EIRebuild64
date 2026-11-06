@@ -12,6 +12,7 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #include "WorldServer.h"
 #include "WorldInterface.h"
+#include "LiveObserver.h"
 #include "PlayerServer.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
@@ -857,13 +858,18 @@ void CPlayerServer::GainExp(int nID, float fpExp)
 void CPlayerServer::LeaveToZone(const char *pszZone, int nZoneEntrance)
 {
     ASSERT(status == PSS_ACTIVE);
-    if (status != PSS_ACTIVE)
+    if (status != PSS_ACTIVE) {
+        LiveObserver::RecordError("zone request refused: player is not active", "");
+        LiveObserver::OperationApplied("enter_zone", false);
         return;
+    }
     if (theWorldServer.curInterface == IFACE_MISSION || theWorldServer.curInterface == IFACE_BASE)
     {
         CUnit *pMainHero = theWorldServer.GetUnit(pPlayer->party.people[0].nID);
         if (!pMainHero || pMainHero->IsDead())
         {
+            LiveObserver::RecordError("zone request refused: main hero is dead or absent", "");
+            LiveObserver::OperationApplied("enter_zone", false);
             GameOver();
             return;
         }

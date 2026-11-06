@@ -27,6 +27,7 @@ bool IsFlipEnable();
 // leaving program
 void AllowQuit(bool bAllow);
 bool QuitProgram(int nExitCode);
+bool CanQuit() noexcept;
 // memory dumping
 bool DumpMemUsage(bool bByFile = true, const char *pszFileName = 0);
 }; // namespace NGame

@@ -304,6 +304,7 @@ void NGame::AllowQuit(bool bAllow)
     bEnableQuit = bAllow;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+bool NGame::CanQuit() noexcept { return bEnableQuit; }
 bool NGame::QuitProgram(int nExitCode)
 {
     if (ErrorDialog::RequestClose()) return true;

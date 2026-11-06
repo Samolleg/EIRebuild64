@@ -148,7 +148,7 @@ class CWorldConnector
     void ConnectLocalServer();
     void Disconnect();
     // most general operations on game world
-    void NewGame();
+    BOOL NewGame();
     void GoMainMenu();
     BOOL LoadGame(const char *pszSaveName);
     BOOL SaveGame(const char *pszSaveName);
@@ -166,7 +166,7 @@ public:
     // Resume only the already prepared new-game transaction after UI input.
     void ReqStartPreparedNewGame();
     void ReqLoadGame(const char *pszSaveName);
-    void ReqSaveGame(const char *pszSaveName);
+    BOOL ReqSaveGame(const char *pszSaveName);
     void ReqMoveToZone(const char *pszZoneName, int nEntrance);
     int GetSaveSize();
     // client side funcs

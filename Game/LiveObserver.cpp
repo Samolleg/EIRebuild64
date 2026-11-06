@@ -9,6 +9,9 @@
 #include "WorldClient.h"
 #include "WorldInterface.h"
 #include "PlayerClient.h"
+#include "PlayerServer.h"
+#include "GlobalMap.h"
+#include "SaveSlot.h"
 #include "Camera.h"
 #include "I3DMain.h"
 #include "I3DScreen.h"
@@ -50,6 +53,9 @@ struct Job {
     std::condition_variable ready;
     bool done=false;
     bool readyToFinish=false; // main thread only
+    bool quitRequested=false; // quit through the ordinary path after its reply
+    unsigned long long operationId=0;
+    std::atomic<bool> replySent{false};
     std::atomic<bool> cancelled{false};
     unsigned phase=0;
     size_t bucket=0, offset=0, item=0;
@@ -86,6 +92,21 @@ std::shared_ptr<Job> queued;
 std::shared_ptr<Job> active; // main thread only
 HANDLE stopEvent=nullptr;
 std::thread worker;
+// One operation record, copied only on a request or transition/error event.
+// It owns no game pointers and adds no per-frame polling or telemetry buffers.
+struct OperationState {
+    unsigned long long id=0;
+    std::string method, parameter, state="idle", stage="idle", error, expectedZone;
+    bool inFlight=false, executing=false, applied=false;
+};
+std::mutex operationMutex;
+OperationState operation;
+unsigned long long operationSequence=0;
+bool saveIsolated=false; // game thread only; deliberately survives load/new game
+bool IsCommand(const std::string& method) {
+    return method=="load_save"||method=="new_game"||method=="enter_zone"||method=="save_game"||
+           method=="unit_move"||method=="unit_teleport"||method=="pause"||method=="quit";
+}
 
 json Error(const char* message) {return {{"ok",false},{"error",message},{"truncated",false}};}
 void ChannelError(const char* operation,DWORD code) noexcept {
@@ -109,6 +130,40 @@ std::string Text(const char* source,size_t maxBytes=512) {
     std::wstring wide(size_t(count),L'\0');
     MultiByteToWideChar(1251,0,source,bytes,wide.data(),count);
     return Utf8(wide.data(),count);
+}
+json OperationJsonLocked() {
+    return {{"id",operation.id},{"method",operation.method},{"name",operation.parameter},
+            {"state",operation.state},{"stage",operation.stage},{"error",operation.error},
+            {"in_flight",operation.inFlight}};
+}
+json OperationJson() {
+    std::lock_guard<std::mutex> lock(operationMutex);return OperationJsonLocked();
+}
+json ExecutingStatus() {
+    std::lock_guard<std::mutex> lock(operationMutex);
+    if(!operation.executing)return nullptr;
+    json result={{"ok",operation.error.empty()},{"pid",GetCurrentProcessId()},
+                 {"status_scope","operation_only"},{"main_thread_responding",false},
+                 {"operation",OperationJsonLocked()},{"truncated",false}};
+    if(!operation.error.empty())result["error"]="game is not responding; see journal";
+    return result;
+}
+unsigned long long BeginOperation(const std::string& method,const std::string& parameter) {
+    std::lock_guard<std::mutex> lock(operationMutex);
+    if(operation.inFlight)throw std::runtime_error("another game operation is in progress");
+    operation=OperationState{};operation.id=++operationSequence;
+    operation.method=method;operation.parameter=parameter;operation.state="running";
+    operation.stage="queued";operation.inFlight=true;return operation.id;
+}
+void LogCommand(const std::string& method,const json& params,const json& response) noexcept {
+    if(!IsCommand(method))return;
+    try {
+        // ASCII JSON keeps user strings intact through the CP1251 journal API.
+        const auto arguments=params.dump(-1,' ',true,json::error_handler_t::replace);
+        const auto result=response.dump(-1,' ',true,json::error_handler_t::replace);
+        GameJournal::Event("MCP","mcp_cmd","source=mcp command=%s params=%s result=%s",
+            method.c_str(),GameJournal::Quote(arguments.c_str()).c_str(),GameJournal::Quote(result.c_str()).c_str());
+    }catch(...){ChannelError("command_log",0);}
 }
 bool Finish(Job& job) {
     std::unique_lock<std::mutex> lock(job.mutex,std::try_to_lock);
@@ -219,15 +274,18 @@ void Serve(HANDLE pipe) {
         DWORD count=0;if(!Transfer(pipe,false,buffer,sizeof(buffer),count)||!count){ChannelError("read",GetLastError());return;}
         line.append(buffer,count);
     }
-    json response;
+    json response;std::string command;json arguments;std::shared_ptr<Job> replyJob;
     try {
         const auto end=line.find('\n');
         if(end==std::string::npos||end+1!=line.size()||end>=RequestLimit)throw std::runtime_error("invalid or oversized request");
-        auto job=std::make_shared<Job>();job->request=json::parse(line.begin(),line.begin()+end);
+        auto job=std::make_shared<Job>();replyJob=job;job->request=json::parse(line.begin(),line.begin()+end);
         if(!job->request.is_object()||!job->request.contains("method")||!job->request["method"].is_string())throw std::runtime_error("invalid request");
-        const std::string method=job->request["method"].get<std::string>();job->method=method;
+        const std::string method=job->request["method"].get<std::string>();job->method=method;command=method;
         if(!job->request.contains("params"))job->request["params"]=json::object();
         if(!job->request["params"].is_object())throw std::runtime_error("params must be an object");
+        arguments=job->request["params"];
+        if(method=="status")response=ExecutingStatus();
+        if(response.is_null()) {
         if(method=="nav"||method=="nav_path") {
             // init(nullptr) allocates independent Detour scratch on this thread;
             // it does not inspect, attach to, or dereference a game mesh.
@@ -243,7 +301,8 @@ void Serve(HANDLE pipe) {
         const auto expires=Clock::now()+std::chrono::milliseconds(4500);
         for(;;) {
             if(!job->ready.wait_until(lock,expires,[&]{return job->done||job->cancelled||job->setup.load(std::memory_order_acquire)==1||WaitForSingleObject(stopEvent,0)==WAIT_OBJECT_0;})) {
-                job->cancelled=true;response=Error("main thread did not answer within the deadline");break;
+                job->cancelled=true;response=Error("game is not responding; see journal");
+                response["main_thread_responding"]=false;response["operation"]=OperationJson();break;
             }
             if(job->done){response=std::move(job->response);break;}
             if(job->cancelled){response=Error("observer request cancelled");break;}
@@ -262,14 +321,17 @@ void Serve(HANDLE pipe) {
         }
         lock.unlock();
         if(method=="screenshot"&&response.value("ok",false))response["path"]=SavePng(*job);
+        }
     }catch(const std::exception& e) {
         GameJournal::Event("ERROR","live_request","reason=%s",GameJournal::Quote(e.what()).c_str());
         response=Error(e.what());
     }catch(...) {ChannelError("request_exception",0);response=Error("live request failed");}
+    LogCommand(command,arguments,response);
     auto payload=response.dump(-1,' ',false,json::error_handler_t::replace);
     if(payload.size()+1>ResponseLimit)payload=Error("response exceeds size limit").dump();
     payload.push_back('\n');DWORD count=0;
     if(!Transfer(pipe,true,payload.data(),DWORD(payload.size()),count)||count!=payload.size())ChannelError("write",GetLastError());
+    if(replyJob)replyJob->replySent.store(true,std::memory_order_release);
 }
 void Run() noexcept {
     PSECURITY_DESCRIPTOR descriptor=nullptr;
@@ -291,6 +353,48 @@ void Run() noexcept {
 }
 } // namespace
 
+bool IsOperation(const char* method) noexcept {
+    std::lock_guard<std::mutex> lock(operationMutex);
+    return operation.inFlight&&operation.method==method;
+}
+void OperationExecuting(const char* method) noexcept {
+    std::lock_guard<std::mutex> lock(operationMutex);
+    if(operation.inFlight&&operation.method==method){operation.executing=true;operation.stage="executing";}
+}
+void OperationApplied(const char* method,bool success) noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(operationMutex);
+        if(!operation.inFlight||operation.method!=method)return;
+        operation.executing=false;
+        if(!success||!operation.error.empty()) {
+            if(operation.error.empty())operation.error="game operation failed; see journal";
+            operation.state="error";operation.stage="failed";operation.inFlight=false;return;
+        }
+        operation.applied=true;
+        operation.expectedZone=theWorldServer.GetCurrentZoneName();
+        if(operation.method=="enter_zone"&&_stricmp(operation.expectedZone.c_str(),operation.parameter.c_str())!=0) {
+            operation.error="game entered a different zone";operation.state="error";
+            operation.stage="failed";operation.inFlight=false;return;
+        }
+        if(operation.method=="save_game") {
+            operation.state="done";operation.stage="done";operation.inFlight=false;
+        } else operation.stage="connecting_client";
+    }catch(...){ChannelError("operation_result",0);}
+}
+void RecordError(const char* text,const char* extra) noexcept {
+    try {
+        std::lock_guard<std::mutex> lock(operationMutex);
+        if(!operation.inFlight||!operation.error.empty())return;
+        operation.error=Text(text,2048)+Text(extra,512);operation.state="error";
+        operation.stage="game_error";
+        // Notification's journal write and critical flush happen before the modal UI.
+    }catch(...){ChannelError("operation_error",0);}
+}
+std::string ProtectedSaveSlot(const char* name) {
+    if(!name)return {};
+    if(!saveIsolated||strncmp(name,"mcp_",4)==0)return name;
+    return std::string("mcp_")+name;
+}
 void Start() noexcept {
     try {
         if(stopEvent||worker.joinable())return;
@@ -322,10 +426,16 @@ void Frame() noexcept {
         }
         if(!active)return;
         if(active->cancelled){CleanupCapture(*active);active.reset();return;}
-        if(active->readyToFinish){if(Finish(*active))active.reset();return;}
+        if(active->readyToFinish){
+            if(active->quitRequested&&active->replySent.load(std::memory_order_acquire)){
+                if(!NGame::QuitProgram(0))ChannelError("quit_refused",0);
+                active.reset();return;
+            }
+            if(Finish(*active)&&!active->quitRequested)active.reset();return;
+        }
         const auto started=Clock::now();
         const auto used=active->captureCost;active->captureCost=Clock::duration{};
-        if(used>std::chrono::milliseconds(1)) {
+        if(used>std::chrono::milliseconds(1)&&!IsCommand(active->method)) {
             if(active->method!="lod")GameJournal::Event("ERROR","live_budget","elapsed_us=%lld",static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(used).count()));
             active->budgetExceeded=true;
         }
@@ -336,17 +446,22 @@ void Frame() noexcept {
         try {done=Step(*active,deadline);}
         catch(const std::exception& e) {
             if(active->method!="lod")GameJournal::Event("ERROR","live_observe","reason=%s",GameJournal::Quote(e.what()).c_str());
+            if(active->operationId){RecordError(e.what(),"");OperationApplied(active->method.c_str(),false);}
             CleanupCapture(*active);active->response=Error(e.what());done=true;
-        } catch(...) {if(active->method!="lod")ChannelError("observe_exception",0);CleanupCapture(*active);active->response=Error("observation failed");done=true;}
+        } catch(...) {
+            if(active->method!="lod")ChannelError("observe_exception",0);
+            if(active->operationId){RecordError("game command failed","");OperationApplied(active->method.c_str(),false);}
+            CleanupCapture(*active);active->response=Error("live request failed");done=true;
+        }
         const auto elapsed=Clock::now()-started+used;
-        if(elapsed>std::chrono::milliseconds(1)) {
+        if(elapsed>std::chrono::milliseconds(1)&&!IsCommand(active->method)) {
             if(active->method!="lod")GameJournal::Event("ERROR","live_budget","elapsed_us=%lld",static_cast<long long>(std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count()));
             active->budgetExceeded=true;
         }
         if(active->cancelled){CleanupCapture(*active);active.reset();return;}
         if(done){
             if(active->budgetExceeded&&active->response.is_object())active->response["budget_exceeded"]=true;
-            active->readyToFinish=true;if(Finish(*active))active.reset();
+            active->readyToFinish=true;if(Finish(*active)&&!active->quitRequested)active.reset();
         }
     } catch(...) {ChannelError("frame_exception",0);if(active){CleanupCapture(*active);active->cancelled=true;active->ready.notify_one();active.reset();}}
 }
@@ -511,7 +626,31 @@ json UnitDetail(CUnit* unit,CWorldServer& world,CPlayer* player) {
         {"command_target_id",command.GetTargetID()},{"command_point",Point(command.ptTarget)}};
     return result;
 }
+// Readiness is evaluated only for an explicit status request, never each frame.
+// World construction alone is insufficient: wait for the normal local handshake
+// and the client/server copies of the squad to reach the mission.
+void UpdateOperationReadiness() {
+    std::lock_guard<std::mutex> lock(operationMutex);
+    if(!operation.inFlight||!operation.applied||operation.executing)return;
+    auto& world=theWorldServer;auto* client=theWorld.GetPlayer();
+    if(!world.bMapLoaded||world.GetServerMode()!=SERV_MODE_LOCAL||!theWorld.IsConnected()||
+       !client||IWorldConnector.HasReq()||client->GetStatus()!=CPlayerClient::CPS_ACTIVE)return;
+    auto* player=client->GetPlayer();auto* serverPlayer=world.GetPlayer(0);
+    if(!player||!serverPlayer||player->curInterface!=world.curInterface||
+       world.GetCurrentZoneName()!=operation.expectedZone.c_str())return;
+    auto* server=static_cast<CPlayerServer*>(serverPlayer->GetPlayerSpecific());
+    if(!server||server->GetStatus()!=CPlayerServer::PSS_ACTIVE)return;
+    if(world.curInterface==IFACE_MISSION) {
+        if(player->party.people.GetSize()==0)return;
+        for(int i=0;i<player->party.people.GetSize();++i) {
+            const int id=player->party.people[i].nID;
+            if(!world.GetUnit(id)||!theWorld.GetUnit(id))return;
+        }
+    }
+    operation.state="done";operation.stage="done";operation.inFlight=false;
+}
 json Status() {
+    UpdateOperationReadiness();
     auto& world=theWorldServer;const auto& perf=CorePerf::Get();
     static const char* const screens[]={"none","mission","main_menu","base","global_map","camp","autoplay","debug","endgame","exchange"};
     const int screen=int(world.curInterface);
@@ -523,6 +662,8 @@ json Status() {
                  {"pause_reasons",{{"combat",combat},{"modal",modal},{"editor",editor},{"background",background}}},
                  {"camera",Point(theCamera.GetCP())},{"camera_anchor",Point(theCamera.GetAnchorPoint())},
                  {"truncated",false}};
+    result["operation"]=OperationJson();result["save_isolation"]=saveIsolated;
+    result["main_thread_responding"]=true;
     if(world.bMapLoaded) {
         result["zone"]=Text(world.GetJournalZoneName(),256);
         result["map"]=Text(world.szZoneFileName,256);result["mob"]=Text(world.szMobFileName,256);
@@ -802,8 +943,133 @@ bool Screenshot(Job& job,Clock::time_point deadline) {
     if(job.row<job.height)return false;
     CleanupCapture(job);job.response={{"ok",true},{"width",job.width},{"height",job.height},{"truncated",false}};return true;
 }
+std::string CommandName(const json& params) {
+    const auto& value=params.at("name");
+    if(!value.is_string())throw std::runtime_error("name must be a string");
+    const auto name=value.get<std::string>();
+    if(name.empty()||name.size()>128||!std::all_of(name.begin(),name.end(),[](unsigned char c){
+        return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-';
+    }))throw std::runtime_error("name must contain 1..128 ASCII letters, digits, underscores or hyphens");
+    return name;
+}
+CPlayerClient* CommandClient() {
+    auto* client=theWorld.GetPlayer();auto* serverPlayer=theWorldServer.GetPlayer(0);
+    if(!theWorldServer.bMapLoaded||theWorldServer.GetServerMode()!=SERV_MODE_LOCAL||
+       !theWorld.IsConnected()||!client||!serverPlayer)
+        throw std::runtime_error("command requires a connected local game");
+    auto* server=static_cast<CPlayerServer*>(serverPlayer->GetPlayerSpecific());
+    if(!server||(server->GetStatus()!=CPlayerServer::PSS_ACTIVE&&server->GetStatus()!=CPlayerServer::PSS_CAMP)||
+       (client->GetStatus()!=CPlayerClient::CPS_ACTIVE&&client->GetStatus()!=CPlayerClient::CPS_CAMP))
+        throw std::runtime_error("local player is not ready");
+    return client;
+}
+CPlot3D CommandPoint(const json& params) {
+    const auto coordinate=[&](const char* key) {
+        if(!params.at(key).is_number())throw std::runtime_error("coordinates must be numbers");
+        const auto value=params.at(key).get<double>();
+        if(!std::isfinite(value)||std::abs(value)>100000)throw std::runtime_error("invalid coordinates");
+        return float(value);
+    };
+    CPlot3D point(coordinate("x"),coordinate("y"),params.contains("z")?coordinate("z"):0.f);
+    if(point.x<0||point.y<0||!theWorldServer.aiMap.TileInBounds(Float2AITile(point.x),Float2AITile(point.y)))
+        throw std::runtime_error("point is outside the loaded map");
+    return point;
+}
+bool Command(Job& job) {
+    // The first listed command, even if rejected, protects every subsequent
+    // slot write in this process. Reading an owner's slot remains permitted.
+    saveIsolated=true;
+    const auto& method=job.method;const auto& params=job.request.at("params");
+    {std::lock_guard<std::mutex> lock(operationMutex);
+     if(operation.inFlight&&method!="quit")throw std::runtime_error("another game operation is in progress; query status");}
+    GameJournal::Source source("mcp");
+    if(method=="quit") {
+        if(!NGame::CanQuit())throw std::runtime_error("game refused to quit");
+        job.quitRequested=true;
+        job.response={{"ok",true},{"status","accepted"},{"truncated",false}};
+        return true;
+    }
+    if(method=="load_save"||method=="new_game"||method=="enter_zone") {
+        if(IWorldConnector.HasReq())throw std::runtime_error("game already has a pending transition");
+        const auto name=method=="new_game"?std::string():CommandName(params);
+        if(method=="enter_zone") {
+            auto* client=CommandClient();
+            if(!theMap.GetZoneByName(name.c_str()))throw std::runtime_error("zone is not in map.txt");
+            if(theWorldServer.GetCurrentZoneName().CompareNoCase(name.c_str())==0)
+                throw std::runtime_error("already in this zone");
+            const auto* player=client->GetPlayer();
+            if(player->party.people.GetSize()==0)throw std::runtime_error("player has no party");
+            if(theWorldServer.curInterface==IFACE_MISSION||theWorldServer.curInterface==IFACE_BASE) {
+                auto* hero=theWorldServer.GetUnit(player->party.people[0].nID);
+                if(!hero||hero->IsDead())throw std::runtime_error("main hero cannot leave the zone");
+            }
+        }
+        const auto id=BeginOperation(method,name);job.operationId=id;
+        if(method=="load_save")IWorldConnector.ReqLoadGame(name.c_str());
+        else if(method=="new_game")IWorldConnector.ReqNewGame();
+        else IWorldConnector.ClientGoZone(name.c_str(),0);
+        job.response={{"ok",true},{"status","accepted"},{"operation_id",id},{"truncated",false}};
+        return true;
+    }
+    auto* client=CommandClient();
+    if(method=="save_game") {
+        const auto name=CommandName(params);
+        if(name.rfind("mcp_",0)!=0)throw std::runtime_error("save_game requires the mcp_ prefix");
+        const auto id=BeginOperation(method,name);job.operationId=id;OperationExecuting("save_game");
+        const bool saved=IWorldConnector.ReqSaveGame(name.c_str())!=FALSE;
+        OperationApplied("save_game",saved);
+        job.response=saved?json{{"ok",true},{"status","done"},{"name",name},{"operation_id",id},{"truncated",false}}:Error("save failed; see journal");
+        return true;
+    }
+    if(method=="pause") {
+        if(!params.at("on").is_boolean())throw std::runtime_error("on must be boolean");
+        IWorld.MissionCombatPause(params.at("on").get<bool>());
+        job.response={{"ok",true},{"status","accepted"},{"on",params["on"]},{"truncated",false}};return true;
+    }
+    const auto& value=params.at("id");
+    if(!value.is_number_integer()||value<=0||value>INT_MAX)throw std::runtime_error("invalid unit id");
+    const int id=value.get<int>();auto& world=theWorldServer;auto* unit=world.GetUnit(id);
+    auto* player=client->GetPlayer();auto* serverPlayer=world.GetPlayer(0);
+    if(!unit||unit->IsInvalid()||unit->IsUnreferenced()||!Squad(unit,player)||!Squad(unit,serverPlayer)||
+       unit->GetPlayerNum()!=player->GetPlayerNumber())throw std::runtime_error("unit is not in the player's squad");
+    if(unit->IsDead()||unit->CheckFlag(UNIT_BLOCKED)||world.curInterface!=IFACE_MISSION||
+       client->GetStatus()!=CPlayerClient::CPS_ACTIVE)throw std::runtime_error("squad unit cannot act in the current state");
+    auto* specific=unit->GetUnitSpecific();
+    if(!specific||specific->WhoAmI()!=HPC_UNITSERVERSPECIFIC)throw std::runtime_error("unit has no server state");
+    auto* server=static_cast<CUnitServer*>(specific);
+    if(!server->logic.GetPlayer())throw std::runtime_error("unit does not accept player orders");
+    auto point=CommandPoint(params);
+    if(method=="unit_move") {
+        auto* clientUnit=theWorld.GetUnit(id);
+        if(!clientUnit)throw std::runtime_error("unit is not present on the client");
+        point.z=world.aiMap.GetTileHeight(point);
+        CArray<CUnit*,CUnit*> units;units.Add(clientUnit);
+        client->UnitCommandMoveTo(units,point,FALSE);
+        job.response={{"ok",true},{"status","accepted"},{"id",id},{"target",Point(point)},
+                      {"path","client_to_server"},{"truncated",false}};return true;
+    }
+    // Service placement, not a path traversal. Keep the normal AI-map placement
+    // and Nav64 support coherent; roll back if the requested support is absent.
+    const auto previous=unit->GetCP();const auto previousLocation=unit->navLocation;
+    if(!world.aiMap.MoveObject(unit,point))throw std::runtime_error("AI map rejected teleport placement");
+    unit->navLocation={};
+    try {
+        if(!world.aiMap.Navigation().Place(unit,world.aiMap))
+            throw std::runtime_error("Nav64 rejected teleport placement; original position restored");
+    }catch(...) {
+        const bool restored=world.aiMap.MoveObject(unit,previous);unit->navLocation=previousLocation;
+        if(!restored){ChannelError("teleport_restore_failed",0);throw std::runtime_error("teleport could not restore position; see journal");}
+        throw;
+    }
+    server->logic.GetPlayer()->DoStop(server->logic);server->InitializeUnit();
+    unit->SetUpdateMask(CMapObject::VLD_MASK_POSROT);
+    job.response={{"ok",true},{"status","done"},{"id",id},{"position",Point(unit->GetCP())},
+        {"navigation_position",Point(unit->navLocation.position)},{"service_action",true},
+        {"navigation_traversal",false},{"z_kind","ground_relative"},{"truncated",false}};return true;
+}
 bool Step(Job& job,Clock::time_point deadline) {
     const auto& method=job.method;const auto& params=job.request.at("params");
+    if(IsCommand(method))return Command(job);
     if(method=="status"){job.response=Status();return true;}
     if(method=="perf"){job.response=Perf();return true;}
     if(method=="screenshot")return Screenshot(job,deadline);
@@ -815,13 +1081,14 @@ bool Step(Job& job,Clock::time_point deadline) {
         auto detail=UnitDetail(unit,world,Player());
         const bool truncated=detail.value("effects_truncated",false)||
             (detail.contains("navigation")&&detail["navigation"].value("truncated",false));
-        job.response={{"ok",true},{"unit",std::move(detail)},{"truncated",truncated}};return true;
+        job.response={{"ok",true},{"unit",std::move(detail)},{"world_epoch",owned::bridge_current_world_epoch()},
+                      {"truncated",truncated}};return true;
     }
     if(method=="lod")return Lod(job,deadline,world,params);
     if(method=="units")return Units(job,deadline,world,params);
     if(method=="globals")return Globals(job,deadline,world,params);
     if(method=="nav"||method=="nav_path")return Nav(job,deadline,world,params,method=="nav_path");
-    job.response=Error("unknown read-only method");return true;
+    job.response=Error("unknown live method");return true;
 }
 } // namespace
 } // namespace LiveObserver

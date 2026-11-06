@@ -25,6 +25,7 @@
 #include "ModPackage.h"
 #include "SpellDatabase.h"
 #include "GameJournal.h"
+#include "LiveObserver.h"
 #include "UnitServer.h"
 #include "OwnedRender/E1MobSource.h"
 #include "dx11/Surface.h"
@@ -719,6 +720,9 @@ bool Slot::Presentation(const char *name,SSaveSlotDesc &desc,Bytes *shot)
 }
 bool Slot::Save(const char *name)
 {
+    // All automatic, quick and manual slot writes converge here. Owner slots
+    // are never overwritten after MCP takes control of this process.
+    const auto protectedName=LiveObserver::ProtectedSaveSlot(name);name=protectedName.c_str();
     try{
         CheckedName(name);if(theWorldServer.GetServerMode()!=SERV_MODE_LOCAL)Invalid("save requires a local world");
         auto *player=theWorldServer.GetPlayer(0);if(!player)Invalid("save requires a local player");
