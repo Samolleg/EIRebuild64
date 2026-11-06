@@ -2278,6 +2278,10 @@ HRESULT DebugOverlay::initialize(HWND window, ID3D11Device* device, ID3D11Device
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    if (!native_user_input_enabled()) {
+        io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
+        io.ConfigFlags |= ImGuiConfigFlags_NoMouse | ImGuiConfigFlags_NoMouseCursorChange;
+    }
     state->latin_font = io.Fonts->AddFontDefault();
     // Cyrillic: the built-in font is Latin only. The Windows UI font fills its
     // missing glyphs (game text such as effect names) and is the whole menu

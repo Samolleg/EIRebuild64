@@ -1,4 +1,5 @@
 #include "combat_ui.h"
+#include "embedded_process_policy.h"
 #include "widescreen.h"
 #ifdef EID3D11_EMBEDDED
 #include "hud_layout_context.h"
@@ -27,6 +28,12 @@
 
 namespace owned {
 namespace {
+SHORT combat_key_state(int key) noexcept {
+#ifdef EID3D11_EMBEDDED
+    if (embedded_agent_background()) return 0;
+#endif
+    return GetAsyncKeyState(key);
+}
 using Microsoft::WRL::ComPtr;
 struct PlateAnchor { std::int32_t id; float x, y; };
 struct SpellList {
@@ -80,7 +87,7 @@ float plate_opacity(const State& s,const CombatUnitValue& unit) {
     if ((s.show_combat && combat) ||
         (s.show_hover && s.hover_id==unit.id && s.hover_incarnation==unit.incarnation)) return 1;
     const bool revealed=s.show_all || (!s.show_combat && ((s.show_paused && s.paused) ||
-        (s.show_alt && (GetAsyncKeyState(VK_MENU)&0x8000)!=0)));
+        (s.show_alt && (combat_key_state(VK_MENU)&0x8000)!=0)));
     return revealed ? (combat ? 1.f : s.idle_opacity) : 0;
 }
 void remove_attack(State& s, const CombatUnitValue& v) {
@@ -886,7 +893,7 @@ void CombatUiRenderer::draw(RendererConfig& config,bool interactive) {
     const bool split=config.find("combat_split_effects")->boolean_value;
     const bool outlines=config.find("combat_effect_outlines")->boolean_value;
     const unsigned limit=unsigned(config.find("combat_max_effects")->integer_value);
-    const bool alt=interactive && (GetAsyncKeyState(VK_MENU)&0x8000)!=0; const double now=ImGui::GetTime();
+    const bool alt=interactive && (combat_key_state(VK_MENU)&0x8000)!=0; const double now=ImGui::GetTime();
     if (!alt) { s.popup={}; s.popup_wheel=0; }
     const bool inside_popup=s.popup.open && contains(s.popup.lo,s.popup.hi,io.MousePos);
     unsigned tooltip=256; CombatEffectValue tooltip_effect{};
@@ -1147,7 +1154,7 @@ void CombatUiRenderer::draw(RendererConfig& config,bool interactive) {
         s.list_track_lo={hi.x-5.f*ux,lo.y}; s.list_track_hi=hi;
         const float track_height=hi.y-lo.y;
         s.list_thumb_height=count ? track_height*(std::min)(1.f,visible/count) : track_height;
-        if (s.list_drag && interactive && (GetAsyncKeyState(VK_LBUTTON)&0x8000) && s.list_max_scroll>0)
+        if (s.list_drag && interactive && (combat_key_state(VK_LBUTTON)&0x8000) && s.list_max_scroll>0)
             s.list_scroll=std::clamp((io.MousePos.y-s.drag_offset-lo.y)/(track_height-s.list_thumb_height)*s.list_max_scroll,0.f,s.list_max_scroll);
         else s.list_drag=false;
         auto* draw=ImGui::GetBackgroundDrawList();
@@ -1209,7 +1216,7 @@ void CombatUiRenderer::draw(RendererConfig& config,bool interactive) {
 }
 bool CombatUiRenderer::process_input(UINT message,WPARAM wparam,LPARAM lparam) noexcept {
     if (!implementation_) return false; auto& s=*implementation_;
-    if (!(GetAsyncKeyState(VK_MENU)&0x8000)) { s.popup={}; s.popup_wheel=0; }
+    if (!(combat_key_state(VK_MENU)&0x8000)) { s.popup={}; s.popup_wheel=0; }
     if (message==WM_MOUSEWHEEL && s.popup.open && s.popup.hovered) { s.popup_wheel+=float(GET_WHEEL_DELTA_WPARAM(wparam))/WHEEL_DELTA; return true; }
     if (message==WM_KILLFOCUS || (message==WM_ACTIVATEAPP && !wparam)) { s.popup={}; s.list_drag=false; }
     const auto& list=s.spell_list;
