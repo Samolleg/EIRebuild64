@@ -111,6 +111,7 @@ public:
     }
     CAIRoute Invert();
     void EraseDuplicates();
+    void Turn(float pivotX,float pivotY,float radians);
     BOOL Is8Connected();
     void AddHeadUnit(WORD wX, WORD wY) { route.AddHead(SRouteUnit(wX, wY)); }
     void AddTailUnit(WORD wX, WORD wY) { route.AddTail(SRouteUnit(wX, wY)); }
@@ -186,6 +187,8 @@ public:
     void UpdateFrom(CUpdateHistory &pkt);
     void Clear();
     void SetSpeed(WORD wSpeed256 = N_RT_SPEED);
+    void Turn(float pivotX,float pivotY,float radians);
+    void Face(float heading);
     CPlot3D GetFinalPoint(); // result is in meters
     void Load(CSave &file) = delete;
     void Store(CSave &file) = delete;

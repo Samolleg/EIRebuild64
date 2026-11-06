@@ -1142,7 +1142,7 @@ void SAIPath::Store(SaveSchema::Writer &w) const
 }
 void SAIPath::Load(SaveSchema::Reader &r)
 {
-    navigationGeneration=0;navigationPending=false;navigationGoal={};navigationPolicy=Navigation::GoalPolicy::Exact;navigationMaxLength=1.e6f;navigationMinDistance=0;
+    navigationGeneration=0;navigationPending=false;navigationTurned=false;navigationGoal={};navigationPolicy=Navigation::GoalPolicy::Exact;navigationMaxLength=1.e6f;navigationMinDistance=0;
     r.Value(toGo); r.Value(curSegment); r.Value(ptFinish); r.Value(ptDestination);
     bFinished=r.Bool(); bRouteFailed=r.Bool(); bTryAnyPath=r.Bool(); bFirstTry=r.Bool();
     excludeVertices.SetSize(r.Count());

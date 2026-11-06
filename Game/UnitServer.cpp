@@ -803,6 +803,28 @@ void CUnitServer::L1NewPathSegment()
     L1StartRotateAnimation();
 }
 /////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::TurnScriptPath(float radians)
+{
+    if(!path.curSegment.IsMoving()||path.navigationPending||!std::isfinite(radians)||std::abs(radians)<.0000001f)return false;
+    auto& map=static_cast<CWorldServer*>(GetWorld())->aiMap;
+    const auto origin=lpUnit->GetCP(),oldGoal=path.ptDestination;
+    const double c=std::cos(double(radians)),s=std::sin(double(radians));
+    auto turn=[&](float& x,float& y,float px,float py){const double dx=double(x)-px,dy=double(y)-py;x=float(px+c*dx-s*dy);y=float(py+s*dx+c*dy);};
+    auto goal=oldGoal;turn(goal.x,goal.y,origin.x,origin.y);
+    if(!std::isfinite(goal.x)||!std::isfinite(goal.y)||goal.x<0||goal.y<0||!map.TileInBounds(Float2AITile(goal.x),Float2AITile(goal.y)))return false;
+    const float x=Meter2AITile(origin.x),y=Meter2AITile(origin.y);
+    path.curSegment.Turn(x,y,radians);path.toGo.Turn(x,y,radians);
+    turn(path.ptFinish.x,path.ptFinish.y,x,y);path.ptDestination=goal;
+    const float height=path.navigationGoal.position.z;
+    path.navigationGoal={};path.navigationGoal.position={goal.x,goal.y,height};path.navigationTurned=true;
+    if(curCommand.IsMove()&&curCommand.pTarget.IsEmpty()) {
+        turn(curCommand.ptTarget.x,curCommand.ptTarget.y,origin.x,origin.y);
+        curCommand.navGoal=path.navigationGoal;curCommand.navGoalValid=true;
+        // A player motivation may already contain a newly queued click.
+        if(nextCommand.IsEmpty())if(auto* player=logic.GetPlayer())player->TurnMoveGoal(oldGoal,goal);
+    }
+    navigationWait=navigationRejects=0;map.Navigation().Stop(lpUnit->GetID());lpUnit->LowNewRoute();return true;
+}
 bool CUnitServer::RestoreNavigation(bool invalidate)
 {
     if(invalidate){navigationRejects=navigationWait=0;path.excludeVertices.RemoveAll();}
@@ -867,6 +889,16 @@ void CUnitServer::L1ExecMove()
 
     auto support=movement.support;
     if(!accepted) {
+        if(path.navigationTurned) {
+            // A wind-turned route must stop here, never find a way around a wall.
+            const auto stop=lpUnit->GetCP();const auto oldGoal=path.ptDestination;
+            if(curCommand.IsMove()&&curCommand.pTarget.IsEmpty()) {
+                curCommand.ptTarget.x=stop.x;curCommand.ptTarget.y=stop.y;
+                if(nextCommand.IsEmpty())if(auto* player=logic.GetPlayer())player->TurnMoveGoal(oldGoal,stop);
+            }
+            L1StopMovement(false);path.CreateStand(lpUnit);path.ptDestination=stop;
+            lpUnit->SetUpdateMask(CMapObject::VLD_MASK_POSROT);lpUnit->LowNewRoute();return;
+        }
         if(movement.blocker>=0) {
             GameJournal::Event("NAV","queue_stopped","unit=%d blocker=%d reason=no_detour",lpUnit->GetID(),movement.blocker);
             L1StopMovement(true);return;
@@ -921,6 +953,9 @@ void CUnitServer::L1ExecMove()
         }
         else lock=AI_LOCK_STATIC;
         ASSERT(bMoved);
+    }
+    if (!bMoved && path.navigationTurned) {
+        L1StopMovement(false);path.CreateStand(lpUnit);lpUnit->LowNewRoute();return;
     }
     if (!bMoved)
     {
@@ -6137,6 +6172,17 @@ void CUnitServer::CmdMoveTo(const CPlot3D &ptDest, bool bRun, bool bGroupCmd, fl
 {
     CWorldServer *pWS = (CWorldServer *)GetWorld();
 
+    const int id=lpUnit->GetID();const auto at=lpUnit->GetCP();
+    const bool wallGuard=(id==42||id==44||id==45||id==52||id==217||id==218||id==219)&&
+        at.x>450&&at.x<510&&at.y>310&&at.y<395&&pWS->GetMapObject(43826);
+    const bool sameFloor=goalSupport?curCommand.navGoalValid&&
+        goalSupport->surface==curCommand.navGoal.surface&&std::abs(goalSupport->position.z-curCommand.navGoal.position.z)<.01f:!curCommand.navGoalValid;
+    if(wallGuard&&nextCommand.IsEmpty()&&curCommand.IsMove()&&curCommand.pTarget.IsEmpty()&&
+       L1IsMoving()&&!bLcCommandFail&&!bL1MovementFailed&&!bL1SpeedChanged&&!bL0Frozen&&!bL0MovementFrozen&&
+       !path.bRouteFailed&&!path.navigationPending&&!path.navigationTurned&&!navigationWait&&!navigationRejects&&
+       path.navigationGeneration==pWS->aiMap.Navigation().Generation()&&sameFloor&&
+       curCommand.bDoItFast==bRun&&curCommand.nQSpellNum==(bGroupCmd?1:0)&&curCommand.ptTarget.z==fpMaxPathDist&&
+       std::abs(curCommand.ptTarget.x-ptDest.x)<.01f&&std::abs(curCommand.ptTarget.y-ptDest.y)<.01f)return;
     nextCommand.Clear();
     nextCommand.cmd = UC_MOVETO;
     nextCommand.ptTarget = ptDest;

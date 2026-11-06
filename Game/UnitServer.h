@@ -741,6 +741,8 @@ public:
     bool IsAlwaysActive() { return logic.IsAlwaysActive(); }
     bool IsTamed() const { return tameLevel != UTL_NONE; }
     void CmdRotate(const CPlot3D &vecDest, float fpAngSpeed);
+    bool TurnScriptPath(float radians);
+    void FaceScriptRoute(float heading) { path.curSegment.Face(heading);lpUnit->LowNewRoute(); }
     void CmdMoveTo(const CPlot3D &ptDest, bool bRun, bool bGroupCmd = false,
                    float fpMaxPathDist = 1e6f,const Navigation::Location* goalSupport=nullptr);
     void CmdShowMove(const CPlot3D &ptDest, bool bGroupCmd, bool bRun, float fpMaxPathDist = 1e6f);

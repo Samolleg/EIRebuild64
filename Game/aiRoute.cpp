@@ -29,6 +29,29 @@ static const char LOCAL_FILE[] = __FILE__;
 #endif
 /////////////////////////////////////////////////////////////////////////////////////
 // SRouteUnit &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+namespace {
+CPlot2D TurnPoint(CPlot2D p,float x,float y,float radians) {
+    const double c=std::cos(double(radians)),s=std::sin(double(radians)),dx=double(p.x)-x,dy=double(p.y)-y;
+    return CPlot2D(float(x+c*dx-s*dy),float(y+s*dx+c*dy));
+}
+}
+void CAIRoute::Turn(float x,float y,float radians) {
+    for(POSITION at=route.GetHeadPosition();at;) {
+        auto& node=route.GetNext(at);node.point=TurnPoint(node.point,x,y,radians);
+        node.nX=short(std::floor(node.point.x));node.nY=short(std::floor(node.point.y));
+        // supportZ is a height hint, not an address. The guard resolves each
+        // actual step from the actor's current Nav64 polygon on this floor.
+    }
+}
+void CAIFullRoute::Turn(float x,float y,float radians) {
+    start=TurnPoint(start,x,y,radians);fpStartAngle+=radians;
+    if(IsMoving()) {auto end=TurnPoint(CPlot2D(walk.fpFinishX,walk.fpFinishY),x,y,radians);walk.fpFinishX=end.x;walk.fpFinishY=end.y;route.Turn(x,y,radians);}
+}
+void CAIFullRoute::Face(float heading) {
+    fpStartAngle=heading;
+    if(moveType==Rotate)rotate.fpFinalAngle=heading;
+    if(moveType==AttackPoint)attack1.fpFinalAngle=heading;
+}
 SRouteUnit SRouteUnit::Move(EAIDirection dir)
 {
     switch (dir)

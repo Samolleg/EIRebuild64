@@ -10,6 +10,7 @@
 #include "ModAttackEvents.h"
 #include "ModInvincible.h"
 #include "ModChase.h"
+#include "ModScriptMotion.h"
 #include "MapObjectManager.h"
 #include "ModRegisteredLoot.h"
 #include "ZoneIce.h"
@@ -41,6 +42,7 @@ inline const Entry registry[]={
  {288,"DirectionAngle","Fff",true},
  {297,"ApplyTrapParalysis","of",true},
  {298,"SetWeather","sf",true},
+ {299,"SetRotate","sf",true},
  {300,"GetPlayerOfUnit","Fo",true},
  {301,"GetUnitExp","Fo?s",true},
  {302,"GetArmor","Foff",true},
@@ -306,6 +308,7 @@ inline bool Action(SSCCmd&cmd){
  case 276:ModChase::Trap(theWorldServer,unit,a,cmd.params[1],cmd.params[2]);break;
  case 291:if(!ModInvincible::Change(unit,cmd.szParams[0],a))return Reject("SetInvincible","Invalid unit, channel or flag");break;
  case 292:if(server)server->ApplyDirectDamage(a);break;
+ case 299:ModScriptMotion::SetRotate(cmd.szParams[0],a);break;
  case 298:{
   if(!std::isfinite(a)||a<0||a>3600||!theWorldServer.IsMapLoaded())break;
   const char*name=cmd.szParams[0];EWeather weather;

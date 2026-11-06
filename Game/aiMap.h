@@ -125,6 +125,7 @@ public:
     // above remains the single owner of the latest order.
     std::uint64_t navigationGeneration=0;
     bool navigationPending=false;
+    bool navigationTurned=false; // transient guard; an explicit new path cancels it
     Navigation::Location navigationGoal;
     Navigation::GoalPolicy navigationPolicy=Navigation::GoalPolicy::Exact;
     float navigationMaxLength=1.e6f,navigationMinDistance=0;
