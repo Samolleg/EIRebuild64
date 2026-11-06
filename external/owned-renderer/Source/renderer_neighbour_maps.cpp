@@ -271,7 +271,19 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     const auto& texture=upload->textures[node.texture];
                     // The figure's mesh at this decoration's shape, shared by every
                     // node drawing it at that shape, in object space.
-                    NativeGeometryView view;
+                    NativeLodIdentity observation;
+                    observation.id=static_cast<std::int32_t>(node.candidate);observation.candidate_id=true;
+                    observation.generation=epoch;observation.neighbour=true;
+                    observation.zone=upload->selection.placement.zone;observation.map=upload->selection.placement.mpr;
+                    observation.mob=upload->selection.placement.mob_path;
+                    const auto slash=observation.mob.find_last_of("/\\");
+                    if(slash!=std::string::npos)observation.mob.erase(0,slash+1);
+                    observation.model=upload->identities[figure.identity].canonical_name;
+                    const auto mod=observation.model.find(".mod/");
+                    if(mod!=std::string::npos)observation.model.resize(mod);
+                    const auto model_slash=observation.model.find_last_of("/\\");
+                    if(model_slash!=std::string::npos)observation.model.erase(0,model_slash+1);
+                    NativeGeometryView view;view.lod_observer=&observation;
                     view.position_groups=figure.position_groups;view.normal_groups=figure.normal_groups;
                     view.texture_coordinate_count=figure.texture_coordinate_count;
                     view.component_count=figure.component_count;view.index_count=figure.index_count;
@@ -280,6 +292,7 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     view.prebuilt_mesh=&upload->meshes[node.mesh];
                     view.world.impostor=neighbour_impostor_slice(upload->identities[figure.identity],texture.view_identity);
                     view.prepared_identity={INT_MIN,epoch,epoch,1,neighbours_.next_part++,0,1,true,true};
+                    observation.part=view.prepared_identity.part_index;
                     NativePreparedMeshHandle mesh;NativePreparedMaterialHandle material;
                     view.prepared_mesh=&mesh;view.prepared_material=&material;
                     view.geometry_revision={1,0,0,0,0};view.geometry_revision_valid=true;

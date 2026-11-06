@@ -826,7 +826,10 @@ struct NativePrebuiltMesh {
 };
 
 struct FurProfile;
+struct NativeLodIdentity;
 struct NativeGeometryView {
+    // Borrowed at synchronous registration only; copied into the renderer record.
+    const NativeLodIdentity* lod_observer = nullptr;
     float contact_world_height = 0;
     // Fur prototype: an owned preview's part record carries its fur profile
     // here (the submission's own shared pointer, valid for the submit call;

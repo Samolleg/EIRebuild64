@@ -2,6 +2,7 @@
 #include "SaveSlot.h"
 #include "CorePerf.h"
 #include "GameJournal.h"
+#include "LiveObserver.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "WorldInterface.h"
@@ -804,7 +805,7 @@ void CWorldConnector::GoMainMenu()
     MoveToZone("MainMenu", IFACE_MAINMENU);
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::NewGame()
+BOOL CWorldConnector::NewGame()
 {
     GameJournal::CombatBoundary("new_game");
     GameJournal::Event("ZONE", "reason", "reason=new_game");
@@ -820,7 +821,7 @@ void CWorldConnector::NewGame()
     CParty party;
     theHat.GetSinglePlayerParty(party);
     //
-    MoveToZone(party.szCurrentZone);
+    return MoveToZone(party.szCurrentZone);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // server side, spawning a new server (with disconnecting everyone from server)
@@ -962,18 +963,23 @@ void CWorldConnector::DoGo()
         return;
     if (action == CD_LOADGAME)
     {
-        LoadGame(szConnectDest);
+        LiveObserver::OperationExecuting("load_save");
+        const BOOL loaded = LoadGame(szConnectDest);
+        LiveObserver::OperationApplied("load_save", loaded != FALSE);
         action = CD_NONE;
         return;
     }
     if (action == CD_MOVETOZONE)
     {
-        MoveToZone(szConnectDest);
+        LiveObserver::OperationExecuting("enter_zone");
+        const BOOL entered = MoveToZone(szConnectDest);
+        LiveObserver::OperationApplied("enter_zone", entered != FALSE);
         action = CD_NONE;
         return;
     }
     if (action == CD_NEWGAME)
     {
+        LiveObserver::OperationExecuting("new_game");
         // Prepare exactly once, before disconnecting the menu's local server.
         // An asynchronous screen lets the normal client/server loop continue.
         theHat.NewSingleGame();
@@ -986,7 +992,11 @@ void CWorldConnector::DoGo()
         {
             action = CD_NONE;
             GameJournal::Event("NEWGAME", "attributes_open");
-            theInterface.ActivateScreen(dbgnew CI3DScreenNewGameStats(&theInterface, freshParty));
+            auto* attributes = dbgnew CI3DScreenNewGameStats(&theInterface, freshParty);
+            theInterface.ActivateScreen(attributes);
+            // The ordinary Esc path accepts the untouched prepared party.
+            // No attribute allocation, new-game shortcut or saved flag is added.
+            if (LiveObserver::IsOperation("new_game")) attributes->OnKeyDown(VK_ESCAPE, 1, 0);
             return;
         }
         GameJournal::Event("NEWGAME", "attributes_skipped", "reason=no_connected_fresh_party");
@@ -1002,17 +1012,20 @@ void CWorldConnector::DoGo()
     case CD_MAINMENU:
         GoMainMenu();
         break;
-    case CD_STARTPREPAREDNEWGAME:
-        NewGame();
+    case CD_STARTPREPAREDNEWGAME: {
+        LiveObserver::OperationExecuting("new_game");
+        const BOOL started = NewGame();
+        LiveObserver::OperationApplied("new_game", started != FALSE);
         break;
+    }
     }
     action = CD_NONE;
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////
-void CWorldConnector::ReqSaveGame(const char *pszSaveName)
+BOOL CWorldConnector::ReqSaveGame(const char *pszSaveName)
 {
     ASSERT(theWorldServer.GetServerMode() == SERV_MODE_LOCAL);
-    SaveGame(pszSaveName);
+    return SaveGame(pszSaveName);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldConnector::ClientSideDisconnect()

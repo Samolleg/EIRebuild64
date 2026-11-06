@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "AgentBackground.h"
 #include "RuntimePaths64.h"
 #include "CorePerf.h"
 #include "OwnedRender/E1TextLifetime.h"
@@ -227,7 +228,7 @@ void CInterface3D::Fini()
     DestroyScreens();
 
     CStdioFile file;
-    if (file.Open(RuntimePaths64::Config("tutorial.ini").string().c_str(),
+    if (!AgentBackground::Enabled() && file.Open(RuntimePaths64::Config("tutorial.ini").string().c_str(),
                   CFile::modeCreate | CFile::modeWrite))
     {
         CString szStr;

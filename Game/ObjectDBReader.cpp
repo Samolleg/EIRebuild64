@@ -49,9 +49,9 @@ bool CGameMOBFile::Load(CWorldServer *pWorldServer, bool bSkipScript, bool objec
     SDiplomation dipl;
     CString szScript;
 
-    const bool read = Read(objects, dipl, szScript);
-    if(objectsOnly && !read)return false;
-    if (read && !objectsOnly)
+    // Read returns the primary/secondary marker; parsing failures propagate.
+    const bool isMain = Read(objects, dipl, szScript);
+    if (isMain && !objectsOnly)
     {
         int i, j;
         for (i = 0; i < N_MAX_PLAYERS; i++)

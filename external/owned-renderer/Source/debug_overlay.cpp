@@ -1,5 +1,6 @@
 #include "test_harness.h"
 #include "debug_overlay.h"
+#include "embedded_process_policy.h"
 #include "combat_ui.h"
 
 #include "cursor_confinement.h"
@@ -43,6 +44,15 @@ extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND window, UINT m
                                                              WPARAM wparam, LPARAM lparam);
 
 namespace owned {
+namespace {
+bool native_user_input_enabled() noexcept {
+#ifdef EID3D11_EMBEDDED
+    return !embedded_agent_background();
+#else
+    return true;
+#endif
+}
+}
 void address_space_mb(std::uint64_t& used, std::uint64_t& largest_free, bool walk) noexcept; // renderer_diagnostics.cpp
 namespace {
 
@@ -267,6 +277,9 @@ std::atomic<bool> g_quit_seen{false};
 LRESULT CALLBACK quit_message_hook(int code, WPARAM wparam, LPARAM lparam) {
     const MSG* message = reinterpret_cast<const MSG*>(lparam);
     if (code == HC_ACTION && message && message->message == WM_QUIT && !g_quit_seen.exchange(true)) {
+#ifdef EID3D11_EMBEDDED
+        if (!embedded_agent_background())
+#endif
         WritePrivateProfileStringW(L"setup", L"over_budget_pending", nullptr, g_quit_hook_ini.c_str());
         bridge_report_event("vram_budget_marker_cleared", "WM_QUIT: orderly quit after an over-budget save");
     }
@@ -390,6 +403,12 @@ namespace {
 
 LRESULT CALLBACK overlay_subclass_proc(HWND window, UINT message, WPARAM wparam, LPARAM lparam,
                                        UINT_PTR, DWORD_PTR reference) {
+    if (!native_user_input_enabled()) {
+        if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATEANDEAT;
+        if ((message >= WM_KEYFIRST && message <= WM_KEYLAST) ||
+            (message >= WM_MOUSEFIRST && message <= WM_MOUSELAST) ||
+            message == WM_INPUT || message == WM_APPCOMMAND || message == 0xcc54u) return 1;
+    }
     auto* overlay = reinterpret_cast<DebugOverlay*>(reference);
     if (!overlay || !overlay->input_ready()) {
         camp_inventory_cancel_drag();return DefSubclassProc(window, message, wparam, lparam);
@@ -2244,12 +2263,12 @@ HRESULT DebugOverlay::initialize(HWND window, ID3D11Device* device, ID3D11Device
     // Only the first-run adapter suggestion set it, so a configured install
     // showed "Video memory: n/a" there.
     if (!state->adapter_budget_bytes) state->adapter_budget_bytes = adapter_local_budget(device);
-    state->f10_was_down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
-    state->f11_was_down = (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
+    state->f10_was_down = native_user_input_enabled() && (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
+    state->f11_was_down = native_user_input_enabled() && (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
     state->ui_scale = overlay_scale_for_window(window);
     for (std::size_t index = 0; index < kMouseVirtualKeys.size(); ++index)
         state->mouse_was_down[index] =
-            (GetAsyncKeyState(kMouseVirtualKeys[index]) & 0x8000) != 0;
+            native_user_input_enabled() && (GetAsyncKeyState(kMouseVirtualKeys[index]) & 0x8000) != 0;
 
     IMGUI_CHECKVERSION();
     state->imgui = ImGui::CreateContext();
@@ -2259,6 +2278,10 @@ HRESULT DebugOverlay::initialize(HWND window, ID3D11Device* device, ID3D11Device
     io.IniFilename = nullptr;
     io.LogFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    if (!native_user_input_enabled()) {
+        io.ConfigFlags &= ~ImGuiConfigFlags_NavEnableKeyboard;
+        io.ConfigFlags |= ImGuiConfigFlags_NoMouse | ImGuiConfigFlags_NoMouseCursorChange;
+    }
     state->latin_font = io.Fonts->AddFontDefault();
     // Cyrillic: the built-in font is Latin only. The Windows UI font fills its
     // missing glyphs (game text such as effect names) and is the whole menu
@@ -2533,9 +2556,9 @@ void DebugOverlay::maintain() noexcept {
     }
     const bool core_input = implementation_->core_input.flags != nullptr;
     const bool host_child = implementation_->host_child;
-    const bool f10_down = !core_input && (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
-    const bool focused = host_child ? implementation_->external_focused : GetForegroundWindow() == implementation_->window;
-    const bool shift_down = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    const bool f10_down = !core_input && native_user_input_enabled() && (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
+    const bool focused = native_user_input_enabled() && (host_child ? implementation_->external_focused : GetForegroundWindow() == implementation_->window);
+    const bool shift_down = native_user_input_enabled() && (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
     if (focused && f10_down && !implementation_->f10_was_down) {
         // Developer mode: F10 = developer cycle, Shift+F10 = player settings.
         // Players: the other way round.
@@ -2550,7 +2573,7 @@ void DebugOverlay::maintain() noexcept {
     }
     implementation_->f10_was_down = f10_down;
     // Core mode: F11 goes to the host as its own command (core_present).
-    const bool f11_down = !core_input && !host_child && (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
+    const bool f11_down = !core_input && !host_child && native_user_input_enabled() && (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
     if (focused && f11_down && !implementation_->f11_was_down) {
         if (shift_down) implementation_->cull_freeze_toggle = true;
         else request_capture(*implementation_, config_);
@@ -2599,7 +2622,7 @@ void DebugOverlay::maintain() noexcept {
         } else io.AddMousePosEvent(-FLT_MAX,-FLT_MAX);
         if (full_input) {
             for (std::size_t index = 0; index < kMouseVirtualKeys.size(); ++index) {
-                const bool down = (GetAsyncKeyState(kMouseVirtualKeys[index]) & 0x8000) != 0;
+                const bool down = native_user_input_enabled() && (GetAsyncKeyState(kMouseVirtualKeys[index]) & 0x8000) != 0;
                 if (down != implementation_->mouse_was_down[index])
                     io.AddMouseButtonEvent(static_cast<int>(index), down);
                 implementation_->mouse_was_down[index] = down;
@@ -2677,6 +2700,7 @@ bool DebugOverlay::first_run_pending() const noexcept {
 }
 
 void DebugOverlay::open_first_run_settings() noexcept {
+    if (!native_user_input_enabled()) return;
     if (first_run_pending()) open_settings(*implementation_, config_, true);
 }
 

@@ -1,4 +1,5 @@
 #include "cursor_confinement.h"
+#include "embedded_process_policy.h"
 
 #include "game_focus.h"
 #include "widescreen.h"
@@ -199,7 +200,7 @@ void release_cursor_confinement(CursorConfinementState& state) noexcept {
 void update_cursor_confinement(CursorConfinementState& state, HWND window,
                                bool focused, bool enabled) noexcept {
 #ifdef EID3D11_EMBEDDED
-    if (GetForegroundWindow() != window || (g_cursor_blocked && g_cursor_blocked())) {
+    if (embedded_agent_background() || GetForegroundWindow() != window || (g_cursor_blocked && g_cursor_blocked())) {
         release_cursor_confinement(state);
         return;
     }

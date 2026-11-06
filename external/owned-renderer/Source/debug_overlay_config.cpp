@@ -1,4 +1,5 @@
 #include "debug_overlay_config.h"
+#include "embedded_process_policy.h"
 #ifdef EID3D11_EMBEDDED
 #include "embedded_host.h"
 #endif
@@ -111,6 +112,9 @@ bool write_all(HANDLE file, const char* data, std::size_t size) {
 
 // Write-flush-atomic-replace.
 bool write_text_file(const wchar_t* path, const std::string& text) {
+#ifdef EID3D11_EMBEDDED
+    if (embedded_agent_background()) return true;
+#endif
     const std::wstring temporary = std::wstring(path) + L".tmp";
     HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);

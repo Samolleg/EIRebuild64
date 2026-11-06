@@ -1891,6 +1891,7 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
  if(bridge_live_wants_capture())bridge_live_capture(context_.Get(),swap_.Get());
 #endif
  (void)plan_pass("present",nullptr,nullptr,plan_read(PlanTarget::backbuffer));
+ finish_native_lod_frame();
  {const stall_watch::Bracket present_bracket("present");const frame_acct::Scope scope(frame_acct::pf_present_call);hr=swap_->Present(interval,flags);}
  const std::int64_t recorder_present_return=
   placed_hitch_profile_.active()?perf_now():0;

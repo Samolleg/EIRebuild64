@@ -3297,10 +3297,11 @@ HRESULT Renderer::upload_native_geometry(UINT page_index,UINT offset,const void*
  profiler_.add_upload(bytes);return S_OK;
 }
 
-HRESULT Renderer::upload_native_work_range(const NativeDispatchRange& range){
+HRESULT Renderer::upload_native_work_range(const NativeDispatchRange& range,bool capture_lod){
  PERF06_SCOPE("upload_work");
  if(!context_||!native_work_range_constants_||!range.count)return E_INVALIDARG;
- const std::array<UINT,4> values{range.first,range.count,0,0};
+ // Only the main-camera colour dispatch opts in; pose and shadow work stays zero.
+ const std::array<UINT,4> values{range.first,range.count,capture_lod?1u:0u,0};
  D3D11_MAPPED_SUBRESOURCE mapped{};
  const HRESULT hr=context_->Map(native_work_range_constants_.Get(),0,
   D3D11_MAP_WRITE_DISCARD,0,&mapped);if(FAILED(hr))return hr;
