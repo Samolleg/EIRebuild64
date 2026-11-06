@@ -122,7 +122,7 @@ static void VfxIceShard(VfxSprites&dst,Vec p,float angle,float width,float heigh
   m.indices.push_back((std::uint16_t)first);m.indices.push_back((std::uint16_t)(first+1));m.indices.push_back((std::uint16_t)(first+2));
  }
 }
-static void VfxFrost(VfxElement&fx,Vec base,Vec camera,float radius,float time,bool charge){
+static void VfxFrost(VfxElement&fx,Vec base,Vec /*camera*/,float radius,float time,bool charge){
  float strength=charge?.38f:1.f;
  for(int layer=0;layer<(charge?1:3);layer++){
   float r=layer==0?radius:std::floor(radius/4)*4-layer*4;if(r<.5f)continue;

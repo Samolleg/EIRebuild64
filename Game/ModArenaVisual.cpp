@@ -2,11 +2,9 @@
 #include "ModArenaVisual.h"
 #include "ModArena.h"
 #include "Object3DClientSpecific.h"
-#include "Effect.h"
-#include "EffectManager.h"
-#include "Particle.h"
 #include "Camera.h"
 #include "Renderer.h"
+#include "dx11/RendererDX11.h"
 #include "GameJournal.h"
 #include "OwnedRender/E1Scene.h"
 #include "OwnedRender/E1World.h"
@@ -41,19 +39,7 @@ void Particles(CScript* owner,int tick) {
     if(!owner)return;
     const int wave=int(ModEncounter::Read(theWorldServer,"A67.Wave"));
     const float radius=ModEncounter::Read(theWorldServer,"A67.WaveRadius");
-    if(!std::isfinite(radius)||radius<0||radius>124)return;
-    auto* manager=static_cast<CEffectManager*>(theWorld.GetEffectManager());if(!manager)return;
-    for(POSITION pos=owner->particles.GetHeadPosition();pos;) {
-        const auto& info=owner->particles.GetNext(pos);
-        const int kind=info.nScriptID-8690000;
-        auto* source=info.pParticle;
-        if(kind<1||kind>3||!source||source->IsInvalid()||source->typeID!=PTID_SMOKE)continue;
-        auto* client=manager->FindByID(source->GetID());
-        if(!client||client->IsInvalid()||client->WhoAmI()!=HPC_EFFECTPARTICLE)continue;
-        auto* effect=static_cast<CEffectParticle*>(client);
-        if(effect->typeID==PTID_SMOKE&&effect->pParticle)
-            effect->pParticle->ConfigureArenaWave(kind,wave==kind?radius:-1.f,radius==0,tick);
-    }
+    owner->RefreshArenaWaveSources(wave,radius,tick);
 }
 }
 void Reset() noexcept {dome={};flow={};armed=false;}
