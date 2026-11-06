@@ -96,11 +96,12 @@ public:
     // AI/Nav participation (falling scenery remains a world/render object).
     void TransformObject(int id,Navigation::Point position,float yaw,bool present);
     bool ObjectPresent(int id) const { return !detachedObjects.count(id); }
+    void ForgetObject(int id) { detachedObjects.erase(id); }
     void Object(CMapObject* object,bool remove,CAIMap& map);
     std::uint64_t Bake(const std::filesystem::path& directory,Navigation::Bytes& table,CWorldServer& world);
     bool Load();
     void Advance();
-    std::uint64_t Generation(CUnit* unit) { auto* mesh=ForUnit(unit);return mesh?mesh->generation:0; }
+    std::uint64_t Generation() const { return generation; }
     void Stop(int id) { queues.erase(id); }
     void ForgetUnit(int id) { Stop(id);flyingUnits.erase(id);airJournal.erase(id); }
     bool Goal(CUnit* unit,Navigation::Point reference,Navigation::Location& result);

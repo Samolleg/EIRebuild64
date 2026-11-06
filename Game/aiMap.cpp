@@ -2415,7 +2415,7 @@ bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpM
     Navigation::Point goal{ptDst.x,ptDst.y,destination.position.z};
     res.navigationGoal=destination;res.navigationPolicy=goalPolicy;
     res.navigationMaxLength=fpMaxPathLength;res.navigationMinDistance=fpMinDistance;
-    res.navigationGeneration=navigation.Generation(pUnit);res.navigationPending=false;
+    res.navigationGeneration=navigation.Generation();res.navigationPending=false;
     Navigation::Route decision;auto* result=detail?detail:&decision;
     if(!NavRoute(pUnit,from,goal,res.toGo,fpMaxPathLength,fpMinDistance,3,nullptr,goalPolicy,result,&destination)) {
         if(result->status!=Navigation::Status::Updating){res.bRouteFailed=true;return false;}
