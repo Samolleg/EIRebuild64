@@ -9,6 +9,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "MapObjectManager.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
+#include "ModInvincible.h"
 
 namespace {
 bool SpellEffectPowerEnabled()
@@ -390,6 +391,7 @@ bool CMapObject::TickInactiveSpellEffects()
 // add spell effect to mapobject's spell effects list
 void CMapObject::AddSpellEffect(CSpellEffect &effect)
 {
+    if (!ModInvincible::AllowsEffect(*this, effect.nSpellID)) return;
     // ADD: FixSpellEffectsOverflow
     // With optimization below 20 is too much actually
     if (spellEffects.GetSize() >= 20)

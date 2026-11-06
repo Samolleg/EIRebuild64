@@ -10,6 +10,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModCampEquipment.h"
 #include "ModAttackTiming.h"
 #include "ModItemSpellPolicy.h"
+#include "ModInvincible.h"
 
 #include "WinRegistry.h"
 #include "FigureManager.h"
@@ -956,6 +957,7 @@ int CUnit::Segment()
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnit::SetStunFlag(BOOL bStun)
 {
+    if (bStun && (ModInvincible::Mask(this) & ModInvincible::Bad)) return;
     if (bStun)
         SetFlag(UNIT_STUN);
     else

@@ -14,6 +14,8 @@
 #include "ModEquipmentSwitch.h"
 #include "ModAttackTiming.h"
 #include "ModAttackEvents.h"
+#include "ModInvincible.h"
+#include "ModChase.h"
 #include "ModPreparedAttack.h"
 #include "ModItemSpellPolicy.h"
 #include "ModStealingPolicy.h"
@@ -5834,6 +5836,69 @@ bool CUnitServer::DetermineHit(SRPGAttackPortion *pAttackPortion, CUnit *pAttack
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // warning, non magic attack will be modified by this function, use with care
+bool CUnitServer::ApplyDirectDamage(float amount)
+{
+    if (!ModInvincible::UnitValid(lpUnit, true) || !std::isfinite(amount) || amount <= 0 ||
+        (ModInvincible::Mask(lpUnit) & ModInvincible::Direct)) return false;
+    auto* common = GetMapObjectServer()->GetRPGStats();
+    const float before = common->ssHP.fpCurrent, maximum = common->ssHP.fpMax;
+    if (!std::isfinite(before) || !std::isfinite(maximum) || maximum <= 0) return false;
+    const auto* owner = lpUnit->GetOwner();
+    const auto publish = [&]() {
+        rpgUnitStats.bFlags |= RPGSTAT_SHOWHPFLY;
+        AddUpdateMask(CMapObject::VLD_MASK_STATS);
+        AddUpdateMask(CMapObject::VLD_MASK_UNIT_STATS);
+    };
+    const auto finishDeath = [&]() {
+        for (auto& limb : rpgUnitStats.hls)
+            if (limb.state >= RPGALS_CRIPPLED && limb.state <= RPGALS_ACTIVE) limb.fpHP = 0;
+        common->ssHP.fpCurrent = 0;
+        publish();
+        // Native finalizer: death/AI/corpse/animation, no attack or resistance reroll.
+        TakeDamage(nullptr, FALSE);
+        common->ssHP.fpCurrent = 0;
+        return lpUnit->IsDead() != FALSE;
+    };
+    // A preceding native contact can leave a live actor with zero HP.
+    if (before <= 0) return owner && owner->bGod ? false : finishDeath();
+    float saved[RPG_NUM_HIT_LOCATIONS];
+    int active = 0;
+    for (unsigned i = 0; i < RPG_NUM_HIT_LOCATIONS; ++i) {
+        const auto& limb = rpgUnitStats.hls[i];
+        if (limb.state < RPGALS_NOTUSED || limb.state > RPGALS_ACTIVE) return false;
+        saved[i] = limb.fpHP;
+        // Unused golem parts may contain uninitialised weights, ignored by CollectHP.
+        if (limb.state == RPGALS_NOTUSED) continue;
+        if (!std::isfinite(limb.fpHP) || !std::isfinite(limb.fpMaxHP) || !std::isfinite(limb.fpVitality)) return false;
+        if (limb.fpMaxHP > 0 && limb.fpHP > 0 && limb.fpVitality > 0) ++active;
+    }
+    if (!active) return false;
+    float target = (std::fmax)(0.f, before - amount);
+    if (target == 0 && owner && owner->bGod) target = (std::min)(before, 1.f);
+    const float initial = rpgUnitStats.CollectHP(maximum);
+    if (!std::isfinite(initial) || initial < target - .001f) return false;
+    float low = 0, high = 1;
+    for (int iteration = 0; iteration < 24; ++iteration) {
+        const float fraction = (low + high) * .5f;
+        for (unsigned i = 0; i < RPG_NUM_HIT_LOCATIONS; ++i) {
+            auto& limb = rpgUnitStats.hls[i];
+            if (limb.state >= RPGALS_CRIPPLED && limb.fpMaxHP > 0 && limb.fpVitality > 0)
+                limb.fpHP = saved[i] * (1 - fraction);
+        }
+        if (rpgUnitStats.CollectHP(maximum) > target) low = fraction;
+        else high = fraction;
+    }
+    const float actual = rpgUnitStats.CollectHP(maximum);
+    if (!std::isfinite(actual) || std::abs(actual - target) > (std::fmax)(.001f, maximum * .000002f)) {
+        for (unsigned i = 0; i < RPG_NUM_HIT_LOCATIONS; ++i) rpgUnitStats.hls[i].fpHP = saved[i];
+        return false;
+    }
+    common->ssHP.fpCurrent = target;
+    publish();
+    GameJournal::ObserveDamage(nullptr, lpUnit, before - target, 1, -1);
+    if (target == 0) return finishDeath();
+    return true;
+}
 BOOL CUnitServer::ProcessCustomAttackPortion(SRPGAttackPortion *portion,CUnit *attacker,CUnit *experience)
 {
     auto *mod=ModRuntime::Current();
@@ -5861,6 +5926,9 @@ BOOL CUnitServer::ProcessAttackPortionOwned(SRPGAttackPortion *lpAttackPortion,C
         ModAttackEvents::Complete(*pWS,deliveredAttack,GetMapObjectServer()->GetCurrentHP());
         return result;
     };
+    CUnit* policyAuthor = ModAttackEvents::AuthorScope::Resolve(*lpAttackPortion, lpUnit, pAttacker);
+    const bool chaseBlocked = ModChase::Block(*pWS, lpUnit, policyAuthor, *lpAttackPortion);
+    ModInvincible::ScopedChannels protectedChannels(*lpAttackPortion, ModInvincible::Mask(lpUnit) & 0x7f, chaseBlocked);
     int journalCritical = -1;
     BOOL bWasCorpse = GetUnit()->IsDead();
     bool bHadOwner = GetUnit()->GetOwner() != 0;
@@ -6021,6 +6089,7 @@ BOOL CUnitServer::ProcessAttackPortionOwned(SRPGAttackPortion *lpAttackPortion,C
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CUnitServer::Heal(float fpPower)
 {
+    if (fpPower > 0 && (ModInvincible::Mask(lpUnit) & ModInvincible::Buffs)) return FALSE;
     const float journalBeforeHP=GetMapObjectServer()->GetCurrentHP();
     if (rpgUnitStats.Heal(GetMapObjectServer()->GetRPGStats(), fpPower))
     {
