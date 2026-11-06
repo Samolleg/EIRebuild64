@@ -13,6 +13,7 @@
 #include "ModConditionalCombat.h"
 #include "ModEquipmentSwitch.h"
 #include "ModAttackTiming.h"
+#include "ModAttackEvents.h"
 #include "ModPreparedAttack.h"
 #include "ModItemSpellPolicy.h"
 #include "ModStealingPolicy.h"
@@ -5855,6 +5856,11 @@ BOOL CUnitServer::ProcessAttackPortionOwned(SRPGAttackPortion *lpAttackPortion,C
     CWorldServer *pWS = (CWorldServer *)GetWorld();
     int skillImpact=ModRuntime::Current()?ModRuntime::Current()->TakeSkillImpact(*lpAttackPortion):0;
     float beforeSkillHp=GetMapObjectServer()->GetRPGStats()->ssHP.fpCurrent;
+    const auto deliveredAttack = ModAttackEvents::Begin(*lpAttackPortion,pAttacker,lpUnit,beforeSkillHp);
+    const auto completeAttack = [&](BOOL result) {
+        ModAttackEvents::Complete(*pWS,deliveredAttack,GetMapObjectServer()->GetCurrentHP());
+        return result;
+    };
     int journalCritical = -1;
     BOOL bWasCorpse = GetUnit()->IsDead();
     bool bHadOwner = GetUnit()->GetOwner() != 0;
@@ -5910,10 +5916,10 @@ BOOL CUnitServer::ProcessAttackPortionOwned(SRPGAttackPortion *lpAttackPortion,C
     if (pPlayer)
     {
         if (pPlayer->bGod >= 2)
-            return FALSE;
+            return completeAttack(FALSE);
         if (ModConditionalCombat::RejectOtherExperienceOwner(inheritedDefense,
                 pExpDest && pExpDest->GetOwner() && pPlayer != pExpDest->GetOwner()))
-            return FALSE;
+            return completeAttack(FALSE);
     }
     //
     SAttackParams apDefender;
@@ -5996,7 +6002,7 @@ BOOL CUnitServer::ProcessAttackPortionOwned(SRPGAttackPortion *lpAttackPortion,C
                     else pWS->GainExperience(pExpDest->GetOwner(), GetUnit()->GetPrototype()->fExp);
                 }
             }
-            return TRUE;
+            return completeAttack(TRUE);
         }
     }
     // modify friend or foe information
@@ -6010,7 +6016,7 @@ BOOL CUnitServer::ProcessAttackPortionOwned(SRPGAttackPortion *lpAttackPortion,C
     GameJournal::ObserveDamage(pAttacker, lpUnit, 0, lpAttackPortion->fpToHit < apDefender.nDefense ? 0 : 2, journalCritical);
     logic.TakeDamage(pAttacker);
 
-    return FALSE;
+    return completeAttack(FALSE);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CUnitServer::Heal(float fpPower)

@@ -9,6 +9,7 @@
 #include "EngineDiagnostics.h"
 #include "ModRuntime.h"
 #include "ModOutOfCombatRegeneration.h"
+#include "ModAttackEvents.h"
 #include "ModPackage.h"
 #include "ModItemUiPolicy.h"
 #include "ModCliTool.h"
@@ -326,6 +327,7 @@ void CWorldServer::RemoveEffects()
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::RemoveEverything()
 {
+    if (!detachedSave) ModAttackEvents::Reset();
     szLoadedMobs.RemoveAll();
     waterLevels.Clear();
     // remove exits from zone
@@ -2698,6 +2700,8 @@ void CWorldServer::RemoveMapObject(int nID)
     if (ppObj == NULL || ppObj[0] == NULL)
         return;
     CMapObject *pMODel = ppObj[0];
+    if (!detachedSave && pMODel->WhoAmI() == HPC_UNIT)
+        ModAttackEvents::Forget(*static_cast<CUnit*>(pMODel));
     if(pMODel->WhoAmI()==HPC_UNIT)aiMap.Navigation().ForgetUnit(nID);
     if (pMODel->WhoAmI() != HPC_MAGICTRAP && aiMap.Navigation().ObjectPresent(nID) && pMODel->nTileMapX>=0 && pMODel->nTileMapY>=0)
         aiMap.RemoveObject(*ppObj);
