@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "ModFinalGolem.h"
+#include "ModGolemReflect.h"
 #include "ModEncounter.h"
 #include "ModArenaBoundary.h"
 #include "SaveSchema.h"
@@ -6049,12 +6050,14 @@ BOOL CUnitServer::ProcessAttackPortionOwned(SRPGAttackPortion *lpAttackPortion,C
                                           CUnit *pExpDest,bool inheritedDefense,bool explicitCustom)
 {
     CWorldServer *pWS = (CWorldServer *)GetWorld();
+    auto reflection=ModGolemReflect::Begin(lpUnit,ModAttackEvents::AuthorScope::Resolve(*lpAttackPortion,lpUnit,pAttacker),*lpAttackPortion);
     int skillImpact=ModRuntime::Current()?ModRuntime::Current()->TakeSkillImpact(*lpAttackPortion):0;
     float beforeSkillHp=GetMapObjectServer()->GetRPGStats()->ssHP.fpCurrent;
     const auto deliveredAttack = ModAttackEvents::Begin(*lpAttackPortion,pAttacker,lpUnit,beforeSkillHp);
     const auto completeAttack = [&](BOOL result) {
         ModAttackEvents::Complete(*pWS,deliveredAttack,GetMapObjectServer()->GetCurrentHP());
         ModFinalGolem::MeleeDelivered(deliveredAttack.attacker,lpUnit,*lpAttackPortion);
+        ModGolemReflect::Complete(reflection);
         return result;
     };
     CUnit* policyAuthor = ModAttackEvents::AuthorScope::Resolve(*lpAttackPortion, lpUnit, pAttacker);
@@ -6145,6 +6148,7 @@ BOOL CUnitServer::ProcessAttackPortionOwned(SRPGAttackPortion *lpAttackPortion,C
         historyOwner->CompensateHitHistory(rpgUnitStats,*lpUnit,pAttacker,*lpAttackPortion,apDefender.nDefense,explicitCustom);
     if (lpAttackPortion->fpToHit >= apDefender.nDefense)
     {
+        reflection.accepted=true; // accepted hit, before armour and HP delta
         rpgUnitStats.bFlags |= RPGSTAT_SHOWHPFLY;
         AddUpdateMask(CMapObject::VLD_MASK_UNIT_STATS);
         //

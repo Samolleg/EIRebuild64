@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModAttackEvents.h"
 #include "SaveSchema.h"
 #include "ModSpellTextures.h"
 #include "ModSpellOwner.h"
@@ -1256,6 +1257,10 @@ BOOL CEffectArrowFigure::DeliverAttack(CMapObject*target,CUnit*attacker)
     attackProcessed=true;
     auto*mod=ModRuntime::Current();
     struct Cleanup{CModPackage*mod;SRPGAttackPortion&ap;~Cleanup(){if(mod)mod->ForgetAttack(ap);}} cleanup{mod,attackPortion};
+    if(auto* unit=dynamic_cast<CUnit*>(target)) {
+        ModAttackEvents::PortionOriginScope origin(attackPortion,*unit,ModAttackEvents::PortionOrigin::Projectile);
+        return target->ProcessAttackPortion(&attackPortion,attacker,attacker);
+    }
     return target?target->ProcessAttackPortion(&attackPortion,attacker,attacker):FALSE;
 }
 int CEffectArrowFigure::Segment()
@@ -1784,7 +1789,7 @@ void CEffectArrowFigure::Explode(const CPlot3D& point){
  for(POSITION pos=units.GetHeadPosition();pos;){auto*target=units.GetNext(pos);
   if(!target||!target->CanBeDamagedByAreaSpell())continue;
   auto*server=dynamic_cast<CUnitServer*>(target->GetUnitSpecific());if(!server)continue;
-  SRPGAttackPortion portion=attackPortion;server->ProcessCustomAttackPortion(&portion,attacker,attacker);
+  SRPGAttackPortion portion=attackPortion;ModAttackEvents::PortionOriginScope origin(portion,*target,ModAttackEvents::PortionOrigin::Projectile);server->ProcessCustomAttackPortion(&portion,attacker,attacker);
  }
  // One local client request after all targets, including an empty target list.
  ModSpellOwner::ExplosiveSound(world==&theWorldServer,theWorld.GetSoundManager(),

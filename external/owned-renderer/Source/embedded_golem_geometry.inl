@@ -150,3 +150,80 @@ void Stage(float time){
   draw(warning,nullptr,phase==9?0x5a7cddff:0x42329edc,false,true);
  }
 }
+
+void ReflectCylinder(Mesh&m,Vec a,Vec b,float ra,float rb,int sides=8){
+ Vec d=Unit(b-a),x=Unit(Cross(d,std::abs(d.z)>.9f?Vec{0,1,0}:Vec{0,0,1})),y=Cross(d,x);
+ unsigned start=(unsigned)m.uv.size();
+ for(int ring=0;ring<2;ring++)for(int j=0;j<sides;j++){float angle=j*6.283185307f/sides;m.Add((ring?b:a)+(x*std::cos(angle)+y*std::sin(angle))*(ring?rb:ra),0,0);}
+ for(int j=0;j<sides;j++){unsigned k=start+j,n=start+(j+1)%sides;m.Quad(k,n,n+sides,k+sides);}
+ unsigned ca=m.Add(a,0,0),cb=m.Add(b,0,0);
+ for(int j=0;j<sides;j++){unsigned k=start+j,n=start+(j+1)%sides;m.indices.insert(m.indices.end(),{(WORD)ca,(WORD)n,(WORD)k,(WORD)cb,(WORD)(k+sides),(WORD)(n+sides)});}
+}
+void ReflectArrow(Mesh&m,Vec at,Vec direction){
+ Vec d=Unit(direction),x=Unit(Cross(d,{0,0,1})),y=Cross(d,x);
+ ReflectCylinder(m,at-d*.9f,at,.025f,.025f);
+ ReflectCylinder(m,at-d*.10f,at+d*.22f,.10f,0,4);
+ for(int j=0;j<3;j++){
+  float a=j*2.0943951f;Vec r=x*std::cos(a)+y*std::sin(a),w=Cross(d,r)*.009f;
+  Vec p[]={at-d*.9f,at-d*.92f+r*.12f,at-d*.65f+r*.1f,at-d*.6f};
+  unsigned k=(unsigned)m.uv.size();for(float sign:{-1.f,1.f})for(auto v:p)m.Add(v+w*sign,0,0);
+  m.Quad(k,k+1,k+2,k+3);m.Quad(k+7,k+6,k+5,k+4);
+  for(int t=0;t<4;t++)m.Quad(k+t,k+(t+1)%4,k+(t+1)%4+4,k+t+4);
+ }
+}
+template<class Emit>void ReflectGeometry(float tick,Emit emit){
+ int used=input.reflection_used;
+ for(int i=0;i<used;i++){
+  float born=input.reflections[i].born,end=input.reflections[i].end,arrival=end-4;
+  if(tick<born||tick>=end||arrival<=born)continue;
+  const auto& slot=input.reflections[i];Vec start{slot.start[0],slot.start[1],slot.start[2]},target{slot.target[0],slot.target[1],slot.target[2]};
+  float t=Clamp((tick-born)/(arrival-born),0,1);int kind=(int)input.reflections[i].kind;
+  Vec at=start+(target-start)*t,direction=target-start;Mesh core,halo;
+  if(kind<=2){if(tick<arrival)ReflectArrow(core,at,direction);emit(core,0xffd9e9f2,false);continue;}
+  unsigned color=kind==3?0xff6819:kind==4?0x68e5aa:kind==5?0x79baff:0xc490ff;
+  if(kind==5){
+   Vec side=Unit(Cross(direction,{0,0,1}));Vec previous=start;
+   for(int k=1;k<=24;k++){
+    float f=k/24.f;Vec next=start+direction*f;
+    if(k<24)next=next+side*((GolemNoise(i*751+k*31+(unsigned)tick*13)-.5f)*.7f)+Vec{0,0,(GolemNoise(k*87+i*17)-.5f)*.35f};
+    ReflectCylinder(core,previous,next,.026f,.026f,5);ReflectCylinder(halo,previous,next,.095f,.095f,5);previous=next;
+   }
+  }else{
+   // A volumetric missile with a twisting trail, rather than flat radial cards.
+   ReflectCylinder(core,at-Unit(direction)*.12f,at+Unit(direction)*.13f,.13f,0,10);
+   for(int j=0;j<14;j++){
+    float f=(float)j/14,angle=j*2.4f+tick*.7f;Vec d=Unit(direction),x=Unit(Cross(d,{0,0,1})),y=Cross(d,x);
+    Vec p=at-d*(f*.9f)+(x*std::cos(angle)+y*std::sin(angle))*(f*.12f);
+    ReflectCylinder(halo,p-d*.14f,p+d*.07f,(1-f)*.13f,.005f,6);
+   }
+  }
+  emit(halo,0x65000000|color,true);emit(core,0xedffffff,true);
+ }
+}
+bool ReflectAuraActive(int stage,int mode,bool active,bool dead){return active&&!dead&&stage>=3&&stage<=5&&mode!=4;}
+float ReflectAuraDensity(float radius){float t=(std::max)(0.f,1.f-radius*radius);return t*t*t;}
+static constexpr int ReflectAuraBins=16;
+template<class Emit>void ReflectAuraGeometry(int boss,float tick,Vec camera,Emit emit){
+ if(!ReflectAuraActive((int)input.stage,(int)input.phase,input.active==1,input.dead))return;
+ auto node=Node(0);if(!node)return;
+ Mesh density[ReflectAuraBins];float time=tick/18.f;
+ Vec center=NodePoint(node,{0,0,1.05f});
+ Vec view=Unit(camera-center),right=Unit(Cross({0,0,1},view)),up=Unit(Cross(view,right));
+ constexpr int S=96,R=32;
+ for(int layer=0;layer<2;layer++){
+  Vec origin=center+view*2.35f+right*(layer?.16f*std::sin(time*.6f):0)+up*(layer?.14f*std::cos(time*.5f):0);
+  float width=layer?2.1f:2.45f,height=layer?2.55f:3.0f;
+  auto point=[&](int ring,int segment){
+   float r=(float)ring/R,a=segment*6.283185307f/S;
+   float drift=1+.045f*std::sin(a*3+time*.6f)+.025f*std::sin(a*5-time*.4f);
+   return origin+right*(width*r*std::cos(a)*drift)+up*(height*r*std::sin(a)*drift)+view*(.12f*(1-r*r));
+  };
+  for(int j=0;j<R;j++)for(int i=0;i<S;i++){
+   float r=(j+.5f)/R,a=(i+.5f)*6.283185307f/S;
+   float alpha=ReflectAuraDensity(r)*(layer?.085f:.18f)*(.90f+.10f*std::sin(a*2-time*.5f+r*3));
+   int bin=(int)std::floor(alpha*255.f/3.f);if(bin<1)continue;bin=(std::min)(ReflectAuraBins-1,bin);
+   auto&m=density[bin];unsigned k=m.Add(point(j,i),0,0);m.Add(point(j,i+1),0,0);m.Add(point(j+1,i+1),0,0);m.Add(point(j+1,i),0,0);m.Quad(k,k+1,k+2,k+3);
+  }
+ }
+ for(int i=1;i<ReflectAuraBins;i++)if(!density[i].indices.empty())emit(density[i],((unsigned)(i*3)<<24)|0x659effu);
+}

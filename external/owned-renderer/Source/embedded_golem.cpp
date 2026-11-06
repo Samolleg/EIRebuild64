@@ -92,7 +92,10 @@ HRESULT Renderer::draw_embedded_golem(const EmbeddedGolemInput& input,const Fixe
  HRESULT failure=S_OK;++embedded_golem_cache_.serial;unsigned slot=0;
  auto draw=[&](Mesh& mesh,ID3D11ShaderResourceView* texture,unsigned color,bool lit,bool additive) {
   if(mesh.indices.empty())return;if(slot>=embedded_golem_cache_.slots.size()){failure=E_INVALIDARG;return;}
-  auto hr=Submit(*this,mesh,input,frame,texture,color,embedded_golem_cache_,slot++,lit,false,additive);if(FAILED(hr)&&SUCCEEDED(failure))failure=hr;
+  // Closed opaque shards/blades/physical arrows keep the source depth writes;
+  // membranes, warning rings, missiles and density aura remain translucent.
+  const bool opaque=!additive&&(color>>24)==255;
+  auto hr=Submit(*this,mesh,input,frame,texture,color,embedded_golem_cache_,slot++,lit,opaque,additive);if(FAILED(hr)&&SUCCEEDED(failure))failure=hr;
  };
  Producer p{input,textures,draw};const float time=input.tick/18.f;
  const float z=p.GolemGround(62,44);Vec corners[]={{28,26,z},{100,26,z},{100,62,z},{28,62,z}};
@@ -104,7 +107,9 @@ HRESULT Renderer::draw_embedded_golem(const EmbeddedGolemInput& input,const Fixe
   if(textures[2]){auto web=p.FinalWall(corners[side.index],corners[(side.index+1)%4],time,band,true);draw(web,textures[2],((alpha+35)<<24)|0xff8a32,false,true);}
  }
  if(input.active&&input.phase==2){auto beacon=p.FinalBeacon({input.target_x,input.target_y,z},time);draw(beacon,nullptr,0xedff942b,false,true);}
- if(input.active){if(!textures[0]||!textures[1])return HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND);p.Stage(time);}
+ if(input.active){if(!textures[0]||!textures[1])return HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND);p.Stage(time);
+  p.ReflectAuraGeometry(0,float(input.tick),camera,[&](Mesh& m,unsigned color){draw(m,nullptr,color,false,true);});
+  p.ReflectGeometry(float(input.tick),[&](Mesh& m,unsigned color,bool additive){draw(m,nullptr,color,false,additive);});}
  return failure;
 }catch(const std::bad_alloc&){return E_OUTOFMEMORY;}catch(const std::exception&){return E_INVALIDARG;}
 }

@@ -2602,6 +2602,7 @@ void CScript::RunThread(SScriptThread *pThread, SOneScript *pOneScript)
 
 bool CScript::RunFragment(const CString &source, float &result, CString &error)
 {
+    ModMob::ServiceScope service;
     CScript fragment;
     CString text = "GlobalVars(result:float)\nWorldScript(\n" + source + "\n)\n";
     if (!fragment.LoadText(text, FALSE))
@@ -3061,6 +3062,17 @@ bool CScript::SetParticleFlow(const SSCCmd &cmd)
 
 // Script-handle ownership stays here, beside the other particle commands.
 // Only matching live client sources receive completed arena emitter values.
+void CScript::RefreshFinalGolemSources(int tick)
+{
+    if(!ModEncounter::Arena(theWorldServer)||(ModEncounter::Read(theWorldServer,"FGL.Active")!=1&&ModEncounter::Read(theWorldServer,"EFC.Walls")!=1))return;
+    auto* manager=static_cast<CEffectManager*>(theWorld.GetEffectManager());if(!manager)return;
+    for(POSITION pos=particles.GetHeadPosition();pos;) {
+        const auto& info=particles.GetNext(pos);const int side=info.nScriptID-8691000;auto* source=info.pParticle;
+        if(side<0||side>3||!source||source->IsInvalid()||source->typeID!=PTID_SMOKE)continue;
+        auto* client=manager->FindByID(source->GetID());if(!client||client->IsInvalid()||client->WhoAmI()!=HPC_EFFECTPARTICLE)continue;
+        auto* effect=static_cast<CEffectParticle*>(client);if(effect->typeID==PTID_SMOKE&&effect->pParticle)effect->pParticle->ConfigureGolemWall(side,tick);
+    }
+}
 void CScript::RefreshArenaWaveSources(int wave,float radius,int tick)
 {
     if(!ModArena::Active()||!std::isfinite(radius)||radius<0||radius>124)return;

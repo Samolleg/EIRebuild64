@@ -55,6 +55,14 @@ void Draw() {
   auto& n=input.nodes[i];CPlot3D p;boss->GetOrientation().Rotate(node->GetPosition(),p);p+=WorldPosition(*boss);n.position=Point(p);
   auto rotation=boss->GetOrientation();rotation*=node->GetOrientation();rotation.GetComponents(n.rotation[0],n.rotation[1],n.rotation[2],n.rotation[3]);n.valid=true;
  }
+ input.reflection_used=std::clamp(int(Read("FGL.ReflectUsed")),0,64);
+ for(int i=0;i<input.reflection_used;++i) {
+  auto& slot=input.reflections[i];slot.born=Slot("Reflect",i,"Born");slot.end=Slot("Reflect",i,"End");slot.kind=int(Slot("Reflect",i,"Kind"));if(slot.end<=Now())continue;
+  const float x=Slot("Reflect",i,"X"),y=Slot("Reflect",i,"Y"),ex=Slot("Reflect",i,"EX"),ey=Slot("Reflect",i,"EY");
+  slot.start={x,y,Ground(x,y)+Slot("Reflect",i,"Z")};slot.target={ex,ey,Ground(ex,ey)+Slot("Reflect",i,"EZ")};
+  const unsigned id=unsigned(Slot("Reflect",i,"Lo"))|(unsigned(Slot("Reflect",i,"Hi"))<<16);
+  if(auto* recipient=theWorld.GetUnit(int(id));recipient&&!recipient->IsInvalid()){auto p=WorldPosition(*recipient);p.z+=.9f;slot.target=Point(p);}
+ }
  std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,3> retained={Texture(boss),Texture(boss,true),Texture(theWorld.GetMapObject(990205))};
  std::array<ID3D11ShaderResourceView*,3> textures={retained[0].Get(),retained[1].Get(),retained[2].Get()};
  dx->SubmitGolemVisual(input,textures);

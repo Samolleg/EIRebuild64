@@ -691,6 +691,7 @@ public:
     void SetParticleSourceSize(SSCCmd *pCmd);
     bool SetParticleFlow(const SSCCmd &cmd);
     void RefreshArenaWaveSources(int wave,float radius,int tick);
+    void RefreshFinalGolemSources(int tick);
     bool SetParticleSourcePower(const SSCCmd &cmd);
     void CreateSFX(SSCCmd *pCmd);
     void CreateSFXSource(SSCCmd *pCmd);

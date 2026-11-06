@@ -1351,6 +1351,10 @@ void CEffectSpell::InflictDamage(SRPGAttackPortion &ap, CUnit *pTarget)
     if ((pWho.IsEmpty() && (lsDamage || (filterMode != 1 && filterMode != 2))) ||
         spell.IsValidTarget(pWho, pTarget))
     {
+        auto* caster=dynamic_cast<CUnit*>((CMapObject*)pWho);auto* weapon=caster?caster->GetCurrentQWeapon():nullptr;
+        const int type=weapon?int(weapon->GetWeaponType()):-1;
+        const bool melee=type>=0&&type<=15&&type!=5&&type!=6&&type!=11&&type!=15&&type!=7;
+        ModAttackEvents::PortionOriginScope provenance(ap,*pTarget,spell.IsItemTrigger()&&melee?ModAttackEvents::PortionOrigin::MeleeItemSpell:ModAttackEvents::PortionOrigin::Spell);
         if (CheckFlag(DW_SPELL_HIDE_CASTER))
         {
             ModAttackEvents::AuthorScope author(ap,*pTarget,pWho);

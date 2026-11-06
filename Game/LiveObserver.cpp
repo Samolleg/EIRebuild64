@@ -1154,7 +1154,7 @@ bool Command(Job& job) {
             const auto message=Text(error,2048);job.response=Error(message.c_str());job.response["stage"]="parse";
         } else {
             if(!std::isfinite(result))throw std::runtime_error("fragment result is not finite; completed game changes are not rolled back");
-            job.response={{"ok",true},{"status","done"},{"result",result},{"truncated",false}};
+            job.response={{"ok",true},{"status","done"},{"service",true},{"result",result},{"truncated",false}};
         }
         return true;
     }

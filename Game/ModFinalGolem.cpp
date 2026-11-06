@@ -1,9 +1,9 @@
 #include "StdAfx.h"
 #include "ModFinalGolem.h"
+#include "ModGolemReflect.h"
 #include "ModFinalGolemState.h"
 #include "ModArenaBoundary.h"
 #include "ModScriptMotion.h"
-#include "UMPlayer.h"
 #include <cfloat>
 #include <stdexcept>
 
@@ -39,8 +39,14 @@ void Contact(CUnit* boss,CUnit* hero) {
  if(!Valid(hero)||!Hero(hero)||Read("FGL.Phase")!=3)return;
  char key[80];std::snprintf(key,sizeof(key),"FGL.Hit.%u",unsigned(hero->GetID()));const float sequence=Read("FGL.Charge");if(Read(key)==sequence)return;
  const auto p=boss->GetCP(),h=hero->GetCP();
- // The actual accepted step is a segment of the one committed corridor.
- if(Distance2(h.x,h.y,Read("FGL.PX"),Read("FGL.PY"),p.x,p.y)>1.1f+Body(hero))return;
+ // Explicitly clip both swept samples to the same committed endpoint used by
+ // path and physical step, including a resumed save or an interrupted route.
+ const float ox=Read("FGL.OX"),oy=Read("FGL.OY"),dx=Read("FGL.DX"),dy=Read("FGL.DY");
+ const float px=Read("FGL.PX"),py=Read("FGL.PY"),length=std::hypot(Read("FGL.EX")-ox,Read("FGL.EY")-oy);
+ if(!std::isfinite(length)||length<=.001f||std::fabs(std::hypot(dx,dy)-1)>.001f||
+    std::fabs((p.x-ox)*dy-(p.y-oy)*dx)>.42f||std::fabs((px-ox)*dy-(py-oy)*dx)>.42f)return;
+ const float before=Clamp((px-ox)*dx+(py-oy)*dy,0,length),after=Clamp((p.x-ox)*dx+(p.y-oy)*dy,0,length);
+ if(after<before-.001f||Distance2(h.x,h.y,ox+dx*before,oy+dy*before,ox+dx*after,oy+dy*after)>1.1f+Body(hero))return;
  Set(key,sequence);Set("FGL.Hits",Read("FGL.Hits")+1);
  for(int location:{4,5,1}) {
   if(!Valid(hero))break;auto* server=Server(hero);if(!server)break;SRPGAttackPortion ap;ap.Clear();
@@ -65,7 +71,7 @@ void Action(CUnit* boss,CUnit* other,int op) {
  auto* s=Server(boss);ArmVisual();
  if(op==0) {
   for(int i=0;i<int(Read("FGL.PartyCount"))&&i<16;++i)if(auto* hero=Party(i);Valid(hero,false))if(auto* server=Server(hero))server->FinishEncounterPerformance();
-  if(Valid(boss)){if(!(ModInvincible::Mask(boss)&ModInvincible::Bad))ModInvincible::Change(boss,"effects",1);Set("DJW.Stage",float((std::max)(Stage(HP(boss)),int(Read("DJW.Stage")))));TickExtras(boss);}return;
+  if(Valid(boss)){if(!(ModInvincible::Mask(boss)&ModInvincible::Bad))ModInvincible::Change(boss,"effects",1);Set("DJW.Stage",float((std::max)(Stage(HP(boss)),int(Read("DJW.Stage")))));TickExtras(boss);ModGolemReflect::Tick();}theWorldServer.script.RefreshFinalGolemSources(Now());return;
  }
  if(op==1){Melee(boss,other);return;}
  if(op==2){Prepare(boss,other);return;}
@@ -73,12 +79,12 @@ void Action(CUnit* boss,CUnit* other,int op) {
  if(op==4){Set("FGL.PX",boss->GetCP().x);Set("FGL.PY",boss->GetCP().y);return;}
  if(op==5){bool arrived=std::hypot(boss->GetCP().x-Read("FGL.EX"),boss->GetCP().y-Read("FGL.EY"))<.65f||Read("FGL.Blocked")!=0;Set("FGL.Arrived",arrived?1.f:0.f);Set("FGL.Resume",!arrived&&Read("FGL.Timer")>1&&!s->GetScriptCommand().IsMove()?1.f:0.f);return;}
  if(op==6){s->ScriptSpeedChanged();return;}
- if(op==7){if(Valid(boss)){ModInvincible::Change(boss,"effects",1);s->Heal(2500);s->RecalcRPGStats(false);Set("DJW.Stage",1);}return;}
+ if(op==7){if(Valid(boss)){ModInvincible::Change(boss,"effects",1);ModGolemReflect::Reset();s->Heal(2500);s->RecalcRPGStats(false);Set("DJW.Stage",1);}return;}
  if(op==8){if(Valid(other)&&Hero(other)){int n=int(Read("FGL.PartyCount"));if(n>=0&&n<16){char key[48];const unsigned id=unsigned(other->GetID());std::snprintf(key,sizeof(key),"FGL.Party%d.Lo",n);Set(key,float(id&65535));std::snprintf(key,sizeof(key),"FGL.Party%d.Hi",n);Set(key,float(id>>16));Set("FGL.PartyCount",float(n+1));}}return;}
  if(op==9){s->CmdMoveTo(CPlot3D(Read("FGL.EX"),Read("FGL.EY"),0),false);return;}
  if(op==10){s->StopEncounterMovement();return;}
  if(op==11){Plan(boss,other);return;}
- if(op==12){ResetExtras();return;}
+ if(op==12){ResetExtras();ModGolemReflect::Reset();return;}
  if(op==13){Circle(boss);return;}
  if(op==14){BeginThrow(boss);return;}
  if(op==15){LaunchThrow(boss);return;}
