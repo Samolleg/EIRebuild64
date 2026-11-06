@@ -49,7 +49,7 @@ inline bool SetRotate(const char* text,float degrees) {
     const CQuaternion rotation((c*w-s*z)*inv,(c*x-s*y)*inv,(c*y+s*x)*inv,(c*z+s*w)*inv);
     auto* unit=dynamic_cast<CUnit*>(object);
     auto* server=unit?dynamic_cast<CUnitServer*>(unit->GetUnitSpecific()):nullptr;
-    if(server&&unit->IsMoving()&&std::abs(delta)<.000001f)return true;
+    if(server&&server->IsL1Moving()&&std::abs(delta)<.000001f)return true;
     const bool turned=server&&server->TurnScriptPath(delta);
     if(!unit&&NavigationObject(object)&&object->WhoAmI()!=HPC_MAGICTRAP) {
         // The existing scene owner publishes the rotated physical placement.

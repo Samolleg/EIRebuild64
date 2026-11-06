@@ -842,11 +842,12 @@ bool CUnitServer::ProcessScriptWindAttack()
     const bool attacking=curCommand.IsAttack()&&curCommand.pTarget==target;
     const float savedHit=Read(*lpUnit,"WindAttack","hit");
     if(pending&&(!std::isfinite(savedHit)||savedHit<0||savedHit>RPGHL_ALL||savedHit!=std::floor(savedHit))){clear();return false;}
-    const bool owned=pending&&same&&(curCommand.windApproach||nextCommand.windApproach);
+    const bool owned=pending&&same&&(curCommand.windApproach||nextCommand.windApproach||
+        (curCommand.cmd==UC_IDLE&&nextCommand.IsEmpty()));
     if(!armed) {
         const int hit=int(Read(*lpUnit,"WindAttack","hit"));const bool run=Read(*lpUnit,"WindAttack","run")!=0;
         clear();
-        if(owned&&(curCommand.IsMove()||curCommand.IsEmpty())&&(nextCommand.IsEmpty()||nextCommand.windApproach)&&!lpUnit->IsDead())
+        if(owned&&(curCommand.IsMove()||curCommand.IsEmpty()||curCommand.cmd==UC_IDLE)&&(nextCommand.IsEmpty()||nextCommand.windApproach)&&!lpUnit->IsDead())
             CmdAttack(target,ERPGHitLocations(hit),run,2);
         return false;
     }
@@ -6259,13 +6260,13 @@ void CUnitServer::CmdMoveTo(const CPlot3D &ptDest, bool bRun, bool bGroupCmd, fl
     const bool wallGuard=(id==42||id==44||id==45||id==52||id==217||id==218||id==219)&&
         at.x>450&&at.x<510&&at.y>310&&at.y<395&&pWS->GetMapObject(43826);
     const bool sameFloor=goalSupport?curCommand.navGoalValid&&
-        goalSupport->surface==curCommand.navGoal.surface&&std::abs(goalSupport->position.z-curCommand.navGoal.position.z)<.01f:!curCommand.navGoalValid;
+        goalSupport->surface==curCommand.navGoal.surface&&goalSupport->position.z==curCommand.navGoal.position.z:!curCommand.navGoalValid;
     if(wallGuard&&nextCommand.IsEmpty()&&curCommand.IsMove()&&curCommand.pTarget.IsEmpty()&&
        L1IsMoving()&&!bLcCommandFail&&!bL1MovementFailed&&!bL1SpeedChanged&&!bL0Frozen&&!bL0MovementFrozen&&
        !path.bRouteFailed&&!path.navigationPending&&!path.navigationTurned&&!navigationWait&&!navigationRejects&&
        path.navigationGeneration==pWS->aiMap.Navigation().Generation()&&sameFloor&&
        curCommand.bDoItFast==bRun&&curCommand.nQSpellNum==(bGroupCmd?1:0)&&curCommand.ptTarget.z==fpMaxPathDist&&
-       std::abs(curCommand.ptTarget.x-ptDest.x)<.01f&&std::abs(curCommand.ptTarget.y-ptDest.y)<.01f)return;
+       curCommand.ptTarget.x==ptDest.x&&curCommand.ptTarget.y==ptDest.y)return;
     CancelScriptWindPending();
     nextCommand.Clear();
     nextCommand.cmd = UC_MOVETO;
@@ -6440,6 +6441,10 @@ void CUnitServer::StopGroupSearchMotion()
 
 void CUnitServer::CmdWait()
 {
+    // Stop must also cancel an approach queued while the body is still idle.
+    if(scriptWindActive&&nextCommand.windApproach) {
+        CancelScriptWindPending();nextCommand.Clear();nextCommand.cmd=UC_IDLE;
+    }
     if (curCommand.cmd == UC_IDLE)
         return;
     // CRAP
