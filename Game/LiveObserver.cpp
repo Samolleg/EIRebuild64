@@ -633,7 +633,7 @@ json UnitDetail(CUnit* unit,CWorldServer& world,CPlayer* player) {
         {"command_target_id",command.GetTargetID()},{"command_point",Point(command.ptTarget)}};
     return result;
 }
-// Readiness is evaluated only for an explicit status request, never each frame.
+// Readiness is evaluated only for a status or command request, never each frame.
 // World construction alone is insufficient: wait for the normal local handshake
 // and the client/server copies of the squad to reach the mission.
 void UpdateOperationReadiness() {
@@ -654,12 +654,16 @@ void UpdateOperationReadiness() {
     auto* server=static_cast<CPlayerServer*>(serverPlayer->GetPlayerSpecific());
     if(!server||(server->GetStatus()!=CPlayerServer::PSS_ACTIVE&&server->GetStatus()!=CPlayerServer::PSS_CAMP))return;
     if(player->curInterface==IFACE_MISSION||player->curInterface==IFACE_BASE) {
-        if(player->party.people.GetSize()==0)return;
+        if(player->party.people.GetSize()!=serverPlayer->party.people.GetSize())return;
         for(int i=0;i<player->party.people.GetSize();++i) {
             const int id=player->party.people[i].nID;
+            if(id!=serverPlayer->party.people[i].nID)return;
             auto* unit=world.GetUnit(id);auto* clientUnit=theWorld.GetUnit(id);
-            if(!unit||unit->IsInvalid()||unit->IsUnreferenced()||
-               !clientUnit||clientUnit->IsInvalid()||clientUnit->IsUnreferenced()||
+            if(!unit||unit->IsInvalid()||unit->IsUnreferenced())return;
+            // A restored corpse need not remain owned or visible on the client.
+            // It is a valid loaded state, including the main hero's death screen.
+            if(unit->IsDead())continue;
+            if(!clientUnit||clientUnit->IsInvalid()||clientUnit->IsUnreferenced()||
                !Squad(unit,serverPlayer)||unit->GetOwner()!=serverPlayer||clientUnit->GetOwner()!=player)return;
             auto* specific=unit->GetUnitSpecific();
             if(!specific||specific->WhoAmI()!=HPC_UNITSERVERSPECIFIC)return;
@@ -743,6 +747,12 @@ bool Lod(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
             {"consistency","GPU snapshot; distances from request camera anchor"},
             {"position_basis","GPU render node origin, world metres"},
             {"visibility_basis","colour triangles emitted; not a pixel visibility test"}};
+        if(!name.empty()){
+            job.response["name"]=name;
+            job.response["name_scope"]="active_and_neighbour_snapshot";
+            job.response["name_match"]="waiting";
+            job.response["model_presence"]="not_determined";
+        }
     }
     if(!SameWorld(job,world)||owned::bridge_current_world_epoch()!=job.response["world_epoch"].get<std::uint64_t>()){
         job.response=Error("world changed while awaiting LOD snapshot");return true;
@@ -754,12 +764,19 @@ bool Lod(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
             job.lodSnapshot.reset();return ++job.offset>=3;
         }
         owned::native_lod_acknowledge(job.lodRequest);
-        if(job.lodSnapshot->unavailable){job.response["status"]="unavailable";return true;}
+        if(job.lodSnapshot->unavailable){
+            job.response["status"]="unavailable";
+            if(!name.empty())job.response["name_match"]="unavailable";
+            return true;
+        }
         job.response["snapshot_frame"]=job.lodSnapshot->frame;
         job.response["capture"]={{"camera_frame",job.lodSnapshot->camera_frame},
             {"record_capacity",job.lodSnapshot->record_capacity},{"rows",job.lodSnapshot->rows.size()},
             {"observed_rows",job.lodSnapshot->observed_rows}};
         job.response["status"]="ready";job.response["truncated"]=job.lodSnapshot->truncated;job.phase=2;
+        // The snapshot contains submitted render records, not a model catalog.
+        // No matching row cannot establish that a loaded/resource model is absent.
+        if(!name.empty())job.response["name_match"]="not_in_snapshot";
     }
     if(!SameWorld(job,world)||owned::bridge_current_world_epoch()!=job.lodSnapshot->world_epoch){
         job.response=Error("world changed during LOD scan");return true;
@@ -770,6 +787,10 @@ bool Lod(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
     while(job.item<rows.size()&&Clock::now()<deadline){
         const auto& row=rows[job.item++];const auto& source=*row.identity;const auto& choice=row.decision;
         if(!Match(source.model,name))continue;
+        if(!name.empty()){
+            job.response["name_match"]="matched";
+            job.response["model_presence"]="present";
+        }
         // A cleared slot has no GPU sample; no CPU substitute for position or LOD.
         const bool observed=choice.state!=0;
         const double dx=choice.position[0]-cameraX,dy=choice.position[1]-cameraY;
@@ -1007,8 +1028,9 @@ bool Command(Job& job) {
     // slot write in this process. Reading an owner's slot remains permitted.
     saveIsolated=true;
     const auto& method=job.method;const auto& params=job.request.at("params");
+    UpdateOperationReadiness();
     {std::lock_guard<std::mutex> lock(operationMutex);
-     if(operation.inFlight&&method!="quit")throw std::runtime_error("another game operation is in progress; query status");}
+     if(operation.inFlight&&method!="quit")throw std::runtime_error("another game operation is in progress");}
     GameJournal::Source source("mcp");
     if(method=="quit") {
         if(!NGame::CanQuit())throw std::runtime_error("game refused to quit");
