@@ -7,6 +7,7 @@
 #include "ModMobFlagArguments.h"
 #include "ModMessages.h"
 #include "ModAnimationLoop.h"
+#include "ModAttackEvents.h"
 #include "MapObjectManager.h"
 #include "ModRegisteredLoot.h"
 #include "ZoneIce.h"
@@ -26,6 +27,11 @@ namespace ModMob {
 // Release registry from57b8e0c, original IDs checked against EXE token table78BCA0.
 struct Entry {int id;const char*name;const char*format;bool ready;};
 inline const Entry registry[]={
+ {275,"GetCloseAttackEvent","Foof",true},
+ {285,"GetPhysicalAttackEvent","Foof",true},
+ {294,"GetAttackEvent","Foof",true},
+ {295,"WasAttacked","Foof",true},
+ {296,"HasAttack","Foof",true},
  {280,"GetArenaTick","F",true},
  {288,"DirectionAngle","Fff",true},
  {297,"ApplyTrapParalysis","of",true},
@@ -160,7 +166,7 @@ inline int CheckedInt(float value){
 }
 inline int Index(float value,int count){int i=CheckedInt(value);if(i<0||i>=count)throw std::runtime_error("MOB index out of range");return i;}
 inline CMapObject* ObjectArg(const SSCCmd&cmd,int i=0){return i<cmd.oParams.GetSize()&&cmd.oParams[i]?cmd.oParams[i]->GetObject():nullptr;}
-inline CUnit* UnitArg(const SSCCmd&cmd){auto*p=ObjectArg(cmd);return p&&p->WhoAmI()==HPC_UNIT?static_cast<CUnit*>(p):nullptr;}
+inline CUnit* UnitArg(const SSCCmd&cmd,int i=0){auto*p=ObjectArg(cmd,i);return p&&p->WhoAmI()==HPC_UNIT?static_cast<CUnit*>(p):nullptr;}
 inline CUnitServer* ServerArg(const SSCCmd&cmd){auto*u=UnitArg(cmd);return u?dynamic_cast<CUnitServer*>(u->GetUnitSpecific()):nullptr;}
 inline CPlayerServer* PlayerServer(int number){auto*p=theWorldServer.GetPlayer(number);return p?dynamic_cast<CPlayerServer*>(p->GetPlayerSpecific()):nullptr;}
 inline std::string Join(const SSCCmd&cmd){std::string s;for(int i=0;i<cmd.szParams.GetSize();i++)s+=(LPCSTR)cmd.szParams[i];return s;}
@@ -168,6 +174,7 @@ inline bool Float(SSCCmd&cmd,float&result){
  if(!ModRuntime::Current())return false;auto*e=Find(cmd.command);if(!e)return false;
  if(!e->ready||e->format[0]!='F')throw std::runtime_error(std::string("Unported MOB float command: ")+e->name);if(!ValidateDispatch(*e,cmd)){result=0;return true;}
  const char*n=e->name;float a=cmd.params.GetSize()?cmd.params[0]:0;
+ if(cmd.command==275||cmd.command==285||cmd.command==294||cmd.command==295||cmd.command==296){result=ModAttackEvents::Query(theWorldServer,cmd.command,UnitArg(cmd),UnitArg(cmd,1),a);return true;}
  if(cmd.command==280){result=float(theWorldServer.GetSegmentTimeCounter());return true;}
  if(cmd.command==288){float y=cmd.params[1];result=std::isfinite(a)&&std::isfinite(y)&&std::hypot(a,y)>.001f?std::atan2(a,-y)*57.2957795130823f:0.f;return true;}
  if(cmd.command==361){auto*unit=UnitArg(cmd);auto*server=ServerArg(cmd);result=unit&&!unit->IsInvalid()&&!unit->IsDead()&&server?float(server->GetScriptPose()):-1.f;return true;}

@@ -9,6 +9,7 @@
 #include "EngineDiagnostics.h"
 #include "ModRuntime.h"
 #include "ModOutOfCombatRegeneration.h"
+#include "ModAttackEvents.h"
 #include "ModPackage.h"
 #include "ModItemUiPolicy.h"
 #include "ModCliTool.h"
@@ -326,6 +327,7 @@ void CWorldServer::RemoveEffects()
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldServer::RemoveEverything()
 {
+    if (!detachedSave) ModAttackEvents::Reset();
     szLoadedMobs.RemoveAll();
     waterLevels.Clear();
     // remove exits from zone

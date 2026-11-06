@@ -20,6 +20,7 @@
 #include "ModAlchemy.h"
 #include "dx11/RetailModalFade.h"
 #include "ModAttackTiming.h"
+#include "ModAttackEvents.h"
 #include "ModPreparedAttack.h"
 #include "TextureManager.h"
 #include "ModMobCommands.h"
@@ -333,7 +334,7 @@ float CModPackage::MurderAwarenessValue(int property,float fallback){
  lua_pushinteger(state,property);lua_pushnumber(state,fallback);Call(2,1);
  return lua_isnumber(state,-1)?static_cast<float>(lua_tonumber(state,-1)):fallback;
 }
-void CModPackage::ResetRuntimeState(){ModOutOfCombatRegeneration::Reset();InvalidateInfoStatsCache();ModGroupSearch::Reset();ModDeathFearReset();ModTactical::Reset();delayedShots.clear();skillCooldowns.Clear();criticalAttacks.clear();customCriticals.Clear();JMV_NpcConsumablesReset();JMV_RegisteredLootReset("package-reset");refreshQueue->Reset();initialization->Reset();npcArmorCache.clear();cacheWorld=nullptr;cacheZone.clear();cacheSegment=-1;}
+void CModPackage::ResetRuntimeState(){ModAttackEvents::Reset();ModOutOfCombatRegeneration::Reset();InvalidateInfoStatsCache();ModGroupSearch::Reset();ModDeathFearReset();ModTactical::Reset();delayedShots.clear();skillCooldowns.Clear();criticalAttacks.clear();customCriticals.Clear();JMV_NpcConsumablesReset();JMV_RegisteredLootReset("package-reset");refreshQueue->Reset();initialization->Reset();npcArmorCache.clear();cacheWorld=nullptr;cacheZone.clear();cacheSegment=-1;}
 void CModPackage::SyncRuntimeState(){
  const void*world=theWorldServer.GetSpecificManager();std::string zone;
  zone=(LPCSTR)theWorldServer.szMobFileName;
@@ -2449,6 +2450,7 @@ void CModPackage::AdoptSaveState(const std::shared_ptr<SaveState> &saved) noexce
 {
  if(!saved)return;
  SwapSaveRuntime(*saved);
+ ModAttackEvents::Reset();
  // Pure invalidation: no Lua, packet construction, resource access or allocation.
  ModGroupSearch::Reset();ModDeathFearReset();ModTactical::Reset();
 }

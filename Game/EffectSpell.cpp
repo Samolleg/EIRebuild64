@@ -3,6 +3,7 @@
 #include "GameJournal.h"
 #include "ModSpellRules.h"
 #include "ModSpellOwner.h"
+#include "ModAttackEvents.h"
 #include "ModSpellDanger.h"
 #include "ModSpellTextures.h"
 #include "ModRuntime.h"
@@ -1351,7 +1352,10 @@ void CEffectSpell::InflictDamage(SRPGAttackPortion &ap, CUnit *pTarget)
         spell.IsValidTarget(pWho, pTarget))
     {
         if (CheckFlag(DW_SPELL_HIDE_CASTER))
+        {
+            ModAttackEvents::AuthorScope author(ap,*pTarget,pWho);
             pTarget->ProcessAttackPortion(&ap, 0, pWho);
+        }
         else
             pTarget->ProcessAttackPortion(&ap, pWho, pWho);
     }
