@@ -108,7 +108,7 @@ bool saveIsolated=false; // game thread only; deliberately survives load/new gam
 bool IsCommand(const std::string& method) {
     return method=="load_save"||method=="new_game"||method=="enter_zone"||method=="save_game"||
            method=="unit_move"||method=="unit_teleport"||method=="pause"||method=="quit"||
-           method=="set_global"||method=="object_transform"||method=="god_mode";
+           method=="set_global"||method=="object_transform"||method=="god_mode"||method=="script_run";
 }
 
 json Error(const char* message) {return {{"ok",false},{"error",message},{"truncated",false}};}
@@ -1085,6 +1085,30 @@ bool Command(Job& job) {
         player->bGod=static_cast<BYTE>(level);
         job.response={{"ok",true},{"status","done"},{"player",0},
             {"previous",previous},{"value",int(player->bGod)},{"truncated",false}};return true;
+    }
+    if(method=="script_run") {
+        const auto& value=params.at("source");
+        if(!value.is_string())throw std::runtime_error("source must be a string");
+        const auto source=value.get<std::string>();
+        if(source.empty()||source.size()>4096||source.find('\0')!=std::string::npos)
+            throw std::runtime_error("source must contain 1..4096 UTF-8 bytes without NUL");
+        const int count=MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,source.data(),int(source.size()),nullptr,0);
+        if(!count)throw std::runtime_error("source must be valid UTF-8");
+        std::wstring wide(size_t(count),L'\0');
+        MultiByteToWideChar(CP_UTF8,MB_ERR_INVALID_CHARS,source.data(),int(source.size()),wide.data(),count);
+        BOOL substituted=FALSE;
+        const int bytes=WideCharToMultiByte(1251,WC_NO_BEST_FIT_CHARS,wide.data(),count,nullptr,0,nullptr,&substituted);
+        if(!bytes||substituted)throw std::runtime_error("source must be representable in Windows-1251");
+        std::string native(size_t(bytes),'\0');
+        WideCharToMultiByte(1251,WC_NO_BEST_FIT_CHARS,wide.data(),count,native.data(),bytes,nullptr,&substituted);
+        float result=0;CString error;
+        if(!theWorldServer.script.RunFragment(native.c_str(),result,error)) {
+            const auto message=Text(error,2048);job.response=Error(message.c_str());job.response["stage"]="parse";
+        } else {
+            if(!std::isfinite(result))throw std::runtime_error("fragment result is not finite; completed game changes are not rolled back");
+            job.response={{"ok",true},{"status","done"},{"result",result},{"truncated",false}};
+        }
+        return true;
     }
     if(method=="set_global") {
         const auto& key=params.at("name");

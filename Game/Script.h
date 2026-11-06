@@ -476,7 +476,7 @@ public:
     }
 
     // последовательно выполняет список команд, вернет FALSE, если в списке больше нет команд
-    BOOL Segment(CScript *pScript);
+    BOOL Segment(CScript *pScript, CScript *pCommandOwner = nullptr);
     void CheckObjectRefs();
     // вернет TRUE,  если в скрипте больше нет команд
     BOOL IsFinished() { return nCurCommand >= pThread->commands.GetSize(); }
@@ -702,6 +702,8 @@ public:
     void RunThread(SScriptThread *pThread, SOneScript *pOneScript = NULL);
     // тред начнет выполнятся в порядке общей очереди при вызове CScript::Segment()
     void RunThreadDelayed(SScriptThread *pThread);
+    // Request-scoped MOB command list; never queues a thread or changes world-script globals.
+    bool RunFragment(const CString &source, float &result, CString &error);
 
     SScriptVariablesSet &GetGlobalVars() { return globalVars; }
     // получить скрипт по его имени, после добавления новых скриптов указатель может стать
