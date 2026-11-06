@@ -2381,6 +2381,7 @@ bool CWorldServer::CheckAddObject(CMapObject *pObj)
 /////////////////////////////////////////////////////////////////////////////////////
 int CWorldServer::AddMapObject(CMEBasicObject *pMEObject)
 {
+    aiMap.Navigation().SourceObject(*pMEObject,aiMap);
     int nResID;
     assert(bMapLoaded == TRUE);
 
@@ -2691,8 +2692,9 @@ void CWorldServer::RemoveMapObject(int nID)
         return;
     CMapObject *pMODel = ppObj[0];
     if(pMODel->WhoAmI()==HPC_UNIT)aiMap.Navigation().ForgetUnit(nID);
-    if (pMODel->WhoAmI() != HPC_MAGICTRAP)
+    if (pMODel->WhoAmI() != HPC_MAGICTRAP && aiMap.Navigation().ObjectPresent(nID) && pMODel->nTileMapX>=0 && pMODel->nTileMapY>=0)
         aiMap.RemoveObject(*ppObj);
+    aiMap.Navigation().ForgetObject(nID);
     RemoveObjectFromActive(nID);
     mapObjects.RemoveAt(nID);
     if (questMapObjs.Seek(nID))
@@ -3448,7 +3450,7 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
         szMobFileName = "";
     }
 
-    aiMap.Navigation().Scene(pszMprName,pszMobName);
+    aiMap.Navigation().Scene(pszMprName,pszMobName,*this);
 
     // prepare for map objects loading
     if (szMobFileName.CompareNoCase(pszMobName) == 0)

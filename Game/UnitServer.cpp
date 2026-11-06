@@ -802,8 +802,8 @@ void CUnitServer::L1NewPathSegment()
 /////////////////////////////////////////////////////////////////////////////////////
 bool CUnitServer::RestoreNavigation(bool invalidate)
 {
-    if(invalidate){navigationRejects=navigationWait=0;path.toGo.Clear();path.excludeVertices.RemoveAll();}
-    if(!path.curSegment.IsMoving())return true;
+    if(invalidate){navigationRejects=navigationWait=0;path.excludeVertices.RemoveAll();}
+    if(!path.curSegment.IsMoving()&&!path.navigationPending)return true;
     auto* world=static_cast<CWorldServer*>(GetWorld());auto goal=path.ptDestination;
     if(distanceXY2(lpUnit->GetCP(),goal)<.0009f) {
         path.CreateStand(lpUnit);L1SetPhase(UL1_NONE);lpUnit->LowNewRoute();return true;
@@ -1077,7 +1077,7 @@ bool CUnitServer::L1StartMove(const CPlot3D &ptTarget, float fpMaxPathLength, co
         L1StopMovement(path.bRouteFailed == TRUE);
         return false;
     }
-    if(!path.curSegment.IsMoving()) {
+    if(!path.curSegment.IsMoving()&&!path.navigationPending) {
         // Already at the nearest reachable point: successful no-op, not a
         // refusal and not a standing segment left in the movement phase.
         const auto accepted=path.ptDestination;

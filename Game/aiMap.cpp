@@ -115,6 +115,8 @@ void SAIPath::Clear()
     bFirstTry = true;
     excludeVertices.RemoveAll();
     nPathCost = 0;
+    navigationGeneration=0;navigationPending=false;navigationGoal={};
+    navigationPolicy=Navigation::GoalPolicy::Exact;navigationMaxLength=1.e6f;navigationMinDistance=0;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 
@@ -2411,7 +2413,19 @@ bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpM
     auto from=navigation.Position(pUnit,*this);
     // ptDst.z is a command distance, not world height.
     Navigation::Point goal{ptDst.x,ptDst.y,destination.position.z};
-    if(!NavRoute(pUnit,from,goal,res.toGo,fpMaxPathLength,fpMinDistance,3,nullptr,goalPolicy,detail,&destination)) {res.bRouteFailed=true;return false;}
+    res.navigationGoal=destination;res.navigationPolicy=goalPolicy;
+    res.navigationMaxLength=fpMaxPathLength;res.navigationMinDistance=fpMinDistance;
+    res.navigationGeneration=navigation.Generation();res.navigationPending=false;
+    Navigation::Route decision;auto* result=detail?detail:&decision;
+    if(!NavRoute(pUnit,from,goal,res.toGo,fpMaxPathLength,fpMinDistance,3,nullptr,goalPolicy,result,&destination)) {
+        if(result->status!=Navigation::Status::Updating){res.bRouteFailed=true;return false;}
+        // A pending scene is not a failed player order. Publish a stationary
+        // segment; the existing movement owner resumes this same intent.
+        res.curSegment.Clear();res.curSegment.SetStartPos(pUnit->GetCP(),-pUnit->GetYAxis(),static_cast<CWorldServer*>(pUnit->GetWorld())->GetSegmentTimeCounter()-1);
+        res.ptFinish=CPlot2D(Meter2AITile(from.x),Meter2AITile(from.y));res.bFinished=false;
+        res.navigationPending=true;res.bFirstTry=false;res.nPathCost=0;return true;
+    }
+    if(!result->points.empty())res.navigationGoal=result->points.back();
     auto& last=res.toGo.route.GetTail();res.ptFinish=last.point;
     if(goalPolicy==Navigation::GoalPolicy::ClosestReachable) {
         // Replans and crowd avoidance must retain the accepted endpoint.
