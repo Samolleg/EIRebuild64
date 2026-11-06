@@ -1330,9 +1330,9 @@ static CParty *GetPartyAndName(CPlayer *pPlayer, CString &szName)
 }
 
 // вернет FALSE, если в скрипте больше нет команд
-BOOL CScriptThreadState::Segment(CScript *pScript)
+BOOL CScriptThreadState::Segment(CScript *pScript, CScript *pCommandOwner)
 {
-    GameJournal::Source journalSource("MQ");
+    GameJournal::Source journalSource(pCommandOwner ? "mcp" : "MQ");
     int i;
     float fpParam;
     CPlot3D objectPos;
@@ -1349,7 +1349,7 @@ BOOL CScriptThreadState::Segment(CScript *pScript)
 
     ASSERT(pThread);
     ASSERT(pScript);
-    CScript &script = *pScript;
+    CScript &script = pCommandOwner ? *pCommandOwner : *pScript;
     nSegment++;
     if (IsFinished())
         return FALSE;
@@ -2600,6 +2600,49 @@ void CScript::RunThread(SScriptThread *pThread, SOneScript *pOneScript)
     }
 }
 
+bool CScript::RunFragment(const CString &source, float &result, CString &error)
+{
+    CScript fragment;
+    CString text = "GlobalVars(result:float)\nWorldScript(\n" + source + "\n)\n";
+    if (!fragment.LoadText(text, FALSE))
+    {
+        const auto failure = fragment.GetLastError();
+        error.Format("line %d: %s", (std::max)(1, failure.nLine - 2), (LPCSTR)failure.text);
+        return false;
+    }
+    if (fragment.scripts.GetSize() || fragment.threads.GetCount() ||
+        fragment.worldActions.GetCount() != 1 || fragment.globalVars.fVars.GetSize() != 1 ||
+        fragment.globalVars.szVars.GetSize() || fragment.globalVars.oVars.GetSize() || fragment.globalVars.gVars.GetSize())
+        throw std::runtime_error("script_run accepts a synchronous command list, without declarations or loops");
+    auto &thread = fragment.worldActions.GetHead();
+    if (!thread.commands.GetSize() || thread.commands.GetSize() > 64)
+        throw std::runtime_error("script_run requires 1..64 commands");
+    // Reject waits and script-local lifetime/area operations before any game mutation.
+    std::vector<const SSCCmd *> pending;
+    for (int i = 0; i < thread.commands.GetSize(); ++i) pending.push_back(&thread.commands[i]);
+    while (!pending.empty())
+    {
+        const auto *cmd = pending.back(); pending.pop_back();
+        switch (cmd->command)
+        {
+        case SC_SLEEP: case SC_WAITSEGMENT: case SC_WAITENDANIMATION:
+        case SC_SLEEPUNTILIDLE: case SC_SLEEPUNTIL: case SC_RUNSCRIPT: case SC_KILLSCRIPT:
+        case SC_FOR: case SC_FORIF: case SC_LOADSCRIPTS:
+        case SC_ADDRECTTOAREA: case SC_ADDROUNDTOAREA: case SC_DELETEAREA: case SC_ISINAREA:
+        case 387: case 390: case 394: // voice waits / a possibly deferred animation start
+            throw std::runtime_error("script_run does not support waits, loops, scripts, local areas or deferred commands");
+        }
+        for (int i = 0; i < cmd->funcParameters.GetSize(); ++i) pending.push_back(cmd->funcParameters[i].cmd);
+    }
+    CScriptThreadState state;
+    state.RunThread(&thread);
+    state.Segment(&fragment, this);
+    if (!state.IsFinished())
+        throw std::runtime_error("fragment did not finish synchronously; completed game changes are not rolled back");
+    result = fragment.globalVars.fVars[0];
+    return true;
+}
+
 void CScript::RunThreadDelayed(SScriptThread *pThread)
 {
     CScriptThreadState newState;
@@ -2886,6 +2929,7 @@ static SParticleNameToID nameToID[] = {
     { "CurseHolder", PTID_CURSEHOLDER, -1 },
     { "StartTrans", PTID_STARTTRANS, 200 },
     { "Transform", PTID_TRANSFORM, 200 },
+    { "Blood1", PTID_BLOOD1, 200 },
 };
 
 void CScript::CreateParticleSource(SSCCmd *pCmd)

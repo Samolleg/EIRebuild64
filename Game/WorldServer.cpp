@@ -1380,6 +1380,13 @@ void CWorldServer::SetupTrap(CItemQuick *pTrap, CUnit *pWho)
     pTrapObj->ActivateTrap();
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CWorldServer::SetScriptWeather(EWeather newWeather, float fpTransTime)
+{
+    // Script transitions own the existing saved weather fields, in simulation ticks.
+    weatherChange = GMW_NONE;
+    SetWeather(newWeather, fpTransTime);
+}
+
 void CWorldServer::SetWeather(EWeather newWeather, float fpTransTime)
 {
     curWeather = newWeather;

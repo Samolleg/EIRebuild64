@@ -249,6 +249,7 @@ public:
     //
     void InvokeAlarm(int nAlarm, const CPlot3D &ptOrigin, bool bForceAlarm = false);
     void SetWeather(EWeather newWeather, float fpTransTime);
+    void SetScriptWeather(EWeather newWeather, float fpTransTime);
     virtual void SetWorldTime(float fpCurrentTime);
     virtual void SetWorldTimeScale(float fpScale);
     void SetServerWind(const CPlot3D &_ptWindDirection, float fpForce);

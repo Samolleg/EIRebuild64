@@ -26,6 +26,10 @@ namespace ModMob {
 // Release registry from57b8e0c, original IDs checked against EXE token table78BCA0.
 struct Entry {int id;const char*name;const char*format;bool ready;};
 inline const Entry registry[]={
+ {280,"GetArenaTick","F",true},
+ {288,"DirectionAngle","Fff",true},
+ {297,"ApplyTrapParalysis","of",true},
+ {298,"SetWeather","sf",true},
  {300,"GetPlayerOfUnit","Fo",true},
  {301,"GetUnitExp","Fo?s",true},
  {302,"GetArmor","Foff",true},
@@ -164,6 +168,9 @@ inline bool Float(SSCCmd&cmd,float&result){
  if(!ModRuntime::Current())return false;auto*e=Find(cmd.command);if(!e)return false;
  if(!e->ready||e->format[0]!='F')throw std::runtime_error(std::string("Unported MOB float command: ")+e->name);if(!ValidateDispatch(*e,cmd)){result=0;return true;}
  const char*n=e->name;float a=cmd.params.GetSize()?cmd.params[0]:0;
+ if(cmd.command==280){result=float(theWorldServer.GetSegmentTimeCounter());return true;}
+ if(cmd.command==288){float y=cmd.params[1];result=std::isfinite(a)&&std::isfinite(y)&&std::hypot(a,y)>.001f?std::atan2(a,-y)*57.2957795130823f:0.f;return true;}
+ if(cmd.command==361){auto*unit=UnitArg(cmd);auto*server=ServerArg(cmd);result=unit&&!unit->IsInvalid()&&!unit->IsDead()&&server?float(server->GetScriptPose()):-1.f;return true;}
  if(cmd.command==95){if(cmd.params.GetSize()==1)return false;result=a<cmd.params[1]?random.GetFloat(a,cmd.params[1]):a;return true;}
  if(cmd.command==311){float dx=cmd.params[2]-a,dy=cmd.params[3]-cmd.params[1];result=sqrtf(dx*dx+dy*dy);return true;}
  if(cmd.command==341){result=theWorldServer.GetPlayer(CheckedInt(a))?1.f:0.f;return true;}
@@ -200,7 +207,6 @@ inline bool Float(SSCCmd&cmd,float&result){
   if(!object||object->WhoAmI()!=HPC_UNIT)return true;auto*unit=static_cast<CUnit*>(object);
   if(!strcmp(n,"GetUnitAggression")){result=float(unit->GetAggression());return true;}
   auto*server=dynamic_cast<CUnitServer*>(unit->GetUnitSpecific());if(!server)return true;auto&s=*server->GetRPGStats();
-  if(cmd.command==361){result=float(server->GetScriptPose());return true;}
   if(cmd.command==366){result=float(server->logic.GetScriptState());return true;}
   if(cmd.command==302){if(!std::isfinite(a)||a<-2147483648.f||a>=2147483648.f||!std::isfinite(cmd.params[1])||cmd.params[1]<-2147483648.f||cmd.params[1]>=2147483648.f)return Reject(n,"Invalid armor argument");int part=int(a),type=int(cmd.params[1]);if(part>=RPG_NUM_HIT_LOCATIONS||type<0||type>=RPG_NUM_ATTACK_TYPES)return Reject(n,"Armor index out of range");if(part>=0){for(auto&layer:s.hls[part].layers)result+=layer.fpAbsorbtions[type];}else{float values[RPG_NUM_ATTACK_TYPES];unit->GetUserUnitStats()->GetAbsorbtions(&unit->GetUserCommonStats(),values,(unit->GetID()>=1000000000));result=values[type];}return true;}
   if(!strcmp(n,"GetUnitExp")){
@@ -285,6 +291,17 @@ inline bool Group(SSCCmd&cmd,CScriptObjectGroup&result){
 inline bool Action(SSCCmd&cmd){
  auto*unit=UnitArg(cmd);auto*server=ServerArg(cmd);float a=cmd.params.GetSize()?cmd.params[0]:0;
  switch(cmd.command){
+ case 298:{
+  if(!std::isfinite(a)||a<0||a>3600||!theWorldServer.IsMapLoaded())break;
+  const char*name=cmd.szParams[0];EWeather weather;
+  if(!_stricmp(name,"clear"))weather=EW_CLEAR;else if(!_stricmp(name,"rain"))weather=EW_RAIN;else if(!_stricmp(name,"snow"))weather=EW_SNOW;else break;
+  theWorldServer.SetScriptWeather(weather,std::round(a*18.f));break;
+ }
+ case 297:{
+  if(!unit||!server||unit->IsInvalid()||unit->IsDead()||unit->CheckFlag(UNIT_STUN)||!std::isfinite(a)||a<=0||a>60)break;
+  CSpellEffect effect;effect.nSpellID=SPELL_ID_STUN;effect.nDuration=long(std::round(a*18.f));effect.fpPower=1;effect.bQuiet=true;
+  unit->AddSpellEffect(effect);unit->UpdateFrame();break;
+ }
  case 396:ZoneIce::Sync();break;
  case 397:ZoneIce::Freeze();break;
  case 314:{if(auto*p=PlayerServer(CheckedInt(a)))p->SetVar(cmd.szParams[0],cmd.params[1]);break;}
