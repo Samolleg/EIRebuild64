@@ -234,6 +234,10 @@ public:
     CPlot3D ptDest;                 // destination of moving particles
     CSmartPtr<CParticle> pParticle; // Pointer to particle source ( client only )
     int nStartID;                   // set start effect position to this object
+    // Like the plugin callbacks, flow direction is transient; scripts rearm it.
+    // Only the ordinary source powers belong to the save schema.
+    bool bScriptFlow = false;
+    CPlot3D scriptFlowDirection = CPlot3D(0,0,0);
 public:
     CEffectParticle();
     virtual ~CEffectParticle() { Destroy(); }
@@ -246,6 +250,7 @@ public:
     void SetDestination(const CPlot3D &_ptDest);
     void SetScale(float _fpScale);
     void SetPower(float _fpPower, float fpPower2 = 1);
+    void SetScriptFlow(const CPlot3D &direction,float length,float width);
     // Update
     virtual void ApplyParams(EUpdateType tip);
     virtual BOOL UpdateFrom(EUpdateType tip, CUpdateHistory &pkt);

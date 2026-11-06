@@ -1361,7 +1361,7 @@ BOOL CScriptThreadState::Segment(CScript *pScript, CScript *pCommandOwner)
         SSCCmd *pCmd = &pThread->commands[nCurCommand];
         pCmd->CalcParameters(pScript, variables);
         bNextCommand = TRUE;
-        if(!ModMob::Void(*pCmd,&nCurCommand,pThread->commands.GetSize(),&nSleepStart,&bNextCommand,pScript->CanDeferCommand()))switch (pCmd->command)
+        if(!ModMob::Void(*pCmd,&nCurCommand,pThread->commands.GetSize(),&nSleepStart,&bNextCommand,pScript->CanDeferCommand(),&script))switch (pCmd->command)
         {
         case SC_WAITSEGMENT:
             if (nSegment < Float2Int(pCmd->params[0]))
@@ -3040,6 +3040,38 @@ void CScript::AttachParticleSource(int nScriptID, int nObjID)
             return;
         }
     }
+}
+
+bool CScript::SetParticleFlow(const SSCCmd &cmd)
+{
+    const auto &a=cmd.params;
+    for(int i=0;i<5;++i)if(!std::isfinite(a[i]))return false;
+    if(a[0]<0||a[0]>16777215||a[0]!=std::floor(a[0])||a[3]<1||a[3]>50||a[4]<.25f||a[4]>10)return false;
+    for(POSITION pos=particles.GetHeadPosition();pos;){
+        auto &info=particles.GetNext(pos);
+        if(info.nScriptID!=int(a[0]))continue;
+        CEffectParticle *source=info.pParticle;
+        if(!source||source->IsInvalid()||source->typeID!=PTID_SMOKE)return false;
+        const auto cp=source->GetCP();const float dx=a[1]-cp.x,dy=a[2]-cp.y,length=std::hypot(dx,dy);
+        if(!std::isfinite(length)||length<.001f)return false;
+        source->SetScriptFlow(CPlot3D(dx/length,dy/length,0),a[3],a[4]);return true;
+    }
+    return false;
+}
+
+bool CScript::SetParticleSourcePower(const SSCCmd &cmd)
+{
+    const auto &a=cmd.params;
+    for(int i=0;i<3;++i)if(!std::isfinite(a[i]))return false;
+    if(a[0]<0||a[0]>16777215||a[0]!=std::floor(a[0])||a[1]<0||a[1]>100||a[2]<0||a[2]>100)return false;
+    for(POSITION pos=particles.GetHeadPosition();pos;){
+        auto &info=particles.GetNext(pos);
+        if(info.nScriptID!=int(a[0]))continue;
+        CEffectParticle *source=info.pParticle;if(!source||source->IsInvalid())return false;
+        if(source->fpPower!=a[1]||source->fpPower2!=a[2])source->SetPower(a[1],a[2]);
+        return true;
+    }
+    return false;
 }
 
 void CScript::SetParticleSourceSize(SSCCmd *pCmd)

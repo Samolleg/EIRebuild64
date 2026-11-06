@@ -689,6 +689,8 @@ public:
     void DeleteParticleSource(SSCCmd *pCmd);
     void AttachParticleSource(int nScriptID, int nObjID);
     void SetParticleSourceSize(SSCCmd *pCmd);
+    bool SetParticleFlow(const SSCCmd &cmd);
+    bool SetParticleSourcePower(const SSCCmd &cmd);
     void CreateSFX(SSCCmd *pCmd);
     void CreateSFXSource(SSCCmd *pCmd);
     void DeleteSFXSource(SSCCmd *pCmd);

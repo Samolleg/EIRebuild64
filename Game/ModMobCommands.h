@@ -31,6 +31,8 @@ namespace ModMob {
 struct Entry {int id;const char*name;const char*format;bool ready;};
 inline const Entry registry[]={
  {276,"ChaseTrapDamage","offf",true},
+ {290,"SetParticleFlow","fffff",true},
+ {287,"SetParticleSourcePower","fff",true},
  {291,"SetInvincible","osf",true},
  {293,"SetMovementModifier","off",true},
  {286,"SetWindAttackMode","of",true},
@@ -357,7 +359,7 @@ inline bool BranchForward(int&index,int count,bool skip,float amount){
 }
 #include "ModVoiceCommands.h"
 namespace ModMob {
-inline bool Void(SSCCmd&cmd,int*index=nullptr,int count=0,int*sleep=nullptr,BOOL*next=nullptr,bool canDefer=true){
+inline bool Void(SSCCmd&cmd,int*index=nullptr,int count=0,int*sleep=nullptr,BOOL*next=nullptr,bool canDefer=true,CScript* owner=nullptr){
  auto*mod=ModRuntime::Current();if(!mod)return false;auto*e=Find(cmd.command);if(!e)return false;
  if(cmd.command==387||cmd.command==390){Validate(*e,cmd);return Voice(cmd,sleep,next);}
  if(cmd.command==394||cmd.command==395){
@@ -379,6 +381,11 @@ inline bool Void(SSCCmd&cmd,int*index=nullptr,int count=0,int*sleep=nullptr,BOOL
   vars->SetVar(key.c_str(),float(entry->dwEntryIndex+1));
   if(server&&!serverUnit->IsInvalid())server->QueueAnimationLoop(entry->dwEntryIndex);
   return true;
+ }
+ if(cmd.command==290||cmd.command==287){
+  Validate(*e,cmd);if(!owner)return Reject(e->name,"Missing source script owner");
+  const bool ok=cmd.command==290?owner->SetParticleFlow(cmd):owner->SetParticleSourcePower(cmd);
+  return ok?true:Reject(e->name,"Invalid particle source or parameters");
  }
  if(e->ready&&(cmd.command==391||cmd.command==392)){
   if(!ValidateDispatch(*e,cmd))return true;bool skip=cmd.command==392||cmd.params[0]==0;float amount=cmd.params[cmd.command==391?1:0];
