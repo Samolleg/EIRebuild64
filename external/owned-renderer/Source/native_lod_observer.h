@@ -39,6 +39,7 @@ struct NativeLodSnapshot {
     std::uint64_t camera_frame = 0;
     std::uint32_t record_capacity = 0, observed_rows = 0;
     bool truncated = false, unavailable = false;
+    const char* unavailable_reason = nullptr; // static reason, owned by the producer
     std::vector<NativeLodRow> rows;
 };
 // A try-lock copies only a shared pointer. Neither producer nor consumer waits.
