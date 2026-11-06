@@ -19,7 +19,7 @@ struct Fragments {
     bool valid=false;
     Fragments() {
         const auto module=GetModuleHandleW(nullptr);
-        const auto resource=FindResourceW(module,L"EID3D11_ARENA_FRAGMENTS_V1",RT_RCDATA);
+        const auto resource=FindResourceW(module,L"EID3D11_ARENA_FRAGMENTS_V1",MAKEINTRESOURCEW(10));
         if(!resource)return;
         const auto handle=LoadResource(module,resource);
         const auto* bytes=static_cast<const unsigned char*>(LockResource(handle));
