@@ -769,6 +769,10 @@ HRESULT Renderer::flush_native(unsigned layout_slot){
    if(d3d12_)d3d12_->count("interface records drawn in a world flush (invariant violated)");
   }
  }
+ // Record rejected passes too, before the shadow/empty-queue short paths.
+ // A cached static bake is real native work even though its queue is empty.
+ // No capture allocation or GPU work happens here, and idle requests return first.
+ if(!native_pending_draws_.empty()||native_static_reuse_)(void)native_lod_colour_pass();
  if(d3d12_)return flush_native_d3d12(layout_slot); // the native records on the D3D12 executor (interface batches)
 
  const stall_watch::Bracket stall_bracket("flush_native");

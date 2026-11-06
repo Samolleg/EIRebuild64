@@ -3970,7 +3970,7 @@ void Renderer::release_native_lod_observer() noexcept {
  for(auto& slot:native_lod_readbacks_){slot.buffer.Reset();slot.snapshot.reset();}
  native_lod_capture_.reset();native_lod_frame_=UINT64_MAX;
  native_lod_copied_request_=native_lod_published_request_=0;native_lod_failed_=false;native_lod_request_=0;
- native_lod_wait_request_=native_lod_wait_frame_=0;native_lod_wait_reason_="no_main_camera_colour_pass";
+ native_lod_wait_request_=native_lod_wait_frame_=0;native_lod_wait_reason_="no_native_flush";
  publish_lod_snapshot(nullptr);
 }
 
@@ -4017,23 +4017,38 @@ void Renderer::begin_native_lod_frame() noexcept try {
  native_lod_capture_->record_capacity=UINT(native_lod_row_indices_.size());
 } catch(...) {native_lod_failed_=true;if(native_lod_capture_){native_lod_capture_->unavailable=true;native_lod_capture_->unavailable_reason="capture_setup_failed";}}
 
-bool Renderer::begin_native_lod_capture(const NativeSubmissionLayout& layout) noexcept try {
+bool Renderer::native_lod_colour_pass() noexcept {
  const auto request=lod_requested.load(std::memory_order_acquire);
  if(!request||request<=lod_consumed.load(std::memory_order_acquire)||
     (request==native_lod_request_&&(!native_lod_capture_||native_lod_frame_!=native_frame_index_)))return false;
  if(lod_requested_epoch.load(std::memory_order_relaxed)!=world_state_epoch_)return false;
  if(native_lod_wait_request_!=request){
   native_lod_wait_request_=request;native_lod_wait_frame_=native_frame_index_;
-  native_lod_wait_reason_="no_main_camera_colour_pass";
+  native_lod_wait_reason_="no_native_flush";
  }
- if(scene_composited_||hit_test_active_||native_shadow_collecting_||native_point_shadow_active_||native_rain_active_||
-    rtv_.Get()!=scene_composite_.target()||dsv_.Get()!=world_dsv_.Get()||!native_world_clip_valid_)return false;
+ const auto reject=[&](const char* reason){native_lod_wait_reason_=reason;return false;};
+ if(scene_composited_)return reject("scene_composited");
+ if(hit_test_active_)return reject("hit_test");
+ // Rain and point shadows also set shadow_collecting: name the specific pass.
+ if(native_rain_active_)return reject("rain");
+ if(native_point_shadow_active_)return reject("point_shadow");
+ if(native_shadow_collecting_)return reject("shadow");
+ if(rtv_.Get()!=scene_composite_.target()||dsv_.Get()!=world_dsv_.Get())return reject("target_mismatch");
+ if(!native_world_clip_valid_)return reject("clip_invalid");
  // The host publishes the player's world camera before drawing the scene.
  // Matching both camera and targets admits its split colour flushes (including
  // neighbours), never a preview, picking or off-screen camera in the same frame.
  const auto camera=bridge_scene_world_to_clip_snapshot();
- if(!camera.valid||!camera.scene_frame_serial){native_lod_wait_reason_="main_camera_unavailable";return false;}
- if(camera.world_to_clip!=native_world_clip_){native_lod_wait_reason_="main_camera_mismatch";return false;}
+ if(!camera.valid||!camera.scene_frame_serial)return reject("main_camera_unavailable");
+ if(camera.world_to_clip!=native_world_clip_)return reject("main_camera_mismatch");
+ // A real pass reached flush_native but may still fail before its build dispatch.
+ native_lod_wait_reason_="native_flush_incomplete";
+ return true;
+}
+
+bool Renderer::begin_native_lod_capture(const NativeSubmissionLayout& layout) noexcept try {
+ if(!native_lod_colour_pass())return false;
+ const auto camera=bridge_scene_world_to_clip_snapshot();
  // Consume a request only in a real main-camera colour pass. Loading/UI-only
  // frames must not publish a cleared UAV as a successful empty world snapshot.
  begin_native_lod_frame();
@@ -4066,7 +4081,7 @@ void Renderer::finish_native_lod_frame() noexcept try {
  if(request<=native_lod_published_request_)return;
  if(native_lod_wait_request_!=request){
   native_lod_wait_request_=request;native_lod_wait_frame_=native_frame_index_;
-  native_lod_wait_reason_="no_main_camera_colour_pass";
+  native_lod_wait_reason_="no_native_flush";
  }
  const auto unavailable=[&](const char* reason){
   auto capture=std::make_shared<NativeLodSnapshot>();
