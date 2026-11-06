@@ -37,6 +37,7 @@ struct NativeLodRow {
 struct NativeLodSnapshot {
     std::uint64_t frame = 0, world_epoch = 0, request = 0;
     std::uint64_t camera_frame = 0;
+    double main_camera_max_delta = 0; // largest absolute matrix element difference on rejection
     std::uint32_t record_capacity = 0, observed_rows = 0;
     bool truncated = false, unavailable = false;
     const char* unavailable_reason = nullptr; // static reason, owned by the producer

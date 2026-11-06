@@ -784,6 +784,8 @@ bool Lod(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
             job.response["status"]="unavailable";
             job.response["reason"]=job.lodSnapshot->unavailable_reason?
                 job.lodSnapshot->unavailable_reason:"gpu_snapshot_unavailable";
+            if(job.lodSnapshot->main_camera_max_delta>0)
+                job.response["main_camera_max_delta"]=job.lodSnapshot->main_camera_max_delta;
             if(!name.empty())job.response["name_match"]="unavailable";
             return true;
         }

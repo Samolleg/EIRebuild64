@@ -3971,6 +3971,7 @@ void Renderer::release_native_lod_observer() noexcept {
  native_lod_capture_.reset();native_lod_frame_=UINT64_MAX;
  native_lod_copied_request_=native_lod_published_request_=0;native_lod_failed_=false;native_lod_request_=0;
  native_lod_wait_request_=native_lod_wait_frame_=0;native_lod_wait_reason_="no_native_flush";
+ native_lod_wait_camera_max_delta_=0;
  publish_lod_snapshot(nullptr);
 }
 
@@ -4024,10 +4025,14 @@ bool Renderer::native_lod_colour_pass() noexcept {
  if(lod_requested_epoch.load(std::memory_order_relaxed)!=world_state_epoch_)return false;
  if(native_lod_wait_request_!=request){
   native_lod_wait_request_=request;native_lod_wait_frame_=native_frame_index_;
-  native_lod_wait_reason_="no_native_flush";
+  native_lod_wait_reason_="no_native_flush";native_lod_wait_camera_max_delta_=0;
  }
- const auto reject=[&](const char* reason){native_lod_wait_reason_=reason;return false;};
- if(scene_composited_)return reject("scene_composited");
+ // Interface/preview flushes after composition cannot explain a rejected
+ // world pass. Preserve its last reason across the remaining flushes/frames.
+ if(scene_composited_)return false;
+ const auto reject=[&](const char* reason){
+  native_lod_wait_reason_=reason;native_lod_wait_camera_max_delta_=0;return false;
+ };
  if(hit_test_active_)return reject("hit_test");
  // Rain and point shadows also set shadow_collecting: name the specific pass.
  if(native_rain_active_)return reject("rain");
@@ -4040,9 +4045,15 @@ bool Renderer::native_lod_colour_pass() noexcept {
  // neighbours), never a preview, picking or off-screen camera in the same frame.
  const auto camera=bridge_scene_world_to_clip_snapshot();
  if(!camera.valid||!camera.scene_frame_serial)return reject("main_camera_unavailable");
- if(camera.world_to_clip!=native_world_clip_)return reject("main_camera_mismatch");
+ if(camera.world_to_clip!=native_world_clip_){
+  reject("main_camera_mismatch");
+  for(size_t i=0;i<native_world_clip_.size();++i)
+   native_lod_wait_camera_max_delta_=(std::max)(native_lod_wait_camera_max_delta_,
+    std::abs(double(camera.world_to_clip[i])-double(native_world_clip_[i])));
+  return false;
+ }
  // A real pass reached flush_native but may still fail before its build dispatch.
- native_lod_wait_reason_="native_flush_incomplete";
+ native_lod_wait_reason_="native_flush_incomplete";native_lod_wait_camera_max_delta_=0;
  return true;
 }
 
@@ -4081,12 +4092,13 @@ void Renderer::finish_native_lod_frame() noexcept try {
  if(request<=native_lod_published_request_)return;
  if(native_lod_wait_request_!=request){
   native_lod_wait_request_=request;native_lod_wait_frame_=native_frame_index_;
-  native_lod_wait_reason_="no_native_flush";
+  native_lod_wait_reason_="no_native_flush";native_lod_wait_camera_max_delta_=0;
  }
- const auto unavailable=[&](const char* reason){
+ const auto unavailable=[&](const char* reason,double camera_max_delta=0.){
   auto capture=std::make_shared<NativeLodSnapshot>();
   capture->frame=native_frame_index_;capture->world_epoch=world_state_epoch_;capture->request=request;
   capture->unavailable=true;capture->unavailable_reason=reason;
+  capture->main_camera_max_delta=camera_max_delta;
   native_lod_capture_=std::move(capture);native_lod_request_=request;
  };
  if(!context_)unavailable("render_context_unavailable");
@@ -4124,7 +4136,7 @@ void Renderer::finish_native_lod_frame() noexcept try {
  // A request can arrive after the last world flush. Allow the following full
  // frame before rejecting it, and never relax the main-camera admission gate.
  if(request!=native_lod_request_&&native_frame_index_>native_lod_wait_frame_)
-  unavailable(native_lod_wait_reason_);
+  unavailable(native_lod_wait_reason_,native_lod_wait_camera_max_delta_);
  if(!native_lod_capture_)return;
  if(native_lod_capture_->unavailable){
   if(publish_lod_snapshot(native_lod_capture_)){
