@@ -4151,6 +4151,10 @@ private:
     std::uint64_t native_lod_copied_request_ = 0, native_lod_published_request_ = 0;
     bool native_lod_failed_ = false;
     std::uint64_t native_lod_request_ = 0;
+    std::uint64_t native_lod_wait_request_ = 0, native_lod_wait_frame_ = 0;
+    const char* native_lod_wait_reason_ = "no_native_flush";
+    double native_lod_wait_camera_max_delta_ = 0;
+    bool native_lod_colour_pass() noexcept;
     void begin_native_lod_frame() noexcept;
     bool begin_native_lod_capture(const NativeSubmissionLayout& layout) noexcept;
     void finish_native_lod_frame() noexcept;

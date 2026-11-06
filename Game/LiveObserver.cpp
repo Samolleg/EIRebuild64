@@ -72,6 +72,7 @@ struct Job {
     int navProfile=0;
     std::shared_ptr<const owned::NativeLodSnapshot> lodSnapshot;
     std::uint64_t lodRequest=0;
+    Clock::time_point lodExpires{};
     std::vector<unsigned char> image;
     // The pipe worker allocates a staging texture using only this copied
     // descriptor/device; it never inspects a game object or context.
@@ -168,12 +169,18 @@ void LogCommand(const std::string& method,const json& params,const json& respons
             method.c_str(),GameJournal::Quote(arguments.c_str()).c_str(),GameJournal::Quote(result.c_str()).c_str());
     }catch(...){ChannelError("command_log",0);}
 }
+void ReleaseLodRequest(Job& job) noexcept {
+    if(!job.lodRequest)return;
+    owned::native_lod_acknowledge(job.lodRequest);job.lodRequest=0;
+}
 bool Finish(Job& job) {
     std::unique_lock<std::mutex> lock(job.mutex,std::try_to_lock);
     if(!lock.owns_lock())return false;
+    ReleaseLodRequest(job);
     job.done=true;lock.unlock();job.ready.notify_one();return true;
 }
 void CleanupCapture(Job& job) noexcept {
+    ReleaseLodRequest(job);
     if(job.isMapped&&job.context&&job.staging)job.context->Unmap(job.staging.Get(),0);
     job.isMapped=false;job.staging.Reset();job.context.Reset();
     if(auto* texture=job.prepared.exchange(nullptr))texture->Release();
@@ -743,6 +750,9 @@ bool Lod(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
         job.world=&world;job.worldId=world.GetRTID();job.phase=1;
         const auto epoch=owned::bridge_current_world_epoch();
         job.lodRequest=owned::native_lod_request(epoch);
+        // Leave time for the scene thread/readback, but finish before the pipe's
+        // 4.5 s deadline even when no eligible world pass or GPU reply arrives.
+        job.lodExpires=Clock::now()+std::chrono::milliseconds(1500);
         job.response={{"ok",true},{"status","waiting"},{"snapshot_frame",nullptr},{"world_epoch",epoch},
             {"objects",json::array()},{"request_id",job.lodRequest},{"limit",limit},{"truncated",false},{"radius",radius},
             {"radius_applied",name.empty()},{"camera_anchor",Point(theCamera.GetAnchorPoint())},
@@ -763,11 +773,19 @@ bool Lod(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
         job.lodSnapshot=owned::native_lod_snapshot();
         if(!job.lodSnapshot||job.lodSnapshot->request!=job.lodRequest||
            job.lodSnapshot->world_epoch!=job.response["world_epoch"].get<std::uint64_t>()){
-            job.lodSnapshot.reset();return ++job.offset>=3;
+            job.lodSnapshot.reset();
+            if(Clock::now()<job.lodExpires)return false;
+            job.response["status"]="unavailable";
+            job.response["reason"]="lod_snapshot_timeout";
+            if(!name.empty())job.response["name_match"]="unavailable";
+            return true;
         }
-        owned::native_lod_acknowledge(job.lodRequest);
         if(job.lodSnapshot->unavailable){
             job.response["status"]="unavailable";
+            job.response["reason"]=job.lodSnapshot->unavailable_reason?
+                job.lodSnapshot->unavailable_reason:"gpu_snapshot_unavailable";
+            if(job.lodSnapshot->main_camera_max_delta>0)
+                job.response["main_camera_max_delta"]=job.lodSnapshot->main_camera_max_delta;
             if(!name.empty())job.response["name_match"]="unavailable";
             return true;
         }
