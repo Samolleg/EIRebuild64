@@ -9,6 +9,7 @@
 #include "ModAnimationLoop.h"
 #include "ModAttackEvents.h"
 #include "ModInvincible.h"
+#include "ModChase.h"
 #include "MapObjectManager.h"
 #include "ModRegisteredLoot.h"
 #include "ZoneIce.h"
@@ -28,6 +29,7 @@ namespace ModMob {
 // Release registry from57b8e0c, original IDs checked against EXE token table78BCA0.
 struct Entry {int id;const char*name;const char*format;bool ready;};
 inline const Entry registry[]={
+ {276,"ChaseTrapDamage","offf",true},
  {291,"SetInvincible","osf",true},
  {292,"ApplyDirectDamage","of",true},
  {275,"GetCloseAttackEvent","Foof",true},
@@ -301,6 +303,7 @@ inline bool Group(SSCCmd&cmd,CScriptObjectGroup&result){
 inline bool Action(SSCCmd&cmd){
  auto*unit=UnitArg(cmd);auto*server=ServerArg(cmd);float a=cmd.params.GetSize()?cmd.params[0]:0;
  switch(cmd.command){
+ case 276:ModChase::Trap(theWorldServer,unit,a,cmd.params[1],cmd.params[2]);break;
  case 291:if(!ModInvincible::Change(unit,cmd.szParams[0],a))return Reject("SetInvincible","Invalid unit, channel or flag");break;
  case 292:if(server)server->ApplyDirectDamage(a);break;
  case 298:{

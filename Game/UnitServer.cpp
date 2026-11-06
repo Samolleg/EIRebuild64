@@ -15,6 +15,7 @@
 #include "ModAttackTiming.h"
 #include "ModAttackEvents.h"
 #include "ModInvincible.h"
+#include "ModChase.h"
 #include "ModPreparedAttack.h"
 #include "ModItemSpellPolicy.h"
 #include "ModStealingPolicy.h"
@@ -5925,7 +5926,9 @@ BOOL CUnitServer::ProcessAttackPortionOwned(SRPGAttackPortion *lpAttackPortion,C
         ModAttackEvents::Complete(*pWS,deliveredAttack,GetMapObjectServer()->GetCurrentHP());
         return result;
     };
-    ModInvincible::ScopedChannels protectedChannels(*lpAttackPortion, ModInvincible::Mask(lpUnit) & 0x7f);
+    CUnit* policyAuthor = ModAttackEvents::AuthorScope::Resolve(*lpAttackPortion, lpUnit, pAttacker);
+    const bool chaseBlocked = ModChase::Block(*pWS, lpUnit, policyAuthor, *lpAttackPortion);
+    ModInvincible::ScopedChannels protectedChannels(*lpAttackPortion, ModInvincible::Mask(lpUnit) & 0x7f, chaseBlocked);
     int journalCritical = -1;
     BOOL bWasCorpse = GetUnit()->IsDead();
     bool bHadOwner = GetUnit()->GetOwner() != 0;

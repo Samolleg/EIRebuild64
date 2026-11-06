@@ -67,14 +67,21 @@ inline bool Change(CUnit* unit, const char* name, float enabled) {
 class ScopedChannels {
     SRPGAttackPortion& portion;
     float weights[RPG_NUM_ATTACK_TYPES];
+    float damage;
+    bool blocked;
 public:
-    ScopedChannels(SRPGAttackPortion& attack, unsigned mask) : portion(attack) {
+    ScopedChannels(SRPGAttackPortion& attack, unsigned mask, bool reject = false)
+        : portion(attack), damage(attack.fpDamage), blocked(reject) {
         for (unsigned i = 0; i < RPG_NUM_ATTACK_TYPES; ++i) {
             weights[i] = portion.fpAttacks[i];
-            if (mask & (1u << i)) portion.fpAttacks[i] = 0;
+            if (blocked || (mask & (1u << i))) portion.fpAttacks[i] = 0;
         }
+        if (blocked) portion.fpDamage = 0;
     }
-    ~ScopedChannels() { for (unsigned i = 0; i < RPG_NUM_ATTACK_TYPES; ++i) portion.fpAttacks[i] = weights[i]; }
+    ~ScopedChannels() {
+        for (unsigned i = 0; i < RPG_NUM_ATTACK_TYPES; ++i) portion.fpAttacks[i] = weights[i];
+        if (blocked) portion.fpDamage = damage;
+    }
     ScopedChannels(const ScopedChannels&) = delete;
     ScopedChannels& operator=(const ScopedChannels&) = delete;
 };
