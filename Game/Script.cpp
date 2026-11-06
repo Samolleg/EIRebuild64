@@ -2602,7 +2602,6 @@ void CScript::RunThread(SScriptThread *pThread, SOneScript *pOneScript)
 
 bool CScript::RunFragment(const CString &source, float &result, CString &error)
 {
-    ModMob::ServiceScope service;
     CScript fragment;
     CString text = "GlobalVars(result:float)\nWorldScript(\n" + source + "\n)\n";
     if (!fragment.LoadText(text, FALSE))

@@ -296,7 +296,7 @@ void NavigationWorld::TransformObject(int id,Navigation::Point position,const st
     if(!Finite(position)||!std::all_of(qv.begin(),qv.end(),[](float v){return std::isfinite(v);})||position.x<0||position.y<0||
        !owner->aiMap.TileInBounds(Float2AITile(position.x),Float2AITile(position.y)))
         throw std::runtime_error("Nav64: invalid scenery transform");
-    auto& map=owner->aiMap;const auto q=object->GetOrientation();const auto x=q.RotateX();
+    auto& map=owner->aiMap;const auto q=object->GetOrientation();
     const CQuaternion rotation(qv[0],qv[1],qv[2],qv[3]);
     const float norm=qv[0]*qv[0]+qv[1]*qv[1]+qv[2]*qv[2]+qv[3]*qv[3];
     if(std::fabs(norm-1.f)>.001f)throw std::runtime_error("Nav64: non-unit scenery rotation");

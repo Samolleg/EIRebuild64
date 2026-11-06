@@ -274,11 +274,6 @@ static SLexemeInfo* ModLexemes(){
   }
   result.push_back({nullptr,SC_UNKNOWN,nullptr,nullptr});return result;
  }();
- if(ModMob::ServiceDepth()) {
-  static std::vector<SLexemeInfo> services=[](){auto result=entries;result.pop_back();const auto& e=ModMob::serviceGolem;
-   result.push_back({e.name,static_cast<ESCCmd>(e.id),nullptr,e.format});result.push_back({nullptr,SC_UNKNOWN,nullptr,nullptr});return result;}();
-  return services.data();
- }
  return entries.data();
 }
 #define validLexemes ModLexemes()

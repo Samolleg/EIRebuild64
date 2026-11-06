@@ -22,4 +22,5 @@ struct GolemResource {
   }valid=left==0;
  }
 };
+const GolemResource& RubyResources(){static const GolemResource value(L"EID3D11_RUBY_V1",26);return value;}
 const GolemResource& GolemResources(){static const GolemResource value(L"EID3D11_GOLEM_V1",115);return value;}

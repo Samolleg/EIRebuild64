@@ -52,6 +52,7 @@ inline const Entry registry[]={
  {283,"GetArenaMotion","Fo",true},
  {282,"ApplyArenaWaveDamage","off",true},
  {280,"GetArenaTick","F",true},
+ {281,"FinalGolemAction","oof",true},
  {288,"DirectionAngle","Fff",true},
  {297,"ApplyTrapParalysis","of",true},
  {298,"SetWeather","sf",true},
@@ -155,11 +156,7 @@ inline const Entry registry[]={
  {396,"ZoneIceSync","",true},
  {397,"ZoneIceFreeze","",true},
 };
-// Scoped lexical capability of synchronous script_run only, never a config key.
-inline unsigned& ServiceDepth(){static unsigned depth=0;return depth;}
-struct ServiceScope {ServiceScope(){++ServiceDepth();}~ServiceScope(){--ServiceDepth();}ServiceScope(const ServiceScope&)=delete;ServiceScope& operator=(const ServiceScope&)=delete;};
-inline const Entry serviceGolem={281,"ServiceFinalGolemAction","oof",true};
-inline const Entry* Find(int id){if(id==serviceGolem.id&&ServiceDepth())return &serviceGolem;for(const auto&e:registry)if(e.id==id)return &e;return nullptr;}
+inline const Entry* Find(int id){for(const auto& e:registry)if(e.id==id)return &e;return nullptr;}
 // Native added command 372 owns the direct custom consumer, not recipient virtual dispatch.
 template<class Server> inline void InflictDamageExConsumer(Server* server,SRPGAttackPortion& portion){
  server->ProcessCustomAttackPortion(&portion,nullptr,nullptr);
@@ -323,7 +320,7 @@ inline bool Group(SSCCmd&cmd,CScriptObjectGroup&result){
 inline bool Action(SSCCmd&cmd){
  auto*unit=UnitArg(cmd);auto*server=ServerArg(cmd);float a=cmd.params.GetSize()?cmd.params[0]:0;
  switch(cmd.command){
- case 281:if(!ServiceDepth())throw std::runtime_error("golem service requires script_run");ModFinalGolem::Action(unit,UnitArg(cmd,1),CheckedInt(a));break;
+ case 281:if(!IntegralArgument(a,0,29))return Reject("FinalGolemAction","operation must be an integer 0..28");ModFinalGolem::Action(unit,UnitArg(cmd,1),int(a));break;
  case 282:ModArena::Damage(unit,a,cmd.params[1]);break;
  case 276:ModChase::Trap(theWorldServer,unit,a,cmd.params[1],cmd.params[2]);break;
  case 291:if(!ModInvincible::Change(unit,cmd.szParams[0],a))return Reject("SetInvincible","Invalid unit, channel or flag");break;

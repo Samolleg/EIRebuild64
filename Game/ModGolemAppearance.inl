@@ -31,7 +31,12 @@ void CaptureVisualState(bool death,int from,int to) {
 void Died(CUnit& unit) {
  if(unit.GetID()==990400&&ModEncounter::Arena(theWorldServer)&&Read("DJW.Stage")>0)CaptureVisualState(true,5,5);
 }
+bool IsRubyActor(const CObject3D& object){return ModEncounter::Hard(theWorldServer)&&Active()&&(object.GetID()==Read("HG.GuardID")||object.GetID()==Read("HG.ObeliskID"));}
 bool PrepareAppearance(CObject3D& object) {
+ if(IsRubyActor(object)){auto* unit=dynamic_cast<CUnit*>(&object);auto* specific=dynamic_cast<CObject3DClientSpecific*>(object.GetObjectSpecific());if(!unit||!specific)return false;
+  struct State {std::uint64_t epoch=0,identity=0;bool dead=false;};static State actors[2];auto& cached=actors[object.GetID()==Read("HG.ObeliskID")?1:0];const bool dead=unit->IsDead()!=FALSE;
+  if(cached.epoch!=OwnedRender::E1Scene().Epoch()||cached.identity!=object.GetRTID()||cached.dead!=dead){specific->InvalidateOwnedAppearance();cached={OwnedRender::E1Scene().Epoch(),object.GetRTID(),dead};}return true;
+ }
  if(object.GetID()!=990400||!ModEncounter::Arena(theWorldServer)||Read("DJW.Stage")<=0)return true;
  ArmVisual();auto* boss=dynamic_cast<CUnit*>(&object);if(!boss)return false;
  auto* specific=dynamic_cast<CObject3DClientSpecific*>(object.GetObjectSpecific());if(!specific)return false;

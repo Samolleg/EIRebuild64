@@ -3,6 +3,7 @@
 #include <functional>
 #include <stdexcept>
 #include <cstring>
+#include <cstdlib>
 namespace owned {namespace golem {
 constexpr float CrystalTipZ=11.3f,ShieldRadius=3.4f,ShieldFoot=.045f;
 #include "embedded_arena_geometry.inl"
@@ -12,7 +13,7 @@ Vec GolemRotate(GolemQuaternion q,Vec p){Vec v={q.x,q.y,q.z};return p+Cross(v,Cr
 float Clamp(float v,float lo,float hi){return (std::max)(lo,(std::min)(hi,v));}
 HRESULT Submit(Renderer& renderer,Mesh& mesh,const EmbeddedGolemInput& input,
     const FixedState& frame,ID3D11ShaderResourceView* texture,std::uint32_t color,
-    EmbeddedGolemCache& cache,unsigned slot,bool lit,bool opaque=false,bool additive=false) {
+    EmbeddedGolemCache& cache,unsigned slot,bool lit,bool opaque=false,bool additive=false,const std::vector<Vec>* authored=nullptr) {
     if(mesh.indices.empty())return S_OK;
     const auto count=mesh.uv.size();
     if(count>65535)return E_INVALIDARG;
@@ -23,7 +24,8 @@ HRESULT Submit(Renderer& renderer,Mesh& mesh,const EmbeddedGolemInput& input,
         return Vec{group.x[lane],group.y[lane],group.z[lane]};
     };
     for(unsigned i=0;i<count;++i)components[i]={std::uint16_t(i),std::uint16_t(i),std::uint16_t(i)};
-    if(lit)for(unsigned i=0;i<mesh.indices.size();i+=3) {
+    if(authored){if(authored->size()!=count)return E_INVALIDARG;for(unsigned i=0;i<count;++i){const auto n=(*authored)[i];auto& g=normals[i/4];g.x[i%4]=n.x;g.y[i%4]=n.y;g.z[i%4]=n.z;g.w[i%4]=1;}}
+    else if(lit)for(unsigned i=0;i<mesh.indices.size();i+=3) {
         const auto a=mesh.indices[i],b=mesh.indices[i+1],c=mesh.indices[i+2];
         const auto normal=Unit(Cross(point(b)-point(a),point(c)-point(a)));
         for(const auto v:{a,b,c}) {
@@ -72,8 +74,10 @@ HRESULT Submit(Renderer& renderer,Mesh& mesh,const EmbeddedGolemInput& input,
 }
 
 struct Producer {
- const EmbeddedGolemInput& input;const GolemResource& resource;const std::array<ID3D11ShaderResourceView*,3>& textures;
+ const EmbeddedGolemInput& input;const GolemResource& resource;EmbeddedGolemCache& cache;const std::array<ID3D11ShaderResourceView*,6>& textures;
  std::function<void(Mesh&,ID3D11ShaderResourceView*,unsigned,bool,bool)> draw;
+ std::function<void(Mesh&,const std::vector<Vec>&,ID3D11ShaderResourceView*,unsigned,bool)> draw_authored;
+ unsigned Tint(unsigned c) const {if(!input.hard)return c;return (c&0xff000000u)|((c&255u)<<16)|((((c>>8)&255u)/4)<<8)|(((c>>16)&255u)/3); }
  Vec Base() const {return {input.base[0],input.base[1],input.base[2]};}
  const EmbeddedGolemNode* Node(int index) const {return input.nodes[index].valid?&input.nodes[index]:nullptr;}
  Vec NodePoint(const EmbeddedGolemNode* node,Vec point) const {
@@ -84,14 +88,17 @@ struct Producer {
  Vec GolemGroundPosition(Vec relative) const {return {relative.x,relative.y,GolemGround(relative.x,relative.y)+relative.z};}
 #include "embedded_golem_geometry.inl"
 #include "embedded_golem_damage.inl"
+#include "embedded_ruby.inl"
 };
 } // namespace golem
-HRESULT Renderer::draw_embedded_golem(const EmbeddedGolemInput& input,const FixedState& frame,const std::array<ID3D11ShaderResourceView*,3>& textures) try {
+HRESULT Renderer::draw_embedded_golem(const EmbeddedGolemInput& input,const FixedState& frame,const std::array<ID3D11ShaderResourceView*,6>& textures) try {
  SCENE_ENTRY("golem_visual");using namespace golem;
- if(!input.world_epoch||input.boss_id!=990400||(!input.active&&!input.walls&&input.death_born<=0)||!input.ground)return E_INVALIDARG;
+ if(!input.world_epoch||input.boss_id!=990400||(!input.active&&!input.walls&&input.death_born<=0&&input.impact_born<=0)||!input.ground)return E_INVALIDARG;
+ if(!input.hard&&(input.active||input.walls)&&!textures[2])return HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND);
  const auto revision=native_static_content_revision_;
  struct Restore {std::uint64_t& value;std::uint64_t saved;~Restore(){value=saved;}} restore{native_static_content_revision_,revision};
- HRESULT failure=S_OK;++embedded_golem_cache_.serial;unsigned slot=0;
+ HRESULT failure=S_OK;const bool settled=input.dead&&input.death_born>0&&input.tick-input.death_born>=108&&!input.active&&!input.walls;
+ if(!settled||embedded_golem_cache_.settled_born!=input.death_born){++embedded_golem_cache_.serial;embedded_golem_cache_.settled_born=settled?input.death_born:-1;}unsigned slot=0;
  auto draw=[&](Mesh& mesh,ID3D11ShaderResourceView* texture,unsigned color,bool lit,bool additive) {
   if(mesh.indices.empty())return;if(slot>=embedded_golem_cache_.slots.size()){failure=E_INVALIDARG;return;}
   // Closed opaque shards/blades/physical arrows keep the source depth writes;
@@ -99,7 +106,8 @@ HRESULT Renderer::draw_embedded_golem(const EmbeddedGolemInput& input,const Fixe
   const bool opaque=!additive&&(color>>24)==255;
   auto hr=Submit(*this,mesh,input,frame,texture,color,embedded_golem_cache_,slot++,lit,opaque,additive);if(FAILED(hr)&&SUCCEEDED(failure))failure=hr;
  };
- Producer p{input,GolemResources(),textures,draw};const float time=input.tick/18.f;
+ auto authored=[&](Mesh& mesh,const std::vector<Vec>& normals,ID3D11ShaderResourceView* texture,unsigned color,bool lit){if(mesh.indices.empty())return;if(!texture||slot>=embedded_golem_cache_.slots.size()){failure=HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND);return;}auto hr=Submit(*this,mesh,input,frame,texture,color,embedded_golem_cache_,slot++,lit,(color>>24)==255,false,&normals);if(FAILED(hr)&&SUCCEEDED(failure))failure=hr;};
+ Producer p{input,GolemResources(),embedded_golem_cache_,textures,draw,authored};const float time=input.tick/18.f;
  const float z=p.GolemGround(input.target_x,input.target_y);Vec corners[]={{28,26,0},{100,26,0},{100,62,0},{28,62,0}};
  struct Side{int index;float distance;};std::array<Side,4> sides{};Vec camera{input.camera[0],input.camera[1],input.camera[2]};
  for(int i=0;i<4;++i){auto d=(corners[i]+corners[(i+1)%4])*.5f-camera;sides[i]={i,Dot(d,d)};}
@@ -110,8 +118,9 @@ HRESULT Renderer::draw_embedded_golem(const EmbeddedGolemInput& input,const Fixe
  }
  if(input.active&&input.phase==2){auto beacon=p.FinalBeacon({input.target_x,input.target_y,z},time);draw(beacon,nullptr,0xedff942b,false,true);}
  if(input.active||input.death_born>0){if(!GolemResources().valid||!textures[0]||!textures[1])return HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND);p.Fractures();if(input.active&&!input.dead)p.Stage(time);
-  p.ReflectAuraGeometry(0,float(input.tick),camera,[&](Mesh& m,unsigned color){draw(m,nullptr,color,false,true);});
+  p.ReflectAuraGeometry(0,float(input.tick),camera,[&](Mesh& m,unsigned color){draw(m,nullptr,p.Tint(color),false,true);});
   p.ReflectGeometry(float(input.tick),[&](Mesh& m,unsigned color,bool additive){draw(m,nullptr,color,false,additive);});}
+ if(input.hard){if(input.active)p.Ruby();p.CollapseDust();}
  return failure;
 }catch(const std::bad_alloc&){return E_OUTOFMEMORY;}catch(const std::exception&){return E_INVALIDARG;}
 }

@@ -55,6 +55,7 @@ private:
     DWORD dwNextPlayTime;
 
 public:
+    EMusicMode GetMode() const { return mode; }
     DWORD GetScriptNextPlayTime() const { return dwNextPlayTime; }
     BOOL GetScriptForced() const { return bForcedMusic; }
     const CString& GetScriptMusic() const { return szForcedMusic; }

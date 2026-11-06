@@ -4,6 +4,10 @@
 #include "ModFinalGolemState.h"
 #include "ModArenaBoundary.h"
 #include "ModScriptMotion.h"
+#include "ModUnitSpawns.h"
+#include "MusicSystem.h"
+#include "I3DMain.h"
+#include "I3DScreenMission.h"
 #include <cfloat>
 #include <stdexcept>
 
@@ -19,7 +23,8 @@ CPlot3D Rotate(const float* q,CPlot3D v) {
 static const float golemThrowOrigins[2][3]={{1.944029596f,1.883236350f,4.109739893f},{-1.944029596f,1.883236350f,4.109739893f}};
 static const float golemThrowRotations[2][4]={{.985990027f,-.101141793f,.132574457f,-.004244622f},{.985990027f,-.101141793f,-.132574457f,.004244622f}};
 #include "ModFinalGolemStages.inl"
-int Stage(float hp) {return hp>2000.001f?1:hp>1500.001f?2:hp>1000.001f?3:hp>500.001f?4:5;}
+#include "ModFinalGolemHard.inl"
+int Stage(float hp) {if(Hard())hp*=.5f;return hp>2000.001f?1:hp>1500.001f?2:hp>1000.001f?3:hp>500.001f?4:5;}
 void Prepare(CUnit* boss,CUnit* target) {
  if(!Valid(target))return;
  const auto p=boss->GetCP(),t=target->GetCP();float dx=t.x-p.x,dy=t.y-p.y,len=std::hypot(dx,dy);
@@ -64,28 +69,26 @@ void Melee(CUnit* boss,CUnit* target) {
 
 void Action(CUnit* boss,CUnit* other,int op) {
  if(op<0||op>28)throw std::runtime_error("FinalGolemAction operation must be 0..28");
- if(op>=24&&op<=26)throw std::runtime_error("FinalGolemAction hard combat is not implemented until package 18");
- if(!ModEncounter::Arena(theWorldServer)||!Valid(boss,false)||boss->GetID()!=990400||!Server(boss))
+  if(!ModEncounter::Arena(theWorldServer)||!Valid(boss,false)||boss->GetID()!=990400||!Server(boss))
   throw std::runtime_error("FinalGolemAction requires arena boss 990400 on the server");
- if(ModEncounter::Hard(theWorldServer)&&op<21)throw std::runtime_error("hard golem controller is not implemented until package 18");
- auto* s=Server(boss);ArmVisual();
+  auto* s=Server(boss);ArmVisual();
  if(op==0) {
   if(boss->IsDead())CaptureVisualState(true,5,5);
   for(int i=0;i<int(Read("FGL.PartyCount"))&&i<16;++i)if(auto* hero=Party(i);Valid(hero,false))if(auto* server=Server(hero))server->FinishEncounterPerformance();
-  if(Valid(boss)){if(!(ModInvincible::Mask(boss)&ModInvincible::Bad))ModInvincible::Change(boss,"effects",1);const int previous=int(Read("DJW.Stage")),stage=(std::max)(Stage(HP(boss)),previous);if(stage>previous)CaptureVisualState(false,previous,stage);Set("DJW.Stage",float(stage));TickExtras(boss);ModGolemReflect::Tick();}theWorldServer.script.RefreshFinalGolemSources(Now());return;
+  if(Valid(boss)){if(!(ModInvincible::Mask(boss)&ModInvincible::Bad))ModInvincible::Change(boss,"effects",1);const int previous=int(Read("DJW.Stage")),stage=(std::max)(Stage(HP(boss)),previous);if(stage>previous)CaptureVisualState(false,previous,stage);Set("DJW.Stage",float(stage));TickExtras(boss);HardTick(boss);HardObelisks(boss);ModGolemReflect::Tick();}theWorldServer.script.RefreshFinalGolemSources(Now());return;
  }
  if(op==1){Melee(boss,other);return;}
- if(op==2){Prepare(boss,other);return;}
+ if(op==2){Prepare(boss,other);HardRamBegin();return;}
  if(op==3){Contact(boss,other);return;}
  if(op==4){Set("FGL.PX",boss->GetCP().x);Set("FGL.PY",boss->GetCP().y);return;}
  if(op==5){bool arrived=std::hypot(boss->GetCP().x-Read("FGL.EX"),boss->GetCP().y-Read("FGL.EY"))<.65f||Read("FGL.Blocked")!=0;Set("FGL.Arrived",arrived?1.f:0.f);Set("FGL.Resume",!arrived&&Read("FGL.Timer")>1&&!s->GetScriptCommand().IsMove()?1.f:0.f);return;}
  if(op==6){s->ScriptSpeedChanged();return;}
- if(op==7){if(Valid(boss)){ModInvincible::Change(boss,"effects",1);ModGolemReflect::Reset();Set("FGL.DeathBorn",0);Set("FGL.DetachBorn",0);s->Heal(2500);s->RecalcRPGStats(false);Set("DJW.Stage",1);}return;}
+ if(op==7){if(Valid(boss)){ModInvincible::Change(boss,"effects",1);ModGolemReflect::Reset();Set("FGL.DeathBorn",0);Set("FGL.DetachBorn",0);s->Heal(Hard()?5000.f:2500.f);s->RecalcRPGStats(false);Set("DJW.Stage",1);}return;}
  if(op==8){if(Valid(other)&&Hero(other)){int n=int(Read("FGL.PartyCount"));if(n>=0&&n<16){char key[48];const unsigned id=unsigned(other->GetID());std::snprintf(key,sizeof(key),"FGL.Party%d.Lo",n);Set(key,float(id&65535));std::snprintf(key,sizeof(key),"FGL.Party%d.Hi",n);Set(key,float(id>>16));Set("FGL.PartyCount",float(n+1));}}return;}
  if(op==9){s->CmdMoveTo(CPlot3D(Read("FGL.EX"),Read("FGL.EY"),0),false);return;}
  if(op==10){s->StopEncounterMovement();return;}
- if(op==11){Plan(boss,other);return;}
- if(op==12){ResetExtras();ModGolemReflect::Reset();return;}
+ if(op==11){Plan(boss,other);if(Hard()&&Read("FGL.Choice")==0&&Read("HG.SlamClock")>=135)Set("FGL.Choice",4);return;}
+ if(op==12){if(boss->IsDead())CaptureVisualState(true,5,5);HardEntitiesReset();ResetExtras();HardReset();ModGolemReflect::Reset();return;}
  if(op==13){Circle(boss);return;}
  if(op==14){BeginThrow(boss);return;}
  if(op==15){LaunchThrow(boss);return;}
@@ -94,6 +97,9 @@ void Action(CUnit* boss,CUnit* other,int op) {
  if(op==18){AimLaser(boss);return;}
  if(op==19){BeginFire(boss);return;}
  if(op==20){HeroEffects(boss,other);return;}
+ if(op==24){HardSlamBegin(boss);return;}
+ if(op==25){HardRamEnd();return;}
+ if(op==26){HardEnsureMusic();return;}
  if(op==27){CollapseTick(false);return;}
  if(op==28){CollapseTick(true);return;}
  if(!Valid(other,false)||!Server(other)||!Server(other)->EncounterPerformance(op))throw std::runtime_error("encounter animation could not be applied");
@@ -103,6 +109,7 @@ void CaptureDamageTypes(CUnit* source,const SRPGAttackPortion& portion) {
  for(int i=0;i<3;++i){char key[40];std::snprintf(key,sizeof(key),"FGL.DamageType%d",i);Set(key,portion.fpAttacks[i]);}Set("FGL.DamageTypesKnown",1);
 }
 void MeleeDelivered(CUnit* source,CUnit* target,const SRPGAttackPortion& portion) {
+ if(Hard()&&source&&unsigned(source->GetID())==unsigned(Read("HG.GuardID"))&&!portion.bAreaEffect&&(portion.fpAttacks[0]>0||portion.fpAttacks[1]>0||portion.fpAttacks[2]>0)){if(auto* guard=Server(source))guard->EncounterCooldown(Now()+72);Set("HG.GuardHits",Read("HG.GuardHits")+1);}
  if(!source||!target||(source->GetID()!=990400&&target->GetID()!=990400)||!Active()||!Valid(source,false)||!Valid(target,false)||Read("FGL.Phase")!=1||portion.bAreaEffect||!(portion.fpAttacks[0]>0||portion.fpAttacks[1]>0||portion.fpAttacks[2]>0))return;
  if(target->GetID()==990400&&Hero(source)&&std::hypot(source->GetCP().x-target->GetCP().x,source->GetCP().y-target->GetCP().y)<=Range(target,source)+1)HeroVar(source,"FlankAt",float(Now()));
  if(source->GetID()!=990400||!Hero(target))return;

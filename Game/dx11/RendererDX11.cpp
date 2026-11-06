@@ -515,7 +515,7 @@ bool CDX11::FinishC74Effect(HRESULT hr, const char* event)
     }
     return false;
 }
-bool CDX11::SubmitGolemVisual(const owned::EmbeddedGolemInput& input,const std::array<ID3D11ShaderResourceView*,3>& textures)
+bool CDX11::SubmitGolemVisual(const owned::EmbeddedGolemInput& input,const std::array<ID3D11ShaderResourceView*,6>& textures)
 {
     owned::FixedState state;std::shared_ptr<owned::SurfaceImage> unused;
     HRESULT hr=PrepareC74Effect(true,false,state,unused);
