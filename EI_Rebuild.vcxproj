@@ -341,6 +341,7 @@
     <ClCompile Include="Game\ModWorldBackground\WorldBackgroundVisual.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="Game\ModWorldBackground\Native.cpp" />
     <ClCompile Include="Game\WorldClient.cpp" />
+    <ClCompile Include="Game\ModArenaVisual.cpp" />
     <ClCompile Include="Game\WorldInterface.cpp" />
     <ClCompile Include="Game\WorldServer.cpp" />
     <ClCompile Include="Game\ZoneExit.cpp" />

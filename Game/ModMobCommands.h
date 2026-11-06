@@ -13,6 +13,7 @@
 #include "ModScriptMotion.h"
 #include "ModUnitSpawns.h"
 #include "ModArena.h"
+#include "ModArenaVisual.h"
 #include "MapObjectManager.h"
 #include "ModRegisteredLoot.h"
 #include "ZoneIce.h"
@@ -46,6 +47,7 @@ inline const Entry registry[]={
  {294,"GetAttackEvent","Foof",true},
  {295,"WasAttacked","Foof",true},
  {296,"HasAttack","Foof",true},
+ {284,"SetArenaEffect","of",true},
  {283,"GetArenaMotion","Fo",true},
  {282,"ApplyArenaWaveDamage","off",true},
  {280,"GetArenaTick","F",true},
@@ -389,6 +391,9 @@ inline bool Void(SSCCmd&cmd,int*index=nullptr,int count=0,int*sleep=nullptr,BOOL
   vars->SetVar(key.c_str(),float(entry->dwEntryIndex+1));
   if(server&&!serverUnit->IsInvalid())server->QueueAnimationLoop(entry->dwEntryIndex);
   return true;
+ }
+ if(cmd.command==284){
+  Validate(*e,cmd);ModArenaVisual::Arm(ObjectArg(cmd),cmd.params[0],owner);return true;
  }
  if(cmd.command==279||cmd.command==278){
   ModUnitSpawns::Status(0,1);
