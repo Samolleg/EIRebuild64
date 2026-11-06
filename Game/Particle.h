@@ -103,7 +103,7 @@ public:
 
 private:
     CObject3D *pCarrier;        // объект, к которому прив€зан данный партикл-эффект
-    CPlot3D carrierCP;          // current cp of carrier
+    CPlot3D carrierCP;          // last resolved world position, including GetCP() offset
     CPlot3D vCarrierSpeed;      // carrier speed ( movement of carrier per last segment )
     CPlot3D vSpeedX1, vSpeedX2; // вектора, перпендикул€рные vCarrierSpeed единичной длины
     float fpSpeedMod;           // module of carrier speed

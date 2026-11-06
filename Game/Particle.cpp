@@ -165,6 +165,7 @@ void CParticle::Clear()
     SetCP(CPlot3D(0, 0, 0));
     SetOrientation(QNULL);
     pCarrier = NULL;
+    carrierCP = GetCP();
     nBornProbability = 0;
     nMinTrys = 0;
     nLifeSpan = -1;
@@ -209,7 +210,11 @@ void CParticle::AttachCarrier(CObject3D *pNewCarrier)
     pCarrier = NULL;
     // передвинем эффект, как будо он остался привязан к старому объекту
     if (pOldCarrier && pNewCarrier == NULL)
-        SetCP(GetCP() + GetCarrierCP(pOldCarrier));
+    {
+        // The old carrier may already have retired its unit/weapon state.
+        // carrierCP is the last resolved world point, including our offset.
+        SetCP(carrierCP);
+    }
 
     if (pOldCarrier)
         pOldCarrier->DetachParticleSource(this);
@@ -218,7 +223,7 @@ void CParticle::AttachCarrier(CObject3D *pNewCarrier)
     {
         pCarrier->RecalcBoundingVolumeFast();
         pCarrier->AttachParticleSource(this);
-        carrierCP = GetCarrierCP(pCarrier);
+        carrierCP = GetCarrierCP(pCarrier) + GetCP();
     }
     else
         carrierCP = GetCP();
@@ -5830,7 +5835,6 @@ void CParticle::ConfigurePowerHit(CUnit* carrier, const CPlot3D& point,
         SetFlag(PS_BIND_TO_BODYPART);
         SetFlag(PS_NEED_CARRIER_TO_GENERATE);
         AttachCarrier(carrier);
-        carrierCP = GetCarrierCP(carrier);
     }
 }
 
@@ -5848,7 +5852,7 @@ void CParticle::PowerHitSourceSegment(SLocalSource* source)
             ResetFlag(PS_GENERATE_PARTICLES);
             return;
         }
-        carrierCP=GetBodyPartCP(static_cast<CUnit*>(pCarrier),"rh3");
+        carrierCP=GetBodyPartCP(static_cast<CUnit*>(pCarrier),"rh3") + GetCP();
         fpParam2 += 1.0f;
         if (fpPower2 > 0.0f) source->reserved.y -= 1.0f;
         const float lightStrength = fpPower2 > 0.0f ?
