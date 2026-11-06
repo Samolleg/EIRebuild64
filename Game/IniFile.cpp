@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "AgentBackground.h"
 #include "RuntimePaths64.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -298,6 +299,7 @@ BOOL CIniFile::GetUIntArray(LPCSTR pszSection, LPCSTR pszEntry, CUIntArray &arra
 // ******************************************************************************** //
 BOOL CIniFile::SetString(LPCSTR pszSection, LPCSTR pszEntry, CString szData)
 {
+    if (AgentBackground::Enabled()) return TRUE;
     return WritePrivateProfileString(pszSection, pszEntry, szData, RuntimePaths64::Config(std::filesystem::path((LPCSTR)szIniFileName).filename().string().c_str()).string().c_str());
 }
 /////////////////////////////////////////////////////////////////////////////////////

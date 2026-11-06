@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "LiveObserver.h"
+#include "AgentBackground.h"
 #include "../external/owned-renderer/Source/native_lod_observer.h"
 #include "../external/owned-renderer/Source/engine_bridge.h"
 #include "RuntimePaths64.h"
@@ -384,7 +385,11 @@ void OperationApplied(const char* method,bool success) noexcept {
 void RecordError(const char* text,const char* extra) noexcept {
     try {
         std::lock_guard<std::mutex> lock(operationMutex);
-        if(!operation.inFlight||!operation.error.empty())return;
+        if(!operation.inFlight) {
+            if(!AgentBackground::Enabled()||operation.state=="error")return;
+            operation=OperationState{};operation.id=++operationSequence;operation.method="background_error";
+        }
+        if(!operation.error.empty())return;
         operation.error=Text(text,2048)+Text(extra,512);operation.state="error";
         operation.stage="game_error";
         // Notification's journal write and critical flush happen before the modal UI.
@@ -392,7 +397,7 @@ void RecordError(const char* text,const char* extra) noexcept {
 }
 std::string ProtectedSaveSlot(const char* name) {
     if(!name)return {};
-    if(!saveIsolated||strncmp(name,"mcp_",4)==0)return name;
+    if((!saveIsolated&&!AgentBackground::Enabled())||strncmp(name,"mcp_",4)==0)return name;
     return std::string("mcp_")+name;
 }
 void Start() noexcept {
@@ -664,7 +669,8 @@ json Status() {
                  {"pause_reasons",{{"combat",combat},{"modal",modal},{"editor",editor},{"background",background}}},
                  {"camera",Point(theCamera.GetCP())},{"camera_anchor",Point(theCamera.GetAnchorPoint())},
                  {"truncated",false}};
-    result["operation"]=OperationJson();result["save_isolation"]=saveIsolated;
+    result["operation"]=OperationJson();result["save_isolation"]=saveIsolated||AgentBackground::Enabled();
+    result["background_agent"]=AgentBackground::Enabled();
     result["main_thread_responding"]=true;
     if(world.bMapLoaded) {
         result["zone"]=Text(world.GetJournalZoneName(),256);

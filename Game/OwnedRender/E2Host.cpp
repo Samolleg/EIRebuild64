@@ -1,4 +1,5 @@
 #include "E2Host.h"
+#include "../AgentBackground.h"
 #include "E3Input.h"
 #include <mutex>
 #include "engine_bridge.h"
@@ -29,15 +30,16 @@ E2HoverSelection E2HoveredObject(int cursorMode) noexcept {
 }
 E2PassScope::E2PassScope(Pass value) noexcept : previous(pass) { pass = value; }
 E2PassScope::~E2PassScope() noexcept { pass = previous; }
-bool E2BackgroundConfigured() noexcept { return backgroundMode.load() >= 0; }
+bool E2BackgroundConfigured() noexcept { return AgentBackground::Enabled() || backgroundMode.load() >= 0; }
 bool E2BackgroundPaused(HWND window) noexcept {
-    return backgroundMode.load() == 1 && window && GetForegroundWindow() != window;
+    return !AgentBackground::Enabled() && backgroundMode.load() == 1 && window && GetForegroundWindow() != window;
 }
 bool E2BlockBackgroundInput(HWND window, UINT message, WPARAM wparam, LPARAM lparam) noexcept {
     if (!E2BackgroundConfigured() || !window) return false;
     const bool input = (message >= WM_KEYFIRST && message <= WM_KEYLAST) ||
         (message >= WM_MOUSEFIRST && message <= WM_MOUSELAST) || message == 0xcc54u;
     const bool altTab = message == WM_SYSKEYUP && wparam == VK_TAB && (lparam & 0x20000000);
+    if (AgentBackground::Enabled()) return input || message == WM_INPUT || message == WM_APPCOMMAND;
     return altTab || (input && GetForegroundWindow() != window);
 }
 DWORD E2Clock(DWORD now, bool paused) noexcept {

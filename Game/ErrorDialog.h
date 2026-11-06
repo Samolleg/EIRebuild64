@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <commctrl.h>
 #include <mutex>
+#include "AgentBackground.h"
 #pragma comment(lib, "comctl32.lib")
 
 // The game's message loop is suspended inside MessageBox, but its window still
@@ -142,11 +143,13 @@ public:
 
 inline int ShowA(HWND owner, const char *text, const char *title, UINT type, bool resume = true)
 {
+    if (AgentBackground::Enabled()) { AgentBackground::DialogError(text, title); return IDCANCEL; }
     Scope scope(owner, resume);
     return MessageBoxA(nullptr, text, title, (type & ~MB_TASKMODAL) | MB_TOPMOST | MB_SETFOREGROUND);
 }
 inline int ShowW(HWND owner, const wchar_t *text, const wchar_t *title, UINT type, bool resume = true)
 {
+    if (AgentBackground::Enabled()) { AgentBackground::DialogError(text, title); return IDCANCEL; }
     Scope scope(owner, resume);
     return MessageBoxW(nullptr, text, title, (type & ~MB_TASKMODAL) | MB_TOPMOST | MB_SETFOREGROUND);
 }

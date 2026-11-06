@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "GameJournal.h"
+#include "AgentBackground.h"
 #include "MiniaudioOneShotSfx.h"
 #include "MoviePlayback.h"
 #include "GeneralSettings.h"
@@ -3636,7 +3637,7 @@ void RenderMiniaudioOutput(ma_device *device, void *output,
     }
     // Render once so voices, music and video keep their playback positions.
     ma_engine_data_callback_internal(device, output, input, frames);
-    if (OutputDeviceLost.load() || !IsGameAudioForeground())
+    if (AgentBackground::Enabled() || OutputDeviceLost.load() || !IsGameAudioForeground())
         ma_silence_pcm_frames(output, frames, device->playback.format,
                               device->playback.channels);
 }

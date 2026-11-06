@@ -2,6 +2,7 @@
 #include "RuntimePaths64.h"
 #include "GameJournal.h"
 #include "LiveObserver.h"
+#include "AgentBackground.h"
 
 #include <string>
 #include <fstream>
@@ -81,6 +82,12 @@ static void ReportMessage(const char *reportType, const char *buffer, const char
     if (plainError && !strcmp(reportType, "Error")) GameJournal::MemoryErrorText(buffer);
     GameJournal::Notification(reportType, buffer, additionalInfo);
     if (!strcmp(reportType, "Error")) LiveObserver::RecordError(buffer, additionalInfo);
+    if (!strcmp(reportType, "Error") && AgentBackground::Enabled()) {
+        // The existing caller's failure result unwinds the operation. The
+        // operation record already contains the original error, without UI/exit.
+        GameJournal::FlushCritical();
+        return;
+    }
     // Retail 0x44C470 is a no-op. Addon only redirects it to the optional debug file.
     // Preserve the separate CLI stdout contract, without adding gameplay console/UI work.
     if (!strcmp(reportType, "Warning") && !ModCliTool::Active())

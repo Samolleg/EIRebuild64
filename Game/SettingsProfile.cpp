@@ -5,6 +5,7 @@
 #include <msxml6.h>
 #include <wincrypt.h>
 #include "SettingsProfile.h"
+#include "AgentBackground.h"
 #include <filesystem>
 #include <mutex>
 #include <map>
@@ -225,6 +226,7 @@ bool GetRaw(const std::wstring& section,const std::wstring& name,std::vector<cha
     auto v=s.values.find({Fold(section),Fold(name)}); return v!=s.values.end() && Decode(v->second,data,type);
 }
 bool SetRaw(const std::wstring& section,const std::wstring& name,const std::vector<char>& data,uint32_t type) {
+    if(AgentBackground::Enabled())return true; // process policy is read-only
     auto& s=Store(); std::lock_guard<std::mutex> lock(s.mutex); s.Init();
     try {
         Com com; auto doc=Load(fs::exists(s.target)?s.target:s.source); Read(doc);
@@ -277,6 +279,7 @@ std::vector<std::wstring> Entries(const std::wstring& section) {
     for(const auto& p:s.values) if(p.first.first==Fold(section)) out.push_back(p.second.name); return out;
 }
 bool Delete(const std::wstring& section,const std::wstring* name) {
+    if(AgentBackground::Enabled())return true;
     auto& s=Store(); std::lock_guard<std::mutex> lock(s.mutex); s.Init();
     try {
         Com com; auto doc=Load(fs::exists(s.target)?s.target:s.source); Read(doc);

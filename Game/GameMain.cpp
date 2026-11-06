@@ -3,6 +3,7 @@
 #include "SaveSlot.h"
 #include "CorePerf.h"
 #include "LiveObserver.h"
+#include "AgentBackground.h"
 #include "OwnedRender/E4Camp.h"
 #include "OwnedRender/E3Input.h"
 #include <game_focus.h>
@@ -362,6 +363,29 @@ BOOL NGame::InitInstance(HINSTANCE hInstance, int nCmdShow)
 {
     // Store instance handle in our global variable
     NGame::hInstance = hInstance;
+    if (AgentBackground::Enabled()) {
+        // A real, visible window below the owner's windows. Never activate it,
+        // even when display settings request borderless/fullscreen.
+        const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPSIBLINGS;
+        const DWORD extra = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+        RECT work{};
+        if (!SystemParametersInfo(SPI_GETWORKAREA, 0, &work, 0)) return FALSE;
+        RECT frame{}; if (!AdjustWindowRectEx(&frame, style, FALSE, extra)) return FALSE;
+        const LONG availableWidth = work.right-work.left-(frame.right-frame.left);
+        const LONG availableHeight = work.bottom-work.top-(frame.bottom-frame.top);
+        if (availableWidth <= 0 || availableHeight <= 0) return FALSE;
+        theSettings.dwWidth = (std::min)(theSettings.dwWidth, DWORD(availableWidth));
+        theSettings.dwHeight = (std::min)(theSettings.dwHeight, DWORD(availableHeight));
+        RECT outer{0,0,LONG(theSettings.dwWidth),LONG(theSettings.dwHeight)};
+        if (!AdjustWindowRectEx(&outer, style, FALSE, extra)) return FALSE;
+        hWnd = CreateWindowEx(extra, LPCSTR(atomWndClassName), szAppTitleName, style,
+            work.left, work.top, outer.right-outer.left, outer.bottom-outer.top,
+            nullptr, nullptr, hInstance, nullptr);
+        if (!hWnd) return FALSE;
+        bEnableRender = true; bEnableRenderStateChanged = true;
+        return SetWindowPos(hWnd, HWND_BOTTOM, work.left, work.top, outer.right-outer.left,
+            outer.bottom-outer.top, SWP_NOACTIVATE | SWP_SHOWWINDOW) != FALSE;
+    }
     // create window with sysmenu on the taskbar
     hWnd = CreateWindowEx(0, LPCSTR(atomWndClassName), szAppTitleName,
                           /*WS_OVERLAPPED | WS_SYSMENU */ WS_POPUP /*| WS_SYSMENU*/ |
@@ -610,7 +634,7 @@ static void NGame::UpdateRenderEnable()
         {
             if (theRenderer.IsInited()) // can restore surfaces only for initialized visualizator
                 GetRenderer()->SetFlag(VIS_ACTIVE);
-            SetCursor(0);
+            if (!AgentBackground::Enabled()) SetCursor(0);
         }
         else
         {
@@ -822,6 +846,7 @@ int WinMainInit(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, i
     // Writable settings/logs remain owned by RuntimePaths64.
     CWorld::InitCurrentDir(theSettings.szWorkPath);
     theAIGeneralSettings.ReadFromFile(CWorld::GetCurrentPath() + "config\\ai.reg");
+    if (AgentBackground::Enabled()) theSettings.nFullScreen = 0; // transient, never saved
     OwnedRender::ConfigureStartup();
     ownedResourceRuntime = std::make_unique<OwnedRender::ResourceRuntimeLease>();
     theWorld.Create();
@@ -975,6 +1000,8 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     if(InspectModPackageCommandLine(inspectionResult))return inspectionResult;
     CorePerf::Initialize();
     GameJournal::Start();
+    if (AgentBackground::Enabled())
+        GameJournal::Event("SESSION", "mcp_background", "argument=--background windowed=1 no_activate=1 audio=muted settings=read_only saves=mcp_");
     LiveObserver::Start();
 #if defined(__SANITIZE_ADDRESS__)
     ASanReporting64::JournalReady();
@@ -991,6 +1018,7 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     if (!ModRuntime::Current())
     {
         GameJournal::Event("SESSION", "mod_required", "EIRebuild requires a loaded mod");
+        if (AgentBackground::Enabled()) { AgentBackground::DialogError("EIRebuild requires a loaded mod", "EIRebuild"); return BAD_RESULT; }
         MessageBoxW(nullptr, L"EIRebuild: \u043d\u0435 \u0437\u0430\u0433\u0440\u0443\u0436\u0435\u043d \u043c\u043e\u0434. \u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u043c\u043e\u0434 \u0432 ReStarter \u0438 \u043f\u043e\u0432\u0442\u043e\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0443\u0441\u043a.",
                     L"EIRebuild", MB_OK | MB_ICONERROR);
         return BAD_RESULT;
@@ -1166,6 +1194,19 @@ LRESULT NGame::WndProc(UINT message, WPARAM wParam, LPARAM lParam)
 /////////////////////////////////////////////////////////////////////////////////////
 LRESULT CALLBACK NGame::ShortWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    if (AgentBackground::Enabled()) {
+        if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATEANDEAT;
+        if (message == WM_WINDOWPOSCHANGING && lParam) {
+            auto* position = reinterpret_cast<WINDOWPOS*>(lParam);
+            position->flags |= SWP_NOACTIVATE;
+            if (!(position->flags & SWP_NOZORDER)) position->hwndInsertAfter = HWND_BOTTOM;
+        }
+        if (message == WM_ACTIVATE || message == WM_ACTIVATEAPP || message == WM_SETFOCUS || message == WM_KILLFOCUS) {
+            bEnableRender = true; bEnableRenderStateChanged = true;
+            theInterface.ResetInputState();
+            return 1;
+        }
+    }
     if (message == WM_KILLFOCUS || message == WM_SETFOCUS || message == WM_ACTIVATE || message == WM_ACTIVATEAPP ||
         message == WM_CANCELMODE || message == WM_CAPTURECHANGED || message == WM_SIZE || message == WM_DESTROY || message == WM_NCDESTROY)
         owned::camp_inventory_input(hWnd, message, wParam, lParam, false);

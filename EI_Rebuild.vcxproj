@@ -65,6 +65,7 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="Game\AgentBackground.cpp" />
     <ClCompile Include="Game\NavigationWorld.cpp" />
     <ClCompile Include="Game\ZoneIce.cpp" />
     <ClCompile Include="Game\NavigationBake.cpp" />

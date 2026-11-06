@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "MoviePlayback.h"
+#include "AgentBackground.h"
 #include "GameMain.h"
 #include "WorldClient.h"
 #include "SoundManager.h"
@@ -13,7 +14,7 @@ namespace Video {
 namespace {
 MovieRenderer* renderer = nullptr;
 Movie* firstMovie = nullptr;
-bool Inactive() { return IsIconic(NGame::hWnd) || GetForegroundWindow() != NGame::hWnd; }
+bool Inactive() { return !AgentBackground::Enabled() && (IsIconic(NGame::hWnd) || GetForegroundWindow() != NGame::hWnd); }
 }
 void SetMovieRenderer(MovieRenderer* value) {
     if (renderer) for (auto* movie = firstMovie; movie; movie = movie->next) renderer->ClearMovie(movie);
@@ -104,7 +105,7 @@ bool Movie::Play(const char* name, unsigned long framePause, bool skipMovie,
                 done = interrupted = true;
                 break;
             }
-            const bool input = msg.message == WM_KEYDOWN || msg.message == WM_LBUTTONDOWN || msg.message == WM_RBUTTONDOWN;
+            const bool input = !AgentBackground::Enabled() && (msg.message == WM_KEYDOWN || msg.message == WM_LBUTTONDOWN || msg.message == WM_RBUTTONDOWN);
             if (input && (skipMovie || (holding && skipFrame))) {
                 if (video.player) video.player->Skip();
                 done = interrupted = true;

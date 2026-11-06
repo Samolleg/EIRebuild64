@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "AgentBackground.h"
 #include "RuntimePaths64.h"
 #include "SaveSchema.h"
 static const char LOCAL_FILE[] = __FILE__;
@@ -358,6 +359,7 @@ int CCamera::Segment()
 // setup mode for camera saving
 BOOL CCamera::BeginCameraPlacementsSave(LPCSTR pszFileName)
 {
+    if (AgentBackground::Enabled()) return FALSE;
     CFileFind find;
     CFile file;
 
@@ -399,6 +401,7 @@ BOOL CCamera::BeginCameraPlacementsSave(LPCSTR pszFileName)
 // save one step of camera placement
 BOOL CCamera::SaveCurrentCameraPlacement(float fpTime)
 {
+    if (AgentBackground::Enabled()) return FALSE;
     SCameraPlacement cameraplacement;
     CFile file;
 

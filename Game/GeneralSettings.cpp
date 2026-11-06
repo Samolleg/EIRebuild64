@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "AgentBackground.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "GeneralSettings.h"
@@ -465,6 +466,7 @@ void SGeneralSettings::ReadSettingsFromFile(LPCSTR szSettingsFileName)
 // requires FULL INI-FILE NAME (with drive too)
 void SGeneralSettings::WriteSettingsToFile(LPCSTR szSettingsFileName)
 {
+    if (AgentBackground::Enabled()) return;
     CString szString;
     CIniFile reg;
     //
@@ -920,6 +922,7 @@ void SGeneralSettings::ReadSettingsFromRegistry(LPCSTR pszRegistryKey)
 // write settings to windows registry
 void SGeneralSettings::WriteSettingsToRegistry(LPCSTR pszRegistryKey)
 {
+    if (AgentBackground::Enabled()) return;
     CString szString;
     CWinRegistry reg;
     //

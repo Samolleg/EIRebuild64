@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <filesystem>
 #include <stdexcept>
+#include "AgentBackground.h"
 
 // Writable paths belong to the x64 installation, never to WorkPath or the mod.
 // Supported layout: <game>/Engine64/EIRebuild64.exe.
@@ -18,7 +19,10 @@ inline const fs::path& Root() {
 }
 inline fs::path Directory(const wchar_t* name) {
     auto path = Root() / name;
-    fs::create_directories(path);
+    // Config64 remains a read-only input in unattended runs, including absent
+    // subdirectories. Logs, cache and MCP save slots keep their normal roots.
+    if (!AgentBackground::Enabled() || (wcscmp(name,L"Config64")!=0 && wcsncmp(name,L"Config64/",9)!=0))
+        fs::create_directories(path);
     return path;
 }
 inline fs::path Config(const char* name) { return Directory(L"Config64") / name; }

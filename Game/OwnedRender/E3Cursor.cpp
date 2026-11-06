@@ -1,4 +1,5 @@
 #include "E3Cursor.h"
+#include "../AgentBackground.h"
 #include "../CorePerf.h"
 #include "cursor_confinement.h"
 #include "../ErrorDialog.h"
@@ -122,12 +123,13 @@ struct CursorOwner {
 
 namespace OwnedRender {
 void E3CursorStart() {
+    if (AgentBackground::Enabled()) return;
     std::lock_guard<std::mutex> lock(cursor.mutex);
     if (cursor.thread.joinable()) return;
     cursor.stop = false;
     cursor.thread = std::thread([] { cursor.run(); });
 }
-void E3CursorStop() noexcept { cursor.shutdown(); owned::hide_load_cursor(); }
+void E3CursorStop() noexcept { cursor.shutdown(); if (!AgentBackground::Enabled()) owned::hide_load_cursor(); }
 void E3CursorPublish(E3CursorState state) {
     std::lock_guard<std::mutex> lock(cursor.mutex);
     // Keep an already prepared frame only for the identical mode/visibility.
@@ -146,6 +148,7 @@ void E3CursorCanvas(HWND window, unsigned width, unsigned height, bool active) n
     cursor.wake.notify_all();
 }
 HRESULT E3QueueCursor(owned::Renderer& renderer, int percent, bool loading) {
+    if (AgentBackground::Enabled()) return S_OK;
     owned::CursorPresentation frame;
     {
         std::lock_guard<std::mutex> lock(cursor.mutex);
@@ -159,6 +162,10 @@ HRESULT E3QueueCursor(owned::Renderer& renderer, int percent, bool loading) {
     }
 }
 BOOL E3ReadCursor(POINT* point) noexcept {
+    if (AgentBackground::Enabled()) {
+        if (!point) return FALSE;
+        unsigned w=0,h=0;E3Canvas(w,h);*point=POINT{LONG(w/2),LONG(h/2)};return TRUE;
+    }
     if (!point || !GetCursorPos(point)) return FALSE;
     const HWND window = E3Window();
     if (!window) return TRUE;

@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "AgentBackground.h"
 #include "RuntimePaths64.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -293,6 +294,7 @@ void NKeyMap::Init()
 /////////////////////////////////////////////////////////////////////////////////////
 void NKeyMap::Fini()
 {
+    if (AgentBackground::Enabled()) return;
     CString szStr;
     CStdioFile file;
     int i, j, k;
