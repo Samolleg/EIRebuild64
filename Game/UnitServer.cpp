@@ -1,4 +1,6 @@
 #include "StdAfx.h"
+#include "ModEncounter.h"
+#include "ModArenaBoundary.h"
 #include "SaveSchema.h"
 #include "CorePerf.h"
 #include "GameJournal.h"
@@ -66,6 +68,7 @@ const float FP_MIN_ATTACK_OPACITY = 0.1f;
 #include "WorldServer.h"
 #include "WorldClient.h"
 #include "UnitServer.h"
+#include "UnitClientSpecific.h"
 #include "MapObjectServer.h"
 #include "mapFormat.h"
 #include "ServerConsts.h"
@@ -969,6 +972,7 @@ void CUnitServer::L1ExecMove()
 
     auto support=movement.support;
     if(!accepted) {
+        if(movement.boundaryBlocked){StopEncounterMovement();return;}
         if(path.navigationTurned) {
             // A wind-turned route must stop here, never find a way around a wall.
             const auto stop=lpUnit->GetCP();const auto oldGoal=path.ptDestination;
@@ -1180,6 +1184,9 @@ void CUnitServer::L1CheckRun()
 /////////////////////////////////////////////////////////////////////////////////////
 bool CUnitServer::L1StartMove(const CPlot3D &ptTarget, float fpMaxPathLength, const Navigation::Location *goalSupport)
 {
+    const auto boundary=ModArena::MovementBoundary(lpUnit);
+    const auto current=lpUnit->GetCP();
+    if(!boundary.Goal({current.x,current.y,current.z},{ptTarget.x,ptTarget.y,ptTarget.z})){StopEncounterMovement();return false;}
     CWorldServer *pWS = (CWorldServer *)GetWorld();
 
     L1CheckRun();
@@ -1192,6 +1199,7 @@ bool CUnitServer::L1StartMove(const CPlot3D &ptTarget, float fpMaxPathLength, co
     if (!LowFindPath(ptTarget, path, lpUnit->bNeedFastPath, fpMaxPathLength,goalPolicy,goalSupport))
     {
         bL1MoveAnimationSet = false;
+        if(boundary.Active()){StopEncounterMovement();return false;}
         L1StopMovement(path.bRouteFailed == TRUE);
         return false;
     }
@@ -5062,6 +5070,7 @@ int CUnitServer::GetPlayerWhoTamed()
 // main function, processing units low level commands and actions
 int CUnitServer::Segment()
 {
+    if(ModEncounter::Arena(theWorldServer))FinishEncounterPerformance();
     CorePerf::Scope coreTiming(CorePerf::UnitSegment);
     // Observe loaded status without serializing cached speed.
     if(auto*mod=ModRuntime::Current()){float factor=mod->CrippledSpeed(*lpUnit);if(factor!=lastCrippledFactor){lastCrippledFactor=factor;L1SpeedChanged();}}
@@ -6554,6 +6563,58 @@ bool CUnitServer::HasLeverRingChoice(const SUnitBasicCmd& cmd) const
         static_cast<CMapObject*>(cmd.pTarget)!=modLeverTarget||cmd.pTarget->GetRTID()!=modLeverId)return false;
     const auto delta=cmd.ptTarget-modLeverPoint;
     return delta.x==0&&delta.y==0&&delta.z==0;
+}
+
+bool CUnitServer::EncounterPerformance(int operation)
+{
+    auto& world=theWorldServer;
+    if(!ModEncounter::Arena(world)||!ModInvincible::UnitValid(lpUnit,true)||!ModEncounter::Hero(world,lpUnit))return false;
+    if(operation==21){
+        auto* peer=theWorld.GetUnit(lpUnit->GetID());
+        auto* client=peer?dynamic_cast<CUnitClientSpecific*>(peer->GetUnitSpecific()):nullptr;
+        if(client)client->ClearAcks();
+        return true;
+    }
+    if(operation!=22&&operation!=23)return false;
+    const auto* entry=static_cast<CMapObjectManager*>(world.GetMapObjectManager())->GetAnimationEntry(lpUnit->GetMaskName(),operation==22?"udeath01":"ucross06");
+    if(!entry)return false;
+    StopAnimationLoop();CancelScriptWindPending();
+    nextCommand.Clear();curCommand.Clear();
+    curCommand.cmd=UC_PLAYANIM;curCommand.dwParam=entry->dwEntryIndex;
+    SL0AnimationSeq animation;animation.AddSimple(entry->dwEntryIndex,-1);
+    L1SetPhase(UL1_SPECIAL_CYCLE);L1StandStill();L0StartAnimation(animation);
+    ModEncounter::Set(world,ModEncounter::PerformanceKey(*lpUnit).c_str(),float(operation));
+    return true;
+}
+
+void CUnitServer::FinishEncounterPerformance(bool leaving)
+{
+    auto& world=theWorldServer;
+    if(!ModEncounter::Hero(world,lpUnit))return;
+    const auto key=ModEncounter::PerformanceKey(*lpUnit);
+    const float operation=ModEncounter::Read(world,key.c_str());
+    if(operation!=22&&operation!=23)return;
+    const auto* entry=static_cast<CMapObjectManager*>(world.GetMapObjectManager())->GetAnimationEntry(lpUnit->GetMaskName(),operation==22?"udeath01":"ucross06");
+    const bool owned=entry&&eL1State==UL1_SPECIAL_CYCLE&&curCommand.cmd==UC_PLAYANIM&&
+        curCommand.dwParam==entry->dwEntryIndex&&level0Animation.animations.GetSize()==1&&
+        level0Animation.GetStartId(0)==entry->dwEntryIndex&&level0Animation.GetCycleId(0)==0xffffffffu;
+    const bool released=leaving||ModEncounter::Read(world,"EFC.Enabled")!=1||
+        (operation==23&&ModEncounter::Read(world,"EFC.Stage")>=7);
+    if(!owned||lpUnit->IsDead()||lpUnit->IsInvalid()||released){
+        if(owned&&!lpUnit->IsDead()){
+            level0Animation.Clear();curCommand.Clear();L1ResetState();
+        }
+        if(auto* player=world.GetPlayer(0))player->party.vars.DelVar(key.c_str());
+    }
+}
+
+void CUnitServer::StopEncounterMovement()
+{
+    if(auto* player=logic.GetPlayer())player->DoStop(logic);
+    nextCommand.Clear();curCommand.Clear();CancelScriptWindPending();
+    L1StopMovement(false);
+    path.CreateStand(lpUnit);lpUnit->LowNewRoute();
+    lpUnit->SetUpdateMask(CMapObject::VLD_MASK_POSROT);
 }
 
 void CUnitServer::QueueAnimationLoop(DWORD id)

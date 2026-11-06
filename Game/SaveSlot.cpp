@@ -1,5 +1,7 @@
 #include "StdAfx.h"
 #include "SaveSlot.h"
+#include "ModEncounter.h"
+#include "ModArena.h"
 #include "ZoneIce.h"
 #include "WorldServer.h"
 #include "WorldClient.h"
@@ -724,12 +726,18 @@ bool Slot::Presentation(const char *name,SSaveSlotDesc &desc,Bytes *shot)
 }
 bool Slot::Save(const char *name)
 {
+    if(ModEncounter::AccessLocked())return false;
     // All automatic, quick and manual slot writes converge here. Owner slots
     // are never overwritten after MCP takes control of this process.
     const auto protectedName=LiveObserver::ProtectedSaveSlot(name);name=protectedName.c_str();
     try{
         CheckedName(name);if(theWorldServer.GetServerMode()!=SERV_MODE_LOCAL)Invalid("save requires a local world");
         auto *player=theWorldServer.GetPlayer(0);if(!player)Invalid("save requires a local player");
+        if(ModEncounter::Arena(theWorldServer))for(int i=0;i<player->party.people.GetSize();++i){
+            auto* unit=theWorldServer.GetUnit(player->party.people[i].nID);
+            if(auto* server=unit?dynamic_cast<CUnitServer*>(unit->GetUnitSpecific()):nullptr)server->FinishEncounterPerformance();
+        }
+        if(!ModArena::Active())ModArena::ClearSavedStatuses(theWorldServer);
         // Keep the existing gameplay snapshot operations, before capturing RNG.
         if(auto *mod=ModRuntime::Current())mod->SaveSkillCooldowns(player->party.vars);
         theHat.SetSinglePlayerParty(player->party);

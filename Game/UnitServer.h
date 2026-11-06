@@ -769,6 +769,10 @@ public:
     void CmdNewWeapon(DWORD dwWeapon);
     void CmdPlayAnimation(const char *pszAnimation);
     bool HasLeverRingChoice(const SUnitBasicCmd& cmd) const;
+    // Typed implementation of FinalGolemAction 21-23; dispatcher joins in package 18.
+    bool EncounterPerformance(int operation);
+    void FinishEncounterPerformance(bool leaving=false);
+    void StopEncounterMovement();
     void QueueAnimationLoop(DWORD id);
     void StopAnimationLoop();
     void UpdateAnimationLoop();

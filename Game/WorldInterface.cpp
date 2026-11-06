@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModEncounter.h"
 #include "SaveSlot.h"
 #include "CorePerf.h"
 #include "GameJournal.h"
@@ -257,6 +258,7 @@ void CWorldClientInterface::ExitZone(int nExitPoint)
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldClientInterface::GoCamp(EInterface iface)
 {
+    if(ModEncounter::AccessLocked())return;
     theInterface.SetScreensMustDie();
     theWorld.GetPlayer()->GoCamp(iface);
 }
@@ -1024,6 +1026,7 @@ void CWorldConnector::DoGo()
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldConnector::ReqSaveGame(const char *pszSaveName)
 {
+    if(ModEncounter::AccessLocked())return FALSE;
     ASSERT(theWorldServer.GetServerMode() == SERV_MODE_LOCAL);
     return SaveGame(pszSaveName);
 }

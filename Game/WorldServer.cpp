@@ -1,4 +1,6 @@
 #include "StdAfx.h"
+#include "ModEncounter.h"
+#include "ModArena.h"
 #include "ZoneIce.h"
 #include "SaveSlot.h"
 #include "CorePerf.h"
@@ -2005,6 +2007,13 @@ void CWorldServer::RemovePlayerParty(CPlayer *pPlayer, SDeployPlayerInfo *pInfo)
     }
     for (i = 0; i < pPlayer->party.people.GetSize(); i++)
         pers.Add(&pPlayer->party.people[i]);
+    // Release only this scene's held animations before exporting the party.
+    if(ModEncounter::Arena(*this)&&pPlayer==GetPlayer(0))for(int n=0;n<pPlayer->party.people.GetSize();++n){
+        auto* unit=GetUnit(pPlayer->party.people[n].nID);
+        if(auto* server=unit?dynamic_cast<CUnitServer*>(unit->GetUnitSpecific()):nullptr)server->FinishEncounterPerformance(true);
+        if(unit)ModArena::Clear(*unit);
+    }
+    if(ModEncounter::Arena(*this)&&pPlayer==GetPlayer(0)){ModArena::ClearSavedStatuses(*this);ModEncounter::ClearPerformanceKeys(*this);}
     // get items and stats from alive ones
     RemovePersonages(pers, &pPlayer->party, pInfo);
 }
@@ -2902,6 +2911,7 @@ void CWorldServer::InvokeAlarm(int nAlarm, const CPlot3D &ptOrigin, bool bForceA
 /////////////////////////////////////////////////////////////////////////////////////
 bool CWorldServer::CanBeginFieldCamp()
 {
+    if(ModEncounter::AccessLocked(*this))return false;
     const auto availability = [](bool value, const char* reason, int enemy = -1, float distance = 0.f) {
         static const char* lastReason = nullptr;
         static DWORD lastTick = 0;

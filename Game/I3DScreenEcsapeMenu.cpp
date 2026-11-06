@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModEncounter.h"
 #include "GameJournal.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -19,6 +20,7 @@ static const char LOCAL_FILE[] = __FILE__;
 // Shared by the Escape save button and the mission quicksave consumer only.
 bool ModSpellAddonAllowsSave()
 {
+    if(ModEncounter::AccessLocked())return false;
     const CModPackage *package = ModRuntime::Current();
     if (!package || package->SpellAddon().Feature44() != 1)
         return true;

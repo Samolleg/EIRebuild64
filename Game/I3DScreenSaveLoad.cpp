@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModEncounter.h"
 #include "SaveSlot.h"
 #include "CorePerf.h"
 #include "OwnedRender/E2Gdi.h"
@@ -155,6 +156,7 @@ CString SSaveSlotDesc::GetAllodLocalName()
 ////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenSaveLoad::OnActivate()
 {
+    if(bIsSaveScreen&&ModEncounter::AccessLocked()){pI3D->ExitFromModal();return;}
     SetRect(0, 0, 800, 600);
 
     AddTexture("saveload");
@@ -609,6 +611,7 @@ void CI3DScreenSaveLoad::MoveScrollToSelection()
 ////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenSaveLoad::Save()
 {
+    if(ModEncounter::AccessLocked())return;
     if (nCurrentSlot < 0 || nCurrentSlot >= slots.size() || !IsEnoughSpace()) return;
     SSaveSlotDesc desc=slots[nCurrentSlot];
     if(bEdited) desc.szName=szEditName;
@@ -899,6 +902,7 @@ void CI3DScreenSaveLoad::ReloadPicture()
 ////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenSaveLoad::QuickSave(LPCTSTR pszSlotName, bool bIsAuto)
 {
+    if(ModEncounter::AccessLocked())return;
     GameJournal::Source source(bIsAuto?"auto":"manual_quick");
     if(!IsEnoughSpace())return;
     if(bIsAuto)NGame::DrawFrame(false);

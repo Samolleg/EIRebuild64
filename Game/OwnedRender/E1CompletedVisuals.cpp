@@ -8,6 +8,7 @@
 #include "../WorldClient.h"
 #include "../Object3DClientSpecific.h"
 #include "../Unit.h"
+#include "../ModEncounter.h"
 #include "../UnitClientSpecific.h"
 #include "embedded_host.h"
 
@@ -110,7 +111,7 @@ bool completeVisualFrame(owned::RetainedVisualFrame& frame, bool combat) noexcep
             sample.values.fade_alpha=specific->GetFadeOutAlpha();
         sample.visibility.casts_shadow=object->CheckFlag(OBJ_NOSHADOW)==0;
         sample.values.object_flags=(sample.values.object_flags&~0x00400000u)|
-            (object->CheckFlag(UNIT_VISIBLE)?0x00400000u:0u);
+            ((object->CheckFlag(UNIT_VISIBLE)||ModEncounter::Draw(*object))?0x00400000u:0u);
         // Both the skeleton and its bounds retain the exact host quaternion,
         // complection, animation phase and placement already in object_pose.
     }

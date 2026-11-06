@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModEncounter.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 /*==========================================================================================================
@@ -546,6 +547,7 @@ void CPlayerServer::FormNewVisibleSet()
                 ((CUnitServer *)pUnit->GetUnitSpecific())->logic.environment.seenCorpses);
             pUnit = unitIter.GetNext();
         }
+        ModEncounter::PinVisible(*GetWorldServer(),pPlayer,unitsVis);
         currentVisible.Add(unitsVis, deadUnits);
         // make list of seen corpses common between all units under player control
         pUnit = unitIter.GetFirst(&pPlayer->unitsUnderControl);
@@ -558,6 +560,7 @@ void CPlayerServer::FormNewVisibleSet()
     }
     else
     {
+        ModEncounter::PinVisible(*GetWorldServer(),pPlayer,unitsVis);
         currentVisible = unitsVis;
         nLookFromID = -1;
     }
@@ -1342,6 +1345,7 @@ BOOL CPlayerServer::PrsExitZone()
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 BOOL CPlayerServer::PrsGoCamp()
 {
+    if(ModEncounter::AccessLocked(*GetWorldServer()))return FALSE;
     ASSERT(status == PSS_ACTIVE);
     if (status != PSS_ACTIVE)
         return FALSE;

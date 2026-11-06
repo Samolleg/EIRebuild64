@@ -129,7 +129,7 @@ public:
         Navigation::Location support;
         Navigation::Point desired,direction;
         float speed=0;
-        bool rotating=false,finished=false,waiting=false,replanned=false;
+        bool rotating=false,finished=false,waiting=false,replanned=false,boundaryBlocked=false;
         double detourMs=0;
         int blocker=-1;
         unsigned avoidanceAttempts=0;
