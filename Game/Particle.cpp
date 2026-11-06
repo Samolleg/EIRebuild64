@@ -168,6 +168,7 @@ void CParticle::Clear()
     pCarrier = NULL;
     carrierCP = GetCP();
     scriptFlowRandom = 0x13579bdu;
+    arenaWave = {};
     nBornProbability = 0;
     nMinTrys = 0;
     nLifeSpan = -1;
@@ -5627,6 +5628,56 @@ BOOL CParticle::ScriptFlowSingleSegment(SSingleParticle* out)
     FlowToHost(p,*out);return TRUE;
 }
 
+
+namespace {
+void ArenaToHost(const owned::ArenaWaveParticle& p,SSingleParticle& out) {
+    out.coord=SXYZW(p.x,p.y,p.z,p.size);
+    out.reserved=CPlot3D(p.reserved.x,p.reserved.y,p.reserved.z);
+    out.reserved2=CPlot3D(p.reserved2.x,p.reserved2.y,p.reserved2.z);
+    out.vSpeed=CPlot3D(p.speed.x,p.speed.y,p.speed.z);
+    out.nLifeTime=p.life;out.nSpecial=p.special;out.nPhase=p.phase;
+    out.nPhaseLifeTime=p.phaseTime;out.dwColor=p.color;
+}
+owned::ArenaWaveParticle ArenaFromHost(const SSingleParticle& in) {
+    owned::ArenaWaveParticle p;
+    p.x=in.coord.x;p.y=in.coord.y;p.z=in.coord.z;p.size=in.coord.w;
+    p.reserved={in.reserved.x,in.reserved.y,in.reserved.z};
+    p.reserved2={in.reserved2.x,in.reserved2.y,in.reserved2.z};
+    p.speed={in.vSpeed.x,in.vSpeed.y,in.vSpeed.z};
+    p.life=in.nLifeTime;p.special=in.nSpecial;p.phase=in.nPhase;
+    p.phaseTime=in.nPhaseLifeTime;p.color=in.dwColor;return p;
+}
+}
+void CParticle::ConfigureArenaWave(int kind,float radius,bool charge,int tick)
+{
+    if(GetTypeID()!=PTID_SMOKE||kind<1||kind>3||!std::isfinite(radius)||radius>124)return;
+    if(createFunc!=&CParticle::ArenaWaveSingleCreate) {
+        arenaWave={};
+        pTexture.SetDesc(TTID_SPELL_MAIN,kind==2?"TendriSmoke":kind==1?"TendriLight":"VisionFog");
+        locSources.SetSize(0);createFunc=&CParticle::ArenaWaveSingleCreate;
+        segmentFunc=&CParticle::ArenaWaveSingleSegment;locSourceSegmentFunc=nullptr;
+        nBornProbability=100;fpLenToSingleDice=1000;
+        nAnimPhases=15;nAnimPerTexSize=4;nLifeOfPhase=1;bUseAddEffect=kind==1?TRUE:FALSE;
+        ResetFlag(PS_NEED_CARRIER_TO_GENERATE|PS_UNPAUSABLE|PS_BIND_TO_BODYPART|PS_PAUSE_INVISIBLE|PS_DONT_DRAW);
+        SetFlag(PS_GENERATE_PARTICLES|PS_KEEP_ALIVE);
+    }
+    arenaWave.kind=kind;arenaWave.radius=radius;arenaWave.charge=charge;arenaWave.lease_tick=tick;
+    nMinTrys=owned::arena_wave_tries(arenaWave);nParticlesMax=owned::arena_wave_maximum(kind);
+}
+BOOL CParticle::ArenaWaveSingleCreate(SSingleParticle* out,int)
+{
+    arenaWave.origin={carrierCP.x,carrierCP.y,carrierCP.z};
+    owned::ArenaWaveParticle p;
+    if(!owned::arena_wave_create(&arenaWave,&p,theWorldServer.GetSegmentTimeCounter()))return FALSE;
+    *out={};ArenaToHost(p,*out);return TRUE;
+}
+BOOL CParticle::ArenaWaveSingleSegment(SSingleParticle* out)
+{
+    auto p=ArenaFromHost(*out);
+    if(!owned::arena_wave_age(&p))return FALSE;
+    ArenaToHost(p,*out);return TRUE;
+}
+
 void CParticle::AddNewParticle(SSingleParticle *pPart)
 {
     pPart->nDelFlag = 0;
@@ -5731,6 +5782,11 @@ int CParticle::Segment()
         UpdateBV(pPart);
     }
 
+    // Arena generation is leased in simulation ticks; pause never advances it.
+    if(createFunc==&CParticle::ArenaWaveSingleCreate) {
+        const int now=theWorldServer.GetSegmentTimeCounter();
+        if(now<arenaWave.lease_tick||now-arenaWave.lease_tick>=4)nMinTrys=0;
+    }
     // Create new particles
     int nTrys = Float2Int(fpSpeedMod / fpLenToSingleDice);
     nTrys = Max(nTrys, nMinTrys);
@@ -5742,7 +5798,7 @@ int CParticle::Segment()
         {
             // Throw dices
             // Flow is always born (100%) and uses only its visual RNG.
-            int nDice = createFunc==&CParticle::ScriptFlowSingleCreate?0:random.Get(0, 99);
+            int nDice = (createFunc==&CParticle::ScriptFlowSingleCreate||createFunc==&CParticle::ArenaWaveSingleCreate)?0:random.Get(0, 99);
             // Check dices for create new particles
             if (nDice < nBornProbability)
                 CreateParticle(nParticles++);

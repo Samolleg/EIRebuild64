@@ -1,3 +1,5 @@
+EID3D11_ARENA_FRAGMENTS_V1 RCDATA "Assets\\arena\\fragments-v1.bin"
+
 EID3D11_CAMP_FRAME RCDATA "Assets\\camp\\stone-bronze-frame.png"
 EID3D11_CAMP_CONTROLS RCDATA "Assets\\camp\\ui-art-atlas-v4.png"
 EID3D11_CAMP_CONSTRUCTION RCDATA "Assets\\camp\\hammer-anvil-empty.png"

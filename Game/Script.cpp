@@ -3059,6 +3059,24 @@ bool CScript::SetParticleFlow(const SSCCmd &cmd)
     return false;
 }
 
+// Script-handle ownership stays here, beside the other particle commands.
+// Only matching live client sources receive completed arena emitter values.
+void CScript::RefreshArenaWaveSources(int wave,float radius,int tick)
+{
+    if(!ModArena::Active()||!std::isfinite(radius)||radius<0||radius>124)return;
+    auto* manager=static_cast<CEffectManager*>(theWorld.GetEffectManager());if(!manager)return;
+    for(POSITION pos=particles.GetHeadPosition();pos;) {
+        const auto& info=particles.GetNext(pos);const int kind=info.nScriptID-8690000;
+        auto* source=info.pParticle;
+        if(kind<1||kind>3||!source||source->IsInvalid()||source->typeID!=PTID_SMOKE)continue;
+        auto* client=manager->FindByID(source->GetID());
+        if(!client||client->IsInvalid()||client->WhoAmI()!=HPC_EFFECTPARTICLE)continue;
+        auto* effect=static_cast<CEffectParticle*>(client);
+        if(effect->typeID==PTID_SMOKE&&effect->pParticle)
+            effect->pParticle->ConfigureArenaWave(kind,wave==kind?radius:-1.f,radius==0,tick);
+    }
+}
+
 bool CScript::SetParticleSourcePower(const SSCCmd &cmd)
 {
     const auto &a=cmd.params;

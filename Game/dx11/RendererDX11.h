@@ -1,4 +1,5 @@
 #pragma once
+namespace owned {struct EmbeddedArenaInput;}
 namespace owned {struct HudPublishedVisual; struct EmbeddedHudVisualInput; struct EmbeddedHudPortraitInput;}
 #include <CommonStates.h>
 #include <dxgidebug.h>
@@ -124,6 +125,7 @@ public:
     void ReportC56FigureNoMatrix();
     void ReportC56FigureSkipSummary();
     bool SubmitC56GameParticles(const owned::GameParticleView& view);
+    bool SubmitArenaVisual(const owned::EmbeddedArenaInput&,const std::array<ID3D11ShaderResourceView*,8>&);
     bool SubmitC74Ribbon(const owned::EmbeddedRibbonInput&);
     bool SubmitC74Selection(const owned::GameSelectionView&);
     bool SubmitC74Print(const owned::EmbeddedPrintInput&);

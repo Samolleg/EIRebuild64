@@ -9,6 +9,7 @@
 #include "ConstantBuffer.h"
 #include "RendererDX11.h"
 #include "embedded_hud_visual.h"
+#include "embedded_arena.h"
 #include "model_draw.h"
 #include "../OwnedRender/E1SurfaceBridge.h"
 #include "../OwnedRender/E1RendererFacade.h"
@@ -513,6 +514,16 @@ bool CDX11::FinishC74Effect(HRESULT hr, const char* event)
         GameJournal::Event("RENDER", event, "owner=c74 reason=renderer_rejected hr=%08lx", static_cast<unsigned long>(hr));
     }
     return false;
+}
+bool CDX11::SubmitArenaVisual(const owned::EmbeddedArenaInput& input,
+    const std::array<ID3D11ShaderResourceView*,8>& textures)
+{
+    owned::FixedState state;std::shared_ptr<owned::SurfaceImage> unused;
+    HRESULT hr=PrepareC74Effect(true,false,state,unused);
+    if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.draw_embedded_arena(input,state,textures);
+    });
+    return FinishC74Effect(hr,"arena_visual_skipped");
 }
 bool CDX11::SubmitC74Ribbon(const owned::EmbeddedRibbonInput& input)
 {
