@@ -437,21 +437,25 @@ void Slot::FinalizeWorld(Document &d, CGSVariableSet* arriving)
                 SavedWorldScope lookups(d.world.get());
                 for(const auto &x:d.world->mapObjects){
                     auto *object=x.second;
-                    auto *animation=static_cast<CAnimationSystem2 *>(d.world->GetFigureManager()->CreateData(ASTID_ANIMATION_SYSTEM2));
-                    if(!animation)Invalid("cannot create saved animation system");
-                    object->SetAnimationSystem2(animation);object->LoadFigureBoundingVolumes(object->GetMaskName());
-                    if(auto *unit=dynamic_cast<CUnit *>(object)){
-                        const auto *race=unit->GetRaceModel();
-                        if(!race)Invalid("saved unit race unavailable");
-                        unit->SetRaceAnimationCoeffs(race->fAnimationCoeffs);
-                        auto id=unit->GetStartAnimationId();
-                        if(id!=0xffffffffu){auto *entry=unit->GetAnimationEntryByIndex(id);if(!entry)Invalid("saved animation unavailable");unit->SetCurrentAnimationEntry(entry);animation->SetAnimation(entry);}
-                        unit->RecalcAIParams();
+                    // Spell triggers have no skeleton or AI-map geometry (MOTID_TRAP).
+                    const bool hasGeometry=object->GetTypeID()!=MOTID_TRAP;
+                    if(hasGeometry){
+                        auto *animation=static_cast<CAnimationSystem2 *>(d.world->GetFigureManager()->CreateData(ASTID_ANIMATION_SYSTEM2));
+                        if(!animation)Invalid("cannot create saved animation system");
+                        object->SetAnimationSystem2(animation);object->LoadFigureBoundingVolumes(object->GetMaskName());
+                        if(auto *unit=dynamic_cast<CUnit *>(object)){
+                            const auto *race=unit->GetRaceModel();
+                            if(!race)Invalid("saved unit race unavailable");
+                            unit->SetRaceAnimationCoeffs(race->fAnimationCoeffs);
+                            auto id=unit->GetStartAnimationId();
+                            if(id!=0xffffffffu){auto *entry=unit->GetAnimationEntryByIndex(id);if(!entry)Invalid("saved animation unavailable");unit->SetCurrentAnimationEntry(entry);animation->SetAnimation(entry);}
+                            unit->RecalcAIParams();
+                        }
                     }
                     // Rebuild every history, including ownership and animation.
                     // SetUpdateMask() without a bit only marks the object dirty.
                     object->ExportStats();object->update.RestoreState();object->UpdateFrame();
-                    d.world->aiMap.AddObject(object);
+                    if(hasGeometry)d.world->aiMap.AddObject(object);
                 }
                 for(const auto &x:d.world->effects){x.second->SetUpdateMask();x.second->UpdateFrame();}
                 if(!d.terrain.IsEmpty()) {
