@@ -115,7 +115,7 @@ void SAIPath::Clear()
     bFirstTry = true;
     excludeVertices.RemoveAll();
     nPathCost = 0;
-    navigationGeneration=0;navigationPending=false;navigationGoal={};
+    navigationGeneration=0;navigationPending=false;navigationTurned=false;navigationGoal={};
     navigationPolicy=Navigation::GoalPolicy::Exact;navigationMaxLength=1.e6f;navigationMinDistance=0;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -2405,7 +2405,7 @@ bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpM
             if(std::hypot(AITile2Meter(last.point.x)-ptDst.x,AITile2Meter(last.point.y)-ptDst.y)<.01f){destination.position.z=last.supportZ;known=true;}
         }
     }
-    res.toGo.Clear();res.ptDestination=ptDst;res.bRouteFailed=false;
+    res.toGo.Clear();res.ptDestination=ptDst;res.bRouteFailed=false;res.navigationTurned=false;
     if(!std::isfinite(ptDst.x)||!std::isfinite(ptDst.y))return false;
     const bool inside=ptDst.x>=0&&ptDst.y>=0&&ptDst.x<AITile2Meter(float(XSize()))&&ptDst.y<AITile2Meter(float(YSize()));
     if(!inside&&goalPolicy==Navigation::GoalPolicy::Exact)return false;

@@ -772,6 +772,31 @@ bool NavigationWorld::Step(CUnit* unit,Navigation::Point from,Navigation::Point 
     }
     return true;
 }
+bool NavigationWorld::GuardTurn(CUnit* unit,SAIPath& path,float time,bool& pending) {
+    pending=false;auto* mesh=ForUnit(unit);if(!mesh)return false;
+    auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
+    const auto from=Position(unit,map);auto current=unit->navLocation;current.position=from;
+    float speed=0,angular=0;unit->GetSpeeds(speed,angular);
+    if(!std::isfinite(speed)||speed<=0)return false;
+    const float ahead=1.f+(Radius(unit)+.15f)*2.f/speed;
+    const int samples=std::clamp(int(std::ceil(ahead*speed/.16f)),2,128);
+    const int type=Type(unit,unit->GetAIClass());
+    for(int i=0;i<=samples;++i) {
+        CPlot3D point(Meter2AITile(from.x),Meter2AITile(from.y),0),direction;
+        bool rotating=false;float v=0,z=from.z;int x=-1,y=-1;
+        const bool active=unit->walker.GetPosition(unit->GetWorldBase(),path.curSegment,time+ahead*i/samples,rotating,point,direction,v,x,y,&z);
+        const Point desired{AITile2Meter(point.x),AITile2Meter(point.y),z};
+        if(!Finite(desired)||Distance(current.position,desired)>4.f)return false;
+        if((!dirtyObjects.empty()||!sourceDirty.empty())&&Pending(type,current.position,desired)){pending=true;return true;}
+        Location next;
+        // Exact constrained sweep, with no funnel, nearest-floor search or detour.
+        if(!Constrain(*mesh,current.position,desired,next,Height(unit),nullptr,&current,ExcludeClass(unit->GetAIClass()))||
+           std::hypot(next.position.x-desired.x,next.position.y-desired.y)>.02f||
+           std::abs(next.position.z-desired.z)>mesh->profile.climb+.001f)return false;
+        current=next;if(!active)break;
+    }
+    return true;
+}
 bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,Movement& move) {
     auto& world=*static_cast<CWorldServer*>(unit->GetWorld());auto& map=world.aiMap;
     auto& segment=path.curSegment;
@@ -787,11 +812,19 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
         if(!StartLocation(*mesh,from,support,Height(unit),Navigation::ExcludeClass(unit->GetAIClass()))||
            std::hypot(support.position.x-from.x,support.position.y-from.y)>.02f||std::abs(support.position.z-from.z)>mesh->profile.climb+.001f)return false;
         unit->navLocation=support;
+        if(path.navigationTurned)path.navigationGeneration=generation;
+        else {
         const auto goal=path.ptDestination;const auto goalSupport=path.navigationGoal;
         if(!map.NewPath(unit,goal,path,path.navigationMaxLength,path.navigationMinDistance,path.navigationPolicy,nullptr,&goalSupport))return false;
         if(path.navigationPending)return waiting();
         float speed=0,angular=0;unit->GetSpeeds(speed,angular);unit->walker.SetSpeeds(speed,angular);unit->walker.CreateWalkerRoute(path.curSegment);
         move.replanned=true;move.support=unit->navLocation;move.desired=from;wait=0;queues.erase(unit->GetID());return true;
+        }
+    }
+    if(path.navigationTurned) {
+        bool pending=false;
+        if(!GuardTurn(unit,path,time,pending))return false;
+        if(pending)return waiting();
     }
     if(!wait)queues.erase(unit->GetID());
     auto pos=unit->GetCP();pos.x=Meter2AITile(pos.x);pos.y=Meter2AITile(pos.y);
@@ -819,6 +852,7 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
     pos.z=move.support.position.z;
     auto* neighbour=map.CheckCircleCollision(unit,pos,&move.support);
     if(neighbour) {
+        if(path.navigationTurned){move.blocker=neighbour->GetID();return observed(false);}
         wait=(std::min)(wait+1,1000000u);
         auto& queue=queues[unit->GetID()];
         const Point goal{path.ptDestination.x,path.ptDestination.y,path.ptDestination.z};

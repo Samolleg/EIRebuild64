@@ -29,6 +29,29 @@ static const char LOCAL_FILE[] = __FILE__;
 #endif
 /////////////////////////////////////////////////////////////////////////////////////
 // SRouteUnit &&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&
+namespace {
+CPlot2D TurnPoint(CPlot2D p,float x,float y,float radians) {
+    const double c=std::cos(double(radians)),s=std::sin(double(radians)),dx=double(p.x)-x,dy=double(p.y)-y;
+    return CPlot2D(float(x+c*dx-s*dy),float(y+s*dx+c*dy));
+}
+}
+void CAIRoute::Turn(float x,float y,float radians) {
+    for(POSITION at=route.GetHeadPosition();at;) {
+        auto& node=route.GetNext(at);node.point=TurnPoint(node.point,x,y,radians);
+        node.nX=short(std::floor(node.point.x));node.nY=short(std::floor(node.point.y));
+        // supportZ is a height hint, not an address. The guard resolves each
+        // actual step from the actor's current Nav64 polygon on this floor.
+    }
+}
+void CAIFullRoute::Turn(float x,float y,float radians) {
+    start=TurnPoint(start,x,y,radians);fpStartAngle+=radians;
+    if(IsMoving()) {auto end=TurnPoint(CPlot2D(walk.fpFinishX,walk.fpFinishY),x,y,radians);walk.fpFinishX=end.x;walk.fpFinishY=end.y;route.Turn(x,y,radians);}
+}
+void CAIFullRoute::Face(float heading) {
+    fpStartAngle=heading;
+    if(moveType==Rotate)rotate.fpFinalAngle=heading;
+    if(moveType==AttackPoint)attack1.fpFinalAngle=heading;
+}
 SRouteUnit SRouteUnit::Move(EAIDirection dir)
 {
     switch (dir)
@@ -266,6 +289,26 @@ void CRouteWalker::CreateWalkerRoute(CAIFullRoute &route)
     } else fpDeltaAngle=0;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CRouteWalker::RestartAt(CAIFullRoute& route,CUnit* unit,int tick)
+{
+    float time=float(tick-route.nStartSegment),angle=fpStartAngle;int first=0;
+    for(int i=0;i<points.GetSize()-1;++i) {
+        auto& a=points[i];auto& b=points[i+1];
+        const float desired=a.GetAngle(),delta=std::remainder(desired-angle,FP_2PI);
+        const float turn=std::abs(delta)/(std::max)(.0001f,fpAngularSpeed);
+        const float duration=Distance(a.point,b.point)/a.fpSpeed;
+        first=i;
+        if(time<turn+duration)break;
+        time-=turn+duration;angle=desired;first=i+1;
+    }
+    // Retain the next corner, replacing the consumed prefix by the body position.
+    SRouteUnit node;
+    for(int i=0;i<=first&&!route.route.route.IsEmpty();++i)node=route.route.route.RemoveHead();
+    node.point=CPlot2D(Meter2AITile(unit->GetCP().x),Meter2AITile(unit->GetCP().y));
+    node.nX=short(std::floor(node.point.x));node.nY=short(std::floor(node.point.y));node.supportZ=unit->navLocation.position.z;
+    route.route.route.AddHead(node);route.start=node.point;
+    const auto facing=-unit->GetYAxis();route.fpStartAngle=std::atan2(facing.y,facing.x);route.nStartSegment=tick;
+}
 void CRouteWalker::StartRotation(float fpX, float fpY, float fpAngSpeed)
 {
     float fpAngle;

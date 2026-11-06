@@ -135,5 +135,6 @@ public:
     };
     // Shared by L1ExecMove and the offline release walker. Time is in game ticks.
     bool Move(CUnit*,SAIPath&,float time,unsigned& wait,Movement&);
+    bool GuardTurn(CUnit*,SAIPath&,float time,bool& pending);
 
 };

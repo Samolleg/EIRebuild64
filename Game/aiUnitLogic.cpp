@@ -2090,6 +2090,7 @@ void CUMPlayer::StartMoving(CAIUnitLogic &logic, bool bGroup)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUMPlayer::CommandUnit(CAIUnitLogic &logic)
 {
+    if(logic.GetUnitServer()->ProcessScriptWindAttack())return;
     bool bIsCombatMode = IsCombat(logic);
     if (auto* mod=ModRuntime::Current(); mod && !mod->CompanionSkillAI(*logic.GetUnit()))
         logic.caster.ReportCompanionDecision(logic,{},"command","flag_missing");
@@ -3470,6 +3471,7 @@ void CAIUnitLogic::ExecTurnNLook()
 /////////////////////////////////////////////////////////////////////////////////////
 void CAIUnitLogic::ExecAttack()
 {
+    if(pUnitServer->ProcessScriptWindAttack())return;
     if (pTarget.IsEmpty())
     {
         state = US_IDLE;
