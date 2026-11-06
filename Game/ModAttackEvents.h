@@ -1,5 +1,4 @@
 #pragma once
-#include "GameJournal.h"
 #include "Player.h"
 #include "Unit.h"
 #include "WorldServer.h"
@@ -69,9 +68,8 @@ struct State {
         if (owner) {
             auto& vars = owner->party.vars;
             auto found = vars.find(SequenceName());
-            GameJournal::Variable(&vars, SequenceName().c_str(), found != vars.end(),
-                                  found == vars.end() ? 0.f : found->second, float(sequence), false);
-            // Same nonzero GS write as SetVar, without per-delivery key construction.
+            // Internal serialized cursor, not a second file-log event for every hit.
+            // The existing combat journal already observes the damage delivery.
             if (found == vars.end()) vars.emplace(SequenceName(), float(sequence));
             else found->second = float(sequence);
         }
