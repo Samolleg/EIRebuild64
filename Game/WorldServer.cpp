@@ -2388,7 +2388,7 @@ bool CWorldServer::CheckAddObject(CMapObject *pObj)
     return bOk;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-int CWorldServer::AddMapObject(CMEBasicObject *pMEObject)
+int CWorldServer::AddMapObject(CMEBasicObject *pMEObject,bool scriptSpawn)
 {
     aiMap.Navigation().SourceObject(*pMEObject,aiMap);
     int nResID;
@@ -2594,8 +2594,13 @@ int CWorldServer::AddMapObject(CMEBasicObject *pMEObject)
         pObj->LoadFigureBoundingVolumes(pMapEditObj->p_szTemplate);
         pObj->RecalcAIClass();
 
-        if (pObj->WhoAmI() == HPC_UNIT)
+        if (pObj->WhoAmI() == HPC_UNIT) {
             ((CUnitServer *)((CUnit *)pObj)->GetUnitSpecific())->InitializeUnit();
+            if(scriptSpawn&&!aiMap.Navigation().Spawn(static_cast<CUnit*>(pObj),aiMap)){
+                aiMap.Navigation().ForgetUnit(pObj->GetID());
+                pMapEditObj->p_lpMapObject=nullptr;pObj->Release();return -2;
+            }
+        }
         ASSERT(mapObjects.Seek(pObj->GetID()) == NULL);
         mapObjects.SetAt(pObj->GetID(), pObj);
         AddToDynamic(pObj);

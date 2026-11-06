@@ -1088,6 +1088,15 @@ void NavigationWorld::Advance() {
     CorePerf::Scope total(CorePerf::NavigationTotal);
     try{if(!flyingUnits.empty()&&!meshes[Flying])LoadFlying();FlushFlight();if(!dirtyObjects.empty())SyncObjects();UpdateSources(false);}catch(const std::exception& e) {error=e.what();GameJournal::Event("NAV","update_failed","reason=%s",GameJournal::Quote(e.what()).c_str());}
 }
+bool NavigationWorld::Spawn(CUnit* unit,CAIMap& map) {
+    auto* mesh=ForUnit(unit);if(!mesh)return false;
+    const auto point=Position(unit,map);Navigation::Location location;
+    if(!Support(unit,point,location)||
+       std::hypot(location.position.x-point.x,location.position.y-point.y)>.001f||
+       std::abs(location.position.z-point.z)>mesh->profile.climb+mesh->profile.cellHeight)return false;
+    if(map.CheckCircleCollision(unit,unit->GetCP(),&location,false))return false;
+    unit->navLocation=location;return true;
+}
 bool NavigationWorld::Place(CUnit* unit,CAIMap& map) {
     if(!loaded)return false;auto* mesh=ForUnit(unit);if(!mesh)return false;
     auto from=Position(unit,map);if((!dirtyObjects.empty()||!sourceDirty.empty())&&Pending(Type(unit,unit->GetAIClass()),from,from))return false;Navigation::Location location;

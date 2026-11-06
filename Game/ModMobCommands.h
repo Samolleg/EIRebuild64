@@ -11,6 +11,7 @@
 #include "ModInvincible.h"
 #include "ModChase.h"
 #include "ModScriptMotion.h"
+#include "ModUnitSpawns.h"
 #include "MapObjectManager.h"
 #include "ModRegisteredLoot.h"
 #include "ZoneIce.h"
@@ -31,6 +32,8 @@ namespace ModMob {
 struct Entry {int id;const char*name;const char*format;bool ready;};
 inline const Entry registry[]={
  {276,"ChaseTrapDamage","offf",true},
+ {279,"SpawnUnitFromDB","fsffff",true},
+ {278,"DespawnUnit","f",true},
  {290,"SetParticleFlow","fffff",true},
  {287,"SetParticleSourcePower","fff",true},
  {291,"SetInvincible","osf",true},
@@ -380,6 +383,14 @@ inline bool Void(SSCCmd&cmd,int*index=nullptr,int count=0,int*sleep=nullptr,BOOL
   if(!entry||entry->dwEntryIndex>=16777215u)return Reject(e->name,"Invalid animation");
   vars->SetVar(key.c_str(),float(entry->dwEntryIndex+1));
   if(server&&!serverUnit->IsInvalid())server->QueueAnimationLoop(entry->dwEntryIndex);
+  return true;
+ }
+ if(cmd.command==279||cmd.command==278){
+  ModUnitSpawns::Status(0,1);
+  try{Validate(*e,cmd);}catch(const ArgumentError& error){return Reject(e->name,error.what());}
+  const auto& a=cmd.params;
+  if(cmd.command==279)ModUnitSpawns::Spawn(a[0],cmd.szParams[0],a[1],a[2],a[3],a[4]);
+  else ModUnitSpawns::Despawn(a[0]);
   return true;
  }
  if(cmd.command==290||cmd.command==287){

@@ -230,7 +230,8 @@ public:
     void AddPlayersGlobalTime(float fpShift = 0);
     // Create map object from map edit object
     bool CheckAddObject(CMapObject *pObj);
-    int AddMapObject(CMEBasicObject *pMEObject);
+    // scriptSpawn validates Nav64 placement before publication; -2 means no support/space.
+    int AddMapObject(CMEBasicObject *pMEObject,bool scriptSpawn=false);
     void RemoveMapObject(int nID);
     void RemoveAllUnits();
     virtual CMapObject *GetMapObject(int nID);
