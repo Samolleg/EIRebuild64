@@ -15,7 +15,7 @@ namespace ModFinalGolem {
 namespace {
 bool armed=false;
 float Ground(float x,float y) {return theWorldServer.GetZValue(x,y);}
-CPlot3D WorldPosition(CMapObject& object) {auto p=object.GetCP();p.z+=Ground(p.x,p.y);return p;}
+CPlot3D WorldPosition(CMapObject& object) {return object.GetCP();}
 std::array<float,3> Point(CPlot3D p) {return {p.x,p.y,p.z};}
 Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> Texture(CMapObject* object,bool secondary=false) {
  if(!object||object->IsInvalid()||!object->FinalDataLoading())return {};
@@ -25,17 +25,25 @@ Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> Texture(CMapObject* object,bool
  return surface?surface->GetShaderResource():Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>{};
 }
 }
+void SavedPose(const char*,std::array<owned::EmbeddedGolemNode,30>&);
 void ArmVisual() noexcept {armed=true;}
 void ResetVisual() noexcept {armed=false;}
 void Draw() {
  if(!armed)return;
  const bool active=Active(),walls=ModEncounter::Arena(theWorldServer)&&Read("EFC.Walls")==1;
- if(!active&&!walls){armed=false;return;}
+ if(!active&&!walls&&Read("FGL.DeathBorn")<=0){armed=false;return;}
  auto* boss=theWorld.GetUnit(990400);if(!boss||boss->IsInvalid())return;
  auto* dx=theRenderer.GetD3D();if(!dx||!dx->IsOwnedWorldActive())return;
  OwnedRender::E1WorldFrame world;if(!OwnedRender::E1ReadWorldFrame(world)||!world.camera.valid||!world.lightingValid)return;
  owned::EmbeddedGolemInput input;
  input.world_epoch=OwnedRender::E1Scene().Epoch();input.incarnation=boss->GetRTID();input.boss_id=990400;input.tick=Now();
+ input.hard=ModEncounter::Hard(theWorldServer);input.death_born=Read("FGL.DeathBorn");input.detach_born=Read("FGL.DetachBorn");input.detach_from=int(Read("FGL.DetachFrom"));input.detach_to=int(Read("FGL.DetachTo"));
+ input.death_base={Read("FGL.DeathX"),Read("FGL.DeathY"),Read("FGL.DeathZ")};
+ struct PoseCache {std::uint64_t epoch=0;float born=-1;std::array<owned::EmbeddedGolemNode,30> nodes{};};
+ static PoseCache deathCache,detachCache;
+ auto saved=[&](const char* name,float born,PoseCache& cache){if(cache.epoch!=input.world_epoch||cache.born!=born){SavedPose(name,cache.nodes);cache.epoch=input.world_epoch;cache.born=born;}return cache.nodes;};
+ if(input.death_born>0)input.death_pose=saved("Death",input.death_born,deathCache);
+ if(input.detach_born>0&&Now()-input.detach_born<=126)input.detached_pose=saved("Detach",input.detach_born,detachCache);
  input.stage=int(Read("DJW.Stage"));input.phase=int(Read("FGL.Phase"));input.active=active;input.walls=walls;input.dead=boss->IsDead()!=FALSE;
  input.base=Point(WorldPosition(*boss));input.camera=Point(theCamera.GetCP());input.world_to_clip=world.camera.world_to_clip;input.ground=Ground;
  input.timer=Read("FGL.Timer");input.target_x=Read("FGL.TargetX");input.target_y=Read("FGL.TargetY");
@@ -68,3 +76,5 @@ void Draw() {
  dx->SubmitGolemVisual(input,textures);
 }
 }
+
+#include "ModGolemAppearance.inl"

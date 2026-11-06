@@ -1,5 +1,6 @@
 #pragma once
 class CUnit;
+class CObject3D;
 struct SRPGAttackPortion;
 namespace ModFinalGolem {
 // Source implementation of C19. Deliberately absent from the MOB registry
@@ -10,6 +11,9 @@ void CaptureDamageTypes(CUnit* source,const SRPGAttackPortion& portion);
 float Speed(CUnit& unit,float native);
 bool RamSpeed(CUnit& unit,float& speed);
 float Slow(CUnit& unit);
+void CaptureVisualState(bool death,int from,int to);
+void Died(CUnit& unit);
+bool PrepareAppearance(CObject3D& object);
 void Draw();
 void ArmVisual() noexcept;
 void ResetVisual() noexcept;

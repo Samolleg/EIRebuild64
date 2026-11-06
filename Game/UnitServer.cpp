@@ -413,6 +413,7 @@ void CUnitServer::LowSetDead(BOOL bDead)
         return;
     pWS->aiMap.RemoveObject(lpUnit);
     lpUnit->bDead = bDead;
+    if(bDead)ModFinalGolem::Died(*lpUnit);
     BOOL bRv = pWS->aiMap.AddObject(lpUnit);
     ASSERT(bRv);
     if (bDead)

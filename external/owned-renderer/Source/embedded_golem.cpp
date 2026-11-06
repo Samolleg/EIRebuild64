@@ -2,10 +2,11 @@
 #include "embedded_golem.h"
 #include <functional>
 #include <stdexcept>
+#include <cstring>
 namespace owned {namespace golem {
 constexpr float CrystalTipZ=11.3f,ShieldRadius=3.4f,ShieldFoot=.045f;
 #include "embedded_arena_geometry.inl"
-#include "embedded_golem_blades.inl"
+#include "embedded_golem_resource.inl"
 struct GolemQuaternion {float w,x,y,z;};
 Vec GolemRotate(GolemQuaternion q,Vec p){Vec v={q.x,q.y,q.z};return p+Cross(v,Cross(v,p)+p*q.w)*2.f;}
 float Clamp(float v,float lo,float hi){return (std::max)(lo,(std::min)(hi,v));}
@@ -71,7 +72,7 @@ HRESULT Submit(Renderer& renderer,Mesh& mesh,const EmbeddedGolemInput& input,
 }
 
 struct Producer {
- const EmbeddedGolemInput& input;const std::array<ID3D11ShaderResourceView*,3>& textures;
+ const EmbeddedGolemInput& input;const GolemResource& resource;const std::array<ID3D11ShaderResourceView*,3>& textures;
  std::function<void(Mesh&,ID3D11ShaderResourceView*,unsigned,bool,bool)> draw;
  Vec Base() const {return {input.base[0],input.base[1],input.base[2]};}
  const EmbeddedGolemNode* Node(int index) const {return input.nodes[index].valid?&input.nodes[index]:nullptr;}
@@ -82,11 +83,12 @@ struct Producer {
  float GolemGround(float x,float y) const {if(!input.ground)throw std::runtime_error("golem ground query missing");float z=input.ground(x,y);if(!std::isfinite(z))throw std::runtime_error("golem ground query failed");return z;}
  Vec GolemGroundPosition(Vec relative) const {return {relative.x,relative.y,GolemGround(relative.x,relative.y)+relative.z};}
 #include "embedded_golem_geometry.inl"
+#include "embedded_golem_damage.inl"
 };
 } // namespace golem
 HRESULT Renderer::draw_embedded_golem(const EmbeddedGolemInput& input,const FixedState& frame,const std::array<ID3D11ShaderResourceView*,3>& textures) try {
  SCENE_ENTRY("golem_visual");using namespace golem;
- if(!input.world_epoch||input.boss_id!=990400||(!input.active&&!input.walls)||!input.ground)return E_INVALIDARG;
+ if(!input.world_epoch||input.boss_id!=990400||(!input.active&&!input.walls&&input.death_born<=0)||!input.ground)return E_INVALIDARG;
  const auto revision=native_static_content_revision_;
  struct Restore {std::uint64_t& value;std::uint64_t saved;~Restore(){value=saved;}} restore{native_static_content_revision_,revision};
  HRESULT failure=S_OK;++embedded_golem_cache_.serial;unsigned slot=0;
@@ -97,17 +99,17 @@ HRESULT Renderer::draw_embedded_golem(const EmbeddedGolemInput& input,const Fixe
   const bool opaque=!additive&&(color>>24)==255;
   auto hr=Submit(*this,mesh,input,frame,texture,color,embedded_golem_cache_,slot++,lit,opaque,additive);if(FAILED(hr)&&SUCCEEDED(failure))failure=hr;
  };
- Producer p{input,textures,draw};const float time=input.tick/18.f;
- const float z=p.GolemGround(62,44);Vec corners[]={{28,26,z},{100,26,z},{100,62,z},{28,62,z}};
+ Producer p{input,GolemResources(),textures,draw};const float time=input.tick/18.f;
+ const float z=p.GolemGround(input.target_x,input.target_y);Vec corners[]={{28,26,0},{100,26,0},{100,62,0},{28,62,0}};
  struct Side{int index;float distance;};std::array<Side,4> sides{};Vec camera{input.camera[0],input.camera[1],input.camera[2]};
  for(int i=0;i<4;++i){auto d=(corners[i]+corners[(i+1)%4])*.5f-camera;sides[i]={i,Dot(d,d)};}
  std::sort(sides.begin(),sides.end(),[](const Side&a,const Side&b){return a.distance>b.distance;});
- for(const auto& side:sides)for(int band=0;band<5;++band){unsigned alpha=band==4?18:band==3?30:42;
+ if(input.active||input.walls)for(const auto& side:sides)for(int band=0;band<5;++band){unsigned alpha=band==4?18:band==3?30:42;
   auto wall=p.FinalWall(corners[side.index],corners[(side.index+1)%4],time,band,false);draw(wall,nullptr,(alpha<<24)|0xe6360b,false,false);
   if(textures[2]){auto web=p.FinalWall(corners[side.index],corners[(side.index+1)%4],time,band,true);draw(web,textures[2],((alpha+35)<<24)|0xff8a32,false,true);}
  }
  if(input.active&&input.phase==2){auto beacon=p.FinalBeacon({input.target_x,input.target_y,z},time);draw(beacon,nullptr,0xedff942b,false,true);}
- if(input.active){if(!textures[0]||!textures[1])return HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND);p.Stage(time);
+ if(input.active||input.death_born>0){if(!GolemResources().valid||!textures[0]||!textures[1])return HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND);p.Fractures();if(input.active&&!input.dead)p.Stage(time);
   p.ReflectAuraGeometry(0,float(input.tick),camera,[&](Mesh& m,unsigned color){draw(m,nullptr,color,false,true);});
   p.ReflectGeometry(float(input.tick),[&](Mesh& m,unsigned color,bool additive){draw(m,nullptr,color,false,additive);});}
  return failure;

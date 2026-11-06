@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModFinalGolem.h"
 #include "ModEncounter.h"
 #include "CorePerf.h"
 #include "OwnedRender/E1PerfDiagnostics.h"
@@ -954,6 +955,11 @@ bool CObject3DClientSpecific::PrepareOwnedResources(bool publishAppearance)
     }
     if(pWoundsTexture && pWoundsTexture->GetSurface())
         pWoundsTexture->GetSurface()->EnsureOwnedSurfacePublished();
+    if(lpObject->GetID()==990400 && !ModFinalGolem::PrepareAppearance(*static_cast<CObject3D*>(lpObject))) {
+        const auto resource=OwnedRender::E1Scene().Resource(lpObject);
+        if(resource.serial)OwnedRender::E1Scene().Scene().visual_reject(resource,owned::RetainedVisualStatus::unsupported_appearance,"golem.authored_stage_material","host.golem");
+        return false;
+    }
     if (publishAppearance && !ownedAppearanceAttempted)
     {
         ownedAppearanceAttempted = true;

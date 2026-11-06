@@ -1,3 +1,4 @@
+EID3D11_GOLEM_V1 RCDATA "Assets\\golem\\golem-v1.bin"
 EID3D11_ARENA_FRAGMENTS_V1 RCDATA "Assets\\arena\\fragments-v1.bin"
 
 EID3D11_CAMP_FRAME RCDATA "Assets\\camp\\stone-bronze-frame.png"
