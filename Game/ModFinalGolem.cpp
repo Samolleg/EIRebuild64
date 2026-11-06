@@ -64,7 +64,7 @@ void Melee(CUnit* boss,CUnit* target) {
 
 void Action(CUnit* boss,CUnit* other,int op) {
  if(op<0||op>28)throw std::runtime_error("FinalGolemAction operation must be 0..28");
- if(op>=24)throw std::runtime_error("FinalGolemAction hard operation is not implemented until packages 16-18");
+ if(op>=24&&op<=26)throw std::runtime_error("FinalGolemAction hard combat is not implemented until package 18");
  if(!ModEncounter::Arena(theWorldServer)||!Valid(boss,false)||boss->GetID()!=990400||!Server(boss))
   throw std::runtime_error("FinalGolemAction requires arena boss 990400 on the server");
  if(ModEncounter::Hard(theWorldServer)&&op<21)throw std::runtime_error("hard golem controller is not implemented until package 18");
@@ -94,6 +94,8 @@ void Action(CUnit* boss,CUnit* other,int op) {
  if(op==18){AimLaser(boss);return;}
  if(op==19){BeginFire(boss);return;}
  if(op==20){HeroEffects(boss,other);return;}
+ if(op==27){CollapseTick(false);return;}
+ if(op==28){CollapseTick(true);return;}
  if(!Valid(other,false)||!Server(other)||!Server(other)->EncounterPerformance(op))throw std::runtime_error("encounter animation could not be applied");
 }
 void CaptureDamageTypes(CUnit* source,const SRPGAttackPortion& portion) {

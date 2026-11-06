@@ -95,6 +95,7 @@ public:
     // Service/MOB seam: z is terrain-relative, yaw is radians. Presence controls
     // AI/Nav participation (falling scenery remains a world/render object).
     void TransformObject(int id,Navigation::Point position,float yaw,bool present);
+    void TransformObject(int id,Navigation::Point position,const std::array<float,4>& rotation,bool present);
     bool ObjectPresent(int id) const { return !detachedObjects.count(id); }
     void ForgetObject(int id) { detachedObjects.erase(id); }
     void Object(CMapObject* object,bool remove,CAIMap& map);

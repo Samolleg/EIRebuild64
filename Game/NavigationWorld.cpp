@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 #include "NavigationWorld.h"
 #include "ModArenaBoundary.h"
+#include "ModFinalGolem.h"
 #include "NavigationBake.h"
 #include "NavigationObject.h"
 #include "../Navigation/Profiles.h"
@@ -168,9 +169,9 @@ bool NavigationWorld::Load(const std::filesystem::path& inputDirectory, bool syn
         }
         if(synchronize&&owner)for(const auto& entry:owner->mapObjects)Object(entry.second,false,owner->aiMap);
         for(auto& mesh:meshes)if(mesh){mesh->sources=sources;IndexSurfaces(*mesh);}
-        const auto syncStart=std::chrono::steady_clock::now();loaded=true;if(synchronize)SyncObjects(true);
+        const auto syncStart=std::chrono::steady_clock::now();loaded=true;if(synchronize){ModFinalGolem::RestoreCollapse();SyncObjects(true);}
         const double syncMs=milliseconds(syncStart);
-        const auto initialTiles=sourceDirty.size();const auto updateStart=std::chrono::steady_clock::now();if(synchronize)UpdateSources(true);
+        const auto initialTiles=sourceDirty.size();const auto updateStart=std::chrono::steady_clock::now();if(synchronize){UpdateSources(true);ModFinalGolem::CommitCollapse();}
         if(ModCliTool::CurrentKind()==ModCliTool::Kind::NavBake) {
             printf("LOAD_STAGES bodies_ms=%.3f catalogue_ms=%.3f source_read_ms=%.3f source_decode_ms=%.3f sync_ms=%.3f update_ms=%.3f\n",bodyMs,catalogueMs,sourceReadMs,sourceDecodeMs,syncMs,milliseconds(updateStart));
             printf("LOAD_SOURCE_PHASE unpack_ms=%.3f arrays_ms=%.3f parse_ms=%.3f\n",sourceTimes[0],sourceTimes[1],sourceTimes[2]);
@@ -282,15 +283,23 @@ void NavigationWorld::SourceMob(const char* name,CAIMap& map) {
     for(const auto& entry:objects)SourceObject(*entry.second,map);
 }
 void NavigationWorld::TransformObject(int id,Navigation::Point position,float yaw,bool present) {
+ if(!owner||!std::isfinite(yaw))throw std::runtime_error("Nav64: invalid scenery yaw");
+ auto* object=owner->GetMapObject(id);if(!object)throw std::runtime_error("Nav64: scenery object missing");
+ const auto q=object->GetOrientation();const auto axis=q.RotateX();auto rotation=CQuaternion(CPlot3D(0,0,1),yaw-std::atan2(axis.y,axis.x))*q;
+ std::array<float,4> value;rotation.GetComponents(value[0],value[1],value[2],value[3]);TransformObject(id,position,value,present);
+}
+void NavigationWorld::TransformObject(int id,Navigation::Point position,const std::array<float,4>& qv,bool present) {
     if(!loaded||!owner)throw std::runtime_error("Nav64: scene is not loaded");
     auto* object=owner->GetMapObject(id);
     if(!object||dynamic_cast<CUnit*>(object)||!NavigationObject(object)||object->WhoAmI()==HPC_MAGICTRAP||object->IsInvalid())
         throw std::runtime_error("Nav64: transform requires an existing scenery object");
-    if(!Finite(position)||!std::isfinite(yaw)||position.x<0||position.y<0||
+    if(!Finite(position)||!std::all_of(qv.begin(),qv.end(),[](float v){return std::isfinite(v);})||position.x<0||position.y<0||
        !owner->aiMap.TileInBounds(Float2AITile(position.x),Float2AITile(position.y)))
         throw std::runtime_error("Nav64: invalid scenery transform");
     auto& map=owner->aiMap;const auto q=object->GetOrientation();const auto x=q.RotateX();
-    const auto rotation=CQuaternion(CPlot3D(0,0,1),yaw-std::atan2(x.y,x.x))*q;
+    const CQuaternion rotation(qv[0],qv[1],qv[2],qv[3]);
+    const float norm=qv[0]*qv[0]+qv[1]*qv[1]+qv[2]*qv[2]+qv[3]*qv[3];
+    if(std::fabs(norm-1.f)>.001f)throw std::runtime_error("Nav64: non-unit scenery rotation");
     const bool wasPresent=!detachedObjects.count(id);const auto previous=object->GetCP();
     if(wasPresent&&!map.RemoveObject(object))throw std::runtime_error("Nav64: scenery is not registered in the AI map");
     object->SetCP(CPlot3D(position.x,position.y,position.z));object->SetOrientation(rotation);
@@ -303,7 +312,7 @@ void NavigationWorld::TransformObject(int id,Navigation::Point position,float ya
         }
     } else {detachedObjects.insert(id);Object(object,true,map);}
     object->SetUpdateMask(CMapObject::VLD_MASK_POSROT);
-    GameJournal::Event("NAV","object_transform","NID=%d position=(%.3f,%.3f,%.3f) yaw=%.6f present=%d",id,position.x,position.y,position.z,yaw,int(present));
+    GameJournal::Event("NAV","object_transform","NID=%d position=(%.3f,%.3f,%.3f) present=%d",id,position.x,position.y,position.z,int(present));
 }
 std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navigation::Bytes& table,CWorldServer& world) {
     if(!baker)throw std::runtime_error("Nav64: baking requires NavBake tool");
@@ -1164,7 +1173,7 @@ void NavigationWorld::PublishSources() {
 void NavigationWorld::Advance() {
     if(!loaded||(dirtyObjects.empty()&&sourceDirty.empty()&&!sourceJob.valid()))return;
     CorePerf::Scope total(CorePerf::NavigationTotal);
-    try{if(!flyingUnits.empty()&&!meshes[Flying])LoadFlying();FlushFlight();if(!dirtyObjects.empty())SyncObjects();UpdateSources(false);}catch(const std::exception& e) {error=e.what();GameJournal::Event("NAV","update_failed","reason=%s",GameJournal::Quote(e.what()).c_str());}
+    try{if(!flyingUnits.empty()&&!meshes[Flying])LoadFlying();FlushFlight();if(!dirtyObjects.empty())SyncObjects();UpdateSources(false);ModFinalGolem::CommitCollapse();}catch(const std::exception& e) {error=e.what();GameJournal::Event("NAV","update_failed","reason=%s",GameJournal::Quote(e.what()).c_str());}
 }
 bool NavigationWorld::Spawn(CUnit* unit,CAIMap& map) {
     auto* mesh=ForUnit(unit);if(!mesh)return false;
