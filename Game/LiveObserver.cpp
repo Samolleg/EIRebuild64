@@ -108,7 +108,7 @@ bool saveIsolated=false; // game thread only; deliberately survives load/new gam
 bool IsCommand(const std::string& method) {
     return method=="load_save"||method=="new_game"||method=="enter_zone"||method=="save_game"||
            method=="unit_move"||method=="unit_teleport"||method=="pause"||method=="quit"||
-           method=="set_global"||method=="object_transform";
+           method=="set_global"||method=="object_transform"||method=="god_mode";
 }
 
 json Error(const char* message) {return {{"ok",false},{"error",message},{"truncated",false}};}
@@ -146,7 +146,7 @@ json ExecutingStatus() {
     std::lock_guard<std::mutex> lock(operationMutex);
     if(!operation.inFlight||(!operation.executing&&operation.applied))return nullptr;
     json result={{"ok",operation.error.empty()},{"pid",GetCurrentProcessId()},
-                 {"status_scope","operation_only"},{"main_thread_responding",false},
+                 {"status_scope","operation_only"},{"main_thread_responding",false},{"god",nullptr},
                  {"operation",OperationJsonLocked()},{"truncated",false}};
     if(!operation.error.empty())result["error"]="game is not responding; see journal";
     return result;
@@ -678,14 +678,16 @@ json Status() {
     if(!world.bMapLoaded&&currentOperation.at("in_flight").get<bool>())
         return {{"ok",true},{"pid",GetCurrentProcessId()},
                 {"status_scope","operation_only"},{"main_thread_responding",true},
-                {"map_loaded",false},{"operation",currentOperation},{"truncated",false}};
+                {"map_loaded",false},{"god",nullptr},{"operation",currentOperation},{"truncated",false}};
     static const char* const screens[]={"none","mission","main_menu","base","global_map","camp","autoplay","debug","endgame","exchange"};
     const int screen=int(world.curInterface);
     const bool combat=world.IsCombatPause(),modal=theInterface.GetModalPause(),editor=OwnedRender::E3EditorPaused();
     const bool background=OwnedRender::E2BackgroundPaused(NGame::hWnd);
+    const auto* player=world.bMapLoaded?world.GetPlayer(0):nullptr;
     json result={{"ok",true},{"pid",GetCurrentProcessId()},{"map_loaded",bool(world.bMapLoaded)},
                  {"mode",screen},{"screen",screen>=0&&screen<10?screens[screen]:"unknown"},
-                 {"server_mode",int(world.GetServerMode())},{"paused",combat||modal||editor||background},
+                 {"server_mode",int(world.GetServerMode())},{"god",player?json(int(player->bGod)):json(nullptr)},
+                 {"paused",combat||modal||editor||background},
                  {"pause_reasons",{{"combat",combat},{"modal",modal},{"editor",editor},{"background",background}}},
                  {"camera",Point(theCamera.GetCP())},{"camera_anchor",Point(theCamera.GetAnchorPoint())},
                  {"truncated",false}};
@@ -1072,6 +1074,17 @@ bool Command(Job& job) {
         OperationApplied("save_game",saved);
         job.response=saved?json{{"ok",true},{"status","done"},{"name",name},{"operation_id",id},{"truncated",false}}:Error("save failed; see journal");
         return true;
+    }
+    if(method=="god_mode") {
+        const auto& value=params.at("level");
+        if(!value.is_number_integer()||value<0||value>3)
+            throw std::runtime_error("level must be an integer from 0 to 3");
+        auto* player=theWorldServer.GetPlayer(0);
+        const int previous=player->bGod,level=value.get<int>();
+        // The same server-side party player field as SC_GODMODE.
+        player->bGod=static_cast<BYTE>(level);
+        job.response={{"ok",true},{"status","done"},{"player",0},
+            {"previous",previous},{"value",int(player->bGod)},{"truncated",false}};return true;
     }
     if(method=="set_global") {
         const auto& key=params.at("name");
