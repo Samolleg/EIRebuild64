@@ -51,7 +51,7 @@ struct Location {
     // Transient. Never serialized: rebuilding a tile invalidates Detour references.
     std::uint64_t polygon = 0, generation = 0;
 };
-enum class Status { Complete, NoMesh, Invalid, NoStart, NoGoal, NoPath, Limit, TooLong };
+enum class Status { Complete, NoMesh, Invalid, NoStart, NoGoal, NoPath, Limit, TooLong, Updating };
 const char* StatusName(Status status);
 // Physical standing-unit footprint, used only by one synchronous path query.
 struct Obstacle { Point position; float radius=0,height=0; int id=0; };

@@ -108,7 +108,7 @@ bool saveIsolated=false; // game thread only; deliberately survives load/new gam
 bool IsCommand(const std::string& method) {
     return method=="load_save"||method=="new_game"||method=="enter_zone"||method=="save_game"||
            method=="unit_move"||method=="unit_teleport"||method=="pause"||method=="quit"||
-           method=="set_global";
+           method=="set_global"||method=="object_transform";
 }
 
 json Error(const char* message) {return {{"ok",false},{"error",message},{"truncated",false}};}
@@ -919,6 +919,9 @@ bool Nav(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
         };
         const auto start=path?point("ax","ay","az"):point("x","y","z");
         const auto goal=path?point("bx","by","bz"):Navigation::Point{};
+        if(navigation.ObserverUpdating(type)) {
+            job.response={{"ok",true},{"profile",profile},{"status","updating"},{"pending",true},{"truncated",false}};return true;
+        }
         job.mesh=navigation.ObserverMesh(type);
         if(!job.mesh){job.response=Error("runtime navigation profile is not loaded");return true;}
         job.world=&world;job.worldId=world.GetRTID();job.navProfile=type;job.navRevision=navigation.ObserverRevision();
@@ -933,7 +936,7 @@ bool Nav(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
         job.response={{"ok",true},{"profile",Navigation::Agents[job.navProfile].name},
             {"status",Navigation::StatusName(result.status)},{"truncated",result.truncated},
             {"dynamic_units_considered",false},{"height_basis","representative profile, not unit body or pose"},
-            {"source",Location(result.source)}};
+            {"source",Location(result.source)},{"navigation_generation",job.mesh->generation},{"pending",false}};
         if(path) {
             job.response["goal"]=Location(result.goal);job.response["points"]=json::array();
             for(const auto& point:result.points)job.response["points"].push_back(Location(point));
@@ -1067,6 +1070,20 @@ bool Command(Job& job) {
         server->SetVar(name.c_str(),stored);
         job.response={{"ok",true},{"status","done"},{"scope","party"},{"player",0},
             {"name",name},{"previous",previous},{"value",stored},{"truncated",false}};return true;
+    }
+    if(method=="object_transform") {
+        // Service-only entry; future MOB owners call the same typed Nav seam.
+        const auto& id=params.at("id");
+        if(!id.is_number_integer()||id<0||id>INT_MAX)throw std::runtime_error("invalid scenery id");
+        if(!params.contains("z"))throw std::runtime_error("z is required and is terrain-relative");
+        const auto point=CommandPoint(params);const auto& angle=params.at("yaw");
+        if(!angle.is_number()||!std::isfinite(angle.get<double>())||std::abs(angle.get<double>())>1.e6)
+            throw std::runtime_error("yaw must be finite radians");
+        if(!params.at("present").is_boolean())throw std::runtime_error("present must be boolean");
+        auto& navigation=theWorldServer.aiMap.Navigation();
+        navigation.TransformObject(id.get<int>(),{point.x,point.y,point.z},angle.get<float>(),params.at("present").get<bool>());
+        job.response={{"ok",true},{"status","queued"},{"service",true},{"id",id},{"position",{point.x,point.y,point.z}},
+            {"yaw",angle},{"navigation_present",navigation.ObjectPresent(id.get<int>())},{"truncated",false}};return true;
     }
     if(method=="pause") {
         if(!params.at("on").is_boolean())throw std::runtime_error("on must be boolean");

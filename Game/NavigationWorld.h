@@ -2,6 +2,7 @@
 #include "../Navigation/Query.h"
 #include "../Navigation/BodyTable.h"
 #include "../Navigation/Profiles.h"
+#include "../Navigation/SceneTransform.h"
 #include <filesystem>
 #include <future>
 #include <deque>
@@ -15,6 +16,7 @@ class CAIRoute;
 class CAIFullRoute;
 struct SAIPath;
 class NavigationBake;
+class CMEBasicObject;
 class NavigationWorld {
     std::array<std::unique_ptr<Navigation::Mesh>,Navigation::AgentCount> meshes;
     Navigation::BodyTable bodyTable;
@@ -41,6 +43,11 @@ class NavigationWorld {
     std::set<int> bakedStatic,dirtyObjects;
     unsigned updateProfile=0;
     std::shared_ptr<Navigation::Geometry> sources;
+    std::shared_ptr<const Navigation::Geometry> originalSources;
+    CWorldServer* owner=nullptr;
+    std::map<int,Navigation::SceneTransform> sourceTransforms,liveTransforms,appliedTransforms;
+    std::set<int> detachedObjects;
+    std::map<std::tuple<int,int,int>,std::unique_ptr<Navigation::Mesh>> preparedTiles;
     std::set<int> absentStatic;
     std::set<std::tuple<int,int,int>> sourceDirty;
     std::future<std::unique_ptr<Navigation::Mesh>> sourceJob;
@@ -67,6 +74,10 @@ class NavigationWorld {
     void QueueBox(const Navigation::Solid& box);
     bool Dynamic(int id) const { return !bakedStatic.count(id); }
     void SyncObjects(bool initial=false);
+    bool Pending(int profile) const;
+    bool Pending(int profile,Navigation::Point from,Navigation::Point to) const;
+    void PublishSources();
+    void SourceMob(const char* name,CAIMap& map);
     const Navigation::BodySize& Body(CUnit* unit);
     int Type(CUnit* unit,int aiClass);
     float Height(CUnit* unit,int aiClass=3);
@@ -79,11 +90,17 @@ public:
     std::unique_ptr<NavigationWorld> PrepareVariant(bool ice);
     void CommitVariant(std::unique_ptr<NavigationWorld> candidate, CWorldServer& world);
     Navigation::Geometry* Terrain(); // Null in game sessions.
-    void Scene(const char* mpr,const char* mob);
+    void Scene(const char* mpr,const char* mob,CWorldServer& world);
+    void SourceObject(const CMEBasicObject& object,CAIMap& map);
+    // Service/MOB seam: z is terrain-relative, yaw is radians. Presence controls
+    // AI/Nav participation (falling scenery remains a world/render object).
+    void TransformObject(int id,Navigation::Point position,float yaw,bool present);
+    bool ObjectPresent(int id) const { return !detachedObjects.count(id); }
     void Object(CMapObject* object,bool remove,CAIMap& map);
     std::uint64_t Bake(const std::filesystem::path& directory,Navigation::Bytes& table,CWorldServer& world);
     bool Load();
     void Advance();
+    std::uint64_t Generation(CUnit* unit) { auto* mesh=ForUnit(unit);return mesh?mesh->generation:0; }
     void Stop(int id) { queues.erase(id); }
     void ForgetUnit(int id) { Stop(id);flyingUnits.erase(id);airJournal.erase(id); }
     bool Goal(CUnit* unit,Navigation::Point reference,Navigation::Location& result);
@@ -96,6 +113,7 @@ public:
         return loaded && profile>=0 && profile<Navigation::AgentCount ? meshes[profile].get() : nullptr;
     }
     std::uint64_t ObserverRevision() const noexcept { return observerRevision; }
+    bool ObserverUpdating(int profile) const { return Pending(profile); }
     Navigation::Point Position(CUnit* unit,CAIMap& map) const;
     Navigation::Route Find(CUnit* unit,Navigation::Point from,Navigation::Point goal,float maxLength,float goalRadius,const float* costs=nullptr,int aiClass=3,Navigation::GoalPolicy goalPolicy=Navigation::GoalPolicy::Exact,const Navigation::Location* goalSupport=nullptr);
     // Passage width and unit-to-unit separation have different footprints.

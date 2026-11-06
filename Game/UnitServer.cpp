@@ -802,7 +802,7 @@ void CUnitServer::L1NewPathSegment()
 /////////////////////////////////////////////////////////////////////////////////////
 bool CUnitServer::RestoreNavigation(bool invalidate)
 {
-    if(invalidate){navigationRejects=navigationWait=0;path.toGo.Clear();path.excludeVertices.RemoveAll();}
+    if(invalidate){navigationRejects=navigationWait=0;path.excludeVertices.RemoveAll();}
     if(!path.curSegment.IsMoving())return true;
     auto* world=static_cast<CWorldServer*>(GetWorld());auto goal=path.ptDestination;
     if(distanceXY2(lpUnit->GetCP(),goal)<.0009f) {
