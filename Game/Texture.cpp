@@ -17,6 +17,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "dx11/RendererDX11.h"
 #include "dx11/Utils.h"
 #include "dx11/Surface.h"
+#include "owned_asset_loader.h"
 #include "dx11/MmpRgbToBgra.h"
 
 void CTexture::SetupTextureFlags(D3D11_TEXTURE2D_DESC *tex2d)
@@ -273,6 +274,8 @@ int CTexture::CopyToSurface(CDXGISurface *pDXDDS, SMMPFileHeader *pHdr, DWORD dw
     int nTotalSize = 0;
     D3D11_TEXTURE2D_DESC destination = {};
     pDXDDS->GetSurfaceDesc(&destination);
+    bool fullyOpaque = destination.ArraySize == 1 && destination.MipLevels > 0 && destination.MipLevels <= 32;
+    UINT uploadedMips = 0;
     for (int i = int(dwFromLevel); i < int(pHdr->dwMipMapLevel) &&
          i - int(dwFromLevel) < int(destination.MipLevels); i++)
     {
@@ -303,6 +306,29 @@ int CTexture::CopyToSurface(CDXGISurface *pDXDDS, SMMPFileHeader *pHdr, DWORD dw
             srd.SysMemPitch = ((dwNewSizeX + 3) / 4) * 8;
         srd.SysMemSlicePitch = 0;
         pDXDDS->UpdateTexture(sub_index, nullptr, &srd);
+        // Inspect the bytes actually uploaded, including RGB conversion and every
+        // destination mip. A GPU-only surface cannot recover this alpha proof.
+        if (fullyOpaque) {
+            owned::TextureAlphaPixels alpha;
+            alpha.data = static_cast<const std::uint8_t*>(srd.pSysMem);
+            alpha.width = dwNewSizeX; alpha.height = dwNewSizeY; alpha.pitch = srd.SysMemPitch;
+            switch (destination.Format) {
+            case DXGI_FORMAT_BC1_UNORM: alpha.format = owned::TextureAlphaFormat::bc1; break;
+            case DXGI_FORMAT_BC2_UNORM: alpha.format = owned::TextureAlphaFormat::bc2; break;
+            case DXGI_FORMAT_BC3_UNORM: alpha.format = owned::TextureAlphaFormat::bc3; break;
+            case DXGI_FORMAT_B8G8R8A8_UNORM:
+                alpha.format = owned::TextureAlphaFormat::packed;
+                alpha.pixel_bytes = 4; alpha.alpha_mask = 0xff000000u; break;
+            default: fullyOpaque = false; break;
+            }
+            const bool packed = alpha.format == owned::TextureAlphaFormat::packed;
+            alpha.bytes = std::uint64_t(alpha.pitch) * (packed ? alpha.height : (std::uint64_t(alpha.height) + 3) / 4);
+            fullyOpaque = fullyOpaque &&
+                alpha.width == (std::max)(1u, destination.Width >> sub_index) &&
+                alpha.height == (std::max)(1u, destination.Height >> sub_index) &&
+                owned::texture_alpha_fully_opaque(alpha);
+        }
+        ++uploadedMips;
         auto depthPitch = linePitch * dwNewSizeY;
         // get next mip-map surface
         lpData = reinterpret_cast<LPBYTE>(pHdr->GetMipLevelData(i + 1));
@@ -313,6 +339,8 @@ int CTexture::CopyToSurface(CDXGISurface *pDXDDS, SMMPFileHeader *pHdr, DWORD dw
         dwNewSizeY >>= 1;
     }
 
+    if (fullyOpaque && uploadedMips == destination.MipLevels)
+        pDXDDS->PublishUploadedOpacity(true);
     return nTotalSize;
 }
 /////////////////////////////////////////////////////////////////////////////////////

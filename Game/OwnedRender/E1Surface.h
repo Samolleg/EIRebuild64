@@ -15,7 +15,8 @@ public:
     E1Surface& operator=(const E1Surface&) = delete;
     std::uint64_t Id() const noexcept { return id; }
     void BeginWrite() noexcept;
-    bool Complete(ID3D11Texture2D* texture) noexcept;
+    // Opaque proof comes from every uploaded CPU mip, never from the GPU format.
+    bool Complete(ID3D11Texture2D* texture, bool alphaFullyOpaque = false) noexcept;
 };
 std::shared_ptr<const owned::OwnedVisualSurface> E1SurfaceValue(std::uint64_t id) noexcept;
 HRESULT E1ResolveSurface(void*, ID3D11Device* device, std::uint64_t id,
