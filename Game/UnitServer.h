@@ -718,6 +718,7 @@ public:
     virtual void RecalcAIParams();
     //
     // DAMAGE Processing of some actions influencing health of unit
+    bool ApplyDirectDamage(float amount);
     BOOL ProcessCustomAttackPortion(SRPGAttackPortion*, CUnit*, CUnit*);
     virtual BOOL ProcessAttackPortion(SRPGAttackPortion *lpAttackPortion, CUnit *pAttacker,
                                       CUnit *pExpDest);
