@@ -41,7 +41,8 @@ int Inspect(CWorldServer& world) {
         auto* object = world.GetMapObject(FirstId + i);
         if(!object) continue;
         char model[16]; sprintf_s(model, "z6i4%02d", i + 1);
-        if(object->IsInvalid() || object->GetTypeID() != MOTID_OBJECT ||
+        if(object->IsInvalid() || object->GetTypeID() != MOTID_BUILDING ||
+            object->WhoAmI() != HPC_BUILDING ||
             _stricmp(object->GetMaskName(), model) != 0)
             Fail("reserved ice ID belongs to an invalid or foreign object");
         ++count;
@@ -80,11 +81,14 @@ public:
         size_t at = 0; Chunk root;
         if(!Next(at, bytes.size(), root) || root.tag != 0xA000 || at != bytes.size())
             Fail("ice MOB must contain one object database");
-        bool haveObjects = false; std::set<unsigned> seen;
+        bool haveObjects = false, haveSecondary = false; std::set<unsigned> seen;
         at = root.begin; Chunk section;
         while(Next(at, root.end, section)) {
-            // ICE02 intentionally has no script, world settings or graph.
-            if(section.tag == 0xC000 && section.begin == section.end) continue;
+            // Only one empty secondary marker; no primary MOB, script,
+            // diplomacy, world settings or graph may enter this path.
+            if(section.tag == 0xD000 && section.begin == section.end && !haveSecondary) {
+                haveSecondary = true; continue;
+            }
             if(section.tag != 0xB000 || haveObjects) Fail("unexpected ice MOB section");
             haveObjects = true;
             size_t objectAt = section.begin; Chunk object;
@@ -100,7 +104,7 @@ public:
                 if(idField.end - idField.begin != 4 || typeField.end - typeField.begin != 4)
                     Fail("invalid ice MOB ID/type size");
                 const unsigned id = Word(idField.begin);
-                if(id < FirstId || id >= FirstId + Count || Word(typeField.begin) != MOTID_OBJECT ||
+                if(id < FirstId || id >= FirstId + Count || Word(typeField.begin) != MOTID_BUILDING ||
                     !seen.insert(id).second) Fail("invalid ice MOB ID/type");
                 char model[16]; sprintf_s(model, "z6i4%02u", id - FirstId + 1);
                 const auto modelField = fields.at(0xB006);
@@ -109,6 +113,7 @@ public:
                 if(actual != model) Fail("ice MOB model does not match ID");
             }
         }
+        if(!haveSecondary) Fail("ice MOB must be secondary");
         if(seen.size() != Count) Fail("ice MOB must contain all 19 objects");
     }
 };

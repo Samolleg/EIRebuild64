@@ -33,6 +33,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <filesystem>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <unordered_set>
@@ -106,7 +107,8 @@ unsigned long long operationSequence=0;
 bool saveIsolated=false; // game thread only; deliberately survives load/new game
 bool IsCommand(const std::string& method) {
     return method=="load_save"||method=="new_game"||method=="enter_zone"||method=="save_game"||
-           method=="unit_move"||method=="unit_teleport"||method=="pause"||method=="quit";
+           method=="unit_move"||method=="unit_teleport"||method=="pause"||method=="quit"||
+           method=="set_global";
 }
 
 json Error(const char* message) {return {{"ok",false},{"error",message},{"truncated",false}};}
@@ -1045,6 +1047,26 @@ bool Command(Job& job) {
         OperationApplied("save_game",saved);
         job.response=saved?json{{"ok",true},{"status","done"},{"name",name},{"operation_id",id},{"truncated",false}}:Error("save failed; see journal");
         return true;
+    }
+    if(method=="set_global") {
+        const auto& key=params.at("name");
+        if(!key.is_string())throw std::runtime_error("name must be a string");
+        const auto name=key.get<std::string>();
+        if(name.empty()||name.size()>128||!std::all_of(name.begin(),name.end(),[](unsigned char c){
+            return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-'||c=='.';
+        }))throw std::runtime_error("global name must contain 1..128 ASCII letters, digits, dots, underscores or hyphens");
+        const auto& value=params.at("value");
+        if(!value.is_number())throw std::runtime_error("value must be a number");
+        const double number=value.get<double>();
+        if(!std::isfinite(number)||std::abs(number)>double((std::numeric_limits<float>::max)()))
+            throw std::runtime_error("value must be a finite float");
+        auto* player=theWorldServer.GetPlayer(0);
+        auto* server=static_cast<CPlayerServer*>(player->GetPlayerSpecific());
+        const float previous=player->party.vars.GetVar(name.c_str()), stored=float(number);
+        // The same party-0 setter as MOB GSSetVar: journal + client PID_SETVAR.
+        server->SetVar(name.c_str(),stored);
+        job.response={{"ok",true},{"status","done"},{"scope","party"},{"player",0},
+            {"name",name},{"previous",previous},{"value",stored},{"truncated",false}};return true;
     }
     if(method=="pause") {
         if(!params.at("on").is_boolean())throw std::runtime_error("on must be boolean");
