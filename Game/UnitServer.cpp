@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "ModEncounter.h"
+#include "ModArenaBoundary.h"
 #include "SaveSchema.h"
 #include "CorePerf.h"
 #include "GameJournal.h"
@@ -971,6 +972,7 @@ void CUnitServer::L1ExecMove()
 
     auto support=movement.support;
     if(!accepted) {
+        if(movement.boundaryBlocked){StopEncounterMovement();return;}
         if(path.navigationTurned) {
             // A wind-turned route must stop here, never find a way around a wall.
             const auto stop=lpUnit->GetCP();const auto oldGoal=path.ptDestination;
@@ -1182,6 +1184,9 @@ void CUnitServer::L1CheckRun()
 /////////////////////////////////////////////////////////////////////////////////////
 bool CUnitServer::L1StartMove(const CPlot3D &ptTarget, float fpMaxPathLength, const Navigation::Location *goalSupport)
 {
+    const auto boundary=ModArena::MovementBoundary(lpUnit);
+    const auto current=lpUnit->GetCP();
+    if(!boundary.Goal({current.x,current.y,current.z},{ptTarget.x,ptTarget.y,ptTarget.z})){StopEncounterMovement();return false;}
     CWorldServer *pWS = (CWorldServer *)GetWorld();
 
     L1CheckRun();
@@ -1194,6 +1199,7 @@ bool CUnitServer::L1StartMove(const CPlot3D &ptTarget, float fpMaxPathLength, co
     if (!LowFindPath(ptTarget, path, lpUnit->bNeedFastPath, fpMaxPathLength,goalPolicy,goalSupport))
     {
         bL1MoveAnimationSet = false;
+        if(boundary.Active()){StopEncounterMovement();return false;}
         L1StopMovement(path.bRouteFailed == TRUE);
         return false;
     }
@@ -6600,6 +6606,15 @@ void CUnitServer::FinishEncounterPerformance(bool leaving)
         }
         if(auto* player=world.GetPlayer(0))player->party.vars.DelVar(key.c_str());
     }
+}
+
+void CUnitServer::StopEncounterMovement()
+{
+    if(auto* player=logic.GetPlayer())player->DoStop(logic);
+    nextCommand.Clear();curCommand.Clear();CancelScriptWindPending();
+    L1StopMovement(false);
+    path.CreateStand(lpUnit);lpUnit->LowNewRoute();
+    lpUnit->SetUpdateMask(CMapObject::VLD_MASK_POSROT);
 }
 
 void CUnitServer::QueueAnimationLoop(DWORD id)

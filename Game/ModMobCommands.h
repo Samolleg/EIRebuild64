@@ -12,6 +12,7 @@
 #include "ModChase.h"
 #include "ModScriptMotion.h"
 #include "ModUnitSpawns.h"
+#include "ModArena.h"
 #include "MapObjectManager.h"
 #include "ModRegisteredLoot.h"
 #include "ZoneIce.h"
@@ -45,6 +46,8 @@ inline const Entry registry[]={
  {294,"GetAttackEvent","Foof",true},
  {295,"WasAttacked","Foof",true},
  {296,"HasAttack","Foof",true},
+ {283,"GetArenaMotion","Fo",true},
+ {282,"ApplyArenaWaveDamage","off",true},
  {280,"GetArenaTick","F",true},
  {288,"DirectionAngle","Fff",true},
  {297,"ApplyTrapParalysis","of",true},
@@ -189,6 +192,7 @@ inline bool Float(SSCCmd&cmd,float&result){
  if(!e->ready||e->format[0]!='F')throw std::runtime_error(std::string("Unported MOB float command: ")+e->name);if(!ValidateDispatch(*e,cmd)){result=0;return true;}
  const char*n=e->name;float a=cmd.params.GetSize()?cmd.params[0]:0;
  if(cmd.command==275||cmd.command==285||cmd.command==294||cmd.command==295||cmd.command==296){result=ModAttackEvents::Query(theWorldServer,cmd.command,UnitArg(cmd),UnitArg(cmd,1),a);return true;}
+ if(cmd.command==283){result=float(ModArena::Motion(UnitArg(cmd)));return true;}
  if(cmd.command==280){result=float(theWorldServer.GetSegmentTimeCounter());return true;}
  if(cmd.command==288){float y=cmd.params[1];result=std::isfinite(a)&&std::isfinite(y)&&std::hypot(a,y)>.001f?std::atan2(a,-y)*57.2957795130823f:0.f;return true;}
  if(cmd.command==361){auto*unit=UnitArg(cmd);auto*server=ServerArg(cmd);result=unit&&!unit->IsInvalid()&&!unit->IsDead()&&server?float(server->GetScriptPose()):-1.f;return true;}
@@ -312,6 +316,7 @@ inline bool Group(SSCCmd&cmd,CScriptObjectGroup&result){
 inline bool Action(SSCCmd&cmd){
  auto*unit=UnitArg(cmd);auto*server=ServerArg(cmd);float a=cmd.params.GetSize()?cmd.params[0]:0;
  switch(cmd.command){
+ case 282:ModArena::Damage(unit,a,cmd.params[1]);break;
  case 276:ModChase::Trap(theWorldServer,unit,a,cmd.params[1],cmd.params[2]);break;
  case 291:if(!ModInvincible::Change(unit,cmd.szParams[0],a))return Reject("SetInvincible","Invalid unit, channel or flag");break;
  case 292:if(server)server->ApplyDirectDamage(a);break;

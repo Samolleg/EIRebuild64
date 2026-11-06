@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModArena.h"
 #include "ModNativeCrtRandom.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -840,7 +841,13 @@ BOOL UpdateFrom( SRPGUserUnitStats* pStats, CPacket &pkt )
 /////////////////////////////////////////////////////////////////////////////////////
 bool SRPGCommonStats::Regenerate(SRPGUnitStats &rpgUnitStats, CUnit *pUnit, bool bHPOnly)
 {
-    if(auto*mod=ModRuntime::Current())return mod->Regenerate(*this,rpgUnitStats,pUnit,bHPOnly);
+    if(auto*mod=ModRuntime::Current()){
+        if(!ModEncounter::Arena(theWorldServer))return mod->Regenerate(*this,rpgUnitStats,pUnit,bHPOnly);
+        ModArena::Regeneration observation(*this,rpgUnitStats,pUnit);
+        bool changed=mod->Regenerate(*this,rpgUnitStats,pUnit,bHPOnly);
+        changed=observation.Finish(*this,rpgUnitStats,pUnit)||changed;
+        ModArena::Tick(pUnit);return changed;
+    }
     ++nRegenerateCounter;
     if ((nRegenerateCounter < 15) && (nRegenerateCounter > 0))
         return false;

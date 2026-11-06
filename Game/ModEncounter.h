@@ -108,4 +108,11 @@ inline bool AckMuted(const CUnit* unit) {
 inline std::string PerformanceKey(const CUnit& unit) {
     return "EFC.Performance."+std::string(ModInvincible::Map(theWorldServer))+"."+std::to_string(unit.GetID());
 }
+inline void ClearPerformanceKeys(CWorldServer& world) {
+    auto* player=world.GetPlayer(0);if(!player)return;
+    const std::string prefix="EFC.Performance."+std::string(ModInvincible::Map(world))+".";
+    std::vector<std::string> erase;
+    for(const auto& var:player->party.vars)if(!var.first.compare(0,prefix.size(),prefix))erase.push_back(var.first);
+    for(const auto& key:erase)player->party.vars.DelVar(key.c_str());
+}
 } // namespace ModEncounter

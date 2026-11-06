@@ -12,6 +12,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModItemSpellPolicy.h"
 #include "ModInvincible.h"
 #include "ModScriptMotion.h"
+#include "ModArena.h"
 
 #include "WinRegistry.h"
 #include "FigureManager.h"
@@ -1036,6 +1037,7 @@ void CUnit::GetSpeeds(float &fpMoveSpeed, float &fpRotateSpeed)
     fpRotateSpeed *= theAIGeneralSettings.fpRotateSpeedMult;
     if(scriptMovementEnabled&&!IsDead()&&std::isfinite(fpMoveSpeed)&&fpMoveSpeed>0)
         fpMoveSpeed=(std::max)(.1f/7.5f,(fpMoveSpeed+scriptMovementOffset/7.5f)*scriptMovementFactor);
+    if(ModEncounter::Arena(theWorldServer)&&!IsDead()&&fpMoveSpeed>0)fpMoveSpeed*=ModArena::Slow(*this);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 float CUnit::GetShowSpeed()

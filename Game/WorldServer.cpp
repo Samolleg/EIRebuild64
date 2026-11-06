@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "ModEncounter.h"
+#include "ModArena.h"
 #include "ZoneIce.h"
 #include "SaveSlot.h"
 #include "CorePerf.h"
@@ -2010,7 +2011,9 @@ void CWorldServer::RemovePlayerParty(CPlayer *pPlayer, SDeployPlayerInfo *pInfo)
     if(ModEncounter::Arena(*this)&&pPlayer==GetPlayer(0))for(int n=0;n<pPlayer->party.people.GetSize();++n){
         auto* unit=GetUnit(pPlayer->party.people[n].nID);
         if(auto* server=unit?dynamic_cast<CUnitServer*>(unit->GetUnitSpecific()):nullptr)server->FinishEncounterPerformance(true);
+        if(unit)ModArena::Clear(*unit);
     }
+    if(ModEncounter::Arena(*this)&&pPlayer==GetPlayer(0)){ModArena::ClearSavedStatuses(*this);ModEncounter::ClearPerformanceKeys(*this);}
     // get items and stats from alive ones
     RemovePersonages(pers, &pPlayer->party, pInfo);
 }

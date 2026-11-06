@@ -899,7 +899,7 @@ bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
         const auto* player = client ? client->GetPlayer() : nullptr;
         const bool drawUndetected = !theSettings.nDrawVisibleOnly ||
             (player && player->curInterface != IFACE_MISSION);
-        if (ModEncounter::Draw(*object))pose.object_flags |= UNIT_VISIBLE;
+        if (ModEncounter::Draw(*static_cast<CUnit*>(object)))pose.object_flags |= UNIT_VISIBLE;
         if (!drawUndetected && !(pose.object_flags & UNIT_VISIBLE))
             pose.object_flags |= OBJ_HIDDEN;
     }

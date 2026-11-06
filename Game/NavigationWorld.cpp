@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "NavigationWorld.h"
+#include "ModArenaBoundary.h"
 #include "NavigationBake.h"
 #include "NavigationObject.h"
 #include "../Navigation/Profiles.h"
@@ -661,6 +662,8 @@ bool NavigationWorld::ObserveAir(CUnit* unit,AirEvent event,unsigned& suppressed
 }
 Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navigation::Point goal,float maxLength,float goalRadius,const float* costs,int aiClass,Navigation::GoalPolicy goalPolicy,const Navigation::Location* goalSupport) {
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationPath);
+    const auto boundary=ModArena::MovementBoundary(unit);
+    if(!boundary.Goal(from,goal)){Navigation::Route route;route.status=Status::NoPath;return route;}
     auto* mesh=ForUnit(unit,aiClass);if(!mesh){
         Navigation::Route route;route.status=Navigation::Status::NoMesh;
         if(unit&&unit->IsHero())GameJournal::Event("NAV","query_failed","unit=%d reason=no_mesh from=(%.3f,%.3f,%.3f) goal=(%.3f,%.3f,%.3f) detail=%s",unit->GetID(),from.x,from.y,from.z,goal.x,goal.y,goal.z,GameJournal::Quote(error.c_str()).c_str());
@@ -672,8 +675,17 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
     request.reuseRoute=queryReuse;
     request.excludedFlags=static_cast<unsigned short>(1u<<(std::clamp(unit?unit->GetAIClass():aiClass,0,7)+4));
     request.obstacles=queryObstacles;
+    std::vector<Navigation::Obstacle> arenaObstacles;
+    if(boundary.seal&&std::hypot(from.x-boundary.cx,from.y-boundary.cy)>=boundary.radius){
+        if(queryObstacles)arenaObstacles=*queryObstacles;
+        arenaObstacles.push_back({{boundary.cx,boundary.cy,from.z},boundary.radius,10000.f,1000105});
+        request.obstacles=&arenaObstacles;
+    }
     if(costs&&mesh->profile.movement==Navigation::Movement::Ground)std::copy(costs,costs+16,request.areaCosts);
     auto route=Navigation::Find(*mesh,request);
+    if(route.status==Status::Complete&&!boundary.Route(route,from)){
+        route.status=Status::NoPath;route.points.clear();route.corridor.clear();return route;
+    }
     if(!sourceDirty.empty()) {
         const int profile=Type(unit,unit?unit->GetAIClass():aiClass);
         if(Pending(profile)) {
@@ -749,6 +761,8 @@ bool NavigationWorld::CanPlace(CUnit* unit,Navigation::Point point,int aiClass) 
 }
 bool NavigationWorld::Step(CUnit* unit,Navigation::Point from,Navigation::Point desired,Navigation::Location& result,const CAIRoute* route) {
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationStep);
+    const auto boundary=ModArena::MovementBoundary(unit);
+    if(boundary.Block(from,desired))return false;
     auto* mesh=ForUnit(unit);
     const char* reason=mesh?"clearance":"no_mesh";
     struct Corners final:Navigation::PathView {
@@ -770,7 +784,7 @@ bool NavigationWorld::Step(CUnit* unit,Navigation::Point from,Navigation::Point 
         }
         return false;
     }
-    return true;
+    return !boundary.Block(from,result.position);
 }
 bool NavigationWorld::GuardTurn(CUnit* unit,SAIPath& path,float time,bool& pending) {
     pending=false;auto* mesh=ForUnit(unit);if(!mesh)return false;
@@ -838,6 +852,19 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
     };
     move.desired={AITile2Meter(pos.x),AITile2Meter(pos.y),segment.IsMoving()?z:from.z};
     move.direction={direction.x,direction.y,0};
+    const auto boundary=ModArena::MovementBoundary(unit);
+    if(segment.IsMoving()&&boundary.Active()){
+        auto walker=unit->walker;auto previous=from;
+        for(int i=0;i<=5;++i){
+            CPlot3D sample(Meter2AITile(from.x),Meter2AITile(from.y),0),axis;
+            bool rotating=false;float speed=0,height=from.z;int sx=-1,sy=-1;
+            const bool active=walker.GetPosition(unit->GetWorldBase(),segment,time+1.25f*i/5,rotating,sample,axis,speed,sx,sy,&height);
+            const Point at{AITile2Meter(sample.x),AITile2Meter(sample.y),height};
+            const int reason=boundary.Block(previous,at);
+            if(reason){move.boundaryBlocked=true;ModArena::Blocked(boundary,at,reason);return observed(false);}
+            previous=at;if(!active)break;
+        }
+    }
     // Script/patrol turns do not move the body. A clearance projection must
     // neither reject them nor replace their heading with a corridor tangent.
     if(!segment.IsMoving()) {
@@ -846,7 +873,9 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
         return observed(true);
     }
     if((!dirtyObjects.empty()||!sourceDirty.empty())&&Pending(Type(unit,unit->GetAIClass()),from,move.desired))return waiting();
-    if(!Step(unit,from,move.desired,move.support,&segment.route))return observed(false);
+    if(!Step(unit,from,move.desired,move.support,&segment.route)){
+        move.boundaryBlocked=boundary.Active();ModArena::Blocked(boundary,move.desired,3);return observed(false);
+    }
     pos.x=move.support.position.x;pos.y=move.support.position.y;
     if(std::hypot(pos.x-from.x,pos.y-from.y)<.00001f)return observed(true);
     pos.z=move.support.position.z;
