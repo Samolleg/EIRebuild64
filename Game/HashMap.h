@@ -63,6 +63,7 @@ public:
     size_t ObserverBucketCount() const noexcept { return hashmap.bucket_count(); }
     auto ObserverBucketBegin(size_t bucket) const { return hashmap.cbegin(bucket); }
     auto ObserverBucketEnd(size_t bucket) const { return hashmap.cend(bucket); }
+    auto ObserverFind(const KEY& key) const { return hashmap.find(DWORD(key)); }
     BOOL IsEmpty() const { return hashmap.empty(); }
     // adding/removing element. clearing hash table, remove all elements
     void SetAt(const KEY &key, const VAL &val);

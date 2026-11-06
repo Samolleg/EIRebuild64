@@ -47,7 +47,7 @@ namespace {
 using Clock=std::chrono::steady_clock;
 constexpr size_t RequestLimit=16384, ResponseLimit=262144, ImageLimit=4096u*4096u*4u;
 constexpr auto FrameBudget=std::chrono::microseconds(800);
-constexpr size_t UnitLimit=128, VariableLimit=200, PathLimit=64, EffectLimit=32;
+constexpr size_t UnitLimit=200, VariableLimit=200, PathLimit=64, EffectLimit=32;
 struct Job {
     json request, response;
     std::string method;
@@ -62,6 +62,8 @@ struct Job {
     unsigned phase=0;
     size_t bucket=0, offset=0, item=0;
     size_t bucketCount=0, initialCount=0;
+    DWORD unitNextKey=0;
+    bool unitScanStarted=false,unitScanFinished=false;
     ObjectId worldId=0;
     const CWorldServer* world=nullptr;
     std::unordered_set<int> seen;
@@ -340,7 +342,19 @@ void Serve(HANDLE pipe) {
     auto payload=response.dump(-1,' ',false,json::error_handler_t::replace);
     if(payload.size()+1>ResponseLimit)payload=Error("response exceeds size limit").dump();
     payload.push_back('\n');DWORD count=0;
-    if(!Transfer(pipe,true,payload.data(),DWORD(payload.size()),count)||count!=payload.size())ChannelError("write",GetLastError());
+    const bool sent=Transfer(pipe,true,payload.data(),DWORD(payload.size()),count)&&count==payload.size();
+    if(!sent)ChannelError("write",GetLastError());
+    if(replyJob&&replyJob->cancelled.load()) {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        if(queued==replyJob)queued.reset();
+    }
+    if(sent) {
+        // WriteFile completion only means the bytes entered the pipe buffer.
+        // The existing client closes after consuming its complete response.
+        // Wait for that close using bounded, cancellable worker I/O before
+        // DisconnectNamedPipe can discard the unread tail of a large reply.
+        char unused=0;DWORD ignored=0;Transfer(pipe,false,&unused,1,ignored);
+    }
     if(replyJob)replyJob->replySent.store(true,std::memory_order_release);
 }
 void Run() noexcept {
@@ -597,6 +611,9 @@ json UnitDetail(CUnit* unit,CWorldServer& world,CPlayer* player) {
     auto result=UnitRow(unit,world,player);
     float w,x,y,z;unit->GetOrientation().GetComponents(w,x,y,z);
     const auto axis=unit->GetYAxis();
+    float move=0,turn=0;unit->GetSpeeds(move,turn);
+    result["movement_speeds"]={{"move",move},{"turn",turn},{"modifier_enabled",unit->scriptMovementEnabled},
+        {"offset",unit->scriptMovementOffset},{"factor",unit->scriptMovementFactor}};
     result["orientation_wxyz"]=json::array({w,x,y,z});
     result["orientation_xy_radians"]=std::atan2(axis.y,axis.x);
     result["nav_location"]=Location(unit->navLocation);
@@ -615,7 +632,7 @@ json UnitDetail(CUnit* unit,CWorldServer& world,CPlayer* player) {
     const auto& path=LiveSnapshotAccess::Path(server);
     auto* target=server.logic.GetCurrentTarget();
     const auto& command=server.GetScriptCommand();
-    result["navigation"]={{"destination",Point(path.ptDestination)},{"finished",path.bFinished},
+    result["navigation"]={{"destination",Point(path.ptDestination)},{"finished",path.bFinished},{"turned",path.navigationTurned},
         {"route_failed",path.bRouteFailed},{"movement_state",LiveSnapshotAccess::State(server)},
         {"segment_type",int(path.curSegment.GetMoveType())},{"wait",LiveSnapshotAccess::Wait(server)},
         {"rejects",LiveSnapshotAccess::Rejects(server)},{"run_failures",LiveSnapshotAccess::RunFailures(server)},
@@ -868,36 +885,41 @@ bool Units(Job& job,Clock::time_point deadline,CWorldServer& world,const json& p
     auto* player=Player();
     const auto relation=params.value("relation",std::string("all"));
     const auto name=params.value("name",std::string()),prototype=params.value("prototype",std::string());
-    while(job.bucket<job.bucketCount&&Clock::now()<deadline) {
-        auto it=world.dynamicObjs.ObserverBucketBegin(job.bucket),end=world.dynamicObjs.ObserverBucketEnd(job.bucket);
-        size_t i=0;
-        while(it!=end&&i<job.offset&&Clock::now()<deadline){++it;++i;}
-        if(i<job.offset)return false;
-        while(it!=end&&Clock::now()<deadline) {
-            CMapObject* object=it->second;++it;++job.offset;
-            if(!object||object->IsInvalid()||object->IsUnreferenced()||object->WhoAmI()!=HPC_UNIT)continue;
-            auto* unit=static_cast<CUnit*>(object);
-            if(!job.seen.insert(unit->GetID()).second)continue;
-            if(relation!="all"&&!player)throw std::runtime_error("player relation is unavailable");
-            if(relation=="squad"&&!Squad(unit,player))continue;
-            if(relation=="enemies") {
-                const int number=PlayerNumber(player);if(number<0)throw std::runtime_error("player relation is unavailable");
-                if(!Enemy(unit,number))continue;
-            }
-            const auto& pos=unit->GetCP();
-            if(params.contains("x")) {
-                const double dx=pos.x-params["x"].get<double>(),dy=pos.y-params["y"].get<double>(),radius=params["radius"].get<double>();
-                if(dx*dx+dy*dy>radius*radius)continue;
-            }
-            const auto* proto=unit->GetPrototype();
-            if(!Match(Text(unit->GetName(),256),name)||!Match(proto?Text(proto->szName,256):std::string(),prototype))continue;
-            job.response["units"].push_back(UnitRow(unit,world,player));
-            if(job.response["units"].size()>=limit){job.response["truncated"]=true;return true;}
-        }
-        if(it==end){++job.bucket;job.offset=0;}
+    // Store an ID bookmark, never an iterator or object pointer across frames.
+    // Restarting a crowded hash bucket from offset zero can consume the whole
+    // budget repeatedly without examining another unit.
+    const auto& objects=world.dynamicObjs;
+    auto it=job.unitScanStarted?objects.ObserverFind(int(job.unitNextKey)):objects.begin();
+    const auto end=objects.end();
+    if(job.unitScanStarted&&!job.unitScanFinished&&it==end) {
+        job.response["truncated"]=true;job.response["reason"]="object cursor removed during scan";return true;
     }
-    return job.bucket>=job.bucketCount;
+    while(it!=end&&!job.unitScanFinished&&Clock::now()<deadline) {
+        CMapObject* object=it->second;++it;job.unitScanStarted=true;
+        job.unitScanFinished=it==end;
+        if(!job.unitScanFinished)job.unitNextKey=it->first;
+        if(!object||object->IsInvalid()||object->IsUnreferenced()||object->WhoAmI()!=HPC_UNIT)continue;
+        auto* unit=static_cast<CUnit*>(object);
+        if(!job.seen.insert(unit->GetID()).second)continue;
+        if(relation!="all"&&!player)throw std::runtime_error("player relation is unavailable");
+        if(relation=="squad"&&!Squad(unit,player))continue;
+        if(relation=="enemies") {
+            const int number=PlayerNumber(player);if(number<0)throw std::runtime_error("player relation is unavailable");
+            if(!Enemy(unit,number))continue;
+        }
+        const auto& pos=unit->GetCP();
+        if(params.contains("x")) {
+            const double dx=pos.x-params["x"].get<double>(),dy=pos.y-params["y"].get<double>(),radius=params["radius"].get<double>();
+            if(dx*dx+dy*dy>radius*radius)continue;
+        }
+        const auto* proto=unit->GetPrototype();
+        if(!Match(Text(unit->GetName(),256),name)||!Match(proto?Text(proto->szName,256):std::string(),prototype))continue;
+        job.response["units"].push_back(UnitRow(unit,world,player));
+        if(job.response["units"].size()>=limit){job.response["truncated"]=true;return true;}
+    }
+    return it==end||job.unitScanFinished;
 }
+
 bool Globals(Job& job,Clock::time_point deadline,CWorldServer& world,const json& params) {
     const size_t limit=GetLimit(params,VariableLimit,100);
     const auto prefix=params.value("prefix",std::string());if(prefix.size()>256)throw std::runtime_error("prefix too long");
