@@ -51,7 +51,7 @@ void NavigationWorld::Scene(const char* mpr,const char* mob,CWorldServer& world)
     if(sourceJob.valid())try{sourceJob.get();}catch(const std::exception& e){GameJournal::Event("NAV","update_discarded","reason=%s",GameJournal::Quote(e.what()).c_str());}
     iceVariant=false;preparedTiles.clear();originalSources.reset();sourceTransforms.clear();liveTransforms.clear();appliedTransforms.clear();
     for(auto& mesh:meshes)mesh.reset();bodySizes.clear();bodyTable.samples.clear();
-    loaded=false;error.clear();failures=stepFailures=0;nextStepLog=0;++generation;queues.clear();airJournal.clear();queryObstacles=nullptr;queryReuse=nullptr;
+    loaded=false;error.clear();failures=stepFailures=0;nextStepLog=0;++generation;queues.clear();airJournal.clear();groundGoals.clear();queryObstacles=nullptr;queryReuse=nullptr;
     sourceRetries.clear();flyingUnits.clear();meshDirectory.clear();flightDeferred=false;sources.reset();absentStatic.clear();sourceDirty.clear();liveDoors.clear();
     liveObjects.clear();appliedObjects.clear();liveFlightObjects.clear();appliedFlightObjects.clear();bakedStatic.clear();dirtyObjects.clear();
     if(baker) {
@@ -704,6 +704,22 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
         request.obstacles=&arenaObstacles;
     }
     if(costs&&mesh->profile.movement==Navigation::Movement::Ground)std::copy(costs,costs+16,request.areaCosts);
+    const bool remember=unit&&mesh->profile.movement==Navigation::Movement::Ground&&
+        goalPolicy==GoalPolicy::ClosestReachable&&sourceDirty.empty()&&!request.obstacles&&!request.reuseRoute;
+    if(remember) {
+        const auto previous=groundGoals.find(unit->GetID());
+        if(previous!=groundGoals.end()) {
+            const auto& saved=previous->second;
+            const auto at=saved.status==Status::Complete?saved.endpoint.position:saved.source;
+            if(saved.generation==generation&&saved.profile==Type(unit,unit->GetAIClass())&&
+               saved.height==request.height&&saved.radius==goalRadius&&saved.maxLength==maxLength&&
+               saved.excludedFlags==request.excludedFlags&&Distance(saved.requested,goal)<.001f&&Distance(at,from)<.001f) {
+                Navigation::Route route;route.status=saved.status;route.goalStatus=saved.reason;
+                if(route.status==Status::Complete){route.points.push_back(saved.endpoint);route.corridor.push_back(saved.endpoint.polygon);}
+                return route;
+            }
+        }
+    }
     auto route=Navigation::Find(*mesh,request);
     if(route.status==Status::Complete&&!boundary.Route(route,from)){
         route.status=Status::NoPath;route.points.clear();route.corridor.clear();return route;
@@ -719,12 +735,23 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
         if(stale){route.status=Status::Updating;route.points.clear();route.corridor.clear();return route;}
         }
     }
+    if(remember) {
+        if((route.status==Status::Complete&&route.goalStatus!=Status::Complete&&!route.points.empty())||
+           route.status==Status::NoGoal||route.status==Status::NoPath) {
+            GroundGoal saved;saved.requested=goal;saved.source=from;
+            if(!route.points.empty())saved.endpoint=route.points.back();
+            saved.generation=generation;saved.profile=Type(unit,unit->GetAIClass());
+            saved.height=request.height;saved.radius=goalRadius;saved.maxLength=maxLength;saved.excludedFlags=request.excludedFlags;
+            saved.status=route.status;saved.reason=route.goalStatus;groundGoals[unit->GetID()]=saved;
+        }
+        else groundGoals.erase(unit->GetID());
+    }
     unsigned suppressed=0;
     if(ObserveAir(unit,AirEvent::Query,suppressed)) {
         const auto end=route.points.empty()?goal:route.points.back().position;
         GameJournal::Event("NAV","air_query","unit=%d result=%s profile=%s locomotion=%u class=%d pose=%d height=%.3f altitude=%.3f from=(%.3f,%.3f,%.3f) goal=(%.3f,%.3f,%.3f) end=(%.3f,%.3f,%.3f) points=%zu length=%.3f suppressed=%u",unit->GetID(),StatusName(route.status),mesh->profileId.c_str(),unsigned(unit->GetUserUnitStats()->cLocomotion),unit->GetAIClass(),int(unit->GetCurrentPose()),request.height,unit->GetCP().z,from.x,from.y,from.z,goal.x,goal.y,goal.z,end.x,end.y,end.z,route.points.size(),route.length,suppressed);
     }
-    if(route.status==Status::Complete&&route.goalStatus!=Status::Complete&&unit&&unit->IsHero()&&!route.points.empty()) {
+    if(route.status==Status::Complete&&route.goalStatus!=Status::Complete&&unit&&!route.points.empty()) {
         const auto at=route.points.back().position;
         GameJournal::Event("NAV","goal_adjusted","unit=%d reason=%s requested=(%.3f,%.3f,%.3f) accepted=(%.3f,%.3f,%.3f) offset_xy=%.3f profile=%s height=%.3f",unit->GetID(),StatusName(route.goalStatus),goal.x,goal.y,goal.z,at.x,at.y,at.z,std::hypot(at.x-goal.x,at.y-goal.y),mesh->profileId.c_str(),request.height);
     }

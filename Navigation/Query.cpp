@@ -132,17 +132,19 @@ bool Nearest(const Mesh& m,dtNavMeshQuery& q,Point point,float horizontal,float 
 struct ClosestGoalQuery final : dtPolyQuery {
     const Mesh& mesh;dtNavMeshQuery& query;Point target;float height;
     Location best;float bestXY=1.e30f,bestZ=1.e30f;
+    float maximumXY,maximumZ;
     std::unordered_set<dtPolyRef> seen;bool limited=false;
-    ClosestGoalQuery(const Mesh& m,dtNavMeshQuery& q,Point p,float h)
-        :mesh(m),query(q),target(p),height(h){seen.reserve(256);}
+    ClosestGoalQuery(const Mesh& m,dtNavMeshQuery& q,Point p,float h,float radius=1.e15f,float vertical=1.e15f)
+        :mesh(m),query(q),target(p),height(h),maximumXY(radius*radius),maximumZ(vertical){seen.reserve(256);}
     void Consider(dtPolyRef ref) {
         const auto nav=ToNav(target);const float input[]={nav.x,nav.y,nav.z};float near[3]{};
         if(dtStatusFailed(query.closestPointOnPoly(ref,input,near,nullptr)))return;
         const float dx=near[0]-nav.x,dy=near[2]-nav.z,xy=dx*dx+dy*dy;
-        if(xy>bestXY+.000001f)return;
+        if(xy>maximumXY||xy>bestXY+.000001f)return;
         const auto at=Address(mesh,{near[0],near[1],near[2]},ref,height,target.z);
         if(!at.surface)return;
         const float dz=std::abs(at.position.z-target.z);
+        if(dz>maximumZ)return;
         if(!best.polygon||xy<bestXY-.000001f||
            (std::abs(xy-bestXY)<=.000001f&&(dz<bestZ-.001f||
             (std::abs(dz-bestZ)<=.001f&&ref<best.polygon)))) {
@@ -163,9 +165,12 @@ Status ClosestGoal(const Mesh& mesh,dtNavMeshQuery& query,Point point,
     if(!mesh.sources)return Status::NoGoal;
     const auto nav=ToNav(point);const auto& g=*mesh.sources;
     const float center[]={nav.x,Flies(mesh.profile)?0.f:(g.minimum.y+g.maximum.y)*.5f,nav.z};
-    const float maximum=std::max({.15f,std::abs(nav.x-g.minimum.x),std::abs(nav.x-g.maximum.x),
-                                std::abs(nav.z-g.minimum.z),std::abs(nav.z-g.maximum.z)})+mesh.profile.cellSize;
-    ClosestGoalQuery closest(mesh,query,point,height);float radius=.15f;
+    // Off-mesh ground orders approach only a local endpoint, never an
+    // unrelated edge across the map. This is a query bound, not bake policy.
+    const bool ground=mesh.profile.movement==Movement::Ground;
+    const float maximum=ground?4.f:std::max({.15f,std::abs(nav.x-g.minimum.x),std::abs(nav.x-g.maximum.x),
+                                           std::abs(nav.z-g.minimum.z),std::abs(nav.z-g.maximum.z)})+mesh.profile.cellSize;
+    ClosestGoalQuery closest(mesh,query,point,height,maximum,ground?4.f:1.e15f);float radius=.15f;
     for(;;) {
         const float extent[]={radius,Flies(mesh.profile)?1.e6f:(g.maximum.y-g.minimum.y)*.5f+2,radius};
         const auto status=query.queryPolygons(center,extent,&filter,&closest);
@@ -257,16 +262,18 @@ Route Find(const Mesh& m,const Request& r) {
         // An exhausted A* contains the entire reachable component. Choose the
         // closest actual polygon boundary to the click, not the heuristic's
         // closest portal midpoint and not the closest point to the unit.
-        ClosestGoalQuery closest(m,q,r.goal,height);
+        const bool localGround=result.goalStatus==Status::NoGoal&&m.profile.movement==Movement::Ground;
+        ClosestGoalQuery closest(m,q,r.goal,height,localGround?4.f:1.e15f,localGround?4.f:1.e15f);
         const auto* pool=q.getNodePool();
         for(int i=1;i<=pool->getNodeCount();++i) {
             const auto* node=pool->getNodeAtIdx(unsigned(i));
             if(node->flags&DT_NODE_CLOSED)closest.Consider(node->id);
         }
-        if(!closest.best.polygon){result.status=Status::NoPath;return result;}
+        if(!closest.best.polygon){result.status=localGround?Status::NoGoal:Status::NoPath;return result;}
         to=closest.best.polygon;goal=ToNav(closest.best.position);
         end[0]=goal.x;end[1]=goal.y;end[2]=goal.z;
-        result.goalStatus=Status::NoPath;selectedPartial=true;
+        if(result.goalStatus==Status::Complete)result.goalStatus=Status::NoPath;
+        selectedPartial=true;
     }
     auto& corridor=m.scratch.corridor;corridor.resize(8192);int count=0;
     status=selectedPartial?q.finalizeSlicedFindPathPartial(&to,1,corridor.data(),&count,int(corridor.size())):

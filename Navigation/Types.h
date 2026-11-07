@@ -65,8 +65,9 @@ struct StraightRequest {
     float left=28,right=100,bottom=26,top=62;BodyPolicy bodies;
 };
 struct StraightResult {Status status=Status::Invalid;Location endpoint;std::vector<Location> points;};
-// User movement can approach an unavailable click. Exact internal targets
-// (attacks, placement, visibility-graph edges) keep their original contract.
+// Ground movement orders (player and scripts) can approach an unavailable
+// point. Exact internal targets (attacks, placement, visibility-graph edges)
+// keep their original contract.
 enum class GoalPolicy { Exact, ClosestReachable };
 enum class RandomShape { Circle, Square };
 constexpr unsigned short ExcludeClass(unsigned aiClass) {
