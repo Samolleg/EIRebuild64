@@ -776,6 +776,8 @@ public:
     bool EncounterPerformance(int operation);
     void FinishEncounterPerformance(bool leaving=false);
     void StopEncounterMovement();
+    bool CurseGesture(bool held);
+    void EndCurseGesture();
     void QueueAnimationLoop(DWORD id);
     void StopAnimationLoop();
     void UpdateAnimationLoop();

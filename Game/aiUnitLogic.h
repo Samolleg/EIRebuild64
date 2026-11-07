@@ -726,6 +726,7 @@ public:
     void StartTurnLook(const SAIRallyPoint &newRally);
     void StartPlayerAttack(CMapObject *pVictim, ERPGHitLocations hl, bool bRun);
     void StartAttack(CMapObject *pVictim);
+    void StartEncounterAttack(CMapObject* victim,ERPGHitLocations location);
     void StartUsingSkill(CMapObject *pVictim, int nSkill, int nItemID, bool bRun);
     void StartCast(int nQSpellNum, CMapObject *pTarg, bool bRun);
     void StartCast(int nQSpellNum, const CPlot3D &pointToCast, bool bRun);

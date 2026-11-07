@@ -2,6 +2,7 @@
 #include "ModFinalGolem.h"
 #include "ModGolemReflect.h"
 #include "ModEncounter.h"
+#include "ModCurseEncounter.h"
 #include "ModArenaBoundary.h"
 #include "SaveSchema.h"
 #include "CorePerf.h"
@@ -6062,6 +6063,7 @@ BOOL CUnitServer::ProcessAttackPortionOwned(SRPGAttackPortion *lpAttackPortion,C
     float beforeSkillHp=GetMapObjectServer()->GetRPGStats()->ssHP.fpCurrent;
     const auto deliveredAttack = ModAttackEvents::Begin(*lpAttackPortion,pAttacker,lpUnit,beforeSkillHp);
     const auto completeAttack = [&](BOOL result) {
+        if(deliveredAttack.valid)ModCurseEncounter::Contact(deliveredAttack.attacker,lpUnit);
         ModAttackEvents::Complete(*pWS,deliveredAttack,GetMapObjectServer()->GetCurrentHP());
         ModFinalGolem::MeleeDelivered(deliveredAttack.attacker,lpUnit,*lpAttackPortion);
         ModGolemReflect::Complete(reflection);
@@ -6070,6 +6072,7 @@ BOOL CUnitServer::ProcessAttackPortionOwned(SRPGAttackPortion *lpAttackPortion,C
     CUnit* policyAuthor = ModAttackEvents::AuthorScope::Resolve(*lpAttackPortion, lpUnit, pAttacker);
     const bool chaseBlocked = ModChase::Block(*pWS, lpUnit, policyAuthor, *lpAttackPortion);
     ModInvincible::ScopedChannels protectedChannels(*lpAttackPortion, ModInvincible::Mask(lpUnit) & 0x7f, chaseBlocked);
+    ModCurseEncounter::DamageScope curseDamage(lpUnit,policyAuthor,*lpAttackPortion);
     int journalCritical = -1;
     BOOL bWasCorpse = GetUnit()->IsDead();
     bool bHadOwner = GetUnit()->GetOwner() != 0;
@@ -6620,6 +6623,45 @@ void CUnitServer::FinishEncounterPerformance(bool leaving)
             level0Animation.Clear();curCommand.Clear();L1ResetState();
         }
         if(auto* player=world.GetPlayer(0))player->party.vars.DelVar(key.c_str());
+    }
+}
+
+bool CUnitServer::CurseGesture(bool held)
+{
+    auto& world=theWorldServer;
+    if(!ModEncounter::Curse(world)||!ModInvincible::UnitValid(lpUnit,true))return false;
+    const SADEntry* entry=nullptr;const char* selected=nullptr;
+    for(const char* name:{"ucast04","ucast01","mcast","cast","uattack"}){
+        entry=lpUnit->GetAnimationEntry(name);
+        if(entry&&!strncmp(entry->pszAnimationName,name,16)){selected=name;break;}
+        entry=nullptr;
+    }
+    if(!entry)return false;
+    if(!held)CmdPlayAnimation(selected);
+    else {
+        if(const auto* attack=lpUnit->GetAnimationEntry("uattack"))entry=attack;
+        StopEncounterMovement();StopAnimationLoop();
+        curCommand.cmd=UC_PLAYANIM;curCommand.dwParam=entry->dwEntryIndex;
+    }
+    SL0AnimationSeq animation;animation.AddSimple(entry->dwEntryIndex,held?-1:GetAnimationLength(entry->dwEntryIndex));
+    if(held){L1SetPhase(UL1_SPECIAL_CYCLE);L1StandStill();L0StartAnimation(animation);}
+    else L1StartSpecial(animation);
+    if(held){
+        char key[96];sprintf_s(key,"ZC.Anim%u.Clip",unsigned(lpUnit->GetID()));ModEncounter::Set(world,key,float(entry->dwEntryIndex));
+        sprintf_s(key,"ZC.Anim%u.Until",unsigned(lpUnit->GetID()));ModEncounter::Set(world,key,float(world.GetSegmentTimeCounter()+18));
+    }
+    return true;
+}
+
+void CUnitServer::EndCurseGesture()
+{
+    auto& world=theWorldServer;char key[96];sprintf_s(key,"ZC.Anim%u.Until",unsigned(lpUnit->GetID()));
+    if(ModEncounter::Read(world,key)<=0)return;ModEncounter::Set(world,key,0);
+    sprintf_s(key,"ZC.Anim%u.Clip",unsigned(lpUnit->GetID()));const DWORD clip=DWORD(ModEncounter::Read(world,key));
+    const bool owned=eL1State==UL1_SPECIAL_CYCLE&&curCommand.cmd==UC_PLAYANIM&&curCommand.dwParam==clip&&
+        level0Animation.animations.GetSize()==1&&level0Animation.GetStartId(0)==clip;
+    if(owned&&!lpUnit->IsDead()&&!lpUnit->IsInvalid()){
+        StopEncounterMovement();level0Animation.Clear();L1ResetState();
     }
 }
 
