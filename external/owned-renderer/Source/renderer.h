@@ -15,6 +15,7 @@
 #include "embedded_game_effects.h"
 #include "embedded_arena.h"
 #include "embedded_golem.h"
+#include "embedded_curse.h"
 #include "frame_plan.h"
 #include "d3d12_frame.h"
 #include "surface_convert.h"
@@ -1177,6 +1178,7 @@ public:
     // expanded on the GPU at the call's stream position.
     HRESULT draw_game_ribbon(const GameRibbonView& view, const FixedState& state, SurfaceImage* texture);
 #ifdef EID3D11_EMBEDDED
+    HRESULT draw_embedded_curse(const EmbeddedCurseInput&,const FixedState&,ID3D11ShaderResourceView*);
     HRESULT draw_embedded_golem(const EmbeddedGolemInput&,const FixedState&,const std::array<ID3D11ShaderResourceView*,6>&);
     HRESULT draw_embedded_arena(const EmbeddedArenaInput&,const FixedState&,const std::array<ID3D11ShaderResourceView*,8>&);
     HRESULT draw_embedded_ribbon(const EmbeddedRibbonInput&, const FixedState&, SurfaceImage*);
@@ -2393,6 +2395,7 @@ private:
     void order_native_groups(bool shadows);
     EmbeddedArenaCache embedded_arena_cache_;
     EmbeddedGolemCache embedded_golem_cache_;
+    EmbeddedCurseCache embedded_curse_cache_;
     HRESULT queue_native_impl(const NativeGeometryView& view,
                               const FixedState& state, SurfaceImage* texture,
                               NativeGeometryResult* result, bool prepared,

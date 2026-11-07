@@ -10,6 +10,7 @@
 #include "RendererDX11.h"
 #include "embedded_hud_visual.h"
 #include "embedded_arena.h"
+#include "embedded_curse.h"
 #include "model_draw.h"
 #include "../OwnedRender/E1SurfaceBridge.h"
 #include "../OwnedRender/E1RendererFacade.h"
@@ -514,6 +515,13 @@ bool CDX11::FinishC74Effect(HRESULT hr, const char* event)
         GameJournal::Event("RENDER", event, "owner=c74 reason=renderer_rejected hr=%08lx", static_cast<unsigned long>(hr));
     }
     return false;
+}
+bool CDX11::SubmitCurseVisual(const owned::EmbeddedCurseInput& input,ID3D11ShaderResourceView* texture)
+{
+    owned::FixedState state;std::shared_ptr<owned::SurfaceImage> unused;
+    HRESULT hr=PrepareC74Effect(true,false,state,unused);
+    if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer){return renderer.draw_embedded_curse(input,state,texture);});
+    return FinishC74Effect(hr,"curse_visual_skipped");
 }
 bool CDX11::SubmitGolemVisual(const owned::EmbeddedGolemInput& input,const std::array<ID3D11ShaderResourceView*,6>& textures)
 {

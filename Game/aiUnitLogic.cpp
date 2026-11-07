@@ -3543,6 +3543,12 @@ void CAIUnitLogic::StartRotate(const CPlot3D &vecDest, float fpTurnSpeed)
     pUnitServer->CmdRotate(vecDest, fpTurnSpeed);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CAIUnitLogic::StartEncounterAttack(CMapObject* victim,ERPGHitLocations location)
+{
+    state=US_ATTACK;pTarget=victim;
+    pUnitServer->CmdAttack(pTarget,location,false,2);
+}
+
 void CAIUnitLogic::StartAttack(CMapObject *pVictim)
 {
     state = US_ATTACK;

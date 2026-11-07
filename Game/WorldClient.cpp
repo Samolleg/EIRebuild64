@@ -84,6 +84,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "WorldServer.h"
 #include "ModArenaVisual.h"
 #include "ModFinalGolem.h"
+#include "ModCurseEncounter.h"
 #include "GeometryManager.h"
 
 #include "I3DMain.h"
@@ -638,6 +639,7 @@ void CWorldClient::Destroy()
 {
     ModArenaVisual::Reset();
     ModFinalGolem::ResetVisual();
+    ModCurseEncounter::ResetVisual();
     InvalidatePicking();
     ItemApproachCatalog::Reset();
     OwnedRender::E1Scene().Retire(this, ownedRenderGeneration);
@@ -3152,6 +3154,7 @@ BOOL CWorldClient::Draw()
     //
     ModArenaVisual::Draw();
     ModFinalGolem::Draw();
+    ModCurseEncounter::Draw();
     coreParts.Stage(CorePerf::WorldFinish);
     DrawPolyLines();
     pRend->GetD3D()->EndWorld(); // compose world before flying HP and other UI
