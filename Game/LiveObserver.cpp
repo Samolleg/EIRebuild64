@@ -18,6 +18,9 @@
 #include "ModFalloutProjection.h"
 #include "I3DMain.h"
 #include "I3DScreen.h"
+#include "I3DScreenMission.h"
+#include "I3DScreenBase.h"
+#include "I3DScreenGlobalMap.h"
 #include "GameMain.h"
 #include "OwnedRender/E2Host.h"
 #include "OwnedRender/E3Input.h"
@@ -258,6 +261,7 @@ void CleanupCapture(Job& job) noexcept {
 }
 bool Step(Job& job,Clock::time_point deadline);
 void UpdateOperationReadiness();
+bool GlobalMapOperationReady();
 #include "LiveObserverCamera.inl"
 #include "LiveObserverRender.inl"
 
@@ -749,6 +753,12 @@ void UpdateOperationReadiness() {
     if(!operation.inFlight||!operation.applied||operation.executing)return;
     if(!operation.error.empty()) {
         operation.state="error";operation.stage="game_error";operation.inFlight=false;return;
+    }
+    if(operation.method=="global_map") {
+        if(!GlobalMapOperationReady())return;
+        if(operation.parameter=="open") {
+            operation.state="done";operation.stage="done";operation.inFlight=false;return;
+        }
     }
     auto& world=theWorldServer;auto* client=theWorld.GetPlayer();
     if(!world.bMapLoaded||world.GetServerMode()!=SERV_MODE_LOCAL||!theWorld.IsConnected()||
@@ -1250,8 +1260,8 @@ bool Command(Job& job) {
         job.response={{"ok",true},{"status","accepted"},{"operation_id",id},{"truncated",false}};
         return true;
     }
+    if(method=="global_map")return GlobalMapCommand(job);
     auto* client=CommandClient();
-    if(method=="global_map")return GlobalMapCommand(job,client);
     if(method=="save_game") {
         const auto name=CommandName(params);
         if(name.rfind("mcp_",0)!=0)throw std::runtime_error("save_game requires the mcp_ prefix");
