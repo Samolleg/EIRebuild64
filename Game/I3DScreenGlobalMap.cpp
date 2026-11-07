@@ -33,6 +33,9 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "dx11/Surface.h"
 #include "dx11/RendererDX11.h"
 #include <vector>
+#include <chrono>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
 /////////////////////////////////////////////////////////////////////////////////////
 const int GM_NF = 3;
 const int GM_NA = 3;
@@ -45,6 +48,10 @@ void CI3DScreenGlobalMap::StoreSpecific()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenGlobalMap::OnActivate()
 {
+    const auto activationStart = std::chrono::steady_clock::now();
+    PROCESS_MEMORY_COUNTERS_EX memoryBefore = {}; memoryBefore.cb = sizeof(memoryBefore);
+    const bool memoryBeforeValid = GetProcessMemoryInfo(GetCurrentProcess(),
+        reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memoryBefore), sizeof(memoryBefore)) != FALSE;
     // The global map has no hero objects; the followed carrier belonged to the departed zone.
     // Detach before any manual save or activation autosave captures the camera.
     theCamera.ResetTracking();
@@ -367,6 +374,19 @@ void CI3DScreenGlobalMap::OnActivate()
         bNeedAutosave = false;
     }
     pI3D->CheckTutorial();
+    const double activationMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - activationStart).count();
+    PROCESS_MEMORY_COUNTERS_EX memoryAfter = {}; memoryAfter.cb = sizeof(memoryAfter);
+    const bool memoryValid = GetProcessMemoryInfo(GetCurrentProcess(),
+        reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memoryAfter), sizeof(memoryAfter)) != FALSE && memoryBeforeValid;
+    const double mib = 1024.0 * 1024.0;
+    GameJournal::Event("RENDER", "world_map_preview_activate",
+        "activate_ms=%.3f private_mb=%.3f private_delta_mb=%.3f working_set_mb=%.3f working_set_delta_mb=%.3f memory_valid=%u",
+        activationMs, double(memoryAfter.PrivateUsage) / mib,
+        memoryValid ? (double(memoryAfter.PrivateUsage) - double(memoryBefore.PrivateUsage)) / mib : 0.0,
+        double(memoryAfter.WorkingSetSize) / mib,
+        memoryValid ? (double(memoryAfter.WorkingSetSize) - double(memoryBefore.WorkingSetSize)) / mib : 0.0,
+        memoryValid ? 1u : 0u);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenGlobalMap::OnDeactivate()

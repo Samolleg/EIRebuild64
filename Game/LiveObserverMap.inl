@@ -14,6 +14,27 @@ bool GlobalMapScreen(EInterface iface) {
     return false;
 }
 
+// A restored map is ready with an undeployed party, after the local handshake.
+// Keep this admission separate from the unit/ownership checks for a mission.
+bool LoadedGlobalMapReady() {
+    auto& world=theWorldServer;
+    if(!world.bMapLoaded||world.GetServerMode()!=SERV_MODE_LOCAL||IWorldConnector.HasReq()||
+       (world.curInterface!=IFACE_MISSION&&world.curInterface!=IFACE_BASE)||
+       world.GetCurrentZoneName()!=operation.expectedZone.c_str()||
+       world.GetCurrentZoneName()!=IWorldClient.GetCurrentZoneName()||
+       !GlobalMapScreen(IFACE_GLOBAL_MAP))return false;
+    auto* client=theWorld.GetPlayer();auto* serverPlayer=world.GetPlayer(0);
+    auto* player=client?client->GetPlayer():nullptr;
+    auto* server=serverPlayer?static_cast<CPlayerServer*>(serverPlayer->GetPlayerSpecific()):nullptr;
+    if(!client||!player||!server||client->GetStatus()!=CPlayerClient::CPS_CAMP||
+       server->GetStatus()!=CPlayerServer::PSS_CAMP||player->curInterface!=IFACE_GLOBAL_MAP||
+       serverPlayer->curInterface!=IFACE_GLOBAL_MAP||
+       player->party.people.GetSize()!=serverPlayer->party.people.GetSize())return false;
+    for(int i=0;i<player->party.people.GetSize();++i)
+        if(player->party.people[i].nID!=serverPlayer->party.people[i].nID)return false;
+    return true;
+}
+
 // Called only for this operation, with operationMutex held by UpdateOperationReadiness.
 bool GlobalMapOperationReady() {
     auto& world=theWorldServer;

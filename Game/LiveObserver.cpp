@@ -280,6 +280,7 @@ void CleanupCapture(Job& job) noexcept {
 }
 bool Step(Job& job,Clock::time_point deadline);
 void UpdateOperationReadiness();
+bool LoadedGlobalMapReady();
 bool GlobalMapOperationReady();
 #include "LiveObserverCamera.inl"
 #include "LiveObserverRender.inl"
@@ -787,6 +788,9 @@ void UpdateOperationReadiness() {
         if(operation.parameter=="open") {
             operation.state="done";operation.stage="done";operation.inFlight=false;return;
         }
+    }
+    if(operation.method=="load_save"&&LoadedGlobalMapReady()) {
+        operation.state="done";operation.stage="done";operation.inFlight=false;return;
     }
     auto& world=theWorldServer;auto* client=theWorld.GetPlayer();
     if(!world.bMapLoaded||world.GetServerMode()!=SERV_MODE_LOCAL||!theWorld.IsConnected()||
