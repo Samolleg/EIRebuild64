@@ -343,6 +343,7 @@
     <ClCompile Include="Game\WorldClient.cpp" />
     <ClCompile Include="Game\ModArenaVisual.cpp" />
     <ClCompile Include="Game\ModFinalGolem.cpp" />
+    <ClCompile Include="Game\ModGolemCollapse.cpp" />
     <ClCompile Include="Game\ModGolemReflect.cpp" />
     <ClCompile Include="Game\ModFinalGolemVisual.cpp" />
     <ClCompile Include="Game\WorldInterface.cpp" />

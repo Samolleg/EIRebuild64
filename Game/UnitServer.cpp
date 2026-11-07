@@ -413,6 +413,7 @@ void CUnitServer::LowSetDead(BOOL bDead)
         return;
     pWS->aiMap.RemoveObject(lpUnit);
     lpUnit->bDead = bDead;
+    if(bDead)ModFinalGolem::Died(*lpUnit);
     BOOL bRv = pWS->aiMap.AddObject(lpUnit);
     ASSERT(bRv);
     if (bDead)
@@ -454,6 +455,12 @@ void CUnitServer::LowNewWishPose(EUnitPose pose)
     AddUpdateMask(CMapObject::VLD_MASK_POSE);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+static Navigation::GoalPolicy MoveGoalPolicy(CUnit* unit)
+{
+    const auto locomotion=unit->GetUserUnitStats()->cLocomotion;
+    const bool ground=unit->GetAIClass()!=0&&locomotion!=2&&locomotion!=3;
+    return ground||unit->IsHero()?Navigation::GoalPolicy::ClosestReachable:Navigation::GoalPolicy::Exact;
+}
 bool CUnitServer::LowFindPath(const CPlot3D &ptDest, SAIPath &res, BOOL bFastPath,
                               float fpMaxPathLength, Navigation::GoalPolicy goalPolicy,const Navigation::Location* goalSupport)
 {
@@ -481,7 +488,7 @@ bool CUnitServer::LowFindPath(const CPlot3D &ptDest, SAIPath &res, BOOL bFastPat
     }
     bool bFound = pWS->aiMap.NewPath(lpUnit, ptDest, res, fpMaxPathLength,0,goalPolicy,journal?&detail:nullptr,goalSupport);
     lpUnit->bNeedFastPath = bSaveFastPath;
-    if(bFound&&journal&&!detail.points.empty()) {
+    if(bFound&&journal&&detail.points.size()>1) {
         std::ostringstream points;unsigned turns=0,printed=0;
         for(size_t i=0;i<detail.points.size();++i) {
             const auto& current=detail.points[i];
@@ -1197,7 +1204,7 @@ bool CUnitServer::L1StartMove(const CPlot3D &ptTarget, float fpMaxPathLength, co
     bL1SpeedChanged = false;
     bL1MovementFailed = false;
     path.Clear();
-    const auto goalPolicy=curCommand.cmd==UC_MOVETO&&lpUnit->IsHero()?Navigation::GoalPolicy::ClosestReachable:Navigation::GoalPolicy::Exact;
+    const auto goalPolicy=curCommand.cmd==UC_MOVETO?MoveGoalPolicy(lpUnit):Navigation::GoalPolicy::Exact;
     if (!LowFindPath(ptTarget, path, lpUnit->bNeedFastPath, fpMaxPathLength,goalPolicy,goalSupport))
     {
         bL1MoveAnimationSet = false;
@@ -6327,7 +6334,7 @@ void CUnitServer::CmdShowMove(const CPlot3D &ptDest, bool bGroupCmd, bool bRun, 
     }
     //
     bool bFound = LowFindPath(ptDest, pathFake, pWS->aiMap.IsWater(lpUnit->GetCP()), fpMaxPathDist,
-                             lpUnit->IsHero()?Navigation::GoalPolicy::ClosestReachable:Navigation::GoalPolicy::Exact,
+                             MoveGoalPolicy(lpUnit),
                              nextCommand.navGoalValid?&nextCommand.navGoal:nullptr);
     //
     if (bRun)

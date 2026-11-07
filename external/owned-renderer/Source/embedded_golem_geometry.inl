@@ -81,7 +81,7 @@ Mesh FinalWall(Vec a,Vec b,float time,int band,bool flowing){
   for(int edge=0;edge<2;edge++){
    float h=(band+edge)*.8f;
    float crest=band==4&&edge?.22f*std::sin(t*n*.75f+time*3.7f):0;
-   Vec p=a+delta*t+Vec{0,0,h+crest};
+   Vec p=a+delta*t;p.z=GolemGround(p.x,p.y)+h+crest;
    m.Add(p,t*n*.31f+(flowing?.04f*std::sin(time+t*5):0),h*.38f-time*.32f);
   }
  }
@@ -106,7 +106,7 @@ void Stage(float time){
  int boss=0;
  int tick=input.tick;float ground=Base().z;Mesh rings;
  auto* body=textures[0];auto* detail=textures[1];
- auto solid=[&](Mesh&m,ID3D11ShaderResourceView*texture,unsigned color){draw(m,texture,color,true,false);m=Mesh{};};
+ auto solid=[&](Mesh&m,ID3D11ShaderResourceView*texture,unsigned color){draw(m,texture,Tint(color),true,false);m=Mesh{};};
  GolemGroundFields(tick,[&](Mesh&m){solid(m,detail,0xffb9e5ff);});
  // Ground fields show only physical fragments. Rings belong exclusively to
  // pending casts/projectiles, so impact removes the warning immediately.
@@ -117,7 +117,7 @@ void Stage(float time){
   start=GolemGroundPosition(start);target=GolemGroundPosition(target);
   float t=Clamp((tick-born)/(end-born),0,1),distance=std::hypot(target.x-start.x,target.y-start.y);Vec at=start+(target-start)*t+Vec{0,0,4*(3+distance*.08f)*t*(1-t)+.5f*t};
   GolemQuaternion q={input.shots[shot].q[0],input.shots[shot].q[1],input.shots[shot].q[2],input.shots[shot].q[3]};Vec axis=Unit(Cross(target-start,{0,0,1}));
-  for(const auto&p:golemThrownBlade)if(p.hand==(int)input.shots[shot].hand&&p.stage==(int)input.shots[shot].stage){Mesh blade;for(int i=0;i<p.count;i++){const auto&v=p.vertices[i];Vec point=Spin(GolemRotate(q,{v.x,v.y,v.z}),axis,t*5.5f);auto k=blade.Add(at+point,v.u,1-v.v);blade.indices.push_back((WORD)k);}solid(blade,p.texture==1?body:detail,0xffd5edff);}
+  for(const auto&p:resource.parts)if(p.kind==3&&p.hand==(int)input.shots[shot].hand&&p.stage==(int)input.shots[shot].stage){Mesh blade;for(int i=0;i<p.count;i++){const auto&v=p.vertices[i];Vec point=Spin(GolemRotate(q,{v.x,v.y,v.z}),axis,t*5.5f);auto k=blade.Add(at+point,v.u,1-v.v);blade.indices.push_back((WORD)k);}solid(blade,p.texture==1?body:detail,0xffd5edff);}
   SpellRing(rings,target,5,.065f);
  }
  if(input.phase==6&&input.throw_launched!=1)for(int i=0;i<(int)input.throw_count;i++)SpellRing(rings,GolemGroundPosition({input.casts[i][0],input.casts[i][1],0}),5,.065f);
@@ -126,11 +126,11 @@ void Stage(float time){
   int stage=(int)input.stage;if(stage>=5||stage<2)continue;
   float release=input.release[hand],ready=input.ready[hand];
   if(release<=0||tick<release+45||tick>=ready)continue;float grow=Clamp((tick-release-45)/27.f,0,1);auto node=Node(hand?2:1);if(!node)continue;
-  for(const auto&p:golemThrownBlade)if(p.hand==hand&&p.stage==stage){Mesh blade;for(int i=0;i<p.count;i++){const auto&v=p.vertices[i];Vec point={v.x*std::sqrt(grow),v.y*std::sqrt(grow),(v.z-.9f)*grow};auto k=blade.Add(NodePoint(node,point),v.u,1-v.v);blade.indices.push_back((WORD)k);}solid(blade,p.texture==1?body:detail,0xffb4ebff);}
+  for(const auto&p:resource.parts)if(p.kind==3&&p.hand==hand&&p.stage==stage){Mesh blade;for(int i=0;i<p.count;i++){const auto&v=p.vertices[i];Vec point={v.x*std::sqrt(grow),v.y*std::sqrt(grow),(v.z-.9f)*grow};auto k=blade.Add(NodePoint(node,point),v.u,1-v.v);blade.indices.push_back((WORD)k);}solid(blade,p.texture==1?body:detail,0xffb4ebff);}
  }
- draw(rings,nullptr,0x9f6fcfff,false,true);
+ draw(rings,nullptr,Tint(0x9f6fcfff),false,true);
  int phase=(int)input.phase;
- GolemLaserHaloGeometry(boss,time,[&](Mesh&m,unsigned color){draw(m,textures[2],color,false,true);});
+ GolemLaserHaloGeometry(boss,time,[&](Mesh&m,unsigned color){draw(m,input.hard?nullptr:textures[2],Tint(color),false,true);});
  if(phase==8||phase==9||phase==10){
   auto node=Node(0);Vec origin=NodePoint(node,{0,-.10f,1.17f});
   float ex=input.beam_ex,ey=input.beam_ey;
@@ -139,15 +139,16 @@ void Stage(float time){
    if(dy>.000001f)length=(std::min)(length,(62-Base().y)/dy);if(dy<-.000001f)length=(std::min)(length,(26-Base().y)/dy);
    ex=Base().x+dx*length;ey=Base().y+dy*length;
   }}
-  Vec end={ex,ey,ground+.8f};auto* flowTexture=textures[2];
+  Vec end={ex,ey,GolemGround(ex,ey)+.8f};auto* flowTexture=input.hard?nullptr:textures[2];
   if(phase==9){
-   for(int layer=0;layer<3;layer++){auto tube=GolemTube(origin,end,layer==0?.5f:layer==1?.24f:.085f,time);draw(tube,flowTexture,layer==0?0x8a379cff:layer==1?0xd77cdfff:0xf4edffff,false,true);}
+   for(int layer=0;layer<3;layer++){auto tube=GolemTube(origin,end,layer==0?.5f:layer==1?.24f:.085f,time);draw(tube,flowTexture,Tint(layer==0?0x8a379cff:layer==1?0xd77cdfff:0xf4edffff),false,true);}
   }else{
-   Mesh charge;float progress=phase==10?1.f:Clamp(input.timer/36.f,0,1);Crystal(charge,origin,.15f+.28f*progress,.3f+.5f*progress,time*3);draw(charge,body,0xe89fe9ff,false,true);
+   Mesh charge;float progress=phase==10?1.f:Clamp(input.timer/36.f,0,1);Crystal(charge,origin,.15f+.28f*progress,.3f+.5f*progress,time*3);draw(charge,body,Tint(0xe89fe9ff),false,true);
   }
-  Vec groundStart=Base()+Vec{0,0,.055f},groundEnd={ex,ey,ground+.055f};Vec side=Unit(Cross(groundEnd-groundStart,{0,0,1}))*.5f;Mesh warning;
-  auto k=warning.Add(groundStart-side,0,0);warning.Add(groundStart+side,0,1);warning.Add(groundEnd+side,1,1);warning.Add(groundEnd-side,1,0);warning.Quad(k,k+1,k+2,k+3);
-  draw(warning,nullptr,phase==9?0x5a7cddff:0x42329edc,false,true);
+  Vec groundStart={Base().x,Base().y,GolemGround(Base().x,Base().y)+.055f},groundEnd={ex,ey,GolemGround(ex,ey)+.055f};Vec side=Unit(Cross(groundEnd-groundStart,{0,0,1}))*.5f;Mesh warning;
+  const int steps=(std::max)(1,int(std::ceil(std::hypot(ex-groundStart.x,ey-groundStart.y)/.65f)));
+  for(int i=0;i<=steps;++i){const float t=float(i)/steps;auto p=groundStart+(groundEnd-groundStart)*t;for(float sign:{-1.f,1.f}){auto q=p+side*sign;q.z=GolemGround(q.x,q.y)+.055f;warning.Add(q,t,sign<0?0.f:1.f);}if(i){auto k=unsigned(i*2);warning.Quad(k-2,k,k+1,k-1);}}
+  draw(warning,nullptr,Tint(phase==9?0x5a7cddff:0x42329edc),false,true);
  }
 }
 

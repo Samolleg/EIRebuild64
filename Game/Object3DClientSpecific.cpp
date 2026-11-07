@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "ModFinalGolem.h"
 #include "ModEncounter.h"
 #include "CorePerf.h"
 #include "OwnedRender/E1PerfDiagnostics.h"
@@ -790,6 +791,10 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
                 oldestEmissive.g, oldestEmissive.b, oldestEmissive.a}};
         }
 
+        if(ModFinalGolem::IsRubyActor(*object) && partName=="core") {
+            const auto* unit=dynamic_cast<CUnit*>(object);
+            materialAsset->emissive=(unit&&unit->IsDead())?std::array<float,4>{0,0,0,1}:std::array<float,4>{.65f,.04f,.03f,1};
+        }
         owned::VisualPartAsset part;
         part.name = partName;
         part.geometry = std::move(figureAsset);
@@ -954,6 +959,11 @@ bool CObject3DClientSpecific::PrepareOwnedResources(bool publishAppearance)
     }
     if(pWoundsTexture && pWoundsTexture->GetSurface())
         pWoundsTexture->GetSurface()->EnsureOwnedSurfacePublished();
+    if((lpObject->GetID()==990400 || ModFinalGolem::IsRubyActor(*static_cast<CObject3D*>(lpObject))) && !ModFinalGolem::PrepareAppearance(*static_cast<CObject3D*>(lpObject))) {
+        const auto resource=OwnedRender::E1Scene().Resource(lpObject);
+        if(resource.serial)OwnedRender::E1Scene().Scene().visual_reject(resource,owned::RetainedVisualStatus::unsupported_appearance,"golem.authored_stage_material","host.golem");
+        return false;
+    }
     if (publishAppearance && !ownedAppearanceAttempted)
     {
         ownedAppearanceAttempted = true;

@@ -32,6 +32,15 @@ class NavigationWorld {
     enum class AirEvent { Query, RandomGoal, Step };
     struct AirJournal { std::uint64_t next=0; unsigned suppressed=0; };
     std::map<int,std::array<AirJournal,3>> airJournal;
+    // One terminal ground-order result per live unit. No saved state or jobs.
+    struct GroundGoal {
+        Navigation::Point requested,source;Navigation::Location endpoint;
+        std::uint64_t generation=0;int profile=0;
+        float height=0,radius=0,maxLength=0;
+        unsigned short excludedFlags=0;
+        Navigation::Status status=Navigation::Status::Invalid,reason=Navigation::Status::Complete;
+    };
+    std::map<int,GroundGoal> groundGoals;
     bool ObserveAir(CUnit* unit,AirEvent event,unsigned& suppressed);
     bool loaded=false;
     bool iceVariant=false;
@@ -95,6 +104,7 @@ public:
     // Service/MOB seam: z is terrain-relative, yaw is radians. Presence controls
     // AI/Nav participation (falling scenery remains a world/render object).
     void TransformObject(int id,Navigation::Point position,float yaw,bool present);
+    void TransformObject(int id,Navigation::Point position,const std::array<float,4>& rotation,bool present);
     bool ObjectPresent(int id) const { return !detachedObjects.count(id); }
     void ForgetObject(int id) { detachedObjects.erase(id); }
     void Object(CMapObject* object,bool remove,CAIMap& map);
@@ -103,7 +113,7 @@ public:
     void Advance();
     std::uint64_t Generation() const { return generation; }
     void Stop(int id) { queues.erase(id); }
-    void ForgetUnit(int id) { Stop(id);flyingUnits.erase(id);airJournal.erase(id); }
+    void ForgetUnit(int id) { Stop(id);flyingUnits.erase(id);airJournal.erase(id);groundGoals.erase(id); }
     bool Goal(CUnit* unit,Navigation::Point reference,Navigation::Location& result);
     float Radius(CUnit* unit) { return (std::max)(.05f,Body(unit).radius); }
     bool RandomGoal(CUnit* unit,Navigation::Point center,float radius,Navigation::Point& goal,Navigation::RandomShape shape=Navigation::RandomShape::Circle);

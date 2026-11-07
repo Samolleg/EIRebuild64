@@ -102,6 +102,23 @@ aperture tiles. Replacements restore current door states and clearance flags.
 The baker logs actual worker/apply timing at the zone1 start tile; this does
 not establish the worst case for every campaign tile or 100 creatures.
 
+## Movement goals
+
+Ground move orders share ClosestReachable for player clicks, MoveToPoint and
+UMSentry. An off-mesh endpoint is sought within 4 m in XY and 4 m in original
+support height, with the existing clearance/class filter. If the nearest
+polygon is disconnected, the exhausted bounded A* selects the closest point
+of the reachable component within those same limits. On-mesh unreachable
+goals retain the existing closest-reachable rule. Attacks, placement and
+internal visibility edges remain Exact. Bake parameters and formats are unchanged.
+
+The game retains one transient terminal result per unit: a failure from the
+same source, or an adjusted endpoint after arrival. Reissuing that ground
+order performs no Detour search and adds no repeated NAV result entry. A
+changed goal, source, profile, clearance, class or path bound, or a scene/door
+generation change, permits a fresh query. Pending geometry and body-detour
+queries never reuse it. Unit removal and scene replacement retire the entry.
+
 ## Authoring
 
 Optional Maps/<mpr>.navsrc is UTF-8 JSON version 1:
