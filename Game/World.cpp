@@ -292,7 +292,8 @@ CUnit *CWorldBase::GetUnit(int nID)
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldBase::SetWorldTime(float fpCurrentTime)
 {
-    fpTimeModifier = fpCurrentTime - GetWorldTime();
+    // Offset is relative to the raw counter, not the old wrapped hour.
+    fpTimeModifier = fpCurrentTime - float(nSegmentTimeCounter) * fpTimeScale;
     // theSettings.nDefaultTimeScale = Float2Int( fpScale );
 }
 /////////////////////////////////////////////////////////////////////////////////////
