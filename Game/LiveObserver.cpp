@@ -34,6 +34,7 @@
 #include "Item.h"
 #include "ItemManager.h"
 #include "SpellManager.h"
+#include "StringProcessing.h"
 #include "ModSettingsPolicy.h"
 #include "TextManager.h"
 #include "ModPackage.h"
