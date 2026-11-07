@@ -18,6 +18,8 @@ const std::string& harness_directory() noexcept;
 // camera_path (temporary): the steps the front command has applied (0 when
 // the front is not a camera_path).
 unsigned harness_camera_path_steps() noexcept;
+// The route banner set by the note verb (empty: none).
+std::string harness_banner_text();
 
 // Present step. Runs the harness-owned commands (wait, state, dump_units,
 // quit, load_save with its 120 s limit, main_menu, and the hand-off of camera/clock/

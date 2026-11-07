@@ -337,6 +337,7 @@ void Renderer::game_effect_constants(const GameEffectDraw& draw,const FixedState
  // Reflection depth coverage; modulating blends (darkening) stay out (3).
  const bool modulating=blended&&(source==D3DBLEND_ZERO||source==D3DBLEND_DESTCOLOR);
  c.coverage_mode=modulating?3u:!blended||destination!=D3DBLEND_ONE?0u:source==D3DBLEND_SRCALPHA?1u:2u;
+ c.padding[0]=draw.ribbon_antialias?1u:0u;
 }
 
 // Shared tail of the game effect draws (particles, lightning ribbons): uploads
@@ -825,7 +826,7 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
 #endif
  // An unchanged static set reuses its grouped order; the layout check below
  // still verifies every record against the queue.
- const NativeStaticSet* static_set=layout_slot==2?&native_static_set_:layout_slot==3?&native_terrain_set_:layout_slot==4?&neighbours_.opaque:nullptr;
+ const NativeStaticSet* static_set=native_static_set_for_layout(layout_slot);
  auto& bake=layout.static_bake;
  HRESULT hr=S_OK;
  // A reused bake keeps the layout, work and totals of the frame that built

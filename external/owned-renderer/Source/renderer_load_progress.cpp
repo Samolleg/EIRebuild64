@@ -93,7 +93,7 @@ const char* decode_progress_pixels(const std::string& path, unsigned width, unsi
 
 // Decoded progress frames as GPU textures (the held picture's GPU sources).
 const char* create_progress_textures(ID3D11Device* device, unsigned width, unsigned height,
-    const std::vector<std::vector<std::uint8_t>>& frames, std::vector<SurfaceImage>& output) {
+    const std::vector<std::vector<std::uint8_t>>& frames, std::vector<SurfaceImage>& output, D3D12Frame* d3d12 = nullptr) {
     output.clear();
     const std::size_t pitch = std::size_t(width) * 4;
     std::vector<SurfaceImage> after;
@@ -108,8 +108,12 @@ const char* create_progress_textures(ID3D11Device* device, unsigned width, unsig
         SurfaceImage image;
         image.width = width; image.height = height; image.pitch = LONG(pitch);
         image.gpu_captured = true;
-        if (FAILED(device->CreateTexture2D(&desc, &initial, &image.texture)) ||
-            FAILED(device->CreateShaderResourceView(image.texture.Get(), nullptr, &image.srv)))
+        if (d3d12) {
+            if (FAILED(d3d12->create_texture(width, height, desc.Format, image.d3d12)) ||
+                FAILED(d3d12->write_texture(*image.d3d12, RECT{0, 0, LONG(width), LONG(height)}, pixels.data(), UINT(pitch))))
+                return "frame texture creation failed (Direct3D 12)";
+        } else if (!device || FAILED(device->CreateTexture2D(&desc, &initial, &image.texture)) ||
+                   FAILED(device->CreateShaderResourceView(image.texture.Get(), nullptr, &image.srv)))
             return "frame texture creation failed";
         after.push_back(std::move(image));
     }
@@ -161,7 +165,7 @@ void Renderer::capture_load_progress_movie(bool fitted) noexcept try {
     auto& state = load_progress_movie_;
     ProgressMovie movie;
     const auto read_movie = [&] {
-        if (!on_scene_thread()) return bridge_progress_movie(movie);
+        if (!on_scene_thread() && !core_host_) return bridge_progress_movie(movie);
         movie = progress_movie_input_;
         return progress_movie_input_valid_;
     };
@@ -277,7 +281,7 @@ void Renderer::draw_load_progress(float progress) noexcept try {
     auto& state = load_progress_movie_;
     // The frame's world and interface passes are done (present): the back
     // buffer is the target and nothing else is queued.
-    if (!scene_composited_ || !pending_blits_.empty() || rtv_ != backbuffer_rtv_) return;
+    if (!scene_composited_ || !pending_blits_.empty() || (!d3d12_ && rtv_ != backbuffer_rtv_)) return;
     const bool typed = bool(state.source);
     if (typed && state.source_failed) return;
     if (!typed && !decode_load_progress_movie()) return;
@@ -369,7 +373,7 @@ void Renderer::core_progress_frames(std::uint64_t serial, unsigned width, unsign
     const std::vector<std::vector<std::uint8_t>>& frames, const char* failure) noexcept try {
     std::vector<SurfaceImage> after;
     const char* why = failure;
-    if (!why) why = create_progress_textures(device_.Get(), width, height, frames, after);
+    if (!why) why = create_progress_textures(device_.Get(), width, height, frames, after, d3d12_);
     std::string path;
     {
         std::lock_guard<std::mutex> lock(load_progress_decode_lock_);

@@ -21,6 +21,9 @@ constexpr std::uint32_t kGameSkillSetUnitVa = 0x0063f800;
 constexpr std::uint32_t kGameChangeWeaponVa = 0x00535590;
 constexpr std::uint32_t kGameLoadTexturesVa = 0x0051c250;
 constexpr std::uint32_t kGameHideWeaponVa = 0x00537cb0;
+constexpr const char* kAnimationPacketSender =
+    "6a 04 8d 86 78 01 00 00 50 8b cf b8 a0 dc 47 00 ff d0 8b cf b8 20 dc 47 00 ff d0 "
+    "68 7d ee 52 00 c3";
 
 struct Image {
     const std::uint8_t* base = nullptr;
@@ -723,9 +726,8 @@ const char* discover_visual(const Image& image, const Resolver& resolver,
         return "visual.receiver_form";
     }
     std::uint32_t update_to[2]{};
-    const std::uint32_t update_count = find_all(image, image.text_begin, image.text_end, sig(
-        "6a 04 8d 86 78 01 00 00 50 8b cf b8 a0 dc 47 00 ff d0 8b cf b8 20 dc 47 00 ff d0 "
-        "68 7d ee 52 00 c3"), update_to, 2);
+    const std::uint32_t update_count = find_all(image, image.text_begin, image.text_end,
+        sig(kAnimationPacketSender), update_to, 2);
     DISCOVER_REQUIRE(update_count <= 1, "visual.update_to_receiver");
     layout.update_to_receiver = update_count ? update_to[0] : 0;
     out = layout;
@@ -864,9 +866,90 @@ const char* discover_effect_values(const Image& image,AddonLayout& out) noexcept
     out.effect_value_callback=callback; return nullptr;
 }
 
+// This packet owner does not imply an appearance/resource contract. The
+// initializer below installs the paired four-byte transfer and coefficient
+// callback together; live game targets and the enabled flag are checked by
+// the consumer before any publication hook is written.
+const char* discover_inline_animation_packet(const Image& image,
+                                             AddonAnimationPacketLayout& out) noexcept {
+    AddonAnimationPacketLayout value{};
+    DISCOVER_REQUIRE(find_unique(image, sig(kAnimationPacketSender), value.sender),
+                     "animation_packet.sender");
+    DISCOVER_REQUIRE(find_unique(image, sig(
+        "6a 04 8d 86 78 01 00 00 50 8b cf b8 00 e0 47 00 ff d0 "
+        "83 be 5c 02 00 00 01 68 b0 f3 52 00 c3"), value.receiver),
+        "animation_packet.receiver");
+
+    Sig registration = sig("6a 05 68 ?? ?? ?? ?? 68 71 5c 53 00 8d 44 24 18 50 e8 ?? ?? ?? ?? "
+                           "8d 44 24 0c 50 b8");
+    add_word(registration, static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(image.base)) + value.sender);
+    add(registration, "b9 76 ee 52 00 e8 ?? ?? ?? ?? 8b 44 24 14 8b 48 f4 2b 48 f0 6a 02 "
+                      "03 48 ec 8d 44 24 10 51 50 e8 ?? ?? ?? ?? 8d 44 24 0c 50 b8");
+    add_word(registration, static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(image.base)) + value.receiver);
+    add(registration, "b9 a9 f3 52 00 e8 ?? ?? ?? ??");
+    std::uint32_t install = 0;
+    DISCOVER_REQUIRE(find_unique(image, registration, install) && install >= 0x46,
+                     "animation_packet.registration");
+    // EAX is zero through the flag comparison; nonzero enters the rate
+    // write and both registrations, while zero returns before all of them.
+    DISCOVER_REQUIRE(matches(image, install - 0x46, sig(
+        "33 c0 c7 44 24 0c ?? ?? ?? ?? 89 44 24 10 89 44 24 14 89 44 24 18 "
+        "88 44 24 20 89 44 24 30 38 05 ?? ?? ?? ?? 75 20 33 f6 46 8d 7c 24 10 "
+        "e8 ?? ?? ?? ?? 8b c6 8b 4c 24 28 64 89 0d 00 00 00 00 59 5f 5e 8b e5 5d c3")) &&
+        (value.enabled_flag = absolute_rva(image, install - 0x26)) != 0,
+        "animation_packet.flag_guard");
+    const auto rate = absolute_rva(image, install + 3);
+    const auto writer = branch_target(image, install + 0x11);
+    const auto jump = branch_target(image, install + 0x25);
+    DISCOVER_REQUIRE(rate && matches(image, rate, sig("83 f8 01 74 12")) && in_text(image, writer) &&
+        in_text(image, jump) && jump == branch_target(image, install + 0x53) &&
+        matches(image, jump, sig(
+            "55 8b ec 51 51 53 56 57 6a 01 8b f0 8d 45 fc 50 8b f9 57 ff 75 08 c6 45 fc e9 "
+            "e8 ?? ?? ?? ?? 6a 04 8b d8 2b f7 8d 45 f8 83 ee 05 50 47 57 ff 75 08 89 75 f8 "
+            "e8 ?? ?? ?? ?? 5f 5e 03 c3 5b c9 c2 04 00")) &&
+        branch_target(image, jump + 0x1a) == writer && branch_target(image, jump + 0x34) == writer,
+        "animation_packet.patch_writer");
+
+    // The same initializer registers GetAnimationCoeff's thiscall callback.
+    const auto coefficient = install + 0x86;
+    DISCOVER_REQUIRE(matches(image, coefficient, sig(
+        "8d 44 24 0c 50 68 ?? ?? ?? ?? 68 ?? ?? ?? ?? 6a 03 6a 04 b8 d0 27 53 00 e8 ?? ?? ?? ?? "
+        "83 c4 14 84 c0 75 08 6a 02 5e e9")) &&
+        (value.coefficient_original = absolute_rva(image, coefficient + 6)) != 0 &&
+        value.coefficient_original <= image.size - 4 &&
+        (value.coefficient_callback = absolute_rva(image, coefficient + 11)) != 0,
+        "animation_packet.coefficient_registration");
+    const auto callback = value.coefficient_callback;
+    std::uint32_t callback_match = 0;
+    DISCOVER_REQUIRE(find_unique(image, sig(
+        "55 8b ec 51 51 8b 55 0c d9 e8 8b 42 14 d9 5d fc 25 00 00 3c 00 53 56 b9 00 00 0c 00 "
+        "3d 00 00 08 00 74 11 3b c1 74 0d 8b 75 08 52 56 ff 15 ?? ?? ?? ?? eb 4d 8b 75 08 "
+        "8b 9e 40 02 00 00 3b c1 74 51 8b c3 e8 ?? ?? ?? ?? 83 f8 3d 74 45 57 8b be"), callback_match) &&
+        callback_match == callback && absolute_rva(image, callback + 0x2e) == value.coefficient_original &&
+        matches(image, callback + 0x50, sig(
+            "6c 02 00 00 e8 ?? ?? ?? ?? 50 53 e8 ?? ?? ?? ?? 89 45 f8 5f 85 c0 74 1c 8b 45 0c "
+            "8b 40 20 89 45 0c db 45 0c 85 c0 79 06 d8 05 ?? ?? ?? ?? da 75 f8 d9 5d fc d9 45 fc "
+            "d9 9e 78 01 00 00 d9 45 fc eb 06 d9 86 78 01 00 00 5e 5b c9 c3")) &&
+        in_text(image, branch_target(image, callback + 0x43)) &&
+        in_text(image, branch_target(image, callback + 0x54)) &&
+        in_text(image, branch_target(image, callback + 0x5b)) &&
+        word(image, absolute_rva(image, callback + 0x7a)) == 0x4f800000,
+        "animation_packet.coefficient_body");
+    out = value;
+    return nullptr;
+}
+
 #undef DISCOVER_REQUIRE
 
 } // namespace
+
+const char* discover_addon_animation_packet(const std::uint8_t* base,
+                                           AddonAnimationPacketLayout& output) noexcept {
+    output = {};
+    Image image{};
+    if (!image_view(base, image)) return "addon.image_headers";
+    return discover_inline_animation_packet(image, output);
+}
 
 AddonLayout discover_addon_layout(const std::uint8_t* base) noexcept {
     AddonLayout layout{};

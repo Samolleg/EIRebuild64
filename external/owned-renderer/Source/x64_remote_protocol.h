@@ -19,7 +19,7 @@
 namespace x64remote {
 
 constexpr std::uint32_t kMagic = 0x44524945u; // 'EIRD'
-constexpr std::uint32_t kVersion = 22; // 22: host_window_work removed again; 21: Control::host_window_work, release_delay_us; 20: cave flag in NativeWorldLightingFrame (#208); 19: zone-mask HitTestFrame (#200); 18: candidate-1025 (S7 17 + grass-cull WorldScene camera anchor height); 17: S7, the call-stream ops, queries, prefetch and neighbour status removed; 16: game_clean_exit; 15: combined-1
+constexpr std::uint32_t kVersion = 35; // 35: owned unknown-map FIG/MapG cover; 34: same-frame map marker controls and border tint; 33: standalone loading-screen map cache; 32: footstep native-contact removal reserved; 30: owned world-map preview commands; 28: authored-family policy with name provenance (neighbor piece5); 27: GameStatus::addon_notice; 26: terrain family/neighbor policy (separate integration); 25: Preview::portrait_hair; 24: Preview::portrait_lighting; 23: game-owned camera pan availability in GameStatus; 22: host_window_work removed again; 21: Control::host_window_work, release_delay_us; 20: cave flag in NativeWorldLightingFrame (#208); 19: zone-mask HitTestFrame (#200); 18: candidate-1025 (S7 17 + grass-cull WorldScene camera anchor height); 17: S7, the call-stream ops, queries, prefetch and neighbour status removed; 16: game_clean_exit; 15: combined-1
 constexpr std::uint32_t kHarnessAcks = 16;              // harness step acks in flight (one step runs at a time)
 constexpr std::uint32_t kSurfaceRequests = 1024;         // surface writes the host asked for, in flight
 constexpr std::uint32_t kOverlayInputs = 64;             // window messages for the host's F10 overlay, in flight

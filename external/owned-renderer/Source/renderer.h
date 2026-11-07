@@ -49,6 +49,7 @@
 #include <unordered_map>
 #include <vector>
 #include "engine_bridge.h"
+#include "world_map_preview.h"
 #include "widescreen.h"
 #include "shadow_far_retention.h"
 #include "debug_overlay.h"
@@ -883,6 +884,7 @@ struct ScenePresentInputs {
     unsigned long harness_entry_id = 0;
     unsigned harness_camera_steps = 0;
     bool harness_on_travel_map = false;
+    std::string harness_banner;  // note verb: the route banner the overlay shows
     BridgeFrameValues bridge{};
     BridgeProfileValues profile{};
     std::int64_t recorder_present_entry = 0;
@@ -1118,8 +1120,42 @@ public:
     int flush_anisotropy_ = -1; // the anisotropy setting while flush_native runs (apply_state), else -1
     const std::array<float,16>* native_frozen_cull_clip() const noexcept { return native_cull_frozen_?&native_cull_clip_:nullptr; }
     bool set_native_world_lighting(const NativeWorldLighting& lighting) noexcept;
+    void precache_world_map_preview(std::uint64_t generation,
+        std::vector<WorldMapPreviewSection> sections, std::string failure = {});
+    void activate_world_map_preview(std::uint64_t generation,
+        std::vector<WorldMapPreviewSection> sections, std::string failure = {});
+    // release: the option turned off; also drop the GPU registrations and
+    // the loading cache's CPU memory.
+    void retire_world_map_preview(bool release = false);
+    // Native submission completes modern HUD placement before crossing the
+    // scene queue. The render command below receives that complete clip matrix.
+    void submit_world_map_preview(std::uint64_t generation, std::uint32_t section,
+        const std::array<float,16>& matrix, const std::array<float,3>& tint,
+        const std::array<float,3>& border_tint, bool discovered, const FixedState& state);
+    void draw_world_map_preview(std::uint64_t generation, std::uint32_t section,
+        const std::array<float,16>& matrix, const std::array<float,3>& tint,
+        const std::array<float,3>& border_tint, bool discovered, const FixedState& state);
+    void begin_world_map_marker();
+    void end_world_map_marker();
+    void draw_world_map_markers();
     // Scene thread: the same, with the world environment read on the game thread.
     bool set_native_world_lighting(const NativeWorldLighting& lighting,const WorldEnvironment* environment) noexcept;
+    // A portrait owns its light only after the world is composited. Its final
+    // flush precedes restoring the exact prepared light, without cave reshaping.
+    class PortraitLightingScope {
+    public:
+        PortraitLightingScope(Renderer& renderer,const NativeWorldLighting* lighting) noexcept;
+        ~PortraitLightingScope();
+        PortraitLightingScope(const PortraitLightingScope&) = delete;
+        PortraitLightingScope& operator=(const PortraitLightingScope&) = delete;
+        bool ready() const noexcept { return ready_; }
+        bool finish() noexcept;
+    private:
+        Renderer* renderer_ = nullptr;
+        NativeWorldLighting previous_{};
+        bool previous_valid_ = false;
+        bool ready_ = false;
+    };
     // world_time: the game's world clock of these lights (emissive-light pulse).
     bool set_native_point_lights(const std::vector<RetainedWorldPointLight>& lights,double world_time=0) noexcept;
     bool native_shadows_enabled() const noexcept { return native_shadows_enabled_; }
@@ -2245,6 +2281,17 @@ private:
         // Interface semantics (an owned HUD mesh, a preview): never drawn in a world flush.
         bool interface_record = false;
     };
+    // Only native world-map arrows, owned values retained until this same
+    // map Draw ends. The ordinary native queue keeps all other records.
+    struct MapPreviewMarker {
+        NativeSelectedRecord selected;
+        std::vector<std::uint8_t> morphs;
+        NativeWorldLighting lighting{};
+        bool lighting_valid = false;
+    };
+    std::vector<MapPreviewMarker> map_preview_markers_;
+    bool map_preview_marker_collecting_ = false;
+    void discard_world_map_markers() noexcept;
     struct NativeInstanceUpdate {
         UINT destination = 0, count = 0, flags = 0;
         NativeInstanceGpu value{};
@@ -2311,6 +2358,7 @@ private:
             std::vector<NativeMesh*> meshes;   // adjacent duplicates folded
             std::uint64_t prepared_vertices = 0, logical_draws = 0;
             std::uint64_t opaque_draws = 0, cutout_draws = 0, material_buckets = 0;
+            std::uint64_t reorderable_draws = 0, ordered_draws = 0;
             std::uint64_t set_revision = 0, content_revision = 0;
             ComPtr<ID3D11Buffer> work;
             ComPtr<ID3D11ShaderResourceView> work_srv;
@@ -2530,17 +2578,21 @@ private:
     HRESULT ensure_upscaler_d3d12();
     void apply_upscaler_mode_d3d12();
     void begin_object_motion_d3d12() noexcept;
+    bool object_motion_ready_d3d12() noexcept;
     bool draw_object_motion_d3d12(const ShaderProgram& vertex,const ShaderProgram& pixel,const D3D12NativeState& batch_state,
                                   const RECT* scissor,UINT args_offset);
     void camera_motion_d3d12(const float clip_to_world[16],const float previous[16]);
     void present_upscaled_d3d12();
     HRESULT upscale_world_d3d12();
+    HRESULT filtered_upscale_d3d12();
     bool render_dlss_d3d12();
     bool render_fsr_d3d12();
     // Where the composite and post passes write: the resolved image while a
-    // temporal upscaler runs, else the back buffer (null).
+    // temporal upscaler runs or the render scale is below 100%, else the back
+    // buffer (null).
     D3D12Texture* scene_output_d3d12() const noexcept {
-        return temporal_upscaler() && upscale12_.resolved ? upscale12_.resolved.get() : nullptr;
+        return (temporal_upscaler() || width_ != output_width_ || height_ != output_height_) && upscale12_.resolved
+            ? upscale12_.resolved.get() : nullptr;
     }
     HRESULT resolve_world_d3d12(bool smaa);
     HRESULT depth_of_field_d3d12(int quality,float strength,const float clip_to_world[16],double seconds);
@@ -2839,6 +2891,8 @@ private:
     std::shared_ptr<const TerrainAtlasSnapshot> core_atlases_sent_; // terrain atlas snapshot last sent
     std::uint8_t core_game_status_sent_[4] = {0xff, 0, 0, 0};    // GameStatus last sent (sky, slots, sites; [3] unused)
     const char* core_weather_problem_sent_ = reinterpret_cast<const char*>(1);
+    const char* core_camera_pan_unavailable_sent_ = reinterpret_cast<const char*>(1);
+    std::string core_addon_notice_sent_; // compare text: the game's startup notice buffer is reused
     unsigned long core_harness_config_entry_ = 0;  // harness config step applied here
     // Game process: sends the surface's pending write to the host (SurfaceWrite)
     // and marks it uploaded; its CPU pixels stay (no GPU copy exists here).
@@ -2944,6 +2998,9 @@ private:
     ComPtr<ID3D11RenderTargetView> hit_test_rtv_,hit_test_saved_rtv_;
     ComPtr<ID3D11DepthStencilView> hit_test_dsv_,hit_test_saved_dsv_;
     UINT hit_test_width_=0,hit_test_height_=0;
+    // D3D12: the same target (B8G8R8A8 with its own D24S8 depth); between
+    // begin and end it stands in for world_d3d12_, which waits in the saved slot.
+    D3D12TextureRef hit_test12_,hit_test_saved_world12_;
     bool hit_test_active_=false;
     bool hit_test_failed_=false;
     void hit_test_frame_apply(bool begin) noexcept;
@@ -3522,7 +3579,8 @@ private:
     void release_terrain2_cache() noexcept;
     bool bake_terrain2_cache_rect(unsigned level,const Terrain2CacheRect& rect) noexcept; // false: not baked (D3D12 pipeline not ready or dropped)
     void update_terrain2_styles(Terrain2Map& map,const TerrainTileFamilies& families,const std::map<std::uint32_t,std::uint32_t>& cells,
-        const std::vector<std::array<std::uint32_t,4>>& rows,const std::vector<std::uint32_t>& fold_table) noexcept;
+        const std::vector<std::array<std::uint32_t,4>>& rows,const std::vector<std::uint32_t>& fold_table,
+        const std::vector<std::array<std::uint32_t,4>>& art) noexcept;
     // Shared map edges (update_terrain_tile_blend_seams): the active map's
     // blend inputs and own vertex families kept for rebuilding its rows when
     // a neighbour's families arrive, the families it can draw (by name) and
@@ -3977,6 +4035,7 @@ private:
         ID3D11VertexShader* vertex_shader = nullptr;
         WorldSupportShader vertex_program = WorldSupportShader::game_particle_vs;  // the same program (D3D12 backend)
         bool fog = true, reflection_depth = true;
+        bool ribbon_antialias = false; // untextured UI ribbon side coverage
         const char* profile_pass = "";
     };
     std::vector<GameParticleGpu> game_effect_elements_;
@@ -4110,7 +4169,7 @@ private:
     ComPtr<ID3D11PixelShader> native_water_ps_,native_water_ssr_ps_,native_low_water_ps_,native_lava_ps_;
     unsigned native_liquid_types_reported_=0; // liquid_batch_types lines, by type mix
     ComPtr<ID3D11PixelShader> ps_;
-    ComPtr<ID3D11PixelShader> backdrop_ps_;ComPtr<ID3D11SamplerState> backdrop_sampler_;
+    ComPtr<ID3D11PixelShader> backdrop_ps_;
     ComPtr<ID3D11PixelShader> interface_scaled_ps_;bool interface_scaled_ps_failed_=false;
     bool interface_scaled_ps();
     ComPtr<ID3D11PixelShader> interface_text_ps_;bool interface_text_ps_failed_=false;
@@ -4492,7 +4551,7 @@ private:
     int fg_low_rate_windows_ = 0;
     double fg_rate_window_ms_ = 0.0, fg_rate_on_ms_ = 0.0, fg_rate_cost_ms_ = -1.0;
     unsigned fg_rate_window_count_ = 0;
-    void update_frame_generation_auto_off() noexcept;
+    void update_frame_generation_auto_off(int output_limit) noexcept;
     bool evaluate_frame_generation_d3d12() noexcept;
     void frame_generation_off(int mode,const char* reason) noexcept;
     void update_frame_generation_rates() noexcept;
@@ -4645,7 +4704,12 @@ private:
     // 0 per-frame color, 1 shadows, 2 persistent static color set, 3 static
     // terrain set, 4 neighbour opaque set, 5 static sun caster bake, 6 terrain
     // sun caster bake, 7 neighbour sun caster bake.
-    std::array<NativeSubmissionLayout,8> native_submission_layouts_;
+    // 8..22 map opaque/cutout; 23..37 map fixed ordered layers. Each of
+    // the at most15 native sections owns two distinct retained layouts.
+    static constexpr unsigned kMapPreviewSections = 15;
+    static constexpr unsigned kMapOpaqueLayout = 8;
+    static constexpr unsigned kMapOrderedLayout = kMapOpaqueLayout + kMapPreviewSections;
+    std::array<NativeSubmissionLayout,kMapOrderedLayout + kMapPreviewSections> native_submission_layouts_;
     // Each registered key's draws hold one reference (taken over from its
     // registration enqueue) until removed or its owner expires.
     struct NativeStaticSet {
@@ -4667,6 +4731,10 @@ private:
     // least; an eighth of the baked draws when larger).
     static constexpr unsigned kNativeStaticAddedFold = 256;
     NativeStaticSet native_static_set_{}, native_terrain_set_{{},{},false,1,3};
+    std::array<NativeStaticSet,kMapPreviewSections> map_preview_opaque_, map_preview_ordered_;
+    std::array<std::uint64_t,kMapPreviewSections> map_preview_resource_revision_{};
+    std::array<bool,kMapPreviewSections> map_preview_discovered_{};
+    std::uint64_t map_preview_native_generation_ = 0;
     struct NeighbourGpuState {
         std::shared_ptr<const void> owner;
         std::weak_ptr<const void> weak_owner;
@@ -4709,8 +4777,13 @@ private:
     std::uint64_t dedicated_geometry_release_frame_ = 0,dedicated_geometry_sweep_frame_ = 0;
     static constexpr std::uint64_t kDedicatedFollowFrames = 3,kDedicatedSweepFrames = 30;
     HRESULT render_neighbour_maps(const FixedState& frame,const std::array<float,16>& world_to_clip,bool ordered) noexcept;
-    HRESULT adopt_native_static_draws(NativeStaticSet& set,std::uint64_t key,std::size_t first,bool& registered);
+    HRESULT adopt_native_static_draws(NativeStaticSet& set,std::uint64_t key,std::size_t first,bool& registered,
+                                     bool fixed_map_order = false);
     HRESULT flush_native_static_set(NativeStaticSet& set,const FixedState& frame);
+    NativeStaticSet* native_static_set_for_layout(unsigned slot) noexcept;
+    void clear_world_map_preview_gpu() noexcept;
+    bool register_world_map_preview_gpu(std::uint32_t section, const std::array<float,16>& matrix,
+                                       bool discovered, const FixedState& state, std::string& failure);
     const FixedState* native_static_frame_ = nullptr;   // set only during a static flush
     // During a static flush: reuse the layout's bake (nothing is queued), or
     // build and bake it (the queue holds exactly the set's draws).
@@ -4885,7 +4958,11 @@ private:
     std::uint64_t presentation_frame_index_ = 0;
     SurfaceTextureResolver surface_texture_resolver_ = nullptr;
     void* surface_texture_resolver_context_ = nullptr;
+    bool apply_native_lighting(const NativeWorldLighting& lighting);
     NativeWorldLighting native_world_lighting_{};
+    WorldMapPreview world_map_preview_;
+    std::uint64_t world_map_preview_generation_ = 0;
+    std::vector<std::string> world_map_preview_reasons_;
     bool native_world_cave_ = false;  // the zone is a cave (set_native_world_lighting)
     // Cave irradiance volume (renderer_point_shadows.cpp).
     float native_world_hour_ = 12.f;  // game hour of the world light (cave exit colour)
@@ -5365,7 +5442,8 @@ private:
     // single-level uncompressed source gets its full mip chain (D3D11
     // GenerateMips there; a 2x2 box filter of the BGRA8 expansion here).
     HRESULT get_native_owned_texture_d3d12(const NativeOwnedTextureView& source, D3D12TextureRef& output,
-                                           std::uint64_t& backing, NativeGeometryResult* result, bool world_mips = false);
+                                           std::uint64_t& backing, NativeGeometryResult* result, bool world_mips = false,
+                                           bool budget_reducible = false);
     // The world-clip constants (b3) as both executors upload them.
     void native_world_clip_values(std::array<std::uint8_t, sizeof(std::array<float, 16>) * 2 + 64>& values);
 };

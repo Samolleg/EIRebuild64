@@ -600,7 +600,8 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
     c.pass[1]=UINT(caster_mask);c.pass[2]=UINT(caster_mask>>32);c.pass[3]=g.pool_capacity;
 
     D3D11_SAMPLER_DESC clamp{};clamp.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;clamp.AddressU=clamp.AddressV=clamp.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;clamp.MaxLOD=D3D11_FLOAT32_MAX;
-    D3D11_SAMPLER_DESC wrap=clamp;wrap.Filter=D3D11_FILTER_ANISOTROPIC;wrap.MaxAnisotropy=8;wrap.AddressU=wrap.AddressV=wrap.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;
+    const auto wrap=world_texture_sampler(D3DTFN_LINEAR,D3DTFG_LINEAR,D3DTFP_LINEAR,
+        D3DTADDRESS_WRAP,D3DTADDRESS_WRAP,true,1u<<configured_integer(debug_overlay_.config(),"anisotropy",3)).description;
     D3D11_SAMPLER_DESC gather=clamp;gather.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT;
     D3D11_SAMPLER_DESC comparison=clamp;comparison.Filter=D3D11_FILTER_COMPARISON_MIN_MAG_MIP_POINT;comparison.ComparisonFunc=D3D11_COMPARISON_LESS_EQUAL;
     comparison.AddressU=comparison.AddressV=comparison.AddressW=D3D11_TEXTURE_ADDRESS_BORDER;std::fill(comparison.BorderColor,comparison.BorderColor+4,1.f);
@@ -610,6 +611,9 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
     const bool sun_on=receivers.control[0]!=0||receivers.bias[4][2]>.5f,sun_far=receivers.bias[4][2]>.5f,sun_soft=native_shadow_softness_[2]>.5f;
     bool sun_maps=false; // as D3D11: any enabled, valid sun map (the caster lists)
     for(UINT i=0;i<5;++i)sun_maps|=native_shadows_enabled_&&native_shadow_frame_.slices[i].enabled&&native_shadow_valid_[i];
+    // As on D3D11, receiver variants follow this frame's published slots.
+    const bool point_shadows=std::any_of(native_point_lights_.begin(),native_point_lights_.end(),
+        [](const NativePointLightValue& light){return light.shadow_slots[0]>0;});
     const auto dispatch=[&](UINT program,UINT x,UINT y=1)->HRESULT {const HRESULT result=d3d12_->dispatch(g.programs[program],x,y,1);if(result==S_OK){++perf_native_compute_dispatches_;++native_frame_stats_.native_compute_dispatches;}return result;};
     static const std::vector<UINT> stage_reset=[] {std::vector<UINT> v(kPlaceClassCount*kGcMaxRounds*4,0);for(std::size_t i=0;i<v.size();i+=4)v[i+1]=v[i+2]=1;return v;}();
     // The cover's depth prepass (depth only: every colour target masked) and
@@ -732,8 +736,13 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
         d3d12_->set_resource(70,shelter_map);d3d12_->set_resource(127,terrain_frame);
         d3d12_->set_resource(27,g.vertices.get());d3d12_->set_resource(28,g.instances.get());d3d12_->set_resource(31,map.ground.get());d3d12_->set_resource(33,cover_color);d3d12_->set_resource(67,g.draw_inputs.get());
         d3d12_->set_resource(17,native_point_lights_.empty()?nullptr:native12_.point_light_grid.get());d3d12_->set_resource(18,native_point_lights_.empty()?nullptr:native12_.point_lights.get());
+        // The shared receiver reads the world's static and overlay atlases in
+        // the cover vertex stage and the snow/sand pile pixel stage.
+        for(UINT page=0;page<PointShadowTextureLayout::array_bindings;++page)
+            d3d12_->set_resource(PointShadowTextureLayout::first_srv+page,
+                page<native_point_shadow_pages_.size()?native_point_shadow_pages_[page].depth12.get():nullptr);
         d3d12_->set_resource(9,shadow12_.maps.get());d3d12_->set_resource(15,contact.tiles12.get());d3d12_->set_resource(16,contact.atlas12.get());
-        d3d12_->set_sampler(8,clamp);d3d12_->set_sampler(9,wrap);d3d12_->set_sampler(1,comparison);d3d12_->set_sampler(4,comparison_far);d3d12_->set_sampler(10,gather);
+        d3d12_->set_sampler(8,clamp);d3d12_->set_sampler(9,wrap);d3d12_->set_sampler(1,comparison);d3d12_->set_sampler(2,comparison_far);d3d12_->set_sampler(4,comparison_far);d3d12_->set_sampler(10,gather);
         // The terrain noise lattice (t122, point wrap s12, as the world flush
         // binds it): snow and sand piles resolve terrain 2.0's warped material
         // field and edge noise through it (terrain2FlatColor). clear_slots
@@ -784,13 +793,12 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
         for(UINT mesh=0;mesh<gm_count;++mesh){
             if(!gc_capacity_[p][mesh])continue;
             const UINT kind=gc_mesh_kind_[mesh],sun=gc_sun_state(sun_on,sun_soft,sun_far),base[4]{gc_base_[p][mesh],0,0,0};
-            const UINT vertex=gp_vs+(kind==3?2+(snow_pressed?1:0):0);
+            const UINT vertex=gp_vs+(kind==3?2+(snow_pressed?1:0):point_shadows?1:0);
             // The masked programs (append_ground_cover_shader_programs): cover
             // [kind * 2], snow pile [point shadows * 2 + trails], strands after
-            // the strands' own ten; this backend writes no AO share and no
-            // point shadows here (bit 0 / point shadows off).
-            const UINT pixel=masked?(kind==3?gp_ps_masked+6+(snow_pressed?1:0):kind==4?gp_ps_strand+10:gp_ps_masked+kind*2):
-                kind==3?gp_ps_snow+(sun_on?4:0)+(snow_pressed?1:0):kind==4?gp_ps_strand+sun*2:gp_ps+(kind*5+sun)*2;
+            // the strands' own ten; this backend writes no AO share.
+            const UINT pixel=masked?(kind==3?gp_ps_masked+6+(point_shadows?2u:0u)+(snow_pressed?1:0):kind==4?gp_ps_strand+10:gp_ps_masked+kind*2):
+                kind==3?gp_ps_snow+(sun_on?4:0)+(point_shadows?2u:0u)+(snow_pressed?1:0):kind==4?gp_ps_strand+sun*2:gp_ps+(kind*5+sun)*2;
             pile_sampler(kind);
             d3d12_->set_constants(12,base,sizeof(base));hr=d3d12_->draw_indexed_indirect(g.programs[vertex],g.programs[pixel],m.neighbour?single_state:state,nullptr,*g.args,mesh*20);
             if(hr!=S_OK)return fail("ground cover material pipeline not ready",hr);

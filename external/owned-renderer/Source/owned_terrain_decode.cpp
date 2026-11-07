@@ -664,10 +664,14 @@ TerrainTileBlendInput owned_terrain_tile_blend_input(const TerrainCpuAsset& terr
    }
   }
  }
- // Plain slots must be drawn on this map, so their page is in the contact atlas.
+ // A static plain source is readable when its page is drawn on this map.
+ // Protected families may use their own plain art even when only their
+ // transition slots were placed; ordinary donors still require a drawn slot.
+ std::uint64_t pages=0;
+ for(std::uint32_t s=0;s<slots;++s)if(usage[s]&&s/64u<contact_blend_max_materials)pages|=std::uint64_t{1}<<(s/64u);
  in.usage=std::move(usage);in.usable.assign(slots,false);
  for(std::uint32_t s=0;s<slots;++s)
-  in.usable[s]=in.usage[s]>0&&s/64u<contact_blend_max_materials&&!terrain.tile_animation_phases[s];
+  in.usable[s]=s/64u<contact_blend_max_materials&&((pages>>(s/64u))&1u)&&!terrain.tile_animation_phases[s];
  return in;
 }
 
@@ -704,7 +708,10 @@ std::map<std::uint32_t,std::uint32_t> tile_blend_cells(const TerrainTileBlendInp
  }
  std::map<std::uint32_t,std::uint32_t> cells;
  // Each family's plain cell carries its material class (edge character).
- for(const auto& [family,slot]:terrain_tile_plain_slots(families.signatures,in.usage,in.usable)){
+ auto plain_usable=in.usable;
+ for(std::size_t s=0;s<plain_usable.size();++s)
+  if(s>=families.signatures.size()||!families.preserve_authored.count(families.signatures[s][0]))plain_usable[s]=plain_usable[s]&&in.usage[s]>0;
+ for(const auto& [family,slot]:terrain_tile_plain_slots(families.signatures,in.usage,plain_usable)){
   const auto name=families.names.find(family);
   cells[family]=terrain_tile_blend_cell(slot,terrain_tile_material_class(name!=families.names.end()?name->second:std::string()),bed.count(family)!=0);
  }
@@ -729,7 +736,6 @@ std::map<std::uint32_t,std::uint32_t> tile_blend_cells(const TerrainTileBlendInp
   const auto d=donors.find(f);
   if(d!=donors.end()&&((d->second>>6)&63u)!=terrain_tile_fold_page)table[c&63u]|=((d->second&4095u)<<14)|(1u<<26);
  }
- if(fold_table)*fold_table=std::move(table);
  // Families with neither borrow a same-word, same-bed family's cell (most
  // drawn first) instead of leaving their tiles as hard-edged art.
  {
@@ -738,6 +744,19 @@ std::map<std::uint32_t,std::uint32_t> tile_blend_cells(const TerrainTileBlendInp
   terrain_tile_borrow_cells(families,order,cells,bed);
   if(borrowed)for(const auto& [f,c]:cells)if(!before.count(f))borrowed->insert(f);
  }
+ // A protected family must have its own unmixed source. Keep an unreadable
+ // cell for missing contributions so the existing shader marker remains
+ // visible; no folded quadrant or another family's art may stand in for it.
+ for(const auto f:families.preserve_authored){
+  if(cells.count(f)||!drawn.count(f)||!drawn.at(f))continue;
+  const auto name=families.names.find(f);
+  const std::uint32_t kind=terrain_tile_material_class(name!=families.names.end()?name->second:std::string());
+  if(table.size()<64u&&table.size()<in.tiles_x){
+   cells[f]=std::uint32_t(table.size())|(terrain_tile_fold_page<<6)|(kind<<12)|(bed.count(f)?terrain_tile_blend_bed:0u);
+   table.push_back(0xffffffffu);
+  }else cells[f]=terrain_tile_blend_none;
+ }
+ if(fold_table)*fold_table=std::move(table);
  return cells;
 }
 }
@@ -760,7 +779,8 @@ std::vector<std::array<std::uint32_t,4>> owned_terrain_tile_blend_rows(const Ter
     const TerrainTileFamilies& families,const std::vector<std::uint32_t>& edge_families,
     std::size_t& blended,std::size_t& plain_materials,std::size_t& bed_families,std::set<std::uint32_t>& unmatched,
     std::vector<std::uint32_t>& fold_table,std::set<std::uint32_t>& borrowed,
-    std::map<std::uint32_t,std::uint32_t>* family_cells,bool slot_variants){
+    std::map<std::uint32_t,std::uint32_t>* family_cells,bool slot_variants,
+    std::vector<std::array<std::uint32_t,4>>* art){
  const auto corners=tile_blend_corners(in,families);
  std::set<std::uint32_t> bed;
  const auto cells=tile_blend_cells(in,families,corners,bed,&fold_table,&borrowed);
@@ -774,6 +794,24 @@ std::vector<std::array<std::uint32_t,4>> owned_terrain_tile_blend_rows(const Ter
    if(!f||f==family[i])continue;
    if(cells.count(f))family[i]=f;else unmatched.insert(f);
   }
+ if(art&&art->size()==corners.size()){
+  const std::uint32_t vw=in.tiles_x+1;
+  for(std::uint32_t y=0;y<in.tiles_y;++y)for(std::uint32_t x=0;x<in.tiles_x;++x){
+   const std::size_t t=std::size_t(y)*in.tiles_x+x;
+   auto& tile=(*art)[t];
+   if((tile[3]&255u)>=64u)continue;
+   // Attach policy to the same consensus/edge families as the field, not
+   // to a disagreeing local corner that lost the shared-vertex decision.
+   const std::array<std::uint32_t,4> vertices{family[std::size_t(y)*vw+x],family[std::size_t(y)*vw+x+1],
+    family[std::size_t(y+1)*vw+x],family[std::size_t(y+1)*vw+x+1]};
+   const auto flags=terrain_tile_authored_flags(families,in.slot[t],vertices);
+   tile[3]=(tile[3]&255u)|flags;
+   if(flags&terrain_tile_authored_plain){
+    const auto own=cells.find(families.signatures[in.slot[t]][0]);
+    if(own!=cells.end())tile[3]|=own->second<<16;
+   }
+  }
+ }
  // Terrain 2.0: every plain slot the map places is its own material. A
  // vertex takes the plain slot of its family that most of its touching
  // plain tiles draw (ties: the lower slot), else the family's cell, so a
@@ -788,6 +826,9 @@ std::vector<std::array<std::uint32_t,4>> owned_terrain_tile_blend_rows(const Ter
    const auto own=f?cells.find(f):cells.end();
    if(own==cells.end())continue;
    vertex_cells[i]=own->second;
+   // Authored variants keep their placed art. Only different families
+   // compete in the field; physical slots of this family are not edges.
+   if(families.preserve_authored.count(f))continue;
    const int vx=int(i%vw),vy=int(i/vw);
    std::uint32_t best=0,count=0,slots[4];unsigned n=0;
    for(unsigned k=0;k<4;++k){
@@ -825,15 +866,40 @@ struct MapFileCache {
 };
 MapFileCache& map_file_cache(){static MapFileCache cache;return cache;}
 
-// Adds to `runs` the base tiles of every *.mpr in the loose map roots (first
-// root wins per file name, as the game resolves maps) bound to `space` with
-// `slots` atlas slots, except the map itself (`own`, already in memory).
-// Returns the number of maps added.
-std::size_t pool_map_files(const ResourceStoreConfig& mounts,const std::string& space,unsigned slots,
-    const std::string& own,const std::vector<bool>& skip,TerrainTileVertexRuns& runs,const std::atomic<bool>* cancel){
+// An atlas identity in this ResourceStore's mount scope. Hash the complete
+// encoded MMP pages in order (length-delimited), not their names or map geometry.
+// Kept only for this load: a later resource incarnation is read again.
+using TerrainAtlasContentKey=std::array<unsigned char,32>;
+bool terrain_atlas_content_key(const ResourceStore& store,const std::string& space,unsigned pages,
+    TerrainAtlasContentKey& key,const std::atomic<bool>* cancel){
+ BCRYPT_ALG_HANDLE algorithm=nullptr;BCRYPT_HASH_HANDLE hash=nullptr;
+ bool ok=pages&&BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)==0&&
+  BCryptCreateHash(algorithm,&hash,nullptr,0,nullptr,0,0)==0;
+ try{for(unsigned page=0;ok&&page<pages;++page){
+  if(load_cancelled(cancel)){ok=false;break;}
+  char suffix[16];std::snprintf(suffix,sizeof(suffix),"%03u.mmp",page);
+  ResourceBlob blob;ResourceFailure failure;
+  if(!store.resolve(space+suffix,blob,failure)||!blob.bytes||blob.bytes->empty()||blob.bytes->size()>(std::numeric_limits<ULONG>::max)()){ok=false;break;}
+  std::uint64_t size=blob.bytes->size();
+  ok=BCryptHashData(hash,reinterpret_cast<PUCHAR>(&size),sizeof(size),0)==0&&
+     BCryptHashData(hash,const_cast<PUCHAR>(blob.bytes->data()),ULONG(size),0)==0;
+ }}catch(...){ok=false;}
+ if(ok)ok=BCryptFinishHash(hash,key.data(),ULONG(key.size()),0)==0;
+ if(hash)BCryptDestroyHash(hash);
+ if(algorithm)BCryptCloseAlgorithmProvider(algorithm,0);
+ return ok;
+}
+
+// First loose root wins per MPR filename. Inference pools every name with
+// identical atlas bytes and layout/types/animation; preset validation keeps
+// its established namespace/slot binding. Each map contributes a separate
+// vertex run set, in filename order, with the active map included exactly once.
+std::size_t pool_map_files(const ResourceStoreConfig& mounts,const TerrainTileMapInput& input,
+    TerrainTileVertexRuns& runs,const std::atomic<bool>* cancel,bool by_content,bool* content_ready=nullptr){
  std::size_t added=0;
  std::vector<TerrainTilePlacement> tiles;
- std::map<std::wstring,bool> taken;
+ struct MapFile{std::wstring path,key;};
+ std::map<std::wstring,MapFile> files;
  auto& cache=map_file_cache();
  for(const auto& root:mounts.loose_roots){
   WIN32_FIND_DATAW found{};
@@ -844,25 +910,53 @@ std::size_t pool_map_files(const ResourceStoreConfig& mounts,const std::string& 
    if(found.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)continue;
    std::wstring name=found.cFileName;
    for(auto& c:name)if(c>=L'A'&&c<=L'Z')c=wchar_t(c+32);
-   if(!taken.emplace(name,true).second)continue;
-   std::string narrow;for(const auto c:name)narrow+=c<128?char(c):'?';
-   if(narrow==own)continue;
+   if(files.count(name))continue;
    const std::wstring path=root+L"\\"+found.cFileName;
    const std::wstring key=path+L"|"+std::to_wstring((std::uint64_t(found.nFileSizeHigh)<<32)|found.nFileSizeLow)+L"|"+
     std::to_wstring((std::uint64_t(found.ftLastWriteTime.dwHighDateTime)<<32)|found.ftLastWriteTime.dwLowDateTime);
-   TerrainTileMapFile header;bool have=false;
-   {std::lock_guard<std::mutex> guard(cache.lock);const auto h=cache.headers.find(key);if(h!=cache.headers.end()){header=h->second;have=true;}}
-   if(!have){
-    if(!terrain_tile_read_map_file(path,header,nullptr))header={};
-    std::lock_guard<std::mutex> guard(cache.lock);cache.headers[key]=header;
-   }
-   if(header.space!=space||header.slots!=slots)continue;
-   TerrainTileMapFile check;
-   if(!terrain_tile_read_map_file(path,check,&tiles)||check.space!=space||check.slots!=slots||tiles.empty())continue;
-   runs.add_map(tiles,slots,skip);++added;
+   files.emplace(std::move(name),MapFile{path,key});
   }while(FindNextFileW(find,&found));
   FindClose(find);
  }
+ if(load_cancelled(cancel))return 0;
+ ResourceStore store;ResourceFailure failure;
+ std::map<std::string,std::pair<bool,TerrainAtlasContentKey>> atlas_keys;
+ auto& own_key=atlas_keys[input.space];
+ const bool identity_ready=by_content&&store.open(mounts,failure)&&
+  (own_key.first=terrain_atlas_content_key(store,input.space,input.pages,own_key.second,cancel));
+ if(content_ready)*content_ready=identity_ready;
+ const auto same_metadata=[&](const TerrainTileMapFile& file){
+  return file.slots==input.slots&&file.pages==input.pages&&file.texture_size==input.texture_size&&file.tile_size==input.tile_size&&
+   file.types.size()==input.type_count&&input.types.size()>=input.type_count&&
+   std::equal(file.types.begin(),file.types.end(),input.types.begin())&&file.animation_phases==input.animation_phases;
+ };
+ const auto bound=[&](const TerrainTileMapFile& file){
+  if(!by_content)return file.space==input.space&&file.slots==input.slots;
+  if(!same_metadata(file))return false;
+  if(file.space==input.space)return true;
+  if(!identity_ready)return false;
+  const auto inserted=atlas_keys.emplace(file.space,std::pair<bool,TerrainAtlasContentKey>{});
+  auto& key=inserted.first->second;
+  if(inserted.second)key.first=terrain_atlas_content_key(store,file.space,file.pages,key.second,cancel);
+  return key.first&&key.second==own_key.second;
+ };
+ bool own_added=false;
+ for(const auto& [name,file]:files){
+   if(load_cancelled(cancel))break;
+   std::string narrow;for(const auto c:name)narrow+=c<128?char(c):'?';
+   if(narrow==input.own_file){runs.add_map(input.own,input.slots,input.skip);++added;own_added=true;continue;}
+   TerrainTileMapFile header;bool have=false;
+   {std::lock_guard<std::mutex> guard(cache.lock);const auto h=cache.headers.find(file.key);if(h!=cache.headers.end()){header=h->second;have=true;}}
+   if(!have){
+    if(!terrain_tile_read_map_file(file.path,header,nullptr))header={};
+    std::lock_guard<std::mutex> guard(cache.lock);cache.headers[file.key]=header;
+   }
+   if(!bound(header))continue;
+   TerrainTileMapFile check;
+   if(!terrain_tile_read_map_file(file.path,check,&tiles)||check.space!=header.space||!bound(check)||tiles.empty())continue;
+   runs.add_map(tiles,input.slots,input.skip);++added;
+ }
+ if(!own_added&&!load_cancelled(cancel)){runs.add_map(input.own,input.slots,input.skip);++added;}
  return added;
 }
 
@@ -934,7 +1028,7 @@ bool terrain_atlas_slot_keys(const ResourceStore& store,const std::string& space
 std::size_t adopt_profile_families(const ResourceStore& store,const TerrainTileMapInput& input,
     TerrainTileFamilies& out,std::vector<bool>& adopted,std::string& text,const std::atomic<bool>* cancel){
  const unsigned slots=input.slots;
- out.signatures.assign(slots,{});out.names.clear();adopted.assign(slots,false);
+ out.signatures.assign(slots,{});out.names.clear();out.placement_names.clear();out.preserve_authored.clear();adopted.assign(slots,false);
  const auto map_name=[](const std::string& space){
   const auto cut=space.find_last_of('_');
   if(cut==std::string::npos||space.size()-cut-1!=12)return space;
@@ -1002,6 +1096,7 @@ std::size_t adopt_profile_families(const ResourceStore& store,const TerrainTileM
   total+=best_count;
   text+=(text.empty()?"":", ")+source.c->space+" "+std::to_string(best_count);
  }
+ terrain_tile_authored_defaults(out); // these names came only from editor profiles
  return total;
 }
 }
@@ -1011,11 +1106,13 @@ TerrainTileMapInput terrain_tile_map_input(const TerrainCpuAsset& terrain){
  input.space=terrain_tile_family_space(terrain);
  input.slots=terrain.texture_count*terrain.tiles_per_texture;
  input.pages=terrain.texture_count;input.tiles_per_side=terrain.tiles_per_texture_side;
+ input.texture_size=terrain.texture_size;input.tile_size=terrain.tile_size;input.type_count=terrain.tile_count;
  std::string own=terrain.project_resource;
  const auto cut=own.find_last_of("\\/");if(cut!=std::string::npos)own=own.substr(cut+1);
  for(char& c:own)if(c>='A'&&c<='Z')c=char(c+32);
  input.own_file=own;
  input.types=terrain.tile_types;
+ input.animation_phases.assign(terrain.tile_animation_phases.begin(),terrain.tile_animation_phases.begin()+terrain.tile_count);
  input.skip.assign(input.slots,false);
  for(std::uint32_t s=0;s<input.slots&&s<terrain.tile_animation_phases.size();++s)input.skip[s]=terrain.tile_animation_phases[s]!=0;
  constexpr std::uint32_t layer=33u*33u;
@@ -1050,6 +1147,17 @@ TerrainTileFamilies load_terrain_tile_families(ResourceStoreConfig mounts,Terrai
    source==0?count:0,source==1?count:0,source==2?count:0,std::size_t(slots)*4u-count);
   return std::string(text);
  };
+ const auto policy=[&](TerrainTileFamilies& families){
+  std::string detail;
+  try{
+   ResourceStore store;ResourceFailure failure;ResourceBlob blob;
+   if(!store.open(mounts,failure))detail=" overrides_unavailable="+failure.message;
+   else if(store.resolve("eid3d11_terrain_families.json",blob,failure)&&blob.bytes)
+    detail=terrain_tile_authored_overrides(std::string(blob.bytes->begin(),blob.bytes->end()),space,families);
+   else if(failure.code!=ResourceFailureCode::not_found)detail=" overrides_unavailable="+failure.message;
+  }catch(const std::exception& error){detail=" overrides_rejected="+std::string(error.what());}
+  families.source="preserveAuthored="+std::to_string(families.preserve_authored.size())+detail+" | "+families.source;
+ };
  std::array<unsigned char,32> digest{};
  BCRYPT_ALG_HANDLE algorithm=nullptr;BCRYPT_HASH_HANDLE hash=nullptr;
  std::string hashed_space=space;
@@ -1066,7 +1174,8 @@ TerrainTileFamilies load_terrain_tile_families(ResourceStoreConfig mounts,Terrai
   ResourceStore store;ResourceFailure failure;ResourceBlob blob;
   if(store.open(mounts,failure)&&store.resolve(member,blob,failure)&&blob.bytes&&
      terrain_tile_signatures_from_profile(std::string(blob.bytes->begin(),blob.bytes->end()),space,slots,result.signatures,&result.names)){
-   result.source="tile families "+atlas+": profile "+member+counts(0,assigned(result));return result;
+   terrain_tile_authored_defaults(result);
+   result.source="tile families "+atlas+": profile "+member+counts(0,assigned(result));policy(result);return result;
   }
  }
  // Corner nodes are 16-bit (slot*4+corner); tile ids are 14-bit anyway.
@@ -1082,40 +1191,53 @@ TerrainTileFamilies load_terrain_tile_families(ResourceStoreConfig mounts,Terrai
   const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
   char text[96];std::snprintf(text,sizeof(text),"adopted %zu of %u slots by art (%.0f ms): ",adopted_slots,slots,ms);
   result=std::move(adopted_families);
-  result.source="tile families "+atlas+": "+text+adopted_text+counts(0,assigned(result));return result;
+  result.source="tile families "+atlas+": "+text+adopted_text+counts(0,assigned(result));policy(result);return result;
  }
- TerrainTileVertexRuns runs;
- runs.add_map(input.own,slots,input.skip);
- const std::size_t maps=pool_map_files(mounts,space,slots,input.own_file,input.skip,runs,cancel)+1;
- if(load_cancelled(cancel))return cancelled();
  std::string rejected;
  for(const auto& preset:kTerrainTilePresets){
   std::string name=preset.name;
   for(char& c:name)if(c>='A'&&c<='Z')c=char(c+32);
   if(name!=space||preset.slots!=slots||!terrain_tile_signatures_from_preset(preset.signatures,slots,result.signatures))continue;
+  TerrainTileVertexRuns preset_runs;
+  const std::size_t maps=pool_map_files(mounts,input,preset_runs,cancel,false);
+  if(load_cancelled(cancel))return cancelled();
   std::size_t tested=0;
-  const double fit=terrain_tile_vertex_consistency(runs,result.signatures,tested);
+  const double fit=terrain_tile_vertex_consistency(preset_runs,result.signatures,tested);
   char text[160];std::snprintf(text,sizeof(text),"(vertex fit %.1f%% of %zu vertices, %zu maps)",100.*fit,tested,maps);
   if(fit>=kTerrainTilePresetFit||tested<64){
    terrain_tile_names_from_preset(preset.families,result.names);
-   result.source="tile families "+atlas+": editor preset "+preset.name+" "+text+counts(1,assigned(result));return result;
+   terrain_tile_authored_defaults(result);
+   result.source="tile families "+atlas+": editor preset "+preset.name+" "+text+counts(1,assigned(result));policy(result);return result;
   }
   rejected=std::string("preset ")+preset.name+" rejected "+text+"; ";
   break;
  }
+ TerrainTileVertexRuns runs;bool content_ready=false;
+ const std::size_t maps=pool_map_files(mounts,input,runs,cancel,true,&content_ready);
+ if(load_cancelled(cancel))return cancelled();
  auto inferred=terrain_tile_map_families(runs,slots,input.types,input.skip);
  const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
  char text[200];std::snprintf(text,sizeof(text),"map placements of %zu maps (%zu corners placed, %zu named families, %.0f ms)",
   maps,inferred.placed,inferred.families.names.size(),ms);
  result=std::move(inferred.families);
- result.source="tile families "+atlas+": "+rejected+text+counts(2,inferred.named);
+ result.source="tile families "+atlas+": "+rejected+text+
+  (content_ready?" | identical atlas content":" | atlas content unavailable; namespace only")+counts(2,inferred.named);
  if(adopted_slots){
   // Adopted slots keep the editor's families; placements fill the rest
   // (inferred ids count from 1, editor ids are hashes).
   for(unsigned s=0;s<slots;++s)if(adopted[s])result.signatures[s]=adopted_families.signatures[s];
-  for(const auto& [id,name]:adopted_families.names)result.names.emplace(id,name);
+  for(const auto& [id,name]:adopted_families.names)
+   if(result.names.emplace(id,name).second)result.placement_names.erase(id);
+  // A colliding name keeps the existing name and its placement provenance.
+  for(const auto id:adopted_families.preserve_authored){
+   const auto name=result.names.find(id);
+   if(name!=result.names.end()&&!result.placement_names.count(id)&&name->second==adopted_families.names.at(id))
+    result.preserve_authored.insert(id);
+   else result.source="authored policy unassigned: adopted familyId="+std::to_string(id)+" conflicts with its winning name/provenance | "+result.source;
+  }
   result.source+=" | adopted "+std::to_string(adopted_slots)+" of "+std::to_string(slots)+" slots by art: "+adopted_text;
  }
+ policy(result);
  return result;
 }catch(...){TerrainTileFamilies failed;failed.source="tile family load failed";return failed;}
 

@@ -687,6 +687,9 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
 // ini) and the x64 host (which applies the values it is sent) share one list.
 void Renderer::register_config_options(){
  auto& config=debug_overlay_.config();
+#ifndef EID3D11_EMBEDDED
+config.register_boolean("camera_pan_smoothing","Camera pan smoothing (experimental)","Input",false,false,"Smooths horizontal camera panning. Off by default. Requires compatible camera controls; unavailable if another component owns the same updates. A missed camera reset may briefly slide the view; turn this off if loads, camera cuts or picking look wrong.");
+#endif
 config.register_boolean("confine_cursor","Confine cursor to game client area","Input",true,false,"Keeps pointer-driven camera and interaction input inside the active game client area; releases immediately when the game loses focus.");config.register_boolean("vsync","Vertical sync","Presentation",present_interval()!=0,false,"Use a synchronized Present interval. Disabled remains the uncapped performance default. Forced off in developer mode.");config.register_integer("background_mode","In the background","Presentation",0,0,1,1,false,"What the game does while its window is not in front. 0: keeps running and drawing (capped by the background frame limit). 1: pauses; the world stops and the last frame stays on screen. Either way it never minimises itself or reloads its textures on return.");config.register_integer("background_frame_limit","Background frame limit (FPS)","Presentation",30,0,240,1,false,"While the game window is not in front, Present is paced to at most this many frames per second, so a game left in the background idles quietly. 0: off.");config.register_integer("frame_limit","Frame rate limit (FPS)","Presentation",0,0,500,1,false,"0: off (uncapped). Otherwise Present is paced to this many frames per second, measured from the previous present (high-resolution timer plus a short final spin). Forced off in developer mode.");config.register_boolean("shadows","Shadows","Graphics",true,false,"Render owned directional shadow maps and sample them in world shading. Changes apply at the next scene boundary.");config.register_boolean("terrain_normal_sunlight","Terrain normal sunlight","Graphics",true,false,"Compare terrain shading. On uses terrain normals for direct sun; off applies full direct sun while keeping projected shadows, ambient light, textures, and fog.");
 config.register_boolean("smaa","Anti-aliasing: SMAA","Graphics",true,false,"SMAA 1x on the world scene, before interface rendering.");
 config.register_boolean("depth_prepass","Depth prepass and shadow mask","Performance",true,false,"Opaque and alpha-tested world surfaces first draw depth only; one full-screen pass then takes the sun and cloud shadow per visible pixel, and the full material shading runs once per pixel. Off draws every surface with its own shadow lookups (more overdraw).");
@@ -710,7 +713,7 @@ config.register_integer("display_mode","Display mode","Display",0,0,1,1,false,"0
 config.register_integer("window_width","Window width","Display",0,0,16384,1,false,"Client width of the windowed mode (0: the monitor's size). Use Apply display to change this during gameplay.");
 config.register_integer("window_height","Window height","Display",0,0,16384,1,false,"Client height of the windowed mode (0: the monitor's size). Use Apply display to change this during gameplay.");
 config.register_boolean("owned_ui_text","Owned interface text","Performance",false,false,"Interface text and line drawing is recorded instead of drawn, and a panel is redrawn (with the same GDI output) only when what it draws changes. Off draws every panel through GDI each time the game asks.");
-config.register_integer("anisotropy","Anisotropic filtering","Graphics",3,0,4,1,false,"World texture filtering: 1, 2, 4, 8 or 16 samples. Interface filtering is preserved.");
+config.register_integer("anisotropy","Anisotropic filtering","Graphics",3,0,4,1,false,"Texture filtering for the world, previews, interface and images: 1, 2, 4, 8 or 16 samples.");
 config.register_boolean("water_reflections","Water reflections","Graphics",true,false,
  "Reflect the current opaque scene on non-emissive liquids; misses use the sky.");
 config.register_integer("water_reflection_quality","Water reflection quality","Graphics",2,0,2,1,false,
@@ -819,6 +822,9 @@ config.register_integer("render_thread_frame_latency","Scene thread frame latenc
 config.register_integer("cull_min_screen_permille","Minimum object size","Performance",5,0,50,1,false,"Objects smaller than this many thousandths of the screen height are not drawn (5 = 0.5%). 0 disables.");
 config.register_integer("shadow_cull_min_texels","Minimum shadow caster size","Performance",2,0,8,1,false,"Sun-shadow casters smaller than this many shadow-map texels are not drawn into the map. 0 disables.");
 config.register_boolean("highlight_briefing","Highlight briefing characters","Highlight",false,false,"On the base screen, characters with something to discuss (and the current speakers) glow with the game's white highlight. Off draws them with normal shading.");config.register_boolean("highlight_selected","Highlight selected characters","Highlight",false,false,"Selected party characters glow with the game's white highlight. Off keeps their normal shading and shadows.");config.register_boolean("highlight_hover_characters","Highlight characters under the cursor","Highlight",true,false,"A softer glow on the character the cursor would act on: briefing characters you can talk to on the base screen, enemies you can attack and spell or steal targets on maps. Follows the game's own cursor decision.");config.register_boolean("highlight_hover_objects","Highlight objects under the cursor","Highlight",true,false,"The same softer glow on what the cursor would use: chests, levers, traps and lootable corpses. Follows the game's own cursor decision.");config.register_integer("cursor_scale","Cursor scale (%)","Interface",100,100,400,25,false,"Size of the game cursor. 100 draws the original pixels exactly; larger sizes are smoothed at the edges.");config.register_integer("pillarbox_fill","Pillarbox fill","Interface",1,0,1,1,false,"Loading screens and movies made for another screen shape are shown at their own shape. 0 fills the bars black, 1 with a soft, darkened blur of the same picture.");config.register_integer("ui_scale","UI scale (%)","Interface",100,50,120,5,false,"Size of the in-mission HUD (map, portrait, weapons, spells, skills, stance wheel, clock, chat). Adjusts immediately from 50% to 120% around each screen corner, including clickable areas. Menus, inventory, shops and dialogs keep their size.");config.register_floating_point("message_panel_width","Message panel width (%)","HUD layout",100.f,50.f,800.f,.1f,false,"Logical width of the loot and quest message panel. Resizing reflows its text.");
+#ifndef EID3D11_EMBEDDED
+config.register_boolean("world_map_previews","World map previews","Interface",false,false,"Terrain and scenery previews for world-map locations. Prepared while a location loads.");
+#endif
 config.register_boolean("portrait_head","Party portraits: real head","Interface",true,false,"The party portraits show each member's own head and hair (strand hair, materials, expressions) through the game's face animation instead of the baked portrait faces. A portrait that cannot be drawn shows its face magenta.");config.register_boolean("portrait_helmet","Party portraits: helmet","Interface",false,false,"Portraits wear the helmet the member wears. Off (the original look) shows the bare head and hair.");
 config.register_integer("hud_fade_duration","HUD fade-out duration (ms)","Interface",250,0,10000,50,false,"Shared fade-out duration for all widgets after the idle delay. 0 makes the transition immediate.");
 config.register_integer("hud_fade_in_duration","HUD fade-in duration (ms)","Interface",250,0,2000,50,false,"Shared fade-in duration on hover or meaningful updates. 0 restores visibility immediately. Repeated updates keep the fade moving.");
@@ -949,6 +955,11 @@ config.register_integer("fur_mode","Fur and hair","Graphics",2,0,2,1,false,"0 of
 // bridge switches (the host answers the bridge setters as no-ops).
 void Renderer::apply_config_settings(){
  auto& config=debug_overlay_.config();
+#ifndef EID3D11_EMBEDDED
+if(!core_mode_&&!bridge_set_world_map_previews(this,configured_boolean(config,"world_map_previews",false)))
+ (void)config.set_boolean("world_map_previews",false);
+bridge_set_camera_pan_smoothing(configured_boolean(config,"camera_pan_smoothing",false));
+#endif
 camp_inventory_set_wide(configured_integer(config,"camp_ui_layout",1)!=0);
 #ifdef EID3D11_EMBEDDED
 // This existing restart-required option is latched once, after config load.
@@ -1018,12 +1029,16 @@ HRESULT Renderer::ensure_host_d3d12(HWND window,UINT w,UINT h){
   if(!x64remote::dlss_caps(caps)){caps.reason[sizeof(caps.reason)-1]=0;set_dlss_unavailable_reason(caps.reason[0]?caps.reason:"not available");}
   else set_dlss_unavailable_reason(nullptr);}
  set_fsr_unavailable_reason(Fsr2UpscalerD3D12::unavailable_reason(*d3d12_));
- ComPtr<IDXGIDevice> dxgi_device;if(SUCCEEDED(device_.As(&dxgi_device))){ComPtr<IDXGIAdapter> adapter;if(SUCCEEDED(dxgi_device->GetAdapter(&adapter)))adapter.As(&adapter3_);}
+ // The executor's adapter (the device that owns every GPU resource here):
+ // the VRAM budget, the point shadow pool's pressure check and the telemetry
+ // query its local segment.
+ if(IDXGIAdapter* adapter=d3d12_->adapter())adapter->QueryInterface(IID_PPV_ARGS(adapter3_.ReleaseAndGetAddressOf()));
  register_config_options();
  apply_config_settings();
- // No render scale on this backend (100%); the upscaler modes follow the
- // options from the first frame on (apply_upscaler_mode_d3d12).
- render_scale_percent_=100;dlss_mode_=configured_dlss_mode();fsr_mode_=configured_fsr_mode();set_world_size();
+ // The render scale and the upscaler modes follow the options from the first
+ // frame on (apply_upscaler_mode_d3d12 between frames, as apply_render_scale).
+ render_scale_percent_=std::clamp(configured_integer(debug_overlay_.config(),"render_scale",100),kRenderScaleMinimum,100);
+ dlss_mode_=configured_dlss_mode();fsr_mode_=configured_fsr_mode();set_world_size();
  scene_composited_=true;
  frame_statistics_.reset();
  system_telemetry_snapshot_={};
@@ -2445,8 +2460,7 @@ void Renderer::prepare_shaders() noexcept try{
 
 HRESULT Renderer::create_pipeline(){
  ComPtr<ID3DBlob> vb,pb,err;HRESULT hr=compile_shader(interface_shader_program(InterfaceShader::game_vs),&vb,&err);if(FAILED(hr))return hr;hr=compile_shader(interface_shader_program(InterfaceShader::game_ps),&pb,&err);if(FAILED(hr))return hr;if(FAILED(hr=create_shader(device_.Get(),vb->GetBufferPointer(),vb->GetBufferSize(),nullptr,&vs_)))return hr;if(FAILED(hr=create_shader(device_.Get(),pb->GetBufferPointer(),pb->GetBufferSize(),nullptr,&ps_)))return hr;
- {ComPtr<ID3DBlob> backdrop;if(FAILED(hr=compile_shader(interface_shader_program(InterfaceShader::backdrop_ps),&backdrop,&err)))return hr;if(FAILED(hr=create_shader(device_.Get(),backdrop->GetBufferPointer(),backdrop->GetBufferSize(),nullptr,&backdrop_ps_)))return hr;
-  D3D11_SAMPLER_DESC sampler{};sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;sampler.MaxLOD=D3D11_FLOAT32_MAX;if(FAILED(hr=device_->CreateSamplerState(&sampler,&backdrop_sampler_)))return hr;}
+ {ComPtr<ID3DBlob> backdrop;if(FAILED(hr=compile_shader(interface_shader_program(InterfaceShader::backdrop_ps),&backdrop,&err)))return hr;if(FAILED(hr=create_shader(device_.Get(),backdrop->GetBufferPointer(),backdrop->GetBufferSize(),nullptr,&backdrop_ps_)))return hr;}
  D3D11_INPUT_ELEMENT_DESC il[]={{"POSITION",0,DXGI_FORMAT_R32G32B32A32_FLOAT,0,0,D3D11_INPUT_PER_VERTEX_DATA,0},{"COLOR",0,DXGI_FORMAT_R8G8B8A8_UNORM,0,16,D3D11_INPUT_PER_VERTEX_DATA,0},{"COLOR",1,DXGI_FORMAT_R8G8B8A8_UNORM,0,20,D3D11_INPUT_PER_VERTEX_DATA,0},{"TEXCOORD",0,DXGI_FORMAT_R32G32_FLOAT,0,24,D3D11_INPUT_PER_VERTEX_DATA,0}};
  if(FAILED(hr=device_->CreateInputLayout(il,ARRAYSIZE(il),vb->GetBufferPointer(),vb->GetBufferSize(),&layout_)))return hr;D3D11_BUFFER_DESC bd{};bd.ByteWidth=(sizeof(Constants)+15)&~15u;bd.Usage=D3D11_USAGE_DYNAMIC;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;bd.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;if(FAILED(hr=device_->CreateBuffer(&bd,nullptr,&constants_)))return hr;
  if(FAILED(hr=create_clear_pipeline()))return hr;
@@ -2473,9 +2487,12 @@ HRESULT Renderer::queue_screen_rectangle(const ScreenRectangleRequest& request,
                                          const D3DVIEWPORT7& viewport){
  if(scene_queue()&&core_mode_){core_post_command(scene_ui::ScreenRectangle{request,viewport},"queue_screen_rectangle");return S_OK;}
  if(scene_queue()){scene_post_frame([this,command=scene_ui::ScreenRectangle{request,viewport}]{report_scene_failure("queue_screen_rectangle",queue_screen_rectangle(command.request,command.viewport));});return S_OK;}
- if(d3d12_)return draw_screen_rectangle_d3d12(request,viewport);
- if(!context_)return E_FAIL;
- if(scene_composited_)return draw_screen_rectangle(request,viewport);
+ // Before the composite the bound target is the world's (D3D12: the world
+ // target): the rectangle waits for the composite as the first interface
+ // output, never through SMAA, the post passes or the upscaler.
+ if(d3d12_&&scene_composited_)return draw_screen_rectangle_d3d12(request,viewport);
+ if(!d3d12_&&!context_)return E_FAIL;
+ if(!d3d12_&&scene_composited_)return draw_screen_rectangle(request,viewport);
  try{pending_screen_rectangles_.push_back({request,viewport});}
  catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
  return S_OK;
@@ -3323,6 +3340,14 @@ void Renderer::release() {
  // Scene thread: run and present what is queued, end it; the game thread
  // owns the renderer for teardown.
  set_scene_mode(false);
+ // Retained map references must go before the mesh and instance tables below.
+ // The host has no game-side bridge registration to retire them for us.
+ discard_world_map_markers();
+ clear_world_map_preview_gpu();
+#ifndef EID3D11_EMBEDDED
+ bridge_clear_world_map_previews(this);
+#endif
+ world_map_preview_.deactivate();
  scene_thread_.reset();
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
  dlss_backend_.shutdown(); // no remaining frame calls; before any device resources are released
@@ -3500,7 +3525,7 @@ void Renderer::release() {
  constants_.Reset();
  layout_.Reset();
  ps_.Reset();
- backdrop_ps_.Reset();backdrop_sampler_.Reset();interface_scaled_ps_.Reset();interface_scaled_ps_failed_=false;interface_text_ps_.Reset();interface_text_ps_failed_=false;gpu_blit_key_.reset();
+ backdrop_ps_.Reset();interface_scaled_ps_.Reset();interface_scaled_ps_failed_=false;interface_text_ps_.Reset();interface_text_ps_failed_=false;gpu_blit_key_.reset();
  vs_.Reset();
  release_ambient_occlusion_targets();
  ao_pipeline_failed_=false;ao_vs_.Reset();ao_horizon_ps_.Reset();ao_denoise_ps_.Reset();ao_resolve_ps_.Reset();

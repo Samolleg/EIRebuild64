@@ -18,6 +18,7 @@
 #include "owned_terrain_views.h"
 #include "native_instance_flags.h"
 #include "fur.h"
+#include "scene_sinks.h"
 
 #include <algorithm>
 #include <array>
@@ -911,16 +912,25 @@ bool bridge_neighbour_world_transform(std::array<float,16>& placement) noexcept 
 
 #endif // !EID3D11_EMBEDDED
 std::shared_ptr<const VisualAssemblyAsset> build_owned_portrait_bare_assembly(
-    const VisualAssemblyAsset& unit, const ResourceBlob& model, const char*& reason) noexcept {
+    const VisualAssemblyAsset& unit, const ResourceBlob& model, std::int32_t hair,
+    const char*& reason) noexcept {
     try {
         if (!unit.skeleton) { reason = "bare_head_skeleton"; return nullptr; }
         MemoryResourceArchive archive;
         ResourceFailure failure;
         if (!archive.open(model, failure)) { reason = "bare_head_model_archive"; return nullptr; }
         auto bare = std::make_shared<VisualAssemblyAsset>(unit);
+        char hair_name[32]{};
+        if (hair >= 0) std::snprintf(hair_name, sizeof(hair_name), "hr.%02d", int(hair));
         for (auto& part : bare->parts) {
             const auto stem = fur_part_stem(part.name);
             const auto armor = part.name.find(".armor");
+            if (fur_hair_stem(stem)) {
+                if (hair < 0) { part.explicitly_hidden = true; continue; }
+                if (part.name.substr(0,armor) != hair_name) {
+                    reason = "bare_head_hair_mismatch"; return nullptr;
+                }
+            }
             if (armor == std::string::npos || (stem != "hd" && !fur_hair_stem(stem))) continue;
             const std::string name = part.name.substr(0, armor);
             // A helmet piece worn over the bare part (hd.armorTT beside hd):
@@ -961,6 +971,45 @@ std::shared_ptr<const VisualAssemblyAsset> build_owned_portrait_bare_assembly(
             part.material_name = donor->material_name; part.surface = donor->surface;
             part.source_available = donor->source_available;
             part.explicitly_hidden = geometry->indices.empty();
+        }
+        if (hair >= 0) {
+            const auto existing = std::find_if(bare->parts.begin(), bare->parts.end(),
+                [&](const VisualPartAsset& part) { return part.name == hair_name; });
+            if (existing != bare->parts.end() && (existing->explicitly_hidden || !existing->source_available ||
+                    !existing->geometry || !existing->material)) {
+                reason = "bare_head_hair_unavailable"; return nullptr;
+            }
+            if (existing == bare->parts.end()) {
+                // A helmet without a matching hair FIG removes hair outright.
+                // Recover only the character's native choice, never another style.
+                ResourceBlob blob;
+                std::shared_ptr<const FigureCpuAsset> geometry;
+                if (!archive.resolve(hair_name, blob, failure) ||
+                    !(geometry = retained_visual_figure_asset(blob, failure)) || geometry->indices.empty()) {
+                    reason = "bare_head_hair_missing"; return nullptr;
+                }
+                std::uint32_t node = UINT_MAX;
+                for (std::uint32_t i = 0; i < unit.skeleton->nodes.size(); ++i)
+                    if (unit.skeleton->nodes[i].name == hair_name) { node = i; break; }
+                if (node == UINT_MAX || !unit.skeleton->nodes[node].transform_available) {
+                    reason = "bare_head_hair_node"; return nullptr;
+                }
+                const VisualPartAsset* donor = nullptr;
+                for (const auto& other : unit.parts) {
+                    if (other.weapon || other.arrow || other.explicitly_hidden || !other.source_available ||
+                        !other.material || (!other.texture && !other.surface) ||
+                        other.material_type != geometry->material_group || other.texture_type != geometry->texture_number)
+                        continue;
+                    donor = &other;
+                    if (fur_part_stem(other.name) == "hd") break;
+                }
+                if (!donor) { reason = "bare_head_hair_material"; return nullptr; }
+                VisualPartAsset part = *donor;
+                part.name = hair_name;
+                part.geometry = std::move(geometry);
+                part.skeleton_node = node;
+                bare->parts.push_back(std::move(part));
+            }
         }
         static std::atomic<std::uint64_t> revision{0};
         bare->revision = 0x7f00000000000000ull | ++revision;
@@ -1071,12 +1120,14 @@ void run_owned_preview_command(OwnedPreviewCommand& command) noexcept {
     if (command.sets.empty()) return;
     const auto& handoff = command.handoff;
     void* sinks = command.sets.front().get();
+    Renderer::PortraitLightingScope lighting(*SceneSinks::of(sinks).renderer,
+        command.portrait ? &command.portrait_lighting : nullptr);
     install_owned_scene_inputs(sinks, handoff, nullptr, nullptr, nullptr, 0);
-    bool transaction = false, ok = false;
+    bool transaction = false, ok = lighting.ready();
     try {
         auto& sample = command.sample;
         NativeWorldGeometry::Pose* pose = nullptr;
-        ok = retained_visual_gpu_pose(sample, pose) && pose;
+        ok = ok && retained_visual_gpu_pose(sample, pose) && pose;
         if (ok) {
             pose->root_to_world = command.base_world;
             transaction = g_native_sink_begin_object && g_native_sink_begin_object(g_native_sink_context);
@@ -1145,12 +1196,13 @@ void run_owned_preview_command(OwnedPreviewCommand& command) noexcept {
             }
         }
     } catch (...) { ok = false; }
+    if (transaction && g_native_sink_end_object) g_native_sink_end_object(g_native_sink_context, ok);
+    if (!lighting.finish()) ok = false;
     if (!ok) {
         static volatile LONG reported = 0;
         if (InterlockedCompareExchange(&reported,1,0) == 0)
             append_bridge_event("owned_preview_omitted","scene thread: preview submission failed; the preview is omitted",true);
     }
-    if (transaction && g_native_sink_end_object) g_native_sink_end_object(g_native_sink_context, ok);
     clear_owned_scene_inputs(handoff);
 }
 

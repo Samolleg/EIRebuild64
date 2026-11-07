@@ -1668,6 +1668,7 @@ bool RetainedStaticScene::visual_publish_assembly(VisualResourceIncarnation reso
         return false;
     }
     entity->source_available = true;
+    entity->surface_lost = false;
     entity->envelope_radius = entity->assembly->envelope_radius;
     // Animated units compile the current selection's conservative envelope in
     // the retained consumer. Appearance publication must not walk animation
@@ -1687,6 +1688,32 @@ bool RetainedStaticScene::visual_publish_assembly(VisualResourceIncarnation reso
     return true;
 }
 
+bool RetainedStaticScene::visual_surface_rebind_candidates(std::uint64_t world_frame,
+    std::vector<std::int32_t>& ids) noexcept {
+    ids.clear();
+    ExclusiveLock guard(lock_);
+    if (!surface_lost_any_) return true;
+    bool any = false;
+    try {
+        for (auto& item : visuals_) {
+            auto& entity = item.second;
+            if (!entity.surface_lost) continue;
+            if (!entity.assembly || entity.source_available) { entity.surface_lost = false; continue; }
+            any = true;
+            const std::uint64_t wait = std::uint64_t{30} << (std::min)(entity.surface_rebind_attempts, 5u);
+            const bool published = entity.surface_rebind_serial != surface_publish_serial_;
+            if (!published && entity.surface_rebind_attempts &&
+                world_frame - entity.surface_rebind_frame < wait) continue;
+            entity.surface_rebind_serial = surface_publish_serial_;
+            entity.surface_rebind_frame = world_frame;
+            if (entity.surface_rebind_attempts < 31) ++entity.surface_rebind_attempts;
+            ids.push_back(item.first);
+        }
+    } catch (...) { ids.clear(); return false; }
+    surface_lost_any_ = any;
+    return true;
+}
+
 std::shared_ptr<const VisualAssemblyAsset> RetainedStaticScene::visual_assembly(
     VisualResourceIncarnation resource) const noexcept {
     SharedLock guard(lock_);
@@ -1702,6 +1729,7 @@ bool RetainedStaticScene::visual_replace_surface(std::uint64_t id,
         io(d.out, id); d.ref(value);
     });
     visual_frame_changed_unlocked();
+    if (value) ++surface_publish_serial_;
     bool success = true;
     for (auto& source : sources_) {
         if (!source.terrain_textures) continue;
@@ -1760,6 +1788,10 @@ bool RetainedStaticScene::visual_replace_surface(std::uint64_t id,
             if (!next->revision) ++next->revision;
             entity.source_available = std::all_of(next->parts.begin(), next->parts.end(),
                 [](const VisualPartAsset& part) { return part.source_available; });
+            if (!value) {
+                entity.surface_lost = true;surface_lost_any_ = true;
+                entity.surface_rebind_attempts = 0;entity.surface_rebind_frame = 0;
+            }
             entity.assembly = std::move(next);
             shadow_source_changed_unlocked(entity.resource.signed_id);
             // Topology, pose and its deformation envelope have not changed.

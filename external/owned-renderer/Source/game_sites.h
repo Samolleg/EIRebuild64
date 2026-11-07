@@ -32,6 +32,8 @@ enum class GameSiteGroup : std::uint8_t {
     visual_native,       // stock unit-appearance sites (no addon visual contract)
     widescreen,          // owned projection and interface layout
     focus,               // background mode: WinMain loop calls, activation state
+    world_projection,    // independently owned world camera projection
+    camera_pan,          // optional displayed pan experiment; never gates bridge
     count
 };
 
@@ -52,6 +54,7 @@ struct GameSite {
 } // namespace owned
 
 #include "game_sites_table.h"
+#include "game_sites_lia.h"
 
 namespace owned {
 
@@ -59,13 +62,16 @@ constexpr std::size_t kGameSiteGroupCount = static_cast<std::size_t>(GameSiteGro
 
 inline const char* game_site_group_name(GameSiteGroup group) noexcept {
     static const char* const names[kGameSiteGroupCount] = {
-        "bridge", "cursor_coordinates", "res_mapping", "res_cache", "ui_layers", "harness", "hud_native", "visual_native", "widescreen", "focus"};
+        "bridge", "cursor_coordinates", "res_mapping", "res_cache", "ui_layers", "harness", "hud_native", "visual_native", "widescreen", "focus", "world_projection", "camera_pan"};
     const auto index = static_cast<std::size_t>(group);
     return index < kGameSiteGroupCount ? names[index] : "unknown";
 }
 
+enum class GameEngine : std::uint8_t { unsupported, base, lia };
+
 struct GameSiteReport {
-    bool layout = false;  // i386 PE with the reference image size and section layout
+    GameEngine engine = GameEngine::unsupported;
+    bool layout = false;  // i386 PE with a verified engine section layout
     std::array<bool, kGameSiteGroupCount> group{};
     std::size_t failed_count = 0;
     std::array<std::uint32_t, 16> failed_rvas{};  // first failures, for the log
@@ -73,8 +79,9 @@ struct GameSiteReport {
 };
 
 // File offsets of the PE header fields 4 GB mode changes; false unless the
-// file is an i386 PE with the reference image size and section layout.
+// file is an i386 PE with a verified engine section layout.
 struct GameImageHeader {
+    GameEngine engine = GameEngine::unsupported;
     std::size_t characteristics = 0;
     std::size_t checksum = 0;
 };
@@ -97,18 +104,27 @@ inline bool game_image_layout(const std::vector<std::uint8_t>& file, GameImageHe
         !read16(nt + 4, machine) || machine != IMAGE_FILE_MACHINE_I386 ||
         !read16(nt + 6, sections) || !read16(nt + 20, optional_size) ||
         !read16(nt + 24, optional_magic) || optional_magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC ||
-        !read32(nt + 24 + 56, image_size) || image_size != kGameSiteImageSize ||
-        sections != std::size(kGameSiteSections))
+        !read32(nt + 24 + 56, image_size))
         return false;
+    const GameSiteSection* expected_sections = nullptr;
+    if (image_size == kGameSiteImageSize && sections == std::size(kGameSiteSections)) {
+        expected_sections = kGameSiteSections;
+        header.engine = GameEngine::base;
+    } else if (image_size == kLiaGameImageSize && sections == std::size(kLiaGameSections)) {
+        expected_sections = kLiaGameSections;
+        header.engine = GameEngine::lia;
+    } else {
+        return false;
+    }
     const std::size_t table = nt + 24 + optional_size;
     for (std::uint16_t index = 0; index < sections; ++index) {
         std::uint32_t virtual_address = 0, raw_size = 0, raw_offset = 0;
         const std::size_t entry = table + index * 40u;
         if (!read32(entry + 12, virtual_address) || !read32(entry + 16, raw_size) ||
             !read32(entry + 20, raw_offset) ||
-            virtual_address != kGameSiteSections[index].virtual_address ||
-            raw_offset != kGameSiteSections[index].raw_offset ||
-            raw_size != kGameSiteSections[index].raw_size)
+            virtual_address != expected_sections[index].virtual_address ||
+            raw_offset != expected_sections[index].raw_offset ||
+            raw_size != expected_sections[index].raw_size)
             return false;
     }
     header.characteristics = nt + 22;
@@ -120,9 +136,30 @@ inline GameSiteReport verify_game_sites(const std::vector<std::uint8_t>& file) {
     GameSiteReport report;
     GameImageHeader header;
     report.layout = game_image_layout(file, header);
-    report.group.fill(true);
     if (!report.layout) return report;
-    for (const auto& site : kGameSites) {
+    report.engine = header.engine;
+    const GameSite* sites = kGameSites;
+    std::size_t count = std::size(kGameSites);
+    if (header.engine == GameEngine::base) {
+        report.group.fill(true);
+    } else {
+        // Enable only independently verified LiA boundaries. A recognised
+        // image must never inherit the base engine's other feature gates.
+        // Authorized trial: each selected installer also checks its complete
+        // native live contract. No base-only feature is inherited.
+        report.group[static_cast<std::size_t>(GameSiteGroup::bridge)] = true;
+        report.group[static_cast<std::size_t>(GameSiteGroup::hud_native)] = true;
+        report.group[static_cast<std::size_t>(GameSiteGroup::visual_native)] = true;
+        report.group[static_cast<std::size_t>(GameSiteGroup::widescreen)] = true;
+        report.group[static_cast<std::size_t>(GameSiteGroup::ui_layers)] = true;
+        report.group[static_cast<std::size_t>(GameSiteGroup::world_projection)] = true;
+        report.group[static_cast<std::size_t>(GameSiteGroup::focus)] = true;
+        report.group[static_cast<std::size_t>(GameSiteGroup::camera_pan)] = true;
+        sites = kLiaGameSites;
+        count = std::size(kLiaGameSites);
+    }
+    for (std::size_t index = 0; index < count; ++index) {
+        const auto& site = sites[index];
         if (site.file_offset <= file.size() && file.size() - site.file_offset >= site.length &&
             std::memcmp(file.data() + site.file_offset, site.bytes, site.length) == 0)
             continue;

@@ -355,7 +355,14 @@ public:
     // A one-line notice drawn over every frame in every mode (null clears),
     // for a state the player must not mistake for normal rendering.
     void set_status_notice(const char* text) noexcept { notice_ = text; }
+    // Test harness route banner (note verb); empty outside harness routes.
+    void set_harness_banner(const std::string& text) { if (text != harness_banner_) harness_banner_ = text; }
+    bool has_harness_banner() const noexcept { return !harness_banner_.empty(); }
     bool has_status_notice() const noexcept { return notice_ != nullptr; }
+    // The world map preview notice; until (GetTickCount64 ms, 0 = none) ends
+    // one that no later preview state would clear.
+    void set_world_map_notice(std::string text, unsigned long long until = 0) {
+        world_map_notice_ = std::move(text); world_map_notice_until_ = until; }
     // Over-budget crash safety net ([setup] over_budget_pending). The marker
     // is set when the player saves settings past the VRAM budget and cleared
     // at WM_QUIT (the orderly quit, before teardown) or, as a fallback, in
@@ -386,6 +393,9 @@ private:
     std::unique_ptr<Implementation> implementation_;
     RendererConfig config_;
     const char* notice_ = nullptr;
+    std::string world_map_notice_;
+    std::string harness_banner_;
+    unsigned long long world_map_notice_until_ = 0;
 };
 
 // The renderer this session runs, shown read-only beside the 64-bit render

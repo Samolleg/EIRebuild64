@@ -1,3 +1,4 @@
+#ifdef EID3D11_EMBEDDED
 #include "camp_inventory.h"
 #include "camp_presentation.h"
 #include "camp_session.h"
@@ -9,6 +10,7 @@
 #include "owned_resource_runtime.h"
 #include "widescreen.h"
 #include "renderer.h"
+#include "game_sites.h"
 #include "camp_icon_decode.h"
 #include "scene_core_types.h"
 #include "x64_remote_link.h"
@@ -28,9 +30,35 @@
 #include <thread>
 #include <utility>
 
-#ifdef EID3D11_EMBEDDED
 #include "camp_inventory_embedded.inl"
 #else
+#include "camp_inventory.h"
+#include "addon_hook_chain.h"
+#include "engine_bridge.h"
+#include "owned_asset_loader.h"
+#include "owned_resource_runtime.h"
+#include "widescreen.h"
+#include "renderer.h"
+#include "game_sites.h"
+#include "camp_icon_decode.h"
+#include "scene_core_types.h"
+#include "x64_remote_link.h"
+#include "x64_remote_protocol.h"
+
+#include <array>
+#include <cstdio>
+#include <cmath>
+#include <cstring>
+#include <initializer_list>
+#include <map>
+#include <condition_variable>
+#include <deque>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <utility>
+
 namespace owned {
 void bridge_append_probe_event(const char*, const char*) noexcept;
 namespace {
@@ -41,9 +69,7 @@ namespace {
 // module owns layout, cell enumeration, picking and scroll positions.
 constexpr std::uintptr_t kBase = 0x400000;
 std::uint8_t* game = nullptr;
-camp::frontend::CampSession session;
-camp::frontend::CardPublication publication;
-void*& screen = session.owner; // Borrowed only during the authoritative camp session.
+void* screen = nullptr; // Borrowed only between the authoritative activate/deactivate calls.
 camp::Layout layout;
 bool valid = false;
 bool install_failed = false;
@@ -58,13 +84,12 @@ bool addon_hover_selection = false;
 std::array<bool,3> cards_drawn{};
 bool any_cards() noexcept {return std::any_of(cards_drawn.begin(),cards_drawn.end(),[](bool shown){return shown;});}
 void* comparison_owner=nullptr; // One fully constructed native owner, never a child or input target.
-bool& comparison_current=publication.comparison;
-int& comparison_modifiers=publication.comparison_modifiers;
+bool comparison_current=false;
+int comparison_modifiers=-1; // Ctrl/Alt mode of its last completed formatting.
 void* blueprint_owner=nullptr; // Independent copied visual Party; never participates in a transaction.
-int& blueprint_modifiers=publication.blueprint_modifiers;
-int& result_modifiers=publication.result_modifiers;
-using ConstructorCard=camp::frontend::ConstructorCard;
-ConstructorCard& constructor_card=publication.constructor;
+int blueprint_modifiers=-1,result_modifiers=-1;
+enum class ConstructorCard { none,empty,blueprint,result };
+ConstructorCard constructor_card=ConstructorCard::none;
 void refresh_comparison(void* item);
 void destroy_comparison() noexcept;
 void* popup_sink_context = nullptr;
@@ -79,7 +104,8 @@ bool popup_submit(CampRenderRequest request, CampPopupDraw draw, void* context) 
 CampDecoration decoration;
 bool decoration_pending = false, art_failed = false;
 int belt_first = 0;
-
+float belt_wheel = 0;
+std::array<float,2> perk_wheel{};
 // Only the optional addon CampDraw (alchemy) adapter path stays pinned to its
 // reviewed JMV build. Every other addon owner the camp depends on is found
 // from the addon's own hook-framework callbacks at our game entries, in
@@ -130,6 +156,100 @@ template<class T> T& field(void* p, std::size_t offset) noexcept {
 template<class Fn> Fn function(std::uintptr_t va) noexcept {
     return reinterpret_cast<Fn>(game + va - kBase);
 }
+struct CampLifecycleContract {
+    std::uintptr_t allocate_va, free_va, surface_ctor_va, attach_surface_va;
+    std::uintptr_t remove_surface_va, remove_figure_va, texture_create_va;
+    std::uintptr_t texture_release_va, texture_vtable_va, manager_destroy_va;
+    std::size_t manager_destroy_bytes;
+    std::array<std::uint8_t,24> manager_destroy_stock;
+};
+const CampLifecycleContract& camp_lifecycle() noexcept {
+    static constexpr CampLifecycleContract base{
+        0x7005af,0x7005d8,0x5fcc00,0x5ffa90,0x5ffbf0,0x5ff700,
+        0x691d80,0x455980,0x743d24,0x691630,6,
+        {0x55,0x57,0x8b,0xf9,0x33,0xed}};
+    static constexpr CampLifecycleContract lia{
+        0x5ffa7b,0x5ffaa6,0x536290,0x5360d0,0x5357d0,0x5356b0,
+        0x5ab7b0,0x432240,0x6354dc,0x5ad4b0,9,
+        {0x53,0x8b,0xd9,0x8b,0x8b,0xe0,0x00,0x00,0x00}};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+template<std::size_t N>
+bool lia_camp_ranges_match(const std::array<std::array<std::uint64_t,3>,N>& ranges) noexcept {
+    for(const auto& range:ranges) {
+        std::uint64_t hash=0xcbf29ce484222325ull;
+        const auto* bytes=game+static_cast<std::uint32_t>(range[0]);
+        for(std::size_t offset=0;offset<static_cast<std::size_t>(range[1]);++offset)
+            hash=(hash^bytes[offset])*0x100000001b3ull;
+        if(hash!=range[2])return false;
+    }
+    return true;
+}
+bool lia_camp_drawing_matches() noexcept {
+    if (!lia_camp_ranges_match(kLiaCampDrawingRanges) ||
+        !bridge_camp_draw_text_matches() || !bridge_camp_surface_clear_matches()) return false;
+    for(const auto& entry:kLiaCampGeometryEntries) {
+        const auto owner=resolve_entry_owner(game+entry.rva,entry.stock.data(),
+            entry.stock.size(),entry.bytes,&addon_module_contains);
+        if(owner.owner==EntryOwner::rejected ||
+            (owner.owner==EntryOwner::framework_chain&&owner.callback))return false;
+    }
+    return true;
+}
+bool camp_lifecycle_matches() noexcept {
+    if (running_game_sites().report.engine != GameEngine::lia) return true;
+    const auto match=[](std::uintptr_t va,std::initializer_list<std::uint8_t> bytes) {
+        return !std::memcmp(game+va-kBase,bytes.begin(),bytes.size());
+    };
+    return lia_camp_drawing_matches() &&
+        match(0x5ffa7b,{0x56,0x57,0x8b,0x7c,0x24,0x0c}) &&
+        match(0x5ffaa6,{0xe9,0xd1,0xd0,0xfe,0xff}) &&
+        match(0x536290,{0x55,0x8b,0xec,0x83,0xe4,0xf8,0x6a,0xff,0x68,0x5c,0x49,0x61,0x00}) &&
+        match(0x5360d0,{0x53,0x8b,0x5c,0x24,0x08,0x85,0xdb,0x74,0x22,0x56,0x57,0x8b,0xb9,0x1c,0x01,0x00,0x00}) &&
+        match(0x5357d0,{0x53,0x56,0x8b,0x74,0x24,0x0c,0x8b,0xd9,0x8b,0x83,0x18,0x01,0x00,0x00}) &&
+        match(0x5356b0,{0x53,0x56,0x8b,0xd1,0x8b,0xb2,0x0c,0x01,0x00,0x00}) &&
+        match(0x5ab7b0,{0x83,0xec,0x6c,0x53,0x55,0x56,0x8b,0xb4,0x24,0x84,0x00,0x00,0x00}) &&
+        match(0x432240,{0x8b,0xc1,0xff,0x48,0x04,0x75,0x09,0x8b,0x48,0x14,0x8b,0x11,0x50,0xff,0x52,0x60,0xc3}) &&
+        bridge_camp_texture_create_matches() &&
+        match(0x5ad4b0,{0x53,0x8b,0xd9,0x8b,0x8b,0xe0,0x00,0x00,0x00}) &&
+        match(0x5ae580,{0x8b,0x01,0x83,0xe8,0x10,0x8d,0x48,0x0c,0x83,0xca,0xff,0xf0,0x0f,0xc1,0x11,0x4a,0x85,0xd2,0x7f,0x08,0x8b,0x08,0x8b,0x11,0x50,0xff,0x52,0x04,0xc3}) &&
+        match(0x524570,{0xd9,0x05,0xa8,0x06,0x62,0x00}) &&
+        match(0x541900,{0x6a,0xff,0x68,0x04,0x52,0x61,0x00,0x64,0xa1,0x00,0x00,0x00,0x00,0x50,0x64,0x89,0x25,0x00,0x00,0x00,0x00,0x51}) &&
+        match(0x5279c0,{0x56,0x8b,0xf1,0xe8,0x58,0xfb,0xff,0xff,0xf6,0x44,0x24,0x08,0x01,0x74,0x09}) &&
+        match(0x528270,{0x64,0xa1,0x00,0x00,0x00,0x00}) &&
+        match(0x52b52c,{0x8b,0x87,0x94,0x01,0x00,0x00,0x85,0xc0,0x89,0x7c,0x24,0x2c,0x74,0x0a,0x8b,0x87,0x90,0x01,0x00,0x00,0x8b,0x18,0xeb,0x02,0x33,0xdb}) &&
+        match(0x5b41d0,{0x8b,0x15,0x0c,0x91,0x6b,0x00,0x0f,0xb7,0x49,0x1a,0x56,0x8b,0x35,0x08}) &&
+        match(0x5273e0,{0x8b,0x44,0x24,0x04,0x81,0x78,0x10,0x07,0x30,0x00,0x00,0x74,0x05,0x32,0xc0,0xc2,0x04,0x00,0x83,0x78,0x4c,0x02,0x75,0xf5,0x83,0x78,0x50,0x03,0x0f,0x94,0xc0,0xc2,0x04,0x00}) &&
+        match(0x527460,{0x8b,0x44,0x24,0x04,0x81,0x78,0x10,0x07,0x30,0x00,0x00,0x75,0x17,0x83,0x78,0x4c,0x02,0x75,0x11,0x8b,0x40,0x50,0x85,0xc0,0x74,0x0f,0x83,0xf8,0x01,0x74,0x0a,0x83,0xf8,0x02,0x74,0x05,0x32,0xc0,0xc2,0x04,0x00,0xb0,0x01,0xc2,0x04,0x00});
+}
+struct CampInputContract {
+    std::uintptr_t interface_va, top_screen, virtual_point, screen_point;
+};
+const CampInputContract& camp_input() noexcept {
+    static constexpr CampInputContract base{0x7c7d50,0x5f7590,0x5f7d20,0x5f7e00};
+    static constexpr CampInputContract lia{0x6b8a38,0x52f560,0x52f2a0,0x52f330};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+struct CampOwnerContract {
+    std::uintptr_t string_destroy, figure_position, info_construct, info_delete, info_init;
+    std::uintptr_t armor_type, spell_blueprint, item_blueprint;
+    std::uintptr_t figure_draw, perk_ranges, add_figure, bar, tiling, frame, frame_time;
+    std::uintptr_t preview_draw, surface_dc, surface_clear, surface_text, surface_release_dc;
+    std::uintptr_t spell_prototype, glow_palette;
+};
+const CampOwnerContract& camp_owner() noexcept {
+    static constexpr CampOwnerContract base{0x700970,0x5e7010,0x60e210,0x5ee420,0x5ee440,
+        0x6a39e0,0x5ee050,0x5ee0d0,
+        0x5e6d90,0x626d70,0x5ff3c0,0x5e70e0,0x5e7680,0x5e8450,0x600270,
+        0x5fc2f0,0x5fdc00,0x5fe2f0,0x5fde20,0x5fdc60,0x68ba20,0x740358};
+    static constexpr CampOwnerContract lia{0x5ae580,0x524570,0x541900,0x5279c0,0x528270,
+        0x5b41d0,0x5273e0,0x527460,
+        0x524710,0x557f40,0x535d90,0x524ab0,0x524e10,0x525680,0x534630,
+        0x534340,0x5349b0,0x534c70,0x534b30,0x5349e0,0x5a7cc0,0x62f300};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
 using DrawFn = BOOL(__thiscall*)(void*, void*);
 using VoidFn = void(__thiscall*)(void*);
 using HitFn = int(__thiscall*)(void*, POINT);
@@ -144,26 +264,36 @@ int spell_count() noexcept {
     return std::clamp(count,0,spell_capacity);
 }
 int spell_first() noexcept {
-    belt_first=camp::frontend::spell_first(belt_first,spell_count());
+    belt_first=std::clamp(belt_first,0,(std::max)(0,spell_count()-8));
     return belt_first;
 }
 
-using Role = camp::frontend::Role;
-using camp::frontend::role_card;
+enum class Role { none, root, background, info, help, stats, wagon, vendor,
+                  quick, spells, perks, trade, repair, construction, comparison, blueprint };
+int role_card(Role role) noexcept {return role==Role::info?0:(role==Role::help||role==Role::blueprint)?1:role==Role::comparison?2:-1;}
 bool card_content_visible(Role role) noexcept {
-    return camp::frontend::card_content_visible(role,constructor_card);
+    return role==Role::help?constructor_card==ConstructorCard::result:
+        role!=Role::blueprint||constructor_card==ConstructorCard::blueprint;
 }
-using ScrollList = camp::frontend::List;
-using ScrollRail = camp::frontend::Rail;
+enum class ScrollList { stash, spell_vendor, item_vendor, spells, learned, available };
+struct ScrollRail {
+    camp::Rect track,thumb;
+    int position=0,maximum=0;
+    bool horizontal=false;
+};
 ScrollRail scroll_rail(ScrollList list) noexcept;
-using HoverKind=camp::frontend::HoverKind;
-auto& ordinary_hover=session.hover;
+enum class HoverKind { none,item,help,skill };
+struct OrdinaryHover {
+    HoverKind kind=HoverKind::none;
+    int value=0,screen_mode=-1;
+    unsigned modifiers=0;
+    bool touched=false;
+} ordinary_hover;
 int result_help=0; // Actual completed help argument for this Draw; native formatting discards it.
 thread_local HoverKind hover_setter=HoverKind::none;
-bool& hover_focus=session.focus;
-bool& hover_controls=session.controls;
+bool hover_focus=true,hover_controls=false;
 void reset_hover() noexcept {
-    ordinary_hover.reset();
+    ordinary_hover.kind=HoverKind::none;ordinary_hover.touched=false;
 }
 bool ordinary_owner(void* self) noexcept {
     return screen&&layout.wide&&valid&&self==field<void*>(screen,0x164);
@@ -218,7 +348,7 @@ struct CampTexture {
           surface(std::move(other.surface)) {}
     ~CampTexture() {
         if (surface) proxy_retire_camp_texture(surface->id, surface->generation);
-        if (compatibility) function<VoidFn>(0x455980)(compatibility);
+        if (compatibility) function<VoidFn>(camp_lifecycle().texture_release_va)(compatibility);
     }
 };
 std::map<std::pair<std::uint64_t, std::string>, CampTexture> camp_textures;
@@ -236,9 +366,7 @@ using CampIconData = PreparedCampIcon;
 template <class C> void core_send(const C& command) {
     std::vector<std::uint8_t> bytes{0};
     scene_wire::encode_into(bytes, command);
-#if !defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_TOOL)
     x64remote::scene_message(static_cast<std::uint16_t>(scene_core::wire_command<C>::id), bytes.data(), bytes.size());
-#endif
 }
 
 class CampIconLoader {
@@ -345,7 +473,6 @@ class CampIconLoader {
     // their entries. A ring that overflowed lost answers: every outstanding
     // request is sent again (the host answers a known serial again).
     void core_poll_locked() {
-#if !defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_TOOL)
         auto& control = x64remote::control();
         const long written = control.camp_icon_answers_written;
         if (written - core_answers_read_ > long(x64remote::kCampIconAnswers)) {
@@ -378,7 +505,6 @@ class CampIconLoader {
             }
             core_requested_.erase(requested);
         }
-#endif
     }
     std::shared_ptr<const CampIconData> core_request(const std::string& name, bool visible) {
         if (!core_started_) {
@@ -498,7 +624,7 @@ std::string item_icon_name(void* item) {
     if (!item) return {};
     struct IconName {
         const char* text = nullptr;
-        ~IconName() { if (text) function<VoidFn>(0x700970)(this); }
+        ~IconName() { if (text) function<VoidFn>(camp_owner().string_destroy)(this); }
     } name;
     // Same hidden CString return and vslot as the admitted DrawItem.
     reinterpret_cast<void*(__thiscall*)(void*,void*)>(field<void**>(item,0)[0x4c/4])(item,&name);
@@ -563,7 +689,7 @@ struct ItemTextureScope {
     void* preview_item = nullptr; // Borrowed only by this synchronous part9 draw.
     bool preview_glow_ready = false;
     std::uint32_t preview_specular_rgb = 0;
-    ModelDrawReference pending_figure; // Released by close(), including the native SEH exit.
+    void* pending_figure = nullptr; // One reference only until this native draw ends.
     bool measure_scroll = false, scroll_miss_open = false;
     bool active = true;
     std::shared_ptr<const OwnedVisualSurface> surface;
@@ -575,7 +701,10 @@ struct ItemTextureScope {
         if (!std::exchange(active, false)) return;
         item_texture_scope = previous;
         preview_item = nullptr;
-        pending_figure.reset();
+        if (void* figure = std::exchange(pending_figure, nullptr)) {
+            // Use the same live Release dispatch as the native LRU trim.
+            reinterpret_cast<VoidFn>(field<void**>(figure, 0)[0x10 / 4])(figure);
+        }
         surface.reset(); binding = nullptr;
     }
     ~ItemTextureScope() { close(); }
@@ -601,6 +730,8 @@ struct ScrollMissTiming {
 };
 
 bool preview_glow_contract() noexcept {
+    if(running_game_sites().report.engine==GameEngine::lia)
+        return lia_camp_ranges_match(kLiaCampGlowRanges);
     const auto match = [&](std::uintptr_t va, std::initializer_list<std::uint8_t> bytes) {
         return !std::memcmp(game + va - kBase, bytes.begin(), bytes.size());
     };
@@ -642,7 +773,7 @@ const char* advance_preview_specular_rgb(void* item, std::uint32_t& rgb) noexcep
         if (type != 0x3004 && type != 0x3005) return nullptr;
         void* spell = field<void*>(item,0x44);
         if (!spell) return nullptr;
-        void* prototype = function<void*(__thiscall*)(void*)>(0x68ba20)(spell);
+        void* prototype = function<void*(__thiscall*)(void*)>(camp_owner().spell_prototype)(spell);
         if (!prototype) return "spell_prototype_unavailable";
         const int subtype = field<int>(prototype,0x14);
         if (subtype < 0 || subtype >= 8) return "spell_palette_unavailable";
@@ -650,18 +781,24 @@ const char* advance_preview_specular_rgb(void* item, std::uint32_t& rgb) noexcep
         if (!data) return "item_phase_unavailable";
         const float phase = field<float>(data,0x14);
         if (!std::isfinite(phase)) return "item_phase_invalid";
-        const auto* palette = reinterpret_cast<const float*>(game + 0x340358 + subtype * 16);
+        const auto* palette = reinterpret_cast<const float*>(game + camp_owner().glow_palette - kBase + subtype * 16);
         for (unsigned channel = 0; channel < 3; ++channel)
             if (!std::isfinite(palette[channel]) || palette[channel] < 0 || palette[channel] > 1)
                 return "spell_palette_invalid";
-        const float elapsed = function<float(__thiscall*)(void*)>(0x600270)(screen);
+        const float elapsed = function<float(__thiscall*)(void*)>(camp_owner().frame_time)(screen);
         if (!std::isfinite(elapsed)) return "native_frame_time_invalid";
         // Native part9 skips the pulse step. Advance only its Info-owned copy,
         // once per draw, using the native frame duration and phase lifecycle.
-        float next_phase = phase;
-        if (!advance_model_preview_glow(next_phase, elapsed,
-                {palette[0], palette[1], palette[2]}, rgb)) return "native_item_glow_update_failed";
-        field<float>(data,0x14) = next_phase;
+        const double next_phase = std::fmod(double(phase) + double(elapsed) * 5.0,
+                                            2.0 * 3.141592653589793);
+        field<float>(data,0x14) = float(next_phase);
+        // Native stores a float phase, then quantizes RGB from the unrounded
+        // wrapped value still on the x87 stack.
+        const double strength = (std::sin(next_phase) + 1.0) * 0.15000000596046448;
+        const auto r = static_cast<std::uint32_t>(strength * palette[0] * 255.0);
+        const auto g = static_cast<std::uint32_t>(strength * palette[1] * 255.0);
+        const auto b = static_cast<std::uint32_t>(strength * palette[2] * 255.0);
+        rgb = (r << 16) | (g << 8) | b;
         return nullptr;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         return "native_item_glow_update_failed";
@@ -674,11 +811,8 @@ const char* advance_preview_specular_rgb(void* item, std::uint32_t& rgb) noexcep
 void __stdcall retain_pending_item_figure(void* self, void* figure) noexcept {
     if (!item_texture_scope || item_texture_scope->owner != self || self != screen || !layout.wide)
         return;
-    item_texture_scope->pending_figure.hold(figure,
-        [](void* value) noexcept { ++field<int>(value, 4); },
-        [](void* value) noexcept {
-            reinterpret_cast<VoidFn>(field<void**>(value, 0)[0x10 / 4])(value);
-        });
+    ++field<int>(figure, 4); // Shipped allocator's inline AddRef operation.
+    item_texture_scope->pending_figure = figure;
     if(item_texture_scope->measure_scroll)++scroll_cost.figure_misses;
 }
 
@@ -696,6 +830,20 @@ __declspec(naked) void item_figure_trim() {
     }
 }
 
+__declspec(naked) void lia_item_figure_trim() {
+    __asm {
+        pushfd
+        pushad
+        push ebp                    // Native new figure, before LRU trim.
+        lea eax, [esi - 170h]        // Native embedded figure LRU owner.
+        push eax
+        call retain_pending_item_figure
+        popad
+        popfd                       // Native TEST ECX flags feed the next JE.
+        jmp dword ptr [figure_trim_forwarder]
+    }
+}
+
 CampTexture* ready_item_texture(const std::string& name, std::uint64_t generation) {
     const auto key = std::make_pair(generation,name);
     auto found = camp_textures.find(key);
@@ -706,10 +854,10 @@ CampTexture* ready_item_texture(const std::string& name, std::uint64_t generatio
     texture.diagnostic_name = name;
     void* manager = bridge_camp_texture_owner();
     if (!manager) { reject("icon_texture_owner_unavailable"); return nullptr; }
-    texture.compatibility = function<void*(__thiscall*)(void*,DWORD,DWORD,int)>(0x691d80)(manager,data->description.width,data->description.height,0x20);
+    texture.compatibility = function<void*(__thiscall*)(void*,DWORD,DWORD,int)>(camp_lifecycle().texture_create_va)(manager,data->description.width,data->description.height,0x20);
     if (!texture.compatibility) { reject("icon_binding_creation_failed"); return nullptr; }
     ++field<int>(texture.compatibility,4);
-    if (field<void*>(texture.compatibility,0) != game + 0x343d24 || field<int>(texture.compatibility,4) != 1) {
+    if (field<void*>(texture.compatibility,0) != game + camp_lifecycle().texture_vtable_va - kBase || field<int>(texture.compatibility,4) != 1) {
         reject("icon_native_reference_contract_differs"); return nullptr;
     }
     // This binding belongs to the persistent owned GPU home, rather than the
@@ -785,12 +933,30 @@ __declspec(naked) void item_texture_lookup() {
     }
 }
 
+void* __fastcall lia_item_texture_lookup(void* lru,void*,const char* name) {
+    // The caller keeps its CString cleanup. Borrow only the current DrawItem
+    // scope and exact embedded LRU; all other native Get calls forward intact.
+    void* output = nullptr;
+    if (screen && lru==static_cast<std::uint8_t*>(screen)+0x180 &&
+        resolve_item_texture(name,screen,&output)) return output;
+    using Fn=void*(__thiscall*)(void*,const char*);
+    return reinterpret_cast<Fn>(item_texture_forwarder)(lru,name);
+}
+
 int mode() noexcept { return screen ? field<int>(screen, 0x190) : 0; }
 camp::Rect stage() noexcept {
-    return camp::frontend::stage(layout,mode());
+    if(mode()==0)return layout.character;
+    if(mode()==1)return layout.content;
+    if(mode()==3||mode()==5){
+        auto board=layout.workbench;board.left+=10;board.right+=10;return board;
+    }
+    return layout.workspace;
 }
 camp::Rect actions() noexcept {
-    return camp::frontend::actions(layout,mode());
+    if(mode()!=1)return layout.actions;
+    const float middle=(layout.stash.left+layout.stash.right)*.5f;
+    // Move the complete native 200x100 footer uniformly below the stash.
+    return {middle-90,510,middle+90,600};
 }
 camp::Rect heading() noexcept { return layout.heading; }
 bool root_action_visible(int index) noexcept {
@@ -804,11 +970,14 @@ camp::Rect context_plate(unsigned card) noexcept {
 }
 
 RECT decoration_pixels(camp::Rect r) noexcept {
-    return camp::frontend::pixels(layout,r);
+    return {LONG(std::lround((r.left-layout.left)*layout.unit)),
+        LONG(std::lround(r.top*layout.unit)),LONG(std::lround((r.right-layout.left)*layout.unit)),
+        LONG(std::lround(r.bottom*layout.unit))};
 }
 
 bool fresh_hover() noexcept {
-    return ordinary_hover.fresh(session.allowed(current_camp_input()));
+    return ordinary_hover.kind!=HoverKind::none&&ordinary_hover.touched&&
+        hover_focus&&!hover_controls&&current_camp_input();
 }
 bool context_visible(unsigned card) noexcept {
     void* owner=card==2?comparison_owner:field<void*>(screen,card==0?0x164:0x1dc);
@@ -819,21 +988,70 @@ bool context_visible(unsigned card) noexcept {
 }
 
 void snapshot_decoration() noexcept {
-    camp::frontend::BackgroundState state;state.mode=mode();
+    decoration={}; decoration.pixel_unit=layout.unit;
+    constexpr float main_board_corner=8,text_group_corner=12;
     const auto shown=[](std::size_t offset){
-        void* child=field<void*>(screen,offset);return child&&field<BOOL>(child,0xe8);
+        void* child=field<void*>(screen,offset);
+        return child&&field<BOOL>(child,0xe8);
     };
-    const bool spells=state.mode==2||state.mode==3;
-    const bool shop=field<bool>(screen,spells?0x195:0x196);
-    state.quick=shown(0x1e4);state.stats=shown(0x1d8);state.perks=shown(0x1f4);state.wagon=shown(0x1e0);
-    state.merchant=shop&&shown(spells?0x1ec:0x1f0);
-    state.trade=shop&&shown(spells?0x1f8:0x200);
-    state.construction=shop&&shown(spells?0x1fc:0x204);
-    state.repair=field<bool>(screen,0x196)&&shown(0x208);
-    state.cards=cards_drawn;state.empty_construction=constructor_card==ConstructorCard::empty;
-    decoration=camp::frontend::background_decoration(layout,state,[](ScrollList list){return scroll_rail(list);});
+    const auto panel=[](camp::Rect r,float corner){
+        decoration.panels[decoration.count++]={decoration_pixels(r),corner};
+    };
+    const auto divider=[](camp::Rect span,float height=50.f/3){
+        const float width=(std::min)(span.width(),800.f/3);
+        const float x=(span.left+span.right-width)*.5f,y=(span.top+span.bottom)*.5f;
+        decoration.dividers[decoration.divider_count++]={decoration_pixels({x,y-height*.5f,x+width,y+height*.5f}),false};
+    };
+    // These are decorative bounds, never a native content viewport or hit area.
+    decoration.title_plate=decoration_pixels(layout.title_plate);
+    if(mode()==0&&shown(0x1e4))panel(layout.character,main_board_corner);
+    if(mode()<2&&shown(0x1d8))panel({layout.stats.left-110.f/3,layout.stats.top,
+        layout.stats.right+110.f/3,layout.stats.bottom},text_group_corner);
+    if((mode()==2&&field<bool>(screen,0x195)&&shown(0x1f8))||
+        (mode()==4&&field<bool>(screen,0x196)&&shown(0x200)))panel(stage(),main_board_corner);
+    if((mode()==3&&shown(0x1fc))||(mode()==5&&shown(0x204))||
+       (mode()==6&&shown(0x208)))panel(stage(),main_board_corner);
+    if(mode()==1&&shown(0x1f4)){
+        panel({layout.skills.left,161,layout.skills.right,590},text_group_corner);
+        panel({layout.available.left,161,layout.available.right,590},text_group_corner);
+        divider({layout.skills.left+24,310,layout.skills.right-24,320},6);
+    }
+    if(mode()>=2){
+        const auto offset=mode()==2||mode()==3?0x1ec:0x1f0;
+        if(field<bool>(screen,offset==0x1ec?0x195:0x196)&&shown(offset))
+            divider({layout.merchant.left,layout.category(true,0).bottom,layout.merchant.right,layout.grid(true).top});
+    }
+    if(shown(0x1e0))divider({layout.stash.left,layout.category(false,0).bottom,layout.stash.right,layout.grid(false).top});
+    if(mode()!=1)divider({layout.content.left+25,490,layout.content.right-25,502});
+    if(mode()==2||mode()==4||mode()==6){
+        const auto gutter=[](float left,float right){
+            constexpr float width=70.f/3;
+            if(right-left<width+16)return;
+            const float x=(left+right)*.5f;
+            decoration.dividers[decoration.divider_count++]={
+                decoration_pixels({x-width*.5f,215,x+width*.5f,335}),true};
+        };
+        const bool spells=mode()==2;
+        if(field<bool>(screen,spells?0x195:0x196)&&shown(spells?0x1ec:0x1f0)){
+            const auto bar=scroll_rail(spells?ScrollList::spell_vendor:ScrollList::item_vendor);
+            const float right=bar.maximum?bar.track.right+10.f/3:layout.grid(true).right;
+            gutter(right,layout.workspace.left);
+        }
+        if(shown(0x1e0))gutter(layout.workspace.right,layout.grid(false).left);
+    }
+    // Stock BG ornaments are submitted explicitly into each isolated card.
+    // Their plate is also the crop and unrelated-text occlusion boundary.
+    for(unsigned card=0;card<cards_drawn.size();++card)
+        if(cards_drawn[card])decoration.cards[decoration.card_count++]=decoration_pixels(context_plate(card));
+    if(cards_drawn[1]&&constructor_card==ConstructorCard::empty){
+        const auto& card=layout.result_info;
+        const float x=(card.left+card.right)*.5f,y=(card.top+card.bottom)*.5f;
+        decoration.construction_icon=decoration_pixels({x-40,y-40,x+40,y+40});
+        decoration.construction_icon_visible=true;
+    }
     decoration_pending=true;
 }
+
 Role role_of(void* object) noexcept {
     if (!screen || !object) return Role::none;
     if (object == screen) return Role::root;
@@ -860,12 +1078,12 @@ Role role_of(void* object) noexcept {
 }
 
 POINT virtual_point(void* object, POINT p) {
-    function<PointFn>(0x5f7e00)(field<void*>(object, 0x98), &p);
+    function<PointFn>(camp_input().screen_point)(field<void*>(object, 0x98), &p);
     return p;
 }
 bool coordinate_contract(void* self) {
     POINT origin{0, 0}, corner{800, 600};
-    auto convert = function<PointFn>(0x5f7d20);
+    auto convert = function<PointFn>(camp_input().virtual_point);
     convert(field<void*>(self, 0x98), &origin);
     convert(field<void*>(self, 0x98), &corner);
     const int expected_left = int(std::lround(-layout.left * layout.unit));
@@ -880,37 +1098,114 @@ camp::Rect area_rect(void* object, int index) noexcept {
 }
 
 camp::Placement perk_band(float x,float y) noexcept {
-    return camp::frontend::perk_band(layout,x,y);
+    const auto& pane=x>=400?layout.available:y<245?layout.skills:layout.learned;
+    // Centre the complete native 200-wide content inside the text/rail gutters.
+    const float left=(pane.left+15+pane.right-25-200)*.5f;
+    if(x>=400)return {{400,100,600,500},{left,165,left+200,565}};
+    if(y<245)return {{200,100,400,245},{left,165,left+200,310}};
+    if(y<270)return {{200,245,400,265},{left,320,left+200,340}};
+    const int row=std::clamp(int((y-270)/15),0,13);
+    const float top=346+row*16.f;
+    return {{200,270+row*15.f,400,285+row*15.f},
+        {left,top,left+200,top+15}};
 }
 
-camp::frontend::InputState input_state(void* object,Role role) noexcept {
-    camp::frontend::InputState s;
-    s.role=role;s.mode=mode();s.first=belt_first;s.capacity=spell_capacity;
-    s.areas=field<int>(object,0x12c);
-    s.actions={{root_action_visible(0),root_action_visible(1)}};
-    return s;
+camp::Placement perk_area(void* object,int index) noexcept {
+    if(index<4)return {};
+    const bool learned=index>=34;
+    const auto source=area_rect(object,learned?34:index);
+    const float native_y=learned?270+(index-34)*15.f:source.top;
+    const auto band=perk_band(source.left,native_y);
+    const float sx=band.destination.width()/band.source.width(),sy=band.destination.height()/band.source.height();
+    const auto target=[&](float x,float y){return std::pair<float,float>{
+        band.destination.left+(x-band.source.left)*sx,band.destination.top+(y-band.source.top)*sy};};
+    const auto a=target(source.left,native_y),b=target(source.right,native_y+source.height());
+    // Logical rows44..47 use the real area34 polygon as their containment template.
+    return {source,{a.first,a.second,b.first,b.second}};
 }
+
 camp::Placement area_placement(void* object, Role role, int index) noexcept {
-    const auto s=input_state(object,role);
-    const int native=camp::frontend::area_template(s,index);
-    if(native<0||native>=s.areas)return {};
-    return camp::frontend::area(layout,s,index,area_rect(object,native));
+    if(role==Role::perks)return perk_area(object,index);
+    const auto source = area_rect(object, index);
+    auto target = source;
+    switch (role) {
+    case Role::root:
+        if (index < 2) {
+            const auto r = actions();
+            const float s = r.width() / 200;
+            target = {r.left + source.left * s, r.top + (source.top - 400) * s,
+                      r.left + source.right * s, r.top + (source.bottom - 400) * s};
+        } else if (index < 4) target=layout.rotation[index-2];
+        else if (index < 12) target = layout.mode_button(index - 4);
+        break;
+    case Role::wagon: case Role::vendor:
+        if (index < 2) target = {}; // Replaced by owned rail input.
+        else if (index < 8) target = layout.category(role == Role::vendor, index - 2);
+        else target = layout.grid(role == Role::vendor);
+        break;
+    case Role::quick:
+        if (index < 8) target = layout.equipped(index < 4 ? index : 11 - index, belt_first, true);
+        else {
+            const auto r = stage(); const float s = r.width() / 400;
+            target = {r.left + (source.left - 200) * s, r.top + (source.top - 100) * s,
+                      r.left + (source.right - 200) * s, r.top + (source.bottom - 100) * s};
+        }
+        break;
+    case Role::spells: target = layout.equipped(index, belt_first); break;
+    case Role::trade: target = layout.trade_cell(index); break;
+    default: {
+        const bool stats = role == Role::stats;
+        const auto r = stats ? layout.stats : stage();
+        const float sx = r.width() / (stats ? 200 : 400);
+        const float sy = r.height() / (stats ? 300 : 400);
+        target = {r.left + (source.left - (stats ? 0 : 200)) * sx,
+                  r.top + (source.top - 100) * sy,
+                  r.left + (source.right - (stats ? 0 : 200)) * sx,
+                  r.top + (source.bottom - 100) * sy};
+        break;
+    }}
+    return {source, target};
 }
+
 bool belt_visible(const camp::Rect& r,bool equipment=false) noexcept {
-    return camp::frontend::belt_visible(layout,r,equipment);
+    const auto contains=[&](const camp::Rect& bounds){return r.left>=bounds.left-.01f&&r.right<=bounds.right+.01f&&
+        r.top>=bounds.top-.01f&&r.bottom<=bounds.bottom+.01f;};
+    return equipment?(contains(layout.weapons)||contains(layout.quick_items)):contains(layout.belt);
 }
 POINT inverse_point(camp::Placement p, POINT point) noexcept {
-    return camp::frontend::inverse(p,point);
+    return {LONG(std::floor(p.source.left + (point.x - p.destination.left) * p.source.width() / p.destination.width())),
+            LONG(std::floor(p.source.top + (point.y - p.destination.top) * p.source.height() / p.destination.height()))};
 }
 BOOL native_area_contains(void* area, POINT point);
 int hit(void* object, POINT physical) {
-    const Role role=role_of(object);if(role==Role::none)return -2;if(!valid)return -1;
-    if(role==Role::spells)spell_first();
-    const auto s=input_state(object,role);
-    return camp::frontend::hit(layout,s,virtual_point(object,physical),
-        [&](int i){return area_rect(object,i);},
-        [&](int i,POINT q){return native_area_contains(field<void**>(object,0x128)[i],q)!=FALSE;});
+    const Role role = role_of(object);
+    if (role == Role::none) return -2;
+    if (!valid) return -1;
+    const POINT p = virtual_point(object, physical);
+    if(role==Role::spells){
+        const int first=spell_first();
+        const auto source=area_rect(object,0);
+        for(int i=first;i<(std::min)(spell_capacity,first+8);++i){
+            const camp::Placement placed{source,layout.equipped(i,first)};
+            if(placed.destination.contains(float(p.x),float(p.y))&&
+                native_area_contains(field<void**>(object,0x128)[0],inverse_point(placed,p)))return i;
+        }
+        return -1;
+    }
+    const int count = role==Role::perks?48:field<int>(object, 0x12c);
+    for (int i = 0; i < count; ++i) {
+        if(role==Role::root&&i<2&&!root_action_visible(i))continue;
+        if((role==Role::wagon||role==Role::vendor)&&i<2)continue;
+        const auto placed = area_placement(object, role, i);
+        if ((role == Role::spells || (role == Role::quick && i < 8)) &&
+            !belt_visible(placed.destination,role==Role::quick)) continue;
+        if (placed.source.width() > 0 && placed.source.height() > 0 &&
+            placed.destination.contains(float(p.x), float(p.y)) &&
+            native_area_contains(field<void**>(object, 0x128)[role==Role::perks&&i>=34?34:i], inverse_point(placed, p))) return i;
+    }
+    return -1;
 }
+
 struct Grid {
     void* object = nullptr;
     void* background = nullptr;
@@ -934,10 +1229,17 @@ void form_sorted(void* object) {
     reinterpret_cast<VoidFn>(table[0x68 / 4])(object);
 }
 int first_item(void* object) noexcept {
-    const int category=field<int>(object,0x150);
-    float& position=field<float>(object,0x15c+std::size_t(category)*4);
-    const int first=camp::frontend::first_item(layout,role_of(object)==Role::vendor,field<int>(object,0x1a0),position);
-    position=float(first);return first;
+    const int category = field<int>(object, 0x150);
+    float& position = field<float>(object, 0x15c + std::size_t(category) * 4);
+    const int count = field<int>(object, 0x1a0);
+    const bool vendor=role_of(object)==Role::vendor;
+    const int columns=layout.grid_columns(vendor),visible_rows=layout.grid_rows(vendor);
+    const int rows = (count + columns - 1) / columns;
+    const int maximum = (std::max)(0, rows - visible_rows) * columns;
+    int first = (std::max)(0, int(position) / columns * columns);
+    first = (std::min)(first, maximum);
+    position = float(first);
+    return first;
 }
 
 void begin_icon_priority_frame() {
@@ -972,7 +1274,12 @@ void prioritize_grid_icons(Grid& grid, int first, int count, int capacity) {
 
 bool perk_list(ScrollList list) noexcept {return list==ScrollList::learned||list==ScrollList::available;}
 bool drag_admitted=false;
-auto& scroll_drag=session.drag;
+struct ScrollDrag {
+    HWND window=nullptr;
+    ScrollList list=ScrollList::stash;
+    int screen_mode=0,category=0;
+    float grab=0;
+} scroll_drag;
 
 // The current person's equipped spells as of the previous camp frame. A spell
 // object that was not equipped then is newly equipped; the belt follows it
@@ -1004,8 +1311,8 @@ void follow_equipped_spell() noexcept {
 bool current_camp_input() noexcept {
     if(!drag_admitted||!game||!screen||!layout.wide||!valid||!requested_wide)return false;
     // Shipped callers pass this inline global object, not a pointer variable.
-    void* camp_interface=game+0x3c7d50;
-    return function<void*(__thiscall*)(void*)>(0x5f7590)(camp_interface)==screen&&
+    void* camp_interface=game+camp_input().interface_va-kBase;
+    return function<void*(__thiscall*)(void*)>(camp_input().top_screen)(camp_interface)==screen&&
         field<void*>(camp_interface,0x0c)==nullptr;
 }
 void* scroll_owner(ScrollList list) noexcept {
@@ -1019,25 +1326,42 @@ void* scroll_owner(ScrollList list) noexcept {
     }
     return nullptr;
 }
-camp::frontend::Scroll scroll_snapshot(ScrollList list) noexcept {
+ScrollRail scroll_rail(ScrollList list) noexcept {
+    ScrollRail bar;
     void* owner=scroll_owner(list);
-    if(!owner||!field<BOOL>(owner,0xe8))return {};
-    camp::frontend::Scroll scroll;scroll.visible=true;
-    if(list==ScrollList::spells){scroll.page=8;scroll.total=spell_count();scroll.position=spell_first();}
-    else if(perk_list(list)){
+    if(!owner||!field<BOOL>(owner,0xe8))return bar;
+    float visible,total;
+    if(list==ScrollList::spells){
+        bar.horizontal=true;visible=8;total=float(spell_count());
+        bar.maximum=(std::max)(0,int(total)-8);bar.position=spell_first();
+        bar.track={layout.belt.left,146,layout.belt.right,156};
+    }else if(perk_list(list)){
         const bool learned=list==ScrollList::learned;
         const auto begin=field<std::uintptr_t>(owner,learned?0x168:0x15c);
         const auto end=field<std::uintptr_t>(owner,learned?0x16c:0x160);
-        scroll.total=int((end-begin)/24);scroll.page=learned?14:23;
-        scroll.position=field<int>(owner,learned?0x158:0x154);
+        total=float((end-begin)/24);visible=learned?14.f:23.f;
+        bar.maximum=(std::max)(0,int(total-visible));
+        bar.position=field<int>(owner,learned?0x158:0x154);
+        const auto pane=learned?layout.learned:layout.available;
+        bar.track={pane.right-(layout.compact?20.f:30.f),learned?346.f:200.f,
+                   pane.right-(layout.compact?10.f:20.f),learned?569.f:550.f};
     }else{
-        const bool vendor=list!=ScrollList::stash;const int columns=layout.grid_columns(vendor);
-        scroll.page=layout.grid_rows(vendor);scroll.total=(field<int>(owner,0x1a0)+columns-1)/columns;
-        scroll.position=first_item(owner)/columns;scroll.category=field<int>(owner,0x150);
+        const bool vendor=list!=ScrollList::stash;
+        const int columns=layout.grid_columns(vendor);
+        visible=float(layout.grid_rows(vendor));
+        total=float((field<int>(owner,0x1a0)+columns-1)/columns);
+        bar.maximum=(std::max)(0,int(total-visible));bar.position=first_item(owner)/columns;
+        const auto grid=layout.grid(vendor);
+        bar.track={grid.right+5.f/3,grid.top,grid.right+40.f/3,grid.bottom};
     }
-    return scroll;
+    if(!bar.maximum)return bar;
+    const float length=bar.horizontal?bar.track.width():bar.track.height();
+    const float thumb=(std::min)(length,(std::max)(110.f/3,length*visible/total));
+    const float offset=(length-thumb)*bar.position/bar.maximum;
+    bar.thumb=bar.horizontal?camp::Rect{bar.track.left+offset,bar.track.top,bar.track.left+offset+thumb,bar.track.bottom}:
+        camp::Rect{bar.track.left,bar.track.top+offset,bar.track.right,bar.track.top+offset+thumb};
+    return bar;
 }
-ScrollRail scroll_rail(ScrollList list) noexcept {return camp::frontend::rail(layout,list,scroll_snapshot(list));}
 void scroll_to(ScrollList list,int position) noexcept {
     const auto bar=scroll_rail(list);
     position=std::clamp(position,0,bar.maximum);
@@ -1045,7 +1369,7 @@ void scroll_to(ScrollList list,int position) noexcept {
     void* owner=scroll_owner(list);
     if(perk_list(list)){
         field<int>(owner,list==ScrollList::learned?0x158:0x154)=position;
-        function<VoidFn>(0x626d70)(owner);
+        function<VoidFn>(camp_owner().perk_ranges)(owner);
         return;
     }
     const int category=field<int>(owner,0x150);
@@ -1053,14 +1377,30 @@ void scroll_to(ScrollList list,int position) noexcept {
     field<float>(owner,0x174)=0;field<float>(owner,0x178)=0;
 }
 void move_scroll_drag(POINT point) noexcept {
-    camp::frontend::move_drag(session,layout,mode(),current_camp_input(),point,scroll_snapshot,scroll_to);
+    if(!scroll_drag.window)return;
+    if(!current_camp_input()||mode()!=scroll_drag.screen_mode||GetCapture()!=scroll_drag.window){camp_inventory_cancel_drag();return;}
+    void* owner=scroll_owner(scroll_drag.list);
+    if(!owner||!field<BOOL>(owner,0xe8)||
+        (scroll_drag.list!=ScrollList::spells&&!perk_list(scroll_drag.list)&&field<int>(owner,0x150)!=scroll_drag.category)){
+        camp_inventory_cancel_drag();return;
+    }
+    const auto bar=scroll_rail(scroll_drag.list);
+    if(!bar.maximum){camp_inventory_cancel_drag();return;}
+    const POINT p=virtual_point(screen,point);
+    const float track=bar.horizontal?bar.track.width():bar.track.height();
+    const float thumb=bar.horizontal?bar.thumb.width():bar.thumb.height();
+    const float start=bar.horizontal?bar.track.left:bar.track.top;
+    const float coordinate=float(bar.horizontal?p.x:p.y);
+    const float grab=(std::min)(scroll_drag.grab,thumb);
+    scroll_to(scroll_drag.list,int(std::lround(std::clamp((coordinate-start-grab)/(track-thumb),0.f,1.f)*bar.maximum)));
 }
+
 using SurfaceCtor = void*(__thiscall*)(void*, void*, int, int, int, int, int, bool);
 using BarFn = void(__thiscall*)(void*, float, float, float, float, float, float, int, int, int, int);
 using FrameFn = void(__thiscall*)(void*, float, float, float, float, float, float, float, int, int, int, int);
 using TilingFn = void(__thiscall*)(void*, float,float,float,float,float,float,int,int,int,int,int,int);
 void* add_figure(void* object) {
-    void* figure=function<void*(__thiscall*)(void*, const char*)>(0x5ff3c0)(object, nullptr);
+    void* figure=function<void*(__thiscall*)(void*, const char*)>(camp_owner().add_figure)(object, nullptr);
     if(!figure)reject("camp_frame_allocation_failed");
     return figure;
 }
@@ -1071,14 +1411,14 @@ void prepare_grid(Grid& grid, void* object) {
     grid.background = add_figure(object);
     if(!grid.background)return;
     const float top = float(field<int>(object, 0x180));
-    function<BarFn>(0x5e70e0)(grid.background, field<float>(object,0x184)*2, 100, 50, top, 150, top + 100, 14, 14, 114, 114);
+    function<BarFn>(camp_owner().bar)(grid.background, field<float>(object,0x184)*2, 100, 50, top, 150, top + 100, 14, 14, 114, 114);
     // The native object owns this text surface and tears it down with its
     // other surfaces. Its dimensions are the grid, not the old 700x20 strip.
-    void* memory = function<void*(__cdecl*)(std::size_t)>(0x7005af)(0x38);
+    void* memory = function<void*(__cdecl*)(std::size_t)>(camp_lifecycle().allocate_va)(0x38);
     if (!memory) { reject("grid_text_allocation_failed"); return; }
-    grid.text = function<SurfaceCtor>(0x5fcc00)(memory, field<void*>(object, 0x98),
+    grid.text = function<SurfaceCtor>(camp_lifecycle().surface_ctor_va)(memory, field<void*>(object, 0x98),
         int(r.left), int(r.top), int(r.right), int(r.bottom), 5, true);
-    function<void*(__thiscall*)(void*, void*)>(0x5ffa90)(object, grid.text);
+    function<void*(__thiscall*)(void*, void*)>(camp_lifecycle().attach_surface_va)(object, grid.text);
 }
 
 // Each entry uses an instruction-complete prologue, with a verified addon
@@ -1162,7 +1502,7 @@ void __fastcall info_item(void* self,void*,void* item) {
     if(!ordinary_owner(self)||hover_setter!=HoverKind::none){original<Fn>(info_item_id)(self,item);return;}
     call_hover_setter(info_item_id,self,item,HoverKind::item);
     if(!item){reset_hover();return;}
-    ordinary_hover.publish(HoverKind::item,true);
+    ordinary_hover.kind=HoverKind::item;ordinary_hover.touched=true;
     refresh_comparison(item);
 }
 void observe_help(HookId id,void* self,int help) {
@@ -1174,7 +1514,7 @@ void observe_help(HookId id,void* self,int help) {
     }
     call_hover_setter(id,self,help,HoverKind::help);
     if(!help){reset_hover();return;}
-    ordinary_hover.publish(HoverKind::help,true,help);
+    ordinary_hover.kind=HoverKind::help;ordinary_hover.value=help;ordinary_hover.touched=true;
 }
 void __fastcall info_help(void* self,void*,int help) {observe_help(info_help_id,self,help);}
 void __fastcall addon_info_help(void* self,void*,int help) {observe_help(addon_info_help_id,self,help);}
@@ -1185,7 +1525,7 @@ void observe_skill(HookId id,void* self,void* descriptor) {
     if(type<0)reset_hover();
     else if(type>7)reject("ordinary_hover_target_type_differs");
     else{
-        ordinary_hover.publish(HoverKind::skill,true);
+        ordinary_hover.kind=HoverKind::skill;ordinary_hover.touched=true;
     }
     // Native live stats/text refresh still occurs for every skill call.
     call_hover_setter(id,self,descriptor,HoverKind::skill);
@@ -1196,14 +1536,14 @@ void publish_addon_hover() {
     // This BG boundary follows the admitted native selection and formatting.
     // The addon inlines SetItem, so its completed fresh selection is the owner.
     if(void* item=field<void*>(screen,0x168)){
-        ordinary_hover.publish(HoverKind::item,true);
+        ordinary_hover.kind=HoverKind::item;ordinary_hover.touched=true;
         refresh_comparison(item);
     }
 }
 BOOL __fastcall info_draw(void* self,void*,void* v) {
     const auto role=role_of(self);
     if(!screen||!layout.wide||role_card(role)<0)return original<DrawFn>(info_draw_id)(self,v);
-    if(!valid||!camp::frontend::card_visible(role,constructor_card,cards_drawn,session.allowed(current_camp_input())))return TRUE;
+    if(!valid||!cards_drawn[role_card(role)]||!card_content_visible(role))return TRUE;
     Scope scope(role);
     return original<DrawFn>(info_draw_id)(self,v);
 }
@@ -1229,7 +1569,7 @@ void native_item_draw(void* self, void* renderer, void* item, ItemTextureScope* 
     }
 }
 void __fastcall texture_manager_destroy(void* self, void*) {
-    camp_inventory_texture_manager_destroying(self);
+    if (bridge_camp_texture_manager(self)) camp_inventory_retire_textures();
     original<VoidFn>(texture_manager_destroy_id)(self);
 }
 BOOL native_area_contains(void* area, POINT point) {
@@ -1255,40 +1595,52 @@ bool restore_perk_viewport() noexcept {
     if(restored){
         perk_viewport_changed=false;
         // Refresh the still-live authoritative producer before clearing its child.
-        if(screen)function<VoidFn>(0x626d70)(field<void*>(screen,0x1f4));
+        if(screen)function<VoidFn>(camp_owner().perk_ranges)(field<void*>(screen,0x1f4));
     }
     return restored;
 }
 
 bool prepare_perk_viewport() noexcept {
-    const std::uint8_t redraw[]{0x6a,0xff,0x68,0x58,0xcc,0x72,0,0x64,0xa1,0,0,0,0,0x50,0x64,0x89,0x25,0,0,0,0,0x83,0xec,0x40};
-    const std::uint8_t ranges[]{0x8b,0x91,0x6c,0x01,0,0,0x8b,0x81,0x68,0x01,0,0,0x2b,0xd0,0xb8,0xab,0xaa,0xaa,0x2a,0xf7,0xea,0xc1,0xfa,0x02};
-    const auto owner=resolve_entry_owner(game+0x2261a0,redraw,sizeof(redraw),7,&addon_module_contains);
-    if(owner.owner==EntryOwner::rejected||std::memcmp(game+0x226d70,ranges,sizeof(ranges)))return false;
-    const bool addon=owner.owner==EntryOwner::framework_chain;
-    // The addon's perk redraw replaces the native one through a one-argument
-    // adapter; its body keeps the native header/row rectangles and row count.
-    std::uint8_t* const body=addon?addon_adapter_body(owner,1):nullptr;
-    const std::uint8_t prologue[]{0x55,0x8b,0xec,0x6a,0xff};
-    if(addon&&(!body||std::memcmp(body,prologue,sizeof(prologue))))return false;
+    const bool lia=running_game_sites().report.engine==GameEngine::lia;
+    bool addon=false;
+    std::uint8_t* body=nullptr;
+    if(lia) {
+        const std::uint8_t redraw[]{0x6a,0xff,0x68,0x68,0x5d,0x61,0,0x64,0xa1,0,0,0,0,0x50,0x64,0x89,0x25,0,0,0,0,0x83,0xec,0x40};
+        const auto owner=resolve_entry_owner(game+0x157790,redraw,sizeof(redraw),7,&addon_module_contains);
+        if(supported_addon || owner.owner!=EntryOwner::stock ||
+           !lia_camp_ranges_match(kLiaCampPerkRanges))return false;
+    } else {
+        const std::uint8_t redraw[]{0x6a,0xff,0x68,0x58,0xcc,0x72,0,0x64,0xa1,0,0,0,0,0x50,0x64,0x89,0x25,0,0,0,0,0x83,0xec,0x40};
+        const std::uint8_t ranges[]{0x8b,0x91,0x6c,0x01,0,0,0x8b,0x81,0x68,0x01,0,0,0x2b,0xd0,0xb8,0xab,0xaa,0xaa,0x2a,0xf7,0xea,0xc1,0xfa,0x02};
+        const auto owner=resolve_entry_owner(game+0x2261a0,redraw,sizeof(redraw),7,&addon_module_contains);
+        if(owner.owner==EntryOwner::rejected||std::memcmp(game+0x226d70,ranges,sizeof(ranges)))return false;
+        addon=owner.owner==EntryOwner::framework_chain;
+        // The addon's perk redraw replaces the native one through a one-argument
+        // adapter; its body keeps the native header/row rectangles and row count.
+        body=addon?addon_adapter_body(owner,1):nullptr;
+        const std::uint8_t prologue[]{0x55,0x8b,0xec,0x6a,0xff};
+        if(addon&&(!body||std::memcmp(body,prologue,sizeof(prologue))))return false;
+    }
     void* perks=field<void*>(screen,0x1f4);
     if(!perks||field<void*>(perks,0x14c)!=screen||field<int>(perks,0x12c)!=44)return false;
-    // These consumers accept logical34..47 and bound-check the actual vector;
-    // neither uses a returned logical ID as an index into the44-area array.
-    const auto match=[&](std::uintptr_t va,std::initializer_list<std::uint8_t> bytes){
-        return !std::memcmp(game+va-kBase,bytes.begin(),bytes.size());};
-    if(!match(0x6256b9,{0xe8,0x02,0xa6,0xfd,0xff})||!match(0x625726,{0x83,0xf8,0x22})||
-       !match(0x625690,{0x53,0x56,0x8b,0x74,0x24,0x14,0x57,0x8b,0xf9,0xc7,0x06,0xff,0xff,0xff,0xff})||
-       !match(0x626920,{0x51,0x8b,0x44,0x24,0x10,0x53,0x55,0x56,0x8b,0xf1,0x57})||
-       !match(0x626c30,{0x8b,0x51,0x04,0x33,0xc0,0x89,0x42,0x0c})||
-       !match(0x626c50,{0x55,0x56,0x8b,0xf1,0x57,0x8b,0x86,0x9c,0x01,0,0})||
-       !match(0x6257d2,{0x8d,0x4c,0x01,0xde})||!match(0x6257e9,{0x3b,0xca})||
-       !match(0x6257eb,{0x73,0x66})||!match(0x62693d,{0xe8,0x7e,0x93,0xfd,0xff})||
-       !match(0x626af3,{0x83,0xfb,0x22})||!match(0x626b94,{0x8d,0x5c,0x19,0xde})||
-       !match(0x626bac,{0x3b,0xda})||!match(0x626bae,{0x73,0x5a})||
-       !match(0x626d00,{0x83,0xff,0x0b})||!match(0x626d03,{0x73,0x64})||
-       !match(0x626dd6,{0x8b,0x91,0x60,0x01,0,0})||!match(0x626ddc,{0x8b,0xb1,0x5c,0x01,0,0})||
-       !match(0x626df3,{0x8d,0x54,0x02,0xe9})||!match(0x626df7,{0x8b,0x81,0x54,0x01,0,0}))return false;
+    if(!lia) {
+        // These consumers accept logical34..47 and bound-check the actual vector;
+        // neither uses a returned logical ID as an index into the44-area array.
+        const auto match=[&](std::uintptr_t va,std::initializer_list<std::uint8_t> bytes){
+            return !std::memcmp(game+va-kBase,bytes.begin(),bytes.size());};
+        if(!match(0x6256b9,{0xe8,0x02,0xa6,0xfd,0xff})||!match(0x625726,{0x83,0xf8,0x22})||
+           !match(0x625690,{0x53,0x56,0x8b,0x74,0x24,0x14,0x57,0x8b,0xf9,0xc7,0x06,0xff,0xff,0xff,0xff})||
+           !match(0x626920,{0x51,0x8b,0x44,0x24,0x10,0x53,0x55,0x56,0x8b,0xf1,0x57})||
+           !match(0x626c30,{0x8b,0x51,0x04,0x33,0xc0,0x89,0x42,0x0c})||
+           !match(0x626c50,{0x55,0x56,0x8b,0xf1,0x57,0x8b,0x86,0x9c,0x01,0,0})||
+           !match(0x6257d2,{0x8d,0x4c,0x01,0xde})||!match(0x6257e9,{0x3b,0xca})||
+           !match(0x6257eb,{0x73,0x66})||!match(0x62693d,{0xe8,0x7e,0x93,0xfd,0xff})||
+           !match(0x626af3,{0x83,0xfb,0x22})||!match(0x626b94,{0x8d,0x5c,0x19,0xde})||
+           !match(0x626bac,{0x3b,0xda})||!match(0x626bae,{0x73,0x5a})||
+           !match(0x626d00,{0x83,0xff,0x0b})||!match(0x626d03,{0x73,0x64})||
+           !match(0x626dd6,{0x8b,0x91,0x60,0x01,0,0})||!match(0x626ddc,{0x8b,0xb1,0x5c,0x01,0,0})||
+           !match(0x626df3,{0x8d,0x54,0x02,0xe9})||!match(0x626df7,{0x8b,0x81,0x54,0x01,0,0}))return false;
+    }
     unsigned n=0;
     bool matched=true;
     const auto add=[&](std::uint8_t* address,std::initializer_list<std::uint8_t> bytes,unsigned immediate,std::uint8_t value){
@@ -1297,7 +1649,13 @@ bool prepare_perk_viewport() noexcept {
         instruction.wide=instruction.native;instruction.wide[immediate]=value;
         matched=(!std::memcmp(address,instruction.native.data(),instruction.size))&&matched;
     };
-    if(addon){
+    if(lia) {
+        add(game+0x157863,{0xc7,0x44,0x24,0x44,0xcd,0,0,0},4,145);
+        add(game+0x15786f,{0xc7,0x44,0x24,0x4c,0xdc,0,0,0},4,160);
+        add(game+0x157c15,{0xb9,0xe6,0,0,0},1,170);
+        add(game+0x157c1a,{0xbd,0xf5,0,0,0},1,185);
+        add(game+0x157d79,{0x83,0xf8,0x0a},2,14);
+    } else if(addon){
         // Each instruction occurs once in the redraw body (JMV 1.35 and
         // Dejavu builds place them at different offsets).
         const auto site=[&](std::initializer_list<std::uint8_t> bytes,unsigned immediate,std::uint8_t value){
@@ -1318,7 +1676,9 @@ bool prepare_perk_viewport() noexcept {
         add(game+0x226618,{0xbb,0xf5,0,0,0},1,185);
         add(game+0x22676b,{0x83,0xf8,0x0a},2,14);
     }
-    for(const auto rva:{0x226d8d,0x226db8,0x226e72})
+    const auto range_sites=lia?std::array<std::uint32_t,3>{{0x157f5d,0x157f86,0x15803c}}:
+        std::array<std::uint32_t,3>{{0x226d8d,0x226db8,0x226e72}};
+    for(const auto rva:range_sites)
         add(game+rva,{0x8d,0x54,0x02,0xf6},3,0xf2);
     if(!matched)return false;
     perk_viewport_changed=true;
@@ -1326,11 +1686,17 @@ bool prepare_perk_viewport() noexcept {
         if(!write_bytes(instruction.address,instruction.wide.data(),instruction.size)){
             restore_perk_viewport();return false;
         }
-    function<VoidFn>(0x626d70)(perks);
+    function<VoidFn>(camp_owner().perk_ranges)(perks);
     return true;
 }
 
 bool prepare_spell_contract() noexcept {
+    if(running_game_sites().report.engine==GameEngine::lia) {
+        for(const auto id:{spell_current_id,spell_draw_id,spell_mouse_id,slot_click_id})
+            if(hooks[id].owner.owner!=EntryOwner::stock)return false;
+        spell_capacity=8;
+        return !supported_addon&&lia_camp_ranges_match(kLiaCampSpellRanges);
+    }
     const auto entry=[&](std::uintptr_t va,std::initializer_list<std::uint8_t> bytes){
         return resolve_entry_owner(game+va-kBase,bytes.begin(),bytes.size(),5,&addon_module_contains);
     };
@@ -1398,6 +1764,11 @@ bool addon_hover_contract() noexcept {
         match(0x7bcd1,{0xc2,0x04,0})&&match(0x474a7,{0xc2,0x04,0});
 }
 bool prepare_hover_contract() noexcept {
+    if(running_game_sites().report.engine==GameEngine::lia) {
+        for(const auto id:{camp_draw_id,info_item_id,info_text_id,info_skill_id,info_help_id})
+            if(hooks[id].owner.owner!=EntryOwner::stock)return false;
+        return !supported_addon&&lia_camp_ranges_match(kLiaCampHoverRanges);
+    }
     // Addon setters are forwarded through their member adapters unchanged.
     const auto allowed=[&](HookId id,unsigned arguments){
         const auto& owner=hooks[id].owner;
@@ -1421,6 +1792,9 @@ bool prepare_hover_contract() noexcept {
 }
 
 bool comparison_contract() noexcept {
+    if(running_game_sites().report.engine==GameEngine::lia)
+        return hooks[info_draw_id].owner.owner==EntryOwner::stock&&
+            lia_camp_ranges_match(kLiaCampComparisonRanges);
     const auto match=[&](std::uintptr_t va,std::initializer_list<std::uint8_t> bytes){return !std::memcmp(game+va-kBase,bytes.begin(),bytes.size());};
     // An addon info draw (Dejavu's larger preview) is the native preview draw
     // with another depth/size: GetItem, then pScreen(+0x14C)->DrawItem at
@@ -1453,6 +1827,8 @@ bool comparison_contract() noexcept {
 }
 
 bool constructor_contract() noexcept {
+    if(running_game_sites().report.engine==GameEngine::lia)
+        return !supported_addon&&lia_camp_ranges_match(kLiaCampConstructorRanges);
     const auto match=[&](std::uintptr_t va,std::initializer_list<std::uint8_t> bytes){
         return !std::memcmp(game+va-kBase,bytes.begin(),bytes.size());};
     // Complete native helpers, their AL-tested calls, and the input Party list
@@ -1511,12 +1887,12 @@ bool constructor_contract() noexcept {
 }
 
 void destroy_comparison_stage(void* self,int stage) noexcept {
-    if(stage>=5){function<void*(__thiscall*)(void*,unsigned)>(0x5ee420)(self,1);return;}
+    if(stage>=5){function<void*(__thiscall*)(void*,unsigned)>(camp_owner().info_delete)(self,1);return;}
     if(stage>=4)function<VoidFn>(0x6fe958)(static_cast<std::uint8_t*>(self)+0x1dc);
     if(stage>=3)function<VoidFn>(0x6fe958)(static_cast<std::uint8_t*>(self)+0x1c8);
     if(stage>=2)function<VoidFn>(0x6611d0)(static_cast<std::uint8_t*>(self)+0x150);
     if(stage>=1)function<VoidFn>(0x5ee410)(self);
-    function<void(__cdecl*)(void*)>(0x7005d8)(self);
+    function<void(__cdecl*)(void*)>(camp_lifecycle().free_va)(self);
 }
 void destroy_comparison() noexcept {
     comparison_current=false;
@@ -1530,60 +1906,100 @@ void destroy_blueprint() noexcept {
 }
 void* make_comparison() {
     // Stage advances only after a native constructor returns successfully.
-    void* self=function<void*(__cdecl*)(std::size_t)>(0x7005af)(0x1f0);
+    void* self=function<void*(__cdecl*)(std::size_t)>(camp_lifecycle().allocate_va)(0x1f0);
     if(!self)return nullptr;
     int stage=0;
     bool completed=false;
     __try {
-        function<void*(__thiscall*)(void*,void*,void*)>(0x60e210)(self,field<void*>(screen,0x98),screen);stage=1;
-        function<void*(__thiscall*)(void*)>(0x661050)(static_cast<std::uint8_t*>(self)+0x150);stage=2;
-        function<void*(__thiscall*)(void*)>(0x6fe925)(static_cast<std::uint8_t*>(self)+0x1c8);stage=3;
-        function<void*(__thiscall*)(void*)>(0x6fe925)(static_cast<std::uint8_t*>(self)+0x1dc);stage=4;
-        field<void*>(self,0)=game+0x3404dc;field<void*>(self,0x94)=game+0x3404a8;stage=5;
+        if (running_game_sites().report.engine == GameEngine::lia) {
+            // This complete constructor owns Party/arrays and its partial unwind.
+            function<void*(__thiscall*)(void*,void*,void*)>(camp_owner().info_construct)(
+                self,field<void*>(screen,0x98),screen);
+            stage=5;
+        } else {
+            function<void*(__thiscall*)(void*,void*,void*)>(camp_owner().info_construct)(self,field<void*>(screen,0x98),screen);stage=1;
+            function<void*(__thiscall*)(void*)>(0x661050)(static_cast<std::uint8_t*>(self)+0x150);stage=2;
+            function<void*(__thiscall*)(void*)>(0x6fe925)(static_cast<std::uint8_t*>(self)+0x1c8);stage=3;
+            function<void*(__thiscall*)(void*)>(0x6fe925)(static_cast<std::uint8_t*>(self)+0x1dc);stage=4;
+            field<void*>(self,0)=game+0x3404dc;field<void*>(self,0x94)=game+0x3404a8;stage=5;
+        }
         if(field<void*>(self,0x118)||field<int>(self,0x11c)||field<int>(self,0x120)||field<int>(self,0x124))return nullptr;
-        void* raw=function<void*(__cdecl*)(std::size_t)>(0x7005af)(0x28);
+        void* raw=function<void*(__cdecl*)(std::size_t)>(camp_lifecycle().allocate_va)(0x28);
         if(!raw)return nullptr;
         auto* data=reinterpret_cast<void**>((reinterpret_cast<std::uintptr_t>(raw)+0x23)&~std::uintptr_t(31));
         data[-1]=raw;data[0]=nullptr;
         // Transfer one empty slot to the native Surface array before its single Init.
         field<void*>(self,0x118)=data;field<int>(self,0x120)=1;
-        function<void(__thiscall*)(void*,int,int)>(0x5ee440)(self,600,100);
+        function<void(__thiscall*)(void*,int,int)>(camp_owner().info_init)(self,600,100);
         if(field<int>(self,0x11c)!=1||!field<void**>(self,0x118)[0])return nullptr;
         completed=true;return self;
     } __finally {if(!completed)destroy_comparison_stage(self,stage);}
 }
 void refresh_comparison(void* item) {
-    if(!comparison_owner||!item||!(GetKeyState(VK_SHIFT)&0x8000)||!session.allowed(current_camp_input()))return;
-    void* person=current_person();if(!person)return;
-    const int index=field<int>(person,0x774),count=field<int>(person,0x734);
-    void* weapon=index>=0&&index<count?field<void**>(person,0x730)[index]:nullptr;
-    void* counterpart=camp::frontend::comparison_item<void*>(item,field<int>(item,0x10),weapon,field<int>(person,0x754),
-        [&](int i){return field<void**>(person,0x750)[i];},
-        [&](void* armor){return function<int(__thiscall*)(void*)>(0x6a39e0)(armor);});
-    camp::frontend::publish_comparison(publication,counterpart,int(item_modifiers()),
-        [&](void* value){original<void(__thiscall*)(void*,void*)>(info_item_id)(comparison_owner,value);},
-        [&]{return function<void*(__thiscall*)(void*)>(0x5ee720)(comparison_owner);},
-        [&]{info_text(comparison_owner,nullptr);});
+    if(!comparison_owner||!item||!(GetKeyState(VK_SHIFT)&0x8000)||!current_camp_input()||!hover_focus||hover_controls)return;
+    void* person=current_person();
+    if(!person)return;
+    void* counterpart=nullptr;
+    const int category=field<int>(item,0x10);
+    if(category==0x3004){
+        const int index=field<int>(person,0x774),count=field<int>(person,0x734);
+        if(index>=0&&index<count)counterpart=field<void**>(person,0x730)[index];
+    }else if(category==0x3005){
+        const auto armor_type=function<int(__thiscall*)(void*)>(camp_owner().armor_type);
+        const int type=armor_type(item),count=field<int>(person,0x754);
+        auto** armors=field<void**>(person,0x750);
+        for(int i=0;i<count;++i)if(armor_type(armors[i])==type){counterpart=armors[i];break;}
+    }
+    if(!counterpart)return; // Multi-entry quick items/spells have no invented counterpart.
+    // SetItem duplicates into this independent native Party; nothing borrowed is retained here.
+    original<void(__thiscall*)(void*,void*)>(info_item_id)(comparison_owner,counterpart);
+    if(comparison_modifiers!=int(item_modifiers()))info_text(comparison_owner,nullptr);
+    comparison_current=true;
 }
+
 void refresh_constructor() {
-    const auto get_item=function<void*(__thiscall*)(void*)>(0x5ee720);
+    const auto get_item=[](void* info)->void* {
+        if (running_game_sites().report.engine != GameEngine::lia)
+            return function<void*(__thiscall*)(void*)>(0x5ee720)(info);
+        // LiA FormText's guarded native getter is inline, with no callable entry.
+        return field<int>(info,0x194)>0 ? field<void**>(info,0x190)[0] : nullptr;
+    };
     void* result=field<void*>(screen,0x1dc);
     const int screen_mode=mode();
-    void* selected=nullptr;
-    if((screen_mode==3||screen_mode==5)&&field<BOOL>(result,0xe8)&&result_help){
-        void* party=field<void*>(screen,screen_mode==3?0x1d4:0x1c0);
-        selected=camp::frontend::last_blueprint<void*>(field<int>(party,0x44),
-            [&](int i){return field<void**>(party,0x40)[i];},
-            [&](void* item){return function<bool(__thiscall*)(void*,void*)>(screen_mode==3?0x5ee050:0x5ee0d0)(screen,item);});
+    if((screen_mode!=3&&screen_mode!=5)||!field<BOOL>(result,0xe8)){
+        if(get_item(blueprint_owner))original<void(__thiscall*)(void*,void*)>(info_item_id)(blueprint_owner,nullptr);
+        return;
     }
-    camp::frontend::publish_constructor(publication,screen_mode,field<BOOL>(result,0xe8)!=FALSE,result_help,
-        get_item(result),selected,int(item_modifiers()),
-        [&](void* value){original<void(__thiscall*)(void*,void*)>(info_item_id)(blueprint_owner,value);},
-        [&]{return get_item(blueprint_owner);},
-        [&](bool actual){info_text(actual?result:blueprint_owner,nullptr);},[](const char* reason){reject(reason);});
-    if(constructor_card==ConstructorCard::result&&!(fresh_hover()&&ordinary_hover.kind==HoverKind::item))
-        refresh_comparison(get_item(result));
+    // Mode help IDs are the admitted native tab literals, not null-item guesses.
+    const int help=screen_mode==3?103:102;
+    if(result_help){
+        if(result_help!=help){reject("constructor_fallback_help_differs");return;}
+        void* party=field<void*>(screen,screen_mode==3?0x1d4:0x1c0);
+        const int count=field<int>(party,0x44);
+        auto** inputs=field<void**>(party,0x40);
+        const auto is_blueprint=function<bool(__thiscall*)(void*,void*)>(screen_mode==3?camp_owner().spell_blueprint:camp_owner().item_blueprint);
+        void* selected=nullptr;
+        // Keep native list/publication order; the borrow ends at this setter.
+        for(int i=0;i<count;++i)if(is_blueprint(screen,inputs[i]))selected=inputs[i];
+        if(selected){
+            original<void(__thiscall*)(void*,void*)>(info_item_id)(blueprint_owner,selected);
+            if(blueprint_modifiers!=int(item_modifiers()))info_text(blueprint_owner,nullptr);
+            constructor_card=ConstructorCard::blueprint;
+        }else{
+            if(get_item(blueprint_owner))original<void(__thiscall*)(void*,void*)>(info_item_id)(blueprint_owner,nullptr);
+            constructor_card=ConstructorCard::empty;
+        }
+    }else{
+        void* item=get_item(result);
+        if(!item){reject("constructor_result_publication_missing");return;}
+        if(result_modifiers!=int(item_modifiers()))info_text(result,nullptr);
+        constructor_card=ConstructorCard::result;
+        // A fresh item hover owns comparison even if its slot has no counterpart.
+        // Otherwise compare the actual native result, not a blueprint prediction.
+        if(!(fresh_hover()&&ordinary_hover.kind==HoverKind::item))refresh_comparison(item);
+    }
 }
+
 bool activation_contract(void* self) noexcept {
     __try {
         // Twelve root areas are created only after the native missing-shop
@@ -1621,7 +2037,7 @@ void clear_owned_layout() noexcept {
     camp_inventory_cancel_drag();
     destroy_comparison();
     destroy_blueprint();
-    session.retire_input();ordinary_hover.screen_mode=-1;result_help=0;
+    reset_hover();ordinary_hover.screen_mode=-1;result_help=0;
     if(!restore_perk_viewport())reject("perk_viewport_restore_failed");
     grids = {}; spell_frame = nullptr; spell_background = nullptr; quick_backgrounds = {};
     camp_background=nullptr;camp_panels={};
@@ -1634,27 +2050,27 @@ bool release_owned_layout() noexcept {
     if(screen){
         if(camp_background||camp_panels[0]){
             void* background_owner=field<void*>(screen,0x16c);
-            if(camp_background)function<BOOL(__thiscall*)(void*,void*)>(0x5ff700)(background_owner,camp_background);
-            if(popup_background)function<BOOL(__thiscall*)(void*,void*)>(0x5ff700)(background_owner,popup_background);
-            for(void* art:scroll_art)if(art)function<BOOL(__thiscall*)(void*,void*)>(0x5ff700)(background_owner,art);
-            for(void* panel:camp_panels)if(panel)function<BOOL(__thiscall*)(void*,void*)>(0x5ff700)(background_owner,panel);
+            if(camp_background)function<BOOL(__thiscall*)(void*,void*)>(camp_lifecycle().remove_figure_va)(background_owner,camp_background);
+            if(popup_background)function<BOOL(__thiscall*)(void*,void*)>(camp_lifecycle().remove_figure_va)(background_owner,popup_background);
+            for(void* art:scroll_art)if(art)function<BOOL(__thiscall*)(void*,void*)>(camp_lifecycle().remove_figure_va)(background_owner,art);
+            for(void* panel:camp_panels)if(panel)function<BOOL(__thiscall*)(void*,void*)>(camp_lifecycle().remove_figure_va)(background_owner,panel);
         }
         for(auto& grid:grids)if(grid.object){
-            if(grid.background)function<BOOL(__thiscall*)(void*,void*)>(0x5ff700)(grid.object,grid.background);
+            if(grid.background)function<BOOL(__thiscall*)(void*,void*)>(camp_lifecycle().remove_figure_va)(grid.object,grid.background);
             if(grid.text){
                 auto** surfaces=field<void**>(grid.object,0x118);
                 for(int i=0;i<field<int>(grid.object,0x11c);++i)if(surfaces[i]==grid.text){
-                    function<void(__thiscall*)(void*,int)>(0x5ffbf0)(grid.object,i);break;
+                    function<void(__thiscall*)(void*,int)>(camp_lifecycle().remove_surface_va)(grid.object,i);break;
                 }
             }
         }
         if(spell_frame||spell_background){
             void* spells=field<void*>(screen,0x1e8);
-            if(spell_frame)function<BOOL(__thiscall*)(void*,void*)>(0x5ff700)(spells,spell_frame);
-            if(spell_background)function<BOOL(__thiscall*)(void*,void*)>(0x5ff700)(spells,spell_background);
+            if(spell_frame)function<BOOL(__thiscall*)(void*,void*)>(camp_lifecycle().remove_figure_va)(spells,spell_frame);
+            if(spell_background)function<BOOL(__thiscall*)(void*,void*)>(camp_lifecycle().remove_figure_va)(spells,spell_background);
         }
         for(void* background:quick_backgrounds)if(background)
-            function<BOOL(__thiscall*)(void*,void*)>(0x5ff700)(field<void*>(screen,0x1e4),background);
+            function<BOOL(__thiscall*)(void*,void*)>(camp_lifecycle().remove_figure_va)(field<void*>(screen,0x1e4),background);
     }
     clear_owned_layout();
     return true;
@@ -1681,20 +2097,24 @@ void prepare_owned_layout(void* self) {
     void* background_owner=field<void*>(self,0x16c);
     camp_background=add_figure(background_owner);
     if(!camp_background)return;
-    function<TilingFn>(0x5e7680)(camp_background,32,100,layout.left,0,layout.left+layout.width,600,
+    function<TilingFn>(camp_owner().tiling)(camp_background,32,100,layout.left,0,layout.left+layout.width,600,
                                 14,14,114,114,int(std::ceil(layout.width/100)),6);
     popup_background=add_figure(background_owner);
     if(!popup_background)return;
     // Isolated card depth is cleared again before the native preview.
-    function<BarFn>(0x5e70e0)(popup_background,32.f,100,0,0,200,300,14,14,114,114);
+    function<BarFn>(camp_owner().bar)(popup_background,32.f,100,0,0,200,300,14,14,114,114);
     for(auto& art:scroll_art){art=add_figure(background_owner);if(!art)return;}
-    function<BarFn>(0x5e70e0)(scroll_art[0],32,100,0,0,12,100,14,14,114,114);
-    function<FrameFn>(0x5e8450)(scroll_art[1],24,100,0,0,12,100,1.5f,14,14,114,114);
+    function<BarFn>(camp_owner().bar)(scroll_art[0],32,100,0,0,12,100,14,14,114,114);
+    function<FrameFn>(camp_owner().frame)(scroll_art[1],24,100,0,0,12,100,1.5f,14,14,114,114);
+    const camp::Rect panel_rects[]={layout.merchant,layout.stash,
+        layout.skills,
+        {200,100,600,500},{0,100,200,400},
+        layout.learned,layout.available};
     for(unsigned i=0;i<camp_panels.size();++i){
         camp_panels[i]=add_figure(background_owner);
         if(!camp_panels[i])return;
-        const auto r=camp::frontend::background_panel(layout,int(i));
-        function<BarFn>(0x5e70e0)(camp_panels[i],28,100,r.left,r.top,r.right,r.bottom,14,14,114,114);
+        const auto r=panel_rects[i];
+        function<BarFn>(camp_owner().bar)(camp_panels[i],28,100,r.left,r.top,r.right,r.bottom,14,14,114,114);
     }
     prepare_grid(grids[0], wagon);
     if(!valid)return;
@@ -1704,14 +2124,14 @@ void prepare_owned_layout(void* self) {
     if(!valid)return;
     spell_frame = add_figure(spells);
     if(!spell_frame)return;
-    function<FrameFn>(0x5e8450)(spell_frame, 8, 100, 0, 0, 100, 100, 15, 14, 142, 114, 242);
+    function<FrameFn>(camp_owner().frame)(spell_frame, 8, 100, 0, 0, 100, 100, 15, 14, 142, 114, 242);
     spell_background = add_figure(spells);
     if(!spell_background)return;
-    function<BarFn>(0x5e70e0)(spell_background,16,100,0,0,100,100,14,142,114,242);
+    function<BarFn>(camp_owner().bar)(spell_background,16,100,0,0,100,100,14,142,114,242);
     for(int i=0;i<2;++i){
         quick_backgrounds[i]=add_figure(field<void*>(self,0x1e4));
         if(!quick_backgrounds[i])return;
-        function<BarFn>(0x5e70e0)(quick_backgrounds[i],16,100,0,0,100,100,14+i*128,14,114+i*128,114);
+        function<BarFn>(camp_owner().bar)(quick_backgrounds[i],16,100,0,0,100,100,14+i*128,14,114+i*128,114);
     }
     bridge_append_probe_event("camp_inventory_active", "owned_grid_layout_pick_scroll_native_item_visuals_temporary");
 }
@@ -1720,7 +2140,7 @@ void __fastcall activate(void* self, void*) {
     // Icon bindings belong to the texture-role generation, not this panel.
     original<VoidFn>(activate_id)(self);
     ++camp_visit;
-    session.activate(self); valid = true; failure = nullptr; icon_catalogue_cursor={}; icon_tab_cursors={}; belt_first = 0; belt_snapshot={};
+    screen = self; valid = true; failure = nullptr; icon_catalogue_cursor={}; icon_tab_cursors={}; belt_first = 0; belt_wheel=0;perk_wheel={};belt_snapshot={};
     clear_owned_layout();
     layout = camp::make_layout(float(output_width), float(output_height), float(frame_size));
     applied_wide = requested_wide;
@@ -1739,7 +2159,7 @@ void __fastcall deactivate(void* self, void*) {
     if(observe)QueryPerformanceCounter(&begin);
     if(screen==self&&!restore_perk_viewport())reject("perk_viewport_restore_failed");
     if(screen==self)camp_inventory_cancel_drag();
-    if (screen == self) { session.deactivate(self); valid = false; clear_owned_layout(); }
+    if (screen == self) { screen = nullptr; valid = false; clear_owned_layout(); }
     if(observe)QueryPerformanceCounter(&native_begin);
     original<VoidFn>(deactivate_id)(self);
     if(observe){
@@ -1753,10 +2173,20 @@ void __fastcall deactivate(void* self, void*) {
     }
 }
 BOOL __fastcall camp_draw(void* self, void*, void* visualizator) {
-    publication.begin();result_help=0;
+    comparison_current=false;
+    constructor_card=ConstructorCard::none;
+    result_help=0;
+    ordinary_hover.touched=false;
     if(screen==self&&layout.wide){
-        if(session.hover.screen_mode!=mode())result_modifiers=-1;
-        session.begin(mode(),item_modifiers()|((GetKeyState(VK_SHIFT)&0x8000)?4u:0u),current_camp_input());
+        const unsigned modifiers=item_modifiers()|((GetKeyState(VK_SHIFT)&0x8000)?4u:0u);
+        // SetScreenMode hides the result card with Show(FALSE,TRUE) and shows
+        // it again on a new surface made from a native copy, which lacks the
+        // owned text; SetItem does not describe an unchanged result again.
+        // Describe it once after every mode change.
+        if(ordinary_hover.screen_mode!=mode())result_modifiers=-1;
+        if(ordinary_hover.screen_mode!=mode()||ordinary_hover.modifiers!=modifiers||!current_camp_input()||!hover_focus)
+            reset_hover();
+        ordinary_hover.screen_mode=mode();ordinary_hover.modifiers=modifiers;
     }
     if(scroll_drag.window&&(!current_camp_input()||mode()!=scroll_drag.screen_mode))camp_inventory_cancel_drag();
     decoration_pending=false; cards_drawn={};
@@ -1814,9 +2244,23 @@ int __fastcall hit_test(void* self, void*, POINT p) {
 }
 BOOL __fastcall inside(void* self, void*, POINT p) {
     const Role role=role_of(self);
-    if(screen&&layout.wide&&role!=Role::none)
-        return valid&&camp::frontend::inside(layout,role,mode(),virtual_point(self,p));
-    return original<HitFn>(inside_id)(self,p);
+    if(screen&&layout.wide&&role!=Role::none){
+        if(!valid)return FALSE;
+        p=virtual_point(self,p);
+        camp::Rect bounds;
+        switch(role){
+        case Role::root:case Role::background:bounds={layout.left,0,layout.left+layout.width,600};break;
+        case Role::wagon:bounds=layout.stash;break;
+        case Role::vendor:bounds=layout.merchant;break;
+        case Role::info:case Role::help:case Role::comparison:case Role::blueprint:return FALSE; // Presentation only; never capture mouse routing.
+        case Role::stats:bounds=layout.stats;break;
+        case Role::spells:bounds=layout.belt;break;
+        case Role::quick:bounds={layout.weapons.left,layout.character.top,layout.quick_items.right,layout.character.bottom};break;
+        default:bounds=stage();break;
+        }
+        return bounds.contains(float(p.x),float(p.y));
+    }
+    return original<HitFn>(inside_id)(self, p);
 }
 BOOL __fastcall point_in_area(void* area, void*, POINT point) {
     void* object = widescreen_interface_owned() ? const_cast<void*>(widescreen_input_area_object()) : tip_object;
@@ -1825,9 +2269,15 @@ BOOL __fastcall point_in_area(void* area, void*, POINT point) {
         auto** areas = field<void**>(object, 0x128);
         const int count = field<int>(object, 0x12c);
         for (int i = 0; i < count; ++i) if (areas[i] == area) {
-            const auto s=input_state(object,role);
-            return camp::frontend::point_in_area(layout,s,i,area_placement(object,role,i),point,
-                [&](int native,POINT q){return native_area_contains(areas[native],q)!=FALSE;},true);
+            const auto p = area_placement(object, role, i);
+            if(role==Role::root&&i<2&&!root_action_visible(i))return FALSE;
+            if((role==Role::wagon||role==Role::vendor)&&i<2)return FALSE;
+            if(role==Role::perks&&i<4)return FALSE;
+            if(role==Role::spells&&spell_capacity==16&&i>=7)return FALSE; // Old empty/arrow areas.
+            if((role==Role::spells||(role==Role::quick&&i<8))&&!belt_visible(p.destination,role==Role::quick))return FALSE;
+            if (p.source.width() <= 0 || p.source.height() <= 0 ||
+                !p.destination.contains(float(point.x), float(point.y))) return FALSE;
+            return native_area_contains(role==Role::perks&&i>=34?areas[34]:area, inverse_point(p, point));
         }
     }
     return original<BOOL(__thiscall*)(void*, POINT)>(point_id)(area, point);
@@ -1846,13 +2296,28 @@ void __fastcall tips(void* self, void*, void* v) {
 }
 
 camp::Placement uniform(Role role) noexcept {
-    return camp::frontend::uniform(layout,mode(),role);
+    switch (role) {
+    case Role::stats: return {{0, 100, 200, 400}, layout.stats};
+    case Role::info: return {{600, 100, 800, 400}, layout.ordinary_info};
+    case Role::help: return {{0, 100, 200, 400}, layout.result_info};
+    case Role::comparison:return {{600,100,800,400},layout.comparison_info};
+    case Role::blueprint:return {{600,100,800,400},layout.result_info};
+    case Role::background: return {{0, 100, 800, 500}, {layout.left, 0, layout.left + layout.width, 600}};
+    default: return {{200, 100, 600, 500}, stage()};
+    }
 }
 
 void draw_scrollbar(ScrollList list,void* v) {
-    camp::frontend::draw_rail(scroll_rail(list),[&](int i,camp::Placement p){
-        Scope placed(p);function<DrawFn>(0x5e6d90)(scroll_art[i],v);
-    },[&](camp::Rect thumb){if(camp_drawing&&decoration_pending)decoration.thumbs[decoration.thumb_count++]=decoration_pixels(thumb);});
+        const auto bar=scroll_rail(list);
+        if(!bar.maximum)return;
+        {
+            Scope placed(camp::Placement{{0,0,12,100},bar.track});
+            function<DrawFn>(camp_owner().figure_draw)(scroll_art[0],v);
+            function<DrawFn>(camp_owner().figure_draw)(scroll_art[1],v);
+        }
+        // Reuse this exact authoritative rail geometry; no second native query.
+        if(camp_drawing&&decoration_pending)
+            decoration.thumbs[decoration.thumb_count++]=decoration_pixels(bar.thumb);
 }
 
 BOOL __fastcall object_draw(void* self, void*, void* v) {
@@ -1862,7 +2327,7 @@ BOOL __fastcall object_draw(void* self, void*, void* v) {
     Scope scope(role);
     if(role_card(role)>=0){
         const unsigned card=unsigned(role_card(role));
-        if(!camp::frontend::card_visible(role,constructor_card,cards_drawn,session.allowed(current_camp_input())))return TRUE;
+        if(!cards_drawn[card]||!card_content_visible(role))return TRUE;
         Scope placed(uniform(role));
         void* arguments[]{self,v};
         popup_submit(CampRenderRequest::draw_popup,[](void* context){
@@ -1876,20 +2341,25 @@ BOOL __fastcall object_draw(void* self, void*, void* v) {
         if(addon_hover_selection)publish_addon_hover();
         refresh_constructor();
         if(!valid)return TRUE;
-        cards_drawn=camp::frontend::visible_cards(ordinary_hover,session.allowed(current_camp_input()),
-            field<BOOL>(field<void*>(screen,0x164),0xe8)!=FALSE,
-            field<BOOL>(field<void*>(screen,0x1dc),0xe8)!=FALSE,constructor_card,
-            context_visible(2));
-        camp::frontend::draw_background(layout,mode(),
-            [&](camp::Rect,int,int){function<DrawFn>(0x5e6d90)(camp_background,v);},
-            [&](int i,camp::Placement p){Scope placed(p);function<DrawFn>(0x5e6d90)(camp_panels[i],v);});
+        for(unsigned card=0;card<cards_drawn.size();++card)cards_drawn[card]=context_visible(card);
+        function<DrawFn>(camp_owner().figure_draw)(camp_background,v);
+        for(unsigned i=0;i<camp_panels.size();++i){
+            if(i==0&&mode()<2)continue;
+            if(i==4&&mode()>=2)continue;
+            if((i==2||i>=5)&&mode()!=1)continue;
+            if(i==3&&(mode()<2||mode()==3||mode()==5))continue;
+            if(i==3){Scope placed(camp::Placement{{200,100,600,500},stage()});function<DrawFn>(camp_owner().figure_draw)(camp_panels[i],v);}
+            else if(i==4){Scope placed(camp::Placement{{0,100,200,400},layout.stats});function<DrawFn>(camp_owner().figure_draw)(camp_panels[i],v);}
+            else function<DrawFn>(camp_owner().figure_draw)(camp_panels[i],v);
+        }
         if(any_cards()){
             void* arguments[]{popup_background,v};
             popup_submit(CampRenderRequest::clear_popup,[](void* context){
                 auto** args=static_cast<void**>(context);
-                camp::frontend::draw_card_backgrounds(layout,cards_drawn,[&](camp::Placement p){
-                    Scope placed(p);function<DrawFn>(0x5e6d90)(args[0],args[1]);
-                });
+                for(unsigned card=0;card<cards_drawn.size();++card)if(cards_drawn[card]){
+                    Scope placed(camp::Placement{{0,0,200,300},context_plate(card)});
+                    function<DrawFn>(camp_owner().figure_draw)(args[0],args[1]);
+                }
             },arguments);
         }
         if(camp_drawing)snapshot_decoration();
@@ -1899,33 +2369,69 @@ BOOL __fastcall object_draw(void* self, void*, void* v) {
     const int count = field<int>(self, 0x10c);
     // Spell backgrounds were one horizontal tiled figure. The owned row
     // draws a native square frame at each authoritative empty or occupied slot.
-    if(role==Role::spells){
-        Scope raw(Role::none);const int first=spell_first();const int selected=field<int>(self,0x154);
-        camp::frontend::draw_spell_frames(layout,first,spell_capacity,spell_count(),selected,[&](camp::Placement p){
-            Scope placement(p);function<DrawFn>(0x5e6d90)(spell_background,v);function<DrawFn>(0x5e6d90)(spell_frame,v);
-        },[&](bool visible,camp::Rect destination){
-            field<BOOL>(figures[0],0x220)=visible;if(!visible)return;
-            float x=0,y=0,z=0;function<void(__thiscall*)(void*,float&,float&,float&)>(0x5e7010)(figures[0],x,y,z);
-            Scope placement(camp::Placement{{x-50,y-50,x+50,y+50},destination});function<DrawFn>(0x5e6d90)(figures[0],v);
-        },[&]{draw_scrollbar(ScrollList::spells,v);});
+    if (role == Role::spells) {
+        Scope raw(Role::none);
+        const int first=spell_first();
+        for (int i = first; i < (std::min)(spell_capacity,first+8); ++i) {
+            const auto destination = layout.equipped(i, belt_first);
+            if (!belt_visible(destination)) continue;
+            Scope placement(camp::Placement{{0, 0, 100, 100}, destination});
+            function<DrawFn>(camp_owner().figure_draw)(spell_background, v);
+            function<DrawFn>(camp_owner().figure_draw)(spell_frame, v);
+        }
+        const int selected=field<int>(self,0x154);
+        const auto destination = layout.equipped(selected, first);
+        field<BOOL>(figures[0],0x220)=selected>=0&&selected<spell_count()&&belt_visible(destination);
+        if (selected>=0&&selected<spell_count()&&belt_visible(destination)) {
+            // Establish the same native selected-frame flag as the replaced Draw.
+            float x=0,y=0,z=0;
+            function<void(__thiscall*)(void*,float&,float&,float&)>(camp_owner().figure_position)(figures[0],x,y,z);
+            Scope placement(camp::Placement{{x-50,y-50,x+50,y+50},destination});
+            function<DrawFn>(camp_owner().figure_draw)(figures[0], v);
+        }
+        draw_scrollbar(ScrollList::spells,v);
         return TRUE;
     }
-    if(role==Role::quick)camp::frontend::draw_quick_backgrounds(layout,belt_first,[&](int index,camp::Placement p){
-        Scope placement(p);function<DrawFn>(0x5e6d90)(quick_backgrounds[index],v);
-    });
-    camp::frontend::draw_object_figures(layout,mode(),belt_first,role,count,[&](int i,camp::Placement p){
-        if(role==Role::quick&&(figures[i]==quick_backgrounds[0]||figures[i]==quick_backgrounds[1]))return;
-        Scope placement(p);function<DrawFn>(0x5e6d90)(figures[i],v);
-    },[&](int i){return area_placement(self,role,i);},[&](int i){
-        float x=0,y=0,z=0;function<void(__thiscall*)(void*,float&,float&,float&)>(0x5e7010)(figures[i],x,y,z);
-        return std::pair<float,float>{x,y};
-    },[&](int i){return root_action_visible(i);});
+    if(role==Role::quick){
+        for(int i=0;i<8;++i){
+            const auto destination=layout.equipped(i,belt_first,true);
+            if(!belt_visible(destination,true))continue;
+            Scope placement(camp::Placement{{0,0,100,100},destination});
+            function<DrawFn>(camp_owner().figure_draw)(quick_backgrounds[i<4?0:1],v);
+        }
+    }
+    for (int i = 0; i < count; ++i) {
+        if(role==Role::quick&&(figures[i]==quick_backgrounds[0]||figures[i]==quick_backgrounds[1]))continue;
+        if (role == Role::quick && (i == 6 || i == 11)) continue; // Old horizontal tiled backgrounds.
+        camp::Placement p = uniform(role);
+        if (role == Role::root) {
+            if (i < 2) {if(!root_action_visible(i))continue;p = {{0, 400, 200, 500}, actions()};}
+            else if (i < 10) p = area_placement(self, role, i + 2);
+            else p = {{0, 0, 800, 600}, {layout.left, 0, layout.left + layout.width, 600}};
+        } else if (role == Role::quick && i < 12) {
+            float x = 0, y = 0, z = 0;
+            function<void(__thiscall*)(void*, float&, float&, float&)>(camp_owner().figure_position)(figures[i], x, y, z);
+            const int native_slot = int(x / 100);
+            const auto r = layout.equipped(native_slot < 4 ? native_slot : 11 - native_slot, belt_first,true);
+            if (!belt_visible(r,true)) continue;
+            p = {{x - 50, y - 50, x + 50, y + 50}, r};
+        } else if (role == Role::trade) {
+            p = area_placement(self, role, i / 2);
+        } else if(role==Role::perks){
+            if(i<4)continue;
+            float x=0,y=0,z=0;
+            function<void(__thiscall*)(void*,float&,float&,float&)>(camp_owner().figure_position)(figures[i],x,y,z);
+            p=perk_band(x,y);
+        }
+        Scope placement(p);
+        function<DrawFn>(camp_owner().figure_draw)(figures[i], v);
+    }
     if(role==Role::perks){draw_scrollbar(ScrollList::learned,v);draw_scrollbar(ScrollList::available,v);}
     // Preserve the native map-preview part of the object draw contract.
     Scope placement(uniform(role));
     auto** previews = field<void**>(self, 0x138);
     for (int i = 0; i < field<int>(self, 0x13c); ++i)
-        function<DrawFn>(0x5fc2f0)(previews[i], v);
+        function<DrawFn>(camp_owner().preview_draw)(previews[i], v);
     return TRUE;
 }
 
@@ -1933,7 +2439,7 @@ void __fastcall draw2d(void* self, void*) {
     const Role role = role_of(self);
     if (!screen || !layout.wide || role == Role::none) { original<VoidFn>(draw2d_id)(self); return; }
     if (!valid) return;
-    if(role_card(role)>=0&&!camp::frontend::card_visible(role,constructor_card,cards_drawn,session.allowed(current_camp_input())))return;
+    if(role_card(role)>=0&&(!cards_drawn[role_card(role)]||!card_content_visible(role)))return;
     Scope scope(role);
     if (auto* grid = grid_for(self)) {
         // Both old 700x20 number/price strips are retired from wide drawing.
@@ -1954,8 +2460,32 @@ void __fastcall item_draw(void* self, void*, void* v, DrawItem* item) {
     // The actual info Draw establishes the card role before its preview call.
     const int card=role_card(drawing);
     if(item->part==9&&(card<0||!cards_drawn[card]))return;
-    const auto p=camp::frontend::item_placement(layout,mode(),belt_first,drawing,item->x,item->y,item->size,item->part);
-    if(item->part==0&&item->y<100&&!camp::frontend::belt_visible(layout,p.destination,mode()==0))return;
+    camp::Placement p;
+    p.source = {item->x - item->size * .5f, item->y - item->size * .5f,
+                item->x + item->size * .5f, item->y + item->size * .5f};
+    if (item->part == 0 && item->y < 100) {
+        int slot = int(item->x / 100);
+        if (mode() == 0 && slot >= 4) slot = 11 - slot;
+        p.destination = layout.equipped(slot, belt_first, mode()==0);
+        if (!belt_visible(p.destination,mode()==0)) return;
+    } else if (item->part == 4 || item->part == 5) {
+        const int index = int((item->x - 200) / 100) + int((item->y - 100) / 100) * 4;
+        p.destination = layout.trade_cell(index);
+    } else if (item->part == 9) {
+        const auto u = uniform(drawing);
+        const float sx = u.destination.width() / u.source.width();
+        p.destination = {u.destination.left + (p.source.left - u.source.left) * sx,
+                         u.destination.top + (p.source.top - u.source.top) * sx,
+                         u.destination.left + (p.source.right - u.source.left) * sx,
+                         u.destination.top + (p.source.bottom - u.source.top) * sx};
+    } else {
+        const auto u = uniform(Role::construction);
+        const float s = u.destination.width() / 400;
+        p.destination = {u.destination.left + (p.source.left - 200) * s,
+                         u.destination.top + (p.source.top - 100) * s,
+                         u.destination.left + (p.source.right - 200) * s,
+                         u.destination.top + (p.source.bottom - 100) * s};
+    }
     if (item->part == 9) {
         Scope placement(p);
         ItemTextureScope texture(self);
@@ -1999,41 +2529,57 @@ BOOL __fastcall inventory_draw(void* self, void*, void* v) {
             grid_cost.columns!=columns||grid_cost.rows!=rows))scroll_cost.valid=false;
         grid_cost={true,first,count,category,columns,rows};
     }
-    const float top=float(field<int>(self,0x180));
+    const float top = float(field<int>(self, 0x180));
+    const camp::Rect native_cell{50, top, 150, top + 100};
     Scope raw(Role::none);
-    camp::frontend::draw_grid(layout,vendor,first,top,[&](const camp::frontend::GridCell& cell){
-        Scope placement(cell.placement);
-        function<DrawFn>(0x5e6d90)(grid->background,v);
-        function<DrawFn>(0x5e6d90)(figures[10],v);
-        if(cell.index>=count||!items[cell.index])return;
-        DrawItem record{items[cell.index],100,top+50,field<float>(self,0x184)*1.5f,100,field<int>(self,0x148)};
-        Scope icon(cell.placement,cell.icon_clip);
+    for (int i = 0; i < columns * rows; ++i) {
+        const auto r = layout.inventory_cell(vendor, i);
+        Scope placement(camp::Placement{native_cell, r});
+        function<DrawFn>(camp_owner().figure_draw)(grid->background, v);
+        function<DrawFn>(camp_owner().figure_draw)(figures[10], v);
+        if (first + i >= count) continue;
+        // The cell background/frame use the full 100x100 placement. Only
+        // DrawItem's icon and effects are clipped to its native 70x70 frame.
+        DrawItem record{items[first + i], 100, top + 50,
+                        field<float>(self, 0x184) * 1.5f, 100, field<int>(self, 0x148)};
+        Scope icon(camp::Placement{native_cell, r}, {65, top + 15, 135, top + 85});
         ItemTextureScope texture(screen,measure_scroll);
-        native_item_draw(screen,v,&record,&texture);
-    },[&](int i,camp::Rect target){
-        Scope placement(camp::Placement{area_rect(self,i+2),target});
-        function<DrawFn>(0x5e6d90)(figures[i+2],v);
-    },[&]{draw_scrollbar(!vendor?ScrollList::stash:self==field<void*>(screen,0x1ec)?ScrollList::spell_vendor:ScrollList::item_vendor,v);});
+        native_item_draw(screen, v, &record, &texture);
+    }
+    for (int i = 0; i < 6; ++i) {
+        Scope placement(camp::Placement{area_rect(self, i + 2), layout.category(vendor, i)});
+        function<DrawFn>(camp_owner().figure_draw)(figures[i + 2], v);
+    }
+    draw_scrollbar(!vendor?ScrollList::stash:self==field<void*>(screen,0x1ec)?ScrollList::spell_vendor:ScrollList::item_vendor,v);
     // Match native lifetime order: finish every figure/icon draw before
     // acquiring the text DC, then release it before surface composition.
-    function<void*(__thiscall*)(void*)>(0x5fdc00)(grid->text);
-    function<VoidFn>(0x5fe2f0)(grid->text);
+    function<void*(__thiscall*)(void*)>(camp_owner().surface_dc)(grid->text);
+    function<VoidFn>(camp_owner().surface_clear)(grid->text);
     using TextFn = int(__thiscall*)(void*, const char*, RECT*, int, COLORREF, int, BOOL);
     const int part = field<int>(self, 0x148);
     const int price_type = field<int>(self, 0x1b0);
     const auto table = field<void**>(screen, 0);
-    camp::frontend::grid_labels(layout,vendor,first,count,[&](int,int index,RECT quantity_rect,RECT price_rect){
-        void* item=items[index];if(!item)return;
-        char number[32];const int quantity=field<int>(item,0x48);
-        if(quantity!=1){std::snprintf(number,sizeof(number),"%d",quantity);
-            function<TextFn>(0x5fde20)(grid->text,number,&quantity_rect,1,RGB(228,215,167),DT_RIGHT,TRUE);}
-        if(price_type!=9&&reinterpret_cast<bool(__thiscall*)(void*,void*,int)>(table[0xac/4])(screen,item,part)){
-            const int price=reinterpret_cast<int(__thiscall*)(void*,void*,int)>(table[0xd8/4])(screen,item,price_type);
-            std::snprintf(number,sizeof(number),"%d",price);
-            function<TextFn>(0x5fde20)(grid->text,number,&price_rect,1,RGB(228,215,167),DT_CENTER,TRUE);
+    for (int i = 0; i < columns * rows && first + i < count; ++i) {
+        void* item = items[first + i];
+        char number[32];
+        const int quantity = field<int>(item, 0x48);
+        const LONG x = LONG((i % columns) * layout.cell);
+        const LONG y = LONG((i / columns) * layout.cell);
+        if (quantity != 1) {
+            std::snprintf(number, sizeof(number), "%d", quantity);
+            RECT text{x + 6, y + 3, x + LONG(layout.cell) - 6, y + 23};
+            function<TextFn>(camp_owner().surface_text)(grid->text, number, &text, 1, RGB(228,215,167), DT_RIGHT, TRUE);
         }
-    });
-    function<VoidFn>(0x5fdc60)(grid->text);
+        if (price_type != 9 && reinterpret_cast<bool(__thiscall*)(void*, void*, int)>(table[0xac / 4])(
+                screen, item, part)) {
+            const int price = reinterpret_cast<int(__thiscall*)(void*, void*, int)>(table[0xd8 / 4])(
+                screen, item, price_type);
+            std::snprintf(number, sizeof(number), "%d", price);
+            RECT text{x + 6, y + LONG(layout.cell) - 23, x + LONG(layout.cell) - 6, y + LONG(layout.cell) - 3};
+            function<TextFn>(camp_owner().surface_text)(grid->text, number, &text, 1, RGB(228,215,167), DT_CENTER, TRUE);
+        }
+    }
+    function<VoidFn>(camp_owner().surface_release_dc)(grid->text);
     return TRUE;
 }
 
@@ -2048,7 +2594,7 @@ void* __fastcall inventory_mouse(void* self, void*, POINT point, int* slot) {
     const int part = field<int>(self, 0x148);
     *slot = part == 1 ? 22 : part == 2 ? 24 : part == 3 ? 23 : 0;
     form_sorted(self);
-    const int index = camp::frontend::grid_pick(layout,vendor,first_item(self),p);
+    const int index = first_item(self) + int((p.y - r.top) / layout.cell) * layout.grid_columns(vendor) + int((p.x - r.left) / layout.cell);
     return index < field<int>(self, 0x1a0) ? field<void**>(self, 0x19c)[index] : nullptr;
 }
 
@@ -2068,7 +2614,15 @@ void __fastcall idle(void* self, void*) {
     field<float>(self, 0x158) = previous_elapsed;
     field<float>(self, 0x15c + category * 4) = position;
     field<float>(self, 0x174) = 0; field<float>(self, 0x178) = 0;
-    const int rows=camp::frontend::idle_rows(request,lock,field<float>(self,0x158),function<float(__thiscall*)(void*)>(0x600270)(self));
+    int rows = int(request);
+    if (lock) {
+        float& elapsed = field<float>(self, 0x158);
+        if (elapsed == 0) { rows += lock == 1 ? -1 : 1; elapsed = .001f; }
+        else {
+            elapsed += function<float(__thiscall*)(void*)>(camp_owner().frame_time)(self);
+            if (elapsed >= .18f) { rows += lock == 1 ? -1 : 1; elapsed = 0.001f; }
+        }
+    }
     field<float>(self, 0x15c + category * 4) += rows * layout.grid_columns(role_of(self)==Role::vendor);
     first_item(self);
 }
@@ -2103,11 +2657,15 @@ void __fastcall set_to_item(void* self, void*, void* item) {
     auto** items = field<void**>(self, 0x19c);
     const int count = field<int>(self, 0x1a0);
     const bool vendor=role_of(self)==Role::vendor;
-
+    const int columns=layout.grid_columns(vendor),rows=layout.grid_rows(vendor);
     // BE0FC330 SetToItem uses this Compare slot and keeps the last match.
     const auto compare = reinterpret_cast<BOOL(__thiscall*)(void*, void*)>(field<void**>(item, 0)[0x38 / 4]);
     for (int i = 0; i < count; ++i) if (compare(item, items[i])) target = i;
-    first=camp::frontend::reveal_item(layout,vendor,first,target);
+    if (target < first) {
+        if (target >= 0) first = target / columns * columns;
+    } else if (target >= first + columns * rows) {
+        first = (target / columns - rows + 1) * columns;
+    }
     field<float>(self, 0x15c + category * 4) = float(first);
     first_item(self);
 }
@@ -2117,8 +2675,13 @@ BOOL child_draw(HookId id, void* self, void* v) {
     if (!valid) return TRUE;
     const auto role = role_of(self);
     Scope scope(role);
-    camp::frontend::ChildVisualScope placement(layout,mode(),role);
-    return original<DrawFn>(id)(self,v);
+    if (role == Role::construction) {
+        // Live stage markers draw after CI3DObject::Draw; keep their owner's
+        // canvas placement active through the complete construction draw.
+        Scope placement(uniform(role));
+        return original<DrawFn>(id)(self, v);
+    }
+    return original<DrawFn>(id)(self, v);
 }
 BOOL __fastcall quick_draw(void* self, void*, void* v) { return child_draw(quick_draw_id, self, v); }
 BOOL __fastcall spell_draw(void* self, void*, void* v) {
@@ -2130,10 +2693,15 @@ BOOL __fastcall spell_draw(void* self, void*, void* v) {
     void* person=current_person();
     const int count=person?std::clamp(field<int>(person,0x764),0,spell_capacity):0;
     auto** spells=person?field<void**>(person,0x760):nullptr;
-    camp::frontend::draw_spell_items(layout,first,count,float(field<int>(self,0x150)),[&](int i,float x,float y,camp::Placement p,camp::Rect clip){
+    for(int i=first;i<(std::min)(count,first+8);++i){
+        const float x=50+i*100.f;
+        const float y=field<int>(self,0x150)+50.f;
         DrawItem record{spells[i],x,y,12,100,field<int>(self,0x148)};
-        Scope placement(p,clip);ItemTextureScope texture(screen);native_item_draw(screen,v,&record,&texture);
-    });
+        const auto destination=layout.equipped(i,first);
+        Scope placement(camp::Placement{{x-50,y-50,x+50,y+50},destination},{x-35,y-35,x+35,y+35});
+        ItemTextureScope texture(screen);
+        native_item_draw(screen,v,&record,&texture);
+    }
     return object_draw(self,nullptr,v);
 }
 void* __fastcall spell_mouse(void* self,void*,POINT point,int* slot) {
@@ -2152,7 +2720,11 @@ void __fastcall spell_current(void* self,void*,void* item) {
     original<void(__thiscall*)(void*,void*)>(spell_current_id)(self,item);
     if(!screen||!layout.wide||!valid||role_of(self)!=Role::spells)return;
     const int selected=field<int>(self,0x154);
-    belt_first=camp::frontend::spell_reveal(belt_first,selected,spell_count());
+    if(selected>=0&&selected<spell_count()){
+        if(selected<belt_first)belt_first=selected;
+        else if(selected>=belt_first+8)belt_first=selected-7;
+    }
+    spell_first();
 }
 void __fastcall slot_click(void* handler,void*,UINT flags,POINT point) {
     using Fn=void(__thiscall*)(void*,UINT,POINT);
@@ -2164,9 +2736,8 @@ void __fastcall slot_click(void* handler,void*,UINT flags,POINT point) {
     void* parent=field<void*>(self,0x14c);
     auto** table=field<void**>(parent,0);
     const int part=field<int>(self,0x148);
-    camp::frontend::slot_click(item,slot,part,
-        [&](void* value,int source){reinterpret_cast<void(__thiscall*)(void*,void*,int)>(table[0xa8/4])(parent,value,source);},
-        [&](int value,int source){reinterpret_cast<void(__thiscall*)(void*,int,int)>(table[0xb0/4])(parent,value,source);});
+    if(item)reinterpret_cast<void(__thiscall*)(void*,void*,int)>(table[0xa8/4])(parent,item,part);
+    else if(slot)reinterpret_cast<void(__thiscall*)(void*,int,int)>(table[0xb0/4])(parent,slot,part);
 }
 BOOL __fastcall trade_draw(void* self, void*, void* v) { return child_draw(trade_draw_id, self, v); }
 BOOL __fastcall repair_draw(void* self, void*, void* v) { return child_draw(repair_draw_id, self, v); }
@@ -2213,10 +2784,6 @@ void camp_inventory_retire_textures() noexcept {
     camp_textures.clear();
 }
 void camp_inventory_shutdown_icons() noexcept { camp_icon_loader.shutdown(); }
-void camp_inventory_texture_manager_destroying(void* owner) noexcept {
-    retire_model_texture_manager(owner, bridge_camp_texture_manager,
-        camp_inventory_retire_textures, camp_inventory_shutdown_icons);
-}
 
 bool camp_inventory_texture(std::uint64_t id, std::uint64_t generation,
                             NativeOwnedTextureView& value) noexcept {
@@ -2321,24 +2888,99 @@ const char* camp_inventory_notice() noexcept {
     return layout.wide ? (layout.compact ? "Camp: compact 16:10 grid" : "Camp: wide grid") : nullptr;
 }
 bool camp_inventory_wheel(POINT point,short delta,UINT flags) noexcept {
-    if(!session.allowed(current_camp_input()))return false;
-    return camp::frontend::wheel(session,layout,virtual_point(screen,point),delta,current_camp_input(),
-        scroll_snapshot,[&](ScrollList list,camp::frontend::Scroll scroll,int steps){
-            if(unsigned(list)<3){
-                // Keep native row animation/sound, using the shared fractional-wheel accumulator.
-                const float before=field<float>(scroll_owner(list),0x174);
-                original<BOOL(__thiscall*)(void*,UINT,short,POINT)>(wheel_id)(
-                    static_cast<std::uint8_t*>(scroll_owner(list))+0x94,flags,short(-steps*WHEEL_DELTA),point);
-                field<float>(scroll_owner(list),0x174)=before+steps;
-            }else scroll_to(list,scroll.position+steps);
-        });
+    if(!hover_focus||hover_controls||!current_camp_input())return false;
+    for(auto list:{ScrollList::stash,ScrollList::spell_vendor,ScrollList::item_vendor}){
+        void* owner=scroll_owner(list);
+        if(!owner||!field<BOOL>(owner,0xe8)||!grid_for(owner))continue;
+        const POINT p=virtual_point(owner,point);
+        if(!layout.grid(list!=ScrollList::stash).contains(float(p.x),float(p.y)))continue;
+        // The caller already converted WM_MOUSEWHEEL screen pixels to client
+        // pixels. Native dispatch would pass the original screen point to
+        // IsInside/HitTest. Keep the verified handler ABI, sound and row request
+        // through the existing hook, and consume this message only once.
+        wheel(static_cast<std::uint8_t*>(owner)+0x94,nullptr,flags,delta,point);
+        return true;
+    }
+    for(auto list:{ScrollList::learned,ScrollList::available}){
+        void* owner=scroll_owner(list);
+        const auto pane=list==ScrollList::learned?layout.learned:layout.available;
+        const POINT p=virtual_point(screen,point);
+        if(!owner||!field<BOOL>(owner,0xe8)||!pane.contains(float(p.x),float(p.y)))continue;
+        auto& remainder=perk_wheel[list==ScrollList::learned?0:1];
+        remainder-=float(delta)/WHEEL_DELTA;
+        const int steps=int(remainder);remainder-=steps;
+        const auto bar=scroll_rail(list);
+        if(steps)scroll_to(list,bar.position+steps);
+        return true;
+    }
+    void* spells=field<void*>(screen,0x1e8);
+    if(!field<BOOL>(spells,0xe8))return false;
+    const POINT p=virtual_point(spells,point);
+    if(!layout.belt.contains(float(p.x),float(p.y)))return false;
+    constexpr int visible=8;
+    const int maximum=(std::max)(0,spell_count()-visible);
+    belt_wheel-=float(delta)/WHEEL_DELTA;
+    const int steps=int(belt_wheel);belt_wheel-=steps;
+    belt_first=std::clamp(belt_first+steps,0,maximum);
+    return true;
 }
-void camp_inventory_cancel_drag() noexcept {camp::frontend::cancel_drag(session);}
+
+void camp_inventory_cancel_drag() noexcept {
+    const HWND window=scroll_drag.window;
+    scroll_drag={};
+    // Clear our state before ReleaseCapture's synchronous notification.
+    if(window&&GetCapture()==window)ReleaseCapture();
+}
 
 bool camp_inventory_input(HWND window,UINT message,WPARAM wparam,LPARAM lparam,bool renderer_controls) noexcept {
-    return camp::frontend::input(session,layout,screen?mode():-1,current_camp_input(),window,
-        message,wparam,lparam,renderer_controls,scroll_snapshot,scroll_to);
+    hover_controls=renderer_controls;
+    if(message==WM_KILLFOCUS||(message==WM_ACTIVATEAPP&&!wparam)||
+        (message==WM_ACTIVATE&&LOWORD(wparam)==WA_INACTIVE))hover_focus=false;
+    if(message==WM_SETFOCUS||(message==WM_ACTIVATEAPP&&wparam)||
+        (message==WM_ACTIVATE&&LOWORD(wparam)!=WA_INACTIVE))hover_focus=true;
+    const POINT point{LONG(static_cast<short>(LOWORD(lparam))),LONG(static_cast<short>(HIWORD(lparam)))};
+    if(renderer_controls||!current_camp_input()||!hover_focus)reset_hover();
+    const bool cancel=renderer_controls||!hover_focus||!current_camp_input()||
+        message==WM_KILLFOCUS||message==WM_CANCELMODE||message==WM_CAPTURECHANGED||message==WM_SIZE||
+        message==WM_DESTROY||message==WM_NCDESTROY||
+        (message==WM_ACTIVATE&&LOWORD(wparam)==WA_INACTIVE)||(message==WM_ACTIVATEAPP&&!wparam)||
+        (message==WM_KEYDOWN&&wparam==VK_F10);
+    if(cancel){camp_inventory_cancel_drag();return false;}
+    if(scroll_drag.window){
+        if(message==WM_MOUSEWHEEL)return true;
+        if(message==WM_MOUSEMOVE){move_scroll_drag(point);return true;}
+        if(message==WM_LBUTTONUP){
+            move_scroll_drag(point);
+            camp_inventory_cancel_drag();return true;
+        }
+        return false;
+    }
+    if(message!=WM_LBUTTONDOWN||GetCapture())return false;
+    const POINT p=virtual_point(screen,point);
+    for(auto list:{ScrollList::stash,ScrollList::spell_vendor,ScrollList::item_vendor,ScrollList::spells,ScrollList::learned,ScrollList::available}){
+        const auto bar=scroll_rail(list);
+        if(!bar.maximum)continue;
+        camp::Rect hit=bar.horizontal?camp::Rect{bar.track.left,bar.track.top-2.5f,bar.track.right,bar.track.bottom+2.5f}:
+            camp::Rect{bar.track.left-10.f/3,bar.track.top,bar.track.right+10.f/3,bar.track.bottom};
+        if(!bar.horizontal&&!perk_list(list)){
+            hit.left=(std::max)(hit.left,layout.grid(list!=ScrollList::stash).right);
+            hit.right=(std::min)(hit.right,list==ScrollList::stash?layout.left+layout.width:layout.content.left);
+        }
+        if(!hit.contains(float(p.x),float(p.y)))continue;
+        const float coordinate=float(bar.horizontal?p.x:p.y);
+        const float start=bar.horizontal?bar.thumb.left:bar.thumb.top;
+        const float length=bar.horizontal?bar.thumb.width():bar.thumb.height();
+        void* owner=scroll_owner(list);
+        SetCapture(window);
+        if(GetCapture()!=window)return false;
+        scroll_drag={window,list,mode(),list==ScrollList::spells||perk_list(list)?0:field<int>(owner,0x150),
+            coordinate>=start&&coordinate<start+length?coordinate-start:length*.5f};
+        move_scroll_drag(point);
+        return true;
+    }
+    return false;
 }
+
 // The addon inventory allocator (CTextureLRUAllocator::CreateObject) owns
 // 0x5EC020 through a one-argument adapter followed directly by its body. The
 // body looks up "<name>.x4.mmp", then ".x2.mmp", then ".mmp" and selects the
@@ -2388,6 +3030,10 @@ bool addon_unload_keeps_persistent() noexcept {
 bool install_camp_inventory(std::uint8_t* image,bool input_dispatch) noexcept {
     if (!image || game) return false;
     game = image;
+    if (!camp_lifecycle_matches()) {
+        bridge_append_probe_event("camp_inventory_hook_rejected", "surface_or_texture_lifecycle_contract_differs");
+        game = nullptr; return false;
+    }
     preview_glow_admitted = preview_glow_contract();
     install_failed = true;
     supported_addon=static_cast<std::uint8_t*>(bridge_supported_addon_image());
@@ -2399,59 +3045,69 @@ bool install_camp_inventory(std::uint8_t* image,bool input_dispatch) noexcept {
     const std::uint8_t input_down[]{0x8b,0xc1,0x8b,0x48,0x0c,0xc6,0x40,0x7f,0,0x85,0xc9,0x75,0x13,0x8b,0x48,0x34,
         0x8b,0x50,0x38,0x3b,0xca,0x74,0x1d,0x8b,0x42,0xfc,0x8d,0x88,0x94,0,0,0};
     const std::uint8_t input_global[]{0xb9,0x50,0x7d,0x7c,0,0xe8,0x11,0xfb,0x19,0};
-    drag_admitted=input_dispatch&&!std::memcmp(game+0x1f7590,input_screen,sizeof(input_screen))&&
+    if (running_game_sites().report.engine == GameEngine::lia) {
+        drag_admitted = input_dispatch&&lia_camp_ranges_match(kLiaCampInputRanges);
+    } else drag_admitted=input_dispatch&&!std::memcmp(game+0x1f7590,input_screen,sizeof(input_screen))&&
         !std::memcmp(game+0x1f76a0,input_down,sizeof(input_down))&&
         !std::memcmp(game+0x57b85,input_global,sizeof(input_global));
     if(!drag_admitted)bridge_append_probe_event("camp_drag_unavailable",input_dispatch?
         "native_top_screen_or_capture_contract_differs":"active_message_call_owner_differs");
-    // Validate the inline lifetime/cleanup/store and ordinary allocator/ref
-    // contracts without modifying any existing allocator or release dispatcher.
-    const std::uint8_t cleanup[]{0x8d,0x4d,0xc8,0xc7,0x45,0xfc,0xff,0xff,0xff,0xff,0xe8,0x33,0x3d,0x11,0};
-    const std::uint8_t stem_state[]{0xc7,0x45,0xfc,0x05,0,0,0,0x89,0x45,0xd8};
-    const std::uint8_t null_checks[]{0x85,0xff,0x0f,0x84,0xac,0x0a,0,0,0x85,0xdb,0x0f,0x84,0xa4,0x0a,0,0};
-    const std::uint8_t store[]{0x89,0x9f,0x80,0x02,0,0};
-    const std::uint8_t allocator[]{0x6a,0xff,0x68,0x36,0x93,0x72,0};
-    const std::uint8_t icon_binding[]{0x6a,0x20,0x68,0,1,0,0,0x68,0,1,0,0,0x8b,0xcb,
-        0x89,0x5c,0x24,0x34,0xe8,0x22,0x5d,0x0a,0};
-    const std::uint8_t interface_constructor[]{0x83,0xec,0x6c,0x53,0x55,0x8b,0xe9,0x56,
-        0x8b,0xb4,0x24,0x84,0,0,0,0x57,0x8b,0x45,0,0x6a,0xff,0x56,0xff,0x50,0x5c};
-    const std::uint8_t persistent_texture[]{0x81,0x48,0x08,0,0,0x04,0};
-    const std::uint8_t release[]{0x8b,0xc1,0x8b,0x48,0x04,0x49,0x89,0x48,0x04,0x75,0x09,0x8b,0x48,0x14,0x50,0x8b,0x11,0xff,0x52,0x60,0xc3};
-    const std::uint8_t figure_miss[]{0xe8,0x05,0xf5,0xff,0xff,0x85,0xc0,0x89,0x45,0xdc,0x75,0x04,0x33,0xff,0xeb,0x6b};
-    const std::uint8_t figure_trim[]{0x8b,0x45,0xf0,0xc6,0x45,0xfc,0,0x8d,0x88,0x70,0x01,0,0,0xe8,0x02,0x64,0,0,0x8b,0x7d,0xdc};
-    const std::uint8_t figure_addref[]{0x8b,0x46,0x04,0x5f,0x40,0x89,0x46,0x04,0x8b,0xc6,0x5e,0xc3};
-    // Post-validation action authority; no new hook or guessed validity field.
-    const std::uint8_t action_validity[]{0x88,0x9e,0x10,0x02,0,0,0x88,0x9e,0x11,0x02,0,0};
-    const std::uint8_t lower_left_tile[]{0xe8,0x50,0xd0,0xfd,0xff,0x68,0xe4,0,0,0,0x68,0xe4,0,0,0,0x6a,0x1c};
-    const std::uint8_t lower_right_tile[]{0xe8,0x04,0xd0,0xfd,0xff,0x8b,0xf8,0x68,0xe4,0,0,0,0x68,0xe4,0,0,0};
-    const std::uint8_t catalogue[]{0x8b,0x86,0xac,0x01,0,0,0x33,0xdb,0x8b,0x48,0x04,
-        0x85,0xc9,0x0f,0x8e,0xd5,0,0,0,0x8b,0x00};
-    const std::uint8_t icon_name[]{0x8b,0x0e,0x8d,0x45,0xc8,0x50,0x8b,0x11,0xff,0x52,0x4c,
-        0x8b,0x4d,0xf0,0x8b,0x00};
-    const std::uint8_t string_release[]{0x56,0x8b,0xf1,0x8b,0x06,0x8d,0x48,0xf4};
-    const auto allocator_owner = resolve_entry_owner(game + 0x1ec020,allocator,sizeof(allocator),7,&addon_module_contains);
-    addon_icon_lookup = addon_icon_allocator(allocator_owner) && addon_unload_keeps_persistent();
-    if (std::memcmp(game + 0x22131b,catalogue,sizeof(catalogue)) ||
-        std::memcmp(game + 0x1ecb33,icon_name,sizeof(icon_name)) ||
-        std::memcmp(game + 0x300970,string_release,sizeof(string_release)) ||
-        (allocator_owner.owner != EntryOwner::stock && !addon_icon_lookup) ||
-        std::memcmp(game + 0x1ecc2e, cleanup, sizeof(cleanup)) ||
-        std::memcmp(game + 0x1ecb43, stem_state, sizeof(stem_state)) ||
-        std::memcmp(game + 0x1ecc3d, null_checks, sizeof(null_checks)) ||
-        std::memcmp(game + 0x1ecc4d, store, sizeof(store)) ||
-        std::memcmp(game + 0x1ec047, icon_binding, sizeof(icon_binding)) ||
-        std::memcmp(game + 0x291d80, interface_constructor, sizeof(interface_constructor)) ||
-        std::memcmp(game + 0x110dd8, persistent_texture, sizeof(persistent_texture)) ||
-        std::memcmp(game + 0x55980, release, sizeof(release)) ||
-        std::memcmp(game + 0x1ecaa6, figure_miss, sizeof(figure_miss)) ||
-        std::memcmp(game + 0x1ecb0c, figure_trim, sizeof(figure_trim)) ||
-        std::memcmp(game + 0x1ec004, figure_addref, sizeof(figure_addref)) ||
-        std::memcmp(game + 0x21197f, action_validity, sizeof(action_validity)) ||
-        std::memcmp(game + 0x22236b, lower_left_tile, sizeof(lower_left_tile)) ||
-        std::memcmp(game + 0x2223b7, lower_right_tile, sizeof(lower_right_tile)) ||
-        allocator_owner.owner == EntryOwner::rejected) {
-        bridge_append_probe_event("camp_inventory_hook_rejected", "item_lifetime_or_native_action_contract_differs");
-        game = nullptr; return false;
+    if(running_game_sites().report.engine==GameEngine::lia) {
+        addon_icon_lookup=false;
+        if(!lia_camp_ranges_match(kLiaCampIconRanges)) {
+            bridge_append_probe_event("camp_inventory_hook_rejected","lia_item_lifetime_or_native_action_contract_differs");
+            game=nullptr;return false;
+        }
+    } else {
+        // Validate the inline lifetime/cleanup/store and ordinary allocator/ref
+        // contracts without modifying any existing allocator or release dispatcher.
+        const std::uint8_t cleanup[]{0x8d,0x4d,0xc8,0xc7,0x45,0xfc,0xff,0xff,0xff,0xff,0xe8,0x33,0x3d,0x11,0};
+        const std::uint8_t stem_state[]{0xc7,0x45,0xfc,0x05,0,0,0,0x89,0x45,0xd8};
+        const std::uint8_t null_checks[]{0x85,0xff,0x0f,0x84,0xac,0x0a,0,0,0x85,0xdb,0x0f,0x84,0xa4,0x0a,0,0};
+        const std::uint8_t store[]{0x89,0x9f,0x80,0x02,0,0};
+        const std::uint8_t allocator[]{0x6a,0xff,0x68,0x36,0x93,0x72,0};
+        const std::uint8_t icon_binding[]{0x6a,0x20,0x68,0,1,0,0,0x68,0,1,0,0,0x8b,0xcb,
+            0x89,0x5c,0x24,0x34,0xe8,0x22,0x5d,0x0a,0};
+        const std::uint8_t interface_constructor[]{0x83,0xec,0x6c,0x53,0x55,0x8b,0xe9,0x56,
+            0x8b,0xb4,0x24,0x84,0,0,0,0x57,0x8b,0x45,0,0x6a,0xff,0x56,0xff,0x50,0x5c};
+        const std::uint8_t persistent_texture[]{0x81,0x48,0x08,0,0,0x04,0};
+        const std::uint8_t release[]{0x8b,0xc1,0x8b,0x48,0x04,0x49,0x89,0x48,0x04,0x75,0x09,0x8b,0x48,0x14,0x50,0x8b,0x11,0xff,0x52,0x60,0xc3};
+        const std::uint8_t figure_miss[]{0xe8,0x05,0xf5,0xff,0xff,0x85,0xc0,0x89,0x45,0xdc,0x75,0x04,0x33,0xff,0xeb,0x6b};
+        const std::uint8_t figure_trim[]{0x8b,0x45,0xf0,0xc6,0x45,0xfc,0,0x8d,0x88,0x70,0x01,0,0,0xe8,0x02,0x64,0,0,0x8b,0x7d,0xdc};
+        const std::uint8_t figure_addref[]{0x8b,0x46,0x04,0x5f,0x40,0x89,0x46,0x04,0x8b,0xc6,0x5e,0xc3};
+        // Post-validation action authority; no new hook or guessed validity field.
+        const std::uint8_t action_validity[]{0x88,0x9e,0x10,0x02,0,0,0x88,0x9e,0x11,0x02,0,0};
+        const std::uint8_t lower_left_tile[]{0xe8,0x50,0xd0,0xfd,0xff,0x68,0xe4,0,0,0,0x68,0xe4,0,0,0,0x6a,0x1c};
+        const std::uint8_t lower_right_tile[]{0xe8,0x04,0xd0,0xfd,0xff,0x8b,0xf8,0x68,0xe4,0,0,0,0x68,0xe4,0,0,0};
+        const std::uint8_t catalogue[]{0x8b,0x86,0xac,0x01,0,0,0x33,0xdb,0x8b,0x48,0x04,
+            0x85,0xc9,0x0f,0x8e,0xd5,0,0,0,0x8b,0x00};
+        const std::uint8_t icon_name[]{0x8b,0x0e,0x8d,0x45,0xc8,0x50,0x8b,0x11,0xff,0x52,0x4c,
+            0x8b,0x4d,0xf0,0x8b,0x00};
+        const std::uint8_t string_release[]{0x56,0x8b,0xf1,0x8b,0x06,0x8d,0x48,0xf4};
+        const auto allocator_owner = resolve_entry_owner(game + 0x1ec020,allocator,sizeof(allocator),7,&addon_module_contains);
+        addon_icon_lookup = addon_icon_allocator(allocator_owner) && addon_unload_keeps_persistent();
+        if (std::memcmp(game + 0x22131b,catalogue,sizeof(catalogue)) ||
+            std::memcmp(game + 0x1ecb33,icon_name,sizeof(icon_name)) ||
+            std::memcmp(game + 0x300970,string_release,sizeof(string_release)) ||
+            (allocator_owner.owner != EntryOwner::stock && !addon_icon_lookup) ||
+            std::memcmp(game + 0x1ecc2e, cleanup, sizeof(cleanup)) ||
+            std::memcmp(game + 0x1ecb43, stem_state, sizeof(stem_state)) ||
+            std::memcmp(game + 0x1ecc3d, null_checks, sizeof(null_checks)) ||
+            std::memcmp(game + 0x1ecc4d, store, sizeof(store)) ||
+            std::memcmp(game + 0x1ec047, icon_binding, sizeof(icon_binding)) ||
+            std::memcmp(game + 0x291d80, interface_constructor, sizeof(interface_constructor)) ||
+            std::memcmp(game + 0x110dd8, persistent_texture, sizeof(persistent_texture)) ||
+            std::memcmp(game + 0x55980, release, sizeof(release)) ||
+            std::memcmp(game + 0x1ecaa6, figure_miss, sizeof(figure_miss)) ||
+            std::memcmp(game + 0x1ecb0c, figure_trim, sizeof(figure_trim)) ||
+            std::memcmp(game + 0x1ec004, figure_addref, sizeof(figure_addref)) ||
+            std::memcmp(game + 0x21197f, action_validity, sizeof(action_validity)) ||
+            std::memcmp(game + 0x22236b, lower_left_tile, sizeof(lower_left_tile)) ||
+            std::memcmp(game + 0x2223b7, lower_right_tile, sizeof(lower_right_tile)) ||
+            allocator_owner.owner == EntryOwner::rejected) {
+            bridge_append_probe_event("camp_inventory_hook_rejected", "item_lifetime_or_native_action_contract_differs");
+            game = nullptr; return false;
+        }
     }
     // Full expected entry bytes below are from the supported shipped image.
     // They also bound the resolver's validation of the addon's stock replay.
@@ -2489,7 +3145,7 @@ bool install_camp_inventory(std::uint8_t* image,bool input_dispatch) noexcept {
         {0x5ee5c0, 6, {0x8b,0x81,0x94,0x01,0,0,0x83,0xec,0x18,0x85,0xc0,0x74,0x5d,0x8b,0x81,0x90,0x01,0,0,0x8b,0,0x85,0xc0,0x74}, &info_draw},
         {0x5ecb4d, 6, {0x8d,0x99,0x80,0x01,0,0}, &item_texture_lookup},
         {0x5ecb13, 6, {0x8d,0x88,0x70,0x01,0,0}, &item_figure_trim},
-        {0x691630, 6, {0x55,0x57,0x8b,0xf9,0x33,0xed}, &texture_manager_destroy},
+        {camp_lifecycle().manager_destroy_va, camp_lifecycle().manager_destroy_bytes, camp_lifecycle().manager_destroy_stock, &texture_manager_destroy},
         // The addon help/skill member bodies behind those setters' adapters.
         {0,5,{0x55,0x8b,0xec,0x6a,0xff},&addon_info_help,true},
         {0,5,{0x55,0x8b,0xec,0x6a,0xff},&addon_info_skill,true},
@@ -2497,9 +3153,24 @@ bool install_camp_inventory(std::uint8_t* image,bool input_dispatch) noexcept {
         {0x66e130,7,{0x6a,0xff,0x68,0,0x0f,0x73,0,0x64,0xa1,0,0,0,0,0x50,0x64,0x89,0x25,0,0,0,0,0x83,0xec,0x44},&close_visibility},
         {0x58b750,5,{0x55,0x8b,0xec,0x6a,0xff,0x68,0x66,0x5a,0x72,0,0x64,0xa1,0,0,0,0,0x50,0x64,0x89,0x25,0,0,0,0},&close_update_player}
     }};
+    if (running_game_sites().report.engine == GameEngine::lia) {
+        // Keep each existing callback's independently checked native ABI, but
+        // select complete native entries/spans rather than remapping addresses.
+        static_assert(kLiaCampEntries.size()==figure_trim_id+1);
+        for(std::size_t index=0;index<kLiaCampEntries.size();++index) {
+            const auto& entry=kLiaCampEntries[index];
+            hooks[index].va=kBase+entry.rva;
+            hooks[index].bytes=entry.bytes;
+            hooks[index].stock=entry.stock;
+        }
+        hooks[item_texture_id].replacement=reinterpret_cast<const void*>(&lia_item_texture_lookup);
+        hooks[figure_trim_id].replacement=reinterpret_cast<const void*>(&lia_item_figure_trim);
+    }
     for (auto& hook : hooks) {
-        if (!camp_diagnostic_enabled() && (&hook == &hooks[close_world_segment_id] ||
-            &hook == &hooks[close_visibility_id] || &hook == &hooks[close_update_player_id])) continue;
+        // These optional diagnostic entries have no verified native profile.
+        if ((running_game_sites().report.engine==GameEngine::lia || !camp_diagnostic_enabled()) &&
+            (&hook == &hooks[close_world_segment_id] || &hook == &hooks[close_visibility_id] ||
+             &hook == &hooks[close_update_player_id])) continue;
         // Keep the owned tooltip wrappers' original caller and area scope.
         if(widescreen_interface_owned() && (&hook==&hooks[tips_id] || &hook==&hooks[tips2d_id]))continue;
         // Result validation can call local help independently of the CampDraw owner.
@@ -2510,7 +3181,8 @@ bool install_camp_inventory(std::uint8_t* image,bool input_dispatch) noexcept {
         }
         auto* entry = hook_entry(hook);
         const bool icon_site = &hook == &hooks[item_texture_id];
-        const bool inline_site = icon_site || &hook == &hooks[figure_trim_id];
+        const bool inline_site = (icon_site && running_game_sites().report.engine != GameEngine::lia) ||
+            &hook == &hooks[figure_trim_id];
         const auto stock_bytes = inline_site || hook.addon_entry || &hook == &hooks[texture_manager_destroy_id] ? hook.bytes : hook.stock.size();
         const auto owner = resolve_entry_owner(entry, hook.stock.data(), stock_bytes, hook.bytes, &addon_module_contains);
         hook.owner=owner;
@@ -2544,7 +3216,7 @@ bool install_camp_inventory(std::uint8_t* image,bool input_dispatch) noexcept {
         std::memcpy(hook.original.data(), entry, hook.patch_bytes);
     }
     item_texture_forwarder = hooks[item_texture_id].forwarder;
-    item_texture_cleanup = game + 0x1ecc2e;
+    item_texture_cleanup = running_game_sites().report.engine == GameEngine::lia ? nullptr : game + 0x1ecc2e;
     figure_trim_forwarder = hooks[figure_trim_id].forwarder;
     for (auto& hook : hooks) {
         if(!hook.forwarder)continue;
@@ -2593,15 +3265,119 @@ bool uninstall_camp_inventory() noexcept {
     return true;
 }
 
-
+static int map_camp_blit(const RECT& destination, const RECT& source, CampBlitPiece* pieces, unsigned capacity) noexcept {
+    if (!camp::primary_output || camp::remapping_blit || !screen || !layout.wide || !valid || drawing == Role::none) return -1;
+    if(role_card(drawing)>=0&&(!cards_drawn[role_card(drawing)]||!card_content_visible(drawing)))return 0;
+    if (drawing == Role::wagon || drawing == Role::vendor) return -1; // Owned grid text is already placed.
+    const float unit = layout.unit;
+    const camp::Rect native{layout.left + destination.left / unit, destination.top / unit,
+                            layout.left + destination.right / unit, destination.bottom / unit};
+    auto emit = [&](camp::Rect crop, camp::Rect target, unsigned index) {
+        const auto x = [&](float v) { return source.left + LONG(std::lround((v - native.left) / native.width() * (source.right - source.left))); };
+        const auto y = [&](float v) { return source.top + LONG(std::lround((v - native.top) / native.height() * (source.bottom - source.top))); };
+        pieces[index].source = {x(crop.left), y(crop.top), x(crop.right), y(crop.bottom)};
+        pieces[index].destination = {LONG(std::lround((target.left - layout.left) * unit)), LONG(std::lround(target.top * unit)),
+                                     LONG(std::lround((target.right - layout.left) * unit)), LONG(std::lround(target.bottom * unit))};
+    };
+    if (drawing == Role::trade) {
+        if (capacity < 16) return 0;
+        unsigned emitted = 0;
+        for (int i = 0; i < 16; ++i) {
+            const float x = 200.f + (i % 4) * 100, y = 100.f + (i / 4) * 100;
+            const camp::Rect crop{(std::max)(native.left,x),(std::max)(native.top,y),
+                                  (std::min)(native.right,x+100),(std::min)(native.bottom,y+100)};
+            if(crop.width() <= 0 || crop.height() <= 0) continue;
+            const auto target=layout.trade_cell(i);const float scale=target.width()/100;
+            emit(crop,{target.left+(crop.left-x)*scale,target.top+(crop.top-y)*scale,
+                       target.left+(crop.right-x)*scale,target.top+(crop.bottom-y)*scale},emitted++);
+        }
+        return int(emitted);
+    }
+    if(drawing==Role::perks){
+        if(capacity<kCampMappedPieces)return 0;
+        unsigned emitted=0;
+        const auto band=[&](camp::Placement p){
+            const auto& s=p.source;
+            const camp::Rect crop{(std::max)(native.left,s.left),(std::max)(native.top,s.top),
+                (std::min)(native.right,s.right),(std::min)(native.bottom,s.bottom)};
+            if(crop.width()<=0||crop.height()<=0)return;
+            const float sx=p.destination.width()/s.width(),sy=p.destination.height()/s.height();
+            emit(crop,{p.destination.left+(crop.left-s.left)*sx,p.destination.top+(crop.top-s.top)*sy,
+                p.destination.left+(crop.right-s.left)*sx,p.destination.top+(crop.bottom-s.top)*sy},emitted++);
+        };
+        band(perk_band(200,100));band(perk_band(200,245));band(perk_band(400,100));
+        for(int row=0;row<14;++row)band(perk_band(200,270+row*15.f));
+        return int(emitted);
+    }
+    if (!capacity) return 0;
+    auto p = uniform(drawing);
+    if (drawing == Role::root) p = native.left < 300 ? camp::Placement{{0, 400, 200, 500}, actions()} : camp::Placement{{600, 400, 800, 430}, heading()};
+    const auto transform = camp::composing ? camp::visual : camp::composition(layout,p);
+    const float x1=transform.a*destination.left+transform.b*destination.top+transform.x;
+    const float y1=transform.c*destination.left+transform.d*destination.top+transform.y;
+    const float x2=transform.a*destination.right+transform.b*destination.bottom+transform.x;
+    const float y2=transform.c*destination.right+transform.d*destination.bottom+transform.y;
+    pieces[0].source=source;
+    pieces[0].destination={LONG(std::lround((std::min)(x1,x2))),LONG(std::lround((std::min)(y1,y2))),
+                           LONG(std::lround((std::max)(x1,x2))),LONG(std::lround((std::max)(y1,y2)))};
+    return 1;
+}
 
 int camp_inventory_blit(const RECT& destination, const RECT& source, CampBlitPiece (&pieces)[kCampBlitPieces]) noexcept {
-    return camp::frontend::SurfaceMapper{layout,mode(),drawing,screen&&layout.wide&&valid,
-        card_content_visible(drawing),cards_drawn,output_width,output_height}.blit(destination,source,pieces);
+    if(camp::remapping_blit)return -1;
+    CampBlitPiece mapped[kCampMappedPieces];
+    int count=map_camp_blit(destination,source,mapped,kCampMappedPieces);
+    const bool occlude=any_cards()&&screen&&layout.wide&&valid&&camp::primary_output&&
+        drawing!=Role::none&&role_card(drawing)<0;
+    if(count<0){
+        if(!occlude)return -1;
+        mapped[0]={source,destination}; count=1;
+    }
+    unsigned emitted=0;
+    const auto append=[&](const CampBlitPiece& p,RECT r){
+        if(r.right<=r.left||r.bottom<=r.top)return;
+        const auto& d=p.destination; const auto& s=p.source;
+        const auto x=[&](LONG v){return s.left+LONG(std::lround(double(v-d.left)*(s.right-s.left)/(d.right-d.left)));};
+        const auto y=[&](LONG v){return s.top+LONG(std::lround(double(v-d.top)*(s.bottom-s.top)/(d.bottom-d.top)));};
+        pieces[emitted++]={{x(r.left),y(r.top),x(r.right),y(r.bottom)},r};
+    };
+    // At most seventeen native bands, split four ways by each of three cards.
+    // Crop sources from the original piece so successive cuts retain its scale.
+    for(int i=0;i<count;++i){
+        const auto& p=mapped[i]; const auto& d=p.destination;
+        RECT regions[kCampCutRegions]{d};unsigned region_count=1;
+        if(occlude)for(unsigned card=0;card<cards_drawn.size();++card)if(cards_drawn[card]){
+            const auto plate=context_plate(card);
+            const RECT bounds{LONG(std::lround((plate.left-layout.left)*layout.unit)),LONG(std::lround(plate.top*layout.unit)),
+                LONG(std::lround((plate.right-layout.left)*layout.unit)),LONG(std::lround(plate.bottom*layout.unit))};
+            RECT next[kCampCutRegions]{};unsigned next_count=0;
+            const auto keep=[&](RECT r){if(r.left<r.right&&r.top<r.bottom)next[next_count++]=r;};
+            for(unsigned j=0;j<region_count;++j){
+                const auto& r=regions[j];
+                const RECT cut{(std::max)(r.left,bounds.left),(std::max)(r.top,bounds.top),
+                               (std::min)(r.right,bounds.right),(std::min)(r.bottom,bounds.bottom)};
+                if(cut.left>=cut.right||cut.top>=cut.bottom){keep(r);continue;}
+                keep({r.left,r.top,cut.left,r.bottom});keep({cut.right,r.top,r.right,r.bottom});
+                keep({cut.left,r.top,cut.right,cut.top});keep({cut.left,cut.bottom,cut.right,r.bottom});
+            }
+            std::copy_n(next,next_count,regions);region_count=next_count;
+        }
+        for(unsigned j=0;j<region_count;++j)append(p,regions[j]);
+    }
+    return int(emitted);
 }
 bool camp_inventory_clear(const RECT& source, RECT& destination) noexcept {
-    return camp::frontend::SurfaceMapper{layout,mode(),drawing,screen&&layout.wide&&valid,
-        card_content_visible(drawing),cards_drawn,output_width,output_height}.clear(source,destination);
+    if (!camp::primary_output || !screen || !layout.wide || !valid || drawing == Role::none) return false;
+    if (source.left == 0 && source.top == 0 && source.right == LONG(output_width) && source.bottom == LONG(output_height)) return false;
+    const auto p = uniform(drawing);
+    const auto& h = camp::composing ? camp::visual : camp::composition(layout, p);
+    const float x1 = h.a * source.left + h.b * source.top + h.x;
+    const float y1 = h.c * source.left + h.d * source.top + h.y;
+    const float x2 = h.a * source.right + h.b * source.bottom + h.x;
+    const float y2 = h.c * source.right + h.d * source.bottom + h.y;
+    destination = {LONG(std::lround((std::min)(x1,x2))), LONG(std::lround((std::min)(y1,y2))),
+                   LONG(std::lround((std::max)(x1,x2))), LONG(std::lround((std::max)(y1,y2)))};
+    return true;
 }
 
 void camp_inventory_set_popup_sink(void* context, CampPopupSink sink, ID3D11Device* device) noexcept {

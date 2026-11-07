@@ -441,7 +441,7 @@ int main(int argc, char** argv) {
             Microsoft::WRL::ComPtr<ID3DBlob> blob, messages;
             if (FAILED(D3DCompile(program.source.data(), program.source.size(), program.name, program.defines, nullptr,
                                   program.entry, program.profile, program.flags, 0, &blob, &messages))) {
-                special_errors[i] = std::string(program.entry) + ": " +
+                special_errors[i] = program_label(program) + ": " +
                                     (messages ? static_cast<const char*>(messages->GetBufferPointer()) : "compile failed");
                 continue;
             }
@@ -461,11 +461,10 @@ int main(int argc, char** argv) {
     };
     special_next = 0;
     workers.clear();
-    // Every hardware thread, up to 12: these programs are far smaller than the
-    // general terrain ones, and 12 FXC instances stay inside this 32-bit
-    // tool's 4 GB address space.
-    const unsigned special_threads = std::clamp(std::thread::hardware_concurrency(), 1u, 12u);
-    for (unsigned t = 0; t < special_threads; ++t) workers.emplace_back(special_work);
+    // Preset compiles share this 32-bit process's address space. An input
+    // that failed in the 12-worker batch compiled alone; use the same
+    // bounded worker count as the general pass.
+    for (unsigned t = 0; t < threads; ++t) workers.emplace_back(special_work);
     for (auto& worker : workers) worker.join();
     for (const auto& error : special_errors)
         if (!error.empty()) { std::fprintf(stderr, "shader_embed: %s\n", error.c_str()); failed = true; }

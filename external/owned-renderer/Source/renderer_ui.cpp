@@ -188,7 +188,8 @@ HRESULT Renderer::draw_hud_asset_frames(const std::vector<HudAssetFrame>* captur
   D3D12UiDraw quads;quads.texture=texture12.get();quads.program=D3D12UiProgram::game;
   quads.blend=fixed_blend_choice(TRUE,D3DBLEND_SRCALPHA,D3DBLEND_INVSRCALPHA,false);
   quads.sampler=world_texture_sampler(state.stage[0][D3DTSS_MINFILTER],state.stage[0][D3DTSS_MAGFILTER],state.stage[0][D3DTSS_MIPFILTER],
-   state.stage[0][D3DTSS_ADDRESSU],state.stage[0][D3DTSS_ADDRESSV],false,1).description;
+   state.stage[0][D3DTSS_ADDRESSU],state.stage[0][D3DTSS_ADDRESSV],false,
+   1u<<configured_integer(debug_overlay_.config(),"anisotropy",3)).description;
   quads.triangle_list=true;quads.vertex_count=UINT(vertices.size());
   D3D12UiPass pass;pass.vertices=vertices.data();pass.vertex_bytes=UINT(vertices.size()*sizeof(HudVertex));pass.vertex_stride=sizeof(HudVertex);
   pass.constants=&block;pass.constant_block_bytes=sizeof(Constants);pass.constant_blocks=1;pass.draws=&quads;pass.draw_count=1;
@@ -600,7 +601,7 @@ HRESULT Renderer::blit(const SurfaceImage& source,const RECT& destination,const 
  const bool released_gpu=released_surface_gpu_blit(source,source_key);
  // Only CPU-converted blits need a restored source mirror.
  if(source.cpu_released&&!released_gpu&&!source.gpu_captured)return E_UNEXPECTED;
- if(!swap_||!context_||(!released_gpu&&!source.gpu_captured&&(source.pixels.empty()||(source.format.dwFlags&DDPF_FOURCC)||!(source.format.dwFlags&DDPF_RGB))))return S_OK;
+ if((!swap_&&!d3d12_)||!context_||(!released_gpu&&!source.gpu_captured&&(source.pixels.empty()||(source.format.dwFlags&DDPF_FOURCC)||!(source.format.dwFlags&DDPF_RGB))))return S_OK;
 #ifndef EID3D11_EMBEDDED
  CampDecoration camp_frame;
  if(camp_inventory_take_decoration(camp_frame))queue_camp_decoration(camp_frame);
@@ -615,7 +616,11 @@ HRESULT Renderer::blit(const SurfaceImage& source,const RECT& destination,const 
  RECT sr=source_rect?*source_rect:RECT{0,0,(LONG)source.width,(LONG)source.height};sr.left=std::clamp<LONG>(sr.left,0,(LONG)source.width);sr.top=std::clamp<LONG>(sr.top,0,(LONG)source.height);sr.right=std::clamp<LONG>(sr.right,sr.left,(LONG)source.width);sr.bottom=std::clamp<LONG>(sr.bottom,sr.top,(LONG)source.height);const LONG dw=destination.right-destination.left,dh=destination.bottom-destination.top,sw=sr.right-sr.left,sh=sr.bottom-sr.top;if(dw<=0||dh<=0||sw<=0||sh<=0)return S_OK;
 // Unkeyed copies preserve RGB without consuming framebuffer alpha.
  const widescreen::HudComposition composition=interface_space&&widescreen::interface_owned?widescreen::hud_blit:widescreen::HudComposition{};RECT clipped=clip_ui_destination(destination,composition,native_canvas?canvas_width():output_width_,native_canvas?canvas_height():output_height_);if(clipped.right<=clipped.left||clipped.bottom<=clipped.top)return S_OK;
- if((source.gpu_captured||released_gpu)&&source.srv){try{PendingBlit pending{};pending.native_canvas=native_canvas;pending.source_id=source.id;pending.source_is_surface=true;pending.gpu=true;pending.force_opaque_alpha=!source_key;pending.destination=clipped;pending.composition=composition;pending.width=source.width;pending.height=source.height;pending.texture=source.texture;pending.srv=source.srv;if(source_key){const HRESULT keyed=gpu_blit_key_.convert(device_.Get(),context_.Get(),source.srv.Get(),source.width,source.height,source.format.dwRBitMask,source.format.dwGBitMask,source.format.dwBBitMask,source_key->dwColorSpaceLowValue,source_key->dwColorSpaceHighValue,pending.texture,pending.srv);if(FAILED(keyed))return keyed;}const float du0=(float)(clipped.left-destination.left)/dw,dv0=(float)(clipped.top-destination.top)/dh,du1=(float)(clipped.right-destination.left)/dw,dv1=(float)(clipped.bottom-destination.top)/dh;pending.u0=(sr.left+du0*sw)/source.width;pending.v0=(sr.top+dv0*sh)/source.height;pending.u1=(sr.left+du1*sw)/source.width;pending.v1=(sr.top+dv1*sh)/source.height;pending_blits_.push_back(std::move(pending));}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}return S_OK;}
+ if((source.gpu_captured||released_gpu)&&(d3d12_?bool(source.d3d12):bool(source.srv))){try{PendingBlit pending{};pending.native_canvas=native_canvas;pending.source_id=source.id;pending.source_is_surface=true;pending.gpu=true;pending.force_opaque_alpha=!source_key;pending.destination=clipped;pending.composition=composition;pending.width=source.width;pending.height=source.height;pending.texture=source.texture;pending.srv=source.srv;pending.d3d12=source.d3d12;
+#ifdef EID3D11_EMBEDDED
+if(source_key){const HRESULT keyed=gpu_blit_key_.convert(device_.Get(),context_.Get(),source.srv.Get(),source.width,source.height,source.format.dwRBitMask,source.format.dwGBitMask,source.format.dwBBitMask,source_key->dwColorSpaceLowValue,source_key->dwColorSpaceHighValue,pending.texture,pending.srv);if(FAILED(keyed))return keyed;}
+#endif
+const float du0=(float)(clipped.left-destination.left)/dw,dv0=(float)(clipped.top-destination.top)/dh,du1=(float)(clipped.right-destination.left)/dw,dv1=(float)(clipped.bottom-destination.top)/dh;pending.u0=(sr.left+du0*sw)/source.width;pending.v0=(sr.top+dv0*sh)/source.height;pending.u1=(sr.left+du1*sw)/source.width;pending.v1=(sr.top+dv1*sh)/source.height;pending_blits_.push_back(std::move(pending));}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}return S_OK;}
  auto hashValue=[](std::uint64_t& seed,std::uint64_t value){seed^=value+0x9e3779b97f4a7c15ull+(seed<<6)+(seed>>2);};std::uint64_t cacheKey=source.id;hashValue(cacheKey,(std::uint32_t)sr.left);hashValue(cacheKey,(std::uint32_t)sr.top);hashValue(cacheKey,(std::uint32_t)sr.right);hashValue(cacheKey,(std::uint32_t)sr.bottom);hashValue(cacheKey,source_key?source_key->dwColorSpaceLowValue:0);hashValue(cacheKey,source_key?source_key->dwColorSpaceHighValue:0);hashValue(cacheKey,source_key?1:0);auto cached=overlay_textures_.find(cacheKey);
  // Refresh only what the source changed since the cached generation.
  const bool cachedMatches=cached!=overlay_textures_.end()&&cached->second.texture&&cached->second.srv&&cached->second.surface_id==source.id&&cached->second.width==(UINT)sw&&cached->second.height==(UINT)sh&&EqualRect(&cached->second.source,&sr)&&cached->second.keyed==(source_key!=nullptr)&&(!source_key||(cached->second.color_key.dwColorSpaceLowValue==source_key->dwColorSpaceLowValue&&cached->second.color_key.dwColorSpaceHighValue==source_key->dwColorSpaceHighValue));
@@ -1266,6 +1271,7 @@ HRESULT Renderer::render_pending_blits(){
  };
  remember_debug_projection(overlay,SemanticKind::ui);apply_state(overlay,true);
  const UINT stride=sizeof(Vertex);ID3D11Buffer* buffer=dynamic_vertices_.Get();context_->IASetInputLayout(layout_.Get());context_->IASetVertexBuffers(0,1,&buffer,&stride,&vertex_offset);context_->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);context_->VSSetShader(vs_.Get(),nullptr,0);context_->PSSetShader(ps_.Get(),nullptr,0);bind_draw_constants();D3D11_VIEWPORT viewport{0,0,(float)target_width(),(float)target_height(),0,1};context_->RSSetViewports(1,&viewport);bind_plan_targets(plan_pass("ui_composition",rtv_.Get(),dsv_.Get()));
+ ComPtr<ID3D11SamplerState> backdrop_sampler;
  DWORD current_alpha_operation=0;float current_opacity=-1.f;PerfScope draw_perf(&perf_draw_ticks_);std::size_t physical_draws=0;
  for(std::size_t index=0;index<pending_blits_.size();){
   apply_state(overlay,true,pending_blits_[index].composition);
@@ -1278,8 +1284,17 @@ HRESULT Renderer::render_pending_blits(){
   const bool interface_scaled=!output_space&&widescreen::composition_scaled(pending_blits_[index].composition)&&interface_scaled_ps();
   if(interface_scaled)context_->PSSetShader(interface_scaled_ps_.Get(),nullptr,0);
   if(text_filtered)context_->PSSetShader(interface_text_ps_.Get(),nullptr,0);
-  const bool backdrop=pending_blits_[index].backdrop&&backdrop_ps_&&backdrop_sampler_;
-  if(backdrop){context_->PSSetShader(backdrop_ps_.Get(),nullptr,0);context_->PSSetSamplers(0,1,backdrop_sampler_.GetAddressOf());}
+  const bool backdrop=pending_blits_[index].backdrop&&backdrop_ps_;
+  if(backdrop){
+   if(!backdrop_sampler){
+    const auto sampling=world_texture_sampler(D3DTFN_LINEAR,D3DTFG_LINEAR,D3DTFP_LINEAR,
+     D3DTADDRESS_CLAMP,D3DTADDRESS_CLAMP,false,1u<<configured_integer(debug_overlay_.config(),"anisotropy",3));
+    auto& cached=sampler_states_[sampling.key];
+    if(!cached&&FAILED(hr=device_->CreateSamplerState(&sampling.description,&cached)))return hr;
+    backdrop_sampler=cached;
+   }
+   context_->PSSetShader(backdrop_ps_.Get(),nullptr,0);context_->PSSetSamplers(0,1,backdrop_sampler.GetAddressOf());
+  }
   std::size_t end=index+1u;
   if(pending_blits_[index].batchable_text)while(end<pending_blits_.size()&&pending_blits_[end].batchable_text&&views[end]==view&&pending_blits_[end].output_space==output_space&&pending_blits_[end].filtered_text==pending_blits_[index].filtered_text&&widescreen::same_composition(pending_blits_[end].composition,pending_blits_[index].composition)&&ui_blit_alpha_operation(pending_blits_[end].force_opaque_alpha)==alpha_operation)++end;
   const std::size_t logical_draws=end-index;
@@ -1382,11 +1397,12 @@ HRESULT Renderer::render_pending_blits_d3d12(){
   mark_interface_cells(x0,y0,x1,y1);
  }
  FixedState overlay{};overlay.stage[0][D3DTSS_COLOROP]=D3DTOP_MODULATE;
- // The UI sampler of the D3D11 path after its world composite (world=false).
+ // The same configured color filtering and mip limits as the D3D11 path.
+ const UINT anisotropy=1u<<configured_integer(debug_overlay_.config(),"anisotropy",3);
  const D3D11_SAMPLER_DESC sampler=world_texture_sampler(overlay.stage[0][D3DTSS_MINFILTER],overlay.stage[0][D3DTSS_MAGFILTER],
-  overlay.stage[0][D3DTSS_MIPFILTER],overlay.stage[0][D3DTSS_ADDRESSU],overlay.stage[0][D3DTSS_ADDRESSV],false,1).description;
- D3D11_SAMPLER_DESC backdrop_sampler{};backdrop_sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
- backdrop_sampler.AddressU=backdrop_sampler.AddressV=backdrop_sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;backdrop_sampler.MaxLOD=D3D11_FLOAT32_MAX;
+  overlay.stage[0][D3DTSS_MIPFILTER],overlay.stage[0][D3DTSS_ADDRESSU],overlay.stage[0][D3DTSS_ADDRESSV],false,anisotropy).description;
+ const D3D11_SAMPLER_DESC backdrop_sampler=world_texture_sampler(D3DTFN_LINEAR,D3DTFG_LINEAR,D3DTFP_LINEAR,
+  D3DTADDRESS_CLAMP,D3DTADDRESS_CLAMP,false,anisotropy).description;
  DWORD current_alpha_operation=0;float current_opacity=-1.f;
  try{
   for(std::size_t index=0;index<pending_blits_.size();){
@@ -1479,8 +1495,8 @@ HRESULT Renderer::draw_screen_rectangle_d3d12(const ScreenRectangleRequest& requ
  block.texture_factor[0]=block.texture_factor[1]=block.texture_factor[2]=block.texture_factor[3]=1.0f;block.transformed=TRUE;block.textured=TRUE;
  block.color_op=D3DTOP_MODULATE;block.alpha_op=D3DTOP_MODULATE;block.color_arg1=overlay.stage[0][D3DTSS_COLORARG1];block.color_arg2=overlay.stage[0][D3DTSS_COLORARG2];
  block.alpha_arg1=overlay.stage[0][D3DTSS_ALPHAARG1];block.alpha_arg2=overlay.stage[0][D3DTSS_ALPHAARG2];block.alpha_func=D3DCMP_ALWAYS;block.hud_opacity=1.0f;
- D3D11_SAMPLER_DESC sampler{};sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT;
- sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
+ const D3D11_SAMPLER_DESC sampler=world_texture_sampler(D3DTFN_POINT,D3DTFG_POINT,D3DTFP_NONE,
+  D3DTADDRESS_CLAMP,D3DTADDRESS_CLAMP,false,1u<<configured_integer(debug_overlay_.config(),"anisotropy",3)).description;
  // One triangle-list draw for every quad (they share texture, blend and program).
  for(std::size_t index=0;index<quads.size();++index){
   const auto& q=quads[index];
@@ -1794,8 +1810,11 @@ void Capture::run(Renderer& renderer){
     renderer.core_surfaces_.erase(target.id);Renderer::report_scene_failure("capture",E_FAIL);return;
    }
   }
-  HRESULT hr=renderer.render_pending_blits();
-  if(SUCCEEDED(hr))hr=renderer.d3d12_->capture(*entry->d3d12,x,y,RECT{LONG(box_left),LONG(box_top),LONG(box_right),LONG(box_bottom)});
+  // The zone hit-test frame: its own target, flushed (capture_source's rule).
+  const bool hit_test=renderer.hit_test_active_&&renderer.hit_test12_;
+  HRESULT hr=hit_test?renderer.flush_native():renderer.render_pending_blits();
+  if(SUCCEEDED(hr))hr=renderer.d3d12_->capture(*entry->d3d12,x,y,RECT{LONG(box_left),LONG(box_top),LONG(box_right),LONG(box_bottom)},
+                                               hit_test?renderer.hit_test12_.get():nullptr);
   if(SUCCEEDED(hr)){entry->generation=target.generation;entry->uploaded_generation=target.generation;entry->gpu_captured=true;++entry->texture_serial;}
   Renderer::report_scene_failure("capture",hr);
   return;

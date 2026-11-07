@@ -487,6 +487,9 @@ bool write_slot(int slot,std::uint32_t value){
 void install(){
  static bool attempted=false;if(attempted)return;attempted=true;
  char value[4]{};if(GetEnvironmentVariableA("EID3D11_FEAR_WATCH",value,sizeof(value))!=1||value[0]!='1')return;
+ // Base game.exe only: its vtable address lies outside other images (LiA
+ // faulted reading it before any check), so nothing is read elsewhere.
+ if(running_game_sites().report.engine!=GameEngine::base){stall_watchdog::append("fear_watch_rejected","base_layout_only");return;}
  g_image=reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
  const auto rebase=[](std::uint32_t va){return g_image+va-0x400000u;};
  const auto* headers=reinterpret_cast<const IMAGE_NT_HEADERS*>(g_image+reinterpret_cast<const IMAGE_DOS_HEADER*>(g_image)->e_lfanew);
@@ -2596,7 +2599,7 @@ HRESULT Surface::Blt(LPRECT dr,LPDIRECTDRAWSURFACE7 src,LPRECT sr,DWORD flags,LP
  auto* s=dynamic_cast<Surface*>(src);if(!s)return DDERR_INVALIDOBJECT;trace("Surface.Blt.Source","id=%llu %ux%u flags=%08lx fourcc=%08lx bpp=%lu active_target=%d",(unsigned long long)s->image()->id,s->image()->width,s->image()->height,s->image()->format.dwFlags,s->image()->format.dwFourCC,s->image()->format.dwRGBBitCount,s==owner_->active_target?1:0);if(state_trace_enabled()){RECT sourceRect=sr?*sr:RECT{0,0,(LONG)s->image()->width,(LONG)s->image()->height};char event[320]{};sprintf_s(event,"Diagnostic.Blt.t%llu.tp%d.s%llu.sa%d.f%08lx.d%ld.%ld.%ld.%ld.r%ld.%ld.%ld.%ld",(unsigned long long)image_.id,primary()?1:0,(unsigned long long)s->image()->id,s==owner_->active_target?1:0,flags,requested.left,requested.top,requested.right,requested.bottom,sourceRect.left,sourceRect.top,sourceRect.right,sourceRect.bottom);trace(event);}
  if(owner_->active_device&&(this==owner_->active_target||primary()||s==owner_->active_target)){HRESULT flush=owner_->active_device->flushForSurface();if(FAILED(flush))return owner_->checkDevice(flush);}
  if(primary()&&s==owner_->active_target){invalidateVisualCpu();proxy_timing.finish();return owner_->presentVisual();}
- HRESULT owned_text_result=DD_OK;if(bridge_consume_character_pane_blt(s->image()->id,_ReturnAddress(),requested,sr,owner_->renderer,owned_text_result,s->image()->generation)){invalidateVisualTarget();return owned_text_result;}
+ HRESULT owned_text_result=DD_OK;if(bridge_consume_character_pane_blt(src,s->image()->id,_ReturnAddress(),requested,sr,owner_->renderer,owned_text_result,s->image()->generation)){invalidateVisualTarget();return owned_text_result;}
  DDCOLORKEY overrideKey{};const DDCOLORKEY* key=nullptr;if(flags&DDBLT_KEYSRCOVERRIDE){if(fx)overrideKey=fx->ddckSrcColorkey;key=&overrideKey;}else if((flags&DDBLT_KEYSRC)&&s->image()->has_color_key)key=&s->image()->color_key;
  if(!((this==owner_->active_target||primary())&&released_surface_gpu_blit(*s->image(),key))){const HRESULT restored=s->restoreReleased(false);if(FAILED(restored))return restored;}
  const auto destinationArea=(std::uint64_t)std::max<LONG>(0,requested.right-requested.left)*std::max<LONG>(0,requested.bottom-requested.top),primaryArea=(std::uint64_t)image_.width*image_.height;// A picture blitted over the whole screen (loading screens, movies) is shown at its own aspect; one the game placed itself (the 1920x816 movies at 3840x1632) keeps its rectangle. Either way the rest of the screen gets the pillarbox fill, never the world composite behind it (issue 172).

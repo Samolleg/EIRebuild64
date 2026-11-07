@@ -156,6 +156,89 @@ constexpr ExpectedEntry kEntries[] = {
     {kQuitProgramRva, {0xa0, 0x51, 0x47, 0x78, 0x00, 0x84, 0xc0, 0x74}},
 };
 
+// LiA (game.exe C7B085C1): console, quit, list_saves, load_save and godmode
+// are ported (entries below); its camera, pause and menu entries are not
+// (initialize_game_commands, harness_world_frame). QuitProgram at 00432460 has base
+// 00455F20's body (can-quit byte test, PUSH ECX, CALL [PostQuitMessage IAT
+// 00620480], MOV AL,1, RET). The console Enter handler (005227C3..C8: MOV
+// EAX,[ESI+10]; MOV ECX,[EAX]; CALL) calls 00424540 with the text in ECX and
+// no stack argument; it registers the "help" family into the command map,
+// tokenizes ECX (0047C030), gates '@' commands on the cheat byte 00673C90
+// like base, and ends in a plain RET (004250D1).
+constexpr std::uintptr_t kLiaQuitProgramRva = 0x00032460;
+constexpr std::uint8_t kLiaQuitProgramStock[] = {
+    0xa0,0x09,0x83,0x66,0x00,0x84,0xc0,0x74,0x0a,0x51,0xff,0x15,0x80,0x04,0x62,0x00,0xb0,0x01,0xc3};
+constexpr std::uintptr_t kLiaConsoleProcessRva = 0x00024540;
+constexpr std::uint8_t kLiaConsoleProcessStock[] = {
+    0x6a,0xff,0x68,0x80,0xa1,0x60,0x00,0x64,0xa1,0x00,0x00,0x00,0x00,0x50,0x64,0x89,0x25,0x00,0x00,0x00,0x00,
+    0x83,0xec,0x1c,0x55,0x56,0x57,0x8b,0xf9,0x68,0x70,0x1e,0x62,0x00};
+constexpr std::uintptr_t kLiaConsoleCallRva = 0x001227c3;
+constexpr std::uint8_t kLiaConsoleCallStock[] = {0x8b,0x46,0x10,0x8b,0x08,0xe8,0x73,0x1d,0xf0,0xff};
+// LiA load_save, the same flow as base on these verified entries:
+//  - RequestLoad 004DFA80 (thiscall connector, slot char*, bool; RET 8)
+//    stores action 2 at [ECX], copies the slot to +8 and the flag to +7C. The
+//    Load dialog calls it at 005812A9..B1 (PUSH 0; PUSH slot; MOV ECX,006A3260)
+//    and quickload at 00581E78..80, like base 00655ADE/00657664.
+//  - The between-frames consumer 004E63E0 (ECX = 006A3260, called at 00433351
+//    like base 004573C0) tests [ECX] and the server interface 006B613C with
+//    base 0057C700's sequence; SaveGame tests [006B613C] == 4 (world map) at
+//    004E3BB1 like base 0057B4D1.
+//  - The save path cell 006A2928 is what the save dialog's accessor 004DD600
+//    (MOV EAX,006A2928; RET, called at 00585348) returns and what the native
+//    loader reads at 004E333B (MOV ECX,[006A2928], its save folder format).
+//  - The party zone accessor 004DEC20 (thiscall, out string; RET 4) reads the
+//    world client 006A29D8's player +1C, its string at +D8, and stores an
+//    add-referenced copy in the out slot (LiA strings: data with a 10h header;
+//    released as the game does at 00424588: lock xadd -1 on header+0C, then
+//    the manager [header]'s Free, vtable +4, at zero).
+constexpr std::uintptr_t kLiaRequestLoadRva = 0x000dfa80;
+constexpr std::uint8_t kLiaRequestLoadStock[] = {
+    0x56,0x57,0x8b,0x7c,0x24,0x0c,0x85,0xff,0x8b,0xf1,0xc7,0x06,0x02,0x00,0x00,0x00,0x8d,0x4e,0x08,0x75,
+    0x04,0x33,0xc0,0xeb,0x11,0x8b,0xc7,0x53,0x8d,0x58,0x01,0x90,0x8a,0x10,0x40,0x84,0xd2,0x75,0xf9,0x2b,
+    0xc3,0x5b,0x50,0x57,0xe8,0x7f,0x43,0xf2,0xff,0x8a,0x4c,0x24,0x10,0x33,0xc0,0x84,0xc9,0x0f,0x95,0xc0,
+    0x5f,0x89,0x46,0x7c,0x5e,0xc2,0x08,0x00};
+constexpr std::uintptr_t kLiaLoadTransitionRva = 0x000e63e0;
+constexpr std::uint8_t kLiaLoadTransitionStock[] = {
+    0x64,0xa1,0x00,0x00,0x00,0x00,0x6a,0xff,0x68,0x03,0x1d,0x61,0x00,0x50,0x64,0x89};
+constexpr std::uintptr_t kLiaLoadDialogCallRva = 0x001812a9;
+constexpr std::uint8_t kLiaLoadDialogCallStock[] = {
+    0x6a,0x00,0x50,0xb9,0x60,0x32,0x6a,0x00,0xe8,0xca,0xe7,0xf5,0xff};
+constexpr std::uintptr_t kLiaConnectorRva = 0x002a3260;
+constexpr std::uintptr_t kLiaServerInterfaceRva = 0x002b613c;
+constexpr std::uintptr_t kLiaSaveInterfaceTestRva = 0x000e3bb1;
+constexpr std::uint8_t kLiaSaveInterfaceTestStock[] = {0x83,0x3d,0x3c,0x61,0x6b,0x00,0x04};
+constexpr std::uintptr_t kLiaSavePathCellRva = 0x002a2928;
+constexpr std::uintptr_t kLiaSavePathAccessorRva = 0x000dd600;
+constexpr std::uint8_t kLiaSavePathAccessorStock[] = {0xb8,0x28,0x29,0x6a,0x00,0xc3};
+constexpr std::uintptr_t kLiaSavePathCallRva = 0x00185348;
+constexpr std::uint8_t kLiaSavePathCallStock[] = {0xe8,0xb3,0x82,0xf5,0xff,0x8b,0x00,0x50};
+constexpr std::uintptr_t kLiaLoadPathOperandRva = 0x000e333b;
+constexpr std::uint8_t kLiaLoadPathOperandStock[] = {
+    0x8b,0x0d,0x28,0x29,0x6a,0x00,0x50,0x51,0x8d,0x54,0x24,0x18,0x68,0x5c,0xd5,0x62,0x00};
+constexpr std::uintptr_t kLiaCurrentZoneRva = 0x000dec20;
+constexpr std::uintptr_t kLiaClientInterfaceRva = 0x002a3249;
+constexpr std::uint8_t kLiaCurrentZoneStock[] = {
+    0x51,0xb9,0xd8,0x29,0x6a,0x00,0xc7,0x44,0x24,0x00,0x00,0x00,0x00,0x00,0xe8,0x4d,0xff,0xfe,0xff,0x8b,
+    0x40,0x1c,0x8b,0x88,0xd8,0x00,0x00,0x00,0x83,0xe9,0x10,0xe8,0xac,0x21,0xf3,0xff,0x8b,0xc8,0x8b,0x44,
+    0x24,0x08,0x83,0xc1,0x10,0x89,0x08,0x59,0xc2,0x04,0x00};
+// LiA god mode: the GodMode script case at 004716B2 has base 004B6EDA's
+// shape (player number from argument 0, PUSH; MOV ECX,006A33D8 the server;
+// CALL GetPlayer 004E6C40; value from argument 1 stored at [player+108]).
+// GetPlayer (thiscall, number; RET 4) walks the server's players for +24 ==
+// number.
+constexpr std::uintptr_t kLiaGodModeScriptRva = 0x000716b2;
+constexpr std::uint8_t kLiaGodModeScriptStock[] = {
+    0x8b,0x46,0x08,0xd9,0x00,0xe8,0x3c,0xa1,0x17,0x00,0x50,0xb9,0xd8,0x33,0x6a,0x00,0xe8,0x79,0x55,0x07,
+    0x00,0x8b,0xf8,0x3b,0xfd,0x0f,0x84,0x27,0x20,0x00,0x00,0x8b,0x4e,0x08,0xd9,0x41,0x04,0xe8,0x1c,0xa1,
+    0x17,0x00,0x88,0x87,0x08,0x01,0x00,0x00};
+constexpr std::uintptr_t kLiaServerRva = 0x002a33d8;
+constexpr std::uintptr_t kLiaGetServerPlayerRva = 0x000e6c40;
+constexpr std::uint8_t kLiaGetServerPlayerStock[] = {
+    0x6a,0xff,0x68,0x38,0x1d,0x61,0x00,0x64,0xa1,0x00,0x00,0x00,0x00,0x50,0x64,0x89,0x25,0x00,0x00,0x00,
+    0x00,0x83,0xec,0x08};
+bool lia_harness() noexcept { return running_game_sites().report.engine == GameEngine::lia; }
+std::uintptr_t connector_rva() noexcept { return lia_harness() ? kLiaConnectorRva : 0x003afe20; }
+
 using SetCameraAsFn = void(__thiscall*)(void*, const float*);
 using SetCarrierFn = void(__thiscall*)(void*, std::uint32_t);
 using SetAnchorPointFn = void(__thiscall*)(void*, const float*);
@@ -180,6 +263,7 @@ struct Entry {
 struct State {
     bool enabled = false;
     bool game_verified = false;
+    bool quit_verified = false;  // base: game_verified; LiA: its own QuitProgram
     std::uint8_t* image = nullptr;
     std::string directory;
     std::deque<Entry> queue;
@@ -219,6 +303,35 @@ std::string entry_error(const State& s, std::uintptr_t rva,
 }
 
 void initialize_game_commands(State& s) {
+    if (lia_harness()) {
+        const auto same = [&s](std::uintptr_t rva, const std::uint8_t* bytes, std::size_t size) {
+            return std::memcmp(s.image + rva, bytes, size) == 0; };
+        s.pause_error = s.menu_error = "not ported on LiA";
+        s.god_error = same(kLiaGodModeScriptRva, kLiaGodModeScriptStock, sizeof(kLiaGodModeScriptStock)) &&
+                      same(kLiaGetServerPlayerRva, kLiaGetServerPlayerStock, sizeof(kLiaGetServerPlayerStock))
+            ? "" : "LiA god mode sites differ";
+        s.interface_error = same(kLiaSaveInterfaceTestRva, kLiaSaveInterfaceTestStock,
+                                 sizeof(kLiaSaveInterfaceTestStock)) ? "" : "LiA SaveGame interface test differs";
+        s.saves_error = same(kLiaSavePathAccessorRva, kLiaSavePathAccessorStock, sizeof(kLiaSavePathAccessorStock)) &&
+                        same(kLiaSavePathCallRva, kLiaSavePathCallStock, sizeof(kLiaSavePathCallStock)) &&
+                        same(kLiaLoadPathOperandRva, kLiaLoadPathOperandStock, sizeof(kLiaLoadPathOperandStock))
+            ? "" : "LiA save path sites differ";
+        if (s.saves_error.empty())
+            s.save_path_cell = reinterpret_cast<const char* const*>(s.image + kLiaSavePathCellRva);
+        s.load_error = s.saves_error;
+        if (s.load_error.empty() && !(
+                same(kLiaRequestLoadRva, kLiaRequestLoadStock, sizeof(kLiaRequestLoadStock)) &&
+                same(kLiaLoadTransitionRva, kLiaLoadTransitionStock, sizeof(kLiaLoadTransitionStock)) &&
+                same(kLiaLoadDialogCallRva, kLiaLoadDialogCallStock, sizeof(kLiaLoadDialogCallStock)) &&
+                same(kLiaCurrentZoneRva, kLiaCurrentZoneStock, sizeof(kLiaCurrentZoneStock))))
+            s.load_error = "LiA load entries differ";
+        s.console_error = std::memcmp(s.image + kLiaConsoleProcessRva, kLiaConsoleProcessStock,
+                                      sizeof(kLiaConsoleProcessStock)) != 0 ||
+                          std::memcmp(s.image + kLiaConsoleCallRva, kLiaConsoleCallStock,
+                                      sizeof(kLiaConsoleCallStock)) != 0
+            ? "LiA console entry bytes differ" : "";
+        return;
+    }
     if (!game_sites_ok(GameSiteGroup::harness)) {
         s.saves_error = s.load_error = s.console_error = s.pause_error = s.god_error =
             s.interface_error = s.menu_error = "harness site bytes differ in game.exe";
@@ -335,6 +448,9 @@ State& state() {
         for (const auto& entry : kEntries)
             s.game_verified = s.game_verified &&
                 std::memcmp(s.image + entry.rva, entry.bytes, sizeof(entry.bytes)) == 0;
+        s.quit_verified = lia_harness() ? std::memcmp(s.image + kLiaQuitProgramRva, kLiaQuitProgramStock,
+                                                       sizeof(kLiaQuitProgramStock)) == 0
+                                         : s.game_verified;
         initialize_game_commands(s);
         s.enabled = true;
         OutputDebugStringA(s.game_verified ?
@@ -418,6 +534,8 @@ struct GameString {
 static_assert(sizeof(GameString) == 4, "native x86 CString argument storage");
 
 std::string dialog_save_name(const std::string& slot, const std::string& zone) {
+    // LiA: the dialog's name formatter is not ported; slots stay selectable by key.
+    if (lia_harness()) return slot;
     // Only the three native string fields read/written by 00653A50 and
     // 00653BD0 are supplied. The intervening words are never accessed by them.
     struct NameArgument {
@@ -435,6 +553,22 @@ std::string dialog_save_name(const std::string& slot, const std::string& zone) {
 }
 
 std::string current_zone() {
+    if (lia_harness()) {
+        char* data = nullptr;
+        using GetZone = void(__thiscall*)(void*, char**);
+        reinterpret_cast<GetZone>(state().image + kLiaCurrentZoneRva)(
+            state().image + kLiaClientInterfaceRva, &data);
+        std::string zone = data ? data : "";
+        if (data) {
+            auto* header = data - 0x10;
+            if (InterlockedExchangeAdd(reinterpret_cast<volatile LONG*>(header + 0x0c), -1) - 1 <= 0) {
+                void* manager = *reinterpret_cast<void**>(header);
+                using FreeFn = void(__thiscall*)(void*, void*);
+                reinterpret_cast<FreeFn>((*reinterpret_cast<void***>(manager))[1])(manager, header);
+            }
+        }
+        return zone;
+    }
     GameString zone("");
     // 00656350..0065637A uses this accessor to fill the save dialog's zone
     // from the authoritative player's party, and destroys the returned string.
@@ -757,10 +891,13 @@ std::string load_entry_error(const char* name, std::uintptr_t rva,
 // queues the action consumed between frames. Returns false with the reason.
 bool request_load(const HarnessCommand& command, std::string& detail) {
     State& s = state();
-    detail = load_entry_error("RequestLoad", kRequestLoadRva, kRequestLoadStock, sizeof(kRequestLoadStock));
-    if (detail.empty()) detail = load_entry_error("load transition", kLoadTransitionRva,
-        kLoadTransitionStock, sizeof(kLoadTransitionStock));
-    if (!detail.empty()) return false;
+    // LiA's entries were checked with the rest at initialization (no addon).
+    if (!lia_harness()) {
+        detail = load_entry_error("RequestLoad", kRequestLoadRva, kRequestLoadStock, sizeof(kRequestLoadStock));
+        if (detail.empty()) detail = load_entry_error("load transition", kLoadTransitionRva,
+            kLoadTransitionStock, sizeof(kLoadTransitionStock));
+        if (!detail.empty()) return false;
+    }
     const auto lifecycle = lifecycle_observer().snapshot();
     if (!lifecycle.observer_active || !lifecycle.hooks_installed || lifecycle.fail_closed) {
         detail = "verified world lifecycle observer is unavailable; cannot establish load completion";
@@ -768,7 +905,7 @@ bool request_load(const HarnessCommand& command, std::string& detail) {
     }
     SaveSlot slot;
     if (!select_save(command.name, slot, detail)) return false;
-    auto* connector = s.image + kConnectorRva;
+    auto* connector = s.image + connector_rva();
     // The action stays set until 0057C700 finishes the transition, so this
     // also refuses a request issued from a frame presented during loading.
     if (field<std::uint32_t>(connector, 0) != 0) {
@@ -782,7 +919,8 @@ bool request_load(const HarnessCommand& command, std::string& detail) {
     s.load_zone = slot.zone;
     s.load_wait = {};
     s.load_wait.request_epoch = bridge_current_world_epoch();
-    reinterpret_cast<RequestLoadFn>(s.image + kRequestLoadRva)(connector, slot.slot.c_str(), false);
+    reinterpret_cast<RequestLoadFn>(s.image + (lia_harness() ? kLiaRequestLoadRva : kRequestLoadRva))(
+        connector, slot.slot.c_str(), false);
     s.load_waiting = true;
     s.world_done = false;
     s.load_started_ms = GetTickCount64();
@@ -805,7 +943,7 @@ RequestMainMenuFn main_menu_entry(std::string& error) {
 }
 
 std::uint32_t server_interface() {
-    return field<std::uint32_t>(state().image, kServerInterfaceRva);
+    return field<std::uint32_t>(state().image, lia_harness() ? kLiaServerInterfaceRva : kServerInterfaceRva);
 }
 
 bool on_travel_map() {
@@ -851,7 +989,7 @@ void observe_loaded_frame() {
     const auto epoch = bridge_current_world_epoch();
     const auto completed_draws = bridge_world_draw_completion_counter();
     if (!harness_load_completed(s.load_wait, epoch, completed_draws,
-            field<std::uint32_t>(s.image + kConnectorRva, 0) != 0)) return;
+            field<std::uint32_t>(s.image + connector_rva(), 0) != 0)) return;
     // An old/menu frame must not satisfy load_save. Read the authoritative
     // party's zone after the new epoch's successful Draw, not from a pointer
     // identity or from the mere existence of a CWorldClient.
@@ -868,7 +1006,40 @@ void observe_loaded_frame() {
     s.world_done = true;
 }
 
+// The route banner (note verb), shown by the overlay and in the game window's
+// title so a watcher sees which route and step is running.
+std::string& banner_text() { static std::string text; return text; }
+
+BOOL CALLBACK title_window(HWND window, LPARAM text) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(window, &pid);
+    if (pid != GetCurrentProcessId() || !IsWindowVisible(window) || GetWindow(window, GW_OWNER)) return TRUE;
+    DWORD_PTR ignored = 0;
+    SendMessageTimeoutW(window, WM_SETTEXT, 0, text, SMTO_ABORTIFHUNG, 100, &ignored);
+    return FALSE;
+}
+
+void set_banner(const std::string& note) {
+    std::string& text = banner_text();
+    text = note;
+    for (char& c : text) if (c == '|') c = '\n';
+    std::string title = "EI HARNESS - " + note;
+    const std::wstring wide = [&] {
+        std::wstring w(title.size(), L'\0');
+        w.resize(static_cast<std::size_t>(MultiByteToWideChar(CP_UTF8, 0, title.data(), static_cast<int>(title.size()),
+                                                              w.data(), static_cast<int>(w.size()))));
+        return w;
+    }();
+    EnumWindows(title_window, reinterpret_cast<LPARAM>(wide.c_str()));
+}
+
 } // namespace
+
+std::string harness_banner_text() {
+    if (!state().enabled) return {};
+    std::lock_guard<std::recursive_mutex> guard(harness_lock());
+    return banner_text();
+}
 
 bool harness_enabled() noexcept { return state().enabled; }
 
@@ -938,6 +1109,10 @@ const HarnessCommand* harness_present_step() noexcept {
             if (!s.game_verified) { retire_front(false, "unsupported game image"); continue; }
             retire_front(true, camera_state());
             continue;
+        case HarnessVerb::note:
+            set_banner(command.name);
+            retire_front(true, "banner set");
+            continue;
         case HarnessVerb::dump_units: {
             static HANDLE request = CreateEventA(nullptr, FALSE, FALSE, "Local\\EID3D11_DumpUnits");
             const bool ok = request && SetEvent(request);
@@ -946,11 +1121,12 @@ const HarnessCommand* harness_present_step() noexcept {
             continue;
         }
         case HarnessVerb::quit:
-            if (!s.game_verified) { retire_front(false, "unsupported game image"); continue; }
+            if (!s.quit_verified) { retire_front(false, "unsupported game image"); continue; }
         {
             // QuitProgram only posts WM_QUIT, and only when the game allows
             // quitting; report its answer instead of assuming it.
-            const bool posted = reinterpret_cast<QuitProgramFn>(s.image + kQuitProgramRva)(0);
+            const bool posted = reinterpret_cast<QuitProgramFn>(
+                s.image + (lia_harness() ? kLiaQuitProgramRva : kQuitProgramRva))(0);
             retire_front(posted, posted ? "QuitProgram(0) posted WM_QUIT"
                                         : "QuitProgram(0) refused by the game");
             if (posted) s.queue.clear();
@@ -963,7 +1139,7 @@ const HarnessCommand* harness_present_step() noexcept {
                 // Shortly after launch the game's own transition into the
                 // main menu is still pending, and the game refuses a load
                 // until it finishes: wait for it instead of failing.
-                if (field<std::uint32_t>(s.image + kConnectorRva, 0) != 0) {
+                if (field<std::uint32_t>(s.image + connector_rva(), 0) != 0) {
                     if (!harness_timed_out(s.load_started_ms, GetTickCount64(), kHarnessLoadTimeoutSeconds))
                         return nullptr;
                     retire_front(false, text_of("game transition still pending after %u s",
@@ -988,7 +1164,7 @@ const HarnessCommand* harness_present_step() noexcept {
             // map: no world frame will come, so do not wait out the limit.
             if (s.load_waiting && on_travel_map() &&
                 bridge_current_world_epoch() != s.load_wait.request_epoch &&
-                field<std::uint32_t>(s.image + kConnectorRva, 0) == 0) {
+                field<std::uint32_t>(s.image + connector_rva(), 0) == 0) {
                 s.load_waiting = false;
                 retire_front(false, "opened the world map (no mission in save); slot=" + s.load_slot);
                 continue;
@@ -1000,7 +1176,7 @@ const HarnessCommand* harness_present_step() noexcept {
                     "(request epoch %llu, current epoch %llu, transition %s)", kHarnessLoadTimeoutSeconds,
                     static_cast<unsigned long long>(s.load_wait.request_epoch),
                     static_cast<unsigned long long>(bridge_current_world_epoch()),
-                    field<std::uint32_t>(s.image + kConnectorRva, 0) ? "pending" : "none"));
+                    field<std::uint32_t>(s.image + connector_rva(), 0) ? "pending" : "none"));
                 continue;
             }
             return nullptr;
@@ -1112,7 +1288,10 @@ const HarnessCommand* harness_present_step() noexcept {
                 retire_front(false, s.god_error);
                 continue;
             }
-            if (!s.game_verified) { retire_front(false, "unsupported game image"); continue; }
+            if (!s.game_verified && !(lia_harness() && command.verb == HarnessVerb::godmode)) {
+                retire_front(false, "unsupported game image");
+                continue;
+            }
             if (!entry.posted) {
                 entry.posted = true;
                 s.world_pending = true;
@@ -1188,10 +1367,12 @@ void set_game_effect_distance(float distance) noexcept { g_game_effect_distance 
 void game_back_clip_world_frame(void* world_client) noexcept {
     static int usable = -1;
     auto* image = reinterpret_cast<std::uint8_t*>(GetModuleHandleA(nullptr));
-    if (!image || world_client != image + kWorldClientRva) return;
-    if (usable < 0) usable = game_sites_ok(GameSiteGroup::harness) ? 1 : 0;
+    const bool lia = running_game_sites().report.engine == GameEngine::lia;
+    if (!image || world_client != image + (lia ? kLiaWorldClientRva : kWorldClientRva)) return;
+    if (usable < 0) usable = (lia ? bridge_lia_back_clip_contract_matches()
+                                  : game_sites_ok(GameSiteGroup::harness)) ? 1 : 0;
     if (!usable) return;
-    float& back = field<float>(image + kCameraRva, 740);
+    float& back = field<float>(image + (lia ? kLiaCameraRva : kCameraRva), 740);
     static bool logged = false;
     if (!logged) {
         logged = true;
@@ -1200,7 +1381,13 @@ void game_back_clip_world_frame(void* world_client) noexcept {
         bridge_report_event("game_back_clip", detail);
     }
     if (std::isfinite(back) && back > 0.f && back != kGameProjectionFarClip) back = kGameProjectionFarClip;
-    game_visual_range_world_frame(image);
+    if (lia) {
+        static bool ranges_reported = false;
+        if (!ranges_reported) {
+            ranges_reported = true;
+            bridge_report_event("game_visual_range", "LiA send ranges not established; native values retained");
+        }
+    } else game_visual_range_world_frame(image);
 }
 
 // The pause verb's contract (same sites, all in the harness group; same Draw
@@ -1264,8 +1451,12 @@ void load_pause_world_frame(void* world_client, bool hold, std::uint64_t epoch,
 void apply_initial_game_back_clip() noexcept {
     auto* image = reinterpret_cast<std::uint8_t*>(GetModuleHandleA(nullptr));
     if (!image) return;
-    if (!game_sites_ok(GameSiteGroup::harness)) { bridge_report_event("game_back_clip", "skipped: site check not passed at DirectDraw creation"); return; }
-    float& back = field<float>(image + kCameraRva, 740);
+    const bool lia = running_game_sites().report.engine == GameEngine::lia;
+    if (!(lia ? bridge_lia_back_clip_contract_matches() : game_sites_ok(GameSiteGroup::harness))) {
+        bridge_report_event("game_back_clip", "skipped: site check not passed at DirectDraw creation");
+        return;
+    }
+    float& back = field<float>(image + (lia ? kLiaCameraRva : kCameraRva), 740);
     const float before = back;
     if (std::isfinite(back) && back > 0.f && back != kGameProjectionFarClip) back = kGameProjectionFarClip;
     char detail[128];
@@ -1341,14 +1532,20 @@ void harness_world_frame(void* world_client) noexcept {
     State& s = state();
     if (!s.enabled || !s.image) return;
     std::uint8_t* world = s.image + kWorldClientRva;
-    const bool supported_world = world_client == world;
+    // LiA: only the console and list_saves run at its world client's Draw
+    // entry (the main menu's world draws through it too).
+    const bool lia_world = lia_harness() && world_client == s.image + kLiaWorldClientRva;
+    const bool supported_world = !lia_harness() && world_client == world;
     if (s.world_pending && !s.queue.empty()) {
-        s.world_pending = false;
-        s.world_done = true;
-        s.world_ok = supported_world;
-        s.world_detail = "Draw target is not the static CWorldClient";
         Entry& entry = s.queue.front();
         const HarnessCommand& command = entry.command;
+        const bool lia_verb = command.verb == HarnessVerb::console || command.verb == HarnessVerb::list_saves ||
+                              command.verb == HarnessVerb::godmode;
+        s.world_pending = false;
+        s.world_done = true;
+        s.world_ok = supported_world || (lia_world && lia_verb);
+        s.world_detail = lia_world && !lia_verb ? "not ported on LiA" :
+                         "Draw target is not the static CWorldClient";
         if (supported_world && command.verb == HarnessVerb::camera_path) {
             // Temporary: the start pose at the first step, then the pose
             // interpolated linearly (yaw along the shorter arc).
@@ -1374,24 +1571,26 @@ void harness_world_frame(void* world_client) noexcept {
         } else if (supported_world && command.verb == HarnessVerb::pause) {
             entry.progress = 0;
             request_pause(command.frames != 0);
-        } else if (supported_world && command.verb == HarnessVerb::godmode) {
+        } else if ((supported_world || lia_world) && command.verb == HarnessVerb::godmode) {
             // Player 0 is the local party's server player (its party
             // variables are read through GetPlayer(0) as well).
-            std::uint8_t* player = reinterpret_cast<GetServerPlayerFn>(s.image + kGetServerPlayerRva)(
-                s.image + kServerRva, 0);
+            std::uint8_t* player = reinterpret_cast<GetServerPlayerFn>(
+                s.image + (lia_world ? kLiaGetServerPlayerRva : kGetServerPlayerRva))(
+                s.image + (lia_world ? kLiaServerRva : kServerRva), 0);
             s.world_ok = player != nullptr;
             if (player) {
                 field<std::uint8_t>(player, kPlayerGod) = command.frames != 0 ? 1 : 0;
                 s.world_detail = text_of("godmode=%s (player 0 flag %u)", command.frames ? "on" : "off",
                                          static_cast<unsigned>(field<std::uint8_t>(player, kPlayerGod)));
             } else s.world_detail = "server has no player 0";
-        } else if (supported_world && command.verb == HarnessVerb::list_saves) {
+        } else if ((supported_world || lia_world) && command.verb == HarnessVerb::list_saves) {
             s.world_ok = list_saves(s.world_detail);
-        } else if (supported_world && command.verb == HarnessVerb::console) {
+        } else if ((supported_world || lia_world) && command.verb == HarnessVerb::console) {
             std::string text;
             s.world_ok = game_text(command.name, 1251, text);
             if (s.world_ok) {
-                reinterpret_cast<ConsoleProcessFn>(s.image + kConsoleProcessRva)(text.c_str());
+                reinterpret_cast<ConsoleProcessFn>(
+                    s.image + (lia_world ? kLiaConsoleProcessRva : kConsoleProcessRva))(text.c_str());
                 // The native parser returns void; unknown commands and cheat
                 // activation are reported by the game's console, not inferred here.
                 s.world_detail = "dispatched to native console parser (no native success return)";

@@ -445,9 +445,6 @@ void Renderer::update_snow_surface() noexcept try{
   if(SUCCEEDED(hr=compile_shader(program[0],&code)))hr=create_shader(device_.Get(),code->GetBufferPointer(),code->GetBufferSize(),nullptr,&snow_surface_cs_);
   D3D11_BUFFER_DESC constants{};constants.ByteWidth=32;constants.Usage=D3D11_USAGE_DEFAULT;constants.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
   if(SUCCEEDED(hr))hr=device_->CreateBuffer(&constants,nullptr,&snow_surface_constants_);
-  D3D11_SAMPLER_DESC wrap{};wrap.Filter=D3D11_FILTER_ANISOTROPIC;wrap.MaxAnisotropy=8;
-  wrap.AddressU=wrap.AddressV=wrap.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;wrap.MaxLOD=D3D11_FLOAT32_MAX;
-  if(SUCCEEDED(hr))hr=device_->CreateSamplerState(&wrap,&snow_surface_sampler_);
   if(FAILED(hr)){snow_surface_cs_.Reset();return fail("snow surface shader");}
  }
  D3D11_TEXTURE2D_DESC d{};d.Width=d.Height=kSnowSurfaceSide;d.MipLevels=0;d.ArraySize=1;d.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
@@ -719,7 +716,8 @@ void Renderer::load_terrain2_masks() noexcept try{
 // and the material cells its rows draw, to bake (a folded cell with a donor bakes the
 // donor's plain slot, which it reads).
 void Renderer::update_terrain2_styles(Terrain2Map& map,const TerrainTileFamilies& families,const std::map<std::uint32_t,std::uint32_t>& cells,
- const std::vector<std::array<std::uint32_t,4>>& rows,const std::vector<std::uint32_t>& fold_table) noexcept try{
+ const std::vector<std::array<std::uint32_t,4>>& rows,const std::vector<std::uint32_t>& fold_table,
+ const std::vector<std::array<std::uint32_t,4>>& art) noexcept try{
  std::array<std::uint8_t,4096> styles;styles.fill(std::uint8_t(kTerrain2NoStyle));
  for(const auto& [family,cell]:cells){
   const auto name=families.names.find(family);
@@ -728,12 +726,26 @@ void Renderer::update_terrain2_styles(Terrain2Map& map,const TerrainTileFamilies
  std::set<std::uint32_t> drawn;
  for(const auto& row:rows)for(const std::uint32_t lane:{row[0],row[1]})for(const std::uint32_t c:{lane&65535u,lane>>16})
   if(c!=terrain_tile_blend_none)drawn.insert(c&4095u);
+ // Protected homogeneous tiles sample their own placed slot, although the
+ // family field uses a canonical cell. Bake that slot's matching height too,
+ // from the same affine art rows the pixel shader reads (no donor height).
+ for(std::size_t t=0;t<rows.size();++t){
+  const auto& tile=art[t];
+  if((tile[3]&terrain_tile_authored_plain)==0)continue;
+  const std::uint32_t page=tile[3]&255u;
+  if(page>=terrain_tile_fold_page)continue;
+  const float u=(float(tile[1]&65535u)+float(tile[2]&65535u))*.5f/65535.f;
+  const float v=(float(tile[1]>>16)+float(tile[2]>>16))*.5f/65535.f;
+  const auto x=std::min(7u,std::uint32_t(u*8)),y=std::min(7u,std::uint32_t(v*8));
+  drawn.insert(page*64u+(7u-y)*8u+x);
+ }
  map.bake_cells.clear();
  for(const std::uint32_t c:drawn){
   std::uint32_t page=c>>6,pos=c&63u,quadrant=0;bool folded=false;
   if(page==terrain_tile_fold_page){
    if(pos>=fold_table.size())continue;
    const std::uint32_t e=fold_table[pos];
+   if(e==0xffffffffu)continue; // protected family with no own plain source: marker, no bake
    if((e>>26)&1u){page=((e>>14)&4095u)>>6;pos=(e>>14)&63u;}
    else{page=(e>>6)&63u;pos=e&63u;quadrant=(e>>12)&3u;folded=true;}
   }else if(c<families.signatures.size()&&styles[c]==kTerrain2NoStyle){
@@ -1300,7 +1312,16 @@ HRESULT Renderer::set_native_terrain_frame(const NativeTerrainState& game_terrai
   // The snow surface for the object build-up (none: its drift relief only).
   if(!d3d12_){
    ID3D11ShaderResourceView* snow=snow_surface_srv_.Get();context_->PSSetShaderResources(kSnowSurfaceSlot,1,&snow);
-   if(snow){ID3D11SamplerState* wrap=snow_surface_sampler_.Get();context_->PSSetSamplers(kSnowSurfaceSampler,1,&wrap);}
+   if(snow){
+    try{
+     const auto sampling=world_texture_sampler(D3DTFN_LINEAR,D3DTFG_LINEAR,D3DTFP_LINEAR,
+      D3DTADDRESS_WRAP,D3DTADDRESS_WRAP,true,1u<<configured_integer(config,"anisotropy",3));
+     auto& sampler=sampler_states_[sampling.key];
+     if(!sampler){const HRESULT hr=device_->CreateSamplerState(&sampling.description,&sampler);if(FAILED(hr))return hr;}
+     snow_surface_sampler_=sampler;
+    }catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+    ID3D11SamplerState* wrap=snow_surface_sampler_.Get();context_->PSSetSamplers(kSnowSurfaceSampler,1,&wrap);
+   }
   }
   // The rain ring texture (nativeRainRingSlope: wet flat ground while it
   // rains, precipitation quality 3+), re-rendered on the game clock. The

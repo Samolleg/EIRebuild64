@@ -41,6 +41,7 @@
 #include "renderer.h"
 #include "engine_bridge.h"
 #include "world_fog.h"
+#include "world_texture_sampler.h"
 #include <d3dcompiler.h>
 #include <algorithm>
 #include <array>
@@ -4195,12 +4196,10 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             D3D11_DEPTH_STENCIL_DESC depth{}; depth.DepthEnable = TRUE; depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
             depth.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
             D3D11_BLEND_DESC blend{}; for (auto& target : blend.RenderTarget) target.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-            D3D11_SAMPLER_DESC sampler{}; sampler.Filter = D3D11_FILTER_ANISOTROPIC; sampler.MaxAnisotropy = 8;
-            sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_WRAP; sampler.MaxLOD = D3D11_FLOAT32_MAX;
             if (FAILED(device_->CreateRasterizerState(&raster, &cr.raster)) || FAILED(device_->CreateDepthStencilState(&depth, &cr.depth)) ||
                 [&] { D3D11_DEPTH_STENCIL_DESC xray{}; xray.DepthEnable = TRUE; xray.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
                       xray.DepthFunc = D3D11_COMPARISON_ALWAYS; return FAILED(device_->CreateDepthStencilState(&xray, &cr.depth_xray)); }() ||
-                FAILED(device_->CreateBlendState(&blend, &cr.blend)) || FAILED(device_->CreateSamplerState(&sampler, &cr.sampler)))
+                FAILED(device_->CreateBlendState(&blend, &cr.blend)))
                 return fail("pipeline states unavailable");
             }
             cr.meshes = a.meshes; cr.minis = a.minis; cr.jaw_start = a.jaw_start; cr.jaw_frames = std::max(1u, a.jaw_frames);
@@ -4845,9 +4844,8 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             d3d12_->set_resource(27, cr.vertices12.get()); d3d12_->set_resource(28, cr.instances12.get());
             d3d12_->set_resource(29, cr.bones12.get()); d3d12_->set_resource(30, cr.baked12.get());
             d3d12_->set_resource(31, cr.skins12.get());
-            D3D11_SAMPLER_DESC wrap{}; wrap.Filter = D3D11_FILTER_ANISOTROPIC; wrap.MaxAnisotropy = 8;
-            wrap.AddressU = wrap.AddressV = wrap.AddressW = D3D11_TEXTURE_ADDRESS_WRAP; wrap.MaxLOD = D3D11_FLOAT32_MAX;
-            d3d12_->set_sampler(8, wrap);
+            d3d12_->set_sampler(8, world_texture_sampler(D3DTFN_LINEAR, D3DTFG_LINEAR, D3DTFP_LINEAR,
+                D3DTADDRESS_WRAP, D3DTADDRESS_WRAP, true, 1u << configured_integer(debug_overlay_.config(), "anisotropy", 3)).description);
             d3d12_->set_constants(1, &native_world_lighting_, sizeof(native_world_lighting_));
             NativeShadowConstants receivers = shadow12_.constants;
             if (!native_shadow_failed_ && native_shadows_enabled_)
@@ -4901,6 +4899,11 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         if (FAILED(context_->Map(cr.frame_constants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) return S_OK;
         std::memcpy(mapped.pData, &c, sizeof(c)); context_->Unmap(cr.frame_constants.Get(), 0);
 
+        const auto sampling = world_texture_sampler(D3DTFN_LINEAR, D3DTFG_LINEAR, D3DTFP_LINEAR,
+            D3DTADDRESS_WRAP, D3DTADDRESS_WRAP, true, 1u << configured_integer(debug_overlay_.config(), "anisotropy", 3));
+        auto& sampler = sampler_states_[sampling.key];
+        if (!sampler && FAILED(device_->CreateSamplerState(&sampling.description, &sampler))) return fail("material sampler unavailable");
+        cr.sampler = sampler;
         transition_profile_pass("critters");
         const bool write_ambient = ao_ambient_rtv_ && rtv_.Get() == scene_composite_.target();
         ao_ambient_written_ |= write_ambient;

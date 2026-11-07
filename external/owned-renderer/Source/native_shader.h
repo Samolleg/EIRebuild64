@@ -905,6 +905,7 @@ NativeWorldVertex prepareNativeWorldVertex(NativeInstance instance,uint componen
  output.p=mul(instance.objectToWorld,float4(position,1));
  float3 normal=loadPacked(instance.geometryOffsets.y,component.y).xyz;
  output.normal.xyz=normalize(mul(transpose(inverseObjectLinear(instance.objectToWorld)),normal));
+ [branch]if((instance.worldGeometry&@WORLD_VERTEX_OPACITY@)!=0)output.normal.w=loadPacked(instance.geometryOffsets.y,component.y).w;
  output.uv=asfloat(nativeGeometry.Load2(instance.geometryOffsets.z+component.z*8));
  output.diffuse=instance.colorOffsets.x==0xffffffff?0xffffffff:nativeGeometry.Load(instance.colorOffsets.x+component.y*4);
  output.specular=instance.colorOffsets.y==0xffffffff?0xff000000:nativeGeometry.Load(instance.colorOffsets.y+component.y*4);
@@ -989,6 +990,7 @@ NativeWorldVertex nativeObjectSpaceVertex(NativeInstance instance,uint component
  output.p=world;output.undeformedXY=world.xy;
  float3 normal=loadPacked(instance.geometryOffsets.y,component.y).xyz;
  output.normal.xyz=normalize(mul(transpose(inverseObjectLinear(instance.objectToWorld)),normal));
+ [branch]if((instance.worldGeometry&@WORLD_VERTEX_OPACITY@)!=0)output.normal.w=loadPacked(instance.geometryOffsets.y,component.y).w;
  output.uv=asfloat(nativeGeometry.Load2(instance.geometryOffsets.z+component.z*8));
  output.diffuse=instance.colorOffsets.x==0xffffffff?0xffffffff:nativeGeometry.Load(instance.colorOffsets.x+component.y*4);
  output.specular=instance.colorOffsets.y==0xffffffff?0xff000000:nativeGeometry.Load(instance.colorOffsets.y+component.y*4);
@@ -1557,6 +1559,7 @@ NativeOutput nativeVertex(uint vertexId,bool sway){
   // the world normal used by the light-space geometry/receiver passes.
   float3 normal=normalize(mul(transpose((float3x3)instance.objectToWorld),world.normal.xyz));
   output.d=calculateWorldLighting(instance,normal,isTerrain?terrain.emissive:instance.nativeEmissive.rgb,
+                                  (instance.worldGeometry&@WORLD_VERTEX_OPACITY@)!=0?world.normal.w:
                                   isTerrain?terrain.opacity:instance.nativeMaterialAlpha);
   float3 light=mul(inverseObjectLinear(instance.objectToWorld),nativeWorldSunDirection.xyz);
   float lengthSquared=dot(light,light);
@@ -2357,7 +2360,7 @@ Texture2D<float4> contactColor:register(t14);
 #endif
 // The terrain's own art: per 2 m tile its atlas corners (00,10,01 as unorm16
 // pairs; the mapping is affine) and material slice (w bits 0-7; 255 none; the
-// upper bits name the tile's cliff rock, terrain_cliff.h), t15,
+// upper bits carry the authored-family policy, terrain_tile_blend.h), t15,
 // and the drawn terrain atlases copied per material into one array, t16.
 // nativeContactMapMaterials (per batch: the active map's or a neighbour's
 // contact maps): bits of the slices already copied.
@@ -2369,12 +2372,12 @@ static const uint contactMarginRows=6;
 uint contactBlendTileRows(uint gh){return gh>contactMarginRows+1u?(gh-1u-contactMarginRows)/2u:0u;}
 Texture2DArray<float4> contactAtlas:register(t16);
 SamplerState contactSampler:register(s8);
-bool contactTerrainArtMap(float2 s,float2 sDx,float2 sDy,uint2 materials,out float3 art){
- art=0;uint w,h;contactTiles.GetDimensions(w,h);
+bool contactTerrainArtMap(float2 s,float2 sDx,float2 sDy,uint2 materials,out float3 art,out bool preserveAuthored){
+ art=0;preserveAuthored=false;uint w,h;contactTiles.GetDimensions(w,h);
  float2 t=s*.5;int2 c=int2(floor(t));
  if(any(c<0)||c.x>=int(w)||c.y>=int(h))return false;
  uint4 v=contactTiles.Load(int3(c,0));
- uint m=v.w&255u; // the upper bits carry the cliff rock (terrain_cliff.h)
+ uint m=v.w&255u; // policy bits never form part of an atlas slice
  if(m>=64u||(((m<32u?materials.x:materials.y)>>(m&31u))&1u)==0)return false;
  float2 uv00=float2(v.x&65535u,v.x>>16)/65535.0;
  float2 du=float2(v.y&65535u,v.y>>16)/65535.0-uv00,dv=float2(v.z&65535u,v.z>>16)/65535.0-uv00;
@@ -2383,10 +2386,15 @@ bool contactTerrainArtMap(float2 s,float2 sDx,float2 sDy,uint2 materials,out flo
  // a quad straddling two tiles keeps its mip.
  art=contactAtlas.SampleGrad(contactSampler,float3(uv00+f.x*du+f.y*dv,m),
   (sDx.x*du+sDx.y*dv)*.5,(sDy.x*du+sDy.y*dv)*.5).rgb;
+ preserveAuthored=(v.w&0x1000u)!=0; // the original slot is homogeneous in a protected family
  return true;
 }
-bool contactTerrainArt(float2 s,float2 sDx,float2 sDy,out float3 art){
- return contactTerrainArtMap(s,sDx,sDy,nativeContactMapMaterials,art);
+// The existing ground-cover caller needs only the art, from the same read.
+bool contactTerrainArtMap(float2 s,float2 sDx,float2 sDy,uint2 materials,out float3 art){
+ bool preserveAuthored;return contactTerrainArtMap(s,sDx,sDy,materials,art,preserveAuthored);
+}
+bool contactTerrainArt(float2 s,float2 sDx,float2 sDy,out float3 art,out bool preserveAuthored){
+ return contactTerrainArtMap(s,sDx,sDy,nativeContactMapMaterials,art,preserveAuthored);
 }
 )" R"(
 @TERRAIN_CLIFF@
@@ -2433,11 +2441,11 @@ float3 contactBlendColor(float3 p,float3 n,float3 pDx,float3 pDy,float worldHeig
  float4 ground=lerp(lerp(contactColor.Load(int3(c,colorMip)),contactColor.Load(int3(c+int2(1,0),colorMip)),f.x),
                     lerp(contactColor.Load(int3(c+int2(0,1),colorMip)),contactColor.Load(int3(c+int2(1,1),colorMip)),f.x),f.y);
  if(ground.a<.99)return 0;
- float3 art;
+ float3 art;bool preserveAuthored;
  float3 terrain=ground.rgb;float detail=0;
- [branch]if(contactTerrainArt(s,sDx,sDy,art)){
+ [branch]if(contactTerrainArt(s,sDx,sDy,art,preserveAuthored)){
   // Large-scale brightness of the terrain's anti-tiling stage, when enabled.
-  if(nativeTerrainMaterial.y>0)art*=terrainMacro(s+nativeContactLayout.xy); // the terrain's own frame
+  if(nativeTerrainMaterial.y>0&&!preserveAuthored)art*=terrainMacro(s+nativeContactLayout.xy); // the terrain's own frame
   float3 luma=float3(.2126,.7152,.0722);
   detail=dot(art,luma)-dot(ground.rgb,luma);
   terrain=art;
@@ -4107,6 +4115,9 @@ inline std::string compose_native_shader_source(const NativeShaderFeatures& feat
   const std::string object_space_marker="@WORLD_OBJECT_SPACE@";
   for(auto at=text.find(object_space_marker);at!=std::string::npos;at=text.find(object_space_marker,at))
    text.replace(at,object_space_marker.size(),std::to_string(native_world_object_space)+"u");
+  const std::string vertex_opacity_marker="@WORLD_VERTEX_OPACITY@";
+  for(auto at=text.find(vertex_opacity_marker);at!=std::string::npos;at=text.find(vertex_opacity_marker,at))
+   text.replace(at,vertex_opacity_marker.size(),std::to_string(native_world_vertex_opacity)+"u");
   const std::string lod_marker="@WORLD_LOD@";
   for(auto at=text.find(lod_marker);at!=std::string::npos;at=text.find(lod_marker,at))
    text.replace(at,lod_marker.size(),std::to_string(native_world_lod)+"u");

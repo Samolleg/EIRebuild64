@@ -1,5 +1,6 @@
 #include "game_focus.h"
 #include "debug_overlay.h"
+#include "game_sites.h"
 
 #include <atomic>
 #include <cstdint>
@@ -10,6 +11,9 @@ namespace owned {
 
 void bridge_report_event(const char* event, const char* detail) noexcept;
 void bridge_note_owned_patch(const void* address, const void* original, std::size_t bytes) noexcept;
+bool bridge_owns_count_time_clock(const void* target) noexcept;
+bool bridge_lia_hud_editor_contract_matches() noexcept;
+bool bridge_reset_lia_hud_editor_input(void* interface_object) noexcept;
 
 namespace {
 
@@ -44,6 +48,24 @@ constexpr std::uint32_t kEditorWallClockRva = 0x000122d0;
 constexpr std::uint32_t kEditorIdleResumeRva = 0x000575e9;
 constexpr std::uint32_t kMissionPointerRva = 0x00239d60;
 
+struct FocusSites {
+    std::uint32_t clock, clock_iat, handler, window_proc, frame, inactive_store;
+    std::uint32_t enable_render, reset_call, interface_object, reset;
+    std::uint32_t pause, wall_clock, idle_resume, mission_pointer;
+    std::size_t pointer_bytes;
+    bool clock_pointer_load;
+};
+const FocusSites& focus_sites() noexcept {
+    static constexpr FocusSites base{kCountTimeClockCallRva,kTimeGetTimeIatRva,
+        kMessageHandlerCallRva,kWindowProcEntryRva,kDrawFrameCallRva,kInactiveRenderStoreRva,
+        kEnableRenderRva,kInterfaceResetCallRva,kInterfaceRva,kInputResetRva,
+        kEditorPauseCallRva,kEditorWallClockRva,kEditorIdleResumeRva,kMissionPointerRva,5,false};
+    static constexpr FocusSites lia{0x0003314b,0x00220544,0x00034eb2,0x00033570,
+        0x00034e7c,0x00033679,0x00276810,0x00033663,0x002b8a38,0x0012fac0,
+        0x000331d8,0x00013930,0x00033567,0x00176e50,9,true};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
 using ClockFn = DWORD(WINAPI*)();
 using MessageHandlerFn = LRESULT(__fastcall*)(UINT, WPARAM, LPARAM);
 using WindowProcFn = LRESULT(WINAPI*)(HWND, UINT, WPARAM, LPARAM);
@@ -60,7 +82,7 @@ struct FocusCallPatch {
     std::uint8_t* address = nullptr;
     std::size_t length = 0;
     DWORD protection = 0;
-    std::uint8_t original[6]{}, current[6]{};
+    std::uint8_t original[9]{}, current[9]{};
 };
 FocusCallPatch g_patches[5];
 std::size_t g_patch_count = 0;
@@ -73,9 +95,23 @@ DrawFrameFn g_next_draw_frame = nullptr;
 const volatile std::uint8_t* g_enable_render = nullptr;
 InputResetFn g_input_reset = nullptr;
 void* g_interface = nullptr;
+// LiA: its reset 0052FAC0 first clears five interface input bytes (+7C, +7E,
+// +7D, +80, +7F), then tail-calls the top screen's +94 input owner, the part
+// that faulted outside native activation (4c5a33a). Only the byte stores are
+// repeated here, after the entry bytes match.
+bool g_lia_input_clear = false;
+constexpr std::uint8_t kLiaInputResetEntry[] = {
+    0x32,0xc0,0x88,0x41,0x7c,0x88,0x41,0x7e,0x88,0x41,0x7d,0x88,0x81,0x80,0x00,0x00,0x00,0x88,0x41,0x7f};
+void clear_lia_interface_input() noexcept {
+    auto* interface_bytes = static_cast<volatile std::uint8_t*>(g_interface);
+    for (const std::size_t offset : {0x7cu, 0x7eu, 0x7du, 0x80u, 0x7fu}) interface_bytes[offset] = 0;
+}
 
-// One authoritative editor state, changed on the game's interface thread.
-std::uint8_t g_hud_editing=0;
+// The native gates read this same one-byte value. Overlay callers may run on
+// the scene thread; LiA input-owner work is consumed by the game clock hook.
+std::atomic<std::uint8_t> g_hud_editing{0};
+static_assert(sizeof(g_hud_editing)==1 && std::atomic<std::uint8_t>::is_always_lock_free);
+std::atomic<int> g_lia_editor_request{-1};
 void* g_mission_pointer_forward=nullptr;
 void* g_editor_idle_resume=nullptr;
 void(*g_editor_wall_clock)()=nullptr;
@@ -117,6 +153,14 @@ bool world_paused() noexcept {
 }
 
 DWORD WINAPI focus_count_time_clock() {
+    if(g_lia_editor_request.load(std::memory_order_acquire)>=0) {
+        const int request=g_lia_editor_request.exchange(-1,std::memory_order_acquire);
+        if(request>=0 && bool(request)!=bool(g_hud_editing.load(std::memory_order_relaxed))) {
+            const bool reset=bridge_reset_lia_hud_editor_input(g_interface);
+            if(reset || !request)g_hud_editing.store(request?1:0,std::memory_order_release);
+            else bridge_report_event("hud_editor_rejected","LiA gameplay HUD is not the completed active top screen");
+        }
+    }
     const DWORD now = g_next_clock ? g_next_clock() : (*g_clock_slot)();
     if (world_paused()) {
         if (!g_clock_paused) {
@@ -201,16 +245,19 @@ bool absolute_operand(const std::uint8_t* at, std::uint32_t rva) noexcept {
 }
 
 bool write_call(std::uint8_t* at, const void* target, std::size_t length,std::uint8_t opcode=0xe8) noexcept {
-    if (g_patch_count == 5 || length < 5 || length > 6) return false;
+    if (g_patch_count == 5 || length < 5 || length > sizeof(g_patches[0].original)) return false;
     auto& patch = g_patches[g_patch_count];
     patch.address = at;
     patch.length = length;
     std::memcpy(patch.original, at, length);
     std::memset(patch.current, 0x90, length);
     patch.current[0] = opcode;
-    const auto relative = static_cast<std::int32_t>(
-        reinterpret_cast<std::intptr_t>(target) - reinterpret_cast<std::intptr_t>(at + 5));
-    std::memcpy(patch.current + 1, &relative, sizeof(relative));
+    // LiA loads the clock function into ESI; preserve both following CALL ESI sites.
+    const std::uint32_t operand = opcode == 0xbe ?
+        static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(target)) :
+        static_cast<std::uint32_t>(reinterpret_cast<std::intptr_t>(target) -
+                                   reinterpret_cast<std::intptr_t>(at + 5));
+    std::memcpy(patch.current + 1, &operand, sizeof(operand));
     if (!VirtualProtect(at, length, PAGE_EXECUTE_READWRITE, &patch.protection)) return false;
     std::memcpy(at, patch.current, length);
     ++g_patch_count;  // journal even when protection restoration/flush fails
@@ -244,6 +291,10 @@ bool game_hud_editor_available() noexcept {return g_installed && g_editor_ready;
 bool game_hud_editing() noexcept {return g_hud_editing!=0;}
 void set_game_hud_editing(bool enabled) noexcept {
     enabled=enabled && game_hud_editor_available();
+    if(running_game_sites().report.engine==GameEngine::lia) {
+        g_lia_editor_request.store(enabled?1:0,std::memory_order_release);
+        return;
+    }
     if(enabled==bool(g_hud_editing))return;
     if(g_input_reset && g_interface)g_input_reset(g_interface);
     g_hud_editing=enabled?1:0;
@@ -267,27 +318,34 @@ void install_game_focus(bool sites_ok) noexcept {
         bridge_report_event("game_focus_rejected", "site bytes differ in game.exe; the game keeps its own lost-focus path");
         return;
     }
+    const auto& sites = focus_sites();
     g_image = reinterpret_cast<std::uint8_t*>(GetModuleHandleW(nullptr));
     g_harness = GetEnvironmentVariableA("EI_RENDERER_HARNESS_DIR", nullptr, 0) > 0;
-    std::uint8_t* const clock = g_image + kCountTimeClockCallRva;
-    std::uint8_t* const handler = g_image + kMessageHandlerCallRva;
-    std::uint8_t* const frame = g_image + kDrawFrameCallRva;
-    const std::uint8_t* const store = g_image + kInactiveRenderStoreRva;
-    std::uint8_t* const reset = g_image + kInterfaceResetCallRva;
+    std::uint8_t* const clock = g_image + sites.clock;
+    std::uint8_t* const handler = g_image + sites.handler;
+    std::uint8_t* const frame = g_image + sites.frame;
+    const std::uint8_t* const store = g_image + sites.inactive_store;
+    std::uint8_t* const reset = g_image + sites.reset_call;
 
     // Live bytes: the stock instruction, or a call another hook put there,
     // which is then chained (the outer frame-timing profile hooks the same
     // three sites and installs first).
-    const bool clock_stock = clock[0] == 0xff && clock[1] == 0x15 && absolute_operand(clock + 2, kTimeGetTimeIatRva);
-    const bool clock_chained = clock[0] == 0xe8 && clock[5] == 0x90;
+    const bool clock_stock = clock[0] == (sites.clock_pointer_load ? 0x8b : 0xff) &&
+        clock[1] == (sites.clock_pointer_load ? 0x35 : 0x15) && absolute_operand(clock + 2, sites.clock_iat);
+    ClockFn preceding_clock = nullptr;
+    if (sites.clock_pointer_load && clock[0] == 0xbe && clock[5] == 0x90)
+        std::memcpy(&preceding_clock,clock+1,sizeof(preceding_clock));
+    const bool clock_chained = sites.clock_pointer_load ?
+        preceding_clock && bridge_owns_count_time_clock(reinterpret_cast<const void*>(preceding_clock)) :
+        clock[0] == 0xe8 && clock[5] == 0x90;
     const char* failure = nullptr;
     if (!clock_stock && !clock_chained) failure = "clock_call";
     else if (!call_target(handler)) failure = "message_handler_call";
     else if (!call_target(frame)) failure = "draw_frame_call";
-    else if (store[0] != 0xc6 || store[1] != 0x05 || !absolute_operand(store + 2, kEnableRenderRva) || store[6] != 0)
+    else if (store[0] != 0xc6 || store[1] != 0x05 || !absolute_operand(store + 2, sites.enable_render) || store[6] != 0)
         failure = "enable_render_store";
-    else if (reset[0] != 0xb9 || !absolute_operand(reset + 1, kInterfaceRva) ||
-             call_target(reset + 5) != g_image + kInputResetRva)
+    else if (reset[0] != 0xb9 || !absolute_operand(reset + 1, sites.interface_object) ||
+             call_target(reset + 5) != g_image + sites.reset)
         failure = "interface_reset_call";
     if (failure) {
         char detail[160];
@@ -295,16 +353,25 @@ void install_game_focus(bool sites_ok) noexcept {
         bridge_report_event("game_focus_rejected", detail);
         return;
     }
-    g_clock_slot = reinterpret_cast<ClockFn*>(g_image + kTimeGetTimeIatRva);
-    g_next_clock = clock_chained ? reinterpret_cast<ClockFn>(call_target(clock)) : nullptr;
+    g_clock_slot = reinterpret_cast<ClockFn*>(g_image + sites.clock_iat);
+    g_next_clock = clock_chained ? (sites.clock_pointer_load ? preceding_clock :
+        reinterpret_cast<ClockFn>(call_target(clock))) : nullptr;
     g_next_message_handler = reinterpret_cast<MessageHandlerFn>(call_target(handler));
-    g_window_proc = reinterpret_cast<WindowProcFn>(g_image + kWindowProcEntryRva);
+    g_window_proc = reinterpret_cast<WindowProcFn>(g_image + sites.window_proc);
     g_next_draw_frame = reinterpret_cast<DrawFrameFn>(call_target(frame));
-    g_enable_render = g_image + kEnableRenderRva;
-    g_interface = g_image + kInterfaceRva;
-    g_input_reset = reinterpret_cast<InputResetFn>(g_image + kInputResetRva);
+    g_enable_render = g_image + sites.enable_render;
+    g_interface = g_image + sites.interface_object;
+    // LiA's reset also calls the current screen's embedded input owner. The
+    // shipped WA_ACTIVE caller performs native activation work first; arbitrary
+    // activation calls bypass it (4c5a33a fault at reset+0x2f). HUD editing
+    // separately admits only a completed top-level gameplay HUD.
+    const bool input_reset_supported = running_game_sites().report.engine != GameEngine::lia;
+    g_input_reset = input_reset_supported ? reinterpret_cast<InputResetFn>(g_image + sites.reset) : nullptr;
+    g_lia_input_clear = !input_reset_supported &&
+        std::memcmp(g_image + sites.reset, kLiaInputResetEntry, sizeof(kLiaInputResetEntry)) == 0;
     // Before the game's message loop starts (DirectDrawCreate, main thread).
-    const bool wrote = write_call(clock, reinterpret_cast<const void*>(&focus_count_time_clock), 6) &&
+    const bool wrote = write_call(clock, reinterpret_cast<const void*>(&focus_count_time_clock), 6,
+                                  sites.clock_pointer_load ? 0xbe : 0xe8) &&
                        write_call(handler, reinterpret_cast<const void*>(&focus_message_handler), 5) &&
                        write_call(frame, reinterpret_cast<const void*>(&focus_draw_frame), 5);
     if (!wrote) {
@@ -313,25 +380,32 @@ void install_game_focus(bool sites_ok) noexcept {
                             "call write failed; restoration blocked, hook records retained");
         return;
     }
-    auto* pause=g_image+kEditorPauseCallRva;
-    auto* pointer=g_image+kMissionPointerRva;
-    const std::uint8_t pointer_bytes[]={0x53,0x56,0x8b,0xf1,0x57};
-    const std::uint8_t idle_bytes[]={0xb9,0x50,0x7d,0x7c,0x00,0xb3,0x01,0xe8,0xcb,0xe1,0x19,0x00};
-    const bool editor_stock=call_target(pause)==g_image+kEditorWallClockRva &&
-        !std::memcmp(pointer,pointer_bytes,sizeof(pointer_bytes)) &&
-        !std::memcmp(g_image+kEditorIdleResumeRva,idle_bytes,sizeof(idle_bytes));
+    auto* pause=g_image+sites.pause;
+    auto* pointer=g_image+sites.mission_pointer;
+    const std::uint8_t base_pointer[]={0x53,0x56,0x8b,0xf1,0x57};
+    const std::uint8_t lia_pointer[]={0x56,0x8b,0xf1,0x8b,0x86,0x98,0x01,0x00,0x00};
+    const std::uint8_t base_idle[]={0xb9,0x50,0x7d,0x7c,0x00,0xb3,0x01,0xe8,0xcb,0xe1,0x19,0x00};
+    const std::uint8_t lia_idle[]={0xb0,0x01,0x5e,0x83,0xc4,0x08,0xc3};
+    const std::uint8_t lia_frame[]={0xa0,0x5c,0x68,0x67,0x00,0x83,0xec,0x08,0xa8,0x01,0x56};
+    const bool editor_reset_supported=input_reset_supported || bridge_lia_hud_editor_contract_matches();
+    const bool editor_stock=editor_reset_supported && call_target(pause)==g_image+sites.wall_clock &&
+        !std::memcmp(pointer,sites.clock_pointer_load?lia_pointer:base_pointer,sites.pointer_bytes) &&
+        !std::memcmp(g_image+sites.idle_resume,sites.clock_pointer_load?lia_idle:base_idle,
+                     sites.clock_pointer_load?sizeof(lia_idle):sizeof(base_idle)) &&
+        (!sites.clock_pointer_load || !std::memcmp(g_image+0x00033140,lia_frame,sizeof(lia_frame)));
     if(editor_stock) {
-        auto* forward=static_cast<std::uint8_t*>(VirtualAlloc(nullptr,10,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE));
+        auto* forward=static_cast<std::uint8_t*>(VirtualAlloc(nullptr,sites.pointer_bytes+5,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE));
         if(forward) {
-            std::memcpy(forward,pointer,5);forward[5]=0xe9;
-            const auto relative=static_cast<std::int32_t>(pointer+5-(forward+10));
-            std::memcpy(forward+6,&relative,4);DWORD old=0;
-            if(VirtualProtect(forward,10,PAGE_EXECUTE_READ,&old) && FlushInstructionCache(GetCurrentProcess(),forward,10)) {
+            std::memcpy(forward,pointer,sites.pointer_bytes);forward[sites.pointer_bytes]=0xe9;
+            const auto relative=static_cast<std::int32_t>(pointer+sites.pointer_bytes-(forward+sites.pointer_bytes+5));
+            std::memcpy(forward+sites.pointer_bytes+1,&relative,4);DWORD old=0;
+            if(VirtualProtect(forward,sites.pointer_bytes+5,PAGE_EXECUTE_READ,&old) &&
+               FlushInstructionCache(GetCurrentProcess(),forward,sites.pointer_bytes+5)) {
                 g_mission_pointer_forward=forward;
                 g_editor_wall_clock=reinterpret_cast<void(*)()>(call_target(pause));
-                g_editor_idle_resume=g_image+kEditorIdleResumeRva;
+                g_editor_idle_resume=g_image+sites.idle_resume;
                 g_editor_ready=write_call(pause,reinterpret_cast<const void*>(&editor_count_time_gate),5) &&
-                    write_call(pointer,reinterpret_cast<const void*>(&editor_mission_pointer_gate),5,0xe9);
+                    write_call(pointer,reinterpret_cast<const void*>(&editor_mission_pointer_gate),sites.pointer_bytes,0xe9);
             } else VirtualFree(forward,0,MEM_RELEASE);
         }
     }
@@ -345,14 +419,27 @@ void install_game_focus(bool sites_ok) noexcept {
         bridge_report_event("hud_editor_rejected","pause/input sites unavailable; layout unlocking disabled");
     }
     g_installed = true;
+    if (!input_reset_supported)
+        bridge_report_event(g_lia_input_clear ? "game_activation_override_installed" : "game_activation_override_rejected",
+            g_lia_input_clear ? "LiA keep-running: deactivation and its activation swallowed, interface input bytes cleared"
+                              : "LiA input-reset entry differs; native activation and background behavior retained");
     char detail[160];
     std::snprintf(detail, sizeof(detail), "clock=%s harness=%d", clock_chained ? "chained" : "stock",
                   g_harness ? 1 : 0);
     bridge_report_event("game_focus_installed", detail);
 }
 
+// LiA: the last WM_ACTIVATE swallowed was a deactivation (an activation is
+// swallowed only after one; reset with the hooks).
+static bool lia_swallowed_deactivation = false;
+
 bool uninstall_game_focus() noexcept {
-    set_game_hud_editing(false);
+    if(running_game_sites().report.engine==GameEngine::lia) {
+        // Unload may run on another thread. Retire renderer state without
+        // calling a native input owner from that thread.
+        g_lia_editor_request.store(-1,std::memory_order_relaxed);
+        g_hud_editing.store(0,std::memory_order_release);
+    } else set_game_hud_editing(false);
     if (!restore_calls()) {
         bridge_report_event("game_focus_uninstall_blocked", "call ownership or memory protection changed; records retained");
         return false;
@@ -367,12 +454,30 @@ bool uninstall_game_focus() noexcept {
     g_window_proc = nullptr;
     g_enable_render = nullptr;
     g_input_reset = nullptr;
+    g_lia_input_clear = false;
+    lia_swallowed_deactivation = false;
     g_interface = nullptr;
     return true;
 }
 
 bool game_focus_swallow_activation(HWND window, UINT message, WPARAM wparam) noexcept {
-    if (message != WM_ACTIVATE || !g_installed || !window || window != g_window) return false;
+    if (message != WM_ACTIVATE || !g_installed || !window || window != g_window ||
+        (!g_input_reset && !g_lia_input_clear)) return false;
+    // LiA: the keep-running background mode (harness runs always keep running)
+    // swallows; the pause mode keeps LiA's native minimise/pause path.
+    if (g_lia_input_clear) {
+        const bool keep_running = g_harness ||
+            g_mode.load(std::memory_order_relaxed) != static_cast<int>(BackgroundMode::pause);
+        const bool deactivation = LOWORD(wparam) == WA_INACTIVE || HIWORD(wparam) != 0;
+        // An activation is swallowed only after its deactivation was: nothing was torn down.
+        if (!keep_running || !*g_enable_render || (!deactivation && !lia_swallowed_deactivation)) return false;
+        lia_swallowed_deactivation = deactivation;
+        clear_lia_interface_input();
+        char detail[96];
+        std::snprintf(detail, sizeof(detail), "state=%u minimised=%u lia_input_bytes_cleared", LOWORD(wparam), HIWORD(wparam));
+        bridge_report_event("game_activation_swallowed", detail);
+        return true;
+    }
     // Not running yet (first activation) or already in its inactive state:
     // the game's own path, unchanged.
     if (!*g_enable_render) return false;

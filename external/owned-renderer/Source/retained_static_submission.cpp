@@ -3054,8 +3054,11 @@ bool merge_part_eligible(const VisualPartAsset& part) {
     // Fur prototype, strands: a unit's hair part stays its own record (its
     // strands and undercoat; retained_visual_part_values).
     if (fur_hair_strands(g_fur_mode) && fur_hair_stem(fur_part_stem(part.name))) return false;
+    // A merged draw contains every member's indices. Apply the unit marker
+    // policy before constructing it: colour and shadow admission is per group.
     return part.source_available && part.geometry && part.material && part.surface && !part.weapon && !part.arrow &&
-        !part.explicitly_hidden && part.texture_type!=13 && part.texture_type!=14 && part.texture_type!=16 &&
+        !part.explicitly_hidden && !unit_service_node(part.name.c_str()) &&
+        part.texture_type!=13 && part.texture_type!=14 && part.texture_type!=16 &&
         part.geometry->position_groups && part.geometry->shape_count &&
         part.geometry->positions.size()==std::size_t(part.geometry->shape_count)*part.geometry->position_groups;
 }

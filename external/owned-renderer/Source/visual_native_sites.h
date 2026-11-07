@@ -16,6 +16,22 @@ constexpr std::uint32_t kVisualNativeWeaponLoadFigureReturnRva = 0x001356e0;
 // RET 8, returns 1; and the handler operand its prologue pushes.
 constexpr std::uint32_t kVisualNativeLoadTexturesRva = 0x0011c250;
 constexpr std::uint32_t kVisualNativeLoadTexturesHandlerRva = 0x0031d998;
+// Hero equipment/model refresh, no stack arguments, RET, returns 1. These
+// reload existing part-set textures directly rather than through LoadTextures.
+constexpr std::uint32_t kVisualNativeRefreshEquipmentRva = 0x00136100;
+constexpr std::uint32_t kVisualNativeRefreshEquipmentHandlerRva = 0x0031eb58;
+constexpr std::uint32_t kVisualNativeRefreshEquipmentSlotRva = 0x0033ed4c;
+constexpr std::uint32_t kVisualNativeRefreshModelRva = 0x00136220;
+constexpr std::uint32_t kVisualNativeRefreshModelHandlerRva = 0x0031eb78;
+constexpr std::uint32_t kVisualNativeRefreshModelSlotRva = 0x0033ed50;
+constexpr std::uint32_t kVisualNativeRefreshEquipmentOwnerRva = 0x00136123;
+constexpr std::uint32_t kVisualNativeRefreshModelOwnerRva = 0x00136236;
+constexpr std::uint32_t kVisualNativeRefreshPrimaryCallRva = 0x0013618d;
+constexpr std::uint32_t kVisualNativeRefreshSecondaryCallRva = 0x001361ed;
+constexpr std::uint32_t kVisualNativeRefreshModelCallRva = 0x001362b4;
+constexpr std::uint32_t kVisualNativeTextureReloadRva = 0x002922a0;
+constexpr std::uint32_t kVisualNativeRefreshEquipmentReturnRva = 0x00136218;
+constexpr std::uint32_t kVisualNativeRefreshModelReturnRva = 0x001362de;
 // The stock animation receiver test (no addon receiver jump) and the
 // texture resource Get slot, which holds the native Get directly.
 constexpr std::uint32_t kVisualNativeReceiverRva = 0x0012f3a9;

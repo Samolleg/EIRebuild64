@@ -145,6 +145,8 @@ const void* widescreen_info_draw_entry() noexcept;
 // Our CInterface3D::VirtualToScreen(CRect&) and the camera's cursor-delta
 // conversion at the RMB camera call site.
 const void* widescreen_virtual_to_screen_rect() noexcept;
+// Local measured dimensions, distinct from the shared native cursor entry.
+const void* widescreen_screen_to_virtual_size() noexcept;
 const void* widescreen_cursor_delta() noexcept;
 // The 4:3 content in interface pixels (800 and 600 placed units), updated
 // with the surface: the divisors the camera's mouse normalisation reads.

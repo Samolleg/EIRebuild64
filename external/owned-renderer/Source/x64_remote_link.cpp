@@ -225,10 +225,16 @@ const char* host_unavailable_reason() noexcept {
 
 bool core_wanted() noexcept try {
     const bool forced = core_requested();
+    const std::wstring ini = owned::renderer_config_path();
+    const DWORD attributes = GetFileAttributesW(ini.c_str());
+    const bool fresh = attributes == INVALID_FILE_ATTRIBUTES && GetLastError() == ERROR_FILE_NOT_FOUND;
+    // An old file without this key is still an existing setup. A nonempty
+    // CORE override (including 0) also keeps first-run selection out of it.
+    const bool automatic = fresh && !GetEnvironmentVariableW(L"EI_RENDERER_X64_CORE", nullptr, 0);
     wchar_t value[16]{};
-    GetPrivateProfileStringW(L"graphics", L"x64_render_host", L"false", value, 16, owned::renderer_config_path().c_str());
+    GetPrivateProfileStringW(L"graphics", L"x64_render_host", L"false", value, 16, ini.c_str());
     const bool option = _wcsicmp(value, L"true") == 0 || _wcsicmp(value, L"1") == 0;
-    if (!forced && !option) return false;
+    if (!forced && !option && !automatic) return false;
     const std::wstring marker = attempt_marker();
     if (GetFileAttributesW(marker.c_str()) != INVALID_FILE_ATTRIBUTES) {
         // Rollback: the last start never reached its first frame.
@@ -246,6 +252,17 @@ bool core_wanted() noexcept try {
         leave_notice(text);
         owned::bridge_report_event("x64_host_unavailable", reason);
         return false;
+    }
+    if (automatic) {
+        // Seed the choice before core_ensure loads it and before the host
+        // becomes the sole config writer. Its normal device creation and
+        // capability handshake, not the OS/file precheck, establish GPU support.
+        if (!WritePrivateProfileStringW(L"graphics", L"x64_render_host", L"true", ini.c_str())) {
+            leave_notice("64-bit render host unavailable (could not save the first-run setting). Using the standard renderer.");
+            owned::bridge_report_event("x64_host_unavailable", "could not save the first-run setting");
+            return false;
+        }
+        owned::bridge_report_event("x64_host_first_run", "new configuration: trying the 64-bit render host with Direct3D 11");
     }
     // The marker goes down before the host is launched (core_ensure); the
     // first host frame removes it (note_first_present).

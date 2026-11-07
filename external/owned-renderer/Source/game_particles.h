@@ -304,6 +304,13 @@ GameParticlePixel gameParticlePS(GameParticleOut i){
  c.rgb=gpColor(gpColorOp,gpArg(gpColorArg1,i.d,t),gpArg(gpColorArg2,i.d,t),c.rgb);
  c.a=gpAlpha(gpAlphaOp,gpArg(gpAlphaArg1,i.d,t),gpArg(gpAlphaArg2,i.d,t),c.a);
  if(gpAlphaTest!=0&&!gpCompare(c.a))discard;
+ // Opt-in untextured UI ribbon: uv.y is the signed cross-section. The
+ // derivative makes a one-pixel inner coverage ramp at either edge. Its
+ // caller uses ONE/INVSRCALPHA, so colour and alpha are premultiplied here.
+ [branch]if(gpPadding.x!=0){
+  float coverage=saturate((1-abs(i.uv.y))/max(fwidth(i.uv.y),1e-6));
+  c*=coverage;
+ }
  const float flame=gpCoverageMode==0?gpFlameKey(c.rgb):1; // authored colour, before fog
  // 1: blended like a surface (takes fog colour and in-scatter); 2: additive
  // light, only attenuated.
@@ -341,7 +348,7 @@ struct GameParticleConstants {
     std::uint32_t textured, fog_mode, first;
     std::uint32_t coverage_mode;  // reflection depth coverage (gameParticleDepthPS)
     std::uint32_t count;          // ribbon point count (gameRibbonVS)
-    std::uint32_t padding[2];
+    std::uint32_t padding[2];     // x: opt-in UI ribbon analytic coverage
 };
 static_assert(sizeof(GameParticleConstants) == 192, "game particle constants must match HLSL");
 

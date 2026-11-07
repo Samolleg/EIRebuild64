@@ -862,6 +862,12 @@ public:
         VisualResourceIncarnation resource) const noexcept;
     bool visual_replace_surface(std::uint64_t id,
         std::shared_ptr<const OwnedVisualSurface> value) noexcept;
+    // Entities whose drawn surface was destroyed under them (a native texture
+    // reload recreates the surfaces) and are due a re-read of their live
+    // appearance bindings at this world frame. Each is retried when another
+    // surface is published, else after a doubling wait from 30 frames.
+    bool visual_surface_rebind_candidates(std::uint64_t world_frame,
+        std::vector<std::int32_t>& ids) noexcept;
     bool visual_replace_generated_texture(const std::string& source_name,
         std::shared_ptr<const TextureCpuAsset> value,
         TextureValueSource source = TextureValueSource::generated_memory) noexcept;
@@ -1017,6 +1023,11 @@ private:
         const char* failure_scope = nullptr;
         bool constructed = false;
         bool source_available = true;
+        // A drawn surface was retired with no replacement value: the part
+        // waits for visual_surface_rebind_candidates to re-read its binding.
+        bool surface_lost = false;
+        std::uint64_t surface_rebind_serial = 0, surface_rebind_frame = 0;
+        std::uint32_t surface_rebind_attempts = 0;
         // Scratch ordinals name this record only during the current value
         // evaluation. Target lookup still uses the existing resource owner.
         mutable std::uint64_t frame_serial = 0;
@@ -1164,6 +1175,9 @@ private:
     // Resource creation precedes world admission and can survive world removal.
     // Membership remains solely in live_; this map owns resource incarnations.
     std::map<std::int32_t, VisualEntity> visuals_;
+    // Surface publications so far, and whether any entity is surface_lost.
+    std::uint64_t surface_publish_serial_ = 0;
+    bool surface_lost_any_ = false;
     // Whether visual_publish_forced_weapon_ids may have left any entity
     // forced_hidden (its only writer); false lets an empty list skip the walk.
     bool forced_weapon_hidden_any_ = false;

@@ -200,6 +200,18 @@ void proxy_retire_camp_texture(std::uint64_t id, std::uint64_t generation) noexc
 // The actual initialized overlay/window owner registers after subclass success
 // and clears this before shutdown. No renderer scene lifetime is used for input.
 void bridge_set_camp_input_overlay(DebugOverlay* overlay) noexcept;
+// Accept stock texture-manager creation or the exact bridge-owned HUD hook.
+bool bridge_camp_texture_create_matches() noexcept;
+// Accept stock pane text or the exact installed bridge-owned text hook.
+bool bridge_camp_draw_text_matches() noexcept;
+// Accept stock Clear or the exact installed item-card text pass-through.
+bool bridge_camp_surface_clear_matches() noexcept;
+// Native editor admission; reset is interface-thread-only and requires the
+// completed owned HUD to be the native top screen with its own embedded input.
+bool bridge_lia_hud_editor_contract_matches() noexcept;
+bool bridge_reset_lia_hud_editor_input(void* interface_object) noexcept;
+// Fingerprinted native camera/projection contract; unrelated harness sites stay off.
+bool bridge_lia_back_clip_contract_matches() noexcept;
 std::uint64_t bridge_camp_texture_generation() noexcept;
 bool bridge_camp_texture_manager(void* manager) noexcept;
 void* bridge_camp_texture_owner() noexcept;
@@ -741,6 +753,9 @@ struct NativeWorldGeometry {
     // A non-animated retained figure may use reduced indices while keeping
     // its existing prepared world vertices, pose and shadow-caster identity.
     bool static_lod = false;
+    // Immutable vertex opacity in the packed normal's otherwise unused W.
+    // This source carries no animated terrain metadata or plant sway.
+    bool vertex_opacity = false;
     // Object space: the plant's root point in world space, the sway anchor a
     // posed record reads from its root pose node (instance flags 0x200 and
     // the trunk shape carry the rest). Unused without sway flags.
@@ -1354,7 +1369,7 @@ bool bridge_finish_character_pane_releasedc(
     IDirectDrawSurface7* surface, const void* caller,
     std::uint64_t surface_id, std::uint64_t surface_generation = 0) noexcept;
 bool bridge_consume_character_pane_blt(
-    std::uint64_t source_id, const void* caller,
+    IDirectDrawSurface7* source_surface, std::uint64_t source_id, const void* caller,
     const RECT& destination, const RECT* source_rect,
     Renderer& renderer, HRESULT& result,
     std::uint64_t source_generation = 0) noexcept;
@@ -1402,6 +1417,8 @@ bool bridge_change_driven_poses_enabled() noexcept;
 void bridge_set_fur_mode(int mode) noexcept;
 // Owned party portraits (engine_bridge.cpp submit_owned_portrait).
 void bridge_set_portrait_options(bool owned, bool helmet) noexcept;
+bool bridge_set_world_map_previews(Renderer* renderer, bool enabled) noexcept;
+void bridge_clear_world_map_previews(Renderer* renderer) noexcept;
 void bridge_set_highlight_options(bool briefing, bool selected, bool hover_characters,
                                   bool hover_objects) noexcept;
 void bridge_set_change_driven_poses(bool enabled) noexcept;
@@ -1481,6 +1498,10 @@ WorldFogSnapshot bridge_world_fog_snapshot() noexcept;
 // its world transform changes; null outside a world frame.
 std::shared_ptr<const WorldMistGrid> bridge_world_mist_grid() noexcept;
 std::uint64_t bridge_current_world_epoch() noexcept;
+// Experimental displayed XY pan; game camera state/timing are never changed.
+// OFF invalidates the sampled history before another Step/view can use it.
+void bridge_set_camera_pan_smoothing(bool enabled) noexcept;
+const char* bridge_camera_pan_smoothing_unavailable_reason() noexcept;
 // Game thread, at the renderer's world change: the bridge's world caches
 // (server seed assemblies, frame spare, terrain caster caches).
 void bridge_release_world_caches() noexcept;

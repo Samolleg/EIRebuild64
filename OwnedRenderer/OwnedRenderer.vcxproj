@@ -19,6 +19,8 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\hud_layout_context.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\hud_layout_embedded.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\owned_ui_layers.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\world_map_preview.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_world_map_preview.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\embedded_neighbour_terrain.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\embedded_arena.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\embedded_golem.cpp" />

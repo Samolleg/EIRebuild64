@@ -26,6 +26,7 @@
 #include "fur.h"
 #include "renderer.h"
 #include "engine_bridge.h"
+#include "world_texture_sampler.h"
 #include <d3dcompiler.h>
 #include <algorithm>
 #include <array>
@@ -211,6 +212,11 @@ float3 furLight(float3 albedo,float3 wp,float3 n,float facing,float2 pixel,float
   float3 t=normalize(cross(sn,abs(sn.z)<.9?float3(0,0,1):float3(1,0,0))),b=cross(sn,t);
   visibility=saturate(nativeShadowVisibility(root+sn*.02,t*.01,b*.01,pixel,false));
  }
+ // World hair receives the same sun/cloud visibility as the native material
+ // pass. Cloud transmittance attenuates direct light only: the ambient and
+ // lamps still light the coat. Use the root, like the geometric shadow, and
+ // never sample the world's cloud field at interface-preview coordinates.
+ [branch]if(furKind==1&&furInterface==0)visibility=min(visibility,skyCloudVisibility(root));
  float3 local=0;
  uint2 range=nativePointLightRange(wp);
  [loop]for(uint k=range.x;k<range.y;++k){
@@ -773,12 +779,6 @@ D3D11_DEPTH_STENCIL_DESC fur_depth_desc(bool write) noexcept {
     depth.DepthWriteMask = write ? D3D11_DEPTH_WRITE_MASK_ALL : D3D11_DEPTH_WRITE_MASK_ZERO;
     return depth;
 }
-D3D11_SAMPLER_DESC fur_sampler_desc() noexcept {
-    D3D11_SAMPLER_DESC sampler{}; sampler.Filter = D3D11_FILTER_ANISOTROPIC; sampler.MaxAnisotropy = 8;
-    sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_WRAP; sampler.MaxLOD = D3D11_FLOAT32_MAX;
-    return sampler;
-}
-
 }  // namespace
 
 void append_fur_shader_programs(std::vector<ShaderProgram>& out) {
@@ -872,13 +872,13 @@ void Renderer::draw_fur_records() noexcept {
 #if !EID3D11_FUR_ARMOUR
         fur_report(fur.reported, 10, "fur: fur armour needs the S1 material classes (not in this build)", nullptr);
 #endif
+        const auto fail = [&](const char* reason) {
+            fur_failed_ = true;
+            OutputDebugStringA((std::string("EID3D11 fur: ") + reason + "; fur omitted.\n").c_str());
+            bridge_append_probe_event("fur_omitted", reason);
+            if (d3d12_) d3d12_->omit(reason, false);
+        };
         if (!fur.ready) {
-            const auto fail = [&](const char* reason) {
-                fur_failed_ = true;
-                OutputDebugStringA((std::string("EID3D11 fur: ") + reason + "; fur omitted.\n").c_str());
-                bridge_append_probe_event("fur_omitted", reason);
-                if (d3d12_) d3d12_->omit(reason, false);
-            };
             if (d3d12_) {
                 if (fur.programs12.size() != fur_program_count) return fail("fur programs unavailable (D3D12)");
                 fur.ready = true;
@@ -912,7 +912,6 @@ void Renderer::draw_fur_records() noexcept {
                                                           : D3D11_COLOR_WRITE_ENABLE_RED;
                     }
                 }
-                const D3D11_SAMPLER_DESC sampler = fur_sampler_desc();
                 D3D11_BUFFER_DESC constants{}; constants.ByteWidth = sizeof(FurDrawConstants); constants.Usage = D3D11_USAGE_DYNAMIC;
                 constants.BindFlags = D3D11_BIND_CONSTANT_BUFFER; constants.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
                 if (FAILED(vs(fur_shell_vs, fur.shell_vs)) || FAILED(ps(fur_shell_ps, fur.shell_ps)) ||
@@ -929,7 +928,6 @@ void Renderer::draw_fur_records() noexcept {
                     FAILED(device_->CreateBlendState(&opaque_motion, &fur.opaque_motion)) ||
                     FAILED(device_->CreateBlendState(&blend_motion, &fur.blend_motion)) ||
                     FAILED(device_->CreateBlendState(&no_colour, &fur.no_colour)) ||
-                    FAILED(device_->CreateSamplerState(&sampler, &fur.sampler)) ||
                     FAILED(device_->CreateBuffer(&constants, nullptr, &fur.constants)))
                     return fail("fur pipeline objects unavailable");
                 fur.ready = true;
@@ -1006,9 +1004,10 @@ void Renderer::draw_fur_records() noexcept {
         }
         if (items.empty() || fur.node_upload.empty()) return;
 
-        // DLSS object motion (D3D11 only; the D3D12 backend has no upscaler
-        // yet): with the motion targets and last frame's world vertices.
-        const bool motion = !d3d12_ && scene_composite_.dlss() && rtv_.Get() == scene_composite_.target() &&
+        // Temporal upscaler object motion: with the motion targets and last
+        // frame's world vertices (D3D12: the world pass's, object_motion_ready_d3d12).
+        const bool motion = d3d12_ ? !interface12 && object_motion_ready_d3d12() :
+            scene_composite_.dlss() && rtv_.Get() == scene_composite_.target() &&
             dlss_previous_world_srv_ && scene_composite_.object_motion_target() && dlss_motion_constants_current();
 
         // Per-record constants (shared by every stage of that record).
@@ -1188,14 +1187,27 @@ void Renderer::draw_fur_records() noexcept {
             }
             // The world colour target alone (the colour pass may have bound
             // the shadow history and AO shares beside it); an interface flush
-            // keeps the target its colour batches drew into.
-            if (!interface12) d3d12_->set_target(world_d3d12_.get(), true);
-            d3d12_->set_sampler(9, fur_sampler_desc());
+            // keeps the target its colour batches drew into. With a temporal
+            // upscaler the object motion targets beside it, as on D3D11: the
+            // motion variants, b11 and last frame's world vertices (t46).
+            if (motion) {
+                auto& up = upscale12_;
+                D3D12Texture* const targets[3]{world_d3d12_.get(), up.object_motion.get(), up.object_depth.get()};
+                d3d12_->set_targets(targets, 3, world_d3d12_.get());
+                d3d12_->set_constants(11, up.motion_constants.data(), UINT(sizeof(up.motion_constants)));
+                d3d12_->set_resource(46, up.previous_world.get());
+            } else if (!interface12) d3d12_->set_target(world_d3d12_.get(), !hit_test_active_);   // the hit-test target: no world role
+            const ShaderProgram& shell_ps = programs[motion ? fur_shell_motion_ps : fur_shell_ps];
+            const ShaderProgram& fin_ps = programs[motion ? fur_fin_motion_ps : fur_fin_ps];
+            const ShaderProgram& strand_ps = programs[motion ? fur_strand_motion_ps : fur_strand_ps];
+            d3d12_->set_sampler(9, world_texture_sampler(D3DTFN_LINEAR, D3DTFG_LINEAR, D3DTFP_LINEAR,
+                D3DTADDRESS_WRAP, D3DTADDRESS_WRAP, true, 1u << configured_integer(debug_overlay_.config(), "anisotropy", 3)).description);
             D3D12NativeState opaque;
             opaque.raster = fur_raster_desc(); opaque.depth = fur_depth_desc(true);
+            if (motion) opaque.custom_blend.custom = D3D12NativeState::kCustomBlendMotionTargets;
             D3D12NativeState blended = opaque;
             blended.depth = fur_depth_desc(false);
-            blended.custom_blend.custom = 1;
+            blended.custom_blend.custom = D3D12NativeState::kCustomBlendOver | (motion ? D3D12NativeState::kCustomBlendMotionTargets : 0u);
             blended.custom_blend.source = D3D11_BLEND_SRC_ALPHA; blended.custom_blend.destination = D3D11_BLEND_INV_SRC_ALPHA;
             blended.custom_blend.source_alpha = D3D11_BLEND_ZERO; blended.custom_blend.destination_alpha = D3D11_BLEND_ONE;
             transition_profile_pass(shells_and_fins ? "fur_shells" : "fur_undercoat");
@@ -1205,7 +1217,7 @@ void Renderer::draw_fur_records() noexcept {
                 if (!page) continue;
                 d3d12_->set_resource(1, page);
                 d3d12_->set_constants(12, &item.c, sizeof(item.c));
-                if (!report12(d3d12_->draw_instanced(programs[fur_shell_vs], programs[fur_shell_ps], opaque, item.clipped ? &item.scissor : nullptr,
+                if (!report12(d3d12_->draw_instanced(programs[fur_shell_vs], shell_ps, opaque, item.clipped ? &item.scissor : nullptr,
                         item.c.triangles * 3u, item.instances, false), "fur shells (draw failed)")) continue;
                 profiler_.add_draw(std::uint64_t(item.c.triangles) * item.instances, 1); profiler_.add_batch();
             }
@@ -1217,7 +1229,7 @@ void Renderer::draw_fur_records() noexcept {
                     if (!page) continue;
                     d3d12_->set_resource(1, page);
                     d3d12_->set_constants(12, &item.c, sizeof(item.c));
-                    if (!report12(d3d12_->draw_instanced(programs[fur_fin_vs], programs[fur_fin_ps], opaque, item.clipped ? &item.scissor : nullptr, 18u, item.c.triangles, false),
+                    if (!report12(d3d12_->draw_instanced(programs[fur_fin_vs], fin_ps, opaque, item.clipped ? &item.scissor : nullptr, 18u, item.c.triangles, false),
                             "fur fins (draw failed)")) continue;
                     profiler_.add_draw(std::uint64_t(item.c.triangles) * 6u, 1); profiler_.add_batch();
                 }
@@ -1232,20 +1244,49 @@ void Renderer::draw_fur_records() noexcept {
                         d3d12_->set_resource(1, page);
                         d3d12_->set_resource(98, item.classes12);
                         d3d12_->set_constants(12, &item.c, sizeof(item.c));
-                        if (!report12(d3d12_->draw_indirect(programs[fur_strand_vs], programs[fur_strand_ps], blended, item.clipped ? &item.scissor : nullptr, *fur.args12,
+                        if (!report12(d3d12_->draw_indirect(programs[fur_strand_vs], strand_ps, blended, item.clipped ? &item.scissor : nullptr, *fur.args12,
                                 item.c.args_offset, nullptr, nullptr, true), "fur strands (draw failed)")) continue;
                         profiler_.add_draw(std::uint64_t(item.c.triangles), 1);
                         profiler_.add_batch();
                     }
+                // As on D3D11: blended hair strands do not write depth.
+                // Publish their outer hull for later depth consumers.
+                transition_profile_pass("fur_depth_hull");
+                if (!interface12) d3d12_->set_target(world_d3d12_.get(), !hit_test_active_);
+                D3D12NativeState hull_state = opaque;
+                hull_state.custom_blend.custom = D3D12NativeState::kCustomBlendOver;
+                hull_state.custom_blend.write_mask = 0;
+                for (const auto& item : items) {
+                    if (item.kind != 1 || !item.c.strands_per_triangle) continue;
+                    const D3D12Buffer* page = page12(item);
+                    if (!page) continue;
+                    FurDrawConstants hull = item.c; hull.depth_hull = 1;
+                    d3d12_->set_resource(1, page);
+                    d3d12_->set_constants(12, &hull, sizeof(hull));
+                    if (!report12(d3d12_->draw_instanced(programs[fur_shell_vs], ShaderProgram{}, hull_state,
+                            item.clipped ? &item.scissor : nullptr, hull.triangles * 3u, 1, false), "fur hair depth hull (draw failed)")) continue;
+                    profiler_.add_draw(hull.triangles, 1); profiler_.add_batch();
+                }
             }
             d3d12_->set_resource(1, no_buffer); d3d12_->set_resource(15, no_buffer);
             d3d12_->set_resource(96, no_buffer); d3d12_->set_resource(97, no_buffer);
             d3d12_->set_resource(98, static_cast<const D3D12Texture*>(nullptr));
+            if (motion) {
+                // b11 is also the ground cover and critter frame slot: zero after (draw_object_motion_d3d12).
+                const std::array<float, 20> zero{};
+                d3d12_->set_constants(11, zero.data(), UINT(sizeof(zero)));
+                d3d12_->set_resource(46, no_buffer);
+            }
             if (!interface12) bind_world_targets_d3d12();
             return;
         }
 
         // ---- D3D11.
+        const auto sampling = world_texture_sampler(D3DTFN_LINEAR, D3DTFG_LINEAR, D3DTFP_LINEAR,
+            D3DTADDRESS_WRAP, D3DTADDRESS_WRAP, true, 1u << configured_integer(debug_overlay_.config(), "anisotropy", 3));
+        auto& sampler = sampler_states_[sampling.key];
+        if (!sampler && FAILED(device_->CreateSamplerState(&sampling.description, &sampler))) return fail("fur material sampler unavailable");
+        fur.sampler = sampler;
         const auto structured = [&](UINT count, UINT stride, UINT bind, UINT cpu, D3D11_USAGE usage, ComPtr<ID3D11Buffer>& buffer,
                                     ComPtr<ID3D11ShaderResourceView>& srv, ComPtr<ID3D11UnorderedAccessView>* uav) {
             D3D11_BUFFER_DESC description{}; description.ByteWidth = count * stride; description.Usage = usage;

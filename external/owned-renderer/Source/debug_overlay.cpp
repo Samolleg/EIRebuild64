@@ -165,6 +165,12 @@ const char* blocked_option_note(const RendererConfig& config, const char* key) {
     if (std::strcmp(key, "render_thread") == 0 || std::strcmp(key, "render_thread_frame_latency") == 0)
         return "Scene thread is not yet available in EIRebuild";
 #endif
+    if (std::strcmp(key, "camera_pan_smoothing") == 0)
+#ifdef EID3D11_EMBEDDED
+        return "Camera pan smoothing requires the native game camera contract";
+#else
+        return bridge_camera_pan_smoothing_unavailable_reason();
+#endif
     // Terrain cliffs need the material blend (configured_terrain_cliffs).
     if (std::strcmp(key, "terrain_cliffs") == 0 && configured_value(config, "terrain_blend") <= 0)
         return "needs material blend";
@@ -907,6 +913,30 @@ void reset_ui_button(RendererConfig& config) {
     if(ImGui::Button(ui_text("Cancel"))||ImGui::IsKeyPressed(ImGuiKey_Escape))ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
 }
+// Shared by the player and developer menus. A blocked saved mode can always
+// be turned off; the existing reason describes this session's selected mode,
+// so choose Off before trying another mode after a selected-mode failure.
+void draw_frame_generation_choice(RendererConfig& config, const RendererOption& option) {
+    const char* labels = ui_choices("Off\0" "NVIDIA DLSS Frame Generation\0" "AMD FSR frame generation\0");
+    const int current = std::clamp(option.integer_value, 0, 2);
+    const char* note = blocked_option_note(config, option.key.c_str());
+    const char* selected = labels;
+    for (int mode = 0; mode < current; ++mode) selected += std::strlen(selected) + 1;
+    char preview[256]{};
+    std::snprintf(preview, sizeof(preview), current && note ? "%s (%s)" : "%s", selected, ui_text("unavailable"));
+    if (ImGui::BeginCombo("##value", preview)) {
+        const char* label = labels;
+        for (int mode = 0; mode <= 2; ++mode) {
+            ImGui::BeginDisabled(mode != 0 && note != nullptr);
+            if (ImGui::Selectable(label, mode == current)) config.set_integer(option.key.c_str(), mode);
+            ImGui::EndDisabled();
+            label += std::strlen(label) + 1;
+        }
+        ImGui::EndCombo();
+    }
+    if (note) ImGui::TextDisabled("%s", ui_text(note));
+}
+
 // Options grouped "Diagnostics" (debug views such as the critter showcase)
 // get their own tab; the Graphics tab lists every other group.
 constexpr const char* kDiagnosticsGroup = "Diagnostics";
@@ -963,7 +993,9 @@ void draw_graphics_tab(RendererConfig& config, ImGuiTextFilter& filter, bool dia
         }
         case RendererOptionType::integer: {
             int value = option.integer_value;
-            if (option.key == "camp_ui_layout") {
+            if (option.key == "frame_generation") {
+                draw_frame_generation_choice(config, option);
+            } else if (option.key == "camp_ui_layout") {
                 const char* choices[] = {ui_text("Original UI (comparison)"), ui_text("Wide grid")};
                 if (ImGui::Combo("##value", &value, choices, 2))
                     config.set_integer(option.key.c_str(), value);
@@ -1802,8 +1834,15 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
     case RendererOptionType::boolean: {
         bool value = option->boolean_value;
         const char* note = blocked_option_note(config, setting.key);
-        ImGui::BeginDisabled(note != nullptr);
-        if (ImGui::Checkbox("##value", &value)) config.set_boolean(setting.key, value);
+        const bool camera_pan = std::strcmp(setting.key, "camera_pan_smoothing") == 0;
+        // A saved ON value must still be switchable OFF on an unsupported setup.
+        ImGui::BeginDisabled(note != nullptr && !(camera_pan && value));
+        if (ImGui::Checkbox("##value", &value)) {
+            config.set_boolean(setting.key, value);
+#ifndef EID3D11_EMBEDDED
+            if (camera_pan) bridge_set_camera_pan_smoothing(value);
+#endif
+        }
         ImGui::EndDisabled();
         if (note) { ImGui::SameLine(); ImGui::TextDisabled("%s", ui_text(note)); }
         // The renderer this session actually runs (read-only).
@@ -1830,7 +1869,9 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
         break;
     }
     case RendererOptionType::integer: {
-        if (std::strcmp(setting.key, "upscaler") == 0) {
+        if (std::strcmp(setting.key, "frame_generation") == 0) {
+            draw_frame_generation_choice(config, *option);
+        } else if (std::strcmp(setting.key, "upscaler") == 0) {
             draw_upscaler_choice(config, *option);
         } else if (std::strcmp(setting.key, "upscaler_quality") == 0) {
             draw_upscaler_quality_choice(config, *option);
@@ -2431,7 +2472,11 @@ HRESULT DebugOverlay::render(const RenderProfileSnapshot* profile,
     const bool capture_notice = implementation_->capture_warmup || implementation_->capture_requested ||
         GetTickCount64() < implementation_->capture_notice_until;
     const bool combat_visible = implementation_->combat_ui.prepare(config_);
-    if (!combat_visible && !visible() && resources.critters.labels.empty() && !notice_ && !capture_notice) return S_FALSE;
+    if (world_map_notice_until_ && GetTickCount64() >= world_map_notice_until_) {
+        world_map_notice_.clear(); world_map_notice_until_ = 0;
+    }
+    if (!combat_visible && !visible() && resources.critters.labels.empty() && !notice_ && world_map_notice_.empty() && !capture_notice &&
+        harness_banner_.empty()) return S_FALSE;
 
     apply_ui_language(*implementation_, config_);
     if (!renderer_) ImGui_ImplDX11_NewFrame();
@@ -2493,6 +2538,27 @@ HRESULT DebugOverlay::render(const RenderProfileSnapshot* profile,
         draw->AddRectFilled(ImVec2(at.x - pad, at.y - pad), ImVec2(at.x + size.x + pad, at.y + size.y + pad),
                             IM_COL32(0, 0, 0, 190));
         draw->AddText(at, IM_COL32(255, 170, 60, 255), notice_);
+    }
+    if (!world_map_notice_.empty()) {
+        ImDrawList* draw = ImGui::GetForegroundDrawList();
+        const float pad = 8.f * implementation_->ui_scale;
+        const ImVec2 size = ImGui::CalcTextSize(world_map_notice_.c_str());
+        const ImVec2 at(pad, pad + (notice_ ? ImGui::GetTextLineHeightWithSpacing()*2.f : 0.f));
+        draw->AddRectFilled(ImVec2(at.x-pad*.5f,at.y-pad*.5f),
+            ImVec2(at.x+size.x+pad*.5f,at.y+size.y+pad*.5f),IM_COL32(0,0,0,210));
+        draw->AddText(at,IM_COL32(255,190,80,255),world_map_notice_.c_str());
+    }
+    // Test harness route banner (note verb), left edge, vertically centred.
+    if (!harness_banner_.empty()) {
+        ImDrawList* draw = ImGui::GetForegroundDrawList();
+        const float pad = 6.f * implementation_->ui_scale;
+        const ImVec2 size = ImGui::CalcTextSize(harness_banner_.c_str());
+        const ImVec2 at(pad * 2.f, io.DisplaySize.y * .5f - size.y * .5f);
+        draw->AddRectFilled(ImVec2(at.x - pad, at.y - pad), ImVec2(at.x + size.x + pad, at.y + size.y + pad),
+                            IM_COL32(20, 0, 40, 200));
+        draw->AddRect(ImVec2(at.x - pad, at.y - pad), ImVec2(at.x + size.x + pad, at.y + size.y + pad),
+                      IM_COL32(255, 80, 255, 255), 0.f, 0, 2.f);
+        draw->AddText(at, IM_COL32(255, 255, 255, 255), harness_banner_.c_str());
     }
     ImGui::Render();
 

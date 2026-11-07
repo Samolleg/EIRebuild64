@@ -35,12 +35,16 @@ inline constexpr std::uint32_t kTerrain2CoverTexels = 8; // class texels a 2 m t
 
 // Cover area class of a 2.0 material cell: a plain slot keeps the class the
 // cover gives its own terrain type (gc_type_area of type & 15, here `area`;
-// a soil, paving, stone, gravel or organic family over a grassy type is bare,
-// as the per-tile classifier's bare-family rule); a folded cell (no slot type
+// an authoritative soil, paving, stone, gravel or organic family over a grassy
+// type is bare). Known plain cells may retain their native area when only a
+// placement-inferred name supplies that exclusion. A folded cell (no slot type
 // of its own) takes it from its family's Mapper style. 255: no class.
-inline std::uint8_t terrain2_cover_class(std::uint32_t style, int area) {
-    const bool bare_family = style == 0 || style == 1 || style == 2 || style == 3 || style == 7;
-    if (area >= 0) return std::uint8_t((area == 1 || area == 2) && bare_family ? 0 : area);
+inline bool terrain2_cover_bare_style(std::uint32_t style) noexcept {
+    return style == 0 || style == 1 || style == 2 || style == 3 || style == 7;
+}
+inline std::uint8_t terrain2_cover_class(std::uint32_t style, int area, bool authoritative_bare = true) {
+    if (area >= 0) return std::uint8_t((area == 1 || area == 2) &&
+        terrain2_cover_bare_style(style) && authoritative_bare ? 0 : area);
     switch (style) {
     case 9: return 1;          // grass
     case 8: return 3;          // sand
@@ -132,7 +136,7 @@ RWTexture2D<unorm float4> t2cColor:register(u1);
 // footprint far under every detail, flat (top plane, no liquid, no wall).
 float3 t2cGround(float2 p,uint mode){
  t2cPass=mode;
- float2 surf;return terrain2Ground(0,float3(p,0),float3(p+t2cLayout,0),float3(1e-3,0,0),float3(0,1e-3,0),float3(0,0,1),float3(0,0,1),0,1e3,surf);
+ float2 surf;float3 unvaried;return terrain2Ground(0,float3(p,0),float3(p+t2cLayout,0),float3(1e-3,0,0),float3(0,1e-3,0),float3(0,0,1),float3(0,0,1),0,1e3,surf,unvaried);
 }
 [numthreads(8,8,1)]
 void terrain2CoverCS(uint3 id:SV_DispatchThreadID){

@@ -6,9 +6,9 @@
 #ifdef __cplusplus
 R"hlsl( //"
 #endif
-// Every pixel from the map's own material cells (the blend rows' vertex
-// cells, terrain_tile_blend.h), never from a tile's art; each map resolves
-// only its own cells. The look is terrain 1.0's blend (terrain_tile_blend.hlsl;
+// Each map reads its own material cells (terrain_tile_blend.h); protected
+// families keep authored top art, with modern projection on the sides.
+// The look is terrain 1.0's blend (terrain_tile_blend.hlsl;
 // user verdict 2026-10-31: its edges, cliffs and rock read more natural than
 // the corner masks), on 2.0's own reads:
 //  - field: a warped kernel (quadratic B-spline mixed with bilinear) over the
@@ -220,8 +220,8 @@ float terrain2RockNoise(float h,float v){
 // across the map loop.)
 bool4 terrain2First(bool4 m){bool a=m.x,b=a||m.y,c=b||m.z;return bool4(a,m.y&&!a,m.z&&!b,m.w&&!c);}
 uint terrain2Pick(uint4 v,bool4 m){return m.x?v.x:m.y?v.y:m.z?v.z:v.w;}
-void terrain2Add(inout uint4 sc,inout float4 wq,uint v,float w,bool force){
- bool4 hit=sc==v;
+void terrain2Add(inout uint4 sc,inout float4 wq,inout bool4 authored,uint v,float w,bool keep,bool force){
+ bool4 hit=sc==v&&authored==keep;
  [branch]if(any(hit)){wq+=hit?w:0;return;}
  bool4 open=sc==0xffffu,slot;
  [branch]if(any(open))slot=terrain2First(open);
@@ -230,7 +230,7 @@ void terrain2Add(inout uint4 sc,inout float4 wq,uint v,float w,bool force){
   if(!force&&w<=m)return;
   slot=terrain2First(wq==m);
  }
- sc=slot?v:sc;wq=slot?w:wq;
+ sc=slot?v:sc;wq=slot?w:wq;authored=slot?keep:authored;
 }
 // The exposed rock of a tile's blend row (z bits 13-15: corner 0-3, 4 top,
 // 5 bottom, 7 none; terrain_tile_blend_rows).
@@ -295,6 +295,53 @@ Terrain2Hex terrain2HexCells(float2 s,float2 sDx,float2 sDy,float aw){
 // (Made again by each read, they cost more ALU than the registers saved:
 // +0.35-0.5 ms on the save1027 frame, D3D11.)
 struct Terrain2Planes{Terrain2Hex h[3];};
+// A canonical own plain source needs only its cell and map readiness;
+// neither placed-art UVs nor fold/donor art belongs in this decode.
+bool terrain2OwnPlainCell(uint m,uint cell,out TerrainCliffCell k){
+ uint donor;bool valid=terrainTileBlendCellFrom(cell,0,terrain2AtlasWidth(m),terrain2Ready(m),k,donor);
+ k.slice+=T2_SLICE_BASE;
+ return cell!=0xffffu&&((cell>>6)&63u)!=63u&&valid;
+}
+// Protected plain art: the placed tile's affine basis carries its MPR turn
+// and authored 2 m scale. Homogeneous tiles retain their exact physical slot;
+// on mixed tiles only the selected family's own unmixed plain source is read.
+// This is the owned sampling rule, not a reconstruction of baked layer UVs.
+// The existing family field and boundary scores still mix the contributions.
+bool terrain2AuthoredCell(uint m,uint cell,uint4 art,bool exact,float2 f,
+                         out TerrainCliffCell k,out float2 uv,out float2 du,out float2 dv){
+ float2 a=float2(art.x&65535u,art.x>>16)/65535.0;
+ du=float2(art.y&65535u,art.y>>16)/65535.0-a;
+ dv=float2(art.z&65535u,art.z>>16)/65535.0-a;
+ uint slice=art.w&255u; // policy bits never form part of an atlas slice
+ if(exact){
+  uint2 c=min(uint2((a+.5*(du+dv))*8),7u);
+  cell=(cell&0xf000u)|(slice<<6)|(7u-c.y)*8u+c.x;
+ }
+ bool valid=terrain2OwnPlainCell(m,cell,k);uv=0;
+ if(slice>=63u||!valid)return false;
+ if(exact)uv=a+f.x*du+f.y*dv;
+ else{
+  float2 lo=min(min(a,a+du),min(a+dv,a+du+dv));
+  float2 span=max(abs(du)+abs(dv),1e-6);
+  uv=terrainCliffCellUv(k,(a-lo+f.x*du+f.y*dv)/span);
+  du=du/span*k.size;dv=dv/span*k.size;
+ }
+ return true;
+}
+float3 terrain2AuthoredRead(uint m,uint cell,uint4 art,bool exact,float2 f,float2 dx,float2 dy,out float2 hc){
+ TerrainCliffCell k;float2 uv,du,dv;hc=float2(.5,0);
+ if(cell==0xffffu||!terrain2AuthoredCell(m,cell,art,exact,f,k,uv,du,dv))return terrain2Marker;
+ float3 mean=terrain2AtlasLevel(m,float3(terrainCliffCellUv(k,.5),k.slice),max(log2(max(k.size.x*k.width,1))-1,0));
+#ifdef TERRAIN2_COVER
+ return terrain2CoverValue(cell,mean);
+#else
+ float2 gx=dx.x*du+dx.y*dv,gy=dy.x*du+dy.y*dv;
+ float3 col=terrain2AtlasGrad(m,float3(uv,k.slice),gx,gy);
+ [branch]if(t2Surface)hc.x=terrain2HeightGrad(m,float3(uv,k.slice),gx,gy);
+ hc.y=saturate(dot(mean-col,float3(.2126,.7152,.0722))*t2CavityGain);
+ return col;
+#endif
+}
 // A material's texel term for the decisions (scores, rock edge): its baked
 // height through the planes' hex cells at the fixed decision level
 // (t2DecisionTexel), so which material wins does not change with distance;
@@ -305,14 +352,37 @@ struct Terrain2Planes{Terrain2Hex h[3];};
 // high-passed, integrated slopes), so their heights alone decided snow edges
 // in soft 0.3-0.5 m blobs where 1.0's per-texel luma gave a crisp, grainy
 // edge (user report on 02b04e90, Ingos; A/B save931, 2026-10-31).
-float terrain2Decide(uint m,uint cell,Terrain2Planes P,float3 wp,float luma){
- TerrainCliffCell k;
- [branch]if(cell==0xffffu||!terrain2Cell(m,cell,k))return 0;
+float terrain2Decide(uint m,uint cell,Terrain2Planes P,float3 wp,float luma,
+                     bool authored,uint4 art,bool exact,float2 f){
+ TerrainCliffCell k;float h=0,l=0,t=0;
+ [branch]if(authored){
+  // Only the top keeps the placed affine art. Side decisions use the same
+  // canonical material and world projections as the modern colour below.
+  float2 uv,du,dv;
+  [branch]if(wp.x>0){
+   if(cell==0xffffu||!terrain2AuthoredCell(m,cell,art,exact,f,k,uv,du,dv))return 0;
+   float margin=log2(max(nativeTerrainCliff.w*.125*k.width,1));
+   float lod=clamp(log2(max(k.size.x*k.width*t2DecisionTexel*.5,1)),0,max(margin-.5,0));
+   [branch]if(luma<1)h=wp.x*terrain2HeightLevel(m,float3(uv,k.slice),lod);
+   [branch]if(luma>0){
+    float3 mean=terrain2AtlasLevel(m,float3(terrainCliffCellUv(k,.5),k.slice),max(log2(max(k.size.x*k.width,1))-1,0));
+    l=wp.x*dot(terrain2AtlasLevel(m,float3(uv,k.slice),lod)-mean,float3(.2126,.7152,.0722));
+   }
+   t=wp.x;
+  }
+  wp.x=0;
+  [branch]if(wp.y+wp.z<=0){
+   if(t<=0)return 0;
+   return lerp(clamp(t2HeightGain*(h/t-.5),-.25,.25),clamp(l/t,-.25,.25),luma);
+  }
+  if(!terrain2OwnPlainCell(m,cell,k))return 0;
+ }else{
+  [branch]if(cell==0xffffu||!terrain2Cell(m,cell,k))return 0;
+ }
  float margin=log2(max(nativeTerrainCliff.w*.125*k.width,1));
  float lod=clamp(log2(max(k.size.x*k.width*t2DecisionTexel*.5,1)),0,max(margin-.5,0));
  float3 mean=0;
  [branch]if(luma>0)mean=terrain2AtlasLevel(m,float3(terrainCliffCellUv(k,k.fold>0?.75:.5),k.slice),max(log2(max(k.size.x*k.width,1))-1,0))+k.shift;
- float h=0,l=0,t=0;
  [unroll]for(int p=0;p<3;++p){
   [branch]if(wp[p]>.002){
    Terrain2Hex x=P.h[p];
@@ -334,17 +404,36 @@ float terrain2Decide(uint m,uint cell,Terrain2Planes P,float3 wp,float luma){
 // copied cell: the marker.
 // hc (S3, t2Surface): the read's height (its hex cells' baked heights at
 // the colour's gradients, 0.5 the bake's middle) and crevice share.
-float3 terrain2Read(uint m,uint cell,Terrain2Planes P,float3 wp,out float2 hc){
- TerrainCliffCell k;hc=float2(.5,0);
- [branch]if(cell==0xffffu||!terrain2Cell(m,cell,k))return terrain2Marker;
+// unvaried: only the protected top's colour share, excluded from the
+// caller's macro variation. The shared hex loop owns every side read.
+float3 terrain2Read(uint m,uint cell,Terrain2Planes P,float3 wp,bool authored,uint4 art,bool exact,
+                    float2 f,float2 dx,float2 dy,out float2 hc,out float3 unvaried){
+ TerrainCliffCell k;hc=float2(.5,0);unvaried=0;
+ bool3 projected=wp>.002; // retain eligibility before authored side normalization
+ float top=0,side=1;float3 topColor=0;float2 topHc=float2(.5,0);
+ [branch]if(authored){
+  top=wp.x;side=wp.y+wp.z;
+  [branch]if(top>0)topColor=terrain2AuthoredRead(m,cell,art,exact,f,dx,dy,topHc);
+  unvaried=top*topColor;
+  [branch]if(side<=0){hc=topHc;return topColor;}
+  if(!terrain2OwnPlainCell(m,cell,k)){
+   hc=top*topHc+side*hc;return unvaried+side*terrain2Marker;
+  }
+  // Same normalized side split as exposed rock; top/side colour and
+  // surface values then mix with the original projection shares.
+  wp=float3(0,wp.yz)/max(side,1e-6);
+  projected.x=false;
+ }else{
+  [branch]if(cell==0xffffu||!terrain2Cell(m,cell,k))return terrain2Marker;
+ }
  // terrainTileBlendMean: a folded cell's middle is its quadrant's corner.
  float3 mean=saturate(terrain2AtlasLevel(m,float3(terrainCliffCellUv(k,k.fold>0?.75:.5),k.slice),max(log2(max(k.size.x*k.width,1))-1,0))+k.shift);
 #ifdef TERRAIN2_COVER
- return terrain2CoverValue(cell,mean); // the cover pass's per-material value (terrain2_cover.h)
+ float3 col=terrain2CoverValue(cell,mean); // the cover pass's per-material value (terrain2_cover.h)
 #else
  float3 detail=0;float squares=0,h=0,hw=0;
  [unroll]for(int p=0;p<3;++p){
-  [branch]if(wp[p]>.002){
+  [branch]if(projected[p]){
    Terrain2Hex x=P.h[p];float3 sum=0;
    [unroll]for(int j=0;j<3;++j){
     [branch]if(x.w[j]>0){
@@ -357,8 +446,10 @@ float3 terrain2Read(uint m,uint cell,Terrain2Planes P,float3 wp,out float2 hc){
  }
  detail*=min(rsqrt(max(squares,1e-8)),terrainDetailGainLimit);
  hc=float2(hw>0?h/hw:.5,saturate(-dot(detail,float3(.2126,.7152,.0722))*t2CavityGain));
- return saturate(mean+detail);
+ float3 col=saturate(mean+detail);
 #endif
+ [branch]if(authored){hc=top*topHc+side*hc;return unvaried+side*col;}
+ return col;
 }
 //")hlsl" R"hlsl( //"
 // The ground colour of table entry mi. p: its map-local rest position, pw: its layout frame (noise,
@@ -367,8 +458,8 @@ float3 terrain2Read(uint m,uint cell,Terrain2Planes P,float3 wp,out float2 hc){
 // bedDepth: liquid depth over the pixel, footRise: its height over the
 // local floor. Past the map's edge its edge vertices continue (clamped).
 // surf (S3): the blended (height, roughness), terrain2SurfacePack.
-float3 terrain2Ground(uint mi,float3 p,float3 pw,float3 pDx,float3 pDy,float3 nrm,float3 planes,float bedDepth,float footRise,out float2 surf){
- surf=float2(.5,1);
+float3 terrain2Ground(uint mi,float3 p,float3 pw,float3 pDx,float3 pDy,float3 nrm,float3 planes,float bedDepth,float footRise,out float2 surf,out float3 unvaried){
+ surf=float2(.5,1);unvaried=0;
  t2Map=terrain2Index(mi);t2MapReady=asuint(terrain2Record(mi,2).zw);
 #ifdef T2_ONE_POOL
  [branch]if((t2Map.x>>16)!=0u)return terrain2Marker; // its pool's program is not ready yet (T2_POOL)
@@ -380,6 +471,9 @@ float3 terrain2Ground(uint mi,float3 p,float3 pw,float3 pDx,float3 pDy,float3 nr
  float2 s=p.xy*.5,sw=pw.xy*.5,sDx=pDx.xy*.5,sDy=pDy.xy*.5;
  int2 c=clamp(int2(floor(s)),0,G-1);
  uint4 own=terrain2Tile(mi,int3(c.x,c.y+int(gh),0));
+ uint4 art=terrain2Tile(mi,int3(c,0));
+ float2 authoredF=frac(s);
+ bool ownAuthored=(art.w&4096u)!=0;
  float aw=terrain2AtlasWidth(mi);
  float2 fw=terrain2FacePlanes(planes);
  float3 wp=float3(planes.z,fw);float faceShare=1-planes.z;
@@ -390,7 +484,9 @@ float3 terrain2Ground(uint mi,float3 p,float3 pw,float3 pDx,float3 pDy,float3 nr
  // A known tile with one material everywhere within the field's reach (row
  // z bit 2 clear: never steep, never on the map border): that material.
  [branch]if((own.z&5u)==1u){
-  float2 hc;float3 one=terrain2Read(mi,own.x&65535u,P,wp,hc);
+  float2 hc;
+  float3 one=terrain2Read(mi,own.x&65535u,P,wp,(art.w&256u)!=0,art,
+   ownAuthored&&(art.w>>16)==(own.x&65535u),authoredF,sDx,sDy,hc,unvaried);
   surf=terrain2SurfacePack(float3(hc,terrain2Roughness(own.x&65535u)));return one;
  }
  // Warped field lookup: two octaves of world-space displacement (Low: the
@@ -410,17 +506,18 @@ float3 terrain2Ground(uint mi,float3 p,float3 pw,float3 pDx,float3 pDy,float3 nr
  int2 n=int2(floor(q+.5));float2 d=q-n;
  float3 kx=lerp(float3(.5*(.5-d.x)*(.5-d.x),.75-d.x*d.x,.5*(.5+d.x)*(.5+d.x)),float3(max(-d.x,0),1-abs(d.x),max(d.x,0)),t2Bilinear);
  float3 ky=lerp(float3(.5*(.5-d.y)*(.5-d.y),.75-d.y*d.y,.5*(.5+d.y)*(.5+d.y)),float3(max(-d.y,0),1-abs(d.y),max(d.y,0)),t2Bilinear);
- uint4 sc=0xffffu;float4 wq=0;
+ uint4 sc=0xffffu;float4 wq=0;bool4 authored=false;
  [unroll]for(int ty=0;ty<2;++ty)[unroll]for(int tx=0;tx<2;++tx){
   int2 want=n-1+int2(tx,ty),tc=clamp(want,0,G-1),over=want-tc;
   uint4 r=terrain2Tile(mi,int3(tc.x,tc.y+int(gh),0));
+  uint policies=terrain2Tile(mi,int3(tc,0)).w>>8;
   [unroll]for(int k=0;k<4;++k){
    int vx=tx+(k&1),vy=ty+(k>>1);
    if(!(((k&1)!=0&&tx!=1)||((k>>1)!=0&&ty!=1))){
     // Past the grid the clamped tile's nearer corner (the edge vertex).
     int2 corner=clamp(int2(k&1,k>>1)+over,0,1);int ci=corner.x+2*corner.y;
     uint v=ci==0?r.x&65535u:ci==1?r.x>>16:ci==2?r.y&65535u:r.y>>16;
-    if(v!=0xffffu)terrain2Add(sc,wq,v,kx[vx]*ky[vy],false);
+    if(v!=0xffffu)terrain2Add(sc,wq,authored,v,kx[vx]*ky[vy],((policies>>ci)&1u)!=0,false);
    }
   }
  }
@@ -436,8 +533,9 @@ float3 terrain2Ground(uint mi,float3 p,float3 pw,float3 pDx,float3 pDy,float3 nr
    float core=((own.w>>(8+k0))&1u)!=0?loneGround*(1-smoothstep(t2LoneCore,t2LoneEdge,length(terrain2OnSurface(s+shift-(c+int2(k0&1,k0>>1)),nrm))+ragged)):0;
    [branch]if(core>0){
     uint lone=oc[k0];
-    terrain2Add(sc,wq,lone,0,true);
-    bool4 hit=sc==lone;
+    bool keep=((art.w>>(8+k0))&1u)!=0;
+    terrain2Add(sc,wq,authored,lone,0,keep,true);
+    bool4 hit=sc==lone&&authored==keep;
     wq=hit?max(wq,core*(1+t2Tail)):wq*(1-core*core);
     if(core>loneCore){loneCore=core;loneCell=lone;}
    }
@@ -517,11 +615,12 @@ float3 terrain2Ground(uint mi,float3 p,float3 pw,float3 pDx,float3 pDy,float3 nr
  [loop]for(uint t=0;t<8u;++t){
   bool rk=t>=4u;
   [branch]if(rk?need.x&&decideRock:decide&&wq.x>0){
-   float v=terrain2Decide(mi,rk?cliffRock.x:sc.x,P,rk?wr:wp,rk?0:lumaShare);
+   float v=terrain2Decide(mi,rk?cliffRock.x:sc.x,P,rk?wr:wp,rk?0:lumaShare,
+    !rk&&authored.x,art,ownAuthored&&sc.x==(art.w>>16),authoredF);
    if(rk)rockQ.x=v;else texQ.x=v;
   }
   if(rk){cliffRock=cliffRock.yzwx;cliffW=cliffW.yzwx;rockQ=rockQ.yzwx;need=need.yzwx;}
-  else{sc=sc.yzwx;wq=wq.yzwx;texQ=texQ.yzwx;}
+  else{sc=sc.yzwx;wq=wq.yzwx;texQ=texQ.yzwx;authored=authored.yzwx;}
  }
  // Scores: weight plus, where contested, the texel term, class noise and,
  // for a looser material, its harder partner's low texels.
@@ -581,19 +680,22 @@ float3 terrain2Ground(uint mi,float3 p,float3 pw,float3 pDx,float3 pDy,float3 nr
  // Colours: the slots by their shares, then the rocks (side planes) where
  // they show; one read in a loop (compiled once).
  // S3: their (height, crevice, class roughness) by the same shares.
- float3 cover=0,rc=0,sCover=0,sRock=0;float rw=0;
+ float3 cover=0,rc=0,sCover=0,sRock=0,raw=0;float rw=0;
  float4 cw=er*cliffW;
  [loop]for(uint t2=0;t2<8u;++t2){
   bool rk=t2>=4u;
   float wt=rk?cw.x:a.x;
   [branch]if(wt>0){
-   uint cell=rk?cliffRock.x:sc.x;float2 hc;
-   float3 col=terrain2Read(mi,cell,P,rk?wr:wp,hc),s3=float3(hc,terrain2Roughness(cell));
+   uint cell=rk?cliffRock.x:sc.x;float2 hc;float3 materialRaw;
+   float3 col=terrain2Read(mi,cell,P,rk?wr:wp,!rk&&authored.x,art,
+    ownAuthored&&cell==(art.w>>16),authoredF,sDx,sDy,hc,materialRaw);
+   raw+=wt*materialRaw;
+   float3 s3=float3(hc,terrain2Roughness(cell));
    if(rk){rc+=wt*col;rw+=wt;sRock+=wt*s3;}else{cover+=wt*col;sCover+=wt*s3;}
   }
-  if(rk){cliffRock=cliffRock.yzwx;cw=cw.yzwx;}else{sc=sc.yzwx;a=a.yzwx;}
+  if(rk){cliffRock=cliffRock.yzwx;cw=cw.yzwx;}else{sc=sc.yzwx;a=a.yzwx;authored=authored.yzwx;}
  }
- [branch]if(rw>0){cover=lerp(cover,rc/rw,e);sCover=lerp(sCover,sRock/rw,e);}
+ [branch]if(rw>0){cover=lerp(cover,rc/rw,e);sCover=lerp(sCover,sRock/rw,e);raw*=1-e;}
 #ifndef TERRAIN2_COVER
  // Wall foot: the floor in front of and below the face climbs it over a
  // ragged band: the floor vertices' materials at the plan point moved
@@ -611,6 +713,7 @@ float3 terrain2Ground(uint mi,float3 p,float3 pw,float3 pDx,float3 pDy,float3 nr
   float unfold=min((1+nrm.z)/length(nrm.xy),4);
   float2 sf=clamp((p.xy+down*footRise*unfold)*.5,0,float2(G)-1e-3);int2 cf=int2(floor(sf));float2 ff=sf-cf;
   uint4 r=terrain2Tile(mi,int3(cf.x,cf.y+int(gh),0));
+  uint4 floorArt=terrain2Tile(mi,int3(cf,0));uint floorPolicies=floorArt.w>>8;
   uint4 ground=uint4(r.x&65535u,r.x>>16,r.y&65535u,r.y>>16);
   float4 gw4=float4((1-ff.x)*(1-ff.y),ff.x*(1-ff.y),(1-ff.x)*ff.y,ff.x*ff.y);
   // The ragged edge's noise runs on the plan position (and a little on the
@@ -630,17 +733,27 @@ float3 terrain2Ground(uint mi,float3 p,float3 pw,float3 pDx,float3 pDy,float3 nr
    uint m=ground.x;
    float w=gw4.x*(1-dot(sc==m?a:0,1));
    TerrainCliffCell kg;
-   [branch]if(foot>.002&&m!=0xffffu&&w>.002&&terrain2Cell(mi,m,kg)){
-    gc+=w*terrain2Tap(mi,kg,frac(fs),fdx,fdy);gsum+=w;
-    float fh=.5;[branch]if(t2Surface)fh=terrain2HeightGrad(mi,float3(terrainCliffCellUv(kg,frac(fs)),kg.slice),fdx*kg.size,fdy*kg.size);
-    gs+=w*float3(fh,0,terrain2Roughness(m));
+   [branch]if(foot>.002&&m!=0xffffu&&w>.002){
+    bool keep=((floorPolicies>>k6)&1u)!=0;
+    bool readable;
+    [branch]if(keep){
+     // The existing cliff-foot projection takes precedence here too;
+     // protected families still require their own plain source.
+     readable=terrain2OwnPlainCell(mi,m,kg);
+    }else readable=terrain2Cell(mi,m,kg);
+    [branch]if(readable){
+     gc+=w*terrain2Tap(mi,kg,frac(fs),fdx,fdy);gsum+=w;
+     float fh=.5;[branch]if(t2Surface)fh=terrain2HeightGrad(mi,float3(terrainCliffCellUv(kg,frac(fs)),kg.slice),fdx*kg.size,fdy*kg.size);
+     gs+=w*float3(fh,0,terrain2Roughness(m));
+    }
    }
    ground=ground.yzwx;gw4=gw4.yzwx;
   }
-  [branch]if(gsum>.002){cover=lerp(cover,gc/gsum,foot*gsum);sCover=lerp(sCover,gs/gsum,foot*gsum);}
+  [branch]if(gsum>.002){cover=lerp(cover,gc/gsum,foot*gsum);sCover=lerp(sCover,gs/gsum,foot*gsum);raw*=1-foot*gsum;}
  }
 #endif
  surf=terrain2SurfacePack(sCover);
+ unvaried=raw;
  return cover;
 }
 // Share of table entry mi at world xy: smooth in each axis over
@@ -679,7 +792,7 @@ float3 terrain2Color(uint self,float3 x,float3 p,float3 pw,float3 dx,float3 dy,f
   float keep=sum>0?saturate(2*top/sum-1):1;
   rise+=(1-keep)*2*t2FootBand;
  }
- float3 c=0;float total=0;surf=0;
+ float3 c=0,raw=0;float total=0;surf=0;
  uint n=band?uint(nativeTerrain2.w):1u;
  [loop]for(uint i=0;i<n;++i){
   uint mi=i==0u?self:i<=self?i-1u:i;
@@ -688,12 +801,13 @@ float3 terrain2Color(uint self,float3 x,float3 p,float3 pw,float3 dx,float3 dy,f
    T2_FRAME_LANE(mi);
    float3 q=x-terrain2Record(mi,1).xyz;float2 s;
    float3 qp=i==0u?p:q,qw=i==0u?pw:float3(q.xy+terrain2Record(mi,2).xy,q.z);
-   c+=w*terrain2Ground(mi,qp,qw,dx,dy,nrm,planes,bed,rise,s);total+=w;surf+=w*s;
+   float3 unvaried;
+   c+=w*terrain2Ground(mi,qp,qw,dx,dy,nrm,planes,bed,rise,s,unvaried);raw+=w*unvaried;total+=w;surf+=w*s;
   }
  }
  T2_FRAME_LANE(0u);
- c/=total;surf/=total;
- return nativeTerrainMaterial.y>0?c*terrainMacro(pw.xy):c;
+ c/=total;raw/=total;surf/=total;
+ return nativeTerrainMaterial.y>0?(c-raw)*terrainMacro(pw.xy)+raw:c;
 }
 // terrain2Color of walkable ground (top plane, no liquid bed, no wall foot,
 // as the material cache bakes it) at world xy x of table entry self, every
@@ -704,16 +818,17 @@ float3 terrain2Color(uint self,float3 x,float3 p,float3 pw,float3 dx,float3 dy,f
 float3 terrain2FlatColor(uint self,float2 x,float3 dx,float3 dy,float3 nrm,out float2 surf){
  float4 r=terrain2Record(self,0);float2 d=min(x-r.xy,r.zw-x);
  bool band=min(d.x,d.y)<t2BorderBand;
- float3 c=0;float total=0;surf=0;
+ float3 c=0,raw=0;float total=0;surf=0;
  [loop]for(uint mi=0;mi<uint(nativeTerrain2.w);++mi){
   float w=mi==self?(band?max(terrain2MapShare(self,x),1e-3):1):band?terrain2MapShare(mi,x):0;
   [branch]if(w>0){
    float3 q=float3(x-terrain2Record(mi,1).xy,0);float2 s;
-   c+=w*terrain2Ground(mi,q,float3(q.xy+terrain2Record(mi,2).xy,0),dx,dy,nrm,float3(0,0,1),0,1e3,s);total+=w;surf+=w*s;
+   float3 unvaried;
+   c+=w*terrain2Ground(mi,q,float3(q.xy+terrain2Record(mi,2).xy,0),dx,dy,nrm,float3(0,0,1),0,1e3,s,unvaried);raw+=w*unvaried;total+=w;surf+=w*s;
   }
  }
- c/=max(total,1e-3);surf/=max(total,1e-3);
- return nativeTerrainMaterial.y>0?c*terrainMacro(x-terrain2Record(self,1).xy+terrain2Record(self,2).xy):c;
+ c/=max(total,1e-3);raw/=max(total,1e-3);surf/=max(total,1e-3);
+ return nativeTerrainMaterial.y>0?(c-raw)*terrainMacro(x-terrain2Record(self,1).xy+terrain2Record(self,2).xy)+raw:c;
 }
 #ifdef __cplusplus
 //")hlsl"

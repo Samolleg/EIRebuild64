@@ -755,7 +755,7 @@ HRESULT Renderer::upload_native_instances_d3d12(){
 // mip chain (the HUD's atlas textures) becomes one D3D12 texture per key
 // and generation, cached in native_owned_textures_ like the D3D11 copy.
 HRESULT Renderer::get_native_owned_texture_d3d12(const NativeOwnedTextureView& source,D3D12TextureRef& output,
- std::uint64_t& backing,NativeGeometryResult* result,bool world_mips){
+ std::uint64_t& backing,NativeGeometryResult* result,bool world_mips,bool budget_reducible){
  const auto fail=[&](HRESULT hr,const char* operation){return native_geometry_failure(result,hr,operation,true);};
  output.reset();backing=0;
  // A camp icon: the surface table's image (the host icon worker's decode),
@@ -853,11 +853,23 @@ HRESULT Renderer::get_native_owned_texture_d3d12(const NativeOwnedTextureView& s
  // stream (build_native_prebuilt_texture), the same chain or levels.
  try{key=native_owned_mip_texture_key(source,generate);}
  catch(const std::bad_alloc&){return fail(E_OUTOFMEMORY,"texture.key_allocation");}
+ // VRAM budget (renderer_vram_budget.cpp): a reducible world texture with a
+ // mip chain leaves out its top levels while the local budget is short, as
+ // get_native_owned_texture does; small textures stay whole (vram_texture_skip).
+ const UINT top_width=source.mips[0].width,top_height=source.mips[0].height;
+ UINT skip=budget_reducible&&world_mips?vram_texture_skip(top_width,top_height,generate?full_mip_count(top_width,top_height):source.mip_count):0u;
+ if(!uncompressed&&((std::max)(1u,top_width>>skip)%4u||(std::max)(1u,top_height>>skip)%4u))skip=0; // block formats: whole blocks at the top level
  const auto existing=native_owned_textures_.find(key);
  if(existing!=native_owned_textures_.end()&&existing->second.generation==source.generation&&existing->second.d3d12){
   auto& texture=existing->second;
   texture.last_used=native_queue_epoch_;texture.last_used_frame=native_frame_index_;
-  output=texture.d3d12;backing=texture.backing;return S_OK;
+  // Built at another budget level: rebuilt when this frame's rebuild work
+  // allows (the old texture goes with the last record that holds it).
+  UINT stored_width=0,stored_height=0,stored_levels=0;DXGI_FORMAT stored_format=DXGI_FORMAT_UNKNOWN;
+  if(texture.budget_skip==skip||!d3d12_->texture_info(*texture.d3d12,stored_width,stored_height,stored_levels,stored_format)||
+     !vram_take_rebuild(texture_storage_bytes(stored_width,stored_height,stored_levels,stored_format))){
+   output=texture.d3d12;backing=texture.backing;return S_OK;
+  }
  }
  DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;UINT block_bytes=0,pixel_bytes=0;
  switch(source.format){
@@ -881,16 +893,18 @@ HRESULT Renderer::get_native_owned_texture_d3d12(const NativeOwnedTextureView& s
   try{if(!native_owned_box_mips(source,chain))return fail(E_INVALIDARG,"texture.mip_bytes");}
   catch(const std::bad_alloc&){return fail(E_OUTOFMEMORY,"texture.mip_allocation");}
   const UINT levels=static_cast<UINT>(chain.size());
+  const UINT kept=levels>skip?skip:0u; // the top levels the budget leaves out
   D3D12TextureRef texture;
-  HRESULT hr=d3d12_->create_texture(width,height,DXGI_FORMAT_B8G8R8A8_UNORM,texture,levels);
+  HRESULT hr=d3d12_->create_texture((std::max)(1u,width>>kept),(std::max)(1u,height>>kept),DXGI_FORMAT_B8G8R8A8_UNORM,texture,levels-kept);
   if(FAILED(hr))return fail(hr,"texture.create");
   for(UINT index=0,w=width,h=height;index<levels;++index,w=(std::max)(1u,w/2),h=(std::max)(1u,h/2))
-   if(FAILED(hr=d3d12_->write_texture(*texture,RECT{0,0,LONG(w),LONG(h)},chain[index].data(),w*4u,index)))return fail(hr,"texture.write");
+   if(index>=kept&&FAILED(hr=d3d12_->write_texture(*texture,RECT{0,0,LONG(w),LONG(h)},chain[index].data(),w*4u,index-kept)))return fail(hr,"texture.write");
   if(native_owned_texture_serial_>=((1ull<<63)-1))return fail(E_OUTOFMEMORY,"texture.serial");
   try{
    NativeOwnedTexture value{};
    value.backing=(1ull<<63)|++native_owned_texture_serial_;
    value.generation=source.generation;value.format=format;value.width=width;value.height=height;value.mip_count=source.mip_count;
+   value.budget_skip=kept;
    value.last_used=native_queue_epoch_;value.last_used_frame=native_frame_index_;value.d3d12=texture;
    backing=value.backing;
    native_owned_textures_[key]=std::move(value);
@@ -898,8 +912,10 @@ HRESULT Renderer::get_native_owned_texture_d3d12(const NativeOwnedTextureView& s
   output=std::move(texture);
   return S_OK;
  }
+ // Authored levels upload from level `skip` (the budget's top levels left out).
+ const UINT kept=source.mip_count>skip?skip:0u;
  D3D12TextureRef texture;
- HRESULT hr=d3d12_->create_texture(width,height,format,texture,source.mip_count);
+ HRESULT hr=d3d12_->create_texture((std::max)(1u,width>>kept),(std::max)(1u,height>>kept),format,texture,source.mip_count-kept);
  if(FAILED(hr))return fail(hr,"texture.create");
  for(UINT index=0;index<source.mip_count;++index){
   const NativeOwnedTextureMip& mip=source.mips[index];
@@ -907,13 +923,14 @@ HRESULT Renderer::get_native_owned_texture_d3d12(const NativeOwnedTextureView& s
   const UINT row_pitch=block_bytes?(std::max)(1u,(mip.width+3u)/4u)*block_bytes:mip.width*pixel_bytes;
   const UINT rows=block_bytes?(std::max)(1u,(mip.height+3u)/4u):mip.height;
   if(std::uint64_t(row_pitch)*rows>mip.bytes)return fail(E_INVALIDARG,"texture.mip_bytes");
-  if(FAILED(hr=d3d12_->write_texture(*texture,RECT{0,0,LONG(mip.width),LONG(mip.height)},mip.data,row_pitch,index)))return fail(hr,"texture.write");
+  if(index>=kept&&FAILED(hr=d3d12_->write_texture(*texture,RECT{0,0,LONG(mip.width),LONG(mip.height)},mip.data,row_pitch,index-kept)))return fail(hr,"texture.write");
  }
  if(native_owned_texture_serial_>=((1ull<<63)-1))return fail(E_OUTOFMEMORY,"texture.serial");
  try{
   NativeOwnedTexture value{};
   value.backing=(1ull<<63)|++native_owned_texture_serial_;
   value.generation=source.generation;value.format=format;value.width=width;value.height=height;value.mip_count=source.mip_count;
+  value.budget_skip=kept;
   value.last_used=native_queue_epoch_;value.last_used_frame=native_frame_index_;value.d3d12=texture;
   backing=value.backing;
   native_owned_textures_[key]=std::move(value);
@@ -1083,16 +1100,30 @@ HRESULT Renderer::prepare_native_poses_d3d12(){
 }
 
 // The world target for this engine frame: created at the world size (the
-// output size, or a temporal upscaler's render size; no render scale on this
-// backend yet), bound and cleared as D3D11 binds scene_composite_.target()
-// and world_dsv_ at begin_engine_frame_at. With an upscaler its targets too.
+// render scale of the output size, or a temporal upscaler's render size),
+// bound and cleared as D3D11 binds scene_composite_.target() and world_dsv_
+// at begin_engine_frame_at. With an upscaler its targets too; below 100%
+// render scale without one, the world-size resolved image the composite
+// writes and upscales (SceneComposite::create's resolved_).
 HRESULT Renderer::bind_world_d3d12(){
+ // A frame begin inside the zone hit-test frame keeps drawing into its target
+ // (begin_engine_frame_at's hit-test rebind on D3D11).
+ if(hit_test_active_){world_d3d12_bound_=true;bind_world_targets_d3d12();return S_OK;}
  if(!world_d3d12_||!d3d12_->texture_matches(*world_d3d12_,width_,height_,DXGI_FORMAT_R11G11B10_FLOAT)){
   world_d3d12_.reset();
   const HRESULT hr=d3d12_->create_target(width_,height_,world_d3d12_,DXGI_FORMAT_R11G11B10_FLOAT);
   if(FAILED(hr)){d3d12_->omit("world target (creation failed)",true);return hr;}
  }
- if(temporal_upscaler()&&FAILED(ensure_upscaler_d3d12()))d3d12_->omit("temporal upscaler targets (creation failed)",true);
+ if(temporal_upscaler()){if(FAILED(ensure_upscaler_d3d12()))d3d12_->omit("temporal upscaler targets (creation failed)",true);}
+ else if(width_!=output_width_||height_!=output_height_){
+  auto& up=upscale12_;
+  if(!up.resolved||!d3d12_->texture_matches(*up.resolved,width_,height_,DXGI_FORMAT_B8G8R8A8_UNORM)){
+   up.resolved.reset();
+   if(FAILED(d3d12_->create_target(width_,height_,up.resolved,DXGI_FORMAT_B8G8R8A8_UNORM,DXGI_FORMAT_UNKNOWN))){
+    up.resolved.reset();d3d12_->omit("render-scale resolved image (creation failed)",true);
+   }
+  }
+ }else upscale12_.resolved.reset();
  world_d3d12_bound_=true;
  if(FAILED(ensure_shadow_history_d3d12()))d3d12_->omit("temporal sun-shadow history (targets unavailable)",false);
  // The AO ambient share for this world frame (cleared at its start), then the
@@ -1209,6 +1240,9 @@ void Renderer::bind_shadow_history_d3d12(bool active) noexcept{
 // frame the ambient share at slot 2. Every world draw returns to these; the
 // world pixel programs write the visibility (SV_Target1) and share (SV_Target2).
 void Renderer::bind_world_targets_d3d12(bool history) noexcept{
+ // The zone hit-test frame: its target alone (as rtv_ alone on D3D11), not
+ // the world's role (no marker colour in the zone mask; hit_test_frame_apply).
+ if(hit_test_active_){world_history_bound12_=false;d3d12_->set_target(world_d3d12_.get(),false);return;}
  D3D12Texture* const visibility=history&&!scene_composited_&&!shadow_history_committed_&&
   shadow_history_current_frame_==native_frame_index_?shadow_history_mask12_[shadow_history_current_index_].get():nullptr;
  world_history_bound12_=visibility!=nullptr;
@@ -1402,7 +1436,16 @@ HRESULT Renderer::composite_world_d3d12(){
  if(world_d3d12_bound_&&world_d3d12_)capture_water_history();
  d3d12_->set_target(nullptr);
  scene_composited_=true;
+ // Selection rectangles requested after the world pass and before this
+ // composite: the first interface output (composite_world's order), on the
+ // back buffer, after the HUD-less copy.
+ const auto draw_pending_rectangles=[this]{
+  for(const auto& pending:pending_screen_rectangles_)
+   if(FAILED(draw_screen_rectangle_d3d12(pending.request,pending.viewport)))d3d12_->omit("selection rectangle (draw failed)",false);
+  pending_screen_rectangles_.clear();
+ };
  if(!world_d3d12_bound_||!world_d3d12_){
+  draw_pending_rectangles();
   const HRESULT dimmed=dim_hud_layout_d3d12();
   transition_profile_pass("ui_composition");return FAILED(world)?world:dimmed;
  }
@@ -1440,11 +1483,14 @@ HRESULT Renderer::composite_world_d3d12(){
    bloom_ceiling(fog_prepared_frame_==native_frame_index_*2u?bloom_fog_headroom_:0.f),
    configured_floating_point(config,"bloom_threshold",1.f),configured_boolean(config,"bloom_debug_view",false)));
  }
- // The upscaler (or, failing it this frame, the filtered upscale) into the output.
- const HRESULT upscaled=scene_output_d3d12()?upscale_world_d3d12():S_OK;
+ // The upscaler (or, failing it this frame, the filtered upscale) into the
+ // output; below 100% render scale without one, the filtered upscale
+ // (composite_world's scene_upscale).
+ const HRESULT upscaled=!scene_output_d3d12()?S_OK:temporal_upscaler()?upscale_world_d3d12():filtered_upscale_d3d12();
  d3d12_->clear_slots();d3d12_->set_target(nullptr);
  world_output_this_present_=true;
  capture_hudless_d3d12();
+ draw_pending_rectangles();
  const HRESULT dimmed=dim_hud_layout_d3d12();
  transition_profile_pass("ui_composition");
  return FAILED(world)?world:FAILED(copied)?copied:FAILED(upscaled)?upscaled:dimmed;
@@ -1555,11 +1601,22 @@ bool Renderer::evaluate_frame_generation_d3d12() noexcept{
 // below the minimum; revert only when the rate changes by more than what
 // disabling it explains). Only intervals between two game frames count, and
 // stalls over 200 ms are left out (a load or hitch is no low rate).
-void Renderer::update_frame_generation_auto_off() noexcept{
+void Renderer::update_frame_generation_auto_off(int output_limit) noexcept{
  const int min_fps=frame_generation_mode_?configured_integer(debug_overlay_.config(),"frame_generation_min_fps",30):0;
  if(min_fps<=0){
   if(fg_low_rate_)bridge_report_event("fg_auto_off","frame generation resumed: auto-off disabled or frame generation off");
   fg_low_rate_=fg_rate_previous_game_=false;fg_low_rate_windows_=0;fg_rate_window_ms_=0.0;fg_rate_window_count_=0;fg_rate_cost_ms_=-1.0;
+  return;
+ }
+ // A total-output cap cannot sustain more than half that rate while
+ // generating. Keep the user's minimum guard, and do not repeatedly resume
+ // from the faster one-present rate while the same cap still forbids it.
+ if(output_limit>0&&double(output_limit)*.5<min_fps){
+  if(!fg_low_rate_){char text[192];std::snprintf(text,sizeof(text),
+   "frame generation paused: output cap %d FPS allows less than frame_generation_min_fps %d rendered FPS",output_limit,min_fps);
+   bridge_report_event("fg_auto_off",text);}
+  fg_low_rate_=true;fg_rate_previous_game_=false;fg_low_rate_windows_=0;
+  fg_rate_window_ms_=0;fg_rate_window_count_=0;fg_rate_cost_ms_=0;
   return;
  }
  const bool game=!fg_not_game_frame_;
@@ -1590,7 +1647,8 @@ void Renderer::update_frame_generation_auto_off() noexcept{
   bridge_report_event("fg_auto_off",text);
   return;
  }
- if((mean+fg_rate_cost_ms_)*1.1>target_ms){fg_low_rate_windows_=0;return;}
+ if((output_limit>0&&double(output_limit)*.5<double(min_fps)*1.1)||
+    (mean+fg_rate_cost_ms_)*1.1>target_ms){fg_low_rate_windows_=0;return;}
  if(++fg_low_rate_windows_<3)return;
  fg_low_rate_=false;fg_low_rate_windows_=0;
  std::snprintf(text,sizeof(text),"present %llu: frame generation resumed: rendered %.1f FPS off (%.1f with generating) clears frame_generation_min_fps %d by 10%% for 3 s",
@@ -1815,7 +1873,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  if(native_pending_draws_.empty()&&!static_reuse){discard_native();return S_OK;}
  struct Discard{Renderer& renderer;~Discard(){renderer.discard_native();}} discard{*this};
  // The static object (2), terrain (3) and neighbour opaque (4) sets draw.
- if(layout_slot>4){
+ if(layout_slot>=5&&layout_slot<kMapOpaqueLayout){
   d3d12_->omit("native static sets",true);
   return S_OK;
  }
@@ -1828,7 +1886,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  // bake -- the layout, work and per-batch totals of the frame that built it
  // (flush_native_static_set checked its keys); any other use of a static
  // layout rebuilds it, so its bake stops being valid first.
- const NativeStaticSet* static_set=layout_slot==2?&native_static_set_:layout_slot==3?&native_terrain_set_:layout_slot==4?&neighbours_.opaque:nullptr;
+ const NativeStaticSet* static_set=native_static_set_for_layout(layout_slot);
  auto& bake=layout.static_bake;
  HRESULT hr=S_OK;
  if(!static_reuse){
@@ -1937,6 +1995,10 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  transition_profile_pass("compute_build");
  // The build dispatches (nativeBuildCS), per geometry page range.
  d3d12_->clear_slots();
+ // prepareNativeVertex also consumes the flat-colour flag for records
+ // without retained world geometry; raster-stage constants arrive later.
+ Constants build_constants{};build_constants.combiner_padding=hit_test_active_?1u:0u;
+ d3d12_->set_constants(0,&build_constants,sizeof(build_constants));
  d3d12_->set_constants(1,&native_world_lighting_,sizeof(native_world_lighting_));
  d3d12_->set_constants(3,clip.data(),UINT(clip.size()));
  d3d12_->set_resource(2,native12_.dynamic.get());
@@ -2007,8 +2069,8 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  d3d12_->set_resource(71,native_rain_rings_bound_?rain12_.rings.get():nullptr);
  // The snow surface for the object build-up (t73, s11; none: its drift relief only).
  d3d12_->set_resource(kSnowSurfaceSlot,snow_surface12_.get());
- {D3D11_SAMPLER_DESC wrap{};wrap.Filter=D3D11_FILTER_ANISOTROPIC;wrap.MaxAnisotropy=8;
-  wrap.AddressU=wrap.AddressV=wrap.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;wrap.MaxLOD=D3D11_FLOAT32_MAX;d3d12_->set_sampler(kSnowSurfaceSampler,wrap);}
+ d3d12_->set_sampler(kSnowSurfaceSampler,world_texture_sampler(D3DTFN_LINEAR,D3DTFG_LINEAR,D3DTFP_LINEAR,
+  D3DTADDRESS_WRAP,D3DTADDRESS_WRAP,true,1u<<configured_integer(debug_overlay_.config(),"anisotropy",3)).description);
  // Crown impostor atlas (t44/t45, nativeImpostorTexel in nativePS and nativePrepassPS); null before any bake.
  d3d12_->set_resource(44,impostors_.albedo12.get());d3d12_->set_resource(45,impostors_.normal12.get());
  // Lights, fog and the noise lattice the world pixel variants read.
@@ -2849,7 +2911,13 @@ HRESULT Renderer::flush_native_shadows_d3d12(){
 HRESULT Renderer::ensure_upscaler_d3d12(){
  auto& up=upscale12_;
  HRESULT hr=S_OK;
- if(!up.resolved||!d3d12_->texture_matches(*up.resolved,width_,height_,DXGI_FORMAT_B8G8R8A8_UNORM)){
+ // All four render-size images together: the plain render-scale path leaves
+ // only resolved at this size, so a switch to DLSS/FSR at the same size must
+ // still create the motion and object images.
+ if(!up.resolved||!d3d12_->texture_matches(*up.resolved,width_,height_,DXGI_FORMAT_B8G8R8A8_UNORM)||
+    !up.motion||!d3d12_->texture_matches(*up.motion,width_,height_,DXGI_FORMAT_R16G16_FLOAT)||
+    !up.object_motion||!d3d12_->texture_matches(*up.object_motion,width_,height_,DXGI_FORMAT_R16G16_FLOAT)||
+    !up.object_depth||!d3d12_->texture_matches(*up.object_depth,width_,height_,DXGI_FORMAT_R32_FLOAT)){
   up.resolved.reset();up.motion.reset();up.object_motion.reset();up.object_depth.reset();
   if(FAILED(hr=d3d12_->create_target(width_,height_,up.resolved,DXGI_FORMAT_B8G8R8A8_UNORM,DXGI_FORMAT_UNKNOWN))||
      FAILED(hr=d3d12_->create_target(width_,height_,up.motion,DXGI_FORMAT_R16G16_FLOAT,DXGI_FORMAT_UNKNOWN))||
@@ -2868,17 +2936,22 @@ HRESULT Renderer::ensure_upscaler_d3d12(){
  return S_OK;
 }
 
-// apply_render_scale's upscaler part on D3D12, between frames: the modes of
-// the options, the world size, and what an upscaler turned off leaves
-// (FSR's images, the targets, the host's NGX feature). Never while a world
+// apply_render_scale on D3D12, between frames: the render scale and the
+// upscaler modes of the options, the world size, and what an upscaler turned
+// off leaves (FSR's images, the targets, the host's NGX feature). The world
+// targets follow the size at the next bind_world_d3d12. Never while a world
 // target is bound: that frame keeps the size it was drawn at.
 #ifndef EID3D11_EMBEDDED
 void Renderer::apply_upscaler_mode_d3d12(){
  if(world_d3d12_bound_)return;
+ const int percent=std::clamp(configured_integer(debug_overlay_.config(),"render_scale",100),kRenderScaleMinimum,100);
  const int dlss=configured_dlss_mode(),fsr=configured_fsr_mode();
- if(dlss==dlss_mode_&&fsr==fsr_mode_)return;
+ if(percent==render_scale_percent_&&dlss==dlss_mode_&&fsr==fsr_mode_)return;
+ render_scale_percent_=percent;
+ const bool mode_changed=dlss!=dlss_mode_||fsr!=fsr_mode_;
  const int old_dlss=dlss_mode_;
  dlss_mode_=dlss;fsr_mode_=fsr;set_world_size();
+ if(!mode_changed)return; // a render scale change alone: the targets follow the size
  dlss_reset_=true;dlss_previous_valid_=false;
  if(fsr_mode_<0)upscale12_.fsr.reset();
  if(dlss_mode_<0)upscale12_.sharpen.reset();
@@ -2917,14 +2990,12 @@ void Renderer::begin_object_motion_d3d12() noexcept{
   up.previous_world.reset();
 }
 
-// draw_dlss_object_motion on D3D12: after a posed batch's material draw
-// (flush_native_d3d12), the same indirect draw through nativeMotionVS/PS
-// into the object motion targets, depth tested LESS_EQUAL against what the
-// batch just wrote, opaque. b11: the previous clip, the jitter and the
-// render size; t46: last frame's world vertices. The caller binds its world
-// targets again. False: nothing drawn (no upscaler, history or pipeline).
-bool Renderer::draw_object_motion_d3d12(const ShaderProgram& vertex,const ShaderProgram& pixel,const D3D12NativeState& batch_state,
-                                        const RECT* scissor,UINT args_offset){
+// The object motion targets can be written now (a world pass with a temporal
+// upscaler, its motion targets and last frame's world vertices), with the b11
+// constants (NativeMotionConstants: last frame's unjittered world clip, the
+// jitter and the render size) written once a world frame, as
+// dlss_motion_constants_current on D3D11.
+bool Renderer::object_motion_ready_d3d12() noexcept{
  auto& up=upscale12_;
  if(!temporal_upscaler()||scene_composited_||hit_test_active_||!world_d3d12_bound_||!world_d3d12_||!up.previous_world||
     !up.object_motion||!up.object_depth)return false;
@@ -2936,6 +3007,19 @@ bool Renderer::draw_object_motion_d3d12(const ShaderProgram& vertex,const Shader
   up.motion_constants[18]=float(width_);up.motion_constants[19]=float(height_);
   up.motion_constants_frame=native_frame_index_;
  }
+ return true;
+}
+
+// draw_dlss_object_motion on D3D12: after a posed batch's material draw
+// (flush_native_d3d12), the same indirect draw through nativeMotionVS/PS
+// into the object motion targets, depth tested LESS_EQUAL against what the
+// batch just wrote, opaque. b11: the previous clip, the jitter and the
+// render size; t46: last frame's world vertices. The caller binds its world
+// targets again. False: nothing drawn (no upscaler, history or pipeline).
+bool Renderer::draw_object_motion_d3d12(const ShaderProgram& vertex,const ShaderProgram& pixel,const D3D12NativeState& batch_state,
+                                        const RECT* scissor,UINT args_offset){
+ auto& up=upscale12_;
+ if(!object_motion_ready_d3d12())return false;
  D3D12NativeState state=batch_state;
  state.depth=D3D11_DEPTH_STENCIL_DESC{};
  state.depth.DepthEnable=TRUE;state.depth.DepthWriteMask=D3D11_DEPTH_WRITE_MASK_ZERO;state.depth.DepthFunc=D3D11_COMPARISON_LESS_EQUAL;
@@ -3000,8 +3084,21 @@ void Renderer::present_upscaled_d3d12(){
 HRESULT Renderer::upscale_world_d3d12(){
  auto& post=post12_;
  if(post.programs.empty())SceneComposite::shader_programs(post.programs);
- if(post.programs.size()<10||!upscale12_.output){d3d12_->omit("temporal upscaler (programs or targets missing)",true);return S_OK;}
+ if(post.programs.size()<10||!upscale12_.output||!upscale12_.resolved||!upscale12_.motion){d3d12_->omit("temporal upscaler (programs or targets missing)",true);return S_OK;}
  if(fsr_mode_>=0?render_fsr_d3d12():render_dlss_d3d12()){d3d12_->count(fsr_mode_>=0?"world frames upscaled (FSR 2)":"world frames upscaled (DLSS)");return S_OK;}
+ const HRESULT hr=filtered_upscale_d3d12();
+ if(hr==S_OK)d3d12_->count("world frames the upscaler did not take (filtered upscale)");
+ return hr;
+}
+
+// SceneComposite::upscale on D3D12: the resolved image (render size) filtered
+// to the back buffer with upscalePS, colour only (the D3D12 interface depth is
+// never the world's). Below 100% render scale every world frame; with a
+// temporal upscaler the frames it cannot take.
+HRESULT Renderer::filtered_upscale_d3d12(){
+ auto& post=post12_;
+ if(post.programs.empty())SceneComposite::shader_programs(post.programs);
+ if(post.programs.size()<6||!upscale12_.resolved){d3d12_->omit("world upscale (programs or resolved image missing)",true);return S_FALSE;}
  transition_profile_pass("scene_upscale");
  const float metrics[4]={1.f/float(width_),1.f/float(height_),float(width_),float(height_)};
  D3D11_SAMPLER_DESC linear{};linear.AddressU=linear.AddressV=linear.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
@@ -3014,8 +3111,8 @@ HRESULT Renderer::upscale_world_d3d12(){
  d3d12_->set_target(nullptr);
  const HRESULT hr=d3d12_->draw(post.programs[0],post.programs[5],post_state(false,false),nullptr,3);
  d3d12_->clear_slots();
- if(hr!=S_OK){d3d12_->omit("world upscale (pipeline not ready)",true);return S_OK;}
- d3d12_->count("world frames the upscaler did not take (filtered upscale)");
+ if(hr!=S_OK){d3d12_->omit("world upscale (pipeline not ready)",true);return S_FALSE;}
+ if(!temporal_upscaler())d3d12_->count("world frames upscaled (render scale)");
  profiler_.add_draw(1,1);profiler_.add_batch();
  return S_OK;
 }

@@ -595,10 +595,12 @@ std::shared_ptr<OwnedPortraitOverlay> build_owned_portrait_overlay(const Texture
 std::string owned_portrait_expression_name(const std::string& neutral, std::int32_t expression);
 // Bare-head portrait (portrait_helmet off): a copy of the unit's assembly in
 // which each helmet head/hair part (hd.armorTT, hr.HH.armorTT) is replaced in
-// place by its bare part (hd, hr.HH) from the unit's model archive. Ordinals
-// stay those of the unit's assembly.
+// place by its bare part (hd, hr.HH) from the unit's model archive. If dressing
+// omitted hair entirely, append the exact native portrait hairstyle (-1: none).
+// Existing ordinals stay those of the unit's assembly.
 std::shared_ptr<const VisualAssemblyAsset> build_owned_portrait_bare_assembly(
-    const VisualAssemblyAsset& unit, const ResourceBlob& model, const char*& reason) noexcept;
+    const VisualAssemblyAsset& unit, const ResourceBlob& model, std::int32_t hair,
+    const char*& reason) noexcept;
 struct OwnedPreviewCommand {
     RetainedVisualSample sample;
     double texture_time = 0;
@@ -610,6 +612,7 @@ struct OwnedPreviewCommand {
     BridgeSceneHandoff handoff;
     std::shared_ptr<OwnedPortraitOverlay> portrait_overlay;   // portraits only
     bool portrait = false;   // a party portrait: its records keep HUD submission order
+    NativeWorldLighting portrait_lighting{};   // captured UI light; never shaped by the map
 };
 void run_owned_preview_command(OwnedPreviewCommand& command) noexcept;
 // One object's wound layer (owned_world_state.cpp): the parts and wound

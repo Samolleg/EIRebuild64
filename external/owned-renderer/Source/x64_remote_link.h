@@ -36,7 +36,11 @@ HRESULT link_removed() noexcept;
 // mode without the ini option.
 bool core_requested() noexcept;
 // Core mode for this start: the player option x64_render_host (eid3d11.ini
-// [graphics]) or the test override. Called once, before any device exists.
+// [graphics]) or the test override. Only an absent ini with no CORE override
+// tries the host by default; existing files keep their saved/default choice.
+// The OS/host precheck permits an attempt; the host's real device creation
+// establishes GPU support. Direct3D 11 remains the default backend.
+// Called once, before any device exists.
 // False, with a notice, when the previous start never reached the host's
 // first frame (the option is turned off: rollback) or when the host cannot
 // run here; the game then runs the standard 32-bit renderer.
