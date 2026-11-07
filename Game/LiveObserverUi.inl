@@ -29,7 +29,9 @@ void AttachUiStatus(json& result) {
     result["world_screen"]=result.value("screen",std::string("none"));
     result["screen"]=ui["screen"];result["cutscene"]=ui["cutscene"];
     result["window_waiting"]=LiveUiAccess::Waiting(theInterface.GetCurrentScreen());
-    result["ui"]=std::move(ui);result["time_scale"]=1;result["time_scale_supported_max"]=1;
+    result["ui"]=std::move(ui);result["time_scale"]=AgentTime::scale;result["time_scale_supported_max"]=8;
+    result["time_scale_debt_ms"]=AgentTime::debtMilliseconds;
+    result["time_scale_client_debt_ms"]=AgentTime::clientDebtMilliseconds;
     auto blockers=json::array();
     if(LiveUiAccess::Depth()>1)blockers.push_back({{"reason","modal_window"}});
     if(LiveUiAccess::Pending())blockers.push_back({{"reason","ui_transition_pending"}});
@@ -192,13 +194,10 @@ bool UiInput(Job& job,Clock::time_point deadline) {
 }
 bool TimeScale(Job& job) {
     const auto& value=job.request.at("params").at("k");
-    if(!value.is_number_integer() || value<1 || value>16)throw std::runtime_error("k must be an integer from 1 to 16");
+    if(!value.is_number_integer() || value<1 || value>8)throw std::runtime_error("k must be an integer from 1 to 8");
     if(!AgentBackground::Enabled())throw std::runtime_error("time_scale requires --background");
-    if(value==1)job.response={{"ok",true},{"status","done"},{"time_scale",1},{"supported_max",1},{"truncated",false}};
-    else {
-        job.response=Error("time_scale_unavailable_without_logic_changes");job.response["time_scale"]=1;
-        job.response["reason"]="CountTime client pacing is frame-dependent; UI, speech and ambient decisions also consume real time";
-        job.response["supported_max"]=1;
-    }
+    const int previous=AgentTime::scale;AgentTime::Set(value.get<int>());
+    job.response={{"ok",true},{"status","done"},{"previous",previous},{"time_scale",AgentTime::scale},
+        {"supported_max",8},{"step_ms",DW_SEGMENT_TIME},{"truncated",false}};
     return true;
 }

@@ -4,6 +4,8 @@
 #include "MoviePlayback.h"
 #include "LiveObserver.h"
 #include "AgentBackground.h"
+#include "AgentTime.h"
+#include "ModEncounter.h"
 #include "../external/owned-renderer/Source/native_lod_observer.h"
 #include "../external/owned-renderer/Source/engine_bridge.h"
 #include "RuntimePaths64.h"
@@ -169,6 +171,7 @@ struct Job {
     std::shared_ptr<RenderCapture> renderFrame;
     std::unordered_set<std::string> renderWorldIds,renderNeighbourIds;
     size_t renderWorldParts=0,renderNeighbourParts=0;
+    std::filesystem::path fileRoot;
     std::string filterName,captureName;
     double filterRadius=2000;
     size_t renderLimit=50;
@@ -213,7 +216,7 @@ bool syntheticCursorActive=false;
 POINT syntheticCursor{};
 bool saveIsolated=false; // game thread only; deliberately survives load/new game
 bool IsCommand(const std::string& method) {
-    return method=="ui_click"||method=="ui_hover"||method=="ui_key"||method=="cutscene_skip"||method=="time_scale"||
+    return method=="save_delete"||method=="screenshot_clear"||method=="arena_stage"||method=="ui_click"||method=="ui_hover"||method=="ui_key"||method=="cutscene_skip"||method=="time_scale"||
            method=="load_save"||method=="new_game"||method=="enter_zone"||method=="save_game"||
            method=="unit_move"||method=="unit_attack"||method=="unit_cast"||method=="unit_use_item"||method=="unit_equip"||method=="unit_order"||method=="unit_teleport"||method=="pause"||method=="quit"||
            method=="set_global"||method=="object_transform"||method=="god_mode"||method=="script_run"||method=="camera"||method=="global_map";
@@ -402,6 +405,8 @@ std::string SavePng(Job& job) {
     return Utf8(file.c_str());
 }
 
+#include "LiveObserverFiles.inl"
+
 void Serve(HANDLE pipe) {
     std::string line;line.reserve(1024);char buffer[1024];
     while(line.size()<=RequestLimit&&line.find('\n')==std::string::npos) {
@@ -456,6 +461,7 @@ void Serve(HANDLE pipe) {
         }
         lock.unlock();
         if(method=="screenshot"&&response.value("ok",false))response["path"]=SavePng(*job);
+        if(!job->fileRoot.empty()&&response.value("ok",false))response=CompleteFileJob(*job);
         }
     }catch(const std::exception& e) {
         GameJournal::Event("ERROR","live_request","reason=%s",GameJournal::Quote(e.what()).c_str());
@@ -1305,6 +1311,7 @@ CPlot3D CommandPoint(const json& params) {
         throw std::runtime_error("point is outside the loaded map");
     return point;
 }
+#include "LiveObserverArena.inl"
 #include "LiveObserverMap.inl"
 #include "LiveUnitCommands.inl"
 #include "LiveUnitEquipment.inl"
@@ -1326,6 +1333,8 @@ bool Command(Job& job,Clock::time_point deadline) {
     }
     if(method=="ui_click"||method=="ui_hover"||method=="ui_key"||method=="cutscene_skip")return UiInput(job,deadline);
     if(method=="time_scale")return TimeScale(job);
+    if(method=="save_delete"||method=="screenshot_clear")return PrepareFileJob(job);
+    if(method=="arena_stage")return ArenaStage(job,deadline);
     if(method=="load_save"||method=="new_game"||method=="enter_zone") {
         if(IWorldConnector.HasReq())throw std::runtime_error("game already has a pending transition");
         const auto name=method=="new_game"?std::string():CommandName(params);
@@ -1480,6 +1489,7 @@ bool Step(Job& job,Clock::time_point deadline) {
     if(method=="camera")return CameraCommand(job);
     if(IsCommand(method))return Command(job,deadline);
     if(method=="status")return LiveStatus(job);
+    if(method=="save_list")return PrepareFileJob(job);
     if(method=="ui_state")return UiState(job,deadline);
     if(method=="audio_state")return AudioState(job,deadline);
     if(method=="perf"){job.response=Perf();return true;}
