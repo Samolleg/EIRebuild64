@@ -117,7 +117,9 @@ bool derive_owned_resource_mounts(const std::wstring& work_path,
     const std::vector<std::uint8_t>& config, ResourceStoreConfig& mounts,
     ResourceFailure& failure, ResourceStoreConfig* text_mounts = nullptr,
     ResourceStoreConfig* data_mounts = nullptr);
-bool owned_resource_runtime_mounts(ResourceStoreConfig& mounts) noexcept;
+// Resolver generation changes on resource-runtime replacement, not zone travel.
+bool owned_resource_runtime_mounts(ResourceStoreConfig& mounts,
+    std::uint64_t* resolver_generation = nullptr) noexcept;
 // x64 host (core mode): the game process's mounts (scene_core::ResourceMounts);
 // the host runs no loader of its own.
 void owned_resource_runtime_adopt_mounts(const ResourceStoreConfig& mounts,

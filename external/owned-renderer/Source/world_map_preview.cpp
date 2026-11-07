@@ -25,7 +25,12 @@ using Clock = std::chrono::steady_clock;
 constexpr std::size_t kChunkVertices =
     65532; // complete triangles, uint16 components
 constexpr std::uint64_t kIdentityDescriptionBytes = 32ull << 20;
+#ifdef EID3D11_EMBEDDED
+// The x64 host admits the complete mod allod; retail keeps its original budget.
+constexpr std::uint64_t kAllodBytes = 512ull << 20;
+#else
 constexpr std::uint64_t kAllodBytes = 192ull << 20;
+#endif
 constexpr std::uint32_t kTextureSide = 512;
 constexpr unsigned kBins = 32;
 
@@ -568,10 +573,19 @@ std::uint64_t reduce_texture_view(Texture &texture) {
 }
 Texture *largest_reducible_texture(Section &section) {
   Texture *largest = nullptr;
-  for (auto &texture : section.textures)
-    if (texture.mips.size() > 1 &&
-        (!largest || texture.mips.front().bytes > largest->mips.front().bytes))
+  for (auto &texture : section.textures) {
+    if (texture.mips.size() < 2)
+      continue;
+    const bool compressed = texture.format == NativeOwnedTextureFormat::dxt1 ||
+                            texture.format == NativeOwnedTextureFormat::dxt3 ||
+                            texture.format == NativeOwnedTextureFormat::dxt5;
+    const auto &next = texture.mips[1];
+    // Small BC mips are valid inside a chain, but cannot become its base level.
+    if (compressed && (next.width % 4 || next.height % 4))
+      continue;
+    if (!largest || texture.mips.front().bytes > largest->mips.front().bytes)
       largest = &texture;
+  }
   return largest;
 }
 // Clips once during preparation. The projected union must not duplicate
@@ -1477,6 +1491,7 @@ struct WorldMapPreview::Impl {
   std::unique_ptr<Cache> cache;
   std::vector<std::size_t> active;
   std::string cache_failure, binding_failure;
+  bool cache_reused = false;
 };
 WorldMapPreview::WorldMapPreview() : impl_(std::make_unique<Impl>()) {}
 WorldMapPreview::~WorldMapPreview() = default;
@@ -1495,6 +1510,7 @@ void WorldMapPreview::release() noexcept {
   impl_->enabled = false;
   impl_->cache.reset();
   impl_->cache_failure.clear();
+  impl_->cache_reused = false;
 }
 namespace {
 bool same_section(const WorldMapPreviewSection &a,
@@ -1511,6 +1527,7 @@ bool WorldMapPreview::precache_loading(
     ResourceStoreConfig mounts, std::vector<WorldMapPreviewSection> sections,
     std::string &failure) noexcept {
   deactivate();
+  impl_->cache_reused = false;
   try {
     if (!failure.empty())
       throw std::runtime_error(failure);
@@ -1526,6 +1543,7 @@ bool WorldMapPreview::precache_loading(
                    impl_->cache->descriptions.begin(), same_section)) {
       // Same descriptions and mounts: a section that failed to prepare fails
       // again from the same data, so its cached failure is reused as well.
+      impl_->cache_reused = true;
       bridge_report_event("world_map_preview_cache_reused",
                           sections.front().zone.c_str());
       for (const auto &s : impl_->cache->status)
@@ -1671,6 +1689,7 @@ bool WorldMapPreview::activate(std::uint64_t generation,
 WorldMapPreviewCacheStats WorldMapPreview::cache_stats() const noexcept {
   WorldMapPreviewCacheStats result;
   if (!impl_->cache) return result;
+  result.reused = impl_->cache_reused;
   result.sections = std::uint32_t(impl_->cache->status.size());
   for (const auto &status : impl_->cache->status) {
     if (status.state == WorldMapPreviewState::ready) ++result.ready;

@@ -107,9 +107,9 @@ void Precache(CRenderer* renderer) noexcept {
     });
     const auto* zone = theMap.GetZoneByName(IWorldClient.GetCurrentZoneName());
     GameJournal::Event("RENDER", "world_map_preview_precache",
-        "generation=%llu allod=%s enabled=%u sections=%u ready=%u failed=%u retained_mb=%.3f source_peak_mb=%.3f precache_ms=%.3f hr=%08lx",
+        "generation=%llu allod=%s enabled=%u sections=%u ready=%u failed=%u reused=%u retained_mb=%.3f source_peak_mb=%.3f precache_ms=%.3f hr=%08lx",
         static_cast<unsigned long long>(generation), zone ? LPCSTR(zone->szAllodName) : "",
-        enabled ? 1u : 0u, stats.sections, stats.ready, stats.failed,
+        enabled ? 1u : 0u, stats.sections, stats.ready, stats.failed, stats.reused ? 1u : 0u,
         double(stats.cpu_bytes) / (1024.0 * 1024.0), double(stats.source_peak_bytes) / (1024.0 * 1024.0), elapsed,
         static_cast<unsigned long>(hr));
     if (FAILED(hr)) Failure("World map preview: loading command failed");

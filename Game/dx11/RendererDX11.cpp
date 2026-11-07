@@ -45,7 +45,8 @@ void CDX11::RetireOwnedWorld() noexcept {
     if (!rendererFacade || !rendererFacade->Ready()) return;
     const HRESULT hr = rendererFacade->Visit([](owned::Renderer& renderer) {
         const HRESULT retired = renderer.retire_embedded_world();
-        if (SUCCEEDED(retired)) renderer.retire_world_map_preview(true);
+        // World retirement has drained GPU records; immutable catalog data belongs to the resources.
+        if (SUCCEEDED(retired)) renderer.retire_world_map_preview(false);
         return retired;
     });
     if (FAILED(hr)) GameJournal::Event("ERROR", "world_retire", "hr=%08lx", static_cast<unsigned long>(hr));

@@ -4971,6 +4971,7 @@ private:
     WorldMapPreview world_map_preview_;
 #ifdef EID3D11_EMBEDDED
     bool embedded_world_map_preview_option_ = false;
+    std::uint64_t embedded_world_map_preview_sources_ = 0;
 #endif
     std::uint64_t world_map_preview_generation_ = 0;
     std::vector<std::string> world_map_preview_reasons_;

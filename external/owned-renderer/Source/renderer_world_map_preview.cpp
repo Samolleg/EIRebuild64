@@ -281,8 +281,14 @@ void Renderer::precache_world_map_preview(
   world_map_preview_generation_ = 0;
   world_map_preview_reasons_.clear();
   ResourceStoreConfig mounts;
-  if (failure.empty() && !owned_resource_runtime_mounts(mounts))
+  std::uint64_t sources = 0;
+  if (failure.empty() && !owned_resource_runtime_mounts(mounts, &sources))
     failure = "World map preview: loading resource mounts are unavailable";
+#ifdef EID3D11_EMBEDDED
+  if (embedded_world_map_preview_sources_ != sources)
+    world_map_preview_.release();
+  embedded_world_map_preview_sources_ = sources;
+#endif
   const bool ready = world_map_preview_.precache_loading(
       generation, WorldMapPreviewSpace::section_fitted, std::move(mounts),
       std::move(sections), failure);

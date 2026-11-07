@@ -48,12 +48,14 @@ struct WorldMapPreviewStatus {
 struct WorldMapPreviewCacheStats {
   std::uint32_t sections = 0, ready = 0, failed = 0;
   std::uint64_t cpu_bytes = 0, source_peak_bytes = 0;
+  bool reused = false;
 };
 
 // Renderer-owned, render-only catalog of map sections. Default OFF. A
 // loading-screen command prepares sections sequentially with one existing
 // loader worker. The render host holds the loading picture until that command
-// finishes. Sections share one192MiB retained-data budget per native allod;
+// finishes. Sections share a retained-data budget per native allod (192MiB
+// retail, 512MiB embedded);
 // a section admission failure preserves already valid entries.
 // CPU output is retained across map close/reopen and for GPU
 // reset/re-upload; decoded maps and assemblies die after their section has been
