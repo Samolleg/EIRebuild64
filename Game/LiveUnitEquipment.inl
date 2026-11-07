@@ -176,6 +176,8 @@ bool EquipUnit(Job& job,Clock::time_point deadline) {
             auto* old=pers->armors[i];party.AddItemToWagon(old);pers->RemoveArmor(old);break;
         }
         stored=pers->AddArmor(static_cast<CItemArmor*>(input.GetPtr()));
+        pers->stats.RemoveAllArmors();
+        for(int i=0;i<pers->armors.GetSize();++i)pers->stats.Wear(pers->armors[i]);
         runtime=theWorldServer.DuplicateItemWithSrc(stored);unit->Wear(static_cast<CItemArmor*>(runtime));
     } else if(kind==ITID_ITEM_QUICK) {
         stored=CampEquipmentSlot(party,pers->items,slot,input,
