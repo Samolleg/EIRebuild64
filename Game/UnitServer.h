@@ -583,7 +583,7 @@ private:
     float GetHitDist(const SUnitBasicCmd &cmd);
     float GetCloseAttackDist(const SUnitBasicCmd &cmd);
     bool AttackIsDirect(const SUnitBasicCmd &cmd, const CPlot3D &ptTargetPos, int nSegment);
-    bool CreateTestAttackPlan(const SUnitBasicCmd &cmd);
+    bool CreateTestAttackPlan(const SUnitBasicCmd &cmd, bool testPosition = false);
     bool IsLootLocked(CMapObject *pTarget);
     bool NeedReliefTrace(const SUnitBasicCmd &cmd, SUCTraceInfo &info);
     void SetReliefTraceDest(SUCTraceInfo &info, const CPlot3D &ptUnitPos);
@@ -599,7 +599,7 @@ public:
 private:
     // ATTACK PLANNING
     // определяет можно ли атаковать pTarget из текущей позиции, если можно создает план
-    bool CreateAttackPlan(const SUnitBasicCmd &atk, SL1Command &cmd);
+    bool CreateAttackPlan(const SUnitBasicCmd &atk, SL1Command &cmd, bool testPosition = false);
     void StartAttack();
     void MoveToTarget();
     void ExecAttack();

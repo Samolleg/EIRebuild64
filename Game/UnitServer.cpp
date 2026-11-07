@@ -2798,13 +2798,13 @@ bool CUnitServer::AttackIsDirect(const SUnitBasicCmd &cmd, const CPlot3D &ptTarg
 /////////////////////////////////////////////////////////////////////////////////////
 // отличается от простого CreateAttackPlan тем, что не возвращает результат и фиксирует
 // цель на одном месте
-bool CUnitServer::CreateTestAttackPlan(const SUnitBasicCmd &cmd)
+bool CUnitServer::CreateTestAttackPlan(const SUnitBasicCmd &cmd, bool testPosition)
 {
     SL1Command tmp;
     CMapObject *pTarget = cmd.pTarget;
     if (pTarget && pTarget->WhoAmI() == HPC_UNIT)
         pTarget->SetFlag(UNIT_GETFUTUREPOS);
-    bool bRv = CreateAttackPlan(cmd, tmp);
+    bool bRv = CreateAttackPlan(cmd, tmp, testPosition);
     if (pTarget && pTarget->WhoAmI() == HPC_UNIT)
         pTarget->ResetFlag(UNIT_GETFUTUREPOS);
     return bRv;
@@ -2867,7 +2867,9 @@ bool CUnitServer::CanAttackFrom(const SUnitBasicCmd &cmd, const CPlot3D &ptPos)
     CPlot3D prevCP = lpUnit->GetCP();
 
     lpUnit->cp = ptPos;
-    bool bRv = CreateTestAttackPlan(cmd);
+    // This is a hypothetical route endpoint, not a physical placement.
+    // FindAttackPath may probe the target centre while its body is on the map.
+    bool bRv = CreateTestAttackPlan(cmd, true);
     lpUnit->cp = prevCP;
     return bRv;
 }
@@ -2877,7 +2879,7 @@ bool CUnitServer::CanAttackFrom(const SUnitBasicCmd &cmd, const CPlot3D &ptPos)
 // function to create attack plans return TRUE if attack plan creation succeded
 // attack should be made from point unit standing on
 // calcs attackInfo
-bool CUnitServer::CreateAttackPlan(const SUnitBasicCmd &atk, SL1Command &cmd)
+bool CUnitServer::CreateAttackPlan(const SUnitBasicCmd &atk, SL1Command &cmd, bool testPosition)
 {
     int nHit;
     SL0AnimationSeq animation;
@@ -2890,7 +2892,7 @@ bool CUnitServer::CreateAttackPlan(const SUnitBasicCmd &atk, SL1Command &cmd)
 
     // Existing overlaps (including loaded ones) must clear before melee can
     // stop movement and leave both bodies standing inside one another.
-    if (atk.IsAttack() && !atk.HasPointOfUse() && !HasRangedAttack() && GetCurrentWeaponType() != RPGWST_MAGIC &&
+    if (!testPosition && atk.IsAttack() && !atk.HasPointOfUse() && !HasRangedAttack() && GetCurrentWeaponType() != RPGWST_MAGIC &&
         !atk.pTarget.IsEmpty() && atk.pTarget->WhoAmI() == HPC_UNIT &&
         ((CWorldServer *)GetWorld())->aiMap.CheckCircleCollision(lpUnit, lpUnit->GetCP()))
         return false;
