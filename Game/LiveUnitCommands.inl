@@ -134,6 +134,12 @@ CUnit* QueryUnit(int id) {
     if(!unit||unit->IsInvalid()||unit->IsUnreferenced())throw std::runtime_error("unit_not_found");
     return unit;
 }
+CPlot3D MissionPoint(const json& params) {
+    auto point=CommandPoint(params);
+    // UI ground picking returns the actual terrain/bridge height, not zero.
+    if(!params.contains("z"))point.z=theWorld.GetBridgeZValue(point.x,point.y);
+    return point;
+}
 CUnit* CommandTarget(const json& params) {
     auto* target=QueryUnit(PositiveId(params.at("target")));
     auto* visible=theWorld.GetUnit(target->GetID());
@@ -267,7 +273,7 @@ bool Abilities(Job& job,Clock::time_point deadline) {
     if(params.contains("target"))target=CommandTarget(params);
     if(params.contains("x")||params.contains("y")) {
         if(target)throw std::runtime_error("supply target or x and y");
-        point=CommandPoint(params);destination=&point;
+        point=MissionPoint(params);destination=&point;
     }
     auto* server=dynamic_cast<CUnitServer*>(unit->GetUnitSpecific());
     if(!job.response.contains("attack")&&server) {
@@ -416,7 +422,7 @@ bool PlayerUnitCommand(Job& job) {
         if(!spell)throw std::runtime_error("no_spell_in_slot");
         if(params.contains("target")&&(params.contains("x")||params.contains("y")))throw std::runtime_error("supply target or x and y");
         if(params.contains("target"))target=CommandTarget(params);
-        else if(params.contains("x")||params.contains("y"))point=CommandPoint(params);
+        else if(params.contains("x")||params.contains("y"))point=MissionPoint(params);
         else if(quick&&!spell->IsOffensive())target=unit;
         else throw std::runtime_error("explicit_target_or_point_required");
         auto availability=SpellAvailability(unit,slot,quick,target,target?nullptr:&point);
@@ -439,7 +445,7 @@ bool PlayerUnitCommand(Job& job) {
         else if(order=="run"||order=="walk"||order=="crawl"||order=="sneak"||order=="lay")packet=PID_CMD_POSE;
         else if(order=="aggressive"||order=="stealth")packet=PID_CMD_AGGRESSION;
         else if(order=="follow"||order=="unfollow") {
-            packet=PID_CMD_FOLLOW;if(order=="follow") {target=CommandTarget(params);if(target->IsDead()||!ActorError(target->GetID(),false).empty())throw std::runtime_error("follow_leader_not_controlled_alive_unit");}
+            packet=PID_CMD_FOLLOW;if(order=="follow") {target=CommandTarget(params);if(target->IsDead())throw std::runtime_error("follow_target_dead");}
         } else if(order.rfind("weapon:",0)==0) {
             slot=Selector(order,"weapon",QI_MAX_WEAPONS);packet=PID_CMD_SELWEAPON;
             for(int id:ids)if(!QueryUnit(id)->GetQWeapon(slot)||!theWorld.GetUnit(id)->GetQWeapon(slot))throw std::runtime_error("weapon_slot_empty_or_not_synchronized");
