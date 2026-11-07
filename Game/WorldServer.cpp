@@ -3465,8 +3465,10 @@ BOOL CWorldServer::LoadMainMob(const char *pszMprName, const char *pszMobName,
                                CMemorySave &graphChunk, bool bStaticOnly, bool skipScripts)
 {
     OwnedRender::E1MobSource ownedSource(pszMprName, pszMobName);
-    // load ai map if changed
-    if (szZoneFileName.CompareNoCase(pszMprName) != 0)
+    // AI cells hold raw object pointers and obstacle tiles for this MOB.
+    // A different MOB releases those objects, even on the same terrain.
+    if (szZoneFileName.CompareNoCase(pszMprName) != 0 ||
+        szMobFileName.CompareNoCase(pszMobName) != 0)
     {
         aiMap.Clear();
         aiMap.StartDelayedConvert();
