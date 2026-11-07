@@ -179,7 +179,7 @@ bool saveIsolated=false; // game thread only; deliberately survives load/new gam
 bool IsCommand(const std::string& method) {
     return method=="load_save"||method=="new_game"||method=="enter_zone"||method=="save_game"||
            method=="unit_move"||method=="unit_teleport"||method=="pause"||method=="quit"||
-           method=="set_global"||method=="object_transform"||method=="god_mode"||method=="script_run"||method=="camera";
+           method=="set_global"||method=="object_transform"||method=="god_mode"||method=="script_run"||method=="camera"||method=="global_map";
 }
 
 json Error(const char* message) {return {{"ok",false},{"error",message},{"truncated",false}};}
@@ -1210,6 +1210,8 @@ CPlot3D CommandPoint(const json& params) {
         throw std::runtime_error("point is outside the loaded map");
     return point;
 }
+#include "LiveObserverMap.inl"
+
 bool Command(Job& job) {
     // The first listed command, even if rejected, protects every subsequent
     // slot write in this process. Reading an owner's slot remains permitted.
@@ -1249,6 +1251,7 @@ bool Command(Job& job) {
         return true;
     }
     auto* client=CommandClient();
+    if(method=="global_map")return GlobalMapCommand(job,client);
     if(method=="save_game") {
         const auto name=CommandName(params);
         if(name.rfind("mcp_",0)!=0)throw std::runtime_error("save_game requires the mcp_ prefix");
