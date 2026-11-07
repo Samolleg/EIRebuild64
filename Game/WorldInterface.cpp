@@ -4,6 +4,7 @@
 #include "CorePerf.h"
 #include "GameJournal.h"
 #include "LiveObserver.h"
+#include "AgentBackground.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "WorldInterface.h"
@@ -259,8 +260,17 @@ void CWorldClientInterface::ExitZone(int nExitPoint)
 void CWorldClientInterface::GoCamp(EInterface iface)
 {
     if(ModEncounter::AccessLocked())return;
+    auto *player = theWorld.GetPlayer();
+    // The agent's map preview is already CAMP over the original mission/base.
+    // Leave it through the normal protocol before requesting another camp UI.
+    if (AgentBackground::Enabled() && iface == IFACE_CAMP && player &&
+        player->GetStatus() == CPlayerClient::CPS_CAMP &&
+        player->GetPlayer()->curInterface == IFACE_GLOBAL_MAP &&
+        theWorldServer.GetServerMode() == SERV_MODE_LOCAL &&
+        (theWorldServer.curInterface == IFACE_MISSION || theWorldServer.curInterface == IFACE_BASE))
+        player->FinishCamp();
     theInterface.SetScreensMustDie();
-    theWorld.GetPlayer()->GoCamp(iface);
+    player->GoCamp(iface);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CWorldClientInterface::GoFieldCamp()
