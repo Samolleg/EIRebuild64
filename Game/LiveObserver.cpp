@@ -20,6 +20,13 @@
 #include "ModFalloutProjection.h"
 #include "I3DMain.h"
 #include "I3DScreen.h"
+#include "I3DScreenMission.h"
+#include "I3DScreenBase.h"
+#include "I3DScreenGlobalMap.h"
+#include "I3DScreenMainMenu.h"
+#include "I3DScreenCamp.h"
+#include "I3DScreenDebug.h"
+#include "I3DScreenEndGame.h"
 #include "GameMain.h"
 #include "OwnedRender/E2Host.h"
 #include "OwnedRender/E3Input.h"
@@ -209,7 +216,7 @@ bool IsCommand(const std::string& method) {
     return method=="ui_click"||method=="ui_hover"||method=="ui_key"||method=="cutscene_skip"||method=="time_scale"||
            method=="load_save"||method=="new_game"||method=="enter_zone"||method=="save_game"||
            method=="unit_move"||method=="unit_attack"||method=="unit_cast"||method=="unit_use_item"||method=="unit_equip"||method=="unit_order"||method=="unit_teleport"||method=="pause"||method=="quit"||
-           method=="set_global"||method=="object_transform"||method=="god_mode"||method=="script_run"||method=="camera";
+           method=="set_global"||method=="object_transform"||method=="god_mode"||method=="script_run"||method=="camera"||method=="global_map";
 }
 
 json Error(const char* message) {return {{"ok",false},{"error",message},{"truncated",false}};}
@@ -294,6 +301,8 @@ void CleanupCapture(Job& job) noexcept {
 }
 bool Step(Job& job,Clock::time_point deadline);
 void UpdateOperationReadiness();
+bool LoadedGlobalMapReady();
+bool GlobalMapOperationReady();
 #include "LiveObserverCamera.inl"
 #include "LiveObserverRender.inl"
 
@@ -809,6 +818,15 @@ void UpdateOperationReadiness() {
     if(!operation.error.empty()) {
         operation.state="error";operation.stage="game_error";operation.inFlight=false;return;
     }
+    if(operation.method=="global_map") {
+        if(!GlobalMapOperationReady())return;
+        if(operation.parameter=="open") {
+            operation.state="done";operation.stage="done";operation.inFlight=false;return;
+        }
+    }
+    if(operation.method=="load_save"&&LoadedGlobalMapReady()) {
+        operation.state="done";operation.stage="done";operation.inFlight=false;return;
+    }
     auto& world=theWorldServer;auto* client=theWorld.GetPlayer();
     if(!world.bMapLoaded||world.GetServerMode()!=SERV_MODE_LOCAL||!theWorld.IsConnected()||
        !client||IWorldConnector.HasReq()||
@@ -838,6 +856,18 @@ void UpdateOperationReadiness() {
     }
     operation.state="done";operation.stage="done";operation.inFlight=false;operation.readinessReason.clear();
 }
+int CurrentScreenMode() {
+    const auto* screen=theInterface.GetCurrentScreen();
+    if(!screen)return IFACE_NONE;
+    if(dynamic_cast<const CI3DScreenMission*>(screen))return IFACE_MISSION;
+    if(dynamic_cast<const CI3DScreenMainMenu*>(screen))return IFACE_MAINMENU;
+    if(dynamic_cast<const CI3DScreenBase*>(screen))return IFACE_BASE;
+    if(dynamic_cast<const CI3DScreenGlobalMap*>(screen))return IFACE_GLOBAL_MAP;
+    if(dynamic_cast<const CI3DScreenCamp*>(screen))return IFACE_CAMP;
+    if(dynamic_cast<const CI3DScreenDebug*>(screen))return IFACE_DEBUG;
+    if(dynamic_cast<const CI3DScreenEndGame*>(screen))return IFACE_ENDGAME;
+    return -1; // A modal/auxiliary screen has no EInterface value.
+}
 json Status() {
     UpdateOperationReadiness();
     auto& world=theWorldServer;const auto& perf=CorePerf::Get();
@@ -848,7 +878,7 @@ json Status() {
                 {"camera",nullptr},{"camera_mode","normal"},{"camera_reason","operation_only"},
                 {"map_loaded",false},{"god",nullptr},{"operation",currentOperation},{"truncated",false}};
     static const char* const screens[]={"none","mission","main_menu","base","global_map","camp","autoplay","debug","endgame","exchange"};
-    const int screen=int(world.curInterface);
+    const int screen=CurrentScreenMode();
     const bool combat=world.IsCombatPause(),modal=theInterface.GetModalPause(),editor=OwnedRender::E3EditorPaused();
     const bool background=OwnedRender::E2BackgroundPaused(NGame::hWnd);
     const auto* player=world.bMapLoaded?world.GetPlayer(0):nullptr;
@@ -1275,6 +1305,7 @@ CPlot3D CommandPoint(const json& params) {
         throw std::runtime_error("point is outside the loaded map");
     return point;
 }
+#include "LiveObserverMap.inl"
 #include "LiveUnitCommands.inl"
 #include "LiveUnitEquipment.inl"
 bool Command(Job& job,Clock::time_point deadline) {
@@ -1317,6 +1348,7 @@ bool Command(Job& job,Clock::time_point deadline) {
         job.response={{"ok",true},{"status","accepted"},{"operation_id",id},{"truncated",false}};
         return true;
     }
+    if(method=="global_map")return GlobalMapCommand(job);
     auto* client=CommandClient();
     if(method=="save_game") {
         const auto name=CommandName(params);

@@ -1437,6 +1437,14 @@ BOOL CPlayerServer::PrsZoneLoaded()
 {
     if (status != PSS_ZONELOADWAIT)
         return FALSE;
+    // A saved map keeps the party in partyPlace until normal FinishCamp.
+    // Acknowledge the new connection without deploying or losing that state.
+    if (pPlayer->curInterface == IFACE_GLOBAL_MAP && GetWorldServer()->GetServerMode() == SERV_MODE_LOCAL &&
+        (GetWorldServer()->curInterface == IFACE_MISSION || GetWorldServer()->curInterface == IFACE_BASE))
+    {
+        status = PSS_CAMP;
+        return TRUE;
+    }
     status = PSS_ACTIVE;
     WantToDeployParty();
     return TRUE;

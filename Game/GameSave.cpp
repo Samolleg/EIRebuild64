@@ -40,10 +40,11 @@ template<> struct Codec<D3DCOLORVALUE>
 };
 template<> struct Codec<SDeployUnitInfo>
 {
+    // Stable personage key: the unit is absent from the map while the party is undeployed.
     static void Store(Writer &w, const SDeployUnitInfo &v)
-    { w.MapReference(v.nID); Field(w,v.ptPlace); Field(w,v.orient); Field(w,v.pose); Field(w,v.dwCurrentWeapon); }
+    { w.Int32(v.nID); Field(w,v.ptPlace); Field(w,v.orient); Field(w,v.pose); Field(w,v.dwCurrentWeapon); }
     static void Load(Reader &r, SDeployUnitInfo &v)
-    { v.nID=r.MapReference(); Field(r,v.ptPlace); Field(r,v.orient); Field(r,v.pose); Field(r,v.dwCurrentWeapon); }
+    { v.nID=r.Int32(); Field(r,v.ptPlace); Field(r,v.orient); Field(r,v.pose); Field(r,v.dwCurrentWeapon); }
     static void Clear(SDeployUnitInfo &) {}
 };
 template<> struct Codec<SDeployPlayerInfo>

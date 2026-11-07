@@ -888,11 +888,13 @@ bool retained_static_runtime_requested() noexcept {
     return enabled();
 }
 
-bool owned_resource_runtime_mounts(ResourceStoreConfig& mounts) noexcept {
+bool owned_resource_runtime_mounts(ResourceStoreConfig& mounts,
+    std::uint64_t* resolver_generation) noexcept {
     RuntimeState& state = runtime();
     std::lock_guard<std::mutex> guard(state.lock);
     if ((!state.loader && !state.mounts_adopted) || state.mounts.archives.empty()) return false;
     try { mounts = state.mounts; } catch (...) { return false; }
+    if (resolver_generation) *resolver_generation = state.resolver_generation;
     return true;
 }
 

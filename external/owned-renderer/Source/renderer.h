@@ -1120,6 +1120,14 @@ public:
     int flush_anisotropy_ = -1; // the anisotropy setting while flush_native runs (apply_state), else -1
     const std::array<float,16>* native_frozen_cull_clip() const noexcept { return native_cull_frozen_?&native_cull_clip_:nullptr; }
     bool set_native_world_lighting(const NativeWorldLighting& lighting) noexcept;
+    bool world_map_previews_enabled() const noexcept {
+        return configured_boolean(debug_overlay_.config(), "world_map_previews", false);
+    }
+    std::uint64_t world_map_preview_binding_generation() const noexcept { return world_map_preview_generation_; }
+    WorldMapPreviewCacheStats world_map_preview_cache_stats() const noexcept { return world_map_preview_.cache_stats(); }
+#ifdef EID3D11_EMBEDDED
+    void sync_embedded_world_map_preview_option();
+#endif
     void precache_world_map_preview(std::uint64_t generation,
         std::vector<WorldMapPreviewSection> sections, std::string failure = {});
     void activate_world_map_preview(std::uint64_t generation,
@@ -4961,6 +4969,10 @@ private:
     bool apply_native_lighting(const NativeWorldLighting& lighting);
     NativeWorldLighting native_world_lighting_{};
     WorldMapPreview world_map_preview_;
+#ifdef EID3D11_EMBEDDED
+    bool embedded_world_map_preview_option_ = false;
+    std::uint64_t embedded_world_map_preview_sources_ = 0;
+#endif
     std::uint64_t world_map_preview_generation_ = 0;
     std::vector<std::string> world_map_preview_reasons_;
     bool native_world_cave_ = false;  // the zone is a cave (set_native_world_lighting)
