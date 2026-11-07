@@ -4,6 +4,9 @@
 #include "CorePerf.h"
 #include "LiveObserver.h"
 #include "AgentBackground.h"
+#include "AgentTime.h"
+#include <chrono>
+#include "../external/owned-renderer/Source/engine_bridge.h"
 #include "OwnedRender/E4Camp.h"
 #include "OwnedRender/E3Input.h"
 #include <game_focus.h>
@@ -737,6 +740,8 @@ static bool NGame::ProcessMessages()
     return true;
 }
 
+#include "AgentTime.inl"
+
 const int BAD_RESULT = 0xDEAD;
 
 // The renderer reads game archives (MOB sources, models) for the whole session,
@@ -1057,9 +1062,10 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     try
 #endif // defined( FINALRELEASE ) && defined( NODEBUGINFO )
     {
+        const auto processMessages = AgentBackground::Enabled() ? &AgentProcessMessages : &NGame::ProcessMessages;
         while (true)
         {
-            if (!NGame::ProcessMessages())
+            if (!processMessages())
                 break;
         }
     }

@@ -708,6 +708,7 @@ public:
     void RunThreadDelayed(SScriptThread *pThread);
     // Request-scoped MOB command list; never queues a thread or changes world-script globals.
     bool RunFragment(const CString &source, float &result, CString &error);
+    bool McpArenaThread(const char* name,const char* marker,float value,bool tail,bool validateOnly);
 
     SScriptVariablesSet &GetGlobalVars() { return globalVars; }
     // получить скрипт по его имени, после добавления новых скриптов указатель может стать

@@ -36,7 +36,7 @@ bool MovieStep(Job& job,Clock::time_point deadline) {
             {"cutscene",true},{"window_waiting",movie.holding},{"ui",MovieUi(movie)},{"movie",MovieJson(movie)},
             {"squad_order_blockers",json::array({{{"reason","movie_playback"}}})},
             {"operation",OperationJson()},{"background_agent",AgentBackground::Enabled()},
-            {"time_scale",1},{"time_scale_supported_max",1},{"camera",nullptr},{"camera_reason","movie_playback"},{"truncated",false}};
+            {"time_scale",AgentTime::scale},{"time_scale_supported_max",8},{"camera",nullptr},{"camera_reason","movie_playback"},{"truncated",false}};
         return true;
     }
     const auto& params=job.request.at("params");

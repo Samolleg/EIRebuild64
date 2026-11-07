@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "AgentBackground.h"
 #include "GameJournal.h"
 #include "ModMobCommands.h"
 #include "ModNpcConsumables.h"
@@ -2642,6 +2643,8 @@ bool CScript::RunFragment(const CString &source, float &result, CString &error)
     result = fragment.globalVars.fVars[0];
     return true;
 }
+
+#include "ScriptMcpArena.inl"
 
 void CScript::RunThreadDelayed(SScriptThread *pThread)
 {
