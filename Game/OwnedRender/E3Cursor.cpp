@@ -1,5 +1,6 @@
 #include "E3Cursor.h"
 #include "../AgentBackground.h"
+#include "../LiveObserver.h"
 #include "../CorePerf.h"
 #include "cursor_confinement.h"
 #include "../ErrorDialog.h"
@@ -162,6 +163,7 @@ HRESULT E3QueueCursor(owned::Renderer& renderer, int percent, bool loading) {
     }
 }
 BOOL E3ReadCursor(POINT* point) noexcept {
+    if (LiveObserver::ReadUiCursor(point)) return TRUE;
     if (AgentBackground::Enabled()) {
         if (!point) return FALSE;
         unsigned w=0,h=0;E3Canvas(w,h);*point=POINT{LONG(w/2),LONG(h/2)};return TRUE;
@@ -182,6 +184,8 @@ BOOL E3ReadCursor(POINT* point) noexcept {
     return TRUE;
 }
 BOOL E3WriteCursor(int x, int y) noexcept {
+    if (LiveObserver::WriteUiCursor(x,y)) return TRUE;
+    if (AgentBackground::Enabled()) return FALSE;
     HWND window = E3Window();
     if (!window) return SetCursorPos(x, y);
     if (GetForegroundWindow() != window || ErrorDialog::Active()) return FALSE;

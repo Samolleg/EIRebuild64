@@ -40,12 +40,14 @@ class CI3DScrollBar;
 class CI3DScrollText;
 class CI3DScreenBase : public CI3DScreen
 {
+    friend struct LiveUiAccess;
 private:
     int nCheckExit; // for exiting;
     bool bDoCheckExit;
 
     EBaseScreenModes eMode;
 
+    CStringArray liveTopicCaptions; // same captions already drawn by RedrawTopics
     CStringArray szBriefings;
     CString szBriefing;
     int nCurrentTopic;

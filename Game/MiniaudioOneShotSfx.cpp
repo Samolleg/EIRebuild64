@@ -236,6 +236,7 @@ struct SVoice
     ma_lpf_node occlusionLowPass;
     char name[128];
     unsigned int sequence;
+    uint64_t liveSequence;
     int priority;
     DWORD startTick;
     float gainWithoutMaster;
@@ -3931,6 +3932,8 @@ bool UpdateListener(void *soundManager)
     return true;
 }
 
+#include "LiveAudioHistory.inl"
+
 EStartResult StartDecoded(
     void *soundManager,
     const char *soundName,
@@ -4212,6 +4215,7 @@ EStartResult StartDecoded(
     voice->startTick = GetTickCount();
     voice->sequence = ++StartSequence;
     CopyName(voice->name, sizeof(voice->name), soundName);
+    voice->liveSequence=liveAudioSequence+1;RememberLiveAudio(LiveVoiceEntry(*voice));
     ++ActiveVoiceCount;
     SetLastStartReason("started");
     if (voice->virtualManaged && voice->scenarioSpeech)
@@ -5702,6 +5706,7 @@ void FinalizeFastStreamingSwitchIfDue()
     if (oldSlot != newSlot)
         StopAndUninitStreamingSlot(oldSlot);
     ApplyStreamingGain();
+    RememberLiveMusic();
 #if JMV_MINIAUDIO_STREAMING_MARKERS_DIAGNOSTICS
     LOGINFO("MINIAUDIO_STREAM_MARKERS_FAST_COMPLETE previous=%s current=%s marker_frame=%I64u marker_output_frame=%I64u scheduled_engine_frame=%I64u observed_engine_frame=%I64u overshoot_frames=%I64u",
             oldName[0] != '\0' ? oldName : "<none>",
@@ -6110,6 +6115,7 @@ bool StartStreamingNow(
         sizeof(Streaming.currentPath),
         resolvedPath);
     ApplyStreamingGain();
+    RememberLiveMusic();
 #if JMV_MINIAUDIO_ONESHOT_SFX_DIAGNOSTICS
     if (replaced)
     {
@@ -6558,6 +6564,20 @@ void ResumeStreaming(const char *reason)
 }
 
 
+
+void ReadLiveAudioSnapshot(LiveAudioSnapshot& out) noexcept
+{
+    out.currentCount=0;out.recentCount=liveAudioCount;
+    out.now=GetTickCount64();out.historySince=liveAudioHistorySince;
+    out.overwritten=liveAudioSequence-liveAudioCount;
+    out.engineInitialized=EngineInitialized;out.outputAvailable=OutputDeviceAvailable();
+    for(const auto& voice:Voices)if(voice.active && voice.soundInitialized && !ma_sound_at_end(&voice.sound))
+        out.current[out.currentCount++]=LiveVoiceEntry(voice);
+    if(Streaming.initialized && Streaming.playing && Streaming.activeSlot<2 && Streaming.slotInitialized[Streaming.activeSlot])
+        out.current[out.currentCount++]=LiveMusicEntry();
+    for(unsigned i=0;i<liveAudioCount;++i)
+        out.recent[i]=liveAudioHistory[(liveAudioNext+256-liveAudioCount+i)%256];
+}
 
 void PrepareNativeManager(void *soundManager)
 {

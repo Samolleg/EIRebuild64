@@ -32,6 +32,10 @@ public:
     CameraDrawScope& operator=(const CameraDrawScope&) = delete;
 };
 void ResetCamera() noexcept;
+// Game-thread synthetic UI cursor; no OS cursor or window reads.
+bool ReadUiCursor(POINT*) noexcept;
+bool WriteUiCursor(int x,int y) noexcept;
+void ReleaseUiCursor() noexcept;
 const CPlot3D& LogicObservationPosition(const CPlot3D& ordinary) noexcept;
 int ParticleLogicVisibility(const SBoundingVolume&, int renderedVisibility) noexcept;
 // These seams copy typed inputs only while render_state/screenshot is pending.

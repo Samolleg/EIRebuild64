@@ -21,6 +21,7 @@ struct SCursor2DInfo
 ///////////////////////////////////////////////////////////////////////////////////////////////////
 class CI3DCursor
 {
+    friend struct LiveUiAccess;
 private:
     BOOL m_isShow;
     SCursor2DInfo *m_pCursorInfo;

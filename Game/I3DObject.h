@@ -13,6 +13,7 @@ class CDXGISurface;
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DPolyArea
 {
+    friend struct LiveUiAccess;
     friend struct E4CampAccess;
     friend struct E3HudAccess;
 private:
@@ -136,6 +137,7 @@ public:
 class CI3DMapObjTranslation;
 class CI3DObject : public CBase3D, public CI3DHandler
 {
+    friend struct LiveUiAccess;
     friend struct E4CampAccess;
     friend struct E3HudAccess;
 private:

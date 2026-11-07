@@ -6,6 +6,23 @@ class CStringArray;
 
 namespace MiniaudioOneShotSfx
 {
+// Native mixer facts for a request-driven observer. No new playback owners.
+struct LiveAudioEntry {
+    char file[260]{},name[128]{};
+    uint64_t sequence=0,started=0;
+    uint32_t id=0,sourceId=0;
+    int priority=0;
+    float gain=0,position[3]{};
+    bool music=false,speech=false,dialog=false,spatial=false,looping=false;
+    bool paused=false,playing=false,scenario=false;
+};
+struct LiveAudioSnapshot {
+    LiveAudioEntry current[65]{},recent[256]{};
+    unsigned currentCount=0,recentCount=0;
+    uint64_t now=0,historySince=0,overwritten=0;
+    bool engineInitialized=false,outputAvailable=false;
+};
+void ReadLiveAudioSnapshot(LiveAudioSnapshot&) noexcept;
 // Host-thread device snapshot: display names and stable endpoint IDs, same indices.
 bool GetPlaybackDevices(CStringArray& names, CStringArray& ids);
 // Host-thread API: release after the video sound has detached.

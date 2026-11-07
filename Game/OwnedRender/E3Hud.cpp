@@ -472,6 +472,7 @@ bool E3ClockTooltip(CI3DToolTip* tooltip) {return E3HudAccess::ClockTooltip(tool
 bool E3HudDraw2D(CI3DObject* object) {return E3HudAccess::Draw2D(object);}
 bool E3HudBlit(CI3DSurface* surface) {return E3HudAccess::Blit(surface);}
 bool E3HudDraw(CI3DObject* object,CRenderer* renderer) {return E3HudAccess::Draw(object,renderer);}
+int E3HudPanel(CI3DObject* object) noexcept {return E3HudAccess::Panel(object);}
 int E3HudHit(CI3DObject* object,POINT pixel) noexcept {return E3HudAccess::Hit(object,pixel);}
 bool E3HudInside(CI3DObject* object,POINT pixel,bool& inside) noexcept {return E3HudAccess::Inside(object,pixel,inside);}
 bool E3HudAreaInside(CI3DObject* object,unsigned area,POINT pixel,bool& inside) noexcept {return E3HudAccess::AreaInside(object,area,pixel,inside);}

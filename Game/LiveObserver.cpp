@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "ModFinalGolem.h"
+#include "MiniaudioOneShotSfx.h"
 #include "LiveObserver.h"
 #include "AgentBackground.h"
 #include "../external/owned-renderer/Source/native_lod_observer.h"
@@ -51,6 +52,7 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <cfloat>
 #include <condition_variable>
 #include <deque>
 #include <filesystem>
@@ -110,6 +112,8 @@ struct LiveParticleAccess {
     static size_t PointCount(const CParticle& p){return p.particles.GetCount();}
 };
 
+#include "LiveUiAccess.inl"
+
 namespace LiveObserver {
 namespace {
 using Clock=std::chrono::steady_clock;
@@ -119,6 +123,11 @@ constexpr size_t UnitLimit=200, VariableLimit=200, PathLimit=64, EffectLimit=32;
 struct RenderCapture;
 struct OrderReceipt {int id=0,packet=0;bool dispatched=false;std::string error;bool dispatching=false;};
 struct Job {
+    std::unique_ptr<MiniaudioOneShotSfx::LiveAudioSnapshot> audio;
+    unsigned long long uiScreen=0;
+    int uiContext=0,uiWidth=0,uiHeight=0,uiX=0,uiY=0;
+    UINT uiKey=0,uiScan=0;
+    bool uiMouseDown=false,uiKeyDown=false;
     std::vector<OrderReceipt> orders;
     std::uint64_t orderEpoch=0;
     Clock::time_point orderExpires{};
@@ -186,13 +195,18 @@ struct OperationState {
     unsigned long long id=0;
     std::string method, parameter, state="idle", stage="idle", error, expectedZone;
     bool inFlight=false, executing=false, applied=false;
+    Clock::time_point appliedAt{};
+    std::string readinessReason;
 };
 std::mutex operationMutex;
 OperationState operation;
 unsigned long long operationSequence=0;
+bool syntheticCursorActive=false;
+POINT syntheticCursor{};
 bool saveIsolated=false; // game thread only; deliberately survives load/new game
 bool IsCommand(const std::string& method) {
-    return method=="load_save"||method=="new_game"||method=="enter_zone"||method=="save_game"||
+    return method=="ui_click"||method=="ui_hover"||method=="ui_key"||method=="cutscene_skip"||method=="time_scale"||
+           method=="load_save"||method=="new_game"||method=="enter_zone"||method=="save_game"||
            method=="unit_move"||method=="unit_attack"||method=="unit_cast"||method=="unit_use_item"||method=="unit_equip"||method=="unit_order"||method=="unit_teleport"||method=="pause"||method=="quit"||
            method=="set_global"||method=="object_transform"||method=="god_mode"||method=="script_run"||method=="camera";
 }
@@ -223,7 +237,8 @@ std::string Text(const char* source,size_t maxBytes=512) {
 json OperationJsonLocked() {
     return {{"id",operation.id},{"method",operation.method},{"name",operation.parameter},
             {"state",operation.state},{"stage",operation.stage},{"error",operation.error},
-            {"in_flight",operation.inFlight}};
+            {"in_flight",operation.inFlight},{"readiness_reason",operation.readinessReason},
+            {"readiness_timeout_seconds",30}};
 }
 json OperationJson() {
     std::lock_guard<std::mutex> lock(operationMutex);return OperationJsonLocked();
@@ -265,7 +280,9 @@ bool Finish(Job& job) {
     ReleaseLodRequest(job);
     job.done=true;lock.unlock();job.ready.notify_one();return true;
 }
+void CleanupUiInput(Job& job) noexcept;
 void CleanupCapture(Job& job) noexcept {
+    CleanupUiInput(job);
     ReleaseLodRequest(job);
     if(job.isMapped&&job.context&&job.staging)job.context->Unmap(job.staging.Get(),0);
     job.isMapped=false;job.staging.Reset();job.context.Reset();
@@ -396,6 +413,7 @@ void Serve(HANDLE pipe) {
             job->query.reset(dtAllocNavMeshQuery());
             if(!job->query||dtStatusFailed(job->query->init(nullptr,65535)))throw std::runtime_error("query allocation failed");
         } else if(method=="screenshot")job->image.resize(ImageLimit);
+        else if(method=="audio_state")job->audio=std::make_unique<MiniaudioOneShotSfx::LiveAudioSnapshot>();
         {
             std::lock_guard<std::mutex> lock(queueMutex);
             if(queued)throw std::runtime_error("observer busy");
@@ -487,7 +505,7 @@ void OperationApplied(const char* method,bool success) noexcept {
             if(operation.error.empty())operation.error="game operation failed; see journal";
             operation.state="error";operation.stage="failed";operation.inFlight=false;return;
         }
-        operation.applied=true;
+        operation.applied=true;operation.appliedAt=Clock::now();operation.readinessReason.clear();
         operation.expectedZone=theWorldServer.GetCurrentZoneName();
         if(operation.method=="enter_zone"&&_stricmp(operation.expectedZone.c_str(),operation.parameter.c_str())!=0) {
             operation.error="game entered a different zone";operation.state="error";
@@ -528,6 +546,7 @@ void Start() noexcept {
     }
 }
 void Stop() noexcept {
+    ReleaseUiCursor();
     ResetCamera();
     if(!stopEvent)return;
     SetEvent(stopEvent);
@@ -637,9 +656,13 @@ void bridge_live_capture(ID3D11DeviceContext* context,IDXGISwapChain* swap,unsig
 }
 }
 
+#include "LiveUnitServiceAccess.inl"
+
 // This accessor only reads existing transient state. It creates no game
 // objects and has no setters or serialization hooks.
 struct LiveSnapshotAccess {
+    static bool Interruptible(CUnitServer& unit) {return unit.L1IsInterruptable();}
+    static bool Suffering(const CUnitServer& unit) {return unit.bL1PlayingSuffer;}
     static unsigned Wait(const CUnitServer& unit) {return unit.navigationWait;}
     static unsigned Rejects(const CUnitServer& unit) {return unit.navigationRejects;}
     static int RunFailures(const CUnitServer& unit) {return unit.nL1RunFailCounter;}
@@ -765,10 +788,15 @@ json UnitDetail(CUnit* unit,CWorldServer& world,CPlayer* player) {
         {"command_target_id",command.GetTargetID()},{"command_point",Point(command.ptTarget)}};
     return result;
 }
+#include "LiveObserverUi.inl"
+#include "LiveObserverAudio.inl"
+#include "LiveObserverReadiness.inl"
+
 // Readiness is evaluated only for a status or command request, never each frame.
 // World construction alone is insufficient: wait for the normal local handshake
 // and the client/server copies of the squad to reach the mission.
 void UpdateOperationReadiness() {
+    if(ExpireOperationReadiness())return;
     std::lock_guard<std::mutex> lock(operationMutex);
     if(!operation.inFlight||!operation.applied||operation.executing)return;
     if(!operation.error.empty()) {
@@ -801,7 +829,7 @@ void UpdateOperationReadiness() {
             if(!specific||specific->WhoAmI()!=HPC_UNITSERVERSPECIFIC)return;
         }
     }
-    operation.state="done";operation.stage="done";operation.inFlight=false;
+    operation.state="done";operation.stage="done";operation.inFlight=false;operation.readinessReason.clear();
 }
 json Status() {
     UpdateOperationReadiness();
@@ -835,6 +863,7 @@ json Status() {
     } else {result["zone"]=nullptr;result["game_hours"]=nullptr;result["game_tick"]=nullptr;}
     double total=0;for(unsigned i=0;i<perf.liveFrameCount;++i)total+=perf.liveFrames[i];
     result["fps"]=total>0?1000.0*perf.liveFrameCount/total:0.0;
+    AttachUiStatus(result);
     return result;
 }
 json Perf() {
@@ -859,7 +888,7 @@ json Perf() {
 bool LiveStatus(Job& job) {
     auto status=Status();
     if(!job.phase){
-        if(!theWorldServer.bMapLoaded||status.value("status_scope",std::string())=="operation_only"){
+        if(!theWorldServer.bMapLoaded||LiveUiAccess::SavedBackground()||status.value("status_scope",std::string())=="operation_only"){
             job.response=std::move(status);job.response["camera"]=nullptr;job.response["camera_view"]=nullptr;
             job.response["camera_reason"]="no_world_draw";return true;
         }
@@ -894,6 +923,11 @@ bool Lod(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
     if(!std::isfinite(radius)||radius<0||radius>2000)throw std::runtime_error("radius must be between 0 and 2000 metres");
     const size_t limit=GetLimit(params,200,50);
     if(!job.phase){
+        if(LiveUiAccess::SavedBackground()) {
+            job.response={{"ok",true},{"status","unavailable"},{"reason","modal_saved_background"},
+                {"renderer_reason","no_native_flush"},{"ui",UiSummary()},{"world_epoch",owned::bridge_current_world_epoch()},
+                {"snapshot_frame",nullptr},{"objects",json::array()},{"truncated",false}};return true;
+        }
         job.world=&world;job.worldId=world.GetRTID();job.phase=1;
         const auto epoch=owned::bridge_current_world_epoch();
         job.lodRequest=owned::native_lod_request(epoch,job.method=="render_state");
@@ -1252,6 +1286,8 @@ bool Command(Job& job,Clock::time_point deadline) {
         job.response={{"ok",true},{"status","accepted"},{"truncated",false}};
         return true;
     }
+    if(method=="ui_click"||method=="ui_hover"||method=="ui_key"||method=="cutscene_skip")return UiInput(job,deadline);
+    if(method=="time_scale")return TimeScale(job);
     if(method=="load_save"||method=="new_game"||method=="enter_zone") {
         if(IWorldConnector.HasReq())throw std::runtime_error("game already has a pending transition");
         const auto name=method=="new_game"?std::string():CommandName(params);
@@ -1393,17 +1429,20 @@ bool Command(Job& job,Clock::time_point deadline) {
         if(!restored){ChannelError("teleport_restore_failed",0);throw std::runtime_error("teleport could not restore position; see journal");}
         throw;
     }
-    server->logic.GetPlayer()->DoStop(server->logic);server->InitializeUnit();
+    server->logic.GetPlayer()->DoStop(server->logic);
+    const bool hurtReset=LiveUnitServiceAccess::BeforeTeleport(*server);server->InitializeUnit();
     unit->SetUpdateMask(CMapObject::VLD_MASK_POSROT);
     job.response={{"ok",true},{"status","done"},{"id",id},{"position",Point(unit->GetCP())},
         {"navigation_position",Point(unit->navLocation.position)},{"service_action",true},
-        {"navigation_traversal",false},{"z_kind","ground_relative"},{"truncated",false}};return true;
+        {"navigation_traversal",false},{"z_kind","ground_relative"},{"cleared_hurt_animation",hurtReset},{"truncated",false}};return true;
 }
 bool Step(Job& job,Clock::time_point deadline) {
     const auto& method=job.method;const auto& params=job.request.at("params");
     if(method=="camera")return CameraCommand(job);
     if(IsCommand(method))return Command(job,deadline);
     if(method=="status")return LiveStatus(job);
+    if(method=="ui_state")return UiState(job,deadline);
+    if(method=="audio_state")return AudioState(job,deadline);
     if(method=="perf"){job.response=Perf();return true;}
     if(method=="screenshot")return Screenshot(job,deadline);
     auto& world=theWorldServer;
@@ -1429,6 +1468,14 @@ bool Step(Job& job,Clock::time_point deadline) {
     job.response=Error("unknown live method");return true;
 }
 } // namespace
+
+bool ReadUiCursor(POINT* point) noexcept {
+    if(!syntheticCursorActive || !point)return false;*point=syntheticCursor;return true;
+}
+bool WriteUiCursor(int x,int y) noexcept {
+    if(!syntheticCursorActive)return false;syntheticCursor={x,y};return true;
+}
+void ReleaseUiCursor() noexcept {syntheticCursorActive=false;}
 
 bool IsPlayerOrder(int id,int packet) noexcept {return PendingReceipt(id,packet)!=nullptr;}
 bool CheckPlayerOrder(int id,int packet) noexcept {

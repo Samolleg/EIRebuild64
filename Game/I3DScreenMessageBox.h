@@ -12,6 +12,7 @@ enum
 class CI3DEditBox;
 class CI3DScreenMessageBox : public CI3DScreen
 {
+    friend struct LiveUiAccess;
 protected:
     CString szTitle;
     CString szText;
