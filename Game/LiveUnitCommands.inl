@@ -148,10 +148,30 @@ CUnit* CommandTarget(const json& params) {
         throw std::runtime_error("target_not_visible_to_player");
     return target;
 }
+std::string ItemCode(CItem* item) {
+    const auto* shape=item->GetShapeEntry();
+    std::string code=item->GetTypeID()==ITID_ITEM_SPELL?"spell container":shape?shape->GetCode():"";
+    if(item->GetTypeID()==ITID_ITEM_WEAPON||item->GetTypeID()==ITID_ITEM_ARMOR||item->GetMaterial()!=0)
+        code+="."+std::string(item->GetMaterialCode());
+    if(auto* spell=item->GetSpell(0)) {
+        code+=" ["+std::string(spell->GetPrototype()->szCodeName);
+        if(spell->GetRunesCount()) {
+            code+="{";
+            for(int i=0;i<spell->GetRunesCount();++i) {
+                const auto* rune=theWorldServer.GetSpellManager()->GetModifier(static_cast<unsigned char>(spell->GetRunes()[i])-1);
+                if(i)code+=";";
+                if(rune)code+=rune->GetCodeName();
+            }
+            code+="}";
+        }
+        code+="]";
+    }
+    return code;
+}
 json ItemJson(CItem* item,const std::string& selector) {
     CString name,description,type;
     if(auto* text=theWorld.GetTextManager())text->GetItemNameAndDesc(item,name,description,type);
-    return {{"id",selector},{"object_id",item->GetID()},{"name",Text(name)},
+    return {{"id",selector},{"object_id",item->GetID()},{"name",Text(name)},{"code",ItemCode(item)},
         {"type",Text(type)},{"class",item->GetGameClassName()},{"count",item->GetCount()},
         {"mana",item->GetMP()},{"max_mana",item->GetMaxMP()},{"broken",item->IsBroken()}};
 }
@@ -283,18 +303,22 @@ bool Abilities(Job& job,Clock::time_point deadline) {
         json reasons=json::array();const auto actor=ActorError(id);
         if(!actor.empty())reasons.push_back(actor);
         if(target&&(target==unit||target->IsDead()))reasons.push_back("invalid_attack_target");
-        const bool available=reasons.empty();json distance=nullptr,inRange=nullptr;
+        if(target&&!LiveSnapshotAccess::AttackHeight(*server,target))reasons.push_back("target_too_high");
+        const bool available=reasons.empty();const auto eligibility=reasons;json distance=nullptr,inRange=nullptr;
+        json reach=nullptr;
         if(target) {
             const auto delta=target->GetCP()-unit->GetCP();distance=std::sqrt(double(delta.x)*delta.x+double(delta.y)*delta.y);
-            inRange=distance.get<double>()<=range;
+            reach=LiveSnapshotAccess::AttackReach(*server,target);
+            inRange=distance.get<double>()<=reach.get<float>();
         }
         if(!target)reasons.push_back("unit_target_not_supplied");
         else if(!inRange.get<bool>())reasons.push_back("out_of_range");
         if(cooldown>0)reasons.push_back("cooldown");
-        job.response["attack"]={{"available",available},{"can_execute_here",reasons.empty()},
+        job.response["attack"]={{"available",available},{"reasons",eligibility},{"can_execute_here",reasons.empty()},
             {"execution_reasons",reasons},{"natural",weapon==nullptr},{"weapon_type",int(unit->GetCurrentWeaponType())},
             {"weapon",weapon?json("weapon:"+std::to_string(unit->GetCurrentWeaponSlotIndex())):json(nullptr)},
-            {"range",range},{"range_basis","current_weapon_or_RPG_natural_range; final_reach_is_game_owned"},
+            {"range",range},{"reach",reach},{"range_basis","weapon_or_natural_extension; reach_includes_bodies_and_spacing"},
+            {"path_checked",false},
             {"distance",distance},{"in_range",inRange},{"cooldown_ticks",cooldown},{"approaches_target",true}};
     }
     const int spells=(std::min)(int(unit->GetSpellSlotCount()),32);
@@ -327,7 +351,7 @@ bool Abilities(Job& job,Clock::time_point deadline) {
             if(slot>=RPG_NUM_ARMOR_TYPES){job.phase=5;job.item=0;continue;}
             auto* armor=unit->GetQArmor(slot);if(!armor)continue;
             auto row=ItemJson(armor,"armor:"+std::to_string(slot));row["slot"]=slot;
-            row["mission_equip"]=false;row["reason"]="equipment_transfer_is_a_camp_party_transaction";
+            row["mission_equip"]=false;row["service_equip"]="unit_equip";
             job.response["armor"].push_back(std::move(row));
         } else {
             auto* player=theWorldServer.GetPlayer(0);
@@ -339,7 +363,7 @@ bool Abilities(Job& job,Clock::time_point deadline) {
             if(!pos)return true;
             auto* item=player->items.GetNext(pos);if(!item)continue;
             auto row=ItemJson(item,"inventory:"+std::to_string(item->GetID()));
-            row["mission_use"]=false;row["reason"]="inventory_transfer_is_a_camp_party_transaction";
+            row["mission_use"]=false;row["service_equip"]="unit_equip";
             job.response["inventory"].push_back(std::move(row));
         }
     }
@@ -403,7 +427,9 @@ bool PlayerUnitCommand(Job& job) {
     auto* client=CommandClient();const auto ids=ActorIds(params);
     CArray<CUnit*,CUnit*> actors;
     for(int id:ids) {
-        WatchUnit(id);const auto error=ActorError(id);
+        WatchUnit(id);
+        auto& observed=unitObservations.at(id);observed.refusal.clear();observed.refusalCode=0;observed.refusalTick=0;
+        const auto error=ActorError(id);
         if(!error.empty()){RememberRefusal(id,error);throw std::runtime_error(error);}
         actors.Add(theWorld.GetUnit(id));
     }

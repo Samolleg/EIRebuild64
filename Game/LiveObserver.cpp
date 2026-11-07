@@ -32,6 +32,9 @@
 #include "UnitServer.h"
 #include "UnitDatabase.h"
 #include "Item.h"
+#include "ItemManager.h"
+#include "SpellManager.h"
+#include "ModSettingsPolicy.h"
 #include "TextManager.h"
 #include "ModPackage.h"
 #include "ModRuntime.h"
@@ -189,7 +192,7 @@ unsigned long long operationSequence=0;
 bool saveIsolated=false; // game thread only; deliberately survives load/new game
 bool IsCommand(const std::string& method) {
     return method=="load_save"||method=="new_game"||method=="enter_zone"||method=="save_game"||
-           method=="unit_move"||method=="unit_attack"||method=="unit_cast"||method=="unit_use_item"||method=="unit_order"||method=="unit_teleport"||method=="pause"||method=="quit"||
+           method=="unit_move"||method=="unit_attack"||method=="unit_cast"||method=="unit_use_item"||method=="unit_equip"||method=="unit_order"||method=="unit_teleport"||method=="pause"||method=="quit"||
            method=="set_global"||method=="object_transform"||method=="god_mode"||method=="script_run"||method=="camera";
 }
 
@@ -642,6 +645,12 @@ struct LiveSnapshotAccess {
     static int State(const CUnitServer& unit) {return int(unit.eL1State);}
     static const SAIPath& Path(const CUnitServer& unit) {return unit.path;}
     static int AttackReady(const CUnitServer& unit) {return unit.nCanAttackTime;}
+    static float AttackReach(CUnitServer& unit,CUnit* target) {
+        SUnitBasicCmd command;command.MakeAttack(target);return unit.GetHitDist(command);
+    }
+    static bool AttackHeight(CUnitServer& unit,CUnit* target) {
+        SUnitBasicCmd command;command.MakeAttack(target);return unit.IsTargetReachable(command);
+    }
 };
 
 namespace LiveObserver {
@@ -693,6 +702,8 @@ json UnitRow(CUnit* unit,CWorldServer& world,CPlayer* player) {
     json row={{"id",unit->GetID()},{"name",Text(unit->GetName(),256)},
         {"prototype",prototype?Text(prototype->szName,256):std::string()},
         {"position",Point(unit->GetCP())},{"hp",unit->GetHP()},{"max_hp",unit->GetMaxHP()},
+        {"mana",server?server->GetMapObjectServer()->GetCurrentMP():unit->GetMP()},
+        {"max_mana",server?server->GetMapObjectServer()->GetRPGStats()->ssMP.fpMax:unit->GetMaxMP()},
         {"moving",bool(unit->IsMoving())},{"dead",bool(unit->IsDead())},
         {"locomotion",Movement(unit)},{"pose",int(unit->GetCurrentPose())},
         {"ai_class",unit->GetAIClass()},{"active",activeSlot&&*activeSlot==unit},
@@ -1223,7 +1234,8 @@ CPlot3D CommandPoint(const json& params) {
     return point;
 }
 #include "LiveUnitCommands.inl"
-bool Command(Job& job) {
+#include "LiveUnitEquipment.inl"
+bool Command(Job& job,Clock::time_point deadline) {
     // The first listed command, even if rejected, protects every subsequent
     // slot write in this process. Reading an owner's slot remains permitted.
     saveIsolated=true;
@@ -1345,6 +1357,7 @@ bool Command(Job& job) {
         IWorld.MissionCombatPause(params.at("on").get<bool>());
         job.response={{"ok",true},{"status","accepted"},{"on",params["on"]},{"truncated",false}};return true;
     }
+    if(method=="unit_equip")return EquipUnit(job,deadline);
     if(method=="unit_move"||method=="unit_attack"||method=="unit_cast"||method=="unit_use_item"||method=="unit_order") {
         try {return PlayerUnitCommand(job);}
         catch(const std::exception& error) {
@@ -1388,7 +1401,7 @@ bool Command(Job& job) {
 bool Step(Job& job,Clock::time_point deadline) {
     const auto& method=job.method;const auto& params=job.request.at("params");
     if(method=="camera")return CameraCommand(job);
-    if(IsCommand(method))return Command(job);
+    if(IsCommand(method))return Command(job,deadline);
     if(method=="status")return LiveStatus(job);
     if(method=="perf"){job.response=Perf();return true;}
     if(method=="screenshot")return Screenshot(job,deadline);
