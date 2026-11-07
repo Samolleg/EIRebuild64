@@ -64,13 +64,13 @@ HarnessCommand parse_harness_command(std::string_view line) {
     const std::string_view verb = w[0];
     HarnessCommand command;
 
-    if (verb == "load_save" || verb == "console") {
+    if (verb == "load_save" || verb == "console" || verb == "note") {
         // These arguments are the remainder of a line, not individual words.
         // Console quotes and internal whitespace belong to the game parser.
         const auto start = line.find_first_not_of(" \t", line.find(verb) + verb.size());
         if (start == std::string_view::npos)
             return rejected(verb == "load_save" ? "usage: load_save <save name or slot file>"
-                                                : "usage: console <text>");
+                            : verb == "note" ? "usage: note <text>" : "usage: console <text>");
         auto argument = line.substr(start);
         while (!argument.empty() && (argument.back() == '\r' || argument.back() == '\n'))
             argument.remove_suffix(1);
@@ -87,7 +87,8 @@ HarnessCommand parse_harness_command(std::string_view line) {
             if (argument.empty()) return rejected("load_save: empty save selector");
         }
         command.name = argument;
-        command.verb = verb == "load_save" ? HarnessVerb::load_save : HarnessVerb::console;
+        command.verb = verb == "load_save" ? HarnessVerb::load_save :
+                       verb == "note" ? HarnessVerb::note : HarnessVerb::console;
     } else if (verb == "walk") {
         // The game's own move order for the party leader (script MoveToPoint:
         // the unit logic's StartMove, real steps), through the console parser

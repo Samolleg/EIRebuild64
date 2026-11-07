@@ -11,6 +11,7 @@
 #include "engine_bridge.h"
 #include "embedded_hud_visual.h"
 #include "world_scene_algorithms.h"
+#include <stdexcept>
 #include "combat_text.h"
 #include "frame_accounting.h"
 #include "widescreen.h"
@@ -22,6 +23,7 @@
 #include "native_placed_figure.h"
 #include "hud_visual_publication.h"
 #include "camera_rotation.h"
+#include "camera_pan_sites.h"
 #include "cursor_confinement.h"
 #include "cursor_image.h"
 #include "test_harness.h"
@@ -195,6 +197,7 @@ constexpr std::uint32_t kFigureResourceManagerSlotRva = 0x003af5f4;
 constexpr std::uint32_t kTextureManagerVtableRva = 0x00343cb0;
 constexpr std::uint32_t kFigureManagerVtableRva = 0x0033fb88;
 constexpr std::uint32_t kCharacterPaneDrawRva = 0x002462a0;
+constexpr std::uint32_t kCharacterPaneSurfaceDrawRva = 0x001fda80;
 constexpr std::uint32_t kCharacterPaneDrawTextRva = 0x001fde20;
 constexpr std::uint32_t kCharacterPaneInterfaceInitRva = 0x001f4990;
 constexpr std::uint32_t kCharacterPaneInterfaceFiniRva = 0x001f4f90;
@@ -215,14 +218,16 @@ constexpr std::size_t kChatNewPhrasePatchBytes = 7;
 // instructions: sub esp,20h / push esi / mov esi,ecx.
 constexpr std::uint32_t kItemCardClearRva = 0x001fe2f0;
 constexpr std::size_t kItemCardClearPatchBytes = 6;
-constexpr std::uint8_t kItemCardClearStock[kItemCardClearPatchBytes] = {
-    0x83,0xec,0x20,0x56,0x8b,0xf1};
+constexpr std::array<std::uint8_t,kItemCardClearPatchBytes> kItemCardClearStock{{
+    0x83,0xec,0x20,0x56,0x8b,0xf1}};
 // CItemInfoPanel surfaces array: DescribeItem 005EE760 passes
 // [[this+118h]] as the CI3DSurface to GetDC/Clear/ReleaseDC (005EE7A9..).
 constexpr std::size_t kItemCardSurfacesOffset = 0x118;
 constexpr std::size_t kChatDraw2DPatchBytes = 10;
 constexpr std::size_t kCharacterPanePatchBytes = 6;
-constexpr std::size_t kCharacterPaneHookCount = 4;
+constexpr std::size_t kCharacterPaneMaximumPatchBytes = 7;
+constexpr std::size_t kCharacterPaneSurfaceDrawHook = 4;
+constexpr std::size_t kCharacterPaneHookCount = 5;
 constexpr std::size_t kCharacterPaneModeOffset = 0x180;
 constexpr std::size_t kCharacterPaneSurfacesOffset = 0x118;
 constexpr std::size_t kInterfaceSurfaceOwnerOffset = 0x04;
@@ -563,6 +568,374 @@ struct SlotPatch {
     void* hook;
     void** original;
 };
+
+struct RendererBoundaryContract {
+    std::uint32_t table_rva;
+    std::array<std::uint32_t,5> entries;
+    std::uint32_t begin_call_rva;
+    std::uint32_t end_call_rva;
+    bool direct_outer_calls;
+};
+
+const RendererBoundaryContract& renderer_boundary_contract() noexcept {
+    static constexpr std::array<std::uint32_t,5> kBaseRendererEntryRvas{{
+        0x00103f40,0x001040a0,0x00101bb0,0x00101d40,0x00101d00}};
+    static constexpr RendererBoundaryContract base{
+        kRendererTableRva,kBaseRendererEntryRvas,
+        kOuterBeginFrameCallRva,kOuterEndFrameCallRva,false};
+    static constexpr RendererBoundaryContract lia{
+        kLiaRendererTableRva,
+        {{kLiaRendererFrameEntryRvas[0],kLiaRendererFrameEntryRvas[1],
+          kLiaRendererFrameEntryRvas[2],kLiaRendererFrameEntryRvas[3],
+          kLiaRendererFrameEntryRvas[4]}},
+        kLiaOuterBeginFrameCallRva,kLiaOuterEndFrameCallRva,true};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+bool g_renderer_outer_calls_installed = false;
+
+// Features added on the base layout after the LiA port was verified. Their
+// game.exe sites have no verified LiA counterpart, so LiA leaves them
+// unsupported (several base RVAs lie outside the smaller LiA image).
+bool base_layout_only() noexcept {
+    return running_game_sites().report.engine == GameEngine::base;
+}
+struct ItemCardClearContract {
+    std::uint32_t entry;
+    std::array<std::uint8_t,kItemCardClearPatchBytes> prefix;
+};
+const ItemCardClearContract& item_card_clear_contract() noexcept {
+    static constexpr ItemCardClearContract base{kItemCardClearRva,kItemCardClearStock};
+    static constexpr ItemCardClearContract lia{0x00134c70,{{0x83,0xec,0x10,0x56,0x8b,0xf1}}};
+    return running_game_sites().report.engine==GameEngine::lia ? lia : base;
+}
+
+struct ResourceManagerContract {
+    std::uint32_t texture_slot, figure_slot, texture_table, figure_table, primary_texture_table;
+};
+
+const ResourceManagerContract& resource_manager_contract() noexcept {
+    static constexpr ResourceManagerContract base{kGameResourceManagerSlotRva,
+        kFigureResourceManagerSlotRva,kTextureManagerVtableRva,kFigureManagerVtableRva,0x00343d24};
+    static constexpr ResourceManagerContract lia{kLiaTextureManagerSlotRva,
+        kLiaFigureManagerSlotRva,kLiaTextureManagerVtableRva,kLiaFigureManagerVtableRva,kLiaPrimaryTextureTableRva};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+struct RetainedSourceContract {
+    std::array<std::uint32_t,4> entries;
+    std::array<std::size_t,4> bytes;
+    std::array<std::array<std::uint8_t,16>,4> stock;
+};
+const RetainedSourceContract& retained_source_contract() noexcept {
+    static constexpr RetainedSourceContract base{
+        {{kRetainedMainLoaderEntryRva,kRetainedSecondaryOwnerEntryRva,kRetainedCommonParserEntryRva,kRetainedAdmissionEntryRva}},
+        {{13,11,7,10}},
+        {{{{0x64,0xa1,0,0,0,0,0x6a,0xff,0x68,0x18,0x65,0x72,0}},
+          {{0x55,0x8b,0x6c,0x24,0x08,0x56,0x8b,0xf1,0x57,0x33,0xff}},
+          {{0x6a,0xff,0x68,0x40,0x65,0x72,0}},
+          {{0x55,0x8b,0xec,0x6a,0xff,0x68,0x30,0x61,0x72,0}}}}};
+    static constexpr RetainedSourceContract lia{kLiaRetainedSourceEntryRvas,kLiaRetainedSourceHookBytes,kLiaRetainedSourceStockBytes};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+struct OuterFrameContract {
+    std::uint32_t count_call, clock_iat, count_target;
+    std::uint32_t pre_call, pre_target, first_step_call, step_target;
+    std::uint32_t post_call, post_target, second_step_call, third_step_call;
+    std::uint32_t idle_call, idle_target, message_call, message_target;
+    std::uint32_t short_message_call, short_message_target, begin_call, begin_target;
+    std::uint32_t end_call, end_target, first_patch, patch_end;
+    std::array<std::uint8_t,6> count_stock;
+    std::array<std::uint8_t,5> message_stock;
+    bool count_caller;
+};
+const OuterFrameContract& outer_frame_contract() noexcept {
+    static constexpr OuterFrameContract base{
+        kOuterCountTimeClockCallRva,kOuterTimeGetTimeIatRva,0,
+        kOuterPreTickCallRva,kOuterPreTickTargetRva,kOuterFirstFixedStepCallRva,kOuterFixedStepTargetRva,
+        kOuterPostTickCallRva,kOuterPostTickTargetRva,kOuterSecondFixedStepCallRva,kOuterThirdFixedStepCallRva,
+        kOuterInterfaceOnIdleCallRva,kOuterInterfaceOnIdleRva,kOuterWndProcCallRva,kOuterWndProcRva,
+        kOuterShortWndProcCallRva,kOuterShortWndProcRva,kOuterBeginFrameCallRva,kOuterBeginFrameRva,
+        kOuterEndFrameCallRva,kOuterEndFrameRva,kOuterCountTimeClockCallRva,kOuterEndFrameCallRva+5,
+        kOuterCountTimeClockCallBytes,kOuterWndProcCallBytes,false};
+    // LiA's clock load feeds two native CALL ESI instructions. Observe its
+    // outer bool CountTime caller without taking that clock-load ownership.
+    static constexpr OuterFrameContract lia{
+        0x34e5b,0x220544,0x33140,0x332a7,0xf44f0,0x3333a,0x11af0,
+        0x3333f,0x13930,0x334e1,0x33512,0x34e6f,0x131ba0,0x34eb2,0x33b30,
+        0x34ece,0x33570,0x327af,0x955c0,0x327cb,0x96040,0x327af,0x34ed3,
+        {{0xe8,0xe0,0xe2,0xff,0xff,0}},{{0xe8,0x79,0xec,0xff,0xff}},true};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+struct CameraMouseContract {
+    std::uint32_t yaw_call, yaw_setter, pitch_call, pitch_setter;
+    std::uint32_t normalize_call, normalize, pitch_input, speed, power, scale, scale_value;
+};
+const CameraMouseContract& camera_mouse_contract() noexcept {
+    static constexpr CameraMouseContract base{kCameraMouseYawCallRva,kCameraSetRotateValueRva,
+        kCameraMousePitchCallRva,kCameraSetPitchValueRva,kCameraMouseNormalizeCallRva,
+        kCameraMouseNormalizeRva,kCameraPitchInputRva,kCameraPitchSpeedRva,
+        kCameraPitchMousePowerRva,kCameraPitchInputScaleRva,kCameraPitchInputScaleValueRva};
+    static constexpr CameraMouseContract lia{0x00126d30,0x00010600,0x00126da1,0x00010640,
+        0x00126cd5,0x0012f330,0x00126d7c,0x002769c0,0x002769c4,0x00126d98,0x00220ee4};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+struct WorldEnvironmentContract {
+    std::uint32_t sky_call, sky_draw, sky_gate, light_table, light_manager_table;
+    std::array<std::uint8_t,12> sky_gate_stock;
+    std::uint32_t torch_table, torch_specific_table;
+};
+const WorldEnvironmentContract& world_environment_contract() noexcept {
+    static constexpr WorldEnvironmentContract base{kSkyDrawCallRva,kSkyObjectDrawRva,kWorldSkyGateRva,
+        0x00343afc,0x00343b50,{{0x8b,0x45,0x08,0xf6,0xc4,0x10,0x0f,0x84,0xbb,0,0,0}},
+        0x0033e834,0x0033e954};
+    static constexpr WorldEnvironmentContract lia{kLiaSkyCallRva,kLiaSkyDrawRva,kLiaSkyGateRva,
+        kLiaLightTableRva,kLiaLightManagerTableRva,kLiaSkyGateStock,
+        kLiaTorchTableRva,kLiaTorchSpecificTableRva};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+#if !defined(EID3D11_EMBEDDED)
+const critters::UnitBloodIdentity& unit_blood_identity() noexcept {
+    static constexpr critters::UnitBloodIdentity base{};
+    static constexpr critters::UnitBloodIdentity lia{0x002a2860,0x002a28a0,true};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+struct ServerStateContract {
+    critters::LocalServerIdentity units;
+    std::uint32_t object_specific_table, material_manager_table;
+};
+const ServerStateContract& server_state_contract() noexcept {
+    static constexpr ServerStateContract base{{},0x0033dd6c,0x00343c38};
+    static constexpr ServerStateContract lia{{kLiaWorldServerRva,kLiaWorldServerTableRva,
+        kLiaObjectManagerTableRva,kLiaUnitTableRva,kLiaUnitServerTableRva},
+        kLiaMapObjectServerTableRva,kLiaMaterialManagerTableRva};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+#endif // !EID3D11_EMBEDDED
+struct RetainedPoseContract {
+    std::uint32_t selector_table, unit_table, unit_specific_table;
+};
+const RetainedPoseContract& retained_pose_contract() noexcept {
+    static constexpr RetainedPoseContract base{0x0033da4c,kObjectSupportedPrimaryVtableRva,0x0033ecd8};
+    static constexpr RetainedPoseContract lia{kLiaSelectorTableRva,kLiaUnitTableRva,kLiaUnitSpecificTableRva};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+struct RetainedSeamContract {
+    std::uint32_t visibility, resume, next, scene, taken, tree_shadow, shadow_visible, vector_push;
+    std::uint32_t visible_only_setting;
+    std::array<std::uint8_t,7> visibility_stock;
+    std::array<std::uint8_t,10> scene_stock;
+};
+const RetainedSeamContract& retained_seam_contract() noexcept {
+    static constexpr RetainedSeamContract base{kRetainedVisibilityEntryRva,kRetainedVisibilityResumeRva,
+        kRetainedVisibilityNextRva,kRetainedSceneSeamRva,kRetainedSceneSeamTakenRva,
+        kRetainedTreeShadowVectorRva,kRetainedShadowVisibilityEntryRva,kRetainedPointerVectorPushEntryRva,
+        0x0039be6c,
+        {{0x8d,0x4e,0x54,0x51,0x8d,0x4e,0x34}},
+        {{0xf6,0x46,0x08,0xc0,0x0f,0x84,0x99,0,0,0}}};
+    static constexpr RetainedSeamContract lia{kLiaRetainedSeamRvas[0],kLiaRetainedSeamRvas[1],
+        kLiaRetainedSeamRvas[2],kLiaRetainedSeamRvas[3],kLiaRetainedSeamRvas[4],
+        kLiaRetainedSeamRvas[5],kLiaRetainedSeamRvas[6],kLiaRetainedSeamRvas[7],
+        kLiaDrawVisibleOnlyRva,kLiaRetainedVisibilityPrefix,kLiaRetainedScenePrefix};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+struct WorldLifecycleContract {
+    std::array<std::uint32_t,4> entries;
+    std::array<std::size_t,4> hook_bytes, guard_bytes;
+    std::array<std::array<std::uint8_t,13>,4> stock;
+    std::uint32_t lookup, world_table, manager_table;
+};
+
+const WorldLifecycleContract& world_lifecycle_contract() noexcept {
+    static constexpr WorldLifecycleContract base{
+        {{kLifecycleTickEntryRva,kLifecycleAddEntryRva,kLifecycleRemoveEntryRva,kLifecyclePositiveResetEntryRva}},
+        {{10,10,10,5}},{{10,10,10,8}},
+        {{{{0x55,0x8b,0xec,0x6a,0xff,0x68,0x68,0x25,0x72,0x00}},
+          {{0x55,0x8b,0xec,0x6a,0xff,0x68,0x98,0x25,0x72,0x00}},
+          {{0x55,0x8b,0xec,0x6a,0xff,0x68,0xc0,0x25,0x72,0x00}},
+          {{0x83,0xec,0x10,0x53,0x55,0x56,0x8b,0xf1}}}},
+        kLifecycleHasObjectEntryRva,0x0033f41c,0x0033dcd8};
+    static constexpr WorldLifecycleContract lia{kLiaLifecycleEntryRvas,kLiaLifecycleHookBytes,
+        kLiaLifecycleHookBytes,kLiaLifecycleStockBytes,0,kLiaWorldTableRva,kLiaObjectManagerTableRva};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+struct TerrainSceneContract {
+    std::uint32_t range, range_caller, shift, segment, free_sector, get_sector, light, set_clip;
+    std::uint32_t world, scene, camera_position, lod_distances, scene_prefix_slot;
+    std::array<std::uint32_t,2> light_calls;
+    std::size_t range_bytes, scene_bytes;
+    std::array<std::uint8_t,6> range_stock, segment_stock, shift_stock;
+    std::array<std::uint8_t,5> free_stock, light_stock;
+    std::array<std::uint8_t,10> world_stock;
+    std::array<std::uint8_t,9> scene_stock;
+};
+
+const TerrainSceneContract& terrain_scene_contract() noexcept {
+    static constexpr TerrainSceneContract base{
+        kTerrainRangeDrawEntryRva,0x002c6306,kTerrainShiftLayersEntryRva,kTerrainSegmentEntryRva,
+        kTerrainFreeEntryRva,kTerrainGetSectorEntryRva,kTerrainSetLightEntryRva,kSectorSetClipFlagEntryRva,
+        kWorldDrawEntryRva,kScene3dDrawEntryRva,kCameraPositionRva,kTerrainLodDistancesRva,0x003af080,
+        kTerrainSetLightCallRvas,5,9,
+        {{0x83,0xec,0x0c,0x53,0x55,0x56}},{{0x55,0x8b,0xec,0x83,0xec,0x6c}},
+        {{0x51,0x53,0x55,0x56,0x8b,0xf1}},{{0x83,0xec,0x08,0x53,0x55}},
+        {{0x83,0xec,0x10,0x53,0x55}},{{0x83,0xec,0x50,0x53,0x8b,0x1d,0,0,0,0}},
+        {{0x55,0x8b,0xec,0x81,0xec,0xa4,0x00,0x00,0x00}}};
+    static constexpr TerrainSceneContract lia{
+        kLiaTerrainSceneEntryRvas[0],kLiaTerrainRangeCallerRva,kLiaTerrainSceneEntryRvas[1],kLiaTerrainSceneEntryRvas[2],
+        kLiaTerrainSceneEntryRvas[3],kLiaTerrainSceneEntryRvas[4],kLiaTerrainSceneEntryRvas[5],
+        kLiaTerrainSceneEntryRvas[6],kLiaTerrainSceneEntryRvas[7],kLiaTerrainSceneEntryRvas[8],
+        kLiaTerrainSceneEntryRvas[9],kLiaTerrainSceneEntryRvas[10],kLiaScenePrefixGpuSlotRva,
+        kLiaTerrainLightCallRvas,6,8,kLiaTerrainRangePrefix,kLiaTerrainSegmentPrefix,
+        kLiaTerrainShiftPrefix,kLiaTerrainFreePrefix,kLiaTerrainLightPrefix,
+        kLiaTerrainWorldPrefix,kLiaTerrainScenePrefix};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+struct HudGameContract {
+    std::array<std::uint32_t,11> entries;
+    std::array<std::size_t,11> hook_bytes;
+    std::array<std::uint32_t,3> panels, panel_handlers;
+    std::array<std::uint32_t,4> producer_calls, add_calls, draw_calls;
+    std::uint32_t producer, object_draw, figure_draw, add_figure, carrier_call;
+};
+
+const HudGameContract& hud_game_contract() noexcept {
+    static constexpr HudGameContract base{
+        {{kHudOnActivateRva,kHudOnDeactivateRva,kHudDestructorRva,kHudItemSetUnitRva,
+          kTextureManagerCreateRva,kFigureManagerCreateRva,kTextureResourceAddRva,
+          kFigureResourceAddRva,kResourceCloseRva,kResourceCloseAllRva,kResourceDestroyRva}},
+        {{7,9,7,7,6,6,7,7,8,6,6}},
+        {{kHudNativeWeaponSetUnitRva,kHudNativeSpellSetUnitRva,kHudNativeSkillSetUnitRva}},
+        {{kHudNativeWeaponHandlerRva,kHudNativeSpellHandlerRva,kHudNativeSkillHandlerRva}},
+        kHudStockProducerCallRvas,kHudStockAddFigureCallRvas,kHudLaneDrawCallRvas,
+        kStockHudAtlasProducerRva,kHudObjectDrawRva,kHudFigureDrawRva,kHudAddFigureRva,kHudCarrierDrawCallRva};
+    static constexpr HudGameContract lia{kLiaHudGameEntryRvas,kLiaHudGameHookBytes,
+        kLiaHudPanelEntryRvas,kLiaHudPanelHandlerRvas,kLiaHudProducerCallRvas,
+        kLiaHudAddFigureCallRvas,kLiaHudLaneDrawCallRvas,kLiaHudProducerRva,
+        kLiaHudObjectDrawRva,kLiaHudFigureDrawRva,kLiaHudAddFigureRva,kLiaHudCarrierCallRva};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+struct NativeGeometryContract {
+    std::uint32_t entry_rva, animation_rva, construct_rva, assign_rva, destroy_rva;
+    std::array<std::uint8_t,6> prefix;
+    bool text_constructor;
+};
+
+const NativeGeometryContract& native_geometry_contract() noexcept {
+    static constexpr NativeGeometryContract base{
+        kNativeGeometryEntryRva,kFigureAnimatedTextureEntryRva,
+        kEngineStringConstructRva,kEngineStringAssignRangeRva,kEngineStringDestroyRva,
+        {{0x55,0x8b,0xec,0x83,0xec,0x14}},false};
+    static constexpr NativeGeometryContract lia{
+        kLiaNativeGeometryRva,kLiaFigureAnimatedTextureRva,
+        kLiaStringTextConstructRva,0,kLiaStringDestroyRva,
+        {{0x53,0x55,0x8b,0x6c,0x24,0x10}},true};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+struct DirectRendererLayout {
+    std::size_t diffuse, fog_enabled, screen_extents;
+};
+
+const DirectRendererLayout& direct_renderer_layout() noexcept {
+    static constexpr DirectRendererLayout base{0x150,0x158,kLegacyRendererScreenExtentsOffset};
+    static constexpr DirectRendererLayout lia{0x110,0x118,0x11c};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+struct WorldClockContract {
+    std::uint32_t client_rva, ticks_rva, fraction_rva;
+    std::size_t region_length_header;
+};
+
+const WorldClockContract& world_clock_contract() noexcept {
+    static constexpr WorldClockContract base{
+        0x003af5b8,kWorldSegmentTimeCounterRva,kWorldTimeFractionRva,8};
+    static constexpr WorldClockContract lia{
+        kLiaWorldClientRva,kLiaWorldTickRva,kLiaWorldFractionRva,12};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+// The base locals are EBP-relative; LiA adapters pass the original ESP.
+// These offsets describe only the verified native object draw boundaries.
+struct ObjectFrameContract {
+    std::uint32_t world_renderer_rva, state_manager_slot_rva, fog_distance_rva;
+    std::uint32_t clock_iat_rva, state_apply_rva, world_accessor_rva, world_fog_rva;
+    std::uint32_t placement_rva, multiply_rva, stack_push_rva;
+    std::size_t active_descriptor_offset;
+    std::ptrdiff_t visible_offset, lighted_offset, fog_offset, position_offset;
+};
+const ObjectFrameContract& object_frame_contract() noexcept {
+    static constexpr ObjectFrameContract base{
+        kWorldFigureRendererRva,kRenderStateManagerGlobalRva,0x0039bd34,
+        kObjectLightingTimeGetTimeIatRva,kRenderStateApplyEntryRva,
+        kObjectWorldAccessorEntryRva,kWorldFogEntryRva,
+        kCreateCurrentPlacementEntryRva,kMatrixMultiplyEntryRva,kMatrixStackPushEntryRva,
+        kRenderStateManagerActiveDescriptorOffset,-0x4c,-0x18,-0x50,-0x70};
+    static constexpr ObjectFrameContract lia{
+        0x002a2598,0x002a25b8,0x00276924,0x00220544,
+        0x000869e0,0x00032200,0x001ca860,
+        0x0000f5e0,0x00082660,0x000828d0,0x10c,0x38,0x2c,0x34,0x48};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+struct ObjectMutationContract {
+    std::array<std::uint32_t,3> entries;
+    std::array<std::size_t,3> bytes;
+    std::array<std::array<std::uint8_t,16>,3> stock;
+};
+const ObjectMutationContract& object_mutation_contract() noexcept {
+    static constexpr ObjectMutationContract base{
+        {{kObjectAddFigureEntryRva,kObjectRemoveFigureEntryRva,kObjectSetComplectionEntryRva}},
+        {{kObjectAddFigurePatchBytes,kObjectRemoveFigurePatchBytes,kObjectSetComplectionPatchBytes}},
+        {{{{0x83,0xec,0x0c,0x33,0xc0,0x53,0x8b,0xd9,0x56,0x57,0x8b,0x8b,0xd4,0x00,0x00,0x00}},
+          {{0x53,0x8b,0xd9,0x55,0x8b,0x6c,0x24,0x0c,0x8b,0x8b,0x94,0x00,0x00,0x00,0x56,0x85}},
+          {{0x64,0xa1,0x00,0x00,0x00,0x00,0x6a,0xff,0x68,0x10,0xd7,0x71,0x00,0x50,0x64,0x89}}}}};
+    static constexpr ObjectMutationContract lia{
+        kLiaObjectMutationEntryRvas,kLiaObjectMutationHookBytes,kLiaObjectMutationStockBytes};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+struct ObjectDrawBoundaryContract {
+    std::uint32_t draw_entry_rva, suffix_entry_rva, suffix_resume_rva;
+    std::uint32_t suffix_epilogue_rva, visual_entry_rva, visual_skip_rva;
+    std::size_t draw_bytes, suffix_bytes;
+    std::array<std::uint8_t,10> draw_stock;
+    std::array<std::uint8_t,6> visual_stock;
+};
+const ObjectDrawBoundaryContract& object_draw_boundary() noexcept {
+    static constexpr ObjectDrawBoundaryContract base{
+        kObject3dDrawEntryRva,kObjectSuffixCutEntryRva,kObjectSuffixCutResumeRva,
+        kObjectSuffixCutEpilogueRva,kObjectVisualLoopEntryRva,kObjectVisualLoopResumeRva,
+        kObject3dDrawPatchBytes,kObjectSuffixCutPatchBytes,
+        {{0x55,0x8b,0xec,0x6a,0xff,0x68,0x77,0xd9,0x71,0x00}},
+        {{0x8b,0x44,0xb3,0x20,0x85,0xc0}}};
+    static constexpr ObjectDrawBoundaryContract lia{
+        0x000a23a0,0x000a2451,0x000a2458,0x000a2be6,0x000a2650,0x000a2a8c,
+        7,7,{{0x6a,0xff,0x68,0x22,0xed,0x60,0x00}},
+        {{0x8b,0x44,0xb5,0x20,0x85,0xc0}}};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
+std::uint32_t native_game_image_size() noexcept {
+    return running_game_sites().report.engine == GameEngine::lia
+        ? kLiaGameImageSize : kExpectedImageSize;
+}
+
+bool object_suffix_live_code_matches(const std::uint8_t* image,
+    std::uint32_t rva,std::size_t bytes,std::uint64_t expected) noexcept;
+bool lia_live_contract_range_matches(const std::uint8_t* image,
+    std::uint32_t rva,std::size_t bytes,std::uint64_t expected) noexcept;
 
 thread_local SemanticContext g_semantic{};
 std::string debug_root();
@@ -1538,6 +1911,7 @@ using NativeGeometryFn = int (__thiscall*)(
     float, float, BYTE, DWORD);
 using FigureAnimatedTextureFn = void (__thiscall*)(void*, float);
 using EngineStringConstructFn = void* (__thiscall*)(void*, const void*);
+using EngineStringTextConstructFn = void* (__thiscall*)(void*, const char*, const void*);
 using EngineStringAssignRangeFn = void* (__thiscall*)(void*, const char*, const char*);
 using EngineStringDestroyFn = void (__thiscall*)(void*);
 using DeformationGetWorldFn = void* (__thiscall*)(void*);
@@ -1630,6 +2004,9 @@ using ResourceGetFn = std::uint8_t* (__thiscall*)(
 using ResourceReleaseFn = bool (__thiscall*)(void*, std::uint8_t*);
 using ResourceCloseAllFilesFn = void (__thiscall*)(void*);
 using CharacterPaneDrawFn = BOOL (__thiscall*)(void*, void*);
+// The native no-argument Draw has a plain ret. Carry its raw EAX through
+// the scope wrapper without adding a return-value assumption.
+using CharacterPaneSurfaceDrawFn = std::uintptr_t (__thiscall*)(void*);
 using CharacterPaneDrawTextFn = int (__thiscall*)(
     void*, const char*, const RECT*, int, COLORREF, int, BOOL);
 using CharacterPaneInterfaceInitFn = void (__thiscall*)(void*, void*);
@@ -1637,6 +2014,8 @@ using CharacterPaneInterfaceFiniFn = void (__thiscall*)(void*);
 using CharacterPaneRectTransformFn = void (__thiscall*)(void*, RECT*);
 using CharacterPaneSizeTransformFn = void (__thiscall*)(void*, SIZE*);
 using OuterTimeGetTimeFn = DWORD (WINAPI*)();
+using OuterCountTimeFn = bool (__cdecl*)();
+using OuterNativePostTickFn = void (__cdecl*)();
 using OuterPreTickFn = int (__thiscall*)(void*);
 using OuterFixedStepFn = void (__thiscall*)(void*, float);
 using OuterPostTickFn = void (__thiscall*)(void*);
@@ -1662,6 +2041,8 @@ BeginEndFn g_end_frame = nullptr;
 // The direct DrawFrame call owns rendering entry independently of profiling.
 std::uint8_t* g_engine_frame_begin_image = nullptr;
 OuterTimeGetTimeFn g_outer_time_get_time = nullptr;
+OuterCountTimeFn g_outer_count_time = nullptr;
+OuterNativePostTickFn g_outer_native_post_tick = nullptr;
 OuterPreTickFn g_outer_pre_tick = nullptr;
 OuterFixedStepFn g_outer_fixed_step = nullptr;
 OuterPostTickFn g_outer_post_tick = nullptr;
@@ -2103,6 +2484,7 @@ FigureLightsFn g_figure_lights = nullptr;
 NativeGeometryFn g_native_geometry = nullptr;
 FigureAnimatedTextureFn g_figure_animated_texture = nullptr;
 EngineStringConstructFn g_engine_string_construct = nullptr;
+EngineStringTextConstructFn g_engine_string_text_construct = nullptr;
 EngineStringAssignRangeFn g_engine_string_assign_range = nullptr;
 EngineStringDestroyFn g_engine_string_destroy = nullptr;
 void* g_native_geometry_trampoline = nullptr;
@@ -2114,7 +2496,7 @@ TerrainFreeFn g_terrain_free = nullptr;
 TerrainSetLightFn g_terrain_set_light = nullptr;
 void* g_terrain_segment_trampoline = nullptr;
 void* g_terrain_free_trampoline = nullptr;
-std::array<std::uint8_t, kTerrainRangeDrawPatchBytes> g_terrain_range_draw_original{};
+std::array<std::uint8_t, 6> g_terrain_range_draw_original{};
 std::array<std::uint8_t, kTerrainSegmentPatchBytes> g_terrain_segment_original{};
 std::array<std::uint8_t, kTerrainFreePatchBytes> g_terrain_free_original{};
 std::array<std::array<std::uint8_t, kTerrainSetLightCallBytes>, 2>
@@ -2137,8 +2519,7 @@ bool g_scene_profile_chained = false;
 bool g_object_lighting_hook_installed = false;
 bool g_object_3d_draw_trampoline_owned = false;
 bool g_object_lighting_chained = false;
-std::array<std::uint8_t, kObjectSuffixCutPatchBytes>
-    g_object_suffix_cut_original{};
+std::array<std::uint8_t, 7> g_object_suffix_cut_original{};
 void* g_object_suffix_cut_trampoline = nullptr;
 void* g_object_suffix_cut_resume = nullptr;
 void* g_object_suffix_cut_epilogue = nullptr;
@@ -2173,9 +2554,9 @@ void* g_lifecycle_tick_trampoline = nullptr;
 void* g_lifecycle_add_trampoline = nullptr;
 void* g_lifecycle_remove_trampoline = nullptr;
 void* g_lifecycle_positive_reset_trampoline = nullptr;
-std::array<std::uint8_t, kLifecycleTickPatchBytes> g_lifecycle_tick_original{};
-std::array<std::uint8_t, kLifecycleAddPatchBytes> g_lifecycle_add_original{};
-std::array<std::uint8_t, kLifecycleRemovePatchBytes> g_lifecycle_remove_original{};
+std::array<std::uint8_t, 13> g_lifecycle_tick_original{};
+std::array<std::uint8_t, 13> g_lifecycle_add_original{};
+std::array<std::uint8_t, 13> g_lifecycle_remove_original{};
 std::array<std::uint8_t, kLifecyclePositiveResetPatchBytes>
     g_lifecycle_positive_reset_original{};
 bool g_lifecycle_hooks_installed = false;
@@ -2508,13 +2889,15 @@ std::atomic<std::uint64_t> g_character_pane_font_generation{0};
 std::atomic<std::uint64_t> g_character_pane_next_font_generation{1};
 std::atomic<std::uint64_t> g_character_pane_next_ui_epoch{1};
 CharacterPaneDrawFn g_character_pane_draw = nullptr;
+CharacterPaneSurfaceDrawFn g_character_pane_surface_draw = nullptr;
+thread_local void* g_character_pane_surface_draw_self = nullptr;
 CharacterPaneDrawTextFn g_character_pane_draw_text = nullptr;
 CharacterPaneInterfaceInitFn g_character_pane_interface_init = nullptr;
 CharacterPaneInterfaceFiniFn g_character_pane_interface_fini = nullptr;
 CharacterPaneRectTransformFn g_character_pane_virtual_to_screen = nullptr;
 CharacterPaneSizeTransformFn g_character_pane_screen_to_virtual = nullptr;
 std::array<void*, kCharacterPaneHookCount> g_character_pane_trampolines{};
-std::array<std::array<std::uint8_t, kCharacterPanePatchBytes>,
+std::array<std::array<std::uint8_t, kCharacterPaneMaximumPatchBytes>,
            kCharacterPaneHookCount> g_character_pane_original{};
 std::uint8_t* g_character_pane_game_image = nullptr;
 bool g_character_pane_hooks_installed = false;
@@ -2967,6 +3350,17 @@ enum class ObjectSuffixWorldRoute : std::uint8_t {
     inventory_preview,
 };
 
+struct LiaWorldObjectRoute {
+    ObjectSuffixWorldRoute route = ObjectSuffixWorldRoute::none;
+    void* owner = nullptr;
+    void* renderer = nullptr;
+};
+thread_local LiaWorldObjectRoute g_lia_world_object_route{};
+constexpr std::array<std::uint32_t,5> kLiaWorldCallbackPublicationRvas{{
+    0x000da983,0x000da9a0,0x000da9fe,0x000daa20,0x000daabf}};
+std::array<std::array<std::uint8_t,5>,5> g_lia_world_callback_original{};
+bool g_lia_world_callbacks_installed = false;
+
 bool owned_preview_route(ObjectSuffixWorldRoute route) noexcept {
     return route == ObjectSuffixWorldRoute::panel_preview ||
         route == ObjectSuffixWorldRoute::inventory_preview;
@@ -3033,6 +3427,26 @@ Renderer* scene_core_renderer() noexcept {
     return g_scene_handoff.context && g_scene_handoff.core_renderer ? g_scene_handoff.core_renderer(g_scene_handoff.context)
                                                                     : nullptr;
 }
+struct MapPreviewDrawContext {
+    void* screen = nullptr; // borrowed only during the native Draw call
+    void* carrier = nullptr;
+    std::int32_t section = -1;
+    bool consumed = false;
+};
+thread_local MapPreviewDrawContext g_map_preview_draw;
+thread_local unsigned g_map_preview_hit_test_depth = 0;
+Renderer* g_map_preview_renderer = nullptr; // explicitly registered modern owner
+bool g_map_preview_enabled = false, g_map_preview_active = false, g_map_preview_published = false;
+std::uint64_t g_map_preview_generation = 0;
+std::uint32_t g_map_preview_sections = 0;
+std::uint8_t* g_map_preview_image = nullptr;
+std::int32_t map_preview_carrier_section(void* carrier,const void* caller) noexcept;
+bool map_preview_carrier_marker(void* carrier,const void* caller) noexcept;
+bool submit_map_preview_placed(void* renderer,void* figure) noexcept;
+bool install_map_preview_hooks(std::uint8_t* game) noexcept;
+bool uninstall_map_preview_hooks() noexcept;
+bool signature(const std::uint8_t* address, std::initializer_list<std::uint8_t> bytes);
+bool relative_call_targets(const std::uint8_t* call,const void* target) noexcept;
 // The device state a captured sinks copy holds (Device::captureSceneSinks).
 SceneSinkState scene_core_sink_state(const std::shared_ptr<void>& captured) {
     const auto& sinks = *static_cast<const SceneSinks*>(captured.get());
@@ -3102,7 +3516,7 @@ std::uintptr_t active_wound_surface_interface(
         const auto* active_descriptor =
             *reinterpret_cast<const void* const*>(
                 render_state_manager +
-                kRenderStateManagerActiveDescriptorOffset);
+                object_frame_contract().active_descriptor_offset);
         if (!descriptor || active_descriptor != descriptor) return 0;
         const auto* texture =
             *reinterpret_cast<const std::uint8_t* const*>(
@@ -3345,7 +3759,7 @@ void* hud_manager_for_role(HudResourceRole role) noexcept {
     void* manager = nullptr;
     __try {
         const std::uint32_t slot = role == HudResourceRole::texture ?
-            kGameResourceManagerSlotRva : kFigureResourceManagerSlotRva;
+            resource_manager_contract().texture_slot : resource_manager_contract().figure_slot;
         manager = *reinterpret_cast<void**>(g_hud_visual_game_image + slot);
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         return nullptr;
@@ -3358,8 +3772,8 @@ bool hud_manager_role_ready(HudResourceRole role) noexcept {
     if (!manager || !g_hud_visual_game_image) return false;
     __try {
         const auto expected = g_hud_visual_game_image +
-            (role == HudResourceRole::texture ? kTextureManagerVtableRva :
-                                                kFigureManagerVtableRva);
+            (role == HudResourceRole::texture ? resource_manager_contract().texture_table :
+                                                resource_manager_contract().figure_table);
         return *reinterpret_cast<void**>(manager) == expected;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -3882,7 +4296,7 @@ void* dispatch_hud_visual_add_figure(
     void* self, const char* resource_name, std::uintptr_t return_address) {
     HudAddFigureFn add_figure = nullptr;
     bool indicator_site = false;
-    for (std::uint32_t rva : kHudStockAddFigureCallRvas)
+    for (std::uint32_t rva : hud_game_contract().add_calls)
         if (return_address == reinterpret_cast<std::uintptr_t>(
                                   g_hud_visual_game_image) + rva + 5u)
             add_figure = g_hud_stock_add_figure;
@@ -3919,17 +4333,24 @@ void* __fastcall hook_hud_visual_add_figure(
 }
 #endif // !EID3D11_EMBEDDED
 
-HudVisualLane hud_lane_from_draw_return(const void* address) noexcept {
+HudVisualLane hud_lane_from_draw_return(const void* address,void* receiver) noexcept {
     if (!g_hud_visual_game_image || !address) return HudVisualLane::none;
     const auto absolute = reinterpret_cast<std::uintptr_t>(address);
     const auto base = reinterpret_cast<std::uintptr_t>(g_hud_visual_game_image);
     if (absolute < base || absolute - base > UINT32_MAX)
         return HudVisualLane::none;
     const auto rva = static_cast<std::uint32_t>(absolute - base);
-    if (rva == kHudLaneDrawCallRvas[0] + 5u) return HudVisualLane::weapon;
-    if (rva == kHudLaneDrawCallRvas[1] + 5u) return HudVisualLane::item;
-    if (rva == kHudLaneDrawCallRvas[2] + 5u) return HudVisualLane::spell;
-    if (rva == kHudLaneDrawCallRvas[3] + 5u) return HudVisualLane::skill;
+    const auto& calls = hud_game_contract().draw_calls;
+    if (rva == calls[0]+5u) return HudVisualLane::weapon;
+    if (running_game_sites().report.engine == GameEngine::lia) {
+        if (rva != calls[1]+5u) return HudVisualLane::none;
+        for (auto lane : {HudVisualLane::item,HudVisualLane::spell,HudVisualLane::skill})
+            if (hud_draw_receiver(receiver,lane)) return lane;
+        return HudVisualLane::none;
+    }
+    if (rva == calls[1]+5u) return HudVisualLane::item;
+    if (rva == calls[2]+5u) return HudVisualLane::spell;
+    if (rva == calls[3]+5u) return HudVisualLane::skill;
     return HudVisualLane::none;
 }
 
@@ -3937,7 +4358,7 @@ HudVisualLane hud_lane_from_draw_return(const void* address) noexcept {
 BOOL __fastcall hook_hud_lane_draw(void* self, void*, void* rect) {
     close_hud_auto_capture();
     const HudDrawContext previous = g_hud_draw;
-    const HudVisualLane lane = hud_lane_from_draw_return(_ReturnAddress());
+    const HudVisualLane lane = hud_lane_from_draw_return(_ReturnAddress(),self);
     if (hud_draw_receiver(self, lane)) {
         g_hud_draw = {};
         g_hud_draw.lane = lane;
@@ -3958,6 +4379,12 @@ BOOL __fastcall hook_hud_lane_draw(void* self, void*, void* rect) {
 }
 
 BOOL __fastcall hook_hud_carrier_draw(void* self, void*, void* renderer) {
+    const auto previous_map = g_map_preview_draw;
+    Renderer* const marker_renderer = map_preview_carrier_marker(self,_ReturnAddress()) ? g_map_preview_renderer : nullptr;
+    g_map_preview_draw.carrier = nullptr;
+    g_map_preview_draw.section = map_preview_carrier_section(self,_ReturnAddress());
+    g_map_preview_draw.consumed = false;
+    if(g_map_preview_draw.section>=0) g_map_preview_draw.carrier=self;
     auto& draw = g_hud_draw;
     void* const previous_carrier = draw.current_carrier;
     const std::uint32_t previous_ordinal = draw.current_ordinal;
@@ -3986,9 +4413,12 @@ BOOL __fastcall hook_hud_carrier_draw(void* self, void*, void* renderer) {
     g_portrait_face_active = g_owned_portraits && widescreen_hud_portrait_face(self, g_portrait_face);
     g_portrait_carrier = g_portrait_face_active ? self : nullptr;
     BOOL result = FALSE;
+    if(marker_renderer)marker_renderer->begin_world_map_marker();
     __try {
         result = widescreen_replaces_hud_frame(self) ? TRUE : (g_hud_figure_draw ? g_hud_figure_draw(self, renderer) : FALSE);
     } __finally {
+        if(marker_renderer)marker_renderer->end_world_map_marker();
+        g_map_preview_draw = previous_map;
         g_portrait_face_active = previous_face_active;
         g_portrait_face = previous_face;
         g_portrait_carrier = previous_portrait_carrier;
@@ -4005,14 +4435,14 @@ void invalidate_hud_manager(void* self, bool destroying = false) noexcept {
     if (!g_hud_visual_game_image || !self) return;
     __try {
         if (self == *reinterpret_cast<void**>(
-                        g_hud_visual_game_image + kGameResourceManagerSlotRva)) {
+                        g_hud_visual_game_image + resource_manager_contract().texture_slot)) {
             camp_inventory_retire_textures();
             destroying
                 ? g_hud_visuals.begin_role_recreation(HudResourceRole::texture)
                 : g_hud_visuals.invalidate_role(HudResourceRole::texture);
         }
         if (self == *reinterpret_cast<void**>(
-                        g_hud_visual_game_image + kFigureResourceManagerSlotRva))
+                        g_hud_visual_game_image + resource_manager_contract().figure_slot))
             destroying
                 ? g_hud_visuals.begin_role_recreation(HudResourceRole::figure)
                 : g_hud_visuals.invalidate_role(HudResourceRole::figure);
@@ -4849,7 +5279,7 @@ FigureFallbackReason publish_retained_world_lighting(
         GetModuleHandleA(nullptr));
     if (!image) return FigureFallbackReason::renderer_state;
     void* world_renderer = const_cast<std::uint8_t*>(
-        image + kWorldFigureRendererRva);
+        image + object_frame_contract().world_renderer_rva);
     if (!world_figure_renderer_owns_scene_renderer(
             world_renderer, scene_renderer))
         return FigureFallbackReason::renderer_state;
@@ -5001,7 +5431,7 @@ FigureFallbackReason build_native_figure_context(
             GetModuleHandleA(nullptr));
         const auto* const* render_state_manager_slot = image
             ? reinterpret_cast<const std::uint8_t* const*>(
-                  image + kRenderStateManagerGlobalRva)
+                  image + object_frame_contract().state_manager_slot_rva)
             : nullptr;
         context.wound_surface_interface = active_wound_surface_interface(
             render_state_manager_slot, object);
@@ -5488,9 +5918,9 @@ bool advance_animated_figure_texture(void* figure) {
         const auto* image = reinterpret_cast<const std::uint8_t*>(GetModuleHandleA(nullptr));
         if (!image) return false;
         const auto ticks = *reinterpret_cast<const std::int32_t*>(
-            image + kWorldSegmentTimeCounterRva);
+            image + world_clock_contract().ticks_rva);
         const auto fraction = *reinterpret_cast<const float*>(
-            image + kWorldTimeFractionRva);
+            image + world_clock_contract().fraction_rva);
         if (!std::isfinite(fraction)) return false;
         g_figure_animated_texture(specific, static_cast<float>(ticks) + fraction);
         return true;
@@ -5711,7 +6141,7 @@ bool submit_resolved_figure_geometry(void* renderer, void* figure, void* materia
         if (context.transform_override) {
             view.object_to_clip = context.object_to_clip;
             view.default_diffuse = *reinterpret_cast<const std::uint32_t*>(
-                direct3d + 0x150);
+                direct3d + direct_renderer_layout().diffuse);
         } else if (!extract_native_transform(
                        direct3d, view.object_to_clip,
                        view.default_diffuse)) {
@@ -5756,7 +6186,8 @@ bool render_owned_figure_geometry(void* renderer, void* figure, void* material,
     render_result = 0;
     contract_violation = FigureExtentContractViolation::none;
     if (!renderer || !figure || !material || !context.geometry ||
-        !g_engine_string_construct || !g_engine_string_assign_range ||
+        !(g_engine_string_text_construct ||
+          (g_engine_string_construct && g_engine_string_assign_range)) ||
         !g_engine_string_destroy)
         return false;
     std::array<std::uint32_t, 3> engine_string{};
@@ -5767,9 +6198,16 @@ bool render_owned_figure_geometry(void* renderer, void* figure, void* material,
         const char* name = nullptr;
         std::size_t length = 0;
         if (!read_figure_name(figure, name, length)) return false;
-        g_engine_string_construct(engine_string.data(), &allocator);
-        string_constructed = true;
-        g_engine_string_assign_range(engine_string.data(), name, name + length);
+        if (g_engine_string_text_construct) {
+            // LiA constructs directly from the NUL-terminated name and the
+            // native caller's address of an allocator byte (ret 8).
+            g_engine_string_text_construct(engine_string.data(),name,&allocator);
+            string_constructed = true;
+        } else {
+            g_engine_string_construct(engine_string.data(), &allocator);
+            string_constructed = true;
+            g_engine_string_assign_range(engine_string.data(), name, name + length);
+        }
         if (!advance_animated_figure_texture(figure)) {
             g_engine_string_destroy(engine_string.data());
             return false;
@@ -5788,7 +6226,7 @@ bool render_owned_figure_geometry(void* renderer, void* figure, void* material,
             geometry_vtable[0x28 / sizeof(void*)]);
         const auto* image = reinterpret_cast<const std::uint8_t*>(GetModuleHandleA(nullptr));
         const auto* target = reinterpret_cast<const std::uint8_t*>(render);
-        if (!image || target < image || target >= image + kExpectedImageSize) {
+        if (!image || target < image || target >= image + native_game_image_size()) {
             g_engine_string_destroy(engine_string.data());
             return false;
         }
@@ -5816,7 +6254,7 @@ bool render_owned_figure_geometry(void* renderer, void* figure, void* material,
                     renderer_extents_unavailable_after_submission;
                 return false;
             }
-            std::memcpy(&extents, direct3d + kLegacyRendererScreenExtentsOffset,
+            std::memcpy(&extents, direct3d + direct_renderer_layout().screen_extents,
                         sizeof(extents));
             published_extents = &extents;
         }
@@ -6105,6 +6543,18 @@ bool object_suffix_route_for_invocation(
         g_object_suffix_image);
     const auto immediate = reinterpret_cast<std::uintptr_t>(
         immediate_return);
+    if (running_game_sites().report.engine == GameEngine::lia) {
+        const auto& current = g_lia_world_object_route;
+        if (!g_lia_world_callbacks_installed || !g_world_draw_depth ||
+            !g_scene_3d_depth || !current.owner || !current.renderer)
+            return false;
+        const bool normal = current.route == ObjectSuffixWorldRoute::lever ||
+            current.route == ObjectSuffixWorldRoute::unit;
+        if (immediate != image + (normal ? 0x0009e916u : 0x0009e946u))
+            return false;
+        route = current.route;
+        return route != ObjectSuffixWorldRoute::none;
+    }
     std::size_t wrapper_return_offset = 0;
     if (immediate == image + kObjectNormalDrawReturnRva)
         wrapper_return_offset = 0x14;
@@ -6153,6 +6603,19 @@ bool object_suffix_prepare_invocation(
         !object_suffix_route_for_invocation(
             immediate_return, return_slot, admitted_route))
         return false;
+    if (running_game_sites().report.engine == GameEngine::lia) {
+        const auto& current = g_lia_world_object_route;
+        const bool normal = admitted_route == ObjectSuffixWorldRoute::lever ||
+            admitted_route == ObjectSuffixWorldRoute::unit;
+        const void* expected_rect = normal ? static_cast<const std::uint8_t*>(owner)+kObjectScreenExtentsOffset : nullptr;
+        void* current_specific = nullptr;
+        if (current.owner != owner || current.renderer != invocation.renderer ||
+            current.route != admitted_route || invocation.caller_rect != expected_rect ||
+            !object_suffix_guarded_copy(
+                static_cast<const std::uint8_t*>(owner) + kObjectSpecificOffset,
+                current_specific) || current_specific != invocation.specific)
+            return false;
+    }
     invocation.route = admitted_route;
     invocation.route_match = true;
     invocation.owner = owner;
@@ -6582,7 +7045,7 @@ bool apply_object_plan_render_state(void* descriptor) noexcept {
             GetModuleHandleA(nullptr));
         if (!image) return false;
         auto* manager = *reinterpret_cast<void* const*>(
-            image + kRenderStateManagerGlobalRva);
+            image + object_frame_contract().state_manager_slot_rva);
         if (!manager) return false;
         g_render_state_apply(manager, descriptor);
         return true;
@@ -6596,8 +7059,8 @@ bool write_object_plan_loop_outputs(void* frame, std::uint32_t visible,
     if (!frame) return false;
     __try {
         auto* bytes = static_cast<std::uint8_t*>(frame);
-        *reinterpret_cast<std::uint32_t*>(bytes - 0x4c) = visible;
-        *reinterpret_cast<std::uint32_t*>(bytes - 0x18) = lighted;
+        *reinterpret_cast<std::uint32_t*>(bytes + object_frame_contract().visible_offset) = visible;
+        *reinterpret_cast<std::uint32_t*>(bytes + object_frame_contract().lighted_offset) = lighted;
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -6777,7 +7240,7 @@ struct ObjectPlanFigureSemanticScope {
     ObjectPlanFigureSemanticScope() noexcept
         : previous(g_semantic), previous_lower_calls(g_native_lower_calls) {
         g_semantic.kind = SemanticKind::figure;
-        g_semantic.caller_rva = kObjectVisualLoopEntryRva;
+        g_semantic.caller_rva = object_draw_boundary().visual_entry_rva;
         g_native_lower_calls = 0;
     }
     ~ObjectPlanFigureSemanticScope() noexcept {
@@ -6790,7 +7253,7 @@ struct ObjectPlanFigureSemanticScope {
 bool read_object_plan_fog(void* frame, BYTE& fog) noexcept {
     if (!frame) return false;
     __try {
-        fog = *(static_cast<std::uint8_t*>(frame) - 0x50);
+        fog = *(static_cast<std::uint8_t*>(frame) + object_frame_contract().fog_offset);
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -6969,7 +7432,7 @@ BYTE neighbour_continued_border_fog(const void* terrain,const float* position,
         const auto* bytes=static_cast<const std::uint8_t*>(terrain);
         if((*reinterpret_cast<const std::uint32_t*>(bytes+kTerrainRenderStateOffset)&4u)==0u)return fog;
         const auto* image=reinterpret_cast<const std::uint8_t*>(GetModuleHandleA(nullptr));
-        const float distance=*reinterpret_cast<const float*>(image+0x0039bd34);
+        const float distance=*reinterpret_cast<const float*>(image+object_frame_contract().fog_distance_rva);
         const auto* extent=reinterpret_cast<const float*>(bytes+0x10c);
         return owned::neighbour_continued_border_fog(
             ObjectBorderFogInputs{{extent[0],extent[1]},distance,true},position,fog);
@@ -6992,7 +7455,7 @@ bool resolve_object_plan_fog(void* frame,void* specific,void* owner,
     _fxsave(floating_state.data());
     __try {
         std::array<float,3> position{};
-        std::memcpy(position.data(),static_cast<const std::uint8_t*>(frame)-0x70,sizeof(position));
+        std::memcpy(position.data(),static_cast<const std::uint8_t*>(frame)+object_frame_contract().position_offset,sizeof(position));
         if(!finite_vector(position.data(),position.size()))__leave;
         void* world_owner=g_object_world_accessor(specific);
         void* terrain=world_owner ? *reinterpret_cast<void**>(
@@ -7231,7 +7694,7 @@ ObjectPlanExecutionStatus execute_owned_object_interaction(
                     !apply_object_plan_render_state(active_set == 0 ? descriptor : nullptr)) { stage="render_state"; success=false; break; }
                 const auto* image = reinterpret_cast<const std::uint8_t*>(GetModuleHandleA(nullptr));
                 const auto* manager_slot = image ?
-                    reinterpret_cast<const std::uint8_t* const*>(image+kRenderStateManagerGlobalRva) : nullptr;
+                    reinterpret_cast<const std::uint8_t* const*>(image+object_frame_contract().state_manager_slot_rva) : nullptr;
 #ifdef EID3D11_TESTING
                 if (g_test_owned_wound_manager_slot) manager_slot = g_test_owned_wound_manager_slot;
 #endif
@@ -7464,60 +7927,92 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
             widescreen::compose_hud_clip(world_to_clip.data(), widescreen::hud_blit,
                                         layout.width, layout.height);
         }
+        NativeWorldGeometry::Pose* pose=nullptr;
+        if (!command) {
+            if (!retained_visual_gpu_pose(sample,pose) || !pose) return fail("preview.gpu_binding");
+            pose->root_to_world=base_world;
+        }
         if (!ensure_object_interaction_mapping(plan,sample)) return fail("preview.parts");
         if (!command) {
             transaction=g_native_sink_begin_object(g_native_sink_context);
             if (!transaction) return fail("preview.transaction");
         }
-        std::uint32_t active_set=0;
-        const auto reject=[&](const char* reason) { failure=reason; return false; };
-        const auto read = [&](std::size_t i, ModelPartFacts& facts) {
-            const auto& current = plan.prepared[i];
-            facts.texture_set = plan.parts[i].set;
-            facts.inactive = current.inactive;
-            facts.hidden = current.hidden;
-            if (!facts.inactive && !read_object_plan_flags(plan.parts[i].figure, facts.visible))
-                return reject("preview.flags");
-            facts.visible &= kFigureVisible;
-            return true;
-        };
-        const auto bind = [&](std::uint32_t set) {
-            active_set = set;
-            void* texture = nullptr;
-            void* descriptor = nullptr;
-            if (!read_object_plan_pointer(plan.sets[set], 0, texture) ||
-                (set == 0 && !read_object_plan_pointer(specific, kObjectWoundDescriptorOffset, descriptor)) ||
-                !set_object_plan_texture(renderer, texture) ||
-                !apply_object_plan_render_state(set == 0 ? descriptor : nullptr))
-                return reject("preview.presentation");
+        std::uint8_t active_set=0xff;
+        std::uint32_t visible=0;
+        for (std::size_t i=0;i<plan.parts.size();++i) {
+            const auto& source=plan.parts[i];
+            const auto& current=plan.prepared[i];
+            if (current.inactive) continue;
+            std::uint32_t flags=0;
+            if (!read_object_plan_flags(source.figure,flags)) return fail("preview.flags");
+            if (current.hidden) { visible|=flags&kFigureVisible; continue; }
+            if (source.set!=active_set) {
+                active_set=source.set;
+                void* texture=nullptr;
+                void* descriptor=nullptr;
+                if (!read_object_plan_pointer(plan.sets[active_set],0,texture) ||
+                    (active_set==0 && !read_object_plan_pointer(specific,kObjectWoundDescriptorOffset,descriptor)) ||
+                    !set_object_plan_texture(renderer,texture) ||
+                    !apply_object_plan_render_state(active_set==0?descriptor:nullptr))
+                    return fail("preview.presentation");
+                if (command) {
+                    // The device state and stage-0 texture this set's parts use.
+                    auto sinks=g_scene_handoff.capture_sinks(g_scene_handoff.context);
+                    if (!sinks) return fail("preview.scene_sinks");
+                    if (g_scene_handoff.bind_texture)
+                        g_scene_handoff.bind_texture(sinks.get(),g_scene_handoff.bound_texture(g_scene_handoff.context));
+                    command->sets.push_back(std::move(sinks));
+                }
+            }
+            const char* name=nullptr;
+            std::size_t name_size=0;
+            if (!read_figure_name(source.figure,name,name_size)) return fail("preview.part_name");
+            auto& ordinal=plan.interaction_part_ordinals[i];
+            if (ordinal>=sample.assembly->parts.size() ||
+                sample.assembly->parts[ordinal].name.size()!=name_size ||
+                std::memcmp(sample.assembly->parts[ordinal].name.data(),name,name_size)!=0) {
+                const auto found=std::find_if(sample.assembly->parts.begin(),sample.assembly->parts.end(),
+                    [&](const VisualPartAsset& part) { return part.name.size()==name_size &&
+                        std::memcmp(part.name.data(),name,name_size)==0; });
+                if (found==sample.assembly->parts.end()) return fail("preview.part_binding");
+                ordinal=static_cast<std::size_t>(found-sample.assembly->parts.begin());
+            }
+            if (!preview_submits_part(sample.assembly->parts[ordinal], sample.values.unit)) continue;
             if (command) {
-                auto sinks = g_scene_handoff.capture_sinks(g_scene_handoff.context);
-                if (!sinks) return reject("preview.scene_sinks");
-                if (g_scene_handoff.bind_texture)
-                    g_scene_handoff.bind_texture(sinks.get(), g_scene_handoff.bound_texture(g_scene_handoff.context));
-                command->sets.push_back(std::move(sinks));
+                NativeFrameState state;
+                if (!g_native_sink_frame_state ||
+                    !g_native_sink_frame_state(g_native_sink_context,state)) return fail("preview.ui_state");
+                std::uint32_t material_flags=0;
+                if (!read_object_plan_flags(current.material,material_flags)) return fail("preview.material");
+                OwnedPreviewPart part;
+                part.ordinal=ordinal; part.set=command->sets.size()-1;
+                part.material=state.material;
+                part.uses_default_colors=current.context.uses_default_colors;
+                part.default_diffuse=current.context.default_diffuse;
+                part.default_specular=current.context.default_specular;
+                part.lighting=current.context.lighting;
+                part.material_flags=material_flags;
+                const auto* image=g_object_suffix_image;
+                const auto* manager=image?reinterpret_cast<const std::uint8_t* const*>(image+kRenderStateManagerGlobalRva):nullptr;
+                part.wound=object_render_wound_surface_for_set(active_set,
+                    active_wound_surface_interface(manager,static_cast<const std::uint8_t*>(owner)));
+                if (part.wound) {
+                    part.wound_texture=g_scene_handoff.surface_snapshot(g_scene_handoff.context,part.wound);
+                    if (!part.wound_texture) return fail("preview.wound_snapshot");
+                }
+                command->parts.push_back(std::move(part));
+                visible|=kFigureVisible;
+                ++output.submitted_figures;
+                continue;
             }
-            return true;
-        };
-        const auto prepare = [&](std::size_t i, ModelPreviewPart& part) {
-            const auto& source = plan.parts[i];
-            const auto& current = plan.prepared[i];
-            const char* name = nullptr;
-            std::size_t name_size = 0;
-            if (!read_figure_name(source.figure, name, name_size)) return reject("preview.part_name");
-            auto& ordinal = plan.interaction_part_ordinals[i];
-            if (ordinal >= sample.assembly->parts.size() ||
-                sample.assembly->parts[ordinal].name.size() != name_size ||
-                std::memcmp(sample.assembly->parts[ordinal].name.data(), name, name_size) != 0) {
-                const auto found = std::find_if(sample.assembly->parts.begin(), sample.assembly->parts.end(),
-                    [&](const VisualPartAsset& asset) { return asset.name.size() == name_size &&
-                        std::memcmp(asset.name.data(), name, name_size) == 0; });
-                if (found == sample.assembly->parts.end()) return reject("preview.part_binding");
-                ordinal = static_cast<std::size_t>(found - sample.assembly->parts.begin());
-            }
-            part.ordinal = ordinal;
-            part.hidden = !preview_submits_part(sample.assembly->parts[ordinal], sample.values.unit);
-            if (part.hidden) return true;
+            NativeWorldBounds bounds{};
+            NativePreparedPartSubmission* record=nullptr;
+            if (!retained_visual_part_bounds(sample,ordinal,bounds) ||
+                !retained_visual_part_submission(sample,ordinal,bounds,{true,true,0},texture_time,fog,record))
+                return fail("preview.part_evaluation");
+            NativeGeometryView view=*record->source;
+            // Read the caller's completed UI state after the set's presentation
+            // transition. The prepared queue handles changes to this state.
             NativeFrameState state;
             if (!g_native_sink_frame_state ||
                 !g_native_sink_frame_state(g_native_sink_context,state)) return fail("preview.ui_state");
@@ -7548,7 +8043,7 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
                 view.owned_fixed_state.z_write_enable=FALSE;
             }
             const auto* image=g_object_suffix_image;
-            const auto* manager=image?reinterpret_cast<const std::uint8_t* const*>(image+kRenderStateManagerGlobalRva):nullptr;
+            const auto* manager=image?reinterpret_cast<const std::uint8_t* const*>(image+object_frame_contract().state_manager_slot_rva):nullptr;
             const auto wound=object_render_wound_surface_for_set(active_set,
                 active_wound_surface_interface(manager,static_cast<const std::uint8_t*>(owner)));
             view.ordering=wound?NativeOrdering::preserve:NativeOrdering::derive_from_state;
@@ -7561,9 +8056,6 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
             visible|=kFigureVisible;
             ++output.submitted_figures;
         }
-        if (!produced) return fail(failure?failure:"preview.parts");
-        const auto visible=loop_result.visible;
-        output.submitted_figures=loop_result.submitted;
         if (command) {
             command->sample=std::move(sample);
             command->texture_time=texture_time; command->fog=fog;
@@ -7614,6 +8106,45 @@ bool read_owned_world_time(const std::uint8_t* image, double& time) noexcept;
 bool read_portrait_world_time(double& time) noexcept;
 constexpr std::uint32_t kPortraitPreviewView = 2;   // views 0/1: panel and inventory previews
 
+bool capture_owned_portrait_lighting(void* renderer, const std::array<float,16>& clip,
+    const FigureBoundingVolume& box, NativeWorldLighting& lighting) noexcept {
+    std::uint32_t tint = 0;
+    if (!renderer || !safe_copy_hud_resource(reinterpret_cast<std::uint8_t*>(&tint),
+            static_cast<const std::uint8_t*>(renderer)+0x18, sizeof(tint))) return false;
+    // The same eye/backwards-ray construction as liquidViewDirection in the
+    // native shader: this complete interface clip owns the portrait's view.
+    const auto cross = [](const std::array<float,3>& a, const std::array<float,3>& b) {
+        return std::array<float,3>{a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]};
+    };
+    const auto dot = [](const std::array<float,3>& a, const std::array<float,3>& b) {
+        return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+    };
+    const std::array<float,3> a{clip[0],clip[1],clip[2]}, b{clip[4],clip[5],clip[6]},
+        c{clip[12],clip[13],clip[14]}, depth{clip[8],clip[9],clip[10]};
+    const auto bc=cross(b,c), ca=cross(c,a), ab=cross(a,b);
+    const float determinant=dot(a,bc);
+    std::array<float,3> direction{};
+    for (unsigned axis=0;axis<3;++axis)
+        direction[axis]=std::abs(determinant)>1e-8f ?
+            (-clip[3]*bc[axis]-clip[7]*ca[axis]-clip[15]*ab[axis])/determinant-
+                .5f*(box.minimum[axis]+box.maximum[axis]) :
+            -ab[axis]*(dot(ab,depth)<0 ? -1.f : 1.f);
+    const float length_squared=dot(direction,direction);
+    if (!std::isfinite(length_squared) || length_squared<=1e-12f) return false;
+    const float inverse_length=1.f/std::sqrt(length_squared);
+    // Authored UI policy, pending human appearance confirmation: 40% ambient,
+    // 60% frontal white key, both carrying the native face's current RGB tint.
+    lighting.ambient={0,0,0,1}; lighting.sunlight_diffuse={0,0,0,1};
+    lighting.sunlight_direction={0,0,0,0};
+    for (unsigned axis=0;axis<3;++axis) {
+        const float color=float((tint>>(16-axis*8))&255u)/255.f;
+        lighting.ambient[axis]=.4f*color;
+        lighting.sunlight_diffuse[axis]=.6f*color;
+        lighting.sunlight_direction[axis]=direction[axis]*inverse_length;
+    }
+    return true;
+}
+
 struct OwnedPortraitSlotCache {
     VisualResourceIncarnation resource{};
     std::shared_ptr<VisualPreparedResources> prepared;
@@ -7621,7 +8152,33 @@ struct OwnedPortraitSlotCache {
     std::string overlay_key;
     std::shared_ptr<OwnedPortraitOverlay> overlay;
     std::shared_ptr<const VisualAssemblyAsset> bare_source, bare;   // bare head of this unit assembly
+    std::int32_t bare_hair = -1;
 };
+
+bool read_owned_portrait_hair(void* figure, const std::string& model, std::int32_t& hair) {
+    const char* raw = nullptr;
+    std::size_t length = 0;
+    if (!read_figure_name(figure, raw, length)) return false;
+    const std::string name(raw, length), prefix = "infa" + model;
+    // Native AddFaces (6409F3..640A46) names the face with the selected
+    // hair + 1, independent of the equipped parts. Zero is native no-hair.
+    if (name.size() < prefix.size()+7 || name.compare(0,prefix.size(),prefix) != 0 ||
+        name.compare(name.size()-4,4,"face") != 0) return false;
+    const auto grace = name.substr(prefix.size(),2);
+    if (grace != "th" && grace != "me" && grace != "fa") return false;
+    const std::size_t first = prefix.size()+2, end = name.size()-4;
+    if (end-first > 1 && name[first] == '0') return false;
+    std::int32_t encoded = 0;
+    for (std::size_t i = first; i < end; ++i) {
+        if (name[i] < '0' || name[i] > '9') return false;
+        const int digit = name[i]-'0';
+        if (encoded > ((std::numeric_limits<std::int32_t>::max)()-digit)/10) return false;
+        encoded = encoded*10+digit;
+    }
+    hair = encoded-1;
+    return true;
+}
+
 bool portrait_model_resource(const std::string& model, ResourceBlob& blob) noexcept;
 // The neutral and expression face pictures in one resolution (game thread).
 bool portrait_face_pictures(const std::string& neutral, const std::string& expression,
@@ -7690,16 +8247,23 @@ bool submit_owned_portrait(void* renderer, void* figure, void* material, BYTE fo
         }
         // Head (stem hd) and hair (stem hr) parts. Without the helmet option
         // a helmeted head (hd.armorTT, hr.HH.armorTT) needs the bare parts.
-        std::vector<std::size_t> parts;
+        const auto select_parts = [](const VisualAssemblyAsset& assembly) {
+            std::vector<std::size_t> selected;
+            for (std::size_t i = 0; i < assembly.parts.size(); ++i) {
+                const auto& part = assembly.parts[i];
+                if (!part.source_available || part.explicitly_hidden || !part.geometry || !part.material || part.weapon) continue;
+                const auto stem = fur_part_stem(part.name);
+                if (stem == "hd" || fur_hair_stem(stem)) selected.push_back(i);
+            }
+            return selected;
+        };
+        std::vector<std::size_t> parts = select_parts(*sample.assembly);
         bool head = false, helmeted = false;
-        for (std::size_t i = 0; i < sample.assembly->parts.size(); ++i) {
+        for (const auto i : parts) {
             const auto& part = sample.assembly->parts[i];
-            if (!part.source_available || part.explicitly_hidden || !part.geometry || !part.material || part.weapon) continue;
             const auto stem = fur_part_stem(part.name);
-            if (stem != "hd" && !fur_hair_stem(stem)) continue;
             head = head || stem == "hd";
             helmeted = helmeted || part.name.find(".armor") != std::string::npos;
-            parts.push_back(i);
         }
         {
             // Head/hair part names and skeleton nodes per member, once (the
@@ -7729,23 +8293,29 @@ bool submit_owned_portrait(void* renderer, void* figure, void* material, BYTE fo
         // A helmeted member's bare head: drawn with portrait_helmet off, and
         // with it on the framing (the face sits where the bare head puts it).
         std::shared_ptr<const VisualAssemblyAsset> bare_fit;
+        std::int32_t portrait_hair = -1;
         if (helmeted) {
+            if (!sample.assembly->skeleton || !read_owned_portrait_hair(figure,
+                    sample.assembly->skeleton->visual_reference, portrait_hair)) {
+                reason = "bare_head_hair_identity"; return false;
+            }
             auto& slot_cache = caches[face.slot];
-            if (slot_cache.bare_source != sample.assembly) {
+            if (slot_cache.bare_source != sample.assembly || slot_cache.bare_hair != portrait_hair) {
                 slot_cache.bare_source = sample.assembly; slot_cache.bare.reset();
+                slot_cache.bare_hair = portrait_hair;
                 ResourceBlob model;
                 const char* bare_reason = "bare_head_model";
                 if (sample.assembly->skeleton && portrait_model_resource(sample.assembly->skeleton->visual_reference, model))
-                    slot_cache.bare = build_owned_portrait_bare_assembly(*sample.assembly, model, bare_reason);
+                    slot_cache.bare = build_owned_portrait_bare_assembly(*sample.assembly, model, portrait_hair, bare_reason);
                 if (!slot_cache.bare) report_owned_portrait_failure(bare_reason);
             }
             if (!slot_cache.bare) { reason = bare_head ? "bare_head" : "bare_head_fit"; return false; }
             if (bare_head) {
                 // portrait_helmet off: the bare hd / hr.HH in place of the helmet parts.
                 sample.assembly = slot_cache.bare;
-                // Helmet pieces worn over the bare head are hidden in the bare assembly.
-                parts.erase(std::remove_if(parts.begin(), parts.end(),
-                    [&](std::size_t index) { return sample.assembly->parts[index].explicitly_hidden; }), parts.end());
+                // Dressing may leave no hair part at all. Include the exact
+                // restored hair appended by the bare assembly, too.
+                parts = select_parts(*sample.assembly);
             } else {
                 bare_fit = slot_cache.bare;
             }
@@ -7772,8 +8342,7 @@ bool submit_owned_portrait(void* renderer, void* figure, void* material, BYTE fo
             std::vector<std::size_t> fit_parts = parts, head_parts;
             if (bare_fit) {
                 sample.assembly = bare_fit;
-                fit_parts.erase(std::remove_if(fit_parts.begin(), fit_parts.end(),
-                    [&](std::size_t index) { return bare_fit->parts[index].explicitly_hidden; }), fit_parts.end());
+                fit_parts = select_parts(*bare_fit);
             }
             for (const auto index : fit_parts)
                 if (fur_part_stem(sample.assembly->parts[index].name) == "hd") head_parts.push_back(index);
@@ -7843,10 +8412,10 @@ bool submit_owned_portrait(void* renderer, void* figure, void* material, BYTE fo
         }
         double texture_time = 0;
         if (!read_portrait_world_time(texture_time)) { reason = "game_clock"; return false; }
-        // The interface lights the game set for this face figure, as the
-        // panel preview publishes them (execute_owned_object_render_plan);
-        // without it the D3D12 interface batches kept the world's (night: black).
-        if (publish_native_world_lighting(renderer) != FigureFallbackReason::none) { reason = "lighting"; return false; }
+        NativeWorldLighting portrait_lighting;
+        if (!capture_owned_portrait_lighting(renderer,face_to_clip,box,portrait_lighting)) {
+            reason = "lighting"; return false;
+        }
         NativeFrameState state;
         if (!g_native_sink_frame_state || !g_native_sink_frame_state(g_native_sink_context, state)) {
             reason = "ui_state"; return false;
@@ -7854,6 +8423,7 @@ bool submit_owned_portrait(void* renderer, void* figure, void* material, BYTE fo
         auto command = std::make_shared<OwnedPreviewCommand>();
         command->handoff = g_scene_handoff;
         command->portrait = true;
+        command->portrait_lighting = portrait_lighting;
         auto sinks = g_scene_handoff.capture_sinks(g_scene_handoff.context);
         if (!sinks) { reason = "scene_sinks"; return false; }
         if (g_scene_handoff.bind_texture)
@@ -7910,11 +8480,13 @@ bool submit_owned_portrait(void* renderer, void* figure, void* material, BYTE fo
             scene_core::Preview preview;
             preview.face_neutral = expression_face.empty() ? std::string() : neutral_face;
             preview.bare_head = bare_head ? 1u : 0u;
+            preview.portrait_hair = bare_head ? portrait_hair : -1;
             // The portrait frame for the host's interface depth clears around the portrait (the HP/MP bars over its hair).
             preview.portrait_clip = {portrait_hud.clip_left, portrait_hud.clip_top, portrait_hud.clip_right, portrait_hud.clip_bottom};
             preview.face_expression = expression_face;
             preview.resource = command->sample.resource; preview.lifecycle = command->sample.lifecycle;
             preview.view = kPortraitPreviewView;
+            preview.portrait_lighting = command->portrait_lighting;
             preview.phase = 0; preview.texture_time = command->texture_time;
             preview.fog = command->fog; preview.base_world = command->base_world;
             preview.world_to_clip = command->world_to_clip; preview.presentation_serial = command->presentation_serial;
@@ -8138,7 +8710,7 @@ ObjectPlanExecutionStatus execute_owned_object_render_plan(
             GetModuleHandleA(nullptr));
         const auto* const* render_state_manager_slot = image
             ? reinterpret_cast<const std::uint8_t* const*>(
-                  image + kRenderStateManagerGlobalRva)
+                  image + object_frame_contract().state_manager_slot_rva)
             : nullptr;
         const std::uintptr_t active_wound_surface =
             active_wound_surface_interface(
@@ -8569,6 +9141,33 @@ extern "C" __declspec(naked) void hook_object_suffix_cut() {
     }
 }
 
+extern "C" __declspec(naked) void hook_lia_object_suffix_cut() {
+    __asm {
+        pushfd
+        pushad
+        lea eax, [esp + 24h]
+        push dword ptr [eax + 0b8h]
+        push dword ptr [eax + 0b4h]
+        push esi
+        push eax
+        call dispatch_object_suffix_cut
+        test eax, eax
+        jz lia_suffix_original
+        popad
+        popfd
+        jmp dword ptr [g_object_suffix_cut_epilogue]
+    lia_suffix_original:
+        popad
+        popfd
+        jmp dword ptr [g_object_suffix_cut_trampoline]
+    }
+}
+const void* object_suffix_hook_target() noexcept {
+    return running_game_sites().report.engine == GameEngine::lia
+        ? reinterpret_cast<const void*>(&hook_lia_object_suffix_cut)
+        : reinterpret_cast<const void*>(&hook_object_suffix_cut);
+}
+
 extern "C" BOOL __stdcall dispatch_object_visual_loop(
     void* frame, void* specific, void* renderer, void* caller_rect) noexcept {
     if (!g_object_visual_loop_installed)
@@ -8616,6 +9215,36 @@ extern "C" __declspec(naked) void hook_object_visual_loop() {
     legacy_loop:
         jmp dword ptr [g_object_visual_loop_trampoline]
     }
+}
+#endif // !EID3D11_EMBEDDED
+
+#if !defined(EID3D11_EMBEDDED)
+extern "C" __declspec(naked) void hook_lia_object_visual_loop() {
+    __asm {
+        pushfd
+        pushad
+        lea eax, [esp + 24h]
+        push dword ptr [eax + 0b8h]
+        push dword ptr [eax + 0b4h]
+        push ebp
+        push eax
+        call dispatch_object_visual_loop
+        mov dword ptr [esp + 1ch], eax
+        popad
+        popfd
+        test eax, eax
+        jz lia_visual_original
+        jmp dword ptr [g_object_visual_loop_resume]
+    lia_visual_original:
+        jmp dword ptr [g_object_visual_loop_trampoline]
+    }
+}
+#endif // !EID3D11_EMBEDDED
+#if !defined(EID3D11_EMBEDDED)
+const void* object_visual_hook_target() noexcept {
+    return running_game_sites().report.engine == GameEngine::lia
+        ? reinterpret_cast<const void*>(&hook_lia_object_visual_loop)
+        : reinterpret_cast<const void*>(&hook_object_visual_loop);
 }
 #endif // !EID3D11_EMBEDDED
 
@@ -8725,9 +9354,27 @@ bool lifecycle_read_draw_signed_id(const void* drawable, std::int32_t& id) noexc
 
 bool lifecycle_lookup_signed_id(void* self, std::int32_t id,
                                 bool& present) noexcept {
-    if (!self || !g_lifecycle_has_object) return false;
+    if (!self) return false;
     __try {
-        present = g_lifecycle_has_object(self, id) != FALSE;
+        if (running_game_sites().report.engine == GameEngine::lia) {
+            // Native Add4d71ff scans the circular list at world+B8, using
+            // node+8's signed object ID at +C. Borrow only during this call.
+            const auto* sentinel=*reinterpret_cast<const std::uint8_t* const*>(
+                static_cast<const std::uint8_t*>(self)+0xb8);
+            if (!sentinel) return false;
+            auto* node=*reinterpret_cast<const std::uint8_t* const*>(sentinel);
+            present=false;
+            for (;node!=sentinel;node=*reinterpret_cast<const std::uint8_t* const*>(node)) {
+                const auto* object=*reinterpret_cast<const std::uint8_t* const*>(node+8);
+                if (*reinterpret_cast<const std::int32_t*>(object+0x0c)==id) {
+                    present=true;
+                    break;
+                }
+            }
+        } else {
+            if (!g_lifecycle_has_object) return false;
+            present = g_lifecycle_has_object(self, id) != FALSE;
+        }
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -8856,9 +9503,12 @@ VisualLoadFigureFn g_visual_load_figure = nullptr;
 VisualFigureMembershipFn g_visual_add_unloaded = nullptr;
 VisualCreateFn g_visual_final_data = nullptr;
 VisualLoadTexturesFn g_visual_load_textures = nullptr;
+VisualCreateFn g_visual_refresh_equipment = nullptr;
+VisualCreateFn g_visual_refresh_model = nullptr;
 VisualChangeTextureFn g_visual_change_texture = nullptr;
 VisualHighlightFn g_visual_highlight = nullptr;
 VisualHighlightFn g_visual_select = nullptr; // same __thiscall (BOOL) shape
+bool g_lia_visual_select_installed = false;
 VisualComposeMemoryFn g_visual_compose_memory = nullptr;
 VisualStockComposeFn g_visual_stock_compose = nullptr;
 
@@ -9066,9 +9716,9 @@ bool visual_client_unit(void* object, void*& specific) noexcept {
     void* table = nullptr;
     // Generic manager objects do not all contain the unit-specific extension.
     return g_visual_game_image && visual_read(object, 0, table) &&
-        table == g_visual_game_image+kObjectSupportedPrimaryVtableRva &&
+        table == g_visual_game_image+retained_pose_contract().unit_table &&
         visual_read(object, 0x240, specific) && specific &&
-        visual_read(specific, 0, table) && table == g_visual_game_image + 0x33ecd8 &&
+        visual_read(specific, 0, table) && table == g_visual_game_image + retained_pose_contract().unit_specific_table &&
         visual_read(specific, 0x1c, owner) && owner == object;
 }
 #endif // !EID3D11_EMBEDDED
@@ -9091,6 +9741,43 @@ BOOL __stdcall owned_shadow_covers_object(void* object) noexcept {
     return lifecycle_read_signed_id(object,id) &&
         lifecycle_observer().active_identity(id,current) &&
         retained_visual_scene().visual_claims_mesh(current);
+}
+
+// LiA stores the full object at native ESP+40; PUSHFD/PUSHAD adds24h.
+__declspec(naked) void lia_visual_shadow_visible_adapter() {
+    __asm {
+        pushfd
+        pushad
+        push dword ptr [esp+64h]
+        call owned_shadow_covers_object
+        test eax,eax
+        jz original_path
+        popad
+        popfd
+        jmp dword ptr [g_visual_shadow_visible_next]
+    original_path:
+        popad
+        popfd
+        jmp dword ptr [g_visual_shadow_visible_original]
+    }
+}
+
+__declspec(naked) void lia_visual_shadow_invisible_adapter() {
+    __asm {
+        pushfd
+        pushad
+        push esi
+        call owned_shadow_covers_object
+        test eax,eax
+        jz original_path
+        popad
+        popfd
+        jmp dword ptr [g_visual_shadow_invisible_next]
+    original_path:
+        popad
+        popfd
+        jmp dword ptr [g_visual_shadow_invisible_original]
+    }
 }
 
 __declspec(naked) void visual_shadow_visible_adapter() {
@@ -9134,8 +9821,8 @@ bool visual_object_id(void* object, std::int32_t& id) noexcept {
     void* table = nullptr;
     void* world = nullptr;
     return g_visual_game_image && visual_read(object, 0x14, manager) && manager &&
-        visual_read(manager, 0, table) && table == g_visual_game_image + 0x33dcd8 &&
-        visual_read(manager, 0xac, world) && world == g_visual_game_image + kVisualClientWorldRva &&
+        visual_read(manager, 0, table) && table == g_visual_game_image + world_lifecycle_contract().manager_table &&
+        visual_read(manager, 0xac, world) && world == g_visual_game_image + world_clock_contract().client_rva &&
         visual_read(object, 0x0c, id);
 }
 
@@ -9150,17 +9837,17 @@ bool visual_bootstrap_is_empty(std::uint8_t* game) noexcept {
     if (!game) return false;
     void* table = nullptr;
     void* manager = nullptr;
-    const auto* world = game+kVisualClientWorldRva;
+    const auto* world = game+world_clock_contract().client_rva;
     // Supported client table: Segment=5641F0; manager getter=55EB70.
     // 403939/4069F3 publish manager list count +40, head/tail +38/+3C.
-    if (!visual_read(world, 0, table) || table != game+0x33f41c ||
+    if (!visual_read(world, 0, table) || table != game+world_lifecycle_contract().world_table ||
         !visual_read(world, 0x40, manager)) return false;
     if (!manager) return true; // No manager exists yet; no resource binding can predate observation.
     void* owner = nullptr;
     void* first = nullptr;
     void* last = nullptr;
     std::uint32_t count = 0;
-    return visual_read(manager,0,table) && table == game+0x33dcd8 &&
+    return visual_read(manager,0,table) && table == game+world_lifecycle_contract().manager_table &&
         visual_read(manager,0xac,owner) && owner == world &&
         visual_read(manager,0x38,first) && !first &&
         visual_read(manager,0x3c,last) && !last &&
@@ -9181,6 +9868,10 @@ bool visual_string(const void* object, std::size_t offset, std::string& result,
     return false;
 }
 #endif // !EID3D11_EMBEDDED
+
+#ifndef EID3D11_EMBEDDED
+#include "world_map_preview_bridge.inl"
+#endif
 
 struct AppearanceDiagnosticContext {
     OuterFrameAppearanceDiagnostic* value = nullptr;
@@ -9331,9 +10022,9 @@ bool visual_named_resource(HudResourceRole role, const std::string& name, Resour
     const bool figure = role == HudResourceRole::figure;
     if (!g_visual_game_image ||
         !visual_read(g_visual_game_image,
-            figure ? kFigureResourceManagerSlotRva : kGameResourceManagerSlotRva, manager) ||
+            figure ? resource_manager_contract().figure_slot : resource_manager_contract().texture_slot, manager) ||
         !visual_read(manager, 0, table) || table != g_visual_game_image +
-            (figure ? kFigureManagerVtableRva : kTextureManagerVtableRva))
+            (figure ? resource_manager_contract().figure_table : resource_manager_contract().texture_table))
         return visual_failure(predicate, "resource.manager");
     ResourceGetFn get = nullptr;
     ResourceReleaseFn release = nullptr;
@@ -9616,7 +10307,7 @@ bool visual_main_selector(void* controller, const char** failure = nullptr) noex
     // Supported constructor 50C661 and completed selector 50CA50 establish
     // this node list and main/current relationship. Do not sample alternate
     // pane tracks, or silently substitute main for an unknown active track.
-    if (!visual_read(controller, 0, table) || table != g_visual_game_image + 0x33da4c)
+    if (!visual_read(controller, 0, table) || table != g_visual_game_image + retained_pose_contract().selector_table)
         return visual_failure(failure, "selector.table");
     if (!visual_read(controller, 0x28, link)) return visual_failure(failure, "selector.head");
     if (!visual_read(controller, 0x30, count) || !count || count > kVisualPartLimit)
@@ -9729,7 +10420,7 @@ bool visual_world_preset_material(const void* world, std::uint32_t type,
     // 455940/5655F0 and the 68E970 creation path establish this exact
     // world preset lookup. Read only: SetMaterial inserts a missing preset.
     if (!visual_read(world, 0x188, material_manager) ||
-        !visual_read(material_manager, 0, table) || table != g_visual_game_image+0x343c38 ||
+        !visual_read(material_manager, 0, table) || table != g_visual_game_image+server_state_contract().material_manager_table ||
         !visual_read(material_manager, 0xc0, buckets) ||
         !visual_read(material_manager, 0xc4, end)) return false;
     const auto begin_address = reinterpret_cast<std::uintptr_t>(buckets);
@@ -9934,7 +10625,7 @@ bool visual_texture_surface(void* texture, IDirectDrawSurface7*& surface,
     surface=nullptr;void* table=nullptr;void* wrapper=nullptr;
     // Texture construction and BindTexture establish this exact receiver chain.
     return texture && g_visual_game_image && visual_read(texture,0,table) &&
-        table==g_visual_game_image+0x343d24 && visual_read(texture,8,flags) &&
+        table==g_visual_game_image+resource_manager_contract().primary_texture_table && visual_read(texture,8,flags) &&
         visual_read(texture,kTextureSurfaceWrapperOffset,wrapper) &&
         (!wrapper || visual_read(wrapper,kSurfaceWrapperInterfaceOffset,surface));
 }
@@ -10032,7 +10723,7 @@ bool visual_completed_skeleton(void* object,
     void* link = nullptr;
     std::uint32_t count = 0;
     if (!visual_read(object, 0x98, controller) || !visual_read(controller, 0, table) ||
-        table != g_visual_game_image+0x33da4c || !visual_read(controller, 0x1c, owner) || owner != object ||
+        table != g_visual_game_image+retained_pose_contract().selector_table || !visual_read(controller, 0x1c, owner) || owner != object ||
         !visual_read(controller, 0x20, head) || !head ||
         !visual_read(controller, 0x28, link) || !visual_read(controller, 0x30, count) ||
         !count || count > kVisualPartLimit) return visual_failure(predicate, "skeleton.controller");
@@ -10536,7 +11227,7 @@ void publish_visual_appearance_changes(void* object, VisualAppearanceChanges& ch
                 initial->resource.serial != resource.serial) continue;
             void* table = nullptr;
             if (!visual_read(object,0,table) ||
-                table != g_visual_game_image+kObjectSupportedPrimaryVtableRva)
+                table != g_visual_game_image+retained_pose_contract().unit_table)
                 break; // Nonunits retain their current completion boundary.
             if (!success || !merge_visual_appearance(initial->appearance, changes)) {
                 initial->failed = true;
@@ -10797,7 +11488,8 @@ void visual_capture_native_weapon_part(VisualAppearanceScope* scope,
 #if !defined(EID3D11_EMBEDDED)
 void* __fastcall hook_visual_load_figure(void* self, void*, const char* name, void* model, BOOL load) {
     const bool weapon = g_visual_native && _ReturnAddress() ==
-        g_visual_game_image + kVisualNativeWeaponLoadFigureReturnRva;
+        g_visual_game_image + (running_game_sites().report.engine == GameEngine::lia ?
+            kLiaVisualWeaponLoadFigureReturnRva : kVisualNativeWeaponLoadFigureReturnRva);
     auto* scope = begin_visual_appearance(self, false, false,
         OuterFrameAppearanceCallback::load_figure);
     const std::size_t captured = scope ? scope->changes.rebound_parts.size() : 0;
@@ -10869,6 +11561,35 @@ BOOL __fastcall hook_visual_load_textures(void* self, void*, const char* primary
     __finally {
         if (AbnormalTermination() || !result) fail_visual_appearance(scope, "textures.original_failed"); finish_visual_appearance(scope, !AbnormalTermination() && result != FALSE); }
     return result;
+}
+
+BOOL invoke_visual_refresh_textures(void* self, VisualCreateFn original) {
+    void* object = nullptr;
+    std::uint32_t type = 0;
+    // Both verified native entries return without changing non-heroes.
+    if (!visual_read(self,0x1c,object) || !visual_read(object,0x10,type) || type != 50)
+        return original(self);
+    auto* scope = begin_visual_appearance(object, false, false,
+        OuterFrameAppearanceCallback::load_textures);
+    if (scope) {
+        scope->changes.textures = true;
+        scope->changes.completed_textures = true;
+    }
+    BOOL result = FALSE;
+    __try { result = original(self); }
+    __finally {
+        if (AbnormalTermination() || !result) fail_visual_appearance(scope, "texture_refresh.original_failed");
+        finish_visual_appearance(scope, !AbnormalTermination() && result != FALSE);
+    }
+    return result;
+}
+
+BOOL __fastcall hook_visual_refresh_equipment(void* self, void*) {
+    return invoke_visual_refresh_textures(self,g_visual_refresh_equipment);
+}
+
+BOOL __fastcall hook_visual_refresh_model(void* self, void*) {
+    return invoke_visual_refresh_textures(self,g_visual_refresh_model);
 }
 
 void* __fastcall hook_visual_change_texture(void* self, void*, void* texture) {
@@ -10987,7 +11708,7 @@ bool prepare_owned_preview_pose(ObjectRenderPlan& plan, void* owner,
     double now=texture_time;
     if (inventory) {
         TimeGetTimeFn clock=nullptr;
-        if (!visual_read(g_visual_game_image,kOuterTimeGetTimeIatRva,clock) || !clock)
+        if (!visual_read(g_visual_game_image,outer_frame_contract().clock_iat,clock) || !clock)
             return visual_failure(failure,"preview.inventory_clock");
         now=static_cast<double>(clock())*(15.0/1024.0);
     }
@@ -11064,8 +11785,8 @@ RawObjectCaptureResult raw_capture_object(const std::uint8_t* object,RawObjectCa
     if(!object || !image) return RawObjectCaptureResult::id;
     __try {
         const auto* manager=raw_field<const std::uint8_t*>(object,0x14);
-        if(!manager || raw_field<const std::uint8_t*>(manager,0)!=image+0x33dcd8 ||
-           raw_field<const std::uint8_t*>(manager,0xac)!=image+kVisualClientWorldRva) return RawObjectCaptureResult::id;
+        if(!manager || raw_field<const std::uint8_t*>(manager,0)!=image+world_lifecycle_contract().manager_table ||
+           raw_field<const std::uint8_t*>(manager,0xac)!=image+world_clock_contract().client_rva) return RawObjectCaptureResult::id;
         out.id=raw_field<std::int32_t>(object,0x0c);
         out.position=raw_field<std::array<float,3>>(object,kObjectPositionOffset);
         out.quaternion=raw_field<std::array<float,4>>(object,kObjectQuaternionOffset);
@@ -11076,7 +11797,7 @@ RawObjectCaptureResult raw_capture_object(const std::uint8_t* object,RawObjectCa
             return RawObjectCaptureResult::controller;
         // Selector: supported constructor 50C661 / selector 50CA50 node list;
         // every node's current track must be its main track.
-        if(raw_field<const std::uint8_t*>(controller,0)!=image+0x33da4c) return RawObjectCaptureResult::selector_table;
+        if(raw_field<const std::uint8_t*>(controller,0)!=image+retained_pose_contract().selector_table) return RawObjectCaptureResult::selector_table;
         const auto* link=raw_field<const std::uint8_t*>(controller,0x28);
         const auto count=raw_field<std::uint32_t>(controller,0x30);
         if(!count || count>kVisualPartLimit) return RawObjectCaptureResult::selector_count;
@@ -11316,7 +12037,7 @@ void* __fastcall invoke_visual_initial_create_data(void* manager, void* table,
                 current.serial == initial->resource.serial &&
                 visual_object_id(result,returned_id) && returned_id == signed_id &&
                 visual_read(result,0,returned_table) &&
-                returned_table == g_visual_game_image+kObjectSupportedPrimaryVtableRva;
+                returned_table == g_visual_game_image+retained_pose_contract().unit_table;
         }
     }
     return result;
@@ -11359,6 +12080,15 @@ BOOL __fastcall hook_visual_create_map_object(void* self, void*) {
         delete initial;
     }
     return result;
+}
+
+__declspec(naked) void lia_visual_virtual_create_adapter() {
+    __asm {
+        mov ecx, esi
+        mov edx, dword ptr [esi]
+        mov edx, dword ptr [edx+8]
+        jmp invoke_visual_virtual_create
+    }
 }
 
 __declspec(naked) void visual_virtual_create_adapter() {
@@ -11565,8 +12295,11 @@ void* __fastcall hook_visual_database_select_secondary(
 bool visual_weapon_shape_type(std::uint32_t shape, std::uint32_t& type) noexcept {
     std::uintptr_t first = 0, last = 0;
     constexpr std::size_t stride = 0xb4;
-    if (!visual_read(g_visual_game_image, 0x3c86f8, first) ||
-        !visual_read(g_visual_game_image, 0x3c86fc, last) || !first || last < first ||
+    const bool lia = running_game_sites().report.engine == GameEngine::lia;
+    const auto first_rva = lia ? kLiaVisualWeaponFirstRva : 0x3c86f8u;
+    const auto last_rva = lia ? kLiaVisualWeaponEndRva : 0x3c86fcu;
+    if (!visual_read(g_visual_game_image, first_rva, first) ||
+        !visual_read(g_visual_game_image, last_rva, last) || !first || last < first ||
         (last-first)%stride || (last-first)/stride > 65536 || shape >= (last-first)/stride)
         return false;
     return visual_read(reinterpret_cast<const void*>(first), shape*stride+0xc, type);
@@ -11631,6 +12364,27 @@ bool unit_percepts_live_contract(const std::uint8_t* game) noexcept {
         return visual_read_bytes(game, rva, actual.data(), expected.size()) &&
             std::memcmp(actual.data(), expected.begin(), expected.size()) == 0;
     };
+    if (running_game_sites().report.engine == GameEngine::lia) {
+        return
+            matches(0x21d9c0, {0xb9,0xd8,0x33,0x6a,0x00}) &&
+            matches(0xf1369, {0xc7,0x06,0xc4,0xda,0x62,0x00}) &&
+            matches(0xe7393, {0x8b,0x86,0x38,0x01,0x00,0x00,0x85,0xc0,0x75,0x23,0x8b,0x44,0x24,0x08,0x83,0xf8,0x02,0x89,0x86,0x38,0x01,0x00,0x00}) &&
+            matches(0xf980, {0x8b,0x41,0x40,0xc3}) &&
+            matches(0x2950, {0x51,0x8d,0x44,0x24,0x00,0x50,0x8d,0x54,0x24,0x0c,0x52,0x83,0xc1,0x1c,0xc7,0x44,0x24,0x08,0x00,0x00,0x00,0x00,0xe8,0x75,0x6f,0x0e,0x00,0x8b,0x44,0x24,0x00,0x59,0xc2,0x04,0x00}) &&
+            matches(0xe98e0, {0x8b,0x44,0x24,0x04,0x56,0x8b,0x30,0x8b,0x41,0x04,0x57,0x8b,0x79,0x08,0x2b,0xf8,0xc1,0xff,0x02,0x33,0xd2,0x8b,0xc6,0xf7,0xf7,0x8b,0x49,0x04,0x8b,0x04,0x91,0x85,0xc0,0x74,0x14,0x39,0x70,0x04,0x74,0x0b,0x8b,0x00,0x85,0xc0,0x75,0xf5,0x5f,0x5e,0xc2,0x08,0x00}) &&
+            matches(0xe9913, {0x85,0xc0,0x75,0x07,0x5f,0x33,0xc0,0x5e,0xc2,0x08,0x00,0x8b,0x48,0x08,0x8b,0x54,0x24,0x10,0x5f,0x89,0x0a,0xb8,0x01,0x00,0x00,0x00,0x5e,0xc2,0x08,0x00}) &&
+            matches(0x2070, {0x8b,0x44,0x24,0x04,0x89,0x81,0xac,0x00,0x00,0x00,0xc2,0x04,0x00}) &&
+            matches(0x9c4d8, {0xc7,0x06,0x0c,0xa8,0x62,0x00}) &&
+            matches(0xaf4e9, {0xc7,0x06,0xc4,0xbb,0x62,0x00}) &&
+            matches(0xc9a59, {0xc7,0x06,0xb4,0xc6,0x62,0x00}) &&
+            matches(0xad903, {0x85,0xc0,0x89,0x86,0x40,0x02,0x00,0x00,0x74,0x0c,0x89,0x70,0x1c,0x8b,0xb6,0x40,0x02,0x00,0x00,0xff,0x46,0x04}) &&
+            matches(0xbd5f9, {0x8d,0x8e,0xe0,0x01,0x00,0x00,0xe8,0x1c,0xa0,0xfe,0xff}) &&
+            matches(0xae420, {0x8b,0x91,0x4c,0x02,0x00,0x00,0x33,0xc0,0x85,0xd2,0x0f,0x95,0xc0,0xc3}) &&
+            matches(0xbf115, {0xd8,0x8e,0x9c,0x02,0x00,0x00}) &&
+            matches(0xbf142, {0xd9,0x96,0x04,0x09,0x00,0x00,0xd9,0x80,0x88,0x00,0x00,0x00,0xd8,0xc9,0xd9,0x9e,0x04,0x09,0x00,0x00}) &&
+            matches(0xa77b6, {0x8d,0x7d,0x28,0x8d,0xb3,0xe4,0x00,0x00,0x00,0xc7,0x44,0x24,0x18,0x06,0x00,0x00,0x00,0x8b,0x4e,0xd0,0x51,0xe8,0xa0,0x52,0xf9,0xff,0x88,0x47,0xfa,0x8b,0x16,0x52,0xe8,0x95,0x52,0xf9,0xff,0x88,0x07,0x8b,0x44,0x24,0x18,0x83,0xc6,0x08,0x47,0x48,0x89,0x44,0x24,0x18,0x75,0xdb}) &&
+            matches(0x3ca70, {0x51,0xd9,0x44,0x24,0x08,0xdb,0x5c,0x24,0x00,0x8b,0x44,0x24,0x00,0x59,0xc2,0x04,0x00});
+    }
     return
         matches(0x1cd46, {0xb9,0x60,0xff,0x7a,0x00}) &&
         matches(0x18a11c, {0xc7,0x06,0x28,0xf9,0x73,0x00}) &&
@@ -11654,6 +12408,19 @@ bool unit_blood_live_contract(const std::uint8_t* game) noexcept {
         return visual_read_bytes(game, rva, actual.data(), expected.size()) &&
             std::memcmp(actual.data(), expected.begin(), expected.size()) == 0;
     };
+    if (game && running_game_sites().report.engine == GameEngine::lia) {
+        return
+            matches(0xb04e0, {0x56,0x8b,0x71,0x18,0x8b,0x0d,0x64,0x28,0x6a,0x00,0x57,0x8b,0x3d,0x60,0x28,0x6a,0x00,0x2b,0xcf,0xb8,0x39,0x8e,0xe3,0x38,0xf7,0xe9,0xc1,0xfa,0x06,0x8b,0xc2,0xc1,0xe8,0x1f,0x03,0xd0,0x3b,0xf2,0x73,0x41,0x8d,0x04,0xf6,0xc1,0xe0,0x05,0x03,0xc7,0x85,0xc0,0x74,0x35}) &&
+            matches(0xb0514, {0x8b,0x70,0x08,0x8b,0x0d,0xa4,0x28,0x6a,0x00,0x8b,0x3d,0xa0,0x28,0x6a,0x00,0x2b,0xcf,0xb8,0xb7,0x60,0x0b,0xb6,0xf7,0xe9,0x03,0xd1,0xc1,0xfa,0x08,0x8b,0xca,0xc1,0xe9,0x1f,0x03,0xd1,0x3b,0xf2,0x73,0x0d,0x69,0xf6,0x68,0x01,0x00,0x00,0x03,0xf7,0x5f,0x8b,0xc6,0x5e,0xc3}) &&
+            matches(0xcce78, {0x57,0x6a,0x00,0x8b,0xce,0xe8,0x7e,0x74,0xf3,0xff}) &&
+            matches(0xb2258, {0xe8,0x83,0xe2,0xff,0xff,0x8b,0x98,0x08,0x01,0x00,0x00}) &&
+            matches(0xcd42e, {0x6a,0x04,0x8d,0x8f,0x08,0x01,0x00,0x00,0x51,0x6a,0x28,0x8b,0xce,0xe8,0x90,0x68,0xf3,0xff}) &&
+            matches(0xcd260, {0x53,0x55,0x56,0x8b,0x74,0x24,0x10,0x57,0x8b,0xf9,0x57,0x6a,0x00,0x8b,0xce,0xe8,0x8c,0x70,0xf3,0xff}) &&
+            matches(0xcd4f6, {0xc2,0x04,0x00}) &&
+            matches(0x42c0, {0x8b,0x54,0x24,0x04,0x85,0xd2,0x57,0x8b,0xf9,0x75,0x0f,0x33,0xc0,0x50,0x52,0xe8,0x5c,0xfb,0xff,0xff,0x8b,0xc7,0x5f,0xc2,0x04,0x00,0x8b,0xc2,0x56,0x8d,0x70,0x01,0x8a,0x08,0x40,0x84,0xc9,0x75,0xf9,0x2b,0xc6,0x5e,0x50,0x52,0x8b,0xcf,0xe8,0x3d,0xfb,0xff,0xff,0x8b,0xc7,0x5f,0xc2,0x04,0x00}) &&
+            matches(0x434d, {0x8b,0x56,0x40,0x03,0x54,0x24,0x08,0x8b,0x4c,0x24,0x1c,0x52,0xe8,0x62,0xff,0xff,0xff,0x5e,0x83,0xc4,0x10,0xc2,0x08,0x00}) &&
+            matches(0x3e85, {0x8b,0x06,0x83,0xc4,0x0c,0x5f,0x89,0x68,0xf4,0x8b,0x0e,0x5b,0x5e,0xc6,0x04,0x29,0x00,0x5d,0x59,0xc2,0x08,0x00});
+    }
     return game &&
         matches(0x130970, {0x56,0x8b,0x71,0x18,0x8b,0x0d,0x5c,0xf3,0x7a,0x00,0x57,0x8b,0x3d,0x58,0xf3,0x7a,0x00,0xb8,0x39,0x8e,0xe3,0x38,0x2b,0xcf,0xf7,0xe9,0xc1,0xfa,0x06,0x8b,0xc2,0xc1,0xe8,0x1f,0x03,0xd0,0x3b,0xf2,0x73,0x40,0x8d,0x04,0xf6,0xc1,0xe0,0x05,0x03,0xc7}) &&
         matches(0x1309a4, {0x8b,0x0d,0x9c,0xf3,0x7a,0x00,0x8b,0x3d,0x98,0xf3,0x7a,0x00,0x8b,0x70,0x08,0x2b,0xcf,0xb8,0xb7,0x60,0x0b,0xb6,0xf7,0xe9,0x03,0xd1,0xc1,0xfa,0x08,0x8b,0xca,0xc1,0xe9,0x1f,0x03,0xd1,0x3b,0xf2,0x73,0x0c,0x8d,0x04,0xb6,0x8d,0x14,0xc0,0x8d,0x04,0xd7}) &&
@@ -11689,7 +12456,7 @@ bool visual_publish_unit_values(void* object, const float* packet_rate = nullptr
         !visual_read(object, kUnitMovingOffset, moving))
         return visual_failure(failure, "unit.threat_senses_read");
     values.blood = 0; values.undead_prototype = false;
-    if (g_unit_blood_verified && !critters::read_unit_blood(g_visual_game_image, object, values.blood, values.undead_prototype, visual_read_bytes) &&
+    if (g_unit_blood_verified && !critters::read_unit_blood(g_visual_game_image, object, values.blood, values.undead_prototype, visual_read_bytes, unit_blood_identity()) &&
         !g_unit_blood_unavailable_reported.exchange(true))
         append_bridge_event("critters_blood", "race blood unavailable; corpse omitted from carrion", false);
     values.visibility = visibility;
@@ -11697,7 +12464,7 @@ bool visual_publish_unit_values(void* object, const float* packet_rate = nullptr
     values.vision = 0; values.controlled = false;   // no party without the exact server values
     if (const char* reason = critters::read_local_unit_percepts(g_visual_game_image,
             g_unit_percepts_verified, id, values.visibility, values.loudness, visual_read_bytes,
-            &values.vision, &values.controlled)) {
+            &values.vision, &values.controlled, server_state_contract().units)) {
         // Log each failure family once; a menu/no-server fallback must not hide
         // a later link failure during gameplay.
         const unsigned bit = !g_unit_percepts_verified ? 1u :
@@ -12026,6 +12793,17 @@ void __stdcall invoke_visual_posrot_read(void* packet, void* object,
             observe_visual_posrot_read(object,destination,size);
             if (!g_visual_packet || g_visual_packet->object != object) mark_object_pose_pending(object);
         }
+    }
+}
+
+__declspec(naked) void lia_visual_posrot_read_adapter() {
+    __asm {
+        push dword ptr [esp+8]
+        push dword ptr [esp+8]
+        push edi
+        push ecx
+        call invoke_visual_posrot_read
+        ret 8
     }
 }
 
@@ -12398,7 +13176,7 @@ void report_quest_light_omission(const char* reason) noexcept {
 bool visual_capture_world_point_lights(void* world,
     std::vector<RetainedWorldPointLight>& lights,const char** failure) noexcept {
     lights.clear();
-    if (world!=g_visual_game_image+kVisualClientWorldRva)
+    if (world!=g_visual_game_image+world_clock_contract().client_rva)
         return visual_failure(failure,"world_point_light.world");
     void* manager=nullptr;void* table=nullptr;void* owner=nullptr;
     void* node=nullptr;void* tail=nullptr;
@@ -12406,7 +13184,7 @@ bool visual_capture_world_point_lights(void* world,
     // Bounded bridge work, not a claim about the game's maximum light count.
     constexpr std::uint32_t maximum_lights=65536;
     if (!visual_read(world,0x190,manager) || !manager ||
-        !visual_read(manager,0,table) || table!=g_visual_game_image+0x343b50 ||
+        !visual_read(manager,0,table) || table!=g_visual_game_image+world_environment_contract().light_manager_table ||
         !visual_read(manager,0xac,owner) || owner!=world ||
         !visual_read(manager,0x38,node) || !visual_read(manager,0x3c,tail) ||
         !visual_read(manager,0x40,count) || count>maximum_lights)
@@ -12423,7 +13201,7 @@ bool visual_capture_world_point_lights(void* world,
         std::uint32_t type=0,flags=0;
         void* light_table=nullptr;void* light_owner=nullptr;
         if (!visual_read(light,0,light_table) ||
-            light_table!=g_visual_game_image+0x343afc ||
+            light_table!=g_visual_game_image+world_environment_contract().light_table ||
             !visual_read(light,0x10,type) ||
             (type!=0x2eu && type!=0x31u) ||
             !visual_read(light,0x14,light_owner) || light_owner!=manager ||
@@ -12471,11 +13249,11 @@ bool visual_capture_hero_light_id(void* world,void* object,std::int32_t& id,
     if (!light) return true;
     void* table=nullptr;void* manager=nullptr;void* world_manager=nullptr;
     std::uint32_t type=0;
-    if (!visual_read(light,0,table) || table!=g_visual_game_image+0x343afc ||
+    if (!visual_read(light,0,table) || table!=g_visual_game_image+world_environment_contract().light_table ||
         !visual_read(light,0x10,type) || type!=0x31u ||
         !visual_read(light,0x14,manager) ||
         !visual_read(world,0x190,world_manager) || !world_manager || manager!=world_manager ||
-        !visual_read(manager,0,table) || table!=g_visual_game_image+0x343b50 ||
+        !visual_read(manager,0,table) || table!=g_visual_game_image+world_environment_contract().light_manager_table ||
         !visual_read(light,0xc,id))
         return visual_failure(failure,"hero_light.manager");
     present=true;
@@ -12491,11 +13269,11 @@ bool visual_capture_hero_light_id(void* world,void* object,std::int32_t& id,
 // SetParticles and CParticle::Scale 0x485480). The server sets that scale
 // to the map's strength and the light range to strength * 10 (0x592986).
 // The game places the light at the flame's base, at the particle carrier.
-// PTID_CAMPFIRE (setup at 0x485BD6, segment 0x48EC20) starts each flame
-// particle up to one speed step above the carrier, rises one speed step
-// (0.30 * scale) per tick and shrinks by 0.85 per tick through its eight
-// flame frames (phase 8 on is smoke). The size-weighted mean height of those
-// frames is 0.30 * (0.5 + 2.670) = 0.951 * scale: the visual flame centre.
+// LiA's constructors 4AB7C0/4AAB40 and attachment 4AC5E0 establish the
+// same fields with different tables. Native particle scale remains authored.
+// The shared renderer lifts the light by .951 * scale toward the visible
+// flame. This is an approximate visual response, not a native field/constant;
+// particle aging and wind need not give the flame an exact fixed centroid.
 constexpr float kTorchFlameCentrePerScale=.951f;
 struct TorchLightLift { std::int32_t source_id=0; float lift=0; };
 
@@ -12508,14 +13286,14 @@ bool visual_capture_torch_light(void* world,void* object,TorchLightLift& result,
     if (!specific) return true;
     void* table=nullptr;void* owner=nullptr;void* light=nullptr;float scale=0;
     if (!visual_read(specific,0,table)) return visual_failure(failure,"torch_light.specific");
-    if (table!=g_visual_game_image+0x33e954) return true; // the server-side specific
+    if (table!=g_visual_game_image+world_environment_contract().torch_specific_table) return true; // the server-side specific
     if (!visual_read(specific,0x1c,owner) || owner!=object ||
         !visual_read(specific,0x58,light) || !visual_read(specific,0x28,scale))
         return visual_failure(failure,"torch_light.attachment");
     if (!light) return true;
     if (!std::isfinite(scale) || scale<=0) return visual_failure(failure,"torch_light.scale");
     void* manager=nullptr;void* world_manager=nullptr;std::uint32_t type=0;
-    if (!visual_read(light,0,table) || table!=g_visual_game_image+0x343afc ||
+    if (!visual_read(light,0,table) || table!=g_visual_game_image+world_environment_contract().light_table ||
         !visual_read(light,0x10,type) || type!=0x31u ||
         !visual_read(light,0x14,manager) ||
         !visual_read(world,0x190,world_manager) || !world_manager || manager!=world_manager ||
@@ -12556,11 +13334,11 @@ bool visual_capture_quest_light(void* world,void* object,std::int32_t id,
     if (!visual_read(light,8,flags)) return visual_failure(failure,"quest_light.flags");
     if ((flags&0x680u)!=0x600u) return true; // active LIT_QUEST | LIT_UNSHADOW
     void* table=nullptr;void* manager=nullptr;void* world_manager=nullptr;
-    if (!visual_read(light,0,table) || table!=g_visual_game_image+0x343afc ||
+    if (!visual_read(light,0,table) || table!=g_visual_game_image+world_environment_contract().light_table ||
         !visual_read(light,0x10,type) || type!=0x31u ||
         !visual_read(light,0x14,manager) ||
         !visual_read(world,0x190,world_manager) || !world_manager || manager!=world_manager ||
-        !visual_read(manager,0,table) || table!=g_visual_game_image+0x343b50)
+        !visual_read(manager,0,table) || table!=g_visual_game_image+world_environment_contract().light_manager_table)
         return visual_failure(failure,"quest_light.point_contract");
     if (!lifecycle_observer().active_identity(id,result.source))
         return visual_failure(failure,"quest_light.lifecycle");
@@ -12592,16 +13370,16 @@ RawWalkResult raw_walk_world_objects(const std::uint8_t* node,std::uint32_t coun
             const auto* object=raw_field<const std::uint8_t*>(node,8);
             if(!object)return RawWalkResult::link;
             const auto* manager=raw_field<const std::uint8_t*>(object,0x14);
-            if(!manager || raw_field<const std::uint8_t*>(manager,0)!=image+0x33dcd8 ||
-               raw_field<const std::uint8_t*>(manager,0xac)!=image+kVisualClientWorldRva)return RawWalkResult::link;
+            if(!manager || raw_field<const std::uint8_t*>(manager,0)!=image+world_lifecycle_contract().manager_table ||
+               raw_field<const std::uint8_t*>(manager,0xac)!=image+world_clock_contract().client_rva)return RawWalkResult::link;
             auto& item=out[i];
             item.object=const_cast<std::uint8_t*>(object);item.id=raw_field<std::int32_t>(object,0x0c);
             item.unit=false;item.hero=false;item.quest=0;
-            item.torch=raw_field<const std::uint8_t*>(object,0)==image+0x33e834;
+            item.torch=raw_field<const std::uint8_t*>(object,0)==image+world_environment_contract().torch_table;
             __try {
-                if(raw_field<const std::uint8_t*>(object,0)==image+kObjectSupportedPrimaryVtableRva) {
+                if(raw_field<const std::uint8_t*>(object,0)==image+retained_pose_contract().unit_table) {
                     const auto* specific=raw_field<const std::uint8_t*>(object,0x240);
-                    item.unit=specific && raw_field<const std::uint8_t*>(specific,0)==image+0x33ecd8 &&
+                    item.unit=specific && raw_field<const std::uint8_t*>(specific,0)==image+retained_pose_contract().unit_specific_table &&
                         raw_field<const std::uint8_t*>(specific,0x1c)==object;
                     item.hero=item.unit && raw_field<const void*>(object,0x24c)!=nullptr;
                 }
@@ -12632,7 +13410,7 @@ bool publish_visual_object_poses(void* world, const char** failure = nullptr,
     if (quest_lights) quest_lights->clear();
     if (hero_light_ids) hero_light_ids->clear();
     if (torch_lights) torch_lights->clear();
-    if (world != g_visual_game_image+kVisualClientWorldRva) return visual_failure(failure, "static.world");
+    if (world != g_visual_game_image+world_clock_contract().client_rva) return visual_failure(failure, "static.world");
     void* manager = nullptr;
     void* owner = nullptr;
     void* table = nullptr;
@@ -12642,7 +13420,7 @@ bool publish_visual_object_poses(void* world, const char** failure = nullptr,
     // This bound is a bridge resource budget, not a claim about game maxima.
     constexpr std::uint32_t maximum_resources = 65536;
     if (!visual_read(world,0x40,manager) || !manager ||
-        !visual_read(manager,0,table) || table != g_visual_game_image+0x33dcd8 ||
+        !visual_read(manager,0,table) || table != g_visual_game_image+world_lifecycle_contract().manager_table ||
         !visual_read(manager,0xac,owner) || owner != world ||
         !visual_read(manager,0x38,node) || !visual_read(manager,0x3c,tail) ||
         !visual_read(manager,0x40,count) || count > maximum_resources) return visual_failure(failure, "static.manager");
@@ -12660,7 +13438,24 @@ bool publish_visual_object_poses(void* world, const char** failure = nullptr,
     default: return visual_failure(failure,"static.membership_fault");
     }
     if(previous!=tail)return visual_failure(failure,"static.membership_tail");
+    // A native texture reload (LiA's own reactivation path; base swallows that
+    // activation while running) destroys and recreates the surfaces drawn
+    // objects are bound to. Their live appearance bindings are re-read here,
+    // at the render-time seam after the reload, instead of waiting for the
+    // next map load to rebuild them.
+    static std::vector<std::int32_t> rebind;
+    static std::uint64_t rebind_frame = 0;
+    rebind.clear();
+    if (publish_poses &&
+        retained_visual_scene().visual_surface_rebind_candidates(++rebind_frame, rebind))
+        std::sort(rebind.begin(), rebind.end());
     for (const auto& item:walked) {
+        if (!rebind.empty() && std::binary_search(rebind.begin(), rebind.end(), item.id)) {
+            VisualAppearanceChanges changes;
+            changes.changed = changes.textures = true;
+            const char* predicate = nullptr;
+            (void)visual_publish_appearance(item.object, &changes, &predicate);
+        }
         if (hero_light_ids && item.hero) {
             std::int32_t id=0;bool present=false;const char* light_failure=nullptr;
             if (!visual_capture_hero_light_id(world,item.object,id,present,&light_failure))
@@ -12785,8 +13580,8 @@ bool read_owned_world_time(const std::uint8_t* image, double& time) noexcept {
 #else
     std::int32_t tick = 0;
     float fraction = 0;
-    if (!visual_read(image, kWorldSegmentTimeCounterRva, tick) ||
-        !visual_read(image, kWorldTimeFractionRva, fraction) ||
+    if (!visual_read(image, world_clock_contract().ticks_rva, tick) ||
+        !visual_read(image, world_clock_contract().fraction_rva, fraction) ||
         !std::isfinite(fraction) || fraction < 0) return false;
     // The completed time writer leaves accumulated time above one segment
     // when waiting for a packet. Native visual readers use the entire value.
@@ -12862,7 +13657,7 @@ bool capture_owned_terrain_geometry_values(const void* terrain,
     if (flags&4u) {
         std::array<float,2> extent{};
         if (!visual_read(terrain,0x10c,extent)) return reject("fog_extent_unreadable");
-        if (!visual_read(image,0x39bd34,animation.fog_distance)) return reject("fog_distance_unreadable");
+        if (!visual_read(image,object_frame_contract().fog_distance_rva,animation.fog_distance)) return reject("fog_distance_unreadable");
         if (animation.fog_distance<=0) return reject("fog_distance_nonpositive");
         animation.fog_enabled=1;
         for (unsigned axis=0;axis<2;++axis) {
@@ -12920,7 +13715,7 @@ bool publish_visual_world_tick(void* world, const char** failure = nullptr) noex
             VisualWorldTickTimingKind::bridge_forced);
         std::int32_t time = 0;
         void* node = nullptr;
-        if (!visual_read(g_visual_game_image, kWorldSegmentTimeCounterRva, time)) return visual_failure(failure, "world.clock");
+        if (!visual_read(g_visual_game_image, world_clock_contract().ticks_rva, time)) return visual_failure(failure, "world.clock");
         if (!visual_read(world, 0x1d4+0x20, node)) return visual_failure(failure, "world.bridge_head");
         std::vector<VisualBridgePlane> planes;
         while (node) {
@@ -13147,11 +13942,14 @@ int __fastcall hook_lifecycle_tick(void* self, void*) {
 // (visual_detach); deletion or any server change of that ID retires it.
 // Simulation is untouched: each hook only observes the ID and continues the
 // original call.
-constexpr std::uint32_t kServerWindowExitCallRva = 0x0018c06f;
-constexpr std::uint32_t kServerWindowRemovalRva = 0x0026dad0;
-constexpr std::uint32_t kServerObjectDeletedCallRva = 0x0019399e;
-constexpr std::uint32_t kServerDeletionNoticeRva = 0x0026dc90;
-constexpr std::uint32_t kMapObjectServerVtableRva = 0x0033dd6c;
+struct WindowMembershipContract {
+    std::uint32_t exit_call, removal, deletion_call, deletion_notice;
+};
+const WindowMembershipContract& window_membership_contract() noexcept {
+    static constexpr WindowMembershipContract base{0x0018c06f,0x0026dad0,0x0019399e,0x0026dc90};
+    static constexpr WindowMembershipContract lia{0x000f428e,0x00196a30,0x000eb67b,0x00196ac0};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
 constexpr std::size_t kMapObjectSpecificOffset = 0x170;
 constexpr std::size_t kWindowChangeHookCount = 4;
 
@@ -13177,7 +13975,7 @@ bool read_server_object_id(const void* object, std::int32_t& id, bool& server) n
         id = *reinterpret_cast<const std::int32_t*>(bytes + kObjectSignedIdOffset);
         const auto* specific = *reinterpret_cast<const std::uint8_t* const*>(bytes + kMapObjectSpecificOffset);
         server = specific && *reinterpret_cast<const std::uint8_t* const*>(specific) ==
-            g_window_membership_image + kMapObjectServerVtableRva;
+            g_window_membership_image + server_state_contract().object_specific_table;
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         id = 0; server = false;
@@ -13291,9 +14089,6 @@ EID3D11_WINDOW_CHANGE_STUB(3)
 // exit copy is kept (server_streamed_object); torches (58) are not seeded and
 // a model with an animation archive (clip pose) is never seeded. Invisible
 // (10000) or hidden (40) server objects are never shown.
-constexpr std::uint32_t kWorldServerRva = 0x003aff60;
-constexpr std::uint32_t kWorldServerVtableRva = 0x0033f928;
-constexpr std::uint32_t kMapObjectManagerVtableRva = 0x0033dcd8;
 constexpr std::size_t kServerModeOffset = 0x138;
 constexpr std::size_t kServerMapLoadedOffset = 0x15c;
 constexpr std::size_t kServerInterfaceOffset = 0x12d64;
@@ -13332,9 +14127,9 @@ bool collect_server_seed_objects(const std::uint8_t* image, RawServerSeedObject*
     std::size_t capacity, std::size_t& written) noexcept {
     written = 0;
     __try {
-        const auto* world = image + kWorldServerRva;
+        const auto* world = image + server_state_contract().units.world;
         const auto* manager = *reinterpret_cast<const std::uint8_t* const*>(world + kServerMapObjectManagerOffset);
-        if (!manager || *reinterpret_cast<const std::uint8_t* const*>(manager) != image + kMapObjectManagerVtableRva)
+        if (!manager || *reinterpret_cast<const std::uint8_t* const*>(manager) != image + server_state_contract().units.manager_table)
             return false;
         const auto* list = world + kServerDynamicMapObjectsOffset;
         const auto* const* begin = *reinterpret_cast<const std::uint8_t* const* const*>(list + 4);
@@ -13358,7 +14153,7 @@ bool collect_server_seed_objects(const std::uint8_t* image, RawServerSeedObject*
                 const auto streamed = server_streamed_object(value.type);
                 if (key <= 0 || streamed == ServerStreamedObject::skip ||
                     (value.flags & (kObjectHiddenFlag | kMapObjectInvisibleFlag)) || !specific ||
-                    *reinterpret_cast<const std::uint8_t* const*>(specific) != image + kMapObjectServerVtableRva ||
+                    *reinterpret_cast<const std::uint8_t* const*>(specific) != image + server_state_contract().object_specific_table ||
                     *reinterpret_cast<const std::uint8_t* const*>(specific + kSpecificOwnerOffset) != object)
                     continue;
                 std::memcpy(value.position.data(), object + kObjectPositionOffset, sizeof(value.position));
@@ -13456,7 +14251,7 @@ std::shared_ptr<const VisualAssemblyAsset> build_server_seed_assembly(
         for (const auto& node : assembly->skeleton->nodes) names.push_back(node.name);
     MemoryResourceArchive archive;
     if (!archive.open(model, failure)) { reason = "model_archive"; return nullptr; }
-    const auto* client_world = g_visual_game_image + kVisualClientWorldRva;
+    const auto* client_world = g_visual_game_image + world_clock_contract().client_rva;
     std::map<std::uint32_t, std::shared_ptr<const MaterialCpuAsset>> materials;
     std::map<std::string, std::shared_ptr<const TextureCpuAsset>> textures;
     std::set<std::string> seen;
@@ -13544,7 +14339,7 @@ void reconcile_server_seeds() noexcept {
     auto& state = g_server_seeds;
     try {
         const auto* image = g_visual_game_image;
-        const void* world = image ? image + kWorldServerRva : nullptr;
+        const void* world = image ? image + server_state_contract().units.world : nullptr;
         const void* table = nullptr;
         std::uint32_t mode = 0, loaded = 0, interface_mode = 0;
         std::string zone;
@@ -13552,7 +14347,7 @@ void reconcile_server_seeds() noexcept {
         // membership excludes held IDs; without both nothing is seeded.
         const bool server = g_window_membership_installed &&
             g_lifecycle_observing.load(std::memory_order_acquire) && world &&
-            visual_read(world, 0, table) && table == image + kWorldServerVtableRva &&
+            visual_read(world, 0, table) && table == image + server_state_contract().units.world_table &&
             visual_read(world, kServerModeOffset, mode) && mode == 1 &&
             visual_read(world, kServerMapLoadedOffset, loaded) && loaded &&
             visual_read(world, kServerInterfaceOffset, interface_mode) && interface_mode == 1 &&
@@ -14144,6 +14939,30 @@ extern "C" __declspec(naked) void hook_retained_owned_visibility() {
 }
 #endif // !EID3D11_EMBEDDED
 
+#if !defined(EID3D11_EMBEDDED)
+extern "C" __declspec(naked) void hook_lia_retained_owned_visibility() {
+    __asm {
+        pushfd
+        pushad
+        push ebp
+        push esi
+        call dispatch_retained_owned_visibility
+        test eax,eax
+        jz retained_original
+        popad
+        popfd
+        jmp dword ptr [g_retained_visibility_next]
+    retained_original:
+        popad
+        popfd
+        lea edi,[esi+54h]
+        push edi
+        lea ecx,[esi+34h]
+        jmp dword ptr [g_retained_visibility_resume]
+    }
+}
+#endif // !EID3D11_EMBEDDED
+
 struct RetainedFrameContext {
     std::array<float, 16> base_object_to_clip{};
     std::array<float, 16> object_placement{};
@@ -14261,7 +15080,8 @@ const std::uint8_t* supported_tl_module(const char*& reason, const TlModuleContr
 void read_world_environment(WorldEnvironment& environment) noexcept {
     environment = {};
     const auto* image = reinterpret_cast<const std::uint8_t*>(GetModuleHandleA(nullptr));
-    constexpr std::size_t client = 0x003af5b8, weather = client + 0x6f4;
+    const auto& clock = world_clock_contract();
+    const std::size_t client = clock.client_rva, weather = client + 0x6f4;
     std::int32_t ticks = 0, cave = 0, current = 0, next = 0;
     float scale = 0.0f, base = 0.0f, start = 0.0f, length = 0.0f;
     if (!image || !visual_read(image, client + 0x64, ticks) || !visual_read(image, client + 0x20, scale) ||
@@ -14297,14 +15117,15 @@ void read_world_environment(WorldEnvironment& environment) noexcept {
     environment.precipitation_strength = precipitation::shower_strength(
         g_weather_strength_setting.load(std::memory_order_relaxed), environment.game_hours,
         environment.world_time * kWeatherSecondsPerSegment);
-    // +0x184 is an MFC CString (character pointer; length at pointer-8), as
-    // concatenated by 00700B9F when the light table name is built.
+    // +0x184 is an MFC CString (character pointer; length header before it), as
+    // concatenated by 00700B9F when the light table name is built. The
+    // region CString header differs between the verified engine builds.
     const char* region = nullptr;
     std::int32_t region_length = 0;
     char name[16]{};
     if (visual_read(image, client + 0x184, region) && region &&
         visual_read(region, static_cast<std::size_t>(0), name) &&
-        visual_read(reinterpret_cast<const std::uint8_t*>(region) - 8, 0, region_length) &&
+        visual_read(reinterpret_cast<const std::uint8_t*>(region) - clock.region_length_header, 0, region_length) &&
         region_length > 0 && region_length < 16) {
         name[region_length] = 0;
         environment.region = fog_region(name);
@@ -14341,7 +15162,7 @@ bool read_stock_distance_fog(void* renderer, WorldFogSnapshot& snapshot) noexcep
             !std::isfinite(fog.projection_43) || !(fog.end > fog.start) || !(fog.scale > 0.0f))
             return false;
         snapshot.fog = fog;
-        snapshot.enabled = *reinterpret_cast<const std::uint32_t*>(bytes + 0x158) != 0;
+        snapshot.enabled = *reinterpret_cast<const std::uint32_t*>(bytes + direct_renderer_layout().fog_enabled) != 0;
         snapshot.failure = "";
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -14402,7 +15223,7 @@ bool retained_world_fog(void* controller,
         }
 #endif
         fog = reinterpret_cast<WorldFogFn>(
-            image + kWorldFogEntryRva)(controller, position.data());
+            image + object_frame_contract().world_fog_rva)(controller, position.data());
         fog = neighbour_continued_border_fog(controller, position.data(), fog);
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -14640,13 +15461,13 @@ bool publish_retained_visibility_and_shadow(
         bool needs_shadow_entry = visible;
         if (!needs_shadow_entry) {
             needs_shadow_entry = reinterpret_cast<ShadowVisibleFn>(
-                image + kRetainedShadowVisibilityEntryRva)(specific);
+                image + retained_seam_contract().shadow_visible)(specific);
         }
         if (needs_shadow_entry) {
             void* object = entry.object;
             reinterpret_cast<PointerVectorPushFn>(
-                image + kRetainedPointerVectorPushEntryRva)(
-                    image + kRetainedTreeShadowVectorRva, &object);
+                image + retained_seam_contract().vector_push)(
+                    image + retained_seam_contract().tree_shadow, &object);
             shadow_published = true;
         }
         return true;
@@ -14842,6 +15663,34 @@ extern "C" __declspec(naked) void hook_retained_static_scene_seam() {
     retained_taken:
         jmp dword ptr [g_retained_scene_seam_taken]
     }
+}
+
+extern "C" __declspec(naked) void hook_lia_retained_static_scene_seam() {
+    __asm {
+        pushfd
+        pushad
+        push edi
+        push esi
+        call dispatch_retained_static_scene
+        popad
+        popfd
+        test byte ptr [esi+8],0c0h
+        jz retained_taken
+        jmp dword ptr [g_retained_scene_seam_fallthrough]
+    retained_taken:
+        jmp dword ptr [g_retained_scene_seam_taken]
+    }
+}
+
+const void* retained_visibility_hook_target() noexcept {
+    return running_game_sites().report.engine == GameEngine::lia ?
+        reinterpret_cast<const void*>(&hook_lia_retained_owned_visibility) :
+        reinterpret_cast<const void*>(&hook_retained_owned_visibility);
+}
+const void* retained_scene_hook_target() noexcept {
+    return running_game_sites().report.engine == GameEngine::lia ?
+        reinterpret_cast<const void*>(&hook_lia_retained_static_scene_seam) :
+        reinterpret_cast<const void*>(&hook_retained_static_scene_seam);
 }
 
 bool retained_static_claims_object(void* specific) noexcept {
@@ -15061,10 +15910,10 @@ void end_rejected_sky_omission(void* world,std::uint32_t restore) noexcept {
 #if !defined(EID3D11_EMBEDDED)
 bool local_single_player_mission() noexcept {
     const auto* image = reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr));
-    const void* world = image + kWorldServerRva;
+    const void* world = image + server_state_contract().units.world;
     const void* table = nullptr;
     std::uint32_t mode = 0, loaded = 0, interface_mode = 0;
-    return visual_read(world, 0, table) && table == image + kWorldServerVtableRva &&
+    return visual_read(world, 0, table) && table == image + server_state_contract().units.world_table &&
         visual_read(world, kServerModeOffset, mode) && mode == 1 &&
         visual_read(world, kServerMapLoadedOffset, loaded) && loaded &&
         visual_read(world, kServerInterfaceOffset, interface_mode) && interface_mode == 1;
@@ -15354,6 +16203,41 @@ DWORD WINAPI hook_outer_count_time_clock() {
 }
 #endif // !EID3D11_EMBEDDED
 
+#if !defined(EID3D11_EMBEDDED)
+bool __cdecl hook_lia_outer_count_time() {
+    const auto begin = outer_frame_timing_active() ? bridge_now() : 0;
+    if (camp_inventory_observation_enabled()) camp_inventory_observe_count_time_clock(bridge_now());
+    if (begin) outer_frame_count_time_begin(begin);
+    bool result = false;
+    __try {
+        result = g_outer_count_time ? g_outer_count_time() : false;
+    } __finally {
+        // False bypasses Idle and Draw; true completes at the existing Idle
+        // boundary. Close inactive iterations before the next CountTime call.
+        if (begin && (!result || AbnormalTermination())) {
+            const auto end = bridge_now();
+            outer_frame_count_time_profile_end(end);
+            if (AbnormalTermination() || end < begin)
+                g_outer_frame_timing.invalid = true;
+            else {
+                g_outer_frame_timing.count_time_ticks += end - begin;
+                ++g_outer_frame_timing.count_time_calls;
+            }
+            g_outer_frame_timing.count_time_begin = 0;
+        }
+    }
+    return result;
+}
+#endif // !EID3D11_EMBEDDED
+
+#if !defined(EID3D11_EMBEDDED)
+const void* outer_count_time_hook() noexcept {
+    return outer_frame_contract().count_caller
+        ? reinterpret_cast<const void*>(&hook_lia_outer_count_time)
+        : reinterpret_cast<const void*>(&hook_outer_count_time_clock);
+}
+#endif // !EID3D11_EMBEDDED
+
 struct OuterDirectTimingToken {
     OuterFrameDirectCall kind = OuterFrameDirectCall::pre_tick;
     std::int64_t begin = 0;
@@ -15448,7 +16332,9 @@ void __fastcall hook_outer_post_tick(void* self, void*) {
     auto timing = outer_direct_timing_begin(OuterFrameDirectCall::post_tick);
     const auto camp_begin = camp_inventory_observation_enabled() ? bridge_now() : 0;
     __try {
-        if (g_outer_post_tick) g_outer_post_tick(self);
+        if (outer_frame_contract().count_caller) {
+            if (g_outer_native_post_tick) g_outer_native_post_tick();
+        } else if (g_outer_post_tick) g_outer_post_tick(self);
     } __finally {
         outer_direct_timing_end(timing, AbnormalTermination() != FALSE);
         if (camp_begin) camp_inventory_observe_close_call("post_tick",camp_begin,bridge_now());
@@ -15516,8 +16402,14 @@ BOOL __fastcall hook_begin_frame(void* self, void*) {
     // world targets before the engine clears them. Saves can draw again
     // without an intervening Present; a nested D3D scene is not this boundary.
     frame_acct::set_root(frame_acct::game_draw);
-    if (g_engine_frame_begin_image &&
-        caller == g_engine_frame_begin_image + kOuterBeginFrameCallRva + 5) {
+    // LiA: patch_slots owns its direct outer begin call, verified to target
+    // the same begin-frame entry; it is the same per-frame boundary.
+    const bool outer_begin =
+        (g_engine_frame_begin_image &&
+         caller == g_engine_frame_begin_image + kOuterBeginFrameCallRva + 5) ||
+        (g_visual_game_image && running_game_sites().report.engine == GameEngine::lia &&
+         caller == g_visual_game_image + renderer_boundary_contract().begin_call_rva + 5);
+    if (outer_begin) {
         bool sink_ok = false;
         {
             const frame_acct::Scope sink_scope(frame_acct::ours_frame_begin);
@@ -15641,12 +16533,21 @@ BOOL __fastcall hook_figure_placed(void* self, void*, void* figure, const void* 
 BOOL hook_figure_placed_body(void* self, void* figure, const void* rotation,
                              const void* position, void* material, BYTE fog, void* rect,
                              const void* return_address, const std::uintptr_t* return_slot) {
+    if(g_map_preview_draw.section>=0 && !g_map_preview_draw.consumed &&
+       g_map_preview_draw.carrier==figure &&
+       g_map_preview_image && return_address==g_map_preview_image+0x1e6f35 &&
+       submit_map_preview_placed(self,figure)) {
+        g_map_preview_draw.consumed=true;
+        // Native CI3DFigure::Draw must execute its two matrix-stack pops.
+        return TRUE;
+    }
     // The verified placed-figure wrapper at RVA 0x001e5d90 has a fixed frame:
     // its caller's return address is 0x88 bytes above this table-call return.
     // Read only that fail-closed stack slot; this replaces unreliable x86 stack
     // unwinding and is active only in the opt-in profiler build path.
     const void* outer_caller = nullptr;
-    if (bridge_profile_enabled()) {
+    if (bridge_profile_enabled() &&
+        running_game_sites().report.engine == GameEngine::base) {
         // return_slot: the hook frame's own return-address slot (passed in).
         outer_caller = reinterpret_cast<const void*>(return_slot[0x88 / sizeof(std::uintptr_t)]);
     }
@@ -15891,7 +16792,7 @@ bool extract_native_transform(void* renderer, std::array<float, 16>& transform,
         if (!matrices || count == 0 || count > 16) return false;
         std::memcpy(transform.data(), matrices + (count - 1u) * 16u,
                     transform.size() * sizeof(float));
-        default_diffuse = *reinterpret_cast<const std::uint32_t*>(renderer_bytes + 0x150);
+        default_diffuse = *reinterpret_cast<const std::uint32_t*>(renderer_bytes + direct_renderer_layout().diffuse);
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -15902,7 +16803,7 @@ bool publish_native_screen_extents(void* renderer, const RECT& extents) {
     if (!renderer) return false;
     __try {
         std::memcpy(static_cast<std::uint8_t*>(renderer) +
-                        kLegacyRendererScreenExtentsOffset,
+                        direct_renderer_layout().screen_extents,
                     &extents, sizeof(extents));
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -16081,9 +16982,9 @@ bool refresh_owned_terrain_animation(NativeTerrainState& animation,
         auto* image = static_cast<const std::uint8_t*>(
             static_cast<const void*>(GetModuleHandleA(nullptr)));
         const int segment_time = *reinterpret_cast<const int*>(
-            image + kWorldSegmentTimeCounterRva);
+            image + world_clock_contract().ticks_rva);
         const float fraction = *reinterpret_cast<const float*>(
-            image + kWorldTimeFractionRva);
+            image + world_clock_contract().fraction_rva);
         animation.precise_time = static_cast<float>(segment_time) + fraction;
         animation.maximum_wind_multiplier = 1.0f;
         if (!finite_vector(animation.wind_direction, 2) ||
@@ -16096,7 +16997,7 @@ bool refresh_owned_terrain_animation(NativeTerrainState& animation,
         // vertices evaluate the border falloff in the shader.
         if ((*reinterpret_cast<const std::uint32_t*>(terrain +
                 kTerrainRenderStateOffset) & 4u) != 0u) {
-            const float distance = *reinterpret_cast<const float*>(image + 0x0039bd34);
+            const float distance = *reinterpret_cast<const float*>(image + object_frame_contract().fog_distance_rva);
             const auto* extent = reinterpret_cast<const float*>(terrain + 0x10c);
             if (!std::isfinite(distance) || distance <= 0.0f ||
                 !finite_vector(extent, 2)) return false;
@@ -16175,7 +17076,7 @@ bool exact_get_terrain_sector(void* terrain, int x, int y, void*& sector) {
     using Function = void* (__thiscall*)(void*, int, int, int, BOOL);
     __try {
         auto* image = static_cast<std::uint8_t*>(static_cast<void*>(GetModuleHandleA(nullptr)));
-        sector = reinterpret_cast<Function>(image + kTerrainGetSectorEntryRva)(
+        sector = reinterpret_cast<Function>(image + terrain_scene_contract().get_sector)(
             terrain, x, y, 4, TRUE);
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -16419,9 +17320,13 @@ void capture_owned_world_shadow_inputs(void* scene,void* renderer,OwnedShadowInp
 #else
     {
     if(!read_owned_world_time(g_visual_game_image,in.time))throw "owned_shadow_time_unreadable_or_invalid";
-    if(!visual_read(g_visual_game_image,0x39be6c,visible_only))throw "owned_shadow_visibility_setting_unreadable";
-    if(!visual_read(scene,0x20c,player))throw "owned_shadow_player_unreadable";
-    if(!visual_read(player,0x100,interface_kind))throw "owned_shadow_interface_unreadable";
+    if(!visual_read(g_visual_game_image,retained_seam_contract().visible_only_setting,visible_only))
+        throw "owned_shadow_visibility_setting_unreadable";
+    // LiA visibility consults the player only when DrawVisibleOnly is set.
+    if(visible_only || running_game_sites().report.engine != GameEngine::lia) {
+        if(!visual_read(scene,0x20c,player))throw "owned_shadow_player_unreadable";
+        if(!visual_read(player,0x100,interface_kind))throw "owned_shadow_interface_unreadable";
+    }
     if(!visual_read(scene,8,in.flags))throw "owned_shadow_flags_unreadable";
     }
 #endif
@@ -16942,10 +17847,10 @@ bool read_owned_terrain_inputs_guarded(
         inputs.world_frame_serial = g_owned_terrain_frame.world_serial;
         std::memcpy(inputs.terrain_origin.data(), bytes + kTerrainOriginOffset,
                     sizeof(inputs.terrain_origin));
-        std::memcpy(inputs.camera_position.data(), image + kCameraPositionRva,
+        std::memcpy(inputs.camera_position.data(), image + terrain_scene_contract().camera_position,
                     sizeof(inputs.camera_position));
         std::memcpy(inputs.lod_distances.data(),
-                    image + kTerrainLodDistancesRva,
+                    image + terrain_scene_contract().lod_distances,
                     sizeof(inputs.lod_distances));
         inputs.maximum_lod = *reinterpret_cast<const int*>(
             bytes + kTerrainMaximumLodOffset);
@@ -16972,9 +17877,9 @@ bool read_owned_terrain_inputs_guarded(
                                 sizeof(float) * 2u);
         mix_owned_terrain_bytes(dynamic, bytes + kTerrainWindForceOffset,
                                 sizeof(float) * 3u);
-        mix_owned_terrain_bytes(dynamic, image + kWorldSegmentTimeCounterRva,
+        mix_owned_terrain_bytes(dynamic, image + world_clock_contract().ticks_rva,
                                 sizeof(int));
-        mix_owned_terrain_bytes(dynamic, image + kWorldTimeFractionRva,
+        mix_owned_terrain_bytes(dynamic, image + world_clock_contract().fraction_rva,
                                 sizeof(float));
         inputs.dynamic_state_fingerprint = dynamic;
         return inputs.maximum_lod >= 0 && inputs.maximum_lod <= 2 &&
@@ -17012,7 +17917,7 @@ bool exact_publish_terrain_clip(void* sector, void* renderer) {
     __try {
         auto* image = static_cast<std::uint8_t*>(
             static_cast<void*>(GetModuleHandleA(nullptr)));
-        reinterpret_cast<Function>(image + kSectorSetClipFlagEntryRva)(
+        reinterpret_cast<Function>(image + terrain_scene_contract().set_clip)(
             sector, renderer);
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -17198,7 +18103,7 @@ bool draw_source_owned_terrain_range(
         // still need them: an uncaptured zero placement collapsed every
         // world bound to the origin and GPU culling dropped all terrain.
         const auto* range_image=reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr));
-        if(range_caller!=range_image+0x2c6306 ||
+        if(range_caller!=range_image+terrain_scene_contract().range_caller ||
            (g_visual_publication_active && !g_owned_visual_drawing_world) ||
            !capture_owned_terrain_world_transform(terrain,renderer)) {
             g_owned_terrain_frame.front_end.status=OwnedTerrainPacketStatus::invalid;
@@ -17659,8 +18564,8 @@ void __fastcall hook_camera_mouse_pitch(void* self, void*, float pitch_delta) {
     // consumed displacement. Remove only its legacy gain before applying the
     // renderer-owned response; no frame-time integration belongs here.
     const auto* image = reinterpret_cast<const std::uint8_t*>(GetModuleHandleA(nullptr));
-    const float speed = *reinterpret_cast<const float*>(image + kCameraPitchSpeedRva);
-    const float power = *reinterpret_cast<const float*>(image + kCameraPitchMousePowerRva);
+    const float speed = *reinterpret_cast<const float*>(image + camera_mouse_contract().speed);
+    const float power = *reinterpret_cast<const float*>(image + camera_mouse_contract().power);
     const float input_gain = speed * power;
     if (!std::isfinite(input_gain) || input_gain == 0.f) {
         static volatile LONG reported = 0;
@@ -17856,9 +18761,10 @@ bool relative_call_targets(const std::uint8_t* call,
 }
 
 bool install_camp_input_hook(std::uint8_t* image) noexcept {
+    const auto& sites = outer_frame_contract();
     if(!image)return false;
-    auto* const call=image+kOuterWndProcCallRva;
-    const auto original=reinterpret_cast<OuterWndProcFn>(image+kOuterWndProcRva);
+    auto* const call=image+sites.message_call;
+    const auto original=reinterpret_cast<OuterWndProcFn>(image+sites.message_target);
     const auto hook=reinterpret_cast<const void*>(&hook_outer_wnd_proc);
     if(g_camp_input_image)return g_camp_input_image==image&&
         g_outer_wnd_proc==original&&relative_call_targets(call,hook);
@@ -17870,14 +18776,14 @@ bool install_camp_input_hook(std::uint8_t* image) noexcept {
     }
     // ProcessMessages calls fastcall WndProc directly, bypassing DispatchMessage
     // and the HWND subclass. Only this exact active call is owned by camp input.
-    if(g_outer_wnd_proc||std::memcmp(call,kOuterWndProcCallBytes.data(),
-                                   kOuterWndProcCallBytes.size())||
+    if(g_outer_wnd_proc||std::memcmp(call,sites.message_stock.data(),
+                                   sites.message_stock.size())||
        !relative_call_fits(call,hook))return false;
     DWORD previous=0;
     if(!VirtualProtect(call,5,PAGE_EXECUTE_READWRITE,&previous))return false;
     g_outer_wnd_proc=original;
     const bool wrote=write_relative_call(call,hook)&&relative_call_targets(call,hook);
-    if(!wrote)std::memcpy(call,kOuterWndProcCallBytes.data(),kOuterWndProcCallBytes.size());
+    if(!wrote)std::memcpy(call,sites.message_stock.data(),sites.message_stock.size());
     DWORD ignored=0;
     VirtualProtect(call,5,previous,&ignored);
     FlushInstructionCache(GetCurrentProcess(),call,5);
@@ -17887,10 +18793,11 @@ bool install_camp_input_hook(std::uint8_t* image) noexcept {
 }
 
 bool uninstall_camp_input_hook() noexcept {
+    const auto& sites = outer_frame_contract();
     auto* const image=g_camp_input_image;
     if(!image)return true;
-    auto* const call=image+kOuterWndProcCallRva;
-    if(g_outer_wnd_proc!=reinterpret_cast<OuterWndProcFn>(image+kOuterWndProcRva)||
+    auto* const call=image+sites.message_call;
+    if(g_outer_wnd_proc!=reinterpret_cast<OuterWndProcFn>(image+sites.message_target)||
        !relative_call_targets(call,reinterpret_cast<const void*>(&hook_outer_wnd_proc)))return false;
     if(g_outer_frame_timing_hooks_installed){
         if(g_outer_frame_timing_image!=image)return false;
@@ -17899,7 +18806,7 @@ bool uninstall_camp_input_hook() noexcept {
     }
     DWORD previous=0;
     if(!VirtualProtect(call,5,PAGE_EXECUTE_READWRITE,&previous))return false;
-    std::memcpy(call,kOuterWndProcCallBytes.data(),kOuterWndProcCallBytes.size());
+    std::memcpy(call,sites.message_stock.data(),sites.message_stock.size());
     DWORD ignored=0;
     VirtualProtect(call,5,previous,&ignored);
     FlushInstructionCache(GetCurrentProcess(),call,5);
@@ -17909,17 +18816,21 @@ bool uninstall_camp_input_hook() noexcept {
 }
 
 bool outer_wnd_proc_restored_call_matches(const std::uint8_t* image) noexcept {
+    const auto& sites = outer_frame_contract();
     if(!image)return false;
     // A timing rollback/uninstall restores its ownership, leaving camp intact.
     if(g_camp_input_image)return g_camp_input_image==image&&
-        g_outer_wnd_proc==reinterpret_cast<OuterWndProcFn>(image+kOuterWndProcRva)&&
-        relative_call_targets(image+kOuterWndProcCallRva,
+        g_outer_wnd_proc==reinterpret_cast<OuterWndProcFn>(image+sites.message_target)&&
+        relative_call_targets(image+sites.message_call,
                               reinterpret_cast<const void*>(&hook_outer_wnd_proc));
-    return std::memcmp(image+kOuterWndProcCallRva,kOuterWndProcCallBytes.data(),
-                       kOuterWndProcCallBytes.size())==0;
+    return std::memcmp(image+sites.message_call,sites.message_stock.data(),
+                       sites.message_stock.size())==0;
 }
 
 bool install_engine_frame_begin_hook(std::uint8_t* image) noexcept {
+    // This call patch is verified on the base layout only. LiA's verified
+    // boundary contract has patch_slots own both direct outer frame calls.
+    if (renderer_boundary_contract().direct_outer_calls) return true;
     const auto* const hook = reinterpret_cast<const void*>(&hook_begin_frame);
     if (g_engine_frame_begin_image)
         return image == g_engine_frame_begin_image &&
@@ -17978,31 +18889,32 @@ bool outer_frame_gap_profile_requested() noexcept {
 
 #if !defined(EID3D11_EMBEDDED)
 bool outer_hook_relative_calls_fit(std::uint8_t* image) noexcept {
+    const auto& sites = outer_frame_contract();
     if (!image) return false;
     return relative_call_fits(
-               image + kOuterCountTimeClockCallRva,
-               reinterpret_cast<const void*>(&hook_outer_count_time_clock)) &&
-           relative_call_fits(image + kOuterPreTickCallRva,
+               image + sites.count_call,
+               outer_count_time_hook()) &&
+           relative_call_fits(image + sites.pre_call,
                               reinterpret_cast<const void*>(&hook_outer_pre_tick)) &&
-           relative_call_fits(image + kOuterFirstFixedStepCallRva,
+           relative_call_fits(image + sites.first_step_call,
                               reinterpret_cast<const void*>(&hook_outer_fixed_step)) &&
-           relative_call_fits(image + kOuterPostTickCallRva,
+           relative_call_fits(image + sites.post_call,
                               reinterpret_cast<const void*>(&hook_outer_post_tick)) &&
-           relative_call_fits(image + kOuterSecondFixedStepCallRva,
+           relative_call_fits(image + sites.second_step_call,
                               reinterpret_cast<const void*>(&hook_outer_fixed_step)) &&
-           relative_call_fits(image + kOuterThirdFixedStepCallRva,
+           relative_call_fits(image + sites.third_step_call,
                               reinterpret_cast<const void*>(&hook_outer_fixed_step)) &&
            relative_call_fits(
-               image + kOuterInterfaceOnIdleCallRva,
+               image + sites.idle_call,
                reinterpret_cast<const void*>(&hook_outer_interface_on_idle)) &&
            relative_call_fits(
-               image + kOuterWndProcCallRva,
+               image + sites.message_call,
                reinterpret_cast<const void*>(&hook_outer_wnd_proc)) &&
            relative_call_fits(
-               image + kOuterShortWndProcCallRva,
+               image + sites.short_message_call,
                reinterpret_cast<const void*>(&hook_outer_short_wnd_proc)) &&
            relative_call_fits(
-               image + kOuterEndFrameCallRva,
+               image + sites.end_call,
                reinterpret_cast<const void*>(&hook_end_frame));
 }
 
@@ -18018,119 +18930,124 @@ bool write_outer_hook_call(std::uint8_t* call,
 
 bool outer_frame_timing_original_calls_match(
     const std::uint8_t* image) noexcept {
+    const auto& sites = outer_frame_contract();
     return image &&
-        std::memcmp(image + kOuterCountTimeClockCallRva,
-                    kOuterCountTimeClockCallBytes.data(),
-                    kOuterCountTimeClockCallBytes.size()) == 0 &&
-        relative_call_targets(image + kOuterPreTickCallRva,
-                              image + kOuterPreTickTargetRva) &&
-        relative_call_targets(image + kOuterFirstFixedStepCallRva,
-                              image + kOuterFixedStepTargetRva) &&
-        relative_call_targets(image + kOuterPostTickCallRva,
-                              image + kOuterPostTickTargetRva) &&
-        relative_call_targets(image + kOuterSecondFixedStepCallRva,
-                              image + kOuterFixedStepTargetRva) &&
-        relative_call_targets(image + kOuterThirdFixedStepCallRva,
-                              image + kOuterFixedStepTargetRva) &&
-        relative_call_targets(image + kOuterInterfaceOnIdleCallRva,
-                              image + kOuterInterfaceOnIdleRva) &&
+        std::memcmp(image + sites.count_call,
+                    sites.count_stock.data(),
+                    (sites.count_caller ? 5u : sites.count_stock.size())) == 0 &&
+        relative_call_targets(image + sites.pre_call,
+                              image + sites.pre_target) &&
+        relative_call_targets(image + sites.first_step_call,
+                              image + sites.step_target) &&
+        relative_call_targets(image + sites.post_call,
+                              image + sites.post_target) &&
+        relative_call_targets(image + sites.second_step_call,
+                              image + sites.step_target) &&
+        relative_call_targets(image + sites.third_step_call,
+                              image + sites.step_target) &&
+        relative_call_targets(image + sites.idle_call,
+                              image + sites.idle_target) &&
         outer_wnd_proc_restored_call_matches(image) &&
-        relative_call_targets(image + kOuterShortWndProcCallRva,
-                              image + kOuterShortWndProcRva) &&
-        relative_call_targets(image + kOuterEndFrameCallRva,
-                              image + kOuterEndFrameRva);
+        relative_call_targets(image + sites.short_message_call,
+                              image + sites.short_message_target) &&
+        relative_call_targets(image + sites.end_call,
+                              image + sites.end_target);
 }
 
 bool outer_frame_timing_hook_calls_match(
     const std::uint8_t* image) noexcept {
+    const auto& sites = outer_frame_contract();
     return image &&
         relative_call_targets(
-            image + kOuterCountTimeClockCallRva,
-            reinterpret_cast<const void*>(&hook_outer_count_time_clock)) &&
-        image[kOuterCountTimeClockCallRva + 5u] == 0x90 &&
-        relative_call_targets(image + kOuterPreTickCallRva,
+            image + sites.count_call,
+            outer_count_time_hook()) &&
+        (sites.count_caller || image[sites.count_call + 5u] == 0x90) &&
+        relative_call_targets(image + sites.pre_call,
                               reinterpret_cast<const void*>(&hook_outer_pre_tick)) &&
-        relative_call_targets(image + kOuterFirstFixedStepCallRva,
+        relative_call_targets(image + sites.first_step_call,
                               reinterpret_cast<const void*>(&hook_outer_fixed_step)) &&
-        relative_call_targets(image + kOuterPostTickCallRva,
+        relative_call_targets(image + sites.post_call,
                               reinterpret_cast<const void*>(&hook_outer_post_tick)) &&
-        relative_call_targets(image + kOuterSecondFixedStepCallRva,
+        relative_call_targets(image + sites.second_step_call,
                               reinterpret_cast<const void*>(&hook_outer_fixed_step)) &&
-        relative_call_targets(image + kOuterThirdFixedStepCallRva,
+        relative_call_targets(image + sites.third_step_call,
                               reinterpret_cast<const void*>(&hook_outer_fixed_step)) &&
         relative_call_targets(
-            image + kOuterInterfaceOnIdleCallRva,
+            image + sites.idle_call,
             reinterpret_cast<const void*>(&hook_outer_interface_on_idle)) &&
         relative_call_targets(
-            image + kOuterWndProcCallRva,
+            image + sites.message_call,
             reinterpret_cast<const void*>(&hook_outer_wnd_proc)) &&
         relative_call_targets(
-            image + kOuterShortWndProcCallRva,
+            image + sites.short_message_call,
             reinterpret_cast<const void*>(&hook_outer_short_wnd_proc)) &&
         relative_call_targets(
-            image + kOuterEndFrameCallRva,
+            image + sites.end_call,
             reinterpret_cast<const void*>(&hook_end_frame));
 }
 
 bool write_outer_frame_timing_hooks(std::uint8_t* image) noexcept {
+    const auto& sites = outer_frame_contract();
     if (!write_outer_hook_call(
-            image + kOuterCountTimeClockCallRva,
-            reinterpret_cast<const void*>(&hook_outer_count_time_clock)))
+            image + sites.count_call,
+            outer_count_time_hook()))
         return false;
-    image[kOuterCountTimeClockCallRva + 5u] = 0x90;
-    return write_outer_hook_call(image + kOuterPreTickCallRva,
+    if (!sites.count_caller) image[sites.count_call + 5u] = 0x90;
+    return write_outer_hook_call(image + sites.pre_call,
                reinterpret_cast<const void*>(&hook_outer_pre_tick)) &&
-           write_outer_hook_call(image + kOuterFirstFixedStepCallRva,
+           write_outer_hook_call(image + sites.first_step_call,
                reinterpret_cast<const void*>(&hook_outer_fixed_step)) &&
-           write_outer_hook_call(image + kOuterPostTickCallRva,
+           write_outer_hook_call(image + sites.post_call,
                reinterpret_cast<const void*>(&hook_outer_post_tick)) &&
-           write_outer_hook_call(image + kOuterSecondFixedStepCallRva,
+           write_outer_hook_call(image + sites.second_step_call,
                reinterpret_cast<const void*>(&hook_outer_fixed_step)) &&
-           write_outer_hook_call(image + kOuterThirdFixedStepCallRva,
+           write_outer_hook_call(image + sites.third_step_call,
                reinterpret_cast<const void*>(&hook_outer_fixed_step)) &&
            write_outer_hook_call(
-               image + kOuterInterfaceOnIdleCallRva,
+               image + sites.idle_call,
                reinterpret_cast<const void*>(&hook_outer_interface_on_idle)) &&
            write_outer_hook_call(
-               image + kOuterWndProcCallRva,
+               image + sites.message_call,
                reinterpret_cast<const void*>(&hook_outer_wnd_proc)) &&
            write_outer_hook_call(
-               image + kOuterShortWndProcCallRva,
+               image + sites.short_message_call,
                reinterpret_cast<const void*>(&hook_outer_short_wnd_proc)) &&
            write_outer_hook_call(
-               image + kOuterEndFrameCallRva,
+               image + sites.end_call,
                reinterpret_cast<const void*>(&hook_end_frame));
 }
 
 bool restore_outer_frame_timing_calls(std::uint8_t* image) noexcept {
+    const auto& sites = outer_frame_contract();
     if (!image) return false;
-    std::memcpy(image + kOuterCountTimeClockCallRva,
-                kOuterCountTimeClockCallBytes.data(),
-                kOuterCountTimeClockCallBytes.size());
+    std::memcpy(image + sites.count_call,
+                sites.count_stock.data(),
+                (sites.count_caller ? 5u : sites.count_stock.size()));
     bool restored = true;
-    restored = write_relative_call(image + kOuterPreTickCallRva,
-                                   image + kOuterPreTickTargetRva) && restored;
-    restored = write_relative_call(image + kOuterFirstFixedStepCallRva,
-                                   image + kOuterFixedStepTargetRva) && restored;
-    restored = write_relative_call(image + kOuterPostTickCallRva,
-                                   image + kOuterPostTickTargetRva) && restored;
-    restored = write_relative_call(image + kOuterSecondFixedStepCallRva,
-                                   image + kOuterFixedStepTargetRva) && restored;
-    restored = write_relative_call(image + kOuterThirdFixedStepCallRva,
-                                   image + kOuterFixedStepTargetRva) && restored;
-    restored = write_relative_call(image + kOuterInterfaceOnIdleCallRva,
-                                   image + kOuterInterfaceOnIdleRva) && restored;
+    restored = write_relative_call(image + sites.pre_call,
+                                   image + sites.pre_target) && restored;
+    restored = write_relative_call(image + sites.first_step_call,
+                                   image + sites.step_target) && restored;
+    restored = write_relative_call(image + sites.post_call,
+                                   image + sites.post_target) && restored;
+    restored = write_relative_call(image + sites.second_step_call,
+                                   image + sites.step_target) && restored;
+    restored = write_relative_call(image + sites.third_step_call,
+                                   image + sites.step_target) && restored;
+    restored = write_relative_call(image + sites.idle_call,
+                                   image + sites.idle_target) && restored;
     if(!g_camp_input_image)
-        restored = write_relative_call(image + kOuterWndProcCallRva,
-                                       image + kOuterWndProcRva) && restored;
-    restored = write_relative_call(image + kOuterShortWndProcCallRva,
-                                   image + kOuterShortWndProcRva) && restored;
-    restored = write_relative_call(image + kOuterEndFrameCallRva,
-                                   image + kOuterEndFrameRva) && restored;
+        restored = write_relative_call(image + sites.message_call,
+                                       image + sites.message_target) && restored;
+    restored = write_relative_call(image + sites.short_message_call,
+                                   image + sites.short_message_target) && restored;
+    restored = write_relative_call(image + sites.end_call,
+                                   image + sites.end_target) && restored;
     return restored && outer_frame_timing_original_calls_match(image);
 }
 
 bool install_outer_frame_timing_hooks(std::uint8_t* image) noexcept {
+    const auto& sites = outer_frame_contract();
     if (g_outer_frame_timing_hooks_installed) return image == g_outer_frame_timing_image;
     // The recorder depends on rendering entry but never owns it. Its rollback
     // and teardown validate only its own sites, so both owners can retry alone.
@@ -18141,13 +19058,17 @@ bool install_outer_frame_timing_hooks(std::uint8_t* image) noexcept {
         !outer_hook_relative_calls_fit(image))
         return false;
 
-    const auto time_get_time =
-        *reinterpret_cast<OuterTimeGetTimeFn*>(
-            image + kOuterTimeGetTimeIatRva);
-    if (!time_get_time) return false;
+    if (sites.count_caller) {
+        for (const auto& range : kLiaOuterFrameRanges)
+            if (!object_suffix_live_code_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return false;
+    }
+    const auto time_get_time = sites.count_caller ? nullptr :
+        *reinterpret_cast<OuterTimeGetTimeFn*>(image + sites.clock_iat);
+    if (!sites.count_caller && !time_get_time) return false;
 
-    auto* const first = image + kOuterCountTimeClockCallRva;
-    auto* const last = image + kOuterEndFrameCallRva + 5u;
+    auto* const first = image + sites.first_patch;
+    auto* const last = image + sites.patch_end;
     DWORD previous = 0;
     if (!VirtualProtect(first, static_cast<SIZE_T>(last - first),
                         PAGE_EXECUTE_READWRITE, &previous))
@@ -18155,16 +19076,20 @@ bool install_outer_frame_timing_hooks(std::uint8_t* image) noexcept {
 
     g_outer_time_get_time = time_get_time;
     g_outer_pre_tick = reinterpret_cast<OuterPreTickFn>(
-        image + kOuterPreTickTargetRva);
+        image + sites.pre_target);
     g_outer_fixed_step = reinterpret_cast<OuterFixedStepFn>(
-        image + kOuterFixedStepTargetRva);
-    g_outer_post_tick = reinterpret_cast<OuterPostTickFn>(
-        image + kOuterPostTickTargetRva);
+        image + sites.step_target);
+    g_outer_count_time = sites.count_caller
+        ? reinterpret_cast<OuterCountTimeFn>(image + sites.count_target) : nullptr;
+    g_outer_native_post_tick = sites.count_caller
+        ? reinterpret_cast<OuterNativePostTickFn>(image + sites.post_target) : nullptr;
+    g_outer_post_tick = sites.count_caller ? nullptr :
+        reinterpret_cast<OuterPostTickFn>(image + sites.post_target);
     g_outer_interface_on_idle = reinterpret_cast<OuterInterfaceOnIdleFn>(
-        image + kOuterInterfaceOnIdleRva);
-    g_outer_wnd_proc = reinterpret_cast<OuterWndProcFn>(image + kOuterWndProcRva);
+        image + sites.idle_target);
+    g_outer_wnd_proc = reinterpret_cast<OuterWndProcFn>(image + sites.message_target);
     g_outer_short_wnd_proc = reinterpret_cast<OuterShortWndProcFn>(
-        image + kOuterShortWndProcRva);
+        image + sites.short_message_target);
 
     const bool wrote = write_outer_frame_timing_hooks(image) &&
         outer_frame_timing_hook_calls_match(image);
@@ -18177,6 +19102,8 @@ bool install_outer_frame_timing_hooks(std::uint8_t* image) noexcept {
                           static_cast<SIZE_T>(last - first));
     if (!wrote) {
         g_outer_time_get_time = nullptr;
+        g_outer_count_time = nullptr;
+        g_outer_native_post_tick = nullptr;
         g_outer_pre_tick = nullptr;
         g_outer_fixed_step = nullptr;
         g_outer_post_tick = nullptr;
@@ -18191,39 +19118,39 @@ bool install_outer_frame_timing_hooks(std::uint8_t* image) noexcept {
 }
 
 bool uninstall_outer_frame_timing_hooks() noexcept {
+    const auto& sites = outer_frame_contract();
     if (!g_outer_frame_timing_hooks_installed) return true;
     auto* const image = g_outer_frame_timing_image;
     if (!image ||
-        !relative_call_targets(image + kOuterCountTimeClockCallRva,
-                               reinterpret_cast<const void*>(
-                                   &hook_outer_count_time_clock)) ||
-        image[kOuterCountTimeClockCallRva + 5u] != 0x90 ||
-        !relative_call_targets(image + kOuterPreTickCallRva,
+        !relative_call_targets(image + sites.count_call,
+                               outer_count_time_hook()) ||
+        (!sites.count_caller && image[sites.count_call + 5u] != 0x90) ||
+        !relative_call_targets(image + sites.pre_call,
                                reinterpret_cast<const void*>(&hook_outer_pre_tick)) ||
-        !relative_call_targets(image + kOuterFirstFixedStepCallRva,
+        !relative_call_targets(image + sites.first_step_call,
                                reinterpret_cast<const void*>(&hook_outer_fixed_step)) ||
-        !relative_call_targets(image + kOuterPostTickCallRva,
+        !relative_call_targets(image + sites.post_call,
                                reinterpret_cast<const void*>(&hook_outer_post_tick)) ||
-        !relative_call_targets(image + kOuterSecondFixedStepCallRva,
+        !relative_call_targets(image + sites.second_step_call,
                                reinterpret_cast<const void*>(&hook_outer_fixed_step)) ||
-        !relative_call_targets(image + kOuterThirdFixedStepCallRva,
+        !relative_call_targets(image + sites.third_step_call,
                                reinterpret_cast<const void*>(&hook_outer_fixed_step)) ||
-        !relative_call_targets(image + kOuterInterfaceOnIdleCallRva,
+        !relative_call_targets(image + sites.idle_call,
                                reinterpret_cast<const void*>(
                                    &hook_outer_interface_on_idle)) ||
-        !relative_call_targets(image + kOuterWndProcCallRva,
+        !relative_call_targets(image + sites.message_call,
                                reinterpret_cast<const void*>(
                                    &hook_outer_wnd_proc)) ||
-        !relative_call_targets(image + kOuterShortWndProcCallRva,
+        !relative_call_targets(image + sites.short_message_call,
                                reinterpret_cast<const void*>(
                                    &hook_outer_short_wnd_proc)) ||
-        !relative_call_targets(image + kOuterEndFrameCallRva,
+        !relative_call_targets(image + sites.end_call,
                                reinterpret_cast<const void*>(
                                    &hook_end_frame)))
         return false;
 
-    auto* const first = image + kOuterCountTimeClockCallRva;
-    auto* const last = image + kOuterEndFrameCallRva + 5u;
+    auto* const first = image + sites.first_patch;
+    auto* const last = image + sites.patch_end;
     DWORD previous = 0;
     if (!VirtualProtect(first, static_cast<SIZE_T>(last - first),
                         PAGE_EXECUTE_READWRITE, &previous))
@@ -18236,6 +19163,8 @@ bool uninstall_outer_frame_timing_hooks() noexcept {
     if (!restored) return false;
     bridge_set_outer_frame_timing_active(false);
     g_outer_time_get_time = nullptr;
+    g_outer_count_time = nullptr;
+    g_outer_native_post_tick = nullptr;
     g_outer_pre_tick = nullptr;
     g_outer_fixed_step = nullptr;
     g_outer_post_tick = nullptr;
@@ -18314,7 +19243,7 @@ HudAtlasRelocatedBytes hud_atlas_relocated_bytes(
     write_u32(expected.stock_critical_leave, 1, critical);
     write_u32(expected.stock_critical_leave, 7, leave_iat);
     write_u32(expected.stock_cleanup, 2,
-              loaded_address(game_image, kGameResourceManagerSlotRva));
+              loaded_address(game_image, resource_manager_contract().texture_slot));
     write_u32(expected.texture_lock_critical_enter, 2, critical);
     write_u32(expected.texture_lock_critical_enter, 8, enter_iat);
     write_u32(expected.texture_unlock_critical_leave, 1, critical);
@@ -18573,11 +19502,14 @@ std::uint8_t* find_addon_module() noexcept {
 std::uint32_t g_features_off = 0;
 char g_addon_notice[256]{};
 
-// After every install decided: one notice and one bridge event naming the
-// addon problem and the features that are off. An addon that is fine (or no
-// addon.dll) leaves the other notices; so does an addon problem that left
-// every feature on through the native contracts.
-void publish_addon_notice() noexcept {
+// After every install decided: required world publication refusal is visible
+// regardless of addon recognition. Keep the existing detailed feature event;
+// optional addon losses use the same persistent notice when world is available.
+void publish_addon_notice(bool world_available) noexcept {
+    g_addon_notice[0] = '\0';
+    if (!world_available)
+        std::snprintf(g_addon_notice, sizeof(g_addon_notice),
+                      "EID3D11: world visuals unavailable. See bridge.jsonl for the reason.");
     if (g_addon_recognition != AddonRecognition::rejected &&
         g_addon_recognition != AddonRecognition::partial) return;
     static constexpr struct { std::uint32_t bit; const char* text; } kFeatures[] = {
@@ -18587,16 +19519,26 @@ void publish_addon_notice() noexcept {
         {bridge_feature_off_hud_layout, "HUD layout"},
     };
     char off[160]{};
+    const char* other_off = nullptr;
     for (const auto& feature : kFeatures) {
         if (!(g_features_off & feature.bit)) continue;
         const std::size_t used = std::strlen(off);
+        // The icon row is first; other losses form a suffix of the same log text.
+        if (feature.bit != bridge_feature_off_hud_icons && !other_off)
+            other_off = off + used + (used ? 2 : 0);
         std::snprintf(off + used, sizeof(off) - used, "%s%s", used ? ", " : "", feature.text);
     }
     if (!off[0]) return;
     const bool rejected = g_addon_recognition == AddonRecognition::rejected;
-    std::snprintf(g_addon_notice, sizeof(g_addon_notice),
-                  "Addon %s (addon.dll %.8s) - off: %s (see bridge.jsonl)",
-                  rejected ? "not recognised" : "partly recognised", g_addon_hash, off);
+    if (world_available) {
+        // A working native HUD leaves addon-only icon uncertainty in logs.
+        const char* visible_off = g_hud_visual_hooks_installed && g_hud_visual_native
+            ? other_off : off;
+        if (visible_off && *visible_off)
+            std::snprintf(g_addon_notice, sizeof(g_addon_notice),
+                          "Addon %s (addon.dll %.8s) - off: %s (see bridge.jsonl)",
+                          rejected ? "not recognised" : "partly recognised", g_addon_hash, visible_off);
+    }
     char detail[320];
     std::snprintf(detail, sizeof(detail), "addon=%s sha256=%s off=%s",
                   rejected ? "rejected" : "partial", g_addon_hash, off);
@@ -18769,69 +19711,71 @@ struct HudVisualCallPatch {
 #if !defined(EID3D11_EMBEDDED)
 std::array<HudVisualEntryPatch, 14> hud_visual_entry_patches(
     std::uint8_t* game, std::uint8_t* addon) noexcept {
+    const auto& contract = hud_game_contract();
     // A null addon selects the stock weapon/spell/skill panel entries.
     const AddonHudVisualLayout& hud = g_addon.layout.hud_visual;
     if (addon && g_addon.layout.hud_visual_failure) return {};
     const HudVisualEntryPatch weapon = addon ?
         HudVisualEntryPatch{addon + hud.weapon_set_unit, 6,
                             reinterpret_cast<const void*>(&hook_hud_weapon_set_unit)} :
-        HudVisualEntryPatch{game + kHudNativeWeaponSetUnitRva, kHudNativeWeaponHookBytes,
+        HudVisualEntryPatch{game + contract.panels[0], kHudNativeWeaponHookBytes,
                             reinterpret_cast<const void*>(&hook_hud_native_weapon_set_unit)};
     const HudVisualEntryPatch spell = addon ?
         HudVisualEntryPatch{addon + hud.spell_set_unit, 5,
                             reinterpret_cast<const void*>(&hook_hud_spell_set_unit)} :
-        HudVisualEntryPatch{game + kHudNativeSpellSetUnitRva, kHudNativeSpellHookBytes,
+        HudVisualEntryPatch{game + contract.panels[1], kHudNativeSpellHookBytes,
                             reinterpret_cast<const void*>(&hook_hud_spell_set_unit)};
     const HudVisualEntryPatch skill = addon ?
         HudVisualEntryPatch{addon + hud.skill_set_unit, 7,
                             reinterpret_cast<const void*>(&hook_hud_skill_set_unit)} :
-        HudVisualEntryPatch{game + kHudNativeSkillSetUnitRva, kHudNativeSkillHookBytes,
+        HudVisualEntryPatch{game + contract.panels[2], kHudNativeSkillHookBytes,
                             reinterpret_cast<const void*>(&hook_hud_native_skill_set_unit)};
     return {{
-        {game + kHudOnActivateRva, 7,
+        {game + contract.entries[0], contract.hook_bytes[0],
          reinterpret_cast<const void*>(&hook_hud_on_activate)},
-        {game + kHudOnDeactivateRva, 9,
+        {game + contract.entries[1], contract.hook_bytes[1],
          reinterpret_cast<const void*>(&hook_hud_on_deactivate)},
-        {game + kHudDestructorRva, 7,
+        {game + contract.entries[2], contract.hook_bytes[2],
          reinterpret_cast<const void*>(&hook_hud_destructor)},
-        {game + kHudItemSetUnitRva, 7,
+        {game + contract.entries[3], contract.hook_bytes[3],
          reinterpret_cast<const void*>(&hook_hud_item_set_unit)},
         weapon,
         spell,
         skill,
-        {game + kTextureManagerCreateRva, 6,
+        {game + contract.entries[4], contract.hook_bytes[4],
          reinterpret_cast<const void*>(&hook_texture_manager_create)},
-        {game + kFigureManagerCreateRva, 6,
+        {game + contract.entries[5], contract.hook_bytes[5],
          reinterpret_cast<const void*>(&hook_figure_manager_create)},
-        {game + kTextureResourceAddRva, 7,
+        {game + contract.entries[6], contract.hook_bytes[6],
          reinterpret_cast<const void*>(&hook_texture_resource_add)},
-        {game + kFigureResourceAddRva, 7,
+        {game + contract.entries[7], contract.hook_bytes[7],
          reinterpret_cast<const void*>(&hook_figure_resource_add)},
-        {game + kResourceCloseRva, 8,
+        {game + contract.entries[8], contract.hook_bytes[8],
          reinterpret_cast<const void*>(&hook_resource_close)},
-        {game + kResourceCloseAllRva, 6,
+        {game + contract.entries[9], contract.hook_bytes[9],
          reinterpret_cast<const void*>(&hook_resource_close_all)},
-        {game + kResourceDestroyRva, 6,
+        {game + contract.entries[10], contract.hook_bytes[10],
          reinterpret_cast<const void*>(&hook_resource_destroy)},
     }};
 }
 
 std::vector<HudVisualCallPatch> hud_visual_call_patches(
     std::uint8_t* game, std::uint8_t* addon) noexcept {
+    const auto& contract = hud_game_contract();
     // A null addon leaves only the stock lanes (no addon lanes or autocast box).
     static const AddonHudVisualLayout kNoAddonLanes{};
     const AddonHudVisualLayout& hud = addon ? g_addon.layout.hud_visual : kNoAddonLanes;
     if (addon && g_addon.layout.hud_visual_failure) return {};
     std::vector<HudVisualCallPatch> result;
     result.reserve(22);
-    for (std::uint32_t rva : kHudStockProducerCallRvas)
-        result.push_back({game + rva, game + kStockHudAtlasProducerRva,
+    for (std::uint32_t rva : contract.producer_calls)
+        result.push_back({game + rva, game + contract.producer,
                          reinterpret_cast<const void*>(&hook_hud_visual_stock_producer)});
     for (std::uint32_t lane = 0; lane < hud.lane_count; ++lane)
         result.push_back({addon + hud.producer_calls[lane], addon + hud.producer,
                           reinterpret_cast<const void*>(&hook_hud_visual_addon_producer)});
-    for (std::uint32_t rva : kHudStockAddFigureCallRvas)
-        result.push_back({game + rva, game + kHudAddFigureRva,
+    for (std::uint32_t rva : contract.add_calls)
+        result.push_back({game + rva, game + contract.add_figure,
                          reinterpret_cast<const void*>(&hook_hud_visual_add_figure)});
     for (std::uint32_t lane = 0; lane < hud.lane_count; ++lane)
         result.push_back({addon + hud.add_figure_calls[lane], addon + hud.add_figure,
@@ -18839,10 +19783,15 @@ std::vector<HudVisualCallPatch> hud_visual_call_patches(
     if (hud.autocast_box)
         result.push_back({addon + hud.autocast_call, addon + hud.autocast_box,
                          reinterpret_cast<const void*>(&hook_hud_autocast_box)});
-    for (std::uint32_t rva : kHudLaneDrawCallRvas)
-        result.push_back({game + rva, game + kHudObjectDrawRva,
-                         reinterpret_cast<const void*>(&hook_hud_lane_draw)});
-    result.push_back({game + kHudCarrierDrawCallRva, game + kHudFigureDrawRva,
+    for (std::uint32_t rva : contract.draw_calls) {
+        // LiA folds item/spell/skill Draw into one callable body and site.
+        if (std::none_of(result.begin(),result.end(),[&](const auto& patch) {
+                return patch.call == game+rva;
+            }))
+            result.push_back({game+rva,game+contract.object_draw,
+                             reinterpret_cast<const void*>(&hook_hud_lane_draw)});
+    }
+    result.push_back({game + contract.carrier_call, game + contract.figure_draw,
                      reinterpret_cast<const void*>(&hook_hud_carrier_draw)});
     return result;
 }
@@ -18852,18 +19801,21 @@ bool executable_address(const void* address) noexcept;
 bool visual_thiscall_chain(const std::uint8_t* entry, const void* callback,
                            std::uint8_t argument_bytes) noexcept;
 
-constexpr std::array<std::uint32_t, 11> kHudVisualGameEntryRvas{{
-    kHudOnActivateRva, kHudOnDeactivateRva, kHudDestructorRva,
-    kHudItemSetUnitRva, kTextureManagerCreateRva,
-    kFigureManagerCreateRva, kTextureResourceAddRva,
-    kFigureResourceAddRva, kResourceCloseRva,
-    kResourceCloseAllRva, kResourceDestroyRva}};
-constexpr std::array<std::size_t, 11> kHudVisualGameEntryHookBytes{{
-    7, 9, 7, 7, 6, 6, 7, 7, 8, 6, 6}};
-
 #if !defined(EID3D11_EMBEDDED)
 std::array<std::array<std::uint8_t, 16>, 11> hud_visual_game_stock(
     const std::uint8_t* game) noexcept {
+    if (running_game_sites().report.engine == GameEngine::lia) {
+        auto entries = kLiaHudGameStockBytes;
+        write_u32(entries[0],3u,loaded_address(game,0x00216e04u));
+        write_u32(entries[1],5u,loaded_address(game,0x00273928u));
+        write_u32(entries[2],3u,loaded_address(game,0x00214512u));
+        write_u32(entries[3],3u,loaded_address(game,0x002169b8u));
+        write_u32(entries[4],9u,loaded_address(game,0x00219390u));
+        write_u32(entries[5],9u,loaded_address(game,0x00212b28u));
+        write_u32(entries[6],3u,loaded_address(game,0x0021875cu));
+        write_u32(entries[7],3u,loaded_address(game,0x00212d8cu));
+        return entries;
+    }
     std::array<std::array<std::uint8_t, 16>, 11> game_entries{{
         {{0x6a,0xff,0x68,0x5e,0xda,0x72,0x00,0x64,0xa1,0,0,0,0,0x50,0x64,0x89}},
         {{0x56,0x8b,0xf1,0x8b,0x0d,0xb0,0xb2,0x79,0x00,0x6a,0x00,0x83,0xc9,0x40,0xc7,0x05}},
@@ -18895,9 +19847,9 @@ std::array<std::array<std::uint8_t, 16>, 11> hud_visual_game_stock(
 EntryResolution hud_visual_game_entry_owner(const std::uint8_t* game,
                                             std::size_t index) noexcept {
     const auto stock = hud_visual_game_stock(game);
-    return resolve_hook_entry(game + kHudVisualGameEntryRvas[index],
+    return resolve_hook_entry(game + hud_game_contract().entries[index],
                               stock[index].data(), stock[index].size(),
-                              kHudVisualGameEntryHookBytes[index]);
+                              hud_game_contract().hook_bytes[index]);
 }
 #endif // !EID3D11_EMBEDDED
 
@@ -18910,11 +19862,11 @@ EntryResolution hud_native_entry_owner(const std::uint8_t* game, std::size_t ind
     std::array<std::uint8_t, 16> spell = weapon;
     std::array<std::uint8_t, 16> skill{{
         0x64,0xa1,0,0,0,0,0x6a,0xff,0x68,0,0,0,0,0x50,0x8b,0x44}};
-    write_u32(weapon, 3u, loaded_address(game, kHudNativeWeaponHandlerRva));
-    write_u32(spell, 3u, loaded_address(game, kHudNativeSpellHandlerRva));
-    write_u32(skill, 9u, loaded_address(game, kHudNativeSkillHandlerRva));
-    const std::array<std::uint32_t,3> rvas{{kHudNativeWeaponSetUnitRva,
-        kHudNativeSpellSetUnitRva,kHudNativeSkillSetUnitRva}};
+    const auto& contract = hud_game_contract();
+    write_u32(weapon,3u,loaded_address(game,contract.panel_handlers[0]));
+    write_u32(spell,3u,loaded_address(game,contract.panel_handlers[1]));
+    write_u32(skill,9u,loaded_address(game,contract.panel_handlers[2]));
+    const auto& rvas = contract.panels;
     const std::array<std::size_t,3> lengths{{kHudNativeWeaponHookBytes,
         kHudNativeSpellHookBytes,kHudNativeSkillHookBytes}};
     const std::array<std::array<std::uint8_t,16>,3> stock{{weapon,spell,skill}};
@@ -18941,7 +19893,7 @@ bool hud_visual_live_contract(std::uint8_t* game,
         return false;
     }
     if (!game) { g_hud_live_mismatch = "check_4"; return false; }
-    for (std::size_t index = 0; index < kHudVisualGameEntryRvas.size(); ++index) {
+    for (std::size_t index = 0; index < hud_game_contract().entries.size(); ++index) {
         const auto owner = hud_visual_game_entry_owner(game, index);
         if (owner.owner == EntryOwner::rejected) {
             g_hud_live_game_entry = index;
@@ -19125,11 +20077,11 @@ bool install_hud_visual_hooks_images(std::uint8_t* game,
     g_hud_visual_addon_producer = reinterpret_cast<AddonHudAtlasProducerFn>(
         addon ? addon + hud.producer : nullptr);
     g_hud_visual_stock_producer = reinterpret_cast<StockHudAtlasProducerFn>(
-        game + kStockHudAtlasProducerRva);
-    g_hud_object_draw = reinterpret_cast<HudObjectDrawFn>(game + kHudObjectDrawRva);
-    g_hud_figure_draw = reinterpret_cast<HudFigureDrawFn>(game + kHudFigureDrawRva);
+        game + hud_game_contract().producer);
+    g_hud_object_draw = reinterpret_cast<HudObjectDrawFn>(game + hud_game_contract().object_draw);
+    g_hud_figure_draw = reinterpret_cast<HudFigureDrawFn>(game + hud_game_contract().figure_draw);
     g_hud_stock_add_figure = reinterpret_cast<HudAddFigureFn>(
-        game + kHudAddFigureRva);
+        game + hud_game_contract().add_figure);
     g_hud_addon_add_figure = reinterpret_cast<HudAddFigureFn>(
         addon ? addon + hud.add_figure : nullptr);
     g_hud_visual_game_image = game;
@@ -19408,12 +20360,15 @@ bool character_pane_receivers(
 // between replay them into the same text path. The addon stays authoritative;
 // values lag at most kStatsRefreshMs. The rest of the panel draw (figures,
 // name, preview, epoch/publication) still runs every frame.
+// A refresh can temporarily replace a font slot. Record the selected logical
+// font with each call; replay must not read the restored slot's definition.
 constexpr std::uint32_t kCharacterPaneStatsCallRva = 0x00246a98;
 constexpr std::uint32_t kCharacterPaneStatsEntryRva = 0x00247040;
 
 struct CharacterPaneStatsText {
     void* surface = nullptr; std::string text; RECT rectangle{}; bool has_rectangle = false;
     int font_slot = 0; COLORREF color = 0; int format = 0; BOOL shadow = FALSE;
+    LOGFONTW font{}; bool has_font = false;
 };
 using CharacterPaneStatsFn = void (__thiscall*)(void*, void*);
 CharacterPaneStatsFn g_character_pane_stats = nullptr;
@@ -19428,13 +20383,15 @@ std::string g_stats_unit;
 void* g_stats_pane = nullptr;
 
 void record_character_pane_stats_text(void* surface, const char* text, const RECT* rectangle,
-    int font_slot, COLORREF color, int format, BOOL shadow) noexcept {
+    int font_slot, COLORREF color, int format, BOOL shadow,
+    const LOGFONTW* font = nullptr) noexcept {
     try {
         CharacterPaneStatsText call{};
         call.surface = surface; call.font_slot = font_slot; call.color = color;
         call.format = format; call.shadow = shadow;
         if (text) call.text = text;
         if (rectangle) { call.rectangle = *rectangle; call.has_rectangle = true; }
+        if (font) { call.font = *font; call.has_font = true; }
         g_stats_text.push_back(std::move(call));
     } catch (...) { g_stats_valid = false; g_stats_recording = false; }
 }
@@ -19517,15 +20474,30 @@ IDirectDrawSurface7* interface_dd_surface(const void* interface_surface) noexcep
     }
 }
 
-int __fastcall hook_character_pane_draw_text(
-    void* self, void*, const char* text, const RECT* rectangle,
-    int font_slot, COLORREF color, int format, BOOL shadow) {
-    if (g_stats_recording)
-        record_character_pane_stats_text(self, text, rectangle, font_slot, color, format, shadow);
+std::uintptr_t __fastcall hook_character_pane_surface_draw(void* self, void*) {
+    // Borrow the native Draw owner only for this invocation. Resolve its live
+    // surface when the forwarded Blt arrives, after any addon interposition.
+    void* const previous = g_character_pane_surface_draw_self;
+    g_character_pane_surface_draw_self = self;
+    std::uintptr_t result = 0;
+    __try {
+        result = g_character_pane_surface_draw(self);
+    } __finally {
+        g_character_pane_surface_draw_self = previous;
+    }
+    return result;
+}
+
+int draw_character_pane_text(
+    void* self, const char* text, const RECT* rectangle,
+    int font_slot, COLORREF color, int format, BOOL shadow,
+    const LOGFONTW* recorded_font) {
     // A claimed item card session excludes every other claim until released.
     auto* invocation = g_item_card_session.claimed
         ? &g_item_card_session : current_character_pane_text_invocation();
     const auto original = [&]() {
+        if (g_stats_recording)
+            record_character_pane_stats_text(self, text, rectangle, font_slot, color, format, shadow);
         return g_character_pane_draw_text
             ? g_character_pane_draw_text(
                   self, text, rectangle, font_slot, color, format, shadow)
@@ -19581,16 +20553,21 @@ int __fastcall hook_character_pane_draw_text(
             draw_rectangle.bottom += 2;
         }
         if (font_slot >= 0 && font_slot < 3 && interface_owner) {
-            const auto* owner = static_cast<const std::uint8_t*>(
-                interface_owner);
-            const auto* font_object =
-                *reinterpret_cast<const std::uint8_t* const*>(
-                    owner + kInterfaceFontArrayOffset +
-                    static_cast<std::size_t>(font_slot) * sizeof(void*));
-            font = font_object
-                ? *reinterpret_cast<HFONT const*>(
-                      font_object + kMfcFontHandleOffset)
-                : nullptr;
+            if (recorded_font) {
+                font = g_character_pane_text.font_from_definition(*recorded_font,
+                    static_cast<std::uint32_t>(font_slot));
+            } else {
+                const auto* owner = static_cast<const std::uint8_t*>(
+                    interface_owner);
+                const auto* font_object =
+                    *reinterpret_cast<const std::uint8_t* const*>(
+                        owner + kInterfaceFontArrayOffset +
+                        static_cast<std::size_t>(font_slot) * sizeof(void*));
+                font = font_object
+                    ? *reinterpret_cast<HFONT const*>(
+                          font_object + kMfcFontHandleOffset)
+                    : nullptr;
+            }
         }
         inputs_valid = surface_handle &&
             live_surface == invocation->surface && interface_owner && font &&
@@ -19603,12 +20580,16 @@ int __fastcall hook_character_pane_draw_text(
         return 0;
     }
 
+    LOGFONTW definition{};
     bool height_valid = false;
     const int screen_height = g_character_pane_text.draw(
         font, static_cast<std::uint32_t>(font_slot), text,
         draw_rectangle, static_cast<UINT>(format), color,
-        shadow != FALSE, height_valid);
+        shadow != FALSE, height_valid, g_stats_recording ? &definition : nullptr);
     if (!height_valid) return 0;
+    if (g_stats_recording)
+        record_character_pane_stats_text(self, text, rectangle, font_slot,
+            color, format, shadow, &definition);
     SIZE virtual_size{0, screen_height};
     bool converted = false;
     __try {
@@ -19625,6 +20606,13 @@ int __fastcall hook_character_pane_draw_text(
         return 0;
     }
     return virtual_size.cy;
+}
+
+int __fastcall hook_character_pane_draw_text(
+    void* self, void*, const char* text, const RECT* rectangle,
+    int font_slot, COLORREF color, int format, BOOL shadow) {
+    return draw_character_pane_text(self, text, rectangle, font_slot,
+        color, format, shadow, nullptr);
 }
 
 void publish_combat_font(void* interface_owner, std::uint64_t generation) {
@@ -19709,9 +20697,9 @@ void __fastcall hook_character_pane_stats(void* pane, void*, void* renderer) {
         return;
     }
     for (const auto& call : g_stats_text)
-        hook_character_pane_draw_text(call.surface, nullptr, call.text.c_str(),
+        draw_character_pane_text(call.surface, call.text.c_str(),
             call.has_rectangle ? &call.rectangle : nullptr, call.font_slot, call.color,
-            call.format, call.shadow);
+            call.format, call.shadow, call.has_font ? &call.font : nullptr);
 }
 
 bool install_character_pane_stats_throttle(std::uint8_t* image) noexcept {
@@ -19756,24 +20744,28 @@ bool write_stock_shadow_window(std::uint8_t* window, const std::uint8_t* bytes,
 // Both branches are verified before either is written, so the stock shadow
 // path is either fully skipped or left exactly as found.
 #if !defined(EID3D11_EMBEDDED)
+const std::array<StockShadowBranch,2>& stock_shadow_branches() noexcept {
+    return running_game_sites().report.engine == GameEngine::lia ? kLiaStockShadowBranches : kStockShadowBranches;
+}
+
 bool install_stock_shadow_suppression(std::uint8_t* image) noexcept {
     if (!image || g_stock_shadows_suppressed) return g_stock_shadows_suppressed;
-    std::array<std::array<std::uint8_t, 13>, kStockShadowBranches.size()> forced{};
-    for (std::size_t index = 0; index < kStockShadowBranches.size(); ++index) {
-        const auto& branch = kStockShadowBranches[index];
+    std::array<std::array<std::uint8_t, 13>, 2> forced{};
+    for (std::size_t index = 0; index < stock_shadow_branches().size(); ++index) {
+        const auto& branch = stock_shadow_branches()[index];
         std::memcpy(forced[index].data(), image + branch.context_rva, branch.size);
         if (!stock_shadow_branch_force(forced[index].data(), branch)) return false;
     }
     std::size_t written = 0;
-    for (; written < kStockShadowBranches.size(); ++written) {
-        const auto& branch = kStockShadowBranches[written];
+    for (; written < stock_shadow_branches().size(); ++written) {
+        const auto& branch = stock_shadow_branches()[written];
         if (!write_stock_shadow_window(image + branch.context_rva,
                                        forced[written].data(), branch.size)) break;
     }
-    if (written != kStockShadowBranches.size()) {
+    if (written != stock_shadow_branches().size()) {
         for (std::size_t index = 0; index < written; ++index)
-            write_stock_shadow_window(image + kStockShadowBranches[index].context_rva,
-                kStockShadowBranches[index].stock.data(), kStockShadowBranches[index].size);
+            write_stock_shadow_window(image + stock_shadow_branches()[index].context_rva,
+                stock_shadow_branches()[index].stock.data(), stock_shadow_branches()[index].size);
         return false;
     }
     g_stock_shadows_suppressed = true;
@@ -19784,7 +20776,7 @@ bool uninstall_stock_shadow_suppression(std::uint8_t* image) noexcept {
     if (!g_stock_shadows_suppressed) return true;
     if (!image) return false;
     bool restored = true;
-    for (const auto& branch : kStockShadowBranches) {
+    for (const auto& branch : stock_shadow_branches()) {
         auto* const window = image + branch.context_rva;
         if (stock_shadow_branch_forced(window, branch))
             restored &= write_stock_shadow_window(window, branch.stock.data(), branch.size);
@@ -19796,65 +20788,106 @@ bool uninstall_stock_shadow_suppression(std::uint8_t* image) noexcept {
 }
 #endif // !EID3D11_EMBEDDED
 
+struct CharacterPaneEntryContract {
+    std::uint32_t rva;
+    std::size_t bytes;
+    std::array<std::uint8_t, kCharacterPaneMaximumPatchBytes> stock;
+};
+struct CharacterPaneContract {
+    std::array<CharacterPaneEntryContract, kCharacterPaneHookCount> entries;
+    std::uint32_t virtual_rect;
+    std::uint32_t screen_size;
+    std::uint32_t draw_end;
+    std::uint32_t text_setup;
+    std::uint32_t text_call;
+    std::uint32_t getdc_return;
+    std::uint32_t releasedc_return;
+    std::uint32_t keyed_blt_return;
+    std::uint32_t unkeyed_blt_return;
+};
+const CharacterPaneContract& character_pane_contract() noexcept {
+    static constexpr CharacterPaneContract base{
+        {{{kCharacterPaneDrawRva,6,{{0x81,0xec,0x00,0x01,0x00,0x00}}},
+          {kCharacterPaneDrawTextRva,6,{{0x83,0xec,0x38,0x57,0x8b,0xf9}}},
+          {kCharacterPaneInterfaceInitRva,6,{{0x64,0xa1,0x00,0x00,0x00,0x00}}},
+          {kCharacterPaneInterfaceFiniRva,6,{{0x64,0xa1,0x00,0x00,0x00,0x00}}},
+          {kCharacterPaneSurfaceDrawRva,6,{{0x81,0xec,0x84,0x00,0x00,0x00}}}}},
+        kCharacterPaneVirtualToScreenRva,kCharacterPaneScreenToVirtualRva,
+        kCharacterPaneWideScreenDrawEndPatchRva,kCharacterPaneDrawTextTransformSetupRva,
+        kCharacterPaneDrawTextTransformCallRva,kCharacterPaneGetDcReturnRva,
+        kCharacterPaneReleaseDcReturnRva,kCharacterPaneKeyedBltReturnRva,
+        kCharacterPaneUnkeyedBltReturnRva};
+    static constexpr CharacterPaneContract lia{
+        {{{0x00175880,6,{{0x81,0xec,0x00,0x01,0x00,0x00}}},
+          {0x00134b30,6,{{0x83,0xec,0x28,0x57,0x8b,0xf9}}},
+          {0x00133150,7,{{0x6a,0xff,0x68,0x96,0x46,0x61,0x00}}},
+          {0x00130900,7,{{0x6a,0xff,0x68,0x28,0x42,0x61,0x00}}},
+          {}}}, // LiA keeps its verified direct-caller admission.
+        0x0012f220,0x0012f330,0x00176080,0x00134ba4,0x00134bac,
+        0x001346a2,0x00134a04,0x0011e77e,0x0011e77e};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
 struct CharacterPaneEntryPatch {
     std::uint8_t* entry = nullptr;
     const void* replacement = nullptr;
+    const CharacterPaneEntryContract* contract = nullptr;
 };
-
 #if !defined(EID3D11_EMBEDDED)
 std::array<CharacterPaneEntryPatch, kCharacterPaneHookCount>
 character_pane_entry_patches(std::uint8_t* image) noexcept {
-    return {{
-        {image + kCharacterPaneDrawRva,
-         reinterpret_cast<const void*>(&hook_character_pane_draw)},
-        {image + kCharacterPaneDrawTextRva,
-         reinterpret_cast<const void*>(&hook_character_pane_draw_text)},
-        {image + kCharacterPaneInterfaceInitRva,
-         reinterpret_cast<const void*>(&hook_character_pane_interface_init)},
-        {image + kCharacterPaneInterfaceFiniRva,
-         reinterpret_cast<const void*>(&hook_character_pane_interface_fini)},
-    }};
+    const auto& entries = character_pane_contract().entries;
+    const void* hooks[]{reinterpret_cast<const void*>(&hook_character_pane_draw),
+        reinterpret_cast<const void*>(&hook_character_pane_draw_text),
+        reinterpret_cast<const void*>(&hook_character_pane_interface_init),
+        reinterpret_cast<const void*>(&hook_character_pane_interface_fini),
+        reinterpret_cast<const void*>(&hook_character_pane_surface_draw)};
+    std::array<CharacterPaneEntryPatch, kCharacterPaneHookCount> patches{};
+    for (std::size_t i = 0; i < patches.size(); ++i)
+        patches[i] = {image + entries[i].rva, hooks[i], &entries[i]};
+    return patches;
 }
 
 
 bool character_pane_widescreen_chain(
     std::uint8_t* image, std::uint8_t* addon) noexcept {
+    const auto& contract = character_pane_contract();
     if (widescreen_interface_owned()) {
         return image && widescreen_info_draw_entry() &&
-            relative_jump_target(image+kCharacterPaneDrawRva)==widescreen_info_draw_entry() &&
-            relative_jump_target(image+kCharacterPaneVirtualToScreenRva)==widescreen_virtual_to_screen_rect() &&
-            std::memcmp(image+kCharacterPaneDrawTextTransformSetupRva,"\x31\xc9\x90",3u)==0 &&
-            relative_call_targets(image+kCharacterPaneDrawTextTransformCallRva,
-                                  image+kCharacterPaneVirtualToScreenRva);
+            relative_jump_target(image+contract.entries[0].rva)==widescreen_info_draw_entry() &&
+            relative_jump_target(image+contract.virtual_rect)==widescreen_virtual_to_screen_rect() &&
+            std::memcmp(image+contract.text_setup,"\x31\xc9\x90",3u)==0 &&
+            relative_call_targets(image+contract.text_call,
+                                  image+contract.virtual_rect) &&
+            (running_game_sites().report.engine != GameEngine::lia ||
+             relative_call_targets(image+0x00134c5b,
+                                   widescreen_screen_to_virtual_size()));
     }
     // Discovery verified the widescreen draw/transform code and globals.
     const AddonPaneLayout& pane = g_addon.layout.pane;
     if (!image || !addon || addon != g_addon.image || g_addon.layout.pane_failure)
         return false;
     return
-           relative_jump_target(image + kCharacterPaneDrawRva) ==
+           relative_jump_target(image + contract.entries[0].rva) ==
                addon + pane.draw_start &&
            relative_jump_target(
-               image + kCharacterPaneWideScreenDrawEndPatchRva) ==
+               image + contract.draw_end) ==
                addon + pane.draw_end &&
            relative_jump_target(
-               image + kCharacterPaneVirtualToScreenRva) ==
+               image + contract.virtual_rect) ==
                addon + pane.virtual_to_screen &&
-           std::memcmp(image + kCharacterPaneDrawTextTransformSetupRva,
+           std::memcmp(image + contract.text_setup,
                        "\x31\xc9\x90", 3u) == 0 &&
            relative_call_targets(
-               image + kCharacterPaneDrawTextTransformCallRva,
-               image + kCharacterPaneVirtualToScreenRva);
+               image + contract.text_call,
+               image + contract.virtual_rect);
 }
 #endif // !EID3D11_EMBEDDED
-
-constexpr std::uint8_t kCharacterPaneDrawStock[kCharacterPanePatchBytes] = {
-    0x81,0xec,0x00,0x01,0x00,0x00};
 
 #if !defined(EID3D11_EMBEDDED)
 bool character_pane_native_chain(std::uint8_t* image) noexcept {
     return image &&
-        std::memcmp(image + kCharacterPaneDrawRva, kCharacterPaneDrawStock,
+        std::memcmp(image + kCharacterPaneDrawRva,
+                    character_pane_contract().entries[0].stock.data(),
                     kCharacterPanePatchBytes) == 0 &&
         std::memcmp(image + kCharacterPaneWideScreenDrawEndPatchRva,
                     "\x8b\x84\x24\x10\x01\x00\x00", 7u) == 0 &&
@@ -19867,19 +20900,33 @@ bool character_pane_native_chain(std::uint8_t* image) noexcept {
 }
 #endif // !EID3D11_EMBEDDED
 
-// Common stock prologues after the pane draw entry.
-constexpr std::array<std::array<std::uint8_t, kCharacterPanePatchBytes>,
-                     kCharacterPaneHookCount - 1u> kCharacterPaneEntryStock{{
-    {{0x83,0xec,0x38,0x57,0x8b,0xf9}},
-    {{0x64,0xa1,0x00,0x00,0x00,0x00}},
-    {{0x64,0xa1,0x00,0x00,0x00,0x00}},
-}};
 #if !defined(EID3D11_EMBEDDED)
+struct CombatClientContract {
+    std::array<std::uint32_t,2> catalog;
+    std::uint32_t effects_call, effects_entry, effects_pre;
+    std::array<std::uint8_t,8> effects_prefix;
+};
+const CombatClientContract& combat_client_contract() noexcept {
+    static constexpr CombatClientContract base{{{0x003c8510,0x003c8514}},
+        0x00246aa7,0x00246b90,0x00246a9f,{{0x83,0xf8,0x03,0x75,0x08,0x57,0x8b,0xcb}}};
+    static constexpr CombatClientContract lia{{{0x002b8f80,0x002b8f84}},
+        0x00176013,0x00173070,0x0017600b,{{0x83,0xf8,0x03,0x75,0x08,0x57,0x8b,0xce}}};
+    return running_game_sites().report.engine==GameEngine::lia ? lia : base;
+}
+
 bool combat_values_contract(std::uint8_t* image) noexcept {
     if (!image) return false;
+    const auto engine=running_game_sites().report.engine;
+    if (engine==GameEngine::lia) {
+        for (const auto& range:kLiaCombatClientRanges)
+            if (!lia_live_contract_range_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return false;
+        return true;
+    }
+    if (engine!=GameEngine::base) return false;
     std::array<std::uint8_t, 6> begin{{0x8b,0x35,0,0,0,0}}, end{{0x8b,0x15,0,0,0,0}};
-    write_u32(begin, 2, loaded_address(image, 0x3c8510));
-    write_u32(end, 2, loaded_address(image, 0x3c8514));
+    write_u32(begin, 2, loaded_address(image, combat_client_contract().catalog[0]));
+    write_u32(end, 2, loaded_address(image, combat_client_contract().catalog[1]));
     return exact_span(image, 0x246cab, begin) && exact_span(image, 0x246c93, end) &&
         // CUnit::IsDead (primary table slot +0xdc). Death is replicated
         // independently of HP, including an already-dead unit on reload.
@@ -19895,6 +20942,15 @@ bool combat_values_contract(std::uint8_t* image) noexcept {
 }
 
 bool combat_server_contract(std::uint8_t* image) noexcept {
+    if (!image) return false;
+    if (running_game_sites().report.engine==GameEngine::lia) {
+        if (!unit_percepts_live_contract(image)) return false;
+        for (const auto& range:kLiaCombatServerRanges)
+            if (!lia_live_contract_range_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return false;
+        return true;
+    }
+    if (!base_layout_only()) return false;
     std::array<std::uint8_t, 7> mode{{0x83,0x3d,0,0,0,0,0x01}};
     std::array<std::uint8_t, 6> loaded{{0xa1,0,0,0,0,0xc3}};
     write_u32(mode, 2, loaded_address(image, 0x3b0098));
@@ -19921,6 +20977,14 @@ std::array<bool, 39> g_combat_stock_offensive{};
 
 #if !defined(EID3D11_EMBEDDED)
 bool combat_ai_contract(std::uint8_t* image) noexcept {
+    if (!image) return false;
+    if (running_game_sites().report.engine==GameEngine::lia) {
+        for (const auto& range:kLiaCombatAiRanges)
+            if (!lia_live_contract_range_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return false;
+        return true;
+    }
+    if (!base_layout_only()) return false;
     // The embedded AI owner selects a motivation independently of the short
     // attack/cast command. Its native getter returns only the selected target.
     return signature(image+0x15247d,{0x8d,0x8e,0x80,0x09,0x00,0x00,0xe8,0x28,0x2f,0x08,0x00}) &&
@@ -19939,8 +21003,9 @@ bool combat_ai_target(void* specific, void*& target) noexcept {
         void* logic=static_cast<std::uint8_t*>(specific)+0x980;
         using Type=int(__thiscall*)(void*);
         using Target=void*(__thiscall*)(void*);
-        if (reinterpret_cast<Type>(g_visual_game_image+0x1d5e10)(logic)!=4) return false;
-        target=reinterpret_cast<Target>(g_visual_game_image+0x1d5f20)(logic);
+        const bool lia=running_game_sites().report.engine==GameEngine::lia;
+        if (reinterpret_cast<Type>(g_visual_game_image+(lia?0x117970:0x1d5e10))(logic)!=4) return false;
+        target=reinterpret_cast<Target>(g_visual_game_image+(lia?0x1179b0:0x1d5f20))(logic);
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         combat_ui_set_status("Combat AI plates omitted: selected motivation is unavailable."); return false;
@@ -20019,7 +21084,15 @@ void publish_combat_amounts(void* unit,void* server,CombatUnitValue& value) noex
 }
 
 bool combat_cast_contract(std::uint8_t* game, std::uint8_t* addon) noexcept {
-    if (!game || !addon) return false;
+    if (!game) return false;
+    if (running_game_sites().report.engine==GameEngine::lia) {
+        for (const auto& range:kLiaCombatCastRanges)
+            if (!lia_live_contract_range_matches(game,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return false;
+        return true;
+    }
+    if (!base_layout_only()) return false;
+    if (!addon) return false;
     // Resolve the actual current spell (including quick wand/scroll slots).
     // Never manufacture a CSpell receiver from an effect ID.
     const std::array<std::uint8_t, 94> getter{{
@@ -20063,8 +21136,13 @@ bool combat_offensive_cast(void* specific, std::size_t slot_offset) noexcept {
     int slot=0; if (!visual_read(specific,slot_offset,slot)) return false;
     __try {
         using GetSpell = void* (__thiscall*)(void*,int);
-        void* spell=reinterpret_cast<GetSpell>(g_visual_game_image+0x14b880)(specific,slot);
+        const bool lia=running_game_sites().report.engine==GameEngine::lia;
+        void* spell=reinterpret_cast<GetSpell>(g_visual_game_image+(lia?0xbe450:0x14b880))(specific,slot);
         if (!spell) return false;
+        if (lia) {
+            using Offensive=bool(__thiscall*)(void*);
+            return reinterpret_cast<Offensive>(g_visual_game_image+0x1a73a0)(spell);
+        }
         std::uint16_t type=0; std::uint8_t selfcast=0;
         const auto& combat=g_addon.layout.combat;
         if (!visual_read(spell,0x1a,type) || !visual_read(g_addon.image,combat.selfcast_enabled,selfcast)) return false;
@@ -20077,18 +21155,22 @@ bool combat_offensive_cast(void* specific, std::size_t slot_offset) noexcept {
 }
 
 void* combat_server_unit(std::int32_t id) noexcept {
+    if (!g_combat_server_ready) return nullptr;
     auto* const image = g_visual_game_image;
-    auto* const world = image + 0x3aff60;
+    const auto& sites=server_state_contract().units;
+    auto* const world = image + sites.world;
     void* table = nullptr; int mode = 0, loaded = 0;
     const void* begin = nullptr; const void* end = nullptr;
-    if (!g_combat_server_ready || !visual_read(world, 0, table) || table != image + 0x33f928 ||
+    if (!visual_read(world, 0, table) || table != image + sites.world_table ||
         !visual_read(world, 0x138, mode) || mode != 1 || !visual_read(world, 0x15c, loaded) || !loaded ||
+        // This span contains hash buckets; native lookup divides by its count.
         !visual_read(world, 0x12d74, begin) || !visual_read(world, 0x12d78, end) || !begin ||
         reinterpret_cast<std::uintptr_t>(end) <= reinterpret_cast<std::uintptr_t>(begin)) return nullptr;
     void* object = nullptr;
     __try {
         using Lookup = void* (__thiscall*)(void*, std::int32_t);
-        object = reinterpret_cast<Lookup>(image + 0x15fb00)(world, id);
+        object = reinterpret_cast<Lookup>(image +
+            (running_game_sites().report.engine==GameEngine::lia?kLiaVisualWorldUnitRva:0x15fb00))(world, id);
     } __except(EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
     return object;
 }
@@ -20098,7 +21180,9 @@ void publish_combat_catalog() noexcept {
     std::uint32_t variant=0;
     if(!read_hud_overlay_variant(variant))return;
     const void* begin = nullptr; const void* end = nullptr;
-    if (!visual_read(g_visual_game_image, 0x3c8510, begin) || !visual_read(g_visual_game_image, 0x3c8514, end)) return;
+    const auto& sites=combat_client_contract();
+    if (!visual_read(g_visual_game_image, sites.catalog[0], begin) ||
+        !visual_read(g_visual_game_image, sites.catalog[1], end)) return;
     const auto first = reinterpret_cast<std::uintptr_t>(begin), last = reinterpret_cast<std::uintptr_t>(end);
     if (!first || last <= first || (last-first) % 0x84 || (last-first) / 0x84 > 65536) return;
     std::array<CombatEffectDefinition, 256> catalog{};
@@ -20124,12 +21208,12 @@ void publish_combat_catalog() noexcept {
 void publish_combat_unit(void* object, std::int32_t id, std::uint64_t incarnation,bool force) noexcept {
     if (!g_hud_active_screen || !g_visual_game_image || !incarnation || (!force && !combat_ui_has_output())) return;
     if (!g_combat_values_checked) {
-        g_combat_values_ready = combat_values_contract(g_visual_game_image);
+        g_combat_values_ready = g_combat_values_ready || combat_values_contract(g_visual_game_image);
         g_combat_server_ready = combat_server_contract(g_visual_game_image);
         g_combat_portraits_ready = widescreen_interface_owned();
-        g_combat_cast_ready = combat_cast_contract(g_visual_game_image,g_hud_visual_addon_image);
-        g_combat_ai_ready = combat_ai_contract(g_visual_game_image);
-        g_combat_amounts_ready = combat_amounts_contract(g_visual_game_image);
+        g_combat_cast_ready = g_combat_server_ready && combat_cast_contract(g_visual_game_image,g_hud_visual_addon_image);
+        g_combat_ai_ready = g_combat_server_ready && combat_ai_contract(g_visual_game_image);
+        g_combat_amounts_ready = base_layout_only() && combat_amounts_contract(g_visual_game_image);
         g_combat_values_checked = true;
         combat_ui_set_status(!g_combat_values_ready ? "Combat UI unavailable: effect/health contract mismatch." :
             !g_combat_server_ready ? "Portrait effects ready; combat healthplate contract is unavailable." :
@@ -20139,8 +21223,9 @@ void publish_combat_unit(void* object, std::int32_t id, std::uint64_t incarnatio
             "Active combat AI / attack / offensive cast participants; game-owned health and effect timers.");
         append_bridge_event("combat_ui_contract", g_combat_values_ready ? "effects_ready" : "effects_rejected", true);
         if (!g_combat_amounts_ready)
-            append_bridge_event("combat_effect_values_omitted",g_addon.layout.effect_value_failure ?
-                g_addon.layout.effect_value_failure : "Live spell-value owner mismatch.",true);
+            append_bridge_event("combat_effect_values_omitted",running_game_sites().report.engine==GameEngine::lia ?
+                "LiA native effects display icons/timers; addon numeric amounts are unavailable." :
+                g_addon.layout.effect_value_failure ? g_addon.layout.effect_value_failure : "Live spell-value owner mismatch.",true);
     }
     if (!g_combat_values_ready) return;
     publish_combat_catalog();
@@ -20162,12 +21247,12 @@ void publish_combat_unit(void* object, std::int32_t id, std::uint64_t incarnatio
     void* server = combat_server_unit(id); void* specific = nullptr; void* owner = nullptr; void* table = nullptr;
     publish_combat_amounts(object,server,value);
     if (!value.dead && health>0 && server && visual_read(server, 0x240, specific) && specific &&
-        visual_read(specific, 0, table) && table == g_visual_game_image+0x33ef38 &&
+        visual_read(specific, 0, table) && table == g_visual_game_image+server_state_contract().units.unit_specific_table &&
         visual_read(specific, 0x1c, owner) && owner == server) {
         unsigned targets=0;
         const auto add_target=[&](void* target) {
             std::int32_t target_id=0;
-            if (!target || !visual_read(target,0,table) || table!=g_visual_game_image+kObjectSupportedPrimaryVtableRva ||
+            if (!target || !visual_read(target,0,table) || table!=g_visual_game_image+server_state_contract().units.unit_table ||
                 !visual_read(target,0x0c,target_id) || !target_id) return;
             for (unsigned n=0;n<targets;++n) if (value.attack_targets[n]==target_id) return;
             value.attack_targets[targets++]=target_id;
@@ -20211,16 +21296,24 @@ void publish_combat_portraits() noexcept {
 
 bool character_pane_live_contract(
     std::uint8_t* image, std::uint8_t* addon) noexcept {
+    const bool lia = running_game_sites().report.engine == GameEngine::lia;
+    if (lia && (addon || !widescreen_interface_owned())) return false;
     if (addon || widescreen_interface_owned()
             ? !character_pane_widescreen_chain(image,addon)
             : !character_pane_native_chain(image)) return false;
-    const std::array<std::uint32_t, kCharacterPaneHookCount - 1u> rvas{{
-        kCharacterPaneDrawTextRva,
-        kCharacterPaneInterfaceInitRva, kCharacterPaneInterfaceFiniRva}};
-    for (std::size_t index = 0; index < rvas.size(); ++index)
-        if (!hook_entry_usable(image + rvas[index], kCharacterPaneEntryStock[index].data(),
-                               kCharacterPanePatchBytes, kCharacterPanePatchBytes))
+    const auto& entries = character_pane_contract().entries;
+    for (std::size_t index = 1; index < kCharacterPaneSurfaceDrawHook; ++index)
+        if (!hook_entry_usable(image + entries[index].rva, entries[index].stock.data(),
+                               entries[index].bytes, entries[index].bytes))
             return false;
+    if (lia) {
+        for (const auto& range : kLiaCharacterPaneTextRanges)
+            if (!lia_live_contract_range_matches(image,
+                    static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]), range[2]))
+                return false;
+        return true;
+    }
     const std::array<std::pair<std::uint32_t,
                               std::array<std::uint8_t, 3>>, 3> calls{{
         {0x001fdc24u, {{0xff,0x51,0x44}}},
@@ -20246,21 +21339,32 @@ bool install_character_pane_text_hooks_from_chain(
     std::uint8_t* image, std::uint8_t* addon) noexcept {
     g_character_pane_install_detail = "invalid_game_or_already_installed";
     if (!image || g_character_pane_hooks_installed) return false;
+    const auto& surface_draw =
+        character_pane_contract().entries[kCharacterPaneSurfaceDrawHook];
+    // Base only: this owner must still be the exact native Draw, not an
+    // unverified entry detour. LiA retains its existing direct-caller route.
+    if (surface_draw.bytes &&
+        std::memcmp(image + surface_draw.rva, surface_draw.stock.data(),
+                    surface_draw.bytes) != 0) {
+        g_character_pane_install_detail = "native_surface_draw_entry_mismatch";
+        return false;
+    }
     if (!character_pane_live_contract(image, addon)) {
         g_character_pane_install_detail = "live_text_transaction_mismatch";
         return false;
     }
     const auto patches = character_pane_entry_patches(image);
     for (std::size_t index = 0; index < patches.size(); ++index) {
+        if (!patches[index].contract->bytes) continue;
         std::memcpy(g_character_pane_original[index].data(),
-                    patches[index].entry, kCharacterPanePatchBytes);
+                    patches[index].entry, patches[index].contract->bytes);
         g_character_pane_trampolines[index] = nullptr;
         if (index == 0u && (addon || widescreen_interface_owned())) continue;
-        const auto* stock = index == 0u ? kCharacterPaneDrawStock
-            : kCharacterPaneEntryStock[index - 1u].data();
+        const auto& entry = *patches[index].contract;
+        const auto* stock = entry.stock.data();
         g_character_pane_trampolines[index] = make_entry_forwarder(
             patches[index].entry, stock,
-            kCharacterPanePatchBytes, kCharacterPanePatchBytes);
+            entry.bytes, entry.bytes);
         if (!g_character_pane_trampolines[index]) {
             for (void*& trampoline : g_character_pane_trampolines) {
                 if (trampoline) VirtualFree(trampoline, 0, MEM_RELEASE);
@@ -20274,6 +21378,8 @@ bool install_character_pane_text_hooks_from_chain(
         ? const_cast<void*>(widescreen_info_draw_entry())
         : addon ? static_cast<void*>(addon+g_addon.layout.pane.draw_start)
                 : g_character_pane_trampolines[0]);
+    g_character_pane_surface_draw = reinterpret_cast<CharacterPaneSurfaceDrawFn>(
+        g_character_pane_trampolines[kCharacterPaneSurfaceDrawHook]);
     g_character_pane_text_surface_local = addon || widescreen_interface_owned();
     g_character_pane_draw_text = reinterpret_cast<CharacterPaneDrawTextFn>(
         g_character_pane_trampolines[1]);
@@ -20285,40 +21391,44 @@ bool install_character_pane_text_hooks_from_chain(
             g_character_pane_trampolines[3]);
     g_character_pane_virtual_to_screen =
         reinterpret_cast<CharacterPaneRectTransformFn>(
-            image + kCharacterPaneVirtualToScreenRva);
+            image + character_pane_contract().virtual_rect);
     g_character_pane_screen_to_virtual =
         reinterpret_cast<CharacterPaneSizeTransformFn>(
-            image + kCharacterPaneScreenToVirtualRva);
+            running_game_sites().report.engine == GameEngine::lia
+                ? const_cast<void*>(widescreen_screen_to_virtual_size())
+                : image+character_pane_contract().screen_size);
     g_character_pane_game_image = image;
 
     std::size_t patched = 0;
     for (; patched < patches.size(); ++patched) {
+        if (!patches[patched].contract->bytes) continue;
         DWORD previous = 0;
         if (!VirtualProtect(
-                patches[patched].entry, kCharacterPanePatchBytes,
+                patches[patched].entry, patches[patched].contract->bytes,
                 PAGE_EXECUTE_READWRITE, &previous))
             break;
         const bool wrote = write_relative_jump(
             patches[patched].entry, patches[patched].replacement);
         if (wrote)
             std::memset(patches[patched].entry + 5u, 0x90,
-                        kCharacterPanePatchBytes - 5u);
+                        patches[patched].contract->bytes - 5u);
         DWORD ignored = 0;
-        VirtualProtect(patches[patched].entry, kCharacterPanePatchBytes,
+        VirtualProtect(patches[patched].entry, patches[patched].contract->bytes,
                        previous, &ignored);
         FlushInstructionCache(
             GetCurrentProcess(), patches[patched].entry,
-            kCharacterPanePatchBytes);
+            patches[patched].contract->bytes);
         if (!wrote) break;
     }
     if (patched != patches.size()) {
         bool restored = true;
         while (patched) {
             --patched;
+            if (!patches[patched].contract->bytes) continue;
             restored = restore_inline_entry(
                            patches[patched].entry,
                            g_character_pane_original[patched].data(),
-                           kCharacterPanePatchBytes) && restored;
+                           patches[patched].contract->bytes) && restored;
         }
         if (!restored) {
             g_character_pane_hooks_installed = true;
@@ -20331,6 +21441,7 @@ bool install_character_pane_text_hooks_from_chain(
             trampoline = nullptr;
         }
         g_character_pane_draw = nullptr;
+        g_character_pane_surface_draw = nullptr;
         g_character_pane_draw_text = nullptr;
         g_character_pane_interface_init = nullptr;
         g_character_pane_interface_fini = nullptr;
@@ -20357,10 +21468,14 @@ bool install_character_pane_text_hooks(std::uint8_t* image) noexcept {
     }
     const bool ready=install_character_pane_text_hooks_from_chain(image,widescreen_interface_owned() ? nullptr : addon);
     if (ready) {
-        auto* site=image+0x246aa7;
+        const auto& sites=combat_client_contract();
+        const bool lia=running_game_sites().report.engine==GameEngine::lia;
+        if (lia && !g_combat_values_ready) g_combat_values_ready=combat_values_contract(image);
+        auto* site=image+sites.effects_call;
         const auto hook=reinterpret_cast<const void*>(&hook_character_pane_effects);
-        const bool contract=signature(image+0x246a9f,{0x83,0xf8,0x03,0x75,0x08,0x57,0x8b,0xcb}) &&
-            signature(site,{0xe8,0xe4,0x00,0x00,0x00}) && relative_call_fits(site,hook);
+        const bool contract=(!lia || g_combat_values_ready) &&
+            exact_span(image,sites.effects_pre,sites.effects_prefix) &&
+            relative_call_targets(site,image+sites.effects_entry) && relative_call_fits(site,hook);
         DWORD protection=0;
         if (contract && VirtualProtect(site,5,PAGE_EXECUTE_READWRITE,&protection)) {
             std::memcpy(g_character_pane_effects_original.data(),site,5);
@@ -20377,7 +21492,7 @@ bool uninstall_character_pane_text_hooks() noexcept {
     if (!g_character_pane_hooks_installed) return true;
     if (!g_character_pane_game_image) return false;
     if (g_character_pane_effects_installed) {
-        auto* site=g_character_pane_game_image+0x246aa7;
+        auto* site=g_character_pane_game_image+combat_client_contract().effects_call;
         if (!relative_call_targets(site,reinterpret_cast<const void*>(&hook_character_pane_effects)) ||
             !restore_inline_entry(site,g_character_pane_effects_original.data(),5)) return false;
         g_character_pane_effects_installed=false;
@@ -20385,20 +21500,22 @@ bool uninstall_character_pane_text_hooks() noexcept {
     const auto patches = character_pane_entry_patches(
         g_character_pane_game_image);
     for (std::size_t index = 0; index < patches.size(); ++index)
-        if (relative_jump_target(patches[index].entry) !=
+        if (patches[index].contract->bytes &&
+            relative_jump_target(patches[index].entry) !=
                 patches[index].replacement &&
             std::memcmp(patches[index].entry,
                         g_character_pane_original[index].data(),
-                        kCharacterPanePatchBytes) != 0)
+                        patches[index].contract->bytes) != 0)
             return false;
     for (std::size_t remaining = patches.size(); remaining; --remaining) {
         const std::size_t index = remaining - 1u;
+        if (!patches[index].contract->bytes) continue;
         if (relative_jump_target(patches[index].entry) ==
                 patches[index].replacement &&
             !restore_inline_entry(
                 patches[index].entry,
                 g_character_pane_original[index].data(),
-                kCharacterPanePatchBytes))
+                patches[index].contract->bytes))
             return false;
     }
     for (void*& trampoline : g_character_pane_trampolines) {
@@ -20408,6 +21525,8 @@ bool uninstall_character_pane_text_hooks() noexcept {
     retire_character_pane_text();
     g_character_pane_text_stack = {};
     g_character_pane_draw = nullptr;
+    g_character_pane_surface_draw = nullptr;
+    g_character_pane_surface_draw_self = nullptr;
     g_character_pane_draw_text = nullptr;
     g_character_pane_interface_init = nullptr;
     g_character_pane_interface_fini = nullptr;
@@ -20484,19 +21603,39 @@ void __fastcall hook_chat_draw2d(void* self, void*) {
 }
 #endif // !EID3D11_EMBEDDED
 
-constexpr std::uint8_t kChatNewPhraseStock[kChatNewPhrasePatchBytes] = {
-    0x6a,0xff,0x68,0x24,0x8f,0x72,0x00};
-constexpr std::uint8_t kChatDraw2DStock[kChatDraw2DPatchBytes] = {
-    0x53,0x8b,0xd9,0x56,0x8b,0x83,0x48,0x01,0x00,0x00};
+struct ChatContract {
+    std::uint32_t new_phrase, draw;
+    std::size_t draw_bytes;
+    std::array<std::uint8_t,kChatNewPhrasePatchBytes> phrase_prefix;
+    std::array<std::uint8_t,kChatDraw2DPatchBytes> draw_prefix;
+};
+const ChatContract& chat_contract() noexcept {
+    static constexpr ChatContract base{kChatNewPhraseRva,kChatDraw2DRva,kChatDraw2DPatchBytes,
+        {{0x6a,0xff,0x68,0x24,0x8f,0x72,0x00}},
+        {{0x53,0x8b,0xd9,0x56,0x8b,0x83,0x48,0x01,0x00,0x00}}};
+    static constexpr ChatContract lia{0x00120810,0x0011ff30,9,
+        {{0x6a,0xff,0x68,0x64,0x39,0x61,0x00}},
+        {{0x53,0x8b,0xd9,0x8b,0x83,0x48,0x01,0x00,0x00,0}}};
+    return running_game_sites().report.engine==GameEngine::lia ? lia : base;
+}
 
 #if !defined(EID3D11_EMBEDDED)
 void __fastcall hook_item_card_clear(void* self, void*);
 
 bool chat_live_contract(const std::uint8_t* image) noexcept {
-    return hook_entry_usable(image + kChatNewPhraseRva, kChatNewPhraseStock,
-                             kChatNewPhrasePatchBytes, kChatNewPhrasePatchBytes) &&
-        hook_entry_usable(image + kChatDraw2DRva, kChatDraw2DStock,
-                          kChatDraw2DPatchBytes, kChatDraw2DPatchBytes) &&
+    if (!image) return false;
+    const auto& sites=chat_contract();
+    if (!hook_entry_usable(image+sites.new_phrase,sites.phrase_prefix.data(),
+            kChatNewPhrasePatchBytes,kChatNewPhrasePatchBytes) ||
+        !hook_entry_usable(image+sites.draw,sites.draw_prefix.data(),sites.draw_bytes,sites.draw_bytes)) return false;
+    if (running_game_sites().report.engine==GameEngine::lia) {
+        if (!bridge_camp_draw_text_matches() || !bridge_camp_surface_clear_matches()) return false;
+        for (const auto& range:kLiaChatRanges)
+            if (!lia_live_contract_range_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return false;
+        return true;
+    }
+    return base_layout_only() &&
         // NewPhrase line fill: GetDC, Clear, DrawText x2, ReleaseDC.
         relative_call_targets(image + 0x001e2fa0u, image + 0x001fdc00u) &&
         relative_call_targets(image + 0x001e2fa7u, image + 0x001fe2f0u) &&
@@ -20549,15 +21688,16 @@ bool install_chat_text_hooks(std::uint8_t* image) noexcept {
         g_chat_install_detail = "live_chat_producer_mismatch";
         return false;
     }
-    auto* new_phrase = image + kChatNewPhraseRva;
-    auto* draw2d = image + kChatDraw2DRva;
+    const auto& sites=chat_contract();
+    auto* new_phrase = image + sites.new_phrase;
+    auto* draw2d = image + sites.draw;
     std::memcpy(g_chat_new_phrase_original.data(), new_phrase,
                 kChatNewPhrasePatchBytes);
-    std::memcpy(g_chat_draw2d_original.data(), draw2d, kChatDraw2DPatchBytes);
+    std::memcpy(g_chat_draw2d_original.data(), draw2d, sites.draw_bytes);
     g_chat_trampolines[0] = make_entry_forwarder(
-        new_phrase, kChatNewPhraseStock, kChatNewPhrasePatchBytes, kChatNewPhrasePatchBytes);
+        new_phrase, sites.phrase_prefix.data(), kChatNewPhrasePatchBytes, kChatNewPhrasePatchBytes);
     g_chat_trampolines[1] = make_entry_forwarder(
-        draw2d, kChatDraw2DStock, kChatDraw2DPatchBytes, kChatDraw2DPatchBytes);
+        draw2d, sites.draw_prefix.data(), sites.draw_bytes, sites.draw_bytes);
     if (!g_chat_trampolines[0] || !g_chat_trampolines[1]) {
         release_chat_trampolines();
         g_chat_install_detail = "trampoline_allocation_failed";
@@ -20571,7 +21711,7 @@ bool install_chat_text_hooks(std::uint8_t* image) noexcept {
         g_chat_install_detail = "patch_transaction_rejected";
         return false;
     }
-    if (!write_chat_entry(draw2d, kChatDraw2DPatchBytes,
+    if (!write_chat_entry(draw2d, sites.draw_bytes,
                           reinterpret_cast<const void*>(&hook_chat_draw2d))) {
         if (!restore_forwarding_hook(new_phrase,g_chat_new_phrase_original.data(),
                 kChatNewPhrasePatchBytes,reinterpret_cast<const void*>(&hook_chat_new_phrase),false,"chat.install_rollback")) {
@@ -20595,12 +21735,13 @@ bool install_chat_text_hooks(std::uint8_t* image) noexcept {
 bool uninstall_chat_text_hooks() noexcept {
     if (!g_chat_hooks_installed) return true;
     if (!g_character_pane_game_image) return false;
-    auto* new_phrase = g_character_pane_game_image + kChatNewPhraseRva;
-    auto* draw2d = g_character_pane_game_image + kChatDraw2DRva;
+    const auto& sites=chat_contract();
+    auto* new_phrase = g_character_pane_game_image + sites.new_phrase;
+    auto* draw2d = g_character_pane_game_image + sites.draw;
     if (!restore_forwarding_hook(new_phrase,g_chat_new_phrase_original.data(),
             kChatNewPhrasePatchBytes,reinterpret_cast<const void*>(&hook_chat_new_phrase),false,"chat.new_phrase") ||
         !restore_forwarding_hook(draw2d,g_chat_draw2d_original.data(),
-            kChatDraw2DPatchBytes,reinterpret_cast<const void*>(&hook_chat_draw2d),false,"chat.draw2d")) return false;
+            sites.draw_bytes,reinterpret_cast<const void*>(&hook_chat_draw2d),false,"chat.draw2d")) return false;
     release_chat_trampolines();
     g_chat_text_frames.clear();
     g_chat_text_ui_epoch = 0;
@@ -20741,10 +21882,23 @@ bool install_item_card_text_hooks(std::uint8_t* image) noexcept {
     if (!image || g_item_card_hooks_installed || !g_character_pane_hooks_installed ||
         image != g_character_pane_game_image)
         return false;
-    auto* clear = image + kItemCardClearRva;
+    const auto& sites=item_card_clear_contract();
+    auto* clear = image + sites.entry;
+    if (running_game_sites().report.engine==GameEngine::lia) {
+        for (const auto& range:kLiaItemCardRanges)
+            if (!lia_live_contract_range_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) {
+                g_item_card_install_detail="lia_item_card_transaction_mismatch";
+                return false;
+            }
+        if (!bridge_camp_surface_clear_matches()) {
+            g_item_card_install_detail="clear_entry_owner_mismatch";
+            return false;
+        }
+    }
     std::memcpy(g_item_card_clear_original.data(), clear, kItemCardClearPatchBytes);
     g_item_card_trampoline = make_entry_forwarder(
-        clear, kItemCardClearStock, kItemCardClearPatchBytes, kItemCardClearPatchBytes);
+        clear, sites.prefix.data(), kItemCardClearPatchBytes, kItemCardClearPatchBytes);
     if (!g_item_card_trampoline) {
         g_item_card_install_detail = "clear_entry_owner_mismatch";
         return false;
@@ -20771,7 +21925,7 @@ bool install_item_card_text_hooks(std::uint8_t* image) noexcept {
 bool uninstall_item_card_text_hooks() noexcept {
     if (!g_item_card_hooks_installed) return true;
     if (!g_character_pane_game_image) return false;
-    if (!restore_forwarding_hook(g_character_pane_game_image + kItemCardClearRva,
+    if (!restore_forwarding_hook(g_character_pane_game_image + item_card_clear_contract().entry,
             g_item_card_clear_original.data(), kItemCardClearPatchBytes,
             reinterpret_cast<const void*>(&hook_item_card_clear), false,
             "item_card.clear")) return false;
@@ -20837,21 +21991,23 @@ bool restore_terrain_set_light_calls_if_owned(
 
 bool install_native_geometry_hook(std::uint8_t* image) {
     if (!native_tl_requested()) return false;
-    auto* entry = image + kNativeGeometryEntryRva;
-    auto* animated_texture_entry = image + kFigureAnimatedTextureEntryRva;
-    auto* string_construct_entry = image + kEngineStringConstructRva;
-    auto* string_assign_entry = image + kEngineStringAssignRangeRva;
-    auto* string_destroy_entry = image + kEngineStringDestroyRva;
-    static const std::uint8_t kStock[] = {0x55,0x8b,0xec,0x83,0xec,0x14};
-    static_assert(sizeof(kStock) == kNativeGeometryPatchBytes);
-    if (!hook_entry_usable(entry, kStock, sizeof(kStock), kNativeGeometryPatchBytes) ||
-        !signature(animated_texture_entry, {0x56,0x8b,0xf1,0x57,0x8b,0x7e,0x1c}) ||
-        !signature(string_construct_entry, {0x8b,0x54,0x24,0x04,0x8b,0xc1,0x33,0xc9}) ||
-        !signature(string_assign_entry, {0x83,0xec,0x0c,0x53,0x55}) ||
-        !signature(string_destroy_entry, {0x8b,0x01,0x8b,0x49,0x08,0x2b,0xc8}))
+    const auto& contract = native_geometry_contract();
+    auto* entry = image + contract.entry_rva;
+    auto* animated_texture_entry = image + contract.animation_rva;
+    auto* string_construct_entry = image + contract.construct_rva;
+    auto* string_assign_entry = contract.assign_rva ? image + contract.assign_rva : nullptr;
+    auto* string_destroy_entry = image + contract.destroy_rva;
+    if (!hook_entry_usable(entry,contract.prefix.data(),contract.prefix.size(),kNativeGeometryPatchBytes) ||
+        !signature(animated_texture_entry, {0x56,0x8b,0xf1,0x57,0x8b,0x7e,0x1c}))
         return false;
+    if (contract.text_constructor) {
+        if (!object_suffix_live_code_matches(image,contract.construct_rva,0x82u,0x96e857cddbc34f86ull) ||
+            !signature(string_destroy_entry,{0x8b,0x11,0x8b,0x41,0x08,0x2b,0xc2})) return false;
+    } else if (!signature(string_construct_entry,{0x8b,0x54,0x24,0x04,0x8b,0xc1,0x33,0xc9}) ||
+        !signature(string_assign_entry,{0x83,0xec,0x0c,0x53,0x55}) ||
+        !signature(string_destroy_entry,{0x8b,0x01,0x8b,0x49,0x08,0x2b,0xc8})) return false;
 
-    auto* trampoline = make_entry_forwarder(entry, kStock, sizeof(kStock),
+    auto* trampoline = make_entry_forwarder(entry,contract.prefix.data(),contract.prefix.size(),
                                             kNativeGeometryPatchBytes);
     if (!trampoline) return false;
     std::memcpy(g_native_geometry_original.data(), entry, kNativeGeometryPatchBytes);
@@ -20875,10 +22031,11 @@ bool install_native_geometry_hook(std::uint8_t* image) {
     g_native_geometry = reinterpret_cast<NativeGeometryFn>(trampoline);
     g_figure_animated_texture = reinterpret_cast<FigureAnimatedTextureFn>(
         animated_texture_entry);
-    g_engine_string_construct = reinterpret_cast<EngineStringConstructFn>(
-        string_construct_entry);
-    g_engine_string_assign_range = reinterpret_cast<EngineStringAssignRangeFn>(
-        string_assign_entry);
+    g_engine_string_text_construct = contract.text_constructor
+        ? reinterpret_cast<EngineStringTextConstructFn>(string_construct_entry) : nullptr;
+    g_engine_string_construct = contract.text_constructor ? nullptr
+        : reinterpret_cast<EngineStringConstructFn>(string_construct_entry);
+    g_engine_string_assign_range = reinterpret_cast<EngineStringAssignRangeFn>(string_assign_entry);
     g_engine_string_destroy = reinterpret_cast<EngineStringDestroyFn>(
         string_destroy_entry);
     g_native_geometry_installed = true;
@@ -20887,7 +22044,7 @@ bool install_native_geometry_hook(std::uint8_t* image) {
 
 void uninstall_native_geometry_hook(std::uint8_t* image) {
     if (!g_native_geometry_installed || !image) return;
-    auto* entry = image + kNativeGeometryEntryRva;
+    auto* entry = image + native_geometry_contract().entry_rva;
     bool owns_entry = false;
     if (entry[0] == 0xe9) {
         std::int32_t relative = 0;
@@ -20911,6 +22068,7 @@ void uninstall_native_geometry_hook(std::uint8_t* image) {
     g_native_geometry = nullptr;
     g_figure_animated_texture = nullptr;
     g_engine_string_construct = nullptr;
+    g_engine_string_text_construct = nullptr;
     g_engine_string_assign_range = nullptr;
     g_engine_string_destroy = nullptr;
     g_native_geometry_installed = false;
@@ -20957,8 +22115,8 @@ bool executable_address(const void* address) noexcept {
 
 // This is a finite patch contract for the supported pair of images. It is
 // deliberately not a detour decoder: an unknown active chain rejects the set.
-constexpr std::size_t kVisualProducerEntries = 30;
-constexpr std::size_t kVisualProducerPatches = kVisualProducerEntries + 3;
+constexpr std::size_t kVisualProducerEntries = 32;
+constexpr std::size_t kVisualProducerPatches = kVisualProducerEntries + 4;
 struct VisualProducerPatch {
     std::uint8_t* entry;
     const void* hook;
@@ -21082,13 +22240,44 @@ std::array<VisualProducerPatch, kVisualProducerPatches> visual_producer_patches(
         // CObject3DClientSpecific::Select: ret 4, then alignment NOPs.
         {game+0x11c9d0, reinterpret_cast<const void*>(&hook_visual_select), 5,
             {0xc2,0x04,0x00,0x90,0x90}},
+        {}, // stock hero equipment refresh; addon keeps its existing owners
+        {}, // stock hero model refresh
         {game+0x3999, reinterpret_cast<const void*>(&visual_virtual_create_adapter), 7,
             {0x8b,0x13,0x8b,0xcb,0xff,0x52,0x08}, SIZE_MAX, true},
         {game+0x10ed5c, reinterpret_cast<const void*>(&visual_posrot_read_adapter), 5,
             {0xe8,0x9f,0xf2,0xf6,0xff}, SIZE_MAX, true},
         {game+0x268067, reinterpret_cast<const void*>(&visual_initial_create_data_adapter), 5,
-            {0xff,0x52,0x5c,0x8b,0xe8}, SIZE_MAX, true}
+            {0xff,0x52,0x5c,0x8b,0xe8}, SIZE_MAX, true},
+        {} // LiA's second virtual-create caller; unused by the base profile.
     }};
+    if (running_game_sites().report.engine == GameEngine::lia) {
+        if (addon) return {}; // This fingerprint has no appearance-owning addon.
+        patches[35] = patches[32];
+        for (std::size_t i=0; i<patches.size(); ++i) {
+            const auto& site=kLiaVisualProducerSites[i];
+            if (!site.rva) { patches[i]={}; continue; }
+            patches[i].entry=game+site.rva;
+            patches[i].size=site.bytes;
+            patches[i].expected=site.stock;
+            // Relocate only the verified PUSH handler in these SEH prefixes.
+            if (site.stock[0]==0x6a && site.stock[1]==0xff && site.stock[2]==0x68) {
+                std::uint32_t handler=0;
+                std::memcpy(&handler,site.stock.data()+3,4);
+                write_u32(patches[i].expected,3,loaded_address(game,handler-0x400000));
+            }
+        }
+        patches[12].hook=reinterpret_cast<const void*>(&hook_visual_change_weapon);
+        patches[17].hook=reinterpret_cast<const void*>(&hook_visual_load_textures);
+        patches[20].hook=reinterpret_cast<const void*>(&hook_visual_stock_compose);
+        patches[21].hook=reinterpret_cast<const void*>(&lia_visual_shadow_visible_adapter);
+        patches[22].hook=reinterpret_cast<const void*>(&lia_visual_shadow_invisible_adapter);
+        patches[30].hook=reinterpret_cast<const void*>(&hook_visual_refresh_equipment);
+        patches[31].hook=reinterpret_cast<const void*>(&hook_visual_refresh_model);
+        patches[32].hook=patches[35].hook=
+            reinterpret_cast<const void*>(&lia_visual_virtual_create_adapter);
+        patches[33].hook=reinterpret_cast<const void*>(&lia_visual_posrot_read_adapter);
+        return patches;
+    }
     // Absolute SEH immediates use the verified image's load address.
     write_u32(patches[5].expected, 3, loaded_address(game,0x31d758));
     write_u32(patches[9].expected, 3, loaded_address(game,0x31d628));
@@ -21110,6 +22299,14 @@ std::array<VisualProducerPatch, kVisualProducerPatches> visual_producer_patches(
         // Its entry is observed for the layer list only (material classes).
         patches[20] = {game+kVisualStockComposeRva,
             reinterpret_cast<const void*>(&hook_visual_stock_compose), 5, {0x55,0x8b,0xec,0x6a,0xff}};
+        patches[30] = {game+kVisualNativeRefreshEquipmentRva,
+            reinterpret_cast<const void*>(&hook_visual_refresh_equipment), 7, {0x6a,0xff,0x68}};
+        write_u32(patches[30].expected, 3,
+                  loaded_address(game, kVisualNativeRefreshEquipmentHandlerRva));
+        patches[31] = {game+kVisualNativeRefreshModelRva,
+            reinterpret_cast<const void*>(&hook_visual_refresh_model), 7, {0x6a,0xff,0x68}};
+        write_u32(patches[31].expected, 3,
+                  loaded_address(game, kVisualNativeRefreshModelHandlerRva));
     }
     return patches;
 }
@@ -21147,7 +22344,9 @@ bool visual_thiscall_chain(const std::uint8_t* entry, const void* callback,
 EntryResolution visual_patch_owner(const VisualProducerPatch& patch) noexcept {
     const bool entry = !patch.call_site && patch.relative_call == SIZE_MAX &&
         patch.hook != reinterpret_cast<const void*>(&visual_shadow_visible_adapter) &&
-        patch.hook != reinterpret_cast<const void*>(&visual_shadow_invisible_adapter);
+        patch.hook != reinterpret_cast<const void*>(&visual_shadow_invisible_adapter) &&
+        patch.hook != reinterpret_cast<const void*>(&lia_visual_shadow_visible_adapter) &&
+        patch.hook != reinterpret_cast<const void*>(&lia_visual_shadow_invisible_adapter);
     if (entry)
         return resolve_hook_entry(patch.entry, patch.expected.data(), patch.size, patch.size);
     EntryResolution exact{};
@@ -21174,11 +22373,95 @@ bool addon_resolver_reaches_native_get(std::uint8_t* game, const void* slot_valu
     return visual_read(g_addon.image, g_addon.layout.resolver.member_slot, native) &&
         native == game + 0x271b40;
 }
+bool lia_visual_publication_live_contract(std::uint8_t* game,std::uint8_t* addon) noexcept {
+    if (!game || addon) { g_visual_live_mismatch="lia_native_owner_required"; return false; }
+    if (!visual_bootstrap_is_empty(game)) {
+        g_visual_live_mismatch="lia_late_bootstrap"; return false;
+    }
+    // Static slots and unchanged consumed bodies reject foreign native state.
+    for (const auto& range:kLiaVisualPublicationRanges) {
+        if (!lia_live_contract_range_matches(game,static_cast<std::uint32_t>(range[0]),
+                static_cast<std::size_t>(range[1]),range[2])) {
+            static char detail[64];
+            std::snprintf(detail,sizeof(detail),"lia_publication_guard_rva=%06X",
+                static_cast<unsigned>(range[0]));
+            g_visual_live_mismatch=detail; return false;
+        }
+    }
+    for (const auto& patch:visual_producer_patches(game,nullptr)) {
+        if (!patch.entry) continue; // Unresolved admission is explicitly not installed.
+        if (visual_patch_owner(patch).owner!=EntryOwner::stock) {
+            g_visual_live_mismatch="lia_native_producer_foreign"; return false;
+        }
+    }
+    const auto* rate=game+kLiaVisualAnimationRateTestRva;
+    const bool stock=signature(rate,{0x83,0xf8,0x02,0x75,0x12});
+    const bool not_mode1=!stock&&signature(rate,{0x83,0xf8,0x01,0x74,0x12});
+    if (!stock&&!not_mode1) { g_visual_live_mismatch="lia_animation_rate_foreign"; return false; }
+    for (std::size_t i=0;i<world_lifecycle_contract().entries.size();++i) {
+        const void* hooks[]{reinterpret_cast<const void*>(&hook_lifecycle_tick),
+            reinterpret_cast<const void*>(&hook_lifecycle_add),
+            reinterpret_cast<const void*>(&hook_lifecycle_remove),
+            reinterpret_cast<const void*>(&hook_lifecycle_positive_reset)};
+        if (relative_jump_target(game+world_lifecycle_contract().entries[i])!=hooks[i]) {
+            g_visual_live_mismatch="lia_lifecycle_owner_inactive"; return false;
+        }
+    }
+    const void* mutations[]{reinterpret_cast<const void*>(&hook_object_plan_add_figure),
+        reinterpret_cast<const void*>(&hook_object_plan_remove_figure),
+        reinterpret_cast<const void*>(&hook_object_plan_set_complection)};
+    for (std::size_t i=0;i<object_mutation_contract().entries.size();++i) {
+        if (relative_jump_target(game+object_mutation_contract().entries[i])!=mutations[i]) {
+            g_visual_live_mismatch="lia_mutation_owner_inactive"; return false;
+        }
+    }
+    g_visual_native_rate_not_mode1=not_mode1;
+    return true;
+}
+
+// An addon can own this packet without owning appearance. Discover only that
+// contract and verify its CURRENT targets; never attribute an old run's jump
+// by an assumed module base, or enable the rejected appearance/resource ABI.
+const char* native_animation_packet_live_contract(std::uint8_t* game) noexcept {
+    auto* const addon = find_addon_module();
+    if (!addon || addon != g_addon.image) return "animation_packet.module_missing_or_ambiguous";
+    AddonAnimationPacketLayout packet{};
+    if (const char* reason = discover_addon_animation_packet(addon, packet)) return reason;
+    // SpellAddon has a different sender at 52EE71. A mixed protocol is not
+    // established by this contract, even when its later 52EE76 target matches.
+    if (!signature(game+0x12ee71,{0xe8,0x2a,0xee,0xf4,0xff}))
+        return "animation_packet.earlier_sender_foreign";
+    if (addon[packet.enabled_flag] != 1) return "animation_packet.flag_inactive";
+    if (relative_jump_target(game+0x12ee76) != addon+packet.sender ||
+        !signature(game+0x12ee7b,{0x90,0x90})) return "animation_packet.sender_owner";
+    if (relative_jump_target(game+0x12f3a9) != addon+packet.receiver ||
+        !signature(game+0x12f3ae,{0x90,0x90})) return "animation_packet.receiver_owner";
+    if (!signature(game+0x135c71,{0x83,0xf8,0x01,0x74,0x12}))
+        return "animation_packet.rate_test";
+    constexpr std::uint8_t coefficient_stock[]{0x8b,0x44,0x24,0x04,0x8b,0x40,0x14,0x25,0,0,0x3c,0};
+    const auto owner = resolve_entry_owner(game+0x1327d0, coefficient_stock,
+        sizeof(coefficient_stock), 5, &addon_module_contains);
+    if (owner.owner != EntryOwner::framework_chain || owner.callback != addon+packet.coefficient_callback ||
+        !visual_thiscall_chain(game+0x1327d0, addon+packet.coefficient_callback, 4))
+        return "animation_packet.coefficient_owner";
+    // The existing framework resolver has verified the adjacent thiscall
+    // converter, stock replay, return jump and padding. The callback must
+    // call that very forwarder through its registered original slot.
+    const std::size_t body = 4 + owner.addon_patch_bytes + 5;
+    const auto* forwarder = owner.dispatcher - body - (4 - body % 4);
+    const void* original = nullptr;
+    if (!visual_read(addon, packet.coefficient_original, original) || original != forwarder)
+        return "animation_packet.coefficient_original";
+    return nullptr;
+}
+
+// A null appearance addon checks native producers and resource selection,
+// with either the stock packet or an independently verified packet owner.
 #endif // !EID3D11_EMBEDDED
-// A null addon checks the native contract: the same game sites, the stock
-// entries in place of the addon's, and the stock receiver and resource slot.
 #if !defined(EID3D11_EMBEDDED)
 bool visual_publication_live_contract(std::uint8_t* game, std::uint8_t* addon) noexcept {
+    if (running_game_sites().report.engine == GameEngine::lia)
+        return lia_visual_publication_live_contract(game,addon);
     if (addon && (g_addon.layout.visual_failure || addon != g_addon.image)) {
         g_visual_live_mismatch = "addon_layout";
         return false;
@@ -21283,17 +22566,35 @@ bool visual_publication_live_contract(std::uint8_t* game, std::uint8_t* addon) n
     write_u32(mapping,16,loaded_address(game,0x33b208));
     if (!signature(game+0x275770,{0x8b,0x44,0x24,8,0x81,0xec,0x38,1,0,0,0x53,0x33,0xdb}) ||
         std::memcmp(game+0x2759b9,mapping.data(),mapping.size()) != 0) { g_visual_live_mismatch = "check_12"; return false; }
-    if (relative_jump_target(game+kLifecycleTickEntryRva) != reinterpret_cast<const void*>(&hook_lifecycle_tick) ||
-        relative_jump_target(game+kLifecycleAddEntryRva) != reinterpret_cast<const void*>(&hook_lifecycle_add) ||
-        relative_jump_target(game+kLifecycleRemoveEntryRva) != reinterpret_cast<const void*>(&hook_lifecycle_remove) ||
-        relative_jump_target(game+kLifecyclePositiveResetEntryRva) != reinterpret_cast<const void*>(&hook_lifecycle_positive_reset) ||
-        relative_jump_target(game+kObjectAddFigureEntryRva) != reinterpret_cast<const void*>(&hook_object_plan_add_figure) ||
-        relative_jump_target(game+kObjectRemoveFigureEntryRva) != reinterpret_cast<const void*>(&hook_object_plan_remove_figure) ||
-        relative_jump_target(game+kObjectSetComplectionEntryRva) != reinterpret_cast<const void*>(&hook_object_plan_set_complection))
+    if (relative_jump_target(game+world_lifecycle_contract().entries[0]) != reinterpret_cast<const void*>(&hook_lifecycle_tick) ||
+        relative_jump_target(game+world_lifecycle_contract().entries[1]) != reinterpret_cast<const void*>(&hook_lifecycle_add) ||
+        relative_jump_target(game+world_lifecycle_contract().entries[2]) != reinterpret_cast<const void*>(&hook_lifecycle_remove) ||
+        relative_jump_target(game+world_lifecycle_contract().entries[3]) != reinterpret_cast<const void*>(&hook_lifecycle_positive_reset) ||
+        relative_jump_target(game+object_mutation_contract().entries[0]) != reinterpret_cast<const void*>(&hook_object_plan_add_figure) ||
+        relative_jump_target(game+object_mutation_contract().entries[1]) != reinterpret_cast<const void*>(&hook_object_plan_remove_figure) ||
+        relative_jump_target(game+object_mutation_contract().entries[2]) != reinterpret_cast<const void*>(&hook_object_plan_set_complection))
         { g_visual_live_mismatch = "check_13"; return false; }
     const bool update_to_stock = signature(game+0x12ee76,{0x8b,0xcf,0xe8,0xa3,0xed,0xf4,0xff});
     if (!addon) {
-        // Stock receiver test and sender; no addon flags, route or chains.
+        // The two completed hero refreshes rename/reload the part-set
+        // textures in place. Their new surfaces must be published after the
+        // native call, not reconstructed at the preview's draw boundary.
+        if (!visual_read(game,kVisualNativeRefreshEquipmentSlotRva,member) ||
+            member != game+kVisualNativeRefreshEquipmentRva ||
+            !visual_read(game,kVisualNativeRefreshModelSlotRva,member) ||
+            member != game+kVisualNativeRefreshModelRva ||
+            !signature(game+kVisualNativeRefreshEquipmentOwnerRva,{0x8b,0x43,0x1c}) ||
+            !signature(game+kVisualNativeRefreshModelOwnerRva,{0x8b,0x41,0x1c,0x83,0x78,0x10,0x32}) ||
+            !relative_call_targets(game+kVisualNativeRefreshPrimaryCallRva,game+kVisualNativeTextureReloadRva) ||
+            !relative_call_targets(game+kVisualNativeRefreshSecondaryCallRva,game+kVisualNativeTextureReloadRva) ||
+            !relative_call_targets(game+kVisualNativeRefreshModelCallRva,game+kVisualNativeTextureReloadRva) ||
+            !signature(game+kVisualNativeRefreshEquipmentReturnRva,{0xc3}) ||
+            !signature(game+kVisualNativeRefreshModelReturnRva,{0xc3})) {
+            g_visual_live_mismatch = "native_texture_refresh";
+            return false;
+        }
+        // The packet may be owned independently of appearance. Both stock
+        // endpoints must match, or the complete paired extension must match.
         // The owned animation values (VisualTickValues rate) follow the live
         // rate test: stock (mode 1 frozen, mode 2 scaled) or a coexisting
         // plugin's rewrite to `cmp eax,1; je` with the same branch target
@@ -21302,15 +22603,21 @@ bool visual_publication_live_contract(std::uint8_t* game, std::uint8_t* addon) n
             signature(game+kVisualNativeAnimationRateTestRva,{0x83,0xf8,0x02,0x75,0x12});
         const bool rate_not_mode1 = !rate_stock &&
             signature(game+kVisualNativeAnimationRateTestRva,{0x83,0xf8,0x01,0x74,0x12});
+        const bool receiver_stock = signature(game+kVisualNativeReceiverRva,
+            {0x83,0xbe,0x5c,0x02,0x00,0x00,0x01,0x75,0x02,0xff,0x0b});
+        if (!update_to_stock || !receiver_stock) {
+            if (const char* reason = native_animation_packet_live_contract(game)) {
+                g_visual_live_mismatch = reason;
+                return false;
+            }
+            g_visual_native_rate_not_mode1 = true;
+            return true;
+        }
         std::uint32_t failed = 0;
-        if (!update_to_stock) failed = 0x12ee76;
-        else if (!rate_stock && !rate_not_mode1)
+        if (!rate_stock && !rate_not_mode1)
             failed = kVisualNativeAnimationRateTestRva;
         else if (!signature(game+0x1327d0,{0x8b,0x44,0x24,0x04,0x8b,0x40,0x14,0x25,0,0,0x3c,0}))
             failed = 0x1327d0;
-        else if (!signature(game+kVisualNativeReceiverRva,
-                            {0x83,0xbe,0x5c,0x02,0x00,0x00,0x01,0x75,0x02,0xff,0x0b}))
-            failed = kVisualNativeReceiverRva;
         if (!failed) {
             g_visual_native_rate_not_mode1 = rate_not_mode1;
             return true;
@@ -21348,18 +22655,61 @@ bool visual_publication_live_contract(std::uint8_t* game, std::uint8_t* addon) n
         (update_to_stock || update_to_addon);
 }
 
+// LiA uses this RET4 code for unrelated methods too. Replace only its
+// verified rendering-half Select slot; never install an entry detour there.
+bool install_lia_visual_select_slot(std::uint8_t* game) noexcept {
+    if (running_game_sites().report.engine!=GameEngine::lia) return true;
+    auto** slot=reinterpret_cast<void**>(game+kLiaVisualSelectSlotRva);
+    void* const original=reinterpret_cast<void*>(g_visual_select);
+    if (original!=game+kLiaVisualSelectOriginalRva || *slot!=original) return false;
+    DWORD protection=0;
+    if (!VirtualProtect(slot,sizeof(void*),PAGE_READWRITE,&protection)) return false;
+    InterlockedExchangePointer(slot,reinterpret_cast<void*>(&hook_visual_select));
+    g_lia_visual_select_installed=true;
+    record_owned_patch(slot,&original,sizeof(original));
+    DWORD ignored=0;
+    return VirtualProtect(slot,sizeof(void*),protection,&ignored)!=FALSE;
+}
+
+bool restore_lia_visual_select_slot() noexcept {
+    if (!g_lia_visual_select_installed) return true;
+    if (!g_visual_game_image || !g_visual_select) return false;
+    auto** slot=reinterpret_cast<void**>(g_visual_game_image+kLiaVisualSelectSlotRva);
+    void* const original=reinterpret_cast<void*>(g_visual_select);
+    if (*slot!=original) {
+        DWORD protection=0;
+        if (*slot!=reinterpret_cast<void*>(&hook_visual_select) ||
+            !VirtualProtect(slot,sizeof(void*),PAGE_READWRITE,&protection)) {
+            append_bridge_event("hook_teardown_pending","lia_select.slot_foreign_or_restore_failed",true);
+            return false;
+        }
+        InterlockedExchangePointer(slot,original);
+        DWORD ignored=0;
+        if (!VirtualProtect(slot,sizeof(void*),protection,&ignored)) {
+            append_bridge_event("hook_teardown_pending","lia_select.protection_restore_failed",true);
+            return false;
+        }
+    }
+    g_lia_visual_select_installed=false;
+    return true;
+}
+
 void assign_visual_originals() noexcept {
+    const bool lia=running_game_sites().report.engine == GameEngine::lia;
     g_visual_posrot_read = g_visual_game_image ?
-        reinterpret_cast<VisualPacketReadFn>(g_visual_game_image+0x7e000) : nullptr;
+        reinterpret_cast<VisualPacketReadFn>(g_visual_game_image+
+            (lia ? kLiaVisualPacketReadRva : 0x7e000)) : nullptr;
     g_visual_base_create = reinterpret_cast<VisualCreateFn>(g_visual_trampolines[0]);
     g_visual_create_map_object = reinterpret_cast<VisualCreateFn>(g_visual_trampolines[26]);
     g_visual_base_destroy = reinterpret_cast<VisualDestroyFn>(g_visual_trampolines[1]);
     g_visual_unit_update = reinterpret_cast<VisualUnitUpdateFn>(g_visual_trampolines[2]);
     g_visual_visible_units = reinterpret_cast<VisualVisibleUnitsFn>(g_visual_trampolines[28]);
     g_visual_player_world = g_visual_game_image ?
-        reinterpret_cast<VisualPlayerWorldFn>(g_visual_game_image+0x55940) : nullptr;
+        reinterpret_cast<VisualPlayerWorldFn>(g_visual_game_image+
+            (lia ? kLiaVisualPlayerWorldRva : 0x55940)) : nullptr;
     g_visual_world_unit = g_visual_game_image ?
-        reinterpret_cast<VisualWorldUnitFn>(g_visual_game_image+0x15fb00) : nullptr;
+        reinterpret_cast<VisualWorldUnitFn>(g_visual_game_image+
+            (lia ? kLiaVisualWorldUnitRva : 0x15fb00)) : nullptr;
     g_visual_animation_received = reinterpret_cast<VisualAnimationReceivedFn>(g_visual_trampolines[3]);
     g_visual_route_writer = reinterpret_cast<VisualRouteWriterFn>(g_visual_trampolines[4]);
     g_visual_database = reinterpret_cast<VisualDatabaseFn>(g_visual_trampolines[5]);
@@ -21381,15 +22731,21 @@ void assign_visual_originals() noexcept {
     g_visual_add_unloaded = reinterpret_cast<VisualFigureMembershipFn>(g_visual_trampolines[15]);
     g_visual_final_data = reinterpret_cast<VisualCreateFn>(g_visual_trampolines[16]);
     g_visual_load_textures = reinterpret_cast<VisualLoadTexturesFn>(g_visual_trampolines[17]);
+    g_visual_refresh_equipment = reinterpret_cast<VisualCreateFn>(g_visual_trampolines[30]);
+    g_visual_refresh_model = reinterpret_cast<VisualCreateFn>(g_visual_trampolines[31]);
     g_visual_change_texture = reinterpret_cast<VisualChangeTextureFn>(g_visual_trampolines[18]);
     g_visual_highlight = reinterpret_cast<VisualHighlightFn>(g_visual_trampolines[19]);
-    g_visual_select = reinterpret_cast<VisualHighlightFn>(g_visual_trampolines[29]);
+    g_visual_select = lia && g_visual_game_image ?
+        *reinterpret_cast<VisualHighlightFn*>(g_visual_game_image+kLiaVisualSelectSlotRva) :
+        reinterpret_cast<VisualHighlightFn>(g_visual_trampolines[29]);
     g_visual_compose_memory = reinterpret_cast<VisualComposeMemoryFn>(g_visual_trampolines[20]);
     g_visual_stock_compose = reinterpret_cast<VisualStockComposeFn>(g_visual_trampolines[20]);
     g_visual_shadow_visible_original = g_visual_trampolines[21];
     g_visual_shadow_invisible_original = g_visual_trampolines[22];
-    g_visual_shadow_visible_next = g_visual_game_image ? g_visual_game_image+0x16ae14 : nullptr;
-    g_visual_shadow_invisible_next = g_visual_game_image ? g_visual_game_image+0x16af49 : nullptr;
+    g_visual_shadow_visible_next = g_visual_game_image ? g_visual_game_image+
+        (lia ? kLiaVisualShadowVisibleNextRva : 0x16ae14) : nullptr;
+    g_visual_shadow_invisible_next = g_visual_game_image ? g_visual_game_image+
+        (lia ? kLiaVisualShadowInvisibleNextRva : 0x16af49) : nullptr;
 }
 
 void clear_visual_hook_state() noexcept {
@@ -21432,6 +22788,7 @@ bool uninstall_visual_publication_hooks(bool release_forwarders = true) noexcept
         if (patches[i].entry && !visual_patch_is_owned(patches[i]) &&
             std::memcmp(patches[i].entry,g_visual_original[i].data(),patches[i].size) != 0)
             return false;
+    if (!restore_lia_visual_select_slot()) return false;
     for (std::size_t i = patches.size(); i-- > 0;)
         if (patches[i].entry && visual_patch_is_owned(patches[i]) &&
             !restore_inline_entry(patches[i].entry,g_visual_original[i].data(),patches[i].size))
@@ -21488,6 +22845,7 @@ bool install_visual_publication_images(std::uint8_t* game, std::uint8_t* addon) 
     assign_visual_originals();
     g_visual_hooks_installed = true;
     bool complete = !addon || install_generated_mmp_memory_route(addon);
+    if (complete) complete=install_lia_visual_select_slot(game);
 #ifdef EID3D11_TESTING
     if (complete && g_visual_test_route_postwrite_failure) complete = false;
 #endif
@@ -21518,8 +22876,11 @@ bool install_visual_publication_images(std::uint8_t* game, std::uint8_t* addon) 
         return false;
     }
     g_visual_publication_active = true;
-    g_visual_install_detail = addon ?
+    g_visual_install_detail = running_game_sites().report.engine == GameEngine::lia ?
+        "verified_lia_trial_producers_deferred_figure_header_size_coverage_unverified" : addon ?
         "verified_memory_generated_source_and_completed_visual_producers" :
+        !signature(game+0x12ee76,{0x8b,0xcf,0xe8,0xa3,0xed,0xf4,0xff}) ?
+            "verified_native_completed_visual_producers packet=addon_inline_coefficient rate_rule=not_mode1" :
         g_visual_native_rate_not_mode1 ?
             "verified_native_completed_visual_producers rate_rule=not_mode1" :
             "verified_native_completed_visual_producers rate_rule=mode2";
@@ -21561,23 +22922,22 @@ bool install_retained_source_hooks(std::uint8_t* image) noexcept {
         const void* replacement;
     };
     const std::array<Hook, kRetainedSourceHookCount> hooks{{
-        {image + kRetainedMainLoaderEntryRva, kRetainedMainLoaderPatchBytes,
+        {image + retained_source_contract().entries[0], retained_source_contract().bytes[0],
          reinterpret_cast<const void*>(&hook_retained_main_loader)},
-        {image + kRetainedSecondaryOwnerEntryRva,
-         kRetainedSecondaryOwnerPatchBytes,
+        {image + retained_source_contract().entries[1],
+         retained_source_contract().bytes[1],
          reinterpret_cast<const void*>(&hook_retained_secondary_owner)},
-        {image + kRetainedCommonParserEntryRva,
-         kRetainedCommonParserPatchBytes,
+        {image + retained_source_contract().entries[2],
+         retained_source_contract().bytes[2],
          reinterpret_cast<const void*>(&hook_retained_common_parser)},
-        {image + kRetainedAdmissionEntryRva, kRetainedAdmissionPatchBytes,
+        {image + retained_source_contract().entries[3], retained_source_contract().bytes[3],
          reinterpret_cast<const void*>(&hook_retained_admission)},
     }};
-    static const std::array<std::array<std::uint8_t, 13>, kRetainedSourceHookCount> kStock{{
-        {{0x64,0xa1,0x00,0x00,0x00,0x00,0x6a,0xff,0x68,0x18,0x65,0x72,0x00}},
-        {{0x55,0x8b,0x6c,0x24,0x08,0x56,0x8b,0xf1,0x57,0x33,0xff}},
-        {{0x6a,0xff,0x68,0x40,0x65,0x72,0x00}},
-        {{0x55,0x8b,0xec,0x6a,0xff,0x68,0x30,0x61,0x72,0x00}},
-    }};
+    const auto& kStock=retained_source_contract().stock;
+    if (running_game_sites().report.engine == GameEngine::lia)
+        for (const auto& range:kLiaRetainedSourceRanges)
+            if (!object_suffix_live_code_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return false;
 
     std::array<void*, kRetainedSourceHookCount> forwarding{};
     std::array<bool, kRetainedSourceHookCount> chained{};
@@ -21684,15 +23044,15 @@ bool uninstall_retained_source_hooks(std::uint8_t* image) noexcept {
         const void* replacement;
     };
     const std::array<Hook, kRetainedSourceHookCount> hooks{{
-        {image + kRetainedMainLoaderEntryRva, kRetainedMainLoaderPatchBytes,
+        {image + retained_source_contract().entries[0], retained_source_contract().bytes[0],
          reinterpret_cast<const void*>(&hook_retained_main_loader)},
-        {image + kRetainedSecondaryOwnerEntryRva,
-         kRetainedSecondaryOwnerPatchBytes,
+        {image + retained_source_contract().entries[1],
+         retained_source_contract().bytes[1],
          reinterpret_cast<const void*>(&hook_retained_secondary_owner)},
-        {image + kRetainedCommonParserEntryRva,
-         kRetainedCommonParserPatchBytes,
+        {image + retained_source_contract().entries[2],
+         retained_source_contract().bytes[2],
          reinterpret_cast<const void*>(&hook_retained_common_parser)},
-        {image + kRetainedAdmissionEntryRva, kRetainedAdmissionPatchBytes,
+        {image + retained_source_contract().entries[3], retained_source_contract().bytes[3],
          reinterpret_cast<const void*>(&hook_retained_admission)},
     }};
     for (std::size_t index = 0; index < hooks.size(); ++index) {
@@ -21726,25 +23086,30 @@ bool install_retained_scene_seam(std::uint8_t* image) noexcept {
     if (!image || g_retained_scene_seam_installed ||
         g_retained_visibility_hook_installed)
         return false;
-    const std::array<std::uint8_t, kRetainedVisibilityPatchBytes>
-        visibility_expected{0x8d,0x4e,0x54,0x51,0x8d,0x4e,0x34};
-    const std::array<std::uint8_t, kRetainedSceneSeamPatchBytes> expected{
-        0xf6,0x46,0x08,0xc0,0x0f,0x84,0x99,0x00,0x00,0x00};
-    auto* visibility_entry = image + kRetainedVisibilityEntryRva;
-    auto* entry = image + kRetainedSceneSeamRva;
+    const auto& visibility_expected=retained_seam_contract().visibility_stock;
+    const auto& expected=retained_seam_contract().scene_stock;
+    auto* visibility_entry = image + retained_seam_contract().visibility;
+    auto* entry = image + retained_seam_contract().scene;
     if (std::memcmp(visibility_entry, visibility_expected.data(),
                     visibility_expected.size()) != 0 ||
-        std::memcmp(entry, expected.data(), expected.size()) != 0 ||
-        !signature(image + kFormVisibilityListsEntryRva,
+        std::memcmp(entry, expected.data(), expected.size()) != 0) return false;
+    if (running_game_sites().report.engine == GameEngine::lia) {
+        for (const auto& range:kLiaRetainedSeamRanges)
+            if (!object_suffix_live_code_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return false;
+        for (const auto& range:kLiaRetainedPoseRanges)
+            if (!object_suffix_live_code_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return false;
+    } else if (!signature(image + kFormVisibilityListsEntryRva,
                    {0x6a,0xff,0x68,0xe8,0x29,0x72,0x00,
                     0x64,0xa1,0x00,0x00,0x00,0x00}) ||
-        !signature(image + kRetainedVisibilityResumeRva,
+        !signature(image + retained_seam_contract().resume,
                    {0xe8,0xd1,0xef,0xf6,0xff,0x8b,0x56,0x1c,
                     0x8b,0x46,0x20,0x8b,0x4e,0x24}) ||
-        !signature(image + kRetainedVisibilityNextRva,
+        !signature(image + retained_seam_contract().next,
                    {0x8b,0x4c,0x24,0x14,0x8b,0x54,0x24,0x40,
                     0x8b,0x01,0x8b,0x0a,0x3b,0xc1}) ||
-        !signature(image + kCreateCurrentPlacementEntryRva,
+        !signature(image + object_frame_contract().placement_rva,
                    {0x83,0xec,0x20,0xd9,0x41,0x04,0xdc,0xc0,
                     0xd9,0x41,0x08,0xdc,0xc0}) ||
         !signature(image + kRetainedTreeClassifierRva,
@@ -21775,10 +23140,10 @@ bool install_retained_scene_seam(std::uint8_t* image) noexcept {
                 g_retained_visibility_original.size());
     std::memcpy(g_retained_scene_seam_original.data(), entry,
                 g_retained_scene_seam_original.size());
-    g_retained_visibility_resume = image + kRetainedVisibilityResumeRva;
-    g_retained_visibility_next = image + kRetainedVisibilityNextRva;
+    g_retained_visibility_resume = image + retained_seam_contract().resume;
+    g_retained_visibility_next = image + retained_seam_contract().next;
     g_retained_scene_seam_fallthrough = entry + kRetainedSceneSeamPatchBytes;
-    g_retained_scene_seam_taken = image + kRetainedSceneSeamTakenRva;
+    g_retained_scene_seam_taken = image + retained_seam_contract().taken;
 
     DWORD visibility_protection = 0;
     if (!VirtualProtect(visibility_entry, kRetainedVisibilityPatchBytes,
@@ -21791,7 +23156,7 @@ bool install_retained_scene_seam(std::uint8_t* image) noexcept {
     }
     const bool visibility_wrote = write_relative_jump(
         visibility_entry,
-        reinterpret_cast<const void*>(&hook_retained_owned_visibility));
+        retained_visibility_hook_target());
     if (visibility_wrote)
         std::memset(visibility_entry + 5, 0x90,
                     kRetainedVisibilityPatchBytes - 5);
@@ -21802,7 +23167,7 @@ bool install_retained_scene_seam(std::uint8_t* image) noexcept {
                           kRetainedVisibilityPatchBytes);
     if (!visibility_wrote) {
         if(!restore_forwarding_hook(visibility_entry,visibility_expected.data(),visibility_expected.size(),
-            reinterpret_cast<const void*>(&hook_retained_owned_visibility),false,"scene.visibility_rollback")) {
+            retained_visibility_hook_target(),false,"scene.visibility_rollback")) {
             g_retained_visibility_hook_installed=true;return false;
         }
         g_retained_visibility_resume = nullptr;
@@ -21817,7 +23182,7 @@ bool install_retained_scene_seam(std::uint8_t* image) noexcept {
     if (!VirtualProtect(entry, kRetainedSceneSeamPatchBytes,
                         PAGE_EXECUTE_READWRITE, &protection)) {
         if(!restore_forwarding_hook(visibility_entry,visibility_expected.data(),visibility_expected.size(),
-            reinterpret_cast<const void*>(&hook_retained_owned_visibility),false,"scene.visibility_rollback")) {
+            retained_visibility_hook_target(),false,"scene.visibility_rollback")) {
             g_retained_visibility_hook_installed=true;return false;
         }
         g_retained_visibility_hook_installed = false;
@@ -21828,7 +23193,7 @@ bool install_retained_scene_seam(std::uint8_t* image) noexcept {
         return false;
     }
     const bool wrote = write_relative_jump(
-        entry, reinterpret_cast<const void*>(&hook_retained_static_scene_seam));
+        entry, retained_scene_hook_target());
     if (wrote)
         std::memset(entry + 5, 0x90, kRetainedSceneSeamPatchBytes - 5);
     VirtualProtect(entry, kRetainedSceneSeamPatchBytes, protection, &ignored);
@@ -21836,11 +23201,11 @@ bool install_retained_scene_seam(std::uint8_t* image) noexcept {
                           kRetainedSceneSeamPatchBytes);
     if (!wrote) {
         if(!restore_forwarding_hook(entry,expected.data(),expected.size(),
-            reinterpret_cast<const void*>(&hook_retained_static_scene_seam),false,"scene.seam_rollback")) {
+            retained_scene_hook_target(),false,"scene.seam_rollback")) {
             g_retained_scene_seam_installed=true;return false;
         }
         if(!restore_forwarding_hook(visibility_entry,visibility_expected.data(),visibility_expected.size(),
-            reinterpret_cast<const void*>(&hook_retained_owned_visibility),false,"scene.visibility_rollback")) {
+            retained_visibility_hook_target(),false,"scene.visibility_rollback")) {
             g_retained_visibility_hook_installed=true;return false;
         }
         g_retained_visibility_hook_installed = false;
@@ -21859,15 +23224,15 @@ bool uninstall_retained_scene_seam(std::uint8_t* image) noexcept {
         !g_retained_visibility_hook_installed)
         return true;
     if (!image) return false;
-    auto* entry = image + kRetainedSceneSeamRva;
-    auto* visibility_entry = image + kRetainedVisibilityEntryRva;
+    auto* entry = image + retained_seam_contract().scene;
+    auto* visibility_entry = image + retained_seam_contract().visibility;
     if (g_retained_visibility_hook_installed &&
         !restore_forwarding_hook(visibility_entry,g_retained_visibility_original.data(),
-            kRetainedVisibilityPatchBytes,reinterpret_cast<const void*>(&hook_retained_owned_visibility),false,
+            kRetainedVisibilityPatchBytes,retained_visibility_hook_target(),false,
             "scene.visibility"))return false;
     if (g_retained_scene_seam_installed &&
         !restore_forwarding_hook(entry,g_retained_scene_seam_original.data(),
-            kRetainedSceneSeamPatchBytes,reinterpret_cast<const void*>(&hook_retained_static_scene_seam),false,
+            kRetainedSceneSeamPatchBytes,retained_scene_hook_target(),false,
             "scene.seam"))return false;
     g_retained_visibility_hook_installed = false;
     g_retained_scene_seam_installed = false;
@@ -21883,31 +23248,32 @@ bool uninstall_retained_scene_seam(std::uint8_t* image) noexcept {
 
 LifecycleValidation install_lifecycle_hooks(std::uint8_t* image) {
     if (!image) return LifecycleValidation::signature_mismatch;
-    auto* tick_entry = image + kLifecycleTickEntryRva;
-    auto* add_entry = image + kLifecycleAddEntryRva;
-    auto* remove_entry = image + kLifecycleRemoveEntryRva;
-    auto* lookup_entry = image + kLifecycleHasObjectEntryRva;
-    auto* reset_entry = image + kLifecyclePositiveResetEntryRva;
+    auto* tick_entry = image + world_lifecycle_contract().entries[0];
+    auto* add_entry = image + world_lifecycle_contract().entries[1];
+    auto* remove_entry = image + world_lifecycle_contract().entries[2];
+    auto* lookup_entry = world_lifecycle_contract().lookup ? image+world_lifecycle_contract().lookup : nullptr;
+    auto* reset_entry = image + world_lifecycle_contract().entries[3];
 
-    static const std::uint8_t kTickStock[] = {0x55,0x8b,0xec,0x6a,0xff,0x68,0x68,0x25,0x72,0x00};
-    static const std::uint8_t kAddStock[] = {0x55,0x8b,0xec,0x6a,0xff,0x68,0x98,0x25,0x72,0x00};
-    static const std::uint8_t kRemoveStock[] = {0x55,0x8b,0xec,0x6a,0xff,0x68,0xc0,0x25,0x72,0x00};
-    static const std::uint8_t kResetStock[] = {0x83,0xec,0x10,0x53,0x55,0x56,0x8b,0xf1};
-    const std::array<const std::uint8_t*, 4> stock{{kTickStock, kAddStock, kRemoveStock, kResetStock}};
-    const std::array<std::size_t, 4> stock_bytes{{
-        sizeof(kTickStock), sizeof(kAddStock), sizeof(kRemoveStock), sizeof(kResetStock)}};
+    const auto& contract=world_lifecycle_contract();
+    const std::array<const std::uint8_t*,4> stock{{contract.stock[0].data(),contract.stock[1].data(),
+        contract.stock[2].data(),contract.stock[3].data()}};
+    const auto& stock_bytes=contract.guard_bytes;
+    const bool lia=running_game_sites().report.engine == GameEngine::lia;
+    if (lia) for (const auto& range:kLiaLifecycleContractRanges)
+        if (!object_suffix_live_code_matches(image,static_cast<std::uint32_t>(range[0]),
+                static_cast<std::size_t>(range[1]),range[2])) return LifecycleValidation::signature_mismatch;
     const auto entries_are_usable = [&]() {
-        return hook_entry_usable(tick_entry, kTickStock, sizeof(kTickStock),
-                                 kLifecycleTickPatchBytes) &&
-               hook_entry_usable(add_entry, kAddStock, sizeof(kAddStock),
-                                 kLifecycleAddPatchBytes) &&
-               hook_entry_usable(remove_entry, kRemoveStock, sizeof(kRemoveStock),
-                                 kLifecycleRemovePatchBytes) &&
-               signature(lookup_entry,
+        return hook_entry_usable(tick_entry, stock[0], stock_bytes[0],
+                                 world_lifecycle_contract().hook_bytes[0]) &&
+               hook_entry_usable(add_entry, stock[1], stock_bytes[1],
+                                 world_lifecycle_contract().hook_bytes[1]) &&
+               hook_entry_usable(remove_entry, stock[2], stock_bytes[2],
+                                 world_lifecycle_contract().hook_bytes[2]) &&
+               (lia || signature(lookup_entry,
                          {0x8b,0x89,0xb8,0x00,0x00,0x00,0x56,0x8b,
-                          0x01,0x3b,0xc1,0x74,0x12,0x8b,0x54,0x24}) &&
-               hook_entry_usable(reset_entry, kResetStock, sizeof(kResetStock),
-                                 kLifecyclePositiveResetPatchBytes);
+                          0x01,0x3b,0xc1,0x74,0x12,0x8b,0x54,0x24})) &&
+               hook_entry_usable(reset_entry, stock[3], stock_bytes[3],
+                                 world_lifecycle_contract().hook_bytes[3]);
     };
     // Validate every live entry before allocating or patching anything. Only
     // stock entries or addon hook-framework chains are accepted.
@@ -21921,16 +23287,16 @@ LifecycleValidation install_lifecycle_hooks(std::uint8_t* image) {
         std::uint8_t* original;
     };
     const std::array<LifecycleHook, 4> hooks{{
-        {tick_entry, kLifecycleTickPatchBytes,
+        {tick_entry, world_lifecycle_contract().hook_bytes[0],
          reinterpret_cast<const void*>(&hook_lifecycle_tick),
          g_lifecycle_tick_original.data()},
-        {add_entry, kLifecycleAddPatchBytes,
+        {add_entry, world_lifecycle_contract().hook_bytes[1],
          reinterpret_cast<const void*>(&hook_lifecycle_add),
          g_lifecycle_add_original.data()},
-        {remove_entry, kLifecycleRemovePatchBytes,
+        {remove_entry, world_lifecycle_contract().hook_bytes[2],
          reinterpret_cast<const void*>(&hook_lifecycle_remove),
          g_lifecycle_remove_original.data()},
-        {reset_entry, kLifecyclePositiveResetPatchBytes,
+        {reset_entry, world_lifecycle_contract().hook_bytes[3],
          reinterpret_cast<const void*>(&hook_lifecycle_positive_reset),
          g_lifecycle_positive_reset_original.data()},
     }};
@@ -22045,17 +23411,17 @@ void uninstall_lifecycle_hooks(std::uint8_t* image) {
             const std::uint8_t* original;
         };
         const std::array<LifecycleHook, 4> hooks{{
-            {image + kLifecycleTickEntryRva, kLifecycleTickPatchBytes,
+            {image + world_lifecycle_contract().entries[0], world_lifecycle_contract().hook_bytes[0],
              reinterpret_cast<const void*>(&hook_lifecycle_tick),
              g_lifecycle_tick_original.data()},
-            {image + kLifecycleAddEntryRva, kLifecycleAddPatchBytes,
+            {image + world_lifecycle_contract().entries[1], world_lifecycle_contract().hook_bytes[1],
              reinterpret_cast<const void*>(&hook_lifecycle_add),
              g_lifecycle_add_original.data()},
-            {image + kLifecycleRemoveEntryRva, kLifecycleRemovePatchBytes,
+            {image + world_lifecycle_contract().entries[2], world_lifecycle_contract().hook_bytes[2],
              reinterpret_cast<const void*>(&hook_lifecycle_remove),
              g_lifecycle_remove_original.data()},
-            {image + kLifecyclePositiveResetEntryRva,
-             kLifecyclePositiveResetPatchBytes,
+            {image + world_lifecycle_contract().entries[3],
+             world_lifecycle_contract().hook_bytes[3],
              reinterpret_cast<const void*>(&hook_lifecycle_positive_reset),
              g_lifecycle_positive_reset_original.data()},
         }};
@@ -22115,9 +23481,9 @@ bool world_object_draw_oracle_is_exact(std::uint8_t* image) noexcept {
         !g_object_lighting_hook_installed || !g_world_draw ||
         !g_object_3d_draw || !g_world_draw_trampoline)
         return false;
-    return relative_jump_target(image + kWorldDrawEntryRva) ==
+    return relative_jump_target(image + terrain_scene_contract().world) ==
                reinterpret_cast<const void*>(&hook_world_draw) &&
-           relative_jump_target(image + kObject3dDrawEntryRva) ==
+           relative_jump_target(image + object_draw_boundary().draw_entry_rva) ==
                reinterpret_cast<const void*>(&hook_object_3d_draw);
 }
 
@@ -22129,22 +23495,15 @@ bool install_object_plan_mutation_hooks(std::uint8_t* image) noexcept {
         const void* replacement;
     };
     const std::array<Hook, kObjectPlanMutationHookCount> hooks{{
-        {image + kObjectAddFigureEntryRva, kObjectAddFigurePatchBytes,
+        {image + object_mutation_contract().entries[0], object_mutation_contract().bytes[0],
          reinterpret_cast<const void*>(&hook_object_plan_add_figure)},
-        {image + kObjectRemoveFigureEntryRva, kObjectRemoveFigurePatchBytes,
+        {image + object_mutation_contract().entries[1], object_mutation_contract().bytes[1],
          reinterpret_cast<const void*>(&hook_object_plan_remove_figure)},
-        {image + kObjectSetComplectionEntryRva,
-         kObjectSetComplectionPatchBytes,
+        {image + object_mutation_contract().entries[2],
+         object_mutation_contract().bytes[2],
          reinterpret_cast<const void*>(&hook_object_plan_set_complection)},
     }};
-    static const std::array<std::array<std::uint8_t, 16>, kObjectPlanMutationHookCount> kStock{{
-        {{0x83,0xec,0x0c,0x33,0xc0,0x53,0x8b,0xd9,
-          0x56,0x57,0x8b,0x8b,0xd4,0x00,0x00,0x00}},
-        {{0x53,0x8b,0xd9,0x55,0x8b,0x6c,0x24,0x0c,
-          0x8b,0x8b,0x94,0x00,0x00,0x00,0x56,0x85}},
-        {{0x64,0xa1,0x00,0x00,0x00,0x00,0x6a,0xff,
-          0x68,0x10,0xd7,0x71,0x00,0x50,0x64,0x89}},
-    }};
+    const auto& kStock = object_mutation_contract().stock;
     for (std::size_t index = 0; index < hooks.size(); ++index)
         if (!hook_entry_usable(hooks[index].entry, kStock[index].data(),
                                kStock[index].size(), hooks[index].bytes))
@@ -22221,12 +23580,12 @@ bool uninstall_object_plan_mutation_hooks(std::uint8_t* image) noexcept {
         const void* replacement;
     };
     const std::array<Hook, kObjectPlanMutationHookCount> hooks{{
-        {image + kObjectAddFigureEntryRva, kObjectAddFigurePatchBytes,
+        {image + object_mutation_contract().entries[0], object_mutation_contract().bytes[0],
          reinterpret_cast<const void*>(&hook_object_plan_add_figure)},
-        {image + kObjectRemoveFigureEntryRva, kObjectRemoveFigurePatchBytes,
+        {image + object_mutation_contract().entries[1], object_mutation_contract().bytes[1],
          reinterpret_cast<const void*>(&hook_object_plan_remove_figure)},
-        {image + kObjectSetComplectionEntryRva,
-         kObjectSetComplectionPatchBytes,
+        {image + object_mutation_contract().entries[2],
+         object_mutation_contract().bytes[2],
          reinterpret_cast<const void*>(&hook_object_plan_set_complection)},
     }};
     for (std::size_t index = 0; index < hooks.size(); ++index) {
@@ -22256,24 +23615,24 @@ bool uninstall_object_plan_mutation_hooks(std::uint8_t* image) noexcept {
     return true;
 }
 
-bool object_suffix_live_code_hash(
+bool live_game_image_range_hash(
     const std::uint8_t* image, std::uint32_t rva, std::size_t bytes,
-    std::uint64_t& hash) noexcept {
+    bool read_only_data, std::uint64_t& hash) noexcept {
     hash = 0;
-    if (!image || bytes == 0 || rva >= kExpectedImageSize ||
-        bytes > kExpectedImageSize - rva)
+    if (!image || bytes == 0 || rva >= native_game_image_size() ||
+        bytes > native_game_image_size() - rva)
         return false;
     const auto* begin = image + rva;
     const auto* end = begin + bytes;
     const auto* cursor = begin;
+    const DWORD allowed_protection = read_only_data ? PAGE_READONLY :
+        PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
     while (cursor < end) {
         MEMORY_BASIC_INFORMATION memory{};
         if (!VirtualQuery(cursor, &memory, sizeof(memory)) ||
             memory.State != MEM_COMMIT || memory.AllocationBase != image ||
             (memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0 ||
-            (memory.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ |
-                               PAGE_EXECUTE_READWRITE |
-                               PAGE_EXECUTE_WRITECOPY)) == 0)
+            (memory.Protect & allowed_protection) == 0)
             return false;
         const auto* region_end = static_cast<const std::uint8_t*>(
             memory.BaseAddress) + memory.RegionSize;
@@ -22298,43 +23657,200 @@ bool object_suffix_live_code_matches(
     const std::uint8_t* image, std::uint32_t rva, std::size_t bytes,
     std::uint64_t expected) noexcept {
     std::uint64_t actual = 0;
-    return object_suffix_live_code_hash(image, rva, bytes, actual) &&
+    return live_game_image_range_hash(image, rva, bytes, false, actual) &&
         actual == expected;
 }
 
+// LiA guards contain immutable vtable slots as well as executable bodies.
+// Keep code checks executable-only; only its fingerprinted .rdata spans use
+// read-only pages. Mutable state and foreign allocations remain inadmissible.
+bool lia_live_contract_range_matches(const std::uint8_t* image,
+    std::uint32_t rva,std::size_t bytes,std::uint64_t expected) noexcept {
+    if (rva < kLiaReadOnlyDataRva)
+        return object_suffix_live_code_matches(image,rva,bytes,expected);
+    if (rva >= kLiaReadOnlyDataRva+kLiaReadOnlyDataSize ||
+        bytes > kLiaReadOnlyDataSize-(rva-kLiaReadOnlyDataRva)) return false;
+    std::uint64_t actual=0;
+    return live_game_image_range_hash(image,rva,bytes,true,actual) && actual==expected;
+}
+
+BOOL dispatch_lia_world_object_route(void* owner,void* renderer,
+                                     ObjectSuffixWorldRoute route) {
+    const auto previous=g_lia_world_object_route;
+    g_lia_world_object_route={route,owner,renderer};
+    BOOL result=FALSE;
+    __try {
+        const bool normal=route==ObjectSuffixWorldRoute::lever || route==ObjectSuffixWorldRoute::unit;
+        const auto callback=reinterpret_cast<BOOL(__thiscall*)(void*,void*)>(
+            g_object_suffix_image+(normal?0x000cf1b0u:0x000cf1d0u));
+        result=callback(owner,renderer);
+    } __finally {g_lia_world_object_route=previous;}
+    return result;
+}
+BOOL __fastcall hook_lia_world_object(void* owner,void*,void* renderer) {
+    return dispatch_lia_world_object_route(owner,renderer,ObjectSuffixWorldRoute::object);
+}
+BOOL __fastcall hook_lia_world_lever(void* owner,void*,void* renderer) {
+    return dispatch_lia_world_object_route(owner,renderer,ObjectSuffixWorldRoute::lever);
+}
+BOOL __fastcall hook_lia_world_building(void* owner,void*,void* renderer) {
+    return dispatch_lia_world_object_route(owner,renderer,ObjectSuffixWorldRoute::building);
+}
+BOOL __fastcall hook_lia_world_tree(void* owner,void*,void* renderer) {
+    return dispatch_lia_world_object_route(owner,renderer,ObjectSuffixWorldRoute::tree);
+}
+BOOL __fastcall hook_lia_world_unit(void* owner,void*,void* renderer) {
+    return dispatch_lia_world_object_route(owner,renderer,ObjectSuffixWorldRoute::unit);
+}
+const std::array<const void*,5>& lia_world_callback_targets() noexcept {
+    static const std::array<const void*,5> targets{{
+        reinterpret_cast<const void*>(&hook_lia_world_object),
+        reinterpret_cast<const void*>(&hook_lia_world_lever),
+        reinterpret_cast<const void*>(&hook_lia_world_building),
+        reinterpret_cast<const void*>(&hook_lia_world_tree),
+        reinterpret_cast<const void*>(&hook_lia_world_unit)}};
+    return targets;
+}
+std::array<std::uint8_t,5> lia_world_callback_bytes(const void* target) noexcept {
+    std::array<std::uint8_t,5> bytes{{0xb8}};
+    const auto address=reinterpret_cast<std::uintptr_t>(target);
+    std::memcpy(bytes.data()+1,&address,4);
+    return bytes;
+}
+bool uninstall_lia_world_callbacks(std::uint8_t* image) noexcept {
+    if (!g_lia_world_callbacks_installed) return true;
+    if (!image) return false;
+    const auto& targets=lia_world_callback_targets();
+    for (std::size_t i=0;i<targets.size();++i) {
+        const auto* entry=image+kLiaWorldCallbackPublicationRvas[i];
+        const auto replacement=lia_world_callback_bytes(targets[i]);
+        if (entry[5]!=0x50 || (std::memcmp(entry,replacement.data(),5) &&
+            std::memcmp(entry,g_lia_world_callback_original[i].data(),5))) return false;
+    }
+    for (std::size_t i=0;i<targets.size();++i) {
+        auto* entry=image+kLiaWorldCallbackPublicationRvas[i];
+        const auto replacement=lia_world_callback_bytes(targets[i]);
+        if (!std::memcmp(entry,replacement.data(),5) &&
+            !restore_inline_entry(entry,g_lia_world_callback_original[i].data(),5)) return false;
+    }
+    g_lia_world_callbacks_installed=false;
+    g_lia_world_object_route={};
+    return true;
+}
+bool install_lia_world_callbacks(std::uint8_t* image) noexcept {
+    if (!image || g_lia_world_callbacks_installed) return false;
+    const auto& targets=lia_world_callback_targets();
+    for (std::size_t i=0;i<targets.size();++i) {
+        auto* entry=image+kLiaWorldCallbackPublicationRvas[i];
+        const auto expected=lia_world_callback_bytes(image+((i==1 || i==4)?0x000cf1b0u:0x000cf1d0u));
+        if (std::memcmp(entry,expected.data(),5) || entry[5]!=0x50) return false;
+        std::memcpy(g_lia_world_callback_original[i].data(),entry,5);
+    }
+    g_lia_world_callbacks_installed=true;
+    for (std::size_t i=0;i<targets.size();++i) {
+        auto* entry=image+kLiaWorldCallbackPublicationRvas[i];
+        const auto replacement=lia_world_callback_bytes(targets[i]);
+        if (!restore_inline_entry(entry,replacement.data(),5)) {
+            uninstall_lia_world_callbacks(image);
+            return false;
+        }
+    }
+    return true;
+}
+
+bool lia_object_suffix_preflight(std::uint8_t* image) noexcept {
+    if (!image || reinterpret_cast<std::uintptr_t>(image)!=0x00400000u ||
+        !EngineBridge::instance().sites_verified() ||
+        !g_object_lighting_hook_installed || g_object_lighting_chained ||
+        !g_object_3d_draw_trampoline_owned || !g_object_3d_draw ||
+        !g_object_visual_loop_installed || !g_object_visual_loop_trampoline ||
+        relative_jump_target(image+object_draw_boundary().draw_entry_rva)!=
+            reinterpret_cast<const void*>(&hook_object_3d_draw) ||
+        relative_jump_target(image+object_draw_boundary().visual_entry_rva)!=object_visual_hook_target() ||
+        std::memcmp(g_object_3d_draw_original.data(),object_draw_boundary().draw_stock.data(),7) ||
+        g_object_visual_loop_original!=object_draw_boundary().visual_stock ||
+        g_object_visual_loop_resume!=image+object_draw_boundary().visual_skip_rva)
+        return false;
+    __try {
+        if (std::memcmp(g_object_3d_draw,object_draw_boundary().draw_stock.data(),7)) return false;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {return false;}
+    const std::array<std::array<std::uint64_t,3>,20> ranges{{
+        {{0x0000f5e0,0xca,0x0c3040b190a0086aull}},
+        {{0x00082660,0x212,0x30293858ca2d77f7ull}},
+        {{0x000828d0,0x6e,0x8a565b6ee5eb6155ull}},
+        {{0x00032200,0x0a,0x97fa31fc52c724c1ull}},
+        {{0x001ca860,0x136,0x65c9df6f2a3ff5efull}},
+        {{0x000a23e7,0x1e,0x182377f0fb87a6c5ull}},
+        {{0x000a2602,0x2d,0xc67df0848f86666bull}},
+        {{0x000a2451,0x09,0x46310984da7157dfull}},
+        {{0x000a2a8c,0x15a,0x401a9cb580d8a5caull}},
+        {{0x000a2be6,0x20,0x2c8493d4d4f731d5ull}},
+        {{0x000869e0,0x59,0xdbbf377c1aeada09ull}},
+        {{0x0009e8f0,0x35,0xae438c0b0c2e3e9cull}},
+        {{0x0009e930,0x21,0x0fb36e2cede31b1full}},
+        {{0x000cf1b0,0x05,0x1ddc209dde13f7c6ull}},
+        {{0x000cf1d0,0x05,0x1ddc249dde13fe92ull}},
+        {{0x000d26d0,0x3d,0x2c38a3e740576fa4ull}},
+        {{0x000a4850,0x311,0x204587e50ae8d749ull}},
+        {{0x000a2675,0x37,0x59133871790ab675ull}},
+        {{0x00092ec1,0x0f,0x3c879ad3e46ea4adull}},
+        {{0x00084a30,0x03,0x7cd9551b0cef284aull}},
+    }};
+    for (const auto& range:ranges)
+        if (!object_suffix_live_code_matches(image,static_cast<std::uint32_t>(range[0]),
+                static_cast<std::size_t>(range[1]),range[2])) return false;
+    for (std::size_t i=0;i<kLiaWorldCallbackPublicationRvas.size();++i) {
+        const auto hash=(i==1 || i==4)?0x672fdc3bb144db30ull:0x4f88ae5fcced9e50ull;
+        if (!object_suffix_live_code_matches(image,kLiaWorldCallbackPublicationRvas[i],6,hash)) return false;
+    }
+    if (!signature(image+0x000926e0,{0xb8,0x98,0x25,0x6a,0x00,0xc3}) ||
+        !signature(image+0x000da5c5,{0xe8,0x16,0x81,0xfb,0xff,0x89,0x44,0x24,0x1c}) ||
+        !signature(image+0x000da978,{0x8b,0x5c,0x24,0x1c,0x8b,0x15,0xd0,0x31,0x6a,0x00,0x53}) ||
+        !signature(image+0x000a23dc,{0x8b,0x84,0x24,0xac,0x00,0x00,0x00,0x53,0x8b,0x58,0x08}) ||
+        !signature(image+0x0022aa84,{0x30,0xe9,0x49,0x00,0xf0,0xe8,0x49,0x00}) ||
+        !signature(image+0x0022ac10,{0xa0,0x23,0x4a,0x00}) ||
+        !signature(image+0x002206a8,{0x00,0x00,0x80,0x3f}) ||
+        !signature(image+0x000a2b0b,{0xff,0x15,0x44,0x05,0x62,0x00,0x89,0x85,0xec,0x00,0x00,0x00,0x83,0x4d,0x08,0x08}) ||
+        !signature(image+0x000a2bce,{0x8b,0x0d,0xb8,0x25,0x6a,0x00,0x6a,0x00,0xe8,0x05,0x3e,0xfe,0xff})) return false;
+    std::uintptr_t clock=0;
+    return object_suffix_guarded_copy(image+object_frame_contract().clock_iat_rva,clock) &&
+        executable_address(reinterpret_cast<const void*>(clock));
+}
+
 bool object_suffix_cut_preflight(std::uint8_t* image) noexcept {
+    if (running_game_sites().report.engine == GameEngine::lia)
+        return lia_object_suffix_preflight(image);
     if (!image || reinterpret_cast<std::uintptr_t>(image) != 0x00400000u ||
         !EngineBridge::instance().sites_verified() ||
         !g_object_lighting_hook_installed || g_object_lighting_chained ||
         !g_object_3d_draw_trampoline_owned || !g_object_3d_draw ||
         !g_object_visual_loop_installed || !g_object_visual_loop_trampoline ||
-        relative_jump_target(image + kObject3dDrawEntryRva) !=
+        relative_jump_target(image + object_draw_boundary().draw_entry_rva) !=
             reinterpret_cast<const void*>(&hook_object_3d_draw) ||
-        relative_jump_target(image + kObjectVisualLoopEntryRva) !=
-            reinterpret_cast<const void*>(&hook_object_visual_loop) ||
-        !signature(image + kObjectSuffixCutEntryRva,
+        relative_jump_target(image + object_draw_boundary().visual_entry_rva) !=
+            object_visual_hook_target() ||
+        !signature(image + object_draw_boundary().suffix_entry_rva,
                    {0x89,0x7d,0xd8,0x89,0x7d,0xe4}) ||
-        !signature(image + kObjectSuffixCutResumeRva,
+        !signature(image + object_draw_boundary().suffix_resume_rva,
                    {0x89,0x7d,0xe0,0x89,0x7d,0xdc}) ||
-        !signature(image + kObjectSuffixCutEpilogueRva,
+        !signature(image + object_draw_boundary().suffix_epilogue_rva,
                    {0x8b,0x4d,0xf4,0x5f,0x5e,0xb8,0x01,0x00,
                     0x00,0x00,0x64,0x89,0x0d,0x00,0x00,0x00,
                     0x00,0x5b,0x8b,0xe5,0x5d,0xc2,0x08,0x00}))
         return false;
 
-    static constexpr std::array<std::uint8_t, kObject3dDrawPatchBytes>
-        stock_object_entry{{
-            0x55,0x8b,0xec,0x6a,0xff,0x68,0x77,0xd9,0x71,0x00}};
+    const auto& stock_object_entry = object_draw_boundary().draw_stock;
     static constexpr std::array<std::uint8_t, kObjectVisualLoopPatchBytes>
         stock_visual_loop{{0x8b,0x44,0xb3,0x20,0x85,0xc0}};
     bool hook_chain_valid =
-        g_object_3d_draw_original == stock_object_entry &&
+        std::memcmp(g_object_3d_draw_original.data(),stock_object_entry.data(),
+                    object_draw_boundary().draw_bytes) == 0 &&
         g_object_visual_loop_original == stock_visual_loop &&
-        g_object_visual_loop_resume == image + kObjectVisualLoopResumeRva;
+        g_object_visual_loop_resume == image + object_draw_boundary().visual_skip_rva;
     __try {
         hook_chain_valid = hook_chain_valid &&
             std::memcmp(g_object_3d_draw, stock_object_entry.data(),
-                        stock_object_entry.size()) == 0;
+                        object_draw_boundary().draw_bytes) == 0;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         hook_chain_valid = false;
     }
@@ -22354,10 +23870,10 @@ bool object_suffix_cut_preflight(std::uint8_t* image) noexcept {
         {{kObjectInventoryPreviewCallRva, 0x08u, 0xb12ece3214c717f0ull}},
     }};
     const std::array<std::array<std::uint64_t, 3>, 4> helper_ranges{{
-        {{kMatrixMultiplyEntryRva, 0x212u, 0x8d1abf4d4768854bull}},
-        {{kCreateCurrentPlacementEntryRva, 0xdeu, 0x2b0c645f32f3110dull}},
-        {{kMatrixStackPushEntryRva, 0x252u, 0x145f9f8467c3dae9ull}},
-        {{kObjectWorldAccessorEntryRva, 0x0au, 0x97fa31fc52c724c1ull}},
+        {{object_frame_contract().multiply_rva, 0x212u, 0x8d1abf4d4768854bull}},
+        {{object_frame_contract().placement_rva, 0xdeu, 0x2b0c645f32f3110dull}},
+        {{object_frame_contract().stack_push_rva, 0x252u, 0x145f9f8467c3dae9ull}},
+        {{object_frame_contract().world_accessor_rva, 0x0au, 0x97fa31fc52c724c1ull}},
     }};
     for (const auto& range : route_ranges)
         if (!object_suffix_live_code_matches(
@@ -22370,7 +23886,7 @@ bool object_suffix_cut_preflight(std::uint8_t* image) noexcept {
                 static_cast<std::size_t>(range[1]), range[2]))
             return false;
     if (!object_suffix_live_code_matches(
-            image, kWorldFogEntryRva, 0x1b8u,
+            image, object_frame_contract().world_fog_rva, 0x1b8u,
             0x241818ab284b3facull))
         return false;
     if (!object_suffix_live_code_matches(
@@ -22386,13 +23902,15 @@ bool object_suffix_cut_preflight(std::uint8_t* image) noexcept {
         object_suffix_guarded_copy(
                image + kObjectSupportedNormalSlotRva, normal_slot) &&
         object_suffix_guarded_copy(
-               image + kObjectLightingTimeGetTimeIatRva, time_get_time) &&
+               image + object_frame_contract().clock_iat_rva, time_get_time) &&
         executable_address(reinterpret_cast<const void*>(time_get_time)) &&
         preview_slot == reinterpret_cast<std::uintptr_t>(
             image + kObjectPreviewDrawWrapperRva) &&
         normal_slot == reinterpret_cast<std::uintptr_t>(
             image + kObjectNormalDrawWrapperRva);
 }
+
+bool uninstall_object_suffix_cut_hook(std::uint8_t* image) noexcept;
 
 bool install_object_suffix_cut_hook(
     std::uint8_t* image, bool verify_contract) noexcept {
@@ -22403,44 +23921,44 @@ bool install_object_suffix_cut_hook(
     if (verify_contract) {
         std::uintptr_t address = 0;
         if (!object_suffix_guarded_copy(
-                image + kObjectLightingTimeGetTimeIatRva, address) ||
+                image + object_frame_contract().clock_iat_rva, address) ||
             !executable_address(reinterpret_cast<const void*>(address)))
             return false;
         time_get_time = reinterpret_cast<TimeGetTimeFn>(address);
     }
-    auto* entry = image + kObjectSuffixCutEntryRva;
+    auto* entry = image + object_draw_boundary().suffix_entry_rva;
     auto* trampoline = static_cast<std::uint8_t*>(VirtualAlloc(
-        nullptr, kObjectSuffixCutPatchBytes + 5,
+        nullptr, object_draw_boundary().suffix_bytes + 5,
         MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
     if (!trampoline) return false;
     std::memcpy(g_object_suffix_cut_original.data(), entry,
-                kObjectSuffixCutPatchBytes);
-    std::memcpy(trampoline, entry, kObjectSuffixCutPatchBytes);
-    if (!write_relative_jump(trampoline + kObjectSuffixCutPatchBytes,
-                             image + kObjectSuffixCutResumeRva)) {
+                object_draw_boundary().suffix_bytes);
+    std::memcpy(trampoline, entry, object_draw_boundary().suffix_bytes);
+    if (!write_relative_jump(trampoline + object_draw_boundary().suffix_bytes,
+                             image + object_draw_boundary().suffix_resume_rva)) {
         VirtualFree(trampoline, 0, MEM_RELEASE);
         return false;
     }
     DWORD trampoline_protection = 0;
-    if (!VirtualProtect(trampoline, kObjectSuffixCutPatchBytes + 5,
+    if (!VirtualProtect(trampoline, object_draw_boundary().suffix_bytes + 5,
                         PAGE_EXECUTE_READ, &trampoline_protection)) {
         VirtualFree(trampoline, 0, MEM_RELEASE);
         return false;
     }
 
     g_object_suffix_cut_trampoline = trampoline;
-    g_object_suffix_cut_resume = image + kObjectSuffixCutResumeRva;
-    g_object_suffix_cut_epilogue = image + kObjectSuffixCutEpilogueRva;
+    g_object_suffix_cut_resume = image + object_draw_boundary().suffix_resume_rva;
+    g_object_suffix_cut_epilogue = image + object_draw_boundary().suffix_epilogue_rva;
     g_matrix_multiply = reinterpret_cast<MatrixMultiplyFn>(
-        image + kMatrixMultiplyEntryRva);
+        image + object_frame_contract().multiply_rva);
     g_matrix_stack_push = reinterpret_cast<MatrixStackPushFn>(
-        image + kMatrixStackPushEntryRva);
+        image + object_frame_contract().stack_push_rva);
     g_object_world_accessor = reinterpret_cast<ObjectWorldAccessorFn>(
-        image + kObjectWorldAccessorEntryRva);
+        image + object_frame_contract().world_accessor_rva);
     g_object_world_fog = reinterpret_cast<WorldFogFn>(
-        image + kWorldFogEntryRva);
+        image + object_frame_contract().world_fog_rva);
     DWORD protection = 0;
-    if (!VirtualProtect(entry, kObjectSuffixCutPatchBytes,
+    if (!VirtualProtect(entry, object_draw_boundary().suffix_bytes,
                         PAGE_EXECUTE_READWRITE, &protection)) {
         VirtualFree(trampoline, 0, MEM_RELEASE);
         g_object_suffix_cut_trampoline = nullptr;
@@ -22453,12 +23971,13 @@ bool install_object_suffix_cut_hook(
         return false;
     }
     const bool wrote = write_relative_jump(
-        entry, reinterpret_cast<const void*>(&hook_object_suffix_cut));
-    if (wrote && kObjectSuffixCutPatchBytes > 5) entry[5] = 0x90;
+        entry, object_suffix_hook_target());
+    if (wrote && object_draw_boundary().suffix_bytes > 5)
+        std::memset(entry + 5,0x90,object_draw_boundary().suffix_bytes - 5);
     DWORD ignored = 0;
-    VirtualProtect(entry, kObjectSuffixCutPatchBytes, protection, &ignored);
+    VirtualProtect(entry, object_draw_boundary().suffix_bytes, protection, &ignored);
     FlushInstructionCache(GetCurrentProcess(), entry,
-                          kObjectSuffixCutPatchBytes);
+                          object_draw_boundary().suffix_bytes);
     if (!wrote) {
         VirtualFree(trampoline, 0, MEM_RELEASE);
         g_object_suffix_cut_trampoline = nullptr;
@@ -22474,21 +23993,27 @@ bool install_object_suffix_cut_hook(
     g_object_suffix_image = image;
     g_object_suffix_time_get_time = time_get_time;
     g_object_suffix_cut_installed = true;
+    if (running_game_sites().report.engine == GameEngine::lia &&
+        !install_lia_world_callbacks(image)) {
+        uninstall_object_suffix_cut_hook(image);
+        return false;
+    }
     return true;
 }
 
 bool uninstall_object_suffix_cut_hook(std::uint8_t* image) noexcept {
     if (!g_object_suffix_cut_installed) return true;
     if (!image) return false;
-    auto* entry = image + kObjectSuffixCutEntryRva;
+    if (!uninstall_lia_world_callbacks(image)) return false;
+    auto* entry = image + object_draw_boundary().suffix_entry_rva;
     const void* target = relative_jump_target(entry);
-    if (target != reinterpret_cast<const void*>(&hook_object_suffix_cut) &&
+    if (target != object_suffix_hook_target() &&
         std::memcmp(entry, g_object_suffix_cut_original.data(),
-                    kObjectSuffixCutPatchBytes) != 0)
+                    object_draw_boundary().suffix_bytes) != 0)
         return false;
-    if (target == reinterpret_cast<const void*>(&hook_object_suffix_cut) &&
+    if (target == object_suffix_hook_target() &&
         !restore_inline_entry(entry, g_object_suffix_cut_original.data(),
-                              kObjectSuffixCutPatchBytes))
+                              object_draw_boundary().suffix_bytes))
         return false;
     if (g_object_suffix_cut_trampoline)
         VirtualFree(g_object_suffix_cut_trampoline, 0, MEM_RELEASE);
@@ -22508,17 +24033,18 @@ bool uninstall_object_suffix_cut_hook(std::uint8_t* image) noexcept {
 
 bool install_object_visual_loop_hook(std::uint8_t* image) noexcept {
     if (!image || g_object_visual_loop_installed ||
-        !signature(image + kObjectVisualLoopEntryRva,
-                   {0x8b,0x44,0xb3,0x20,0x85,0xc0}) ||
-        !signature(image + kObjectVisualLoopResumeRva,
-                   {0x8a,0x45,0xee,0x84,0xc0,0x0f,0x84,0xcc,
-                    0x00,0x00,0x00}) ||
-        !signature(image + kCreateCurrentPlacementEntryRva,
-                   {0x83,0xec,0x20,0xd9,0x41,0x04}) ||
-        !signature(image + kRenderStateApplyEntryRva,
-                   {0x56,0x57,0x8b,0x7c,0x24,0x0c,0x8b,0xf1}))
-        return false;
-    auto* entry = image + kObjectVisualLoopEntryRva;
+        std::memcmp(image+object_draw_boundary().visual_entry_rva,
+                    object_draw_boundary().visual_stock.data(),kObjectVisualLoopPatchBytes)) return false;
+    if (running_game_sites().report.engine == GameEngine::lia) {
+        if (!signature(image+object_draw_boundary().visual_skip_rva,{0x8a,0x44,0x24,0x1b,0x84,0xc0}) ||
+            !object_suffix_live_code_matches(image,0x000a2650,0x0c,0x4407a5e1bc3096e7ull) ||
+            !object_suffix_live_code_matches(image,object_frame_contract().placement_rva,0xca,0x0c3040b190a0086aull) ||
+            !object_suffix_live_code_matches(image,object_frame_contract().state_apply_rva,0x59,0xdbbf377c1aeada09ull)) return false;
+    } else if (!signature(image+object_draw_boundary().visual_skip_rva,
+                    {0x8a,0x45,0xee,0x84,0xc0,0x0f,0x84,0xcc,0x00,0x00,0x00}) ||
+        !signature(image+object_frame_contract().placement_rva,{0x83,0xec,0x20,0xd9,0x41,0x04}) ||
+        !signature(image+object_frame_contract().state_apply_rva,{0x56,0x57,0x8b,0x7c,0x24,0x0c,0x8b,0xf1})) return false;
+    auto* entry = image + object_draw_boundary().visual_entry_rva;
     auto* trampoline = static_cast<std::uint8_t*>(VirtualAlloc(
         nullptr, kObjectVisualLoopPatchBytes + 5,
         MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
@@ -22538,11 +24064,11 @@ bool install_object_visual_loop_hook(std::uint8_t* image) noexcept {
         return false;
     }
     g_object_visual_loop_trampoline = trampoline;
-    g_object_visual_loop_resume = image + kObjectVisualLoopResumeRva;
+    g_object_visual_loop_resume = image + object_draw_boundary().visual_skip_rva;
     g_create_current_placement = reinterpret_cast<CreateCurrentPlacementFn>(
-        image + kCreateCurrentPlacementEntryRva);
+        image + object_frame_contract().placement_rva);
     g_render_state_apply = reinterpret_cast<RenderStateApplyFn>(
-        image + kRenderStateApplyEntryRva);
+        image + object_frame_contract().state_apply_rva);
     DWORD protection = 0;
     if (!VirtualProtect(entry, kObjectVisualLoopPatchBytes,
                         PAGE_EXECUTE_READWRITE, &protection)) {
@@ -22554,7 +24080,7 @@ bool install_object_visual_loop_hook(std::uint8_t* image) noexcept {
         return false;
     }
     const bool wrote = write_relative_jump(
-        entry, reinterpret_cast<const void*>(&hook_object_visual_loop));
+        entry, object_visual_hook_target());
     if (wrote && kObjectVisualLoopPatchBytes > 5) entry[5] = 0x90;
     DWORD ignored = 0;
     VirtualProtect(entry, kObjectVisualLoopPatchBytes, protection, &ignored);
@@ -22575,13 +24101,13 @@ bool install_object_visual_loop_hook(std::uint8_t* image) noexcept {
 bool uninstall_object_visual_loop_hook(std::uint8_t* image) noexcept {
     if (!g_object_visual_loop_installed) return true;
     if (!image) return false;
-    auto* entry = image + kObjectVisualLoopEntryRva;
+    auto* entry = image + object_draw_boundary().visual_entry_rva;
     const void* target = relative_jump_target(entry);
-    if (target != reinterpret_cast<const void*>(&hook_object_visual_loop) &&
+    if (target != object_visual_hook_target() &&
         std::memcmp(entry, g_object_visual_loop_original.data(),
                     kObjectVisualLoopPatchBytes) != 0)
         return false;
-    if (target == reinterpret_cast<const void*>(&hook_object_visual_loop) &&
+    if (target == object_visual_hook_target() &&
         !restore_inline_entry(entry, g_object_visual_loop_original.data(),
                               kObjectVisualLoopPatchBytes))
         return false;
@@ -22599,48 +24125,47 @@ bool install_object_lighting_hook(std::uint8_t* image) {
     if ((!native_tl_requested() && !retained_static_runtime_requested()) ||
         !image)
         return false;
-    auto* entry = image + kObject3dDrawEntryRva;
-    static const std::uint8_t kStock[] = {0x55,0x8b,0xec,0x6a,0xff,0x68,0x77,0xd9,0x71,0x00};
-    static_assert(sizeof(kStock) == kObject3dDrawPatchBytes);
-    const auto owner = resolve_hook_entry(entry, kStock, sizeof(kStock),
-                                          kObject3dDrawPatchBytes);
+    auto* entry = image + object_draw_boundary().draw_entry_rva;
+    const auto& kStock = object_draw_boundary().draw_stock;
+    const auto owner = resolve_hook_entry(entry,kStock.data(),object_draw_boundary().draw_bytes,
+                                          object_draw_boundary().draw_bytes);
     if (owner.owner == EntryOwner::rejected) return false;
     const void* chain_target = owner.dispatcher;
 
     std::memcpy(g_object_3d_draw_original.data(), entry,
-                kObject3dDrawPatchBytes);
+                object_draw_boundary().draw_bytes);
     void* trampoline = const_cast<void*>(chain_target);
     bool owns_trampoline = false;
     if (!trampoline) {
         auto* allocated = static_cast<std::uint8_t*>(VirtualAlloc(
-            nullptr, kObject3dDrawPatchBytes + 5,
+            nullptr, object_draw_boundary().draw_bytes + 5,
             MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
         if (!allocated) return false;
         trampoline = allocated;
         owns_trampoline = true;
-        std::memcpy(allocated, entry, kObject3dDrawPatchBytes);
+        std::memcpy(allocated, entry, object_draw_boundary().draw_bytes);
         if (!write_relative_jump(
-                allocated + kObject3dDrawPatchBytes,
-                entry + kObject3dDrawPatchBytes)) {
+                allocated + object_draw_boundary().draw_bytes,
+                entry + object_draw_boundary().draw_bytes)) {
             VirtualFree(allocated, 0, MEM_RELEASE);
             return false;
         }
         DWORD protection = 0;
-        if (!VirtualProtect(allocated, kObject3dDrawPatchBytes + 5,
+        if (!VirtualProtect(allocated, object_draw_boundary().draw_bytes + 5,
                             PAGE_EXECUTE_READ, &protection)) {
             VirtualFree(allocated, 0, MEM_RELEASE);
             return false;
         }
     }
     if (std::memcmp(entry, g_object_3d_draw_original.data(),
-                    kObject3dDrawPatchBytes) != 0) {
+                    object_draw_boundary().draw_bytes) != 0) {
         if (owns_trampoline) VirtualFree(trampoline, 0, MEM_RELEASE);
         return false;
     }
 
     g_object_3d_draw = reinterpret_cast<Object3dDrawFn>(trampoline);
     DWORD protection = 0;
-    if (!VirtualProtect(entry, kObject3dDrawPatchBytes,
+    if (!VirtualProtect(entry, object_draw_boundary().draw_bytes,
                         PAGE_EXECUTE_READWRITE, &protection)) {
         g_object_3d_draw = nullptr;
         if (owns_trampoline) VirtualFree(trampoline, 0, MEM_RELEASE);
@@ -22649,10 +24174,10 @@ bool install_object_lighting_hook(std::uint8_t* image) {
     const bool wrote = write_relative_jump(
         entry, reinterpret_cast<const void*>(&hook_object_3d_draw));
     if (wrote)
-        std::memset(entry + 5, 0x90, kObject3dDrawPatchBytes - 5);
+        std::memset(entry + 5, 0x90, object_draw_boundary().draw_bytes - 5);
     DWORD ignored = 0;
-    VirtualProtect(entry, kObject3dDrawPatchBytes, protection, &ignored);
-    FlushInstructionCache(GetCurrentProcess(), entry, kObject3dDrawPatchBytes);
+    VirtualProtect(entry, object_draw_boundary().draw_bytes, protection, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), entry, object_draw_boundary().draw_bytes);
     if (!wrote) {
         g_object_3d_draw = nullptr;
         if (owns_trampoline) VirtualFree(trampoline, 0, MEM_RELEASE);
@@ -22668,7 +24193,7 @@ bool install_object_lighting_hook(std::uint8_t* image) {
 
 void uninstall_object_lighting_hook(std::uint8_t* image) {
     if (image && g_object_lighting_hook_installed) {
-        auto* entry = image + kObject3dDrawEntryRva;
+        auto* entry = image + object_draw_boundary().draw_entry_rva;
         bool owns_entry = false;
         if (entry[0] == 0xe9) {
             std::int32_t relative = 0;
@@ -22678,7 +24203,7 @@ void uninstall_object_lighting_hook(std::uint8_t* image) {
         }
         if (owns_entry)
             restore_inline_entry(entry, g_object_3d_draw_original.data(),
-                                 kObject3dDrawPatchBytes);
+                                 object_draw_boundary().draw_bytes);
     }
     if (g_object_3d_draw_trampoline && g_object_3d_draw_trampoline_owned)
         VirtualFree(g_object_3d_draw_trampoline, 0, MEM_RELEASE);
@@ -22691,19 +24216,17 @@ void uninstall_object_lighting_hook(std::uint8_t* image) {
 
 bool install_scene_profile_hooks(std::uint8_t* image) {
     if (!image) return false;
-    auto* world_entry = image + kWorldDrawEntryRva;
-    auto* scene_entry = image + kScene3dDrawEntryRva;
+    auto* world_entry = image + terrain_scene_contract().world;
+    auto* scene_entry = image + terrain_scene_contract().scene;
     // Each entry is stock or an addon hook-framework chain; a chain forwards
     // through the addon's dispatcher. Any other owner rejects the install.
-    std::array<std::uint8_t, kWorldDrawPatchBytes> world_stock{{
-        0x83,0xec,0x50,0x53,0x8b,0x1d,0,0,0,0}};
-    write_u32(world_stock, 6, loaded_address(image, 0x003af080));
-    const std::array<std::uint8_t, kScene3dDrawPatchBytes> scene_stock{{
-        0x55,0x8b,0xec,0x81,0xec,0xa4,0x00,0x00,0x00}};
+    auto world_stock=terrain_scene_contract().world_stock;
+    write_u32(world_stock, 6, loaded_address(image, terrain_scene_contract().scene_prefix_slot));
+    const auto& scene_stock=terrain_scene_contract().scene_stock;
     const auto world_owner = resolve_hook_entry(world_entry, world_stock.data(),
         world_stock.size(), kWorldDrawPatchBytes);
     const auto scene_owner = resolve_hook_entry(scene_entry, scene_stock.data(),
-        scene_stock.size(), kScene3dDrawPatchBytes);
+        terrain_scene_contract().scene_bytes, terrain_scene_contract().scene_bytes);
     if (world_owner.owner == EntryOwner::rejected ||
         scene_owner.owner == EntryOwner::rejected) return false;
     const void* world_chain_target = world_owner.dispatcher;
@@ -22718,7 +24241,7 @@ bool install_scene_profile_hooks(std::uint8_t* image) {
     const std::array<PhaseHook, 2> hooks{{
         {world_entry, kWorldDrawPatchBytes,
          reinterpret_cast<const void*>(&hook_world_draw), g_world_draw_original.data()},
-        {scene_entry, kScene3dDrawPatchBytes,
+        {scene_entry, terrain_scene_contract().scene_bytes,
          reinterpret_cast<const void*>(&hook_scene_3d_draw), g_scene_3d_draw_original.data()},
     }};
     std::array<void*, hooks.size()> trampolines{};
@@ -22800,10 +24323,10 @@ bool install_scene_profile_hooks(std::uint8_t* image) {
 bool uninstall_scene_profile_hooks(std::uint8_t* image) {
     if (!g_scene_profile_hooks_installed) return true;
     if (!image) return false;
-    if (!restore_forwarding_hook(image+kWorldDrawEntryRva,g_world_draw_original.data(),
+    if (!restore_forwarding_hook(image+terrain_scene_contract().world,g_world_draw_original.data(),
             kWorldDrawPatchBytes,reinterpret_cast<const void*>(&hook_world_draw),false,"scene.world") ||
-        !restore_forwarding_hook(image+kScene3dDrawEntryRva,g_scene_3d_draw_original.data(),
-            kScene3dDrawPatchBytes,reinterpret_cast<const void*>(&hook_scene_3d_draw),false,"scene.draw3d"))return false;
+        !restore_forwarding_hook(image+terrain_scene_contract().scene,g_scene_3d_draw_original.data(),
+            terrain_scene_contract().scene_bytes,reinterpret_cast<const void*>(&hook_scene_3d_draw),false,"scene.draw3d"))return false;
     if (g_world_draw_trampoline && g_world_trampoline_owned)
         VirtualFree(g_world_draw_trampoline, 0, MEM_RELEASE);
     if (g_scene_3d_draw_trampoline && g_scene_3d_trampoline_owned)
@@ -22829,39 +24352,44 @@ bool install_terrain_hooks(std::uint8_t* image) {
     if (!native_tl_requested() || !image || g_terrain_set_light) return false;
     // The replacement depends on SetLight's readiness/scratch completion and
     // the border-fog value layout, not just their entry instructions.
-    if (!object_suffix_live_code_matches(image,0x002c6230,0xf0u,0x100d77f70f8ee321ull) ||
-        !object_suffix_live_code_matches(image, kTerrainSetLightEntryRva,
+    if (running_game_sites().report.engine == GameEngine::lia) {
+        for (const auto& range:kLiaTerrainContractRanges)
+            if (!object_suffix_live_code_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return false;
+        if (!signature(image+kLiaTerrainUnitFloatRva,{0x00,0x00,0x80,0x3f})) return false;
+    } else if (!object_suffix_live_code_matches(image,0x002c6230,0xf0u,0x100d77f70f8ee321ull) ||
+        !object_suffix_live_code_matches(image, terrain_scene_contract().light,
             0x27eu, 0x6c79262a441f8f98ull) ||
-        !object_suffix_live_code_matches(image, kWorldFogEntryRva,
+        !object_suffix_live_code_matches(image, object_frame_contract().world_fog_rva,
             0x1b8u, 0x241818ab284b3facull) ||
         !signature(image + 0x003441d0, {0x00,0x00,0x80,0x3f}))
         return false;
-    auto* range_draw_entry = image + kTerrainRangeDrawEntryRva;
-    auto* segment_entry = image + kTerrainSegmentEntryRva;
-    auto* free_entry = image + kTerrainFreeEntryRva;
-    auto* shift_entry = image + kTerrainShiftLayersEntryRva;
-    auto* set_light_entry = image + kTerrainSetLightEntryRva;
-    std::array<std::uint8_t*, kTerrainSetLightCallRvas.size()> set_light_calls{};
+    auto* range_draw_entry = image + terrain_scene_contract().range;
+    auto* segment_entry = image + terrain_scene_contract().segment;
+    auto* free_entry = image + terrain_scene_contract().free_sector;
+    auto* shift_entry = image + terrain_scene_contract().shift;
+    auto* set_light_entry = image + terrain_scene_contract().light;
+    std::array<std::uint8_t*, 2> set_light_calls{};
     for (std::size_t index = 0; index < set_light_calls.size(); ++index)
-        set_light_calls[index] = image + kTerrainSetLightCallRvas[index];
-    static const std::uint8_t kSegmentStock[] = {0x55,0x8b,0xec,0x83,0xec,0x6c};
-    static const std::uint8_t kFreeStock[] = {0x83,0xec,0x08,0x53,0x55};
-    static_assert(sizeof(kSegmentStock) == kTerrainSegmentPatchBytes &&
-                  sizeof(kFreeStock) == kTerrainFreePatchBytes);
+        set_light_calls[index] = image + terrain_scene_contract().light_calls[index];
+    const auto& kSegmentStock=terrain_scene_contract().segment_stock;
+    const auto& kFreeStock=terrain_scene_contract().free_stock;
+    static_assert(std::tuple_size<decltype(TerrainSceneContract::segment_stock)>::value == kTerrainSegmentPatchBytes &&
+                  std::tuple_size<decltype(TerrainSceneContract::free_stock)>::value == kTerrainFreePatchBytes);
     // The range draw is fully replaced and stays exact (a foreign owner is
     // named and rejected visibly); the forwarding entries accept stock bytes
     // or an addon hook-framework chain.
-    static const std::uint8_t kRangeDrawStock[] = {0x83,0xec,0x0c,0x53,0x55,0x56};
-    if (!replaced_entry_is_stock(range_draw_entry, kRangeDrawStock, sizeof(kRangeDrawStock)) ||
-        !hook_entry_usable(segment_entry, kSegmentStock, sizeof(kSegmentStock),
+    const auto& kRangeDrawStock=terrain_scene_contract().range_stock;
+    if (!replaced_entry_is_stock(range_draw_entry, kRangeDrawStock.data(), kRangeDrawStock.size()) ||
+        !hook_entry_usable(segment_entry, kSegmentStock.data(), kSegmentStock.size(),
                            kTerrainSegmentPatchBytes) ||
-        !hook_entry_usable(free_entry, kFreeStock, sizeof(kFreeStock),
+        !hook_entry_usable(free_entry, kFreeStock.data(), kFreeStock.size(),
                            kTerrainFreePatchBytes) ||
-        !signature(shift_entry, {0x51,0x53,0x55,0x56,0x8b,0xf1}) ||
-        !signature(image + kTerrainGetSectorEntryRva,
+        std::memcmp(shift_entry,terrain_scene_contract().shift_stock.data(),terrain_scene_contract().shift_stock.size()) ||
+        !signature(image + terrain_scene_contract().get_sector,
                    {0x64,0xa1,0x00,0x00,0x00,0x00}) ||
-        !signature(set_light_entry, {0x83,0xec,0x10,0x53,0x55}) ||
-        !signature(image + kSectorSetClipFlagEntryRva,
+        std::memcmp(set_light_entry,terrain_scene_contract().light_stock.data(),terrain_scene_contract().light_stock.size()) ||
+        !signature(image + terrain_scene_contract().set_clip,
                    {0x55,0x8b,0x6c,0x24,0x08})) return false;
     for (const auto* call : set_light_calls)
         if (!relative_call_targets(call, set_light_entry)) return false;
@@ -22873,7 +24401,7 @@ bool install_terrain_hooks(std::uint8_t* image) {
         bool needs_continuation;
     };
     const std::array<InlineHook, 3> hooks{{
-        {range_draw_entry, kTerrainRangeDrawPatchBytes,
+        {range_draw_entry, terrain_scene_contract().range_bytes,
          reinterpret_cast<const void*>(&hook_terrain_range_draw),
          g_terrain_range_draw_original.data(), false},
         {segment_entry, kTerrainSegmentPatchBytes,
@@ -22893,7 +24421,7 @@ bool install_terrain_hooks(std::uint8_t* image) {
         std::memcpy(hook.original, hook.entry, hook.bytes);
         if (!hook.needs_continuation) continue;
         trampolines[index] = make_entry_forwarder(
-            hook.entry, index == 1 ? kSegmentStock : kFreeStock, hook.bytes, hook.bytes);
+            hook.entry, index == 1 ? kSegmentStock.data() : kFreeStock.data(), hook.bytes, hook.bytes);
         if (!trampolines[index]) {
             release_trampolines();
             return false;
@@ -22980,8 +24508,8 @@ bool uninstall_terrain_hooks(std::uint8_t* image) {
     if (!image) return false;
     if (g_terrain_set_light) {
         const std::array<std::uint8_t*, 2> set_light_calls{{
-            image + kTerrainSetLightCallRvas[0],
-            image + kTerrainSetLightCallRvas[1]}};
+            image + terrain_scene_contract().light_calls[0],
+            image + terrain_scene_contract().light_calls[1]}};
         bool restored=true;
         for(std::size_t i=0;i<set_light_calls.size();++i)
             restored=restore_forwarding_hook(set_light_calls[i],g_terrain_set_light_call_original[i].data(),
@@ -23004,11 +24532,11 @@ bool uninstall_terrain_hooks(std::uint8_t* image) {
         g_terrain_set_light_cleanup_pending = false;
     }
     if (g_terrain_hooks_installed &&
-        (!restore_forwarding_hook(image+kTerrainRangeDrawEntryRva,g_terrain_range_draw_original.data(),
-            kTerrainRangeDrawPatchBytes,reinterpret_cast<const void*>(&hook_terrain_range_draw),false,"terrain.range") ||
-         !restore_forwarding_hook(image+kTerrainSegmentEntryRva,g_terrain_segment_original.data(),
+        (!restore_forwarding_hook(image+terrain_scene_contract().range,g_terrain_range_draw_original.data(),
+            terrain_scene_contract().range_bytes,reinterpret_cast<const void*>(&hook_terrain_range_draw),false,"terrain.range") ||
+         !restore_forwarding_hook(image+terrain_scene_contract().segment,g_terrain_segment_original.data(),
             kTerrainSegmentPatchBytes,reinterpret_cast<const void*>(&hook_terrain_segment),false,"terrain.segment") ||
-         !restore_forwarding_hook(image+kTerrainFreeEntryRva,g_terrain_free_original.data(),
+         !restore_forwarding_hook(image+terrain_scene_contract().free_sector,g_terrain_free_original.data(),
             kTerrainFreePatchBytes,reinterpret_cast<const void*>(&hook_terrain_free),false,"terrain.free")))return false;
     if (g_terrain_segment_trampoline)
         VirtualFree(g_terrain_segment_trampoline, 0, MEM_RELEASE);
@@ -23032,12 +24560,30 @@ void uninstall_camera_mouse_pitch_hook(std::uint8_t* image);
 void uninstall_global_map_hit_test_hook(std::uint8_t* image);
 
 // ---- Renderer-owned cursor ----
-// Fields (verified in the draw/update routines): +0x0C shown, +0x10 current
-// image info, +0x1C thread exit event, +0x30 clipped destination, +0x50
-// native canvas rectangle, +0x78
-// position, +0x91 initialized, +0x9C thread shutdown, +0xA0 critical section.
-// Image info: +0 surface wrapper (IDirectDrawSurface7 at +0x10), +4/+8 frame
-// size, +0x10 frame, +0x14/+0x18 hotspot.
+// The two shipped cursor layouts have independently verified field offsets.
+// Both keep animation/position in the game and replace its three screen writers
+// whole. These entry patches never replay or call an original prologue.
+struct CursorContract {
+    std::array<std::uint32_t,3> entries;
+    std::uint32_t update, screen_state;
+    std::uint16_t visible, image_info, copy_rect, destination, x, y;
+    std::uint16_t mode, initialized, shutdown, critical_section, exit_event;
+    // Native canvas rectangle Init caches (base +0x50); 0 where unverified.
+    std::uint16_t canvas;
+    std::array<std::array<std::uint8_t,5>,3> prefixes;
+};
+constexpr CursorContract kBaseCursorContract{
+    {kCursorDrawEntryRva,kCursorThreadEntryRva,kCursorRestoreEntryRva},
+    kCursorUpdateEntryRva,kCursorScreenStateRva,
+    0x0c,0x10,0x20,0x30,0x78,0x7c,0x90,0x91,0x9c,0xa0,0x1c,0x50,
+    {{{0x83,0xec,0x10,0x53,0x55},{0x81,0xec,0xe0,0x00,0x00},{0x83,0xec,0x20,0x53,0x56}}}};
+constexpr CursorContract kLiaCursorContract{
+    {0x00123630,0x00123770,0x001233c0},0x00122e00,0x002a2598,
+    0x08,0x0c,0x1c,0x2c,0x74,0x78,0x8c,0x8d,0x98,0x9c,0x18,0,
+    {{{0x83,0xec,0x10,0x57,0x8b},{0x81,0xec,0xe0,0x00,0x00},{0x83,0xec,0x20,0x53,0x56}}}};
+const CursorContract* g_cursor_contract = &kBaseCursorContract;
+// Image info is unchanged: wrapper +0 (DD surface +10), frame size +4/+8,
+// current frame +10, hotspot +14/+18.
 using CursorUpdateFn = void (__thiscall*)(void*);
 CursorUpdateFn g_cursor_update = nullptr;
 const std::uint8_t* g_cursor_screen_state = nullptr;
@@ -23055,22 +24601,22 @@ void owned_cursor_step(std::uint8_t* self) noexcept {
     __try {
         if (input_focus_trace_enabled())
             InterlockedExchange(&g_input_trace_cursor_flags,
-                (g_cursor_screen_state[4] & 1u) | (self[0x91] ? 2 : 0) |
-                (self[0x90] ? 4 : 0) |
-                (*reinterpret_cast<const LONG*>(self + 0x9c) ? 8 : 0));
-        if ((g_cursor_screen_state[4] & 1u) && self[0x91]) {
+                (g_cursor_screen_state[4] & 1u) | (self[g_cursor_contract->initialized] ? 2 : 0) |
+                (self[g_cursor_contract->mode] ? 4 : 0) |
+                (*reinterpret_cast<const LONG*>(self + g_cursor_contract->shutdown) ? 8 : 0));
+        if ((g_cursor_screen_state[4] & 1u) && self[g_cursor_contract->initialized]) {
             // Init caches this rectangle once. Live Apply changes the logical
             // canvas; use the same current span as input/output conversion
             // before native position clamping and destination intersection.
-            if (widescreen_interface_owned()) {
+            if (g_cursor_contract->canvas && widescreen_interface_owned()) {
                 const auto& canvas = widescreen_layout();
-                *reinterpret_cast<RECT*>(self + 0x50) =
+                *reinterpret_cast<RECT*>(self + g_cursor_contract->canvas) =
                     {0, 0, LONG(std::lround(canvas.width)), LONG(std::lround(canvas.height))};
             }
             g_cursor_update(self);
-            auto* destination = reinterpret_cast<RECT*>(self + 0x30);
-            if (!IsRectEmpty(destination) && *reinterpret_cast<const BOOL*>(self + 0x0c)) {
-                const auto* info = *reinterpret_cast<const std::uint8_t* const*>(self + 0x10);
+            auto* destination = reinterpret_cast<RECT*>(self + g_cursor_contract->destination);
+            if (!IsRectEmpty(destination) && *reinterpret_cast<const BOOL*>(self + g_cursor_contract->visible)) {
+                const auto* info = *reinterpret_cast<const std::uint8_t* const*>(self + g_cursor_contract->image_info);
                 const auto* wrapper = *reinterpret_cast<const std::uint8_t* const*>(info);
                 const auto width = *reinterpret_cast<const LONG*>(info + 4);
                 const auto height = *reinterpret_cast<const LONG*>(info + 8);
@@ -23078,11 +24624,11 @@ void owned_cursor_step(std::uint8_t* self) noexcept {
                 frame.surface = *reinterpret_cast<void* const*>(wrapper + 0x10);
                 frame.hot_x = *reinterpret_cast<const LONG*>(info + 0x14);
                 frame.hot_y = *reinterpret_cast<const LONG*>(info + 0x18);
-                frame.x = *reinterpret_cast<const LONG*>(self + 0x78) - frame.hot_x;
-                frame.y = *reinterpret_cast<const LONG*>(self + 0x7c) - frame.hot_y;
+                frame.x = *reinterpret_cast<const LONG*>(self + g_cursor_contract->x) - frame.hot_x;
+                frame.y = *reinterpret_cast<const LONG*>(self + g_cursor_contract->y) - frame.hot_y;
                 frame.source = {index * width, 0, index * width + width, height};
                 frame.visible = frame.surface && width > 0 && height > 0;
-                *reinterpret_cast<RECT*>(self + 0x20) = *destination;
+                *reinterpret_cast<RECT*>(self + g_cursor_contract->copy_rect) = *destination;
             }
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) { frame = {}; }
@@ -23101,18 +24647,18 @@ void __fastcall hook_cursor_draw(void* self, void*) {
 #if !defined(EID3D11_EMBEDDED)
 void __fastcall hook_cursor_thread(void* self, void*) {
     auto* bytes = static_cast<std::uint8_t*>(self);
-    if (!bytes[0x91]) return;
-    auto* lock = reinterpret_cast<CRITICAL_SECTION*>(bytes + 0xa0);
+    if (!bytes[g_cursor_contract->initialized]) return;
+    auto* lock = reinterpret_cast<CRITICAL_SECTION*>(bytes + g_cursor_contract->critical_section);
     for (;;) {
         const DWORD start = GetTickCount();
         EnterCriticalSection(lock);
         owned_cursor_step(bytes);
         LeaveCriticalSection(lock);
-        if (*reinterpret_cast<volatile LONG*>(bytes + 0x9c)) break;
+        if (*reinterpret_cast<volatile LONG*>(bytes + g_cursor_contract->shutdown)) break;
         const DWORD elapsed = GetTickCount() - start;
         if (elapsed < 41) Sleep(41 - elapsed);
     }
-    SetEvent(*reinterpret_cast<HANDLE*>(bytes + 0x1c));
+    SetEvent(*reinterpret_cast<HANDLE*>(bytes + g_cursor_contract->exit_event));
 }
 #endif // !EID3D11_EMBEDDED
 
@@ -23123,17 +24669,31 @@ void __fastcall hook_cursor_restore(void*, void*, int) {}
 
 bool install_owned_cursor_hooks(std::uint8_t* image) {
     if (!image) return false;
-    const std::array<std::uint32_t,3> rvas{kCursorDrawEntryRva,kCursorThreadEntryRva,kCursorRestoreEntryRva};
-    // Whole stock instructions (the thread's first one is 6 bytes) so an
-    // addon hook-framework chain is recognised and named, never overwritten.
-    const std::array<std::array<std::uint8_t,7>,3> expected{{{0x83,0xec,0x10,0x53,0x55,0x56,0x57},
-        {0x81,0xec,0xe0,0x00,0x00,0x00,0x53},{0x83,0xec,0x20,0x53,0x56,0x8b,0xf1}}};
+    const auto* contract = running_game_sites().report.engine == GameEngine::lia
+        ? &kLiaCursorContract : &kBaseCursorContract;
+    const auto& rvas = contract->entries;
+    const auto& expected = contract->prefixes;
+    if (contract == &kLiaCursorContract &&
+        (!object_suffix_live_code_matches(image,contract->entries[0],0x13cu,0x0aa36f9a409da6d5ull) ||
+         !object_suffix_live_code_matches(image,contract->entries[1],0x490u,0x133a47eb98672df5ull) ||
+         !object_suffix_live_code_matches(image,contract->entries[2],0xa4u,0x3418e3f63c70a434ull) ||
+         !object_suffix_live_code_matches(image,contract->update,0x1cbu,0xcc32703c2873a808ull) ||
+         !signature(image + 0x000926e0, {0xb8,0x98,0x25,0x6a,0x00,0xc3})))
+        return false;
     const std::array<const void*,3> targets{reinterpret_cast<const void*>(&hook_cursor_draw),
         reinterpret_cast<const void*>(&hook_cursor_thread),reinterpret_cast<const void*>(&hook_cursor_restore)};
+    // Whole stock instructions on the base layout (the thread's first one is 6
+    // bytes) so an addon hook-framework chain is recognised and named, never
+    // overwritten; the LiA prefixes are its verified five bytes.
+    const std::array<std::array<std::uint8_t,7>,3> base_expected{{{0x83,0xec,0x10,0x53,0x55,0x56,0x57},
+        {0x81,0xec,0xe0,0x00,0x00,0x00,0x53},{0x83,0xec,0x20,0x53,0x56,0x8b,0xf1}}};
     for (std::size_t i = 0; i < rvas.size(); ++i)
-        if (!replaced_entry_is_stock(image + rvas[i], expected[i].data(), expected[i].size())) return false;
-    g_cursor_update = reinterpret_cast<CursorUpdateFn>(image + kCursorUpdateEntryRva);
-    g_cursor_screen_state = image + kCursorScreenStateRva;
+        if (contract == &kLiaCursorContract ? !replaced_entry_is_stock(image + rvas[i], expected[i].data(), 5)
+                                            : !replaced_entry_is_stock(image + rvas[i], base_expected[i].data(), base_expected[i].size()))
+            return false;
+    g_cursor_contract = contract;
+    g_cursor_update = reinterpret_cast<CursorUpdateFn>(image + contract->update);
+    g_cursor_screen_state = image + contract->screen_state;
     for (std::size_t i = 0; i < rvas.size(); ++i) {
         auto* entry = image + rvas[i];
         std::memcpy(g_cursor_originals[i].data(), entry, 5);
@@ -23155,19 +24715,326 @@ bool install_owned_cursor_hooks(std::uint8_t* image) {
 
 void uninstall_owned_cursor_hooks(std::uint8_t* image) {
     if (!image || !g_owned_cursor_installed) return;
-    const std::array<std::uint32_t,3> rvas{kCursorDrawEntryRva,kCursorThreadEntryRva,kCursorRestoreEntryRva};
+    const auto& rvas = g_cursor_contract->entries;
     for (std::size_t i = 0; i < rvas.size(); ++i)
         restore_inline_entry(image + rvas[i], g_cursor_originals[i].data(), 5);
     g_owned_cursor_installed = false;
 }
 
+// Experimental displayed XY pan only. The game still owns every Step,
+// camera field, terrain membership and LOD input. The three admitted calls
+// distinguish the client-segment contribution from the split wall-time one.
+struct CameraPanProfile {
+    std::uint32_t object, step, view, tick, backlog;
+    std::array<std::uint32_t,4> calls;
+};
+constexpr CameraPanProfile kBaseCameraPanProfile{
+    kCameraPanObjectRva,kOuterFixedStepTargetRva,kCameraPanViewEntryRva,
+    kCameraPanTickLengthRva,kCameraPanBacklogRva,
+    {{kOuterFirstFixedStepCallRva,kOuterSecondFixedStepCallRva,
+      kOuterThirdFixedStepCallRva,kCameraPanViewCallRva}}};
+constexpr CameraPanProfile kLiaCameraPanProfile{
+    kLiaCameraRva,kLiaCameraPanStepRva,kLiaCameraPanViewEntryRva,
+    kLiaCameraPanTickLengthRva,kLiaCameraPanBacklogRva,
+    {{kLiaCameraPanStepCalls[0],kLiaCameraPanStepCalls[1],
+      kLiaCameraPanStepCalls[2],kLiaCameraPanViewCallRva}}};
+const CameraPanProfile& camera_pan_profile() noexcept {
+    return running_game_sites().report.engine==GameEngine::lia ?
+        kLiaCameraPanProfile : kBaseCameraPanProfile;
+}
+using CameraPanViewFn = float* (__thiscall*)(void*, float*, const void*);
+using CameraPanVoidViewFn = void (__thiscall*)(void*, float*, const void*);
+
+struct CameraPanSample {
+    std::array<float, 3> position{}, anchor{};
+    std::array<float, 4> rotation{}, heading{};
+    float pitch = 0.f, distance = 0.f;
+    std::uint32_t flags = 0;
+};
+struct CameraPanHistory {
+    CameraPanSample last{};
+    std::array<float, 2> tick_delta{};
+    float back = 0.f;
+    bool have_last = false, slow_frame = false;
+};
+struct CameraPanHooks {
+    std::uint8_t* image = nullptr;
+    OuterFixedStepFn step = nullptr;
+    CameraPanViewFn view = nullptr;
+    std::array<std::array<std::uint8_t, 5>, 4> original{};
+    CameraPanHistory history{};
+    std::uint64_t epoch = 0, revision = 0;
+    bool installed = false;
+} g_camera_pan;
+std::atomic<bool> g_camera_pan_requested{false};
+std::atomic<std::uint64_t> g_camera_pan_revision{1};
+std::atomic<const char*> g_camera_pan_unavailable{"camera smoothing is not initialized"};
+
+void reject_camera_pan(const char* reason) noexcept {
+    g_camera_pan.history = {};
+    if (!g_camera_pan_unavailable.exchange(reason, std::memory_order_acq_rel))
+        append_bridge_event("camera_pan_smoothing_rejected", reason, false);
+}
+
+bool camera_pan_active() noexcept {
+    // OFF must not even query the lifecycle owner or read camera state.
+    if (!g_camera_pan_requested.load(std::memory_order_acquire) ||
+        g_camera_pan_unavailable.load(std::memory_order_acquire)) {
+        g_camera_pan.history = {};
+        return false;
+    }
+    const auto revision = g_camera_pan_revision.load(std::memory_order_acquire);
+    const auto epoch = bridge_current_world_epoch();
+    if (revision != g_camera_pan.revision || epoch != g_camera_pan.epoch) {
+        g_camera_pan.history = {};
+        g_camera_pan.revision = revision;
+        g_camera_pan.epoch = epoch;
+    }
+    if (!epoch) {
+        g_camera_pan.history = {};
+        return false;
+    }
+    return true;
+}
+
+bool camera_pan_sample(const void* camera, CameraPanSample& out) noexcept {
+    // These are the singleton and fields read/written by the verified
+    // Step, view builder and placement/load writers, never a cache identity.
+    if (camera != g_camera_pan.image + camera_pan_profile().object) return false;
+    const auto* bytes = static_cast<const std::uint8_t*>(camera);
+    __try {
+        std::memcpy(out.position.data(), bytes + 0x1c, sizeof(out.position));
+        std::memcpy(out.rotation.data(), bytes + 0x34, sizeof(out.rotation));
+        std::memcpy(out.anchor.data(), bytes + 0xe0, sizeof(out.anchor));
+        std::memcpy(out.heading.data(), bytes + kCameraYawOrientationOffset, sizeof(out.heading));
+        out.pitch = *reinterpret_cast<const float*>(bytes + kCameraPitchAngleOffset);
+        out.distance = *reinterpret_cast<const float*>(bytes + 0xf0);
+        out.flags = *reinterpret_cast<const std::uint32_t*>(bytes + kCameraFlagsOffset);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+    return finite_vector(out.position.data(), out.position.size()) &&
+        finite_vector(out.rotation.data(), out.rotation.size()) &&
+        finite_vector(out.anchor.data(), out.anchor.size()) &&
+        finite_vector(out.heading.data(), out.heading.size()) &&
+        std::isfinite(out.pitch) && std::isfinite(out.distance);
+}
+
+__declspec(noinline) void __fastcall hook_camera_pan_step(void* self, void*, float dt) {
+    const auto* caller = static_cast<const std::uint8_t*>(_ReturnAddress());
+    if (!camera_pan_active()) { g_camera_pan.step(self, dt); return; }
+    const auto& profile = camera_pan_profile();
+    CameraPanSample before{}, after{};
+    bool sample = true;
+    const auto revision = g_camera_pan.revision, epoch = g_camera_pan.epoch;
+    if (sample && !camera_pan_sample(self, before)) {
+        reject_camera_pan("camera state is unavailable");
+        sample = false;
+    }
+    if (sample && ((before.flags & 0x60u) ||
+        (g_camera_pan.history.have_last &&
+         std::memcmp(&before, &g_camera_pan.history.last, sizeof(before)) != 0)))
+        g_camera_pan.history = {}; // approved sampled external-placement reset
+
+    g_camera_pan.step(self, dt); // original time/input/state, exactly once
+
+    if (!sample || !camera_pan_active() || revision != g_camera_pan.revision ||
+        epoch != g_camera_pan.epoch) return;
+    if (!camera_pan_sample(self, after)) {
+        reject_camera_pan("completed camera state is unavailable");
+        return;
+    }
+    auto& history = g_camera_pan.history;
+    if (after.flags & 0x60u) { history = {}; return; } // recorded/scripted placement
+    history.last = after;
+    history.have_last = true;
+    if (caller == g_camera_pan.image + profile.calls[0] + 5u) {
+        history.tick_delta = {after.anchor[0] - before.anchor[0],
+                              after.anchor[1] - before.anchor[1]};
+        history.back = 1.f;
+    } else if (caller == g_camera_pan.image + profile.calls[1] + 5u) {
+        history.slow_frame = true;
+    } else if (caller == g_camera_pan.image + profile.calls[2] + 5u) {
+        // The selected clock producer establishes tick length and client
+        // backlog. Use that owner's progress, not an assumed tick rate or QPC.
+        const auto tick = *reinterpret_cast<const std::uint32_t*>(
+            g_camera_pan.image + profile.tick);
+        const auto backlog = *reinterpret_cast<const std::uint32_t*>(
+            g_camera_pan.image + profile.backlog);
+        if (!tick) { reject_camera_pan("camera clock is unavailable"); return; }
+        if (history.slow_frame) history.tick_delta = {};
+        const float back = 1.f - std::clamp(float(backlog) / float(tick), 0.f, 1.f);
+        history.back = (std::min)(history.back, back);
+        history.slow_frame = false;
+    }
+}
+
+void correct_camera_pan_view(float* matrix, const void* camera, bool returned_matrix) {
+    if (!camera_pan_active()) return;
+    CameraPanSample current{};
+    if (!camera_pan_sample(camera, current)) {
+        reject_camera_pan("displayed camera state is unavailable");
+        return;
+    }
+    auto& history = g_camera_pan.history;
+    if (!history.have_last || (current.flags & 0x60u) ||
+        std::memcmp(&current, &history.last, sizeof(current)) != 0) {
+        history = {}; // also catches a placement after the last Step
+        return;
+    }
+    const float x = history.tick_delta[0] * history.back;
+    const float y = history.tick_delta[1] * history.back;
+    if (x == 0.f && y == 0.f) return;
+    // Both verified writers use row axes and -dot(axis, position) in column 3.
+    // Changing only this column publishes the same displayed XY translation
+    // to every derived world transform, screen extent and last-view pick ray.
+    if (!matrix || !returned_matrix) {
+        reject_camera_pan("camera view is unavailable");
+        return;
+    }
+    std::array<float, 3> translation{};
+    for (std::size_t row = 0; row != translation.size(); ++row)
+        translation[row] = matrix[row * 4u + 3u] +
+            matrix[row * 4u] * x + matrix[row * 4u + 1u] * y;
+    if (!finite_vector(translation.data(), translation.size())) {
+        reject_camera_pan("camera view is invalid");
+        return;
+    }
+    for (std::size_t row = 0; row != translation.size(); ++row)
+        matrix[row * 4u + 3u] = translation[row];
+}
+
+float* __fastcall hook_camera_pan_view(void* self, void*, float* matrix, const void* camera) {
+    float* result = g_camera_pan.view(self, matrix, camera);
+    correct_camera_pan_view(matrix,camera,result==matrix);
+    return result;
+}
+
+void __fastcall hook_lia_camera_pan_view(void* self, void*, float* matrix, const void* camera) {
+    // C7 consumes both stack arguments with RET 8; ECX is ignored and EAX is
+    // not a result. Preserve that native ABI, then correct before publication.
+    const auto original = reinterpret_cast<CameraPanVoidViewFn>(
+        g_camera_pan.image+kLiaCameraPanViewEntryRva);
+    original(self,matrix,camera);
+    correct_camera_pan_view(matrix,camera,true);
+}
+
+const void* camera_pan_hook(std::size_t index) noexcept {
+    if (index!=3) return reinterpret_cast<const void*>(&hook_camera_pan_step);
+    return running_game_sites().report.engine==GameEngine::lia ?
+        reinterpret_cast<const void*>(&hook_lia_camera_pan_view) :
+        reinterpret_cast<const void*>(&hook_camera_pan_view);
+}
+
+bool uninstall_camera_pan_hooks() noexcept {
+    if (!g_camera_pan.installed) return true;
+    const auto& profile = camera_pan_profile();
+    g_camera_pan_unavailable.store("camera smoothing is being released", std::memory_order_release);
+    g_camera_pan.history = {};
+    bool restored = true;
+    for (std::size_t i = 0; i != profile.calls.size(); ++i) {
+        auto* call = g_camera_pan.image + profile.calls[i];
+        if (relative_call_targets(call, camera_pan_hook(i)))
+            restored &= restore_inline_entry(call, g_camera_pan.original[i].data(), 5);
+        else if (std::memcmp(call, g_camera_pan.original[i].data(), 5) != 0)
+            restored = false; // preserve a foreign owner and our live chain
+    }
+    if (restored) {
+        g_camera_pan = {};
+        g_camera_pan_unavailable.store("camera smoothing is not initialized", std::memory_order_release);
+    }
+    return restored;
+}
+
+bool install_camera_pan_hooks(std::uint8_t* image) noexcept {
+    // Admit the verified native camera contract, not a game/mod name or
+    // whole-module fingerprint. Addon absence is not evidence of ownership.
+    const auto engine = running_game_sites().report.engine;
+    const bool lia = engine==GameEngine::lia;
+    if ((engine != GameEngine::base && !lia) ||
+        !game_sites_ok(GameSiteGroup::camera_pan)) {
+        g_camera_pan_unavailable.store("camera ABI is not verified");
+        return false;
+    }
+    const auto& profile = camera_pan_profile();
+    // RMB yaw/pitch/remainder have already installed, but all their code
+    // patches are at input callers outside these complete native bodies.
+    if (lia) {
+        for (const auto& range:kLiaCameraPanRanges)
+            if (!lia_live_contract_range_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) {
+                g_camera_pan_unavailable.store("LiA camera or picking contract changed");
+                return false;
+            }
+    } else {
+        if (!object_suffix_live_code_matches(image, kOuterFixedStepTargetRva,
+                kCameraPanStepBodyBytes, kCameraPanStepBodyHash)) {
+            g_camera_pan_unavailable.store("camera update code changed or has another hook");
+            return false;
+        }
+        if (!object_suffix_live_code_matches(image, kCameraPanViewEntryRva,
+                kCameraPanViewBodyBytes, kCameraPanViewBodyHash)) {
+            g_camera_pan_unavailable.store("camera view code changed or has another hook");
+            return false;
+        }
+        if (!signature(image + kCameraPanClockOperandsRva,
+                {0xa1,0x34,0xff,0x78,0x00,0x8b,0x0d,0x68,0xbc,0x79,0x00})) {
+            g_camera_pan_unavailable.store("camera timing instructions changed");
+            return false;
+        }
+    }
+    if (!relative_call_targets(image + profile.calls[3], image + profile.view)) {
+        g_camera_pan_unavailable.store("camera view call has another owner");
+        return false;
+    }
+    const auto step = reinterpret_cast<OuterFixedStepFn>(image + profile.step);
+    const void* chain = g_outer_frame_timing_hooks_installed ?
+        reinterpret_cast<const void*>(&hook_outer_fixed_step) : reinterpret_cast<const void*>(step);
+    for (std::size_t i = 0; i != profile.calls.size(); ++i) {
+        auto* call = image + profile.calls[i];
+        if (i != 3 && !relative_call_targets(call, chain)) {
+            g_camera_pan_unavailable.store("camera update calls have another owner");
+            return false;
+        }
+        if (!relative_call_fits(call, camera_pan_hook(i))) {
+            g_camera_pan_unavailable.store("camera hooks are out of range");
+            return false;
+        }
+    }
+    g_camera_pan.image = image;
+    g_camera_pan.step = reinterpret_cast<OuterFixedStepFn>(const_cast<void*>(chain));
+    g_camera_pan.view = lia ? nullptr : reinterpret_cast<CameraPanViewFn>(image + profile.view);
+    for (std::size_t i = 0; i != profile.calls.size(); ++i)
+        std::memcpy(g_camera_pan.original[i].data(), image + profile.calls[i], 5);
+    g_camera_pan.installed = true;
+    for (std::size_t i = 0; i != profile.calls.size(); ++i) {
+        auto* call = image + profile.calls[i];
+        DWORD protection = 0, ignored = 0;
+        bool wrote = VirtualProtect(call, 5, PAGE_EXECUTE_READWRITE, &protection) != FALSE;
+        if (wrote) {
+            wrote = write_relative_call(call, camera_pan_hook(i));
+            wrote = (VirtualProtect(call, 5, protection, &ignored) != FALSE) && wrote;
+            FlushInstructionCache(GetCurrentProcess(), call, 5);
+        }
+        if (!wrote) {
+            (void)uninstall_camera_pan_hooks();
+            g_camera_pan_unavailable.store("camera hooks could not be installed");
+            return false;
+        }
+    }
+    g_camera_pan_unavailable.store(nullptr, std::memory_order_release);
+    return true;
+}
+
 bool install_camera_mouse_yaw_hook(std::uint8_t* image) {
-    auto* call = image + kCameraMouseYawCallRva;
+    if (running_game_sites().report.engine == GameEngine::lia)
+        for (const auto& range:kLiaCameraMouseRanges)
+            if (!object_suffix_live_code_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return false;
+    auto* call = image + camera_mouse_contract().yaw_call;
     if (call[0] != 0xe8) return false;
     std::int32_t relative = 0;
     std::memcpy(&relative, call + 1, sizeof(relative));
     if (call + kCameraMouseYawCallBytes + relative !=
-        image + kCameraSetRotateValueRva) return false;
+        image + camera_mouse_contract().yaw_setter) return false;
 
     std::memcpy(g_camera_mouse_yaw_original.data(), call,
                 kCameraMouseYawCallBytes);
@@ -23186,23 +25053,45 @@ bool install_camera_mouse_yaw_hook(std::uint8_t* image) {
 
 // The zone hit-test frame (#200): the original GenerateHitTestDDS runs
 // unchanged between the renderer's begin and end.
+struct GlobalMapHitTestContract { std::uint32_t call, entry; };
+const GlobalMapHitTestContract& global_map_hit_test_contract() noexcept {
+    static constexpr GlobalMapHitTestContract base{kGlobalMapHitTestCallRva,kGlobalMapHitTestEntryRva};
+    static constexpr GlobalMapHitTestContract lia{0x001606d8,0x0015fdc0};
+    return running_game_sites().report.engine==GameEngine::lia ? lia : base;
+}
 void __fastcall hook_global_map_hit_test(void* self, void*) {
     using GenerateHitTestFn = void(__thiscall*)(void*);
-    const auto original = reinterpret_cast<GenerateHitTestFn>(g_global_map_hit_test_image + kGlobalMapHitTestEntryRva);
+    const auto original = reinterpret_cast<GenerateHitTestFn>(g_global_map_hit_test_image + global_map_hit_test_contract().entry);
+    // The supported map activation invokes OnIdle, and therefore this first
+    // mask, before returning to hook_map_preview_activate. Its native section
+    // list is complete here. Bind now so this non-presented one-shot frame
+    // uploads the owned scene with its real placed state before colour reveal.
+    if(g_map_preview_enabled && g_map_preview_hooks_ready) {
+        g_map_preview_active=true;
+        publish_map_preview(self);
+    }
     void* const context = g_hit_test_frame_context;
     const HitTestFrameFn sink = g_hit_test_frame_sink;
     if (sink) sink(context, true);
-    original(self);
+    const unsigned previous_depth=g_map_preview_hit_test_depth++;
+    __try { original(self); }
+    __finally { g_map_preview_hit_test_depth=previous_depth; }
     if (sink) sink(context, false);
 }
 
 bool install_global_map_hit_test_hook(std::uint8_t* image) {
-    if (!signature(image + kGlobalMapHitTestEntryRva, {0x53, 0x56, 0x8b, 0xf1, 0x33, 0xdb})) return false;
-    auto* call = image + kGlobalMapHitTestCallRva;
+    const bool lia=running_game_sites().report.engine==GameEngine::lia;
+    const auto& sites=global_map_hit_test_contract();
+    if (lia) {
+        for (const auto& range:kLiaGlobalMapHitTestRanges)
+            if (!lia_live_contract_range_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return false;
+    } else if (!signature(image + sites.entry, {0x53,0x56,0x8b,0xf1,0x33,0xdb})) return false;
+    auto* call = image + sites.call;
     if (call[0] != 0xe8) return false;
     std::int32_t relative = 0;
     std::memcpy(&relative, call + 1, sizeof(relative));
-    if (call + kGlobalMapHitTestCallBytes + relative != image + kGlobalMapHitTestEntryRva) return false;
+    if (call + kGlobalMapHitTestCallBytes + relative != image + sites.entry) return false;
     std::memcpy(g_global_map_hit_test_original.data(), call, kGlobalMapHitTestCallBytes);
     g_global_map_hit_test_image = image;
     DWORD protection = 0;
@@ -23221,7 +25110,7 @@ bool install_global_map_hit_test_hook(std::uint8_t* image) {
 // Restores the call only while it is still ours (a later hook keeps it).
 void uninstall_global_map_hit_test_hook(std::uint8_t* image) {
     if (!image || g_global_map_hit_test_image != image) return;
-    auto* call = image + kGlobalMapHitTestCallRva;
+    auto* call = image + global_map_hit_test_contract().call;
     std::int32_t relative = 0;
     std::memcpy(&relative, call + 1, sizeof(relative));
     if (call[0] == 0xe8 && call + kGlobalMapHitTestCallBytes + relative ==
@@ -23238,18 +25127,22 @@ void uninstall_global_map_hit_test_hook(std::uint8_t* image) {
 }
 
 bool install_camera_mouse_pitch_hook(std::uint8_t* image) {
-    if (!signature(image + kCameraPitchInputRva,
-            {0xd9,0x05,0xd4,0xbd,0x79,0x00,0xd8,0x0d,0xd0,0xbd,0x79,0x00}) ||
-        !signature(image + kCameraPitchInputScaleRva,
-            {0xd8,0x0d,0xb4,0xba,0x73,0x00}) ||
-        !signature(image + kCameraPitchInputScaleValueRva,
-            {0x00,0x00,0xfa,0x43})) return false;
-    auto* call = image + kCameraMousePitchCallRva;
+    const auto& contract = camera_mouse_contract();
+    const bool lia = running_game_sites().report.engine == GameEngine::lia;
+    const bool input_matches = lia ?
+        signature(image + contract.pitch_input,
+            {0xd9,0x05,0xc4,0x69,0x67,0x00,0x51,0xd8,0x0d,0xc0,0x69,0x67,0x00}) &&
+        signature(image + contract.scale,{0xd8,0x0d,0xe4,0x0e,0x62,0x00}) :
+        signature(image + contract.pitch_input,
+            {0xd9,0x05,0xd4,0xbd,0x79,0x00,0xd8,0x0d,0xd0,0xbd,0x79,0x00}) &&
+        signature(image + contract.scale,{0xd8,0x0d,0xb4,0xba,0x73,0x00});
+    if (!input_matches || !signature(image + contract.scale_value,{0x00,0x00,0xfa,0x43})) return false;
+    auto* call = image + camera_mouse_contract().pitch_call;
     if (call[0] != 0xe8) return false;
     std::int32_t relative = 0;
     std::memcpy(&relative, call + 1, sizeof(relative));
     if (call + kCameraMousePitchCallBytes + relative !=
-        image + kCameraSetPitchValueRva) return false;
+        image + camera_mouse_contract().pitch_setter) return false;
 
     std::memcpy(g_camera_mouse_pitch_original.data(), call,
                 kCameraMousePitchCallBytes);
@@ -23268,7 +25161,7 @@ bool install_camera_mouse_pitch_hook(std::uint8_t* image) {
 
 void uninstall_camera_mouse_yaw_hook(std::uint8_t* image) {
     if (!image || !g_camera_mouse_yaw_installed) return;
-    auto* call = image + kCameraMouseYawCallRva;
+    auto* call = image + camera_mouse_contract().yaw_call;
     bool owns_call = false;
     if (call[0] == 0xe8) {
         std::int32_t relative = 0;
@@ -23293,7 +25186,7 @@ void uninstall_camera_mouse_yaw_hook(std::uint8_t* image) {
 
 void uninstall_camera_mouse_pitch_hook(std::uint8_t* image) {
     if (!image || !g_camera_mouse_pitch_installed) return;
-    auto* call = image + kCameraMousePitchCallRva;
+    auto* call = image + camera_mouse_contract().pitch_call;
     bool owns_call = false;
     if (call[0] == 0xe8) {
         std::int32_t relative = 0;
@@ -23337,6 +25230,23 @@ constexpr std::uint32_t kHighlightPickFirstUnitRva = 0x00165d00;
 constexpr std::uint32_t kHighlightCursorRva = 0x003c7bd8;      // theCursor; +0x18 current mode
 constexpr std::uint32_t kHighlightInterfaceRva = 0x003c7d50;   // theInterface; +0x34/+0x38 screen stack
 constexpr std::uint32_t kHighlightBaseScreenVtableRva = 0x003405ac; // CI3DScreenBase primary table
+struct HighlightContract {
+    std::array<std::uint32_t,4> calls;
+    std::uint32_t set_mode, check_action, pick_unit, cursor, interface_object, base_screen_table;
+    std::uint32_t pause_getter, pause_value;
+    std::size_t cursor_shape;
+};
+const HighlightContract& highlight_contract() noexcept {
+    static constexpr HighlightContract base{
+        {{kHighlightMissionCursorResetCallRva,kHighlightMissionCheckActionCallRva,
+          kHighlightBaseCursorResetCallRva,kHighlightBasePickUnitCallRva}},
+        kHighlightCursorSetModeRva,kHighlightCheckActionRva,kHighlightPickFirstUnitRva,
+        kHighlightCursorRva,kHighlightInterfaceRva,kHighlightBaseScreenVtableRva,0x178d50,0x3af624,0x18};
+    static constexpr HighlightContract lia{
+        {{0x176e9d,0x176fbd,0x1415f6,0x1416a8}},
+        0x1235c0,0x174e40,0xd8ed0,0x2b8918,0x2b8a38,0x22fe4c,0xdd5d0,0x2a2a44,0x14};
+    return running_game_sites().report.engine==GameEngine::lia ? lia : base;
+}
 constexpr std::uint32_t kUnitVisibleFlag = 0x00400000u;
 using HighlightSetModeFn = int (__thiscall*)(void*, int);
 using HighlightCheckActionFn = void (__thiscall*)(void*, void*, LONG, LONG);
@@ -23366,8 +25276,9 @@ void set_highlight_hover(VisualResourceIncarnation resource, std::int32_t mode) 
 
 #if !defined(EID3D11_EMBEDDED)
 bool highlight_cursor_mode(std::int32_t& mode) noexcept {
+    const auto& sites=highlight_contract();
     return g_visual_game_image &&
-        visual_read(g_visual_game_image+kHighlightCursorRva, 0x18, mode);
+        visual_read(g_visual_game_image+sites.cursor, sites.cursor_shape, mode);
 }
 
 } // namespace
@@ -23411,7 +25322,7 @@ void __fastcall hook_highlight_check_action(void* screen, void*, void* unit, LON
     case HoverTarget::picked_object: {
         // PickFirstMapObject (5659D0) leaves vciLastPicked (+0x100) on the
         // 24-byte screen-rect entry of the object it returned; +4 is its ID.
-        const auto* world = g_visual_game_image + kVisualClientWorldRva;
+        const auto* world = g_visual_game_image + world_clock_contract().client_rva;
         std::uintptr_t begin = 0, end = 0, last = 0;
         std::int32_t id = 0;
         if (visual_read(world, 0xf4, begin) && visual_read(world, 0xf8, end) &&
@@ -23433,23 +25344,31 @@ void* __fastcall hook_highlight_pick_unit(void* world, void*, const void* point)
 
 bool install_highlight_hooks(std::uint8_t* image) {
     if (!image || g_highlight_hooks_installed) return false;
+    const auto& sites=highlight_contract();
+    const bool lia=running_game_sites().report.engine==GameEngine::lia;
+    if (lia) {
+        // Admission precedes the four call writes: these are raw native hashes.
+        for (const auto& range:kLiaHighlightRanges)
+            if (!lia_live_contract_range_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return false;
+    } else if (!base_layout_only()) return false;
     g_highlight_call_sites = {{
-        {kHighlightMissionCursorResetCallRva, kHighlightCursorSetModeRva,
+        {sites.calls[0], sites.set_mode,
             reinterpret_cast<const void*>(&hook_highlight_cursor_reset), {}},
-        {kHighlightMissionCheckActionCallRva, kHighlightCheckActionRva,
+        {sites.calls[1], sites.check_action,
             reinterpret_cast<const void*>(&hook_highlight_check_action), {}},
-        {kHighlightBaseCursorResetCallRva, kHighlightCursorSetModeRva,
+        {sites.calls[2], sites.set_mode,
             reinterpret_cast<const void*>(&hook_highlight_cursor_reset), {}},
-        {kHighlightBasePickUnitCallRva, kHighlightPickFirstUnitRva,
+        {sites.calls[3], sites.pick_unit,
             reinterpret_cast<const void*>(&hook_highlight_pick_unit), {}}}};
     for (const auto& site : g_highlight_call_sites)
         if (!relative_call_targets(image + site.rva, image + site.target_rva)) return false;
-    g_combat_hover_ready=signature(image+0x239f16,{0xf7,0x47,0x08,0x00,0x00,0x40,0x00});
+    g_combat_hover_ready=lia || signature(image+0x239f16,{0xf7,0x47,0x08,0x00,0x00,0x40,0x00});
     if (!g_combat_hover_ready)
         append_bridge_event("combat_hover_omitted","Native picked-unit visibility contract mismatch.",true);
-    g_highlight_set_mode = reinterpret_cast<HighlightSetModeFn>(image + kHighlightCursorSetModeRva);
-    g_highlight_check_action = reinterpret_cast<HighlightCheckActionFn>(image + kHighlightCheckActionRva);
-    g_highlight_pick_unit = reinterpret_cast<HighlightPickUnitFn>(image + kHighlightPickFirstUnitRva);
+    g_highlight_set_mode = reinterpret_cast<HighlightSetModeFn>(image + sites.set_mode);
+    g_highlight_check_action = reinterpret_cast<HighlightCheckActionFn>(image + sites.check_action);
+    g_highlight_pick_unit = reinterpret_cast<HighlightPickUnitFn>(image + sites.pick_unit);
     for (std::size_t i = 0; i < g_highlight_call_sites.size(); ++i) {
         auto& site = g_highlight_call_sites[i];
         auto* call = image + site.rva;
@@ -23493,8 +25412,13 @@ bool uninstall_highlight_hooks(std::uint8_t* image) {
 // (DoModal 5F7350 pushes CI3DScreen*, GetCurrentScreen 5F7590 reads the top).
 #if !defined(EID3D11_EMBEDDED)
 bool highlight_base_screen_open() noexcept {
-    if (!g_visual_game_image) return false;
-    const auto* face = g_visual_game_image + kHighlightInterfaceRva;
+    // LiA's native briefing flag/Highlight chain and stack identity are admitted
+    // by the observer transaction. Its existing appearance observer must also
+    // own publication before this policy consumes that completed state.
+    if (!g_visual_game_image || (running_game_sites().report.engine==GameEngine::lia &&
+            (!g_highlight_hooks_installed || !g_visual_hooks_installed))) return false;
+    const auto& sites=highlight_contract();
+    const auto* face = g_visual_game_image + sites.interface_object;
     std::uintptr_t begin = 0, end = 0;
     if (!visual_read(face, 0x34, begin) || !visual_read(face, 0x38, end) ||
         end < begin || (end - begin) % 4 || end - begin > 64 * 4) return false;
@@ -23503,7 +25427,7 @@ bool highlight_base_screen_open() noexcept {
         void* table = nullptr;
         if (visual_read(reinterpret_cast<const void*>(entry), 0, screen) && screen &&
             visual_read(screen, 0, table) &&
-            table == g_visual_game_image + kHighlightBaseScreenVtableRva) return true;
+            table == g_visual_game_image + sites.base_screen_table) return true;
     }
     return false;
 }
@@ -23525,14 +25449,16 @@ void publish_highlight_state() noexcept {
     retained_visual_scene().visual_publish_highlight(state);
 #else
     static bool pause_checked=false,pause_ready=false;
+    const auto& sites=highlight_contract();
     if (!pause_checked && g_visual_game_image) {
         std::array<std::uint8_t,6> getter{{0xa0,0,0,0,0,0xc3}};
-        write_u32(getter,1,loaded_address(g_visual_game_image,0x3af624));
-        pause_ready=exact_span(g_visual_game_image,0x178d50,getter); pause_checked=true;
+        write_u32(getter,1,loaded_address(g_visual_game_image,sites.pause_value));
+        pause_ready=(base_layout_only() || running_game_sites().report.engine==GameEngine::lia) &&
+            exact_span(g_visual_game_image,sites.pause_getter,getter); pause_checked=true;
         if (!pause_ready) append_bridge_event("combat_pause_omitted","Native mission pause contract mismatch.",true);
     }
     std::uint8_t paused=0;
-    combat_ui_publish_paused(pause_ready && visual_read(g_visual_game_image,0x3af624,paused) && paused!=0);
+    combat_ui_publish_paused(pause_ready && visual_read(g_visual_game_image,sites.pause_value,paused) && paused!=0);
     RetainedHighlightState state;
     state.show_selected = g_highlight_selected;
     state.strip_preselected = !g_highlight_briefing && highlight_base_screen_open();
@@ -23567,18 +25493,23 @@ constexpr std::array<std::uint8_t, 76> kCameraWideNormalizeBytes{{
 bool install_camera_mouse_normalize_hook(std::uint8_t* image,
                                         std::uint8_t* addon = nullptr) {
     if (!image || g_camera_mouse_normalize_installed) return false;
-    auto* call = image + kCameraMouseNormalizeCallRva;
+    auto* call = image + camera_mouse_contract().normalize_call;
     if (call[0] != 0xe8) return false;
     std::int32_t relative = 0;
     std::memcpy(&relative, call + 1, sizeof(relative));
     const auto* target = call + 5 + relative;
     const std::int32_t* width = nullptr;
     const std::int32_t* height = nullptr;
+    if (target == image + camera_mouse_contract().normalize &&
+        running_game_sites().report.engine == GameEngine::lia &&
+        !object_suffix_live_code_matches(image,0x0012f330,0x26,0xf84e23a10399f5b3ull)) return false;
     if (target == widescreen_cursor_delta()) {
         width=widescreen_content_width();
         height=widescreen_content_height();
-    } else if (target != image + kCameraMouseNormalizeRva) {
-        if (target != image + kCameraMouseNormalizeRva - 2) return false;
+    } else if (target != image + camera_mouse_contract().normalize) {
+        // The base addon entry-minus-two displacement gadget is unverified in LiA.
+        if (running_game_sites().report.engine == GameEngine::lia) return false;
+        if (target != image + camera_mouse_contract().normalize - 2) return false;
         if (!addon) addon = find_addon_module();
         if (!addon || addon != g_addon.image || g_addon.layout.pane_failure ||
             !signature(target, {0x31,0xc9})) return false;
@@ -23592,7 +25523,7 @@ bool install_camera_mouse_normalize_hook(std::uint8_t* image,
         write_u32(bytes, 17, static_cast<std::uint32_t>(shift));
         write_u32(bytes, 29, static_cast<std::uint32_t>(effective));
         write_u32(bytes, 62, static_cast<std::uint32_t>(vertical));
-        if (!exact_span(image, kCameraMouseNormalizeRva, bytes)) return false;
+        if (!exact_span(image, camera_mouse_contract().normalize, bytes)) return false;
         width = reinterpret_cast<const std::int32_t*>(
             addon + pane.screen_effective);
         height = reinterpret_cast<const std::int32_t*>(
@@ -23616,7 +25547,7 @@ bool install_camera_mouse_normalize_hook(std::uint8_t* image,
 
 void uninstall_camera_mouse_normalize_hook(std::uint8_t* image) {
     if (!image || !g_camera_mouse_normalize_installed) return;
-    auto* call = image + kCameraMouseNormalizeCallRva;
+    auto* call = image + camera_mouse_contract().normalize_call;
     std::int32_t relative = 0;
     std::memcpy(&relative, call + 1, sizeof(relative));
     if (call[0] == 0xe8 && call + 5 + relative ==
@@ -23636,14 +25567,23 @@ struct WindowChangeHook {
     void (*stub)();
 };
 #if !defined(EID3D11_EMBEDDED)
-const std::array<WindowChangeHook, kWindowChangeHookCount> kWindowChangeHooks{{
+const std::array<WindowChangeHook, kWindowChangeHookCount> kBaseWindowChangeHooks{{
     {0x0010e9f0, 7, {0x56,0x8b,0xf1,0x8b,0x4c,0x24,0x08}, &hook_server_object_change_0},
     {0x0010f1e0, 6, {0x53,0x55,0x8b,0xe9,0x56,0x57}, &hook_server_object_change_1},
     {0x0010f2d0, 6, {0x55,0x8b,0xec,0x83,0xec,0x24}, &hook_server_object_change_2},
     {0x0010f5b0, 9, {0x56,0x8b,0xf1,0x8b,0x86,0x98,0x01,0x00,0x00}, &hook_server_object_change_3},
 }};
-#endif // !EID3D11_EMBEDDED
+const std::array<WindowChangeHook, kWindowChangeHookCount> kLiaWindowChangeHooks{{
+    {0x00098bd0, 7, {0x56,0x8b,0xf1,0x8b,0x4c,0x24,0x08}, &hook_server_object_change_0},
+    {0x000998d0, 6, {0x53,0x55,0x56,0x8b,0xe9,0x57}, &hook_server_object_change_1},
+    {0x0009a170, 6, {0x83,0xec,0x08,0x56,0x8b,0xf1}, &hook_server_object_change_2},
+    {0x00099370, 7, {0x56,0x8b,0xf1,0x6a,0xff,0x6a,0x00}, &hook_server_object_change_3},
+}};
 
+const std::array<WindowChangeHook,kWindowChangeHookCount>& window_change_hooks() noexcept {
+    return running_game_sites().report.engine == GameEngine::lia ? kLiaWindowChangeHooks : kBaseWindowChangeHooks;
+}
+#endif // !EID3D11_EMBEDDED
 std::array<std::array<std::uint8_t, 5>, 2> g_window_call_originals{};
 std::array<std::array<std::uint8_t, 9>, kWindowChangeHookCount> g_window_change_originals{};
 // Bytes each writer entry patch covers: ours for stock entries, the addon's
@@ -23675,14 +25615,18 @@ bool patch_window_code(std::uint8_t* at, const void* target, bool call) noexcept
 #if !defined(EID3D11_EMBEDDED)
 bool install_window_membership_hooks(std::uint8_t* image) noexcept {
     if (!image || g_window_membership_installed) return false;
-    auto* exit_call = image + kServerWindowExitCallRva;
-    auto* deleted_call = image + kServerObjectDeletedCallRva;
-    if (!window_call_targets(exit_call, image + kServerWindowRemovalRva) ||
-        !window_call_targets(deleted_call, image + kServerDeletionNoticeRva))
+    if (running_game_sites().report.engine == GameEngine::lia)
+        for (const auto& range:kLiaServerSeedRanges)
+            if (!object_suffix_live_code_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return false;
+    auto* exit_call = image + window_membership_contract().exit_call;
+    auto* deleted_call = image + window_membership_contract().deletion_call;
+    if (!window_call_targets(exit_call, image + window_membership_contract().removal) ||
+        !window_call_targets(deleted_call, image + window_membership_contract().deletion_notice))
         return false;
     std::array<const void*, kWindowChangeHookCount> chains{};
-    for (std::size_t index = 0; index < kWindowChangeHooks.size(); ++index) {
-        const auto& hook = kWindowChangeHooks[index];
+    for (std::size_t index = 0; index < window_change_hooks().size(); ++index) {
+        const auto& hook = window_change_hooks()[index];
         const auto owner = resolve_hook_entry(image + hook.rva, hook.prologue.data(),
                                               hook.bytes, 5);
         if (owner.owner == EntryOwner::rejected) return false;
@@ -23699,8 +25643,8 @@ bool install_window_membership_hooks(std::uint8_t* image) noexcept {
             if (trampolines[index] && !chains[index])
                 VirtualFree(trampolines[index], 0, MEM_RELEASE);
     };
-    for (std::size_t index = 0; index < kWindowChangeHooks.size(); ++index) {
-        const auto& hook = kWindowChangeHooks[index];
+    for (std::size_t index = 0; index < window_change_hooks().size(); ++index) {
+        const auto& hook = window_change_hooks()[index];
         std::memcpy(g_window_change_originals[index].data(), image + hook.rva, g_window_change_bytes[index]);
         if (chains[index]) {
             trampolines[index] = static_cast<std::uint8_t*>(const_cast<void*>(chains[index]));
@@ -23719,16 +25663,16 @@ bool install_window_membership_hooks(std::uint8_t* image) noexcept {
         }
     }
     g_window_membership_image = image;
-    g_server_window_removal = reinterpret_cast<ServerObjectsFn>(image + kServerWindowRemovalRva);
-    g_server_deletion_notice = reinterpret_cast<ServerObjectsFn>(image + kServerDeletionNoticeRva);
+    g_server_window_removal = reinterpret_cast<ServerObjectsFn>(image + window_membership_contract().removal);
+    g_server_deletion_notice = reinterpret_cast<ServerObjectsFn>(image + window_membership_contract().deletion_notice);
     for (std::size_t index = 0; index < trampolines.size(); ++index)
         g_window_change_next[index] = trampolines[index];
     std::memcpy(g_window_call_originals[0].data(), exit_call, 5);
     std::memcpy(g_window_call_originals[1].data(), deleted_call, 5);
     // Change observation goes live before the window exit can be marked.
     std::size_t entries = 0;
-    for (; entries < kWindowChangeHooks.size(); ++entries) {
-        const auto& hook = kWindowChangeHooks[entries];
+    for (; entries < window_change_hooks().size(); ++entries) {
+        const auto& hook = window_change_hooks()[entries];
         if (!patch_window_code(image + hook.rva, reinterpret_cast<const void*>(hook.stub), false)) break;
         const std::size_t patched = g_window_change_bytes[entries];
         if (patched > 5) {
@@ -23740,7 +25684,7 @@ bool install_window_membership_hooks(std::uint8_t* image) noexcept {
             }
         }
     }
-    const bool calls = entries == kWindowChangeHooks.size() &&
+    const bool calls = entries == window_change_hooks().size() &&
         patch_window_code(deleted_call, reinterpret_cast<const void*>(&hook_server_object_deleted), true) &&
         patch_window_code(exit_call, reinterpret_cast<const void*>(&hook_server_window_exit), true);
     if (!calls) {
@@ -23749,9 +25693,9 @@ bool install_window_membership_hooks(std::uint8_t* image) noexcept {
         restored=restore_forwarding_hook(deleted_call,g_window_call_originals[1].data(),5,
             reinterpret_cast<const void*>(&hook_server_object_deleted),true,"window.delete_rollback")&&restored;
         for (std::size_t index=0;index<entries;++index)
-            restored=restore_forwarding_hook(image+kWindowChangeHooks[index].rva,
+            restored=restore_forwarding_hook(image+window_change_hooks()[index].rva,
                 g_window_change_originals[index].data(),g_window_change_bytes[index],
-                reinterpret_cast<const void*>(kWindowChangeHooks[index].stub),false,"window.writer_rollback")&&restored;
+                reinterpret_cast<const void*>(window_change_hooks()[index].stub),false,"window.writer_rollback")&&restored;
         if(!restored)g_window_membership_installed=true;
         return false;
     }
@@ -23762,12 +25706,12 @@ bool install_window_membership_hooks(std::uint8_t* image) noexcept {
 bool uninstall_window_membership_hooks(std::uint8_t* image) noexcept {
     if (!g_window_membership_installed) return true;
     if (!image) return false;
-    bool restored=restore_forwarding_hook(image+kServerWindowExitCallRva,g_window_call_originals[0].data(),5,
+    bool restored=restore_forwarding_hook(image+window_membership_contract().exit_call,g_window_call_originals[0].data(),5,
         reinterpret_cast<const void*>(&hook_server_window_exit),true,"window.exit");
-    restored=restore_forwarding_hook(image+kServerObjectDeletedCallRva,g_window_call_originals[1].data(),5,
+    restored=restore_forwarding_hook(image+window_membership_contract().deletion_call,g_window_call_originals[1].data(),5,
         reinterpret_cast<const void*>(&hook_server_object_deleted),true,"window.delete")&&restored;
-    for (std::size_t index=0;index<kWindowChangeHooks.size();++index) {
-        const auto& hook=kWindowChangeHooks[index];
+    for (std::size_t index=0;index<window_change_hooks().size();++index) {
+        const auto& hook=window_change_hooks()[index];
         restored=restore_forwarding_hook(image+hook.rva,g_window_change_originals[index].data(),g_window_change_bytes[index],
             reinterpret_cast<const void*>(hook.stub),false,"window.writer")&&restored;
     }
@@ -23788,8 +25732,12 @@ bool uninstall_window_membership_hooks(std::uint8_t* image) noexcept {
 // mapObjects (+12D70: buckets [+4,+8), count +10, nodes {next,key,value}) are
 // read before and after; an ID whose object changed is reported once in
 // bridge.jsonl and by a short on-screen notice. The original always runs.
-constexpr std::uint32_t kSaveLoadDynamicDataCallRva = 0x0019734c;
-constexpr std::uint32_t kSaveLoadDynamicDataRva = 0x00196900;
+struct SaveClashContract { std::uint32_t call, target; };
+const SaveClashContract& save_clash_contract() noexcept {
+    static constexpr SaveClashContract base{0x0019734c,0x00196900};
+    static constexpr SaveClashContract lia{0x000ef865,0x000eef30};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
 constexpr std::size_t kServerMapObjectsOffset = 0x12d70;
 using SaveLoadDynamicDataFn = void (__thiscall*)(void*, void*);
 SaveLoadDynamicDataFn g_save_load_dynamic_data = nullptr;
@@ -23874,10 +25822,14 @@ void __fastcall hook_save_load_dynamic_data(void* server, void*, void* file) {
 
 const char* install_save_id_clash_check(std::uint8_t* image) noexcept {
     if (!image || g_save_clash_installed) return "unavailable";
-    auto* call = image + kSaveLoadDynamicDataCallRva;
-    if (!window_call_targets(call, image + kSaveLoadDynamicDataRva)) return "call_site_mismatch";
+    if (running_game_sites().report.engine == GameEngine::lia)
+        for (const auto& range:kLiaSaveClashRanges)
+            if (!object_suffix_live_code_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return "native_contract_mismatch";
+    auto* call = image + save_clash_contract().call;
+    if (!window_call_targets(call, image + save_clash_contract().target)) return "call_site_mismatch";
     std::memcpy(g_save_clash_call_original.data(), call, 5);
-    g_save_load_dynamic_data = reinterpret_cast<SaveLoadDynamicDataFn>(image + kSaveLoadDynamicDataRva);
+    g_save_load_dynamic_data = reinterpret_cast<SaveLoadDynamicDataFn>(image + save_clash_contract().target);
     if (!patch_window_code(call, reinterpret_cast<const void*>(&hook_save_load_dynamic_data), true))
         return "patch_failed";
     g_save_clash_installed = true;
@@ -23887,7 +25839,7 @@ const char* install_save_id_clash_check(std::uint8_t* image) noexcept {
 bool uninstall_save_id_clash_check(std::uint8_t* image) noexcept {
     if (!g_save_clash_installed) return true;
     if (!image) return false;
-    if (!restore_forwarding_hook(image + kSaveLoadDynamicDataCallRva, g_save_clash_call_original.data(), 5,
+    if (!restore_forwarding_hook(image + save_clash_contract().call, g_save_clash_call_original.data(), 5,
             reinterpret_cast<const void*>(&hook_save_load_dynamic_data), true, "save_clash.call"))
         return false;
     g_save_clash_installed = false;
@@ -23949,17 +25901,51 @@ extern "C" __declspec(naked) void hook_world_destroy_figure_manager() {
     }
 }
 
+// LiA (game.exe C7B085C1): CWorldBase::Destroy releases the same members in
+// the same order as base (+60, object manager +40, figure manager +3C, +34,
+// specific manager +44); the figure manager release starts at 4CDC4C with
+// mov eax,[esi+3C]; test eax,eax; je +17. CObject3DClientSpecific's vtable is
+// 62ABC4 (constructor 4A1F10 fills +E0/+E4 like base 51AB8D; destructor
+// 4A43EF), and its slot 3, 4A3F00, is Destroy: it releases +7C, +D8, +DC and
+// then the material sets, as base slot 3 51AF70 does.
+extern "C" __declspec(naked) void hook_lia_world_destroy_figure_manager() {
+    __asm {
+        pushfd
+        pushad
+        push esi
+        call destroy_orphan_client_specifics
+        popad
+        popfd
+        mov eax, dword ptr [esi + 0x3c]
+        test eax, eax
+        jmp dword ptr [g_world_destroy_resume]
+    }
+}
+
+struct WorldTeardownContract {
+    std::uint32_t site_rva, specific_vtable_rva;
+    std::array<std::uint8_t, 7> site;
+    void (*hook)();
+};
+const WorldTeardownContract& world_teardown_contract() noexcept {
+    static constexpr WorldTeardownContract base{kWorldDestroyFigureManagerSiteRva,kObject3DClientSpecificVtableRva,
+        {{0x8b,0x46,0x3c,0x3b,0xc5,0x74,0x17}},&hook_world_destroy_figure_manager};
+    static constexpr WorldTeardownContract lia{0x000cdc4c,0x0022abc4,
+        {{0x8b,0x46,0x3c,0x85,0xc0,0x74,0x17}},&hook_lia_world_destroy_figure_manager};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
+
 const char* install_world_teardown_fix(std::uint8_t* image) noexcept {
     if (!image || g_world_destroy_hook_installed) return "unavailable";
-    auto* site = image + kWorldDestroyFigureManagerSiteRva;
-    // mov eax,[esi+3C]; cmp eax,ebp; je +17. Live bytes, so an addon patch here rejects.
-    if (!exact_span(image, kWorldDestroyFigureManagerSiteRva,
-                    std::array<std::uint8_t, 7>{{0x8b, 0x46, 0x3c, 0x3b, 0xc5, 0x74, 0x17}}))
+    const auto& contract = world_teardown_contract();
+    auto* site = image + contract.site_rva;
+    // The figure manager release head. Live bytes, so an addon patch here rejects.
+    if (!exact_span(image, contract.site_rva, contract.site))
         return "site_bytes_mismatch";
     std::memcpy(g_world_destroy_site_original.data(), site, kWorldDestroyFigureManagerSiteBytes);
-    g_object3d_client_specific_vtable = image + kObject3DClientSpecificVtableRva;
+    g_object3d_client_specific_vtable = image + contract.specific_vtable_rva;
     g_world_destroy_resume = site + kWorldDestroyFigureManagerSiteBytes;
-    if (!patch_window_code(site, reinterpret_cast<const void*>(&hook_world_destroy_figure_manager), false))
+    if (!patch_window_code(site, reinterpret_cast<const void*>(contract.hook), false))
         return "patch_failed";
     g_world_destroy_hook_installed = true;
     return nullptr;
@@ -23968,8 +25954,9 @@ const char* install_world_teardown_fix(std::uint8_t* image) noexcept {
 bool uninstall_world_teardown_fix(std::uint8_t* image) noexcept {
     if (!g_world_destroy_hook_installed) return true;
     if (!image) return false;
-    if (!restore_forwarding_hook(image + kWorldDestroyFigureManagerSiteRva, g_world_destroy_site_original.data(),
-            kWorldDestroyFigureManagerSiteBytes, reinterpret_cast<const void*>(&hook_world_destroy_figure_manager),
+    const auto& contract = world_teardown_contract();
+    if (!restore_forwarding_hook(image + contract.site_rva, g_world_destroy_site_original.data(),
+            kWorldDestroyFigureManagerSiteBytes, reinterpret_cast<const void*>(contract.hook),
             false, "world_teardown.site"))
         return false;
     g_world_destroy_hook_installed = false;
@@ -23977,15 +25964,20 @@ bool uninstall_world_teardown_fix(std::uint8_t* image) noexcept {
 }
 
 bool install_owned_sky_hook(std::uint8_t* image) {
-    g_owned_sky_gate_valid=exact_span(image,kWorldSkyGateRva,
-        std::array<std::uint8_t,12>{{0x8b,0x45,0x08,0xf6,0xc4,0x10,0x0f,0x84,0xbb,0,0,0}});
-    auto* call = image + kSkyDrawCallRva;
+    const auto& environment=world_environment_contract();
+    g_owned_sky_gate_valid=exact_span(image,environment.sky_gate,environment.sky_gate_stock);
+    if (running_game_sites().report.engine == GameEngine::lia) {
+        for (const auto& range:kLiaEnvironmentRanges)
+            if (!lia_live_contract_range_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return false;
+    }
+    auto* call = image + environment.sky_call;
     if (call[0] != 0xe8) return false;
     std::int32_t relative = 0;
     std::memcpy(&relative, call + 1, sizeof(relative));
-    if (call + 5 + relative != image + kSkyObjectDrawRva) return false;
+    if (call + 5 + relative != image + environment.sky_draw) return false;
     std::memcpy(g_owned_sky_call_original.data(), call, 5);
-    g_stock_sky_draw = image + kSkyObjectDrawRva;
+    g_stock_sky_draw = image + environment.sky_draw;
     DWORD protection = 0;
     if (!VirtualProtect(call, 5, PAGE_EXECUTE_READWRITE, &protection)) return false;
     const bool patched = write_relative_call(call, reinterpret_cast<const void*>(&hook_owned_sky_draw));
@@ -23999,7 +25991,7 @@ bool install_owned_sky_hook(std::uint8_t* image) {
 bool uninstall_owned_sky_hook(std::uint8_t* image) {
     if (!g_owned_sky_installed) return true;
     if (!image) return false;
-    auto* call = image + kSkyDrawCallRva;
+    auto* call = image + world_environment_contract().sky_call;
     if(std::memcmp(call,g_owned_sky_call_original.data(),5)!=0) {
         if(!relative_call_targets(call,reinterpret_cast<const void*>(&hook_owned_sky_draw)) ||
            !restore_inline_entry(call,g_owned_sky_call_original.data(),5))return false;
@@ -24027,6 +26019,19 @@ constexpr std::array<OwnedWeatherSite, 2> kOwnedWeatherSites{{
     {kWeatherDrawSnowCallRva, kWeatherDrawSnowRva,
      {{0x55,0x8b,0xec,0x83,0xec,0x64,0x53,0x8b,0xd9,0x56,0x57,0x8d,0x83,0xa8,0,0,0,0x8b,0x8b,0xa8,0,0,0,0x89}}, "snow"},
 }};
+// LiA (game.exe C7B085C1...): CWeather::Draw at 4848E0 has the base shape of
+// 4E5680 (type at this+B4, 1 rain, 2 snow, each call push visualizator,
+// ECX = this, ret 4): rain 483B40 is called at 484943, snow 484220 at
+// 484956. Both entries read this+A8 like base and end ret 4.
+constexpr std::array<OwnedWeatherSite, 2> kLiaOwnedWeatherSites{{
+    {0x00084943, 0x00083b40,
+     {{0x83,0xec,0x5c,0x53,0x55,0x56,0x8b,0xf1,0x8d,0x86,0xa8,0,0,0,0x8b,0x08,0x8b,0x50,0x04,0x8b,0x40,0x08,0x89,0x44}}, "rain"},
+    {0x00084956, 0x00084220,
+     {{0x83,0xec,0x60,0x53,0x55,0x8b,0xe9,0x8d,0x85,0xa8,0,0,0,0x8b,0x08,0x8b,0x50,0x04,0x8b,0x40,0x08,0x89,0x44,0x24}}, "snow"},
+}};
+const std::array<OwnedWeatherSite, 2>& owned_weather_sites() noexcept {
+    return running_game_sites().report.engine == GameEngine::lia ? kLiaOwnedWeatherSites : kOwnedWeatherSites;
+}
 
 // Both stock weather draws stop. A call site that no longer calls the stock
 // entry, or an entry another hook framework chains (an addon observing or
@@ -24036,8 +26041,8 @@ constexpr std::array<OwnedWeatherSite, 2> kOwnedWeatherSites{{
 bool install_owned_weather_hooks(std::uint8_t* image) noexcept {
     if (!game_sites_ok(GameSiteGroup::bridge)) { g_owned_weather_status = "game sites differ: stock rain/snow kept (doubled)"; return false; }
     bool all = true;
-    for (std::size_t i = 0; i < kOwnedWeatherSites.size(); ++i) {
-        const auto& site = kOwnedWeatherSites[i];
+    for (std::size_t i = 0; i < owned_weather_sites().size(); ++i) {
+        const auto& site = owned_weather_sites()[i];
         if (g_owned_weather_installed[i]) continue;
         auto* call = image + site.call_rva;
         const auto owner = resolve_hook_entry(image + site.entry_rva, site.prologue.data(), site.prologue.size(), 5);
@@ -24062,9 +26067,9 @@ bool install_owned_weather_hooks(std::uint8_t* image) noexcept {
 
 bool uninstall_owned_weather_hooks(std::uint8_t* image) noexcept {
     bool restored = true;
-    for (std::size_t i = 0; i < kOwnedWeatherSites.size(); ++i) {
+    for (std::size_t i = 0; i < owned_weather_sites().size(); ++i) {
         if (!g_owned_weather_installed[i]) continue;
-        if (!image || !restore_forwarding_hook(image + kOwnedWeatherSites[i].call_rva, g_owned_weather_call_original[i].data(), 5,
+        if (!image || !restore_forwarding_hook(image + owned_weather_sites()[i].call_rva, g_owned_weather_call_original[i].data(), 5,
                 reinterpret_cast<const void*>(&hook_owned_weather_draw), true, "owned_weather.call")) {
             restored = false;
             continue;
@@ -24088,6 +26093,22 @@ constexpr std::uint32_t kDrawFrameSelectionInvertedReturnRva = 0x001045c3;
 constexpr std::size_t kDrawFrameSelectionPatchBytes = 10;
 constexpr std::array<std::uint8_t, kDrawFrameSelectionPatchBytes>
     kDrawFrameSelectionEntry{{0x8b,0x44,0x24,0x0c,0x81,0xec,0x9c,0x00,0x00,0x00}};
+
+struct FrameSelectionContract {
+    std::uint32_t entry_rva, return_rva, second_return_rva;
+    std::size_t patch_bytes;
+    std::array<std::uint8_t,kDrawFrameSelectionPatchBytes> prefix;
+};
+
+const FrameSelectionContract& frame_selection_contract() noexcept {
+    static constexpr FrameSelectionContract base{
+        kDrawFrameSelectionRva,kDrawFrameSelectionDrawnReturnRva,
+        kDrawFrameSelectionInvertedReturnRva,kDrawFrameSelectionPatchBytes,kDrawFrameSelectionEntry};
+    static constexpr FrameSelectionContract lia{
+        kLiaFrameSelectionRva,kLiaFrameSelectionReturnRva,0,6,
+        {{0x81,0xec,0x9c,0x00,0x00,0x00}}};
+    return running_game_sites().report.engine == GameEngine::lia ? lia : base;
+}
 std::array<std::uint8_t, kDrawFrameSelectionPatchBytes> g_frame_selection_original{};
 bool g_frame_selection_installed = false;
 void* g_screen_rectangle_sink_context = nullptr;
@@ -24114,23 +26135,23 @@ BOOL __fastcall hook_draw_frame_selection(void*, void*, int x1, int y1,
 
 bool install_owned_frame_selection_hook(std::uint8_t* image) noexcept {
     if (!image || g_frame_selection_installed) return false;
-    auto* entry = image + kDrawFrameSelectionRva;
-    if (std::memcmp(entry, kDrawFrameSelectionEntry.data(),
-                    kDrawFrameSelectionEntry.size()) != 0 ||
-        std::memcmp(image + kDrawFrameSelectionDrawnReturnRva, "\xc2\x18\x00", 3) != 0 ||
-        std::memcmp(image + kDrawFrameSelectionInvertedReturnRva, "\xc2\x18\x00", 3) != 0)
-        return false;
-    std::memcpy(g_frame_selection_original.data(), entry, kDrawFrameSelectionPatchBytes);
+    const auto& contract = frame_selection_contract();
+    auto* entry = image + contract.entry_rva;
+    if (std::memcmp(entry,contract.prefix.data(),contract.patch_bytes) != 0 ||
+        std::memcmp(image+contract.return_rva,"\xc2\x18\x00",3) != 0 ||
+        (contract.second_return_rva &&
+         std::memcmp(image+contract.second_return_rva,"\xc2\x18\x00",3) != 0)) return false;
+    std::memcpy(g_frame_selection_original.data(),entry,contract.patch_bytes);
     DWORD protection = 0;
-    if (!VirtualProtect(entry, kDrawFrameSelectionPatchBytes,
+    if (!VirtualProtect(entry, contract.patch_bytes,
                         PAGE_EXECUTE_READWRITE, &protection))
         return false;
     const bool wrote = write_relative_jump(
         entry, reinterpret_cast<const void*>(&hook_draw_frame_selection));
-    if (wrote) std::memset(entry + 5, 0x90, kDrawFrameSelectionPatchBytes - 5);
+    if (wrote) std::memset(entry + 5, 0x90, contract.patch_bytes - 5);
     DWORD ignored = 0;
-    VirtualProtect(entry, kDrawFrameSelectionPatchBytes, protection, &ignored);
-    FlushInstructionCache(GetCurrentProcess(), entry, kDrawFrameSelectionPatchBytes);
+    VirtualProtect(entry, contract.patch_bytes, protection, &ignored);
+    FlushInstructionCache(GetCurrentProcess(), entry, contract.patch_bytes);
     if (!wrote) return false;
     g_frame_selection_installed = true;
     InterlockedExchange(&g_frame_selection_failure_reported, 0);
@@ -24139,8 +26160,9 @@ bool install_owned_frame_selection_hook(std::uint8_t* image) noexcept {
 
 bool uninstall_owned_frame_selection_hook(std::uint8_t* image) noexcept {
     if (!g_frame_selection_installed) return true;
-    if (!image || !restore_forwarding_hook(image+kDrawFrameSelectionRva,
-        g_frame_selection_original.data(),kDrawFrameSelectionPatchBytes,
+    const auto& contract = frame_selection_contract();
+    if (!image || !restore_forwarding_hook(image+contract.entry_rva,
+        g_frame_selection_original.data(),contract.patch_bytes,
         reinterpret_cast<const void*>(&hook_draw_frame_selection),false,"selection.entry"))return false;
     g_frame_selection_installed=false;return true;
 }
@@ -24202,7 +26224,10 @@ bool read_game_particle_counts(const void* points, const void* particles, std::i
                                std::int32_t& particle_count) noexcept {
     __try {
         point_count = *reinterpret_cast<const std::int32_t*>(static_cast<const std::uint8_t*>(points) + 4);
-        particle_count = *reinterpret_cast<const std::int32_t*>(static_cast<const std::uint8_t*>(particles) + 8);
+        // LiA's verified producer/consumer uses the point count for both
+        // arrays; do not read an unestablished descriptor count field.
+        particle_count = running_game_sites().report.engine == GameEngine::lia ? point_count
+            : *reinterpret_cast<const std::int32_t*>(static_cast<const std::uint8_t*>(particles) + 8);
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -24286,9 +26311,12 @@ BOOL __fastcall hook_game_particles(void* self, void*, std::uint32_t additive, c
 // drawing particles (reported as rejected).
 #if !defined(EID3D11_EMBEDDED)
 bool install_game_particle_hook(std::uint8_t* image) {
-    auto** table = reinterpret_cast<void**>(image + kRendererTableRva);
-    if (table[kGameParticleSlot] != image + kGameParticleRva ||
-        !signature(image + kGameParticleRva, {0x81,0xec,0x90,0x00,0x00,0x00,0x53,0x8b,0xd9,0x55,0x56,0x8b,0x6b,0x08}))
+    auto** table = reinterpret_cast<void**>(image + renderer_boundary_contract().table_rva);
+    const bool lia = running_game_sites().report.engine == GameEngine::lia;
+    const auto entry_rva = lia ? kLiaParticleEntryRva : kGameParticleRva;
+    if (table[kGameParticleSlot] != image + entry_rva ||
+        (lia ? !signature(image+entry_rva,{0x6a,0xff,0x68,0xac,0xe5,0x60,0x00,0x64,0xa1,0x00,0x00,0x00,0x00})
+             : !signature(image+entry_rva,{0x81,0xec,0x90,0x00,0x00,0x00,0x53,0x8b,0xd9,0x55,0x56,0x8b,0x6b,0x08})))
         return false;
     DWORD protection = 0;
     if (!VirtualProtect(&table[kGameParticleSlot], sizeof(void*), PAGE_READWRITE, &protection)) return false;
@@ -24304,7 +26332,7 @@ bool install_game_particle_hook(std::uint8_t* image) {
 bool uninstall_game_particle_hook(std::uint8_t* image) {
     if (!g_game_particles_installed) return true;
     if (!image) return false;
-    auto** table=reinterpret_cast<void**>(image+kRendererTableRva);
+    auto** table=reinterpret_cast<void**>(image+renderer_boundary_contract().table_rva);
     if(table[kGameParticleSlot]!=g_game_particles_original) {
         DWORD protection=0;
         if(table[kGameParticleSlot]!=reinterpret_cast<void*>(&hook_game_particles) ||
@@ -24421,9 +26449,12 @@ BOOL __fastcall hook_game_ribbon(void* self, void*, const void* points, float wi
 // bytes are unpatched; otherwise the game keeps drawing (reported rejected).
 #if !defined(EID3D11_EMBEDDED)
 bool install_game_ribbon_hook(std::uint8_t* image) {
-    auto** table = reinterpret_cast<void**>(image + kRendererTableRva);
-    if (table[kGameRibbonSlot] != image + kGameRibbonRva ||
-        !signature(image + kGameRibbonRva, {0x55,0x8b,0xec,0x83,0xec,0x30,0x89,0x4d,0xd0,0x8b,0x49,0x08}))
+    const bool lia=running_game_sites().report.engine==GameEngine::lia;
+    const auto entry=lia ? 0x00095830u : kGameRibbonRva;
+    auto** table = reinterpret_cast<void**>(image + renderer_boundary_contract().table_rva);
+    if (table[kGameRibbonSlot] != image + entry ||
+        !(lia ? signature(image+entry,{0x83,0xec,0x24,0x53,0x55,0x56,0x8b,0xf1,0x8b,0x5e,0x08,0x8b,0x43,0x0c}) :
+                 signature(image+entry,{0x55,0x8b,0xec,0x83,0xec,0x30,0x89,0x4d,0xd0,0x8b,0x49,0x08})))
         return false;
     DWORD protection = 0;
     if (!VirtualProtect(&table[kGameRibbonSlot], sizeof(void*), PAGE_READWRITE, &protection)) return false;
@@ -24439,7 +26470,7 @@ bool install_game_ribbon_hook(std::uint8_t* image) {
 bool uninstall_game_ribbon_hook(std::uint8_t* image) {
     if (!g_game_ribbon_installed) return true;
     if (!image) return false;
-    auto** table=reinterpret_cast<void**>(image+kRendererTableRva);
+    auto** table=reinterpret_cast<void**>(image+renderer_boundary_contract().table_rva);
     if(table[kGameRibbonSlot]!=g_game_ribbon_original) {
         DWORD protection=0;
         if(table[kGameRibbonSlot]!=reinterpret_cast<void*>(&hook_game_ribbon) ||
@@ -24470,6 +26501,17 @@ constexpr std::uint32_t kDrawSelectionCallRva = 0x0016bf12;
 constexpr std::uint32_t kDrawSelectionEntryRva = 0x00103a40;
 constexpr std::array<std::uint8_t, 24> kDrawSelectionPrologue{{0x81,0xec,0x2c,0x01,0x00,0x00,0xd9,0x84,0x24,0x34,
     0x01,0x00,0x00,0xd8,0x0d,0xa4,0xd9,0x73,0x00,0x53,0x55,0x8b,0xe9,0x56}};
+struct GameSelectionContract {
+    std::uint32_t call, entry;
+    std::array<std::uint8_t,24> prefix;
+};
+const GameSelectionContract& game_selection_contract() noexcept {
+    static constexpr GameSelectionContract base{kDrawSelectionCallRva,kDrawSelectionEntryRva,kDrawSelectionPrologue};
+    static constexpr GameSelectionContract lia{0x000cedc7,0x000930d0,
+        {{0x81,0xec,0x04,0x01,0,0,0xd9,0x84,0x24,0x0c,0x01,0,0,
+          0xa1,0xd4,0x25,0x67,0,0xd8,0x0d,0x48,0x0e,0x62,0}}};
+    return running_game_sites().report.engine==GameEngine::lia ? lia : base;
+}
 std::array<std::uint8_t, 5> g_game_selection_call_original{};
 bool g_game_selection_installed = false;
 thread_local void* g_game_selection_sink_context = nullptr;
@@ -24529,10 +26571,10 @@ BOOL __fastcall hook_game_selection(void* self, void*, const float* cp, float si
 #if !defined(EID3D11_EMBEDDED)
 bool install_game_selection_hook(std::uint8_t* image) noexcept {
     if (g_game_selection_installed) return true;
-    auto* call = image + kDrawSelectionCallRva;
-    const auto owner = resolve_hook_entry(image + kDrawSelectionEntryRva, kDrawSelectionPrologue.data(),
-                                          kDrawSelectionPrologue.size(), 5);
-    if (!window_call_targets(call, image + kDrawSelectionEntryRva) || owner.owner != EntryOwner::stock) return false;
+    const auto& sites=game_selection_contract();
+    auto* call = image + sites.call;
+    const auto owner = resolve_hook_entry(image + sites.entry, sites.prefix.data(),sites.prefix.size(), 5);
+    if (!window_call_targets(call, image + sites.entry) || owner.owner != EntryOwner::stock) return false;
     std::memcpy(g_game_selection_call_original.data(), call, 5);
     if (!patch_window_code(call, reinterpret_cast<const void*>(&hook_game_selection), true)) return false;
     g_game_selection_installed = true;
@@ -24541,7 +26583,7 @@ bool install_game_selection_hook(std::uint8_t* image) noexcept {
 
 bool uninstall_game_selection_hook(std::uint8_t* image) noexcept {
     if (!g_game_selection_installed) return true;
-    if (!image || !restore_forwarding_hook(image + kDrawSelectionCallRva, g_game_selection_call_original.data(), 5,
+    if (!image || !restore_forwarding_hook(image + game_selection_contract().call, g_game_selection_call_original.data(), 5,
             reinterpret_cast<const void*>(&hook_game_selection), true, "selection_marker.call"))
         return false;
     g_game_selection_installed = false;
@@ -24568,6 +26610,21 @@ constexpr std::array<std::uint32_t, 3> kPrintsListOffsets{{0x1b8, 0x1bc, 0x1c0}}
 constexpr std::array<std::uint8_t, 10> kPrintsDrawPrologue{{0x55,0x8b,0xec,0x6a,0xff,0x68,0xf8,0x71,0x73,0x00}};
 constexpr std::int32_t kTrvVisibleNoClip = 0;
 using PrintsDrawFn = int (__thiscall*)(void*);
+struct GamePrintContract {
+    std::uint32_t draw, render_call, mesh, visualizer;
+    std::array<std::uint32_t,3> pushes;
+    std::array<std::uint8_t,13> prefix;
+    std::size_t prefix_bytes;
+};
+const GamePrintContract& game_print_contract() noexcept {
+    static constexpr GamePrintContract base{kPrintsDrawRva,kPrintsRenderCallRva,kD3DRenderMeshRva,
+        kVisualizatorObjectRva,kPrintsPushSiteRvas,
+        {{0x55,0x8b,0xec,0x6a,0xff,0x68,0xf8,0x71,0x73,0}},kPrintsDrawPrologue.size()};
+    static constexpr GamePrintContract lia{0x001cf4c0,0x001cf949,0x00086530,0x002a2598,
+        {{0x000dab92,0x000dabbb,0x000dabf0}},
+        {{0x64,0xa1,0,0,0,0,0x6a,0xff,0x68,0x18,0xa7,0x61,0}},13};
+    return running_game_sites().report.engine==GameEngine::lia ? lia : base;
+}
 
 std::uint8_t* g_game_print_image = nullptr;
 bool g_game_prints_installed = false;
@@ -24612,7 +26669,7 @@ int __fastcall hook_game_print(void*, void*, const float* plots, const float* ma
     }
     if (!index_count) return kTrvVisibleNoClip;
     GamePrintView view{};
-    void* const visualizator = g_game_print_image + kVisualizatorObjectRva;
+    void* const visualizator = g_game_print_image + game_print_contract().visualizer;
     if (const char* failure = read_game_particle_clip_rect(visualizator, view.clip_half_width, view.clip_half_height)) {
         report_game_print_omission(failure);
         return kTrvVisibleNoClip;
@@ -24641,7 +26698,7 @@ int __fastcall hook_game_print(void*, void*, const float* plots, const float* ma
 #if !defined(EID3D11_EMBEDDED)
 bool game_print_is_last(const void* print, std::uint32_t list_offset) noexcept {
     __try {
-        const auto* world = g_game_print_image + kVisualClientWorldRva;
+        const auto* world = g_game_print_image + world_clock_contract().client_rva;
         const void* sentinel = *reinterpret_cast<const void* const*>(world + list_offset);
         const void* next = *reinterpret_cast<const void* const*>(static_cast<const std::uint8_t*>(print) - 8);
         return next == sentinel;
@@ -24652,7 +26709,7 @@ bool game_print_is_last(const void* print, std::uint32_t list_offset) noexcept {
 
 int game_print_list_draw(void* print, std::uint32_t list_offset) {
     g_game_print_list_active = true;
-    const int result = reinterpret_cast<PrintsDrawFn>(g_game_print_image + kPrintsDrawRva)(print);
+    const int result = reinterpret_cast<PrintsDrawFn>(g_game_print_image + game_print_contract().draw)(print);
     g_game_print_list_active = false;
     if (game_print_is_last(print, list_offset) && g_game_print_flush &&
         !g_game_print_flush(g_game_print_sink_context))
@@ -24684,24 +26741,24 @@ bool write_game_print_push(std::uint8_t* site, const void* target) noexcept {
 #if !defined(EID3D11_EMBEDDED)
 bool install_game_print_hooks(std::uint8_t* image) noexcept {
     if (g_game_prints_installed) return true;
-    const auto draw = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(image + kPrintsDrawRva));
-    for (std::uint32_t rva : kPrintsPushSiteRvas) {
+    const auto draw = static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(image + game_print_contract().draw));
+    for (std::uint32_t rva : game_print_contract().pushes) {
         std::uint32_t value = 0;
         std::memcpy(&value, image + rva + 1, 4);
         if (image[rva] != 0x68 || value != draw) return false;
     }
-    if (std::memcmp(image + kPrintsDrawRva, kPrintsDrawPrologue.data(), kPrintsDrawPrologue.size()) != 0 ||
-        !window_call_targets(image + kPrintsRenderCallRva, image + kD3DRenderMeshRva))
+    if (std::memcmp(image + game_print_contract().draw, game_print_contract().prefix.data(), game_print_contract().prefix_bytes) != 0 ||
+        !window_call_targets(image + game_print_contract().render_call, image + game_print_contract().mesh))
         return false;
     g_game_print_image = image;
-    std::memcpy(g_game_print_call_original.data(), image + kPrintsRenderCallRva, 5);
-    if (!patch_window_code(image + kPrintsRenderCallRva, reinterpret_cast<const void*>(&hook_game_print), true))
+    std::memcpy(g_game_print_call_original.data(), image + game_print_contract().render_call, 5);
+    if (!patch_window_code(image + game_print_contract().render_call, reinterpret_cast<const void*>(&hook_game_print), true))
         return false;
-    for (std::size_t i = 0; i < kPrintsPushSiteRvas.size(); ++i) {
-        if (write_game_print_push(image + kPrintsPushSiteRvas[i], kGamePrintWrappers[i])) continue;
+    for (std::size_t i = 0; i < game_print_contract().pushes.size(); ++i) {
+        if (write_game_print_push(image + game_print_contract().pushes[i], kGamePrintWrappers[i])) continue;
         for (std::size_t k = 0; k < i; ++k)
-            write_game_print_push(image + kPrintsPushSiteRvas[k], image + kPrintsDrawRva);
-        restore_forwarding_hook(image + kPrintsRenderCallRva, g_game_print_call_original.data(), 5,
+            write_game_print_push(image + game_print_contract().pushes[k], image + game_print_contract().draw);
+        restore_forwarding_hook(image + game_print_contract().render_call, g_game_print_call_original.data(), 5,
                                 reinterpret_cast<const void*>(&hook_game_print), true, "prints.call");
         return false;
     }
@@ -24713,14 +26770,14 @@ bool uninstall_game_print_hooks(std::uint8_t* image) noexcept {
     if (!g_game_prints_installed) return true;
     if (!image) return false;
     bool restored = true;
-    for (std::size_t i = 0; i < kPrintsPushSiteRvas.size(); ++i) {
+    for (std::size_t i = 0; i < game_print_contract().pushes.size(); ++i) {
         std::uint32_t value = 0;
-        std::memcpy(&value, image + kPrintsPushSiteRvas[i] + 1, 4);
+        std::memcpy(&value, image + game_print_contract().pushes[i] + 1, 4);
         if (value == static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(kGamePrintWrappers[i])))
-            restored &= write_game_print_push(image + kPrintsPushSiteRvas[i], image + kPrintsDrawRva);
+            restored &= write_game_print_push(image + game_print_contract().pushes[i], image + game_print_contract().draw);
         else { append_bridge_event("hook_teardown_pending", "prints.push_foreign", true); restored = false; }
     }
-    if (!restore_forwarding_hook(image + kPrintsRenderCallRva, g_game_print_call_original.data(), 5,
+    if (!restore_forwarding_hook(image + game_print_contract().render_call, g_game_print_call_original.data(), 5,
             reinterpret_cast<const void*>(&hook_game_print), true, "prints.call"))
         restored = false;
     if (restored) g_game_prints_installed = false;
@@ -24768,6 +26825,27 @@ using CombatTextGetUnitFn = void* (__thiscall*)(void*, std::int32_t);
 using CombatTextMatchFigureFn = void* (__thiscall*)(void*, const char*);
 using CombatTextEraseFn = void (__thiscall*)(void*, void**, void*);
 using CombatTextSetTextureFn = BOOL (__thiscall*)(void*, DWORD, void*);
+struct CombatTextContract {
+    std::uint32_t call, draw, receive, get_unit, unit_owner, match_figure, erase, setting;
+    std::array<std::uint32_t,3> figure_names;
+    std::array<std::uint32_t,2> clock_calls;
+    std::size_t clock_count;
+    std::array<std::uint8_t,14> draw_prefix;
+    std::array<std::uint8_t,6> clock_prefix;
+    bool pooled_erase;
+};
+const CombatTextContract& combat_text_contract() noexcept {
+    static constexpr CombatTextContract base{kCombatTextCallRva,kCombatTextDrawRva,kCombatTextReceiveRva,
+        kCombatTextGetUnitRva,kCombatTextUnitOwnerRva,kCombatTextMatchFigureRva,kCombatTextEraseRva,
+        kCombatTextSettingRva,kCombatTextFigureNameRvas,kCombatTextClockCallRvas,2,
+        kCombatTextDrawPrologue,kCombatTextClockCall,false};
+    static constexpr CombatTextContract lia{0x000db48a,0x0011f3d0,0x0011f370,
+        0x000dd490,0x002a3249,0x0009f0b0,0x001d8df0,0x00276a64,
+        {{0x00226be8,0x00226ba8,0x0022cb34}},{{0x0011f38d,0}},1,
+        {{0x6a,0xff,0x68,0x8b,0x37,0x61,0,0x64,0xa1,0,0,0,0,0x50}},
+        {{0xff,0x15,0x44,0x05,0x62,0}},true};
+    return running_game_sites().report.engine==GameEngine::lia ? lia : base;
+}
 
 std::uint8_t* g_combat_text_image = nullptr;
 bool g_combat_text_installed = false;
@@ -24835,8 +26913,20 @@ std::size_t count_combat_text_list(void* text) noexcept {
 
 bool erase_combat_text_node(void* text, void* node) noexcept {
     __try {
+        const auto& sites=combat_text_contract();
+        if (sites.pooled_erase) {
+            // LiA's expiry and briefing cleanup unlink this 24-byte node,
+            // then return it to the native sized pool; there is no list count.
+            void* const next=*static_cast<void**>(node);
+            void* const previous=*reinterpret_cast<void**>(static_cast<std::uint8_t*>(node)+4);
+            *static_cast<void**>(previous)=next;
+            *reinterpret_cast<void**>(static_cast<std::uint8_t*>(next)+4)=previous;
+            using FreeNodeFn=void(__cdecl*)(void*,std::uint32_t);
+            reinterpret_cast<FreeNodeFn>(g_combat_text_image+sites.erase)(node,24);
+            return true;
+        }
         void* result = nullptr;
-        reinterpret_cast<CombatTextEraseFn>(g_combat_text_image + kCombatTextEraseRva)(
+        reinterpret_cast<CombatTextEraseFn>(g_combat_text_image + sites.erase)(
             static_cast<std::uint8_t*>(text) + 4, &result, node);
         return true;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -24850,14 +26940,14 @@ bool erase_combat_text_node(void* text, void* node) noexcept {
 bool read_combat_text_unit(std::int32_t id, int& x, int& y, bool& owned) noexcept {
     __try {
         auto* unit = static_cast<std::uint8_t*>(reinterpret_cast<CombatTextGetUnitFn>(
-            g_combat_text_image + kCombatTextGetUnitRva)(g_combat_text_image + kCombatTextUnitOwnerRva, id));
+            g_combat_text_image + combat_text_contract().get_unit)(g_combat_text_image + combat_text_contract().unit_owner, id));
         if (!unit) return false;
         const std::uint32_t flags = *reinterpret_cast<std::uint32_t*>(unit + 8);
         if (!(flags & 0x20u) || (flags & 0x40u) || !(flags & 0x400000u)) return false;
         std::uint8_t* figure = nullptr;
-        for (std::uint32_t name : kCombatTextFigureNameRvas) {
+        for (std::uint32_t name : combat_text_contract().figure_names) {
             figure = static_cast<std::uint8_t*>(reinterpret_cast<CombatTextMatchFigureFn>(
-                g_combat_text_image + kCombatTextMatchFigureRva)(unit, reinterpret_cast<const char*>(g_combat_text_image + name)));
+                g_combat_text_image + combat_text_contract().match_figure)(unit, reinterpret_cast<const char*>(g_combat_text_image + name)));
             if (figure) break;
         }
         if (!figure) return false;
@@ -24928,7 +27018,7 @@ BOOL __fastcall hook_combat_text(void* text, void*, void* visualizator) {
     }
     nodes.resize(kept);
     std::int32_t enabled = 0;
-    if (!visual_read(g_combat_text_image, kCombatTextSettingRva, enabled)) { report_combat_text_omission("setting_unreadable"); return TRUE; }
+    if (!visual_read(g_combat_text_image, combat_text_contract().setting, enabled)) { report_combat_text_omission("setting_unreadable"); return TRUE; }
     if (!enabled) return TRUE;
     float screen_w = 0, screen_h = 0;
     const bool screen = read_combat_text_screen(visualizator, screen_w, screen_h);
@@ -24993,34 +27083,39 @@ bool restore_combat_text_clock_call(std::uint8_t* site, const std::array<std::ui
 }
 #endif // !EID3D11_EMBEDDED
 
-// The Draw call, Draw's entry, ReceiveDamage's entry and both receive clock
-// calls must be stock; then all are patched, or none stay patched.
+// The Draw call, Draw/ReceiveDamage entries and the selected receive clock
+// calls (base two, LiA one) must be stock; then all are patched together.
 #ifndef EID3D11_EMBEDDED
 #if !defined(EID3D11_EMBEDDED)
 bool install_combat_text_hooks(std::uint8_t* image) noexcept {
+    const auto& sites=combat_text_contract();
     if (g_combat_text_installed) return true;
-    const auto draw_owner = resolve_hook_entry(image + kCombatTextDrawRva, kCombatTextDrawPrologue.data(),
-                                               kCombatTextDrawPrologue.size(), 5);
+    if (running_game_sites().report.engine==GameEngine::lia)
+        for (const auto& range:kLiaCombatTextRanges)
+            if (!lia_live_contract_range_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return false;
+    const auto draw_owner = resolve_hook_entry(image + sites.draw, sites.draw_prefix.data(),
+                                               sites.draw_prefix.size(), 5);
     // A framework chain on Draw is the addon's replacement Draw; the call is
     // taken before it, so that chain stays installed and is simply not reached.
-    if (!window_call_targets(image + kCombatTextCallRva, image + kCombatTextDrawRva) ||
+    if (!window_call_targets(image + sites.call, image + sites.draw) ||
         draw_owner.owner == EntryOwner::rejected ||
-        std::memcmp(image + kCombatTextReceiveRva, kCombatTextReceivePrologue.data(), kCombatTextReceivePrologue.size()) != 0)
+        std::memcmp(image + sites.receive, kCombatTextReceivePrologue.data(), kCombatTextReceivePrologue.size()) != 0)
         return false;
-    for (std::uint32_t rva : kCombatTextClockCallRvas)
-        if (std::memcmp(image + rva, kCombatTextClockCall.data(), kCombatTextClockCall.size()) != 0) return false;
+    for (std::size_t i=0; i<sites.clock_count; ++i)
+        if (std::memcmp(image + sites.clock_calls[i], sites.clock_prefix.data(), sites.clock_prefix.size()) != 0) return false;
     g_combat_text_image = image;
     g_combat_text_addon_layout = draw_owner.owner == EntryOwner::framework_chain;
-    std::memcpy(g_combat_text_call_original.data(), image + kCombatTextCallRva, 5);
-    for (std::size_t i = 0; i < kCombatTextClockCallRvas.size(); ++i)
-        std::memcpy(g_combat_text_clock_original[i].data(), image + kCombatTextClockCallRvas[i], 6);
-    if (!patch_window_code(image + kCombatTextCallRva, reinterpret_cast<const void*>(&hook_combat_text), true)) return false;
-    for (std::size_t i = 0; i < kCombatTextClockCallRvas.size(); ++i) {
-        if (write_combat_text_clock_call(image + kCombatTextClockCallRvas[i], reinterpret_cast<const void*>(&combat_text_clock_ms)))
+    std::memcpy(g_combat_text_call_original.data(), image + sites.call, 5);
+    for (std::size_t i = 0; i < sites.clock_count; ++i)
+        std::memcpy(g_combat_text_clock_original[i].data(), image + sites.clock_calls[i], 6);
+    if (!patch_window_code(image + sites.call, reinterpret_cast<const void*>(&hook_combat_text), true)) return false;
+    for (std::size_t i = 0; i < sites.clock_count; ++i) {
+        if (write_combat_text_clock_call(image + sites.clock_calls[i], reinterpret_cast<const void*>(&combat_text_clock_ms)))
             continue;
         for (std::size_t k = 0; k < i; ++k)
-            restore_combat_text_clock_call(image + kCombatTextClockCallRvas[k], g_combat_text_clock_original[k]);
-        restore_forwarding_hook(image + kCombatTextCallRva, g_combat_text_call_original.data(), 5,
+            restore_combat_text_clock_call(image + sites.clock_calls[k], g_combat_text_clock_original[k]);
+        restore_forwarding_hook(image + sites.call, g_combat_text_call_original.data(), 5,
                                 reinterpret_cast<const void*>(&hook_combat_text), true, "combat_text.call");
         return false;
     }
@@ -25033,16 +27128,17 @@ bool install_combat_text_hooks(std::uint8_t* image) noexcept {
 #ifndef EID3D11_EMBEDDED
 #if !defined(EID3D11_EMBEDDED)
 bool uninstall_combat_text_hooks(std::uint8_t* image) noexcept {
+    const auto& sites=combat_text_contract();
     if (!g_combat_text_installed) return true;
     if (!image) return false;
     bool restored = true;
-    for (std::size_t i = 0; i < kCombatTextClockCallRvas.size(); ++i) {
-        std::uint8_t* site = image + kCombatTextClockCallRvas[i];
+    for (std::size_t i = 0; i < sites.clock_count; ++i) {
+        std::uint8_t* site = image + sites.clock_calls[i];
         if (relative_call_targets(site, reinterpret_cast<const void*>(&combat_text_clock_ms)))
             restored &= restore_combat_text_clock_call(site, g_combat_text_clock_original[i]);
         else { append_bridge_event("hook_teardown_pending", "combat_text.clock_foreign", true); restored = false; }
     }
-    if (!restore_forwarding_hook(image + kCombatTextCallRva, g_combat_text_call_original.data(), 5,
+    if (!restore_forwarding_hook(image + sites.call, g_combat_text_call_original.data(), 5,
             reinterpret_cast<const void*>(&hook_combat_text), true, "combat_text.call"))
         restored = false;
     if (restored) g_combat_text_installed = false;
@@ -25068,6 +27164,93 @@ void bridge_update_combat_portraits() noexcept {
 }
 
 #if !defined(EID3D11_EMBEDDED)
+bool bridge_camp_texture_create_matches() noexcept {
+    const auto* image = reinterpret_cast<const std::uint8_t*>(GetModuleHandleA(nullptr));
+    if (!image || running_game_sites().report.engine != GameEngine::lia) return false;
+    if (lia_live_contract_range_matches(image,0x001ad330,0xe,0x83ebd6416991ef9dull))
+        return true;
+    const auto* entry = image + 0x001ad330;
+    return g_hud_visual_hooks_installed && g_hud_visual_native &&
+        g_hud_visual_game_image == image && g_hud_visual_trampoline_owned[7] &&
+        g_hud_visual_trampolines[7] &&
+        g_texture_manager_create == reinterpret_cast<ResourceManagerCreateFn>(g_hud_visual_trampolines[7]) &&
+        relative_jump_target(entry) == reinterpret_cast<const void*>(&hook_texture_manager_create) &&
+        entry[5] == 0x90 &&
+        lia_live_contract_range_matches(image,0x001ad336,8,0x4a8663b8ab3babd2ull);
+}
+
+bool bridge_camp_draw_text_matches() noexcept {
+    const auto* image = reinterpret_cast<const std::uint8_t*>(GetModuleHandleA(nullptr));
+    if (!image || running_game_sites().report.engine != GameEngine::lia) return false;
+    if (lia_live_contract_range_matches(image, 0x00134b30, 6, 0xd1e596960b2b3cc3ull))
+        return true;
+    const auto* entry = image + 0x00134b30;
+    return g_character_pane_hooks_installed && g_character_pane_game_image == image &&
+        g_character_pane_trampolines[1] &&
+        g_character_pane_draw_text == reinterpret_cast<CharacterPaneDrawTextFn>(
+            g_character_pane_trampolines[1]) &&
+        relative_jump_target(entry) == reinterpret_cast<const void*>(&hook_character_pane_draw_text) &&
+        entry[5] == 0x90;
+}
+
+bool bridge_camp_surface_clear_matches() noexcept {
+    const auto* image=reinterpret_cast<const std::uint8_t*>(GetModuleHandleA(nullptr));
+    if (!image || running_game_sites().report.engine!=GameEngine::lia) return false;
+    if (!lia_live_contract_range_matches(image,0x00134c76,0x39,0x7cb809a896943c02ull)) return false;
+    const auto& sites=item_card_clear_contract();
+    const auto* entry=image+sites.entry;
+    if (!std::memcmp(entry,sites.prefix.data(),sites.prefix.size())) return true;
+    return g_item_card_hooks_installed && g_character_pane_game_image==image &&
+        g_item_card_trampoline &&
+        g_item_card_clear==reinterpret_cast<ItemCardClearFn>(g_item_card_trampoline) &&
+        !std::memcmp(g_item_card_clear_original.data(),sites.prefix.data(),sites.prefix.size()) &&
+        relative_jump_target(entry)==reinterpret_cast<const void*>(&hook_item_card_clear) && entry[5]==0x90;
+}
+
+bool bridge_lia_hud_editor_contract_matches() noexcept {
+    const auto* image=reinterpret_cast<const std::uint8_t*>(GetModuleHandleA(nullptr));
+    if (!image || running_game_sites().report.engine!=GameEngine::lia) return false;
+    static const bool verified=[image]() noexcept {
+        for (const auto& range:kLiaHudEditorRanges)
+            if (!lia_live_contract_range_matches(image,static_cast<std::uint32_t>(range[0]),
+                    static_cast<std::size_t>(range[1]),range[2])) return false;
+        return true;
+    }();
+    return verified;
+}
+
+bool bridge_reset_lia_hud_editor_input(void* interface_object) noexcept {
+    auto* image=g_hud_visual_game_image;
+    if (!bridge_lia_hud_editor_contract_matches() || !image ||
+        interface_object!=image+0x002b8a38 || !g_hud_active_screen ||
+        !g_hud_visuals.active_screen_generation()) return false;
+    const void* begin=nullptr; const void* end=nullptr; void* top=nullptr;
+    void* table=nullptr; void* input_table=nullptr; void* owner=nullptr;
+    if (!visual_read(interface_object,0x34,begin) || !visual_read(interface_object,0x38,end)) return false;
+    const auto first=reinterpret_cast<std::uintptr_t>(begin),last=reinterpret_cast<std::uintptr_t>(end);
+    if (!first || last<=first || (last-first)%sizeof(void*) ||
+        !visual_read(reinterpret_cast<const void*>(last-sizeof(void*)),0,top) || top!=g_hud_active_screen ||
+        !visual_read(top,0,table) || table!=image+0x0022fd64 ||
+        !visual_read(top,0x94,input_table) || input_table!=image+0x0022fd28 ||
+        !visual_read(top,0x98,owner) || owner!=interface_object) return false;
+    using Reset=void(__thiscall*)(void*);
+    reinterpret_cast<Reset>(image+0x0012fac0)(interface_object);
+    return true;
+}
+
+bool bridge_lia_back_clip_contract_matches() noexcept {
+    const auto* image = reinterpret_cast<const std::uint8_t*>(GetModuleHandleA(nullptr));
+    if (!image || running_game_sites().report.engine != GameEngine::lia ||
+        !game_sites_ok(GameSiteGroup::world_projection)) return false;
+    static const bool verified = [image]() noexcept {
+        for (const auto& range : kLiaBackClipRanges)
+            if (!lia_live_contract_range_matches(image,static_cast<std::uint32_t>(range[0]),
+                static_cast<std::size_t>(range[1]),range[2])) return false;
+        return true;
+    }();
+    return verified;
+}
+
 std::uint64_t bridge_camp_texture_generation() noexcept {
     return g_hud_visual_game_image && g_hud_visuals.role_ready(HudResourceRole::texture)
         ? g_hud_visuals.role_generation(HudResourceRole::texture) : 0;
@@ -25084,6 +27267,15 @@ bool bridge_camp_texture_mounts(ResourceStoreConfig& mounts) noexcept {
     void* manager = bridge_camp_texture_owner();
     if (!manager) return false;
     const auto* game = g_hud_visual_game_image;
+    if (running_game_sites().report.engine==GameEngine::lia) {
+        static const bool verified=[game]() noexcept {
+            for (const auto& range:kLiaCampMountRanges)
+                if (!lia_live_contract_range_matches(game,static_cast<std::uint32_t>(range[0]),
+                        static_cast<std::size_t>(range[1]),range[2])) return false;
+            return true;
+        }();
+        if (!verified) return false;
+    } else {
     // Fingerprinted GetFile and AddNewResource establish the vector, string
     // spans and first-hit iteration. GetFile skips archives that never opened.
     const std::uint8_t resource_vector[]{0x8b,0xb5,0xb0,0,0,0,0x8b,0x85,0xb4,0,0,0};
@@ -25097,6 +27289,7 @@ bool bridge_camp_texture_mounts(ResourceStoreConfig& mounts) noexcept {
         std::memcmp(game + 0x275472,resource_stride,sizeof(resource_stride)) ||
         std::memcmp(game + 0x275095,resource_name,sizeof(resource_name)) ||
         std::memcmp(game + 0x271b5e,resource_open,sizeof(resource_open))) return false;
+    }
     std::uintptr_t begin = 0, end = 0;
     if (!visual_read(manager,0xb0,begin) || !visual_read(manager,0xb4,end) ||
         end < begin || (end-begin)%16 || (end-begin)/16 > 4096) return false;
@@ -25149,8 +27342,28 @@ std::map<CoverMarkerKey, CreatedCoverMarker> g_cover_markers;
 std::uint64_t g_cover_marker_epoch = 0;
 
 #if !defined(EID3D11_EMBEDDED)
+std::uint32_t ground_cover_marker_vtable_rva() noexcept {
+    return running_game_sites().report.engine == GameEngine::lia
+        ? kLiaFootprintVtableRva : 0x0033f760u;
+}
+
 bool ground_cover_marker_contract() noexcept {
-    return g_visual_game_image && g_visual_publication_active &&
+    if (!g_visual_game_image || !g_visual_publication_active) return false;
+    if (running_game_sites().report.engine == GameEngine::lia) {
+        for (const auto& range : kLiaFootprintMarkerRanges)
+            if (!lia_live_contract_range_matches(g_visual_game_image,
+                static_cast<std::uint32_t>(range[0]),static_cast<std::size_t>(range[1]),range[2]))
+                return false;
+        // The print hook changes only this PUSH operand. All other gate bytes,
+        // including the opcode, remain hashed; teardown restores the native Draw.
+        const auto& prints=game_print_contract();
+        std::uint32_t target=0;
+        if (!visual_read(g_visual_game_image,prints.pushes[1]+1,target)) return false;
+        return target==loaded_address(g_visual_game_image,prints.draw) ||
+            (g_game_prints_installed && g_game_print_image==g_visual_game_image &&
+             target==static_cast<std::uint32_t>(reinterpret_cast<std::uintptr_t>(kGamePrintWrappers[1])));
+    }
+    return
         relative_call_targets(g_visual_game_image+0x134350,g_visual_game_image+0x134b60) &&
         signature(g_visual_game_image+0x134b99,{0x8b,0x02,0x89,0x44,0x24,0x50}) &&
         signature(g_visual_game_image+0x2cece5,{0x66,0xff,0x4a,0x1c}) &&
@@ -25172,7 +27385,7 @@ bool read_cover_marker(const void* node, std::int32_t tick, bool just_created,
     std::int16_t life=0;
     std::array<float,4> rectangle{},mapping{};
     float rotation=0;
-    if(!visual_read(node,8,table)||table!=g_visual_game_image+0x33f760||
+    if(!visual_read(node,8,table)||table!=g_visual_game_image+ground_cover_marker_vtable_rva()||
        !visual_read(node,8+5,visible)||!visual_read(node,8+8,rectangle)||
        !visual_read(node,8+0x1c,life)||!visual_read(node,8+0x30,mapping)||
        !visual_read(node,8+0x44,rotation)||!visual_read(node,8+0x4c,alpha)||
@@ -25195,7 +27408,7 @@ GroundCoverFootprintAppend begin_ground_cover_footprint_append() noexcept {
     while(!g_cover_markers.empty()&&
           !ground_cover::footprint_history_needed(double(g_cover_markers.begin()->first.first),time))
         g_cover_markers.erase(g_cover_markers.begin());
-    const void* world=g_visual_game_image+kVisualClientWorldRva;
+    const void* world=g_visual_game_image+world_clock_contract().client_rva;
     std::array<const void*,2> ends{};
     if(!visual_read(world,0x1bc,result.head)||!result.head||
        !visual_read(result.head,0,ends)||!ends[0]||!ends[1])return {};
@@ -25213,7 +27426,7 @@ void publish_ground_cover_footprint_append(void* object, VisualResourceIncarnati
     if(!retained_visual_scene().visual_tick_values(resource,values)||
        values.hidden||(values.object_flags&0x40u)||values.dead||values.invisible||
        !visual_read(object,0x1c,centre)||!finite_vector(centre.data(),centre.size())||
-       !visual_read(g_visual_game_image,kWorldSegmentTimeCounterRva,tick))return;
+       !visual_read(g_visual_game_image,world_clock_contract().ticks_rva,tick))return;
     CreatedCoverMarker created{};created.creator=resource;created.tick=tick;
     created.half_extent=snow_trail_extent(values.target_half_extent);
     created.walks=ground_cover::unit_presses_cover(values.locomotion);
@@ -25260,18 +27473,20 @@ bool read_ground_cover_footprints(std::vector<ground_cover::FootprintSplat>& out
         return fail("supported footprint creation/fade contract unavailable; ground cover omitted");
     refresh_cover_marker_epoch();
     std::int32_t tick=0;double time=0;
-    if(!read_owned_world_time(g_visual_game_image,time)||!visual_read(g_visual_game_image,kWorldSegmentTimeCounterRva,tick))
+    if(!read_owned_world_time(g_visual_game_image,time)||!visual_read(g_visual_game_image,world_clock_contract().ticks_rva,tick))
         return fail("footprint clock unreadable; ground cover omitted");
     std::int32_t enabled = 0;
-    if (!visual_read(g_visual_game_image, 0x39bd4c, enabled))
+    const auto setting_rva = running_game_sites().report.engine == GameEngine::lia
+        ? kLiaFootprintEnabledRva : 0x0039bd4cu;
+    if (!visual_read(g_visual_game_image, setting_rva, enabled))
         return fail("footprint setting unreadable; ground cover omitted");
-    if (!enabled) { // Draw's gate at 0056B91A, even for existing prints.
+    if (!enabled) { // The verified native draw gate also controls existing prints.
         while(!g_cover_markers.empty()&&g_cover_markers.begin()->first.first<=tick)
             g_cover_markers.erase(g_cover_markers.begin());
         return true;
     }
 
-    const void* world = g_visual_game_image + kVisualClientWorldRva;
+    const void* world = g_visual_game_image + world_clock_contract().client_rva;
     const void* head = nullptr;
     std::array<const void*,2> ends{};
     if (!visual_read(world, 0x1bc, head) || !head || !visual_read(head, 0, ends) || !ends[0] || !ends[1])
@@ -25304,7 +27519,7 @@ bool read_ground_cover_footprints(std::vector<ground_cover::FootprintSplat>& out
         const void* table = nullptr;
         // The footprint is INLINE at node+8, not a pointer stored there.
         if (!node || node == head || !visual_read(node, 0, links) || !links[0] || links[1] != previous ||
-            !visual_read(node, 8, table) || table != g_visual_game_image + 0x33f760 ||
+            !visual_read(node, 8, table) || table != g_visual_game_image + ground_cover_marker_vtable_rva() ||
             !visual_read(node, 8 + 5, visible))
             return fail("footprint object or list changed during read; ground cover omitted");
         if (visible) {
@@ -25552,7 +27767,7 @@ bool bridge_begin_character_pane_getdc(
     const bool caller_matches = g_character_pane_game_image &&
         reinterpret_cast<std::uintptr_t>(caller) ==
             reinterpret_cast<std::uintptr_t>(g_character_pane_game_image) +
-                kCharacterPaneGetDcReturnRva;
+                character_pane_contract().getdc_return;
 #ifdef EID3D11_TESTING
     const bool admitted_caller = caller_matches ||
         g_character_pane_proxy_test_mode;
@@ -25585,7 +27800,7 @@ bool bridge_finish_character_pane_releasedc(
     const bool caller_matches = g_character_pane_game_image &&
         reinterpret_cast<std::uintptr_t>(caller) ==
             reinterpret_cast<std::uintptr_t>(g_character_pane_game_image) +
-                kCharacterPaneReleaseDcReturnRva;
+                character_pane_contract().releasedc_return;
 #ifdef EID3D11_TESTING
     const bool admitted_caller = caller_matches ||
         g_character_pane_proxy_test_mode;
@@ -25655,7 +27870,7 @@ void bridge_retire_owned_text_surface(std::uint64_t surface_id) noexcept {
 
 #if !defined(EID3D11_EMBEDDED)
 bool bridge_consume_character_pane_blt(
-    std::uint64_t source_id, const void* caller,
+    IDirectDrawSurface7* source_surface, std::uint64_t source_id, const void* caller,
     const RECT& destination, const RECT* source_rect,
     Renderer& renderer, HRESULT& result,
     std::uint64_t source_generation) noexcept {
@@ -25672,9 +27887,13 @@ bool bridge_consume_character_pane_blt(
         reinterpret_cast<std::uintptr_t>(caller);
     const std::uintptr_t image =
         reinterpret_cast<std::uintptr_t>(g_character_pane_game_image);
-    const bool caller_matches = g_character_pane_game_image &&
-        (return_address == image + kCharacterPaneKeyedBltReturnRva ||
-         return_address == image + kCharacterPaneUnkeyedBltReturnRva);
+    const bool native_draw_source = source_surface &&
+        g_character_pane_surface_draw_self &&
+        interface_dd_surface(g_character_pane_surface_draw_self) == source_surface;
+    const bool caller_matches = native_draw_source ||
+        (g_character_pane_game_image &&
+         (return_address == image + character_pane_contract().keyed_blt_return ||
+          return_address == image + character_pane_contract().unkeyed_blt_return));
 #ifdef EID3D11_TESTING
     const bool admitted_caller = caller_matches ||
         g_character_pane_proxy_test_mode;
@@ -25809,12 +28028,23 @@ void bridge_set_completed_visual_surface_reader(CompletedVisualSurfaceReader rea
 }
 
 #if !defined(EID3D11_EMBEDDED)
+void bridge_set_camera_pan_smoothing(bool enabled) noexcept {
+    if (g_camera_pan_requested.exchange(enabled, std::memory_order_acq_rel) != enabled)
+        g_camera_pan_revision.fetch_add(1u, std::memory_order_release);
+}
+
+const char* bridge_camera_pan_smoothing_unavailable_reason() noexcept {
+    return g_camera_pan_unavailable.load(std::memory_order_acquire);
+}
+
 void bridge_set_camp_input_overlay(DebugOverlay* overlay) noexcept {
     g_camp_input_overlay=overlay;
 }
 
 bool EngineBridge::install() {
     if (installed_) return true;
+    g_features_off = 0;
+    g_addon_notice[0] = '\0';
     configure_startup_diagnostics();
     const bool traced = startup_begin(StartupStage::hooks);
     image_ = GetModuleHandleW(nullptr);
@@ -25892,6 +28122,9 @@ bool EngineBridge::install() {
                 &g_addon.layout.res_cache : nullptr);
         report(res_cache_release_installed ? "res_cache_release_installed" :
                                              "res_cache_release_rejected",
+               // Without an addon there is no private cache to route to
+               // (vanilla and LiA): nothing to install, whatever the sites.
+               !res_cache_addon ? "addon_missing" :
                res_cache_sites ? res_cache_release_status_name(res_cache_release_snapshot().status)
                                : "site_bytes_mismatch");
         const bool owned_cursor_installed = install_owned_cursor_hooks(
@@ -25946,17 +28179,32 @@ bool EngineBridge::install() {
         report(game_particles_installed ? "game_particles_installed" : "game_particles_rejected",
                game_particles_installed ? "verified_draw_particles_slot_gpu_billboards" :
                                           "draw_particles_slot_or_entry_mismatch_game_draws_particles");
-        const bool game_lightning_installed = install_game_ribbon_hook(
+        bool game_effect_sites=true;
+        if (running_game_sites().report.engine==GameEngine::lia)
+            for (const auto& range:kLiaOwnedEffectRanges)
+                if (!lia_live_contract_range_matches(reinterpret_cast<const std::uint8_t*>(image_),
+                        static_cast<std::uint32_t>(range[0]),static_cast<std::size_t>(range[1]),range[2])) {
+                    game_effect_sites=false; break;
+                }
+        // Effects also witness the stock view publication body. Complete
+        // that preflight before replacing its optional camera-pan call.
+        const bool camera_pan_installed = install_camera_pan_hooks(
+            reinterpret_cast<std::uint8_t*>(image_));
+        report(camera_pan_installed ? "camera_pan_smoothing_installed" :
+                                      "camera_pan_smoothing_rejected",
+               camera_pan_installed ? "experimental_displayed_xy_only_default_off" :
+                   bridge_camera_pan_smoothing_unavailable_reason());
+        const bool game_lightning_installed = game_effect_sites && install_game_ribbon_hook(
             reinterpret_cast<std::uint8_t*>(image_));
         report(game_lightning_installed ? "game_lightning_installed" : "game_lightning_rejected",
                game_lightning_installed ? "verified_draw_3d_line_slot_gpu_ribbons" :
                                           "draw_3d_line_slot_or_entry_mismatch_game_draws_lightning");
-        const bool game_selection_installed = install_game_selection_hook(
+        const bool game_selection_installed = game_effect_sites && install_game_selection_hook(
             reinterpret_cast<std::uint8_t*>(image_));
         report(game_selection_installed ? "game_selection_marker_installed" : "game_selection_marker_rejected",
                game_selection_installed ? "verified_draw_selection_call_gpu_marker" :
                                           "draw_selection_call_or_entry_mismatch_game_draws_marker");
-        const bool game_prints_installed = install_game_print_hooks(
+        const bool game_prints_installed = game_effect_sites && install_game_print_hooks(
             reinterpret_cast<std::uint8_t*>(image_));
         report(game_prints_installed ? "game_prints_installed" : "game_prints_rejected",
                game_prints_installed ? "verified_print_list_pushes_and_render_call_gpu_prints" :
@@ -26152,6 +28400,10 @@ bool EngineBridge::install() {
                    "hud_visual_publication_rejected",
                native_installed ? g_hud_visual_install_detail :
                                   "native_sink_inactive");
+        const bool map_preview_installed =
+            install_map_preview_hooks(reinterpret_cast<std::uint8_t*>(image_));
+        report(map_preview_installed ? "world_map_preview_hooks_installed" :
+            "world_map_preview_hooks_rejected",g_map_preview_hook_failure);
         const bool character_pane_text_installed =
             install_character_pane_text_hooks(
                 reinterpret_cast<std::uint8_t*>(image_));
@@ -26216,7 +28468,7 @@ bool EngineBridge::install() {
                stock_shadows_suppressed ?
                    "verified_draw_and_offscreen_branches_registry_settings_ignored" :
                    "branch_bytes_mismatch_game_shadows_follow_registry_settings");
-        publish_addon_notice();
+        publish_addon_notice(visual_publication_installed);
     }
     startup_end(StartupStage::hooks, traced, installed_ ? "completed" : "rejected");
     return installed_;
@@ -26245,7 +28497,11 @@ bool EngineBridge::uninstall() {
     restored &= uninstall_world_teardown_fix(image);
     restored &= uninstall_window_membership_hooks(image);
     restored &= uninstall_visual_publication_hooks();
-    restored &= uninstall_outer_frame_timing_hooks();
+    const bool camera_pan_restored = uninstall_camera_pan_hooks();
+    restored &= camera_pan_restored;
+    if (camera_pan_restored) restored &= uninstall_outer_frame_timing_hooks();
+    else report("camera_pan_smoothing_uninstall_pending",
+                "restore_failed_or_foreign_owner_preserved_timing_chain");
     // Optional timing must release its sites before the required begin call.
     const bool frame_begin_restored = uninstall_engine_frame_begin_hook();
     if (!frame_begin_restored)
@@ -26254,6 +28510,7 @@ bool EngineBridge::uninstall() {
     restored &= uninstall_item_card_text_hooks();
     restored &= uninstall_chat_text_hooks();
     restored &= uninstall_character_pane_text_hooks();
+    restored &= uninstall_map_preview_hooks();
     restored &= uninstall_hud_visual_hooks();
     restored &= uninstall_hud_atlas_hooks();
     if (!uninstall_res_cache_release_hooks()) {
@@ -26309,7 +28566,33 @@ bool EngineBridge::uninstall() {
         restored = false;
     }
     uninstall_native_geometry_hook(image);
-    auto** table = reinterpret_cast<void**>(reinterpret_cast<std::uint8_t*>(image_) + kRendererTableRva);
+    const auto& boundary = renderer_boundary_contract();
+    if (g_renderer_outer_calls_installed) {
+        auto* const first = image + boundary.begin_call_rva;
+        auto* const last = image + boundary.end_call_rva + 5;
+        DWORD previous = 0;
+        bool calls_restored = VirtualProtect(first, static_cast<SIZE_T>(last-first),
+                                             PAGE_EXECUTE_READWRITE, &previous) != FALSE;
+        if (calls_restored) {
+            const std::uint32_t calls[] = {boundary.begin_call_rva,boundary.end_call_rva};
+            const void* hooks[] = {reinterpret_cast<const void*>(&hook_begin_frame),
+                                   reinterpret_cast<const void*>(&hook_end_frame)};
+            for (std::size_t i=0;i<2;++i) {
+                auto* const call = image + calls[i];
+                if (relative_call_targets(call,hooks[i]))
+                    calls_restored &= write_relative_call(call,image+boundary.entries[i]);
+                else if (!relative_call_targets(call,image+boundary.entries[i]))
+                    calls_restored = false;
+            }
+            DWORD ignored = 0;
+            calls_restored &= VirtualProtect(first,static_cast<SIZE_T>(last-first),
+                                             previous,&ignored) != FALSE;
+            FlushInstructionCache(GetCurrentProcess(),first,static_cast<SIZE_T>(last-first));
+        }
+        if (calls_restored) g_renderer_outer_calls_installed = false;
+        restored &= calls_restored;
+    }
+    auto** table = reinterpret_cast<void**>(image + boundary.table_rva);
     SlotPatch slots[] = {
         {kBeginFrameSlot, 0, reinterpret_cast<void*>(&hook_begin_frame), reinterpret_cast<void**>(&g_begin_frame)},
         {kEndFrameSlot, 0, reinterpret_cast<void*>(&hook_end_frame), reinterpret_cast<void**>(&g_end_frame)},
@@ -26329,7 +28612,11 @@ bool EngineBridge::uninstall() {
     } else {
         restored = false;
     }
-    if (restored) installed_ = false;
+    if (restored) {
+        installed_ = false;
+        g_features_off = 0;
+        g_addon_notice[0] = '\0';
+    }
     return restored;
 }
 #endif // !EID3D11_EMBEDDED
@@ -26404,7 +28691,7 @@ std::uint32_t EngineBridge::image_rva(const void* address) const {
     if (!image_ || !address) return 0;
     const auto base = reinterpret_cast<std::uintptr_t>(image_);
     const auto value = reinterpret_cast<std::uintptr_t>(address);
-    return value >= base && value < base + kExpectedImageSize
+    return value >= base && value < base + native_game_image_size()
         ? static_cast<std::uint32_t>(value - base) : 0;
 }
 
@@ -26413,10 +28700,17 @@ const wchar_t* EngineBridge::resource_registry_key() const noexcept {
     if (!sites_verified_ || !image_) return nullptr;
     // The supported startup selects its registry root with this PUSH operand.
     // An addon may replace the operand; read its current value, never overwrite it.
+    // Base: PUSH root; MOV ECX,CString; CALL CString::operator=. LiA: PUSH
+    // root; MOV ECX,string; CALL assign(ptr,len), followed by
+    // RegOpenKeyExA(HKCU, that string, ...) - the same root selection.
     std::array<std::uint8_t, 15> code{};
-    constexpr std::array<std::uint8_t, 10> continuation{
+    const bool lia = running_game_sites().report.engine == GameEngine::lia;
+    constexpr std::array<std::uint8_t, 10> base_continuation{
         0xb9,0x50,0xf4,0x7a,0x00,0xe8,0x01,0xa2,0x2a,0x00};
-    if (!visual_read_bytes(image_, 0x568e9, code.data(), code.size()) ||
+    constexpr std::array<std::uint8_t, 10> lia_continuation{
+        0xb9,0x20,0x29,0x6a,0x00,0xe8,0x27,0xfa,0xfc,0xff};
+    const auto& continuation = lia ? lia_continuation : base_continuation;
+    if (!visual_read_bytes(image_, lia ? 0x343fa : 0x568e9, code.data(), code.size()) ||
         code[0] != 0x68 ||
         std::memcmp(code.data()+5, continuation.data(), continuation.size()) != 0)
         return nullptr;
@@ -26439,30 +28733,61 @@ const wchar_t* EngineBridge::resource_registry_key() const noexcept {
 
 bool EngineBridge::patch_slots() {
     auto* base = reinterpret_cast<std::uint8_t*>(image_);
-    auto** table = reinterpret_cast<void**>(base + kRendererTableRva);
+    const auto& boundary = renderer_boundary_contract();
+    auto** table = reinterpret_cast<void**>(base + boundary.table_rva);
     SlotPatch slots[] = {
-        {kBeginFrameSlot, 0x00103f40, reinterpret_cast<void*>(&hook_begin_frame), reinterpret_cast<void**>(&g_begin_frame)},
-        {kEndFrameSlot, 0x001040a0, reinterpret_cast<void*>(&hook_end_frame), reinterpret_cast<void**>(&g_end_frame)},
-        {kSimpleGeometrySlot, 0x00101bb0, reinterpret_cast<void*>(&hook_simple_geometry), reinterpret_cast<void**>(&g_simple_geometry)},
-        {kFigureWithLightsSlot, 0x00101d40, reinterpret_cast<void*>(&hook_figure_lights), reinterpret_cast<void**>(&g_figure_lights)},
-        {kFigurePlacedSlot, 0x00101d00, reinterpret_cast<void*>(&hook_figure_placed), reinterpret_cast<void**>(&g_figure_placed)},
+        {kBeginFrameSlot, boundary.entries[0], reinterpret_cast<void*>(&hook_begin_frame), reinterpret_cast<void**>(&g_begin_frame)},
+        {kEndFrameSlot, boundary.entries[1], reinterpret_cast<void*>(&hook_end_frame), reinterpret_cast<void**>(&g_end_frame)},
+        {kSimpleGeometrySlot, boundary.entries[2], reinterpret_cast<void*>(&hook_simple_geometry), reinterpret_cast<void**>(&g_simple_geometry)},
+        {kFigureWithLightsSlot, boundary.entries[3], reinterpret_cast<void*>(&hook_figure_lights), reinterpret_cast<void**>(&g_figure_lights)},
+        {kFigurePlacedSlot, boundary.entries[4], reinterpret_cast<void*>(&hook_figure_placed), reinterpret_cast<void**>(&g_figure_placed)},
     };
     for (const auto& slot : slots) {
         if (table[slot.slot] != base + slot.expected_rva) return false;
     }
-    if (!signature(base + 0x00103f40, {0x56,0x8b,0xf1}) ||
-        !signature(base + 0x001040a0, {0x64,0xa1,0x00,0x00,0x00,0x00}) ||
-        !signature(base + 0x00101bb0, {0x53,0x55,0x8b,0x6c,0x24,0x0c}) ||
-        !signature(base + 0x00101d40, {0x8b,0x44,0x24,0x04}) ||
-        !signature(base + 0x00101d00, {0x8b,0x44,0x24,0x04})) return false;
+    if (boundary.direct_outer_calls) {
+        if (!signature(base + boundary.entries[0], {0x56,0x8b,0xf1,0xf6,0x46,0x04,0x01}) ||
+            !signature(base + boundary.entries[1], {0x64,0xa1,0x00,0x00,0x00,0x00}) ||
+            !signature(base + boundary.entries[2], {0x8b,0x49,0x20,0xe9,0xb8,0x21,0xff,0xff}) ||
+            !signature(base + boundary.entries[3], {0x8b,0x44,0x24,0x04,0x8a,0x50,0x08,0x84,0xd2,0x79,0x08,0xb8,0x01,0x00,0x00,0x00,0xc2,0x1c,0x00,0x8b,0x49,0x20,0x8b,0x80,0x94,0x00,0x00,0x00,0x89,0x4c,0x24,0x04,0x8b,0xc8,0xe9,0x29,0x8c,0x06,0x00}) ||
+            !signature(base + boundary.entries[4], {0x8b,0x44,0x24,0x04,0x8a,0x50,0x08,0x84,0xd2,0x79,0x08,0xb8,0x01,0x00,0x00,0x00,0xc2,0x18,0x00,0x8b,0x49,0x20,0x8b,0x80,0x94,0x00,0x00,0x00,0x89,0x4c,0x24,0x04,0x8b,0xc8,0xe9,0x59,0x89,0x06,0x00}) ||
+            !relative_call_targets(base+boundary.begin_call_rva,base+boundary.entries[0]) ||
+            !relative_call_targets(base+boundary.end_call_rva,base+boundary.entries[1]) ||
+            !relative_call_fits(base+boundary.begin_call_rva,reinterpret_cast<const void*>(&hook_begin_frame)) ||
+            !relative_call_fits(base+boundary.end_call_rva,reinterpret_cast<const void*>(&hook_end_frame))) return false;
+    } else if (!signature(base + boundary.entries[0], {0x56,0x8b,0xf1}) ||
+        !signature(base + boundary.entries[1], {0x64,0xa1,0x00,0x00,0x00,0x00}) ||
+        !signature(base + boundary.entries[2], {0x53,0x55,0x8b,0x6c,0x24,0x0c}) ||
+        !signature(base + boundary.entries[3], {0x8b,0x44,0x24,0x04}) ||
+        !signature(base + boundary.entries[4], {0x8b,0x44,0x24,0x04})) return false;
+    auto* const first_call = base+boundary.begin_call_rva;
+    const auto calls_size = static_cast<SIZE_T>(boundary.end_call_rva-boundary.begin_call_rva+5);
+    DWORD calls_protection = 0;
+    if (boundary.direct_outer_calls &&
+        !VirtualProtect(first_call,calls_size,PAGE_EXECUTE_READWRITE,&calls_protection)) return false;
     DWORD protection = 0;
-    if (!VirtualProtect(table, 26 * sizeof(void*), PAGE_READWRITE, &protection)) return false;
+    if (!VirtualProtect(table, 26 * sizeof(void*), PAGE_READWRITE, &protection)) {
+        if (boundary.direct_outer_calls) {
+            DWORD ignored = 0;
+            VirtualProtect(first_call,calls_size,calls_protection,&ignored);
+        }
+        return false;
+    }
     for (const auto& slot : slots) {
         *slot.original = table[slot.slot];
         InterlockedExchangePointer(&table[slot.slot], slot.hook);
         record_owned_patch(&table[slot.slot], slot.original, sizeof(void*));
     }
     DWORD ignored = 0;
+    if (boundary.direct_outer_calls) {
+        // Both relative destinations and writable spans were checked before
+        // touching either the direct call pair or the renderer table.
+        write_relative_call(first_call,reinterpret_cast<const void*>(&hook_begin_frame));
+        write_relative_call(base+boundary.end_call_rva,reinterpret_cast<const void*>(&hook_end_frame));
+        g_renderer_outer_calls_installed = true;
+        VirtualProtect(first_call,calls_size,calls_protection,&ignored);
+        FlushInstructionCache(GetCurrentProcess(),first_call,calls_size);
+    }
     VirtualProtect(table, 26 * sizeof(void*), protection, &ignored);
     FlushInstructionCache(GetCurrentProcess(), table, 26 * sizeof(void*));
     return true;
@@ -26475,6 +28800,10 @@ void EngineBridge::report(const char* event, const char* detail) const {
 
 #if !defined(EID3D11_EMBEDDED)
 SemanticContext current_semantic_context() { return EngineBridge::instance().current(); }
+
+bool bridge_owns_count_time_clock(const void* target) noexcept {
+    return target == reinterpret_cast<const void*>(&hook_outer_count_time_clock);
+}
 
 void bridge_report_event(const char* event, const char* detail) noexcept {
     append_bridge_event(event, detail, EngineBridge::instance().sites_verified());
@@ -26961,6 +29290,37 @@ void bridge_set_profile_enabled(bool enabled) {
 bool bridge_skip_scenery_draw_walk_enabled() noexcept { return g_skip_scenery_draw_walk; }
 bool bridge_change_driven_poses_enabled() noexcept { return g_change_driven_poses; }
 void bridge_set_skip_scenery_draw_walk(bool enabled) noexcept { g_skip_scenery_draw_walk = enabled; }
+#ifndef EID3D11_EMBEDDED
+bool bridge_set_world_map_previews(Renderer* renderer,bool enabled) noexcept {
+    if(g_map_preview_renderer==renderer && g_map_preview_enabled==enabled) return true;
+    try {
+        retire_map_preview();
+        g_map_preview_renderer=renderer;
+        g_map_preview_enabled=enabled;
+        if(enabled && (!g_map_preview_image || !g_map_preview_hooks_ready) && renderer) {
+            g_map_preview_enabled=false; // the unsupported option remains OFF
+            renderer->activate_world_map_preview(0,{},
+                std::string("World map previews unavailable: ")+g_map_preview_hook_failure);
+            return false;
+        }
+        // Off: release the loading cache (GPU registrations, then CPU memory).
+        // On with ready hooks: clear an earlier unavailable notice. Either way
+        // the next load or map opening establishes the preview state again.
+        if(renderer) renderer->retire_world_map_preview(!enabled);
+        return true;
+    } catch(...) {
+        bridge_report_event("world_map_preview_failed","option transition failed");
+        return false;
+    }
+}
+void bridge_clear_world_map_previews(Renderer* renderer) noexcept {
+    if(g_map_preview_renderer!=renderer) return;
+    try { retire_map_preview(); } catch(...) {}
+    g_map_preview_renderer=nullptr;
+    g_map_preview_enabled=false;
+}
+
+#endif
 void bridge_set_highlight_options(bool briefing, bool selected, bool hover_characters,
                                   bool hover_objects) noexcept {
     g_highlight_briefing = briefing;
@@ -27074,15 +29434,19 @@ HMODULE renderer_module() noexcept {
 
 // The player-facing name of a hooked site; other sites are named by RVA.
 const char* owned_site_name(std::uint32_t rva) noexcept {
-    if (rva == kTerrainRangeDrawEntryRva || rva == kTerrainSegmentEntryRva ||
-        rva == kTerrainFreeEntryRva) return "terrain";
+    const auto& terrain = terrain_scene_contract();
+    if (rva == terrain.range || rva == terrain.segment || rva == terrain.free_sector) return "terrain";
+    if (rva == terrain.world) return "world draw";
+    if (rva == terrain.scene) return "Draw3DScene";
+    const std::uint32_t table = renderer_boundary_contract().table_rva;
+    if (rva >= table && rva < table + 26 * sizeof(void*))
+        return "renderer slots";
+    // The cursor and object-draw names below are base-layout RVAs; LiA
+    // sites there are named by RVA.
+    if (running_game_sites().report.engine != GameEngine::base) return nullptr;
     if (rva == kCursorDrawEntryRva || rva == kCursorThreadEntryRva ||
         rva == kCursorRestoreEntryRva) return "cursor";
-    if (rva == kWorldDrawEntryRva) return "world draw";
-    if (rva == kScene3dDrawEntryRva) return "Draw3DScene";
     if (rva == kObject3dDrawEntryRva) return "object draw";
-    if (rva >= kRendererTableRva && rva < kRendererTableRva + 26 * sizeof(void*))
-        return "renderer slots";
     return nullptr;
 }
 
@@ -27487,6 +29851,13 @@ void bridge_release_world_caches() noexcept {
 constexpr std::uint32_t kProgressMovieNameRva = 0x00391ee0;
 constexpr std::uint32_t kProgressMovieHandleRva = 0x003c5550;
 constexpr std::uint32_t kProgressWorkPathRva = 0x003af460;
+struct ProgressMovieContract { std::uint32_t name, handle, work_path; };
+const ProgressMovieContract& progress_movie_contract() noexcept {
+    static constexpr ProgressMovieContract base{kProgressMovieNameRva,kProgressMovieHandleRva,kProgressWorkPathRva};
+    // LiA 51DE80 publishes this handle; 51DE40 closes and clears it.
+    static constexpr ProgressMovieContract lia{0x0026f694,0x002b887c,0x002a2928};
+    return running_game_sites().report.engine==GameEngine::lia ? lia : base;
+}
 
 #if !defined(EID3D11_EMBEDDED)
 bool bridge_progress_movie(ProgressMovie& movie) noexcept {
@@ -27494,13 +29865,26 @@ bool bridge_progress_movie(ProgressMovie& movie) noexcept {
     try {
         if (!game_sites_ok(GameSiteGroup::bridge)) return false;
         const auto* image = reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr));
+        if (running_game_sites().report.engine==GameEngine::lia) {
+            static const bool verified=[image]() noexcept {
+                for (const auto& range:kLiaProgressMovieRanges)
+                    if (!lia_live_contract_range_matches(image,static_cast<std::uint32_t>(range[0]),
+                            static_cast<std::size_t>(range[1]),range[2])) {
+                        append_bridge_event("progress_movie_omitted","LiA progress owner contract mismatch",true);
+                        return false;
+                    }
+                return true;
+            }();
+            if (!verified) return false;
+        }
+        const auto& sites=progress_movie_contract();
         const void* handle = nullptr;
-        if (!visual_read(image, kProgressMovieHandleRva, handle) || !handle) return false;
+        if (!visual_read(image, sites.handle, handle) || !handle) return false;
         std::array<std::uint32_t, 4> values{};
         if (!visual_read(handle, 0, values)) return false;
         std::string name, work_path;
-        if (!visual_string(image, kProgressMovieNameRva, name) ||
-            !visual_string(image, kProgressWorkPathRva, work_path, true)) return false;
+        if (!visual_string(image, sites.name, name) ||
+            !visual_string(image, sites.work_path, work_path, true)) return false;
         movie.width = values[0]; movie.height = values[1]; movie.frames = values[2]; movie.current = values[3];
         movie.path = work_path + "Movies\\" + name;
         return true;
@@ -27659,9 +30043,9 @@ void bridge_trace_input_focus(HWND window, const char* phase, UINT message,
         frame.visible, InterlockedCompareExchange(&g_input_trace_cursor_flags, 0, 0),
         g_camera_mouse_yaw_installed, g_camera_mouse_pitch_installed,
         g_camera_mouse_normalize_installed,
-        owns_call(kCameraMouseYawCallRva, reinterpret_cast<const void*>(&hook_camera_mouse_yaw)),
-        owns_call(kCameraMousePitchCallRva, reinterpret_cast<const void*>(&hook_camera_mouse_pitch)),
-        owns_call(kCameraMouseNormalizeCallRva, reinterpret_cast<const void*>(&hook_camera_mouse_normalize)),
+        owns_call(camera_mouse_contract().yaw_call, reinterpret_cast<const void*>(&hook_camera_mouse_yaw)),
+        owns_call(camera_mouse_contract().pitch_call, reinterpret_cast<const void*>(&hook_camera_mouse_pitch)),
+        owns_call(camera_mouse_contract().normalize_call, reinterpret_cast<const void*>(&hook_camera_mouse_normalize)),
         g_camera_mouse_carry.x, g_camera_mouse_carry.y);
     append_bridge_event("input_focus", detail, true);
 }

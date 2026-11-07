@@ -19,6 +19,7 @@
 
 struct ImDrawData;
 struct ID3D12Device;
+struct IDXGIAdapter;
 struct ID3D12GraphicsCommandList;
 struct ID3D12Resource;
 
@@ -86,9 +87,13 @@ struct D3D12NativeState {
     FixedBlend blend{};
     D3D11_DEPTH_STENCIL_DESC depth{};
     D3D11_RASTERIZER_DESC raster{};
-    // A full colour blend in place of `blend` when custom is set (the post
-    // passes' additive and alpha-over blends that keep the target alpha).
-    // Whole words only: the state is a pipeline key, byte for byte.
+    // custom bits: kCustomBlendOver, a full colour blend at target 0 in place
+    // of `blend` (the post passes' additive and alpha-over blends that keep
+    // the target alpha); kCustomBlendMotionTargets, targets 1 and 2 (object
+    // motion RG, its depth R) blended by the output alpha, so alpha 0 keeps
+    // them (the fur motion variants). Whole words only: the state is a
+    // pipeline key, byte for byte.
+    static constexpr UINT kCustomBlendOver = 1, kCustomBlendMotionTargets = 2;
     struct CustomBlend {
         UINT custom = 0, source = D3D11_BLEND_ONE, destination = D3D11_BLEND_ZERO, op = D3D11_BLEND_OP_ADD;
         UINT source_alpha = D3D11_BLEND_ONE, destination_alpha = D3D11_BLEND_ZERO, op_alpha = D3D11_BLEND_OP_ADD;
@@ -287,8 +292,12 @@ public:
                                   float z, UINT8 stencil_value) noexcept = 0;
     // Pipelines built so far for native passes, and their total build time.
     virtual void native_pipeline_stats(UINT& count, double& milliseconds) const noexcept = 0;
-    // Copies box of what the frame drew so far to (x, y) of texture.
-    virtual HRESULT capture(D3D12Texture& texture, UINT x, UINT y, const RECT& box) = 0;
+    // The game's one-shot picking frame is data: every requested pipeline
+    // must finish compiling before its draws/dispatches can be copied out.
+    virtual void set_hit_test_frame(bool active) noexcept = 0;
+    // Copies box of what the frame drew so far to (x, y) of texture; with a
+    // source, box of that offscreen target instead (the zone hit-test frame).
+    virtual HRESULT capture(D3D12Texture& texture, UINT x, UINT y, const RECT& box, D3D12Texture* source = nullptr) = 0;
     virtual HRESULT draw_ui(const D3D12UiPass& pass) = 0;
     // A whole-target clear before anything is drawn this frame: the frame's
     // background colour (the world marker still wins when a world pass was
@@ -308,8 +317,8 @@ public:
     virtual void set_frame_image(bool wanted) noexcept = 0;
     virtual void composite_frame_image() noexcept = 0;
     // Frame generation presentation (frame_generation=DLSS-G). From the next
-    // frame taken, set_frame_generation(true) moves the swap chain to a pacer
-    // thread with its own queue; each frame's screen (what composite_frame_image
+    // frame taken, set_frame_generation(1) moves presentation to a pacer
+    // thread on the shared direct queue; each frame's screen (what composite_frame_image
     // copies the frame image into and where the overlay, cursor, reveal and
     // gamma draw) is an offscreen real image the pacer presents. A failure to
     // start is reported once (frame_generation_failure) and leaves it off.
@@ -377,11 +386,14 @@ public:
     virtual HRESULT record_external(const char* name, const ExternalUse* uses, UINT count, const ExternalRecord& record) = 0;
     // The executor's device (DLSS initialises NGX on it).
     virtual ID3D12Device* device() noexcept = 0;
+    // The adapter of that device (the VRAM budget queries its local segment).
+    virtual IDXGIAdapter* adapter() noexcept = 0;
     // Waits until the GPU finished every submitted frame, the frame being
     // recorded keeping its fence value (callable mid-frame; before NGX
     // releases a feature those frames may still run).
     virtual void wait_idle() noexcept = 0;
-    virtual HRESULT present(UINT sync_interval) = 0;
+    // frame_limit caps total output FPS, including generated frames (0: off).
+    virtual HRESULT present(UINT sync_interval, int frame_limit = 0) = 0;
     virtual HRESULT resize(UINT width, UINT height) = 0;
     // "name xcount, ..." of everything omitted since the start (F11).
     virtual std::string omitted() const = 0;

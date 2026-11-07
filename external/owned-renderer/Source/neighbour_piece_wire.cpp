@@ -16,7 +16,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
 constexpr std::uint32_t kWireMagic = 0x5045494eu; // 'NIEP'
-constexpr std::uint32_t kWireVersion = 2; // 2: the terrain_bake cell tables left the ground cover inputs
+constexpr std::uint32_t kWireVersion = 5; // 5: authored-family policy plus retained name provenance; 4: family-name provenance
 
 // Plain record types travel as bytes; both builds must agree on their sizes.
 template<class T> constexpr bool plain = std::is_trivially_copyable_v<T> && !std::is_pointer_v<T>;
@@ -192,10 +192,29 @@ template<class A> void visit_ground_cover(A& a, GroundCoverNeighbourInputs& v) {
         if constexpr (A::reading) {
             if (!a.count(n, 1)) return;
             v.families.names.clear();
-            for (std::uint64_t i = 0; i < n && a.ok; ++i) { std::uint32_t key = 0; std::string name; a.pod(key); a.str(name); v.families.names.emplace(key, std::move(name)); }
+            v.families.placement_names.clear();
+            for (std::uint64_t i = 0; i < n && a.ok; ++i) {
+                std::uint32_t key = 0; std::string name; std::uint8_t placement = 0;
+                a.pod(key); a.str(name); a.pod(placement);
+                if (placement > 1) { a.ok = false; return; }
+                if (v.families.names.emplace(key, std::move(name)).second && placement)
+                    v.families.placement_names.insert(key);
+            }
         } else {
             a.pod(n);
-            for (auto& [key, name] : v.families.names) { auto k = key; auto s = name; a.pod(k); a.str(s); }
+            for (auto& [key, name] : v.families.names) {
+                auto k = key; auto s = name;
+                std::uint8_t placement = v.families.placement_names.count(key) != 0;
+                a.pod(k); a.str(s); a.pod(placement);
+            }
+        }
+    }
+    {
+        std::vector<std::uint32_t> authored(v.families.preserve_authored.begin(), v.families.preserve_authored.end());
+        a.vec(authored);
+        if constexpr (A::reading) {
+            v.families.preserve_authored.clear();
+            v.families.preserve_authored.insert(authored.begin(), authored.end());
         }
     }
     a.str(v.families.source); a.pod(v.families.rock_hard_only);

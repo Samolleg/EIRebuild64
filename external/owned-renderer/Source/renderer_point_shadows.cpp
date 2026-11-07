@@ -59,9 +59,8 @@ HRESULT Renderer::grow_native_point_shadow_page(std::size_t index,UINT cubes,boo
  const UINT slices=point_atlas_slices(cubes);
  const UINT old_slices=point_atlas_slices(static_cast<UINT>(old.used.size()));
  const auto bytes=std::uint64_t(width)*width*(slices-std::min(slices,old_slices))*(overlay?4u:2u);
- // adapter3_ belongs to the helper D3D11 device, not necessarily the D3D12
- // device. D3D12 allocation failures still take the existing fade/retry path.
- if(!d3d12_&&adapter3_){DXGI_QUERY_VIDEO_MEMORY_INFO memory{};
+ // adapter3_: the adapter that owns the pool (D3D12: the executor's, ensure_host_d3d12).
+ if(adapter3_){DXGI_QUERY_VIDEO_MEMORY_INFO memory{};
   if(SUCCEEDED(adapter3_->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&memory))&&memory.Budget&&
      bytes>memory.Budget-std::min(memory.Budget,memory.CurrentUsage))return HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY);
  }
@@ -158,7 +157,7 @@ bool Renderer::begin_native_point_shadow_batch(std::uint64_t& generation,bool* p
  }
  if(!native_point_shadow_generation_)native_point_shadow_generation_=g_point_shadow_pool_generation.fetch_add(1,std::memory_order_relaxed)+1;
  generation=native_point_shadow_generation_;
- if(!d3d12_&&adapter3_&&pressure){DXGI_QUERY_VIDEO_MEMORY_INFO memory{};
+ if(adapter3_&&pressure){DXGI_QUERY_VIDEO_MEMORY_INFO memory{};
   if(SUCCEEDED(adapter3_->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&memory))&&memory.Budget&&memory.CurrentUsage>memory.Budget){
    *pressure=true;point_shadow_capacity_failure("live WDDM budget pressure",HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY));
   }

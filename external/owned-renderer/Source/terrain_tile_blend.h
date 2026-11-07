@@ -44,7 +44,77 @@ struct TerrainTileFamilies {
     // Families inferred from map placements: a cliff's exposed rock comes only
     // from a hard-class family, never from ground (blend row z bit 12).
     bool rock_hard_only = false;
+    // Provenance of the retained name, not of every slot carrying its id.
+    // Editor/profile names are unmarked, including art-adopted names.
+    std::set<std::uint32_t> placement_names;
+    // Profile-local families whose placed tile art keeps its authored mapping.
+    // Resolved once with the families, from semantic defaults and mod overrides.
+    std::set<std::uint32_t> preserve_authored;
 };
+
+// Only actual editor profile/preset names establish a default. Retain the
+// current winning-name provenance: a placement label is not semantic metadata.
+// Preservation needs an own homogeneous reference in this atlas. Transition-only
+// families use the same reconstruction path as other materials in every zone.
+inline void terrain_tile_authored_defaults(TerrainTileFamilies& families) {
+    std::set<std::uint32_t> plain;
+    for (const auto& g : families.signatures)
+        if (g[0] && g[1] == g[0] && g[2] == g[0] && g[3] == g[0]) plain.insert(g[0]);
+    for (const auto& [id, name] : families.names) {
+        if (families.placement_names.count(id)) continue;
+        std::string word = name.substr(0, name.find_first_of(" /"));
+        for (char& c : word) if (c >= 'A' && c <= 'Z') c = char(c + 32);
+        if ((word == "paving" || word == "slabs") && plain.count(id)) families.preserve_authored.insert(id);
+    }
+}
+
+// Optional mounted eid3d11_terrain_families.json. ResourceStore supplies the
+// active mod's normal precedence. Ids are meaningful only within namespace.
+// A malformed document leaves the already established defaults unchanged.
+inline std::string terrain_tile_authored_overrides(const std::string& json, std::string space,
+                                                   TerrainTileFamilies& families) {
+    const auto root = small_json::Reader(json).root();
+    small_json::require(root.field("schema").num() == 1, "Unsupported terrain family policy schema");
+    for (char& c : space) if (c >= 'A' && c <= 'Z') c = char(c + 32);
+    auto selected = families.preserve_authored;
+    std::size_t applied = 0, unknown = 0;
+    std::uint32_t first_unknown = 0;
+    for (const auto& rule : root.field("families").list()) {
+        std::string name = rule.field("namespace").str();
+        for (char& c : name) if (c >= 'A' && c <= 'Z') c = char(c + 32);
+        if (name != space) continue;
+        const double id = rule.field("familyId").num();
+        small_json::require(id >= 1 && id <= 4294967295.0 && std::floor(id) == id, "Invalid terrain policy familyId");
+        const auto& value = rule.field("preserveAuthored");
+        small_json::require(value.kind == small_json::Value::literal && (value.text == "true" || value.text == "false"),
+                            "Terrain policy preserveAuthored must be boolean");
+        const auto family = std::uint32_t(id);
+        if (!families.names.count(family)) { if (!unknown++) first_unknown = family; continue; }
+        if (value.text == "true") selected.insert(family); else selected.erase(family);
+        ++applied;
+    }
+    families.preserve_authored = std::move(selected);
+    return " overrides=" + std::to_string(applied) + (unknown ? " unknown_family=" + std::to_string(first_unknown) +
+        " unknown_count=" + std::to_string(unknown) : std::string());
+}
+
+// Authored contact rows: w low byte remains the atlas slice (255: absent).
+// Bits 8-11 carry protection at world corners 00,10,01,11; bit 12 says the
+// placed slot itself is homogeneous in one protected family, whose canonical
+// cell occupies bits 16-31. These never replace the cross-family blend rows
+// or their weights, including when a shared vertex belongs to another family.
+constexpr std::uint32_t terrain_tile_authored_plain = 1u << 12;
+inline std::uint32_t terrain_tile_authored_flags(const TerrainTileFamilies& families,
+                                                std::uint32_t slot, const std::array<std::uint32_t, 4>& vertex) {
+    if (slot >= families.signatures.size()) return 0;
+    const auto& g = families.signatures[slot];
+    std::uint32_t flags = 0;
+    for (unsigned k = 0; k < 4; ++k)
+        if (families.preserve_authored.count(vertex[k])) flags |= 1u << (8 + k);
+    if (g[0] && g[1] == g[0] && g[2] == g[0] && g[3] == g[0] && families.preserve_authored.count(g[0]))
+        flags |= terrain_tile_authored_plain;
+    return flags;
+}
 
 // Material classes for the edge character (shader tables tileBlendClass*),
 // from the first word of the editor family name; unlisted words are ground.
@@ -286,7 +356,7 @@ inline void terrain_tile_fold_cells(const TerrainTileFamilies& families, const s
         const auto& g = families.signatures[s];
         for (unsigned k = 0; k < 4; ++k) {
             const std::uint32_t f = g[k];
-            if (!f || cells.count(f)) continue;
+            if (!f || cells.count(f) || families.preserve_authored.count(f)) continue;
             std::uint32_t count = 0;
             for (unsigned j = 0; j < 4; ++j) count += g[j] == f;
             if (count == 4) continue;
@@ -318,7 +388,7 @@ inline void terrain_tile_borrow_cells(const TerrainTileFamilies& families, const
     for (const auto& g : families.signatures) for (const auto f : g) if (f) seen[f] = true;
     for (const auto& [f, unused] : seen) {
         (void)unused;
-        if (cells.count(f)) continue;
+        if (cells.count(f) || families.preserve_authored.count(f)) continue;
         const std::string w = word_of(f);
         const bool f_bed = bed.count(f) != 0;
         for (const auto donor : family_usage_order) {

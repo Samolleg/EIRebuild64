@@ -928,6 +928,9 @@ HRESULT Renderer::begin_engine_frame(){
 
 // world_epoch 0: no world change is considered (queued frame begins).
 HRESULT Renderer::begin_engine_frame_at(std::uint64_t world_epoch){
+ // An aborted map Draw must never carry its selected arrow records into
+ // the following engine frame. Normal map Draw consumes these itself.
+ discard_world_map_markers();
  if(d3d12_){
   // D3D12 backend: the previous invocation's UI, then a new frame index for
   // the UI's per-frame bookkeeping and the world target bound (as rtv_/dsv_
@@ -935,7 +938,9 @@ HRESULT Renderer::begin_engine_frame_at(std::uint64_t world_epoch){
   const HRESULT hr=SUCCEEDED(flush_native())?render_pending_blits():E_FAIL;
   // The first engine frame of a new world: a clean slate (as on D3D11).
   if(SUCCEEDED(hr)&&world_epoch&&world_epoch!=world_state_epoch_&&native_pending_draws_.empty()){world_state_epoch_=world_epoch;release_world_state();dlss_reset_=true;}
-  ++native_frame_index_;advance_dlss_jitter();scene_composited_=false;scene_updated_=false;
+  // Ground marks of an engine frame that was never composited go, as at
+  // D3D11's begin below (its composite consumed them, the clear drops the rest).
+  ++native_frame_index_;advance_dlss_jitter();scene_composited_=false;scene_updated_=false;deferred_ground_marks_.clear();
   if(FAILED(hr))return hr;
   const HRESULT bound=bind_world_d3d12();
   if(SUCCEEDED(bound))begin_object_motion_d3d12();
@@ -1145,6 +1150,43 @@ void Renderer::hit_test_frame(bool begin){
 // named once and the mask capture is refused.
 void Renderer::hit_test_frame_apply(bool begin) noexcept{
  if(!begin)hit_test_failed_=false;
+ if(d3d12_){
+  // D3D12: the same frame into hit_test12_, which stands in for the world
+  // target (every world pass binds world_d3d12_, bind_world_targets_d3d12
+  // alone); the composite skips it, and the game's capture or readback
+  // copies it (Capture::run, Readback::run).
+  if(begin==hit_test_active_)return;
+  (void)flush_native();
+  if(!begin){
+   hit_test_active_=false;
+   d3d12_->set_hit_test_frame(false);
+   if(hit_test_saved_world12_)world_d3d12_=std::move(hit_test_saved_world12_);
+   hit_test_saved_world12_.reset();
+   // The world target takes its world role back first (set_targets keeps it).
+   if(world_d3d12_bound_&&world_d3d12_&&!scene_composited_){d3d12_->set_target(world_d3d12_.get(),true);bind_world_targets_d3d12();}
+   return;
+  }
+  const auto report=[this](const char* detail){
+   static bool reported=false;
+   if(!reported){reported=true;bridge_report_event("zone_hit_test",detail);}
+  };
+  // The verified scope starts before the game's nested DrawFrame. The
+  // preceding frame may already be composited; that does not invalidate the
+  // world texture saved here. Its new frame begin binds the mask below.
+  if(!world_d3d12_){report("world target unavailable at the hit-test frame (D3D12); the zone mask is the normal frame");return;}
+  if(!hit_test12_||!d3d12_->texture_matches(*hit_test12_,output_width_,output_height_,DXGI_FORMAT_B8G8R8A8_UNORM)){
+   hit_test12_.reset();
+   if(FAILED(d3d12_->create_target(output_width_,output_height_,hit_test12_,DXGI_FORMAT_B8G8R8A8_UNORM,DXGI_FORMAT_D24_UNORM_S8_UINT))){
+    hit_test12_.reset();report("target allocation failed (D3D12); the zone mask is the normal frame");return;
+   }
+  }
+  hit_test_saved_world12_=std::move(world_d3d12_);world_d3d12_=hit_test12_;
+  hit_test_active_=true;
+  d3d12_->set_hit_test_frame(true);
+  bind_world_targets_d3d12();
+  const float zero[4]{};d3d12_->clear_target(zero,true);
+  return;
+ }
  if(begin==hit_test_active_||!device_||!context_)return;
  (void)flush_native();
  if(!begin){
@@ -1466,7 +1508,19 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
    (fg_not_game_frame_&kFgNotInFront)?" window not in front":"",(fg_not_game_frame_&kFgNotFullInterface)?" full-screen interface":"");
   bridge_report_event("fg_game_frame",text);
  }
- update_frame_generation_auto_off();
+ static const bool developer_mode=renderer_developer_mode();
+ const PresentationSettings presentation=presentation_settings(debug_overlay_.config(),developer_mode);
+ static const bool harness_run=[](){char v[8]{};return GetEnvironmentVariableA("EI_RENDERER_HARNESS_DIR",v,sizeof(v))>0;}();
+ int frame_limit=static_cast<int>(presentation.frame_limit);
+ // Frame generation's auto-off sees the player's cap only: a background
+ // present is no game frame (fg_not_game_frame_) and never a low-rate sample,
+ // so the background cap must not pause generation past the return.
+ update_frame_generation_auto_off(frame_limit);
+ set_background_mode(configured_integer(debug_overlay_.config(),"background_mode",0));
+ if(!harness_run&&hwnd_&&!window_in_front()){
+  const int background=configured_integer(debug_overlay_.config(),"background_frame_limit",30);
+  if(background>0&&(frame_limit<=0||frame_limit>background))frame_limit=background;
+ }
  // frame_generation: the generated frame between the previous real frame and
  // this one, recorded from the frame image before it is composited.
  const bool generated=frame_generation_mode_==1&&evaluate_frame_generation_d3d12();
@@ -1484,7 +1538,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  system_telemetry_.try_get_snapshot(system_telemetry_snapshot_);
  if(debug_overlay_.config().debug_resource_view()!=DebugResourceView::disabled)d3d12_->omit("debug_resource_view",false);
  if(debug_overlay_.initialized()&&debug_overlay_pass_needed(overlay_visible||combat_ui_has_output(),
-    debug_overlay_.has_status_notice()||widescreen_hud_hovered(HudPanel::game_speed),!critters_summary_.labels.empty())){
+    debug_overlay_.has_status_notice()||debug_overlay_.has_harness_banner()||widescreen_hud_hovered(HudPanel::game_speed),!critters_summary_.labels.empty())){
   transition_profile_pass("debug_overlay");
   RendererResourceSnapshot presented{};presented.present_interval_ms=present_interval_ms_;presented.present_smoothed_ms=present_smoothed_ms_;
   presented.fg_presented_fps=frame_generation_mode_?fg_presented_fps_:0.0;presented.fg_real_fps=frame_generation_mode_?fg_real_fps_:0.0;
@@ -1500,7 +1554,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
    // Frame generation: the same cursor (render rate) on the generated image,
    // the newest position on both presents (decision 2026-11-01). A midpoint
    // cursor would add latency in a click-driven game; a present-time OS
-   // sample needs the cursor drawn on the pacer queue and breaks while the
+   // sample needs cursor composition at final presentation and breaks while the
    // camera handlers warp the cursor (RMB rotation): the plan if players
    // report cursor lag with frame generation. FSR takes generated-frame UI
    // from the real back buffer, so its cursor is the real frame's either way.
@@ -1528,15 +1582,6 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  // reveal keeps the last one and holds it over world frames until the world
  // and its neighbours are prepared (apply_load_reveal, as on D3D11).
  apply_load_reveal();
- static const bool developer_mode=renderer_developer_mode();
- const PresentationSettings presentation=presentation_settings(debug_overlay_.config(),developer_mode);
- static const bool harness_run=[](){char v[8]{};return GetEnvironmentVariableA("EI_RENDERER_HARNESS_DIR",v,sizeof(v))>0;}();
- int frame_limit=static_cast<int>(presentation.frame_limit);
- set_background_mode(configured_integer(debug_overlay_.config(),"background_mode",0));
- if(!harness_run&&hwnd_&&!window_in_front()){
-  const int background=configured_integer(debug_overlay_.config(),"background_frame_limit",30);
-  if(background>0&&(frame_limit<=0||frame_limit>background))frame_limit=background;
- }
  // The game's gamma ramp over the finished frame, cursor included (after the
  // load reveal, as apply_gamma_ramp on D3D11).
  if(FAILED(apply_gamma_ramp_d3d12()))d3d12_->omit("gamma_ramp (D3D12 pass failed)",false);
@@ -1560,8 +1605,8 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  fsr_prepared_=false;
  update_frame_generation_rates();
  profiler_.end_frame(presentation.sync_interval,0);
- frame_limiter_.wait(frame_limit);
- hr=d3d12_->present(presentation.sync_interval);
+ // The final presentation owner applies the output cap (both images with FG).
+ hr=d3d12_->present(presentation.sync_interval,frame_limit);
  profiler_.present_return(output_width_,output_height_,presentation.sync_interval,0,hr);
  HRESULT trim_hr=S_OK;
  if(SUCCEEDED(hr)){
@@ -1574,8 +1619,9 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  // Exclude the host's wait for the next frame's records from renderer work.
  end_profile_pass();
  if(SUCCEEDED(hr)&&window_in_front())frame_statistics_.add_present(perf_now(),perf_frequency());else frame_statistics_.reset();
- ++presentation_frame_index_;
- // Upscaler option changes take effect between frames (apply_render_scale).
+ // The next present's native counters start from zero (present_frame's reset).
+ native_frame_stats_={};++presentation_frame_index_;
+ // Render scale and upscaler option changes take effect between frames (apply_render_scale).
  apply_upscaler_mode_d3d12();
  finish_harness_path_row(inputs?inputs->game_frame:fa_game_frame_,nullptr);
  pending_screen_rectangles_.clear();
@@ -1680,7 +1726,7 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
     requested_debug_view!=DebugResourceView::shadow_cascade_coverage)
   transition_profile_pass("debug_resource_view");
  render_debug_resource_view(requested_debug_view,debug_overlay_mode);
- if(debug_overlay_.initialized()&&debug_overlay_pass_needed(overlay_visible || combat_ui_has_output(),debug_overlay_.has_status_notice() || widescreen_hud_hovered(HudPanel::game_speed),!critters_summary_.labels.empty())){
+ if(debug_overlay_.initialized()&&debug_overlay_pass_needed(overlay_visible || combat_ui_has_output(),debug_overlay_.has_status_notice() || debug_overlay_.has_harness_banner() || widescreen_hud_hovered(HudPanel::game_speed),!critters_summary_.labels.empty())){
   const frame_acct::Scope overlay_scope(frame_acct::pf_overlay);
   const auto shadows=debug_overlay_mode==DebugOverlayMode::full?debug_shadow_info():DebugShadowInfo{};
   transition_profile_pass("debug_overlay");

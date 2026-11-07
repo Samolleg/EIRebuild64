@@ -509,6 +509,9 @@ Renderer::HarnessRequest Renderer::step_test_harness(const ScenePresentInputs* i
  // game thread sees it retired, and is skipped there.
  const HarnessCommand* command=inputs?(inputs->harness_command_valid&&inputs->harness_entry_id!=harness_completed_entry_?
   &inputs->harness_command:nullptr):harness_present_step();
+#ifndef EID3D11_EMBEDDED
+ if(debug_overlay_.initialized())debug_overlay_.set_harness_banner(inputs?inputs->harness_banner:harness_banner_text());
+#endif
  // camera_path rows are buffered while a path runs (frame accounting);
  // they go to disk once another command (or none) is at the front.
  if(!harness_path_rows_.empty()&&(!command||command->verb!=HarnessVerb::camera_path)){
@@ -1020,6 +1023,8 @@ template<class Map> void compact_map(Map& map) {
 // already restarted it for this new world (held: neighbour_maps_restart,
 // core mode), which this releases instead.
 void Renderer::release_world_state() noexcept try{
+ discard_world_map_markers();
+ clear_world_map_preview_gpu();
  // Neighbour draws first: they index the instance records cleared below.
  neighbour_client_world_changed(neighbours_.epoch);
  release_neighbour_maps();
@@ -1173,6 +1178,7 @@ void Renderer::apply_load_reveal() noexcept try{
     if(FAILED(d3d12_->create_texture(output_width_,output_height_,DXGI_FORMAT_B8G8R8A8_UNORM,load_picture12_))){load_picture12_.reset();return;}
    }
    if(FAILED(d3d12_->capture(*load_picture12_,0,0,RECT{0,0,LONG(output_width_),LONG(output_height_)})))load_picture12_.reset();
+   capture_load_progress_movie(fitted);
    return;
   }
   if(!picture_matches()){
@@ -1228,8 +1234,8 @@ void Renderer::apply_load_reveal() noexcept try{
   if(load_reveal_holding_){
    ++load_reveal_frames_;
    if(d3d12_){
-    // The held picture over the whole frame (opaque), else black. The
-    // progress movie's later frames are not drawn on this backend (named).
+    // The held picture over the whole frame (opaque), else black, with
+    // the progress movie's later frames following the hold's real progress.
     if(picture_matches()){
      const float w=float(output_width_),h=float(output_height_);
      const Vertex quad[4]={{0,0,0,1,0xffffffffu,0xffffffffu,0,0},{w,0,0,1,0xffffffffu,0xffffffffu,1,0},
@@ -1242,16 +1248,15 @@ void Renderer::apply_load_reveal() noexcept try{
      block.alpha_func=D3DCMP_ALWAYS;block.hud_opacity=1.0f;
      D3D12UiDraw draw;draw.texture=load_picture12_.get();draw.program=D3D12UiProgram::game;
      draw.blend=fixed_blend_choice(FALSE,D3DBLEND_ONE,D3DBLEND_ZERO,false);
-     draw.sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT;
-     draw.sampler.AddressU=draw.sampler.AddressV=draw.sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
-     draw.sampler.MaxLOD=D3D11_FLOAT32_MAX;
+     draw.sampler=world_texture_sampler(D3DTFN_POINT,D3DTFG_POINT,D3DTFP_LINEAR,
+      D3DTADDRESS_CLAMP,D3DTADDRESS_CLAMP,false,1u<<configured_integer(debug_overlay_.config(),"anisotropy",3)).description;
      draw.first_vertex=0;draw.vertex_count=4;
      D3D12UiPass ui;
      ui.vertices=quad;ui.vertex_bytes=sizeof(quad);ui.vertex_stride=sizeof(Vertex);
      ui.constants=&block;ui.constant_block_bytes=sizeof(Constants);ui.constant_blocks=1;
      ui.draws=&draw;ui.draw_count=1;
      (void)d3d12_->draw_ui(ui);
-     if(load_progress_movie_valid_)d3d12_->omit("load progress movie frames during the hold (the held picture shows)",false);
+     if(load_progress_movie_valid_)draw_load_progress(load_reveal_progress());
     }else{
      const float black[4]={0,0,0,1};
      const RECT whole{0,0,LONG(output_width_),LONG(output_height_)};

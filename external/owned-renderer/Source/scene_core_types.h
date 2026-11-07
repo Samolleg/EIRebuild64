@@ -63,6 +63,10 @@ SCENE_WIRE_POD_NAMED(owned::NativeMorphOffset, native_morph_offset)
 SCENE_WIRE_POD_NAMED(owned::NativeFrameState, native_frame_state)
 
 namespace owned {
+template <class A> void fields(A& a, WorldMapPreviewSection& v) {
+    scene_wire::fields_of(a, v.zone, v.terrain_resource, v.map_resource,
+                          v.figure_resource, v.figure_shape, v.unknown_texture_resource);
+}
 
 template <class A> void fields(A& a, WorldFogSnapshot& v) {
     scene_wire::fields_of(a, v.scene_frame_serial, v.valid, v.enabled);
@@ -122,7 +126,8 @@ template <class A> void fields(A& a, HarnessCommand& v) {
 // profile and outer timing are not sent yet (F10 and the hitch recorder).
 template <class A> void fields(A& a, ScenePresentInputs& v) {
     scene_wire::fields_of(a, v.harness_command_valid, v.harness_command, v.harness_entry_id, v.harness_camera_steps,
-                          v.harness_on_travel_map, v.bridge, v.recorder_present_entry, v.game_frame, v.hud_frames);
+                          v.harness_on_travel_map, v.bridge, v.recorder_present_entry, v.game_frame, v.hud_frames,
+                          v.harness_banner);
 }
 
 namespace scene_cmd {
@@ -382,19 +387,24 @@ struct GameStatus {
     static constexpr bool frame_values = false;
     bool owned_sky_installed = false;
     const char* owned_weather_problem = nullptr;  // static text
+    const char* camera_pan_unavailable = nullptr; // game-owned static reason, nullptr: available
+    const char* addon_notice = nullptr;          // game-owned startup/required-publication notice
     bool semantic_slots_installed = false;
     bool game_sites_all_verified = false;
     void run(Renderer& renderer);  // host (core_host.cpp)
     bool operator==(const GameStatus& other) const noexcept {
         return owned_sky_installed == other.owned_sky_installed && owned_weather_problem == other.owned_weather_problem &&
                semantic_slots_installed == other.semantic_slots_installed &&
-               game_sites_all_verified == other.game_sites_all_verified;
+               game_sites_all_verified == other.game_sites_all_verified &&
+               camera_pan_unavailable == other.camera_pan_unavailable && addon_notice == other.addon_notice;
     }
 };
 template <class A> void fields(A& a, GameStatus& v) {
     scene_wire::field(a, v.owned_sky_installed);
     scene_wire::static_text(a, v.owned_weather_problem);
     scene_wire::fields_of(a, v.semantic_slots_installed, v.game_sites_all_verified);
+    scene_wire::static_text(a, v.camera_pan_unavailable);
+    scene_wire::static_text(a, v.addon_notice);
 }
 
 // The game window's client size changed (display Apply, mode change): the
@@ -485,6 +495,64 @@ struct ResourceMounts {
     ResourceStoreConfig mounts, text_mounts, data_mounts;
     void run(Renderer& renderer);  // host (core_host.cpp)
 };
+
+struct MapPreviewActivate {
+    static constexpr bool frame_values = false;
+    std::uint64_t generation = 0;
+    std::vector<WorldMapPreviewSection> sections;
+    std::string failure;
+    void run(Renderer& renderer);
+};
+struct MapPreviewPrecache {
+    static constexpr bool frame_values = false;
+    std::uint64_t generation = 0;
+    std::vector<WorldMapPreviewSection> sections;
+    std::string failure;
+    void run(Renderer& renderer);
+};
+template <class A> void fields(A& a, MapPreviewPrecache& v) {
+    scene_wire::fields_of(a, v.generation, v.sections, v.failure);
+}
+template <class A> void fields(A& a, MapPreviewActivate& v) {
+    scene_wire::fields_of(a, v.generation, v.sections, v.failure);
+}
+struct MapPreviewRetire {
+    static constexpr bool frame_values = false;
+    bool release = false; // the option turned off: drop the loading cache too
+    void run(Renderer& renderer);
+};
+template <class A> void fields(A& a, MapPreviewRetire& v) {
+    scene_wire::fields_of(a, v.release);
+}
+struct MapPreviewDraw {
+    static constexpr bool frame_values = true;
+    std::uint64_t generation = 0;
+    std::uint32_t section = 0;
+    std::array<float,16> matrix{};
+    std::array<float,3> tint{};
+    FixedState state{};
+    std::array<float,3> border_tint{1,1,1};
+    bool discovered = true;
+    void run(Renderer& renderer);
+};
+template <class A> void fields(A& a, MapPreviewDraw& v) {
+    scene_wire::fields_of(a, v.generation, v.section, v.matrix, v.tint, v.state, v.border_tint, v.discovered);
+}
+struct MapMarkerBegin {
+    static constexpr bool frame_values = true;
+    void run(Renderer& renderer);
+};
+struct MapMarkerEnd {
+    static constexpr bool frame_values = true;
+    void run(Renderer& renderer);
+};
+struct MapMarkersDraw {
+    static constexpr bool frame_values = true;
+    void run(Renderer& renderer);
+};
+template <class A> void fields(A&, MapMarkerBegin&) {}
+template <class A> void fields(A&, MapMarkerEnd&) {}
+template <class A> void fields(A&, MapMarkersDraw&) {}
 template <class A> void fields(A& a, ResourceMounts& v) {
     scene_wire::fields_of(a, v.mounts.loose_roots, v.mounts.archives, v.mounts.archive_kinds,
                           v.text_mounts.loose_roots, v.text_mounts.archives, v.text_mounts.archive_kinds,

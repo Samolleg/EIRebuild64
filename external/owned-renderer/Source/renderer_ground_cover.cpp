@@ -40,6 +40,7 @@
 #include "renderer.h"
 #include "engine_bridge.h"
 #include "world_fog.h"
+#include "world_texture_sampler.h"
 #include <d3dcompiler.h>
 #include <algorithm>
 #include <chrono>
@@ -3045,13 +3046,10 @@ HRESULT Renderer::ensure_ground_cover_pipeline() noexcept {
     D3D11_DEPTH_STENCIL_DESC trail_depth{}; trail_depth.DepthFunc = D3D11_COMPARISON_ALWAYS;
     D3D11_SAMPLER_DESC clamp{}; clamp.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     clamp.AddressU = clamp.AddressV = clamp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; clamp.MaxLOD = D3D11_FLOAT32_MAX;
-    D3D11_SAMPLER_DESC wrap = clamp; wrap.Filter = D3D11_FILTER_ANISOTROPIC; wrap.MaxAnisotropy = 8;
-    wrap.AddressU = wrap.AddressV = wrap.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
     if (FAILED(hr = device_->CreateRasterizerState(&raster, &gc_raster_)) || FAILED(hr = device_->CreateDepthStencilState(&depth, &gc_depth_)) ||
         FAILED(hr = device_->CreateDepthStencilState(&trail_depth, &gc_trail_depth_)) ||
         FAILED(hr = device_->CreateBlendState(&trail_blend, &gc_trail_blend_)) ||
-        FAILED(hr = device_->CreateBlendState(&blend, &gc_blend_)) || FAILED(hr = device_->CreateSamplerState(&clamp, &gc_clamp_)) ||
-        FAILED(hr = device_->CreateSamplerState(&wrap, &gc_wrap_))) return hr;
+        FAILED(hr = device_->CreateBlendState(&blend, &gc_blend_)) || FAILED(hr = device_->CreateSamplerState(&clamp, &gc_clamp_))) return hr;
     // Last: the placement shader marks the pipeline complete.
     return blob_cs(gp_place, gc_place_cs_);
 }
@@ -3549,9 +3547,24 @@ void Renderer::update_terrain_tile_blend_seams() noexcept try {
         std::vector<std::uint32_t> fold_table;
         const auto rows_start = std::chrono::steady_clock::now();
         std::map<std::uint32_t, std::uint32_t> cells;
+        // The original contact rows remain the placed art/UV authority.
+        // Decode adds this generation's effective corner policy only to the
+        // uploaded copy; the slice remains in w's low byte.
+        std::vector<std::array<std::uint32_t,4>> grid(*self.contact);
         const auto rows = owned_terrain_tile_blend_rows(*self.input, *self.families, edge, blended, plain, bed, unmatched, fold_table, borrowed, &cells,
-            tile_blend_own_edges_);
+            tile_blend_own_edges_, &grid);
         const double rows_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - rows_start).count();
+        for (const auto f : self.families->preserve_authored) {
+            const auto cell = cells.find(f);
+            if (cell == cells.end() || (cell->second != terrain_tile_blend_none && ((cell->second >> 6) & 63u) != terrain_tile_fold_page)) continue;
+            if (!tile_blend_seam_unmatched_.insert(self.name + "/authored/" + std::to_string(f)).second) continue;
+            const auto name = self.families->names.find(f);
+            const std::string family = name != self.families->names.end() ? name->second : std::to_string(f);
+            const std::string text = "map=" + self.name + " preserveAuthored unsupported_family=\"" + family +
+                "\" familyId=" + std::to_string(f) + " reason=no_own_plain_source_on_drawn_atlas_page; contribution omitted/marker";
+            if (self.neighbour) bridge_neighbour_diagnostic(text.c_str());
+            else bridge_append_probe_event("terrain_tile_blend", text.c_str());
+        }
         // Families with neither a plain slot nor a transition quadrant of their
         // own still borrow another family's art: once per map and family.
         for (const auto f : borrowed) {
@@ -3576,7 +3589,6 @@ void Renderer::update_terrain_tile_blend_seams() noexcept try {
         // The margin from this build's cells (the check above used the
         // previous ones; the second pass catches a difference).
         seam_margin(self, cells, margin, margin_sides);
-        std::vector<std::array<std::uint32_t,4>> grid(*self.contact);
         grid.insert(grid.end(), rows.begin(), rows.end());
         // The seam margin rows (kTerrainTileSeamMarginRows, two cells a
         // lane), then one more row: the folded cells' table
@@ -3613,7 +3625,7 @@ void Renderer::update_terrain_tile_blend_seams() noexcept try {
             else { contact.tiles = tiles; contact.tiles_serial = ++terrain2_tiles_serials_; }
             if (self.neighbour) self.neighbour->blend_rows = true;
             else tile_blend_rows_ = true;
-            update_terrain2_styles(self.neighbour ? self.neighbour->terrain2 : terrain2_map_, *self.families, self.maps->cells, rows, fold_table);
+            update_terrain2_styles(self.neighbour ? self.neighbour->terrain2 : terrain2_map_, *self.families, self.maps->cells, rows, fold_table, grid);
             if (!self.neighbour) update_terrain2_cover_classes(*self.families, contact_maps_.cells, rows, self.w, self.h);
         }
         char text[480];
@@ -4806,6 +4818,12 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     // Draw into the world colour (AO ambient share alongside, like world pixels).
     // Its own scope: placement (with the mask and trail passes) and the lit
     // draws scale with different settings (density vs. pixels and shading).
+    const auto sampling = world_texture_sampler(D3DTFN_LINEAR, D3DTFG_LINEAR, D3DTFP_LINEAR,
+        D3DTADDRESS_WRAP, D3DTADDRESS_WRAP, true, 1u << configured_integer(debug_overlay_.config(), "anisotropy", 3));
+    auto& sampler = sampler_states_[sampling.key];
+    if (!sampler && FAILED(device_->CreateSamplerState(&sampling.description, &sampler)))
+        return fail("EID3D11 ground cover: material sampler unavailable; ground cover omitted.");
+    gc_wrap_ = sampler;
     transition_profile_pass("ground_cover_draw");
     const bool write_ambient = ao_ambient_rtv_ && rtv_.Get() == scene_composite_.target();
     ao_ambient_written_ |= write_ambient;
@@ -5433,12 +5451,21 @@ void Renderer::update_terrain2_cover_classes(const TerrainTileFamilies& families
     if (rows.size() != std::size_t(w) * h || !w || !h) return;
     const auto terrain = retained_static_terrain_source_snapshot().terrain;
     std::array<std::uint8_t, 4096> classes; classes.fill(255);
-    std::map<std::uint32_t, std::uint32_t> family_of;
-    for (const auto& [family, cell] : cells) family_of.emplace(cell & 4095u, family);
     const auto style_of = [&](std::uint32_t family) {
         const auto name = families.names.find(family);
         return name != families.names.end() ? terrain2_style(name->second) : kTerrain2NoStyle;
     };
+    const auto verified_bare = [&](std::uint32_t family) {
+        return !families.placement_names.count(family) && terrain2_cover_bare_style(style_of(family));
+    };
+    struct CellFamily { std::uint32_t family; bool verified_bare; };
+    std::map<std::uint32_t, CellFamily> family_of;
+    for (const auto& [family, cell] : cells) {
+        const auto found = family_of.emplace(cell & 4095u, CellFamily{family, false}).first;
+        // Keep the original first-name style selection, but a verified bare
+        // label on any shared donor cell must retain its existing exclusion.
+        found->second.verified_bare |= verified_bare(family);
+    }
     const auto vertex = [&](UINT vx, UINT vy) { // terrain2Vertex
         const UINT tx = std::min(vx, w - 1), ty = std::min(vy, h - 1);
         const auto& r = rows[std::size_t(ty) * w + tx];
@@ -5450,13 +5477,25 @@ void Renderer::update_terrain2_cover_classes(const TerrainTileFamilies& families
         if (c == terrain_tile_blend_none || classes[c & 4095u] != 255) continue;
         const std::uint32_t id = c & 4095u;
         const auto f = family_of.find(id);
-        std::uint32_t style = f != family_of.end() ? style_of(f->second) : kTerrain2NoStyle;
+        std::uint32_t family = f != family_of.end() ? f->second.family : 0;
+        std::uint32_t style = f != family_of.end() ? style_of(family) : kTerrain2NoStyle;
         int area = -1; // a folded cell (no slot type of its own) takes its family's style
+        bool authoritative_bare = true;
         if ((id >> 6) != terrain_tile_fold_page) {
-            if (style == kTerrain2NoStyle && id < families.signatures.size()) style = style_of(families.signatures[id][0]);
+            if (style == kTerrain2NoStyle && id < families.signatures.size()) {
+                family = families.signatures[id][0];
+                style = style_of(family);
+            }
             if (terrain && id < terrain->tile_types.size()) area = int(gc_type_area(terrain->tile_types[id] & 15u));
+            if ((area == 1 || area == 2) && id < families.signatures.size()) {
+                const auto& g = families.signatures[id];
+                const bool plain = g[0] && g[1] == g[0] && g[2] == g[0] && g[3] == g[0];
+                if (plain && families.placement_names.count(family) && !verified_bare(g[0]) &&
+                    (f == family_of.end() || !f->second.verified_bare))
+                    authoritative_bare = false;
+            }
         }
-        classes[id] = terrain2_cover_class(style, area);
+        classes[id] = terrain2_cover_class(style, area, authoritative_bare);
     }
     std::vector<std::uint8_t> tiles(std::size_t(w) * h, 0);
     for (UINT ty = 0; ty < h; ++ty) for (UINT tx = 0; tx < w; ++tx) {

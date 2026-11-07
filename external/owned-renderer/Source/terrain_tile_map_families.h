@@ -3,7 +3,7 @@
 // Terrain tile families from map placements (terrain_tile_blend, automatic
 // source for atlases without editor data). A grid vertex shows one material,
 // so the atlas-slot corners every map places around one vertex belong to one
-// family. Pooled over all maps of an atlas (namespace + slot count), corner
+// family. Pooled over all maps of an atlas (content + layout/types/animation), corner
 // nodes are joined strongest link first; a link joining two groups must carry
 // kTerrainTileMapSupport of the smaller group's vertex incidences, so a few
 // mis-painted vertices cannot fuse two families. A group is named only from
@@ -213,6 +213,7 @@ inline TerrainTileMapFamilies terrain_tile_map_families(const TerrainTileVertexR
                 const std::uint32_t id = std::uint32_t(family_of.size()) + 1u;
                 f = family_of.emplace(g, id).first;
                 out.families.names[id] = std::string(terrain_tile_type_word(best)) + " / map group " + std::to_string(id);
+                out.families.placement_names.insert(id);
             }
             out.families.signatures[s][k] = f->second;
             ++out.named;
@@ -225,8 +226,12 @@ inline TerrainTileMapFamilies terrain_tile_map_families(const TerrainTileVertexR
 // One MPR map file's atlas binding and base tiles, read straight from its RES
 // directory (only the .mp header and the .sec members). Map files are
 // third-party data: every size and offset is checked; a malformed file is
-// skipped. tiles == nullptr reads the header only.
-struct TerrainTileMapFile { std::string space; std::uint32_t slots = 0; };
+// skipped. tiles == nullptr reads only the atlas binding metadata.
+struct TerrainTileMapFile {
+    std::string space;
+    std::uint32_t slots = 0, pages = 0, texture_size = 0, tile_size = 0;
+    std::vector<std::uint32_t> types, animation_phases;
+};
 inline bool terrain_tile_read_map_file(const std::wstring& path, TerrainTileMapFile& file,
                                        std::vector<TerrainTilePlacement>* tiles) {
     std::ifstream in(path, std::ios::binary);
@@ -258,12 +263,27 @@ inline bool terrain_tile_read_map_file(const std::wstring& path, TerrainTileMapF
         if (m.name.size() > 3 && m.name.compare(m.name.size() - 3, 3, ".mp") == 0) { if (mp) return false; mp = &m; }
     std::uint8_t header[38]{};
     if (!mp || mp->size < sizeof(header) || !read(mp->offset, header, sizeof(header))) return false;
-    std::uint32_t textures, texture_size, tile_size;
+    std::uint32_t textures, texture_size, tile_size, type_count, animation_count;
+    std::uint16_t object_count;
     std::memcpy(&textures, header + 16, 4); std::memcpy(&texture_size, header + 20, 4); std::memcpy(&tile_size, header + 28, 4);
+    std::memcpy(&type_count, header + 24, 4); std::memcpy(&object_count, header + 32, 2); std::memcpy(&animation_count, header + 34, 4);
     if (!textures || textures > 4096u || !tile_size || texture_size % tile_size || !texture_size || texture_size / tile_size > 64u) return false;
+    const std::uint64_t types_at = sizeof(header) + std::uint64_t(object_count) * 44u;
+    const std::uint64_t animations_at = types_at + std::uint64_t(type_count) * 4u;
+    if (!type_count || type_count > 65536u || animation_count > 65536u ||
+        animations_at + std::uint64_t(animation_count) * 4u != mp->size) return false;
     const std::uint32_t side = texture_size / tile_size;
     file.space = mp->name.substr(0, mp->name.size() - 3);
     file.slots = textures * side * side;
+    file.pages = textures; file.texture_size = texture_size; file.tile_size = tile_size;
+    file.types.resize(type_count); file.animation_phases.assign(type_count, 0u);
+    if (!read(std::uint64_t(mp->offset) + types_at, file.types.data(), file.types.size() * 4u)) return false;
+    std::vector<std::array<std::uint16_t, 2>> animations(animation_count);
+    if (animation_count && !read(std::uint64_t(mp->offset) + animations_at, animations.data(), animations.size() * 4u)) return false;
+    for (const auto& animation : animations) {
+        if (animation[0] >= type_count || std::uint32_t(animation[0]) + animation[1] > type_count) return false;
+        file.animation_phases[animation[0]] = animation[1]; // native last assignment wins
+    }
     if (!tiles) return true;
     tiles->clear();
     for (const auto& m : members) {

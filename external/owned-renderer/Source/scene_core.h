@@ -86,7 +86,14 @@ namespace scene_core {
     X(camp_icon_priority, ::owned::scene_core::CampIconPriority)  \
     X(camp_icon_bind, ::owned::scene_core::CampIconBind)          \
     X(retire_camp_texture, ::owned::scene_ui::RetireCampTexture)  \
-    X(hit_test_frame, ::owned::scene_cmd::HitTestFrame)
+    X(hit_test_frame, ::owned::scene_cmd::HitTestFrame)           \
+    X(map_preview_activate, ::owned::scene_core::MapPreviewActivate) \
+    X(map_preview_retire, ::owned::scene_core::MapPreviewRetire)  \
+    X(map_preview_draw, ::owned::scene_core::MapPreviewDraw)    \
+    X(map_preview_precache, ::owned::scene_core::MapPreviewPrecache) \
+    X(map_marker_begin, ::owned::scene_core::MapMarkerBegin) \
+    X(map_marker_end, ::owned::scene_core::MapMarkerEnd) \
+    X(map_markers_draw, ::owned::scene_core::MapMarkersDraw)
 
 enum class Command : std::uint16_t {
     none = 0,

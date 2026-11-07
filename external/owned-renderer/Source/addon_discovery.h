@@ -98,6 +98,20 @@ struct AddonResolverLayout {
     std::uint32_t thunk = 0;
     std::uint32_t member_slot = 0;
 };
+
+// The inline four-byte animation-coefficient packet extension, independent
+// of appearance, generated textures and resource selection. Discovered only
+// when the native appearance path needs to validate a coexisting protocol.
+struct AddonAnimationPacketLayout {
+    std::uint32_t sender = 0;
+    std::uint32_t receiver = 0;
+    std::uint32_t enabled_flag = 0;
+    std::uint32_t coefficient_callback = 0;
+    std::uint32_t coefficient_original = 0;
+};
+const char* discover_addon_animation_packet(const std::uint8_t* image,
+                                           AddonAnimationPacketLayout& output) noexcept;
+
 struct AddonCombatLayout {
     std::array<bool,75> offensive{};
     std::array<bool,55> selfcast{};

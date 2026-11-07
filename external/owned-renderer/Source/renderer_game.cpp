@@ -84,6 +84,10 @@ static void report_hud_frame_layer_failure(const char* reason) noexcept {
  bridge_report_event("hud_frame_layer_failed",detail);
 }
 void Renderer::begin_scene_game(){
+#ifndef EID3D11_EMBEDDED
+ if(!bridge_set_world_map_previews(this,configured_boolean(debug_overlay_.config(),"world_map_previews",false)))
+  (void)debug_overlay_.config().set_boolean("world_map_previews",false);
+#endif
  // Owned party portraits are chosen on the game thread (engine_bridge.cpp),
  // in core mode too, where begin_scene_renderer runs on the host.
  bridge_set_portrait_options(configured_boolean(debug_overlay_.config(),"portrait_head",true),
@@ -280,6 +284,7 @@ HRESULT Renderer::queue_present(){
 #ifndef EID3D11_EMBEDDED
  inputs.harness_command_valid=harness_present_step_copy(inputs.harness_command,inputs.harness_entry_id,
   inputs.harness_camera_steps,inputs.harness_on_travel_map);
+ inputs.harness_banner=harness_banner_text();
 #endif
  if(!bridge_capture_frame_values(inputs.bridge))return E_FAIL;
  bridge_capture_profile_values(inputs.profile);
@@ -345,6 +350,12 @@ HRESULT Renderer::core_ensure(){
   x64remote::lose_device(reason);
   return E_FAIL;
  }
+ // Loading hooks can precede BeginScene. Register the loaded option once
+ // the host can receive a notice as well as the later cache command.
+#ifndef EID3D11_EMBEDDED
+ if(!bridge_set_world_map_previews(this,configured_boolean(debug_overlay_.config(),"world_map_previews",false)))
+  (void)debug_overlay_.config().set_boolean("world_map_previews",false);
+#endif
  // The harness result directory: the host Renderer writes screenshots and
  // captures there and acks each renderer step (core_present retires them).
  if(harness_enabled())strncpy_s(x64remote::control().harness_directory,harness_directory().c_str(),_TRUNCATE);
@@ -706,6 +717,7 @@ HRESULT Renderer::core_present(){
   auto& inputs=command.inputs;
   inputs.harness_command_valid=harness_present_step_copy(inputs.harness_command,inputs.harness_entry_id,
    inputs.harness_camera_steps,inputs.harness_on_travel_map);
+  inputs.harness_banner=harness_banner_text();
   // A config step changes this process's options (it owns the ini); the
   // host takes them with the config command below, before this present.
   if(inputs.harness_command_valid&&inputs.harness_command.verb==HarnessVerb::config){
@@ -748,10 +760,16 @@ HRESULT Renderer::core_present(){
    scene_core::GameStatus status;
    status.owned_sky_installed=bridge_owned_sky_installed();status.owned_weather_problem=bridge_owned_weather_problem();
    status.semantic_slots_installed=bridge_semantic_slots_installed();status.game_sites_all_verified=bridge_game_sites_all_verified();
+   status.camera_pan_unavailable=bridge_camera_pan_smoothing_unavailable_reason();
+   status.addon_notice=bridge_addon_notice();
+   const char* addon_notice=status.addon_notice?status.addon_notice:"";
    const std::uint8_t now[3]={std::uint8_t(status.owned_sky_installed),std::uint8_t(status.semantic_slots_installed),
     std::uint8_t(status.game_sites_all_verified)};
-   if(std::memcmp(now,core_game_status_sent_,3)!=0||status.owned_weather_problem!=core_weather_problem_sent_){
+   if(std::memcmp(now,core_game_status_sent_,3)!=0||status.owned_weather_problem!=core_weather_problem_sent_||
+      status.camera_pan_unavailable!=core_camera_pan_unavailable_sent_||core_addon_notice_sent_!=addon_notice){
     std::memcpy(core_game_status_sent_,now,3);core_weather_problem_sent_=status.owned_weather_problem;
+    core_camera_pan_unavailable_sent_=status.camera_pan_unavailable;
+    core_addon_notice_sent_=addon_notice;
     std::vector<std::uint8_t> status_bytes{0};scene_wire::encode_into(status_bytes,status);
     core_send(static_cast<std::uint16_t>(scene_core::Command::game_status),status_bytes);
    }}

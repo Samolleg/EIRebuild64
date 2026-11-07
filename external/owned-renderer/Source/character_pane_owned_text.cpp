@@ -11,6 +11,7 @@
 #include <climits>
 #include <cmath>
 #include <cstring>
+#include <cwchar>
 #include <iterator>
 #include <limits>
 #include <new>
@@ -171,20 +172,37 @@ const char* character_pane_text_failure_name(
     return "unknown";
 }
 
+bool CharacterPaneOwnedText::FontDefinition::operator<(
+    const FontDefinition& other) const noexcept {
+    const auto attributes = std::tie(value.lfHeight, value.lfWidth,
+        value.lfEscapement, value.lfOrientation, value.lfWeight,
+        value.lfItalic, value.lfUnderline, value.lfStrikeOut, value.lfCharSet,
+        value.lfOutPrecision, value.lfClipPrecision, value.lfQuality,
+        value.lfPitchAndFamily);
+    const auto other_attributes = std::tie(other.value.lfHeight, other.value.lfWidth,
+        other.value.lfEscapement, other.value.lfOrientation, other.value.lfWeight,
+        other.value.lfItalic, other.value.lfUnderline, other.value.lfStrikeOut,
+        other.value.lfCharSet, other.value.lfOutPrecision, other.value.lfClipPrecision,
+        other.value.lfQuality, other.value.lfPitchAndFamily);
+    if (attributes != other_attributes) return attributes < other_attributes;
+    // Compare the name, not padding or unused bytes after its terminator.
+    return std::wcsncmp(value.lfFaceName, other.value.lfFaceName, LF_FACESIZE) < 0;
+}
+
 bool CharacterPaneOwnedText::GlyphKey::operator<(
     const GlyphKey& other) const noexcept {
-    return std::tie(font_generation, font_slot, raster_key, glyph) <
+    return std::tie(font_generation, font_slot, raster_key, glyph, font) <
         std::tie(other.font_generation, other.font_slot, other.raster_key,
-                 other.glyph);
+                 other.glyph, other.font);
 }
 
 bool CharacterPaneOwnedText::LayoutKey::operator<(
     const LayoutKey& other) const noexcept {
-    return std::tie(font_generation, font_slot, format, width, height, wrap,
-                    spacing, text) <
+    return std::tie(font_generation, font_slot, format, width, height,
+                    spacing, text, font) <
         std::tie(other.font_generation, other.font_slot, other.format,
-                 other.width, other.height, other.wrap, other.spacing,
-                 other.text);
+                 other.width, other.height, other.spacing,
+                 other.text, other.font);
 }
 
 CharacterPaneOwnedText::~CharacterPaneOwnedText() {
@@ -267,18 +285,32 @@ void CharacterPaneOwnedText::release_raster_fonts() noexcept {
     raster_fonts_.clear();
 }
 
+HFONT CharacterPaneOwnedText::font_from_definition(
+    const LOGFONTW& description, std::uint32_t font_slot) noexcept {
+    const FontDefinition definition{description};
+    const auto key = std::make_tuple(font_slot, kUnitRasterKey, definition);
+    const auto found = raster_fonts_.find(key);
+    if (found != raster_fonts_.end()) return found->second;
+    HFONT created = CreateFontIndirectW(&description);
+    if (!created) return nullptr;
+    try {
+        raster_fonts_.emplace(key, created);
+    } catch (const std::bad_alloc&) {
+        DeleteObject(created);
+        return nullptr;
+    }
+    return created;
+}
+
 // A copy of the engine font at raster_scale_. Glyph indices come from the
 // stock font shaping and are the same in the copy (same face).
 HFONT CharacterPaneOwnedText::raster_font(
     HFONT font, std::uint32_t font_slot) noexcept {
     if (raster_key_ == kUnitRasterKey) return font;
-    const auto key = std::make_pair(font_slot, raster_key_);
+    const auto key = std::make_tuple(font_slot, raster_key_, font_definition_);
     const auto found = raster_fonts_.find(key);
     if (found != raster_fonts_.end()) return found->second;
-    LOGFONTW description{};
-    if (GetObjectW(font, sizeof(description), &description) !=
-        sizeof(description))
-        return nullptr;
+    LOGFONTW description = font_definition_.value;
     if (!description.lfHeight) {
         // Default size: scale the stock cell height (selected in the DC).
         TEXTMETRICW metrics{};
@@ -514,10 +546,10 @@ bool CharacterPaneOwnedText::ellipsize(
 
 bool CharacterPaneOwnedText::layout(
     HDC dc, const DisplayText& display, int maximum_width,
-    bool word_break, bool single_line, UINT ellipsis, double gap_spacing,
+    bool word_break, bool single_line, UINT ellipsis,
     std::vector<Line>& lines) noexcept {
     if (!layout_lines(dc, display, maximum_width, word_break, single_line,
-                      ellipsis != 0, gap_spacing, lines))
+                      ellipsis != 0, lines))
         return false;
     if (!ellipsis) return true;
     const int width = std::max(maximum_width, 1);
@@ -533,18 +565,9 @@ bool CharacterPaneOwnedText::layout(
 
 bool CharacterPaneOwnedText::layout_lines(
     HDC dc, const DisplayText& display, int maximum_width,
-    bool word_break, bool single_line, bool whole_words, double gap_spacing,
+    bool word_break, bool single_line, bool whole_words,
     std::vector<Line>& lines) noexcept {
     lines.clear();
-    // A wrapped line keeps room for its letter spacing.
-    const auto spaced_width = [gap_spacing](const ShapedRun& run) {
-        if (!(gap_spacing > 0.0)) return run.width;
-        int gaps = -1;
-        for (const int advance : run.advances)
-            if (advance > 0) ++gaps;
-        return gaps > 0 ? run.width + static_cast<int>(
-            std::ceil(gap_spacing * gaps)) : run.width;
-    };
     try {
         const auto shaped_line = [&](std::size_t start, std::size_t length,
                                      Line& line) {
@@ -603,7 +626,7 @@ bool CharacterPaneOwnedText::layout_lines(
                             dc, display.text.data() + cursor,
                             trial - cursor, trial_run))
                             return false;
-                        if (spaced_width(trial_run) <= std::max(maximum_width, 1) ||
+                        if (trial_run.width <= std::max(maximum_width, 1) ||
                             best == cursor) {
                             best = trial;
                             best_run = std::move(trial_run);
@@ -812,7 +835,8 @@ bool CharacterPaneOwnedText::realize_glyph(
     HDC dc, std::uint32_t font_slot, std::uint16_t glyph,
     const GlyphMask*& output) noexcept {
     output = nullptr;
-    const GlyphKey key{font_generation_, font_slot, raster_key_, glyph};
+    const GlyphKey key{font_generation_, font_slot, raster_key_, glyph,
+                       font_definition_};
     auto found = glyphs_.find(key);
     if (found != glyphs_.end()) {
         output = &found->second;
@@ -1072,7 +1096,7 @@ bool CharacterPaneOwnedText::draw_line(
 int CharacterPaneOwnedText::draw(
     HFONT font, std::uint32_t font_slot, const char* text,
     const RECT& rectangle, UINT format, COLORREF color,
-    bool shadow, bool& height_valid) noexcept {
+    bool shadow, bool& height_valid, LOGFONTW* selected_font) noexcept {
     height_valid = false;
     if (!frame_claimed_ || dc_finished_) return 0;
     if (!font || font == HGDI_ERROR) {
@@ -1084,13 +1108,20 @@ int CharacterPaneOwnedText::draw(
         fail(CharacterPaneTextFailure::encoding);
         return 0;
     }
-    // The glyph cache already names a font by generation and slot. Only a
+    // Read the live font definition before any cache lookup. The native card
+    // producer can replace a slot just for its description and restore it
+    // before the next call; the HFONT address is not a cache identity.
+    if (GetObjectW(font, sizeof(font_definition_.value), &font_definition_.value) !=
+        sizeof(font_definition_.value)) {
+        fail(CharacterPaneTextFailure::font);
+        return 0;
+    }
+    if (selected_font) *selected_font = font_definition_.value;
+    // The glyph cache names generation, slot and this definition. Only a
     // completed supported-format layout is reused; color and shadow are
     // applied when quads are emitted.
-    // Item card text with letter spacing keeps a right padding equal to its
-    // left margin: lines and their spacing end inside it. Taller rectangles
-    // wrap at that padded width, spacing included; a one-line rectangle (a
-    // line the game already wrapped) keeps its line and only spaces less.
+    // The card producer already wraps its text into draw calls. Keep those
+    // lines; letter spacing uses only the room left inside the right padding.
     const bool padded = letter_spacing_ && raster_key_ != kUnitRasterKey &&
         rectangle.left >= 0 && rectangle.left < static_cast<LONG>(width_) / 2;
     const LONG left_bound = padded ? rectangle.left : 0;
@@ -1106,11 +1137,13 @@ int CharacterPaneOwnedText::draw(
         try {
             key.font_generation = font_generation_;
             key.font_slot = font_slot;
+            key.font = font_definition_;
             key.format = format;
             key.width = rectangle.right - rectangle.left;
             key.height = rectangle.bottom - rectangle.top;
-            key.wrap = padded ? right_bound : 0;
-            key.spacing = padded ? raster_key_ : 0u;
+            // Card lines must not reuse a pane/chat word-wrapped layout,
+            // including when the card rasterizes at the native size.
+            key.spacing = letter_spacing_ ? raster_key_ : 0u;
             key.text.assign(text, length);
             keyed = true;
             const auto found = layouts_.find(key);
@@ -1149,19 +1182,15 @@ int CharacterPaneOwnedText::draw(
         complete = complete && GetTextMetricsA(measure_dc_, &metrics) != FALSE;
         fresh.line_height = metrics.tmHeight;
         fresh.ascent = metrics.tmAscent;
-        const bool tall = padded && metrics.tmHeight > 0 &&
-            rectangle.bottom - rectangle.top >= 2 * metrics.tmHeight;
+        // DrawMultiText owns card line breaks. Rewrapping one of its result
+        // lines here can put its last word below that call's clip. This
+        // boundary comes from the card producer, not a second measurement.
         complete = complete && layout(
-            measure_dc_, fresh.display,
-            (tall ? right_bound : rectangle.right) - rectangle.left,
-            (format & DT_WORDBREAK) != 0 && !(format & DT_SINGLELINE),
+            measure_dc_, fresh.display, rectangle.right - rectangle.left,
+            (format & DT_WORDBREAK) != 0 && !(format & DT_SINGLELINE) &&
+                !letter_spacing_,
             (format & DT_SINGLELINE) != 0, format & kEllipsisFlags,
-            tall ? tracking_out / static_cast<double>(raster_scale_) : 0.0,
             fresh.lines);
-        // More lines than the stock measure: report their height.
-        if (complete && tall)
-            fresh.height = (std::max)(fresh.height, static_cast<int>(
-                fresh.lines.size() * static_cast<std::size_t>(fresh.line_height)));
         shaped = &fresh;
     }
     const int exact_height = shaped->height;

@@ -27,6 +27,7 @@ enum class HarnessVerb : std::uint8_t {
     godmode,       // godmode on|off: the GodMode script flag of player 0
     wait_ready,    // wait_ready [seconds]: loaded world fully prepared by the renderer
     main_menu,     // the game's own return to the main menu, from any screen
+    note,          // note <text>: the harness banner ('|' starts a line) and window title
     // Temporary (camera-movement frame cost, 2026-10-11; remove once found):
     // camera_path <frames> x y yaw dist pitch: the camera moves from its pose
     // to the target over that many world frames, one step per present, and

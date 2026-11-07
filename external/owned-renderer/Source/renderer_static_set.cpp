@@ -70,13 +70,16 @@
 
 namespace owned {
 
-HRESULT Renderer::adopt_native_static_draws(NativeStaticSet& set,std::uint64_t key,std::size_t first,bool& registered){
- // Only reorderable color draws may live in a static set; ordered
- // transparency keeps its per-frame depth order.
+HRESULT Renderer::adopt_native_static_draws(NativeStaticSet& set,std::uint64_t key,std::size_t first,bool& registered,bool fixed_map_order){
+ // World sets accept only reorderable color draws. Map layers have a fixed
+ // section-local sequence: their private set may retain that exact order.
+ fixed_map_order=fixed_map_order&&set.layout_slot>=kMapOrderedLayout&&
+  set.layout_slot<native_submission_layouts_.size()&&native_static_set_for_layout(set.layout_slot)==&set;
  bool eligible=native_pending_draws_.size()>first;
  for(std::size_t i=first;i<native_pending_draws_.size()&&eligible;++i){
   const auto& selected=native_pending_draws_[i];
-  eligible=selected.passes==1u&&native_instance_records_[selected.record].command.reorderable;
+  const auto& command=native_instance_records_[selected.record].command;
+  eligible=selected.passes==1u&&(command.reorderable||(fixed_map_order&&command.preserve_order));
  }
  try{
   if(eligible)set.objects[key].assign(native_pending_draws_.begin()+first,native_pending_draws_.end());
@@ -215,7 +218,8 @@ HRESULT Renderer::flush_native_static_set(NativeStaticSet& set,const FixedState&
   bake.set_revision==set.revision&&bake.content_revision==native_static_content_revision_;
  if(reuse){
   native_frame_stats_.native_logical_draws+=bake.logical_draws;
-  native_frame_stats_.native_reorderable_draws+=bake.logical_draws; // set draws are reorderable
+  native_frame_stats_.native_reorderable_draws+=bake.reorderable_draws;
+  native_frame_stats_.native_ordered_draws+=bake.ordered_draws;
   native_frame_stats_.native_opaque_draws+=bake.opaque_draws;
   native_frame_stats_.native_cutout_draws+=bake.cutout_draws;
   native_frame_stats_.native_material_buckets+=bake.material_buckets;
@@ -242,6 +246,11 @@ HRESULT Renderer::bake_native_static_layout(NativeSubmissionLayout& layout) try{
  bake.batches.reserve(layout.batches.size());
  bake.prepared_vertices=0;bake.logical_draws=native_pending_draws_.size();
  bake.opaque_draws=bake.cutout_draws=bake.material_buckets=0;
+ bake.reorderable_draws=bake.ordered_draws=0;
+ for(const auto& selected:native_pending_draws_){
+  if(native_instance_records_[selected.record].command.reorderable)++bake.reorderable_draws;
+  else ++bake.ordered_draws;
+ }
  for(const auto& work:layout.work)
   if(work.record!=UINT_MAX&&(work.flags&2u))bake.prepared_vertices+=native_instance_records_[work.record].command.component_count;
  UINT previous_bucket=UINT_MAX;

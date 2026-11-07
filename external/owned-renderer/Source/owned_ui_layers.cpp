@@ -1,4 +1,5 @@
 #include "owned_ui_layers.h"
+#include "game_sites.h"
 
 #include <richedit.h>
 
@@ -61,7 +62,7 @@ struct ImportSlot {
 };
 
 std::array<ImportSlot, 11> import_slots() noexcept {
-    return {{
+    std::array<ImportSlot, 11> slots{{
         {0x0033b4f0u, "user32.dll", "DrawTextA",
          reinterpret_cast<void*>(&ui_layer_draw_text_a),
          reinterpret_cast<void**>(&g_real.draw_text)},
@@ -96,9 +97,16 @@ std::array<ImportSlot, 11> import_slots() noexcept {
          reinterpret_cast<void*>(&ui_layer_send_message_a),
          reinterpret_cast<void**>(&g_real.send_message)},
     }};
+    if (running_game_sites().report.engine == GameEngine::lia) {
+        static_assert(std::size(kLiaUiImportRvas) == std::tuple_size<decltype(slots)>::value);
+        for (std::size_t index = 0; index < slots.size(); ++index)
+            slots[index].rva = kLiaUiImportRvas[index];
+    }
+    return slots;
 }
 
 std::uint8_t* g_image = nullptr;
+std::uint32_t g_get_dc_return_rva = 0;
 
 enum class Op : std::uint8_t {
     draw_text = 1,
@@ -566,13 +574,17 @@ const char* ui_layer_failure_name(UiLayerFailure failure) noexcept {
 const char* ui_layers_install(std::uint8_t* image) noexcept {
     if (g_image) return nullptr;
     if (!image) return "unsupported_image";
-    if (std::memcmp(image + kGetDcCallRva, kGetDcCall, sizeof(kGetDcCall)) ||
-        std::memcmp(image + kReleaseDcCallRva, kReleaseDcCall,
+    const bool lia = running_game_sites().report.engine == GameEngine::lia;
+    const auto get_dc_call = lia ? kLiaUiGetDcCallRva : kGetDcCallRva;
+    const auto release_dc_call = lia ? kLiaUiReleaseDcCallRva : kReleaseDcCallRva;
+    if (std::memcmp(image + get_dc_call, kGetDcCall, sizeof(kGetDcCall)) ||
+        std::memcmp(image + release_dc_call, kReleaseDcCall,
                     sizeof(kReleaseDcCall)))
         return "surface_dc_call_mismatch";
     auto slots = import_slots();
     std::uintptr_t page = 0;
     for (const auto& slot : slots) {
+        if (!slot.rva) continue; // LiA does not import PatBlt or PolylineTo.
         const HMODULE module = GetModuleHandleA(slot.module);
         void* const expected = module
             ? reinterpret_cast<void*>(GetProcAddress(module, slot.name)) : nullptr;
@@ -590,6 +602,7 @@ const char* ui_layers_install(std::uint8_t* image) noexcept {
         return "import_page_protection";
     std::size_t patched = 0;
     for (; patched < slots.size(); ++patched) {
+        if (!slots[patched].rva) continue;
         auto* const cell = reinterpret_cast<void**>(image + slots[patched].rva);
         void* const stock = *cell;
         *slots[patched].real = stock;
@@ -599,6 +612,7 @@ const char* ui_layers_install(std::uint8_t* image) noexcept {
     }
     if (patched != slots.size()) {
         while (patched--) {
+            if (!slots[patched].rva) continue;
             auto* const cell = reinterpret_cast<void**>(image + slots[patched].rva);
             InterlockedCompareExchangePointer(cell, *slots[patched].real,
                                               slots[patched].replacement);
@@ -607,6 +621,7 @@ const char* ui_layers_install(std::uint8_t* image) noexcept {
     DWORD ignored = 0;
     VirtualProtect(reinterpret_cast<void*>(page), 0x1000, protection, &ignored);
     if (patched != slots.size()) return "import_patch_race";
+    g_get_dc_return_rva = lia ? kLiaUiGetDcReturnRva : kGetDcReturnRva;
     g_image = image;
     return nullptr;
 }
@@ -619,15 +634,18 @@ void ui_layers_uninstall() noexcept {
         DWORD protection = 0;
         if (VirtualProtect(reinterpret_cast<void*>(page), 0x1000,
                            PAGE_READWRITE, &protection)) {
-            for (const auto& slot : slots)
+            for (const auto& slot : slots) {
+                if (!slot.rva) continue;
                 InterlockedCompareExchangePointer(
                     reinterpret_cast<void**>(g_image + slot.rva), *slot.real,
                     slot.replacement);
+            }
             DWORD ignored = 0;
             VirtualProtect(reinterpret_cast<void*>(page), 0x1000, protection,
                            &ignored);
         }
         g_image = nullptr;
+        g_get_dc_return_rva = 0;
     }
     for (auto& session : g_sessions) {
         if (session.active.load(std::memory_order_acquire)) close_session(session);
@@ -643,7 +661,7 @@ void ui_layers_uninstall() noexcept {
 bool ui_layers_active() noexcept { return g_image != nullptr; }
 
 bool ui_layer_getdc_caller(const void* return_address) noexcept {
-    return g_image && return_address == g_image + kGetDcReturnRva;
+    return g_image && return_address == g_image + g_get_dc_return_rva;
 }
 
 HDC ui_layer_begin(void* context, UiLayerPromote promote) noexcept {

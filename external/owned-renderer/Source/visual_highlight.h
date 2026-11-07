@@ -49,7 +49,11 @@ inline std::array<float, 4> visual_highlight_emissive(std::uint32_t object_flags
             if (!timed_highlight && !preselected)
                 result = selected && material.has_oldest ? material.oldest : material.previous;
         } else if (selected) {
-            result = material.previous;
+            // More than one native white push can leave the previous value
+            // white too. With selection as the only active highlight, use
+            // the authored value below those pushes; keep explicit effects.
+            result = !timed_highlight && !preselected && material.has_oldest
+                ? material.oldest : material.previous;
         }
         if ((policy & kHighlightStripPreselect) && preselected && !selected && !timed_highlight)
             result = quest_light && material.has_oldest ? material.oldest : material.previous;

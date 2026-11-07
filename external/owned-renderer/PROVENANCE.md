@@ -1,3 +1,27 @@
+# X64RUPD03 renderer source provenance (2026-11-07)
+
+Upstream main: `d17a6149e5b5d4c2d23873d18e037bc270269050` (193 commits after
+`b1ffc736d4792eb36f3528a8d8ee2c358da80d54`). Local task base: `6f29190bd2e5e9c6375b2e672968f0e4b410d534`,
+branch `task/X64RUPD03`. Read-only bare reference; final file tree imported
+by a three-way file merge, without Git merge or replaying intermediate commits.
+Build label: `eirebuild64-X64RUPD03-d17a6149`. LICENSE.md and NOTICE.md retained.
+
+The author's service-node policy is identical to the former local header.
+FIG1 neighbour handling, retained/observed native LOD, effective opaque proof,
+plugin visuals, typed host inputs, Russian UI and GPU FPS surface remain.
+Shared rendering algorithms and HLSL follow the author. Native retail hooks,
+Host/Core transport and D3D12 stay outside the embedded D3D11 target.
+
+New world-map preview preparation/draw code is imported but its native frontend
+is excluded. A complete typed catalog/load, carrier transform/tint, raw hit-ID,
+marker ordering and invalidation adapter remains open under BRIEF item 5
+(large host input). Its option is not registered in the embedded target.
+The native experimental camera smoothing contract is likewise not exposed.
+No fallback, local toggle or placeholder implementation was added.
+Runtime and visual acceptance remain open.
+
+## Previous provenance
+
 # X64RUPD02 renderer source provenance (2026-11-02)
 
 Upstream final main tree: `b1ffc736d4792eb36f3528a8d8ee2c358da80d54`,

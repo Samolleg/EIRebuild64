@@ -99,7 +99,7 @@ std::uint64_t hash_bytes(std::uint64_t hash,const void* bytes,std::size_t size){
 }  // namespace
 
 static NativeAlphaEvidence native_alpha_evidence(const NativeGeometryView& view,
- const FixedState&,bool owned_texture_bound,const NativePreparedPartValues* values=nullptr) noexcept {
+ float material_alpha,bool owned_texture_bound,const NativePreparedPartValues* values=nullptr) noexcept {
  NativeAlphaEvidence result;
  result.ordered_blend=(values?static_cast<NativeOrdering>(values->ordering):view.ordering)==NativeOrdering::preserve;
  if(owned_texture_bound)result.texture_opaque=native_texture_alpha_opaque(
@@ -108,7 +108,7 @@ static NativeAlphaEvidence native_alpha_evidence(const NativeGeometryView& view,
  if(view.semantic_kind!=SemanticKind::terrain){
   const auto flags=values?values->flags:view.flags;
   if(values?values->lighting_enabled:view.lighting.enabled)
-   result.diffuse_alpha=values?values->alpha:view.lighting.material_alpha;
+   result.diffuse_alpha=material_alpha;
   else if(flags&4u)result.diffuse_alpha=float((values?values->default_diffuse:view.default_diffuse)>>24)/255.f;
  }
  return result;
@@ -351,8 +351,7 @@ void Renderer::retire_dedicated_geometry() noexcept{
 // camera-motion churn of issue #57.)
 HRESULT Renderer::trim_native_mesh_cache(){
  if(!native_pending_draws_.empty())return E_UNEXPECTED;
- // Budget reductions still operate on D3D11 textures and shadow pools.
- if(!d3d12_)update_vram_budget(); // every kPollFrames presents
+ update_vram_budget(); // every kPollFrames presents (both backends)
  const std::uint64_t released=native_released_mesh_slots_;
  retire_native_source_values();
  trim_native_tables();
@@ -2053,6 +2052,8 @@ HRESULT Renderer::upload_native_instances(){
 
 void Renderer::retire_native_poses() noexcept{
  release_native_lod_observer();
+ discard_world_map_markers();
+ clear_world_map_preview_gpu();
  native_instance_update_cs_.Reset();native_persistent_instances_.Reset();native_persistent_instance_srv_.Reset();native_persistent_instance_uav_.Reset();
  native_instance_updates_.Reset();native_instance_update_srv_.Reset();native_world_clip_constants_.Reset();
  native_instance_update_ring_.release();native_pose_input_ring_.release();
@@ -2666,7 +2667,8 @@ HRESULT Renderer::queue_native_owned_impl(const NativeGeometryView& view,const F
   // D3D12 backend: the owned texture as a D3D12 texture on the same key.
   D3D12TextureRef d3d12_texture;std::uint64_t d3d12_backing=0;
   const HRESULT d3d12_hr=get_native_owned_texture_d3d12(view.owned_texture,d3d12_texture,d3d12_backing,result,
-   !view.owned_texture.camp_surface_alias&&!scene_composited_&&view.semantic_kind!=SemanticKind::ui);
+   !view.owned_texture.camp_surface_alias&&!scene_composited_&&view.semantic_kind!=SemanticKind::ui,
+   view.semantic_kind!=SemanticKind::terrain); // terrain atlases keep their texel gutters
   if(FAILED(d3d12_hr))return d3d12_hr;
   ++native_generic_ingress_calls_;
   // A retained figure part's composed atlas: its material profile (as below).
@@ -2820,7 +2822,7 @@ HRESULT Renderer::queue_native_terrain(const NativeGeometryView& view,const Fixe
    FixedState shadow_state;
    const FixedState* material_state=nullptr;
    const auto opacity=native_material_state(state,view.lighting.material_alpha,
-    native_alpha_evidence(view,state,view.owned_texture.identity!=0),native_shadow_collecting_,shadow_state,material_state);
+    native_alpha_evidence(view,view.lighting.material_alpha,view.owned_texture.identity!=0),native_shadow_collecting_,shadow_state,material_state);
    draw.instance.world_geometry=(draw.instance.world_geometry&~(native_world_lod|native_world_impostor))|
     (native_record_takes_lod(view,opacity,draw.mesh->lod_levels)?native_world_lod:0u)|
     (native_record_takes_impostor(view,opacity,draw.mesh->sphere_block)?native_world_impostor:0u);
@@ -3298,8 +3300,10 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
       state.render[D3DRENDERSTATE_ALPHAFUNC]=source.owned_fixed_state.alpha_func;
       state.render[D3DRENDERSTATE_ALPHAREF]=source.owned_fixed_state.alpha_ref;
       const FixedState* material_state=nullptr;
+      // The proof must use the drawn alpha, including the zero that hides
+      // original hair beneath the fur pass, rather than its original alpha.
       const auto opacity=native_material_state(state,alpha,
-       native_alpha_evidence(source,state,!wound,&values),native_shadow_collecting_,state,material_state);
+       native_alpha_evidence(source,alpha,!wound,&values),native_shadow_collecting_,state,material_state);
       const auto key=native_material_key(state,source.semantic_kind,opacity,values.lighting_enabled!=0,
        group.texture_srv!=nullptr||group.texture_d3d12,group.texture_array,group.material_key.texture_backing,group.material_key.texture_generation,group.material_key.contact_map);
       const auto ordering=wound?NativeOrdering::preserve:static_cast<NativeOrdering>(values.ordering);
@@ -3374,8 +3378,7 @@ bool Renderer::set_native_world_lighting(
 }
 void scene_cmd::WorldLighting::run(Renderer& r){(void)r.set_native_world_lighting(lighting,&environment);}
 
-bool Renderer::set_native_world_lighting(
-    const NativeWorldLighting& lighting,const WorldEnvironment* captured) noexcept {
+static bool native_lighting_is_valid(const NativeWorldLighting& lighting) noexcept {
  for(float value:lighting.ambient)if(!std::isfinite(value))return false;
  for(float value:lighting.sunlight_direction)if(!std::isfinite(value))return false;
  for(float value:lighting.sunlight_diffuse)if(!std::isfinite(value))return false;
@@ -3383,6 +3386,12 @@ bool Renderer::set_native_world_lighting(
   lighting.sunlight_direction[1]*lighting.sunlight_direction[1]+
   lighting.sunlight_direction[2]*lighting.sunlight_direction[2];
  if(!std::isfinite(length_squared)||length_squared<=1e-12f)return false;
+ return true;
+}
+
+bool Renderer::set_native_world_lighting(
+    const NativeWorldLighting& lighting,const WorldEnvironment* captured) noexcept {
+ if(!native_lighting_is_valid(lighting))return false;
  // Cave zones (the game's own GMS_CAVE flag, read with the rest of the world
  // environment) take the renderer's cave profile; every consumer of the
  // shared world light (world, cover, critters, liquids, fog) sees it.
@@ -3395,18 +3404,56 @@ bool Renderer::set_native_world_lighting(
   cave_lighting_profile(environment.cave,configured_floating_point(debug_overlay_.config(),
    "cave_brightness",kDefaultCaveBrightness),configured_floating_point(debug_overlay_.config(),
    "cave_ambient_floor",kDefaultCaveAmbientFloor),shaped.ambient,shaped.sunlight_diffuse);
+ return apply_native_lighting(shaped);
+}
+
+bool Renderer::apply_native_lighting(const NativeWorldLighting& lighting) {
  if(native_world_lighting_valid_&&
-    std::memcmp(&native_world_lighting_,&shaped,sizeof(shaped))==0)return true;
+    std::memcmp(&native_world_lighting_,&lighting,sizeof(lighting))==0)return true;
  // Pending native commands consume the existing shared constant. Finish that
  // domain before accepting the next one; legacy/UI queues own their transitions.
  const bool previous_dirty=native_world_lighting_dirty_;
- if(FAILED(flush_native())){
+ try{
+  if(FAILED(flush_native())){
+   native_world_lighting_dirty_=previous_dirty;
+   return false;
+  }
+ }catch(...){
   native_world_lighting_dirty_=previous_dirty;
-  return false;
+  throw;
  }
- native_world_lighting_=shaped;native_world_lighting_dirty_=true;
+ native_world_lighting_=lighting;native_world_lighting_dirty_=true;
  native_world_lighting_valid_=true;
  return true;
+}
+
+Renderer::PortraitLightingScope::PortraitLightingScope(
+    Renderer& renderer,const NativeWorldLighting* lighting) noexcept {
+ if(!lighting){ready_=true;return;}
+ if(!native_lighting_is_valid(*lighting))return;
+ try{
+  if(FAILED(renderer.composite_world()))return;
+  previous_=renderer.native_world_lighting_;
+  previous_valid_=renderer.native_world_lighting_valid_;
+  if(!renderer.apply_native_lighting(*lighting))return;
+  renderer_=&renderer;ready_=true;
+ }catch(...){ready_=false;}
+}
+
+Renderer::PortraitLightingScope::~PortraitLightingScope(){(void)finish();}
+
+bool Renderer::PortraitLightingScope::finish() noexcept {
+ if(!renderer_)return ready_;
+ Renderer& renderer=*renderer_;renderer_=nullptr;
+ bool flushed=false;
+ try{flushed=SUCCEEDED(renderer.flush_native());}catch(...){renderer.discard_native();}
+ // Restore prepared values directly: the world profile was already applied.
+ // Dirty makes the next native consumer rebind b1 after this portrait's flush.
+ renderer.native_world_lighting_=previous_;
+ renderer.native_world_lighting_valid_=previous_valid_;
+ renderer.native_world_lighting_dirty_=true;
+ ready_=flushed;
+ return ready_;
 }
 
 // Emissive-surface lights for the active map at the current F10 level, from
@@ -3592,6 +3639,11 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
  const auto fail=[&](HRESULT hr,const char* operation,bool texture_failure=false){
   return native_geometry_failure(result,hr,operation,texture_failure);
  };
+ // The verified map arrow route is a placed figure with a per-record clip.
+ // Keep its authoritative depth/write/cull state; the final overlay owns
+ // its depth rectangle instead of changing the figure's self-occlusion.
+ if(map_preview_marker_collecting_&&(view.world.enabled||view.terrain.animation_phase_count||registered))
+  return fail(E_INVALIDARG,"map_marker.placed_contract");
  // A prepare-only view is handled by queue_native_prepared; it never draws.
  if(view.prepare_only)return fail(E_INVALIDARG,"prepare.unprepared_route");
  if(reject_native_contribution(view,result))return S_OK;
@@ -3635,6 +3687,7 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
   (UINT(view.contribution.light_mask & (native_shadow_collecting_?native_shadow_dirty_mask_:31u))<<8);
  if(view.world.enabled){
   draw.instance.world_geometry=native_world_geometry|(view.world.object_space?native_world_object_space:0u);
+  if(view.world.vertex_opacity)draw.instance.world_geometry|=native_world_vertex_opacity;
   draw.instance.shape_count=view.world.shape_count;
   draw.instance.position_groups=view.position_groups;
   std::copy(view.world.shape.begin(),view.world.shape.end(),draw.instance.shape);
@@ -3691,7 +3744,7 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
  FixedState shadow_state;
  const FixedState* material_state=nullptr;
  const NativeOpacityClass opacity=native_material_state(st,view.lighting.material_alpha,
-  native_alpha_evidence(view,st,direct_texture!=nullptr && texture==nullptr),native_shadow_collecting_,shadow_state,material_state);
+  native_alpha_evidence(view,view.lighting.material_alpha,direct_texture!=nullptr && texture==nullptr),native_shadow_collecting_,shadow_state,material_state);
  if(native_record_takes_lod(view,opacity,mesh->lod_levels)){
   draw.instance.world_geometry|=native_world_lod;
   if(!view.world.object_space)draw.instance.second_morph_offset=draw.world_base;
@@ -3804,8 +3857,16 @@ void Renderer::enqueue_native_record(NativeSelectedRecord selected){
 #ifdef EID3D11_TESTING
  if(test_native_enqueue_failure_&&!--test_native_enqueue_failure_)throw std::bad_alloc();
 #endif
- native_pending_draws_.push_back(selected);
  auto& record=native_instance_records_[selected.record];auto& draw=record.command;
+ if(map_preview_marker_collecting_){
+  MapPreviewMarker marker;
+  selected.interface_record=true;
+  marker.selected=selected;marker.lighting=native_world_lighting_;marker.lighting_valid=native_world_lighting_valid_;
+  const auto bytes=std::size_t(draw.instance.morph_count)*sizeof(NativeMorphOffset);
+  if(bytes)marker.morphs.assign(native_pending_upload_.begin()+draw.instance.morph_offset,
+                              native_pending_upload_.begin()+draw.instance.morph_offset+bytes);
+  map_preview_markers_.push_back(std::move(marker));
+ }else native_pending_draws_.push_back(selected);
  ++record.references;++draw.mesh->pending_references;
  if(draw.pose_allocation<native_pose_ranges_.size())++native_pose_ranges_[draw.pose_allocation].references;
  if(draw.animation_allocation<native_animation_ranges_.size())++native_animation_ranges_[draw.animation_allocation].references;

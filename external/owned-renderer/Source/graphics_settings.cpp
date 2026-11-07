@@ -76,7 +76,7 @@ constexpr PlayerGraphicsSetting kSettings[] = {
     {"smaa", kCategories[0], "Anti-aliasing (SMAA)",
      "Smooths jagged edges in the world. Cheap.", nullptr, true, {0, 1, 1, 1}},
     {"anisotropy", kCategories[0], "Texture filtering",
-     "Keeps ground textures sharp when seen at a low angle. Higher is sharper.",
+     "Filters textures across the world, character previews, interface and images. Higher keeps angled textures sharper.",
      "1x\0" "2x\0" "4x\0" "8x\0" "16x\0", true, {2, 3, 3, 4}},
     {"vsync", kCategories[0], "VSync",
      "Matches frames to the monitor's refresh to stop tearing. Off gives the highest frame rate.",
@@ -259,6 +259,8 @@ constexpr PlayerGraphicsSetting kSettings[] = {
     CRITTER_TYPE_ROW(10), CRITTER_TYPE_ROW(11), CRITTER_TYPE_ROW(12), CRITTER_TYPE_ROW(13), CRITTER_TYPE_ROW(14),
 #undef CRITTER_TYPE_ROW
     // Interface & Cursor (the menu language has its own section at the top)
+    {"world_map_previews", kCategories[8], "World map previews",
+     "Show each world-map section with a miniature of its selected terrain and static scenery while keeping native labels, markers and clicks. The first opening prepares the map resources.", nullptr, false, {0, 0, 0, 0}},
     {"hud_fade_duration", kCategories[8], "HUD fade-out duration (ms)",
      "Shared fade-out duration for every widget after the idle delay. 0 fades instantly.", nullptr, false, {}},
     {"hud_fade_in_duration", kCategories[8], "HUD fade-in duration (ms)",
@@ -344,6 +346,11 @@ constexpr PlayerGraphicsSetting kSettings[] = {
      "Original UI (comparison)\0" "Wide grid\0", false, {1, 1, 1, 1}},
     {"cursor_scale", kCategories[8], "Cursor size (%)",
      "Size of the mouse cursor.", nullptr, false, {0, 0, 0, 0}},
+    {"camera_pan_smoothing", kCategories[8], "Camera pan smoothing (experimental)",
+     "Smooths horizontal camera panning. Off by default. Requires compatible camera controls; "
+     "unavailable if another component owns the same updates. "
+     "Camera cuts may briefly slide. Turn off if loads, camera cuts or picking look wrong.",
+     nullptr, false, {0, 0, 0, 0}},
     {"confine_cursor", kCategories[8], "Keep cursor in the window",
      "The cursor cannot leave the game window while it has focus.", nullptr, false, {0, 0, 0, 0}},
     {"highlight_briefing", kCategories[8], "Highlight briefing characters",

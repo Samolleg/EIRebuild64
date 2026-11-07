@@ -13,6 +13,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 namespace owned {
@@ -102,10 +103,10 @@ struct CharacterPaneShapeTestResult {
 // Owns bounded append-only glyph atlas pages, immutable published page
 // snapshots, and one frame-local list of ordered glyph quads. Engine handles
 // are never retained. Completed layouts of recently drawn strings are kept,
-// keyed by font generation/slot, format, rectangle size and text bytes, so an
-// unchanged string is not measured and reshaped every frame; a layout unused
-// for a full sweep interval, or of a retired font generation, is dropped. A
-// font generation is published by the exact CInterface3D Init/Fini hooks.
+// keyed by font generation/slot/definition, format, rectangle size and text
+// bytes, so an unchanged string is not measured and reshaped every frame. A
+// layout unused for a full sweep interval, or of a retired font generation,
+// is dropped. Font generation is published by the exact Init/Fini hooks.
 class CharacterPaneOwnedText {
 public:
     CharacterPaneOwnedText() = default;
@@ -118,14 +119,19 @@ public:
     // raster_scale: output pixels per surface pixel this surface is expected
     // to be composed at. Layout, wrapping and the returned heights keep the
     // stock surface metrics; only glyph rasterization uses this size.
-    // letter_spacing: output-size glyphs get a little extra advance (item
-    // card text), placed without changing layout or wrapping.
+    // letter_spacing: item cards already have producer-owned line breaks;
+    // preserve them and give output-size glyphs any extra advance that fits.
     bool begin_frame(std::uint32_t width, std::uint32_t height,
                      float raster_scale = 1.0f,
                      bool letter_spacing = false) noexcept;
+    // An owned native-size copy for replay after the producer restores its
+    // mutable font slot. Shares the existing definition-keyed font lifetime.
+    HFONT font_from_definition(const LOGFONTW& definition,
+                               std::uint32_t font_slot) noexcept;
     int draw(HFONT font, std::uint32_t font_slot, const char* text,
              const RECT& rectangle, UINT format, COLORREF color,
-             bool shadow, bool& height_valid) noexcept;
+             bool shadow, bool& height_valid,
+             LOGFONTW* selected_font = nullptr) noexcept;
     void finish_dc(bool success) noexcept;
     void fail(CharacterPaneTextFailure failure) noexcept;
     bool take(CharacterPaneTextFrame& frame) noexcept;
@@ -151,11 +157,16 @@ public:
 #endif
 
 private:
+    struct FontDefinition {
+        LOGFONTW value{};
+        bool operator<(const FontDefinition& other) const noexcept;
+    };
     struct GlyphKey {
         std::uint64_t font_generation = 0;
         std::uint32_t font_slot = 0;
         std::uint32_t raster_key = 0;
         std::uint16_t glyph = 0;
+        FontDefinition font;
         bool operator<(const GlyphKey& other) const noexcept;
     };
     struct GlyphMask {
@@ -189,10 +200,10 @@ private:
         UINT format = 0;
         LONG width = 0;
         LONG height = 0;
-        // Letter-spacing wrap (item cards): right bound and raster key.
-        LONG wrap = 0;
+        // Card producer scope, at every raster key; zero for pane/chat text.
         std::uint32_t spacing = 0;
         std::string text;
+        FontDefinition font;
         bool operator<(const LayoutKey& other) const noexcept;
     };
     struct TextLayout {
@@ -217,10 +228,10 @@ private:
                    ShapedRun& output) noexcept;
     bool layout(HDC dc, const DisplayText& text, int maximum_width,
                 bool word_break, bool single_line, UINT ellipsis,
-                double gap_spacing, std::vector<Line>& lines) noexcept;
+                std::vector<Line>& lines) noexcept;
     bool layout_lines(HDC dc, const DisplayText& text, int maximum_width,
                       bool word_break, bool single_line, bool whole_words,
-                      double gap_spacing, std::vector<Line>& lines) noexcept;
+                      std::vector<Line>& lines) noexcept;
     bool ellipsize(HDC dc, const DisplayText& text, int maximum_width,
                    Line& line) noexcept;
     bool draw_line(HDC dc, const DisplayText& text, const Line& line,
@@ -254,6 +265,9 @@ private:
     bool ensure_solid_asset() noexcept;
 
     std::uint64_t font_generation_ = 0;
+    // The actual native font definition borrowed by the current draw. A
+    // description can temporarily replace a slot within one generation.
+    FontDefinition font_definition_;
     std::uint64_t next_page_identity_ = 1;
     std::uint64_t frame_token_ = 0;
     std::uint32_t width_ = 0;
@@ -269,8 +283,8 @@ private:
     float raster_scale_ = 1.0f;
     bool letter_spacing_ = false;
     std::uint32_t raster_key_ = 0;
-    // Owned copies of the engine fonts at raster_scale_, by slot and key.
-    std::map<std::pair<std::uint32_t, std::uint32_t>, HFONT> raster_fonts_;
+    // Owned replay/scaled copies; normal and temporary definitions coexist.
+    std::map<std::tuple<std::uint32_t, std::uint32_t, FontDefinition>, HFONT> raster_fonts_;
     HDC measure_dc_ = nullptr;
     HBITMAP measure_bitmap_ = nullptr;
     HGDIOBJ measure_old_bitmap_ = nullptr;

@@ -27,6 +27,7 @@
 #include "engine_bridge.h"
 #include "neighbour_maps.h"
 #include "owned_resource_runtime.h"
+#include "renderer_internal.h"
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -62,8 +63,17 @@ std::uint64_t Renderer::evict_idle_textures_for_budget(std::uint64_t bytes) noex
  const auto idle=[&](std::uint64_t frame){return native_frame_index_>frame+kIdleFrames;};
  struct Candidate{std::uint64_t frame;const std::string* key;std::vector<NativeTextureArrayPage>* pages;std::size_t page;};
  std::vector<Candidate> candidates;
+ // D3D12: buckets, records, queued commands and surfaces hold their texture
+ // by reference (D3D12TextureRef), so an entry only the cache still holds is
+ // referenced by nothing, and dropping it frees it (after the frames that
+ // read it, the executor's deferred release).
+ const auto d3d12_bytes=[&](const NativeOwnedTexture& t)->std::uint64_t{
+  UINT width=0,height=0,levels=0;DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;
+  return d3d12_&&t.d3d12&&d3d12_->texture_info(*t.d3d12,width,height,levels,format)?texture_storage_bytes(width,height,levels,format):0;
+ };
  for(const auto& item:native_owned_textures_){const auto& t=item.second;
-  if(!t.camp_surface_alias&&!t.surface_shared&&t.texture&&idle(t.last_used_frame)&&!queued.count(t.srv.Get())&&!held.count(t.texture.Get()))
+  if(t.camp_surface_alias||t.surface_shared||!idle(t.last_used_frame))continue;
+  if(t.texture?!queued.count(t.srv.Get())&&!held.count(t.texture.Get()):t.d3d12&&t.d3d12.use_count()==1)
    candidates.push_back({t.last_used_frame,&item.first,nullptr,0});}
  for(auto& group:native_texture_arrays_)if(group.first.immutable_values)
   for(std::size_t i=0;i<group.second.size();++i){const auto& page=group.second[i];
@@ -74,7 +84,7 @@ std::uint64_t Renderer::evict_idle_textures_for_budget(std::uint64_t bytes) noex
  std::vector<std::string> keys;
  for(const auto& c:candidates){
   if(freed>=bytes)break;
-  if(c.key){const auto& t=native_owned_textures_.at(*c.key);freed+=resource_video_bytes(t.texture.Get());keys.push_back(*c.key);}
+  if(c.key){const auto& t=native_owned_textures_.at(*c.key);freed+=t.texture?resource_video_bytes(t.texture.Get()):d3d12_bytes(t);keys.push_back(*c.key);}
   else{freed+=resource_video_bytes((*c.pages)[c.page].texture.Get());pages.push_back({c.pages,c.page});}
  }
  // Pages go first: the (vector, index) pairs name the arrays as they were

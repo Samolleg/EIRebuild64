@@ -116,19 +116,24 @@ std::set<std::string> owned_terrain_tile_blend_drawable(const TerrainTileBlendIn
 // cells' table (terrain_tile_fold_cells), the grid's extra row; borrowed:
 // families that still borrow another family's art. slot_variants (terrain
 // 2.0): each vertex draws the plain slot its own plain tiles place.
+// art, when supplied, receives family policy bits in its existing w upper
+// bits, from the effective shared-vertex families that generate these rows.
 std::vector<std::array<std::uint32_t,4>> owned_terrain_tile_blend_rows(const TerrainTileBlendInput& input,
     const TerrainTileFamilies& families,const std::vector<std::uint32_t>& edge_families,
     std::size_t& blended,std::size_t& plain_materials,std::size_t& bed_families,std::set<std::uint32_t>& unmatched,
     std::vector<std::uint32_t>& fold_table,std::set<std::uint32_t>& borrowed,
-    std::map<std::uint32_t,std::uint32_t>* family_cells=nullptr,bool slot_variants=false);
+    std::map<std::uint32_t,std::uint32_t>* family_cells=nullptr,bool slot_variants=false,
+    std::vector<std::array<std::uint32_t,4>>* art=nullptr);
 // What the tile family load needs from the map, copied on the calling thread:
-// its atlas (space: terrain_tile_family_space, slot count), its own base tile
-// placements and file name, ETERRTYPE per slot and the animated slots.
+// its atlas namespace/layout, its own base tile placements and file name,
+// ETERRTYPE per slot and the declared animation phases. type_count excludes
+// the loader's extra long-tile defaults; skip is the inference's slot mask.
 struct TerrainTileMapInput {
  std::string space,own_file;
- unsigned slots=0,pages=0,tiles_per_side=0;
+ unsigned slots=0,pages=0,tiles_per_side=0,texture_size=0,tile_size=0,type_count=0;
  std::vector<TerrainTilePlacement> own;
  std::vector<std::uint32_t> types;
+ std::vector<std::uint32_t> animation_phases;
  std::vector<bool> skip;
 };
 TerrainTileMapInput terrain_tile_map_input(const TerrainCpuAsset& terrain);

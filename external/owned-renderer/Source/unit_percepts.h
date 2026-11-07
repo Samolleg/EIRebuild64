@@ -6,6 +6,14 @@
 
 namespace owned::critters {
 
+struct LocalServerIdentity {
+    std::uint32_t world = 0x003aff60;
+    std::uint32_t world_table = 0x0033f928;
+    std::uint32_t manager_table = 0x0033dcd8;
+    std::uint32_t unit_table = 0x0033ea8c;
+    std::uint32_t unit_specific_table = 0x0033ef38;
+};
+
 // Supported image: 55FAE0/403F40 resolve the replicated signed ID through
 // world+40, manager buckets [+20,+24), node {next,key,value} at {0,4,8}.
 // 58DC93 establishes server mode +138 (1 = single player); 553519 establishes
@@ -19,10 +27,11 @@ namespace owned::critters {
 template<class Read>
 const char* read_local_unit_percepts(const void* image, bool verified,
     std::int32_t id, float& visibility, float& loudness, Read read,
-    float* vision = nullptr, bool* controlled = nullptr) noexcept {
+    float* vision = nullptr, bool* controlled = nullptr,
+    const LocalServerIdentity& identity = {}) noexcept {
     static_assert(sizeof(void*) == 4, "supported game ABI is x86");
     if (!verified || !image) return "server percept contract mismatch";
-    const auto* world = static_cast<const std::uint8_t*>(image) + 0x3aff60;
+    const auto* world = static_cast<const std::uint8_t*>(image) + identity.world;
     const auto get = [&](const void* base, std::size_t offset, auto& value) {
         return read(base, offset, &value, sizeof(value));
     };
@@ -33,9 +42,9 @@ const char* read_local_unit_percepts(const void* image, bool verified,
     const void* manager = nullptr;
     const void* owner = nullptr;
     const auto* game = static_cast<const std::uint8_t*>(image);
-    if (!get(world, 0, table) || table != game+0x33f928 ||
+    if (!get(world, 0, table) || table != game+identity.world_table ||
         !get(world, 0x40, manager) || !manager ||
-        !get(manager, 0, table) || table != game+0x33dcd8 ||
+        !get(manager, 0, table) || table != game+identity.manager_table ||
         !get(manager, 0xac, owner) || owner != world)
         return "server manager ownership mismatch";
     std::uintptr_t begin = 0, end = 0;
@@ -57,11 +66,11 @@ const char* read_local_unit_percepts(const void* image, bool verified,
             const void* specific = nullptr;
             std::int32_t unit_id = 0;
             if (!get(node, 8, unit) || !unit ||
-                !get(unit, 0, table) || table != game+0x33ea8c ||
+                !get(unit, 0, table) || table != game+identity.unit_table ||
                 !get(unit, 0xc, unit_id) || unit_id != id ||
                 !get(unit, 0x14, owner) || owner != manager ||
                 !get(unit, 0x240, specific) || !specific ||
-                !get(specific, 0, table) || table != game+0x33ef38 ||
+                !get(specific, 0, table) || table != game+identity.unit_specific_table ||
                 !get(specific, 0x1c, owner) || owner != unit)
                 return "server unit link mismatch";
             float sight = 0, hearing = 0;

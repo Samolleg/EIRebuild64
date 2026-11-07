@@ -39,6 +39,9 @@ inline constexpr std::uint32_t native_world_lod = 4u;
 //          far away (NativeInstance::secondMorphOffset holds its atlas slice;
 //          object-space records never read it, they carry no morph)
 inline constexpr std::uint32_t native_world_impostor = 8u;
+//   bit 4  immutable vertex opacity in normal.w; world normal XYZ and
+//          material lighting are unchanged, without terrain animation data.
+inline constexpr std::uint32_t native_world_vertex_opacity = 16u;
 
 // Crown impostors: each cut-out decoration figure is baked once into one
 // slice of an atlas array: kImpostorFrames x kImpostorFrames orthographic
