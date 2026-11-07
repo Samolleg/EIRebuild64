@@ -15,6 +15,7 @@
 #include "ModArena.h"
 #include "ModArenaVisual.h"
 #include "ModFinalGolem.h"
+#include "ModCurseEncounter.h"
 #include "MapObjectManager.h"
 #include "ModRegisteredLoot.h"
 #include "ZoneIce.h"
@@ -34,6 +35,7 @@ namespace ModMob {
 // Release registry from57b8e0c, original IDs checked against EXE token table78BCA0.
 struct Entry {int id;const char*name;const char*format;bool ready;};
 inline const Entry registry[]={
+ {277,"CurseEncounterAction","oof",true},
  {276,"ChaseTrapDamage","offf",true},
  {279,"SpawnUnitFromDB","fsffff",true},
  {278,"DespawnUnit","f",true},
@@ -320,6 +322,7 @@ inline bool Group(SSCCmd&cmd,CScriptObjectGroup&result){
 inline bool Action(SSCCmd&cmd){
  auto*unit=UnitArg(cmd);auto*server=ServerArg(cmd);float a=cmd.params.GetSize()?cmd.params[0]:0;
  switch(cmd.command){
+ case 277:if(!IntegralArgument(a,0,4))return Reject("CurseEncounterAction","operation must be an integer 0..3");ModCurseEncounter::Action(unit,UnitArg(cmd,1),int(a));break;
  case 281:if(!IntegralArgument(a,0,29))return Reject("FinalGolemAction","operation must be an integer 0..28");ModFinalGolem::Action(unit,UnitArg(cmd,1),int(a));break;
  case 282:ModArena::Damage(unit,a,cmd.params[1]);break;
  case 276:ModChase::Trap(theWorldServer,unit,a,cmd.params[1],cmd.params[2]);break;

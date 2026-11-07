@@ -24,7 +24,7 @@ static void Move(CUnit* u,Point p) {
  player->DoMoveTo(s->logic,CPlot3D(p.x,p.y,0),false,false,CPlot3D(0,0,0));
 }
 static bool Place(CUnit* u,Point p) {
- if(!Live(u))return false;auto& map=theWorldServer.aiMap;const CPlot3D point(p.x,p.y,map.GetTileHeight(CPlot3D(p.x,p.y,0)));
+ if(!Live(u))return false;auto& map=theWorldServer.aiMap;const CPlot3D point(p.x,p.y,0);
  if(!map.CanPutObject(u,point)||!map.MoveObject(u,point))return false;
  Server(u)->InitializeUnit();Stop(u);u->SetUpdateMask(CMapObject::VLD_MASK_POSROT);return true;
 }
@@ -61,13 +61,6 @@ static ModAttackEvents::Event LastAttack(CUnit* attacker,CUnit* target) {
 static int Count(){return (std::min)(PartyLimit,(std::max)(0,(int)Read("ZC.PartyCount")));}
 static CUnit* ChooseHero(){
  int count=Count(),start=(int)Read("ZC.TargetCursor");for(int i=0;i<count;i++){int n=(start+i)%count;auto u=Party(n);if(Live(u)){Set("ZC.TargetCursor",float(n+1));return u;}}return nullptr;
-}
-static bool Clear(Point p,CUnit*who){
- if(!Inside(p,3))return false;
- for(int i=0;i<Count();i++)if(Live(Party(i))&&Distance(p,XY(Party(i)))<2.5f)return false;
- for(unsigned id:{666666u,49435758u,49435759u}){auto u=Actor(id);if(u!=who&&Live(u)&&Distance(p,XY(u))<3.5f)return false;}
- for(int i=0;i<Pool;i++){auto u=Actor(710001+i);if(u!=who&&Slot("Enemy",i,"On")==1&&Live(u)&&Distance(p,XY(u))<2.5f)return false;}
- for(int i=0;i<8;i++){float a=i*.785398163f,b=(i+1)*.785398163f;if(!TurnGuardSweep(who,p.x+std::cos(a),p.y+std::sin(a),p.x+std::cos(b),p.y+std::sin(b)))return false;}return true;
 }
 static bool Clear(Point p,CUnit* who) {
  if(!Inside(p,3))return false;
@@ -227,8 +220,7 @@ static void Tick(CUnit*boss,CUnit*mage){
 }
 void Action(CUnit*boss,CUnit*other,int op){
  if(!Map()||ID(boss)!=666666||!Valid(boss))return;
- ArmVisual();
- if(op==0){Tick(boss,other);return;}
+ if(op==0){Tick(boss,other);ArmVisual();return;}
  if(op==1){
   if(Read("ZC.Enabled")==1&&Read("ZC.Version")==3)return;
   for(const char*k:{"Active","VictoryReady","Failed","Waves","Phase","Threat","ThreatSeq","TargetCursor","PartyCount","Music","MageMode","ShotBorn","CastMage","CastBoss","CastEnemy","Intercepts","LanceMisses","MageAttacks","Pad","HadEnemies","WaveDue","Notice","BoltHits","Guardians","Started","CastBorn","ShotRelease","ShotEnd","ReleaseDue"}){char key[64];sprintf_s(key,"ZC.%s",k);Set(key,0);}

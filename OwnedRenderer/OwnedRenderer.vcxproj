@@ -22,6 +22,7 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\embedded_neighbour_terrain.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\embedded_arena.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\embedded_golem.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\embedded_curse.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\debug_overlay.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\combat_ui.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)ThirdParty\imgui\imgui.cpp" />
