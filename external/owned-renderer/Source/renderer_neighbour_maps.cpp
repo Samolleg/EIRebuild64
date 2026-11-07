@@ -384,7 +384,7 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     (unsigned long long)upload->lod_stats.full_triangles,(unsigned long long)upload->lod_stats.level_triangles[0],
                     (unsigned long long)upload->lod_stats.level_triangles[1],(unsigned long long)upload->lod_stats.level_triangles[2],
                     upload->lod_stats.milliseconds,upload->lod_stats.prebuild_milliseconds,
-                    12.0*(upload->lod_stats.level_triangles[0]+upload->lod_stats.level_triangles[1]+
+                    12.0*double(upload->lod_stats.level_triangles[0]+upload->lod_stats.level_triangles[1]+
                         upload->lod_stats.level_triangles[2])/1048576.0,upload->lod_stats.load_milliseconds,
                     upload->decoration_summary.c_str());
                 bridge_neighbour_diagnostic(text);

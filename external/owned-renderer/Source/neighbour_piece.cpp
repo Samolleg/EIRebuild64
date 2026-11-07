@@ -145,7 +145,7 @@ void piece_terrain(PieceBuilder& builder, const NeighbourMapUpload& upload) {
             draw.identity = builder.identity(data.identity);
             draw.texture = builder.texture(page.texture->identity, page.texture->identity.container_incarnation,
                 static_cast<NativeOwnedTextureFormat>(page.texture->format), page.mips.data(),
-                static_cast<std::uint32_t>(page.mips.size()), view.owned_texture.opaque_mips);
+                static_cast<std::uint32_t>(page.mips.size()), page.texture->opaque_mips);
             draw.mesh = builder.mesh(*mesh);
             draw.position_groups = view.position_groups; draw.normal_groups = view.normal_groups;
             draw.texture_coordinate_count = view.texture_coordinate_count;
@@ -252,7 +252,7 @@ void piece_ground_cover(PieceBuilder& builder, const NeighbourMapUpload& upload)
         const auto& page = terrain.pages[page_index];
         inputs->atlas_textures[material] = builder.texture(page.texture->identity,
             page.texture->identity.container_incarnation, static_cast<NativeOwnedTextureFormat>(page.texture->format),
-            page.mips.data(), static_cast<std::uint32_t>(page.mips.size()));
+            page.mips.data(), static_cast<std::uint32_t>(page.mips.size()), page.texture->opaque_mips);
     }
 }
 
