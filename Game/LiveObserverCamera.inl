@@ -40,6 +40,7 @@ double Number(const json& params,const char* key,double minimum,double maximum) 
         throw std::runtime_error(std::string(key)+" is outside the allowed range");
     return n;
 }
+void FillCapturedCameraReply(Job& job);
 bool CameraCommand(Job& job) {
     const auto& params=job.request.at("params");
     if(!job.phase) {
@@ -79,9 +80,8 @@ bool CameraCommand(Job& job) {
     if(job.phase==2){
         if(job.renderFrames.empty()&&theWorldServer.bMapLoaded&&Clock::now()<job.lodExpires)return false;
         job.response={{"ok",true},{"camera_mode","normal"},{"camera",nullptr},{"truncated",false}};
-        if(!job.renderFrames.empty()){
-            job.response["camera"]=CameraJson(job.renderFrames.back()->camera);job.response["world_frame"]=job.renderFrames.back()->frame;
-        }else job.response["camera_reason"]="no_world_draw";
+        if(!job.renderFrames.empty())FillCapturedCameraReply(job);
+        else job.response["camera_reason"]="no_world_draw";
         return true;
     }
     if(!theWorldServer.bMapLoaded||job.worldId!=theWorldServer.GetRTID()||cameraControl.mode=="normal") {

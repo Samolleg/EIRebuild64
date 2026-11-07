@@ -23,6 +23,10 @@ struct RenderCapture {
     std::map<int,unsigned> templates;
     Clock::duration cost{};
 };
+void FillCapturedCameraReply(Job& job) {
+    job.response["camera"]=CameraJson(job.renderFrames.back()->camera);
+    job.response["world_frame"]=job.renderFrames.back()->frame;
+}
 bool Match(const std::string&,const std::string&);
 RenderCapture* Capturing() noexcept {
     if(!active||active->cancelled||active->readyToFinish||active->renderFrames.empty())return nullptr;
