@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "LiveObserver.h"
 #include "ModEncounter.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
@@ -1013,12 +1014,14 @@ BOOL CPlayerServer::PrsUnitCommandAggresion()
     pkt.Read(nID);
     pUnit = GetWorldServer()->GetUnit(nID);
     pkt.Read(cAggr);
+    if (!LiveObserver::CheckPlayerOrder(nID, PID_CMD_AGGRESSION)) return TRUE;
     if (pUnit)
         pUnit->SetAggression((EUnitAggression)cAggr);
+    LiveObserver::PlayerOrderResult(nID, PID_CMD_AGGRESSION, pUnit ? nullptr : "unit_not_found_on_server");
     return TRUE;
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
-static void ReadUnitArray(CPacket &pkt, CArray<CUnit *, CUnit *> &units)
+static void ReadUnitArray(CPacket &pkt, CArray<CUnit *, CUnit *> &units, int packet = 0)
 {
     int n;
     pkt.Read(n);
@@ -1026,6 +1029,7 @@ static void ReadUnitArray(CPacket &pkt, CArray<CUnit *, CUnit *> &units)
     {
         int nID;
         pkt.Read(nID);
+        if (!LiveObserver::CheckPlayerOrder(nID, packet)) continue;
         CUnit *pUnit = theWorldServer.GetUnit(nID);
         if (pUnit && !pUnit->CheckFlag(UNIT_BLOCKED))
             units.Add(pUnit);
@@ -1085,7 +1089,7 @@ BOOL CPlayerServer::PrsUnitCommandMoveTo()
     CPlot3D ptTarget;
     CArray<CUnit *, CUnit *> units;
     CArray<CPlot3D, CPlot3D &> offsets;
-    ReadUnitArray(pkt, units);
+    ReadUnitArray(pkt, units, PID_CMD_MOVETO);
     pkt.Read(bRun);
     pkt.Read(&ptTarget, sizeof(ptTarget));
     CalcOffsets(units, offsets);
@@ -1096,6 +1100,7 @@ BOOL CPlayerServer::PrsUnitCommandMoveTo()
         CUMPlayer *pUP = logic.GetPlayer();
         if (pUP)
             pUP->DoMoveTo(logic, ptTarget, units.GetSize() > 1, bRun != 0, offsets[i]);
+        LiveObserver::PlayerOrderResult(pUnit->GetID(), PID_CMD_MOVETO, pUP ? nullptr : "unit_has_no_player_logic");
     }
     return TRUE;
 }
@@ -1107,13 +1112,15 @@ BOOL CPlayerServer::PrsUnitCommandAttack()
     ERPGHitLocations hl;
     CMapObject *pTarget;
     CArray<CUnit *, CUnit *> units;
-    ReadUnitArray(pkt, units);
+    ReadUnitArray(pkt, units, PID_CMD_ATTACK);
     pkt.Read(bRun);
     pkt.Read(&hl, sizeof(hl));
     pkt.Read(nID);
     pTarget = theWorldServer.GetMapObject(nID);
-    if (!pTarget)
+    if (!pTarget) {
+        for (int i=0;i<units.GetSize();++i) LiveObserver::PlayerOrderResult(units[i]->GetID(), PID_CMD_ATTACK, "target_not_found_on_server");
         return TRUE;
+    }
     for (int i = 0; i < units.GetSize(); i++)
     {
         CUnit *pUnit = units[i];
@@ -1121,6 +1128,7 @@ BOOL CPlayerServer::PrsUnitCommandAttack()
         CUMPlayer *pUP = logic.GetPlayer();
         if (pUP)
             pUP->DoAttack(logic, pTarget, hl, bRun != 0);
+        LiveObserver::PlayerOrderResult(pUnit->GetID(), PID_CMD_ATTACK, pUP ? nullptr : "unit_has_no_player_logic");
     }
     return TRUE;
 }
@@ -1182,13 +1190,17 @@ BOOL CPlayerServer::PrsUnitCommandSkill()
     int nID, nItemID;
     CMapObject *pTarget;
     CArray<CUnit *, CUnit *> units;
-    ReadUnitArray(pkt, units);
+    ReadUnitArray(pkt, units, PID_CMD_SKILL);
     pkt.Read(bRun);
     pkt.Read(nSkill);
     pkt.Read(nItemID);
     pkt.Read(nID);
     pTarget = theWorldServer.GetMapObject(nID);
     //
+    if (!pTarget && units.GetSize()==1 && LiveObserver::IsPlayerOrder(units[0]->GetID(), PID_CMD_SKILL)) {
+        LiveObserver::PlayerOrderResult(units[0]->GetID(), PID_CMD_SKILL, "loot_target_not_found");
+        return TRUE;
+    }
     CUnit *pActor = ChooseSkillExecutor(units, pTarget, nSkill);
     if (pActor)
     {
@@ -1196,6 +1208,7 @@ BOOL CPlayerServer::PrsUnitCommandSkill()
         CUMPlayer *pUP = logic.GetPlayer();
         if (pUP)
             pUP->DoSkill(logic, pTarget, nSkill, nItemID, bRun != 0);
+        LiveObserver::PlayerOrderResult(pActor->GetID(), PID_CMD_SKILL, pUP ? nullptr : "unit_has_no_player_logic");
     }
     return TRUE;
 }
@@ -1210,11 +1223,15 @@ BOOL CPlayerServer::PrsUnitCommandCastTarget()
 {
     SNP_CMD_CAST_UNIT cast;
     pkt.Read(&cast, sizeof(cast));
+    if (!LiveObserver::CheckPlayerOrder(cast.mapobjID, PID_CMD_CASTTARGET)) return TRUE;
 
     CMapObject *pCastTarget = GetWorldServer()->GetMapObject(cast.targetID);
     CUnit *pUnit = GetWorldServer()->GetUnit(cast.mapobjID);
     if (!pCastTarget || !pUnit)
+    {
+        LiveObserver::PlayerOrderResult(cast.mapobjID, PID_CMD_CASTTARGET, "caster_or_target_not_found_on_server");
         return TRUE;
+    }
     if (pUnit && pUnit->CheckFlag(UNIT_BLOCKED))
         return TRUE;
     if (pUnit && !pUnit->IsDead())
@@ -1223,6 +1240,7 @@ BOOL CPlayerServer::PrsUnitCommandCastTarget()
         CUMPlayer *pUP = logic.GetPlayer();
         if (pUP)
             pUP->DoCast(logic, cast.spellNum, pCastTarget, cast.bDoItFast != 0);
+        LiveObserver::PlayerOrderResult(cast.mapobjID, PID_CMD_CASTTARGET, pUP ? nullptr : "unit_has_no_player_logic");
     }
     return TRUE;
 }
@@ -1231,10 +1249,14 @@ BOOL CPlayerServer::PrsUnitCommandCastPoint()
 {
     SNP_CMD_CAST_POINT cast;
     pkt.Read(&cast, sizeof(cast));
+    if (!LiveObserver::CheckPlayerOrder(cast.mapobjID, PID_CMD_CASTPOINT)) return TRUE;
 
     CUnit *pUnit = GetWorldServer()->GetUnit(cast.mapobjID);
     if (!pUnit)
+    {
+        LiveObserver::PlayerOrderResult(cast.mapobjID, PID_CMD_CASTPOINT, "caster_or_target_not_found_on_server");
         return TRUE;
+    }
     if (pUnit && pUnit->CheckFlag(UNIT_BLOCKED))
         return TRUE;
     if (pUnit && !pUnit->IsDead())
@@ -1243,6 +1265,7 @@ BOOL CPlayerServer::PrsUnitCommandCastPoint()
         CUMPlayer *pUP = logic.GetPlayer();
         if (pUP)
             pUP->DoCast(logic, cast.spellNum, cast.targetCoord, cast.bDoItFast != 0);
+        LiveObserver::PlayerOrderResult(cast.mapobjID, PID_CMD_CASTPOINT, pUP ? nullptr : "unit_has_no_player_logic");
     }
     return TRUE;
 }
@@ -1251,14 +1274,18 @@ BOOL CPlayerServer::PrsUnitCommandSelWeapon()
 {
     SNP_CMD_SELWEAPON cmd;
     pkt.Read(&cmd, sizeof(cmd));
+    if (!LiveObserver::CheckPlayerOrder(cmd.mapobjID, PID_CMD_SELWEAPON)) return TRUE;
 
     CUnit *pUnit = GetWorldServer()->GetUnit(cmd.mapobjID);
-    if (!pUnit)
+    if (!pUnit) {
+        LiveObserver::PlayerOrderResult(cmd.mapobjID, PID_CMD_SELWEAPON, "unit_not_found_on_server");
         return TRUE;
+    }
     if (pUnit && pUnit->CheckFlag(UNIT_BLOCKED))
         return TRUE;
     if (pUnit && !pUnit->IsDead())
         ((CUnitServer *)pUnit->GetUnitSpecific())->CmdNewWeapon(cmd.cSlotToSelect);
+    LiveObserver::PlayerOrderResult(cmd.mapobjID, PID_CMD_SELWEAPON);
     return TRUE;
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1266,13 +1293,17 @@ BOOL CPlayerServer::PrsUnitCommandPose()
 {
     SNP_CMD_PHASE cmd;
     pkt.Read(&cmd, sizeof(cmd));
+    if (!LiveObserver::CheckPlayerOrder(cmd.mapobjID, PID_CMD_POSE)) return TRUE;
     CUnit *pUnit = GetWorldServer()->GetUnit(cmd.mapobjID);
-    if (!pUnit)
+    if (!pUnit) {
+        LiveObserver::PlayerOrderResult(cmd.mapobjID, PID_CMD_POSE, "unit_not_found_on_server");
         return TRUE;
+    }
     // if ( pUnit && pUnit->CheckFlag( UNIT_BLOCKED ) )
     // return TRUE;
     if (pUnit && !pUnit->IsDead())
         ((CUnitServer *)pUnit->GetUnitSpecific())->CmdNewPose((EUnitPose)cmd.bPose);
+    LiveObserver::PlayerOrderResult(cmd.mapobjID, PID_CMD_POSE);
     return TRUE;
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1299,14 +1330,22 @@ BOOL CPlayerServer::PrsUnitFollow()
 {
     SNP_CMD_FOLLOW cmd;
     pkt.Read(&cmd, sizeof(cmd));
+    if (!LiveObserver::CheckPlayerOrder(cmd.mapobjID, PID_CMD_FOLLOW)) return TRUE;
     CUnit *pUnit = GetWorldServer()->GetUnit(cmd.mapobjID);
-    if (!pUnit)
+    if (!pUnit) {
+        LiveObserver::PlayerOrderResult(cmd.mapobjID, PID_CMD_FOLLOW, "unit_not_found_on_server");
         return TRUE;
+    }
     CUnit *pTarget = GetWorldServer()->GetUnit(cmd.targetID);
+    if (cmd.targetID >= 0 && !pTarget && LiveObserver::IsPlayerOrder(cmd.mapobjID, PID_CMD_FOLLOW)) {
+        LiveObserver::PlayerOrderResult(cmd.mapobjID, PID_CMD_FOLLOW, "follow_target_not_found");
+        return TRUE;
+    }
     CAIUnitLogic &logic = ((CUnitServer *)pUnit->GetUnitSpecific())->logic;
     CUMPlayer *pUP = logic.GetPlayer();
     if (pUP)
         pUP->DoFollow(logic, pTarget);
+    LiveObserver::PlayerOrderResult(cmd.mapobjID, PID_CMD_FOLLOW);
     return TRUE;
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
