@@ -2,6 +2,7 @@
 #include "CorePerf.h"
 #include "widescreen_layout.h"
 #include "GameJournal.h"
+#include "OwnedRender/GlobalMapPreview.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenEcsapeMenu.h"
@@ -355,6 +356,7 @@ void CI3DScreenGlobalMap::OnActivate()
     pCloudGen->Init();
 
     ApplyCloudsParams();
+    OwnedRender::GlobalMapPreview::Activate(this, GetRenderer());
     OnIdle();
     hSnd = pI3D->BeginFX("buttons\\globalmap\\wind.wav", TRUE);
 
@@ -369,6 +371,7 @@ void CI3DScreenGlobalMap::OnActivate()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenGlobalMap::OnDeactivate()
 {
+    OwnedRender::GlobalMapPreview::Deactivate(this, GetRenderer());
     if (pCloudGen)
         delete pCloudGen;
     pCloudGen = 0;
@@ -423,6 +426,8 @@ BOOL CI3DScreenGlobalMap::Draw(CRenderer *pRend)
 {
     CorePerf::Scope coreTiming(CorePerf::ScreenGlobalMap);
     pRend->GetD3D()->BeginInterface();
+    OwnedRender::GlobalMapPreview::DrawScope preview(this, pRend);
+    if (!preview.Ready()) return TRUE;
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, TRUE);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
@@ -899,6 +904,7 @@ void CI3DScreenGlobalMap::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenGlobalMap::GenerateHitTestDDS()
 {
+    OwnedRender::GlobalMapPreview::HitTestScope previewMask;
     int i, j;
     if (!pHitTestDDS)
         return;

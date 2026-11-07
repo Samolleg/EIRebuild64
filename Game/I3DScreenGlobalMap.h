@@ -36,6 +36,7 @@ class CCloudsGenerator;
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DScreenGlobalMap : public CI3DScreen
 {
+    friend struct GlobalMapPreviewAccess;
 private:
     int nZones;
     int nObjectives;

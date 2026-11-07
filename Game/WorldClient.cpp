@@ -8,6 +8,7 @@
 #include "OwnedRender/E3Scale.h"
 #include "GameJournal.h"
 #include "LiveObserver.h"
+#include "OwnedRender/GlobalMapPreview.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "WorldClient.h"
@@ -2372,6 +2373,7 @@ BOOL CWorldClient::NewZone(CMemorySave &packet)
     IWorldServer.CheckZone(szZone, szMob);
     //
     C2DScreenWait::Step(8);
+    OwnedRender::GlobalMapPreview::Precache(::GetRenderer());
 
     // erasing all objects
     bloodprints.clear();
