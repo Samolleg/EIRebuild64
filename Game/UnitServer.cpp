@@ -7,6 +7,7 @@
 #include "SaveSchema.h"
 #include "CorePerf.h"
 #include "GameJournal.h"
+#include "LiveObserver.h"
 #include "ModNativeCrtRandom.h"
 #include "NumericPolicy.h"
 #include "EngineDiagnostics.h"
@@ -5210,6 +5211,7 @@ void CUnitServer::RemoveReferencesOn(CMapObject *pTarget)
 // послать сообщение пользователю, что какое-либо действие окончилось неудачей
 void CUnitServer::InformFailure(DWORD dwAction)
 {
+    LiveObserver::PlayerOrderRefusal(lpUnit->GetID(), dwAction);
     if (!IsHeroAck(dwAction) && dwAction != ACK_UNIT_BECOME_KILLER)
         return;
     if (dwAction == ACK_NOTHING)
@@ -6508,7 +6510,11 @@ void CUnitServer::CmdNewPose(EUnitPose pose)
     {
         if (pose != UP_RUN || rpgUnitStats.CanRun(true) == ECR_CAN_RUN)
             InformFailure(ACK_HERO_ACK_CHANGE_POSE);
+        else
+            LiveObserver::PlayerOrderResult(lpUnit->GetID(), PID_CMD_POSE, "cannot_run_in_current_state");
     }
+    else
+        LiveObserver::PlayerOrderResult(lpUnit->GetID(), PID_CMD_POSE, "cannot_change_pose");
     if (pose != UP_STAND && pose != UP_RUN)
         curCommand.bDoItFast = false;
 }

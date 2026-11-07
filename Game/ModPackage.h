@@ -181,6 +181,7 @@ public:
     void SaveSkillCooldowns(CGSVariableSet&);
     void LoadSkillCooldowns();
     int SkillCooldown(CUnit&,CSpell*);
+    int SkillCooldownSnapshot(CUnit&,CSpell*) const; // passive MCP read, no expiry/Sync mutation
     void StartSkillCooldown(CUnit&,CSpell*,const ModSkills::Config&);
     bool TargetSkill(CSpell*) const;
     bool PointSkill(CSpell*) const;

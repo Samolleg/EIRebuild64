@@ -36,6 +36,10 @@ class Cooldowns {
 public:
  static uint32_t Hash(const std::string&s){uint32_t h=2166136261u;for(unsigned char c:s){if(c>='A'&&c<='Z')c+=32;h=(h^c)*16777619u;}return h;}
  void Clear(){entries.clear();world=nullptr;last=-1;}
+ int Peek(const void*w,int tick,int unit,const std::string&code)const{
+  if(!w||w!=world||(last>=0&&tick<last))return 0;
+  auto i=entries.find(Key(unit,code));return i==entries.end()?0:int(MeleeCooldown::Remaining(i->second.state,uint32_t(tick)));
+ }
  int Remaining(const void*w,int tick,int unit,const std::string&code){Sync(w,tick);auto i=entries.find(Key(unit,code));if(i==entries.end())return 0;auto n=MeleeCooldown::Remaining(i->second.state,uint32_t(tick));if(!n)entries.erase(i);return int(n);}
  void Start(const void*w,int tick,int unit,const std::string&code,int duration,bool persistent=true){Sync(w,tick);if(w&&duration>0)entries[Key(unit,code)]={{uint32_t(tick),uint32_t(duration),uint32_t(duration)},persistent};}
  template<class Vars> void Save(const void*w,int tick,const std::string&zone,Vars&vars){

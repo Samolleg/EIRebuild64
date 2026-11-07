@@ -1,6 +1,7 @@
 #ifndef GAME_JOURNAL_STANDALONE
 #include "StdAfx.h"
 #include "Unit.h"
+#include "LiveObserver.h"
 #include "WorldClient.h"
 #include "WorldServer.h"
 #include "MapObjectManager.h"
@@ -376,6 +377,7 @@ thread_local std::vector<TradeRow> tradeRows;
 thread_local bool tradeOverflow=false;
 }
 void ObserveDamage(CUnit* a,CUnit* t,float amount,int outcome,int critical) noexcept {
+    if(t)LiveObserver::ObserveHit(a?a->GetID():actor,t->GetID(),amount,outcome,critical);
     try{if(t)Damage(a?a->GetID():actor,t->GetID(),Prototype(a),Prototype(t),Squad(a)||Squad(t),amount,outcome,critical);}catch(...){}
 }
 void ObserveHeal(CUnit* t,float amount) noexcept {

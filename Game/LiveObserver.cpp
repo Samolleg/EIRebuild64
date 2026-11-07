@@ -31,6 +31,12 @@
 #include "Unit.h"
 #include "UnitServer.h"
 #include "UnitDatabase.h"
+#include "Item.h"
+#include "TextManager.h"
+#include "ModPackage.h"
+#include "ModRuntime.h"
+#include "ModStatRules.h"
+#include "MapObjectServer.h"
 #include "SpellEffect.h"
 #include "../Navigation/LiveQuery.h"
 #include "nlohmann/json.hpp"
@@ -47,6 +53,7 @@
 #include <limits>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 
 #pragma comment(lib,"windowscodecs.lib")
@@ -106,7 +113,11 @@ constexpr size_t RequestLimit=16384, ResponseLimit=262144, ImageLimit=4096u*4096
 constexpr auto FrameBudget=std::chrono::microseconds(800);
 constexpr size_t UnitLimit=200, VariableLimit=200, PathLimit=64, EffectLimit=32;
 struct RenderCapture;
+struct OrderReceipt {int id=0,packet=0;bool dispatched=false;std::string error;bool dispatching=false;};
 struct Job {
+    std::vector<OrderReceipt> orders;
+    std::uint64_t orderEpoch=0;
+    Clock::time_point orderExpires{};
     json request, response;
     std::string method;
     std::mutex mutex;
@@ -178,7 +189,7 @@ unsigned long long operationSequence=0;
 bool saveIsolated=false; // game thread only; deliberately survives load/new game
 bool IsCommand(const std::string& method) {
     return method=="load_save"||method=="new_game"||method=="enter_zone"||method=="save_game"||
-           method=="unit_move"||method=="unit_teleport"||method=="pause"||method=="quit"||
+           method=="unit_move"||method=="unit_attack"||method=="unit_cast"||method=="unit_use_item"||method=="unit_order"||method=="unit_teleport"||method=="pause"||method=="quit"||
            method=="set_global"||method=="object_transform"||method=="god_mode"||method=="script_run"||method=="camera";
 }
 
@@ -630,6 +641,7 @@ struct LiveSnapshotAccess {
     static int RunFailures(const CUnitServer& unit) {return unit.nL1RunFailCounter;}
     static int State(const CUnitServer& unit) {return int(unit.eL1State);}
     static const SAIPath& Path(const CUnitServer& unit) {return unit.path;}
+    static int AttackReady(const CUnitServer& unit) {return unit.nCanAttackTime;}
 };
 
 namespace LiveObserver {
@@ -1210,6 +1222,7 @@ CPlot3D CommandPoint(const json& params) {
         throw std::runtime_error("point is outside the loaded map");
     return point;
 }
+#include "LiveUnitCommands.inl"
 bool Command(Job& job) {
     // The first listed command, even if rejected, protects every subsequent
     // slot write in this process. Reading an owner's slot remains permitted.
@@ -1332,6 +1345,13 @@ bool Command(Job& job) {
         IWorld.MissionCombatPause(params.at("on").get<bool>());
         job.response={{"ok",true},{"status","accepted"},{"on",params["on"]},{"truncated",false}};return true;
     }
+    if(method=="unit_move"||method=="unit_attack"||method=="unit_cast"||method=="unit_use_item"||method=="unit_order") {
+        try {return PlayerUnitCommand(job);}
+        catch(const std::exception& error) {
+            for(const auto& id:ActorIds(params))RememberRefusal(id,error.what());
+            throw;
+        }
+    }
     const auto& value=params.at("id");
     if(!value.is_number_integer()||value<=0||value>INT_MAX)throw std::runtime_error("invalid unit id");
     const int id=value.get<int>();auto& world=theWorldServer;auto* unit=world.GetUnit(id);
@@ -1346,15 +1366,6 @@ bool Command(Job& job) {
     auto* server=static_cast<CUnitServer*>(specific);
     if(!server->logic.GetPlayer())throw std::runtime_error("unit does not accept player orders");
     auto point=CommandPoint(params);
-    if(method=="unit_move") {
-        auto* clientUnit=theWorld.GetUnit(id);
-        if(!clientUnit)throw std::runtime_error("unit is not present on the client");
-        point.z=world.aiMap.GetTileHeight(point);
-        CArray<CUnit*,CUnit*> units;units.Add(clientUnit);
-        client->UnitCommandMoveTo(units,point,FALSE);
-        job.response={{"ok",true},{"status","accepted"},{"id",id},{"target",Point(point)},
-                      {"path","client_to_server"},{"truncated",false}};return true;
-    }
     // Service placement, not a path traversal. Keep the normal AI-map placement
     // and Nav64 support coherent; roll back if the requested support is absent.
     const auto previous=unit->GetCP();const auto previousLocation=unit->navLocation;
@@ -1387,11 +1398,15 @@ bool Step(Job& job,Clock::time_point deadline) {
         const int id=params.at("id").get<int>();auto* unit=world.GetUnit(id);
         if(!unit||unit->IsInvalid()||unit->IsUnreferenced()){job.response=Error("unit not found");return true;}
         auto detail=UnitDetail(unit,world,Player());
+        detail["combat"]=CombatJson(unit);
+        detail["controlled"]=ActorError(id,false).empty();
         const bool truncated=detail.value("effects_truncated",false)||
             (detail.contains("navigation")&&detail["navigation"].value("truncated",false));
         job.response={{"ok",true},{"unit",std::move(detail)},{"world_epoch",owned::bridge_current_world_epoch()},
                       {"truncated",truncated}};return true;
     }
+    if(method=="unit_abilities")return Abilities(job,deadline);
+    if(method=="squad")return SquadRead(job,deadline);
     if(method=="lod")return Lod(job,deadline,world,params);
     if(method=="render_state")return RenderState(job,deadline,world,params);
     if(method=="units")return Units(job,deadline,world,params);
@@ -1400,4 +1415,39 @@ bool Step(Job& job,Clock::time_point deadline) {
     job.response=Error("unknown live method");return true;
 }
 } // namespace
+
+bool IsPlayerOrder(int id,int packet) noexcept {return PendingReceipt(id,packet)!=nullptr;}
+bool CheckPlayerOrder(int id,int packet) noexcept {
+    try {
+        auto* receipt=PendingReceipt(id,packet);if(!receipt)return true;
+        const auto error=active->orderEpoch==owned::bridge_current_world_epoch()?ActorError(id):"world_changed_before_dispatch";
+        if(error.empty()){receipt->dispatching=true;return true;}
+        receipt->dispatched=true;receipt->error=error;RememberRefusal(id,error);return false;
+    } catch(...) {PlayerOrderResult(id,packet,"MCP_order_validation_failed");return false;}
+}
+void PlayerOrderResult(int id,int packet,const char* error) noexcept {
+    try {
+        auto* receipt=PendingReceipt(id,packet);if(!receipt)return;
+        receipt->dispatched=true;receipt->dispatching=false;
+        if(error&&*error){receipt->error=error;RememberRefusal(id,error);}
+    }catch(...){}
+}
+void PlayerOrderRefusal(int id,unsigned code) noexcept {
+    try {
+        if(unitObservations.empty()||observationEpoch!=owned::bridge_current_world_epoch())return;
+        const auto* reason=RefusalReason(code);if(!reason)return;
+        RememberRefusal(id,reason,code);
+        if(active&&!active->cancelled&&!active->readyToFinish&&active->phase==1&&
+           active->orderEpoch==owned::bridge_current_world_epoch())
+            for(auto& receipt:active->orders)if(receipt.id==id&&(receipt.dispatched||receipt.dispatching)&&receipt.error.empty())receipt.error=reason;
+    }catch(...){}
+}
+void ObserveHit(int attacker,int target,float damage,int outcome,int critical) noexcept {
+    // No allocations, unit lookups, locks, journal writes or polling here.
+    if(unitObservations.empty()||observationEpoch!=owned::bridge_current_world_epoch())return;
+    HitObservation hit;hit.present=true;hit.attacker=attacker;hit.target=target;
+    hit.damage=damage;hit.outcome=outcome;hit.critical=critical;hit.tick=theWorldServer.GetSegmentTimeCounter();
+    auto a=unitObservations.find(attacker);if(a!=unitObservations.end())a->second.dealt=hit;
+    auto t=unitObservations.find(target);if(t!=unitObservations.end())t->second.received=hit;
+}
 } // namespace LiveObserver
