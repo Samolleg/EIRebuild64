@@ -20,7 +20,7 @@ class CGameBase;
 namespace SaveSchema {
 class Slot;
 using Bytes = std::vector<std::uint8_t>;
-constexpr std::uint32_t Version = 4; // Nav64 addresses and continuous route points; old x64 slots are incompatible.
+constexpr std::uint32_t Version = 5; // Undeployed personage keys are Int32, not live object references; old x64 slots are incompatible.
 constexpr std::uint32_t HeaderBytes = 48;
 // Wire v3 (LE): magic[8], u32 version/headerBytes, u64 payloadBytes,
 // u32 fundamentCount/rootBytes/gameCount/reserved, u64 nextId.

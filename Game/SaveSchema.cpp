@@ -442,7 +442,10 @@ Graph Load(CSave &file, const Registry &registry, const std::function<void(Reade
     const auto version = Get(file, 4), headerSize = Get(file, 4), payload = Get(file, 8);
     const auto count = Get(file, 4), rootSize = Get(file, 4), gameCount = Get(file, 4);
     const auto reserved = Get(file, 4), next = Get(file, 8);
-    if (version != Version || headerSize != HeaderBytes || reserved)
+    if (version != Version)
+        throw Error(ErrorCode::Incompatible, "Несовместимое сохранение: формат " + std::to_string(version) +
+            ", требуется " + std::to_string(Version) + ". Начните новую игру.");
+    if (headerSize != HeaderBytes || reserved)
         throw Error(ErrorCode::Incompatible, "Несовместимое сохранение: версия схемы не поддерживается");
     if (payload > limits.payloadBytes || count + gameCount > limits.objects || rootSize > limits.fieldBytes)
         throw Error(ErrorCode::Limit, "save header limit");
