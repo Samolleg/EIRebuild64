@@ -31,7 +31,7 @@ thread_local CI3DScreenGlobalMap* drawing = nullptr;
 thread_local bool drawingEnabled = false;
 thread_local unsigned hitDepth = 0;
 std::uint64_t sequence = 0, binding = 0;
-bool published = false, listValid = false, optionActive = false;
+bool published = false, listValid = false, optionActive = false, maskChanged = false;
 std::string lastFailure;
 std::uint64_t NextGeneration() noexcept { if (!++sequence) ++sequence; return sequence; }
 void Failure(const char* reason) noexcept {
@@ -60,11 +60,11 @@ bool Bind(CI3DScreenGlobalMap* screen, owned::Renderer& renderer) {
     const bool enabled = renderer.world_map_previews_enabled();
     if (enabled != optionActive) {
         optionActive = enabled; published = false;
-        if (!hitDepth) GlobalMapPreviewAccess::InvalidateMask(*screen);
+        if (!hitDepth) { maskChanged = true; GlobalMapPreviewAccess::InvalidateMask(*screen); }
     }
     if (!enabled) return true;
     if (published && binding == renderer.world_map_preview_binding_generation()) return listValid;
-    if (!hitDepth) GlobalMapPreviewAccess::InvalidateMask(*screen);
+    if (!hitDepth) { maskChanged = true; GlobalMapPreviewAccess::InvalidateMask(*screen); }
     published = true; listValid = false; binding = NextGeneration();
     std::vector<owned::WorldMapPreviewSection> sections;
     std::string failure;
@@ -115,17 +115,23 @@ void Precache(CRenderer* renderer) noexcept {
     if (FAILED(hr)) Failure("World map preview: loading command failed");
 }
 void Activate(CI3DScreenGlobalMap* screen, CRenderer* renderer) noexcept {
-    active = screen; published = false; listValid = false; optionActive = false; lastFailure.clear();
-    if (!renderer || !renderer->GetD3D()) { Failure("World map preview: activation renderer unavailable"); return; }
+    active = screen; published = false; listValid = false; optionActive = false; maskChanged = false; lastFailure.clear();
+    (void)Refresh(screen, renderer);
+}
+bool Refresh(CI3DScreenGlobalMap* screen, CRenderer* renderer) noexcept {
+    if (screen != active) return false;
+    if (!renderer || !renderer->GetD3D()) { Failure("World map preview: activation renderer unavailable"); return false; }
     const auto lease = renderer->GetD3D()->GetOwnedRenderer().LockFrame();
     const auto hr = renderer->GetD3D()->GetRendererFacade().Visit([&](owned::Renderer& backend) {
+        backend.sync_embedded_world_map_preview_option();
         Bind(screen, backend); return S_OK;
     });
-    if (FAILED(hr)) Failure("World map preview: activation command failed");
+    if (FAILED(hr)) Failure("World map preview: binding refresh failed");
+    return maskChanged;
 }
 void Deactivate(CI3DScreenGlobalMap* screen, CRenderer* renderer) noexcept {
     if (active != screen) return;
-    active = nullptr; published = false; listValid = false; binding = 0;
+    active = nullptr; published = false; listValid = false; maskChanged = false; binding = 0;
     if (!renderer || !renderer->GetD3D()) return;
     const auto lease = renderer->GetD3D()->GetOwnedRenderer().LockFrame();
     const auto hr = renderer->GetD3D()->GetRendererFacade().Visit([](owned::Renderer& backend) {
@@ -173,7 +179,7 @@ MarkerScope::~MarkerScope() {
     });
     if (FAILED(hr)) Failure("World map preview: marker end failed");
 }
-HitTestScope::HitTestScope() noexcept { ++hitDepth; }
+HitTestScope::HitTestScope() noexcept { ++hitDepth; maskChanged = false; }
 HitTestScope::~HitTestScope() { --hitDepth; }
 bool SubmitSection(CI3DFigure* figure, CRenderer* renderer) noexcept {
     if (!drawingEnabled || !drawing) return false;

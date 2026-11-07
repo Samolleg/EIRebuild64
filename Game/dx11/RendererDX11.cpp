@@ -44,8 +44,9 @@ void CDX11::RetireOwnedWorld() noexcept {
     const auto access = ownedRenderer.LockFrame();
     if (!rendererFacade || !rendererFacade->Ready()) return;
     const HRESULT hr = rendererFacade->Visit([](owned::Renderer& renderer) {
-        renderer.retire_world_map_preview(true);
-        return renderer.retire_embedded_world();
+        const HRESULT retired = renderer.retire_embedded_world();
+        if (SUCCEEDED(retired)) renderer.retire_world_map_preview(true);
+        return retired;
     });
     if (FAILED(hr)) GameJournal::Event("ERROR", "world_retire", "hr=%08lx", static_cast<unsigned long>(hr));
     else GameJournal::MemorySnapshot("world_retired");

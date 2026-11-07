@@ -93,6 +93,7 @@ private:
     bool CheckZonePresence(LPCTSTR pszZoneName);
 
     void GenerateHitTestDDS();
+    void RefreshPreviewHitTest();
     void SetZonesColors(int nCurZone = -1, bool bIsBase = false);
 
     void SetFigurePos(CI3DFigure *pFig, CPlot3D pos);

@@ -550,6 +550,7 @@ void CI3DScreenGlobalMap::OnIdle()
     time = fTime / 30;
     figures[GM_NF + nTotal + 2]->SetUShift(time - (int)time);
 
+    OwnedRender::GlobalMapPreview::Refresh(this, GetRenderer());
     if (bGenerateHitTestDDS)
         GenerateHitTestDDS();
     bGenerateHitTestDDS = FALSE;
@@ -654,6 +655,7 @@ void CI3DScreenGlobalMap::OnLButtonDown(UINT nFlags, CPoint point)
         return;
     }
     // after all checks we try to detect, which zone is under cursor
+    RefreshPreviewHitTest();
     color = pHitTestDDS->GetPixel(owned::widescreen::hit_surface_pixel(float(point.x),0.f,1.f),
             owned::widescreen::hit_surface_pixel(float(point.y),0.f,1.f));
     nCurZone = int((color >> 4) & 0x0000000f) - 1;
@@ -772,6 +774,7 @@ void CI3DScreenGlobalMap::OnMouseMove(UINT nFlags, CPoint point)
         {
             // hittest for zone
 
+            RefreshPreviewHitTest();
             DWORD color = pHitTestDDS->GetPixel(owned::widescreen::hit_surface_pixel(float(point.x),0.f,1.f),
             owned::widescreen::hit_surface_pixel(float(point.y),0.f,1.f));
             nCurZone = int((color >> 4) & 0x0000000f) - 1;
@@ -899,6 +902,15 @@ void CI3DScreenGlobalMap::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
     case KA_QLOAD:
         CI3DScreenSaveLoad::QuickLoad("saveq");
         break;
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
+void CI3DScreenGlobalMap::RefreshPreviewHitTest()
+{
+    if (OwnedRender::GlobalMapPreview::Refresh(this, GetRenderer()))
+    {
+        GenerateHitTestDDS();
+        bGenerateHitTestDDS = FALSE;
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////

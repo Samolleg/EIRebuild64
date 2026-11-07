@@ -8,6 +8,8 @@ namespace OwnedRender::GlobalMapPreview {
 // Game-thread ingress only. Resources/geometry and marker morphs stay renderer-owned.
 void Precache(CRenderer* renderer) noexcept;
 void Activate(CI3DScreenGlobalMap* screen, CRenderer* renderer) noexcept;
+// Returns whether a new representation still needs its native ID mask. No I/O.
+bool Refresh(CI3DScreenGlobalMap* screen, CRenderer* renderer) noexcept;
 void Deactivate(CI3DScreenGlobalMap* screen, CRenderer* renderer) noexcept;
 bool SubmitSection(CI3DFigure* figure, CRenderer* renderer) noexcept;
 
