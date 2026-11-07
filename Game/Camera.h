@@ -123,6 +123,7 @@ struct SEarthquakeEffect
 class CCamera : public CBase3D
 {
     friend class SaveSchema::Slot;
+    friend struct LiveCameraAccess;
 private:
     // different camera restrictions and params
     SGeneralSettings *pSettings; // here we'll use only camera settings

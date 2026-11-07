@@ -8,6 +8,7 @@
 
 #include "ConstantBuffer.h"
 #include "RendererDX11.h"
+#include "../LiveObserver.h"
 #include "embedded_hud_visual.h"
 #include "embedded_arena.h"
 #include "embedded_curse.h"
@@ -520,14 +521,18 @@ bool CDX11::SubmitCurseVisual(const owned::EmbeddedCurseInput& input,ID3D11Shade
 {
     owned::FixedState state;std::shared_ptr<owned::SurfaceImage> unused;
     HRESULT hr=PrepareC74Effect(true,false,state,unused);
-    if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer){return renderer.draw_embedded_curse(input,state,texture);});
+    bool published=false;
+    if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer){published=true;return renderer.draw_embedded_curse(input,state,texture);});
+    LiveObserver::ObserveCurse(input,hr,published);
     return FinishC74Effect(hr,"curse_visual_skipped");
 }
 bool CDX11::SubmitGolemVisual(const owned::EmbeddedGolemInput& input,const std::array<ID3D11ShaderResourceView*,6>& textures)
 {
     owned::FixedState state;std::shared_ptr<owned::SurfaceImage> unused;
     HRESULT hr=PrepareC74Effect(true,false,state,unused);
-    if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer){return renderer.draw_embedded_golem(input,state,textures);});
+    bool published=false;
+    if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer){published=true;return renderer.draw_embedded_golem(input,state,textures);});
+    LiveObserver::ObserveGolem(input,hr,published);
     return FinishC74Effect(hr,"golem_visual_skipped");
 }
 bool CDX11::SubmitArenaVisual(const owned::EmbeddedArenaInput& input,
@@ -535,9 +540,11 @@ bool CDX11::SubmitArenaVisual(const owned::EmbeddedArenaInput& input,
 {
     owned::FixedState state;std::shared_ptr<owned::SurfaceImage> unused;
     HRESULT hr=PrepareC74Effect(true,false,state,unused);
+    bool published=false;
     if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer) {
-        return renderer.draw_embedded_arena(input,state,textures);
+        published=true;return renderer.draw_embedded_arena(input,state,textures);
     });
+    LiveObserver::ObserveArena(input,hr,published);
     return FinishC74Effect(hr,"arena_visual_skipped");
 }
 bool CDX11::SubmitC74Ribbon(const owned::EmbeddedRibbonInput& input)

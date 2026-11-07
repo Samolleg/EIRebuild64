@@ -3,6 +3,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Particle.h"
+#include "LiveObserver.h"
 #include "Effect.h"
 #include "EffectManager.h"
 #include "UnitServer.h"
@@ -5827,16 +5828,20 @@ int CParticle::Segment()
 BOOL CParticle::Draw(CRenderer *pTarget)
 {
     if (particles.GetCount() == 0)
-        return TRUE;
-
-    int nClipFlag = pTarget->CheckVisibility(bv);
-    if (nClipFlag == TRV_INVISIBLE)
     {
-        nInvisibleCounter++;
+        LiveObserver::ObserveParticle(*this,false);
         return TRUE;
     }
 
-    nInvisibleCounter = 0;
+    int nClipFlag = pTarget->CheckVisibility(bv);
+    const int logicClip = LiveObserver::ParticleLogicVisibility(bv,nClipFlag);
+    if (logicClip == TRV_INVISIBLE) ++nInvisibleCounter;
+    else nInvisibleCounter = 0;
+    if (nClipFlag == TRV_INVISIBLE)
+    {
+        LiveObserver::ObserveParticle(*this,false);
+        return TRUE;
+    }
     // Define temporary arrays
     static CParticleToDrawArray resParts;
     static CXYZWArray inCoords;
@@ -5852,7 +5857,10 @@ BOOL CParticle::Draw(CRenderer *pTarget)
 
     // Set texture
     if (!pTarget->BindTexture(0, pTexture))
+    {
+        LiveObserver::ObserveParticle(*this,false);
         return FALSE;
+    }
 
     // Fill inCoords and set colors and texture coordinates
     SXYZW *pXYZW = inCoords.GetData();
@@ -5890,6 +5898,7 @@ BOOL CParticle::Draw(CRenderer *pTarget)
         pTarget->SetRenderState(D3DRENDERSTATE_ALPHAREF, 1);
     }
     const BOOL drawn = pTarget->DrawParticles(bUseAddEffect != FALSE, inCoords, resParts);
+    LiveObserver::ObserveParticle(*this,drawn!=FALSE);
     if (clipTransparentExit)
     {
         pTarget->SetRenderState(D3DRENDERSTATE_ALPHAREF, oldAlphaRef);

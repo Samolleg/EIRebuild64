@@ -34,6 +34,16 @@ struct NativeLodRow {
     std::shared_ptr<const NativeLodIdentity> identity;
     NativeLodDecisionGpu decision;
 };
+// Small query-only observation of state that has no host-side input. No GPU
+// mapping or terrain/LOD selection is performed by this observer.
+struct NativeTerrain2Observation {
+    struct Pool { std::uint32_t width=0,height=0,mips=0,slices=0; bool atlas=false,heights=false; };
+    struct Map { std::uint32_t contact_map=0,pending_cells=0,baked_cells=0; bool ready=false,dirty=false,failed=false; };
+    bool observed=false,enabled=false,table_ready=false;
+    std::uint32_t table_maps=0;
+    std::array<Pool,4> pools{};
+    std::vector<Map> maps;
+};
 struct NativeLodSnapshot {
     std::uint64_t frame = 0, world_epoch = 0, request = 0;
     std::uint64_t camera_frame = 0;
@@ -42,10 +52,11 @@ struct NativeLodSnapshot {
     bool truncated = false, unavailable = false;
     const char* unavailable_reason = nullptr; // static reason, owned by the producer
     std::vector<NativeLodRow> rows;
+    NativeTerrain2Observation terrain2;
 };
 // A try-lock copies only a shared pointer. Neither producer nor consumer waits.
 std::shared_ptr<const NativeLodSnapshot> native_lod_snapshot() noexcept;
 // Game thread: reuse an outstanding request, otherwise request one future full frame.
-std::uint64_t native_lod_request(std::uint64_t world_epoch) noexcept;
+std::uint64_t native_lod_request(std::uint64_t world_epoch, bool render_state=false) noexcept;
 void native_lod_acknowledge(std::uint64_t request) noexcept;
 } // namespace owned

@@ -7,6 +7,7 @@
 #include "A3Cursor.h"
 #include "OwnedRender/E3Scale.h"
 #include "GameJournal.h"
+#include "LiveObserver.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "WorldClient.h"
@@ -637,6 +638,7 @@ void CWorldClient::RemoveQuickItemsAndSpells()
 // destroy all internal data structures
 void CWorldClient::Destroy()
 {
+    LiveObserver::ResetCamera();
     ModArenaVisual::Reset();
     ModFinalGolem::ResetVisual();
     ModCurseEncounter::ResetVisual();
@@ -2336,6 +2338,7 @@ BOOL CWorldClient::AddItems(CMemorySave &packet)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CWorldClient::NewZone(CMemorySave &packet)
 {
+    LiveObserver::ResetCamera();
     InvalidatePicking();
     OwnedRender::E1Scene().Retire(this, ownedRenderGeneration);
     OwnedRender::E1ResetGroundCoverFootprints();
@@ -2895,6 +2898,7 @@ BOOL CWorldClient::Draw()
     CorePerf::Partition coreParts(CorePerf::WorldSetup);
     theCamera.UpdateFieldCampCamera();
     CameraTerrainCollision::GuardEye(this, &theCamera);
+    LiveObserver::CameraDrawScope liveCamera;
     CDXGeometryProcessor *pGPU = theRenderer.GetGPU();
     CRenderer *pRend = &theRenderer;
     const DWORD falloutWorldStacks[] = {
@@ -3360,7 +3364,7 @@ BOOL CWorldClient::Prepare3DScene()
     float fpTime = theWorld.GetPreciseTime();
     int nRelightCounter = 0;
     // iterate all object and store dynamic in the separate list
-    const CPlot3D &ptObservationPosition = pCamera->GetObservationPosition();
+    const CPlot3D &ptObservationPosition = LiveObserver::LogicObservationPosition(pCamera->GetObservationPosition());
     // set time for 'quest notifier MOSHKA' :)
     if (pMoshka)
         pMoshka->SetTime(fpTime);

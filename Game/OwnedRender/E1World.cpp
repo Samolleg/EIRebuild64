@@ -8,6 +8,7 @@
 #include "E1Terrain.h"
 #include "character_pane_owned_text.h"
 #include "E1VisualFrame.h"
+#include "../LiveObserver.h"
 #include "precipitation.h"
 #include "weather_wind.h"
 #include <mutex>
@@ -125,6 +126,7 @@ E1WorldDraw::E1WorldDraw(const void* owner, std::uint64_t generation,
             values.fog.failure = "host_environment_unavailable";
         } else values.fog.failure = "";
     }
+    LiveObserver::ObserveWorld(values);
 }
 E1WorldDraw::~E1WorldDraw() noexcept {
     // An exception or an early return cannot publish a successful world draw.

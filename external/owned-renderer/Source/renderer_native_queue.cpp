@@ -4002,6 +4002,11 @@ namespace {
 std::mutex lod_snapshot_mutex;
 std::shared_ptr<const NativeLodSnapshot> lod_snapshot;
 std::atomic<std::uint64_t> lod_request_counter{0},lod_requested{0},lod_requested_epoch{0},lod_consumed{0};
+std::atomic<std::int64_t> lod_admission_deadline{0};
+std::atomic<bool> lod_render_state{false};
+std::int64_t lod_clock_ms() noexcept {
+ return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 bool publish_lod_snapshot(std::shared_ptr<const NativeLodSnapshot> value) noexcept {
  std::unique_lock<std::mutex> lock(lod_snapshot_mutex,std::try_to_lock);
  if(!lock.owns_lock())return false;
@@ -4013,10 +4018,12 @@ std::shared_ptr<const NativeLodSnapshot> native_lod_snapshot() noexcept {
  return lock.owns_lock()?lod_snapshot:nullptr;
 }
 
-std::uint64_t native_lod_request(std::uint64_t epoch) noexcept {
+std::uint64_t native_lod_request(std::uint64_t epoch,bool render_state) noexcept {
  const auto pending=lod_requested.load(std::memory_order_acquire);
  if(pending>lod_consumed.load(std::memory_order_acquire)&&lod_requested_epoch.load()==epoch)return pending;
  const auto next=lod_request_counter.fetch_add(1,std::memory_order_relaxed)+1;
+ lod_admission_deadline.store(lod_clock_ms()+3000,std::memory_order_relaxed);
+ lod_render_state.store(render_state,std::memory_order_relaxed);
  lod_requested_epoch.store(epoch,std::memory_order_relaxed);lod_requested.store(next,std::memory_order_release);
  return next;
 }
@@ -4126,6 +4133,16 @@ bool Renderer::begin_native_lod_capture(const NativeSubmissionLayout& layout) no
  begin_native_lod_frame();
  if(!native_lod_capture_||native_lod_frame_!=native_frame_index_||native_lod_failed_)return false;
  native_lod_capture_->camera_frame=camera.scene_frame_serial;
+ if(lod_render_state.load(std::memory_order_relaxed)&&!native_lod_capture_->terrain2.observed){
+  auto& value=native_lod_capture_->terrain2;
+  value.observed=true;value.enabled=tile_blend_own_edges_;value.table_maps=terrain2_table_count_;
+  value.table_ready=bool(terrain2_style_srv_)&&bool(terrain2_grids_srv_);
+  for(size_t i=0;i<value.pools.size();++i){const auto& p=terrain2_pools_[i];
+   value.pools[i]={p.width,p.height,p.mips,p.slices,bool(p.atlas_srv),bool(p.heights_srv)};}
+  const auto add=[&](UINT contact,const auto& map){value.maps.push_back({contact,UINT(map.bake_cells.size()),UINT(map.baked.size()),
+   bool(map.height_srv)||bool(map.height12),map.dirty,map.failed});};
+  add(0,terrain2_map_);for(const auto& n:gc_neighbours_)add(n.contact_map,n.terrain2);
+ }
  for(const auto& work:layout.work){
   if(work.record>=native_instance_records_.size())continue;
   const auto& identity=native_instance_records_[work.record].lod_observer;if(!identity)continue;
@@ -4194,9 +4211,10 @@ void Renderer::finish_native_lod_frame() noexcept try {
   }
   slot.snapshot.reset();
  }
- // A request can arrive after the last world flush. Allow the following full
- // frame before rejecting it, and never relax the main-camera admission gate.
- if(request!=native_lod_request_&&native_frame_index_>native_lod_wait_frame_)
+ // Loading/teleport/UI-only frames may outlast a single presented frame.
+ // Keep the same request armed until a real colour flush or its admission
+ // deadline; never weaken the main-camera/target gate or synthesize a sample.
+ if(request!=native_lod_request_&&lod_clock_ms()>=lod_admission_deadline.load(std::memory_order_relaxed))
   unavailable(native_lod_wait_reason_,native_lod_wait_camera_max_delta_);
  if(!native_lod_capture_)return;
  if(native_lod_capture_->unavailable){
