@@ -21,6 +21,8 @@ void Start() noexcept;
 void Stop() noexcept;
 // Called by the game thread between frames.
 void Frame() noexcept;
+// Safe command subset while the host is inside a synchronous movie loop.
+void MovieFrame() noexcept;
 // Render-only camera lease. Ordinary camera state is restored before logic,
 // audio, save/load or the next frame's input can inspect it.
 class CameraDrawScope {

@@ -241,6 +241,7 @@ void Player::Stop() { p->Halt(); p->state = State::Stopped; p->current.reset(); 
 void Player::Cancel() { p->Halt(); p->state = State::Cancelled; p->current.reset(); }
 void Player::Skip() { p->Halt(); p->state = State::Skipped; p->current.reset(); }
 void Player::SetLoop(bool value) { p->loop = value; }
+AudioState Player::AudioSnapshot() const noexcept {return p->hasAudio?p->audio.Snapshot():AudioState{};}
 State Player::GetState() const { return p->failed ? State::Failed : p->state; }
 std::string Player::Error() const { std::lock_guard<std::mutex> lock(p->mutex); return p->error; }
 bool Player::Update(FrameSink& sink) {

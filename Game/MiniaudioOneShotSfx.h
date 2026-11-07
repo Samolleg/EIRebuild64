@@ -13,7 +13,7 @@ struct LiveAudioEntry {
     uint32_t id=0,sourceId=0;
     int priority=0;
     float gain=0,position[3]{};
-    bool music=false,speech=false,dialog=false,spatial=false,looping=false;
+    bool music=false,video=false,speech=false,dialog=false,spatial=false,looping=false;
     bool paused=false,playing=false,scenario=false;
 };
 struct LiveAudioSnapshot {
@@ -23,6 +23,7 @@ struct LiveAudioSnapshot {
     bool engineInitialized=false,outputAvailable=false;
 };
 void ReadLiveAudioSnapshot(LiveAudioSnapshot&) noexcept;
+uint64_t ObserveVideoStart(const char* name,bool loop,bool playing,float gain) noexcept;
 // Host-thread device snapshot: display names and stable endpoint IDs, same indices.
 bool GetPlaybackDevices(CStringArray& names, CStringArray& ids);
 // Host-thread API: release after the video sound has detached.

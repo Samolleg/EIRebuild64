@@ -1,6 +1,9 @@
 #include "StdAfx.h"
 #include "MoviePlayback.h"
 #include "AgentBackground.h"
+#include "LiveObserver.h"
+#include "MiniaudioOneShotSfx.h"
+#include <atomic>
 #include "GameMain.h"
 #include "WorldClient.h"
 #include "SoundManager.h"
@@ -16,12 +19,14 @@ MovieRenderer* renderer = nullptr;
 Movie* firstMovie = nullptr;
 bool Inactive() { return !AgentBackground::Enabled() && (IsIconic(NGame::hWnd) || GetForegroundWindow() != NGame::hWnd); }
 }
+#include "MovieLiveInput.inl"
+
 void SetMovieRenderer(MovieRenderer* value) {
     if (renderer) for (auto* movie = firstMovie; movie; movie = movie->next) renderer->ClearMovie(movie);
     renderer = value;
 }
 void StopMovies() { for (auto* movie = firstMovie; movie; movie = movie->next) movie->StopPlaying(); }
-Movie::Movie() : next(firstMovie) { firstMovie = this; }
+Movie::Movie() : next(firstMovie) { static uint64_t serial=0;liveSerial=++serial;firstMovie = this; }
 Movie::~Movie() {
     StopPlaying();
     auto** link = &firstMovie;
@@ -50,12 +55,14 @@ bool Movie::BeginPlay(const char* name, bool stopSounds, bool hideCursor, bool l
     if (stopSounds && theWorld.GetSoundManager()) theWorld.GetSoundManager()->StopAllSounds(true);
     std::unique_ptr<Player> candidate(new Player);
     if (!candidate->Open(std::move(bytes), loop)) return false;
-    player = std::move(candidate);
+    player = std::move(candidate);liveName=name;
     presentation.loading = loop;
     missingRendererLogged = false;
     restoreCursor = hideCursor && theCursor.IsShown();
     if (hideCursor) theCursor.Show(FALSE);
     player->Play();
+    const auto audio=player->AudioSnapshot();
+    liveAudioSequence=audio.present?MiniaudioOneShotSfx::ObserveVideoStart(name,loop,audio.playing,audio.gain):0;
     return true;
 }
 bool Movie::Submit(std::shared_ptr<const Frame> frame) {
@@ -96,6 +103,7 @@ bool Movie::Play(const char* name, unsigned long framePause, bool skipMovie,
     Movie video;
     if (!video.BeginPlay(name, stopSounds)) return false;
     bool done = false, interrupted = false, holding = false;
+    LiveMovieInputScope inputScope(video,done,interrupted,holding,skipMovie,skipFrame);
     ULONGLONG pauseElapsed = 0, lastTick = GetTickCount64();
     while (!done) {
         MSG msg;
@@ -107,14 +115,14 @@ bool Movie::Play(const char* name, unsigned long framePause, bool skipMovie,
             }
             const bool input = !AgentBackground::Enabled() && (msg.message == WM_KEYDOWN || msg.message == WM_LBUTTONDOWN || msg.message == WM_RBUTTONDOWN);
             if (input && (skipMovie || (holding && skipFrame))) {
-                if (video.player) video.player->Skip();
-                done = interrupted = true;
+                SkipLiveMovieInput();
                 break;
             }
             if (msg.message >= WM_KEYFIRST && msg.message <= WM_KEYLAST) continue;
             if (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST) continue;
             TranslateMessage(&msg); DispatchMessage(&msg);
         }
+        if (!done) LiveObserver::MovieFrame();
         if (done) break;
         if (!IsWindow(NGame::hWnd) || !video.player) { interrupted = true; break; }
         const ULONGLONG now = GetTickCount64();

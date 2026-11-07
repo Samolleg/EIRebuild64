@@ -1,10 +1,10 @@
 // The mixer copies a bounded native snapshot once. JSON is emitted in slices
 // using the observer's existing deadline; the pipe worker never reads audio.
 json AudioEntry(const MiniaudioOneShotSfx::LiveAudioEntry& value,uint64_t now) {
-    const char* source=value.music?"music":value.scenario?"scenario_voice":value.sourceId?"party_voice":value.spatial?"world_sound":"flat_sound";
+    const char* source=value.video?"movie":value.music?"music":value.scenario?"scenario_voice":value.sourceId?"party_voice":value.spatial?"world_sound":"flat_sound";
     json result={{"id",value.id},{"sequence",value.sequence},{"file",Text(value.file,MAX_PATH)},
         {"name",value.music?Text(value.name,128):Text(value.file,128)},
-        {"kind",value.music?"music":value.speech?"speech":"sound"},
+        {"kind",value.video?"video":value.music?"music":value.speech?"speech":"sound"},
         {"source",{{"kind",source},{"unit_id",value.sourceId?json(value.sourceId):json(nullptr)}}},
         {"playing",value.playing},{"paused",value.paused},{"looping",value.looping},{"priority",value.priority},
         {"volume",{{"gain",value.gain},{"percent",value.gain*100.f},
@@ -28,6 +28,15 @@ bool AudioState(Job& job,Clock::time_point deadline) {
             {"history_since_uptime_ms",audio.historySince},{"snapshot_uptime_ms",audio.now},
             {"events_overwritten",audio.overwritten},{"recent_basis","mixer_start_accepted; includes starts_held_by_pause"},
             {"current_truncated",false},{"recent_truncated",false},{"truncated",false}};
+        const auto movie=Video::ReadLiveMovieState();
+        if(movie.active && movie.audio.present) {
+            auto video=AudioEntry(MiniaudioOneShotSfx::LiveAudioEntry{},audio.now);
+            video["file"]=Text(movie.name.c_str(),512);video["name"]=video["file"];video["kind"]="video";
+            video["source"]={{"kind","movie"},{"unit_id",nullptr}};video["sequence"]=movie.audioSequence;
+            video["playing"]=movie.audio.playing;video["paused"]=!movie.audio.playing;video["looping"]=movie.loading;
+            video["volume"]["gain"]=movie.audio.gain;video["volume"]["percent"]=movie.audio.gain*100.f;
+            video["age_seconds"]=nullptr;job.response["current"].push_back(std::move(video));
+        }
         if(audio.overwritten && audio.recentCount &&
            double(audio.now>=audio.recent[0].started?audio.now-audio.recent[0].started:0)<seconds*1000.0)job.response["recent_truncated"]=true;
     }

@@ -6565,6 +6565,13 @@ void ResumeStreaming(const char *reason)
 
 
 
+uint64_t ObserveVideoStart(const char* name,bool loop,bool playing,float gain) noexcept
+{
+    LiveAudioEntry value{};value.video=true;value.looping=loop;value.playing=playing;value.gain=gain;
+    value.started=GetTickCount64();strncpy_s(value.file,name?name:"",_TRUNCATE);
+    RememberLiveAudio(value);return liveAudioSequence;
+}
+
 void ReadLiveAudioSnapshot(LiveAudioSnapshot& out) noexcept
 {
     out.currentCount=0;out.recentCount=liveAudioCount;

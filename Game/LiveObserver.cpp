@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 #include "ModFinalGolem.h"
 #include "MiniaudioOneShotSfx.h"
+#include "MoviePlayback.h"
 #include "LiveObserver.h"
 #include "AgentBackground.h"
 #include "../external/owned-renderer/Source/native_lod_observer.h"
@@ -244,6 +245,7 @@ json OperationJson() {
     std::lock_guard<std::mutex> lock(operationMutex);return OperationJsonLocked();
 }
 json ExecutingStatus() {
+    if(Video::HasLiveMovieInput())return nullptr;
     std::lock_guard<std::mutex> lock(operationMutex);
     if(!operation.inFlight||(!operation.executing&&operation.applied))return nullptr;
     json result={{"ok",operation.error.empty()},{"pid",GetCurrentProcessId()},
@@ -280,6 +282,8 @@ bool Finish(Job& job) {
     ReleaseLodRequest(job);
     job.done=true;lock.unlock();job.ready.notify_one();return true;
 }
+bool PumpMovieJob(bool acceptNew);
+void CancelMovieJob() noexcept;
 void CleanupUiInput(Job& job) noexcept;
 void CleanupCapture(Job& job) noexcept {
     CleanupUiInput(job);
@@ -546,6 +550,7 @@ void Start() noexcept {
     }
 }
 void Stop() noexcept {
+    CancelMovieJob();
     ReleaseUiCursor();
     ResetCamera();
     if(!stopEvent)return;
@@ -561,6 +566,7 @@ void Stop() noexcept {
 }
 void Frame() noexcept {
     try {
+        if(PumpMovieJob(false))return;
         if(!active) {
             std::unique_lock<std::mutex> lock(queueMutex,std::try_to_lock);
             if(lock.owns_lock()&&queued)active=std::move(queued);
@@ -790,6 +796,7 @@ json UnitDetail(CUnit* unit,CWorldServer& world,CPlayer* player) {
 }
 #include "LiveObserverUi.inl"
 #include "LiveObserverAudio.inl"
+#include "LiveObserverMovie.inl"
 #include "LiveObserverReadiness.inl"
 
 // Readiness is evaluated only for a status or command request, never each frame.
@@ -1469,6 +1476,9 @@ bool Step(Job& job,Clock::time_point deadline) {
 }
 } // namespace
 
+void MovieFrame() noexcept {
+    try{PumpMovieJob(true);}catch(...){CancelMovieJob();ChannelError("movie_frame",0);}
+}
 bool ReadUiCursor(POINT* point) noexcept {
     if(!syntheticCursorActive || !point)return false;*point=syntheticCursor;return true;
 }

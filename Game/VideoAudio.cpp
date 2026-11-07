@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "VideoAudio.h"
+#include "VideoPlayer.h"
 #include "MiniaudioOneShotSfx.h"
 #pragma push_macro("f32")
 #pragma push_macro("s32")
@@ -210,4 +211,10 @@ bool Audio::Drained() const {
     std::lock_guard<std::mutex> lock(p->mutex);
     return !MiniaudioOneShotSfx::OutputDeviceAvailable() || (p->eof && p->count == 0);
 }
+AudioState Audio::Snapshot() const noexcept {
+    AudioState result;result.present=p->soundReady;
+    if(p->soundReady){result.playing=ma_sound_is_playing(&p->sound)!=MA_FALSE;result.gain=ma_sound_get_volume(&p->sound);}
+    return result;
+}
+
 }
