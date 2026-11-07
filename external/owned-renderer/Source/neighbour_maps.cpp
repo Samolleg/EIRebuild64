@@ -465,6 +465,7 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
                     if(stopped() || next_claim>=neighbours.size())break;
                     index=next_claim++;++s.resident;
                 }
+                const auto load_start=std::chrono::steady_clock::now();
                 std::unique_ptr<NeighbourMapUpload> upload;
                 try {upload=decode_neighbour(loader,root,neighbours,index,epoch,mounts);}
                 catch(const std::exception& e) {set_error(s,neighbours[index].placement.zone+": "+e.what());}
@@ -494,6 +495,8 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
                         {std::lock_guard<std::mutex> guard(device_lock);device=stream_device;if(device)device->AddRef();else d3d12=stream_preparer();}
                         piece=make_neighbour_piece(*upload,device,d3d12.get());
                         if(device)device->Release();
+                        piece->lod_stats.load_milliseconds=std::chrono::duration<double,std::milli>(
+                            std::chrono::steady_clock::now()-load_start).count();
                     }
                     catch(const std::exception& e) {set_error(s,neighbours[index].placement.zone+": "+e.what());}
                     catch(...) {set_error(s,neighbours[index].placement.zone+": neighbour piece allocation failed");}

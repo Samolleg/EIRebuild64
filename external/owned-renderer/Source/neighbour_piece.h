@@ -36,6 +36,7 @@ struct NeighbourPieceTexture {
     std::uint64_t view_identity = 0;     // NativeOwnedTextureView::identity
     NativeOwnedTextureFormat format = NativeOwnedTextureFormat::dxt1;
     std::uint32_t mip_count = 0;
+    std::uint32_t opaque_mips = 0;      // proof for the original mip range, even without CPU bytes
     struct Mip { std::uint32_t offset = 0, width = 0, height = 0, bytes = 0; };
     std::vector<Mip> mips;               // into bytes; empty when created by the stream
     std::vector<std::uint8_t> bytes;
@@ -106,6 +107,7 @@ struct NeighbourPiece {
         std::uint64_t full_triangles = 0;
         std::array<std::uint64_t, kStaticLodMaxLevels> level_triangles{};
         double milliseconds = 0, prebuild_milliseconds = 0;
+        double load_milliseconds = 0; // decode through piece preparation, before renderer adoption
     } lod_stats;
     std::vector<ResourceIdentity> identities;
     std::vector<NeighbourPieceTexture> textures;
