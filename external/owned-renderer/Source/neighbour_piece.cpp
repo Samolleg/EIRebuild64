@@ -22,6 +22,7 @@ NativeOwnedTextureView neighbour_piece_texture_view(const NeighbourPieceTexture&
     view.identity = texture.view_identity; view.generation = 1;
     view.resource = &texture.identity; view.value_source = 1;
     view.format = texture.format; view.mip_count = texture.mip_count;
+    view.opaque_mips = texture.opaque_mips;
     mips.clear();
     if (!texture.mips.empty()) {
         mips.reserve(texture.mips.size());
@@ -57,13 +58,14 @@ struct PieceBuilder {
     // A texture by its cache identity; mips are copied only for formats the
     // stream does not create (the render thread uploads those as before).
     std::uint32_t texture(const ResourceIdentity& value, std::uint64_t view_identity,
-        NativeOwnedTextureFormat format, const NativeOwnedTextureMip* mips, std::uint32_t mip_count) {
+        NativeOwnedTextureFormat format, const NativeOwnedTextureMip* mips, std::uint32_t mip_count,
+        std::uint32_t opaque_mips) {
         auto key = value.key() + "|" + std::to_string(view_identity);
         const auto found = texture_index.find(key);
         if (found != texture_index.end()) return found->second;
         NeighbourPieceTexture made;
         made.identity = value; made.view_identity = view_identity;
-        made.format = format; made.mip_count = mip_count;
+        made.format = format; made.mip_count = mip_count; made.opaque_mips = opaque_mips;
         if (!block_compressed(format) && mips) {
             std::size_t total = 0;
             for (std::uint32_t i = 0; i < mip_count; ++i) total += mips[i].bytes;
@@ -143,7 +145,7 @@ void piece_terrain(PieceBuilder& builder, const NeighbourMapUpload& upload) {
             draw.identity = builder.identity(data.identity);
             draw.texture = builder.texture(page.texture->identity, page.texture->identity.container_incarnation,
                 static_cast<NativeOwnedTextureFormat>(page.texture->format), page.mips.data(),
-                static_cast<std::uint32_t>(page.mips.size()));
+                static_cast<std::uint32_t>(page.mips.size()), page.texture->opaque_mips);
             draw.mesh = builder.mesh(*mesh);
             draw.position_groups = view.position_groups; draw.normal_groups = view.normal_groups;
             draw.texture_coordinate_count = view.texture_coordinate_count;
@@ -171,7 +173,7 @@ void piece_decorations(PieceBuilder& builder, const NeighbourMapUpload& upload) 
             draw.candidate = static_cast<std::uint32_t>(candidate_index);
             draw.figure = builder.figure(*node.figure);
             draw.texture = builder.texture(node.texture->identity, node.texture_identity, node.texture_format,
-                node.texture_mips.data(), static_cast<std::uint32_t>(node.texture_mips.size()));
+                node.texture_mips.data(), static_cast<std::uint32_t>(node.texture_mips.size()), node.texture->opaque_mips);
             draw.mesh = builder.mesh(found->second);
             draw.shape = candidate.source->shape;
             draw.object_to_world = node.object_to_world;
@@ -198,7 +200,7 @@ void piece_impostors(PieceBuilder& builder, const NeighbourMapUpload& upload, ID
         NeighbourPieceImpostor made;
         made.figure = builder.figure(*key.first);
         made.texture = builder.texture(node.texture->identity, node.texture_identity, node.texture_format,
-            node.texture_mips.data(), static_cast<std::uint32_t>(node.texture_mips.size()));
+            node.texture_mips.data(), static_cast<std::uint32_t>(node.texture_mips.size()), node.texture->opaque_mips);
         if (!device) {
             // D3D12 backend: created and filled here; the bake records the copies.
             if (FAILED(d3d12->prepare_buffer(source.source.vertices.size() * sizeof(float), source.source.vertices.data(),
@@ -250,7 +252,7 @@ void piece_ground_cover(PieceBuilder& builder, const NeighbourMapUpload& upload)
         const auto& page = terrain.pages[page_index];
         inputs->atlas_textures[material] = builder.texture(page.texture->identity,
             page.texture->identity.container_incarnation, static_cast<NativeOwnedTextureFormat>(page.texture->format),
-            page.mips.data(), static_cast<std::uint32_t>(page.mips.size()));
+            page.mips.data(), static_cast<std::uint32_t>(page.mips.size()), page.texture->opaque_mips);
     }
 }
 

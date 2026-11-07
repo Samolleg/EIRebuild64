@@ -373,7 +373,7 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                 char impostor_split[160]{};
                 if(impostors_.failed)std::snprintf(impostor_split,sizeof(impostor_split)," impostors_failed");
                 char text[1536];std::snprintf(text,sizeof(text),
-                    "map=%s accepted=%d failed_step=%s%s%s gpu_geometry=%llu gpu_textures=%llu textures_shared=%llu/%llu decoded_payload_peak=%llu cpu_geometry_retained=0 omitted_decorations=%zu unbuilt_decorations=%u fog_culled=%u impostors=%u/%zu bake_ms=%.1f atlas_slices=%u%s lod=%s figures:%u/%u triangles:%llu>%llu/%llu/%llu lod_ms=%.1f prebuild_ms=%.1f %s",
+                    "map=%s accepted=%d failed_step=%s%s%s gpu_geometry=%llu gpu_textures=%llu textures_shared=%llu/%llu decoded_payload_peak=%llu cpu_geometry_retained=0 omitted_decorations=%zu unbuilt_decorations=%u fog_culled=%u impostors=%u/%zu bake_ms=%.1f atlas_slices=%u%s lod=%s figures:%u/%u triangles:%llu>%llu/%llu/%llu lod_ms=%.1f prebuild_ms=%.1f lod_indices_mb=%.3f load_ms=%.1f %s",
                     upload->selection.placement.mpr.c_str(),accepted?1:0,accepted?"none":step?step:"unknown",
                     submission.failure?"/":"",submission.failure?submission.failure:"",
                     neighbours_.geometry_bytes,neighbours_.texture_bytes,native_texture_shared_,native_texture_shared_bytes_,neighbours_.peak_decoded_bytes,upload->omitted_decorations,upload->unbuilt_decorations,upload->fog_culled,
@@ -384,6 +384,8 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     (unsigned long long)upload->lod_stats.full_triangles,(unsigned long long)upload->lod_stats.level_triangles[0],
                     (unsigned long long)upload->lod_stats.level_triangles[1],(unsigned long long)upload->lod_stats.level_triangles[2],
                     upload->lod_stats.milliseconds,upload->lod_stats.prebuild_milliseconds,
+                    12.0*double(upload->lod_stats.level_triangles[0]+upload->lod_stats.level_triangles[1]+
+                        upload->lod_stats.level_triangles[2])/1048576.0,upload->lod_stats.load_milliseconds,
                     upload->decoration_summary.c_str());
                 bridge_neighbour_diagnostic(text);
                 unused_prebuilt.release();

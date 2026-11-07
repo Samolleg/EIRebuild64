@@ -16,7 +16,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
 constexpr std::uint32_t kWireMagic = 0x5045494eu; // 'NIEP'
-constexpr std::uint32_t kWireVersion = 5; // 5: authored-family policy plus retained name provenance; 4: family-name provenance
+constexpr std::uint32_t kWireVersion = 6; // 6: texture mip opacity proof and neighbour preparation time
 
 // Plain record types travel as bytes; both builds must agree on their sizes.
 template<class T> constexpr bool plain = std::is_trivially_copyable_v<T> && !std::is_pointer_v<T>;
@@ -175,7 +175,7 @@ template<class A> void visit_selection(A& a, NeighbourSelection& v) {
 }
 
 template<class A> void visit_texture(A& a, NeighbourPieceTexture& v) {
-    visit_identity(a, v.identity); a.pod(v.view_identity); a.pod(v.format); a.pod(v.mip_count);
+    visit_identity(a, v.identity); a.pod(v.view_identity); a.pod(v.format); a.pod(v.mip_count); a.pod(v.opaque_mips);
     a.vec(v.mips); a.vec(v.bytes);
 }
 
