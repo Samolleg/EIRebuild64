@@ -255,6 +255,15 @@ bool Renderer::register_world_map_preview_gpu(
   return true;
 }
 
+#ifdef EID3D11_EMBEDDED
+void Renderer::sync_embedded_world_map_preview_option() {
+  const bool enabled = world_map_previews_enabled();
+  if (embedded_world_map_preview_option_ == enabled) return;
+  retire_world_map_preview(!enabled);
+  embedded_world_map_preview_option_ = enabled;
+}
+#endif
+
 void Renderer::precache_world_map_preview(
     std::uint64_t generation, std::vector<WorldMapPreviewSection> sections,
     std::string failure) {

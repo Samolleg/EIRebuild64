@@ -45,6 +45,11 @@ struct WorldMapPreviewStatus {
   double load_ms = 0, prepare_ms = 0;
 };
 
+struct WorldMapPreviewCacheStats {
+  std::uint32_t sections = 0, ready = 0, failed = 0;
+  std::uint64_t cpu_bytes = 0, source_peak_bytes = 0;
+};
+
 // Renderer-owned, render-only catalog of map sections. Default OFF. A
 // loading-screen command prepares sections sequentially with one existing
 // loader worker. The render host holds the loading picture until that command
@@ -91,6 +96,7 @@ public:
   // renderer releases the GPU registrations first).
   void release() noexcept;
   WorldMapPreviewStatus status(std::size_t section) const;
+  WorldMapPreviewCacheStats cache_stats() const noexcept;
   // Immutable prepared-memory incarnation; UI reopen generations do not
   // change this value. Zero means no prepared section is bound.
   std::uint64_t section_revision(std::size_t section) const noexcept;

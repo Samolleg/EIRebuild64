@@ -1668,6 +1668,18 @@ bool WorldMapPreview::activate(std::uint64_t generation,
     return false;
   }
 }
+WorldMapPreviewCacheStats WorldMapPreview::cache_stats() const noexcept {
+  WorldMapPreviewCacheStats result;
+  if (!impl_->cache) return result;
+  result.sections = std::uint32_t(impl_->cache->status.size());
+  for (const auto &status : impl_->cache->status) {
+    if (status.state == WorldMapPreviewState::ready) ++result.ready;
+    else ++result.failed;
+    result.cpu_bytes += status.cpu_bytes;
+    result.source_peak_bytes = (std::max)(result.source_peak_bytes, status.source_peak_bytes);
+  }
+  return result;
+}
 WorldMapPreviewStatus WorldMapPreview::status(std::size_t section) const {
   if (!enabled())
     return {};
