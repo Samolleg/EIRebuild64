@@ -8,6 +8,7 @@ class CShop;
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DScreenCamp : public CI3DItemScreen
 {
+    friend struct LiveUiAccess;
     friend struct E4CampAccess;
 private:
     EItemScreenModes eScreenMode;

@@ -7,6 +7,7 @@ class CI3DScreen;
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DScreenTutorial : public CI3DScreen
 {
+    friend struct LiveUiAccess;
 private:
     bool mbScript;
     CString mszTutorial;

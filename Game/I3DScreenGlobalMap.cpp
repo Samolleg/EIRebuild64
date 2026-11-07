@@ -1,5 +1,7 @@
 #include "StdAfx.h"
 #include "CorePerf.h"
+#include "LiveObserver.h"
+#include "AgentBackground.h"
 #include "widescreen_layout.h"
 #include "GameJournal.h"
 #include "OwnedRender/GlobalMapPreview.h"
@@ -515,7 +517,10 @@ void CI3DScreenGlobalMap::OnIdle()
     if (bRButDown && !nRotate)
     {
         CPoint ptCursorPos;
-        GetCursorPos(&ptCursorPos);
+        if (!LiveObserver::ReadUiCursor(&ptCursorPos)) {
+            if (AgentBackground::Enabled()) ptCursorPos=theCursor.GetPos();
+            else GetCursorPos(&ptCursorPos);
+        }
         OnMouseMove(0, ptCursorPos);
     }
     if (nRotate || bRButDown)
@@ -729,7 +734,7 @@ void CI3DScreenGlobalMap::ResetInputState()
     theCursor.ResetIncrement();
     CPoint pt = theCursor.GetPos();
     theCursor.LockPos(false);
-    SetCursorPos(pt.x, pt.y);
+    if (!LiveObserver::WriteUiCursor(pt.x,pt.y) && !AgentBackground::Enabled()) SetCursorPos(pt.x, pt.y);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenGlobalMap::OnRButtonDown(UINT nFlags, CPoint point)
@@ -750,7 +755,7 @@ void CI3DScreenGlobalMap::OnRButtonUp(UINT nFlags, CPoint point)
     theCursor.ResetIncrement();
     CPoint pt = theCursor.GetPos();
     theCursor.LockPos(false);
-    SetCursorPos(pt.x, pt.y);
+    if (!LiveObserver::WriteUiCursor(pt.x,pt.y) && !AgentBackground::Enabled()) SetCursorPos(pt.x, pt.y);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenGlobalMap::OnMouseMove(UINT nFlags, CPoint point)

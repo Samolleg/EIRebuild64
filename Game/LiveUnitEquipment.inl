@@ -65,6 +65,15 @@ CItem* EquipmentItem(CUnit* unit,int kind,int slot) {
     if(kind==ITID_ITEM_QUICK)return unit->GetQItem(slot);
     return unit->GetQSpellItem(slot);
 }
+CItem* PersonageEquipment(CPersonage* personage,int kind,int slot) {
+    if(!personage || slot<0)return nullptr;
+    if(kind==ITID_ITEM_WEAPON)return slot<personage->weapons.GetSize()?personage->weapons[slot]:nullptr;
+    if(kind==ITID_ITEM_QUICK)return slot<personage->items.GetSize()?personage->items[slot]:nullptr;
+    if(kind==ITID_ITEM_SPELL)return slot<personage->spells.GetSize()?personage->spells[slot]:nullptr;
+    if(kind==ITID_ITEM_ARMOR)for(int i=0;i<personage->armors.GetSize();++i)
+        if(personage->armors[i]->GetSlotIndex()==slot)return personage->armors[i];
+    return nullptr;
+}
 const char* EquipmentPrefix(int kind) {
     return kind==ITID_ITEM_WEAPON?"weapon":kind==ITID_ITEM_ARMOR?"armor":kind==ITID_ITEM_QUICK?"quick":"spell";
 }
@@ -93,19 +102,17 @@ bool EquipUnit(Job& job,Clock::time_point deadline) {
         const int kind=job.response.at("kind"),slot=job.response.at("slot");
         auto* current=EquipmentItem(unit,kind,slot);
         auto* visible=EquipmentItem(theWorld.GetUnit(id),kind,slot);
-        CItem* clientItem=nullptr;
-        if(kind==ITID_ITEM_WEAPON&&slot<clientPers->weapons.GetSize())clientItem=clientPers->weapons[slot];
-        else if(kind==ITID_ITEM_QUICK&&slot<clientPers->items.GetSize())clientItem=clientPers->items[slot];
-        else if(kind==ITID_ITEM_SPELL&&slot<clientPers->spells.GetSize())clientItem=clientPers->spells[slot];
-        else if(kind==ITID_ITEM_ARMOR)for(int i=0;i<clientPers->armors.GetSize();++i)
-            if(clientPers->armors[i]->GetSlotIndex()==slot)clientItem=clientPers->armors[i];
+        CItem* clientItem=PersonageEquipment(clientPers,kind,slot);
         if(kind==ITID_ITEM_ARMOR)visible=clientItem; // Client armor is a subtype/figure, owned item lives in its party.
         if(current&&visible&&clientItem&&current->GetID()==job.response.at("ability_item_id").get<int>()&&
-           clientItem->GetID()==job.response.at("party_item_id").get<int>()&&
+           clientItem->GetRTID()!=job.response.at("client_previous_item_rtid").get<ObjectId>()&&
+           ItemCode(clientItem)==job.response.at("code").get<std::string>()&&
            ItemCode(visible)==job.response.at("code").get<std::string>()&&
            (kind!=ITID_ITEM_WEAPON||theWorld.GetUnit(id)->GetCurrentWeaponSlotIndex()==DWORD(slot))) {
             auto item=ItemJson(current,std::string(EquipmentPrefix(kind))+":"+std::to_string(slot));
             job.response["item"]=std::move(item);job.response["ok"]=true;job.response["status"]="done";
+            job.response["client_item_id"]=clientItem->GetID();
+            job.response["synchronization_basis"]="server_runtime_id_and_new_client_slot_instance";
             job.response["selected"]=kind==ITID_ITEM_WEAPON;return true;
         }
         if(Clock::now()>=job.orderExpires)
@@ -162,6 +169,8 @@ bool EquipUnit(Job& job,Clock::time_point deadline) {
     if(slot>=maximum||slot>count)throw std::runtime_error("equipment_slot_full_or_not_contiguous");
     if(kind!=ITID_ITEM_ARMOR)for(int i=0;i<count;++i)
         if(!EquipmentItem(unit,kind,i))throw std::runtime_error("equipment_slots_not_synchronized");
+    const auto* previousClientItem=PersonageEquipment(clientPers,kind,slot);
+    const ObjectId previousClientIdentity=previousClientItem?previousClientItem->GetRTID():0;
     // Keep the inventory input alive until its normal removal packet is queued.
     CSmartPtr<CItem> held=found;
     CSmartPtr<CItem> input=wagon?found:party.DuplicateItem(found);
@@ -204,6 +213,7 @@ bool EquipUnit(Job& job,Clock::time_point deadline) {
         {"code",ItemCode(runtime)},{"runtime_item_id",runtime->GetID()},{"party_item_id",stored->GetID()},
         {"ability_item_id",EquipmentItem(unit,kind,slot)->GetID()},
         {"source_item_id",sourceId},{"source",wagon?"wagon":"inventory"},{"world_epoch",job.orderEpoch},
+        {"client_previous_item_rtid",previousClientIdentity},
         {"path","camp_personage_and_live_deployment"},{"truncated",false}};
     return false;
 }

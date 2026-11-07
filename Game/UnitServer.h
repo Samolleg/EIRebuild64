@@ -380,6 +380,7 @@ class CUnitServer : public CUnitSpecific
     friend class CModPackage;
     friend class CUnit;
     friend struct LiveSnapshotAccess;
+    friend struct LiveUnitServiceAccess;
 
 private:
     // Lowest level data

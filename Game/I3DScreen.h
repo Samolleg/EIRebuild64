@@ -5,7 +5,9 @@
 /////////////////////////////////////////////////////////////////////////////////////
 class CI3DScreen : public CI3DObject
 {
+    friend struct LiveUiAccess;
 protected:
+    unsigned long long liveUiSerial = 0; // transient screen incarnation, never serialized
     CSimplyArray<CI3DObject *, CI3DObject *> pObjects;
     std::vector<CI3DHandler *> pHandlers;
 

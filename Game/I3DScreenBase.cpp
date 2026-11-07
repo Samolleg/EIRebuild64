@@ -1518,6 +1518,8 @@ void CI3DScreenBase::OnExitFromModal(DWORD dwRetValue)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenBase::RedrawTopics()
 {
+    liveTopicCaptions.SetSize(BASE_NUM_BRIEFS_VISIBLE);
+    for (int k=0;k<BASE_NUM_BRIEFS_VISIBLE;++k) liveTopicCaptions[k].Empty();
     CString szPrefix;
     IWorld.GetTextManager()->GetSystemString("topic_prefix", szPrefix);
 #ifndef NOGETDC
@@ -1527,12 +1529,13 @@ void CI3DScreenBase::RedrawTopics()
     int i, n;
     for (i = 0, n = nPos; i < BASE_NUM_BRIEFS_VISIBLE && n < szBriefings.GetSize(); i++, n++)
     {
+        liveTopicCaptions[i] = GetBriefingLocalName(szBriefings[n]);
         COLORREF cr = (n == nCurrentTopic) ? RGB(255, 255, 255) : BASE_COLOR_TEXT;
 #ifdef NODEBUGINFO
-        pSurf->DrawText(szPrefix + " " + GetBriefingLocalName(szBriefings[n]),
+        pSurf->DrawText(szPrefix + " " + liveTopicCaptions[i],
                         CRect(15, 12 + i * 24, 380, 34 + i * 24), 1, cr, DT_LEFT);
 #else
-        pSurf->DrawText(szBriefings[n] + " - " + GetBriefingLocalName(szBriefings[n]),
+        pSurf->DrawText(szBriefings[n] + " - " + liveTopicCaptions[i],
                         CRect(15, 12 + i * 24, 380, 34 + i * 24), 1, cr, DT_LEFT);
 #endif // NODEBUGINFO
     }

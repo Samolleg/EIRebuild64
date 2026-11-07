@@ -20,6 +20,7 @@ public:
     virtual ~FrameSink() = default;
     virtual bool Submit(std::shared_ptr<const Frame>) = 0;
 };
+struct AudioState { bool present=false,playing=false;float gain=0; };
 enum class State { Closed, Ready, Playing, Paused, Ended, Stopped, Cancelled, Skipped, Failed };
 class Player {
 public:
@@ -38,6 +39,7 @@ public:
     // also while paused. Rendering is serialized by the caller's render gate.
     bool Update(FrameSink&);
     State GetState() const;
+    AudioState AudioSnapshot() const noexcept;
     std::string Error() const;
 private:
     struct Impl;

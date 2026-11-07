@@ -178,7 +178,10 @@ public:
     int GetUpdateCounter() { return nUpdateCounter; }
     float GetWorldTime() const
     {
-        return std::fmod(float(nSegmentTimeCounter) * fpTimeScale + fpTimeModifier, 24.0f);
+        // Saved offsets may be negative; all hour consumers require [0,24).
+        const float hour = std::fmod(float(nSegmentTimeCounter) * fpTimeScale + fpTimeModifier, 24.0f);
+        const float wrapped = hour < 0.0f ? hour + 24.0f : hour;
+        return wrapped >= 24.0f ? 0.0f : wrapped;
     }
     float GetTimeInHours(int nSegments) const { return float(nSegments) * fpTimeScale; }
     double GetUnwrappedWorldTime() const

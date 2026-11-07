@@ -34,6 +34,7 @@ class CDXGISurface;
 /////////////////////////////////////////////////////////////////////////////////////
 class CInterface3D
 {
+    friend struct LiveUiAccess;
 private:
     int nScreenWidth, nScreenHeight; // screen size ( for area initialization )
 

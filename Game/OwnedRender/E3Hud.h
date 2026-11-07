@@ -31,6 +31,8 @@ bool E3HudDraw2D(CI3DObject* object);
 bool E3ClockTooltip(CI3DToolTip* tooltip);
 bool E3HudBlit(CI3DSurface* surface);
 // -2 means an unrelated/non-owned object, -1 means a handled miss.
+// Read-only identity of the already published HUD input panel.
+int E3HudPanel(CI3DObject* object) noexcept;
 int E3HudHit(CI3DObject* object,POINT pixel) noexcept;
 bool E3HudInside(CI3DObject* object,POINT pixel,bool& inside) noexcept;
 bool E3HudAreaInside(CI3DObject* object,unsigned area,POINT pixel,bool& inside) noexcept;

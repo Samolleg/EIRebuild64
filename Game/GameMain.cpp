@@ -1123,6 +1123,8 @@ LRESULT NGame::WndProc(UINT message, WPARAM wParam, LPARAM lParam)
     OwnedRender::E3RefreshInterface();
     if (OwnedRender::E3BlockInput(message, wParam))
         return SendMessage(hWnd, message, wParam, lParam);
+    if (message==WM_MOUSEMOVE || message==WM_LBUTTONDOWN || message==WM_RBUTTONDOWN)
+        LiveObserver::ReleaseUiCursor();
     E4CampAccess::BeginInput();
     if (OwnedRender::E2CampInput(message, wParam, lParam)) return 1;
     if (OwnedRender::E4::Message(NGame::hWnd, message, wParam, lParam)) return 1;

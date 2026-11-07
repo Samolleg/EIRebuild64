@@ -13,6 +13,8 @@ static const char LOCAL_FILE[] = __FILE__;
 CI3DScreen::CI3DScreen(CInterface3D *pI)
     : CI3DObject(pI)
 {
+    static unsigned long long serial = 0;
+    liveUiSerial = ++serial;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 CI3DScreen::~CI3DScreen()

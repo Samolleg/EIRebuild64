@@ -78,6 +78,8 @@ json CombatJson(CUnit* unit) {
         result["current_order"]=CommandJson(server->GetScriptCommand());
         result["next_order"]=CommandJson(server->GetNextScriptCommand());
         result["failed"]=server->IsCmdFailed();
+        result["interruptible"]=LiveSnapshotAccess::Interruptible(*server);
+        result["hurt_animation"]=LiveSnapshotAccess::Suffering(*server);
         result["attack_cooldown_ticks"]=(std::max)(0,LiveSnapshotAccess::AttackReady(*server)-theWorldServer.GetSegmentTimeCounter());
     }
     return result;

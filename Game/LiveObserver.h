@@ -21,6 +21,8 @@ void Start() noexcept;
 void Stop() noexcept;
 // Called by the game thread between frames.
 void Frame() noexcept;
+// Safe command subset while the host is inside a synchronous movie loop.
+void MovieFrame() noexcept;
 // Render-only camera lease. Ordinary camera state is restored before logic,
 // audio, save/load or the next frame's input can inspect it.
 class CameraDrawScope {
@@ -32,6 +34,10 @@ public:
     CameraDrawScope& operator=(const CameraDrawScope&) = delete;
 };
 void ResetCamera() noexcept;
+// Game-thread synthetic UI cursor; no OS cursor or window reads.
+bool ReadUiCursor(POINT*) noexcept;
+bool WriteUiCursor(int x,int y) noexcept;
+void ReleaseUiCursor() noexcept;
 const CPlot3D& LogicObservationPosition(const CPlot3D& ordinary) noexcept;
 int ParticleLogicVisibility(const SBoundingVolume&, int renderedVisibility) noexcept;
 // These seams copy typed inputs only while render_state/screenshot is pending.
