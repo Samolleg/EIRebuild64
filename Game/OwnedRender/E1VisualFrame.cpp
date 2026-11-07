@@ -4,6 +4,7 @@
 #include "E1TerrainSubmission.h"
 #include "E1Surface.h"
 #include "../GameJournal.h"
+#include "../LiveObserver.h"
 #include "renderer.h"
 #include "engine_bridge.h"
 #include "retained_static_scene.h"
@@ -311,6 +312,7 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     std::vector<std::int32_t> drawn;
     std::vector<owned::EmbeddedVisualOmission> omitted;
     const bool ok = owned::bridge_embedded_owned_visual_frame(inputs, &drawn, &omitted);
+    LiveObserver::ObserveVisualResult(ok,drawn.size(),omitted.size());
     std::sort(drawn.begin(), drawn.end());
     currentDrawn.swap(drawn);
     currentOmissions.clear();

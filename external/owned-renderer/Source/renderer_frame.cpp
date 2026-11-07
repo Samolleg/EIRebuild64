@@ -71,7 +71,7 @@
 namespace owned {
 #ifdef EID3D11_EMBEDDED
 bool bridge_live_wants_capture() noexcept;
-void bridge_live_capture(ID3D11DeviceContext*,IDXGISwapChain*) noexcept;
+void bridge_live_capture(ID3D11DeviceContext*,IDXGISwapChain*,unsigned long long) noexcept;
 #endif
 namespace {
 bool shadow_temporal_diagnostic_enabled(){static const bool enabled=[](){char value[8]{};return GetEnvironmentVariableA("EI_RENDERER_SHADOW_TEMPORAL_CAPTURE",value,sizeof(value))&&value[0]=='1';}();return enabled;}
@@ -1934,7 +1934,7 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
  HRESULT hr;
 #ifdef EID3D11_EMBEDDED
  // The host observer copies only the completed composed frame, before Present.
- if(bridge_live_wants_capture())bridge_live_capture(context_.Get(),swap_.Get());
+ if(bridge_live_wants_capture())bridge_live_capture(context_.Get(),swap_.Get(),native_frame_index_);
 #endif
  (void)plan_pass("present",nullptr,nullptr,plan_read(PlanTarget::backbuffer));
  finish_native_lod_frame();

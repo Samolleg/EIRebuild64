@@ -63,6 +63,7 @@ public:
     LPTLPIPELINE GetGeometryProcessor() const { return lpGeometryProcessor; }
     //
     int CheckVisibility(const SBoundingVolume &bv);
+    int CheckVisibility(const SBoundingVolume &bv, const SHMatrix &projection);
     int TransformVertices(SXYZW4 *pSrc, STLVertex1 *pDst, BYTE *pClips, DWORD *speculars,
                           const int nNumSrc, const SBoundingVolume *pBV);
     int TransformVertices(SXYZW4 *pSrc, STLVertex1 *pDst, BYTE *pClips, const int nNumSrc,

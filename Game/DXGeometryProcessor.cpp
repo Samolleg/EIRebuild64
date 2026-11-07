@@ -341,8 +341,10 @@ void CDXGeometryProcessor::CreateDirectionCorrection(const CPlot3D &direction, C
 /////////////////////////////////////////////////////////////////////////////////////
 int CDXGeometryProcessor::CheckVisibility(const SBoundingVolume &bv)
 {
-    const SHMatrix &mProj = GetMatrix(MAT_STACK_PROJSPACE);
-    const SHMatrix &mV2C = GetMatrix(MAT_STACK_VIEW2CLIP);
+    return CheckVisibility(bv, GetMatrix(MAT_STACK_PROJSPACE));
+}
+int CDXGeometryProcessor::CheckVisibility(const SBoundingVolume &bv, const SHMatrix &mProj)
+{
     BYTE nClipFlags, nClipFlags1, nClipFlags2;
     SXYZW ptHVector;
     CPlot3D pt;

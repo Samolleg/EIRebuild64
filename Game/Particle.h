@@ -82,6 +82,7 @@ const int PS_DONT_DRAW = 64;        // do not draw particle effect
 // --------------------------- CParticle -----------------------------------------------------
 class CParticle : public CBase3D
 {
+    friend struct LiveParticleAccess;
     void InitializeExtendedSpellSources();
 public:
     enum EBindPlace

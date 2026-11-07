@@ -15,11 +15,19 @@
 #include "GlobalMap.h"
 #include "SaveSlot.h"
 #include "Camera.h"
+#include "ModFalloutProjection.h"
 #include "I3DMain.h"
 #include "I3DScreen.h"
 #include "GameMain.h"
 #include "OwnedRender/E2Host.h"
 #include "OwnedRender/E3Input.h"
+#include "OwnedRender/E1World.h"
+#include "OwnedRender/E1Scene.h"
+#include "Particle.h"
+#include "Terrain.h"
+#include "embedded_arena.h"
+#include "embedded_golem.h"
+#include "embedded_curse.h"
 #include "Unit.h"
 #include "UnitServer.h"
 #include "UnitDatabase.h"
@@ -32,7 +40,9 @@
 #include <wrl/client.h>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <limits>
 #include <mutex>
@@ -43,12 +53,59 @@
 using nlohmann::json;
 using Microsoft::WRL::ComPtr;
 
+struct LiveCameraAccess {
+    struct Saved {
+        CPlot3D position,anchor;
+        CQuaternion orientation,orbit;
+        float distance=0,pitch=0,height=0;
+        CCamera::FalloutMode fallout=CCamera::FALLOUT_STOCK;
+    };
+    static Saved Apply(CCamera& c,const CPlot3D& target,float azimuth,float pitch,float distance) {
+        Saved saved{c.GetCP(),c.ptAnchorPoint,c.GetOrientation(),c.qRotate,c.fDistance,c.fPitch,c.fAnchorHeight,c.falloutMode};
+        c.ptAnchorPoint=target;c.fDistance=distance;c.fPitch=ToRadian(pitch);
+        c.qRotate.FromAxisAngle(CPlot3D(0,0,1),ToRadian(azimuth));c.falloutMode=CCamera::FALLOUT_STOCK;
+        c.SetOrientation(c.qRotate);c.Rotate(c.GetXAxis(),-(ToRadian(90.f)+c.fPitch));
+        c.SetCP(target-c.GetZAxis()*distance);
+        return saved;
+    }
+    static void Restore(CCamera& c,const Saved& saved) {
+        c.SetCP(saved.position);c.SetOrientation(saved.orientation);c.ptAnchorPoint=saved.anchor;
+        c.qRotate=saved.orbit;c.fDistance=saved.distance;c.fPitch=saved.pitch;c.fAnchorHeight=saved.height;c.falloutMode=saved.fallout;
+    }
+};
+struct LiveParticleAccess {
+    struct Value {
+        int id=0,type=0,carrier=0,points=0,sourceCount=0,minimumTries=0,probability=0,maximum=0;
+        bool submitted=false,generating=false,sourcesTruncated=false;
+        float power=0,power2=0,param1=0,param2=0,lengthPerTry=0,scale=0;
+        std::string name;
+        std::array<float,3> position{},direction{};
+        std::array<SLocalSource,32> sources{};
+    };
+    static Value Read(const CParticle& p,bool submitted) {
+        Value v;v.id=p.GetID();v.type=int(p.GetTypeID());v.name="particle:"+std::to_string(v.type);
+        v.carrier=p.pCarrier?p.pCarrier->GetID():0;v.points=int(p.particles.GetCount());v.sourceCount=p.locSources.GetSize();
+        v.minimumTries=p.nMinTrys;v.probability=p.nBornProbability;v.maximum=p.nParticlesMax;
+        v.submitted=submitted;v.generating=(p.dwPFlags&PS_GENERATE_PARTICLES)!=0;
+        v.power=p.fpPower;v.power2=p.fpPower2;v.param1=p.fpParam1;v.param2=p.fpParam2;
+        v.lengthPerTry=p.fpLenToSingleDice;v.scale=p.fpCurrentScale;
+        const auto& position=p.pCarrier?p.carrierCP:p.GetCP();v.position={position.x,position.y,position.z};
+        v.direction={p.ptWallDirection.x,p.ptWallDirection.y,p.ptWallDirection.z};
+        v.sourcesTruncated=v.sourceCount>int(v.sources.size());
+        for(int i=0;i<v.sourceCount&&i<int(v.sources.size());++i)v.sources[i]=p.locSources[i];
+        return v;
+    }
+    static int SourceCount(const CParticle& p){return p.locSources.GetSize();}
+    static size_t PointCount(const CParticle& p){return p.particles.GetCount();}
+};
+
 namespace LiveObserver {
 namespace {
 using Clock=std::chrono::steady_clock;
 constexpr size_t RequestLimit=16384, ResponseLimit=262144, ImageLimit=4096u*4096u*4u;
 constexpr auto FrameBudget=std::chrono::microseconds(800);
 constexpr size_t UnitLimit=200, VariableLimit=200, PathLimit=64, EffectLimit=32;
+struct RenderCapture;
 struct Job {
     json request, response;
     std::string method;
@@ -76,6 +133,16 @@ struct Job {
     std::shared_ptr<const owned::NativeLodSnapshot> lodSnapshot;
     std::uint64_t lodRequest=0;
     Clock::time_point lodExpires{};
+    std::deque<std::shared_ptr<RenderCapture>> renderFrames;
+    std::shared_ptr<RenderCapture> renderFrame;
+    std::unordered_set<std::string> renderWorldIds,renderNeighbourIds;
+    size_t renderWorldParts=0,renderNeighbourParts=0;
+    std::string filterName,captureName;
+    double filterRadius=2000;
+    size_t renderLimit=50;
+    bool renderDetails=false;
+    unsigned waitFrames=0;
+    std::uint64_t captureFrame=0,captureWorldFrame=0,waitFrame=UINT64_MAX;
     std::vector<unsigned char> image;
     // The pipe worker allocates a staging texture using only this copied
     // descriptor/device; it never inspects a game object or context.
@@ -112,7 +179,7 @@ bool saveIsolated=false; // game thread only; deliberately survives load/new gam
 bool IsCommand(const std::string& method) {
     return method=="load_save"||method=="new_game"||method=="enter_zone"||method=="save_game"||
            method=="unit_move"||method=="unit_teleport"||method=="pause"||method=="quit"||
-           method=="set_global"||method=="object_transform"||method=="god_mode"||method=="script_run";
+           method=="set_global"||method=="object_transform"||method=="god_mode"||method=="script_run"||method=="camera";
 }
 
 json Error(const char* message) {return {{"ok",false},{"error",message},{"truncated",false}};}
@@ -151,6 +218,7 @@ json ExecutingStatus() {
     if(!operation.inFlight||(!operation.executing&&operation.applied))return nullptr;
     json result={{"ok",operation.error.empty()},{"pid",GetCurrentProcessId()},
                  {"status_scope","operation_only"},{"main_thread_responding",false},{"god",nullptr},
+                 {"camera",nullptr},{"camera_mode","normal"},{"camera_reason","operation_only"},
                  {"operation",OperationJsonLocked()},{"truncated",false}};
     if(!operation.error.empty())result["error"]="game is not responding; see journal";
     return result;
@@ -189,6 +257,9 @@ void CleanupCapture(Job& job) noexcept {
     if(auto* texture=job.prepared.exchange(nullptr))texture->Release();
 }
 bool Step(Job& job,Clock::time_point deadline);
+void UpdateOperationReadiness();
+#include "LiveObserverCamera.inl"
+#include "LiveObserverRender.inl"
 
 // All I/O waits are overlapped so shutdown and slow/missing clients cannot
 // strand the game thread. One bounded request is accepted per connection.
@@ -245,9 +316,12 @@ std::string SavePng(Job& job) {
     const auto init=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
     if(FAILED(init))throw std::runtime_error("WIC COM initialization failed");
     struct ComEnd {~ComEnd(){CoUninitialize();}} comEnd;
-    const auto dir=RuntimePaths64::Directory(L"Logs64")/L"live";fs::create_directories(dir);
+    auto dir=RuntimePaths64::Directory(L"Logs64")/L"live";
+    if(!job.captureName.empty())dir/=L"named";
+    fs::create_directories(dir);
     const auto stem=L"eimcp-"+std::to_wstring(GetTickCount64())+L"-"+std::to_wstring(GetCurrentProcessId());
-    const auto temp=dir/(stem+L".tmp");const auto file=dir/(stem+L".png");
+    const auto temp=dir/(stem+L".tmp");
+    const auto file=dir/(job.captureName.empty()?stem+L".png":std::wstring(job.captureName.begin(),job.captureName.end())+L".png");
     ComPtr<IWICImagingFactory> factory;ComPtr<IWICStream> stream;ComPtr<IWICBitmapEncoder> encoder;ComPtr<IWICBitmapFrameEncode> frame;
     HRESULT hr=CoCreateInstance(CLSID_WICImagingFactory,nullptr,CLSCTX_INPROC_SERVER,IID_PPV_ARGS(&factory));
     if(SUCCEEDED(hr))hr=factory->CreateStream(&stream);
@@ -265,7 +339,9 @@ std::string SavePng(Job& job) {
     if(SUCCEEDED(hr))hr=encoder->Commit();
     frame.Reset();encoder.Reset();stream.Reset();factory.Reset();
     if(FAILED(hr)){DeleteFileW(temp.c_str());throw std::runtime_error("PNG encoding failed");}
-    if(!MoveFileExW(temp.c_str(),file.c_str(),MOVEFILE_WRITE_THROUGH)){DeleteFileW(temp.c_str());throw std::runtime_error("PNG finalization failed");}
+    const auto moveFlags=MOVEFILE_WRITE_THROUGH|(job.captureName.empty()?0:MOVEFILE_REPLACE_EXISTING);
+    if(!MoveFileExW(temp.c_str(),file.c_str(),moveFlags)){DeleteFileW(temp.c_str());throw std::runtime_error("PNG finalization failed");}
+    if(!job.captureName.empty())return Utf8(file.c_str());
     std::vector<fs::directory_entry> captures;
     for(const auto& entry:fs::directory_iterator(dir)) {
         const auto name=entry.path().filename().wstring();
@@ -383,6 +459,7 @@ bool IsOperation(const char* method) noexcept {
     return operation.inFlight&&operation.method==method;
 }
 void OperationExecuting(const char* method) noexcept {
+    if(method&&(!std::strcmp(method,"load_save")||!std::strcmp(method,"new_game")||!std::strcmp(method,"enter_zone")))ResetCamera();
     std::lock_guard<std::mutex> lock(operationMutex);
     if(operation.inFlight&&operation.method==method){operation.executing=true;operation.stage="executing";}
 }
@@ -436,6 +513,7 @@ void Start() noexcept {
     }
 }
 void Stop() noexcept {
+    ResetCamera();
     if(!stopEvent)return;
     SetEvent(stopEvent);
     {
@@ -454,7 +532,7 @@ void Frame() noexcept {
             if(lock.owns_lock()&&queued)active=std::move(queued);
         }
         if(!active)return;
-        if(active->cancelled){CleanupCapture(*active);active.reset();return;}
+        if(active->cancelled){if(active->method=="camera"&&active->phase==1)ResetCamera();CleanupCapture(*active);active.reset();return;}
         if(active->readyToFinish){
             if(active->quitRequested&&active->replySent.load(std::memory_order_acquire)){
                 if(!NGame::QuitProgram(0))ChannelError("quit_refused",0);
@@ -495,11 +573,15 @@ void Frame() noexcept {
     } catch(...) {ChannelError("frame_exception",0);if(active){CleanupCapture(*active);active->cancelled=true;active->ready.notify_one();active.reset();}}
 }
 bool WantsCapture() noexcept {return active&&!active->cancelled&&(active->phase==1||active->phase==6)&&active->method=="screenshot";}
-void CaptureFrame(ID3D11DeviceContext* context,IDXGISwapChain* swap) noexcept {
+void CaptureFrame(ID3D11DeviceContext* context,IDXGISwapChain* swap,unsigned long long frame) noexcept {
     if(!WantsCapture())return;
     const auto started=Clock::now();
     try {
         auto& job=*active;
+        if(job.phase==1&&job.waitFrames){
+            if(job.waitFrame!=frame){job.waitFrame=frame;--job.waitFrames;}
+            return;
+        }
         if(!context||!swap)throw std::runtime_error("backbuffer is unavailable");
         ComPtr<ID3D11Texture2D> output;
         if(FAILED(swap->GetBuffer(0,IID_PPV_ARGS(&output))))throw std::runtime_error("backbuffer is unavailable");
@@ -518,7 +600,8 @@ void CaptureFrame(ID3D11DeviceContext* context,IDXGISwapChain* swap) noexcept {
         } else {
             if(desc.Width!=job.width||desc.Height!=job.height||device.Get()!=job.captureDevice.Get()||!job.staging)
                 throw std::runtime_error("backbuffer changed during capture; retry");
-            job.context=context;context->CopyResource(job.staging.Get(),output.Get());job.phase=2;
+            job.context=context;context->CopyResource(job.staging.Get(),output.Get());
+            job.captureFrame=frame;job.captureWorldFrame=owned::bridge_scene_world_to_clip_snapshot().scene_frame_serial;job.phase=2;
         }
     } catch(const std::exception& e) {
         GameJournal::Event("ERROR","live_screenshot","reason=%s",GameJournal::Quote(e.what()).c_str());
@@ -534,8 +617,8 @@ void CaptureFrame(ID3D11DeviceContext* context,IDXGISwapChain* swap) noexcept {
 
 namespace owned {
 bool bridge_live_wants_capture() noexcept {return LiveObserver::WantsCapture();}
-void bridge_live_capture(ID3D11DeviceContext* context,IDXGISwapChain* swap) noexcept {
-    LiveObserver::CaptureFrame(context,swap);
+void bridge_live_capture(ID3D11DeviceContext* context,IDXGISwapChain* swap,unsigned long long frame) noexcept {
+    LiveObserver::CaptureFrame(context,swap,frame);
 }
 }
 
@@ -703,6 +786,7 @@ json Status() {
     if(!world.bMapLoaded&&currentOperation.at("in_flight").get<bool>())
         return {{"ok",true},{"pid",GetCurrentProcessId()},
                 {"status_scope","operation_only"},{"main_thread_responding",true},
+                {"camera",nullptr},{"camera_mode","normal"},{"camera_reason","operation_only"},
                 {"map_loaded",false},{"god",nullptr},{"operation",currentOperation},{"truncated",false}};
     static const char* const screens[]={"none","mission","main_menu","base","global_map","camp","autoplay","debug","endgame","exchange"};
     const int screen=int(world.curInterface);
@@ -714,10 +798,11 @@ json Status() {
                  {"server_mode",int(world.GetServerMode())},{"god",player?json(int(player->bGod)):json(nullptr)},
                  {"paused",combat||modal||editor||background},
                  {"pause_reasons",{{"combat",combat},{"modal",modal},{"editor",editor},{"background",background}}},
-                 {"camera",Point(theCamera.GetCP())},{"camera_anchor",Point(theCamera.GetAnchorPoint())},
+                 {"camera",Point(CurrentCameraView().position)},{"camera_anchor",Point(CurrentCameraView().target)},
                  {"truncated",false}};
     result["operation"]=currentOperation;result["save_isolation"]=saveIsolated||AgentBackground::Enabled();
     result["background_agent"]=AgentBackground::Enabled();
+    result["camera_mode"]=CurrentCameraView().mode;result["camera_view"]=CameraJson(CurrentCameraView());
     result["main_thread_responding"]=true;
     if(world.bMapLoaded) {
         result["zone"]=Text(world.GetJournalZoneName(),256);
@@ -747,6 +832,26 @@ json Perf() {
     result["window_ms"]=(CorePerf::Now()-s.liveWindow)*1000.0/s.frequency;
     return result;
 }
+bool LiveStatus(Job& job) {
+    auto status=Status();
+    if(!job.phase){
+        if(!theWorldServer.bMapLoaded||status.value("status_scope",std::string())=="operation_only"){
+            job.response=std::move(status);job.response["camera"]=nullptr;job.response["camera_view"]=nullptr;
+            job.response["camera_reason"]="no_world_draw";return true;
+        }
+        job.phase=1;job.lodExpires=Clock::now()+std::chrono::milliseconds(1000);return false;
+    }
+    if(job.renderFrames.empty()&&theWorldServer.bMapLoaded&&Clock::now()<job.lodExpires)return false;
+    job.response=std::move(status);
+    if(!job.renderFrames.empty()){
+        const auto& frame=*job.renderFrames.back();job.response["camera"]=Point(frame.camera.position);
+        job.response["camera_anchor"]=Point(frame.camera.target);job.response["camera_mode"]=frame.camera.mode;
+        job.response["camera_view"]=CameraJson(frame.camera);job.response["camera_frame"]=frame.frame;
+    }else {
+        job.response["camera"]=nullptr;job.response["camera_view"]=nullptr;job.response["camera_reason"]="no_world_draw";
+    }
+    return true;
+}
 bool SameWorld(Job& job,CWorldServer& world) {
     return job.world==&world&&job.worldId==world.GetRTID();
 }
@@ -767,13 +872,13 @@ bool Lod(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
     if(!job.phase){
         job.world=&world;job.worldId=world.GetRTID();job.phase=1;
         const auto epoch=owned::bridge_current_world_epoch();
-        job.lodRequest=owned::native_lod_request(epoch);
+        job.lodRequest=owned::native_lod_request(epoch,job.method=="render_state");
         // Leave time for the scene thread/readback, but finish before the pipe's
         // 4.5 s deadline even when no eligible world pass or GPU reply arrives.
-        job.lodExpires=Clock::now()+std::chrono::milliseconds(1500);
+        job.lodExpires=Clock::now()+std::chrono::milliseconds(3500);
         job.response={{"ok",true},{"status","waiting"},{"snapshot_frame",nullptr},{"world_epoch",epoch},
             {"objects",json::array()},{"request_id",job.lodRequest},{"limit",limit},{"truncated",false},{"radius",radius},
-            {"radius_applied",name.empty()},{"camera_anchor",Point(theCamera.GetAnchorPoint())},
+            {"radius_applied",name.empty()},{"camera_anchor",Point(CurrentCameraView().target)},
             {"consistency","GPU snapshot; distances from request camera anchor"},
             {"position_basis","GPU render node origin, world metres"},
             {"visibility_basis","colour triangles emitted; not a pixel visibility test"}};
@@ -824,6 +929,12 @@ bool Lod(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
     const double cameraY=job.response["camera_anchor"][1].get<double>();
     while(job.item<rows.size()&&Clock::now()<deadline){
         const auto& row=rows[job.item++];const auto& source=*row.identity;const auto& choice=row.decision;
+        if(job.method=="render_state"){
+            const auto key=source.zone+"/"+source.map+"/"+std::to_string(source.id);
+            (source.neighbour?job.renderNeighbourIds:job.renderWorldIds).insert(key);
+            ++(source.neighbour?job.renderNeighbourParts:job.renderWorldParts);
+            if(!job.renderDetails)continue;
+        }
         if(!Match(source.model,name))continue;
         if(!name.empty()){
             job.response["name_match"]="matched";
@@ -833,8 +944,8 @@ bool Lod(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
         const bool observed=choice.state!=0;
         const double dx=choice.position[0]-cameraX,dy=choice.position[1]-cameraY;
         const double distance=std::sqrt(dx*dx+dy*dy);
-        if(name.empty()&&(!observed||distance>radius))continue;
-        if(job.response["objects"].size()>=limit){job.response["truncated"]=true;return true;}
+        if((name.empty()||job.method=="render_state")&&(!observed||distance>radius))continue;
+        if(job.response["objects"].size()>=limit){job.response["truncated"]=true;if(job.method=="render_state")continue;return true;}
         const bool selected=choice.state==2;
         json value={{"id",source.id},{"id_kind",source.candidate_id?"neighbour_candidate":"game_object"},
             {"generation",source.generation},{"part",source.part},{"record",row.record},{"model",source.model},
@@ -851,6 +962,7 @@ bool Lod(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
             value["rendered"]=selected&&(choice.first_triangles+choice.second_triangles)>0;
             value["lod_count"]=choice.level_count;value["triangles_lod0"]=choice.full_triangles;
             value["merged"]=bool(choice.merged);
+            value["branch"]=choice.merged?"merged":"part";
             value["triangles"]=choice.first_triangles+choice.second_triangles;
             if(selected){
                 if(choice.first_level!=UINT32_MAX)value["lod"]=choice.first_level;
@@ -864,6 +976,7 @@ bool Lod(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
     }
     return job.item>=rows.size();
 }
+#include "LiveObserverRenderReply.inl"
 bool Units(Job& job,Clock::time_point deadline,CWorldServer& world,const json& params) {
     const size_t limit=GetLimit(params,UnitLimit,50);
     if(!job.phase) {
@@ -1010,7 +1123,26 @@ bool Nav(Job& job,Clock::time_point deadline,CWorldServer& world,const json& par
     return false;
 }
 bool Screenshot(Job& job,Clock::time_point deadline) {
-    if(!job.phase){job.phase=1;return false;} // Capture at the next completed backbuffer.
+    if(!job.phase){
+        const auto& params=job.request.at("params");
+        if(params.contains("name")){
+            if(!params["name"].is_string())throw std::runtime_error("name must be a string");
+            job.captureName=params["name"].get<std::string>();
+            if(job.captureName.empty()||job.captureName.size()>64||!std::all_of(job.captureName.begin(),job.captureName.end(),[](unsigned char c){
+                return (c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-';
+            }))throw std::runtime_error("screenshot name must contain 1..64 ASCII letters, digits, underscores or hyphens");
+            auto upper=job.captureName;for(auto& c:upper)if(c>='a'&&c<='z')c-=('a'-'A');
+            if(upper=="CON"||upper=="PRN"||upper=="AUX"||upper=="NUL"||
+               (upper.size()==4&&(upper.substr(0,3)=="COM"||upper.substr(0,3)=="LPT")&&upper[3]>='1'&&upper[3]<='9'))
+                throw std::runtime_error("reserved Windows screenshot name");
+        }
+        if(params.contains("frames")){
+            const auto& frames=params["frames"];
+            if(!frames.is_number_integer()||frames<0||frames>60)throw std::runtime_error("frames must be an integer from 0 to 60");
+            job.waitFrames=frames.get<unsigned>();
+        }
+        job.phase=1;return false;
+    } // Capture after the requested number of completed backbuffers.
     if(job.phase==1||job.phase==6)return false;
     if(job.phase==5) {
         const int status=job.setup.load(std::memory_order_acquire);
@@ -1035,7 +1167,16 @@ bool Screenshot(Job& job,Clock::time_point deadline) {
         ++job.row;
     }
     if(job.row<job.height)return false;
-    CleanupCapture(job);job.response={{"ok",true},{"width",job.width},{"height",job.height},{"truncated",false}};return true;
+    CleanupCapture(job);job.response={{"ok",true},{"width",job.width},{"height",job.height},
+        {"frame",job.captureFrame},{"world_frame",job.captureWorldFrame},{"camera",nullptr},
+        {"frames",job.request.at("params").value("frames",0)},{"truncated",false}};
+    if(job.captureWorldFrame){
+        const auto found=std::find_if(job.renderFrames.begin(),job.renderFrames.end(),[&](const auto& f){return f->frame==job.captureWorldFrame;});
+        if(found==job.renderFrames.end()){job.response=Error("captured camera stamp expired; retry screenshot");return true;}
+        job.response["camera"]=CameraJson((*found)->camera);
+    } else job.response["camera_reason"]="no_world_draw";
+    if(!job.captureName.empty())job.response["name"]=job.captureName;
+    return true;
 }
 std::string CommandName(const json& params) {
     const auto& value=params.at("name");
@@ -1080,6 +1221,7 @@ bool Command(Job& job) {
     GameJournal::Source source("mcp");
     if(method=="quit") {
         if(!NGame::CanQuit())throw std::runtime_error("game refused to quit");
+        ResetCamera();
         job.quitRequested=true;
         job.response={{"ok",true},{"status","accepted"},{"truncated",false}};
         return true;
@@ -1234,8 +1376,9 @@ bool Command(Job& job) {
 }
 bool Step(Job& job,Clock::time_point deadline) {
     const auto& method=job.method;const auto& params=job.request.at("params");
+    if(method=="camera")return CameraCommand(job);
     if(IsCommand(method))return Command(job);
-    if(method=="status"){job.response=Status();return true;}
+    if(method=="status")return LiveStatus(job);
     if(method=="perf"){job.response=Perf();return true;}
     if(method=="screenshot")return Screenshot(job,deadline);
     auto& world=theWorldServer;
@@ -1250,6 +1393,7 @@ bool Step(Job& job,Clock::time_point deadline) {
                       {"truncated",truncated}};return true;
     }
     if(method=="lod")return Lod(job,deadline,world,params);
+    if(method=="render_state")return RenderState(job,deadline,world,params);
     if(method=="units")return Units(job,deadline,world,params);
     if(method=="globals")return Globals(job,deadline,world,params);
     if(method=="nav"||method=="nav_path")return Nav(job,deadline,world,params,method=="nav_path");

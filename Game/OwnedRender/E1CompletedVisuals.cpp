@@ -9,6 +9,7 @@
 #include "../Object3DClientSpecific.h"
 #include "../Unit.h"
 #include "../ModEncounter.h"
+#include "../LiveObserver.h"
 #include "../UnitClientSpecific.h"
 #include "embedded_host.h"
 
@@ -122,7 +123,9 @@ bool completeVisualFrame(owned::RetainedVisualFrame& frame, bool combat) noexcep
 }
 }
 bool E1CompleteVisualFrame(owned::RetainedVisualFrame& frame) noexcept {
-    return completeVisualFrame(frame, true);
+    const bool completed=completeVisualFrame(frame, true);
+    if(completed)LiveObserver::ObserveVisuals(frame);
+    return completed;
 }
 bool E1CompleteAmbientFrame(owned::RetainedVisualFrame& frame) noexcept {
     return completeVisualFrame(frame, false);
