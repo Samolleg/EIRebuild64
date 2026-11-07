@@ -87,6 +87,8 @@ void Renderer::begin_scene_game(){
 #ifndef EID3D11_EMBEDDED
  if(!bridge_set_world_map_previews(this,configured_boolean(debug_overlay_.config(),"world_map_previews",false)))
   (void)debug_overlay_.config().set_boolean("world_map_previews",false);
+#else
+ sync_embedded_world_map_preview_option();
 #endif
  // Owned party portraits are chosen on the game thread (engine_bridge.cpp),
  // in core mode too, where begin_scene_renderer runs on the host.

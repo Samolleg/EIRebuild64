@@ -18,6 +18,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "I3DMain.h"
 #include "WorldInterface.h"
 #include "WorldClient.h"
+#include "WorldServer.h"
 #include "PlayerClient.h"
 #include "Unit.h"
 #include "PlayerManager.h"
@@ -940,6 +941,11 @@ BOOL CPlayerClient::PrsNewInterface()
     }
     iface = (EInterface)nInterface;
     pPlayer->curInterface = iface;
+    // Saved-map adoption logs in again; restore the camp state before autosave
+    // and before FinishCamp can send the normal party redeployment command.
+    if (iface == IFACE_GLOBAL_MAP && theWorldServer.GetServerMode() == SERV_MODE_LOCAL &&
+        (theWorldServer.curInterface == IFACE_MISSION || theWorldServer.curInterface == IFACE_BASE))
+        status = CPS_CAMP;
     theInterface.ActivateScreen(iface);
     theWorld.SetSegmentTimeCounter(nSegmentCounter);
     if (iface == IFACE_BASE)

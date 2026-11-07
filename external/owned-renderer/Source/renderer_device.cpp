@@ -822,9 +822,7 @@ config.register_integer("render_thread_frame_latency","Scene thread frame latenc
 config.register_integer("cull_min_screen_permille","Minimum object size","Performance",5,0,50,1,false,"Objects smaller than this many thousandths of the screen height are not drawn (5 = 0.5%). 0 disables.");
 config.register_integer("shadow_cull_min_texels","Minimum shadow caster size","Performance",2,0,8,1,false,"Sun-shadow casters smaller than this many shadow-map texels are not drawn into the map. 0 disables.");
 config.register_boolean("highlight_briefing","Highlight briefing characters","Highlight",false,false,"On the base screen, characters with something to discuss (and the current speakers) glow with the game's white highlight. Off draws them with normal shading.");config.register_boolean("highlight_selected","Highlight selected characters","Highlight",false,false,"Selected party characters glow with the game's white highlight. Off keeps their normal shading and shadows.");config.register_boolean("highlight_hover_characters","Highlight characters under the cursor","Highlight",true,false,"A softer glow on the character the cursor would act on: briefing characters you can talk to on the base screen, enemies you can attack and spell or steal targets on maps. Follows the game's own cursor decision.");config.register_boolean("highlight_hover_objects","Highlight objects under the cursor","Highlight",true,false,"The same softer glow on what the cursor would use: chests, levers, traps and lootable corpses. Follows the game's own cursor decision.");config.register_integer("cursor_scale","Cursor scale (%)","Interface",100,100,400,25,false,"Size of the game cursor. 100 draws the original pixels exactly; larger sizes are smoothed at the edges.");config.register_integer("pillarbox_fill","Pillarbox fill","Interface",1,0,1,1,false,"Loading screens and movies made for another screen shape are shown at their own shape. 0 fills the bars black, 1 with a soft, darkened blur of the same picture.");config.register_integer("ui_scale","UI scale (%)","Interface",100,50,120,5,false,"Size of the in-mission HUD (map, portrait, weapons, spells, skills, stance wheel, clock, chat). Adjusts immediately from 50% to 120% around each screen corner, including clickable areas. Menus, inventory, shops and dialogs keep their size.");config.register_floating_point("message_panel_width","Message panel width (%)","HUD layout",100.f,50.f,800.f,.1f,false,"Logical width of the loot and quest message panel. Resizing reflows its text.");
-#ifndef EID3D11_EMBEDDED
 config.register_boolean("world_map_previews","World map previews","Interface",false,false,"Terrain and scenery previews for world-map locations. Prepared while a location loads.");
-#endif
 config.register_boolean("portrait_head","Party portraits: real head","Interface",true,false,"The party portraits show each member's own head and hair (strand hair, materials, expressions) through the game's face animation instead of the baked portrait faces. A portrait that cannot be drawn shows its face magenta.");config.register_boolean("portrait_helmet","Party portraits: helmet","Interface",false,false,"Portraits wear the helmet the member wears. Off (the original look) shows the bare head and hair.");
 config.register_integer("hud_fade_duration","HUD fade-out duration (ms)","Interface",250,0,10000,50,false,"Shared fade-out duration for all widgets after the idle delay. 0 makes the transition immediate.");
 config.register_integer("hud_fade_in_duration","HUD fade-in duration (ms)","Interface",250,0,2000,50,false,"Shared fade-in duration on hover or meaningful updates. 0 restores visibility immediately. Repeated updates keep the fade moving.");
@@ -959,6 +957,8 @@ void Renderer::apply_config_settings(){
 if(!core_mode_&&!bridge_set_world_map_previews(this,configured_boolean(config,"world_map_previews",false)))
  (void)config.set_boolean("world_map_previews",false);
 bridge_set_camera_pan_smoothing(configured_boolean(config,"camera_pan_smoothing",false));
+#elif !defined(EID3D11_SHADER_EMBED)
+ sync_embedded_world_map_preview_option();
 #endif
 camp_inventory_set_wide(configured_integer(config,"camp_ui_layout",1)!=0);
 #ifdef EID3D11_EMBEDDED
@@ -3348,6 +3348,8 @@ void Renderer::release() {
  bridge_clear_world_map_previews(this);
 #endif
  world_map_preview_.deactivate();
+ world_map_preview_generation_ = 0;
+ world_map_preview_reasons_.clear();
  scene_thread_.reset();
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
  dlss_backend_.shutdown(); // no remaining frame calls; before any device resources are released

@@ -551,22 +551,26 @@ static bool CountTime()
     for (;;)
     {
         bool bBreak = true;
-        if (dwPassedTime >= DW_SEGMENT_TIME)
+        // Screen replacement inside Segment can reset DW_SEGMENT_TIME.
+        // Charge the interval admitted here, not the new screen's interval.
+        const DWORD serverSegmentTime = DW_SEGMENT_TIME;
+        if (dwPassedTime >= serverSegmentTime)
         {
             bBreak = false;
             if (!theWorldServer.Segment())
                 return true;
-            dwPassedTime -= DW_SEGMENT_TIME;
+            dwPassedTime -= serverSegmentTime;
         }
 
-        if (dwClientPassedTime >= DW_SEGMENT_TIME)
+        const DWORD clientSegmentTime = DW_SEGMENT_TIME;
+        if (dwClientPassedTime >= clientSegmentTime)
         {
             if (theWorld.HasPacket() || !theWorld.IsConnected())
             {
                 bBreak = false;
                 if (!theWorld.Segment())
                     return true;
-                dwClientPassedTime -= DW_SEGMENT_TIME;
+                dwClientPassedTime -= clientSegmentTime;
             }
         }
 

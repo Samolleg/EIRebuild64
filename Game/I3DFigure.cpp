@@ -5,6 +5,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "I3DFigure.h"
 #include "Renderer.h"
 #include "OwnedRender/E4Camp.h"
+#include "OwnedRender/GlobalMapPreview.h"
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CI3DFigure::Create()
 {
@@ -41,6 +42,7 @@ BOOL CI3DFigure::Draw(CRenderer *pRend)
     if (!IsVisible())
         return TRUE;
 
+    OwnedRender::GlobalMapPreview::MarkerScope mapMarker(this, pRend);
     CDXGeometryProcessor *pGPU = pRend->GetGPU();
     BOOL bCheck = FALSE;
     SHMatrix matrix;
@@ -61,7 +63,8 @@ BOOL CI3DFigure::Draw(CRenderer *pRend)
     DWORD dwOldAmbient = pRend->GetAmbientColor();
     pRend->SetAmbientColor(ambientLight.x, ambientLight.y, ambientLight.z);
     // draw figure
-    bCheck = pRend->DrawFigure(this, QNULL, CPlot3D(0, 0, 0), pMaterial, 255, FALSE);
+    bCheck = OwnedRender::GlobalMapPreview::SubmitSection(this, pRend) ||
+        pRend->DrawFigure(this, QNULL, CPlot3D(0, 0, 0), pMaterial, 255, FALSE);
     pRend->SetAmbientColor(dwOldAmbient);
     if (bCheck == FALSE)
         return ReportError("CI3DFigure::Draw.\n CFigure::Draw failed.\n");

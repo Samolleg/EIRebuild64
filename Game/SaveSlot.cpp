@@ -811,7 +811,7 @@ bool Slot::Load(const char *name)
         Commit(std::move(state));
         GameJournal::Event("SAVE","loaded","slot=%s",GameJournal::Quote(name).c_str());
         return true;
-    }catch(const Error &e){ReportError("Save64: %s",e.code==ErrorCode::Incompatible?"Несовместимое сохранение":e.what());return false;}
+    }catch(const Error &e){ReportError("Save64: %s",e.what());return false;}
     catch(const std::exception &e){ReportError("Save64: %s",e.what());return false;}
     catch(CException *e){e->Delete();ReportError("Save64: file or memory error");return false;}
 }

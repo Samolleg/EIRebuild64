@@ -2,6 +2,7 @@
 #include "CorePerf.h"
 #include "widescreen_layout.h"
 #include "GameJournal.h"
+#include "OwnedRender/GlobalMapPreview.h"
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "I3DScreenEcsapeMenu.h"
@@ -32,6 +33,9 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "dx11/Surface.h"
 #include "dx11/RendererDX11.h"
 #include <vector>
+#include <chrono>
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
 /////////////////////////////////////////////////////////////////////////////////////
 const int GM_NF = 3;
 const int GM_NA = 3;
@@ -44,6 +48,10 @@ void CI3DScreenGlobalMap::StoreSpecific()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenGlobalMap::OnActivate()
 {
+    const auto activationStart = std::chrono::steady_clock::now();
+    PROCESS_MEMORY_COUNTERS_EX memoryBefore = {}; memoryBefore.cb = sizeof(memoryBefore);
+    const bool memoryBeforeValid = GetProcessMemoryInfo(GetCurrentProcess(),
+        reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memoryBefore), sizeof(memoryBefore)) != FALSE;
     // The global map has no hero objects; the followed carrier belonged to the departed zone.
     // Detach before any manual save or activation autosave captures the camera.
     theCamera.ResetTracking();
@@ -355,6 +363,7 @@ void CI3DScreenGlobalMap::OnActivate()
     pCloudGen->Init();
 
     ApplyCloudsParams();
+    OwnedRender::GlobalMapPreview::Activate(this, GetRenderer());
     OnIdle();
     hSnd = pI3D->BeginFX("buttons\\globalmap\\wind.wav", TRUE);
 
@@ -365,10 +374,24 @@ void CI3DScreenGlobalMap::OnActivate()
         bNeedAutosave = false;
     }
     pI3D->CheckTutorial();
+    const double activationMs = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - activationStart).count();
+    PROCESS_MEMORY_COUNTERS_EX memoryAfter = {}; memoryAfter.cb = sizeof(memoryAfter);
+    const bool memoryValid = GetProcessMemoryInfo(GetCurrentProcess(),
+        reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memoryAfter), sizeof(memoryAfter)) != FALSE && memoryBeforeValid;
+    const double mib = 1024.0 * 1024.0;
+    GameJournal::Event("RENDER", "world_map_preview_activate",
+        "activate_ms=%.3f private_mb=%.3f private_delta_mb=%.3f working_set_mb=%.3f working_set_delta_mb=%.3f memory_valid=%u",
+        activationMs, double(memoryAfter.PrivateUsage) / mib,
+        memoryValid ? (double(memoryAfter.PrivateUsage) - double(memoryBefore.PrivateUsage)) / mib : 0.0,
+        double(memoryAfter.WorkingSetSize) / mib,
+        memoryValid ? (double(memoryAfter.WorkingSetSize) - double(memoryBefore.WorkingSetSize)) / mib : 0.0,
+        memoryValid ? 1u : 0u);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenGlobalMap::OnDeactivate()
 {
+    OwnedRender::GlobalMapPreview::Deactivate(this, GetRenderer());
     if (pCloudGen)
         delete pCloudGen;
     pCloudGen = 0;
@@ -423,6 +446,8 @@ BOOL CI3DScreenGlobalMap::Draw(CRenderer *pRend)
 {
     CorePerf::Scope coreTiming(CorePerf::ScreenGlobalMap);
     pRend->GetD3D()->BeginInterface();
+    OwnedRender::GlobalMapPreview::DrawScope preview(this, pRend);
+    if (!preview.Ready()) return TRUE;
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHABLENDENABLE, TRUE);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, FALSE);
     pI3D->GetRenderer()->SetRenderState(D3DRENDERSTATE_SRCBLEND, D3DBLEND_SRCALPHA);
@@ -545,6 +570,7 @@ void CI3DScreenGlobalMap::OnIdle()
     time = fTime / 30;
     figures[GM_NF + nTotal + 2]->SetUShift(time - (int)time);
 
+    OwnedRender::GlobalMapPreview::Refresh(this, GetRenderer());
     if (bGenerateHitTestDDS)
         GenerateHitTestDDS();
     bGenerateHitTestDDS = FALSE;
@@ -649,6 +675,7 @@ void CI3DScreenGlobalMap::OnLButtonDown(UINT nFlags, CPoint point)
         return;
     }
     // after all checks we try to detect, which zone is under cursor
+    RefreshPreviewHitTest();
     color = pHitTestDDS->GetPixel(owned::widescreen::hit_surface_pixel(float(point.x),0.f,1.f),
             owned::widescreen::hit_surface_pixel(float(point.y),0.f,1.f));
     nCurZone = int((color >> 4) & 0x0000000f) - 1;
@@ -767,6 +794,7 @@ void CI3DScreenGlobalMap::OnMouseMove(UINT nFlags, CPoint point)
         {
             // hittest for zone
 
+            RefreshPreviewHitTest();
             DWORD color = pHitTestDDS->GetPixel(owned::widescreen::hit_surface_pixel(float(point.x),0.f,1.f),
             owned::widescreen::hit_surface_pixel(float(point.y),0.f,1.f));
             nCurZone = int((color >> 4) & 0x0000000f) - 1;
@@ -897,8 +925,18 @@ void CI3DScreenGlobalMap::OnKeyDown(UINT nChar, UINT nRepCnt, UINT nFlags)
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+void CI3DScreenGlobalMap::RefreshPreviewHitTest()
+{
+    if (OwnedRender::GlobalMapPreview::Refresh(this, GetRenderer()))
+    {
+        GenerateHitTestDDS();
+        bGenerateHitTestDDS = FALSE;
+    }
+}
+/////////////////////////////////////////////////////////////////////////////////////
 void CI3DScreenGlobalMap::GenerateHitTestDDS()
 {
+    OwnedRender::GlobalMapPreview::HitTestScope previewMask;
     int i, j;
     if (!pHitTestDDS)
         return;
