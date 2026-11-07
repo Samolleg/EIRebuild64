@@ -87,10 +87,12 @@ CGameBase *Registry::MapObject(int id) const
 {
     if (id == -1) return nullptr;
     if (id < 0 || !gameObjects.map)
-        throw Error(ErrorCode::Identity, "map object writer not bound or invalid map ID");
+        throw Error(ErrorCode::Identity, "map object writer not bound or invalid map ID: map_id=" + std::to_string(id));
     CGameBase *object = gameObjects.map(id);
     if (!dynamic_cast<CMapObject *>(object) || object->GetID() != id)
-        throw Error(ErrorCode::Identity, "dangling runtime map ID");
+        throw Error(ErrorCode::Identity, "dangling runtime map ID: map_id=" + std::to_string(id) +
+            " resolved_type=" + (object ? typeid(*object).name() : "missing") +
+            " resolved_object_id=" + std::to_string(object ? object->GetRTID() : 0));
     return object;
 }
 const Type &Registry::Find(std::uint32_t id) const
@@ -376,7 +378,11 @@ void Store(CSave &file, const Registry &registry, const std::function<void(Write
             auto *object = state.objects.at(record.id).GetPtr();
             record.type = registry.Id(*object);
             Writer writer(record.body, state);
-            registry.Find(record.type).store(writer, *object);
+            try { registry.Find(record.type).store(writer, *object); }
+            catch (const Error &error) {
+                throw Error(error.code, std::string(error.what()) + "; owner_type=" + typeid(*object).name() +
+                    " owner_object_id=" + std::to_string(record.id));
+            }
             record.length = static_cast<std::uint32_t>(record.body.size());
             records.emplace(record.id, std::move(record));
         }
@@ -390,7 +396,11 @@ void Store(CSave &file, const Registry &registry, const std::function<void(Write
             record.runtimeType = static_cast<std::uint32_t>(object->GetTypeID());
             record.mapId = object->GetID(); record.subtype = object->GetSubtypeID(); record.flags = object->GetFlags();
             Writer writer(record.body, state);
-            registry.FindGame(record.type).store(writer, *object);
+            try { registry.FindGame(record.type).store(writer, *object); }
+            catch (const Error &error) {
+                throw Error(error.code, std::string(error.what()) + "; owner_type=" + typeid(*object).name() +
+                    " owner_object_id=" + std::to_string(record.id) + " owner_map_id=" + std::to_string(record.mapId));
+            }
             record.length = static_cast<std::uint32_t>(record.body.size());
             games.emplace(record.id, std::move(record));
         }

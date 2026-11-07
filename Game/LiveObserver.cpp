@@ -21,6 +21,10 @@
 #include "I3DScreenMission.h"
 #include "I3DScreenBase.h"
 #include "I3DScreenGlobalMap.h"
+#include "I3DScreenMainMenu.h"
+#include "I3DScreenCamp.h"
+#include "I3DScreenDebug.h"
+#include "I3DScreenEndGame.h"
 #include "GameMain.h"
 #include "OwnedRender/E2Host.h"
 #include "OwnedRender/E3Input.h"
@@ -789,6 +793,18 @@ void UpdateOperationReadiness() {
     }
     operation.state="done";operation.stage="done";operation.inFlight=false;
 }
+int CurrentScreenMode() {
+    const auto* screen=theInterface.GetCurrentScreen();
+    if(!screen)return IFACE_NONE;
+    if(dynamic_cast<const CI3DScreenMission*>(screen))return IFACE_MISSION;
+    if(dynamic_cast<const CI3DScreenMainMenu*>(screen))return IFACE_MAINMENU;
+    if(dynamic_cast<const CI3DScreenBase*>(screen))return IFACE_BASE;
+    if(dynamic_cast<const CI3DScreenGlobalMap*>(screen))return IFACE_GLOBAL_MAP;
+    if(dynamic_cast<const CI3DScreenCamp*>(screen))return IFACE_CAMP;
+    if(dynamic_cast<const CI3DScreenDebug*>(screen))return IFACE_DEBUG;
+    if(dynamic_cast<const CI3DScreenEndGame*>(screen))return IFACE_ENDGAME;
+    return -1; // A modal/auxiliary screen has no EInterface value.
+}
 json Status() {
     UpdateOperationReadiness();
     auto& world=theWorldServer;const auto& perf=CorePerf::Get();
@@ -799,7 +815,7 @@ json Status() {
                 {"camera",nullptr},{"camera_mode","normal"},{"camera_reason","operation_only"},
                 {"map_loaded",false},{"god",nullptr},{"operation",currentOperation},{"truncated",false}};
     static const char* const screens[]={"none","mission","main_menu","base","global_map","camp","autoplay","debug","endgame","exchange"};
-    const int screen=int(world.curInterface);
+    const int screen=CurrentScreenMode();
     const bool combat=world.IsCombatPause(),modal=theInterface.GetModalPause(),editor=OwnedRender::E3EditorPaused();
     const bool background=OwnedRender::E2BackgroundPaused(NGame::hWnd);
     const auto* player=world.bMapLoaded?world.GetPlayer(0):nullptr;
