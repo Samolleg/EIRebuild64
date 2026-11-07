@@ -2144,6 +2144,9 @@ void CModPackage::LoadSkillCooldowns(){
  auto*p=theWorldServer.GetPlayer(0);if(p)skillCooldowns.Load(theWorldServer.GetSpecificManager(),theWorldServer.GetSegmentTimeCounter(),std::string((LPCSTR)theWorldServer.szMobFileName),p->party.vars);
 }
 int CModPackage::SkillCooldown(CUnit&unit,CSpell*spell){return !spell||!spell->GetPrototype()?0:skillCooldowns.Remaining(theWorldServer.GetSpecificManager(),theWorldServer.GetSegmentTimeCounter(),unit.GetID(),(LPCSTR)spell->GetPrototype()->szCodeName);}
+int CModPackage::SkillCooldownSnapshot(CUnit&unit,CSpell*spell)const{
+ return !spell||!spell->GetPrototype()?0:skillCooldowns.Peek(theWorldServer.GetSpecificManager(),theWorldServer.GetSegmentTimeCounter(),unit.GetID(),(LPCSTR)spell->GetPrototype()->szCodeName);
+}
 void CModPackage::StartSkillCooldown(CUnit&unit,CSpell*spell,const ModSkills::Config&config){if(spell&&spell->GetPrototype())skillCooldowns.Start(theWorldServer.GetSpecificManager(),theWorldServer.GetSegmentTimeCounter(),unit.GetID(),(LPCSTR)spell->GetPrototype()->szCodeName,config.Duration(),config.requiredArchery<0);}
 bool CModPackage::SkillReady(CUnit&unit,CSpell*spell,const ModSkills::Config&config,bool server){
  auto*w=unit.GetCurrentQWeapon();if(!w||!config.Weapon(w->GetWeaponType()))return false;

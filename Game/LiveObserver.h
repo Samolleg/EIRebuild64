@@ -4,6 +4,7 @@
 struct ID3D11DeviceContext;
 struct IDXGISwapChain;
 class CParticle;
+class CUnit;
 struct CPlot3D;
 struct SBoundingVolume;
 namespace OwnedRender { struct E1WorldFrame; }
@@ -46,6 +47,12 @@ bool IsOperation(const char* method) noexcept;
 void OperationExecuting(const char* method) noexcept;
 void OperationApplied(const char* method, bool success) noexcept;
 void RecordError(const char* text, const char* extra) noexcept;
+// Passive local command receipts; non-MCP orders retain their original path.
+bool IsPlayerOrder(int id, int packet) noexcept;
+bool CheckPlayerOrder(int id, int packet) noexcept;
+void PlayerOrderResult(int id, int packet, const char* error = nullptr) noexcept;
+void PlayerOrderRefusal(int id, unsigned code) noexcept;
+void ObserveHit(int attacker, int target, float damage, int outcome, int critical) noexcept;
 // Process-local protection after the first MCP command; not a config toggle.
 std::string ProtectedSaveSlot(const char* name);
 // Called on the game thread at the completed backbuffer/present boundary.
