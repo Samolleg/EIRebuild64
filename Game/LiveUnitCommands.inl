@@ -270,6 +270,27 @@ bool Abilities(Job& job,Clock::time_point deadline) {
         point=CommandPoint(params);destination=&point;
     }
     auto* server=dynamic_cast<CUnitServer*>(unit->GetUnitSpecific());
+    if(!job.response.contains("attack")&&server) {
+        const int cooldown=(std::max)(0,LiveSnapshotAccess::AttackReady(*server)-theWorldServer.GetSegmentTimeCounter());
+        const float range=server->GetCurrentWeaponRange();
+        auto* weapon=unit->GetCurrentQWeapon();
+        json reasons=json::array();const auto actor=ActorError(id);
+        if(!actor.empty())reasons.push_back(actor);
+        if(target&&(target==unit||target->IsDead()))reasons.push_back("invalid_attack_target");
+        const bool available=reasons.empty();json distance=nullptr,inRange=nullptr;
+        if(target) {
+            const auto delta=target->GetCP()-unit->GetCP();distance=std::sqrt(double(delta.x)*delta.x+double(delta.y)*delta.y);
+            inRange=distance.get<double>()<=range;
+        }
+        if(!target)reasons.push_back("unit_target_not_supplied");
+        else if(!inRange.get<bool>())reasons.push_back("out_of_range");
+        if(cooldown>0)reasons.push_back("cooldown");
+        job.response["attack"]={{"available",available},{"can_execute_here",reasons.empty()},
+            {"execution_reasons",reasons},{"natural",weapon==nullptr},{"weapon_type",int(unit->GetCurrentWeaponType())},
+            {"weapon",weapon?json("weapon:"+std::to_string(unit->GetCurrentWeaponSlotIndex())):json(nullptr)},
+            {"range",range},{"range_basis","current_weapon_or_RPG_natural_range; final_reach_is_game_owned"},
+            {"distance",distance},{"in_range",inRange},{"cooldown_ticks",cooldown},{"approaches_target",true}};
+    }
     const int spells=(std::min)(int(unit->GetSpellSlotCount()),32);
     while(Clock::now()<deadline) {
         const int slot=int(job.item++);
