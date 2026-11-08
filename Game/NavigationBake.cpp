@@ -26,6 +26,7 @@
 #include "nlohmann/json.hpp"
 #pragma comment(lib,"bcrypt.lib")
 using namespace Navigation;
+std::function<void()> NavigationBake::overlap;
 unsigned NavigationBake::tileCells=96;
 std::filesystem::path NavigationBake::reportDirectory;
 std::filesystem::path NavigationBake::replayInput;
@@ -361,7 +362,7 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
         grid.width=unsigned(x1-grid.x+1);grid.height=unsigned(y1-grid.y+1);grid.base=terrain.minimum.y-2;
         grid.heights.assign(size_t(grid.width)*grid.height,0xffff);
         for(const auto& cell:canopy) {
-            const int height=int(std::floor((cell.second-grid.base)/Agents[Small].profile.cellHeight));
+            const int height=int(std::floor((cell.second-grid.base)/Agents[Human].profile.cellHeight));
             if(height<0||height>=0xffff)throw std::runtime_error("Nav64: canopy height outside grid range");
             grid.heights[size_t(cell.first.second-grid.y)*grid.width+cell.first.first-grid.x]=static_cast<std::uint16_t>(height);
         }
@@ -527,17 +528,24 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
     }
     // Initial dynamic occupancy is baked once; later worker rebuilds use the
     // static source triangles plus the current live obstacle snapshot.
-    auto built=Navigation::BuildProfiles(initial,requests);
+    auto pending=std::async(std::launch::async,[&]{return Navigation::BuildProfiles(initial,requests);});
+    if(overlap)overlap();
+    auto built=pending.get();
     for(auto& mesh:built){mesh->sources=sources;IndexSurfaces(*mesh);}
     std::uint64_t totalBytes=0;std::vector<Navigation::Bytes> outputs(AgentCount);
     for(int type=0;type<AgentCount;++type) {
         auto& mesh=*built[type];mesh.mapName=mapName;mesh.mobName=mobName;mesh.profileId=Agents[type].name;CheckReleaseHeights(mesh);
     }
-    auto serialize=[&](int first){for(int type=first;type<AgentCount;type+=2)outputs[type]=Navigation::Store(*built[type]);};
+    std::array<std::uint64_t,AgentCount> storeMs{},writeMs{};
+    auto serialize=[&](int first){for(int type=first;type<AgentCount;type+=2) {
+        const auto start=std::chrono::steady_clock::now();outputs[type]=Navigation::Store(*built[type]);
+        storeMs[type]=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
+    }};
     auto parallel=std::async(std::launch::async,[&]{serialize(1);});serialize(0);parallel.get();
     for(int type=0;type<AgentCount;++type) {
         auto ready=Navigation::Load(outputs[type],built[type]->profile,mapName,mobName,Agents[type].name);
         ready->buildMs=built[type]->buildMs;ready->rasterMs=built[type]->rasterMs;ready->polygonMs=built[type]->polygonMs;
+        ready->stagesMs=built[type]->stagesMs;
         ready->sources=sources;IndexSurfaces(*ready);built[type]=std::move(ready);
         totalBytes+=outputs[type].size();
     }
@@ -639,11 +647,16 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
     for(const auto& entry:normalizedBounds)printf("BOUNDS_NORMALIZED mpr=%s mob=%s %s\n",mapName.c_str(),mobName.c_str(),entry.c_str());
     for(int type=0;type<AgentCount;++type) {
         const auto& mesh=*built[type];const auto& bytes=outputs[type];
+        const auto writeStart=std::chrono::steady_clock::now();
         Atomic(directory/Navigation::MeshFilename(mapName,mobName,type),bytes);
-        printf("PROFILE map=%s mob=%s type=%s radius=%.2f tiles=%u ms=%llu raster_cpu_ms=%llu polygons_cpu_ms=%llu bytes=%zu height_outliers=0\n",
+        writeMs[type]=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-writeStart).count();
+        unsigned polygons=0;const dtNavMesh& data=*mesh.data;
+        for(int i=0;i<data.getMaxTiles();++i)if(const auto* h=data.getTile(i)->header)polygons+=h->polyCount;
+        printf("PROFILE map=%s mob=%s type=%s radius=%.2f tiles=%u ms=%llu raster_cpu_ms=%llu polygons_cpu_ms=%llu bytes=%zu polygons=%u recast_raster_ms=%llu filters_compact_ms=%llu erosion_ms=%llu regions_contours_polys_ms=%llu detail_ms=%llu serialize_compress_ms=%llu write_ms=%llu height_outliers=0\n",
             mapName.c_str(),mobName.c_str(),Agents[type].name,mesh.profile.radius,mesh.tiles,
             static_cast<unsigned long long>(mesh.buildMs),static_cast<unsigned long long>(mesh.rasterMs),
-            static_cast<unsigned long long>(mesh.polygonMs),bytes.size());
+            static_cast<unsigned long long>(mesh.polygonMs),bytes.size(),polygons,
+            mesh.stagesMs[0],mesh.stagesMs[1],mesh.stagesMs[2],mesh.stagesMs[3],mesh.stagesMs[4],storeMs[type],writeMs[type]);
         fflush(stdout);
     }
     const auto decoded=LoadSources(sourceBytes);

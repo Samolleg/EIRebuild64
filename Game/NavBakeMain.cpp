@@ -22,6 +22,9 @@
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <functional>
+#include <psapi.h>
+#pragma comment(lib,"psapi.lib")
 
 namespace {
 using Clock=std::chrono::steady_clock;
@@ -37,11 +40,14 @@ int wmain(int argc,wchar_t** argv) {
     // Flush stdout after every map/profile so the mapper can show progress.
     std::map<std::wstring,std::filesystem::path> options;
     bool all=false;
+    std::vector<std::filesystem::path> selectedMaps;
     for(int i=1;i<argc;++i) {
         const std::wstring name=argv[i];
         if(name==L"--all"){if(all)return 2;all=true;continue;}
         if(name!=L"--game-root"&&name!=L"--mod"&&name!=L"--map"&&name!=L"--model"&&name!=L"--mob"&&name!=L"--output-root"&&name!=L"--report-root"&&name!=L"--tile-cells"&&name!=L"--replay-input")return 2;
-        if(i+1>=argc||options.count(name))return 2;
+        if(i+1>=argc)return 2;
+        if(name==L"--map"){selectedMaps.emplace_back(argv[++i]);options[name]=selectedMaps.back();continue;}
+        if(options.count(name))return 2;
         options[name]=argv[++i];
     }
     if(!options.count(L"--game-root")||!options.count(L"--mod")||!options.count(L"--output-root")||!options.count(L"--report-root")||
@@ -93,8 +99,11 @@ int wmain(int argc,wchar_t** argv) {
             }
             maps.emplace(GameScenes::MenuTerrain,GameScenes::MenuObjects);
         } else {
-            const auto map=Extension(options.at(L"--map").string(),".mpr");
-            maps.emplace(map,options.count(L"--mob")?Extension(options.at(L"--mob").string(),".mob"):Extension(map,".mob"));
+            if(selectedMaps.size()>1&&options.count(L"--mob"))return 2;
+            for(const auto& selected:selectedMaps) {
+                const auto map=Extension(selected.string(),".mpr");
+                maps.emplace(map,options.count(L"--mob")?Extension(options.at(L"--mob").string(),".mob"):Extension(map,".mob"));
+            }
         }
         const auto total=Clock::now();unsigned completed=0,errors=0,missing=0,skipped=0;std::uint64_t totalBytes=0;
         exitCode=4;
@@ -127,7 +136,31 @@ int wmain(int argc,wchar_t** argv) {
         }
         const auto initialBodyBytes=bodyTable.size();
         printf("BAKE_BEGIN maps=%zu output=%s algorithm=%u\n",maps.size(),output.string().c_str(),Navigation::AlgorithmVersion);fflush(stdout);
-        for(const auto& map:maps) {
+        MEMORYSTATUSEX memory{};memory.dwLength=sizeof(memory);
+        if(!GlobalMemoryStatusEx(&memory))throw std::runtime_error("Cannot query physical memory");
+        // The measured old zone7 peak is below 2 GiB. Reserve twice that per
+        // resident map plus 32 MiB per tile worker, shared across all maps.
+        const std::uint64_t mapReserve=4ull*1024*1024*1024;
+        const std::uint64_t memoryBudget=memory.ullTotalPhys/2;
+        SYSTEM_INFO cpu{};GetSystemInfo(&cpu);
+        const auto tileReserve=std::uint64_t(cpu.dwNumberOfProcessors)*32*1024*1024;
+        const unsigned mapLimit=unsigned((std::max)(std::uint64_t(1),(memoryBudget>tileReserve?memoryBudget-tileReserve:0)/mapReserve));
+        unsigned active=0;auto nextMap=maps.begin();
+        std::function<void()> bakeNext;
+        NavigationBake::overlap=[&] {
+            while(nextMap!=maps.end()&&active<mapLimit) {
+                PROCESS_MEMORY_COUNTERS_EX peak{};peak.cb=sizeof(peak);
+                if(!GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&peak),sizeof(peak)))
+                    throw std::runtime_error("Cannot query bake memory");
+                if(peak.PeakWorkingSetSize+mapReserve>memoryBudget)break;
+                bakeNext();
+            }
+        };
+        struct ResetOverlap {~ResetOverlap(){NavigationBake::overlap={};}} resetOverlap;
+        printf("BAKE_MEMORY budget=%llu map_reserve=%llu maps_in_flight=%u\n",memoryBudget,mapReserve,mapLimit);
+        bakeNext=[&] {
+            const auto map=*nextMap++;
+            ++active;struct ReleaseSlot {unsigned& active;~ReleaseSlot(){--active;}} releaseSlot{active};
             const auto start=Clock::now();
             printf("MAP_BEGIN mpr=%s mob=%s\n",map.first.c_str(),map.second.c_str());fflush(stdout);
             try {
@@ -139,14 +172,14 @@ int wmain(int argc,wchar_t** argv) {
                     ++missing;
                     fprintf(stderr,"MAP_MISSING mpr=%s mob=%s code=5 mpr_present=%d mob_present=%d reason=no_sources\n",
                         map.first.c_str(),map.second.c_str(),int(haveMpr),int(haveMob));
-                    fflush(stderr);continue;
+                    fflush(stderr);return;
                 }
                 if(!world.Create()||!world.LoadNavigationScene(map.first.c_str(),map.second.c_str()))
                     throw std::runtime_error("Shared MPR/MOB import failed");
                 if(options.count(L"--model")) {
                     const auto selected=Navigation::ResourceName(options.at(L"--model").stem().string().c_str());bool present=false;
                     for(const auto& object:world.mapObjects)if(Navigation::ResourceName(object.second->GetMaskName())==selected){present=true;break;}
-                    if(!present){++skipped;printf("MAP_SKIPPED mpr=%s mob=%s reason=model_absent\n",map.first.c_str(),map.second.c_str());fflush(stdout);continue;}
+                    if(!present){++skipped;printf("MAP_SKIPPED mpr=%s mob=%s reason=model_absent\n",map.first.c_str(),map.second.c_str());fflush(stdout);return;}
                 }
                 const auto importMs=Milliseconds(start);
                 const auto bytes=world.aiMap.Navigation().Bake(output,bodyTable,world);totalBytes+=bytes;
@@ -158,7 +191,8 @@ int wmain(int argc,wchar_t** argv) {
                 fprintf(stderr,"MAP_ERROR mpr=%s mob=%s code=4 ms=%lld reason=%s\n",map.first.c_str(),map.second.c_str(),Milliseconds(start),e.what());
             }
             fflush(stdout);fflush(stderr);
-        }
+        };
+        while(nextMap!=maps.end())bakeNext();
         // Individual MOBs may extend the shared table with non-un* models.
         totalBytes+=bodyTable.size()-initialBodyBytes;
         if(totalBytes>400ull*1024*1024)fprintf(stderr,"BAKE_WARNING reason=campaign_exceeds_400_MiB\n");

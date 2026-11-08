@@ -31,7 +31,10 @@ Location Address(const Mesh& m,Point p,dtPolyRef ref,float height,float referenc
     const dtMeshTile* tile=nullptr;const dtPoly* poly=nullptr;
     if(!m.sources||dtStatusFailed(m.data->getTileAndPolyByRef(ref,&tile,&poly)))return l;
     const auto key=std::make_pair(tile->header->x,tile->header->y);
-    const auto identities=m.polygonSurfaces.find(key);const auto triangles=m.sources->surfaceTriangles.find(key);
+    const auto identities=m.polygonSurfaces.find(key);
+    const auto sourceKey=std::make_pair(int(std::floor((p.x-m.sources->minimum.x)/m.sources->tileWidth)),
+        int(std::floor((p.z-m.sources->minimum.z)/m.sources->tileWidth)));
+    const auto triangles=m.sources->surfaceTriangles.find(sourceKey);
     const size_t index=size_t(poly-tile->polys);
     if(identities==m.polygonSurfaces.end()||index>=identities->second.size()||triangles==m.sources->surfaceTriangles.end())return l;
     const auto& surfaces=identities->second[index];

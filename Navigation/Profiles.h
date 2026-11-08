@@ -4,15 +4,14 @@
 #include <cctype>
 
 namespace Navigation {
-enum AgentType { Small, Human, Large, Giant, Levitate, Flying, AgentCount };
+enum AgentType { Human, Large, Giant, Levitate, Flying, AgentCount };
 struct Agent { const char* name; Profile profile; };
 inline const Agent Agents[]={
-    {"small",          {.1f,.2f,40.f,.35f,.1f,.05f,96,2}},
     {"human",          {.2f,.4f,40.f,.35f,.1f}},
-    {"large",          {.5f,.4f,40.f,.35f,.1f,.05f,96,6}},
-    {"giant",          {1.f,.4f,40.f,.35f,.1f,.05f,96,7}},
-    {"levitate",       {.5f,.2f,60.f,.35f,.1f,.05f,96,0,Movement::Levitate}},
-    {"flying",         {1.f,.2f,90.f,.35f,.1f,.05f,96,0,Movement::Flying}}
+    {"large",          {.5f,.4f,40.f,.35f,.2f,.05f,96,6}},
+    {"giant",          {1.f,.4f,40.f,.35f,.3f,.05f,96,7}},
+    {"levitate",       {.5f,.2f,60.f,.35f,.2f,.05f,96,0,Movement::Levitate}},
+    {"flying",         {1.f,.2f,90.f,.35f,.3f,.05f,96,0,Movement::Flying}}
 };
 // Height selection is shared by unit movement and read-only profile probes.
 inline float LegacyClassHeight(unsigned aiClass) {
@@ -26,7 +25,7 @@ inline float SelectedClearance(const Profile& profile,float height) {
 }
 inline int ProfileForRadius(float radius,bool levitate) {
     if(levitate)return Levitate;
-    const int first=Small,last=Giant;
+    const int first=Human,last=Giant;
     int type=first;for(int i=first+1;i<=last;++i)if(Agents[i].profile.radius<=radius)type=i;
     return type;
 }
