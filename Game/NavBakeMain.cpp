@@ -34,6 +34,64 @@ long long Milliseconds(Clock::time_point start) {
 std::string Extension(std::string name,const char* extension) {
     return std::filesystem::path(name).replace_extension(extension).string();
 }
+// Cooperative map continuations retain importer/release work on this thread.
+// Only the existing tile pool runs concurrently. A ready map can finish while
+// another map is still building, without nesting one map's lifetime in another.
+class MapScheduler {
+    struct Job {
+        MapScheduler* owner;
+        void* fiber=nullptr;
+        CWorldServer* world=nullptr;
+        std::function<void()> work;
+        bool done=false;
+    };
+    void* coordinator;
+    Job* current=nullptr;
+    std::vector<std::unique_ptr<Job>> jobs;
+    std::exception_ptr error;
+    static void WINAPI Entry(void* value) {
+        auto& job=*static_cast<Job*>(value);
+        try {job.work();}catch(...) {job.owner->error=std::current_exception();}
+        job.done=true;
+        SwitchToFiber(job.owner->coordinator);
+    }
+public:
+    MapScheduler():coordinator(ConvertThreadToFiber(nullptr)) {
+        if(!coordinator)throw std::runtime_error("Cannot create map coordinator");
+    }
+    ~MapScheduler() {
+        // Pending futures own references into their fiber's stack. Drain them
+        // even when admission fails, before releasing any stack or callback.
+        while(!jobs.empty()) {
+            try {Poll();}catch(...) {}
+            if(!jobs.empty())Sleep(1);
+        }
+        ConvertFiberToThread();
+    }
+    void Add(std::function<void()> work) {
+        auto job=std::make_unique<Job>();job->owner=this;job->work=std::move(work);
+        job->fiber=CreateFiber(0,Entry,job.get());
+        if(!job->fiber)throw std::runtime_error("Cannot create map continuation");
+        jobs.push_back(std::move(job));
+    }
+    void SuspendMap() {
+        current->world=&ActiveWorldServer();
+        SwitchToFiber(coordinator);
+    }
+    bool Empty() const {return jobs.empty();}
+    void Poll() {
+        for(auto& job:jobs) {
+            current=job.get();
+            SavedWorldScope scope(job->world);
+            SwitchToFiber(job->fiber);
+        }
+        jobs.erase(std::remove_if(jobs.begin(),jobs.end(),[](auto& job) {
+            if(!job->done)return false;
+            DeleteFiber(job->fiber);return true;
+        }),jobs.end());
+        if(error&&jobs.empty())std::rethrow_exception(error);
+    }
+};
 }
 int wmain(int argc,wchar_t** argv) {
     // This executable has no renderer/audio/window/session initialization.
@@ -146,24 +204,17 @@ int wmain(int argc,wchar_t** argv) {
         const auto tileReserve=std::uint64_t(cpu.dwNumberOfProcessors)*32*1024*1024;
         const unsigned mapLimit=unsigned((std::max)(std::uint64_t(1),(memoryBudget>tileReserve?memoryBudget-tileReserve:0)/mapReserve));
         unsigned active=0;auto nextMap=maps.begin();
-        std::function<void()> bakeNext;
-        NavigationBake::overlap=[&] {
-            while(nextMap!=maps.end()&&active<mapLimit) {
-                PROCESS_MEMORY_COUNTERS_EX peak{};peak.cb=sizeof(peak);
-                if(!GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&peak),sizeof(peak)))
-                    throw std::runtime_error("Cannot query bake memory");
-                if(peak.PeakWorkingSetSize+mapReserve>memoryBudget)break;
-                bakeNext();
-            }
-        };
         struct ResetOverlap {~ResetOverlap(){NavigationBake::overlap={};}} resetOverlap;
+        MapScheduler scheduler;
+        NavigationBake::overlap=[&] {scheduler.SuspendMap();};
         printf("BAKE_MEMORY budget=%llu map_reserve=%llu maps_in_flight=%u\n",memoryBudget,mapReserve,mapLimit);
-        bakeNext=[&] {
-            const auto map=*nextMap++;
+        auto bakeNext=[&](const std::pair<std::string,std::string>& map) {
             ++active;struct ReleaseSlot {unsigned& active;~ReleaseSlot(){--active;}} releaseSlot{active};
             const auto start=Clock::now();
             printf("MAP_BEGIN mpr=%s mob=%s\n",map.first.c_str(),map.second.c_str());fflush(stdout);
             try {
+                long long importMs=0;std::uint64_t bytes=0;
+                {
                 CWorldServer world(true);SavedWorldScope worldScope(&world);
                 struct DestroyWorld {CWorldServer& world;~DestroyWorld(){world.Destroy();}} cleanup{world};
                 const bool haveMpr=std::filesystem::is_regular_file(ModRuntime::MapPath(world.GetFullMobName(map.first.c_str())));
@@ -181,8 +232,9 @@ int wmain(int argc,wchar_t** argv) {
                     for(const auto& object:world.mapObjects)if(Navigation::ResourceName(object.second->GetMaskName())==selected){present=true;break;}
                     if(!present){++skipped;printf("MAP_SKIPPED mpr=%s mob=%s reason=model_absent\n",map.first.c_str(),map.second.c_str());fflush(stdout);return;}
                 }
-                const auto importMs=Milliseconds(start);
-                const auto bytes=world.aiMap.Navigation().Bake(output,bodyTable,world);totalBytes+=bytes;
+                importMs=Milliseconds(start);
+                bytes=world.aiMap.Navigation().Bake(output,bodyTable,world);totalBytes+=bytes;
+                }
                 ++completed;
                 printf("MAP_DONE mpr=%s mob=%s import_ms=%lld total_ms=%lld profiles=%u bytes=%llu\n",
                     map.first.c_str(),map.second.c_str(),importMs,Milliseconds(start),unsigned(Navigation::AgentCount),static_cast<unsigned long long>(bytes));
@@ -192,7 +244,19 @@ int wmain(int argc,wchar_t** argv) {
             }
             fflush(stdout);fflush(stderr);
         };
-        while(nextMap!=maps.end())bakeNext();
+        while(nextMap!=maps.end()||!scheduler.Empty()) {
+            if(nextMap!=maps.end()&&active<mapLimit) {
+                PROCESS_MEMORY_COUNTERS_EX peak{};peak.cb=sizeof(peak);
+                if(!GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&peak),sizeof(peak)))
+                    throw std::runtime_error("Cannot query bake memory");
+                if(scheduler.Empty()||peak.PeakWorkingSetSize+mapReserve<=memoryBudget) {
+                    const auto map=*nextMap++;
+                    scheduler.Add([bakeNext,map] {bakeNext(map);});
+                }
+            }
+            scheduler.Poll();
+            if(!scheduler.Empty())Sleep(1);
+        }
         // Individual MOBs may extend the shared table with non-un* models.
         totalBytes+=bodyTable.size()-initialBodyBytes;
         if(totalBytes>400ull*1024*1024)fprintf(stderr,"BAKE_WARNING reason=campaign_exceeds_400_MiB\n");

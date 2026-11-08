@@ -359,6 +359,26 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
     std::array<std::atomic<std::uint64_t>,5> stagesNs{};
     for(auto& stage:stagesNs)stage.store(0);
     auto micros=[](auto begin){return std::uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-begin).count());};
+    // Bound flight polygons to small blocks. A sampled detail mesh can miss an
+    // interior maximum when its vertex budget is exhausted. Every block keeps
+    // the maximum of all source triangles touching it; shared vertices use all
+    // incident blocks, including across tile boundaries. Polygon fans therefore
+    // remain above the entire covered raster, not just its sample locations.
+    constexpr int flightBlockCells=FlightBlockCells;
+    const float flightBlock=p.cellSize*flightBlockCells;
+    std::map<std::pair<int,int>,float> flightTops;
+    if(Flies(p))for(const auto& t:g.ground) {
+        const auto a=ToNav(t.a),b=ToNav(t.b),c=ToNav(t.c);
+        const int x0=int(std::floor((std::min({a.x,b.x,c.x})-g.minimum.x)/flightBlock)),
+            x1=int(std::floor((std::max({a.x,b.x,c.x})-g.minimum.x)/flightBlock)),
+            z0=int(std::floor((std::min({a.z,b.z,c.z})-g.minimum.z)/flightBlock)),
+            z1=int(std::floor((std::max({a.z,b.z,c.z})-g.minimum.z)/flightBlock));
+        const float top=std::max({a.y,b.y,c.y});
+        for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x) {
+            auto inserted=flightTops.emplace(std::make_pair(x,z),top);
+            inserted.first->second=std::max(inserted.first->second,top);
+        }
+    }
     auto tile=[&](int index) {
         const int x=index%nx,z=index/nx;
         if((onlyX>=0&&(x!=onlyX||z!=onlyZ))||inputs[index].triangles.empty())return;
@@ -691,6 +711,8 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
                         for(int d=0;d<4;++d)if(rcGetCon(span,d)!=RC_NOT_CONNECTED) {
                             const int nx=cx+rcGetDirOffsetX(d),nz=cz+rcGetDirOffsetY(d);
                             const unsigned n=field.cells[nx+nz*field.width].index+rcGetCon(span,d);
+                            if(Flies(p)&&(int(std::floor(float(nx-cfg.borderSize)/flightBlockCells))!=int(std::floor(float(ix-cfg.borderSize)/flightBlockCells))||
+                                int(std::floor(float(nz-cfg.borderSize)/flightBlockCells))!=int(std::floor(float(iz-cfg.borderSize)/flightBlockCells))))continue;
                             if(!seen[n]&&old[n]==old[j]&&support[n]==support[j]&&forbidden[n]==forbidden[j]&&field.areas[n]==field.areas[j]){seen[n]=true;stack.emplace_back(nx,nz,n);}
                         }
                     }
@@ -730,7 +752,10 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         // Keep hole boundaries within a quarter cell; one full cell can
         // collapse them to zero signed area and turn holes into outlines.
         const bool classBoundaries=std::any_of(forbidden.begin(),forbidden.end(),[](unsigned short flags){return flags!=0;});
-        cfg.maxSimplificationError=(layered||classBoundaries)?0.f:holes?.25f:1.f;
+        // Solids already cover every partially touched cell (convex hull vs
+        // cell rectangle above). Preserve that coverage for every cell size:
+        // contour approximation must not cut back into a blocked corner.
+        cfg.maxSimplificationError=(layered||classBoundaries||!inputs[index].solids.empty()||Flies(p))?0.f:holes?.25f:1.f;
         auto buildContours=[&](float error) {
             // Same-area region borders are simplified without an error test
             // even at maxError=0. Temporary adjacent-region colors preserve
@@ -888,10 +913,18 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         create.verts=poly.verts;create.vertCount=poly.nverts;create.polys=poly.polys;
         create.polyAreas=poly.areas;create.polyFlags=poly.flags;create.polyCount=poly.npolys;create.nvp=poly.nvp;
         if(Flies(p)) {
-            r.detail=rcAllocPolyMeshDetail();
-            Require(r.detail&&rcBuildPolyMeshDetail(&context,poly,*r.compact,.5f,.05f,*r.detail),"Nav64: flight detail mesh failed");
-            create.detailMeshes=r.detail->meshes;create.detailVerts=r.detail->verts;create.detailVertsCount=r.detail->nverts;
-            create.detailTris=r.detail->tris;create.detailTriCount=r.detail->ntris;
+            for(int i=0;i<poly.nverts;++i) {
+                auto* v=poly.verts+i*3;
+                const int gx=x*int(p.tileCells)+v[0],gz=z*int(p.tileCells)+v[2];
+                const int bx=gx/flightBlockCells,bz=gz/flightBlockCells;
+                float top=g.minimum.y;
+                for(int iz=bz-(gz%flightBlockCells==0);iz<=bz;++iz)
+                    for(int ix=bx-(gx%flightBlockCells==0);ix<=bx;++ix) {
+                        const auto found=flightTops.find({ix,iz});
+                        if(found!=flightTops.end())top=std::max(top,found->second);
+                    }
+                v[1]=static_cast<unsigned short>(std::max(int(v[1]),int(std::ceil((top-poly.bmin[1])/cfg.ch))));
+            }
         }
         create.walkableHeight=p.height;create.walkableRadius=p.radius;create.walkableClimb=p.climb;
         create.tileX=x;create.tileY=z;create.tileLayer=0;

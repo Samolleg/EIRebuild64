@@ -35,7 +35,7 @@ class NavigationBake {
     float GroundHeight(Navigation::Point point);
     const NavigationCanopy& Canopy(const CMapObjectServer& object,const owned::FigureCpuAsset& figure);
 public:
-    // Coordinator runs the next import on its owning thread while tiles build.
+    // Yield to the owning-thread coordinator while this map's tiles build.
     static std::function<void()> overlap;
     static unsigned tileCells;
     static std::filesystem::path reportDirectory;

@@ -5,6 +5,7 @@
 #include <stdexcept>
 
 namespace Navigation {
+inline constexpr int FlightBlockCells=8;
 // Automatic flight is an upper envelope, not a second walkable ground layer.
 // A one-metre lattice conservatively covers each source footprint. Propagating
 // its maxima gives continuous approach/departure ramps, irrespective of the
@@ -24,7 +25,10 @@ inline Geometry FlightGeometry(const Geometry& input,const Profile& profile,int 
     int firstX=0,firstZ=0,lastX=nx-1,lastZ=nz-1;
     int emitX0=0,emitZ0=0,emitX1=nx-1,emitZ1=nz-1;
     if(onlyX>=0&&onlyZ>=0) {
-        const float width=profile.tileCells*profile.cellSize,border=1.3f+cell;
+        // Match the conservative polygon blocks, including the source triangle
+        // beyond their far edge, when rebuilding an isolated runtime tile.
+        const float width=profile.tileCells*profile.cellSize,
+            border=std::max(1.3f+cell,FlightBlockCells*profile.cellSize+cell);
         emitX0=std::max(0,int(std::floor((onlyX*width-border)/cell)));
         emitZ0=std::max(0,int(std::floor((onlyZ*width-border)/cell)));
         emitX1=std::min(nx-1,int(std::ceil(((onlyX+1)*width+border)/cell)));

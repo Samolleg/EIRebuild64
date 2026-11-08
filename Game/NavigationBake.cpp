@@ -529,7 +529,7 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
     // Initial dynamic occupancy is baked once; later worker rebuilds use the
     // static source triangles plus the current live obstacle snapshot.
     auto pending=std::async(std::launch::async,[&]{return Navigation::BuildProfiles(initial,requests);});
-    if(overlap)overlap();
+    if(overlap)while(pending.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready)overlap();
     auto built=pending.get();
     for(auto& mesh:built){mesh->sources=sources;IndexSurfaces(*mesh);}
     std::uint64_t totalBytes=0;std::vector<Navigation::Bytes> outputs(AgentCount);
