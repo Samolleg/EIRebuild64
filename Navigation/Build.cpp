@@ -286,6 +286,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         allAreas.push_back(t.area);
         bin(std::min({a.x,b.x,c.x}),std::min({a.z,b.z,c.z}),std::max({a.x,b.x,c.x}),std::max({a.z,b.z,c.z}),int(i),false);
     }
+    const auto materialAreas=allAreas;
     rcContext classifier(false);std::vector<unsigned char> slopes(allAreas.size(),RC_NULL_AREA);
     rcMarkWalkableTriangles(&classifier,p.slope,allVertices.data(),int(allVertices.size()/3),allIndices.data(),int(allAreas.size()),slopes.data());
     // Material permissions only restrict geometry; they never override slope.
@@ -370,6 +371,41 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         for(int iz=0;iz<raw->height;++iz)for(int ix=0;ix<raw->width;++ix)
             for(auto* span=raw->spans[ix+iz*raw->width];span;span=span->next)
                 Require(rcAddSpan(&context,*r.height,ix,iz,span->smin,span->smax,static_cast<unsigned char>(span->area),0),"Nav64: profile heightfield copy failed");
+        if(!Flies(p)) {
+            // Rasterize permitted surfaces without the slope mask. Solids are
+            // deliberately absent: a low BV top must never become a floor.
+            RawField steps(rcAllocHeightfield(),rcFreeHeightField);
+            Require(steps&&rcCreateHeightfield(&context,*steps,cfg.width,cfg.height,cfg.bmin,cfg.bmax,cfg.cs,cfg.ch),"Nav64: step heightfield allocation failed");
+            for(int ti:inputs[index].triangles)if(materialAreas[ti]) {
+                const int indices[]={0,1,2};const unsigned char area=materialAreas[ti];
+                Require(rcRasterizeTriangles(&context,allVertices.data()+size_t(ti)*9,3,indices,&area,1,*steps,0),"Nav64: step rasterization failed");
+            }
+            struct Step {rcSpan* span;int x,z,anchor;};
+            std::vector<Step> pending;
+            // Original walkable spans are the only anchors. Carry their height
+            // through low faces so a tessellated steep slope cannot climb itself.
+            for(int iz=0;iz<cfg.height;++iz)for(int ix=0;ix<cfg.width;++ix)
+                for(auto* span=r.height->spans[ix+iz*cfg.width];span;span=span->next)
+                    if(span->area)pending.push_back({span,ix,iz,int(span->smax)});
+            for(size_t next=0;next<pending.size();++next) {
+                const auto current=pending[next];
+                for(int dir=0;dir<4;++dir) {
+                    const int ix=current.x+rcGetDirOffsetX(dir),iz=current.z+rcGetDirOffsetY(dir);
+                    if(ix<0||iz<0||ix>=cfg.width||iz>=cfg.height)continue;
+                    for(auto* span=r.height->spans[ix+iz*cfg.width];span;span=span->next) {
+                        if(span->area||std::abs(int(span->smax)-current.anchor)>cfg.walkableClimb)continue;
+                        const int ceiling=span->next?span->next->smin:RC_SPAN_MAX_HEIGHT;
+                        const int otherCeiling=current.span->next?current.span->next->smin:RC_SPAN_MAX_HEIGHT;
+                        if(std::min(ceiling,otherCeiling)-std::max(span->smax,current.span->smax)<cfg.walkableHeight)continue;
+                        for(auto* permitted=steps->spans[ix+iz*cfg.width];permitted;permitted=permitted->next)
+                            if(permitted->area&&permitted->smax==span->smax&&
+                                int(permitted->smax)-int(permitted->smin)<=cfg.walkableClimb) {
+                                span->area=permitted->area;pending.push_back({span,ix,iz,current.anchor});break;
+                            }
+                    }
+                }
+            }
+        }
         raw.reset();
         // Flight clearance is already in the upper envelope. Ground ledge and
         // footprint erosion would remove valid sky beside the map boundary.
@@ -425,11 +461,11 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         auto& field=*r.compact;
         std::vector<std::uint64_t> support(field.spanCount,1);
         bool layered=false;
-        for(int ti:inputs[index].triangles)if(allAreas[ti]&&g.ground[ti].surface>1){layered=true;break;}
+        for(int ti:inputs[index].triangles)if(materialAreas[ti]&&g.ground[ti].surface>1){layered=true;break;}
         if(layered) {
             std::fill(support.begin(),support.end(),0);
             std::vector<float> gaps(field.spanCount,1.e30f);
-            for(int ti:inputs[index].triangles)if(allAreas[ti]&&g.ground[ti].surface) {
+            for(int ti:inputs[index].triangles)if(materialAreas[ti]&&g.ground[ti].surface) {
                 const auto t=Surface(g.ground[ti],p);const Point a=ToNav(t.a),b=ToNav(t.b),c=ToNav(t.c);
                 const int x0=std::max(0,int(std::floor((std::min({a.x,b.x,c.x})-cfg.bmin[0])/cfg.cs))),
                     x1=std::min(field.width-1,int(std::floor((std::max({a.x,b.x,c.x})-cfg.bmin[0])/cfg.cs))),
@@ -466,7 +502,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             // Remove only those mixed edge columns before radius erosion;
             // separate terrain/floor layers are retained unchanged.
             std::map<std::uint64_t,std::vector<int>> planes;
-            for(int ti:inputs[index].triangles)if((allAreas[ti]&&g.ground[ti].surface)||g.ground[ti].terrain)planes[g.ground[ti].surface].push_back(ti);
+            for(int ti:inputs[index].triangles)if((materialAreas[ti]&&g.ground[ti].surface)||g.ground[ti].terrain)planes[g.ground[ti].surface].push_back(ti);
             auto heightAt=[&](std::uint64_t surface,float x,float y,float from=-FLT_MAX) {
                 float result=-FLT_MAX;
                 for(int ti:planes.at(surface)) {
@@ -476,7 +512,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
                     const float u=((x-t.a.x)*by-(y-t.a.y)*bx)/det,v=(ax*(y-t.a.y)-ay*(x-t.a.x))/det;
                     if(u>=-.00001f&&v>=-.00001f&&u+v<=1.00001f) {
                         const float height=t.a.z+u*(t.b.z-t.a.z)+v*(t.c.z-t.a.z);
-                        if(from==-FLT_MAX||(allAreas[ti]&&std::abs(height-from)<=p.climb+.001f))result=std::max(result,height);
+                        if(from==-FLT_MAX||(materialAreas[ti]&&std::abs(height-from)<=p.climb+.001f))result=std::max(result,height);
                     }
                 }
                 return result;
