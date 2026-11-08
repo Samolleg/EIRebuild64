@@ -911,7 +911,7 @@ BOOL CWorldConnector::MoveToZone(const char *pszZoneName, EInterface iface)
         switch (iface)
         {
         case IFACE_MAINMENU: {
-            theWorldServer.NewZone("ZoneMainMenuNew.mpr", "ZoneMainMenuNew.mob");
+            theWorldServer.NewZone(GameScenes::MenuTerrain, GameScenes::MenuObjects);
             SYSTEMTIME time;
             GetLocalTime(&time);
 
