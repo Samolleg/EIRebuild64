@@ -467,14 +467,17 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             // separate terrain/floor layers are retained unchanged.
             std::map<std::uint64_t,std::vector<int>> planes;
             for(int ti:inputs[index].triangles)if((allAreas[ti]&&g.ground[ti].surface)||g.ground[ti].terrain)planes[g.ground[ti].surface].push_back(ti);
-            auto heightAt=[&](std::uint64_t surface,float x,float y) {
+            auto heightAt=[&](std::uint64_t surface,float x,float y,float from=-FLT_MAX) {
                 float result=-FLT_MAX;
                 for(int ti:planes.at(surface)) {
                     const auto& t=g.ground[ti];
                     const float ax=t.b.x-t.a.x,ay=t.b.y-t.a.y,bx=t.c.x-t.a.x,by=t.c.y-t.a.y,det=ax*by-ay*bx;
                     if(det<=1.e-8f)continue;
                     const float u=((x-t.a.x)*by-(y-t.a.y)*bx)/det,v=(ax*(y-t.a.y)-ay*(x-t.a.x))/det;
-                    if(u>=-.00001f&&v>=-.00001f&&u+v<=1.00001f)result=std::max(result,t.a.z+u*(t.b.z-t.a.z)+v*(t.c.z-t.a.z));
+                    if(u>=-.00001f&&v>=-.00001f&&u+v<=1.00001f) {
+                        const float height=t.a.z+u*(t.b.z-t.a.z)+v*(t.c.z-t.a.z);
+                        if(from==-FLT_MAX||(allAreas[ti]&&std::abs(height-from)<=p.climb+.001f))result=std::max(result,height);
+                    }
                 }
                 return result;
             };
@@ -490,7 +493,13 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
                         const float x=cfg.bmin[0]+(ix+dx)*cfg.cs,y=-(cfg.bmin[2]+(iz+dz)*cfg.cs);
                         if(heightAt(support[j],x,y)>-FLT_MAX)continue;
                         const float ground=heightAt(1,x,y);
-                        if(ground>=bottom-cfg.ch&&ground<top-p.climb-.001f)cliff=true;
+                        if(ground>=bottom-cfg.ch&&ground<top-p.climb-.001f) {
+                            // A merged column may be supported by another BASE,
+                            // even when the terrain below it is beyond climb.
+                            bool reachable=false;
+                            for(const auto& plane:planes)if(heightAt(plane.first,x,y,top)>-FLT_MAX){reachable=true;break;}
+                            if(!reachable)cliff=true;
+                        }
                     }
                     if(cliff)field.areas[j]=RC_NULL_AREA;
                 }
