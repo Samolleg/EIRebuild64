@@ -6,6 +6,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Script.h"
+#include "ScriptLanguageRuntime.h"
 #include "ScriptParser.h"
 #include "MapObjectManager.h"
 #include "WorldServer.h"
@@ -269,33 +270,14 @@ static CUnitServer *GetUnitByID(int nUnitID)
 }
 
 // ------------------------- CScriptObject ---------------------------------
-CScriptObject::CScriptObject()
-{
-    pObject = NULL;
-}
-
-void CScriptObject::Clear()
-{
-    if (pObject)
-    {
-        pObject->Release();
-    }
-    pObject = NULL;
-}
-
 void CScriptObject::SetObject(CMapObject *pObj)
 {
     Clear();
     if (pObj)
         pObj->AddRef();
     pObject = pObj;
-}
-
-void CScriptObject::Copy(const CScriptObject &a)
-{
-    pObject = a.pObject;
-    if (pObject)
-        pObject->AddRef();
+    retainObject = [](CMapObject *object) { object->AddRef(); };
+    releaseObject = [](CMapObject *object) { object->Release(); };
 }
 
 /*CMapObject* CScriptObject::GetObject()
@@ -588,62 +570,6 @@ BOOL CScriptObjectGroup::HasMapObject(CMapObject *pSearch)
 
 
 // --------------------------- SScriptVariablesSet ---------------------------
-void SScriptVariablesSet::SetZeroValues()
-{
-    int i;
-    for (i = 0; i < fVars.GetSize(); i++)
-        fVars[i] = 0;
-    for (i = 0; i < szVars.GetSize(); i++)
-        szVars[i] = "";
-    for (i = 0; i < oVars.GetSize(); i++)
-        oVars[i].SetObject(NULL);
-    for (i = 0; i < gVars.GetSize(); i++)
-        gVars[i].Clear();
-}
-
-BOOL SScriptVariablesSet::IsVariableName(const char *pszName)
-{
-    if (fVars.GetVariableIndex(pszName) >= 0)
-        return TRUE;
-    if (szVars.GetVariableIndex(pszName) >= 0)
-        return TRUE;
-    if (oVars.GetVariableIndex(pszName) >= 0)
-        return TRUE;
-    if (gVars.GetVariableIndex(pszName) >= 0)
-        return TRUE;
-    return FALSE;
-}
-
-BOOL SScriptVariablesSet::GetVariable(const char *pszName, int &nNumber,
-                                      EScriptParameterType &eType)
-{
-    eType = ptFloat;
-    nNumber = fVars.GetVariableIndex(pszName);
-    if (nNumber >= 0)
-        return TRUE;
-    eType = ptString;
-    nNumber = szVars.GetVariableIndex(pszName);
-    if (nNumber >= 0)
-        return TRUE;
-    eType = ptObject;
-    nNumber = oVars.GetVariableIndex(pszName);
-    if (nNumber >= 0)
-        return TRUE;
-    eType = ptGroup;
-    nNumber = gVars.GetVariableIndex(pszName);
-    if (nNumber >= 0)
-        return TRUE;
-    return FALSE;
-}
-
-void SScriptVariablesSet::AddVars(const SScriptVariablesSet &a)
-{
-    fVars.AddVars(a.fVars);
-    szVars.AddVars(a.szVars);
-    oVars.AddVars(a.oVars);
-    gVars.AddVars(a.gVars);
-}
-
 void SScriptVariablesSet::CheckObjectRefs()
 {
     int i;
@@ -1254,19 +1180,6 @@ void SSCCmd::CalcFunction(CScript *pScript, SScriptVariablesSet &vars, CScriptOb
         ReportError("Function does not return string at SSCCmd::CalcFunction");
         break;
     }
-}
-
-void SSCCmd::Clear()
-{
-    command = SC_UNKNOWN;
-    params.SetSize(0);
-    szParams.SetSize(0);
-    oParams.SetSize(0);
-    gParams.SetSize(0);
-    localParameters.SetSize(0);
-    globalParameters.SetSize(0);
-    funcParameters.SetSize(0);
-    pLoopBody = NULL;
 }
 
 
@@ -2492,34 +2405,6 @@ void SOneScript::SetParameters(SSCCmd &cmd)
         vars.gVars.SetAt(i, *cmd.gParams[i]);
 }
 
-BOOL SOneScript::AddParameter(CString &szParam, EScriptParameterType eType)
-{
-    BOOL bRv;
-    CString szType;
-    switch (eType)
-    {
-    case ptFloat:
-        bRv = vars.fVars.AddVariable(szParam);
-        szType = "f";
-        break;
-    case ptString:
-        bRv = vars.szVars.AddVariable(szParam);
-        szType = "s";
-        break;
-    case ptObject:
-        bRv = vars.oVars.AddVariable(szParam);
-        szType = "o";
-        break;
-    case ptGroup:
-        bRv = vars.gVars.AddVariable(szParam);
-        szType = "g";
-        break;
-    }
-    if (bRv)
-        szScriptParams = szScriptParams + szType;
-    return bRv;
-}
-
 void SOneScript::CheckObjectRefs()
 {
     vars.CheckObjectRefs();
@@ -3123,7 +3008,13 @@ void CScript::SetParticleSourceSize(SSCCmd *pCmd)
 // **************************************************
 //      Clear script
 // **************************************************
+static void ReportScriptCompilerInvariant(const char *text)
+{
+    ReportError("%s", text);
+}
+
 CScript::CScript()
+    : CScriptCompiler(ScriptLanguage::Legacy(), ReportScriptCompilerInvariant)
 {
     lights.SetSize(256);
     memset(lights.GetData(), 0, lights.GetSize() * sizeof(lights[0]));
@@ -3143,16 +3034,11 @@ void CScript::StopExecution()
 void CScript::Clear()
 {
     if (detachedSaveState) { DiscardSaveState(); return; }
-    bLoaded = FALSE;
-    nSecondaryCount = 0;
-    scriptError.text = "Unknown error";
-    scriptError.eError = SC_NO_ERROR;
-    scriptError.nLine = 0;
+    ResetCompilationStatus();
 
     StopExecution();
 
-    worldActions.RemoveAll();
-    globalVars.Clear();
+    ClearCompilationGlobals();
 
     nForCount = 0;
     ReleaseTemp();
@@ -3173,9 +3059,7 @@ void CScript::Clear()
     nPrevNegativeParticleSourceID = -2;
     nPrevNegativeSoundID = -2;
 
-    scripts.RemoveAll();
-    while (!threads.IsEmpty())
-        threads.RemoveHead();
+    ClearCompilationScripts();
 }
 
 void CScript::RestartScript()
@@ -3347,20 +3231,6 @@ void CScript::Segment()
 }
 
 // --------------------------------- CScript interface ----------------------------------------
-SScriptThread *CScript::AllocateNewThread()
-{
-    SScriptThread *pRes = &threads.GetAt(threads.AddTail(SScriptThread()));
-    pRes->SetNumber(threads.GetCount());
-    return pRes;
-}
-
-SScriptThread *CScript::AllocateNewWorldThread()
-{
-    SScriptThread *pRes = &worldActions.GetAt(worldActions.AddTail(SScriptThread()));
-    pRes->SetNumber(worldActions.GetCount() | 0x80000000);
-    return pRes;
-}
-
 int CScript::GetRunningScriptIndex(SOneScript *pScript)
 {
     POSITION pos = runningScripts.GetHeadPosition();
@@ -3388,167 +3258,45 @@ SOneScript *CScript::GetRunningScript(int nNumber)
     return NULL;
 }
 
-SScriptThread *CScript::GetThreadByIndex(int nIdx)
+BOOL CScript::LoadText(CString &text, BOOL bRun)
 {
-    POSITION pos;
-    if (nIdx & 0x80000000)
-    {
-        pos = worldActions.GetHeadPosition();
-        while (pos)
-        {
-            SScriptThread &res = worldActions.GetNext(pos);
-            if (res.GetNumber() == nIdx)
-                return &res;
-        }
-    }
-    else
-    {
-        pos = threads.GetHeadPosition();
-        while (pos)
-        {
-            SScriptThread &res = threads.GetNext(pos);
-            if (res.GetNumber() == nIdx)
-                return &res;
-        }
-    }
-    return NULL;
-}
-
-SOneScript *CScript::GetScriptByName(const char *szName)
-{
-    if (!szName || szName[0] == 0)
-        return NULL;
-    for (int i = 0; i < scripts.GetSize(); i++)
-    {
-        if (scripts[i].szScriptName == szName)
-            return &scripts[i];
-    }
-    return NULL;
-}
-
-HScriptThread CScript::GetWorldScript()
-{
-    if (worldActions.GetHeadPosition() == NULL)
-        worldActions.AddHead(SScriptThread());
-    return &worldActions.GetHead();
-}
-
-SOneScript *CScript::GetScript(const char *szName)
-{
-    for (int i = 0; i < scripts.GetSize(); i++)
-    {
-        if (scripts[i].szScriptName == szName)
-            return &scripts[i];
-    }
-    return NULL;
-}
-
-BOOL CScript::ParseGlobalVars(CString szVars)
-{
-    SOneScript objScript;
-    CLexemeList lexemes;
-
-    objScript.Clear();
-    szVars = szVars + "\n)";
-    if (!CreateLexemesList(szVars, lexemes))
+    SScriptThread *worldThread;
+    if (!ParseText(text, CurrentScriptLanguage(), worldThread))
         return FALSE;
-    POSITION pos = lexemes.GetHeadPosition();
-    if (!LoadParameters(objScript, pos, lexemes, TRUE))
-        return FALSE;
-    if (pos != 0)
-        return ScriptError(lexemes.GetAt(pos).nLine, SC_UNEXPECTED_SYMBOL,
-                           "Symbols behind variables declaration");
-    objScript.vars.SetZeroValues(); // this guarantees that execution will start in identical
-                                    // environment every time
-    globalVars.AddVars(objScript.vars);
+    if (worldThread && bRun)
+        RunThreadDelayed(worldThread);
+    FinishTextLoad();
     return TRUE;
 }
 
-BOOL CScript::CreateOneScript(const char *pszOneScriptName, CString szParams)
+BOOL CScript::ParseGlobalVars(CString text)
 {
-    SOneScript objScript;
-    CLexemeList lexemes;
-
-    objScript.szScriptName = SignName(pszOneScriptName);
-    if (GetScriptIdx(objScript.szScriptName) != -1)
-        return ScriptError(0, SC_DUPLICATE_SCRIPT, "Duplicate script %s", pszOneScriptName);
-    szParams = szParams + "\n)";
-    if (!CreateLexemesList(szParams, lexemes))
-        return FALSE;
-    POSITION pos = lexemes.GetHeadPosition();
-    if (!LoadParameters(objScript, pos, lexemes))
-        return FALSE;
-    scripts.Add(objScript);
-    return TRUE;
+    SetLanguage(CurrentScriptLanguage());
+    return CScriptCompiler::ParseGlobalVars(text);
 }
 
-BOOL CScript::CreateCondition(const char *pszOneScriptName, HScriptThread &pIfThread,
-                              HScriptThread &pThenThread)
+BOOL CScript::CreateOneScript(const char *name, CString parameters)
 {
-    SOneScript *pOneScript;
-    SScriptCondition condition;
-    pOneScript = GetScript(SignName(pszOneScriptName));
-    if (!pOneScript)
-        return FALSE;
-    // allocate new thread in list of all threads and load conditions in it
-    condition.pConditions = AllocateNewThread();
-    pIfThread = condition.pConditions;
-    // allocate new thread in list of all threads and load commands in it
-    condition.pActions = AllocateNewThread();
-    pThenThread = condition.pActions;
-    pOneScript->conditions.Add(condition);
-    return TRUE;
+    SetLanguage(CurrentScriptLanguage());
+    return CScriptCompiler::CreateOneScript(name, parameters);
 }
 
-BOOL CScript::ParseIfThread(const char *pszOneScriptName, HScriptThread pThread, CString szSrc)
+BOOL CScript::CreateCondition(const char *name, HScriptThread &conditions, HScriptThread &actions)
 {
-    CLexemeList lexemes;
-    SOneScript *pOneScript;
-
-    pOneScript = GetScript(SignName(pszOneScriptName));
-    if (!pOneScript)
-        return FALSE;
-    szSrc = szSrc + "\n)";
-    if (!CreateLexemesList(szSrc, lexemes))
-        return FALSE;
-    POSITION pos = lexemes.GetHeadPosition();
-    if (!LoadConditionsList(*pThread, pos, lexemes, pOneScript->vars))
-        return FALSE;
-    if (pos != 0)
-        return ScriptError(lexemes.GetAt(pos).nLine, SC_UNEXPECTED_SYMBOL,
-                           "Symbols behind conditions list");
-    return TRUE;
+    SetLanguage(CurrentScriptLanguage());
+    return CScriptCompiler::CreateCondition(name, conditions, actions);
 }
 
-BOOL CScript::ParseCommandThread(const char *pszOneScriptName, HScriptThread pThread, CString szSrc)
+BOOL CScript::ParseIfThread(const char *name, HScriptThread thread, CString text)
 {
-    CLexemeList lexemes;
-    SOneScript *pOneScript = NULL;
+    SetLanguage(CurrentScriptLanguage());
+    return CScriptCompiler::ParseIfThread(name, thread, text);
+}
 
-    if (pszOneScriptName)
-    {
-        pOneScript = GetScript(SignName(pszOneScriptName));
-        if (!pOneScript)
-            return FALSE;
-    }
-    szSrc = szSrc + "\n)";
-    if (!CreateLexemesList(szSrc, lexemes))
-        return FALSE;
-    POSITION pos = lexemes.GetHeadPosition();
-    if (pOneScript)
-    {
-        if (!LoadCommandsList(*pThread, pos, lexemes, &pOneScript->vars))
-            return FALSE;
-    }
-    else
-    {
-        if (!LoadCommandsList(*pThread, pos, lexemes, NULL))
-            return FALSE;
-    }
-    if (pos != 0)
-        return ScriptError(lexemes.GetAt(pos).nLine, SC_UNEXPECTED_SYMBOL,
-                           "Symbols behind commands list");
-    return TRUE;
+BOOL CScript::ParseCommandThread(const char *name, HScriptThread thread, CString text)
+{
+    SetLanguage(CurrentScriptLanguage());
+    return CScriptCompiler::ParseCommandThread(name, thread, text);
 }
 
 // -------------------- CScript load&store ---------------------------------------
