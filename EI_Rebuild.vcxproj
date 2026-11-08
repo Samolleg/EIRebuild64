@@ -289,7 +289,7 @@
     <ClCompile Include="Game\SaveLoader.cpp" />
     <ClCompile Include="Game\ScenarioTracker.cpp" />
     <ClCompile Include="Game\Script.cpp" />
-    <ClCompile Include="Game\ScriptParser.cpp" />
+    <ClCompile Include="Game\ScriptText.cpp" />
     <ClCompile Include="Game\sdbFormat.cpp" />
     <ClCompile Include="Game\Sector.cpp" />
     <ClCompile Include="Game\ServerSpecificManager.cpp" />
@@ -612,6 +612,9 @@
     <Natvis Include="images.natvis" />
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="ScriptCompilerCore\ScriptCompilerCore.vcxproj">
+      <Project>{B09F21A4-D437-47E6-BB47-19806B3886C1}</Project>
+    </ProjectReference>
     <ProjectReference Include="OwnedRenderer\RendererShaders.vcxproj">
       <Project>{F9F236B9-5E99-4BD6-B032-D727834B2329}</Project>
       <LinkLibraryDependencies>false</LinkLibraryDependencies>

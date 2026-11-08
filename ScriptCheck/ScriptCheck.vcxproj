@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{C4F60489-B9F6-424E-B33E-FD8CA0028D18}</ProjectGuid>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType><UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset><CharacterSet>MultiByte</CharacterSet><UseOfMfc>Static</UseOfMfc>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <OutDir>$(MSBuildThisFileDirectory)..\out\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)..\obj\ScriptCheck\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>ScriptCheck</TargetName>
+    <ScriptCheckRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..'))</ScriptCheckRoot>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader><LanguageStandard>stdcpp17</LanguageStandard>
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary><Optimization>MaxSpeed</Optimization>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_CRT_SECURE_NO_WARNINGS;_CRT_NONSTDC_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory);$(MSBuildThisFileDirectory)..\Game;$(IntDir);$(IntDir)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link><SubSystem>Console</SubSystem><TargetMachine>MachineX64</TargetMachine></Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="ScriptCheck.cpp" />
+    <ClCompile Include="..\Game\SaveLoader.cpp" />
+    <ClCompile Include="..\Game\SimpleCryptographer.cpp" />
+    <ClInclude Include="StdAfx.h" />
+    <None Include="README.md" />
+    <ProjectReference Include="ScriptCheckCore.vcxproj">
+      <Project>{EE133587-66A5-4F8C-967E-3CCA95203A19}</Project>
+    </ProjectReference>
+  </ItemGroup>
+  <Target Name="ScriptCheckBuildInputs" BeforeTargets="ClCompile">
+    <MakeDir Directories="$(IntDir)" />
+    <Exec WorkingDirectory="$(ScriptCheckRoot)" Command="git -c safe.directory=&quot;$(ScriptCheckRoot)&quot; describe --always --abbrev=12 --dirty --exclude=* &gt; &quot;$(IntDir)compiler-commit.txt&quot;" />
+    <ReadLinesFromFile File="$(IntDir)compiler-commit.txt"><Output TaskParameter="Lines" PropertyName="ScriptCheckCommit" /></ReadLinesFromFile>
+    <Error Condition="'$(ScriptCheckCommit)' == ''" Text="Cannot identify ScriptCheck source commit" />
+    <WriteLinesToFile File="$(IntDir)CompilerVersion.h" Lines="#define SCRIPT_CHECK_COMMIT &quot;$(ScriptCheckCommit)&quot;" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <ItemGroup><JsonHeaders Include="$(MSBuildThisFileDirectory)..\SDKs\JSON\**\*.hpp" /></ItemGroup>
+    <Copy SourceFiles="@(JsonHeaders)" DestinationFiles="@(JsonHeaders->'$(IntDir)include\nlohmann\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+  </Target>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

@@ -13,11 +13,23 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "RendererShaders", "OwnedRen
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "EIRebuild64NavBake", "EIRebuild64NavBake.vcxproj", "{7D770D60-B31E-4A77-AF67-BAFD6209B00A}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ScriptCompilerCore", "ScriptCompilerCore\ScriptCompilerCore.vcxproj", "{B09F21A4-D437-47E6-BB47-19806B3886C1}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ScriptCheckCore", "ScriptCheck\ScriptCheckCore.vcxproj", "{EE133587-66A5-4F8C-967E-3CCA95203A19}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ScriptCheck", "ScriptCheck\ScriptCheck.vcxproj", "{C4F60489-B9F6-424E-B33E-FD8CA0028D18}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Release|x64 = Release|x64
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{B09F21A4-D437-47E6-BB47-19806B3886C1}.Release|x64.ActiveCfg = Release|x64
+		{B09F21A4-D437-47E6-BB47-19806B3886C1}.Release|x64.Build.0 = Release|x64
+		{EE133587-66A5-4F8C-967E-3CCA95203A19}.Release|x64.ActiveCfg = Release|x64
+		{EE133587-66A5-4F8C-967E-3CCA95203A19}.Release|x64.Build.0 = Release|x64
+		{C4F60489-B9F6-424E-B33E-FD8CA0028D18}.Release|x64.ActiveCfg = Release|x64
+		{C4F60489-B9F6-424E-B33E-FD8CA0028D18}.Release|x64.Build.0 = Release|x64
 		{7D770D60-B31E-4A77-AF67-BAFD6209B00A}.Release|x64.ActiveCfg = Release|x64
 		{7D770D60-B31E-4A77-AF67-BAFD6209B00A}.Release|x64.Build.0 = Release|x64
 		{042A52A4-CF8B-4868-B551-448520F97F44}.Release|x64.ActiveCfg = Release|x64
