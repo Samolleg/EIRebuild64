@@ -55,10 +55,6 @@ Location Address(const Mesh& m,Point p,dtPolyRef ref,float height,float referenc
         // Walkability is owned by the baked mesh. This function evaluates
         // original support Z, including the sub-cell edge of a terrain triangle.
         if(det<=1.e-8f)continue;
-        if(!t.terrain) {
-            const float nx=ay*(t.c.z-t.a.z)-(t.b.z-t.a.z)*by,ny=(t.b.z-t.a.z)*bx-ax*(t.c.z-t.a.z);
-            if(det/std::sqrt(nx*nx+ny*ny+det*det)<=std::cos(m.profile.slope*3.14159265f/180.f))continue;
-        }
         const float x=l.position.x-t.a.x,y=l.position.y-t.a.y;
         const float u=(x*by-y*bx)/det,v=(ax*y-ay*x)/det;
         // Footprint margins are measured in metres, not barycentric coordinates.
