@@ -1,3 +1,6 @@
+> NEWPROJ03: внутри C:/Dev/EvilIslands зависимости находятся в `deps`, локальный NuGet — `deps/nuget`. `tools/prepare-worktree.ps1` находит RULES.md вверх от checkout, в том числе из tasks/<ID>/wt. Глобальные caches и старый work не являются его defaults.
+> Выполните `powershell -NoProfile -ExecutionPolicy Bypass -File tools/prepare-worktree.ps1`, затем `MSBuild EI_Rebuild.sln /m:4 /nr:false /t:Build /p:Configuration=Release /p:Platform=x64`. Рецепт ниже относится к самостоятельному клону вне нового корня.
+
 # Сборка EIRebuild64 из чистого клона
 
 Проверено 2026-11-06 на `main` `81dbcdd`: обе цели Release x64 собраны,

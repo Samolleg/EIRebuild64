@@ -5,16 +5,14 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-if (!$FFmpegSource) {
-    $work = Split-Path $repo
-    if ((Split-Path $work -Leaf) -eq 'eirebuild64-wt') { $work = Split-Path $work }
-    $FFmpegSource = Join-Path $work 'deps64/ffmpeg/8.1.3/x64'
+$projectRoot = $repo
+while (!(Test-Path -LiteralPath (Join-Path $projectRoot 'RULES.md') -PathType Leaf)) {
+    $parent = Split-Path -Parent $projectRoot
+    if (!$parent -or $parent -eq $projectRoot) { throw 'Project RULES.md not found above worktree.' }
+    $projectRoot = $parent
 }
-if (!$DlssSdkSource) {
-    $work = Split-Path $repo
-    if ((Split-Path $work -Leaf) -eq 'eirebuild64-wt') { $work = Split-Path $work }
-    $DlssSdkSource = Join-Path $work 'deps64/dlss-sdk/v310.9.16'
-}
+if (!$FFmpegSource) { $FFmpegSource = Join-Path $projectRoot 'deps/ffmpeg/8.1.3/x64' }
+if (!$DlssSdkSource) { $DlssSdkSource = Join-Path $projectRoot 'deps/dlss-sdk/v310.9.16' }
 $dlssFiles = @('include/nvsdk_ngx.h', 'include/nvsdk_ngx_defs.h', 'include/nvsdk_ngx_params.h',
     'include/nvsdk_ngx_helpers.h', 'include/nvsdk_ngx_helpers_d3d.h', 'include/nvsdk_ngx_helpers_cuda.h',
     'lib/Windows_x86_64/x64/nvsdk_ngx_d.lib',
@@ -24,7 +22,7 @@ foreach ($file in $dlssFiles) {
         throw "Missing DLSS SDK v310.9.16 file: $DlssSdkSource/$file. Pass -DlssSdkSource or set EIREBUILD64_DLSS_SDK. Nothing will be downloaded."
     }
 }
-$cache = Join-Path $env:USERPROFILE '.nuget/packages'
+$cache = Join-Path $projectRoot 'deps/nuget'
 [xml]$config = Get-Content -LiteralPath (Join-Path $repo 'packages.config') -Raw
 
 # Resolve every pinned package locally before writing any build dependencies.
