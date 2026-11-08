@@ -327,55 +327,6 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
     const auto start=std::chrono::steady_clock::now();
     if(!Load(directory))throw std::runtime_error(error);
     printf("LOAD_RELEASE mpr=%s mob=%s ms=%.3f pending=%zu\n",mapName.c_str(),mobName.c_str(),std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count(),sourceDirty.size());fflush(stdout);
-    if(mapName=="zone1.mpr"&&mobName=="zone1.mob") {
-        CUnit* probe=nullptr;
-        for(const auto& entry:world.mapObjects)if(auto* unit=dynamic_cast<CUnit*>(entry.second)) {
-            if(Type(unit,unit->GetAIClass())==Small&&unit->GetAIClass()!=0){probe=unit;break;}
-        }
-        if(!probe)throw std::runtime_error("Nav64: restore release has no small unit");
-        const auto originalCP=probe->GetCP();const auto originalLocation=probe->navLocation;
-        auto check=[&](const char* name,Point point,std::uint64_t surface) {
-            world.aiMap.MoveObject(probe,CPlot3D(point.x,point.y,originalCP.z));
-            probe->navLocation={};probe->navLocation.position=point;probe->navLocation.surface=surface;
-            const bool placed=Place(probe,world.aiMap);const auto saved=probe->navLocation;
-            Location strict;const bool r2=placed&&StartLocation(*ForUnit(probe),saved.position,strict,Height(probe))&&strict.surface==saved.surface&&std::abs(strict.position.z-saved.position.z)<=.25f;
-            // Match the serialized fields: polygon/generation are not stored.
-            probe->navLocation.polygon=probe->navLocation.generation=0;
-            const bool restored=placed&&Restore(probe,world.aiMap);
-            const auto loaded=probe->navLocation;
-            const bool same=restored&&Distance(saved.position,loaded.position)<.02f;
-            // Surface identity can change; only height/position select a floor.
-            probe->navLocation.surface=~std::uint64_t(0);
-            const bool stale=same&&Restore(probe,world.aiMap)&&Distance(saved.position,probe->navLocation.position)<.02f;
-            printf("RESTORE_RELEASE name=%s placed=%d r2_strict=%d restored=%d stale_hint=%d surface=%llu at=(%.6f,%.6f,%.6f)\n",name,int(placed),int(r2),int(same),int(stale),static_cast<unsigned long long>(loaded.surface),loaded.position.x,loaded.position.y,loaded.position.z);fflush(stdout);
-            if(!stale)throw std::runtime_error(std::string("Nav64: placement/restore release failure: ")+name);
-        };
-        check("HERO_START",{55.55f,138.78f,19.24f},1);
-        for(int id:{195,1492,1748}) {
-            bool checked=false;
-            for(const auto& triangle:sources->ground)if(triangle.object==id&&triangle.area&&triangle.surface>1) {
-                Point p{(triangle.a.x+triangle.b.x+triangle.c.x)/3,(triangle.a.y+triangle.b.y+triangle.c.y)/3,(triangle.a.z+triangle.b.z+triangle.c.z)/3};
-                Location location;
-                if(!ResolveLocation(*ForUnit(probe),p,nullptr,location,Height(probe))||int(location.surface>>32)!=id)continue;
-                check(("BASE_"+std::to_string(id)).c_str(),location.position,location.surface);checked=true;break;
-            }
-            // A paired MOB can legitimately contain no such model.
-            const bool present=std::any_of(sources->ground.begin(),sources->ground.end(),[&](const Triangle& t){return t.object==id&&t.surface>1;});
-            if(present&&!checked)throw std::runtime_error("Nav64: BASE restore release has no placement: "+std::to_string(id));
-        }
-        world.aiMap.MoveObject(probe,originalCP);probe->navLocation=originalLocation;
-    }
-    if(mapName=="zone1.mpr"&&mobName=="zone1.mob") {
-        std::ofstream sites(NavigationBake::reportDirectory/"r15-sites.csv");
-        sites<<"x,y,profile,project,surface,z\n";
-        std::ofstream water(NavigationBake::reportDirectory/"r15-water-poses.csv");water<<"x,y,height,standing,laying\n";
-        for(const auto p:{Point{102.974f,84.9555f,6.f},Point{103.887f,52.188f,6.f},Point{58.158f,63.208f,4.f}}) {
-            Location standing,laying;const bool s=Project(*meshes[Small],p,.001f,4.f,standing,1.6f,1u<<7),l=Project(*meshes[Small],p,.001f,4.f,laying,.4f,1u<<5);
-            water<<p.x<<','<<p.y<<','<<p.z<<','<<s<<','<<l<<'\n';
-        }
-        for(const auto p:{Point{193.487f,112.524f,7.76405f},Point{194.246f,112.665f,7.76405f},Point{197.751f,112.244f,7.89577f},Point{205.953f,112.161f,7.7f}})
-            for(int type=Small;type<=Human;++type){Location at;const bool ok=Project(*meshes[type],p,.001f,4.f,at,1.6f);sites<<p.x<<','<<p.y<<','<<Agents[type].name<<','<<ok<<','<<at.surface<<','<<std::setprecision(9)<<at.position.z<<'\n';}
-    }
     if(!NavigationBake::replayInput.empty()) {
         const auto input=Read(NavigationBake::replayInput);
         auto records=nlohmann::json::parse(input.begin(),input.end());

@@ -2,6 +2,11 @@
 
 #include "ZoneExit.h"
 #include "sArray.h"
+
+namespace GameScenes {
+inline constexpr const char* MenuTerrain="ZoneMainMenuNew.mpr";
+inline constexpr const char* MenuObjects="ZoneMainMenuNew.mob";
+}
 /////////////////////////////////////////////////////////////////////////////////////
 enum EGMZoneType
 {

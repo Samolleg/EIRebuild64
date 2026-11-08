@@ -91,7 +91,7 @@ int wmain(int argc,wchar_t** argv) {
                 if(zone->szTerrainName.IsEmpty()||zone->szMobName.IsEmpty())continue;
                 maps.emplace(Extension((LPCSTR)zone->szTerrainName,".mpr"),Extension((LPCSTR)zone->szMobName,".mob"));
             }
-            maps.emplace("ZoneMainMenuNew.mpr","ZoneMainMenuNew.mob");
+            maps.emplace(GameScenes::MenuTerrain,GameScenes::MenuObjects);
         } else {
             const auto map=Extension(options.at(L"--map").string(),".mpr");
             maps.emplace(map,options.count(L"--mob")?Extension(options.at(L"--mob").string(),".mob"):Extension(map,".mob"));
