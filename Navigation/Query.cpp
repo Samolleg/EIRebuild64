@@ -39,11 +39,11 @@ Location Address(const Mesh& m,Point p,dtPolyRef ref,float height,float referenc
     if(identities==m.polygonSurfaces.end()||index>=identities->second.size()||triangles==m.sources->surfaceTriangles.end())return l;
     const auto& surfaces=identities->second[index];
     float best=1.e30f,terrainZ=-1.e30f;
-    std::vector<std::pair<float,std::uint64_t>> heights;
+    std::vector<std::pair<float,std::uint64_t>> heights;std::vector<float> ceilings;
     for(size_t i:triangles->second) {
         const auto& original=m.sources->ground[i];
         const bool admitted=std::find(surfaces.begin(),surfaces.end(),original.surface)!=surfaces.end();
-        if((!admitted&&!original.terrain)||m.excludedObjects.count(original.object))continue;
+        if(m.excludedObjects.count(original.object))continue;
         const auto surface=original.surface;
         // Recast can join a sub-cell seam between imported BASE faces. Only
         // declared connected BASE planes may cover it, never solid BV tops.
@@ -68,14 +68,14 @@ Location Address(const Mesh& m,Point p,dtPolyRef ref,float height,float referenc
         const float z=t.a.z+u*(t.b.z-t.a.z)+v*(t.c.z-t.a.z);
         if(t.terrain) {
             terrainZ=std::max(terrainZ,z);
-            if(admitted&&surfaces.size()==1){l.surface=surface;l.position.z=z;return l;}
         }
+        if(!t.terrain)ceilings.push_back(z);
         if(admitted)heights.emplace_back(z,surface);
     }
     for(const auto& at:heights) {
         if(at.second!=1&&at.first<terrainZ-.015f)continue;
         bool covered=false;
-        for(const auto& upper:heights)if(upper.first>at.first+.001f&&upper.first-at.first<height) {covered=true;break;}
+        for(float upper:ceilings)if(upper>at.first+.001f&&upper-at.first<height) {covered=true;break;}
         if(covered)continue;
         const float distance=std::abs(at.first-referenceZ);
         // Coplanar BASE overlaps share one stable address, independent of
@@ -164,12 +164,11 @@ Status ClosestGoal(const Mesh& mesh,dtNavMeshQuery& query,Point point,
     if(!mesh.sources)return Status::NoGoal;
     const auto nav=ToNav(point);const auto& g=*mesh.sources;
     const float center[]={nav.x,Flies(mesh.profile)?0.f:(g.minimum.y+g.maximum.y)*.5f,nav.z};
-    // Off-mesh ground orders approach only a local endpoint, never an
-    // unrelated edge across the map. This is a query bound, not bake policy.
-    const bool ground=mesh.profile.movement==Movement::Ground;
-    const float maximum=ground?4.f:std::max({.15f,std::abs(nav.x-g.minimum.x),std::abs(nav.x-g.maximum.x),
-                                           std::abs(nav.z-g.minimum.z),std::abs(nav.z-g.maximum.z)})+mesh.profile.cellSize;
-    ClosestGoalQuery closest(mesh,query,point,height,maximum,ground?4.f:1.e15f);float radius=.15f;
+    // A click outside the mesh still has a nearest polygon. Search the map
+    // bounds, then let Detour return the reachable part of its corridor.
+    const float maximum=std::max({.15f,std::abs(nav.x-g.minimum.x),std::abs(nav.x-g.maximum.x),
+                                 std::abs(nav.z-g.minimum.z),std::abs(nav.z-g.maximum.z)})+mesh.profile.cellSize;
+    ClosestGoalQuery closest(mesh,query,point,height,maximum);float radius=.15f;
     for(;;) {
         const float extent[]={radius,Flies(mesh.profile)?1.e6f:(g.maximum.y-g.minimum.y)*.5f+2,radius};
         const auto status=query.queryPolygons(center,extent,&filter,&closest);
@@ -261,14 +260,13 @@ Route Find(const Mesh& m,const Request& r) {
         // An exhausted A* contains the entire reachable component. Choose the
         // closest actual polygon boundary to the click, not the heuristic's
         // closest portal midpoint and not the closest point to the unit.
-        const bool localGround=result.goalStatus==Status::NoGoal&&m.profile.movement==Movement::Ground;
-        ClosestGoalQuery closest(m,q,r.goal,height,localGround?4.f:1.e15f,localGround?4.f:1.e15f);
+        ClosestGoalQuery closest(m,q,r.goal,height);
         const auto* pool=q.getNodePool();
         for(int i=1;i<=pool->getNodeCount();++i) {
             const auto* node=pool->getNodeAtIdx(unsigned(i));
             if(node->flags&DT_NODE_CLOSED)closest.Consider(node->id);
         }
-        if(!closest.best.polygon){result.status=localGround?Status::NoGoal:Status::NoPath;return result;}
+        if(!closest.best.polygon){result.status=Status::NoPath;return result;}
         to=closest.best.polygon;goal=ToNav(closest.best.position);
         end[0]=goal.x;end[1]=goal.y;end[2]=goal.z;
         if(result.goalStatus==Status::Complete)result.goalStatus=Status::NoPath;
@@ -304,22 +302,41 @@ Route Find(const Mesh& m,const Request& r) {
     result.status=straighten(corridor,result);
     if(result.status!=Status::Complete){result.points.clear();result.corridor.clear();return result;}
     result.plannedCost=result.cost;
-    if(count>1) {
-        // A polygon-centre A* corridor may contain needless turns even on a
-        // clear line. Mixed material costs are not a reason to skip visibility:
-        // price both actual portal-crossing paths under the unchanged filter.
-        auto& visible=m.scratch.visible;visible.resize(512);int visited=0;float t=0,normal[3]{};
-        const auto ray=q.raycast(from,start,end,&filter,&t,normal,visible.data(),&visited,int(visible.size()));
-        if(dtStatusSucceed(ray)&&!Limited(ray)&&t>=1&&visited>0&&visible[visited-1]==to) {
-            visible.resize(visited);Route candidate;
-            if(straighten(visible,candidate)==Status::Complete) {
-                result.straightCost=candidate.cost;
-                const float tolerance=1.e-5f*std::max(1.f,result.cost);
-                if(candidate.cost<=result.cost+tolerance) {
-                    candidate.goalStatus=result.goalStatus;candidate.plannedCost=result.cost;
-                    candidate.straightCost=candidate.cost;candidate.straightened=true;
-                    result=std::move(candidate);
-                }
+    if(count>1&&!ingress) {
+        // Use the movement portal traversal for visibility too. Detour's float
+        // raycast can stop at a shared grid corner although the segment passes
+        // through linked polygons, leaving a staircase in an open water field.
+        Route candidate;candidate.corridor=result.corridor;
+        candidate.points.push_back(result.points.front());
+        const auto a=result.points.front().position,b=result.points.back().position;
+        const int samples=std::max(1,int(std::ceil(std::hypot(b.x-a.x,b.y-a.y)/m.profile.cellSize)));
+        bool clear=samples<60000;
+        for(int i=1;clear&&i<=samples;++i) {
+            const float f=float(i)/samples;Location at;
+            const auto previous=candidate.points.back();
+            clear=Constrain(m,previous.position,{a.x+(b.x-a.x)*f,a.y+(b.y-a.y)*f,a.z+(b.z-a.z)*f},at,height,nullptr,&previous,r.excludedFlags);
+            if(!clear)break;
+            // Pending scene updates must also see tiles used by this line,
+            // which can differ from the original A* corridor.
+            if(candidate.corridor.empty()||candidate.corridor.back()!=at.polygon)candidate.corridor.push_back(at.polygon);
+            const float length=Distance(previous.position,at.position);
+            candidate.length+=length;candidate.cost+=length*filter.getAreaCost(previous.area);
+            // Keep material/floor crossings, but no sampling vertices on a
+            // straight XY segment. Runtime support still resolves exact Z.
+            if(candidate.points.size()>1) {
+                const auto& before=candidate.points[candidate.points.size()-2];
+                if(before.area==previous.area&&previous.area==at.area&&before.surface==previous.surface&&previous.surface==at.surface)
+                    candidate.points.back()=at;
+                else candidate.points.push_back(at);
+            } else candidate.points.push_back(at);
+        }
+        if(clear&&candidate.points.back().surface==result.points.back().surface) {
+            result.straightCost=candidate.cost;
+            const float tolerance=1.e-5f*std::max(1.f,result.cost);
+            if(candidate.cost<=result.cost+tolerance) {
+                candidate.status=Status::Complete;candidate.goalStatus=result.goalStatus;candidate.plannedCost=result.cost;
+                candidate.straightCost=candidate.cost;candidate.straightened=true;
+                result=std::move(candidate);
             }
         }
     }

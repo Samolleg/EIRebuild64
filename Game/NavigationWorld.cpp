@@ -971,9 +971,9 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
                 move.replanned=true;move.finished=false;move.support=unit->navLocation;
                 wait=0;queues.erase(unit->GetID());return observed(true);
             }
-            // An impossible detour is a failed movement command. Let its owner
-            // choose the next action instead of freezing an unchanged queue.
-            move.blocker=neighbour->GetID();queues.erase(unit->GetID());return observed(false);
+            // Live neighbours cannot invalidate a static route. Keep its
+            // intent while movement waits for separation or a free bypass.
+            move.waiting=true;move.blocker=neighbour->GetID();return observed(true);
         }
         move.waiting=true;move.blocker=neighbour->GetID();return observed(true);
     }

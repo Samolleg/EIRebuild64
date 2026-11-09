@@ -2321,19 +2321,33 @@ dtStatus dtNavMeshQuery::getPortalPoints(dtPolyRef from, const dtPoly* fromPoly,
 	dtVcopy(left, &fromTile->verts[v0*3]);
 	dtVcopy(right, &fromTile->verts[v1*3]);
 	
-	// If the link is at tile boundary, dtClamp the vertices to
-	// the link width.
+	// EIRebuild64: byte-sized link limits are only a spatial index. On a long tile edge,
+	// rounding them to 1/255 can move a funnel endpoint outside the linked
+	// polygon. Recover the actual common edge, as the physical walker does.
 	if (link->side != 0xff)
 	{
-		// Unpack portal limits.
-		if (link->bmin != 0 || link->bmax != 255)
+		const int axis = (link->side == 0 || link->side == 4) ? 2 : 0;
+		const int across = axis == 2 ? 0 : 2;
+		const float* a = &fromTile->verts[v0*3];
+		const float* b = &fromTile->verts[v1*3];
+		float otherMin = FLT_MAX, otherMax = -FLT_MAX;
+		for (int i = 0; i < toPoly->vertCount; ++i)
 		{
-			const float s = 1.0f/255.0f;
-			const float tmin = link->bmin*s;
-			const float tmax = link->bmax*s;
-			dtVlerp(left, &fromTile->verts[v0*3], &fromTile->verts[v1*3], tmin);
-			dtVlerp(right, &fromTile->verts[v0*3], &fromTile->verts[v1*3], tmax);
+			const float* c = &toTile->verts[toPoly->verts[i]*3];
+			const float* d = &toTile->verts[toPoly->verts[(i+1)%toPoly->vertCount]*3];
+			if (dtAbs(c[across]-a[across]) > 0.001f || dtAbs(d[across]-a[across]) > 0.001f)
+				continue;
+			otherMin = dtMin(otherMin, dtMin(c[axis], d[axis]));
+			otherMax = dtMax(otherMax, dtMax(c[axis], d[axis]));
 		}
+		const float low = dtMax(dtMin(a[axis], b[axis]), otherMin);
+		const float high = dtMin(dtMax(a[axis], b[axis]), otherMax);
+		if (low > high || dtAbs(b[axis]-a[axis]) < 1e-8f)
+			return DT_FAILURE | DT_INVALID_PARAM;
+		const float first = (low-a[axis])/(b[axis]-a[axis]);
+		const float last = (high-a[axis])/(b[axis]-a[axis]);
+		dtVlerp(left, a, b, dtMin(first, last));
+		dtVlerp(right, a, b, dtMax(first, last));
 	}
 	
 	return DT_SUCCESS;

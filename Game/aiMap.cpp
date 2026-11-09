@@ -1051,6 +1051,11 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
             STerrainTile policy;
             policies[size_t(y)*XSize()+x][c]=BYTE(CalcOneTilePassability(policy,c,Float2Int(fpUnitsHeights[c]*fpZMult),x,y));
         }
+        // The shared human domain admits shallow water independently of
+        // tiny body clearance. The legacy class-1 blanket water ban belonged
+        // to the removed small profile, not to ground locomotion itself.
+        for(int y=0;y<YSize();++y)for(int x=0;x<XSize();++x)if(map[y][x].nDepth>0)
+            policies[size_t(y)*XSize()+x][1]=policies[size_t(y)*XSize()+x][3];
         auto policyAt=[&](int x,int y) {return TileInBounds(x,y)?policies[size_t(y)*XSize()+x]:Policy{};};
         struct Vertex {Navigation::Point p;float water;};
         auto clip=[](std::vector<Vertex> polygon,int axis,float bound,bool greater) {
