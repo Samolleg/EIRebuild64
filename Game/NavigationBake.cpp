@@ -540,7 +540,7 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
             if(!file.read(reinterpret_cast<char*>(bytes.data()),bytes.size()))throw std::runtime_error("Nav64: unreadable source cache");
             return bytes;
         };
-        const auto bytes=read(directory/(sourceStem+".navcache"));auto cache=nlohmann::json::parse(bytes.begin(),bytes.end());
+        const auto bytes=read(CacheDirectory()/(sourceStem+".navcache"));auto cache=nlohmann::json::parse(bytes.begin(),bytes.end());
         const auto checksum=cache.at("checksum").get<Bytes>();cache.erase("checksum");const auto text=cache.dump();
         if(cache.at("version")!=1||cache.at("algorithm")!=AlgorithmVersion||checksum!=Digest(Bytes(text.begin(),text.end())))
             throw std::runtime_error("Nav64: stale source cache");
@@ -568,7 +568,7 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
     // This disposable companion binds the input signatures to the complete
     // published set. A missing, interrupted or damaged set is a full bake.
     try {
-        const auto bytes=read(directory/(cacheStem+".navcache"));
+        const auto bytes=read(CacheDirectory()/(cacheStem+".navcache"));
         auto cache=nlohmann::json::parse(bytes.begin(),bytes.end());
         const auto checksum=cache.at("checksum").get<Bytes>();cache.erase("checksum");
         const auto text=cache.dump();
@@ -785,7 +785,7 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
         cache["profiles"].push_back({{"mesh",Digest(outputs[type])},{"keys",built[type]->tileKeys},{"tiles",built[type]->tiles},{"polygons",polygons}});
     }
     const auto unsignedText=cache.dump();cache["checksum"]=Digest(Bytes(unsignedText.begin(),unsignedText.end()));
-    const auto cacheText=cache.dump();Atomic(directory/(stem+".navcache"),Bytes(cacheText.begin(),cacheText.end()));
+    const auto cacheText=cache.dump();Atomic(CacheDirectory()/(stem+".navcache"),Bytes(cacheText.begin(),cacheText.end()));
     printf("PHASE_TIMING map=%s source_ms=%lld source_serialize_compress_ms=%lld tiles_ms=%lld serialize_compress_ms=%lld quality_ms=%lld write_ms=%lld\n",
         mapName.c_str(),sourceMs,sourceStoreMs,tilesMs,serializeMs,qualityMs,
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-writeStart).count());fflush(stdout);
