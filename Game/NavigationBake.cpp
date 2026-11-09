@@ -66,6 +66,9 @@ void CheckReleaseHeights(const Navigation::Mesh& mesh) {
 }
 }
 std::shared_ptr<const owned::FigureCpuAsset> NavigationBake::Figure(CFigureManager& manager,const std::string& mask,const char* part) {
+    return QueueFigure(manager,mask,part).get();
+}
+NavigationBake::FigureJob NavigationBake::QueueFigure(CFigureManager& manager,const std::string& mask,const char* part) {
     const std::string key=mask+"/"+part;
     auto found=figures.find(key);if(found!=figures.end())return found->second;
 
@@ -78,9 +81,16 @@ std::shared_ptr<const owned::FigureCpuAsset> NavigationBake::Figure(CFigureManag
     catch(...) {if(model)model->GetModel()->CloseFile(data);else manager.CloseFile(data);throw;}
     if(model)model->GetModel()->CloseFile(data);else manager.CloseFile(data);
     blob.identity.canonical_name=key;blob.identity.bytes=size;
-    auto figure=std::make_shared<owned::FigureCpuAsset>();owned::ResourceFailure failure;
-    if(!owned::parse_figure_asset(blob,*figure,failure))throw std::runtime_error("Nav64: "+key+": "+failure.message);
-    figures.emplace(key,figure);return figure;
+    // Resource-manager caches stay on their owner thread. Decoders consume
+    // immutable copied payloads and can overlap both I/O and other decoders.
+    const auto csr=_mm_getcsr();
+    auto pending=std::async(std::launch::async,[blob=std::move(blob),key,csr]() -> std::shared_ptr<const owned::FigureCpuAsset> {
+        _mm_setcsr(csr);
+        auto figure=std::make_shared<owned::FigureCpuAsset>();owned::ResourceFailure failure;
+        if(!owned::parse_figure_asset(blob,*figure,failure))throw std::runtime_error("Nav64: "+key+": "+failure.message);
+        return figure;
+    }).share();
+    figures.emplace(key,pending);return pending;
 }
 
 const NavigationCanopy& NavigationBake::Canopy(const CMapObjectServer& object,const owned::FigureCpuAsset& figure) {
@@ -279,6 +289,12 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
         const auto& bv=object->fbvs[i];
         if(!bv.IsIgnored()&&!bv.IsBridge()&&bv.GetPassability()==AI_PASS_NO)hasTrunk=true;
     }
+    // Admit all selected part payloads before waiting for the first decoder.
+    // Failure is reported by the original labelled per-part path below.
+    for(INT_PTR n=0;n<parts.GetSize();++n) {
+        const int i=object->GetFigureIndexByName(parts[n]);if(i<0||object->fbvs[i].IsIgnored())continue;
+        try {QueueFigure(*static_cast<CFigureManager*>(object->GetWorld()->GetFigureManager()),object->GetMaskName(),parts[n]);}catch(const std::exception&) {}
+    }
     constexpr float canopyCell=.3f;
     std::map<std::pair<int,int>,float> canopy;
     for(INT_PTR n=0;n<parts.GetSize();++n){int i=object->GetFigureIndexByName(parts[n]);if(i<0)continue;
@@ -300,7 +316,7 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
                 }
                 auto base=object->GetCP();base.z+=GroundHeight(GamePoint(base));
                 std::vector<Navigation::Point> vertices(figure->components.size());
-                for(size_t j=0;j<vertices.size();++j) {
+                auto transform=[&](size_t begin,size_t end) {for(size_t j=begin;j<end;++j) {
                     const auto index=figure->components[j].position;CPlot3D p(0,0,0);
                     for(unsigned s=0;s<figure->shape_count;++s) {
                         const auto& group=figure->positions[s*figure->position_groups+index/4];const auto lane=index%4;
@@ -310,6 +326,13 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
                     // to the collision BV. BON already contains linked offsets.
                     p=object->RotateVector(p+bv.ptBone)+base;vertices[j]=GamePoint(p);
                     if(!Navigation::Finite(vertices[j]))throw std::runtime_error("non-finite transformed triangle vertex");
+                }
+                };
+                if(vertices.size()<4096)transform(0,vertices.size());
+                else {
+                    const auto csr=_mm_getcsr();std::array<std::future<void>,4> jobs;
+                    for(size_t k=0;k<jobs.size();++k)jobs[k]=std::async(std::launch::async,[&,k]{_mm_setcsr(csr);transform(vertices.size()*k/jobs.size(),vertices.size()*(k+1)/jobs.size());});
+                    for(auto& job:jobs)job.get();
                 }
                 FlightBox top;top.object=id;top.minimum={FLT_MAX,FLT_MAX,FLT_MAX};top.maximum={-FLT_MAX,-FLT_MAX,-FLT_MAX};
                 for(auto p:vertices) {
@@ -506,12 +529,64 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
         printf("BODIES_EXTENDED models_and_shapes=%zu bytes=%zu\n",bodyTable.samples.size(),table.size());fflush(stdout);
     }
     // Build, runtime support and tile rebuild consume lossless imported planes.
-    auto input=Geometry();IndexSources(input,tileCells*.1f);auto sourceBytes=StoreSources(input);
+    const auto sourceStart=std::chrono::steady_clock::now();
+    SourceReuse sourceReuse;
+    const auto sourceStem=std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string();
+    try {
+        auto read=[](const std::filesystem::path& path) {
+            std::ifstream file(path,std::ios::binary|std::ios::ate);const auto size=file.tellg();
+            if(size<0||size>512ll*1024*1024)throw std::runtime_error("Nav64: unavailable source cache");
+            Bytes bytes(static_cast<size_t>(size));file.seekg(0);
+            if(!file.read(reinterpret_cast<char*>(bytes.data()),bytes.size()))throw std::runtime_error("Nav64: unreadable source cache");
+            return bytes;
+        };
+        const auto bytes=read(directory/(sourceStem+".navcache"));auto cache=nlohmann::json::parse(bytes.begin(),bytes.end());
+        const auto checksum=cache.at("checksum").get<Bytes>();cache.erase("checksum");const auto text=cache.dump();
+        if(cache.at("version")!=1||cache.at("algorithm")!=AlgorithmVersion||checksum!=Digest(Bytes(text.begin(),text.end())))
+            throw std::runtime_error("Nav64: stale source cache");
+        sourceReuse.previous=read(directory/(sourceStem+".navgeom"));
+        if(cache.at("sources").get<Bytes>()!=Digest(sourceReuse.previous))throw std::runtime_error("Nav64: stale source cache");
+        sourceReuse.keys=cache.at("source_keys").get<Bytes>();
+    }catch(const std::exception&) {sourceReuse={};}
+    auto input=Geometry();IndexSources(input,tileCells*.1f);auto sourceBytes=StoreSources(input,&sourceReuse);
+    const auto sourceStoreMs=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-sourceStart).count();
     auto sources=LoadSources(sourceBytes);const auto& geometry=*sources;
     std::vector<Navigation::BuildRequest> requests;
     for(int type=0;type<AgentCount;++type){
         auto p=Agents[type].profile;p.tileCells=tileCells;BuildRequest request{p,{}};
         requests.push_back(std::move(request));
+    }
+    const auto cacheStem=std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string();
+    auto read=[](const std::filesystem::path& path) {
+        std::ifstream file(path,std::ios::binary|std::ios::ate);
+        const auto size=file.tellg();
+        if(size<0||size>512ll*1024*1024)throw std::runtime_error("Nav64: unavailable cache");
+        Bytes bytes(static_cast<size_t>(size));file.seekg(0);
+        if(!file.read(reinterpret_cast<char*>(bytes.data()),bytes.size()))throw std::runtime_error("Nav64: unreadable cache");
+        return bytes;
+    };
+    // This disposable companion binds the input signatures to the complete
+    // published set. A missing, interrupted or damaged set is a full bake.
+    try {
+        const auto bytes=read(directory/(cacheStem+".navcache"));
+        auto cache=nlohmann::json::parse(bytes.begin(),bytes.end());
+        const auto checksum=cache.at("checksum").get<Bytes>();cache.erase("checksum");
+        const auto text=cache.dump();
+        if(cache.at("version")!=1||cache.at("algorithm")!=AlgorithmVersion||
+            checksum!=Digest(Bytes(text.begin(),text.end()))||
+            cache.at("sources").get<Bytes>()!=Digest(read(directory/(cacheStem+".navgeom")))||
+            cache.at("world").get<Bytes>()!=Digest(read(directory/(cacheStem+".navworld"))))
+            throw std::runtime_error("Nav64: stale cache");
+        for(int type=0;type<AgentCount;++type) {
+            auto bytes=read(directory/MeshFilename(mapName,mobName,type));
+            const auto& profile=cache.at("profiles").at(type);
+            if(profile.at("mesh").get<Bytes>()!=Digest(bytes))throw std::runtime_error("Nav64: stale mesh cache");
+            requests[type].previous=Navigation::Load(bytes,requests[type].profile,mapName,mobName,Agents[type].name);
+            requests[type].previousBytes=std::move(bytes);
+            requests[type].tileKeys=profile.at("keys").get<Bytes>();
+        }
+    }catch(const std::exception&) {
+        for(auto& request:requests){request.previous.reset();request.tileKeys.clear();request.previousBytes.clear();}
     }
     std::map<int,std::vector<Solid>> initialObjects,initialFlightObjects;
     auto initial=geometry;
@@ -528,27 +603,38 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
     }
     // Initial dynamic occupancy is baked once; later worker rebuilds use the
     // static source triangles plus the current live obstacle snapshot.
+    const auto tilesStart=std::chrono::steady_clock::now();
+    const auto sourceMs=std::chrono::duration_cast<std::chrono::milliseconds>(tilesStart-sourceStart).count();
     auto pending=std::async(std::launch::async,[&]{return Navigation::BuildProfiles(initial,requests);});
     if(overlap)while(pending.wait_for(std::chrono::milliseconds(0))!=std::future_status::ready)overlap();
     auto built=pending.get();
+    const auto tilesMs=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-tilesStart).count();
     for(auto& mesh:built){mesh->sources=sources;IndexSurfaces(*mesh);}
     std::uint64_t totalBytes=0;std::vector<Navigation::Bytes> outputs(AgentCount);
     for(int type=0;type<AgentCount;++type) {
         auto& mesh=*built[type];mesh.mapName=mapName;mesh.mobName=mobName;mesh.profileId=Agents[type].name;CheckReleaseHeights(mesh);
     }
+    const auto serializeStart=std::chrono::steady_clock::now();
     std::array<std::uint64_t,AgentCount> storeMs{},writeMs{};
-    auto serialize=[&](int first){for(int type=first;type<AgentCount;type+=2) {
-        const auto start=std::chrono::steady_clock::now();outputs[type]=Navigation::Store(*built[type]);
+    auto serialize=[&](int type) {
+        const auto start=std::chrono::steady_clock::now();outputs[type]=built[type]->rebuilt==0&&!requests[type].previousBytes.empty()?std::move(requests[type].previousBytes):Navigation::Store(*built[type]);
         storeMs[type]=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
-    }};
-    auto parallel=std::async(std::launch::async,[&]{serialize(1);});serialize(0);parallel.get();
+    };
+    // Independent LZMS streams, one per existing profile container. The bytes
+    // within a stream retain their original order and compression settings.
+    std::vector<std::future<void>> serializers;
+    for(int type=0;type<AgentCount;++type)serializers.push_back(std::async(std::launch::async,[&,type]{serialize(type);}));
+    for(auto& job:serializers)job.get();
     for(int type=0;type<AgentCount;++type) {
         auto ready=Navigation::Load(outputs[type],built[type]->profile,mapName,mobName,Agents[type].name);
+        ready->rebuilt=built[type]->rebuilt;ready->tileKeys=std::move(built[type]->tileKeys);
         ready->buildMs=built[type]->buildMs;ready->rasterMs=built[type]->rasterMs;ready->polygonMs=built[type]->polygonMs;
         ready->stagesMs=built[type]->stagesMs;
         ready->sources=sources;IndexSurfaces(*ready);built[type]=std::move(ready);
         totalBytes+=outputs[type].size();
     }
+    const auto qualityStart=std::chrono::steady_clock::now();
+    const auto serializeMs=std::chrono::duration_cast<std::chrono::milliseconds>(qualityStart-serializeStart).count();
     {
         const auto& mesh=*built[Flying];unsigned samples=0;float minimum=FLT_MAX;
         auto check=[&](Point p) {
@@ -645,6 +731,8 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
         }
     }
     for(const auto& entry:normalizedBounds)printf("BOUNDS_NORMALIZED mpr=%s mob=%s %s\n",mapName.c_str(),mobName.c_str(),entry.c_str());
+    const auto writeStart=std::chrono::steady_clock::now();
+    const auto qualityMs=std::chrono::duration_cast<std::chrono::milliseconds>(writeStart-qualityStart).count();
     for(int type=0;type<AgentCount;++type) {
         const auto& mesh=*built[type];const auto& bytes=outputs[type];
         const auto writeStart=std::chrono::steady_clock::now();
@@ -652,8 +740,8 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
         writeMs[type]=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-writeStart).count();
         unsigned polygons=0;const dtNavMesh& data=*mesh.data;
         for(int i=0;i<data.getMaxTiles();++i)if(const auto* h=data.getTile(i)->header)polygons+=h->polyCount;
-        printf("PROFILE map=%s mob=%s type=%s radius=%.2f tiles=%u ms=%llu raster_cpu_ms=%llu polygons_cpu_ms=%llu bytes=%zu polygons=%u recast_raster_ms=%llu filters_compact_ms=%llu erosion_ms=%llu regions_contours_polys_ms=%llu detail_ms=%llu serialize_compress_ms=%llu write_ms=%llu height_outliers=0\n",
-            mapName.c_str(),mobName.c_str(),Agents[type].name,mesh.profile.radius,mesh.tiles,
+        printf("PROFILE map=%s mob=%s type=%s radius=%.2f tiles=%u rebuilt=%u ms=%llu raster_cpu_ms=%llu polygons_cpu_ms=%llu bytes=%zu polygons=%u recast_raster_ms=%llu filters_compact_ms=%llu erosion_ms=%llu regions_contours_polys_ms=%llu detail_ms=%llu serialize_compress_ms=%llu write_ms=%llu height_outliers=0\n",
+            mapName.c_str(),mobName.c_str(),Agents[type].name,mesh.profile.radius,mesh.tiles,mesh.rebuilt,
             static_cast<unsigned long long>(mesh.buildMs),static_cast<unsigned long long>(mesh.rasterMs),
             static_cast<unsigned long long>(mesh.polygonMs),bytes.size(),polygons,
             mesh.stagesMs[0],mesh.stagesMs[1],mesh.stagesMs[2],mesh.stagesMs[3],mesh.stagesMs[4],storeMs[type],writeMs[type]);
@@ -683,5 +771,17 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
     }
     const auto text=catalogue.dump();Navigation::Bytes bytes(text.begin(),text.end());
     Atomic(directory/(std::filesystem::path(mapName).stem().string()+"--"+std::filesystem::path(mobName).stem().string()+".navworld"),bytes);
+    nlohmann::json cache={{"version",1},{"algorithm",AlgorithmVersion},{"sources",Digest(sourceBytes)},{"source_keys",sourceReuse.keys},
+        {"world",Digest(bytes)},{"profiles",nlohmann::json::array()}};
+    for(int type=0;type<AgentCount;++type) {
+        unsigned polygons=0;const dtNavMesh& data=*built[type]->data;
+        for(int i=0;i<data.getMaxTiles();++i)if(const auto* h=data.getTile(i)->header)polygons+=h->polyCount;
+        cache["profiles"].push_back({{"mesh",Digest(outputs[type])},{"keys",built[type]->tileKeys},{"tiles",built[type]->tiles},{"polygons",polygons}});
+    }
+    const auto unsignedText=cache.dump();cache["checksum"]=Digest(Bytes(unsignedText.begin(),unsignedText.end()));
+    const auto cacheText=cache.dump();Atomic(directory/(stem+".navcache"),Bytes(cacheText.begin(),cacheText.end()));
+    printf("PHASE_TIMING map=%s source_ms=%lld source_serialize_compress_ms=%lld tiles_ms=%lld serialize_compress_ms=%lld quality_ms=%lld write_ms=%lld\n",
+        mapName.c_str(),sourceMs,sourceStoreMs,tilesMs,serializeMs,qualityMs,
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-writeStart).count());fflush(stdout);
     return totalBytes+bytes.size();
 }

@@ -133,6 +133,12 @@ CModPackage::CModPackage():initialization(std::make_unique<ModInitialization::Le
 CModPackage::~CModPackage(){perkHostLifetime.reset();if(state)lua_close(state);}
 void CModPackage::Call(int args,int results){CorePerf::Scope coreTiming(CorePerf::Lua);GameJournal::Callback journalCallback;GameJournal::Source journalSource("Lua.mod");if(lua_pcall(state,args,results,0)){const char*p=lua_tostring(state,-1);GameJournal::Event("ERROR","lua","text=%s",GameJournal::Quote(p).c_str());throw std::runtime_error(p?p:"Lua package call failed");}}
 void CModPackage::Require(const char *name){lua_getglobal(state,"require");lua_pushstring(state,name);Call(1,1);}
+std::vector<std::string> CModPackage::NavigationInputs() const {
+ std::vector<std::string> result={Join(root,"config.reg"),Join(root,mainScript),spellAddon.Path()};
+ for(const auto& category:archives)for(const auto& path:category.second)result.push_back(path);
+ for(const auto& config:configs)result.push_back(config.second);
+ return result;
+}
 void CModPackage::Load(const std::string &directory){
  if(state)throw std::runtime_error("Package already loaded; create a fresh package for reload");
  root=fs::absolute(directory).lexically_normal().string();

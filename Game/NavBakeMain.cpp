@@ -26,7 +26,54 @@
 #include <psapi.h>
 #pragma comment(lib,"psapi.lib")
 
+#include "nlohmann/json.hpp"
+#include <bcrypt.h>
+#pragma comment(lib,"bcrypt.lib")
 namespace {
+// Stream hashes keep large resource archives out of the map working set.
+Navigation::Bytes FileDigest(const std::filesystem::path& path) {
+    BCRYPT_HASH_HANDLE hash=nullptr;
+    if(BCryptCreateHash(BCRYPT_SHA256_ALG_HANDLE,&hash,nullptr,0,nullptr,0,0)<0)throw std::runtime_error("Cannot hash navigation input");
+    struct Close {BCRYPT_HASH_HANDLE hash;~Close(){BCryptDestroyHash(hash);}} close{hash};
+    std::ifstream file(path,std::ios::binary);if(!file)throw std::runtime_error("Cannot read navigation input");
+    std::array<unsigned char,65536> buffer;
+    while(file) {
+        file.read(reinterpret_cast<char*>(buffer.data()),buffer.size());
+        if(BCryptHashData(hash,buffer.data(),ULONG(file.gcount()),0)<0)throw std::runtime_error("Cannot hash navigation input");
+    }
+    if(!file.eof())throw std::runtime_error("Cannot read navigation input");
+    Navigation::Bytes result(32);if(BCryptFinishHash(hash,result.data(),ULONG(result.size()),0)<0)throw std::runtime_error("Cannot finish navigation hash");
+    return result;
+}
+nlohmann::json ReadImportCache(const std::filesystem::path& path) {
+    std::ifstream file(path);nlohmann::json result;file>>result;return result;
+}
+// Include configured archives even when outside res/, their names as well as
+// contents, the complete base archive/config inventory (including additions),
+// selected scene/authoring and executable. No timestamps decide cache reuse.
+Navigation::Bytes ImportKey(const std::filesystem::path& base,const CModPackage& package,
+    const std::string& map,const std::string& mob,const std::filesystem::path& settings) {
+    std::set<std::filesystem::path> paths;
+    for(const auto& path:package.NavigationInputs())if(!path.empty())paths.insert(std::filesystem::absolute(path));
+    for(const auto& folder:{base/"Res",base/"config"})if(std::filesystem::exists(folder))
+        for(const auto& entry:std::filesystem::recursive_directory_iterator(folder))if(entry.is_regular_file())paths.insert(entry.path());
+    paths.insert(settings);
+    for(const auto& name:{map,mob})paths.insert(std::filesystem::absolute(ModRuntime::MapPath(name.c_str())));
+    auto authoring=std::filesystem::path(ModRuntime::MapPath(map.c_str()));authoring.replace_extension(".navsrc");paths.insert(std::filesystem::absolute(authoring));
+    if(!NavigationBake::replayInput.empty())paths.insert(NavigationBake::replayInput);
+    wchar_t executable[32768];const auto size=GetModuleFileNameW(nullptr,executable,32768);
+    if(!size||size==32768)throw std::runtime_error("Cannot identify navigation executable");paths.insert(std::filesystem::path(executable));
+    const std::vector<std::filesystem::path> ordered(paths.begin(),paths.end());
+    std::vector<Navigation::Bytes> hashes(ordered.size());std::array<std::future<void>,4> jobs;
+    for(size_t worker=0;worker<jobs.size();++worker)jobs[worker]=std::async(std::launch::async,[&,worker] {
+        for(size_t i=worker;i<ordered.size();i+=jobs.size())if(std::filesystem::is_regular_file(ordered[i]))hashes[i]=FileDigest(ordered[i]);
+    });
+    for(auto& job:jobs)job.get();
+    nlohmann::json inputs=nlohmann::json::array();
+    for(size_t i=0;i<ordered.size();++i)inputs.push_back({ordered[i].u8string(),hashes[i]});
+    const auto text=nlohmann::json{{"files",inputs},{"tile_cells",NavigationBake::tileCells},{"algorithm",Navigation::AlgorithmVersion}}.dump();
+    return Navigation::Digest(Navigation::Bytes(text.begin(),text.end()));
+}
 using Clock=std::chrono::steady_clock;
 long long Milliseconds(Clock::time_point start) {
     return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-start).count();
@@ -214,6 +261,37 @@ int wmain(int argc,wchar_t** argv) {
             printf("MAP_BEGIN mpr=%s mob=%s\n",map.first.c_str(),map.second.c_str());fflush(stdout);
             try {
                 long long importMs=0;std::uint64_t bytes=0;
+                const auto stem=std::filesystem::path(map.first).stem().string()+"--"+std::filesystem::path(map.second).stem().string();
+                const auto importCachePath=output/(stem+".navimport");
+                Navigation::Bytes importKey;
+                // Model-filtered admission must still inspect the actual MOB.
+                if(!options.count(L"--model"))try {
+                    importKey=ImportKey(base,package,map.first,map.second,settings);
+                    auto cache=ReadImportCache(importCachePath);
+                    const auto checksum=cache.at("checksum").get<Navigation::Bytes>();cache.erase("checksum");const auto text=cache.dump();
+                    if(checksum!=Navigation::Digest(Navigation::Bytes(text.begin(),text.end())))throw std::runtime_error("Damaged navigation cache");
+                    if(cache.at("version")!=1||cache.at("input").get<Navigation::Bytes>()!=importKey)throw std::runtime_error("Changed navigation input");
+                    std::set<std::string> expected;
+                    for(int type=0;type<Navigation::AgentCount;++type)expected.insert(Navigation::MeshFilename(map.first,map.second,type));
+                    for(const auto* extension:{".navgeom",".navworld",".navcache"})expected.insert(stem+extension);
+                    expected.insert(Navigation::BodyFilename);
+                    for(const auto& entry:cache.at("outputs")) {
+                        const auto name=entry.at("name").get<std::string>();
+                        if(!expected.erase(name)||FileDigest(output/name)!=entry.at("hash").get<Navigation::Bytes>())throw std::runtime_error("Changed navigation output");
+                    }
+                    // Require the entire known set, including the tile cache;
+                    // an absent/corrupt companion always causes a full bake.
+                    if(!expected.empty())throw std::runtime_error("Incomplete navigation cache");
+                    const auto tileCache=ReadImportCache(output/(stem+".navcache"));
+                    for(int type=0;type<Navigation::AgentCount;++type) {
+                        const auto& profile=tileCache.at("profiles").at(type);const auto& agent=Navigation::Agents[type];
+                        printf("PROFILE map=%s mob=%s type=%s radius=%.2f tiles=%u rebuilt=0 ms=0 raster_cpu_ms=0 polygons_cpu_ms=0 bytes=%llu polygons=%u recast_raster_ms=0 filters_compact_ms=0 erosion_ms=0 regions_contours_polys_ms=0 detail_ms=0 serialize_compress_ms=0 write_ms=0 height_outliers=0\n",
+                            map.first.c_str(),map.second.c_str(),agent.name,agent.profile.radius,profile.at("tiles").get<unsigned>(),
+                            static_cast<unsigned long long>(std::filesystem::file_size(output/Navigation::MeshFilename(map.first,map.second,type))),profile.at("polygons").get<unsigned>());
+                    }
+                    bytes=cache.at("bytes").get<std::uint64_t>();totalBytes+=bytes;++completed;
+                    printf("MAP_DONE mpr=%s mob=%s import_ms=0 total_ms=%lld profiles=%u bytes=%llu\n",map.first.c_str(),map.second.c_str(),Milliseconds(start),unsigned(Navigation::AgentCount),static_cast<unsigned long long>(bytes));fflush(stdout);return;
+                }catch(const std::exception&) {}
                 {
                 CWorldServer world(true);SavedWorldScope worldScope(&world);
                 struct DestroyWorld {CWorldServer& world;~DestroyWorld(){world.Destroy();}} cleanup{world};
@@ -234,6 +312,19 @@ int wmain(int argc,wchar_t** argv) {
                 }
                 importMs=Milliseconds(start);
                 bytes=world.aiMap.Navigation().Bake(output,bodyTable,world);totalBytes+=bytes;
+                }
+                if(!importKey.empty()) {
+                    nlohmann::json outputs=nlohmann::json::array();
+                    auto add=[&](const std::string& name){outputs.push_back({{"name",name},{"hash",FileDigest(output/name)}});};
+                    for(int type=0;type<Navigation::AgentCount;++type)add(Navigation::MeshFilename(map.first,map.second,type));
+                    for(const auto* extension:{".navgeom",".navworld",".navcache"})add(stem+extension);
+                    add(Navigation::BodyFilename);
+                    auto manifest=nlohmann::json{{"version",1},{"input",importKey},{"outputs",outputs},{"bytes",bytes}};
+                    const auto unsignedText=manifest.dump();manifest["checksum"]=Navigation::Digest(Navigation::Bytes(unsignedText.begin(),unsignedText.end()));
+                    const auto cache=manifest.dump();
+                    auto temporary=importCachePath;temporary+=L".tmp";
+                    {std::ofstream file(temporary,std::ios::binary|std::ios::trunc);if(!file.write(cache.data(),cache.size())||!file.flush())throw std::runtime_error("Cannot write import cache");}
+                    if(!MoveFileExW(temporary.c_str(),importCachePath.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))throw std::runtime_error("Cannot publish import cache");
                 }
                 ++completed;
                 printf("MAP_DONE mpr=%s mob=%s import_ms=%lld total_ms=%lld profiles=%u bytes=%llu\n",

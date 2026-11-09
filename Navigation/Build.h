@@ -41,12 +41,19 @@ struct Mesh {
     std::uint64_t generation = 0;
     std::uint32_t tiles = 0;
     // Build telemetry only; no change to the container or serialized addresses.
-    std::uint32_t workers = 0;
+    std::uint32_t workers = 0, rebuilt = 0;
+    Bytes tileKeys; // Baker-only signatures, never part of the game container.
     std::uint64_t rasterMs = 0, polygonMs = 0, buildMs = 0;
     std::array<std::uint64_t,5> stagesMs{}; // Recast raster, filters/compact, erosion, regions/contours/polys, detail; summed CPU time.
 };
-struct BuildRequest { Profile profile; std::vector<Point> columns; };
-Bytes StoreSources(const Geometry& geometry);
+struct BuildRequest {
+    Profile profile; std::vector<Point> columns;
+    std::shared_ptr<Mesh> previous;
+    Bytes tileKeys, previousBytes;
+};
+Bytes Digest(const Bytes& bytes);
+struct SourceReuse {Bytes previous, keys;};
+Bytes StoreSources(const Geometry& geometry,SourceReuse* reuse=nullptr);
 std::shared_ptr<Geometry> LoadSources(Bytes bytes,std::array<double,3>* stages=nullptr);
 void IndexSurfaces(Mesh& mesh);
 void IndexSources(Geometry& geometry,float tileWidth);

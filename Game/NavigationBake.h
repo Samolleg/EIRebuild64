@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <set>
 #include <functional>
+#include <future>
 #include "../Navigation/Authoring.h"
 
 class CMapObject;
@@ -17,7 +18,8 @@ namespace owned {struct FigureCpuAsset;struct ModelCpuAsset;struct AnimationClip
 // under the NavBake tool scope; a game session never imports this geometry.
 class NavigationBake {
     std::map<int,Navigation::Geometry> objects;
-    std::map<std::string,std::shared_ptr<const owned::FigureCpuAsset>> figures;
+    using FigureJob=std::shared_future<std::shared_ptr<const owned::FigureCpuAsset>>;
+    std::map<std::string,FigureJob> figures;
     std::shared_ptr<CTextureManager> canopyResources;
     std::map<std::string,std::shared_ptr<const NavigationCanopy>> canopyTextures;
     std::map<std::string,std::shared_ptr<const owned::ModelCpuAsset>> bodies;
@@ -29,6 +31,7 @@ class NavigationBake {
     std::set<int> staticIds;
     std::map<int,Navigation::Door> doors;
     std::set<std::string> normalizedBounds;
+    FigureJob QueueFigure(CFigureManager& manager,const std::string& mask,const char* part);
     std::shared_ptr<const owned::FigureCpuAsset> Figure(CFigureManager& manager,const std::string& mask,const char* part);
     const Navigation::BodySize& Body(CWorldServer& world,const std::string& mask,float strength,float grace,float tall);
     Navigation::Geometry Geometry();
