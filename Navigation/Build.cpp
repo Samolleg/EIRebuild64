@@ -18,6 +18,7 @@
 #include <functional>
 #include <tuple>
 #include <cstdio>
+#include <deque>
 #define NOMINMAX
 #include <windows.h>
 #include <compressapi.h>
@@ -25,6 +26,64 @@
 
 namespace Navigation {
 namespace {
+
+// One process-wide tile pool, also used by overlapping map builds. Batches
+// rotate after each tile so a large map cannot starve a newly imported map.
+class TilePool {
+    struct Batch {
+        int next=0,count=0,remaining=0;
+        std::function<void(int)> work;
+        std::exception_ptr error;
+        std::condition_variable done;
+    };
+    std::mutex mutex;
+    std::condition_variable ready;
+    std::deque<std::shared_ptr<Batch>> queue;
+    std::vector<std::thread> threads;
+    bool stopping=false;
+public:
+    TilePool() {
+        DWORD_PTR mask=0,system=0;GetProcessAffinityMask(GetCurrentProcess(),&mask,&system);
+        unsigned count=0;for(;mask;mask>>=1)count+=unsigned(mask&1);
+        count=std::max(1u,count);
+        try {for(unsigned i=0;i<count;++i)threads.emplace_back([this] {
+            for(;;) {
+                std::shared_ptr<Batch> batch;int index;
+                {
+                    std::unique_lock<std::mutex> lock(mutex);
+                    ready.wait(lock,[&]{return stopping||!queue.empty();});
+                    if(stopping&&queue.empty())return;
+                    batch=queue.front();queue.pop_front();index=batch->next++;
+                    if(batch->next<batch->count)queue.push_back(batch);
+                }
+                std::exception_ptr error;
+                try {batch->work(index);}catch(...) {error=std::current_exception();}
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    if(error&&!batch->error)batch->error=error;
+                    if(!--batch->remaining)batch->done.notify_one();
+                }
+            }
+        });}catch(...) {
+            {std::lock_guard<std::mutex> lock(mutex);stopping=true;}ready.notify_all();
+            for(auto& thread:threads)thread.join();throw;
+        }
+    }
+    ~TilePool() {
+        {std::lock_guard<std::mutex> lock(mutex);stopping=true;}ready.notify_all();
+        for(auto& thread:threads)thread.join();
+    }
+    unsigned Size() const {return unsigned(threads.size());}
+    void For(int count,std::function<void(int)> work) {
+        if(!count)return;
+        auto batch=std::make_shared<Batch>();batch->count=batch->remaining=count;batch->work=std::move(work);
+        std::unique_lock<std::mutex> lock(mutex);queue.push_back(batch);ready.notify_all();
+        batch->done.wait(lock,[&]{return batch->remaining==0;});
+        if(batch->error)std::rethrow_exception(batch->error);
+    }
+};
+TilePool& Tiles() {static TilePool pool;return pool;}
+
 void Require(bool ok,const char* what) { if(!ok)throw std::runtime_error(what); }
 struct Wire {
     Bytes bytes; size_t at=0;
@@ -109,7 +168,7 @@ template<class Work> void SourceRows(size_t count,Work work) {
 }
 void CheckProfile(const Profile& p) {
     Require(std::isfinite(p.radius)&&p.radius>=0&&p.radius<=4 && std::isfinite(p.height)&&p.height>.1f&&p.height<=10 &&
-        p.cellSize==.1f && p.cellHeight==.05f && (p.tileCells==32||p.tileCells==64||p.tileCells==96||p.tileCells==128) && ((p.movement==Movement::Ground&&p.slope==40)||(Levitates(p)&&p.slope==60)||(Flies(p)&&p.slope==90)) && p.climb==.35f,"Nav64: unsupported build profile");
+        (p.cellSize==.1f||p.cellSize==.2f||p.cellSize==.3f) && p.cellHeight==.05f && (p.tileCells==32||p.tileCells==64||p.tileCells==96||p.tileCells==128) && ((p.movement==Movement::Ground&&p.slope==40)||(Levitates(p)&&p.slope==60)||(Flies(p)&&p.slope==90)) && p.climb==.35f,"Nav64: unsupported build profile");
 }
 // v1.6.0 addTile does not take bounds for its internal sections. Validate all
 // counts and the exact aligned library layout BEFORE handing it cached bytes.
@@ -182,8 +241,22 @@ void CheckTile(const unsigned char* data,size_t size) {
     }
 }
 struct BakeContext final : rcContext {
+    std::array<std::chrono::steady_clock::time_point,RC_MAX_TIMERS> started{};
+    std::array<std::uint64_t,RC_MAX_TIMERS> elapsed{};
+    std::array<std::atomic<std::uint64_t>,5>* stages;
     unsigned material; float radius; int x,z; bool printing; bool multipleOutlines=false; std::string failure;
-    BakeContext(const Profile& p,int tx,int tz,bool logging):rcContext(true),material(p.materialClass),radius(p.radius),x(tx),z(tz),printing(logging) {}
+    BakeContext(const Profile& p,int tx,int tz,bool logging,std::array<std::atomic<std::uint64_t>,5>* totals):rcContext(true),stages(totals),material(p.materialClass),radius(p.radius),x(tx),z(tz),printing(logging) {}
+    void doStartTimer(const rcTimerLabel label) override {started[label]=std::chrono::steady_clock::now();}
+    void doStopTimer(const rcTimerLabel label) override {
+        elapsed[label]+=std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now()-started[label]).count();
+    }
+    ~BakeContext() {
+        (*stages)[0].fetch_add(elapsed[RC_TIMER_RASTERIZE_TRIANGLES]);
+        (*stages)[1].fetch_add(elapsed[RC_TIMER_FILTER_BORDER]+elapsed[RC_TIMER_FILTER_WALKABLE]+elapsed[RC_TIMER_FILTER_LOW_OBSTACLES]+elapsed[RC_TIMER_BUILD_COMPACTHEIGHTFIELD]);
+        (*stages)[2].fetch_add(elapsed[RC_TIMER_ERODE_AREA]);
+        (*stages)[3].fetch_add(elapsed[RC_TIMER_BUILD_REGIONS]+elapsed[RC_TIMER_BUILD_CONTOURS]+elapsed[RC_TIMER_BUILD_POLYMESH]);
+        (*stages)[4].fetch_add(elapsed[RC_TIMER_BUILD_POLYMESHDETAIL]);
+    }
     void doLog(const rcLogCategory category,const char* message,const int length) override {
         if(category==RC_LOG_ERROR && (std::string(message,length).find("rcBuildContours: Multiple outlines for region ")==0||
             std::string(message,length).find("rcBuildContours: Bad outline for region ")==0)) {
@@ -197,65 +270,35 @@ struct Resources {
     rcHeightfield* height=nullptr;rcCompactHeightfield* compact=nullptr;rcContourSet* contours=nullptr;rcPolyMesh* polys=nullptr;rcPolyMeshDetail* detail=nullptr;
     ~Resources(){rcFreeHeightField(height);rcFreeCompactHeightfield(compact);rcFreeContourSet(contours);rcFreePolyMesh(polys);rcFreePolyMeshDetail(detail);}
 };
- // Shared raw tiles are bounded: a faster profile cannot retain a whole zone.
-using RawField = std::shared_ptr<rcHeightfield>;
-struct RasterBatch {
-    struct Entry {
-        std::promise<RawField> promise;
-        std::shared_future<RawField> value=promise.get_future().share();
-        unsigned readers=0;
-    };
-    using DomainKey=std::tuple<float,float,unsigned>; // cell size, ground/levitation slope
-    using TileKey=std::tuple<float,float,unsigned,int>;
-    std::map<DomainKey,Profile> domains;
-    std::map<DomainKey,unsigned> consumers,retained;
-    std::map<TileKey,std::shared_ptr<Entry>> fields;
-    std::mutex mutex;
-    std::condition_variable changed;
-    bool failed=false;
-    explicit RasterBatch(const std::vector<BuildRequest>& requests) {
-        for(const auto& request:requests) {
-            const auto& p=request.profile;auto key=DomainKey{p.cellSize,p.slope,p.materialClass};
-            auto i=domains.emplace(key,p).first;
-            i->second.radius=std::max(i->second.radius,p.radius);
-            i->second.height=std::max(i->second.height,p.height);
-            ++consumers[key];
+using RawField = std::unique_ptr<rcHeightfield,void(*)(rcHeightfield*)>;
+}
+struct PreparedGeometry {
+    struct SolidInput {std::vector<float> hull;float low,high;};
+    std::vector<float> vertices,levitationVertices;
+    std::vector<int> indices;
+    std::vector<SolidInput> solids;
+    explicit PreparedGeometry(const Geometry& g) {
+        vertices.reserve(g.ground.size()*9);levitationVertices.reserve(g.ground.size()*9);indices.reserve(g.ground.size()*3);
+        for(const auto& t:g.ground) {
+            const Point points[]={t.a,t.b,t.c};const float water[]={t.waterDepth.x,t.waterDepth.y,t.waterDepth.z};
+            for(int i=0;i<3;++i) {
+                auto v=ToNav(points[i]);indices.push_back(int(vertices.size()/3));
+                vertices.insert(vertices.end(),{v.x,v.y,v.z});
+                if(t.terrain)v.y+=water[i];
+                levitationVertices.insert(levitationVertices.end(),{v.x,v.y,v.z});
+            }
         }
-    }
-    const Profile& Domain(const Profile& p) const {return domains.at({p.cellSize,p.slope,p.materialClass});}
-    void Cancel() {std::lock_guard<std::mutex> lock(mutex);failed=true;changed.notify_all();}
-    RawField Get(const Profile& p,int tile,const std::function<RawField()>& rasterize) {
-        const DomainKey domain{p.cellSize,p.slope,p.materialClass};const TileKey key{p.cellSize,p.slope,p.materialClass,tile};
-        std::shared_ptr<Entry> entry;bool owner=false;
-        {
-            std::unique_lock<std::mutex> lock(mutex);
-            changed.wait(lock,[&]{return failed||fields.count(key)||retained[domain]<32;});
-            Require(!failed,"Nav64: profile build cancelled");
-            auto i=fields.find(key);
-            if(i==fields.end()){entry=std::make_shared<Entry>();fields.emplace(key,entry);++retained[domain];owner=true;}
-            else entry=i->second;
-        }
-        if(owner) {
-            try {entry->promise.set_value(rasterize());}
-            catch(...) {entry->promise.set_exception(std::current_exception());Cancel();throw;}
-        }
-        auto field=entry->value.get();
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            if(++entry->readers==consumers.at(domain)){fields.erase(key);--retained[domain];changed.notify_all();}
-        }
-        return field;
+        for(const auto& s:g.solids) {SolidInput input;input.hull=Footprint(s,input.low,input.high);solids.push_back(std::move(input));}
     }
 };
-}
-static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,const std::string& key,RasterBatch* batch,unsigned workerLimit,int onlyX=-1,int onlyZ=-1,const std::vector<Point>& columns={},bool flightReady=false) {
+static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,const std::string& key,int onlyX=-1,int onlyZ=-1,const std::vector<Point>& columns={},bool flightReady=false,const PreparedGeometry* prepared=nullptr) {
     if(Flies(p)&&!flightReady) {
         auto sky=FlightGeometry(g,p,onlyX,onlyZ);
-        return BuildProfile(sky,p,key,nullptr,workerLimit,onlyX,onlyZ,columns,true);
+        return BuildProfile(sky,p,key,onlyX,onlyZ,columns,true);
     }
     const auto buildStart=std::chrono::steady_clock::now();
     CheckProfile(p);
-    const auto& domain=batch?batch->Domain(p):p;
+    const auto& domain=p;
     auto mesh=std::make_unique<Mesh>();mesh->profile=p;mesh->data.reset(dtAllocNavMesh());
     Require(bool(mesh->data),"Nav64: cannot allocate Detour mesh");
     float tileSize=p.cellSize*p.tileCells;
@@ -266,11 +309,14 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
     // Bin once, instead of scanning every triangle/solid again for each tile.
     // The margin is exactly the Recast border used below, including erosion.
     struct TileInput {std::vector<int> triangles,solids,ceilings;};
-    struct SolidInput {std::vector<float> hull;float low,high;};
-    std::vector<TileInput> inputs(nx*nz);std::vector<SolidInput> solids;
-    std::vector<float> allVertices;std::vector<int> allIndices;
+    std::vector<TileInput> inputs(nx*nz);
+    std::unique_ptr<PreparedGeometry> owned;
+    if(!prepared){owned=std::make_unique<PreparedGeometry>(g);prepared=owned.get();}
+    const auto& solids=prepared->solids;
+    const auto& allVertices=Levitates(p)?prepared->levitationVertices:prepared->vertices;
+    const auto& allIndices=prepared->indices;
     std::vector<unsigned char> allAreas;
-    allVertices.reserve(g.ground.size()*9);allIndices.reserve(g.ground.size()*3);allAreas.reserve(g.ground.size());
+    allAreas.reserve(g.ground.size());
     const float border=(std::ceil(domain.radius/p.cellSize)+3)*p.cellSize;
     auto bin=[&](float minx,float minz,float maxx,float maxz,int index,bool solid) {
         int x0=std::max(0,int(std::floor((minx-g.minimum.x-border)/tileSize)));
@@ -282,7 +328,6 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
     };
     for(size_t i=0;i<g.ground.size();++i) {
         const auto t=Surface(g.ground[i],p);Point a=ToNav(t.a),b=ToNav(t.b),c=ToNav(t.c);
-        for(auto v:{a,b,c}){allIndices.push_back(int(allVertices.size()/3));allVertices.insert(allVertices.end(),{v.x,v.y,v.z});}
         allAreas.push_back(t.area);
         bin(std::min({a.x,b.x,c.x}),std::min({a.z,b.z,c.z}),std::max({a.x,b.x,c.x}),std::max({a.z,b.z,c.z}),int(i),false);
     }
@@ -291,12 +336,12 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
     rcMarkWalkableTriangles(&classifier,p.slope,allVertices.data(),int(allVertices.size()/3),allIndices.data(),int(allAreas.size()),slopes.data());
     // Material permissions only restrict geometry; they never override slope.
     for(size_t i=0;i<allAreas.size();++i)if(slopes[i]==RC_NULL_AREA)allAreas[i]=RC_NULL_AREA;
-    for(const auto& s:g.solids) {
-        SolidInput input;input.hull=Footprint(s,input.low,input.high);
+    for(size_t index=0;index<solids.size();++index) {
+        const auto& input=solids[index];
         if(input.hull.size()<9)continue;
         float minx=input.hull[0],maxx=minx,minz=input.hull[2],maxz=minz;
         for(size_t i=0;i<input.hull.size();i+=3){minx=std::min(minx,input.hull[i]);maxx=std::max(maxx,input.hull[i]);minz=std::min(minz,input.hull[i+2]);maxz=std::max(maxz,input.hull[i+2]);}
-        bin(minx,minz,maxx,maxz,int(solids.size()),true);solids.push_back(std::move(input));
+        bin(minx,minz,maxx,maxz,int(index),true);
     }
     for(size_t i=0;i<g.ceilings.size();++i) {
         const auto& c=g.ceilings[i];
@@ -309,14 +354,35 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
     // Workers own all Recast state and output blobs. Only the simulation thread
     // mutates Detour, in fixed z/x order, so cache bytes/references stay stable.
     struct TileBlob {unsigned char* data=nullptr;int size=0;std::vector<std::vector<std::uint64_t>> surfaces;~TileBlob(){dtFree(data);}};
-    std::vector<std::unique_ptr<TileBlob>> tiles(nx*nz);std::vector<std::exception_ptr> errors(nx*nz);
-    std::atomic<int> next{0};std::atomic<bool> failed{false};
+    std::vector<std::unique_ptr<TileBlob>> tiles(nx*nz);
     std::atomic<std::uint64_t> rasterUs{0},polygonUs{0};
+    std::array<std::atomic<std::uint64_t>,5> stagesNs{};
+    for(auto& stage:stagesNs)stage.store(0);
     auto micros=[](auto begin){return std::uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-begin).count());};
+    // Bound flight polygons to small blocks. A sampled detail mesh can miss an
+    // interior maximum when its vertex budget is exhausted. Every block keeps
+    // the maximum of all source triangles touching it; shared vertices use all
+    // incident blocks, including across tile boundaries. Polygon fans therefore
+    // remain above the entire covered raster, not just its sample locations.
+    constexpr int flightBlockCells=FlightBlockCells;
+    const float flightBlock=p.cellSize*flightBlockCells;
+    std::map<std::pair<int,int>,float> flightTops;
+    if(Flies(p))for(const auto& t:g.ground) {
+        const auto a=ToNav(t.a),b=ToNav(t.b),c=ToNav(t.c);
+        const int x0=int(std::floor((std::min({a.x,b.x,c.x})-g.minimum.x)/flightBlock)),
+            x1=int(std::floor((std::max({a.x,b.x,c.x})-g.minimum.x)/flightBlock)),
+            z0=int(std::floor((std::min({a.z,b.z,c.z})-g.minimum.z)/flightBlock)),
+            z1=int(std::floor((std::max({a.z,b.z,c.z})-g.minimum.z)/flightBlock));
+        const float top=std::max({a.y,b.y,c.y});
+        for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x) {
+            auto inserted=flightTops.emplace(std::make_pair(x,z),top);
+            inserted.first->second=std::max(inserted.first->second,top);
+        }
+    }
     auto tile=[&](int index) {
         const int x=index%nx,z=index/nx;
         if((onlyX>=0&&(x!=onlyX||z!=onlyZ))||inputs[index].triangles.empty())return;
-        BakeContext context(p,x,z,onlyX<0);auto begin=std::chrono::steady_clock::now();
+        BakeContext context(p,x,z,onlyX<0,&stagesNs);auto begin=std::chrono::steady_clock::now();
         rcConfig cfg{};cfg.cs=p.cellSize;cfg.ch=p.cellHeight;cfg.walkableSlopeAngle=p.slope;
         cfg.walkableHeight=int(std::ceil(p.height/cfg.ch));cfg.walkableClimb=Flies(p)?int(std::ceil((g.maximum.y-g.minimum.y+4)/cfg.ch)):int(std::floor(p.climb/cfg.ch));cfg.walkableRadius=Flies(p)?0:int(std::ceil(p.radius/cfg.cs));
         cfg.tileSize=p.tileCells;cfg.borderSize=int(std::ceil(domain.radius/p.cellSize))+3;cfg.width=cfg.height=cfg.tileSize+cfg.borderSize*2;
@@ -365,12 +431,8 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
 
             return field;
         };
-        auto raw=batch?batch->Get(p,index,rasterize):rasterize();
-        Resources r;r.height=rcAllocHeightfield();
-        Require(r.height&&rcCreateHeightfield(&context,*r.height,cfg.width,cfg.height,cfg.bmin,cfg.bmax,cfg.cs,cfg.ch),"Nav64: profile heightfield allocation failed");
-        for(int iz=0;iz<raw->height;++iz)for(int ix=0;ix<raw->width;++ix)
-            for(auto* span=raw->spans[ix+iz*raw->width];span;span=span->next)
-                Require(rcAddSpan(&context,*r.height,ix,iz,span->smin,span->smax,static_cast<unsigned char>(span->area),0),"Nav64: profile heightfield copy failed");
+        auto raw=rasterize();
+        Resources r;r.height=raw.release();
         if(!Flies(p)) {
             // Rasterize permitted surfaces without the slope mask. Solids are
             // deliberately absent: a low BV top must never become a floor.
@@ -406,7 +468,6 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
                 }
             }
         }
-        raw.reset();
         // Flight clearance is already in the upper envelope. Ground ledge and
         // footprint erosion would remove valid sky beside the map boundary.
         if(!Flies(p))rcFilterLedgeSpans(&context,cfg.walkableHeight,cfg.walkableClimb,*r.height);
@@ -650,6 +711,8 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
                         for(int d=0;d<4;++d)if(rcGetCon(span,d)!=RC_NOT_CONNECTED) {
                             const int nx=cx+rcGetDirOffsetX(d),nz=cz+rcGetDirOffsetY(d);
                             const unsigned n=field.cells[nx+nz*field.width].index+rcGetCon(span,d);
+                            if(Flies(p)&&(int(std::floor(float(nx-cfg.borderSize)/flightBlockCells))!=int(std::floor(float(ix-cfg.borderSize)/flightBlockCells))||
+                                int(std::floor(float(nz-cfg.borderSize)/flightBlockCells))!=int(std::floor(float(iz-cfg.borderSize)/flightBlockCells))))continue;
                             if(!seen[n]&&old[n]==old[j]&&support[n]==support[j]&&forbidden[n]==forbidden[j]&&field.areas[n]==field.areas[j]){seen[n]=true;stack.emplace_back(nx,nz,n);}
                         }
                     }
@@ -689,7 +752,10 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         // Keep hole boundaries within a quarter cell; one full cell can
         // collapse them to zero signed area and turn holes into outlines.
         const bool classBoundaries=std::any_of(forbidden.begin(),forbidden.end(),[](unsigned short flags){return flags!=0;});
-        cfg.maxSimplificationError=(layered||classBoundaries)?0.f:holes?.25f:1.f;
+        // Solids already cover every partially touched cell (convex hull vs
+        // cell rectangle above). Preserve that coverage for every cell size:
+        // contour approximation must not cut back into a blocked corner.
+        cfg.maxSimplificationError=(layered||classBoundaries||!inputs[index].solids.empty()||Flies(p))?0.f:holes?.25f:1.f;
         auto buildContours=[&](float error) {
             // Same-area region borders are simplified without an error test
             // even at maxError=0. Temporary adjacent-region colors preserve
@@ -847,10 +913,18 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         create.verts=poly.verts;create.vertCount=poly.nverts;create.polys=poly.polys;
         create.polyAreas=poly.areas;create.polyFlags=poly.flags;create.polyCount=poly.npolys;create.nvp=poly.nvp;
         if(Flies(p)) {
-            r.detail=rcAllocPolyMeshDetail();
-            Require(r.detail&&rcBuildPolyMeshDetail(&context,poly,*r.compact,.5f,.05f,*r.detail),"Nav64: flight detail mesh failed");
-            create.detailMeshes=r.detail->meshes;create.detailVerts=r.detail->verts;create.detailVertsCount=r.detail->nverts;
-            create.detailTris=r.detail->tris;create.detailTriCount=r.detail->ntris;
+            for(int i=0;i<poly.nverts;++i) {
+                auto* v=poly.verts+i*3;
+                const int gx=x*int(p.tileCells)+v[0],gz=z*int(p.tileCells)+v[2];
+                const int bx=gx/flightBlockCells,bz=gz/flightBlockCells;
+                float top=g.minimum.y;
+                for(int iz=bz-(gz%flightBlockCells==0);iz<=bz;++iz)
+                    for(int ix=bx-(gx%flightBlockCells==0);ix<=bx;++ix) {
+                        const auto found=flightTops.find({ix,iz});
+                        if(found!=flightTops.end())top=std::max(top,found->second);
+                    }
+                v[1]=static_cast<unsigned short>(std::max(int(v[1]),int(std::ceil((top-poly.bmin[1])/cfg.ch))));
+            }
         }
         create.walkableHeight=p.height;create.walkableRadius=p.radius;create.walkableClimb=p.climb;
         create.tileX=x;create.tileY=z;create.tileLayer=0;
@@ -883,19 +957,10 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         tiles[index]=std::move(blob);
         polygonUs.fetch_add(micros(begin));
     };
-    auto worker=[&] {
-        while(!failed.load()) {
-            int index=next.fetch_add(1);if(index>=nx*nz)break;
-            try {tile(index);}catch(...) {errors[index]=std::current_exception();failed.store(true);if(batch)batch->Cancel();}
-        }
-    };
-    mesh->workers=std::min(unsigned(nx*nz),workerLimit);
-    std::vector<std::thread> workers;
-    try {for(unsigned i=1;i<mesh->workers;++i)workers.emplace_back(worker);}
-    catch(...) {failed.store(true);for(auto& thread:workers)thread.join();throw;}
-    worker();for(auto& thread:workers)thread.join();
-    for(const auto& error:errors)if(error)std::rethrow_exception(error);
+    if(onlyX>=0) {mesh->workers=1;tile(onlyZ*nx+onlyX);}
+    else {mesh->workers=Tiles().Size();Tiles().For(nx*nz,tile);}
     mesh->rasterMs=rasterUs.load()/1000;mesh->polygonMs=polygonUs.load()/1000;
+    for(size_t i=0;i<stagesNs.size();++i)mesh->stagesMs[i]=stagesNs[i].load()/1000000;
     Require(params.maxTiles<=131072&&dtStatusSucceed(mesh->data->init(&params)),"Nav64: cannot initialize Detour mesh");
     for(size_t index=0;index<tiles.size();++index)if(auto& blob=tiles[index]) {
         mesh->polygonSurfaces[{int(index)%nx,int(index)/nx}]=std::move(blob->surfaces);
@@ -911,20 +976,15 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
     return mesh;
 }
 std::unique_ptr<Mesh> Build(const Geometry& g,const Profile& p,const std::string& key) {
-    return BuildProfile(g,p,key,nullptr,std::min(8u,std::max(1u,std::thread::hardware_concurrency()/2)));
+    return BuildProfile(g,p,key);
 }
 std::vector<std::unique_ptr<Mesh>> BuildProfiles(const Geometry& g,const std::vector<BuildRequest>& requests) {
-    RasterBatch batch(requests);std::vector<std::future<std::unique_ptr<Mesh>>> pending;
-    const unsigned workers=std::max(1u,std::min(8u,std::max(1u,std::thread::hardware_concurrency()/2))/unsigned(std::max(size_t(1),requests.size())));
-    try {
-        for(const auto& request:requests)pending.push_back(std::async(std::launch::async,[&,request]{
-            try {return BuildProfile(g,request.profile,"",&batch,workers,-1,-1,request.columns);}
-            catch(...) {batch.Cancel();throw;}
-        }));
-    }catch(...) {batch.Cancel();throw;}
-    std::vector<std::unique_ptr<Mesh>> result;std::exception_ptr failure;
-    for(auto& future:pending)try {result.push_back(future.get());}catch(...) {if(!failure)failure=std::current_exception();}
-    if(failure)std::rethrow_exception(failure);
+    // Current profiles have distinct slope/material/geometry domains. Tile
+    // workers fill fixed slots; Detour insertion and profile order stay fixed.
+    std::vector<std::unique_ptr<Mesh>> result;
+    PreparedGeometry prepared(g);
+    for(const auto& request:requests)
+        result.push_back(BuildProfile(g,request.profile,"",-1,-1,request.columns,false,&prepared));
     return result;
 }
 Bytes Store(const Mesh& mesh) {
@@ -1147,11 +1207,11 @@ void IndexSources(Geometry& g,float width) {
             const int z0=std::max(0,int(std::floor((std::min({a.z,b.z,c.z})-border-g.minimum.z)/width))),z1=std::min(nz-1,int(std::floor((std::max({a.z,b.z,c.z})+border-g.minimum.z)/width)));
             for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x){index[{x,z}].push_back(std::uint32_t(i));if(objects&&t.object)g.objectTiles[t.object].emplace(x,z);}
         };
-        bin(1.3f,g.tileTriangles,true);
-        if(t.terrain||(t.surface>1&&t.area))bin(.025f,g.surfaceTriangles,false);
+        bin(2.1f,g.tileTriangles,true);
+        if(t.terrain||(t.surface>1&&t.area))bin(.075f,g.surfaceTriangles,false);
     }
     for(size_t i=0;i<g.ceilings.size();++i) {
-        const auto& c=g.ceilings[i];constexpr float border=1.3f;
+        const auto& c=g.ceilings[i];constexpr float border=2.1f;
         const int x0=std::max(0,int(std::floor((c.x*.3f-border-g.minimum.x)/width))),
             x1=std::min(nx-1,int(std::floor(((c.x+int(c.width))*.3f+border-g.minimum.x)/width))),
             z0=std::max(0,int(std::floor((-(c.y+int(c.height))*.3f-border-g.minimum.z)/width))),
@@ -1161,12 +1221,12 @@ void IndexSources(Geometry& g,float width) {
 }
 void IndexSurfaces(Mesh& mesh) {
     if(!mesh.sources)return;
-    Require(mesh.sources->tileWidth==mesh.data->getParams()->tileWidth,"Nav64: mismatched source tile width");
-    // Catalogue storage is shared by all profiles; queries read it in place.
+    Require(mesh.sources->tileWidth>0,"Nav64: invalid source tile width");
+    // Source catalogue cells and profile tiles have independent physical widths.
 }
 std::unique_ptr<Mesh> RebuildTile(const Geometry& g,const Profile& p,int x,int z) {
     const auto start=std::chrono::steady_clock::now();
-    auto result=BuildProfile(g,p,"",nullptr,1,x,z);
+    auto result=BuildProfile(g,p,"",x,z);
     result->buildMs=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
     const auto* tile=result->data->getTileAt(x,z,0);
     if(tile) {

@@ -43,6 +43,7 @@ struct Mesh {
     // Build telemetry only; no change to the container or serialized addresses.
     std::uint32_t workers = 0;
     std::uint64_t rasterMs = 0, polygonMs = 0, buildMs = 0;
+    std::array<std::uint64_t,5> stagesMs{}; // Recast raster, filters/compact, erosion, regions/contours/polys, detail; summed CPU time.
 };
 struct BuildRequest { Profile profile; std::vector<Point> columns; };
 Bytes StoreSources(const Geometry& geometry);

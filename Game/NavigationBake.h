@@ -2,6 +2,7 @@
 #include "../Navigation/BodyTable.h"
 #include <filesystem>
 #include <set>
+#include <functional>
 #include "../Navigation/Authoring.h"
 
 class CMapObject;
@@ -34,6 +35,8 @@ class NavigationBake {
     float GroundHeight(Navigation::Point point);
     const NavigationCanopy& Canopy(const CMapObjectServer& object,const owned::FigureCpuAsset& figure);
 public:
+    // Yield to the owning-thread coordinator while this map's tiles build.
+    static std::function<void()> overlap;
     static unsigned tileCells;
     static std::filesystem::path reportDirectory;
     static std::filesystem::path replayInput;

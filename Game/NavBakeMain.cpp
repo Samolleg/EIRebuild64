@@ -22,6 +22,9 @@
 #include <chrono>
 #include <cstdio>
 #include <fstream>
+#include <functional>
+#include <psapi.h>
+#pragma comment(lib,"psapi.lib")
 
 namespace {
 using Clock=std::chrono::steady_clock;
@@ -31,17 +34,78 @@ long long Milliseconds(Clock::time_point start) {
 std::string Extension(std::string name,const char* extension) {
     return std::filesystem::path(name).replace_extension(extension).string();
 }
+// Cooperative map continuations retain importer/release work on this thread.
+// Only the existing tile pool runs concurrently. A ready map can finish while
+// another map is still building, without nesting one map's lifetime in another.
+class MapScheduler {
+    struct Job {
+        MapScheduler* owner;
+        void* fiber=nullptr;
+        CWorldServer* world=nullptr;
+        std::function<void()> work;
+        bool done=false;
+    };
+    void* coordinator;
+    Job* current=nullptr;
+    std::vector<std::unique_ptr<Job>> jobs;
+    std::exception_ptr error;
+    static void WINAPI Entry(void* value) {
+        auto& job=*static_cast<Job*>(value);
+        try {job.work();}catch(...) {job.owner->error=std::current_exception();}
+        job.done=true;
+        SwitchToFiber(job.owner->coordinator);
+    }
+public:
+    MapScheduler():coordinator(ConvertThreadToFiber(nullptr)) {
+        if(!coordinator)throw std::runtime_error("Cannot create map coordinator");
+    }
+    ~MapScheduler() {
+        // Pending futures own references into their fiber's stack. Drain them
+        // even when admission fails, before releasing any stack or callback.
+        while(!jobs.empty()) {
+            try {Poll();}catch(...) {}
+            if(!jobs.empty())Sleep(1);
+        }
+        ConvertFiberToThread();
+    }
+    void Add(std::function<void()> work) {
+        auto job=std::make_unique<Job>();job->owner=this;job->work=std::move(work);
+        job->fiber=CreateFiber(0,Entry,job.get());
+        if(!job->fiber)throw std::runtime_error("Cannot create map continuation");
+        jobs.push_back(std::move(job));
+    }
+    void SuspendMap() {
+        current->world=&ActiveWorldServer();
+        SwitchToFiber(coordinator);
+    }
+    bool Empty() const {return jobs.empty();}
+    void Poll() {
+        for(auto& job:jobs) {
+            current=job.get();
+            SavedWorldScope scope(job->world);
+            SwitchToFiber(job->fiber);
+        }
+        jobs.erase(std::remove_if(jobs.begin(),jobs.end(),[](auto& job) {
+            if(!job->done)return false;
+            DeleteFiber(job->fiber);return true;
+        }),jobs.end());
+        if(error&&jobs.empty())std::rethrow_exception(error);
+    }
+};
 }
 int wmain(int argc,wchar_t** argv) {
     // This executable has no renderer/audio/window/session initialization.
     // Flush stdout after every map/profile so the mapper can show progress.
     std::map<std::wstring,std::filesystem::path> options;
     bool all=false;
+    std::vector<std::filesystem::path> selectedMaps;
     for(int i=1;i<argc;++i) {
         const std::wstring name=argv[i];
         if(name==L"--all"){if(all)return 2;all=true;continue;}
         if(name!=L"--game-root"&&name!=L"--mod"&&name!=L"--map"&&name!=L"--model"&&name!=L"--mob"&&name!=L"--output-root"&&name!=L"--report-root"&&name!=L"--tile-cells"&&name!=L"--replay-input")return 2;
-        if(i+1>=argc||options.count(name))return 2;
+        if(i+1>=argc)return 2;
+        if(name==L"--map"){selectedMaps.emplace_back(argv[++i]);options[name]=selectedMaps.back();continue;}
+        if(options.count(name))return 2;
         options[name]=argv[++i];
     }
     if(!options.count(L"--game-root")||!options.count(L"--mod")||!options.count(L"--output-root")||!options.count(L"--report-root")||
@@ -93,8 +157,11 @@ int wmain(int argc,wchar_t** argv) {
             }
             maps.emplace(GameScenes::MenuTerrain,GameScenes::MenuObjects);
         } else {
-            const auto map=Extension(options.at(L"--map").string(),".mpr");
-            maps.emplace(map,options.count(L"--mob")?Extension(options.at(L"--mob").string(),".mob"):Extension(map,".mob"));
+            if(selectedMaps.size()>1&&options.count(L"--mob"))return 2;
+            for(const auto& selected:selectedMaps) {
+                const auto map=Extension(selected.string(),".mpr");
+                maps.emplace(map,options.count(L"--mob")?Extension(options.at(L"--mob").string(),".mob"):Extension(map,".mob"));
+            }
         }
         const auto total=Clock::now();unsigned completed=0,errors=0,missing=0,skipped=0;std::uint64_t totalBytes=0;
         exitCode=4;
@@ -127,10 +194,27 @@ int wmain(int argc,wchar_t** argv) {
         }
         const auto initialBodyBytes=bodyTable.size();
         printf("BAKE_BEGIN maps=%zu output=%s algorithm=%u\n",maps.size(),output.string().c_str(),Navigation::AlgorithmVersion);fflush(stdout);
-        for(const auto& map:maps) {
+        MEMORYSTATUSEX memory{};memory.dwLength=sizeof(memory);
+        if(!GlobalMemoryStatusEx(&memory))throw std::runtime_error("Cannot query physical memory");
+        // The measured old zone7 peak is below 2 GiB. Reserve twice that per
+        // resident map plus 32 MiB per tile worker, shared across all maps.
+        const std::uint64_t mapReserve=4ull*1024*1024*1024;
+        const std::uint64_t memoryBudget=memory.ullTotalPhys/2;
+        SYSTEM_INFO cpu{};GetSystemInfo(&cpu);
+        const auto tileReserve=std::uint64_t(cpu.dwNumberOfProcessors)*32*1024*1024;
+        const unsigned mapLimit=unsigned((std::max)(std::uint64_t(1),(memoryBudget>tileReserve?memoryBudget-tileReserve:0)/mapReserve));
+        unsigned active=0;auto nextMap=maps.begin();
+        struct ResetOverlap {~ResetOverlap(){NavigationBake::overlap={};}} resetOverlap;
+        MapScheduler scheduler;
+        NavigationBake::overlap=[&] {scheduler.SuspendMap();};
+        printf("BAKE_MEMORY budget=%llu map_reserve=%llu maps_in_flight=%u\n",memoryBudget,mapReserve,mapLimit);
+        auto bakeNext=[&](const std::pair<std::string,std::string>& map) {
+            ++active;struct ReleaseSlot {unsigned& active;~ReleaseSlot(){--active;}} releaseSlot{active};
             const auto start=Clock::now();
             printf("MAP_BEGIN mpr=%s mob=%s\n",map.first.c_str(),map.second.c_str());fflush(stdout);
             try {
+                long long importMs=0;std::uint64_t bytes=0;
+                {
                 CWorldServer world(true);SavedWorldScope worldScope(&world);
                 struct DestroyWorld {CWorldServer& world;~DestroyWorld(){world.Destroy();}} cleanup{world};
                 const bool haveMpr=std::filesystem::is_regular_file(ModRuntime::MapPath(world.GetFullMobName(map.first.c_str())));
@@ -139,17 +223,18 @@ int wmain(int argc,wchar_t** argv) {
                     ++missing;
                     fprintf(stderr,"MAP_MISSING mpr=%s mob=%s code=5 mpr_present=%d mob_present=%d reason=no_sources\n",
                         map.first.c_str(),map.second.c_str(),int(haveMpr),int(haveMob));
-                    fflush(stderr);continue;
+                    fflush(stderr);return;
                 }
                 if(!world.Create()||!world.LoadNavigationScene(map.first.c_str(),map.second.c_str()))
                     throw std::runtime_error("Shared MPR/MOB import failed");
                 if(options.count(L"--model")) {
                     const auto selected=Navigation::ResourceName(options.at(L"--model").stem().string().c_str());bool present=false;
                     for(const auto& object:world.mapObjects)if(Navigation::ResourceName(object.second->GetMaskName())==selected){present=true;break;}
-                    if(!present){++skipped;printf("MAP_SKIPPED mpr=%s mob=%s reason=model_absent\n",map.first.c_str(),map.second.c_str());fflush(stdout);continue;}
+                    if(!present){++skipped;printf("MAP_SKIPPED mpr=%s mob=%s reason=model_absent\n",map.first.c_str(),map.second.c_str());fflush(stdout);return;}
                 }
-                const auto importMs=Milliseconds(start);
-                const auto bytes=world.aiMap.Navigation().Bake(output,bodyTable,world);totalBytes+=bytes;
+                importMs=Milliseconds(start);
+                bytes=world.aiMap.Navigation().Bake(output,bodyTable,world);totalBytes+=bytes;
+                }
                 ++completed;
                 printf("MAP_DONE mpr=%s mob=%s import_ms=%lld total_ms=%lld profiles=%u bytes=%llu\n",
                     map.first.c_str(),map.second.c_str(),importMs,Milliseconds(start),unsigned(Navigation::AgentCount),static_cast<unsigned long long>(bytes));
@@ -158,6 +243,19 @@ int wmain(int argc,wchar_t** argv) {
                 fprintf(stderr,"MAP_ERROR mpr=%s mob=%s code=4 ms=%lld reason=%s\n",map.first.c_str(),map.second.c_str(),Milliseconds(start),e.what());
             }
             fflush(stdout);fflush(stderr);
+        };
+        while(nextMap!=maps.end()||!scheduler.Empty()) {
+            if(nextMap!=maps.end()&&active<mapLimit) {
+                PROCESS_MEMORY_COUNTERS_EX peak{};peak.cb=sizeof(peak);
+                if(!GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&peak),sizeof(peak)))
+                    throw std::runtime_error("Cannot query bake memory");
+                if(scheduler.Empty()||peak.PeakWorkingSetSize+mapReserve<=memoryBudget) {
+                    const auto map=*nextMap++;
+                    scheduler.Add([bakeNext,map] {bakeNext(map);});
+                }
+            }
+            scheduler.Poll();
+            if(!scheduler.Empty())Sleep(1);
         }
         // Individual MOBs may extend the shared table with non-un* models.
         totalBytes+=bodyTable.size()-initialBodyBytes;

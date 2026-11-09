@@ -259,13 +259,24 @@ Release walk records may set neighbour_distance, release_after_wait (0 keeps
 the neighbour standing) and require_detour. Their results include detour_max_ms.
 
 
-## Six profiles and automatic flight (algorithm 26)
+## Five profiles and automatic flight (algorithm 27)
 
-Profiles are small, human, large, giant, levitate and flying. Tiny bodies use
-small; levitating bodies share the remaining 0.5 m levitate profile. Profile
+Profiles are human, large, giant, levitate and flying. Tiny bodies use
+human; levitating bodies share the 0.5 m levitate profile. Profile
 ordinals change, so nav64/navgeom/navbody must be released together. The wire
 profile now stores Movement (ground=0, levitate=1, flying=2) after materialClass.
-The body table uses ground indices 0..3 and levitate index 4.
+The body table uses ground indices 0..2 and levitate index 3. Horizontal cells
+are 0.10 m for human, 0.20 m for large/levitate and 0.30 m for giant/flying;
+vertical cells remain 0.05 m. Re-bake the body table and every profile together.
+The container layout is unchanged. Geometry conversion and solid footprints are
+prepared once per map; raster fields cannot be shared across the current
+profiles because their material, slope or movement geometry differs.
+
+One process-wide tile pool uses the CPUs allowed by process affinity. Tile
+results are installed in fixed order. Campaign baking overlaps map builds while
+keeping world import and release validation on the owning thread; admission
+reserves 4 GiB per resident map and 32 MiB per pool worker within half of RAM.
+Repeated `--map` arguments select multiple explicit scenes in one invocation.
 
 Database locomotion 1 remains ground, 2 remains levitation, and 3 selects flying
 with AI class 0. No species names, database assignments or altitude controls are

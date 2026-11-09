@@ -70,6 +70,7 @@ class NavigationWorld {
     Navigation::Point flightLow,flightHigh;
     void FlushFlight();
     void QueueTile(int type,int x,int z);
+    void QueueSourceTile(int x,int z);
     void QueueFlightBox(const Navigation::Solid&);
     void LoadFlying();
     std::map<int,int> liveDoors;

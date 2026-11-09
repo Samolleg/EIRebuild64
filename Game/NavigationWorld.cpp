@@ -336,7 +336,7 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
             auto point=[](const nlohmann::json& j){return Point{j.at(0).get<float>(),j.at(1).get<float>(),j.at(2).get<float>()};};
             const auto from=point(record.at("source")),goal=point(record.at("goal"));
             auto* unit=world.GetUnit(record.at("unit").get<int>());
-            int type=unit?Type(unit,unit->GetAIClass()):Small;
+            int type=unit?Type(unit,unit->GetAIClass()):Human;
             if(record.contains("profile"))for(int i=0;i<AgentCount;++i)if(record["profile"]==Agents[i].name)type=i;
             auto& mesh=*meshes[type];const float height=record.value("height",unit?Height(unit):1.6f);
             record["profile_used"]=Agents[type].name;record["height_used"]=height;
@@ -421,7 +421,7 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
         CUnit* human=nullptr;CUnit* neighbour=nullptr;
         for(const auto& entry:world.mapObjects)if(auto* unit=dynamic_cast<CUnit*>(entry.second)) {
             saved.push_back({unit,unit->GetCP(),unit->navLocation});world.aiMap.RemoveObject(unit);
-            if(Type(unit,unit->GetAIClass())==Small&&Height(unit)>=1.6f&&!human)human=unit;
+            if(Type(unit,unit->GetAIClass())==Human&&Height(unit)>=1.6f&&!human)human=unit;
             else if(!neighbour)neighbour=unit;
         }
         auto startWalker=[&](CUnit* unit,SAIPath& path) {
@@ -439,7 +439,7 @@ std::uint64_t NavigationWorld::Bake(const std::filesystem::path& directory,Navig
             // A previous route may have exhausted its budget. Set the clock
             // before constructing the next route/walker, not on its first step.
             world.SetSegmentTimeCounter(oldTime);
-            if(!human)throw std::runtime_error("Nav64: requested movement release has no standing small body");
+            if(!human)throw std::runtime_error("Nav64: requested movement release has no standing human body");
             const auto a=record.at("source").get<std::array<float,3>>(),b=record.at("goal").get<std::array<float,3>>();
             const Point from{a[0],a[1],a[2]};auto* unit=human;
             const auto cp=unit->GetCP();unit->navLocation={};unit->navLocation.position=from;unit->navLocation.surface=1;
@@ -1012,6 +1012,18 @@ void NavigationWorld::QueueTile(int type,int x,int z) {
     const auto key=std::make_tuple(type,x,z);sourceDirty.insert(key);sourceRetries.erase(key);preparedTiles.erase(key);
     if(sourceJob.valid()&&sourceTask==key)sourceChanged=true;
 }
+void NavigationWorld::QueueSourceTile(int sx,int sz) {
+    const float sourceWidth=sources->tileWidth;
+    for(int type=0;type<AgentCount;++type)if(type!=Flying) {
+        const float width=meshes[type]->data->getParams()->tileWidth;
+        const int nx=int(std::ceil((sources->maximum.x-sources->minimum.x)/width));
+        const int nz=int(std::ceil((sources->maximum.z-sources->minimum.z)/width));
+        const int x0=int(std::floor(sx*sourceWidth/width)),z0=int(std::floor(sz*sourceWidth/width));
+        const int x1=(std::min)(nx-1,int(std::ceil((sx+1)*sourceWidth/width))-1);
+        const int z1=(std::min)(nz-1,int(std::ceil((sz+1)*sourceWidth/width))-1);
+        for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x)QueueTile(type,x,z);
+    }
+}
 void NavigationWorld::QueueFlightBox(const Solid& box) {
     if(flyingUnits.empty()) {
         for(auto p:box.corners) {
@@ -1023,7 +1035,7 @@ void NavigationWorld::QueueFlightBox(const Solid& box) {
     }
     float top=sources->minimum.y;
     for(auto p:box.corners)top=(std::max)(top,p.z);
-    const auto* params=meshes[0]->data->getParams();const float width=params->tileWidth;
+    const auto* params=meshes[Flying]->data->getParams();const float width=params->tileWidth;
     // Include the entire possible change of the propagated approach ramp.
     const float halo=(std::max)(0.f,top+.5f-sources->minimum.y)+Agents[Flying].profile.radius+3.3f;
     float lx=FLT_MAX,lz=FLT_MAX,hx=-FLT_MAX,hz=-FLT_MAX;
@@ -1034,13 +1046,16 @@ void NavigationWorld::QueueFlightBox(const Solid& box) {
     for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x)QueueTile(Flying,x,z);
 }
 void NavigationWorld::QueueBox(const Solid& box) {
-    const auto* params=meshes[0]->data->getParams();const float width=params->tileWidth,border=1.3f;
+    constexpr float border=2.1f;
     float lowX=FLT_MAX,lowZ=FLT_MAX,highX=-FLT_MAX,highZ=-FLT_MAX;
     for(auto corner:box.corners){const auto p=ToNav(corner);lowX=(std::min)(lowX,p.x);lowZ=(std::min)(lowZ,p.z);highX=(std::max)(highX,p.x);highZ=(std::max)(highZ,p.z);}
-    const int nx=int(std::ceil((sources->maximum.x-sources->minimum.x)/width)),nz=int(std::ceil((sources->maximum.z-sources->minimum.z)/width));
-    const int x0=(std::max)(0,int(std::floor((lowX-border-params->orig[0])/width))),x1=(std::min)(nx-1,int(std::floor((highX+border-params->orig[0])/width)));
-    const int z0=(std::max)(0,int(std::floor((lowZ-border-params->orig[2])/width))),z1=(std::min)(nz-1,int(std::floor((highZ+border-params->orig[2])/width)));
-    for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x)for(int type=0;type<AgentCount;++type)if(type!=Flying)QueueTile(type,x,z);
+    for(int type=0;type<AgentCount;++type)if(type!=Flying) {
+        const auto* params=meshes[type]->data->getParams();const float width=params->tileWidth;
+        const int nx=int(std::ceil((sources->maximum.x-sources->minimum.x)/width)),nz=int(std::ceil((sources->maximum.z-sources->minimum.z)/width));
+        const int x0=(std::max)(0,int(std::floor((lowX-border-params->orig[0])/width))),x1=(std::min)(nx-1,int(std::floor((highX+border-params->orig[0])/width)));
+        const int z0=(std::max)(0,int(std::floor((lowZ-border-params->orig[2])/width))),z1=(std::min)(nz-1,int(std::floor((highZ+border-params->orig[2])/width)));
+        for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x)QueueTile(type,x,z);
+    }
     QueueFlightBox(box);
 }
 void NavigationWorld::SyncObjects(bool initial) {
@@ -1089,7 +1104,7 @@ void NavigationWorld::SyncObjects(bool initial) {
                 moved=previous==appliedTransforms.end()||!previous->second.Same(liveTransforms.at(id));
             }
             if(presenceChanged||moved) {
-                for(const auto& tile:sources->objectTiles[id])for(int type=0;type<AgentCount;++type)if(type!=Flying)QueueTile(type,tile.first,tile.second);
+                for(const auto& tile:sources->objectTiles[id])QueueSourceTile(tile.first,tile.second);
                 auto queueFlight=[&](const Geometry& geometry){for(const auto& box:geometry.flightBoxes)if(box.object==id) {
                     Solid bounds;for(int i=0;i<8;++i)bounds.corners[i]={(i&1)?box.maximum.x:box.minimum.x,(i&2)?box.maximum.y:box.minimum.y,(i&4)?box.maximum.z:box.minimum.z};QueueFlightBox(bounds);
                 }};
@@ -1099,7 +1114,7 @@ void NavigationWorld::SyncObjects(bool initial) {
                     TransformSource(*changed,*originalSources,id,sourceTransforms.at(id),liveTransforms.at(id));
                     IndexSources(*changed,sources->tileWidth);sources=std::move(changed);
                     appliedTransforms[id]=liveTransforms.at(id);
-                    for(const auto& tile:sources->objectTiles[id])for(int type=0;type<AgentCount;++type)if(type!=Flying)QueueTile(type,tile.first,tile.second);
+                    for(const auto& tile:sources->objectTiles[id])QueueSourceTile(tile.first,tile.second);
                     queueFlight(*sources);
                 }
                 GameJournal::Event("NAV","static_changed","NID=%d absent=%d transformed=%d queued_profile_tiles=%zu",id,int(absent),int(moved),sourceDirty.size());
@@ -1218,10 +1233,21 @@ void NavigationWorld::UpdateSources(bool initial) {
             }
             sourceTask=*next;sourceChanged=false;stage="snapshot";const auto [type,x,z]=sourceTask;
             auto snapshot=sources;auto absent=absentStatic;auto profile=meshes[type]->profile;
-            const auto triangles=sources->tileTriangles[{x,z}],ceilings=sources->tileCeilings[{x,z}];
+            std::vector<std::uint32_t> triangles,ceilings;
+            const float width=profile.tileCells*profile.cellSize,sourceWidth=sources->tileWidth;
+            const int sx0=int(std::floor(x*width/sourceWidth)),sz0=int(std::floor(z*width/sourceWidth));
+            const int sx1=int(std::floor((x+1)*width/sourceWidth)),sz1=int(std::floor((z+1)*width/sourceWidth));
+            auto collect=[&](const auto& catalogue,auto& result) {
+                for(int sz=sz0;sz<=sz1;++sz)for(int sx=sx0;sx<=sx1;++sx) {
+                    const auto found=catalogue.find({sx,sz});
+                    if(found!=catalogue.end())result.insert(result.end(),found->second.begin(),found->second.end());
+                }
+                std::sort(result.begin(),result.end());result.erase(std::unique(result.begin(),result.end()),result.end());
+            };
+            collect(sources->tileTriangles,triangles);collect(sources->tileCeilings,ceilings);
             std::vector<Solid> boxes,airBoxes;
             if(Flies(profile))for(const auto& entry:appliedFlightObjects)airBoxes.insert(airBoxes.end(),entry.second.begin(),entry.second.end());
-            const float width=profile.tileCells*profile.cellSize,border=1.3f;
+            const float border=2.1f;
             const float lowX=sources->minimum.x+x*width-border,highX=lowX+width+border*2;
             const float lowZ=sources->minimum.z+z*width-border,highZ=lowZ+width+border*2;
             for(const auto& entry:appliedObjects)for(const auto& box:entry.second) {
