@@ -4488,7 +4488,9 @@ BOOL CParticle::PathSingleCreate(SSingleParticle *pSPart, int nNumber)
     if (locSources[0].reserved == ptPos)
         return FALSE;
     locSources[0].reserved = ptPos;
-    ptPos.z += 0.15f;
+    // Navigation points follow the bottom; the marker follows the visible
+    // water surface. Keep the physical route and renderer unchanged.
+    ptPos.z = Max(ptPos.z,theWorld.GetSurfaceValue(ptPos.x,ptPos.y)) + 0.15f;
 #else
     CPlot3D ptPos(-1, -1, -1);
 #endif
