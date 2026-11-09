@@ -213,23 +213,24 @@ int wmain(int argc,wchar_t** argv) {
         const auto total=Clock::now();unsigned completed=0,errors=0,missing=0,skipped=0;std::uint64_t totalBytes=0;
         exitCode=4;
         Navigation::Bytes bodyTable;
-        {
+        if(!all) {
+            std::ifstream file(output/Navigation::BodyFilename,std::ios::binary|std::ios::ate);
+            const auto size=file.tellg();
+            if(size>0&&size<=16*1024*1024) {
+                bodyTable.resize(static_cast<size_t>(size));file.seekg(0);
+                if(!file.read(reinterpret_cast<char*>(bodyTable.data()),bodyTable.size()))bodyTable.clear();
+                if(!bodyTable.empty()) {
+                    try {Navigation::LoadBodies(bodyTable);}
+                    catch(const std::runtime_error&) {bodyTable.clear();}
+                }
+            }
+        }
+        if(bodyTable.empty()) {
             const auto started=Clock::now();CWorldServer world(true);SavedWorldScope scope(&world);
             struct Destroy {CWorldServer& world;~Destroy(){world.Destroy();}} cleanup{world};
             if(!world.Create())throw std::runtime_error("Cannot create body table importer");
-            Navigation::Bytes previous;
-            const auto previousPath=output/Navigation::BodyFilename;
-            if(!all&&std::filesystem::is_regular_file(previousPath)) {
-                std::ifstream file(previousPath,std::ios::binary|std::ios::ate);
-                const auto size=file.tellg();
-                if(size<=0||size>16*1024*1024)throw std::runtime_error("Invalid previous body table; re-bake with --all");
-                previous.resize(static_cast<size_t>(size));file.seekg(0);
-                if(!file.read(reinterpret_cast<char*>(previous.data()),previous.size()))throw std::runtime_error("Cannot read previous body table");
-            }
-            NavigationBake baker;bodyTable=baker.Bodies(world,previous);
+            NavigationBake baker;bodyTable=baker.Bodies(world,{});
             printf("BODIES models_and_shapes=%zu bytes=%zu ms=%lld file=%s\n",Navigation::LoadBodies(bodyTable).samples.size(),bodyTable.size(),Milliseconds(started),Navigation::BodyFilename);fflush(stdout);
-        }
-        {
             std::filesystem::create_directories(output);
             auto temporary=output/Navigation::BodyFilename;temporary+=L".tmp";
             {
@@ -237,8 +238,8 @@ int wmain(int argc,wchar_t** argv) {
                 if(!file.write(reinterpret_cast<const char*>(bodyTable.data()),bodyTable.size())||!file.flush())throw std::runtime_error("Cannot write body table");
             }
             if(!MoveFileExW(temporary.c_str(),(output/Navigation::BodyFilename).c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH))throw std::runtime_error("Cannot publish body table");
-            totalBytes+=bodyTable.size();
         }
+        totalBytes+=bodyTable.size();
         const auto initialBodyBytes=bodyTable.size();
         printf("BAKE_BEGIN maps=%zu output=%s algorithm=%u\n",maps.size(),output.string().c_str(),Navigation::AlgorithmVersion);fflush(stdout);
         MEMORYSTATUSEX memory{};memory.dwLength=sizeof(memory);
