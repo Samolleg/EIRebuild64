@@ -804,6 +804,9 @@ public:
     bool IsAttacking() { return curCommand.IsAttack() || curCommand.IsCast(); }
     bool IsL1Attacking() { return L1IsAttacking(); }
     bool IsL1Moving() { return L1IsMoving(); }
+    bool CrowdPlayer() { return logic.GetPlayer()!=nullptr; }
+    bool CrowdDestination(Navigation::Point goal,float maxLength,Navigation::Location& result);
+    bool CrowdShift(const Navigation::Location& support);
     bool IsDanger();
     bool GetPathDestination(CPlot3D &ptRes);
     bool HasRangedAttack();

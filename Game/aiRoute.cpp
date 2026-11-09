@@ -472,6 +472,10 @@ bool CRouteWalker::GetPosition(CWorldBase *pWorld, CAIFullRoute &route, float fp
 // CAIFullRoute implementation
 /////////////////////////////////////////////////////////////////////////////////////
 // return true if position changed
+void CAIFullRoute::RelocateStart(const CPlot3D& point)
+{
+    start.x=Meter2AITile(point.x);start.y=Meter2AITile(point.y);
+}
 bool CAIFullRoute::SetStartPos(const CPlot3D &pos, const CPlot3D &look, int _nStartSegment)
 {
     bool bRv;

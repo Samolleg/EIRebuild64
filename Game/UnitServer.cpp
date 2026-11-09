@@ -771,6 +771,51 @@ void CUnitServer::L1StartSuffer()
     L0FreezeMovement(true);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+bool CUnitServer::CrowdShift(const Navigation::Location& support)
+{
+    if(HasNoCommand()&&!L1IsAttacking()&&currentPose.pose==UP_STAND&&!bL1PlayingSuffer&&!lpUnit->CheckFlag(UNIT_STUN)) {
+        if(L1IsMoving())return true;
+        // Idle allies take an ordinary short walk, then resume their AI.
+        return L1StartMove(CPlot3D(support.position.x,support.position.y,1.e6f),1.e6f,&support);
+    }
+    auto& map=static_cast<CWorldServer*>(GetWorld())->aiMap;
+    if(L1IsAttacking()&&!curCommand.pTarget.IsEmpty()) {
+        const auto target=curCommand.pTarget->GetFuturePosition(level1Command.nHitTime);
+        const float dx=support.position.x-target.x,dy=support.position.y-target.y;
+        if(dx*dx+dy*dy>=level1Command.fpHitDist2)return false;
+    }
+    CPlot3D point(support.position.x,support.position.y,lpUnit->GetCP().z);
+    if(!map.MoveObject(lpUnit,point))return false;
+    lpUnit->navLocation=support;
+    // Preserve commands and attack timing. A displaced walker replans from here.
+    if(L1IsMoving()) {
+        path.navigationPending=true;
+        path.curSegment.SetStartPos(lpUnit->GetCP(),-lpUnit->GetYAxis(),GetWorldBase()->GetSegmentTimeCounter());
+    } else path.curSegment.RelocateStart(lpUnit->GetCP());
+    lpUnit->SetUpdateMask(CMapObject::VLD_MASK_POSROT);
+    lpUnit->LowNewRoute();return true;
+}
+bool CUnitServer::CrowdDestination(Navigation::Point goal,float maxLength,Navigation::Location& result)
+{
+    auto& nav=static_cast<CWorldServer*>(GetWorld())->aiMap.Navigation();
+    CMapObject* object=curCommand.pTarget;
+    if(object&&!curCommand.IsMove()) {
+        const float reach=GetHitDist(curCommand);
+        if(object->WhoAmI()==HPC_UNIT&&!curCommand.HasPointOfUse()) {
+            auto* target=static_cast<CUnit*>(object);
+            const auto center=nav.Position(target,static_cast<CWorldServer*>(GetWorld())->aiMap);
+            return nav.AttackPosition(lpUnit,target,center,reach,maxLength,result);
+        }
+        const auto cp=object->GetCP();
+        const Navigation::Point center=curCommand.HasPointOfUse()?goal:Navigation::Point{cp.x,cp.y,goal.z};
+        return nav.FreePosition(lpUnit,center,0,reach,maxLength,result);
+    }
+    auto& map=static_cast<CWorldServer*>(GetWorld())->aiMap;
+    Navigation::Location support;nav.Support(lpUnit,goal,support);
+    auto* blocker=map.CheckCircleCollision(lpUnit,CPlot3D(goal.x,goal.y,lpUnit->GetCP().z),&support,false);
+    const float outer=nav.CollisionRadius(lpUnit)+(blocker?nav.CollisionRadius(blocker):nav.CollisionRadius(lpUnit))+AITile2Meter(1.f);
+    return nav.FreePosition(lpUnit,goal,0,outer,maxLength,result);
+}
 void CUnitServer::L1StandStill()
 {
     path.Clear();
@@ -792,6 +837,7 @@ void CUnitServer::L1StopMovement(bool bFailed)
     L1StandStill();
     L1SetPhase(UL1_NONE);
     bL1MovementFailed = bFailed;
+    if(HasNoCommand()) { L0Freeze(false);L0StartAnimation(*GetIdleAnimation()); }
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // start rotate animation - depends on previous L1 state
@@ -954,6 +1000,13 @@ void CUnitServer::L1ExecMove()
     vec=CPlot3D(movement.direction.x,movement.direction.y,0);
     bRotating=movement.rotating;bSegmentFinished=movement.finished;fpSpeed=movement.speed;
 
+    if(movement.waiting) {
+        segment.Freeze(1);lpUnit->SetUpdateMask(CMapObject::VLD_MASK_ROUTE);
+        L0Freeze(false);LowSetMoving(FALSE);L0StartAnimation(*GetIdleAnimation());bL1MoveAnimationSet=false;
+        if(navigationWait==1)GameJournal::Event("NAV","queue_wait","unit=%d blocker=%d",lpUnit->GetID(),movement.blocker);
+        return;
+    }
+
     if (!bRotating && !bL1MoveAnimationSet)
     {
         L0StartAnimation(*GetMoveAnimation());
@@ -996,12 +1049,12 @@ void CUnitServer::L1ExecMove()
         }
         if(movement.blocker>=0) {
             GameJournal::Event("NAV","queue_stopped","unit=%d blocker=%d reason=no_detour",lpUnit->GetID(),movement.blocker);
-            L1StopMovement(true);return;
+            L1StopMovement(true);L0Freeze(false);L0StartAnimation(*GetIdleAnimation());return;
         }
         path.ClearCalcedPath();
         if(++navigationRejects>1) {
             GameJournal::Event("NAV","step_replan","unit=%d result=stopped reason=repeated_rejection",lpUnit->GetID());
-            L1StopMovement(true);return;
+            L1StopMovement(true);L0Freeze(false);L0StartAnimation(*GetIdleAnimation());return;
         }
         bool replanned=LowFindPath(path.ptDestination,path,lpUnit->bNeedFastPath,path.ptDestination.z);
         // Reject an unchanged first movement immediately; rebuilding the same
@@ -1018,12 +1071,6 @@ void CUnitServer::L1ExecMove()
         return;
     }
     if(movement.replanned){L1NewPathSegment();return;}
-    if(movement.waiting) {
-        segment.Freeze(1);lpUnit->SetUpdateMask(CMapObject::VLD_MASK_ROUTE);
-        L0Freeze(true);LowSetMoving(FALSE);
-        if(navigationWait==1)GameJournal::Event("NAV","queue_wait","unit=%d blocker=%d",lpUnit->GetID(),movement.blocker);
-        return;
-    }
     L0Freeze(false);bMoved=true;
     lock=bMoved?AI_LOCK_NO:AI_LOCK_DYNAMIC;
     // юнит вступил в дерьмо, а может он мог бы это избежать ??! - repath in this case
