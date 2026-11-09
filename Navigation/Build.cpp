@@ -300,7 +300,7 @@ struct PreparedGeometry {
         for(const auto& s:g.solids) {SolidInput input;input.hull=Footprint(s,input.low,input.high);solids.push_back(std::move(input));}
     }
 };
-static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,const std::string& key,int onlyX=-1,int onlyZ=-1,const std::vector<Point>& columns={},bool flightReady=false,const PreparedGeometry* prepared=nullptr,const BuildRequest* reuse=nullptr) {
+static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,const std::string& key,int onlyX=-1,int onlyZ=-1,const std::vector<Point>& columns={},bool flightReady=false,const PreparedGeometry* prepared=nullptr,BuildRequest* reuse=nullptr) {
     if(Flies(p)&&!flightReady) {
         auto sky=FlightGeometry(g,p,onlyX,onlyZ);
         return BuildProfile(sky,p,key,onlyX,onlyZ,columns,true,nullptr,reuse);
@@ -425,12 +425,43 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
         return reuse&&reuse->previous&&reuse->tileKeys.size()==mesh->tileKeys.size()&&
             std::equal(hash.begin(),hash.end(),reuse->tileKeys.begin()+size_t(index)*32);
     };
+    // Decide whole-profile reuse before allocating/copying any tile payloads.
+    // Ownership stays unique: an unchanged profile returns the authenticated
+    // decoded mesh itself, with its original tile order and references.
+    std::vector<unsigned char> unchanged(size_t(nx)*nz,0);
+    if(reuse) {
+        Tiles().For(nx*nz,[&](int index) {
+            if(inputs[index].triangles.empty()) {
+                unchanged[index]=reuse->previous&&!reuse->previous->data->getTileAt(index%nx,index/nx,0);
+            }else unchanged[index]=signature(index);
+        });
+        if(reuse->previous&&std::all_of(unchanged.begin(),unchanged.end(),[](unsigned char v){return v!=0;})) {
+            const auto& old=*reuse->previous->data->getParams();
+            if(std::equal(std::begin(params.orig),std::end(params.orig),std::begin(old.orig))&&
+                old.tileWidth==params.tileWidth&&old.tileHeight==params.tileHeight&&
+                old.maxTiles==params.maxTiles&&old.maxPolys==params.maxPolys) {
+                auto ready=std::move(reuse->previous);
+                ready->tileKeys=std::move(mesh->tileKeys);ready->rebuilt=0;ready->workers=0;
+                ready->rasterMs=ready->polygonMs=0;ready->stagesMs={};
+                ready->buildMs=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-buildStart).count();
+                return ready;
+            }
+            // An empty profile still serializes its layout. Never retain the
+            // old file when those parameters changed without producing tiles.
+            reuse->previousBytes.clear();
+        }
+    }
     std::atomic<unsigned> rebuilt{0};
     auto tile=[&](int index) {
         const int x=index%nx,z=index/nx;
-        if((onlyX>=0&&(x!=onlyX||z!=onlyZ))||inputs[index].triangles.empty())return;
-        const bool unchanged=reuse&&signature(index);
-        if(unchanged) {
+        if(onlyX>=0&&(x!=onlyX||z!=onlyZ))return;
+        if(inputs[index].triangles.empty()) {
+            // Removing the last input of a former tile changes the profile too.
+            if(reuse&&reuse->previous&&reuse->previous->data->getTileAt(x,z,0))++rebuilt;
+            return;
+        }
+        const bool unchangedTile=reuse&&unchanged[index];
+        if(unchangedTile) {
             const dtNavMesh& old=*reuse->previous->data;
             if(const auto* t=old.getTileAt(x,z,0)) {
                 auto blob=std::make_unique<TileBlob>();blob->size=t->dataSize;
@@ -1039,12 +1070,12 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
 std::unique_ptr<Mesh> Build(const Geometry& g,const Profile& p,const std::string& key) {
     return BuildProfile(g,p,key);
 }
-std::vector<std::unique_ptr<Mesh>> BuildProfiles(const Geometry& g,const std::vector<BuildRequest>& requests) {
+std::vector<std::unique_ptr<Mesh>> BuildProfiles(const Geometry& g,std::vector<BuildRequest>& requests) {
     // Current profiles have distinct slope/material/geometry domains. Tile
     // workers fill fixed slots; Detour insertion and profile order stay fixed.
     std::vector<std::unique_ptr<Mesh>> result;
     PreparedGeometry prepared(g);
-    for(const auto& request:requests)
+    for(auto& request:requests)
         result.push_back(BuildProfile(g,request.profile,"",-1,-1,request.columns,false,&prepared,&request));
     return result;
 }

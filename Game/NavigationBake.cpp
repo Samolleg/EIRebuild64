@@ -611,13 +611,15 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
     const auto tilesMs=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-tilesStart).count();
     for(auto& mesh:built){mesh->sources=sources;IndexSurfaces(*mesh);}
     std::uint64_t totalBytes=0;std::vector<Navigation::Bytes> outputs(AgentCount);
+    std::array<bool,AgentCount> retained{};
+    for(int type=0;type<AgentCount;++type)retained[type]=built[type]->rebuilt==0&&!requests[type].previousBytes.empty();
     for(int type=0;type<AgentCount;++type) {
         auto& mesh=*built[type];mesh.mapName=mapName;mesh.mobName=mobName;mesh.profileId=Agents[type].name;CheckReleaseHeights(mesh);
     }
     const auto serializeStart=std::chrono::steady_clock::now();
     std::array<std::uint64_t,AgentCount> storeMs{},writeMs{};
     auto serialize=[&](int type) {
-        const auto start=std::chrono::steady_clock::now();outputs[type]=built[type]->rebuilt==0&&!requests[type].previousBytes.empty()?std::move(requests[type].previousBytes):Navigation::Store(*built[type]);
+        const auto start=std::chrono::steady_clock::now();outputs[type]=retained[type]?std::move(requests[type].previousBytes):Navigation::Store(*built[type]);
         storeMs[type]=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count();
     };
     // Independent LZMS streams, one per existing profile container. The bytes
@@ -626,12 +628,15 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
     for(int type=0;type<AgentCount;++type)serializers.push_back(std::async(std::launch::async,[&,type]{serialize(type);}));
     for(auto& job:serializers)job.get();
     for(int type=0;type<AgentCount;++type) {
+        totalBytes+=outputs[type].size();
+        // The cached container was authenticated and decoded before BuildProfiles.
+        // Its unchanged tiles already populate this queryable mesh.
+        if(retained[type])continue;
         auto ready=Navigation::Load(outputs[type],built[type]->profile,mapName,mobName,Agents[type].name);
         ready->rebuilt=built[type]->rebuilt;ready->tileKeys=std::move(built[type]->tileKeys);
         ready->buildMs=built[type]->buildMs;ready->rasterMs=built[type]->rasterMs;ready->polygonMs=built[type]->polygonMs;
         ready->stagesMs=built[type]->stagesMs;
         ready->sources=sources;IndexSurfaces(*ready);built[type]=std::move(ready);
-        totalBytes+=outputs[type].size();
     }
     const auto qualityStart=std::chrono::steady_clock::now();
     const auto serializeMs=std::chrono::duration_cast<std::chrono::milliseconds>(qualityStart-serializeStart).count();
@@ -736,7 +741,8 @@ std::uint64_t NavigationBake::Bake(const std::string& mapName,const std::string&
     for(int type=0;type<AgentCount;++type) {
         const auto& mesh=*built[type];const auto& bytes=outputs[type];
         const auto writeStart=std::chrono::steady_clock::now();
-        Atomic(directory/Navigation::MeshFilename(mapName,mobName,type),bytes);
+        if(!retained[type])
+            Atomic(directory/Navigation::MeshFilename(mapName,mobName,type),bytes);
         writeMs[type]=std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-writeStart).count();
         unsigned polygons=0;const dtNavMesh& data=*mesh.data;
         for(int i=0;i<data.getMaxTiles();++i)if(const auto* h=data.getTile(i)->header)polygons+=h->polyCount;
