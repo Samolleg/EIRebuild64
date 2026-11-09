@@ -22,9 +22,18 @@
 #define NOMINMAX
 #include <windows.h>
 #include <compressapi.h>
+#include <bcrypt.h>
+#pragma comment(lib,"bcrypt.lib")
 #pragma comment(lib,"cabinet.lib")
 
 namespace Navigation {
+Bytes Digest(const Bytes& bytes) {
+    Bytes result(32);
+    if(BCryptHash(BCRYPT_SHA256_ALG_HANDLE,nullptr,0,
+        const_cast<PUCHAR>(bytes.data()),ULONG(bytes.size()),result.data(),ULONG(result.size()))<0)
+        throw std::runtime_error("Nav64: SHA256 failed");
+    return result;
+}
 namespace {
 
 // One process-wide tile pool, also used by overlapping map builds. Batches
@@ -291,10 +300,10 @@ struct PreparedGeometry {
         for(const auto& s:g.solids) {SolidInput input;input.hull=Footprint(s,input.low,input.high);solids.push_back(std::move(input));}
     }
 };
-static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,const std::string& key,int onlyX=-1,int onlyZ=-1,const std::vector<Point>& columns={},bool flightReady=false,const PreparedGeometry* prepared=nullptr) {
+static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,const std::string& key,int onlyX=-1,int onlyZ=-1,const std::vector<Point>& columns={},bool flightReady=false,const PreparedGeometry* prepared=nullptr,const BuildRequest* reuse=nullptr) {
     if(Flies(p)&&!flightReady) {
         auto sky=FlightGeometry(g,p,onlyX,onlyZ);
-        return BuildProfile(sky,p,key,onlyX,onlyZ,columns,true);
+        return BuildProfile(sky,p,key,onlyX,onlyZ,columns,true,nullptr,reuse);
     }
     const auto buildStart=std::chrono::steady_clock::now();
     CheckProfile(p);
@@ -379,9 +388,60 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
             inserted.first->second=std::max(inserted.first->second,top);
         }
     }
+    // Sign the exact ordered inputs of each raster domain. Bounds are global:
+    // a changed origin or vertical quantization must invalidate every tile.
+    // Flight signs the derived envelope, including maxima of incident blocks.
+    if(reuse)mesh->tileKeys.resize(size_t(nx)*nz*32);
+    auto signature=[&](int index) {
+        Wire w;w.U(AlgorithmVersion);w.U(1);w.ProfileOut(p);w.P(g.minimum);w.P(g.maximum);
+        const int x=index%nx,z=index/nx;w.U(x);w.U(z);
+        const auto& in=inputs[index];w.U(unsigned(in.triangles.size()));
+        for(int i:in.triangles) {
+            const auto& t=g.ground[i];w.P(t.a);w.P(t.b);w.P(t.c);w.P(t.waterDepth);
+            w.U(t.area);w.U(t.levitateArea);w.U(t.terrain);w.U(t.object);
+            w.U(unsigned(t.surface));w.U(unsigned(t.surface>>32));
+            for(auto a:t.classAreas)w.U(a);
+        }
+        w.U(unsigned(in.solids.size()));for(int i:in.solids) {
+            const auto& s=solids[i];w.F(s.low);w.F(s.high);w.U(unsigned(s.hull.size()));
+            for(auto v:s.hull)w.F(v);
+        }
+        w.U(unsigned(in.ceilings.size()));for(int i:in.ceilings) {
+            const auto& c=g.ceilings[i];w.U(c.object);w.U(c.x);w.U(c.y);w.U(c.width);w.U(c.height);w.F(c.base);
+            for(auto h:c.heights)w.U(h);
+        }
+        const float x0=g.minimum.x+x*tileSize-border,x1=g.minimum.x+(x+1)*tileSize+border,
+            z0=g.minimum.z+z*tileSize-border,z1=g.minimum.z+(z+1)*tileSize+border;
+        for(const auto& d:g.doors)if(d.maximum.x>=x0&&d.minimum.x<=x1&&-d.minimum.y>=z0&&-d.maximum.y<=z1) {
+            w.U(d.object);w.U(d.openState);w.P(d.minimum);w.P(d.maximum);
+        }
+        w.U(0);
+        if(Flies(p))for(int iz=z*int(p.tileCells)/flightBlockCells-1;iz<=(z+1)*int(p.tileCells)/flightBlockCells;++iz)
+            for(int ix=x*int(p.tileCells)/flightBlockCells-1;ix<=(x+1)*int(p.tileCells)/flightBlockCells;++ix) {
+                const auto found=flightTops.find({ix,iz});w.U(found!=flightTops.end());
+                if(found!=flightTops.end())w.F(found->second);
+            }
+        const auto hash=Digest(w.bytes);std::copy(hash.begin(),hash.end(),mesh->tileKeys.begin()+size_t(index)*32);
+        return reuse&&reuse->previous&&reuse->tileKeys.size()==mesh->tileKeys.size()&&
+            std::equal(hash.begin(),hash.end(),reuse->tileKeys.begin()+size_t(index)*32);
+    };
+    std::atomic<unsigned> rebuilt{0};
     auto tile=[&](int index) {
         const int x=index%nx,z=index/nx;
         if((onlyX>=0&&(x!=onlyX||z!=onlyZ))||inputs[index].triangles.empty())return;
+        const bool unchanged=reuse&&signature(index);
+        if(unchanged) {
+            const dtNavMesh& old=*reuse->previous->data;
+            if(const auto* t=old.getTileAt(x,z,0)) {
+                auto blob=std::make_unique<TileBlob>();blob->size=t->dataSize;
+                blob->data=static_cast<unsigned char*>(dtAlloc(blob->size,DT_ALLOC_PERM));
+                Require(blob->data!=nullptr,"Nav64: reused tile allocation failed");
+                std::memcpy(blob->data,t->data,blob->size);
+                blob->surfaces=reuse->previous->polygonSurfaces.at({x,z});tiles[index]=std::move(blob);
+            }
+            return; // An unchanged empty tile remains empty.
+        }
+        ++rebuilt;
         BakeContext context(p,x,z,onlyX<0,&stagesNs);auto begin=std::chrono::steady_clock::now();
         rcConfig cfg{};cfg.cs=p.cellSize;cfg.ch=p.cellHeight;cfg.walkableSlopeAngle=p.slope;
         cfg.walkableHeight=int(std::ceil(p.height/cfg.ch));cfg.walkableClimb=Flies(p)?int(std::ceil((g.maximum.y-g.minimum.y+4)/cfg.ch)):int(std::floor(p.climb/cfg.ch));cfg.walkableRadius=Flies(p)?0:int(std::ceil(p.radius/cfg.cs));
@@ -959,6 +1019,7 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
     };
     if(onlyX>=0) {mesh->workers=1;tile(onlyZ*nx+onlyX);}
     else {mesh->workers=Tiles().Size();Tiles().For(nx*nz,tile);}
+    mesh->rebuilt=rebuilt.load();
     mesh->rasterMs=rasterUs.load()/1000;mesh->polygonMs=polygonUs.load()/1000;
     for(size_t i=0;i<stagesNs.size();++i)mesh->stagesMs[i]=stagesNs[i].load()/1000000;
     Require(params.maxTiles<=131072&&dtStatusSucceed(mesh->data->init(&params)),"Nav64: cannot initialize Detour mesh");
@@ -984,7 +1045,7 @@ std::vector<std::unique_ptr<Mesh>> BuildProfiles(const Geometry& g,const std::ve
     std::vector<std::unique_ptr<Mesh>> result;
     PreparedGeometry prepared(g);
     for(const auto& request:requests)
-        result.push_back(BuildProfile(g,request.profile,"",-1,-1,request.columns,false,&prepared));
+        result.push_back(BuildProfile(g,request.profile,"",-1,-1,request.columns,false,&prepared,&request));
     return result;
 }
 Bytes Store(const Mesh& mesh) {
@@ -1057,7 +1118,7 @@ std::unique_ptr<Mesh> Load(Bytes bytes,const Profile& expected,
     return mesh;
 }
 
-Bytes StoreSources(const Geometry& g) {
+Bytes StoreSources(const Geometry& g,SourceReuse* reuse) {
     // Preserve the imported planes exactly. Centimetre rounding changes the
     // slope and even collapses thin BASE faces; it cannot define support Z.
     using Vertex=std::array<float,3>;
@@ -1107,16 +1168,33 @@ Bytes StoreSources(const Geometry& g) {
     }
     // Four independent lossless blocks retain LZMS's small release data while
     // allowing parallel decode on entry. No geometry is imported or rebuilt.
-    constexpr unsigned chunks=4;std::array<std::future<Bytes>,chunks> pending;
+    constexpr unsigned chunks=4;
+    std::array<Bytes,chunks> previous;Bytes previousKeys,newKeys(chunks*32);
+    std::array<std::future<Bytes>,chunks> pending;
+    if(reuse&&!reuse->previous.empty())try {
+        Wire old;old.bytes=reuse->previous;
+        Require(old.U()==0x4352534e&&old.U()==8,"Nav64: incompatible previous sources");
+        Require(old.U()==w.bytes.size()&&old.U()==chunks,"Nav64: changed source layout");
+        for(unsigned i=0;i<chunks;++i) {
+            Require(old.U()==w.bytes.size()*(i+1)/chunks-w.bytes.size()*i/chunks,"Nav64: changed source block");
+            const auto n=old.U();Require(n<=old.bytes.size()-old.at,"Nav64: truncated previous source block");
+            previous[i]=Bytes(old.bytes.begin()+old.at,old.bytes.begin()+old.at+n);old.at+=n;
+        }
+        Require(old.at==old.bytes.size(),"Nav64: trailing source block");previousKeys=reuse->keys;
+    }catch(const std::exception&) {previous={};}
     for(unsigned i=0;i<chunks;++i)pending[i]=std::async(std::launch::async,[&,i] {
         const size_t a=w.bytes.size()*i/chunks,b=w.bytes.size()*(i+1)/chunks;
-        return Pack(Bytes(w.bytes.begin()+a,w.bytes.begin()+b));
+        Bytes input(w.bytes.begin()+a,w.bytes.begin()+b);const auto hash=Digest(input);
+        std::copy(hash.begin(),hash.end(),newKeys.begin()+i*32);
+        if(previousKeys.size()==newKeys.size()&&!previous[i].empty()&&std::equal(hash.begin(),hash.end(),previousKeys.begin()+i*32))return std::move(previous[i]);
+        return Pack(input);
     });
     Wire out;out.U(0x4352534e);out.U(8);out.U(unsigned(w.bytes.size()));out.U(chunks);
     for(unsigned i=0;i<chunks;++i) {
         auto packed=pending[i].get();out.U(unsigned(w.bytes.size()*(i+1)/chunks-w.bytes.size()*i/chunks));
         out.U(unsigned(packed.size()));out.B(packed.data(),packed.size());
     }
+    if(reuse)reuse->keys=std::move(newKeys);
     return std::move(out.bytes);
 }
 std::shared_ptr<Geometry> LoadSources(Bytes bytes,std::array<double,3>* stages) {

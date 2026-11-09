@@ -1,9 +1,15 @@
 # Nav64 X64NAVCORE candidate
 
 The offline baker and game use the same Recast/Detour v1.6.0 source.
-No fingerprint, content hash, stale-input check, legacy-graph fallback or
-runtime configuration toggle participates in navigation. Refresh on mapper
-save, release with --all and model replacement with --model NAME.
+The offline baker automatically reuses unchanged tiles. Disposable `.navcache`
+and `.navimport` companions bind content SHA-256 signatures to the published
+files; missing, incompatible or damaged data causes a full bake. Signatures
+cover ordered raster inputs with the profile border and derived flight maxima.
+Reused tiles enter a fresh Detour mesh in the same order as a full bake.
+An unchanged input/resource set also skips scene import and serialization.
+The game ignores both companions; game file formats and traversal rules are
+unchanged. Refresh on mapper save, release with --all and model replacement
+with --model NAME.
 
     EIRebuild64NavBake --game-root DIR --mod DIR --map zone1 --mob zone1 --output-root DIR --report-root PRIVATE_DIR
     EIRebuild64NavBake --game-root DIR --mod DIR --all --output-root DIR --report-root PRIVATE_DIR

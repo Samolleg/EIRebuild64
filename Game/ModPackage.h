@@ -77,6 +77,8 @@ public:
     void ApplyPartyVisualOptions();
     const ModSpellAddon::Profile& SpellAddon() const { return spellAddon; }
     const std::string& Directory() const { return root; }
+    // Content dependencies for the offline scene-import cache.
+    std::vector<std::string> NavigationInputs() const;
     bool GetNpcCombatConsumableConfig(const char*zone,int id,const char*prototype,int kind,int variant,ModConsumableConfig&);
     void Load(const std::string &directory);
     std::string ResolveConfig(const std::string &name,const std::string &fallback) const;

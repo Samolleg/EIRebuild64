@@ -9,6 +9,7 @@
  *>	Copyright (c) 1998, Nival Enterntainemnt
  **********************************************************************/
 #include "StdAfx.h"
+#include <future>
 #include "ModArenaBoundary.h"
 #include "SaveSchema.h"
 #include "EngineDiagnostics.h"
@@ -1069,9 +1070,11 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
             }
             return result;
         };
-        std::vector<Navigation::Triangle> classified;classified.reserve(navTerrain->ground.size());
-        std::map<size_t,std::string> labels;
-        for(size_t index=0;index<navTerrain->ground.size();++index) {
+        struct Classified {std::vector<Navigation::Triangle> ground;std::map<size_t,std::string> labels;};
+        auto classify=[&](size_t begin,size_t end) {
+        Classified result;auto& classified=result.ground;auto& labels=result.labels;
+        classified.reserve(end-begin);
+        for(size_t index=begin;index<end;++index) {
             const auto& t=navTerrain->ground[index];
             auto label=navTerrain->groundSources.find(index);if(label!=navTerrain->groundSources.end())labels[classified.size()]=label->second;
             const int x0=Float2AITile((std::min)({t.a.x,t.b.x,t.c.x})),x1=Float2AITile((std::max)({t.a.x,t.b.x,t.c.x})-.00001f);
@@ -1095,6 +1098,19 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
                     auto triangle=t;triangle.a=a.p;triangle.b=b.p;triangle.c=c.p;triangle.waterDepth={a.water,b.water,c.water};append(triangle,policyAt(x,y));
                 }
             }
+        }
+        return result;
+        };
+        const size_t count=navTerrain->ground.size();
+        const size_t workers=count<4096?1:4;const auto csr=_mm_getcsr();
+        std::vector<std::future<Classified>> jobs;
+        for(size_t i=0;i<workers;++i)jobs.push_back(std::async(std::launch::async,[&,i]{_mm_setcsr(csr);return classify(count*i/workers,count*(i+1)/workers);}));
+        std::vector<Navigation::Triangle> classified;std::map<size_t,std::string> labels;
+        classified.reserve(count);
+        for(auto& job:jobs) {
+            auto result=job.get();const auto offset=classified.size();
+            for(auto& label:result.labels)labels.emplace(offset+label.first,std::move(label.second));
+            classified.insert(classified.end(),result.ground.begin(),result.ground.end());
         }
         navTerrain->ground=std::move(classified);navTerrain->groundSources=std::move(labels);
     }
