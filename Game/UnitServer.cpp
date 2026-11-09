@@ -3242,8 +3242,8 @@ void CUnitServer::MoveToTarget()
             else
                 theWorldServer.aiMap.RemoveObject(pTarget);
             if (!found)
-                L1StopMovement(true);
-            else if (!L1StartMove(ptPathDest, fpMaxPathLength, bodyMelee ? &approach : nullptr))
+                GameJournal::Event("NAV","attack_fallback","unit=%d target=%d reason=no_free_destination reach=%.3f",lpUnit->GetID(),pTarget->GetID(),fpHitDist);
+            if (!L1StartMove(ptPathDest, fpMaxPathLength, bodyMelee && found ? &approach : nullptr))
                 L1SetMoveFailed();
             if (!bodyMelee)theWorldServer.aiMap.AddObject(pTarget);
             theWorldServer.aiMap.SetGraphRebuild(bGraphRebuild);
