@@ -132,6 +132,8 @@ public:
     Navigation::Route Find(CUnit* unit,Navigation::Point from,Navigation::Point goal,float maxLength,float goalRadius,const float* costs=nullptr,int aiClass=3,Navigation::GoalPolicy goalPolicy=Navigation::GoalPolicy::Exact,const Navigation::Location* goalSupport=nullptr);
     // Passage width and unit-to-unit separation have different footprints.
     float CollisionRadius(CUnit* unit);
+    bool FreePosition(CUnit*,Navigation::Point center,float inner,float outer,float maxLength,Navigation::Location&);
+    bool YieldFor(CUnit* stronger,CUnit* weaker,Navigation::Point next);
     bool AttackPosition(CUnit* unit,CUnit* target,Navigation::Point goal,float reach,float maxLength,Navigation::Location& result);
     bool CanPlace(CUnit* unit,Navigation::Point point,int aiClass=3);
     bool Support(CUnit* unit,Navigation::Point point,Navigation::Location& result);

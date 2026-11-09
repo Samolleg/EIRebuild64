@@ -325,7 +325,7 @@ Route Find(const Mesh& m,const Request& r) {
             // straight XY segment. Runtime support still resolves exact Z.
             if(candidate.points.size()>1) {
                 const auto& before=candidate.points[candidate.points.size()-2];
-                if(before.area==previous.area&&previous.area==at.area&&before.surface==previous.surface&&previous.surface==at.surface)
+                if(before.area==previous.area&&previous.area==at.area)
                     candidate.points.back()=at;
                 else candidate.points.push_back(at);
             } else candidate.points.push_back(at);
@@ -340,6 +340,32 @@ Route Find(const Mesh& m,const Request& r) {
             }
         }
     }
+    // A route may turn around land before entering water. Shorten its visible
+    // portions too; the source triangle identity is not a raster corner.
+    for(size_t i=1;i+1<result.points.size();) {
+        const auto a=result.points[i-1],middle=result.points[i],b=result.points[i+1];
+        bool clear=a.area==middle.area&&middle.area==b.area;
+        const int samples=std::max(1,int(std::ceil(Distance(a.position,b.position)/m.profile.cellSize)));
+        clear=clear&&samples<=256;Location previous=a;float cost=0;
+        std::vector<dtPolyRef> crossed;
+        for(int k=1;clear&&k<=samples;++k) {
+            const float f=float(k)/samples;Location at;
+            clear=Constrain(m,previous.position,{a.position.x+(b.position.x-a.position.x)*f,a.position.y+(b.position.y-a.position.y)*f,a.position.z+(b.position.z-a.position.z)*f},at,height,nullptr,&previous,r.excludedFlags)&&at.area==a.area;
+            if(clear){cost+=Distance(previous.position,at.position)*filter.getAreaCost(previous.area);crossed.push_back(at.polygon);previous=at;}
+        }
+        const float old=(Distance(a.position,middle.position)+Distance(middle.position,b.position))*filter.getAreaCost(a.area);
+        if(clear&&previous.surface==b.surface&&Distance(previous.position,b.position)<.003f&&cost<=old+1.e-5f*std::max(1.f,old)) {
+            result.points.erase(result.points.begin()+i);
+            result.corridor.insert(result.corridor.end(),crossed.begin(),crossed.end());
+            result.straightened=true;if(i>1)--i;
+        } else ++i;
+    }
+    result.length=result.cost=0;
+    for(size_t i=1;i<result.points.size();++i) {
+        const auto& a=result.points[i-1];const float length=Distance(a.position,result.points[i].position);
+        result.length+=length;result.cost+=length*filter.getAreaCost(a.area);
+    }
+    if(result.straightened)result.straightCost=result.cost;
     if(Flies(m.profile)&&result.points.size()>1) {
         std::vector<Location> sampled;sampled.push_back(result.points.front());result.length=0;
         for(size_t i=1;i<result.points.size();++i) {
@@ -366,7 +392,8 @@ Route FindAround(const Mesh& mesh,const Request& input) {
     }
     Request request=input;request.obstacles=&obstacles;
     Request plain=request;plain.obstacles=nullptr;
-    auto direct=input.reuseRoute?*input.reuseRoute:Find(mesh,plain);
+    const bool reuse=input.reuseRoute&&!input.reuseRoute->points.empty()&&Distance(input.reuseRoute->points.back().position,input.goal)<.003f;
+    auto direct=reuse?*input.reuseRoute:Find(mesh,plain);
     if(direct.status!=Status::Complete||direct.points.empty())return direct;
     auto intersects=[&](Point a,Point b,const Obstacle& obstacle) {
         const float dx=b.x-a.x,dy=b.y-a.y,length=dx*dx+dy*dy;
@@ -418,32 +445,23 @@ Route FindAround(const Mesh& mesh,const Request& input) {
         const Point p{o->position.x+radius*std::cos(angle),o->position.y+radius*std::sin(angle),o->position.z};
         if(Project(mesh,p,.001f,4.f,at,height,request.excludedFlags)&&clearSegment(at.position,at.position))nodes.push_back(at);
     }
-    dtQueryFilter filter;filter.setIncludeFlags(ClearanceMask(mesh.profile,height));filter.setExcludeFlags(ClassFlags(mesh,request.excludedFlags));
-    for(int i=1;i<16;++i)filter.setAreaCost(i,request.areaCosts[i]);
-    auto& refs=scratch.visible;refs.resize(512);
-    auto& points=scratch.points;points.resize(512*3);
-    auto& pointRefs=scratch.refs;pointRefs.resize(512);
-    auto& flags=scratch.flags;flags.resize(512);
     Route edge;
     auto segment=[&](const Location& a,const Location& b) {
         edge.points.clear();edge.corridor.clear();edge.length=edge.cost=0;
-        const auto na=ToNav(a.position),nb=ToNav(b.position);const float start[]={na.x,na.y,na.z},end[]={nb.x,nb.y,nb.z};
-        int count=0;float t=0,normal[3]{};
-        const auto ray=mesh.query->raycast(a.polygon,start,end,&filter,&t,normal,refs.data(),&count,int(refs.size()));
-        if(dtStatusFailed(ray)||Limited(ray)||t<1||count<1||refs[count-1]!=b.polygon)return false;
-        int n=0;const auto status=mesh.query->findStraightPath(start,end,refs.data(),count,points.data(),flags.data(),pointRefs.data(),&n,512,DT_STRAIGHTPATH_ALL_CROSSINGS);
-        if(dtStatusFailed(status)||Limited(status)||n<1||!(flags[n-1]&DT_STRAIGHTPATH_END))return false;
-        for(int i=0;i<n;++i) {
-            const auto at=Address(mesh,{points[i*3],points[i*3+1],points[i*3+2]},pointRefs[i]?pointRefs[i]:b.polygon,height,edge.points.empty()?a.position.z:edge.points.back().position.z);
-            if(!at.surface)return false;
-            if(!edge.points.empty()) {
-                const auto& prev=edge.points.back();if(!clearSegment(prev.position,at.position))return false;
-                const float length=Distance(prev.position,at.position);edge.length+=length;edge.cost+=length*request.areaCosts[prev.area];
-            }
-            edge.points.push_back(at);
+        edge.points.push_back(a);Location previous=a;
+        const int samples=std::max(1,int(std::ceil(Distance(a.position,b.position)/mesh.profile.cellSize)));
+        if(samples>60000)return false;
+        for(int i=1;i<=samples;++i) {
+            const float f=float(i)/samples;Location at;
+            const Point point{a.position.x+(b.position.x-a.position.x)*f,a.position.y+(b.position.y-a.position.y)*f,a.position.z+(b.position.z-a.position.z)*f};
+            if(!Constrain(mesh,previous.position,point,at,height,nullptr,&previous,request.excludedFlags)||!clearSegment(a.position,at.position))return false;
+            const float length=Distance(previous.position,at.position);
+            edge.length+=length;edge.cost+=length*request.areaCosts[previous.area];edge.corridor.push_back(at.polygon);
+            if(edge.points.size()>1&&edge.points[edge.points.size()-2].area==previous.area&&previous.area==at.area)edge.points.back()=at;
+            else edge.points.push_back(at);
+            previous=at;
         }
-        if(Distance(edge.points.back().position,b.position)>.003f)return false;
-        edge.corridor.assign(refs.begin(),refs.begin()+count);return true;
+        return Distance(previous.position,b.position)<.003f&&previous.surface==b.surface;
     };
     auto& cost=scratch.cost;auto& length=scratch.length;auto& previous=scratch.previous;auto& closed=scratch.closed;auto& incoming=scratch.incoming;
     cost.assign(nodes.size(),1.e30f);length.assign(nodes.size(),0);previous.assign(nodes.size(),-1);closed.assign(nodes.size(),0);incoming.resize(nodes.size());cost[0]=0;
@@ -461,7 +479,9 @@ Route FindAround(const Mesh& mesh,const Request& input) {
     Route result;result.status=Status::NoPath;if(previous[1]<0)return result;
     std::vector<int> chain;for(int i=1;i!=0;i=previous[i])chain.push_back(i);std::reverse(chain.begin(),chain.end());
     for(int i:chain)for(const auto& at:incoming[i].points)if(result.points.empty()||Distance(result.points.back().position,at.position)>.00001f)result.points.push_back(at);
-    if(input.reuseRoute)result.sampledTail=result.points.size();
+    for(int i:chain)result.corridor.insert(result.corridor.end(),incoming[i].corridor.begin(),incoming[i].corridor.end());
+    result.corridor.insert(result.corridor.end(),direct.corridor.begin(),direct.corridor.end());
+    result.sampledTail=0;
     for(size_t i=tail;i<direct.points.size();++i)if(Distance(result.points.back().position,direct.points[i].position)>.00001f)result.points.push_back(direct.points[i]);
     for(size_t i=1;i<result.points.size();++i){const auto& a=result.points[i-1];const float d=Distance(a.position,result.points[i].position);result.length+=d;result.cost+=d*request.areaCosts[a.area];}
     if(result.length>request.maxLength){result.points.clear();result.status=Status::TooLong;return result;}

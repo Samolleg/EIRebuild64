@@ -27,6 +27,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "tools.h"
 #include "WinRegistry.h"
 #include "unit.h"
+#include "UnitServer.h"
 #include "MapObjectServer.h"
 // crap, for routes start segment & resource path ...
 #include "WorldServer.h"
@@ -2435,6 +2436,15 @@ bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpM
     auto from=navigation.Position(pUnit,*this);
     // ptDst.z is a command distance, not world height.
     Navigation::Point goal{ptDst.x,ptDst.y,destination.position.z};
+    if(!destination.surface)navigation.Support(pUnit,goal,destination);
+    if(!ModArena::Charge(pUnit)&&destination.surface&&
+       CheckCircleCollision(pUnit,CPlot3D(goal.x,goal.y,pUnit->GetCP().z),&destination,false)) {
+        auto* server=static_cast<CUnitServer*>(pUnit->GetUnitSpecific());
+        Navigation::Location free;
+        if(!server->CrowdDestination(goal,fpMaxPathLength,free))return false;
+        destination=free;goal=free.position;
+        res.ptDestination.x=goal.x;res.ptDestination.y=goal.y;
+    }
     res.navigationGoal=destination;res.navigationPolicy=goalPolicy;
     res.navigationMaxLength=fpMaxPathLength;res.navigationMinDistance=fpMinDistance;
     res.navigationGeneration=navigation.Generation();res.navigationPending=false;

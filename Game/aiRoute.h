@@ -190,6 +190,7 @@ public:
     void SetSpeed(WORD wSpeed256 = N_RT_SPEED);
     void Turn(float pivotX,float pivotY,float radians);
     void Face(float heading);
+    void RelocateStart(const CPlot3D& point);
     CPlot3D GetFinalPoint(); // result is in meters
     void Load(CSave &file) = delete;
     void Store(CSave &file) = delete;

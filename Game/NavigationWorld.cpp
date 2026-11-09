@@ -724,30 +724,91 @@ bool NavigationWorld::Support(CUnit* unit,Navigation::Point point,Navigation::Lo
 }
 bool NavigationWorld::AttackPosition(CUnit* unit,CUnit* target,Navigation::Point goal,float reach,float maxLength,Navigation::Location& result) {
     auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
-    const auto from=Position(unit,map),center=Position(target,map);
-    const float inner=CollisionRadius(unit)+CollisionRadius(target)+.01f;
+    const auto center=Position(target,map);
+    const float inner=target->IsDead()?0.f:CollisionRadius(unit)+CollisionRadius(target)+.01f;
     const float outer=reach-.01f;
     if(outer<inner)return false;
-    // Original FindPathDestination order: toward the attacker, then both sides
-    // in 45-degree steps. Each candidate must be free and reachable on Nav64.
-    const float bearing=std::atan2(from.y-goal.y,from.x-goal.x);
-    const int directions[]={0,1,-1,2,-2,3,-3,4};
-    const int rings=(std::max)(1,int(std::ceil((outer-inner)/AITile2Meter(1.f))));
-    for(int ring=0;ring<=rings;++ring) {
-        const float radius=outer-(outer-inner)*float(ring)/float(rings);
-        for(int direction:directions) {
-            const float angle=bearing+float(direction)*FP_PI/4;
-            const Point point{goal.x+radius*std::cos(angle),goal.y+radius*std::sin(angle),center.z};
-            Location candidate;
-            if(!Support(unit,point,candidate))continue;
-            const CPlot3D position(candidate.position.x,candidate.position.y,unit->GetCP().z);
-            // Escaping a loaded overlap may cross its boundary, but its
-            // destination must be completely outside every other body.
-            if(map.CheckCircleCollision(unit,position,&candidate,false))continue;
-            CAIRoute route;
-            if(!map.NavRoute(unit,from,candidate.position,route,maxLength,0,unit->GetAIClass(),nullptr,GoalPolicy::Exact,nullptr,&candidate))continue;
-            result=candidate;return true;
+    return FreePosition(unit,{goal.x,goal.y,center.z},inner,outer,maxLength,result);
+}
+bool NavigationWorld::FreePosition(CUnit* unit,Point center,float inner,float outer,float maxLength,Location& result) {
+    auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
+    const auto from=Position(unit,map);
+    const float cell=AITile2Meter(1.f);
+    std::vector<Point> candidates;
+    const int extent=int(std::ceil(outer/cell));
+    for(int y=-extent;y<=extent;++y)for(int x=-extent;x<=extent;++x) {
+        const float radius=std::hypot(float(x)*cell,float(y)*cell);
+        if(radius<inner||radius>outer)continue;
+        candidates.push_back({center.x+x*cell,center.y+y*cell,center.z});
+    }
+    const auto nearest=inner>0?from:center;
+    std::stable_sort(candidates.begin(),candidates.end(),[&](Point a,Point b){
+        return std::hypot(a.x-nearest.x,a.y-nearest.y)<std::hypot(b.x-nearest.x,b.y-nearest.y);
+    });
+    // Use live bodies for reachability, not just for the candidate endpoint.
+    std::vector<Obstacle> obstacles;CUnitList nearby;
+    const auto* savedObstacles=queryObstacles;const auto* savedReuse=queryReuse;
+    struct RestoreQuery {
+        NavigationWorld& owner;const std::vector<Obstacle>* obstacles;const Route* reuse;
+        ~RestoreQuery(){owner.queryObstacles=obstacles;owner.queryReuse=reuse;}
+    } restore{*this,savedObstacles,savedReuse};
+    if(!queryObstacles) {
+        map.GetUnitsNear(unit->GetCP(),nearby,24.f);
+        for(POSITION i=nearby.GetHeadPosition();i;) {
+            auto* other=nearby.GetNext(i);if(other==unit||other->IsDead())continue;
+            obstacles.push_back({Position(other,map),CollisionRadius(unit)+CollisionRadius(other),Height(other),other->GetID()});
         }
+        queryObstacles=&obstacles;
+    }
+    queryReuse=nullptr;
+    for(const auto point:candidates) {
+        Location candidate;
+        if(!Support(unit,point,candidate)||std::abs(candidate.position.z-center.z)>Height(unit))continue;
+        if(map.CheckCircleCollision(unit,CPlot3D(candidate.position.x,candidate.position.y,unit->GetCP().z),&candidate,false))continue;
+        CAIRoute route;
+        if(!map.NavRoute(unit,from,candidate.position,route,maxLength,0,unit->GetAIClass(),nullptr,GoalPolicy::Exact,nullptr,&candidate))continue;
+        result=candidate;return true;
+    }
+    return false;
+}
+bool NavigationWorld::YieldFor(CUnit* stronger,CUnit* weaker,Point next) {
+    auto* strong=static_cast<CUnitServer*>(stronger->GetUnitSpecific());
+    auto* weak=static_cast<CUnitServer*>(weaker->GetUnitSpecific());
+    // Same-side allies only, with symmetric diplomacy and player protection.
+    if(stronger->GetPlayerNum()!=weaker->GetPlayerNum()||
+       stronger->IsEnemy(weaker->GetPlayerNum())||weaker->IsEnemy(stronger->GetPlayerNum())||
+       (weak->CrowdPlayer()&&!strong->CrowdPlayer()))return false;
+    const auto strength=[&](CUnit* u) {
+        auto* server=static_cast<CUnitServer*>(u->GetUnitSpecific());
+        return std::make_tuple(Radius(u),Height(u),server->GetMapObjectServer()->GetRPGStats()->ssHP.fpMax,u->GetLevel(),-u->GetID());
+    };
+    if(strength(stronger)<=strength(weaker))return false;
+    // A player's active order is never displaced. NPC attacks keep their timing.
+    if(weak->CrowdPlayer()&&!weak->HasNoCommand())return false;
+    auto& map=static_cast<CWorldServer*>(stronger->GetWorld())->aiMap;
+    const auto from=Position(weaker,map),origin=Position(stronger,map);
+    const float cell=AITile2Meter(1.f),limit=CollisionRadius(stronger)+CollisionRadius(weaker)+cell;
+    const int extent=int(std::ceil(limit/cell));
+    std::vector<Point> candidates;
+    for(int y=-extent;y<=extent;++y)for(int x=-extent;x<=extent;++x) {
+        if((!x&&!y)||std::hypot(float(x)*cell,float(y)*cell)>limit)continue;
+        candidates.push_back({from.x+x*cell,from.y+y*cell,from.z});
+    }
+    std::stable_sort(candidates.begin(),candidates.end(),[&](Point a,Point b){return Distance(a,from)<Distance(b,from);});
+    const float separation=CollisionRadius(stronger)+CollisionRadius(weaker)+.01f;
+    const float dx=next.x-origin.x,dy=next.y-origin.y,length=dx*dx+dy*dy;
+    for(auto point:candidates) {
+        const float f=length>0?std::clamp(((point.x-origin.x)*dx+(point.y-origin.y)*dy)/length,0.f,1.f):0;
+        if(std::hypot(point.x-origin.x-f*dx,point.y-origin.y-f*dy)<separation)continue;
+        Location at=weaker->navLocation;Point previous=from;bool clear=true;
+        const int steps=int(std::ceil(Distance(point,from)/(cell*.5f)));
+        for(int i=1;i<=steps&&clear;++i) {
+            const float t=float(i)/steps;Location support;
+            clear=Step(weaker,previous,{from.x+(point.x-from.x)*t,from.y+(point.y-from.y)*t,from.z},support);
+            if(clear)clear=!map.CheckCircleCollision(weaker,CPlot3D(support.position.x,support.position.y,weaker->GetCP().z),&support,true);
+            if(clear){at=support;previous=at.position;}
+        }
+        if(clear&&weak->CrowdShift(at))return true;
     }
     return false;
 }
@@ -916,6 +977,13 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
     const auto chargeBodies=ModArena::Charge(unit)?ModArena::ChargeBodies():Navigation::BodyPolicy{};
     auto* neighbour=map.CheckCircleCollision(unit,pos,&move.support,true,ModArena::Charge(unit)?&chargeBodies:nullptr);
     if(neighbour&&ModArena::Charge(unit)){move.blocker=neighbour->GetID();ModArena::Blocked(boundary,move.desired,4);return observed(false);}
+    if(neighbour&&YieldFor(unit,neighbour,move.support.position)) {
+        neighbour=map.CheckCircleCollision(unit,pos,&move.support,true);
+        if(neighbour&&++wait<27) {
+            queues[unit->GetID()]={{path.ptDestination.x,path.ptDestination.y,path.ptDestination.z},neighbour->GetID()};
+            move.waiting=true;move.blocker=neighbour->GetID();return observed(true);
+        }
+    }
     if(neighbour) {
         if(path.navigationTurned){move.blocker=neighbour->GetID();return observed(false);}
         wait=(std::min)(wait+1,1000000u);
@@ -923,11 +991,8 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
         const Point goal{path.ptDestination.x,path.ptDestination.y,path.ptDestination.z};
         if(Distance(queue.goal,goal)>.001f){queue={goal,neighbour->GetID()};wait=1;}
         else queue.blocker=neighbour->GetID();
-        // A changing neighbour must not restart the bounded wait forever.
-        // Its movement flag is not proof that this body can make progress.
-        // A stationary body cannot clear the corridor by waiting. Moving
-        // neighbours keep the bounded queue, including mutual congestion.
-        if((!neighbour->IsMoving()||wait>=27)&&!move.rotating) {
+        // A movement flag does not prove that a neighbour can clear the way.
+        if(!move.rotating) {
             ++move.avoidanceAttempts;
             const auto start=std::chrono::steady_clock::now();
             std::vector<Navigation::Obstacle> blockers;CUnitList nearby;
@@ -965,15 +1030,15 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
             if(found) {
                 path.curSegment=alternate.curSegment;path.toGo=alternate.toGo;
                 path.ptFinish=alternate.ptFinish;path.bFinished=alternate.bFinished;
+                path.ptDestination=alternate.ptDestination;path.navigationGoal=alternate.navigationGoal;
+                path.navigationPolicy=alternate.navigationPolicy;path.navigationMaxLength=alternate.navigationMaxLength;path.navigationMinDistance=alternate.navigationMinDistance;
                 path.bRouteFailed=alternate.bRouteFailed;path.nPathCost=alternate.nPathCost;path.navigationGeneration=alternate.navigationGeneration;path.navigationPending=alternate.navigationPending;
                 float speed=0,angular=0;unit->GetSpeeds(speed,angular);
                 unit->walker.SetSpeeds(speed,angular);unit->walker.CreateWalkerRoute(path.curSegment);
                 move.replanned=true;move.finished=false;move.support=unit->navLocation;
                 wait=0;queues.erase(unit->GetID());return observed(true);
             }
-            // Live neighbours cannot invalidate a static route. Keep its
-            // intent while movement waits for separation or a free bypass.
-            move.waiting=true;move.blocker=neighbour->GetID();return observed(true);
+            move.blocker=neighbour->GetID();return observed(false);
         }
         move.waiting=true;move.blocker=neighbour->GetID();return observed(true);
     }
