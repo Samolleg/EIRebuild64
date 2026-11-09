@@ -727,8 +727,14 @@ bool NavigationWorld::AttackPosition(CUnit* unit,CUnit* target,Navigation::Point
     const auto center=Position(target,map);
     const float inner=target->IsDead()?0.f:CollisionRadius(unit)+CollisionRadius(target)+.01f;
     const float outer=reach-.01f;
-    if(outer<inner)return false;
-    return FreePosition(unit,{goal.x,goal.y,center.z},inner,outer,maxLength,result);
+    // reach is the XY center distance used by GetHitDist and the strike.
+    if(outer<inner) {
+        GameJournal::Event("NAV","attack_position_failed","unit=%d target=%d reason=empty_ring inner=%.3f outer=%.3f reach=%.3f",unit->GetID(),target->GetID(),inner,outer,reach);
+        return false;
+    }
+    if(FreePosition(unit,{goal.x,goal.y,center.z},inner,outer,maxLength,result))return true;
+    GameJournal::Event("NAV","attack_position_failed","unit=%d target=%d reason=no_free_position inner=%.3f outer=%.3f reach=%.3f",unit->GetID(),target->GetID(),inner,outer,reach);
+    return false;
 }
 bool NavigationWorld::FreePosition(CUnit* unit,Point center,float inner,float outer,float maxLength,Location& result) {
     auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
@@ -761,14 +767,16 @@ bool NavigationWorld::FreePosition(CUnit* unit,Point center,float inner,float ou
         queryObstacles=&obstacles;
     }
     queryReuse=nullptr;
+    unsigned supportRejected=0,occupied=0,unreachable=0;
     for(const auto point:candidates) {
         Location candidate;
-        if(!Support(unit,point,candidate)||std::abs(candidate.position.z-center.z)>Height(unit))continue;
-        if(map.CheckCircleCollision(unit,CPlot3D(candidate.position.x,candidate.position.y,unit->GetCP().z),&candidate,false))continue;
+        if(!Support(unit,point,candidate)||std::abs(candidate.position.z-center.z)>Height(unit)){++supportRejected;continue;}
+        if(map.CheckCircleCollision(unit,CPlot3D(candidate.position.x,candidate.position.y,unit->GetCP().z),&candidate,false)){++occupied;continue;}
         CAIRoute route;
-        if(!map.NavRoute(unit,from,candidate.position,route,maxLength,0,unit->GetAIClass(),nullptr,GoalPolicy::Exact,nullptr,&candidate))continue;
+        if(!map.NavRoute(unit,from,candidate.position,route,maxLength,0,unit->GetAIClass(),nullptr,GoalPolicy::Exact,nullptr,&candidate)){++unreachable;continue;}
         result=candidate;return true;
     }
+    GameJournal::Event("NAV","free_position_failed","unit=%d reason=no_candidate center=(%.3f,%.3f,%.3f) inner=%.3f outer=%.3f candidates=%zu support_rejected=%u occupied=%u unreachable=%u",unit->GetID(),center.x,center.y,center.z,inner,outer,candidates.size(),supportRejected,occupied,unreachable);
     return false;
 }
 bool NavigationWorld::YieldFor(CUnit* stronger,CUnit* weaker,Point next) {

@@ -805,6 +805,7 @@ public:
     bool IsL1Attacking() { return L1IsAttacking(); }
     bool IsL1Moving() { return L1IsMoving(); }
     bool CrowdPlayer() { return logic.GetPlayer()!=nullptr; }
+    float CrowdTargetDistance() { return !curCommand.pTarget.IsEmpty() && !curCommand.IsMove() ? GetHitDist(curCommand) : 0.f; }
     bool CrowdDestination(Navigation::Point goal,float maxLength,Navigation::Location& result);
     bool CrowdShift(const Navigation::Location& support);
     bool IsDanger();

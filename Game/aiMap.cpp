@@ -28,6 +28,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "WinRegistry.h"
 #include "unit.h"
 #include "UnitServer.h"
+#include "GameJournal.h"
 #include "MapObjectServer.h"
 // crap, for routes start segment & resource path ...
 #include "WorldServer.h"
@@ -2429,9 +2430,9 @@ bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpM
         }
     }
     res.toGo.Clear();res.ptDestination=ptDst;res.bRouteFailed=false;res.navigationTurned=false;
-    if(!std::isfinite(ptDst.x)||!std::isfinite(ptDst.y))return false;
+    if(!std::isfinite(ptDst.x)||!std::isfinite(ptDst.y)){GameJournal::Event("NAV","path_failed","unit=%d reason=nonfinite_goal",pUnit->GetID());return false;}
     const bool inside=ptDst.x>=0&&ptDst.y>=0&&ptDst.x<AITile2Meter(float(XSize()))&&ptDst.y<AITile2Meter(float(YSize()));
-    if(!inside&&goalPolicy==Navigation::GoalPolicy::Exact)return false;
+    if(!inside&&goalPolicy==Navigation::GoalPolicy::Exact){GameJournal::Event("NAV","path_failed","unit=%d reason=outside_map",pUnit->GetID());return false;}
     if(!known)navigation.Goal(pUnit,destination.position,destination);
     auto from=navigation.Position(pUnit,*this);
     // ptDst.z is a command distance, not world height.
@@ -2441,16 +2442,21 @@ bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpM
        CheckCircleCollision(pUnit,CPlot3D(goal.x,goal.y,pUnit->GetCP().z),&destination,false)) {
         auto* server=static_cast<CUnitServer*>(pUnit->GetUnitSpecific());
         Navigation::Location free;
-        if(!server->CrowdDestination(goal,fpMaxPathLength,free))return false;
-        destination=free;goal=free.position;
-        res.ptDestination.x=goal.x;res.ptDestination.y=goal.y;
+        if(server->CrowdDestination(goal,fpMaxPathLength,free)) {
+            destination=free;goal=free.position;
+            res.ptDestination.x=goal.x;res.ptDestination.y=goal.y;
+        } else {
+            // A free endpoint is optional; retain the original target and reach.
+            fpMinDistance=(std::max)(fpMinDistance,server->CrowdTargetDistance());
+            GameJournal::Event("NAV","crowd_fallback","unit=%d reason=no_free_destination goal=(%.3f,%.3f,%.3f) min_distance=%.3f",pUnit->GetID(),goal.x,goal.y,goal.z,fpMinDistance);
+        }
     }
     res.navigationGoal=destination;res.navigationPolicy=goalPolicy;
     res.navigationMaxLength=fpMaxPathLength;res.navigationMinDistance=fpMinDistance;
     res.navigationGeneration=navigation.Generation();res.navigationPending=false;
     Navigation::Route decision;auto* result=detail?detail:&decision;
     if(!NavRoute(pUnit,from,goal,res.toGo,fpMaxPathLength,fpMinDistance,3,nullptr,goalPolicy,result,&destination)) {
-        if(result->status!=Navigation::Status::Updating){res.bRouteFailed=true;return false;}
+        if(result->status!=Navigation::Status::Updating){GameJournal::Event("NAV","path_failed","unit=%d reason=%s",pUnit->GetID(),Navigation::StatusName(result->status));res.bRouteFailed=true;return false;}
         // A pending scene is not a failed player order. Publish a stationary
         // segment; the existing movement owner resumes this same intent.
         res.curSegment.Clear();res.curSegment.SetStartPos(pUnit->GetCP(),-pUnit->GetYAxis(),static_cast<CWorldServer*>(pUnit->GetWorld())->GetSegmentTimeCounter()-1);
@@ -2464,7 +2470,7 @@ bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpM
         res.ptDestination.x=AITile2Meter(last.point.x);res.ptDestination.y=AITile2Meter(last.point.y);
         if(res.toGo.route.GetCount()<2){res.CreateStand(pUnit);return true;}
     }
-    if(res.toGo.route.GetCount()<2){res.toGo.Clear();return false;}
+    if(res.toGo.route.GetCount()<2){GameJournal::Event("NAV","path_failed","unit=%d reason=short_route",pUnit->GetID());res.toGo.Clear();return false;}
     // Queries, including movement previews, never replace the live support.
     // Only placement and an accepted physical step own navLocation.
     res.nPathCost=int(res.toGo.route.GetCount());res.bFirstTry=false;
