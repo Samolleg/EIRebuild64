@@ -48,7 +48,7 @@ struct Mesh {
 };
 struct BuildRequest {
     Profile profile; std::vector<Point> columns;
-    std::shared_ptr<Mesh> previous;
+    std::unique_ptr<Mesh> previous; // Consumed when the complete profile is reusable.
     Bytes tileKeys, previousBytes;
 };
 Bytes Digest(const Bytes& bytes);
@@ -60,7 +60,7 @@ void IndexSources(Geometry& geometry,float tileWidth);
 std::unique_ptr<Mesh> RebuildTile(const Geometry& geometry,const Profile& profile,int x,int z);
 void ReplaceTile(Mesh& mesh,Mesh& replacement,int x,int z);
 void DoorState(Mesh& mesh,int object,bool open);
-std::vector<std::unique_ptr<Mesh>> BuildProfiles(const Geometry& geometry,const std::vector<BuildRequest>& requests);
+std::vector<std::unique_ptr<Mesh>> BuildProfiles(const Geometry& geometry,std::vector<BuildRequest>& requests);
 std::unique_ptr<Mesh> Build(const Geometry& geometry,const Profile& profile,const std::string& key);
 Bytes Store(const Mesh& mesh);
 std::unique_ptr<Mesh> Load(Bytes bytes,const Profile& expected,
