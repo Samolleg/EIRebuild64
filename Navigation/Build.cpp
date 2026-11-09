@@ -672,28 +672,6 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
                 }
                 return result;
             };
-            // Exact BASE planes also form ceilings over terrain. A thin slab
-            // can merge into a terrain voxel; its underside must still cap
-            // clearance before pose erosion, independently of voxel merging.
-            if(!Levitates(p)&&planes.count(1))for(int iz=0;iz<field.height;++iz)for(int ix=0;ix<field.width;++ix) {
-                const auto& cell=field.cells[ix+iz*field.width];
-                for(unsigned j=cell.index;j<cell.index+cell.count;++j)if(field.areas[j]&&support[j]==1) {
-                    float clearance=FLT_MAX;
-                    for(float dz:{.05f,.5f,.95f})for(float dx:{.05f,.5f,.95f}) {
-                        const float x=cfg.bmin[0]+(ix+dx)*cfg.cs,y=-(cfg.bmin[2]+(iz+dz)*cfg.cs);
-                        const float ground=heightAt(1,x,y);if(ground==-FLT_MAX)continue;
-                        for(const auto& plane:planes)if(plane.first>1) {
-                            const float above=heightAt(plane.first,x,y);
-                            if(above>ground+.001f)clearance=std::min(clearance,above-ground);
-                        }
-                    }
-                    if(clearance<FLT_MAX) {
-                        auto& span=field.spans[j];
-                        span.h=static_cast<unsigned char>(std::min(int(span.h),std::max(0,int(std::floor(clearance/cfg.ch)))));
-                        if(span.h<cfg.walkableHeight)field.areas[j]=RC_NULL_AREA;
-                    }
-                }
-            }
             if(planes.count(1))for(int iz=0;iz<field.height;++iz)for(int ix=0;ix<field.width;++ix) {
                 const auto& cell=field.cells[ix+iz*field.width];
                 for(unsigned j=cell.index;j<cell.index+cell.count;++j)if(field.areas[j]&&support[j]>1) {
@@ -717,31 +695,6 @@ static std::unique_ptr<Mesh> BuildProfile(const Geometry& g,const Profile& p,con
                     if(cliff)field.areas[j]=RC_NULL_AREA;
                 }
             }
-            // Raster tops can hide a too-high change of original floor. Cut
-            // the touching columns before erosion so contour vertex welding
-            // cannot restore an invalid connection between terrain and BASE.
-            std::vector<unsigned> ledges;
-            for(int iz=0;iz<field.height;++iz)for(int ix=0;ix<field.width;++ix) {
-                const auto& cell=field.cells[ix+iz*field.width];
-                for(unsigned j=cell.index;j<cell.index+cell.count;++j)if(field.areas[j]&&support[j]) {
-                    const auto& span=field.spans[j];
-                    for(int d=0;d<4;++d)if(rcGetCon(span,d)!=RC_NOT_CONNECTED) {
-                        const int nx=ix+rcGetDirOffsetX(d),nz=iz+rcGetDirOffsetY(d);
-                        const unsigned n=field.cells[nx+nz*field.width].index+rcGetCon(span,d);
-                        if(!field.areas[n]||!support[n]||support[n]==support[j])continue;
-                        const float x=cfg.bmin[0]+(ix+.5f)*cfg.cs,y=-(cfg.bmin[2]+(iz+.5f)*cfg.cs),
-                            tx=cfg.bmin[0]+(nx+.5f)*cfg.cs,ty=-(cfg.bmin[2]+(nz+.5f)*cfg.cs);
-                        // Compare both exact planes at the common cell edge.
-                        // Where the source ends inside a cell, use its own
-                        // centre rather than a quantized voxel-top height.
-                        float a=heightAt(support[j],(x+tx)*.5f,(y+ty)*.5f),b=heightAt(support[n],(x+tx)*.5f,(y+ty)*.5f);
-                        if(a==-FLT_MAX)a=heightAt(support[j],x,y);
-                        if(b==-FLT_MAX)b=heightAt(support[n],tx,ty);
-                        if(a>-FLT_MAX&&b>-FLT_MAX&&std::abs(a-b)>p.climb+.001f){ledges.push_back(j);ledges.push_back(n);}
-                    }
-                }
-            }
-            for(unsigned j:ledges)field.areas[j]=RC_NULL_AREA;
         }
         // Canopies only cap existing floor spans. They cannot create extra
         // floors, ledges or regions at their upper side. Above the tallest
