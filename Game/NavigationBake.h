@@ -42,6 +42,7 @@ public:
     static std::function<void()> overlap;
     static unsigned tileCells;
     static std::filesystem::path reportDirectory;
+    static std::filesystem::path CacheDirectory() { return reportDirectory/"cache"; }
     static std::filesystem::path replayInput;
     Navigation::Geometry terrain;
     void Bind(CWorldServer& world,CAIMap& map) { sourceWorld=&world;sourceMap=&map; }

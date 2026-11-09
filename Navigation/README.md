@@ -7,7 +7,9 @@ files; missing, incompatible or damaged data causes a full bake. Signatures
 cover ordered raster inputs with the profile border and derived flight maxima.
 Reused tiles enter a fresh Detour mesh in the same order as a full bake.
 An unchanged input/resource set also skips scene import and serialization.
-The game ignores both companions; game file formats and traversal rules are
+Both companions live only in the cache subdirectory of report-root; old
+companions in output-root are ignored. The game ignores both companions;
+game file formats and traversal rules are
 unchanged. Refresh on mapper save, release with --all and model replacement
 with --model NAME.
 

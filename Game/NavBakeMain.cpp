@@ -177,6 +177,8 @@ int wmain(int argc,wchar_t** argv) {
         auto mod=options.at(L"--mod");if(mod.is_relative())mod=root/mod;
         const auto output=std::filesystem::absolute(options.at(L"--output-root")).lexically_normal()/"Maps"/"Nav64";
         const auto base=std::filesystem::is_directory(root/"Base"/"Res")?root/"Base":root;
+        const auto cacheDirectory=NavigationBake::CacheDirectory();
+        std::filesystem::create_directories(cacheDirectory);
         CModPackage package;package.Load(mod.string());
         ModRuntime::ResourceScope resources(package);
         CWorld::InitCurrentDir((base.string()+"\\").c_str());
@@ -263,7 +265,7 @@ int wmain(int argc,wchar_t** argv) {
             try {
                 long long importMs=0;std::uint64_t bytes=0;
                 const auto stem=std::filesystem::path(map.first).stem().string()+"--"+std::filesystem::path(map.second).stem().string();
-                const auto importCachePath=output/(stem+".navimport");
+                const auto importCachePath=cacheDirectory/(stem+".navimport");
                 Navigation::Bytes importKey;
                 // Model-filtered admission must still inspect the actual MOB.
                 if(!options.count(L"--model"))try {
@@ -278,12 +280,12 @@ int wmain(int argc,wchar_t** argv) {
                     expected.insert(Navigation::BodyFilename);
                     for(const auto& entry:cache.at("outputs")) {
                         const auto name=entry.at("name").get<std::string>();
-                        if(!expected.erase(name)||FileDigest(output/name)!=entry.at("hash").get<Navigation::Bytes>())throw std::runtime_error("Changed navigation output");
+                        if(!expected.erase(name)||FileDigest((name==stem+".navcache"?cacheDirectory:output)/name)!=entry.at("hash").get<Navigation::Bytes>())throw std::runtime_error("Changed navigation output");
                     }
                     // Require the entire known set, including the tile cache;
                     // an absent/corrupt companion always causes a full bake.
                     if(!expected.empty())throw std::runtime_error("Incomplete navigation cache");
-                    const auto tileCache=ReadImportCache(output/(stem+".navcache"));
+                    const auto tileCache=ReadImportCache(cacheDirectory/(stem+".navcache"));
                     for(int type=0;type<Navigation::AgentCount;++type) {
                         const auto& profile=tileCache.at("profiles").at(type);const auto& agent=Navigation::Agents[type];
                         printf("PROFILE map=%s mob=%s type=%s radius=%.2f tiles=%u rebuilt=0 ms=0 raster_cpu_ms=0 polygons_cpu_ms=0 bytes=%llu polygons=%u recast_raster_ms=0 filters_compact_ms=0 erosion_ms=0 regions_contours_polys_ms=0 detail_ms=0 serialize_compress_ms=0 write_ms=0 height_outliers=0\n",
@@ -316,7 +318,7 @@ int wmain(int argc,wchar_t** argv) {
                 }
                 if(!importKey.empty()) {
                     nlohmann::json outputs=nlohmann::json::array();
-                    auto add=[&](const std::string& name){outputs.push_back({{"name",name},{"hash",FileDigest(output/name)}});};
+                    auto add=[&](const std::string& name){outputs.push_back({{"name",name},{"hash",FileDigest((name==stem+".navcache"?cacheDirectory:output)/name)}});};
                     for(int type=0;type<Navigation::AgentCount;++type)add(Navigation::MeshFilename(map.first,map.second,type));
                     for(const auto* extension:{".navgeom",".navworld",".navcache"})add(stem+extension);
                     add(Navigation::BodyFilename);
