@@ -1,28 +1,36 @@
 # nala-to-skn (incomplete)
 
-Offline x64 project in `EI_Rebuild.sln`. The implemented command extracts the
-accepted bahonec internal rig into the section-13 payload described in
-`docs/skn-format.md`. It preserves every bind slot and controller parameter,
-including binary64 precision, without invoking a CPU vertex generator.
+Offline x64 project in EI_Rebuild.sln. No hooks or D3D7 calls.
 
-Build from the worktree:
+From the worktree, build the cooker and existing texture tool with MSBuild:
 
 ```
-MSBuild tools/nala-to-skn/nala-to-skn.vcxproj /p:Configuration=Release /p:Platform=x64 /nr:false
+MSBuild EI_Rebuild.sln /t:"nala-to-skn;skn_texpack" /p:Configuration=Release /p:Platform=x64 /nr:false
+out/x64/Release/tools/nala-to-skn --export-bind-mesh ../mod-files/Maps/unhufe.skn
+out/x64/Release/skn_texpack/skn_texpack --role color --space srgb --input <bahonec>/assets/runtime/natural_nails_20261110/body_face.rgb --width 2048 --height 2048 --output ../mod-files/Maps/nala/201.dds
+```
+
+Create the output parent directories first. Outputs must not exist. The skin
+input must be manifest resource 201 from config/natural-nails-runtime.json,
+SHA256 efcefe68d2548334b240a8166fca5c907f640bc7e063046e48a80eb108df2585.
+The source clone is read-only; texture bytes are cooked outside Git.
+
+The bind snapshot contains the resolved default body/face/eyes, accepted UVs,
+proxy vertices, four original skin slots per sampling vertex (UNORM16),
+section-9 render correspondences and the complete section-13 pose rig.
+Original duplicate lid edits execute in order; the last write wins. The cooker
+reads its actual container through the shared decoder, checks the rig round
+trip and compares serialized bind contacts to NalaLidContact::Render.
+
+The older command remains available:
+
+```
 out/x64/Release/tools/nala-to-skn --export-pose-section ../tmp/unhufe.section13
 ```
 
-Output must not exist. The writer decodes and re-encodes the actual payload
-before publishing it; mismatched data fails. The common reader rejects invalid
-table ranges/references, nonfinite values, singular transforms and hierarchy
-cycles. `nala_pose::palette` evaluates only bones using the transferred kernel.
-Neither tool nor reader has a renderer/device dependency or game-memory hooks.
-
-This is a partial cooker, not a model conversion. It does not produce
-`unhufe.skn` or DDS, and `.section13` must not be installed in Maps. Container
-loading, GPU morph/skin/lid integration and CPU-output removal remain undone.
-In particular, `NalaBodyAuthoring.h::Apply` changes each vertex by an inverse
-weighted sum of its old bind matrices and a weighted sum of its new bind
-matrices. Copying the five resolver inputs or exporting only fat deltas does
-not implement that operation. It still needs explicit GPU lowering, together
-with `NalaUpperBody::Map` and the source face/proxy corrections.
+Neither output is ready for installation. Section 8 is absent; shape changes,
+per-frame bone palette integration and GPU skin/contact submission are pending.
+The existing Nala CPU route has not been removed and still precedes file lookup.
+Hair, clothes, underwear, layers, wounds and pose corrections are not cooked.
+The container decoder accepts the bind contact subset; runtime SKN selection
+explicitly rejects it until submission is implemented. See docs/skn-format.md.

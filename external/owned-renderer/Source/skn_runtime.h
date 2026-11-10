@@ -108,6 +108,8 @@ inline std::shared_ptr<const RuntimeAsset> select(const std::string &name,
   std::string error;
   if (!blob.bytes || !decode(*blob.bytes, a->asset, error))
     throw std::runtime_error(error);
+  if (a->asset.nala_rig)
+    throw std::runtime_error("SKN Nala bind asset: section 8 shape data and GPU contact submission are not implemented");
   // In joint-local bind space every influenced vertex lies in this sphere.
   // Positive normalized skin weights make the posed mesh a convex combination
   // of the posed joint spheres, including rotation and non-uniform scale.

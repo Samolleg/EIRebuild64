@@ -45,11 +45,11 @@ Material offsets: 0 f32 baseColor RGBA; 16 f32 emission RGB; 28 f32 roughness; 3
 
 DDS requires DX10, one 2D texture, no cube/volume/array, top-level width and height each a multiple of four in 4–16384 (1x1 and 2x2 top levels are invalid), exact block payload and complete authored mip chain through 1×1. Base/emission use BC7 sRGB (DXGI 99); normal XY uses BC5 UNORM linear (83), positive Z reconstructed; ORM uses BC7 UNORM linear (98). Lower mips may have dimensions below four and still occupy complete BC blocks. A mip has ceil(width/4)×ceil(height/4)×16 bytes. Missing declared maps, wrong color space/format, missing mips or invalid payload fail. Cutout coverage, padding and vector normal filtering are offline responsibilities.
 
-## Nala feature sections (design, not implemented)
+## Nala feature sections (design; partial bind decoder)
 
-The following is the X64NALASKN01 section design. The current decoder still
-rejects nonempty sections 8–11; this specification does not imply runtime
-support. The CPU Nala implementation has not been replaced by this document.
+The following is the X64NALASKN01 section design. The decoder supports the
+section-9 bind-contact subset described at the end, and rejects nonempty
+sections 8/10/11. Runtime submission and the CPU Nala replacement remain pending.
 
 ### Common envelope for sections 8, 9 and 11
 
@@ -177,11 +177,11 @@ truncating weights. No runtime lid topology generation is allowed.
 
 ### Section 13: internal Nala pose rig, version 1
 
-The standalone codec is `Source/nala_pose_asset.h`; the offline extraction
-command is documented in `tools/nala-to-skn/README.md`. This codec is **not yet
-wired into the SKN container decoder or retained submission**. Section 13 in a
-model therefore still rejects at runtime. A standalone `.section13` is an
-intermediate payload, not an installable SKN model.
+The codec is `Source/nala_pose_asset.h`; the offline extraction command is
+in `tools/nala-to-skn/README.md`. The container decoder retains the rig and
+validates the contact subset described below. Retained GPU submission is not
+implemented: runtime selection rejects this bind snapshot explicitly. A
+standalone `.section13` is also an intermediate, not an installable model.
 
 Use the common 16-byte table envelope above with exactly nine tables. The
 outer section uses version=1, stride=1, count=payload byte size. All scalar
@@ -307,3 +307,56 @@ The source `FORMAT.md` of the dropped X64SKIN01 task is no longer present. The a
 «Модель взята из личного проекта bahonec, сделанного им специально для Unity, и перенесена автором bahonec с помощью GPT-агента для использования в проекте „Проклятые земли“. Список одежды и материалов и перенос на новый движок bahonec также разрабатывает лично.»
 
 Assets from bahonec/Dejavu-Female-Body are authorized for EIRebuild64. The clone remains read-only; texture cooking alone is not an implementation of its procedural rig or a gameplay acceptance.
+
+## Current bind extraction (X64NALASKN01, incomplete)
+
+The later owner decision in BRIEF supersedes the proposed section-8 GPU scalar
+program above: run the existing complete NalaBodyShape/authoring/upper-body
+calculation on CPU only on a change of the five inputs, then upload unit-local
+bind vertices/normals and rig once. Animation must only evaluate bones on CPU.
+The section-8 payload needed to reproduce this calculation is still pending;
+the bind snapshot has no section 8 and cannot change shape at runtime.
+
+`nala-to-skn --export-bind-mesh` currently cooks the resolver default
+(build=.3, fullness=.3, height=.85, strength=25, dexterity=25), with all accepted
+face corrections, 105% head size and proxy vertices. Section 3 contains 21,670
+sampling vertices followed by 21,003 visible render vertices, with unchanged
+UVs and 36,162 triangles. Eyes/teeth/tongue use their original skin slots and
+renderer-local bind coordinates, which need not be common body coordinates.
+There is no hair mesh in this extraction; the existing hair FIG is not cooked.
+
+Section 13 is authoritative for affine bind frames and its 1,880 skin slots.
+In this mode section 2 enumerates those slots with unique names and identity
+TRS/inverse descriptors (all roots), not LNK joints. This explicit mode requires
+sections 9 and 13 together; the decoder checks matching slot counts and identity
+descriptors. A consumer must never skin these vertices through section 2 alone.
+The 378 internal nodes and controller ordering remain in section 13. No slot
+merging or reduction to 15 LNK joints occurs. Four influences are quantized by
+largest remainder to sum exactly to 65535, without dropping an influence.
+
+Section 9 uses the existing version-1 envelope and six tables. Two surfaces:
+0 is sampling-only, with all native/proxy vertices and no indices; 1 is visible,
+with all render vertices/indices. A single operation-0 stage replaces every
+visible vertex from three sampling sources. Ordinary copies repeat their source
+with weights (1,0,0); Edits retain three sources/weights. When the source table
+writes a render vertex repeatedly, the last edit wins, as in Render(). All
+normal/tangent offsets and frame/reserved fields are zero. Visible placeholder
+skin lanes are ignored by the contact stage; they are not a four-bone
+approximation of an edit. Blend each source's skinned, normalized normal, then
+normalize the result, as in NalaLidContact::Render. This preserves blends that
+can involve more than four bones. Proxy positions/normals and their inherited
+skin are ordinary sampling vertices; no runtime topology generation is needed.
+
+The container decoder supports only this two-surface/single-anchor-stage
+subset. It checks table extents/overlap, strides, surface ownership and indices,
+unique target coverage, source references, finite nonnegative normalized weights
+and zero offsets/frame. Other contact stages still reject. The cooker decodes
+the actual container, round-trips section 13 and compares serialized contact
+bind positions/normals to the source Render result (position tolerance 1e-4 m,
+normal cosine >= .99999). These cooking checks do not validate posed GPU output.
+
+RuntimeAsset selection refuses Nala bind snapshots until shape data and GPU
+contact submission are implemented. The pre-existing selected-Nala CPU route
+still runs before SKN selection; replacing it, passing the five raw CUnit inputs,
+per-unit shape caching and bone palettes, GPU contact and hair are outstanding.
+No claim of a visible file-backed Nala or completed step 1 is made.

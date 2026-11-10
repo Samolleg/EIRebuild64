@@ -1,6 +1,6 @@
-// Offline extraction of the pose prerequisite for the Nala SKN cooker.
-// Full conversion is deliberately not advertised: section 8 GPU shape lowering
-// and render integration are still required before a deployable SKN can exist.
+// Offline Nala bind mesh and pose extraction.
+// CPU shape data and GPU skin/contact integration are still required before
+// a deployable SKN can exist.
 #include "nala_pose_asset.h"
 #include "nala/UnityCompleteData.h"
 #include <filesystem>
@@ -77,10 +77,26 @@ void write(const std::filesystem::path& path,const Bytes& bytes) {
   file.close();if(!file)throw std::runtime_error("cannot write pose section");
 }
 }
+#include "bind_mesh.h"
 int main(int argc,char** argv) try {
+  if(argc==3 && std::string(argv[1])=="--export-bind-mesh") {
+    const Data source=CompleteData();Data shaped;
+    NalaMorphs::Values values;NalaMorphs::Status status;
+    if(!NalaMorphs::Resolve({},values,status))throw std::runtime_error("default shape resolver failed");
+    auto profile=NalaBodyShape::Profile(values);
+    if(!NalaBodyShape::Build(source,values,std::vector<double>(EditorSchema::BoneCount*9),shaped,profile,NalaUpperArcIdentity::Apply))
+      throw std::runtime_error("default bind shape failed");
+    const auto bytes=bind_mesh(shaped);
+    write(argv[2],bytes);
+    std::cout<<"bind SKN: "<<shaped.vertices.size()<<" sampling vertices, "<<NalaLidContact::RenderCount
+      <<" visible vertices, "<<std::size(NalaLidContact::Indices)/3<<" triangles, "<<shaped.bindInverse.size()
+      <<" skin slots; sections 9/13; "<<bytes.size()<<" bytes\n"
+      <<"INCOMPLETE: section 8 and runtime integration pending; do not install.\n";
+    return 0;
+  }
   if(argc!=3 || std::string(argv[1])!="--export-pose-section") {
     std::cerr<<"usage: nala-to-skn --export-pose-section OUTPUT.section13\n"
-      "Full unhufe.skn conversion is not implemented; this command exports only the pose section.\n";
+      "or: nala-to-skn --export-bind-mesh OUTPUT.skn\nRuntime integration remains incomplete.\n";
     return 2;
   }
   const Data source=CompleteData();
