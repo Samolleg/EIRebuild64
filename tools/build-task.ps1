@@ -43,14 +43,41 @@ function Remove-CacheEntry([string]$path) {
     if ((Get-Item -LiteralPath $full).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Cache entry is a link: $full" }
     Remove-Item -LiteralPath $full -Recurse -Force
 }
+function Sync-Tree([string]$source,[string]$destination,[string[]]$files) {
+    # Incremental builds need one stable source path. Copy only files whose bytes
+    # differ and stamp them now, so MSBuild rebuilds exactly what changed.
+    New-Item -ItemType Directory -Force -Path $destination | Out-Null
+    $listPath = Join-Path $destination '.ei-sources'
+    $previous = @(); if (Test-Path -LiteralPath $listPath) { $previous = @(Get-Content -LiteralPath $listPath) }
+    $now = [datetime]::UtcNow; $copied = 0
+    foreach ($relative in $files) {
+        $from = Join-Path $source $relative; $to = Join-Path $destination $relative
+        if (!(Test-Path -LiteralPath $from -PathType Leaf)) { continue }
+        $same = (Test-Path -LiteralPath $to -PathType Leaf) -and ((Get-Item -LiteralPath $from).Length -eq (Get-Item -LiteralPath $to).Length) -and ((Hash-File $from) -eq (Hash-File $to))
+        if (!$same) {
+            New-Item -ItemType Directory -Force -Path (Split-Path $to) | Out-Null
+            Copy-Item -LiteralPath $from -Destination $to -Force
+            (Get-Item -LiteralPath $to).LastWriteTimeUtc = $now
+            $copied++
+        }
+    }
+    $current = [Collections.Generic.HashSet[string]]::new([string[]]$files,[StringComparer]::OrdinalIgnoreCase)
+    $removed = 0
+    foreach ($relative in $previous) {
+        if (!$current.Contains($relative)) { $gone = Join-Path $destination $relative; if (Test-Path -LiteralPath $gone -PathType Leaf) { Remove-Item -LiteralPath $gone -Force; $removed++ } }
+    }
+    Write-Utf8 $listPath $files
+    Write-Host "Persistent build tree: $copied changed, $removed removed, $($files.Count) sources."
+}
 function Trim-Cache {
     foreach ($group in Get-ChildItem -LiteralPath $CacheRoot -Directory) {
+        if ($group.Name -eq 'work') { continue }
         if ($group.Name -notin @('LuaJIT','DirectXTex','DirectXTK','RendererShaders','Recast')) { throw "Unknown cache directory: $($group.FullName)" }
         $entries = @(Get-ChildItem -LiteralPath $group.FullName -Directory | Sort-Object LastWriteTimeUtc -Descending)
         foreach ($entry in $entries) { if ($entry.Name -notmatch '^[0-9a-f]{64}$') { throw "Unknown cache entry: $($entry.FullName)" } }
         $entries | Select-Object -Skip $CacheVersions | ForEach-Object { Remove-CacheEntry $_.FullName }
     }
-    $entries = @(Get-ChildItem -LiteralPath $CacheRoot -Directory | Get-ChildItem -Directory | Sort-Object LastWriteTimeUtc)
+    $entries = @(Get-ChildItem -LiteralPath $CacheRoot -Directory | Where-Object Name -ne 'work' | Get-ChildItem -Directory | Sort-Object LastWriteTimeUtc)
     [long]$size = (Get-ChildItem -LiteralPath $CacheRoot -File -Recurse | Measure-Object Length -Sum).Sum
     foreach ($entry in $entries) {
         if ($size -le $CacheLimitGB * 1GB) { break }
@@ -86,8 +113,14 @@ try {
     foreach ($name in 'CL','_CL_','LINK','_LINK_','EID3D11_SHADER_STORE') { [Environment]::SetEnvironmentVariable($name,$null,'Process') }
     # Shared build metadata and toolchain; source payloads are keyed per library.
     $inventory = [Collections.Generic.List[string]]::new()
-    $tracked = @(& git -c core.quotepath=false ls-files --cached --others --exclude-standard | Sort-Object -Unique)
+    $tracked = @(& git -C $repo -c core.quotepath=false ls-files --cached --others --exclude-standard | Sort-Object -Unique)
     if ($LASTEXITCODE -ne 0) { throw 'Cannot enumerate sources.' }
+    # Build in one persistent tree so unchanged objects, PCH and incremental LTCG
+    # survive between tasks; the task worktree keeps only sources and the kit.
+    $sourceRepo = $repo
+    $repo = Join-Path $CacheRoot 'work'
+    Sync-Tree $sourceRepo $repo $tracked
+    Set-Location $repo
     foreach ($relative in $tracked | Where-Object { $_ -match '\.(vcxproj|props|targets|ps1|cs)$' }) { $inventory.Add($relative + '=' + (Hash-File (Join-Path $repo $relative))) }
     foreach ($directory in @((Join-Path $vc 'include'),(Join-Path $vc 'atlmfc/include'),(Join-Path $sdk "Include/$sdkversion"))) {
         foreach ($file in Get-ChildItem -LiteralPath $directory -File -Recurse | Sort-Object FullName) { $inventory.Add($file.FullName + '=' + (Hash-File $file.FullName)) }
@@ -104,7 +137,12 @@ try {
         @{ Name='RendererShaders'; Sources='^(external/owned-renderer/|OwnedRenderer/|Game/OwnedRender/)'; Patterns=@('out/x64/Release/RendererShaders/eid3d11_*') },
         @{ Name='Recast'; Sources='^external/recastnavigation/'; Patterns=@('out/obj/x64/Release/EI_Rebuild/Recast*.obj','out/obj/x64/Release/EI_Rebuild/Detour*.obj','out/obj/x64/Release/EI_Rebuild/Recast.compiler.pdb') }
     )
-    $arguments = @('EI_Rebuild.sln',"/m:$cores",'/nr:false','/t:Build','/p:Configuration=Release','/p:Platform=x64',"/p:VCToolsVersion=$vcversion","/p:WindowsTargetPlatformVersion=$sdkversion","/p:UserRootDir=$privateTemp\",'/nologo','/v:minimal')
+    # The persistent tree already keeps every library output; per-library payload
+    # restores would restamp files and force relinks, so they are not used here.
+    $groups = @()
+    $sourceCommit = (& git -C $sourceRepo -c "safe.directory=$sourceRepo" describe --always --abbrev=12 --dirty --exclude=*).Trim()
+    if ($LASTEXITCODE -ne 0 -or !$sourceCommit) { throw 'Cannot identify source commit.' }
+    $arguments = @("/p:ScriptCheckCommit=$sourceCommit",'EI_Rebuild.sln',"/m:$cores",'/nr:false','/t:Build','/p:Configuration=Release','/p:Platform=x64',"/p:VCToolsVersion=$vcversion","/p:WindowsTargetPlatformVersion=$sdkversion","/p:UserRootDir=$privateTemp\",'/nologo','/v:minimal')
     foreach ($group in $groups) {
         $sourceInventory = @($key)
         foreach ($relative in $tracked | Where-Object { $_ -match $group.Sources }) { $sourceInventory += ($relative + '=' + (Hash-File (Join-Path $repo $relative))) }
@@ -131,7 +169,7 @@ try {
         }
         Write-Host "$($group.Name): cache hit=$($group.Hit) key=$($group.Key)"
     }
-    & (Join-Path $PSScriptRoot 'prepare-worktree.ps1') -VSInstallDir $vs
+    & (Join-Path $repo 'tools/prepare-worktree.ps1') -VSInstallDir $vs
     if (!$?) { throw 'Preparation failed.' }
     Write-Host "MSBuild workers: $cores; compiler /MP; isolated endpoint $env:_MSPDBSRV_ENDPOINT_"
     Add-Type -Path (Join-Path $PSScriptRoot 'BuildProcess.cs')
