@@ -31,7 +31,7 @@ Copy-Item -LiteralPath (Join-Path $vendor 'src'),(Join-Path $vendor 'dynasm'),(J
 # completion, and an actual nonzero exit code when upstream reports failure.
 $batchPath = Join-Path $sourceCopy 'src/msvcbuild.bat'
 $batch = [IO.File]::ReadAllText($batchPath).Replace("`r`n", "`n")
-$batch = $batch.Replace('@set LJCOMPILE=cl /nologo /c /O2 /W3 ', '@set LJCOMPILE=cl /nologo /c /O2 /W3 /MT /DLUAJIT_ENABLE_GC64 ')
+$batch = $batch.Replace('@set LJCOMPILE=cl /nologo /c /O2 /W3 ', ('@set LJCOMPILE=cl /nologo /c /O2 /W3 /MT /MP /FS /Fd"' + (Join-Path $output 'luajit.compiler.pdb') + '" /DLUAJIT_ENABLE_GC64 '))
 $start = $batch.IndexOf("`n:MTDLL`n") + 1
 $end = $batch.IndexOf("`n:SETHOSTVARS`n") + 1
 if ($start -lt 0 -or $end -le $start) { throw 'Pinned msvcbuild layout changed.' }

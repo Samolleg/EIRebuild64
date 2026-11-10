@@ -1,0 +1,20 @@
+#pragma once
+// Stable standard headers only: source-local feature macros keep their meaning.
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <functional>
+#include <future>
+#include <limits>
+#include <map>
+#include <memory>
+#include <set>
+#include <string>
+#include <type_traits>
+#include <unordered_map>
+#include <vector>

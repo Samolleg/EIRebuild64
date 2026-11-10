@@ -40,4 +40,5 @@
       <_ATGFXCPath />
     </PropertyGroup>
   </Target>
+<PropertyGroup><EITaskCacheHit>$(EICacheDirectXTex)</EITaskCacheHit></PropertyGroup><Import Project="../../tools/TaskCache.targets" />
 </Project>
