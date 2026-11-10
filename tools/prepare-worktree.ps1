@@ -15,7 +15,7 @@ if (!$FFmpegSource) { $FFmpegSource = Join-Path $projectRoot 'deps/ffmpeg/8.1.3/
 if (!$DlssSdkSource) { $DlssSdkSource = Join-Path $projectRoot 'deps/dlss-sdk/v310.9.16' }
 $dlssFiles = @('include/nvsdk_ngx.h', 'include/nvsdk_ngx_defs.h', 'include/nvsdk_ngx_params.h',
     'include/nvsdk_ngx_helpers.h', 'include/nvsdk_ngx_helpers_d3d.h', 'include/nvsdk_ngx_helpers_cuda.h',
-    'lib/Windows_x86_64/x64/nvsdk_ngx_s.lib',
+    'lib/Windows_x86_64/x64/nvsdk_ngx_s.lib', 'lib/Windows_x86_64/x64/nvsdk_ngx_s_dbg.lib',
     'lib/Windows_x86_64/rel/nvngx_dlss.dll', 'LICENSE.txt')
 foreach ($file in $dlssFiles) {
     if (!(Test-Path -LiteralPath (Join-Path $DlssSdkSource $file) -PathType Leaf)) {

@@ -608,7 +608,6 @@
   <ItemGroup>
   </ItemGroup>
   <ItemGroup>
-    <None Include="packages.config" />
     <None Include="render.md" />
   </ItemGroup>
   <ItemGroup>
@@ -629,17 +628,9 @@
   </ItemGroup>
   <PropertyGroup><OwnedRendererRoot Condition="'$(OwnedRendererRoot)'==''">$(ProjectDir)external\owned-renderer\</OwnedRendererRoot></PropertyGroup>
   <ItemDefinitionGroup><ClCompile><AdditionalIncludeDirectories>$(OwnedRendererRoot)\Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile></ItemDefinitionGroup>
+  <Import Project="tools\DirectXStatic.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Import Project="OwnedRenderer\E1RendererFacadeWarpCheck.host.targets" Condition="'$(E1RendererFacadeWarpCheck)'=='true'" />
   <ImportGroup Label="ExtensionTargets">
-    <Import Project="packages\directxtk_desktop_2019.2024.6.5.1\build\native\directxtk_desktop_2019.targets" Condition="Exists('packages\directxtk_desktop_2019.2024.6.5.1\build\native\directxtk_desktop_2019.targets')" />
-    <Import Project="packages\directxtex_desktop_2019.2024.6.5.1\build\native\directxtex_desktop_2019.targets" Condition="Exists('packages\directxtex_desktop_2019.2024.6.5.1\build\native\directxtex_desktop_2019.targets')" />
   </ImportGroup>
-  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
-    <PropertyGroup>
-      <ErrorText>Данный проект ссылается на пакеты NuGet, отсутствующие на этом компьютере. Используйте восстановление пакетов NuGet, чтобы скачать их.  Дополнительную информацию см. по адресу: http://go.microsoft.com/fwlink/?LinkID=322105. Отсутствует следующий файл: {0}.</ErrorText>
-    </PropertyGroup>
-    <Error Condition="!Exists('packages\directxtk_desktop_2019.2024.6.5.1\build\native\directxtk_desktop_2019.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\directxtk_desktop_2019.2024.6.5.1\build\native\directxtk_desktop_2019.targets'))" />
-    <Error Condition="!Exists('packages\directxtex_desktop_2019.2024.6.5.1\build\native\directxtex_desktop_2019.targets')" Text="$([System.String]::Format('$(ErrorText)', 'packages\directxtex_desktop_2019.2024.6.5.1\build\native\directxtex_desktop_2019.targets'))" />
-  </Target>
 </Project>

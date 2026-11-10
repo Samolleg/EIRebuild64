@@ -1,10 +1,3 @@
-> X64STATICCRT: настройки переведены на статический CRT; итоговая сборка пока не подтверждена.
-> Нужна x64 `/MT` библиотека NVIDIA `nvsdk_ngx_s.lib` версии v310.9.16.
-> Локально есть только `/MD` `nvsdk_ngx_d.lib`; подготовка останавливается до копирования зависимостей.
-> Локальные NuGet DirectXTex и DirectXTK 2024.6.5.1 также содержат `/MD` библиотеки:
-> для игры и skn_texpack нужна их пересборка из исходников той же версии с `/MT`; исходников локально нет.
-> Не подавлять LNK2038 и не смешивать CRT. Исторические результаты сборки ниже относятся к прежнему main.
-
 > NEWPROJ03: внутри C:/Dev/EvilIslands зависимости находятся в `deps`, локальный NuGet — `deps/nuget`. `tools/prepare-worktree.ps1` находит RULES.md вверх от checkout, в том числе из tasks/<ID>/wt. Глобальные caches и старый work не являются его defaults.
 > Выполните `powershell -NoProfile -ExecutionPolicy Bypass -File tools/prepare-worktree.ps1`, затем `MSBuild EI_Rebuild.sln /m:4 /nr:false /t:Build /p:Configuration=Release /p:Platform=x64`. Рецепт ниже относится к самостоятельному клону вне нового корня.
 
@@ -39,36 +32,12 @@ git rev-parse HEAD
 
 ## Внешние зависимости
 
-**NuGet.** В отдельном окне PowerShell выполните следующий блок из корня клона.
-Выберите новый каталог профиля; `USERPROFILE` меняется только в этом процессе.
-Скрипт подготовки читает пакеты именно из `$env:USERPROFILE/.nuget/packages`.
-Обычный restore `packages.config` в каталоги `id.version` этот шаг не заменяет.
-
-```powershell
-$ErrorActionPreference = 'Stop'
-$env:USERPROFILE = 'C:\ei64-deps\nuget-user'
-$env:NUGET_PACKAGES = Join-Path $env:USERPROFILE '.nuget/packages'
-$env:NUGET_HTTP_CACHE_PATH = Join-Path $env:USERPROFILE '.nuget/http-cache'
-$env:NUGET_PLUGINS_CACHE_PATH = Join-Path $env:USERPROFILE '.nuget/plugin-cache'
-if (Test-Path -LiteralPath $env:USERPROFILE) { throw 'Choose a new empty profile' }
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-[xml]$buildPackages = Get-Content -LiteralPath 'packages.config' -Raw
-$nugetIndex = Invoke-RestMethod 'https://api.nuget.org/v3/index.json'
-$packageBase = ($nugetIndex.resources | Where-Object { $_.'@type' -eq 'PackageBaseAddress/3.0.0' }).'@id'
-foreach ($buildPackage in $buildPackages.packages.package) {
-    $packageId = $buildPackage.id.ToLowerInvariant()
-    $packageVersion = $buildPackage.version.ToLowerInvariant()
-    $packageDirectory = Join-Path $env:NUGET_PACKAGES "$packageId/$packageVersion"
-    New-Item -ItemType Directory -Path $packageDirectory -Force | Out-Null
-    $packageArchive = Join-Path $packageDirectory "$packageId.$packageVersion.nupkg"
-    Invoke-WebRequest -UseBasicParsing "$packageBase$packageId/$packageVersion/$packageId.$packageVersion.nupkg" -OutFile $packageArchive
-    [IO.Compression.ZipFile]::ExtractToDirectory($packageArchive, $packageDirectory)
-}
-```
-
-Получаются `directxtex_desktop_2019` и `directxtk_desktop_2019`, оба `2024.6.5.1`,
-из официального [NuGet V3 API](https://learn.microsoft.com/en-us/nuget/api/package-base-address-resource).
-Продолжайте подготовку в этом же окне; глобальный кэш и настройки не меняются.
+**DirectXTex / DirectXTK.** Исходники Microsoft jun2024 включены в
+`external/DirectXTex` и `external/DirectXTK` вместе с LICENSE и PROVENANCE.
+Решение собирает их статически с `/MT` (Debug `/MTd`); NuGet не требуется.
+DirectXTK содержит используемые BasicPostProcess, CommonStates, ScreenGrab и WICTextureLoader
+с публичными заголовками, необходимыми хосту. Compute-шейдеры DirectXTex
+генерируются Windows SDK fxc при первой сборке.
 
 **FFmpeg 8.1.3 x64.** Соберите по [рецепту](tools/ffmpeg/README.md).
 В проверенном окружении MSYS2 curl отказал на цепочке сертификатов. Архив был
@@ -97,7 +66,7 @@ set "PATH=C:\msys64\ucrt64\bin;C:\msys64\usr\bin;%PATH%"
 **DLSS SDK.** Получите отдельно [официальный тег v310.9.16](https://github.com/NVIDIA/DLSS/tree/v310.9.16),
 commit `9981c6350dc58c0ce21f024fd65e31e851c31689`. Нужны шесть заголовков
 `include/nvsdk_ngx{,_defs,_params,_helpers,_helpers_d3d,_helpers_cuda}.h`,
-`lib/Windows_x86_64/x64/nvsdk_ngx_s.lib`,
+`lib/Windows_x86_64/x64/nvsdk_ngx_s.lib` и `nvsdk_ngx_s_dbg.lib`,
 `lib/Windows_x86_64/rel/nvngx_dlss.dll` и `LICENSE.txt` с исходной структурой папок.
 Тег и этот список проверены удалённо; полная загрузка SDK заново не проверялась.
 При сборке использован ранее полученный SDK этого коммита; содержимое нужных
@@ -105,7 +74,7 @@ commit `9981c6350dc58c0ce21f024fd65e31e851c31689`. Нужны шесть заг�
 
 ## Подготовка и одна сборка обеих целей
 
-Вернитесь в PowerShell с изолированным `USERPROFILE`. Укажите свой каталог SDK:
+В PowerShell укажите свой каталог SDK (в корне EvilIslands используются defaults из `deps`):
 
 ```powershell
 $vsInstall = & "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
@@ -113,7 +82,7 @@ $ffmpegSource = Join-Path $PWD '.ffmpeg-build/install'
 $dlssSource = 'C:\ei64-deps\DLSS-v310.9.16'
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File ./tools/prepare-worktree.ps1 -VSInstallDir $vsInstall -FFmpegSource $ffmpegSource -DlssSdkSource $dlssSource
 if ($LASTEXITCODE -ne 0) { throw 'Preparation failed' }
-& "$vsInstall/MSBuild/Current/Bin/MSBuild.exe" EI_Rebuild.sln /m /t:Build /p:Configuration=Release /p:Platform=x64 /nologo /v:minimal
+& "$vsInstall/MSBuild/Current/Bin/MSBuild.exe" EI_Rebuild.sln /m:4 /nr:false /t:Build /p:Configuration=Release /p:Platform=x64 /nologo /v:minimal
 if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
 ```
 
@@ -148,3 +117,30 @@ ReStarter64 не входит в этот Git-репозиторий. Он су�
 подтверждён. Его исходники или готовый комплект, совместимый Атаман, игру и мод
 нужно получить у владельца отдельно. Сборка стартера, запекание Nav64,
 установка и игровой запуск в этой проверке не выполнялись.
+
+## Границы CRT (X64STATICCRT)
+
+`Directory.Build.targets` задаёт `/MT` для Release и `/MTd` для Debug во всех
+native-проектах. Основное решение поддерживает Release x64; новых конфигураций
+хоста не добавлено. MFC, LuaJIT, Recast/Detour, ScriptCompilerCore, рендер,
+DirectXTex и DirectXTK линкуются статически. NGX использует соответствующие
+`nvsdk_ngx_s.lib` / `nvsdk_ngx_s_dbg.lib`; подавления LNK2038 нет.
+
+Собственных DLL в комплекте нет. `Game/dx11/RendererDX11.cpp` создаёт
+`RendererFacadeCore<owned::Renderer>` внутри EXE; старый `OwnedRendererClient`
+не инициализируется в этом пути. Его C API (`ei_renderer_api.h`) также использует
+opaque handles с destroy/release у провайдера, POD и COM AddRef/Release,
+без передаваемых FILE* и STL-объектов с внешним владельцем.
+
+Внешние DLL: FFmpeg и NVIDIA DLSS; Streamline в комплекте нет.
+`Game/VideoPlayer.cpp` выделяет AVIO-буфер через av_malloc, освобождает через
+av_free/av_freep; контексты, пакеты и кадры — через соответствующие av*_free.
+AVIO callbacks копируют данные в предоставленный буфер и используют opaque
+указатель на объект хоста без передачи владения. `Game/VideoAudio.cpp` передаёт
+буфер std::vector в swr_convert только для записи, освобождает SwrContext через
+swr_free, AVChannelLayout через av_channel_layout_uninit. FILE* через DLL нет.
+`external/owned-renderer/Source/dlss_backend.cpp` получает параметры NGX через
+GetCapabilityParameters/AllocateParameters и возвращает DestroyParameters;
+feature handle освобождается ReleaseFeature, COM-ресурсы — Release. CRT память
+и STL не освобождаются чужим модулем. Правки игрового кода не потребовались.
+Это аудит исходников; игровой запуск, перенос на ноутбук и Wine не проверены.
