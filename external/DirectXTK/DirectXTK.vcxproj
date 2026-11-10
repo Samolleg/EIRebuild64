@@ -22,4 +22,5 @@
   <Exec Command="&quot;$([System.String]::Copy('$(WindowsSDK_ExecutablePath_x64)').Split(';').GetValue(0))\fxc.exe&quot; /nologo /WX /Ges /Zpc /Qstrip_reflect /Qstrip_debug /T%(PostShader.Profile) /E%(PostShader.Identity) /Fh&quot;$(IntDir)Shaders\PostProcess_%(PostShader.Identity).inc&quot; /VnPostProcess_%(PostShader.Identity) &quot;$(ProjectDir)Src\Shaders\PostProcess.fx&quot;" />
  </Target>
 
+<PropertyGroup><EITaskCacheHit>$(EICacheDirectXTK)</EITaskCacheHit></PropertyGroup><Import Project="../../tools/TaskCache.targets" />
 </Project>

@@ -353,9 +353,8 @@ int main(int argc, char** argv) {
             ++compiled;
         }
     };
-    // FXC holds up to ~250 MB for the largest programs; four workers stay well
-    // inside this 32-bit tool's address space and nativePS bounds the time anyway.
-    const unsigned threads = std::clamp(std::thread::hardware_concurrency(), 1u, 4u);
+    // This tool is built for x64; use the available logical processors.
+    const unsigned threads = std::max(std::thread::hardware_concurrency(), 1u);
     std::vector<std::thread> workers;
     for (unsigned t = 0; t < threads; ++t) workers.emplace_back(work);
     for (auto& worker : workers) worker.join();

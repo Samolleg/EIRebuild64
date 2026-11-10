@@ -73,24 +73,24 @@
     <ClCompile Include="Navigation\Geometry.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ObjectFileName>$(IntDir)Navigation_Geometry.obj</ObjectFileName></ClCompile>
     <ClCompile Include="Navigation\Build.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ObjectFileName>$(IntDir)Navigation_Build.obj</ObjectFileName></ClCompile>
     <ClCompile Include="Navigation\Query.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ObjectFileName>$(IntDir)Navigation_Query.obj</ObjectFileName></ClCompile>
-    <ClCompile Include="external\recastnavigation\Recast\Source\Recast.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\Recast\Source\RecastAlloc.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\Recast\Source\RecastArea.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\Recast\Source\RecastAssert.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\Recast\Source\RecastContour.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\Recast\Source\RecastFilter.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\Recast\Source\RecastLayers.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><PreprocessorDefinitions>RC_MAX_LAYERS_DEF=255;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
-    <ClCompile Include="external\recastnavigation\Recast\Source\RecastMesh.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\Recast\Source\RecastMeshDetail.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\Recast\Source\RecastRasterization.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\Recast\Source\RecastRegion.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\Detour\Source\DetourAlloc.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\Detour\Source\DetourAssert.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\Detour\Source\DetourCommon.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\Detour\Source\DetourNavMesh.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\Detour\Source\DetourNavMeshBuilder.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\Detour\Source\DetourNavMeshQuery.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
-    <ClCompile Include="external\recastnavigation\Detour\Source\DetourNode.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\Recast.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastAlloc.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastArea.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastAssert.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastContour.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastFilter.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastLayers.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader><PreprocessorDefinitions>RC_MAX_LAYERS_DEF=255;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastMesh.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastMeshDetail.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastRasterization.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Recast\Source\RecastRegion.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Detour\Source\DetourAlloc.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Detour\Source\DetourAssert.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Detour\Source\DetourCommon.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Detour\Source\DetourNavMesh.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Detour\Source\DetourNavMeshBuilder.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Detour\Source\DetourNavMeshQuery.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="external\recastnavigation\Detour\Source\DetourNode.cpp"><ProgramDataBaseFileName>$(IntDir)Recast.compiler.pdb</ProgramDataBaseFileName><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
   </ItemGroup>
   <Import Project="OwnedRenderer\DlssSdk.props" />
   <ItemGroup>
@@ -633,4 +633,4 @@
   <Import Project="OwnedRenderer\E1RendererFacadeWarpCheck.host.targets" Condition="'$(E1RendererFacadeWarpCheck)'=='true'" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
-</Project>
+<Import Project="tools/TaskCache.targets" /></Project>

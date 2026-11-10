@@ -1,9 +1,9 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <!-- All native projects, including tools without an explicit CRT setting. -->
   <ItemDefinitionGroup>
-    <ClCompile>
+    <ClCompile><ProgramDataBaseFileName>$(IntDir)$(MSBuildProjectName).compiler.pdb</ProgramDataBaseFileName><MultiProcessorCompilation>true</MultiProcessorCompilation><AdditionalOptions>/FS %(AdditionalOptions)</AdditionalOptions>
       <RuntimeLibrary Condition="'$(Configuration)' != 'Debug'">MultiThreaded</RuntimeLibrary>
       <RuntimeLibrary Condition="'$(Configuration)' == 'Debug'">MultiThreadedDebug</RuntimeLibrary>
-    </ClCompile>
+    </ClCompile><Link><ProgramDatabaseFile>$(OutDir)$(MSBuildProjectName).pdb</ProgramDatabaseFile></Link>
   </ItemDefinitionGroup>
 </Project>
