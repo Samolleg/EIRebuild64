@@ -1070,7 +1070,7 @@ void CUnitServer::L1ExecMove()
         if(replanned)L1NewPathSegment();else L1StopMovement(true);
         return;
     }
-    if(movement.replanned){L1NewPathSegment();return;}
+    if(movement.replanned){ShowFoundMovePath(path,true);L1NewPathSegment();return;}
     L0Freeze(false);bMoved=true;
     lock=bMoved?AI_LOCK_NO:AI_LOCK_DYNAMIC;
     // юнит вступил в дерьмо, а может он мог бы это избежать ??! - repath in this case
@@ -3635,6 +3635,7 @@ void CUnitServer::ShowFoundPath(CAIFullRoute &move, const CPlot3D &ptDest, int p
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitServer::ShowFoundMovePath(SAIPath &move, bool bFound)
 {
+    if(move.navigationPending)return;
     if (logic.IsFollowing())
         return;
     CAIFullRoute full;
