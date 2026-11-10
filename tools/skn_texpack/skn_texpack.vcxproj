@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+ <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration></ItemGroup>
+ <PropertyGroup Label="Globals"><ProjectGuid>{5F390DA3-B0F4-4ECA-98ED-7C6891032E98}</ProjectGuid><WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion></PropertyGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+ <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v143</PlatformToolset><CharacterSet>Unicode</CharacterSet></PropertyGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+ <PropertyGroup><OutDir>$(MSBuildThisFileDirectory)..\..\out\x64\Release\skn_texpack\</OutDir><IntDir>$(MSBuildThisFileDirectory)..\..\out\obj\x64\Release\skn_texpack\</IntDir><TexRoot>$(MSBuildThisFileDirectory)..\..\packages\directxtex_desktop_2019.2024.6.5.1\</TexRoot></PropertyGroup>
+ <ItemDefinitionGroup><ClCompile><LanguageStandard>stdcpp17</LanguageStandard><Optimization>MaxSpeed</Optimization><RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary><ExceptionHandling>Sync</ExceptionHandling><WarningLevel>Level4</WarningLevel><AdditionalIncludeDirectories>$(TexRoot)include</AdditionalIncludeDirectories><PreprocessorDefinitions>NOMINMAX;UNICODE;_UNICODE</PreprocessorDefinitions></ClCompile><Link><SubSystem>Console</SubSystem><AdditionalLibraryDirectories>$(TexRoot)native\lib\x64\Release</AdditionalLibraryDirectories><AdditionalDependencies>DirectXTex.lib;windowscodecs.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link></ItemDefinitionGroup>
+ <ItemGroup><ClCompile Include="main.cpp" /></ItemGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
