@@ -1331,7 +1331,34 @@ void IndexSources(Geometry& g,float width) {
         for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x){g.tileCeilings[{x,z}].push_back(std::uint32_t(i));g.objectTiles[c.object].emplace(x,z);}
     }
 }
+void IndexConnectivity(Mesh& mesh) {
+    auto& parents=mesh.components;parents.clear();
+    const dtNavMesh& data=*mesh.data;
+    for(int i=0;i<data.getMaxTiles();++i) {
+        const auto* tile=data.getTile(i);if(!tile||!tile->header)continue;
+        const auto base=data.getPolyRefBase(tile);
+        for(int j=0;j<tile->header->polyCount;++j)parents.emplace(base|dtPolyRef(j),base|dtPolyRef(j));
+    }
+    auto root=[&](dtPolyRef ref) {
+        auto at=ref;while(parents.at(at)!=at)at=parents.at(at);
+        while(ref!=at){const auto next=parents.at(ref);parents.at(ref)=at;ref=next;}return at;
+    };
+    for(int i=0;i<data.getMaxTiles();++i) {
+        const auto* tile=data.getTile(i);if(!tile||!tile->header)continue;
+        const auto base=data.getPolyRefBase(tile);
+        for(int j=0;j<tile->header->polyCount;++j)for(auto k=tile->polys[j].firstLink;k!=DT_NULL_LINK;k=tile->links[k].next) {
+            const auto other=tile->links[k].ref;if(!parents.count(other))continue;
+            const auto a=root(base|dtPolyRef(j)),b=root(other);if(a!=b)parents[a]=b;
+        }
+    }
+    for(auto& entry:parents)entry.second=root(entry.first);
+}
+bool Connected(const Mesh& mesh,dtPolyRef from,dtPolyRef to) {
+    const auto a=mesh.components.find(from),b=mesh.components.find(to);
+    return a==mesh.components.end()||b==mesh.components.end()||a->second==b->second;
+}
 void IndexSurfaces(Mesh& mesh) {
+    IndexConnectivity(mesh);
     if(!mesh.sources)return;
     Require(mesh.sources->tileWidth>0,"Nav64: invalid source tile width");
     // Source catalogue cells and profile tiles have independent physical widths.
@@ -1381,6 +1408,7 @@ void ReplaceTile(Mesh& mesh,Mesh& replacement,int x,int z) {
         if(std::get<0>(i->first)==x&&std::get<1>(i->first)==z)i=mesh.doorFlags.erase(i);else ++i;
     }
     ++mesh.generation;
+    IndexConnectivity(mesh);
 }
 void DoorState(Mesh& mesh,int object,bool open) {
     if(Flies(mesh.profile))return;

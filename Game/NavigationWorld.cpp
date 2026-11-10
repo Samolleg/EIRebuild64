@@ -52,7 +52,7 @@ void NavigationWorld::Scene(const char* mpr,const char* mob,CWorldServer& world)
     if(sourceJob.valid())try{sourceJob.get();}catch(const std::exception& e){GameJournal::Event("NAV","update_discarded","reason=%s",GameJournal::Quote(e.what()).c_str());}
     iceVariant=false;preparedTiles.clear();originalSources.reset();sourceTransforms.clear();liveTransforms.clear();appliedTransforms.clear();
     for(auto& mesh:meshes)mesh.reset();bodySizes.clear();bodyTable.samples.clear();
-    loaded=false;error.clear();failures=stepFailures=0;nextStepLog=0;++generation;queues.clear();airJournal.clear();groundGoals.clear();queryObstacles=nullptr;queryReuse=nullptr;
+    loaded=false;error.clear();failures=stepFailures=0;nextStepLog=0;++generation;queues.clear();airJournal.clear();groundGoals.clear();failedQueries.clear();attackGoals.clear();positionFailures.clear();queryObstacles=nullptr;queryReuse=nullptr;
     sourceRetries.clear();flyingUnits.clear();meshDirectory.clear();flightDeferred=false;sources.reset();absentStatic.clear();sourceDirty.clear();liveDoors.clear();
     liveObjects.clear();appliedObjects.clear();liveFlightObjects.clear();appliedFlightObjects.clear();bakedStatic.clear();dirtyObjects.clear();
     if(baker) {
@@ -672,7 +672,22 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
             }
         }
     }
+    const bool cacheFailure=unit&&sourceDirty.empty()&&!request.obstacles&&!request.reuseRoute;
+    const auto previousFailure=cacheFailure?failedQueries.find(unit->GetID()):failedQueries.end();
+    if(previousFailure!=failedQueries.end()) {
+        for(const auto& saved:previousFailure->second)
+        if(GetTickCount64()<saved.after&&saved.generation==mesh->generation&&saved.profile==Type(unit,aiClass)&&
+           saved.aiClass==aiClass&&saved.height==request.height&&saved.policy==goalPolicy&&Distance(saved.goal,goal)<=1.f&&Distance(saved.source,from)<=1.f) {
+            Navigation::Route refused;refused.status=saved.status;return refused;
+        }
+    }
     auto route=Navigation::Find(*mesh,request);
+    if(cacheFailure) {
+        auto& failures=failedQueries[unit->GetID()];const auto now=GetTickCount64();
+        failures.erase(std::remove_if(failures.begin(),failures.end(),[&](const FailedQuery& f){return f.after<=now||f.generation!=mesh->generation;}),failures.end());
+        if(route.status==Status::NoGoal||route.status==Status::NoPath||route.status==Status::Limit||route.status==Status::TooLong)
+            failures.push_back({from,goal,now+1500,mesh->generation,Type(unit,aiClass),aiClass,request.height,maxLength,goalRadius,goalPolicy,route.status});
+    }
     if(route.status==Status::Complete&&!boundary.Route(route,from)){
         route.status=Status::NoPath;route.points.clear();route.corridor.clear();return route;
     }
@@ -771,6 +786,23 @@ bool NavigationWorld::Support(CUnit* unit,Navigation::Point point,Navigation::Lo
     auto* mesh=ForUnit(unit);
     return mesh&&((dirtyObjects.empty()&&sourceDirty.empty())||!Pending(Type(unit,unit?unit->GetAIClass():3),point,point))&&Navigation::Project(*mesh,point,.001f,4.f,result,Height(unit),Navigation::ExcludeClass(unit?unit->GetAIClass():3));
 }
+bool NavigationWorld::Reachable(CUnit* unit,CUnit* target,float maxLength,float reach) {
+    auto* mesh=ForUnit(unit);if(!mesh)return false;
+    auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
+    const auto from=Position(unit,map),to=Position(target,map);
+    if(std::hypot(from.x-to.x,from.y-to.y)>maxLength+reach)return false;
+    Location a,b;const float height=Height(unit);const auto flags=ExcludeClass(unit->GetAIClass());
+    a=unit->navLocation;
+    dtQueryFilter filter;filter.setIncludeFlags(ClearanceMask(mesh->profile,height));filter.setExcludeFlags(flags);
+    const bool current=a.generation==mesh->generation&&a.radius==mesh->profile.radius&&a.height==height&&
+        Distance(a.position,from)<=.001f&&mesh->query->isValidPolyRef(a.polygon,&filter);
+    if(!current&&!StartLocation(*mesh,from,a,height,flags))return false;
+    // Target may stand just outside this body's eroded profile.
+    if(!NearestSupport(*mesh,to,(std::max)(.15f,reach),4.f,b,height,flags)) {
+        if(mesh->profile.movement==Navigation::Movement::Ground||!ClosestLocation(*mesh,to,b,height,flags))return false;
+    }
+    return Connected(*mesh,a.polygon,b.polygon);
+}
 bool NavigationWorld::AttackPosition(CUnit* unit,CUnit* target,Navigation::Point goal,float reach,float maxLength,Navigation::Location& result) {
     auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
     const auto center=Position(target,map);
@@ -781,7 +813,20 @@ bool NavigationWorld::AttackPosition(CUnit* unit,CUnit* target,Navigation::Point
         GameJournal::Event("NAV","attack_position_failed","unit=%d target=%d reason=empty_ring inner=%.3f outer=%.3f reach=%.3f",unit->GetID(),target->GetID(),inner,outer,reach);
         return false;
     }
-    if(FreePosition(unit,{goal.x,goal.y,center.z},inner,outer,maxLength,result,target->GetID()))return true;
+    auto cached=attackGoals.find(unit->GetID());
+    if(cached!=attackGoals.end()) {
+        const auto& saved=cached->second;const float distance=std::hypot(saved.endpoint.position.x-center.x,saved.endpoint.position.y-center.y);
+        if(saved.target==target->GetID()&&saved.reach==reach&&saved.generation==(ForUnit(unit)?ForUnit(unit)->generation:0)&&
+           Distance(saved.center,center)<=reach&&distance>=inner&&distance<=outer&&
+           !map.CheckCircleCollision(unit,CPlot3D(saved.endpoint.position.x,saved.endpoint.position.y,unit->GetCP().z),&saved.endpoint,false,nullptr,true)) {
+            YieldAlong(unit,saved.endpoint.position,saved.endpoint.position);
+            result=saved.endpoint;return true;
+        }
+    }
+    if(FreePosition(unit,{goal.x,goal.y,center.z},inner,outer,maxLength,result,target->GetID())) {
+        attackGoals[unit->GetID()]={target->GetID(),center,result,reach,result.generation};return true;
+    }
+    attackGoals.erase(unit->GetID());
     GameJournal::Event("NAV","attack_position_failed","unit=%d target=%d reason=no_free_position inner=%.3f outer=%.3f reach=%.3f",unit->GetID(),target->GetID(),inner,outer,reach);
     return false;
 }
@@ -789,6 +834,12 @@ bool NavigationWorld::FreePosition(CUnit* unit,Point center,float inner,float ou
     auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
     const auto from=Position(unit,map);
     auto* mesh=ForUnit(unit);if(!mesh||outer<inner)return false;
+    const auto failed=positionFailures.find(unit->GetID());
+    if(failed!=positionFailures.end()) {
+        for(const auto& saved:failed->second)
+        if(saved.generation==mesh->generation&&GetTickCount64()<saved.after&&saved.target==targetId&&
+           saved.inner==inner&&saved.outer==outer&&Distance(saved.center,center)<=1.f&&Distance(saved.source,from)<=1.f)return false;
+    }
     std::vector<Point> candidates;
     if(inner==0)candidates.push_back(center);
     const float facing=std::atan2(from.y-center.y,from.x-center.x);
@@ -822,6 +873,8 @@ bool NavigationWorld::FreePosition(CUnit* unit,Point center,float inner,float ou
     obstacles.erase(std::remove_if(obstacles.begin(),obstacles.end(),[&](const Obstacle& body){return body.id==targetId;}),obstacles.end());
     queryObstacles=&obstacles;queryReuse=nullptr;
     unsigned supportRejected=0,occupied=0,unreachable=0;
+    std::vector<Location> admitted;Location origin;
+    if(!StartLocation(*mesh,from,origin,Height(unit),ExcludeClass(unit->GetAIClass())))return false;
     for(const auto point:candidates) {
         Location candidate;
         if(Pending(Type(unit,unit->GetAIClass()),point,point)||
@@ -829,11 +882,19 @@ bool NavigationWorld::FreePosition(CUnit* unit,Point center,float inner,float ou
         const float radius=std::hypot(candidate.position.x-center.x,candidate.position.y-center.y);
         if(radius<inner||radius>outer){++supportRejected;continue;}
         if(map.CheckCircleCollision(unit,CPlot3D(candidate.position.x,candidate.position.y,unit->GetCP().z),&candidate,false,nullptr,true)){++occupied;continue;}
+        if(!Connected(*mesh,origin.polygon,candidate.polygon)){++unreachable;continue;}
+        admitted.push_back(candidate);
+    }
+    for(size_t i=0;i<admitted.size()&&i<3;++i) {
+        const auto& candidate=admitted[i];
         CAIRoute route;
         if(!map.NavRoute(unit,from,candidate.position,route,maxLength,0,unit->GetAIClass(),nullptr,GoalPolicy::Exact,nullptr,&candidate)){++unreachable;continue;}
         YieldAlong(unit,candidate.position,candidate.position);
         result=candidate;return true;
     }
+    auto& failures=positionFailures[unit->GetID()];const auto now=GetTickCount64();
+    failures.erase(std::remove_if(failures.begin(),failures.end(),[&](const PositionFailure& f){return f.after<=now||f.generation!=mesh->generation;}),failures.end());
+    failures.push_back({center,from,inner,outer,targetId,mesh->generation,now+1500});
     GameJournal::Event("NAV","free_position_failed","unit=%d reason=no_candidate center=(%.3f,%.3f,%.3f) inner=%.3f outer=%.3f candidates=%zu support_rejected=%u occupied=%u unreachable=%u",unit->GetID(),center.x,center.y,center.z,inner,outer,candidates.size(),supportRejected,occupied,unreachable);
     return false;
 }

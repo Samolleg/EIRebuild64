@@ -2466,7 +2466,7 @@ bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpM
     }
     if(!result->points.empty())res.navigationGoal=result->points.back();
     auto& last=res.toGo.route.GetTail();res.ptFinish=last.point;
-    if(goalPolicy==Navigation::GoalPolicy::ClosestReachable) {
+    if(goalPolicy==Navigation::GoalPolicy::ClosestReachable||result->goalStatus==Navigation::Status::NoGoal) {
         // Replans and crowd avoidance must retain the accepted endpoint.
         res.ptDestination.x=AITile2Meter(last.point.x);res.ptDestination.y=AITile2Meter(last.point.y);
         if(res.toGo.route.GetCount()<2){res.CreateStand(pUnit);return true;}
