@@ -730,7 +730,7 @@ std::vector<CPlot3D> NavigationWorld::PathMarkers(CUnit* unit,CAIFullRoute& rout
     }
     Location cursor;
     const auto flags=ExcludeClass(unit->GetAIClass());const float height=Height(unit);
-    if(!Flies(mesh->profile)&&!StartLocation(*mesh,path.front(),cursor,height,flags))return markers;
+    if(!Flies(mesh->profile))StartLocation(*mesh,path.front(),cursor,height,flags);
     CRouteWalker walker;walker.SetSpeeds(FP_SHOW_PATH_SPEED,1e10f);walker.CreateWalkerRoute(route);
     const int tick=owner->GetSegmentTimeCounter();
     for(int i=0;i<2500&&i<=limit;++i) {
@@ -739,10 +739,23 @@ std::vector<CPlot3D> NavigationWorld::PathMarkers(CUnit* unit,CAIFullRoute& rout
         Point desired{AITile2Meter(pos.x),AITile2Meter(pos.y),z};
         if(!Flies(mesh->profile)) {
             Location at;
-            if(!Follow(*mesh,cursor.position,desired,path,at,height,nullptr,&cursor,flags))break;
             const auto nav=ToNav(desired);const float point[]={nav.x,nav.y,nav.z};float surface=0;
-            if(dtStatusFailed(mesh->query->getPolyHeight(at.polygon,point,&surface)))break;
-            desired.z=surface;cursor=at;
+            if(!Follow(*mesh,cursor.position,desired,path,at,height,nullptr,&cursor,flags)||
+               dtStatusFailed(mesh->query->getPolyHeight(at.polygon,point,&surface))) {
+                // Markers are visual samples, not movement admission queries. Recover
+                // the detail surface directly when adjacent samples cannot be followed.
+                dtQueryFilter filter;dtPolyRef polygon=0;float nearest[3]{};bool over=false;
+                const float extent[]={.01f,mesh->sources->maximum.y-mesh->sources->minimum.y+4.f,.01f};
+                const auto status=mesh->query->findNearestPoly(point,extent,&filter,&polygon,nearest,&over);
+                if(dtStatusFailed(status)||!polygon||!over||
+                   dtStatusFailed(mesh->query->getPolyHeight(polygon,point,&surface))) {
+                    if(!moving)break;
+                    continue;
+                }
+                at={};at.polygon=polygon;at.generation=mesh->generation;
+                at.radius=mesh->profile.radius;at.height=height;
+            }
+            desired.z=surface;at.position=desired;cursor=at;
         }
         CPlot3D marker(desired.x,desired.y,desired.z);
         markers.push_back(marker);
