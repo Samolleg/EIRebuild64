@@ -1,5 +1,6 @@
 #include "owned_resource_store.h"
 #include <charconv>
+#include <filesystem>
 
 
 #include <algorithm>
@@ -249,7 +250,9 @@ public:
             const auto error = GetLastError();
             fail(failure, error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND
                     ? ResourceFailureCode::not_found : ResourceFailureCode::file_open,
-                 "resource container could not be opened for immutable reading");
+                 "resource container open failed path=\"" + std::filesystem::path(path_).u8string() +
+                 "\" win32=" + std::to_string(error));
+            bridge_append_probe_event("resource_open_failed", failure.message.c_str());
             return false;
         }
         LARGE_INTEGER size{};
@@ -711,6 +714,7 @@ bool ResourceStore::open(const ResourceStoreConfig& config,
         auto file = std::make_shared<FileOwner>(config.archives[index],
                                                 impl_->counters, true);
         if (!file->open(failure)) {
+            bridge_append_probe_event("resource_store_open_failed", failure.message.c_str());
             close();
             return false;
         }

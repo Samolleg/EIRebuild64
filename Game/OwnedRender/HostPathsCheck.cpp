@@ -7,12 +7,12 @@
 #include <iterator>
 
 struct PackagePlan {
-    std::string Directory() const { return "Mods/Selected"; }
+    std::string Directory() const { return "D:\\Profiles\\Mods\\Selected"; }
     bool ResourcePlan(const std::string& category, std::vector<std::string>& paths, bool& ignore) const {
         ignore = category == "figures.res";
-        if (category == "figures.res") paths = {"Mods/Selected/a.res", "Mods/Selected/a.res"};
-        if (category == "menus.res") paths = {"Mods/Selected/menu.res"};
-        if (category == "textures.res") paths = {"Mods/Selected/tex.res"};
+        if (category == "figures.res") paths = {"D:\\Profiles\\Mods\\Selected\\a.res", "D:\\Profiles\\Mods\\Selected\\a.res"};
+        if (category == "menus.res") paths = {"D:\\Profiles\\Mods\\Selected\\menu.res"};
+        if (category == "textures.res") paths = {"D:\\Profiles\\Mods\\Selected\\tex.res"};
         return true;
     }
 };
@@ -21,7 +21,7 @@ void CheckStartupPlan() {
     auto require = [](bool value) { if (!value) throw std::runtime_error("startup plan mismatch"); };
     const PackagePlan package;
     const auto selected = OwnedRender::CaptureStartupPaths(L"C:/App/Engine",
-        L"D:/Profiles/restarter-settings.xml", L"Base", L"Base/Res", &package);
+        L"D:\\Profiles\\Base", L"D:\\Profiles\\Base\\Res", &package);
     const std::vector<std::wstring> expected = {
         L"D:\\Profiles\\Mods\\Selected\\a.res", L"D:\\Profiles\\Mods\\Selected\\a.res",
         L"D:\\Profiles\\Mods\\Selected\\menu.res", L"D:\\Profiles\\Mods\\Selected\\tex.res",
@@ -31,17 +31,17 @@ void CheckStartupPlan() {
         L"D:\\Profiles\\Mods\\Selected\\Maps", L"D:\\Profiles\\Base\\Maps"});
     require(selected.world_map_layouts == L"D:\\Profiles\\Mods\\Selected\\world-map-layouts.json");
     const auto stock = OwnedRender::CaptureStartupPaths(L"C:/App/Engine",
-        L"D:/Profiles/restarter-settings.xml", L"E:/Stock", L"E:/Stock/Res", (const PackagePlan*)nullptr);
+        L"E:\\Stock", L"E:\\Stock\\Res", (const PackagePlan*)nullptr);
     require(stock.mounts.archives.size() == 3 && stock.mounts.loose_roots.size() == 1);
     require(stock.mounts.archives.front() == L"E:\\Stock\\Res\\figures.res");
     require(stock.world_map_layouts == L"E:\\Stock\\world-map-layouts.json");
     for (const auto* invalid : {L"C:relative", L"\\root-relative", L""}) {
         bool rejected = false;
-        try { OwnedRender::ResolveProfilePath(invalid, L"D:/Profiles"); }
+        try { RuntimePaths64::ResolveSetting(invalid); }
         catch (const std::invalid_argument&) { rejected = true; }
         require(rejected);
     }
-    std::puts("PASS: startup plan; selected mod; stock; menu assets; ignore-base; duplicate priority; profile-relative paths; ambiguous paths rejected");
+    std::puts("PASS: startup plan; selected mod; stock; menu assets; ignore-base; duplicate priority; absolute settings paths; ambiguous paths rejected");
 }
 
 int wmain(int argc, wchar_t** argv) {

@@ -2,6 +2,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "World.h"
+#include "RuntimePaths64.h"
 #include "SaveSchema.h"
 #include <set>
 
@@ -85,11 +86,9 @@ void CWorld::InitCurrentDir(const char *dataRoot)
         SetCurrentDir(dataRoot);
         return;
     }
-    // get current directory
-    char buffer[1024];
-    // get current directory
-    GetCurrentDirectory(1024, buffer);
-    SetCurrentDir(CString(buffer) + '\\');
+    // Legacy configuration paths use the same EXE base as loaded settings.
+    const auto engine = RuntimePaths64::Engine().string() + "\\";
+    SetCurrentDir(engine.c_str());
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // CWorldBase
