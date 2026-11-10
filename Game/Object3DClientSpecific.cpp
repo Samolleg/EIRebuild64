@@ -801,6 +801,7 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
         part.skeleton_node = static_cast<std::uint32_t>(node - skeleton->links.begin());
         part.surface = std::move(surface);
         part.texture_source_name = texture->GetName() ? texture->GetName() : "";
+        part.assembled_character_texture = object->GetTypeID() == MOTID_HUMAN;
         part.material = std::move(materialAsset);
         part.texture_type = static_cast<std::uint32_t>(texture->GetTypeID());
         part.material_type = static_cast<std::uint32_t>(material->GetTypeID());

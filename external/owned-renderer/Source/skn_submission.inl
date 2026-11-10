@@ -7,6 +7,8 @@ bool build_skn_groups(const RetainedVisualSample &sample,
   if (data.semantic_joints.size() != data.submeshes.size())
     throw std::runtime_error(
         "SKN gameplay reference required for unit visibility");
+  // SKN owns absent variants too: never expose an unmatched FIG draw.
+  prepared.merged_part_group.assign(sample.assembly->parts.size(), 0);
   std::vector<unsigned> nodes(data.joints.size(), UINT_MAX);
   for (unsigned j = 0; j < nodes.size(); ++j)
     for (unsigned k = 0; k < sample.assembly->skeleton->nodes.size(); ++k)
@@ -54,6 +56,10 @@ bool build_skn_groups(const RetainedVisualSample &sample,
       }
     if (part == UINT_MAX)
       continue;
+    const auto& selected = sample.assembly->parts[part];
+    if (!selected.source_available || selected.explicitly_hidden ||
+        (sample.values.unit && unit_service_node(selected.name.c_str())))
+      continue;
     std::map<unsigned, unsigned> unique;
     std::vector<unsigned> vertices;
     for(const auto& list:chunk)for(unsigned v:list) {
@@ -73,7 +79,8 @@ bool build_skn_groups(const RetainedVisualSample &sample,
     group.parts = {part};
     group.skn_asset = asset;
     group.skn_material = mesh.material;
-    group.skn_casts_shadow = data.materials[mesh.material].alpha!=2;
+    group.skn_casts_shadow = selected.assembled_character_texture
+        ? selected.casts_shadow : data.materials[mesh.material].alpha!=2;
     group.shape_count = 1;
     group.position_groups = group.normal_groups =
         static_cast<unsigned>((vertices.size() + 3) / 4);

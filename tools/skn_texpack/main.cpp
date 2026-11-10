@@ -271,8 +271,8 @@ int wmain(int argc, wchar_t **argv)
         }
         w = s.w;
         h = s.h;
-        auto valid = [](size_t n) { return (n & (n - 1)) == 0 || n % 4 == 0; };
-        require(valid(w) && valid(h), "BC dimensions must be power of two or multiple of four");
+        auto valid = [](size_t n) { return n >= 4 && n <= 16384 && n % 4 == 0; };
+        require(valid(w) && valid(h), "BC top-level width and height must be multiples of four in 4..16384");
         for (auto &p : s.p)
         {
             for (float v : p)

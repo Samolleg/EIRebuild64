@@ -39,6 +39,8 @@ inline Dds dds(ResourceBlob blob, unsigned map) {
   unsigned dxgi = r.u32(128), w = r.u32(16), h = r.u32(12), levels = r.u32(28);
   if (!w || !h || w > 16384 || h > 16384)
     throw std::runtime_error("SKN DDS dimensions");
+  if (w % 4 || h % 4)
+    throw std::runtime_error("SKN DDS BC top-level dimensions " + std::to_string(w) + "x" + std::to_string(h) + ": width and height must be multiples of four (minimum 4x4)");
   unsigned expected = map == 1 ? 83 : map == 2 ? 98 : 99;
   if (dxgi != expected)
     throw std::runtime_error("SKN DDS color space/BC format");

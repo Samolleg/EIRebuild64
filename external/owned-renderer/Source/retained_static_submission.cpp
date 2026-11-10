@@ -3305,7 +3305,9 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
         view.indices=geometry.indices.data();view.index_count=static_cast<UINT>(geometry.indices.size());
         view.bounds_valid=true;view.bounds_flags=2;view.semantic_kind=SemanticKind::figure;
         retained_visual_part_fixed_state(sample,view.owned_fixed_state);
-        if(!group.skn_asset){
+        const bool assembled_texture = group.skn_asset && part.surface &&
+            part.assembled_character_texture;
+        if(!group.skn_asset || assembled_texture){
          view.owned_texture.identity=part.surface->id;view.owned_texture.generation=part.surface->generation;
          view.owned_texture.surface=part.surface.get();
         }else{
@@ -3346,6 +3348,7 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
          view.owned_fixed_state.alpha_ref=static_cast<UINT>(material.cutoff*255);
          view.owned_fixed_state.alpha_blend_enable=material.alpha==2;
         }
+        if (assembled_texture) view.owned_texture.material_name=&part.texture_source_name;
         if (!group.skn_asset && !part.material_name.empty()) view.owned_texture.material_name=&part.material_name;
         if (++group.record_revision==0) ++group.record_revision;
         view.world.record_revision=group.record_revision;view.world.owner=&prepared.gpu_pose.owner;
@@ -3365,7 +3368,7 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
     NativePreparedPartValues values;
     if (!retained_visual_part_values(sample,part,time,fog,values)) return false;
     values.flags|=0x40u;
-    if(group.skn_asset){
+    if(group.skn_asset && !part.assembled_character_texture){
      const auto& m=group.skn_asset->asset.materials[group.skn_material];
      if(m.alpha!=0)values.alpha*=m.base[3];
 

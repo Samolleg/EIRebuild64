@@ -70,6 +70,7 @@ struct VisualPartAsset {
     std::uint32_t skeleton_node = UINT_MAX;
     std::shared_ptr<const TextureCpuAsset> texture;
     std::string texture_source_name;
+    bool assembled_character_texture = false;
     // The game texture's own name (CTexture name) for surface and value
     // parts alike: the key of its material composition (material classes).
     std::string material_name;
