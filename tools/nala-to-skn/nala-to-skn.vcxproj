@@ -1,0 +1,11 @@
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+ <ItemGroup Label="ProjectConfigurations"><ProjectConfiguration Include="Release|x64"><Configuration>Release</Configuration><Platform>x64</Platform></ProjectConfiguration></ItemGroup>
+ <PropertyGroup Label="Globals"><ProjectGuid>{C76E4B8D-C0B6-461D-98C3-341290ED3E14}</ProjectGuid><WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion></PropertyGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+ <PropertyGroup Label="Configuration"><ConfigurationType>Application</ConfigurationType><PlatformToolset>v143</PlatformToolset></PropertyGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+ <PropertyGroup><OutDir>$(MSBuildThisFileDirectory)..\..\out\x64\Release\tools\</OutDir><IntDir>$(MSBuildThisFileDirectory)..\..\out\obj\x64\Release\nala-to-skn\</IntDir><TargetName>nala-to-skn</TargetName></PropertyGroup>
+ <ItemDefinitionGroup><ClCompile><LanguageStandard>stdcpp17</LanguageStandard><RuntimeLibrary>MultiThreaded</RuntimeLibrary><PrecompiledHeader>NotUsing</PrecompiledHeader><Optimization>MaxSpeed</Optimization><ExceptionHandling>Sync</ExceptionHandling><WarningLevel>Level4</WarningLevel><AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions><PreprocessorDefinitions>NOMINMAX;WIN32_LEAN_AND_MEAN;_CRT_SECURE_NO_WARNINGS</PreprocessorDefinitions><AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\..\external\owned-renderer\Source</AdditionalIncludeDirectories></ClCompile><Link><SubSystem>Console</SubSystem><StackReserveSize>16777216</StackReserveSize><OptimizeReferences>true</OptimizeReferences></Link></ItemDefinitionGroup>
+ <ItemGroup><ClCompile Include="main.cpp" /></ItemGroup>
+ <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

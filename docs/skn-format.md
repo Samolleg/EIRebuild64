@@ -175,6 +175,56 @@ weighted source edits must retain their actual deformation; cooking must
 report any edit not expressible by four influences instead of silently
 truncating weights. No runtime lid topology generation is allowed.
 
+### Section 13: internal Nala pose rig, version 1
+
+The standalone codec is `Source/nala_pose_asset.h`; the offline extraction
+command is documented in `tools/nala-to-skn/README.md`. This codec is **not yet
+wired into the SKN container decoder or retained submission**. Section 13 in a
+model therefore still rejects at runtime. A standalone `.section13` is an
+intermediate payload, not an installable SKN model.
+
+Use the common 16-byte table envelope above with exactly nine tables. The
+outer section uses version=1, stride=1, count=payload byte size. All scalar
+parameters below use little-endian binary64, preserving the accepted kernel's
+parameters. No C++ structure layout or source pointers are written. Matrices
+are row-major affine 3x4 (three rows of four binary64 values, translation in
+column 3); quaternions here follow the kernel's w,x,y,z order. These deliberately
+differ from section 2's binary32 column-major TRS. Nonfinite/singular matrices,
+invalid references, cyclic hierarchy and invalid controller ranges reject.
+
+| Kind | Ordered fields | Stride |
+|---|---|---:|
+| 1 nodes | i32 parent, driver; f64 rest[12], local[12], stretch[12], restQ[4] | 328 |
+| 2 skin slots | u32 bindNode; f64 bindInverse[12] | 100 |
+| 3 game bind, exactly 15 | f64 gameBind[12] | 96 |
+| 4 hierarchy order | u32 node | 4 |
+| 5 dual controllers | u32 side, a, b, i1, i2 | 20 |
+| 6 damped controllers | u32 side, own, target | 12 |
+| 7 semi controllers | u32 side, own, target; f64 weight | 20 |
+| 8 limits | u32 own, parent; f64 frame[12], low, high, y, z | 136 |
+| 9 forward, exactly one | f64 x, y, z | 24 |
+
+Node IDs preserve the original rig indices. Parents need not have smaller
+indices; table 4 is a complete permutation with parents preceding children.
+Reconstruct children from parent IDs. Parent/driver -1 means absent. Each of
+the 15 drivers occurs exactly once. Driver indices are, in order,
+`hp,bd,hd,lh1,rh1,lh2,rh2,lh3,rh3,ll1,rl1,ll2,rl2,ll3,rl3`.
+Vertex influences address table-2 slots, **not** table-1 nodes. Multiple slots
+can point to one node while retaining different inverse matrices; merging
+these slots changes the eyes/teeth/tongue bind frames. Skin-slot count is
+independent of node count. No reduction to 15 LNK weights is performed.
+
+Execute `Retarget`, then `LimitRetarget`, then `Control`. Limits retain table
+order. Control runs side 0 then side 1, each with dual, damped, semi in that
+order, preserving each table's per-side order. Dual nlerp factor remains the
+accepted `0.3330000042915344`. `Replace` propagates the delta through descendants.
+Skin palette slot i is `world[bindNode[i]] * bindInverse[i]`, in rig-local
+coordinates; root/world placement remains a separate caller responsibility.
+Shape-dependent rest/local/stretch/restQ/inverse-bind/limit-frame changes must
+be applied before this bone-only evaluator. It neither evaluates the shape
+program nor applies appearance scale, hands, hips, sole placement or attachment
+corrections. Those are not implicitly replaced by this section.
+
 ### Section 11: outfit, material variants, layers and hiding
 
 | Kind | Ordered fields | Stride |
