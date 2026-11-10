@@ -28,9 +28,11 @@ The older command remains available:
 out/x64/Release/tools/nala-to-skn --export-pose-section ../tmp/unhufe.section13
 ```
 
-Neither output is ready for installation. Section 8 is absent; shape changes,
-per-frame bone palette integration and GPU skin/contact submission are pending.
-The existing Nala CPU route has not been removed and still precedes file lookup.
+Neither output is approved for installation. Section 8 and shape changes are
+pending. The game now selects the SKN file and evaluates its section-13 bones;
+the native shader skins sources and blends section-9 contacts. The former
+CPU geometry output is removed. Full engine build and game acceptance remain
+with the coordinator. Model/authoring headers reside in this offline project.
 Hair, clothes, underwear, layers, wounds and pose corrections are not cooked.
-The container decoder accepts the bind contact subset; runtime SKN selection
-explicitly rejects it until submission is implemented. See docs/skn-format.md.
+The container decoder and runtime accept the bind contact subset.
+See docs/skn-format.md for its GPU record and palette contract.

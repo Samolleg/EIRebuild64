@@ -355,8 +355,29 @@ the actual container, round-trips section 13 and compares serialized contact
 bind positions/normals to the source Render result (position tolerance 1e-4 m,
 normal cosine >= .99999). These cooking checks do not validate posed GPU output.
 
-RuntimeAsset selection refuses Nala bind snapshots until shape data and GPU
-contact submission are implemented. The pre-existing selected-Nala CPU route
-still runs before SKN selection; replacing it, passing the five raw CUnit inputs,
-per-unit shape caching and bone palettes, GPU contact and hair are outstanding.
-No claim of a visible file-backed Nala or completed step 1 is made.
+RuntimeAsset selection accepts this default bind snapshot. It supplies the
+single skin material from nala/201.dds, independently of the FIG assembled atlas.
+The old per-frame CPU vertex/garment output is removed from the game project;
+model/authoring tables now reside under tools/nala-to-skn/nala.
+
+Each pose samples the game LNK/ANM/ADB bones and evaluates section-13
+Retarget, LimitRetarget and Control. The accepted default body scale and sole
+alignment are applied on bones only. Its 1,880 affine skin matrices follow the
+ordinary game nodes in the native pose allocation. The backend uploads these
+matrices for both D3D11 and D3D12; the existing GPU pose evaluator still writes
+only the game nodes. Pose allocation generations and references protect queued
+passes against palette replacement.
+
+Contact records retain all three source bind positions/normals and all four
+skin slots per source. The world-vertex shader skins each source independently,
+normalizes its skinned normal, blends the section-9 weights, then normalizes the
+result. This is the pointwise skin/contact composition of Render(), with no
+CPU vertex work and no four-influence approximation of contact edits. Ordinary
+SKN records retain their 240-byte layout; contact records use 1,024 bytes and a
+separate component flag. The source snapshot draws as one material group.
+
+Section 8 and runtime shape changes are still absent: the existing captured
+CUnit controls do not change this default bind mesh. Hair, garments, layers,
+wounds and special pose corrections are not implemented by this snapshot.
+Renderer compilation and posed GPU/in-game output remain unverified; full
+engine build and in-game acceptance belong to the coordinator.

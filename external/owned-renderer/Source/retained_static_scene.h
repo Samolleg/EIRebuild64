@@ -273,8 +273,6 @@ struct VisualPreparedResources {
     };
 #endif
     struct Part {
-        std::shared_ptr<const FigureCpuAsset> nala_geometry;
-        std::uint64_t nala_serial=0;
         NativePreparedMeshHandle mesh{};
         NativePreparedMaterialHandle material{};
         NativePreparedMaterialHandle wound_material{};
@@ -326,10 +324,6 @@ struct VisualPreparedResources {
     PoseKey skn_bounds_key{};
     NativeWorldBounds skn_bounds{};
     bool skn_bounds_valid = false;
-    std::shared_ptr<const nala::Frame> nala_frame;
-    nala::Input nala_input;
-    PoseKey nala_key{};
-    std::uint64_t nala_group_serial=0;
     struct MergedGroup {
         std::shared_ptr<const skn::RuntimeAsset> skn_asset;
         std::uint32_t skn_material = 0;

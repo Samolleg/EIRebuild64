@@ -1040,7 +1040,7 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
      !reserve(color_bytes,mesh.diffuse_storage_offset)||
      !reserve(color_bytes,mesh.specular_storage_offset)||
      (has_terrain&&!reserve(terrain_bytes,mesh.terrain_vertex_offset))||
-     (source.skin_vertices&&!reserve(std::uint64_t(source.component_count)*240,skin_at))||
+     (source.skin_vertices&&!reserve(std::uint64_t(source.component_count)*(source.skin_contacts?1024:240),skin_at))||
      (lods&&!reserve(64,lod_table_at))||!reserve(index_bytes,mesh.index_offset))
   return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
  for(UINT level=0;lods&&level<lods->levels;++level)
@@ -1059,10 +1059,10 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
   try{blob.assign(cursor,0);}catch(const std::bad_alloc&){return abandon(E_OUTOFMEMORY);}
   const auto put=[&](UINT offset,const void* data,std::uint64_t bytes){if(data&&bytes)std::memcpy(blob.data()+offset,data,static_cast<std::size_t>(bytes));};
   if(source.skin_vertices){
-   put(skin_at,source.skin_vertices,std::uint64_t(source.component_count)*240);
+   put(skin_at,source.skin_vertices,std::uint64_t(source.component_count)*(source.skin_contacts?1024:240));
    for(UINT i=0;i<components.size();++i){
-    components[i].normal|=0x80000000u;
-    components[i].padding=mesh.allocation.offset+skin_at+i*240;
+    components[i].normal|=source.skin_contacts?0xc0000000u:0x80000000u;
+    components[i].padding=mesh.allocation.offset+skin_at+i*(source.skin_contacts?1024:240);
    }
   }
   put(mesh.position_offset,source.positions,position_bytes);
@@ -1671,7 +1671,7 @@ HRESULT Renderer::resolve_native_pose(NativeWorldGeometry::Pose* pose,const Nati
    for(UINT i=0;i<native_pose_slots_.size();++i)if(!native_pose_slots_[i].active){index=i;break;}
    if(index==UINT_MAX){index=static_cast<UINT>(native_pose_slots_.size());native_pose_slots_.emplace_back();}
    auto& slot=native_pose_slots_[index];slot.active=true;slot.identity=identity;slot.owner=source.owner;
-   slot.binding.reset();slot.valid=false;slot.revision=slot.scheduled=0;slot.count=0;
+   slot.skin_palette.clear();slot.binding.reset();slot.valid=false;slot.revision=slot.scheduled=0;slot.count=0;
    source.slot=index;source.generation=slot.generation;
   }
   auto& slot=native_pose_slots_[index];
@@ -1682,8 +1682,10 @@ HRESULT Renderer::resolve_native_pose(NativeWorldGeometry::Pose* pose,const Nati
   else {HRESULT hr=get_native_skeleton_asset(source.binding,value.asset,animation_allocation);if(FAILED(hr))return hr;}
   value.output=slot.value.output;
   value.generation=slot.value.generation;
-  const UINT count=static_cast<UINT>(source.binding->tracks.size());
-  const bool changed=slot.count!=count||std::memcmp(&slot.value,&value,sizeof(value))!=0||slot.binding!=source.binding;
+  const UINT base_count=static_cast<UINT>(source.binding->tracks.size());
+  if(source.skin_palette.size()>65535)return E_INVALIDARG;
+  const UINT count=base_count+static_cast<UINT>(source.skin_palette.size());
+  const bool changed=slot.skin_palette!=source.skin_palette||slot.count!=count||std::memcmp(&slot.value,&value,sizeof(value))!=0||slot.binding!=source.binding;
   if(changed){
    if(slot.allocation>=native_pose_ranges_.size()||slot.count!=count||native_pose_ranges_[slot.allocation].references){
     UINT allocation=UINT_MAX;
@@ -1701,6 +1703,26 @@ HRESULT Renderer::resolve_native_pose(NativeWorldGeometry::Pose* pose,const Nati
    if(++slot.revision==0)++slot.revision;
    value.generation={static_cast<UINT>(slot.revision),static_cast<UINT>(slot.revision>>32)};
    slot.value=value;slot.count=count;slot.binding=source.binding;slot.valid=false;
+   slot.skin_palette=source.skin_palette;
+   if(!source.skin_palette.empty()){
+    std::vector<NativePoseNodeGpu> extra(source.skin_palette.size());
+    for(unsigned i=0;i<extra.size();++i){
+     const auto& m=source.skin_palette[i];auto& result=extra[i];
+     result.rotation={1,0,0,0};result.generation=value.generation;
+     for(unsigned row=0;row<3;++row)for(unsigned col=0;col<4;++col){
+      float v=0;for(unsigned k=0;k<4;++k)v+=source.root_to_world[row*4+k]*m[k*4+col];
+      if(!std::isfinite(v))return E_INVALIDARG;
+      result.rows[row][col]=v;
+     }
+     result.translation={result.rows[0][3],result.rows[1][3],result.rows[2][3],0};
+    }
+    const UINT start=(value.output+base_count)*sizeof(NativePoseNodeGpu);
+    const UINT size=static_cast<UINT>(extra.size()*sizeof(NativePoseNodeGpu));
+    if(d3d12_){const HRESULT hr=d3d12_->write_buffer(*native12_.pose_nodes,start,extra.data(),size);if(FAILED(hr))return hr;}
+    else {D3D11_BOX box{};box.left=start;box.right=start+size;box.bottom=box.back=1;
+     context_->UpdateSubresource(native_pose_nodes_.Get(),0,&box,extra.data(),0,0);}
+    profiler_.add_upload(size);
+   }
   }
   if(!slot.valid&&slot.scheduled!=slot.revision){
    native_pose_work_.push_back({slot.value,index,slot.count,slot.allocation,slot.revision,
