@@ -681,7 +681,27 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
             Navigation::Route refused;refused.status=saved.status;return refused;
         }
     }
+    const auto frame=CorePerf::Get().frameNumber;
+    if(pathFrame!=frame){pathFrame=frame;pathBudgetMs=2.;}
+    const bool sliced=unit&&(!request.obstacles||request.obstacles->empty())&&!request.reuseRoute;
+    if(sliced) {
+        auto& job=pathSearches[unit->GetID()];const auto& old=job.request;
+        if(job.mesh!=mesh||job.revision!=observerRevision||job.generation!=mesh->generation||
+           Distance(old.source,from)>.001f||Distance(old.goal,goal)>.001f||
+           old.height!=request.height||old.excludedFlags!=request.excludedFlags||
+           old.goalPolicy!=request.goalPolicy||old.maxLength!=maxLength||old.goalRadius!=goalRadius||
+           !std::equal(old.areaCosts,old.areaCosts+16,request.areaCosts)||
+           bool(old.goalSupport)!=bool(goalSupport)||(goalSupport&&job.goalSupport.surface!=goalSupport->surface)) {
+            job=PathSearch{};job.mesh=mesh;job.revision=observerRevision;job.generation=mesh->generation;job.request=request;
+            if(request.start){job.start=*request.start;job.request.start=&job.start;}
+            if(goalSupport){job.goalSupport=*goalSupport;job.request.goalSupport=&job.goalSupport;}
+        }
+        request.start=job.request.start;request.goalSupport=job.request.goalSupport;
+        request.sliced=&job.search;request.frameBudgetMs=&pathBudgetMs;
+    }
     auto route=Navigation::Find(*mesh,request);
+    if(sliced&&route.status!=Status::Updating)pathSearches.erase(unit->GetID());
+    if(route.status==Status::Updating)return route;
     if(cacheFailure) {
         auto& failures=failedQueries[unit->GetID()];const auto now=GetTickCount64();
         failures.erase(std::remove_if(failures.begin(),failures.end(),[&](const FailedQuery& f){return f.after<=now||f.generation!=mesh->generation;}),failures.end());

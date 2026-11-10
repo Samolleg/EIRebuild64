@@ -41,6 +41,16 @@ class NavigationWorld {
         Navigation::Status status=Navigation::Status::Invalid,reason=Navigation::Status::Complete;
     };
     std::map<int,GroundGoal> groundGoals;
+    struct PathSearch {
+        Navigation::SlicedSearch search;
+        Navigation::Request request;
+        Navigation::Location start,goalSupport;
+        const Navigation::Mesh* mesh=nullptr;
+        std::uint64_t revision=0,generation=0;
+    };
+    std::map<int,PathSearch> pathSearches;
+    double pathBudgetMs=2.;
+    std::uint64_t pathFrame=~std::uint64_t(0);
     struct FailedQuery {Navigation::Point source,goal;std::uint64_t after=0,generation=0;int profile=0,aiClass=0;float height=0,maxLength=0,radius=0;Navigation::GoalPolicy policy=Navigation::GoalPolicy::Exact;Navigation::Status status=Navigation::Status::NoPath;};
     std::map<int,std::vector<FailedQuery>> failedQueries;
     struct AttackGoal {int target=0;Navigation::Point center;Navigation::Location endpoint;float reach=0;std::uint64_t generation=0;};
@@ -120,7 +130,7 @@ public:
     void Advance();
     std::uint64_t Generation() const { return generation; }
     void Stop(int id) { queues.erase(id); }
-    void ForgetUnit(int id) { Stop(id);flyingUnits.erase(id);airJournal.erase(id);groundGoals.erase(id);failedQueries.erase(id);attackGoals.erase(id);positionFailures.erase(id); }
+    void ForgetUnit(int id) { pathSearches.erase(id);Stop(id);flyingUnits.erase(id);airJournal.erase(id);groundGoals.erase(id);failedQueries.erase(id);attackGoals.erase(id);positionFailures.erase(id); }
     bool Goal(CUnit* unit,Navigation::Point reference,Navigation::Location& result);
     float Radius(CUnit* unit) { return (std::max)(.05f,Body(unit).radius); }
     bool RandomGoal(CUnit* unit,Navigation::Point center,float radius,Navigation::Point& goal,Navigation::RandomShape shape=Navigation::RandomShape::Circle);

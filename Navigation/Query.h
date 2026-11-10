@@ -1,6 +1,12 @@
 #pragma once
 #include "Build.h"
 namespace Navigation {
+struct SlicedSearch {
+    std::unique_ptr<dtNavMeshQuery,QueryDeleter> query;
+    dtQueryFilter filter;
+    dtStatus status=0;
+    bool initialized=false;
+};
 // A zero class mask uses the profile's representative material class.
 bool Project(const Mesh& mesh,Point point,float horizontal,float vertical,Location& result,float height=0,unsigned short excludedFlags=0);
 // Nearest Detour polygon for sampled approach endpoints, retaining source support.

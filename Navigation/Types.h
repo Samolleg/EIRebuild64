@@ -74,7 +74,10 @@ constexpr unsigned short ExcludeClass(unsigned aiClass) {
     return aiClass<8?static_cast<unsigned short>(1u<<(aiClass+4)):0x0ff0;
 }
 struct Route;
+struct SlicedSearch;
 struct Request {
+    SlicedSearch* sliced = nullptr;
+    double* frameBudgetMs = nullptr;
     Point source, goal;
     GoalPolicy goalPolicy = GoalPolicy::Exact;
     const Location* start = nullptr; // transient source polygon; never serialized

@@ -249,40 +249,67 @@ bool ClosestLocation(const Mesh& m,Point point,Location& result,float height,uns
     return ClosestGoal(m,*m.query,point,filter,height,result)==Status::Complete;
 }
 Route Find(const Mesh& m,const Request& r) {
-    const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(4);
+    const auto began=std::chrono::steady_clock::now();
+    const auto deadline=began+std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double,std::milli>(r.frameBudgetMs?*r.frameBudgetMs:4.));
+    struct ChargeBudget {
+        double* budget;std::chrono::steady_clock::time_point began;
+        ~ChargeBudget(){if(budget)*budget=std::max(0.,*budget-std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-began).count());}
+    } charge{r.frameBudgetMs,began};
     Route result;if(!m.data||!m.tiles){result.status=Status::NoMesh;return result;}
     if(!Finite(r.source)||!Finite(r.goal)||!std::isfinite(r.maxLength)||r.maxLength<0||!std::isfinite(r.goalRadius)||r.goalRadius<0)return result;
-    auto* query=Query(m);if(!query){result.status=Status::Limit;return result;}auto& q=*query;
+    if(r.frameBudgetMs&&*r.frameBudgetMs<=0){result.status=Status::Updating;return result;}
+    auto* q=Query(m);if(!q){result.status=Status::Limit;return result;}
     const float height=r.height>0?r.height:m.profile.height;const auto mask=ClearanceMask(m.profile,height);if(!mask)return result;
     dtQueryFilter filter;filter.setIncludeFlags(mask);filter.setExcludeFlags(ClassFlags(m,r.excludedFlags));for(int i=1;i<16;++i){if(!(r.areaCosts[i]>0&&std::isfinite(r.areaCosts[i])))return result;filter.setAreaCost(i,r.areaCosts[i]);}
     if(r.obstacles&&!r.obstacles->empty())return FindAround(m,r);
     dtPolyRef from=0,to=0;Point source,goal,actual;bool ingress=false;
-    if(!Start(m,q,r.source,filter,from,source,actual,ingress,height,r.start)){result.status=Status::NoStart;return result;}
-    if(!Nearest(m,q,r.goal,std::max(.15f,r.goalRadius),4.f,filter,to,goal,r.goalSupport?r.goalSupport->surface:0,height)) {
+    if(!Start(m,*q,r.source,filter,from,source,actual,ingress,height,r.start)){result.status=Status::NoStart;return result;}
+    if(!Nearest(m,*q,r.goal,std::max(.15f,r.goalRadius),4.f,filter,to,goal,r.goalSupport?r.goalSupport->surface:0,height)) {
         if(r.goalPolicy==GoalPolicy::Exact&&m.profile.movement==Movement::Ground){result.status=Status::NoGoal;return result;}
-        Location closest;const auto selected=ClosestGoal(m,q,r.goal,filter,height,closest);
+        Location closest;const auto selected=ClosestGoal(m,*q,r.goal,filter,height,closest);
         if(selected!=Status::Complete){result.status=selected;return result;}
         to=closest.polygon;goal=ToNav(closest.position);result.goalStatus=Status::NoGoal;
     }
     const bool disconnected=!Connected(m,from,to);
+    if(disconnected&&r.goalPolicy==GoalPolicy::ClosestReachable) {
+        ClosestGoalQuery closest(m,*q,r.goal,height);
+        for(const auto& entry:m.components)if(Connected(m,from,entry.first)&&q->isValidPolyRef(entry.first,&filter))closest.Consider(entry.first);
+        if(!closest.best.polygon){result.status=Status::NoPath;return result;}
+        to=closest.best.polygon;goal=ToNav(closest.best.position);result.goalStatus=Status::NoPath;
+    }
     if(disconnected&&r.goalPolicy==GoalPolicy::Exact){result.status=Status::NoPath;return result;}
     float start[3]={source.x,source.y,source.z},end[3]={goal.x,goal.y,goal.z};
-    // Fixed work bound within Detour, no retry with a different pathfinder.
-    auto status=q.initSlicedFindPath(from,to,start,end,&filter);
-    int iterations=0;
-    constexpr int nodeBudget=512;
-    while(dtStatusInProgress(status)&&iterations<nodeBudget&&std::chrono::steady_clock::now()<deadline){int done=0;status=q.updateSlicedFindPath(std::min(64,nodeBudget-iterations),&done);iterations+=done;if(!done)break;}
+    if(r.sliced&&!r.sliced->query) {
+        r.sliced->query.reset(dtAllocNavMeshQuery());
+        if(!r.sliced->query||dtStatusFailed(r.sliced->query->init(m.data.get(),65535))){result.status=Status::Limit;return result;}
+    }
+    if(r.sliced)q=r.sliced->query.get();
+    dtStatus status=DT_IN_PROGRESS;
+    if(r.sliced) {
+        auto& search=*r.sliced;
+        if(!search.initialized){search.filter=filter;search.status=q->initSlicedFindPath(from,to,start,end,&search.filter);search.initialized=true;}
+        status=search.status;
+        while(dtStatusInProgress(status)&&std::chrono::steady_clock::now()<deadline) {
+            int done=0;status=q->updateSlicedFindPath(16,&done);if(!done)break;
+        }
+        search.status=status;
+        if(dtStatusInProgress(status)||std::chrono::steady_clock::now()>=deadline){result.status=Status::Updating;return result;}
+    } else {
+        status=q->initSlicedFindPath(from,to,start,end,&filter);
+        while(dtStatusInProgress(status)&&std::chrono::steady_clock::now()<deadline){int done=0;status=q->updateSlicedFindPath(64,&done);if(!done)break;}
+    }
     const bool limited=dtStatusInProgress(status)||Limited(status);
+    if(limited){result.status=Status::Limit;return result;}
     if(dtStatusFailed(status)){result.status=Status::NoPath;return result;}
-    const bool reached=from==to||q.isInClosedList(to);
+    const bool reached=from==to||q->isInClosedList(to);
     bool selectedPartial=false;
-    if(limited&&r.goalPolicy==GoalPolicy::Exact){result.status=Status::Limit;return result;}
     if(!reached&&r.goalPolicy==GoalPolicy::ClosestReachable) {
-        // Choose among explored polygons (the whole reachable component when
-        // exhausted, a prefix when bounded). Use the boundary, not the heuristic's
+        // Search is exhausted: choose the closest reachable boundary,
+        // never an unfinished search prefix. Do not use the heuristic's
         // closest portal midpoint and not the closest point to the unit.
-        ClosestGoalQuery closest(m,q,r.goal,height);
-        const auto* pool=q.getNodePool();
+        ClosestGoalQuery closest(m,*q,r.goal,height);
+        const auto* pool=q->getNodePool();
         for(int i=1;i<=pool->getNodeCount();++i) {
             const auto* node=pool->getNodeAtIdx(unsigned(i));
             if(node->flags&DT_NODE_CLOSED)closest.Consider(node->id);
@@ -295,8 +322,8 @@ Route Find(const Mesh& m,const Request& r) {
         selectedPartial=true;
     }
     auto& corridor=m.scratch.corridor;corridor.resize(8192);int count=0;
-    status=selectedPartial?q.finalizeSlicedFindPathPartial(&to,1,corridor.data(),&count,int(corridor.size())):
-                           q.finalizeSlicedFindPath(corridor.data(),&count,int(corridor.size()));
+    status=selectedPartial?q->finalizeSlicedFindPathPartial(&to,1,corridor.data(),&count,int(corridor.size())):
+                           q->finalizeSlicedFindPath(corridor.data(),&count,int(corridor.size()));
     if(Limited(status)){result.status=Status::Limit;return result;}
     if(dtStatusFailed(status)||(!selectedPartial&&dtStatusDetail(status,DT_PARTIAL_RESULT))||!count||corridor[count-1]!=to){result.status=Status::NoPath;return result;}
     corridor.resize(count);
@@ -304,7 +331,7 @@ Route Find(const Mesh& m,const Request& r) {
         auto& points=m.scratch.points;points.resize(8192*3);
         auto& refs=m.scratch.refs;refs.resize(8192);
         auto& flags=m.scratch.flags;flags.resize(8192);int n=0;
-        const auto state=q.findStraightPath(start,end,path.data(),int(path.size()),points.data(),flags.data(),refs.data(),&n,8192,DT_STRAIGHTPATH_ALL_CROSSINGS);
+        const auto state=q->findStraightPath(start,end,path.data(),int(path.size()),points.data(),flags.data(),refs.data(),&n,8192,DT_STRAIGHTPATH_ALL_CROSSINGS);
         if(Limited(state))return Status::Limit;
         if(dtStatusFailed(state)||n<1||!(flags[n-1]&DT_STRAIGHTPATH_END))return Status::NoPath;
         route.corridor.assign(path.begin(),path.end());
