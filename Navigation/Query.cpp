@@ -218,6 +218,16 @@ bool Project(const Mesh& m,Point p,float horizontal,float vertical,Location& res
     if(!Nearest(m,q,p,horizontal,vertical,filter,ref,near,0,height))return false;
     result=Address(m,near,ref,height,p.z);return true;
 }
+bool NearestSupport(const Mesh& m,Point p,float horizontal,float vertical,Location& result,float height,unsigned short excludedFlags) {
+    if(!m.data||!m.query||!Finite(p))return false;
+    const auto mask=ClearanceMask(m.profile,height);if(!mask)return false;
+    dtQueryFilter filter;filter.setIncludeFlags(mask);filter.setExcludeFlags(ClassFlags(m,excludedFlags));
+    const auto nav=ToNav(p);const float pos[]={nav.x,nav.y,nav.z},ext[]={horizontal,vertical,horizontal};
+    dtPolyRef ref=0;float near[3]{};
+    if(dtStatusFailed(m.query->findNearestPoly(pos,ext,&filter,&ref,near))||!ref)return false;
+    result=Address(m,{near[0],near[1],near[2]},ref,height,p.z);
+    return result.surface&&std::hypot(result.position.x-p.x,result.position.y-p.y)<=horizontal&&std::abs(result.position.z-p.z)<=vertical;
+}
 bool ResolveLocation(const Mesh& m,Point p,const Location* hint,Location& result,float height,unsigned short excludedFlags) {
     if(!m.query||!m.data||!m.tiles)return false;
     const auto mask=ClearanceMask(m.profile,height);if(!mask)return false;

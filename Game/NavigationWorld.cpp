@@ -764,20 +764,23 @@ bool NavigationWorld::AttackPosition(CUnit* unit,CUnit* target,Navigation::Point
         GameJournal::Event("NAV","attack_position_failed","unit=%d target=%d reason=empty_ring inner=%.3f outer=%.3f reach=%.3f",unit->GetID(),target->GetID(),inner,outer,reach);
         return false;
     }
-    if(FreePosition(unit,{goal.x,goal.y,center.z},inner,outer,maxLength,result))return true;
+    if(FreePosition(unit,{goal.x,goal.y,center.z},inner,outer,maxLength,result,target->GetID()))return true;
     GameJournal::Event("NAV","attack_position_failed","unit=%d target=%d reason=no_free_position inner=%.3f outer=%.3f reach=%.3f",unit->GetID(),target->GetID(),inner,outer,reach);
     return false;
 }
-bool NavigationWorld::FreePosition(CUnit* unit,Point center,float inner,float outer,float maxLength,Location& result) {
+bool NavigationWorld::FreePosition(CUnit* unit,Point center,float inner,float outer,float maxLength,Location& result,int targetId) {
     auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
     const auto from=Position(unit,map);
-    const float cell=AITile2Meter(1.f);
+    auto* mesh=ForUnit(unit);if(!mesh||outer<inner)return false;
     std::vector<Point> candidates;
-    const int extent=int(std::ceil(outer/cell));
-    for(int y=-extent;y<=extent;++y)for(int x=-extent;x<=extent;++x) {
-        const float radius=std::hypot(float(x)*cell,float(y)*cell);
-        if(radius<inner||radius>outer)continue;
-        candidates.push_back({center.x+x*cell,center.y+y*cell,center.z});
+    if(inner==0)candidates.push_back(center);
+    const float facing=std::atan2(from.y-center.y,from.x-center.x);
+    for(int ring=0;ring<3;++ring) {
+        const float radius=inner+(outer-inner)*float(ring+1)/4.f;
+        for(int direction=0;direction<24;++direction) {
+            const float angle=facing+float(direction)*6.28318530718f/24.f;
+            candidates.push_back({center.x+radius*std::cos(angle),center.y+radius*std::sin(angle),center.z});
+        }
     }
     const auto nearest=inner>0?from:center;
     std::stable_sort(candidates.begin(),candidates.end(),[&](Point a,Point b){
@@ -790,19 +793,24 @@ bool NavigationWorld::FreePosition(CUnit* unit,Point center,float inner,float ou
         NavigationWorld& owner;const std::vector<Obstacle>* obstacles;const Route* reuse;
         ~RestoreQuery(){owner.queryObstacles=obstacles;owner.queryReuse=reuse;}
     } restore{*this,savedObstacles,savedReuse};
-    if(!queryObstacles) {
+    if(queryObstacles)obstacles=*queryObstacles;
+    else {
         map.GetUnitsNear(unit->GetCP(),nearby,24.f);
         for(POSITION i=nearby.GetHeadPosition();i;) {
             auto* other=nearby.GetNext(i);if(other==unit||other->IsDead())continue;
             obstacles.push_back({Position(other,map),CollisionRadius(unit)+CollisionRadius(other),Height(other),other->GetID()});
         }
-        queryObstacles=&obstacles;
     }
-    queryReuse=nullptr;
+    // The victim must not cut off routes to its own attack ring.
+    obstacles.erase(std::remove_if(obstacles.begin(),obstacles.end(),[&](const Obstacle& body){return body.id==targetId;}),obstacles.end());
+    queryObstacles=&obstacles;queryReuse=nullptr;
     unsigned supportRejected=0,occupied=0,unreachable=0;
     for(const auto point:candidates) {
         Location candidate;
-        if(!Support(unit,point,candidate)||std::abs(candidate.position.z-center.z)>Height(unit)){++supportRejected;continue;}
+        if(Pending(Type(unit,unit->GetAIClass()),point,point)||
+           !Navigation::NearestSupport(*mesh,point,.25f,1.f,candidate,Height(unit),Navigation::ExcludeClass(unit->GetAIClass()))){++supportRejected;continue;}
+        const float radius=std::hypot(candidate.position.x-center.x,candidate.position.y-center.y);
+        if(radius<inner||radius>outer){++supportRejected;continue;}
         if(map.CheckCircleCollision(unit,CPlot3D(candidate.position.x,candidate.position.y,unit->GetCP().z),&candidate,false)){++occupied;continue;}
         CAIRoute route;
         if(!map.NavRoute(unit,from,candidate.position,route,maxLength,0,unit->GetAIClass(),nullptr,GoalPolicy::Exact,nullptr,&candidate)){++unreachable;continue;}

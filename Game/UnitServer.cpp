@@ -3128,6 +3128,8 @@ void CUnitServer::MoveToTarget()
     CWorldServer *pWS = (CWorldServer *)GetWorldBase();
     int nCurSegment = pWS->GetSegmentTimeCounter(), nTimeToHit, nForwardTime;
 
+    // Preserve a terminal failure until ExecAttack hands it to the AI.
+    if(L1IsMoveFailed())return;
     lpUnit->bNeedFastPath = TRUE;
     // if we need to move to the point of use or point of cast destination
     if (curCommand.HasPointOfUse() || curCommand.pTarget.IsEmpty())
@@ -3156,7 +3158,7 @@ void CUnitServer::MoveToTarget()
     // more conventional path - we have some target and move to it
     CMapObject *pTarget = curCommand.pTarget;
     const bool bodyMelee = curCommand.IsAttack() && pTarget->WhoAmI() == HPC_UNIT &&
-                           !HasRangedAttack() && GetCurrentWeaponType() != RPGWST_MAGIC;
+                           HasBodyMeleeAttack();
     const bool overlapping = bodyMelee && pWS->aiMap.CheckCircleCollision(lpUnit, lpUnit->GetCP());
     fpHitDist = GetHitDist(curCommand);
     CPlot3D ptTargetPos = pTarget->GetTargetCP();
@@ -3241,8 +3243,11 @@ void CUnitServer::MoveToTarget()
             }
             else
                 theWorldServer.aiMap.RemoveObject(pTarget);
-            if (!found)
-                GameJournal::Event("NAV","attack_fallback","unit=%d target=%d reason=no_free_destination reach=%.3f",lpUnit->GetID(),pTarget->GetID(),fpHitDist);
+            if (!found) {
+                GameJournal::Event("NAV","attack_failed","unit=%d target=%d reason=no_free_destination reach=%.3f",lpUnit->GetID(),pTarget->GetID(),fpHitDist);
+                theWorldServer.aiMap.SetGraphRebuild(bGraphRebuild);
+                L1StopMovement(true);return;
+            }
             if (!L1StartMove(ptPathDest, fpMaxPathLength, bodyMelee && found ? &approach : nullptr))
                 L1SetMoveFailed();
             if (!bodyMelee)theWorldServer.aiMap.AddObject(pTarget);

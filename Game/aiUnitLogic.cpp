@@ -458,13 +458,28 @@ bool CAISpellCaster::CanAttackEnemy(CAIUnitLogic &logic, const CEnemy &target, b
         float fpMaxPathLength = pAttacker->GetMaxAttackPathLength(
             fabs(pAttacker->GetCP() - target.pEnemy->GetCP()));
         float fpMinDistance = pAttacker->GetAttackDistance() + target.pEnemy->GetAttackDistance();
-        theWorldServer.aiMap.RemoveObject(target.pEnemy);
-        if (!theWorldServer.aiMap.NewPath(pAttacker, target.pEnemy->GetCP(), fakePath,
-                                          fpMaxPathLength, fpMinDistance,Navigation::GoalPolicy::Exact,nullptr,&target.pEnemy->navLocation))
-            ptFrom = pAttacker->GetCP();
-        else
-            ptFrom = fakePath.GetFinalPoint();
-        theWorldServer.aiMap.AddObject(target.pEnemy);
+        auto* server=logic.GetUnitServer();
+        const bool bodyMelee=target.nAttackNumber<0&&server->HasBodyMeleeAttack();
+        if(bodyMelee) {
+            // Motivation and execution must agree on a reachable strike endpoint.
+            // Otherwise the AI keeps reissuing attacks at an unreachable centre.
+            ptFrom=pAttacker->GetCP();
+            if(theWorldServer.aiMap.CheckCircleCollision(pAttacker,ptFrom)||!CanAttackEnemyFrom(logic,ptFrom,target)) {
+                Navigation::Location approach;
+                auto& nav=theWorldServer.aiMap.Navigation();
+                const auto center=nav.Position(target.pEnemy,theWorldServer.aiMap);
+                if(!nav.AttackPosition(pAttacker,target.pEnemy,center,server->EncounterAttackRange(target.pEnemy),fpMaxPathLength,approach))return false;
+                ptFrom=CPlot3D(approach.position.x,approach.position.y,pAttacker->GetCP().z);
+            }
+        } else {
+            theWorldServer.aiMap.RemoveObject(target.pEnemy);
+            if (!theWorldServer.aiMap.NewPath(pAttacker, target.pEnemy->GetCP(), fakePath,
+                                              fpMaxPathLength, fpMinDistance,Navigation::GoalPolicy::Exact,nullptr,&target.pEnemy->navLocation))
+                ptFrom = pAttacker->GetCP();
+            else
+                ptFrom = fakePath.GetFinalPoint();
+            theWorldServer.aiMap.AddObject(target.pEnemy);
+        }
     }
     // some advanced checks
     if (!CanAttackEnemyFrom(logic, ptFrom, target))

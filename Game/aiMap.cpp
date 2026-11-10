@@ -2430,9 +2430,9 @@ bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpM
         }
     }
     res.toGo.Clear();res.ptDestination=ptDst;res.bRouteFailed=false;res.navigationTurned=false;
-    if(!std::isfinite(ptDst.x)||!std::isfinite(ptDst.y)){GameJournal::Event("NAV","path_failed","unit=%d reason=nonfinite_goal",pUnit->GetID());return false;}
+    if(!std::isfinite(ptDst.x)||!std::isfinite(ptDst.y)){GameJournal::Event("NAV","path_failed","unit=%d reason=nonfinite_goal",pUnit->GetID());res.bRouteFailed=true;return false;}
     const bool inside=ptDst.x>=0&&ptDst.y>=0&&ptDst.x<AITile2Meter(float(XSize()))&&ptDst.y<AITile2Meter(float(YSize()));
-    if(!inside&&goalPolicy==Navigation::GoalPolicy::Exact){GameJournal::Event("NAV","path_failed","unit=%d reason=outside_map",pUnit->GetID());return false;}
+    if(!inside&&goalPolicy==Navigation::GoalPolicy::Exact){GameJournal::Event("NAV","path_failed","unit=%d reason=outside_map",pUnit->GetID());res.bRouteFailed=true;return false;}
     if(!known)navigation.Goal(pUnit,destination.position,destination);
     auto from=navigation.Position(pUnit,*this);
     // ptDst.z is a command distance, not world height.
@@ -2470,7 +2470,7 @@ bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpM
         res.ptDestination.x=AITile2Meter(last.point.x);res.ptDestination.y=AITile2Meter(last.point.y);
         if(res.toGo.route.GetCount()<2){res.CreateStand(pUnit);return true;}
     }
-    if(res.toGo.route.GetCount()<2){GameJournal::Event("NAV","path_failed","unit=%d reason=short_route",pUnit->GetID());res.toGo.Clear();return false;}
+    if(res.toGo.route.GetCount()<2){GameJournal::Event("NAV","path_failed","unit=%d reason=short_route",pUnit->GetID());res.bRouteFailed=true;res.toGo.Clear();return false;}
     // Queries, including movement previews, never replace the live support.
     // Only placement and an accepted physical step own navLocation.
     res.nPathCost=int(res.toGo.route.GetCount());res.bFirstTry=false;
