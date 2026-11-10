@@ -1,5 +1,6 @@
 #pragma once
 #include "../Navigation/Types.h"
+#include "BodyShape.h"
 namespace SaveSchema { class Writer; class Reader; }
 /////////////////////////////////////////////////////////////////////////////////////
 #include "MapObject.h"
@@ -196,6 +197,10 @@ public:
     bool scriptMovementEnabled=false;
     float scriptMovementOffset=0,scriptMovementFactor=1;
 private:
+    // Transient visual state; the SKN asset owner rebinds after loading.
+    bool hasNalaSknBody = false;
+    BodyShape::State bodyShape;
+    void RefreshBodyShape();
     struct SItemIDs
     {
         DWORD dwWeaponsID[QI_MAX_WEAPONS];
@@ -263,6 +268,10 @@ public:
     SUnitVisibilityInfo sensesDetection;
 
 public:
+    // Asset binding, not a configuration switch. Unbind on asset detach.
+    void BindNalaSknBody();
+    void UnbindSknBody();
+    const BodyShape::State* GetBodyShape();
     CUnit();
     virtual ~CUnit();
     // create/destroy

@@ -124,6 +124,7 @@ void CUnit::Destroy()
 // clear data (not destroy)
 void CUnit::Clear()
 {
+    UnbindSknBody();
     scriptMovementEnabled=false;scriptMovementOffset=0;scriptMovementFactor=1;
     szName.Empty();
     dwVoicePrototype = -1;
@@ -373,7 +374,9 @@ BOOL CUnit::RecalcRPGStats(bool bStrengthChanged)
 {
     if (!lpUnitSpecific)
         return FALSE;
-    return lpUnitSpecific->RecalcRPGStats(bStrengthChanged);
+    BOOL result = lpUnitSpecific->RecalcRPGStats(bStrengthChanged);
+    RefreshBodyShape();
+    return result;
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // export all unit's stats to client format
@@ -384,6 +387,7 @@ BOOL CUnit::ExportStats()
     // export unit's stats
     if (lpUnitSpecific)
         lpUnitSpecific->ExportStats();
+    RefreshBodyShape();
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -397,6 +401,7 @@ void CUnit::LoadDefaultClientStats(const char *pszTemplate)
     pM->SetupStats(&s1, &s2, pszTemplate);
     s1.Export(&rpgUserCommonStats);
     s2.Export(0, &rpgUserUnitStats);
+    RefreshBodyShape();
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnit::ShowHelmet(bool bShow)
@@ -650,6 +655,7 @@ BOOL CUnit::UpdateFrom(EUpdateType tip)
                             float(rpgUserUnitStats.hls[hl].wMaxHP);
 
         ::UpdateFrom(rpgUserUnitStats, *pPkt);
+        RefreshBodyShape();
 
         if (!IsDead() && tip == utFrame)
         {
@@ -2133,6 +2139,7 @@ CPlot3D CUnit::GetCastPointPosition()
 void CUnit::SetupCampUnitWithUnitStats(SRPGUnitStats *pUnitStats)
 {
     pUnitStats->Export(this, &rpgUserUnitStats);
+    RefreshBodyShape();
     float fMaxHP = pUnitStats->GetModifiedHealth(this, pUnitStats->RecalcHP());
     rpgUserCommonStats.nMaxHP = fMaxHP;
     rpgUserCommonStats.nHP = pUnitStats->CollectHP(fMaxHP);
@@ -2261,3 +2268,37 @@ float CUnit::GetHeightComplectionScale() const
     return fHCCurr / fHCBase;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
+
+void CUnit::BindNalaSknBody()
+{
+    hasNalaSknBody = true;
+    RefreshBodyShape();
+}
+void CUnit::UnbindSknBody()
+{
+    hasNalaSknBody = false;
+    bodyShape = {};
+}
+const BodyShape::State* CUnit::GetBodyShape()
+{
+    // Covers prototype replacement and direct stat edits before a snapshot.
+    RefreshBodyShape();
+    return hasNalaSknBody ? &bodyShape : nullptr;
+}
+void CUnit::RefreshBodyShape()
+{
+    if (!hasNalaSknBody) return;
+    const auto* prototype = GetPrototype();
+    if (!prototype) { bodyShape = {}; return; }
+    BodyShape::Input input;
+    input.strength = rpgUserUnitStats.cStrength;
+    input.dexterity = rpgUserUnitStats.cDexterity;
+    if (lpUnitSpecific && lpUnitSpecific->WhoAmI() == HPC_UNITSERVERSPECIFIC) {
+        const auto* stats = static_cast<CUnitServer*>(lpUnitSpecific)->GetRPGStats();
+        input.strength = stats->psStrength.fpEffectiveValue;
+        input.dexterity = stats->psDexterity.fpEffectiveValue;
+    }
+    input.db = {prototype->fStrength, prototype->fGrace, prototype->fTall};
+    bodyShape.Update(input);
+}
