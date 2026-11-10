@@ -278,12 +278,10 @@ void CPlayerServer::SendShowPath(CUnit *pWho, CAIFullRoute &route, const CPlot3D
     wpkt.Write(fpShowLeng);
     if (type != CPlayer::PPT_NOPATH)
     {
-        CUpdateSingle update;
-        CUpdateHistory *pPkt;
-        pPkt = update.StartUpdateTo(utStart);
-        route.UpdateTo(*pPkt);
-        pPkt->FinishUpdate();
-        update.AppendStart(wpkt);
+        // Presentation samples only; the movement route is untouched.
+        const auto markers=GetWorldServer()->aiMap.Navigation().PathMarkers(pWho,route,fpShowLeng);
+        wpkt.Write(int(markers.size()));
+        for(const auto& point:markers){wpkt.Write(point.x);wpkt.Write(point.y);wpkt.Write(point.z);}
     }
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////

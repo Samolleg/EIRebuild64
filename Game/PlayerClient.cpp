@@ -987,8 +987,6 @@ BOOL CPlayerClient::PrsShowPath()
     int nID;
     float fpLeng;
     CParticle *pParticle1 = 0, *pParticle2 = 0;
-    CUpdateSingle update;
-    CUpdateHistory *pPkt;
     CPlayer::EPathType type;
     CPlayer::EPathResult res;
 
@@ -1002,24 +1000,17 @@ BOOL CPlayerClient::PrsShowPath()
     //
     if (type != CPlayer::PPT_NOPATH)
     {
-        CUnit *pFake = (CUnit *)theWorld.GetMapObjectManager()->CreateData(MOTID_HUMAN);
-        pFake->AddRef();
-        CAIFullRoute &route = *pFake->GetUnitSpecific()->GetRoute();
-        pPkt = update.StartUpdateTo(utStart);
-        route.UpdateTo(*pPkt);
-        pPkt->FinishUpdate();
-        pPkt = update.StartUpdateFrom(utStart, pkt);
-        route.UpdateFrom(*pPkt);
-        pPkt->FinishUpdate();
-        //
+        int count=0;pkt.Read(count);
+        if(count<0||count>2500)return FALSE;
+        std::vector<CPlot3D> markers(count);
+        for(auto& point:markers){pkt.Read(point.x);pkt.Read(point.y);pkt.Read(point.z);}
         if (theSettings.nDrawPath)
         {
             // create path effect
-            pFake->LowSetRouteSpeeds(FP_SHOW_PATH_SPEED, 1e10f);
             //
             pParticle1 = ((CParticleManager *)theWorld.GetParticleManager())
                              ->CreateParticleSystem(PTID_PATH);
-            pParticle1->AttachCarrier(pFake);
+            pParticle1->pathMarkers=std::move(markers);
             pParticle1->SetPower2(fpLeng);
             switch (type)
             {
@@ -1036,7 +1027,6 @@ BOOL CPlayerClient::PrsShowPath()
             pParticle1->Segment();
             pParticle1->AttachCarrier(0);
         }
-        pFake->Release();
     }
     if (theSettings.nDrawPath == 0)
         return TRUE;

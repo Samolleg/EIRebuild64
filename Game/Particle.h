@@ -11,6 +11,7 @@
  **********************************************************************/
 
 #include <cstdint>
+#include <vector>
 #include "embedded_arena_particles.h"
 #include "embedded_golem_particles.h"
 #include "Base3D.h"
@@ -202,6 +203,7 @@ public:
     // Set power
     void SetPower(float fpNewPower) { fpPower = fpNewPower; }
     void SetPower2(float fpNewPower) { fpPower2 = fpNewPower; }
+    std::vector<CPlot3D> pathMarkers; // Presentation samples supplied by the server.
     void SetParam1(float fpA) { fpParam1 = fpA; }
     void SetParam2(float fpA) { fpParam2 = fpA; }
     // Set wall vector for wall effects like firewall
