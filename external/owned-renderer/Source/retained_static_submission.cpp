@@ -1191,7 +1191,7 @@ bool retained_visual_world_bounds(const RetainedVisualSample& sample,
     if (sample.status != RetainedVisualStatus::ready) return false;
     bool skn_present=false;
     try{if(!skn_pose_bounds(sample,bounds,skn_present))return false;if(skn_present)return true;}
-    catch(const std::exception& error){bridge_append_probe_event("skn_asset_rejected",error.what());return false;}
+    catch(const std::exception& error){skn::report_rejection(sample.assembly->skeleton->visual_reference,error.what());return false;}
     float envelope_radius = sample.envelope_radius;
     if (sample.values.unit && !sample.completed_pose &&
         !retained_visual_selection_envelope_radius(sample,envelope_radius)) return false;
@@ -2508,7 +2508,7 @@ bool retained_visual_part_bounds(const RetainedVisualSample& sample,std::size_t 
     // changes. Using the whole skin envelope per part is conservative.
     bool skn_present=false;
     try{if(!skn_pose_bounds(sample,bounds,skn_present))return false;if(skn_present)return true;}
-    catch(const std::exception&){return false;}
+    catch(const std::exception& error){skn::report_rejection(sample.assembly->skeleton->visual_reference,error.what());return false;}
     bounds={};
     if (!sample.assembly||!sample.prepared||index>=sample.prepared->parts.size()) return false;
     auto& prepared=*sample.prepared;
@@ -3192,7 +3192,7 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
      prepared.skn_selected=true;prepared.merged_groups.clear();
      prepared.merged_part_group.assign(assembly.parts.size(),0);
      prepared.merged_assembly=sample.assembly;
-     bridge_append_probe_event("skn_asset_rejected",error.what());
+     skn::report_rejection(sample.assembly->skeleton->visual_reference,error.what());
      return true;
     }
     prepared.merged_assembly=sample.assembly;
