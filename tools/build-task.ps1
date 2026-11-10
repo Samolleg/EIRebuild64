@@ -60,7 +60,7 @@ function Trim-Cache {
     }
 }
 $saved = @{}
-foreach ($name in 'TMP','TEMP','_MSPDBSRV_ENDPOINT_','CL','_CL_','LINK','_LINK_','EID3D11_SHADER_STORE') { $saved[$name] = [Environment]::GetEnvironmentVariable($name,'Process') }
+foreach ($name in 'TMP','TEMP','_MSPDBSRV_ENDPOINT_','CL','_CL_','LINK','_LINK_','EID3D11_SHADER_STORE','MSBUILDDISABLENODEREUSE') { $saved[$name] = [Environment]::GetEnvironmentVariable($name,'Process') }
 $lock = $null
 Push-Location $repo
 try {
@@ -80,6 +80,7 @@ try {
     }
     if ((Get-Item -LiteralPath $CacheRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Cache root is a link.' }
     Trim-Cache
+    $env:MSBUILDDISABLENODEREUSE = '1'
     $env:TMP = $privateTemp; $env:TEMP = $privateTemp
     $env:_MSPDBSRV_ENDPOINT_ = 'EI-' + [guid]::NewGuid().ToString('N')
     foreach ($name in 'CL','_CL_','LINK','_LINK_','EID3D11_SHADER_STORE') { [Environment]::SetEnvironmentVariable($name,$null,'Process') }
@@ -87,7 +88,7 @@ try {
     $inventory = [Collections.Generic.List[string]]::new()
     $tracked = @(& git -c core.quotepath=false ls-files --cached --others --exclude-standard | Sort-Object -Unique)
     if ($LASTEXITCODE -ne 0) { throw 'Cannot enumerate sources.' }
-    foreach ($relative in $tracked | Where-Object { $_ -match '\.(vcxproj|props|targets|ps1)$' }) { $inventory.Add($relative + '=' + (Hash-File (Join-Path $repo $relative))) }
+    foreach ($relative in $tracked | Where-Object { $_ -match '\.(vcxproj|props|targets|ps1|cs)$' }) { $inventory.Add($relative + '=' + (Hash-File (Join-Path $repo $relative))) }
     foreach ($directory in @((Join-Path $vc 'include'),(Join-Path $vc 'atlmfc/include'),(Join-Path $sdk "Include/$sdkversion"))) {
         foreach ($file in Get-ChildItem -LiteralPath $directory -File -Recurse | Sort-Object FullName) { $inventory.Add($file.FullName + '=' + (Hash-File $file.FullName)) }
     }
@@ -133,8 +134,14 @@ try {
     & (Join-Path $PSScriptRoot 'prepare-worktree.ps1') -VSInstallDir $vs
     if (!$?) { throw 'Preparation failed.' }
     Write-Host "MSBuild workers: $cores; compiler /MP; isolated endpoint $env:_MSPDBSRV_ENDPOINT_"
-    & $msbuild @arguments "/flp:logfile=$task/build.log;verbosity=normal"
-    if ($LASTEXITCODE -ne 0) { throw "MSBuild failed ($LASTEXITCODE); no serial retry." }
+    Add-Type -Path (Join-Path $PSScriptRoot 'BuildProcess.cs')
+    $arguments += "/flp:logfile=$task/build.log;verbosity=normal"
+    # Quote Windows argv, doubling trailing backslashes before the closing quote.
+    $commandLine = ($arguments | ForEach-Object {
+        '"' + ([regex]::Replace(([regex]::Replace($_, '(\\*)"', '$1$1\"')), '(\\+)$', '$1$1')) + '"'
+    }) -join ' '
+    $buildExit = [EIBuildProcess]::Run($msbuild, $commandLine, $repo)
+    if ($buildExit -ne 0) { throw "MSBuild failed ($buildExit); no serial retry." }
     foreach ($name in 'DirectXTex','DirectXTK') {
         $compilerPdb = Join-Path $repo "out/obj/x64/Release/$name/$name.compiler.pdb"
         if (Test-Path -LiteralPath $compilerPdb) { Copy-Item -LiteralPath $compilerPdb -Destination (Join-Path $repo "out/x64/Release/$name/") -Force }
