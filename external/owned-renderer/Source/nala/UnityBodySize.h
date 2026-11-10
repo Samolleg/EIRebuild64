@@ -4,7 +4,7 @@ namespace UnityBodySize {
 inline bool Apply(const std::array<UnityBody::M,15>&game,std::vector<UnityBody::V>&positions,
                   std::vector<UnityBody::M>&world,UnityBody::M&root,double bodyScale=Scale){
  using namespace UnityBody;
- if(!std::isfinite(bodyScale)||bodyScale<.5||bodyScale>1.5||world.size()<=std::max(Feet[0],Feet[1]))return false;
+ if(!std::isfinite(bodyScale)||bodyScale<.5||bodyScale>1.5||world.size()<=(std::max)(Feet[0],Feet[1]))return false;
  for(V&v:positions)v=UnityBody::Scale(v,bodyScale);
  for(M&m:world)m.t=UnityBody::Scale(m.t,bodyScale);
  root=game[0];V oldCenter{},newCenter{};

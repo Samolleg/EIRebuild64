@@ -13,7 +13,7 @@ inline V Sub(V a,V b){return {a.x-b.x,a.y-b.y,a.z-b.z};}
 inline V Scale(V a,double s){return {a.x*s,a.y*s,a.z*s};}
 inline double Dot(V a,V b){return a.x*b.x+a.y*b.y+a.z*b.z;}
 inline V Cross(V a,V b){return {a.y*b.z-a.z*b.y,a.z*b.x-a.x*b.z,a.x*b.y-a.y*b.x};}
-inline V Unit(V v){return Scale(v,1/std::max(std::sqrt(Dot(v,v)),1e-15));}
+inline V Unit(V v){return Scale(v,1/(std::max)(std::sqrt(Dot(v,v)),1e-15));}
 inline V Rotate(const M&m,V v){return {m.r[0][0]*v.x+m.r[0][1]*v.y+m.r[0][2]*v.z,m.r[1][0]*v.x+m.r[1][1]*v.y+m.r[1][2]*v.z,m.r[2][0]*v.x+m.r[2][1]*v.y+m.r[2][2]*v.z};}
 inline V Point(const M&m,V v){return Add(Rotate(m,v),m.t);}
 inline M Product(const M&a,const M&b){M m;for(unsigned i=0;i<3;++i)for(unsigned j=0;j<3;++j){m.r[i][j]=0;for(unsigned k=0;k<3;++k)m.r[i][j]+=a.r[i][k]*b.r[k][j];}m.t=Point(a,b.t);return m;}
