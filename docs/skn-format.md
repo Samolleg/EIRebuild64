@@ -45,14 +45,192 @@ Material offsets: 0 f32 baseColor RGBA; 16 f32 emission RGB; 28 f32 roughness; 3
 
 DDS requires DX10, one 2D texture, no cube/volume/array, top-level width and height each a multiple of four in 4–16384 (1x1 and 2x2 top levels are invalid), exact block payload and complete authored mip chain through 1×1. Base/emission use BC7 sRGB (DXGI 99); normal XY uses BC5 UNORM linear (83), positive Z reconstructed; ORM uses BC7 UNORM linear (98). Lower mips may have dimensions below four and still occupy complete BC blocks. A mip has ceil(width/4)×ceil(height/4)×16 bytes. Missing declared maps, wrong color space/format, missing mips or invalid payload fail. Cutout coverage, padding and vector normal filtering are offline responsibilities.
 
-## Deferred feature sections
+## Nala feature sections (design, not implemented)
 
-Types 8–11 are reserved in v1. Their nonempty payloads are explicitly rejected by this pilot, never silently treated as ordinary skin. Their detailed binary record schema is not yet frozen; they require a section version specification before authoring assets.
+The following is the X64NALASKN01 section design. The current decoder still
+rejects nonempty sections 8–11; this specification does not imply runtime
+support. The CPU Nala implementation has not been replaced by this document.
 
-* 8 morph/drivers: named strength/grace/height/fullness and separate RPG strength/dexterity inputs; ranges/defaults/knots; bone controls; gameBind and root-relative retarget; legacy-driver/bind-node→palette map; twist/damped/limit correctors. FIG8 cross terms s*g/s*t/g*t/s*g*t and BON bind updates must be preserved. Morph is before skin.
-* 9 surface bindings: source topology ID, three source indices/barycentric weights, tangent-frame offsets, normal offset, dependency stage and LOD correspondence. Dependencies are acyclic; order is source samples→morph/skin→post-skin bindings→garment support/folds→normals.
-* 10 regions/wounds: versioned per-triangle body/underwear regions with L/R detail; wound masks/stages and eye regions. Keep gameplay proxy unchanged.
-* 11 outfit: skeleton/bind/driver hashes; slots head/torso/legs/hands/feet/back/accessory; underwear→base→outer; hideBody/hideLowerLayers bitsets. Union only ready visible clothing; removing/failing an asset restores lower layers. Owner decision of 2026-11-10 overrides the proposal: fitted shirt/pants/underwear/wraps/cuffs/socks use surface binding; loose clothing, rigid armour and eyelids use ordinary bone weights.
+### Common envelope for sections 8, 9 and 11
+
+Directory section version is 1, stride is 1, count is payload byte size.
+The payload starts with four u32: headerBytes=16, tableCount,
+tableDirectoryOffset=16, reserved=0. Each table directory entry is four u32:
+kind, section-relative byte offset, count, stride. Table payloads start on
+16-byte boundaries. Reject overflow, out-of-bounds ranges, overlap with another
+table/header/directory, duplicate or unknown kinds, unsupported versions and
+nonzero reserved fields. Strings reference section 1. All numbers are finite.
+Indices are zero based; an absent optional reference is 0xffffffff.
+
+### Section 8: five inputs, controls, vertices and bones
+
+The five inputs are database build/fullness/height and RPG strength/dexterity,
+in that order. They are not the 45 resolved editor controls. Match
+`Game/BodyShapeResolver.h::NalaMorphs::Resolve`: clamp RPG inputs to [15,35]
+and database inputs to authored knots; bilinearly interpolate the 3x3 RPG
+samples; add database deviations for ordinary controls and multiply them for
+height/stature; preserve the fixed 1.05 head size. Reject nonfinite input before
+clamping. Independent linear deltas for five axes do not describe this resolver.
+
+| Kind | Ordered fields | Stride |
+|---|---|---:|
+| 1 inputs, exactly five | u32 name, semantic; f32 min, default, max; u32 reserved | 24 |
+| 2 scalar instructions | u32 opcode, a, b, c; f32 immediate; u32 reserved | 24 |
+| 3 named controls | u32 name, scalar; f32 min, max | 16 |
+| 4 vertex positions | u32 vertex, xScalar, yScalar, zScalar | 16 |
+| 5 bone components | u32 joint, component, scalar, reserved | 16 |
+
+Input semantics are 0..4, unique and complete, with min<=default<=max.
+Instruction index is its result register. Opcodes: 0 constant(immediate),
+1 input(a), 2 add(a,b), 3 subtract(a,b), 4 multiply(a,b), 5 divide(a,b),
+6 min(a,b), 7 max(a,b), 8 negate(a), 9 sqrt(a), 10 sin(a), 11 cos(a),
+12 atan2(a,b), 13 acos(a), 14 select(a,b,c): b when a<0, otherwise c.
+Except input indices, operands reference preceding instructions only. Unused
+fields are zero. No loops, executable shader text or arbitrary memory access.
+Operations use binary32 without implicit saturation or fused operations.
+Invalid domains, zero divisors and nonfinite results reject evaluation.
+Required clamps are explicit instructions. Named controls check authored limits.
+
+Vertex records replace absolute pre-skin positions in section 3, one output
+per vertex. Unlisted vertices retain their bind positions. Bone components
+0..2 are local translation, 3..6 quaternion x/y/z/w, 7..9 positive scale;
+unlisted components retain section-2 values. Duplicate output destinations
+are invalid. Rebuild global bind/inverse bind in parent order after shape
+changes. Preserve FIG8 cross terms and shape-dependent bind changes.
+
+Evaluate the shape program on GPU at load and only when the effective five
+inputs change. Cache by asset identity/generation and effective tuple; separate
+shape buffers for different unit shapes. Pose, outfit and wounds have separate
+invalidation. Recompute appropriate normals/tangents from deformed geometry.
+No CPU vertex stream or GPU readback is part of evaluation.
+
+Pose serialization remains a prerequisite beyond these shape tables: bahonec
+uses `Data::bindNode`, gameBind, driver retargeting, dual/damped/semi controllers
+and joint limits. Its palette cannot be reduced to the 15 LNK drivers without
+changing deformation. The file path must preserve those operations and mappings;
+a file needing unimplemented controllers must fail. Hand, hip, sole placement,
+attachment and locomotion corrections belong to pose evaluation. They must not
+call the CPU body/garment vertex generators.
+
+### Section 9: surface bindings and ordered dependencies
+
+| Kind | Ordered fields | Stride |
+|---|---|---:|
+| 1 surfaces | u32 name, firstVertex, vertexCount, firstIndex, indexCount, lod, flags, reserved | 32 |
+| 2 stages | u32 operation, sourceSurface, targetSurface, firstRecord, recordCount, reserved[3] | 32 |
+| 3 anchors | u32 target, source[3]; f32 barycentric[3], offset[3]; u32 frame, reserved | 48 |
+| 4 triangles | u32 a,b,c | 12 |
+| 5 weld groups | u32 vertex, group | 8 |
+| 6 copies | u32 target, source; f32 normalOffset; u32 reserved | 16 |
+
+Surfaces own disjoint section-3 vertex ranges and section-4 index ranges.
+Their indices address only their own vertices; lod references section 6.
+flags=1 marks sampling-only geometry with no draw submesh; flags=0 is visible
+geometry. No other flags are defined. Sampling geometry still deforms when
+hidden. Bindings never infer correspondence from proximity or reuse indices
+across LODs: every LOD has an explicit source surface and bindings.
+
+Stage operations: 0 anchor replacement, 1 anchor offset addition,
+2 area-normal recalculation, 3 position weld, 4 normal weld,
+5 copy with normal offset. firstRecord/count addresses anchors (0/1),
+triangles (2), welds (3/4) or copies (5). For anchors/copies, source indices
+are local to sourceSurface and target indices local to targetSurface.
+Triangles/welds are local to targetSurface; group<vertexCount. Each anchor,
+copy or weld stage contains a target at most once. Operations 2..4 require
+sourceSurface==targetSurface.
+
+Skin ordinary and sampling geometry first. Execute stages in stored order,
+with a GPU barrier between each producer and consumer. Cross-surface
+sources must be completed by earlier stages; cyclic dependencies and reads
+of unfinished targets fail. Anchor/copy sources and targets are distinct
+surfaces. In-place offset addition reads the previous target state; weld and
+normal stages read a completed snapshot and write their completed result.
+
+For source p0,p1,p2, each weight is in [0,1] and sum(w)=1 within 1e-5.
+c=sum(wi*pi). Frame 0: n=normalize(cross(p1-p0,p2-p0)), t=normalize(p1-p0).
+Frame 1: n=normalize(sum(wi*ni)),
+t=normalize((p1-p0)-n*dot(p1-p0,n)). Both use b=cross(n,t) and
+q=c+t*offset.x+b*offset.y+n*offset.z. Replacement writes q; offset addition
+adds q-c to the previous target position. Frame 0 matches underwear; frame 1
+matches shirt, pants, wraps, cuffs and socks. Degenerate frames fail evaluation.
+
+Area normals sum unnormalized triangle crosses before normalization.
+Position weld averages positions per group; normal weld sums normals per group
+before normalization. Copy writes source+normalOffset*sourceNormal, with the
+normal reversed for negative offsets. Inner faces/rims and their UV/index
+splits are explicit mesh data. Final normals/tangents follow final positions;
+intermediate normals required by later binding stages must also be computed.
+
+Preserve multi-stage source behavior: shirt support normals precede folds;
+pants support normals/weld precede refinement, position weld and normal weld;
+wraps select bare/over-shirt anchors. The waist shirt correction adds only its
+anchor offset, not the interpolated body position. Inner offsets follow outer
+normals. A single body-to-cloth anchor pass cannot replace this pipeline.
+
+Keep native sampling topology separate from render topology: bahonec has
+20,579 native body vertices, while NalaLidContact produces 21,003 render
+vertices. Cook its accepted proxies/edits, UVs and indices into the ordinary
+visible mesh. Clothing source indices remain native. Render vertices with
+weighted source edits must retain their actual deformation; cooking must
+report any edit not expressible by four influences instead of silently
+truncating weights. No runtime lid topology generation is allowed.
+
+### Section 11: outfit, material variants, layers and hiding
+
+| Kind | Ordered fields | Stride |
+|---|---|---:|
+| 1 items | u32 name, nativeSlot, subtypeMask, subtypeValue, layer, firstSubmesh, submeshCount, reserved | 32 |
+| 2 hide rules | u32 item, targetSubmesh, requiredItem, reserved | 16 |
+| 3 geometry variants | u32 item, requiredItem, firstStage, stageCount | 16 |
+| 4 identity, exactly one | u8 skeletonSHA256[32], bindSHA256[32], driversSHA256[32] | 96 |
+
+Skeleton hash covers ordered UTF-8 joint names including terminating NUL,
+followed by parent i32 LE for each joint. Bind hash covers section-2 payload;
+driver hash covers section-8 payload. Hashes describe cooked compatibility,
+not implementation support.
+
+Layers: 0 underwear, 1 base, 2 outer. Slots use actual CUnit Wear IDs:
+3 shirt, 4 pants, 6 cuffs, 5 socks in the current source. An always-present
+body/underwear item has nativeSlot=0xffffffff and mask=value=0. Other items
+match (wornSubtype & subtypeMask)==subtypeValue, with value & ~mask=0.
+Overlapping selectors in the same slot/layer reject the file. Unsupported
+subtypes select no cooked garment. Material variants retain their accepted
+cut and texture mapping; geometry is not inferred from resource ID alone.
+
+An item owns a nonempty contiguous submesh range, with unique ownership and
+matching submesh layer. Split body/underwear zones into ordinary submeshes.
+Hide rules apply only when item is selected and ready and requiredItem, if
+not absent, is also selected and ready. A rule may hide a lower layer or an
+explicit body zone, never itself. Union applicable hide sets after readiness
+resolution; removing/failing a garment restores lower layers immediately.
+Shirt hides bandeau and pants hide panties only after readiness. No CPU
+vertex/index regeneration is needed to select visible parts.
+
+Geometry variants select section-9 stage ranges. requiredItem absent means
+unconditional; a matching conditional variant takes priority. Multiple
+applicable conditional variants fail. This carries shirt-under-wrap and
+bare/over-shirt wrap choices independently of fabric. Active variants must
+retain acyclic dependencies. Hidden sampling sources still execute when
+needed by visible clothing. Draw once per visible part/material.
+
+Cook every current material variant from natural-nails-runtime.json, including
+underwear, shirts, pants, wraps, finishes, cuffs and socks. Fitted garments
+use surface bindings; loose garments, rigid armour and lids use bone weights,
+per the owner decision. Missing support must not change appearance silently.
+
+### Wounds and failure behavior
+
+Section 10 remains reserved and rejected when nonempty. Wounds are an open
+part of the file implementation: preserve resource 202's 19 decoded masks
+and six independent wound-stage selections with the accepted composite.
+A baked current wound state in body albedo is not full wound support.
+
+Reject a failed required file/section with one diagnostic line identifying
+asset, section/stage and cause. Deduplicate by failed asset identity and
+resource generation across passes/frames. A new generation may retry.
+Never select the legacy body or call a CPU vertex generator after failure.
+Keep gameplay FIG/BV proxies, event/navigation behavior and attachment
+admission separate from the visual file.
 
 bahonec remains read-only. Rights and provenance are recorded below; this task cooks its clothing textures outside Git/kit. The rigid tool does not claim to reproduce its procedural rig, resolver, eyelid contact or surface-bound clothes.
 
