@@ -876,6 +876,9 @@ HRESULT Renderer::get_native_owned_texture_d3d12(const NativeOwnedTextureView& s
  case NativeOwnedTextureFormat::dxt1:format=DXGI_FORMAT_BC1_UNORM;block_bytes=8;break;
  case NativeOwnedTextureFormat::dxt3:format=DXGI_FORMAT_BC2_UNORM;block_bytes=16;break;
  case NativeOwnedTextureFormat::dxt5:format=DXGI_FORMAT_BC3_UNORM;block_bytes=16;break;
+ case NativeOwnedTextureFormat::bc5:format=DXGI_FORMAT_BC5_UNORM;block_bytes=16;break;
+ case NativeOwnedTextureFormat::bc7:format=DXGI_FORMAT_BC7_UNORM;block_bytes=16;break;
+ case NativeOwnedTextureFormat::bc7_srgb:format=DXGI_FORMAT_BC7_UNORM_SRGB;block_bytes=16;break;
  case NativeOwnedTextureFormat::rgb565:format=DXGI_FORMAT_B5G6R5_UNORM;pixel_bytes=2;break;
  case NativeOwnedTextureFormat::argb1555:format=DXGI_FORMAT_B5G5R5A1_UNORM;pixel_bytes=2;break;
  case NativeOwnedTextureFormat::argb4444:format=DXGI_FORMAT_B4G4R4A4_UNORM;pixel_bytes=2;break;

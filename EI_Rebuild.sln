@@ -21,6 +21,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "ScriptCheck", "ScriptCheck\
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "skn_texpack", "tools\skn_texpack\skn_texpack.vcxproj", "{5F390DA3-B0F4-4ECA-98ED-7C6891032E98}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "fig-to-skn", "tools\fig-to-skn.vcxproj", "{7E96C1E3-135E-4EB7-A51D-B400F42A0342}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Release|x64 = Release|x64
@@ -28,6 +30,8 @@ Global
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
 		{5F390DA3-B0F4-4ECA-98ED-7C6891032E98}.Release|x64.ActiveCfg = Release|x64
 		{5F390DA3-B0F4-4ECA-98ED-7C6891032E98}.Release|x64.Build.0 = Release|x64
+		{7E96C1E3-135E-4EB7-A51D-B400F42A0342}.Release|x64.ActiveCfg = Release|x64
+		{7E96C1E3-135E-4EB7-A51D-B400F42A0342}.Release|x64.Build.0 = Release|x64
 		{B09F21A4-D437-47E6-BB47-19806B3886C1}.Release|x64.ActiveCfg = Release|x64
 		{B09F21A4-D437-47E6-BB47-19806B3886C1}.Release|x64.Build.0 = Release|x64
 		{EE133587-66A5-4F8C-967E-3CCA95203A19}.Release|x64.ActiveCfg = Release|x64

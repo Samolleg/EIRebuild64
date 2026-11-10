@@ -564,6 +564,7 @@ enum class NativeOwnedTextureFormat : std::uint32_t {
     argb4444,
     argb8888,
     dxt5,
+    bc5, bc7, bc7_srgb,
 };
 
 struct NativeOwnedTextureMip {
@@ -867,6 +868,9 @@ struct NativeGeometryView {
     // Merged character meshes (#65): per component, the part's skeleton node
     // (low 16 bits) and its position base (high 16 bits); null elsewhere.
     const std::uint32_t* component_parts = nullptr;
+    // Immutable SKN upload records, 224 bytes/component: u32 node[4], f32
+    // weight[4], column-major inverse bind's first 3 rows as 4xfloat3[4].
+    const std::uint8_t* skin_vertices = nullptr;
     // Established from conservative source/pose envelopes before resolving any
     // mesh, texture or deformation. A light-only record never becomes a color
     // draw merely because its source was admitted for shadow preparation.

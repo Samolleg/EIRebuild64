@@ -337,8 +337,8 @@ WorldLampMemory<RetainedWorldPointLight> g_world_lamp_memory;
 bool g_merge_character_parts = true;
 
 bool owned_unit_merged(const RetainedVisualSample& sample) {
-    return g_merge_character_parts && sample.values.unit && retained_visual_merged_groups(sample) &&
-        !sample.prepared->merged_groups.empty();
+    return sample.values.unit && retained_visual_merged_groups(sample) && (g_merge_character_parts || sample.prepared->skn_selected) &&
+        (sample.prepared->skn_selected || !sample.prepared->merged_groups.empty());
 }
 bool owned_merged_member(const RetainedVisualSample& sample,std::size_t part) noexcept {
     const auto& map=sample.prepared->merged_part_group;

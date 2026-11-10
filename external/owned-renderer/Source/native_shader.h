@@ -852,11 +852,12 @@ float neighbourSeamWaveWeight(float2 p){
 NativeWorldVertex prepareNativeWorldVertex(NativeInstance instance,uint componentAddress){
  NativeWorldVertex output=(NativeWorldVertex)0;
  uint4 component=nativeGeometry.Load4(componentAddress);
+ bool skinned=(component.y&0x80000000u)!=0;component.y&=0x7fffffffu;
  // Merged characters (flag 0x40): each component names its part's node and
  // position base; the part animates exactly as its own record would.
  uint partNode=0,positionBase=0;
- if((instance.nativeFlags&0x40u)!=0){partNode=component.w&0xffffu;positionBase=component.w>>16;}
- if(instance.poseNode!=0xffffffff)instance.objectToWorld=nativeNodeMatrix(instance.poseNode+partNode);
+ if(!skinned&&(instance.nativeFlags&0x40u)!=0){partNode=component.w&0xffffu;positionBase=component.w>>16;}
+ if(!skinned&&instance.poseNode!=0xffffffff)instance.objectToWorld=nativeNodeMatrix(instance.poseNode+partNode);
  float3 position=0;
  if(instance.shapeCount==8){
   [unroll]for(uint shape=0;shape<8;shape++){
@@ -867,7 +868,7 @@ NativeWorldVertex prepareNativeWorldVertex(NativeInstance instance,uint componen
              endpoint.x*endpoint.y*endpoint.z;
   }
  }else position=loadPacked(instance.geometryOffsets.x,component.x).xyz;
- if(instance.poseNode!=0xffffffff){
+ if(!skinned&&instance.poseNode!=0xffffffff){
   NativePoseNode node=nativePoseNodes[instance.poseNode+partNode];
   uint local=component.x-positionBase;
   if(local<node.morphCount){
@@ -905,6 +906,24 @@ NativeWorldVertex prepareNativeWorldVertex(NativeInstance instance,uint componen
  output.p=mul(instance.objectToWorld,float4(position,1));
  float3 normal=loadPacked(instance.geometryOffsets.y,component.y).xyz;
  output.normal.xyz=normalize(mul(transpose(inverseObjectLinear(instance.objectToWorld)),normal));
+ if(skinned){
+  uint4 joints=nativeGeometry.Load4(component.w);
+  float4 weights=asfloat(nativeGeometry.Load4(component.w+16));
+  float3 world=0,worldNormal=0;
+  [unroll]for(uint influence=0;influence<4;++influence){
+   if(weights[influence]>0){
+    uint address=component.w+32+influence*48;
+    // Three rows, uploaded from the column-vector disk contract once.
+    float4x4 inverseBind=float4x4(asfloat(nativeGeometry.Load4(address)),
+      asfloat(nativeGeometry.Load4(address+16)),asfloat(nativeGeometry.Load4(address+32)),float4(0,0,0,1));
+    float4x4 palette=mul(nativeNodeMatrix(instance.poseNode+joints[influence]),inverseBind);
+    world+=weights[influence]*mul(palette,float4(position,1)).xyz;
+    worldNormal+=weights[influence]*mul(transpose(inverseObjectLinear(palette)),normal);
+   }
+  }
+  output.p=float4(world,1);output.undeformedXY=world.xy;
+  output.normal.xyz=normalize(worldNormal);
+ }
  [branch]if((instance.worldGeometry&@WORLD_VERTEX_OPACITY@)!=0)output.normal.w=loadPacked(instance.geometryOffsets.y,component.y).w;
  output.uv=asfloat(nativeGeometry.Load2(instance.geometryOffsets.z+component.z*8));
  output.diffuse=instance.colorOffsets.x==0xffffffff?0xffffffff:nativeGeometry.Load(instance.colorOffsets.x+component.y*4);
