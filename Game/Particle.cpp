@@ -4466,7 +4466,6 @@ BOOL CParticle::PathSingleCreate(SSingleParticle *pSPart, int nNumber)
 {
 #ifndef _A4
     CPlot3D ptPos;
-    CMapObject *pMO = (CMapObject *)GetCarrier();
     if (locSources.GetSize() == 0)
     {
         locSources.SetSize(1);
@@ -4478,13 +4477,8 @@ BOOL CParticle::PathSingleCreate(SSingleParticle *pSPart, int nNumber)
         else if (fpPower == 2)
             locSources[0].nPhase = RGBA_MAKE(0xFF, 0x80, 0x28, 0);
     }
-    // ASSERT( GetCarrier() );
-    if (!pMO)
-        return FALSE;
-    if (nNumber > fpPower2)
-        return FALSE;
-    int nTime = theWorld.GetSegmentTimeCounter() + nNumber;
-    if(pMO->WhoAmI()!=HPC_UNIT || !static_cast<CUnit*>(pMO)->GetRoutePosition(float(nTime),ptPos))return FALSE;
+    if(nNumber<0||size_t(nNumber)>=pathMarkers.size())return FALSE;
+    ptPos=pathMarkers[nNumber];
     if (locSources[0].reserved == ptPos)
         return FALSE;
     locSources[0].reserved = ptPos;

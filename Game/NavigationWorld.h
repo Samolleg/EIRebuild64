@@ -137,6 +137,7 @@ public:
     bool AttackPosition(CUnit* unit,CUnit* target,Navigation::Point goal,float reach,float maxLength,Navigation::Location& result);
     bool CanPlace(CUnit* unit,Navigation::Point point,int aiClass=3);
     bool Support(CUnit* unit,Navigation::Point point,Navigation::Location& result);
+    std::vector<CPlot3D> PathMarkers(CUnit*,CAIFullRoute&,float limit);
     bool Step(CUnit* unit,Navigation::Point from,Navigation::Point desired,Navigation::Location& result,const CAIRoute* route=nullptr);
     bool Restore(CUnit* unit,CAIMap& map);
     struct Movement {

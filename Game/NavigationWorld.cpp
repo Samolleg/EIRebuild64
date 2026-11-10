@@ -24,6 +24,7 @@
 #include "nlohmann/json.hpp"
 #include <regex>
 #include "RandomGen.h"
+#include "../external/recastnavigation/Detour/Include/DetourNavMeshQuery.h"
 #include "MapEditObject.h"
 #include "ObjectDBReader.h"
 using namespace Navigation;
@@ -717,6 +718,37 @@ bool NavigationWorld::Goal(CUnit* unit,Navigation::Point reference,Navigation::L
     // across the source height range, preferring the origin's floor by height.
     const float vertical=mesh->sources->maximum.y-mesh->sources->minimum.y+4.f;
     return Navigation::Project(*mesh,reference,.15f,vertical,result,Height(unit),Navigation::ExcludeClass(unit->GetAIClass()));
+}
+std::vector<CPlot3D> NavigationWorld::PathMarkers(CUnit* unit,CAIFullRoute& route,float limit) {
+    std::vector<CPlot3D> markers;
+    if(!unit||!route.IsMoving()||route.route.route.GetCount()<2)return markers;
+    auto* mesh=ForUnit(unit);if(!mesh)return markers;
+    std::vector<Point> path;
+    for(POSITION i=route.route.route.GetHeadPosition();i;) {
+        const auto& node=route.route.route.GetNext(i);
+        path.push_back({AITile2Meter(node.point.x),AITile2Meter(node.point.y),node.supportZ});
+    }
+    Location cursor;
+    const auto flags=ExcludeClass(unit->GetAIClass());const float height=Height(unit);
+    if(!Flies(mesh->profile)&&!StartLocation(*mesh,path.front(),cursor,height,flags))return markers;
+    CRouteWalker walker;walker.SetSpeeds(FP_SHOW_PATH_SPEED,1e10f);walker.CreateWalkerRoute(route);
+    const int tick=owner->GetSegmentTimeCounter();
+    for(int i=0;i<2500&&i<=limit;++i) {
+        CPlot3D pos,dir;float speed=0,z=0;bool rotating=false;int x=-1,y=-1;
+        const bool moving=walker.GetPosition(owner,route,float(tick+i),rotating,pos,dir,speed,x,y,&z);
+        Point desired{AITile2Meter(pos.x),AITile2Meter(pos.y),z};
+        if(!Flies(mesh->profile)) {
+            Location at;
+            if(!Follow(*mesh,cursor.position,desired,path,at,height,nullptr,&cursor,flags))break;
+            const auto nav=ToNav(desired);const float point[]={nav.x,nav.y,nav.z};float surface=0;
+            if(dtStatusFailed(mesh->query->getPolyHeight(at.polygon,point,&surface)))break;
+            desired.z=surface;cursor=at;
+        }
+        CPlot3D marker(desired.x,desired.y,desired.z);
+        markers.push_back(marker);
+        if(!moving)break;
+    }
+    return markers;
 }
 bool NavigationWorld::Support(CUnit* unit,Navigation::Point point,Navigation::Location& result) {
     auto* mesh=ForUnit(unit);
