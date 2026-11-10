@@ -8,14 +8,21 @@
 // Supported layout: <game>/Engine64/EIRebuild64.exe.
 namespace RuntimePaths64 {
 namespace fs = std::filesystem;
-inline const fs::path& Root() {
+inline const fs::path& Engine() {
     static const fs::path root = [] {
         wchar_t module[32768]{};
         const DWORD size = GetModuleFileNameW(nullptr, module, 32768);
         if (!size || size >= 32768) throw std::runtime_error("Cannot resolve x64 game root");
-        return fs::path(module).parent_path().parent_path();
+        return fs::path(module).parent_path();
     }();
     return root;
+}
+inline fs::path Root() { return Engine().parent_path(); }
+// Configuration inputs are resolved once, independently of process CWD.
+inline fs::path ResolveSetting(const fs::path& value) {
+    if (value.empty() || value.wstring().find(L'\0') != std::wstring::npos || (!value.is_absolute() && (value.has_root_name() || value.has_root_directory())))
+        throw std::invalid_argument("Ambiguous settings path");
+    return (value.is_absolute() ? value : Engine() / value).lexically_normal();
 }
 inline fs::path Directory(const wchar_t* name) {
     auto path = Root() / name;

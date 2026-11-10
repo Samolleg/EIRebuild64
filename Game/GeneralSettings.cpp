@@ -11,6 +11,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModPackage.h"
 #include "ModRuntime.h"
 #include <filesystem>
+#include "RuntimePaths64.h"
 /////////////////////////////////////////////////////////////////////////////////////
 SGeneralSettings theSettings;
 namespace {
@@ -21,10 +22,7 @@ float ImportedShortcutPitch(float value) {
 }
 std::filesystem::path InstalledGameRoot()
 {
-    char modulePath[1024] = {};
-    DWORD length = GetModuleFileNameA(nullptr, modulePath, sizeof(modulePath));
-    if (!length || length >= sizeof(modulePath)) return {};
-    const auto engine = std::filesystem::path(modulePath).parent_path();
+    const auto& engine = RuntimePaths64::Engine();
     const auto portable = engine.parent_path() / "Base";
     if (std::filesystem::is_regular_file(portable / "Res" / "database.res") &&
         std::filesystem::is_directory(portable / "Maps")) return portable;
@@ -38,7 +36,10 @@ std::filesystem::path InstalledGameRoot()
 }
 CString DirectoryWithSlash(const std::filesystem::path &path)
 {
-    return CString((path.string() + "\\").c_str());
+    auto directory = path.string();
+    if (directory.empty() || (directory.back() != '\\' && directory.back() != '/'))
+        directory += '\\';
+    return CString(directory.c_str());
 }
 }
 /////////////////////////////////////////////////////////////////////////////////////
@@ -215,9 +216,9 @@ void SGeneralSettings::ReadSettingsFromFile(LPCSTR szSettingsFileName)
     ////////////////////////////////////////////////////////////////////////////////////
     // COMMON SETTINGS (independent from user)
     // pathes settings
-    szWorkPath = reg.GetString(szPathSettings, "Work path", szWorkPath);
-    szResourcePath = reg.GetString(szPathSettings, "Resources path", szResourcePath);
-    szCDPath = reg.GetString(szPathSettings, "CD-ROM Path", szCDPath);
+    szWorkPath = DirectoryWithSlash(RuntimePaths64::ResolveSetting((LPCSTR)reg.GetString(szPathSettings, "Work path", szWorkPath)));
+    szResourcePath = DirectoryWithSlash(RuntimePaths64::ResolveSetting((LPCSTR)reg.GetString(szPathSettings, "Resources path", szResourcePath)));
+    szCDPath = DirectoryWithSlash(RuntimePaths64::ResolveSetting((LPCSTR)reg.GetString(szPathSettings, "CD-ROM Path", szCDPath)));
     ////////////////////////////////////////////////////////////////////////////////////
     // GENERAL SETTINGS
     // video settings
@@ -474,9 +475,7 @@ void SGeneralSettings::WriteSettingsToFile(LPCSTR szSettingsFileName)
     ////////////////////////////////////////////////////////////////////////////////////
     // COMMON SETTINGS (independent from user)
     // pathes settings
-    reg.SetString(szPathSettings, "Work path", szWorkPath);
-    reg.SetString(szPathSettings, "Resources path", szResourcePath);
-    reg.SetString(szPathSettings, "CD-ROM Path", szCDPath);
+    // Keep the original path settings on disk for portable installations.
     ////////////////////////////////////////////////////////////////////////////////////
     // GENERAL SETTINGS
     // video settings
@@ -663,19 +662,20 @@ void SGeneralSettings::ReadSettingsFromRegistry(LPCSTR pszRegistryKey)
     ////////////////////////////////////////////////////////////////////////////////////
     // COMMON SETTINGS (independent from user).
     // pathes settings
-    // EIStarter starts in Starter/Engine, while loose game data lives in the
-    // installation root. Keep every explicitly configured path unchanged.
+    // Explicit profile paths take precedence over detected default data roots.
     const auto gameRoot = InstalledGameRoot();
-    const bool portableLayout = gameRoot.filename() == "Base";
     CString configuredWork = reg.GetString(szPathSettings, "Work path", "");
     CString configuredResources = reg.GetString(szPathSettings, "Resources path", "");
     CString configuredCD = reg.GetString(szPathSettings, "CD-ROM Path", "");
-    szWorkPath = portableLayout ? DirectoryWithSlash(gameRoot) : !configuredWork.IsEmpty() ? configuredWork
+    szWorkPath = !configuredWork.IsEmpty() ? configuredWork
         : !gameRoot.empty() ? DirectoryWithSlash(gameRoot) : szWorkPath;
-    szResourcePath = portableLayout ? DirectoryWithSlash(gameRoot / "Res") : !configuredResources.IsEmpty() ? configuredResources
+    szResourcePath = !configuredResources.IsEmpty() ? configuredResources
         : !gameRoot.empty() ? DirectoryWithSlash(gameRoot / "Res") : szResourcePath;
-    szCDPath = portableLayout ? DirectoryWithSlash(gameRoot) : !configuredCD.IsEmpty() ? configuredCD
+    szCDPath = !configuredCD.IsEmpty() ? configuredCD
         : !gameRoot.empty() ? DirectoryWithSlash(gameRoot) : szCDPath;
+    szWorkPath = DirectoryWithSlash(RuntimePaths64::ResolveSetting((LPCSTR)szWorkPath));
+    szResourcePath = DirectoryWithSlash(RuntimePaths64::ResolveSetting((LPCSTR)szResourcePath));
+    szCDPath = DirectoryWithSlash(RuntimePaths64::ResolveSetting((LPCSTR)szCDPath));
     //
     ////////////////////////////////////////////////////////////////////////////////////
     // GENERAL SETTINGS
@@ -930,9 +930,7 @@ void SGeneralSettings::WriteSettingsToRegistry(LPCSTR pszRegistryKey)
     ////////////////////////////////////////////////////////////////////////////////////
     // COMMON SETTINGS (independent from user)
     // pathes settings
-    reg.SetString(szPathSettings, "Work path", szWorkPath);
-    reg.SetString(szPathSettings, "Resources path", szResourcePath);
-    reg.SetString(szPathSettings, "CD-ROM Path", szCDPath);
+    // Keep the original path settings on disk for portable installations.
     //
     ////////////////////////////////////////////////////////////////////////////////////
     // GENERAL SETTINGS

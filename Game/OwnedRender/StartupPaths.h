@@ -37,44 +37,36 @@ void CaptureGraphicsMounts(owned::ResourceStoreConfig& mounts,
     addMod(3, owned::kArchiveTextures);
 }
 
-inline std::filesystem::path ResolveProfilePath(const std::filesystem::path& value,
-    const std::filesystem::path& profileDirectory) {
-    if (value.empty() || value.wstring().find(L'\0') != std::wstring::npos ||
-        !profileDirectory.is_absolute())
-        throw std::invalid_argument("invalid renderer profile path");
-    // Drive-relative and root-relative paths would depend on process state.
-    if (!value.is_absolute() && (value.has_root_name() || value.has_root_directory()))
-        throw std::invalid_argument("ambiguous renderer profile path");
-    return (value.is_absolute() ? value : profileDirectory / value).lexically_normal();
+inline std::filesystem::path AbsoluteInput(const std::filesystem::path& value) {
+    if (!value.is_absolute() || value.wstring().find(L'\0') != std::wstring::npos) throw std::invalid_argument("relative startup resource path");
+    return value;
 }
 
 // Package is CModPackage in production. Copy its already selected resource
 // plan, including duplicates and the ignore-original flag; never enumerate RES.
 template<class Package>
 owned::EmbeddedHostPaths CaptureStartupPaths(const std::filesystem::path& engine,
-    const std::filesystem::path& profile, const std::filesystem::path& work,
+    const std::filesystem::path& work,
     const std::filesystem::path& resources, const Package* package) {
-    const auto profileDirectory = profile.parent_path();
-    const auto workRoot = ResolveProfilePath(work, profileDirectory);
-    const auto resourceRoot = ResolveProfilePath(resources, profileDirectory);
+    const auto workRoot = AbsoluteInput(work);
+    const auto resourceRoot = AbsoluteInput(resources);
     owned::EmbeddedHostPaths paths;
     if (!engine.is_absolute()) throw std::invalid_argument("relative engine directory");
     paths.renderer_config = RuntimePaths64::Config("rddraw.ini").wstring();
-    const auto modRoot = package ? ResolveProfilePath(std::filesystem::path(package->Directory()),
-        profileDirectory) : workRoot;
+    const auto modRoot = package ? AbsoluteInput(std::filesystem::path(package->Directory())) : workRoot;
     paths.world_map_layouts = (modRoot / L"world-map-layouts.json").wstring();
     if (package) paths.mounts.loose_roots.push_back((modRoot / L"Maps").wstring());
     paths.mounts.loose_roots.push_back((workRoot / L"Maps").wstring());
     CaptureGraphicsMounts(paths.mounts, resourceRoot, package, [&](const std::string& replacement) {
-        return ResolveProfilePath(std::filesystem::path(replacement), profileDirectory).wstring();
+        return AbsoluteInput(std::filesystem::path(replacement)).wstring();
     });
     const auto captureFamily = [&](const char* name, owned::ResourceStoreConfig& mounts) {
         std::vector<std::string> replacements;
         bool ignore = false;
         if (package) package->ResourcePlan(name, replacements, ignore);
         for (const auto& replacement : replacements)
-            mounts.archives.push_back(ResolveProfilePath(
-                std::filesystem::path(replacement), profileDirectory).wstring());
+            mounts.archives.push_back(AbsoluteInput(
+                std::filesystem::path(replacement)).wstring());
         if (!ignore) mounts.archives.push_back((resourceRoot / name).wstring());
     };
     captureFamily("texts.res", paths.text_mounts);
