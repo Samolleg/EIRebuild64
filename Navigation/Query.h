@@ -3,6 +3,8 @@
 namespace Navigation {
 // A zero class mask uses the profile's representative material class.
 bool Project(const Mesh& mesh,Point point,float horizontal,float vertical,Location& result,float height=0,unsigned short excludedFlags=0);
+// Nearest Detour polygon for sampled approach endpoints, retaining source support.
+bool NearestSupport(const Mesh&,Point,float horizontal,float vertical,Location&,float height,unsigned short excludedFlags);
 bool StartLocation(const Mesh& mesh,Point point,Location& result,float height=0,unsigned short excludedFlags=0);
 // Placement/load resolve by position and height; the old surface only breaks ties.
 bool ResolveLocation(const Mesh&,Point point,const Location* hint,Location& result,float height,unsigned short excludedFlags=0);

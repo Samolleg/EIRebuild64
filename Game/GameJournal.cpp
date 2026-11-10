@@ -59,6 +59,7 @@ struct Lock {
 };
 struct Entry { std::string line; bool important; };
 struct Repeat { DWORD time; unsigned count; std::string detail; };
+struct NavRepeat { DWORD time=0; unsigned count=0; std::string detail; };
 struct Counter { DWORD time; unsigned count; std::string category, event, key; };
 struct AnimationGap { unsigned long long ordinary=0, missing=0, skipped=0, idle=0; };
 struct CombatPair {
@@ -70,6 +71,7 @@ struct State {
     std::deque<Entry> queue;
     std::map<std::string, Repeat> repeats;
     std::map<std::string, Repeat> notifications;
+    std::map<std::pair<std::string,int>, NavRepeat> navigation;
     std::map<std::string, Counter> counters;
     std::map<std::pair<std::string, DWORD>, AnimationGap> animationGaps;
     std::map<std::pair<int,int>, CombatPair> combat;
@@ -169,6 +171,13 @@ void Drain(State& s, bool tryQueue = false, bool critical = false) {
             }
             if (s.stopping || now - repeat.time >= 60000) it = s.notifications.erase(it);
             else ++it;
+        }
+        for(auto it=s.navigation.begin();it!=s.navigation.end();) {
+            auto& repeat=it->second;
+            if(critical||s.stopping||now-repeat.time>=2000) {
+                if(repeat.count)pending.push_back(Line("NAV",it->first.first.c_str(),repeat.detail+" suppressed="+std::to_string(repeat.count)));
+                it=s.navigation.erase(it);
+            } else ++it;
         }
         CombatDrain(s, pending, CombatNow(), true);
         for (auto it = s.repeats.begin(); it != s.repeats.end();) {
@@ -604,7 +613,21 @@ void Event(const char* category,const char* event,const char* format,...) noexce
     try {
         va_list copy;va_copy(copy,args);int n=_vscprintf(format,copy);va_end(copy);
         if(n>=0){std::vector<char> text(static_cast<size_t>(n)+1);vsnprintf_s(text.data(),text.size(),_TRUNCATE,format,args);
-            Enqueue(*s,Line(category,event,Utf8(text.data())),strcmp(category,"ERROR")==0||strcmp(category,"ZONE")==0||strcmp(category,"SAVE")==0||strcmp(category,"LOAD")==0);}
+            auto detail=Utf8(text.data());
+            int unit=0;
+            if(strcmp(category,"NAV")==0&&sscanf_s(text.data(),"unit=%d",&unit)==1) {
+                Lock guard(s->queueLock);if(s->stopping){va_end(args);return;}
+                const auto key=std::make_pair(std::string(event),unit);const DWORD now=GetTickCount();
+                auto it=s->navigation.find(key);
+                if(it!=s->navigation.end()) {
+                    auto& repeat=it->second;
+                    if(repeat.detail==detail&&now-repeat.time<2000){if(repeat.count<~0u)++repeat.count;va_end(args);return;}
+                    if(repeat.count)Append(*s,Line("NAV",event,repeat.detail+" suppressed="+std::to_string(repeat.count)));
+                    s->navigation.erase(it);
+                }
+                s->navigation.emplace(key,NavRepeat{now,0,detail});
+                Append(*s,Line(category,event,detail));
+            } else Enqueue(*s,Line(category,event,detail),strcmp(category,"ERROR")==0||strcmp(category,"ZONE")==0||strcmp(category,"SAVE")==0||strcmp(category,"LOAD")==0);}
     }catch(...){} va_end(args);
     if(strcmp(category,"ERROR")==0)Synchronize(*s);
 }

@@ -811,6 +811,7 @@ public:
     bool IsDanger();
     bool GetPathDestination(CPlot3D &ptRes);
     bool HasRangedAttack();
+    bool HasBodyMeleeAttack() { return !HasRangedAttack() && GetCurrentWeaponType()!=RPGWST_MAGIC; }
     //
     virtual int Segment();
     virtual void RemoveReferencesOn(CMapObject *pTarget);
