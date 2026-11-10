@@ -19,7 +19,7 @@ definition headers, compile C sources and archive the static library.
 These build generators run as part of compilation; no interpreter or game is
 run for verification. No `luajit.exe` is built.
 
-Only the private batch copy changes: add `/MD /DLUAJIT_ENABLE_GC64`, finish after
+Only the private batch copy changes: add `/MT /DLUAJIT_ENABLE_GC64`, finish after
 the library, and return a nonzero failure code. Upstream x64 enables GC64 through
 `lj_arch.h` by default; `LUAJIT_ENABLE_GC64` documents the explicit request,
 while `LUAJIT_DISABLE_GC64` is never passed. `vcvars64.bat` selects native x64

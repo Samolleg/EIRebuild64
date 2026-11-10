@@ -27,11 +27,11 @@ New-Item -ItemType Directory -Force -Path $sourceCopy | Out-Null
 Copy-Item -LiteralPath (Join-Path $vendor 'src'),(Join-Path $vendor 'dynasm'),(Join-Path $vendor '.relver') -Destination $sourceCopy -Recurse -Force
 
 # Use the pinned upstream build steps. Adapt only this private generated copy:
-# /MD for the static library and build tools, explicit GC64 request, library-only
+# /MT for the static library and build tools, explicit GC64 request, library-only
 # completion, and an actual nonzero exit code when upstream reports failure.
 $batchPath = Join-Path $sourceCopy 'src/msvcbuild.bat'
 $batch = [IO.File]::ReadAllText($batchPath).Replace("`r`n", "`n")
-$batch = $batch.Replace('@set LJCOMPILE=cl /nologo /c /O2 /W3 ', '@set LJCOMPILE=cl /nologo /c /O2 /W3 /MD /DLUAJIT_ENABLE_GC64 ')
+$batch = $batch.Replace('@set LJCOMPILE=cl /nologo /c /O2 /W3 ', '@set LJCOMPILE=cl /nologo /c /O2 /W3 /MT /DLUAJIT_ENABLE_GC64 ')
 $start = $batch.IndexOf("`n:MTDLL`n") + 1
 $end = $batch.IndexOf("`n:SETHOSTVARS`n") + 1
 if ($start -lt 0 -or $end -le $start) { throw 'Pinned msvcbuild layout changed.' }
@@ -70,4 +70,4 @@ foreach ($header in 'lua.h','lua.hpp','lauxlib.h','lualib.h','luaconf.h','luajit
 }
 Copy-Item -LiteralPath (Join-Path $sourceCopy 'src/jit') -Destination $output -Recurse -Force
 Copy-Item -LiteralPath (Join-Path $vendor 'COPYRIGHT') -Destination $output -Force
-Write-Output "Built static LuaJIT x64 GC64 (/MD): $library"
+Write-Output "Built static LuaJIT x64 GC64 (/MT): $library"

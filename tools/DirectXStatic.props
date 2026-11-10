@@ -1,0 +1,7 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+ <ItemDefinitionGroup><ClCompile><AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\external\DirectXTex;$(MSBuildThisFileDirectory)..\external\DirectXTK\Inc;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile><Link><AdditionalDependencies>windowscodecs.lib;d3d11.lib;dxguid.lib;%(AdditionalDependencies)</AdditionalDependencies></Link></ItemDefinitionGroup>
+ <ItemGroup>
+  <ProjectReference Include="$(MSBuildThisFileDirectory)..\external\DirectXTex\DirectXTex.vcxproj"><Project>{DA2B3309-0011-4321-ABCD-111111111111}</Project></ProjectReference>
+  <ProjectReference Include="$(MSBuildThisFileDirectory)..\external\DirectXTK\DirectXTK.vcxproj"><Project>{DA2B3309-0011-4321-ABCD-222222222222}</Project></ProjectReference>
+ </ItemGroup>
+</Project>

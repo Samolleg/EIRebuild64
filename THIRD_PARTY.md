@@ -10,24 +10,20 @@
 |---|---|---|
 | miniaudio | `third_party/miniaudio/miniaudio.h`, v0.11.25 (2026-03-04); https://github.com/mackron/miniaudio | Выбор public domain или MIT-0, полный текст `third_party/miniaudio/LICENSE` и в заголовке. Постоянный аудиобэкенд. |
 | nlohmann/json | `SDKs/JSON/`, v3.10.5; https://github.com/nlohmann/json | MIT, notice и полный текст в `SDKs/JSON/json.hpp`; это отдельный компонент, не удаляется вместе с dx7sdk. |
-| LuaJIT GC64 x64 | `third_party/luajit/`, v2.1, pin `a4c064539ea931274d407e1249b4bb575424a0f4`, 2026-10-21 15:09:24 +02:00, version timestamp `1792588164`; https://luajit.org/git/luajit.git | MIT, полный `COPYRIGHT`; [PROVENANCE](third_party/luajit/PROVENANCE.md), [рецепт](tools/luajit/README.md). Полный неизменённый source; VM генерируется при сборке, статическая библиотека x64 GC64 с `/MD`. P14: хост использует matching публичные заголовки и библиотеку; старые LuaState и luajit-x86 удалены. |
+| LuaJIT GC64 x64 | `third_party/luajit/`, v2.1, pin `a4c064539ea931274d407e1249b4bb575424a0f4`, 2026-10-21 15:09:24 +02:00, version timestamp `1792588164`; https://luajit.org/git/luajit.git | MIT, полный `COPYRIGHT`; [PROVENANCE](third_party/luajit/PROVENANCE.md), [рецепт](tools/luajit/README.md). Полный неизменённый source; VM генерируется при сборке, статическая библиотека x64 GC64 с `/MT`. P14: хост использует matching публичные заголовки и библиотеку; старые LuaState и luajit-x86 удалены. |
 | Рендер автора | `external/owned-renderer/`; upstream `ef7e12467db17ef673f8ce3b105063b4b3b16417`; https://github.com/Ilufus/evil-islands-owned-renderer | PolyForm Noncommercial 1.0.0; полные `LICENSE.md`, `NOTICE.md` и все Required Notice сохранены в vendor-копии. EID3D11 renderer by Ilufus. Это изменённая embedded-версия EIRebuild64; локальные отличия перечислены в `PROVENANCE.md`. Лицензии third-party сохраняют собственные условия. |
 | Dear ImGui | `external/owned-renderer/ThirdParty/imgui/`; https://github.com/ocornut/imgui, commit `f1cc2ae15e53a861a874c3034aae6798fde194ab` | MIT; `LICENSE.txt` и `PROVENANCE.md` в каталоге компонента. |
 | meshoptimizer | `external/owned-renderer/ThirdParty/meshoptimizer/`; https://github.com/zeux/meshoptimizer, v1.1 | MIT; `LICENSE.md` и `PROVENANCE.md` в каталоге компонента. |
 | SMAA | `external/owned-renderer/ThirdParty/smaa/`; https://github.com/iryoku/smaa | MIT; `LICENSE.txt` и `PROVENANCE.md`. В provenance исходный upstream commit не указан; не приписывать снимку выдуманный pin. |
 | Ресурсы camp UI | `external/owned-renderer/Assets/camp/` | Происхождение отдельных изображений в `PROVENANCE.txt`; это asset provenance, не общая лицензия рендера и не разрешение на распространение игровых данных. |
 
-## Закреплённые NuGet-зависимости
+## DirectXTex и DirectXTK
 
-Сами restored packages не включены в исходное дерево. Pins остаются в
-`packages.config`, архитектура импорта MSBuild — `x64`; P06 не выполняет restore
-и не подтверждает содержимое ещё не полученных x64 libraries.
-
-| Пакет | Версия | Источник / notices |
-|---|---|---|
-| `directxtex_desktop_2019` | `2024.6.5.1` | DirectXTex, https://github.com/microsoft/DirectXTex, MIT; LICENSE и notices из точного восстановленного пакета сохраняются при подготовке комплекта. |
-| `directxtk_desktop_2019` | `2024.6.5.1` | DirectXTK, https://github.com/microsoft/DirectXTK, MIT; сохранить LICENSE/notices точного пакета. Наличие общих helpers не разрешает возвращать старый OpenEI. |
-| `Microsoft.XAudio2.Redist` | `1.2.11` | https://www.nuget.org/packages/Microsoft.XAudio2.Redist/1.2.11 ; отдельные условия Microsoft из пакета, не MIT. Необходимость для выбранного miniaudio backend и notices уточняются P22/P24; import пока сохранён. |
+Microsoft DirectXTex / DirectXTK, tag jun2024 (DirectXTex соответствует NuGet
+2024.6.5.1), MIT. Нужные исходники, LICENSE и точные SHA256 исходных архивов
+сохранены в `external/DirectXTex` и `external/DirectXTK` (PROVENANCE.md).
+Локальные проекты собирают статические библиотеки с /MT, Debug /MTd.
+NuGet DirectXTex/DirectXTK и XAudio2.Redist не используются.
 
 ## Закреплённый source и рецепт FFmpeg (P19)
 
@@ -76,9 +72,9 @@ other countries. Copyright NVIDIA Corporation. All rights reserved.
 
 The SDK is external, not vendored. Run tools/prepare-worktree.ps1; its
 -DlssSdkSource parameter or EIREBUILD64_DLSS_SDK environment variable overrides
-the default work/deps64/dlss-sdk/v310.9.16 source. Build property DlssSdkRoot
+the default deps/dlss-sdk/v310.9.16 source. Build property DlssSdkRoot
 can override the prepared dependencies/dlss/v310.9.16 location. The host links
-the Windows x64 nvsdk_ngx_d.lib (/MD), preserving the existing CRT. Only the
+the Windows x64 nvsdk_ngx_s.lib (/MT), or nvsdk_ngx_s_dbg.lib (/MTd) for Debug. Only the
 release nvngx_dlss.dll is shipped beside EIRebuild64.exe, with the unchanged
 SDK LICENSE.txt at licenses/NVIDIA-DLSS-LICENSE.txt. Headers/import libraries
 and development DLLs are excluded from the handoff and Git.
