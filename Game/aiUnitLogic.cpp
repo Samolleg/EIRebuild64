@@ -435,7 +435,6 @@ bool CAISpellCaster::CanAttackEnemyFrom(CAIUnitLogic &logic, const CPlot3D &ptFr
 bool CAISpellCaster::CanAttackEnemy(CAIUnitLogic &logic, const CEnemy &target, bool bDoNotMove)
 {
     if(IsWeaponSkillChoice(logic,target)){CEnemy weapon=target;weapon.nAttackNumber=-1;return CanAttackEnemy(logic,weapon,bDoNotMove);}
-    SAIPath fakePath;
     CUnit *pAttacker = logic.GetUnit();
     CPlot3D ptFrom;
     // check for spell
@@ -453,33 +452,17 @@ bool CAISpellCaster::CanAttackEnemy(CAIUnitLogic &logic, const CEnemy &target, b
         ptFrom = pAttacker->GetCP();
     else
     {
-        // check I path to target exist or at least monster can attack target from closest reachable
-        // point
-        float fpMaxPathLength = pAttacker->GetMaxAttackPathLength(
-            fabs(pAttacker->GetCP() - target.pEnemy->GetCP()));
-        float fpMinDistance = pAttacker->GetAttackDistance() + target.pEnemy->GetAttackDistance();
+        const float distance=fabs(pAttacker->GetCP()-target.pEnemy->GetCP());
+        const float maxLength=pAttacker->GetMaxAttackPathLength(distance);
         auto* server=logic.GetUnitServer();
-        const bool bodyMelee=target.nAttackNumber<0&&server->HasBodyMeleeAttack();
-        if(bodyMelee) {
-            // Motivation and execution must agree on a reachable strike endpoint.
-            // Otherwise the AI keeps reissuing attacks at an unreachable centre.
-            ptFrom=pAttacker->GetCP();
-            if(theWorldServer.aiMap.CheckCircleCollision(pAttacker,ptFrom)||!CanAttackEnemyFrom(logic,ptFrom,target)) {
-                Navigation::Location approach;
-                auto& nav=theWorldServer.aiMap.Navigation();
-                const auto center=nav.Position(target.pEnemy,theWorldServer.aiMap);
-                if(!nav.AttackPosition(pAttacker,target.pEnemy,center,server->EncounterAttackRange(target.pEnemy),fpMaxPathLength,approach))return false;
-                ptFrom=CPlot3D(approach.position.x,approach.position.y,pAttacker->GetCP().z);
-            }
-        } else {
-            theWorldServer.aiMap.RemoveObject(target.pEnemy);
-            if (!theWorldServer.aiMap.NewPath(pAttacker, target.pEnemy->GetCP(), fakePath,
-                                              fpMaxPathLength, fpMinDistance,Navigation::GoalPolicy::Exact,nullptr,&target.pEnemy->navLocation))
-                ptFrom = pAttacker->GetCP();
-            else
-                ptFrom = fakePath.GetFinalPoint();
-            theWorldServer.aiMap.AddObject(target.pEnemy);
-        }
+        const float reach=target.nAttackNumber<0&&server->HasBodyMeleeAttack()?
+            server->EncounterAttackRange(target.pEnemy):pAttacker->GetAttackDistance()+target.pEnemy->GetAttackDistance();
+        ptFrom=pAttacker->GetCP();
+        if(CanAttackEnemyFrom(logic,ptFrom,target))return true;
+        if(!theWorldServer.aiMap.Navigation().Reachable(pAttacker,target.pEnemy,maxLength,reach))return false;
+        // Keep spell/weapon and target-height admission without choosing a strike endpoint.
+        const auto center=target.pEnemy->GetCP();
+        return CanAttackEnemyFrom(logic,CPlot3D(center.x,center.y,pAttacker->GetCP().z),target);
     }
     // some advanced checks
     if (!CanAttackEnemyFrom(logic, ptFrom, target))

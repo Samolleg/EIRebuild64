@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <tuple>
 #include <set>
+#include <unordered_map>
 #include "../external/recastnavigation/Detour/Include/DetourNavMesh.h"
 #include "../external/recastnavigation/Detour/Include/DetourNavMeshQuery.h"
 
@@ -25,6 +26,8 @@ struct Mesh {
         std::vector<Obstacle> obstacles;
     };
     mutable Scratch scratch; // Queries on a mesh are serialized by the owner.
+    // Weak components include directed/off-mesh links: different IDs prove no route.
+    std::unordered_map<dtPolyRef,dtPolyRef> components;
     Profile profile;
     std::shared_ptr<const Geometry> sources;
     std::set<int> excludedObjects;
@@ -56,6 +59,8 @@ struct SourceReuse {Bytes previous, keys;};
 Bytes StoreSources(const Geometry& geometry,SourceReuse* reuse=nullptr);
 std::shared_ptr<Geometry> LoadSources(Bytes bytes,std::array<double,3>* stages=nullptr);
 void IndexSurfaces(Mesh& mesh);
+void IndexConnectivity(Mesh& mesh);
+bool Connected(const Mesh& mesh,dtPolyRef from,dtPolyRef to);
 void IndexSources(Geometry& geometry,float tileWidth);
 std::unique_ptr<Mesh> RebuildTile(const Geometry& geometry,const Profile& profile,int x,int z);
 void ReplaceTile(Mesh& mesh,Mesh& replacement,int x,int z);

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <iterator>
 #include <unordered_set>
+#include <chrono>
 
 
 namespace Navigation {
@@ -242,7 +243,13 @@ bool StartLocation(const Mesh& m,Point p,Location& result,float height,unsigned 
     if(!Start(m,*query,p,filter,ref,near,actual,ingress,height))return false;
     result=Address(m,ingress?ToNav(actual):near,ref,height,p.z);return true;
 }
+bool ClosestLocation(const Mesh& m,Point point,Location& result,float height,unsigned short excludedFlags) {
+    if(!m.query||!m.data||!m.tiles)return false;
+    dtQueryFilter filter;filter.setIncludeFlags(ClearanceMask(m.profile,height));filter.setExcludeFlags(ClassFlags(m,excludedFlags));
+    return ClosestGoal(m,*m.query,point,filter,height,result)==Status::Complete;
+}
 Route Find(const Mesh& m,const Request& r) {
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(4);
     Route result;if(!m.data||!m.tiles){result.status=Status::NoMesh;return result;}
     if(!Finite(r.source)||!Finite(r.goal)||!std::isfinite(r.maxLength)||r.maxLength<0||!std::isfinite(r.goalRadius)||r.goalRadius<0)return result;
     auto* query=Query(m);if(!query){result.status=Status::Limit;return result;}auto& q=*query;
@@ -252,23 +259,27 @@ Route Find(const Mesh& m,const Request& r) {
     dtPolyRef from=0,to=0;Point source,goal,actual;bool ingress=false;
     if(!Start(m,q,r.source,filter,from,source,actual,ingress,height,r.start)){result.status=Status::NoStart;return result;}
     if(!Nearest(m,q,r.goal,std::max(.15f,r.goalRadius),4.f,filter,to,goal,r.goalSupport?r.goalSupport->surface:0,height)) {
-        if(r.goalPolicy==GoalPolicy::Exact){result.status=Status::NoGoal;return result;}
+        if(r.goalPolicy==GoalPolicy::Exact&&m.profile.movement==Movement::Ground){result.status=Status::NoGoal;return result;}
         Location closest;const auto selected=ClosestGoal(m,q,r.goal,filter,height,closest);
         if(selected!=Status::Complete){result.status=selected;return result;}
         to=closest.polygon;goal=ToNav(closest.position);result.goalStatus=Status::NoGoal;
     }
+    const bool disconnected=!Connected(m,from,to);
+    if(disconnected&&r.goalPolicy==GoalPolicy::Exact){result.status=Status::NoPath;return result;}
     float start[3]={source.x,source.y,source.z},end[3]={goal.x,goal.y,goal.z};
     // Fixed work bound within Detour, no retry with a different pathfinder.
     auto status=q.initSlicedFindPath(from,to,start,end,&filter);
     int iterations=0;
-    while(dtStatusInProgress(status)&&iterations<65536){int done=0;status=q.updateSlicedFindPath(2048,&done);iterations+=done;if(!done)break;}
-    if(dtStatusInProgress(status)||Limited(status)){result.status=Status::Limit;return result;}
+    constexpr int nodeBudget=512;
+    while(dtStatusInProgress(status)&&iterations<nodeBudget&&std::chrono::steady_clock::now()<deadline){int done=0;status=q.updateSlicedFindPath(std::min(64,nodeBudget-iterations),&done);iterations+=done;if(!done)break;}
+    const bool limited=dtStatusInProgress(status)||Limited(status);
     if(dtStatusFailed(status)){result.status=Status::NoPath;return result;}
     const bool reached=from==to||q.isInClosedList(to);
     bool selectedPartial=false;
+    if(limited&&r.goalPolicy==GoalPolicy::Exact){result.status=Status::Limit;return result;}
     if(!reached&&r.goalPolicy==GoalPolicy::ClosestReachable) {
-        // An exhausted A* contains the entire reachable component. Choose the
-        // closest actual polygon boundary to the click, not the heuristic's
+        // Choose among explored polygons (the whole reachable component when
+        // exhausted, a prefix when bounded). Use the boundary, not the heuristic's
         // closest portal midpoint and not the closest point to the unit.
         ClosestGoalQuery closest(m,q,r.goal,height);
         const auto* pool=q.getNodePool();
@@ -276,10 +287,11 @@ Route Find(const Mesh& m,const Request& r) {
             const auto* node=pool->getNodeAtIdx(unsigned(i));
             if(node->flags&DT_NODE_CLOSED)closest.Consider(node->id);
         }
-        if(!closest.best.polygon){result.status=Status::NoPath;return result;}
+        if(!closest.best.polygon)closest.Consider(from);
+        if(!closest.best.polygon){result.status=limited?Status::Limit:Status::NoPath;return result;}
         to=closest.best.polygon;goal=ToNav(closest.best.position);
         end[0]=goal.x;end[1]=goal.y;end[2]=goal.z;
-        if(result.goalStatus==Status::Complete)result.goalStatus=Status::NoPath;
+        if(result.goalStatus==Status::Complete)result.goalStatus=limited?Status::Limit:Status::NoPath;
         selectedPartial=true;
     }
     auto& corridor=m.scratch.corridor;corridor.resize(8192);int count=0;
@@ -312,6 +324,7 @@ Route Find(const Mesh& m,const Request& r) {
     result.status=straighten(corridor,result);
     if(result.status!=Status::Complete){result.points.clear();result.corridor.clear();return result;}
     result.plannedCost=result.cost;
+    unsigned smoothingWork=std::chrono::steady_clock::now()<deadline?256:0;
     if(count>1&&!ingress) {
         // Use the movement portal traversal for visibility too. Detour's float
         // raycast can stop at a shared grid corner although the segment passes
@@ -320,8 +333,10 @@ Route Find(const Mesh& m,const Request& r) {
         candidate.points.push_back(result.points.front());
         const auto a=result.points.front().position,b=result.points.back().position;
         const int samples=std::max(1,int(std::ceil(std::hypot(b.x-a.x,b.y-a.y)/m.profile.cellSize)));
-        bool clear=samples<60000;
+        bool clear=unsigned(samples)<=smoothingWork;
+        if(clear)smoothingWork-=unsigned(samples);
         for(int i=1;clear&&i<=samples;++i) {
+            if((i&15)==1&&std::chrono::steady_clock::now()>=deadline){clear=false;break;}
             const float f=float(i)/samples;Location at;
             const auto previous=candidate.points.back();
             clear=Constrain(m,previous.position,{a.x+(b.x-a.x)*f,a.y+(b.y-a.y)*f,a.z+(b.z-a.z)*f},at,height,nullptr,&previous,r.excludedFlags);
@@ -353,12 +368,16 @@ Route Find(const Mesh& m,const Request& r) {
     // A route may turn around land before entering water. Shorten its visible
     // portions too; the source triangle identity is not a raster corner.
     for(size_t i=1;i+1<result.points.size();) {
+        if(!smoothingWork||std::chrono::steady_clock::now()>=deadline)break;
         const auto a=result.points[i-1],middle=result.points[i],b=result.points[i+1];
         bool clear=a.area==middle.area&&middle.area==b.area;
         const int samples=std::max(1,int(std::ceil(Distance(a.position,b.position)/m.profile.cellSize)));
-        clear=clear&&samples<=256;Location previous=a;float cost=0;
+        clear=clear&&unsigned(samples)<=smoothingWork;
+        if(clear)smoothingWork-=unsigned(samples);
+        Location previous=a;float cost=0;
         std::vector<dtPolyRef> crossed;
         for(int k=1;clear&&k<=samples;++k) {
+            if((k&15)==1&&std::chrono::steady_clock::now()>=deadline){clear=false;break;}
             const float f=float(k)/samples;Location at;
             clear=Constrain(m,previous.position,{a.position.x+(b.position.x-a.position.x)*f,a.position.y+(b.position.y-a.position.y)*f,a.position.z+(b.position.z-a.position.z)*f},at,height,nullptr,&previous,r.excludedFlags)&&at.area==a.area;
             if(clear){cost+=Distance(previous.position,at.position)*filter.getAreaCost(previous.area);crossed.push_back(at.polygon);previous=at;}
@@ -395,6 +414,8 @@ Route Find(const Mesh& m,const Request& r) {
 }
 namespace {
 Route FindAround(const Mesh& mesh,const Request& input) {
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::milliseconds(4);
+    const auto exhausted=[&]{return std::chrono::steady_clock::now()>=deadline;};
     auto& scratch=mesh.scratch;auto& obstacles=scratch.obstacles;obstacles=*input.obstacles;
     for(auto& obstacle:obstacles) {
         const float d=std::hypot(input.source.x-obstacle.position.x,input.source.y-obstacle.position.y);
@@ -435,6 +456,7 @@ Route FindAround(const Mesh& mesh,const Request& input) {
     for(const auto* o:rings)reach=std::max(reach,std::hypot(o->position.x-request.source.x,o->position.y-request.source.y)+ringRadius(*o)+1.f);
     if(reach>24.f){Route failed;failed.status=Status::Limit;return failed;}
     const float height=request.height>0?request.height:mesh.profile.height;
+    if(exhausted()){Route failed;failed.status=Status::Limit;return failed;}
     Location anchor=direct.points.back();size_t tail=direct.points.size();float along=0;
     for(size_t i=1;i<direct.points.size();++i) {
         const auto a=direct.points[i-1].position,b=direct.points[i].position;const float length=std::hypot(b.x-a.x,b.y-a.y);
@@ -451,6 +473,7 @@ Route FindAround(const Mesh& mesh,const Request& input) {
     if(!anchor.polygon&&!Project(mesh,anchor.position,.001f,4.f,anchor,height,request.excludedFlags)){Route failed;failed.status=Status::NoGoal;return failed;}
     nodes.push_back(source);nodes.push_back(anchor);
     for(const auto* o:rings)for(int i=0;i<12;++i) {
+        if(exhausted()){Route failed;failed.status=Status::Limit;return failed;}
         const float angle=float(i)*6.283185307f/12,radius=ringRadius(*o);Location at;
         const Point p{o->position.x+radius*std::cos(angle),o->position.y+radius*std::sin(angle),o->position.z};
         if(Project(mesh,p,.001f,4.f,at,height,request.excludedFlags)&&clearSegment(at.position,at.position))nodes.push_back(at);
@@ -462,6 +485,7 @@ Route FindAround(const Mesh& mesh,const Request& input) {
         const int samples=std::max(1,int(std::ceil(Distance(a.position,b.position)/mesh.profile.cellSize)));
         if(samples>60000)return false;
         for(int i=1;i<=samples;++i) {
+            if((i&15)==1&&exhausted())return false;
             const float f=float(i)/samples;Location at;
             const Point point{a.position.x+(b.position.x-a.position.x)*f,a.position.y+(b.position.y-a.position.y)*f,a.position.z+(b.position.z-a.position.z)*f};
             if(!Constrain(mesh,previous.position,point,at,height,nullptr,&previous,request.excludedFlags)||!clearSegment(a.position,at.position))return false;
@@ -477,16 +501,18 @@ Route FindAround(const Mesh& mesh,const Request& input) {
     cost.assign(nodes.size(),1.e30f);length.assign(nodes.size(),0);previous.assign(nodes.size(),-1);closed.assign(nodes.size(),0);incoming.resize(nodes.size());cost[0]=0;
     const float minimumCost=*std::min_element(std::begin(request.areaCosts),std::end(request.areaCosts));
     for(size_t iteration=0;iteration<nodes.size();++iteration) {
+        if(exhausted())break;
         size_t from=nodes.size();float best=1.e30f;
         for(size_t i=0;i<nodes.size();++i)if(!closed[i]){const float estimate=cost[i]+Distance(nodes[i].position,nodes[1].position)*minimumCost;if(estimate<best){best=estimate;from=i;}}
         if(from==nodes.size()||from==1)break;closed[from]=1;
         for(size_t to=1;to<nodes.size();++to) {
+            if(exhausted())break;
             if(closed[to]||to==from||cost[from]+Distance(nodes[from].position,nodes[to].position)*minimumCost>=cost[to]||!clearSegment(nodes[from].position,nodes[to].position))continue;
             if(!segment(nodes[from],nodes[to])||length[from]+edge.length>request.maxLength||cost[from]+edge.cost>=cost[to])continue;
             cost[to]=cost[from]+edge.cost;length[to]=length[from]+edge.length;previous[to]=int(from);incoming[to]=edge;
         }
     }
-    Route result;result.status=Status::NoPath;if(previous[1]<0)return result;
+    Route result;result.status=exhausted()?Status::Limit:Status::NoPath;if(previous[1]<0)return result;
     std::vector<int> chain;for(int i=1;i!=0;i=previous[i])chain.push_back(i);std::reverse(chain.begin(),chain.end());
     for(int i:chain)for(const auto& at:incoming[i].points)if(result.points.empty()||Distance(result.points.back().position,at.position)>.00001f)result.points.push_back(at);
     for(int i:chain)result.corridor.insert(result.corridor.end(),incoming[i].corridor.begin(),incoming[i].corridor.end());

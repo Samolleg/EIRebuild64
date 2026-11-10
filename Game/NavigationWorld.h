@@ -41,6 +41,12 @@ class NavigationWorld {
         Navigation::Status status=Navigation::Status::Invalid,reason=Navigation::Status::Complete;
     };
     std::map<int,GroundGoal> groundGoals;
+    struct FailedQuery {Navigation::Point source,goal;std::uint64_t after=0,generation=0;int profile=0,aiClass=0;float height=0,maxLength=0,radius=0;Navigation::GoalPolicy policy=Navigation::GoalPolicy::Exact;Navigation::Status status=Navigation::Status::NoPath;};
+    std::map<int,std::vector<FailedQuery>> failedQueries;
+    struct AttackGoal {int target=0;Navigation::Point center;Navigation::Location endpoint;float reach=0;std::uint64_t generation=0;};
+    std::map<int,AttackGoal> attackGoals;
+    struct PositionFailure {Navigation::Point center,source;float inner=0,outer=0;int target=0;std::uint64_t generation=0,after=0;};
+    std::map<int,std::vector<PositionFailure>> positionFailures;
     bool ObserveAir(CUnit* unit,AirEvent event,unsigned& suppressed);
     bool loaded=false;
     bool iceVariant=false;
@@ -114,7 +120,7 @@ public:
     void Advance();
     std::uint64_t Generation() const { return generation; }
     void Stop(int id) { queues.erase(id); }
-    void ForgetUnit(int id) { Stop(id);flyingUnits.erase(id);airJournal.erase(id);groundGoals.erase(id); }
+    void ForgetUnit(int id) { Stop(id);flyingUnits.erase(id);airJournal.erase(id);groundGoals.erase(id);failedQueries.erase(id);attackGoals.erase(id);positionFailures.erase(id); }
     bool Goal(CUnit* unit,Navigation::Point reference,Navigation::Location& result);
     float Radius(CUnit* unit) { return (std::max)(.05f,Body(unit).radius); }
     bool RandomGoal(CUnit* unit,Navigation::Point center,float radius,Navigation::Point& goal,Navigation::RandomShape shape=Navigation::RandomShape::Circle);
@@ -136,6 +142,7 @@ public:
     void YieldAlong(CUnit*,Navigation::Point from,Navigation::Point next);
     bool CanYield(CUnit* stronger,CUnit* weaker);
     bool YieldFor(CUnit* stronger,CUnit* weaker,Navigation::Point next);
+    bool Reachable(CUnit* unit,CUnit* target,float maxLength,float reach);
     bool AttackPosition(CUnit* unit,CUnit* target,Navigation::Point goal,float reach,float maxLength,Navigation::Location& result);
     bool CanPlace(CUnit* unit,Navigation::Point point,int aiClass=3);
     bool Support(CUnit* unit,Navigation::Point point,Navigation::Location& result);

@@ -20,6 +20,8 @@ private:
     int nWidth;
     int nHeight; // in real pixels
     int nLineHeight;
+    int nFontPixels=0;
+    int nBorder=8,nScrollWidth=10,nMinTextWidth=50;
     CRect rcRequested;
     CRect rcReal;
 
