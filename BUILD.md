@@ -1,3 +1,10 @@
+> X64STATICCRT: настройки переведены на статический CRT; итоговая сборка пока не подтверждена.
+> Нужна x64 `/MT` библиотека NVIDIA `nvsdk_ngx_s.lib` версии v310.9.16.
+> Локально есть только `/MD` `nvsdk_ngx_d.lib`; подготовка останавливается до копирования зависимостей.
+> Локальные NuGet DirectXTex и DirectXTK 2024.6.5.1 также содержат `/MD` библиотеки:
+> для игры и skn_texpack нужна их пересборка из исходников той же версии с `/MT`; исходников локально нет.
+> Не подавлять LNK2038 и не смешивать CRT. Исторические результаты сборки ниже относятся к прежнему main.
+
 > NEWPROJ03: внутри C:/Dev/EvilIslands зависимости находятся в `deps`, локальный NuGet — `deps/nuget`. `tools/prepare-worktree.ps1` находит RULES.md вверх от checkout, в том числе из tasks/<ID>/wt. Глобальные caches и старый work не являются его defaults.
 > Выполните `powershell -NoProfile -ExecutionPolicy Bypass -File tools/prepare-worktree.ps1`, затем `MSBuild EI_Rebuild.sln /m:4 /nr:false /t:Build /p:Configuration=Release /p:Platform=x64`. Рецепт ниже относится к самостоятельному клону вне нового корня.
 
@@ -14,7 +21,7 @@
 ## Инструменты и клон
 
 - Visual Studio 2022 / Build Tools: C++ v143 для x64/x86, **MFC v143** и Windows SDK
-  (включая `rc.exe`); Git. Сборка использует C++17 и динамический CRT `/MD`.
+  (включая `rc.exe`); Git. Сборка использует C++17 и статический CRT `/MT` и статическую MFC.
 - Для сборки FFmpeg: MSYS2, GNU make, NASM и остальные инструменты из
   [рецепта FFmpeg](tools/ffmpeg/README.md). Установка системных пакетов здесь
   не проверялась; проверен уже установленный набор инструментов.
@@ -90,7 +97,7 @@ set "PATH=C:\msys64\ucrt64\bin;C:\msys64\usr\bin;%PATH%"
 **DLSS SDK.** Получите отдельно [официальный тег v310.9.16](https://github.com/NVIDIA/DLSS/tree/v310.9.16),
 commit `9981c6350dc58c0ce21f024fd65e31e851c31689`. Нужны шесть заголовков
 `include/nvsdk_ngx{,_defs,_params,_helpers,_helpers_d3d,_helpers_cuda}.h`,
-`lib/Windows_x86_64/x64/nvsdk_ngx_d.lib`,
+`lib/Windows_x86_64/x64/nvsdk_ngx_s.lib`,
 `lib/Windows_x86_64/rel/nvngx_dlss.dll` и `LICENSE.txt` с исходной структурой папок.
 Тег и этот список проверены удалённо; полная загрузка SDK заново не проверялась.
 При сборке использован ранее полученный SDK этого коммита; содержимое нужных
@@ -125,7 +132,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
 Размещаются обе EXE в `<игра>/Engine64/`, рядом — `avcodec-62.dll`,
 `avformat-62.dll`, `avutil-60.dll`, `swscale-9.dll`, `swresample-6.dll` из
 `dependencies/ffmpeg/8.1.3/x64/bin` и release `nvngx_dlss.dll` из SDK.
-Нужны также x64 runtime Visual C++/MFC. LuaJIT и ресурсы шейдеров встроены.
+Visual C++/MFC и LuaJIT линкуются статически; ресурсы шейдеров встроены.
 Лицензии и notices сохраняются согласно [THIRD_PARTY.md](THIRD_PARTY.md).
 
 Рабочая папка запуска — `Engine64`; аргумент движку —
