@@ -117,5 +117,5 @@
 
   <ItemGroup><ClInclude Include="$(OwnedRendererRoot)Source\frame_plan.h" /><ClInclude Include="$(OwnedRendererRoot)Source\cave_irradiance.h" /><ClInclude Include="$(OwnedRendererRoot)Source\liquid_surf.h" /><ClInclude Include="$(OwnedRendererRoot)Source\embedded_game_effects.h" /></ItemGroup>
   <ItemDefinitionGroup><ClCompile><PreprocessorDefinitions>EID3D11_EMBEDDED;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile></ItemDefinitionGroup>
-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Import Project="RendererPch.targets" /><Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

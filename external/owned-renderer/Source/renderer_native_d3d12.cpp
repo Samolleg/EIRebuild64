@@ -2007,6 +2007,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  d3d12_->set_resource(2,native12_.dynamic.get());
  d3d12_->set_resource(5,native12_.draws.get());
  d3d12_->set_resource(13,native12_.instances.get());
+ d3d12_->set_resource(126,native12_.instances.get());
  d3d12_->set_resource(16,work);
  // The occlusion pyramid (nativeHiZ, t26) while b3 says it is active.
  d3d12_->set_resource(26,native_occlusion_active()?native_hiz12_.get():nullptr);
@@ -2055,6 +2056,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  d3d12_->set_resource(7,native12_.prepared.get());
  d3d12_->set_resource(8,native12_.world_vertices.get());
  d3d12_->set_resource(13,native12_.instances.get());
+ d3d12_->set_resource(126,native12_.instances.get());
  d3d12_->set_resource(10,native12_.animation.get());
  d3d12_->set_resource(12,native12_.pose_nodes.get());
  d3d12_->set_resource(19,native12_.layer_shifts.get());
@@ -2709,6 +2711,7 @@ HRESULT Renderer::flush_native_shadows_d3d12(){
    d3d12_->set_resource(10,native12_.animation.get());
    d3d12_->set_resource(12,native12_.pose_nodes.get());
    d3d12_->set_resource(13,native12_.instances.get());
+ d3d12_->set_resource(126,native12_.instances.get());
    d3d12_->set_resource(16,work);
    if(bake&&active->masked)d3d12_->set_resource(35,native_shadow_work_mask12_.get()); // terrain bake: this redraw's per-work map masks
    d3d12_->set_resource(19,native12_.layer_shifts.get());

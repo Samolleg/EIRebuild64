@@ -1,0 +1,10 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- Only build-task.ps1 supplies hit properties after verifying cached payloads. -->
+  <PropertyGroup Condition="'$(EITaskCacheHit)'=='true'">
+    <BuildDependsOn></BuildDependsOn>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(MSBuildProjectName)'=='EI_Rebuild' and '$(EIRecastCacheHit)'=='true'">
+    <ClCompile Remove="external\recastnavigation\Recast\Source\*.cpp;external\recastnavigation\Detour\Source\*.cpp" />
+    <Link Include="$(IntDir)Recast*.obj;$(IntDir)Detour*.obj" />
+  </ItemGroup>
+</Project>

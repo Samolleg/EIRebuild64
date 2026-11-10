@@ -40,8 +40,9 @@
   </ItemGroup>
   <Target Name="ScriptCheckBuildInputs" BeforeTargets="ClCompile">
     <MakeDir Directories="$(IntDir)" />
-    <Exec WorkingDirectory="$(ScriptCheckRoot)" Command="git -c safe.directory=&quot;$(ScriptCheckRoot)&quot; describe --always --abbrev=12 --dirty --exclude=* &gt; &quot;$(IntDir)compiler-commit.txt&quot;" />
-    <ReadLinesFromFile File="$(IntDir)compiler-commit.txt"><Output TaskParameter="Lines" PropertyName="ScriptCheckCommit" /></ReadLinesFromFile>
+    <!-- build-task.ps1 builds outside Git and passes the source commit explicitly. -->
+    <Exec Condition="'$(ScriptCheckCommit)' == ''" WorkingDirectory="$(ScriptCheckRoot)" Command="git -c safe.directory=&quot;$(ScriptCheckRoot)&quot; describe --always --abbrev=12 --dirty --exclude=* &gt; &quot;$(IntDir)compiler-commit.txt&quot;" />
+    <ReadLinesFromFile Condition="'$(ScriptCheckCommit)' == ''" File="$(IntDir)compiler-commit.txt"><Output TaskParameter="Lines" PropertyName="ScriptCheckCommit" /></ReadLinesFromFile>
     <Error Condition="'$(ScriptCheckCommit)' == ''" Text="Cannot identify ScriptCheck source commit" />
     <WriteLinesToFile File="$(IntDir)CompilerVersion.h" Lines="#define SCRIPT_CHECK_COMMIT &quot;$(ScriptCheckCommit)&quot;" Overwrite="true" WriteOnlyWhenDifferent="true" />
     <ItemGroup><JsonHeaders Include="$(MSBuildThisFileDirectory)..\SDKs\JSON\**\*.hpp" /></ItemGroup>

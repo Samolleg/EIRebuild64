@@ -160,6 +160,7 @@ bool native_record_takes_lod(const NativeGeometryView& view,NativeOpacityClass o
   (view.ordering==NativeOrdering::derive_from_state &&
    (view.semantic_kind==SemanticKind::figure || view.semantic_kind==SemanticKind::terrain ||
     view.semantic_kind==SemanticKind::simple_geometry) && opacity!=NativeOpacityClass::ordered);
+ if(view.skin_vertices)return lod_levels&&view.world.enabled;
  return lod_levels&&view.world.enabled&&(view.world.object_space||view.world.static_lod)&&
   !view.morph_count&&opacity==NativeOpacityClass::opaque&&reorderable;
 }
@@ -182,6 +183,7 @@ std::size_t Renderer::NativeMeshKeyHash::operator()(const NativeMeshKey& key) co
 std::size_t Renderer::NativeMaterialKeyHash::operator()(const NativeMaterialKey& key) const noexcept{
  std::uint64_t hash=1469598103934665603ull;
  hash=hash_bytes(hash,key.state.data(),key.state.size()*sizeof(key.state[0]));
+ hash=hash_bytes(hash,&key.skn_material,sizeof(key.skn_material));
  hash=hash_bytes(hash,&key.shadow,sizeof(key.shadow));
  hash=hash_bytes(hash,&key.contact_map,sizeof(key.contact_map));
  hash=hash_bytes(hash,&key.texture_backing,sizeof(key.texture_backing));
@@ -1020,7 +1022,7 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
  if(lods){
   if(lods->levels>kStaticLodMaxLevels||has_terrain)return E_INVALIDARG;
   for(UINT level=0;level<lods->levels;++level){
-   if(lods->indices[level].empty()||lods->indices[level].size()%3||
+   if((lods->indices[level].empty()&&!source.skin_vertices)||lods->indices[level].size()%3||
       !std::isfinite(lods->error[level])||lods->error[level]<0)return E_INVALIDARG;
    for(const auto index:lods->indices[level])if(index>=source.component_count)return E_INVALIDARG;
   }
@@ -1038,7 +1040,7 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
      !reserve(color_bytes,mesh.diffuse_storage_offset)||
      !reserve(color_bytes,mesh.specular_storage_offset)||
      (has_terrain&&!reserve(terrain_bytes,mesh.terrain_vertex_offset))||
-     (source.skin_vertices&&!reserve(std::uint64_t(source.component_count)*224,skin_at))||
+     (source.skin_vertices&&!reserve(std::uint64_t(source.component_count)*240,skin_at))||
      (lods&&!reserve(64,lod_table_at))||!reserve(index_bytes,mesh.index_offset))
   return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
  for(UINT level=0;lods&&level<lods->levels;++level)
@@ -1057,10 +1059,10 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
   try{blob.assign(cursor,0);}catch(const std::bad_alloc&){return abandon(E_OUTOFMEMORY);}
   const auto put=[&](UINT offset,const void* data,std::uint64_t bytes){if(data&&bytes)std::memcpy(blob.data()+offset,data,static_cast<std::size_t>(bytes));};
   if(source.skin_vertices){
-   put(skin_at,source.skin_vertices,std::uint64_t(source.component_count)*224);
+   put(skin_at,source.skin_vertices,std::uint64_t(source.component_count)*240);
    for(UINT i=0;i<components.size();++i){
     components[i].normal|=0x80000000u;
-    components[i].padding=mesh.allocation.offset+skin_at+i*224;
+    components[i].padding=mesh.allocation.offset+skin_at+i*240;
    }
   }
   put(mesh.position_offset,source.positions,position_bytes);
@@ -1073,13 +1075,14 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
   put(mesh.index_offset,indices.data(),index_bytes);
   if(lods){
    auto* table=reinterpret_cast<UINT*>(blob.data()+lod_table_at);
-   table[0]=lods->levels;
+   table[0]=lods->levels;table[1]=lods->skn_base_triangles;
    for(UINT level=0;level<lods->levels;++level){
     const auto& list=lods->indices[level];
     put(lod_at[level],list.data(),list.size()*sizeof(std::uint32_t));
     auto* entry=table+4*(level+1);
     entry[0]=mesh.allocation.offset+lod_at[level];entry[1]=static_cast<UINT>(list.size()/3);
     std::memcpy(&entry[2],&lods->error[level],sizeof(float));
+    std::memcpy(&entry[3],&lods->hysteresis[level],sizeof(float));
    }
    mesh.lod_levels=lods->levels;mesh.lod_extra_triangles=static_cast<UINT>(lods->indices[0].size()/3);
   }
@@ -3313,15 +3316,18 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
       // original hair beneath the fur pass, rather than its original alpha.
       const auto opacity=native_material_state(state,alpha,
        native_alpha_evidence(source,alpha,!wound,&values),native_shadow_collecting_,state,material_state);
-      const auto key=native_material_key(state,source.semantic_kind,opacity,values.lighting_enabled!=0,
+      auto key=native_material_key(state,source.semantic_kind,opacity,values.lighting_enabled!=0,
        group.texture_srv!=nullptr||group.texture_d3d12,group.texture_array,group.material_key.texture_backing,group.material_key.texture_generation,group.material_key.contact_map);
+      key.skn_material=source.skn_material.identity;
+      const auto skn_textures=group.skn_textures;
       const auto ordering=wound?NativeOrdering::preserve:static_cast<NativeOrdering>(values.ordering);
       draw.reorderable=ordering==NativeOrdering::reorderable||
        (ordering==NativeOrdering::derive_from_state&&opacity!=NativeOpacityClass::ordered);
       draw.preserve_order=ordering==NativeOrdering::preserve;
       {const D3D12TextureRef texture12=group.texture_d3d12; // the D3D12 texture stays with the re-keyed bucket
       if(FAILED(hr=get_native_material_group(key,state,group.texture_srv.Get(),group.texture_array,source.semantic_kind,
-          opacity,native_material_state_key(key),draw.state_bucket,texture12?&texture12:nullptr)))return fail(hr,"records.material");}
+          opacity,native_material_state_key(key),draw.state_bucket,texture12?&texture12:nullptr)))return fail(hr,"records.material");
+      native_state_buckets_[draw.state_bucket].skn_textures=skn_textures;}
      }
      NativeGeometryView lod_view=source;
      lod_view.ordering=wound?NativeOrdering::preserve:static_cast<NativeOrdering>(values.ordering);
@@ -3636,6 +3642,7 @@ Renderer::NativeMaterialKey Renderer::native_material_key(const FixedState& st,S
 std::uint64_t Renderer::native_material_state_key(const NativeMaterialKey& material_key) noexcept{
  std::uint64_t state_key=hash_bytes(1469598103934665603ull,material_key.state.data(),
    material_key.state.size()*sizeof(material_key.state[0]));
+  state_key=hash_bytes(state_key,&material_key.skn_material,sizeof(material_key.skn_material));
   state_key=hash_bytes(state_key,&material_key.shadow,sizeof(material_key.shadow));
   state_key=hash_bytes(state_key,&material_key.contact_map,sizeof(material_key.contact_map));
   state_key=hash_bytes(state_key,&material_key.texture_backing,sizeof(material_key.texture_backing));
@@ -3776,6 +3783,7 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
    if(slot.active&&slot.generation==handle.generation&&
       same_prepared_identity(slot.identity,view.prepared_identity,false)&&
       slot.presentation_serial==view.prepared_identity.presentation_serial&&
+      slot.material_key.skn_material==view.skn_material.identity&&
       slot.material_key.texture_backing==current_texture_backing&&
       slot.material_key.texture_generation==current_texture_generation&&
       slot.material_key.shadow==UINT(native_shadow_collecting_)&&
@@ -3798,9 +3806,10 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
  if(!prepared_material_hit){
   // D3D12 backend (bindless): the texture is the draw's own index, not part
   // of its bucket, so draws of one state share a batch across textures.
-  const auto material_key=native_material_key(*material_state,view.semantic_kind,opacity,view.lighting.enabled!=0,
+  auto material_key=native_material_key(*material_state,view.semantic_kind,opacity,view.lighting.enabled!=0,
    texture_srv!=nullptr||(d3d12_texture&&*d3d12_texture)||surface_d3d12,texture_array,d3d12_?0:current_texture_backing,
    d3d12_?0:current_texture_generation,view.contact_map);
+  material_key.skn_material=view.skn_material.identity;
   const auto state_key=native_material_state_key(material_key);
   if(prepared){
    hr=resolve_native_prepared_material(view,*material_state,texture,texture_srv.Get(),
@@ -3810,6 +3819,26 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
   }else{
    hr=get_native_material_group(material_key,*material_state,texture_srv.Get(),texture_array,view.semantic_kind,opacity,state_key,bucket_index,d3d12_texture?d3d12_texture:(surface_d3d12?&surface_d3d12:nullptr));
    if(FAILED(hr)){native_pending_upload_.resize(upload_start);return fail(hr,"material_bucket_allocation");}
+  }
+ }
+ if(view.skn_material.identity){
+  std::copy_n(view.skn_material.factors,4,draw.instance.skn_factors);
+  std::copy_n(view.skn_material.emission,4,draw.instance.skn_emission);
+  std::copy_n(view.skn_material.base,4,draw.instance.skn_base);
+  auto& bucket=native_state_buckets_[bucket_index];
+  for(unsigned k=0;k<3;++k){
+   const auto& map=view.skn_material.maps[k];
+   if(native_shadow_collecting_||!map.mip_count)continue;
+   std::uint64_t backing=0;
+   if(d3d12_){
+    if(FAILED(hr=get_native_owned_texture_d3d12(map,draw.skn_textures12[k],backing,result,true,true)))return hr;
+    const auto index=d3d12_->bindless_index(*draw.skn_textures12[k]);
+    if(index==UINT_MAX)return E_OUTOFMEMORY;
+    draw.instance.skn_maps[k]=index;
+   }else{
+    if(FAILED(hr=get_native_owned_texture(map,bucket.skn_textures[k],backing,result,true,true)))return hr;
+   }
+   draw.instance.skn_maps[3]|=1u<<k;
   }
  }
  if(d3d12_){

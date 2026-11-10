@@ -33,10 +33,11 @@
   </ItemGroup>
   <!-- Compile only shared shader producers and preset data, with the runtime embedded contract. -->
   <ItemDefinitionGroup><ClCompile><PreprocessorDefinitions>EID3D11_SHADER_EMBED;EID3D11_EMBEDDED;%(PreprocessorDefinitions)</PreprocessorDefinitions><FunctionLevelLinking>true</FunctionLevelLinking></ClCompile><Link><OptimizeReferences>true</OptimizeReferences><EnableCOMDATFolding>true</EnableCOMDATFolding><LargeAddressAware>true</LargeAddressAware><AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;dxguid.lib;user32.lib;gdi32.lib;comctl32.lib;bcrypt.lib;pdh.lib;psapi.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link></ItemDefinitionGroup>
-  <Target Name="GenerateRendererResources" AfterTargets="Build" Inputs="$(TargetPath);$(OwnedRendererRoot)Source\camp_art.rc;$(OwnedRendererRoot)Assets\arena\fragments-v1.bin;$(OwnedRendererRoot)Assets\camp\stone-bronze-frame.png;$(OwnedRendererRoot)Assets\camp\ui-art-atlas-v4.png;$(OwnedRendererRoot)Assets\camp\hammer-anvil-empty.png" Outputs="$(OutDir)eid3d11_shaders.bin;$(OutDir)eid3d11_shaders.res;$(OutDir)eid3d11_camp_art.res">
+  <Target Condition="'$(EICacheRendererShaders)'!='true'" Name="GenerateRendererResources" AfterTargets="Build" Inputs="$(TargetPath);$(OwnedRendererRoot)Source\camp_art.rc;$(OwnedRendererRoot)Assets\arena\fragments-v1.bin;$(OwnedRendererRoot)Assets\camp\stone-bronze-frame.png;$(OwnedRendererRoot)Assets\camp\ui-art-atlas-v4.png;$(OwnedRendererRoot)Assets\camp\hammer-anvil-empty.png" Outputs="$(OutDir)eid3d11_shaders.bin;$(OutDir)eid3d11_shaders.res;$(OutDir)eid3d11_camp_art.res">
     <Exec Command="&quot;$(TargetPath)&quot; eid3d11_shaders.bin" WorkingDirectory="$(OutDir)" />
     <Exec Command="&quot;$([System.String]::Copy('$(WindowsSDK_ExecutablePath_x64)').Split(';').GetValue(0))\rc.exe&quot; /nologo /fo eid3d11_shaders.res eid3d11_shaders.rc" WorkingDirectory="$(OutDir)" />
     <Exec Command="&quot;$([System.String]::Copy('$(WindowsSDK_ExecutablePath_x64)').Split(';').GetValue(0))\rc.exe&quot; /nologo /fo &quot;$(OutDir)eid3d11_camp_art.res&quot; Source\camp_art.rc" WorkingDirectory="$(OwnedRendererRoot)" />
   </Target>
-  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Import Project="RendererPch.targets" /><Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+<PropertyGroup><EITaskCacheHit>$(EICacheRendererShaders)</EITaskCacheHit></PropertyGroup><Import Project="../tools/TaskCache.targets" />
 </Project>
