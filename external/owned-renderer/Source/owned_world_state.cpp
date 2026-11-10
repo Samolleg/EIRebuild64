@@ -155,7 +155,7 @@ bool submit_owned_visual_records(const RetainedVisualSample& sample,
     submission.parts=parts;submission.count=count;submission.pose=&sample.prepared->gpu_pose;
     submission.identity={sample.lifecycle.id,sample.lifecycle.generation,sample.lifecycle.positive_world_epoch,
         sample.resource.serial,0,0,serial,true};
-    submission.world_to_clip=&clip;submission.wound_surface_interface=wound;
+    submission.world_to_clip=&clip;submission.wound_surface_interface=sample.values.nala.selected?0:wound;
     submission.retained_color_diagnostic=retained_color_diagnostic;
     NativeGeometryView dispatch;dispatch.prepared_submission=&submission;
     const bool accepted=g_native_sink_submit&&g_native_sink_submit(g_native_sink_context,dispatch,result);

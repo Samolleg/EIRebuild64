@@ -42,6 +42,8 @@ bool produce_model_preview(const ModelPreviewInput& input, std::size_t count,
     NativeWorldGeometry::Pose* pose = nullptr;
     if (!retained_visual_gpu_pose(input.sample, pose) || !pose) return false;
     pose->root_to_world = input.object_to_world;
+    bool nalaDrawn=false;
+    if(input.sample.values.nala.selected && (!retained_visual_merged_groups(input.sample) || input.sample.prepared->merged_groups.empty()))return false;
     return produce_model_parts(count, read, bind,
         [&](std::size_t index, std::uint32_t& visible) {
             ModelPreviewPart part;
@@ -50,6 +52,26 @@ bool produce_model_preview(const ModelPreviewInput& input, std::size_t count,
             const auto& asset = input.sample.assembly->parts[part.ordinal];
             if (part.hidden || (input.sample.values.unit && unit_service_node(asset.name.c_str())))
                 return true;
+            if(input.sample.values.nala.selected && part.ordinal<input.sample.prepared->merged_part_group.size() &&
+               input.sample.prepared->merged_part_group[part.ordinal]>=0){
+                visible=part.visible;if(nalaDrawn)return true;
+                NativeWorldBounds bounds{};
+                if(!retained_visual_world_bounds(input.sample,bounds))return false;
+                for(unsigned group=0;group<input.sample.prepared->merged_groups.size();++group){
+                    NativePreparedPartSubmission* record=nullptr;
+                    if(!retained_visual_group_submission(input.sample,group,bounds,{true,true,0},input.texture_time,input.fog,record)||!record||!record->source)return false;
+                    auto view=*record->source;
+                    view.world.pose=pose;view.world.owner=&pose->owner;view.world.shape=pose->shape;
+                    view.world.object_to_world=input.object_to_world;view.world.world_to_clip=input.world_to_clip;view.object_to_clip=input.world_to_clip;
+                    view.bounds_minimum=bounds.minimum;view.bounds_maximum=bounds.maximum;view.contribution={true,true,0};
+                    view.prepared_identity.presentation_serial=input.serial;view.fog=input.fog;
+                    view.flags|=0x40u;
+                    if(!input.ground_contact)view.flags&=~native_ground_contact_flag;
+                    apply_model_preview_material(view,part.material);
+                    if(!submit(view,part))return false;
+                }
+                nalaDrawn=true;return true;
+            }
             NativeGeometryView view;
             if (!prepare_model_preview_geometry(input.sample, part.ordinal, *pose,
                     input.object_to_world, input.world_to_clip, input.texture_time,

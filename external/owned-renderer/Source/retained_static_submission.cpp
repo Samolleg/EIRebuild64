@@ -1135,8 +1135,25 @@ bool skn_pose_bounds(const RetainedVisualSample& sample,NativeWorldBounds& bound
  present=false;
  if(!sample.values.unit||!sample.assembly||!sample.assembly->skeleton)return true;
  auto& prepared=*sample.prepared;
- if(prepared.merged_assembly==sample.assembly&&!prepared.skn_selected){
+ if(!sample.values.nala.selected&&prepared.merged_assembly==sample.assembly&&!prepared.skn_selected){
   prepared.skn_bounds_asset.reset();prepared.skn_bounds_valid=false;return true;
+ }
+ if(sample.values.nala.selected){
+  present=true;
+  try {
+   const auto frame=nala::prepare(sample);
+   std::vector<VisualNodeSample> pose;
+   if(!sample_visual_skeleton(*sample.assembly->skeleton,sample.selection,retained_visual_shape(sample),sample.assembly->center_shift,sample.pose.phase,pose,false))return false;
+   std::array<float,16> local{},placement{};
+   VisualPoseState root;root.tilted_facing=root.root_rotation_valid=true;root.root_rotation={1,0,0,0};
+   if(!visual_node_world_matrix(root,pose.at(frame->root_node),sample.assembly->scale,local)||
+      !retained_object_matrix(sample.object_pose.position,sample.object_pose.quaternion,placement))return false;
+   const auto matrix=retained_multiply_matrix(placement,local);
+   for(unsigned a=0;a<3;++a){double squared=0;for(unsigned k=0;k<3;++k)squared+=double(matrix[a*4+k])*matrix[a*4+k];
+    const float radius=frame->radius*float(std::sqrt(squared))+1e-4f;
+    bounds.minimum[a]=matrix[a*4+3]-radius;bounds.maximum[a]=matrix[a*4+3]+radius;}
+   bounds.valid=true;return finite_world_bounds(bounds);
+  }catch(const std::exception& error){skn::report_rejection(sample.assembly->skeleton->visual_reference,error.what());return false;}
  }
  std::shared_ptr<const skn::RuntimeAsset> asset;
  if(prepared.skn_bounds_asset&&prepared.skn_bounds_key.assembly==sample.assembly){asset=prepared.skn_bounds_asset;present=true;}
@@ -3046,8 +3063,30 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
     if (!part.source_available||!part.geometry||!part.material||!prepared.gpu_pose.binding||
         part.skeleton_node>=prepared.gpu_pose.binding->tracks.size()) return false;
     auto& target=prepared.parts[index];auto& view=target.record;
+    if(sample.values.nala.selected){
+        const auto frame=nala::prepare(sample);
+        const auto found=frame->attachments.find(part.name);
+        if(found!=frame->attachments.end()&&target.nala_serial!=frame->serial){
+            auto transformed=std::make_shared<FigureCpuAsset>(*part.geometry);
+            const auto& m=found->second;
+            for(auto& p:transformed->positions)for(unsigned l=0;l<4;++l){
+                const double x=p.x[l],y=p.y[l],z=p.z[l];
+                p.x[l]=float(m[0]*x+m[1]*y+m[2]*z+m[3]);
+                p.y[l]=float(m[4]*x+m[5]*y+m[6]*z+m[7]);
+                p.z[l]=float(m[8]*x+m[9]*y+m[10]*z+m[11]);
+            }
+            for(auto& n:transformed->normals)for(unsigned l=0;l<4;++l){
+                const double x=n.x[l],y=n.y[l],z=n.z[l];
+                const double a=m[0]*x+m[1]*y+m[2]*z,b=m[4]*x+m[5]*y+m[6]*z,c=m[8]*x+m[9]*y+m[10]*z;
+                const double length=std::sqrt(a*a+b*b+c*c);
+                if(!(length>0))return false;n.x[l]=float(a/length);n.y[l]=float(b/length);n.z[l]=float(c/length);
+            }
+            transformed->identity.canonical_name+="|nala/"+std::to_string(frame->serial);
+            target.nala_geometry=transformed;target.nala_serial=frame->serial;target.bound_assembly.reset();target.depth_revision=next_retained_shadow_revision();
+        }
+    }
     if (target.bound_assembly!=sample.assembly) {
-        view={};const auto& figure=*part.geometry;
+        view={};const auto& figure=target.nala_geometry?*target.nala_geometry:*part.geometry;
         view.world.enabled=true;view.world.identity=&figure.identity;view.world.shape_count=figure.shape_count;
         if(!sample.values.unit&&!assembly.sways)view.lod_figure=&figure;
         view.geometry_revision={1,0,0,0,0};view.geometry_revision_valid=true;
@@ -3165,11 +3204,21 @@ std::shared_ptr<const VisualPreparedResources::MergedGeometry> merged_geometry(c
 }
 
 #include "skn_submission.inl"
+#include "nala_submission.inl"
 
 bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
     if (!sample.assembly || !sample.prepared || !sample.values.unit) return false;
     auto& prepared=*sample.prepared;const auto& assembly=*sample.assembly;
     const bool fur_hair=fur_hair_strands(g_fur_mode);
+    if(sample.values.nala.selected) {
+        prepared.skn_selected=true;
+        try { return build_nala_groups(sample); }
+        catch(const std::exception& error) {
+            prepared.merged_groups.clear();prepared.merged_part_group.assign(assembly.parts.size(),0);
+            prepared.merged_assembly=sample.assembly;
+            skn::report_rejection(assembly.skeleton->visual_reference,error.what());return true;
+        }
+    }
     if (prepared.merged_assembly==sample.assembly && prepared.merged_fur_hair==fur_hair) return true;
     prepared.merged_fur_hair=fur_hair;prepared.merged_assembly=nullptr;
     if (!prepared.gpu_pose.binding) return false;
@@ -3305,7 +3354,7 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
         view.indices=geometry.indices.data();view.index_count=static_cast<UINT>(geometry.indices.size());
         view.bounds_valid=true;view.bounds_flags=2;view.semantic_kind=SemanticKind::figure;
         retained_visual_part_fixed_state(sample,view.owned_fixed_state);
-        const bool assembled_texture = group.skn_asset && part.surface &&
+        const bool assembled_texture = group.skn_asset && !group.skn_asset->nala_generated && part.surface &&
             part.assembled_character_texture;
         if(!group.skn_asset || assembled_texture){
          view.owned_texture.identity=part.surface->id;view.owned_texture.generation=part.surface->generation;
@@ -3368,7 +3417,7 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
     NativePreparedPartValues values;
     if (!retained_visual_part_values(sample,part,time,fog,values)) return false;
     values.flags|=0x40u;
-    if(group.skn_asset && !part.assembled_character_texture){
+    if(group.skn_asset && (group.skn_asset->nala_generated || !part.assembled_character_texture)){
      const auto& m=group.skn_asset->asset.materials[group.skn_material];
      if(m.alpha!=0)values.alpha*=m.base[3];
 

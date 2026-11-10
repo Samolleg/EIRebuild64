@@ -23,6 +23,7 @@ struct Dds {
   std::vector<NativeOwnedTextureMip> mips;
 };
 struct RuntimeAsset {
+  bool nala_generated=false;
   ResourceIdentity identity;
   Asset asset;
   std::vector<std::array<Dds, 4>> textures;
