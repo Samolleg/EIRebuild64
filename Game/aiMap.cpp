@@ -1657,7 +1657,7 @@ BYTE CAIMap::GetUnitLockCheck(CUnit *pUnit)
     return GetLockCheckValue(pUnit->GetCollisionDistance());
 }
 /////////////////////////////////////////////////////////////////////////////////////
-CUnit *CAIMap::CheckCircleCollision(CUnit *pUnit, const CPlot3D &newPos, const Navigation::Location *support, bool allowEscape,const Navigation::BodyPolicy* bodies)
+CUnit *CAIMap::CheckCircleCollision(CUnit *pUnit, const CPlot3D &newPos, const Navigation::Location *support, bool allowEscape,const Navigation::BodyPolicy* bodies,bool planning)
 {
     CUnitList nearUnits;const float radius=navigation.CollisionRadius(pUnit);
     mapObjects.GetUnitsNear(newPos,nearUnits,10);
@@ -1666,6 +1666,7 @@ CUnit *CAIMap::CheckCircleCollision(CUnit *pUnit, const CPlot3D &newPos, const N
         const float sum=radius+navigation.CollisionRadius(other);
         const float next=distanceXY2(newPos,other->GetCP());
         if(next>=sum*sum)continue;
+        if(planning&&navigation.CanYield(pUnit,other))continue;
         const float previous=distanceXY2(pUnit->GetCP(),other->GetCP());
         if(allowEscape&&previous<sum*sum&&next>previous+.00001f)continue;
         auto first=support?support->position:navigation.Position(pUnit,*this);
@@ -2439,7 +2440,7 @@ bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpM
     Navigation::Point goal{ptDst.x,ptDst.y,destination.position.z};
     if(!destination.surface)navigation.Support(pUnit,goal,destination);
     if(!ModArena::Charge(pUnit)&&destination.surface&&
-       CheckCircleCollision(pUnit,CPlot3D(goal.x,goal.y,pUnit->GetCP().z),&destination,false)) {
+       CheckCircleCollision(pUnit,CPlot3D(goal.x,goal.y,pUnit->GetCP().z),&destination,false,nullptr,true)) {
         auto* server=static_cast<CUnitServer*>(pUnit->GetUnitSpecific());
         Navigation::Location free;
         if(server->CrowdDestination(goal,fpMaxPathLength,free)) {

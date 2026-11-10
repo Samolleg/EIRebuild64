@@ -710,6 +710,10 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
     // Hero failures remain observable after NPCs exhaust the background quota.
     if(route.status!=Navigation::Status::Complete&&((unit&&unit->IsHero())||failures++<16))
         GameJournal::Event("NAV","query_failed","unit=%d reason=%s from=(%.3f,%.3f,%.3f) goal=(%.3f,%.3f,%.3f) profile=%s class=%d pose=%d height=%.3f goal_radius=%.3f max_length=%.3f route_length=%.3f start_surface=%llu start_polygon=%llu mesh_generation=%llu obstacles=%zu",unit?unit->GetID():-1,Navigation::StatusName(route.status),from.x,from.y,from.z,goal.x,goal.y,goal.z,mesh->profileId.c_str(),unit?unit->GetAIClass():aiClass,unit?int(unit->GetCurrentPose()):-1,request.height,goalRadius,maxLength,route.length,static_cast<unsigned long long>(unit?unit->navLocation.surface:0),static_cast<unsigned long long>(unit?unit->navLocation.polygon:0),static_cast<unsigned long long>(mesh->generation),queryObstacles?queryObstacles->size():0);
+    if(unit&&route.status==Status::Complete)for(const auto& at:route.points) {
+        if(std::hypot(at.position.x-from.x,at.position.y-from.y)<.001f)continue;
+        YieldAlong(unit,from,at.position);break;
+    }
     return route;
 }
 bool NavigationWorld::Goal(CUnit* unit,Navigation::Point reference,Navigation::Location& result) {
@@ -810,7 +814,7 @@ bool NavigationWorld::FreePosition(CUnit* unit,Point center,float inner,float ou
     else {
         map.GetUnitsNear(unit->GetCP(),nearby,24.f);
         for(POSITION i=nearby.GetHeadPosition();i;) {
-            auto* other=nearby.GetNext(i);if(other==unit||other->IsDead())continue;
+            auto* other=nearby.GetNext(i);if(other==unit||other->IsDead()||CanYield(unit,other))continue;
             obstacles.push_back({Position(other,map),CollisionRadius(unit)+CollisionRadius(other),Height(other),other->GetID()});
         }
     }
@@ -824,15 +828,37 @@ bool NavigationWorld::FreePosition(CUnit* unit,Point center,float inner,float ou
            !Navigation::NearestSupport(*mesh,point,.25f,1.f,candidate,Height(unit),Navigation::ExcludeClass(unit->GetAIClass()))){++supportRejected;continue;}
         const float radius=std::hypot(candidate.position.x-center.x,candidate.position.y-center.y);
         if(radius<inner||radius>outer){++supportRejected;continue;}
-        if(map.CheckCircleCollision(unit,CPlot3D(candidate.position.x,candidate.position.y,unit->GetCP().z),&candidate,false)){++occupied;continue;}
+        if(map.CheckCircleCollision(unit,CPlot3D(candidate.position.x,candidate.position.y,unit->GetCP().z),&candidate,false,nullptr,true)){++occupied;continue;}
         CAIRoute route;
         if(!map.NavRoute(unit,from,candidate.position,route,maxLength,0,unit->GetAIClass(),nullptr,GoalPolicy::Exact,nullptr,&candidate)){++unreachable;continue;}
+        YieldAlong(unit,candidate.position,candidate.position);
         result=candidate;return true;
     }
     GameJournal::Event("NAV","free_position_failed","unit=%d reason=no_candidate center=(%.3f,%.3f,%.3f) inner=%.3f outer=%.3f candidates=%zu support_rejected=%u occupied=%u unreachable=%u",unit->GetID(),center.x,center.y,center.z,inner,outer,candidates.size(),supportRejected,occupied,unreachable);
     return false;
 }
-bool NavigationWorld::YieldFor(CUnit* stronger,CUnit* weaker,Point next) {
+void NavigationWorld::YieldAlong(CUnit* unit,Point from,Point next) {
+    if(!unit)return;
+    auto& map=static_cast<CWorldServer*>(unit->GetWorld())->aiMap;
+    // A yielding ally plans its own walk independently of the caller's query.
+    const auto* obstacles=queryObstacles;const auto* reuse=queryReuse;
+    struct Restore {
+        NavigationWorld& world;const std::vector<Obstacle>* obstacles;const Route* reuse;
+        ~Restore(){world.queryObstacles=obstacles;world.queryReuse=reuse;}
+    } restore{*this,obstacles,reuse};
+    queryObstacles=nullptr;queryReuse=nullptr;
+    CUnitList nearby;map.GetUnitsNear(unit->GetCP(),nearby,10.f);
+    for(POSITION i=nearby.GetHeadPosition();i;) {
+        auto* other=nearby.GetNext(i);if(!CanYield(unit,other))continue;
+        const auto at=Position(other,map);
+        const float dx=next.x-from.x,dy=next.y-from.y,d=dx*dx+dy*dy;
+        const float f=d>0?std::clamp(((at.x-from.x)*dx+(at.y-from.y)*dy)/d,0.f,1.f):0;
+        if(std::abs(at.z-from.z)<2.f&&std::hypot(at.x-from.x-f*dx,at.y-from.y-f*dy)<CollisionRadius(unit)+CollisionRadius(other)+.05f)
+            YieldFor(unit,other,next);
+    }
+}
+bool NavigationWorld::CanYield(CUnit* stronger,CUnit* weaker) {
+    if(!stronger||!weaker||stronger==weaker||stronger->IsDead()||weaker->IsDead())return false;
     auto* strong=static_cast<CUnitServer*>(stronger->GetUnitSpecific());
     auto* weak=static_cast<CUnitServer*>(weaker->GetUnitSpecific());
     // Same-side allies only, with symmetric diplomacy and player protection.
@@ -846,16 +872,26 @@ bool NavigationWorld::YieldFor(CUnit* stronger,CUnit* weaker,Point next) {
     if(strength(stronger)<=strength(weaker))return false;
     // A player's active order is never displaced. NPC attacks keep their timing.
     if(weak->CrowdPlayer()&&!weak->HasNoCommand())return false;
+    return true;
+}
+bool NavigationWorld::YieldFor(CUnit* stronger,CUnit* weaker,Point next) {
+    if(!CanYield(stronger,weaker))return false;
+    auto* weak=static_cast<CUnitServer*>(weaker->GetUnitSpecific());
+    auto journal=[&](const char* result) {
+        char key[128];sprintf_s(key,"unit=%d blocker=%d result=%s",stronger->GetID(),weaker->GetID(),result);
+        GameJournal::Count("NAV","yield",key);
+    };
+    journal("attempt");
     auto& map=static_cast<CWorldServer*>(stronger->GetWorld())->aiMap;
     const auto from=Position(weaker,map),origin=Position(stronger,map);
-    const float cell=AITile2Meter(1.f),limit=CollisionRadius(stronger)+CollisionRadius(weaker)+cell;
-    const int extent=int(std::ceil(limit/cell));
+    const float cell=.25f,limit=CollisionRadius(stronger)+CollisionRadius(weaker)+.5f;
     std::vector<Point> candidates;
-    for(int y=-extent;y<=extent;++y)for(int x=-extent;x<=extent;++x) {
-        if((!x&&!y)||std::hypot(float(x)*cell,float(y)*cell)>limit)continue;
-        candidates.push_back({from.x+x*cell,from.y+y*cell,from.z});
+    const float facing=std::atan2(from.y-origin.y,from.x-origin.x);
+    for(int ring=1;ring<=8;++ring)for(int direction=0;direction<24;++direction) {
+        const float radius=limit*float(ring)/8.f,angle=facing+direction*6.28318530718f/24.f;
+        candidates.push_back({from.x+radius*std::cos(angle),from.y+radius*std::sin(angle),from.z});
     }
-    std::stable_sort(candidates.begin(),candidates.end(),[&](Point a,Point b){return Distance(a,from)<Distance(b,from);});
+    Navigation::BodyPolicy bodies;bodies.ignored[0]=stronger->GetID();bodies.count=1;
     const float separation=CollisionRadius(stronger)+CollisionRadius(weaker)+.01f;
     const float dx=next.x-origin.x,dy=next.y-origin.y,length=dx*dx+dy*dy;
     for(auto point:candidates) {
@@ -866,12 +902,14 @@ bool NavigationWorld::YieldFor(CUnit* stronger,CUnit* weaker,Point next) {
         for(int i=1;i<=steps&&clear;++i) {
             const float t=float(i)/steps;Location support;
             clear=Step(weaker,previous,{from.x+(point.x-from.x)*t,from.y+(point.y-from.y)*t,from.z},support);
-            if(clear)clear=!map.CheckCircleCollision(weaker,CPlot3D(support.position.x,support.position.y,weaker->GetCP().z),&support,true);
+            if(clear)clear=!map.CheckCircleCollision(weaker,CPlot3D(support.position.x,support.position.y,weaker->GetCP().z),&support,true,&bodies);
             if(clear){at=support;previous=at.position;}
         }
-        if(clear&&weak->CrowdShift(at))return true;
+        const float endFraction=length>0?std::clamp(((at.position.x-origin.x)*dx+(at.position.y-origin.y)*dy)/length,0.f,1.f):0;
+        if(clear&&std::hypot(at.position.x-origin.x-endFraction*dx,at.position.y-origin.y-endFraction*dy)<separation)continue;
+        if(clear&&weak->CrowdShift(at)){journal(weak->HasNoCommand()?"yielded":"shifted");return true;}
     }
-    return false;
+    journal("no_space");return false;
 }
 bool NavigationWorld::CanPlace(CUnit* unit,Navigation::Point point,int aiClass) {
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationPlace);
@@ -1059,7 +1097,7 @@ bool NavigationWorld::Move(CUnit* unit,SAIPath& path,float time,unsigned& wait,M
             std::vector<Navigation::Obstacle> blockers;CUnitList nearby;
             map.GetUnitsNear(CPlot3D(from.x,from.y,from.z),nearby,24.f);
             for(POSITION i=nearby.GetHeadPosition();i;) {auto* other=nearby.GetNext(i);
-                if(other==unit||other->IsDead())continue;
+                if(other==unit||other->IsDead()||CanYield(unit,other))continue;
                 const auto at=Position(other,map);
                 if(std::hypot(at.x-from.x,at.y-from.y)>24.f)continue;
                 blockers.push_back({at,CollisionRadius(other)+CollisionRadius(unit),Height(other),other->GetID()});

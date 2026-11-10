@@ -648,7 +648,7 @@ public:
     bool CanMoveTo(CUnit *pUnit, int nX, int nY, EAILock &res);
     // bool IsStaticLocked( int nUnitClass, int nX, int nY );
     // проверить на столкновение с другими юнитами по кругам ( TRUE если сталкивается )
-    CUnit *CheckCircleCollision(CUnit *pUnit, const CPlot3D &newPos, const Navigation::Location *support = nullptr, bool allowEscape = true,const Navigation::BodyPolicy* bodies=nullptr);
+    CUnit *CheckCircleCollision(CUnit *pUnit, const CPlot3D &newPos, const Navigation::Location *support = nullptr, bool allowEscape = true,const Navigation::BodyPolicy* bodies=nullptr,bool planning=false);
     // конвертировать динамические блокировки в статические и обратно в районе ptPlace
     void ConvertLocks(const CPlot3D &ptPlace, bool bLock);
     // bool IsWideUnit( int nUnitClass ) { return nUnitClass >= 5; }

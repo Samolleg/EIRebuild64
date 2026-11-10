@@ -133,6 +133,8 @@ public:
     // Passage width and unit-to-unit separation have different footprints.
     float CollisionRadius(CUnit* unit);
     bool FreePosition(CUnit*,Navigation::Point center,float inner,float outer,float maxLength,Navigation::Location&,int targetId=-1);
+    void YieldAlong(CUnit*,Navigation::Point from,Navigation::Point next);
+    bool CanYield(CUnit* stronger,CUnit* weaker);
     bool YieldFor(CUnit* stronger,CUnit* weaker,Navigation::Point next);
     bool AttackPosition(CUnit* unit,CUnit* target,Navigation::Point goal,float reach,float maxLength,Navigation::Location& result);
     bool CanPlace(CUnit* unit,Navigation::Point point,int aiClass=3);
