@@ -33,6 +33,8 @@ Color uses exact sRGB transfer functions around linear box filtering; alpha and
 ORM are linear. All levels down to 1x1 are compressed as BC7 sRGB, BC5 linear or
 BC7 linear, with forced DDS DX10 header. Invalid dimensions, missing LFS pixels,
 nonfinite/out-of-range data, wrong role/space and degenerate normals fail.
+Top-level width and height must each be multiples of four in 4..16384;
+1x1 and 2x2 top levels are rejected. Lower mips still continue through 1x1.
 The tool prints bytes, mip count and arithmetic mean of per-R/G/B PSNR in dB
 against decoded base-level DDS samples (encoded byte domain, excluding alpha).
 PSNR is meaningful for color/emission; exact channels report infinity.
