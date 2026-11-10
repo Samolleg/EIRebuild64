@@ -13,6 +13,7 @@
 // go through append_bridge_event (bridge.jsonl in the DLL, host.log in the
 // host). Reads only the frame copies (owned_world_frame.h); host-buildable.
 #include "owned_world_frame.h"
+#include "skn_runtime.h"
 #include "owned_resource_store.h"
 #include "neighbour_maps.h"
 #include "owned_terrain_views.h"
@@ -157,7 +158,14 @@ bool submit_owned_visual_records(const RetainedVisualSample& sample,
     submission.world_to_clip=&clip;submission.wound_surface_interface=wound;
     submission.retained_color_diagnostic=retained_color_diagnostic;
     NativeGeometryView dispatch;dispatch.prepared_submission=&submission;
-    return g_native_sink_submit&&g_native_sink_submit(g_native_sink_context,dispatch,result);
+    const bool accepted=g_native_sink_submit&&g_native_sink_submit(g_native_sink_context,dispatch,result);
+    if(!accepted && sample.prepared->skn_selected && sample.assembly && sample.assembly->skeleton) {
+        char detail[256]{};
+        std::snprintf(detail,sizeof(detail),"operation=%s hr=%08lx",
+            result.failure_operation?result.failure_operation:"sink_submit",static_cast<unsigned long>(result.failure_hresult));
+        skn::report_rejection(sample.assembly->skeleton->visual_reference,detail);
+    }
+    return accepted;
 }
 
 thread_local std::uint64_t g_object_render_presentation_serial = 0;
@@ -277,6 +285,11 @@ void log_owned_visual_failure(const OwnedVisualRejection& rejection) noexcept {
 
 void reject_owned_visual(const char* stage, const char* reason,
     const RetainedVisualSample* sample, bool failure, std::uint32_t class_flags) noexcept {
+    if (failure && sample && sample->prepared && sample->prepared->skn_selected &&
+        sample->assembly && sample->assembly->skeleton) {
+        skn::report_rejection(sample->assembly->skeleton->visual_reference,
+            std::string(stage?stage:"unknown")+":"+(reason?reason:"unknown"));
+    }
     auto& frame = g_owned_visual_world_frame;
     if (!frame.diagnostic.profile_frame) return;
     OwnedVisualRejection rejection{};

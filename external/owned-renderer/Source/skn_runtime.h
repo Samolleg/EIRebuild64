@@ -5,6 +5,18 @@
 #include <map>
 #include <mutex>
 namespace owned::skn {
+// One rejection per model across bounds, construction and sink submission.
+inline void report_rejection(const std::string &model, const std::string &reason) noexcept try {
+  static std::mutex mutex;
+  static std::set<std::string> reported;
+  std::lock_guard<std::mutex> guard(mutex);
+  if (reported.insert(model).second) {
+    const std::string detail = "model=\"" + model + "\" reason=\"" + reason + "\"";
+    bridge_append_probe_event("skn_asset_rejected", detail.c_str());
+  }
+} catch (...) {
+  // Diagnostics must never interrupt rendering, including allocation failure.
+}
 struct Dds {
   ResourceBlob blob;
   NativeOwnedTextureFormat format{};
