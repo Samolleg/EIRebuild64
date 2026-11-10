@@ -358,3 +358,10 @@ No IPC/protocol/resource IDs or upstream ProjectID are imported. Each embedded
 Renderer owns its NGX instance; capability and optimal settings use the real
 D3D11 device. Frame evaluation and settings integration remain X64DLSS02/03.
 SDK v310.9.16 and distribution notices: repository THIRD_PARTY.md.
+
+X64SKIN03 (2026-11-10): completes the local SKN v1 GPU material path
+(BC7 sRGB, BC5 tangent normals, ORM, emission and alpha/two-sided state)
+through the existing GGX/Schlick lighting. Authored discrete LOD uses camera
+error with persistent hysteresis and matching shadow levels. Joint influence
+spheres supply pose-conservative CPU/GPU culling envelopes. Resource-store
+paths, gameplay and upstream reference sources are unchanged.

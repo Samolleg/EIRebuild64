@@ -78,6 +78,7 @@ bool prepare_world_visual_bounds(const RetainedVisualSample& sample,
     NativeWorldBounds& bounds) {
     auto& prepared=*sample.prepared;
     if(prepared.derived_world_bounds_valid &&
+        (!prepared.skn_bounds_asset||owned_visual_pose_key_matches(prepared.skn_bounds_key,sample)) &&
         owned_visual_world_bounds_key_matches(prepared.derived_world_bounds_key,sample)) {
         bounds=prepared.derived_world_bounds;
 #ifdef EID3D11_TESTING

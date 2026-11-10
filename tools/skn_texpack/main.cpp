@@ -1,5 +1,8 @@
 #include <DirectXTex.h>
 #include <algorithm>
+#include <atomic>
+#include <cstring>
+#include <thread>
 #include <array>
 #include <cmath>
 #include <filesystem>
@@ -30,6 +33,49 @@ void check(HRESULT hr)
         std::cerr << "HRESULT 0x" << std::hex << hr << '\n';
         throw std::runtime_error("DirectXTex operation failed");
     }
+}
+// BC blocks are independent. Partition on block-row boundaries, preserving
+// the default-quality DirectXTex result without an OpenMP DLL dependency.
+void compress_rows(const ScratchImage& source, DXGI_FORMAT format, ScratchImage& output)
+{
+    const auto& metadata = source.GetMetadata();
+    check(output.Initialize2D(format, metadata.width, metadata.height, 1, metadata.mipLevels));
+    struct Job { size_t mip, row, height; };
+    std::vector<Job> jobs;
+    for (size_t mip=0; mip<metadata.mipLevels; ++mip) {
+        const auto& image=*source.GetImage(mip,0,0);
+        for (size_t row=0; row<image.height; row+=16)
+            jobs.push_back({mip,row,std::min(size_t(16),image.height-row)});
+    }
+    std::atomic<size_t> next{0};
+    std::atomic<HRESULT> failure{S_OK};
+    const auto work=[&] {
+        for (size_t index=next++; index<jobs.size() && SUCCEEDED(failure.load()); index=next++) {
+            const auto job=jobs[index];
+            Image strip=*source.GetImage(job.mip,0,0);
+            strip.pixels+=strip.rowPitch*job.row;strip.height=job.height;
+            strip.slicePitch=strip.rowPitch*strip.height;
+            ScratchImage compressed;
+            const HRESULT hr=Compress(strip,format,TEX_COMPRESS_DEFAULT,1,compressed);
+            if (FAILED(hr)) { failure.store(hr);break; }
+            const auto& src=*compressed.GetImage(0,0,0);
+            const auto& dst=*output.GetImage(job.mip,0,0);
+            for (size_t row=0;row<(job.height+3)/4;++row)
+                std::memcpy(dst.pixels+(job.row/4+row)*dst.rowPitch,
+                            src.pixels+row*src.rowPitch,src.rowPitch);
+        }
+    };
+    std::vector<std::thread> workers;
+    try {
+        const auto count=std::clamp(std::thread::hardware_concurrency(),1u,4u);
+        for(unsigned i=0;i<count;++i)workers.emplace_back(work);
+    } catch (...) {
+        failure.store(E_OUTOFMEMORY);
+        for(auto& worker:workers)worker.join();
+        throw;
+    }
+    for(auto& worker:workers)worker.join();
+    check(failure.load());
 }
 float number(const std::wstring &s)
 {
@@ -332,11 +378,11 @@ int wmain(int argc, wchar_t **argv)
             ids = std::move(nextIds);
         }
         ScratchImage packed;
-        check(Compress(chain.GetImages(), chain.GetImageCount(), chain.GetMetadata(),
+        compress_rows(chain,
                        normal  ? DXGI_FORMAT_BC5_UNORM
                        : color ? DXGI_FORMAT_BC7_UNORM_SRGB
                                : DXGI_FORMAT_BC7_UNORM,
-                       TEX_COMPRESS_PARALLEL, 1, packed));
+                       packed);
         ScratchImage decoded;
         check(Decompress(*packed.GetImage(0, 0, 0), color ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM, decoded));
         double mse[3]{};

@@ -96,6 +96,8 @@ struct NativeMeshLods {
     // Largest deviation of each level, object units, over every stored shape;
     // never smaller than the previous level's.
     std::array<float, kStaticLodMaxLevels> error{};
+    std::array<float, kStaticLodMaxLevels> hysteresis{};
+    std::uint32_t skn_base_triangles = 0;
 };
 
 // False (and no levels) for a figure too small or not reducible.

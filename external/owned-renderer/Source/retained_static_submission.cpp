@@ -9,6 +9,7 @@
 #include "fur.h"
 #include "figure_service_nodes.h"
 #include "skn_runtime.h"
+#include "world_scene_algorithms.h"
 
 #include <algorithm>
 #include <atomic>
@@ -1129,10 +1130,68 @@ const std::array<float,3>& retained_visual_shape(const RetainedVisualSample& sam
     return sample.values.unit && !sample.completed_pose && sample.assembly ? sample.assembly->shape : sample.object_pose.shape;
 }
 
+namespace {
+bool skn_pose_bounds(const RetainedVisualSample& sample,NativeWorldBounds& bounds,bool& present){
+ present=false;
+ if(!sample.values.unit||!sample.assembly||!sample.assembly->skeleton)return true;
+ auto& prepared=*sample.prepared;
+ if(prepared.merged_assembly==sample.assembly&&!prepared.skn_selected){
+  prepared.skn_bounds_asset.reset();prepared.skn_bounds_valid=false;return true;
+ }
+ std::shared_ptr<const skn::RuntimeAsset> asset;
+ if(prepared.skn_bounds_asset&&prepared.skn_bounds_key.assembly==sample.assembly){asset=prepared.skn_bounds_asset;present=true;}
+ else asset=skn::select(sample.assembly->skeleton->visual_reference,present);
+ if(!present){prepared.skn_bounds_asset.reset();prepared.skn_bounds_valid=false;return true;}
+ if(prepared.skn_bounds_valid&&asset==prepared.skn_bounds_asset&&owned_visual_pose_key_matches(prepared.skn_bounds_key,sample)){
+  bounds=prepared.skn_bounds;return true;
+ }
+ std::vector<VisualNodeSample> pose;
+ if(!sample_visual_skeleton(*sample.assembly->skeleton,sample.selection,retained_visual_shape(sample),
+     sample.assembly->center_shift,sample.pose.phase,pose,false))return false;
+ bounds.minimum.fill(FLT_MAX);bounds.maximum.fill(-FLT_MAX);
+ const auto node_matrix=[&](unsigned node,std::array<float,16>& matrix){
+  if(sample.completed_pose){
+   VisualPoseState local;local.tilted_facing=local.root_rotation_valid=true;local.root_rotation={1,0,0,0};
+   std::array<float,16> placement{};
+   if(!visual_node_world_matrix(local,pose[node],sample.assembly->scale,matrix)||
+      !retained_object_matrix(sample.object_pose.position,sample.object_pose.quaternion,placement))return false;
+   matrix=retained_multiply_matrix(placement,matrix);
+  }else if(!visual_node_world_matrix(sample.pose,pose[node],sample.assembly->scale,matrix))return false;
+  return true;
+ };
+ std::array<float,16> node_zero{};
+ if(pose.empty()||!node_matrix(0,node_zero))return false;
+ for(unsigned axis=0;axis<3;++axis)bounds.minimum[axis]=bounds.maximum[axis]=node_zero[axis*4+3];
+ std::unordered_map<std::string,unsigned> nodes;
+ nodes.reserve(sample.assembly->skeleton->nodes.size());
+ for(unsigned n=0;n<sample.assembly->skeleton->nodes.size();++n)nodes.emplace(sample.assembly->skeleton->nodes[n].name,n);
+ for(unsigned j=0;j<asset->joint_radius.size();++j){
+  if(asset->joint_radius[j]<0)continue;
+  const auto found=nodes.find(asset->asset.joints[j].name);
+  if(found==nodes.end())return false;
+  const unsigned node=found->second;
+  if(node>=pose.size())return false;
+  std::array<float,16> matrix{};
+  if(!node_matrix(node,matrix))return false;
+  for(unsigned axis=0;axis<3;++axis){
+   double squared=0;for(unsigned k=0;k<3;++k)squared+=double(matrix[axis*4+k])*matrix[axis*4+k];
+   const double radius=(std::max)(0.f,asset->joint_radius[j])*std::sqrt(squared)+1e-5;
+   bounds.minimum[axis]=(std::min)(bounds.minimum[axis],next_float(static_cast<float>(matrix[axis*4+3]-radius),-INFINITY));
+   bounds.maximum[axis]=(std::max)(bounds.maximum[axis],next_float(static_cast<float>(matrix[axis*4+3]+radius),INFINITY));
+  }
+ }
+ bounds.valid=true;if(!finite_world_bounds(bounds))return false;
+ prepared.skn_bounds_asset=asset;prepared.skn_bounds_key=owned_visual_pose_key(sample);
+ prepared.skn_bounds=bounds;prepared.skn_bounds_valid=true;return true;
+}
+}
 bool retained_visual_world_bounds(const RetainedVisualSample& sample,
                                    NativeWorldBounds& bounds) noexcept {
     bounds = {};
     if (sample.status != RetainedVisualStatus::ready) return false;
+    bool skn_present=false;
+    try{if(!skn_pose_bounds(sample,bounds,skn_present))return false;if(skn_present)return true;}
+    catch(const std::exception& error){bridge_append_probe_event("skn_asset_rejected",error.what());return false;}
     float envelope_radius = sample.envelope_radius;
     if (sample.values.unit && !sample.completed_pose &&
         !retained_visual_selection_envelope_radius(sample,envelope_radius)) return false;
@@ -2445,6 +2504,11 @@ bool retained_visual_neutral_parts_box(const RetainedVisualSample& sample,
 }
 
 bool retained_visual_part_bounds(const RetainedVisualSample& sample,std::size_t index,NativeWorldBounds& bounds) {
+    // Selection remains semantic/gameplay driven; only the culling envelope
+    // changes. Using the whole skin envelope per part is conservative.
+    bool skn_present=false;
+    try{if(!skn_pose_bounds(sample,bounds,skn_present))return false;if(skn_present)return true;}
+    catch(const std::exception&){return false;}
     bounds={};
     if (!sample.assembly||!sample.prepared||index>=sample.prepared->parts.size()) return false;
     auto& prepared=*sample.prepared;
@@ -3217,8 +3281,16 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
     // Every node lies within the already-scaled world selection envelope.
     // Twice that world radius around node zero bounds every merged part;
     // nativeCurrentBounds must not apply the node's scale to it again.
-    const float radius=2*(std::max)({bounds.maximum[0]-bounds.minimum[0],bounds.maximum[1]-bounds.minimum[1],
-        bounds.maximum[2]-bounds.minimum[2]})*.5f;
+    const auto& root_matrix=prepared.gpu_pose.root_to_world;
+    double squared_radius=0;
+    for(unsigned axis=0;axis<3;++axis){
+      const double d=(std::max)(std::abs(double(bounds.minimum[axis])-root_matrix[axis*4+3]),
+                               std::abs(double(bounds.maximum[axis])-root_matrix[axis*4+3]));
+      squared_radius+=d*d;
+    }
+    const float radius=group.skn_asset?2*static_cast<float>(std::sqrt(squared_radius)):
+        2*(std::max)({bounds.maximum[0]-bounds.minimum[0],bounds.maximum[1]-bounds.minimum[1],
+            bounds.maximum[2]-bounds.minimum[2]})*.5f;
     if (!view.world.enabled) {
         view={};
         const auto& geometry=*group.geometry;
@@ -3228,7 +3300,7 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
         view.normals=geometry.normals.data();view.normal_groups=group.normal_groups;
         view.texture_coordinates=geometry.texture_coordinates.data();view.texture_coordinate_count=static_cast<UINT>(geometry.texture_coordinates.size());
         view.components=geometry.components.data();view.component_count=static_cast<UINT>(geometry.components.size());
-        if(group.skn_asset)view.skin_vertices=geometry.skin_vertices.data();
+        if(group.skn_asset){view.skin_vertices=geometry.skin_vertices.data();view.lods=&geometry.skn_lods;view.world.static_lod=true;}
         else view.component_parts=geometry.component_parts.data();
         view.indices=geometry.indices.data();view.index_count=static_cast<UINT>(geometry.indices.size());
         view.bounds_valid=true;view.bounds_flags=2;view.semantic_kind=SemanticKind::figure;
@@ -3249,6 +3321,26 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
           view.owned_texture.identity=0x534b4e;view.owned_texture.value_source=2;
           view.owned_texture.format=NativeOwnedTextureFormat::argb8888;view.owned_texture.mips=&mip;view.owned_texture.mip_count=1;
          }
+         auto& skn_material=view.skn_material;
+         // The immutable asset and material index are stable across poses.
+         skn_material.identity=static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&material));
+         skn_material.factors[0]=material.roughness;skn_material.factors[1]=material.metallic;
+         skn_material.factors[2]=material.ao;skn_material.factors[3]=material.two_sided?2.f:1.f;
+         std::copy_n(material.emission,3,skn_material.emission);
+         std::copy_n(material.base,4,skn_material.base);
+         skn_material.base[3]=static_cast<float>(material.alpha);
+         if(material.alpha==0)view.owned_texture.opaque_mips=UINT_MAX;
+         for(unsigned k=0;k<3;++k){
+          const auto& src=group.skn_asset->textures[group.skn_material][k+1];
+          auto& dst=skn_material.maps[k];if(src.mips.empty())continue;
+          dst.identity=1;dst.generation=1;dst.value_source=1;
+          dst.resource=&src.blob.identity;dst.format=src.format;
+          dst.mips=src.mips.data();dst.mip_count=static_cast<UINT>(src.mips.size());
+         }
+         view.owned_fixed_state.source_blend=D3DBLEND_SRCALPHA;
+         view.owned_fixed_state.destination_blend=D3DBLEND_INVSRCALPHA;
+         view.owned_fixed_state.z_write_enable=material.alpha!=2;
+         view.owned_fixed_state.alpha_func=D3DCMP_GREATEREQUAL;
          view.owned_fixed_state.cull_mode=material.two_sided?D3DCULL_NONE:D3DCULL_CW;
          view.owned_fixed_state.alpha_test_enable=material.alpha==1;
          view.owned_fixed_state.alpha_ref=static_cast<UINT>(material.cutoff*255);
@@ -3275,8 +3367,8 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
     values.flags|=0x40u;
     if(group.skn_asset){
      const auto& m=group.skn_asset->asset.materials[group.skn_material];
-     values.alpha*=m.base[3];
-     for(unsigned k=0;k<3;++k){values.diffuse[k]*=m.base[k];values.emissive[k]+=m.emission[k];}
+     if(m.alpha!=0)values.alpha*=m.base[3];
+
     }
     auto& submission=group.submission;
     if(!submission.values_revision||std::memcmp(&submission.values,&values,sizeof(values))!=0){

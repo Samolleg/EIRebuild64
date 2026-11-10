@@ -16,6 +16,42 @@ def pointer(path):
         return stream.read(42).startswith(b'version https://git-lfs.github.com/spec/v1')
 
 
+def bake_authoring(root, out, run, results):
+    # Each pair follows the author's naming convention in authoring/equipment.
+    authoring = root / 'assets/authoring/equipment'
+    for albedo in sorted(authoring.rglob('*albedo*.png')):
+        rel = albedo.relative_to(root).as_posix()
+        if pointer(albedo):
+            results['lfs_pointers'].append(rel)
+            continue
+        name = albedo.parent.name + '_' + albedo.stem + '_color.dds'
+        result = run(['--role', 'color', '--space', 'srgb', '--input', str(albedo)],
+                     out / name)
+        results['albedo'].append(dict(source=rel, **result))
+    rough_maps = sorted(authoring.rglob('*roughness.png'))
+    for rough in rough_maps:
+        metal = rough.with_name(rough.name.replace('roughness', 'metallic'))
+        if pointer(rough):
+            results['lfs_pointers'].append(rough.relative_to(root).as_posix())
+            continue
+        if metal.exists() and pointer(metal):
+            results['lfs_pointers'].append(metal.relative_to(root).as_posix())
+            continue
+        if metal.exists():
+            metallic = ['--metallic', str(metal)]
+            metallic_source = metal.relative_to(root).as_posix()
+        else:
+            results['missing'].append(metal.relative_to(root).as_posix())
+            metallic = ['--metallic-value', '0']
+            metallic_source = 'constant:0'
+        name = rough.parent.name + '_' + rough.stem.replace('_roughness', '') + '_orm.dds'
+        result = run(['--role', 'orm', '--space', 'linear', '--ao-value', '1',
+                      '--roughness', str(rough), *metallic], out / name)
+        results['orm'].append(dict(source=str(rough.relative_to(root)),
+                                   metallic_source=metallic_source, **result))
+
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--clone', type=Path, required=True)
@@ -24,11 +60,13 @@ def main():
     args = parser.parse_args()
     root = args.clone.resolve()
     args.out.mkdir(parents=True, exist_ok=True)
-    results = {'atlases': [], 'orm': [], 'lfs_pointers': [], 'missing': []}
+    results = {'atlases': [], 'albedo': [], 'orm': [], 'lfs_pointers': [], 'missing': []}
 
     def run(options, output):
         proc = subprocess.run([str(args.exe), *options, '--output', str(output)],
-                              capture_output=True, text=True, check=True)
+                              capture_output=True, text=True)
+        if proc.returncode:
+            raise RuntimeError(f'{output.name}: {proc.stdout} {proc.stderr}')
         print(output.name, proc.stdout.strip(), flush=True)
         return {'dds_bytes': output.stat().st_size, 'metrics': proc.stdout.strip()}
 
@@ -51,25 +89,7 @@ def main():
         results['atlases'].append(dict(resource=resource, source=entry['file'],
                                        source_bytes=len(raw), **result))
 
-    # Each pair follows the author's naming convention in authoring/equipment.
-    authoring = root / 'assets/authoring/equipment'
-    rough_maps = sorted(authoring.rglob('*roughness.png'))
-    for rough in rough_maps:
-        metal = rough.with_name(rough.name.replace('roughness', 'metallic'))
-        usable = True
-        for source in (rough, metal):
-            rel = source.relative_to(root).as_posix()
-            if not source.exists():
-                results['missing'].append(rel)
-                usable = False
-            elif pointer(source):
-                results['lfs_pointers'].append(rel)
-                usable = False
-        if usable:
-            name = rough.parent.name + '_' + rough.stem.replace('_roughness', '') + '_orm.dds'
-            result = run(['--role', 'orm', '--space', 'linear', '--ao-value', '1',
-                          '--roughness', str(rough), '--metallic', str(metal)], args.out / name)
-            results['orm'].append(dict(source=str(rough.relative_to(root)), **result))
+    bake_authoring(root, args.out, run, results)
     (args.out / 'results.json').write_text(json.dumps(results, indent=2), encoding='utf-8')
 
 

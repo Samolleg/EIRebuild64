@@ -1,7 +1,8 @@
 # skn_texpack
 
-Offline x64 SKN texture cooker, DirectXTex 2024.6.5.1 (local NuGet only).
-BC compression uses DirectXTex's parallel CPU path at default quality.
+Offline x64 SKN texture cooker, vendored DirectXTex jun2024 (2024.6.5.1).
+BC compression uses up to four CPU workers over independent block rows at default
+quality, without an OpenMP runtime.
 Build Release|x64 in EI_Rebuild.sln after tools/prepare-worktree.ps1 as in BUILD.md.
 No renderer or GPU/device dependency. Output paths must not already exist.
 
@@ -38,6 +39,7 @@ PSNR is meaningful for color/emission; exact channels report infinity.
 
 `python bake_bahonec.py --clone <bahonec> --exe <skn_texpack.exe> --out <out>`
 cooks RGB8 resources from `config/natural-nails-runtime.json`, verifying source
-size and SHA-256. It also pairs authoring roughness/metallic maps, with AO=1.
+size and SHA-256. It also cooks authoring albedo maps and pairs roughness/metallic with AO=1.
+An absent metallic map uses 0; an LFS pointer is reported and skipped.
 Missing maps and LFS pointers are listed in `out/results.json`; no checkout or
 downloads are attempted. Use a fresh output directory for each run.
