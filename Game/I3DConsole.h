@@ -19,7 +19,8 @@ private:
 
     int nWidth;
     int nHeight; // in real pixels
-    CRect rcVirtual;
+    int nLineHeight;
+    CRect rcRequested;
     CRect rcReal;
 
     CStringArray szLines; // all lines in output pool

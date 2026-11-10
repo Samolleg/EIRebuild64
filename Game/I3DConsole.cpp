@@ -4,13 +4,13 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "I3DMain.h"
 #include "I3DConsole.h"
 #include "I3DObject.h"
+#include "dx11/RendererDX11.h"
 #include "Console.h"
 #include "StringProcessing.h"
 #include "shared/Common.h"
 /////////////////////////////////////////////////////////////////////////////////////
 const int CONSOLE_STACK_SIZE = 30;
 const int CONSOLE_BORDER = 8;
-const int CONSOLE_LINE_HEIGHT = 15;
 const int CONSOLE_SCROLL_WIDTH = 10;
 const int CONSOLE_MIN_TEXT_WIDTH = 50;
 const int CONSOLE_MIN_HISTORY = 8;
@@ -83,11 +83,19 @@ CI3DConsole::CI3DConsole(CInterface3D *pI)
     bShiftDown = false;
 
     pConsoleFont = new CFont();
-    if (!pConsoleFont->CreatePointFont(90, _T("Courier New")))
+    if (!pConsoleFont->CreateFont(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, FIXED_PITCH | FF_MODERN, _T("Courier New")))
     {
         delete pConsoleFont;
         pConsoleFont = 0;
     }
+
+    CDC metricsDC;
+    metricsDC.CreateCompatibleDC(nullptr);
+    CFont *oldFont = pConsoleFont ? metricsDC.SelectObject(pConsoleFont) : nullptr;
+    TEXTMETRIC metrics = {};
+    metricsDC.GetTextMetrics(&metrics);
+    nLineHeight = Max(1, int(metrics.tmHeight + metrics.tmExternalLeading));
+    if (oldFont) metricsDC.SelectObject(oldFont);
 
     SetRect(CRect(0, 0, 800, 150));
     SetHistory(256);
@@ -105,32 +113,28 @@ CI3DConsole::~CI3DConsole()
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DConsole::SetRect(CRect rc)
 {
-    int w = pI3D->GetWidth(), h = pI3D->GetHeight();
+    const auto &output = pI3D->GetD3D()->GetRendererFacade();
+    int w = int(output.Width()), h = int(output.Height());
 
-    rcReal = rc;
-    pI3D->VirtualToScreen(rcReal);
-
-    nWidth = rcReal.Width();
-    nHeight = rcReal.Height();
+    rcRequested = rc;
+    // Console is an output-pixel overlay, independent of HUD anchors and scale.
+    nWidth = w;
+    nHeight = MulDiv(h, rc.Height(), 600);
 
     if (nWidth < 2 * CONSOLE_BORDER + CONSOLE_SCROLL_WIDTH + CONSOLE_MIN_TEXT_WIDTH)
         nWidth = 2 * CONSOLE_BORDER + CONSOLE_SCROLL_WIDTH + CONSOLE_MIN_TEXT_WIDTH;
     if (nWidth > w)
         nWidth = w;
 
-    if (nHeight < 3 * CONSOLE_BORDER + 3 * CONSOLE_LINE_HEIGHT)
-        nHeight = 3 * CONSOLE_BORDER + 3 * CONSOLE_LINE_HEIGHT;
+    if (nHeight < 3 * CONSOLE_BORDER + 3 * nLineHeight)
+        nHeight = 3 * CONSOLE_BORDER + 3 * nLineHeight;
     if (nHeight > h)
         nHeight = h;
 
-    nVisibleLines = (nHeight - 3 * CONSOLE_BORDER) / CONSOLE_LINE_HEIGHT - 1;
-    // nHeight = (nVisibleLines + 1) * CONSOLE_LINE_HEIGHT + 3 * CONSOLE_BORDER;
+    nVisibleLines = (nHeight - 3 * CONSOLE_BORDER) / nLineHeight - 1;
+    // nHeight = (nVisibleLines + 1) * nLineHeight + 3 * CONSOLE_BORDER;
 
-    rcReal.right = rcReal.left + nWidth;
-    rcReal.bottom = rcReal.top + nHeight;
-
-    rcVirtual = rcReal;
-    pI3D->ScreenToVirtual(rcVirtual);
+    rcReal = CRect(0, 0, nWidth, nHeight);
 
     if (IsVisible())
     {
@@ -152,8 +156,15 @@ void CI3DConsole::SetHistory(int nLines)
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DConsole::Draw2D()
 {
-    if (pSurface)
-        pSurface->Draw();
+    if (!pSurface) return;
+    const auto &output = pI3D->GetD3D()->GetRendererFacade();
+    if (nWidth != int(output.Width()) || nHeight != Min(int(output.Height()),
+        Max(3 * CONSOLE_BORDER + 3 * nLineHeight, MulDiv(int(output.Height()), rcRequested.Height(), 600))))
+        SetRect(rcRequested);
+    // Submit to the output layer: the native canvas is composed below mission portraits.
+    auto *dx = pI3D->GetD3D();
+    IfFailedThrowHR(pSurface->GetSurface()->BlitPublishedToFacade(dx->GetRendererFacade(),
+        rcReal, nullptr, nullptr, false, false), "Console output blit");
 }
 /////////////////////////////////////////////////////////////////////////////////////
 void CI3DConsole::Show(bool bShow)
@@ -162,7 +173,7 @@ void CI3DConsole::Show(bool bShow)
     if (bShow)
     {
         if (!pSurface)
-            pSurface = dbgnew CI3DSurface(pI3D, rcVirtual, BS_VISIBLE);
+            pSurface = dbgnew CI3DSurface(pI3D, rcReal.left, rcReal.top, rcReal.right, rcReal.bottom, BS_VISIBLE, false);
         RedrawLines();
         RedrawCommand();
     }
@@ -428,12 +439,12 @@ void CI3DConsole::RedrawLines()
 
 #ifndef NOGETDC
     CConsolePaint paint(pSurface, nWidth, 0,
-                        nHeight - 2 * CONSOLE_BORDER - CONSOLE_LINE_HEIGHT);
+                        nHeight - 2 * CONSOLE_BORDER - nLineHeight);
     CDC *pDC = paint.GetDC();
     if (!pDC)
         return;
 
-    pDC->FillSolidRect(0, 0, nWidth, nHeight - 2 * CONSOLE_BORDER - CONSOLE_LINE_HEIGHT,
+    pDC->FillSolidRect(0, 0, nWidth, nHeight - 2 * CONSOLE_BORDER - nLineHeight,
                        CONSOLE_COLOR_BG);
 
     CFont *pOldFont = pDC->SelectObject(pConsoleFont);
@@ -446,24 +457,24 @@ void CI3DConsole::RedrawLines()
         pDC->DrawText(
             szLines[j],
             CRect(CONSOLE_BORDER,
-                  nHeight - 2 * (CONSOLE_BORDER + CONSOLE_LINE_HEIGHT) - i * CONSOLE_LINE_HEIGHT,
+                  nHeight - 2 * (CONSOLE_BORDER + nLineHeight) - i * nLineHeight,
                   nWidth - CONSOLE_BORDER - CONSOLE_SCROLL_WIDTH,
-                  nHeight - 2 * CONSOLE_BORDER - CONSOLE_LINE_HEIGHT - i * CONSOLE_LINE_HEIGHT + 5),
-            DT_LEFT | DT_NOPREFIX);
+                  nHeight - 2 * CONSOLE_BORDER - nLineHeight - i * nLineHeight),
+            DT_LEFT | DT_NOPREFIX | DT_SINGLELINE);
     }
 
     if (nCurrentLine > 0)
         pDC->DrawText("+",
                       CRect(nWidth - CONSOLE_BORDER - CONSOLE_SCROLL_WIDTH,
-                            nHeight - 2 * (CONSOLE_BORDER + CONSOLE_LINE_HEIGHT),
+                            nHeight - 2 * (CONSOLE_BORDER + nLineHeight),
                             nWidth - CONSOLE_BORDER,
-                            nHeight - 2 * CONSOLE_BORDER - CONSOLE_LINE_HEIGHT),
+                            nHeight - 2 * CONSOLE_BORDER - nLineHeight),
                       DT_RIGHT | DT_NOPREFIX);
 
     if (nCurrentLine < szLines.GetSize() - nVisibleLines)
         pDC->DrawText("+",
                       CRect(nWidth - CONSOLE_BORDER - CONSOLE_SCROLL_WIDTH, CONSOLE_BORDER,
-                            nWidth - CONSOLE_BORDER, CONSOLE_BORDER + CONSOLE_LINE_HEIGHT),
+                            nWidth - CONSOLE_BORDER, CONSOLE_BORDER + nLineHeight),
                       DT_RIGHT | DT_NOPREFIX);
 
     pDC->SelectObject(pOldFont);
@@ -490,16 +501,16 @@ void CI3DConsole::RedrawCommand()
 
 #ifndef NOGETDC
     CConsolePaint paint(pSurface, nWidth,
-                        nHeight - 2 * CONSOLE_BORDER - CONSOLE_LINE_HEIGHT,
-                        2 * CONSOLE_BORDER + CONSOLE_LINE_HEIGHT);
+                        nHeight - 2 * CONSOLE_BORDER - nLineHeight,
+                        2 * CONSOLE_BORDER + nLineHeight);
     CDC *pDC = paint.GetDC();
     if (!pDC)
         return;
     CFont *pOldFont = pDC->SelectObject(pConsoleFont);
 
     // clear
-    pDC->FillSolidRect(0, nHeight - 2 * CONSOLE_BORDER - CONSOLE_LINE_HEIGHT, nWidth,
-                       2 * CONSOLE_BORDER + CONSOLE_LINE_HEIGHT, CONSOLE_COLOR_BG);
+    pDC->FillSolidRect(0, nHeight - 2 * CONSOLE_BORDER - nLineHeight, nWidth,
+                       2 * CONSOLE_BORDER + nLineHeight, CONSOLE_COLOR_BG);
 
     // selection
     sizeCursor = pDC->GetOutputTextExtent(CString("> ") + szCommand.Left(nCursorPos));
@@ -512,8 +523,8 @@ void CI3DConsole::RedrawCommand()
             end = nWidth - 2 * CONSOLE_BORDER;
         if (begin < end)
             pDC->FillSolidRect(CONSOLE_BORDER + begin,
-                               nHeight - CONSOLE_LINE_HEIGHT - CONSOLE_BORDER, end - begin,
-                               CONSOLE_LINE_HEIGHT, CONSOLE_COLOR_SEL);
+                               nHeight - nLineHeight - CONSOLE_BORDER, end - begin,
+                               nLineHeight, CONSOLE_COLOR_SEL);
     }
 
     // command
@@ -521,16 +532,16 @@ void CI3DConsole::RedrawCommand()
     pDC->SetBkMode(TRANSPARENT);
 
     pDC->DrawText(CString("> ") + szCommand,
-                  CRect(CONSOLE_BORDER, nHeight - CONSOLE_LINE_HEIGHT - CONSOLE_BORDER,
-                        nWidth - CONSOLE_BORDER, nHeight - CONSOLE_BORDER + 5),
-                  DT_LEFT | DT_NOPREFIX);
+                  CRect(CONSOLE_BORDER, nHeight - nLineHeight - CONSOLE_BORDER,
+                        nWidth - CONSOLE_BORDER, nHeight - CONSOLE_BORDER),
+                  DT_LEFT | DT_NOPREFIX | DT_SINGLELINE);
 
     // cursor
     if (sizeCursor.cx < nWidth - 2 * CONSOLE_BORDER)
     {
         CPen pen(PS_SOLID, 2, CONSOLE_COLOR_CURSOR);
         CPen *pOldPen = pDC->SelectObject(&pen);
-        pDC->MoveTo(CONSOLE_BORDER + sizeCursor.cx, nHeight - CONSOLE_LINE_HEIGHT - CONSOLE_BORDER);
+        pDC->MoveTo(CONSOLE_BORDER + sizeCursor.cx, nHeight - nLineHeight - CONSOLE_BORDER);
         pDC->LineTo(CONSOLE_BORDER + sizeCursor.cx, nHeight - CONSOLE_BORDER);
         pDC->SelectObject(pOldPen);
     }
