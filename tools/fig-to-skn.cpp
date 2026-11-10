@@ -129,8 +129,10 @@ void convert(ResourceStore &store, const std::string &name,
   unsigned vertex_count = 0, index_count = 0, submesh_count = 0;
   std::array<float, 3> lo{FLT_MAX, FLT_MAX, FLT_MAX},
       hi{-FLT_MAX, -FLT_MAX, -FLT_MAX};
-  // Convert every available FIG part; LNK includes alternate equipment. Runtime
-  // semantic visibility must select the corresponding exported submeshes.
+  // Preserve every LNK variant (including hr.NN and *.armorNN). Section 12
+  // binds each submesh to its exact named node, not its bare body-part prefix.
+  // BuildOwnedAssembly supplies the live Wear/Remove/hair selection and the
+  // completed primary/secondary atlas; do not bake one outfit into this file.
   for (unsigned i = 0; i < model.nodes.size(); ++i) {
     if (remap[i] == UINT_MAX)
       continue;
@@ -214,7 +216,7 @@ void convert(ResourceStore &store, const std::string &name,
   u32(sections[7],0);u32(sections[7],0); // opaque, one sided
   for(const auto role:{"color","normal","orm","emission"}){
     const auto filename=name+"_"+role+".dds";
-    if(dds_dir.empty()||std::string(role)=="emission")u32(sections[7],0);
+    if(dds_dir.empty()||std::string(role)!="color")u32(sections[7],0);
     else{
       if(!std::filesystem::is_regular_file(dds_dir/filename))throw std::runtime_error("missing external DDS: "+filename);
       u32(sections[7],string(sections[1],"dds/"+filename));

@@ -167,7 +167,7 @@ void AssetEncoder::body(Out& out, const VisualAssemblyAsset& v) {
     io_count(out, v.parts.size());
     for (const auto& p : v.parts) {
         io(out, p.name); ref(out, p.geometry); io(out, p.skeleton_node); ref(out, p.texture);
-        io(out, p.texture_source_name); io(out, p.material_name); ref(out, p.surface); io(out, p.source_available); ref(out, p.material);
+        io(out, p.texture_source_name); io(out, p.assembled_character_texture); io(out, p.material_name); ref(out, p.surface); io(out, p.source_available); ref(out, p.material);
         io(out, p.diffuse); io(out, p.specular); io(out, p.texture_type); io(out, p.material_type);
         io(out, p.figure_flags); io(out, p.material_flags); io(out, p.texture_flags); io(out, p.weapon);
         io(out, p.arrow); io(out, p.explicitly_hidden); io(out, p.casts_shadow);
@@ -296,7 +296,7 @@ bool AssetDecoder::body(In& in, VisualAssemblyAsset& v) {
     v.parts.resize(in.count(1));
     for (auto& p : v.parts) {
         io(in, p.name); ref(in, p.geometry); io(in, p.skeleton_node); ref(in, p.texture);
-        io(in, p.texture_source_name); io(in, p.material_name); ref(in, p.surface); io(in, p.source_available); ref(in, p.material);
+        io(in, p.texture_source_name); io(in, p.assembled_character_texture); io(in, p.material_name); ref(in, p.surface); io(in, p.source_available); ref(in, p.material);
         io(in, p.diffuse); io(in, p.specular); io(in, p.texture_type); io(in, p.material_type);
         io(in, p.figure_flags); io(in, p.material_flags); io(in, p.texture_flags); io(in, p.weapon);
         io(in, p.arrow); io(in, p.explicitly_hidden); io(in, p.casts_shadow);
