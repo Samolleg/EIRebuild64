@@ -1,0 +1,78 @@
+#pragma once
+#include <cstring>
+namespace ShoulderGripFrames {
+inline UnityBody::V Normal(const char*name){
+ if(std::strcmp(name,"rh3.sword02") == 0)return {0.085777439045114687,0,-0.99623020492497416};
+ if(std::strcmp(name,"rh3.axe00") == 0)return {-0.4174555518902125,0,-0.90869734356167142};
+ if(std::strcmp(name,"rh3.club01") == 0)return {-0.51615404488552397,0,-0.85649576878599509};
+ if(std::strcmp(name,"rh3.pike00") == 0)return {-0.63152043662392376,0,-0.77525113888462516};
+ if(std::strcmp(name,"rh3.dsword01") == 0)return {-6.2884282385932268e-05,0,-0.99991618963632323};
+ if(std::strcmp(name,"rh3.daxe01") == 0)return {0.42230803078713075,0,-0.90635992706206547};
+ if(std::strcmp(name,"rh3.dpike03") == 0)return {0.015335231877554811,0,-0.99979859017430017};
+ if(std::strcmp(name,"rh3.staff03") == 0)return {-0.18417243246130652,0,-0.98280868197861471};
+ if(std::strcmp(name,"rh3.dstaff00") == 0)return {0.015335231877554811,0,-0.99979859017430017};
+ if(std::strcmp(name,"rh3.dstaff01") == 0)return {0.015335231877554811,0,-0.99979859017430017};
+ if(std::strcmp(name,"rh3.dstaff02") == 0)return {0.015399399332520347,0,-0.99988142221975362};
+ if(std::strcmp(name,"rh3.dstaff03") == 0)return {0.18621878802900316,0,-0.98250830173846837};
+ if(std::strcmp(name,"rh3.dstaff04") == 0)return {0.015399399332520347,0,-0.99988142221975362};
+ if(std::strcmp(name,"rh3.dstaff05") == 0)return {0.51669763347990783,0,-0.85607005893648636};
+ if(std::strcmp(name,"rh3.axe01") == 0)return {-0.372163566730495,0,-0.92807686635241282};
+ if(std::strcmp(name,"rh3.axe02") == 0)return {-0.40697947078689345,0,-0.91334555378448123};
+ if(std::strcmp(name,"rh3.axe03") == 0)return {-0.53519688825691414,0,-0.84462813181830454};
+ if(std::strcmp(name,"rh3.axe05") == 0)return {-0.5352480379081298,0,-0.84459571877571094};
+ if(std::strcmp(name,"rh3.axe07") == 0)return {-0.19915363214284171,0,-0.97988275883647991};
+ if(std::strcmp(name,"rh3.axe08") == 0)return {-0.28724788792759237,0,-0.95776878271407828};
+ if(std::strcmp(name,"rh3.axe09") == 0)return {-0.035661678593287817,0,-0.99928005832465383};
+ if(std::strcmp(name,"rh3.axe10") == 0)return {-0.035661678593287817,0,-0.99928005832465383};
+ if(std::strcmp(name,"rh3.club02") == 0)return {-0.54668151201058568,0,-0.83724053573896018};
+ if(std::strcmp(name,"rh3.club03") == 0)return {-0.52368658840922133,0,-0.8518126245713854};
+ if(std::strcmp(name,"rh3.club04") == 0)return {-0.51931423604692795,0,-0.85448529214839097};
+ if(std::strcmp(name,"rh3.club05") == 0)return {-0.56983024420971273,0,-0.82166044266611871};
+ if(std::strcmp(name,"rh3.club06") == 0)return {-0.53615930224572894,0,-0.84401753114146039};
+ if(std::strcmp(name,"rh3.club07") == 0)return {-0.5350930838432898,0,-0.84469389833349839};
+ if(std::strcmp(name,"rh3.club08") == 0)return {-0.55813119191700011,0,-0.82965171178502639};
+ if(std::strcmp(name,"rh3.club09") == 0)return {0.58890100674255808,0,-0.80810147538065868};
+ if(std::strcmp(name,"rh3.dagger01") == 0)return {0.64361860263209714,0,-0.76523688136424806};
+ if(std::strcmp(name,"rh3.dagger02") == 0)return {0.66222934689043367,0,-0.74918935014536048};
+ if(std::strcmp(name,"rh3.dagger03") == 0)return {0.65901407289425085,0,-0.75201917660488671};
+ if(std::strcmp(name,"rh3.dagger04") == 0)return {0.61552972514396287,0,-0.78800732719841582};
+ if(std::strcmp(name,"rh3.dagger05") == 0)return {0.30154466375504252,0,-0.95336415184075363};
+ if(std::strcmp(name,"rh3.dagger07") == 0)return {0.31294222999961702,0,-0.9496839221978447};
+ if(std::strcmp(name,"rh3.dagger08") == 0)return {-0.0032194896505560134,0,-0.99991100861040594};
+ if(std::strcmp(name,"rh3.dagger09") == 0)return {0.65960953363798569,0,-0.75149694170238601};
+ if(std::strcmp(name,"rh3.daxe00") == 0)return {0.38835556048305275,0,-0.92141866102936643};
+ if(std::strcmp(name,"rh3.daxe02") == 0)return {0.015335231877554811,0,-0.99979859017430017};
+ if(std::strcmp(name,"rh3.daxe03") == 0)return {0.015335231877554811,0,-0.99979859017430017};
+ if(std::strcmp(name,"rh3.daxe04") == 0)return {0.015335231877554811,0,-0.99979859017430017};
+ if(std::strcmp(name,"rh3.dclub02") == 0)return {0.015335231877554811,0,-0.99979859017430017};
+ if(std::strcmp(name,"rh3.dclub03") == 0)return {0.015335231877554811,0,-0.99979859017430017};
+ if(std::strcmp(name,"rh3.dclub05") == 0)return {-6.2884282385932268e-05,0,-0.99991618963632323};
+ if(std::strcmp(name,"rh3.dpike00") == 0)return {-0.6118819483598974,0,-0.79084313964436204};
+ if(std::strcmp(name,"rh3.dpike01") == 0)return {-0.64278122422154027,0,-0.76594039457356899};
+ if(std::strcmp(name,"rh3.dpike02") == 0)return {0.23566688293342555,0,-0.97174765785140915};
+ if(std::strcmp(name,"rh3.dstaff07") == 0)return {0.015335231877554811,0,-0.99979859017430017};
+ if(std::strcmp(name,"rh3.dsword00") == 0)return {-0.21193603232218799,0,-0.97719778369314003};
+ if(std::strcmp(name,"rh3.dsword02") == 0)return {0.015335231877554811,0,-0.99979859017430017};
+ if(std::strcmp(name,"rh3.pike01") == 0)return {-0.64407259822003382,0,-0.76485480873003298};
+ if(std::strcmp(name,"rh3.pike03") == 0)return {-0.64278014588866794,0,-0.76594129949149869};
+ if(std::strcmp(name,"rh3.pike05") == 0)return {-0.64278194872348371,0,-0.76593978654370987};
+ if(std::strcmp(name,"rh3.pike06") == 0)return {-0.93497731245075555,0,-0.35447117545712914};
+ if(std::strcmp(name,"rh3.pike07") == 0)return {-0.93497731245075555,0,-0.35447117545712914};
+ if(std::strcmp(name,"rh3.staff02") == 0)return {0.015335231877554811,0,-0.99979859017430017};
+ if(std::strcmp(name,"rh3.staff04") == 0)return {0.015335231877554811,0,-0.99979859017430017};
+ if(std::strcmp(name,"rh3.staff06") == 0)return {0.015335231877554811,0,-0.99979859017430017};
+ if(std::strcmp(name,"rh3.sword01") == 0)return {0.63382456771617079,0,-0.77336848113534495};
+ if(std::strcmp(name,"rh3.sword03") == 0)return {0.61552839615911037,0,-0.78800836529569063};
+ if(std::strcmp(name,"rh3.sword04") == 0)return {0.68681522685264773,0,-0.72671674978459122};
+ if(std::strcmp(name,"rh3.sword06") == 0)return {0.77241433460286335,0,-0.63498699668106173};
+ if(std::strcmp(name,"rh3.sword08") == 0)return {-0.0027741834021470747,0,-0.99991234323831657};
+ if(std::strcmp(name,"rh3.sword09") == 0)return {0.31294222999961702,0,-0.9496839221978447};
+ if(std::strcmp(name,"rh3.sword10") == 0)return {0.31294222999961702,0,-0.9496839221978447};
+ if(std::strcmp(name,"rh3.sword11") == 0)return {0.30119662737238079,0,-0.9534741642612472};
+ if(std::strcmp(name,"rh3.sword12") == 0)return {0.31294222999961702,0,-0.9496839221978447};
+ if(std::strcmp(name,"rh3.sword13") == 0)return {0.31302771631763571,1.9723551819561536e-09,-0.94974400651450286};
+ if(std::strcmp(name,"rh3.axe13") == 0)return {-0.035601459547006137,4.2408459509715724e-08,-0.9993660139729923};
+ if(std::strcmp(name,"rh3.pike15") == 0)return {-0.93503337211500348,-1.9796476277700314e-08,-0.35455983859609941};
+ return {0,0,-1};
+}
+}

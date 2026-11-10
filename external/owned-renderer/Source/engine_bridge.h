@@ -782,6 +782,8 @@ struct NativeWorldGeometry {
         std::shared_ptr<const VisualSkeletonBinding> binding;
         std::weak_ptr<const void> owner;
         std::array<float,16> root_to_world{};
+        // Additional model-space affine skin slots, evaluated on bones only.
+        std::vector<std::array<float,16>> skin_palette;
         std::array<float,3> shape{}, center_shift{};
         std::uint32_t frame = 0;
         float fraction = 0, height_scale = 1;
@@ -879,6 +881,7 @@ struct NativeGeometryView {
     // Immutable SKN upload records, 240 bytes/component: u32 node[4], f32
     // weight[4], column-major inverse bind's first 3 rows as 4xfloat3[4].
     const std::uint8_t* skin_vertices = nullptr;
+    bool skin_contacts = false; // 1024-byte records; ordinary SKN remains 240 bytes
     NativeSknMaterial skn_material{};
     // Established from conservative source/pose envelopes before resolving any
     // mesh, texture or deformation. A light-only record never becomes a color

@@ -1,0 +1,7 @@
+#pragma once
+#include <string>
+namespace ShoulderFamilyData {
+inline bool Known(const std::string&name){
+return name=="rh3.sword13"||name=="rh3.axe13"||name=="rh3.pike15"||name=="rh3.axe01"||name=="rh3.axe02"||name=="rh3.axe03"||name=="rh3.axe05"||name=="rh3.axe07"||name=="rh3.axe08"||name=="rh3.axe09"||name=="rh3.axe10"||name=="rh3.club02"||name=="rh3.club03"||name=="rh3.club04"||name=="rh3.club05"||name=="rh3.club06"||name=="rh3.club07"||name=="rh3.club08"||name=="rh3.club09"||name=="rh3.dagger01"||name=="rh3.dagger02"||name=="rh3.dagger03"||name=="rh3.dagger04"||name=="rh3.dagger05"||name=="rh3.dagger07"||name=="rh3.dagger08"||name=="rh3.dagger09"||name=="rh3.daxe00"||name=="rh3.daxe01"||name=="rh3.daxe02"||name=="rh3.daxe03"||name=="rh3.daxe04"||name=="rh3.dclub02"||name=="rh3.dclub03"||name=="rh3.dclub05"||name=="rh3.dpike00"||name=="rh3.dpike01"||name=="rh3.dpike02"||name=="rh3.dpike03"||name=="rh3.dstaff00"||name=="rh3.dstaff01"||name=="rh3.dstaff05"||name=="rh3.dstaff07"||name=="rh3.dsword00"||name=="rh3.dsword01"||name=="rh3.dsword02"||name=="rh3.pike01"||name=="rh3.pike03"||name=="rh3.pike05"||name=="rh3.pike06"||name=="rh3.pike07"||name=="rh3.staff02"||name=="rh3.staff03"||name=="rh3.staff04"||name=="rh3.staff06"||name=="rh3.sword01"||name=="rh3.sword02"||name=="rh3.sword03"||name=="rh3.sword04"||name=="rh3.sword06"||name=="rh3.sword08"||name=="rh3.sword09"||name=="rh3.sword10"||name=="rh3.sword11"||name=="rh3.sword12";
+}
+}
