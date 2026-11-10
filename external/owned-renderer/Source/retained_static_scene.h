@@ -1,4 +1,5 @@
 #pragma once
+#include "static_lod.h"
 
 #include "lifecycle_probe.h"
 #include "owned_asset_loader.h"
@@ -312,12 +313,18 @@ struct VisualPreparedResources {
         std::vector<std::uint8_t> skin_vertices;
         std::vector<std::uint32_t> component_parts;   // skeleton node | position base << 16
         std::vector<std::uint16_t> indices;
+        NativeMeshLods skn_lods;
         ResourceIdentity identity;                    // content identity: shared by identical characters
     };
     bool skn_selected = false;
+    std::shared_ptr<const skn::RuntimeAsset> skn_bounds_asset;
+    PoseKey skn_bounds_key{};
+    NativeWorldBounds skn_bounds{};
+    bool skn_bounds_valid = false;
     struct MergedGroup {
         std::shared_ptr<const skn::RuntimeAsset> skn_asset;
         std::uint32_t skn_material = 0;
+        bool skn_casts_shadow = true;
         std::vector<std::uint32_t> parts;
         std::uint32_t shape_count = 0, position_groups = 0, normal_groups = 0;
         std::shared_ptr<const MergedGeometry> geometry;

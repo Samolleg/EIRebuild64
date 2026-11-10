@@ -27,7 +27,7 @@ Legacy bind comes from BON, selected with strength/grace/tall. Native ANM/ADB tr
 
 ## Mesh and LOD
 
-Vertex offsets: 0 f32 position[3]; 12 SNORM16 normal[4]; 20 SNORM16 tangent[4], w=handedness; 28 f16 UV0[2]; 32 u16 joint[4]; 40 UNORM16 weight[4]. Weights sum exactly to 65535; all four joint indices must exist, including zero-weight lanes. Indices are u32 absolute vertex references, grouped in threes. Authoring uses MikkTSpace and splits UV/normal/region seams. The rigid reference tool has no normal map and writes a perpendicular reference tangent, not an authoring-quality MikkTSpace bake.
+Vertex offsets: 0 f32 position[3]; 12 SNORM16 normal[4]; 20 SNORM16 tangent[4], w=handedness; 28 f16 UV0[2]; 32 u16 joint[4]; 40 UNORM16 weight[4]. Weights sum exactly to 65535; all four joint indices must exist, including zero-weight lanes. Indices are u32 absolute vertex references, grouped in threes. Authoring uses MikkTSpace and splits UV/normal/region seams. The rigid reference tool writes a perpendicular reference tangent and may attach a flat BC5 normal; it is not an authoring-quality MikkTSpace bake.
 
 Submesh offsets: 0 u32 first index; 4 u32 index count; 8 u32 material; 12 u16 region; 14 u16 layer. Ranges contain whole triangles and valid material/vertex references.
 
@@ -50,14 +50,28 @@ Types 8–11 are reserved in v1. Their nonempty payloads are explicitly rejected
 * 10 regions/wounds: versioned per-triangle body/underwear regions with L/R detail; wound masks/stages and eye regions. Keep gameplay proxy unchanged.
 * 11 outfit: skeleton/bind/driver hashes; slots head/torso/legs/hands/feet/back/accessory; underwear→base→outer; hideBody/hideLowerLayers bitsets. Union only ready visible clothing; removing/failing an asset restores lower layers. Owner decision of 2026-11-10 overrides the proposal: fitted shirt/pants/underwear/wraps/cuffs/socks use surface binding; loose clothing, rigid armour and eyelids use ordinary bone weights.
 
-bahonec remains read-only. No bahonec asset is included pending the owner's rights clarification; the rigid tool does not claim to reproduce its procedural rig, resolver, eyelid contact or surface-bound clothes.
+bahonec remains read-only. Rights and provenance are recorded below; this task cooks its clothing textures outside Git/kit. The rigid tool does not claim to reproduce its procedural rig, resolver, eyelid contact or surface-bound clothes.
 
 ## Reference tool
 
-Build `tools/fig-to-skn.vcxproj`; run `fig-to-skn OUTPUT_DIR ARCHIVE.res [ARCHIVE.res ...]`, archives in first-wins priority. It converts unhufe at (0.2,0.3,0.85) and unmogo at (0.5,0.5,0.2), all available FIG submeshes (including alternative equipment), with weight 1.0 on their part's LNK node and bind from BON. Geometry is frozen at that shape; shape morph authoring is deferred. Its factor-only material does not pretend old MMP files are BC7/BC5 PBR maps.
+Build `tools/fig-to-skn.vcxproj`; run `fig-to-skn OUTPUT_DIR ARCHIVE.res [ARCHIVE.res ...]`, archives in first-wins priority. It converts unhufe at (0.2,0.3,0.85) and unmogo at (0.5,0.5,0.2), all available FIG submeshes (including alternative equipment), with weight 1.0 on their part's LNK node and bind from BON. Geometry is frozen at that shape; shape morph authoring is deferred. The optional `--dds-directory DIRECTORY` argument between OUTPUT_DIR and the archives attaches `dds/<model>_color.dds`, `_normal.dds` and `_orm.dds`. All three files must exist. Runtime validation still enforces their BC formats, color spaces and complete mip chains. The geometry and CPU reference comparison are unchanged.
+
+`fig-to-skn --export-mmp TEXTURE.mmp OUTPUT.rgb ARCHIVE.res [...]` exports mip zero through the existing MMP RGB decoder and prints dimensions. Feed those bytes to `skn_texpack --role color --space srgb --input OUTPUT.rgb --width W --height H --output <model>_color.dds`. Cook a constant positive-Z normal and ORM (AO=1, roughness=1, metallic=0) with skn_texpack as well. This reference is opaque and exports RGB, not translucent MMP alpha.
 
 The serialized SKN is decoded and compared against the renderer's actual CPU functions `sample_visual_skeleton` and `visual_node_world_matrix`. Idle and attack are sampled at integer/fractional phases with nonidentity root/facing, tolerance 1e-4 metres. ANM vertex morphs reject the skin-only reference. This comparison verifies transform math, not GPU execution or gameplay presentation.
 
-## Current implementation limits (X64SKIN02 work in progress)
+## Runtime material, LOD and bounds (X64SKIN03)
 
-The runtime selector currently supports one LOD, base-color DDS and base/emission color factors. Full PBR factors are not integrated. It explicitly rejects multiple LODs and nonempty normal/ORM/emission maps: their complete GPU material/LOD integration is unfinished. The decoder itself validates the full required table layouts. Conservative bounds for arbitrary new silhouettes and the binary schemas of deferred sections also remain to be completed. This is not a finished implementation of BRIEF.
+The retained GPU path accepts all four DDS channels and factors. BC5 reconstructs positive Z in the skinned, orthonormalized tangent frame; ORM supplies AO/roughness/metallic. SKN enters the existing materialGgx/Schlick sun, point-light and environment path without class-derived pseudo-relief. Emission is independent of base color. Opaque ignores authored alpha, mask uses the cutoff, blend uses source-alpha compositing without depth writes or opaque shadow casting; two-sided faces reverse their shading normal on the back.
+
+One draw per semantic part/material/region owns the union of its LOD vertices and separate authored index lists; large sets split into native 16-bit component pages without changing vertices. A persistent GPU level switches discretely by projected error at the renderer's pixel limit. Moving coarser uses limit*(1-hysteresis), moving finer limit*(1+hysteresis). Shadows reuse that selected camera level. Static FIG LOD crossfades are unchanged.
+
+For each joint the loader computes a bind-local sphere containing every vertex with a positive weight, across all LODs. Current pose matrices transform sphere centers and row-norm radii; their union contains the weighted convex skin. Pose-keyed bounds feed early CPU selection, part/light admission and the grow-only GPU envelope. No CPU-deformed vertex stream is uploaded. Bind geometry, gameplay proxies and resource paths are unchanged.
+
+## Owner decisions and bahonec provenance
+
+The source `FORMAT.md` of the dropped X64SKIN01 task is no longer present. The accepted specification above retains its SKN/driver/region/outfit decisions, including the 2026-11-10 surface-binding decision. The canonical project knowledge (`C:/Dev/EvilIslands/KNOWLEDGE.md`, Models and illustrations) confirms rights and provides this exact credit:
+
+«Модель взята из личного проекта bahonec, сделанного им специально для Unity, и перенесена автором bahonec с помощью GPT-агента для использования в проекте „Проклятые земли“. Список одежды и материалов и перенос на новый движок bahonec также разрабатывает лично.»
+
+Assets from bahonec/Dejavu-Female-Body are authorized for EIRebuild64. The clone remains read-only; texture cooking alone is not an implementation of its procedural rig or a gameplay acceptance.

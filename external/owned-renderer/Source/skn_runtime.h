@@ -14,6 +14,7 @@ struct RuntimeAsset {
   ResourceIdentity identity;
   Asset asset;
   std::vector<std::array<Dds, 4>> textures;
+  std::vector<float> joint_radius;
 };
 inline Dds dds(ResourceBlob blob, unsigned map) {
   if (!blob.bytes)
@@ -92,15 +93,15 @@ inline std::shared_ptr<const RuntimeAsset> select(const std::string &name,
   std::string error;
   if (!blob.bytes || !decode(*blob.bytes, a->asset, error))
     throw std::runtime_error(error);
-  // Runtime restrictions are explicit until the remaining SKN shading/LOD
-  // work is completed; never silently discard authored material channels.
-  if (a->asset.lods.size() != 1)
-    throw std::runtime_error("SKN runtime LOD selection is not implemented");
-  for (const auto &material : a->asset.materials)
-    if (!material.maps[1].empty() || !material.maps[2].empty() ||
-        !material.maps[3].empty())
-      throw std::runtime_error(
-          "SKN normal/ORM/emission shading is not implemented");
+  // In joint-local bind space every influenced vertex lies in this sphere.
+  // Positive normalized skin weights make the posed mesh a convex combination
+  // of the posed joint spheres, including rotation and non-uniform scale.
+  a->joint_radius.assign(a->asset.joints.size(),-1);
+  for(const auto& v:a->asset.vertices)for(unsigned k=0;k<4;++k)if(v.weights[k]){
+    const auto p=point(a->asset.joints[v.joints[k]].inverse,v.position);
+    const float r=std::sqrt(p[0]*p[0]+p[1]*p[1]+p[2]*p[2]);
+    a->joint_radius[v.joints[k]]=(std::max)(a->joint_radius[v.joints[k]],std::nextafter(r,INFINITY));
+  }
   a->textures.resize(a->asset.materials.size());
   for (unsigned i = 0; i < a->textures.size(); ++i)
     for (unsigned k = 0; k < 4; ++k) {
@@ -125,6 +126,7 @@ struct GpuVertex {
   std::uint32_t joints[4];
   float weights[4];
   float inverse[4][12];
+  float tangent[4];
 };
-static_assert(sizeof(GpuVertex) == 224);
+static_assert(sizeof(GpuVertex) == 240);
 } // namespace owned::skn

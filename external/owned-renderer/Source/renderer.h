@@ -2000,6 +2000,10 @@ private:
         float morph_fraction = 0;
         float shape[3]{};
         UINT pose_node = UINT_MAX;
+        UINT skn_maps[4]{};
+        float skn_factors[4]{};
+        float skn_emission[4]{};
+        float skn_base[4]{};
     };
     struct NativeDrawGpu {
         UINT instance_index = 0;
@@ -2047,8 +2051,9 @@ private:
         UINT specular = 0xff000000u;
         UINT source_position = 0;
         UINT padding = 0;
+        float tangent[4]{};
     };
-    static_assert(sizeof(NativeInstanceGpu) == 352,
+    static_assert(sizeof(NativeInstanceGpu) == 416,
                   "NativeInstanceGpu must match the HLSL structured-buffer layout");
     static_assert(sizeof(NativeWorldLighting) == 48,
                   "NativeWorldLighting must match the HLSL constant-buffer layout");
@@ -2058,7 +2063,7 @@ private:
                   "NativeDrawWorkGpu must match the HLSL structured-buffer layout");
     static_assert(sizeof(NativePreparedVertexGpu) == 64,
                   "NativePreparedVertexGpu must match the HLSL structured-buffer layout");
-    static_assert(sizeof(NativeWorldVertexGpu) == 64,
+    static_assert(sizeof(NativeWorldVertexGpu) == 80,
                   "NativeWorldVertexGpu must match the HLSL structured-buffer layout");
     struct NativeMaterialKey {
         // Only state consumed by the current native D3D11 pipeline belongs in
@@ -2067,9 +2072,10 @@ private:
         std::array<std::uint32_t, 30> state{};
         std::uint32_t shadow = 0, contact_map = 0;
         std::uint64_t texture_backing = 0;
+        std::uint64_t skn_material = 0;
         std::uint64_t texture_generation = 0;
         bool operator==(const NativeMaterialKey& other) const noexcept {
-            return state == other.state && shadow == other.shadow && contact_map == other.contact_map && texture_backing == other.texture_backing &&
+            return skn_material == other.skn_material && state == other.state && shadow == other.shadow && contact_map == other.contact_map && texture_backing == other.texture_backing &&
                 texture_generation == other.texture_generation;
         }
     };
@@ -2154,9 +2160,10 @@ private:
     };
     struct NativeWorldStateGpu {
         std::array<UINT,2> geometry{},pose{};
+        UINT skn_lod = 0;
         UINT preparations = 0,components = 0; // test seam; production never increments these
     };
-    static_assert(sizeof(NativePoseGpu)==120 && sizeof(NativePoseNodeGpu)==104 && sizeof(NativeWorldStateGpu)==24,
+    static_assert(sizeof(NativePoseGpu)==120 && sizeof(NativePoseNodeGpu)==104 && sizeof(NativeWorldStateGpu)==28,
         "Pose records must match the structured HLSL layout");
     struct NativePoseSlot {
         NativePreparedIdentity identity{};
@@ -2194,6 +2201,7 @@ private:
         FixedState state{};
         ComPtr<ID3D11ShaderResourceView> texture_srv;
         D3D12TextureRef texture_d3d12;  // renderer_backend=d3d12: the texture instead of texture_srv
+        std::array<ComPtr<ID3D11ShaderResourceView>,3> skn_textures;
         NativeMaterialKey material_key{};
         SemanticKind semantic_kind = SemanticKind::unknown;
         NativeOpacityClass opacity = NativeOpacityClass::ordered;
@@ -2252,6 +2260,7 @@ private:
         // D3D12: the texture instance.padding[0] names by bindless index, kept
         // alive by the command (and the record) that stores the index.
         D3D12TextureRef texture12;
+        std::array<D3D12TextureRef,3> skn_textures12;
         // D3D12: the texture value (backing) instance.padding[1]'s material profile index belongs to.
         std::uint64_t material_backing = 0;
     };
@@ -2305,7 +2314,7 @@ private:
         NativeInstanceGpu value{};
         NativeDrawGpu descriptor{};
     };
-    static_assert(sizeof(NativeInstanceUpdate)==464,"NativeInstanceUpdate must match the structured HLSL layout");
+    static_assert(sizeof(NativeInstanceUpdate)==528,"NativeInstanceUpdate must match the structured HLSL layout");
     struct NativeBatch {
         std::size_t first_draw = 0;
         std::size_t draw_count = 0;

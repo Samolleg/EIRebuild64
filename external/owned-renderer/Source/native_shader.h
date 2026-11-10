@@ -35,11 +35,11 @@
 namespace owned {
 
 inline constexpr char kNativeShader[] = R"(
-struct NativeInstance{row_major float4x4 objectToClip;row_major float4x4 objectToWorld;uint4 geometryOffsets;uint2 colorOffsets;float2 nativeUvShift;uint nativeFlags;uint nativeDefaultDiffuse;uint nativeDefaultSpecular;uint morphOffset;uint morphCount;uint lightingEnabled;uint4 nativePadding;uint terrainVertexOffset;uint terrainPhaseOffset;uint terrainPhaseCount;uint terrainTilesPerSide;uint terrainFlags;float2 terrainWindDirection;float terrainWindForce;float terrainWindForceNormalized;float terrainWindPhase;float terrainPreciseTime;float2 terrainFogMin;float2 terrainFogMax;float terrainFogDistance;uint terrainFogEnabled;float4 nativeEmissive;float4 nativeSpecular;float nativeMaterialAlpha;float3 nativeMaterialDiffuse;uint worldGeometry;uint shapeCount;uint positionGroups;uint secondMorphOffset;float morphFraction;float3 shape;uint poseNode;};
+struct NativeInstance{row_major float4x4 objectToClip;row_major float4x4 objectToWorld;uint4 geometryOffsets;uint2 colorOffsets;float2 nativeUvShift;uint nativeFlags;uint nativeDefaultDiffuse;uint nativeDefaultSpecular;uint morphOffset;uint morphCount;uint lightingEnabled;uint4 nativePadding;uint terrainVertexOffset;uint terrainPhaseOffset;uint terrainPhaseCount;uint terrainTilesPerSide;uint terrainFlags;float2 terrainWindDirection;float terrainWindForce;float terrainWindForceNormalized;float terrainWindPhase;float terrainPreciseTime;float2 terrainFogMin;float2 terrainFogMax;float terrainFogDistance;uint terrainFogEnabled;float4 nativeEmissive;float4 nativeSpecular;float nativeMaterialAlpha;float3 nativeMaterialDiffuse;uint worldGeometry;uint shapeCount;uint positionGroups;uint secondMorphOffset;float morphFraction;float3 shape;uint poseNode;uint4 sknMaps;float4 sknFactors;float4 sknEmission;float4 sknBase;};
 struct NativeTerrainVertex{float noise;float windMultiplier;float3 objectColor;float depth;uint flags;uint animationIndex;uint animationBaseTile;uint gridIndex;float opacity;float3 emissive;float liquidDepth;float liquidMultiplier;float4 liquidUvBounds;float liquidBend;float liquidCascade;float2 liquidCurrent;float liquidSelfIllumination;float liquidBedEmission;uint slopeNormal;uint shiftObjects;float liquidDrop;float liquidFill;};
 struct NativeDraw{uint instanceIndex;uint componentOffset;uint indexOffset;uint indexCount;uint outputTriangleBase;uint indirectArgsByteOffset;uint orderedTriangleOffset;uint preservesOrder;float4 boundsMin;float4 boundsMax;uint preparedVertexBase;uint componentCount;uint prepareWorld;uint colorVisible;uint worldState;uint2 worldGeneration;float geometryRadius;uint steepFirstTriangle;};
 struct NativePreparedVertex{float4 p;float4 d;float4 s;float2 uv;uint2 textureReference;};
-struct NativeWorldVertex{float4 p;float4 normal;float2 uv;float2 undeformedXY;uint diffuse;uint specular;uint sourcePosition;uint partNode;};
+struct NativeWorldVertex{float4 p;float4 normal;float2 uv;float2 undeformedXY;uint diffuse;uint specular;uint sourcePosition;uint partNode;float4 tangent;};
 // b0 and b1, one member list each. D3D11 reads them as constant buffers.
 // EID3D12 reads the same bytes through root raw views (t0/t1 space4, the
 // executor binds the b0/b1 upload blocks there). As constant buffers, on the
@@ -272,6 +272,8 @@ RWStructuredBuffer<NativePoseNode> nativePoseOutput:register(u4);
 cbuffer NativeWorldClip:register(b3){row_major float4x4 nativeCurrentWorldClip;row_major float4x4 nativeCullWorldClip;float4 nativeCullParams;float4 nativeHiZParams;float4 nativeDistanceCull;float4 nativeImpostorParams;};
 Texture2D<float> nativeHiZ:register(t26);
 StructuredBuffer<NativeInstance> nativePersistentInstances:register(t13);
+// Pixel t13 is the contact height map; SKN reads the instance rows at t126.
+StructuredBuffer<NativeInstance> nativeSknInstances:register(t126);
 struct NativeInstanceUpdate{uint destination;uint count;uint flags;NativeInstance value;NativeDraw descriptor;};
 StructuredBuffer<NativeInstanceUpdate> nativeInstanceUpdates:register(t14);
 RWStructuredBuffer<NativeInstance> nativeInstanceOutput:register(u5);
@@ -610,7 +612,7 @@ RWStructuredBuffer<uint4> nativeTriangleOutput:register(u0);
 RWByteAddressBuffer nativeIndirectArgs:register(u1);
 RWStructuredBuffer<NativePreparedVertex> nativePreparedOutput:register(u2);
 RWStructuredBuffer<NativeWorldVertex> nativeWorldOutput:register(u3);
-struct NativeWorldState{uint2 geometry;uint2 pose;uint preparations;uint components;};
+struct NativeWorldState{uint2 geometry;uint2 pose;uint sknLod;uint preparations;uint components;};
 RWStructuredBuffer<NativeWorldState> nativeWorldStateOutput:register(u6);
 StructuredBuffer<NativeWorldState> nativeWorldStates:register(t15);
 struct NativeOutput{float4 p:SV_Position;float4 d:COLOR0;float4 s:COLOR1;float2 uv:TEXCOORD0;nointerpolation uint2 textureReference:TEXCOORD1;float3 worldPosition:TEXCOORD2;float3 worldNormal:TEXCOORD3;float3 directional:TEXCOORD4;float3 emissive:TEXCOORD5;nointerpolation uint shadowMode:TEXCOORD6;float4 pointMaterial:TEXCOORD7;
@@ -628,6 +630,10 @@ struct NativeOutput{float4 p:SV_Position;float4 d:COLOR0;float4 s:COLOR1;float2 
  float2 terrainFlat:TEXCOORD29;
  // Rest (undisplaced) world position: shadow lookups stay attached to swaying leaves.
  float3 shadowPosition:TEXCOORD20;};
+// SKN is never liquid: reuse its interpolated tint for the tangent frame,
+// and its flat flow.w for the instance row. Keep the tessellation signature
+// within the existing register budget. Swaying bit 28 tags the union.
+uint nativeSknInstance(NativeOutput i){return (i.swaying&(1u<<28))!=0?(uint)i.liquidFlow.w:0;}
 @LIQUID_SURFACE@
 // Rain rings on wet flat ground: the height gradient of the drop rings,
 // rendered once per game-time step into a tiling texture (rainRingsCS,
@@ -909,7 +915,8 @@ NativeWorldVertex prepareNativeWorldVertex(NativeInstance instance,uint componen
  if(skinned){
   uint4 joints=nativeGeometry.Load4(component.w);
   float4 weights=asfloat(nativeGeometry.Load4(component.w+16));
-  float3 world=0,worldNormal=0;
+  float3 world=0,worldNormal=0,worldTangent=0;
+  float4 tangent=asfloat(nativeGeometry.Load4(component.w+224));
   [unroll]for(uint influence=0;influence<4;++influence){
    if(weights[influence]>0){
     uint address=component.w+32+influence*48;
@@ -919,10 +926,12 @@ NativeWorldVertex prepareNativeWorldVertex(NativeInstance instance,uint componen
     float4x4 palette=mul(nativeNodeMatrix(instance.poseNode+joints[influence]),inverseBind);
     world+=weights[influence]*mul(palette,float4(position,1)).xyz;
     worldNormal+=weights[influence]*mul(transpose(inverseObjectLinear(palette)),normal);
+    worldTangent+=weights[influence]*mul((float3x3)palette,tangent.xyz);
    }
   }
   output.p=float4(world,1);output.undeformedXY=world.xy;
   output.normal.xyz=normalize(worldNormal);
+  output.tangent=float4(normalize(worldTangent),tangent.w);
  }
  [branch]if((instance.worldGeometry&@WORLD_VERTEX_OPACITY@)!=0)output.normal.w=loadPacked(instance.geometryOffsets.y,component.y).w;
  output.uv=asfloat(nativeGeometry.Load2(instance.geometryOffsets.z+component.z*8));
@@ -1056,11 +1065,41 @@ void nativeImpostorSelect(NativeDraw draw,NativeInstance instance,inout uint fir
  if(coverage==0){impostorSecond=false;secondCount=0;return;}
  fade=512u|coverage;
 }
+// SKN switches discretely. Update history during world preparation, before
+// either colour or shadow index selection, using the camera projection.
+groupshared uint nativeSknSelectedLevel;
+void nativeSknLodUpdate(NativeDraw draw,NativeInstance instance){
+ if(instance.sknFactors.w==0||draw.worldState==0xffffffffu||(instance.worldGeometry&@WORLD_LOD@)==0)return;
+ uint table=draw.indexOffset-64,levels=min(nativeGeometry.Load(table),3u);
+ NativeWorldState state=nativeWorldStateOutput[draw.worldState];
+ uint chosen=all(state.geometry==draw.worldGeneration)?min(state.sknLod,levels):0;
+ float4x4 node=nativeNodeMatrix(instance.poseNode);
+ float3 center=float3(node[0].w,node[1].w,node[2].w);
+ float w=dot(nativeCurrentWorldClip[3],float4(center,1));
+ float3x3 m=(float3x3)nativeNodeMatrix(instance.poseNode);
+ float scale=max(max(length(float3(m[0][0],m[1][0],m[2][0])),length(float3(m[0][1],m[1][1],m[2][1]))),length(float3(m[0][2],m[1][2],m[2][2])));
+ float pixels=scale*length(nativeCurrentWorldClip[1].xyz)*nativeCullParams.y*.5/max(w,1e-3);
+ float limit=nativeDistanceCull.z;
+ if(w<=1e-3||limit<=0)chosen=0;
+ else{
+  [loop]while(chosen>0){float error=asfloat(nativeGeometry.Load(table+chosen*16+8))*pixels;
+   float h=asfloat(nativeGeometry.Load(table+chosen*16+12));if(error<=limit*(1+h))break;--chosen;}
+  [loop]while(chosen<levels){float error=asfloat(nativeGeometry.Load(table+(chosen+1)*16+8))*pixels;
+   float h=asfloat(nativeGeometry.Load(table+(chosen+1)*16+12));if(error>limit*(1-h))break;++chosen;}
+ }
+ nativeSknSelectedLevel=chosen;
+ state.sknLod=chosen;nativeWorldStateOutput[draw.worldState]=state;
+}
 void nativeStaticLodSelect(NativeDraw draw,NativeInstance instance,inout uint firstOffset,inout uint firstCount,
                            out uint secondOffset,out uint secondCount,out uint fade,out uint firstLevel,out uint secondLevel){
  secondOffset=0;secondCount=0;fade=0;firstLevel=0;secondLevel=0xffffffffu;
  uint table=draw.indexOffset-64;
  uint levels=min(nativeGeometry.Load(table),3u);
+ if(instance.sknFactors.w>0){
+  firstCount=nativeGeometry.Load(table+4);firstLevel=nativeSknSelectedLevel;
+  if(firstLevel>0){uint2 entry=nativeGeometry.Load2(table+firstLevel*16);firstOffset=entry.x;firstCount=entry.y;}
+  return;
+ }
  float3 center=(draw.boundsMin.xyz+draw.boundsMax.xyz)*.5;
  float w=dot(instance.objectToClip[3],float4(center,1));
  if(levels==0||w<=1e-3)return;
@@ -1214,7 +1253,7 @@ float3 treeSwayOffset(float3 position,NativeInstance instance){
 )" R"(
 void nativePrepareWorld(NativeDraw draw,NativeInstance instance,uint lane){
  uint2 pose=nativePoseGeneration(instance);
- if(lane==0){nativeGroupPrepare=0;
+ if(lane==0){nativeSknLodUpdate(draw,instance);nativeGroupPrepare=0;
   if(draw.worldState!=0xffffffffu){NativeWorldState previous=nativeWorldStateOutput[draw.worldState];
    nativeGroupPrepare=any(previous.geometry!=draw.worldGeneration)||any(previous.pose!=pose);
   }
@@ -1265,7 +1304,7 @@ void nativePrepareWorld(NativeDraw draw,NativeInstance instance,uint lane){
  // Static LOD: the record's level (and, in a crossfade band, its successor).
  uint firstOffset=draw.indexOffset,firstCount=triangleCount,secondOffset=0,secondCount=0,fade=0;
  uint firstLevel=0,secondLevel=0xffffffffu;
- [branch]if((instance.worldGeometry&@WORLD_LOD@)!=0&&nativeDistanceCull.z>0&&draw.preservesOrder==0&&!split)
+ [branch]if((instance.worldGeometry&@WORLD_LOD@)!=0&&((nativeDistanceCull.z>0&&draw.preservesOrder==0)||instance.sknFactors.w>0)&&!split)
   nativeStaticLodSelect(draw,instance,firstOffset,firstCount,secondOffset,secondCount,fade,firstLevel,secondLevel);
  // Crown impostors: the record's quad far away, both in the crossfade band.
  bool impostorSecond=false;
@@ -1322,6 +1361,7 @@ bool nativeShadowPrepareVisible(inout NativeDraw draw,NativeInstance instance){
  uint first=groupId.z*kNativeShadowChunk;if(first>=draw.componentCount)return;
  NativeInstance instance=loadNativeInstance(draw.instanceIndex);
  if(threadId.x==0){
+  if(groupId.z==0)nativeSknLodUpdate(draw,instance);
   nativeGroupVisible=nativeShadowPrepareVisible(draw,instance)?1:0;nativeGroupPrepare=0;
   if(nativeGroupVisible!=0&&draw.worldState!=0xffffffffu){NativeWorldState previous=nativeWorldStateOutput[draw.worldState];
    nativeGroupPrepare=any(previous.geometry!=draw.worldGeneration)||any(previous.pose!=nativePoseGeneration(instance));}
@@ -1383,6 +1423,12 @@ void nativeShadowLodSelect(NativeDraw draw,NativeInstance instance,uint slice,in
   if(draw.worldState==0xffffffffu)return;
   NativeWorldState prepared=nativeWorldStates[draw.worldState];
   if(any(prepared.geometry!=draw.worldGeneration)||any(prepared.pose!=nativePoseGeneration(instance)))return;
+ }
+ if(instance.sknFactors.w>0&&(instance.worldGeometry&@WORLD_LOD@)!=0){
+  uint table=draw.indexOffset-64,level=nativeWorldStates[draw.worldState].sknLod;
+  allTriangles=nativeGeometry.Load(table+4);
+  if(level>0){uint2 entry=nativeGeometry.Load2(table+level*16);indexOffset=entry.x;allTriangles=entry.y;}
+  if(firstTriangle>=allTriangles)return;
  }
  uint triangleCount=min(kNativeShadowChunk,allTriangles-firstTriangle);
  nativeCurrentBounds(draw,instance);
@@ -1508,6 +1554,7 @@ NativeOutput nativeVertex(uint vertexId,bool sway){
  if((instance.nativeFlags&0x2u)!=0)output.swaying|=1u<<29;
  if(instance.poseNode!=0xffffffff)instance.objectToWorld=nativeNodeMatrix(instance.poseNode+world.partNode);
  output.worldPosition=world.p.xyz;output.worldNormal=world.normal.xyz;
+
  output.p=mul(instance.objectToClip,world.p);
  bool isTerrain=instance.terrainVertexOffset!=0xffffffff;
  NativeTerrainVertex terrain=(NativeTerrainVertex)0;
@@ -1675,6 +1722,7 @@ NativeOutput nativeVertex(uint vertexId,bool sway){
   output.liquidView=lengthSquared>1e-12?light*rsqrt(lengthSquared):0;
   output.liquidDirections=float4(instance.nativeMaterialDiffuse,lengthSquared>1e-12?1:0);
  }
+ if(instance.sknFactors.w>0){output.swaying|=1u<<28;output.liquidTintDepth=world.tangent;output.liquidFlow.w=float((triangleRef.x&0x7fffffffu)+1);}
  return output;
 }
 NativeOutput nativeVS(uint vertexId:SV_VertexID){
@@ -2186,6 +2234,18 @@ float nativePointVisibility(NativePointLight light,float3 shadowPosition,float3 
 // game's diffuse lighting stays as it is; specular, sky reflection and sheen
 // are added on top, and metals keep nativeMaterialDiffuseKeep of the diffuse.
 // Beside it at t38, the class relief: how strongly the texture's luma tilts the normal.
+Texture2D<float4> nativeSknNormal:register(t123);
+Texture2D<float4> nativeSknOrm:register(t124);
+Texture2D<float4> nativeSknEmission:register(t125);
+float4 nativeSknTap(uint map,uint reference,float2 uv,float2 dx,float2 dy){
+#ifdef EID3D12
+ Texture2D<float4> t=ResourceDescriptorHeap[NonUniformResourceIndex(nativeBindlessIndex(reference))];return t.SampleGrad(nativeSampler,uv,dx,dy);
+#else
+ if(map==0)return nativeSknNormal.SampleGrad(nativeSampler,uv,dx,dy);
+ if(map==1)return nativeSknOrm.SampleGrad(nativeSampler,uv,dx,dy);
+ return nativeSknEmission.SampleGrad(nativeSampler,uv,dx,dy);
+#endif
+}
 Texture2D<float4> nativeMaterialProfile:register(t37);
 Texture2D<float> nativeMaterialReliefMap:register(t38);
 // D3D12: one state's draws share a batch across textures, so each draw names
@@ -2300,7 +2360,7 @@ float3 nativePointLighting(NativeOutput i,out float3 glow,bool glowOnly,bool gro
   }
 #endif
   float intensity=light.color.w>0?.65:1;
-#if !defined(NATIVE_OFF_MATERIALS)&&!defined(NATIVE_LOW)
+#if 1
   // Lamp and fire highlights on material pixels (characters Medium, world objects High).
   [branch]if(materialLamps&&facing>0){
    float3 h=normalize(direction+materialView);
@@ -2771,7 +2831,7 @@ float3 nativeCaveExitGlow(float3 p){
 }
 // ambient: the part of color contributed by the ambient light, for AO (see ambient_occlusion.h).
 struct NativePixelResult{float4 color:SV_Target0;float4 shadow:SV_Target1;float4 ambient:SV_Target2;};
-NativePixelResult nativePS(NativeOutput i){
+NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
 #ifdef EID3D12_HAZARDS
  nativeGpuReportBegin(2u,i.textureReference.x,uint(i.p.x)|(uint(i.p.y)<<16));
 #endif
@@ -2862,10 +2922,36 @@ NativePixelResult nativePS(NativeOutput i){
  // glow only (none without glow lights).
  // The bounce light volume lights them too, with or without lamps.
  bool pointLit=i.shadowMode==1&&(nativePointLightCount!=0||caveVolumeStrength>0);
-#if !defined(NATIVE_OFF_MATERIALS)&&!defined(NATIVE_TERRAIN_PS)
+#if !defined(NATIVE_TERRAIN_PS)
  // Material pixels: lit figures drawn with a bound profile (nativeCombinerTail bit 1).
+ bool sknMaterial=nativeSknInstance(i)!=0;
+ float3 sknBaseNormal=i.worldNormal;
+ float sknAo=1;float3 sknEmission=0;
  float4 materialProfile=0;
- [branch]if(NATIVE_MATERIAL_BOUND(i)&&nativeMaterialLevel>0&&i.shadowMode==1&&!impostor){
+ [branch]if(sknMaterial){
+  NativeInstance m=nativeSknInstances[nativeSknInstance(i)-1];
+  float3 orm=1;
+  if((m.sknMaps.w&2u)!=0)orm=nativeSknTap(1,m.sknMaps.y,i.uv,uvDx,uvDy).rgb;
+  orm*=m.sknFactors.zxy;
+  materialProfile=float4(clamp(orm.y,.08,1),saturate(orm.z),.16,0);sknAo=saturate(orm.x);
+  if((m.sknMaps.w&1u)!=0){
+   float2 xy=nativeSknTap(0,m.sknMaps.x,i.uv,uvDx,uvDy).rg*2-1;
+   float3 n=normalize(i.worldNormal),t=normalize(i.liquidTintDepth.xyz-n*dot(n,i.liquidTintDepth.xyz));
+   float3 b=cross(n,t)*i.liquidTintDepth.w;
+   i.worldNormal=normalize(t*xy.x+b*xy.y+n*sqrt(saturate(1-dot(xy,xy))));
+  }
+  // CULL_NONE uses clockwise front faces; SKN's front winding is CCW.
+  // Flip the completed tangent-space normal, retaining the original vertex
+  // normal as the baseline of the sun's diffuse correction below.
+  if(frontFace&&m.sknFactors.w>1)i.worldNormal=-i.worldNormal;
+  sknEmission=m.sknEmission.rgb;
+  if((m.sknMaps.w&4u)!=0)sknEmission*=nativeSknTap(2,m.sknMaps.z,i.uv,uvDx,uvDy).rgb;
+  else sknEmission=0;
+  materialActive=materialLamps=true;materialView=NATIVE_INTERFACE?normalize(i.liquidView):normalize(fogEye.xyz-i.worldPosition);
+  materialAlpha2=pow(materialProfile.r,4);
+ }
+
+ [branch]if(!sknMaterial&&NATIVE_MATERIAL_BOUND(i)&&nativeMaterialLevel>0&&i.shadowMode==1&&!impostor){
   materialProfile=nativeMaterialProfileTap(i.textureReference.y,i.uv);
   materialActive=true;
   materialView=NATIVE_INTERFACE?normalize(i.liquidView):normalize(fogEye.xyz-i.worldPosition);
@@ -2879,7 +2965,7 @@ NativePixelResult nativePS(NativeOutput i){
  // are a rough dielectric whose roughness, relief and crevices come from
  // their own texture below; leaves take the foliage profile (materialFoliage,
  // no extra texture taps). The lamp loop takes the base roughness.
- else [branch]if(nativeMaterialWorldLevel>=2&&i.shadowMode==1&&((i.swaying>>29)&1u)==0&&
+ else [branch]if(!sknMaterial&&nativeMaterialWorldLevel>=2&&i.shadowMode==1&&((i.swaying>>29)&1u)==0&&
   (nativeTextured!=0||impostor)&&i.bedLiquid.x<=0){
   materialActive=materialWorld=true;
   materialFoliage=((i.swaying>>30)&1u)!=0||impostor;
@@ -3041,6 +3127,9 @@ NativePixelResult nativePS(NativeOutput i){
 // Low: read and alpha-tested before the lighting; terrain: read with its material above.
 #if !defined(NATIVE_LOW)&&!defined(NATIVE_TERRAIN_PS)
   float4 t=float4(1,1,1,1);if(impostor)t=impostorTexel;else if(nativeTextured!=0)t=NATIVE_SAMPLE(i.textureReference,i.uv);
+#endif
+#ifndef NATIVE_TERRAIN_PS
+ if(nativeSknInstance(i)!=0){NativeInstance skn=nativeSknInstances[nativeSknInstance(i)-1];t.rgb*=skn.sknBase.rgb;if(skn.sknBase.w==0)t.a=1;}
 #endif
 #ifdef NATIVE_SNOW_TRAILS
   // Packed trough floor: barely darker, cooler snow.
@@ -3277,6 +3366,9 @@ NativePixelResult nativePS(NativeOutput i){
   // Emissive-surface glow: direct light on top of the clamped game lighting
   // (shadow receivers only, so ordered effects keep their colour).
   if(shadowReceiver){c.rgb+=t.rgb*glow;c0+=t.rgb*glow;}
+#if !defined(NATIVE_TERRAIN_PS)&&!defined(NATIVE_UNLIT)
+  if(sknMaterial)c.rgb-=max(c.rgb-c0,0)*(1-sknAo);
+#endif
   // Blend finished material colours: blending t before the texture stage
   // also multiplied the ground by the object's diffuse/material response.
 #ifndef NATIVE_LOW // Low: ground contact blend off
@@ -3406,7 +3498,7 @@ NativePixelResult nativePS(NativeOutput i){
   }
 #endif
 )" R"(
-#if !defined(NATIVE_OFF_MATERIALS)&&!defined(NATIVE_TERRAIN_PS)&&!defined(NATIVE_UNLIT)
+#if !defined(NATIVE_TERRAIN_PS)&&!defined(NATIVE_UNLIT)
   // Material response (pseudo-PBR S1): energy-conserving GGX of the sun and
   // the lamps, the owned sky through a split-sum reflection, specular
   // occlusion and a cloth sheen, added to the game's lit colour. Both c and
@@ -3424,8 +3516,8 @@ NativePixelResult nativePS(NativeOutput i){
    // class roughness: dark dye is not a rougher surface (the roughening put
    // EI's dark cloth, leather and skin at the .98 clamp, with no highlight
    // left), and their painted crevices lose specular through the occlusion.
-   float roughness=clamp(materialProfile.r+(1-smoothstep(.18,.65,luminance))*.28*saturate(materialProfile.r*1.5)*metal,.08,.98);
-   float3 n=normalize(i.worldNormal),n0=n,v=materialView;
+   float roughness=sknMaterial?materialProfile.r:clamp(materialProfile.r+(1-smoothstep(.18,.65,luminance))*.28*saturate(materialProfile.r*1.5)*metal,.08,.98);
+   float3 n=normalize(i.worldNormal),n0=sknMaterial?normalize(sknBaseNormal):n,v=materialView;
    // Leaves are thin two-sided cards: the side facing the viewer (an
    // impostor: its baked crown normal) takes the response.
    if(materialFoliage){n=impostor?impostorNormal:n;n=dot(n,v)<0?-n:n;n0=n;}
@@ -3434,7 +3526,7 @@ NativePixelResult nativePS(NativeOutput i){
    // surroundings) holds no highlight (Medium and up).
    float occlusion=1;
 #ifndef NATIVE_LOW
-   [branch]if(medium&&nativeTextured!=0&&!materialFoliage){
+   [branch]if(!sknMaterial&&medium&&nativeTextured!=0&&!materialFoliage){
     // Relief (world objects, S2; figures, S1): the texture's luma is the
     // height. Two taps one screen pixel (at least one texel) along u and v,
     // at the colour read's gradients, give its slope; a cotangent frame from
@@ -3547,7 +3639,7 @@ NativePixelResult nativePS(NativeOutput i){
    // Relief: the sun's diffuse change from the derived normal (zero on
    // average; none in shadow; metals keep their diffuse share). Emission
    // and highlight stay as they were.
-#ifndef NATIVE_LOW // Low: no relief
+// Authored SKN normals affect diffuse light at every quality level.
    {
     float3 relief=sunLight*t.rgb*keep*(nl-saturate(dot(n0,l)));
     c.rgb=max(c.rgb+relief,0);c0=max(c0+relief,0);
@@ -3562,7 +3654,6 @@ NativePixelResult nativePS(NativeOutput i){
     float ambientLight=max(1+3*dot(n-n0,skyDirection),0)*lerp(1,occlusion,.8);
     c.rgb+=max(c.rgb-c0,0)*(ambientLight-1);
    }
-#endif
    float3 fresnel=f0+(1-f0)*pow(1-saturate(dot(v,h)),5);
    float3 specular=sunLight*fresnel*materialGgx(saturate(dot(n,h)),nv,nl,alpha2);
    specular+=f0*materialPointSpecular+materialPointFresnel;
@@ -3611,7 +3702,7 @@ NativePixelResult nativePS(NativeOutput i){
    [branch]if(reflectionWeight>0){
     float3 reflected=saturate((f0*brdf.x+brdf.y)*nativeMaterialReflection)*reflectionWeight;
     c.rgb-=max(c.rgb-c0,0)*reflected;
-    skyReflection=environment*reflected*occlusion;
+    skyReflection=environment*reflected*occlusion*(sknMaterial?sknAo:1);
    }
    specular*=occlusion;
    // Cloth and leather sheen in ambient light (Medium and up): the sheen
@@ -3652,6 +3743,9 @@ NativePixelResult nativePS(NativeOutput i){
 #endif
   // Caustics on ground under water only (bed depth > 0, no bed emission);
   // everything else keeps bed 1 without the caustic terms.
+#if !defined(NATIVE_TERRAIN_PS)&&!defined(NATIVE_UNLIT)
+  if(sknMaterial){c.rgb+=sknEmission;c0+=sknEmission;}
+#endif
   float causticDepth=i.bedLiquid.y>0?0:i.bedLiquid.x;float3 bed=liquidBedTransmission(i.bedLiquid.x);
   [branch]if(causticDepth>0)bed*=1+liquidBedCaustics(i.shadowPosition.xy,causticDepth,float4(shadowDx.xy,shadowDy.xy))*smoothstep(.6,.85,normalize(i.worldNormal).z)*dot(saturate(nativeWorldSunDiffuse.rgb),float3(.2126,.7152,.0722));
   c.rgb*=bed;

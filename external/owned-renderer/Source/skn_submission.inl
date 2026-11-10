@@ -17,28 +17,53 @@ bool build_skn_groups(const RetainedVisualSample &sample,
   for (unsigned node : nodes)
     if (node == UINT_MAX)
       throw std::runtime_error("SKN joint missing in legacy LNK");
-  for (unsigned sub = data.lods[0].first_submesh;
-       sub < data.lods[0].first_submesh + data.lods[0].submesh_count; ++sub) {
+  // One draw per gameplay part/material/region, with a union vertex buffer
+  // and independently authored index lists. LODs need not share vertices.
+  std::set<std::array<unsigned,4>> built;
+  for (unsigned sub=0;sub<data.submeshes.size();++sub) {
     const auto &mesh = data.submeshes[sub];
+    const std::array<unsigned,4> key{data.semantic_joints[sub],mesh.material,mesh.zone,mesh.layer};
+    if(!built.insert(key).second)continue;
+    std::vector<std::vector<unsigned>> lists(data.lods.size());
+    for(unsigned level=0;level<data.lods.size();++level){
+      const auto& lod=data.lods[level];
+      for(unsigned m=lod.first_submesh;m<lod.first_submesh+lod.submesh_count;++m){
+        const auto& candidate=data.submeshes[m];
+        if(std::array<unsigned,4>{data.semantic_joints[m],candidate.material,candidate.zone,candidate.layer}!=key)continue;
+        for(unsigned i=candidate.first;i<candidate.first+candidate.count;++i)lists[level].push_back(data.indices[i]);
+      }
+    }
+    // Native components are 16-bit. Partition triangle lists across all
+    // authored levels rather than rejecting a valid high resolution skin.
+    std::vector<std::vector<std::vector<unsigned>>> chunks(1,
+        std::vector<std::vector<unsigned>>(lists.size()));
+    std::set<unsigned> used;
+    for(unsigned level=0;level<lists.size();++level)for(unsigned i=0;i<lists[level].size();i+=3){
+      const unsigned triangle[3]={lists[level][i],lists[level][i+1],lists[level][i+2]};
+      unsigned additional=0;for(unsigned v:triangle)if(!used.count(v))++additional;
+      if(used.size()+additional>65532){chunks.emplace_back(lists.size());used.clear();}
+      for(unsigned v:triangle){chunks.back()[level].push_back(v);used.insert(v);}
+    }
+    unsigned chunk_index=0;
+    for(const auto& chunk:chunks){
     unsigned semantic = nodes[data.semantic_joints[sub]], part = UINT_MAX;
     for (unsigned i = 0; i < sample.assembly->parts.size(); ++i)
       if (sample.assembly->parts[i].skeleton_node == semantic) {
         part = i;
         break;
       }
-    if (part == UINT_MAX || !mesh.count)
+    if (part == UINT_MAX)
       continue;
     std::map<unsigned, unsigned> unique;
     std::vector<unsigned> vertices;
-    for (unsigned i = mesh.first; i < mesh.first + mesh.count; ++i) {
-      unsigned v = data.indices[i];
+    for(const auto& list:chunk)for(unsigned v:list) {
       if (!unique.count(v)) {
         unique[v] = static_cast<unsigned>(vertices.size());
         vertices.push_back(v);
       }
     }
-    // Native records have 16-bit components; split topology offline rather than
-    // truncating it, including when a future exporter supplies a large mesh.
+    if(vertices.empty())continue;
+    // Defensive guard after the block partition above; never truncate indices.
     if (vertices.size() > 65532)
       throw std::runtime_error(
           "SKN submesh exceeds native record component limit");
@@ -48,12 +73,13 @@ bool build_skn_groups(const RetainedVisualSample &sample,
     group.parts = {part};
     group.skn_asset = asset;
     group.skn_material = mesh.material;
+    group.skn_casts_shadow = data.materials[mesh.material].alpha!=2;
     group.shape_count = 1;
     group.position_groups = group.normal_groups =
         static_cast<unsigned>((vertices.size() + 3) / 4);
     prepared.merged_part_group[part] = group_index;
     const std::string content =
-        "skn|" + asset->identity.key() + "|" + std::to_string(sub);
+        "skn|" + asset->identity.key() + "|" + std::to_string(sub) + "|" + std::to_string(chunk_index++);
     group.geometry = merged_geometry(
         content, [&](VisualPreparedResources::MergedGeometry &g) {
           g.positions.resize(group.position_groups);
@@ -76,6 +102,7 @@ bool build_skn_groups(const RetainedVisualSample &sample,
                                     static_cast<std::uint16_t>(i),
                                     static_cast<std::uint16_t>(i)});
             skn::GpuVertex skin{};
+            for(unsigned k=0;k<4;++k)skin.tangent[k]=v.tangent[k]/32767.f;
             for (unsigned k = 0; k < 4; ++k) {
               skin.joints[k] = nodes[v.joints[k]];
               skin.weights[k] = v.weights[k] / 65535.f;
@@ -87,10 +114,17 @@ bool build_skn_groups(const RetainedVisualSample &sample,
             std::memcpy(g.skin_vertices.data() + i * sizeof(skin), &skin,
                         sizeof(skin));
           }
-          for (unsigned i = mesh.first; i < mesh.first + mesh.count; ++i)
-            g.indices.push_back(
-                static_cast<std::uint16_t>(unique.at(data.indices[i])));
+          g.skn_lods.levels=static_cast<unsigned>(data.lods.size()-1);
+          g.skn_lods.skn_base_triangles=static_cast<unsigned>(chunk[0].size()/3);
+          for(unsigned level=0;level<chunk.size();++level){
+            for(unsigned v:chunk[level])g.indices.push_back(static_cast<std::uint16_t>(unique.at(v)));
+            if(!level)continue;
+            for(unsigned v:chunk[level])g.skn_lods.indices[level-1].push_back(unique.at(v));
+            g.skn_lods.error[level-1]=data.lods[level].error;
+            g.skn_lods.hysteresis[level-1]=data.lods[level].hysteresis;
+          }
         });
+    }
   }
   return true;
 }

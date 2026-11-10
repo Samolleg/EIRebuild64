@@ -594,6 +594,14 @@ struct NativeOwnedTextureView {
     const std::string* material_name = nullptr;
 };
 
+struct NativeSknMaterial {
+    std::uint64_t identity = 0;
+    std::array<NativeOwnedTextureView,3> maps{}; // normal, ORM, emission
+    float factors[4]{1,0,1,1}; // roughness, metallic, AO, mode (0 none, 1 SKN, 2 two-sided)
+    float emission[4]{};
+    float base[4]{1,1,1,1};
+};
+
 struct NativeOwnedFixedState {
     bool enabled = false;
     std::uint32_t cull_mode = 0;
@@ -868,9 +876,10 @@ struct NativeGeometryView {
     // Merged character meshes (#65): per component, the part's skeleton node
     // (low 16 bits) and its position base (high 16 bits); null elsewhere.
     const std::uint32_t* component_parts = nullptr;
-    // Immutable SKN upload records, 224 bytes/component: u32 node[4], f32
+    // Immutable SKN upload records, 240 bytes/component: u32 node[4], f32
     // weight[4], column-major inverse bind's first 3 rows as 4xfloat3[4].
     const std::uint8_t* skin_vertices = nullptr;
+    NativeSknMaterial skn_material{};
     // Established from conservative source/pose envelopes before resolving any
     // mesh, texture or deformation. A light-only record never becomes a color
     // draw merely because its source was admitted for shadow preparation.

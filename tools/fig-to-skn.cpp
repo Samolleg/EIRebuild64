@@ -79,7 +79,7 @@ struct SourceVertex {
   std::array<float, 3> local;
 };
 void convert(ResourceStore &store, const std::string &name,
-             const std::filesystem::path &out) {
+             const std::filesystem::path &out, const std::filesystem::path &dds_dir) {
   ResourceFailure failure;
   ModelCpuAsset model;
   if (!decode_model_resources(resolve(store, name + ".mod"),
@@ -211,8 +211,16 @@ void convert(ResourceStore &store, const std::string &name,
     f32(sections[6], x);
   for (float x : {1.f, 1.f, 1.f, 1.f, 0.f, 0.f, 0.f, 1.f, 0.f, 1.f, .5f})
     f32(sections[7], x);
-  for (unsigned k = 0; k < 8; ++k)
-    u32(sections[7], 0);
+  u32(sections[7],0);u32(sections[7],0); // opaque, one sided
+  for(const auto role:{"color","normal","orm","emission"}){
+    const auto filename=name+"_"+role+".dds";
+    if(dds_dir.empty()||std::string(role)=="emission")u32(sections[7],0);
+    else{
+      if(!std::filesystem::is_regular_file(dds_dir/filename))throw std::runtime_error("missing external DDS: "+filename);
+      u32(sections[7],string(sections[1],"dds/"+filename));
+    }
+  }
+  u32(sections[7],0);u32(sections[7],0);
   const unsigned strides[] = {0, 1, 112, 48, 4, 16, 56, 76, 0, 0, 0, 0, 4};
   Bytes bytes(32 + 8 * 24, 0);
   set32(bytes, 0, 0x004e4b53);
@@ -315,18 +323,33 @@ void convert(ResourceStore &store, const std::string &name,
 int wmain(int argc, wchar_t **argv) {
   try {
     if (argc < 3) {
-      std::cerr << "fig-to-skn OUTPUT_DIR ARCHIVE.res [ARCHIVE.res ...]\n";
+      std::cerr << "fig-to-skn OUTPUT_DIR [--dds-directory DDS_DIR] ARCHIVE.res [ARCHIVE.res ...]\n";
       return 2;
     }
+    const bool export_mmp=std::wstring(argv[1])==L"--export-mmp";
+    const bool materials=!export_mmp&&argc>4&&std::wstring(argv[2])==L"--dds-directory";
+    if(export_mmp&&argc<5)throw std::runtime_error("--export-mmp TEXTURE.mmp OUTPUT.rgb ARCHIVE.res [...]");
     ResourceStoreConfig config;
-    for (int i = 2; i < argc; ++i)
+    for (int i = export_mmp?4:materials?4:2; i < argc; ++i)
       config.archives.push_back(argv[i]);
     ResourceStore store;
     ResourceFailure failure;
     if (!store.open(config, failure))
       throw std::runtime_error(failure.message);
-    convert(store, "unhufe", argv[1]);
-    convert(store, "unmogo", argv[1]);
+    if(export_mmp){
+      const auto name=std::filesystem::path(argv[2]).u8string();
+      TextureCpuAsset texture;
+      if(!parse_texture_asset(resolve(store,name),texture,failure))throw std::runtime_error(failure.message);
+      std::uint32_t width=0,height=0;Bytes rgb;
+      if(!texture_rgb_pixels(texture,0,width,height,rgb))throw std::runtime_error("MMP RGB decode failed");
+      std::ofstream output(std::filesystem::path(argv[3]),std::ios::binary);
+      output.write(reinterpret_cast<const char*>(rgb.data()),rgb.size());
+      if(!output)throw std::runtime_error("RGB output write failed");
+      std::cout<<"width="<<width<<" height="<<height<<" bytes="<<rgb.size()<<"\n";return 0;
+    }
+    const std::filesystem::path dds_dir=materials?argv[3]:L"";
+    convert(store, "unhufe", argv[1],dds_dir);
+    convert(store, "unmogo", argv[1],dds_dir);
     return 0;
   } catch (const std::exception &e) {
     std::cerr << e.what() << "\n";
