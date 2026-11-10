@@ -897,8 +897,7 @@ bool submit_owned_visual_color(void* fog_controller, bool prepare_light_only,
             }
             // Merged units (#65): each group is one colour record; its member
             // parts are admitted with it and skip the per-part record below.
-            const bool merged=g_merge_character_parts && !prepare_light_only && sample.values.unit &&
-                retained_visual_merged_groups(sample) && !sample.prepared->merged_groups.empty() &&
+            const bool merged=!prepare_light_only && owned_unit_merged(sample) &&
                 prepared.contribution.color;
             if(merged && !reused) {
                 auto& groups=sample.prepared->merged_groups;

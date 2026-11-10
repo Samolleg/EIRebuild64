@@ -19,6 +19,7 @@
 #include <vector>
 
 namespace owned {
+namespace skn {struct RuntimeAsset;}
 
 struct RetainedStaticSourceCandidate;
 struct FurProfile;
@@ -308,11 +309,15 @@ struct VisualPreparedResources {
         std::vector<NativePackedGroup> positions, normals;
         std::vector<NativeTextureCoordinate> texture_coordinates;
         std::vector<NativeVertexComponent> components;
+        std::vector<std::uint8_t> skin_vertices;
         std::vector<std::uint32_t> component_parts;   // skeleton node | position base << 16
         std::vector<std::uint16_t> indices;
         ResourceIdentity identity;                    // content identity: shared by identical characters
     };
+    bool skn_selected = false;
     struct MergedGroup {
+        std::shared_ptr<const skn::RuntimeAsset> skn_asset;
+        std::uint32_t skn_material = 0;
         std::vector<std::uint32_t> parts;
         std::uint32_t shape_count = 0, position_groups = 0, normal_groups = 0;
         std::shared_ptr<const MergedGeometry> geometry;

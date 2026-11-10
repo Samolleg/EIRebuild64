@@ -857,7 +857,7 @@ bool ResourceStore::locate(const std::string& resource_name,
         const std::size_t n = std::strlen(suffix);
         return canonical.size() >= n && canonical.compare(canonical.size() - n, n, suffix) == 0;
     };
-    const std::uint8_t kind = ends_with(".mmp") || ends_with(".json") ? kArchiveTextures : kArchiveFigures;
+    const std::uint8_t kind = ends_with(".mmp") || ends_with(".dds") || ends_with(".json") ? kArchiveTextures : kArchiveFigures;
     for (const ArchiveMount& archive : impl_->archives) {
         if (!(archive.kinds & kind)) continue;
         std::uint32_t entry_index = 0;

@@ -902,6 +902,7 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
    decoded.terrain_vertex_count=target.terrain_vertex_count;
  }
  const NativeGeometryView& source=decoded;
+ if(source.skin_vertices && (source.component_parts || shape_count!=1))return E_INVALIDARG;
  if(!source.positions||!source.normals||!source.components||
      !source.texture_coordinates||!source.indices)return E_INVALIDARG;
  if(has_terrain&&(!source.terrain_vertices||
@@ -1024,7 +1025,7 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
    for(const auto index:lods->indices[level])if(index>=source.component_count)return E_INVALIDARG;
   }
  }
- NativeMesh mesh{};UINT cursor=0,lod_table_at=0;
+ NativeMesh mesh{};UINT cursor=0,lod_table_at=0,skin_at=0;
  std::array<UINT,kStaticLodMaxLevels> lod_at{};
  auto reserve=[&](std::uint64_t bytes,UINT& offset){
   if(!align_up_checked(cursor,16,cursor)||cursor>native_geometry_page_limit()||
@@ -1037,6 +1038,7 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
      !reserve(color_bytes,mesh.diffuse_storage_offset)||
      !reserve(color_bytes,mesh.specular_storage_offset)||
      (has_terrain&&!reserve(terrain_bytes,mesh.terrain_vertex_offset))||
+     (source.skin_vertices&&!reserve(std::uint64_t(source.component_count)*224,skin_at))||
      (lods&&!reserve(64,lod_table_at))||!reserve(index_bytes,mesh.index_offset))
   return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
  for(UINT level=0;lods&&level<lods->levels;++level)
@@ -1054,6 +1056,13 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
   std::vector<std::uint8_t> blob;
   try{blob.assign(cursor,0);}catch(const std::bad_alloc&){return abandon(E_OUTOFMEMORY);}
   const auto put=[&](UINT offset,const void* data,std::uint64_t bytes){if(data&&bytes)std::memcpy(blob.data()+offset,data,static_cast<std::size_t>(bytes));};
+  if(source.skin_vertices){
+   put(skin_at,source.skin_vertices,std::uint64_t(source.component_count)*224);
+   for(UINT i=0;i<components.size();++i){
+    components[i].normal|=0x80000000u;
+    components[i].padding=mesh.allocation.offset+skin_at+i*224;
+   }
+  }
   put(mesh.position_offset,source.positions,position_bytes);
   put(mesh.normal_offset,source.normals,normal_bytes);
   put(mesh.component_offset,components.data(),component_bytes);

@@ -8,6 +8,7 @@
 #include "native_instance_flags.h"
 #include "fur.h"
 #include "figure_service_nodes.h"
+#include "skn_runtime.h"
 
 #include <algorithm>
 #include <atomic>
@@ -3099,6 +3100,8 @@ std::shared_ptr<const VisualPreparedResources::MergedGeometry> merged_geometry(c
 }
 }
 
+#include "skn_submission.inl"
+
 bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
     if (!sample.assembly || !sample.prepared || !sample.values.unit) return false;
     auto& prepared=*sample.prepared;const auto& assembly=*sample.assembly;
@@ -3110,6 +3113,24 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
     // Without a pose binding yet the parts draw singly for now; do not record
     // the assembly as merged, or it never merges once the binding exists.
     if (!prepared.gpu_pose.binding) return true;
+    bool skn_present=false;
+    try {
+     const auto skn_asset=skn::select(assembly.skeleton->visual_reference,skn_present);
+     prepared.skn_selected=skn_present;
+     if(skn_present){
+      const bool built=build_skn_groups(sample,skn_asset);
+      if(built)prepared.merged_assembly=sample.assembly;
+      return built;
+     }
+    } catch(const std::exception& error) {
+     // Reject the selected visual atomically. An invalid SKN cannot expose
+     // a partly built group or silently fall back to the legacy FIG visual.
+     prepared.skn_selected=true;prepared.merged_groups.clear();
+     prepared.merged_part_group.assign(assembly.parts.size(),0);
+     prepared.merged_assembly=sample.assembly;
+     bridge_append_probe_event("skn_asset_rejected",error.what());
+     return true;
+    }
     prepared.merged_assembly=sample.assembly;
     std::vector<std::vector<std::uint32_t>> members;
     for (std::uint32_t index=0;index<assembly.parts.size();++index) {
@@ -3207,13 +3228,33 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
         view.normals=geometry.normals.data();view.normal_groups=group.normal_groups;
         view.texture_coordinates=geometry.texture_coordinates.data();view.texture_coordinate_count=static_cast<UINT>(geometry.texture_coordinates.size());
         view.components=geometry.components.data();view.component_count=static_cast<UINT>(geometry.components.size());
-        view.component_parts=geometry.component_parts.data();
+        if(group.skn_asset)view.skin_vertices=geometry.skin_vertices.data();
+        else view.component_parts=geometry.component_parts.data();
         view.indices=geometry.indices.data();view.index_count=static_cast<UINT>(geometry.indices.size());
         view.bounds_valid=true;view.bounds_flags=2;view.semantic_kind=SemanticKind::figure;
         retained_visual_part_fixed_state(sample,view.owned_fixed_state);
-        view.owned_texture.identity=part.surface->id;view.owned_texture.generation=part.surface->generation;
-        view.owned_texture.surface=part.surface.get();
-        if (!part.material_name.empty()) view.owned_texture.material_name=&part.material_name;
+        if(!group.skn_asset){
+         view.owned_texture.identity=part.surface->id;view.owned_texture.generation=part.surface->generation;
+         view.owned_texture.surface=part.surface.get();
+        }else{
+         const auto& material=group.skn_asset->asset.materials[group.skn_material];
+         const auto& texture=group.skn_asset->textures[group.skn_material][0];
+         view.owned_texture.identity=1;view.owned_texture.generation=1;view.owned_texture.value_source=1;
+         if(!texture.mips.empty()){
+          view.owned_texture.resource=&texture.blob.identity;view.owned_texture.format=texture.format;
+          view.owned_texture.mips=texture.mips.data();view.owned_texture.mip_count=static_cast<UINT>(texture.mips.size());
+         }else{
+          static const std::uint32_t white=0xffffffffu;
+          static const NativeOwnedTextureMip mip{reinterpret_cast<const std::uint8_t*>(&white),1,1,4};
+          view.owned_texture.identity=0x534b4e;view.owned_texture.value_source=2;
+          view.owned_texture.format=NativeOwnedTextureFormat::argb8888;view.owned_texture.mips=&mip;view.owned_texture.mip_count=1;
+         }
+         view.owned_fixed_state.cull_mode=material.two_sided?D3DCULL_NONE:D3DCULL_CW;
+         view.owned_fixed_state.alpha_test_enable=material.alpha==1;
+         view.owned_fixed_state.alpha_ref=static_cast<UINT>(material.cutoff*255);
+         view.owned_fixed_state.alpha_blend_enable=material.alpha==2;
+        }
+        if (!group.skn_asset && !part.material_name.empty()) view.owned_texture.material_name=&part.material_name;
         if (++group.record_revision==0) ++group.record_revision;
         view.world.record_revision=group.record_revision;view.world.owner=&prepared.gpu_pose.owner;
         view.prepared_identity={sample.lifecycle.id,sample.lifecycle.generation,sample.lifecycle.positive_world_epoch,
@@ -3225,18 +3266,23 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
         if (++group.record_revision==0) ++group.record_revision;
         view.world.record_revision=group.record_revision;
     }
-    view.owned_texture.mips=group.texture_mips.data();
+    if(!group.skn_asset)view.owned_texture.mips=group.texture_mips.data();
     view.prepared_mesh=&group.mesh;view.prepared_material=&group.material;view.prepared_wound_material=&group.wound_material;
     // The members share every value input, so the first member's values hold
     // for all of them; 0x40 selects the per-component part node on the GPU.
     NativePreparedPartValues values;
     if (!retained_visual_part_values(sample,part,time,fog,values)) return false;
     values.flags|=0x40u;
+    if(group.skn_asset){
+     const auto& m=group.skn_asset->asset.materials[group.skn_material];
+     values.alpha*=m.base[3];
+     for(unsigned k=0;k<3;++k){values.diffuse[k]*=m.base[k];values.emissive[k]+=m.emission[k];}
+    }
     auto& submission=group.submission;
     if(!submission.values_revision||std::memcmp(&submission.values,&values,sizeof(values))!=0){
         submission.values=values;if(++submission.values_revision==0)++submission.values_revision;
     }
-    submission.fur=fur_record_profile(sample,group.parts.data(),group.parts.size());submission.fur_node_base=0;
+    submission.fur=group.skn_asset?nullptr:fur_record_profile(sample,group.parts.data(),group.parts.size());submission.fur_node_base=0;
     submission.source=&view;submission.bounds=bounds;submission.contribution=contribution;
     output=&submission;return true;
 }
