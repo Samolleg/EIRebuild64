@@ -110,7 +110,6 @@ private:
 
 public:
     DWORD GetWeaponSubtype(DWORD index) const { return GetWeapon(index); }
-    DWORD GetArmorSubtype(DWORD index) const { return index < RPG_NUM_ARMOR_TYPES ? armors[index] : DWORD(-1); }
     void SetBriefingWeaponHidden(bool hidden);
     CUnitClientSpecific();
     virtual ~CUnitClientSpecific();

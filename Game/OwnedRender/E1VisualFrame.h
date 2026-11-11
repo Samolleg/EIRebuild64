@@ -4,12 +4,9 @@
 #include <memory>
 
 class CObject3DClientSpecific;
-class CUnit;
-namespace owned { namespace nala { struct Input; } }
 namespace owned { class Renderer; struct FixedState; struct OwnedVisualSurface; struct RetainedVisualFrame; struct VisualResourceIncarnation; }
 
 namespace OwnedRender {
-void E1CompleteNalaInput(CUnit*,owned::nala::Input&);
 // Publish live source appearance before retained frame sampling.
 bool E1CompleteVisualAppearance(CObject3DClientSpecific& specific,
     owned::VisualResourceIncarnation resource) noexcept;
