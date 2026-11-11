@@ -3,6 +3,7 @@
 #include "MiniaudioOneShotSfx.h"
 #include "MoviePlayback.h"
 #include "LiveObserver.h"
+#include "../external/owned-renderer/Source/d3d12_frame.h"
 #include "AgentBackground.h"
 #include "AgentTime.h"
 #include "ModEncounter.h"
@@ -628,13 +629,28 @@ void Frame() noexcept {
     } catch(...) {ChannelError("frame_exception",0);if(active){CleanupCapture(*active);active->cancelled=true;active->ready.notify_one();active.reset();}}
 }
 bool WantsCapture() noexcept {return active&&!active->cancelled&&(active->phase==1||active->phase==6)&&active->method=="screenshot";}
-void CaptureFrame(ID3D11DeviceContext* context,IDXGISwapChain* swap,unsigned long long frame) noexcept {
+void CaptureFrame(ID3D11DeviceContext* context,IDXGISwapChain* swap,unsigned long long frame,owned::D3D12Frame* backend) noexcept {
     if(!WantsCapture())return;
     const auto started=Clock::now();
     try {
         auto& job=*active;
         if(job.phase==1&&job.waitFrames){
             if(job.waitFrame!=frame){job.waitFrame=frame;--job.waitFrames;}
+            return;
+        }
+        if(backend) {
+            std::vector<std::uint8_t> pixels;
+            UINT width=0,height=0;
+            const HRESULT hr=backend->read_back_buffer(pixels,width,height);
+            if(hr!=S_OK)throw std::runtime_error("D3D12 backbuffer readback failed");
+            if(!width||!height||width>4096||height>4096||
+               size_t(width)*height*4>job.image.size()||pixels.size()!=size_t(width)*height*4)
+                throw std::runtime_error("unsupported backbuffer dimensions");
+            std::memcpy(job.image.data(),pixels.data(),pixels.size());
+            job.width=width;job.height=height;job.row=height;
+            job.captureFrame=frame;job.captureWorldFrame=owned::bridge_scene_world_to_clip_snapshot().scene_frame_serial;
+            job.phase=2;
+            job.captureCost+=Clock::now()-started;
             return;
         }
         if(!context||!swap)throw std::runtime_error("backbuffer is unavailable");
@@ -674,6 +690,9 @@ namespace owned {
 bool bridge_live_wants_capture() noexcept {return LiveObserver::WantsCapture();}
 void bridge_live_capture(ID3D11DeviceContext* context,IDXGISwapChain* swap,unsigned long long frame) noexcept {
     LiveObserver::CaptureFrame(context,swap,frame);
+}
+void bridge_live_capture_d3d12(D3D12Frame& backend,unsigned long long frame) noexcept {
+    LiveObserver::CaptureFrame(nullptr,nullptr,frame,&backend);
 }
 }
 
@@ -1254,8 +1273,8 @@ bool Screenshot(Job& job,Clock::time_point deadline) {
         job.staging.Attach(texture);job.phase=6;return false;
     }
     if(job.phase==4)return true; // CaptureFrame already recorded the error.
-    if(job.phase!=2||!job.context||!job.staging)throw std::runtime_error("invalid screenshot state");
-    if(!job.isMapped) {
+    if(job.phase!=2||(job.row<job.height&&(!job.context||!job.staging)))throw std::runtime_error("invalid screenshot state");
+    if(job.row<job.height&&!job.isMapped) {
         const HRESULT hr=job.context->Map(job.staging.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&job.mapped);
         if(hr==DXGI_ERROR_WAS_STILL_DRAWING)return false;
         if(FAILED(hr))throw std::runtime_error("backbuffer readback failed");
