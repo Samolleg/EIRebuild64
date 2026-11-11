@@ -78,6 +78,8 @@ struct SlicedSearch;
 struct Request {
     SlicedSearch* sliced = nullptr;
     double* frameBudgetMs = nullptr;
+    // One small sliced batch per unit/frame may exceed the shared soft budget.
+    bool ensureProgress = false;
     Point source, goal;
     GoalPolicy goalPolicy = GoalPolicy::Exact;
     const Location* start = nullptr; // transient source polygon; never serialized

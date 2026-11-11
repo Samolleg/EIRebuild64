@@ -718,6 +718,10 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
             if(goalSupport){job.goalSupport=*goalSupport;job.request.goalSupport=&job.goalSupport;}
         }
         request.start=job.request.start;request.goalSupport=job.request.goalSupport;
+        // Tick order must not starve later units when earlier NPCs consume the
+        // shared budget. Reserve one bounded batch per unit per host frame.
+        request.ensureProgress=job.progressFrame!=frame;
+        job.progressFrame=frame;
         request.sliced=&job.search;request.frameBudgetMs=&pathBudgetMs;
     }
     auto route=Navigation::Find(*mesh,request);
