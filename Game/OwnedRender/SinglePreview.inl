@@ -64,7 +64,10 @@ struct SourceSinglePreview {
         OwnedRender::E4::Icon binding(figure,icon);
         figure->Draw(renderer);
     }
-    void draw_head() { figure->Draw(renderer); }
+    void draw_head() {
+        OwnedRender::E4::Icon binding(figure,icon);
+        figure->Draw(renderer);
+    }
     void position(float& x,float& y,float& z,float& scale) {
         figure->GetRelativeToScreen(x,y,z);scale=figure->GetXScale();
     }

@@ -236,6 +236,7 @@ HRESULT Renderer::upload_d3d12(SurfaceImage& i,SurfaceUploadResult* output){
   D3D12TextureRef texture=matches?i.d3d12:nullptr;
   const HRESULT hr=surface_mips_d3d12(i,texture);if(FAILED(hr))return hr;
   if(texture!=i.d3d12){i.d3d12=std::move(texture);++i.texture_serial;}
+  d3d12_account_surface(*i.d3d12,texture_storage_bytes(i.d3d12.get()));
   i.uploaded_generation=i.generation;i.uploaded_shape=shape;i.mip_source_used=true;
   clear_surface_dirty(i);
   if(output){output->uploaded=true;output->recreated=!matches;output->dirty_rect=RECT{0,0,LONG(i.width),LONG(i.height)};
@@ -256,6 +257,7 @@ HRESULT Renderer::upload_d3d12(SurfaceImage& i,SurfaceUploadResult* output){
   prepared.bytes+=std::uint64_t(pitch)*rows;
  }
  if(texture!=i.d3d12){i.d3d12=std::move(texture);++i.texture_serial;}
+  d3d12_account_surface(*i.d3d12,texture_storage_bytes(i.d3d12.get()));
  i.uploaded_generation=i.generation;i.uploaded_shape=shape;i.gpu_captured=false;i.mip_source_used=true;
  clear_surface_dirty(i);
  if(output){output->uploaded=true;output->recreated=!matches;output->dirty_rect=rect;output->upload_bytes=prepared.bytes;

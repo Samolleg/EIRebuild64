@@ -18,12 +18,12 @@ bool armed=false;
 float Ground(float x,float y) {return theWorldServer.GetZValue(x,y);}
 CPlot3D WorldPosition(CMapObject& object) {return object.GetCP();}
 std::array<float,3> Point(CPlot3D p) {return {p.x,p.y,p.z};}
-Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> Texture(CMapObject* object,bool secondary=false) {
+CDXGISurface* TextureSurface(CMapObject* object,bool secondary=false) {
  if(!object||object->IsInvalid()||!object->FinalDataLoading())return {};
  auto* specific=dynamic_cast<CObject3DClientSpecific*>(object->GetObjectSpecific());
  auto* texture=specific?(secondary?specific->GetSecondaryTexture():specific->GetPrimaryTexture()):nullptr;
  auto* surface=texture?texture->GetSurface():nullptr;
- return surface?surface->GetShaderResource():Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>{};
+ return surface;
 }
 }
 void SavedPose(const char*,std::array<owned::EmbeddedGolemNode,30>&);
@@ -77,9 +77,15 @@ void Draw() {
   const unsigned id=unsigned(Slot("Reflect",i,"Lo"))|(unsigned(Slot("Reflect",i,"Hi"))<<16);
   if(auto* recipient=theWorld.GetUnit(int(id));recipient&&!recipient->IsInvalid()){auto p=WorldPosition(*recipient);p.z+=.9f;slot.target=Point(p);}
  }
- std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,6> retained={Texture(boss),Texture(boss,true),Texture(theWorld.GetMapObject(990205)),Texture(theWorld.GetMapObject(994520)),Texture(theWorld.GetMapObject(994520),true),Texture(theWorld.GetMapObject(994521))};
- std::array<ID3D11ShaderResourceView*,6> textures={retained[0].Get(),retained[1].Get(),retained[2].Get(),retained[3].Get(),retained[4].Get(),retained[5].Get()};
- dx->SubmitGolemVisual(input,textures);
+ std::array<CDXGISurface*,6> surfaces={TextureSurface(boss),TextureSurface(boss,true),TextureSurface(theWorld.GetMapObject(990205)),TextureSurface(theWorld.GetMapObject(994520)),TextureSurface(theWorld.GetMapObject(994520),true),TextureSurface(theWorld.GetMapObject(994521))};
+ std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,6> retained;
+ std::array<ID3D11ShaderResourceView*,6> textures{};
+ std::array<std::uint64_t,6> surfaceIds{};
+ for(size_t i=0;i<textures.size();++i)if(auto* surface=surfaces[i]) {
+  retained[i]=surface->GetShaderResource();textures[i]=retained[i].Get();
+  if(!textures[i]&&surface->EnsureOwnedSurfacePublished())surfaceIds[i]=surface->OwnedSurfaceId();
+ }
+ dx->SubmitGolemVisual(input,textures,surfaceIds);
 }
 }
 

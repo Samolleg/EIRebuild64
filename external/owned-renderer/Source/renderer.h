@@ -780,6 +780,7 @@ void append_sky_shader_programs(std::vector<ShaderProgram>& out);
 // The x64 host's DXIL-only programs (renderer_native_d3d12.cpp): GenerateMips
 // and the gamma ramp's (renderer_frame.cpp gammaVS, gammaPS) on D3D12.
 void append_d3d12_shader_programs(std::vector<ShaderProgram>& out);
+void append_debug_resource_shader_programs(std::vector<ShaderProgram>& out);
 void append_gamma_shader_programs(std::vector<ShaderProgram>& out);
 const ShaderProgram& d3d12_mip_program() noexcept;
 const ShaderProgram& d3d12_mip_array_program() noexcept;
@@ -1028,6 +1029,7 @@ public:
     HRESULT begin_engine_frame();
     HRESULT retire_embedded_world();
     RendererMemoryCounters read_memory_counters();
+    Microsoft::WRL::ComPtr<IDXGIAdapter> graphics_adapter() noexcept;
     // The global map's zone hit-test frame (#200; bridge hook on the game's
     // GenerateHitTestDDS call): begin redirects the world target to the
     // lossless hit-test target, end restores it.
@@ -1242,8 +1244,15 @@ public:
     HRESULT draw_game_ribbon(const GameRibbonView& view, const FixedState& state, SurfaceImage* texture);
 #ifdef EID3D11_EMBEDDED
     HRESULT draw_embedded_curse(const EmbeddedCurseInput&,const FixedState&,ID3D11ShaderResourceView*,SurfaceImage* image=nullptr);
-    HRESULT draw_embedded_golem(const EmbeddedGolemInput&,const FixedState&,const std::array<ID3D11ShaderResourceView*,6>&);
-    HRESULT draw_embedded_arena(const EmbeddedArenaInput&,const FixedState&,const std::array<ID3D11ShaderResourceView*,8>&);
+    struct EmbeddedEffectTexture {
+        ID3D11ShaderResourceView* srv = nullptr;
+        SurfaceImage* image = nullptr;
+        EmbeddedEffectTexture() = default;
+        EmbeddedEffectTexture(std::nullptr_t) {}
+        explicit operator bool() const noexcept { return srv || image; }
+    };
+    HRESULT draw_embedded_golem(const EmbeddedGolemInput&,const FixedState&,const std::array<EmbeddedEffectTexture,6>&);
+    HRESULT draw_embedded_arena(const EmbeddedArenaInput&,const FixedState&,const std::array<EmbeddedEffectTexture,8>&);
     HRESULT draw_embedded_ribbon(const EmbeddedRibbonInput&, const FixedState&, SurfaceImage*);
     HRESULT draw_embedded_prints(EmbeddedPrintBatch&);
     HRESULT draw_embedded_combat_text(const EmbeddedCombatTextInput&, const FixedState&, SurfaceImage*);
@@ -1562,6 +1571,9 @@ public:
     // One bridge event naming the removal reason, adapter, driver and memory.
     void report_device_removed(HRESULT reason) noexcept;
     ID3D11Device* resource_device() const noexcept { return device_.Get(); }
+    ProfileTimestamps* native_profile_timestamps() const noexcept {
+        return d3d12_ ? &d3d12_->profile_timestamps() : nullptr;
+    }
     UINT width() const { return width_; }
     UINT height() const { return height_; }
     std::uint64_t native_logical_draws() const { return perf_native_draws_; }
@@ -2432,6 +2444,7 @@ private:
     void remember_debug_projection(const FixedState& state,
                                    SemanticKind semantic_kind) noexcept;
     HRESULT render_debug_texture(DebugResourceView view) noexcept;
+    HRESULT render_debug_texture_d3d12(DebugResourceView view) noexcept;
     HRESULT create_pipeline();
     // Creates the shader object of every program the current settings use and
     // this process has not prepared yet, on worker threads (from the embedded
@@ -2584,7 +2597,7 @@ private:
     // layer as executor depth arrays, this frame's shadow constants (b2) and
     // the same flush through the executor.
     struct ShadowD3D12 {
-        D3D12TextureRef maps, statics;
+        D3D12TextureRef maps, statics, range_cells, range;
         NativeShadowConstants constants{}, point_constants{};
     } shadow12_;
     HRESULT flush_native_shadows_d3d12();
@@ -4255,7 +4268,9 @@ private:
     ComPtr<ID3D11ComputeShader> native_build_cs_;
     ComPtr<ID3D11Buffer> native_lod_observations_;
     ComPtr<ID3D11UnorderedAccessView> native_lod_observation_uav_;
+    D3D12BufferRef native_lod_observations12_;
     struct NativeLodReadback {
+        std::uint64_t ticket12 = 0;
         ComPtr<ID3D11Buffer> buffer;
         std::shared_ptr<NativeLodSnapshot> snapshot;
     };
@@ -5186,6 +5201,7 @@ private:
     bool apply_harness_config(const HarnessCommand& command, std::string& detail) noexcept;
     bool write_harness_screenshot(const std::string& path, std::string& detail) noexcept;
     bool write_hudless_image(const std::string& path, std::string& detail) noexcept;
+    bool write_profile_image_d3d12(const std::string& path, std::string& detail) noexcept;
     std::string harness_unready_parts(std::string& ready_detail) noexcept;
     // Load reveal: after a new world epoch the first world frames keep the
     // last loading picture on screen until the map, its neighbours and its
@@ -5475,7 +5491,7 @@ private:
     // chain when it matches the game surface (as the D3D11 terrain array
     // slice takes it), else the surface's own single level.
     HRESULT terrain_texture_d3d12(SurfaceImage& image, const TerrainTexturePage* page, D3D12TextureRef& output);
-    struct TerrainTextureD3D12 { std::uint64_t generation = 0; D3D12TextureRef texture; };
+    struct TerrainTextureD3D12 { std::uint64_t generation = 0; D3D12TextureRef texture; bool surface_alias = false; };
     std::unordered_map<std::uint64_t, TerrainTextureD3D12> terrain_textures_d3d12_;
     // The active terrain's pages prepared at once on workers (read, parse,
     // texture and upload memory) at its first page miss; each miss then only

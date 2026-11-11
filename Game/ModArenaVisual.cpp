@@ -27,13 +27,13 @@ bool Near(CMapObject* object,float x,float y) {
     const auto p=object->GetCP();
     return std::isfinite(p.x)&&std::isfinite(p.y)&&std::isfinite(p.z)&&std::fabs(p.x-x)<.8f&&std::fabs(p.y-y)<.8f;
 }
-Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> Texture(int id) {
+CDXGISurface* TextureSurface(int id) {
     auto* object=theWorld.GetMapObject(id);
     if(!object||object->IsInvalid()||!object->FinalDataLoading())return {};
     auto* specific=dynamic_cast<CObject3DClientSpecific*>(object->GetObjectSpecific());
     auto* texture=specific?specific->GetPrimaryTexture():nullptr;
     auto* surface=texture?texture->GetSurface():nullptr;
-    return surface?surface->GetShaderResource():Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>{};
+    return surface;
 }
 void Particles(CScript* owner,int tick) {
     if(!owner)return;
@@ -75,17 +75,22 @@ void Draw() {
     input.wave_radius=ModEncounter::Read(theWorldServer,"A67.WaveRadius");
     std::array<Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>,8> retained;
     std::array<ID3D11ShaderResourceView*,8> textures{};
-    if(input.dome)retained[0]=Texture(990203);
-    if(input.flow)retained[1]=Texture(990205);
+    std::array<CDXGISurface*,8> surfaces{};
+    std::array<std::uint64_t,8> surfaceIds{};
+    if(input.dome)surfaces[0]=TextureSurface(990203);
+    if(input.flow)surfaces[1]=TextureSurface(990205);
     for(int i=0;i<3;++i) {
         auto& tower=input.towers[i];char key[48];
         std::snprintf(key,sizeof(key),"A67.Broken%d",i);tower.broken=ModEncounter::Read(theWorldServer,key)!=0;
         std::snprintf(key,sizeof(key),"A67.BreakAt%d",i);tower.break_time=ModEncounter::Read(theWorldServer,key);
         auto* crystal=theWorld.GetMapObject(crystals[i]);tower.present=Near(crystal,xy[i][0],xy[i][1]);
         if(tower.present){const auto cp=crystal->GetCP();tower.crystal={cp.x,cp.y,cp.z};}
-        if(input.flow&&tower.broken) {retained[2+i*2]=Texture(towers[i]);retained[3+i*2]=Texture(crystals[i]);}
+        if(input.flow&&tower.broken) {surfaces[2+i*2]=TextureSurface(towers[i]);surfaces[3+i*2]=TextureSurface(crystals[i]);}
     }
-    for(size_t i=0;i<textures.size();++i)textures[i]=retained[i].Get();
-    dx->SubmitArenaVisual(input,textures);
+    for(size_t i=0;i<textures.size();++i)if(auto* surface=surfaces[i]) {
+        retained[i]=surface->GetShaderResource();textures[i]=retained[i].Get();
+        if(!textures[i]&&surface->EnsureOwnedSurfacePublished())surfaceIds[i]=surface->OwnedSurfaceId();
+    }
+    dx->SubmitArenaVisual(input,textures,surfaceIds);
 }
 }

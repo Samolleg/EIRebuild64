@@ -4081,8 +4081,9 @@ void native_lod_acknowledge(std::uint64_t request) noexcept {
 
 void Renderer::release_native_lod_observer() noexcept {
  native_lod_observations_.Reset();native_lod_observation_uav_.Reset();
+ native_lod_observations12_.reset();
  native_lod_row_indices_.clear();
- for(auto& slot:native_lod_readbacks_){slot.buffer.Reset();slot.snapshot.reset();}
+ for(auto& slot:native_lod_readbacks_){slot.ticket12=0;slot.buffer.Reset();slot.snapshot.reset();}
  native_lod_capture_.reset();native_lod_frame_=UINT64_MAX;
  native_lod_copied_request_=native_lod_published_request_=0;native_lod_failed_=false;native_lod_request_=0;
  native_lod_wait_request_=native_lod_wait_frame_=0;native_lod_wait_reason_="no_native_flush";
@@ -4093,7 +4094,7 @@ void Renderer::release_native_lod_observer() noexcept {
 void Renderer::begin_native_lod_frame() noexcept try {
  const auto request=lod_requested.load(std::memory_order_acquire);
  if(!request||request==native_lod_request_||request<=lod_consumed.load(std::memory_order_acquire)||
-    lod_requested_epoch.load(std::memory_order_relaxed)!=world_state_epoch_||!context_||!device_)return;
+    lod_requested_epoch.load(std::memory_order_relaxed)!=world_state_epoch_||(!d3d12_&&(!context_||!device_)))return;
  const auto capacity=(std::max)(size_t(kNativeLodObservationCapacity),native_instance_records_.size());
  if(capacity>native_lod_row_indices_.size())
   for(const auto& slot:native_lod_readbacks_)if(slot.snapshot){native_lod_wait_reason_="readback_slots_busy";return;}
@@ -4107,6 +4108,21 @@ void Renderer::begin_native_lod_frame() noexcept try {
  native_lod_failed_=capacity>kNativeLodObservationRecordLimit;
  if(native_lod_failed_){
   native_lod_capture_->unavailable=true;native_lod_capture_->unavailable_reason="record_capacity_exceeded";return;
+ }
+ if(d3d12_){
+  if(!native_lod_observations12_||capacity>native_lod_row_indices_.size()){
+   std::vector<UINT> indices(capacity,UINT_MAX);
+   D3D12BufferRef buffer;
+   const HRESULT hr=d3d12_->create_buffer(UINT64(capacity)*sizeof(NativeLodDecisionGpu),0,kD3D12BufferUnordered,buffer);
+   if(FAILED(hr)){
+    native_lod_failed_=true;native_lod_capture_->unavailable=true;
+    native_lod_capture_->unavailable_reason="observation_buffer_creation_failed";return;
+   }
+   native_lod_observations12_=std::move(buffer);native_lod_row_indices_=std::move(indices);
+  }
+  d3d12_->clear_buffer_uint(*native_lod_observations12_,0);
+  std::fill(native_lod_row_indices_.begin(),native_lod_row_indices_.end(),UINT_MAX);
+  native_lod_capture_->record_capacity=UINT(native_lod_row_indices_.size());return;
  }
  if(!native_lod_observations_||capacity>native_lod_row_indices_.size()){
   std::vector<UINT> indices(capacity,UINT_MAX);
@@ -4153,7 +4169,8 @@ bool Renderer::native_lod_colour_pass() noexcept {
  if(native_rain_active_)return reject("rain");
  if(native_point_shadow_active_)return reject("point_shadow");
  if(native_shadow_collecting_)return reject("shadow");
- if(rtv_.Get()!=scene_composite_.target()||dsv_.Get()!=world_dsv_.Get())return reject("target_mismatch");
+ if(d3d12_ ? !world_d3d12_bound_ :
+    (rtv_.Get()!=scene_composite_.target()||dsv_.Get()!=world_dsv_.Get()))return reject("target_mismatch");
  if(!native_world_clip_valid_)return reject("clip_invalid");
  // The host publishes the player's world camera before drawing the scene.
  // Matching both camera and targets admits its split colour flushes (including
@@ -4184,6 +4201,12 @@ bool Renderer::begin_native_lod_capture(const NativeSubmissionLayout& layout) no
   auto& value=native_lod_capture_->terrain2;
   value.observed=true;value.enabled=tile_blend_own_edges_;value.table_maps=terrain2_table_count_;
   value.table_ready=bool(terrain2_style_srv_)&&bool(terrain2_grids_srv_);
+  if(d3d12_){
+   // D3D12 publishes per-map grid/atlas identities instead of D3D11 pool views.
+   value.table_ready=terrain2_table_count_!=0;
+   for(UINT k=0;k<terrain2_table_count_;++k)
+    value.table_ready=value.table_ready&&bool(terrain2_table12_[k])&&bool(terrain2_table12_[kTerrain2TableMaps+k]);
+  }
   for(size_t i=0;i<value.pools.size();++i){const auto& p=terrain2_pools_[i];
    value.pools[i]={p.width,p.height,p.mips,p.slices,bool(p.atlas_srv),bool(p.heights_srv)};}
   const auto add=[&](UINT contact,const auto& map){value.maps.push_back({contact,UINT(map.bake_cells.size()),UINT(map.baked.size()),
@@ -4226,7 +4249,33 @@ void Renderer::finish_native_lod_frame() noexcept try {
   capture->main_camera_max_delta=camera_max_delta;
   native_lod_capture_=std::move(capture);native_lod_request_=request;
  };
- if(!context_)unavailable("render_context_unavailable");
+ if(d3d12_){
+  for(auto& slot:native_lod_readbacks_)if(slot.snapshot){
+   std::vector<std::uint8_t> bytes;
+   // Poll even cancelled requests to retire their executor-owned ticket.
+   const bool pending=slot.ticket12!=0;
+   const HRESULT hr=pending?d3d12_->poll_readback(slot.ticket12,bytes):S_OK;
+   if(hr==S_FALSE)continue;
+   slot.ticket12=0;
+   if(slot.snapshot->request!=request||slot.snapshot->world_epoch!=world_state_epoch_){slot.snapshot.reset();continue;}
+   // A completed result stays decoded when publication must retry next frame.
+   if(pending&&!slot.snapshot->unavailable){
+    if(FAILED(hr)||bytes.size()<size_t(slot.snapshot->record_capacity)*sizeof(NativeLodDecisionGpu)){
+     slot.snapshot->unavailable=true;slot.snapshot->unavailable_reason="gpu_readback_failed";
+    }else{
+     slot.snapshot->observed_rows=0;
+     for(auto& row:slot.snapshot->rows){
+      std::memcpy(&row.decision,bytes.data()+size_t(row.record)*sizeof(NativeLodDecisionGpu),sizeof(row.decision));
+      if(row.decision.state)++slot.snapshot->observed_rows;
+     }
+     if(!slot.snapshot->rows.empty()&&!slot.snapshot->observed_rows){
+      slot.snapshot->unavailable=true;slot.snapshot->unavailable_reason="gpu_lod_not_observed";
+     }
+    }
+   }
+   if(publish_lod_snapshot(slot.snapshot)){native_lod_published_request_=slot.snapshot->request;slot.snapshot.reset();}
+  }
+ }else if(!context_)unavailable("render_context_unavailable");
  // Three independent slots: never overwrite an in-flight copy, never Flush or wait.
  if(context_)for(auto& slot:native_lod_readbacks_)if(slot.snapshot){
   if(slot.snapshot->request!=request||slot.snapshot->world_epoch!=world_state_epoch_){slot.snapshot.reset();continue;}
@@ -4271,6 +4320,15 @@ void Renderer::finish_native_lod_frame() noexcept try {
   return;
  }
  if(native_lod_copied_request_==native_lod_capture_->request)return;
+ if(d3d12_){
+  for(auto& slot:native_lod_readbacks_)if(!slot.snapshot){
+   const HRESULT hr=d3d12_->request_readback(*native_lod_observations12_,
+    UINT64(native_lod_capture_->record_capacity)*sizeof(NativeLodDecisionGpu),slot.ticket12);
+   if(hr!=S_OK){native_lod_capture_->unavailable=true;native_lod_capture_->unavailable_reason="gpu_readback_failed";return;}
+   native_lod_copied_request_=native_lod_capture_->request;slot.snapshot=std::move(native_lod_capture_);break;
+  }
+  return;
+ }
  for(auto& slot:native_lod_readbacks_)if(!slot.snapshot&&slot.buffer){
   context_->CopyResource(slot.buffer.Get(),native_lod_observations_.Get());
   native_lod_copied_request_=native_lod_capture_->request;slot.snapshot=std::move(native_lod_capture_);break;

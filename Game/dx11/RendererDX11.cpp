@@ -53,6 +53,14 @@ void CDX11::RetireOwnedWorld() noexcept {
     if (FAILED(hr)) GameJournal::Event("ERROR", "world_retire", "hr=%08lx", static_cast<unsigned long>(hr));
     else GameJournal::MemorySnapshot("world_retired");
 }
+Microsoft::WRL::ComPtr<IDXGIAdapter> CDX11::ReadOwnedAdapter() noexcept {
+    const auto access = ownedRenderer.LockFrame();
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    if (rendererFacade && rendererFacade->Ready()) rendererFacade->Visit([&](owned::Renderer& renderer) {
+        adapter = renderer.graphics_adapter(); return S_OK;
+    });
+    return adapter;
+}
 owned::RendererMemoryCounters CDX11::ReadOwnedMemoryCounters() noexcept {
     const auto access = ownedRenderer.LockFrame();
     owned::RendererMemoryCounters counters;
@@ -560,23 +568,47 @@ bool CDX11::SubmitCurseVisual(const owned::EmbeddedCurseInput& input,ID3D11Shade
     LiveObserver::ObserveCurse(input,hr,published);
     return FinishC74Effect(hr,"curse_visual_skipped");
 }
-bool CDX11::SubmitGolemVisual(const owned::EmbeddedGolemInput& input,const std::array<ID3D11ShaderResourceView*,6>& textures)
+bool CDX11::SubmitGolemVisual(const owned::EmbeddedGolemInput& input,const std::array<ID3D11ShaderResourceView*,6>& textures,const std::array<std::uint64_t,6>& surfaceIds)
 {
     owned::FixedState state;std::shared_ptr<owned::SurfaceImage> unused;
     HRESULT hr=PrepareC74Effect(true,false,state,unused);
     bool published=false;
-    if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer){published=true;return renderer.draw_embedded_golem(input,state,textures);});
+    if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer){
+        std::array<std::shared_ptr<owned::SurfaceImage>,6> retained;
+        std::array<owned::Renderer::EmbeddedEffectTexture,6> materials{};
+        for(size_t i=0;i<materials.size();++i) {
+            if(renderer.d3d12_backend()) {
+                if(surfaceIds[i]) {
+                    const HRESULT resolved=OwnedRender::E1ParticleSurfaceImage(nullptr,nullptr,surfaceIds[i],retained[i]);
+                    if(FAILED(resolved))return resolved;
+                    materials[i].image=retained[i].get();
+                }
+            } else materials[i].srv=textures[i];
+        }
+        published=true;return renderer.draw_embedded_golem(input,state,materials);
+    });
     LiveObserver::ObserveGolem(input,hr,published);
     return FinishC74Effect(hr,"golem_visual_skipped");
 }
 bool CDX11::SubmitArenaVisual(const owned::EmbeddedArenaInput& input,
-    const std::array<ID3D11ShaderResourceView*,8>& textures)
+    const std::array<ID3D11ShaderResourceView*,8>& textures,const std::array<std::uint64_t,8>& surfaceIds)
 {
     owned::FixedState state;std::shared_ptr<owned::SurfaceImage> unused;
     HRESULT hr=PrepareC74Effect(true,false,state,unused);
     bool published=false;
     if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer) {
-        published=true;return renderer.draw_embedded_arena(input,state,textures);
+        std::array<std::shared_ptr<owned::SurfaceImage>,8> retained;
+        std::array<owned::Renderer::EmbeddedEffectTexture,8> materials{};
+        for(size_t i=0;i<materials.size();++i) {
+            if(renderer.d3d12_backend()) {
+                if(surfaceIds[i]) {
+                    const HRESULT resolved=OwnedRender::E1ParticleSurfaceImage(nullptr,nullptr,surfaceIds[i],retained[i]);
+                    if(FAILED(resolved))return resolved;
+                    materials[i].image=retained[i].get();
+                }
+            } else materials[i].srv=textures[i];
+        }
+        published=true;return renderer.draw_embedded_arena(input,state,materials);
     });
     LiveObserver::ObserveArena(input,hr,published);
     return FinishC74Effect(hr,"arena_visual_skipped");
@@ -1114,7 +1146,13 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
             return renderer.blit_srv(image, destination, source, (flags & EI_RENDERER_UI_OPAQUE) != 0);
         });
     };
-    const HRESULT timingAttached = nativeD3D12 ? S_FALSE : frameTiming.Attach(device.Get(), deviceContext.Get());
+    HRESULT timingAttached = S_FALSE;
+    if (nativeD3D12) {
+        IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
+            timingAttached = frameTiming.AttachNative(renderer.native_profile_timestamps());
+            return S_OK;
+        }));
+    } else timingAttached = frameTiming.Attach(device.Get(), deviceContext.Get());
     GameJournal::Event("RENDER", "frame_owner",
         "frame=c56 hwnd=%p menu_panels=c56-blit world_terrain=c56 world_figures=c56 game_particles=c56 visfog=c56 fog=c56 triangles=c56 effects=category-migration shadows=c56 timing_gpu=0x%08lX",
         hWnd, static_cast<unsigned long>(timingAttached));

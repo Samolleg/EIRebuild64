@@ -105,8 +105,8 @@ Mesh FinalBeacon(Vec at,float time){
 void Stage(float time){
  int boss=0;
  int tick=input.tick;float ground=Base().z;Mesh rings;
- auto* body=textures[0];auto* detail=textures[1];
- auto solid=[&](Mesh&m,ID3D11ShaderResourceView*texture,unsigned color){draw(m,texture,Tint(color),true,false);m=Mesh{};};
+ auto body=textures[0];auto detail=textures[1];
+ auto solid=[&](Mesh&m,Renderer::EmbeddedEffectTexture texture,unsigned color){draw(m,texture,Tint(color),true,false);m=Mesh{};};
  GolemGroundFields(tick,[&](Mesh&m){solid(m,detail,0xffb9e5ff);});
  // Ground fields show only physical fragments. Rings belong exclusively to
  // pending casts/projectiles, so impact removes the warning immediately.
@@ -139,7 +139,7 @@ void Stage(float time){
    if(dy>.000001f)length=(std::min)(length,(62-Base().y)/dy);if(dy<-.000001f)length=(std::min)(length,(26-Base().y)/dy);
    ex=Base().x+dx*length;ey=Base().y+dy*length;
   }}
-  Vec end={ex,ey,GolemGround(ex,ey)+.8f};auto* flowTexture=input.hard?nullptr:textures[2];
+  Vec end={ex,ey,GolemGround(ex,ey)+.8f};auto flowTexture=input.hard?nullptr:textures[2];
   if(phase==9){
    for(int layer=0;layer<3;layer++){auto tube=GolemTube(origin,end,layer==0?.5f:layer==1?.24f:.085f,time);draw(tube,flowTexture,Tint(layer==0?0x8a379cff:layer==1?0xd77cdfff:0xf4edffff),false,true);}
   }else{

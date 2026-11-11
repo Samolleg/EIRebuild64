@@ -136,6 +136,16 @@ void Renderer::report_shadow_diagnostics(const char* reason) noexcept {
 void Renderer::report_shadow_diagnostics(const char* reason) noexcept {  }
 #endif
 
+Microsoft::WRL::ComPtr<IDXGIAdapter> Renderer::graphics_adapter() noexcept {
+ Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+ if(d3d12_)adapter=d3d12_->adapter();
+ else if(device_){
+  Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;
+  if(SUCCEEDED(device_.As(&dxgi)))dxgi->GetAdapter(&adapter);
+ }
+ return adapter;
+}
+
 bool Renderer::status_text_wanted() const noexcept {
  return debug_overlay_.visible()||debug_overlay_.wants_profiling()||profiler_.attribution_enabled()||
   placed_hitch_profile_.active()||harness_enabled()||!critters_summary_.labels.empty();
@@ -528,13 +538,6 @@ Renderer::HarnessRequest Renderer::step_test_harness(const ScenePresentInputs* i
    harness_complete(ok,detail);
   harness_stage_=0;harness_wait_=0;};
  std::string detail;
- // D3D12 backend: no world yet (wait_ready) and no outer frame recorder
- // (profile), so these fail at once (named) and the route goes on; captures
- // (the profiler's pass timings), screenshots, config and paths run.
- if(d3d12_&&(command->verb==HarnessVerb::profile||command->verb==HarnessVerb::wait_ready)){
-  finish(false,"not on the Direct3D 12 backend yet (no world, no outer frame recorder)");
-  return HarnessRequest::none;
- }
  switch(command->verb){
  case HarnessVerb::capture:
   if(harness_stage_==0){
@@ -738,7 +741,7 @@ std::string Renderer::harness_unready_parts(std::string& ready_detail) noexcept 
    add("ground_cover","tile families still loading");
   else if(!gc_material_state_.empty())add("ground_cover",gc_paint_failure_?gc_paint_failure_:"terrain atlases still painting");
   else for(const auto& n:gc_neighbours_)
-   if(!n.prepared||n.families.valid()){add("ground_cover","neighbour cover still preparing");break;}
+   if((d3d12_?(n.cover12.width&&(!n.cover12.fields_ready||!n.cover12.color_ready)):!n.prepared)||n.families.valid()){add("ground_cover","neighbour cover still preparing");break;}
  }
  const auto* option=debug_overlay_.config().find("neighbour_maps");
  const bool neighbours=option&&option->boolean_value;
@@ -784,8 +787,8 @@ const char* Renderer::load_reveal_ground_cover_wait() noexcept{
    return "ground cover tile families";
   // Atlases arrive as the game draws its terrain; wait while they still do.
   if(!gc_material_state_.empty()&&gc_painted_frame_+3>native_frame_index_)return "ground cover atlases painting";
-  // D3D12: neighbours keep only their blend maps (no cover pass to prepare).
-  for(const auto& n:gc_neighbours_)if((!d3d12_&&!n.prepared)||n.families.valid())return "neighbour ground cover";
+  // Each backend publishes readiness in its own neighbour cover resources.
+  for(const auto& n:gc_neighbours_)if((d3d12_?(n.cover12.width&&(!n.cover12.fields_ready||!n.cover12.color_ready)):!n.prepared)||n.families.valid())return "neighbour ground cover";
  }
  return nullptr;
 }
@@ -1398,6 +1401,34 @@ bool Renderer::write_hudless_image(const std::string& path,std::string& detail) 
   if(!d3d12_||!hudless_d3d12_){detail="no HUD-less copy";return false;}
   std::vector<std::uint8_t> bgra;UINT width=0,height=0;
   if(d3d12_->read_texture(*hudless_d3d12_,bgra,width,height)!=S_OK){detail="HUD-less readback failed";return false;}
+  return write_bgra_bmp(path,bgra.data(),width,height,width*4u,detail);
+ }catch(...){detail="allocation failed";return false;}
+}
+
+// Export only boundaries whose color target is ready. HDR world passes need
+// their own GPU conversion target before they can be represented as a BMP.
+bool Renderer::write_profile_image_d3d12(const std::string& path,std::string& detail) noexcept {
+ const stall_watch::Exempt disk_export;
+ detail.clear();
+ const bool post=profiler_.current_pass_is("scene_smaa")||profiler_.current_pass_is("scene_copy")||
+  profiler_.current_pass_is("scene_dof")||profiler_.current_pass_is("scene_sun_rays")||
+  profiler_.current_pass_is("scene_bloom");
+ if(!post){
+  if(scene_composited_&&(profiler_.current_pass_is("ui_composition")||
+     profiler_.current_pass_is("present_bookkeeping")||profiler_.current_pass_is("fg_frame_composite")))
+   return write_harness_screenshot(path,detail);
+  return false;
+ }
+ try{
+  if(!d3d12_){detail="D3D12 executor unavailable";return false;}
+  D3D12Texture* source=scene_output_d3d12();
+  if(!source)return write_harness_screenshot(path,detail);
+  std::vector<std::uint8_t> bgra;UINT width=0,height=0;
+  const HRESULT hr=d3d12_->read_texture(*source,bgra,width,height);
+  if(hr!=S_OK){
+   char text[96]{};std::snprintf(text,sizeof(text),"D3D12 post-pass readback failed (%08lx)",static_cast<unsigned long>(hr));
+   detail=text;return false;
+  }
   return write_bgra_bmp(path,bgra.data(),width,height,width*4u,detail);
  }catch(...){detail="allocation failed";return false;}
 }

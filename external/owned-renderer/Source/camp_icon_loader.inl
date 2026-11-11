@@ -104,31 +104,47 @@ class CampIconLoader {
                     image.format.dwGBitMask=0x0000ff00; image.format.dwBBitMask=0x000000ff;
                     image.format.dwRGBAlphaBitMask=0xff000000;
                     image.pixels.resize(std::size_t(image.pitch)*canvas);
-                    auto cut=std::make_shared<std::vector<std::uint8_t>>(
-                        (std::size_t(canvas)*canvas+7)/8,std::uint8_t{0xff});
-                    bool opaque=texture.width==canvas && texture.height==canvas;
-                    const auto* source=texture.source->data()+texture.mips[0].byte_offset;
-                    for (unsigned y=0;y<texture.height;++y)
-                        for (unsigned x=0;x<texture.width;++x) {
-                            std::uint32_t colour;
-                            std::memcpy(&colour,source+(y*texture.width+x)*4,4);
-                            const std::uint32_t alpha=(colour&0x80000000u)?0xff000000u:0;
-                            // Exactly the native 1555 quantization followed by
-                            // the normal upload's value*255/31 expansion.
-                            const std::uint32_t expanded=alpha|
-                                ((((colour>>19)&31u)*255u/31u)<<16)|
-                                ((((colour>>11)&31u)*255u/31u)<<8)|
-                                (((colour>>3)&31u)*255u/31u);
-                            const std::size_t bit=std::size_t(canvas-texture.height+y)*canvas+x;
-                            std::memcpy(image.pixels.data()+bit*4,&expanded,4);
-                            if (alpha) (*cut)[bit/8]&=std::uint8_t(~(1u<<(bit%8)));
-                            else opaque=false;
-                        }
-                    description.alpha_fully_opaque=opaque;
-                    if (!opaque) description.alpha_cut_mask=std::move(cut);
-                    if (FAILED(create_completed_surface_texture(device.Get(),image,result->texture,result->srv)))
-                        error="owned icon GPU creation failed";
-                    if (error.empty()) data = std::move(result);
+#ifdef EID3D11_EMBEDDED
+                    if (!device) {
+                        // Preserve authored BGRA bytes and bottom alignment.
+                        // The surface resolver uploads this native format on D3D12.
+                        const auto* source = texture.source->data() + texture.mips[0].byte_offset;
+                        for (unsigned y = 0; y < texture.height; ++y)
+                            std::memcpy(image.pixels.data() + (y + canvas - texture.height) * image.pitch,
+                                source + std::size_t(y) * texture.width * 4, std::size_t(texture.width) * 4);
+                        result->native_surface = std::make_shared<OwnedRender::E1Surface>();
+                        if (!result->native_surface->CompleteCpu(image))
+                            error = "D3D12 icon surface publication failed";
+                        else data = std::move(result);
+                    } else
+#endif
+                    {
+                        auto cut=std::make_shared<std::vector<std::uint8_t>>(
+                            (std::size_t(canvas)*canvas+7)/8,std::uint8_t{0xff});
+                        bool opaque=texture.width==canvas && texture.height==canvas;
+                        const auto* source=texture.source->data()+texture.mips[0].byte_offset;
+                        for (unsigned y=0;y<texture.height;++y)
+                            for (unsigned x=0;x<texture.width;++x) {
+                                std::uint32_t colour;
+                                std::memcpy(&colour,source+(y*texture.width+x)*4,4);
+                                const std::uint32_t alpha=(colour&0x80000000u)?0xff000000u:0;
+                                // Exactly the native 1555 quantization followed by
+                                // the normal upload's value*255/31 expansion.
+                                const std::uint32_t expanded=alpha|
+                                    ((((colour>>19)&31u)*255u/31u)<<16)|
+                                    ((((colour>>11)&31u)*255u/31u)<<8)|
+                                    (((colour>>3)&31u)*255u/31u);
+                                const std::size_t bit=std::size_t(canvas-texture.height+y)*canvas+x;
+                                std::memcpy(image.pixels.data()+bit*4,&expanded,4);
+                                if (alpha) (*cut)[bit/8]&=std::uint8_t(~(1u<<(bit%8)));
+                                else opaque=false;
+                            }
+                        description.alpha_fully_opaque=opaque;
+                        if (!opaque) description.alpha_cut_mask=std::move(cut);
+                        if (FAILED(create_completed_surface_texture(device.Get(),image,result->texture,result->srv)))
+                            error="owned icon GPU creation failed";
+                        if (error.empty()) data = std::move(result);
+                    }
                 }
             } catch (...) { error = "owned icon decode allocation failed"; }
             std::lock_guard lock(mutex_);
@@ -144,7 +160,9 @@ public:
                 reject("icon_texture_manager_mount_contract_unavailable");
                 return {};
             }
+#ifndef EID3D11_EMBEDDED
             if (!icon_device) return {};
+#endif
             ComPtr<ID3D11Device> device = icon_device;
             for (auto& worker : workers_)
                 worker=std::thread([this,mounts,high_resolution=addon_icon_lookup,device]() mutable {

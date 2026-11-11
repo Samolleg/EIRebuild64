@@ -9,7 +9,7 @@ void RubyDisc(RubySprites& bins,Vec at,Vec camera,float radius,float alpha){
   for(int j=0;j<16;++j){float u=j*6.283185307f/16,v=(j+1)*6.283185307f/16;Vec p=x*std::cos(u)+y*std::sin(u),q=x*std::cos(v)+y*std::sin(v);auto k=m.Add(at+p*r0,0,0);m.Add(at+q*r0,0,0);m.Add(at+q*r1,0,0);m.Add(at+p*r1,0,0);m.Quad(k,k+1,k+2,k+3);}
  }
 }
-void RubySpritesDraw(RubySprites& sprites,ID3D11ShaderResourceView* texture,unsigned rgb,bool additive){for(unsigned b=0;b<32;++b)if(!sprites.opacity[b].indices.empty())draw(sprites.opacity[b],texture,(((b+1)*255/32)<<24)|(rgb&0xffffffu),false,additive);}
+void RubySpritesDraw(RubySprites& sprites,Renderer::EmbeddedEffectTexture  texture,unsigned rgb,bool additive){for(unsigned b=0;b<32;++b)if(!sprites.opacity[b].indices.empty())draw(sprites.opacity[b],texture,(((b+1)*255/32)<<24)|(rgb&0xffffffu),false,additive);}
 const EmbeddedGolemNode& RubyNode(int actor,const char* bone) const {
  for(int i=0;i<24;++i)if(!std::strcmp(EmbeddedRubyBones[i],bone)&&input.ruby[actor].nodes[i].valid)return input.ruby[actor].nodes[i];throw std::runtime_error("ruby current bone missing");
 }

@@ -194,7 +194,10 @@ public:
     void add_batch(std::uint64_t count = 1);
     void add_upload(std::uint64_t bytes);
     void add_capture(std::uint64_t cpu_ticks, std::uint64_t bytes, bool appended);
-    void end_pass(ID3D11Texture2D* capture_source = nullptr);
+    // Native image export runs only for passes selected by the capture policy.
+    using CaptureWriter = bool (*)(void*, const std::string&);
+    void end_pass(ID3D11Texture2D* capture_source = nullptr,
+                  CaptureWriter writer = nullptr, void* writer_context = nullptr);
     // Opens a named GPU sub-scope inside the active pass, closing the open one
     // unless it has the same name (consecutive same-named groups share one
     // timestamp pair). No-op unless profiling is on; the pass end closes it.
@@ -304,7 +307,8 @@ private:
     bool read(const QueryPair& pair, bool end, UINT64& ticks) noexcept;
     void end_sub_scope();
     void refresh_enabled() noexcept;
-    void capture_pass(ID3D11Texture2D* source, const PassRecord& pass, UINT ordinal);
+    void capture_pass(ID3D11Texture2D* source, const PassRecord& pass, UINT ordinal,
+                      CaptureWriter writer, void* writer_context);
     bool write_bmp(const std::string& path, ID3D11Texture2D* source,
                    bool source_is_staging = false);
     bool write_shadow_temporal_depth(const std::string& path, ID3D11Texture2D* staging);

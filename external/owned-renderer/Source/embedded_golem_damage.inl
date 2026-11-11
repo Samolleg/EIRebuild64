@@ -35,7 +35,7 @@ void Fractures() {
    c=center+velocity*settle;c.z=Support(moved,c,.025f);
   }else c.z=(std::max)(c.z,floor);
   Mesh mesh;for(unsigned i=0;i<moved.size();++i){const auto& v=part.vertices[i];auto k=mesh.Add(c+moved[i],v.u,1-v.v);mesh.indices.push_back(WORD(k));}
-  auto* texture=textures[part.texture==1?0:1];if(!texture)throw std::runtime_error("golem authored material missing");
+  auto texture=textures[part.texture==1?0:1];if(!texture)throw std::runtime_error("golem authored material missing");
   draw(mesh,texture,death?0xffa8b3bfu:0xffacb8c4u,true,false);
   if(settled){stored->meshes.push_back(mesh);stored->textures.push_back(part.texture==1?0:1);}
   if(death&&part.core&&time<2.3f){float fade=(std::max)(0.f,1-time/2.3f);unsigned alpha=unsigned(200*fade*fade);if(alpha)draw(mesh,texture,(alpha<<24)|(input.hard?0xff8a8au:0x8ae8ffu),false,true);}
