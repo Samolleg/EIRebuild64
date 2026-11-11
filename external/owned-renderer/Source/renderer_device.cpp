@@ -2874,7 +2874,7 @@ HRESULT Renderer::create_native_geometry_resource(
 }
 
 HRESULT Renderer::create_native_geometry_arena(){
- if(!device_)return E_FAIL;
+ if(!d3d12_&&!device_)return E_FAIL;
  if(d3d12_){ // D3D12 backend: the first page as a D3D12 buffer (as native_d3d12_ensure makes it)
   NativeGeometryPage page;page.capacity=16;page.high_water=16;
   try{page.free.reserve(1);}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
@@ -3006,7 +3006,7 @@ HRESULT Renderer::allocate_native_geometry_span(UINT requested,
  output={};UINT bytes=0;const UINT limit=native_geometry_page_limit();
  if(!requested||!align_up_checked(requested,16,bytes)||bytes>limit-16u)
   return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
- if(native_geometry_pages_.empty()||!device_||!context_)return E_FAIL;
+ if(native_geometry_pages_.empty()||(!d3d12_&&(!device_||!context_)))return E_FAIL;
  UINT best_page=UINT_MAX,best_slot=UINT_MAX,best_bytes=UINT_MAX;
  for(UINT page_index=0;page_index<native_geometry_pages_.size();++page_index){
   const auto& page=native_geometry_pages_[page_index];
@@ -3230,7 +3230,7 @@ bool Renderer::test_native_prepared_record_addresses_current(
 
 HRESULT Renderer::upload_native_geometry(UINT page_index,UINT offset,const void* data,UINT bytes){
  PERF06_SCOPE("upload_geometry");
- if(!context_||page_index>=native_geometry_pages_.size()||!data||!bytes)return E_INVALIDARG;
+ if((!d3d12_&&!context_)||page_index>=native_geometry_pages_.size()||!data||!bytes)return E_INVALIDARG;
  if(d3d12_){
   auto& page=native_geometry_pages_[page_index];
   if(!page.d3d12||offset>page.capacity||bytes>page.capacity-offset)return E_INVALIDARG;

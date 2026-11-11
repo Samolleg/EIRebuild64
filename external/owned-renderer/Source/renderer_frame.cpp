@@ -74,6 +74,7 @@ namespace owned {
 #ifdef EID3D11_EMBEDDED
 bool bridge_live_wants_capture() noexcept;
 void bridge_live_capture(ID3D11DeviceContext*,IDXGISwapChain*,unsigned long long) noexcept;
+void bridge_live_capture_d3d12(D3D12Frame&,unsigned long long) noexcept;
 #endif
 namespace {
 bool shadow_temporal_diagnostic_enabled(){static const bool enabled=[](){char value[8]{};return GetEnvironmentVariableA("EI_RENDERER_SHADOW_TEMPORAL_CAPTURE",value,sizeof(value))&&value[0]=='1';}();return enabled;}
@@ -1712,6 +1713,9 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  // The game's gamma ramp over the finished frame, cursor included (after the
  // load reveal, as apply_gamma_ramp on D3D11).
  if(FAILED(apply_gamma_ramp_d3d12()))d3d12_->omit("gamma_ramp (D3D12 pass failed)",false);
+#ifdef EID3D11_EMBEDDED
+ if(bridge_live_wants_capture())bridge_live_capture_d3d12(*d3d12_,native_frame_index_);
+#endif
  // Frame generation: the generated image gets the same layers as the real
  // one (overlay draw lists replayed, the cursor at the real frame's position,
  // gamma; the load reveal never holds on a generated frame). The pacer

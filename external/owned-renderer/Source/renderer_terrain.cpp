@@ -985,7 +985,7 @@ HRESULT Renderer::apply_terrain_tile_blend(const TerrainTileFamilies& families) 
 }catch(...){return E_OUTOFMEMORY;}
 
 HRESULT Renderer::set_native_terrain_layer_shifts(const std::vector<float>& shifts) noexcept try{SCENE_ENTRY("set_native_terrain_layer_shifts");
- if(!device_||!context_)return E_FAIL;
+ if(!d3d12_&&(!device_||!context_))return E_FAIL;
  if(shifts==native_terrain_layer_shifts_)return S_OK;
  for(float value:shifts)if(!std::isfinite(value))return E_INVALIDARG;
  if(d3d12_){ // D3D12 backend: the values only; flush_native_d3d12 uploads them
@@ -1020,7 +1020,7 @@ HRESULT Renderer::set_native_terrain_layer_shifts(const std::vector<float>& shif
 
 HRESULT Renderer::set_native_terrain_frame(const NativeTerrainState& game_terrain,bool full_sun,
                                            const std::vector<float>* layer_shifts) noexcept{SCENE_ENTRY("set_native_terrain_frame");
- if(!device_||!context_)return E_FAIL;
+ if(!d3d12_&&(!device_||!context_))return E_FAIL;
  if(layer_shifts){const HRESULT hr=set_native_terrain_layer_shifts(*layer_shifts);if(FAILED(hr))return hr;}
  // The active map's saved-layout origin: its terrain material layouts use
  // the same frame as when it is drawn as a neighbour. The neighbour stream
