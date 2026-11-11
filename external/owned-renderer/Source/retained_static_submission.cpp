@@ -9,15 +9,11 @@
 #include "fur.h"
 #include "figure_service_nodes.h"
 #include "skn_runtime.h"
+#include "nala_shape.h"
 #include "nala/UnityBodySize.h"
 #include "nala/NalaAttachments.h"
 #include "nala/UnityHandsData.h"
-#include "../../../tools/nala-to-skn/nala/UnityCompleteData.h"
 #include "../../../tools/nala-to-skn/nala/UnityBodyAppearance.h"
-#include "../../../tools/nala-to-skn/nala/head105_v1/NalaFaceSourceData.h"
-#include "../../../tools/nala-to-skn/nala/head105_v1/NalaUpperArcIdentity.h"
-#include "../../../tools/nala-to-skn/nala/morphs_head105_v1/NalaBodyShape.h"
-#include <chrono>
 #include <sstream>
 #include "world_scene_algorithms.h"
 
@@ -1140,7 +1136,6 @@ const std::array<float,3>& retained_visual_shape(const RetainedVisualSample& sam
     return sample.values.unit && !sample.completed_pose && sample.assembly ? sample.assembly->shape : sample.object_pose.shape;
 }
 
-#include "nala_shape.inl"
 namespace {
 // Bone-only evaluation of section 13. Bind vertices never enter this path.
 std::vector<std::array<float,16>> nala_skin_palette(const RetainedVisualSample& sample,

@@ -1,6 +1,21 @@
-// Included inside owned. Authoring tables are compiled into the renderer from
-// the same headers as nala-to-skn, so the existing SKN needs no new payload.
-namespace {
+#include "nala_shape.h"
+#include "retained_static_submission.h"
+#include "skn_runtime.h"
+#include "../../../tools/nala-to-skn/nala/UnityCompleteData.h"
+#include "../../../tools/nala-to-skn/nala/UnityBodyAppearance.h"
+#include "../../../tools/nala-to-skn/nala/head105_v1/NalaFaceSourceData.h"
+#include "../../../tools/nala-to-skn/nala/head105_v1/NalaUpperArcIdentity.h"
+#include "../../../tools/nala-to-skn/nala/morphs_head105_v1/NalaBodyShape.h"
+#include <algorithm>
+#include <atomic>
+#include <cfloat>
+#include <chrono>
+#include <cmath>
+#include <sstream>
+#include <stdexcept>
+
+// Authoring tables match nala-to-skn and are compiled only in this unit.
+namespace owned {
 std::shared_ptr<const skn::RuntimeAsset> unit_skn_asset(
     const RetainedVisualSample& sample, bool& present) {
     auto& prepared = *sample.prepared;
