@@ -183,7 +183,8 @@ HRESULT Renderer::terrain_texture_d3d12(SurfaceImage& image,const TerrainTexture
  }
  const UINT block_rows=(std::max)(1u,(image.height+3u)/4u);
  if(source->pixels.empty()||source->pitch<=0||std::uint64_t(source->pitch)*block_rows>source->pixels.size()){
-  if(!image.d3d12){const HRESULT hr=upload_d3d12(image,nullptr);if(FAILED(hr))return hr;}
+  // upload_d3d12 also checks executor ownership before its generation hit.
+  const HRESULT hr=upload_d3d12(image,nullptr);if(FAILED(hr))return hr;
   return record(image.d3d12,"terrain pages: BC1 without bytes (one level)");
  }
  UINT mip_count=1;

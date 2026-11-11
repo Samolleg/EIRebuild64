@@ -1,3 +1,36 @@
+# X64D3D12 surface ownership and remaining subsystem retirement, stage 11 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+The executor's texture_info and texture_matches now require the allocation's
+shared resource owner to match this executor, in addition to the existing
+shape checks. Owner identity survives allocator/address reuse and lets an
+external SurfaceImage outlive device teardown without passing a later
+executor's upload-generation hit. Failed texture_info clears its outputs.
+
+Snapshot upload validates ownership before the single-level fast path. An
+obsolete pixel-free snapshot can rebuild only through the surface table's
+exact source generation. Missing source bytes fail explicitly. GPU-captured
+content whose allocation no longer matches returns DXGI_ERROR_DEVICE_RESET
+instead of uploading stale CPU pixels. The BC1 terrain path with missing
+bytes now uses the same validated upload before retaining the texture.
+
+Embedded release() drops surface-table GPU references and upload shapes,
+retaining source bytes and GPU-capture markers. It resets the entire impostor
+atlas, bake targets, slice identities and failure state. D3D12 fog, water
+reflection and cave allocations now retire beside the shared validity and
+capacity resets already performed by their common release functions. This
+stage adds no SDKs, DLLs, HLSL or rendering algorithms. D3D11 is unchanged.
+
+The executor still stays alive. Before shutting it down, finish the remaining
+lifetime audit, including prepared uploads and external resource submission
+sites that bypass surface upload. Then bind startup configuration, backend,
+overlay, local simulation/render boundaries and world/present dispatch with
+explicit startup/device-removal errors. Host transport adaptation remains
+in Source/embedded_d3d12.{h,cpp}, with Renderer integration still incomplete.
+Full BRIEF remains open. No compilation, shader compilation, tests or game
+run was performed. Build/link and GPU behavior remain unverified.
+Earlier sections record the preceding stages.
+
 # X64D3D12 map/effect cache retirement, stage 10 (2026-11-11)
 
 Incomplete runtime integration. renderer_backend=1 still creates D3D11.

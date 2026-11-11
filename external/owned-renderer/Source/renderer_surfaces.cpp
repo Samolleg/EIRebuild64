@@ -123,10 +123,14 @@ HRESULT Renderer::upload(SurfaceImage& i,SurfaceUploadResult* output){
  // table's pixels of that generation (this backend keeps them).
  if(d3d12_&&i.scene_snapshot){
   if(output)*output={};
-  if(!i.d3d12)return E_UNEXPECTED;
+  UINT width=0,height=0,levels=0;DXGI_FORMAT stored=DXGI_FORMAT_UNKNOWN;
+  if(!i.d3d12||!d3d12_->texture_info(*i.d3d12,width,height,levels,stored)){
+   // Rebuild only from the exact generation retained in the surface table.
+   // A pixel-free snapshot must never reuse a previous executor's texture.
+   const HRESULT restored=upload_d3d12(i,output);if(FAILED(restored))return restored;
+  }
   DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;UINT blocks=0;
   if(!surface_dxgi_format(i.format,format,blocks))return E_UNEXPECTED;
-  UINT width=0,height=0,levels=0;DXGI_FORMAT stored=DXGI_FORMAT_UNKNOWN;
   if(!(i.static_mip_hint&&i.world_mip_use&&!i.gpu_captured&&!blocks)||
      (d3d12_->texture_info(*i.d3d12,width,height,levels,stored)&&levels>1))return S_OK;
   auto& cached=scene_mip_textures_[i.id];
@@ -211,6 +215,9 @@ HRESULT Renderer::upload_d3d12(SurfaceImage& i,SurfaceUploadResult* output){
   d3d12_->texture_info(*i.d3d12,stored_width,stored_height,stored_levels,stored_format)&&
   stored_levels==(mips?full_mip_count(i.width,i.height):1u);
  if(matches&&i.uploaded_generation==i.generation)return S_OK;
+ // Captures have no current CPU copy. A replacement executor cannot restore
+ // their content from the old allocation or from the stale pixels vector.
+ if(i.gpu_captured&&!matches)return DXGI_ERROR_DEVICE_RESET;
  if(i.cpu_released){
   // A queued command's pixel-free snapshot (surface_snapshot): the host
   // table's image of the same generation keeps the bytes on this backend;

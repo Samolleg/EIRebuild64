@@ -148,7 +148,8 @@ public:
     // A shader-readable texture (B8G8R8A8, BC1-3 or the 16-bit owned formats).
     virtual HRESULT create_texture(UINT width, UINT height, DXGI_FORMAT format, D3D12TextureRef& out, UINT mips = 1) = 0;
     // A texture array (shader-readable as Texture2DArray, even with one slice).
-    // A texture's size, levels and format.
+    // A current executor texture's size, levels and format. Returns false
+    // for another executor's allocation, including surviving old snapshots.
     virtual bool texture_info(const D3D12Texture& texture, UINT& width, UINT& height, UINT& mips, DXGI_FORMAT& format) const noexcept = 0;
     virtual HRESULT create_texture_array(UINT width, UINT height, DXGI_FORMAT format, UINT mips, UINT slices, D3D12TextureRef& out) = 0;
     // A texture compute programs write (u0-u7) and shaders read: 2D, 3D when

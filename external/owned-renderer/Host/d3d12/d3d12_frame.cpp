@@ -938,11 +938,16 @@ public:
     }
 
     bool texture_info(const D3D12Texture& texture, UINT& width, UINT& height, UINT& mips, DXGI_FORMAT& format) const noexcept override {
+        // A surviving SurfaceImage may belong to an earlier executor even
+        // when its dimensions and generation match the new device's request.
+        width = height = mips = 0;
+        format = DXGI_FORMAT_UNKNOWN;
+        if (texture.owner != resource_owner_ || !texture.resource) return false;
         width = texture.width;
         height = texture.height;
         mips = texture.mips;
         format = texture.format;
-        return texture.resource != nullptr;
+        return true;
     }
 
     HRESULT create_texture_array(UINT width, UINT height, DXGI_FORMAT format, UINT mips, UINT slices, owned::D3D12TextureRef& out) override {
@@ -1701,7 +1706,8 @@ public:
     }
 
     bool texture_matches(const D3D12Texture& texture, UINT width, UINT height, DXGI_FORMAT format) const noexcept override {
-        return texture.width == width && texture.height == height && texture.format == format;
+        return texture.owner == resource_owner_ && texture.resource &&
+            texture.width == width && texture.height == height && texture.format == format;
     }
 
     HRESULT write_texture(D3D12Texture& texture, const RECT& rect, const void* data, UINT pitch, UINT mip = 0) override {

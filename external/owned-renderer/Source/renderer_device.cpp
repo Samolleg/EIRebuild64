@@ -3442,6 +3442,9 @@ void Renderer::release() {
   // The liquid workers have joined above. Their upload/null checks must
   // see an empty owner even if the next device draws the same source map.
   liquid12_={};
+  // The common D3D11 release functions reset shared validity/capacity gates,
+  // but these parallel executor allocations must retire here as well.
+  water12_={};fog12_={};cave12_={};
   liquid_swamp_frame_generation_=UINT64_MAX;liquid_surf_built_serial_=0;
   liquid_wave_current_=0;
   // A saved loading picture cannot be copied by a replacement executor.
@@ -3452,6 +3455,18 @@ void Renderer::release() {
   terrain_textures_d3d12_.clear();terrain_pages_d3d12_={};
   native_terrain_frame_d3d12_.clear();
   scene_mip_textures_.clear();
+  // Keep source bytes for exact-generation snapshot recovery. GPU-only
+  // captures retain their marker so upload rejects them until recaptured.
+  for(auto& item:core_surfaces_){
+   if(!item.second)continue;
+   item.second->d3d12.reset();
+   item.second->uploaded_shape={};
+   ++item.second->texture_serial;
+  }
+  // Atlas slices and the fixed bake targets all belong to this executor.
+  impostors_={};
+  native_impostor_pixels_uploaded_=-1.f;
+  native_impostor_debug_uploaded_=false;
   // Preserve source texture identities, but rebuild their device-specific
   // profiles even when the composition serial (or fixed unit table) is equal.
   for(auto& item:material_profiles_){
