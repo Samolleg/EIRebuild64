@@ -182,6 +182,8 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
     if(scene_composited_||ambient_terrain_frame_!=native_frame_index_||gc_drawn_frame_==native_frame_index_)return S_OK;
     const auto fail=[&](const char* reason,HRESULT hr)->HRESULT {
         d3d12_->clear_slots();d3d12_->set_index_buffer(nullptr);bind_world_targets_d3d12();
+        char detail[384]{};std::snprintf(detail,sizeof(detail),"operation=ground_cover stage=%s hr=0x%08lx frame=%llu",reason,static_cast<unsigned long>(hr),static_cast<unsigned long long>(native_frame_index_));
+        if(FAILED(hr))bridge_report_event("d3d12_failed",detail);
         d3d12_->omit(reason,true);return FAILED(hr)?hr:S_OK;
     };
     HRESULT hr=bind_world_d3d12();if(FAILED(hr))return hr;
@@ -251,7 +253,7 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
         // This map's cover built from its tile families: the D3D11 point
         // (update_ground_cover_maps) that ends the load reveal's wait.
         if(families)gc_map_generation_=ambient_map_generation_;
-        g.readbacks={};g.read_head=g.read_pending=0;
+        g.readbacks={};g.read_head=g.read_pending=0;g.demand_state=0;
     }
     if((hr=prepare_ground_cover_map_d3d12(g.map))!=S_OK)return fail("ground cover fields/terrain paint not ready",hr);
     update_ground_cover_terrain2_d3d12(); // the active map's terrain 2.0 classes and colour (while terrain2 is on)
@@ -306,7 +308,7 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
     // One pool region per map, sized by its own demand readback.
     const UINT passes=UINT(1+gc_neighbours_.size());
     if(gc_capacity_.size()<passes){gc_capacity_.resize(passes);gc_base_.resize(passes);}
-    if(level!=gc_level_){gc_level_=level;for(auto& capacity:gc_capacity_)capacity.fill(0);g.instances.reset();g.pool_capacity=0;g.readbacks={};g.read_head=g.read_pending=0;}
+    if(level!=gc_level_){gc_level_=level;for(auto& capacity:gc_capacity_)capacity.fill(0);g.instances.reset();g.pool_capacity=0;g.readbacks={};g.read_head=g.read_pending=0;g.demand_state=0;}
     if(passes!=g.passes){
         // Counts still in flight for the previous regions are dropped.
         D3D12BufferRef counts,overflow;
@@ -314,14 +316,25 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
            FAILED(hr=d3d12_->create_buffer(UINT64(passes)*gm_count*8,0,kD3D12BufferUnordered,overflow)))return fail("ground cover count buffers",hr);
         d3d12_->clear_buffer_uint(*overflow,0);
         g.counts=std::move(counts);g.overflow=std::move(overflow);g.passes=passes;
-        g.readbacks={};g.read_head=g.read_pending=0;gc_grow_=true;
+        g.readbacks={};g.read_head=g.read_pending=0;g.demand_state=0;gc_grow_=true;
     }
     while(g.read_pending){
         std::vector<std::uint8_t> bytes;hr=d3d12_->poll_readback(g.readbacks[g.read_head],bytes);
         if(hr==S_FALSE)break;if(FAILED(hr)||bytes.size()!=std::size_t(passes)*gm_count*4)return fail("ground cover demand readback",FAILED(hr)?hr:E_FAIL);
+        std::uint64_t total_demand=0;
         for(UINT p=0;p<passes;++p)for(UINT m=0;m<gm_count;++m){
             UINT demand;std::memcpy(&demand,bytes.data()+(p*gm_count+m)*4,4);auto& capacity=gc_capacity_[p][m];
+            total_demand+=demand;
             if(demand>capacity-capacity*3/10){capacity=demand+demand/2+64;gc_grow_=true;}
+        }
+        // Demand is GPU placement output, not a count of submitted indirect draws.
+        // Log transitions and one reminder per 600 frames, bounded per renderer.
+        if(g.demand_state!=(total_demand?2u:1u)||native_frame_index_-g.demand_frame>=600){
+            char detail[384]{};std::snprintf(detail,sizeof(detail),"frame=%llu maps=%u visible_maps=%u demand=%llu pool=%u reason=%s",
+                static_cast<unsigned long long>(native_frame_index_),passes,UINT(maps.size()),static_cast<unsigned long long>(total_demand),g.pool_capacity,
+                total_demand?"placement_produced_instances":"placement_produced_zero_instances");
+            bridge_report_event("d3d12_ground_cover_placement",detail);
+            g.demand_state=total_demand?2u:1u;g.demand_frame=native_frame_index_;
         }
         g.read_head=(g.read_head+1)%UINT(g.readbacks.size());--g.read_pending;
     }
