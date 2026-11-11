@@ -1,3 +1,30 @@
+# X64D3D12 embedded world/present dispatch, stage 18 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+The embedded Renderer now dispatches composite_world and present_frame to
+the author's native D3D12 bodies when its local executor is active.
+Readiness and begin_scene accept that executor without a D3D11 device.
+The native present consumes the local resource poll, camp layout and
+Draw2D popup decoration at the embedded presentation boundary. The author's
+world composition, SR, DLSS/FSR FG, pacing and presentation code is reused.
+Native frame HRESULTs and executor failures reach the prepared journal and
+player error message. Exceptions become E_OUTOFMEMORY/E_FAIL at that same
+boundary; a latched failure prevents subsequent presentation. Resize errors
+also reach the player. device_removed_reason queries the actual D3D12 device,
+and present reports its removal HRESULT even when the frame body succeeded.
+Engine-frame flush preserves its original failure HRESULT.
+No HLSL, SDKs or runtime DLL lists changed this stage. Host transport
+adaptation remains Source/embedded_d3d12.{h,cpp}.
+
+Next adapt source CDXGISurface/E1Surface/E1SurfaceBridge CPU publication,
+capture and texture/sprite/SRV boundaries, plus SetRenderStates. Those still
+require D3D11 resources. Then load/latch renderer_backend before device
+creation and call ensure_embedded_d3d12. Connect local input/simulation and
+render boundaries, including discarded/capture-only and repeated presents,
+to EmbeddedD3D12's phase owner. This stage does not activate the backend.
+Full BRIEF remains open. No compilation, shader compilation, tests or game
+run was performed. Build/link, D3D11 regression and GPU behavior are unverified.
+
 # X64D3D12 native source output capture, stage 17 (2026-11-11)
 
 Incomplete runtime integration. renderer_backend=1 still creates D3D11.

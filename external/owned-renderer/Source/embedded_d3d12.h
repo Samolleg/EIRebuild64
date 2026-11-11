@@ -33,6 +33,7 @@ public:
     void fg_release() noexcept;
     std::uint64_t fg_vram(UINT width, UINT height, UINT render_w, UINT render_h) noexcept;
     const char* failure() const noexcept;
+    HRESULT device_removed_reason() const noexcept;
     // Before Renderer releases resources: stop NGX while its GPU wait still
     // has a live executor. shutdown() follows after all renderer textures,
     // buffers, upload jobs, overlay and profiler have been retired.

@@ -1534,12 +1534,20 @@ public:
     // pointer to the image itself.
     std::shared_ptr<SurfaceImage> scene_surface(SurfaceImage* image);
     // Core mode: ready once the host link is up (no device in this process).
-    bool ready() const { return device_ != nullptr || core_mode_; }
+    bool ready() const {
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+        if (d3d12_) return !embedded_d3d12_failed_;
+#endif
+        return device_ != nullptr || core_mode_ || d3d12_ != nullptr;
+    }
     // S_OK while the device works; the DXGI removal reason after a driver
     // timeout (TDR) or reset. Callers query it only after a failed HRESULT.
     // Core mode: the host link's loss (named in the device-removed box).
     HRESULT device_removed_reason() const noexcept {
         if (core_mode_) return core_removed_reason();
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+        if (d3d12_) return embedded_d3d12_.device_removed_reason();
+#endif
         return device_ ? device_->GetDeviceRemovedReason() : S_OK;
     }
     HRESULT core_removed_reason() const noexcept;

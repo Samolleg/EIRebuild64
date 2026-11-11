@@ -3,6 +3,7 @@
 #include "../Host/reflex.h"
 #include "engine_bridge.h"
 #include <shlobj.h>
+#include <d3d12.h>
 #include <cstdarg>
 #include <cstdio>
 #include <cwchar>
@@ -170,6 +171,10 @@ std::uint64_t EmbeddedD3D12::fg_vram(UINT width, UINT height, UINT rw, UINT rh) 
 }
 const char* EmbeddedD3D12::failure() const noexcept {
     return state_ ? d3d12::frame_executor_failure(*state_->executor).c_str() : "Embedded D3D12 is not initialized";
+}
+HRESULT EmbeddedD3D12::device_removed_reason() const noexcept {
+    ID3D12Device* device = state_ ? state_->executor->device() : nullptr;
+    return device ? device->GetDeviceRemovedReason() : S_OK;
 }
 void EmbeddedD3D12::stop_ngx() noexcept {
     if (!state_) return;
