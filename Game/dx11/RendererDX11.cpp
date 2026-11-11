@@ -352,9 +352,23 @@ bool CDX11::SubmitC74Figure(const owned::NativeGeometryView& view,
     const auto& pixel = GetConstantBuffers()->cb_ps_pixelshader.data;
     auto* primary = ownedRenderer.FigureActive() ? ownedRenderer.FigurePrimaryTexture() : boundFigureTextures[0].Get();
     auto* secondary = ownedRenderer.FigureActive() ? ownedRenderer.FigureSecondaryTexture() : boundFigureTextures[1].Get();
-    state.stage[0][D3DTSS_COLOROP] = primary ? D3DTOP_MODULATE : D3DTOP_SELECTARG2;
+    bool nativeD3D12 = false;
+    if (FAILED(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        nativeD3D12 = renderer.d3d12_backend();
+        return S_OK;
+    }))) return false;
+    const auto primaryId = ownedRenderer.FigureActive() && ownedRenderer.FigurePrimarySurface() ?
+        ownedRenderer.FigurePrimarySurface() : boundParticleSurface;
+    const auto secondaryId = ownedRenderer.FigureActive() && ownedRenderer.FigureSecondarySurface() ?
+        ownedRenderer.FigureSecondarySurface() : boundSecondarySurface;
+    const auto primarySurface = nativeD3D12 ? OwnedRender::E1SurfaceValue(primaryId) : nullptr;
+    const auto secondarySurface = nativeD3D12 ? OwnedRender::E1SurfaceValue(secondaryId) : nullptr;
+    if (nativeD3D12 && ((primaryId && !primarySurface) ||
+        (secondaryId && !secondarySurface))) return false;
+    const bool textured = primary || bool(primarySurface);
+    state.stage[0][D3DTSS_COLOROP] = textured ? D3DTOP_MODULATE : D3DTOP_SELECTARG2;
     state.stage[0][D3DTSS_COLORARG1] = D3DTA_TEXTURE; state.stage[0][D3DTSS_COLORARG2] = D3DTA_DIFFUSE;
-    state.stage[0][D3DTSS_ALPHAOP] = !primary ? D3DTOP_SELECTARG2 : pixel.alphaMode == 0 ?
+    state.stage[0][D3DTSS_ALPHAOP] = !textured ? D3DTOP_SELECTARG2 : pixel.alphaMode == 0 ?
         D3DTOP_SELECTARG1 : pixel.alphaMode == 2 ? D3DTOP_SELECTARG2 : D3DTOP_MODULATE;
     state.stage[0][D3DTSS_ALPHAARG1] = D3DTA_TEXTURE; state.stage[0][D3DTSS_ALPHAARG2] = D3DTA_DIFFUSE;
     state.stage[0][D3DTSS_ADDRESSU] = state.stage[0][D3DTSS_ADDRESSV] = D3DTADDRESS_WRAP;
@@ -364,7 +378,7 @@ bool CDX11::SubmitC74Figure(const owned::NativeGeometryView& view,
     state.render[D3DRENDERSTATE_FOGCOLOR] = (byte(pixel.fogColor.x)<<16) |
         (byte(pixel.fogColor.y)<<8) | byte(pixel.fogColor.z);
     const HRESULT hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
-        if (camp && !lighting && !secondary) {
+        if (camp && !lighting && !secondary && !nativeD3D12) {
             const HRESULT flushed = renderer.has_pending_ui() ? renderer.flush_ui() : S_OK;
             if (FAILED(flushed)) return flushed;
             owned::Renderer::NativeQueueCheckpoint checkpoint;
@@ -373,7 +387,8 @@ bool CDX11::SubmitC74Figure(const owned::NativeGeometryView& view,
             if (FAILED(queued)) renderer.rollback_native(checkpoint);
             return queued;
         }
-        return renderer.queue_embedded_figure(model, state, primary, secondary, lighting, lights);
+        return renderer.queue_embedded_figure(model, state, primary, secondary, lighting, lights,
+            primarySurface.get(), secondarySurface.get());
     });
     RestoreHostBindings();
     if (SUCCEEDED(hr)) {++c56WorldFigurePrimitives; return true;}
@@ -942,11 +957,9 @@ BOOL CDX11::BindTexture(DWORD dwIndex, ID3D11ShaderResourceView *pTexture,
         // Completed CPU surfaces have an identity without a D3D11 SRV.
         // Reject raw SRVs before changing the previously bound texture.
         if (pTexture || dwIndex >= boundFigureTextures.size()) return FALSE;
-        // Secondary figure/wound bindings still need their owned-surface
-        // submission adapter. Do not acknowledge a texture we cannot retain.
-        if (dwIndex != 0 && surfaceId) return FALSE;
         if (surfaceId && !OwnedRender::E1SurfaceValue(surfaceId)) return FALSE;
         if (dwIndex == 0) boundParticleSurface = surfaceId;
+        else boundSecondarySurface = surfaceId;
         boundFigureTextures[dwIndex].Reset();
         return TRUE;
     }

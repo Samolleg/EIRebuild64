@@ -1,3 +1,22 @@
+# X64D3D12 immediate figure layer ingress, stage 29 (2026-11-11)
+
+The source BindTexture boundary retains the completed secondary CPU surface ID.
+Camp and immediate figure submissions resolve both published surface generations
+and pass them into queue_embedded_figure. Figure scopes retain explicit source
+surface IDs alongside their D3D11 SRVs, preserving the scope texture selection.
+D3D12 uploads through get_native_owned_texture_d3d12, composes both layers with
+the existing embedded figure shader/mip executor and flushes the native draw
+before releasing the temporary texture. Missing publications and pending
+composition fail the draw. Existing D3D11 calls retain their SRV path.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}; this stage
+adds source ingress in Game/dx11 and Game/OwnedRender/CampSubmission.cpp.
+No SDK, DLL, HLSL or rendering algorithm added.
+
+Full BRIEF remains open. Next adapt source fixed-function drawing and remaining
+sprite/SRV consumers, then coordinator build/link and D3D12 startup/FG plus
+D3D11 regression validation. The reported E1Surface NOMINMAX fix was already
+committed in stage 26. No compilation, tests or game execution in this stage.
+
 # X64D3D12 secondary record texture composition, stage 28 (2026-11-11)
 
 queue_embedded_records now resolves both owned surfaces on D3D12 and caches

@@ -1063,7 +1063,9 @@ public:
         const OwnedVisualSurface* secondary, NativeGeometryResult* result);
     HRESULT queue_embedded_figure(const NativeGeometryView& view, const FixedState& state,
         ID3D11ShaderResourceView* primary, ID3D11ShaderResourceView* secondary,
-        const NativeWorldLighting* lighting, const std::vector<RetainedWorldPointLight>& lights);
+        const NativeWorldLighting* lighting, const std::vector<RetainedWorldPointLight>& lights,
+        const OwnedVisualSurface* primarySurface = nullptr,
+        const OwnedVisualSurface* secondarySurface = nullptr);
     HRESULT queue_embedded_wound(const NativeGeometryView& view, const FixedState& state,
         const OwnedVisualSurface& surface, NativeGeometryResult* result);
 #endif

@@ -58,7 +58,13 @@ bool CDX11::SubmitC56CampFigure(const owned::NativeGeometryView& view)
         hr=rendererFacade->Visit([&](owned::Renderer& renderer) {
             HRESULT result=renderer.has_pending_ui()?renderer.flush_ui():S_OK;
             if(SUCCEEDED(result)) {
-                if(boundFigureTextures[1])
+                if(nativeD3D12 && boundSecondarySurface) {
+                    const auto primary=OwnedRender::E1SurfaceValue(boundParticleSurface);
+                    const auto secondary=OwnedRender::E1SurfaceValue(boundSecondarySurface);
+                    if(!secondary || (boundParticleSurface && !primary))return E_INVALIDARG;
+                    result=renderer.queue_embedded_figure(materialView,state,nullptr,nullptr,nullptr,{},
+                        primary.get(),secondary.get());
+                } else if(boundFigureTextures[1])
                     result=renderer.queue_embedded_figure(materialView,state,boundFigureTextures[0].Get(),boundFigureTextures[1].Get(),nullptr,{});
                 else {
                     owned::Renderer::NativeQueueCheckpoint checkpoint;

@@ -70,6 +70,7 @@ private:
     HRESULT c56FigureLastRenderError = S_OK;
     OwnedRendererClient ownedRenderer;
     std::uint64_t boundParticleSurface = 0;
+    std::uint64_t boundSecondarySurface = 0;
     bool ownedWorldActive = false;
     owned::EmbeddedPrintBatch c74Prints;
     owned::FixedState CaptureC74EffectState();

@@ -167,7 +167,9 @@ HRESULT Renderer::queue_embedded_records(const NativePreparedSubmission& submiss
 HRESULT Renderer::queue_embedded_figure(const NativeGeometryView& view,
  const FixedState& state, ID3D11ShaderResourceView* primary,
  ID3D11ShaderResourceView* secondary, const NativeWorldLighting* lighting,
- const std::vector<RetainedWorldPointLight>& lights) {
+ const std::vector<RetainedWorldPointLight>& lights,
+ const OwnedVisualSurface* primarySurface, const OwnedVisualSurface* secondarySurface) {
+ if(d3d12_ && (primary || secondary))return E_INVALIDARG;
  HRESULT hr = has_pending_ui() ? flush_ui() : S_OK;
  if (SUCCEEDED(hr)) hr = flush_native();
  if (FAILED(hr)) return hr;
@@ -186,12 +188,38 @@ HRESULT Renderer::queue_embedded_figure(const NativeGeometryView& view,
  if (lighting && (!set_native_world_lighting(*lighting) ||
      !set_native_point_lights(lights, worldTime))) return E_INVALIDARG;
  ComPtr<ID3D11ShaderResourceView> combined;
- if (primary && secondary) {
+ if (!d3d12_ && primary && secondary) {
   hr=compose_embedded_figure_texture(primary,secondary,combined);
   if(FAILED(hr))return hr;
   primary=combined.Get();
  }
- hr=queue_native_direct(view,state,primary);
+ if(d3d12_) {
+  D3D12TextureRef texture,overlay;
+  std::uint64_t backing=0;
+  if(primarySurface) {
+   NativeOwnedTextureView ownedPrimary{};
+   ownedPrimary.identity=primarySurface->id;
+   ownedPrimary.generation=primarySurface->generation;
+   ownedPrimary.surface=primarySurface;
+   hr=get_native_owned_texture_d3d12(ownedPrimary,texture,backing,nullptr,true);
+   if(FAILED(hr))return hr;
+  }
+  if(primarySurface && secondarySurface) {
+   NativeOwnedTextureView ownedSecondary{};
+   ownedSecondary.identity=secondarySurface->id;
+   ownedSecondary.generation=secondarySurface->generation;
+   ownedSecondary.surface=secondarySurface;
+   hr=get_native_owned_texture_d3d12(ownedSecondary,overlay,backing,nullptr,true);
+   if(FAILED(hr))return hr;
+   D3D12TextureRef composed;
+   hr=compose_embedded_figure_texture_d3d12(texture,overlay,composed);
+   if(hr!=S_OK)return FAILED(hr)?hr:E_PENDING;
+   texture=std::move(composed);
+  }
+  if(texture)hr=queue_native_impl(view,state,nullptr,nullptr,false,nullptr,
+      std::uint64_t(reinterpret_cast<std::uintptr_t>(texture.get())),1,false,0,nullptr,&texture);
+  else hr=queue_native_direct(view,state,nullptr);
+ } else hr=queue_native_direct(view,state,primary);
  if (SUCCEEDED(hr)) hr=flush_native();
  if (FAILED(hr)) discard_native();
  return hr;
