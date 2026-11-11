@@ -210,7 +210,7 @@ HRESULT Renderer::terrain_texture_d3d12(SurfaceImage& image,const TerrainTexture
  // them by surface id and generation).
  const auto record=[&](const D3D12TextureRef& texture,const char* kind)->HRESULT{
   if(!texture)return E_FAIL;
-  entry.generation=image.generation;entry.texture=texture;output=texture;
+  entry.generation=image.generation;entry.texture=texture;entry.surface_alias=texture==image.d3d12;output=texture;
   d3d12_->count(kind);
   return S_OK;
  };

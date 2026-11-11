@@ -5490,7 +5490,7 @@ private:
     // chain when it matches the game surface (as the D3D11 terrain array
     // slice takes it), else the surface's own single level.
     HRESULT terrain_texture_d3d12(SurfaceImage& image, const TerrainTexturePage* page, D3D12TextureRef& output);
-    struct TerrainTextureD3D12 { std::uint64_t generation = 0; D3D12TextureRef texture; };
+    struct TerrainTextureD3D12 { std::uint64_t generation = 0; D3D12TextureRef texture; bool surface_alias = false; };
     std::unordered_map<std::uint64_t, TerrainTextureD3D12> terrain_textures_d3d12_;
     // The active terrain's pages prepared at once on workers (read, parse,
     // texture and upload memory) at its first page miss; each miss then only

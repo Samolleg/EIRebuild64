@@ -983,7 +983,22 @@ HRESULT Renderer::retire_embedded_world(){
 RendererMemoryCounters Renderer::read_memory_counters(){
  const SceneInlineScope scene_inline(this,"memory_snapshot");
  RendererMemoryCounters out;
- out.available=context_!=nullptr;
+ out.available=d3d12_!=nullptr||context_!=nullptr;
+ if(d3d12_){
+  auto bytes=[&](const D3D12BufferRef& buffer)->std::uint64_t{return buffer?d3d12_->buffer_bytes(*buffer):0;};
+  for(const auto& page:native_geometry_pages_)out.geometry+=bytes(page.d3d12);
+  {std::lock_guard<std::mutex> guard(native_owned_textures_lock_);
+   for(const auto& item:native_owned_textures_)if(!item.second.camp_surface_alias&&!item.second.surface_shared)
+    out.textures+=texture_storage_bytes(item.second.d3d12.get());}
+  // Terrain pages have a separate native cache, rather than D3D11 array pages.
+  for(const auto& item:terrain_textures_d3d12_)if(!item.second.surface_alias)out.textures+=texture_storage_bytes(item.second.texture.get());
+  out.animation=bytes(native12_.animation)+bytes(native12_.pose_nodes)+bytes(native12_.pose_inputs);
+  out.world=bytes(native12_.world_vertices)+bytes(native12_.world_states)+bytes(native12_.instances)+bytes(native12_.draws);
+  out.surfaceCpu=g_cpu_surface_bytes.load(std::memory_order_relaxed);
+  out.surfaceGpu=d3d12_surface_bytes();
+  out.neighbours=neighbours_.accepted.size();
+  return out;
+ }
  out.geometry=native_geometry_capacity_bytes();
  {std::lock_guard<std::mutex> guard(native_owned_textures_lock_);
   for(const auto& item:native_owned_textures_)if(!item.second.camp_surface_alias&&!item.second.surface_shared)

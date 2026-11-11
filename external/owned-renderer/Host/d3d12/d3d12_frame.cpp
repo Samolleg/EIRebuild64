@@ -25,6 +25,7 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <cstring>
 #include <fstream>
@@ -62,6 +63,8 @@ struct D3D12ResourceOwner {
     d3d12::Core* core;
 };
 
+namespace { std::atomic<std::uint64_t> surface_texture_bytes{0}; }
+
 struct D3D12Texture {
     std::shared_ptr<D3D12ResourceOwner> owner;
     d3d12::ComPtr<ID3D12Resource> resource;
@@ -89,11 +92,13 @@ struct D3D12Texture {
     std::vector<D3D12_CPU_DESCRIPTOR_HANDLE> level_uavs;
     bool depth_array = false;  // create_depth_array: resource is the depth, dsv the first slice view
     bool written = false;  // a dispatch wrote it as a UAV since its last barrier
+    std::uint64_t surface_bytes = 0;
     D3D12Texture() = default;
     D3D12Texture(const D3D12Texture&) = delete;
     D3D12Texture& operator=(const D3D12Texture&) = delete;
     // Released once the frame being recorded (the last that may read it) finished.
     ~D3D12Texture() {
+        surface_texture_bytes.fetch_sub(surface_bytes, std::memory_order_relaxed);
         if (!owner) return;
         std::lock_guard<std::recursive_mutex> lock(owner->mutex);
         d3d12::Core* core = owner->core;
@@ -120,6 +125,20 @@ struct D3D12Texture {
         if (heap) core->release_later(heap);  // after its placed resource
     }
 };
+
+D3D12TextureShape d3d12_texture_shape(const D3D12Texture& texture) noexcept {
+    return {texture.width, texture.height, texture.mips, texture.slices, texture.format};
+}
+
+void d3d12_account_surface(D3D12Texture& texture, std::uint64_t bytes) noexcept {
+    // Allocation metadata is immutable; marking runs on the renderer thread.
+    if (texture.surface_bytes) return;
+    texture.surface_bytes = bytes;
+    surface_texture_bytes.fetch_add(bytes, std::memory_order_relaxed);
+}
+std::uint64_t d3d12_surface_bytes() noexcept {
+    return surface_texture_bytes.load(std::memory_order_relaxed);
+}
 
 struct D3D12Buffer {
     std::shared_ptr<D3D12ResourceOwner> owner;

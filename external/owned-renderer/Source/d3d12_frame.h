@@ -33,6 +33,15 @@ class OverlayRenderer;  // debug_overlay.h
 struct D3D12Texture;
 struct ProfileTimestamps;  // render_profiler.h
 using D3D12TextureRef = std::shared_ptr<D3D12Texture>;
+// Immutable allocation shape, readable without commands or a live executor.
+struct D3D12TextureShape {
+    UINT width{}, height{}, mips{}, slices{};
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+};
+D3D12TextureShape d3d12_texture_shape(const D3D12Texture& texture) noexcept;
+// Count each live surface allocation once, even when snapshots share it.
+void d3d12_account_surface(D3D12Texture& texture, std::uint64_t bytes) noexcept;
+std::uint64_t d3d12_surface_bytes() noexcept;
 
 // The shared UI programs (renderer_device.cpp kShader and its neighbours).
 enum class D3D12UiProgram : std::uint8_t { game, interface_scaled, interface_text, backdrop, count };

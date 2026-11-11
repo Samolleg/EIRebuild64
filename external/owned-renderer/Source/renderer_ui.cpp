@@ -1824,6 +1824,7 @@ void Capture::run(Renderer& renderer){
    }
   }
   // The zone hit-test frame: its own target, flushed (capture_source's rule).
+  d3d12_account_surface(*entry->d3d12,texture_storage_bytes(entry->d3d12.get()));
   const bool hit_test=renderer.hit_test_active_&&renderer.hit_test12_;
   HRESULT hr=hit_test?renderer.flush_native():renderer.render_pending_blits();
   if(SUCCEEDED(hr))hr=renderer.d3d12_->capture(*entry->d3d12,x,y,RECT{LONG(box_left),LONG(box_top),LONG(box_right),LONG(box_bottom)},

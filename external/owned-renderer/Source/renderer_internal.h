@@ -99,6 +99,13 @@ std::uint64_t texture_storage_bytes(ID3D11Texture2D* texture) noexcept {
 }
 
 
+std::uint64_t texture_storage_bytes(const D3D12Texture* texture) noexcept {
+    if (!texture) return 0;
+    const auto shape = d3d12_texture_shape(*texture);
+    return texture_storage_bytes(shape.width, shape.height, shape.mips, shape.format) *
+           std::max(1u, shape.slices);
+}
+
 using Vertex = FixedFunctionVertex;
 struct Constants {
     D3DMATRIX world,view,projection;
