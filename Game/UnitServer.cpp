@@ -1053,6 +1053,7 @@ void CUnitServer::L1ExecMove()
         }
         path.ClearCalcedPath();
         if(++navigationRejects>1) {
+            pWS->aiMap.Navigation().RejectMovement(lpUnit,from,path.navigationGoal.position);
             GameJournal::Event("NAV","step_replan","unit=%d result=stopped reason=repeated_rejection",lpUnit->GetID());
             L1StopMovement(true);L0Freeze(false);L0StartAnimation(*GetIdleAnimation());return;
         }
@@ -1067,7 +1068,10 @@ void CUnitServer::L1ExecMove()
             Navigation::Location probe;replanned=pWS->aiMap.Navigation().Step(lpUnit,from,next,probe,&path.curSegment.route);break;
         }
         GameJournal::Event("NAV","step_replan","unit=%d result=%s",lpUnit->GetID(),replanned?"ready":"stopped");
-        if(replanned)L1NewPathSegment();else L1StopMovement(true);
+        if(replanned)L1NewPathSegment();else {
+            pWS->aiMap.Navigation().RejectMovement(lpUnit,from,path.navigationGoal.position);
+            L1StopMovement(true);
+        }
         return;
     }
     if(movement.replanned){ShowFoundMovePath(path,true);L1NewPathSegment();return;}

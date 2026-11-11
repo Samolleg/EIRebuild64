@@ -73,11 +73,28 @@ Location Address(const Mesh& m,Point p,dtPolyRef ref,float height,float referenc
         if(!t.terrain)ceilings.push_back(z);
         if(admitted)heights.emplace_back(z,surface);
     }
+    // Remove physically unavailable supports before choosing a floor.
+    heights.erase(std::remove_if(heights.begin(),heights.end(),[&](const auto& at) {
+        if(at.second!=1&&at.first<terrainZ-.015f)return true;
+        for(float upper:ceilings)if(upper>at.first+.001f&&upper-at.first<height)return true;
+        return false;
+    }),heights.end());
+    // Connected source IDs may span a bridge and terrain at its end. Use
+    // local mesh Z only to distinguish competing levels, never as an absolute
+    // admission bound: a lone ground support survives raster/source offsets.
+    // Callers may pass body Z, so obtain mesh Z from the polygon itself.
+    float input[]={p.x,p.y,p.z},closest[3]{};
+    auto* query=observer?observer:m.query.get();
+    float floorZ=0;bool floorKnown=false;
+    if(!heights.empty()&&query&&dtStatusSucceed(query->closestPointOnPoly(ref,input,closest,nullptr))) {
+        const auto floor=std::min_element(heights.begin(),heights.end(),[&](const auto& a,const auto& b) {
+            const float da=std::abs(a.first-closest[1]),db=std::abs(b.first-closest[1]);
+            return da<db||(da==db&&a.second<b.second);
+        });
+        floorZ=floor->first;floorKnown=true;
+    }
     for(const auto& at:heights) {
-        if(at.second!=1&&at.first<terrainZ-.015f)continue;
-        bool covered=false;
-        for(float upper:ceilings)if(upper>at.first+.001f&&upper-at.first<height) {covered=true;break;}
-        if(covered)continue;
+        if(floorKnown&&std::abs(at.first-floorZ)>m.profile.climb+m.profile.cellHeight+.001f)continue;
         const float distance=std::abs(at.first-referenceZ);
         // Coplanar BASE overlaps share one stable address, independent of
         // the queried polygon or traversal direction. Sub-millimetre placement
