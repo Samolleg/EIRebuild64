@@ -1405,6 +1405,7 @@ public:
     HRESULT bind_embedded_targets();
     HRESULT clear_embedded_targets(const float* color, const float* depth);
     HRESULT read_embedded_viewport(D3DVIEWPORT7& viewport);
+    HRESULT read_embedded_output_size(UINT& width, UINT& height);
     bool embedded_hit_test_frame() const noexcept { return hit_test_active_; }
     HRESULT visit_embedded_output(void* user, EmbeddedOutputVisitor visitor) const {
         if (hit_test_failed_) return E_FAIL;

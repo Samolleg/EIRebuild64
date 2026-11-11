@@ -121,14 +121,14 @@ owned::NativeOwnedFixedState CDX11::CaptureOwnedTerrainMaterial()
 {
     auto state = OwnedRender::E1TerrainMaterialState(fake_dx7.render_state,
         GetConstantBuffers()->cb_ps_pixelshader.data.alphaMode);
-    D3D11_VIEWPORT viewport{}; UINT count = 1;
-    deviceContext->RSGetViewports(&count, &viewport);
-    if (count != 1 || viewport.TopLeftX < 0 || viewport.TopLeftY < 0 ||
-        viewport.Width < 1 || viewport.Height < 1) return {};
+    D3DVIEWPORT7 viewport{};
+    if (!rendererFacade || FAILED(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.read_embedded_viewport(viewport);
+    })) || !viewport.dwWidth || !viewport.dwHeight) return {};
     state.replay_frame_state = true;
-    state.captured_viewport = {UINT(viewport.TopLeftX), UINT(viewport.TopLeftY),
-        UINT(viewport.Width), UINT(viewport.Height)};
-    state.captured_depth_range = {viewport.MinDepth, viewport.MaxDepth};
+    state.captured_viewport = {UINT(viewport.dwX), UINT(viewport.dwY),
+        UINT(viewport.dwWidth), UINT(viewport.dwHeight)};
+    state.captured_depth_range = {viewport.dvMinZ, viewport.dvMaxZ};
     const auto fog = owned::bridge_world_fog_snapshot();
     state.captured_fog_enable = theRenderer.IsAddFog() && fog.valid && fog.enabled;
     const auto& color = GetConstantBuffers()->cb_ps_pixelshader.data.fogColor;
@@ -1010,14 +1010,21 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
         ReportError(hr, "Cannot initialize the embedded c56 renderer.");
         throw hr;
     }
-    IfFailedThrowHR(rendererFacade->VisitDevice(this,
-        [](void* user, const owned::EmbeddedDeviceView& view) -> HRESULT {
-            auto& self = *static_cast<CDX11*>(user);
-            self.device = view.device;
-            self.deviceContext = view.context;
-            self.m_width = view.width; self.m_height = view.height;
-            return OwnedRender::E1BindTargets(nullptr, view);
-        }));
+    bool nativeD3D12 = false;
+    IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        nativeD3D12 = renderer.d3d12_backend();
+        return S_OK;
+    }));
+    if (!nativeD3D12) {
+        IfFailedThrowHR(rendererFacade->VisitDevice(this,
+            [](void* user, const owned::EmbeddedDeviceView& view) -> HRESULT {
+                auto& self = *static_cast<CDX11*>(user);
+                self.device = view.device;
+                self.deviceContext = view.context;
+                self.m_width = view.width; self.m_height = view.height;
+                return OwnedRender::E1BindTargets(nullptr, view);
+            }));
+    }
     ownedRenderer.embeddedUi = [this](ID3D11ShaderResourceView* image, const RECT& destination,
                                       const RECT* source, unsigned flags) -> HRESULT {
         if (!rendererFacade) return S_FALSE;
@@ -1025,105 +1032,108 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
             return renderer.blit_srv(image, destination, source, (flags & EI_RENDERER_UI_OPAQUE) != 0);
         });
     };
-    const HRESULT timingAttached = frameTiming.Attach(device.Get(), deviceContext.Get());
+    const HRESULT timingAttached = nativeD3D12 ? S_FALSE : frameTiming.Attach(device.Get(), deviceContext.Get());
     GameJournal::Event("RENDER", "frame_owner",
         "frame=c56 hwnd=%p menu_panels=c56-blit world_terrain=c56 world_figures=c56 game_particles=c56 visfog=c56 fog=c56 triangles=c56 effects=category-migration shadows=c56 timing_gpu=0x%08lX",
         hWnd, static_cast<unsigned long>(timingAttached));
-    IfFailedThrowHR(rendererFacade->VisitOutput(this,
-        [](void* user, ID3D11DeviceContext*, ID3D11Texture2D* output) -> HRESULT {
-            D3D11_TEXTURE2D_DESC desc{}; output->GetDesc(&desc);
-            if (!desc.Width || !desc.Height) return E_INVALIDARG;
-            auto& self = *static_cast<CDX11*>(user);
-            self.m_width = desc.Width; self.m_height = desc.Height;
-            return S_OK;
-        }));
+    IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        UINT width = 0, height = 0;
+        const HRESULT result = renderer.read_embedded_output_size(width, height);
+        if (SUCCEEDED(result)) { m_width = width; m_height = height; }
+        return result;
+    }));
     dwWidth = m_width; dwHeight = m_height;
 
-    // Create Blend State
-    D3D11_RENDER_TARGET_BLEND_DESC rtbd = { 0 };
-    rtbd.BlendEnable = true;
-    // dst (render target), src (pixel shader) pixels
-    // dst.rgb = src.a * src.rgb + (1 - src.a) * dst.rgb
-    rtbd.SrcBlend = D3D11_BLEND::D3D11_BLEND_SRC_ALPHA;
-    rtbd.DestBlend = D3D11_BLEND::D3D11_BLEND_INV_SRC_ALPHA;
-    rtbd.BlendOp = D3D11_BLEND_OP::D3D11_BLEND_OP_ADD;
+    // Native D3D12 submissions translate fixed state inside the renderer.
+    // Legacy state objects and context operations belong to D3D11 only.
+    if (!nativeD3D12) {
+        // Create Blend State
+        D3D11_RENDER_TARGET_BLEND_DESC rtbd = { 0 };
+        rtbd.BlendEnable = true;
+        // dst (render target), src (pixel shader) pixels
+        // dst.rgb = src.a * src.rgb + (1 - src.a) * dst.rgb
+        rtbd.SrcBlend = D3D11_BLEND::D3D11_BLEND_SRC_ALPHA;
+        rtbd.DestBlend = D3D11_BLEND::D3D11_BLEND_INV_SRC_ALPHA;
+        rtbd.BlendOp = D3D11_BLEND_OP::D3D11_BLEND_OP_ADD;
 
-    // dst.a = 1 * src.a + 0 * dst.a;
-    rtbd.SrcBlendAlpha = D3D11_BLEND::D3D11_BLEND_ONE;
-    rtbd.DestBlendAlpha = D3D11_BLEND::D3D11_BLEND_ZERO;
-    rtbd.BlendOpAlpha = D3D11_BLEND_OP::D3D11_BLEND_OP_ADD;
-    rtbd.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE::D3D11_COLOR_WRITE_ENABLE_ALL;
+        // dst.a = 1 * src.a + 0 * dst.a;
+        rtbd.SrcBlendAlpha = D3D11_BLEND::D3D11_BLEND_ONE;
+        rtbd.DestBlendAlpha = D3D11_BLEND::D3D11_BLEND_ZERO;
+        rtbd.BlendOpAlpha = D3D11_BLEND_OP::D3D11_BLEND_OP_ADD;
+        rtbd.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE::D3D11_COLOR_WRITE_ENABLE_ALL;
 
-    D3D11_BLEND_DESC blendDesc = { 0 };
-    blendDesc.RenderTarget[0] = rtbd;
-    IfFailedThrowHR(this->device->CreateBlendState(&blendDesc, this->blendState.GetAddressOf()));
+        D3D11_BLEND_DESC blendDesc = { 0 };
+        blendDesc.RenderTarget[0] = rtbd;
+        IfFailedThrowHR(this->device->CreateBlendState(&blendDesc, this->blendState.GetAddressOf()));
 
-    // Create depth stencil state
-    D3D11_DEPTH_STENCIL_DESC depthstencildesc;
-    ZeroMemory(&depthstencildesc, sizeof(D3D11_DEPTH_STENCIL_DESC));
-    depthstencildesc.DepthEnable = true;
-    depthstencildesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK::D3D11_DEPTH_WRITE_MASK_ALL;
-    depthstencildesc.DepthFunc = G_DEPTH_FUNC;
+        // Create depth stencil state
+        D3D11_DEPTH_STENCIL_DESC depthstencildesc;
+        ZeroMemory(&depthstencildesc, sizeof(D3D11_DEPTH_STENCIL_DESC));
+        depthstencildesc.DepthEnable = true;
+        depthstencildesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK::D3D11_DEPTH_WRITE_MASK_ALL;
+        depthstencildesc.DepthFunc = G_DEPTH_FUNC;
 
-    IfFailedThrowHR(
-        this->device->CreateDepthStencilState(&depthstencildesc, depthStencilState.GetAddressOf()));
+        IfFailedThrowHR(
+            this->device->CreateDepthStencilState(&depthstencildesc, depthStencilState.GetAddressOf()));
 
-    ZeroMemory(&depthstencildesc, sizeof(D3D11_DEPTH_STENCIL_DESC));
-    depthstencildesc.DepthEnable = true;
-    depthstencildesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK::D3D11_DEPTH_WRITE_MASK_ZERO;
-    depthstencildesc.DepthFunc = G_DEPTH_FUNC;
+        ZeroMemory(&depthstencildesc, sizeof(D3D11_DEPTH_STENCIL_DESC));
+        depthstencildesc.DepthEnable = true;
+        depthstencildesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK::D3D11_DEPTH_WRITE_MASK_ZERO;
+        depthstencildesc.DepthFunc = G_DEPTH_FUNC;
 
-    IfFailedThrowHR(
-        this->device->CreateDepthStencilState(&depthstencildesc,
-                                              this->depthStencilStateDisableWrite.GetAddressOf()));
+        IfFailedThrowHR(
+            this->device->CreateDepthStencilState(&depthstencildesc,
+                                                  this->depthStencilStateDisableWrite.GetAddressOf()));
 
-    ZeroMemory(&depthstencildesc, sizeof(D3D11_DEPTH_STENCIL_DESC));
-    depthstencildesc.DepthEnable = true;
-    depthstencildesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK::D3D11_DEPTH_WRITE_MASK_ZERO;
-    depthstencildesc.DepthFunc = D3D11_COMPARISON_FUNC::D3D11_COMPARISON_ALWAYS;
-    IfFailedThrowHR(
-        this->device->CreateDepthStencilState(&depthstencildesc,
-                                              this->depthStencilStateDisable.GetAddressOf()));
+        ZeroMemory(&depthstencildesc, sizeof(D3D11_DEPTH_STENCIL_DESC));
+        depthstencildesc.DepthEnable = true;
+        depthstencildesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK::D3D11_DEPTH_WRITE_MASK_ZERO;
+        depthstencildesc.DepthFunc = D3D11_COMPARISON_FUNC::D3D11_COMPARISON_ALWAYS;
+        IfFailedThrowHR(
+            this->device->CreateDepthStencilState(&depthstencildesc,
+                                                  this->depthStencilStateDisable.GetAddressOf()));
 
-    // Create the Viewport
-    D3D11_VIEWPORT viewport;
-    ZeroMemory(&viewport, sizeof(D3D11_VIEWPORT));
+        // Create the Viewport
+        D3D11_VIEWPORT viewport;
+        ZeroMemory(&viewport, sizeof(D3D11_VIEWPORT));
 
-    viewport.TopLeftX = 0;
-    viewport.TopLeftY = 0;
-    viewport.Width = dwWidth;
-    viewport.Height = dwHeight;
-    viewport.MinDepth = 0.0f;
-    viewport.MaxDepth = 1.0f;
+        viewport.TopLeftX = 0;
+        viewport.TopLeftY = 0;
+        viewport.Width = dwWidth;
+        viewport.Height = dwHeight;
+        viewport.MinDepth = 0.0f;
+        viewport.MaxDepth = 1.0f;
 
-    // Set the Viewport
-    this->deviceContext->RSSetViewports(1, &viewport);
+        // Set the Viewport
+        this->deviceContext->RSSetViewports(1, &viewport);
 
-    // Create Rasterizer State
-    D3D11_RASTERIZER_DESC rasterizerDesc;
-    ZeroMemory(&rasterizerDesc, sizeof(D3D11_RASTERIZER_DESC));
+        // Create Rasterizer State
+        D3D11_RASTERIZER_DESC rasterizerDesc;
+        ZeroMemory(&rasterizerDesc, sizeof(D3D11_RASTERIZER_DESC));
 
-    rasterizerDesc.FillMode = D3D11_FILL_MODE::D3D11_FILL_SOLID;
-    bool ccw = true;
-    rasterizerDesc.FrontCounterClockwise = ccw;
-    rasterizerDesc.CullMode = G_CULL_MODE;
-    IfFailedThrowHR(
-        this->device->CreateRasterizerState(&rasterizerDesc, this->rasterizerState.GetAddressOf()));
+        rasterizerDesc.FillMode = D3D11_FILL_MODE::D3D11_FILL_SOLID;
+        bool ccw = true;
+        rasterizerDesc.FrontCounterClockwise = ccw;
+        rasterizerDesc.CullMode = G_CULL_MODE;
+        IfFailedThrowHR(
+            this->device->CreateRasterizerState(&rasterizerDesc, this->rasterizerState.GetAddressOf()));
 
-    ZeroMemory(&rasterizerDesc, sizeof(D3D11_RASTERIZER_DESC));
-    rasterizerDesc.FillMode = D3D11_FILL_MODE::D3D11_FILL_SOLID;
-    rasterizerDesc.FrontCounterClockwise = ccw;
-    rasterizerDesc.CullMode = D3D11_CULL_MODE::D3D11_CULL_NONE;
-    IfFailedThrowHR(
-        this->device->CreateRasterizerState(&rasterizerDesc,
-                                            this->rasterizerStateNoCull.GetAddressOf()));
+        ZeroMemory(&rasterizerDesc, sizeof(D3D11_RASTERIZER_DESC));
+        rasterizerDesc.FillMode = D3D11_FILL_MODE::D3D11_FILL_SOLID;
+        rasterizerDesc.FrontCounterClockwise = ccw;
+        rasterizerDesc.CullMode = D3D11_CULL_MODE::D3D11_CULL_NONE;
+        IfFailedThrowHR(
+            this->device->CreateRasterizerState(&rasterizerDesc,
+                                                this->rasterizerStateNoCull.GetAddressOf()));
+
+    }
 
     spriteBatch = std::make_unique<OwnedSpriteBatch>(ownedRenderer);
     // spriteBatch->Begin();
     // spriteFont = std::make_unique<DirectX::SpriteFont>(this->device.Get(),
     // L"Data\\comic_sans_ms_16.spritefont"); spriteFont->SetDefaultCharacter(L'Z');
 
-    m_states = std::make_unique<DirectX::CommonStates>(this->device.Get());
+    if (!nativeD3D12) m_states = std::make_unique<DirectX::CommonStates>(this->device.Get());
     return true;
 }
 

@@ -661,6 +661,24 @@ HRESULT Renderer::clear_embedded_targets(const float* color,const float* depth){
  });
 }
 
+HRESULT Renderer::read_embedded_output_size(UINT& width,UINT& height){
+ SCENE_ENTRY("embedded_output_size");
+ width=height=0;
+ if(d3d12_){
+  if(hit_test_failed_)return E_FAIL;
+  width=output_width_;height=output_height_;
+  return width&&height?S_OK:DXGI_ERROR_INVALID_CALL;
+ }
+ struct Size{UINT width=0,height=0;} size;
+ const HRESULT hr=visit_embedded_output(&size,[](void* user,ID3D11DeviceContext*,ID3D11Texture2D* output)->HRESULT{
+  D3D11_TEXTURE2D_DESC desc{};output->GetDesc(&desc);
+  if(!desc.Width||!desc.Height)return E_INVALIDARG;
+  *static_cast<Size*>(user)={desc.Width,desc.Height};return S_OK;
+ });
+ if(SUCCEEDED(hr)){width=size.width;height=size.height;}
+ return hr;
+}
+
 HRESULT Renderer::read_embedded_viewport(D3DVIEWPORT7& viewport){
  SCENE_ENTRY("embedded_read_viewport");
  viewport={};
@@ -673,6 +691,7 @@ HRESULT Renderer::read_embedded_viewport(D3DVIEWPORT7& viewport){
  if(!context_)return DXGI_ERROR_INVALID_CALL;
  D3D11_VIEWPORT value{};UINT count=1;
  context_->RSGetViewports(&count,&value);
+ if(count!=1||value.TopLeftX<0||value.TopLeftY<0||value.Width<1||value.Height<1)return E_INVALIDARG;
  viewport={DWORD(value.TopLeftX),DWORD(value.TopLeftY),DWORD(value.Width),DWORD(value.Height),
   value.MinDepth,value.MaxDepth};
  return S_OK;

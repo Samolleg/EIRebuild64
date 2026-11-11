@@ -1,3 +1,32 @@
+# X64D3D12 source initialization boundary, stage 16 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+CDX11 InitializeDX now queries the actual renderer backend before borrowing
+D3D11 device/context leases, creating legacy states, binding the viewport,
+attaching legacy GPU timing or constructing CommonStates. Those operations
+retain their D3D11 order and are skipped for a native D3D12 renderer. This
+prepares activation; it does not select D3D12 or supply a substitute device.
+The shared sprite frontend remains initialized for either backend.
+
+Renderer::read_embedded_output_size drains scene work and reports native
+output dimensions without a D3D11 output lease. D3D11 still reads the actual
+output texture description. CaptureOwnedTerrainMaterial now uses the same
+renderer-owned viewport boundary as the other source material captures.
+The D3D11 boundary rejects missing, negative or empty viewports before any
+unsigned conversion, retaining the terrain caller's previous rejection.
+No HLSL, rendering algorithms, SDKs, runtime DLLs or pose/SKN changed.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}.
+
+Next adapt the source texture/surface/SRV and capture/screenshot boundaries
+(E1Surface, E1SurfaceBridge, dx11 texture/sprite adapters). SetRenderStates
+and remaining context-based source submissions also need native dispatch;
+skipping startup states alone is insufficient. Then latch renderer_backend
+before device creation, call ensure_embedded_d3d12, enable readiness and
+local simulation/render boundaries with world/SR/FG/present dispatch and
+explicit runtime/removal errors. Full BRIEF remains open.
+No compilation, shader compilation, tests or game run was performed.
+Build/link, D3D11 regression and D3D12 GPU behavior remain unverified.
+
 # X64D3D12 embedded target operations, stage 15 (2026-11-11)
 
 Incomplete runtime integration. renderer_backend=1 still creates D3D11.
