@@ -8,6 +8,7 @@
 #include <array>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <map>
 #include <mutex>
 #include <set>
@@ -321,7 +322,8 @@ Archive::Archive(const fs::path &path)
             cursor += static_cast<size_t>(nameSize);
             Require(Normalize(e.name) == e.name && (previous.empty() || previous < e.name),
                     "noncanonical or duplicate PAK name");
-            Require(e.method <= 1 && e.size && e.size <= UINT32_MAX && e.stored &&
+            Require(e.method <= 1 && e.size <= UINT32_MAX &&
+                        (e.size ? e.stored != 0 : e.method == 0 && e.stored == 0) &&
                         e.offset == Align(dataEnd) && e.offset <= toc &&
                         e.stored <= toc - e.offset && (e.method || e.stored == e.size),
                     "invalid PAK data bounds/method");
@@ -390,7 +392,7 @@ void Pack(const fs::path &directory, const fs::path &output, const fs::path &cac
                 continue;
             auto name = ResourceName(file.path().lexically_relative(source).string());
             const auto size = file.file_size();
-            Require(size && size <= UINT32_MAX, "empty or oversized file");
+            Require(size <= UINT32_MAX, "oversized file");
             Require(inputs.emplace(name, file.path()).second, "case-insensitive duplicate");
         }
         catch (const std::exception &e)
@@ -412,12 +414,14 @@ void Pack(const fs::path &directory, const fs::path &output, const fs::path &cac
     for (const auto &item : inputs)
     {
         auto bytes = ReadFile(item.second);
-        Require(!bytes.empty() && bytes.size() <= UINT32_MAX, "input changed size during packing");
+        Require(bytes.size() <= UINT32_MAX, "input changed size during packing");
+        if (bytes.empty())
+            std::cerr << "warning: empty file: " << item.first << '\n';
         Entry e;
         e.name = item.first;
         e.size = bytes.size();
         e.hash = Hash(bytes);
-        e.method = Stored(bytes) ? 0 : 1;
+        e.method = bytes.empty() || Stored(bytes) ? 0 : 1;
         Bytes payload;
         if (e.method)
         {

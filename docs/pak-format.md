@@ -39,7 +39,9 @@ Each record contains the following fixed fields, followed immediately by its nam
 Records are strictly sorted by normalized byte name. Duplicate names, overlapping
 payloads, unknown methods, nonzero reserved fields and invalid ranges are rejected.
 Original sizes are limited to UINT32_MAX by existing game resource APIs. Empty
-input files are rejected by the pack command.
+input files are valid: method 0, both sizes zero, and XXH64 of empty bytes
+(seed 0, 0xef46db3751d8e999). The pack command lists them as warnings and
+returns success. Zero-length payloads may share the next aligned offset.
 
 XXH64 provides a fast corruption check consistent with the measured decompression
 throughput. It is bundled with zstd, so the format needs one local dependency.
