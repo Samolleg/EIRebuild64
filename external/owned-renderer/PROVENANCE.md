@@ -1,3 +1,29 @@
+# X64D3D12 map/effect cache retirement, stage 10 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+Embedded release() now retires ambient and ground-cover device owners through
+release_ground_cover/release_ambient_world after the final native flush.
+This also invalidates the same-map CPU identity gates, joins cover shader
+preparation and releases active/neighbour contact maps and terrain2 heights.
+The remaining cover terrain2 class/color resources, terrain2 frame table,
+cache parameter buffer, snow surface and their validity/revision gates are
+cleared locally. Liquid maps/waves retire after their workers have joined;
+the existing generation/serial gates force uploads on a replacement device.
+Saved loading pictures and their hold state retire at this boundary too.
+The executor stays alive. These additions run only in the embedded D3D12
+release branch. No HLSL, rendering algorithms, SDKs or DLLs changed here.
+
+Remaining lifetime work includes external SurfaceImage/snapshot reuse,
+core surface tables, impostor/device caches and any remaining subsystem
+owners. External textures can survive teardown for release, but the current
+surface upload fast paths still lack a replacement-device ownership check.
+Resolve those before executor shutdown and backend activation. Then bind
+startup configuration, backend/overlay, local simulation/render boundaries
+and world/present dispatch, with explicit startup/device-removal failures.
+Full BRIEF remains open. No compilation, shader compilation, tests or game
+run was performed. Build/link and GPU behavior remain unverified.
+Earlier sections record the preceding stages.
+
 # X64D3D12 native resource retirement, stage 9 (2026-11-11)
 
 Incomplete runtime integration: renderer_backend=1 still creates D3D11.

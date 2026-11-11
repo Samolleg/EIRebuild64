@@ -3426,6 +3426,28 @@ void Renderer::release() {
   // The final native flush and pose/instance retirement above have finished.
   // Drop persistent and frame buffers, including ready/failed and upload
   // revisions: no native resource can be adopted by a replacement executor.
+  // Map producers and their device caches must retire after the last draw.
+  // Reuse the world release to invalidate the same-map fast path as well.
+  release_ground_cover();
+  release_ambient_world();
+  ambient12_={};
+  gc_t2_cell_class12_.reset();gc_t2_classes12_.reset();gc_t2_color12_.reset();
+  gc_t2_programs12_.clear();
+  gc_t2_cell_class_srv_.Reset();gc_t2_tile_classes_.clear();gc_t2_rows_generation_=0;
+  terrain2_table12_={};terrain2_table_={};terrain2_table_count_=0;
+  terrain2_records_first_=0;terrain2_table_full_logged_=false;
+  terrain2_cache_params12_.reset();
+  terrain2_cache_programs12_.clear();terrain2_bake12_programs_.clear();
+  snow_surface12_.reset();snow_surface_key_=0;snow_surface12_program_.clear();
+  // The liquid workers have joined above. Their upload/null checks must
+  // see an empty owner even if the next device draws the same source map.
+  liquid12_={};
+  liquid_swamp_frame_generation_=UINT64_MAX;liquid_surf_built_serial_=0;
+  liquid_wave_current_=0;
+  // A saved loading picture cannot be copied by a replacement executor.
+  load_picture12_.reset();
+  load_picture_this_frame_=load_picture_fitted_=false;
+  load_reveal_tracking_=load_reveal_holding_=false;
   native12_={};
   terrain_textures_d3d12_.clear();terrain_pages_d3d12_={};
   native_terrain_frame_d3d12_.clear();
