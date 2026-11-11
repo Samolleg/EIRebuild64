@@ -2091,10 +2091,12 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  d3d12_->set_resource(19,native12_.layer_shifts.get());
  d3d12_->set_resource(127,native12_.terrain_frame.get());
  d3d12_->set_unordered(6,native12_.world_states.get());
+ const bool capture_lod=begin_native_lod_capture(layout);
+ d3d12_->set_unordered(4,capture_lod?native_lod_observations12_.get():nullptr);
  for(const auto& range:layout.dispatches){
   if(range.geometry_page>=native_geometry_pages_.size()||!native_geometry_pages_[range.geometry_page].d3d12)return E_FAIL;
   d3d12_->set_resource(1,native_geometry_pages_[range.geometry_page].d3d12.get());
-  const std::array<UINT,4> work_range{range.first,range.count,0,0};
+  const std::array<UINT,4> work_range{range.first,range.count,capture_lod?1u:0u,0};
   d3d12_->set_constants(4,work_range.data(),sizeof(work_range));
   UINT width=0,height=0;
   if(!native_dispatch_dimensions(range.count,width,height))return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);

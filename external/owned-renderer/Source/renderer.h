@@ -4262,7 +4262,9 @@ private:
     ComPtr<ID3D11ComputeShader> native_build_cs_;
     ComPtr<ID3D11Buffer> native_lod_observations_;
     ComPtr<ID3D11UnorderedAccessView> native_lod_observation_uav_;
+    D3D12BufferRef native_lod_observations12_;
     struct NativeLodReadback {
+        std::uint64_t ticket12 = 0;
         ComPtr<ID3D11Buffer> buffer;
         std::shared_ptr<NativeLodSnapshot> snapshot;
     };

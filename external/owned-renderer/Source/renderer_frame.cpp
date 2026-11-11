@@ -1706,6 +1706,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
   const auto cutout_scope=cutout_shadow_scope_snapshot();
   profiler_.request_capture_next(bridge_latest_profile(),&capture_resources,&cutout_scope);
  }
+ finish_native_lod_frame();
  // Loading screens: the game's own pictures draw (present_image); the load
  // reveal keeps the last one and holds it over world frames until the world
  // and its neighbours are prepared (apply_load_reveal, as on D3D11).
