@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "SaveSlot.h"
+#include "SaveModIdentity.h"
 #include "ModEncounter.h"
 #include "ModArena.h"
 #include "ZoneIce.h"
@@ -714,7 +715,7 @@ bool Slot::Presentation(const char *name,SSaveSlotDesc &desc,Bytes *shot)
         CheckedName(name);auto bytes=ReadFile(Directory()+name+CString("\\slot.sav"));
         CMemorySave f;Buffer(f,bytes);Registry reg;Bytes info,image;
         auto graph=SaveSchema::Load(f,reg,[&](Reader &r){
-            if(r.String()!="EIRebuild64.slot.3")Invalid("unsupported slot root");
+            if(!SaveModIdentity::CurrentEnvelope(r.String()))Invalid("unsupported slot root");
             r.UInt64();r.String();r.String();r.UInt64();r.Blob();info=r.Blob();image=r.Blob();
         },SlotLimits());
         CMemorySave metadata;Buffer(metadata,info);auto g=SaveSchema::Load(metadata,reg,[&](Reader &r){
@@ -764,8 +765,8 @@ bool Slot::Save(const char *name)
         }
         FILETIME time;GetSystemTimeAsFileTime(&time);const std::uint64_t generation=(std::uint64_t(time.dwHighDateTime)<<32)|time.dwLowDateTime;
         CMemorySave envelope;Registry meta;
-        SaveSchema::Store(envelope,meta,[&](Writer &w){w.String("EIRebuild64.slot.3");w.UInt64(generation);
-            auto *mod=ModRuntime::Current();if(!mod)Invalid("slot requires loaded mod");w.String(mod->Directory());w.String(current);
+        SaveSchema::Store(envelope,meta,[&](Writer &w){w.String(SaveModIdentity::SlotRoot);w.UInt64(generation);
+            auto *mod=ModRuntime::Current();if(!mod)Invalid("slot requires loaded mod");w.String(mod->SaveIdentity());w.String(current);
             w.UInt64(Content(payload));w.Blob(payload);w.Blob(presentation);w.Blob(screenshot);
         },SlotLimits());
         std::filesystem::create_directories(std::filesystem::path((LPCSTR)Directory())/name);
@@ -782,8 +783,8 @@ bool Slot::Load(const char *name)
         CheckedName(name);const auto bytes=ReadFile(Directory()+name+CString("\\slot.sav"));
         auto state=std::make_unique<State>();state->fullSlot=true;Bytes payload;Registry meta;CMemorySave f;Buffer(f,bytes);
         auto envelope=SaveSchema::Load(f,meta,[&](Reader &r){
-            if(r.String()!="EIRebuild64.slot.3")throw Error(ErrorCode::Incompatible,"Incompatible save");
-            if(!r.UInt64())Invalid("invalid slot generation");auto mod=r.String();if(!ModRuntime::Current()||mod!=ModRuntime::Current()->Directory())Invalid("slot belongs to another mod");
+            if(!SaveModIdentity::CurrentEnvelope(r.String()))throw Error(ErrorCode::Incompatible,"Incompatible save");
+            if(!r.UInt64())Invalid("invalid slot generation");auto mod=r.String();if(!ModRuntime::Current()||!SaveModIdentity::BelongsTo(mod,ModRuntime::Current()->SaveIdentity()))Invalid("slot belongs to another mod");
             state->current=r.String();CheckedName(state->current.c_str());const auto content=r.UInt64();payload=r.Blob();
             if(Content(payload)!=content)Invalid("slot content mismatch");r.Blob();r.Blob();
         },SlotLimits());

@@ -39,7 +39,7 @@ public:
     virtual ~CMappedResource();
     //
     virtual BOOL OpenResource(LPCSTR pszFileName, BOOL bWriteAccess = FALSE);
-    virtual BOOL OpenResourceMem(LPVOID pBaseAddress);
+    virtual BOOL OpenResourceMem(LPVOID pBaseAddress, std::size_t bytes);
     virtual void CloseResource();
     virtual void Flush() {}
     //
@@ -61,7 +61,7 @@ public:
 
     // Открывает ресурсный файл, для информации по pAccelTable см. CResourceBase.h
     virtual BOOL OpenResource(LPCSTR pszFileName, BOOL bWriteAccess = FALSE);
-    virtual BOOL OpenResourceMem(LPVOID pBaseAddress);
+    virtual BOOL OpenResourceMem(LPVOID pBaseAddress, std::size_t bytes);
     virtual void CloseResource();
     virtual void Flush(); // flush written data if opened with write access
 

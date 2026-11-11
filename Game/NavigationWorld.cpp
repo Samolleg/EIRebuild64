@@ -697,8 +697,7 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
     const auto previousFailure=cacheFailure?failedQueries.find(unit->GetID()):failedQueries.end();
     if(previousFailure!=failedQueries.end()) {
         for(const auto& saved:previousFailure->second)
-        if(GetTickCount64()<saved.after&&saved.generation==mesh->generation&&saved.profile==Type(unit,aiClass)&&
-           saved.aiClass==aiClass&&saved.height==request.height&&saved.policy==goalPolicy&&Distance(saved.goal,goal)<=1.f&&Distance(saved.source,from)<=1.f) {
+        if(saved.Matches(request,GetTickCount64(),mesh->generation,observerRevision,Type(unit,aiClass),aiClass)) {
             Navigation::Route refused;refused.status=saved.status;return refused;
         }
     }
@@ -725,14 +724,15 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
         request.sliced=&job.search;request.frameBudgetMs=&pathBudgetMs;
     }
     auto route=Navigation::Find(*mesh,request);
-    if(sliced&&route.status!=Status::Updating)pathSearches.erase(unit->GetID());
     if(route.status==Status::Updating)return route;
     if(cacheFailure) {
         auto& failures=failedQueries[unit->GetID()];const auto now=GetTickCount64();
-        failures.erase(std::remove_if(failures.begin(),failures.end(),[&](const FailedQuery& f){return f.after<=now||f.generation!=mesh->generation;}),failures.end());
-        if(route.status==Status::NoGoal||route.status==Status::NoPath||route.status==Status::Limit||route.status==Status::TooLong)
-            failures.push_back({from,goal,now+1500,mesh->generation,Type(unit,aiClass),aiClass,request.height,maxLength,goalRadius,goalPolicy,route.status});
+        failures.erase(std::remove_if(failures.begin(),failures.end(),[&](const FailedQuery& f){return f.after<=now||f.generation!=mesh->generation||f.revision!=observerRevision;}),failures.end());
+        if(FailedQuery::Cacheable(route.status))
+            failures.emplace_back(request,now+1500,mesh->generation,observerRevision,Type(unit,aiClass),aiClass,route.status);
     }
+    // Snapshot cache inputs before releasing the sliced job's owned supports.
+    if(sliced)pathSearches.erase(unit->GetID());
     if(route.status==Status::Complete&&!boundary.Route(route,from)){
         route.status=Status::NoPath;route.points.clear();route.corridor.clear();return route;
     }
@@ -748,8 +748,8 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
         }
     }
     if(remember) {
-        if((route.status==Status::Complete&&route.goalStatus!=Status::Complete&&!route.points.empty())||
-           route.status==Status::NoGoal||route.status==Status::NoPath) {
+        // Failed requests belong only to the fully keyed, expiring failure cache.
+        if(route.status==Status::Complete&&route.goalStatus!=Status::Complete&&!route.points.empty()) {
             GroundGoal saved;saved.requested=goal;saved.source=from;
             if(!route.points.empty())saved.endpoint=route.points.back();
             saved.generation=generation;saved.profile=Type(unit,unit->GetAIClass());

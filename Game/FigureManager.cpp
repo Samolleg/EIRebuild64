@@ -88,21 +88,19 @@ CModelResourceEntry::~CModelResourceEntry()
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CModelResourceEntry::OpenModelResources(BYTE *pModel, BYTE *pBones, BYTE *pAnimations,
-    DWORD animationSize)
+bool CModelResourceEntry::OpenModelResources(BYTE *pModel, DWORD modelSize,
+    BYTE *pBones, DWORD bonesSize, BYTE *pAnimations, DWORD animationSize)
 {
-    if (pModel)
-        pResModel->OpenResourceMem(pModel);
-    if (pBones)
-        pResBones->OpenResourceMem(pBones);
-    if (pAnimations)
-        pResAllAnimations->OpenResourceMem(pAnimations);
+    // Own the provider references before any child can reject its bytes.
     pModelFile = pModel;
     pBonesFile = pBones;
     pAnimsFile = pAnimations;
     pAnimsFileSize = animationSize;
+    return (!pModel || pResModel->OpenResourceMem(pModel, modelSize)) &&
+           (!pBones || pResBones->OpenResourceMem(pBones, bonesSize)) &&
+           (!pAnimations || pResAllAnimations->OpenResourceMem(pAnimations, animationSize));
 }
-/////////////////////////////////////////////////////////////////////////////////////
+//---------------------------------------------------------------------------
 CMappedResource *CModelResourceEntry::GetAnimation(const std::string &szName)
 {
     auto pos = resAnimations.find(szName);
@@ -112,8 +110,12 @@ CMappedResource *CModelResourceEntry::GetAnimation(const std::string &szName)
         BYTE *pData = pResAllAnimations->GetFile(szName.c_str(), &dataSize);
         if (pData)
         {
-            resAnimations[szName] = dbgnew CWin32MappedResource();
-            resAnimations[szName]->OpenResourceMem(pData);
+            auto archive = std::make_unique<CWin32MappedResource>();
+            if (!archive->OpenResourceMem(pData, dataSize)) {
+                pResAllAnimations->CloseFile(pData);
+                return nullptr;
+            }
+            resAnimations[szName] = archive.release();
             animationSources.emplace(szName, std::make_pair(pData, dataSize));
         }
         pos = resAnimations.find(szName);
@@ -220,17 +222,11 @@ CModelResourceEntry *CFigureManager::GetModel(const std::string &szName)
     auto pos = models.find(szName);
     if (pos == models.end())
     {
-        char buff[512];
-        strcpy(buff, szName.c_str());
-        strcat(buff, ".mod");
-        BYTE *pModel = GetFile(buff);
-        strcpy(buff, szName.c_str());
-        strcat(buff, ".bon");
-        BYTE *pBones = GetFile(buff);
-        strcpy(buff, szName.c_str());
-        strcat(buff, ".anm");
+        DWORD modelSize = 0, bonesSize = 0;
+        BYTE *pModel = GetFile((szName + ".mod").c_str(), &modelSize);
+        BYTE *pBones = GetFile((szName + ".bon").c_str(), &bonesSize);
         DWORD animationSize = 0;
-        BYTE *pAnims = GetFile(buff, &animationSize);
+        BYTE *pAnims = GetFile((szName + ".anm").c_str(), &animationSize);
         // DejaVu shares these species clips under their canonical animation mask.
         if (!pAnims && (!_stricmp(szName.c_str(), "unmoog1") ||
                         !_stricmp(szName.c_str(), "unmoog2")))
@@ -240,7 +236,10 @@ CModelResourceEntry *CFigureManager::GetModel(const std::string &szName)
         if (pModel) // we need at rest a model to open resource (bones and animations are optional)
         {
             models[szName] = dbgnew CModelResourceEntry(this);
-            models[szName]->OpenModelResources(pModel, pBones, pAnims, animationSize);
+            if (!models[szName]->OpenModelResources(pModel, modelSize, pBones, bonesSize, pAnims, animationSize)) {
+                models.erase(szName);
+                return nullptr;
+            }
             pos = models.find(szName);
         }
     }
