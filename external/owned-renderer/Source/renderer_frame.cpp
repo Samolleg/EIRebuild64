@@ -19,6 +19,7 @@
 #include "native_shader.h"
 #include "owned_terrain_decode.h"
 #include "renderer.h"
+#include "gamma_shader_programs.h"
 #include "graphics_settings.h"
 #include "ui_language.h"
 #include "game_focus.h"
@@ -55,6 +56,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <iterator>
 #include <thread>
@@ -382,7 +384,7 @@ HRESULT Renderer::composite_world(){
  if(scene_queue()){scene_native_pending_=false;scene_post_command(scene_cmd::CompositeWorld{});return S_OK;}
  if(hit_test_active_)return S_OK; // the zone hit-test frame is never composited (#200)
  if(scene_composited_)return S_OK;
-#ifndef EID3D11_EMBEDDED
+#if !defined(EID3D11_SHADER_EMBED)
  if(d3d12_)return composite_world_d3d12();
 #endif
  const auto checked=[&](const char* operation,auto&& work)->HRESULT{
@@ -588,7 +590,14 @@ HRESULT Renderer::resize(UINT w,UINT h){if(core_mode_)return core_resize(w,h);SC
  w=std::max(1u,w);h=std::max(1u,h);
  if(w==old_w && h==old_h)return S_OK;
  if(d3d12_){
-  const HRESULT hr=d3d12_->resize(w,h);if(FAILED(hr))return hr;
+  const HRESULT hr=d3d12_->resize(w,h);
+  if(FAILED(hr)){
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+   return fail_embedded_d3d12("resize",hr,embedded_d3d12_.failure());
+#else
+   return hr;
+#endif
+  }
   output_width_=w;output_height_=h;set_world_size();camp_inventory_output(canvas_width(),canvas_height());return S_OK;
  }
  if(!device_){output_width_=w;output_height_=h;return S_OK;}
@@ -612,6 +621,111 @@ HRESULT Renderer::resize(UINT w,UINT h){if(core_mode_)return core_resize(w,h);SC
   return hr;
  }
  camp_inventory_output(canvas_width(),canvas_height());return S_OK;
+}
+
+HRESULT Renderer::bind_embedded_targets(){
+ SCENE_ENTRY("embedded_bind_targets");
+ if(d3d12_){
+  // Native draws bind their own targets. Rebinding here would lose a popup,
+  // hit-test target or the world's motion/history attachments.
+  return S_OK;
+ }
+ return visit_embedded_device(nullptr,[](void*,const EmbeddedDeviceView& view)->HRESULT{
+  view.context->OMSetRenderTargets(1,&view.color,view.depth);
+  const D3D11_VIEWPORT viewport{0,0,float(view.width),float(view.height),0,1};
+  view.context->RSSetViewports(1,&viewport);
+  return S_OK;
+ });
+}
+HRESULT Renderer::clear_embedded_targets(const float* color,const float* depth){
+ SCENE_ENTRY("embedded_clear_targets");
+ if(!color&&!depth)return E_INVALIDARG;
+ if(d3d12_){
+  // clear() alone only updates the pre-draw output background. An explicit
+  // rectangle clears after draws too and preserves a custom offscreen depth
+  // value (clear_target uses 1.0). Do not run legacy Clear's world composite.
+  if(color)d3d12_->clear(color);
+  // The executor clips against the actual target (including popup/hit-test
+  // sizes), rather than assuming the world's current render scale.
+  const RECT rectangle{0,0,LONG_MAX,LONG_MAX};
+  d3d12_->clear_rectangles(&rectangle,1,color,depth!=nullptr,depth!=nullptr,
+   depth?*depth:1.f,0);
+ #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+  if(embedded_d3d12_.frame()==d3d12_){
+   const char* reason=embedded_d3d12_.failure();
+   if(reason&&*reason)return fail_embedded_d3d12("clear targets",E_FAIL,reason);
+  }
+ #endif
+  return S_OK;
+ }
+ struct Values{const float* color;const float* depth;} values{color,depth};
+ return visit_embedded_device(&values,[](void* user,const EmbeddedDeviceView& view)->HRESULT{
+  const auto& values=*static_cast<const Values*>(user);
+  if(values.color)view.context->ClearRenderTargetView(view.color,values.color);
+  if(values.depth)view.context->ClearDepthStencilView(view.depth,
+   D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,*values.depth,0);
+  return S_OK;
+ });
+}
+
+HRESULT Renderer::read_embedded_output_size(UINT& width,UINT& height){
+ SCENE_ENTRY("embedded_output_size");
+ width=height=0;
+ if(d3d12_){
+  if(hit_test_failed_)return E_FAIL;
+  width=output_width_;height=output_height_;
+  return width&&height?S_OK:DXGI_ERROR_INVALID_CALL;
+ }
+ struct Size{UINT width=0,height=0;} size;
+ const HRESULT hr=visit_embedded_output(&size,[](void* user,ID3D11DeviceContext*,ID3D11Texture2D* output)->HRESULT{
+  D3D11_TEXTURE2D_DESC desc{};output->GetDesc(&desc);
+  if(!desc.Width||!desc.Height)return E_INVALIDARG;
+  *static_cast<Size*>(user)={desc.Width,desc.Height};return S_OK;
+ });
+ if(SUCCEEDED(hr)){width=size.width;height=size.height;}
+ return hr;
+}
+
+HRESULT Renderer::read_embedded_d3d12_output(std::vector<std::uint8_t>& pixels,UINT& width,UINT& height){
+ SCENE_ENTRY("embedded_native_output_readback");
+ pixels.clear();width=height=0;
+ if(!d3d12_)return DXGI_ERROR_INVALID_CALL;
+ if(hit_test_failed_)return E_FAIL;
+ try{
+  // Drain frontend batches before the executor records its copy. Hit tests
+  // read their private target, just like the D3D11 output lease.
+  HRESULT hr=has_pending_ui()?flush_ui():S_OK;
+  if(SUCCEEDED(hr))hr=flush_native();
+  if(FAILED(hr))return hr;
+  std::vector<std::uint8_t> captured;UINT w=0,h=0;
+  if(hit_test_active_){
+   if(!hit_test12_)return DXGI_ERROR_INVALID_CALL;
+   hr=d3d12_->read_texture(*hit_test12_,captured,w,h);
+  }else hr=d3d12_->read_back_buffer(captured,w,h);
+  if(hr!=S_OK)return hr;
+  const std::size_t row=std::size_t(w)*4u;
+  if(!w||!h||row/4u!=w||row>SIZE_MAX/h||captured.size()!=row*h)return E_FAIL;
+  pixels=std::move(captured);width=w;height=h;
+  return S_OK;
+ }catch(...){return E_OUTOFMEMORY;}
+}
+
+HRESULT Renderer::read_embedded_viewport(D3DVIEWPORT7& viewport){
+ SCENE_ENTRY("embedded_read_viewport");
+ viewport={};
+ if(d3d12_){
+  // Embedded native submissions use the renderer's world/UI pixel space;
+  // projection jitter remains in the camera, never in the viewport origin.
+  viewport={0,0,target_width(),target_height(),0.f,1.f};
+  return viewport.dwWidth&&viewport.dwHeight?S_OK:DXGI_ERROR_INVALID_CALL;
+ }
+ if(!context_)return DXGI_ERROR_INVALID_CALL;
+ D3D11_VIEWPORT value{};UINT count=1;
+ context_->RSGetViewports(&count,&value);
+ if(count!=1||value.TopLeftX<0||value.TopLeftY<0||value.Width<1||value.Height<1)return E_INVALIDARG;
+ viewport={DWORD(value.TopLeftX),DWORD(value.TopLeftY),DWORD(value.Width),DWORD(value.Height),
+  value.MinDepth,value.MaxDepth};
+ return S_OK;
 }
 
 HRESULT Renderer::clear(DWORD rectangle_count,const D3DRECT* rectangles,DWORD flags,D3DCOLOR color,float z,DWORD stencil){
@@ -885,6 +999,21 @@ RendererMemoryCounters Renderer::read_memory_counters(){
  out.neighbours=neighbours_.accepted.size();
  return out;
 }
+HRESULT Renderer::begin_embedded_simulation(){
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ if(!d3d12_)return S_FALSE;
+ if(embedded_d3d12_failed_)return E_FAIL;
+ return embedded_d3d12_.begin_simulation(configured_integer(debug_overlay_.config(),"reflex",0));
+#else
+ return S_FALSE;
+#endif
+}
+void Renderer::finish_embedded_frame(){
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ if(d3d12_)embedded_d3d12_.finish_render();
+#endif
+}
+
 HRESULT Renderer::begin_engine_frame(){
  // The world epoch is read here, on the game thread, once. A new epoch
  // releases world state on both sides (release_world_state with the bridge's
@@ -932,10 +1061,16 @@ HRESULT Renderer::begin_engine_frame_at(std::uint64_t world_epoch){
  // the following engine frame. Normal map Draw consumes these itself.
  discard_world_map_markers();
  if(d3d12_){
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+  if(embedded_d3d12_failed_)return E_FAIL;
+  const HRESULT phase=embedded_d3d12_.begin_render(configured_integer(debug_overlay_.config(),"reflex",0));
+  if(FAILED(phase))return fail_embedded_d3d12("begin render phase",phase,embedded_d3d12_.failure());
+#endif
   // D3D12 backend: the previous invocation's UI, then a new frame index for
   // the UI's per-frame bookkeeping and the world target bound (as rtv_/dsv_
   // are on D3D11) until the composite.
-  const HRESULT hr=SUCCEEDED(flush_native())?render_pending_blits():E_FAIL;
+  HRESULT hr=flush_native();
+  if(SUCCEEDED(hr))hr=render_pending_blits();
   // The first engine frame of a new world: a clean slate (as on D3D11).
   if(SUCCEEDED(hr)&&world_epoch&&world_epoch!=world_state_epoch_&&native_pending_draws_.empty()){world_state_epoch_=world_epoch;release_world_state();dlss_reset_=true;}
   // Ground marks of an engine frame that was never composited go, as at
@@ -967,7 +1102,7 @@ HRESULT Renderer::begin_engine_frame_at(std::uint64_t world_epoch){
  return S_OK;
 }
 void Renderer::begin_scene(){
- if(!device_&&!core_mode_)return;
+ if(!ready())return;
  begin_scene_game();
  if(scene_queue()){scene_post_command(scene_cmd::BeginScene{});return;}
  begin_scene_renderer();
@@ -1291,35 +1426,6 @@ void Renderer::report_scene_failure(const char* operation,HRESULT hr) noexcept{
  char detail[160];std::snprintf(detail,sizeof(detail),"operation=%s hr=%08lx count=%u",operation,static_cast<unsigned long>(hr),count);
  bridge_report_event("render_thread_command_failed",detail);
 }
-namespace {
-
-// The game's gamma ramp (game.exe 00504A60 builds it from the brightness,
-// contrast and gamma options and hands it to IDirectDrawGammaControl). A
-// display ramp maps the 8-bit value i to ramp[i] >> 8, so the game's neutral
-// ramp, i * 256, is the identity. Applied to the whole finished frame, cursor
-// included, as the hardware ramp was; captures and harness screenshots are
-// taken before it, as screen reads were.
-constexpr char kGammaShader[] = R"(
-Texture2D<float4> gammaFrame:register(t0);
-Texture2D<float4> gammaLut:register(t1); // 256x1: rgb = each channel's ramp
-SamplerState gammaSampler:register(s0);  // linear clamp
-float4 gammaVS(uint id:SV_VertexID):SV_Position{float2 uv=float2((id<<1)&2,id&2);return float4(uv.x*2-1,1-uv.y*2,0,1);}
-float4 gammaPS(float4 position:SV_Position):SV_Target{
- float4 color=gammaFrame.Load(int3(position.xy,0));
- float3 at=(saturate(color.rgb)*255+.5)/256;
- return float4(gammaLut.SampleLevel(gammaSampler,float2(at.r,.5),0).r,gammaLut.SampleLevel(gammaSampler,float2(at.g,.5),0).g,
-               gammaLut.SampleLevel(gammaSampler,float2(at.b,.5),0).b,color.a);
-}
-)";
-}  // namespace
-
-// gammaVS, gammaPS: apply_gamma_ramp's programs, and the D3D12 backend's
-// (append_d3d12_shader_programs puts them in the host's DXIL table).
-void append_gamma_shader_programs(std::vector<ShaderProgram>& out){
- out.push_back({{kGammaShader,sizeof(kGammaShader)-1},nullptr,nullptr,"gammaVS","vs_4_0",0});
- out.push_back({{kGammaShader,sizeof(kGammaShader)-1},nullptr,nullptr,"gammaPS","ps_4_0",0});
-}
-
 void Renderer::set_gamma_ramp(const WORD* red,const WORD* green,const WORD* blue) noexcept{
  if(!red||!green||!blue)return;
  std::lock_guard<std::mutex> lock(gamma_lock_);
@@ -1418,13 +1524,17 @@ void Renderer::update_status_notice(const char* reset_notice){
 #endif
 }
 
-// x64 host, renderer_backend=d3d12 (M1a): the menu frame on the D3D12
-// executor. The UI, cursor, F10 overlay and present run here; the world,
-// HUD frames, debug views, gamma, the harness and the profiler are not on
-// this backend yet and are omitted by name (F11 lists them).
-#ifndef EID3D11_EMBEDDED
+// Author's native frame composition, SR/FG and final presentation. Both the
+// remote host and the embedded executor use this body. Local game-owned
+// publications are taken here when no remote frame snapshot was supplied.
+#if !defined(EID3D11_SHADER_EMBED)
 HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  struct PlanFrameEnd{FramePlan& plan;~PlanFrameEnd(){plan.begin_frame();}} plan_frame_end{frame_plan_};
+ if(!inputs){
+  owned_resource_runtime_poll();
+  camp_inventory_set_wide(configured_integer(debug_overlay_.config(),"camp_ui_layout",1)!=0);
+ }
+ prestart_terrain_tile_families();
  const std::int64_t present_tick=perf_now();
  if(last_present_tick_&&present_tick>last_present_tick_){
   const double sample=1000.0*static_cast<double>(present_tick-last_present_tick_)/static_cast<double>(perf_frequency());
@@ -1442,19 +1552,36 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  // availability is read once from the host; a mode that failed stays off for
  // the session. The F10 note shows the selected mode's reason.
  if(!fg_caps_checked_){fg_caps_checked_=true;x64remote::DlssgCaps caps{};
-  if(!x64remote::dlssg_caps(caps)){caps.reason[sizeof(caps.reason)-1]=0;std::snprintf(fg_dlssg_unavailable_,sizeof(fg_dlssg_unavailable_),"%s",caps.reason[0]?caps.reason:"not available");}}
+#ifdef EID3D11_EMBEDDED
+  const bool available=embedded_d3d12_.fg_caps(caps);
+#else
+  const bool available=x64remote::dlssg_caps(caps);
+#endif
+  if(!available){caps.reason[sizeof(caps.reason)-1]=0;std::snprintf(fg_dlssg_unavailable_,sizeof(fg_dlssg_unavailable_),"%s",caps.reason[0]?caps.reason:"not available");}}
  {const int selected=std::clamp(configured_integer(debug_overlay_.config(),"frame_generation",0),0,2);
   for(int mode=1;mode<=2;++mode)if(const char* failure=d3d12_->frame_generation_failure(mode);failure&&!fg_failed_[mode][0])frame_generation_off(mode,failure);
   const char* reason=selected==0?nullptr:fg_failed_[selected][0]?fg_failed_[selected]:selected==1&&fg_dlssg_unavailable_[0]?fg_dlssg_unavailable_:nullptr;
   if(selected!=fg_reason_mode_||reason){fg_reason_mode_=selected;set_frame_generation_unavailable_reason(reason);}
   frame_generation_mode_=reason?0:selected;}
- if(frame_generation_mode_!=1&&fg_previous_generated_){fg_previous_generated_=false;x64remote::dlssg_release();}
+ if(frame_generation_mode_!=1&&fg_previous_generated_){fg_previous_generated_=false;
+#ifdef EID3D11_EMBEDDED
+  embedded_d3d12_.fg_release();
+#else
+  x64remote::dlssg_release();
+#endif
+ }
  if(frame_generation_mode_!=2)fsr_prepared_=false;
  fg_frame_image_=configured_boolean(debug_overlay_.config(),"fg_frame_image",false)||frame_generation_mode_;
  d3d12_->set_frame_image(fg_frame_image_);
  d3d12_->set_frame_generation(frame_generation_mode_);
  if(!fg_frame_image_){hudless_d3d12_.reset();hudless_gamma_d3d12_.reset();}
  HRESULT hr=scene_composited_?flush_native():composite_world();
+#ifdef EID3D11_EMBEDDED
+ // Source Draw2D completes the popup's decoration after the world draw.
+ // Consume it at the same boundary as the embedded D3D11 frame.
+ CampDecoration camp_frame;
+ if(camp_inventory_take_decoration(camp_frame))queue_camp_decoration(camp_frame);
+#endif
  if(SUCCEEDED(hr)){transition_profile_pass("ui_composition");hr=render_pending_blits();}
  if(FAILED(hr)){bridge_report_event("present_step_failed","step=render_pending_blits (D3D12)");return hr;}
  if(FAILED(hr=draw_hud_asset_frames(inputs?&inputs->hud_frames:nullptr))){bridge_report_event("present_step_failed","step=hud_asset_frames (D3D12)");return hr;}
@@ -1607,6 +1734,9 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  profiler_.end_frame(presentation.sync_interval,0);
  // The final presentation owner applies the output cap (both images with FG).
  hr=d3d12_->present(presentation.sync_interval,frame_limit);
+#ifdef EID3D11_EMBEDDED
+ if(SUCCEEDED(hr))embedded_d3d12_presented_=true;
+#endif
  profiler_.present_return(output_width_,output_height_,presentation.sync_interval,0,hr);
  HRESULT trim_hr=S_OK;
  if(SUCCEEDED(hr)){
@@ -1628,9 +1758,26 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  return FAILED(trim_hr)?trim_hr:hr;
 }
 
-#endif // !EID3D11_EMBEDDED
+#endif // !EID3D11_SHADER_EMBED
 HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
-#ifndef EID3D11_EMBEDDED
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ if(d3d12_){
+  struct FinishPhase {
+   EmbeddedD3D12& owner;
+   ~FinishPhase(){owner.finish_render();}
+  } finish_phase{embedded_d3d12_};
+  if(embedded_d3d12_failed_)return E_FAIL;
+  HRESULT hr;
+  try{hr=present_frame_d3d12(inputs);}
+  catch(const std::bad_alloc&){hr=E_OUTOFMEMORY;}
+  catch(...){hr=E_FAIL;}
+  const HRESULT removed=embedded_d3d12_.device_removed_reason();
+  const char* reason=embedded_d3d12_.failure();
+  if(FAILED(removed))return fail_embedded_d3d12("device removed during frame",removed,reason);
+  if(FAILED(hr)||(reason&&*reason))return fail_embedded_d3d12("frame composition/presentation",hr,reason);
+  return hr;
+ }
+#elif !defined(EID3D11_SHADER_EMBED)
  if(d3d12_)return present_frame_d3d12(inputs);
 #endif
  // The next frame's plan starts when this call returns, on every path.

@@ -38,7 +38,13 @@ public:
             Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>{};
         if(!primary&&boundPrimary)primary=boundPrimary;
         if(!secondary&&boundSecondary)secondary=boundSecondary;
-        renderer.BeginFigure(p,figure->GetName(),object?object->GetMaskName():nullptr,primary.Get(),secondary.Get());
+        auto* primarySurface=texture0?texture0->GetSurface():nullptr;
+        auto* secondarySurface=texture1?texture1->GetSurface():nullptr;
+        if(primarySurface && !primary)primarySurface->EnsureOwnedSurfacePublished();
+        if(secondarySurface && !secondary)secondarySurface->EnsureOwnedSurfacePublished();
+        renderer.BeginFigure(p,figure->GetName(),object?object->GetMaskName():nullptr,primary.Get(),secondary.Get(),
+            primarySurface?primarySurface->OwnedSurfaceId():0,
+            secondarySurface?secondarySurface->OwnedSurfaceId():0);
     }
     ~Scope(){renderer.EndFigure();}
 };

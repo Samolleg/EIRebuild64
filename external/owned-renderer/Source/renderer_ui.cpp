@@ -1,5 +1,6 @@
 // Renderer UI: legacy draw frames and HUD asset frames, camp popup, cursor, blits, present_image, character pane text, capture, surface retirement and pending blits.
 #include <intrin.h>
+#include "embedded_figure_shader.h"
 #include "point_shadow_policy.h"
 #include "cursor_image.h"
 #include "shadow_softness.h"

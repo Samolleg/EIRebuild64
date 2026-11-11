@@ -10,6 +10,8 @@
 // and draw sets its slots on the executor, which copies them into ring
 // tables (a thin per-flush translation, not a D3D11 emulation layer).
 #include "renderer.h"
+#include "gamma_shader_programs.h"
+#include "embedded_figure_shader.h"
 #include "renderer_internal.h"
 #include "world_texture_sampler.h"
 #include "contact_blend.h"
@@ -98,6 +100,8 @@ void append_d3d12_shader_programs(std::vector<ShaderProgram>& out) {
  out.push_back(kD3D12MipArrayProgram);
  out.push_back(kD3D12MipArrayRangeProgram);
  append_gamma_shader_programs(out);
+ out.push_back(embedded_figure_layer_program(false));
+ out.push_back(embedded_figure_layer_program(true));
  append_terrain2_cache_d3d12_programs(out);
  append_native_off_material_programs(out);
 }
@@ -107,6 +111,42 @@ const ShaderProgram& d3d12_mip_array_range_program() noexcept { return kD3D12Mip
 
 // The native programs and the first geometry page on the D3D12 backend.
 #if !defined(EID3D11_SHADER_EMBED)
+#ifdef EID3D11_EMBEDDED
+HRESULT Renderer::compose_embedded_figure_texture_d3d12(const D3D12TextureRef& primary,
+ const D3D12TextureRef& secondary,D3D12TextureRef& combined){
+ combined.reset();
+ if(!d3d12_||!primary||!secondary)return E_INVALIDARG;
+ UINT width=0,height=0,mips=0;DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;
+ if(!d3d12_->texture_info(*primary,width,height,mips,format)||!width||!height)return E_INVALIDARG;
+ UINT sw=0,sh=0,sm=0;DXGI_FORMAT sf=DXGI_FORMAT_UNKNOWN;
+ if(!d3d12_->texture_info(*secondary,sw,sh,sm,sf))return E_INVALIDARG;
+ // RGBA keeps sampled channel values and permits typed UAV mip writes.
+ D3D12TextureRef target,output;
+ HRESULT hr=d3d12_->create_target(width,height,target,DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_UNKNOWN);
+ if(FAILED(hr))return hr;
+ UINT levels=1;for(UINT size=(std::max)(width,height);size>1;size>>=1)++levels;
+ hr=d3d12_->create_storage_texture(width,height,0,DXGI_FORMAT_R8G8B8A8_UNORM,output,levels);
+ if(FAILED(hr))return hr;
+ D3D11_SAMPLER_DESC sampling{};sampling.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+ sampling.AddressU=sampling.AddressV=sampling.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;
+ sampling.MaxLOD=D3D11_FLOAT32_MAX;
+ D3D12NativeState state;
+ state.raster.FillMode=D3D11_FILL_SOLID;state.raster.CullMode=D3D11_CULL_BACK;state.raster.DepthClipEnable=TRUE;
+ d3d12_->clear_slots();d3d12_->set_resource(0,primary.get());d3d12_->set_resource(1,secondary.get());
+ d3d12_->set_sampler(0,sampling);d3d12_->set_target(target.get());
+ hr=d3d12_->draw(embedded_figure_layer_program(false),embedded_figure_layer_program(true),state,nullptr,3);
+ d3d12_->clear_slots();
+ if(world_d3d12_bound_)bind_world_targets_d3d12();else d3d12_->set_target(nullptr);
+ // A pending pipeline must never publish an unwritten composite.
+ if(hr!=S_OK)return hr;
+ hr=d3d12_->copy_texture(*output,0,*target,0);
+ if(hr!=S_OK)return hr;
+ hr=d3d12_->generate_mips(*output,d3d12_mip_program());
+ if(hr==S_OK)combined=std::move(output);
+ return hr;
+}
+#endif
+
 HRESULT Renderer::native_d3d12_ensure(){
  if(native12_.ready)return S_OK;
  if(native12_.failed||!d3d12_)return E_FAIL;
@@ -182,7 +222,8 @@ HRESULT Renderer::terrain_texture_d3d12(SurfaceImage& image,const TerrainTexture
  }
  const UINT block_rows=(std::max)(1u,(image.height+3u)/4u);
  if(source->pixels.empty()||source->pitch<=0||std::uint64_t(source->pitch)*block_rows>source->pixels.size()){
-  if(!image.d3d12){const HRESULT hr=upload_d3d12(image,nullptr);if(FAILED(hr))return hr;}
+  // upload_d3d12 also checks executor ownership before its generation hit.
+  const HRESULT hr=upload_d3d12(image,nullptr);if(FAILED(hr))return hr;
   return record(image.d3d12,"terrain pages: BC1 without bytes (one level)");
  }
  UINT mip_count=1;
@@ -1382,7 +1423,6 @@ void Renderer::bind_world_effect_d3d12(bool depth_test){
 // composite_world on the D3D12 backend: the world's queue, then the world
 // target copied into the back buffer (D3D11 scene_copy). The steps D3D11
 // runs around that copy are named omitted while they are configured on.
-#ifndef EID3D11_EMBEDDED
 HRESULT Renderer::composite_world_d3d12(){
  const HRESULT world=flush_native();
  // This frame's shadow history: the world depth its visibility was drawn
@@ -1579,15 +1619,29 @@ bool Renderer::evaluate_frame_generation_d3d12() noexcept{
                                         {hudless_d3d12_.get(),false,false},{output,false,true}};
  const bool first=!fg_previous_generated_&&!fg_stats_tick_;
  const HRESULT hr=d3d12_->record_external("dlss-g",uses,5,[&](ID3D12GraphicsCommandList* list,ID3D12Resource* const* resources){
+#ifdef EID3D11_EMBEDDED
+  return embedded_d3d12_.fg_evaluate(list,resources,e);
+#else
   return x64remote::dlssg_evaluate_d3d12(list,resources,e);
+#endif
  });
  transition_profile_pass("present_bookkeeping");
  if(FAILED(hr)){
-  char reason[120];std::snprintf(reason,sizeof(reason),"DLSS Frame Generation failed (0x%08lX); see host.log",static_cast<unsigned long>(hr));
+  char reason[120];std::snprintf(reason,sizeof(reason),
+#ifdef EID3D11_EMBEDDED
+   "DLSS Frame Generation failed (0x%08lX); see engine journal"
+#else
+   "DLSS Frame Generation failed (0x%08lX); see host.log"
+#endif
+   ,static_cast<unsigned long>(hr));
   frame_generation_off(1,reason);return false;
  }
  if(first){
+#ifdef EID3D11_EMBEDDED
+  const std::uint64_t bytes=embedded_d3d12_.fg_vram(output_width_,output_height_,width_,height_);
+#else
   const std::uint64_t bytes=x64remote::dlssg_vram_estimate(output_width_,output_height_,width_,height_);
+#endif
   char text[160];std::snprintf(text,sizeof(text),"DLSS Frame Generation on: %ux%u, depth/motion %ux%u; NGX VRAM estimate %.1f MiB",
    output_width_,output_height_,width_,height_,double(bytes)/(1024.0*1024.0));
   bridge_report_event("frame_generation",text);
@@ -1678,7 +1732,13 @@ void Renderer::frame_generation_off(int mode,const char* reason) noexcept{
  if(frame_generation_mode_==mode){frame_generation_mode_=0;set_frame_generation_unavailable_reason(fg_failed_[mode]);fg_reason_mode_=mode;}
  char text[240];std::snprintf(text,sizeof(text),"%s: %s",mode==1?"DLSS Frame Generation":"FSR frame generation",fg_failed_[mode]);
  bridge_report_event("frame_generation_failed",text);
- if(mode==1){fg_previous_generated_=false;x64remote::dlssg_release();}
+ if(mode==1){fg_previous_generated_=false;
+#ifdef EID3D11_EMBEDDED
+  embedded_d3d12_.fg_release();
+#else
+  x64remote::dlssg_release();
+#endif
+ }
  else fsr_prepared_=false;
  if(d3d12_&&frame_generation_mode_==0)d3d12_->set_frame_generation(0);
 }
@@ -1718,7 +1778,14 @@ bool Renderer::prepare_fsr_frame_generation_d3d12() noexcept{
   return d3d12_->fsr_prepare(list,resources[0],resources[1],p);
  });
  transition_profile_pass("present_bookkeeping");
- if(FAILED(hr)){frame_generation_off(2,"FidelityFX frame generation prepare failed; see host.log");return false;}
+ if(FAILED(hr)){
+#ifdef EID3D11_EMBEDDED
+  frame_generation_off(2,"FidelityFX frame generation prepare failed; see engine journal");
+#else
+  frame_generation_off(2,"FidelityFX frame generation prepare failed; see host.log");
+#endif
+  return false;
+ }
  if(first){
   char text[160];std::snprintf(text,sizeof(text),"FSR frame generation on: %ux%u, depth/motion %ux%u; FidelityFX context VRAM %.1f MiB",
    output_width_,output_height_,width_,height_,double(d3d12_->fsr_vram())/(1024.0*1024.0));
@@ -1781,7 +1848,6 @@ void Renderer::capture_hudless_d3d12() noexcept{
 
 // The HUD layout editor dims the composited world under its grid (the end
 // of the D3D11 composite_world), before every interface pass.
-#endif // !EID3D11_EMBEDDED
 HRESULT Renderer::dim_hud_layout_d3d12(){
  if(!debug_overlay_.hud_editing())return S_OK;
  transition_profile_pass("hud_layout_dim");
@@ -2947,7 +3013,6 @@ HRESULT Renderer::ensure_upscaler_d3d12(){
 // off leaves (FSR's images, the targets, the host's NGX feature). The world
 // targets follow the size at the next bind_world_d3d12. Never while a world
 // target is bound: that frame keeps the size it was drawn at.
-#ifndef EID3D11_EMBEDDED
 void Renderer::apply_upscaler_mode_d3d12(){
  if(world_d3d12_bound_)return;
  const int percent=std::clamp(configured_integer(debug_overlay_.config(),"render_scale",100),kRenderScaleMinimum,100);
@@ -2965,7 +3030,13 @@ void Renderer::apply_upscaler_mode_d3d12(){
   auto& up=upscale12_;
   up.resolved.reset();up.motion.reset();up.object_motion.reset();up.object_depth.reset();up.output.reset();up.previous_world.reset();
  }
- if(old_dlss>=0&&dlss_mode_<0)x64remote::dlss_release();
+ if(old_dlss>=0&&dlss_mode_<0){
+#ifdef EID3D11_EMBEDDED
+  embedded_d3d12_.dlss_release();
+#else
+  x64remote::dlss_release();
+#endif
+ }
 }
 
 // begin_dlss_object_motion on D3D12, at a world frame's start with an
@@ -2973,7 +3044,6 @@ void Renderer::apply_upscaler_mode_d3d12(){
 // zero motion, depth beyond any surface), and the world vertices as the
 // previous frame left them (the used range, same slots), so a posed
 // record's vertex can read where it was.
-#endif // !EID3D11_EMBEDDED
 void Renderer::begin_object_motion_d3d12() noexcept{
  auto& up=upscale12_;
  up.motion_constants_frame=UINT64_MAX;
@@ -3086,7 +3156,6 @@ void Renderer::present_upscaled_d3d12(){
 
 // The upscaler of the frame (DLSS or FSR 2), or the filtered upscale of the
 // resolved image when it cannot run this frame (SceneComposite::upscale).
-#ifndef EID3D11_EMBEDDED
 HRESULT Renderer::upscale_world_d3d12(){
  auto& post=post12_;
  if(post.programs.empty())SceneComposite::shader_programs(post.programs);
@@ -3128,7 +3197,11 @@ HRESULT Renderer::filtered_upscale_d3d12(){
 // DLSS failed this frame and is turned off with the reason on the list.
 bool Renderer::render_dlss_d3d12(){
  // The first-Present deferral of render_dlss, kept for the same host.
+#ifdef EID3D11_EMBEDDED
+ if(!embedded_d3d12_presented_){dlss_reset_=true;dlss_previous_valid_=false;return false;}
+#else
  if(!x64remote::host_presented()){dlss_reset_=true;dlss_previous_valid_=false;return false;}
+#endif
  auto& up=upscale12_;
  const UpscalerFrame frame=begin_upscaler_frame();
  static const float jitter_sign=[]{char value[8]{};return GetEnvironmentVariableA("EI_RENDERER_DLSS_JITTER_SIGN",value,sizeof(value))&&value[0]=='-'?-1.f:1.f;}();
@@ -3142,7 +3215,11 @@ bool Renderer::render_dlss_d3d12(){
  const D3D12Frame::ExternalUse uses[4]={{up.resolved.get(),false,false},{world_d3d12_.get(),true,false},
                                         {up.motion.get(),false,false},{up.output.get(),false,true}};
  const HRESULT hr=d3d12_->record_external("dlss",uses,4,[&](ID3D12GraphicsCommandList* list,ID3D12Resource* const* resources){
+#ifdef EID3D11_EMBEDDED
+  return embedded_d3d12_.dlss_evaluate(list,resources,evaluate);
+#else
   return x64remote::dlss_evaluate_d3d12(list,resources,evaluate);
+#endif
  });
  if(FAILED(hr)){
   char reason[96];std::snprintf(reason,sizeof(reason),"DLSS evaluation failed (0x%08lX)",static_cast<unsigned long>(hr));
@@ -3167,7 +3244,6 @@ bool Renderer::render_dlss_d3d12(){
 
 // render_fsr on D3D12 (fsr2_upscaler_d3d12.h). False: FSR failed (turned off
 // for the session with the reason) or a program was not ready this frame.
-#endif // !EID3D11_EMBEDDED
 bool Renderer::render_fsr_d3d12(){
  auto& up=upscale12_;
  const auto fail=[&](const char* reason){

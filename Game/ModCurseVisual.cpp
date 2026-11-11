@@ -23,13 +23,13 @@ owned::EmbeddedCurseActor ActorInput(unsigned id) {
     // once; native particles and the actor skeleton use this same position.
     result.base={p.x,p.y,p.z};return result;
 }
-Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> FlowTexture() {
+CDXGISurface* FlowTexture() {
     auto* object=theWorld.GetMapObject(720101);
     if(!object||object->IsInvalid()||!object->FinalDataLoading())return {};
     auto* specific=dynamic_cast<CObject3DClientSpecific*>(object->GetObjectSpecific());
     auto* texture=specific?specific->GetPrimaryTexture():nullptr;
     auto* surface=texture?texture->GetSurface():nullptr;
-    return surface?surface->GetShaderResource():Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>{};
+    return surface;
 }
 }
 void ResetVisual() noexcept {armed=false;}
@@ -56,6 +56,9 @@ void Draw() {
         input.enemies[i]=ActorInput(710001+i);input.enemies[i].channel=true;
     }
     const auto camera=theCamera.GetCP();input.camera={camera.x,camera.y,camera.z};input.world_to_clip=frame.camera.world_to_clip;input.ground=Ground;
-    const auto texture=FlowTexture();dx->SubmitCurseVisual(input,texture.Get());
+    auto* surface=FlowTexture();
+    const auto texture=surface?surface->GetShaderResource():Microsoft::WRL::ComPtr<ID3D11ShaderResourceView>{};
+    const auto surfaceId=!texture&&surface&&surface->EnsureOwnedSurfacePublished()?surface->OwnedSurfaceId():0;
+    dx->SubmitCurseVisual(input,texture.Get(),surfaceId);
 }
 }

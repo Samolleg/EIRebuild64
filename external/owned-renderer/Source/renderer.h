@@ -4,6 +4,7 @@
 #include "fsr2_upscaler.h"
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
 #include "dlss_backend.h"
+#include "embedded_d3d12.h"
 #endif
 #include "fsr2_upscaler_d3d12.h"
 #include "bloom.h"
@@ -920,6 +921,16 @@ struct CharacterPaneText; struct GlyphAtlas;
 class MaterialLibrary;
 
 class Renderer {
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+    // Declared first: the local executor outlives all renderer GPU members.
+    // Startup binds frame() only after configuration selects D3D12.
+    EmbeddedD3D12 embedded_d3d12_;
+    bool embedded_d3d12_presented_ = false;
+    bool embedded_d3d12_failed_ = false;
+    // Prepared startup; connect only with the source CDX11 device adapters.
+    HRESULT ensure_embedded_d3d12();
+    HRESULT fail_embedded_d3d12(const char* operation, HRESULT result, const char* reason = nullptr) noexcept;
+#endif
     friend struct ContactBlendSmokeAccess;
     friend struct LiquidSurfaceSmokeAccess;
     friend struct SceneCompositeSmokeAccess;
@@ -1008,6 +1019,10 @@ public:
     HRESULT clear(DWORD flags, D3DCOLOR color, float z, DWORD stencil) {
         return clear(0, nullptr, flags, color, z, stencil);
     }
+    // S_FALSE borrows active rendering (or selects D3D11). S_OK gives
+    // the caller ownership of the corresponding finish boundary.
+    HRESULT begin_embedded_simulation();
+    void finish_embedded_frame();
     HRESULT begin_engine_frame();
     HRESULT retire_embedded_world();
     RendererMemoryCounters read_memory_counters();
@@ -1029,7 +1044,7 @@ public:
     // Synchronous bounded source values; never retains source pointers.
     HRESULT draw_embedded_fixed_function(D3DPRIMITIVETYPE type, const FixedFunctionVertex* vertices,
         DWORD vertex_count, const WORD* indices, DWORD index_count,
-        const FixedState& state, ID3D11ShaderResourceView* texture);
+        const FixedState& state, ID3D11ShaderResourceView* texture, SurfaceImage* surface = nullptr);
 #endif
     HRESULT draw_frame(const std::vector<LegacyDrawPacket>& packets,
                        const std::vector<std::uint8_t>& vertex_bytes,
@@ -1048,7 +1063,9 @@ public:
         const OwnedVisualSurface* secondary, NativeGeometryResult* result);
     HRESULT queue_embedded_figure(const NativeGeometryView& view, const FixedState& state,
         ID3D11ShaderResourceView* primary, ID3D11ShaderResourceView* secondary,
-        const NativeWorldLighting* lighting, const std::vector<RetainedWorldPointLight>& lights);
+        const NativeWorldLighting* lighting, const std::vector<RetainedWorldPointLight>& lights,
+        const OwnedVisualSurface* primarySurface = nullptr,
+        const OwnedVisualSurface* secondarySurface = nullptr);
     HRESULT queue_embedded_wound(const NativeGeometryView& view, const FixedState& state,
         const OwnedVisualSurface& surface, NativeGeometryResult* result);
 #endif
@@ -1222,7 +1239,7 @@ public:
     // expanded on the GPU at the call's stream position.
     HRESULT draw_game_ribbon(const GameRibbonView& view, const FixedState& state, SurfaceImage* texture);
 #ifdef EID3D11_EMBEDDED
-    HRESULT draw_embedded_curse(const EmbeddedCurseInput&,const FixedState&,ID3D11ShaderResourceView*);
+    HRESULT draw_embedded_curse(const EmbeddedCurseInput&,const FixedState&,ID3D11ShaderResourceView*,SurfaceImage* image=nullptr);
     HRESULT draw_embedded_golem(const EmbeddedGolemInput&,const FixedState&,const std::array<ID3D11ShaderResourceView*,6>&);
     HRESULT draw_embedded_arena(const EmbeddedArenaInput&,const FixedState&,const std::array<ID3D11ShaderResourceView*,8>&);
     HRESULT draw_embedded_ribbon(const EmbeddedRibbonInput&, const FixedState&, SurfaceImage*);
@@ -1389,6 +1406,15 @@ public:
         return owned::visit_embedded_device(device_.Get(), context_.Get(),
             rtv_.Get(), dsv_.Get(), user, visitor);
     }
+    // Current-target operations, without a borrowed backend device or the
+    // legacy Clear operation's implicit world-composition boundary.
+    HRESULT bind_embedded_targets();
+    HRESULT clear_embedded_targets(const float* color, const float* depth);
+    HRESULT read_embedded_viewport(D3DVIEWPORT7& viewport);
+    HRESULT read_embedded_output_size(UINT& width, UINT& height);
+    // Native output capture, tightly packed BGRA. S_FALSE means minimized.
+    // The caller must consume the returned pixels only on S_OK.
+    HRESULT read_embedded_d3d12_output(std::vector<std::uint8_t>& pixels, UINT& width, UINT& height);
     bool embedded_hit_test_frame() const noexcept { return hit_test_active_; }
     HRESULT visit_embedded_output(void* user, EmbeddedOutputVisitor visitor) const {
         if (hit_test_failed_) return E_FAIL;
@@ -1514,12 +1540,20 @@ public:
     // pointer to the image itself.
     std::shared_ptr<SurfaceImage> scene_surface(SurfaceImage* image);
     // Core mode: ready once the host link is up (no device in this process).
-    bool ready() const { return device_ != nullptr || core_mode_; }
+    bool ready() const {
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+        if (d3d12_) return !embedded_d3d12_failed_;
+#endif
+        return device_ != nullptr || core_mode_ || d3d12_ != nullptr;
+    }
     // S_OK while the device works; the DXGI removal reason after a driver
     // timeout (TDR) or reset. Callers query it only after a failed HRESULT.
     // Core mode: the host link's loss (named in the device-removed box).
     HRESULT device_removed_reason() const noexcept {
         if (core_mode_) return core_removed_reason();
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+        if (d3d12_) return embedded_d3d12_.device_removed_reason();
+#endif
         return device_ ? device_->GetDeviceRemovedReason() : S_OK;
     }
     HRESULT core_removed_reason() const noexcept;
@@ -1816,7 +1850,10 @@ private:
     struct EmbeddedFigureLayers {
         std::uint64_t primary_generation=0,secondary_generation=0;
         ComPtr<ID3D11ShaderResourceView> texture;
+        D3D12TextureRef texture12;
     };
+    HRESULT compose_embedded_figure_texture_d3d12(const D3D12TextureRef& primary,
+        const D3D12TextureRef& secondary, D3D12TextureRef& combined);
     std::map<std::pair<std::uint64_t,std::uint64_t>,EmbeddedFigureLayers> embedded_figure_layers_;
     ComPtr<ID3D11VertexShader> embedded_figure_vs_;
     ComPtr<ID3D11PixelShader> embedded_figure_ps_;

@@ -5,18 +5,7 @@ HRESULT Renderer::compose_embedded_figure_texture(ID3D11ShaderResourceView* prim
   if(owner.Get()!=device_.Get())return E_INVALIDARG;
   // Combine the two authored layers before c56's ordinary material pipeline.
   // Overlay alpha changes RGB only; primary alpha still owns alpha testing.
-  static constexpr char shader[] = R"(
-Texture2D base:register(t0); Texture2D layer:register(t1);
-SamplerState filtering:register(s0);
-struct Vertex { float4 position:SV_Position; float2 uv:TEXCOORD0; };
-Vertex vs(uint id:SV_VertexID) {
- Vertex o; o.uv=float2((id<<1)&2,id&2);
- o.position=float4(o.uv*float2(2,-2)+float2(-1,1),0,1); return o;
-}
-float4 ps(Vertex v):SV_Target {
- float4 a=base.Sample(filtering,v.uv),b=layer.Sample(filtering,v.uv);
- return float4(lerp(a.rgb,b.rgb,b.a),a.a);
-})";
+  const auto& shader=kEmbeddedFigureLayerShader;
   if (embedded_figure_vs_) {
    ComPtr<ID3D11Device> shaderDevice; embedded_figure_vs_->GetDevice(&shaderDevice);
    if(shaderDevice.Get()!=device_.Get()) {
@@ -128,6 +117,27 @@ HRESULT Renderer::queue_embedded_records(const NativePreparedSubmission& submiss
    hr=queue_embedded_wound(view,state,*secondary,result);
   }
   else if(!secondary || source.owned_texture.identity!=primaryId)hr=queue_native_owned(view,state,result);
+  else if(d3d12_) {
+   D3D12TextureRef primary,overlay;
+   std::uint64_t backing=0;
+   hr=get_native_owned_texture_d3d12(source.owned_texture,primary,backing,result,true);
+   NativeOwnedTextureView second{};
+   second.identity=secondary->id;second.generation=secondary->generation;second.surface=secondary;
+   if(SUCCEEDED(hr))hr=get_native_owned_texture_d3d12(second,overlay,backing,result,true);
+   if(FAILED(hr))return hr;
+   auto& layers=embedded_figure_layers_[{primaryId,secondary->id}];
+   if(!layers.texture12||layers.primary_generation!=source.owned_texture.generation||
+      layers.secondary_generation!=secondary->generation) {
+    hr=flush_native();if(FAILED(hr))return hr;
+    D3D12TextureRef combined;
+    hr=compose_embedded_figure_texture_d3d12(primary,overlay,combined);
+    if(hr!=S_OK)return native_geometry_failure(result,FAILED(hr)?hr:E_PENDING,"embedded.records_layers_d3d12");
+    layers.texture12=std::move(combined);
+    layers.primary_generation=source.owned_texture.generation;layers.secondary_generation=secondary->generation;
+   }
+   hr=queue_native_impl(view,state,nullptr,result,false,nullptr,
+       std::uint64_t(reinterpret_cast<std::uintptr_t>(layers.texture12.get())),1,false,0,nullptr,&layers.texture12);
+  }
   else {
    ComPtr<ID3D11ShaderResourceView> primary, overlay;
    std::uint64_t backing=0;
@@ -157,7 +167,9 @@ HRESULT Renderer::queue_embedded_records(const NativePreparedSubmission& submiss
 HRESULT Renderer::queue_embedded_figure(const NativeGeometryView& view,
  const FixedState& state, ID3D11ShaderResourceView* primary,
  ID3D11ShaderResourceView* secondary, const NativeWorldLighting* lighting,
- const std::vector<RetainedWorldPointLight>& lights) {
+ const std::vector<RetainedWorldPointLight>& lights,
+ const OwnedVisualSurface* primarySurface, const OwnedVisualSurface* secondarySurface) {
+ if(d3d12_ && (primary || secondary))return E_INVALIDARG;
  HRESULT hr = has_pending_ui() ? flush_ui() : S_OK;
  if (SUCCEEDED(hr)) hr = flush_native();
  if (FAILED(hr)) return hr;
@@ -176,12 +188,38 @@ HRESULT Renderer::queue_embedded_figure(const NativeGeometryView& view,
  if (lighting && (!set_native_world_lighting(*lighting) ||
      !set_native_point_lights(lights, worldTime))) return E_INVALIDARG;
  ComPtr<ID3D11ShaderResourceView> combined;
- if (primary && secondary) {
+ if (!d3d12_ && primary && secondary) {
   hr=compose_embedded_figure_texture(primary,secondary,combined);
   if(FAILED(hr))return hr;
   primary=combined.Get();
  }
- hr=queue_native_direct(view,state,primary);
+ if(d3d12_) {
+  D3D12TextureRef texture,overlay;
+  std::uint64_t backing=0;
+  if(primarySurface) {
+   NativeOwnedTextureView ownedPrimary{};
+   ownedPrimary.identity=primarySurface->id;
+   ownedPrimary.generation=primarySurface->generation;
+   ownedPrimary.surface=primarySurface;
+   hr=get_native_owned_texture_d3d12(ownedPrimary,texture,backing,nullptr,true);
+   if(FAILED(hr))return hr;
+  }
+  if(primarySurface && secondarySurface) {
+   NativeOwnedTextureView ownedSecondary{};
+   ownedSecondary.identity=secondarySurface->id;
+   ownedSecondary.generation=secondarySurface->generation;
+   ownedSecondary.surface=secondarySurface;
+   hr=get_native_owned_texture_d3d12(ownedSecondary,overlay,backing,nullptr,true);
+   if(FAILED(hr))return hr;
+   D3D12TextureRef composed;
+   hr=compose_embedded_figure_texture_d3d12(texture,overlay,composed);
+   if(hr!=S_OK)return FAILED(hr)?hr:E_PENDING;
+   texture=std::move(composed);
+  }
+  if(texture)hr=queue_native_impl(view,state,nullptr,nullptr,false,nullptr,
+      std::uint64_t(reinterpret_cast<std::uintptr_t>(texture.get())),1,false,0,nullptr,&texture);
+  else hr=queue_native_direct(view,state,nullptr);
+ } else hr=queue_native_direct(view,state,primary);
  if (SUCCEEDED(hr)) hr=flush_native();
  if (FAILED(hr)) discard_native();
  return hr;

@@ -20,7 +20,7 @@ static void CurseRune(Mesh&m,Vec p,float radius,float time){
 }
 HRESULT Submit(Renderer& renderer,Mesh& mesh,const EmbeddedCurseInput& input,
     const FixedState& frame,ID3D11ShaderResourceView* texture,std::uint32_t color,
-    EmbeddedCurseCache& cache,unsigned slot,bool lit,bool opaque=false,bool additive=false,const std::vector<Vec>* authored=nullptr) {
+    EmbeddedCurseCache& cache,unsigned slot,bool lit,bool opaque=false,bool additive=false,const std::vector<Vec>* authored=nullptr,SurfaceImage* image=nullptr) {
     if(mesh.indices.empty())return S_OK;
     const auto count=mesh.uv.size();
     if(count>65535)return E_INVALIDARG;
@@ -53,7 +53,7 @@ HRESULT Submit(Renderer& renderer,Mesh& mesh,const EmbeddedCurseInput& input,
     state.render[D3DRENDERSTATE_SRCBLEND]=D3DBLEND_SRCALPHA;
     state.render[D3DRENDERSTATE_DESTBLEND]=additive?D3DBLEND_ONE:D3DBLEND_INVSRCALPHA;
     state.render[D3DRENDERSTATE_SPECULARENABLE]=FALSE;
-    state.stage[0][D3DTSS_COLOROP]=state.stage[0][D3DTSS_ALPHAOP]=texture?D3DTOP_MODULATE:D3DTOP_SELECTARG2;
+    state.stage[0][D3DTSS_COLOROP]=state.stage[0][D3DTSS_ALPHAOP]=(texture||image)?D3DTOP_MODULATE:D3DTOP_SELECTARG2;
     state.stage[0][D3DTSS_COLORARG1]=state.stage[0][D3DTSS_ALPHAARG1]=D3DTA_TEXTURE;
     state.stage[0][D3DTSS_COLORARG2]=state.stage[0][D3DTSS_ALPHAARG2]=D3DTA_DIFFUSE;
     NativeGeometryView view;
@@ -75,32 +75,33 @@ HRESULT Submit(Renderer& renderer,Mesh& mesh,const EmbeddedCurseInput& input,
     view.geometry_revision_valid=true;
     view.geometry_revision={std::uint32_t(input.world_epoch),std::uint32_t(input.world_epoch>>32),
         std::uint32_t(cache.serial),std::uint32_t(cache.serial>>32),slot};
-    const auto hr=renderer.queue_native_direct(view,state,texture);
+    const auto hr=renderer.d3d12_backend()?renderer.queue_native(view,state,image):
+        renderer.queue_native_direct(view,state,texture);
     if(FAILED(hr))return hr;
     return renderer.flush_native();
 }
 
 }
-HRESULT Renderer::draw_embedded_curse(const EmbeddedCurseInput& input,const FixedState& frame,ID3D11ShaderResourceView* texture) try {
+HRESULT Renderer::draw_embedded_curse(const EmbeddedCurseInput& input,const FixedState& frame,ID3D11ShaderResourceView* texture,SurfaceImage* image) try {
  SCENE_ENTRY("curse_visual");using namespace curse;
  if(!input.world_epoch||input.boss_id!=666666||!input.ground)return E_INVALIDARG;
  // Authored beams/channels require 720101's material. No plain replacement.
  const bool beams=input.active||input.threat==2||input.threat==4||
   (input.ward.present&&input.ward_at>0&&input.tick-input.ward_at>=0&&input.tick-input.ward_at<14);
- if(beams&&!texture)return HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND);
+ if(beams&&!(d3d12_?image!=nullptr:texture!=nullptr))return HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND);
  const auto revision=native_static_content_revision_;
  struct Restore {std::uint64_t& value;std::uint64_t saved;~Restore(){value=saved;}} restore{native_static_content_revision_,revision};
  ++embedded_curse_cache_.serial;unsigned slot=0;HRESULT failure=S_OK;
- auto draw=[&](Mesh& mesh,ID3D11ShaderResourceView* material,unsigned color){
+ auto draw=[&](Mesh& mesh,bool textured,unsigned color){
   if(mesh.indices.empty())return;if(slot>=embedded_curse_cache_.slots.size()){failure=E_INVALIDARG;return;}
-  const auto hr=Submit(*this,mesh,input,frame,material,color,embedded_curse_cache_,slot++,false,false,true);
+  const auto hr=Submit(*this,mesh,input,frame,textured?texture:nullptr,color,embedded_curse_cache_,slot++,false,false,true,nullptr,textured?image:nullptr);
   if(FAILED(hr)&&SUCCEEDED(failure))failure=hr;
  };
  const int tick=input.tick,type=input.threat;const float time=tick/18.f,age=tick-input.threat_born;
  const Vec camera={input.camera[0],input.camera[1],input.camera[2]};const auto& boss=input.boss;const auto& mage=input.mage;
  auto ground=[&](float x,float y){const float z=input.ground(x,y);if(!std::isfinite(z))throw std::runtime_error("Curse ground query failed");return Vec{x,y,z+.035f};};
- auto plain=[&](Mesh& mesh,unsigned color){draw(mesh,nullptr,color);};
- auto beam=[&](Vec a,Vec b,float width,unsigned color){Mesh mesh;VfxBeam(mesh,a,b,camera,width,time*.7f,time*.7f+3);draw(mesh,texture,color);};
+ auto plain=[&](Mesh& mesh,unsigned color){draw(mesh,false,color);};
+ auto beam=[&](Vec a,Vec b,float width,unsigned color){Mesh mesh;VfxBeam(mesh,a,b,camera,width,time*.7f,time*.7f+3);draw(mesh,true,color);};
  if(input.active==1){
   // A low translucent seal outlines the playable area without hiding actors.
   Vec corners[]={ground(54,46),ground(106,46),ground(106,102),ground(54,102)};
@@ -110,7 +111,7 @@ HRESULT Renderer::draw_embedded_curse(const EmbeddedCurseInput& input,const Fixe
   Vec m=Vec{mage.base[0],mage.base[1],mage.base[2]};
   if(input.mage_mode==2){for(int i=0;i<6;i++){float a=i*1.0472f+time*.4f;Vec c=m+Vec{1.1f*std::cos(a),1.1f*std::sin(a),.7f};beam(c,c+Vec{0,0,.7f},.055f,0xa088c9ff);}}
   if(input.mage_mode==3){Mesh pad;CurseRune(pad,ground(input.pad_x,input.pad_y),1.5f,time);plain(pad,0xa6ffdb9f);}
-  for(int i=0;i<12;i++)if(input.enemies[i].channel){const auto& u=input.enemies[i];if(u.present)for(int strand=0;strand<2;strand++){auto flow=Ribbon(Vec{u.base[0],u.base[1],u.base[2]}+Vec{0,0,1.7f},m+Vec{0,0,1.5f},camera,time,strand);draw(flow,texture,0x667e54ce);}}
+  for(int i=0;i<12;i++)if(input.enemies[i].channel){const auto& u=input.enemies[i];if(u.present)for(int strand=0;strand<2;strand++){auto flow=Ribbon(Vec{u.base[0],u.base[1],u.base[2]}+Vec{0,0,1.7f},m+Vec{0,0,1.5f},camera,time,strand);draw(flow,true,0x667e54ce);}}
  }
  if(type==1||type==3){
   Vec p=ground(input.x,input.y);float radius=type==1?3.f:5.f;Mesh m;CurseRune(m,p,radius,time);plain(m,age<36?0x99ff7058:0xd0ff493d);

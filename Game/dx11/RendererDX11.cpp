@@ -5,6 +5,7 @@
 
 #include <wincodec.h> // Optional
 #include <ScreenGrab.h>
+#include <DirectXTex.h>
 
 #include "ConstantBuffer.h"
 #include "RendererDX11.h"
@@ -72,6 +73,17 @@ bool CDX11::SetItemColorSum(bool active)
 
 bool CDX11::SetRenderStates()
 {
+    // Native packets capture fake_dx7 state at submission. D3D12 creates its
+    // PSOs from those values; no D3D11 immediate state belongs to this path.
+    if (rendererFacade) {
+        bool nativeD3D12 = false;
+        const HRESULT hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+            nativeD3D12 = renderer.d3d12_backend();
+            return S_OK;
+        });
+        IfFailedThrowHR(hr);
+        if (nativeD3D12) return true;
+    }
     D3D11_RENDER_TARGET_BLEND_DESC rtbd = { 0 };
     auto &rs = fake_dx7.render_state;
     // true/false
@@ -121,14 +133,14 @@ owned::NativeOwnedFixedState CDX11::CaptureOwnedTerrainMaterial()
 {
     auto state = OwnedRender::E1TerrainMaterialState(fake_dx7.render_state,
         GetConstantBuffers()->cb_ps_pixelshader.data.alphaMode);
-    D3D11_VIEWPORT viewport{}; UINT count = 1;
-    deviceContext->RSGetViewports(&count, &viewport);
-    if (count != 1 || viewport.TopLeftX < 0 || viewport.TopLeftY < 0 ||
-        viewport.Width < 1 || viewport.Height < 1) return {};
+    D3DVIEWPORT7 viewport{};
+    if (!rendererFacade || FAILED(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.read_embedded_viewport(viewport);
+    })) || !viewport.dwWidth || !viewport.dwHeight) return {};
     state.replay_frame_state = true;
-    state.captured_viewport = {UINT(viewport.TopLeftX), UINT(viewport.TopLeftY),
-        UINT(viewport.Width), UINT(viewport.Height)};
-    state.captured_depth_range = {viewport.MinDepth, viewport.MaxDepth};
+    state.captured_viewport = {UINT(viewport.dwX), UINT(viewport.dwY),
+        UINT(viewport.dwWidth), UINT(viewport.dwHeight)};
+    state.captured_depth_range = {viewport.dvMinZ, viewport.dvMaxZ};
     const auto fog = owned::bridge_world_fog_snapshot();
     state.captured_fog_enable = theRenderer.IsAddFog() && fog.valid && fog.enabled;
     const auto& color = GetConstantBuffers()->cb_ps_pixelshader.data.fogColor;
@@ -186,12 +198,11 @@ owned::FixedState CDX11::CaptureC56MaterialState()
     for (const auto& item : fake_dx7.render_state)
         if (item.first >= 0 && std::size_t(item.first) < state.render.size())
             state.render[item.first] = item.second;
-    D3D11_VIEWPORT viewport{}; UINT count = 1;
-    deviceContext->RSGetViewports(&count, &viewport);
-    state.viewport = {DWORD(viewport.TopLeftX), DWORD(viewport.TopLeftY),
-        DWORD(viewport.Width), DWORD(viewport.Height), viewport.MinDepth, viewport.MaxDepth};
+    IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.read_embedded_viewport(state.viewport);
+    }));
     const auto& pixel = GetConstantBuffers()->cb_ps_pixelshader.data;
-    const bool textured = bool(boundFigureTextures[0]);
+    const bool textured = bool(boundFigureTextures[0]) || boundParticleSurface != 0;
     state.stage[0][D3DTSS_COLOROP] = textured ? D3DTOP_MODULATE : D3DTOP_SELECTARG2;
     state.stage[0][D3DTSS_COLORARG1] = D3DTA_TEXTURE;
     state.stage[0][D3DTSS_COLORARG2] = D3DTA_DIFFUSE;
@@ -225,9 +236,12 @@ bool CDX11::SubmitC74FixedFunction(D3DPRIMITIVETYPE type, const owned::FixedFunc
             state.stage[0][D3DTSS_COLORARG2] = state.stage[0][D3DTSS_ALPHAARG2] = D3DTA_DIFFUSE;
             state.render[D3DRENDERSTATE_SHADEMODE] = D3DSHADE_FLAT;
         }
-        hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+        std::shared_ptr<owned::SurfaceImage> surface;
+        hr = !untextured && !device && boundParticleSurface ? OwnedRender::E1ParticleSurfaceImage(device.Get(),
+            deviceContext.Get(), boundParticleSurface, surface) : S_OK;
+        if (SUCCEEDED(hr)) hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
             return renderer.draw_embedded_fixed_function(type, vertices, count,
-                indices, indexCount, state, texture);
+                indices, indexCount, state, texture, surface.get());
         });
         RestoreHostBindings();
     }
@@ -341,9 +355,23 @@ bool CDX11::SubmitC74Figure(const owned::NativeGeometryView& view,
     const auto& pixel = GetConstantBuffers()->cb_ps_pixelshader.data;
     auto* primary = ownedRenderer.FigureActive() ? ownedRenderer.FigurePrimaryTexture() : boundFigureTextures[0].Get();
     auto* secondary = ownedRenderer.FigureActive() ? ownedRenderer.FigureSecondaryTexture() : boundFigureTextures[1].Get();
-    state.stage[0][D3DTSS_COLOROP] = primary ? D3DTOP_MODULATE : D3DTOP_SELECTARG2;
+    bool nativeD3D12 = false;
+    if (FAILED(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        nativeD3D12 = renderer.d3d12_backend();
+        return S_OK;
+    }))) return false;
+    const auto primaryId = ownedRenderer.FigureActive() && ownedRenderer.FigurePrimarySurface() ?
+        ownedRenderer.FigurePrimarySurface() : boundParticleSurface;
+    const auto secondaryId = ownedRenderer.FigureActive() && ownedRenderer.FigureSecondarySurface() ?
+        ownedRenderer.FigureSecondarySurface() : boundSecondarySurface;
+    const auto primarySurface = nativeD3D12 ? OwnedRender::E1SurfaceValue(primaryId) : nullptr;
+    const auto secondarySurface = nativeD3D12 ? OwnedRender::E1SurfaceValue(secondaryId) : nullptr;
+    if (nativeD3D12 && ((primaryId && !primarySurface) ||
+        (secondaryId && !secondarySurface))) return false;
+    const bool textured = primary || bool(primarySurface);
+    state.stage[0][D3DTSS_COLOROP] = textured ? D3DTOP_MODULATE : D3DTOP_SELECTARG2;
     state.stage[0][D3DTSS_COLORARG1] = D3DTA_TEXTURE; state.stage[0][D3DTSS_COLORARG2] = D3DTA_DIFFUSE;
-    state.stage[0][D3DTSS_ALPHAOP] = !primary ? D3DTOP_SELECTARG2 : pixel.alphaMode == 0 ?
+    state.stage[0][D3DTSS_ALPHAOP] = !textured ? D3DTOP_SELECTARG2 : pixel.alphaMode == 0 ?
         D3DTOP_SELECTARG1 : pixel.alphaMode == 2 ? D3DTOP_SELECTARG2 : D3DTOP_MODULATE;
     state.stage[0][D3DTSS_ALPHAARG1] = D3DTA_TEXTURE; state.stage[0][D3DTSS_ALPHAARG2] = D3DTA_DIFFUSE;
     state.stage[0][D3DTSS_ADDRESSU] = state.stage[0][D3DTSS_ADDRESSV] = D3DTADDRESS_WRAP;
@@ -353,7 +381,7 @@ bool CDX11::SubmitC74Figure(const owned::NativeGeometryView& view,
     state.render[D3DRENDERSTATE_FOGCOLOR] = (byte(pixel.fogColor.x)<<16) |
         (byte(pixel.fogColor.y)<<8) | byte(pixel.fogColor.z);
     const HRESULT hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
-        if (camp && !lighting && !secondary) {
+        if (camp && !lighting && !secondary && !nativeD3D12) {
             const HRESULT flushed = renderer.has_pending_ui() ? renderer.flush_ui() : S_OK;
             if (FAILED(flushed)) return flushed;
             owned::Renderer::NativeQueueCheckpoint checkpoint;
@@ -362,7 +390,8 @@ bool CDX11::SubmitC74Figure(const owned::NativeGeometryView& view,
             if (FAILED(queued)) renderer.rollback_native(checkpoint);
             return queued;
         }
-        return renderer.queue_embedded_figure(model, state, primary, secondary, lighting, lights);
+        return renderer.queue_embedded_figure(model, state, primary, secondary, lighting, lights,
+            primarySurface.get(), secondarySurface.get());
     });
     RestoreHostBindings();
     if (SUCCEEDED(hr)) {++c56WorldFigurePrimitives; return true;}
@@ -442,7 +471,7 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
             alphaMode == 2 ? D3DTOP_SELECTARG2 : D3DTOP_MODULATE;
         state.stage[0][D3DTSS_ALPHAARG1] = D3DTA_TEXTURE;
         state.stage[0][D3DTSS_ALPHAARG2] = D3DTA_DIFFUSE;
-        if (!boundFigureTextures[0]) {
+        if (!boundFigureTextures[0] && !boundParticleSurface) {
             state.stage[0][D3DTSS_COLOROP] = D3DTOP_SELECTARG2;
             state.stage[0][D3DTSS_ALPHAOP] = D3DTOP_SELECTARG2;
         }
@@ -454,7 +483,7 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
             state.render[D3DRENDERSTATE_DESTBLEND] = D3DBLEND_ONE;
         }
         std::shared_ptr<owned::SurfaceImage> texture;
-        hr = boundFigureTextures[0] ? OwnedRender::E1ParticleSurfaceImage(device.Get(),
+        hr = (boundFigureTextures[0] || boundParticleSurface) ? OwnedRender::E1ParticleSurfaceImage(device.Get(),
             deviceContext.Get(), boundParticleSurface, texture) : S_OK;
         if (SUCCEEDED(hr)) {
             hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
@@ -468,12 +497,7 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
             });
             // c56 uses the same device, but its shaders/targets/state differ.
             // Restore the host bindings for subsequent figure draws.
-            RefreshOwnedTargets();
-            SetRenderStates();
-            for (UINT stage = 0; stage < boundFigureTextures.size(); ++stage) {
-                ID3D11ShaderResourceView* resource = boundFigureTextures[stage].Get();
-                deviceContext->PSSetShaderResources(stage, 1, &resource);
-            }
+            RestoreHostBindings();
         }
     }
     if (SUCCEEDED(hr)) return true;
@@ -504,7 +528,7 @@ HRESULT CDX11::PrepareC74Effect(bool requireWorld, bool useTexture, owned::Fixed
         HRESULT flushed = renderer.has_pending_ui() ? renderer.flush_ui() : S_OK;
         return FAILED(flushed) ? flushed : renderer.flush_native();
     });
-    if (SUCCEEDED(hr) && useTexture && boundFigureTextures[0])
+    if (SUCCEEDED(hr) && useTexture && (boundFigureTextures[0] || boundParticleSurface))
         hr = OwnedRender::E1ParticleSurfaceImage(device.Get(), deviceContext.Get(), boundParticleSurface, texture);
     return hr;
 }
@@ -520,12 +544,19 @@ bool CDX11::FinishC74Effect(HRESULT hr, const char* event)
     }
     return false;
 }
-bool CDX11::SubmitCurseVisual(const owned::EmbeddedCurseInput& input,ID3D11ShaderResourceView* texture)
+bool CDX11::SubmitCurseVisual(const owned::EmbeddedCurseInput& input,ID3D11ShaderResourceView* texture,std::uint64_t surfaceId)
 {
     owned::FixedState state;std::shared_ptr<owned::SurfaceImage> unused;
     HRESULT hr=PrepareC74Effect(true,false,state,unused);
     bool published=false;
-    if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer){published=true;return renderer.draw_embedded_curse(input,state,texture);});
+    if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer){
+        std::shared_ptr<owned::SurfaceImage> image;
+        if(renderer.d3d12_backend()&&surfaceId) {
+            const HRESULT resolved=OwnedRender::E1ParticleSurfaceImage(nullptr,nullptr,surfaceId,image);
+            if(FAILED(resolved))return resolved;
+        }
+        published=true;return renderer.draw_embedded_curse(input,state,texture,image.get());
+    });
     LiveObserver::ObserveCurse(input,hr,published);
     return FinishC74Effect(hr,"curse_visual_skipped");
 }
@@ -578,7 +609,7 @@ bool CDX11::SubmitC74Print(const owned::EmbeddedPrintInput& input)
         if (!ownedWorldActive || !rendererFacade || !rendererFacade->FrameActive()) hr = E_UNEXPECTED;
         else {
             state = CaptureC74EffectState();
-            if (boundFigureTextures[0]) hr = OwnedRender::E1ParticleSurfaceImage(device.Get(),
+            if (boundFigureTextures[0] || boundParticleSurface) hr = OwnedRender::E1ParticleSurfaceImage(device.Get(),
                 deviceContext.Get(), boundParticleSurface, texture);
         }
     }
@@ -604,8 +635,33 @@ bool CDX11::SubmitC74CombatText(const owned::EmbeddedCombatTextInput& input)
     return FinishC74Effect(hr, "combat_text_skipped");
 }
 
+bool CDX11::BeginSimulation()
+{
+    if (!rendererFacade || !rendererFacade->Ready()) return false;
+    const auto access = ownedRenderer.LockFrame();
+    const HRESULT hr = rendererFacade->Visit([](owned::Renderer& renderer) {
+        return renderer.begin_embedded_simulation();
+    });
+    IfFailedThrowHR(hr);
+    return hr == S_OK;
+}
+void CDX11::FinishSimulation() noexcept
+{
+    if (!rendererFacade || !rendererFacade->Ready()) return;
+    const auto access = ownedRenderer.LockFrame();
+    (void)rendererFacade->Visit([](owned::Renderer& renderer) {
+        renderer.finish_embedded_frame();
+        return S_OK;
+    });
+}
+
 void CDX11::BeginFrame()
 {
+    struct FailedPhase {
+        CDX11& owner;
+        bool complete = false;
+        ~FailedPhase() { if (!complete) owner.FinishSimulation(); }
+    } phase{*this};
     ReportC56FigureSkipSummary();
     // c73 separates authoritative engine frames from D3D scene brackets.
     // Reopen world composition and advance per-frame caches before BeginScene
@@ -617,15 +673,12 @@ void CDX11::BeginFrame()
     owned::bridge_set_screen_rectangle_sink(this, &SubmitScreenRectangleToC56);
     frameTiming.Begin();
     RefreshOwnedTargets();
-    IfFailedThrowHR(rendererFacade->VisitDevice(&background_color,
-        [](void *user, const owned::EmbeddedDeviceView& view) -> HRESULT {
-            const auto *color = static_cast<const DirectX::XMFLOAT4 *>(user);
-            view.context->ClearRenderTargetView(view.color, reinterpret_cast<const float *>(color));
-            view.context->ClearDepthStencilView(view.depth,
-                D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, G_CLEAR_DEPTH_VALUE, 0);
-            return S_OK;
-        }));
+    IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.clear_embedded_targets(reinterpret_cast<const float*>(&background_color),
+            &G_CLEAR_DEPTH_VALUE);
+    }));
     SetRenderStates();
+    phase.complete = true;
 }
 
 bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
@@ -841,11 +894,18 @@ void CDX11::BeginInterface()
 
 void CDX11::RefreshOwnedTargets()
 {
-    IfFailedThrowHR(rendererFacade->VisitDevice(nullptr, &OwnedRender::E1BindTargets));
+    IfFailedThrowHR(rendererFacade->Visit([](owned::Renderer& renderer) {
+        return renderer.bind_embedded_targets();
+    }));
 }
 
 void CDX11::EndFrame(bool present)
 {
+    // Close capture-only frames and all early/failed presentation exits.
+    struct FinishPhase {
+        CDX11& owner;
+        ~FinishPhase() { owner.FinishSimulation(); }
+    } finishPhase{*this};
     ReportC56FigureSkipSummary();
     owned::bridge_set_screen_rectangle_sink(nullptr, nullptr);
     if (!present) {
@@ -882,18 +942,37 @@ void CDX11::EndFrame(bool present)
 void CDX11::ClearColorBuffer(DWORD value)
 {
     DirectX::XMFLOAT4 color = BGRAtoFloat4(value);
-    IfFailedThrowHR(rendererFacade->VisitDevice(&color, &OwnedRender::E1ClearColor));
+    IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.clear_embedded_targets(reinterpret_cast<const float*>(&color), nullptr);
+    }));
 }
 
 void CDX11::ClearZBuffer(DWORD dwValue)
 {
     float depth = float(dwValue);
-    IfFailedThrowHR(rendererFacade->VisitDevice(&depth, &OwnedRender::E1ClearDepth));
+    IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.clear_embedded_targets(nullptr, &depth);
+    }));
 }
 
 BOOL CDX11::BindTexture(DWORD dwIndex, ID3D11ShaderResourceView *pTexture,
                           std::uint64_t surfaceId)
 {
+    bool nativeD3D12 = false;
+    if (!rendererFacade || FAILED(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        nativeD3D12 = renderer.d3d12_backend();
+        return S_OK;
+    }))) return FALSE;
+    if (nativeD3D12) {
+        // Completed CPU surfaces have an identity without a D3D11 SRV.
+        // Reject raw SRVs before changing the previously bound texture.
+        if (pTexture || dwIndex >= boundFigureTextures.size()) return FALSE;
+        if (surfaceId && !OwnedRender::E1SurfaceValue(surfaceId)) return FALSE;
+        if (dwIndex == 0) boundParticleSurface = surfaceId;
+        else boundSecondarySurface = surfaceId;
+        boundFigureTextures[dwIndex].Reset();
+        return TRUE;
+    }
     if (dwIndex == 0) boundParticleSurface = pTexture ? surfaceId : 0;
     if (dwIndex < boundFigureTextures.size())
         boundFigureTextures[dwIndex] = pTexture;
@@ -1009,14 +1088,21 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
         ReportError(hr, "Cannot initialize the embedded c56 renderer.");
         throw hr;
     }
-    IfFailedThrowHR(rendererFacade->VisitDevice(this,
-        [](void* user, const owned::EmbeddedDeviceView& view) -> HRESULT {
-            auto& self = *static_cast<CDX11*>(user);
-            self.device = view.device;
-            self.deviceContext = view.context;
-            self.m_width = view.width; self.m_height = view.height;
-            return OwnedRender::E1BindTargets(nullptr, view);
-        }));
+    bool nativeD3D12 = false;
+    IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        nativeD3D12 = renderer.d3d12_backend();
+        return S_OK;
+    }));
+    if (!nativeD3D12) {
+        IfFailedThrowHR(rendererFacade->VisitDevice(this,
+            [](void* user, const owned::EmbeddedDeviceView& view) -> HRESULT {
+                auto& self = *static_cast<CDX11*>(user);
+                self.device = view.device;
+                self.deviceContext = view.context;
+                self.m_width = view.width; self.m_height = view.height;
+                return OwnedRender::E1BindTargets(nullptr, view);
+            }));
+    }
     ownedRenderer.embeddedUi = [this](ID3D11ShaderResourceView* image, const RECT& destination,
                                       const RECT* source, unsigned flags) -> HRESULT {
         if (!rendererFacade) return S_FALSE;
@@ -1024,110 +1110,136 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
             return renderer.blit_srv(image, destination, source, (flags & EI_RENDERER_UI_OPAQUE) != 0);
         });
     };
-    const HRESULT timingAttached = frameTiming.Attach(device.Get(), deviceContext.Get());
+    const HRESULT timingAttached = nativeD3D12 ? S_FALSE : frameTiming.Attach(device.Get(), deviceContext.Get());
     GameJournal::Event("RENDER", "frame_owner",
         "frame=c56 hwnd=%p menu_panels=c56-blit world_terrain=c56 world_figures=c56 game_particles=c56 visfog=c56 fog=c56 triangles=c56 effects=category-migration shadows=c56 timing_gpu=0x%08lX",
         hWnd, static_cast<unsigned long>(timingAttached));
-    IfFailedThrowHR(rendererFacade->VisitOutput(this,
-        [](void* user, ID3D11DeviceContext*, ID3D11Texture2D* output) -> HRESULT {
-            D3D11_TEXTURE2D_DESC desc{}; output->GetDesc(&desc);
-            if (!desc.Width || !desc.Height) return E_INVALIDARG;
-            auto& self = *static_cast<CDX11*>(user);
-            self.m_width = desc.Width; self.m_height = desc.Height;
-            return S_OK;
-        }));
+    IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        UINT width = 0, height = 0;
+        const HRESULT result = renderer.read_embedded_output_size(width, height);
+        if (SUCCEEDED(result)) { m_width = width; m_height = height; }
+        return result;
+    }));
     dwWidth = m_width; dwHeight = m_height;
 
-    // Create Blend State
-    D3D11_RENDER_TARGET_BLEND_DESC rtbd = { 0 };
-    rtbd.BlendEnable = true;
-    // dst (render target), src (pixel shader) pixels
-    // dst.rgb = src.a * src.rgb + (1 - src.a) * dst.rgb
-    rtbd.SrcBlend = D3D11_BLEND::D3D11_BLEND_SRC_ALPHA;
-    rtbd.DestBlend = D3D11_BLEND::D3D11_BLEND_INV_SRC_ALPHA;
-    rtbd.BlendOp = D3D11_BLEND_OP::D3D11_BLEND_OP_ADD;
+    // Native D3D12 submissions translate fixed state inside the renderer.
+    // Legacy state objects and context operations belong to D3D11 only.
+    if (!nativeD3D12) {
+        // Create Blend State
+        D3D11_RENDER_TARGET_BLEND_DESC rtbd = { 0 };
+        rtbd.BlendEnable = true;
+        // dst (render target), src (pixel shader) pixels
+        // dst.rgb = src.a * src.rgb + (1 - src.a) * dst.rgb
+        rtbd.SrcBlend = D3D11_BLEND::D3D11_BLEND_SRC_ALPHA;
+        rtbd.DestBlend = D3D11_BLEND::D3D11_BLEND_INV_SRC_ALPHA;
+        rtbd.BlendOp = D3D11_BLEND_OP::D3D11_BLEND_OP_ADD;
 
-    // dst.a = 1 * src.a + 0 * dst.a;
-    rtbd.SrcBlendAlpha = D3D11_BLEND::D3D11_BLEND_ONE;
-    rtbd.DestBlendAlpha = D3D11_BLEND::D3D11_BLEND_ZERO;
-    rtbd.BlendOpAlpha = D3D11_BLEND_OP::D3D11_BLEND_OP_ADD;
-    rtbd.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE::D3D11_COLOR_WRITE_ENABLE_ALL;
+        // dst.a = 1 * src.a + 0 * dst.a;
+        rtbd.SrcBlendAlpha = D3D11_BLEND::D3D11_BLEND_ONE;
+        rtbd.DestBlendAlpha = D3D11_BLEND::D3D11_BLEND_ZERO;
+        rtbd.BlendOpAlpha = D3D11_BLEND_OP::D3D11_BLEND_OP_ADD;
+        rtbd.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE::D3D11_COLOR_WRITE_ENABLE_ALL;
 
-    D3D11_BLEND_DESC blendDesc = { 0 };
-    blendDesc.RenderTarget[0] = rtbd;
-    IfFailedThrowHR(this->device->CreateBlendState(&blendDesc, this->blendState.GetAddressOf()));
+        D3D11_BLEND_DESC blendDesc = { 0 };
+        blendDesc.RenderTarget[0] = rtbd;
+        IfFailedThrowHR(this->device->CreateBlendState(&blendDesc, this->blendState.GetAddressOf()));
 
-    // Create depth stencil state
-    D3D11_DEPTH_STENCIL_DESC depthstencildesc;
-    ZeroMemory(&depthstencildesc, sizeof(D3D11_DEPTH_STENCIL_DESC));
-    depthstencildesc.DepthEnable = true;
-    depthstencildesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK::D3D11_DEPTH_WRITE_MASK_ALL;
-    depthstencildesc.DepthFunc = G_DEPTH_FUNC;
+        // Create depth stencil state
+        D3D11_DEPTH_STENCIL_DESC depthstencildesc;
+        ZeroMemory(&depthstencildesc, sizeof(D3D11_DEPTH_STENCIL_DESC));
+        depthstencildesc.DepthEnable = true;
+        depthstencildesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK::D3D11_DEPTH_WRITE_MASK_ALL;
+        depthstencildesc.DepthFunc = G_DEPTH_FUNC;
 
-    IfFailedThrowHR(
-        this->device->CreateDepthStencilState(&depthstencildesc, depthStencilState.GetAddressOf()));
+        IfFailedThrowHR(
+            this->device->CreateDepthStencilState(&depthstencildesc, depthStencilState.GetAddressOf()));
 
-    ZeroMemory(&depthstencildesc, sizeof(D3D11_DEPTH_STENCIL_DESC));
-    depthstencildesc.DepthEnable = true;
-    depthstencildesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK::D3D11_DEPTH_WRITE_MASK_ZERO;
-    depthstencildesc.DepthFunc = G_DEPTH_FUNC;
+        ZeroMemory(&depthstencildesc, sizeof(D3D11_DEPTH_STENCIL_DESC));
+        depthstencildesc.DepthEnable = true;
+        depthstencildesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK::D3D11_DEPTH_WRITE_MASK_ZERO;
+        depthstencildesc.DepthFunc = G_DEPTH_FUNC;
 
-    IfFailedThrowHR(
-        this->device->CreateDepthStencilState(&depthstencildesc,
-                                              this->depthStencilStateDisableWrite.GetAddressOf()));
+        IfFailedThrowHR(
+            this->device->CreateDepthStencilState(&depthstencildesc,
+                                                  this->depthStencilStateDisableWrite.GetAddressOf()));
 
-    ZeroMemory(&depthstencildesc, sizeof(D3D11_DEPTH_STENCIL_DESC));
-    depthstencildesc.DepthEnable = true;
-    depthstencildesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK::D3D11_DEPTH_WRITE_MASK_ZERO;
-    depthstencildesc.DepthFunc = D3D11_COMPARISON_FUNC::D3D11_COMPARISON_ALWAYS;
-    IfFailedThrowHR(
-        this->device->CreateDepthStencilState(&depthstencildesc,
-                                              this->depthStencilStateDisable.GetAddressOf()));
+        ZeroMemory(&depthstencildesc, sizeof(D3D11_DEPTH_STENCIL_DESC));
+        depthstencildesc.DepthEnable = true;
+        depthstencildesc.DepthWriteMask = D3D11_DEPTH_WRITE_MASK::D3D11_DEPTH_WRITE_MASK_ZERO;
+        depthstencildesc.DepthFunc = D3D11_COMPARISON_FUNC::D3D11_COMPARISON_ALWAYS;
+        IfFailedThrowHR(
+            this->device->CreateDepthStencilState(&depthstencildesc,
+                                                  this->depthStencilStateDisable.GetAddressOf()));
 
-    // Create the Viewport
-    D3D11_VIEWPORT viewport;
-    ZeroMemory(&viewport, sizeof(D3D11_VIEWPORT));
+        // Create the Viewport
+        D3D11_VIEWPORT viewport;
+        ZeroMemory(&viewport, sizeof(D3D11_VIEWPORT));
 
-    viewport.TopLeftX = 0;
-    viewport.TopLeftY = 0;
-    viewport.Width = dwWidth;
-    viewport.Height = dwHeight;
-    viewport.MinDepth = 0.0f;
-    viewport.MaxDepth = 1.0f;
+        viewport.TopLeftX = 0;
+        viewport.TopLeftY = 0;
+        viewport.Width = dwWidth;
+        viewport.Height = dwHeight;
+        viewport.MinDepth = 0.0f;
+        viewport.MaxDepth = 1.0f;
 
-    // Set the Viewport
-    this->deviceContext->RSSetViewports(1, &viewport);
+        // Set the Viewport
+        this->deviceContext->RSSetViewports(1, &viewport);
 
-    // Create Rasterizer State
-    D3D11_RASTERIZER_DESC rasterizerDesc;
-    ZeroMemory(&rasterizerDesc, sizeof(D3D11_RASTERIZER_DESC));
+        // Create Rasterizer State
+        D3D11_RASTERIZER_DESC rasterizerDesc;
+        ZeroMemory(&rasterizerDesc, sizeof(D3D11_RASTERIZER_DESC));
 
-    rasterizerDesc.FillMode = D3D11_FILL_MODE::D3D11_FILL_SOLID;
-    bool ccw = true;
-    rasterizerDesc.FrontCounterClockwise = ccw;
-    rasterizerDesc.CullMode = G_CULL_MODE;
-    IfFailedThrowHR(
-        this->device->CreateRasterizerState(&rasterizerDesc, this->rasterizerState.GetAddressOf()));
+        rasterizerDesc.FillMode = D3D11_FILL_MODE::D3D11_FILL_SOLID;
+        bool ccw = true;
+        rasterizerDesc.FrontCounterClockwise = ccw;
+        rasterizerDesc.CullMode = G_CULL_MODE;
+        IfFailedThrowHR(
+            this->device->CreateRasterizerState(&rasterizerDesc, this->rasterizerState.GetAddressOf()));
 
-    ZeroMemory(&rasterizerDesc, sizeof(D3D11_RASTERIZER_DESC));
-    rasterizerDesc.FillMode = D3D11_FILL_MODE::D3D11_FILL_SOLID;
-    rasterizerDesc.FrontCounterClockwise = ccw;
-    rasterizerDesc.CullMode = D3D11_CULL_MODE::D3D11_CULL_NONE;
-    IfFailedThrowHR(
-        this->device->CreateRasterizerState(&rasterizerDesc,
-                                            this->rasterizerStateNoCull.GetAddressOf()));
+        ZeroMemory(&rasterizerDesc, sizeof(D3D11_RASTERIZER_DESC));
+        rasterizerDesc.FillMode = D3D11_FILL_MODE::D3D11_FILL_SOLID;
+        rasterizerDesc.FrontCounterClockwise = ccw;
+        rasterizerDesc.CullMode = D3D11_CULL_MODE::D3D11_CULL_NONE;
+        IfFailedThrowHR(
+            this->device->CreateRasterizerState(&rasterizerDesc,
+                                                this->rasterizerStateNoCull.GetAddressOf()));
+
+    }
 
     spriteBatch = std::make_unique<OwnedSpriteBatch>(ownedRenderer);
     // spriteBatch->Begin();
     // spriteFont = std::make_unique<DirectX::SpriteFont>(this->device.Get(),
     // L"Data\\comic_sans_ms_16.spritefont"); spriteFont->SetDefaultCharacter(L'Z');
 
-    m_states = std::make_unique<DirectX::CommonStates>(this->device.Get());
+    if (!nativeD3D12) m_states = std::make_unique<DirectX::CommonStates>(this->device.Get());
     return true;
 }
 
 void CDX11::MakeScreenShot()
 {
+    bool nativeD3D12 = false;
+    std::vector<std::uint8_t> pixels;
+    UINT width = 0, height = 0;
+    HRESULT hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+        nativeD3D12 = renderer.d3d12_backend();
+        return nativeD3D12 ? renderer.read_embedded_d3d12_output(pixels, width, height) : S_OK;
+    });
+    if (nativeD3D12) {
+        if (hr == S_OK) {
+            DirectX::Image image{};
+            image.width = width; image.height = height;
+            image.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            image.rowPitch = std::size_t(width) * 4u;
+            image.slicePitch = pixels.size(); image.pixels = pixels.data();
+            hr = DirectX::SaveToWICFile(image, DirectX::WIC_FLAGS_NONE,
+                GUID_ContainerFormatJpeg,
+                (RuntimePaths64::Directory(L"Screenshots64") / L"SCREENSHOT.JPG").c_str());
+        }
+        if (hr != S_OK) GameJournal::Event("RENDER", "screenshot_failed",
+            "backend=d3d12 hr=%08lx", static_cast<unsigned long>(hr));
+        return;
+    }
+    if (FAILED(hr)) return;
     // Capture the composed output while its renderer-owned lease is valid.
     rendererFacade->VisitOutput(nullptr,
         [](void*, ID3D11DeviceContext* context, ID3D11Texture2D* output) -> HRESULT {

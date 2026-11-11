@@ -7,6 +7,7 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <Import Project="Renderer.props" /><Import Project="..\tools\DirectXStatic.props" />
   <Import Project="DlssSdk.props" />
+  <Import Project="D3D12Sdk.props" />
   <PropertyGroup><TargetName>OwnedRenderer</TargetName></PropertyGroup>
   <ItemGroup>
     <ClCompile Include="..\Game\OwnedRender\E1SkeletonSources.cpp" />
@@ -109,6 +110,18 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\ground_cover_neighbour.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\camp_icon_decode.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\native_prebuilt.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\embedded_d3d12.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Host\dlss.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Host\reflex.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Host\d3d12\d3d12_barriers.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Host\d3d12\d3d12_core.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Host\d3d12\d3d12_frame.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Host\d3d12\d3d12_fsr_fg.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Host\d3d12\d3d12_pacer.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Host\d3d12\d3d12_pipelines.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Host\d3d12\d3d12_presenter.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Host\d3d12\d3d12_rings.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Host\d3d12\d3d12_timestamps.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\embedded_remote_stubs.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\dlss_backend.cpp" />
     <ClInclude Include="$(OwnedRendererRoot)Source\dlss_backend.h" />

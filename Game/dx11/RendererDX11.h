@@ -70,6 +70,7 @@ private:
     HRESULT c56FigureLastRenderError = S_OK;
     OwnedRendererClient ownedRenderer;
     std::uint64_t boundParticleSurface = 0;
+    std::uint64_t boundSecondarySurface = 0;
     bool ownedWorldActive = false;
     owned::EmbeddedPrintBatch c74Prints;
     owned::FixedState CaptureC74EffectState();
@@ -100,6 +101,8 @@ public:
 
 
 
+    bool BeginSimulation();
+    void FinishSimulation() noexcept;
     void BeginFrame();
     bool BeginWorld(const EIRenderWorldFrameV2& frame);
     void EndWorld();
@@ -125,7 +128,7 @@ public:
     void ReportC56FigureNoMatrix();
     void ReportC56FigureSkipSummary();
     bool SubmitC56GameParticles(const owned::GameParticleView& view);
-    bool SubmitCurseVisual(const owned::EmbeddedCurseInput&,ID3D11ShaderResourceView*);
+    bool SubmitCurseVisual(const owned::EmbeddedCurseInput&,ID3D11ShaderResourceView*,std::uint64_t surfaceId=0);
     bool SubmitGolemVisual(const owned::EmbeddedGolemInput&,const std::array<ID3D11ShaderResourceView*,6>&);
     bool SubmitArenaVisual(const owned::EmbeddedArenaInput&,const std::array<ID3D11ShaderResourceView*,8>&);
     bool SubmitC74Ribbon(const owned::EmbeddedRibbonInput&);

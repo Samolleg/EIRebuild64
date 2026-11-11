@@ -474,7 +474,25 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
 #ifdef EID3D11_EMBEDDED
  if(!embedded_sky().available_to(this))return E_UNEXPECTED;
 #endif
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ // Keep the selected native owner latched, including a failed startup.
+ if(embedded_d3d12_failed_)return E_FAIL;
+ if(d3d12_)return S_OK;
+#endif
  output_width_=std::max(1u,w);output_height_=std::max(1u,h);camp_inventory_output(canvas_width(),canvas_height());set_world_size();hwnd_=hwnd;if(device_)return rtv_&&scene_composite_.target()?S_OK:E_FAIL;
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ // Read the overlay's registered ini value before any D3D11 allocation.
+ // WARP remains an explicit D3D11 diagnostic entry, never a fallback.
+ if(driver==D3D_DRIVER_TYPE_HARDWARE){
+  RendererConfig startup_config;
+  startup_config.register_integer("renderer_backend","Renderer","Display",0,0,1,1,false,"");
+  startup_config.load(renderer_config_path().c_str());
+  if(configured_integer(startup_config,"renderer_backend",0)==1){
+   register_config_options();
+   return ensure_embedded_d3d12();
+  }
+ }
+#endif
 #ifndef EID3D11_EMBEDDED
  // Core mode (F10 x64_render_host, or the test override EI_RENDERER_X64_CORE=1):
  // the x64 host's Renderer draws; no device here. A host that never reached
@@ -538,6 +556,67 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
  return S_OK;
 }
 
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+HRESULT Renderer::fail_embedded_d3d12(const char* operation,HRESULT result,const char* reason) noexcept{
+ if(!embedded_d3d12_failed_){
+  embedded_d3d12_failed_=true;
+  char text[2048]{};
+  std::snprintf(text,sizeof(text),"Direct3D 12: %s failed (0x%08lx). %s\nRestart with Direct3D 11 selected in Config64\\rddraw.ini (renderer_backend=0), or update your graphics driver.",
+   operation,static_cast<unsigned long>(result),reason&&*reason?reason:"See the engine journal for details.");
+  bridge_report_event("d3d12_failed",text);
+  MessageBoxA(hwnd_,text,"EIRebuild64 - Direct3D 12",MB_OK|MB_ICONERROR);
+ }
+ return FAILED(result)?result:E_FAIL;
+}
+// Caller registers/loads configuration and sets hwnd_/output dimensions first.
+// Selected before D3D11 allocation. Failure returns directly to the caller;
+// it never starts a different backend.
+HRESULT Renderer::ensure_embedded_d3d12(){
+ if(d3d12_)return embedded_d3d12_failed_?E_FAIL:S_OK;
+ std::string reason;
+ if(!embedded_d3d12_.initialize(hwnd_,reason))return fail_embedded_d3d12("device/swap chain creation",E_FAIL,reason.c_str());
+ d3d12_=embedded_d3d12_.frame();
+ const auto failed=[&](const char* step,HRESULT hr){
+  fail_embedded_d3d12(step,hr,embedded_d3d12_.failure());
+  release();
+  return hr;
+ };
+ try{
+  debug_overlay_set_running_renderer("64-bit embedded, Direct3D 12",false);
+  debug_overlay_set_running_d3d12(true);
+  if(IDXGIAdapter* adapter=d3d12_->adapter())adapter->QueryInterface(IID_PPV_ARGS(adapter3_.ReleaseAndGetAddressOf()));
+  debug_overlay_.set_renderer(&d3d12_->overlay_renderer());
+  HRESULT hr=debug_overlay_.initialize(hwnd_,nullptr,nullptr,nullptr,d3d12_->adapter());
+  if(FAILED(hr))return failed("overlay initialization",hr);
+  auto& config=debug_overlay_.config();
+  migrate_settings(config,renderer_config_path().c_str());
+  debug_overlay_.sync_interface_profile();recover_shader_crash();
+  apply_config_settings();
+  {x64remote::DlssCaps caps{};
+   const bool available=embedded_d3d12_.dlss_caps(caps);
+   caps.reason[sizeof(caps.reason)-1]=0;
+   set_dlss_unavailable_reason(available?nullptr:(caps.reason[0]?caps.reason:"not available"));}
+  set_fsr_unavailable_reason(Fsr2UpscalerD3D12::unavailable_reason(*d3d12_));
+  render_scale_percent_=std::clamp(configured_integer(config,"render_scale",100),kRenderScaleMinimum,100);
+  dlss_mode_=configured_dlss_mode();fsr_mode_=configured_fsr_mode();set_world_size();
+  scene_composited_=true;
+  retained_visual_scene().visual_set_surface_texture_retainer(&Renderer::retain_detached_surface_texture,this);
+  register_embedded_shaders();
+  profiler_.set_timestamps(&d3d12_->profile_timestamps());
+  if(FAILED(hr=profiler_.initialize(nullptr,nullptr)))return failed("profiler initialization",hr);
+  neighbour_maps_set_d3d12(d3d12_->preparer());
+  if(FAILED(hr=native_d3d12_ensure()))return failed("native pipeline initialization",hr);
+  frame_statistics_.reset();system_telemetry_snapshot_={};system_telemetry_active_=false;
+  system_telemetry_.start(adapter3_.Get());start_liquid_maps_job();
+  if(!embedded_sky().attach(this))return failed("sky attachment",E_UNEXPECTED);
+  embedded_d3d12_failed_=false;
+  bridge_report_event("renderer_backend","Direct3D 12 embedded executor initialized");
+  return S_OK;
+ }catch(const std::bad_alloc&){return failed("initialization allocation",E_OUTOFMEMORY);}
+ catch(...){return failed("initialization exception",E_FAIL);}
+}
+#endif
+
 // The player and developer options (eid3d11.ini [graphics] and friends):
 // registered in every Renderer, so a core-mode game process (which owns the
 // ini) and the x64 host (which applies the values it is sent) share one list.
@@ -564,7 +643,11 @@ config.register_integer("frame_generation_min_fps","Frame generation minimum FPS
 config.register_integer("reflex","NVIDIA Reflex","Presentation",0,0,2,1,false,"Test (Direct3D 12 backend, NVIDIA GPUs): 0 off. 1: Reflex low latency mode with latency markers (the driver keeps the GPU queue short). 2: also the Reflex sleep before the render host releases the game's next frame. Never a frame cap. host.log reports the game-frame-to-present latency every 5 s in every mode.");
 config.register_integer("latency_pacing","Latency pacing","Presentation",0,0,1,1,false,"Test (Direct3D 12 backend, any GPU): 1 starts the game's next frame later, by as much as its frame would otherwise wait for the render host, so input is read closer to when the frame is drawn. Never a frame cap; the delay stays under 3/4 of a frame. host.log reports the delay and the remaining wait every 5 s.");
 config.register_boolean("fg_frame_image","Frame generation inputs (D3D12)","Diagnostics",false,false,"D3D12 backend: the frame draws into its own image (world and interface) with a HUD-less copy of the world, then is copied to the screen before the F10 overlay, cursor, load reveal and gamma, as frame generation will need. Looks the same; costs two full-screen copies a frame. Harness captures write hudless.bmp beside ui_composition.bmp.");
+#ifdef EID3D11_EMBEDDED
+config.register_integer("renderer_backend","Renderer","Display",0,0,1,1,false,"0 Direct3D 11. 1 Direct3D 12, required for frame generation and NVIDIA Reflex. Applies after restarting the game. If Direct3D 12 cannot start, the engine journal and an error dialog show the reason. Select renderer_backend=0 in Config64\\rddraw.ini to use Direct3D 11 on the next start.");
+#else
 config.register_integer("renderer_backend","Renderer","Display",0,0,1,1,false,"0 Direct3D 11. 1 Direct3D 12: Direct3D 12 runs in the 64-bit render host and is needed for frame generation and NVIDIA Reflex. Applies after restarting the game. A graphics card that cannot start Direct3D 12 stays on Direct3D 11 (the reason shows in F10 and host.log).");
+#endif
 config.register_integer("display_mode","Display mode","Display",0,0,1,1,false,"0: borderless fullscreen on the primary monitor, 1: a movable window of the chosen window size. Use Apply display to change this during gameplay.");
 config.register_integer("window_width","Window width","Display",0,0,16384,1,false,"Client width of the windowed mode (0: the monitor's size). Use Apply display to change this during gameplay.");
 config.register_integer("window_height","Window height","Display",0,0,16384,1,false,"Client height of the windowed mode (0: the monitor's size). Use Apply display to change this during gameplay.");
@@ -1071,7 +1154,8 @@ void Renderer::set_world_size() noexcept {
 #endif
   UINT w=0,h=0;
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
-  const bool sized=dlss_backend_.optimal(output_width_,output_height_,static_cast<DlssQuality>(dlss_mode_),w,h);
+  const bool sized=d3d12_?embedded_d3d12_.dlss_size(output_width_,output_height_,dlss_mode_,w,h):
+   dlss_backend_.optimal(output_width_,output_height_,static_cast<DlssQuality>(dlss_mode_),w,h);
 #else
   const bool sized=x64remote::dlss_render_size(output_width_,output_height_,dlss_mode_,w,h);
 #endif
@@ -1080,7 +1164,7 @@ void Renderer::set_world_size() noexcept {
   }
   char reason[96];std::snprintf(reason,sizeof(reason),"DLSS has no render size for %ux%u",output_width_,output_height_);
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
-  const char* error=dlss_backend_.last_error();
+  const char* error=d3d12_?reason:dlss_backend_.last_error();
   set_dlss_unavailable_reason(error[0]?error:reason);
   bridge_report_event("dlss_frame_refused",dlss_unavailable_reason());
   width_=output_width_;height_=output_height_;return;
@@ -3206,6 +3290,7 @@ void Renderer::release() {
  world_map_preview_reasons_.clear();
  scene_thread_.reset();
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ embedded_d3d12_.stop_ngx(); // joined frame owner; executor/device still alive
  dlss_backend_.shutdown(); // no remaining frame calls; before any device resources are released
 #endif
  write_harness_path_rows(); // frame accounting rows still buffered
@@ -3265,6 +3350,12 @@ void Renderer::release() {
  debug_overlay_.shutdown();
  bridge_set_profile_enabled(false);
  profiler_.shutdown();
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ // Both clients have finished using the executor above. Their borrowed
+ // interfaces must be detached even if the following ensure selects D3D11.
+ profiler_.set_timestamps(nullptr);
+ debug_overlay_.set_renderer(nullptr);
+#endif
  if(context_)context_->ClearState();
 
  game_particle_vs_.Reset();game_particle_ps_.Reset();game_particle_constants_.Reset();game_particle_buffer_.Reset();game_particle_srv_.Reset();
@@ -3416,6 +3507,102 @@ void Renderer::release() {
  present_smoothed_ms_=0.0;
 #ifdef EID3D11_EMBEDDED
  embedded_figure_layers_.clear(); embedded_figure_vs_.Reset(); embedded_figure_ps_.Reset(); embedded_figure_sampler_.Reset();
+#if !defined(EID3D11_SHADER_EMBED)
+ // release() also serves repeated ensure(): histories and cached FG
+ // capability/failure values belong to one device. Retire frame images
+ // after NGX stops, while the executor still owns its descriptor heaps.
+ if(d3d12_){
+  // The final native flush and pose/instance retirement above have finished.
+  // Drop persistent and frame buffers, including ready/failed and upload
+  // revisions: no native resource can be adopted by a replacement executor.
+  // Map producers and their device caches must retire after the last draw.
+  // Reuse the world release to invalidate the same-map fast path as well.
+  release_ground_cover();
+  release_ambient_world();
+  // CritterState owns immutable GPU meshes/skins as well as frame buffers.
+  // World release deliberately keeps them and its ready gate. Dropping the
+  // state also joins its value-only asset/shader futures, which capture
+  // neither Renderer nor the executor.
+  critters_.reset();critters_failed_=false;
+  critters_drawn_frame_=critters_status_frame_=UINT64_MAX;
+  critters_summary_={};
+  std::snprintf(critters_status_,sizeof(critters_status_),"Critters: pass not reached yet");
+  ambient12_={};
+  gc_t2_cell_class12_.reset();gc_t2_classes12_.reset();gc_t2_color12_.reset();
+  gc_t2_programs12_.clear();
+  gc_t2_cell_class_srv_.Reset();gc_t2_tile_classes_.clear();gc_t2_rows_generation_=0;
+  terrain2_table12_={};terrain2_table_={};terrain2_table_count_=0;
+  terrain2_records_first_=0;terrain2_table_full_logged_=false;
+  terrain2_cache_params12_.reset();
+  terrain2_cache_programs12_.clear();terrain2_bake12_programs_.clear();
+  snow_surface12_.reset();snow_surface_key_=0;snow_surface12_program_.clear();
+  // The liquid workers have joined above. Their upload/null checks must
+  // see an empty owner even if the next device draws the same source map.
+  liquid12_={};
+  // The common D3D11 release functions reset shared validity/capacity gates,
+  // but these parallel executor allocations must retire here as well.
+  water12_={};fog12_={};cave12_={};
+  liquid_swamp_frame_generation_=UINT64_MAX;liquid_surf_built_serial_=0;
+  liquid_wave_current_=0;
+  // A saved loading picture cannot be copied by a replacement executor.
+  load_picture12_.reset();
+  load_picture_this_frame_=load_picture_fitted_=false;
+  load_reveal_tracking_=load_reveal_holding_=false;
+  native12_={};
+  terrain_textures_d3d12_.clear();terrain_pages_d3d12_={};
+  native_terrain_frame_d3d12_.clear();
+  scene_mip_textures_.clear();
+  // Keep source bytes for exact-generation snapshot recovery. GPU-only
+  // captures retain their marker so upload rejects them until recaptured.
+  for(auto& item:core_surfaces_){
+   if(!item.second)continue;
+   item.second->d3d12.reset();
+   item.second->uploaded_shape={};
+   ++item.second->texture_serial;
+  }
+  // Atlas slices and the fixed bake targets all belong to this executor.
+  impostors_={};
+  native_impostor_pixels_uploaded_=-1.f;
+  native_impostor_debug_uploaded_=false;
+  // Preserve source texture identities, but rebuild their device-specific
+  // profiles even when the composition serial (or fixed unit table) is equal.
+  for(auto& item:material_profiles_){
+   auto& profile=item.second;
+   profile.profile12.reset();profile.class12.reset();
+   profile.srv.Reset();profile.relief_srv.Reset();profile.class_srv.Reset();
+   profile.serial=0;profile.strands=profile.failed=false;
+  }
+  ++material_profiles_revision_;material_profiles_indexed_=UINT64_MAX;
+  material_profiles_dirty_=true;
+  post12_={};upscale12_={};ao12_={};shadow12_={};
+  world_d3d12_.reset();d3d12_white_.reset();native_hiz12_.reset();
+  prepass_rest12_.reset();prepass_normal12_.reset();shadow_mask12_.reset();
+  prepass_failed_width12_=prepass_failed_height12_=0;
+  shadow_history_mask12_={};shadow_history_depth12_.reset();shadow_history_constants12_={};
+  world_d3d12_bound_=world_history_bound12_=false;
+  hit_test12_.reset();hit_test_saved_world12_.reset();particle_depth12_={};
+  gamma_lut_d3d12_.reset();gamma_frame_d3d12_.reset();
+  hudless_d3d12_.reset();hudless_gamma_d3d12_.reset();
+  fg_caps_checked_=fg_previous_generated_=fg_frame_image_=false;
+  fg_dlssg_unavailable_[0]=0;for(auto& reason:fg_failed_)reason[0]=0;
+  fg_reason_mode_=-1;frame_generation_mode_=0;fsr_prepared_=false;
+  world_output_this_present_=hudless_this_present_=fg_upscaler_valid_=false;
+  fg_upscaler_reset_=true;fg_skip_logged_="";
+  fg_not_game_frame_=0;fg_not_game_frame_logged_=~0u;
+  fg_stats_real_=fg_stats_generated_=0;fg_stats_tick_=0;
+  fg_presented_fps_=fg_real_fps_=0.;
+  fg_low_rate_=fg_rate_previous_game_=false;fg_low_rate_windows_=0;
+  fg_rate_window_ms_=fg_rate_on_ms_=0.;fg_rate_cost_ms_=-1.;fg_rate_window_count_=0;
+  dlss_reset_=true;dlss_previous_valid_=false;embedded_d3d12_presented_=false;
+ }
+ // Every renderer worker/client and GPU owner above has retired. External
+ // snapshots/preparers retain their session identity for late release;
+ // the executor invalidates that owner before its heaps/device disappear.
+ // Detach dispatch before destruction so repeated release/ensure cannot
+ // submit work to a destroyed executor.
+ d3d12_=nullptr;
+ embedded_d3d12_.shutdown();
+#endif
 #endif
 }
 

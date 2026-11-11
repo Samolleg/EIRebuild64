@@ -37,6 +37,8 @@ using D3D12TextureRef = std::shared_ptr<D3D12Texture>;
 // The shared UI programs (renderer_device.cpp kShader and its neighbours).
 enum class D3D12UiProgram : std::uint8_t { game, interface_scaled, interface_text, backdrop, count };
 
+struct D3D12NativeState;
+
 // One UI draw over the pass's vertices (the Renderer's 32-byte Vertex).
 struct D3D12UiDraw {
     const D3D12Texture* texture = nullptr;  // t0
@@ -44,6 +46,9 @@ struct D3D12UiDraw {
     FixedBlend blend{};
     D3D11_SAMPLER_DESC sampler{};           // s0
     bool triangle_list = false;             // else a strip
+    // Synchronous embedded fixed-function ingress, using the game shaders.
+    const D3D12NativeState* fixed_state = nullptr;
+    D3DPRIMITIVETYPE fixed_topology = D3DPT_TRIANGLELIST;
     bool scissor = false;
     RECT scissor_rect{};                    // output pixels
     UINT constants = 0;                     // its block in D3D12UiPass::constants
@@ -111,8 +116,9 @@ struct ShaderProgram;  // shader_cache.h
 struct D3D12PreparedUpload;
 using D3D12PreparedUploadRef = std::shared_ptr<D3D12PreparedUpload>;
 
-// Preparation of those uploads: any thread, several at once. It holds only
-// the device (shared ownership), so a worker may keep it past the executor.
+// Preparation of those uploads: any thread, several at once. It holds the
+// device and session identity (shared ownership), so a worker may keep it
+// past the executor. A replacement executor rejects its prepared uploads.
 class D3D12Preparer {
 public:
     virtual ~D3D12Preparer() = default;
@@ -143,12 +149,14 @@ public:
     // Render thread: the prepared resource with its views (as create_buffer /
     // create_texture make them), its copies recorded in stream order, the
     // upload memory released once this frame finished. The upload is spent.
+    // Uploads from another executor return DXGI_ERROR_DEVICE_RESET unconsumed.
     virtual HRESULT finish_buffer(D3D12PreparedUpload& upload, UINT stride, UINT flags, D3D12BufferRef& out) = 0;
     virtual HRESULT finish_texture(D3D12PreparedUpload& upload, D3D12TextureRef& out) = 0;
     // A shader-readable texture (B8G8R8A8, BC1-3 or the 16-bit owned formats).
     virtual HRESULT create_texture(UINT width, UINT height, DXGI_FORMAT format, D3D12TextureRef& out, UINT mips = 1) = 0;
     // A texture array (shader-readable as Texture2DArray, even with one slice).
-    // A texture's size, levels and format.
+    // A current executor texture's size, levels and format. Returns false
+    // for another executor's allocation, including surviving old snapshots.
     virtual bool texture_info(const D3D12Texture& texture, UINT& width, UINT& height, UINT& mips, DXGI_FORMAT& format) const noexcept = 0;
     virtual HRESULT create_texture_array(UINT width, UINT height, DXGI_FORMAT format, UINT mips, UINT slices, D3D12TextureRef& out) = 0;
     // A texture compute programs write (u0-u7) and shaders read: 2D, 3D when

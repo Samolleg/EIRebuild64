@@ -1,0 +1,7 @@
+// Host-only D3D12 programs (Host\d3d12\*.hlsl), compiled by Host\host.mak with dxc.exe.
+// Paths are relative to this file.
+D3D12_DIAG_CS RCDATA "..\\..\\build\\x64-host\\dxil\\diag_cs.dxil"
+D3D12_DIAG_VS RCDATA "..\\..\\build\\x64-host\\dxil\\diag_vs.dxil"
+D3D12_DIAG_PS RCDATA "..\\..\\build\\x64-host\\dxil\\diag_ps.dxil"
+D3D12_IMGUI_VS RCDATA "..\\..\\build\\x64-host\\dxil\\imgui_vs.dxil"
+D3D12_IMGUI_PS RCDATA "..\\..\\build\\x64-host\\dxil\\imgui_ps.dxil"

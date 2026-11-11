@@ -2,9 +2,17 @@
 #include "../dx11/RendererDX11.h"
 #include "../dx11/ConstantBuffer.h"
 #include "../GameJournal.h"
+#include "E1SurfaceBridge.h"
 
 void CDX11::RestoreHostBindings()
 {
+    bool nativeD3D12 = false;
+    IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        nativeD3D12 = renderer.d3d12_backend();
+        return S_OK;
+    }));
+    // Native passes own their target, PSO and texture bindings.
+    if (nativeD3D12) return;
     RefreshOwnedTargets();
     SetRenderStates();
     for (UINT stage=0;stage<boundFigureTextures.size();++stage) {
@@ -20,14 +28,27 @@ bool CDX11::SubmitC56CampFigure(const owned::NativeGeometryView& view)
         owned::FixedState state;
         for(const auto& entry:fake_dx7.render_state)
             if(entry.first>=0&&std::size_t(entry.first)<state.render.size())state.render[entry.first]=entry.second;
-        D3D11_VIEWPORT viewport{};UINT count=1;
-        deviceContext->RSGetViewports(&count,&viewport);
-        state.viewport={DWORD(viewport.TopLeftX),DWORD(viewport.TopLeftY),DWORD(viewport.Width),DWORD(viewport.Height),viewport.MinDepth,viewport.MaxDepth};
+        bool nativeD3D12=false;
+        hr=rendererFacade->Visit([&](owned::Renderer& renderer) {
+            nativeD3D12=renderer.d3d12_backend();
+            if(nativeD3D12)return renderer.read_embedded_viewport(state.viewport);
+            // Keep the source D3D11 viewport and submission order unchanged.
+            D3D11_VIEWPORT viewport{};UINT count=1;
+            deviceContext->RSGetViewports(&count,&viewport);
+            state.viewport={DWORD(viewport.TopLeftX),DWORD(viewport.TopLeftY),DWORD(viewport.Width),DWORD(viewport.Height),viewport.MinDepth,viewport.MaxDepth};
+            return S_OK;
+        });
+        if(FAILED(hr)) {
+            campPopupFailed=true;
+            GameJournal::Event("RENDER","camp_viewport_failed","hr=%08lx",static_cast<unsigned long>(hr));
+            return false;
+        }
+        const bool textured=bool(boundFigureTextures[0])||(nativeD3D12&&boundParticleSurface!=0);
         state.render[D3DRENDERSTATE_FOGENABLE]=FALSE;
         const auto mode=GetConstantBuffers()->cb_ps_pixelshader.data.alphaMode;
-        state.stage[0][D3DTSS_COLOROP]=boundFigureTextures[0]?D3DTOP_MODULATE:D3DTOP_SELECTARG2;
+        state.stage[0][D3DTSS_COLOROP]=textured?D3DTOP_MODULATE:D3DTOP_SELECTARG2;
         state.stage[0][D3DTSS_COLORARG1]=D3DTA_TEXTURE;state.stage[0][D3DTSS_COLORARG2]=D3DTA_DIFFUSE;
-        state.stage[0][D3DTSS_ALPHAOP]=!boundFigureTextures[0]?D3DTOP_SELECTARG2:mode==0?D3DTOP_SELECTARG1:mode==2?D3DTOP_SELECTARG2:D3DTOP_MODULATE;
+        state.stage[0][D3DTSS_ALPHAOP]=!textured?D3DTOP_SELECTARG2:mode==0?D3DTOP_SELECTARG1:mode==2?D3DTOP_SELECTARG2:D3DTOP_MODULATE;
         state.stage[0][D3DTSS_ALPHAARG1]=D3DTA_TEXTURE;state.stage[0][D3DTSS_ALPHAARG2]=D3DTA_DIFFUSE;
         state.stage[0][D3DTSS_ADDRESSU]=state.stage[0][D3DTSS_ADDRESSV]=D3DTADDRESS_WRAP;
         state.stage[0][D3DTSS_MINFILTER]=state.stage[0][D3DTSS_MAGFILTER]=D3DTFG_LINEAR;
@@ -37,12 +58,25 @@ bool CDX11::SubmitC56CampFigure(const owned::NativeGeometryView& view)
         hr=rendererFacade->Visit([&](owned::Renderer& renderer) {
             HRESULT result=renderer.has_pending_ui()?renderer.flush_ui():S_OK;
             if(SUCCEEDED(result)) {
-                if(boundFigureTextures[1])
+                if(nativeD3D12 && boundSecondarySurface) {
+                    const auto primary=OwnedRender::E1SurfaceValue(boundParticleSurface);
+                    const auto secondary=OwnedRender::E1SurfaceValue(boundSecondarySurface);
+                    if(!secondary || (boundParticleSurface && !primary))return E_INVALIDARG;
+                    result=renderer.queue_embedded_figure(materialView,state,nullptr,nullptr,nullptr,{},
+                        primary.get(),secondary.get());
+                } else if(boundFigureTextures[1])
                     result=renderer.queue_embedded_figure(materialView,state,boundFigureTextures[0].Get(),boundFigureTextures[1].Get(),nullptr,{});
                 else {
                     owned::Renderer::NativeQueueCheckpoint checkpoint;
                     if(!renderer.checkpoint_native(checkpoint))return E_FAIL;
-                    result=renderer.queue_native_direct(materialView,state,boundFigureTextures[0].Get());
+                    if(nativeD3D12&&!materialView.skn_material.identity) {
+                        // Reuse completed CPU publications and the author's native
+                        // upload/geometry path; no D3D11 SRV exists in this session.
+                        std::shared_ptr<owned::SurfaceImage> image;
+                        result=boundParticleSurface?OwnedRender::E1ParticleSurfaceImage(
+                            nullptr,nullptr,boundParticleSurface,image):S_OK;
+                        if(SUCCEEDED(result))result=renderer.queue_native(materialView,state,image.get());
+                    } else result=renderer.queue_native_direct(materialView,state,boundFigureTextures[0].Get());
                     if(FAILED(result))renderer.rollback_native(checkpoint);
                 }
             }

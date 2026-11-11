@@ -16,10 +16,34 @@ if (!$DlssSdkSource) { $DlssSdkSource = Join-Path $projectRoot 'deps/dlss-sdk/v3
 $dlssFiles = @('include/nvsdk_ngx.h', 'include/nvsdk_ngx_defs.h', 'include/nvsdk_ngx_params.h',
     'include/nvsdk_ngx_helpers.h', 'include/nvsdk_ngx_helpers_d3d.h', 'include/nvsdk_ngx_helpers_cuda.h',
     'lib/Windows_x86_64/x64/nvsdk_ngx_s.lib', 'lib/Windows_x86_64/x64/nvsdk_ngx_s_dbg.lib',
-    'lib/Windows_x86_64/rel/nvngx_dlss.dll', 'LICENSE.txt')
+    'include/nvsdk_ngx_defs_dlssg.h', 'include/nvsdk_ngx_params_dlssg.h',
+    'include/nvsdk_ngx_helpers_dlssg.h', 'include/nvsdk_ngx_helpers_dlssg_d3d.h',
+    'lib/Windows_x86_64/rel/nvngx_dlss.dll', 'lib/Windows_x86_64/rel/nvngx_dlssg.dll', 'LICENSE.txt')
 foreach ($file in $dlssFiles) {
     if (!(Test-Path -LiteralPath (Join-Path $DlssSdkSource $file) -PathType Leaf)) {
         throw "Missing DLSS SDK v310.9.16 file: $DlssSdkSource/$file. Pass -DlssSdkSource or set EIREBUILD64_DLSS_SDK. Nothing will be downloaded."
+    }
+}
+# Resolve pinned local D3D12 inputs before copying any dependencies.
+$d3d12Packages = @(
+    @{ Source='deps/fidelityfx-sdk/2.3.0'; Destination='dependencies/fidelityfx/2.3.0'; Files=@(
+        'api/include/*','framegeneration/include/*','upscalers/include/*',
+        'signedbin/amd_fidelityfx_loader_dx12.lib','signedbin/amd_fidelityfx_loader_dx12.dll',
+        'signedbin/amd_fidelityfx_framegeneration_dx12.dll','license.md') },
+    @{ Source='deps/nvapi/70d337db/nvapi-70d337db9186e968eab622f7e786de7e437faf3d'; Destination='dependencies/nvapi/70d337db'; Files=@(
+        '*.h','amd64/nvapi64.lib','License.txt') },
+    @{ Source='deps/dxc/1.9.2609'; Destination='dependencies/dxc/1.9.2609'; Files=@(
+        'bin/x64/dxc.exe','bin/x64/dxcompiler.dll','bin/x64/dxil.dll',
+        'LICENCE-MIT.txt','LICENSE-LLVM.txt','LICENSE-MS.txt') }
+)
+$d3d12Files = foreach ($package in $d3d12Packages) {
+    $source = Join-Path $projectRoot $package.Source
+    foreach ($pattern in $package.Files) {
+        $matches = @(Get-ChildItem -Path (Join-Path $source $pattern) -File -Recurse -ErrorAction Stop)
+        if (!$matches.Count) { throw "Missing local D3D12 SDK input: $source/$pattern. Nothing will be downloaded." }
+        foreach ($file in $matches) {
+            [pscustomobject]@{ Source=$file.FullName; Destination=(Join-Path (Join-Path $repo $package.Destination) $file.FullName.Substring($source.Length+1)) }
+        }
     }
 }
 $cache = Join-Path $projectRoot 'deps/nuget'
@@ -55,6 +79,11 @@ if ($ffmpegMissing -and !(Test-Path -LiteralPath $FFmpegSource -PathType Contain
 }
 
 # Only ignored packages/, out/ and dependencies/ receive generated/copied files.
+foreach ($file in $d3d12Files) {
+    New-Item -ItemType Directory -Force -Path (Split-Path $file.Destination) | Out-Null
+    Copy-Item -LiteralPath $file.Source -Destination $file.Destination -Force
+}
+Write-Output 'Prepared FidelityFX 2.3.0, NVAPI 70d337db and DXC 1.9.2609 from local deps.'
 $dlssDestination = Join-Path $repo 'dependencies/dlss/v310.9.16'
 foreach ($file in $dlssFiles) {
     $destination = Join-Path $dlssDestination $file

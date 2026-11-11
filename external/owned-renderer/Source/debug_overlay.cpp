@@ -2164,12 +2164,14 @@ void apply_ui_language(DebugOverlay::Implementation& state, const RendererConfig
 }
 
 // The WDDM local video memory budget of the device's adapter (0: unknown).
-std::uint64_t adapter_local_budget(ID3D11Device* device) noexcept {
+std::uint64_t adapter_local_budget(ID3D11Device* device, IDXGIAdapter* native_adapter) noexcept {
     std::uint64_t budget = 0;
     IDXGIDevice* dxgi_device = nullptr;
-    if (FAILED(device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgi_device)))) return 0;
-    IDXGIAdapter* adapter = nullptr;
-    if (SUCCEEDED(dxgi_device->GetAdapter(&adapter))) {
+    IDXGIAdapter* adapter = native_adapter;
+    if (adapter) adapter->AddRef();
+    else if (device && SUCCEEDED(device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgi_device))))
+        dxgi_device->GetAdapter(&adapter);
+    if (adapter) {
         IDXGIAdapter3* adapter3 = nullptr;
         if (SUCCEEDED(adapter->QueryInterface(__uuidof(IDXGIAdapter3), reinterpret_cast<void**>(&adapter3)))) {
             DXGI_QUERY_VIDEO_MEMORY_INFO local{};
@@ -2178,17 +2180,19 @@ std::uint64_t adapter_local_budget(ID3D11Device* device) noexcept {
         }
         adapter->Release();
     }
-    dxgi_device->Release();
+    if (dxgi_device) dxgi_device->Release();
     return budget;
 }
 
 // First-run hint: UMA adapters expose no non-local segment; discrete cards
 // are graded by their local budget (DXGI_ADAPTER_DESC sizes are 32-bit here).
-void suggest_for_adapter(DebugOverlay::Implementation& state, ID3D11Device* device) {
+void suggest_for_adapter(DebugOverlay::Implementation& state, ID3D11Device* device, IDXGIAdapter* native_adapter) {
     IDXGIDevice* dxgi_device = nullptr;
-    if (FAILED(device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgi_device)))) return;
-    IDXGIAdapter* adapter = nullptr;
-    if (SUCCEEDED(dxgi_device->GetAdapter(&adapter))) {
+    IDXGIAdapter* adapter = native_adapter;
+    if (adapter) adapter->AddRef();
+    else if (device && SUCCEEDED(device->QueryInterface(__uuidof(IDXGIDevice), reinterpret_cast<void**>(&dxgi_device))))
+        dxgi_device->GetAdapter(&adapter);
+    if (adapter) {
         DXGI_ADAPTER_DESC desc{};
         std::uint64_t memory = 0;
         bool integrated = false;
@@ -2213,7 +2217,7 @@ void suggest_for_adapter(DebugOverlay::Implementation& state, ID3D11Device* devi
         state.suggested_preset = suggest_graphics_preset(integrated, memory);
         adapter->Release();
     }
-    dxgi_device->Release();
+    if (dxgi_device) dxgi_device->Release();
 }
 
 } // namespace
@@ -2260,9 +2264,9 @@ void DebugOverlay::load_config_only(const wchar_t* config_path) {
 }
 
 HRESULT DebugOverlay::initialize(HWND window, ID3D11Device* device, ID3D11DeviceContext* context,
-                                 const wchar_t* config_path) {
+                                 const wchar_t* config_path, IDXGIAdapter* native_adapter) {
     shutdown();
-    if (!window || !device || !context) return E_INVALIDARG;
+    if (!window || (!renderer_ && (!device || !context))) return E_INVALIDARG;
     auto state = std::make_unique<Implementation>();
     state->window = window;
     state->device = device;
@@ -2280,11 +2284,11 @@ HRESULT DebugOverlay::initialize(HWND window, ID3D11Device* device, ID3D11Device
     // Players start without developer windows unless their ini chose one.
     if (!state->developer && !config_.overlay_mode_loaded()) config_.set_overlay_mode(DebugOverlayMode::hidden);
     if (first_run_settings_due(config_.first_run_done(), state->developer))
-        suggest_for_adapter(*state, device);
+        suggest_for_adapter(*state, device, native_adapter);
     // Crash safety net: settings saved past the VRAM budget and no clean exit
     // since (crash, hang, driver reset). Back to the adapter suggestion.
     if (config_.over_budget_pending()) {
-        if (state->suggested_preset == GraphicsPreset::custom) suggest_for_adapter(*state, device);
+        if (state->suggested_preset == GraphicsPreset::custom) suggest_for_adapter(*state, device, native_adapter);
         const GraphicsPreset preset =
             state->suggested_preset != GraphicsPreset::custom ? state->suggested_preset : GraphicsPreset::low;
         apply_graphics_preset(config_, preset);
@@ -2303,7 +2307,7 @@ HRESULT DebugOverlay::initialize(HWND window, ID3D11Device* device, ID3D11Device
     // the telemetry sampler is idle (it only runs with a developer overlay).
     // Only the first-run adapter suggestion set it, so a configured install
     // showed "Video memory: n/a" there.
-    if (!state->adapter_budget_bytes) state->adapter_budget_bytes = adapter_local_budget(device);
+    if (!state->adapter_budget_bytes) state->adapter_budget_bytes = adapter_local_budget(device, native_adapter);
     state->f10_was_down = native_user_input_enabled() && (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
     state->f11_was_down = native_user_input_enabled() && (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
     state->ui_scale = overlay_scale_for_window(window);

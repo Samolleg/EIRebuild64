@@ -687,6 +687,18 @@ static void WaitForIdleWork()
         armed ? INFINITE : static_cast<DWORD>(remaining), QS_ALLINPUT, MWMO_INPUTAVAILABLE);
     if (armed) CancelWaitableTimer(timer.handle);
 }
+namespace {
+// The idle step owns the input phase; nested draws finish at their own present.
+class NativeSimulationScope {
+    CDX11* renderer;
+    bool ownsPhase;
+public:
+    NativeSimulationScope() : renderer(theRenderer.GetD3D()), ownsPhase(false) {
+        if (renderer) ownsPhase = renderer->BeginSimulation();
+    }
+    ~NativeSimulationScope() { if (ownsPhase) renderer->FinishSimulation(); }
+};
+}
 static bool NGame::ProcessMessages()
 {
     MSG msg;
@@ -699,6 +711,7 @@ static bool NGame::ProcessMessages()
                         PM_NOREMOVE)) // no messages in the queue => process OnIdle
     {
         CorePerf::Frame coreFrame;
+        NativeSimulationScope simulation;
         GameJournal::MemoryFrame(GetTickCount());
         C2DScreenWait::Update();
         // Update render state
@@ -728,6 +741,8 @@ static bool NGame::ProcessMessages()
     CorePerf::Scope coreMessages(CorePerf::Messages);
     if (!GetMessage(&msg, 0, 0, 0))
         return false;
+    // Keep one simulation across queued input messages until the idle draw.
+    if (auto* renderer = theRenderer.GetD3D()) renderer->BeginSimulation();
     FrameDiagnostics::Message();
     TranslateMessage(&msg);
     // DispatchMessage( &msg );

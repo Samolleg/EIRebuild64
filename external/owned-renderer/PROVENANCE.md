@@ -1,3 +1,806 @@
+# X64D3D12 curse material ingress, stage 31 (2026-11-11)
+
+The source curse producer now publishes carrier 720101's completed CPU surface
+identity when no D3D11 SRV exists. CDX11 resolves that publication with the
+existing E1ParticleSurfaceImage cache on D3D12. draw_embedded_curse selects
+textured versus plain meshes explicitly and submits the CPU-backed material
+through queue_native / the author's D3D12 upload and native draw executor.
+Each mesh is flushed before releasing its material reference. Missing required
+beam material still fails the draw and reaches the existing host journal.
+D3D11 retains its SRV and queue_native_direct route. Geometry, HLSL and effect
+algorithms are unchanged; no SDK or runtime DLL added in this stage.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}; the additional
+local texture ingress is Game/ModCurseVisual.cpp and Game/dx11/RendererDX11.cpp.
+
+Full BRIEF remains open. Next adapt the arena/golem material arrays and finish
+remaining live sprite/SRV consumers, then coordinator compilation/link and
+D3D12 startup/FG plus D3D11 regression validation. E1Surface NOMINMAX was
+already fixed in stage 26. No compilation, tests or game execution performed.
+
+# X64D3D12 embedded fixed-function ingress, stage 30 (2026-11-11)
+
+Source SubmitC74FixedFunction now supplies its published CPU surface on the
+native backend. The bounded renderer entry admits D3D12, retaining finite
+vertex/index validation and the flush at the exact source stream position.
+The common author constant builder feeds the existing game VS/PS and vertex
+layout. Indices are expanded in order for the executor's vertex upload ring;
+point/line/triangle lists and strips retain their topology. The executor uses
+its existing native state translation for depth, blend, cull and wireframe,
+with the existing UI vertex layout, sampler and scissor. D3D11 keeps its
+original buffer/map/submission path. No HLSL, SDK or runtime DLL added.
+Host transport remains Source/embedded_d3d12.{h,cpp}; the new local ingress is
+Game/dx11/RendererDX11.cpp and Source/renderer_flush.cpp. The fixed pipeline
+cache is session-local; it uses the author's asynchronous pipeline library
+and omission reporting, but is not in the recorded warm-up list yet.
+
+Full BRIEF remains open: remaining sprite/SRV consumers still need native
+adapters, followed by coordinator build/link, D3D12 startup/FG and D3D11
+regression validation. The reported NOMINMAX fix was already in stage 26.
+No compilation, shader compilation, tests or game execution performed.
+
+# X64D3D12 immediate figure layer ingress, stage 29 (2026-11-11)
+
+The source BindTexture boundary retains the completed secondary CPU surface ID.
+Camp and immediate figure submissions resolve both published surface generations
+and pass them into queue_embedded_figure. Figure scopes retain explicit source
+surface IDs alongside their D3D11 SRVs, preserving the scope texture selection.
+D3D12 uploads through get_native_owned_texture_d3d12, composes both layers with
+the existing embedded figure shader/mip executor and flushes the native draw
+before releasing the temporary texture. Missing publications and pending
+composition fail the draw. Existing D3D11 calls retain their SRV path.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}; this stage
+adds source ingress in Game/dx11 and Game/OwnedRender/CampSubmission.cpp.
+No SDK, DLL, HLSL or rendering algorithm added.
+
+Full BRIEF remains open. Next adapt source fixed-function drawing and remaining
+sprite/SRV consumers, then coordinator build/link and D3D12 startup/FG plus
+D3D11 regression validation. The reported E1Surface NOMINMAX fix was already
+committed in stage 26. No compilation, tests or game execution in this stage.
+
+# X64D3D12 secondary record texture composition, stage 28 (2026-11-11)
+
+queue_embedded_records now resolves both owned surfaces on D3D12 and caches
+an RGB composite keyed by the surface pair and both generations. The existing
+embedded layer HLSL was moved unchanged into embedded_figure_shader.h, shared
+with D3D11 and enumerated for DXIL. Primary alpha, linear wrap sampling and the
+full generated mip chain are preserved. D3D12 uses an RGBA render target then
+a storage texture for the author's mip executor. Pending pipelines never
+publish an unwritten texture. Native batches are flushed before target changes;
+the current world/interface target is restored. No SDK or runtime DLL added.
+Host adaptation remains Source/embedded_d3d12.{h,cpp}.
+
+Full BRIEF remains open. This stage adapts the prepared-record consumer only;
+source BindTexture still rejects secondary CPU bindings until the immediate
+camp/figure adapter also supports them. Fixed-function and remaining sprite/SRV
+routes still require D3D12 adapters. Next connect those source drawing boundaries,
+then coordinator build/link, startup/FG and D3D11 regression validation.
+No compilation, shader compilation, tests or game execution performed.
+
+# X64D3D12 game effect admission, stage 27 (2026-11-11)
+
+The five game-effect producers now admit the embedded D3D12 executor when
+there is no D3D11 device/context. Particles, lightning ribbons, selection
+marks, combat glyphs and print runs reach the existing author-owned
+ensure_game_particle_pipeline / draw_game_effect_d3d12 path. Input checks,
+CPU ordering, deferred ground-mark scheduling, constants and shader programs
+retain their existing implementation. D3D11 admission still requires both
+its device and context. Host transport remains Source/embedded_d3d12.{h,cpp}.
+This stage adds no libraries, DLLs or shader programs.
+
+Full BRIEF remains open. Source fixed-function drawing, secondary figure
+composition / BindTexture stage-one admission and remaining sprite/SRV
+boundaries still require adapters. These five producer fixes remove an
+additional drawing blocker but do not complete those adapters. Next finish
+the fixed-function route and secondary composition, then coordinator build,
+D3D12 startup/FG and D3D11 regression validation. Compilation, tests and game
+execution have not been performed in this stage.
+
+# X64D3D12 compile unblock and wound texture ingress, stage 26 (2026-11-11)
+
+E1Surface.cpp defines NOMINMAX before its first Windows-dependent include,
+matching the embedded source units. This addresses the min/max macro collision
+reported by the coordinator; compilation has not been repeated here.
+queue_embedded_wound now resolves its owned surface through the existing
+D3D12 texture cache and passes the texture reference/backing/generation into
+queue_native_impl with the same prepared wound material and blend state.
+The D3D11 branch and the author's HLSL/algorithms are unchanged.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}; no SDK/DLL added.
+
+Full BRIEF remains open: secondary figure composition, source fixed-function
+and remaining sprite/SRV adapters are still required. The wound ingress alone
+does not enable the secondary source binding rejected by BindTexture.
+Next finish those drawing adapters, then coordinator build/startup/FG and
+D3D11 regression validation. No compilation, tests or game run performed.
+
+# X64D3D12 local input/simulation/render phases, stage 25 (2026-11-11)
+
+GameMain now opens the embedded simulation before queued input dispatch and
+idle simulation. Queued messages share the simulation ID and Reflex Sleep.
+The idle scope closes skipped simulation and exception exits. Engine-frame
+begin transfers its QPC/ID to the author's Reflex/executor state. Loading,
+capture and nested draws can start their own render invocation. Present,
+capture-only discard and failed BeginFrame close the render phase. The
+executor's existing render-end marker deduplicates the present boundary.
+The source frame gate serializes these transitions with the renderer.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}; source
+boundaries are Game/GameMain.cpp and Game/dx11/RendererDX11.{h,cpp}, with
+dispatch in Source/renderer_frame.cpp. No HLSL, SDK or runtime DLL added.
+
+Full BRIEF remains open. Secondary figure/wound composition, fixed-function
+source draws and remaining sprite/SRV boundaries still need native adapters.
+Continue with those source drawing blockers before the coordinator builds.
+No compilation, shader compilation, tests or game run performed. Build/link,
+D3D12 startup/FG, nested loading/capture and D3D11 regression are unverified.
+
+# X64D3D12 native camp figure boundary, stage 24 (2026-11-11)
+
+Camp figure submissions now read the native viewport through Renderer instead
+of dereferencing the absent source D3D11 context. Non-SKN camp geometry keeps
+its primary CPU surface publication through the existing bounded snapshot /
+upload cache and the author's queue_native path. Texture/alpha modulation
+recognizes that publication; failed snapshots roll back the native checkpoint
+and invalidate the popup rather than acknowledging an untextured draw.
+D3D11 retains its viewport read, SRVs and submission paths. SKN material
+submission is unchanged. No HLSL, algorithms, SDKs or runtime DLLs added.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}; this stage
+adapts Game/OwnedRender/CampSubmission.cpp.
+
+Full BRIEF remains open. Secondary figure/wound composition still reaches
+D3D11-only compose_embedded_figure_texture in embedded_figure_material.inl;
+BindTexture therefore still rejects secondary CPU bindings. Fixed-function
+source draws likewise require a native adapter (draw_embedded_fixed_function
+and draw_fixed_function currently require D3D11). Sprite/SRV boundaries and
+local input/simulation/render phase dispatch also remain to finish. These
+are startup/drawing blockers, not optional resource retirement work.
+No compilation, shader compilation, tests or game run performed. Build/link,
+D3D12 startup/FG and D3D11 regression remain unverified.
+
+# X64D3D12 source particle texture bindings, stage 23 (2026-11-11)
+
+The source BindTexture stage-zero boundary now retains a completed surface ID
+when the native backend has no D3D11 SRV. Unbinding clears that ID. Raw SRVs,
+unpublished IDs and unsupported secondary native surface binds return FALSE
+before modifying the prior binding. Secondary figure/wound bindings still
+need their owned-surface adapter and are not accepted silently.
+Particle, print and combat-text source adapters recognize that ID and use
+the existing E1ParticleSurfaceImage CPU snapshot/upload cache. Material state
+retains textured modulation for CPU publications. RestoreHostBindings skips
+D3D11 target/state/SRV restoration for native passes, including the particle
+pass that previously restored those bindings inline. D3D11 retains its
+existing target/state/SRV operations. No HLSL, SDK or runtime DLLs added.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}; this stage
+changes Game/dx11/RendererDX11.cpp and Game/OwnedRender/CampSubmission.cpp.
+
+Full BRIEF remains open. Next finish source figure/secondary texture, fixed
+function and sprite boundaries and connect local input/simulation/render
+phases. These pending adapters can still prevent D3D12 startup and drawing.
+No compilation, shader compilation, tests or game run performed. Build/link,
+D3D12 startup/FG and D3D11 regression remain unverified.
+
+# X64D3D12 backend selection, stage 22 (2026-11-11)
+
+Supersedes earlier notes that renderer_backend=1 still creates D3D11.
+ensure_with_driver now reads the registered backend option through the same
+RendererConfig parser before D3D11CreateDevice. A native session (including
+failed startup) cannot fall through to D3D11 on a repeated ensure call.
+The D3D11 startup uses a separate read-only config probe; its live config,
+device initialization and explicit WARP diagnostic route are unchanged.
+The selected D3D12 route calls the prepared ensure_embedded_d3d12 owner:
+author's executor/device/swap chain, NGX, native overlay, queue timestamps,
+profiler and native pipelines. Initialization failures use the engine journal
+and an error dialog; English/Russian backend help no longer promises fallback.
+No HLSL, algorithms, new SDKs or DLLs added in this stage. Host adaptation
+remains Source/embedded_d3d12.{h,cpp}.
+
+Full BRIEF remains open. Backend selection is connected, not runtime-ready:
+source texture/SRV bindings (including BindTexture and RestoreHostBindings)
+still require D3D12 surface identities instead of D3D11 SRVs. Connect local
+input/simulation/render boundaries to EmbeddedD3D12 phase methods next;
+world/present/FG dispatch was prepared by earlier stages. These unfinished
+adapters can prevent the selected D3D12 path from drawing or starting.
+No compilation, shader compilation, tests or game run performed. Build/link,
+D3D12 startup/FG and D3D11 regression remain unverified.
+
+# X64D3D12 native capture and CPU surface effects, stage 21 (2026-11-11)
+
+Incomplete runtime integration: renderer_backend=1 still creates D3D11.
+CDXGISurface::BltFromRenderSurface now consumes the author's native executor
+readback through E1CaptureNativeTarget, including the private hit-test target.
+The bridge retains the existing point-filter/non-WIC scaling convention for
+lossless mask codes. Source consumers see E_PENDING for unavailable captures,
+so their FAILED gate cannot treat an older completed image as a fresh frame.
+Completed CPU images are published only after capture/resize succeeds.
+
+Fade on CPU surfaces reuses RetailModalFade::Gray and preserves alpha.
+StretchTo uses the existing DirectXTex dependency's linear/non-WIC resizer,
+with the source API's viewport extents, destination clipping and detached
+writes (including self-stretch). RGB565 thumbnail allocations use canonical
+BGRA source storage; SaveThumbnailFile retains the existing RGB565 packing.
+These are source-game surface adapters, without new renderer HLSL/algorithms.
+D3D11 branches retain their existing operations. No SDKs or DLLs added.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}; this stage
+adapts Game/dx11/Surface.cpp and Game/OwnedRender/E1SurfaceBridge.{h,cpp}.
+
+Next finish source texture/sprite/SRV boundaries, then latch renderer_backend
+before device creation and connect local input/simulation/render phases to
+the prepared executor startup and world/present/FG dispatch. Full BRIEF is
+still open. No compilation, shader compilation, tests or game run performed.
+Build/link, D3D11 regression, thumbnail filtering and native GPU capture
+(including hit-test masks) remain unverified.
+
+# X64D3D12 CPU surface producers, stage 20 (2026-11-11)
+
+Incomplete runtime integration: renderer_backend=1 still creates D3D11.
+Game/dx11/Surface.{h,cpp} now selects CPU BGRA storage for an active native
+executor, publishes through E1Surface::CompleteCpu and uses the author's
+SurfaceImage/SurfacePixels copy-on-write backing. Source RGB/MMP level-zero
+uploads retain MmpRgbToBgra conversion, including BGRX opaque padding. Higher
+source mips leave level zero intact; the native uploader owns GPU mips.
+CPU descriptors, full/rectangular copies, pixel/thumbnail reads and uploads,
+GDI DIB sessions, text-only publication and facade UI blits need no D3D11
+texture. DIB writes preserve pixel alpha and publish only after GdiFlush and
+DC release. BGRA allocation rejects unsupported formats and invalid extents.
+No HLSL, SDK, runtime DLL or pose/SKN changes. Host transport adaptation
+remains Source/embedded_d3d12.{h,cpp}; these producers live in Game/dx11.
+
+Next adapt BltFromRenderSurface native capture and Fade/StretchTo effects,
+then remaining source texture/sprite/SRV boundaries. Only then latch backend
+before device creation and connect input/simulation/render phase boundaries.
+Full BRIEF remains open. No compilation, shader compilation, tests or game
+run was performed. Build/link, D3D11 regression and GPU behavior are unverified.
+
+# X64D3D12 CPU surface publication seam, stage 19 (2026-11-11)
+
+Incomplete runtime integration: renderer_backend=1 still creates D3D11.
+E1Surface now owns completed CPU surface generations as an alternative to
+D3D11 textures. Its resolver returns the renderer's mutable upload home when
+called without a D3D11 device, validating ID/generation without IPC. CPU bytes
+use the author's SurfacePixels copy-on-write storage, format conversion and
+D3D12 upload algorithms; publication validates dimensions, pitch and extent.
+E1SurfaceBridge supports CPU snapshots, raw readback, UI blits and a bounded
+particle snapshot/upload cache without a D3D11 device/context. RGB readback
+uses the author's mask conversion; DXT rows are copied without source padding.
+D3D11 branches remain unchanged. SetRenderStates skips immediate D3D11 state
+creation for an active native executor; packets retain their fixed state.
+No HLSL, SDK or runtime DLL list changed. Host transport adaptation remains
+Source/embedded_d3d12.{h,cpp}; source surface transport is in Game/OwnedRender.
+
+Next: CDXGISurface must actually produce CompleteCpu publications, including
+its CPU creation/upload/copy/GDI/capture/thumbnail operations. This stage only
+adds the registry/consumer seam; no source producer calls CompleteCpu yet.
+Texture/sprite/SRV boundaries still require adaptation. Then latch backend
+before device creation and connect input/simulation/render phase boundaries.
+Full BRIEF remains open. No compilation, shader compilation, tests or game
+run was performed, as directed. Build/link, D3D11 regression and GPU behavior
+are unverified. Stage 18 below describes the preceding frame-dispatch work.
+
+# X64D3D12 embedded world/present dispatch, stage 18 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+The embedded Renderer now dispatches composite_world and present_frame to
+the author's native D3D12 bodies when its local executor is active.
+Readiness and begin_scene accept that executor without a D3D11 device.
+The native present consumes the local resource poll, camp layout and
+Draw2D popup decoration at the embedded presentation boundary. The author's
+world composition, SR, DLSS/FSR FG, pacing and presentation code is reused.
+Native frame HRESULTs and executor failures reach the prepared journal and
+player error message. Exceptions become E_OUTOFMEMORY/E_FAIL at that same
+boundary; a latched failure prevents subsequent presentation. Resize errors
+also reach the player. device_removed_reason queries the actual D3D12 device,
+and present reports its removal HRESULT even when the frame body succeeded.
+Engine-frame flush preserves its original failure HRESULT.
+No HLSL, SDKs or runtime DLL lists changed this stage. Host transport
+adaptation remains Source/embedded_d3d12.{h,cpp}.
+
+Next adapt source CDXGISurface/E1Surface/E1SurfaceBridge CPU publication,
+capture and texture/sprite/SRV boundaries, plus SetRenderStates. Those still
+require D3D11 resources. Then load/latch renderer_backend before device
+creation and call ensure_embedded_d3d12. Connect local input/simulation and
+render boundaries, including discarded/capture-only and repeated presents,
+to EmbeddedD3D12's phase owner. This stage does not activate the backend.
+Full BRIEF remains open. No compilation, shader compilation, tests or game
+run was performed. Build/link, D3D11 regression and GPU behavior are unverified.
+
+# X64D3D12 native source output capture, stage 17 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+CDX11 MakeScreenShot can now capture a native output through Renderer,
+without borrowing a D3D11 device/context or output texture. The synchronous
+entry drains scene work, UI and native batches before calling the author's
+executor read_back_buffer (or read_texture for the private hit-test target).
+Only a complete, correctly sized BGRA result is published to the caller.
+Minimized/unavailable outputs and failures never reach the JPEG encoder.
+The source uses the existing DirectXTex WIC encoder for SCREENSHOT.JPG,
+and journals native capture/encoding failures. D3D11 retains ScreenGrab.
+No HLSL, rendering algorithms, SDKs, runtime DLL lists or pose/SKN changed.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}.
+
+Next adapt source texture/surface/SRV publication and render-target capture
+(CDXGISurface::BltFromRenderSurface still writes a D3D11 texture). The new
+BGRA readback supplies the native source pixels for that boundary, including
+lossless hit-test codes. SetRenderStates and remaining source context-based
+submissions need native dispatch. Then latch renderer_backend before device
+creation, call ensure_embedded_d3d12, enable readiness and local frame
+boundaries with world/SR/FG/present dispatch and explicit runtime errors.
+Full BRIEF remains open. No compilation, shader compilation, tests or game
+run was performed. Build/link, D3D11 regression and GPU behavior are unverified.
+
+# X64D3D12 source initialization boundary, stage 16 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+CDX11 InitializeDX now queries the actual renderer backend before borrowing
+D3D11 device/context leases, creating legacy states, binding the viewport,
+attaching legacy GPU timing or constructing CommonStates. Those operations
+retain their D3D11 order and are skipped for a native D3D12 renderer. This
+prepares activation; it does not select D3D12 or supply a substitute device.
+The shared sprite frontend remains initialized for either backend.
+
+Renderer::read_embedded_output_size drains scene work and reports native
+output dimensions without a D3D11 output lease. D3D11 still reads the actual
+output texture description. CaptureOwnedTerrainMaterial now uses the same
+renderer-owned viewport boundary as the other source material captures.
+The D3D11 boundary rejects missing, negative or empty viewports before any
+unsigned conversion, retaining the terrain caller's previous rejection.
+No HLSL, rendering algorithms, SDKs, runtime DLLs or pose/SKN changed.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}.
+
+Next adapt the source texture/surface/SRV and capture/screenshot boundaries
+(E1Surface, E1SurfaceBridge, dx11 texture/sprite adapters). SetRenderStates
+and remaining context-based source submissions also need native dispatch;
+skipping startup states alone is insufficient. Then latch renderer_backend
+before device creation, call ensure_embedded_d3d12, enable readiness and
+local simulation/render boundaries with world/SR/FG/present dispatch and
+explicit runtime/removal errors. Full BRIEF remains open.
+No compilation, shader compilation, tests or game run was performed.
+Build/link, D3D11 regression and D3D12 GPU behavior remain unverified.
+
+# X64D3D12 embedded target operations, stage 15 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+CDX11 BeginFrame, RefreshOwnedTargets and ClearColor/Z now use renderer-owned
+target operations, instead of borrowing a D3D11 device/context. D3D11 keeps
+the same target binding, viewport and clear calls. The new synchronous seams
+drain pending scene work before accessing current target state.
+
+D3D12 draws retain their own target bindings (world history/MRTs, hit-test
+and popup targets must not be overwritten by a generic host bind). Clears
+use the author's executor background/full-rectangle operations; the executor
+clips to the actual active target and preserves the requested depth/stencil.
+They deliberately do not call legacy Clear, which can composite the world.
+Executor failures use the prepared embedded journal/player error path.
+CaptureC56MaterialState reads its viewport through Renderer too; D3D11 keeps
+RSGetViewports, while D3D12 uses the current world/UI pixel dimensions.
+No author HLSL, rendering algorithms, SDKs or runtime DLL lists changed.
+
+Activation still requires CDX11 InitializeDX's D3D11 states and device/output
+leases, source texture/SRV adapters and screenshot/capture boundaries to be
+adapted. Then latch renderer_backend before device creation, call the prepared
+ensure_embedded_d3d12, enable readiness/begin_scene and local simulation/render
+boundaries together with world/SR/FG/present dispatch and removal reporting.
+Do not substitute a D3D11 device or set core_host_. Host transport adaptation
+remains Source/embedded_d3d12.{h,cpp}. Full BRIEF remains open.
+No compilation, shader compilation, tests or game run was performed.
+Build/link, D3D11 regression and D3D12 GPU behavior remain unverified.
+
+# X64D3D12 native startup preparation, stage 14 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+Prepared Renderer::ensure_embedded_d3d12 adapts ensure_host_d3d12 to the
+local executor/NGX, native game window/input and embedded sky. It initializes
+the native pipelines, neighbour preparer, settings, telemetry and SR caps,
+with a journal event and player error message on startup failure. It never
+creates a D3D11 device or sets core_host_. It is not yet called by ensure().
+
+DebugOverlay now accepts the executor's real DXGI adapter without a D3D11
+device/context when its external OverlayRenderer is supplied. First-run
+recommendations and video-memory budgets retain the author's algorithms;
+the normal native window subclass/input ownership stays in the game.
+RenderProfiler initialization, begin_frame and resolve now accept its GPU
+timestamps without a D3D11 context. Existing D3D11 callers are unchanged.
+No HLSL, rendering algorithms, SDKs, DLL lists or pose/SKN changes this stage.
+
+Concrete activation dependency: Game/dx11/RendererDX11.cpp::InitializeDX
+unconditionally calls VisitDevice/VisitOutput after ensure, then creates
+D3D11 states. BeginFrame, RefreshOwnedTargets, ClearColor/Z and screenshot
+also require those leases; CaptureC56MaterialState reads a D3D11 viewport.
+The source texture/surface adapters still use D3D11 device/context/SRVs.
+Switching ensure to the local executor alone therefore fails before the menu.
+Next adapt those source GPU boundaries to typed renderer operations/resources,
+then load/latch renderer_backend before device creation and call the prepared
+startup; enable ready/begin_scene, composite/present dispatch and local
+simulation/render boundaries together. Add explicit runtime/removal errors.
+Do not route the source through core_host_ or a substitute D3D11 device.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}.
+No compilation, shader compilation, tests or game run was performed.
+Build/link, initial/repeated startup and GPU behavior remain unverified.
+
+# X64D3D12 executor retirement boundary, stage 13 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+Renderer::release now detaches its borrowed overlay-renderer and profiler
+timestamp interfaces after their shutdown, while the executor is alive.
+The remaining CritterState GPU meshes, skins, instance/bone buffers and
+ready/failure gates retire with the other D3D12 subsystem owners. Its
+value-only asset/shader futures join when the state drops; neither worker
+captures Renderer or the executor. A map-only critter release would keep
+the immutable GPU objects and ready gate, so it is insufficient here.
+
+After renderer resource retirement, release clears the raw d3d12_ dispatch
+pointer and shuts down EmbeddedD3D12. NGX has already stopped, scene and
+neighbour workers have joined, and overlay/profiler shutdown has finished.
+Executor teardown waits pipelines/GPU work, drains presenter/pacer, retires
+Reflex and invalidates the shared resource owner. External snapshots and
+preparers can still release their old allocations; their session identities
+prevent submission to a replacement executor. D3D11 and author HLSL and
+rendering algorithms are unchanged. No new SDKs or runtime DLLs this stage.
+
+Next: bind startup configuration/backend selection before D3D11 creation,
+initialize overlay and profiler from the native executor without requiring
+a D3D11 device/context, then wire local simulation/render boundaries and
+world/SR/FG/present dispatch. Audit embedded facade readiness/device gates
+alongside those entry points. Preserve local window/input ownership rather
+than setting core_host_. Startup and device-removal failures still need
+explicit journal/player messages without a D3D11 fallback. Host transport
+adaptation remains Source/embedded_d3d12.{h,cpp}; full BRIEF remains open.
+No compilation, shader compilation, tests or game run was performed.
+Build/link, repeated device lifetimes and GPU behavior remain unverified.
+Earlier sections describe preceding stages, not the current shutdown state.
+
+# X64D3D12 prepared uploads and resource submission ownership, stage 12 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+Preparer and all three preparation paths now retain the executor's shared
+session identity. finish_buffer/finish_texture reject uploads from another
+session with DXGI_ERROR_DEVICE_RESET before recording commands or consuming
+the prepared resource, including workers surviving the original executor.
+
+The executor validates resource ownership before slot/index/target binding,
+buffer/texture writes and copies, indirect draws/dispatches, clears, mip
+creation, capture and readback. Null bindings still unbind normally. Invalid
+resource submission latches a named backend failure; size/format inspection
+remains non-fatal. Bindless validation precedes even a cached-index return.
+External NGX/FSR recording validates every texture before opening a command
+list or transitioning any resource. UI validates all supplied textures before
+uploading or drawing. These HRESULT interfaces reject obsolete resources
+with DXGI_ERROR_DEVICE_RESET; malformed arrays return E_INVALIDARG.
+This stage changes no HLSL, rendering algorithms, D3D11, SDKs or DLL lists.
+
+The executor still stays alive in Renderer::release(). Next: finish auditing
+retained raw pointer/worker lifetimes at shutdown, detach d3d12_ and retire
+EmbeddedD3D12 after all renderer clients. Then bind startup configuration,
+backend/overlay, simulation/render boundaries and world/present dispatch,
+with explicit startup/device-removal failures. Host transport adaptation
+remains in Source/embedded_d3d12.{h,cpp}; full BRIEF remains open.
+No compilation, shader compilation, tests or game run was performed.
+Build/link and GPU behavior remain unverified. Earlier stages follow.
+
+# X64D3D12 surface ownership and remaining subsystem retirement, stage 11 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+The executor's texture_info and texture_matches now require the allocation's
+shared resource owner to match this executor, in addition to the existing
+shape checks. Owner identity survives allocator/address reuse and lets an
+external SurfaceImage outlive device teardown without passing a later
+executor's upload-generation hit. Failed texture_info clears its outputs.
+
+Snapshot upload validates ownership before the single-level fast path. An
+obsolete pixel-free snapshot can rebuild only through the surface table's
+exact source generation. Missing source bytes fail explicitly. GPU-captured
+content whose allocation no longer matches returns DXGI_ERROR_DEVICE_RESET
+instead of uploading stale CPU pixels. The BC1 terrain path with missing
+bytes now uses the same validated upload before retaining the texture.
+
+Embedded release() drops surface-table GPU references and upload shapes,
+retaining source bytes and GPU-capture markers. It resets the entire impostor
+atlas, bake targets, slice identities and failure state. D3D12 fog, water
+reflection and cave allocations now retire beside the shared validity and
+capacity resets already performed by their common release functions. This
+stage adds no SDKs, DLLs, HLSL or rendering algorithms. D3D11 is unchanged.
+
+The executor still stays alive. Before shutting it down, finish the remaining
+lifetime audit, including prepared uploads and external resource submission
+sites that bypass surface upload. Then bind startup configuration, backend,
+overlay, local simulation/render boundaries and world/present dispatch with
+explicit startup/device-removal errors. Host transport adaptation remains
+in Source/embedded_d3d12.{h,cpp}, with Renderer integration still incomplete.
+Full BRIEF remains open. No compilation, shader compilation, tests or game
+run was performed. Build/link and GPU behavior remain unverified.
+Earlier sections record the preceding stages.
+
+# X64D3D12 map/effect cache retirement, stage 10 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+Embedded release() now retires ambient and ground-cover device owners through
+release_ground_cover/release_ambient_world after the final native flush.
+This also invalidates the same-map CPU identity gates, joins cover shader
+preparation and releases active/neighbour contact maps and terrain2 heights.
+The remaining cover terrain2 class/color resources, terrain2 frame table,
+cache parameter buffer, snow surface and their validity/revision gates are
+cleared locally. Liquid maps/waves retire after their workers have joined;
+the existing generation/serial gates force uploads on a replacement device.
+Saved loading pictures and their hold state retire at this boundary too.
+The executor stays alive. These additions run only in the embedded D3D12
+release branch. No HLSL, rendering algorithms, SDKs or DLLs changed here.
+
+Remaining lifetime work includes external SurfaceImage/snapshot reuse,
+core surface tables, impostor/device caches and any remaining subsystem
+owners. External textures can survive teardown for release, but the current
+surface upload fast paths still lack a replacement-device ownership check.
+Resolve those before executor shutdown and backend activation. Then bind
+startup configuration, backend/overlay, local simulation/render boundaries
+and world/present dispatch, with explicit startup/device-removal failures.
+Full BRIEF remains open. No compilation, shader compilation, tests or game
+run was performed. Build/link and GPU behavior remain unverified.
+Earlier sections record the preceding stages.
+
+# X64D3D12 native resource retirement, stage 9 (2026-11-11)
+
+Incomplete runtime integration: renderer_backend=1 still creates D3D11.
+Embedded release() now clears the complete NativeD3D12 buffer/texture owner,
+its ready/failed gates, layer upload revision and instance capacity after
+scene join, the final native flush and pose/instance retirement. Geometry
+pages and instance records already retire earlier in release(). Terrain
+page textures and prepared uploads, their retained CPU terrain owner, the
+bindless terrain-frame staging and scene mip copies now retire too.
+Material identities are retained, but their GPU profiles and fixed-unit or
+composition serial gates are reset and profile indices invalidated so the
+next device rebuilds them even without a source composition change.
+The executor remains alive through all these releases. D3D11, upstream Host,
+HLSL and pose/SKN algorithms are unchanged. No SDKs or DLLs added this stage.
+
+This completes only native/terrain-page/material/scene-mip cache retirement.
+Other owners still need an audit: ambient/cover/contact maps and terrain2,
+liquids, loading-picture copies, external SurfaceImage/snapshot resources
+and their reuse across replacement devices. Do not shut down the executor
+or activate backend selection before those lifetimes are resolved. Then
+bind startup config/backend, overlay, local frame boundaries and dispatch,
+with explicit startup/device-removal failures. Full BRIEF remains open.
+No compilation, shader compilation, tests or game run; build and GPU behavior
+remain unverified. Earlier sections describe the preceding stages.
+
+# X64D3D12 frame-image retirement, stage 8 (2026-11-11)
+
+Incomplete runtime integration: renderer_backend=1 still creates D3D11.
+Embedded release() now retires its D3D12 world, postprocess, SR, AO,
+shadow-history, prepass, hit-test, particle-depth, gamma and HUD-less images.
+It clears cached FG capabilities, device-specific failure reasons, pacing
+statistics and temporal validity, including first-Present deferral, so a
+replacement device cannot inherit those values. Retirement follows scene
+join, NGX shutdown, the final native flush and overlay/profiler teardown;
+the executor remains alive. The D3D11 and upstream Host paths are unchanged.
+
+This is only frame-image retirement, not complete executor shutdown. Native
+buffers/instances, terrain/prepared uploads, surface and subsystem caches
+still require a device-lifetime audit and retirement before owner shutdown.
+Next finish those owners, then bind startup config/backend, overlay, frame
+boundaries and dispatch with explicit startup/device-removal errors. Backend
+activation and full BRIEF completion remain open. No new SDKs or DLLs.
+No compilation, shader compilation, tests or game run; build and GPU behavior
+remain unverified. Earlier sections document the preceding stages.
+
+# X64D3D12 local renderer SR/FG/present bodies, stage 7 (2026-11-11)
+
+Incomplete runtime integration: renderer_backend=1 still creates D3D11.
+Renderer now contains the local EmbeddedD3D12 owner, declared before GPU
+members so its executor outlives their destruction. release() stops local
+NGX after the scene thread joins, before releasing renderer resources.
+D3D11 retains its existing separate NGX owner and optimal-size calls.
+
+The author's composite_world_d3d12, upscaler-mode changes, DLSS evaluation,
+DLSS-G/FSR FG preparation, HUD-less capture and present_frame_d3d12 bodies
+are now included in the embedded runtime translation units. The D3D12 NGX
+calls in these bodies and DLSS render-size selection go directly to the
+local owner, using the author's value descriptors; no Host transport or
+remote stubs are called. Embedded first-Present deferral records a local
+successful executor present, not the absent Host's presented flag. Embedded
+SR/FG diagnostics refer to the engine journal. HLSL and rendering algorithms
+are unchanged. The shader generator still excludes runtime bodies.
+
+This does not activate those bodies: embedded ensure(), composite_world()
+and present_frame() still retain the old startup/dispatch guards. Next bind
+configuration before device creation, initialize the owner and overlay,
+finish resize/resource retirement for repeated release/ensure, wire the
+local simulation/render boundaries and enable dispatch with explicit
+startup/device-removal errors. Do not set core_host_ blindly: source frame
+and overlay/input ownership differ from Host/core_host.cpp. No claim of a
+working D3D12 or frame generation backend is made; task remains open.
+No additional libraries or DLLs beyond stage 2. No compilation, shader
+compilation, tests or game run; build/link and GPU behavior are unverified.
+
+# X64D3D12 local simulation/render boundaries, stage 6 (2026-11-11)
+
+Incomplete runtime integration: renderer_backend=1 still creates D3D11.
+EmbeddedD3D12 now supplies serialized begin_simulation / begin_render /
+finish_render boundaries adapted from upstream d17a6149 Host/core_host.cpp.
+Sleep runs before local input sampling; the simulation QPC and increasing
+serial reach the existing executor/pacer via Reflex::set_frame.
+Simulation/end and render/start replace taking a Host present record;
+finish_render closes failed or omitted presents as well as shown frames.
+The executor retains author render/end deduplication, present markers and
+asynchronous real-image latency sampling. No IPC release delay is copied.
+These APIs are not yet called by Renderer. D3D11 behavior is unchanged.
+Next: bind Renderer ownership/config/backend selection and these boundaries,
+then enable world/SR/FG/present bodies with local NGX and explicit failures.
+No new SDKs, DLLs, HLSL or algorithms. No compilation, tests or game run;
+full D3D12/FG integration and GPU behavior remain unverified and task open.
+
+# X64D3D12 Reflex device retirement, stage 5 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+The embedded executor now retires the author's process-global Reflex device
+at teardown, after presenter destruction and pacer join, while the D3D12
+device is alive. The borrowed device, applied mode, frame markers and latency
+samples are cleared. Successful process-level NVAPI initialization survives;
+a replacement device can retry SetSleepMode after an earlier GPU rejected it.
+An executor that never configured Reflex cannot clear a different owner.
+This is required for repeated embedded Renderer/device lifetimes. D3D11 and
+the separate upstream Host target retain their existing code paths.
+No SDK, runtime DLL, HLSL or rendering algorithm changed in this stage.
+
+Host transport remains unbound at Renderer. Continue with local frame and
+simulation boundaries, Renderer ownership/teardown, configuration before device
+creation, the excluded world/SR/FG/present bodies and explicit failure messages.
+Stages 2/3 contain the prepared SDK/DXIL/NGX/executor inputs for that work.
+The task remains open. Compilation, shaders, tests and game were not run;
+GPU teardown and the complete requested D3D12/FG behavior remain unverified.
+
+# X64D3D12 external resource retirement, stage 4 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still enters D3D11 and
+frame generation remains unavailable. This stage changes resource ownership
+in Host/d3d12/d3d12_frame.cpp, without changing the author's HLSL or rendering
+algorithms. D3D11 code and dependencies are unchanged in this stage.
+
+All six texture creation/adoption sites and the common buffer adoption site
+now attach a shared retirement owner. It serializes texture/buffer destruction
+with executor teardown. The executor drains GPU work, presenter and pacer,
+then clears the borrowed Core before its members are destroyed. A surviving
+SurfaceImage/snapshot can subsequently release its COM resources without
+calling retired descriptor heaps, Core::release_later or hazard callbacks
+belonging to a later executor. Placed textures release their resource before
+the backing heap. Frame-thread resource use/release remains the author contract.
+This supersedes the stage 3 warning about late snapshot destruction only.
+
+Next stage must instantiate EmbeddedD3D12 in Renderer and integrate config,
+backend selection, world/SR/FG bodies, present and local Reflex boundaries.
+Renderer teardown must first join the scene/upload callers, stop NGX, retire
+overlay/profiler and clear its resource caches. Snapshots that survive executor
+shutdown are release-only: old resources must never be reused by a new device.
+Startup/removal failures still require explicit journal and player messages.
+The existing guards and startup choice have not been activated in this stage.
+The task remains open and is not ready for acceptance.
+
+No compilation, shader compilation, tests, preparation or game run was
+performed. Compilation/linking, GPU teardown and full runtime integration
+remain unverified. The stages below describe historical progress.
+
+# X64D3D12 local executor/NGX ownership, stage 3 (2026-11-11)
+
+Incomplete runtime integration; renderer_backend=1 still enters D3D11.
+Source/embedded_d3d12.{h,cpp} now owns the author's frame executor and NGX
+worker locally. OwnedRenderer.vcxproj includes the nine runtime executor
+translation units, Host/dlss.cpp and Host/reflex.cpp. Diagnostic bring-up
+is deliberately not compiled: its separate window is not a game backend.
+The new owner is not yet instantiated by Renderer, so adding these archive
+objects does not activate D3D12 or make frame generation available.
+
+The owner exposes direct SR/FG capability, optimal-size, evaluate, release
+and VRAM queries. Only the author's value descriptors are shared; no ring,
+replay, remote globals, process or Host control block is used. Algorithms
+and HLSL remain the author's. Host diagnostic call sites route to the
+engine journal through remote::host_log in embedded_d3d12.cpp.
+The embedded factory adopts the native top-level window as both target and
+parent (the author's child-window minimization test otherwise rejects it).
+
+Host/dlss.cpp has an embedded-only D3D12 initializer with the existing
+EIRebuild64 ProjectID. It starts NGX directly on the executor device without
+creating an intermediate D3D11 instance. DLL search remains beside the EXE;
+NGX data goes to LocalAppData/EIRebuild64/NGX, pipeline data to its D3D12
+sibling. Path strings/info and the GPU-idle callback remain alive through
+NGX shutdown. The worker shuts down before executor/device destruction;
+stop_ngx separates NGX retirement from later renderer resource retirement.
+The embedded shutdown clears borrowed device pointers for repeated teardown.
+Source/dlss_backend.cpp and its existing D3D11 worker are unchanged.
+No further dependencies, DLLs or packaging changes beyond stage 2.
+
+Next stage must bind this owner to Renderer, choose renderer_backend before
+D3D11 creation, load local overlay/config, enable the excluded D3D12 world,
+upscaler and present bodies, replace their x64remote calls with owner calls,
+and supply local Reflex frame boundaries. Startup/removal failures still
+need engine-log and player-message handling with no D3D11 fallback.
+Resource lifetime is a required integration subtask: D3D12Texture and
+D3D12Buffer in Host/d3d12/d3d12_frame.cpp contain a borrowed Core pointer
+and their destructors call Core::release_later. Renderer-held GPU references,
+external SurfaceImage/snapshots and upload jobs must therefore retire before
+EmbeddedD3D12::shutdown; merely resetting the executor in release is unsafe.
+Do not activate backend selection until this ownership boundary is resolved.
+This task is open and is not ready for acceptance.
+
+No compilation, shader compilation, tests, preparation or game run was
+performed. Build/link ABI and runtime behavior are unverified. Historical
+stage 1/2 status below describes those stages, not the current source list.
+
+# X64D3D12 dependency and DXIL integration, stage 2 (2026-11-11)
+
+Incomplete runtime integration. The coordinator supplied the pinned packages
+listed in BRIEF. Local deps now contain FidelityFX SDK 2.3.0, NVIDIA NVAPI
+70d337db9186e968eab622f7e786de7e437faf3d, DXC 1.9.2609 and the DLSS-G
+v310.9.16 headers/runtime. tools/prepare-worktree.ps1 copies them offline
+into dependencies. OwnedRenderer/D3D12Sdk.props supplies includes, imports,
+runtime output copies and license copies. Full license texts are retained
+in third_party/d3d12. THIRD_PARTY.md records the pins and redistribution.
+The permitted build-task.ps1 DLL list now includes nvngx_dlssg.dll and the
+two signed FidelityFX DLLs. DXC/DXIL compiler DLLs remain build inputs.
+
+RendererShaders now requests shader_embed --dxil-sources and includes the
+author's D3D12-only program list after writing the existing DXBC table.
+OwnedRenderer/D3D12Shaders.mak invokes DXC using the generated author rules
+and compiles the five Host diagnostic/overlay entry points. Both DXIL
+resource tables are linked into EIRebuild64.exe. The shared gamma HLSL and
+program descriptors moved byte-for-byte into gamma_shader_programs.h so the
+shader producer can enumerate them without compiling frame runtime code.
+The author's HLSL, compiler flags and empty-resource failure convention are
+preserved. Host/d3d12 sources themselves remain unchanged and unlinked.
+
+Next stage must complete executor/NGX ownership, local frame and config
+initialization, backend selection before D3D11 creation, frame boundaries,
+resize/teardown, direct SR/FG/Reflex calls and explicit startup/removal
+failure reporting. In particular renderer_native_d3d12.cpp still excludes
+composite_world_d3d12, apply_upscaler_mode_d3d12 and upscale_world_d3d12 for
+embedded callers, and embedded_remote_stubs.cpp still describes transport
+absence. Replacing only ensure_host_d3d12 or setting core_host_ would leave
+these execution/lifetime seams unresolved. Keep the D3D11 NGX worker owner.
+Use the embedded ProjectID from Source/dlss_backend.cpp for D3D12 NGX.
+renderer_backend=1 still creates D3D11 and FG remains unavailable until
+that stage is finished. This task is open, not ready for acceptance.
+
+No preparation script, compilation, shader compilation, tests or game run
+was executed. The build/kit, dependency import ABI and runtime behavior
+remain unverified. The sections below describe the earlier stage.
+
+# X64D3D12 source import, stage 1 (2026-11-11)
+
+Incomplete integration. Imported the 21 files under `Host/d3d12/` and
+`Host/dlss.{h,cpp}`, `Host/reflex.{h,cpp}` from upstream
+`d17a6149e5b5d4c2d23873d18e037bc270269050`, using Git archive from the
+read-only reference. All 25 source files retain the upstream bytes.
+The existing LICENSE.md and NOTICE.md apply to these author sources.
+
+This stage includes the device/queue/heaps/fences, barriers, upload rings,
+pipelines, timestamps, frame executor, presenter, DLSS-G pacer, FidelityFX
+FSR 3.1 FG, NGX D3D12 SR/FG, Reflex, diagnostic bring-up and HLSL/resources.
+They are staged sources and are not linked into OwnedRenderer yet.
+`Source/dxil_table.h` and the shared renderer D3D12 algorithms were already
+present. The embedded runtime still creates D3D11 for renderer_backend=1,
+and frame generation remains unavailable. BRIEF completion is open.
+
+Local dependency blocker: the project tree has no FidelityFX SDK 2.3.0,
+NVAPI SDK or DXC. The installed DLSS SDK v310.9.16 has nvngx_dlss.dll,
+but lacks nvsdk_ngx_helpers_dlssg_d3d.h and nvngx_dlssg.dll required by
+Host/dlss.cpp. Nothing was downloaded and no runtime DLL or kit was added.
+See THIRD_PARTY.md for the exact upstream dependency paths and runtime files.
+
+Continuation requires the embedded Host adaptation and build integration:
+- Own the executor through Renderer lifecycle, route renderer_backend before
+  D3D11 creation, and report D3D12 startup/removal errors to the engine log
+  and player. create_frame_executor returns a reason on failure. Its upstream
+  comment about keeping D3D11 must not become an embedded fallback.
+- Adapt ensure_host_d3d12, overlay/config initialization, frame boundaries,
+  resize and teardown to the native window and existing embedded scene input.
+  Host transport has not been adapted in this stage. Do not copy the remote
+  Core/Host replay or set core_host_ blindly: the embedded game submits locally.
+- Route NGX SR/FG and Reflex calls directly, with engine logging and local
+  paths. Replace the imported author's NGX project ID with the existing
+  EIRebuild64 identity from Source/dlss_backend.cpp. Keep D3D11 NGX ownership.
+- Compile the author's DXIL through shader_embed --dxil-sources and DXC,
+  include the D3D12-only program list currently guarded out for embedded,
+  and link both DXIL resource tables with adapted resource paths. The raw
+  d3d12_shaders.rc currently names the author's build/x64-host/dxil directory.
+- Prepare licensed SDK inputs locally and package their required runtime DLLs
+  through the permitted build integration. tools/build-task.ps1 is forbidden
+  to edit by this BRIEF. Claude performs the full build after integration.
+
+No compilation, tests, gameplay or visual acceptance was performed.
 # X64RUPD03 renderer source provenance (2026-11-07)
 
 Upstream main: `d17a6149e5b5d4c2d23873d18e037bc270269050` (193 commits after

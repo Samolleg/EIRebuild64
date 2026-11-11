@@ -31,6 +31,7 @@ class OwnedRendererClient {
     EIRenderFigureV4 figureScope = {};
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> figurePrimaryTexture, figureSecondaryTexture;
     uint64_t figureIdentity = 0;
+    uint64_t figurePrimarySurface = 0, figureSecondarySurface = 0;
     struct PartEntry {uint64_t identity, lastUsed;};
     std::map<std::pair<uint64_t,std::string>,PartEntry> figureIdentities;
     struct MeshEntry {uint64_t handle, revision, lastUsed;};
@@ -222,11 +223,13 @@ public:
 
     void BeginFigure(const EIRenderFigureV4& input,const char* name,const char* model=nullptr,
                      ID3D11ShaderResourceView* primary=nullptr,
-                     ID3D11ShaderResourceView* secondary=nullptr) {
+                     ID3D11ShaderResourceView* secondary=nullptr,
+                     uint64_t primarySurface=0, uint64_t secondarySurface=0) {
         const auto access = renderGate.Lock();
         figurePart=name?name:"";figureModel=model?model:"unknown";
         figureScope=input;figureScope.scene_generation=figureScene;
         figurePrimaryTexture=primary;figureSecondaryTexture=secondary;
+        figurePrimarySurface=primarySurface;figureSecondarySurface=secondarySurface;
         const auto key=std::make_pair(input.object_id,std::string(name?name:""));
         auto found=figureIdentities.find(key);
         if(found==figureIdentities.end())found=figureIdentities.emplace(key,PartEntry{nextFigureIdentity++,figureFrame}).first;
@@ -241,7 +244,8 @@ public:
     }
     void EndFigure() noexcept {
         const auto access = renderGate.Lock();figureScopeActive=false;
-        figurePrimaryTexture.Reset();figureSecondaryTexture.Reset();}
+        figurePrimaryTexture.Reset();figureSecondaryTexture.Reset();
+        figurePrimarySurface=0;figureSecondarySurface=0;}
     bool FigureActive() const noexcept {
         const auto access = renderGate.Lock();return figureScopeActive;}
     EIRenderFigureV4 FigureValues() const {
@@ -250,6 +254,10 @@ public:
         const auto access = renderGate.Lock();return figurePrimaryTexture.Get();}
     ID3D11ShaderResourceView* FigureSecondaryTexture() const {
         const auto access = renderGate.Lock();return figureSecondaryTexture.Get();}
+    uint64_t FigurePrimarySurface() const {
+        const auto access = renderGate.Lock();return figurePrimarySurface;}
+    uint64_t FigureSecondarySurface() const {
+        const auto access = renderGate.Lock();return figureSecondarySurface;}
     void FigureFallback(const char* reason) {
         const auto access = renderGate.Lock();
         if(!figureScopeActive)return;

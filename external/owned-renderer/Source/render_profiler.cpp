@@ -356,7 +356,7 @@ void RenderProfiler::refresh_enabled() noexcept {
 
 HRESULT RenderProfiler::initialize(ID3D11Device* device, ID3D11DeviceContext* context) {
     shutdown();
-    if (!device || !context) return E_INVALIDARG;
+    if (!timestamps_ && (!device || !context)) return E_INVALIDARG;
     device_ = device;
     context_ = context;
     LARGE_INTEGER frequency{};
@@ -819,7 +819,7 @@ bool RenderProfiler::read(const QueryPair& pair, bool end, UINT64& ticks) noexce
 }
 
 void RenderProfiler::begin_frame(UINT width, UINT height) {
-    if (!enabled_ || frame_active_ || !context_) return;
+    if (!enabled_ || frame_active_ || (!timestamps_ && !context_)) return;
     FrameSlot& slot = slots_[next_frame_ % kBufferedFrames];
     if (slot.pending && !resolve(slot, false)) {
         // Do not recycle a live query slot.  Missing one diagnostic frame is
@@ -1180,7 +1180,7 @@ HRESULT gpu_map_read_bounded(ID3D11DeviceContext* context, ID3D11Device* device,
 }
 
 bool RenderProfiler::resolve(FrameSlot& slot, bool wait) {
-    if (!slot.pending || !context_) return true;
+    if (!slot.pending || (!timestamps_ && !context_)) return true;
     D3D11_QUERY_DATA_TIMESTAMP_DISJOINT disjoint{};
     HRESULT ready = S_FALSE;
     // A waiting resolve (F11 capture, shutdown) gives up after 2 s like the

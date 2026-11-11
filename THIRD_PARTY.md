@@ -96,3 +96,47 @@ Source: https://github.com/recastnavigation/recastnavigation/releases/tag/v1.6.0
 Archive SHA-256: 8b50c62177249554b226514b307e6c529934a62b3926822777bf6abb8906a155.
 Unmodified Recast and Detour modules only, statically compiled x64 /MD, DT_POLYREF64.
 zlib license: external/recastnavigation/License.txt. Pin: third_party/recastnavigation.lock.json.
+
+## Direct3D 12 dependencies (X64D3D12, runtime integration pending)
+
+The coordinator supplied these packages offline in tasks/X64D3D12/downloads.
+They were copied into project deps. tools/prepare-worktree.ps1 materializes
+only the needed files under ignored dependencies/ for the build. No network
+restore is used. OwnedRenderer/D3D12Sdk.props defines the build paths.
+
+- AMD FidelityFX SDK 2.3.0, Kits/FidelityFX, from
+  https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/tree/v2.3.0 .
+  Local deps/fidelityfx-sdk/2.3.0. API, framegeneration and upscalers headers;
+  signedbin/amd_fidelityfx_loader_dx12.lib. Runtime files are
+  amd_fidelityfx_loader_dx12.dll and amd_fidelityfx_framegeneration_dx12.dll.
+  Complete supplied license.md is third_party/d3d12/AMD-FidelityFX-LICENSE.md
+  and is copied to application output licenses/AMD-FidelityFX-LICENSE.md.
+  Preserve this combined license and its component notices on distribution.
+  FSR FG requires Microsoft VC++ Redistributable 2015+ x64. If it is missing,
+  FSR FG is unavailable; the game and DLSS FG do not require these AMD DLLs.
+- NVIDIA NVAPI commit 70d337db9186e968eab622f7e786de7e437faf3d, from
+  https://github.com/NVIDIA/nvapi/tree/70d337db9186e968eab622f7e786de7e437faf3d .
+  Local deps/nvapi/70d337db/nvapi-70d337db9186e968eab622f7e786de7e437faf3d.
+  Headers and static amd64/nvapi64.lib, used for the author's Reflex code.
+  MIT license preserved in third_party/d3d12/NVIDIA-NVAPI-LICENSE.txt and
+  application output licenses/NVIDIA-NVAPI-LICENSE.txt. No NVAPI SDK DLL ships.
+- Microsoft DirectXShaderCompiler v1.9.2609, release archive
+  dxc_2026_09_29.zip from
+  https://github.com/microsoft/DirectXShaderCompiler/releases/tag/v1.9.2609 .
+  Local deps/dxc/1.9.2609. Build inputs bin/x64/dxc.exe, dxcompiler.dll,
+  dxil.dll. Supplied LICENCE-MIT.txt, LICENSE-LLVM.txt and LICENSE-MS.txt
+  are preserved unchanged in third_party/d3d12 and the prepared dependency.
+  Only compiled DXIL resources enter the application. Compiler executables
+  and DLLs are excluded from the runtime kit.
+- NVIDIA DLSS SDK v310.9.16, same tag/commit/license as X64DLSS01 above.
+  The existing deps/dlss-sdk/v310.9.16 now includes the four supplied
+  *_dlssg*.h headers and release nvngx_dlssg.dll. Preparation and runtime
+  packaging include DLSS-G beside nvngx_dlss.dll. The unchanged SDK
+  LICENSE.txt and the existing NVIDIA attribution/distribution obligations
+  apply to both. The author calls NGX directly, with no Streamline dependency.
+
+The build-task runtime DLL list includes both FidelityFX DLLs and DLSS-G.
+Application output contains SDK licenses. A distributed kit must also carry
+the complete licenses above, including the existing NVIDIA DLSS license.
+Source/build integration is staged. Host executor and NGX transport adaptation
+remain open. No build, shader compilation, kit or game execution is validated.
