@@ -1,3 +1,46 @@
+# X64D3D12 source import, stage 1 (2026-11-11)
+
+Incomplete integration. Imported the 21 files under `Host/d3d12/` and
+`Host/dlss.{h,cpp}`, `Host/reflex.{h,cpp}` from upstream
+`d17a6149e5b5d4c2d23873d18e037bc270269050`, using Git archive from the
+read-only reference. All 25 source files retain the upstream bytes.
+The existing LICENSE.md and NOTICE.md apply to these author sources.
+
+This stage includes the device/queue/heaps/fences, barriers, upload rings,
+pipelines, timestamps, frame executor, presenter, DLSS-G pacer, FidelityFX
+FSR 3.1 FG, NGX D3D12 SR/FG, Reflex, diagnostic bring-up and HLSL/resources.
+They are staged sources and are not linked into OwnedRenderer yet.
+`Source/dxil_table.h` and the shared renderer D3D12 algorithms were already
+present. The embedded runtime still creates D3D11 for renderer_backend=1,
+and frame generation remains unavailable. BRIEF completion is open.
+
+Local dependency blocker: the project tree has no FidelityFX SDK 2.3.0,
+NVAPI SDK or DXC. The installed DLSS SDK v310.9.16 has nvngx_dlss.dll,
+but lacks nvsdk_ngx_helpers_dlssg_d3d.h and nvngx_dlssg.dll required by
+Host/dlss.cpp. Nothing was downloaded and no runtime DLL or kit was added.
+See THIRD_PARTY.md for the exact upstream dependency paths and runtime files.
+
+Continuation requires the embedded Host adaptation and build integration:
+- Own the executor through Renderer lifecycle, route renderer_backend before
+  D3D11 creation, and report D3D12 startup/removal errors to the engine log
+  and player. create_frame_executor returns a reason on failure. Its upstream
+  comment about keeping D3D11 must not become an embedded fallback.
+- Adapt ensure_host_d3d12, overlay/config initialization, frame boundaries,
+  resize and teardown to the native window and existing embedded scene input.
+  Host transport has not been adapted in this stage. Do not copy the remote
+  Core/Host replay or set core_host_ blindly: the embedded game submits locally.
+- Route NGX SR/FG and Reflex calls directly, with engine logging and local
+  paths. Replace the imported author's NGX project ID with the existing
+  EIRebuild64 identity from Source/dlss_backend.cpp. Keep D3D11 NGX ownership.
+- Compile the author's DXIL through shader_embed --dxil-sources and DXC,
+  include the D3D12-only program list currently guarded out for embedded,
+  and link both DXIL resource tables with adapted resource paths. The raw
+  d3d12_shaders.rc currently names the author's build/x64-host/dxil directory.
+- Prepare licensed SDK inputs locally and package their required runtime DLLs
+  through the permitted build integration. tools/build-task.ps1 is forbidden
+  to edit by this BRIEF. Claude performs the full build after integration.
+
+No compilation, tests, gameplay or visual acceptance was performed.
 # X64RUPD03 renderer source provenance (2026-11-07)
 
 Upstream main: `d17a6149e5b5d4c2d23873d18e037bc270269050` (193 commits after

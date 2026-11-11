@@ -96,3 +96,36 @@ Source: https://github.com/recastnavigation/recastnavigation/releases/tag/v1.6.0
 Archive SHA-256: 8b50c62177249554b226514b307e6c529934a62b3926822777bf6abb8906a155.
 Unmodified Recast and Detour modules only, statically compiled x64 /MD, DT_POLYREF64.
 zlib license: external/recastnavigation/License.txt. Pin: third_party/recastnavigation.lock.json.
+
+## D3D12 source-stage dependencies (X64D3D12, integration pending)
+
+The author's Host/d3d12, Host/dlss and Host/reflex sources are imported under
+external/owned-renderer, covered by its LICENSE.md and NOTICE.md. They are
+not linked yet. No additional third-party SDK or runtime was obtained.
+The following inputs are required by upstream Host/host.mak and Host/build.cmd
+at d17a6149, and remain missing from the local project tree.
+
+- FidelityFX SDK 2.3.0, Kits/FidelityFX. Headers from api/include and
+  framegeneration/include, including ffx_api.h, dx12/ffx_api_dx12.h,
+  ffx_framegeneration.h and dx12/ffx_api_framegeneration_dx12.h.
+  Link signedbin/amd_fidelityfx_loader_dx12.lib. Ship signedbin DLLs
+  amd_fidelityfx_loader_dx12.dll and amd_fidelityfx_framegeneration_dx12.dll
+  with the SDK's docs/license.md. Preserve that supplied license unchanged.
+- NVIDIA NVAPI, upstream release identifier 70d337db (folder
+  NVIDIA-nvapi-70d337d). Header nvapi.h and static amd64/nvapi64.lib.
+  Upstream identifies the license as MIT and ships the SDK's License.txt.
+  Obtain and preserve that file with the dependency and runtime notices.
+- DirectXShaderCompiler 1.9.2609. Build-time bin/x64/dxc.exe,
+  dxcompiler.dll and dxil.dll. Preserve the release's license/notices when
+  preparing the build dependency. The author's build recipe excludes the
+  Windows SDK 10.0.22621 DXC 1.6 because it crashes on liquid programs.
+  The runtime consumes embedded DXIL resources.
+- NVIDIA DLSS/NGX. The existing local v310.9.16 subset supplies SR only.
+  Host/dlss.cpp additionally requires nvsdk_ngx_helpers_dlssg_d3d.h and
+  release lib/Windows_x86_64/rel/nvngx_dlssg.dll. Obtain a complete compatible
+  SDK with its NVIDIA license. Package the release nvngx_dlssg.dll beside
+  nvngx_dlss.dll with the supplied license. Upstream calls NGX DLSS-G
+  directly and does not require Streamline.
+
+These entries describe pending inputs. SDK files, licenses and DLLs above
+have not been imported or packaged, and no D3D12 build/runtime is validated.
