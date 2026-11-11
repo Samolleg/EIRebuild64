@@ -221,7 +221,19 @@ try {
         $imports = & $dumpbin /nologo /dependents $binary.FullName
         if ($LASTEXITCODE -ne 0) { throw "dumpbin failed: $($binary.Name)" }
         $imports | Out-File (Join-Path $task ($binary.Name + '.dependents.txt')) -Encoding utf8
-        if ($imports -match '(?i)(MSVCP\d+|VCRUNTIME\d+|mfc\d+|ucrtbase|api-ms-win-crt-).*\.dll') { throw "Dynamic VC runtime: $($binary.Name)" }
+        if ($binary.Name -match '^(nvngx_|amd_fidelityfx_).*\.dll$') {
+            $signature = Get-AuthenticodeSignature -LiteralPath $binary.FullName
+            if ($signature.Status -ne 'Valid') { throw "Invalid vendor signature: $($binary.Name): $($signature.Status)" }
+        } elseif ($imports -match '(?i)(MSVCP\d+|VCRUNTIME\d+|mfc\d+|ucrtbase|api-ms-win-crt-).*\.dll') {
+            throw "Dynamic VC runtime: $($binary.Name)"
+        }
+        if ($binary.Name -ieq 'EIRebuild64.exe') {
+            # dumpbin lists delay-load dependencies separately from startup imports.
+            $staticImports = (($imports -join "`n") -split '(?im)^\s*Image has the following delay load dependencies:')[0]
+            if ($staticImports -match '(?im)^\s*(nvngx_|amd_fidelityfx_)[^\s]*\.dll\s*$') {
+                throw "Static vendor DLL import: $($binary.Name): $($Matches[0].Trim())"
+            }
+        }
     }
     Write-Utf8 (Join-Path $kit 'SHA256SUMS') (Manifest $kit)
     $clock.Stop()

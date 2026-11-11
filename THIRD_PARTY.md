@@ -112,6 +112,8 @@ restore is used. OwnedRenderer/D3D12Sdk.props defines the build paths.
   Complete supplied license.md is third_party/d3d12/AMD-FidelityFX-LICENSE.md
   and is copied to application output licenses/AMD-FidelityFX-LICENSE.md.
   Preserve this combined license and its component notices on distribution.
+  FSR FG requires Microsoft VC++ Redistributable 2015+ x64. If it is missing,
+  FSR FG is unavailable; the game and DLSS FG do not require these AMD DLLs.
 - NVIDIA NVAPI commit 70d337db9186e968eab622f7e786de7e437faf3d, from
   https://github.com/NVIDIA/nvapi/tree/70d337db9186e968eab622f7e786de7e437faf3d .
   Local deps/nvapi/70d337db/nvapi-70d337db9186e968eab622f7e786de7e437faf3d.

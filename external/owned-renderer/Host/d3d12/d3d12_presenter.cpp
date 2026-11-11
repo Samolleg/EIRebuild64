@@ -1,7 +1,7 @@
 // Flip-model presenter in a child window; see d3d12_presenter.h.
 #include "d3d12_presenter.h"
 
-#include <ffx_api.h>
+#include "d3d12_fidelityfx_runtime.h"
 #include <dx12/ffx_api_dx12.h>
 #include <ffx_framegeneration.h>
 #include <dx12/ffx_api_framegeneration_dx12.h>
@@ -48,7 +48,7 @@ void Presenter::release_swap() noexcept {
     for (auto& buffer : buffers_) buffer.Reset();
     if (proxy_context_) {
         ffxContext context = static_cast<ffxContext>(proxy_context_);
-        ffxDestroyContext(&context, nullptr);
+        fidelityfx::api.destroy(&context, nullptr);
         proxy_context_ = nullptr;
     }
     // The last reference (the FidelityFX guide asserts a release count of 0
@@ -154,6 +154,7 @@ bool Presenter::create_swap(Core& core, ID3D12CommandQueue* queue, std::string& 
     ComPtr<IDXGISwapChain1> swap;
     HRESULT hr = S_OK;
     if (proxy) {
+        if (!fidelityfx::load(reason)) return false;
         // The window's only swap chain; the proxy owns the real one inside.
         ffxCreateContextDescFrameGenerationSwapChainVersionDX12 version{};
         version.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_FRAMEGENERATIONSWAPCHAIN_VERSION_DX12;
@@ -169,9 +170,9 @@ bool Presenter::create_swap(Core& core, ID3D12CommandQueue* queue, std::string& 
         create.dxgiFactory = core.factory();
         create.gameQueue = queue;
         ffxContext context = nullptr;
-        const ffxReturnCode_t made = ffxCreateContext(&context, &create.header, nullptr);
+        const ffxReturnCode_t made = fidelityfx::api.create(&context, &create.header, nullptr);
         if (made != FFX_API_RETURN_OK || !created) {
-            if (context) ffxDestroyContext(&context, nullptr);
+            if (context) fidelityfx::api.destroy(&context, nullptr);
             reason = "the FidelityFX frame generation swap chain could not be created (ffx " + std::to_string(unsigned(made)) + ")";
             return false;
         }
