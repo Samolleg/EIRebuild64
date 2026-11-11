@@ -20,6 +20,7 @@ struct ModDelayedShot;
 class CGameBase;
 namespace SaveSchema { class Writer; class Reader; }
 #include <string>
+#include <stdexcept>
 #include <optional>
 #include <vector>
 #include <map>
@@ -77,6 +78,10 @@ public:
     void ApplyPartyVisualOptions();
     const ModSpellAddon::Profile& SpellAddon() const { return spellAddon; }
     const std::string& Directory() const { return root; }
+    const std::string& SaveIdentity() const {
+        if (saveIdentity.empty()) throw std::runtime_error("Saving requires MOD/Title in config.reg");
+        return saveIdentity;
+    }
     // Content dependencies for the offline scene-import cache.
     std::vector<std::string> NavigationInputs() const;
     bool GetNpcCombatConsumableConfig(const char*zone,int id,const char*prototype,int kind,int variant,ModConsumableConfig&);
@@ -249,7 +254,7 @@ private:
     bool briefingWeapons=true;
     bool worldBackground=true;
     bool partyVisualOptions=false, hidePartyHelmets=false, hidePartyUpperArmor=false;
-    std::string root;
+    std::string root, saveIdentity;
     std::map<std::string,std::vector<std::string>> archives;
     std::map<std::string,bool> ignoreBase;
     std::map<std::string,std::string> configs,maps,cameras;

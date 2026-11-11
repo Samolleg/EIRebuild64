@@ -1,5 +1,6 @@
 #pragma once
 #include "../Navigation/Query.h"
+#include "../Navigation/QueryFailure.h"
 #include "../Navigation/BodyTable.h"
 #include "../Navigation/Profiles.h"
 #include "../Navigation/SceneTransform.h"
@@ -52,7 +53,7 @@ class NavigationWorld {
     std::map<int,PathSearch> pathSearches;
     double pathBudgetMs=2.;
     std::uint64_t pathFrame=~std::uint64_t(0);
-    struct FailedQuery {Navigation::Point source,goal;std::uint64_t after=0,generation=0;int profile=0,aiClass=0;float height=0,maxLength=0,radius=0;Navigation::GoalPolicy policy=Navigation::GoalPolicy::Exact;Navigation::Status status=Navigation::Status::NoPath;};
+    using FailedQuery = Navigation::QueryFailure;
     std::map<int,std::vector<FailedQuery>> failedQueries;
     struct RejectedMove {
         Navigation::Point source,goal;

@@ -42,8 +42,8 @@ public:
     CModelResourceEntry(class CGeometryManager *pManager);
     ~CModelResourceEntry();
     //
-    void OpenModelResources(BYTE *pModel, BYTE *pBones, BYTE *pAnimations,
-                            DWORD animationSize = 0);
+    bool OpenModelResources(BYTE *pModel, DWORD modelSize, BYTE *pBones, DWORD bonesSize,
+                            BYTE *pAnimations, DWORD animationSize);
     //
     CMappedResource *GetAnimation(const std::string &szName);
     bool GetAnimationSourceBytes(const std::string& szName, const void*& bytes, DWORD& size);

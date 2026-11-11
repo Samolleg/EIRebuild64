@@ -1198,20 +1198,18 @@ CModelResourceEntry *CGeometryManager::GetModel(const std::string &szName)
     auto pos = models.find(szName);
     if (pos == models.end())
     {
-        char buff[512];
-        strcpy(buff, szName.c_str());
-        strcat(buff, ".mod");
-        BYTE *pModel = GetFile(buff);
-        strcpy(buff, szName.c_str());
-        strcat(buff, ".bon");
-        BYTE *pBones = GetFile(buff);
-        strcpy(buff, szName.c_str());
-        strcat(buff, ".anm");
-        BYTE *pAnims = GetFile(buff);
+        DWORD modelSize = 0, bonesSize = 0;
+        BYTE *pModel = GetFile((szName + ".mod").c_str(), &modelSize);
+        BYTE *pBones = GetFile((szName + ".bon").c_str(), &bonesSize);
+        DWORD animationSize = 0;
+        BYTE *pAnims = GetFile((szName + ".anm").c_str(), &animationSize);
         if (pModel) // we need at rest a model to open resource (bones and animations are optional)
         {
             models[szName] = dbgnew CModelResourceEntry(this);
-            models[szName]->OpenModelResources(pModel, pBones, pAnims);
+            if (!models[szName]->OpenModelResources(pModel, modelSize, pBones, bonesSize, pAnims, animationSize)) {
+                models.erase(szName);
+                return nullptr;
+            }
             pos = models.find(szName);
         }
     }

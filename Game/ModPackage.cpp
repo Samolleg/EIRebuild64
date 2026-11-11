@@ -63,6 +63,7 @@
 #include <limits>
 #include <cmath>
 #include "FileRegistry.h"
+#include "SaveModIdentity.h"
 #include "aiSettings.h"
 #include "ItemDatabase.h"
 #include "CMappedResource.h"
@@ -144,6 +145,7 @@ void CModPackage::Load(const std::string &directory){
  root=fs::absolute(directory).lexically_normal().string();
  SpellTextures::Load(root);
  CFileRegistry config;if(!config.Open(Join(root,"config.reg").c_str()))throw std::runtime_error("Cannot open mod config.reg");
+ saveIdentity=SaveModIdentity::Read(config);
  saveInMod=config.GetInt("MOD","GameSaves",1)!=0;
   forceTutorial=ModConfiguration::Bool(config,"MOD","ForceShowTutorial",false);
   gameDebugFile=(LPCSTR)config.GetString("Dev","GameDebugFile","");

@@ -78,6 +78,19 @@ void CMappedResource::GetFileList(CStringArray&names,LPCSTR mask){
  auto append=[&](){for(int i=0;i<local.GetSize();i++){std::string key=(LPCSTR)local[i];for(char&c:key)if(c>='A'&&c<='Z')c+=32;if(seen.insert(key).second)names.Add(local[i]);}local.RemoveAll();};
  for(auto&child:overlays){child->GetFileList(local,mask);append();}if(!ignoreOriginal){CResourceBase::GetFileList(local,mask);append();}
 }
+namespace {
+bool ReadResourceBytes(int file, void* buffer, std::size_t bytes)
+{
+    auto* out = static_cast<BYTE*>(buffer);
+    while (bytes) {
+        const unsigned count = static_cast<unsigned>((std::min)(bytes, std::size_t(1u << 20)));
+        const int read = _read(file, out, count);
+        if (read <= 0) return false;
+        out += read; bytes -= read;
+    }
+    return true;
+}
+}
 BOOL CMappedResource::OpenResource(LPCSTR pszFileName, BOOL _bWriteAccess)
 {
     CloseResource();
@@ -86,52 +99,38 @@ BOOL CMappedResource::OpenResource(LPCSTR pszFileName, BOOL _bWriteAccess)
         ? ModRuntime::MapPath(pszFileName) : std::string(pszFileName);
     sourcePath = resolvedName;
     pszFileName = resolvedName.c_str();
-    OpenOverlays(pszFileName,_bWriteAccess);if(ignoreOriginal)return TRUE;
-
+    OpenOverlays(pszFileName, _bWriteAccess);
+    if (ignoreOriginal) return TRUE;
     hFile = _open(pszFileName, _O_BINARY | _O_RANDOM | (bWriteAccess ? _O_RDWR : _O_RDONLY));
-    if (hFile == -1)
-        return ReportError("CMappedResource::OpenResource()\nUnable to open file \"" +
-                           CString(pszFileName) + "\"");
-    if (_lseek(hFile, 0, SEEK_SET) == -1 || _read(hFile, &header, sizeof(header)) != sizeof(header))
-    {
+    if (hFile == -1) return ReportError("Cannot open resource: %s", pszFileName);
+    const auto size = _filelengthi64(hFile);
+    if (size < 0 || !ReadResourceBytes(hFile, &header, sizeof(header)) ||
+        !SetResourceLayout(static_cast<std::uint64_t>(size), false)) {
         CloseResource();
-        return ReportError("CMappedResource::OpenResource()\nUnable to read file \"" +
-                           CString(pszFileName) + "\"");
+        return ReportError("Invalid resource header/ranges: %s", pszFileName);
     }
-    if (header.dwSignature != SRESHEADER_SIGNATURE)
-    {
-        ReportError("Wrong format resource file \"" + CString(pszFileName) + "\"");
-        CloseResource();
-        return FALSE;
-    }
-    int nHashTblSize = header.dwEntryCount * sizeof(SResHashEntry);
-    pHashTable = dbgnew SResHashEntry[header.dwEntryCount];
-    pNamePool = dbgnew BYTE[header.dwNameDataSize];
-    if (_lseek(hFile, header.dwHashTableOffset, SEEK_SET) == -1 ||
-        _read(hFile, pHashTable, nHashTblSize) != nHashTblSize ||
-        _read(hFile, pNamePool, header.dwNameDataSize) != header.dwNameDataSize)
-    {
-        CloseResource();
-        return ReportError("CMappedResource::OpenResource()\nUnable to read file \"" +
-                           CString(pszFileName) + "\"");
-    }
+    try {
+        const auto tableBytes = std::size_t(header.dwEntryCount) * sizeof(SResHashEntry);
+        pHashTable = dbgnew SResHashEntry[header.dwEntryCount];
+        pNamePool = dbgnew BYTE[static_cast<std::size_t>(namePoolBytes)];
+        if (_lseeki64(hFile, header.dwHashTableOffset, SEEK_SET) == -1 ||
+            !ReadResourceBytes(hFile, pHashTable, tableBytes) ||
+            !ReadResourceBytes(hFile, pNamePool, static_cast<std::size_t>(namePoolBytes))) {
+            CloseResource();
+            return ReportError("Incomplete resource table/names: %s", pszFileName);
+        }
+    } catch (...) { CloseResource(); throw; }
     return TRUE;
 }
 
-BOOL CMappedResource::OpenResourceMem(LPVOID pAddress)
+BOOL CMappedResource::OpenResourceMem(LPVOID address, std::size_t bytes)
 {
     CloseResource();
-    pBaseAddress = LPBYTE(pAddress);
-    memcpy(&header, pBaseAddress, sizeof(header));
-    if (header.dwSignature != SRESHEADER_SIGNATURE)
-    {
-        ReportError("Wrong format resource\n");
+    if (!BindResourceMemory(address, bytes)) {
         CloseResource();
-        return FALSE;
+        return ReportError("Invalid memory resource header/ranges");
     }
-    pHashTable = (SResHashEntry *)(pBaseAddress + header.dwHashTableOffset);
-    pNamePool = pBaseAddress + header.dwHashTableOffset +
-                sizeof(SResHashEntry) * header.dwEntryCount;
+    pBaseAddress = static_cast<BYTE*>(address);
     return TRUE;
 }
 
@@ -152,6 +151,7 @@ void CMappedResource::CloseResource()
     pNamePool = NULL;
     pBaseAddress = NULL;
     memset(&header, 0, sizeof(header));
+    resourceBytes = namePoolBytes = 0;
 }
 
 //--------------------------------------------------------------------------------------------
@@ -186,7 +186,7 @@ LPBYTE CMappedResource::GetFile(LPCSTR pszFileName, LPDWORD pnDataSize)
 }
 LPBYTE CMappedResource::GetFileExact(LPCSTR pszFileName, LPDWORD pnDataSize)
 {
-    if (!pHashTable || !pNamePool)
+    if (!pszFileName || !pHashTable || !pNamePool)
         return NULL;
 
     auto pos = recByName.find(std::string(pszFileName));
@@ -216,8 +216,8 @@ LPBYTE CMappedResource::GetFileExact(LPCSTR pszFileName, LPDWORD pnDataSize)
     pRec->pAllocatedMemory = dbgnew BYTE[pRec->dwSize];
     pRec->dwFilePos = pHashTable[dwIndex].dwOffset;
 
-    if (_lseek(hFile, pRec->dwFilePos, SEEK_SET) == -1 ||
-        _read(hFile, pRec->pAllocatedMemory, pRec->dwSize) != pRec->dwSize)
+    if (_lseeki64(hFile, pRec->dwFilePos, SEEK_SET) == -1 ||
+        !ReadResourceBytes(hFile, pRec->pAllocatedMemory, pRec->dwSize))
     {
         delete[] pRec->pAllocatedMemory;
         delete pRec;
@@ -250,7 +250,7 @@ bool CMappedResource::CloseFile(LPBYTE pFileImage)
     SResourceFileRecord *pRec = pos->second;
     if (--pRec->nRefs == 0)
     {
-        if (bWriteAccess && (_lseek(hFile, pRec->dwFilePos, SEEK_SET) == -1 ||
+        if (bWriteAccess && (_lseeki64(hFile, pRec->dwFilePos, SEEK_SET) == -1 ||
                              _write(hFile, pRec->pAllocatedMemory, pRec->dwSize) != pRec->dwSize))
             ReportError("CMappedResource::CloseFile()\nUnable to write file \"" +
                         CString(pFileImage) + "\"");
@@ -293,30 +293,27 @@ CWin32MappedResource::~CWin32MappedResource()
     CloseResource();
 }
 //--------------------------------------------------------------------------------------------
-BOOL CWin32MappedResource::OpenResource(LPCSTR pszFileName, BOOL bWriteAccess)
+BOOL CWin32MappedResource::OpenResource(LPCSTR name, BOOL write)
 {
-    CloseResource();sourcePath=pszFileName;OpenOverlays(pszFileName,bWriteAccess,true);if(ignoreOriginal)return TRUE;
-    if (!cMappedFile.Open(pszFileName, bWriteAccess))
-        return FALSE;
-    if (OpenResourceMem((LPBYTE)cMappedFile.GetAddress()))
-        return TRUE;
-    CloseResource();
-    return FALSE;
+    CloseResource(); sourcePath = name; OpenOverlays(name, write, true);
+    if (ignoreOriginal) return TRUE;
+    if (!cMappedFile.Open(name, write)) { CloseResource(); return FALSE; }
+    if (!BindResourceMemory(cMappedFile.GetAddress(), cMappedFile.GetSize())) {
+        CloseResource();
+        return ReportError("Invalid mapped resource header/ranges: %s", name);
+    }
+    pBaseAddress = static_cast<BYTE*>(cMappedFile.GetAddress());
+    return TRUE;
 }
 
-BOOL CWin32MappedResource::OpenResourceMem(LPVOID pAddress)
+BOOL CWin32MappedResource::OpenResourceMem(LPVOID address, std::size_t bytes)
 {
-    pBaseAddress = (LPBYTE)pAddress;
-    memcpy(&header, pBaseAddress, sizeof(header));
-    if (header.dwSignature != SRESHEADER_SIGNATURE)
-    {
-        ReportError("Wrong format resource\n");
+    CloseResource();
+    if (!BindResourceMemory(address, bytes)) {
         CloseResource();
-        return FALSE;
+        return ReportError("Invalid memory resource header/ranges");
     }
-    pHashTable = (SResHashEntry *)(pBaseAddress + header.dwHashTableOffset);
-    pNamePool = pBaseAddress + header.dwHashTableOffset +
-                sizeof(SResHashEntry) * header.dwEntryCount;
+    pBaseAddress = static_cast<BYTE*>(address);
     return TRUE;
 }
 
@@ -328,6 +325,7 @@ void CWin32MappedResource::CloseResource()
     pNamePool = NULL;
     pBaseAddress = NULL;
     memset(&header, 0, sizeof(header));
+    resourceBytes = namePoolBytes = 0;
 }
 
 void CWin32MappedResource::Flush()
@@ -353,7 +351,7 @@ LPBYTE CWin32MappedResource::GetFile(LPCSTR pszFileName, LPDWORD pnDataSize)
 }
 LPBYTE CWin32MappedResource::GetFileExact(LPCSTR pszFileName, LPDWORD pnDataSize)
 {
-    if (!pHashTable || !pNamePool)
+    if (!pszFileName || !pHashTable || !pNamePool)
         return NULL;
     DWORD dwIndex = GetIndexOfName(pszFileName);
     if (dwIndex == -1)

@@ -3,6 +3,9 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "CResourceBase.h"
 #include "Notification.h"
+#include <array>
+#include <string>
+#include <stdexcept>
 // --------------------------------------------------------------------------------------------
 CResourceBase::CResourceBase()
 {
@@ -24,40 +27,75 @@ CResourceBase::~CResourceBase()
     FreeAccelTable();
 }
 // --------------------------------------------------------------------------------------------
-static int GetHashValueByName(LPBYTE pszBytes, DWORD dwHashBase, int *pnNameLen)
+bool CResourceBase::SetResourceLayout(std::uint64_t bytes, bool mapped)
 {
-    DWORD dwSum = 0;
-    int nNameLen = 0;
-    while (*pszBytes)
-    {
-        dwSum += tolower(*pszBytes++);
-        nNameLen++;
-    }
-    *pnNameLen = nNameLen;
-    return dwSum % dwHashBase;
+    resourceBytes = namePoolBytes = 0;
+    if (bytes < sizeof(header) || header.dwSignature != SRESHEADER_SIGNATURE)
+        return false;
+    const std::uint64_t tableBytes = std::uint64_t(header.dwEntryCount) * sizeof(SResHashEntry);
+    if (header.dwHashTableOffset > bytes || tableBytes > bytes - header.dwHashTableOffset)
+        return false;
+    const auto available = bytes - header.dwHashTableOffset - tableBytes;
+    // Nested/mapped archives historically use the remainder of the container
+    // for names. Buffered archives own exactly the declared name pool.
+    if (!mapped && header.dwNameDataSize > available)
+        return false;
+    resourceBytes = bytes;
+    namePoolBytes = mapped ? available : header.dwNameDataSize;
+    return true;
 }
-// --------------------------------------------------------------------------------------------
-// returns index in hash table or -1 if not found
-DWORD CResourceBase::GetIndexOfName(LPCSTR pszName)
+bool CResourceBase::BindResourceMemory(const void* address, std::size_t bytes)
 {
-    if (header.dwEntryCount == 0)
-        return -1;
-    int nNameLen;
-    int nIndex = GetHashValueByName(LPBYTE(pszName), header.dwEntryCount, &nNameLen);
-    while (nNameLen != pHashTable[nIndex].wNameLen ||
-           strnicmp(pszName, LPCSTR(pNamePool + pHashTable[nIndex].dwNameOffset), nNameLen))
-    {
-        nIndex = pHashTable[nIndex].dwNextIndex;
-        if (nIndex == -1)
-            return -1;
-    }
-    return nIndex;
+    if (!address || bytes < sizeof(header)) return false;
+    memcpy(&header, address, sizeof(header));
+    if (!SetResourceLayout(bytes, true)) return false;
+    auto* base = static_cast<const BYTE*>(address);
+    pHashTable = reinterpret_cast<SResHashEntry*>(const_cast<BYTE*>(base + header.dwHashTableOffset));
+    pNamePool = const_cast<BYTE*>(base + header.dwHashTableOffset +
+        std::size_t(header.dwEntryCount) * sizeof(SResHashEntry));
+    return true;
 }
-DWORD CResourceBase::GetIndexOfID(int nResourceID)
+bool CResourceBase::EntryAvailable(DWORD index) const
 {
-    if (nResourceID >= nAccelTableSize)
-        return -1;
-    return pdwAccelTable[nResourceID];
+    if (!pHashTable || !pNamePool || index >= header.dwEntryCount) return false;
+    const auto& entry = pHashTable[index];
+    if (!entry.wNameLen || entry.dwOffset > resourceBytes ||
+        entry.dwSize > resourceBytes - entry.dwOffset ||
+        entry.dwNameOffset > namePoolBytes || entry.wNameLen > namePoolBytes - entry.dwNameOffset)
+        return false;
+    return memchr(pNamePool + entry.dwNameOffset, 0, entry.wNameLen) == nullptr;
+}
+static DWORD GetHashValueByName(LPCSTR name, DWORD base, std::size_t& length)
+{
+    DWORD sum = 0;
+    length = 0;
+    for (auto* p = reinterpret_cast<const unsigned char*>(name); *p; ++p) {
+        sum += tolower(*p);
+        ++length;
+    }
+    return sum % base;
+}
+DWORD CResourceBase::GetIndexOfName(LPCSTR name)
+{
+    if (!name || !pHashTable || !pNamePool || !header.dwEntryCount) return DWORD(-1);
+    std::size_t length = 0;
+    DWORD index = GetHashValueByName(name, header.dwEntryCount, length);
+    // Bad/dead records cannot match, but a valid successor remains usable.
+    // The table-size bound also terminates cyclic collision chains.
+    for (DWORD steps = 0; steps < header.dwEntryCount && index < header.dwEntryCount; ++steps) {
+        const auto& entry = pHashTable[index];
+        if (EntryAvailable(index) && length == entry.wNameLen &&
+            _strnicmp(name, reinterpret_cast<const char*>(pNamePool + entry.dwNameOffset), length) == 0)
+            return index;
+        index = entry.dwNextIndex;
+    }
+    return DWORD(-1);
+}
+DWORD CResourceBase::GetIndexOfID(int id)
+{
+    if (id < 0 || id >= nAccelTableSize || !pdwAccelTable) return DWORD(-1);
+    const DWORD index = pdwAccelTable[id];
+    return EntryAvailable(index) ? index : DWORD(-1);
 }
 
 // --------------------------------------------------------------------------------------------
@@ -150,34 +188,32 @@ static BOOL strsimilar(LPCSTR pszName, LPCSTR pszMask, BOOL bRetIfMaskEmpty)
     return TRUE;
 }
 
-static BOOL FileNameSimilar(LPCSTR pszName, LPCSTR pszMask)
+static BOOL FileNameSimilar(LPCSTR name, LPCSTR mask)
 {
-    char driveN[_MAX_DRIVE];
-    char dirN[_MAX_DIR];
-    char fnameN[_MAX_FNAME];
-    char extN[_MAX_EXT];
-    char driveM[_MAX_DRIVE];
-    char dirM[_MAX_DIR];
-    char fnameM[_MAX_FNAME];
-    char extM[_MAX_EXT];
-
-    _splitpath(pszName, driveN, dirN, fnameN, extN);
-    _splitpath(pszMask, driveM, dirM, fnameM, extM);
-    return strsimilar(driveN, driveM, TRUE) && strsimilar(dirN, dirM, TRUE) &&
-           strsimilar(fnameN, fnameM, FALSE) && strsimilar(extN, extM, TRUE);
+    auto split = [](const char* value) {
+        std::array<std::string,4> parts;
+        for (auto& part : parts) part.resize(strlen(value) + 1, '\0');
+        if (_splitpath_s(value, parts[0].data(), parts[0].size(), parts[1].data(), parts[1].size(),
+                         parts[2].data(), parts[2].size(), parts[3].data(), parts[3].size()) != 0)
+            throw std::invalid_argument("Invalid resource name/mask");
+        return parts;
+    };
+    const auto names = split(name), masks = split(mask);
+    return strsimilar(names[0].c_str(), masks[0].c_str(), TRUE) &&
+           strsimilar(names[1].c_str(), masks[1].c_str(), TRUE) &&
+           strsimilar(names[2].c_str(), masks[2].c_str(), FALSE) &&
+           strsimilar(names[3].c_str(), masks[3].c_str(), TRUE);
 }
 
 void CResourceBase::GetFileList(CStringArray &aNames, LPCSTR pszMask)
 {
-    char temp[1024];
     aNames.RemoveAll();
-    SResHashEntry *pCurEntry = pHashTable;
-    for (DWORD i = 0; i < header.dwEntryCount; i++, pCurEntry++)
+    for (DWORD i = 0; i < header.dwEntryCount; ++i)
     {
-        BYTE *pName = pNamePool + pCurEntry->dwNameOffset;
-        memcpy(temp, pName, pCurEntry->wNameLen);
-        temp[pCurEntry->wNameLen] = 0;
-        if (pszMask == NULL || FileNameSimilar(temp, pszMask) == TRUE)
-            aNames.Add(temp);
+        if (!EntryAvailable(i)) continue;
+        const auto& entry = pHashTable[i];
+        const CString name(reinterpret_cast<const char*>(pNamePool + entry.dwNameOffset), entry.wNameLen);
+        if (pszMask == NULL || FileNameSimilar(name, pszMask))
+            aNames.Add(name);
     }
 }

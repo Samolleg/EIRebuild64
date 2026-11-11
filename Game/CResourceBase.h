@@ -5,6 +5,8 @@ Written by Ivanov E.N.
 Nival Entertainment, 1998
 --------------------------------------------------------------------------------------------*/
 #include <assert.h>
+#include <cstdint>
+#include <cstddef>
 // Структура таблицы для ускорения поиска файлов в ресурсе
 // nResourceID используется как индекс в массиве, поэтому желательно
 // чтобы они начинались с 0 и шли по очереди
@@ -34,6 +36,10 @@ protected:
 
     // returns index of hash table record or -1 if not found
     DWORD GetIndexOfName(LPCSTR pszName);
+    bool SetResourceLayout(std::uint64_t bytes, bool mapped);
+    bool BindResourceMemory(const void* address, std::size_t bytes);
+    bool EntryAvailable(DWORD index) const;
+    std::uint64_t resourceBytes = 0, namePoolBytes = 0;
     DWORD GetIndexOfID(int nResourceID);
 #ifdef TRY_OPEN_EXTERNAL_RESOURCES
     LPCSTR FindNameByID(int nResourceID);

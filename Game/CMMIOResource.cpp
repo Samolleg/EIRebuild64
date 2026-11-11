@@ -29,13 +29,15 @@ BOOL CMMIOResource::OpenResource(LPCSTR pszFileName, SResToID *pAccelTable, int 
         ReportError("CMMIOResource::OpenResource().\nUnable to open resource file.\n");
         return FALSE;
     }
-    if (mmioRead(hMmio, (char *)&header, sizeof(header)) != sizeof(header))
+    const LONG resourceSize = mmioSeek(hMmio, 0, SEEK_END);
+    if (resourceSize < 0 || mmioSeek(hMmio, 0, SEEK_SET) == -1 ||
+        mmioRead(hMmio, (char *)&header, sizeof(header)) != sizeof(header))
     {
         ReportError("CMMIOResource::OpenResource().\nUnable to read header of resource file.\n");
         CloseResource();
         return FALSE;
     }
-    if (header.dwSignature != SRESHEADER_SIGNATURE)
+    if (!SetResourceLayout(static_cast<std::uint64_t>(resourceSize), false))
     {
         ReportError("CMappedResource::OpenResource().\nWrong format resource file.\n");
         CloseResource();
@@ -77,6 +79,7 @@ void CMMIOResource::CloseResource()
         pNamePool = NULL;
     }
     memset(&header, 0, sizeof(header));
+    resourceBytes = namePoolBytes = 0;
     if (hMmio)
     {
         mmioClose(hMmio, 0);
