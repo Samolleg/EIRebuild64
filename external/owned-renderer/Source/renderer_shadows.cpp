@@ -251,6 +251,10 @@ void append_shadow_range_shader_programs(std::vector<ShaderProgram>& out){
 
 #if !defined(EID3D11_SHADER_EMBED)
 void Renderer::release_native_shadow_range() noexcept{
+ if(d3d12_){
+  d3d12_->set_resource(64,static_cast<const D3D12Texture*>(nullptr));
+  shadow12_.range_cells.reset();shadow12_.range.reset();
+ }
  if(context_&&!d3d12_){ID3D11ShaderResourceView* empty=nullptr;context_->PSSetShaderResources(64,1,&empty);}
  native_shadow_cells_.Reset();native_shadow_cells_srv_.Reset();native_shadow_cells_uav_.Reset();
  native_shadow_range_.Reset();native_shadow_range_srv_.Reset();native_shadow_range_uav_.Reset();
@@ -270,6 +274,47 @@ void Renderer::ensure_native_shadow_range() noexcept{
 }
 
 HRESULT Renderer::build_native_shadow_range(std::uint8_t slices) noexcept{
+ if(d3d12_){
+  if(!slices||!native_shadow_early_out_||native_shadow_range_failed_||!shadow12_.maps)return S_FALSE;
+  const UINT side=native_shadow_side_;
+  if(side<16||side%16)return S_FALSE;
+  const UINT cells=side/16;
+  const auto fail=[&](HRESULT result){
+   native_shadow_range_failed_=true;release_native_shadow_range();
+   d3d12_->omit("sun shadow early-out cells (compute failed)",false);return result;
+  };
+  HRESULT hr=S_OK;
+  if(native_shadow_range_side_!=side||!shadow12_.range_cells||!shadow12_.range){
+   release_native_shadow_range();
+   hr=d3d12_->create_storage_texture(cells,cells,0,DXGI_FORMAT_R32G32_FLOAT,shadow12_.range_cells,1,5);
+   if(SUCCEEDED(hr))hr=d3d12_->create_storage_texture(cells,cells,0,DXGI_FORMAT_R32G32_FLOAT,shadow12_.range,1,5);
+   if(FAILED(hr))return fail(hr);
+   native_shadow_range_side_=side;
+  }
+  std::vector<ShaderProgram> programs;append_shadow_range_shader_programs(programs);
+  transition_profile_pass("shadow_range");
+  // A pending PSO leaves the slice invalid and is retried before its next receiver.
+  // Each dispatch uses the executor's tracked SRV/UAV transitions and UAV barriers.
+  for(UINT slice=0;slice<5;++slice){
+   if(!(slices&(1u<<slice)))continue;
+   const std::array<UINT,4> control{slice,cells,0u,0u};
+   d3d12_->clear_slots();d3d12_->set_constants(0,control.data(),sizeof(control));
+   d3d12_->set_resource(0,shadow12_.maps.get());
+   d3d12_->set_unordered(0,shadow12_.range_cells.get());
+   hr=d3d12_->dispatch(programs[0],cells,cells,1);
+   if(hr==S_OK){
+    d3d12_->clear_slots();d3d12_->set_constants(0,control.data(),sizeof(control));
+    d3d12_->set_resource(1,shadow12_.range_cells.get());
+    d3d12_->set_unordered(0,shadow12_.range.get());
+    hr=d3d12_->dispatch(programs[1],(cells+7)/8,(cells+7)/8,1);
+   }
+   d3d12_->clear_slots();
+   if(FAILED(hr))return fail(hr);
+   if(hr!=S_OK)return hr;
+   native_shadow_range_mask_|=std::uint8_t(1u<<slice);
+  }
+  return S_OK;
+ }
  if(!slices||!native_shadow_early_out_||native_shadow_range_failed_||!device_||!context_||!native_shadow_depth_srv_)return S_FALSE;
  const UINT side=native_shadow_side_;
  if(side<16||side%16)return S_FALSE;

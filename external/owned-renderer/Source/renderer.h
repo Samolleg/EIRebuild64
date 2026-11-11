@@ -2597,7 +2597,7 @@ private:
     // layer as executor depth arrays, this frame's shadow constants (b2) and
     // the same flush through the executor.
     struct ShadowD3D12 {
-        D3D12TextureRef maps, statics;
+        D3D12TextureRef maps, statics, range_cells, range;
         NativeShadowConstants constants{}, point_constants{};
     } shadow12_;
     HRESULT flush_native_shadows_d3d12();

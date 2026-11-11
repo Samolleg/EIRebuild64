@@ -956,7 +956,22 @@ HRESULT Renderer::clear_target_rectangles(const D3D11_RECT* rectangles,DWORD rec
  return S_OK;
 }
 
-void Renderer::end_profile_pass(){if(!profiler_.pass_active())return;ComPtr<ID3D11Texture2D> back;if(profiler_.capture_active()&&swap_){if(!scene_composited_&&backbuffer_rtv_&&scene_composite_.target()){DebugViewStateGuard guard(context_.Get());scene_composite_.render(context_.Get(),scene_composite_.resolve_target(backbuffer_rtv_.Get()),false);scene_composite_.upscale(context_.Get(),backbuffer_rtv_.Get(),nullptr,nullptr);}swap_->GetBuffer(0,IID_PPV_ARGS(&back));}profiler_.end_pass(back.Get());}
+void Renderer::end_profile_pass(){if(!profiler_.pass_active())return;
+ if(d3d12_){
+  // Only the composed target represents the output image. Earlier world
+  // passes still need their HDR target resolved into a separate capture target.
+  const RenderProfiler::CaptureWriter writer=scene_composited_&&
+   (profiler_.current_pass_is("ui_composition")||profiler_.current_pass_is("present_bookkeeping")||
+    profiler_.current_pass_is("fg_frame_composite"))?
+   +[](void* context,const std::string& path)->bool{
+    auto& renderer=*static_cast<Renderer*>(context);std::string detail;
+    const bool ok=renderer.write_harness_screenshot(path,detail);
+    if(!ok)bridge_report_event("d3d12_capture",("pass image not written: "+detail).c_str());
+    return ok;
+   }:nullptr;
+  profiler_.end_pass(nullptr,writer,this);return;
+ }
+ ComPtr<ID3D11Texture2D> back;if(profiler_.capture_active()&&swap_){if(!scene_composited_&&backbuffer_rtv_&&scene_composite_.target()){DebugViewStateGuard guard(context_.Get());scene_composite_.render(context_.Get(),scene_composite_.resolve_target(backbuffer_rtv_.Get()),false);scene_composite_.upscale(context_.Get(),backbuffer_rtv_.Get(),nullptr,nullptr);}swap_->GetBuffer(0,IID_PPV_ARGS(&back));}profiler_.end_pass(back.Get());}
 void Renderer::transition_profile_pass(const char* name){if(d3d12_)d3d12_->marker(name);if(profiler_.current_pass_is(name))return;end_profile_pass();profiler_.begin_pass(name);}
 const char* Renderer::terrain_profile_scope(bool neighbour,bool tessellated,TerrainProfilePart part) noexcept{
  static const char* const names[2][2][8]={
@@ -1153,8 +1168,11 @@ void Renderer::begin_scene_renderer(){
   const auto softness=shadow_softness_constants(configured_integer(config,"shadow_softness",1),
    configured_integer(config,"shadow_sun_angle",15),configured_integer(config,"point_shadow_light_size",100));
   if(softness!=native_shadow_softness_){native_shadow_softness_=softness;native_shadow_constants_dirty_=true;}
-  // The early-out cells (shadowRange) are not on this backend: never current.
-  native_shadow_early_out_=false;native_shadow_range_mask_=0;
+  const bool early_out=configured_boolean(config,"shadow_early_out",true);
+  if(early_out!=native_shadow_early_out_){
+   native_shadow_early_out_=early_out;native_shadow_constants_dirty_=true;
+   if(!early_out)release_native_shadow_range();
+  }
   if(far_foliage_opaque!=native_far_foliage_opaque_&&SUCCEEDED(flush_native())){
    native_far_foliage_opaque_=far_foliage_opaque;
    for(UINT slice=3;slice<5;++slice){native_shadow_valid_[slice]=false;native_shadow_static_valid_[slice]=false;}
@@ -1165,7 +1183,7 @@ void Renderer::begin_scene_renderer(){
    point_side!=native_point_shadow_side_||close_cascades!=native_close_shadow_cascades_||
    far_shadows!=native_far_shadows_enabled_||point_shadows!=native_point_shadows_enabled_;
   if(changed&&SUCCEEDED(flush_native())){
-   if(shadow_side!=native_shadow_side_){shadow12_.maps.reset();shadow12_.statics.reset();}
+   if(shadow_side!=native_shadow_side_){shadow12_.maps.reset();shadow12_.statics.reset();release_native_shadow_range();}
    if(point_side!=native_point_shadow_side_||!point_shadows){
     for(UINT page=0;page<PointShadowTextureLayout::array_bindings;++page)
      d3d12_->set_resource(PointShadowTextureLayout::first_srv+page,static_cast<const D3D12Texture*>(nullptr));

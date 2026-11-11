@@ -997,7 +997,8 @@ void RenderProfiler::end_sub_scope() {
     sub_active_ = false;
 }
 
-void RenderProfiler::end_pass(ID3D11Texture2D* capture_source) {
+void RenderProfiler::end_pass(ID3D11Texture2D* capture_source,
+                              CaptureWriter writer, void* writer_context) {
     if (!pass_active_ || !current_) return;
     end_sub_scope();
     PassRecord& pass = current_->passes[current_pass_];
@@ -1013,8 +1014,8 @@ void RenderProfiler::end_pass(ID3D11Texture2D* capture_source) {
                                pass.counters.capture_calls, pass.counters.capture_bytes,
                                pass.counters.packets_created, pass.counters.packets_appended);
     }
-    // D3D12: no D3D11 back buffer to copy; the pass manifest is still written.
-    if (capture_active_ && (capture_source || timestamps_)) capture_pass(capture_source, pass, current_pass_);
+    if (capture_active_ && (capture_source || timestamps_ || writer))
+        capture_pass(capture_source, pass, current_pass_, writer, writer_context);
     ++current_pass_;
     current_->pass_count = current_pass_;
     pass_active_ = false;
@@ -1587,7 +1588,8 @@ bool RenderProfiler::export_shadow_temporal_pair() {
     } catch (...) { return false; }
 }
 
-void RenderProfiler::capture_pass(ID3D11Texture2D* source, const PassRecord& pass, UINT ordinal) {
+void RenderProfiler::capture_pass(ID3D11Texture2D* source, const PassRecord& pass, UINT ordinal,
+                                  CaptureWriter writer, void* writer_context) {
     const stall_watch::Exempt disk_export;  // F11 capture readback and disk output
     char image_name[128]{};
     std::snprintf(image_name, sizeof(image_name), "%02u_%s.bmp", ordinal, sanitize(pass.name.data()).c_str());
@@ -1599,7 +1601,7 @@ void RenderProfiler::capture_pass(ID3D11Texture2D* source, const PassRecord& pas
         return GetEnvironmentVariableA("EI_RENDERER_CAPTURE_ALL_PASSES", value, sizeof(value)) && value[0] == '1'; }();
     const bool image = all_passes || std::strcmp(sanitize(pass.name.data()).c_str(), "ui_composition") == 0;
     if (image && source && !write_bmp(image_path, source)) return;
-    const bool image_written = image && source;
+    const bool image_written = image && (source || (writer && writer(writer_context, image_path)));
 
     const std::string manifest_path = capture_directory_ + "\\passes.jsonl";
     FILE* file = nullptr;

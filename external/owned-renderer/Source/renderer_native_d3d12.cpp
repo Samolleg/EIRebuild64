@@ -108,6 +108,7 @@ void append_d3d12_shader_programs(std::vector<ShaderProgram>& out) {
  out.push_back(kD3D12MipArrayRangeProgram);
  append_gamma_shader_programs(out);
  append_debug_resource_shader_programs(out);
+ append_shadow_range_shader_programs(out);
  out.push_back(embedded_figure_layer_program(false));
  out.push_back(embedded_figure_layer_program(true));
  append_terrain2_cache_d3d12_programs(out);
@@ -2134,6 +2135,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  prepare_liquid_ripples();
  (void)ensure_liquid_normal_map(); // unavailable: the water draws without them, as on D3D11
  bind_liquid_swamp_frame();
+ if(!scene_composited_)ensure_native_shadow_range();
  // The interface batches: nativeVS and the object nativePS over the build's
  // outputs, each batch's fixed state and texture as the D3D11 flush binds them.
  d3d12_->clear_slots();
@@ -2191,6 +2193,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
     if(native_shadow_frame_.slices[slice].enabled&&!(receivers.control[0]&(1u<<slice))){receivers.bias[4][2]=0;break;}
   d3d12_->set_constants(2,&receivers,sizeof(receivers));}
  d3d12_->set_resource(9,shadow12_.maps.get());
+ d3d12_->set_resource(64,shadow12_.range.get());
  // The temporal sun-shadow history (b6, t20/t21, s3): read by every world
  // batch, written (slot 1) by the batches the D3D11 flush's write_history picks.
  const bool history_active=prepare_shadow_history();
