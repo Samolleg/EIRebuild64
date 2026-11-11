@@ -2732,16 +2732,6 @@ private:
     UINT vram_shadow_shift() const noexcept { return vram_budget_.level >= 2 ? 1u : 0u; }
     CutoutShadowScopeSnapshot cutout_shadow_scope_snapshot() const noexcept;
 
-    // Declared before device resources so implicit destruction releases them
-    // before our own NVAPI client and module reference.
-    struct NvidiaShaderCacheApi {
-        HMODULE module = nullptr;
-        int (__cdecl* unload)() = nullptr;
-        ~NvidiaShaderCacheApi();
-        void reset() noexcept;
-    } nvidia_shader_cache_api_;
-    HRESULT disable_nvidia_shader_disk_cache() noexcept;
-
     HWND hwnd_ = nullptr;
     // World render size: the output scaled by the player render scale. Every
     // world pass, its depth and its screen-space targets use it.
@@ -2838,7 +2828,7 @@ private:
     std::uint32_t shader_unprepared_reported_ = 0;  // shader_objects_ misses already logged
     // D3D11_FEATURE_THREADING DriverConcurrentCreates (report_adapter). False:
     // shader preparation runs on one worker, like after a parallel crash.
-    bool driver_concurrent_creates_ = true;
+    bool driver_concurrent_creates_ = false;
     std::atomic<bool> shader_marker_open_{false};  // a preparation's breadcrumb awaits a completed present
     HRESULT create_swap_chain();
     ComPtr<ID3D11Device> device_;

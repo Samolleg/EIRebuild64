@@ -277,139 +277,6 @@ HRESULT Renderer::create_swap_chain(){
 }
 namespace {
 
-// The NVIDIA driver's per-game disk shader cache (landmine L-087):
-// %LOCALAPPDATA%\NVIDIA\DXCache\<8-hex game id><hex>.nvph, mapped whole into
-// the 32-bit process when the device is created.
-std::wstring nvidia_cache_directory(){
- wchar_t local[MAX_PATH]{};
- const DWORD length=GetEnvironmentVariableW(L"LOCALAPPDATA",local,MAX_PATH);
- if(!length||length>=MAX_PATH)return {};
- return std::wstring(local)+L"\\NVIDIA\\DXCache\\";
-}
-bool starts_with_cache_id(const wchar_t* text) noexcept {
- for(int n=0;n<8;++n)if(!iswxdigit(text[n]))return false;
- return true;
-}
-
-// Before device creation: delete every cache file of this game recorded by an
-// earlier run ([setup] nvidia_cache_id). Other games' files are never touched;
-// locked files are skipped.
-void delete_recorded_nvidia_cache() noexcept try{
- wchar_t id[17]{};
- GetPrivateProfileStringW(L"setup",L"nvidia_cache_id",L"",id,17,renderer_config_path().c_str());
- if(std::wcslen(id)!=8||!starts_with_cache_id(id))return;
- ComPtr<IDXGIFactory1> factory;ComPtr<IDXGIAdapter1> adapter;DXGI_ADAPTER_DESC1 desc{};
- if(FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory)))||FAILED(factory->EnumAdapters1(0,&adapter))||
-    FAILED(adapter->GetDesc1(&desc))||desc.VendorId!=0x10de)return;
- const std::wstring directory=nvidia_cache_directory();
- if(directory.empty())return;
- WIN32_FIND_DATAW found{};
- const HANDLE search=FindFirstFileW((directory+id+L"*").c_str(),&found);
- if(search==INVALID_HANDLE_VALUE)return;
- unsigned count=0;std::uint64_t bytes=0;
- do{
-  if((found.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)||_wcsnicmp(found.cFileName,id,8)!=0)continue;
-  if(DeleteFileW((directory+found.cFileName).c_str())){
-   ++count;bytes+=(static_cast<std::uint64_t>(found.nFileSizeHigh)<<32)|found.nFileSizeLow;
-  }
- }while(FindNextFileW(search,&found));
- FindClose(search);
- if(!count)return;
- char detail[96]{};
- std::snprintf(detail,sizeof(detail),"id=%ls files=%u mb=%.1f",id,count,static_cast<double>(bytes)/1048576.0);
- bridge_report_event("nvidia_shader_cache_deleted",detail);
-}catch(...){}
-
-// After device creation: the game id of the largest .nvph file the driver
-// mapped into this process from the DXCache directory, or empty.
-std::string mapped_nvidia_cache_id() noexcept try{
- const std::wstring directory=nvidia_cache_directory();
- if(directory.size()<3||directory[1]!=L':')return {};
- const wchar_t drive[3]={directory[0],L':',0};wchar_t volume[MAX_PATH]{};
- if(!QueryDosDeviceW(drive,volume,MAX_PATH))return {};
- const std::wstring device_directory=std::wstring(volume)+directory.substr(2);
- std::string id;std::uint64_t largest=0;
- const void* base=nullptr;std::uint64_t bytes=0;bool mapped=false;
- const auto finish=[&]{
-  if(!base||!mapped||bytes<=largest)return;
-  wchar_t path[MAX_PATH]{};
-  if(GetMappedFileNameW(GetCurrentProcess(),const_cast<void*>(base),path,MAX_PATH)<=device_directory.size()||
-     _wcsnicmp(path,device_directory.c_str(),device_directory.size())!=0)return;
-  const wchar_t* name=path+device_directory.size();const std::size_t length=std::wcslen(name);
-  if(std::wcschr(name,L'\\')||length<=5||_wcsicmp(name+length-5,L".nvph")!=0||!starts_with_cache_id(name))return;
-  largest=bytes;id.clear();
-  for(int n=0;n<8;++n)id.push_back(static_cast<char>(name[n]));
- };
- SYSTEM_INFO info{};GetSystemInfo(&info);
- auto* address=static_cast<std::uint8_t*>(info.lpMinimumApplicationAddress);
- MEMORY_BASIC_INFORMATION region{};
- while(address<info.lpMaximumApplicationAddress&&VirtualQuery(address,&region,sizeof(region))==sizeof(region)){
-  if(region.State!=MEM_FREE&&region.AllocationBase==base)bytes+=region.RegionSize;
-  else{
-   finish();
-   base=region.State==MEM_FREE?nullptr:region.AllocationBase;bytes=region.RegionSize;mapped=region.Type==MEM_MAPPED;
-  }
-  address=static_cast<std::uint8_t*>(region.BaseAddress)+region.RegionSize;
- }
- finish();
- return id;
-}catch(...){return {};}
-}  // namespace
-
-Renderer::NvidiaShaderCacheApi::~NvidiaShaderCacheApi() { reset(); }
-
-void Renderer::NvidiaShaderCacheApi::reset() noexcept {
- if(unload)unload();
- if(module)FreeLibrary(module);
- unload=nullptr;module=nullptr;
-}
-
-HRESULT Renderer::disable_nvidia_shader_disk_cache() noexcept {
- ComPtr<IDXGIDevice> dxgi_device;ComPtr<IDXGIAdapter> adapter;DXGI_ADAPTER_DESC desc{};
- HRESULT hr=device_.As(&dxgi_device);
- if(SUCCEEDED(hr))hr=dxgi_device->GetAdapter(&adapter);
- if(SUCCEEDED(hr))hr=adapter->GetDesc(&desc);
- if(FAILED(hr)){
-  bridge_report_event("nvidia_shader_disk_cache_rejected","adapter identification failed");
-  return hr;
- }
- if(desc.VendorId!=0x10de)return S_OK;
- const auto fail=[](const char* stage,int status){
-  char detail[160]{};
-  std::snprintf(detail,sizeof(detail),"%s failed (status %d); device initialization rejected",stage,status);
-  bridge_report_event("nvidia_shader_disk_cache_rejected",detail);
-  return E_FAIL;
- };
-#if defined(_WIN64)
- HMODULE module=LoadLibraryExW(L"nvapi64.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
-#else
- HMODULE module=LoadLibraryExW(L"nvapi.dll",nullptr,LOAD_LIBRARY_SEARCH_SYSTEM32);
-#endif
- if(!module)return fail("load NVAPI",static_cast<int>(GetLastError()));
- using QueryInterfaceFn=void* (__cdecl*)(unsigned int);
- using InitializeFn=int (__cdecl*)();
- using DisableCacheFn=int (__cdecl*)(IUnknown*);
- const auto query=reinterpret_cast<QueryInterfaceFn>(GetProcAddress(module,"nvapi_QueryInterface"));
- // Public NVAPI interface IDs and cdecl ABI, independently used here:
- // https://github.com/NVIDIA/nvapi/blob/main/nvapi_interface.h
- const auto initialize=query?reinterpret_cast<InitializeFn>(query(0x0150e828)):nullptr;
- const auto unload=query?reinterpret_cast<InitializeFn>(query(0xd22bdd7e)):nullptr;
- const auto disable=query?reinterpret_cast<DisableCacheFn>(query(0xd0cbca7d)):nullptr;
- if(!initialize||!unload||!disable){
-  FreeLibrary(module);
-  return fail("resolve NVAPI shader disk cache interface",-1);
- }
- const int initialized=initialize();
- if(initialized!=0){FreeLibrary(module);return fail("initialize NVAPI",initialized);}
- nvidia_shader_cache_api_.module=module;
- nvidia_shader_cache_api_.unload=unload;
- const int disabled=disable(device_.Get());
- if(disabled!=0)return fail("disable device shader disk cache",disabled);
- bridge_report_event("nvidia_shader_disk_cache_disabled","owned D3D11 device; before shader creation");
- return S_OK;
-}
-namespace {
-
 // " budget=<MiB> usage=<MiB>" of the adapter's local memory.
 std::string local_memory_text(IDXGIAdapter3* adapter) noexcept try{
  DXGI_QUERY_VIDEO_MEMORY_INFO memory{};
@@ -480,7 +347,7 @@ void Renderer::report_adapter() noexcept try{
  // A driver without concurrent creates gets them serialised by the runtime
  // anyway: preparing on one worker loses nothing and keeps its compiler
  // single-threaded from our side.
- driver_concurrent_creates_=!have_threading||threading.DriverConcurrentCreates;
+ driver_concurrent_creates_=have_threading&&threading.DriverConcurrentCreates;
  if(!driver_concurrent_creates_)
   bridge_report_event("shader_preparation_serial","driver reports no concurrent creates (D3D11_FEATURE_THREADING); one worker");
 }catch(...){}
@@ -621,9 +488,6 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
  // nvwgf2um (dumps of 2026-10-11..13). Ask the driver to keep its internal
  // threads off this device.
  UINT flags=D3D11_CREATE_DEVICE_BGRA_SUPPORT|D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_0,D3D_FEATURE_LEVEL_10_1,D3D_FEATURE_LEVEL_10_0,D3D_FEATURE_LEVEL_9_3};HRESULT hr;
-#if !defined(EID3D11_EMBEDDED) || !defined(_WIN64)
- delete_recorded_nvidia_cache();
-#endif
  hr=D3D11CreateDevice(nullptr,driver,nullptr,flags,levels,ARRAYSIZE(levels),D3D11_SDK_VERSION,&device_,&feature_level_,&context_);
  if(FAILED(hr))return hr;
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
@@ -641,7 +505,6 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
  frame_acct::install_device_counters(device_.Get(),context_.Get());
  detect_device_options();
  report_adapter();
- if(FAILED(hr=disable_nvidia_shader_disk_cache()))return hr;
  retained_visual_scene().visual_set_surface_texture_retainer(&Renderer::retain_detached_surface_texture,this);
  set_test_initialization_stage("create-swap-chain");
  if(hwnd_&&FAILED(hr=create_swap_chain()))return hr;
@@ -650,13 +513,6 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
  register_config_options();
  auto& config=debug_overlay_.config();
  if(hwnd_){debug_overlay_.initialize(hwnd_,device_.Get(),context_.Get());if(debug_overlay_.initialized()){migrate_settings(config,renderer_config_path().c_str());debug_overlay_.sync_interface_profile();recover_shader_crash();}}
- // Record which cache files the driver mapped, for deletion at the next start.
- if(debug_overlay_.initialized()){
-  const std::string cache_id=mapped_nvidia_cache_id();
-  if(!cache_id.empty()&&cache_id!=config.nvidia_cache_id()){
-   config.set_nvidia_cache_id(cache_id);config.save(renderer_config_path().c_str());
-  }
- }
  apply_config_settings();
  render_scale_percent_=std::clamp(configured_integer(config,"render_scale",100),kRenderScaleMinimum,100);
  dlss_mode_=configured_dlss_mode();fsr_mode_=configured_fsr_mode();set_world_size();
@@ -2401,14 +2257,12 @@ void Renderer::prepare_shaders() noexcept try{
   if(groups&(1u<<group)){kShaderGroups[group].append(programs);program_groups.resize(programs.size(),static_cast<std::uint8_t>(group));}
  const std::int64_t begin=perf_now();
  // Workers create the shader objects (the driver translates the bytecode).
- // A program missing from the table is compiled first; FXC holds up to ~250
- // MB for the largest ones, so later preparations (a settings change in a
- // map) use at most two workers to keep the 32-bit address space calm.
- const unsigned start_threads=std::clamp(std::thread::hardware_concurrency(),2u,5u)-1u;
- // One worker after the driver crashed in a parallel preparation, or when
- // it reports no concurrent creates (the runtime would serialise them).
+ // Match the specialisation pool: leave two logical processors for the
+ // game, progress rendering and input. Keep crash recovery's serial mode.
+ const unsigned cores=std::thread::hardware_concurrency();
+ const unsigned available_threads=cores>2?cores-2:1;
  const bool serial=debug_overlay_.config().serial_shader_preparation()||!driver_concurrent_creates_;
- const unsigned threads=serial?1u:shader_groups_prepared_?std::min(2u,start_threads):start_threads;
+ const unsigned threads=std::min<unsigned>(serial?1u:available_threads,static_cast<unsigned>(programs.size()));
  // The breadcrumb follows the handoffs from here until a completed present.
  {ShaderMarker& marker=shader_marker();std::lock_guard<std::mutex> lock(marker.mutex);
   marker.group=-1;marker.phase="preparation";marker.workers=std::min<unsigned>(threads,static_cast<unsigned>(programs.size()));
@@ -2452,7 +2306,7 @@ void Renderer::prepare_shaders() noexcept try{
  char text[224];
  std::snprintf(text,sizeof(text),"programs=%zu created=%zu compiled=%zu failed=%zu retained=%zu threads=%u ms=%.0f window=%s groups=0x%x",
   preparation.total(),preparation.created(),preparation.compiled(),preparation.failed(),shader_objects_?shader_objects_->size():0u,
-  threads,ms,shown?"shown":"not_needed",groups);
+  preparation.worker_count(),ms,shown?"shown":"not_needed",groups);
  bridge_report_event("shader_preparation",text);
 }catch(...){
  // The features compile their programs themselves when preparation fails.
@@ -3556,7 +3410,6 @@ void Renderer::release() {
  shader_objects_.Reset();shader_groups_prepared_=0;
  device_.Reset();
  swap_.Reset();
- nvidia_shader_cache_api_.reset();
  feature_level_=D3D_FEATURE_LEVEL_9_3;
  last_present_tick_=0;
  present_interval_ms_=0.0;
