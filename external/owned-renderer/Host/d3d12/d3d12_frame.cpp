@@ -925,8 +925,7 @@ public:
         HRESULT hr = core_.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                                              IID_PPV_ARGS(&texture->resource));
         if (FAILED(hr)) {
-            report_once(texture_failures_, "texture creation", hresult_text("CreateCommittedResource (UI texture)", hr));
-            return hr;
+            return resource_failure(hr, "CreateCommittedResource (UI texture)", desc);
         }
         texture->owner = resource_owner_;
         texture->width = width;
@@ -974,8 +973,7 @@ public:
         HRESULT hr = core_.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                                              IID_PPV_ARGS(&texture->resource));
         if (FAILED(hr)) {
-            report_once(texture_failures_, "texture creation", hresult_text("CreateCommittedResource (texture array)", hr));
-            return hr;
+            return resource_failure(hr, "CreateCommittedResource (texture array)", desc);
         }
         texture->owner = resource_owner_;
         texture->width = width;
@@ -1024,8 +1022,7 @@ public:
         if (FAILED(hr)) hr = core_.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                                              nullptr, IID_PPV_ARGS(&texture->resource));
         if (FAILED(hr)) {
-            report_once(texture_failures_, "texture creation", hresult_text("CreateCommittedResource (storage texture)", hr));
-            return hr;
+            return resource_failure(hr, "CreateCommittedResource (storage texture)", desc);
         }
         texture->owner = resource_owner_;
         texture->state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
@@ -1205,8 +1202,7 @@ public:
         HRESULT hr = core_.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
                                                              IID_PPV_ARGS(&resource));
         if (FAILED(hr)) {
-            report_once(buffer_failures_, "buffer creation", hresult_text("CreateCommittedResource (native buffer)", hr));
-            return hr;
+            return resource_failure(hr, "CreateCommittedResource (native buffer)", desc);
         }
         return adopt_buffer(std::move(resource), bytes, stride, flags, out);
     }
@@ -1325,7 +1321,13 @@ public:
     HRESULT write_buffer_from(UploadRing& ring, owned::D3D12Buffer& buffer, UINT64 offset, const void* data, UINT64 bytes) {
         if (!accept_resource(&buffer)) return DXGI_ERROR_DEVICE_RESET;
         if (!bytes) return S_OK;
-        if (offset > buffer.bytes || bytes > buffer.bytes - offset) return E_INVALIDARG;
+        if (offset > buffer.bytes || bytes > buffer.bytes - offset) {
+            char detail[256]{};
+            std::snprintf(detail, sizeof(detail), "write_buffer offset=%llu bytes=%llu capacity=%llu stride=%u flags=0x%x",
+                static_cast<unsigned long long>(offset), static_cast<unsigned long long>(bytes),
+                static_cast<unsigned long long>(buffer.bytes), buffer.stride, buffer.flags);
+            return fail(E_INVALIDARG, detail);
+        }
         ID3D12GraphicsCommandList* list = open_list();
         if (!list) return E_FAIL;
         UploadAllocation upload;
@@ -1845,8 +1847,7 @@ public:
         clear.Color[3] = 1.0f;
         auto texture = std::make_shared<D3D12Texture>();
         const auto failed = [&](HRESULT hr, const char* what) {
-            report_once(texture_failures_, "offscreen target creation", hresult_text(what, hr));
-            return hr;
+            return resource_failure(hr, what, desc);
         };
         texture->owner = resource_owner_;
         texture->width = width;
@@ -4117,6 +4118,18 @@ private:
         return false;
     }
 
+    HRESULT resource_failure(HRESULT hr, const char* operation, const D3D12_RESOURCE_DESC& desc) {
+        char detail[512]{};
+        std::snprintf(detail, sizeof(detail), "%s width=%llu height=%u depth_or_slices=%u mips=%u format=%u flags=0x%x dimension=%u",
+            operation, static_cast<unsigned long long>(desc.Width), desc.Height,
+            unsigned(desc.DepthOrArraySize), unsigned(desc.MipLevels), unsigned(desc.Format), unsigned(desc.Flags), unsigned(desc.Dimension));
+        // Allocation pressure may be retried with a smaller buffer by the caller.
+        if (hr == E_INVALIDARG) return fail(hr, detail);
+        remote::host_log("d3d12: resource creation failed hr=0x%08lx %s", static_cast<unsigned long>(hr), detail);
+        owned::bridge_report_event("d3d12_resource_failed", detail);
+        return hr;
+    }
+
     // A device-level failure ends this backend: named once, every later call fails.
     HRESULT fail(HRESULT hr, const std::string& reason) {
         if (failure_.empty()) {
@@ -4126,6 +4139,10 @@ private:
             const std::string crumbs = breadcrumb_report();
             if (!crumbs.empty()) failure_ += "; " + crumbs;
             remote::host_log("d3d12: %s", failure_.c_str());
+            char detail[2048]{};
+            std::snprintf(detail, sizeof(detail), "hr=0x%08lx operation=%s",
+                static_cast<unsigned long>(hr), failure_.c_str());
+            owned::bridge_report_event("d3d12_failed", detail);
             if (debug_) debug_message_summary();
             if (g_hazards) g_hazards->summary("at the failure");
         }

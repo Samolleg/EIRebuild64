@@ -124,7 +124,9 @@ BOOL CBaseManager::Create(CWorld *lpWorld)
 // destroy all data, this manager contain in and all internal data structures
 void CBaseManager::Destroy()
 {
-    if(this==theWorldServer.GetEffectManager())SpellTextures::ResetWorld();
+    // Client managers can outlive the server during exception/CRT teardown.
+    // Do not dispatch through the server unless this manager belongs to it.
+    if(lpWorld==&theWorldServer && this==theWorldServer.GetEffectManager())SpellTextures::ResetWorld();
     CHashMapIterator<int, LPGAMEBASE> hmi;
     LPGAMEBASE lpData = NULL;
     //
@@ -180,7 +182,9 @@ void CBaseManager::Destroy()
 // remove all data from main hash map
 void CBaseManager::RemoveAll()
 {
-    if(this==theWorldServer.GetEffectManager())SpellTextures::ResetWorld();
+    // Client managers can outlive the server during exception/CRT teardown.
+    // Do not dispatch through the server unless this manager belongs to it.
+    if(lpWorld==&theWorldServer && this==theWorldServer.GetEffectManager())SpellTextures::ResetWorld();
     CHashMapIterator<int, LPGAMEBASE> hmi;
     LPGAMEBASE lpData;
     // set used mark for every object

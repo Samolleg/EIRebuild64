@@ -3711,6 +3711,7 @@ private:
         UINT passes=0; // pool regions (maps) the counts and overflow buffers hold
         std::array<std::uint64_t,8> readbacks{};
         UINT read_head=0,read_pending=0;
+        UINT demand_state=0;std::uint64_t demand_frame=0;
     } gc12_;
     HRESULT ensure_ground_cover_d3d12();
     HRESULT build_ground_cover_map_d3d12(GcMapD3D12& map,UINT tiles_x,UINT tiles_y,UINT color_texels,

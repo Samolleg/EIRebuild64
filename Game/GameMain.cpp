@@ -1083,6 +1083,7 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 
         //
         // Main message loop:
+    bool renderFailed = false;
 #if defined(FINALRELEASE) && defined(NODEBUGINFO)
     try
 #endif // defined( FINALRELEASE ) && defined( NODEBUGINFO )
@@ -1090,7 +1091,23 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
         const auto processMessages = AgentBackground::Enabled() ? &AgentProcessMessages : &NGame::ProcessMessages;
         while (true)
         {
-            const bool running = processMessages();
+            bool running = false;
+            try { running = processMessages(); }
+            catch (HRESULT error)
+            {
+                if (!GetRenderer()->GetD3D() || !GetRenderer()->GetD3D()->D3D12Selected()) throw;
+                renderFailed = true;
+                char detail[160]{};
+                _snprintf_s(detail, sizeof(detail), _TRUNCATE,
+                    "operation=game_frame hr=0x%08lX; running FINI before CRT teardown",
+                    static_cast<unsigned long>(error));
+                owned::bridge_report_event("d3d12_failed", detail);
+                GameJournal::FlushCritical();
+                EngineDiagnostics::Report(detail, true);
+                // Keep the host, renderer and resource runtime alive through FINI.
+                // Normal cleanup releases world GPU inputs before the device.
+                break;
+            }
             if (showD3D12Failure() || !running)
                 break;
         }
@@ -1134,6 +1151,10 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     theWorld.Destroy();
     GetRenderer()->Destroy();
     ownedResourceRuntime.reset();
+    if (renderFailed) {
+        showD3D12Failure();
+        return BAD_RESULT;
+    }
 
     DumpUnfreedMemory(AMTS_BYFILENAME);
     //_CrtDumpMemoryLeaks();

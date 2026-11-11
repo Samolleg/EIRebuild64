@@ -92,9 +92,10 @@ void bridge_report_event(const char* event, const char* detail) noexcept {
     }
     // Bounded strings and the existing bounded asynchronous game journal.
     const bool failure = event && (!std::strcmp(event, "render_thread_command_failed") ||
-        !std::strcmp(event, "present_step_failed") || !std::strcmp(event, "composite_step_failed"));
+        !std::strcmp(event, "present_step_failed") || !std::strcmp(event, "composite_step_failed") || !std::strcmp(event, "d3d12_failed"));
     GameJournal::Event(failure ? "ERROR" : "RENDER", "bridge",
         "event=%.96s detail=%.768s", event ? event : "", detail ? detail : "");
+    if (event && !std::strcmp(event, "d3d12_failed")) GameJournal::FlushCritical();
 }
 void bridge_append_probe_event(const char* event, const char* detail) noexcept {
     // Shared renderer events include terrain/material failures, not just retail probes.

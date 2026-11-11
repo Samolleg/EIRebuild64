@@ -797,7 +797,15 @@ HRESULT Renderer::upload_native_instances_d3d12(){
 // and generation, cached in native_owned_textures_ like the D3D11 copy.
 HRESULT Renderer::get_native_owned_texture_d3d12(const NativeOwnedTextureView& source,D3D12TextureRef& output,
  std::uint64_t& backing,NativeGeometryResult* result,bool world_mips,bool budget_reducible){
- const auto fail=[&](HRESULT hr,const char* operation){return native_geometry_failure(result,hr,operation,true);};
+ const auto fail=[&](HRESULT hr,const char* operation){
+  char detail[512]{};
+  std::snprintf(detail,sizeof(detail),"operation=%s hr=0x%08lx format=%u mips=%u width=%u height=%u source=%u identity=%llu generation=%llu",
+   operation,static_cast<unsigned long>(hr),unsigned(source.format),source.mip_count,
+   source.mips&&source.mip_count?source.mips[0].width:0,source.mips&&source.mip_count?source.mips[0].height:0,
+   source.value_source,static_cast<unsigned long long>(source.identity),static_cast<unsigned long long>(source.generation));
+  bridge_report_event("d3d12_failed",detail);
+  return native_geometry_failure(result,hr,operation,true);
+ };
  output.reset();backing=0;
  // A camp icon: the surface table's image (the host icon worker's decode),
  // uploaded once per generation; its entry retires with retire_camp_texture.
