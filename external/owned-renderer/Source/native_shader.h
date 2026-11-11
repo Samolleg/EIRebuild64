@@ -2078,8 +2078,7 @@ float nativeCombineAlpha(float4 d,float4 s,float4 t){
 // foliage per texel. renderer_shadows.cpp binds the mask target only in that
 // bake, every caster drawing with this stage, so the top surface's class
 // wins; sun and point maps bind no colour target, which discards it.
-// (The D3D12 shelter bake binds no foliage mask yet: renderer_precipitation.cpp
-// reports it as omitted.)
+// D3D12 binds rain12_.foliage beside the shelter slice as well.
 float4 nativeShadowPS(NativeOutput i):SV_Target{
  NATIVE_REPORT_PIXEL(3u,i.textureReference.x,i.p)
  float4 t=1;

@@ -1,10 +1,8 @@
 // Native packets on the x64 host's D3D12 executor (renderer_backend=d3d12):
 // the native queue's own records (layout, batches, work, arguments, instance
 // rows, b0 constants) drawn through Source/d3d12_frame.h instead of the D3D11
-// context. Interface (SemanticKind::ui) batches draw; world batches are
-// omitted with the marker until M2 moves the world passes to bindless
-// indices. Every function here runs only with Renderer::d3d12_ set (null in
-// the x86 DLL and on the D3D11 host).
+// context. Interface and world batches use native resource bindings.
+// Every function here runs only with Renderer::d3d12_ set.
 //
 // Binding: the shared native HLSL keeps its D3D11 registers; each dispatch
 // and draw sets its slots on the executor, which copies them into ring
@@ -46,6 +44,14 @@ namespace owned {
 // box of the one above, clamped at odd edges. Only the x64 host's DXIL table
 // holds it (shader_embed --dxil-sources); the D3D11 table never sees it.
 namespace {
+// Captured BGRA content stays on the GPU. Sample its native view into an
+// RGBA UAV (BGRA has no typed UAV store), preserving logical channels.
+constexpr char kD3D12SurfaceCopyShader[] =
+"Texture2D<float4> surfaceSource:register(t0);RWTexture2D<float4> surfaceTarget:register(u0);\n"
+"[numthreads(8,8,1)]void surfaceCopyCS(uint3 id:SV_DispatchThreadID){\n"
+" uint w,h;surfaceTarget.GetDimensions(w,h);if(id.x<w&&id.y<h)surfaceTarget[id.xy]=surfaceSource.Load(int3(id.xy,0));}\n";
+const ShaderProgram kD3D12SurfaceCopyProgram{{kD3D12SurfaceCopyShader,sizeof(kD3D12SurfaceCopyShader)-1},
+ nullptr,nullptr,"surfaceCopyCS","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3};
 constexpr char kD3D12MipShader[] =
 "Texture2D<float4> mipSource:register(t0);RWTexture2D<float4> mipTarget:register(u0);\n"
 "[numthreads(8,8,1)]void mipBoxCS(uint3 id:SV_DispatchThreadID){\n"
@@ -97,6 +103,7 @@ D3D11_SAMPLER_DESC post_linear_clamp(){
 
 void append_d3d12_shader_programs(std::vector<ShaderProgram>& out) {
  out.push_back(kD3D12MipProgram);
+ out.push_back(kD3D12SurfaceCopyProgram);
  out.push_back(kD3D12MipArrayProgram);
  out.push_back(kD3D12MipArrayRangeProgram);
  append_gamma_shader_programs(out);
@@ -865,11 +872,6 @@ HRESULT Renderer::get_native_owned_texture_d3d12(const NativeOwnedTextureView& s
   if(!(world_mips&&source.surface->static_mip_hint&&!(source.surface->format.dwFlags&DDPF_FOURCC)))return S_OK;
   UINT stored_width=0,stored_height=0,stored_levels=0;DXGI_FORMAT stored_format=DXGI_FORMAT_UNKNOWN;
   if(d3d12_->texture_info(*image->d3d12,stored_width,stored_height,stored_levels,stored_format)&&stored_levels>1)return S_OK;
-  if(image->gpu_captured){
-   // GPU-written content: its CPU bytes are stale, so no box chain.
-   d3d12_->omit("world surface textures: a GPU-captured surface keeps one level",false);
-   return S_OK;
-  }
   std::string key;
   try{key="surface:"+std::to_string(source.identity)+"|mips=full";}catch(const std::bad_alloc&){return fail(E_OUTOFMEMORY,"texture.key_allocation");}
   const auto existing=native_owned_textures_.find(key);
@@ -879,13 +881,25 @@ HRESULT Renderer::get_native_owned_texture_d3d12(const NativeOwnedTextureView& s
    output=texture.d3d12;backing=texture.backing;return S_OK;
   }
   D3D12TextureRef texture;
-  if(FAILED(hr=surface_mips_d3d12(*image,texture)))return fail(hr,"texture.surface_mips");
+  UINT levels=1;for(UINT size=(std::max)(image->width,image->height);size>1;size>>=1)++levels;
+  if(image->gpu_captured){
+   hr=d3d12_->create_storage_texture(image->width,image->height,0,DXGI_FORMAT_R8G8B8A8_UNORM,texture,levels);
+   if(FAILED(hr))return fail(hr,"texture.captured_mip_allocation");
+   d3d12_->clear_slots();d3d12_->set_resource(0,image->d3d12.get());d3d12_->set_unordered(0,texture.get());
+   hr=d3d12_->dispatch(kD3D12SurfaceCopyProgram,(image->width+7)/8,(image->height+7)/8,1);
+   d3d12_->clear_slots();
+   if(hr==S_OK)hr=d3d12_->generate_mips(*texture,d3d12_mip_program());
+   // Keep the original level while a pipeline compiles; retry next draw.
+   // Never cache an incomplete chain.
+   if(hr!=S_OK)return FAILED(hr)?fail(hr,"texture.captured_mips"):hr;
+  }else if(FAILED(hr=surface_mips_d3d12(*image,texture)))return fail(hr,"texture.surface_mips");
   if(native_owned_texture_serial_>=((1ull<<63)-1))return fail(E_OUTOFMEMORY,"texture.serial");
   try{
    NativeOwnedTexture value{};
    value.backing=(1ull<<63)|++native_owned_texture_serial_;
-   value.generation=source.generation;value.format=DXGI_FORMAT_B8G8R8A8_UNORM;value.width=image->width;value.height=image->height;
-   value.mip_count=1;value.surface_id=source.identity;
+   value.generation=source.generation;value.format=image->gpu_captured?DXGI_FORMAT_R8G8B8A8_UNORM:DXGI_FORMAT_B8G8R8A8_UNORM;
+   value.width=image->width;value.height=image->height;
+   value.mip_count=levels;value.surface_id=source.identity;
    value.last_used=native_queue_epoch_;value.last_used_frame=native_frame_index_;value.d3d12=texture;
    backing=value.backing;
    native_owned_textures_[key]=std::move(value);
