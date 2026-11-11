@@ -560,23 +560,47 @@ bool CDX11::SubmitCurseVisual(const owned::EmbeddedCurseInput& input,ID3D11Shade
     LiveObserver::ObserveCurse(input,hr,published);
     return FinishC74Effect(hr,"curse_visual_skipped");
 }
-bool CDX11::SubmitGolemVisual(const owned::EmbeddedGolemInput& input,const std::array<ID3D11ShaderResourceView*,6>& textures)
+bool CDX11::SubmitGolemVisual(const owned::EmbeddedGolemInput& input,const std::array<ID3D11ShaderResourceView*,6>& textures,const std::array<std::uint64_t,6>& surfaceIds)
 {
     owned::FixedState state;std::shared_ptr<owned::SurfaceImage> unused;
     HRESULT hr=PrepareC74Effect(true,false,state,unused);
     bool published=false;
-    if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer){published=true;return renderer.draw_embedded_golem(input,state,textures);});
+    if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer){
+        std::array<std::shared_ptr<owned::SurfaceImage>,6> retained;
+        std::array<owned::Renderer::EmbeddedEffectTexture,6> materials{};
+        for(size_t i=0;i<materials.size();++i) {
+            if(renderer.d3d12_backend()) {
+                if(surfaceIds[i]) {
+                    const HRESULT resolved=OwnedRender::E1ParticleSurfaceImage(nullptr,nullptr,surfaceIds[i],retained[i]);
+                    if(FAILED(resolved))return resolved;
+                    materials[i].image=retained[i].get();
+                }
+            } else materials[i].srv=textures[i];
+        }
+        published=true;return renderer.draw_embedded_golem(input,state,materials);
+    });
     LiveObserver::ObserveGolem(input,hr,published);
     return FinishC74Effect(hr,"golem_visual_skipped");
 }
 bool CDX11::SubmitArenaVisual(const owned::EmbeddedArenaInput& input,
-    const std::array<ID3D11ShaderResourceView*,8>& textures)
+    const std::array<ID3D11ShaderResourceView*,8>& textures,const std::array<std::uint64_t,8>& surfaceIds)
 {
     owned::FixedState state;std::shared_ptr<owned::SurfaceImage> unused;
     HRESULT hr=PrepareC74Effect(true,false,state,unused);
     bool published=false;
     if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer) {
-        published=true;return renderer.draw_embedded_arena(input,state,textures);
+        std::array<std::shared_ptr<owned::SurfaceImage>,8> retained;
+        std::array<owned::Renderer::EmbeddedEffectTexture,8> materials{};
+        for(size_t i=0;i<materials.size();++i) {
+            if(renderer.d3d12_backend()) {
+                if(surfaceIds[i]) {
+                    const HRESULT resolved=OwnedRender::E1ParticleSurfaceImage(nullptr,nullptr,surfaceIds[i],retained[i]);
+                    if(FAILED(resolved))return resolved;
+                    materials[i].image=retained[i].get();
+                }
+            } else materials[i].srv=textures[i];
+        }
+        published=true;return renderer.draw_embedded_arena(input,state,materials);
     });
     LiveObserver::ObserveArena(input,hr,published);
     return FinishC74Effect(hr,"arena_visual_skipped");

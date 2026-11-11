@@ -12,7 +12,7 @@ struct GolemQuaternion {float w,x,y,z;};
 Vec GolemRotate(GolemQuaternion q,Vec p){Vec v={q.x,q.y,q.z};return p+Cross(v,Cross(v,p)+p*q.w)*2.f;}
 float Clamp(float v,float lo,float hi){return (std::max)(lo,(std::min)(hi,v));}
 HRESULT Submit(Renderer& renderer,Mesh& mesh,const EmbeddedGolemInput& input,
-    const FixedState& frame,ID3D11ShaderResourceView* texture,std::uint32_t color,
+    const FixedState& frame,Renderer::EmbeddedEffectTexture texture,std::uint32_t color,
     EmbeddedGolemCache& cache,unsigned slot,bool lit,bool opaque=false,bool additive=false,const std::vector<Vec>* authored=nullptr) {
     if(mesh.indices.empty())return S_OK;
     const auto count=mesh.uv.size();
@@ -68,15 +68,16 @@ HRESULT Submit(Renderer& renderer,Mesh& mesh,const EmbeddedGolemInput& input,
     view.geometry_revision_valid=true;
     view.geometry_revision={std::uint32_t(input.world_epoch),std::uint32_t(input.world_epoch>>32),
         std::uint32_t(cache.serial),std::uint32_t(cache.serial>>32),slot};
-    const auto hr=renderer.queue_native_direct(view,state,texture);
+    const auto hr=renderer.d3d12_backend()?renderer.queue_native(view,state,texture.image):
+        renderer.queue_native_direct(view,state,texture.srv);
     if(FAILED(hr))return hr;
     return renderer.flush_native();
 }
 
 struct Producer {
- const EmbeddedGolemInput& input;const GolemResource& resource;EmbeddedGolemCache& cache;const std::array<ID3D11ShaderResourceView*,6>& textures;
- std::function<void(Mesh&,ID3D11ShaderResourceView*,unsigned,bool,bool)> draw;
- std::function<void(Mesh&,const std::vector<Vec>&,ID3D11ShaderResourceView*,unsigned,bool)> draw_authored;
+ const EmbeddedGolemInput& input;const GolemResource& resource;EmbeddedGolemCache& cache;const std::array<Renderer::EmbeddedEffectTexture,6>& textures;
+ std::function<void(Mesh&,Renderer::EmbeddedEffectTexture,unsigned,bool,bool)> draw;
+ std::function<void(Mesh&,const std::vector<Vec>&,Renderer::EmbeddedEffectTexture,unsigned,bool)> draw_authored;
  unsigned Tint(unsigned c) const {if(!input.hard)return c;return (c&0xff000000u)|((c&255u)<<16)|((((c>>8)&255u)/4)<<8)|(((c>>16)&255u)/3); }
  Vec Base() const {return {input.base[0],input.base[1],input.base[2]};}
  const EmbeddedGolemNode* Node(int index) const {return input.nodes[index].valid?&input.nodes[index]:nullptr;}
@@ -91,7 +92,7 @@ struct Producer {
 #include "embedded_ruby.inl"
 };
 } // namespace golem
-HRESULT Renderer::draw_embedded_golem(const EmbeddedGolemInput& input,const FixedState& frame,const std::array<ID3D11ShaderResourceView*,6>& textures) try {
+HRESULT Renderer::draw_embedded_golem(const EmbeddedGolemInput& input,const FixedState& frame,const std::array<Renderer::EmbeddedEffectTexture,6>& textures) try {
  SCENE_ENTRY("golem_visual");using namespace golem;
  if(!input.world_epoch||input.boss_id!=990400||(!input.active&&!input.walls&&input.death_born<=0&&input.impact_born<=0)||!input.ground)return E_INVALIDARG;
  if(!input.hard&&(input.active||input.walls)&&!textures[2])return HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND);
@@ -99,14 +100,14 @@ HRESULT Renderer::draw_embedded_golem(const EmbeddedGolemInput& input,const Fixe
  struct Restore {std::uint64_t& value;std::uint64_t saved;~Restore(){value=saved;}} restore{native_static_content_revision_,revision};
  HRESULT failure=S_OK;const bool settled=input.dead&&input.death_born>0&&input.tick-input.death_born>=108&&!input.active&&!input.walls;
  if(!settled||embedded_golem_cache_.settled_born!=input.death_born){++embedded_golem_cache_.serial;embedded_golem_cache_.settled_born=settled?input.death_born:-1;}unsigned slot=0;
- auto draw=[&](Mesh& mesh,ID3D11ShaderResourceView* texture,unsigned color,bool lit,bool additive) {
+ auto draw=[&](Mesh& mesh,Renderer::EmbeddedEffectTexture texture,unsigned color,bool lit,bool additive) {
   if(mesh.indices.empty())return;if(slot>=embedded_golem_cache_.slots.size()){failure=E_INVALIDARG;return;}
   // Closed opaque shards/blades/physical arrows keep the source depth writes;
   // membranes, warning rings, missiles and density aura remain translucent.
   const bool opaque=!additive&&(color>>24)==255;
   auto hr=Submit(*this,mesh,input,frame,texture,color,embedded_golem_cache_,slot++,lit,opaque,additive);if(FAILED(hr)&&SUCCEEDED(failure))failure=hr;
  };
- auto authored=[&](Mesh& mesh,const std::vector<Vec>& normals,ID3D11ShaderResourceView* texture,unsigned color,bool lit){if(mesh.indices.empty())return;if(!texture||slot>=embedded_golem_cache_.slots.size()){failure=HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND);return;}auto hr=Submit(*this,mesh,input,frame,texture,color,embedded_golem_cache_,slot++,lit,(color>>24)==255,false,&normals);if(FAILED(hr)&&SUCCEEDED(failure))failure=hr;};
+ auto authored=[&](Mesh& mesh,const std::vector<Vec>& normals,Renderer::EmbeddedEffectTexture texture,unsigned color,bool lit){if(mesh.indices.empty())return;if(!texture||slot>=embedded_golem_cache_.slots.size()){failure=HRESULT_FROM_WIN32(ERROR_RESOURCE_NAME_NOT_FOUND);return;}auto hr=Submit(*this,mesh,input,frame,texture,color,embedded_golem_cache_,slot++,lit,(color>>24)==255,false,&normals);if(FAILED(hr)&&SUCCEEDED(failure))failure=hr;};
  Producer p{input,GolemResources(),embedded_golem_cache_,textures,draw,authored};const float time=input.tick/18.f;
  const float z=p.GolemGround(input.target_x,input.target_y);Vec corners[]={{28,26,0},{100,26,0},{100,62,0},{28,62,0}};
  struct Side{int index;float distance;};std::array<Side,4> sides{};Vec camera{input.camera[0],input.camera[1],input.camera[2]};

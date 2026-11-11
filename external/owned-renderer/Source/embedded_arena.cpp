@@ -69,7 +69,7 @@ Mesh Debris(const Fragments& resource,Vec base,int tower,float elapsed,unsigned 
 }
 
 HRESULT Submit(Renderer& renderer,Mesh& mesh,const EmbeddedArenaInput& input,
-    const FixedState& frame,ID3D11ShaderResourceView* texture,std::uint32_t color,
+    const FixedState& frame,Renderer::EmbeddedEffectTexture texture,std::uint32_t color,
     EmbeddedArenaCache& cache,unsigned slot,bool lit,bool opaque=false,bool additive=false) {
     if(mesh.indices.empty())return S_OK;
     const auto count=mesh.uv.size();
@@ -124,14 +124,15 @@ HRESULT Submit(Renderer& renderer,Mesh& mesh,const EmbeddedArenaInput& input,
     view.geometry_revision_valid=true;
     view.geometry_revision={std::uint32_t(input.world_epoch),std::uint32_t(input.world_epoch>>32),
         std::uint32_t(cache.serial),std::uint32_t(cache.serial>>32),slot};
-    const auto hr=renderer.queue_native_direct(view,state,texture);
+    const auto hr=renderer.d3d12_backend()?renderer.queue_native(view,state,texture.image):
+        renderer.queue_native_direct(view,state,texture.srv);
     if(FAILED(hr))return hr;
     return renderer.flush_native();
 }
 } // namespace arena
 
 HRESULT Renderer::draw_embedded_arena(const EmbeddedArenaInput& input,const FixedState& frame,
-    const std::array<ID3D11ShaderResourceView*,8>& textures) try {
+    const std::array<Renderer::EmbeddedEffectTexture,8>& textures) try {
     SCENE_ENTRY("arena_visual");
     using namespace arena;
     if(!input.world_epoch||input.boss_id!=1000105||(!input.dome&&!input.flow))return E_INVALIDARG;
@@ -147,7 +148,7 @@ HRESULT Renderer::draw_embedded_arena(const EmbeddedArenaInput& input,const Fixe
     const Vec base{input.base[0],input.base[1],input.base[2]},camera{input.camera[0],input.camera[1],input.camera[2]};
     HRESULT failure=S_OK;
     ++embedded_arena_cache_.serial;unsigned slot=0;
-    auto draw=[&](Mesh mesh,ID3D11ShaderResourceView* texture,unsigned color,bool lit=false,bool opaque=false,bool additive=false) {
+    auto draw=[&](Mesh mesh,Renderer::EmbeddedEffectTexture texture,unsigned color,bool lit=false,bool opaque=false,bool additive=false) {
         if(slot>=embedded_arena_cache_.slots.size()){failure=E_INVALIDARG;return;}
         const auto hr=Submit(*this,mesh,input,frame,texture,color,embedded_arena_cache_,slot++,lit,opaque,additive);
         if(FAILED(hr)&&SUCCEEDED(failure))failure=hr;

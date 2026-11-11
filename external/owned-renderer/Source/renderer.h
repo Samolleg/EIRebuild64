@@ -1242,8 +1242,15 @@ public:
     HRESULT draw_game_ribbon(const GameRibbonView& view, const FixedState& state, SurfaceImage* texture);
 #ifdef EID3D11_EMBEDDED
     HRESULT draw_embedded_curse(const EmbeddedCurseInput&,const FixedState&,ID3D11ShaderResourceView*,SurfaceImage* image=nullptr);
-    HRESULT draw_embedded_golem(const EmbeddedGolemInput&,const FixedState&,const std::array<ID3D11ShaderResourceView*,6>&);
-    HRESULT draw_embedded_arena(const EmbeddedArenaInput&,const FixedState&,const std::array<ID3D11ShaderResourceView*,8>&);
+    struct EmbeddedEffectTexture {
+        ID3D11ShaderResourceView* srv = nullptr;
+        SurfaceImage* image = nullptr;
+        EmbeddedEffectTexture() = default;
+        EmbeddedEffectTexture(std::nullptr_t) {}
+        explicit operator bool() const noexcept { return srv || image; }
+    };
+    HRESULT draw_embedded_golem(const EmbeddedGolemInput&,const FixedState&,const std::array<EmbeddedEffectTexture,6>&);
+    HRESULT draw_embedded_arena(const EmbeddedArenaInput&,const FixedState&,const std::array<EmbeddedEffectTexture,8>&);
     HRESULT draw_embedded_ribbon(const EmbeddedRibbonInput&, const FixedState&, SurfaceImage*);
     HRESULT draw_embedded_prints(EmbeddedPrintBatch&);
     HRESULT draw_embedded_combat_text(const EmbeddedCombatTextInput&, const FixedState&, SurfaceImage*);
