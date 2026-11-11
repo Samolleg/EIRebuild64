@@ -48,8 +48,7 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
     sample.lifecycle = {lpObject->GetID(), ownedPreviewResource, ownedPreviewResource};
     sample.assembly = ownedPreviewAssembly;
     OwnedRender::E1CompleteNalaInput(dynamic_cast<CUnit*>(lpObject),sample.values.nala);
-    sample.values.unit=dynamic_cast<CUnit*>(lpObject)!=nullptr;
-    sample.completed_pose=true;
+    if(sample.values.nala.selected){sample.values.unit=true;sample.completed_pose=true;}
     sample.status = owned::RetainedVisualStatus::ready;
     sample.object_pose.shape = sample.assembly->shape;
     if (++ownedPreviewSerial == 0) ++ownedPreviewSerial;

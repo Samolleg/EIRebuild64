@@ -127,7 +127,7 @@ HRESULT Renderer::queue_embedded_records(const NativePreparedSubmission& submiss
    view.wound_only=true;
    hr=queue_embedded_wound(view,state,*secondary,result);
   }
-  else if(!secondary || !source.owned_texture.surface || source.owned_texture.surface->id!=primaryId)hr=queue_native_owned(view,state,result);
+  else if(!secondary || source.owned_texture.identity!=primaryId)hr=queue_native_owned(view,state,result);
   else {
    ComPtr<ID3D11ShaderResourceView> primary, overlay;
    std::uint64_t backing=0;
@@ -176,7 +176,7 @@ HRESULT Renderer::queue_embedded_figure(const NativeGeometryView& view,
  if (lighting && (!set_native_world_lighting(*lighting) ||
      !set_native_point_lights(lights, worldTime))) return E_INVALIDARG;
  ComPtr<ID3D11ShaderResourceView> combined;
- if (!view.skn_material.identity && primary && secondary) {
+ if (primary && secondary) {
   hr=compose_embedded_figure_texture(primary,secondary,combined);
   if(FAILED(hr))return hr;
   primary=combined.Get();

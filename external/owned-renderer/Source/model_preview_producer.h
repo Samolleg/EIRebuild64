@@ -43,9 +43,7 @@ bool produce_model_preview(const ModelPreviewInput& input, std::size_t count,
     if (!retained_visual_gpu_pose(input.sample, pose) || !pose) return false;
     pose->root_to_world = input.object_to_world;
     bool nalaDrawn=false;
-    if(input.sample.values.unit && !retained_visual_merged_groups(input.sample))return false;
-    const bool skinned=input.sample.values.unit && input.sample.prepared->skn_selected;
-    if(skinned && input.sample.prepared->merged_groups.empty())return false;
+    if(input.sample.values.nala.selected && (!retained_visual_merged_groups(input.sample) || input.sample.prepared->merged_groups.empty()))return false;
     return produce_model_parts(count, read, bind,
         [&](std::size_t index, std::uint32_t& visible) {
             ModelPreviewPart part;
@@ -54,7 +52,7 @@ bool produce_model_preview(const ModelPreviewInput& input, std::size_t count,
             const auto& asset = input.sample.assembly->parts[part.ordinal];
             if (part.hidden || (input.sample.values.unit && unit_service_node(asset.name.c_str())))
                 return true;
-            if(skinned && part.ordinal<input.sample.prepared->merged_part_group.size() &&
+            if(input.sample.values.nala.selected && part.ordinal<input.sample.prepared->merged_part_group.size() &&
                input.sample.prepared->merged_part_group[part.ordinal]>=0){
                 visible=part.visible;if(nalaDrawn)return true;
                 NativeWorldBounds bounds{};
@@ -70,10 +68,6 @@ bool produce_model_preview(const ModelPreviewInput& input, std::size_t count,
                     view.flags|=0x40u;
                     if(!input.ground_contact)view.flags&=~native_ground_contact_flag;
                     apply_model_preview_material(view,part.material);
-                    if(view.skn_material.identity){
-                        view.flags&=~4u;view.default_diffuse=0xffffffffu;
-                        view.lighting.enabled=1;view.lighting.material_diffuse={1,1,1};
-                    }
                     if(!submit(view,part))return false;
                 }
                 nalaDrawn=true;return true;

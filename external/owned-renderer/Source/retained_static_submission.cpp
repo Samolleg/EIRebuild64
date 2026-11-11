@@ -10,8 +10,6 @@
 #include "figure_service_nodes.h"
 #include "skn_runtime.h"
 #include "nala/UnityBodySize.h"
-#include "nala/NalaAttachments.h"
-#include "nala/UnityHandsData.h"
 #include "world_scene_algorithms.h"
 
 #include <algorithm>
@@ -1163,40 +1161,6 @@ std::vector<std::array<float,16>> nala_skin_palette(const RetainedVisualSample& 
   for(unsigned row=0;row<3;++row)for(unsigned col=0;col<3;++col)m[row*4+col]=float(skin.r[row][col]);
   m[3]=float(skin.t.x);m[7]=float(skin.t.y);m[11]=float(skin.t.z);result.push_back(m);
  }
- // Match PrepareAttachment in UnityGamePlugin.cpp. The old FIG's local
- // coordinates remain intact and only its rigid mounting frame changes.
- std::array<unsigned,15> drivers{};drivers.fill(UINT_MAX);
- for(unsigned i=0;i<rig.driver.size();++i)if(rig.driver[i]>=0)drivers[unsigned(rig.driver[i])]=i;
- for(unsigned node=0;node<pose.size();++node){
-  M attachment=Rotation({pose[node].rotation[0],pose[node].rotation[1],pose[node].rotation[2],pose[node].rotation[3]});
-  attachment.t={pose[node].translation[0],pose[node].translation[1],pose[node].translation[2]};
-  const auto& name=sample.assembly->skeleton->nodes[node].name;
-  const auto* weapon=NalaAttachments::Assembly(name);
-  int driver=-1;
-  if(name.rfind("hr.",0)==0)driver=2;
-  else if(weapon)driver=weapon->role==NalaAttachments::Role::Shield?5:int(7+weapon->side);
-  if(driver>=0 && drivers[unsigned(driver)]!=UINT_MAX){
-   const unsigned bone=drivers[unsigned(driver)];
-   M desired=Proper(world[bone]);desired.t=Scale(world[bone].t,UnityBodySize::Scale);
-   desired=Product(root,desired);
-   const M restSource=Proper(Product(Inverse(rig.gameBind[0]),rig.gameBind[unsigned(driver)]));
-   const M restTarget=Proper(rig.rest[bone]);
-   attachment=Product(Product(desired,Product(Inverse(restTarget),restSource)),
-                      Product(Inverse(game[unsigned(driver)]),attachment));
-   // The source rod grip shifts perpendicular to its shaft into the palm.
-   const auto* holder=NalaAttachments::Find(name);
-   if(holder && holder->role==NalaAttachments::Role::Rod){
-    const auto& hand=UnityHandsData::Sides[holder->side];
-    const V centre=Scale(Add(hand.palm,Add(Scale(hand.forward,.020),Scale(hand.normal,.012))),UnityBodySize::Scale);
-    const V target=Point(desired,centre),point=Point(attachment,holder->point);
-    const V axis=Unit(Rotate(attachment,holder->axis));
-    attachment.t=Add(attachment.t,Sub(Sub(target,point),Scale(axis,Dot(Sub(target,point),axis))));
-   }
-  }
-  std::array<float,16> m{};m[15]=1;
-  for(unsigned row=0;row<3;++row)for(unsigned col=0;col<3;++col)m[row*4+col]=float(attachment.r[row][col]);
-  m[3]=float(attachment.t.x);m[7]=float(attachment.t.y);m[11]=float(attachment.t.z);result.push_back(m);
- }
  return result;
 }
 bool skn_pose_bounds(const RetainedVisualSample& sample,NativeWorldBounds& bounds,bool& present){
@@ -1254,30 +1218,6 @@ bool skn_pose_bounds(const RetainedVisualSample& sample,NativeWorldBounds& bound
    const double radius=(std::max)(0.f,asset->joint_radius[j])*std::sqrt(squared)+1e-5;
    bounds.minimum[axis]=(std::min)(bounds.minimum[axis],next_float(static_cast<float>(matrix[axis*4+3]-radius),-INFINITY));
    bounds.maximum[axis]=(std::max)(bounds.maximum[axis],next_float(static_cast<float>(matrix[axis*4+3]+radius),INFINITY));
-  }
- }
- if(asset->asset.nala_rig){
-  std::array<float,16> placement{};
-  if(sample.completed_pose){
-   if(!retained_object_matrix(sample.object_pose.position,sample.object_pose.quaternion,placement))return false;
-   for(unsigned row=0;row<3;++row)for(unsigned col=0;col<3;++col)placement[row*4+col]*=sample.assembly->scale[col];
-  }else if(!visual_node_world_matrix(sample.pose,VisualNodeSample{},sample.assembly->scale,placement))return false;
-  for(const auto& part:sample.assembly->parts){
-   if(!NalaAttachments::Retained(part.name) || part.explicitly_hidden || !part.source_available ||
-      !part.geometry || part.geometry->bounds.empty())continue;
-   const auto box=part.geometry->shape_count==1?part.geometry->bounds.front():
-       selected_bounds(*part.geometry,retained_visual_shape(sample));
-   const auto matrix=retained_multiply_matrix(placement,palette.at(asset->asset.nala_rig->bindInverse.size()+part.skeleton_node));
-   for(unsigned axis=0;axis<3;++axis){
-    float lo=matrix[axis*4+3],hi=lo;
-    for(unsigned k=0;k<3;++k){
-     const float a=matrix[axis*4+k]*(box.center[k]+box.minimum[k]);
-     const float b=matrix[axis*4+k]*(box.center[k]+box.maximum[k]);
-     lo+=(std::min)(a,b);hi+=(std::max)(a,b);
-    }
-    bounds.minimum[axis]=(std::min)(bounds.minimum[axis],next_float(lo,-INFINITY));
-    bounds.maximum[axis]=(std::max)(bounds.maximum[axis],next_float(hi,INFINITY));
-   }
   }
  }
  bounds.valid=true;if(!finite_world_bounds(bounds))return false;
@@ -3202,11 +3142,6 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
         if (++target.record_revision==0) ++target.record_revision;
         view.world.record_revision=target.record_revision;
     }
-    if(sample.values.unit && NalaAttachments::Retained(part.name) && !prepared.gpu_pose.skin_palette.empty()) {
-        view.world.pose_node=static_cast<unsigned>(prepared.gpu_pose.skin_palette.size()+part.skeleton_node);
-        // palette contains skin slots followed by one mount per skeleton node.
-        // The node range begins at base nodes + skin slots.
-    }
     view.owned_texture.mips=target.texture_mips.data();
     view.prepared_mesh=&target.mesh;view.prepared_material=&target.material;view.prepared_wound_material=&target.wound_material;
     NativePreparedPartValues values;
@@ -3216,8 +3151,7 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
         submission.values=values;if(++submission.values_revision==0)++submission.values_revision;
     }
     {const auto part_index=static_cast<std::uint32_t>(index);
-     submission.fur=prepared.gpu_pose.skin_palette.empty()?fur_record_profile(sample,&part_index,1):nullptr;
-     submission.fur_node_base=part.skeleton_node;}
+     submission.fur=fur_record_profile(sample,&part_index,1);submission.fur_node_base=part.skeleton_node;}
     submission.source=&view;submission.bounds=bounds;submission.contribution=contribution;
     output=&submission;return true;
 }
@@ -3486,11 +3420,6 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
     values.flags|=0x40u;
     if(group.skn_asset && (group.skn_asset->nala_generated || !part.assembled_character_texture)){
      const auto& m=group.skn_asset->asset.materials[group.skn_material];
-     if(group.skn_asset->nala_generated){
-      values.flags&=~4u;values.default_diffuse=0xffffffffu;
-      values.lighting_enabled=1;values.diffuse={1,1,1};
-      values.u_shift=values.v_shift=0;
-     }
      if(m.alpha!=0)values.alpha*=m.base[3];
 
     }
