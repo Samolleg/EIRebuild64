@@ -1185,7 +1185,11 @@ HRESULT Renderer::render_pending_blits(){
  }
  if(pending_blits_.empty())return S_OK;
  if(d3d12_){ // the composite marks the interface boundary, as on D3D11
-  (void)composite_world();
+  const HRESULT composite_hr=composite_world();
+  if(FAILED(composite_hr)){
+   d3d12_->omit("interface quads (world composite failed before the UI boundary)",false);
+   return composite_hr;
+  }
   // Named, not silent (a flicker report): quads recorded while the world
   // target is still bound land in the world image, not the output.
   if(world_d3d12_bound_)d3d12_->omit("interface quads recorded into the world target (no composite before them)",false);

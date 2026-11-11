@@ -980,7 +980,8 @@ const char* Renderer::terrain_profile_scope(bool neighbour,bool tessellated,Terr
 bool Renderer::owned_ui_text_enabled() const noexcept{return configured_boolean(debug_overlay_.config(),"owned_ui_text",false);}
 HRESULT Renderer::retire_embedded_world(){
  const SceneInlineScope scene_inline(this,"world_retire");
- if(!context_)return S_FALSE;
+ // Both backends drain and release the retired world before the next decode.
+ if(!d3d12_&&!context_)return S_FALSE;
  // Drain the last world's commands before dropping their owners. Do this
  // at host retirement, before any next-world decoding or neighbour prebuild.
  HRESULT hr=flush_native();if(FAILED(hr))return hr;
