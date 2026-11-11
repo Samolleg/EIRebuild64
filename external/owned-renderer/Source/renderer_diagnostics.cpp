@@ -1441,7 +1441,10 @@ bool Renderer::write_profile_image_d3d12(const std::string& path,std::string& de
    detail=text;return false;
   }
   if(hdr){
-   if(format!=DXGI_FORMAT_R11G11B10_FLOAT){detail="unexpected HDR target format";return false;}
+   // Picking temporarily substitutes a BGRA target for the HDR world target.
+   if(format!=DXGI_FORMAT_R11G11B10_FLOAT&&format!=DXGI_FORMAT_B8G8R8A8_UNORM){
+    detail="unexpected world target format";return false;
+   }
    struct DdsFileHeader {
     std::uint32_t magic=DirectX::DDS_MAGIC;
     DirectX::DDS_HEADER description{};
