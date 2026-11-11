@@ -1405,6 +1405,34 @@ bool Renderer::write_hudless_image(const std::string& path,std::string& detail) 
  }catch(...){detail="allocation failed";return false;}
 }
 
+// Export only boundaries whose color target is ready. HDR world passes need
+// their own GPU conversion target before they can be represented as a BMP.
+bool Renderer::write_profile_image_d3d12(const std::string& path,std::string& detail) noexcept {
+ const stall_watch::Exempt disk_export;
+ detail.clear();
+ const bool post=profiler_.current_pass_is("scene_smaa")||profiler_.current_pass_is("scene_copy")||
+  profiler_.current_pass_is("scene_dof")||profiler_.current_pass_is("scene_sun_rays")||
+  profiler_.current_pass_is("scene_bloom");
+ if(!post){
+  if(scene_composited_&&(profiler_.current_pass_is("ui_composition")||
+     profiler_.current_pass_is("present_bookkeeping")||profiler_.current_pass_is("fg_frame_composite")))
+   return write_harness_screenshot(path,detail);
+  return false;
+ }
+ try{
+  if(!d3d12_){detail="D3D12 executor unavailable";return false;}
+  D3D12Texture* source=scene_output_d3d12();
+  if(!source)return write_harness_screenshot(path,detail);
+  std::vector<std::uint8_t> bgra;UINT width=0,height=0;
+  const HRESULT hr=d3d12_->read_texture(*source,bgra,width,height);
+  if(hr!=S_OK){
+   char text[96]{};std::snprintf(text,sizeof(text),"D3D12 post-pass readback failed (%08lx)",static_cast<unsigned long>(hr));
+   detail=text;return false;
+  }
+  return write_bgra_bmp(path,bgra.data(),width,height,width*4u,detail);
+ }catch(...){detail="allocation failed";return false;}
+}
+
 // The back buffer as the game composed it this present (before the debug
 // view and overlay), as a 24-bit bottom-up BMP.
 bool Renderer::write_harness_screenshot(const std::string& path,std::string& detail) noexcept {

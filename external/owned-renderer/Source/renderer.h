@@ -5201,6 +5201,7 @@ private:
     bool apply_harness_config(const HarnessCommand& command, std::string& detail) noexcept;
     bool write_harness_screenshot(const std::string& path, std::string& detail) noexcept;
     bool write_hudless_image(const std::string& path, std::string& detail) noexcept;
+    bool write_profile_image_d3d12(const std::string& path, std::string& detail) noexcept;
     std::string harness_unready_parts(std::string& ready_detail) noexcept;
     // Load reveal: after a new world epoch the first world frames keep the
     // last loading picture on screen until the map, its neighbours and its

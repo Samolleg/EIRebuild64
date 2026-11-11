@@ -1565,6 +1565,9 @@ HRESULT Renderer::composite_world_d3d12(){
  // The upscaler (or, failing it this frame, the filtered upscale) into the
  // output; below 100% render scale without one, the filtered upscale
  // (composite_world's scene_upscale).
+ // Seal the resolved post image before upscaling or HUD work changes it.
+ // At native resolution no upscale pass opens a new profiling boundary.
+ end_profile_pass();
  const HRESULT upscaled=!scene_output_d3d12()?S_OK:temporal_upscaler()?upscale_world_d3d12():filtered_upscale_d3d12();
  d3d12_->clear_slots();d3d12_->set_target(nullptr);
  world_output_this_present_=true;

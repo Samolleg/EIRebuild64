@@ -958,17 +958,13 @@ HRESULT Renderer::clear_target_rectangles(const D3D11_RECT* rectangles,DWORD rec
 
 void Renderer::end_profile_pass(){if(!profiler_.pass_active())return;
  if(d3d12_){
-  // Only the composed target represents the output image. Earlier world
-  // passes still need their HDR target resolved into a separate capture target.
-  const RenderProfiler::CaptureWriter writer=scene_composited_&&
-   (profiler_.current_pass_is("ui_composition")||profiler_.current_pass_is("present_bookkeeping")||
-    profiler_.current_pass_is("fg_frame_composite"))?
+  const RenderProfiler::CaptureWriter writer=
    +[](void* context,const std::string& path)->bool{
     auto& renderer=*static_cast<Renderer*>(context);std::string detail;
-    const bool ok=renderer.write_harness_screenshot(path,detail);
-    if(!ok)bridge_report_event("d3d12_capture",("pass image not written: "+detail).c_str());
+    const bool ok=renderer.write_profile_image_d3d12(path,detail);
+    if(!ok&&!detail.empty())bridge_report_event("d3d12_capture",("pass image not written: "+detail).c_str());
     return ok;
-   }:nullptr;
+   };
   profiler_.end_pass(nullptr,writer,this);return;
  }
  ComPtr<ID3D11Texture2D> back;if(profiler_.capture_active()&&swap_){if(!scene_composited_&&backbuffer_rtv_&&scene_composite_.target()){DebugViewStateGuard guard(context_.Get());scene_composite_.render(context_.Get(),scene_composite_.resolve_target(backbuffer_rtv_.Get()),false);scene_composite_.upscale(context_.Get(),backbuffer_rtv_.Get(),nullptr,nullptr);}swap_->GetBuffer(0,IID_PPV_ARGS(&back));}profiler_.end_pass(back.Get());}
