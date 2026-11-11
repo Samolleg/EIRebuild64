@@ -1,4 +1,6 @@
 #include "E1Surface.h"
+#include "../../external/owned-renderer/Source/renderer.h"
+#include <limits>
 #include <map>
 #include <atomic>
 #include <mutex>
@@ -8,6 +10,7 @@ using Microsoft::WRL::ComPtr;
 struct Entry {
     std::shared_ptr<const owned::OwnedVisualSurface> value;
     ComPtr<ID3D11Texture2D> texture;
+    std::shared_ptr<owned::SurfaceImage> image;
 };
 // Source and c56 consumers run on the same render thread. The resolver rejects
 // another device; it never opens a shared handle or silently copies between devices.
@@ -56,6 +59,59 @@ bool E1Surface::Complete(ID3D11Texture2D* texture, bool alphaFullyOpaque) noexce
     entries().emplace(id, std::move(entry));
     return true;
 } catch (...) { BeginWrite(); return false; }
+bool E1Surface::CompleteCpu(const owned::SurfaceImage& source, bool alphaFullyOpaque) noexcept try {
+    BeginWrite();
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    UINT blockBytes = 0;
+    if (!source.width || !source.height || source.width > UINT((std::numeric_limits<LONG>::max)()) ||
+        source.height > UINT((std::numeric_limits<LONG>::max)()) || source.pitch <= 0 || source.cpu_released ||
+        !owned::surface_dxgi_format(source.format, format, blockBytes)) return false;
+    if (!blockBytes && source.format.dwRGBBitCount != 16 &&
+        source.format.dwRGBBitCount != 24 && source.format.dwRGBBitCount != 32) return false;
+    const std::uint64_t rows = blockBytes ? (std::uint64_t(source.height) + 3) / 4 : source.height;
+    const std::uint64_t rowBytes = blockBytes ? ((std::uint64_t(source.width) + 3) / 4) * blockBytes :
+        (std::uint64_t(source.width) * source.format.dwRGBBitCount + 7) / 8;
+    if (!rowBytes || rowBytes > std::uint64_t(source.pitch) ||
+        rows > (std::numeric_limits<std::size_t>::max)() / std::size_t(source.pitch) ||
+        source.pixels.size() < rows * std::size_t(source.pitch)) return false;
+    auto image = std::shared_ptr<owned::SurfaceImage>(new owned::SurfaceImage,
+        [](owned::SurfaceImage* value) {
+            owned::release_surface_memory_accounting(*value); delete value;
+        });
+    image->width = source.width; image->height = source.height;
+    image->pitch = source.pitch; image->format = source.format;
+    image->pixels = source.pixels;
+    image->has_color_key = source.has_color_key; image->color_key = source.color_key;
+    image->static_mip_hint = source.static_mip_hint; image->cpu_pinned = true;
+    auto value = std::make_shared<owned::OwnedVisualSurface>();
+    value->width = image->width; value->height = image->height;
+    value->pitch = image->pitch; value->format = image->format;
+    value->has_color_key = image->has_color_key; value->color_key = image->color_key;
+    value->static_mip_hint = image->static_mip_hint;
+    value->alpha_fully_opaque = alphaFullyOpaque;
+    if (++generation == 0) ++generation;
+    image->id = value->id = id; image->generation = value->generation = generation;
+    owned::update_surface_memory_accounting(*image);
+    Entry entry; entry.value = std::move(value); entry.image = std::move(image);
+    const std::lock_guard<std::mutex> lock(guard());
+    entries().emplace(id, std::move(entry));
+    return true;
+} catch (...) { BeginWrite(); return false; }
+HRESULT E1CopyCpuSurface(std::uint64_t id, owned::SurfaceImage& image) noexcept try {
+    image = {};
+    const std::lock_guard<std::mutex> lock(guard());
+    const auto found = entries().find(id);
+    if (found == entries().end()) return E_HANDLE;
+    if (!found->second.image) return S_FALSE;
+    const auto& source = *found->second.image;
+    image.id = source.id; image.generation = source.generation;
+    image.width = source.width; image.height = source.height;
+    image.pitch = source.pitch; image.format = source.format;
+    image.pixels = source.pixels;
+    image.has_color_key = source.has_color_key; image.color_key = source.color_key;
+    image.static_mip_hint = source.static_mip_hint; image.cpu_pinned = true;
+    return S_OK;
+} catch (...) { image = {}; return E_OUTOFMEMORY; }
 std::shared_ptr<const owned::OwnedVisualSurface> E1SurfaceValue(std::uint64_t id) noexcept {
     const std::lock_guard<std::mutex> lock(guard());
     const auto found = entries().find(id);
@@ -63,12 +119,18 @@ std::shared_ptr<const owned::OwnedVisualSurface> E1SurfaceValue(std::uint64_t id
 }
 HRESULT E1ResolveSurface(void*, ID3D11Device* device, std::uint64_t id,
     std::uint64_t generation, ComPtr<ID3D11Texture2D>& texture, owned::SurfaceImage*& image) noexcept {
-    image = nullptr; // No mutable proxy image backs an immutable host surface.
+    image = nullptr; // Only the CPU publication owns a mutable upload home.
     texture.Reset();
-    if (!device || !id || !generation) return E_INVALIDARG;
+    if (!id || !generation) return E_INVALIDARG;
     const std::lock_guard<std::mutex> lock(guard());
     const auto found = entries().find(id);
     if (found == entries().end() || found->second.value->generation != generation) return E_HANDLE;
+    if (!device) {
+        if (!found->second.image) return E_PENDING;
+        image = found->second.image.get();
+        return S_OK;
+    }
+    if (!found->second.texture) return E_INVALIDARG;
     ComPtr<ID3D11Device> actual; found->second.texture->GetDevice(&actual);
     if (actual.Get() != device) return E_INVALIDARG;
     texture = found->second.texture; return S_OK;

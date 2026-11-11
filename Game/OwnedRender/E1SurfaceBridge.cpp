@@ -7,6 +7,7 @@
 #include "E1PerfDiagnostics.h"
 #include "E1Surface.h"
 #include "../../external/owned-renderer/Source/renderer.h"
+#include "../../external/owned-renderer/Source/surface_convert.h"
 #include <DirectXTex.h>
 #include <cstring>
 #include <limits>
@@ -70,6 +71,33 @@ HRESULT E1ReadbackSurface(ID3D11Device* device, ID3D11DeviceContext* context,
     static E1PerfCounter counter{"ui_readback"};
     E1PerfScope timing(counter);
     image = {};
+    if (!device && !context) {
+        owned::SurfaceImage cpu;
+        const HRESULT copied = E1CopyCpuSurface(id, cpu);
+        if (copied != S_OK) return copied == S_FALSE ? E_INVALIDARG : copied;
+        UINT blockBytes = 0;
+        if (!owned::surface_dxgi_format(cpu.format, image.format, blockBytes)) return DXGI_ERROR_UNSUPPORTED;
+        // Match GPU readback: RGB masks become BGRA, compressed blocks stay
+        // encoded, and publication color keys must not rewrite the raw pixels.
+        cpu.has_color_key = false;
+        RECT rect{};
+        surface_convert::Prepared prepared;
+        const HRESULT converted = owned::prepare_surface_upload(cpu, true, blockBytes, rect, prepared);
+        if (FAILED(converted)) return converted;
+        const std::uint64_t rowBytes = blockBytes ? ((std::uint64_t(cpu.width) + 3) / 4) * blockBytes :
+            std::uint64_t(cpu.width) * 4;
+        const UINT rows = blockBytes ? (cpu.height + 3) / 4 : cpu.height;
+        if (rowBytes > UINT((std::numeric_limits<LONG>::max)()) || rowBytes > prepared.pitch ||
+            rowBytes > (std::numeric_limits<std::size_t>::max)() / rows) return E_INVALIDARG;
+        image.id = cpu.id; image.generation = cpu.generation;
+        image.width = cpu.width; image.height = cpu.height; image.pitch = LONG(rowBytes);
+        image.pixels.resize(std::size_t(rowBytes) * rows);
+        for (UINT y = 0; y < rows; ++y)
+            std::memcpy(image.pixels.data() + std::size_t(y) * std::size_t(rowBytes),
+                static_cast<const std::uint8_t*>(prepared.data) + std::size_t(y) * prepared.pitch,
+                std::size_t(rowBytes));
+        return S_OK;
+    }
     if (!device || !context || !id) return E_INVALIDARG;
     Microsoft::WRL::ComPtr<ID3D11Device> contextDevice;
     context->GetDevice(&contextDevice);
@@ -121,6 +149,10 @@ HRESULT E1ReadbackSurface(ID3D11Device* device, ID3D11DeviceContext* context,
 HRESULT E1SurfaceImage(ID3D11Device* device, ID3D11DeviceContext* context,
     std::uint64_t id, owned::SurfaceImage& image) noexcept try {
     image = {};
+    if (!device && !context) {
+        const HRESULT copied = E1CopyCpuSurface(id, image);
+        return copied == S_FALSE ? E_INVALIDARG : copied;
+    }
     if (!device || !context || !id) return E_INVALIDARG;
     const auto value = E1SurfaceValue(id);
     if (!value) return E_HANDLE;
@@ -171,6 +203,38 @@ HRESULT E1ParticleSurfaceImage(ID3D11Device* device, ID3D11DeviceContext* contex
     std::uint64_t id, std::shared_ptr<owned::SurfaceImage>& image) noexcept try {
     image.reset();
     const auto value = E1SurfaceValue(id);
+    if (value && !device && !context) {
+        struct CpuEntry {
+            std::uint64_t used = 0;
+            std::shared_ptr<owned::SurfaceImage> image;
+        };
+        // Render-thread cache, like the D3D11 snapshot cache below. Keep the
+        // upload home across particle draws until this publication changes.
+        static auto* cpuCache = new std::map<std::uint64_t, CpuEntry>;
+        static std::uint64_t cpuSerial = 0;
+        const auto found = cpuCache->find(id);
+        if (found != cpuCache->end() && found->second.image->generation == value->generation) {
+            found->second.used = ++cpuSerial;
+            image = found->second.image;
+            return S_OK;
+        }
+        auto cpu = std::shared_ptr<owned::SurfaceImage>(new owned::SurfaceImage,
+            [](owned::SurfaceImage* value) {
+                owned::release_surface_memory_accounting(*value); delete value;
+            });
+        const HRESULT copied = E1CopyCpuSurface(id, *cpu);
+        if (copied != S_OK) return copied == S_FALSE ? E_INVALIDARG : copied;
+        owned::update_surface_memory_accounting(*cpu);
+        (*cpuCache)[id] = {++cpuSerial, cpu};
+        while (cpuCache->size() > 64) {
+            auto oldest = cpuCache->begin();
+            for (auto it = cpuCache->begin(); it != cpuCache->end(); ++it)
+                if (it->second.used < oldest->second.used) oldest = it;
+            cpuCache->erase(oldest);
+        }
+        image = std::move(cpu);
+        return S_OK;
+    }
     if (!value || !device || !context) return E_INVALIDARG;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> published;
     const HRESULT resolved = E1ResolveSurface(nullptr, device, id, value->generation, published);
@@ -238,6 +302,18 @@ HRESULT E1BlitPublishedSurface(owned::Renderer& renderer, ID3D11Device* device,
     bool native_canvas) noexcept try {
     static E1PerfCounter counter{"ui_blit_total"};
     E1PerfScope timing(counter);
+    if (renderer.d3d12_backend()) {
+        const auto value = E1SurfaceValue(id);
+        if (!value) return E_HANDLE;
+        HRESULT textResult = S_OK;
+        if (owned::owned_text_consume(renderer, id, value->generation, destination, source, textResult))
+            return textResult;
+        owned::SurfaceImage image;
+        const HRESULT copied = E1CopyCpuSurface(id, image);
+        if (copied != S_OK) return copied == S_FALSE ? E_PENDING : copied;
+        const HRESULT hr = renderer.blit(image, destination, source, color_key, interface_space, native_canvas);
+        return FAILED(hr) ? hr : renderer.flush_ui();
+    }
     if (!device || !context || !id) return E_INVALIDARG;
     Microsoft::WRL::ComPtr<ID3D11Device> contextDevice;
     context->GetDevice(&contextDevice);

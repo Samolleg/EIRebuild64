@@ -73,6 +73,17 @@ bool CDX11::SetItemColorSum(bool active)
 
 bool CDX11::SetRenderStates()
 {
+    // Native packets capture fake_dx7 state at submission. D3D12 creates its
+    // PSOs from those values; no D3D11 immediate state belongs to this path.
+    if (rendererFacade) {
+        bool nativeD3D12 = false;
+        const HRESULT hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+            nativeD3D12 = renderer.d3d12_backend();
+            return S_OK;
+        });
+        IfFailedThrowHR(hr);
+        if (nativeD3D12) return true;
+    }
     D3D11_RENDER_TARGET_BLEND_DESC rtbd = { 0 };
     auto &rs = fake_dx7.render_state;
     // true/false

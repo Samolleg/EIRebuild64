@@ -17,8 +17,12 @@ public:
     void BeginWrite() noexcept;
     // Opaque proof comes from every uploaded CPU mip, never from the GPU format.
     bool Complete(ID3D11Texture2D* texture, bool alphaFullyOpaque = false) noexcept;
+    // Copies completed level-zero bytes, never the caller's GPU allocation.
+    bool CompleteCpu(const owned::SurfaceImage& source, bool alphaFullyOpaque = false) noexcept;
 };
 std::shared_ptr<const owned::OwnedVisualSurface> E1SurfaceValue(std::uint64_t id) noexcept;
+// S_FALSE means a D3D11-only publication; errors must not silently fall back.
+HRESULT E1CopyCpuSurface(std::uint64_t id, owned::SurfaceImage& image) noexcept;
 HRESULT E1ResolveSurface(void*, ID3D11Device* device, std::uint64_t id,
     std::uint64_t generation, Microsoft::WRL::ComPtr<ID3D11Texture2D>& texture, owned::SurfaceImage*& image) noexcept;
 HRESULT E1ResolveSurface(void*, ID3D11Device* device, std::uint64_t id,

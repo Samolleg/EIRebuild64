@@ -1,3 +1,28 @@
+# X64D3D12 CPU surface publication seam, stage 19 (2026-11-11)
+
+Incomplete runtime integration: renderer_backend=1 still creates D3D11.
+E1Surface now owns completed CPU surface generations as an alternative to
+D3D11 textures. Its resolver returns the renderer's mutable upload home when
+called without a D3D11 device, validating ID/generation without IPC. CPU bytes
+use the author's SurfacePixels copy-on-write storage, format conversion and
+D3D12 upload algorithms; publication validates dimensions, pitch and extent.
+E1SurfaceBridge supports CPU snapshots, raw readback, UI blits and a bounded
+particle snapshot/upload cache without a D3D11 device/context. RGB readback
+uses the author's mask conversion; DXT rows are copied without source padding.
+D3D11 branches remain unchanged. SetRenderStates skips immediate D3D11 state
+creation for an active native executor; packets retain their fixed state.
+No HLSL, SDK or runtime DLL list changed. Host transport adaptation remains
+Source/embedded_d3d12.{h,cpp}; source surface transport is in Game/OwnedRender.
+
+Next: CDXGISurface must actually produce CompleteCpu publications, including
+its CPU creation/upload/copy/GDI/capture/thumbnail operations. This stage only
+adds the registry/consumer seam; no source producer calls CompleteCpu yet.
+Texture/sprite/SRV boundaries still require adaptation. Then latch backend
+before device creation and connect input/simulation/render phase boundaries.
+Full BRIEF remains open. No compilation, shader compilation, tests or game
+run was performed, as directed. Build/link, D3D11 regression and GPU behavior
+are unverified. Stage 18 below describes the preceding frame-dispatch work.
+
 # X64D3D12 embedded world/present dispatch, stage 18 (2026-11-11)
 
 Incomplete runtime integration. renderer_backend=1 still creates D3D11.
