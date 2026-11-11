@@ -240,15 +240,22 @@ bool Presenter::resize(Core& core, UINT width, UINT height, std::string& reason)
     return acquire_buffers(core, reason);
 }
 
+void Presenter::wait_frame_latency() noexcept {
+    if (!waitable_) return;
+    const DWORD waited = WaitForSingleObjectEx(waitable_, 1000, TRUE);
+    if (waited != WAIT_OBJECT_0 && waited != WAIT_IO_COMPLETION)
+        remote::host_log("d3d12: swap chain frame latency wait failed: wait=%lu error=%lu", waited, GetLastError());
+}
+
 Presenter::State Presenter::prepare(Core& core, std::string& reason, bool wait_latency) {
     if (adopted_) {
         // The owner sizes and orders the window. Minimized: no wait, since
         // only a Present returns the frame latency count a wait takes.
         if (!IsWindow(parent_) || IsIconic(parent_)) return State::minimized;
-        if (waitable_ && wait_latency) WaitForSingleObjectEx(waitable_, 1000, TRUE);
+        if (wait_latency) wait_frame_latency();
         return State::ready;
     }
-    if (waitable_ && wait_latency) WaitForSingleObjectEx(waitable_, 1000, TRUE);
+    if (wait_latency) wait_frame_latency();
     if (!IsWindow(parent_)) return State::minimized;  // the game is closing
     RECT client{};
     GetClientRect(parent_, &client);

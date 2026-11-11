@@ -12,6 +12,7 @@
 #include <dxgiformat.h>
 
 #include <cstdio>
+#include <chrono>
 #include <cstring>
 
 namespace remote {
@@ -498,7 +499,17 @@ bool Dlss::run_raw(void (*job)(void*), void* context) noexcept {
                 for (;;) {
                     wake_.wait(lock, [this] { return job_ != nullptr || stop_; });
                     if (job_) {
-                        job_(job_context_);
+                        if (device12_) {
+                            // Let the D3D12 caller report a long NGX operation.
+                            // Its job context stays alive until done_ is signalled.
+                            const auto job = job_;
+                            void* const context = job_context_;
+                            lock.unlock();
+                            job(context);
+                            lock.lock();
+                        } else {
+                            job_(job_context_);
+                        }
                         job_ = nullptr;
                         done_.notify_all();
                         continue;
@@ -515,10 +526,20 @@ bool Dlss::run_raw(void (*job)(void*), void* context) noexcept {
         }
     }
     std::unique_lock<std::mutex> lock(mutex_);
+    const bool d3d12_job = device12_ != nullptr;
+    const Log wait_log = log_;
     job_context_ = context;
     job_ = job;
     wake_.notify_one();
-    done_.wait(lock, [this] { return job_ == nullptr; });
+    if (d3d12_job) {
+        while (!done_.wait_for(lock, std::chrono::seconds(20), [this] { return job_ == nullptr; })) {
+            lock.unlock();
+            if (wait_log) wait_log("D3D12 NGX operation still pending after 20 s; waiting before releasing its inputs");
+            lock.lock();
+        }
+    } else {
+        done_.wait(lock, [this] { return job_ == nullptr; });
+    }
     return true;
 }
 

@@ -2005,7 +2005,9 @@ public:
     // Not Core::wait_idle: NGX calls this inside record_external, with the
     // frame's list open (a new fence value there retired the frame's own
     // ring memory and releases early: the TDR of the first DLSS mode change).
-    void wait_idle() noexcept override { (void)core_.wait_submitted(); }
+    void wait_idle() noexcept override {
+        if (!core_.wait_submitted()) fail(E_FAIL, "the GPU did not finish submitted work within 20 s");
+    }
 
     // One target's depth into another's of the same size and format (stream order).
     HRESULT copy_depth(D3D12Texture& destination, D3D12Texture& source) override {
@@ -2568,7 +2570,7 @@ public:
         // markers (nvapi.h: RENDERSUBMIT_END comes before Present).
         reflex::marker(reflex::Marker::render_end, reflex::frame());
         if (shown && fg_on_) {
-            presentation_limiter_.wait(0);  // the pacer owns both output presents
+            presentation_limiter_.wait(0, nullptr, &remote::host_log);  // the pacer owns both output presents
             // Reflex's per-rendered-frame PRESENT markers bracket the
             // hand-over after render submission. Rendering and final copies
             // use the same normal queue, with no out-of-band queue/markers.
@@ -2590,7 +2592,7 @@ public:
             // The AMD proxy owns its final presents: its documented producer
             // limit is half the desired output rate while interpolating.
             presentation_limiter_.wait(frame_limit > 0 && fsr_on_ && fsr_.generating()
-                ? (std::max)(1, frame_limit / 2) : frame_limit);
+                ? (std::max)(1, frame_limit / 2) : frame_limit, nullptr, &remote::host_log);
             reflex::marker(reflex::Marker::present_start, reflex::frame());
             hr = presenter_.present(sync_interval);
             reflex::marker(reflex::Marker::present_end, reflex::frame());
@@ -4102,10 +4104,16 @@ private:
 
     // Null unbinds a slot/target. Any non-null resource must belong to this
     // session before its descriptors, GPU addresses or bindless index are used.
-    template<class Resource>
-    bool accept_resource(const Resource* resource) {
-        if (!resource || (resource->owner == resource_owner_ && resource->resource)) return true;
-        fail(DXGI_ERROR_DEVICE_RESET, "resource belongs to another D3D12 executor");
+    bool accept_resource(const owned::D3D12Buffer* buffer) {
+        if (!buffer || (buffer->owner == resource_owner_ && buffer->resource)) return true;
+        fail(DXGI_ERROR_DEVICE_RESET, "buffer is empty or belongs to another D3D12 executor");
+        return false;
+    }
+    bool accept_resource(const D3D12Texture* texture) {
+        // Depth-only targets own depth without a colour resource. Shadow
+        // history copies and bindings must accept that allocation too.
+        if (!texture || (texture->owner == resource_owner_ && (texture->resource || texture->depth))) return true;
+        fail(DXGI_ERROR_DEVICE_RESET, "texture is empty or belongs to another D3D12 executor");
         return false;
     }
 

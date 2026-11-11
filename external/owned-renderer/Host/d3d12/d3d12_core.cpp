@@ -5,6 +5,8 @@
 
 #include <cstdio>
 
+namespace remote { void host_log(const char* format, ...); }
+
 namespace d3d12 {
 
 std::string hresult_text(const char* call, HRESULT hr) {
@@ -514,21 +516,33 @@ void Core::bind(ID3D12GraphicsCommandList* list) const noexcept {
 }
 
 bool Core::wait_for(std::uint64_t value) noexcept {
-    if (fence_->GetCompletedValue() >= value) return true;
-    if (FAILED(fence_->SetEventOnCompletion(value, fence_event_))) return false;
-    // A hung GPU ends in device removal, which completes every fence value.
-    return WaitForSingleObject(fence_event_, 20000) == WAIT_OBJECT_0;
+    const auto completed = fence_->GetCompletedValue();
+    if (completed != UINT64_MAX && completed >= value) return true;
+    const HRESULT hr = fence_->SetEventOnCompletion(value, fence_event_);
+    const DWORD waited = SUCCEEDED(hr) ? WaitForSingleObject(fence_event_, 20000) : WAIT_FAILED;
+    const auto finished = fence_->GetCompletedValue();
+    if (waited == WAIT_OBJECT_0 && finished != UINT64_MAX && finished >= value) return true;
+    remote::host_log("d3d12: frame fence wait failed: wanted=%llu completed=%llu wait=%lu event_hr=0x%08lX device_hr=0x%08lX",
+                     static_cast<unsigned long long>(value), static_cast<unsigned long long>(finished), waited,
+                     static_cast<unsigned long>(hr), static_cast<unsigned long>(device_->GetDeviceRemovedReason()));
+    return false;
 }
 
 bool Core::wait_idle() noexcept {
     const std::uint64_t value = next_idle_value_++;
-    if (FAILED(queue_->Signal(idle_fence_.Get(), value))) return false;
-    if (idle_fence_->GetCompletedValue() < value) {
-        if (FAILED(idle_fence_->SetEventOnCompletion(value, idle_event_))) return false;
-        if (WaitForSingleObject(idle_event_, 20000) != WAIT_OBJECT_0) return false;
+    HRESULT hr = queue_->Signal(idle_fence_.Get(), value);
+    DWORD waited = WAIT_OBJECT_0;
+    if (SUCCEEDED(hr) && idle_fence_->GetCompletedValue() < value) {
+        hr = idle_fence_->SetEventOnCompletion(value, idle_event_);
+        waited = SUCCEEDED(hr) ? WaitForSingleObject(idle_event_, 20000) : WAIT_FAILED;
     }
     const std::uint64_t completed = idle_fence_->GetCompletedValue();
-    if (completed < value || completed == UINT64_MAX) return false;
+    if (FAILED(hr) || waited != WAIT_OBJECT_0 || completed < value || completed == UINT64_MAX) {
+        remote::host_log("d3d12: idle fence wait failed: wanted=%llu completed=%llu wait=%lu hr=0x%08lX device_hr=0x%08lX",
+                         static_cast<unsigned long long>(value), static_cast<unsigned long long>(completed), waited,
+                         static_cast<unsigned long>(hr), static_cast<unsigned long>(device_->GetDeviceRemovedReason()));
+        return false;
+    }
     retire(fence_->GetCompletedValue());
     return true;
 }

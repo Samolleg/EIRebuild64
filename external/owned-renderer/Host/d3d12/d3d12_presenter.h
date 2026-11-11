@@ -45,7 +45,7 @@ public:
     bool proxy() const noexcept { return proxy_context_ != nullptr; }
     IDXGISwapChain* swap_chain() const noexcept { return swap_.Get(); }
     // The frame latency wait the pacer takes before each Present.
-    void wait_frame_latency() noexcept { if (waitable_) WaitForSingleObjectEx(waitable_, 1000, TRUE); }
+    void wait_frame_latency() noexcept;
     // Runs before any resize or destroy (the pacer drains its presents).
     void set_before_resize(void (*hook)(void*), void* context) noexcept { before_resize_ = hook; before_resize_context_ = context; }
     // After Core::end_frame. Interval 0 tears where the display allows it.

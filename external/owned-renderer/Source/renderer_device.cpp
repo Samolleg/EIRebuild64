@@ -564,7 +564,8 @@ HRESULT Renderer::fail_embedded_d3d12(const char* operation,HRESULT result,const
   std::snprintf(text,sizeof(text),"Direct3D 12: %s failed (0x%08lx). %s\nRestart with Direct3D 11 selected in Config64\\rddraw.ini (renderer_backend=0), or update your graphics driver.",
    operation,static_cast<unsigned long>(result),reason&&*reason?reason:"See the engine journal for details.");
   bridge_report_event("d3d12_failed",text);
-  MessageBoxA(hwnd_,text,"EIRebuild64 - Direct3D 12",MB_OK|MB_ICONERROR);
+  // A modal dialog here parks the game thread inside a render entry point.
+  // Keep the failure latched and return it after journalling the reason.
  }
  return FAILED(result)?result:E_FAIL;
 }

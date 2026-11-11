@@ -2,8 +2,11 @@
 #include "d3d12_pipelines.h"
 
 #include <algorithm>
+#include <chrono>
 #include <fstream>
 #include <iterator>
+
+namespace remote { void host_log(const char* format, ...); }
 
 namespace d3d12 {
 
@@ -160,7 +163,12 @@ std::string Pipelines::failure(std::uint32_t id) const {
 
 void Pipelines::wait_all() {
     std::unique_lock<std::mutex> lock(mutex_);
-    work_done_.wait(lock, [this] { return outstanding_ == 0; });
+    while (!work_done_.wait_for(lock, std::chrono::seconds(20), [this] { return outstanding_ == 0; })) {
+        const auto outstanding = outstanding_;
+        lock.unlock();
+        remote::host_log("d3d12: pipeline compilation still pending after 20 s: %u requests; waiting before using or releasing PSO inputs", outstanding);
+        lock.lock();
+    }
 }
 
 bool Pipelines::idle() const {
