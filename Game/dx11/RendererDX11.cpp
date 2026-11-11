@@ -202,7 +202,7 @@ owned::FixedState CDX11::CaptureC56MaterialState()
         return renderer.read_embedded_viewport(state.viewport);
     }));
     const auto& pixel = GetConstantBuffers()->cb_ps_pixelshader.data;
-    const bool textured = bool(boundFigureTextures[0]);
+    const bool textured = bool(boundFigureTextures[0]) || boundParticleSurface != 0;
     state.stage[0][D3DTSS_COLOROP] = textured ? D3DTOP_MODULATE : D3DTOP_SELECTARG2;
     state.stage[0][D3DTSS_COLORARG1] = D3DTA_TEXTURE;
     state.stage[0][D3DTSS_COLORARG2] = D3DTA_DIFFUSE;
@@ -453,7 +453,7 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
             alphaMode == 2 ? D3DTOP_SELECTARG2 : D3DTOP_MODULATE;
         state.stage[0][D3DTSS_ALPHAARG1] = D3DTA_TEXTURE;
         state.stage[0][D3DTSS_ALPHAARG2] = D3DTA_DIFFUSE;
-        if (!boundFigureTextures[0]) {
+        if (!boundFigureTextures[0] && !boundParticleSurface) {
             state.stage[0][D3DTSS_COLOROP] = D3DTOP_SELECTARG2;
             state.stage[0][D3DTSS_ALPHAOP] = D3DTOP_SELECTARG2;
         }
@@ -465,7 +465,7 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
             state.render[D3DRENDERSTATE_DESTBLEND] = D3DBLEND_ONE;
         }
         std::shared_ptr<owned::SurfaceImage> texture;
-        hr = boundFigureTextures[0] ? OwnedRender::E1ParticleSurfaceImage(device.Get(),
+        hr = (boundFigureTextures[0] || boundParticleSurface) ? OwnedRender::E1ParticleSurfaceImage(device.Get(),
             deviceContext.Get(), boundParticleSurface, texture) : S_OK;
         if (SUCCEEDED(hr)) {
             hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
@@ -479,12 +479,7 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
             });
             // c56 uses the same device, but its shaders/targets/state differ.
             // Restore the host bindings for subsequent figure draws.
-            RefreshOwnedTargets();
-            SetRenderStates();
-            for (UINT stage = 0; stage < boundFigureTextures.size(); ++stage) {
-                ID3D11ShaderResourceView* resource = boundFigureTextures[stage].Get();
-                deviceContext->PSSetShaderResources(stage, 1, &resource);
-            }
+            RestoreHostBindings();
         }
     }
     if (SUCCEEDED(hr)) return true;
@@ -515,7 +510,7 @@ HRESULT CDX11::PrepareC74Effect(bool requireWorld, bool useTexture, owned::Fixed
         HRESULT flushed = renderer.has_pending_ui() ? renderer.flush_ui() : S_OK;
         return FAILED(flushed) ? flushed : renderer.flush_native();
     });
-    if (SUCCEEDED(hr) && useTexture && boundFigureTextures[0])
+    if (SUCCEEDED(hr) && useTexture && (boundFigureTextures[0] || boundParticleSurface))
         hr = OwnedRender::E1ParticleSurfaceImage(device.Get(), deviceContext.Get(), boundParticleSurface, texture);
     return hr;
 }
@@ -589,7 +584,7 @@ bool CDX11::SubmitC74Print(const owned::EmbeddedPrintInput& input)
         if (!ownedWorldActive || !rendererFacade || !rendererFacade->FrameActive()) hr = E_UNEXPECTED;
         else {
             state = CaptureC74EffectState();
-            if (boundFigureTextures[0]) hr = OwnedRender::E1ParticleSurfaceImage(device.Get(),
+            if (boundFigureTextures[0] || boundParticleSurface) hr = OwnedRender::E1ParticleSurfaceImage(device.Get(),
                 deviceContext.Get(), boundParticleSurface, texture);
         }
     }
@@ -907,6 +902,23 @@ void CDX11::ClearZBuffer(DWORD dwValue)
 BOOL CDX11::BindTexture(DWORD dwIndex, ID3D11ShaderResourceView *pTexture,
                           std::uint64_t surfaceId)
 {
+    bool nativeD3D12 = false;
+    if (!rendererFacade || FAILED(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        nativeD3D12 = renderer.d3d12_backend();
+        return S_OK;
+    }))) return FALSE;
+    if (nativeD3D12) {
+        // Completed CPU surfaces have an identity without a D3D11 SRV.
+        // Reject raw SRVs before changing the previously bound texture.
+        if (pTexture || dwIndex >= boundFigureTextures.size()) return FALSE;
+        // Secondary figure/wound bindings still need their owned-surface
+        // submission adapter. Do not acknowledge a texture we cannot retain.
+        if (dwIndex != 0 && surfaceId) return FALSE;
+        if (surfaceId && !OwnedRender::E1SurfaceValue(surfaceId)) return FALSE;
+        if (dwIndex == 0) boundParticleSurface = surfaceId;
+        boundFigureTextures[dwIndex].Reset();
+        return TRUE;
+    }
     if (dwIndex == 0) boundParticleSurface = pTexture ? surfaceId : 0;
     if (dwIndex < boundFigureTextures.size())
         boundFigureTextures[dwIndex] = pTexture;

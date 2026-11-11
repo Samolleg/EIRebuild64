@@ -1,3 +1,25 @@
+# X64D3D12 source particle texture bindings, stage 23 (2026-11-11)
+
+The source BindTexture stage-zero boundary now retains a completed surface ID
+when the native backend has no D3D11 SRV. Unbinding clears that ID. Raw SRVs,
+unpublished IDs and unsupported secondary native surface binds return FALSE
+before modifying the prior binding. Secondary figure/wound bindings still
+need their owned-surface adapter and are not accepted silently.
+Particle, print and combat-text source adapters recognize that ID and use
+the existing E1ParticleSurfaceImage CPU snapshot/upload cache. Material state
+retains textured modulation for CPU publications. RestoreHostBindings skips
+D3D11 target/state/SRV restoration for native passes, including the particle
+pass that previously restored those bindings inline. D3D11 retains its
+existing target/state/SRV operations. No HLSL, SDK or runtime DLLs added.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}; this stage
+changes Game/dx11/RendererDX11.cpp and Game/OwnedRender/CampSubmission.cpp.
+
+Full BRIEF remains open. Next finish source figure/secondary texture, fixed
+function and sprite boundaries and connect local input/simulation/render
+phases. These pending adapters can still prevent D3D12 startup and drawing.
+No compilation, shader compilation, tests or game run performed. Build/link,
+D3D12 startup/FG and D3D11 regression remain unverified.
+
 # X64D3D12 backend selection, stage 22 (2026-11-11)
 
 Supersedes earlier notes that renderer_backend=1 still creates D3D11.
