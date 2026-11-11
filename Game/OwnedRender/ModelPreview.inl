@@ -150,6 +150,17 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
             return true;
         },
         [&](unsigned set) {
+            if (!renderer->GetD3D()->GetDevice()) {
+                // A missing model texture must not become an untextured draw.
+                // Publish the current atlas, including private equipment edits.
+                const auto* texture = sets[set]->lpTexture;
+                auto* surface = texture ? texture->GetSurface() : nullptr;
+                if (!surface || !surface->EnsureOwnedSurfacePublished()) return false;
+                if (set == 0 && pWoundsTexture) {
+                    auto* wounds = pWoundsTexture->GetSurface();
+                    if (!wounds || !wounds->EnsureOwnedSurfacePublished()) return false;
+                }
+            }
             return renderer->BindTexture(0, sets[set]->lpTexture) &&
                 renderer->BindTexture(1, set == 0 ? pWoundsTexture : nullptr);
         },
