@@ -4,6 +4,7 @@
 #include "fsr2_upscaler.h"
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
 #include "dlss_backend.h"
+#include "embedded_d3d12.h"
 #endif
 #include "fsr2_upscaler_d3d12.h"
 #include "bloom.h"
@@ -920,6 +921,12 @@ struct CharacterPaneText; struct GlyphAtlas;
 class MaterialLibrary;
 
 class Renderer {
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+    // Declared first: the local executor outlives all renderer GPU members.
+    // Startup binds frame() only after configuration selects D3D12.
+    EmbeddedD3D12 embedded_d3d12_;
+    bool embedded_d3d12_presented_ = false;
+#endif
     friend struct ContactBlendSmokeAccess;
     friend struct LiquidSurfaceSmokeAccess;
     friend struct SceneCompositeSmokeAccess;

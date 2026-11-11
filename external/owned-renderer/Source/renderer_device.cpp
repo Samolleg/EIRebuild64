@@ -1071,7 +1071,8 @@ void Renderer::set_world_size() noexcept {
 #endif
   UINT w=0,h=0;
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
-  const bool sized=dlss_backend_.optimal(output_width_,output_height_,static_cast<DlssQuality>(dlss_mode_),w,h);
+  const bool sized=d3d12_?embedded_d3d12_.dlss_size(output_width_,output_height_,dlss_mode_,w,h):
+   dlss_backend_.optimal(output_width_,output_height_,static_cast<DlssQuality>(dlss_mode_),w,h);
 #else
   const bool sized=x64remote::dlss_render_size(output_width_,output_height_,dlss_mode_,w,h);
 #endif
@@ -1080,7 +1081,7 @@ void Renderer::set_world_size() noexcept {
   }
   char reason[96];std::snprintf(reason,sizeof(reason),"DLSS has no render size for %ux%u",output_width_,output_height_);
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
-  const char* error=dlss_backend_.last_error();
+  const char* error=d3d12_?reason:dlss_backend_.last_error();
   set_dlss_unavailable_reason(error[0]?error:reason);
   bridge_report_event("dlss_frame_refused",dlss_unavailable_reason());
   width_=output_width_;height_=output_height_;return;
@@ -3206,6 +3207,7 @@ void Renderer::release() {
  world_map_preview_reasons_.clear();
  scene_thread_.reset();
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ embedded_d3d12_.stop_ngx(); // joined frame owner; executor/device still alive
  dlss_backend_.shutdown(); // no remaining frame calls; before any device resources are released
 #endif
  write_harness_path_rows(); // frame accounting rows still buffered

@@ -1394,7 +1394,7 @@ void Renderer::update_status_notice(const char* reset_notice){
 // executor. The UI, cursor, F10 overlay and present run here; the world,
 // HUD frames, debug views, gamma, the harness and the profiler are not on
 // this backend yet and are omitted by name (F11 lists them).
-#ifndef EID3D11_EMBEDDED
+#if !defined(EID3D11_SHADER_EMBED)
 HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  struct PlanFrameEnd{FramePlan& plan;~PlanFrameEnd(){plan.begin_frame();}} plan_frame_end{frame_plan_};
  const std::int64_t present_tick=perf_now();
@@ -1414,13 +1414,24 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  // availability is read once from the host; a mode that failed stays off for
  // the session. The F10 note shows the selected mode's reason.
  if(!fg_caps_checked_){fg_caps_checked_=true;x64remote::DlssgCaps caps{};
-  if(!x64remote::dlssg_caps(caps)){caps.reason[sizeof(caps.reason)-1]=0;std::snprintf(fg_dlssg_unavailable_,sizeof(fg_dlssg_unavailable_),"%s",caps.reason[0]?caps.reason:"not available");}}
+#ifdef EID3D11_EMBEDDED
+  const bool available=embedded_d3d12_.fg_caps(caps);
+#else
+  const bool available=x64remote::dlssg_caps(caps);
+#endif
+  if(!available){caps.reason[sizeof(caps.reason)-1]=0;std::snprintf(fg_dlssg_unavailable_,sizeof(fg_dlssg_unavailable_),"%s",caps.reason[0]?caps.reason:"not available");}}
  {const int selected=std::clamp(configured_integer(debug_overlay_.config(),"frame_generation",0),0,2);
   for(int mode=1;mode<=2;++mode)if(const char* failure=d3d12_->frame_generation_failure(mode);failure&&!fg_failed_[mode][0])frame_generation_off(mode,failure);
   const char* reason=selected==0?nullptr:fg_failed_[selected][0]?fg_failed_[selected]:selected==1&&fg_dlssg_unavailable_[0]?fg_dlssg_unavailable_:nullptr;
   if(selected!=fg_reason_mode_||reason){fg_reason_mode_=selected;set_frame_generation_unavailable_reason(reason);}
   frame_generation_mode_=reason?0:selected;}
- if(frame_generation_mode_!=1&&fg_previous_generated_){fg_previous_generated_=false;x64remote::dlssg_release();}
+ if(frame_generation_mode_!=1&&fg_previous_generated_){fg_previous_generated_=false;
+#ifdef EID3D11_EMBEDDED
+  embedded_d3d12_.fg_release();
+#else
+  x64remote::dlssg_release();
+#endif
+ }
  if(frame_generation_mode_!=2)fsr_prepared_=false;
  fg_frame_image_=configured_boolean(debug_overlay_.config(),"fg_frame_image",false)||frame_generation_mode_;
  d3d12_->set_frame_image(fg_frame_image_);
@@ -1579,6 +1590,9 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  profiler_.end_frame(presentation.sync_interval,0);
  // The final presentation owner applies the output cap (both images with FG).
  hr=d3d12_->present(presentation.sync_interval,frame_limit);
+#ifdef EID3D11_EMBEDDED
+ if(SUCCEEDED(hr))embedded_d3d12_presented_=true;
+#endif
  profiler_.present_return(output_width_,output_height_,presentation.sync_interval,0,hr);
  HRESULT trim_hr=S_OK;
  if(SUCCEEDED(hr)){
@@ -1600,7 +1614,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  return FAILED(trim_hr)?trim_hr:hr;
 }
 
-#endif // !EID3D11_EMBEDDED
+#endif // !EID3D11_SHADER_EMBED
 HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
 #ifndef EID3D11_EMBEDDED
  if(d3d12_)return present_frame_d3d12(inputs);

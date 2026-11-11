@@ -1,3 +1,32 @@
+# X64D3D12 local renderer SR/FG/present bodies, stage 7 (2026-11-11)
+
+Incomplete runtime integration: renderer_backend=1 still creates D3D11.
+Renderer now contains the local EmbeddedD3D12 owner, declared before GPU
+members so its executor outlives their destruction. release() stops local
+NGX after the scene thread joins, before releasing renderer resources.
+D3D11 retains its existing separate NGX owner and optimal-size calls.
+
+The author's composite_world_d3d12, upscaler-mode changes, DLSS evaluation,
+DLSS-G/FSR FG preparation, HUD-less capture and present_frame_d3d12 bodies
+are now included in the embedded runtime translation units. The D3D12 NGX
+calls in these bodies and DLSS render-size selection go directly to the
+local owner, using the author's value descriptors; no Host transport or
+remote stubs are called. Embedded first-Present deferral records a local
+successful executor present, not the absent Host's presented flag. Embedded
+SR/FG diagnostics refer to the engine journal. HLSL and rendering algorithms
+are unchanged. The shader generator still excludes runtime bodies.
+
+This does not activate those bodies: embedded ensure(), composite_world()
+and present_frame() still retain the old startup/dispatch guards. Next bind
+configuration before device creation, initialize the owner and overlay,
+finish resize/resource retirement for repeated release/ensure, wire the
+local simulation/render boundaries and enable dispatch with explicit
+startup/device-removal errors. Do not set core_host_ blindly: source frame
+and overlay/input ownership differ from Host/core_host.cpp. No claim of a
+working D3D12 or frame generation backend is made; task remains open.
+No additional libraries or DLLs beyond stage 2. No compilation, shader
+compilation, tests or game run; build/link and GPU behavior are unverified.
+
 # X64D3D12 local simulation/render boundaries, stage 6 (2026-11-11)
 
 Incomplete runtime integration: renderer_backend=1 still creates D3D11.
