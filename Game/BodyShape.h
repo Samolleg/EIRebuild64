@@ -1,32 +1,17 @@
 #pragma once
-#include "BodyShapeResolver.h"
+#include <array>
+#include <cmath>
 
-// Visual CPU data only: never use for FIG/BV/navigation/gameplay.
+// Capture CUnit's five visual inputs. The SKN file owns their shape resolver.
 namespace BodyShape {
-using Input = NalaMorphs::Input;
-using Values = NalaMorphs::Values;
-using Status = NalaMorphs::Status;
-inline bool Resolve(const Input& input, Values& values, Status& status)
-{
-    return NalaMorphs::Resolve(input, values, status);
-}
-inline double Scale(const Values& values)
-{
-    return .9309906028352594 * values[EditorSchema::height];
-}
+struct Input {double strength=25,dexterity=25;std::array<double,3> db{.3,.3,.85};};
 struct State {
     Input input{};
-    Values controls{};
-    Status status{};
-    double scale = 0;
-    bool valid = false;
-    void Update(const Input& nextInput)
-    {
-        input = nextInput;
-        Values next{};
-        valid = BodyShape::Resolve(input, next, status);
-        controls = valid ? next : Values{};
-        scale = valid ? Scale(controls) : 0;
+    bool valid=false;
+    void Update(const Input& nextInput) {
+        input=nextInput;
+        valid=std::isfinite(input.strength) && std::isfinite(input.dexterity);
+        for(double value:input.db)valid=valid && std::isfinite(value);
     }
 };
 }

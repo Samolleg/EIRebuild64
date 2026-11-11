@@ -10,10 +10,7 @@
 #include "figure_service_nodes.h"
 #include "skn_runtime.h"
 #include "nala_shape.h"
-#include "nala/UnityBodySize.h"
-#include "nala/NalaAttachments.h"
-#include "nala/UnityHandsData.h"
-#include "../../../tools/nala-to-skn/nala/UnityBodyAppearance.h"
+#include "nala_shape_evaluator.h"
 #include <sstream>
 #include "world_scene_algorithms.h"
 
@@ -1154,13 +1151,21 @@ std::vector<std::array<float,16>> nala_skin_palette(const RetainedVisualSample& 
  if(std::find(found.begin(),found.end(),false)!=found.end())throw std::runtime_error("Nala LNK driver missing");
  const auto& rig=*asset.asset.nala_rig;
  auto world=Retarget(rig,game);LimitRetarget(rig,world);Control(rig,world);
+ const auto& attachment_data=*asset.asset.nala_attachments;
  const auto& p=asset.nala_profile;
- const UnityBodyAppearance::Profile profile{p[0],p[1],p[2],p[3],p[4],p[5],p[6]};
- if(!asset.shape_key.empty())UnityBodyAppearance::ApplyScales(profile,world);
- const double body_scale=asset.shape_key.empty()?UnityBodySize::Scale:profile.scale;
+
+ if(!asset.shape_key.empty())skn::nala_shape::apply_scales(*asset.asset.nala_shape,p,world);
+ const double body_scale=asset.shape_key.empty()?attachment_data.scale:p[6];
  // Apply the accepted body scale and sole alignment at bone level only.
- auto scaled=world;std::vector<V> no_vertices;M root;
- if(!UnityBodySize::Apply(game,no_vertices,scaled,root,body_scale))throw std::runtime_error("Nala sole alignment rejected");
+ M root=game[0];V old_center{},new_center{};
+ for(unsigned side=0;side<2;++side) {
+  old_center=Add(old_center,Point(game[13+side],attachment_data.game_soles[side]));
+  M foot=world[attachment_data.feet[side]];foot.t=Scale(foot.t,body_scale);
+  new_center=Add(new_center,Point(root,Point(foot,Scale(attachment_data.source_soles[side],body_scale))));
+ }
+ const V shift=Scale(Sub(old_center,new_center),.5);
+ if(!std::isfinite(Dot(shift,shift)) || Dot(shift,shift)>.25)throw std::runtime_error("Nala sole alignment rejected");
+ root.t=Add(root.t,shift);
  std::vector<std::array<float,16>> result;result.reserve(rig.bindInverse.size());
  for(unsigned i=0;i<rig.bindInverse.size();++i){
   M skin=Product(world[rig.bindNode[i]],rig.bindInverse[i]);
@@ -1178,10 +1183,10 @@ std::vector<std::array<float,16>> nala_skin_palette(const RetainedVisualSample& 
   M attachment=Rotation({pose[node].rotation[0],pose[node].rotation[1],pose[node].rotation[2],pose[node].rotation[3]});
   attachment.t={pose[node].translation[0],pose[node].translation[1],pose[node].translation[2]};
   const auto& name=sample.assembly->skeleton->nodes[node].name;
-  const auto* weapon=NalaAttachments::Assembly(name);
+  const auto* weapon=attachment_data.assembly(name);
   int driver=-1;
   if(name.rfind("hr.",0)==0)driver=2;
-  else if(weapon)driver=weapon->role==NalaAttachments::Role::Shield?5:int(7+weapon->side);
+  else if(weapon)driver=weapon->role==4?5:int(7+weapon->side);
   if(driver>=0 && drivers[unsigned(driver)]!=UINT_MAX){
    const unsigned bone=drivers[unsigned(driver)];
    M desired=Proper(world[bone]);desired.t=Scale(world[bone].t,body_scale);
@@ -1191,10 +1196,10 @@ std::vector<std::array<float,16>> nala_skin_palette(const RetainedVisualSample& 
    attachment=Product(Product(desired,Product(Inverse(restTarget),restSource)),
                       Product(Inverse(game[unsigned(driver)]),attachment));
    // The source rod grip shifts perpendicular to its shaft into the palm.
-   const auto* holder=NalaAttachments::Find(name);
-   if(holder && holder->role==NalaAttachments::Role::Rod){
-    const auto& hand=UnityHandsData::Sides[holder->side];
-    const V centre=Scale(Add(hand.palm,Add(Scale(hand.forward,.020),Scale(hand.normal,.012))),body_scale);
+   const auto* holder=attachment_data.find(name);
+   if(holder && holder->role==1){
+    const unsigned hand=holder->side;
+    const V centre=Scale(Add(attachment_data.palm[hand],Add(Scale(attachment_data.forward[hand],attachment_data.palm_forward),Scale(attachment_data.normal[hand],attachment_data.palm_normal))),body_scale);
     const V target=Point(desired,centre),point=Point(attachment,holder->point);
     const V axis=Unit(Rotate(attachment,holder->axis));
     attachment.t=Add(attachment.t,Sub(Sub(target,point),Scale(axis,Dot(Sub(target,point),axis))));
@@ -1271,7 +1276,7 @@ bool skn_pose_bounds(const RetainedVisualSample& sample,NativeWorldBounds& bound
    for(unsigned row=0;row<3;++row)for(unsigned col=0;col<3;++col)placement[row*4+col]*=sample.assembly->scale[col];
   }else if(!visual_node_world_matrix(sample.pose,VisualNodeSample{},sample.assembly->scale,placement))return false;
   for(const auto& part:sample.assembly->parts){
-   if(!NalaAttachments::Retained(part.name) || part.explicitly_hidden || !part.source_available ||
+   if(!(prepared.nala_shape_asset && prepared.nala_shape_asset->asset.nala_attachments->retained(part.name)) || part.explicitly_hidden || !part.source_available ||
       !part.geometry || part.geometry->bounds.empty())continue;
    const auto box=part.geometry->shape_count==1?part.geometry->bounds.front():
        selected_bounds(*part.geometry,retained_visual_shape(sample));
@@ -3210,7 +3215,7 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
         if (++target.record_revision==0) ++target.record_revision;
         view.world.record_revision=target.record_revision;
     }
-    if(sample.values.unit && NalaAttachments::Retained(part.name) && !prepared.gpu_pose.skin_palette.empty()) {
+    if(sample.values.unit && (prepared.nala_shape_asset && prepared.nala_shape_asset->asset.nala_attachments->retained(part.name)) && !prepared.gpu_pose.skin_palette.empty()) {
         view.world.pose_node=static_cast<unsigned>(prepared.gpu_pose.skin_palette.size()+part.skeleton_node);
         // palette contains skin slots followed by one mount per skeleton node.
         // The node range begins at base nodes + skin slots.

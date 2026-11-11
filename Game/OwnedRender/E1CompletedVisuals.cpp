@@ -95,7 +95,6 @@ void E1CompleteNalaInput(CUnit* unit,owned::nala::Input& output) {
             if(!shape){unit->BindNalaSknBody();shape=unit->GetBodyShape();}
             input.valid=shape&&shape->valid;
             if(input.valid){
-                input.controls=shape->controls;
                 const auto& source=shape->input;
                 input.shape_inputs={source.db[0],source.db[1],source.db[2],source.strength,source.dexterity};
             }

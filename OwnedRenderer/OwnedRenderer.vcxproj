@@ -51,7 +51,7 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\neighbour_maps.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\retained_static_scene.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\retained_static_submission.cpp" />
-    <ClCompile Include="$(OwnedRendererRoot)Source\nala_shape.cpp"><AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions></ClCompile>
+    <ClCompile Include="$(OwnedRendererRoot)Source\nala_shape.cpp" />
     <ClInclude Include="$(OwnedRendererRoot)Source\nala_shape.h" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\cursor_image.cpp" />

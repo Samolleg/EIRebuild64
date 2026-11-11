@@ -10,7 +10,7 @@ bool build_skn_groups(const RetainedVisualSample &sample,
   // SKN owns absent variants too: never expose an unmatched FIG draw.
   prepared.merged_part_group.assign(sample.assembly->parts.size(), 0);
   if(data.nala_rig)for(unsigned i=0;i<sample.assembly->parts.size();++i)
-    if(NalaAttachments::Retained(sample.assembly->parts[i].name))prepared.merged_part_group[i]=-1;
+    if(data.nala_attachments->retained(sample.assembly->parts[i].name))prepared.merged_part_group[i]=-1;
   std::vector<unsigned> nodes(data.joints.size(), UINT_MAX);
   for (unsigned j = 0; j < nodes.size(); ++j)
     for (unsigned k = 0; k < sample.assembly->skeleton->nodes.size(); ++k)

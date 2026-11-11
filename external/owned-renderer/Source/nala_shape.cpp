@@ -1,11 +1,7 @@
 #include "nala_shape.h"
 #include "retained_static_submission.h"
 #include "skn_runtime.h"
-#include "../../../tools/nala-to-skn/nala/UnityCompleteData.h"
-#include "../../../tools/nala-to-skn/nala/UnityBodyAppearance.h"
-#include "../../../tools/nala-to-skn/nala/head105_v1/NalaFaceSourceData.h"
-#include "../../../tools/nala-to-skn/nala/head105_v1/NalaUpperArcIdentity.h"
-#include "../../../tools/nala-to-skn/nala/morphs_head105_v1/NalaBodyShape.h"
+#include "nala_shape_evaluator.h"
 #include <algorithm>
 #include <atomic>
 #include <cfloat>
@@ -14,7 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 
-// Authoring tables match nala-to-skn and are compiled only in this unit.
+// The immutable model program is decoded from SKN section 8.
 namespace owned {
 std::shared_ptr<const skn::RuntimeAsset> unit_skn_asset(
     const RetainedVisualSample& sample, bool& present) {
@@ -41,19 +37,18 @@ std::shared_ptr<const skn::RuntimeAsset> unit_skn_asset(
         const auto start = std::chrono::steady_clock::now();
         auto base = skn::select(sample.assembly->skeleton->visual_reference, present);
         if (!base || !base->asset.nala_rig) throw std::runtime_error("Nala SKN rig missing");
-        static const UnityBody::Data source = UnityBody::CompleteData();
-        auto shaped = std::make_shared<UnityBody::Data>();
-        UnityBodyAppearance::Profile profile;
-        if (!NalaBodyShape::Build(source, input.controls,
-            std::vector<double>(EditorSchema::BoneCount * 9), *shaped, profile,
-            NalaUpperArcIdentity::Apply)) throw std::runtime_error("Nala bind shape rejected");
+        if(!base->asset.nala_shape)throw std::runtime_error("Nala shape section 8 missing");
+        const auto& program=*base->asset.nala_shape;
+        const auto controls=skn::nala_shape::resolve(program,input.shape_inputs);
+        auto shaped=std::make_shared<UnityBody::Data>();
+        skn::nala_shape::build(program,controls,*shaped);
         auto result = std::make_shared<skn::RuntimeAsset>(*base);
         auto& data = result->asset;
         const auto count = shaped->vertices.size();
-        if (data.vertices.size() != count + NalaLidContact::RenderCount ||
+        if (data.vertices.size() != count + data.nala_contacts.size() ||
             data.joints.size() != shaped->bindInverse.size() ||
-            data.nala_contacts.size() != NalaLidContact::RenderCount)
-            throw std::runtime_error("Nala compiled shape/SKN topology mismatch");
+            data.nala_contacts.empty())
+            throw std::runtime_error("Nala section 8/SKN topology mismatch");
         auto set_vertex = [](skn::Vertex& vertex, UnityBody::V p, UnityBody::V n) {
             using namespace UnityBody;
             if (!std::isfinite(Dot(p,p)) || !std::isfinite(Dot(n,n)))
@@ -92,7 +87,8 @@ std::shared_ptr<const skn::RuntimeAsset> unit_skn_asset(
                     lod.maximum[axis]=(std::max)(lod.maximum[axis],data.vertices[i].position[axis]);
                 }
         }
-        result->nala_profile = {profile.fat,profile.legs,profile.arms,profile.waist,profile.depth,profile.breasts,profile.scale};
+        using namespace BodyShape::EditorSchema;
+        result->nala_profile = {controls[fat],controls[legs],controls[arms],controls[waist],controls[waistDepth],controls[breasts],program.scale*controls[height]};
         result->joint_radius.assign(data.joints.size(), -1);
         for (const auto& vertex : data.vertices) for (unsigned k=0; k<4; ++k) if (vertex.weights[k]) {
             const float* p=vertex.position;
