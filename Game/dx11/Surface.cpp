@@ -1080,8 +1080,8 @@ void CDXGISurface::UpdateTexture(UINT subresource_index, D3D11_BOX *region,
         if (blockBytes) {
             if (region || hDc || !srd || !srd->pSysMem || subresource_index >= cpuDesc.MipLevels)
                 IfFailedThrowHR(E_INVALIDARG);
-            const UINT w = (std::max)(1u, dwSurfaceWidth >> subresource_index);
-            const UINT h = (std::max)(1u, dwSurfaceHeight >> subresource_index);
+            const UINT w = (std::max<DWORD>)(1, dwSurfaceWidth >> subresource_index);
+            const UINT h = (std::max<DWORD>)(1, dwSurfaceHeight >> subresource_index);
             const size_t pitch = size_t((w + 3) / 4) * blockBytes, rows = (h + 3) / 4;
             if (srd->SysMemPitch < pitch) IfFailedThrowHR(E_INVALIDARG);
             std::vector<BYTE> pixels(pitch * rows);

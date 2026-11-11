@@ -312,10 +312,7 @@ int CTexture::CopyToSurface(CDXGISurface *pDXDDS, SMMPFileHeader *pHdr, DWORD dw
             owned::TextureAlphaPixels alpha;
             alpha.data = static_cast<const std::uint8_t*>(srd.pSysMem);
             alpha.width = dwNewSizeX; alpha.height = dwNewSizeY; alpha.pitch = srd.SysMemPitch;
-            const auto alphaFormat = m_texFormat == DXGI_FORMAT_BC1_UNORM ||
-                m_texFormat == DXGI_FORMAT_BC2_UNORM || m_texFormat == DXGI_FORMAT_BC3_UNORM
-                ? m_texFormat : destination.Format;
-            switch (alphaFormat) {
+            switch (destination.Format) {
             case DXGI_FORMAT_BC1_UNORM: alpha.format = owned::TextureAlphaFormat::bc1; break;
             case DXGI_FORMAT_BC2_UNORM: alpha.format = owned::TextureAlphaFormat::bc2; break;
             case DXGI_FORMAT_BC3_UNORM: alpha.format = owned::TextureAlphaFormat::bc3; break;
