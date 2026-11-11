@@ -1,4 +1,5 @@
 #include "render_profiler.h"
+#include "../Host/d3d12/d3d12_fsr_fg.h"
 #include "debug_output_paths.h"
 #include "debug_overlay.h"
 #include "camp_inventory.h"
@@ -445,6 +446,7 @@ void RenderProfiler::shutdown() {
     journal_enabled_ = false;
     journal_passes_.clear();
     journal_totals_.clear();
+    journal_dlssg_ = {}; journal_fsr_prepare_ = {};
     journal_invalid_ = 0;
     frame_active_ = false;
     pass_active_ = false;
@@ -1351,13 +1353,15 @@ bool RenderProfiler::resolve(FrameSlot& slot, bool wait) {
         for (const auto& pass : frame_passes)
             journal_passes_[pass.first].ms.push_back(pass.second);
         journal_totals_.push_back(snapshot.frame_gpu_ms);
+        journal_dlssg_.add(frame_passes["fg_dlssg"]);
+        journal_fsr_prepare_.add(frame_passes["fg_fsr_prepare"]);
     } else if (journal_enabled_) ++journal_invalid_;
     has_latest_snapshot_ = true;
     slot.pending = false;
     return true;
 }
 
-std::string RenderProfiler::take_gpu_pass_report() {
+std::string RenderProfiler::take_gpu_pass_report(std::string* frame_waits) {
     const auto percentile = [](std::vector<double>& values, bool p95) {
         if (values.empty()) return -1.0;
         std::sort(values.begin(), values.end());
@@ -1386,6 +1390,17 @@ std::string RenderProfiler::take_gpu_pass_report() {
         result += text;
     }
     result += "]";
+    if (frame_waits) {
+        std::snprintf(text, sizeof(text), "gpu_scope=resolved_since_report gpu_n=%zu gpu_invalid_n=%llu gpu_sum_ms_median=%.3f gpu_sum_ms_p95=%.3f",
+            journal_totals_.size(), static_cast<unsigned long long>(journal_invalid_),
+            percentile(journal_totals_, false), percentile(journal_totals_, true));
+        *frame_waits = text;
+        journal_dlssg_.append(*frame_waits, "gpu_dlssg");
+        journal_fsr_prepare_.append(*frame_waits, "gpu_fsr_prepare");
+        *frame_waits += " " + d3d12::FsrFrameGeneration::take_gpu_report();
+    } else {
+        journal_dlssg_ = {}; journal_fsr_prepare_ = {};
+    }
     journal_passes_.clear(); journal_totals_.clear(); journal_invalid_ = 0;
     return result;
 }

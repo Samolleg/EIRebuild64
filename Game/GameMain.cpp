@@ -681,6 +681,7 @@ static void WaitForIdleWork()
     due.QuadPart = -static_cast<LONGLONG>(remaining) * 10000;
     const bool armed = timer.handle && SetWaitableTimer(timer.handle, &due, 0, nullptr, nullptr, FALSE);
     CorePerf::Scope coreWait(CorePerf::IdleWait);
+    const owned::frame_waits::Scope idleWait(owned::frame_waits::idle);
     // INPUTAVAILABLE also wakes for input already inspected by PeekMessage;
     // no message is removed or dispatched here. The normal pump retains order.
     MsgWaitForMultipleObjectsEx(armed ? 1 : 0, armed ? &timer.handle : nullptr,
@@ -1372,8 +1373,10 @@ void NGame::DrawFrame(bool bFlip, bool bDraw2D)
 
     auto pDX11 = theRenderer.GetD3D();
     CorePerf::Scope coreLock(CorePerf::LockFrameWait);
+    owned::frame_waits::Scope lockWait(owned::frame_waits::lock_frame);
     const auto renderAccess = pDX11->GetOwnedRenderer().LockFrame();
     coreLock.Finish();
+    lockWait.finish();
 
     if (theRenderer.BeginDrawFrame())
     {

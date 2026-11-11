@@ -1,4 +1,5 @@
 #pragma once
+#include "frame_waits.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -47,6 +48,7 @@ public:
             return;
         }
         if (timing) timing->requested = deadline - now;
+        const frame_waits::Scope wait(frame_waits::limiter);
         sleep_until(deadline, report);
         if (timing) timing->actual = counter() - now;
         last_ = deadline;

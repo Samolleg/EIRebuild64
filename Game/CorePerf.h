@@ -1,4 +1,5 @@
 #pragma once
+#include "../external/owned-renderer/Source/frame_waits.h"
 #include <windows.h>
 #include <cstdint>
 #include <cstdio>
@@ -371,8 +372,10 @@ inline void Flush() noexcept {
 class Frame {
     State* state = Main();
     Scope timing{IdleFrame};
+    bool waitOwner = false;
 public:
     Frame() noexcept { if (state) {
+        waitOwner = owned::frame_waits::begin();
         state->frameStarted = Now(); state->frameDraw = 0; ++state->frameNumber;
         state->detailCount = state->detailDepth = 0; state->detailOverflow = false;
         for (auto& detail : state->frameDetails) detail = {};
@@ -381,6 +384,7 @@ public:
     ~Frame() noexcept {
         timing.Finish();
         if (state) {
+            if (waitOwner) owned::frame_waits::end();
             state->scopes[NavigationFrame].Add(state->navigationFrame);
             ++state->histogram[state->frameTicks < 3 ? state->frameTicks : 3];
             if (!state->drew3D) ++state->emptyFrames;

@@ -962,6 +962,7 @@ void CDX11::EndFrame(bool present)
     }));
     const HRESULT presented = rendererFacade->EndFrame();
     frameTiming.End(SUCCEEDED(presented));
+    if (SUCCEEDED(presented)) owned::frame_waits::frame.presented = true;
     FrameDiagnostics::Presented(presented);
     if (SUCCEEDED(presented) && (++frameSerial % 120u) == 0) {
         const auto sample = frameTiming.Read();
@@ -975,9 +976,13 @@ void CDX11::EndFrame(bool present)
     }
     const ULONGLONG now = GetTickCount64();
     if (now - lastGpuPassReport >= 5000) {
-        std::string passes;
+        std::string passes, gpuWaits;
+        bool fgActive = false, sceneThread = false;
+        const std::string cpuWaits = owned::frame_waits::take_cpu_report();
         rendererFacade->Visit([&](owned::Renderer& renderer) {
-            passes = renderer.take_gpu_pass_report();
+            passes = renderer.take_gpu_pass_report(&gpuWaits);
+            fgActive = renderer.frame_generation_stats().active;
+            sceneThread = renderer.scene_mode();
             return S_OK;
         });
         const auto sample = frameTiming.Read();
@@ -985,6 +990,9 @@ void CDX11::EndFrame(bool present)
             "backend=%s window_ms=%llu counters=window_totals pass_samples=frames_with_pass frame_timing_scope=tail240 frame_timing_gpu_ms_median=%.3f frame_timing_gpu_ms_p95=%.3f frame_timing_gpu_n=%u %s",
             D3D12Selected() ? "d3d12" : "d3d11", now - lastGpuPassReport,
             sample.gpu.median, sample.gpu.p95, sample.gpu.count, passes.c_str());
+        GameJournal::Event("RENDER", "frame_waits",
+            "backend=%s fg_active_at_report=%u scene_thread_at_report=%u window_ms=%llu %s %s", D3D12Selected() ? "d3d12" : "d3d11", unsigned(fgActive), unsigned(sceneThread),
+            now - lastGpuPassReport, cpuWaits.c_str(), gpuWaits.c_str());
         lastGpuPassReport = now;
     }
     IfFailedThrowHR(presented);

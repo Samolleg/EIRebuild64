@@ -1,4 +1,5 @@
 // Frame generation pacer; see d3d12_pacer.h.
+#include "frame_waits.h"
 #include "d3d12_pacer.h"
 
 #include "d3d12_presenter.h"
@@ -83,6 +84,7 @@ void Pacer::submit(Presenter& presenter, ID3D12Resource* generated, ID3D12Resour
                    std::int64_t game_start, std::int64_t host_taken, UINT sync_interval, int frame_limit) noexcept {
     LARGE_INTEGER called{};
     QueryPerformanceCounter(&called);  // before the back-pressure wait: the host's frame is recorded
+    const owned::frame_waits::Scope wait(owned::frame_waits::pacer);
     std::unique_lock<std::mutex> lock(mutex_);
     while (!idle_.wait_for(lock, std::chrono::seconds(5), [this] { return !pending_ && !busy_; })) {
         lock.unlock();
@@ -97,6 +99,7 @@ void Pacer::submit(Presenter& presenter, ID3D12Resource* generated, ID3D12Resour
 
 void Pacer::drain() noexcept {
     {
+        const owned::frame_waits::Scope wait(owned::frame_waits::pacer);
         std::unique_lock<std::mutex> lock(mutex_);
         while (!idle_.wait_for(lock, std::chrono::seconds(5), [this] { return !pending_ && !busy_; })) {
             lock.unlock();
@@ -109,7 +112,10 @@ void Pacer::drain() noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
         value = value_;
     }
-    if (value) wait_value(value);
+    if (value) {
+        const owned::frame_waits::Scope wait(owned::frame_waits::pacer);
+        wait_value(value);
+    }
 }
 
 void Pacer::wait_slot(unsigned slot) noexcept {
@@ -118,7 +124,10 @@ void Pacer::wait_slot(unsigned slot) noexcept {
         std::lock_guard<std::mutex> lock(mutex_);
         value = slot_values_[slot % kSlots];
     }
-    if (value) wait_value(value);
+    if (value) {
+        const owned::frame_waits::Scope wait(owned::frame_waits::pacer);
+        wait_value(value);
+    }
 }
 
 Pacer::Stats Pacer::stats() const noexcept {

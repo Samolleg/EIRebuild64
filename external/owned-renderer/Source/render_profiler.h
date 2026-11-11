@@ -1,4 +1,5 @@
 #pragma once
+#include "frame_waits.h"
 #include <map>
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -254,7 +255,7 @@ public:
     // Consumes completed timestamp results since the previous report.
     void enable_gpu_journal() noexcept { journal_enabled_ = true; }
     bool gpu_journal_enabled() const noexcept { return journal_enabled_; }
-    std::string take_gpu_pass_report();
+    std::string take_gpu_pass_report(std::string* frame_waits = nullptr);
     bool frame_active() const { return frame_active_; }
     bool pass_active() const { return pass_active_; }
     bool enabled() const { return enabled_; }
@@ -273,6 +274,7 @@ private:
     bool journal_enabled_ = false;
     std::map<std::string, JournalPass> journal_passes_;
     std::vector<double> journal_totals_;
+    frame_waits::Distribution journal_dlssg_, journal_fsr_prepare_;
     std::uint64_t journal_invalid_ = 0;
     static constexpr UINT kBufferedFrames = 6;
 

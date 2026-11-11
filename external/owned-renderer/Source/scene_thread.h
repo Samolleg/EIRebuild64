@@ -31,6 +31,7 @@
 #include <utility>
 #include "stall_watchdog.h"
 #include "frame_accounting.h"
+#include "frame_waits.h"
 
 namespace owned {
 
@@ -173,6 +174,7 @@ private:
                     waiting_ = true;
                     {
                         const frame_acct::Scope idle(frame_acct::scene_idle);
+                        const frame_waits::Scope inputWait(frame_waits::idle);
                         wake_.wait(lock, [this] { return stop_ || !queue_.empty(); });
                     }
                     waiting_ = false;
@@ -189,12 +191,15 @@ private:
             // pipeline compiles at a menu load (seconds, and on the game
             // thread never watched), and each such report wrote a 1 GB dump.
             {
+                if (!frame_waits::frame.active) frame_waits::begin();
+                const frame_waits::Scope record(frame_waits::record);
                 const frame_acct::Scope running(frame_acct::scene_command);
                 command->run();
             }
             const bool present = command->present;
             delete command;
             if (present) {
+                frame_waits::end_render();
                 std::lock_guard<std::mutex> lock(mutex_);
                 if (presents_pending_) --presents_pending_;
                 done_.notify_all();

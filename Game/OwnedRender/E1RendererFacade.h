@@ -1,4 +1,5 @@
 #pragma once
+#include "../../external/owned-renderer/Source/frame_waits.h"
 
 #pragma push_macro("min")
 #pragma push_macro("max")
@@ -68,6 +69,7 @@ public:
         if (!initialized) return E_UNEXPECTED;
         if (frameActive) return DXGI_ERROR_INVALID_CALL;
         try {
+            const owned::frame_waits::Scope record(owned::frame_waits::record);
             renderer.begin_scene();
             frameActive = true;
             return S_OK;
@@ -80,6 +82,7 @@ public:
         if (!initialized || !frameActive) return E_UNEXPECTED;
         frameActive = false;
         try {
+            const owned::frame_waits::Scope record(owned::frame_waits::record);
             renderer.end_scene();
             return renderer.present();
         } catch (...) {
@@ -93,6 +96,7 @@ public:
         if (!initialized || !frameActive) return E_UNEXPECTED;
         frameActive = false;
         try {
+            const owned::frame_waits::Scope record(owned::frame_waits::record);
             renderer.end_scene();
             return S_OK;
         } catch (...) {
@@ -110,6 +114,7 @@ public:
     HRESULT Visit(Visitor&& visitor) {
         if (!initialized) return E_UNEXPECTED;
         try {
+            const owned::frame_waits::Scope record(owned::frame_waits::record);
             return visitor(renderer);
         } catch (...) {
             return E_FAIL;

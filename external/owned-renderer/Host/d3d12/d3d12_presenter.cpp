@@ -1,4 +1,5 @@
 // Flip-model presenter in a child window; see d3d12_presenter.h.
+#include "frame_waits.h"
 #include "d3d12_presenter.h"
 
 #include "d3d12_fidelityfx_runtime.h"
@@ -242,6 +243,7 @@ bool Presenter::resize(Core& core, UINT width, UINT height, std::string& reason)
 
 void Presenter::wait_frame_latency() noexcept {
     if (!waitable_) return;
+    const owned::frame_waits::Scope wait(owned::frame_waits::swapchain);
     const DWORD waited = WaitForSingleObjectEx(waitable_, 1000, TRUE);
     if (waited != WAIT_OBJECT_0 && waited != WAIT_IO_COMPLETION)
         remote::host_log("d3d12: swap chain frame latency wait failed: wait=%lu error=%lu", waited, GetLastError());
@@ -280,6 +282,7 @@ Presenter::State Presenter::prepare(Core& core, std::string& reason, bool wait_l
 }
 
 HRESULT Presenter::present(UINT sync_interval) noexcept {
+    const owned::frame_waits::Scope wait(owned::frame_waits::present);
     return swap_->Present(sync_interval, sync_interval == 0 && tearing_ ? DXGI_PRESENT_ALLOW_TEARING : 0);
 }
 

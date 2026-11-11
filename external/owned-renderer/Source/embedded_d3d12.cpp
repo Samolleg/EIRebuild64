@@ -1,4 +1,5 @@
 #include "embedded_d3d12.h"
+#include "frame_waits.h"
 #include "../Host/dlss.h"
 #include "../Host/reflex.h"
 #include "engine_bridge.h"
@@ -99,7 +100,7 @@ HRESULT EmbeddedD3D12::begin_simulation(int reflex_mode) noexcept {
     if (state_->phase == State::Phase::simulation) return S_OK;
     // Author's Sleep-before-game-release boundary, now before local input.
     reflex::configure(state_->executor->device(), reflex_mode);
-    reflex::sleep();
+    { const frame_waits::Scope wait(frame_waits::reflex); reflex::sleep(); }
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
     state_->simulation_start = now.QuadPart;
