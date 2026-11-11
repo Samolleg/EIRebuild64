@@ -729,6 +729,73 @@ HRESULT Renderer::read_embedded_viewport(D3DVIEWPORT7& viewport){
  return S_OK;
 }
 
+void Renderer::capture_shadow_temporal_boundary(DWORD flags,DWORD rectangle_count,bool full_surface){
+ // Device::Clear has already flushed deferred world draws. This is the first
+ // depth-destructive barrier after a verified completed world traversal.
+ if((flags&D3DCLEAR_ZBUFFER)&&profiler_.shadow_temporal_armed()){
+  const auto boundary=bridge_world_draw_completion_snapshot();
+  if(boundary.valid&&profiler_.shadow_temporal_due(presentation_frame_index_,
+      boundary.completion_serial)){
+   ShadowTemporalFrameSnapshot snapshot{};
+   snapshot.presentation_frame=presentation_frame_index_;
+   snapshot.world_bridge_frame=boundary.bridge_frame;
+   snapshot.world_completion_serial=boundary.completion_serial;
+   snapshot.sample_qpc=perf_now();
+   snapshot.world_time_valid=bridge_current_world_time(snapshot.world_time);
+   snapshot.clear_flags=flags; snapshot.clear_rectangles=rectangle_count;
+   snapshot.clear_full_surface=full_surface;
+   snapshot.publication_serial=native_shadow_frame_.publication_serial;
+   const auto scene_clip=bridge_scene_world_to_clip_snapshot();
+   snapshot.scene_frame_serial=scene_clip.scene_frame_serial;
+   snapshot.world_to_clip_valid=scene_clip.valid;
+   if(scene_clip.valid)snapshot.world_to_clip=scene_clip.world_to_clip;
+   snapshot.authored_sun_valid=native_world_lighting_valid_;
+   snapshot.shadows_enabled=native_shadows_enabled_;
+   if(native_world_lighting_valid_){
+    snapshot.authored_sun_direction=native_world_lighting_.sunlight_direction;
+    snapshot.authored_sun_diffuse=native_world_lighting_.sunlight_diffuse;
+   }
+   const auto& decision=native_frame_stats_.shadow_decision;
+   snapshot.shadow_begin_calls=decision.begin_calls;
+   snapshot.previous_valid_mask=decision.previous_valid_mask;
+   snapshot.current_enabled_mask=decision.current_enabled_mask;
+   snapshot.world_to_light_changed_mask=decision.light_transform_changed_mask;
+   snapshot.camera_slice_changed_mask=decision.camera_slice_changed_mask;
+   snapshot.bias_changed_mask=decision.bias_changed_mask;
+   snapshot.receiver_bounds_changed_mask=decision.receiver_bounds_changed_mask;
+   snapshot.validity_changed_mask=decision.validity_changed_mask;
+   snapshot.dirty_mask=decision.dirty_mask;
+   snapshot.source_dirty_mask=native_frame_stats_.native_shadow_source_dirty_mask;
+   snapshot.source_changed_visuals=native_frame_stats_.native_shadow_source_changed_visuals;
+   snapshot.source_changed_terrain=native_frame_stats_.native_shadow_source_changed_terrain;
+   for(unsigned index=0;index<5;++index){
+    const auto& source=native_shadow_frame_.slices[index];
+    auto& slice=snapshot.slices[index];
+    slice.enabled=source.enabled; slice.valid=native_shadow_valid_[index];
+    slice.caster_revisions=source.validity.size();
+    slice.world_to_light=source.world_to_light;
+    slice.camera_slice=source.camera_slice;
+    slice.bias=source.bias;
+    slice.receiver_minimum=source.receiver_minimum;
+    slice.receiver_maximum=source.receiver_maximum;
+   }
+   bool queued=false;
+   if(d3d12_){
+    queued=world_d3d12_&&shadow12_.maps&&
+     profiler_.queue_shadow_temporal_frame_d3d12(*world_d3d12_,*shadow12_.maps,snapshot);
+   }else{
+    ComPtr<ID3D11Texture2D> world_color;
+    if(swap_)swap_->GetBuffer(0,IID_PPV_ARGS(&world_color));
+    queued=profiler_.queue_shadow_temporal_frame(world_color.Get(),depth_.Get(),
+     native_shadow_depth_.Get(),snapshot);
+   }
+   if(!queued)
+    report_placed_hitch_lifecycle("shadow_temporal_capture_failed",
+     "world-boundary GPU copy rejected; pair unavailable");
+  }
+ }
+}
+
 HRESULT Renderer::clear(DWORD rectangle_count,const D3DRECT* rectangles,DWORD flags,D3DCOLOR color,float z,DWORD stencil){
  if(scene_queue()){
   // Camp placement reads camp state on the game thread; the scene thread
@@ -764,9 +831,12 @@ HRESULT Renderer::clear(DWORD rectangle_count,const D3DRECT* rectangles,DWORD fl
   // The depth clear after a completed world traversal is where the D3D11
   // frame composites the world: the boundary after which game packets are
   // the interface 3D (Packet::run). Core mode sends no CompositeWorld for it.
-  if((flags&D3DCLEAR_ZBUFFER)&&bridge_world_draw_completion_snapshot().valid)(void)composite_world();
+  if((flags&D3DCLEAR_ZBUFFER)&&bridge_world_draw_completion_snapshot().valid){
+   const HRESULT composed=composite_world();if(FAILED(composed))return composed;
+  }
   const bool whole=!rectangle_count||!rectangles||(rectangle_count==1&&rectangles[0].x1<=0&&rectangles[0].y1<=0&&
    rectangles[0].x2>=LONG(canvas_width())&&rectangles[0].y2>=LONG(canvas_height()));
+  capture_shadow_temporal_boundary(flags,rectangle_count,whole);
   if(!whole){
    // As clear_rectangles: the panes' rectangles composed for the wide HUD,
    // clipped to the canvas, scaled to output pixels.
@@ -815,63 +885,7 @@ HRESULT Renderer::clear(DWORD rectangle_count,const D3DRECT* rectangles,DWORD fl
  // After composite_world: the deferred neighbour liquids it draws still use
  // this frame's water scene copy; the clear itself invalidates it.
  if(flags&(D3DCLEAR_TARGET|D3DCLEAR_ZBUFFER))water_capture_ready_=false;
- // Device::Clear has already flushed deferred world draws. This is the first
- // depth-destructive barrier after a verified completed world traversal.
- if((flags&D3DCLEAR_ZBUFFER)&&profiler_.shadow_temporal_armed()){
-  const auto boundary=bridge_world_draw_completion_snapshot();
-  if(boundary.valid&&profiler_.shadow_temporal_due(presentation_frame_index_,
-      boundary.completion_serial)){
-   ShadowTemporalFrameSnapshot snapshot{};
-   snapshot.presentation_frame=presentation_frame_index_;
-   snapshot.world_bridge_frame=boundary.bridge_frame;
-   snapshot.world_completion_serial=boundary.completion_serial;
-   snapshot.sample_qpc=perf_now();
-   snapshot.world_time_valid=bridge_current_world_time(snapshot.world_time);
-   snapshot.clear_flags=flags; snapshot.clear_rectangles=rectangle_count;
-   snapshot.clear_full_surface=scope.full_surface;
-   snapshot.publication_serial=native_shadow_frame_.publication_serial;
-   const auto scene_clip=bridge_scene_world_to_clip_snapshot();
-   snapshot.scene_frame_serial=scene_clip.scene_frame_serial;
-   snapshot.world_to_clip_valid=scene_clip.valid;
-   if(scene_clip.valid)snapshot.world_to_clip=scene_clip.world_to_clip;
-   snapshot.authored_sun_valid=native_world_lighting_valid_;
-   snapshot.shadows_enabled=native_shadows_enabled_;
-   if(native_world_lighting_valid_){
-    snapshot.authored_sun_direction=native_world_lighting_.sunlight_direction;
-    snapshot.authored_sun_diffuse=native_world_lighting_.sunlight_diffuse;
-   }
-   const auto& decision=native_frame_stats_.shadow_decision;
-   snapshot.shadow_begin_calls=decision.begin_calls;
-   snapshot.previous_valid_mask=decision.previous_valid_mask;
-   snapshot.current_enabled_mask=decision.current_enabled_mask;
-   snapshot.world_to_light_changed_mask=decision.light_transform_changed_mask;
-   snapshot.camera_slice_changed_mask=decision.camera_slice_changed_mask;
-   snapshot.bias_changed_mask=decision.bias_changed_mask;
-   snapshot.receiver_bounds_changed_mask=decision.receiver_bounds_changed_mask;
-   snapshot.validity_changed_mask=decision.validity_changed_mask;
-   snapshot.dirty_mask=decision.dirty_mask;
-   snapshot.source_dirty_mask=native_frame_stats_.native_shadow_source_dirty_mask;
-   snapshot.source_changed_visuals=native_frame_stats_.native_shadow_source_changed_visuals;
-   snapshot.source_changed_terrain=native_frame_stats_.native_shadow_source_changed_terrain;
-   for(unsigned index=0;index<5;++index){
-    const auto& source=native_shadow_frame_.slices[index];
-    auto& slice=snapshot.slices[index];
-    slice.enabled=source.enabled; slice.valid=native_shadow_valid_[index];
-    slice.caster_revisions=source.validity.size();
-    slice.world_to_light=source.world_to_light;
-    slice.camera_slice=source.camera_slice;
-    slice.bias=source.bias;
-    slice.receiver_minimum=source.receiver_minimum;
-    slice.receiver_maximum=source.receiver_maximum;
-   }
-   ComPtr<ID3D11Texture2D> world_color;
-   if(swap_)swap_->GetBuffer(0,IID_PPV_ARGS(&world_color));
-   if(!profiler_.queue_shadow_temporal_frame(world_color.Get(),depth_.Get(),
-       native_shadow_depth_.Get(),snapshot))
-    report_placed_hitch_lifecycle("shadow_temporal_capture_failed",
-     "world-boundary GPU copy rejected; pair unavailable");
-  }
- }
+ capture_shadow_temporal_boundary(flags,rectangle_count,scope.full_surface);
  if(!scope.full_surface)return clear_rectangles(rectangle_count,rectangles,flags,color,z,stencil);
  const PlanPass& pass=plan_pass("clear",(flags&D3DCLEAR_TARGET)?rtv_.Get():nullptr,
                                 (flags&(D3DCLEAR_ZBUFFER|D3DCLEAR_STENCIL))?dsv_.Get():nullptr);
@@ -965,7 +979,7 @@ void Renderer::end_profile_pass(){if(!profiler_.pass_active())return;
     if(!ok&&!detail.empty())bridge_report_event("d3d12_capture",("pass image not written: "+detail).c_str());
     return ok;
    };
-  profiler_.end_pass(nullptr,writer,this);return;
+  profiler_.end_pass(nullptr,writer,this,world_d3d12_bound_&&!scene_composited_?"dds":"bmp");return;
  }
  ComPtr<ID3D11Texture2D> back;if(profiler_.capture_active()&&swap_){if(!scene_composited_&&backbuffer_rtv_&&scene_composite_.target()){DebugViewStateGuard guard(context_.Get());scene_composite_.render(context_.Get(),scene_composite_.resolve_target(backbuffer_rtv_.Get()),false);scene_composite_.upscale(context_.Get(),backbuffer_rtv_.Get(),nullptr,nullptr);}swap_->GetBuffer(0,IID_PPV_ARGS(&back));}profiler_.end_pass(back.Get());}
 void Renderer::transition_profile_pass(const char* name){if(d3d12_)d3d12_->marker(name);if(profiler_.current_pass_is(name))return;end_profile_pass();profiler_.begin_pass(name);}
@@ -1630,7 +1644,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  // Before the overlay, so a harness screenshot is the game's image (as on D3D11).
  // A harness capture: the profiler's pass timings (no D3D11 back buffer images).
  const HarnessRequest harness_request=step_test_harness(inputs);
- if(harness_request==HarnessRequest::capture){
+ if(harness_request==HarnessRequest::capture&&!shadow_temporal_diagnostic_enabled()){
   const RendererResourceSnapshot capture_resources=resource_snapshot();
   const auto cutout_scope=cutout_shadow_scope_snapshot();
   profiler_.request_capture_next(bridge_latest_profile(),&capture_resources,&cutout_scope);
@@ -1746,7 +1760,32 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  // Capture and outer-frame recording use the same lifecycle on both backends.
  const bool f11_capture=debug_overlay_.consume_capture_request()||std::exchange(core_capture_request_,false);
  bool recorder_armed_this_present=false;
- if(f11_capture||harness_request==HarnessRequest::profile){
+ const auto temporal_outcome=profiler_.shadow_temporal_present(presentation_frame_index_);
+ if(harness_shadow_temporal_outcome_==ShadowTemporalPresentOutcome::waiting&&
+    temporal_outcome!=ShadowTemporalPresentOutcome::none)
+  harness_shadow_temporal_outcome_=temporal_outcome;
+ if(temporal_outcome!=ShadowTemporalPresentOutcome::none){
+  frame_statistics_.reset();
+  report_placed_hitch_lifecycle(
+   temporal_outcome==ShadowTemporalPresentOutcome::complete?"shadow_temporal_capture_complete":
+   temporal_outcome==ShadowTemporalPresentOutcome::waiting?"shadow_temporal_capture_waiting":
+   temporal_outcome==ShadowTemporalPresentOutcome::unavailable?"shadow_temporal_capture_unavailable":"shadow_temporal_capture_failed",
+   "D3D12 adjacent completed-world samples");
+ }
+ const bool temporal_request=(f11_capture||harness_request==HarnessRequest::capture)&&shadow_temporal_diagnostic_enabled();
+ if(temporal_request){
+  UINT sw=0,sh=0,levels=0;DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;
+  const bool armed=world_d3d12_&&shadow12_.maps&&
+   d3d12_->texture_info(*shadow12_.maps,sw,sh,levels,format)&&
+   profiler_.request_shadow_temporal_pair_d3d12(*d3d12_,*world_d3d12_,*shadow12_.maps,sw,
+    presentation_frame_index_+1,bridge_world_draw_completion_counter());
+  if(harness_request==HarnessRequest::capture)
+   harness_shadow_temporal_outcome_=armed?ShadowTemporalPresentOutcome::waiting:ShadowTemporalPresentOutcome::unavailable;
+  report_placed_hitch_lifecycle(armed?"shadow_temporal_capture_armed":"shadow_temporal_capture_rejected",
+   "D3D12 HDR color, world depth/stencil and five sun-shadow slices");
+  frame_statistics_.reset();
+ }
+ if(!temporal_request&&(f11_capture||harness_request==HarnessRequest::profile)){
    const bool recorder_requested=f11_capture?placed_hitch_profile_enabled():
     harness_request==HarnessRequest::profile;
   const bool timing_supported=bridge_outer_frame_timing_supported();

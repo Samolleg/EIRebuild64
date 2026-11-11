@@ -998,7 +998,7 @@ void RenderProfiler::end_sub_scope() {
 }
 
 void RenderProfiler::end_pass(ID3D11Texture2D* capture_source,
-                              CaptureWriter writer, void* writer_context) {
+                              CaptureWriter writer, void* writer_context, const char* image_extension) {
     if (!pass_active_ || !current_) return;
     end_sub_scope();
     PassRecord& pass = current_->passes[current_pass_];
@@ -1015,7 +1015,7 @@ void RenderProfiler::end_pass(ID3D11Texture2D* capture_source,
                                pass.counters.packets_created, pass.counters.packets_appended);
     }
     if (capture_active_ && (capture_source || timestamps_ || writer))
-        capture_pass(capture_source, pass, current_pass_, writer, writer_context);
+        capture_pass(capture_source, pass, current_pass_, writer, writer_context, image_extension);
     ++current_pass_;
     current_->pass_count = current_pass_;
     pass_active_ = false;
@@ -1340,11 +1340,71 @@ bool RenderProfiler::resolve(FrameSlot& slot, bool wait) {
 
 void RenderProfiler::clear_shadow_temporal_pair() noexcept {
     shadow_temporal_slots_ = {};
+    shadow_temporal_d3d12_ = nullptr;
     shadow_temporal_first_frame_ = 0;
     shadow_temporal_last_world_completion_ = 0;
     shadow_temporal_queued_ = 0;
     shadow_temporal_armed_ = false;
 }
+
+bool RenderProfiler::request_shadow_temporal_pair_d3d12(D3D12Frame& frame,
+    D3D12Texture& world, D3D12Texture& shadows, UINT shadow_side,
+    std::uint64_t first_presentation_frame, std::uint64_t completed_world_serial) noexcept try {
+    if (shadow_temporal_armed_ || capture_active_ || capture_requested_) return false;
+    UINT width = 0, height = 0, mips = 0, shadow_width = 0, shadow_height = 0, shadow_mips = 0;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN, shadow_format = DXGI_FORMAT_UNKNOWN;
+    if (!frame.texture_info(world, width, height, mips, format) ||
+        format != DXGI_FORMAT_R11G11B10_FLOAT || mips != 1 ||
+        !frame.texture_info(shadows, shadow_width, shadow_height, shadow_mips, shadow_format) ||
+        shadow_format != DXGI_FORMAT_R32_FLOAT || shadow_mips != 1 ||
+        shadow_width != shadow_side || shadow_height != shadow_width ||
+        (shadow_side != 1024 && shadow_side != 2048 && shadow_side != 4096)) return false;
+    clear_shadow_temporal_pair();
+    for (auto& slot : shadow_temporal_slots_) {
+        if (FAILED(frame.create_target(width, height, slot.color12, format, DXGI_FORMAT_UNKNOWN)) ||
+            FAILED(frame.create_target(width, height, slot.depth12, DXGI_FORMAT_UNKNOWN)) ||
+            FAILED(frame.create_depth_array(shadow_side, 5, slot.shadows12))) {
+            clear_shadow_temporal_pair();
+            return false;
+        }
+        slot.width12 = width; slot.height12 = height; slot.shadow_side12 = shadow_side;
+    }
+    shadow_temporal_d3d12_ = &frame;
+    shadow_temporal_first_frame_ = first_presentation_frame;
+    shadow_temporal_last_world_completion_ = completed_world_serial;
+    shadow_temporal_armed_ = true;
+    return true;
+} catch (...) { clear_shadow_temporal_pair(); return false; }
+
+bool RenderProfiler::queue_shadow_temporal_frame_d3d12(D3D12Texture& world,
+    D3D12Texture& shadows, const ShadowTemporalFrameSnapshot& snapshot) noexcept try {
+    if (!shadow_temporal_d3d12_ || shadow_temporal_queued_ >= shadow_temporal_slots_.size() ||
+        !shadow_temporal_due(snapshot.presentation_frame,
+            snapshot.world_completion_serial)) return false;
+    auto& frame = *shadow_temporal_d3d12_;
+    auto& slot = shadow_temporal_slots_[shadow_temporal_queued_];
+    UINT width = 0, height = 0, mips = 0, shadow_width = 0, shadow_height = 0, shadow_mips = 0;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN, shadow_format = DXGI_FORMAT_UNKNOWN;
+    if (!frame.texture_info(world, width, height, mips, format) ||
+        width != slot.width12 || height != slot.height12 || mips != 1 ||
+        format != DXGI_FORMAT_R11G11B10_FLOAT ||
+        !frame.texture_info(shadows, shadow_width, shadow_height, shadow_mips, shadow_format) ||
+        shadow_format != DXGI_FORMAT_R32_FLOAT || shadow_mips != 1 ||
+        shadow_width != slot.shadow_side12 || shadow_height != shadow_width) {
+        clear_shadow_temporal_pair(); return false;
+    }
+    slot.snapshot = snapshot;
+    const auto begin = qpc_now();
+    HRESULT hr = frame.copy_texture(*slot.color12, 0, world, 0);
+    if (SUCCEEDED(hr)) hr = frame.copy_depth(*slot.depth12, world);
+    for (UINT slice = 0; slice < 5 && SUCCEEDED(hr); ++slice)
+        hr = frame.copy_texture(*slot.shadows12, slice, shadows, slice);
+    if (FAILED(hr)) { clear_shadow_temporal_pair(); return false; }
+    slot.snapshot.copy_enqueue_qpc_ticks = qpc_now() - begin;
+    ++shadow_temporal_queued_;
+    shadow_temporal_last_world_completion_ = snapshot.world_completion_serial;
+    return true;
+} catch (...) { clear_shadow_temporal_pair(); return false; }
 
 bool RenderProfiler::request_shadow_temporal_pair(ID3D11Texture2D* color,
     ID3D11Texture2D* depth, ID3D11Texture2D* shadows,
@@ -1468,28 +1528,70 @@ bool RenderProfiler::export_shadow_temporal_pair() {
             const auto& slot = shadow_temporal_slots_[ordinal];
             const auto& snapshot = slot.snapshot;
             const std::string stem = "frame_" + std::to_string(ordinal);
-            const std::string color_name = stem + "_world.bmp";
-            const std::string depth_name = stem + "_world_depth.d24s8";
+            const bool native = shadow_temporal_d3d12_ != nullptr;
+            const std::string color_name = stem + (native ? "_world.r11g11b10f" : "_world.bmp");
+            const std::string depth_name = stem + (native ? "_world_depth.r24x8" : "_world_depth.d24s8");
             const std::string shadow_name = stem + "_shadow.r32farray";
-            const bool color_written = write_bmp(directory + "\\" + color_name,
+            const auto native_write = [&](const std::string& path, D3D12Texture& texture,
+                                          bool depth, UINT count, bool color, UINT first = 0) {
+                FILE* file = nullptr;
+                fopen_s(&file, path.c_str(), "wb");
+                if (!file) return false;
+                bool ok = true;
+                for (UINT slice = 0; slice < count && ok; ++slice) {
+                    std::vector<std::uint8_t> bytes; UINT width = 0, height = 0;
+                    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+                    const HRESULT hr = color
+                        ? shadow_temporal_d3d12_->read_texture(texture, bytes, width, height, &format)
+                        : shadow_temporal_d3d12_->read_texture_plane(texture, depth, first + slice, bytes, width, height);
+                    ok = hr == S_OK && !bytes.empty() &&
+                        std::fwrite(bytes.data(), 1, bytes.size(), file) == bytes.size();
+                }
+                ok = std::fclose(file) == 0 && ok;
+                if (!ok) DeleteFileA(path.c_str());
+                return ok;
+            };
+            const bool color_written = native
+                ? native_write(directory + "\\" + color_name, *slot.color12, false, 1, true)
+                : write_bmp(directory + "\\" + color_name,
                 slot.color.Get(), true);
-            const bool depth_written = write_shadow_temporal_depth(directory + "\\" + depth_name,
+            // D3D12 exposes D24S8 as two copy planes. Keep their exact native
+            // payloads separate, with no CPU packing or precision conversion.
+            const bool depth_written = native
+                ? native_write(directory + "\\" + depth_name, *slot.depth12, true, 1, false)
+                : write_shadow_temporal_depth(directory + "\\" + depth_name,
                 slot.depth.Get());
-            const bool shadow_written = write_shadow_temporal_maps(directory + "\\" + shadow_name,
+            const bool shadow_written = native
+                ? native_write(directory + "\\" + shadow_name, *slot.shadows12, false, 5, false)
+                : write_shadow_temporal_maps(directory + "\\" + shadow_name,
                 slot.shadows.Get());
+            const std::string stencil_name = stem + "_world_stencil.x24g8";
+            const bool stencil_written = !native ||
+                native_write(directory + "\\" + stencil_name, *slot.depth12, true, 1, false, 1);
             D3D11_TEXTURE2D_DESC color_desc{}, shadow_desc{};
-            slot.color->GetDesc(&color_desc);
-            slot.shadows->GetDesc(&shadow_desc);
+            if (native) {
+                color_desc.Width = slot.width12; color_desc.Height = slot.height12;
+                shadow_desc.Width = shadow_desc.Height = slot.shadow_side12; shadow_desc.ArraySize = 5;
+            } else {
+                slot.color->GetDesc(&color_desc);
+                slot.shadows->GetDesc(&shadow_desc);
+            }
             std::ostringstream output;
             output.imbue(std::locale::classic());
             output << std::setprecision(12);
+            if (native) {
+                output << "{\"backend\":\"d3d12\",\"world_color_encoding\":\"top-down R11G11B10_FLOAT, tightly packed four bytes per pixel\","
+                    << "\"world_stencil_image\":\"" << stencil_name
+                    << "\",\"world_stencil_encoding\":\"top-down native D3D12 stencil plane 1, X24_TYPELESS_G8_UINT, tightly packed rows\","
+                    << "\"stencil_written\":" << (stencil_written ? "true" : "false") << ',';
+            }
             const auto write_array = [&](const auto& values) {
                 output << '[';
                 for (std::size_t index = 0; index < values.size(); ++index)
                     output << (index ? "," : "") << values[index];
                 output << ']';
             };
-            output << "{\"schema\":2,\"capture\":\"f11_shadow_temporal_pair\",\"ordinal\":"
+            output << (native ? "" : "{") << "\"schema\":" << (native ? 3 : 2) << ",\"capture\":\"f11_shadow_temporal_pair\",\"ordinal\":"
                 << ordinal << ",\"requested_frames\":2,\"sample_boundary\":\"first_depth_clear_after_completed_world\""
                 << ",\"presentation_frame\":" << snapshot.presentation_frame
                 << ",\"world_bridge_frame\":" << snapshot.world_bridge_frame
@@ -1499,7 +1601,8 @@ bool RenderProfiler::export_shadow_temporal_pair() {
                 << ",\"copy_enqueue_ms\":"
                 << (1000.0 * static_cast<double>(snapshot.copy_enqueue_qpc_ticks) /
                     static_cast<double>(qpc_frequency_))
-                << ",\"capture_perturbation\":\"three GPU copies per sample, including one complete sun-shadow array; no CPU readback or file I/O between samples\""
+                << ",\"capture_perturbation\":\"" << (native ? "seven GPU copy operations per sample" : "three GPU copies per sample")
+                << ", including one complete sun-shadow array; no CPU readback or file I/O between samples\""
                 << ",\"pair_sample_interval_ms\":" << interval_ms
                 << ",\"world_time_valid\":" << (snapshot.world_time_valid ? "true" : "false")
                 << ",\"world_time\":" << snapshot.world_time
@@ -1515,7 +1618,9 @@ bool RenderProfiler::export_shadow_temporal_pair() {
                 << "\",\"color_written\":" << (color_written ? "true" : "false")
                 << ",\"depth_written\":" << (depth_written ? "true" : "false")
                 << ",\"shadow_written\":" << (shadow_written ? "true" : "false")
-                << ",\"world_depth_encoding\":\"top-down little-endian D24_UNORM_S8_UINT, tightly packed four bytes per pixel\""
+                << ",\"world_depth_encoding\":\"" << (native
+                    ? "top-down native D3D12 depth plane 0, R24_UNORM_X8_TYPELESS, tightly packed four bytes per pixel"
+                    : "top-down little-endian D24_UNORM_S8_UINT, tightly packed four bytes per pixel") << "\""
                 << ",\"shadow_width\":" << shadow_desc.Width
                 << ",\"shadow_height\":" << shadow_desc.Height
                 << ",\"shadow_slices\":" << shadow_desc.ArraySize
@@ -1581,7 +1686,7 @@ bool RenderProfiler::export_shadow_temporal_pair() {
             const bool wrote = std::fwrite(metadata.data(), 1, metadata.size(), file) ==
                 metadata.size();
             const bool metadata_written = std::fclose(file) == 0 && wrote;
-            complete = color_written && depth_written && shadow_written &&
+            complete = color_written && depth_written && shadow_written && stencil_written &&
                 metadata_written && complete;
         }
         return complete;
@@ -1589,10 +1694,10 @@ bool RenderProfiler::export_shadow_temporal_pair() {
 }
 
 void RenderProfiler::capture_pass(ID3D11Texture2D* source, const PassRecord& pass, UINT ordinal,
-                                  CaptureWriter writer, void* writer_context) {
+                                  CaptureWriter writer, void* writer_context, const char* image_extension) {
     const stall_watch::Exempt disk_export;  // F11 capture readback and disk output
     char image_name[128]{};
-    std::snprintf(image_name, sizeof(image_name), "%02u_%s.bmp", ordinal, sanitize(pass.name.data()).c_str());
+    std::snprintf(image_name, sizeof(image_name), "%02u_%s.%s", ordinal, sanitize(pass.name.data()).c_str(), image_extension);
     const std::string image_path = capture_directory_ + "\\" + image_name;
     // Every pass is an uncompressed 4K image (~25-125 per capture, up to ~3 GB),
     // so a capture writes only the composed frame; per-pass images are opt-in

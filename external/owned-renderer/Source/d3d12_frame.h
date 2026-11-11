@@ -382,7 +382,14 @@ public:
     virtual FrameGenerationStats frame_generation_stats() const noexcept = 0;
     // A captured interface surface, with the same tight BGRA layout and
     // synchronous completion as read_back_buffer. Restores its resource state.
-    virtual HRESULT read_texture(D3D12Texture& texture, std::vector<std::uint8_t>& pixels, UINT& width, UINT& height) = 0;
+    // A format output also admits packed R11G11B10_FLOAT for lossless HDR export.
+    // Existing callers retain their BGRA-only contract.
+    virtual HRESULT read_texture(D3D12Texture& texture, std::vector<std::uint8_t>& pixels, UINT& width, UINT& height,
+                                 DXGI_FORMAT* format = nullptr) = 0;
+    // Diagnostic native bytes for one mip-zero array slice or depth/stencil plane.
+    // No pixel conversion. The returned rows have no D3D12 alignment padding.
+    virtual HRESULT read_texture_plane(D3D12Texture& texture, bool depth, UINT subresource,
+                                       std::vector<std::uint8_t>& pixels, UINT& width, UINT& height) = 0;
     // A pass or command this backend does not draw yet: one log line per
     // name, the F11 list; world: the frame shows the world marker colour.
     virtual void omit(const char* name, bool world) noexcept = 0;

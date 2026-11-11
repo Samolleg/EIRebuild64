@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 #include "attribution_ledger.h"
+#include "d3d12_frame.h"
 
 namespace owned {
 
@@ -197,7 +198,7 @@ public:
     // Native image export runs only for passes selected by the capture policy.
     using CaptureWriter = bool (*)(void*, const std::string&);
     void end_pass(ID3D11Texture2D* capture_source = nullptr,
-                  CaptureWriter writer = nullptr, void* writer_context = nullptr);
+                  CaptureWriter writer = nullptr, void* writer_context = nullptr, const char* image_extension = "bmp");
     // Opens a named GPU sub-scope inside the active pass, closing the open one
     // unless it has the same name (consecutive same-named groups share one
     // timestamp pair). No-op unless profiling is on; the pass end closes it.
@@ -230,6 +231,12 @@ public:
                                       ID3D11Texture2D* shadows,
                                       std::uint64_t first_presentation_frame,
                                       std::uint64_t completed_world_serial) noexcept;
+    bool request_shadow_temporal_pair_d3d12(D3D12Frame& frame, D3D12Texture& world,
+                                            D3D12Texture& shadows, UINT shadow_side,
+                                            std::uint64_t first_presentation_frame,
+                                            std::uint64_t completed_world_serial) noexcept;
+    bool queue_shadow_temporal_frame_d3d12(D3D12Texture& world, D3D12Texture& shadows,
+                                          const ShadowTemporalFrameSnapshot& snapshot) noexcept;
     bool shadow_temporal_armed() const noexcept { return shadow_temporal_armed_; }
     bool shadow_temporal_due(std::uint64_t presentation_frame,
                              std::uint64_t completed_world_serial) const noexcept {
@@ -308,7 +315,7 @@ private:
     void end_sub_scope();
     void refresh_enabled() noexcept;
     void capture_pass(ID3D11Texture2D* source, const PassRecord& pass, UINT ordinal,
-                      CaptureWriter writer, void* writer_context);
+                      CaptureWriter writer, void* writer_context, const char* image_extension);
     bool write_bmp(const std::string& path, ID3D11Texture2D* source,
                    bool source_is_staging = false);
     bool write_shadow_temporal_depth(const std::string& path, ID3D11Texture2D* staging);
@@ -344,8 +351,11 @@ private:
     std::string pending_normal_frame_metadata_;
     struct ShadowTemporalSlot {
         ComPtr<ID3D11Texture2D> color, depth, shadows;
+        D3D12TextureRef color12, depth12, shadows12;
+        UINT width12 = 0, height12 = 0, shadow_side12 = 0;
         ShadowTemporalFrameSnapshot snapshot{};
     };
+    D3D12Frame* shadow_temporal_d3d12_ = nullptr;
     std::array<ShadowTemporalSlot, 2> shadow_temporal_slots_{};
     std::uint64_t shadow_temporal_first_frame_ = 0;
     std::uint64_t shadow_temporal_last_world_completion_ = 0;

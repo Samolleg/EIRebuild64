@@ -2393,22 +2393,46 @@ public:
         return out;
     }
 
-    HRESULT read_texture(D3D12Texture& texture, std::vector<std::uint8_t>& pixels, UINT& width, UINT& height) override {
+    HRESULT read_texture(D3D12Texture& texture, std::vector<std::uint8_t>& pixels, UINT& width, UINT& height,
+                         DXGI_FORMAT* format = nullptr) override {
+        if (format) *format = DXGI_FORMAT_UNKNOWN;
         if (!accept_resource(&texture)) { pixels.clear(); width = height = 0; return DXGI_ERROR_DEVICE_RESET; }
-        return read_bgra(texture.resource.Get(), texture.state, pixels, width, height);
+        return read_bgra(texture.resource.Get(), texture.state, pixels, width, height, format);
+    }
+
+    HRESULT read_texture_plane(D3D12Texture& texture, bool depth, UINT subresource,
+                               std::vector<std::uint8_t>& pixels, UINT& width, UINT& height) override {
+        pixels.clear(); width = height = 0;
+        if (!accept_resource(&texture)) return DXGI_ERROR_DEVICE_RESET;
+        ID3D12Resource* resource = depth ? texture.depth.Get() : texture.resource.Get();
+        if (!resource) return E_INVALIDARG;
+        const auto desc = resource->GetDesc();
+        const bool packed_depth = desc.Format == DXGI_FORMAT_R24G8_TYPELESS;
+        const bool shadow = desc.Format == DXGI_FORMAT_R32_TYPELESS || desc.Format == DXGI_FORMAT_D32_FLOAT;
+        if (desc.MipLevels != 1 || desc.SampleDesc.Count != 1 ||
+            (!packed_depth && !shadow) || subresource >= UINT(desc.DepthOrArraySize) * (packed_depth ? 2u : 1u))
+            return E_INVALIDARG;
+        return read_bgra(resource, depth ? texture.depth_state : texture.state,
+                         pixels, width, height, nullptr, true, subresource);
     }
 
     HRESULT read_bgra(ID3D12Resource* source_resource, D3D12_RESOURCE_STATES source_state,
-                      std::vector<std::uint8_t>& pixels, UINT& width, UINT& height) {
+                      std::vector<std::uint8_t>& pixels, UINT& width, UINT& height, DXGI_FORMAT* format = nullptr,
+                      bool native_plane = false, UINT subresource = 0) {
+        pixels.clear();
         width = height = 0;
+        if (format) *format = DXGI_FORMAT_UNKNOWN;
         const D3D12_RESOURCE_DESC desc = source_resource->GetDesc();
-        if (desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM || desc.SampleDesc.Count != 1 || desc.DepthOrArraySize != 1)
+        const bool hdr = format && desc.Format == DXGI_FORMAT_R11G11B10_FLOAT;
+        if ((!native_plane && !hdr && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) ||
+            desc.SampleDesc.Count != 1 || (!native_plane && desc.DepthOrArraySize != 1))
             return E_NOTIMPL;
+        if (format) *format = desc.Format;
         ID3D12GraphicsCommandList* list = open_list();
         if (!list) return E_FAIL;
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
         UINT64 bytes = 0, row_bytes = 0;
-        core_.device()->GetCopyableFootprints(&desc, 0, 1, 0, &footprint, nullptr, &row_bytes, &bytes);
+        core_.device()->GetCopyableFootprints(&desc, subresource, 1, 0, &footprint, nullptr, &row_bytes, &bytes);
         D3D12_HEAP_PROPERTIES heap{};
         heap.Type = D3D12_HEAP_TYPE_READBACK;
         D3D12_RESOURCE_DESC buffer{};
@@ -2434,6 +2458,7 @@ public:
         D3D12_TEXTURE_COPY_LOCATION source{};
         source.pResource = source_resource;
         source.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        source.SubresourceIndex = subresource;
         list->CopyTextureRegion(&destination, 0, 0, 0, &source, nullptr);
         if (source_state != D3D12_RESOURCE_STATE_COPY_SOURCE) {
             const auto barrier = transition_barrier(source_resource, D3D12_RESOURCE_STATE_COPY_SOURCE, source_state);

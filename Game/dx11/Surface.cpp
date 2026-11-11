@@ -689,16 +689,11 @@ void CDXGISurface::Fade()
     if (cpuImage) {
         if (cpuImage->format.dwFlags & DDPF_FOURCC) IfFailedThrowHR(E_NOTIMPL);
         if (hDc || uiRecordingDc) IfFailedThrowHR(DXGI_ERROR_INVALID_CALL);
-        // Detach from completed publications before modifying the source bytes.
-        auto pixels = cpuImage->pixels;
-        auto* bytes = pixels.data();
-        for (UINT y = 0; y < dwSurfaceHeight; ++y) {
-            for (UINT x = 0; x < dwSurfaceWidth; ++x) {
-                auto* pixel = bytes + size_t(y) * cpuImage->pitch + size_t(x) * 4;
-                const BYTE gray = BYTE(RetailModalFade::Gray(pixel[2], pixel[1], pixel[0]));
-                pixel[0] = pixel[1] = pixel[2] = gray;
-            }
-        }
+        std::vector<std::uint8_t> pixels;
+        const RECT viewport{0, 0, LONG(dwSurfaceWidth), LONG(dwSurfaceHeight)};
+        IfFailedThrowHR(pDX11->GetRendererFacade().Visit([&](owned::Renderer& renderer) {
+            return renderer.surface_effect_d3d12(*cpuImage, *cpuImage, viewport, true, pixels);
+        }));
         ownedSurface.BeginWrite();
         cpuImage->pixels = std::move(pixels);
         IfFailedThrowHR(PublishSurface() ? S_OK : E_FAIL);
@@ -714,7 +709,7 @@ void CDXGISurface::StretchTo(const CDXGISurface *src, const RECT &rect)
 {
     // The historical argument named src is the actual destination.
     if (cpuImage) {
-        if (!src || !src->cpuImage || (cpuImage->format.dwFlags & DDPF_FOURCC) ||
+        if (!src || !src->cpuImage ||
             (src->cpuImage->format.dwFlags & DDPF_FOURCC) || hDc || uiRecordingDc || src->hDc || src->uiRecordingDc)
             IfFailedThrowHR(E_INVALIDARG);
         // Preserve the source API's viewport convention: right/bottom are
@@ -722,30 +717,14 @@ void CDXGISurface::StretchTo(const CDXGISurface *src, const RECT &rect)
         if (rect.right <= 0 || rect.bottom <= 0 ||
             rect.right > (std::numeric_limits<LONG>::max)() / 4)
             IfFailedThrowHR(E_INVALIDARG);
-        const auto& sourcePixels = static_cast<const owned::SurfaceImage&>(*cpuImage).pixels;
-        DirectX::Image source{};
-        source.width = dwSurfaceWidth; source.height = dwSurfaceHeight;
-        source.format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        source.rowPitch = size_t(cpuImage->pitch);
-        source.slicePitch = sourcePixels.size();
-        source.pixels = const_cast<std::uint8_t*>(sourcePixels.data());
-        DirectX::ScratchImage resized;
-        IfFailedThrowHR(DirectX::Resize(source, size_t(rect.right), size_t(rect.bottom),
-            DirectX::TEX_FILTER_LINEAR | DirectX::TEX_FILTER_FORCE_NON_WIC, resized));
-        const auto* scaled = resized.GetImage(0, 0, 0);
-        if (!scaled) IfFailedThrowHR(E_FAIL);
-        auto pixels = src->cpuImage->pixels;
-        const auto left = (std::max)(std::int64_t(0), std::int64_t(rect.left));
-        const auto top = (std::max)(std::int64_t(0), std::int64_t(rect.top));
-        const auto right = (std::min)(std::int64_t(src->dwSurfaceWidth),
-            std::int64_t(rect.left) + rect.right);
-        const auto bottom = (std::min)(std::int64_t(src->dwSurfaceHeight),
-            std::int64_t(rect.top) + rect.bottom);
-        if (left >= right || top >= bottom) return;
-        for (auto y = top; y < bottom; ++y)
-            memcpy(pixels.data() + size_t(y) * src->cpuImage->pitch + size_t(left) * 4,
-                scaled->pixels + size_t(y - rect.top) * scaled->rowPitch + size_t(left - rect.left) * 4,
-                size_t(right - left) * 4);
+        if (std::int64_t(rect.left) + rect.right <= 0 ||
+            std::int64_t(rect.top) + rect.bottom <= 0 ||
+            std::int64_t(rect.left) >= src->dwSurfaceWidth ||
+            std::int64_t(rect.top) >= src->dwSurfaceHeight) return;
+        std::vector<std::uint8_t> pixels;
+        IfFailedThrowHR(pDX11->GetRendererFacade().Visit([&](owned::Renderer& renderer) {
+            return renderer.surface_effect_d3d12(*cpuImage, *src->cpuImage, rect, false, pixels);
+        }));
         src->ownedSurface.BeginWrite();
         src->cpuImage->pixels = std::move(pixels);
         IfFailedThrowHR(src->PublishSurface() ? S_OK : E_FAIL);

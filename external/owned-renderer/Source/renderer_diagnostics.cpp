@@ -20,6 +20,7 @@
 #include "native_shader.h"
 #include "owned_terrain_decode.h"
 #include "renderer.h"
+#include "../../DirectXTex/DDS.h"
 #include "graphics_settings.h"
 #include "ui_language.h"
 #include "game_focus.h"
@@ -551,6 +552,14 @@ Renderer::HarnessRequest Renderer::step_test_harness(const ScenePresentInputs* i
    harness_wait_=0;harness_stage_=1;return HarnessRequest::capture;
   }
   if(harness_stage_==1){
+    if(d3d12_&&harness_shadow_temporal_outcome_!=ShadowTemporalPresentOutcome::none){
+     if(harness_shadow_temporal_outcome_==ShadowTemporalPresentOutcome::waiting)return HarnessRequest::none;
+     const bool complete=harness_shadow_temporal_outcome_==ShadowTemporalPresentOutcome::complete;
+     harness_shadow_temporal_outcome_=ShadowTemporalPresentOutcome::none;
+     finish(complete,complete?"D3D12 paired temporal capture exported":
+      "D3D12 paired temporal capture unavailable or export failed; see lifecycle log");
+     return HarnessRequest::none;
+    }
    if(profiler_.capture_active()){harness_capture_directory_=profiler_.capture_directory();harness_stage_=2;}
    else if(++harness_wait_>8)finish(false,"capture did not start");
    return HarnessRequest::none;
@@ -1405,15 +1414,16 @@ bool Renderer::write_hudless_image(const std::string& path,std::string& detail) 
  }catch(...){detail="allocation failed";return false;}
 }
 
-// Export only boundaries whose color target is ready. HDR world passes need
-// their own GPU conversion target before they can be represented as a BMP.
+// Preserve HDR world-pass pixels in a DX10 DDS without CPU color conversion.
+// Post/UI boundaries retain their existing BGRA BMP representation.
 bool Renderer::write_profile_image_d3d12(const std::string& path,std::string& detail) noexcept {
  const stall_watch::Exempt disk_export;
  detail.clear();
+ const bool hdr=world_d3d12_bound_&&!scene_composited_&&world_d3d12_;
  const bool post=profiler_.current_pass_is("scene_smaa")||profiler_.current_pass_is("scene_copy")||
   profiler_.current_pass_is("scene_dof")||profiler_.current_pass_is("scene_sun_rays")||
   profiler_.current_pass_is("scene_bloom");
- if(!post){
+ if(!post&&!hdr){
   if(scene_composited_&&(profiler_.current_pass_is("ui_composition")||
      profiler_.current_pass_is("present_bookkeeping")||profiler_.current_pass_is("fg_frame_composite")))
    return write_harness_screenshot(path,detail);
@@ -1421,13 +1431,42 @@ bool Renderer::write_profile_image_d3d12(const std::string& path,std::string& de
  }
  try{
   if(!d3d12_){detail="D3D12 executor unavailable";return false;}
-  D3D12Texture* source=scene_output_d3d12();
+  D3D12Texture* source=hdr?world_d3d12_.get():scene_output_d3d12();
   if(!source)return write_harness_screenshot(path,detail);
   std::vector<std::uint8_t> bgra;UINT width=0,height=0;
-  const HRESULT hr=d3d12_->read_texture(*source,bgra,width,height);
+  DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;
+  const HRESULT hr=d3d12_->read_texture(*source,bgra,width,height,hdr?&format:nullptr);
   if(hr!=S_OK){
-   char text[96]{};std::snprintf(text,sizeof(text),"D3D12 post-pass readback failed (%08lx)",static_cast<unsigned long>(hr));
+   char text[96]{};std::snprintf(text,sizeof(text),"D3D12 pass readback failed (%08lx)",static_cast<unsigned long>(hr));
    detail=text;return false;
+  }
+  if(hdr){
+   // Picking temporarily substitutes a BGRA target for the HDR world target.
+   if(format!=DXGI_FORMAT_R11G11B10_FLOAT&&format!=DXGI_FORMAT_B8G8R8A8_UNORM){
+    detail="unexpected world target format";return false;
+   }
+   struct DdsFileHeader {
+    std::uint32_t magic=DirectX::DDS_MAGIC;
+    DirectX::DDS_HEADER description{};
+    DirectX::DDS_HEADER_DXT10 extension{};
+   } header;
+   static_assert(sizeof(header)==148,"DDS header layout");
+   header.description.size=sizeof(DirectX::DDS_HEADER);
+   header.description.flags=DDS_HEADER_FLAGS_TEXTURE|DDS_HEADER_FLAGS_PITCH;
+   header.description.height=height;header.description.width=width;
+   header.description.pitchOrLinearSize=width*4u;
+   header.description.ddspf=DirectX::DDSPF_DX10;
+   header.description.caps=DDS_SURFACE_FLAGS_TEXTURE;
+   header.extension.dxgiFormat=format;
+   header.extension.resourceDimension=D3D11_RESOURCE_DIMENSION_TEXTURE2D;
+   header.extension.arraySize=1;
+   FILE* file=nullptr;fopen_s(&file,path.c_str(),"wb");
+   if(!file){detail="HDR DDS open failed";return false;}
+   bool ok=std::fwrite(&header,sizeof(header),1,file)==1&&
+    std::fwrite(bgra.data(),1,bgra.size(),file)==bgra.size();
+   ok=std::fclose(file)==0&&ok;
+   if(!ok){DeleteFileA(path.c_str());detail="HDR DDS write failed";}
+   return ok;
   }
   return write_bgra_bmp(path,bgra.data(),width,height,width*4u,detail);
  }catch(...){detail="allocation failed";return false;}
