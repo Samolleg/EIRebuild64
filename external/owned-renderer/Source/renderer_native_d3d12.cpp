@@ -100,6 +100,7 @@ void append_d3d12_shader_programs(std::vector<ShaderProgram>& out) {
  out.push_back(kD3D12MipArrayProgram);
  out.push_back(kD3D12MipArrayRangeProgram);
  append_gamma_shader_programs(out);
+ append_debug_resource_shader_programs(out);
  out.push_back(embedded_figure_layer_program(false));
  out.push_back(embedded_figure_layer_program(true));
  append_terrain2_cache_d3d12_programs(out);
@@ -1954,6 +1955,8 @@ HRESULT Renderer::resolve_world_d3d12(bool smaa){
 // flush_native on the D3D12 backend: the same record preparation, then the
 // build dispatches and the interface batches through the executor.
 HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
+ const bool shadow_coverage=debug_overlay_.mode()==DebugOverlayMode::full&&
+  debug_overlay_.config().debug_resource_view()==DebugResourceView::shadow_cascade_coverage;
  if(native_shadow_collecting_)return flush_native_shadows(); // the sun maps (flush_native_shadows_d3d12)
  // A reused static bake draws with an empty queue (flush_native_static_set).
  // Taken once: any flush nested in this one is an ordinary flush.
@@ -2361,7 +2364,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
    const NativeQueuedDraw& draw=baked?native_instance_records_[baked->first_record].command:native_queued_draw(native_draw_order_[batch.first_draw]);
    const FixedState& st=bucket.state;
    ID3D11ShaderResourceView* contact_views[4]{};
-   Constants constants;native_batch_constants(batch,draw,bucket,contact_views,neighbour_terrain_blend,neighbour_fog_skip,false,&constants);
+   Constants constants;native_batch_constants(batch,draw,bucket,contact_views,neighbour_terrain_blend,neighbour_fog_skip,shadow_coverage,&constants);
    d3d12_->set_constants(0,&constants,sizeof(constants));
    d3d12_->set_resource(1,native_geometry_pages_[batch.geometry_page].d3d12.get());
    D3D12NativeState state;
@@ -2421,7 +2424,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
   const NativeQueuedDraw& draw=baked?native_instance_records_[baked->first_record].command:native_queued_draw(native_draw_order_[batch.first_draw]);
   const FixedState& st=bucket.state;
   ID3D11ShaderResourceView* contact_views[4]{};
-  Constants constants;native_batch_constants(batch,draw,bucket,contact_views,neighbour_terrain_blend,neighbour_fog_skip,false,&constants);
+  Constants constants;native_batch_constants(batch,draw,bucket,contact_views,neighbour_terrain_blend,neighbour_fog_skip,shadow_coverage,&constants);
   d3d12_->set_constants(0,&constants,sizeof(constants));
   d3d12_->set_resource(1,native_geometry_pages_[batch.geometry_page].d3d12.get());
   // The batch's contact maps (native_batch_constants chose the active map's).
@@ -2583,7 +2586,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
       const NativeQueuedDraw& item_draw=item_baked?native_instance_records_[item_baked->first_record].command:
        native_queued_draw(native_draw_order_[item.first_draw]);
       ID3D11ShaderResourceView* item_contact[4]{};Constants item_constants;
-      native_batch_constants(item,item_draw,item_bucket,item_contact,neighbour_terrain_blend,neighbour_fog_skip,false,&item_constants);
+      native_batch_constants(item,item_draw,item_bucket,item_contact,neighbour_terrain_blend,neighbour_fog_skip,shadow_coverage,&item_constants);
       item_constants.liquid_layer=2u; // the liquid triangles only
       d3d12_->set_constants(0,&item_constants,sizeof(item_constants));
       d3d12_->set_resource(1,native_geometry_pages_[item.geometry_page].d3d12.get());

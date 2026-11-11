@@ -74,6 +74,7 @@ struct D3D12Texture {
     d3d12::ComPtr<ID3D12DescriptorHeap> rtv_heap, dsv_heap;
     D3D12_CPU_DESCRIPTOR_HANDLE rtv{}, dsv{};
     D3D12_CPU_DESCRIPTOR_HANDLE depth_srv{};  // the target's depth as R24_UNORM or R32_FLOAT (staging)
+    D3D12_CPU_DESCRIPTOR_HANDLE stencil_srv{};
     d3d12::ComPtr<ID3D12Resource> depth;
     d3d12::ComPtr<ID3D12Heap> heap;  // a placed texture's heap (prepare_texture_batch), kept while it lives
     DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN;  // its depth view's format (none: no depth)
@@ -107,6 +108,7 @@ struct D3D12Texture {
         }
         if (srv.ptr) core->staging().free(srv);
         if (depth_srv.ptr) core->staging().free(depth_srv);
+        if (stencil_srv.ptr) core->staging().free(stencil_srv);
         if (uav.ptr) core->staging().free(uav);
         for (const auto view : mip_views) core->staging().free(view);
         for (const auto view : level_uavs) core->staging().free(view);
@@ -2040,6 +2042,25 @@ public:
         slots_dirty_ = true;
     }
 
+    void set_stencil_resource(UINT slot, const D3D12Texture* target) noexcept override {
+        if (!accept_resource(target) || slot >= kD3D11ResourceSlots) return;
+        auto* texture = const_cast<D3D12Texture*>(target);
+        if (texture && texture->depth_format == DXGI_FORMAT_D24_UNORM_S8_UINT && !texture->stencil_srv.ptr) {
+            texture->stencil_srv = core_.staging().allocate();
+            if (!texture->stencil_srv.ptr) { fail(E_OUTOFMEMORY, "stencil staging descriptor"); return; }
+            D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+            view.Format = DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+            view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
+            view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            view.Texture2D.MipLevels = 1;
+            view.Texture2D.PlaneSlice = 1;
+            core_.device()->CreateShaderResourceView(texture->depth.Get(), &view, texture->stencil_srv);
+        }
+        const bool readable = texture && texture->stencil_srv.ptr;
+        resources_[slot] = {readable ? texture->stencil_srv : D3D12_CPU_DESCRIPTOR_HANDLE{}, nullptr,
+                            readable ? texture : nullptr, true};
+        slots_dirty_ = true;
+    }
     // A depth array (shadow maps): D16/D32 readable as Texture2DArray,
     // one depth view per slice.
     HRESULT create_depth_array(UINT side, UINT slices, owned::D3D12TextureRef& out, DXGI_FORMAT depth_format, bool plain) override {

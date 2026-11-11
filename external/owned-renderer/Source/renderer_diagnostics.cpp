@@ -136,6 +136,16 @@ void Renderer::report_shadow_diagnostics(const char* reason) noexcept {
 void Renderer::report_shadow_diagnostics(const char* reason) noexcept {  }
 #endif
 
+Microsoft::WRL::ComPtr<IDXGIAdapter> Renderer::graphics_adapter() noexcept {
+ Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+ if(d3d12_)adapter=d3d12_->adapter();
+ else if(device_){
+  Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;
+  if(SUCCEEDED(device_.As(&dxgi)))dxgi->GetAdapter(&adapter);
+ }
+ return adapter;
+}
+
 bool Renderer::status_text_wanted() const noexcept {
  return debug_overlay_.visible()||debug_overlay_.wants_profiling()||profiler_.attribution_enabled()||
   placed_hitch_profile_.active()||harness_enabled()||!critters_summary_.labels.empty();
@@ -528,13 +538,6 @@ Renderer::HarnessRequest Renderer::step_test_harness(const ScenePresentInputs* i
    harness_complete(ok,detail);
   harness_stage_=0;harness_wait_=0;};
  std::string detail;
- // D3D12 backend: no world yet (wait_ready) and no outer frame recorder
- // (profile), so these fail at once (named) and the route goes on; captures
- // (the profiler's pass timings), screenshots, config and paths run.
- if(d3d12_&&(command->verb==HarnessVerb::profile||command->verb==HarnessVerb::wait_ready)){
-  finish(false,"not on the Direct3D 12 backend yet (no world, no outer frame recorder)");
-  return HarnessRequest::none;
- }
  switch(command->verb){
  case HarnessVerb::capture:
   if(harness_stage_==0){
@@ -738,7 +741,7 @@ std::string Renderer::harness_unready_parts(std::string& ready_detail) noexcept 
    add("ground_cover","tile families still loading");
   else if(!gc_material_state_.empty())add("ground_cover",gc_paint_failure_?gc_paint_failure_:"terrain atlases still painting");
   else for(const auto& n:gc_neighbours_)
-   if(!n.prepared||n.families.valid()){add("ground_cover","neighbour cover still preparing");break;}
+   if((!d3d12_&&!n.prepared)||n.families.valid()){add("ground_cover","neighbour cover still preparing");break;}
  }
  const auto* option=debug_overlay_.config().find("neighbour_maps");
  const bool neighbours=option&&option->boolean_value;

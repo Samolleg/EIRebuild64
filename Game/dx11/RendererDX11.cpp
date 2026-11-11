@@ -53,6 +53,14 @@ void CDX11::RetireOwnedWorld() noexcept {
     if (FAILED(hr)) GameJournal::Event("ERROR", "world_retire", "hr=%08lx", static_cast<unsigned long>(hr));
     else GameJournal::MemorySnapshot("world_retired");
 }
+Microsoft::WRL::ComPtr<IDXGIAdapter> CDX11::ReadOwnedAdapter() noexcept {
+    const auto access = ownedRenderer.LockFrame();
+    Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
+    if (rendererFacade && rendererFacade->Ready()) rendererFacade->Visit([&](owned::Renderer& renderer) {
+        adapter = renderer.graphics_adapter(); return S_OK;
+    });
+    return adapter;
+}
 owned::RendererMemoryCounters CDX11::ReadOwnedMemoryCounters() noexcept {
     const auto access = ownedRenderer.LockFrame();
     owned::RendererMemoryCounters counters;

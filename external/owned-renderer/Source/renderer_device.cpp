@@ -1857,6 +1857,15 @@ void Renderer::remember_debug_projection(const FixedState& state,
 
 DebugResourceViewAvailability Renderer::debug_resource_view_availability() const noexcept {
  DebugResourceViewAvailability result{};
+ if(d3d12_){
+  result.raw_depth=world_d3d12_!=nullptr;
+  result.linearized_depth=result.raw_depth&&debug_projection_valid_;
+  result.stencil=result.raw_depth; // world target uses D24S8
+  result.ambient_occlusion=ao12_.filtered!=nullptr;
+  result.shadows=shadow12_.maps!=nullptr;
+  result.shadow_cascade_coverage=native12_.ready;
+  return result;
+ }
  result.raw_depth=depth_srv_!=nullptr;
  result.linearized_depth=result.raw_depth&&debug_projection_valid_;
  if(depth_){D3D11_TEXTURE2D_DESC description{};depth_->GetDesc(&description);
@@ -1872,7 +1881,7 @@ DebugShadowInfo Renderer::debug_shadow_info() const noexcept {
  DebugShadowInfo result{};
  result.feature_enabled=native_shadows_enabled_;
  result.pass_in_progress=native_shadow_collecting_;
- if(!native_shadow_depth_srv_)return result;
+ if(d3d12_?!shadow12_.maps:!native_shadow_depth_srv_)return result;
  if(!native_shadow_collecting_&&!native_shadow_failed_)
   result.rewritten_mask=native_shadow_cleared_mask_;
  for(unsigned i=0;i<5;++i){
@@ -1892,7 +1901,55 @@ DebugShadowInfo Renderer::debug_shadow_info() const noexcept {
  return result;
 }
 
+HRESULT Renderer::render_debug_texture_d3d12(DebugResourceView view) noexcept {
+ std::uint32_t mode=0;
+ switch(view){
+ case DebugResourceView::raw_depth:mode=1;break;
+ case DebugResourceView::linearized_depth:mode=2;break;
+ case DebugResourceView::stencil:mode=3;break;
+ case DebugResourceView::ambient_occlusion:mode=4;break;
+ case DebugResourceView::shadows:mode=5;break;
+ default:return E_INVALIDARG;
+ }
+ DebugViewConstants constants{};constants.projection=debug_projection_coefficients_;constants.mode=mode;
+ if(mode==5){
+  const auto info=debug_shadow_info();
+  constants.shadow_enabled=info.enabled_mask;constants.shadow_valid=info.valid_mask;
+  const float width=float(target_width()),height=float(target_height());
+  const float side=(std::min)(width/3.f,height/2.f);
+  constants.shadow_board={(width-3*side)*.5f,(height-2*side)*.5f,side,0};
+  for(unsigned i=0;i<5;++i){
+   if((info.valid_mask&(1u<<i))==0)continue;
+   const auto& slice=native_shadow_frame_.slices[i];
+   const float inverse_radius=1.f/info.slices[i].radius;
+   constants.receiver_rectangle[i]={
+    .5f+.5f*(slice.receiver_minimum[0]*inverse_radius+slice.world_to_light[3]),
+    .5f-.5f*(slice.receiver_maximum[1]*inverse_radius+slice.world_to_light[7]),
+    .5f+.5f*(slice.receiver_maximum[0]*inverse_radius+slice.world_to_light[3]),
+    .5f-.5f*(slice.receiver_minimum[1]*inverse_radius+slice.world_to_light[7])};
+  }
+ }
+ const std::string_view shader(kDebugResourceViewShader,sizeof(kDebugResourceViewShader)-1);
+ const ShaderProgram vertex{shader,nullptr,nullptr,"debugTextureVS","vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3};
+ const ShaderProgram pixel{shader,nullptr,nullptr,"debugTexturePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3};
+ D3D12NativeState state{};
+ state.raster.FillMode=D3D11_FILL_SOLID;state.raster.CullMode=D3D11_CULL_NONE;state.raster.DepthClipEnable=TRUE;
+ D3D11_SAMPLER_DESC sampler{};sampler.Filter=D3D11_FILTER_MIN_MAG_MIP_POINT;
+ sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
+ sampler.MaxLOD=D3D11_FLOAT32_MAX;
+ d3d12_->clear_slots();d3d12_->set_target(nullptr);
+ d3d12_->set_constants(0,&constants,sizeof(constants));d3d12_->set_sampler(0,sampler);
+ if(mode==5)d3d12_->set_resource(2,shadow12_.maps.get());
+ else if(mode==4)d3d12_->set_resource(0,ao12_.filtered.get());
+ else if(mode==3)d3d12_->set_stencil_resource(1,world_d3d12_.get());
+ else d3d12_->set_depth_resource(0,world_d3d12_.get());
+ const HRESULT hr=d3d12_->draw(vertex,pixel,state,nullptr,3);
+ d3d12_->clear_slots();
+ if(hr==S_OK){++debug_resource_view_work_.draws;profiler_.add_draw(1,1);profiler_.add_batch();}
+ return hr;
+}
 HRESULT Renderer::render_debug_texture(DebugResourceView view) noexcept {
+ if(d3d12_)return render_debug_texture_d3d12(view);
  HRESULT hr=ensure_debug_texture_pipeline();if(FAILED(hr))return hr;
  if(view==DebugResourceView::stencil&&FAILED(hr=ensure_debug_stencil_view()))return hr;
  ID3D11ShaderResourceView* source=nullptr;std::uint32_t mode=0;
@@ -1972,6 +2029,11 @@ HRESULT Renderer::render_debug_resource_view(DebugResourceView view,
 }
 
 #endif
+void append_debug_resource_shader_programs(std::vector<ShaderProgram>& out){
+ const std::string_view shader(kDebugResourceViewShader,sizeof(kDebugResourceViewShader)-1);
+ out.push_back({shader,nullptr,nullptr,"debugTextureVS","vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ out.push_back({shader,nullptr,nullptr,"debugTexturePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+}
 // Feature level 9_3 interface programs: the game pipeline (vsMain, psMain),
 // then the screen rectangle.
 #pragma warning(push)

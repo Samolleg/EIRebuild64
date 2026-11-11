@@ -482,6 +482,18 @@ void ReadGameMemory(State& s, bool failure) noexcept {
             resources.surfaceCpu=owned.surfaceCpu;resources.surfaceGpu=owned.surfaceGpu;resources.neighbours=owned.neighbours;
         }
         auto device=dx?dx->GetDevice():Microsoft::WRL::ComPtr<ID3D11Device>();
+        // Error reporting must not re-enter the renderer frame lock.
+        if(!device && dx && !failure){
+            const auto adapter=dx->ReadOwnedAdapter();
+            Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter3;
+            if(adapter && SUCCEEDED(adapter.As(&adapter3))){
+                DXGI_QUERY_VIDEO_MEMORY_INFO info={};
+                gpu.local=SUCCEEDED(adapter3->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&info));
+                if(gpu.local){gpu.localUsage=info.CurrentUsage;gpu.localBudget=info.Budget;}
+                gpu.nonlocal=SUCCEEDED(adapter3->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,&info));
+                if(gpu.nonlocal){gpu.nonlocalUsage=info.CurrentUsage;gpu.nonlocalBudget=info.Budget;}
+            }
+        }
         if(device){
             Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
             Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter3;

@@ -181,6 +181,7 @@ public:
     auto &GetRendererFacade() { return *rendererFacade; };
     void RetireOwnedWorld() noexcept;
     owned::RendererMemoryCounters ReadOwnedMemoryCounters() noexcept;
+    Microsoft::WRL::ComPtr<IDXGIAdapter> ReadOwnedAdapter() noexcept;
     HRESULT BlitPublishedSurface(std::uint64_t surfaceId, const RECT& destination,
                                  const RECT* source, const DDCOLORKEY* colorKey);
     DirectX::CommonStates *GetCommonStates() { return m_states.get(); };

@@ -1531,6 +1531,13 @@ void Renderer::update_status_notice(const char* reset_notice){
 #if !defined(EID3D11_SHADER_EMBED)
 HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  struct PlanFrameEnd{FramePlan& plan;~PlanFrameEnd(){plan.begin_frame();}} plan_frame_end{frame_plan_};
+ const std::int64_t recorder_present_entry=inputs?inputs->recorder_present_entry:
+  placed_hitch_profile_.active()?perf_now():0;
+ OuterFrameTimingSnapshot outer_timing{};
+ if(inputs){if(inputs->outer_timing_taken)outer_timing=inputs->outer_timing;}
+ else if(placed_hitch_profile_.active())
+  (void)bridge_take_outer_frame_timing(
+   recorder_present_entry,outer_timing);
  if(!inputs){
   owned_resource_runtime_poll();
   camp_inventory_set_wide(configured_integer(debug_overlay_.config(),"camp_ui_layout",1)!=0);
@@ -1544,6 +1551,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  last_present_tick_=present_tick;
  // The profiler's frame and passes, named as on D3D11 so captures line up.
  const bool overlay_profile=debug_overlay_.wants_profiling();profiler_.set_enabled(overlay_profile);
+ bridge_set_profile_enabled(overlay_profile||placed_hitch_profile_.active());
  if(!profiler_.frame_active())profiler_.begin_frame(output_width_,output_height_);
  transition_profile_pass("present_head");
  // fg_frame_image: the executor takes it from the next frame; the HUD-less
@@ -1591,7 +1599,8 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  if(debug_overlay_.first_run_pending()){AmbientWorldSource world;if(bridge_ambient_world_source(world)&&world.terrain)debug_overlay_.open_first_run_settings();}
  // Before the overlay, so a harness screenshot is the game's image (as on D3D11).
  // A harness capture: the profiler's pass timings (no D3D11 back buffer images).
- if(step_test_harness(inputs)==HarnessRequest::capture){
+ const HarnessRequest harness_request=step_test_harness(inputs);
+ if(harness_request==HarnessRequest::capture){
   const RendererResourceSnapshot capture_resources=resource_snapshot();
   const auto cutout_scope=cutout_shadow_scope_snapshot();
   profiler_.request_capture_next(bridge_latest_profile(),&capture_resources,&cutout_scope);
@@ -1664,7 +1673,13 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  const bool telemetry_wanted=debug_overlay_.initialized()&&debug_overlay_.mode()!=DebugOverlayMode::hidden;
  if(telemetry_wanted!=system_telemetry_active_){system_telemetry_.set_active(telemetry_wanted);system_telemetry_active_=telemetry_wanted;}
  system_telemetry_.try_get_snapshot(system_telemetry_snapshot_);
- if(debug_overlay_.config().debug_resource_view()!=DebugResourceView::disabled)d3d12_->omit("debug_resource_view",false);
+ const auto debug_view_availability=debug_resource_view_availability();
+ const auto requested_debug_view=debug_overlay_.config().debug_resource_view();
+ if(debug_overlay_.mode()==DebugOverlayMode::full&&debug_view_availability.available(requested_debug_view)){
+  transition_profile_pass("debug_resource_view");
+  const HRESULT debug_hr=render_debug_resource_view(requested_debug_view,debug_overlay_.mode());
+  if(FAILED(debug_hr)||debug_hr==kD3D12Dropped)d3d12_->omit("debug_resource_view (draw failed)",false);
+ }
  if(debug_overlay_.initialized()&&debug_overlay_pass_needed(overlay_visible||combat_ui_has_output(),
     debug_overlay_.has_status_notice()||debug_overlay_.has_harness_banner()||widescreen_hud_hovered(HudPanel::game_speed),!critters_summary_.labels.empty())){
   transition_profile_pass("debug_overlay");
@@ -1673,7 +1688,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
   presented.fg_mode=frame_generation_mode_;
   presented.fg_auto_off_fps=frame_generation_mode_&&fg_low_rate_?std::max(1,configured_integer(debug_overlay_.config(),"frame_generation_min_fps",30)):0;
   debug_overlay_.render(profiler_.latest_snapshot(),bridge_latest_profile(),presented,
-                        DebugResourceViewAvailability{},&profiler_,DebugShadowInfo{});
+                        debug_view_availability,&profiler_,debug_shadow_info());
  }
  PendingBlit generated_cursor{};bool generated_cursor_wanted=false;
  if(cursor_pending_){
@@ -1698,14 +1713,94 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
   else harness_complete(ok,detail+" (after the overlay: critter labels on)");
   harness_stage_=0;harness_wait_=0;harness_overlay_shot_.clear();
  }
- // F11: what this backend omitted so far (the world passes among them).
- if(debug_overlay_.consume_capture_request()||std::exchange(core_capture_request_,false)){
-  const std::string omitted=d3d12_->omitted();
-  bridge_report_event("d3d12_capture",omitted.empty()?"F11: nothing omitted on the D3D12 backend":("F11: omitted on the D3D12 backend: "+omitted).c_str());
-  const RendererResourceSnapshot capture_resources=resource_snapshot();
-  const auto cutout_scope=cutout_shadow_scope_snapshot();
-  profiler_.request_capture_next(bridge_latest_profile(),&capture_resources,&cutout_scope);
- }
+ // Capture and outer-frame recording use the same lifecycle on both backends.
+ const bool f11_capture=debug_overlay_.consume_capture_request()||std::exchange(core_capture_request_,false);
+ bool recorder_armed_this_present=false;
+ if(f11_capture||harness_request==HarnessRequest::profile){
+   const bool recorder_requested=f11_capture?placed_hitch_profile_enabled():
+    harness_request==HarnessRequest::profile;
+  const bool timing_supported=bridge_outer_frame_timing_supported();
+  const bool recorder_available=recorder_requested&&timing_supported;
+  char request_detail[192]{};
+  std::snprintf(request_detail,sizeof(request_detail),
+   "%s recorder_requested=%s timing_supported=%s active=%s",
+   f11_capture?"focused_rising_edge_consumed":"harness_request",
+   recorder_requested?"true":"false",timing_supported?"true":"false",
+   placed_hitch_profile_.active()?"true":"false");
+  report_placed_hitch_lifecycle(
+   "outer_frame_gap_profile_f11_request",request_detail);
+  const PlacedHitchCaptureAction action=placed_hitch_capture_action(
+   recorder_available,placed_hitch_profile_);
+  if(action==PlacedHitchCaptureAction::arm_recorder){
+   const auto* bridge=bridge_latest_profile();
+   RetainedSceneIdentitySnapshot arm_scene_identity{};
+   PlacedHitchArmInputs arm_inputs{};
+   bool arm_outcome_reported=false;
+   try{
+    arm_scene_identity=retained_static_scene_identity_snapshot();
+    arm_inputs=placed_hitch_arm_inputs(bridge,arm_scene_identity);
+    if(!arm_inputs.current_world_epoch_valid){
+     arm_outcome_reported=true;
+     report_placed_hitch_lifecycle("outer_frame_gap_profile_arm_rejected",
+      "reason=current_world_epoch_unknown");
+    }else{
+     recorder_armed_this_present=arm_placed_hitch_profile(
+      placed_hitch_profile_,arm_inputs);
+    }
+   }catch(const std::bad_alloc&){
+    arm_outcome_reported=true;
+    report_placed_hitch_lifecycle("outer_frame_gap_profile_arm_failed",
+     "reason=allocation_failed");
+   }catch(...){
+    arm_outcome_reported=true;
+    report_placed_hitch_lifecycle("outer_frame_gap_profile_arm_failed",
+     "reason=unexpected_exception");
+   }
+   if(recorder_armed_this_present){
+    placed_hitch_scene_json_.clear();
+    placed_hitch_previous_trim_ticks_=0;
+    placed_hitch_previous_trim_valid_=false;
+    try{
+     SYSTEMTIME utc{};GetSystemTime(&utc);char timestamp[32]{};
+     std::snprintf(timestamp,sizeof(timestamp),
+      "%04u-%02u-%02uT%02u:%02u:%02u.%03uZ",
+      utc.wYear,utc.wMonth,utc.wDay,utc.wHour,utc.wMinute,
+      utc.wSecond,utc.wMilliseconds);
+     placed_hitch_scene_json_=format_scene_identity_json(
+      arm_scene_identity,
+      bridge_scene_world_to_clip_snapshot(),timestamp,true,
+      presentation_frame_index_);
+    }catch(...){placed_hitch_scene_json_.clear();}
+    bridge_set_profile_enabled(true);
+    frame_statistics_.reset();
+    char arm_detail[256]{};
+    std::snprintf(arm_detail,sizeof(arm_detail),
+     "sequence=%llu bridge_frame=%llu world_epoch=%llu scene_identity=%s",
+     static_cast<unsigned long long>(placed_hitch_profile_.sequence_id()),
+     static_cast<unsigned long long>(arm_inputs.previous_bridge_frame),
+     static_cast<unsigned long long>(arm_inputs.current_world_epoch),
+     placed_hitch_scene_json_.empty()?"unavailable":"captured");
+    report_placed_hitch_lifecycle("outer_frame_gap_profile_armed",arm_detail);
+   }else if(!arm_outcome_reported){
+    report_placed_hitch_lifecycle("outer_frame_gap_profile_arm_rejected",
+     "reason=state_rejected");
+   }
+  }else if(action==PlacedHitchCaptureAction::normal_capture){
+   report_placed_hitch_lifecycle("outer_frame_gap_profile_not_armed",
+    recorder_requested?"reason=timing_hooks_unsupported":
+                       "reason=recorder_disabled_normal_capture");
+
+   const RendererResourceSnapshot capture_resources=resource_snapshot();
+   const auto cutout_scope=cutout_shadow_scope_snapshot();
+   profiler_.request_capture_next(bridge_latest_profile(),&capture_resources,&cutout_scope);
+   frame_statistics_.reset();
+   }else{
+    report_placed_hitch_lifecycle("outer_frame_gap_profile_arm_rejected",
+     "reason=already_active");
+   }
+  }
+ if(harness_request==HarnessRequest::profile)harness_profile_armed_=recorder_armed_this_present;
+
  finish_native_lod_frame();
  // Loading screens: the game's own pictures draw (present_image); the load
  // reveal keeps the last one and holds it over world frames until the world
@@ -1739,17 +1834,48 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  profiler_.end_frame(presentation.sync_interval,0);
  // The final presentation owner applies the output cap (both images with FG).
  hr=d3d12_->present(presentation.sync_interval,frame_limit);
+ const std::int64_t recorder_present_return=placed_hitch_profile_.active()?perf_now():0;
 #ifdef EID3D11_EMBEDDED
  if(SUCCEEDED(hr))embedded_d3d12_presented_=true;
 #endif
  profiler_.present_return(output_width_,output_height_,presentation.sync_interval,0,hr);
+ if(placed_hitch_profile_.active()){
+  if(FAILED(hr)){
+   finish_placed_hitch_profile(PlacedHitchFinishReason::present_failed);
+  }else if(recorder_armed_this_present){
+   if(placed_hitch_profile_.anchor_present(
+       recorder_present_return,perf_frequency())){
+    bridge_set_outer_frame_timing_active(false);
+    export_placed_hitch_profile();
+    bridge_set_profile_enabled(debug_overlay_.wants_profiling());
+   }else{
+    bridge_set_outer_frame_timing_active(true);
+   }
+  }else{
+   // A harness run is unattended by design; focus loss is not a disturbance there.
+   record_placed_hitch_frame(recorder_present_entry,
+    recorder_present_return,window_in_front()||harness_enabled(),hr,outer_timing);
+  }
+ }
  HRESULT trim_hr=S_OK;
+ const std::int64_t trim_begin=placed_hitch_profile_.active()&&SUCCEEDED(hr)?perf_now():0;
  if(SUCCEEDED(hr)){
   transition_profile_pass("frame_tail");
   d3d12_->clear_slots();
   const frame_acct::Scope scope(frame_acct::pf_trim);
   trim_hr=trim_native_mesh_cache();
   if(FAILED(trim_hr))bridge_report_event("present_step_failed","step=trim_native_mesh_cache (D3D12)");
+ }
+ const std::int64_t trim_end=trim_begin?perf_now():0;
+ if(placed_hitch_profile_.active()){
+  if(FAILED(trim_hr)){
+   finish_placed_hitch_profile(PlacedHitchFinishReason::trim_failed);
+  }else if(trim_begin>0&&trim_end>=trim_begin){
+   placed_hitch_previous_trim_ticks_=trim_end-trim_begin;
+   placed_hitch_previous_trim_valid_=true;
+  }else{
+   finish_placed_hitch_profile(PlacedHitchFinishReason::invalid_clock);
+  }
  }
  // Exclude the host's wait for the next frame's records from renderer work.
  end_profile_pass();
@@ -1779,6 +1905,7 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
   const HRESULT removed=embedded_d3d12_.device_removed_reason();
   const char* reason=embedded_d3d12_.failure();
   if(FAILED(removed))return fail_embedded_d3d12("device removed during frame",removed,reason);
+  if(FAILED(hr))finish_placed_hitch_profile(PlacedHitchFinishReason::native_flush_failed);
   if(FAILED(hr)||(reason&&*reason))return fail_embedded_d3d12("frame composition/presentation",hr,reason);
   return hr;
  }

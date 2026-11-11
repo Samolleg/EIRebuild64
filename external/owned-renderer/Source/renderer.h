@@ -780,6 +780,7 @@ void append_sky_shader_programs(std::vector<ShaderProgram>& out);
 // The x64 host's DXIL-only programs (renderer_native_d3d12.cpp): GenerateMips
 // and the gamma ramp's (renderer_frame.cpp gammaVS, gammaPS) on D3D12.
 void append_d3d12_shader_programs(std::vector<ShaderProgram>& out);
+void append_debug_resource_shader_programs(std::vector<ShaderProgram>& out);
 void append_gamma_shader_programs(std::vector<ShaderProgram>& out);
 const ShaderProgram& d3d12_mip_program() noexcept;
 const ShaderProgram& d3d12_mip_array_program() noexcept;
@@ -1028,6 +1029,7 @@ public:
     HRESULT begin_engine_frame();
     HRESULT retire_embedded_world();
     RendererMemoryCounters read_memory_counters();
+    Microsoft::WRL::ComPtr<IDXGIAdapter> graphics_adapter() noexcept;
     // The global map's zone hit-test frame (#200; bridge hook on the game's
     // GenerateHitTestDDS call): begin redirects the world target to the
     // lossless hit-test target, end restores it.
@@ -2439,6 +2441,7 @@ private:
     void remember_debug_projection(const FixedState& state,
                                    SemanticKind semantic_kind) noexcept;
     HRESULT render_debug_texture(DebugResourceView view) noexcept;
+    HRESULT render_debug_texture_d3d12(DebugResourceView view) noexcept;
     HRESULT create_pipeline();
     // Creates the shader object of every program the current settings use and
     // this process has not prepared yet, on worker threads (from the embedded

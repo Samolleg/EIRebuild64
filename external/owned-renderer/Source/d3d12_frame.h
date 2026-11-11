@@ -202,6 +202,8 @@ public:
     virtual HRESULT copy_depth(D3D12Texture& destination, D3D12Texture& source) = 0;
     // A target's depth as a shader input (t0-t127).
     virtual void set_depth_resource(UINT slot, const D3D12Texture* target) noexcept = 0;
+    // D24S8 stencil plane as Texture2D<uint>; other depth formats bind null.
+    virtual void set_stencil_resource(UINT slot, const D3D12Texture* target) noexcept = 0;
     // A depth array (shadow maps): D16 or D32 slices, readable as Texture2DArray
     // (plain: one slice read as Texture2D, the rain shelter map).
     virtual HRESULT create_depth_array(UINT side, UINT slices, D3D12TextureRef& out,
