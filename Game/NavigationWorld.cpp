@@ -52,7 +52,7 @@ void NavigationWorld::Scene(const char* mpr,const char* mob,CWorldServer& world)
     if(sourceJob.valid())try{sourceJob.get();}catch(const std::exception& e){GameJournal::Event("NAV","update_discarded","reason=%s",GameJournal::Quote(e.what()).c_str());}
     iceVariant=false;preparedTiles.clear();originalSources.reset();sourceTransforms.clear();liveTransforms.clear();appliedTransforms.clear();
     for(auto& mesh:meshes)mesh.reset();bodySizes.clear();bodyTable.samples.clear();
-    loaded=false;error.clear();failures=stepFailures=0;nextStepLog=0;++generation;queues.clear();airJournal.clear();groundGoals.clear();failedQueries.clear();rejectedMoves.clear();attackGoals.clear();positionFailures.clear();queryObstacles=nullptr;queryReuse=nullptr;
+    loaded=false;error.clear();failures=stepFailures=0;nextStepLog=0;++generation;queues.clear();airJournal.clear();groundGoals.clear();failedQueries.clear();attackGoals.clear();positionFailures.clear();queryObstacles=nullptr;queryReuse=nullptr;
     sourceRetries.clear();flyingUnits.clear();meshDirectory.clear();flightDeferred=false;sources.reset();absentStatic.clear();sourceDirty.clear();liveDoors.clear();
     liveObjects.clear();appliedObjects.clear();liveFlightObjects.clear();appliedFlightObjects.clear();bakedStatic.clear();dirtyObjects.clear();
     if(baker) {
@@ -621,11 +621,6 @@ bool NavigationWorld::ObserveAir(CUnit* unit,AirEvent event,unsigned& suppressed
     if(now<entry.next){if(entry.suppressed<UINT_MAX)++entry.suppressed;return false;}
     suppressed=entry.suppressed;entry.suppressed=0;entry.next=now+2000;return true;
 }
-void NavigationWorld::RejectMovement(CUnit* unit,Navigation::Point source,Navigation::Point goal) {
-    if(!unit)return;
-    rejectedMoves[unit->GetID()]={source,goal,observerRevision,Type(unit,unit->GetAIClass()),
-        unit->GetAIClass(),Height(unit),Radius(unit)};
-}
 Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navigation::Point goal,float maxLength,float goalRadius,const float* costs,int aiClass,Navigation::GoalPolicy goalPolicy,const Navigation::Location* goalSupport) {
     CorePerf::Scope total(CorePerf::NavigationTotal),timing(CorePerf::NavigationPath);
     const auto boundary=ModArena::MovementBoundary(unit);
@@ -654,22 +649,6 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
     request.reuseRoute=queryReuse;
     request.excludedFlags=static_cast<unsigned short>(1u<<(std::clamp(unit?unit->GetAIClass():aiClass,0,7)+4));
     request.obstacles=queryObstacles;
-    // A geometry step failed twice. Retrying the unchanged request cannot
-    // repair it. Keep this terminal result across AI stop/start cycles until
-    // its physical inputs change, independently of elapsed time.
-    if(unit) {
-        const auto rejected=rejectedMoves.find(unit->GetID());
-        if(rejected!=rejectedMoves.end()) {
-            const auto& saved=rejected->second;
-            if(saved.revision==observerRevision&&saved.profile==Type(unit,unit->GetAIClass())&&
-               saved.aiClass==unit->GetAIClass()&&saved.height==request.height&&
-               saved.radius==Radius(unit)&&
-               Distance(saved.source,from)<.001f&&Distance(saved.goal,goal)<.001f) {
-                Navigation::Route refused;refused.status=Status::NoPath;return refused;
-            }
-            rejectedMoves.erase(rejected);
-        }
-    }
     std::vector<Navigation::Obstacle> arenaObstacles;
     if(boundary.seal&&std::hypot(from.x-boundary.cx,from.y-boundary.cy)>=boundary.radius){
         if(queryObstacles)arenaObstacles=*queryObstacles;
