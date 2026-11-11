@@ -634,10 +634,16 @@ HRESULT Renderer::update_contact_maps_d3d12(){
   if(!(contact_maps_.pending&bit))continue;
   std::shared_ptr<const OwnedVisualSurface> surface;
   if(!bridge_terrain_atlas(material,surface)||!surface){d3d12_->count("contact atlas: atlas surface not captured (retried)");continue;}
-  const auto found=terrain_textures_d3d12_.find(surface->id);
-  if(found==terrain_textures_d3d12_.end()||found->second.generation!=surface->generation||!found->second.texture){d3d12_->count("contact atlas: page not drawn yet (retried)");continue;}
-  D3D12Texture& source=*found->second.texture;
-  const HRESULT copied=copy_contact_atlas_d3d12(source,material,contact_maps_);
+  // Resolve the captured atlas generation, as the author's D3D11 path
+  // does. Owned terrain bypasses terrain_texture_d3d12, so its legacy
+  // page cache can stay empty forever. Without these copies Terrain 2.0
+  // has no class field and GPU placement rejects every land candidate.
+  NativeOwnedTextureView view{};view.identity=surface->id;view.generation=surface->generation;view.surface=surface.get();
+  D3D12TextureRef source;UINT64 backing=0;
+  const HRESULT resolved=get_native_owned_texture_d3d12(view,source,backing,nullptr,true);
+  if(FAILED(resolved))return resolved;
+  if(!source)continue;
+  const HRESULT copied=copy_contact_atlas_d3d12(*source,material,contact_maps_);
   if(FAILED(copied))return copied;
   if(copied==S_FALSE){
    if(!contact_incompatible_logged_){
@@ -646,6 +652,12 @@ HRESULT Renderer::update_contact_maps_d3d12(){
    }
    continue;
   }
+  char detail[224]{};std::snprintf(detail,sizeof(detail),
+   "epoch=%llu material=%u surface=%llu generation=%llu ready=%016llx pending=%016llx backend=D3D12",
+   static_cast<unsigned long long>(bridge_current_world_epoch()),material,
+   static_cast<unsigned long long>(surface->id),static_cast<unsigned long long>(surface->generation),
+   static_cast<unsigned long long>(contact_maps_.ready),static_cast<unsigned long long>(contact_maps_.pending));
+  bridge_report_event("contact_terrain_atlas",detail);
   d3d12_->count("contact atlas: materials copied");
  }
  return S_OK;
