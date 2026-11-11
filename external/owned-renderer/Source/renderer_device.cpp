@@ -3423,6 +3423,23 @@ void Renderer::release() {
  // capability/failure values belong to one device. Retire frame images
  // after NGX stops, while the executor still owns its descriptor heaps.
  if(d3d12_){
+  // The final native flush and pose/instance retirement above have finished.
+  // Drop persistent and frame buffers, including ready/failed and upload
+  // revisions: no native resource can be adopted by a replacement executor.
+  native12_={};
+  terrain_textures_d3d12_.clear();terrain_pages_d3d12_={};
+  native_terrain_frame_d3d12_.clear();
+  scene_mip_textures_.clear();
+  // Preserve source texture identities, but rebuild their device-specific
+  // profiles even when the composition serial (or fixed unit table) is equal.
+  for(auto& item:material_profiles_){
+   auto& profile=item.second;
+   profile.profile12.reset();profile.class12.reset();
+   profile.srv.Reset();profile.relief_srv.Reset();profile.class_srv.Reset();
+   profile.serial=0;profile.strands=profile.failed=false;
+  }
+  ++material_profiles_revision_;material_profiles_indexed_=UINT64_MAX;
+  material_profiles_dirty_=true;
   post12_={};upscale12_={};ao12_={};shadow12_={};
   world_d3d12_.reset();d3d12_white_.reset();native_hiz12_.reset();
   prepass_rest12_.reset();prepass_normal12_.reset();shadow_mask12_.reset();

@@ -1,3 +1,28 @@
+# X64D3D12 native resource retirement, stage 9 (2026-11-11)
+
+Incomplete runtime integration: renderer_backend=1 still creates D3D11.
+Embedded release() now clears the complete NativeD3D12 buffer/texture owner,
+its ready/failed gates, layer upload revision and instance capacity after
+scene join, the final native flush and pose/instance retirement. Geometry
+pages and instance records already retire earlier in release(). Terrain
+page textures and prepared uploads, their retained CPU terrain owner, the
+bindless terrain-frame staging and scene mip copies now retire too.
+Material identities are retained, but their GPU profiles and fixed-unit or
+composition serial gates are reset and profile indices invalidated so the
+next device rebuilds them even without a source composition change.
+The executor remains alive through all these releases. D3D11, upstream Host,
+HLSL and pose/SKN algorithms are unchanged. No SDKs or DLLs added this stage.
+
+This completes only native/terrain-page/material/scene-mip cache retirement.
+Other owners still need an audit: ambient/cover/contact maps and terrain2,
+liquids, loading-picture copies, external SurfaceImage/snapshot resources
+and their reuse across replacement devices. Do not shut down the executor
+or activate backend selection before those lifetimes are resolved. Then
+bind startup config/backend, overlay, local frame boundaries and dispatch,
+with explicit startup/device-removal failures. Full BRIEF remains open.
+No compilation, shader compilation, tests or game run; build and GPU behavior
+remain unverified. Earlier sections describe the preceding stages.
+
 # X64D3D12 frame-image retirement, stage 8 (2026-11-11)
 
 Incomplete runtime integration: renderer_backend=1 still creates D3D11.
