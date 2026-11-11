@@ -1,3 +1,30 @@
+# X64D3D12 native capture and CPU surface effects, stage 21 (2026-11-11)
+
+Incomplete runtime integration: renderer_backend=1 still creates D3D11.
+CDXGISurface::BltFromRenderSurface now consumes the author's native executor
+readback through E1CaptureNativeTarget, including the private hit-test target.
+The bridge retains the existing point-filter/non-WIC scaling convention for
+lossless mask codes. Source consumers see E_PENDING for unavailable captures,
+so their FAILED gate cannot treat an older completed image as a fresh frame.
+Completed CPU images are published only after capture/resize succeeds.
+
+Fade on CPU surfaces reuses RetailModalFade::Gray and preserves alpha.
+StretchTo uses the existing DirectXTex dependency's linear/non-WIC resizer,
+with the source API's viewport extents, destination clipping and detached
+writes (including self-stretch). RGB565 thumbnail allocations use canonical
+BGRA source storage; SaveThumbnailFile retains the existing RGB565 packing.
+These are source-game surface adapters, without new renderer HLSL/algorithms.
+D3D11 branches retain their existing operations. No SDKs or DLLs added.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}; this stage
+adapts Game/dx11/Surface.cpp and Game/OwnedRender/E1SurfaceBridge.{h,cpp}.
+
+Next finish source texture/sprite/SRV boundaries, then latch renderer_backend
+before device creation and connect local input/simulation/render phases to
+the prepared executor startup and world/present/FG dispatch. Full BRIEF is
+still open. No compilation, shader compilation, tests or game run performed.
+Build/link, D3D11 regression, thumbnail filtering and native GPU capture
+(including hit-test masks) remain unverified.
+
 # X64D3D12 CPU surface producers, stage 20 (2026-11-11)
 
 Incomplete runtime integration: renderer_backend=1 still creates D3D11.

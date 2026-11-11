@@ -18,6 +18,7 @@
 #include "hud_layout_context.h"
 #include "MmpRgbToBgra.h"
 #include <limits>
+#include <DirectXTex.h>
 
 size_t BitsPerPixel(DXGI_FORMAT fmt)
 {
@@ -258,7 +259,8 @@ BOOL CDXGISurface::CreateTexture(D3D11_TEXTURE2D_DESC *ptex2d)
             ptex2d->Width > UINT((std::numeric_limits<LONG>::max)() / 4) ||
             ptex2d->Height > UINT((std::numeric_limits<LONG>::max)()) ||
             size_t(ptex2d->Height) > (std::numeric_limits<size_t>::max)() / (size_t(ptex2d->Width) * 4) ||
-            ptex2d->Format != DXGI_FORMAT_B8G8R8A8_UNORM ||
+            (ptex2d->Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+             ptex2d->Format != DXGI_FORMAT_B5G6R5_UNORM) ||
             ptex2d->ArraySize != 1 || ptex2d->SampleDesc.Count != 1 || hDc || uiRecordingDc)
             return FALSE;
         auto image = std::make_shared<owned::SurfaceImage>();
@@ -273,6 +275,9 @@ BOOL CDXGISurface::CreateTexture(D3D11_TEXTURE2D_DESC *ptex2d)
         image->pixels.resize(size_t(image->pitch) * image->height, 0);
         ownedSurface.BeginWrite();
         cpuImage = std::move(image); cpuDesc = *ptex2d;
+        // Save thumbnails request RGB565; their file writer performs the packing.
+        // Native source storage and GDI always use canonical BGRA pixels.
+        cpuDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         texture.Reset(); textureView.Reset(); pixelReadbackStaging.Reset();
         if (!PublishSurface()) return FALSE;
         return ExtractSurfaceParams();
@@ -647,6 +652,23 @@ HRESULT ApplyOwnedSurfaceEffect(OwnedRender::RendererFacadeCore<owned::Renderer>
 
 void CDXGISurface::Fade()
 {
+    if (cpuImage) {
+        if (hDc || uiRecordingDc) IfFailedThrowHR(DXGI_ERROR_INVALID_CALL);
+        // Detach from completed publications before modifying the source bytes.
+        auto pixels = cpuImage->pixels;
+        auto* bytes = pixels.data();
+        for (UINT y = 0; y < dwSurfaceHeight; ++y) {
+            for (UINT x = 0; x < dwSurfaceWidth; ++x) {
+                auto* pixel = bytes + size_t(y) * cpuImage->pitch + size_t(x) * 4;
+                const BYTE gray = BYTE(RetailModalFade::Gray(pixel[2], pixel[1], pixel[0]));
+                pixel[0] = pixel[1] = pixel[2] = gray;
+            }
+        }
+        ownedSurface.BeginWrite();
+        cpuImage->pixels = std::move(pixels);
+        IfFailedThrowHR(PublishSurface() ? S_OK : E_FAIL);
+        return;
+    }
     ownedSurface.BeginWrite();
     const HRESULT hr = ApplyOwnedSurfaceEffect(pDX11->GetRendererFacade(),
         textureView.Get(), texture.Get(), nullptr, true);
@@ -656,6 +678,43 @@ void CDXGISurface::Fade()
 void CDXGISurface::StretchTo(const CDXGISurface *src, const RECT &rect)
 {
     // The historical argument named src is the actual destination.
+    if (cpuImage) {
+        if (!src || !src->cpuImage || hDc || uiRecordingDc || src->hDc || src->uiRecordingDc)
+            IfFailedThrowHR(E_INVALIDARG);
+        // Preserve the source API's viewport convention: right/bottom are
+        // extents, including when left/top specify a destination offset.
+        if (rect.right <= 0 || rect.bottom <= 0 ||
+            rect.right > (std::numeric_limits<LONG>::max)() / 4)
+            IfFailedThrowHR(E_INVALIDARG);
+        const auto& sourcePixels = static_cast<const owned::SurfaceImage&>(*cpuImage).pixels;
+        DirectX::Image source{};
+        source.width = dwSurfaceWidth; source.height = dwSurfaceHeight;
+        source.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        source.rowPitch = size_t(cpuImage->pitch);
+        source.slicePitch = sourcePixels.size();
+        source.pixels = const_cast<std::uint8_t*>(sourcePixels.data());
+        DirectX::ScratchImage resized;
+        IfFailedThrowHR(DirectX::Resize(source, size_t(rect.right), size_t(rect.bottom),
+            DirectX::TEX_FILTER_LINEAR | DirectX::TEX_FILTER_FORCE_NON_WIC, resized));
+        const auto* scaled = resized.GetImage(0, 0, 0);
+        if (!scaled) IfFailedThrowHR(E_FAIL);
+        auto pixels = src->cpuImage->pixels;
+        const auto left = (std::max)(std::int64_t(0), std::int64_t(rect.left));
+        const auto top = (std::max)(std::int64_t(0), std::int64_t(rect.top));
+        const auto right = (std::min)(std::int64_t(src->dwSurfaceWidth),
+            std::int64_t(rect.left) + rect.right);
+        const auto bottom = (std::min)(std::int64_t(src->dwSurfaceHeight),
+            std::int64_t(rect.top) + rect.bottom);
+        if (left >= right || top >= bottom) return;
+        for (auto y = top; y < bottom; ++y)
+            memcpy(pixels.data() + size_t(y) * src->cpuImage->pitch + size_t(left) * 4,
+                scaled->pixels + size_t(y - rect.top) * scaled->rowPitch + size_t(left - rect.left) * 4,
+                size_t(right - left) * 4);
+        src->ownedSurface.BeginWrite();
+        src->cpuImage->pixels = std::move(pixels);
+        IfFailedThrowHR(src->PublishSurface() ? S_OK : E_FAIL);
+        return;
+    }
     src->ownedSurface.BeginWrite();
     const HRESULT hr = ApplyOwnedSurfaceEffect(pDX11->GetRendererFacade(),
         textureView.Get(), src->texture.Get(), &rect, false);
@@ -912,6 +971,24 @@ HRESULT CDXGISurface::BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DW
             return hr;
         });
         if (FAILED(ready)) return ready;
+    }
+    if (cpuImage) {
+        if (hDc || uiRecordingDc) return DXGI_ERROR_INVALID_CALL;
+        OwnedRender::E1SurfaceCpuImage image;
+        bool mask = false;
+        const HRESULT captured = facade.Visit([&](owned::Renderer& renderer) {
+            mask = renderer.embedded_hit_test_frame();
+            return OwnedRender::E1CaptureNativeTarget(renderer, dwSurfaceWidth, dwSurfaceHeight, image);
+        });
+        // The caller tests FAILED before reading pixels. An unavailable output
+        // must invalidate this capture attempt rather than expose an older frame.
+        if (captured != S_OK) return FAILED(captured) ? captured : E_PENDING;
+        ownedSurface.BeginWrite();
+        cpuImage->pixels = std::move(image.pixels);
+        if (!PublishSurface()) return E_FAIL;
+        captureUsedBoundTarget = false;
+        captureDifferentFromBufferZero = mask;
+        return S_OK;
     }
     struct Capture { CDXGISurface* surface; bool composed; bool mask = false; } capture{this, composedOutput};
     const auto copy = [](void* user, ID3D11DeviceContext* context, ID3D11Texture2D* backbuffer) -> HRESULT {

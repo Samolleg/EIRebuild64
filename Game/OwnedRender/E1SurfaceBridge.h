@@ -21,6 +21,10 @@ HRESULT E1ResolveSurface(void*, ID3D11Device* device, std::uint64_t id,
 // surface without tone mapping or interpolation of color-coded hit-test masks.
 HRESULT E1CaptureTarget(ID3D11DeviceContext* context, ID3D11Texture2D* source,
     UINT width, UINT height, DXGI_FORMAT format, E1SurfaceCpuImage& image) noexcept;
+// Read the native output (or private hit-test target) and point-scale BGRA
+// pixels to the source surface dimensions, preserving lossless mask codes.
+HRESULT E1CaptureNativeTarget(owned::Renderer& renderer, UINT width, UINT height,
+    E1SurfaceCpuImage& image) noexcept;
 // Read one completed published surface into the CPU image consumed by c56 blit.
 HRESULT E1ReadbackSurface(ID3D11Device* device, ID3D11DeviceContext* context,
     std::uint64_t id, E1SurfaceCpuImage& image) noexcept;

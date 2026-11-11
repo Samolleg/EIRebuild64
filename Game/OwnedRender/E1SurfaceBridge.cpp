@@ -66,6 +66,42 @@ HRESULT E1CaptureTarget(ID3D11DeviceContext* context, ID3D11Texture2D* source,
     return S_OK;
 } catch (...) { image = {}; return E_OUTOFMEMORY; }
 
+HRESULT E1CaptureNativeTarget(owned::Renderer& renderer, UINT width, UINT height,
+    E1SurfaceCpuImage& image) noexcept try {
+    image = {};
+    const std::size_t rowBytes = std::size_t(width) * sizeof(DWORD);
+    if (!width || !height || rowBytes > (std::numeric_limits<LONG>::max)() ||
+        rowBytes > (std::numeric_limits<std::size_t>::max)() / height)
+        return E_INVALIDARG;
+    std::vector<std::uint8_t> captured;
+    UINT sourceWidth = 0, sourceHeight = 0;
+    const HRESULT hr = renderer.read_embedded_d3d12_output(captured, sourceWidth, sourceHeight);
+    if (hr != S_OK) return hr;
+    // Native readback validates the complete, tightly packed BGRA allocation.
+    if (sourceWidth == width && sourceHeight == height) {
+        image.pixels = std::move(captured);
+    } else {
+        DirectX::Image source{};
+        source.width = sourceWidth; source.height = sourceHeight;
+        source.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        source.rowPitch = std::size_t(sourceWidth) * sizeof(DWORD);
+        source.slicePitch = captured.size(); source.pixels = captured.data();
+        DirectX::ScratchImage resized;
+        const HRESULT scaled = DirectX::Resize(source, width, height,
+            DirectX::TEX_FILTER_POINT | DirectX::TEX_FILTER_FORCE_NON_WIC, resized);
+        if (FAILED(scaled)) return scaled;
+        const auto* pixels = resized.GetImage(0, 0, 0);
+        if (!pixels || pixels->rowPitch < rowBytes) return E_FAIL;
+        image.pixels.resize(rowBytes * height);
+        for (UINT y = 0; y < height; ++y)
+            std::memcpy(image.pixels.data() + std::size_t(y) * rowBytes,
+                pixels->pixels + std::size_t(y) * pixels->rowPitch, rowBytes);
+    }
+    image.width = width; image.height = height;
+    image.pitch = static_cast<LONG>(rowBytes); image.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    return S_OK;
+} catch (...) { image = {}; return E_OUTOFMEMORY; }
+
 HRESULT E1ReadbackSurface(ID3D11Device* device, ID3D11DeviceContext* context,
     std::uint64_t id, E1SurfaceCpuImage& image) noexcept try {
     static E1PerfCounter counter{"ui_readback"};
