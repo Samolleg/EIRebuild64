@@ -1019,6 +1019,10 @@ public:
     HRESULT clear(DWORD flags, D3DCOLOR color, float z, DWORD stencil) {
         return clear(0, nullptr, flags, color, z, stencil);
     }
+    // S_FALSE borrows active rendering (or selects D3D11). S_OK gives
+    // the caller ownership of the corresponding finish boundary.
+    HRESULT begin_embedded_simulation();
+    void finish_embedded_frame();
     HRESULT begin_engine_frame();
     HRESULT retire_embedded_world();
     RendererMemoryCounters read_memory_counters();

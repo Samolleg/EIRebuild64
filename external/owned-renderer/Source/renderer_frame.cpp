@@ -999,6 +999,21 @@ RendererMemoryCounters Renderer::read_memory_counters(){
  out.neighbours=neighbours_.accepted.size();
  return out;
 }
+HRESULT Renderer::begin_embedded_simulation(){
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ if(!d3d12_)return S_FALSE;
+ if(embedded_d3d12_failed_)return E_FAIL;
+ return embedded_d3d12_.begin_simulation(configured_integer(debug_overlay_.config(),"reflex",0));
+#else
+ return S_FALSE;
+#endif
+}
+void Renderer::finish_embedded_frame(){
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ if(d3d12_)embedded_d3d12_.finish_render();
+#endif
+}
+
 HRESULT Renderer::begin_engine_frame(){
  // The world epoch is read here, on the game thread, once. A new epoch
  // releases world state on both sides (release_world_state with the bridge's
@@ -1046,6 +1061,11 @@ HRESULT Renderer::begin_engine_frame_at(std::uint64_t world_epoch){
  // the following engine frame. Normal map Draw consumes these itself.
  discard_world_map_markers();
  if(d3d12_){
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+  if(embedded_d3d12_failed_)return E_FAIL;
+  const HRESULT phase=embedded_d3d12_.begin_render(configured_integer(debug_overlay_.config(),"reflex",0));
+  if(FAILED(phase))return fail_embedded_d3d12("begin render phase",phase,embedded_d3d12_.failure());
+#endif
   // D3D12 backend: the previous invocation's UI, then a new frame index for
   // the UI's per-frame bookkeeping and the world target bound (as rtv_/dsv_
   // are on D3D11) until the composite.
@@ -1742,6 +1762,10 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
 HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
  if(d3d12_){
+  struct FinishPhase {
+   EmbeddedD3D12& owner;
+   ~FinishPhase(){owner.finish_render();}
+  } finish_phase{embedded_d3d12_};
   if(embedded_d3d12_failed_)return E_FAIL;
   HRESULT hr;
   try{hr=present_frame_d3d12(inputs);}

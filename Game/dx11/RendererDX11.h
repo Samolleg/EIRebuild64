@@ -100,6 +100,8 @@ public:
 
 
 
+    bool BeginSimulation();
+    void FinishSimulation() noexcept;
     void BeginFrame();
     bool BeginWorld(const EIRenderWorldFrameV2& frame);
     void EndWorld();

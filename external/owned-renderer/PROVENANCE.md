@@ -1,3 +1,23 @@
+# X64D3D12 local input/simulation/render phases, stage 25 (2026-11-11)
+
+GameMain now opens the embedded simulation before queued input dispatch and
+idle simulation. Queued messages share the simulation ID and Reflex Sleep.
+The idle scope closes skipped simulation and exception exits. Engine-frame
+begin transfers its QPC/ID to the author's Reflex/executor state. Loading,
+capture and nested draws can start their own render invocation. Present,
+capture-only discard and failed BeginFrame close the render phase. The
+executor's existing render-end marker deduplicates the present boundary.
+The source frame gate serializes these transitions with the renderer.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}; source
+boundaries are Game/GameMain.cpp and Game/dx11/RendererDX11.{h,cpp}, with
+dispatch in Source/renderer_frame.cpp. No HLSL, SDK or runtime DLL added.
+
+Full BRIEF remains open. Secondary figure/wound composition, fixed-function
+source draws and remaining sprite/SRV boundaries still need native adapters.
+Continue with those source drawing blockers before the coordinator builds.
+No compilation, shader compilation, tests or game run performed. Build/link,
+D3D12 startup/FG, nested loading/capture and D3D11 regression are unverified.
+
 # X64D3D12 native camp figure boundary, stage 24 (2026-11-11)
 
 Camp figure submissions now read the native viewport through Renderer instead

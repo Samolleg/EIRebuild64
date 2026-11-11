@@ -19,8 +19,9 @@ public:
     // Serialized frame owner only: before input/simulation, before drawing,
     // and after Renderer::present_frame, including failed/omitted presents.
     // Replace core_host's game-release and present-record boundaries.
+    // Repeated input calls share one simulation; rendering returns S_FALSE.
     HRESULT begin_simulation(int reflex_mode) noexcept;
-    HRESULT begin_render() noexcept;
+    HRESULT begin_render(int reflex_mode) noexcept;
     void finish_render() noexcept;
     bool dlss_caps(x64remote::DlssCaps& out) const noexcept;
     bool dlss_size(UINT width, UINT height, int mode, UINT& w, UINT& h) noexcept;

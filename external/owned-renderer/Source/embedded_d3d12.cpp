@@ -93,7 +93,9 @@ bool EmbeddedD3D12::initialize(HWND window, std::string& reason) noexcept {
 
 D3D12Frame* EmbeddedD3D12::frame() const noexcept { return state_ ? state_->executor.get() : nullptr; }
 HRESULT EmbeddedD3D12::begin_simulation(int reflex_mode) noexcept {
-    if (!state_ || state_->phase != State::Phase::idle) return E_UNEXPECTED;
+    if (!state_) return E_UNEXPECTED;
+    if (state_->phase == State::Phase::rendering) return S_FALSE;
+    if (state_->phase == State::Phase::simulation) return S_OK;
     // Author's Sleep-before-game-release boundary, now before local input.
     reflex::configure(state_->executor->device(), reflex_mode);
     reflex::sleep();
@@ -105,8 +107,17 @@ HRESULT EmbeddedD3D12::begin_simulation(int reflex_mode) noexcept {
     state_->phase = State::Phase::simulation;
     return S_OK;
 }
-HRESULT EmbeddedD3D12::begin_render() noexcept {
-    if (!state_ || state_->phase != State::Phase::simulation) return E_UNEXPECTED;
+HRESULT EmbeddedD3D12::begin_render(int reflex_mode) noexcept {
+    if (!state_) return E_UNEXPECTED;
+    // A nested loading draw seals the prior engine invocation at this point.
+    if (state_->phase == State::Phase::rendering) finish_render();
+    // Loading movies and repeated capture/present calls can draw without an
+    // outer game simulation. Give each such render its own local frame ID.
+    if (state_->phase == State::Phase::idle) {
+        const HRESULT hr = begin_simulation(reflex_mode);
+        if (FAILED(hr)) return hr;
+    }
+    if (state_->phase != State::Phase::simulation) return E_UNEXPECTED;
     // The executor and asynchronous pacer receive the real simulation QPC.
     reflex::set_frame(state_->serial, state_->simulation_start);
     reflex::marker(reflex::Marker::simulation_end, state_->serial);
@@ -115,7 +126,13 @@ HRESULT EmbeddedD3D12::begin_render() noexcept {
     return S_OK;
 }
 void EmbeddedD3D12::finish_render() noexcept {
-    if (!state_ || state_->phase != State::Phase::rendering) return;
+    if (!state_ || state_->phase == State::Phase::idle) return;
+    // A skipped draw still closes its simulation, without a present sample.
+    if (state_->phase == State::Phase::simulation) {
+        reflex::marker(reflex::Marker::simulation_end, state_->serial);
+        state_->phase = State::Phase::idle;
+        return;
+    }
     // Deduplicated by Reflex when executor::present already sent render_end.
     // Also close frames that never reached Present, as core_host does.
     reflex::marker(reflex::Marker::render_end, state_->serial);

@@ -610,8 +610,33 @@ bool CDX11::SubmitC74CombatText(const owned::EmbeddedCombatTextInput& input)
     return FinishC74Effect(hr, "combat_text_skipped");
 }
 
+bool CDX11::BeginSimulation()
+{
+    if (!rendererFacade || !rendererFacade->Ready()) return false;
+    const auto access = ownedRenderer.LockFrame();
+    const HRESULT hr = rendererFacade->Visit([](owned::Renderer& renderer) {
+        return renderer.begin_embedded_simulation();
+    });
+    IfFailedThrowHR(hr);
+    return hr == S_OK;
+}
+void CDX11::FinishSimulation() noexcept
+{
+    if (!rendererFacade || !rendererFacade->Ready()) return;
+    const auto access = ownedRenderer.LockFrame();
+    (void)rendererFacade->Visit([](owned::Renderer& renderer) {
+        renderer.finish_embedded_frame();
+        return S_OK;
+    });
+}
+
 void CDX11::BeginFrame()
 {
+    struct FailedPhase {
+        CDX11& owner;
+        bool complete = false;
+        ~FailedPhase() { if (!complete) owner.FinishSimulation(); }
+    } phase{*this};
     ReportC56FigureSkipSummary();
     // c73 separates authoritative engine frames from D3D scene brackets.
     // Reopen world composition and advance per-frame caches before BeginScene
@@ -628,6 +653,7 @@ void CDX11::BeginFrame()
             &G_CLEAR_DEPTH_VALUE);
     }));
     SetRenderStates();
+    phase.complete = true;
 }
 
 bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
@@ -850,6 +876,11 @@ void CDX11::RefreshOwnedTargets()
 
 void CDX11::EndFrame(bool present)
 {
+    // Close capture-only frames and all early/failed presentation exits.
+    struct FinishPhase {
+        CDX11& owner;
+        ~FinishPhase() { owner.FinishSimulation(); }
+    } finishPhase{*this};
     ReportC56FigureSkipSummary();
     owned::bridge_set_screen_rectangle_sink(nullptr, nullptr);
     if (!present) {
