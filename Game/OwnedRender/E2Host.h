@@ -3,6 +3,8 @@
 #include <cstdint>
 
 namespace OwnedRender {
+// Consume the first fatal backend error outside renderer code.
+bool E2TakeD3D12Failure(char (&text)[2048]) noexcept;
 // Direct host scopes; no retail return addresses or persisted world pointers.
 enum class Pass { unknown, frame, ui };
 class E2PassScope {
