@@ -256,9 +256,8 @@ inline HRESULT compile_shader(const ShaderProgram& program, ID3DBlob** code, ID3
 
 // The shader objects of one device, created by its preparations and handed to
 // every feature that creates the same bytecode for the same stage
-// (create_shader). The driver translates bytecode in Create*Shader and its
-// disk cache is off (32-bit address space), so a discarded object would be
-// translated again at first use: ~18 ms a program on the thread that draws.
+// (create_shader). Keeping the objects avoids another Create*Shader call on
+// the drawing thread, even when the driver has cached its translated bytecode.
 // The renderer creates one per device (attach), and clears and detaches it
 // before the device goes (detach): the objects hold their device.
 class ShaderObjects final : public IUnknown {
@@ -423,6 +422,10 @@ public:
     ShaderPreparation(const ShaderPreparation&) = delete;
     ShaderPreparation& operator=(const ShaderPreparation&) = delete;
 
+    unsigned worker_count() const noexcept {
+        if (programs_.empty()) return 0;
+        return (std::max)(1u, static_cast<unsigned>(workers_.size()));
+    }
     std::size_t total() const noexcept { return programs_.size(); }
     std::size_t done() const noexcept { return done_.load(); }
     std::size_t compiled() const noexcept { return compiled_.load(); }  // had no table entry
