@@ -538,6 +538,67 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
  return S_OK;
 }
 
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+HRESULT Renderer::fail_embedded_d3d12(const char* operation,HRESULT result,const char* reason) noexcept{
+ if(!embedded_d3d12_failed_){
+  embedded_d3d12_failed_=true;
+  char text[2048]{};
+  std::snprintf(text,sizeof(text),"Direct3D 12: %s failed (0x%08lx). %s\nRestart with Direct3D 11 selected in Config64\\rddraw.ini (renderer_backend=0), or update your graphics driver.",
+   operation,static_cast<unsigned long>(result),reason&&*reason?reason:"See the engine journal for details.");
+  bridge_report_event("d3d12_failed",text);
+  MessageBoxA(hwnd_,text,"EIRebuild64 - Direct3D 12",MB_OK|MB_ICONERROR);
+ }
+ return FAILED(result)?result:E_FAIL;
+}
+// Caller registers/loads configuration and sets hwnd_/output dimensions first.
+// Deliberately not selected from ensure_with_driver until source GPU adapters
+// no longer require visit_embedded_device/visit_embedded_output after ensure.
+HRESULT Renderer::ensure_embedded_d3d12(){
+ if(d3d12_)return embedded_d3d12_failed_?E_FAIL:S_OK;
+ std::string reason;
+ if(!embedded_d3d12_.initialize(hwnd_,reason))return fail_embedded_d3d12("device/swap chain creation",E_FAIL,reason.c_str());
+ d3d12_=embedded_d3d12_.frame();
+ const auto failed=[&](const char* step,HRESULT hr){
+  fail_embedded_d3d12(step,hr,embedded_d3d12_.failure());
+  release();
+  return hr;
+ };
+ try{
+  debug_overlay_set_running_renderer("64-bit embedded, Direct3D 12",false);
+  debug_overlay_set_running_d3d12(true);
+  if(IDXGIAdapter* adapter=d3d12_->adapter())adapter->QueryInterface(IID_PPV_ARGS(adapter3_.ReleaseAndGetAddressOf()));
+  debug_overlay_.set_renderer(&d3d12_->overlay_renderer());
+  HRESULT hr=debug_overlay_.initialize(hwnd_,nullptr,nullptr,nullptr,d3d12_->adapter());
+  if(FAILED(hr))return failed("overlay initialization",hr);
+  auto& config=debug_overlay_.config();
+  migrate_settings(config,renderer_config_path().c_str());
+  debug_overlay_.sync_interface_profile();recover_shader_crash();
+  apply_config_settings();
+  {x64remote::DlssCaps caps{};
+   const bool available=embedded_d3d12_.dlss_caps(caps);
+   caps.reason[sizeof(caps.reason)-1]=0;
+   set_dlss_unavailable_reason(available?nullptr:(caps.reason[0]?caps.reason:"not available"));}
+  set_fsr_unavailable_reason(Fsr2UpscalerD3D12::unavailable_reason(*d3d12_));
+  render_scale_percent_=std::clamp(configured_integer(config,"render_scale",100),kRenderScaleMinimum,100);
+  dlss_mode_=configured_dlss_mode();fsr_mode_=configured_fsr_mode();set_world_size();
+  scene_composited_=true;
+  retained_visual_scene().visual_set_surface_texture_retainer(&Renderer::retain_detached_surface_texture,this);
+  register_embedded_shaders();
+  profiler_.set_timestamps(&d3d12_->profile_timestamps());
+  if(FAILED(hr=profiler_.initialize(nullptr,nullptr)))return failed("profiler initialization",hr);
+  neighbour_maps_set_d3d12(d3d12_->preparer());
+  if(FAILED(hr=native_d3d12_ensure()))return failed("native pipeline initialization",hr);
+  frame_statistics_.reset();system_telemetry_snapshot_={};system_telemetry_active_=false;
+  system_telemetry_.start(adapter3_.Get());start_liquid_maps_job();
+  if(!embedded_sky().attach(this))return failed("sky attachment",E_UNEXPECTED);
+  embedded_d3d12_failed_=false;
+  bridge_report_event("renderer_backend","Direct3D 12 embedded executor initialized");
+  return S_OK;
+ }catch(const std::bad_alloc&){return failed("initialization allocation",E_OUTOFMEMORY);}
+ catch(...){return failed("initialization exception",E_FAIL);}
+}
+#endif
+
 // The player and developer options (eid3d11.ini [graphics] and friends):
 // registered in every Renderer, so a core-mode game process (which owns the
 // ini) and the x64 host (which applies the values it is sent) share one list.

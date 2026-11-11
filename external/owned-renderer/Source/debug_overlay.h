@@ -266,7 +266,7 @@ public:
     const RendererConfig& config() const noexcept { return config_; }
 
     HRESULT initialize(HWND window, ID3D11Device* device, ID3D11DeviceContext* context,
-                       const wchar_t* config_path = nullptr);
+                       const wchar_t* config_path = nullptr, IDXGIAdapter* native_adapter = nullptr);
     // Core mode (EI_RENDERER_X64_CORE, no D3D11 device in the game process): the
     // ini and the menu language only (initialized() stays false).
     void load_config_only(const wchar_t* config_path = nullptr);
@@ -277,7 +277,8 @@ public:
     HRESULT initialize_host(HWND window, ID3D11Device* device, ID3D11DeviceContext* context,
                             const wchar_t* config_path);
     // Before initialize: the overlay draws through renderer instead of the
-    // D3D11 backend (the device then only answers adapter queries). The combat
+    // D3D11 backend. Device/context may be null; native_adapter then supplies
+    // first-run recommendations and the video-memory budget. The combat
     // UI's icon atlas is an ImGui user texture, so it draws on either.
     void set_renderer(OverlayRenderer* renderer) noexcept { renderer_ = renderer; }
     void set_external_focus(bool focused) noexcept;

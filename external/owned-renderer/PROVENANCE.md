@@ -1,3 +1,35 @@
+# X64D3D12 native startup preparation, stage 14 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+Prepared Renderer::ensure_embedded_d3d12 adapts ensure_host_d3d12 to the
+local executor/NGX, native game window/input and embedded sky. It initializes
+the native pipelines, neighbour preparer, settings, telemetry and SR caps,
+with a journal event and player error message on startup failure. It never
+creates a D3D11 device or sets core_host_. It is not yet called by ensure().
+
+DebugOverlay now accepts the executor's real DXGI adapter without a D3D11
+device/context when its external OverlayRenderer is supplied. First-run
+recommendations and video-memory budgets retain the author's algorithms;
+the normal native window subclass/input ownership stays in the game.
+RenderProfiler initialization, begin_frame and resolve now accept its GPU
+timestamps without a D3D11 context. Existing D3D11 callers are unchanged.
+No HLSL, rendering algorithms, SDKs, DLL lists or pose/SKN changes this stage.
+
+Concrete activation dependency: Game/dx11/RendererDX11.cpp::InitializeDX
+unconditionally calls VisitDevice/VisitOutput after ensure, then creates
+D3D11 states. BeginFrame, RefreshOwnedTargets, ClearColor/Z and screenshot
+also require those leases; CaptureC56MaterialState reads a D3D11 viewport.
+The source texture/surface adapters still use D3D11 device/context/SRVs.
+Switching ensure to the local executor alone therefore fails before the menu.
+Next adapt those source GPU boundaries to typed renderer operations/resources,
+then load/latch renderer_backend before device creation and call the prepared
+startup; enable ready/begin_scene, composite/present dispatch and local
+simulation/render boundaries together. Add explicit runtime/removal errors.
+Do not route the source through core_host_ or a substitute D3D11 device.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}.
+No compilation, shader compilation, tests or game run was performed.
+Build/link, initial/repeated startup and GPU behavior remain unverified.
+
 # X64D3D12 executor retirement boundary, stage 13 (2026-11-11)
 
 Incomplete runtime integration. renderer_backend=1 still creates D3D11.

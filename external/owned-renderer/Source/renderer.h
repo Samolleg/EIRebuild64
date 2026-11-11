@@ -926,6 +926,10 @@ class Renderer {
     // Startup binds frame() only after configuration selects D3D12.
     EmbeddedD3D12 embedded_d3d12_;
     bool embedded_d3d12_presented_ = false;
+    bool embedded_d3d12_failed_ = false;
+    // Prepared startup; connect only with the source CDX11 device adapters.
+    HRESULT ensure_embedded_d3d12();
+    HRESULT fail_embedded_d3d12(const char* operation, HRESULT result, const char* reason = nullptr) noexcept;
 #endif
     friend struct ContactBlendSmokeAccess;
     friend struct LiquidSurfaceSmokeAccess;
