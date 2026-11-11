@@ -7,6 +7,7 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cwchar>
+#include <filesystem>
 
 namespace d3d12 {
 // Factory implemented by the author's Host/d3d12/d3d12_frame.cpp.
@@ -73,7 +74,7 @@ bool EmbeddedD3D12::initialize(HWND window, std::string& reason) noexcept {
         }
         const std::wstring base = std::wstring(local) + L"\\EIRebuild64";
         const std::wstring cache = base + L"\\D3D12";
-        const std::wstring ngx_data = base + L"\\NGX";
+        const std::wstring ngx_data = (std::filesystem::path(exe).parent_path() / L"Logs64").wstring();
         if (!directory(base, reason) || !directory(cache, reason) || !directory(ngx_data, reason)) return false;
         auto state = std::make_unique<State>();
         state->executor = d3d12::create_frame_executor(window, cache + L"\\", reason);

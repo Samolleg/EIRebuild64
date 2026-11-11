@@ -10,14 +10,80 @@
 #include <nvsdk_ngx_helpers.h>
 #include <nvsdk_ngx_helpers_dlssg_d3d.h>
 #include <dxgiformat.h>
+#include <d3d12.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <chrono>
 #include <cstring>
+#ifdef EID3D11_EMBEDDED
+#include "../Source/engine_bridge.h"
+#endif
 
 namespace remote {
 namespace {
 
+#ifdef EID3D11_EMBEDDED
+// NGX can call from its worker threads. The engine journal is asynchronous
+// and thread-safe. Split messages below its 768-byte bridge detail limit.
+void NVSDK_CONV ngx_log_callback(const char* message, NVSDK_NGX_Logging_Level level, NVSDK_NGX_Feature source) {
+    if (!message) return;
+    while (*message) {
+        char text[720];
+        const std::size_t count = (std::min)(std::strlen(message), std::size_t(600));
+        std::snprintf(text, sizeof(text), "NGX level=%u feature=%u %.*s", unsigned(level), unsigned(source), int(count), message);
+        owned::bridge_report_event("d3d12_ngx_sdk", text);
+        message += count;
+    }
+}
+#endif
+
+void log_fg_inputs(Dlss::Log log, NVSDK_NGX_Parameter* parameters, ID3D12GraphicsCommandList* list, ID3D12Resource* const* resources,
+                   const NVSDK_NGX_DLSSG_Opt_Eval_Params& opt) noexcept {
+    if (!log) return;
+    char text[720];
+    const char* create_keys[] = {NVSDK_NGX_Parameter_Width, NVSDK_NGX_Parameter_Height,
+        NVSDK_NGX_DLSSG_Parameter_InternalWidth, NVSDK_NGX_DLSSG_Parameter_InternalHeight,
+        NVSDK_NGX_DLSSG_Parameter_BackbufferFormat, NVSDK_NGX_DLSSG_Parameter_DynamicResolution,
+        NVSDK_NGX_Parameter_CreationNodeMask, NVSDK_NGX_Parameter_VisibilityNodeMask};
+    for (const char* key : create_keys) {
+        unsigned value = 0;
+        const NVSDK_NGX_Result result = NVSDK_NGX_Parameter_GetUI(parameters, key, &value);
+        std::snprintf(text, sizeof(text), "DLSSG parameter %s=%u (get=0x%08x)", key, value, unsigned(result));
+        log(text);
+    }
+    std::snprintf(text, sizeof(text), "DLSSG list=%p type=%u multiFrameCount=%u multiFrameIndex=%u jitter=(%g,%g) mvecScale=(%g,%g) reset=%u HDR=%u depthInverted=%u cameraMotionIncluded=%u notRenderingGameFrames=%u",
+                  static_cast<void*>(list), unsigned(list->GetType()), opt.multiFrameCount, opt.multiFrameIndex,
+                  opt.jitterOffset[0], opt.jitterOffset[1], opt.mvecScale[0], opt.mvecScale[1], unsigned(opt.reset),
+                  unsigned(opt.colorBuffersHDR), unsigned(opt.depthInverted), unsigned(opt.cameraMotionIncluded), unsigned(opt.notRenderingGameFrames));
+    log(text);
+    constexpr unsigned shader_read = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    const unsigned states[] = {shader_read, shader_read | D3D12_RESOURCE_STATE_DEPTH_READ, shader_read, shader_read, D3D12_RESOURCE_STATE_UNORDERED_ACCESS};
+    const char* names[] = {"Backbuffer", "Depth", "MVecs", "HUDLess", "OutputInterpolated"};
+    for (unsigned i = 0; i < 5; ++i) {
+        const D3D12_RESOURCE_DESC desc = resources[i] ? resources[i]->GetDesc() : D3D12_RESOURCE_DESC{};
+        // record_external transitions to these states before entering NGX.
+        std::snprintf(text, sizeof(text), "DLSSG %s=%p format=%u size=%llux%u dimension=%u flags=0x%x samples=%u stateAtEntry=0x%x",
+                      names[i], static_cast<void*>(resources[i]), unsigned(desc.Format), static_cast<unsigned long long>(desc.Width), desc.Height,
+                      unsigned(desc.Dimension), unsigned(desc.Flags), desc.SampleDesc.Count, states[i]);
+        log(text);
+    }
+    log("DLSSG UI/UIAlpha/BidirectionalDistortionField/OutputReal/OutputDisableInterpolation=null; all subrect bases/sizes=0; pinhole=(0,0); minRelativeLinearDepthObjectSeparation=0");
+    std::snprintf(text, sizeof(text), "DLSSG camera near=%g far=%g fov=%g aspect=%g pos=(%g,%g,%g) up=(%g,%g,%g) right=(%g,%g,%g) fwd=(%g,%g,%g)",
+                  opt.cameraNear, opt.cameraFar, opt.cameraFOV, opt.cameraAspectRatio,
+                  opt.cameraPos[0], opt.cameraPos[1], opt.cameraPos[2], opt.cameraUp[0], opt.cameraUp[1], opt.cameraUp[2],
+                  opt.cameraRight[0], opt.cameraRight[1], opt.cameraRight[2], opt.cameraFwd[0], opt.cameraFwd[1], opt.cameraFwd[2]);
+    log(text);
+    const float (*matrices[])[4] = {opt.cameraViewToClip, opt.clipToCameraView, opt.clipToLensClip, opt.clipToPrevClip, opt.prevClipToClip};
+    const char* matrix_names[] = {"CameraViewToClip", "ClipToCameraView", "ClipToLensClip", "ClipToPrevClip", "PrevClipToClip"};
+    for (unsigned i = 0; i < 5; ++i) {
+        for (unsigned row = 0; row < 4; ++row) {
+            const float* m = matrices[i][row];
+            std::snprintf(text, sizeof(text), "DLSSG %s[%u]=(%g,%g,%g,%g)", matrix_names[i], row, m[0], m[1], m[2], m[3]);
+            log(text);
+        }
+    }
+}
 // Our fixed NGX project id (custom engine).
 #ifdef EID3D11_EMBEDDED
 constexpr char kProjectId[] = "666beccc-e6e1-4a4e-b13e-5bb45c14de81"; // EIRebuild64
@@ -85,6 +151,12 @@ void Dlss::initialize_d3d12_owned(ID3D12Device* device, x64remote::Capabilities&
     paths_[0] = folder_.c_str();
     info_.PathListInfo.Path = paths_;
     info_.PathListInfo.Length = 1;
+#ifdef EID3D11_EMBEDDED
+    info_.LoggingInfo.LoggingCallback = &ngx_log_callback;
+    info_.LoggingInfo.MinimumLoggingLevel = NVSDK_NGX_LOGGING_LEVEL_VERBOSE;
+    info_.LoggingInfo.DisableOtherLoggingSinks = false;
+    if (log_) log_("NGX D3D12 verbose logging enabled in Logs64 (SDK callback also in engine journal)");
+#endif
     const NVSDK_NGX_Result result = NVSDK_NGX_D3D12_Init_with_ProjectID(kProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM, "1.0",
 #ifdef EID3D11_EMBEDDED
                                                                         data_folder_.c_str(), device, &info_, NVSDK_NGX_Version_API);
@@ -393,13 +465,6 @@ bool Dlss::evaluate_frame_generation_owned(ID3D12GraphicsCommandList* list, cons
     eval.pHudless = resources[3];
     eval.pOutputInterpFrame = resources[4];
     NVSDK_NGX_DLSSG_Opt_Eval_Params opt{};
-    // The SDK helper writes every subrect, including zero-initialized sizes.
-    // Describe the active regions explicitly for mixed input/output resolutions.
-    opt.backbufferSubrectSize = {record.width, record.height};
-    opt.outputInterpSubrectSize = {record.width, record.height};
-    opt.depthSubrectSize = {record.render_w, record.render_h};
-    opt.mvecsSubrectSize = {record.render_w, record.render_h};
-    if (resources[3]) opt.hudLessSubrectSize = {record.width, record.height};
     opt.multiFrameCount = 1;
     opt.multiFrameIndex = 1;
     std::memcpy(opt.cameraViewToClip, record.view_to_clip, sizeof(opt.cameraViewToClip));
@@ -426,6 +491,7 @@ bool Dlss::evaluate_frame_generation_owned(ID3D12GraphicsCommandList* list, cons
     opt.notRenderingGameFrames = false;  // such presents are not evaluated at all
     const NVSDK_NGX_Result result = NGX_D3D12_EVALUATE_DLSSG(list, fg_feature_, parameters_, &eval, &opt);
     if (NVSDK_NGX_FAILED(result)) {
+        log_fg_inputs(log_, parameters_, list, resources, opt);
         std::snprintf(error, error_bytes, "DLSS Frame Generation evaluate failed (NVSDK_NGX_Result 0x%08x)", static_cast<unsigned>(result));
         return false;
     }
