@@ -393,6 +393,13 @@ bool Dlss::evaluate_frame_generation_owned(ID3D12GraphicsCommandList* list, cons
     eval.pHudless = resources[3];
     eval.pOutputInterpFrame = resources[4];
     NVSDK_NGX_DLSSG_Opt_Eval_Params opt{};
+    // The SDK helper writes every subrect, including zero-initialized sizes.
+    // Describe the active regions explicitly for mixed input/output resolutions.
+    opt.backbufferSubrectSize = {record.width, record.height};
+    opt.outputInterpSubrectSize = {record.width, record.height};
+    opt.depthSubrectSize = {record.render_w, record.render_h};
+    opt.mvecsSubrectSize = {record.render_w, record.render_h};
+    if (resources[3]) opt.hudLessSubrectSize = {record.width, record.height};
     opt.multiFrameCount = 1;
     opt.multiFrameIndex = 1;
     std::memcpy(opt.cameraViewToClip, record.view_to_clip, sizeof(opt.cameraViewToClip));
