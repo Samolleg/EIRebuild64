@@ -1652,7 +1652,7 @@ HRESULT Renderer::resolve_native_pose(NativeWorldGeometry::Pose* pose,const Nati
  UINT node,NativeQueuedDraw& draw){
  if(!pose)return S_OK;
  auto& source=*pose;
- if(!source.binding||!source.binding->model||node>=source.binding->tracks.size()||
+ if(!source.binding||!source.binding->model||node>=source.binding->tracks.size()+source.skin_palette.size()||
     !std::isfinite(source.fraction)||source.fraction<0||source.fraction>1||!std::isfinite(source.height_scale))return E_INVALIDARG;
  NativePoseGpu value{};value.frame=source.frame;value.fraction=source.fraction;value.height_scale=source.height_scale;
  value.root_to_world=source.root_to_world;std::copy(source.shape.begin(),source.shape.end(),value.shape);
@@ -2633,6 +2633,7 @@ HRESULT Renderer::queue_native(const NativeGeometryView& view,const FixedState& 
 
 HRESULT Renderer::queue_native_direct(const NativeGeometryView& view,const FixedState& st,
  ID3D11ShaderResourceView* texture,NativeGeometryResult* result){
+ if(view.skn_material.identity)return queue_native_owned_impl(view,native_owned_submission_state(st,view.owned_fixed_state),result,nullptr);
  if(texture){ComPtr<ID3D11Device> actual;texture->GetDevice(&actual);if(actual.Get()!=device_.Get())return E_INVALIDARG;}
  return queue_native_impl(view,st,nullptr,result,false,texture,
   static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(texture)),1,false,0,nullptr);
@@ -3209,7 +3210,7 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
    if(!passes){++native_contribution_rejects_;continue;}
    if(!source.world.enabled||!source.world.record_revision||!source.owned_fixed_state.enabled||
       !source.prepared_mesh||!source.prepared_material||!submission.pose->binding||
-      source.world.pose_node>=submission.pose->binding->tracks.size())
+      source.world.pose_node>=submission.pose->binding->tracks.size()+submission.pose->skin_palette.size())
     return fail(E_INVALIDARG,"records.source");
    if(!pose_resolved){
     if(!set_native_world_clip(*submission.world_to_clip))return fail(E_FAIL,"records.clip_transition");
