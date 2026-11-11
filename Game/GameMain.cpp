@@ -1067,6 +1067,7 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     }
     catch (const std::exception& e)
     { GameJournal::AllocationFailureInCatch("GameMain");
+        if (GetRenderer()->GetD3D() && GetRenderer()->GetD3D()->D3D12Selected()) throw;
         EngineDiagnostics::Caught(e.what());
         return BAD_RESULT;
     }
@@ -1087,6 +1088,7 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
 #if defined(FINALRELEASE) && defined(NODEBUGINFO)
     catch (...)
     { GameJournal::AllocationFailureInCatch("GameMain");
+        if (GetRenderer()->GetD3D() && GetRenderer()->GetD3D()->D3D12Selected()) throw;
         EngineDiagnostics::Caught("Unhandled game-loop exception");
         return BAD_RESULT;
     }
@@ -1428,7 +1430,42 @@ static int RunMainEntry(HINSTANCE instance, HINSTANCE previous, LPSTR command, i
         RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
     }
     EngineDiagnostics::Note("Entering game startup");
-    return RunGame(instance, previous, command, show);
+    const auto nativeD3D12 = [] {
+        auto* renderer = GetRenderer();
+        return renderer && renderer->GetD3D() && renderer->GetD3D()->D3D12Selected();
+    };
+    const auto report = [](const char* reason) {
+        char text[2048]{};
+        _snprintf_s(text, sizeof(text), _TRUNCATE,
+            "Direct3D 12 rendering stopped: %s\nSee Logs64 for details. "
+            "You can select renderer_backend=0 in Config64\\rddraw.ini and restart.",
+            reason && *reason ? reason : "unknown rendering error");
+        GameJournal::Event("ERROR", "d3d12_render_exception", "reason=%s", GameJournal::Quote(text).c_str());
+        GameJournal::FlushCritical();
+        ErrorDialog::ShowA(nullptr, text, "EIRebuild64 - Direct3D 12", MB_OK | MB_ICONERROR);
+        return BAD_RESULT;
+    };
+    try { return RunGame(instance, previous, command, show); }
+    catch (CGameException* error) {
+        if (!nativeD3D12()) throw;
+        std::unique_ptr<CGameException> owned(error);
+        return report(error ? error->GetErrorString() : "null game exception");
+    }
+    catch (HRESULT error) {
+        if (!nativeD3D12()) throw;
+        char reason[64]{};
+        _snprintf_s(reason, sizeof(reason), _TRUNCATE, "render operation failed (0x%08lX)",
+            static_cast<unsigned long>(error));
+        return report(reason);
+    }
+    catch (const std::exception& error) {
+        if (!nativeD3D12()) throw;
+        return report(error.what());
+    }
+    catch (...) {
+        if (!nativeD3D12()) throw;
+        return report("unknown C++ rendering exception");
+    }
 }
 
 bool InspectRendererFacadeCheckCommandLine(int& result);

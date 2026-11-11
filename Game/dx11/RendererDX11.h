@@ -175,6 +175,7 @@ public:
     };
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> GetDeviceContext() { return deviceContext; };
     Microsoft::WRL::ComPtr<ID3D11Device> GetDevice() { return device; };
+    bool D3D12Selected() const noexcept { return rendererFacade && rendererFacade->D3D12Selected(); }
     OwnedSpriteBatch *GetSpriteBatch() { return spriteBatch.get(); };
     OwnedRendererClient &GetOwnedRenderer() { return ownedRenderer; };
     auto &GetRendererFacade() { return *rendererFacade; };

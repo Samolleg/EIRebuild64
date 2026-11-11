@@ -230,8 +230,12 @@ CDXGISurface::CDXGISurface(CDX11 *pDXDirectDraw, D3D11_TEXTURE2D_DESC *ptex2d)
     D3D11_TEXTURE2D_DESC normalized = *ptex2d;
     opaquePadding = normalized.Format == DXGI_FORMAT_B8G8R8X8_UNORM;
     normalized.Format = OwnedRgbSurfaceFormat(normalized.Format);
-    if (!CreateTexture(&normalized))
+    if (!CreateTexture(&normalized)) {
+        if (pDX11->D3D12Selected())
+            throw dbgnew CDXException("Direct3D 12: cannot create surface %ux%u format=%u mips=%u.\n",
+                normalized.Width, normalized.Height, unsigned(normalized.Format), normalized.MipLevels);
         throw dbgnew CDXException("Can't create surface.\n");
+    }
 
     ExtractSurfaceParams();
 }
@@ -260,7 +264,10 @@ BOOL CDXGISurface::CreateTexture(D3D11_TEXTURE2D_DESC *ptex2d)
             ptex2d->Height > UINT((std::numeric_limits<LONG>::max)()) ||
             size_t(ptex2d->Height) > (std::numeric_limits<size_t>::max)() / (size_t(ptex2d->Width) * 4) ||
             (ptex2d->Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
-             ptex2d->Format != DXGI_FORMAT_B5G6R5_UNORM) ||
+             ptex2d->Format != DXGI_FORMAT_B5G6R5_UNORM &&
+             ptex2d->Format != DXGI_FORMAT_BC1_UNORM &&
+             ptex2d->Format != DXGI_FORMAT_BC2_UNORM &&
+             ptex2d->Format != DXGI_FORMAT_BC3_UNORM) ||
             ptex2d->ArraySize != 1 || ptex2d->SampleDesc.Count != 1 || hDc || uiRecordingDc)
             return FALSE;
         auto image = std::make_shared<owned::SurfaceImage>();
@@ -275,6 +282,7 @@ BOOL CDXGISurface::CreateTexture(D3D11_TEXTURE2D_DESC *ptex2d)
         image->pixels.resize(size_t(image->pitch) * image->height, 0);
         ownedSurface.BeginWrite();
         cpuImage = std::move(image); cpuDesc = *ptex2d;
+        cpuUploadFormat = ptex2d->Format;
         // Save thumbnails request RGB565; their file writer performs the packing.
         // Native source storage and GDI always use canonical BGRA pixels.
         cpuDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -1046,9 +1054,37 @@ void CDXGISurface::UpdateTexture(UINT subresource_index, D3D11_BOX *region,
             box.left >= box.right || box.top >= box.bottom ||
             box.right > dwSurfaceWidth || box.bottom > dwSurfaceHeight)
             IfFailedThrowHR(E_INVALIDARG);
+        const UINT width = box.right - box.left;
+        if (cpuUploadFormat == DXGI_FORMAT_BC1_UNORM ||
+            cpuUploadFormat == DXGI_FORMAT_BC2_UNORM ||
+            cpuUploadFormat == DXGI_FORMAT_BC3_UNORM) {
+            // Keep the source BC format separate from canonical CPU/GDI storage.
+            // The native executor uploads the completed BGRA image and owns mips.
+            if (region) IfFailedThrowHR(E_INVALIDARG);
+            const size_t blockBytes = cpuUploadFormat == DXGI_FORMAT_BC1_UNORM ? 8 : 16;
+            const size_t pitch = size_t((width + 3) / 4) * blockBytes;
+            if (srd->SysMemPitch < pitch) IfFailedThrowHR(E_INVALIDARG);
+            DirectX::Image compressed{};
+            compressed.width = width; compressed.height = box.bottom - box.top;
+            compressed.format = cpuUploadFormat;
+            compressed.rowPitch = srd->SysMemPitch;
+            compressed.slicePitch = compressed.rowPitch * ((compressed.height + 3) / 4);
+            compressed.pixels = const_cast<BYTE*>(static_cast<const BYTE*>(srd->pSysMem));
+            DirectX::ScratchImage decoded;
+            IfFailedThrowHR(DirectX::Decompress(compressed, DXGI_FORMAT_B8G8R8A8_UNORM, decoded));
+            const auto* image = decoded.GetImage(0, 0, 0);
+            if (!image) IfFailedThrowHR(E_FAIL);
+            auto pixels = cpuImage->pixels;
+            for (UINT y = 0; y < compressed.height; ++y)
+                memcpy(pixels.data() + size_t(y) * cpuImage->pitch,
+                    image->pixels + size_t(y) * image->rowPitch, size_t(width) * 4);
+            ownedSurface.BeginWrite();
+            cpuImage->pixels = std::move(pixels);
+            IfFailedThrowHR(PublishSurface() ? S_OK : E_FAIL);
+            return;
+        }
         SMMPFileHeader format;
         format.InitializeDefaultFormat(sourceMmpFormat);
-        const UINT width = box.right - box.left;
         if (format.dwBitDepth != 16 && format.dwBitDepth != 32)
             IfFailedThrowHR(E_INVALIDARG);
         const size_t rowBytes = size_t(width) * (format.dwBitDepth / 8);

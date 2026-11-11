@@ -404,7 +404,7 @@ void CI3DSurface::MemoryBackup(BOOL bShow)
         pCopy.reset();
 
         D3D11_TEXTURE2D_DESC tex2d;
-        pSurface->GetTexture()->GetDesc(&tex2d);
+        if (!pSurface->GetSurfaceDesc(&tex2d)) IfFailedThrowHR(E_FAIL);
         pCopy = std::make_unique<CDXGISurface>(pI3D->GetD3D(), &tex2d);
         pCopy->CopyResource(pSurface.get());
     }

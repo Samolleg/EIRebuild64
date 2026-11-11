@@ -5328,6 +5328,13 @@ public:
     // to this executor; the adopted D3D11 device only answers adapter queries.
     void set_d3d12_frame(D3D12Frame* frame) noexcept { d3d12_ = frame; }
     bool d3d12_backend() const noexcept { return d3d12_ != nullptr; }
+    bool d3d12_selected() const noexcept {
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+        return d3d12_backend() || embedded_d3d12_failed_;
+#else
+        return d3d12_backend();
+#endif
+    }
     // D3D12 backend: a pass this backend does not draw yet, named once (F11 list).
     void d3d12_omit(const char* name, bool world) noexcept;
 private:

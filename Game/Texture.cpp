@@ -223,14 +223,14 @@ BOOL CTexture::Load(CRenderer *pRend, SMMPFileHeader *pHdr, DWORD dwFromLevel)
     pSurface = std::make_unique<CDXGISurface>(pRend->GetD3D(), &tex2d);
 
     std::string debugName;
-    if (szName)
+    if (pSurface->GetTexture() && szName)
     {
         debugName = "tex2d_" + szName;
         SetDebugObjectNameEx(pSurface->GetTexture().Get(), debugName);
         debugName = "sres_" + szName;
         SetDebugObjectNameEx(pSurface->GetShaderResource().Get(), debugName);
     }
-    else
+    else if (pSurface->GetTexture())
     {
         DirectX::SetDebugObjectName(pSurface->GetTexture().Get(), "tex2d_nameless");
         DirectX::SetDebugObjectName(pSurface->GetShaderResource().Get(), "tex2d_nameless");
@@ -312,7 +312,10 @@ int CTexture::CopyToSurface(CDXGISurface *pDXDDS, SMMPFileHeader *pHdr, DWORD dw
             owned::TextureAlphaPixels alpha;
             alpha.data = static_cast<const std::uint8_t*>(srd.pSysMem);
             alpha.width = dwNewSizeX; alpha.height = dwNewSizeY; alpha.pitch = srd.SysMemPitch;
-            switch (destination.Format) {
+            const auto alphaFormat = m_texFormat == DXGI_FORMAT_BC1_UNORM ||
+                m_texFormat == DXGI_FORMAT_BC2_UNORM || m_texFormat == DXGI_FORMAT_BC3_UNORM
+                ? m_texFormat : destination.Format;
+            switch (alphaFormat) {
             case DXGI_FORMAT_BC1_UNORM: alpha.format = owned::TextureAlphaFormat::bc1; break;
             case DXGI_FORMAT_BC2_UNORM: alpha.format = owned::TextureAlphaFormat::bc2; break;
             case DXGI_FORMAT_BC3_UNORM: alpha.format = owned::TextureAlphaFormat::bc3; break;
