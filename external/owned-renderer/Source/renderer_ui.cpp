@@ -464,7 +464,7 @@ HRESULT Renderer::queue_cursor(std::uint64_t cache_key,const std::vector<std::ui
   return S_OK;
  }
  pending_cursor_={};cursor_pending_=false;
- if((!swap_&&!d3d12_)||!context_||!width||!height||pixels.size()!=(size_t)width*height)return S_OK;
+ if((!d3d12_&&(!swap_||!context_))||!width||!height||pixels.size()!=(size_t)width*height)return S_OK;
  RECT clipped{std::max<LONG>(0,destination.left),std::max<LONG>(0,destination.top),std::min<LONG>((LONG)output_width_,destination.right),std::min<LONG>((LONG)output_height_,destination.bottom)};
  if(clipped.right<=clipped.left||clipped.bottom<=clipped.top)return S_OK;
  const auto cached=overlay_textures_.find(cache_key);
@@ -510,7 +510,7 @@ HRESULT Renderer::make_scene_blit(const SurfaceImage& source,const RECT& destina
  if(overlay_mirror_reset_.exchange(false,std::memory_order_acq_rel))overlay_mirror_.clear();
  const bool released_gpu=released_surface_gpu_blit(source,source_key);
  if(source.cpu_released&&!released_gpu&&!source.gpu_captured)return E_UNEXPECTED;
- if((!core_mode_&&(!swap_||!context_))||(!released_gpu&&!source.gpu_captured&&(source.pixels.empty()||(source.format.dwFlags&DDPF_FOURCC)||!(source.format.dwFlags&DDPF_RGB))))return S_OK;
+ if((!core_mode_&&!d3d12_&&(!swap_||!context_))||(!released_gpu&&!source.gpu_captured&&(source.pixels.empty()||(source.format.dwFlags&DDPF_FOURCC)||!(source.format.dwFlags&DDPF_RGB))))return S_OK;
  CampDecoration camp_frame;
  if(camp_inventory_take_decoration(camp_frame)){scene_ui_pending_=true;if(core_mode_)core_post_command(scene_ui::CampDecorationFrame{camp_frame},"camp_decoration");else scene_post_frame([this,command=scene_ui::CampDecorationFrame{camp_frame}]{queue_camp_decoration(command.frame);});}
  RECT initial_source=source_rect?*source_rect:RECT{0,0,LONG(source.width),LONG(source.height)};
@@ -602,7 +602,7 @@ HRESULT Renderer::blit(const SurfaceImage& source,const RECT& destination,const 
  const bool released_gpu=released_surface_gpu_blit(source,source_key);
  // Only CPU-converted blits need a restored source mirror.
  if(source.cpu_released&&!released_gpu&&!source.gpu_captured)return E_UNEXPECTED;
- if((!swap_&&!d3d12_)||!context_||(!released_gpu&&!source.gpu_captured&&(source.pixels.empty()||(source.format.dwFlags&DDPF_FOURCC)||!(source.format.dwFlags&DDPF_RGB))))return S_OK;
+ if((!d3d12_&&(!swap_||!context_))||(!released_gpu&&!source.gpu_captured&&(source.pixels.empty()||(source.format.dwFlags&DDPF_FOURCC)||!(source.format.dwFlags&DDPF_RGB))))return S_OK;
 #ifndef EID3D11_EMBEDDED
  CampDecoration camp_frame;
  if(camp_inventory_take_decoration(camp_frame))queue_camp_decoration(camp_frame);
@@ -804,7 +804,19 @@ HRESULT Renderer::queue_character_pane_text(
 #else
  constexpr bool unscoped_test=false;
 #endif
- if((!swap_&&!d3d12_)||!context_||((!ui_epoch||!frame_serial)&&!unscoped_test)||!frame.width||!frame.height)return E_INVALIDARG;
+ // D3D12 owns its executor, not a D3D11 swap chain/context. Keep the
+ // author's text validation and quad layout for either backend.
+ const auto invalid=[&](const char* reason)->HRESULT {
+  if(d3d12_){
+   char detail[256]{};std::snprintf(detail,sizeof(detail),"operation=queue_character_pane_text reason=%s hr=0x%08lx epoch=%llu serial=%llu size=%ux%u",
+    reason,static_cast<unsigned long>(E_INVALIDARG),static_cast<unsigned long long>(ui_epoch),static_cast<unsigned long long>(frame_serial),frame.width,frame.height);
+   bridge_report_event("d3d12_failed",detail);
+  }
+  return E_INVALIDARG;
+ };
+ if(!d3d12_&&(!swap_||!context_))return invalid("device_context");
+ if((!ui_epoch||!frame_serial)&&!unscoped_test)return invalid("frame_identity");
+ if(!frame.width||!frame.height)return invalid("frame_dimensions");
  RECT sr=source_rect?*source_rect:RECT{0,0,(LONG)frame.width,(LONG)frame.height};sr.left=std::clamp<LONG>(sr.left,0,(LONG)frame.width);sr.top=std::clamp<LONG>(sr.top,0,(LONG)frame.height);sr.right=std::clamp<LONG>(sr.right,sr.left,(LONG)frame.width);sr.bottom=std::clamp<LONG>(sr.bottom,sr.top,(LONG)frame.height);const LONG dw=destination.right-destination.left,dh=destination.bottom-destination.top,sw=sr.right-sr.left,sh=sr.bottom-sr.top;if(dw<=0||dh<=0||sw<=0||sh<=0)return S_OK;
  const widescreen::HudComposition composition=interface_space&&widescreen::interface_owned?widescreen::hud_blit:widescreen::HudComposition{};
  const std::size_t checkpoint=pending_blits_.size();
@@ -812,13 +824,13 @@ HRESULT Renderer::queue_character_pane_text(
   std::unordered_set<std::uint64_t> queued_assets;
   queued_assets.reserve(frame.quads.size());
   for(const auto& command:frame.quads){
-   if(!command.asset||!command.asset->identity||!command.asset->generation||!command.asset->revision||!command.asset->width||!command.asset->height||command.asset->width>UINT_MAX/4u||command.asset->width>(std::numeric_limits<std::size_t>::max)()/command.asset->height||command.asset->coverage.size()!=static_cast<std::size_t>(command.asset->width)*command.asset->height||command.asset->coverage.size()>kMaximumCharacterPaneAtlasPixels){pending_blits_.resize(checkpoint);return E_INVALIDARG;}
+   if(!command.asset||!command.asset->identity||!command.asset->generation||!command.asset->revision||!command.asset->width||!command.asset->height||command.asset->width>UINT_MAX/4u||command.asset->width>(std::numeric_limits<std::size_t>::max)()/command.asset->height||command.asset->coverage.size()!=static_cast<std::size_t>(command.asset->width)*command.asset->height||command.asset->coverage.size()>kMaximumCharacterPaneAtlasPixels){pending_blits_.resize(checkpoint);return invalid("glyph_asset");}
    if(command.raster_scale>0.f){
     // Output-size glyph: snap the stock pen to whole output pixels and place
     // the raster 1:1, so every glyph keeps its shape at any UI scale.
     if(!command.color)continue;
     const LONG source_width=command.source.right-command.source.left,source_height=command.source.bottom-command.source.top;
-    if(source_width<=0||source_height<=0||command.source.left<0||command.source.top<0||command.source.right>(LONG)command.asset->width||command.source.bottom>(LONG)command.asset->height){pending_blits_.resize(checkpoint);return E_INVALIDARG;}
+    if(source_width<=0||source_height<=0||command.source.left<0||command.source.top<0||command.source.right>(LONG)command.asset->width||command.source.bottom>(LONG)command.asset->height){pending_blits_.resize(checkpoint);return invalid("glyph_source");}
     const double kx=double(dw)/sw,ky=double(dh)/sh,sx=double(output_width_)/canvas_width(),sy=double(output_height_)/canvas_height();
     const auto map_x=[&](double p){return double(widescreen::compose_x(float(destination.left+(p-sr.left)*kx),composition))*sx;};
     const auto map_y=[&](double p){return double(widescreen::compose_y(float(destination.top+(p-sr.top)*ky),composition))*sy;};
@@ -870,7 +882,7 @@ HRESULT Renderer::queue_character_pane_text(
     if(placed.bottom<=placed.top)placed.bottom=placed.top+1;
    }
    RECT pane_clip{std::max(placed.left,sr.left),std::max(placed.top,sr.top),std::min(placed.right,sr.right),std::min(placed.bottom,sr.bottom)};if(pane_clip.right<=pane_clip.left||pane_clip.bottom<=pane_clip.top||!command.color)continue;
-   const LONG command_width=placed.right-placed.left,command_height=placed.bottom-placed.top,asset_source_width=command.source.right-command.source.left,asset_source_height=command.source.bottom-command.source.top;if(command_width<=0||command_height<=0||asset_source_width<=0||asset_source_height<=0||command.source.left<0||command.source.top<0||command.source.right>(LONG)command.asset->width||command.source.bottom>(LONG)command.asset->height){pending_blits_.resize(checkpoint);return E_INVALIDARG;}
+   const LONG command_width=placed.right-placed.left,command_height=placed.bottom-placed.top,asset_source_width=command.source.right-command.source.left,asset_source_height=command.source.bottom-command.source.top;if(command_width<=0||command_height<=0||asset_source_width<=0||asset_source_height<=0||command.source.left<0||command.source.top<0||command.source.right>(LONG)command.asset->width||command.source.bottom>(LONG)command.asset->height){pending_blits_.resize(checkpoint);return invalid("solid_quad_source");}
    RECT mapped{destination.left+MulDiv(pane_clip.left-sr.left,dw,sw),destination.top+MulDiv(pane_clip.top-sr.top,dh,sh),destination.left+MulDiv(pane_clip.right-sr.left,dw,sw),destination.top+MulDiv(pane_clip.bottom-sr.top,dh,sh)};RECT clipped=clip_ui_destination(mapped,composition,canvas_width(),canvas_height());if(clipped.right<=clipped.left||clipped.bottom<=clipped.top)continue;
    const float source_u0=(command.source.left+(pane_clip.left-placed.left)*(float)asset_source_width/command_width)/command.asset->width,source_v0=(command.source.top+(pane_clip.top-placed.top)*(float)asset_source_height/command_height)/command.asset->height,source_u1=(command.source.left+(pane_clip.right-placed.left)*(float)asset_source_width/command_width)/command.asset->width,source_v1=(command.source.top+(pane_clip.bottom-placed.top)*(float)asset_source_height/command_height)/command.asset->height;
    const float mapped_width=(float)(mapped.right-mapped.left),mapped_height=(float)(mapped.bottom-mapped.top);if(mapped_width<=0||mapped_height<=0)continue;
