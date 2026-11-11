@@ -559,12 +559,31 @@ Json CModPackage::Lookup(const std::string &table,const Json &key,int column,con
  Stack stack(state);lua_rawgeti(state,LUA_REGISTRYINDEX,lookupRef);lua_pushlstring(state,table.data(),table.size());Push(state,key);lua_pushinteger(state,column);Push(state,fallback);Call(4,1);return Value(state,-1);
 }
 bool CModPackage::ResourcePlan(const std::string&name,std::vector<std::string>&paths,bool&ignore)const{
- auto key=Lower(fs::path(name).filename().string());auto it=archives.find(key);auto skip=ignoreBase.find(key);ignore=skip!=ignoreBase.end()&&skip->second;if(it!=archives.end())paths=it->second;return it!=archives.end()||ignore;
+ auto filename=fs::path(name).filename(); if(Lower(filename.extension().string())==".pak")filename.replace_extension(".res");
+ auto key=Lower(filename.string()); auto it=archives.find(key); auto skip=ignoreBase.find(key);
+ ignore=skip!=ignoreBase.end()&&skip->second; paths.clear();
+ if(it!=archives.end()) {
+     if(RuntimeDiagnostics::Enabled()) paths.push_back(root);
+     for(const auto& original:it->second) {
+         auto pak=fs::path(original); pak.replace_extension(".pak");
+         if(fs::is_regular_file(pak)) paths.push_back(pak.string());
+     }
+     for(const auto& original:it->second) if(fs::is_regular_file(original) && Lower(fs::path(original).extension().string())!=".pak")paths.push_back(original);
+ }
+ return it!=archives.end()||ignore;
 }
-CMappedResource &CModPackage::Open(const std::string &path){auto &slot=opened[path];if(!slot){if(!fs::is_regular_file(path))throw std::runtime_error("Missing archive: "+path);auto p=std::make_unique<CMappedResource>(true);if(!p->OpenResource(path.c_str()))throw std::runtime_error("Cannot open archive: "+path);slot=std::move(p);}return *slot;}
+CMappedResource &CModPackage::Open(const std::string &path){auto &slot=opened[path];if(!slot){if(!fs::exists(path))throw std::runtime_error("Missing archive: "+path);auto p=std::make_unique<CMappedResource>(true);if(!p->OpenResource(path.c_str()))throw std::runtime_error("Cannot open archive: "+path);slot=std::move(p);}return *slot;}
 std::vector<unsigned char> CModPackage::ReadResource(const std::string &category,const std::string &entry,const std::string &base,std::string &owner){
- owner.clear();auto key=Lower(category);auto it=archives.find(key);std::vector<std::string> paths;if(it!=archives.end())paths=it->second;if(!ignoreBase[key]&&!base.empty())paths.push_back(base);
- for(const auto &path:paths){auto &res=Open(path);DWORD size=0;BYTE *data=res.GetFile(entry.c_str(),&size);if(!data)continue;std::vector<unsigned char> result;try{result.assign(data,data+size);}catch(...){res.CloseFile(data);throw;}res.CloseFile(data);owner=path;return result;}return {};
+ owner.clear();std::vector<std::string> paths;bool ignore=false;ResourcePlan(category,paths,ignore);if(!ignore&&!base.empty())paths.push_back(base);
+ for(const auto &path:paths){
+  CMappedResource* selected=nullptr;
+  try { selected=&Open(path); }
+  catch(const std::exception& e) {
+   if(Lower(fs::path(path).extension().string())!=".pak")throw;
+   GameJournal::Event("PAK","open_failed","path=%s error=%s",path.c_str(),e.what());
+   continue;
+  }
+  auto &res=*selected;DWORD size=0;BYTE *data=res.GetFile(entry.c_str(),&size);if(!data)continue;std::vector<unsigned char> result;try{result.assign(data,data+size);}catch(...){res.CloseFile(data);throw;}res.CloseFile(data);owner=path;return result;}return {};
 }
 Json CModPackage::Describe(){
  Json report={{"stage","package-config-resources-lua-data"},{"gameplayActivated",false},{"fullMainExecuted",false},{"mainScript",mainScript},{"configCount",configs.size()},{"mapCount",maps.size()},{"resourceGroups",Json::array()},{"luaTables",Json::array()}};

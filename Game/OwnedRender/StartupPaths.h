@@ -3,6 +3,7 @@
 #include "ResourceBootstrap.h"
 #include <filesystem>
 #include <array>
+#include "../../external/owned-renderer/Source/runtime_diagnostics.h"
 
 namespace OwnedRender {
 // Same ordered figure/texture chains consumed by the renderer and source managers.
@@ -15,26 +16,29 @@ void CaptureGraphicsMounts(owned::ResourceStoreConfig& mounts,
     std::array<std::vector<std::string>, 4> replacements;
     for (size_t i = 0; i != ignore.size(); ++i)
         if (package) package->ResourcePlan(categories[i], replacements[i], ignore[i]);
-    const auto addMod = [&](size_t i, std::uint8_t kind) {
+    const auto addMod = [&](size_t i, std::uint8_t kind, bool pak) {
         for (const auto& path : replacements[i]) {
+            if (std::filesystem::is_directory(path)) {
+                if (pak && RuntimeDiagnostics::Enabled()) mounts.loose_roots.push_back(resolve(path));
+                continue;
+            }
+            if ((_stricmp(std::filesystem::path(path).extension().string().c_str(),".pak") == 0) != pak) continue;
             mounts.archives.push_back(resolve(path));
             mounts.archive_kinds.push_back(kind);
         }
     };
-    const auto addBase = [&](size_t i, std::uint8_t kind) {
-        if (ignore[i]) return;
+    for (bool pak : {true, false}) {
+        addMod(0, owned::kArchiveFigures, pak);
+        addMod(3, owned::kArchiveAllKinds, pak);
+        addMod(1, owned::kArchiveTextures, pak);
+        addMod(2, owned::kArchiveTextures, pak);
+    }
+    for (size_t i = 0; i != ignore.size(); ++i) {
+        if (ignore[i]) continue;
         mounts.archives.push_back((resourceRoot / categories[i]).wstring());
-        mounts.archive_kinds.push_back(kind);
-    };
-    addMod(0, owned::kArchiveFigures);
-    addMod(3, owned::kArchiveFigures);
-    addMod(1, owned::kArchiveTextures);
-    addBase(0, owned::kArchiveFigures);
-    addBase(1, owned::kArchiveTextures);
-    addMod(2, owned::kArchiveTextures);
-    addBase(2, owned::kArchiveTextures);
-    addBase(3, owned::kArchiveAllKinds);
-    addMod(3, owned::kArchiveTextures);
+        mounts.archive_kinds.push_back(i == 0 ? owned::kArchiveFigures :
+            i == 3 ? owned::kArchiveAllKinds : owned::kArchiveTextures);
+    }
 }
 
 inline std::filesystem::path AbsoluteInput(const std::filesystem::path& value) {
@@ -55,8 +59,8 @@ owned::EmbeddedHostPaths CaptureStartupPaths(const std::filesystem::path& engine
     paths.renderer_config = RuntimePaths64::Config("rddraw.ini").wstring();
     const auto modRoot = package ? AbsoluteInput(std::filesystem::path(package->Directory())) : workRoot;
     paths.world_map_layouts = (modRoot / L"world-map-layouts.json").wstring();
-    if (package) paths.mounts.loose_roots.push_back((modRoot / L"Maps").wstring());
-    paths.mounts.loose_roots.push_back((workRoot / L"Maps").wstring());
+    if (package && RuntimeDiagnostics::Enabled()) paths.mounts.loose_roots.push_back((modRoot / L"Maps").wstring());
+    if (RuntimeDiagnostics::Enabled()) paths.mounts.loose_roots.push_back((workRoot / L"Maps").wstring());
     CaptureGraphicsMounts(paths.mounts, resourceRoot, package, [&](const std::string& replacement) {
         return AbsoluteInput(std::filesystem::path(replacement)).wstring();
     });
@@ -64,9 +68,12 @@ owned::EmbeddedHostPaths CaptureStartupPaths(const std::filesystem::path& engine
         std::vector<std::string> replacements;
         bool ignore = false;
         if (package) package->ResourcePlan(name, replacements, ignore);
-        for (const auto& replacement : replacements)
-            mounts.archives.push_back(AbsoluteInput(
-                std::filesystem::path(replacement)).wstring());
+        for (const auto& replacement : replacements) {
+            const auto path = AbsoluteInput(std::filesystem::path(replacement));
+            if (std::filesystem::is_directory(path)) {
+                if (RuntimeDiagnostics::Enabled()) mounts.loose_roots.push_back(path.wstring());
+            } else mounts.archives.push_back(path.wstring());
+        }
         if (!ignore) mounts.archives.push_back((resourceRoot / name).wstring());
     };
     captureFamily("texts.res", paths.text_mounts);

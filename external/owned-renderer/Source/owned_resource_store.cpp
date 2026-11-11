@@ -16,6 +16,9 @@
 #include <unordered_map>
 #include <utility>
 #include <cstdio>
+#include <filesystem>
+#include "../../../Pak/Pak.h"
+#include "runtime_diagnostics.h"
 
 namespace owned {
 void bridge_append_probe_event(const char* event, const char* detail) noexcept;
@@ -343,7 +346,7 @@ private:
 struct ArchiveEntry {
     std::int32_t next = -1;
     std::uint32_t size = 0;
-    std::uint32_t offset = 0;
+    std::uint64_t offset = 0;
     std::string raw_name;
     std::string folded_name;
     bool ascii = false;
@@ -485,6 +488,7 @@ bool find_archive_entry(const std::vector<ArchiveEntry>& entries,
 }
 
 struct ArchiveMount {
+    std::shared_ptr<ei::pak::Archive> pak;
     std::shared_ptr<FileOwner> file;
     std::vector<ArchiveEntry> entries;
     ResourceContainerInfo container;
@@ -517,6 +521,8 @@ bool selected_bytes_equal(const void* selected, const std::uint8_t* owned,
 } // namespace
 
 struct ResourceLocation::State {
+    std::shared_ptr<ei::pak::Archive> pak;
+    std::string pak_name;
     std::shared_ptr<FileOwner> file;
     std::uint64_t offset = 0;
     std::uint64_t bytes = 0;
@@ -727,6 +733,21 @@ bool ResourceStore::open(const ResourceStoreConfig& config,
         mount.container.label = base_name_utf8(file->path());
         mount.container.incarnation = file->incarnation();
         mount.container.file_key = file->file_key();
+        if (_wcsicmp(std::filesystem::path(file->path()).extension().c_str(),L".pak") == 0) {
+            try {
+                mount.pak = std::make_shared<ei::pak::Archive>(file->path());
+                for (const auto& source : mount.pak->Entries()) {
+                    ArchiveEntry entry;
+                    entry.size = static_cast<std::uint32_t>(source.size); entry.offset = source.offset;
+                    entry.raw_name = entry.folded_name = source.name; entry.ascii = true;
+                    mount.entries.push_back(std::move(entry));
+                }
+                impl_->archives.push_back(std::move(mount));
+            } catch (const std::exception& e) {
+                bridge_append_probe_event("pak_open_failed",e.what());
+            }
+            continue;
+        }
         std::vector<std::uint8_t> header;
         if (!file->read(0, kResHeaderBytes, header, failure)) {
             close();
@@ -865,7 +886,11 @@ bool ResourceStore::locate(const std::string& resource_name,
     for (const ArchiveMount& archive : impl_->archives) {
         if (!(archive.kinds & kind)) continue;
         std::uint32_t entry_index = 0;
-        if (!find_archive_entry(archive.entries, canonical, entry_index)) continue;
+        if (archive.pak) {
+            const auto* entry = archive.pak->Find(canonical);
+            if (!entry) continue;
+            entry_index = static_cast<std::uint32_t>(entry - archive.pak->Entries().data());
+        } else if (!find_archive_entry(archive.entries, canonical, entry_index)) continue;
         const ArchiveEntry& entry = archive.entries[entry_index];
         location.identity_.canonical_name = canonical;
         location.identity_.container_incarnation = archive.container.incarnation;
@@ -876,6 +901,7 @@ bool ResourceStore::locate(const std::string& resource_name,
         location.identity_.entry_index = entry_index;
         auto state = std::make_shared<ResourceLocation::State>();
         state->file = archive.file;
+        state->pak = archive.pak; state->pak_name = canonical;
         state->offset = entry.offset;
         state->bytes = entry.size;
         location.state_ = std::move(state);
@@ -916,7 +942,16 @@ bool ResourceStore::read(const ResourceLocation& location, ResourceBlob& blob,
     {
         SelectedDiagnosticTicks timing(diagnostic ? &diagnostic->file_read_ticks : nullptr);
         if (diagnostic) ++diagnostic->file_read_calls;
-        if (!location.state_->file->read(location.state_->offset,
+        if (location.state_->pak) {
+            try {
+                const auto* entry = location.state_->pak->Find(location.state_->pak_name);
+                if (!entry) throw std::runtime_error("PAK entry disappeared");
+                *bytes = location.state_->pak->Read(*entry,RuntimeDiagnostics::Enabled());
+            } catch (const std::exception& e) {
+                bridge_append_probe_event("pak_read_failed",e.what());
+                fail(failure,ResourceFailureCode::file_read,e.what()); return false;
+            }
+        } else if (!location.state_->file->read(location.state_->offset,
                                          location.state_->bytes, *bytes, failure))
             return false;
     }

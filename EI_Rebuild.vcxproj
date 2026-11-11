@@ -630,6 +630,7 @@
   <PropertyGroup><OwnedRendererRoot Condition="'$(OwnedRendererRoot)'==''">$(ProjectDir)external\owned-renderer\</OwnedRendererRoot></PropertyGroup>
   <ItemDefinitionGroup><ClCompile><AdditionalIncludeDirectories>$(OwnedRendererRoot)\Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile></ItemDefinitionGroup>
   <Import Project="tools\DirectXStatic.props" />
+  <Import Project="Pak\Zstd.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <Import Project="OwnedRenderer\E1RendererFacadeWarpCheck.host.targets" Condition="'$(E1RendererFacadeWarpCheck)'=='true'" />
   <ImportGroup Label="ExtensionTargets">

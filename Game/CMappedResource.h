@@ -8,6 +8,7 @@ Nival Entertainment, 1998
 --------------------------------------------------------------------------------------------*/
 #include "Win32Classes.h"
 #include "CResourceBase.h"
+#include "../Pak/Pak.h"
 #include <string>
 #include <cstdint>
 #include <unordered_map>
@@ -18,6 +19,8 @@ struct SResourceFileRecord;
 class CMappedResource : public CResourceBase
 {
 private:
+    std::unique_ptr<ei::pak::Archive> pak;
+    bool looseDirectory = false;
     int hFile;           // handle to resource file
     LPBYTE pBaseAddress; // NULL if opened from file
     BOOL bWriteAccess;

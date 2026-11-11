@@ -1,0 +1,24 @@
+<?xml version='1.0' encoding='utf-8'?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <ZstdRoot Condition="'$(ZstdRoot)'==''">$(MSBuildThisFileDirectory)..\dependencies\zstd\v1.5.7\</ZstdRoot>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(ZstdRoot)lib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="$(MSBuildThisFileDirectory)Pak.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="$(ZstdRoot)lib\common\*.c;$(ZstdRoot)lib\compress\*.c;$(ZstdRoot)lib\decompress\*.c">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <CompileAs>CompileAsC</CompileAs>
+      <ObjectFileName>$(IntDir)zstd_%(Filename).obj</ObjectFileName>
+    </ClCompile>
+  </ItemGroup>
+  <Target Name="VerifyZstd" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(ZstdRoot)lib\zstd.h') Or !Exists('$(ZstdRoot)LICENSE')" Text="Local zstd 1.5.7 missing. Run tools/prepare-worktree.ps1." />
+  </Target>
+</Project>
