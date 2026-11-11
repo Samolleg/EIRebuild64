@@ -2202,7 +2202,6 @@ private:
         std::weak_ptr<const void> owner;
         std::shared_ptr<const VisualSkeletonBinding> binding;
         NativePoseGpu value{};
-        std::vector<std::array<float,16>> skin_palette;
         UINT generation = 1, count = 0, allocation = UINT_MAX;
         UINT animation_allocation = UINT_MAX;
         std::uint64_t revision = 0, scheduled = 0;

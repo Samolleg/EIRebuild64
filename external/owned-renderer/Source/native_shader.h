@@ -858,7 +858,7 @@ float neighbourSeamWaveWeight(float2 p){
 NativeWorldVertex prepareNativeWorldVertex(NativeInstance instance,uint componentAddress){
  NativeWorldVertex output=(NativeWorldVertex)0;
  uint4 component=nativeGeometry.Load4(componentAddress);
- bool skinned=(component.y&0x80000000u)!=0;bool contactSkin=(component.y&0x40000000u)!=0;component.y&=0x3fffffffu;
+ bool skinned=(component.y&0x80000000u)!=0;component.y&=0x7fffffffu;
  // Merged characters (flag 0x40): each component names its part's node and
  // position base; the part animates exactly as its own record would.
  uint partNode=0,positionBase=0;
@@ -928,33 +928,6 @@ NativeWorldVertex prepareNativeWorldVertex(NativeInstance instance,uint componen
     worldNormal+=weights[influence]*mul(transpose(inverseObjectLinear(palette)),normal);
     worldTangent+=weights[influence]*mul((float3x3)palette,tangent.xyz);
    }
-  }
-  if(contactSkin){
-   float4 contact=asfloat(nativeGeometry.Load4(component.w+1008));
-   world=0;worldNormal=0;
-   [unroll]for(uint source=0;source<3;++source){
-    if(contact[source]>0){
-     uint at=component.w+240+source*256;
-     uint4 sourceJoints=nativeGeometry.Load4(at);
-     float4 sourceWeights=asfloat(nativeGeometry.Load4(at+16));
-     float3 sourcePosition=asfloat(nativeGeometry.Load3(at+224));
-     float3 sourceNormal=asfloat(nativeGeometry.Load3(at+240));
-     float3 p=0,n=0;
-     [unroll]for(uint k=0;k<4;++k){
-      if(sourceWeights[k]>0){
-       float4x4 m=nativeNodeMatrix(instance.poseNode+sourceJoints[k]);
-       p+=sourceWeights[k]*mul(m,float4(sourcePosition,1)).xyz;
-       n+=sourceWeights[k]*mul((float3x3)m,sourceNormal);
-      }
-     }
-     world+=contact[source]*p;
-     worldNormal+=contact[source]*normalize(n);
-    }
-   }
-   // The cooked snapshot has no tangent-space maps; retain an orthogonal
-   // tangent for the shared material interface after the contact normal.
-   float3 n=normalize(worldNormal);
-   worldTangent=normalize(abs(n.z)<.9?cross(float3(0,0,1),n):cross(float3(0,1,0),n));
   }
   output.p=float4(world,1);output.undeformedXY=world.xy;
   output.normal.xyz=normalize(worldNormal);
@@ -3156,16 +3129,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
   float4 t=float4(1,1,1,1);if(impostor)t=impostorTexel;else if(nativeTextured!=0)t=NATIVE_SAMPLE(i.textureReference,i.uv);
 #endif
 #ifndef NATIVE_TERRAIN_PS
- if(nativeSknInstance(i)!=0){
-  NativeInstance skn=nativeSknInstances[nativeSknInstance(i)-1];
-  // BC7 sRGB sampling and the authored base factor are linear. The shared
-  // legacy combiner, lighting and UNORM frame output use display RGB, with
-  // no final sRGB encode. Cross that boundary once, after the linear tint;
-  // keep the sRGB SRV so texture filtering still happens in linear space.
-  float3 linearBase=max(t.rgb*skn.sknBase.rgb,0);
-  t.rgb=lerp(1.055*pow(linearBase,1.0/2.4)-.055,12.92*linearBase,linearBase<=.0031308);
-  if(skn.sknBase.w==0)t.a=1;
- }
+ if(nativeSknInstance(i)!=0){NativeInstance skn=nativeSknInstances[nativeSknInstance(i)-1];t.rgb*=skn.sknBase.rgb;if(skn.sknBase.w==0)t.a=1;}
 #endif
 #ifdef NATIVE_SNOW_TRAILS
   // Packed trough floor: barely darker, cooler snow.
