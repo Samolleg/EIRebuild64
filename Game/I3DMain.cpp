@@ -342,11 +342,12 @@ static void UpdateFpsSurface(CInterface3D& interface3D, CI3DSurface& target, LPC
         dc.SetTextColor(RGB(255, 255, 255));
         dc.DrawText(value, -1, rectangle, format);
     };
-    // Preserve the existing two passes, font, shadow, alignment and scaled bounds.
-    drawText("FPS:", CRect(0, 0, 60, 18), DT_LEFT);
-    drawText(text, CRect(0, 0, 70, 18), DT_RIGHT);
-    drawText("FPS:", CRect(0, 0, 60, 18), DT_LEFT);
-    drawText(text, CRect(0, 0, 70, 18), DT_RIGHT);
+    // Keep the original position for a single value, with room to the left for FG.
+    const int labelLeft = strchr(text, '(') ? 0 : 70;
+    drawText("FPS:", CRect(labelLeft, 0, labelLeft + 60, 18), DT_LEFT);
+    drawText(text, CRect(0, 0, 140, 18), DT_RIGHT);
+    drawText("FPS:", CRect(labelLeft, 0, labelLeft + 60, 18), DT_LEFT);
+    drawText(text, CRect(0, 0, 140, 18), DT_RIGHT);
     const BOOL flushed = GdiFlush();
     dc.SelectObject(previousFont);
     dc.SelectObject(previousBitmap);
@@ -422,7 +423,11 @@ void CInterface3D::Draw2D()
             if (pSurfaceFPS)
             {
                 CString szFPS;
-                szFPS.Format("%.1f", nCountFrames * 1000.f / (dwNewTime - dwLastUpdateTime));
+                double outputFps = 0, realFps = 0;
+                if (pDX11->FrameGenerationFps(outputFps, realFps))
+                    szFPS.Format("%.0f (%.0f)", outputFps, realFps);
+                else
+                    szFPS.Format("%.1f", nCountFrames * 1000.f / (dwNewTime - dwLastUpdateTime));
 #ifndef NOGETDC
                 UpdateFpsSurface(*this, *pSurfaceFPS, szFPS);
 #endif // NOGETDC
@@ -446,7 +451,7 @@ void CInterface3D::ShowFPS(bool bOn)
     if (bOn)
     {
         if (!pSurfaceFPS)
-            pSurfaceFPS = std::make_unique<CI3DSurface>(this, 730, 10, 800, 28);
+            pSurfaceFPS = std::make_unique<CI3DSurface>(this, 660, 10, 800, 28);
     }
     else
     {

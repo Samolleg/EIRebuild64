@@ -699,6 +699,7 @@ void CDX11::BeginFrame()
     // Reopen world composition and advance per-frame caches before BeginScene
     // or any clear/draw; Present intentionally leaves the prior frame sealed.
     IfFailedThrowHR(rendererFacade->Visit([](owned::Renderer& renderer) {
+        renderer.enable_gpu_journal();
         return renderer.begin_engine_frame();
     }));
     IfFailedThrowHR(rendererFacade->BeginFrame());
@@ -972,7 +973,42 @@ void CDX11::EndFrame(bool present)
             static_cast<unsigned long long>(sample.dropped),
             static_cast<unsigned long long>(sample.invalid));
     }
+    const ULONGLONG now = GetTickCount64();
+    if (now - lastGpuPassReport >= 5000) {
+        std::string passes;
+        rendererFacade->Visit([&](owned::Renderer& renderer) {
+            passes = renderer.take_gpu_pass_report();
+            return S_OK;
+        });
+        const auto sample = frameTiming.Read();
+        GameJournal::Event("RENDER", "gpu_passes",
+            "backend=%s window_ms=%llu counters=window_totals pass_samples=frames_with_pass frame_timing_scope=tail240 frame_timing_gpu_ms_median=%.3f frame_timing_gpu_ms_p95=%.3f frame_timing_gpu_n=%u %s",
+            D3D12Selected() ? "d3d12" : "d3d11", now - lastGpuPassReport,
+            sample.gpu.median, sample.gpu.p95, sample.gpu.count, passes.c_str());
+        lastGpuPassReport = now;
+    }
     IfFailedThrowHR(presented);
+}
+
+bool CDX11::FrameGenerationFps(double& output, double& real)
+{
+    const auto access = ownedRenderer.LockFrame();
+    owned::D3D12Frame::FrameGenerationStats stats;
+    if (!rendererFacade || FAILED(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        stats = renderer.frame_generation_stats();
+        return S_OK;
+    }))) return false;
+    const ULONGLONG now = GetTickCount64();
+    const bool ready = stats.active && fpsSampleTime && now > fpsSampleTime &&
+        stats.real_presents >= fpsReal && stats.generated_presents >= fpsGenerated;
+    if (ready) {
+        real = double(stats.real_presents - fpsReal) * 1000.0 / double(now - fpsSampleTime);
+        output = real + double(stats.generated_presents - fpsGenerated) * 1000.0 / double(now - fpsSampleTime);
+    }
+    fpsSampleTime = stats.active ? now : 0;
+    fpsReal = stats.real_presents;
+    fpsGenerated = stats.generated_presents;
+    return ready;
 }
 
 void CDX11::ClearColorBuffer(DWORD value)

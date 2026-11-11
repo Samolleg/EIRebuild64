@@ -442,6 +442,10 @@ void RenderProfiler::shutdown() {
     enabled_ = false;
     environment_enabled_ = false;
     requested_enabled_ = false;
+    journal_enabled_ = false;
+    journal_passes_.clear();
+    journal_totals_.clear();
+    journal_invalid_ = 0;
     frame_active_ = false;
     pass_active_ = false;
     sub_active_ = false;
@@ -1333,9 +1337,57 @@ bool RenderProfiler::resolve(FrameSlot& slot, bool wait) {
             }
         }
     }
+    // Repeated instances of one named pass form one per-frame sample.
+    // Reject incomplete frames rather than treating missing timings as zero.
+    if (journal_enabled_ && snapshot.gpu_valid) {
+        std::map<std::string, double> frame_passes;
+        for (const auto& pass : snapshot.passes) {
+            const std::string name(pass.name.data());
+            frame_passes[name] += pass.gpu_ms;
+            auto& total = journal_passes_[name];
+            total.draws += pass.counters.draws;
+            total.triangles += pass.counters.triangles;
+        }
+        for (const auto& pass : frame_passes)
+            journal_passes_[pass.first].ms.push_back(pass.second);
+        journal_totals_.push_back(snapshot.frame_gpu_ms);
+    } else if (journal_enabled_) ++journal_invalid_;
     has_latest_snapshot_ = true;
     slot.pending = false;
     return true;
+}
+
+std::string RenderProfiler::take_gpu_pass_report() {
+    const auto percentile = [](std::vector<double>& values, bool p95) {
+        if (values.empty()) return -1.0;
+        std::sort(values.begin(), values.end());
+        const size_t n = values.size();
+        if (p95) return values[(95 * n + 99) / 100 - 1];
+        return n % 2 ? values[n / 2] : (values[n / 2 - 1] + values[n / 2]) * 0.5;
+    };
+    struct Row { std::string name; double median, p95; JournalPass* pass; };
+    std::vector<Row> rows;
+    for (auto& pass : journal_passes_)
+        rows.push_back({pass.first, percentile(pass.second.ms, false),
+                        percentile(pass.second.ms, true), &pass.second});
+    std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
+        return a.median != b.median ? a.median > b.median : a.name < b.name;
+    });
+    char text[256];
+    std::snprintf(text, sizeof(text), "valid_n=%zu invalid_n=%llu sum_gpu_ms_median=%.3f sum_gpu_ms_p95=%.3f passes=%zu top=[",
+        journal_totals_.size(), static_cast<unsigned long long>(journal_invalid_),
+        percentile(journal_totals_, false), percentile(journal_totals_, true), rows.size());
+    std::string result(text);
+    for (size_t i = 0; i < (std::min)(size_t(20), rows.size()); ++i) {
+        const auto& row = rows[i];
+        std::snprintf(text, sizeof(text), "%s{name=\"%s\",median_ms=%.3f,p95_ms=%.3f,n=%zu,draws=%llu,triangles=%llu}",
+            i ? "," : "", row.name.c_str(), row.median, row.p95, row.pass->ms.size(),
+            static_cast<unsigned long long>(row.pass->draws), static_cast<unsigned long long>(row.pass->triangles));
+        result += text;
+    }
+    result += "]";
+    journal_passes_.clear(); journal_totals_.clear(); journal_invalid_ = 0;
+    return result;
 }
 
 void RenderProfiler::clear_shadow_temporal_pair() noexcept {
