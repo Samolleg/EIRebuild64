@@ -10,6 +10,7 @@
 // and draw sets its slots on the executor, which copies them into ring
 // tables (a thin per-flush translation, not a D3D11 emulation layer).
 #include "renderer.h"
+#include "gamma_shader_programs.h"
 #include "renderer_internal.h"
 #include "world_texture_sampler.h"
 #include "contact_blend.h"

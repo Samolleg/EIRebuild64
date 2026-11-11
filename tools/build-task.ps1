@@ -215,7 +215,8 @@ try {
         Copy-Item -LiteralPath (Join-Path $repo "out/x64/Release/$($target[0])/$($target[0]).pdb") -Destination (Join-Path $kit ($target[1] + '.pdb'))
     }
     foreach ($name in 'avcodec-62.dll','avformat-62.dll','avutil-60.dll','swscale-9.dll','swresample-6.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/ffmpeg/8.1.3/x64/bin/' + $name)) -Destination $kit }
-    Copy-Item -LiteralPath (Join-Path $repo 'dependencies/dlss/v310.9.16/lib/Windows_x86_64/rel/nvngx_dlss.dll') -Destination $kit
+    foreach ($name in 'nvngx_dlss.dll','nvngx_dlssg.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/dlss/v310.9.16/lib/Windows_x86_64/rel/' + $name)) -Destination $kit }
+    foreach ($name in 'amd_fidelityfx_loader_dx12.dll','amd_fidelityfx_framegeneration_dx12.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/fidelityfx/2.3.0/signedbin/' + $name)) -Destination $kit }
     foreach ($binary in Get-ChildItem $kit -File | Where-Object Extension -in '.exe','.dll') {
         $imports = & $dumpbin /nologo /dependents $binary.FullName
         if ($LASTEXITCODE -ne 0) { throw "dumpbin failed: $($binary.Name)" }

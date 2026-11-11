@@ -1,3 +1,41 @@
+# X64D3D12 dependency and DXIL integration, stage 2 (2026-11-11)
+
+Incomplete runtime integration. The coordinator supplied the pinned packages
+listed in BRIEF. Local deps now contain FidelityFX SDK 2.3.0, NVIDIA NVAPI
+70d337db9186e968eab622f7e786de7e437faf3d, DXC 1.9.2609 and the DLSS-G
+v310.9.16 headers/runtime. tools/prepare-worktree.ps1 copies them offline
+into dependencies. OwnedRenderer/D3D12Sdk.props supplies includes, imports,
+runtime output copies and license copies. Full license texts are retained
+in third_party/d3d12. THIRD_PARTY.md records the pins and redistribution.
+The permitted build-task.ps1 DLL list now includes nvngx_dlssg.dll and the
+two signed FidelityFX DLLs. DXC/DXIL compiler DLLs remain build inputs.
+
+RendererShaders now requests shader_embed --dxil-sources and includes the
+author's D3D12-only program list after writing the existing DXBC table.
+OwnedRenderer/D3D12Shaders.mak invokes DXC using the generated author rules
+and compiles the five Host diagnostic/overlay entry points. Both DXIL
+resource tables are linked into EIRebuild64.exe. The shared gamma HLSL and
+program descriptors moved byte-for-byte into gamma_shader_programs.h so the
+shader producer can enumerate them without compiling frame runtime code.
+The author's HLSL, compiler flags and empty-resource failure convention are
+preserved. Host/d3d12 sources themselves remain unchanged and unlinked.
+
+Next stage must complete executor/NGX ownership, local frame and config
+initialization, backend selection before D3D11 creation, frame boundaries,
+resize/teardown, direct SR/FG/Reflex calls and explicit startup/removal
+failure reporting. In particular renderer_native_d3d12.cpp still excludes
+composite_world_d3d12, apply_upscaler_mode_d3d12 and upscale_world_d3d12 for
+embedded callers, and embedded_remote_stubs.cpp still describes transport
+absence. Replacing only ensure_host_d3d12 or setting core_host_ would leave
+these execution/lifetime seams unresolved. Keep the D3D11 NGX worker owner.
+Use the embedded ProjectID from Source/dlss_backend.cpp for D3D12 NGX.
+renderer_backend=1 still creates D3D11 and FG remains unavailable until
+that stage is finished. This task is open, not ready for acceptance.
+
+No preparation script, compilation, shader compilation, tests or game run
+was executed. The build/kit, dependency import ABI and runtime behavior
+remain unverified. The sections below describe the earlier stage.
+
 # X64D3D12 source import, stage 1 (2026-11-11)
 
 Incomplete integration. Imported the 21 files under `Host/d3d12/` and

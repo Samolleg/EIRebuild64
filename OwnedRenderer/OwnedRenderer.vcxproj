@@ -7,6 +7,7 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <Import Project="Renderer.props" /><Import Project="..\tools\DirectXStatic.props" />
   <Import Project="DlssSdk.props" />
+  <Import Project="D3D12Sdk.props" />
   <PropertyGroup><TargetName>OwnedRenderer</TargetName></PropertyGroup>
   <ItemGroup>
     <ClCompile Include="..\Game\OwnedRender\E1SkeletonSources.cpp" />

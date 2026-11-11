@@ -424,9 +424,7 @@ int main(int argc, char** argv) {
             std::printf("shader_embed:   %6.1f s %s\n", seconds[order[n]], program_label(programs[order[n]]).c_str());
     }
 
-#ifndef EID3D11_EMBEDDED
     append_d3d12_shader_programs(programs);  // the DXIL table only
-#endif
     if (!dxil_directory.empty() && write_dxil_sources(dxil_directory, programs)) return 1;
     if (!preset_cache) return 0;
     // --preset-cache (build-local-x86.cmd with EID3D11_PRESET_CACHE=1, for
