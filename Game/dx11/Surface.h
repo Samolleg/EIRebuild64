@@ -7,7 +7,7 @@
 #define DXGI_ENABLED
 
 class CDX11;
-namespace owned { class Renderer; }
+namespace owned { class Renderer; struct SurfaceImage; }
 namespace OwnedRender { template<class Backend> class RendererFacadeCore; }
 
 class CDXGISurface
@@ -20,6 +20,13 @@ private:
     DWORD dwSurfaceBPP;    // surface bit depth
     DXGI_FORMAT tfFormat = DXGI_FORMAT::DXGI_FORMAT_UNKNOWN;
     bool opaquePadding = false;
+    std::shared_ptr<owned::SurfaceImage> cpuImage;
+    D3D11_TEXTURE2D_DESC cpuDesc{};
+    HBITMAP cpuBitmap = nullptr;
+    HGDIOBJ cpuPreviousBitmap = nullptr;
+    void* cpuDcPixels = nullptr;
+    void CloseCpuDC() noexcept;
+    bool PublishSurface(bool fullyOpaque = false) const noexcept;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture = 0;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> textureView = 0;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> pixelReadbackStaging;
@@ -52,13 +59,13 @@ public:
     bool EnsureOwnedSurfacePublished() const noexcept
     {
         return OwnedRender::E1SurfaceValue(ownedSurface.Id()) != nullptr ||
-               ownedSurface.Complete(texture.Get());
+               PublishSurface();
     }
     // Complete a full CPU upload with its verified alpha evidence. Other writes
     // publish without that proof and remain conservative.
     bool PublishUploadedOpacity(bool fullyOpaque) noexcept
     {
-        return ownedSurface.Complete(texture.Get(), fullyOpaque);
+        return PublishSurface(fullyOpaque);
     }
     DWORD GetWidth() const { return dwSurfaceWidth; };
     DWORD GetHeight() const { return dwSurfaceHeight; };

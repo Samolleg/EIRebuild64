@@ -17,6 +17,7 @@
 #include "../OwnedRender/E1TextLifetime.h"
 #include "hud_layout_context.h"
 #include "MmpRgbToBgra.h"
+#include <limits>
 
 size_t BitsPerPixel(DXGI_FORMAT fmt)
 {
@@ -228,8 +229,8 @@ CDXGISurface::CDXGISurface(CDX11 *pDXDirectDraw, D3D11_TEXTURE2D_DESC *ptex2d)
     D3D11_TEXTURE2D_DESC normalized = *ptex2d;
     opaquePadding = normalized.Format == DXGI_FORMAT_B8G8R8X8_UNORM;
     normalized.Format = OwnedRgbSurfaceFormat(normalized.Format);
-    pDX11->CreateTexture(&normalized, texture);
-    pDX11->CreateShaderResource(texture, textureView);
+    if (!CreateTexture(&normalized))
+        throw dbgnew CDXException("Can't create surface.\n");
 
     ExtractSurfaceParams();
 }
@@ -248,12 +249,46 @@ CDXGISurface::CDXGISurface(CDX11 *pDXDirectDraw, const SMMPFileHeader *pHdr, boo
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CDXGISurface::CreateTexture(D3D11_TEXTURE2D_DESC *ptex2d)
 {
+    bool nativeD3D12 = false;
+    IfFailedThrowHR(pDX11->GetRendererFacade().Visit([&](owned::Renderer& renderer) {
+        nativeD3D12 = renderer.d3d12_backend(); return S_OK;
+    }));
+    if (nativeD3D12) {
+        if (!ptex2d || !ptex2d->Width || !ptex2d->Height ||
+            ptex2d->Width > UINT((std::numeric_limits<LONG>::max)() / 4) ||
+            ptex2d->Height > UINT((std::numeric_limits<LONG>::max)()) ||
+            size_t(ptex2d->Height) > (std::numeric_limits<size_t>::max)() / (size_t(ptex2d->Width) * 4) ||
+            ptex2d->Format != DXGI_FORMAT_B8G8R8A8_UNORM ||
+            ptex2d->ArraySize != 1 || ptex2d->SampleDesc.Count != 1 || hDc || uiRecordingDc)
+            return FALSE;
+        auto image = std::make_shared<owned::SurfaceImage>();
+        image->width = ptex2d->Width; image->height = ptex2d->Height;
+        image->pitch = LONG(image->width * 4);
+        image->format.dwSize = sizeof(image->format);
+        image->format.dwFlags = DDPF_RGB | DDPF_ALPHAPIXELS;
+        image->format.dwRGBBitCount = 32;
+        image->format.dwRBitMask = 0x00ff0000; image->format.dwGBitMask = 0x0000ff00;
+        image->format.dwBBitMask = 0x000000ff; image->format.dwRGBAlphaBitMask = 0xff000000;
+        image->cpu_pinned = true;
+        image->pixels.resize(size_t(image->pitch) * image->height, 0);
+        ownedSurface.BeginWrite();
+        cpuImage = std::move(image); cpuDesc = *ptex2d;
+        texture.Reset(); textureView.Reset(); pixelReadbackStaging.Reset();
+        if (!PublishSurface()) return FALSE;
+        return ExtractSurfaceParams();
+    }
     ownedSurface.BeginWrite();
     pDX11->CreateTexture(ptex2d, texture);
     pDX11->CreateShaderResource(texture, textureView);
     return ExtractSurfaceParams();
 }
 /////////////////////////////////////////////////////////////////////////////////////
+bool CDXGISurface::PublishSurface(bool fullyOpaque) const noexcept
+{
+    return cpuImage ? ownedSurface.CompleteCpu(*cpuImage, fullyOpaque) :
+                      ownedSurface.Complete(texture.Get(), fullyOpaque);
+}
+
 BOOL CDXGISurface::ExtractSurfaceParams()
 {
     D3D11_TEXTURE2D_DESC tex2d;
@@ -370,7 +405,7 @@ BOOL CDXGISurface::Load(const SMMPFileHeader *pHdr, bool bInVideo)
     tex2d.Height = pHdr->dwDimentionY;
     tex2d.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     tex2d.MipLevels = pHdr->dwMipMapLevel;
-    CreateTexture(&tex2d);
+    if (!CreateTexture(&tex2d)) return FALSE;
     CopyToSurface(this, pHdr, 0);
     return TRUE;
 }
@@ -386,6 +421,16 @@ void CDXGISurface::DefaultSurfaceDesc(D3D11_TEXTURE2D_DESC *ptex2d)
 
 void CDXGISurface::CopyResource(CDXGISurface *src)
 {
+    if (cpuImage) {
+        if (!src || !src->cpuImage || hDc || src->hDc ||
+            dwSurfaceWidth != src->dwSurfaceWidth || dwSurfaceHeight != src->dwSurfaceHeight)
+            IfFailedThrowHR(E_INVALIDARG);
+        auto pixels = src->cpuImage->pixels;
+        ownedSurface.BeginWrite();
+        cpuImage->pixels = std::move(pixels);
+        IfFailedThrowHR(PublishSurface() ? S_OK : E_FAIL);
+        return;
+    }
     ownedSurface.BeginWrite();
     pDX11->GetDeviceContext()->CopyResource(this->GetTexture().Get(), src->GetTexture().Get());
     ownedSurface.Complete(texture.Get());
@@ -394,6 +439,29 @@ void CDXGISurface::CopyResource(CDXGISurface *src)
 void CDXGISurface::CopySubresourceRegion(UINT dstSubresource, UINT dstX, UINT dstY, UINT dstZ,
                                          CDXGISurface *src, UINT srcSubresource, D3D11_BOX *pBox)
 {
+    if (cpuImage) {
+        if (!src || !src->cpuImage || hDc || src->hDc || dstSubresource || srcSubresource || dstZ)
+            IfFailedThrowHR(E_INVALIDARG);
+        const D3D11_BOX box = pBox ? *pBox :
+            D3D11_BOX{0, 0, 0, src->dwSurfaceWidth, src->dwSurfaceHeight, 1};
+        if (box.front || box.back != 1 || box.left >= box.right || box.top >= box.bottom ||
+            box.right > src->dwSurfaceWidth || box.bottom > src->dwSurfaceHeight ||
+            dstX > dwSurfaceWidth || dstY > dwSurfaceHeight ||
+            box.right - box.left > dwSurfaceWidth - dstX ||
+            box.bottom - box.top > dwSurfaceHeight - dstY)
+            IfFailedThrowHR(E_INVALIDARG);
+        // A local copy keeps overlapping/self copies and prior submissions immutable.
+        auto pixels = cpuImage->pixels;
+        const auto& source = static_cast<const owned::SurfaceImage&>(*src->cpuImage).pixels;
+        for (UINT row = 0; row < box.bottom - box.top; ++row)
+            memcpy(pixels.data() + size_t(row + dstY) * cpuImage->pitch + size_t(dstX) * 4,
+                source.data() + size_t(row + box.top) * src->cpuImage->pitch + size_t(box.left) * 4,
+                size_t(box.right - box.left) * 4);
+        ownedSurface.BeginWrite();
+        cpuImage->pixels = std::move(pixels);
+        IfFailedThrowHR(PublishSurface() ? S_OK : E_FAIL);
+        return;
+    }
     ownedSurface.BeginWrite();
     pDX11->GetDeviceContext()->CopySubresourceRegion(this->GetTexture().Get(), dstSubresource, dstX,
                                                      dstY, dstZ, src->GetTexture().Get(),
@@ -409,6 +477,13 @@ HRESULT CDXGISurface::CopyPixelBuffer(DWORD *destination, size_t pixelCount)
 {
     if (!destination || pixelCount < size_t(dwSurfaceWidth) * dwSurfaceHeight)
         return E_INVALIDARG;
+    if (cpuImage) {
+        const auto& pixels = static_cast<const owned::SurfaceImage&>(*cpuImage).pixels;
+        for (UINT y = 0; y < dwSurfaceHeight; ++y)
+            memcpy(destination + size_t(y) * dwSurfaceWidth,
+                pixels.data() + size_t(y) * cpuImage->pitch, size_t(dwSurfaceWidth) * sizeof(DWORD));
+        return S_OK;
+    }
     if (!pixelReadbackStaging)
     {
         D3D11_TEXTURE2D_DESC desc = {};
@@ -445,6 +520,12 @@ HRESULT CDXGISurface::CopyPixelBuffer(DWORD *destination, size_t pixelCount)
 
 std::unique_ptr<DWORD[]> CDXGISurface::GetPixelBuffer()
 {
+    if (cpuImage) {
+        const size_t count = size_t(dwSurfaceWidth) * dwSurfaceHeight;
+        auto pixels = std::make_unique<DWORD[]>(count);
+        if (FAILED(CopyPixelBuffer(pixels.get(), count))) return nullptr;
+        return pixels;
+    }
     int pixelCount = dwSurfaceWidth * dwSurfaceHeight;
     // assume 32 bit;
     // create cpu-copyable texture
@@ -592,15 +673,48 @@ CDXGISurface::~CDXGISurface()
 {
     owned::owned_text_retire_surface(OwnedSurfaceId());
     if(uiRecordingDc)owned::ui_layer_abort(uiRecordingDc);
+    if (cpuImage) CloseCpuDC();
     if(hDc && texture){
         Microsoft::WRL::ComPtr<IDXGISurface1> surface;
         if(SUCCEEDED(texture.As(&surface)))surface->ReleaseDC(nullptr);
     }
 }
 
+void CDXGISurface::CloseCpuDC() noexcept
+{
+    if (!hDc) return;
+    SelectObject(hDc, cpuPreviousBitmap);
+    DeleteObject(cpuBitmap);
+    DeleteDC(hDc);
+    hDc = nullptr; cpuBitmap = nullptr; cpuPreviousBitmap = nullptr; cpuDcPixels = nullptr;
+}
+
 HDC CDXGISurface::AcquirePixelsDC()
 {
     CorePerf::Scope timing(CorePerf::UiPixelsAcquire);
+    if (cpuImage) {
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = LONG(dwSurfaceWidth);
+        info.bmiHeader.biHeight = -LONG(dwSurfaceHeight);
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        HDC dc = CreateCompatibleDC(nullptr);
+        if (!dc) IfFailedThrowHR(E_OUTOFMEMORY);
+        HBITMAP bitmap = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &cpuDcPixels, nullptr, 0);
+        if (!bitmap) { DeleteDC(dc); IfFailedThrowHR(E_OUTOFMEMORY); }
+        HGDIOBJ previous = SelectObject(dc, bitmap);
+        if (!previous || previous == HGDI_ERROR) {
+            DeleteObject(bitmap); DeleteDC(dc); cpuDcPixels = nullptr;
+            IfFailedThrowHR(E_FAIL);
+        }
+        const auto& pixels = static_cast<const owned::SurfaceImage&>(*cpuImage).pixels;
+        memcpy(cpuDcPixels, pixels.data(), pixels.size());
+        ownedSurface.BeginWrite();
+        cpuBitmap = bitmap; cpuPreviousBitmap = previous; hDc = dc;
+        return hDc;
+    }
     Microsoft::WRL::ComPtr<IDXGISurface1> surface;
     IfFailedThrowHR(texture.As(&surface));
     ownedSurface.BeginWrite();
@@ -611,6 +725,16 @@ HDC CDXGISurface::AcquirePixelsDC()
 void CDXGISurface::ReleasePixelsDC()
 {
     CorePerf::Scope timing(CorePerf::UiPixelsRelease);
+    if (cpuImage) {
+        GdiFlush();
+        try {
+            // SurfacePixels detaches shared snapshots before the write.
+            memcpy(cpuImage->pixels.data(), cpuDcPixels, cpuImage->pixels.size());
+        } catch (...) { CloseCpuDC(); throw; }
+        CloseCpuDC();
+        IfFailedThrowHR(PublishSurface() ? S_OK : E_FAIL);
+        return;
+    }
     Microsoft::WRL::ComPtr<IDXGISurface1> surface;
     IfFailedThrowHR(texture.As(&surface));
     IfFailedThrowHR(surface->ReleaseDC(nullptr));
@@ -681,7 +805,7 @@ BOOL CDXGISurface::ReleaseDC(HDC hDC)
         // identity too, including after screen/resource recreation, so the blit
         // can reach owned_text_consume with a nonzero current generation.
         if(success && !OwnedRender::E1SurfaceValue(OwnedSurfaceId())) {
-            success=ownedSurface.Complete(texture.Get());
+            success=PublishSurface();
             if(!success) {
                 static bool reported=false;
                 if(!reported) {
@@ -723,6 +847,9 @@ BOOL CDXGISurface::ReleaseDC(HDC hDC)
 // get surface description
 BOOL CDXGISurface::GetSurfaceDesc(D3D11_TEXTURE2D_DESC *ptex2d)
 {
+    if (!ptex2d) return FALSE;
+    if (cpuImage) { *ptex2d = cpuDesc; return TRUE; }
+    if (!texture) return FALSE;
     texture->GetDesc(ptex2d);
     return TRUE;
 }
@@ -764,7 +891,9 @@ HRESULT CDXGISurface::BlitPublishedToFacade(OwnedRender::E1RendererFacade& facad
     const RECT& destination, const RECT* source, const DDCOLORKEY* colorKey,
     bool interfaceSpace, bool nativeCanvas)
 {
-    if (!pDX11 || !texture || !facade.FrameActive()) return E_UNEXPECTED;
+    if (!pDX11 || (!texture && !cpuImage) || !facade.FrameActive()) return E_UNEXPECTED;
+    if (cpuImage) return OwnedRender::E1BlitPublishedSurface(facade, nullptr, nullptr,
+        OwnedSurfaceId(), destination, source, colorKey, interfaceSpace, nativeCanvas);
     auto device = pDX11->GetDevice();
     auto context = pDX11->GetDeviceContext();
     if (!device || !context) return E_UNEXPECTED;
@@ -830,6 +959,40 @@ HRESULT CDXGISurface::BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DW
 void CDXGISurface::UpdateTexture(UINT subresource_index, D3D11_BOX *region,
                                  D3D11_SUBRESOURCE_DATA *srd, DWORD sourceMmpFormat)
 {
+    if (cpuImage) {
+        // SurfaceImage uploads level zero; the author's native uploader owns
+        // GPU mip generation. Source mip uploads do not replace level zero.
+        if (subresource_index != 0) return;
+        const D3D11_BOX box = region ? *region :
+            D3D11_BOX{0, 0, 0, dwSurfaceWidth, dwSurfaceHeight, 1};
+        if (hDc || !srd || !srd->pSysMem || box.front != 0 || box.back != 1 ||
+            box.left >= box.right || box.top >= box.bottom ||
+            box.right > dwSurfaceWidth || box.bottom > dwSurfaceHeight)
+            IfFailedThrowHR(E_INVALIDARG);
+        SMMPFileHeader format;
+        format.InitializeDefaultFormat(sourceMmpFormat);
+        const UINT width = box.right - box.left;
+        if (format.dwBitDepth != 16 && format.dwBitDepth != 32)
+            IfFailedThrowHR(E_INVALIDARG);
+        const size_t rowBytes = size_t(width) * (format.dwBitDepth / 8);
+        const size_t sourcePitch = srd->SysMemPitch ? srd->SysMemPitch : rowBytes;
+        if (sourcePitch < rowBytes) IfFailedThrowHR(E_INVALIDARG);
+        // Convert into a detached copy before invalidating the completed image.
+        auto pixels = cpuImage->pixels;
+        std::vector<DWORD> converted;
+        for (UINT row = 0; row < box.bottom - box.top; ++row) {
+            if (!MmpRgbToBgra::Convert(format,
+                static_cast<const BYTE*>(srd->pSysMem) + size_t(row) * sourcePitch, width, converted))
+                IfFailedThrowHR(E_INVALIDARG);
+            if (opaquePadding) for (DWORD& pixel : converted) pixel |= 0xff000000u;
+            memcpy(pixels.data() + size_t(row + box.top) * cpuImage->pitch + size_t(box.left) * 4,
+                converted.data(), size_t(width) * sizeof(DWORD));
+        }
+        ownedSurface.BeginWrite();
+        cpuImage->pixels = std::move(pixels);
+        IfFailedThrowHR(PublishSurface() ? S_OK : E_FAIL);
+        return;
+    }
     ownedSurface.BeginWrite();
     D3D11_TEXTURE2D_DESC destination = {};
     texture->GetDesc(&destination);
@@ -871,11 +1034,20 @@ void CDXGISurface::UpdateTexture(UINT subresource_index, D3D11_BOX *region,
 /////////////////////////////////////////////////////////////////////////////////////
 HRESULT CDXGISurface::Clear(DWORD dwColorFill)
 {
+    if (cpuImage) {
+        if (!hDc) return E_UNEXPECTED;
+        RECT rect = {0, 0, LONG(dwSurfaceWidth), LONG(dwSurfaceHeight)};
+        HBRUSH brush = CreateSolidBrush(dwColorFill);
+        if (!brush) return E_OUTOFMEMORY;
+        const bool cleared = FillRect(hDc, &rect, brush) != 0;
+        DeleteObject(brush);
+        return cleared ? S_OK : E_FAIL;
+    }
 #ifdef DXGI_ENABLED
     ASSERT(hDc);
     // dwColorFill = 0x000000FF;
     D3D11_TEXTURE2D_DESC tex2d;
-    texture->GetDesc(&tex2d);
+    GetSurfaceDesc(&tex2d);
     // std::unique_ptr<DWORD[]> data = std::make_unique<DWORD[]>(tex2d.Width * tex2d.Height);
     // for (int i = 0; i < tex2d.Width; ++i)
     //{

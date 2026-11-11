@@ -1,3 +1,24 @@
+# X64D3D12 CPU surface producers, stage 20 (2026-11-11)
+
+Incomplete runtime integration: renderer_backend=1 still creates D3D11.
+Game/dx11/Surface.{h,cpp} now selects CPU BGRA storage for an active native
+executor, publishes through E1Surface::CompleteCpu and uses the author's
+SurfaceImage/SurfacePixels copy-on-write backing. Source RGB/MMP level-zero
+uploads retain MmpRgbToBgra conversion, including BGRX opaque padding. Higher
+source mips leave level zero intact; the native uploader owns GPU mips.
+CPU descriptors, full/rectangular copies, pixel/thumbnail reads and uploads,
+GDI DIB sessions, text-only publication and facade UI blits need no D3D11
+texture. DIB writes preserve pixel alpha and publish only after GdiFlush and
+DC release. BGRA allocation rejects unsupported formats and invalid extents.
+No HLSL, SDK, runtime DLL or pose/SKN changes. Host transport adaptation
+remains Source/embedded_d3d12.{h,cpp}; these producers live in Game/dx11.
+
+Next adapt BltFromRenderSurface native capture and Fade/StretchTo effects,
+then remaining source texture/sprite/SRV boundaries. Only then latch backend
+before device creation and connect input/simulation/render phase boundaries.
+Full BRIEF remains open. No compilation, shader compilation, tests or game
+run was performed. Build/link, D3D11 regression and GPU behavior are unverified.
+
 # X64D3D12 CPU surface publication seam, stage 19 (2026-11-11)
 
 Incomplete runtime integration: renderer_backend=1 still creates D3D11.
