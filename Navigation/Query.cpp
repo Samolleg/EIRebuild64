@@ -39,6 +39,16 @@ Location Address(const Mesh& m,Point p,dtPolyRef ref,float height,float referenc
     const size_t index=size_t(poly-tile->polys);
     if(identities==m.polygonSurfaces.end()||index>=identities->second.size()||triangles==m.sources->surfaceTriangles.end())return l;
     const auto& surfaces=identities->second[index];
+    // Connected source IDs can include terrain joined at the end of a bridge.
+    // At an overlapping XY that terrain is still a different floor. Bound the
+    // source plane by this polygon's raster height envelope before using the
+    // caller's height hint to rank supports. Exact Z still comes from the source.
+    float floorLow=1.e30f,floorHigh=-1.e30f;
+    for(int i=0;i<poly->vertCount;++i) {
+        const float z=tile->verts[poly->verts[i]*3+1];
+        floorLow=std::min(floorLow,z);floorHigh=std::max(floorHigh,z);
+    }
+    const float floorMargin=m.profile.climb+m.profile.cellHeight+.001f;
     float best=1.e30f,terrainZ=-1.e30f;
     std::vector<std::pair<float,std::uint64_t>> heights;std::vector<float> ceilings;
     for(size_t i:triangles->second) {
@@ -71,7 +81,7 @@ Location Address(const Mesh& m,Point p,dtPolyRef ref,float height,float referenc
             terrainZ=std::max(terrainZ,z);
         }
         if(!t.terrain)ceilings.push_back(z);
-        if(admitted)heights.emplace_back(z,surface);
+        if(admitted&&z>=floorLow-floorMargin&&z<=floorHigh+floorMargin)heights.emplace_back(z,surface);
     }
     for(const auto& at:heights) {
         if(at.second!=1&&at.first<terrainZ-.015f)continue;
@@ -199,6 +209,10 @@ bool Start(const Mesh& mesh,dtNavMeshQuery& q,Point p,const dtQueryFilter& filte
     }
     if(!Nearest(mesh,q,p,.05f,4.f,filter,ref,near,0,height))return false;
     actual=FromNav(near);
+    // Placement may search four metres vertically, but a route must start on
+    // the body's current floor. Otherwise Find returns ready from another
+    // level while Constrain rejects the same first step on every AI retry.
+    if(!Flies(mesh.profile)&&std::abs(actual.z-p.z)>mesh.profile.climb+.001f)return false;
     ingress=std::hypot(actual.x-p.x,actual.y-p.y)>.001f;
     if(ingress) {
         // The existing 5 cm admission margin is an explicit entry segment,

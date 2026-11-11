@@ -1053,6 +1053,7 @@ void CUnitServer::L1ExecMove()
         }
         path.ClearCalcedPath();
         if(++navigationRejects>1) {
+            pWS->aiMap.Navigation().RejectMovement(lpUnit,from,path.navigationGoal.position);
             GameJournal::Event("NAV","step_replan","unit=%d result=stopped reason=repeated_rejection",lpUnit->GetID());
             L1StopMovement(true);L0Freeze(false);L0StartAnimation(*GetIdleAnimation());return;
         }
