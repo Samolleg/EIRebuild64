@@ -1,3 +1,22 @@
+# X64D3D12 game effect admission, stage 27 (2026-11-11)
+
+The five game-effect producers now admit the embedded D3D12 executor when
+there is no D3D11 device/context. Particles, lightning ribbons, selection
+marks, combat glyphs and print runs reach the existing author-owned
+ensure_game_particle_pipeline / draw_game_effect_d3d12 path. Input checks,
+CPU ordering, deferred ground-mark scheduling, constants and shader programs
+retain their existing implementation. D3D11 admission still requires both
+its device and context. Host transport remains Source/embedded_d3d12.{h,cpp}.
+This stage adds no libraries, DLLs or shader programs.
+
+Full BRIEF remains open. Source fixed-function drawing, secondary figure
+composition / BindTexture stage-one admission and remaining sprite/SRV
+boundaries still require adapters. These five producer fixes remove an
+additional drawing blocker but do not complete those adapters. Next finish
+the fixed-function route and secondary composition, then coordinator build,
+D3D12 startup/FG and D3D11 regression validation. Compilation, tests and game
+execution have not been performed in this stage.
+
 # X64D3D12 compile unblock and wound texture ingress, stage 26 (2026-11-11)
 
 E1Surface.cpp defines NOMINMAX before its first Windows-dependent include,

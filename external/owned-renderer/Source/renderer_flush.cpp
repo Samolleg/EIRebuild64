@@ -288,7 +288,7 @@ HRESULT Renderer::draw_game_particles(const GameParticleView& view,const FixedSt
   return S_OK;
  }
  PerfScope perf(&perf_draw_ticks_);if(perf_enabled())++perf_draw_calls_;
- if(!device_||!context_||!view.particles||!view.count)return E_INVALIDARG;
+ if((!d3d12_&&(!device_||!context_))||!view.particles||!view.count)return E_INVALIDARG;
  if(view.interface_pass){const HRESULT hr=composite_world();if(FAILED(hr))return hr;}
  if(HRESULT created=ensure_game_particle_pipeline();FAILED(created))return created;
  try{
@@ -521,7 +521,7 @@ HRESULT Renderer::draw_game_ribbon(const GameRibbonView& view,const FixedState& 
   return S_OK;
  }
  PerfScope perf(&perf_draw_ticks_);if(perf_enabled())++perf_draw_calls_;
- if(!device_||!context_||!view.points||view.count<2)return E_INVALIDARG;
+ if((!d3d12_&&(!device_||!context_))||!view.points||view.count<2)return E_INVALIDARG;
  if(view.interface_pass){const HRESULT hr=composite_world();if(FAILED(hr))return hr;}
  if(HRESULT created=ensure_game_particle_pipeline();FAILED(created))return created;
  try{game_effect_elements_.resize(view.count);}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
@@ -552,7 +552,7 @@ HRESULT Renderer::draw_game_selection_held(const GameSelectionView& view,const F
   return S_OK;
  }
  PerfScope perf(&perf_draw_ticks_);if(perf_enabled())++perf_draw_calls_;
- if(!device_||!context_)return E_INVALIDARG;
+ if(!d3d12_&&(!device_||!context_))return E_INVALIDARG;
  if(HRESULT created=ensure_game_particle_pipeline();FAILED(created))return created;
  try{game_effect_elements_.resize(1);}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
  game_selection_gpu(view.marker,game_effect_elements_[0]);
@@ -576,7 +576,7 @@ HRESULT Renderer::draw_game_glyphs(const GameGlyphView& view,const FixedState& s
   return S_OK;
  }
  PerfScope perf(&perf_draw_ticks_);if(perf_enabled())++perf_draw_calls_;
- if(!device_||!context_)return E_INVALIDARG;
+ if(!d3d12_&&(!device_||!context_))return E_INVALIDARG;
  if(HRESULT created=ensure_game_particle_pipeline();FAILED(created))return created;
  try{game_effect_elements_.assign(view.glyphs,view.glyphs+view.count);}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
  static const float identity[16]={1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
@@ -612,7 +612,7 @@ HRESULT Renderer::draw_game_print_run_held(std::vector<GameParticleGpu> vertices
   return S_OK;
  }
  PerfScope perf(&perf_draw_ticks_);if(perf_enabled())++perf_draw_calls_;
- if(!device_||!context_)return E_INVALIDARG;
+ if(!d3d12_&&(!device_||!context_))return E_INVALIDARG;
  if(HRESULT created=ensure_game_particle_pipeline();FAILED(created))return created;
  try{game_effect_elements_=std::move(vertices);}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
  GameEffectDraw draw{};draw.object_to_clip=object_to_clip.data();
