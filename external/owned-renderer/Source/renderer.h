@@ -1400,6 +1400,11 @@ public:
         return owned::visit_embedded_device(device_.Get(), context_.Get(),
             rtv_.Get(), dsv_.Get(), user, visitor);
     }
+    // Current-target operations, without a borrowed backend device or the
+    // legacy Clear operation's implicit world-composition boundary.
+    HRESULT bind_embedded_targets();
+    HRESULT clear_embedded_targets(const float* color, const float* depth);
+    HRESULT read_embedded_viewport(D3DVIEWPORT7& viewport);
     bool embedded_hit_test_frame() const noexcept { return hit_test_active_; }
     HRESULT visit_embedded_output(void* user, EmbeddedOutputVisitor visitor) const {
         if (hit_test_failed_) return E_FAIL;

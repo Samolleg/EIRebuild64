@@ -1,3 +1,31 @@
+# X64D3D12 embedded target operations, stage 15 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+CDX11 BeginFrame, RefreshOwnedTargets and ClearColor/Z now use renderer-owned
+target operations, instead of borrowing a D3D11 device/context. D3D11 keeps
+the same target binding, viewport and clear calls. The new synchronous seams
+drain pending scene work before accessing current target state.
+
+D3D12 draws retain their own target bindings (world history/MRTs, hit-test
+and popup targets must not be overwritten by a generic host bind). Clears
+use the author's executor background/full-rectangle operations; the executor
+clips to the actual active target and preserves the requested depth/stencil.
+They deliberately do not call legacy Clear, which can composite the world.
+Executor failures use the prepared embedded journal/player error path.
+CaptureC56MaterialState reads its viewport through Renderer too; D3D11 keeps
+RSGetViewports, while D3D12 uses the current world/UI pixel dimensions.
+No author HLSL, rendering algorithms, SDKs or runtime DLL lists changed.
+
+Activation still requires CDX11 InitializeDX's D3D11 states and device/output
+leases, source texture/SRV adapters and screenshot/capture boundaries to be
+adapted. Then latch renderer_backend before device creation, call the prepared
+ensure_embedded_d3d12, enable readiness/begin_scene and local simulation/render
+boundaries together with world/SR/FG/present dispatch and removal reporting.
+Do not substitute a D3D11 device or set core_host_. Host transport adaptation
+remains Source/embedded_d3d12.{h,cpp}. Full BRIEF remains open.
+No compilation, shader compilation, tests or game run was performed.
+Build/link, D3D11 regression and D3D12 GPU behavior remain unverified.
+
 # X64D3D12 native startup preparation, stage 14 (2026-11-11)
 
 Incomplete runtime integration. renderer_backend=1 still creates D3D11.

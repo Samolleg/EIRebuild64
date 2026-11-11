@@ -56,6 +56,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <climits>
 #include <cmath>
 #include <iterator>
 #include <thread>
@@ -613,6 +614,68 @@ HRESULT Renderer::resize(UINT w,UINT h){if(core_mode_)return core_resize(w,h);SC
   return hr;
  }
  camp_inventory_output(canvas_width(),canvas_height());return S_OK;
+}
+
+HRESULT Renderer::bind_embedded_targets(){
+ SCENE_ENTRY("embedded_bind_targets");
+ if(d3d12_){
+  // Native draws bind their own targets. Rebinding here would lose a popup,
+  // hit-test target or the world's motion/history attachments.
+  return S_OK;
+ }
+ return visit_embedded_device(nullptr,[](void*,const EmbeddedDeviceView& view)->HRESULT{
+  view.context->OMSetRenderTargets(1,&view.color,view.depth);
+  const D3D11_VIEWPORT viewport{0,0,float(view.width),float(view.height),0,1};
+  view.context->RSSetViewports(1,&viewport);
+  return S_OK;
+ });
+}
+HRESULT Renderer::clear_embedded_targets(const float* color,const float* depth){
+ SCENE_ENTRY("embedded_clear_targets");
+ if(!color&&!depth)return E_INVALIDARG;
+ if(d3d12_){
+  // clear() alone only updates the pre-draw output background. An explicit
+  // rectangle clears after draws too and preserves a custom offscreen depth
+  // value (clear_target uses 1.0). Do not run legacy Clear's world composite.
+  if(color)d3d12_->clear(color);
+  // The executor clips against the actual target (including popup/hit-test
+  // sizes), rather than assuming the world's current render scale.
+  const RECT rectangle{0,0,LONG_MAX,LONG_MAX};
+  d3d12_->clear_rectangles(&rectangle,1,color,depth!=nullptr,depth!=nullptr,
+   depth?*depth:1.f,0);
+ #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+  if(embedded_d3d12_.frame()==d3d12_){
+   const char* reason=embedded_d3d12_.failure();
+   if(reason&&*reason)return fail_embedded_d3d12("clear targets",E_FAIL,reason);
+  }
+ #endif
+  return S_OK;
+ }
+ struct Values{const float* color;const float* depth;} values{color,depth};
+ return visit_embedded_device(&values,[](void* user,const EmbeddedDeviceView& view)->HRESULT{
+  const auto& values=*static_cast<const Values*>(user);
+  if(values.color)view.context->ClearRenderTargetView(view.color,values.color);
+  if(values.depth)view.context->ClearDepthStencilView(view.depth,
+   D3D11_CLEAR_DEPTH|D3D11_CLEAR_STENCIL,*values.depth,0);
+  return S_OK;
+ });
+}
+
+HRESULT Renderer::read_embedded_viewport(D3DVIEWPORT7& viewport){
+ SCENE_ENTRY("embedded_read_viewport");
+ viewport={};
+ if(d3d12_){
+  // Embedded native submissions use the renderer's world/UI pixel space;
+  // projection jitter remains in the camera, never in the viewport origin.
+  viewport={0,0,target_width(),target_height(),0.f,1.f};
+  return viewport.dwWidth&&viewport.dwHeight?S_OK:DXGI_ERROR_INVALID_CALL;
+ }
+ if(!context_)return DXGI_ERROR_INVALID_CALL;
+ D3D11_VIEWPORT value{};UINT count=1;
+ context_->RSGetViewports(&count,&value);
+ viewport={DWORD(value.TopLeftX),DWORD(value.TopLeftY),DWORD(value.Width),DWORD(value.Height),
+  value.MinDepth,value.MaxDepth};
+ return S_OK;
 }
 
 HRESULT Renderer::clear(DWORD rectangle_count,const D3DRECT* rectangles,DWORD flags,D3DCOLOR color,float z,DWORD stencil){

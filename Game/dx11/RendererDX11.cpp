@@ -186,10 +186,9 @@ owned::FixedState CDX11::CaptureC56MaterialState()
     for (const auto& item : fake_dx7.render_state)
         if (item.first >= 0 && std::size_t(item.first) < state.render.size())
             state.render[item.first] = item.second;
-    D3D11_VIEWPORT viewport{}; UINT count = 1;
-    deviceContext->RSGetViewports(&count, &viewport);
-    state.viewport = {DWORD(viewport.TopLeftX), DWORD(viewport.TopLeftY),
-        DWORD(viewport.Width), DWORD(viewport.Height), viewport.MinDepth, viewport.MaxDepth};
+    IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.read_embedded_viewport(state.viewport);
+    }));
     const auto& pixel = GetConstantBuffers()->cb_ps_pixelshader.data;
     const bool textured = bool(boundFigureTextures[0]);
     state.stage[0][D3DTSS_COLOROP] = textured ? D3DTOP_MODULATE : D3DTOP_SELECTARG2;
@@ -617,14 +616,10 @@ void CDX11::BeginFrame()
     owned::bridge_set_screen_rectangle_sink(this, &SubmitScreenRectangleToC56);
     frameTiming.Begin();
     RefreshOwnedTargets();
-    IfFailedThrowHR(rendererFacade->VisitDevice(&background_color,
-        [](void *user, const owned::EmbeddedDeviceView& view) -> HRESULT {
-            const auto *color = static_cast<const DirectX::XMFLOAT4 *>(user);
-            view.context->ClearRenderTargetView(view.color, reinterpret_cast<const float *>(color));
-            view.context->ClearDepthStencilView(view.depth,
-                D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, G_CLEAR_DEPTH_VALUE, 0);
-            return S_OK;
-        }));
+    IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.clear_embedded_targets(reinterpret_cast<const float*>(&background_color),
+            &G_CLEAR_DEPTH_VALUE);
+    }));
     SetRenderStates();
 }
 
@@ -841,7 +836,9 @@ void CDX11::BeginInterface()
 
 void CDX11::RefreshOwnedTargets()
 {
-    IfFailedThrowHR(rendererFacade->VisitDevice(nullptr, &OwnedRender::E1BindTargets));
+    IfFailedThrowHR(rendererFacade->Visit([](owned::Renderer& renderer) {
+        return renderer.bind_embedded_targets();
+    }));
 }
 
 void CDX11::EndFrame(bool present)
@@ -882,13 +879,17 @@ void CDX11::EndFrame(bool present)
 void CDX11::ClearColorBuffer(DWORD value)
 {
     DirectX::XMFLOAT4 color = BGRAtoFloat4(value);
-    IfFailedThrowHR(rendererFacade->VisitDevice(&color, &OwnedRender::E1ClearColor));
+    IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.clear_embedded_targets(reinterpret_cast<const float*>(&color), nullptr);
+    }));
 }
 
 void CDX11::ClearZBuffer(DWORD dwValue)
 {
     float depth = float(dwValue);
-    IfFailedThrowHR(rendererFacade->VisitDevice(&depth, &OwnedRender::E1ClearDepth));
+    IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.clear_embedded_targets(nullptr, &depth);
+    }));
 }
 
 BOOL CDX11::BindTexture(DWORD dwIndex, ID3D11ShaderResourceView *pTexture,
