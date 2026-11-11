@@ -180,6 +180,7 @@ float4 rectanglePS(RectanglePixel input):SV_Target{return input.color;})";
 #if !defined(EID3D11_SHADER_EMBED)
 struct ScreenRectangleVertex { float x, y; std::uint32_t color; };
 constexpr UINT kScreenRectangleMaximumVertices = 5u * 6u;
+#endif
 
 constexpr char kDebugResourceViewShader[] = R"(
 cbuffer DebugViewConstants:register(b0){float4 projectionCoefficients;uint debugMode;uint shadowEnabled;uint shadowValid;uint debugPadding;float4 shadowBoard;float4 receiverRectangle[5];};
@@ -222,6 +223,7 @@ float4 debugTexturePS(FullscreenOutput input):SV_Target{
  }
  return float4(value,value,value,1);})";
 
+#if !defined(EID3D11_SHADER_EMBED)
 struct DebugViewConstants {
     std::array<float, 4> projection{};
     std::uint32_t mode = 0;
