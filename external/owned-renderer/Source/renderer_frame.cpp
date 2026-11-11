@@ -2295,7 +2295,7 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
  // Sample the existing asynchronous profiler. No new query or GPU wait.
  static ULONGLONG perf06last=0;
  const auto perf06now=GetTickCount64();
- try { if(perf06now-perf06last>=2000){
+ try { if(RuntimeDiagnostics::Enabled() && perf06now-perf06last>=2000){
   perf06last=perf06now;
   if(const auto* sample=profiler_.latest_snapshot()){
    char detail[384]{};

@@ -3112,6 +3112,7 @@ private:
     // per second, one host.log line every 5 s (the harness reads it; F10
     // shows the same counts every half second).
     void log_fsr_rates() noexcept {
+        if (!RuntimeDiagnostics::Enabled()) return;
         LARGE_INTEGER now{}, frequency{};
         QueryPerformanceCounter(&now);
         QueryPerformanceFrequency(&frequency);

@@ -1,4 +1,5 @@
 #pragma once
+#include "runtime_diagnostics.h"
 #include <d3d11.h>
 #include <wrl/client.h>
 #include <algorithm>
@@ -79,6 +80,7 @@ public:
         cpuBegin = frequency = 0; gpuEnabled = false; queryStatus = S_FALSE; native = nullptr;
     }
     HRESULT AttachNative(owned::ProfileTimestamps* timestamps) noexcept {
+        if (!RuntimeDiagnostics::Enabled()) return S_FALSE;
         Reset();
         LARGE_INTEGER value{};
         if (QueryPerformanceFrequency(&value)) frequency = value.QuadPart;
@@ -87,6 +89,7 @@ public:
         return queryStatus = gpuEnabled ? S_OK : S_FALSE;
     }
     HRESULT Attach(ID3D11Device* device, ID3D11DeviceContext* immediate) noexcept {
+        if (!RuntimeDiagnostics::Enabled()) return S_FALSE;
         Reset();
         LARGE_INTEGER value{};
         if (QueryPerformanceFrequency(&value)) frequency = value.QuadPart;
@@ -148,6 +151,7 @@ public:
         }
     }
     void Begin() noexcept {
+        if (!RuntimeDiagnostics::Enabled()) return;
         // A failed/abandoned frame is not a successful frame sample.
         if (open) { CloseQuery(); if (active >= 0) slots[active].pending = false; ++aborted; }
         active = -1; open = true; cpuBegin = Now();

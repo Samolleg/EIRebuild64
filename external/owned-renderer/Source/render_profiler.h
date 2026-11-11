@@ -1,4 +1,5 @@
 #pragma once
+#include "runtime_diagnostics.h"
 #include "frame_waits.h"
 #include <map>
 
@@ -253,7 +254,7 @@ public:
         std::uint64_t presentation_frame) noexcept;
 
     // Consumes completed timestamp results since the previous report.
-    void enable_gpu_journal() noexcept { journal_enabled_ = true; }
+    void enable_gpu_journal() noexcept { journal_enabled_ = RuntimeDiagnostics::Enabled(); }
     bool gpu_journal_enabled() const noexcept { return journal_enabled_; }
     std::string take_gpu_pass_report(std::string* frame_waits = nullptr);
     bool frame_active() const { return frame_active_; }

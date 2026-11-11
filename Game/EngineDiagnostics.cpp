@@ -48,8 +48,6 @@ DWORD Setting(const wchar_t *name, DWORD fallback) {
     return SettingsProfile::Dword(L"Settings",name,fallback);
 }
 
-HANDLE runtimeLog = INVALID_HANDLE_VALUE;
-volatile LONG eventCount = 0;
 // Retain the existing typed reporting-point context beside the native logger ring.
 size_t Count() { return fileLog.RecentLineCount() + snapshotCount; }
 const char *Line(size_t i) {
@@ -93,7 +91,7 @@ void Initialize(bool quiet) {
         path = GetUniqPath(directory, L"ei-", L".dmp");
     wchar_t logPath[MAX_PATH];
     _snwprintf_s(logPath, MAX_PATH, _TRUNCATE, L"%s.runtime.txt", path.c_str());
-    runtimeLog = path.empty() ? INVALID_HANDLE_VALUE : CreateFileW(logPath, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+
     FrameDiagnostics::Configure(logPath);
     CrashEvidence::Configure(path.c_str(), "EIRebuild R135 " __DATE__ " " __TIME__);
     CrashEvidence::Prepare(GetModuleHandleW(nullptr));
@@ -144,15 +142,10 @@ void Caught(const char *text, DWORD code) {
 namespace EngineDiagnostics {
 void Event(const char *format, ...) {
     FrameDiagnostics::Scope timing(FrameDiagnostics::DiagnosticEvent);
-    char text[768], line[820]; va_list args; va_start(args, format);
+    char text[768]; va_list args; va_start(args, format);
     _vsnprintf_s(text, sizeof(text), _TRUNCATE, format, args); va_end(args);
     GameJournal::Event("DIAG", "diagnostic_event", "text=%s", GameJournal::Quote(text).c_str());
-    if (InterlockedIncrement(&eventCount) > 1024) return;
     Note(text);
-    int n = _snprintf_s(line, sizeof(line), _TRUNCATE, "[%lu] %s\r\n", GetTickCount(), text);
-    if (runtimeLog != INVALID_HANDLE_VALUE && n > 0) {
-        DWORD written; WriteFile(runtimeLog, line, n, &written, nullptr); FlushFileBuffers(runtimeLog);
-    }
 }
 }
 

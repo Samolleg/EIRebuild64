@@ -1,4 +1,5 @@
 #pragma once
+#include "runtime_diagnostics.h"
 #include <windows.h>
 #include <algorithm>
 #include <array>
@@ -75,7 +76,7 @@ inline thread_local Distribution cpu_frame;
 inline std::mutex render_mutex;
 inline std::array<Distribution, count> render;
 inline bool begin() noexcept {
-    if (frame.active) return false;
+    if (!RuntimeDiagnostics::Enabled() || frame.active) return false;
     frame = {};
     frame.active = true;
     frame.checkpoint = now();
@@ -95,6 +96,7 @@ inline void end() noexcept {
 // Scene commands accumulate from first command through Present. Queue starvation
 // is measured as idle and excluded from command recording. Submit once per frame.
 inline void end_render() noexcept {
+    if (!frame.active) return;
     checkpoint(now());
     frame.active = false;
     std::lock_guard<std::mutex> lock(render_mutex);

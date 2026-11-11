@@ -83,7 +83,7 @@ void Pacer::stop() noexcept {
 void Pacer::submit(Presenter& presenter, ID3D12Resource* generated, ID3D12Resource* real, std::uint64_t main_value, unsigned slot,
                    std::int64_t game_start, std::int64_t host_taken, UINT sync_interval, int frame_limit) noexcept {
     LARGE_INTEGER called{};
-    QueryPerformanceCounter(&called);  // before the back-pressure wait: the host's frame is recorded
+    if (RuntimeDiagnostics::Enabled()) QueryPerformanceCounter(&called);  // before the back-pressure wait
     const owned::frame_waits::Scope wait(owned::frame_waits::pacer);
     std::unique_lock<std::mutex> lock(mutex_);
     while (!idle_.wait_for(lock, std::chrono::seconds(5), [this] { return !pending_ && !busy_; })) {
@@ -196,7 +196,7 @@ bool Pacer::copy_and_present(ID3D12Resource* source, std::uint64_t& signalled, c
     limiter_.wait(frame.frame_limit, nullptr, &remote::host_log);
     const HRESULT hr = presenter_->present(frame.sync_interval);
     LARGE_INTEGER now{};
-    QueryPerformanceCounter(&now);
+    if (RuntimeDiagnostics::Enabled()) QueryPerformanceCounter(&now);
     if (last_present_) {
         const double ms = 1000.0 * double(now.QuadPart - last_present_) / double(frequency_);
         if (ms < 100.0) { spacing_sum_ += ms; spacing_squares_ += ms * ms; spacing_max_ = (std::max)(spacing_max_, ms); ++spacing_count_; }
@@ -254,7 +254,7 @@ void Pacer::run() noexcept {
         bool generated_shown = false;
         if (frame.generated) {
             generated_shown = copy_and_present(frame.generated, signalled, frame);
-            if (generated_shown) { generated_after_sum_ += 1000.0 * double(last_present_ - done.QuadPart) / double(frequency.QuadPart); ++generated_after_count_; }
+            if (RuntimeDiagnostics::Enabled() && generated_shown) { generated_after_sum_ += 1000.0 * double(last_present_ - done.QuadPart) / double(frequency.QuadPart); ++generated_after_count_; }
             // The real image half a real-frame interval after the generated
             // one (no interval yet: at once).
             // With VSync, the swap chain's latency wait/vblank establishes
@@ -266,10 +266,10 @@ void Pacer::run() noexcept {
             }
         }
         LARGE_INTEGER real_start{};
-        QueryPerformanceCounter(&real_start);
+        if (RuntimeDiagnostics::Enabled()) QueryPerformanceCounter(&real_start);
         const bool real_shown = copy_and_present(frame.real, signalled, frame);
         if (real_shown) reflex::real_presented(frame.game_start);
-        if (real_shown && frame.game_start > 0 && frame.host_taken >= frame.game_start && frame.submitted >= frame.host_taken &&
+        if (RuntimeDiagnostics::Enabled() && real_shown && frame.game_start > 0 && frame.host_taken >= frame.game_start && frame.submitted >= frame.host_taken &&
             done.QuadPart >= frame.submitted) {
             const double to_ms = 1000.0 / double(frequency.QuadPart);
             stage_taken_sum_ += double(frame.host_taken - frame.game_start) * to_ms;
@@ -278,13 +278,13 @@ void Pacer::run() noexcept {
             stage_real_sum_ += double(last_present_ - frame.game_start) * to_ms;
             ++stage_count_;
         }
-        if (real_shown) { real_call_sum_ += 1000.0 * double(last_present_ - real_start.QuadPart) / double(frequency.QuadPart); ++real_call_count_; }
+        if (RuntimeDiagnostics::Enabled() && real_shown) { real_call_sum_ += 1000.0 * double(last_present_ - real_start.QuadPart) / double(frequency.QuadPart); ++real_call_count_; }
         // Measurement (EI frame generation stage): the spacing of Present
         // calls and how long the real image is held after its GPU work ends
         // (frame generation's added display latency), every 5 s in host.log.
-        if (real_shown) { hold_sum_ += 1000.0 * double(last_present_ - done.QuadPart) / double(frequency.QuadPart); ++hold_count_; }
+        if (RuntimeDiagnostics::Enabled() && real_shown) { hold_sum_ += 1000.0 * double(last_present_ - done.QuadPart) / double(frequency.QuadPart); ++hold_count_; }
         if (!window_start_) window_start_ = done.QuadPart;
-        if (double(done.QuadPart - window_start_) >= 5.0 * double(frequency.QuadPart) && spacing_count_) {
+        if (RuntimeDiagnostics::Enabled() && double(done.QuadPart - window_start_) >= 5.0 * double(frequency.QuadPart) && spacing_count_) {
             const double mean = spacing_sum_ / double(spacing_count_);
             const double sd = std::sqrt((std::max)(0.0, spacing_squares_ / double(spacing_count_) - mean * mean));
             const double seconds = double(done.QuadPart - window_start_) / double(frequency.QuadPart);

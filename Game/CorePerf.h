@@ -58,6 +58,7 @@ inline const char* Name(Id id) noexcept {
     return names[id];
 }
 inline LONGLONG Now() noexcept {
+    if (!RuntimeDiagnostics::Enabled()) return 0;
     LARGE_INTEGER value{}; QueryPerformanceCounter(&value); return value.QuadPart;
 }
 struct Counter {
@@ -123,6 +124,7 @@ struct State {
 inline State& Get() noexcept { static State value; return value; }
 inline void Initialize() noexcept { (void)Get(); }
 inline State* Main() noexcept {
+    if (!RuntimeDiagnostics::Enabled()) return nullptr;
     State& s = Get(); return GetCurrentThreadId() == s.thread && s.frequency > 0 ? &s : nullptr;
 }
 // Tokens are stack depths, valid only until their matching synchronous end.
@@ -231,6 +233,7 @@ class AnyThreadScope {
 public:
     explicit AnyThreadScope(Id value) noexcept : id(value), detail(BeginFrameDetail(Name(value), started)) {}
     ~AnyThreadScope() noexcept {
+        if (!RuntimeDiagnostics::Enabled()) return;
         const auto now = Now();
         EndFrameDetail(detail, now);
         const auto elapsed = now - started;
@@ -324,7 +327,7 @@ inline void Flush() noexcept {
             sprintf_s(extra, " dynamicObjs_mean=%.2f dynamicObjs_max=%llu activeSet_mean=%.2f activeSet_max=%llu",
                 c.calls ? double(s.dynamicTotal) / c.calls : 0.0, s.dynamicMax,
                 c.calls ? double(s.activeTotal) / c.calls : 0.0, s.activeMax);
-        GameJournal::Event("CORE", "core_perf",
+        if (RuntimeDiagnostics::Enabled()) GameJournal::Event("CORE", "core_perf",
             "scope=%s window_ms=%.3f calls=%llu total_ms=%.3f mean_ms=%.4f max_ms=%.3f inclusive=1 thread=main%s",
             Name(static_cast<Id>(i)), window, c.calls, c.total * ms,
             c.calls ? c.total * ms / c.calls : 0.0, c.maximum * ms, extra);
@@ -335,7 +338,7 @@ inline void Flush() noexcept {
         const auto total = c.total;
         const auto maximum = c.maximum;
         if (calls || total)
-            GameJournal::Event("CORE", "core_perf",
+            if (RuntimeDiagnostics::Enabled()) GameJournal::Event("CORE", "core_perf",
                 "scope=%s window_ms=%.3f calls=%llu total_ms=%.3f mean_ms=%.4f max_ms=%.3f inclusive=1 thread=scene",
                 Name(static_cast<Id>(i)), window, calls, total * ms,
                 calls ? total * ms / calls : 0.0, maximum * ms);

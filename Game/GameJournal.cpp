@@ -620,6 +620,12 @@ void Stop() noexcept {
 void Tick(unsigned long tick) noexcept {InterlockedExchange(&gameTick,static_cast<LONG>(tick));}
 std::string Quote(const char* value) noexcept {try{return Escape(value?value:"",true);}catch(...){return {};}}
 void Event(const char* category,const char* event,const char* format,...) noexcept {
+    if (!RuntimeDiagnostics::Enabled()) {
+        static const char* const counters[] = {"world_model_owner", "world_visual", "core_perf",
+            "pipeline_perf", "host_perf", "gpu_passes", "frame_waits", "frame_timing", "turn_finished", "rotate"};
+        for (const auto* counter : counters) if (strcmp(event, counter) == 0) return;
+        if (strcmp(category, "GVAR") == 0) return;
+    }
     State* s=current.load();if(!s||s->stopping)return;
     va_list args;va_start(args,format);
     try {
@@ -744,6 +750,7 @@ void Crash(const wchar_t* dump,unsigned long code,const CrashEvidence::Details* 
     ReleaseSRWLockExclusive(&s->writeLock);
 }
 void Variable(const void* set,const char* name,bool present,float oldValue,float newValue,bool deleting) noexcept {
+    if (!RuntimeDiagnostics::Enabled()) return;
     if(deleting ? !present : (present && oldValue==newValue))return;
     State* s=current.load();if(!s||s->stopping)return;
     try {
@@ -776,6 +783,7 @@ void Variable(const void* set,const char* name,bool present,float oldValue,float
     }catch(...){}
 }
 void Count(const char* category,const char* event,const char* key) noexcept {
+    if (!RuntimeDiagnostics::Enabled()) return;
     State* s=current.load();if(!s||s->stopping)return;
     try {
         Lock guard(s->queueLock);

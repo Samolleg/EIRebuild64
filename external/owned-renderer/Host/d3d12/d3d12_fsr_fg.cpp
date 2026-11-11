@@ -146,12 +146,12 @@ bool FsrFrameGeneration::create(ID3D12Device* device, ID3D12CommandQueue* queue,
     // pass allocates new queries. Never wait for their results on the CPU.
     std::string timing_reason;
     try {
-        if (queue && gpu_times_.create(device, queue, timing_reason, 1) &&
+        if (RuntimeDiagnostics::Enabled() && queue && gpu_times_.create(device, queue, timing_reason, 1) &&
             SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gpu_fence_)))) {
             gpu_queue_ = queue;
         }
     } catch (...) {}
-    if (!gpu_queue_) {
+    if (RuntimeDiagnostics::Enabled() && !gpu_queue_) {
         std::lock_guard<std::mutex> lock(g_gpu_mutex);
         ++g_gpu_invalid;
     }
@@ -305,7 +305,7 @@ unsigned FsrFrameGeneration::dispatch_generation(void* parameters) noexcept {
         gpu_times_.end(list, pass);
         gpu_times_.resolve(list);
         gpu_recorded_ = true;
-    } else {
+    } else if (RuntimeDiagnostics::Enabled()) {
         std::lock_guard<std::mutex> lock(g_gpu_mutex);
         ++g_gpu_invalid;
     }

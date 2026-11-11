@@ -364,16 +364,16 @@ HRESULT RenderProfiler::initialize(ID3D11Device* device, ID3D11DeviceContext* co
     QueryPerformanceFrequency(&frequency);
     qpc_frequency_ = std::max<std::int64_t>(1, frequency.QuadPart);
     debug_root_ = make_debug_root();
-    attribution_.initialize();
+    if (RuntimeDiagnostics::Enabled()) attribution_.initialize();
 
     char capture_value[32]{};
     if (GetEnvironmentVariableA("EI_RENDERER_CAPTURE_FRAME", capture_value,
                                 static_cast<DWORD>(sizeof(capture_value))) != 0) {
         requested_capture_frame_ = _strtoui64(capture_value, nullptr, 10);
     }
-    environment_enabled_ = environment_flag("EI_RENDERER_PROFILE") ||
+    environment_enabled_ = RuntimeDiagnostics::Enabled() && (environment_flag("EI_RENDERER_PROFILE") ||
                            environment_flag("EI_RENDERER_CAPTURE_NEXT") ||
-                           requested_capture_frame_ != ~std::uint64_t{0};
+                           requested_capture_frame_ != ~std::uint64_t{0});
     {
         // Sub-scopes are on with profiling; =0 measures their own overhead.
         char value[16]{};

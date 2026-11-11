@@ -831,7 +831,7 @@ void CUnitServer::L1StopMovement(bool bFailed)
     static_cast<CWorldServer*>(GetWorld())->aiMap.Navigation().Stop(lpUnit->GetID());
     if(path.curSegment.GetMoveType()==CAIFullRoute::Rotate) {
         const auto facing=-lpUnit->GetYAxis();
-        GameJournal::Event("UNIT","turn_finished","unit=%d failed=%d requested=%.6f actual=%.6f",
+        if (RuntimeDiagnostics::Enabled()) GameJournal::Event("UNIT", "turn_finished","unit=%d failed=%d requested=%.6f actual=%.6f",
                            lpUnit->GetID(),int(bFailed),std::atan2(curCommand.ptTarget.y,curCommand.ptTarget.x),std::atan2(facing.y,facing.x));
     }
     L1StandStill();
@@ -6330,7 +6330,7 @@ void CUnitServer::InitializeUnit()
 void CUnitServer::CmdRotate(const CPlot3D &vecDest, float fpAngSpeed)
 {
     const auto facing=-lpUnit->GetYAxis();
-    GameJournal::Event("CMD","rotate","unit=%d requested=%.6f previous=%.6f speed=%.6f",
+    if (RuntimeDiagnostics::Enabled()) GameJournal::Event("CMD", "rotate","unit=%d requested=%.6f previous=%.6f speed=%.6f",
                        lpUnit->GetID(),std::atan2(vecDest.y,vecDest.x),std::atan2(facing.y,facing.x),fpAngSpeed);
     CancelScriptWindPending();
     nextCommand.Clear();

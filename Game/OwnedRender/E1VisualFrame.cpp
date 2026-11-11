@@ -392,10 +392,11 @@ void E1ReportOwnedVisual(std::int32_t id) noexcept try {
         GameJournal::Event("RENDER", "world_visual_omission",
             "id=%d owner=c56 reason=%s", id, reason ? reason : "entity_missing_from_frame");
     }
+    if (!RuntimeDiagnostics::Enabled()) return;
     const auto previous = reportedVisuals.find(id);
     if (previous == reportedVisuals.end() || previous->second != drawn) {
         reportedVisuals[id] = drawn;
-        GameJournal::Event("RENDER", "world_visual",
+        if (RuntimeDiagnostics::Enabled()) GameJournal::Event("RENDER", "world_visual",
             "id=%d owner=c56 status=%s", id, drawn ? "drawn" : "skipped_unclaimed");
     }
 } catch (...) {}
