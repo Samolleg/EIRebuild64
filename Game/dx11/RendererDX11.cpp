@@ -544,12 +544,19 @@ bool CDX11::FinishC74Effect(HRESULT hr, const char* event)
     }
     return false;
 }
-bool CDX11::SubmitCurseVisual(const owned::EmbeddedCurseInput& input,ID3D11ShaderResourceView* texture)
+bool CDX11::SubmitCurseVisual(const owned::EmbeddedCurseInput& input,ID3D11ShaderResourceView* texture,std::uint64_t surfaceId)
 {
     owned::FixedState state;std::shared_ptr<owned::SurfaceImage> unused;
     HRESULT hr=PrepareC74Effect(true,false,state,unused);
     bool published=false;
-    if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer){published=true;return renderer.draw_embedded_curse(input,state,texture);});
+    if(SUCCEEDED(hr))hr=rendererFacade->Visit([&](owned::Renderer& renderer){
+        std::shared_ptr<owned::SurfaceImage> image;
+        if(renderer.d3d12_backend()&&surfaceId) {
+            const HRESULT resolved=OwnedRender::E1ParticleSurfaceImage(nullptr,nullptr,surfaceId,image);
+            if(FAILED(resolved))return resolved;
+        }
+        published=true;return renderer.draw_embedded_curse(input,state,texture,image.get());
+    });
     LiveObserver::ObserveCurse(input,hr,published);
     return FinishC74Effect(hr,"curse_visual_skipped");
 }

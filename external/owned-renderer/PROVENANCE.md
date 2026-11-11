@@ -1,3 +1,22 @@
+# X64D3D12 curse material ingress, stage 31 (2026-11-11)
+
+The source curse producer now publishes carrier 720101's completed CPU surface
+identity when no D3D11 SRV exists. CDX11 resolves that publication with the
+existing E1ParticleSurfaceImage cache on D3D12. draw_embedded_curse selects
+textured versus plain meshes explicitly and submits the CPU-backed material
+through queue_native / the author's D3D12 upload and native draw executor.
+Each mesh is flushed before releasing its material reference. Missing required
+beam material still fails the draw and reaches the existing host journal.
+D3D11 retains its SRV and queue_native_direct route. Geometry, HLSL and effect
+algorithms are unchanged; no SDK or runtime DLL added in this stage.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}; the additional
+local texture ingress is Game/ModCurseVisual.cpp and Game/dx11/RendererDX11.cpp.
+
+Full BRIEF remains open. Next adapt the arena/golem material arrays and finish
+remaining live sprite/SRV consumers, then coordinator compilation/link and
+D3D12 startup/FG plus D3D11 regression validation. E1Surface NOMINMAX was
+already fixed in stage 26. No compilation, tests or game execution performed.
+
 # X64D3D12 embedded fixed-function ingress, stage 30 (2026-11-11)
 
 Source SubmitC74FixedFunction now supplies its published CPU surface on the

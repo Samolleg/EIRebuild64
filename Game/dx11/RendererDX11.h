@@ -128,7 +128,7 @@ public:
     void ReportC56FigureNoMatrix();
     void ReportC56FigureSkipSummary();
     bool SubmitC56GameParticles(const owned::GameParticleView& view);
-    bool SubmitCurseVisual(const owned::EmbeddedCurseInput&,ID3D11ShaderResourceView*);
+    bool SubmitCurseVisual(const owned::EmbeddedCurseInput&,ID3D11ShaderResourceView*,std::uint64_t surfaceId=0);
     bool SubmitGolemVisual(const owned::EmbeddedGolemInput&,const std::array<ID3D11ShaderResourceView*,6>&);
     bool SubmitArenaVisual(const owned::EmbeddedArenaInput&,const std::array<ID3D11ShaderResourceView*,8>&);
     bool SubmitC74Ribbon(const owned::EmbeddedRibbonInput&);
