@@ -3418,6 +3418,33 @@ void Renderer::release() {
  present_smoothed_ms_=0.0;
 #ifdef EID3D11_EMBEDDED
  embedded_figure_layers_.clear(); embedded_figure_vs_.Reset(); embedded_figure_ps_.Reset(); embedded_figure_sampler_.Reset();
+#if !defined(EID3D11_SHADER_EMBED)
+ // release() also serves repeated ensure(): histories and cached FG
+ // capability/failure values belong to one device. Retire frame images
+ // after NGX stops, while the executor still owns its descriptor heaps.
+ if(d3d12_){
+  post12_={};upscale12_={};ao12_={};shadow12_={};
+  world_d3d12_.reset();d3d12_white_.reset();native_hiz12_.reset();
+  prepass_rest12_.reset();prepass_normal12_.reset();shadow_mask12_.reset();
+  prepass_failed_width12_=prepass_failed_height12_=0;
+  shadow_history_mask12_={};shadow_history_depth12_.reset();shadow_history_constants12_={};
+  world_d3d12_bound_=world_history_bound12_=false;
+  hit_test12_.reset();hit_test_saved_world12_.reset();particle_depth12_={};
+  gamma_lut_d3d12_.reset();gamma_frame_d3d12_.reset();
+  hudless_d3d12_.reset();hudless_gamma_d3d12_.reset();
+  fg_caps_checked_=fg_previous_generated_=fg_frame_image_=false;
+  fg_dlssg_unavailable_[0]=0;for(auto& reason:fg_failed_)reason[0]=0;
+  fg_reason_mode_=-1;frame_generation_mode_=0;fsr_prepared_=false;
+  world_output_this_present_=hudless_this_present_=fg_upscaler_valid_=false;
+  fg_upscaler_reset_=true;fg_skip_logged_="";
+  fg_not_game_frame_=0;fg_not_game_frame_logged_=~0u;
+  fg_stats_real_=fg_stats_generated_=0;fg_stats_tick_=0;
+  fg_presented_fps_=fg_real_fps_=0.;
+  fg_low_rate_=fg_rate_previous_game_=false;fg_low_rate_windows_=0;
+  fg_rate_window_ms_=fg_rate_on_ms_=0.;fg_rate_cost_ms_=-1.;fg_rate_window_count_=0;
+  dlss_reset_=true;dlss_previous_valid_=false;embedded_d3d12_presented_=false;
+ }
+#endif
 #endif
 }
 

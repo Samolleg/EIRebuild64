@@ -1,3 +1,23 @@
+# X64D3D12 frame-image retirement, stage 8 (2026-11-11)
+
+Incomplete runtime integration: renderer_backend=1 still creates D3D11.
+Embedded release() now retires its D3D12 world, postprocess, SR, AO,
+shadow-history, prepass, hit-test, particle-depth, gamma and HUD-less images.
+It clears cached FG capabilities, device-specific failure reasons, pacing
+statistics and temporal validity, including first-Present deferral, so a
+replacement device cannot inherit those values. Retirement follows scene
+join, NGX shutdown, the final native flush and overlay/profiler teardown;
+the executor remains alive. The D3D11 and upstream Host paths are unchanged.
+
+This is only frame-image retirement, not complete executor shutdown. Native
+buffers/instances, terrain/prepared uploads, surface and subsystem caches
+still require a device-lifetime audit and retirement before owner shutdown.
+Next finish those owners, then bind startup config/backend, overlay, frame
+boundaries and dispatch with explicit startup/device-removal errors. Backend
+activation and full BRIEF completion remain open. No new SDKs or DLLs.
+No compilation, shader compilation, tests or game run; build and GPU behavior
+remain unverified. Earlier sections document the preceding stages.
+
 # X64D3D12 local renderer SR/FG/present bodies, stage 7 (2026-11-11)
 
 Incomplete runtime integration: renderer_backend=1 still creates D3D11.
