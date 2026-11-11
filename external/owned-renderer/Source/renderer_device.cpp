@@ -474,7 +474,25 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
 #ifdef EID3D11_EMBEDDED
  if(!embedded_sky().available_to(this))return E_UNEXPECTED;
 #endif
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ // Keep the selected native owner latched, including a failed startup.
+ if(embedded_d3d12_failed_)return E_FAIL;
+ if(d3d12_)return S_OK;
+#endif
  output_width_=std::max(1u,w);output_height_=std::max(1u,h);camp_inventory_output(canvas_width(),canvas_height());set_world_size();hwnd_=hwnd;if(device_)return rtv_&&scene_composite_.target()?S_OK:E_FAIL;
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ // Read the overlay's registered ini value before any D3D11 allocation.
+ // WARP remains an explicit D3D11 diagnostic entry, never a fallback.
+ if(driver==D3D_DRIVER_TYPE_HARDWARE){
+  RendererConfig startup_config;
+  startup_config.register_integer("renderer_backend","Renderer","Display",0,0,1,1,false,"");
+  startup_config.load(renderer_config_path().c_str());
+  if(configured_integer(startup_config,"renderer_backend",0)==1){
+   register_config_options();
+   return ensure_embedded_d3d12();
+  }
+ }
+#endif
 #ifndef EID3D11_EMBEDDED
  // Core mode (F10 x64_render_host, or the test override EI_RENDERER_X64_CORE=1):
  // the x64 host's Renderer draws; no device here. A host that never reached
@@ -551,8 +569,8 @@ HRESULT Renderer::fail_embedded_d3d12(const char* operation,HRESULT result,const
  return FAILED(result)?result:E_FAIL;
 }
 // Caller registers/loads configuration and sets hwnd_/output dimensions first.
-// Deliberately not selected from ensure_with_driver until source GPU adapters
-// no longer require visit_embedded_device/visit_embedded_output after ensure.
+// Selected before D3D11 allocation. Failure returns directly to the caller;
+// it never starts a different backend.
 HRESULT Renderer::ensure_embedded_d3d12(){
  if(d3d12_)return embedded_d3d12_failed_?E_FAIL:S_OK;
  std::string reason;
@@ -625,7 +643,11 @@ config.register_integer("frame_generation_min_fps","Frame generation minimum FPS
 config.register_integer("reflex","NVIDIA Reflex","Presentation",0,0,2,1,false,"Test (Direct3D 12 backend, NVIDIA GPUs): 0 off. 1: Reflex low latency mode with latency markers (the driver keeps the GPU queue short). 2: also the Reflex sleep before the render host releases the game's next frame. Never a frame cap. host.log reports the game-frame-to-present latency every 5 s in every mode.");
 config.register_integer("latency_pacing","Latency pacing","Presentation",0,0,1,1,false,"Test (Direct3D 12 backend, any GPU): 1 starts the game's next frame later, by as much as its frame would otherwise wait for the render host, so input is read closer to when the frame is drawn. Never a frame cap; the delay stays under 3/4 of a frame. host.log reports the delay and the remaining wait every 5 s.");
 config.register_boolean("fg_frame_image","Frame generation inputs (D3D12)","Diagnostics",false,false,"D3D12 backend: the frame draws into its own image (world and interface) with a HUD-less copy of the world, then is copied to the screen before the F10 overlay, cursor, load reveal and gamma, as frame generation will need. Looks the same; costs two full-screen copies a frame. Harness captures write hudless.bmp beside ui_composition.bmp.");
+#ifdef EID3D11_EMBEDDED
+config.register_integer("renderer_backend","Renderer","Display",0,0,1,1,false,"0 Direct3D 11. 1 Direct3D 12, required for frame generation and NVIDIA Reflex. Applies after restarting the game. If Direct3D 12 cannot start, the engine journal and an error dialog show the reason. Select renderer_backend=0 in Config64\\rddraw.ini to use Direct3D 11 on the next start.");
+#else
 config.register_integer("renderer_backend","Renderer","Display",0,0,1,1,false,"0 Direct3D 11. 1 Direct3D 12: Direct3D 12 runs in the 64-bit render host and is needed for frame generation and NVIDIA Reflex. Applies after restarting the game. A graphics card that cannot start Direct3D 12 stays on Direct3D 11 (the reason shows in F10 and host.log).");
+#endif
 config.register_integer("display_mode","Display mode","Display",0,0,1,1,false,"0: borderless fullscreen on the primary monitor, 1: a movable window of the chosen window size. Use Apply display to change this during gameplay.");
 config.register_integer("window_width","Window width","Display",0,0,16384,1,false,"Client width of the windowed mode (0: the monitor's size). Use Apply display to change this during gameplay.");
 config.register_integer("window_height","Window height","Display",0,0,16384,1,false,"Client height of the windowed mode (0: the monitor's size). Use Apply display to change this during gameplay.");

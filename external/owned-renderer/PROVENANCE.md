@@ -1,3 +1,27 @@
+# X64D3D12 backend selection, stage 22 (2026-11-11)
+
+Supersedes earlier notes that renderer_backend=1 still creates D3D11.
+ensure_with_driver now reads the registered backend option through the same
+RendererConfig parser before D3D11CreateDevice. A native session (including
+failed startup) cannot fall through to D3D11 on a repeated ensure call.
+The D3D11 startup uses a separate read-only config probe; its live config,
+device initialization and explicit WARP diagnostic route are unchanged.
+The selected D3D12 route calls the prepared ensure_embedded_d3d12 owner:
+author's executor/device/swap chain, NGX, native overlay, queue timestamps,
+profiler and native pipelines. Initialization failures use the engine journal
+and an error dialog; English/Russian backend help no longer promises fallback.
+No HLSL, algorithms, new SDKs or DLLs added in this stage. Host adaptation
+remains Source/embedded_d3d12.{h,cpp}.
+
+Full BRIEF remains open. Backend selection is connected, not runtime-ready:
+source texture/SRV bindings (including BindTexture and RestoreHostBindings)
+still require D3D12 surface identities instead of D3D11 SRVs. Connect local
+input/simulation/render boundaries to EmbeddedD3D12 phase methods next;
+world/present/FG dispatch was prepared by earlier stages. These unfinished
+adapters can prevent the selected D3D12 path from drawing or starting.
+No compilation, shader compilation, tests or game run performed. Build/link,
+D3D12 startup/FG and D3D11 regression remain unverified.
+
 # X64D3D12 native capture and CPU surface effects, stage 21 (2026-11-11)
 
 Incomplete runtime integration: renderer_backend=1 still creates D3D11.
