@@ -15,12 +15,14 @@ inline double Scale(const Values& values)
     return .9309906028352594 * values[EditorSchema::height];
 }
 struct State {
+    Input input{};
     Values controls{};
     Status status{};
     double scale = 0;
     bool valid = false;
-    void Update(const Input& input)
+    void Update(const Input& nextInput)
     {
+        input = nextInput;
         Values next{};
         valid = BodyShape::Resolve(input, next, status);
         controls = valid ? next : Values{};

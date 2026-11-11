@@ -99,7 +99,7 @@ bool build_skn_groups(const RetainedVisualSample &sample,
       for(const char* n:body)if(name==n)prepared.merged_part_group[i]=group_index;
     }
     const std::string content =
-        "skn|" + asset->identity.key() + "|" + std::to_string(sub) + "|" + std::to_string(chunk_index++);
+        "skn|" + asset->identity.key() + asset->shape_key + "|" + std::to_string(sub) + "|" + std::to_string(chunk_index++);
     group.geometry = merged_geometry(
         content, [&](VisualPreparedResources::MergedGeometry &g) {
           g.positions.resize(group.position_groups);
