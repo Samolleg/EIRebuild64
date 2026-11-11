@@ -6,6 +6,7 @@
 #include "world_fog.h"
 
 #include <d3dcompiler.h>
+#include <d3d12.h>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -204,11 +205,18 @@ void Renderer::prepare_owned_sky(FogFrameGpu& fog, const WorldEnvironment& env, 
     const auto& config = debug_overlay_.config();
     const int quality = std::clamp(configured_integer(config, "sky_clouds", 2), 0, 2);
     const char* problem = nullptr;const char* state = nullptr;char values[512] = "";
+    D3D_FEATURE_LEVEL sky_feature_level = feature_level_;
+    if (d3d12_) {
+        const D3D_FEATURE_LEVEL levels[]{D3D_FEATURE_LEVEL_11_0};
+        D3D12_FEATURE_DATA_FEATURE_LEVELS features{1, levels, D3D_FEATURE_LEVEL_9_3};
+        if (SUCCEEDED(d3d12_->device()->CheckFeatureSupport(D3D12_FEATURE_FEATURE_LEVELS, &features, sizeof(features))))
+            sky_feature_level = features.MaxSupportedFeatureLevel;
+    }
     if (quality == 0) state = "stock sky (sky_clouds 0)";
     else if (!bridge_owned_sky_installed()) problem = "owned sky hook rejected: stock sky omitted";
     else if (!bridge_owned_sky_requested()) state = "the game drew no sky this frame";
     else if (env.valid && env.cave) state = "cave: no sky";
-    else if (feature_level_ < D3D_FEATURE_LEVEL_11_0) problem = "feature level below 11_0: sky omitted";
+    else if (sky_feature_level < D3D_FEATURE_LEVEL_11_0) problem = "feature level below 11_0: sky omitted";
     else if (sky_failed_) problem = sky_reason_;
     else if (FAILED(ensure_owned_sky(quality))) {sky_failed_ = true;problem = sky_reason_;}
     else if (sky12_.pending) state = "sky programs not ready: sky omitted this frame";

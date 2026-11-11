@@ -125,8 +125,14 @@ HRESULT Renderer::prepare_ground_cover_map_d3d12(GcMapD3D12& map) {
         else {
             std::shared_ptr<const OwnedVisualSurface> surface;
             if(bridge_terrain_atlas(material,surface)&&surface){
-                const auto found=terrain_textures_d3d12_.find(surface->id);
-                if(found!=terrain_textures_d3d12_.end()&&found->second.generation==surface->generation)atlas=found->second.texture;
+                // Owned terrain can upload through the surface resolver without
+                // populating the legacy terrain-page cache. Resolve the captured
+                // generation directly, as the D3D11 paint path does.
+                NativeOwnedTextureView view{};
+                view.identity=surface->id;view.generation=surface->generation;view.surface=surface.get();
+                std::uint64_t backing=0;
+                hr=get_native_owned_texture_d3d12(view,atlas,backing,nullptr,true);
+                if(FAILED(hr))return hr;
             }
         }
         if(!atlas)continue; // The source's atlas has not been drawn/uploaded yet.
