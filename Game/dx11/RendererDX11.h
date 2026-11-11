@@ -62,6 +62,9 @@ private:
     std::shared_ptr<OwnedRender::RendererFacadeCore<owned::Renderer>> rendererFacade;
     OwnedRender::E2FrameTiming frameTiming;
     std::uint64_t frameSerial = 0;
+    ULONGLONG lastGpuPassReport = GetTickCount64();
+    ULONGLONG fpsSampleTime = 0;
+    std::uint64_t fpsReal = 0, fpsGenerated = 0;
     std::uint64_t c56WorldFigurePrimitives = 0;
     std::uint64_t c56WorldFigureQueueFailed = 0;
     std::uint64_t c56FigureSkippedNoMatrix = 0;
@@ -113,6 +116,7 @@ public:
                               double worldTime);
     bool IsOwnedWorldActive() const { return ownedWorldActive; }
     void EndFrame(bool present = true);
+    bool FrameGenerationFps(double& output, double& real);
     void ClearColorBuffer(DWORD value);
     void ClearZBuffer(DWORD value);
     owned::FixedState CaptureC56MaterialState();

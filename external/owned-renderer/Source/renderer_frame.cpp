@@ -1290,7 +1290,7 @@ void Renderer::begin_scene_renderer(){
  }
 
  native_frame_stats_.native_shadows_enabled=native_shadows_enabled_;
- const bool profile=debug_overlay_.wants_profiling();profiler_.set_enabled(profile);
+ const bool profile=debug_overlay_.wants_profiling();profiler_.set_enabled(profile||profiler_.gpu_journal_enabled());
  bridge_set_profile_enabled(profile||placed_hitch_profile_.active());
  if(!profiler_.frame_active())profiler_.begin_frame(output_width_,output_height_);
  transition_profile_pass("legacy_scene");
@@ -1594,7 +1594,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  }
  last_present_tick_=present_tick;
  // The profiler's frame and passes, named as on D3D11 so captures line up.
- const bool overlay_profile=debug_overlay_.wants_profiling();profiler_.set_enabled(overlay_profile);
+ const bool overlay_profile=debug_overlay_.wants_profiling();profiler_.set_enabled(overlay_profile||profiler_.gpu_journal_enabled());
  bridge_set_profile_enabled(overlay_profile||placed_hitch_profile_.active());
  if(!profiler_.frame_active())profiler_.begin_frame(output_width_,output_height_);
  transition_profile_pass("present_head");
@@ -2021,7 +2021,7 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
   finish_placed_hitch_profile(PlacedHitchFinishReason::native_flush_failed);
   return failed_frame(0,"flush_native",nativeHr);
  }
- const bool overlay_profile=debug_overlay_.wants_profiling();profiler_.set_enabled(overlay_profile);bridge_set_profile_enabled(overlay_profile||placed_hitch_profile_.active());
+ const bool overlay_profile=debug_overlay_.wants_profiling();profiler_.set_enabled(overlay_profile||profiler_.gpu_journal_enabled());bridge_set_profile_enabled(overlay_profile||placed_hitch_profile_.active());
  if(profiler_.pass_active())profiler_.end_pass();HRESULT composite_hr;{const frame_acct::Scope scope(frame_acct::pf_composite);composite_hr=composite_world();}if(FAILED(composite_hr))return failed_frame(1,"composite_world",composite_hr);transition_profile_pass("ui_composition");
  std::optional<frame_acct::Scope> ui_scope;ui_scope.emplace(frame_acct::pf_ui);
 #ifdef EID3D11_EMBEDDED
