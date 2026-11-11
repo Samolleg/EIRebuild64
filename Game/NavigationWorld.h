@@ -47,6 +47,7 @@ class NavigationWorld {
         Navigation::Location start,goalSupport;
         const Navigation::Mesh* mesh=nullptr;
         std::uint64_t revision=0,generation=0;
+        std::uint64_t progressFrame=~std::uint64_t(0);
     };
     std::map<int,PathSearch> pathSearches;
     double pathBudgetMs=2.;

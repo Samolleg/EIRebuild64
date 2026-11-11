@@ -2430,6 +2430,7 @@ bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpM
             if(std::hypot(AITile2Meter(last.point.x)-ptDst.x,AITile2Meter(last.point.y)-ptDst.y)<.01f){destination.position.z=last.supportZ;known=true;}
         }
     }
+    const bool wasPending=res.navigationPending;
     res.toGo.Clear();res.ptDestination=ptDst;res.bRouteFailed=false;res.navigationTurned=false;
     if(!std::isfinite(ptDst.x)||!std::isfinite(ptDst.y)){GameJournal::Event("NAV","path_failed","unit=%d reason=nonfinite_goal",pUnit->GetID());res.bRouteFailed=true;return false;}
     const bool inside=ptDst.x>=0&&ptDst.y>=0&&ptDst.x<AITile2Meter(float(XSize()))&&ptDst.y<AITile2Meter(float(YSize()));
@@ -2462,8 +2463,11 @@ bool CAIMap::NewPath(CUnit *pUnit, const CPlot3D &ptDst, SAIPath &res, float fpM
         // segment; the existing movement owner resumes this same intent.
         res.curSegment.Clear();res.curSegment.SetStartPos(pUnit->GetCP(),-pUnit->GetYAxis(),static_cast<CWorldServer*>(pUnit->GetWorld())->GetSegmentTimeCounter()-1);
         res.ptFinish=CPlot2D(Meter2AITile(from.x),Meter2AITile(from.y));res.bFinished=false;
-        res.navigationPending=true;res.bFirstTry=false;res.nPathCost=0;return true;
+        res.navigationPending=true;res.bFirstTry=false;res.nPathCost=0;
+        if(!wasPending&&detail)GameJournal::Event("NAV","path_pending","unit=%d reason=updating goal=(%.3f,%.3f)",pUnit->GetID(),ptDst.x,ptDst.y);
+        return true;
     }
+    if(wasPending&&pUnit->IsHero())GameJournal::Event("NAV","path_resumed","unit=%d points=%zu goal=(%.3f,%.3f)",pUnit->GetID(),result->points.size(),ptDst.x,ptDst.y);
     if(!result->points.empty())res.navigationGoal=result->points.back();
     auto& last=res.toGo.route.GetTail();res.ptFinish=last.point;
     if(goalPolicy==Navigation::GoalPolicy::ClosestReachable||result->goalStatus==Navigation::Status::NoGoal) {

@@ -275,7 +275,7 @@ Route Find(const Mesh& m,const Request& r) {
     } charge{r.frameBudgetMs,began};
     Route result;if(!m.data||!m.tiles){result.status=Status::NoMesh;return result;}
     if(!Finite(r.source)||!Finite(r.goal)||!std::isfinite(r.maxLength)||r.maxLength<0||!std::isfinite(r.goalRadius)||r.goalRadius<0)return result;
-    if(r.frameBudgetMs&&*r.frameBudgetMs<=0){result.status=Status::Updating;return result;}
+    if(r.frameBudgetMs&&*r.frameBudgetMs<=0&&!(r.sliced&&r.ensureProgress)){result.status=Status::Updating;return result;}
     auto* q=Query(m);if(!q){result.status=Status::Limit;return result;}
     const float height=r.height>0?r.height:m.profile.height;const auto mask=ClearanceMask(m.profile,height);if(!mask)return result;
     dtQueryFilter filter;filter.setIncludeFlags(mask);filter.setExcludeFlags(ClassFlags(m,r.excludedFlags));for(int i=1;i<16;++i){if(!(r.areaCosts[i]>0&&std::isfinite(r.areaCosts[i])))return result;filter.setAreaCost(i,r.areaCosts[i]);}
@@ -307,11 +307,14 @@ Route Find(const Mesh& m,const Request& r) {
         auto& search=*r.sliced;
         if(!search.initialized){search.filter=filter;search.status=q->initSlicedFindPath(from,to,start,end,&search.filter);search.initialized=true;}
         status=search.status;
-        while(dtStatusInProgress(status)&&std::chrono::steady_clock::now()<deadline) {
+        bool ensureProgress=r.ensureProgress;
+        while(dtStatusInProgress(status)&&(ensureProgress||std::chrono::steady_clock::now()<deadline)) {
+            ensureProgress=false;
             int done=0;status=q->updateSlicedFindPath(16,&done);if(!done)break;
         }
         search.status=status;
-        if(dtStatusInProgress(status)||std::chrono::steady_clock::now()>=deadline){result.status=Status::Updating;return result;}
+        // Publish a completed search even if its last batch used the budget.
+        if(dtStatusInProgress(status)){result.status=Status::Updating;return result;}
     } else {
         status=q->initSlicedFindPath(from,to,start,end,&filter);
         while(dtStatusInProgress(status)&&std::chrono::steady_clock::now()<deadline){int done=0;status=q->updateSlicedFindPath(64,&done);if(!done)break;}
