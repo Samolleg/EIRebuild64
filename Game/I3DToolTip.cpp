@@ -290,7 +290,10 @@ void CI3DToolTip::Draw2D()
         // not a premultiplied sprite: otherwise its background adds to the scene.
         auto *dx = pI3D->GetD3D();
         dx->GetSpriteBatch()->End();
-        dx->GetSpriteBatch()->Begin(DirectX::SpriteSortMode_Deferred, dx->GetCommonStates()->Opaque());
+        // Native surface blits already copy tooltip RGB with opaque alpha.
+        // D3D12 has no DirectXTK common states.
+        auto* states = dx->GetCommonStates();
+        dx->GetSpriteBatch()->Begin(DirectX::SpriteSortMode_Deferred, states ? states->Opaque() : nullptr);
         if (!OwnedRender::E3ClockTooltip(this)) CI3DObject::Draw2D();
         dx->GetSpriteBatch()->End();
         dx->GetSpriteBatch()->Begin();
