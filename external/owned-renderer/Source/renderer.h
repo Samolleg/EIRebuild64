@@ -1848,7 +1848,10 @@ private:
     struct EmbeddedFigureLayers {
         std::uint64_t primary_generation=0,secondary_generation=0;
         ComPtr<ID3D11ShaderResourceView> texture;
+        D3D12TextureRef texture12;
     };
+    HRESULT compose_embedded_figure_texture_d3d12(const D3D12TextureRef& primary,
+        const D3D12TextureRef& secondary, D3D12TextureRef& combined);
     std::map<std::pair<std::uint64_t,std::uint64_t>,EmbeddedFigureLayers> embedded_figure_layers_;
     ComPtr<ID3D11VertexShader> embedded_figure_vs_;
     ComPtr<ID3D11PixelShader> embedded_figure_ps_;

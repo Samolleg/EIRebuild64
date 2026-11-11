@@ -11,6 +11,7 @@
 // tables (a thin per-flush translation, not a D3D11 emulation layer).
 #include "renderer.h"
 #include "gamma_shader_programs.h"
+#include "embedded_figure_shader.h"
 #include "renderer_internal.h"
 #include "world_texture_sampler.h"
 #include "contact_blend.h"
@@ -99,6 +100,8 @@ void append_d3d12_shader_programs(std::vector<ShaderProgram>& out) {
  out.push_back(kD3D12MipArrayProgram);
  out.push_back(kD3D12MipArrayRangeProgram);
  append_gamma_shader_programs(out);
+ out.push_back(embedded_figure_layer_program(false));
+ out.push_back(embedded_figure_layer_program(true));
  append_terrain2_cache_d3d12_programs(out);
  append_native_off_material_programs(out);
 }
@@ -108,6 +111,42 @@ const ShaderProgram& d3d12_mip_array_range_program() noexcept { return kD3D12Mip
 
 // The native programs and the first geometry page on the D3D12 backend.
 #if !defined(EID3D11_SHADER_EMBED)
+#ifdef EID3D11_EMBEDDED
+HRESULT Renderer::compose_embedded_figure_texture_d3d12(const D3D12TextureRef& primary,
+ const D3D12TextureRef& secondary,D3D12TextureRef& combined){
+ combined.reset();
+ if(!d3d12_||!primary||!secondary)return E_INVALIDARG;
+ UINT width=0,height=0,mips=0;DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;
+ if(!d3d12_->texture_info(*primary,width,height,mips,format)||!width||!height)return E_INVALIDARG;
+ UINT sw=0,sh=0,sm=0;DXGI_FORMAT sf=DXGI_FORMAT_UNKNOWN;
+ if(!d3d12_->texture_info(*secondary,sw,sh,sm,sf))return E_INVALIDARG;
+ // RGBA keeps sampled channel values and permits typed UAV mip writes.
+ D3D12TextureRef target,output;
+ HRESULT hr=d3d12_->create_target(width,height,target,DXGI_FORMAT_R8G8B8A8_UNORM,DXGI_FORMAT_UNKNOWN);
+ if(FAILED(hr))return hr;
+ UINT levels=1;for(UINT size=(std::max)(width,height);size>1;size>>=1)++levels;
+ hr=d3d12_->create_storage_texture(width,height,0,DXGI_FORMAT_R8G8B8A8_UNORM,output,levels);
+ if(FAILED(hr))return hr;
+ D3D11_SAMPLER_DESC sampling{};sampling.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+ sampling.AddressU=sampling.AddressV=sampling.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;
+ sampling.MaxLOD=D3D11_FLOAT32_MAX;
+ D3D12NativeState state;
+ state.raster.FillMode=D3D11_FILL_SOLID;state.raster.CullMode=D3D11_CULL_BACK;state.raster.DepthClipEnable=TRUE;
+ d3d12_->clear_slots();d3d12_->set_resource(0,primary.get());d3d12_->set_resource(1,secondary.get());
+ d3d12_->set_sampler(0,sampling);d3d12_->set_target(target.get());
+ hr=d3d12_->draw(embedded_figure_layer_program(false),embedded_figure_layer_program(true),state,nullptr,3);
+ d3d12_->clear_slots();
+ if(world_d3d12_bound_)bind_world_targets_d3d12();else d3d12_->set_target(nullptr);
+ // A pending pipeline must never publish an unwritten composite.
+ if(hr!=S_OK)return hr;
+ hr=d3d12_->copy_texture(*output,0,*target,0);
+ if(hr!=S_OK)return hr;
+ hr=d3d12_->generate_mips(*output,d3d12_mip_program());
+ if(hr==S_OK)combined=std::move(output);
+ return hr;
+}
+#endif
+
 HRESULT Renderer::native_d3d12_ensure(){
  if(native12_.ready)return S_OK;
  if(native12_.failed||!d3d12_)return E_FAIL;

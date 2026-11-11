@@ -1,3 +1,22 @@
+# X64D3D12 secondary record texture composition, stage 28 (2026-11-11)
+
+queue_embedded_records now resolves both owned surfaces on D3D12 and caches
+an RGB composite keyed by the surface pair and both generations. The existing
+embedded layer HLSL was moved unchanged into embedded_figure_shader.h, shared
+with D3D11 and enumerated for DXIL. Primary alpha, linear wrap sampling and the
+full generated mip chain are preserved. D3D12 uses an RGBA render target then
+a storage texture for the author's mip executor. Pending pipelines never
+publish an unwritten texture. Native batches are flushed before target changes;
+the current world/interface target is restored. No SDK or runtime DLL added.
+Host adaptation remains Source/embedded_d3d12.{h,cpp}.
+
+Full BRIEF remains open. This stage adapts the prepared-record consumer only;
+source BindTexture still rejects secondary CPU bindings until the immediate
+camp/figure adapter also supports them. Fixed-function and remaining sprite/SRV
+routes still require D3D12 adapters. Next connect those source drawing boundaries,
+then coordinator build/link, startup/FG and D3D11 regression validation.
+No compilation, shader compilation, tests or game execution performed.
+
 # X64D3D12 game effect admission, stage 27 (2026-11-11)
 
 The five game-effect producers now admit the embedded D3D12 executor when
