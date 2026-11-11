@@ -1,3 +1,35 @@
+# X64D3D12 executor retirement boundary, stage 13 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+Renderer::release now detaches its borrowed overlay-renderer and profiler
+timestamp interfaces after their shutdown, while the executor is alive.
+The remaining CritterState GPU meshes, skins, instance/bone buffers and
+ready/failure gates retire with the other D3D12 subsystem owners. Its
+value-only asset/shader futures join when the state drops; neither worker
+captures Renderer or the executor. A map-only critter release would keep
+the immutable GPU objects and ready gate, so it is insufficient here.
+
+After renderer resource retirement, release clears the raw d3d12_ dispatch
+pointer and shuts down EmbeddedD3D12. NGX has already stopped, scene and
+neighbour workers have joined, and overlay/profiler shutdown has finished.
+Executor teardown waits pipelines/GPU work, drains presenter/pacer, retires
+Reflex and invalidates the shared resource owner. External snapshots and
+preparers can still release their old allocations; their session identities
+prevent submission to a replacement executor. D3D11 and author HLSL and
+rendering algorithms are unchanged. No new SDKs or runtime DLLs this stage.
+
+Next: bind startup configuration/backend selection before D3D11 creation,
+initialize overlay and profiler from the native executor without requiring
+a D3D11 device/context, then wire local simulation/render boundaries and
+world/SR/FG/present dispatch. Audit embedded facade readiness/device gates
+alongside those entry points. Preserve local window/input ownership rather
+than setting core_host_. Startup and device-removal failures still need
+explicit journal/player messages without a D3D11 fallback. Host transport
+adaptation remains Source/embedded_d3d12.{h,cpp}; full BRIEF remains open.
+No compilation, shader compilation, tests or game run was performed.
+Build/link, repeated device lifetimes and GPU behavior remain unverified.
+Earlier sections describe preceding stages, not the current shutdown state.
+
 # X64D3D12 prepared uploads and resource submission ownership, stage 12 (2026-11-11)
 
 Incomplete runtime integration. renderer_backend=1 still creates D3D11.

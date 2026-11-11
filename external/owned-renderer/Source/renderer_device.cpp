@@ -3267,6 +3267,12 @@ void Renderer::release() {
  debug_overlay_.shutdown();
  bridge_set_profile_enabled(false);
  profiler_.shutdown();
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ // Both clients have finished using the executor above. Their borrowed
+ // interfaces must be detached even if the following ensure selects D3D11.
+ profiler_.set_timestamps(nullptr);
+ debug_overlay_.set_renderer(nullptr);
+#endif
  if(context_)context_->ClearState();
 
  game_particle_vs_.Reset();game_particle_ps_.Reset();game_particle_constants_.Reset();game_particle_buffer_.Reset();game_particle_srv_.Reset();
@@ -3430,6 +3436,14 @@ void Renderer::release() {
   // Reuse the world release to invalidate the same-map fast path as well.
   release_ground_cover();
   release_ambient_world();
+  // CritterState owns immutable GPU meshes/skins as well as frame buffers.
+  // World release deliberately keeps them and its ready gate. Dropping the
+  // state also joins its value-only asset/shader futures, which capture
+  // neither Renderer nor the executor.
+  critters_.reset();critters_failed_=false;
+  critters_drawn_frame_=critters_status_frame_=UINT64_MAX;
+  critters_summary_={};
+  std::snprintf(critters_status_,sizeof(critters_status_),"Critters: pass not reached yet");
   ambient12_={};
   gc_t2_cell_class12_.reset();gc_t2_classes12_.reset();gc_t2_color12_.reset();
   gc_t2_programs12_.clear();
@@ -3498,6 +3512,13 @@ void Renderer::release() {
   fg_rate_window_ms_=fg_rate_on_ms_=0.;fg_rate_cost_ms_=-1.;fg_rate_window_count_=0;
   dlss_reset_=true;dlss_previous_valid_=false;embedded_d3d12_presented_=false;
  }
+ // Every renderer worker/client and GPU owner above has retired. External
+ // snapshots/preparers retain their session identity for late release;
+ // the executor invalidates that owner before its heaps/device disappear.
+ // Detach dispatch before destruction so repeated release/ensure cannot
+ // submit work to a destroyed executor.
+ d3d12_=nullptr;
+ embedded_d3d12_.shutdown();
 #endif
 #endif
 }
