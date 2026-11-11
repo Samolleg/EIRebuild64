@@ -17,10 +17,13 @@ The source clone is read-only; texture bytes are cooked outside Git.
 
 The bind snapshot contains the resolved default body/face/eyes, accepted UVs,
 proxy vertices, four original skin slots per sampling vertex (UNORM16),
-section-9 render correspondences and the complete section-13 pose rig.
+section-8 source shape program, section-9 render correspondences, section-13
+pose rig and section-14 attachment/hand/sole calibration.
 Original duplicate lid edits execute in order; the last write wins. The cooker
 reads its actual container through the shared decoder, checks the rig round
-trip and compares serialized bind contacts to NalaLidContact::Render.
+trip, rebuilds the default shape using the decoded program, compares its
+vertices/normals/rig with the accepted authoring result, and compares serialized
+bind contacts to NalaLidContact::Render.
 
 The older command remains available:
 
@@ -28,8 +31,8 @@ The older command remains available:
 out/x64/Release/tools/nala-to-skn --export-pose-section ../tmp/unhufe.section13
 ```
 
-Neither output is approved for installation. Section 8 and shape changes are
-pending. The game now selects the SKN file and evaluates its section-13 bones;
+The game resolves section-8 shape data once per unit input change and evaluates
+section-13 bones for animation;
 the native shader skins sources and blends section-9 contacts. The former
 CPU geometry output is removed. Full engine build and game acceptance remain
 with the coordinator. Model/authoring headers reside in this offline project.

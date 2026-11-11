@@ -1,6 +1,5 @@
 // Offline Nala bind mesh and pose extraction.
-// CPU shape data and GPU skin/contact integration are still required before
-// a deployable SKN can exist.
+// Includes the file-driven CPU shape program and bone/contact payloads.
 #include "nala_pose_asset.h"
 #include "nala/UnityCompleteData.h"
 #include <filesystem>
@@ -90,8 +89,8 @@ int main(int argc,char** argv) try {
     write(argv[2],bytes);
     std::cout<<"bind SKN: "<<shaped.vertices.size()<<" sampling vertices, "<<NalaLidContact::RenderCount
       <<" visible vertices, "<<std::size(NalaLidContact::Indices)/3<<" triangles, "<<shaped.bindInverse.size()
-      <<" skin slots; sections 9/13; "<<bytes.size()<<" bytes\n"
-      <<"INCOMPLETE: section 8 and runtime integration pending; do not install.\n";
+      <<" skin slots; sections 8/9/13/14; "<<bytes.size()<<" bytes\n"
+      <<"Shape data is file-driven; full engine build and game acceptance belong to the coordinator.\n";
     return 0;
   }
   if(argc!=3 || std::string(argv[1])!="--export-pose-section") {

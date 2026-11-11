@@ -1,11 +1,10 @@
 # Nala bone runtime
 
-The game retains UnityBodyKernel.h and the accepted size/sole constants.
-Section 13 supplies the rig/controller payload. Runtime evaluates bones only;
-SKN vertices and section-9 contacts are evaluated by the native GPU shader.
+UnityBodyKernel.h supplies shared affine/rig math. Model data comes from SKN
+section 8 for CPU shape changes, section 9 for GPU contacts, section 13 for the
+bone rig, and section 14 for rigid mounts, hands and sole alignment.
 
-Offline model, appearance, morph and garment headers are now under
+Offline model, appearance, morph, attachment and garment tables reside under
 `tools/nala-to-skn/nala`. They preserve bahonec commit
 `0580dff8805fc0bba33f6dce06be7f948451d4d6` and the accepted configuration.
-The former nala_runtime.cpp CPU geometry submission has been removed.
-See docs/skn-format.md for implemented behavior and remaining limitations.
+See docs/skn-format.md for the runtime and cooking contracts.

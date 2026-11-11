@@ -1,3 +1,5 @@
+# EID3D11_SHADER_STORE persists DXBC across worktrees in CacheRoot/ShaderStore.
+# Compiler-keyed entries share the cache size limit (20 GB by default).
 param(
     [string]$CacheRoot,
     [ValidateRange(1,1024)][int]$CacheLimitGB = 20,
@@ -72,7 +74,7 @@ function Sync-Tree([string]$source,[string]$destination,[string[]]$files) {
 function Trim-Cache {
     foreach ($group in Get-ChildItem -LiteralPath $CacheRoot -Directory) {
         if ($group.Name -eq 'work') { continue }
-        if ($group.Name -notin @('LuaJIT','DirectXTex','DirectXTK','RendererShaders','Recast')) { throw "Unknown cache directory: $($group.FullName)" }
+        if ($group.Name -notin @('LuaJIT','DirectXTex','DirectXTK','RendererShaders','Recast','ShaderStore')) { throw "Unknown cache directory: $($group.FullName)" }
         $entries = @(Get-ChildItem -LiteralPath $group.FullName -Directory | Sort-Object LastWriteTimeUtc -Descending)
         foreach ($entry in $entries) { if ($entry.Name -notmatch '^[0-9a-f]{64}$') { throw "Unknown cache entry: $($entry.FullName)" } }
         $entries | Select-Object -Skip $CacheVersions | ForEach-Object { Remove-CacheEntry $_.FullName }
@@ -110,7 +112,11 @@ try {
     $env:MSBUILDDISABLENODEREUSE = '1'
     $env:TMP = $privateTemp; $env:TEMP = $privateTemp
     $env:_MSPDBSRV_ENDPOINT_ = 'EI-' + [guid]::NewGuid().ToString('N')
-    foreach ($name in 'CL','_CL_','LINK','_LINK_','EID3D11_SHADER_STORE') { [Environment]::SetEnvironmentVariable($name,$null,'Process') }
+    foreach ($name in 'CL','_CL_','LINK','_LINK_') { [Environment]::SetEnvironmentVariable($name,$null,'Process') }
+    $shaderCompilerKey = Hash-File "$env:SystemRoot/System32/d3dcompiler_47.dll"
+    $env:EID3D11_SHADER_STORE = Join-Path $CacheRoot ("ShaderStore/" + $shaderCompilerKey)
+    New-Item -ItemType Directory -Force -Path $env:EID3D11_SHADER_STORE | Out-Null
+    (Get-Item -LiteralPath $env:EID3D11_SHADER_STORE).LastWriteTimeUtc = [datetime]::UtcNow
     # Shared build metadata and toolchain; source payloads are keyed per library.
     $inventory = [Collections.Generic.List[string]]::new()
     $tracked = @(& git -C $repo -c core.quotepath=false ls-files --cached --others --exclude-standard | Sort-Object -Unique)
@@ -142,7 +148,7 @@ try {
     $groups = @()
     $sourceCommit = (& git -C $sourceRepo -c "safe.directory=$sourceRepo" describe --always --abbrev=12 --dirty --exclude=*).Trim()
     if ($LASTEXITCODE -ne 0 -or !$sourceCommit) { throw 'Cannot identify source commit.' }
-    $arguments = @("/p:ScriptCheckCommit=$sourceCommit",'EI_Rebuild.sln',"/m:$cores",'/nr:false','/t:Build','/p:Configuration=Release','/p:Platform=x64',"/p:VCToolsVersion=$vcversion","/p:WindowsTargetPlatformVersion=$sdkversion","/p:UserRootDir=$privateTemp\",'/nologo','/v:minimal')
+    $arguments = @("/p:ScriptCheckCommit=$sourceCommit",'EI_Rebuild.sln',"/m:$cores",'/nr:false','/t:Build','/p:Configuration=Release','/p:Platform=x64','/p:PreferredToolArchitecture=x64',"/p:VCToolsVersion=$vcversion","/p:WindowsTargetPlatformVersion=$sdkversion","/p:UserRootDir=$privateTemp\",'/nologo','/v:minimal')
     foreach ($group in $groups) {
         $sourceInventory = @($key)
         foreach ($relative in $tracked | Where-Object { $_ -match $group.Sources }) { $sourceInventory += ($relative + '=' + (Hash-File (Join-Path $repo $relative))) }
