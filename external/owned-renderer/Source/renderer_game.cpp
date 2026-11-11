@@ -293,6 +293,7 @@ HRESULT Renderer::queue_present(){
  {const stall_watch::Exempt wait;const frame_acct::Scope wait_scope(frame_acct::wait_present_slot);
  #ifdef EID3D11_EMBEDDED
  const CorePerf::AnyThreadScope coreWait(CorePerf::PresentSlotWait);
+ const frame_waits::Scope presentSlotWait(frame_waits::present_slot);
  #endif
  scene_thread_->wait_present_slot();}
  inputs.game_frame=fa_game_frame_;

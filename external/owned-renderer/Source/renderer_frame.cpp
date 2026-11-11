@@ -1444,6 +1444,7 @@ void Renderer::scene_sync(const char* reason) noexcept{
  {
  #ifdef EID3D11_EMBEDDED
  const CorePerf::AnyThreadScope coreWait(CorePerf::SceneSyncWait);
+ const frame_waits::Scope sceneWait(frame_waits::scene_sync);
  #endif
  scene_thread_->sync();
  }
@@ -2286,7 +2287,7 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
 #endif
  (void)plan_pass("present",nullptr,nullptr,plan_read(PlanTarget::backbuffer));
  finish_native_lod_frame();
- {const stall_watch::Bracket present_bracket("present");const frame_acct::Scope scope(frame_acct::pf_present_call);hr=swap_->Present(interval,flags);}
+ {const stall_watch::Bracket present_bracket("present");const frame_acct::Scope scope(frame_acct::pf_present_call);const frame_waits::Scope wait(frame_waits::present);hr=swap_->Present(interval,flags);}
  const std::int64_t recorder_present_return=
   placed_hitch_profile_.active()?perf_now():0;
  profiler_.present_return(output_width_,output_height_,interval,flags,hr);
@@ -2294,7 +2295,7 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
  // Sample the existing asynchronous profiler. No new query or GPU wait.
  static ULONGLONG perf06last=0;
  const auto perf06now=GetTickCount64();
- try { if(perf06now-perf06last>=2000){
+ try { if(RuntimeDiagnostics::Enabled() && perf06now-perf06last>=2000){
   perf06last=perf06now;
   if(const auto* sample=profiler_.latest_snapshot()){
    char detail[384]{};

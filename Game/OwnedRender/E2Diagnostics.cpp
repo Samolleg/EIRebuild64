@@ -67,7 +67,7 @@ void embedded_frame_scope_end(unsigned token, LONGLONG now) noexcept {
 }
 
 void embedded_perf06_report(const char* detail) noexcept {
-    GameJournal::Event("RENDER", "pipeline_perf", "%s", detail);
+    if (RuntimeDiagnostics::Enabled()) GameJournal::Event("RENDER", "pipeline_perf", "%s", detail);
 }
 
 const char* figure_fallback_reason_name(FigureFallbackReason reason) noexcept {

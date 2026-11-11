@@ -1,4 +1,5 @@
 #pragma once
+#include "../external/owned-renderer/Source/runtime_diagnostics.h"
 #include <string>
 #ifndef GAME_JOURNAL_STANDALONE
 #include <list>

@@ -22,10 +22,12 @@ struct PassTiming {
 
 class Timestamps {
 public:
-    bool create(ID3D12Device* device, ID3D12CommandQueue* queue, std::string& reason);
+    bool create(ID3D12Device* device, ID3D12CommandQueue* queue, std::string& reason, std::uint32_t initial_passes = 64);
     // After Core::begin_frame (the slot's previous frame has finished): reads
     // that frame's results into last(), regrows the slot if it overflowed.
     bool begin_frame(Core& core, std::string& reason);
+    // External FG lists use the same profiler after their own queue fence completes.
+    bool begin_frame(unsigned slot, std::string& reason);
     // Returns the pass's index for end(); passes nest or follow freely.
     std::uint32_t begin(ID3D12GraphicsCommandList* list, const char* name);
     void end(ID3D12GraphicsCommandList* list, std::uint32_t pass) noexcept;

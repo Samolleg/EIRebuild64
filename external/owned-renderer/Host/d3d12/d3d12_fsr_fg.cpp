@@ -7,6 +7,8 @@
 #include <dx12/ffx_api_framegeneration_dx12.h>
 
 #include <atomic>
+#include <mutex>
+#include "frame_waits.h"
 #include <cstdio>
 #include <cstring>
 
@@ -67,11 +69,12 @@ namespace {
 // The FG swap chain asks for the interpolation through this callback,
 // during Present on the game thread (frame-interpolation-swap-chain.md).
 std::atomic<std::uint64_t> g_dispatches{0};
+std::mutex g_gpu_mutex;
+owned::frame_waits::Distribution g_gpu_ms;
+std::uint64_t g_gpu_invalid = 0;
 
-ffxReturnCode_t dispatch_generation(ffxDispatchDescFrameGeneration* params, void* context) {
-    const ffxReturnCode_t result = fidelityfx::api.dispatch(static_cast<ffxContext*>(context), &params->header);
-    if (result == FFX_API_RETURN_OK) g_dispatches.fetch_add(1, std::memory_order_relaxed);
-    return result;
+ffxReturnCode_t dispatch_generation_callback(ffxDispatchDescFrameGeneration* params, void* context) {
+    return static_cast<ffxReturnCode_t>(static_cast<FsrFrameGeneration*>(context)->dispatch_generation(params));
 }
 
 // The FSR 3.x frame generation provider (the loader may also list ML frame
@@ -111,7 +114,7 @@ bool FsrFrameGeneration::available(ID3D12Device* device, std::string& reason) no
     return state == 1;
 }
 
-bool FsrFrameGeneration::create(ID3D12Device* device, UINT width, UINT height, DXGI_FORMAT format, std::string& reason) noexcept {
+bool FsrFrameGeneration::create(ID3D12Device* device, ID3D12CommandQueue* queue, UINT width, UINT height, DXGI_FORMAT format, std::string& reason) noexcept {
     destroy(nullptr);
     if (!available(device, reason)) return false;
     char name[64] = {};
@@ -139,6 +142,19 @@ bool FsrFrameGeneration::create(ID3D12Device* device, UINT width, UINT height, D
         reason = text;
         return false;
     }
+    // Diagnostics may be unavailable without disabling generation. Only the FG
+    // pass allocates new queries. Never wait for their results on the CPU.
+    std::string timing_reason;
+    try {
+        if (RuntimeDiagnostics::Enabled() && queue && gpu_times_.create(device, queue, timing_reason, 1) &&
+            SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&gpu_fence_)))) {
+            gpu_queue_ = queue;
+        }
+    } catch (...) {}
+    if (RuntimeDiagnostics::Enabled() && !gpu_queue_) {
+        std::lock_guard<std::mutex> lock(g_gpu_mutex);
+        ++g_gpu_invalid;
+    }
     context_ = context;
     width_ = width;
     height_ = height;
@@ -161,6 +177,11 @@ void FsrFrameGeneration::destroy(IDXGISwapChain* swap) noexcept {
         fidelityfx::api.configure(&context, &off.header);  // waits for the swap chain's presents
     }
     fidelityfx::api.destroy(&context, nullptr);
+    // SDK destruction drains its lists before profiler query resources go away.
+    collect_gpu_times();
+    gpu_queue_.Reset(); gpu_fence_.Reset();
+    for (auto& value : gpu_values_) value = 0;
+    gpu_serial_ = 0; gpu_slot_ = 0; gpu_recorded_ = false;
     context_ = nullptr;
     width_ = height_ = 0;
     prepared_ = enabled_ = false;
@@ -212,8 +233,8 @@ bool FsrFrameGeneration::configure(IDXGISwapChain* swap, ID3D12Resource* hudless
     ffxConfigureDescFrameGeneration configure{};
     configure.header.type = FFX_API_CONFIGURE_DESC_TYPE_FRAMEGENERATION;
     configure.swapChain = swap;
-    configure.frameGenerationCallback = dispatch_generation;
-    configure.frameGenerationCallbackUserContext = context_ ? &context_ : nullptr;
+    configure.frameGenerationCallback = dispatch_generation_callback;
+    configure.frameGenerationCallbackUserContext = this;
     configure.frameGenerationEnabled = enabled;
     configure.allowAsyncWorkloads = false;
     if (enabled) configure.HUDLessColor = ffxApiGetResourceDX12(hudless, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ);
@@ -240,6 +261,82 @@ std::uint64_t FsrFrameGeneration::vram() const noexcept {
     query.header.type = FFX_API_QUERY_DESC_TYPE_FRAMEGENERATION_GPU_MEMORY_USAGE;
     query.gpuMemoryUsageFrameGeneration = &usage;
     return fidelityfx::api.query(&context, &query.header) == FFX_API_RETURN_OK ? usage.totalUsageInBytes : 0;
+}
+
+void FsrFrameGeneration::collect_gpu_times() noexcept {
+    if (!gpu_fence_) return;
+    const auto completed = gpu_fence_->GetCompletedValue();
+    if (completed == UINT64_MAX) return;
+    for (unsigned slot = 0; slot < Core::kFramesInFlight; ++slot) {
+        if (!gpu_values_[slot] || gpu_values_[slot] > completed) continue;
+        try {
+            std::string reason;
+            const bool ready = gpu_times_.begin_frame(slot, reason);
+            std::lock_guard<std::mutex> lock(g_gpu_mutex);
+            if (ready && gpu_times_.last().size() == 1) g_gpu_ms.add(gpu_times_.last()[0].ms);
+            else ++g_gpu_invalid;
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(g_gpu_mutex);
+            ++g_gpu_invalid;
+        }
+        gpu_values_[slot] = 0;
+    }
+}
+
+unsigned FsrFrameGeneration::dispatch_generation(void* parameters) noexcept {
+    auto* params = static_cast<ffxDispatchDescFrameGeneration*>(parameters);
+    auto* list = static_cast<ID3D12GraphicsCommandList*>(params->commandList);
+    collect_gpu_times();
+    bool timed = false;
+    std::uint32_t pass = 0;
+    // A busy query slot drops a diagnostic sample without delaying the frame.
+    if (gpu_queue_ && !gpu_recorded_ && !gpu_values_[gpu_slot_]) {
+        try {
+            std::string reason;
+            if (gpu_times_.begin_frame(gpu_slot_, reason)) {
+                pass = gpu_times_.begin(list, "fg_fsr_interpolate");
+                timed = true;
+            }
+        } catch (...) {}
+    }
+    ffxContext context = static_cast<ffxContext>(context_);
+    const auto result = fidelityfx::api.dispatch(&context, &params->header);
+    if (timed) {
+        gpu_times_.end(list, pass);
+        gpu_times_.resolve(list);
+        gpu_recorded_ = true;
+    } else if (RuntimeDiagnostics::Enabled()) {
+        std::lock_guard<std::mutex> lock(g_gpu_mutex);
+        ++g_gpu_invalid;
+    }
+    if (result == FFX_API_RETURN_OK) g_dispatches.fetch_add(1, std::memory_order_relaxed);
+    return static_cast<unsigned>(result);
+}
+
+void FsrFrameGeneration::submitted() noexcept {
+    if (gpu_recorded_) {
+        // allowAsyncWorkloads=false records interpolation on the game queue.
+        // Present has submitted the callback list before this queue signal.
+        const auto value = ++gpu_serial_;
+        if (SUCCEEDED(gpu_queue_->Signal(gpu_fence_.Get(), value))) gpu_values_[gpu_slot_] = value;
+        else {
+            std::lock_guard<std::mutex> lock(g_gpu_mutex);
+            ++g_gpu_invalid;
+            gpu_queue_.Reset(); // no reuse after losing the completion signal
+        }
+        gpu_slot_ = (gpu_slot_ + 1) % Core::kFramesInFlight;
+        gpu_recorded_ = false;
+    }
+    collect_gpu_times();
+}
+
+std::string FsrFrameGeneration::take_gpu_report() {
+    std::lock_guard<std::mutex> lock(g_gpu_mutex);
+    std::string result = "gpu_fsr_interpolate_scope=callback_dispatch gpu_fsr_interpolate_in_sum=0";
+    g_gpu_ms.append(result, "gpu_fsr_interpolate");
+    result += " gpu_fsr_interpolate_invalid_n=" + std::to_string(g_gpu_invalid);
+    g_gpu_invalid = 0;
+    return result;
 }
 
 } // namespace d3d12

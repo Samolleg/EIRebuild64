@@ -1,4 +1,5 @@
 #pragma once
+#include "runtime_diagnostics.h"
 // Per-present frame accounting (harness runs only: EI_RENDERER_HARNESS_DIR set,
 // EI_RENDERER_FRAME_ACCOUNTING=0 turns it off). Written into the camera_path
 // row; see RENDERER_ARCHITECTURE.md "Frame accounting".
@@ -117,6 +118,9 @@ inline const char* part_name(unsigned part) noexcept {
 }
 
 inline bool enabled() noexcept {
+#ifdef EID3D11_EMBEDDED
+    if (!RuntimeDiagnostics::Enabled()) return false;
+#endif
     static const bool on = [] {
         char value[8]{};
         if (GetEnvironmentVariableA("EI_RENDERER_FRAME_ACCOUNTING", value, sizeof(value)) && value[0] == '0')

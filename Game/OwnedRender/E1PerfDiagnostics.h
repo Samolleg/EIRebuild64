@@ -20,11 +20,13 @@ class E1PerfScope {
 public:
     explicit E1PerfScope(E1PerfCounter& value, std::uint64_t copied = 0) noexcept
         : counter(value), bytes(copied) {
+        if (!RuntimeDiagnostics::Enabled()) return;
         QueryPerformanceCounter(&start);
         detail = CorePerf::BeginFrameDetail(counter.name, start.QuadPart);
         if (!counter.window) counter.window = start.QuadPart;
     }
     ~E1PerfScope() noexcept {
+        if (!RuntimeDiagnostics::Enabled()) return;
         LARGE_INTEGER end{};
         QueryPerformanceCounter(&end);
         CorePerf::EndFrameDetail(detail, end.QuadPart);
@@ -38,7 +40,7 @@ public:
         ++counter.calls; counter.bytes += bytes;
         if (end.QuadPart - counter.window < frequency * 2) return;
         const double ms = 1000.0 / static_cast<double>(frequency);
-        GameJournal::Event("RENDER", "host_perf",
+        if (RuntimeDiagnostics::Enabled()) GameJournal::Event("RENDER", "host_perf",
             "scope=%s window_ms=%.3f calls=%llu total_ms=%.3f mean_ms=%.4f max_ms=%.3f bytes=%llu inclusive=1",
             counter.name, (end.QuadPart-counter.window)*ms,
             static_cast<unsigned long long>(counter.calls), counter.total*ms,

@@ -11,6 +11,7 @@
 // off, so interpolation runs on the game queue and the HUD-less image may be
 // rewritten by the next frame (frame-interpolation-api.md, resource lifetime).
 #include "d3d12_core.h"
+#include "d3d12_timestamps.h"
 
 #include <cstdint>
 #include <string>
@@ -36,7 +37,7 @@ public:
     UINT width() const noexcept { return width_; }
     UINT height() const noexcept { return height_; }
     // The context for the display size (the swap chain's).
-    bool create(ID3D12Device* device, UINT width, UINT height, DXGI_FORMAT format, std::string& reason) noexcept;
+    bool create(ID3D12Device* device, ID3D12CommandQueue* queue, UINT width, UINT height, DXGI_FORMAT format, std::string& reason) noexcept;
     // Turns generation off on the swap chain (waits for its presents) and
     // destroys the context (SDK Shutdown order: before the swap chain context).
     void destroy(IDXGISwapChain* swap) noexcept;
@@ -53,8 +54,21 @@ public:
     // Interpolation workloads the proxy asked for so far (its callback): the
     // generated frames, independent of DXGI's present statistics.
     static std::uint64_t dispatches() noexcept;
+    // SDK callback and post-Present submission boundary, on the recording thread.
+    unsigned dispatch_generation(void* params) noexcept;
+    void submitted() noexcept;
+    // Resolved external FG pass, independent of the ordinary frame-list sum.
+    static std::string take_gpu_report();
 
 private:
+    void collect_gpu_times() noexcept;
+    Timestamps gpu_times_;
+    ComPtr<ID3D12CommandQueue> gpu_queue_;
+    ComPtr<ID3D12Fence> gpu_fence_;
+    std::uint64_t gpu_values_[Core::kFramesInFlight]{};
+    std::uint64_t gpu_serial_ = 0;
+    unsigned gpu_slot_ = 0;
+    bool gpu_recorded_ = false;
     void* context_ = nullptr;  // ffxContext
     UINT width_ = 0, height_ = 0;
     std::uint64_t frame_id_ = 0;

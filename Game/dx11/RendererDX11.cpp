@@ -908,7 +908,7 @@ void CDX11::EndWorld()
             static_cast<unsigned long>(composite));
     IfFailedThrowHR(composite);
     ReportC56FigureSkipSummary();
-    GameJournal::Event("RENDER", "world_model_owner",
+    if (RuntimeDiagnostics::Enabled()) GameJournal::Event("RENDER", "world_model_owner",
         "owner=c56 path=c56_native_queue submitted=%llu skipped=%llu",
         static_cast<unsigned long long>(c56WorldFigurePrimitives),
         static_cast<unsigned long long>(c56WorldFigureQueueFailed));
@@ -962,10 +962,11 @@ void CDX11::EndFrame(bool present)
     }));
     const HRESULT presented = rendererFacade->EndFrame();
     frameTiming.End(SUCCEEDED(presented));
+    if (SUCCEEDED(presented)) owned::frame_waits::frame.presented = true;
     FrameDiagnostics::Presented(presented);
-    if (SUCCEEDED(presented) && (++frameSerial % 120u) == 0) {
+    if (RuntimeDiagnostics::Enabled() && SUCCEEDED(presented) && (++frameSerial % 120u) == 0) {
         const auto sample = frameTiming.Read();
-        GameJournal::Event("RENDER", "frame_timing",
+        if (RuntimeDiagnostics::Enabled()) GameJournal::Event("RENDER", "frame_timing",
             "owner=c56 frame=%llu cpu_ms_median=%.3f cpu_ms_p95=%.3f cpu_n=%u gpu_ms_median=%.3f gpu_ms_p95=%.3f gpu_n=%u gpu_status=0x%08lX dropped=%llu invalid=%llu",
             static_cast<unsigned long long>(frameSerial), sample.cpu.median, sample.cpu.p95,
             sample.cpu.count, sample.gpu.median, sample.gpu.p95, sample.gpu.count,
@@ -974,17 +975,24 @@ void CDX11::EndFrame(bool present)
             static_cast<unsigned long long>(sample.invalid));
     }
     const ULONGLONG now = GetTickCount64();
-    if (now - lastGpuPassReport >= 5000) {
-        std::string passes;
+    if (RuntimeDiagnostics::Enabled() && now - lastGpuPassReport >= 5000) {
+        std::string passes, gpuWaits;
+        bool fgActive = false, sceneThread = false;
+        const std::string cpuWaits = owned::frame_waits::take_cpu_report();
         rendererFacade->Visit([&](owned::Renderer& renderer) {
-            passes = renderer.take_gpu_pass_report();
+            passes = renderer.take_gpu_pass_report(&gpuWaits);
+            fgActive = renderer.frame_generation_stats().active;
+            sceneThread = renderer.scene_mode();
             return S_OK;
         });
         const auto sample = frameTiming.Read();
-        GameJournal::Event("RENDER", "gpu_passes",
+        if (RuntimeDiagnostics::Enabled()) GameJournal::Event("RENDER", "gpu_passes",
             "backend=%s window_ms=%llu counters=window_totals pass_samples=frames_with_pass frame_timing_scope=tail240 frame_timing_gpu_ms_median=%.3f frame_timing_gpu_ms_p95=%.3f frame_timing_gpu_n=%u %s",
             D3D12Selected() ? "d3d12" : "d3d11", now - lastGpuPassReport,
             sample.gpu.median, sample.gpu.p95, sample.gpu.count, passes.c_str());
+        if (RuntimeDiagnostics::Enabled()) GameJournal::Event("RENDER", "frame_waits",
+            "backend=%s fg_active_at_report=%u scene_thread_at_report=%u window_ms=%llu %s %s", D3D12Selected() ? "d3d12" : "d3d11", unsigned(fgActive), unsigned(sceneThread),
+            now - lastGpuPassReport, cpuWaits.c_str(), gpuWaits.c_str());
         lastGpuPassReport = now;
     }
     IfFailedThrowHR(presented);

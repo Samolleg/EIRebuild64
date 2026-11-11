@@ -5,14 +5,14 @@
 
 namespace d3d12 {
 
-bool Timestamps::create(ID3D12Device* device, ID3D12CommandQueue* queue, std::string& reason) {
+bool Timestamps::create(ID3D12Device* device, ID3D12CommandQueue* queue, std::string& reason, std::uint32_t initial_passes) {
     device_ = device;
     UINT64 frequency = 0;
     const HRESULT hr = queue->GetTimestampFrequency(&frequency);
     if (FAILED(hr) || !frequency) { reason = hresult_text("ID3D12CommandQueue::GetTimestampFrequency", hr); return false; }
     ticks_per_ms_ = double(frequency) / 1000.0;
     for (Slot& slot : slots_)
-        if (!create_slot(slot, 64, reason)) return false;
+        if (!create_slot(slot, initial_passes, reason)) return false;
     return true;
 }
 
@@ -45,7 +45,11 @@ bool Timestamps::create_slot(Slot& slot, std::uint32_t passes, std::string& reas
 }
 
 bool Timestamps::begin_frame(Core& core, std::string& reason) {
-    Slot& slot = slots_[core.frame_slot()];
+    return begin_frame(core.frame_slot(), reason);
+}
+
+bool Timestamps::begin_frame(unsigned index, std::string& reason) {
+    Slot& slot = slots_[index];
     if (slot.pending) {
         const std::uint32_t timed = std::uint32_t((std::min)(slot.names.size(), std::size_t(slot.capacity)));
         const D3D12_RANGE range{0, std::size_t(timed) * 2 * sizeof(UINT64)};

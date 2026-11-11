@@ -1574,7 +1574,10 @@ public:
     void report_device_removed(HRESULT reason) noexcept;
     ID3D11Device* resource_device() const noexcept { return device_.Get(); }
     void enable_gpu_journal() noexcept { profiler_.enable_gpu_journal(); }
-    std::string take_gpu_pass_report() { return profiler_.take_gpu_pass_report(); }
+    std::string take_gpu_pass_report(std::string* frame_waits = nullptr) {
+        scene_sync("gpu_pass_report");
+        return profiler_.take_gpu_pass_report(frame_waits);
+    }
     D3D12Frame::FrameGenerationStats frame_generation_stats() const noexcept {
         return d3d12_ ? d3d12_->frame_generation_stats() : D3D12Frame::FrameGenerationStats{};
     }

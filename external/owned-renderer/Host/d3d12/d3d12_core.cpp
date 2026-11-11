@@ -1,4 +1,5 @@
 // Native D3D12 backend core; see d3d12_core.h.
+#include "frame_waits.h"
 #include "d3d12_core.h"
 
 #include <psapi.h>
@@ -518,6 +519,7 @@ void Core::bind(ID3D12GraphicsCommandList* list) const noexcept {
 bool Core::wait_for(std::uint64_t value) noexcept {
     const auto completed = fence_->GetCompletedValue();
     if (completed != UINT64_MAX && completed >= value) return true;
+    const owned::frame_waits::Scope wait(owned::frame_waits::fence);
     const HRESULT hr = fence_->SetEventOnCompletion(value, fence_event_);
     const DWORD waited = SUCCEEDED(hr) ? WaitForSingleObject(fence_event_, 20000) : WAIT_FAILED;
     const auto finished = fence_->GetCompletedValue();
@@ -529,6 +531,7 @@ bool Core::wait_for(std::uint64_t value) noexcept {
 }
 
 bool Core::wait_idle() noexcept {
+    const owned::frame_waits::Scope wait(owned::frame_waits::fence);
     const std::uint64_t value = next_idle_value_++;
     HRESULT hr = queue_->Signal(idle_fence_.Get(), value);
     DWORD waited = WAIT_OBJECT_0;

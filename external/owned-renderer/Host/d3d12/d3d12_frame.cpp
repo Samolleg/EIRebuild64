@@ -2661,6 +2661,7 @@ public:
                 ? (std::max)(1, frame_limit / 2) : frame_limit, nullptr, &remote::host_log);
             reflex::marker(reflex::Marker::present_start, reflex::frame());
             hr = presenter_.present(sync_interval);
+            if (fsr_on_) fsr_.submitted();
             reflex::marker(reflex::Marker::present_end, reflex::frame());
             if (FAILED(hr)) return fail(hr, hresult_text("IDXGISwapChain::Present", hr));
             // FSR: the proxy shows the real image after the generated one (this
@@ -2976,7 +2977,7 @@ private:
             // FSR's context at the swap chain's size (destroyed before each resize).
             std::string note;
             fsr_.destroy(presenter_.swap_chain());
-            if (fsr_.create(core_.device(), presenter_.width(), presenter_.height(), Presenter::kFormat, note)) {
+            if (fsr_.create(core_.device(), core_.queue(), presenter_.width(), presenter_.height(), Presenter::kFormat, note)) {
                 remote::host_log("d3d12: FSR frame generation context %ux%u (%s), VRAM %.1f MiB", presenter_.width(), presenter_.height(),
                                  note.c_str(), double(fsr_.vram()) / (1024.0 * 1024.0));
             } else {
@@ -3111,6 +3112,7 @@ private:
     // per second, one host.log line every 5 s (the harness reads it; F10
     // shows the same counts every half second).
     void log_fsr_rates() noexcept {
+        if (!RuntimeDiagnostics::Enabled()) return;
         LARGE_INTEGER now{}, frequency{};
         QueryPerformanceCounter(&now);
         QueryPerformanceFrequency(&frequency);
