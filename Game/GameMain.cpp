@@ -1060,13 +1060,22 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
         ~MovieLifetime() { Finish(); }
     } movieLifetime;
     OutputDebugStringA("Hello!\n");
+    const auto showD3D12Failure = []() {
+        char text[2048]{};
+        if (!OwnedRender::E2TakeD3D12Failure(text)) return false;
+        ErrorDialog::ShowA(NGame::hWnd, text, "EIRebuild64 - Direct3D 12", MB_OK | MB_ICONERROR, false);
+        return true;
+    };
     try
     {
-        if (WinMainInit(hInstance, hPrevInstance, lpCmdLine, nCmdShow) == BAD_RESULT)
+        if (WinMainInit(hInstance, hPrevInstance, lpCmdLine, nCmdShow) == BAD_RESULT) {
+            showD3D12Failure();
             return BAD_RESULT;
+        }
     }
     catch (const std::exception& e)
     { GameJournal::AllocationFailureInCatch("GameMain");
+        showD3D12Failure();
         if (GetRenderer()->GetD3D() && GetRenderer()->GetD3D()->D3D12Selected()) throw;
         EngineDiagnostics::Caught(e.what());
         return BAD_RESULT;
@@ -1081,13 +1090,15 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
         const auto processMessages = AgentBackground::Enabled() ? &AgentProcessMessages : &NGame::ProcessMessages;
         while (true)
         {
-            if (!processMessages())
+            const bool running = processMessages();
+            if (showD3D12Failure() || !running)
                 break;
         }
     }
 #if defined(FINALRELEASE) && defined(NODEBUGINFO)
     catch (...)
     { GameJournal::AllocationFailureInCatch("GameMain");
+        showD3D12Failure();
         if (GetRenderer()->GetD3D() && GetRenderer()->GetD3D()->D3D12Selected()) throw;
         EngineDiagnostics::Caught("Unhandled game-loop exception");
         return BAD_RESULT;

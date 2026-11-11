@@ -9,13 +9,26 @@
 #include <cstdio>
 #include <mutex>
 #include "embedded_host.h"
+#include "E2Host.h"
 
 namespace {
+std::mutex d3d12FailureGuard;
+char d3d12FailureText[2048]{};
+bool d3d12FailureLatched = false;
 void unavailable(const char* feature, std::atomic_flag& once) noexcept {
     if (!once.test_and_set())
         GameJournal::Event("RENDER", "unavailable", "%s: unavailable in embedded build; retail instrumentation is not installed", feature);
 }
 #define E2_UNAVAILABLE(feature) do { static std::atomic_flag once = ATOMIC_FLAG_INIT; unavailable(feature, once); } while (false)
+}
+namespace OwnedRender {
+bool E2TakeD3D12Failure(char (&text)[2048]) noexcept {
+    std::lock_guard<std::mutex> lock(d3d12FailureGuard);
+    if (!d3d12FailureText[0]) return false;
+    std::memcpy(text, d3d12FailureText, sizeof(text));
+    d3d12FailureText[0] = 0;
+    return true;
+}
 }
 namespace owned {
 void embedded_report_render_failure(const char* event, const char* reason) noexcept try {
@@ -69,6 +82,14 @@ bool harness_timed_out(std::uint64_t start, std::uint64_t now, std::uint32_t sec
     return now >= start && now - start >= std::uint64_t(seconds) * 1000;
 }
 void bridge_report_event(const char* event, const char* detail) noexcept {
+    if (event && !std::strcmp(event, "d3d12_failed")) {
+        std::lock_guard<std::mutex> lock(d3d12FailureGuard);
+        if (!d3d12FailureLatched) {
+            d3d12FailureLatched = true;
+            std::snprintf(d3d12FailureText, sizeof(d3d12FailureText), "%s",
+                detail && *detail ? detail : "Direct3D 12 failed. See the engine journal for details.");
+        }
+    }
     // Bounded strings and the existing bounded asynchronous game journal.
     const bool failure = event && (!std::strcmp(event, "render_thread_command_failed") ||
         !std::strcmp(event, "present_step_failed") || !std::strcmp(event, "composite_step_failed"));

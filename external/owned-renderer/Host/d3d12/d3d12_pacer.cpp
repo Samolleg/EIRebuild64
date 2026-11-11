@@ -5,6 +5,7 @@
 #include "../reflex.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 namespace remote { void host_log(const char* format, ...); }
@@ -67,7 +68,7 @@ void Pacer::stop() noexcept {
         wake_.notify_all();
         thread_.join();
     }
-    limiter_.wait(0);
+    limiter_.wait(0, nullptr, &remote::host_log);
     if (fence_ && value_) wait_value(value_);
     list_.Reset();
     for (auto& allocator : allocators_) allocator.Reset();
@@ -83,7 +84,11 @@ void Pacer::submit(Presenter& presenter, ID3D12Resource* generated, ID3D12Resour
     LARGE_INTEGER called{};
     QueryPerformanceCounter(&called);  // before the back-pressure wait: the host's frame is recorded
     std::unique_lock<std::mutex> lock(mutex_);
-    idle_.wait(lock, [this] { return !pending_ && !busy_; });
+    while (!idle_.wait_for(lock, std::chrono::seconds(5), [this] { return !pending_ && !busy_; })) {
+        lock.unlock();
+        remote::host_log("d3d12: pacer submit waiting 5 s for the previous Present; resources remain in use");
+        lock.lock();
+    }
     presenter_ = &presenter;
     frame_ = Frame{generated, real, main_value, slot % kSlots, game_start, host_taken, called.QuadPart, sync_interval, frame_limit};
     pending_ = true;
@@ -93,7 +98,11 @@ void Pacer::submit(Presenter& presenter, ID3D12Resource* generated, ID3D12Resour
 void Pacer::drain() noexcept {
     {
         std::unique_lock<std::mutex> lock(mutex_);
-        idle_.wait(lock, [this] { return !pending_ && !busy_; });
+        while (!idle_.wait_for(lock, std::chrono::seconds(5), [this] { return !pending_ && !busy_; })) {
+            lock.unlock();
+            remote::host_log("d3d12: pacer drain waiting 5 s for Present; resources remain in use");
+            lock.lock();
+        }
     }
     std::uint64_t value = 0;
     {
@@ -123,7 +132,12 @@ Pacer::Stats Pacer::stats() const noexcept {
 void Pacer::wait_value(std::uint64_t value) noexcept {
     if (!fence_ || fence_->GetCompletedValue() >= value) return;
     HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-    if (event && SUCCEEDED(fence_->SetEventOnCompletion(value, event))) WaitForSingleObject(event, 5000);
+    const HRESULT hr = event ? fence_->SetEventOnCompletion(value, event) : HRESULT_FROM_WIN32(GetLastError());
+    const DWORD waited = SUCCEEDED(hr) ? WaitForSingleObject(event, 5000) : WAIT_FAILED;
+    if (waited != WAIT_OBJECT_0)
+        remote::host_log("d3d12: pacer fence wait failed: wanted=%llu completed=%llu wait=%lu hr=0x%08lX",
+                         static_cast<unsigned long long>(value), static_cast<unsigned long long>(fence_->GetCompletedValue()),
+                         waited, static_cast<unsigned long>(hr));
     if (event) CloseHandle(event);
 }
 
@@ -136,7 +150,10 @@ void Pacer::sleep_until(std::int64_t deadline, std::int64_t frequency, HANDLE ti
     if (timer && deadline - now.QuadPart > spin) {
         LARGE_INTEGER due{};
         due.QuadPart = -static_cast<LONGLONG>((deadline - now.QuadPart - spin) * 10000000 / frequency);  // 100 ns units, relative
-        if (SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) WaitForSingleObject(timer, 1000);
+        if (SetWaitableTimerEx(timer, &due, 0, nullptr, nullptr, nullptr, 0)) {
+            const DWORD waited = WaitForSingleObject(timer, 1000);
+            if (waited != WAIT_OBJECT_0) remote::host_log("d3d12: pacer spacing timer wait failed: wait=%lu", waited);
+        }
     }
     for (;;) {
         QueryPerformanceCounter(&now);
@@ -167,7 +184,7 @@ bool Pacer::copy_and_present(ID3D12Resource* source, std::uint64_t& signalled, c
     if (FAILED(list_->Close())) return false;
     ID3D12CommandList* lists[] = {list_.Get()};
     queue_->ExecuteCommandLists(1, lists);
-    limiter_.wait(frame.frame_limit);
+    limiter_.wait(frame.frame_limit, nullptr, &remote::host_log);
     const HRESULT hr = presenter_->present(frame.sync_interval);
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
@@ -207,8 +224,14 @@ void Pacer::run() noexcept {
         }
         // The real frame's GPU work (the generated image is part of it).
         ID3D12Fence* main = core_->fence();
-        if (main->GetCompletedValue() < frame.main_value && SUCCEEDED(main->SetEventOnCompletion(frame.main_value, main_event_)))
-            WaitForSingleObject(main_event_, 5000);
+        if (main->GetCompletedValue() < frame.main_value) {
+            const HRESULT hr = main->SetEventOnCompletion(frame.main_value, main_event_);
+            const DWORD waited = SUCCEEDED(hr) ? WaitForSingleObject(main_event_, 5000) : WAIT_FAILED;
+            if (waited != WAIT_OBJECT_0)
+                remote::host_log("d3d12: pacer main fence wait failed: wanted=%llu completed=%llu wait=%lu hr=0x%08lX",
+                                 static_cast<unsigned long long>(frame.main_value), static_cast<unsigned long long>(main->GetCompletedValue()),
+                                 waited, static_cast<unsigned long>(hr));
+        }
         LARGE_INTEGER done{};
         QueryPerformanceCounter(&done);
         double interval = 0;

@@ -29,7 +29,7 @@ public:
 
     struct WaitTiming { std::int64_t requested = 0, actual = 0; };
 
-    void wait(int fps, WaitTiming* timing = nullptr) noexcept {
+    void wait(int fps, WaitTiming* timing = nullptr, void (*report)(const char*, ...) = nullptr) noexcept {
         if (timing) *timing = {};
         if (fps <= 0) {
             last_ = 0;
@@ -47,7 +47,7 @@ public:
             return;
         }
         if (timing) timing->requested = deadline - now;
-        sleep_until(deadline);
+        sleep_until(deadline, report);
         if (timing) timing->actual = counter() - now;
         last_ = deadline;
     }
@@ -59,7 +59,7 @@ private:
         return value.QuadPart;
     }
 
-    void sleep_until(std::int64_t deadline) noexcept {
+    void sleep_until(std::int64_t deadline, void (*report)(const char*, ...)) noexcept {
         if (!timer_ && !timer_tried_) {
             timer_tried_ = true;
             timer_ = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
@@ -75,7 +75,11 @@ private:
                 LARGE_INTEGER due{};
                 due.QuadPart = -((remaining - spin) * 10000000 / frequency_);
                 if (due.QuadPart < 0 && SetWaitableTimer(timer_, &due, 0, nullptr, nullptr, FALSE)) {
-                    WaitForSingleObject(timer_, INFINITE);
+                    const DWORD waited = WaitForSingleObject(timer_, report ? 1000 : INFINITE);
+                    if (report && waited != WAIT_OBJECT_0) {
+                        report("d3d12: frame limiter timer wait failed: wait=%lu error=%lu", waited, GetLastError());
+                        return;
+                    }
                     continue;
                 }
             }
