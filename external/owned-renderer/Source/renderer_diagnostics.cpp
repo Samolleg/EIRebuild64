@@ -741,7 +741,7 @@ std::string Renderer::harness_unready_parts(std::string& ready_detail) noexcept 
    add("ground_cover","tile families still loading");
   else if(!gc_material_state_.empty())add("ground_cover",gc_paint_failure_?gc_paint_failure_:"terrain atlases still painting");
   else for(const auto& n:gc_neighbours_)
-   if((!d3d12_&&!n.prepared)||n.families.valid()){add("ground_cover","neighbour cover still preparing");break;}
+   if((d3d12_?(n.cover12.width&&(!n.cover12.fields_ready||!n.cover12.color_ready)):!n.prepared)||n.families.valid()){add("ground_cover","neighbour cover still preparing");break;}
  }
  const auto* option=debug_overlay_.config().find("neighbour_maps");
  const bool neighbours=option&&option->boolean_value;
@@ -787,8 +787,8 @@ const char* Renderer::load_reveal_ground_cover_wait() noexcept{
    return "ground cover tile families";
   // Atlases arrive as the game draws its terrain; wait while they still do.
   if(!gc_material_state_.empty()&&gc_painted_frame_+3>native_frame_index_)return "ground cover atlases painting";
-  // D3D12: neighbours keep only their blend maps (no cover pass to prepare).
-  for(const auto& n:gc_neighbours_)if((!d3d12_&&!n.prepared)||n.families.valid())return "neighbour ground cover";
+  // Each backend publishes readiness in its own neighbour cover resources.
+  for(const auto& n:gc_neighbours_)if((d3d12_?(n.cover12.width&&(!n.cover12.fields_ready||!n.cover12.color_ready)):!n.prepared)||n.families.valid())return "neighbour ground cover";
  }
  return nullptr;
 }
