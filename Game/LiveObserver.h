@@ -9,6 +9,7 @@ struct CPlot3D;
 struct SBoundingVolume;
 namespace OwnedRender { struct E1WorldFrame; }
 namespace owned {
+class D3D12Frame;
 struct RetainedVisualFrame;
 struct EmbeddedArenaInput;
 struct EmbeddedGolemInput;
@@ -63,5 +64,5 @@ void ObserveHit(int attacker, int target, float damage, int outcome, int critica
 std::string ProtectedSaveSlot(const char* name);
 // Called on the game thread at the completed backbuffer/present boundary.
 bool WantsCapture() noexcept;
-void CaptureFrame(ID3D11DeviceContext*, IDXGISwapChain*, unsigned long long frame) noexcept;
+void CaptureFrame(ID3D11DeviceContext*, IDXGISwapChain*, unsigned long long frame, owned::D3D12Frame* backend = nullptr) noexcept;
 }

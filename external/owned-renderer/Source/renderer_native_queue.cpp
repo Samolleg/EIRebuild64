@@ -192,7 +192,7 @@ std::size_t Renderer::NativeMaterialKeyHash::operator()(const NativeMaterialKey&
 }
 
 HRESULT Renderer::retire_stale_native_geometry(std::uint64_t before){
- if(!device_||!context_||native_geometry_pages_.empty())
+ if((!d3d12_&&(!device_||!context_))||native_geometry_pages_.empty())
   return E_FAIL;
  if(!native_pending_draws_.empty())return E_UNEXPECTED;
  for(const auto& entry:native_meshes_)
@@ -375,7 +375,7 @@ HRESULT Renderer::trim_native_mesh_cache(){
  if(native_texture_epoch_sweep_pending_&&native_frame_index_-native_cache_epoch_frame_>=2){
   native_texture_epoch_sweep_pending_=false;retire_world_textures(native_texture_epoch_queue_);
  }
- if(!device_||!context_||native_geometry_pages_.empty())return S_FALSE;
+ if((!d3d12_&&(!device_||!context_))||native_geometry_pages_.empty())return S_FALSE;
  constexpr std::uint64_t kNativeCacheIdleFrames=1800;
  std::uint64_t before=0;
  if(native_cache_epoch_sweep_pending_&&native_frame_index_-native_cache_epoch_frame_>=2){
@@ -723,7 +723,7 @@ void Renderer::refresh_native_mesh_records(NativeMesh& mesh) noexcept{
 
 HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& output){
  output=nullptr;
- if(!device_||native_geometry_pages_.empty()||!view.position_groups||!view.normal_groups||
+ if((!d3d12_&&!device_)||native_geometry_pages_.empty()||!view.position_groups||!view.normal_groups||
     !view.component_count||!view.texture_coordinate_count||!view.index_count)
   return E_INVALIDARG;
  if(view.position_groups>UINT_MAX/4u||view.normal_groups>UINT_MAX/4u)

@@ -1973,24 +1973,8 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
   refresh_native_draw_work(layout,false);
   if(static_set&&static_bake&&FAILED(hr=bake_native_static_layout(layout)))return hr;
  }
- // Drawn: the owned HUD meshes (ui semantic), every batch after the frame's
- // world composite (the interface 3D: the game's plain packets keep their own
- // semantic; the D3D11 frame draws them after the composite as well), and the
- // world's terrain (M2b) into the world target. Any other world batch names
- // the world as omitted.
- const auto interface_batch=[&](const NativeBatch& batch){
-  const SemanticKind kind=native_state_buckets_[batch.state_bucket].semantic_kind;
-  return scene_composited_||kind!=SemanticKind::particles; // world particles are M2e
- };
- bool any_interface=false;
- for(const auto& batch:layout.batches){
-  if(interface_batch(batch))any_interface=true;
-  else{
-   const SemanticKind kind=native_state_buckets_[batch.state_bucket].semantic_kind;
-   (void)kind;d3d12_->omit("world batches: particles (M2e)",true);
-  }
- }
- if(!any_interface)return S_OK;
+ // Every queued native batch uses the shared build and draw programs,
+ // including world particle meshes with their captured blend and depth state.
  // A world flush with work: the frame has world output (the D3D11 flush's
  // rule; the upscalers start their history over on frames without it).
  if(!scene_composited_)scene_updated_=true;
@@ -2321,7 +2305,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  for(std::size_t batch_index=0;prepass_ready&&batch_index<layout.batches.size();++batch_index){
   const NativeBatch& batch=layout.batches[batch_index];
   const NativeStateBucket& bucket=native_state_buckets_[batch.state_bucket];
-  if(!interface_batch(batch)||batch.posed||bucket.opacity==NativeOpacityClass::ordered)continue;
+  if(batch.posed||bucket.opacity==NativeOpacityClass::ordered)continue;
   const auto* baked=baked_batch(batch_index);
   const NativeQueuedDraw& draw=baked?native_instance_records_[baked->first_record].command:native_queued_draw(native_draw_order_[batch.first_draw]);
   if(draw.hud_composition.opacity<1.f)continue;
@@ -2405,7 +2389,6 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
  for(std::size_t batch_index=0;batch_index<layout.batches.size();++batch_index){
   const NativeBatch& batch=layout.batches[batch_index];
   const NativeStateBucket& bucket=native_state_buckets_[batch.state_bucket];
-  if(!interface_batch(batch))continue;
   if(batch.geometry_page>=native_geometry_pages_.size()||!native_geometry_pages_[batch.geometry_page].d3d12)return E_FAIL;
   // write_history (the D3D11 flush): opaque and cutout world batches write
   // this frame's sun visibility into the history target at slot 1.
@@ -2569,7 +2552,7 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
      for(std::size_t index=0;index<layout.batches.size();++index){
       const NativeBatch& item=layout.batches[index];
       const NativeStateBucket& item_bucket=native_state_buckets_[item.state_bucket];
-      if(item_bucket.semantic_kind!=SemanticKind::terrain||!interface_batch(item))continue;
+      if(item_bucket.semantic_kind!=SemanticKind::terrain)continue;
       const auto* item_baked=baked_batch(index);
       bool item_liquid=item_baked&&item_baked->liquid;
       for(std::size_t n=item.first_draw;!item_baked&&!item_liquid&&n<item.first_draw+item.draw_count;++n)
