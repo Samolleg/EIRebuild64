@@ -94,10 +94,7 @@ void E1CompleteNalaInput(CUnit* unit,owned::nala::Input& output) {
             const auto* shape=unit->GetBodyShape();
             if(!shape){unit->BindNalaSknBody();shape=unit->GetBodyShape();}
             input.valid=shape&&shape->valid;
-            if(input.valid){
-                const auto& source=shape->input;
-                input.shape_inputs={source.db[0],source.db[1],source.db[2],source.strength,source.dexterity};
-            }
+            if(input.valid)input.controls=shape->controls;
             const unsigned slots[]={3,4,6,5};
             const auto* client=dynamic_cast<CUnitClientSpecific*>(unit->GetUnitSpecific());
             for(unsigned i=0;i<4;++i) {

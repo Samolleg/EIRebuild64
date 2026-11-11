@@ -15,11 +15,7 @@ The 32-byte header is eight u32: magic `0x004e4b53` (`SKN\0`), version=1, exact 
 | 5 | Submeshes | 16 |
 | 6 | LODs | 56 |
 | 7 | Materials | 76 |
-| 8 | Optional CPU shape program | 1 |
-| 9 | Optional surface contact program | 1 |
 | 12 | Optional semantic joint per submesh | 4 |
-| 13 | Optional internal pose rig | 1 |
-| 14 | Optional rigid attachment data | 1 |
 
 Sections 1–7 are required. A string reference is u32 relative to section 1. Offset 0 conventionally contains the empty string. Names are unique stable LNK names. DDS IDs are relative, use `/`, contain no absolute prefix, drive, backslash or `..`, and end in `.dds`.
 
@@ -49,12 +45,13 @@ Material offsets: 0 f32 baseColor RGBA; 16 f32 emission RGB; 28 f32 roughness; 3
 
 DDS requires DX10, one 2D texture, no cube/volume/array, top-level width and height each a multiple of four in 4–16384 (1x1 and 2x2 top levels are invalid), exact block payload and complete authored mip chain through 1×1. Base/emission use BC7 sRGB (DXGI 99); normal XY uses BC5 UNORM linear (83), positive Z reconstructed; ORM uses BC7 UNORM linear (98). Lower mips may have dimensions below four and still occupy complete BC blocks. A mip has ceil(width/4)×ceil(height/4)×16 bytes. Missing declared maps, wrong color space/format, missing mips or invalid payload fail. Cutout coverage, padding and vector normal filtering are offline responsibilities.
 
-## Nala feature sections
+## Nala feature sections (design; partial bind decoder)
 
-The decoder supports the section-8 CPU shape program, section-9 body contacts,
-section-13 pose rig and section-14 attachments. Sections 10/11 remain reserved.
+The following is the X64NALASKN01 section design. The decoder supports the
+section-9 bind-contact subset described at the end, and rejects nonempty
+sections 8/10/11. Runtime submission and the CPU Nala replacement remain pending.
 
-### Common envelope for sections 9, 11 and 13
+### Common envelope for sections 8, 9 and 11
 
 Directory section version is 1, stride is 1, count is payload byte size.
 The payload starts with four u32: headerBytes=16, tableCount,
@@ -65,102 +62,55 @@ table/header/directory, duplicate or unknown kinds, unsupported versions and
 nonzero reserved fields. Strings reference section 1. All numbers are finite.
 Indices are zero based; an absent optional reference is 0xffffffff.
 
-### Section 8 CPU shape program
+### Section 8: five inputs, controls, vertices and bones
 
-The section has directory version 1, stride 1 and count equal to its byte size.
-It uses the ordered scalar stream below. Section 14 uses the same scalar-stream
-conventions. Every integer is u32 LE, every real is finite binary64 LE, and a
-vector is three reals in x/y/z order. A counted array starts with its u32 count.
-A byte blob starts with its u32 byte length. There is no internal padding,
-native structure layout or pointer. Reject missing or trailing bytes, invalid
-references, incompatible counts and unsupported payload magic.
+The five inputs are database build/fullness/height and RPG strength/dexterity,
+in that order. They are not the 45 resolved editor controls. Match
+`Game/BodyShapeResolver.h::NalaMorphs::Resolve`: clamp RPG inputs to [15,35]
+and database inputs to authored knots; bilinearly interpolate the 3x3 RPG
+samples; add database deviations for ordinary controls and multiply them for
+height/stature; preserve the fixed 1.05 head size. Reject nonfinite input before
+clamping. Independent linear deltas for five axes do not describe this resolver.
 
-| Order | Payload |
-|---|---|
-| 1 | u32 magic 0x31504853 (`SHP1`) |
-| 2 | byte blob containing the source rig in the section-13 format |
-| 3 | counted source position vectors, then counted source normal vectors |
-| 4 | counted source skins, each u32 slot[4], f64 weight[4] |
-| 5 | four counted vector arrays for positive/negative fat position deltas, then positive/negative normal deltas |
-| 6 | counted ordered edits, each u32 target, source, mode, followed by position/normal delta vectors |
-| 7 | counted authoring commands as described below |
-| 8 | counted pivot node IDs, followed by three u32 profile-channel IDs per pivot |
-| 9 | counted signed group IDs, encoded as u32, one per source rig node |
-| 10 | f64 upper-body parameters[20] |
-| 11 | f64 database knots[3][3], stats[9][45], database controls[6][45], limits[45][2] |
-| 12 | f64 appearance scale multiplier, fixed head-size control |
+| Kind | Ordered fields | Stride |
+|---|---|---:|
+| 1 inputs, exactly five | u32 name, semantic; f32 min, default, max; u32 reserved | 24 |
+| 2 scalar instructions | u32 opcode, a, b, c; f32 immediate; u32 reserved | 24 |
+| 3 named controls | u32 name, scalar; f32 min, max | 16 |
+| 4 vertex positions | u32 vertex, xScalar, yScalar, zScalar | 16 |
+| 5 bone components | u32 joint, component, scalar, reserved | 16 |
 
-Source position, normal and skin arrays have equal counts. The four delta arrays
-have one common count covering an initial subset of those vertices. A source skin
-retains four original slots and nonnegative weights summing to one within 1e-5.
-The nested source rig preserves independent renderer bind frames. Section 13
-contains the default shaped rig, with matching parent, driver and slot mappings.
+Input semantics are 0..4, unique and complete, with min<=default<=max.
+Instruction index is its result register. Opcodes: 0 constant(immediate),
+1 input(a), 2 add(a,b), 3 subtract(a,b), 4 multiply(a,b), 5 divide(a,b),
+6 min(a,b), 7 max(a,b), 8 negate(a), 9 sqrt(a), 10 sin(a), 11 cos(a),
+12 atan2(a,b), 13 acos(a), 14 select(a,b,c): b when a<0, otherwise c.
+Except input indices, operands reference preceding instructions only. Unused
+fields are zero. No loops, executable shader text or arbitrary memory access.
+Operations use binary32 without implicit saturation or fused operations.
+Invalid domains, zero divisors and nonfinite results reject evaluation.
+Required clamps are explicit instructions. Named controls check authored limits.
 
-Execute fat interpolation first, normalizing the resulting normals. Execute
-edits in file order. Mode 0 reads source, adds deltas and writes target. Mode 1
-copies source to target with the stored deltas. Mode 2 appends a proxy whose
-target equals the current source count, inheriting source skin. Each operation
-normalizes its normal after addition. Sequential edits preserve accepted face
-corrections, aliases and eyelid proxy creation. The final source count matches
-section 9's sampling surface, preceding its visible surface in section 3.
+Vertex records replace absolute pre-skin positions in section 3, one output
+per vertex. Unlisted vertices retain their bind positions. Bone components
+0..2 are local translation, 3..6 quaternion x/y/z/w, 7..9 positive scale;
+unlisted components retain section-2 values. Duplicate output destinations
+are invalid. Rebuild global bind/inverse bind in parent order after shape
+changes. Preserve FIG8 cross terms and shape-dependent bind changes.
 
-Each authoring command contains u32 pivot, canonicalFrame, shiftMode, a counted
-array of stop nodes, u32 control[3], vector constant and vector coefficient.
-Component i evaluates constant[i]+coefficient[i]*control[control[i]]. Shift mode
-0 applies the diagonal scale in the pivot's proper frame, or identity axes
-when canonicalFrame=1, translating stopped subtrees with their attachments.
-Shift mode 1 translates the pivot subtree. Shift mode 2 translates the pivot
-node alone. Translation components are divided by the resolved appearance
-scale. Commands retain file order. Rebind using the original per-renderer
-neutral mapping, inverse-transpose normals, and updated rest/local/stretch,
-rest quaternions, inverse binds and limit frames.
+Evaluate the shape program on GPU at load and only when the effective five
+inputs change. Cache by asset identity/generation and effective tuple; separate
+shape buffers for different unit shapes. Pose, outfit and wounds have separate
+invalidation. Recompute appropriate normals/tangents from deformed geometry.
+No CPU vertex stream or GPU readback is part of evaluation.
 
-Profile channels are fat, legs, arms, waist, waist depth, breasts, scale in
-indices 0..6. Channel 7 means constant one. Group -1 leaves a node unscaled.
-Other groups address the pivot array. Pose-time profile scaling affects bones.
-
-Upper-body parameters are capped lateral thresholds[2], central thresholds[2],
-rise thresholds[2], head exclusion thresholds[2], upper fade thresholds[2],
-torso lateral thresholds[2], torso vertical thresholds[2], depth coefficient,
-depth origin, vertex z minimum/maximum, finite-difference step and shoulder
-width multiplier. Paired thresholds increase strictly and the step is positive.
-Use the accepted smoothstep/capped map before authoring, inverse-transpose its
-finite-difference Jacobian for normals, and remap rig translations/inverse binds.
-The implementation is in `Source/nala_shape_evaluator.h`.
-
-Five input semantics are database build/fullness/height, RPG strength/dexterity.
-`CUnit::GetBodyShape` captures the live values. Resolve on the CPU from section
-8, clamping RPG values to [15,35] and database values to the stored knots.
-Bilinearly interpolate the 3x3 RPG samples, add database deviations for ordinary
-controls and multiply them for height/stature. Retain the stored head size and
-control limits in `Game/BodyShapeSchema.h` order. Reject nonfinite inputs.
-
-Evaluate at first display and when a unit's five captured inputs change.
-Keep each unit's immutable shaped bind mesh/rig and upload them once. Rebuild
-section-9 visible bind positions/normals from the newly shaped sampling sources.
-Subsequent frames evaluate bones and skin/contact shaders. A changed tuple
-invalidates that unit's merged geometry and bounds together. Emit one
-`nala_shape_applied` event with model, inputs and elapsed calculation milliseconds
-after successful publication. Failures use the existing deduplicated rejection.
-
-### Section 14 rigid attachment data
-
-The payload is an ordered scalar stream with magic 0x31545441 (`ATT1`). A string
-is a byte blob of printable ASCII characters without a terminator.
-
-| Order | Payload |
-|---|---|
-| 1 | u32 magic |
-| 2 | counted weapons, each string name, u32 role, side, vector point, axis |
-| 3 | counted assembly members, each string name and u32 weapon index |
-| 4 | two side records, each vector palm, forward, normal, game sole, source sole, then u32 foot node |
-| 5 | f64 default body scale, palm-forward offset, palm-normal offset |
-
-Roles 1..5 mean rod, bow, crossbow, shield and arrow. Side is 0 or 1. Axis must
-be nonzero, member indices and foot nodes must exist. Attachment lookup retains
-the accepted rigid mount, palm offset and sole-alignment calculations using
-these file values. Hair uses its existing LNK admission. The game contains the
-generic bone/mount evaluator. Source model tables live in `tools/nala-to-skn`.
+Pose serialization remains a prerequisite beyond these shape tables: bahonec
+uses `Data::bindNode`, gameBind, driver retargeting, dual/damped/semi controllers
+and joint limits. Its palette cannot be reduced to the 15 LNK drivers without
+changing deformation. The file path must preserve those operations and mappings;
+a file needing unimplemented controllers must fail. Hand, hip, sole placement,
+attachment and locomotion corrections belong to pose evaluation. They must not
+call the CPU body/garment vertex generators.
 
 ### Section 9: surface bindings and ordered dependencies
 
@@ -229,7 +179,8 @@ truncating weights. No runtime lid topology generation is allowed.
 
 The codec is `Source/nala_pose_asset.h`; the offline extraction command is
 in `tools/nala-to-skn/README.md`. The container decoder retains the rig and
-validates the contact subset described below. The runtime retains this rig for bone evaluation. A
+validates the contact subset described below. Retained GPU submission is not
+implemented: runtime selection rejects this bind snapshot explicitly. A
 standalone `.section13` is also an intermediate, not an installable model.
 
 Use the common 16-byte table envelope above with exactly nine tables. The
@@ -363,7 +314,8 @@ The later owner decision in BRIEF supersedes the proposed section-8 GPU scalar
 program above: run the existing complete NalaBodyShape/authoring/upper-body
 calculation on CPU only on a change of the five inputs, then upload unit-local
 bind vertices/normals and rig once. Animation must only evaluate bones on CPU.
-The section-8 stream above carries the source data and complete CPU calculation.
+The section-8 payload needed to reproduce this calculation is still pending;
+the bind snapshot has no section 8 and cannot change shape at runtime.
 
 `nala-to-skn --export-bind-mesh` currently cooks the resolver default
 (build=.3, fullness=.3, height=.85, strength=25, dexterity=25), with all accepted
@@ -424,8 +376,8 @@ CPU vertex work and no four-influence approximation of contact edits. Ordinary
 SKN records retain their 240-byte layout; contact records use 1,024 bytes and a
 separate component flag. The source snapshot draws as one material group.
 
-Section 8 supplies per-unit CPU bind-shape changes. Section 14 supplies rigid
-attachment calibration. Hair, garments, layers, wounds and special pose
-corrections remain outside this body-shape change.
+Section 8 and runtime shape changes are still absent: the existing captured
+CUnit controls do not change this default bind mesh. Hair, garments, layers,
+wounds and special pose corrections are not implemented by this snapshot.
 Renderer compilation and posed GPU/in-game output remain unverified; full
 engine build and in-game acceptance belong to the coordinator.

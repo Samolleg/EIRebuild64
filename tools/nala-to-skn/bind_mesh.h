@@ -7,7 +7,6 @@
 #include "nala/head105_v1/NalaUpperArcIdentity.h"
 #include "nala/morphs_head105_v1/NalaBodyShape.h"
 #include <numeric>
-#include "shape_export.h"
 
 namespace {
 void f32(Bytes& b,double x) {
@@ -42,7 +41,7 @@ Bytes bind_mesh(const Data& d) {
     throw std::runtime_error("bind source/proxy topology mismatch");
   std::vector<V> p,n;
   if(!NalaLidContact::Render(d.vertices,d.normals,p,n))throw std::runtime_error("lid render topology rejected");
-  std::array<Bytes,15> s;s[1].push_back(0);
+  std::array<Bytes,14> s;s[1].push_back(0);
   // In the section-13 mode section 2 enumerates skin slots. The authoritative
   // affine bind frames are in section 13, which also preserves duplicate slots.
   for(unsigned i=0;i<d.bindInverse.size();++i){
@@ -93,10 +92,9 @@ Bytes bind_mesh(const Data& d) {
     for(double x:weight)f32(tables[3],x);
     for(unsigned k=0;k<5;++k)u32(tables[3],0);
   }
-  s[8]=shape_section();s[14]=attachment_section();
   s[9]=envelope(tables,{0,32,32,48,12,8,16});s[13]=encode(d);
-  const std::vector<unsigned> kinds{1,2,3,4,5,6,7,8,9,13,14};
-  const unsigned strides[]={0,1,112,48,4,16,56,76,1,1,1,1,4,1,1};
+  const std::vector<unsigned> kinds{1,2,3,4,5,6,7,9,13};
+  const unsigned strides[]={0,1,112,48,4,16,56,76,1,1,1,1,4,1};
   Bytes b(32+24*kinds.size());set32(b,0,0x004e4b53);set32(b,4,1);set32(b,12,32);set32(b,16,unsigned(kinds.size()));set32(b,20,32);
   for(unsigned i=0;i<kinds.size();++i){unsigned k=kinds[i];while(b.size()%16)b.push_back(0);unsigned at=32+i*24;
     set32(b,at,k);set32(b,at+4,unsigned(b.size()));set32(b,at+8,unsigned(s[k].size()));set32(b,at+12,unsigned(s[k].size()/strides[k]));set32(b,at+16,strides[k]);set32(b,at+20,1);b.insert(b.end(),s[k].begin(),s[k].end());}
@@ -104,26 +102,6 @@ Bytes bind_mesh(const Data& d) {
   owned::skn::Asset decoded;std::string error;
   if(!owned::skn::decode(b,decoded,error))throw std::runtime_error(error);
   if(encode(*decoded.nala_rig)!=s[13])throw std::runtime_error("bind rig round trip mismatch");
-  // Check the shape program read from the finished container against the
-  // accepted authoring result before publishing the model.
-  const auto controls=owned::skn::nala_shape::resolve(*decoded.nala_shape,{.3,.3,.85,25,25});
-  Data rebuilt;owned::skn::nala_shape::build(*decoded.nala_shape,controls,rebuilt);
-  if(rebuilt.vertices.size()!=d.vertices.size())throw std::runtime_error("serialized shape vertex count");
-  for(unsigned i=0;i<d.vertices.size();++i) {
-    const V dp=Sub(rebuilt.vertices[i],d.vertices[i]),dn=Sub(rebuilt.normals[i],d.normals[i]);
-    if(Dot(dp,dp)>1e-20 || Dot(dn,dn)>1e-20)throw std::runtime_error("serialized shape differs at vertex "+std::to_string(i));
-  }
-  const auto expected=owned::skn::nala_pose::decode(s[13]);
-  auto same_matrix=[](const M& a,const M& b) {
-    V dt=Sub(a.t,b.t);if(Dot(dt,dt)>1e-20)return false;
-    for(unsigned row=0;row<3;++row)for(unsigned col=0;col<3;++col)if(std::abs(a.r[row][col]-b.r[row][col])>1e-10)return false;
-    return true;
-  };
-  for(unsigned i=0;i<expected.rest.size();++i)
-    if(!same_matrix(rebuilt.rest[i],expected.rest[i]) || !same_matrix(rebuilt.local[i],expected.local[i]) || !same_matrix(rebuilt.stretch[i],expected.stretch[i]))
-      throw std::runtime_error("serialized shape rig differs at node "+std::to_string(i));
-  for(unsigned i=0;i<expected.bindInverse.size();++i)
-    if(!same_matrix(rebuilt.bindInverse[i],expected.bindInverse[i]))throw std::runtime_error("serialized shape inverse bind differs");
   // Verify the serialized correspondence against the accepted render function,
   // including all lid edits. Source renderer-local coordinates can exceed 100;
   // use the SKN 1e-4 metre tolerance for their binary32 conversion.

@@ -24,8 +24,6 @@ struct Dds {
 };
 struct RuntimeAsset {
   bool nala_generated=false;
-  std::string shape_key;
-  std::array<double,7> nala_profile{};
   ResourceIdentity identity;
   Asset asset;
   std::vector<std::array<Dds, 4>> textures;

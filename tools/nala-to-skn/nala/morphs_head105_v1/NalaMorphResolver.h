@@ -1,4 +1,4 @@
 #pragma once
-#include "BodyShapeResolver.h"
+#include "../../../../Game/BodyShapeResolver.h"
 #include "EditorSchema.h"
 namespace NalaMorphs=BodyShape::NalaMorphs;

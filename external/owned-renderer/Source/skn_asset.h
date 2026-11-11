@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 #include <memory>
-#include "nala_shape_asset.h"
+#include "nala_pose_asset.h"
 
 namespace owned::skn {
 using Matrix = std::array<float, 16>;
@@ -48,8 +48,6 @@ struct Asset {
     float weight[3];
   };
   std::shared_ptr<const UnityBody::Data> nala_rig;
-  std::shared_ptr<const nala_shape::Program> nala_shape;
-  std::shared_ptr<const nala_shape::AttachmentData> nala_attachments;
   std::vector<Contact> nala_contacts;
   std::vector<Joint> joints;
   std::vector<Vertex> vertices;
@@ -165,9 +163,9 @@ inline bool decode(const std::vector<std::uint8_t> &bytes, Asset &output,
     struct Section {
       std::uint32_t at = 0, bytes = 0, count = 0, stride = 0;
     };
-    std::array<Section, 15> sections{};
+    std::array<Section, 14> sections{};
     auto count = r.u32(16), table = r.u32(20);
-    if (count > 14 || table != 32)
+    if (count > 13 || table != 32)
       throw std::runtime_error("SKN section directory");
     r.range(table, std::uint64_t(count) * 24);
     std::vector<std::pair<std::uint64_t, std::uint64_t>> spans{
@@ -192,7 +190,7 @@ inline bool decode(const std::vector<std::uint8_t> &bytes, Asset &output,
       if (!sections[i].at || sections[i].stride != strides[i])
         throw std::runtime_error("SKN required section/stride");
     for (unsigned i = 8; i < sections.size(); ++i)
-      if (i != 8 && i != 9 && i != 12 && i != 13 && i != 14 && sections[i].count)
+      if (i != 9 && i != 12 && i != 13 && sections[i].count)
         throw std::runtime_error(
             "SKN feature not implemented by this renderer");
     auto text = [&](unsigned at) {
@@ -390,26 +388,15 @@ inline bool decode(const std::vector<std::uint8_t> &bytes, Asset &output,
         output.semantic_joints.push_back(j);
       }
     }
-    if (sections[8].at || sections[9].at || sections[13].at || sections[14].at) {
+    if (sections[9].at || sections[13].at) {
       if (!sections[9].count || !sections[13].count ||
           sections[9].stride != 1 || sections[13].stride != 1)
         throw std::runtime_error("SKN Nala requires contact and pose sections");
-      if(!sections[8].count || !sections[14].count || sections[8].stride!=1 || sections[14].stride!=1)
-        throw std::runtime_error("SKN Nala requires shape section 8 and attachment section 14");
-      const auto& shape=sections[8];
-      output.nala_shape=std::make_shared<nala_shape::Program>(nala_shape::decode(
-        nala_pose::Bytes(bytes.begin()+shape.at,bytes.begin()+shape.at+shape.bytes)));
-      const auto& attachment=sections[14];
-      output.nala_attachments=std::make_shared<nala_shape::AttachmentData>(nala_shape::decode_attachments(
-        nala_pose::Bytes(bytes.begin()+attachment.at,bytes.begin()+attachment.at+attachment.bytes),unsigned(output.nala_shape->source.rest.size())));
       const auto& pose = sections[13];
       auto rig = std::make_shared<UnityBody::Data>(nala_pose::decode(
           std::vector<std::uint8_t>(bytes.begin()+pose.at,bytes.begin()+pose.at+pose.bytes)));
       if (rig->bindInverse.size() != output.joints.size())
         throw std::runtime_error("SKN Nala skin slot count differs from section 13");
-      const auto& source=output.nala_shape->source;
-      if(source.parent!=rig->parent || source.driver!=rig->driver || source.bindNode!=rig->bindNode)
-        throw std::runtime_error("SKN section 8/13 rig topology mismatch");
       // Section 13 owns the affine frames. Identity slot descriptors prevent
       // an ordinary section-2 reader from interpreting these as LNK joints.
       for (const auto& j : output.joints) {
@@ -444,11 +431,6 @@ inline bool decode(const std::vector<std::uint8_t> &bytes, Asset &output,
       unsigned surface=tables[1].at;
       unsigned sourceFirst=cr.u32(surface+4),sourceCount=cr.u32(surface+8);
       unsigned targetFirst=cr.u32(surface+36),targetCount=cr.u32(surface+40);
-      std::size_t shapeCount=source.vertices.size();
-      for(const auto& edit:output.nala_shape->edits)if(edit.mode==2)++shapeCount;
-      if(sourceFirst!=0 || targetFirst!=sourceCount || shapeCount!=sourceCount ||
-         std::uint64_t(sourceCount)+targetCount!=output.vertices.size())
-        throw std::runtime_error("SKN section 8/9 source topology mismatch");
       auto fits=[](unsigned first,unsigned n,std::size_t total){return first<=total && n<=total-first;};
       text(cr.u32(surface));text(cr.u32(surface+32));
       if(!sourceCount || !targetCount || !fits(sourceFirst,sourceCount,output.vertices.size()) ||

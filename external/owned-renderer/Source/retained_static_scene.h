@@ -256,8 +256,6 @@ struct VisualPreparedResources {
         std::uint64_t assembly_revision = 0;
         double phase = 0;
         float facing = 0;
-        std::array<double,5> nala_shape_inputs{};
-        bool nala_selected = false, nala_valid = false;
         bool unit = false;
         bool tilted_facing = false;
         bool root_rotation_valid = false;
@@ -322,11 +320,6 @@ struct VisualPreparedResources {
         ResourceIdentity identity;                    // content identity: shared by identical characters
     };
     bool skn_selected = false;
-    std::string nala_shape_model;
-    std::shared_ptr<const skn::RuntimeAsset> nala_shape_asset;
-    std::array<double,5> nala_shape_inputs{};
-    bool nala_shape_valid = false;
-    std::string nala_shape_error;
     std::shared_ptr<const skn::RuntimeAsset> skn_bounds_asset;
     PoseKey skn_bounds_key{};
     NativeWorldBounds skn_bounds{};
