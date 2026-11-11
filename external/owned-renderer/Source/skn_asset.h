@@ -9,8 +9,6 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
-#include <memory>
-#include "nala_pose_asset.h"
 
 namespace owned::skn {
 using Matrix = std::array<float, 16>;
@@ -43,12 +41,6 @@ struct Lod {
   std::array<float, 3> minimum, maximum;
 };
 struct Asset {
-  struct Contact {
-    std::uint32_t target, source[3];
-    float weight[3];
-  };
-  std::shared_ptr<const UnityBody::Data> nala_rig;
-  std::vector<Contact> nala_contacts;
   std::vector<Joint> joints;
   std::vector<Vertex> vertices;
   std::vector<std::uint32_t> indices;
@@ -163,9 +155,9 @@ inline bool decode(const std::vector<std::uint8_t> &bytes, Asset &output,
     struct Section {
       std::uint32_t at = 0, bytes = 0, count = 0, stride = 0;
     };
-    std::array<Section, 14> sections{};
+    std::array<Section, 13> sections{};
     auto count = r.u32(16), table = r.u32(20);
-    if (count > 13 || table != 32)
+    if (count > 12 || table != 32)
       throw std::runtime_error("SKN section directory");
     r.range(table, std::uint64_t(count) * 24);
     std::vector<std::pair<std::uint64_t, std::uint64_t>> spans{
@@ -190,7 +182,7 @@ inline bool decode(const std::vector<std::uint8_t> &bytes, Asset &output,
       if (!sections[i].at || sections[i].stride != strides[i])
         throw std::runtime_error("SKN required section/stride");
     for (unsigned i = 8; i < sections.size(); ++i)
-      if (i != 9 && i != 12 && i != 13 && sections[i].count)
+      if (i != 12 && sections[i].count)
         throw std::runtime_error(
             "SKN feature not implemented by this renderer");
     auto text = [&](unsigned at) {
@@ -387,79 +379,6 @@ inline bool decode(const std::vector<std::uint8_t> &bytes, Asset &output,
           throw std::runtime_error("SKN semantic mapping joint");
         output.semantic_joints.push_back(j);
       }
-    }
-    if (sections[9].at || sections[13].at) {
-      if (!sections[9].count || !sections[13].count ||
-          sections[9].stride != 1 || sections[13].stride != 1)
-        throw std::runtime_error("SKN Nala requires contact and pose sections");
-      const auto& pose = sections[13];
-      auto rig = std::make_shared<UnityBody::Data>(nala_pose::decode(
-          std::vector<std::uint8_t>(bytes.begin()+pose.at,bytes.begin()+pose.at+pose.bytes)));
-      if (rig->bindInverse.size() != output.joints.size())
-        throw std::runtime_error("SKN Nala skin slot count differs from section 13");
-      // Section 13 owns the affine frames. Identity slot descriptors prevent
-      // an ordinary section-2 reader from interpreting these as LNK joints.
-      for (const auto& j : output.joints) {
-        if (j.parent != -1 || j.translation != std::array<float,3>{} ||
-            j.rotation != std::array<float,4>{0,0,0,1} ||
-            j.scale != std::array<float,3>{1,1,1} || j.inverse != identity())
-          throw std::runtime_error("SKN Nala slot descriptor must be identity");
-      }
-      const auto& contact = sections[9];
-      std::vector<std::uint8_t> payload(bytes.begin()+contact.at,bytes.begin()+contact.at+contact.bytes);
-      Reader cr{payload};
-      if (cr.u32(0)!=16 || cr.u32(4)!=6 || cr.u32(8)!=16 || cr.u32(12))
-        throw std::runtime_error("SKN Nala contact envelope");
-      struct Table {unsigned at=0,count=0,stride=0;};
-      std::array<Table,7> tables{};
-      std::vector<std::pair<std::uint64_t,std::uint64_t>> ranges{{0,112}};
-      const unsigned expected[]={0,32,32,48,12,8,16};
-      for(unsigned i=0;i<6;++i){
-        unsigned at=16+16*i,k=cr.u32(at);Table t{cr.u32(at+4),cr.u32(at+8),cr.u32(at+12)};
-        if(!k || k>=tables.size() || tables[k].at || t.stride!=expected[k] || t.at%16 || t.at<112)
-          throw std::runtime_error("SKN Nala contact table layout");
-        std::uint64_t end=std::uint64_t(t.at)+std::uint64_t(t.count)*t.stride;
-        cr.range(t.at,std::uint64_t(t.count)*t.stride);
-        if(t.count){for(auto span:ranges)if(t.at<span.second && span.first<end)
-          throw std::runtime_error("SKN Nala contact tables overlap");ranges.push_back({t.at,end});}
-        tables[k]=t;
-      }
-      // Implemented subset: hidden skinned sources -> visible lid render mesh.
-      // Garment stages remain unsupported and must fail instead of disappearing.
-      if(tables[1].count!=2 || tables[2].count!=1 || tables[4].count || tables[5].count || tables[6].count)
-        throw std::runtime_error("SKN unsupported Nala contact stage set");
-      unsigned surface=tables[1].at;
-      unsigned sourceFirst=cr.u32(surface+4),sourceCount=cr.u32(surface+8);
-      unsigned targetFirst=cr.u32(surface+36),targetCount=cr.u32(surface+40);
-      auto fits=[](unsigned first,unsigned n,std::size_t total){return first<=total && n<=total-first;};
-      text(cr.u32(surface));text(cr.u32(surface+32));
-      if(!sourceCount || !targetCount || !fits(sourceFirst,sourceCount,output.vertices.size()) ||
-          !fits(targetFirst,targetCount,output.vertices.size()) ||
-          (sourceFirst<std::uint64_t(targetFirst)+targetCount && targetFirst<std::uint64_t(sourceFirst)+sourceCount) ||
-          cr.u32(surface+12) || cr.u32(surface+16) || cr.u32(surface+20) || cr.u32(surface+24)!=1 || cr.u32(surface+28) ||
-          cr.u32(surface+44) || cr.u32(surface+48)!=output.indices.size() || cr.u32(surface+52) || cr.u32(surface+56) || cr.u32(surface+60) ||
-          output.lods.size()!=1 || tables[3].count!=targetCount)
-        throw std::runtime_error("SKN Nala contact surface ranges");
-      for(unsigned index:output.indices)if(index<targetFirst || index>=targetFirst+targetCount)
-        throw std::runtime_error("SKN Nala visible index outside target surface");
-      unsigned stage=tables[2].at;
-      const unsigned stageValues[]={0,0,1,0,targetCount,0,0,0};
-      for(unsigned i=0;i<8;++i)if(cr.u32(stage+4*i)!=stageValues[i])
-        throw std::runtime_error("SKN unsupported Nala contact operation");
-      std::vector<bool> assigned(targetCount,false);
-      for(unsigned i=0;i<targetCount;++i){
-        unsigned at=tables[3].at+48*i,target=cr.u32(at);
-        if(target>=targetCount || assigned[target])throw std::runtime_error("SKN Nala contact duplicate/invalid target");
-        assigned[target]=true;Asset::Contact c{};c.target=targetFirst+target;double sum=0;
-        for(unsigned k=0;k<3;++k){unsigned src=cr.u32(at+4+4*k);
-          if(src>=sourceCount)throw std::runtime_error("SKN Nala contact source");
-          c.source[k]=sourceFirst+src;c.weight[k]=cr.f32(at+16+4*k);sum+=c.weight[k];
-          if(c.weight[k]<0)throw std::runtime_error("SKN Nala contact negative weight");}
-        if(std::abs(sum-1)>1e-5)throw std::runtime_error("SKN Nala contact weight sum");
-        for(unsigned k=0;k<5;++k)if(cr.u32(at+28+4*k))throw std::runtime_error("SKN unsupported Nala contact offset/frame");
-        output.nala_contacts.push_back(c);
-      }
-      output.nala_rig=std::move(rig);
     }
     return true;
   } catch (const std::exception &e) {

@@ -1,6 +1,5 @@
 #pragma once
 #include "static_lod.h"
-#include "nala_runtime.h"
 
 #include "lifecycle_probe.h"
 #include "owned_asset_loader.h"
@@ -132,7 +131,6 @@ struct VisualAssemblyAsset {
 };
 
 struct VisualTickValues {
-    nala::Input nala;
     std::uint32_t object_flags = 0;
     bool unit = false;
     bool timed_highlight_active = false;

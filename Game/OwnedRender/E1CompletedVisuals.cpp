@@ -8,7 +8,6 @@
 #include "../WorldClient.h"
 #include "../Object3DClientSpecific.h"
 #include "../Unit.h"
-#include "../Item.h"
 #include "../ModEncounter.h"
 #include "../LiveObserver.h"
 #include "../UnitClientSpecific.h"
@@ -86,33 +85,6 @@ bool E1CompleteVisualAppearance(CObject3DClientSpecific& specific,
     return false;
 }
 
-void E1CompleteNalaInput(CUnit* unit,owned::nala::Input& output) {
-        output={};
-        if (unit && (unit->GetID()==1000011214 || unit->GetID()==1100011214) &&
-            std::strcmp(unit->GetMaskName(),"unhufe")==0) {
-            auto& input=output;input.selected=true;
-            const auto* shape=unit->GetBodyShape();
-            if(!shape){unit->BindNalaSknBody();shape=unit->GetBodyShape();}
-            input.valid=shape&&shape->valid;
-            if(input.valid)input.controls=shape->controls;
-            const unsigned slots[]={3,4,6,5};
-            const auto* client=dynamic_cast<CUnitClientSpecific*>(unit->GetUnitSpecific());
-            for(unsigned i=0;i<4;++i) {
-                const auto* armor=unit->GetQArmor(slots[i]);
-                input.clothing[i]=client?client->GetArmorSubtype(slots[i]):armor?armor->GetSubtypeID():DWORD(-1);
-            }
-            const auto* stats=unit->GetUserUnitStats();
-            for(unsigned i=0;i<6;++i){
-                const auto& h=stats->hls[i];
-                if(h.state==0)input.wounds[i]=0;
-                else if(h.state==1||h.state==2)input.wounds[i]=3;
-                else if(h.state==3&&h.wMaxHP&&h.wHP<=h.wMaxHP)
-                    input.wounds[i]=h.wHP==h.wMaxHP?0:h.wHP>=h.wMaxHP*.66?1:h.wHP>=h.wMaxHP*.33?2:3;
-                else input.valid=false;
-            }
-        }
-}
-
 // Capture only on the synchronous host seam, before either depth or colour.
 // The retained scene still owns completed object poses; changing a frame's
 // rendering class must never switch the scene to the retail route evaluator.
@@ -127,7 +99,6 @@ bool completeVisualFrame(owned::RetainedVisualFrame& frame, bool combat) noexcep
         if(current.serial!=sample.resource.serial)return false;
         auto* unit=static_cast<CUnit*>(object);
         if (combat) E3CombatPublishUnit(unit);
-        E1CompleteNalaInput(unit,sample.values.nala);
         sample.completed_pose=true;
         sample.values.unit=true;
         sample.values.dead=unit->IsDead()!=FALSE;

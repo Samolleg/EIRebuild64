@@ -23,7 +23,6 @@ struct Dds {
   std::vector<NativeOwnedTextureMip> mips;
 };
 struct RuntimeAsset {
-  bool nala_generated=false;
   ResourceIdentity identity;
   Asset asset;
   std::vector<std::array<Dds, 4>> textures;
@@ -108,8 +107,6 @@ inline std::shared_ptr<const RuntimeAsset> select(const std::string &name,
   std::string error;
   if (!blob.bytes || !decode(*blob.bytes, a->asset, error))
     throw std::runtime_error(error);
-  a->nala_generated = bool(a->asset.nala_rig);
-  if(a->nala_generated)a->asset.semantic_joints.assign(a->asset.submeshes.size(),0);
   // In joint-local bind space every influenced vertex lies in this sphere.
   // Positive normalized skin weights make the posed mesh a convex combination
   // of the posed joint spheres, including rotation and non-uniform scale.
@@ -146,18 +143,4 @@ struct GpuVertex {
   float tangent[4];
 };
 static_assert(sizeof(GpuVertex) == 240);
-// Section-9 sources stay independent until after GPU skinning. Never merge
-// influences from different bind positions into one four-weight vertex.
-struct ContactSource {
-  std::uint32_t joints[4];
-  float weights[4];
-  float inverse[4][12];
-  float position[4], normal[4];
-};
-struct SkinVertex {
-  GpuVertex skin;
-  ContactSource source[3];
-  float blend[4]; // xyz = contact weights, w = contact enabled
-};
-static_assert(sizeof(ContactSource)==256 && sizeof(SkinVertex)==1024);
 } // namespace owned::skn

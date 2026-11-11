@@ -1,5 +1,4 @@
 #include "contact_blend.h"
-#include "E1VisualFrame.h"
 #include "ModelPreviewContext.h"
 #include "model_preview_presentation.h"
 #include "model_preview_producer.h"
@@ -47,8 +46,6 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
     sample.resource = {lpObject->GetID(), ownedPreviewResource};
     sample.lifecycle = {lpObject->GetID(), ownedPreviewResource, ownedPreviewResource};
     sample.assembly = ownedPreviewAssembly;
-    OwnedRender::E1CompleteNalaInput(dynamic_cast<CUnit*>(lpObject),sample.values.nala);
-    if(sample.values.nala.selected){sample.values.unit=true;sample.completed_pose=true;}
     sample.status = owned::RetainedVisualStatus::ready;
     sample.object_pose.shape = sample.assembly->shape;
     if (++ownedPreviewSerial == 0) ++ownedPreviewSerial;

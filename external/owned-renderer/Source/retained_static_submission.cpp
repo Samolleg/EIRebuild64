@@ -9,7 +9,6 @@
 #include "fur.h"
 #include "figure_service_nodes.h"
 #include "skn_runtime.h"
-#include "nala/UnityBodySize.h"
 #include "world_scene_algorithms.h"
 
 #include <algorithm>
@@ -1132,48 +1131,16 @@ const std::array<float,3>& retained_visual_shape(const RetainedVisualSample& sam
 }
 
 namespace {
-// Bone-only evaluation of section 13. Bind vertices never enter this path.
-std::vector<std::array<float,16>> nala_skin_palette(const RetainedVisualSample& sample,
-                                                  const skn::RuntimeAsset& asset){
- using namespace UnityBody;
- std::vector<VisualNodeSample> pose;
- if(!sample_visual_skeleton(*sample.assembly->skeleton,sample.selection,retained_visual_shape(sample),
-       sample.assembly->center_shift,sample.pose.phase,pose,false))throw std::runtime_error("Nala ANM pose unavailable");
- static const char* names[]={"hp","bd","hd","lh1","rh1","lh2","rh2","lh3","rh3","ll1","rl1","ll2","rl2","ll3","rl3"};
- std::array<M,15> game;std::array<bool,15> found{};
- for(unsigned i=0;i<sample.assembly->skeleton->nodes.size();++i)for(unsigned k=0;k<15;++k)
-  if(sample.assembly->skeleton->nodes[i].name==names[k]){
-   game[k]=Rotation({pose[i].rotation[0],pose[i].rotation[1],pose[i].rotation[2],pose[i].rotation[3]});
-   game[k].t={pose[i].translation[0],pose[i].translation[1],pose[i].translation[2]};found[k]=true;
-  }
- if(std::find(found.begin(),found.end(),false)!=found.end())throw std::runtime_error("Nala LNK driver missing");
- const auto& rig=*asset.asset.nala_rig;
- auto world=Retarget(rig,game);LimitRetarget(rig,world);Control(rig,world);
- // Apply the accepted body scale and sole alignment at bone level only.
- auto scaled=world;std::vector<V> no_vertices;M root;
- if(!UnityBodySize::Apply(game,no_vertices,scaled,root))throw std::runtime_error("Nala sole alignment rejected");
- std::vector<std::array<float,16>> result;result.reserve(rig.bindInverse.size());
- for(unsigned i=0;i<rig.bindInverse.size();++i){
-  M skin=Product(world[rig.bindNode[i]],rig.bindInverse[i]);
-  for(auto& row:skin.r)for(auto& v:row)v*=UnityBodySize::Scale;
-  skin.t=Scale(skin.t,UnityBodySize::Scale);skin=Product(root,skin);
-  std::array<float,16> m{};m[15]=1;
-  for(unsigned row=0;row<3;++row)for(unsigned col=0;col<3;++col)m[row*4+col]=float(skin.r[row][col]);
-  m[3]=float(skin.t.x);m[7]=float(skin.t.y);m[11]=float(skin.t.z);result.push_back(m);
- }
- return result;
-}
 bool skn_pose_bounds(const RetainedVisualSample& sample,NativeWorldBounds& bounds,bool& present){
  present=false;
  if(!sample.values.unit||!sample.assembly||!sample.assembly->skeleton)return true;
  auto& prepared=*sample.prepared;
- if(!sample.values.nala.selected&&prepared.merged_assembly==sample.assembly&&!prepared.skn_selected){
+ if(prepared.merged_assembly==sample.assembly&&!prepared.skn_selected){
   prepared.skn_bounds_asset.reset();prepared.skn_bounds_valid=false;return true;
  }
  std::shared_ptr<const skn::RuntimeAsset> asset;
  if(prepared.skn_bounds_asset&&prepared.skn_bounds_key.assembly==sample.assembly){asset=prepared.skn_bounds_asset;present=true;}
  else asset=skn::select(sample.assembly->skeleton->visual_reference,present);
- if(sample.values.nala.selected && !present)throw std::runtime_error("Nala SKN file missing");
  if(!present){prepared.skn_bounds_asset.reset();prepared.skn_bounds_valid=false;return true;}
  if(prepared.skn_bounds_valid&&asset==prepared.skn_bounds_asset&&owned_visual_pose_key_matches(prepared.skn_bounds_key,sample)){
   bounds=prepared.skn_bounds;return true;
@@ -1198,21 +1165,14 @@ bool skn_pose_bounds(const RetainedVisualSample& sample,NativeWorldBounds& bound
  std::unordered_map<std::string,unsigned> nodes;
  nodes.reserve(sample.assembly->skeleton->nodes.size());
  for(unsigned n=0;n<sample.assembly->skeleton->nodes.size();++n)nodes.emplace(sample.assembly->skeleton->nodes[n].name,n);
- const auto palette=asset->asset.nala_rig?nala_skin_palette(sample,*asset):std::vector<std::array<float,16>>{};
  for(unsigned j=0;j<asset->joint_radius.size();++j){
   if(asset->joint_radius[j]<0)continue;
   const auto found=nodes.find(asset->asset.joints[j].name);
+  if(found==nodes.end())return false;
+  const unsigned node=found->second;
+  if(node>=pose.size())return false;
   std::array<float,16> matrix{};
-  if(asset->asset.nala_rig){
-   std::array<float,16> placement{};
-   if(sample.completed_pose){
-    if(!retained_object_matrix(sample.object_pose.position,sample.object_pose.quaternion,placement))return false;
-    for(unsigned row=0;row<3;++row)for(unsigned col=0;col<3;++col)placement[row*4+col]*=sample.assembly->scale[col];
-   }else if(!visual_node_world_matrix(sample.pose,VisualNodeSample{},sample.assembly->scale,placement))return false;
-   matrix=retained_multiply_matrix(placement,palette[j]);
-  }else{
-   if(found==nodes.end()||found->second>=pose.size()||!node_matrix(found->second,matrix))return false;
-  }
+  if(!node_matrix(node,matrix))return false;
   for(unsigned axis=0;axis<3;++axis){
    double squared=0;for(unsigned k=0;k<3;++k)squared+=double(matrix[axis*4+k])*matrix[axis*4+k];
    const double radius=(std::max)(0.f,asset->joint_radius[j])*std::sqrt(squared)+1e-5;
@@ -2392,14 +2352,6 @@ bool retained_visual_gpu_pose(const RetainedVisualSample& sample,
         if (h[1]!=0) height=(double(h[0])+retained_visual_shape(sample)[2]*(double(h[2])-h[0]))/h[1];
     }
     if (!finite_value(height) || std::abs(height)>(std::numeric_limits<float>::max)()) return false;
-    current.skin_palette.clear();
-    if(sample.values.unit){
-     try{bool present=false;const auto asset=skn::select(assembly.skeleton->visual_reference,present);
-      if(sample.values.nala.selected && (!present||!asset||!asset->asset.nala_rig))
-       throw std::runtime_error("Nala SKN rig missing");
-      if(asset && asset->asset.nala_rig)current.skin_palette=nala_skin_palette(sample,*asset);
-     }catch(const std::exception& e){skn::report_rejection(assembly.skeleton->visual_reference,e.what());return false;}
-    }
     current.binding=prepared.skeleton_binding;
     current.owner=sample.prepared;
     current.root_to_world=root;current.shape=retained_visual_shape(sample);current.center_shift=assembly.center_shift;
@@ -3214,7 +3166,6 @@ std::shared_ptr<const VisualPreparedResources::MergedGeometry> merged_geometry(c
 
 #include "skn_submission.inl"
 
-
 bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
     if (!sample.assembly || !sample.prepared || !sample.values.unit) return false;
     auto& prepared=*sample.prepared;const auto& assembly=*sample.assembly;
@@ -3229,7 +3180,6 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
     bool skn_present=false;
     try {
      const auto skn_asset=skn::select(assembly.skeleton->visual_reference,skn_present);
-     if(sample.values.nala.selected && !skn_present)throw std::runtime_error("Nala SKN file missing");
      prepared.skn_selected=skn_present;
      if(skn_present){
       const bool built=build_skn_groups(sample,skn_asset);
@@ -3350,12 +3300,12 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
         view.normals=geometry.normals.data();view.normal_groups=group.normal_groups;
         view.texture_coordinates=geometry.texture_coordinates.data();view.texture_coordinate_count=static_cast<UINT>(geometry.texture_coordinates.size());
         view.components=geometry.components.data();view.component_count=static_cast<UINT>(geometry.components.size());
-        if(group.skn_asset){view.skin_contacts=bool(group.skn_asset->asset.nala_rig);view.skin_vertices=geometry.skin_vertices.data();view.lods=&geometry.skn_lods;view.world.static_lod=true;}
+        if(group.skn_asset){view.skin_vertices=geometry.skin_vertices.data();view.lods=&geometry.skn_lods;view.world.static_lod=true;}
         else view.component_parts=geometry.component_parts.data();
         view.indices=geometry.indices.data();view.index_count=static_cast<UINT>(geometry.indices.size());
         view.bounds_valid=true;view.bounds_flags=2;view.semantic_kind=SemanticKind::figure;
         retained_visual_part_fixed_state(sample,view.owned_fixed_state);
-        const bool assembled_texture = group.skn_asset && !group.skn_asset->nala_generated && part.surface &&
+        const bool assembled_texture = group.skn_asset && part.surface &&
             part.assembled_character_texture;
         if(!group.skn_asset || assembled_texture){
          view.owned_texture.identity=part.surface->id;view.owned_texture.generation=part.surface->generation;
@@ -3418,7 +3368,7 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
     NativePreparedPartValues values;
     if (!retained_visual_part_values(sample,part,time,fog,values)) return false;
     values.flags|=0x40u;
-    if(group.skn_asset && (group.skn_asset->nala_generated || !part.assembled_character_texture)){
+    if(group.skn_asset && !part.assembled_character_texture){
      const auto& m=group.skn_asset->asset.materials[group.skn_material];
      if(m.alpha!=0)values.alpha*=m.base[3];
 

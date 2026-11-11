@@ -6,7 +6,6 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Unit.h"
 #include "ModPackage.h"
 #include "ModRuntime.h"
-#include "NalaLameLocomotion.h"
 #include "ModEquipmentSwitch.h"
 #include "ModCampEquipment.h"
 #include "ModAttackTiming.h"
@@ -1236,8 +1235,6 @@ bool CUnit::HasRestAnimations() const
 // No RNG or equipment remapping is performed by the capability check above.
 const SADEntry *CUnit::GetAnimation(DWORD dwAnimationFlags, bool bWeapon, bool reportMissing)
 {
-    dwAnimationFlags = LameLocomotion::Normalize(
-        (GetID()==1000011214 || GetID()==1100011214) && strcmp(GetMaskName(),"unhufe")==0, dwAnimationFlags);
     const DWORD requestedFlags = dwAnimationFlags;
     switch (GetTypeID())
     {
