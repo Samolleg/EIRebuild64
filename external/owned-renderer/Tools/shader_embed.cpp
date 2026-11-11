@@ -195,9 +195,14 @@ std::string g_store;
 ShaderKey g_compiler_key;
 // Hash the DLL actually providing D3DCompile, including servicing updates.
 bool identify_compiler() {
+    // &D3DCompile can name the EXE's import thunk, so resolve the export
+    // before finding its module. Hashing the thunk's module hashes this tool
+    // and invalidates unchanged shaders whenever its C++ code changes.
+    const HMODULE compiler = GetModuleHandleW(D3DCOMPILER_DLL_W);
+    const FARPROC compile = compiler ? GetProcAddress(compiler, "D3DCompile") : nullptr;
     HMODULE module = nullptr;
-    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           reinterpret_cast<LPCWSTR>(&D3DCompile), &module)) return false;
+    if (!compile || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                       reinterpret_cast<LPCWSTR>(compile), &module)) return false;
     wchar_t path[32768];
     const DWORD length = GetModuleFileNameW(module, path, 32768);
     if (!length || length >= 32768) return false;
