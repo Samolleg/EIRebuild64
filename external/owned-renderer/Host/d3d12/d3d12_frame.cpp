@@ -777,6 +777,9 @@ public:
             core_.wait_idle();
             presenter_.destroy(core_);  // drains the pacer first (before_resize)
             pacer_.stop();
+#ifdef EID3D11_EMBEDDED
+            reflex::retire_device(core_.device());
+#endif
         }
         // Late snapshots must not call Core or a subsequent executor's hazards.
         resource_owner_->core = nullptr;

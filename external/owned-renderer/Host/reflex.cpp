@@ -20,6 +20,9 @@ namespace {
 std::mutex g_mutex;                       // NVAPI state and the samples
 ID3D12Device* g_device = nullptr;         // the device NVAPI low latency is set on
 bool g_tried = false, g_ready = false;    // NvAPI_Initialize tried / succeeded
+#ifdef EID3D11_EMBEDDED
+bool g_initialized = false;             // process API availability across devices
+#endif
 int g_applied = -1;                       // the mode SetSleepMode last applied
 std::atomic<int> g_mode{0};
 std::atomic<std::uint64_t> g_frame{0};
@@ -77,6 +80,9 @@ void configure(ID3D12Device* device, int mode) noexcept {
         g_tried = true;
         const NvAPI_Status status = NvAPI_Initialize();
         g_ready = status == NVAPI_OK;
+#ifdef EID3D11_EMBEDDED
+        g_initialized = g_ready;
+#endif
         remote::host_log(g_ready ? "reflex: NVAPI initialised" : "reflex: NVAPI not available (%d); Reflex stays off", int(status));
     }
     if (!g_ready || !device) { g_mode.store(0); return; }
@@ -107,6 +113,37 @@ void configure(ID3D12Device* device, int mode) noexcept {
 }
 
 int mode() noexcept { return g_mode.load(); }
+
+#ifdef EID3D11_EMBEDDED
+void retire_device(ID3D12Device* device) noexcept {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!device || device != g_device) return;
+    // The executor has joined the pacer. Presentation threads can no longer
+    // borrow this device for markers, Sleep or latency reports.
+    g_mode.store(0);
+    if (g_ready && g_applied > 0) {
+        NV_SET_SLEEP_MODE_PARAMS params{};
+        params.version = NV_SET_SLEEP_MODE_PARAMS_VER;
+        const NvAPI_Status status = NvAPI_D3D_SetSleepMode(device, &params);
+        if (status != NVAPI_OK)
+            remote::host_log("reflex: disabling retired device failed (%d)", int(status));
+    }
+    g_device = nullptr;
+    g_applied = -1;
+    // Retry device capabilities after replacement, including after rejection
+    // of SetSleepMode on the old GPU. NVAPI remains process-owned.
+    g_ready = g_initialized;
+    g_frame.store(0);
+    g_frame_start.store(0);
+    g_frame_taken.store(0);
+    g_render_end_frame.store(0);
+    g_samples.clear();
+    g_window_start = 0;
+    g_delay_sum = g_ring_sum = g_queue_sum = g_interval = g_unpaced = 0;
+    g_pacing_count = 0;
+    g_pacing_on = false;
+}
+#endif
 
 void set_frame(std::uint64_t id, std::int64_t game_start_qpc) noexcept {
     g_frame.store(id);

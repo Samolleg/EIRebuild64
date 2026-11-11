@@ -1,3 +1,23 @@
+# X64D3D12 Reflex device retirement, stage 5 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+The embedded executor now retires the author's process-global Reflex device
+at teardown, after presenter destruction and pacer join, while the D3D12
+device is alive. The borrowed device, applied mode, frame markers and latency
+samples are cleared. Successful process-level NVAPI initialization survives;
+a replacement device can retry SetSleepMode after an earlier GPU rejected it.
+An executor that never configured Reflex cannot clear a different owner.
+This is required for repeated embedded Renderer/device lifetimes. D3D11 and
+the separate upstream Host target retain their existing code paths.
+No SDK, runtime DLL, HLSL or rendering algorithm changed in this stage.
+
+Host transport remains unbound at Renderer. Continue with local frame and
+simulation boundaries, Renderer ownership/teardown, configuration before device
+creation, the excluded world/SR/FG/present bodies and explicit failure messages.
+Stages 2/3 contain the prepared SDK/DXIL/NGX/executor inputs for that work.
+The task remains open. Compilation, shaders, tests and game were not run;
+GPU teardown and the complete requested D3D12/FG behavior remain unverified.
+
 # X64D3D12 external resource retirement, stage 4 (2026-11-11)
 
 Incomplete runtime integration. renderer_backend=1 still enters D3D11 and

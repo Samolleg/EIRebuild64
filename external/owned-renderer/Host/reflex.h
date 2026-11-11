@@ -33,6 +33,10 @@ enum class Marker { simulation_start, simulation_end, render_start, render_end, 
 // device without it stays off with one log line.
 void configure(ID3D12Device* device, int mode) noexcept;
 int mode() noexcept;
+#ifdef EID3D11_EMBEDDED
+// After joining presentation callers, before releasing the executor device.
+void retire_device(ID3D12Device* device) noexcept;
+#endif
 // The game present being rendered (replay thread) and its game frame start.
 void set_frame(std::uint64_t id, std::int64_t game_start_qpc) noexcept;
 std::uint64_t frame() noexcept;
