@@ -125,3 +125,9 @@ if ($luaMissing -or $headersMissing) {
     Write-Output 'LuaJIT library and headers already prepared.'
 }
 Write-Output 'Worktree prepared for Release x64 host build.'
+
+$zstdSource = Join-Path $projectRoot "deps/zstd/v1.5.7"
+if (!(Test-Path (Join-Path $zstdSource "lib/zstd.h"))) { throw "Missing local zstd 1.5.7; nothing will be downloaded." }
+$zstdDestination = Join-Path $repo "dependencies/zstd/v1.5.7"
+New-Item -ItemType Directory -Force -Path $zstdDestination | Out-Null
+Copy-Item -LiteralPath (Join-Path $zstdSource "lib"), (Join-Path $zstdSource "LICENSE"), (Join-Path $zstdSource "COPYING") -Destination $zstdDestination -Recurse -Force

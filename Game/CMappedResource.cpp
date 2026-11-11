@@ -10,6 +10,10 @@ static const char LOCAL_FILE[] = __FILE__;
 #include <io.h>
 #include <fcntl.h>
 #include <atomic>
+#include "GameJournal.h"
+#include <shlwapi.h>
+#include <fstream>
+#pragma comment(lib,"shlwapi.lib")
 namespace { std::atomic<std::uint64_t> resourcePayloadBytes{0}; }
 std::uint64_t CMappedResource::LivePayloadBytes() noexcept { return resourcePayloadBytes.load(std::memory_order_relaxed); }
 
@@ -42,7 +46,10 @@ CMappedResource::~CMappedResource()
 void CMappedResource::OpenOverlays(LPCSTR name,bool write,bool mapped){
  overlays.clear();ignoreOriginal=false;if(rawResource||write||!ModRuntime::Resources())return;
  std::vector<std::string> paths;ModRuntime::Resources()->ResourcePlan(name,paths,ignoreOriginal);
- for(const auto&path:paths){if(!std::filesystem::is_regular_file(path))throw std::runtime_error("Missing mod resource: "+path);std::unique_ptr<CMappedResource> child = mapped ? std::unique_ptr<CMappedResource>(new CWin32MappedResource(true)) : std::make_unique<CMappedResource>(true);if(!child->OpenResource(path.c_str()))throw std::runtime_error("Cannot open mod resource: "+path);overlays.push_back(std::move(child));}
+ for (const auto& path : paths) {
+     auto child = std::make_unique<CMappedResource>(true);
+     if (child->OpenResource(path.c_str())) overlays.push_back(std::move(child));
+ }
 }
 namespace {
 std::vector<std::string> BriefingCandidates(LPCSTR path)
@@ -76,7 +83,18 @@ LPBYTE CMappedResource::OverlayFile(LPCSTR name,LPDWORD size)
 void CMappedResource::GetFileList(CStringArray&names,LPCSTR mask){
  names.RemoveAll();std::set<std::string> seen;CStringArray local;
  auto append=[&](){for(int i=0;i<local.GetSize();i++){std::string key=(LPCSTR)local[i];for(char&c:key)if(c>='A'&&c<='Z')c+=32;if(seen.insert(key).second)names.Add(local[i]);}local.RemoveAll();};
- for(auto&child:overlays){child->GetFileList(local,mask);append();}if(!ignoreOriginal){CResourceBase::GetFileList(local,mask);append();}
+ for(auto&child:overlays){child->GetFileList(local,mask);append();}
+ if (!ignoreOriginal && pak) {
+     for (const auto& e : pak->Entries()) if (!mask || PathMatchSpecA(e.name.c_str(),mask)) local.Add(e.name.c_str());
+     append();
+ } else if (!ignoreOriginal && looseDirectory) {
+     for (const auto& f : std::filesystem::recursive_directory_iterator(sourcePath)) {
+         if (!f.is_regular_file()) continue;
+         auto name = f.path().lexically_relative(sourcePath).string();
+         if (!mask || PathMatchSpecA(name.c_str(),mask)) local.Add(name.c_str());
+     }
+     append();
+ } else if(!ignoreOriginal){CResourceBase::GetFileList(local,mask);append();}
 }
 namespace {
 bool ReadResourceBytes(int file, void* buffer, std::size_t bytes)
@@ -101,6 +119,15 @@ BOOL CMappedResource::OpenResource(LPCSTR pszFileName, BOOL _bWriteAccess)
     pszFileName = resolvedName.c_str();
     OpenOverlays(pszFileName, _bWriteAccess);
     if (ignoreOriginal) return TRUE;
+    if (!overlays.empty() && !std::filesystem::exists(sourcePath)) { ignoreOriginal = true; return TRUE; }
+    if (!_bWriteAccess && std::filesystem::is_directory(sourcePath) && RuntimeDiagnostics::Enabled()) {
+        looseDirectory = true; return TRUE;
+    }
+    if (_stricmp(std::filesystem::path(sourcePath).extension().string().c_str(),".pak") == 0) {
+        if (_bWriteAccess) { GameJournal::Event("PAK","read_only","path=%s",sourcePath.c_str()); return FALSE; }
+        try { pak = std::make_unique<ei::pak::Archive>(sourcePath); return TRUE; }
+        catch (const std::exception& e) { GameJournal::Event("PAK","open_failed","%s",e.what()); return FALSE; }
+    }
     hFile = _open(pszFileName, _O_BINARY | _O_RANDOM | (bWriteAccess ? _O_RDWR : _O_RDONLY));
     if (hFile == -1) return ReportError("Cannot open resource: %s", pszFileName);
     const auto size = _filelengthi64(hFile);
@@ -138,6 +165,7 @@ void CMappedResource::CloseResource()
 {
     overlays.clear();ignoreOriginal=false;
     CloseAllFiles();
+    pak.reset(); looseDirectory = false;
     if (hFile >= 0)
     {
         _close(hFile);
@@ -170,6 +198,10 @@ bool CMappedResource::IsFileExist(LPCSTR pszFileName)
 }
 bool CMappedResource::IsFileExistExact(LPCSTR pszFileName)
 {
+    try {
+        if (pak) return pak->Find(pszFileName) != nullptr;
+        if (looseDirectory) return std::filesystem::is_regular_file(std::filesystem::path(sourcePath)/ei::pak::Normalize(pszFileName));
+    } catch (const std::exception&) { return false; }
     return pHashTable && pNamePool && GetIndexOfName(pszFileName) != DWORD(-1);
 }
 LPBYTE CMappedResource::GetFile(LPCSTR pszFileName, LPDWORD pnDataSize)
@@ -186,7 +218,7 @@ LPBYTE CMappedResource::GetFile(LPCSTR pszFileName, LPDWORD pnDataSize)
 }
 LPBYTE CMappedResource::GetFileExact(LPCSTR pszFileName, LPDWORD pnDataSize)
 {
-    if (!pszFileName || !pHashTable || !pNamePool)
+    if (!pszFileName || (!pak && !looseDirectory && (!pHashTable || !pNamePool)))
         return NULL;
 
     auto pos = recByName.find(std::string(pszFileName));
@@ -199,10 +231,35 @@ LPBYTE CMappedResource::GetFileExact(LPCSTR pszFileName, LPDWORD pnDataSize)
         return pRec->pAllocatedMemory;
     }
 
+    if (pak || looseDirectory) {
+        try {
+            ei::pak::Bytes bytes;
+            if (pak) {
+                auto* entry = pak->Find(pszFileName); if (!entry) return nullptr;
+                bytes = pak->Read(*entry,RuntimeDiagnostics::Enabled());
+            } else {
+                const auto path = std::filesystem::path(sourcePath)/ei::pak::Normalize(pszFileName);
+                if (!std::filesystem::is_regular_file(path)) return nullptr;
+                const auto size = std::filesystem::file_size(path);
+                if (!size || size > MAXDWORD) return nullptr;
+                bytes.resize(static_cast<size_t>(size)); std::ifstream in(path,std::ios::binary);
+                if (!in.read(reinterpret_cast<char*>(bytes.data()),bytes.size())) return nullptr;
+            }
+            auto memory = std::make_unique<BYTE[]>(bytes.size());
+            memcpy(memory.get(),bytes.data(),bytes.size());
+            auto record = std::make_unique<SResourceFileRecord>();
+            record->szName = pszFileName; record->dwSize = static_cast<DWORD>(bytes.size());
+            record->dwFilePos = 0; record->nRefs = 1; record->pAllocatedMemory = memory.get();
+            auto inserted = recByName.emplace(record->szName,record.get());
+            try { recByData.emplace(memory.get(),record.get()); }
+            catch (...) { recByName.erase(inserted.first); throw; }
+            resourcePayloadBytes.fetch_add(record->dwSize,std::memory_order_relaxed);
+            if (pnDataSize) *pnDataSize = record->dwSize;
+            record.release(); return memory.release();
+        } catch (const std::exception& e) { GameJournal::Event("PAK","read_failed","path=%s entry=%s error=%s",sourcePath.c_str(),pszFileName,e.what()); return nullptr; }
+    }
     DWORD dwIndex = GetIndexOfName(pszFileName);
-    if (dwIndex == -1)
-        return NULL;
-
+    if (dwIndex == -1) return NULL;
     if (pBaseAddress)
     {
         if(pnDataSize)*pnDataSize=pHashTable[dwIndex].dwSize;
@@ -236,7 +293,8 @@ bool CMappedResource::CloseFile(LPBYTE pFileImage)
 {
     for(auto&child:overlays)if(child->CloseFile(pFileImage))return true;
     if (pBaseAddress)
-        return true;
+        return reinterpret_cast<std::uintptr_t>(pFileImage) >= reinterpret_cast<std::uintptr_t>(pBaseAddress) &&
+            reinterpret_cast<std::uintptr_t>(pFileImage) - reinterpret_cast<std::uintptr_t>(pBaseAddress) < resourceBytes;
 
     if (!pFileImage)
         return false;
@@ -295,8 +353,11 @@ CWin32MappedResource::~CWin32MappedResource()
 //--------------------------------------------------------------------------------------------
 BOOL CWin32MappedResource::OpenResource(LPCSTR name, BOOL write)
 {
+    if (_stricmp(std::filesystem::path(name).extension().string().c_str(),".pak") == 0 || std::filesystem::is_directory(name))
+        return CMappedResource::OpenResource(name,write);
     CloseResource(); sourcePath = name; OpenOverlays(name, write, true);
     if (ignoreOriginal) return TRUE;
+    if (!overlays.empty() && !std::filesystem::exists(name)) { ignoreOriginal = true; return TRUE; }
     if (!cMappedFile.Open(name, write)) { CloseResource(); return FALSE; }
     if (!BindResourceMemory(cMappedFile.GetAddress(), cMappedFile.GetSize())) {
         CloseResource();
@@ -320,12 +381,12 @@ BOOL CWin32MappedResource::OpenResourceMem(LPVOID address, std::size_t bytes)
 void CWin32MappedResource::CloseResource()
 {
     overlays.clear();ignoreOriginal=false;
+    CMappedResource::CloseAllFiles();
     cMappedFile.Close();
     pHashTable = NULL;
     pNamePool = NULL;
     pBaseAddress = NULL;
-    memset(&header, 0, sizeof(header));
-    resourceBytes = namePoolBytes = 0;
+    CMappedResource::CloseResource();
 }
 
 void CWin32MappedResource::Flush()
@@ -351,6 +412,7 @@ LPBYTE CWin32MappedResource::GetFile(LPCSTR pszFileName, LPDWORD pnDataSize)
 }
 LPBYTE CWin32MappedResource::GetFileExact(LPCSTR pszFileName, LPDWORD pnDataSize)
 {
+    if (!pBaseAddress) return CMappedResource::GetFileExact(pszFileName,pnDataSize);
     if (!pszFileName || !pHashTable || !pNamePool)
         return NULL;
     DWORD dwIndex = GetIndexOfName(pszFileName);
@@ -363,10 +425,13 @@ LPBYTE CWin32MappedResource::GetFileExact(LPCSTR pszFileName, LPDWORD pnDataSize
 
 bool CWin32MappedResource::CloseFile(LPBYTE pFileImage)
 {
+    if (!pBaseAddress) return CMappedResource::CloseFile(pFileImage);
     for(auto&child:overlays)if(child->CloseFile(pFileImage))return true;
-    return true;
+    return reinterpret_cast<std::uintptr_t>(pFileImage) >= reinterpret_cast<std::uintptr_t>(pBaseAddress) &&
+        reinterpret_cast<std::uintptr_t>(pFileImage) - reinterpret_cast<std::uintptr_t>(pBaseAddress) < resourceBytes;
 }
 void CWin32MappedResource::CloseAllFiles()
 {
+    if (!pBaseAddress) { CMappedResource::CloseAllFiles(); return; }
     for(auto&child:overlays)child->CloseAllFiles();
 }
