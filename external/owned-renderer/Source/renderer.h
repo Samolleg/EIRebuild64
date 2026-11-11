@@ -1399,6 +1399,8 @@ public:
     void set_surface_texture_resolver(SurfaceTextureResolver resolver, void* context) noexcept {
         surface_texture_resolver_ = resolver; surface_texture_resolver_context_ = context;
     }
+    HRESULT surface_effect_d3d12(const SurfaceImage& source, const SurfaceImage& destination,
+                                 const RECT& viewport, bool fade, std::vector<std::uint8_t>& pixels);
     HRESULT composite_world();
     void queue_camp_decoration(const CampDecoration& frame, bool include_popup = true) noexcept;
     HRESULT begin_camp_popup(bool clear);
@@ -5202,6 +5204,7 @@ private:
     bool write_harness_screenshot(const std::string& path, std::string& detail) noexcept;
     bool write_hudless_image(const std::string& path, std::string& detail) noexcept;
     bool write_profile_image_d3d12(const std::string& path, std::string& detail) noexcept;
+    void capture_shadow_temporal_boundary(DWORD flags, DWORD rectangle_count, bool full_surface);
     std::string harness_unready_parts(std::string& ready_detail) noexcept;
     // Load reveal: after a new world epoch the first world frames keep the
     // last loading picture on screen until the map, its neighbours and its
@@ -5316,6 +5319,7 @@ private:
     std::vector<std::pair<DXGI_FORMAT, ComPtr<ID3D11RenderTargetView>>> warmup_targets_;
     std::vector<std::pair<DXGI_FORMAT, ComPtr<ID3D11DepthStencilView>>> warmup_depths_;
     unsigned harness_stage_ = 0;
+    ShadowTemporalPresentOutcome harness_shadow_temporal_outcome_ = ShadowTemporalPresentOutcome::none;
     unsigned long harness_completed_entry_ = 0; // scene thread: last completed queued command
     std::uint64_t harness_started_ms_ = 0;
     unsigned harness_wait_ = 0;

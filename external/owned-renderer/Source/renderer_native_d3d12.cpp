@@ -44,6 +44,32 @@ namespace owned {
 // box of the one above, clamped at odd edges. Only the x64 host's DXIL table
 // holds it (shader_embed --dxil-sources); the D3D11 table never sees it.
 namespace {
+constexpr char kD3D12SurfaceEffectShader[] = R"hlsl(
+Texture2D<float4> sourceImage : register(t0);
+Texture2D<float4> destinationImage : register(t1);
+SamplerState linearClamp : register(s0);
+cbuffer SurfaceEffect : register(b0) { float4 viewport; uint fade; float3 padding; };
+float4 surfaceEffectVS(uint id : SV_VertexID) : SV_Position {
+ float2 uv = float2((id << 1) & 2, id & 2);
+ return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1);
+}
+float4 surfaceEffectPS(float4 position : SV_Position) : SV_Target {
+ float2 uv = (position.xy - viewport.xy) / viewport.zw;
+ if (any(uv < 0) || any(uv >= 1)) return destinationImage.Load(int3(position.xy, 0));
+ float4 pixel = sourceImage.SampleLevel(linearClamp, uv, 0);
+ if (fade) {
+  // RetailModalFade integer RGB32 rule, including its dimming coefficient.
+  uint3 rgb = (uint3)round(saturate(pixel.rgb) * 255.0);
+  uint gray = (2u * rgb.r + 4u * rgb.g + rgb.b) >> 4u;
+  pixel.rgb = float3(gray, gray, gray) / 255.0;
+ }
+ return pixel;
+}
+)hlsl";
+const ShaderProgram kD3D12SurfaceEffectVS{{kD3D12SurfaceEffectShader,sizeof(kD3D12SurfaceEffectShader)-1},
+ nullptr,nullptr,"surfaceEffectVS","vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3};
+const ShaderProgram kD3D12SurfaceEffectPS{{kD3D12SurfaceEffectShader,sizeof(kD3D12SurfaceEffectShader)-1},
+ nullptr,nullptr,"surfaceEffectPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3};
 // Captured BGRA content stays on the GPU. Sample its native view into an
 // RGBA UAV (BGRA has no typed UAV store), preserving logical channels.
 constexpr char kD3D12SurfaceCopyShader[] =
@@ -102,6 +128,8 @@ D3D11_SAMPLER_DESC post_linear_clamp(){
 }  // namespace
 
 void append_d3d12_shader_programs(std::vector<ShaderProgram>& out) {
+ out.push_back(kD3D12SurfaceEffectVS);
+ out.push_back(kD3D12SurfaceEffectPS);
  out.push_back(kD3D12MipProgram);
  out.push_back(kD3D12SurfaceCopyProgram);
  out.push_back(kD3D12MipArrayProgram);
@@ -120,6 +148,61 @@ const ShaderProgram& d3d12_mip_array_range_program() noexcept { return kD3D12Mip
 
 // The native programs and the first geometry page on the D3D12 backend.
 #if !defined(EID3D11_SHADER_EMBED)
+HRESULT Renderer::surface_effect_d3d12(const SurfaceImage& source,const SurfaceImage& destination,
+ const RECT& viewport,bool fade,std::vector<std::uint8_t>& pixels){
+ if(!d3d12_||viewport.right<=0||viewport.bottom<=0||
+    (destination.format.dwFlags&DDPF_FOURCC)||destination.format.dwRGBBitCount!=32)return E_INVALIDARG;
+ HRESULT hr=flush_native();
+ if(FAILED(hr))return hr;
+ // Game publications keep their CPU generation. Use isolated uploads so a
+ // later edit of the same game image cannot reuse an old GPU generation.
+ auto input=source;
+ auto background=destination;
+ input.d3d12.reset();
+ input.uploaded_generation=0;
+ input.uploaded_shape={};
+ background.d3d12.reset();
+ background.uploaded_generation=0;
+ background.uploaded_shape={};
+ if(FAILED(hr=upload_d3d12(input,nullptr))||FAILED(hr=upload_d3d12(background,nullptr)))return hr;
+ D3D12TextureRef target;
+ if(FAILED(hr=d3d12_->create_target(destination.width,destination.height,target,
+  DXGI_FORMAT_B8G8R8A8_UNORM,DXGI_FORMAT_UNKNOWN)))return hr;
+ struct alignas(16) EffectConstants {
+  float viewport[4];
+  UINT fade;
+  UINT padding[3];
+ } constants{{float(viewport.left),float(viewport.top),float(viewport.right),float(viewport.bottom)},fade?1u:0u,{}};
+ try{
+  d3d12_->clear_slots();
+  d3d12_->set_target(target.get());
+  d3d12_->set_resource(0,input.d3d12.get());
+  d3d12_->set_resource(1,background.d3d12.get());
+  d3d12_->set_sampler(0,post_linear_clamp());
+  d3d12_->set_constants(0,&constants,sizeof(constants));
+  // Surface APIs are one-shot writes. Wait for their PSO as for a picking frame.
+  d3d12_->set_hit_test_frame(true);
+  hr=d3d12_->draw(kD3D12SurfaceEffectVS,kD3D12SurfaceEffectPS,post_state(false,false),nullptr,3);
+  if(hr==S_OK){
+   UINT width=0,height=0;
+   hr=d3d12_->read_texture(*target,pixels,width,height);
+   if(hr==S_OK&&(width!=destination.width||height!=destination.height))hr=E_UNEXPECTED;
+  }else if(SUCCEEDED(hr))hr=E_PENDING;
+ }catch(const std::bad_alloc&){hr=E_OUTOFMEMORY;}
+ catch(...){hr=E_FAIL;}
+ d3d12_->set_hit_test_frame(hit_test_active_);
+ d3d12_->clear_slots();
+ if(camp_popup_active_&&camp_popup_d3d12_)
+  d3d12_->set_target(camp_popup_d3d12_.get());
+ else if(world_d3d12_bound_)
+  bind_world_targets_d3d12();
+ else
+  d3d12_->set_target(nullptr);
+ // Readback preserves bytes for the existing game/DC publication contract.
+ // Resampling, BC decoding and fade arithmetic all ran on the GPU.
+ return hr;
+}
+
 #ifdef EID3D11_EMBEDDED
 HRESULT Renderer::compose_embedded_figure_texture_d3d12(const D3D12TextureRef& primary,
  const D3D12TextureRef& secondary,D3D12TextureRef& combined){
@@ -1492,8 +1575,7 @@ HRESULT Renderer::composite_world_d3d12(){
  // rule): the interface 3D after this point (HUD spell and skill icons,
  // previews) must not be culled against the world's depth.
  native_hiz_frame_=UINT64_MAX;native_world_clip_dirty_=true;
- // composite_world's world-space effects before the history copy that are
- // not on this backend yet: named while configured on, never silently absent.
+ // World-space effects precede the reflection history and post-processing.
  if(world_d3d12_bound_&&world_d3d12_){
   // AO needs the finished world depth and ambient share and precedes SMAA
   // and every interface pass (the world targets bound again after it).
@@ -1513,6 +1595,8 @@ HRESULT Renderer::composite_world_d3d12(){
  }
  // The finished world colour for the next frame's reflections.
  if(world_d3d12_bound_&&world_d3d12_)capture_water_history();
+ // Seal the last HDR boundary while its target and encoding are still current.
+ end_profile_pass();
  d3d12_->set_target(nullptr);
  scene_composited_=true;
  // Selection rectangles requested after the world pass and before this
