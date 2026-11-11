@@ -279,13 +279,34 @@ BOOL CDXGISurface::CreateTexture(D3D11_TEXTURE2D_DESC *ptex2d)
         image->format.dwRBitMask = 0x00ff0000; image->format.dwGBitMask = 0x0000ff00;
         image->format.dwBBitMask = 0x000000ff; image->format.dwRGBAlphaBitMask = 0xff000000;
         image->cpu_pinned = true;
-        image->pixels.resize(size_t(image->pitch) * image->height, 0);
-        ownedSurface.BeginWrite();
-        cpuImage = std::move(image); cpuDesc = *ptex2d;
+        cpuDesc = *ptex2d;
         cpuUploadFormat = ptex2d->Format;
-        // Save thumbnails request RGB565; their file writer performs the packing.
-        // Native source storage and GDI always use canonical BGRA pixels.
-        cpuDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        const UINT blockBytes = cpuUploadFormat == DXGI_FORMAT_BC1_UNORM ? 8 :
+            (cpuUploadFormat == DXGI_FORMAT_BC2_UNORM || cpuUploadFormat == DXGI_FORMAT_BC3_UNORM ? 16 : 0);
+        if (blockBytes) {
+            UINT levels = 1;
+            for (UINT size = (std::max)(image->width, image->height); size > 1; size >>= 1) ++levels;
+            if (ptex2d->MipLevels > levels) return FALSE;
+            cpuDesc.MipLevels = ptex2d->MipLevels ? ptex2d->MipLevels : levels;
+            image->format = {};
+            image->format.dwSize = sizeof(image->format);
+            image->format.dwFlags = DDPF_FOURCC;
+            image->format.dwFourCC = blockBytes == 8 ? MAKEFOURCC('D','X','T','1') :
+                cpuUploadFormat == DXGI_FORMAT_BC2_UNORM ? MAKEFOURCC('D','X','T','3') : MAKEFOURCC('D','X','T','5');
+            image->pitch = ((image->width + 3) / 4) * blockBytes;
+            image->pixels.resize(size_t(image->pitch) * ((image->height + 3) / 4), 0);
+            image->bc_mips.resize(cpuDesc.MipLevels - 1);
+            for (UINT level = 1; level < cpuDesc.MipLevels; ++level) {
+                const UINT w = (std::max)(1u, image->width >> level), h = (std::max)(1u, image->height >> level);
+                image->bc_mips[level - 1].resize(size_t((w + 3) / 4) * blockBytes * ((h + 3) / 4), 0);
+            }
+        } else {
+            // Save thumbnails request RGB565; their writer performs the packing.
+            cpuDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            image->pixels.resize(size_t(image->pitch) * image->height, 0);
+        }
+        ownedSurface.BeginWrite();
+        cpuImage = std::move(image);
         texture.Reset(); textureView.Reset(); pixelReadbackStaging.Reset();
         if (!PublishSurface()) return FALSE;
         return ExtractSurfaceParams();
@@ -436,11 +457,14 @@ void CDXGISurface::CopyResource(CDXGISurface *src)
 {
     if (cpuImage) {
         if (!src || !src->cpuImage || hDc || src->hDc ||
+            cpuDesc.Format != src->cpuDesc.Format || cpuDesc.MipLevels != src->cpuDesc.MipLevels ||
             dwSurfaceWidth != src->dwSurfaceWidth || dwSurfaceHeight != src->dwSurfaceHeight)
             IfFailedThrowHR(E_INVALIDARG);
         auto pixels = src->cpuImage->pixels;
+        auto mips = src->cpuImage->bc_mips;
         ownedSurface.BeginWrite();
         cpuImage->pixels = std::move(pixels);
+        cpuImage->bc_mips = std::move(mips);
         IfFailedThrowHR(PublishSurface() ? S_OK : E_FAIL);
         return;
     }
@@ -453,7 +477,8 @@ void CDXGISurface::CopySubresourceRegion(UINT dstSubresource, UINT dstX, UINT ds
                                          CDXGISurface *src, UINT srcSubresource, D3D11_BOX *pBox)
 {
     if (cpuImage) {
-        if (!src || !src->cpuImage || hDc || src->hDc || dstSubresource || srcSubresource || dstZ)
+        if (!src || !src->cpuImage || (cpuImage->format.dwFlags & DDPF_FOURCC) ||
+            (src->cpuImage->format.dwFlags & DDPF_FOURCC) || hDc || src->hDc || dstSubresource || srcSubresource || dstZ)
             IfFailedThrowHR(E_INVALIDARG);
         const D3D11_BOX box = pBox ? *pBox :
             D3D11_BOX{0, 0, 0, src->dwSurfaceWidth, src->dwSurfaceHeight, 1};
@@ -491,6 +516,7 @@ HRESULT CDXGISurface::CopyPixelBuffer(DWORD *destination, size_t pixelCount)
     if (!destination || pixelCount < size_t(dwSurfaceWidth) * dwSurfaceHeight)
         return E_INVALIDARG;
     if (cpuImage) {
+        if (cpuImage->format.dwFlags & DDPF_FOURCC) return E_NOTIMPL;
         const auto& pixels = static_cast<const owned::SurfaceImage&>(*cpuImage).pixels;
         for (UINT y = 0; y < dwSurfaceHeight; ++y)
             memcpy(destination + size_t(y) * dwSurfaceWidth,
@@ -661,6 +687,7 @@ HRESULT ApplyOwnedSurfaceEffect(OwnedRender::RendererFacadeCore<owned::Renderer>
 void CDXGISurface::Fade()
 {
     if (cpuImage) {
+        if (cpuImage->format.dwFlags & DDPF_FOURCC) IfFailedThrowHR(E_NOTIMPL);
         if (hDc || uiRecordingDc) IfFailedThrowHR(DXGI_ERROR_INVALID_CALL);
         // Detach from completed publications before modifying the source bytes.
         auto pixels = cpuImage->pixels;
@@ -687,7 +714,8 @@ void CDXGISurface::StretchTo(const CDXGISurface *src, const RECT &rect)
 {
     // The historical argument named src is the actual destination.
     if (cpuImage) {
-        if (!src || !src->cpuImage || hDc || uiRecordingDc || src->hDc || src->uiRecordingDc)
+        if (!src || !src->cpuImage || (cpuImage->format.dwFlags & DDPF_FOURCC) ||
+            (src->cpuImage->format.dwFlags & DDPF_FOURCC) || hDc || uiRecordingDc || src->hDc || src->uiRecordingDc)
             IfFailedThrowHR(E_INVALIDARG);
         // Preserve the source API's viewport convention: right/bottom are
         // extents, including when left/top specify a destination offset.
@@ -760,6 +788,7 @@ HDC CDXGISurface::AcquirePixelsDC()
 {
     CorePerf::Scope timing(CorePerf::UiPixelsAcquire);
     if (cpuImage) {
+        if (cpuImage->format.dwFlags & DDPF_FOURCC) IfFailedThrowHR(E_NOTIMPL);
         BITMAPINFO info{};
         info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         info.bmiHeader.biWidth = LONG(dwSurfaceWidth);
@@ -981,6 +1010,7 @@ HRESULT CDXGISurface::BltFromRenderSurface(LPRECT pDestRect, LPRECT pSrcRect, DW
         if (FAILED(ready)) return ready;
     }
     if (cpuImage) {
+        if (cpuImage->format.dwFlags & DDPF_FOURCC) return E_NOTIMPL;
         if (hDc || uiRecordingDc) return DXGI_ERROR_INVALID_CALL;
         OwnedRender::E1SurfaceCpuImage image;
         bool mask = false;
@@ -1045,8 +1075,26 @@ void CDXGISurface::UpdateTexture(UINT subresource_index, D3D11_BOX *region,
                                  D3D11_SUBRESOURCE_DATA *srd, DWORD sourceMmpFormat)
 {
     if (cpuImage) {
-        // SurfaceImage uploads level zero; the author's native uploader owns
-        // GPU mip generation. Source mip uploads do not replace level zero.
+        const UINT blockBytes = cpuUploadFormat == DXGI_FORMAT_BC1_UNORM ? 8 :
+            (cpuUploadFormat == DXGI_FORMAT_BC2_UNORM || cpuUploadFormat == DXGI_FORMAT_BC3_UNORM ? 16 : 0);
+        if (blockBytes) {
+            if (region || hDc || !srd || !srd->pSysMem || subresource_index >= cpuDesc.MipLevels)
+                IfFailedThrowHR(E_INVALIDARG);
+            const UINT w = (std::max)(1u, dwSurfaceWidth >> subresource_index);
+            const UINT h = (std::max)(1u, dwSurfaceHeight >> subresource_index);
+            const size_t pitch = size_t((w + 3) / 4) * blockBytes, rows = (h + 3) / 4;
+            if (srd->SysMemPitch < pitch) IfFailedThrowHR(E_INVALIDARG);
+            std::vector<BYTE> pixels(pitch * rows);
+            for (size_t row = 0; row < rows; ++row)
+                memcpy(pixels.data() + row * pitch,
+                    static_cast<const BYTE*>(srd->pSysMem) + row * srd->SysMemPitch, pitch);
+            ownedSurface.BeginWrite();
+            if (subresource_index) cpuImage->bc_mips[subresource_index - 1] = pixels;
+            else cpuImage->pixels = pixels;
+            IfFailedThrowHR(PublishSurface() ? S_OK : E_FAIL);
+            return;
+        }
+        // Uncompressed surfaces generate world mip levels from level zero.
         if (subresource_index != 0) return;
         const D3D11_BOX box = region ? *region :
             D3D11_BOX{0, 0, 0, dwSurfaceWidth, dwSurfaceHeight, 1};
@@ -1055,34 +1103,6 @@ void CDXGISurface::UpdateTexture(UINT subresource_index, D3D11_BOX *region,
             box.right > dwSurfaceWidth || box.bottom > dwSurfaceHeight)
             IfFailedThrowHR(E_INVALIDARG);
         const UINT width = box.right - box.left;
-        if (cpuUploadFormat == DXGI_FORMAT_BC1_UNORM ||
-            cpuUploadFormat == DXGI_FORMAT_BC2_UNORM ||
-            cpuUploadFormat == DXGI_FORMAT_BC3_UNORM) {
-            // Keep the source BC format separate from canonical CPU/GDI storage.
-            // The native executor uploads the completed BGRA image and owns mips.
-            if (region) IfFailedThrowHR(E_INVALIDARG);
-            const size_t blockBytes = cpuUploadFormat == DXGI_FORMAT_BC1_UNORM ? 8 : 16;
-            const size_t pitch = size_t((width + 3) / 4) * blockBytes;
-            if (srd->SysMemPitch < pitch) IfFailedThrowHR(E_INVALIDARG);
-            DirectX::Image compressed{};
-            compressed.width = width; compressed.height = box.bottom - box.top;
-            compressed.format = cpuUploadFormat;
-            compressed.rowPitch = srd->SysMemPitch;
-            compressed.slicePitch = compressed.rowPitch * ((compressed.height + 3) / 4);
-            compressed.pixels = const_cast<BYTE*>(static_cast<const BYTE*>(srd->pSysMem));
-            DirectX::ScratchImage decoded;
-            IfFailedThrowHR(DirectX::Decompress(compressed, DXGI_FORMAT_B8G8R8A8_UNORM, decoded));
-            const auto* image = decoded.GetImage(0, 0, 0);
-            if (!image) IfFailedThrowHR(E_FAIL);
-            auto pixels = cpuImage->pixels;
-            for (UINT y = 0; y < compressed.height; ++y)
-                memcpy(pixels.data() + size_t(y) * cpuImage->pitch,
-                    image->pixels + size_t(y) * image->rowPitch, size_t(width) * 4);
-            ownedSurface.BeginWrite();
-            cpuImage->pixels = std::move(pixels);
-            IfFailedThrowHR(PublishSurface() ? S_OK : E_FAIL);
-            return;
-        }
         SMMPFileHeader format;
         format.InitializeDefaultFormat(sourceMmpFormat);
         if (format.dwBitDepth != 16 && format.dwBitDepth != 32)

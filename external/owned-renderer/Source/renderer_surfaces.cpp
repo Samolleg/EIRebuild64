@@ -209,11 +209,13 @@ HRESULT Renderer::upload_d3d12(SurfaceImage& i,SurfaceUploadResult* output){
  // D3D11 (upload_surface_image): a static surface in world use carries its
  // full mip chain, rebuilt whole from level 0 on each upload.
  const bool mips=i.static_mip_hint&&i.world_mip_use&&!i.gpu_captured&&!block_bytes;
+ const UINT levels=block_bytes?1u+static_cast<UINT>(i.bc_mips.size()):(mips?full_mip_count(i.width,i.height):1u);
+ if(levels>full_mip_count(i.width,i.height))return E_INVALIDARG;
  UINT stored_width=0,stored_height=0,stored_levels=0;DXGI_FORMAT stored_format=DXGI_FORMAT_UNKNOWN;
  const bool matches=same_surface_upload_shape(i.uploaded_shape,shape)&&i.d3d12&&
   d3d12_->texture_matches(*i.d3d12,i.width,i.height,format)&&
   d3d12_->texture_info(*i.d3d12,stored_width,stored_height,stored_levels,stored_format)&&
-  stored_levels==(mips?full_mip_count(i.width,i.height):1u);
+  stored_levels==levels;
  if(matches&&i.uploaded_generation==i.generation)return S_OK;
  // Captures have no current CPU copy. A replacement executor cannot restore
  // their content from the old allocation or from the stale pixels vector.
@@ -243,8 +245,16 @@ HRESULT Renderer::upload_d3d12(SurfaceImage& i,SurfaceUploadResult* output){
  RECT rect{};surface_convert::Prepared prepared{};
  HRESULT hr=prepare_surface_upload(i,!matches,block_bytes,rect,prepared);if(FAILED(hr))return hr;
  D3D12TextureRef texture=matches?i.d3d12:nullptr;
- if(!texture&&FAILED(hr=d3d12_->create_texture(i.width,i.height,format,texture)))return hr;
+ if(!texture&&FAILED(hr=d3d12_->create_texture(i.width,i.height,format,texture,levels)))return hr;
  if(FAILED(hr=d3d12_->write_texture(*texture,rect,prepared.data,prepared.pitch)))return hr;
+ for(UINT level=1;block_bytes&&level<levels;++level){
+  const UINT w=(std::max)(1u,i.width>>level),h=(std::max)(1u,i.height>>level);
+  const UINT pitch=((w+3)/4)*block_bytes,rows=(h+3)/4;
+  const auto& bytes=i.bc_mips[level-1];
+  if(bytes.size()!=std::size_t(pitch)*rows)return E_INVALIDARG;
+  if(FAILED(hr=d3d12_->write_texture(*texture,RECT{0,0,LONG(w),LONG(h)},bytes.data(),pitch,level)))return hr;
+  prepared.bytes+=std::uint64_t(pitch)*rows;
+ }
  if(texture!=i.d3d12){i.d3d12=std::move(texture);++i.texture_serial;}
  i.uploaded_generation=i.generation;i.uploaded_shape=shape;i.gpu_captured=false;i.mip_source_used=true;
  clear_surface_dirty(i);
@@ -484,7 +494,7 @@ void Renderer::scene_unshare_surface_texture(std::uint64_t id,ID3D11Texture2D* t
 // queued command (scene mode's game thread; the core-mode host's table).
 std::shared_ptr<SurfaceImage> surface_snapshot(const SurfaceImage& image){
  std::shared_ptr<SurfaceImage> copy;
- try{copy=std::make_shared<SurfaceImage>();}catch(...){return nullptr;}
+ try{copy=std::make_shared<SurfaceImage>();copy->bc_mips=image.bc_mips;}catch(...){return nullptr;}
  SurfaceImage& c=*copy;
  c.id=image.id;c.width=image.width;c.height=image.height;c.pitch=image.pitch;c.format=image.format;
  c.has_color_key=image.has_color_key;c.color_key=image.color_key;c.generation=image.generation;

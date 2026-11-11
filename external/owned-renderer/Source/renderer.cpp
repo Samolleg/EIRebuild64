@@ -213,7 +213,8 @@ POINT capture_stretch_source_point(const RECT& source, const RECT& destination,
 
 void update_surface_memory_accounting(SurfaceImage& image) noexcept {
  if(image.scene_snapshot)return;  // the game thread's image is accounted
- const std::uint64_t cpu_bytes=image.pixels.capacity();
+ std::uint64_t cpu_bytes=image.pixels.capacity();
+ for(const auto& mip:image.bc_mips)cpu_bytes+=mip.capacity();
  const std::uint64_t gpu_bytes=texture_storage_bytes(image.texture.Get());
  const std::uint64_t double_resident=cpu_bytes&&gpu_bytes?std::min(cpu_bytes,gpu_bytes):0;
  replace_accounted_bytes(g_cpu_surface_bytes,image.accounted_cpu_bytes,cpu_bytes);

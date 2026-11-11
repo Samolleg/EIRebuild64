@@ -182,6 +182,8 @@ struct SurfaceImage {
     LONG pitch = 4;
     DDPIXELFORMAT format{};
     SurfacePixels pixels;
+    // Authored BC mip levels below level zero, tightly packed in 4x4 blocks.
+    std::vector<SurfacePixels> bc_mips;
     bool has_color_key = false;
     DDCOLORKEY color_key{};
     std::uint64_t generation = 1;
