@@ -1044,7 +1044,7 @@ public:
     // Synchronous bounded source values; never retains source pointers.
     HRESULT draw_embedded_fixed_function(D3DPRIMITIVETYPE type, const FixedFunctionVertex* vertices,
         DWORD vertex_count, const WORD* indices, DWORD index_count,
-        const FixedState& state, ID3D11ShaderResourceView* texture);
+        const FixedState& state, ID3D11ShaderResourceView* texture, SurfaceImage* surface = nullptr);
 #endif
     HRESULT draw_frame(const std::vector<LegacyDrawPacket>& packets,
                        const std::vector<std::uint8_t>& vertex_bytes,

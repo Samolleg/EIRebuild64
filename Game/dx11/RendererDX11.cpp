@@ -236,9 +236,12 @@ bool CDX11::SubmitC74FixedFunction(D3DPRIMITIVETYPE type, const owned::FixedFunc
             state.stage[0][D3DTSS_COLORARG2] = state.stage[0][D3DTSS_ALPHAARG2] = D3DTA_DIFFUSE;
             state.render[D3DRENDERSTATE_SHADEMODE] = D3DSHADE_FLAT;
         }
-        hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+        std::shared_ptr<owned::SurfaceImage> surface;
+        hr = !untextured && !device && boundParticleSurface ? OwnedRender::E1ParticleSurfaceImage(device.Get(),
+            deviceContext.Get(), boundParticleSurface, surface) : S_OK;
+        if (SUCCEEDED(hr)) hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
             return renderer.draw_embedded_fixed_function(type, vertices, count,
-                indices, indexCount, state, texture);
+                indices, indexCount, state, texture, surface.get());
         });
         RestoreHostBindings();
     }

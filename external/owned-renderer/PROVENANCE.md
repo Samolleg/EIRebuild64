@@ -1,3 +1,24 @@
+# X64D3D12 embedded fixed-function ingress, stage 30 (2026-11-11)
+
+Source SubmitC74FixedFunction now supplies its published CPU surface on the
+native backend. The bounded renderer entry admits D3D12, retaining finite
+vertex/index validation and the flush at the exact source stream position.
+The common author constant builder feeds the existing game VS/PS and vertex
+layout. Indices are expanded in order for the executor's vertex upload ring;
+point/line/triangle lists and strips retain their topology. The executor uses
+its existing native state translation for depth, blend, cull and wireframe,
+with the existing UI vertex layout, sampler and scissor. D3D11 keeps its
+original buffer/map/submission path. No HLSL, SDK or runtime DLL added.
+Host transport remains Source/embedded_d3d12.{h,cpp}; the new local ingress is
+Game/dx11/RendererDX11.cpp and Source/renderer_flush.cpp. The fixed pipeline
+cache is session-local; it uses the author's asynchronous pipeline library
+and omission reporting, but is not in the recorded warm-up list yet.
+
+Full BRIEF remains open: remaining sprite/SRV consumers still need native
+adapters, followed by coordinator build/link, D3D12 startup/FG and D3D11
+regression validation. The reported NOMINMAX fix was already in stage 26.
+No compilation, shader compilation, tests or game execution performed.
+
 # X64D3D12 immediate figure layer ingress, stage 29 (2026-11-11)
 
 The source BindTexture boundary retains the completed secondary CPU surface ID.

@@ -37,6 +37,8 @@ using D3D12TextureRef = std::shared_ptr<D3D12Texture>;
 // The shared UI programs (renderer_device.cpp kShader and its neighbours).
 enum class D3D12UiProgram : std::uint8_t { game, interface_scaled, interface_text, backdrop, count };
 
+struct D3D12NativeState;
+
 // One UI draw over the pass's vertices (the Renderer's 32-byte Vertex).
 struct D3D12UiDraw {
     const D3D12Texture* texture = nullptr;  // t0
@@ -44,6 +46,9 @@ struct D3D12UiDraw {
     FixedBlend blend{};
     D3D11_SAMPLER_DESC sampler{};           // s0
     bool triangle_list = false;             // else a strip
+    // Synchronous embedded fixed-function ingress, using the game shaders.
+    const D3D12NativeState* fixed_state = nullptr;
+    D3DPRIMITIVETYPE fixed_topology = D3DPT_TRIANGLELIST;
     bool scissor = false;
     RECT scissor_rect{};                    // output pixels
     UINT constants = 0;                     // its block in D3D12UiPass::constants

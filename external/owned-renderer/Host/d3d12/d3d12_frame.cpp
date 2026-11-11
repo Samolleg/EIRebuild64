@@ -2215,7 +2215,7 @@ public:
             // Every skipped quad is named (omit: the session total, and the
             // frame's interface line at present).
             if (depth_target_) { omit("interface quads (a depth-only target was bound)", false); continue; }
-            ID3D12PipelineState* pipeline = ui_pipeline(draw.program, draw.blend);
+            ID3D12PipelineState* pipeline = draw.fixed_state ? fixed_pipeline(draw) : ui_pipeline(draw.program, draw.blend);
             if (!pipeline) { omit("interface quads (pipeline not ready or failed)", false); continue; }
             const std::uint32_t sampler = sampler_index(draw.sampler);
             if (!draw.texture || sampler == UINT32_MAX) { omit("interface quads (no texture or sampler)", false); continue; }
@@ -2225,7 +2225,8 @@ public:
             if (table == UINT32_MAX) { omit("interface quads (beyond the descriptor ring)", false); continue; }  // it grows before the next frame
             core_.device()->CopyDescriptorsSimple(1, core_.views().cpu(table), draw.texture->srv, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
             set_pipeline(list, pipeline);
-            set_topology(list, draw.triangle_list ? D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST : D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+            set_topology(list, draw.fixed_state ? static_cast<D3D_PRIMITIVE_TOPOLOGY>(draw.fixed_topology) :
+                draw.triangle_list ? D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST : D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
             list->SetGraphicsRootConstantBufferView(kRootD3D11Constants, constants.gpu + std::uint64_t(draw.constants) * block);
             list->SetGraphicsRootDescriptorTable(kRootD3D11Resources, core_.views().gpu(table));
             list->SetGraphicsRootDescriptorTable(kRootD3D11Samplers, core_.samplers().gpu(sampler));
@@ -4427,6 +4428,25 @@ private:
 
     // The shared UI program with this blend: requested once (built ahead for
     // the UI's blend at start); null until ready or after it failed (named once).
+    ID3D12PipelineState* fixed_pipeline(const owned::D3D12UiDraw& draw) {
+        DXGI_FORMAT formats[9]{}; std::uint32_t targets = 0;
+        current_formats(formats, targets);
+        const std::string identity = "embedded.fixed." + std::to_string(unsigned(draw.fixed_topology));
+        const std::string* names[4] = {&identity, nullptr, nullptr, nullptr};
+        const std::wstring name = native_name(names, *draw.fixed_state, formats);
+        auto found = fixed_pipelines_.find(name);
+        if (found == fixed_pipelines_.end()) {
+            const D3D12_SHADER_BYTECODE* code[4] = {&ui_vs_, &ui_ps_[size_t(D3D12UiProgram::game)], nullptr, nullptr};
+            auto desc = native_desc(code, *draw.fixed_state, formats, targets);
+            desc.InputLayout = ui_desc(D3D12UiProgram::game, draw.blend, targets, formats).InputLayout;
+            desc.PrimitiveTopologyType = draw.fixed_topology == D3DPT_POINTLIST ? D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT :
+                draw.fixed_topology == D3DPT_LINELIST || draw.fixed_topology == D3DPT_LINESTRIP ?
+                D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE : D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
+            found = fixed_pipelines_.emplace(name, pipelines_.request(name, desc)).first;
+        }
+        return ready_pipeline(found->second);
+    }
+
     ID3D12PipelineState* ui_pipeline(D3D12UiProgram program, const owned::FixedBlend& blend) {
         const std::uint64_t key = (std::uint64_t(target_format()) << 56) | (std::uint64_t(program) << 48) | (std::uint64_t(blend.enabled != 0) << 40) |
                                   (std::uint64_t(blend.source) << 20) | blend.destination;
@@ -4610,6 +4630,7 @@ private:
     std::vector<std::pair<std::string, std::uint64_t>> counted_;
     D3D12_SHADER_BYTECODE ui_vs_{}, ui_ps_[size_t(D3D12UiProgram::count)]{};
     std::unordered_map<std::uint64_t, std::uint32_t> ui_pipelines_;
+    std::unordered_map<std::wstring, std::uint32_t> fixed_pipelines_;
     std::uint32_t imgui_pipeline_ = UINT32_MAX;
     std::unordered_map<std::string, std::uint32_t> samplers_;
     std::unordered_map<ImTextureID, owned::D3D12TextureRef> imgui_textures_;

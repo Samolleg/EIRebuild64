@@ -177,8 +177,8 @@ HRESULT Renderer::draw(D3DPRIMITIVETYPE type,DWORD fvf,const void* data,DWORD co
 #ifdef EID3D11_EMBEDDED
 HRESULT Renderer::draw_embedded_fixed_function(D3DPRIMITIVETYPE type,const FixedFunctionVertex* data,
  DWORD count,const WORD* indices,DWORD index_count,const FixedState& st,
- ID3D11ShaderResourceView* texture){SCENE_ENTRY("draw_embedded_fixed_function");
- if(!device_||!data||!count||count>65536u||(!indices&&index_count)||(indices&&!index_count))return E_INVALIDARG;
+ ID3D11ShaderResourceView* texture,SurfaceImage* surface){SCENE_ENTRY("draw_embedded_fixed_function");
+ if((!d3d12_&&!device_)||!data||!count||count>65536u||(!indices&&index_count)||(indices&&!index_count))return E_INVALIDARG;
  const DWORD elements=indices?index_count:count;
  switch(type){
  case D3DPT_POINTLIST:break;
@@ -189,6 +189,7 @@ HRESULT Renderer::draw_embedded_fixed_function(D3DPRIMITIVETYPE type,const Fixed
  default:return E_NOTIMPL;
  }
  for(DWORD i=0;i<index_count;++i)if(indices[i]>=count)return E_INVALIDARG;
+ if(d3d12_&&texture)return E_INVALIDARG;
  if(texture){ComPtr<ID3D11Device> actual;texture->GetDevice(&actual);
   if(actual.Get()!=device_.Get())return E_INVALIDARG;}
  std::vector<Vertex> vertices;
@@ -201,7 +202,7 @@ HRESULT Renderer::draw_embedded_fixed_function(D3DPRIMITIVETYPE type,const Fixed
  // drains queued work; no caller memory or texture is used asynchronously.
  HRESULT hr=flush_native();if(FAILED(hr))return hr;
  if(has_pending_ui()&&FAILED(hr=flush_ui()))return hr;
- return draw_fixed_function(type,vertices,indices,index_count,st,nullptr,
+ return draw_fixed_function(type,vertices,indices,index_count,st,surface,
   SemanticKind::simple_geometry,0,1,{},texture,false,true);
 }
 #endif
@@ -226,11 +227,15 @@ HRESULT Renderer::draw_fixed_function(D3DPRIMITIVETYPE type,std::vector<FixedFun
   for(auto& vertex:v)widescreen::compose_point(vertex.x,vertex.y,h);
  }
  if(tl&&camp::composing&&camp::primary_output)for(auto& vertex:v){const float x=vertex.x,y=vertex.y;vertex.x=camp::visual.a*x+camp::visual.b*y+camp::visual.x;vertex.y=camp::visual.c*x+camp::visual.d*y+camp::visual.y;}
+ HRESULT hr=S_OK;
+ UINT vertexOffset=0,indexOffset=0;
+ if(!d3d12_){
  const UINT vertexBytes=(UINT)(v.size()*sizeof(Vertex));
  if(!dynamic_vertices_||vertexBytes>dynamic_vertex_capacity_){dynamic_vertex_capacity_=std::max<UINT>(4u*1024u*1024u,vertexBytes);D3D11_BUFFER_DESC vd{};vd.ByteWidth=dynamic_vertex_capacity_;vd.Usage=D3D11_USAGE_DYNAMIC;vd.BindFlags=D3D11_BIND_VERTEX_BUFFER;vd.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;dynamic_vertices_.Reset();HRESULT createHr=device_->CreateBuffer(&vd,nullptr,&dynamic_vertices_);if(FAILED(createHr))return createHr;dynamic_vertex_offset_=0;discard_vertices_=true;}
  if(dynamic_vertex_offset_+vertexBytes>dynamic_vertex_capacity_){dynamic_vertex_offset_=0;discard_vertices_=true;}
- const UINT vertexOffset=dynamic_vertex_offset_;D3D11_MAPPED_SUBRESOURCE vertexMap{};HRESULT hr=context_->Map(dynamic_vertices_.Get(),0,discard_vertices_?D3D11_MAP_WRITE_DISCARD:D3D11_MAP_WRITE_NO_OVERWRITE,0,&vertexMap);if(FAILED(hr))return hr;std::memcpy(static_cast<std::uint8_t*>(vertexMap.pData)+vertexOffset,v.data(),vertexBytes);context_->Unmap(dynamic_vertices_.Get(),0);dynamic_vertex_offset_=(vertexOffset+vertexBytes+15u)&~15u;discard_vertices_=false;
- UINT indexOffset=0;if(indices&&index_count){const UINT indexBytes=index_count*2;if(!dynamic_indices_||indexBytes>dynamic_index_capacity_){dynamic_index_capacity_=std::max<UINT>(1024u*1024u,indexBytes);D3D11_BUFFER_DESC id{};id.ByteWidth=dynamic_index_capacity_;id.Usage=D3D11_USAGE_DYNAMIC;id.BindFlags=D3D11_BIND_INDEX_BUFFER;id.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;dynamic_indices_.Reset();if(FAILED(hr=device_->CreateBuffer(&id,nullptr,&dynamic_indices_)))return hr;dynamic_index_offset_=0;discard_indices_=true;}if(dynamic_index_offset_+indexBytes>dynamic_index_capacity_){dynamic_index_offset_=0;discard_indices_=true;}indexOffset=dynamic_index_offset_;D3D11_MAPPED_SUBRESOURCE indexMap{};if(FAILED(hr=context_->Map(dynamic_indices_.Get(),0,discard_indices_?D3D11_MAP_WRITE_DISCARD:D3D11_MAP_WRITE_NO_OVERWRITE,0,&indexMap)))return hr;std::memcpy(static_cast<std::uint8_t*>(indexMap.pData)+indexOffset,indices,indexBytes);context_->Unmap(dynamic_indices_.Get(),0);dynamic_index_offset_=(indexOffset+indexBytes+3u)&~3u;discard_indices_=false;}
+ vertexOffset=dynamic_vertex_offset_;D3D11_MAPPED_SUBRESOURCE vertexMap{};hr=context_->Map(dynamic_vertices_.Get(),0,discard_vertices_?D3D11_MAP_WRITE_DISCARD:D3D11_MAP_WRITE_NO_OVERWRITE,0,&vertexMap);if(FAILED(hr))return hr;std::memcpy(static_cast<std::uint8_t*>(vertexMap.pData)+vertexOffset,v.data(),vertexBytes);context_->Unmap(dynamic_vertices_.Get(),0);dynamic_vertex_offset_=(vertexOffset+vertexBytes+15u)&~15u;discard_vertices_=false;
+ if(indices&&index_count){const UINT indexBytes=index_count*2;if(!dynamic_indices_||indexBytes>dynamic_index_capacity_){dynamic_index_capacity_=std::max<UINT>(1024u*1024u,indexBytes);D3D11_BUFFER_DESC id{};id.ByteWidth=dynamic_index_capacity_;id.Usage=D3D11_USAGE_DYNAMIC;id.BindFlags=D3D11_BIND_INDEX_BUFFER;id.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;dynamic_indices_.Reset();if(FAILED(hr=device_->CreateBuffer(&id,nullptr,&dynamic_indices_)))return hr;dynamic_index_offset_=0;discard_indices_=true;}if(dynamic_index_offset_+indexBytes>dynamic_index_capacity_){dynamic_index_offset_=0;discard_indices_=true;}indexOffset=dynamic_index_offset_;D3D11_MAPPED_SUBRESOURCE indexMap{};if(FAILED(hr=context_->Map(dynamic_indices_.Get(),0,discard_indices_?D3D11_MAP_WRITE_DISCARD:D3D11_MAP_WRITE_NO_OVERWRITE,0,&indexMap)))return hr;std::memcpy(static_cast<std::uint8_t*>(indexMap.pData)+indexOffset,indices,indexBytes);context_->Unmap(dynamic_indices_.Get(),0);dynamic_index_offset_=(indexOffset+indexBytes+3u)&~3u;discard_indices_=false;}
+ }
  Constants c{};c.hud_opacity=hud_composition.opacity;c.combiner_padding=hit_test_active_?1u:0u;c.world=st.transform[D3DTRANSFORMSTATE_WORLD];c.view=st.transform[D3DTRANSFORMSTATE_VIEW];c.projection=st.transform[D3DTRANSFORMSTATE_PROJECTION];if(!tl&&camp::composing&&camp::primary_output)camp::compose_clip(&c.projection._11,camp::visual,float(canvas_width()),float(canvas_height()),true);c.viewport[0]=(float)st.viewport.dwX;c.viewport[1]=(float)st.viewport.dwY;c.viewport[2]=(float)std::max<DWORD>(1,st.viewport.dwWidth);c.viewport[3]=(float)std::max<DWORD>(1,st.viewport.dwHeight);
  // The upscaler jitter (jitter_clip): untransformed vertices through the
  // projection (row vectors: columns x and y take dx, dy times column w),
@@ -240,6 +245,43 @@ HRESULT Renderer::draw_fixed_function(D3DPRIMITIVETYPE type,std::vector<FixedFun
   else{float* p=&c.projection._11;for(int row=0;row<4;++row){p[row*4]+=dx*p[row*4+3];p[row*4+1]+=dy*p[row*4+3];}}}}
  DWORD fog=st.render[D3DRENDERSTATE_FOGCOLOR],tf=st.render[D3DRENDERSTATE_TEXTUREFACTOR];c.fog_color[0]=((fog>>16)&255)/255.f;c.fog_color[1]=((fog>>8)&255)/255.f;c.fog_color[2]=(fog&255)/255.f;c.fog_color[3]=1;c.texture_factor[0]=((tf>>16)&255)/255.f;c.texture_factor[1]=((tf>>8)&255)/255.f;c.texture_factor[2]=(tf&255)/255.f;c.texture_factor[3]=((tf>>24)&255)/255.f;c.transformed=tl;c.textured=texture!=nullptr || owned_texture!=nullptr;c.color_op=st.stage[0][D3DTSS_COLOROP];c.alpha_op=st.stage[0][D3DTSS_ALPHAOP];c.color_arg1=st.stage[0][D3DTSS_COLORARG1];c.color_arg2=st.stage[0][D3DTSS_COLORARG2];c.alpha_arg1=st.stage[0][D3DTSS_ALPHAARG1];c.alpha_arg2=st.stage[0][D3DTSS_ALPHAARG2];c.alpha_test=st.render[D3DRENDERSTATE_ALPHATESTENABLE]!=0;c.alpha_func=st.render[D3DRENDERSTATE_ALPHAFUNC];c.alpha_ref=(st.render[D3DRENDERSTATE_ALPHAREF]&255)/256.f;c.fog_enable=st.render[D3DRENDERSTATE_FOGENABLE]!=0;c.specular_enable=spec&&st.render[D3DRENDERSTATE_SPECULARENABLE]!=0;
  if(!tl)widescreen::compose_hud_clip(&c.projection._11,hud_composition,float(canvas_width()),float(canvas_height()),true);
+ if(d3d12_){
+  if(owned_texture)return E_INVALIDARG;
+  D3D12TextureRef texture12;
+  if(texture){texture->world_mip_use=!scene_composited_;if(scene_composited_)texture->static_mip_hint=false;
+   if(FAILED(hr=upload(*texture)))return hr;texture12=texture->d3d12;}
+  else{
+   if(!d3d12_white_){
+    if(FAILED(hr=d3d12_->create_texture(1,1,DXGI_FORMAT_B8G8R8A8_UNORM,d3d12_white_)))return hr;
+    const DWORD white=0xffffffffu;
+    if(FAILED(hr=d3d12_->write_texture(*d3d12_white_,RECT{0,0,1,1},&white,4))){d3d12_white_.reset();return hr;}
+   }
+   texture12=d3d12_white_;
+  }
+  // Expand source indices in order, preserving the author's vertex layout.
+  std::vector<Vertex> expanded;
+  if(index_count>UINT_MAX/sizeof(Vertex))return E_INVALIDARG;
+  if(indices&&index_count){try{expanded.reserve(index_count);for(DWORD i=0;i<index_count;++i)expanded.push_back(v[indices[i]]);}
+   catch(const std::bad_alloc&){return E_OUTOFMEMORY;}}
+  const auto& vertices=expanded.empty()?v:expanded;
+  if(vertices.size()>UINT_MAX/sizeof(Vertex))return E_INVALIDARG;
+  D3D12NativeState state{};
+  state.raster=fixed_raster_desc(st.render[D3DRENDERSTATE_CULLMODE],st.render[D3DRENDERSTATE_FILLMODE]==D3DFILL_WIREFRAME,true);
+  state.depth=fixed_depth_desc(st.render[D3DRENDERSTATE_ZENABLE],st.render[D3DRENDERSTATE_ZWRITEENABLE],st.render[D3DRENDERSTATE_ZFUNC]);
+  state.blend=fixed_blend_choice(st.render[D3DRENDERSTATE_ALPHABLENDENABLE],st.render[D3DRENDERSTATE_SRCBLEND],st.render[D3DRENDERSTATE_DESTBLEND],hud_composition.opacity<1.f);
+  D3D12UiDraw draw;draw.texture=texture12.get();draw.blend=state.blend;draw.fixed_state=&state;draw.fixed_topology=type;
+  draw.vertex_count=UINT(vertices.size());
+  draw.sampler=world_texture_sampler(st.stage[0][D3DTSS_MINFILTER],st.stage[0][D3DTSS_MAGFILTER],st.stage[0][D3DTSS_MIPFILTER],
+   st.stage[0][D3DTSS_ADDRESSU],st.stage[0][D3DTSS_ADDRESSV],!scene_composited_,
+   1u<<configured_integer(debug_overlay_.config(),"anisotropy",3)).description;
+  const camp::Clip clip=camp::composing&&camp::primary_output?camp::visual.clip:camp::Clip{};
+  draw.scissor=ui_clip_rect(hud_composition,clip,draw.scissor_rect);
+  D3D12UiPass pass;pass.vertices=vertices.data();pass.vertex_bytes=UINT(vertices.size()*sizeof(Vertex));pass.vertex_stride=sizeof(Vertex);
+  pass.constants=&c;pass.constant_block_bytes=sizeof(c);pass.constant_blocks=1;pass.draws=&draw;pass.draw_count=1;
+  hr=d3d12_->draw_ui(pass);
+  if(SUCCEEDED(hr)&&texture)sampled_surface_pixels(*texture);
+  return hr;
+ }
  if(FAILED(hr=upload_draw_constants(&c,sizeof(c))))return hr;const camp::Clip clip=camp::composing&&camp::primary_output?camp::visual.clip:camp::Clip{};if(FAILED(hr=apply_state(st,texture!=nullptr || owned_texture!=nullptr,hud_composition,clip)))return hr;if(texture){texture->world_mip_use=!scene_composited_;if(scene_composited_)texture->static_mip_hint=false;if(FAILED(hr=upload(*texture)))return hr;context_->PSSetShaderResources(0,1,texture->srv.GetAddressOf());}else{context_->PSSetShaderResources(0,1,&owned_texture);}
  UINT sz=sizeof(Vertex),off=vertexOffset;ID3D11Buffer* vertexBuffer=dynamic_vertices_.Get();context_->IASetInputLayout(layout_.Get());context_->IASetVertexBuffers(0,1,&vertexBuffer,&sz,&off);D3D11_PRIMITIVE_TOPOLOGY top=D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;if(type==D3DPT_TRIANGLESTRIP)top=D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP;else if(type==D3DPT_LINELIST)top=D3D11_PRIMITIVE_TOPOLOGY_LINELIST;else if(type==D3DPT_LINESTRIP)top=D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP;else if(type==D3DPT_POINTLIST)top=D3D11_PRIMITIVE_TOPOLOGY_POINTLIST;context_->IASetPrimitiveTopology(top);context_->VSSetShader(vs_.Get(),nullptr,0);context_->PSSetShader(ps_.Get(),nullptr,0);D3D11_VIEWPORT vp=target_viewport();context_->RSSetViewports(1,&vp);context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());if(indices&&index_count){context_->IASetIndexBuffer(dynamic_indices_.Get(),DXGI_FORMAT_R16_UINT,indexOffset);context_->DrawIndexed(index_count,0,0);}else context_->Draw(count,0);if(texture)sampled_surface_pixels(*texture);return S_OK;
 }
