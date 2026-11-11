@@ -582,8 +582,6 @@
     <ClInclude Include="Game\Unit.h" />
     <ClInclude Include="Game\BodyShape.h" />
     <ClInclude Include="Game\BodyShapeSchema.h" />
-    <ClInclude Include="Game\BodyShapeData.h" />
-    <ClInclude Include="Game\BodyShapeResolver.h" />
     <ClInclude Include="Game\UnitClientSpecific.h" />
     <ClInclude Include="Game\UnitDatabase.h" />
     <ClInclude Include="Game\UnitServer.h" />

@@ -100,6 +100,8 @@ VisualPreparedResources::PoseKey owned_visual_pose_key(const RetainedVisualSampl
     VisualPreparedResources::PoseKey key{};
     key.lifecycle=sample.lifecycle;key.resource=sample.resource;key.assembly=sample.assembly;
     key.assembly_revision=sample.assembly?sample.assembly->revision:0;
+    key.nala_shape_inputs=sample.values.nala.shape_inputs;
+    key.nala_selected=sample.values.nala.selected;key.nala_valid=sample.values.nala.valid;
     key.unit=sample.values.unit && !sample.completed_pose;key.selection=sample.selection;key.phase=sample.pose.phase;
     if(key.unit) {
         key.root=sample.pose.root;key.root_rotation=sample.pose.root_rotation;
@@ -114,6 +116,8 @@ VisualPreparedResources::PoseKey owned_visual_pose_key(const RetainedVisualSampl
 
 bool same_visual_pose_key(const VisualPreparedResources::PoseKey& left,
     const VisualPreparedResources::PoseKey& right) noexcept {
+    if(left.nala_selected!=right.nala_selected || left.nala_valid!=right.nala_valid ||
+        left.nala_shape_inputs!=right.nala_shape_inputs)return false;
     if(!same_lifecycle_identity(left.lifecycle,right.lifecycle) ||
         !same_visual_resource(left.resource,right.resource) || left.assembly!=right.assembly ||
         left.assembly_revision!=right.assembly_revision || left.unit!=right.unit || left.phase!=right.phase ||
@@ -129,6 +133,8 @@ bool same_visual_pose_key(const VisualPreparedResources::PoseKey& left,
 
 bool owned_visual_pose_key_matches(const VisualPreparedResources::PoseKey& left,
     const RetainedVisualSample& sample,const double* phase) noexcept {
+    if(left.nala_selected!=sample.values.nala.selected || left.nala_valid!=sample.values.nala.valid ||
+        left.nala_shape_inputs!=sample.values.nala.shape_inputs)return false;
     const bool unit=sample.values.unit && !sample.completed_pose;
     const decltype(left.phase) current=phase?*phase:sample.pose.phase;
     if(!same_lifecycle_identity(left.lifecycle,sample.lifecycle) ||
