@@ -78,7 +78,12 @@ struct State {
     float idle_opacity = .5f;
     std::string status = "Waiting for an active mission.";
 };
-State& state() { static State value; return value; }
+State& state() {
+    // Global client-world destruction can retire units after ordinary statics.
+    // World retirement clears the per-world publications explicitly.
+    static State* value = new State;
+    return *value;
+}
 std::atomic<std::uint64_t> g_game_revision{1};
 void game_changed() noexcept { g_game_revision.fetch_add(1, std::memory_order_relaxed); }
 float plate_opacity(const State& s,const CombatUnitValue& unit) {

@@ -94,7 +94,10 @@ public:
     E1ResourceCreation& operator=(const E1ResourceCreation&) = delete;
 };
 inline E1SceneMembership& E1Scene() noexcept {
-    static E1SceneMembership value(owned::retained_visual_scene());
-    return value;
+    // Global client worlds retire resources during CRT teardown, after
+    // function-local objects would be destroyed. Match the retained scene
+    // lifetime. Retire still releases each world's memberships and resources.
+    static E1SceneMembership* value = new E1SceneMembership(owned::retained_visual_scene());
+    return *value;
 }
 }
