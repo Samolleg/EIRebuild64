@@ -1146,7 +1146,13 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
             return renderer.blit_srv(image, destination, source, (flags & EI_RENDERER_UI_OPAQUE) != 0);
         });
     };
-    const HRESULT timingAttached = nativeD3D12 ? S_FALSE : frameTiming.Attach(device.Get(), deviceContext.Get());
+    HRESULT timingAttached = S_FALSE;
+    if (nativeD3D12) {
+        IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
+            timingAttached = frameTiming.AttachNative(renderer.native_profile_timestamps());
+            return S_OK;
+        }));
+    } else timingAttached = frameTiming.Attach(device.Get(), deviceContext.Get());
     GameJournal::Event("RENDER", "frame_owner",
         "frame=c56 hwnd=%p menu_panels=c56-blit world_terrain=c56 world_figures=c56 game_particles=c56 visfog=c56 fog=c56 triangles=c56 effects=category-migration shadows=c56 timing_gpu=0x%08lX",
         hWnd, static_cast<unsigned long>(timingAttached));

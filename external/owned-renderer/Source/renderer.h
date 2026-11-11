@@ -1571,6 +1571,9 @@ public:
     // One bridge event naming the removal reason, adapter, driver and memory.
     void report_device_removed(HRESULT reason) noexcept;
     ID3D11Device* resource_device() const noexcept { return device_.Get(); }
+    ProfileTimestamps* native_profile_timestamps() const noexcept {
+        return d3d12_ ? &d3d12_->profile_timestamps() : nullptr;
+    }
     UINT width() const { return width_; }
     UINT height() const { return height_; }
     std::uint64_t native_logical_draws() const { return perf_native_draws_; }

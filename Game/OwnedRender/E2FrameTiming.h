@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include "render_profiler.h"
 
 namespace OwnedRender {
 // A bounded tail of completed measurements, in milliseconds. Missing GPU
@@ -34,10 +35,12 @@ public:
 // when the GPU never completes. GetData never flushes or waits for the GPU.
 class E2FrameTiming {
     using Query = Microsoft::WRL::ComPtr<ID3D11Query>;
-    struct Slot { Query disjoint, begin, end; bool pending = false; };
+    struct Slot { Query disjoint, begin, end; bool pending = false;
+        std::uint64_t nativeBegin = 0, nativeEnd = 0; unsigned polls = 0; };
     std::array<Slot, 8> slots;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
     FrameSamples cpu, gpu;
+    owned::ProfileTimestamps* native = nullptr; // executor lifetime, reattached at renderer initialization
     LONGLONG frequency = 0, cpuBegin = 0;
     int active = -1;
     bool open = false, gpuEnabled = false;
@@ -73,7 +76,15 @@ public:
         for (auto& slot : slots) slot = {};
         context.Reset(); cpu = {}; gpu = {};
         completed = dropped = invalid = aborted = 0;
-        cpuBegin = frequency = 0; gpuEnabled = false; queryStatus = S_FALSE;
+        cpuBegin = frequency = 0; gpuEnabled = false; queryStatus = S_FALSE; native = nullptr;
+    }
+    HRESULT AttachNative(owned::ProfileTimestamps* timestamps) noexcept {
+        Reset();
+        LARGE_INTEGER value{};
+        if (QueryPerformanceFrequency(&value)) frequency = value.QuadPart;
+        native = timestamps;
+        gpuEnabled = native && native->frequency() != 0;
+        return queryStatus = gpuEnabled ? S_OK : S_FALSE;
     }
     HRESULT Attach(ID3D11Device* device, ID3D11DeviceContext* immediate) noexcept {
         Reset();
@@ -101,6 +112,23 @@ public:
         gpuEnabled = true; return queryStatus = S_OK;
     }
     void Poll() noexcept {
+        if (native && gpuEnabled) {
+            const auto ticksPerSecond = native->frequency();
+            for (auto& slot : slots) {
+                if (!slot.pending) continue;
+                std::uint64_t begin = 0, end = 0;
+                if (!native->value(slot.nativeEnd, end) || !native->value(slot.nativeBegin, begin)) {
+                    // A lost timestamp (e.g. a growing query heap) must not
+                    // occupy one of the bounded slots forever.
+                    if (++slot.polls > 120) { slot.pending = false; ++dropped; }
+                    continue;
+                }
+                slot.pending = false;
+                if (!ticksPerSecond || end < begin) { ++invalid; continue; }
+                gpu.Add(double(end - begin) * 1000.0 / double(ticksPerSecond));
+            }
+            return;
+        }
         if (!gpuEnabled || !context) return;
         for (auto& slot : slots) {
             if (!slot.pending) continue;
@@ -126,6 +154,11 @@ public:
         Poll();
         if (!gpuEnabled) return;
         for (unsigned i = 0; i < slots.size(); ++i) if (!slots[i].pending) {
+            if (native) {
+                slots[i].nativeBegin = native->stamp(); slots[i].nativeEnd = 0; slots[i].polls = 0;
+                if (!slots[i].nativeBegin) { ++dropped; return; }
+                active = int(i); return;
+            }
             active = int(i);
             context->Begin(slots[i].disjoint.Get()); context->End(slots[i].begin.Get());
             return;
@@ -138,7 +171,13 @@ public:
     void End(bool presented) noexcept {
         if (!open) return;
         CloseQuery();
-        if (active >= 0) slots[active].pending = presented;
+        if (active >= 0) {
+            if (native) {
+                slots[active].nativeEnd = native->stamp();
+                slots[active].pending = presented && slots[active].nativeEnd != 0;
+                if (presented && !slots[active].nativeEnd) ++dropped;
+            } else slots[active].pending = presented;
+        }
         active = -1;
         if (presented) {
             if (frequency > 0) cpu.Add(double(Now() - cpuBegin) * 1000.0 / double(frequency));
