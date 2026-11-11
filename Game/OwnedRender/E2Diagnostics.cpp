@@ -106,6 +106,7 @@ const std::string& harness_directory() noexcept { static const std::string empty
 unsigned harness_camera_path_steps() noexcept { return 0; }
 const HarnessCommand* harness_present_step() noexcept { return nullptr; }
 void harness_complete(bool, const std::string&) noexcept { E2_UNAVAILABLE("retail harness completion"); }
+void harness_complete_entry(unsigned long, bool, const std::string&) noexcept { E2_UNAVAILABLE("retail harness completion"); }
 void harness_world_frame(void*) noexcept { E2_UNAVAILABLE("retail harness world commands"); }
 bool harness_on_travel_map() noexcept { E2_UNAVAILABLE("retail harness travel state"); return false; }
 void request_debug_lightning() noexcept { E2_UNAVAILABLE("debug lightning command"); }
