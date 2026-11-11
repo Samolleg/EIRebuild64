@@ -192,6 +192,24 @@ int write_dxil_sources(const std::string& directory, const std::vector<ShaderPro
 // everything the other commit had; the store keeps both. Never pruned here:
 // delete the folder to reclaim its space.
 std::string g_store;
+ShaderKey g_compiler_key;
+// Hash the DLL actually providing D3DCompile, including servicing updates.
+bool identify_compiler() {
+    HMODULE module = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           reinterpret_cast<LPCWSTR>(&D3DCompile), &module)) return false;
+    wchar_t path[32768];
+    const DWORD length = GetModuleFileNameW(module, path, 32768);
+    if (!length || length >= 32768) return false;
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    shader_cache_detail::Hasher h;
+    char buffer[65536];
+    while (in.read(buffer, sizeof(buffer)) || in.gcount()) h.bytes(buffer, static_cast<std::size_t>(in.gcount()));
+    if (!in.eof()) return false;
+    g_compiler_key = {h.a, h.b};
+    return true;
+}
 std::string store_file(const ShaderKey& key) {
     std::string narrow;
     for (const wchar_t ch : native_spec_cache_file_name(key)) narrow += static_cast<char>(ch); // hex digits and ".dxbc"
@@ -218,7 +236,9 @@ void store_write(const ShaderKey& key, const void* code, std::size_t size) {
 }
 // The store's key: the program as FXC sees it after preprocessing (its
 // defines applied, comments and #if-excluded code gone), its entry, profile
-// and flags. The table key (shader_key) hashes the composed source, which
+// and flags, plus the loaded compiler DLL fingerprint. Includes and defines
+// are resolved by D3DPreprocess; compilation uses the same null include handler.
+// The table key (shader_key) hashes the composed source, which
 // every program built from the native source shares, so before this any
 // edit there recompiled all of them (~186 programs; a terrain edit reached
 // the ground cover, fog and critter programs too). Preprocessing a program
@@ -234,7 +254,9 @@ bool compile_key(const ShaderProgram& program, ShaderKey& key) {
     const char* p = static_cast<const char*>(text->GetBufferPointer());
     const char* const end = p + text->GetBufferSize();
     shader_cache_detail::Hasher h;
-    h.text("preprocessed 2");
+    h.text("preprocessed 3");
+    h.bytes(&g_compiler_key.a, sizeof(g_compiler_key.a));
+    h.bytes(&g_compiler_key.b, sizeof(g_compiler_key.b));
     while (p < end) {
         const char* line_end = static_cast<const char*>(std::memchr(p, '\n', std::size_t(end - p)));
         line_end = line_end ? line_end + 1 : end;
@@ -273,6 +295,10 @@ int main(int argc, char** argv) {
     }
     const std::string output = argv[1];
     if (const char* store = std::getenv("EID3D11_SHADER_STORE"); store && *store) {
+        if (!identify_compiler()) {
+            std::fprintf(stderr, "shader_embed: cannot identify shader compiler DLL\n");
+            return 1;
+        }
         g_store = store;
         CreateDirectoryA(g_store.c_str(), nullptr);
     }
@@ -286,7 +312,9 @@ int main(int argc, char** argv) {
         previous.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
     }
     if (!validate_shader_table(previous.data(), previous.size())) previous.clear();
-    if (!previous.empty()) use_embedded_shaders(previous.data(), previous.size());
+    // The previous table has no compiler identity. Only compiler-keyed store
+    // entries can be reused when the store is enabled.
+    if (!previous.empty() && g_store.empty()) use_embedded_shaders(previous.data(), previous.size());
 
     std::vector<ShaderProgram> programs;
     append_shader_groups(0xFFFFFFFFu, programs);
@@ -332,8 +360,6 @@ int main(int argc, char** argv) {
             std::size_t size = 0;
             if (shader_cache_detail::find(table[i].first, code, size)) {
                 table[i].second.assign(static_cast<const char*>(code), size);
-                if (keyed && GetFileAttributesA(store_file(stored_key).c_str()) == INVALID_FILE_ATTRIBUTES)
-                    store_write(stored_key, code, size); // seeds the store
                 continue;
             }
             if (keyed && store_read(stored_key, table[i].second)) { ++stored; continue; }
@@ -432,11 +458,10 @@ int main(int argc, char** argv) {
             wanted[i] = file_of(program);
             ShaderKey key{};
             const bool keyed = !g_store.empty() && compile_key(program, key);
-            if (GetFileAttributesA(wanted[i].c_str()) != INVALID_FILE_ATTRIBUTES) {
-                if (keyed) CopyFileA(wanted[i].c_str(), store_file(key).c_str(), TRUE); // seeds the store
+            if (!keyed && GetFileAttributesA(wanted[i].c_str()) != INVALID_FILE_ATTRIBUTES) {
                 continue;
             }
-            if (keyed && CopyFileA(store_file(key).c_str(), wanted[i].c_str(), TRUE)) { ++special_stored; continue; }
+            if (keyed && CopyFileA(store_file(key).c_str(), wanted[i].c_str(), FALSE)) { ++special_stored; continue; }
             Microsoft::WRL::ComPtr<ID3DBlob> blob, messages;
             if (FAILED(D3DCompile(program.source.data(), program.source.size(), program.name, program.defines, nullptr,
                                   program.entry, program.profile, program.flags, 0, &blob, &messages))) {
