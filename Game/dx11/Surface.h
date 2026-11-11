@@ -22,6 +22,7 @@ private:
     bool opaquePadding = false;
     std::shared_ptr<owned::SurfaceImage> cpuImage;
     D3D11_TEXTURE2D_DESC cpuDesc{};
+    DXGI_FORMAT cpuUploadFormat = DXGI_FORMAT_UNKNOWN;
     HBITMAP cpuBitmap = nullptr;
     HGDIOBJ cpuPreviousBitmap = nullptr;
     void* cpuDcPixels = nullptr;

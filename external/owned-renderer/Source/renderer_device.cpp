@@ -574,14 +574,14 @@ HRESULT Renderer::fail_embedded_d3d12(const char* operation,HRESULT result,const
 HRESULT Renderer::ensure_embedded_d3d12(){
  if(d3d12_)return embedded_d3d12_failed_?E_FAIL:S_OK;
  std::string reason;
- if(!embedded_d3d12_.initialize(hwnd_,reason))return fail_embedded_d3d12("device/swap chain creation",E_FAIL,reason.c_str());
- d3d12_=embedded_d3d12_.frame();
  const auto failed=[&](const char* step,HRESULT hr){
-  fail_embedded_d3d12(step,hr,embedded_d3d12_.failure());
+  fail_embedded_d3d12(step,hr,reason.empty()?embedded_d3d12_.failure():reason.c_str());
   release();
   return hr;
  };
  try{
+  if(!embedded_d3d12_.initialize(hwnd_,reason))return failed("device/swap chain creation",E_FAIL);
+  d3d12_=embedded_d3d12_.frame();
   debug_overlay_set_running_renderer("64-bit embedded, Direct3D 12",false);
   debug_overlay_set_running_d3d12(true);
   if(IDXGIAdapter* adapter=d3d12_->adapter())adapter->QueryInterface(IID_PPV_ARGS(adapter3_.ReleaseAndGetAddressOf()));

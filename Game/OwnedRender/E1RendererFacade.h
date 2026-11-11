@@ -27,6 +27,7 @@ class RendererFacadeCore {
 
 public:
     RendererFacadeCore() = default;
+    bool D3D12Selected() const noexcept { return renderer.d3d12_selected(); }
     RendererFacadeCore(const RendererFacadeCore&) = delete;
     RendererFacadeCore& operator=(const RendererFacadeCore&) = delete;
 

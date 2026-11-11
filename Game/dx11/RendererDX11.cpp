@@ -742,9 +742,13 @@ void CDX11::RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals)
     c56WorldPassRan = true;
     RefreshOwnedTargets();
     SetRenderStates();
-    for (UINT stage = 0; stage < boundFigureTextures.size(); ++stage) {
-        ID3D11ShaderResourceView* resource = boundFigureTextures[stage].Get();
-        deviceContext->PSSetShaderResources(stage, 1, &resource);
+    // The native pass already captured surface identities in its packets.
+    // Only D3D11 restores immediate SRV bindings after the owned world pass.
+    if (!D3D12Selected()) {
+        for (UINT stage = 0; stage < boundFigureTextures.size(); ++stage) {
+            ID3D11ShaderResourceView* resource = boundFigureTextures[stage].Get();
+            deviceContext->PSSetShaderResources(stage, 1, &resource);
+        }
     }
     const int state = FAILED(pass) ? 3 : visuals ? (owned ? 2 : 1) : 0;
     if (state != c56WorldPassState) {

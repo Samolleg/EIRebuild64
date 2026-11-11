@@ -223,14 +223,14 @@ BOOL CTexture::Load(CRenderer *pRend, SMMPFileHeader *pHdr, DWORD dwFromLevel)
     pSurface = std::make_unique<CDXGISurface>(pRend->GetD3D(), &tex2d);
 
     std::string debugName;
-    if (szName)
+    if (pSurface->GetTexture() && szName)
     {
         debugName = "tex2d_" + szName;
         SetDebugObjectNameEx(pSurface->GetTexture().Get(), debugName);
         debugName = "sres_" + szName;
         SetDebugObjectNameEx(pSurface->GetShaderResource().Get(), debugName);
     }
-    else
+    else if (pSurface->GetTexture())
     {
         DirectX::SetDebugObjectName(pSurface->GetTexture().Get(), "tex2d_nameless");
         DirectX::SetDebugObjectName(pSurface->GetShaderResource().Get(), "tex2d_nameless");

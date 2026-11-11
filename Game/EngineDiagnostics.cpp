@@ -133,6 +133,8 @@ void Caught(const char *text, DWORD code) {
     EXCEPTION_RECORD record = {}; record.ExceptionCode = code;
 #ifdef _M_IX86
     record.ExceptionAddress = reinterpret_cast<void *>(context.Eip);
+#elif defined(_M_X64)
+    record.ExceptionAddress = reinterpret_cast<void *>(context.Rip);
 #endif
     EXCEPTION_POINTERS info = { &record, &context };
     Filter(&info);

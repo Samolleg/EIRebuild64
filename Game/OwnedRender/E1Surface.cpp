@@ -84,6 +84,7 @@ bool E1Surface::CompleteCpu(const owned::SurfaceImage& source, bool alphaFullyOp
     image->width = source.width; image->height = source.height;
     image->pitch = source.pitch; image->format = source.format;
     image->pixels = source.pixels;
+    image->bc_mips = source.bc_mips;
     image->has_color_key = source.has_color_key; image->color_key = source.color_key;
     image->static_mip_hint = source.static_mip_hint; image->cpu_pinned = true;
     auto value = std::make_shared<owned::OwnedVisualSurface>();
@@ -111,6 +112,7 @@ HRESULT E1CopyCpuSurface(std::uint64_t id, owned::SurfaceImage& image) noexcept 
     image.width = source.width; image.height = source.height;
     image.pitch = source.pitch; image.format = source.format;
     image.pixels = source.pixels;
+    image.bc_mips = source.bc_mips;
     image.has_color_key = source.has_color_key; image.color_key = source.color_key;
     image.static_mip_hint = source.static_mip_hint; image.cpu_pinned = true;
     return S_OK;

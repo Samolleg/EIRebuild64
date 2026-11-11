@@ -216,8 +216,15 @@ BOOL CALLBACK StackRead(HANDLE, DWORD64 address, PVOID buffer, DWORD size, LPDWO
 
 PVOID CALLBACK FunctionTable(HANDLE process, DWORD64 address)
 {
+#if defined(_M_X64)
+    // Unwind through system DLLs too, even when their PDBs are unavailable.
+    // x64 unwind metadata lives in the loaded image and needs no symbol server.
+    DWORD64 imageBase = 0;
+    return RtlLookupFunctionEntry(address, &imageBase, nullptr);
+#else
     return details.exactPdb && ModuleBase(process, address) == symbolBase && pSymFunctionTableAccess64
         ? pSymFunctionTableAccess64(process, address) : nullptr;
+#endif
 }
 
 void AddFrame(ULONG_PTR address)
@@ -290,6 +297,22 @@ void CollectDetails(EXCEPTION_POINTERS *pointers)
             AddFrame(static_cast<DWORD>(walk.AddrPC.Offset));
         lastPc = walk.AddrPC.Offset; lastSp = walk.AddrStack.Offset;
     }
+#elif defined(_M_X64)
+    CONTEXT context = {};
+    if (!ReadMemory(reinterpret_cast<ULONG_PTR>(info.ContextRecord), &context, sizeof(context))) return;
+    AddFrame(context.Rip);
+    STACKFRAME64 walk = {};
+    walk.AddrPC.Offset = context.Rip; walk.AddrStack.Offset = context.Rsp; walk.AddrFrame.Offset = context.Rbp;
+    walk.AddrPC.Mode = walk.AddrStack.Mode = walk.AddrFrame.Mode = AddrModeFlat;
+    DWORD64 lastPc = context.Rip, lastSp = context.Rsp;
+    for (unsigned attempt = 0; attempt < 64 && details.frameCount < 64 && pStackWalk64; ++attempt) {
+        if (!pStackWalk64(IMAGE_FILE_MACHINE_AMD64, GetCurrentProcess(), crashThreadHandle,
+                &walk, &context, StackRead, FunctionTable, ModuleBase, nullptr) || !walk.AddrPC.Offset) break;
+        if (attempt && walk.AddrPC.Offset == lastPc && walk.AddrStack.Offset == lastSp) break;
+        if (attempt || walk.AddrPC.Offset != details.frames[0].address)
+            AddFrame(static_cast<ULONG_PTR>(walk.AddrPC.Offset));
+        lastPc = walk.AddrPC.Offset; lastSp = walk.AddrStack.Offset;
+    }
 #endif
     for (unsigned i = 0; i < details.frameCount; ++i)
     {
@@ -310,7 +333,7 @@ void PrepareSymbols()
     if (!length || length == MAX_PATH) return;
     wcscpy_s(folder, image);
     wchar_t *slash = wcsrchr(folder, L'\\'); if (!slash) return; *slash = 0;
-    _snwprintf_s(pdb, _TRUNCATE, L"%s\\EIRebuild.pdb", folder);
+    _snwprintf_s(pdb, _TRUNCATE, L"%s\\EIRebuild64.pdb", folder);
     // No invasion, no env paths, no deferred/automatic module loading or network.
     pSymSetOptions(SYMOPT_EXACT_SYMBOLS | SYMOPT_LOAD_LINES | SYMOPT_UNDNAME |
         SYMOPT_FAIL_CRITICAL_ERRORS | SYMOPT_NO_PROMPTS | SYMOPT_IGNORE_NT_SYMPATH |
@@ -556,6 +579,12 @@ void WriteContext(ReportWriter &out, EXCEPTION_POINTERS *info)
     }
     else
         out.Print("Stack bytes: unavailable (error %lu)\r\n", GetLastError());
+#elif defined(_M_X64)
+    const CONTEXT* ctx = info->ContextRecord;
+    out.Print("RAX=%016llX RBX=%016llX RCX=%016llX RDX=%016llX\r\n",
+              ctx->Rax, ctx->Rbx, ctx->Rcx, ctx->Rdx);
+    out.Print("RIP=%016llX RSP=%016llX RBP=%016llX EFLAGS=%08lX\r\n",
+              ctx->Rip, ctx->Rsp, ctx->Rbp, ctx->EFlags);
 #else
     out.Print("Registers: unsupported architecture\r\n");
 #endif
