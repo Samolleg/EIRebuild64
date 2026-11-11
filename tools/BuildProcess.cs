@@ -25,6 +25,14 @@ public static class EIBuildProcess {
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateJobObject(IntPtr job, uint code);
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool TerminateProcess(IntPtr process, uint code);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    [StructLayout(LayoutKind.Sequential)]
+    struct JobAccounting {
+        public long userTime, kernelTime, periodUserTime, periodKernelTime;
+        public uint pageFaults, totalProcesses, activeProcesses, terminatedProcesses;
+    }
+    [DllImport("kernel32.dll", SetLastError=true)]
+    static extern bool QueryInformationJobObject(IntPtr job, int informationClass,
+        out JobAccounting accounting, int size, IntPtr returnLength);
     public static int Run(string app, string arguments, string directory) {
         IntPtr job = CreateJobObject(IntPtr.Zero, null);
         if (job == IntPtr.Zero) throw new Win32Exception();
@@ -45,14 +53,30 @@ public static class EIBuildProcess {
         } finally {
             // Job membership tracks exact process identities, including orphaned nodes.
             // No process-name search or termination outside this invocation.
-            if (assigned) {
-                if (!TerminateJobObject(job, 1)) throw new Win32Exception();
-                if (WaitForSingleObject(job, 30000) != 0) throw new Exception("Build job did not drain.");
-                Console.WriteLine("Private MSBuild job drained; no owned workers remain.");
-            } else if (pi.process != IntPtr.Zero) { TerminateProcess(pi.process, 1); }
-            if (pi.thread != IntPtr.Zero) CloseHandle(pi.thread);
-            if (pi.process != IntPtr.Zero) CloseHandle(pi.process);
-            CloseHandle(job);
+            try {
+                if (assigned) {
+                    if (!TerminateJobObject(job, 1)) throw new Win32Exception();
+                    // Job handles do not signal when the last process exits.
+                    // Query membership to wait for cleanup on every exit path.
+                    var deadline = DateTime.UtcNow.AddSeconds(30);
+                    JobAccounting accounting;
+                    do {
+                        if (!QueryInformationJobObject(job, 1, out accounting,
+                            Marshal.SizeOf(typeof(JobAccounting)), IntPtr.Zero)) throw new Win32Exception();
+                        if (accounting.activeProcesses == 0) break;
+                        if (DateTime.UtcNow >= deadline) throw new Exception("Build job did not drain.");
+                        System.Threading.Thread.Sleep(10);
+                    } while (true);
+                    Console.WriteLine("Private MSBuild job drained; no owned workers remain.");
+                } else if (pi.process != IntPtr.Zero) {
+                    if (!TerminateProcess(pi.process, 1)) throw new Win32Exception();
+                    if (WaitForSingleObject(pi.process, 30000) != 0) throw new Exception("Build root did not exit.");
+                }
+            } finally {
+                if (pi.thread != IntPtr.Zero) CloseHandle(pi.thread);
+                if (pi.process != IntPtr.Zero) CloseHandle(pi.process);
+                CloseHandle(job);
+            }
         }
     }
 }

@@ -20,7 +20,7 @@ if ($CacheRoot.StartsWith($task + '\',[StringComparison]::OrdinalIgnoreCase) -or
     $CacheRoot -eq $project -or $CacheRoot -eq $repo) { throw 'Cache must be outside task worktrees.' }
 if ((Split-Path $repo -Leaf) -ne 'wt' -or !(Test-Path (Join-Path $task 'BRIEF.md'))) { throw 'Run from a task worktree.' }
 $clock = [Diagnostics.Stopwatch]::StartNew()
-$cores = [Environment]::ProcessorCount
+$cores = 4
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
 $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 if ($LASTEXITCODE -ne 0 -or !$vs) { throw 'MSVC x64 tools not found.' }

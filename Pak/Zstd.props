@@ -15,6 +15,7 @@
     <ClCompile Include="$(ZstdRoot)lib\common\*.c;$(ZstdRoot)lib\compress\*.c;$(ZstdRoot)lib\decompress\*.c">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <CompileAs>CompileAsC</CompileAs>
+      <ForcedIncludeFiles />
       <ObjectFileName>$(IntDir)zstd_%(Filename).obj</ObjectFileName>
     </ClCompile>
   </ItemGroup>
