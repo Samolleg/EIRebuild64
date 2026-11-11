@@ -52,8 +52,18 @@ constexpr D3D12_RESOURCE_STATES kDepthRead = kShaderRead | D3D12_RESOURCE_STATE_
 static void (*hazard_forget)(ID3D12Resource*) = nullptr;
 static void (*hazard_index_freed)(std::uint32_t, std::uint64_t) = nullptr;  // a bindless index returned (and its fence)
 
+// External SurfaceImage snapshots may release their last reference after the
+// embedded executor has retired. Serialize that release with executor teardown
+// and detach the borrowed Core once its GPU work and presenter have drained.
+// Resource use and ordinary release still follow the frame-thread contract.
+struct D3D12ResourceOwner {
+    explicit D3D12ResourceOwner(d3d12::Core* value) : core(value) {}
+    std::recursive_mutex mutex;
+    d3d12::Core* core;
+};
+
 struct D3D12Texture {
-    d3d12::Core* core = nullptr;
+    std::shared_ptr<D3D12ResourceOwner> owner;
     d3d12::ComPtr<ID3D12Resource> resource;
     D3D12_CPU_DESCRIPTOR_HANDLE srv{};  // CPU staging view, copied into the ring per draw
     UINT width = 0, height = 0, mips = 1, slices = 1;
@@ -83,7 +93,18 @@ struct D3D12Texture {
     D3D12Texture& operator=(const D3D12Texture&) = delete;
     // Released once the frame being recorded (the last that may read it) finished.
     ~D3D12Texture() {
-        if (!core) return;
+        if (!owner) return;
+        std::lock_guard<std::recursive_mutex> lock(owner->mutex);
+        d3d12::Core* core = owner->core;
+        // Detached resources retain their COM references until this destructor.
+        // The old executor already waited for their GPU work before detaching.
+        if (!core) {
+            // A placed resource must be released before its backing heap.
+            resource.Reset();
+            depth.Reset();
+            heap.Reset();
+            return;
+        }
         if (srv.ptr) core->staging().free(srv);
         if (depth_srv.ptr) core->staging().free(depth_srv);
         if (uav.ptr) core->staging().free(uav);
@@ -99,7 +120,7 @@ struct D3D12Texture {
 };
 
 struct D3D12Buffer {
-    d3d12::Core* core = nullptr;
+    std::shared_ptr<D3D12ResourceOwner> owner;
     d3d12::ComPtr<ID3D12Resource> resource;
     D3D12_CPU_DESCRIPTOR_HANDLE srv{}, uav{};  // CPU staging views
     UINT64 bytes = 0;
@@ -111,6 +132,11 @@ struct D3D12Buffer {
     D3D12Buffer(const D3D12Buffer&) = delete;
     D3D12Buffer& operator=(const D3D12Buffer&) = delete;
     ~D3D12Buffer() {
+        if (!owner) return;
+        std::lock_guard<std::recursive_mutex> lock(owner->mutex);
+        d3d12::Core* core = owner->core;
+        // Detached resources retain their COM references until this destructor.
+        // The old executor already waited for their GPU work before detaching.
         if (!core) return;
         core->staging().free(srv);
         core->staging().free(uav);
@@ -727,6 +753,8 @@ class Executor final : public owned::D3D12Frame, public owned::OverlayRenderer, 
 
 public:
     ~Executor() override {
+        // Presenter teardown can retire textures on this same frame thread.
+        std::lock_guard<std::recursive_mutex> lock(resource_owner_->mutex);
         if (core_.device()) {
             UINT count = 0;
             double milliseconds = 0.0;
@@ -750,6 +778,8 @@ public:
             presenter_.destroy(core_);  // drains the pacer first (before_resize)
             pacer_.stop();
         }
+        // Late snapshots must not call Core or a subsequent executor's hazards.
+        resource_owner_->core = nullptr;
         owned::hazard_forget = nullptr;
         owned::hazard_index_freed = nullptr;
         g_hazards = nullptr;
@@ -888,7 +918,7 @@ public:
             report_once(texture_failures_, "texture creation", hresult_text("CreateCommittedResource (UI texture)", hr));
             return hr;
         }
-        texture->core = &core_;
+        texture->owner = resource_owner_;
         texture->width = width;
         texture->height = height;
         texture->mips = desc.MipLevels;
@@ -932,7 +962,7 @@ public:
             report_once(texture_failures_, "texture creation", hresult_text("CreateCommittedResource (texture array)", hr));
             return hr;
         }
-        texture->core = &core_;
+        texture->owner = resource_owner_;
         texture->width = width;
         texture->height = height;
         texture->mips = desc.MipLevels;
@@ -982,7 +1012,7 @@ public:
             report_once(texture_failures_, "texture creation", hresult_text("CreateCommittedResource (storage texture)", hr));
             return hr;
         }
-        texture->core = &core_;
+        texture->owner = resource_owner_;
         texture->state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         texture->width = width;
         texture->height = height;
@@ -1168,7 +1198,7 @@ public:
     HRESULT adopt_buffer(ComPtr<ID3D12Resource> resource, UINT64 bytes, UINT stride, UINT flags, owned::D3D12BufferRef& out) {
         auto buffer = std::make_shared<owned::D3D12Buffer>();
         buffer->resource = std::move(resource);
-        buffer->core = &core_;
+        buffer->owner = resource_owner_;
         buffer->bytes = bytes;
         buffer->stride = stride;
         buffer->flags = flags;
@@ -1236,7 +1266,7 @@ public:
         auto texture = std::make_shared<D3D12Texture>();
         texture->resource = std::move(upload.resource);
         texture->heap = std::move(upload.heap);  // placed: its heap goes with it
-        texture->core = &core_;
+        texture->owner = resource_owner_;
         texture->width = upload.width;
         texture->height = upload.height;
         texture->mips = upload.mips;
@@ -1783,7 +1813,7 @@ public:
             report_once(texture_failures_, "offscreen target creation", hresult_text(what, hr));
             return hr;
         };
-        texture->core = &core_;
+        texture->owner = resource_owner_;
         texture->width = width;
         texture->height = height;
         HRESULT hr = S_OK;
@@ -1988,7 +2018,7 @@ public:
         HRESULT hr = core_.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_DEPTH_WRITE, &clear,
                                                              IID_PPV_ARGS(&texture->resource));
         if (FAILED(hr)) return failed(hr, "CreateCommittedResource (depth array)");
-        texture->core = &core_;
+        texture->owner = resource_owner_;
         texture->width = texture->height = side;
         texture->slices = slices;
         texture->format = d16 ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R32_FLOAT;
@@ -4412,6 +4442,8 @@ private:
     }
 
     Core core_;
+    std::shared_ptr<owned::D3D12ResourceOwner> resource_owner_ =
+        std::make_shared<owned::D3D12ResourceOwner>(&core_);
     UploadRing upload_;
     UploadRing bulk_;  // one-off load data (write_buffer_bulk): never grows the per-frame blocks
     std::uint64_t upload_buffer_bytes_ = 0, upload_texture_bytes_ = 0;  // this frame's write_buffer / write_texture bytes (upload_end_frame)

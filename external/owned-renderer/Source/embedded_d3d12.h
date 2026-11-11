@@ -30,6 +30,8 @@ public:
     // Before Renderer releases resources: stop NGX while its GPU wait still
     // has a live executor. shutdown() follows after all renderer textures,
     // buffers, upload jobs, overlay and profiler have been retired.
+    // External snapshots may outlive shutdown for release only. Their old
+    // resources must not be submitted to a replacement executor/device.
     void stop_ngx() noexcept;
     void shutdown() noexcept;
 private:

@@ -1,3 +1,33 @@
+# X64D3D12 external resource retirement, stage 4 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still enters D3D11 and
+frame generation remains unavailable. This stage changes resource ownership
+in Host/d3d12/d3d12_frame.cpp, without changing the author's HLSL or rendering
+algorithms. D3D11 code and dependencies are unchanged in this stage.
+
+All six texture creation/adoption sites and the common buffer adoption site
+now attach a shared retirement owner. It serializes texture/buffer destruction
+with executor teardown. The executor drains GPU work, presenter and pacer,
+then clears the borrowed Core before its members are destroyed. A surviving
+SurfaceImage/snapshot can subsequently release its COM resources without
+calling retired descriptor heaps, Core::release_later or hazard callbacks
+belonging to a later executor. Placed textures release their resource before
+the backing heap. Frame-thread resource use/release remains the author contract.
+This supersedes the stage 3 warning about late snapshot destruction only.
+
+Next stage must instantiate EmbeddedD3D12 in Renderer and integrate config,
+backend selection, world/SR/FG bodies, present and local Reflex boundaries.
+Renderer teardown must first join the scene/upload callers, stop NGX, retire
+overlay/profiler and clear its resource caches. Snapshots that survive executor
+shutdown are release-only: old resources must never be reused by a new device.
+Startup/removal failures still require explicit journal and player messages.
+The existing guards and startup choice have not been activated in this stage.
+The task remains open and is not ready for acceptance.
+
+No compilation, shader compilation, tests, preparation or game run was
+performed. Compilation/linking, GPU teardown and full runtime integration
+remain unverified. The stages below describe historical progress.
+
 # X64D3D12 local executor/NGX ownership, stage 3 (2026-11-11)
 
 Incomplete runtime integration; renderer_backend=1 still enters D3D11.
