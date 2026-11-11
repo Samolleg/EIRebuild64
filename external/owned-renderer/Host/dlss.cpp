@@ -18,7 +18,11 @@ namespace remote {
 namespace {
 
 // Our fixed NGX project id (custom engine).
+#ifdef EID3D11_EMBEDDED
+constexpr char kProjectId[] = "666beccc-e6e1-4a4e-b13e-5bb45c14de81"; // EIRebuild64
+#else
 constexpr char kProjectId[] = "6d0f1b52-3c7e-4a9d-8e41-2b5f7c9a0d63";
+#endif
 
 NVSDK_NGX_PerfQuality_Value quality_of(int mode) noexcept {
     switch (mode) {
@@ -81,7 +85,11 @@ void Dlss::initialize_d3d12_owned(ID3D12Device* device, x64remote::Capabilities&
     info_.PathListInfo.Path = paths_;
     info_.PathListInfo.Length = 1;
     const NVSDK_NGX_Result result = NVSDK_NGX_D3D12_Init_with_ProjectID(kProjectId, NVSDK_NGX_ENGINE_TYPE_CUSTOM, "1.0",
+#ifdef EID3D11_EMBEDDED
+                                                                        data_folder_.c_str(), device, &info_, NVSDK_NGX_Version_API);
+#else
                                                                         folder_.c_str(), device, &info_, NVSDK_NGX_Version_API);
+#endif
     if (NVSDK_NGX_FAILED(result)) {
         std::snprintf(caps.dlss_reason, sizeof(caps.dlss_reason), "NGX init on Direct3D 12 failed (NVSDK_NGX_Result 0x%08x)",
                       static_cast<unsigned>(result));
@@ -298,6 +306,12 @@ void Dlss::shutdown_owned() noexcept {
         if (initialized_ && device_) NVSDK_NGX_D3D11_Shutdown1(device_);
     }
     initialized_ = available_ = false;
+#ifdef EID3D11_EMBEDDED
+    device_ = nullptr;
+    device12_ = nullptr;
+    fg_multi_frame_max_ = 0;
+    std::snprintf(fg_reason_, sizeof(fg_reason_), "NGX was not initialised on Direct3D 12");
+#endif
 }
 
 // ---- DLSS Frame Generation (D3D12) -----------------------------------------
@@ -553,6 +567,34 @@ void Dlss::initialize_d3d12(ID3D12Device* device, x64remote::Capabilities& caps,
         caps.dlss_available = 0;
     }
 }
+
+#ifdef EID3D11_EMBEDDED
+void Dlss::initialize_embedded_d3d12(ID3D12Device* device, const std::wstring& dll_folder,
+    const std::wstring& data_folder, x64remote::Capabilities& caps, Log log,
+    std::function<void()> wait_idle) noexcept {
+    // Old features wait on the old executor before any callback/path changes.
+    shutdown();
+    caps.dlss_available = 0;
+    if (!device || dll_folder.empty() || data_folder.empty() || !log || !wait_idle) {
+        std::snprintf(caps.dlss_reason, sizeof(caps.dlss_reason), "Invalid embedded NGX device, paths, logger or GPU wait");
+        return;
+    }
+    try {
+        folder_ = dll_folder;
+        data_folder_ = data_folder;
+        wait_idle_ = std::move(wait_idle);
+    } catch (...) {
+        std::snprintf(caps.dlss_reason, sizeof(caps.dlss_reason), "Embedded NGX initialization allocation failed");
+        return;
+    }
+    log_ = log;
+    auto job = [&] { initialize_d3d12_owned(device, caps); };
+    if (!run(job)) {
+        std::snprintf(caps.dlss_reason, sizeof(caps.dlss_reason), "the NGX thread could not be started");
+        caps.dlss_available = 0;
+    }
+}
+#endif
 
 bool Dlss::evaluate_d3d12(ID3D12GraphicsCommandList* list, const x64remote::DlssEvaluateRecord& record,
                           ID3D12Resource* const* resources, char* error, std::size_t error_bytes) noexcept {

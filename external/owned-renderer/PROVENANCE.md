@@ -1,3 +1,49 @@
+# X64D3D12 local executor/NGX ownership, stage 3 (2026-11-11)
+
+Incomplete runtime integration; renderer_backend=1 still enters D3D11.
+Source/embedded_d3d12.{h,cpp} now owns the author's frame executor and NGX
+worker locally. OwnedRenderer.vcxproj includes the nine runtime executor
+translation units, Host/dlss.cpp and Host/reflex.cpp. Diagnostic bring-up
+is deliberately not compiled: its separate window is not a game backend.
+The new owner is not yet instantiated by Renderer, so adding these archive
+objects does not activate D3D12 or make frame generation available.
+
+The owner exposes direct SR/FG capability, optimal-size, evaluate, release
+and VRAM queries. Only the author's value descriptors are shared; no ring,
+replay, remote globals, process or Host control block is used. Algorithms
+and HLSL remain the author's. Host diagnostic call sites route to the
+engine journal through remote::host_log in embedded_d3d12.cpp.
+The embedded factory adopts the native top-level window as both target and
+parent (the author's child-window minimization test otherwise rejects it).
+
+Host/dlss.cpp has an embedded-only D3D12 initializer with the existing
+EIRebuild64 ProjectID. It starts NGX directly on the executor device without
+creating an intermediate D3D11 instance. DLL search remains beside the EXE;
+NGX data goes to LocalAppData/EIRebuild64/NGX, pipeline data to its D3D12
+sibling. Path strings/info and the GPU-idle callback remain alive through
+NGX shutdown. The worker shuts down before executor/device destruction;
+stop_ngx separates NGX retirement from later renderer resource retirement.
+The embedded shutdown clears borrowed device pointers for repeated teardown.
+Source/dlss_backend.cpp and its existing D3D11 worker are unchanged.
+No further dependencies, DLLs or packaging changes beyond stage 2.
+
+Next stage must bind this owner to Renderer, choose renderer_backend before
+D3D11 creation, load local overlay/config, enable the excluded D3D12 world,
+upscaler and present bodies, replace their x64remote calls with owner calls,
+and supply local Reflex frame boundaries. Startup/removal failures still
+need engine-log and player-message handling with no D3D11 fallback.
+Resource lifetime is a required integration subtask: D3D12Texture and
+D3D12Buffer in Host/d3d12/d3d12_frame.cpp contain a borrowed Core pointer
+and their destructors call Core::release_later. Renderer-held GPU references,
+external SurfaceImage/snapshots and upload jobs must therefore retire before
+EmbeddedD3D12::shutdown; merely resetting the executor in release is unsafe.
+Do not activate backend selection until this ownership boundary is resolved.
+This task is open and is not ready for acceptance.
+
+No compilation, shader compilation, tests, preparation or game run was
+performed. Build/link ABI and runtime behavior are unverified. Historical
+stage 1/2 status below describes those stages, not the current source list.
+
 # X64D3D12 dependency and DXIL integration, stage 2 (2026-11-11)
 
 Incomplete runtime integration. The coordinator supplied the pinned packages

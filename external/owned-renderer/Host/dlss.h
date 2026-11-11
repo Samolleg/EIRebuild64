@@ -45,6 +45,13 @@ public:
     // rewritten as initialize writes them. wait_idle waits for that device's
     // submitted work: run before a feature the GPU may still use is released.
     void initialize_d3d12(ID3D12Device* device, x64remote::Capabilities& caps, std::function<void()> wait_idle) noexcept;
+#ifdef EID3D11_EMBEDDED
+    // Native D3D12 entry: no preliminary D3D11 NGX instance. Both path
+    // buffers and the logging callback are owned until shutdown completes.
+    void initialize_embedded_d3d12(ID3D12Device* device, const std::wstring& dll_folder,
+        const std::wstring& data_folder, x64remote::Capabilities& caps, Log log,
+        std::function<void()> wait_idle) noexcept;
+#endif
     // One evaluation recorded into list (the D3D12 backend). resources:
     // colour, depth, motion, output, already in their states (shader read,
     // depth read, shader read, unordered access). The feature is recreated
@@ -133,6 +140,9 @@ private:
     // in it for NGX, and feature creation (first evaluate) searches the path
     // list for nvngx_dlss.dll. They were stack locals and a temporary.
     std::wstring folder_;
+#ifdef EID3D11_EMBEDDED
+    std::wstring data_folder_; // writable NGX logs/cache, separate from DLL search
+#endif
     const wchar_t* paths_[1]{};
     NVSDK_NGX_FeatureCommonInfo info_{};
 };

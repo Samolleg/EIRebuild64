@@ -819,7 +819,13 @@ public:
         if (!upload_.create(core_.device(), reason)) return false;
         if (!bulk_.create(core_.device(), reason, L"eid3d11 bulk upload block")) return false;
         try { preparer_ = std::make_shared<Preparer>(core_.device()); } catch (...) { reason = "the upload preparer could not be created"; return false; }
+#ifdef EID3D11_EMBEDDED
+        // The embedded caller passes the native top-level game window, not
+        // a Host child. It remains owned by the engine (no message thread).
+        if (!presenter_.create(core_, child, reason, child)) return false;
+#else
         if (!presenter_.create(core_, GetParent(child), reason, child)) return false;
+#endif
         presenter_.set_before_resize([](void* self) {
             // The pacer's presents finish; FSR's context goes before the proxy
             // resizes or is destroyed (its display size follows the swap chain).
@@ -4659,7 +4665,8 @@ private:
 
 // Core mode with renderer_backend=d3d12 (Host/core_host.cpp): the executor in
 // the host's child window, or null with reason naming what is missing
-// (below the floor, no DXIL, a failed call); the caller then keeps D3D11.
+// (below the floor, no DXIL, a failed call). The embedded caller must report
+// failure and refuse startup; it must not substitute a D3D11 renderer.
 std::unique_ptr<owned::D3D12Frame> create_frame_executor(HWND child, const std::wstring& directory, std::string& reason) {
     auto executor = std::make_unique<Executor>();
     if (!executor->create(child, directory, reason)) return nullptr;
