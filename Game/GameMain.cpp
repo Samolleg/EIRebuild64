@@ -1451,6 +1451,9 @@ static int RunMainEntry(HINSTANCE instance, HINSTANCE previous, LPSTR command, i
             "Direct3D 12 rendering stopped: %s\nSee Logs64 for details. "
             "You can select renderer_backend=0 in Config64\\rddraw.ini and restart.",
             reason && *reason ? reason : "unknown rendering error");
+        // RunGame has already unwound its journal guard on this boundary.
+        // Keep the original failure in the native error log before CRT teardown.
+        EngineDiagnostics::Report(text, true);
         GameJournal::Event("ERROR", "d3d12_render_exception", "reason=%s", GameJournal::Quote(text).c_str());
         GameJournal::FlushCritical();
         ErrorDialog::ShowA(nullptr, text, "EIRebuild64 - Direct3D 12", MB_OK | MB_ICONERROR);
