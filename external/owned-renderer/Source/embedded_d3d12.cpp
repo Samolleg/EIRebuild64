@@ -1,5 +1,6 @@
 #include "embedded_d3d12.h"
 #include "../Host/dlss.h"
+#include "../Host/reflex.h"
 #include "engine_bridge.h"
 #include <shlobj.h>
 #include <cstdarg>
@@ -45,6 +46,9 @@ struct EmbeddedD3D12::State {
     std::unique_ptr<D3D12Frame> executor;
     remote::Dlss ngx;
     x64remote::Capabilities caps{};
+    enum class Phase { idle, simulation, rendering } phase = Phase::idle;
+    std::uint64_t serial = 0;
+    std::int64_t simulation_start = 0;
 };
 
 EmbeddedD3D12::EmbeddedD3D12() = default;
@@ -87,6 +91,35 @@ bool EmbeddedD3D12::initialize(HWND window, std::string& reason) noexcept {
 }
 
 D3D12Frame* EmbeddedD3D12::frame() const noexcept { return state_ ? state_->executor.get() : nullptr; }
+HRESULT EmbeddedD3D12::begin_simulation(int reflex_mode) noexcept {
+    if (!state_ || state_->phase != State::Phase::idle) return E_UNEXPECTED;
+    // Author's Sleep-before-game-release boundary, now before local input.
+    reflex::configure(state_->executor->device(), reflex_mode);
+    reflex::sleep();
+    LARGE_INTEGER now{};
+    QueryPerformanceCounter(&now);
+    state_->simulation_start = now.QuadPart;
+    ++state_->serial;
+    reflex::marker(reflex::Marker::simulation_start, state_->serial);
+    state_->phase = State::Phase::simulation;
+    return S_OK;
+}
+HRESULT EmbeddedD3D12::begin_render() noexcept {
+    if (!state_ || state_->phase != State::Phase::simulation) return E_UNEXPECTED;
+    // The executor and asynchronous pacer receive the real simulation QPC.
+    reflex::set_frame(state_->serial, state_->simulation_start);
+    reflex::marker(reflex::Marker::simulation_end, state_->serial);
+    reflex::marker(reflex::Marker::render_start, state_->serial);
+    state_->phase = State::Phase::rendering;
+    return S_OK;
+}
+void EmbeddedD3D12::finish_render() noexcept {
+    if (!state_ || state_->phase != State::Phase::rendering) return;
+    // Deduplicated by Reflex when executor::present already sent render_end.
+    // Also close frames that never reached Present, as core_host does.
+    reflex::marker(reflex::Marker::render_end, state_->serial);
+    state_->phase = State::Phase::idle;
+}
 bool EmbeddedD3D12::dlss_caps(x64remote::DlssCaps& out) const noexcept {
     out = {};
     if (!state_) { std::snprintf(out.reason, sizeof(out.reason), "Embedded D3D12 is not initialized"); return false; }

@@ -16,6 +16,12 @@ public:
     // Failure leaves no executor and supplies a printable reason, never D3D11.
     bool initialize(HWND window, std::string& reason) noexcept;
     D3D12Frame* frame() const noexcept;
+    // Serialized frame owner only: before input/simulation, before drawing,
+    // and after Renderer::present_frame, including failed/omitted presents.
+    // Replace core_host's game-release and present-record boundaries.
+    HRESULT begin_simulation(int reflex_mode) noexcept;
+    HRESULT begin_render() noexcept;
+    void finish_render() noexcept;
     bool dlss_caps(x64remote::DlssCaps& out) const noexcept;
     bool dlss_size(UINT width, UINT height, int mode, UINT& w, UINT& h) noexcept;
     HRESULT dlss_evaluate(ID3D12GraphicsCommandList* list, ID3D12Resource* const* resources,

@@ -1,3 +1,20 @@
+# X64D3D12 local simulation/render boundaries, stage 6 (2026-11-11)
+
+Incomplete runtime integration: renderer_backend=1 still creates D3D11.
+EmbeddedD3D12 now supplies serialized begin_simulation / begin_render /
+finish_render boundaries adapted from upstream d17a6149 Host/core_host.cpp.
+Sleep runs before local input sampling; the simulation QPC and increasing
+serial reach the existing executor/pacer via Reflex::set_frame.
+Simulation/end and render/start replace taking a Host present record;
+finish_render closes failed or omitted presents as well as shown frames.
+The executor retains author render/end deduplication, present markers and
+asynchronous real-image latency sampling. No IPC release delay is copied.
+These APIs are not yet called by Renderer. D3D11 behavior is unchanged.
+Next: bind Renderer ownership/config/backend selection and these boundaries,
+then enable world/SR/FG/present bodies with local NGX and explicit failures.
+No new SDKs, DLLs, HLSL or algorithms. No compilation, tests or game run;
+full D3D12/FG integration and GPU behavior remain unverified and task open.
+
 # X64D3D12 Reflex device retirement, stage 5 (2026-11-11)
 
 Incomplete runtime integration. renderer_backend=1 still creates D3D11.
