@@ -1,3 +1,27 @@
+# X64D3D12 native source output capture, stage 17 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+CDX11 MakeScreenShot can now capture a native output through Renderer,
+without borrowing a D3D11 device/context or output texture. The synchronous
+entry drains scene work, UI and native batches before calling the author's
+executor read_back_buffer (or read_texture for the private hit-test target).
+Only a complete, correctly sized BGRA result is published to the caller.
+Minimized/unavailable outputs and failures never reach the JPEG encoder.
+The source uses the existing DirectXTex WIC encoder for SCREENSHOT.JPG,
+and journals native capture/encoding failures. D3D11 retains ScreenGrab.
+No HLSL, rendering algorithms, SDKs, runtime DLL lists or pose/SKN changed.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}.
+
+Next adapt source texture/surface/SRV publication and render-target capture
+(CDXGISurface::BltFromRenderSurface still writes a D3D11 texture). The new
+BGRA readback supplies the native source pixels for that boundary, including
+lossless hit-test codes. SetRenderStates and remaining source context-based
+submissions need native dispatch. Then latch renderer_backend before device
+creation, call ensure_embedded_d3d12, enable readiness and local frame
+boundaries with world/SR/FG/present dispatch and explicit runtime errors.
+Full BRIEF remains open. No compilation, shader compilation, tests or game
+run was performed. Build/link, D3D11 regression and GPU behavior are unverified.
+
 # X64D3D12 source initialization boundary, stage 16 (2026-11-11)
 
 Incomplete runtime integration. renderer_backend=1 still creates D3D11.

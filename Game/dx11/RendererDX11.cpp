@@ -5,6 +5,7 @@
 
 #include <wincodec.h> // Optional
 #include <ScreenGrab.h>
+#include <DirectXTex.h>
 
 #include "ConstantBuffer.h"
 #include "RendererDX11.h"
@@ -1139,6 +1140,29 @@ bool CDX11::InitializeDX(HWND hWnd, DWORD dwWidth, DWORD dwHeight)
 
 void CDX11::MakeScreenShot()
 {
+    bool nativeD3D12 = false;
+    std::vector<std::uint8_t> pixels;
+    UINT width = 0, height = 0;
+    HRESULT hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+        nativeD3D12 = renderer.d3d12_backend();
+        return nativeD3D12 ? renderer.read_embedded_d3d12_output(pixels, width, height) : S_OK;
+    });
+    if (nativeD3D12) {
+        if (hr == S_OK) {
+            DirectX::Image image{};
+            image.width = width; image.height = height;
+            image.format = DXGI_FORMAT_B8G8R8A8_UNORM;
+            image.rowPitch = std::size_t(width) * 4u;
+            image.slicePitch = pixels.size(); image.pixels = pixels.data();
+            hr = DirectX::SaveToWICFile(image, DirectX::WIC_FLAGS_NONE,
+                GUID_ContainerFormatJpeg,
+                (RuntimePaths64::Directory(L"Screenshots64") / L"SCREENSHOT.JPG").c_str());
+        }
+        if (hr != S_OK) GameJournal::Event("RENDER", "screenshot_failed",
+            "backend=d3d12 hr=%08lx", static_cast<unsigned long>(hr));
+        return;
+    }
+    if (FAILED(hr)) return;
     // Capture the composed output while its renderer-owned lease is valid.
     rendererFacade->VisitOutput(nullptr,
         [](void*, ID3D11DeviceContext* context, ID3D11Texture2D* output) -> HRESULT {

@@ -679,6 +679,30 @@ HRESULT Renderer::read_embedded_output_size(UINT& width,UINT& height){
  return hr;
 }
 
+HRESULT Renderer::read_embedded_d3d12_output(std::vector<std::uint8_t>& pixels,UINT& width,UINT& height){
+ SCENE_ENTRY("embedded_native_output_readback");
+ pixels.clear();width=height=0;
+ if(!d3d12_)return DXGI_ERROR_INVALID_CALL;
+ if(hit_test_failed_)return E_FAIL;
+ try{
+  // Drain frontend batches before the executor records its copy. Hit tests
+  // read their private target, just like the D3D11 output lease.
+  HRESULT hr=has_pending_ui()?flush_ui():S_OK;
+  if(SUCCEEDED(hr))hr=flush_native();
+  if(FAILED(hr))return hr;
+  std::vector<std::uint8_t> captured;UINT w=0,h=0;
+  if(hit_test_active_){
+   if(!hit_test12_)return DXGI_ERROR_INVALID_CALL;
+   hr=d3d12_->read_texture(*hit_test12_,captured,w,h);
+  }else hr=d3d12_->read_back_buffer(captured,w,h);
+  if(hr!=S_OK)return hr;
+  const std::size_t row=std::size_t(w)*4u;
+  if(!w||!h||row/4u!=w||row>SIZE_MAX/h||captured.size()!=row*h)return E_FAIL;
+  pixels=std::move(captured);width=w;height=h;
+  return S_OK;
+ }catch(...){return E_OUTOFMEMORY;}
+}
+
 HRESULT Renderer::read_embedded_viewport(D3DVIEWPORT7& viewport){
  SCENE_ENTRY("embedded_read_viewport");
  viewport={};

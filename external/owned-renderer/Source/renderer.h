@@ -1406,6 +1406,9 @@ public:
     HRESULT clear_embedded_targets(const float* color, const float* depth);
     HRESULT read_embedded_viewport(D3DVIEWPORT7& viewport);
     HRESULT read_embedded_output_size(UINT& width, UINT& height);
+    // Native output capture, tightly packed BGRA. S_FALSE means minimized.
+    // The caller must consume the returned pixels only on S_OK.
+    HRESULT read_embedded_d3d12_output(std::vector<std::uint8_t>& pixels, UINT& width, UINT& height);
     bool embedded_hit_test_frame() const noexcept { return hit_test_active_; }
     HRESULT visit_embedded_output(void* user, EmbeddedOutputVisitor visitor) const {
         if (hit_test_failed_) return E_FAIL;
