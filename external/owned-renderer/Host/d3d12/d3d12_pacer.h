@@ -29,9 +29,9 @@ public:
     bool running() const noexcept { return thread_.joinable(); }
     // One real frame whose main-queue work signals main_value: generated
     // (null: none this frame, the real image is presented when ready) then
-    // real, both in COPY_SOURCE. Waits while the previous frame is still
-    // being presented (that is the frame's back-pressure, as a blocking
-    // Present). slot: the ring slot both images belong to.
+    // real, both in COPY_SOURCE. One pending frame overlaps the presenting
+    // frame. Back-pressure applies when the pending entry is occupied.
+    // slot: both images' ring slot, acquired through wait_slot before writing.
     // game_start, host_taken: QPC times for the real Present's latency sample.
     void submit(Presenter& presenter, ID3D12Resource* generated, ID3D12Resource* real, std::uint64_t main_value, unsigned slot,
                 std::int64_t game_start, std::int64_t host_taken, UINT sync_interval, int frame_limit) noexcept;
@@ -64,6 +64,7 @@ private:
     ComPtr<ID3D12GraphicsCommandList> list_;
     unsigned next_allocator_ = 0;
     std::uint64_t value_ = 0;                 // the pacer fence's last signalled value (pacer thread)
+    bool slot_in_use_[kSlots] = {};         // queued/presenting until the copy fence is published
     std::uint64_t slot_values_[kSlots] = {};  // the value after the last copy out of each slot
     std::thread thread_;
     mutable std::mutex mutex_;

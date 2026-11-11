@@ -43,6 +43,7 @@ bool Pacer::start(Core& core, std::string& reason) {
     std::fill(std::begin(allocator_values_), std::end(allocator_values_), 0);
     std::fill(std::begin(slot_values_), std::end(slot_values_), 0);
     stop_ = pending_ = busy_ = false;
+    std::fill(std::begin(slot_in_use_), std::end(slot_in_use_), false);
     last_done_ = last_present_ = window_start_ = 0;
     spacing_sum_ = spacing_squares_ = spacing_max_ = hold_sum_ = 0;
     spacing_count_ = hold_count_ = window_generated_ = window_real_ = 0;
@@ -86,13 +87,16 @@ void Pacer::submit(Presenter& presenter, ID3D12Resource* generated, ID3D12Resour
     if (RuntimeDiagnostics::Enabled()) QueryPerformanceCounter(&called);  // before the back-pressure wait
     const owned::frame_waits::Scope wait(owned::frame_waits::pacer);
     std::unique_lock<std::mutex> lock(mutex_);
-    while (!idle_.wait_for(lock, std::chrono::seconds(5), [this] { return !pending_ && !busy_; })) {
+    while (!idle_.wait_for(lock, std::chrono::seconds(5), [this] { return !pending_; })) {
         lock.unlock();
         remote::host_log("d3d12: pacer submit waiting 5 s for the previous Present; resources remain in use");
         lock.lock();
     }
-    presenter_ = &presenter;
+    // The presenter remains stable until drain (resize/mode switch/shutdown).
+    // Publish only while idle to avoid a concurrent write on the consumer.
+    if (!busy_) presenter_ = &presenter;
     frame_ = Frame{generated, real, main_value, slot % kSlots, game_start, host_taken, called.QuadPart, sync_interval, frame_limit};
+    slot_in_use_[frame_.slot] = true;
     pending_ = true;
     wake_.notify_one();
 }
@@ -121,7 +125,15 @@ void Pacer::drain() noexcept {
 void Pacer::wait_slot(unsigned slot) noexcept {
     std::uint64_t value = 0;
     {
-        std::lock_guard<std::mutex> lock(mutex_);
+        const owned::frame_waits::Scope wait(owned::frame_waits::pacer);
+        std::unique_lock<std::mutex> lock(mutex_);
+        // The fence is published only after both copies have been submitted.
+        // A queued or presenting frame still owns this slot until then.
+        while (!idle_.wait_for(lock, std::chrono::seconds(5), [this, slot] { return !slot_in_use_[slot % kSlots]; })) {
+            lock.unlock();
+            remote::host_log("d3d12: pacer slot waiting 5 s for Present; resources remain in use");
+            lock.lock();
+        }
         value = slot_values_[slot % kSlots];
     }
     if (value) {
@@ -231,6 +243,9 @@ void Pacer::run() noexcept {
             pending_ = false;
             busy_ = true;
         }
+        // One pending frame overlaps this frame's GPU wait and spacing.
+        // Slot ownership bounds the total to kSlots, including this frame.
+        idle_.notify_all();
         // The real frame's GPU work (the generated image is part of it).
         ID3D12Fence* main = core_->fence();
         if (main->GetCompletedValue() < frame.main_value) {
@@ -323,6 +338,7 @@ void Pacer::run() noexcept {
             if (generated_shown) ++stats_.generated;
             if (real_shown) ++stats_.real;
             slot_values_[frame.slot] = signalled;
+            slot_in_use_[frame.slot] = false;
             busy_ = false;
         }
         idle_.notify_all();
