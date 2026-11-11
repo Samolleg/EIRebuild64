@@ -1,3 +1,26 @@
+# X64D3D12 native camp figure boundary, stage 24 (2026-11-11)
+
+Camp figure submissions now read the native viewport through Renderer instead
+of dereferencing the absent source D3D11 context. Non-SKN camp geometry keeps
+its primary CPU surface publication through the existing bounded snapshot /
+upload cache and the author's queue_native path. Texture/alpha modulation
+recognizes that publication; failed snapshots roll back the native checkpoint
+and invalidate the popup rather than acknowledging an untextured draw.
+D3D11 retains its viewport read, SRVs and submission paths. SKN material
+submission is unchanged. No HLSL, algorithms, SDKs or runtime DLLs added.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}; this stage
+adapts Game/OwnedRender/CampSubmission.cpp.
+
+Full BRIEF remains open. Secondary figure/wound composition still reaches
+D3D11-only compose_embedded_figure_texture in embedded_figure_material.inl;
+BindTexture therefore still rejects secondary CPU bindings. Fixed-function
+source draws likewise require a native adapter (draw_embedded_fixed_function
+and draw_fixed_function currently require D3D11). Sprite/SRV boundaries and
+local input/simulation/render phase dispatch also remain to finish. These
+are startup/drawing blockers, not optional resource retirement work.
+No compilation, shader compilation, tests or game run performed. Build/link,
+D3D12 startup/FG and D3D11 regression remain unverified.
+
 # X64D3D12 source particle texture bindings, stage 23 (2026-11-11)
 
 The source BindTexture stage-zero boundary now retains a completed surface ID
