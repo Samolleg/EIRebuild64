@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "E4Camp.h"
+#include "E1Surface.h"
 #include "model_preview_presentation.h"
 #include "../I3DScreenCamp.h"
 #include "../I3DMain.h"
@@ -540,6 +541,11 @@ namespace OwnedRender::E4 {
 bool BindIcon(CI3DFigure* figure,CRenderer* renderer){
     const auto value=BoundIcon(figure);
     if(!value)return false;
+    if (value->native_surface) {
+        const bool bound = renderer->GetD3D()->BindTexture(0, nullptr, value->native_surface->Id()) != FALSE;
+        if (!bound) owned::bridge_report_event("camp_icon_omitted", "D3D12 icon texture binding failed");
+        return bound;
+    }
     renderer->GetD3D()->BindTexture(0,value->srv.Get());
     return true;
 }

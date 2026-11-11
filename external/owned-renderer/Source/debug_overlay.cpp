@@ -1385,7 +1385,7 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
     ImGui::SetNextWindowSize(ImVec2(850.0f * state.ui_scale, 620.0f * state.ui_scale),
                              ImGuiCond_FirstUseEver);
     bool open = true;
-    if (ImGui::Begin(window_title("EID3D11 renderer", "renderer").c_str(), &open, ImGuiWindowFlags_NoCollapse)) {
+    if (ImGui::Begin(window_title(g_running_d3d12 ? "EID3D12 renderer" : "EID3D11 renderer", "renderer").c_str(), &open, ImGuiWindowFlags_NoCollapse)) {
         ImGui::TextDisabled("%s", ui_text(state.developer
             ? "F10: hidden / monitor / configuration   Shift+F10: player settings   F11: capture next frame"
             : "Shift+F10: hidden / monitor / configuration   F10: player settings   F11: capture next frame"));

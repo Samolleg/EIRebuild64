@@ -30,6 +30,7 @@
 #include <thread>
 #include <utility>
 
+#include "../../../Game/OwnedRender/E1Surface.h"
 #include "camp_inventory_embedded.inl"
 #else
 #include "camp_inventory.h"

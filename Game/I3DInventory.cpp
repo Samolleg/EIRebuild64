@@ -367,12 +367,19 @@ void CI3DItemScreen::DrawHead(CRenderer *pRend, SDrawHead &head)
             [](void* value) noexcept { static_cast<CI3DFigure*>(value)->AddRef(); },
             [](void* value) noexcept { static_cast<CI3DFigure*>(value)->Release(); });
     });
-    CTexture *pTex = texturesLRU.GetObject(szTextureName);
-    if (!pFig || !CTextureLRUAllocator::EnsureReady(pTex))
-        return;
+    CTexture *pTex = nullptr;
+    std::shared_ptr<const owned::PreparedCampIcon> headIcon;
+    if (!pRend->GetD3D()->GetDevice()) {
+        headIcon = owned::camp_inventory_request_icon(szTextureName, nullptr);
+        if (!pFig || !headIcon) return;
+    } else {
+        pTex = texturesLRU.GetObject(szTextureName);
+        if (!pFig || !CTextureLRUAllocator::EnsureReady(pTex)) return;
+    }
     pFig->SetTexture(pTex);
     pFig->SetMaterial(pMat1);
     SourceSinglePreview adapter{this,pRend,pFig,textures[2],textures[1]};
+    adapter.icon = std::move(headIcon);
     OwnedRender::produce_single_head_preview(head.fX,head.fY,head.fZ,head.fPixSize,
         VIEWING_ANGLE_TAN,adapter);
 }

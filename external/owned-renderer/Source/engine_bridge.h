@@ -27,6 +27,7 @@
 #include "lifecycle_probe.h"
 struct IDirectDrawSurface7;
 struct ID3D11Texture2D;
+namespace OwnedRender { class E1Surface; }
 namespace owned {
 struct HudAtlasMutationWindow;
 struct HudPublishedVisual;
@@ -219,6 +220,9 @@ struct ResourceStoreConfig;
 // Main-thread immutable snapshot of the texture manager's actual ordered RES list.
 bool bridge_camp_texture_mounts(ResourceStoreConfig& mounts) noexcept;
 struct PreparedCampIcon {
+#ifdef EID3D11_EMBEDDED
+    std::shared_ptr<OwnedRender::E1Surface> native_surface;
+#endif
     OwnedVisualSurface description;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> srv;

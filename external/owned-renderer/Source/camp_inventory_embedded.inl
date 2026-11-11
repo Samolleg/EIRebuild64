@@ -29,7 +29,7 @@ bool bridge_camp_texture_mounts(ResourceStoreConfig& mounts) noexcept {
 }
 std::shared_ptr<const PreparedCampIcon> camp_inventory_request_icon(
     const char* name, ID3D11Device* device) noexcept {
-    if (!embedded_camp_owner || !embedded_camp_generation || !name || !*name || !device)
+    if (!embedded_camp_owner || !embedded_camp_generation || !name || !*name)
         return {};
     try {
         if (icon_device != device) { camp_icon_loader.shutdown(); icon_device = device; }
