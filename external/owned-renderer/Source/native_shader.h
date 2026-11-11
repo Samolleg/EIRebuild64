@@ -3156,16 +3156,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
   float4 t=float4(1,1,1,1);if(impostor)t=impostorTexel;else if(nativeTextured!=0)t=NATIVE_SAMPLE(i.textureReference,i.uv);
 #endif
 #ifndef NATIVE_TERRAIN_PS
- if(nativeSknInstance(i)!=0){
-  NativeInstance skn=nativeSknInstances[nativeSknInstance(i)-1];
-  // BC7 sRGB sampling and the authored base factor are linear. The shared
-  // legacy combiner, lighting and UNORM frame output use display RGB, with
-  // no final sRGB encode. Cross that boundary once, after the linear tint;
-  // keep the sRGB SRV so texture filtering still happens in linear space.
-  float3 linearBase=max(t.rgb*skn.sknBase.rgb,0);
-  t.rgb=lerp(1.055*pow(linearBase,1.0/2.4)-.055,12.92*linearBase,linearBase<=.0031308);
-  if(skn.sknBase.w==0)t.a=1;
- }
+ if(nativeSknInstance(i)!=0){NativeInstance skn=nativeSknInstances[nativeSknInstance(i)-1];t.rgb*=skn.sknBase.rgb;if(skn.sknBase.w==0)t.a=1;}
 #endif
 #ifdef NATIVE_SNOW_TRAILS
   // Packed trough floor: barely darker, cooler snow.
