@@ -1,3 +1,31 @@
+# X64D3D12 prepared uploads and resource submission ownership, stage 12 (2026-11-11)
+
+Incomplete runtime integration. renderer_backend=1 still creates D3D11.
+Preparer and all three preparation paths now retain the executor's shared
+session identity. finish_buffer/finish_texture reject uploads from another
+session with DXGI_ERROR_DEVICE_RESET before recording commands or consuming
+the prepared resource, including workers surviving the original executor.
+
+The executor validates resource ownership before slot/index/target binding,
+buffer/texture writes and copies, indirect draws/dispatches, clears, mip
+creation, capture and readback. Null bindings still unbind normally. Invalid
+resource submission latches a named backend failure; size/format inspection
+remains non-fatal. Bindless validation precedes even a cached-index return.
+External NGX/FSR recording validates every texture before opening a command
+list or transitioning any resource. UI validates all supplied textures before
+uploading or drawing. These HRESULT interfaces reject obsolete resources
+with DXGI_ERROR_DEVICE_RESET; malformed arrays return E_INVALIDARG.
+This stage changes no HLSL, rendering algorithms, D3D11, SDKs or DLL lists.
+
+The executor still stays alive in Renderer::release(). Next: finish auditing
+retained raw pointer/worker lifetimes at shutdown, detach d3d12_ and retire
+EmbeddedD3D12 after all renderer clients. Then bind startup configuration,
+backend/overlay, simulation/render boundaries and world/present dispatch,
+with explicit startup/device-removal failures. Host transport adaptation
+remains in Source/embedded_d3d12.{h,cpp}; full BRIEF remains open.
+No compilation, shader compilation, tests or game run was performed.
+Build/link and GPU behavior remain unverified. Earlier stages follow.
+
 # X64D3D12 surface ownership and remaining subsystem retirement, stage 11 (2026-11-11)
 
 Incomplete runtime integration. renderer_backend=1 still creates D3D11.

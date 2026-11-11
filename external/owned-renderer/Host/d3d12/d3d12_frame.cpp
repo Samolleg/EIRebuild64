@@ -149,6 +149,8 @@ struct D3D12Buffer {
 // A one-off upload a worker prepared (D3D12Preparer): nothing here has been
 // recorded or seen by the GPU, so dropping it unfinished just releases it.
 struct D3D12PreparedUpload {
+    // Keep session identity even if a worker outlives executor teardown.
+    std::shared_ptr<D3D12ResourceOwner> owner;
     d3d12::ComPtr<ID3D12Heap> heap;          // a batch's placed texture: the heap it lives in (released last)
     d3d12::ComPtr<ID3D12Resource> resource;  // the destination: a buffer (COMMON) or texture (COPY_DEST)
     d3d12::ComPtr<ID3D12Resource> upload;    // every byte, in the copy's layout (shared by a batch)
@@ -178,13 +180,15 @@ constexpr float kBlack[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 // command list, no executor state. finish_buffer / finish_texture adopt it.
 class Preparer final : public owned::D3D12Preparer {
 public:
-    explicit Preparer(ID3D12Device* device) : device_(device) {}
+    Preparer(ID3D12Device* device, std::shared_ptr<owned::D3D12ResourceOwner> owner)
+        : device_(device), owner_(std::move(owner)) {}
 
     HRESULT prepare_buffer(UINT64 bytes, const void* data, owned::D3D12PreparedUploadRef& out) noexcept override try {
         out.reset();
         if (!data && bytes) return E_INVALIDARG;
         const UINT64 size = (std::max<UINT64>)(16, (bytes + 15) & ~UINT64(15));
         auto prepared = std::make_shared<owned::D3D12PreparedUpload>();
+        prepared->owner = owner_;
         D3D12_RESOURCE_DESC desc = buffer_desc(size);
         D3D12_HEAP_PROPERTIES heap{};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
@@ -216,6 +220,7 @@ public:
         desc.Format = format;
         desc.SampleDesc.Count = 1;
         auto prepared = std::make_shared<owned::D3D12PreparedUpload>();
+        prepared->owner = owner_;
         prepared->levels.resize(mips);
         std::vector<UINT> rows(mips);
         std::vector<UINT64> row_bytes(mips);
@@ -312,6 +317,7 @@ public:
             Entry& entry = entries[n];
             if (!entry.usable) continue;
             auto item = std::make_shared<owned::D3D12PreparedUpload>();
+            item->owner = owner_;
             item->heap = heap;
             if (FAILED(device_->CreatePlacedResource(heap.Get(), entry.heap_offset, &entry.desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                                      IID_PPV_ARGS(&item->resource))))
@@ -379,6 +385,7 @@ private:
         return S_OK;
     }
     ComPtr<ID3D12Device> device_;
+    std::shared_ptr<owned::D3D12ResourceOwner> owner_;
 };
 
 D3D12_SHADER_BYTECODE resource_program(const char* name) {
@@ -851,7 +858,7 @@ public:
         remote::host_log("d3d12: device %s (SM 6.6, binding tier 3); %s", adapter, core_.heap_cost().c_str());
         if (!upload_.create(core_.device(), reason)) return false;
         if (!bulk_.create(core_.device(), reason, L"eid3d11 bulk upload block")) return false;
-        try { preparer_ = std::make_shared<Preparer>(core_.device()); } catch (...) { reason = "the upload preparer could not be created"; return false; }
+        try { preparer_ = std::make_shared<Preparer>(core_.device(), resource_owner_); } catch (...) { reason = "the upload preparer could not be created"; return false; }
 #ifdef EID3D11_EMBEDDED
         // The embedded caller passes the native top-level game window, not
         // a Host child. It remains owned by the engine (no message thread).
@@ -1068,6 +1075,7 @@ public:
     // slice: d3d12_mip_array_program reads only z 0, so count 1 for it), the
     // levels moved between read and write together for all those slices.
     HRESULT generate_mips(D3D12Texture& texture, const owned::ShaderProgram& downsample, UINT slice = 0, UINT count = 1) override {
+        if (!accept_resource(&texture)) return DXGI_ERROR_DEVICE_RESET;
         if (texture.mips < 2 || !texture.uav.ptr || slice >= texture.slices || !count) return S_OK;
         count = (std::min)(count, texture.slices - slice);
         ID3D12GraphicsCommandList* list = open_list();
@@ -1154,6 +1162,7 @@ public:
     }
 
     HRESULT copy_texture(D3D12Texture& destination, UINT destination_subresource, D3D12Texture& source, UINT source_subresource) override {
+        if (!accept_resource(&destination) || !accept_resource(&source)) return DXGI_ERROR_DEVICE_RESET;
         ID3D12GraphicsCommandList* list = open_list();
         if (!list) return E_FAIL;
         transition(list, destination, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -1249,6 +1258,7 @@ public:
     HRESULT finish_buffer(owned::D3D12PreparedUpload& upload, UINT stride, UINT flags, owned::D3D12BufferRef& out) override {
         out.reset();
         if (!failure_.empty()) return E_FAIL;
+        if (upload.owner != resource_owner_) return DXGI_ERROR_DEVICE_RESET;
         // The prepared resource has no unordered access.
         if (upload.texture || !upload.resource || !upload.upload || (flags & owned::kD3D12BufferUnordered)) return E_INVALIDARG;
         if ((flags & owned::kD3D12BufferTyped) && stride != 4 && stride != 16) return E_INVALIDARG;
@@ -1268,6 +1278,7 @@ public:
     HRESULT finish_texture(owned::D3D12PreparedUpload& upload, owned::D3D12TextureRef& out) override {
         out.reset();
         if (!failure_.empty()) return E_FAIL;
+        if (upload.owner != resource_owner_) return DXGI_ERROR_DEVICE_RESET;
         if (!upload.texture || !upload.resource || !upload.upload || upload.levels.size() != upload.mips) return E_INVALIDARG;
         ID3D12GraphicsCommandList* list = open_list();
         if (!list) return E_FAIL;
@@ -1312,6 +1323,7 @@ public:
         return write_buffer_from(bulk_, buffer, offset, data, bytes);
     }
     HRESULT write_buffer_from(UploadRing& ring, owned::D3D12Buffer& buffer, UINT64 offset, const void* data, UINT64 bytes) {
+        if (!accept_resource(&buffer)) return DXGI_ERROR_DEVICE_RESET;
         if (!bytes) return S_OK;
         if (offset > buffer.bytes || bytes > buffer.bytes - offset) return E_INVALIDARG;
         ID3D12GraphicsCommandList* list = open_list();
@@ -1328,6 +1340,7 @@ public:
     }
 
     HRESULT copy_buffer(owned::D3D12Buffer& destination, owned::D3D12Buffer& source, UINT64 bytes) override {
+        if (!accept_resource(&destination) || !accept_resource(&source)) return DXGI_ERROR_DEVICE_RESET;
         if (!bytes) return S_OK;
         if (bytes > destination.bytes || bytes > source.bytes) return E_INVALIDARG;
         ID3D12GraphicsCommandList* list = open_list();
@@ -1360,26 +1373,31 @@ public:
         slots_dirty_ = true;
     }
     void set_resource(UINT slot, const owned::D3D12Buffer* buffer) noexcept override {
+        if (!accept_resource(buffer)) return;
         if (slot >= kD3D11ResourceSlots) return;
         resources_[slot] = {buffer ? buffer->srv : D3D12_CPU_DESCRIPTOR_HANDLE{}, const_cast<owned::D3D12Buffer*>(buffer), nullptr};
         slots_dirty_ = true;
     }
     void set_resource(UINT slot, const D3D12Texture* texture) noexcept override {
+        if (!accept_resource(texture)) return;
         if (slot >= kD3D11ResourceSlots) return;
         resources_[slot] = {texture ? texture->srv : D3D12_CPU_DESCRIPTOR_HANDLE{}, nullptr, const_cast<D3D12Texture*>(texture)};
         slots_dirty_ = true;
     }
     void set_unordered(UINT slot, const owned::D3D12Buffer* buffer) noexcept override {
+        if (!accept_resource(buffer)) return;
         if (slot >= kD3D11UnorderedSlots) return;
         unordered_[slot] = {buffer ? buffer->uav : D3D12_CPU_DESCRIPTOR_HANDLE{}, const_cast<owned::D3D12Buffer*>(buffer), nullptr};
         slots_dirty_ = true;
     }
     void set_unordered(UINT slot, const D3D12Texture* texture) noexcept override {
+        if (!accept_resource(texture)) return;
         if (slot >= kD3D11UnorderedSlots) return;
         unordered_[slot] = {texture ? texture->uav : D3D12_CPU_DESCRIPTOR_HANDLE{}, nullptr, const_cast<D3D12Texture*>(texture)};
         slots_dirty_ = true;
     }
     void set_unordered_level(UINT slot, D3D12Texture* texture, UINT mip) noexcept override {
+        if (!accept_resource(texture)) return;
         if (slot >= kD3D11UnorderedSlots) return;
         const D3D12_CPU_DESCRIPTOR_HANDLE view = texture ? level_uav(*texture, mip) : D3D12_CPU_DESCRIPTOR_HANDLE{};
         unordered_[slot] = {view, nullptr, view.ptr ? texture : nullptr};
@@ -1388,6 +1406,7 @@ public:
     // A 2D storage texture's unordered view of one level (mip 0: its own
     // view); null when it has no such level or no staging descriptor is left.
     D3D12_CPU_DESCRIPTOR_HANDLE level_uav(D3D12Texture& texture, UINT mip) noexcept {
+        if (!accept_resource(&texture)) return {};
         if (mip == 0 || !texture.uav.ptr) return texture.uav;
         if (mip >= texture.mips || texture.slices > 1) return {};
         if (texture.level_uavs.empty()) {
@@ -1452,6 +1471,7 @@ public:
     // A dispatch whose group counts come from the arguments (three words at
     // offset, as D3D11 DispatchIndirect reads them).
     HRESULT dispatch_indirect(const owned::ShaderProgram& program, owned::D3D12Buffer& arguments, UINT offset) override {
+        if (!accept_resource(&arguments)) return DXGI_ERROR_DEVICE_RESET;
         ID3D12GraphicsCommandList* list = open_list();
         if (!list) return E_FAIL;
         const ProgramCode* code = nullptr;
@@ -1469,13 +1489,14 @@ public:
         return S_OK;
     }
 
-    void set_index_buffer(owned::D3D12Buffer* indices) noexcept override { index_buffer_ = indices; }
+    void set_index_buffer(owned::D3D12Buffer* indices) noexcept override { if (accept_resource(indices)) index_buffer_ = indices; }
 
     // An indexed draw (the index buffer, 32-bit) from five argument words at
     // offset, as D3D11 DrawIndexedInstancedIndirect reads them.
     HRESULT draw_indexed_indirect(const owned::ShaderProgram& vertex, const owned::ShaderProgram& pixel,
                                   const owned::D3D12NativeState& state, const RECT* scissor, owned::D3D12Buffer& arguments,
                                   UINT offset) override {
+        if (!accept_resource(&arguments)) return DXGI_ERROR_DEVICE_RESET;
         ID3D12GraphicsCommandList* list = open_target();
         if (!list) return failure_.empty() ? S_OK : E_FAIL;  // minimized: nothing visible
         if (!index_buffer_ || !indexed_signature_) return E_INVALIDARG;
@@ -1504,6 +1525,7 @@ public:
     // Every 32-bit word of the buffer set to value (D3D11
     // ClearUnorderedAccessViewUint on its raw view), in stream order.
     void clear_buffer_uint(owned::D3D12Buffer& buffer, UINT value) noexcept override {
+        if (!accept_resource(&buffer)) return;
         ID3D12GraphicsCommandList* list = open_list();
         if (!list || buffer.bytes < 4) return;
         if (!buffer.clear_uav.ptr) {
@@ -1530,6 +1552,7 @@ public:
     // poll_readback hands them over once the frame that copied them finished.
     HRESULT request_readback(owned::D3D12Buffer& source, UINT64 bytes, std::uint64_t& ticket) override {
         ticket = 0;
+        if (!accept_resource(&source)) return DXGI_ERROR_DEVICE_RESET;
         ID3D12GraphicsCommandList* list = open_list();
         if (!list) return E_FAIL;
         bytes = (std::min)(bytes, source.bytes);
@@ -1589,6 +1612,7 @@ public:
     HRESULT draw_indirect(const owned::ShaderProgram& vertex, const owned::ShaderProgram& pixel, const owned::D3D12NativeState& state,
                           const RECT* scissor, owned::D3D12Buffer& arguments, UINT offset, const owned::ShaderProgram* hull = nullptr,
                           const owned::ShaderProgram* domain = nullptr, bool strip = false) override {
+        if (!accept_resource(&arguments)) return DXGI_ERROR_DEVICE_RESET;
         const bool patches = hull && domain;
         ID3D12GraphicsCommandList* list = open_target();
         if (!list) return failure_.empty() ? S_OK : E_FAIL;  // minimized: nothing visible
@@ -1711,6 +1735,7 @@ public:
     }
 
     HRESULT write_texture(D3D12Texture& texture, const RECT& rect, const void* data, UINT pitch, UINT mip = 0) override {
+        if (!accept_resource(&texture)) return DXGI_ERROR_DEVICE_RESET;
         ID3D12GraphicsCommandList* list = open_list();
         if (!list) return E_FAIL;
         if (rect.right <= rect.left || rect.bottom <= rect.top) return S_OK;
@@ -1757,6 +1782,7 @@ public:
     }
 
     HRESULT capture(D3D12Texture& texture, UINT x, UINT y, const RECT& box, D3D12Texture* from = nullptr) override {
+        if (!accept_resource(&texture) || !accept_resource(from)) return DXGI_ERROR_DEVICE_RESET;
         ID3D12GraphicsCommandList* list = open_target();
         if (!list) return failure_.empty() ? S_FALSE : E_FAIL;  // minimized: nothing drawn to copy
         if (box.right <= box.left || box.bottom <= box.top) return S_OK;
@@ -1880,6 +1906,9 @@ public:
     // Several colour targets (up to 8) and the depth of `depth` (null: none)
     // for the draws that follow; set_target returns to one.
     void set_targets(D3D12Texture* const* colors, UINT count, D3D12Texture* depth) noexcept override {
+        if (!accept_resource(depth)) return;
+        for (UINT index = 0; index < (std::min)(count, UINT(extra_targets_.size()) + 1); ++index)
+            if (!colors || !accept_resource(colors[index])) return;
         count = (std::min)(count, UINT(extra_targets_.size()) + 1);
         offscreen_ = count && colors[0] && colors[0]->rtv.ptr ? colors[0] : nullptr;
         // The world target with more targets (the AO ambient share) stays the world's.
@@ -1896,6 +1925,7 @@ public:
 
     // Any target's colour, cleared now (the bound targets are not changed).
     void clear_texture(D3D12Texture& target, const float color[4], UINT mip = 0) noexcept override {
+        if (!accept_resource(&target)) return;
         ID3D12GraphicsCommandList* list = target.rtv.ptr ? open_target() : open_list();
         if (!list) return;
         if (mip > 0) {  // a storage texture's level
@@ -1925,6 +1955,7 @@ public:
     }
 
     void clear_texture_uint(D3D12Texture& target, const UINT values[4]) noexcept override {
+        if (!accept_resource(&target)) return;
         ID3D12GraphicsCommandList* list = open_list();
         if (!list || !target.uav.ptr) return;
         const std::uint32_t index = ring(1);
@@ -1940,15 +1971,21 @@ public:
     // then the executor's heaps and root signature bound again and its
     // cached list state forgotten (the library set its own).
     HRESULT record_external(const char* name, const ExternalUse* uses, UINT count, const ExternalRecord& record) override {
+        constexpr UINT kMaximum = 8;
+        if (count > kMaximum || (count && !uses) || !record) return E_INVALIDARG;
+        // Validate the complete set before opening a list or transitioning any
+        // resource. A surviving snapshot must never reach NGX/FSR on a new device.
+        for (UINT index = 0; index < count; ++index) {
+            const D3D12Texture* texture = uses[index].texture;
+            if (!texture || (uses[index].depth && !texture->depth)) return E_INVALIDARG;
+            if (texture->owner != resource_owner_ || !texture->resource) return DXGI_ERROR_DEVICE_RESET;
+        }
         ID3D12GraphicsCommandList* list = open_list();
         if (!list) return E_FAIL;
-        constexpr UINT kMaximum = 8;
-        if (count > kMaximum || !record) return E_INVALIDARG;
         ID3D12Resource* resources[kMaximum]{};
         if (g_hazards) g_hazards->command(name);
         for (UINT index = 0; index < count; ++index) {
             D3D12Texture* texture = uses[index].texture;
-            if (!texture || (uses[index].depth && !texture->depth)) return E_INVALIDARG;
             const D3D12_RESOURCE_STATES state = uses[index].written ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : uses[index].depth ? kDepthRead : kShaderRead;
             if (uses[index].depth) transition_depth(list, *texture, state);
             else transition(list, *texture, state);
@@ -1972,6 +2009,7 @@ public:
 
     // One target's depth into another's of the same size and format (stream order).
     HRESULT copy_depth(D3D12Texture& destination, D3D12Texture& source) override {
+        if (!accept_resource(&destination) || !accept_resource(&source)) return DXGI_ERROR_DEVICE_RESET;
         ID3D12GraphicsCommandList* list = open_list();
         if (!list) return E_FAIL;
         if (!destination.depth || !source.depth || destination.depth_format != source.depth_format ||
@@ -1991,6 +2029,7 @@ public:
     }
 
     void set_depth_resource(UINT slot, const D3D12Texture* target) noexcept override {
+        if (!accept_resource(target)) return;
         if (slot >= kD3D11ResourceSlots) return;
         const bool readable = target && target->depth_srv.ptr;
         resources_[slot] = {readable ? target->depth_srv : D3D12_CPU_DESCRIPTOR_HANDLE{}, nullptr,
@@ -2071,6 +2110,7 @@ public:
     // Depth-only draws into one slice of a depth array, in the viewport rect
     // (also the scissor); set_target or set_targets returns to colour.
     void set_depth_target(D3D12Texture* array, UINT slice, const RECT& viewport, D3D12Texture* color) noexcept override {
+        if (!accept_resource(array) || !accept_resource(color)) return;
         depth_target_ = array && array->depth_array && slice < array->slices ? array : nullptr;
         depth_target_color_ = depth_target_ && color && color->rtv.ptr ? color : nullptr;
         depth_target_slice_ = slice;
@@ -2080,6 +2120,7 @@ public:
 
     // A whole slice, or just one shared-atlas cell, cleared to depth now.
     void clear_depth_slice(D3D12Texture& array, UINT slice, float depth, const RECT* rect) noexcept override {
+        if (!accept_resource(&array)) return;
         ID3D12GraphicsCommandList* list = open_target();
         if (!list || !array.depth_array || slice >= array.slices) return;
         transition(list, array, D3D12_RESOURCE_STATE_DEPTH_WRITE);
@@ -2088,6 +2129,7 @@ public:
     }
 
     std::uint32_t bindless_index(D3D12Texture& texture) noexcept override {
+        if (!accept_resource(&texture)) return UINT32_MAX;
         if (texture.index != UINT32_MAX) return texture.index;
         const std::uint32_t index = core_.views().allocate();
         if (index == UINT32_MAX) {
@@ -2107,6 +2149,7 @@ public:
     }
 
     void set_target(D3D12Texture* target, bool world = false) noexcept override {
+        if (!accept_resource(target)) return;
         offscreen_ = target && target->rtv.ptr ? target : nullptr;
         offscreen_world_ = offscreen_ && world;
         if (offscreen_world_) world_target_ = offscreen_;
@@ -2131,6 +2174,7 @@ public:
     }
 
     void clear_depth_of(D3D12Texture& target, float depth, UINT8 stencil) noexcept override {
+        if (!accept_resource(&target)) return;
         ID3D12GraphicsCommandList* list = open_target();
         if (!list || !target.dsv.ptr) return;
         transition_depth(list, target, D3D12_RESOURCE_STATE_DEPTH_WRITE);
@@ -2142,6 +2186,11 @@ public:
     }
 
     HRESULT draw_ui(const owned::D3D12UiPass& pass) override {
+        if (pass.draw_count && !pass.draws) return E_INVALIDARG;
+        for (std::size_t index = 0; index < pass.draw_count; ++index) {
+            const D3D12Texture* texture = pass.draws[index].texture;
+            if (texture && (texture->owner != resource_owner_ || !texture->resource)) return DXGI_ERROR_DEVICE_RESET;
+        }
         ID3D12GraphicsCommandList* list = open_target();
         if (!list) return failure_.empty() ? S_OK : E_FAIL;  // minimized: nothing visible
         if (!pass.draw_count || !pass.vertex_bytes) return S_OK;
@@ -2268,7 +2317,7 @@ public:
         if (!fsr_.prepare(list, depth, motion, p, error)) { remote::host_log("d3d12: %s", error.c_str()); return E_FAIL; }
         return S_OK;
     }
-    void set_fsr_hudless(D3D12Texture* hudless) noexcept override { fsr_hudless_ = fsr_on_ ? hudless : nullptr; }
+    void set_fsr_hudless(D3D12Texture* hudless) noexcept override { if (accept_resource(hudless)) fsr_hudless_ = fsr_on_ ? hudless : nullptr; }
     std::uint64_t fsr_vram() const noexcept override { return fsr_.vram(); }
     D3D12Texture* frame_image_texture() noexcept override { return frame_image(); }
     D3D12Texture* generated_image() noexcept override { return fg_on_ ? generated_[fg_slot_].get() : nullptr; }
@@ -2301,6 +2350,7 @@ public:
     }
 
     HRESULT read_texture(D3D12Texture& texture, std::vector<std::uint8_t>& pixels, UINT& width, UINT& height) override {
+        if (!accept_resource(&texture)) { pixels.clear(); width = height = 0; return DXGI_ERROR_DEVICE_RESET; }
         return read_bgra(texture.resource.Get(), texture.state, pixels, width, height);
     }
 
@@ -4047,6 +4097,15 @@ private:
         if (FAILED(hr)) { reason = hresult_text("CreateCommittedResource (interface depth)", hr); return false; }
         core_.device()->CreateDepthStencilView(depth_.Get(), nullptr, depth_dsv_);
         return true;
+    }
+
+    // Null unbinds a slot/target. Any non-null resource must belong to this
+    // session before its descriptors, GPU addresses or bindless index are used.
+    template<class Resource>
+    bool accept_resource(const Resource* resource) {
+        if (!resource || (resource->owner == resource_owner_ && resource->resource)) return true;
+        fail(DXGI_ERROR_DEVICE_RESET, "resource belongs to another D3D12 executor");
+        return false;
     }
 
     // A device-level failure ends this backend: named once, every later call fails.
