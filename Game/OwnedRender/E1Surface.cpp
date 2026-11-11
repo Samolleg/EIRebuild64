@@ -1,3 +1,6 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include "E1Surface.h"
 #include "../../external/owned-renderer/Source/renderer.h"
 #include <limits>

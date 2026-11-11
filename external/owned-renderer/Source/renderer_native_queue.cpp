@@ -2744,6 +2744,15 @@ HRESULT Renderer::queue_embedded_wound(const NativeGeometryView& source,const Fi
  state.render[D3DRENDERSTATE_DESTBLEND]=D3DBLEND_INVSRCALPHA;
  state.render[D3DRENDERSTATE_ALPHABLENDENABLE]=TRUE;
  state.stage[0][D3DTSS_TEXCOORDINDEX]=0;
+ if(d3d12_){
+  D3D12TextureRef texture;
+  std::uint64_t backing=0;
+  const HRESULT hr=get_native_owned_texture_d3d12(view.owned_texture,texture,backing,result,false);
+  if(FAILED(hr))return hr;
+  if(!texture)return native_geometry_failure(result,E_FAIL,"embedded.wound_texture_d3d12");
+  return queue_native_impl(view,state,nullptr,result,true,nullptr,backing,
+   surface.generation,false,0,nullptr,&texture);
+ }
  ComPtr<ID3D11ShaderResourceView> texture;
  std::uint64_t backing=0;
  HRESULT hr=get_native_owned_texture(view.owned_texture,texture,backing,result,false);

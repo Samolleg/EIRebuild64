@@ -1,3 +1,20 @@
+# X64D3D12 compile unblock and wound texture ingress, stage 26 (2026-11-11)
+
+E1Surface.cpp defines NOMINMAX before its first Windows-dependent include,
+matching the embedded source units. This addresses the min/max macro collision
+reported by the coordinator; compilation has not been repeated here.
+queue_embedded_wound now resolves its owned surface through the existing
+D3D12 texture cache and passes the texture reference/backing/generation into
+queue_native_impl with the same prepared wound material and blend state.
+The D3D11 branch and the author's HLSL/algorithms are unchanged.
+Host transport adaptation remains Source/embedded_d3d12.{h,cpp}; no SDK/DLL added.
+
+Full BRIEF remains open: secondary figure composition, source fixed-function
+and remaining sprite/SRV adapters are still required. The wound ingress alone
+does not enable the secondary source binding rejected by BindTexture.
+Next finish those drawing adapters, then coordinator build/startup/FG and
+D3D11 regression validation. No compilation, tests or game run performed.
+
 # X64D3D12 local input/simulation/render phases, stage 25 (2026-11-11)
 
 GameMain now opens the embedded simulation before queued input dispatch and
