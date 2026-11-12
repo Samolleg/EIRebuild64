@@ -158,6 +158,7 @@ it errors for an absent or deleted name and verifies the extracted payload.
 
 ```json
 {
+  "expected_sha256": "<lowercase SHA-256 of opened archive; null if new>",
   "changes": [
     {"op": "put", "name_hex": "6974656D2E616462", "file": "edited/item.adb"},
     {"op": "delete", "name_hex": "6F6C642E616462"}
@@ -179,10 +180,10 @@ single-archive operation leaves the previously published PAK in place.
 ```json
 {
   "archives": [
-    {"pak": "res/database.pak", "changes": [
+    {"pak": "res/database.pak", "expected_sha256": "<opened SHA-256>", "changes": [
       {"op": "put", "name_hex": "6974656D2E616462", "file": "edited/item.adb"}
     ]},
-    {"pak": "res/texts.pak", "changes": [
+    {"pak": "res/texts.pak", "expected_sha256": "<opened SHA-256>", "changes": [
       {"op": "put", "name_hex": "6974656D2E747874", "file": "edited/item.txt"}
     ]}
   ]
@@ -299,3 +300,9 @@ decompression C sources with the static CRT for the engine and pack utility.
 `EIRebuild64Pack.vcxproj` is part of `EI_Rebuild.sln`. No dependency download or
 restore is performed. The dependency license and bundled xxHash notice are
 recorded in `THIRD_PARTY.md`.
+
+Every apply request and txn member requires expected_sha256: the lowercase SHA-256
+of the editor snapshot, or JSON null for a new archive. All preconditions are
+checked under all writer locks before staging any archive. A mismatch rejects
+the entire edit; callers must reload and resolve conflicts, never retry with a
+new hash attached to stale payloads.

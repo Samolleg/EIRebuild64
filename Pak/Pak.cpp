@@ -579,6 +579,14 @@ void Publish(const fs::path& from,const fs::path& to)
 Json ReadJson(const fs::path& file){std::ifstream in(file,std::ios::binary);Require(bool(in),"cannot open JSON");Json j;in>>j;return j;}
 fs::path Absolute(const fs::path& path){return fs::absolute(path).lexically_normal();}
 std::string Digest(const fs::path& path){auto hash=Sha(ReadFile(path));return Hex(hash.data(),hash.size());}
+void CheckExpected(const fs::path& path,const Json& expected)
+{
+    if(expected.is_null()){Require(!fs::exists(path),"archive was created externally; reload before saving");return;}
+    Require(expected.is_string(),"expected_sha256 must be a hex digest or null");
+    auto value=expected.get<std::string>();
+    Require(value.size()==64&&std::all_of(value.begin(),value.end(),[](char c){return (c>='0'&&c<='9')||(c>='a'&&c<='f');}),"expected_sha256 must be lowercase SHA-256");
+    Require(fs::exists(path)&&Sha(ReadFile(path))==Unhex(value),"archive changed externally; reload before saving");
+}
 std::string ChangeName(const Json& change)
 {
     auto bytes=Unhex(change.at("name_hex").get<std::string>());std::string name(bytes.begin(),bytes.end());Normalize(name);return name;
@@ -610,7 +618,7 @@ void BuildChanges(const fs::path& target,const Json& changes,const fs::path& bas
     if(!lines.empty())Save(work/L"_deleted.txt",Bytes(lines.begin(),lines.end()));
     Pack(work,tmp);Verify(tmp);Flush(tmp);
 }
-struct Target {fs::path path,tmp;Json changes;};
+struct Target {fs::path path,tmp;Json changes;Json expected;};
 std::vector<std::unique_ptr<Lock>> Locks(const std::vector<Target>& targets)
 {
     std::vector<std::unique_ptr<Lock>> locks;for(const auto& t:targets)locks.push_back(std::make_unique<Lock>(t.path));return locks;
@@ -664,19 +672,21 @@ void Apply(const fs::path& path,const fs::path& changesFile)
 {
     auto target=Absolute(path);Require(_wcsicmp(target.extension().c_str(),L".pak")==0,"target must be .pak");auto tmp=target;tmp+=L".tmp";Lock lock(target);NoPending(target.parent_path());
     Require(!fs::exists(tmp),"stale staging file; recover first");
-    try{BuildChanges(target,ReadJson(changesFile).at("changes"),Absolute(changesFile).parent_path(),tmp);Publish(tmp,target);}catch(...){std::error_code ec;fs::remove(tmp,ec);throw;}
+    auto request=ReadJson(changesFile);CheckExpected(target,request.at("expected_sha256"));
+    try{BuildChanges(target,request.at("changes"),Absolute(changesFile).parent_path(),tmp);Publish(tmp,target);}catch(...){std::error_code ec;fs::remove(tmp,ec);throw;}
 }
 void Transaction(const fs::path& changesFile)
 {
     auto base=Absolute(changesFile).parent_path();auto j=ReadJson(changesFile);std::vector<Target> targets;
     for(const auto& item:j.at("archives")) {
-        auto path=fs::u8path(item.at("pak").get<std::string>());if(path.is_relative())path=base/path;path=Absolute(path);Require(_wcsicmp(path.extension().c_str(),L".pak")==0,"target must be .pak");auto tmp=path;tmp+=L".tmp";targets.push_back({path,tmp,item.at("changes")});
+        auto path=fs::u8path(item.at("pak").get<std::string>());if(path.is_relative())path=base/path;path=Absolute(path);Require(_wcsicmp(path.extension().c_str(),L".pak")==0,"target must be .pak");auto tmp=path;tmp+=L".tmp";targets.push_back({path,tmp,item.at("changes"),item.at("expected_sha256")});
     }
     Require(!targets.empty(),"empty transaction");SortTargets(targets);auto directory=targets.front().path.parent_path();for(const auto& t:targets) {
         Require(t.path.root_name()==directory.root_name(),"transaction targets must share a volume");
         for(;;){auto relative=t.path.lexically_relative(directory);if(!relative.empty()&&*relative.begin()!=L"..")break;auto parent=directory.parent_path();Require(parent!=directory,"no common transaction directory");directory=parent;}
     }
     auto locks=Locks(targets);for(const auto& t:targets){NoPending(t.path.parent_path());Require(!fs::exists(t.tmp),"stale staging file; recover first");}
+    for(const auto& t:targets)CheckExpected(t.path,t.expected);
     auto manifest=directory/(L"pak-txn-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64())+L".json");bool committed=false;
     try {
         Json members=Json::array();for(const auto& t:targets){BuildChanges(t.path,t.changes,base,t.tmp);members.push_back({{"target",t.path.lexically_relative(directory).generic_u8string()},{"tmp",t.tmp.lexically_relative(directory).generic_u8string()},{"sha256",Digest(t.tmp)}});}
