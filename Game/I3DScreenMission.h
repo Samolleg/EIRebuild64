@@ -75,6 +75,7 @@ class CI3DObjectOutput;
 class CI3DScreenMission : public CI3DScreen
 {
     friend struct E3HudAccess;
+    friend struct GamepadMissionAccess;
 private:
     CArray<CUnit *, CUnit *> pUnits;
 
@@ -177,6 +178,7 @@ public:
 class CI3DObjectWeapons : public CI3DObject
 {
     friend struct E3HudAccess;
+    friend struct GamepadMissionAccess;
 private:
     CI3DScreenMission *pScreen;
 
@@ -223,6 +225,7 @@ struct SQItemDesc
 class CI3DObjectItems : public CI3DObject
 {
     friend struct E3HudAccess;
+    friend struct GamepadMissionAccess;
 private:
     CI3DScreenMission *pScreen;
 
@@ -279,6 +282,7 @@ public:
 class CI3DObjectSpells : public CI3DObject
 {
     friend struct E3HudAccess;
+    friend struct GamepadMissionAccess;
 private:
     CI3DScreenMission *pScreen;
 
@@ -329,6 +333,7 @@ public:
 class CI3DObjectSkills : public CI3DObject
 {
     friend struct E3HudAccess;
+    friend struct GamepadMissionAccess;
 private:
     CI3DScreenMission *pScreen;
 

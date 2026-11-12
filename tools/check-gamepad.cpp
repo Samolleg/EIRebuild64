@@ -1,4 +1,6 @@
 #include "../Game/GamepadState64.h"
+#include "../Game/GamepadGestures64.h"
+#include "../external/owned-renderer/Source/controller_input_state.h"
 #include <cstdio>
 #include <cstdlib>
 
@@ -7,6 +9,57 @@ void require(bool ok, const char* name) {
 }
 int main() {
     using namespace Gamepad64;
+    owned::set_controller_modifiers(6);
+    require(owned::controller_modifier_down(0x10) && owned::controller_modifier_down(0x12) &&
+        !owned::controller_modifier_down(0x11), "HUD receives Shift/Alt without physical key injection");
+    owned::set_controller_modifiers(0);
+    require(!owned::controller_modifier_down(0x10) && !owned::controller_modifier_down(0x12), "HUD modifiers reset");
+    require(MessageKey(0xa0) == 0x10 && MessageKey(0xa1) == 0x10, "Shift releases use generic VK");
+    require(MessageKey(0xa4) == 0x12 && MessageKey(0xa5) == 0x12, "Alt releases use generic VK");
+    require(MessageKey('N') == 'N', "ordinary virtual keys preserved");
+    require(ModifierPartner(42) == 54 && ModifierPartner(56) == 312 && ModifierPartner(1) == -1,
+        "opposite-side physical modifiers share ownership");
+    TimedPress tap;
+    require(tap.Update(true, 100) == Press::none, "short action deferred");
+    require(tap.Update(false, 200) == Press::shortPress, "short action on release");
+    require(tap.Update(false, 300) == Press::none, "short action fires once");
+    TimedPress hold;
+    require(hold.Update(true, 100) == Press::none, "hold begins without short action");
+    require(hold.Update(true, 549) == Press::none, "hold below threshold");
+    require(hold.Update(true, 550) == Press::longPress, "long action at threshold");
+    require(hold.Update(true, 2000) == Press::none, "long action no autorepeat");
+    require(hold.Update(false, 2100) == Press::none, "long release never fires short action");
+    TimedPress slowFrame;
+    slowFrame.Update(true, 0);
+    require(slowFrame.Update(false, 600) == Press::longPress, "delayed poll keeps long semantics");
+    TriggerPicker picker;
+    require(picker.Update(true, 0) == PickerEvent::none, "bumper alone does not select");
+    require(picker.Update(true, 60) == PickerEvent::advance, "trigger edge advances");
+    require(picker.Update(true, 255) == PickerEvent::none, "held trigger no repeat");
+    require(picker.Update(true, 35) == PickerEvent::none, "trigger hysteresis");
+    require(picker.Update(true, 30) == PickerEvent::none, "trigger release does not commit");
+    require(picker.Update(true, 60) == PickerEvent::advance, "second trigger press advances");
+    require(picker.Update(false, 255) == PickerEvent::commit, "bumper release commits once");
+    require(picker.BlocksWheel(), "consumed trigger cannot zoom on bumper release");
+    require(picker.Update(false, 255) == PickerEvent::none, "commit not repeated");
+    picker.Update(false, 0);
+    require(!picker.BlocksWheel(), "trigger neutral restores wheel");
+    TriggerPicker cancelled;
+    cancelled.Update(true, 100);
+    cancelled.Abort();
+    require(cancelled.Update(true, 0) == PickerEvent::none, "cancelled selection stays cancelled");
+    require(cancelled.Update(true, 100) == PickerEvent::none, "cancel cannot restart until bumper release");
+    require(cancelled.Update(false, 100) == PickerEvent::none, "cancel cannot activate on release");
+    require(cancelled.BlocksWheel(), "cancelled trigger does not leak to wheel");
+    TriggerPicker noSelection;
+    noSelection.Update(true, 0);
+    require(noSelection.Update(false, 0) == PickerEvent::none, "bumper without trigger never activates");
+    for (int pose = 0; pose < 4; ++pose) {
+        require(StepPose(pose, 1) == (pose == 3 ? 3 : pose + 1), "pose up clamps at run");
+        require(StepPose(pose, -1) == (pose == 0 ? 0 : pose - 1), "pose down clamps at prone");
+    }
+    require(NextSlot(-1, 4) == 0 && NextSlot(3, 4) == 0 && NextSlot(0, 4, -1) == 3 && NextSlot(0, 0) == -1,
+        "cyclic slots, no selection and empty panel");
     MovieButtonGate movie;
     require(!movie.Update(true, 0x1000, true), "held on movie entry cannot skip");
     require(!movie.Update(true, 0x1000, true), "held button remains blocked");
@@ -57,5 +110,5 @@ int main() {
     require(!held.Set(false, true), "physical takes shared ownership");
     require(!held.Set(true, false) && held.Down(), "pad release preserves physical hold");
     require(held.Set(false, false) && !held.Down(), "last owner releases");
-    std::puts("PASS: movie skip/release/focus/disconnect/permissions, stick grid, triggers, dual-source buttons");
+    std::puts("PASS: gestures, deferred picker, modifiers, stance/cycles, movie skip, sticks, dual-source buttons");
 }

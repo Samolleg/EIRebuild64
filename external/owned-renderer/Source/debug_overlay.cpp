@@ -1,5 +1,6 @@
 #include "test_harness.h"
 #include "debug_overlay.h"
+#include <controller_input_state.h>
 #include "embedded_process_policy.h"
 #include "combat_ui.h"
 
@@ -2628,7 +2629,7 @@ void DebugOverlay::maintain() noexcept {
     const bool host_child = implementation_->host_child;
     const bool f10_down = !core_input && native_user_input_enabled() && (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
     const bool focused = native_user_input_enabled() && (host_child ? implementation_->external_focused : GetForegroundWindow() == implementation_->window);
-    const bool shift_down = native_user_input_enabled() && (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+    const bool shift_down = native_user_input_enabled() && ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0 || owned::controller_modifier_down(VK_SHIFT));
     if (focused && f10_down && !implementation_->f10_was_down) {
         // Developer mode: F10 = developer cycle, Shift+F10 = player settings.
         // Players: the other way round.

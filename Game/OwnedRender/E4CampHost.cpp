@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "E4Camp.h"
+#include <controller_input_state.h>
 #include "E1Surface.h"
 #include "model_preview_presentation.h"
 #include "../I3DScreenCamp.h"
@@ -140,7 +141,7 @@ void E4CampAccess::Hover(CI3DObjectItemInfo* info,owned::camp::frontend::HoverKi
     if(info==screen->pConstrInfo)result_help=kind==owned::camp::frontend::HoverKind::help&&present?argument:0;
 }
 void E4CampAccess::Text(CI3DObjectItemInfo* info){
-    const int modifiers=((GetKeyState(VK_CONTROL)&0x8000)?1:0)|((GetKeyState(VK_MENU)&0x8000)?2:0);
+    const int modifiers=(((GetKeyState(VK_CONTROL)&0x8000) || owned::controller_modifier_down(VK_CONTROL))?1:0)|(((GetKeyState(VK_MENU)&0x8000) || owned::controller_modifier_down(VK_MENU))?2:0);
     if(info==comparison.get())publication.comparison_modifiers=modifiers;
     if(info==blueprint.get())publication.blueprint_modifiers=modifiers;
     if(screen&&info==screen->pConstrInfo)publication.result_modifiers=modifiers;

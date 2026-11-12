@@ -2,6 +2,21 @@
 #include <cmath>
 
 namespace Gamepad64 {
+// WM_KEY* carries generic modifier VKs, unlike MAPVK_VSC_TO_VK_EX.
+inline unsigned MessageKey(unsigned key) noexcept {
+    if (key == 0xa0 || key == 0xa1) return 0x10; // Shift
+    if (key == 0xa2 || key == 0xa3) return 0x11; // Control
+    if (key == 0xa4 || key == 0xa5) return 0x12; // Alt
+    return key;
+}
+inline int ModifierPartner(int scan) noexcept {
+    switch (scan) {
+    case 42: return 54; case 54: return 42;
+    case 29: return 285; case 285: return 29;
+    case 56: return 312; case 312: return 56;
+    default: return -1;
+    }
+}
 // Each movie/controller needs an observed release before accepting a press.
 // Inactive/disconnected samples disarm it; forbidden skips still consume edges.
 struct MovieButtonGate {
