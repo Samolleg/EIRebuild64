@@ -276,6 +276,7 @@ int CTexture::CopyToSurface(CDXGISurface *pDXDDS, SMMPFileHeader *pHdr, DWORD dw
     pDXDDS->GetSurfaceDesc(&destination);
     bool fullyOpaque = destination.ArraySize == 1 && destination.MipLevels > 0 && destination.MipLevels <= 32;
     UINT uploadedMips = 0;
+    std::shared_ptr<const std::vector<std::uint8_t>> alphaCutMask;
     for (int i = int(dwFromLevel); i < int(pHdr->dwMipMapLevel) &&
          i - int(dwFromLevel) < int(destination.MipLevels); i++)
     {
@@ -308,7 +309,7 @@ int CTexture::CopyToSurface(CDXGISurface *pDXDDS, SMMPFileHeader *pHdr, DWORD dw
         pDXDDS->UpdateTexture(sub_index, nullptr, &srd);
         // Inspect the bytes actually uploaded, including RGB conversion and every
         // destination mip. A GPU-only surface cannot recover this alpha proof.
-        if (fullyOpaque) {
+        if (fullyOpaque || sub_index == 0) {
             owned::TextureAlphaPixels alpha;
             alpha.data = static_cast<const std::uint8_t*>(srd.pSysMem);
             alpha.width = dwNewSizeX; alpha.height = dwNewSizeY; alpha.pitch = srd.SysMemPitch;
@@ -323,6 +324,10 @@ int CTexture::CopyToSurface(CDXGISurface *pDXDDS, SMMPFileHeader *pHdr, DWORD dw
             }
             const bool packed = alpha.format == owned::TextureAlphaFormat::packed;
             alpha.bytes = std::uint64_t(alpha.pitch) * (packed ? alpha.height : (std::uint64_t(alpha.height) + 3) / 4);
+            // Preserve destination mip-zero cutouts for foliage classification,
+            // including reduced source mip uploads, without GPU readback.
+            if (sub_index == 0 && alpha.width == destination.Width && alpha.height == destination.Height)
+                alphaCutMask = owned::texture_alpha_cut_mask(alpha);
             fullyOpaque = fullyOpaque &&
                 alpha.width == (std::max)(1u, destination.Width >> sub_index) &&
                 alpha.height == (std::max)(1u, destination.Height >> sub_index) &&
@@ -339,8 +344,8 @@ int CTexture::CopyToSurface(CDXGISurface *pDXDDS, SMMPFileHeader *pHdr, DWORD dw
         dwNewSizeY >>= 1;
     }
 
-    if (fullyOpaque && uploadedMips == destination.MipLevels)
-        pDXDDS->PublishUploadedOpacity(true);
+    if (uploadedMips == destination.MipLevels)
+        pDXDDS->PublishUploadedOpacity(fullyOpaque, std::move(alphaCutMask));
     return nTotalSize;
 }
 /////////////////////////////////////////////////////////////////////////////////////

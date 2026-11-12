@@ -16,9 +16,11 @@ public:
     std::uint64_t Id() const noexcept { return id; }
     void BeginWrite() noexcept;
     // Opaque proof comes from every uploaded CPU mip, never from the GPU format.
-    bool Complete(ID3D11Texture2D* texture, bool alphaFullyOpaque = false) noexcept;
+    bool Complete(ID3D11Texture2D* texture, bool alphaFullyOpaque = false,
+        std::shared_ptr<const std::vector<std::uint8_t>> alphaCutMask = {}) noexcept;
     // Copies completed level-zero bytes, never the caller's GPU allocation.
-    bool CompleteCpu(const owned::SurfaceImage& source, bool alphaFullyOpaque = false) noexcept;
+    bool CompleteCpu(const owned::SurfaceImage& source, bool alphaFullyOpaque = false,
+        std::shared_ptr<const std::vector<std::uint8_t>> alphaCutMask = {}) noexcept;
 };
 std::shared_ptr<const owned::OwnedVisualSurface> E1SurfaceValue(std::uint64_t id) noexcept;
 // S_FALSE means a D3D11-only publication; errors must not silently fall back.

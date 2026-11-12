@@ -50,11 +50,13 @@ namespace OwnedRender {
 E1Surface::E1Surface() : id(++nextId) { registry(); if (!id) id = ++nextId; }
 E1Surface::~E1Surface() { BeginWrite(); }
 void E1Surface::BeginWrite() noexcept { const std::lock_guard<std::mutex> lock(guard()); entries().erase(id); }
-bool E1Surface::Complete(ID3D11Texture2D* texture, bool alphaFullyOpaque) noexcept try {
+bool E1Surface::Complete(ID3D11Texture2D* texture, bool alphaFullyOpaque,
+        std::shared_ptr<const std::vector<std::uint8_t>> alphaCutMask) noexcept try {
     BeginWrite();
     auto value = std::make_shared<owned::OwnedVisualSurface>();
     if (!describe(texture, *value)) return false;
     value->alpha_fully_opaque = alphaFullyOpaque;
+    value->alpha_cut_mask = alphaFullyOpaque ? nullptr : std::move(alphaCutMask);
     if (++generation == 0) ++generation;
     value->id = id; value->generation = generation;
     Entry entry; entry.value = std::move(value); entry.texture = texture;
@@ -62,7 +64,8 @@ bool E1Surface::Complete(ID3D11Texture2D* texture, bool alphaFullyOpaque) noexce
     entries().emplace(id, std::move(entry));
     return true;
 } catch (...) { BeginWrite(); return false; }
-bool E1Surface::CompleteCpu(const owned::SurfaceImage& source, bool alphaFullyOpaque) noexcept try {
+bool E1Surface::CompleteCpu(const owned::SurfaceImage& source, bool alphaFullyOpaque,
+        std::shared_ptr<const std::vector<std::uint8_t>> alphaCutMask) noexcept try {
     BeginWrite();
     DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
     UINT blockBytes = 0;
@@ -92,7 +95,13 @@ bool E1Surface::CompleteCpu(const owned::SurfaceImage& source, bool alphaFullyOp
     value->pitch = image->pitch; value->format = image->format;
     value->has_color_key = image->has_color_key; value->color_key = image->color_key;
     value->static_mip_hint = image->static_mip_hint;
+    if (!alphaFullyOpaque && !alphaCutMask) {
+        owned::TextureAlphaPixels alpha;
+        if (owned::visual_surface_raw_alpha(*value, image->pixels.data(), image->pixels.size(), alpha))
+            alphaCutMask = owned::texture_alpha_cut_mask(alpha);
+    }
     value->alpha_fully_opaque = alphaFullyOpaque;
+    value->alpha_cut_mask = alphaFullyOpaque ? nullptr : std::move(alphaCutMask);
     if (++generation == 0) ++generation;
     image->id = value->id = id; image->generation = value->generation = generation;
     owned::update_surface_memory_accounting(*image);
