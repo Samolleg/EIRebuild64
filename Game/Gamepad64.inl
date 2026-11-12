@@ -201,7 +201,7 @@ void Poll() {
     const bool mission = !theInterface.IsConsoleVisible() &&
         dynamic_cast<CI3DScreenMission*>(theInterface.GetCurrentScreen()) != nullptr;
     if (mission) {
-        WantAction(wanted, KA_PAUSE, pad.wButtons & XINPUT_GAMEPAD_X);
+        WantAction(wanted, KA_PAUSE, pad.wButtons & XINPUT_GAMEPAD_A);
         WantAction(wanted, KA_MINIMAP, pad.wButtons & XINPUT_GAMEPAD_Y);
         WantAction(wanted, KA_OBJECTIVES, pad.wButtons & XINPUT_GAMEPAD_BACK);
         WantAction(wanted, KA_CAMERA_LEFT, right.x < -0.25);
@@ -274,7 +274,7 @@ void Poll() {
         leftPress = {}; rightPress = {}; previousButtons = 0;
     }
     for (int button = 0; button < 2; ++button) {
-        const bool down = inside && (pad.wButtons & (button ? XINPUT_GAMEPAD_B : XINPUT_GAMEPAD_A));
+        const bool down = inside && (pad.wButtons & (button ? XINPUT_GAMEPAD_B : XINPUT_GAMEPAD_X));
         if (down && !mouse[button].pad) CancelPreviews();
         if (!mouse[button].Set(true, down)) continue;
         UINT message = button ? (down ? WM_RBUTTONDOWN : WM_RBUTTONUP) :
