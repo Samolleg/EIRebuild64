@@ -25,8 +25,16 @@ void CheckStartupPlan() {
     const std::vector<std::wstring> expected = {
         L"D:\\Profiles\\Mods\\Selected\\a.res", L"D:\\Profiles\\Mods\\Selected\\a.res",
         L"D:\\Profiles\\Mods\\Selected\\menu.res", L"D:\\Profiles\\Mods\\Selected\\tex.res",
-        L"D:\\Profiles\\Base\\Res\\textures.res", L"D:\\Profiles\\Base\\Res\\redress.res", L"D:\\Profiles\\Base\\Res\\menus.res"};
+        L"D:\\Profiles\\Mods\\Selected\\menu.res", L"D:\\Profiles\\Base\\Res\\textures.res", L"D:\\Profiles\\Base\\Res\\redress.res", L"D:\\Profiles\\Base\\Res\\menus.res"};
     require(selected.mounts.archives == expected);
+    // mainmenu00 exists in both: HD textures must beat the legacy menu atlas.
+    std::vector<std::wstring> textures;
+    for (size_t i = 0; i < selected.mounts.archives.size(); ++i)
+        if (selected.mounts.archive_kinds[i] & owned::kArchiveTextures)
+            textures.push_back(selected.mounts.archives[i]);
+    require(textures.size() >= 2);
+    require(textures[0] == L"D:\\Profiles\\Mods\\Selected\\tex.res");
+    require(textures[1] == L"D:\\Profiles\\Mods\\Selected\\menu.res");
     require(selected.mounts.loose_roots == std::vector<std::wstring>{
         L"D:\\Profiles\\Mods\\Selected\\Maps", L"D:\\Profiles\\Base\\Maps"});
     require(selected.world_map_layouts == L"D:\\Profiles\\Mods\\Selected\\world-map-layouts.json");

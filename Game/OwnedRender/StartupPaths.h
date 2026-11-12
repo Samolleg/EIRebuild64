@@ -29,9 +29,10 @@ void CaptureGraphicsMounts(owned::ResourceStoreConfig& mounts,
     };
     for (bool pak : {true, false}) {
         addMod(0, owned::kArchiveFigures, pak);
-        addMod(3, owned::kArchiveAllKinds, pak);
+        addMod(3, owned::kArchiveFigures, pak);
         addMod(1, owned::kArchiveTextures, pak);
         addMod(2, owned::kArchiveTextures, pak);
+        addMod(3, owned::kArchiveTextures, pak);
     }
     for (size_t i = 0; i != ignore.size(); ++i) {
         if (ignore[i]) continue;
