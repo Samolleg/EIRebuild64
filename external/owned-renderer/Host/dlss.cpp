@@ -28,7 +28,7 @@ namespace {
 // NGX can call from its worker threads. The engine journal is asynchronous
 // and thread-safe. Split messages below its 768-byte bridge detail limit.
 void NVSDK_CONV ngx_log_callback(const char* message, NVSDK_NGX_Logging_Level level, NVSDK_NGX_Feature source) {
-    if (!message) return;
+    if (!RuntimeDiagnostics::Enabled() || !message) return;
     while (*message) {
         char text[720];
         const std::size_t count = (std::min)(std::strlen(message), std::size_t(600));
@@ -126,7 +126,7 @@ void Dlss::initialize_owned(ID3D11Device* device, const std::wstring& folder, x6
     info_.PathListInfo.Path = paths_;
     info_.PathListInfo.Length = 1;
 #ifdef EID3D11_EMBEDDED
-    info_.LoggingInfo.LoggingCallback = RuntimeDiagnostics::Enabled() ? &ngx_log_callback : nullptr;
+    info_.LoggingInfo.LoggingCallback = &ngx_log_callback;
     info_.LoggingInfo.MinimumLoggingLevel = RuntimeDiagnostics::Enabled() ? NVSDK_NGX_LOGGING_LEVEL_VERBOSE : NVSDK_NGX_LOGGING_LEVEL_OFF;
     info_.LoggingInfo.DisableOtherLoggingSinks = !RuntimeDiagnostics::Enabled();
 #endif
@@ -158,7 +158,7 @@ void Dlss::initialize_d3d12_owned(ID3D12Device* device, x64remote::Capabilities&
     info_.PathListInfo.Path = paths_;
     info_.PathListInfo.Length = 1;
 #ifdef EID3D11_EMBEDDED
-    info_.LoggingInfo.LoggingCallback = RuntimeDiagnostics::Enabled() ? &ngx_log_callback : nullptr;
+    info_.LoggingInfo.LoggingCallback = &ngx_log_callback;
     info_.LoggingInfo.MinimumLoggingLevel = RuntimeDiagnostics::Enabled() ? NVSDK_NGX_LOGGING_LEVEL_VERBOSE : NVSDK_NGX_LOGGING_LEVEL_OFF;
     info_.LoggingInfo.DisableOtherLoggingSinks = !RuntimeDiagnostics::Enabled();
     if (RuntimeDiagnostics::Enabled() && log_) log_("NGX D3D12 verbose logging enabled in Logs64 (SDK callback also in engine journal)");
