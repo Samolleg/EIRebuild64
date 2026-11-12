@@ -563,7 +563,7 @@ bool CModPackage::ResourcePlan(const std::string&name,std::vector<std::string>&p
  auto key=Lower(filename.string()); auto it=archives.find(key); auto skip=ignoreBase.find(key);
  ignore=skip!=ignoreBase.end()&&skip->second; paths.clear();
  if(it!=archives.end()) {
-     if(RuntimeDiagnostics::Enabled()) paths.push_back(root);
+     paths.push_back(root);
      for(const auto& original:it->second) {
          auto pak=fs::path(original); pak.replace_extension(".pak");
          if(fs::is_regular_file(pak)) paths.push_back(pak.string());

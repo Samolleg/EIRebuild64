@@ -27,12 +27,12 @@ void CheckStartupPlan() {
         L"D:\\Profiles\\Mods\\Selected\\menu.res", L"D:\\Profiles\\Mods\\Selected\\tex.res",
         L"D:\\Profiles\\Base\\Res\\textures.res", L"D:\\Profiles\\Base\\Res\\redress.res", L"D:\\Profiles\\Base\\Res\\menus.res"};
     require(selected.mounts.archives == expected);
-    require(selected.mounts.loose_roots == (RuntimeDiagnostics::Enabled() ? std::vector<std::wstring>{
-        L"D:\\Profiles\\Mods\\Selected\\Maps", L"D:\\Profiles\\Base\\Maps"} : std::vector<std::wstring>{}));
+    require(selected.mounts.loose_roots == std::vector<std::wstring>{
+        L"D:\\Profiles\\Mods\\Selected\\Maps", L"D:\\Profiles\\Base\\Maps"});
     require(selected.world_map_layouts == L"D:\\Profiles\\Mods\\Selected\\world-map-layouts.json");
     const auto stock = OwnedRender::CaptureStartupPaths(L"C:/App/Engine",
         L"E:\\Stock", L"E:\\Stock\\Res", (const PackagePlan*)nullptr);
-    require(stock.mounts.archives.size() == 4 && stock.mounts.loose_roots.size() == (RuntimeDiagnostics::Enabled() ? 1u : 0u));
+    require(stock.mounts.archives.size() == 4 && stock.mounts.loose_roots.size() == 1u);
     require(stock.mounts.archives.front() == L"E:\\Stock\\Res\\figures.res");
     require(stock.world_map_layouts == L"E:\\Stock\\world-map-layouts.json");
     owned::EmbeddedHostConfiguration selectedHost, stockHost;

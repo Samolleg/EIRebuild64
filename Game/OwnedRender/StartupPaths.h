@@ -19,7 +19,7 @@ void CaptureGraphicsMounts(owned::ResourceStoreConfig& mounts,
     const auto addMod = [&](size_t i, std::uint8_t kind, bool pak) {
         for (const auto& path : replacements[i]) {
             if (std::filesystem::is_directory(path)) {
-                if (pak && RuntimeDiagnostics::Enabled()) mounts.loose_roots.push_back(resolve(path));
+                if (pak) mounts.loose_roots.push_back(resolve(path));
                 continue;
             }
             if ((_stricmp(std::filesystem::path(path).extension().string().c_str(),".pak") == 0) != pak) continue;
@@ -59,8 +59,8 @@ owned::EmbeddedHostPaths CaptureStartupPaths(const std::filesystem::path& engine
     paths.renderer_config = RuntimePaths64::Config("rddraw.ini").wstring();
     const auto modRoot = package ? AbsoluteInput(std::filesystem::path(package->Directory())) : workRoot;
     paths.world_map_layouts = (modRoot / L"world-map-layouts.json").wstring();
-    if (package && RuntimeDiagnostics::Enabled()) paths.mounts.loose_roots.push_back((modRoot / L"Maps").wstring());
-    if (RuntimeDiagnostics::Enabled()) paths.mounts.loose_roots.push_back((workRoot / L"Maps").wstring());
+    if (package) paths.mounts.loose_roots.push_back((modRoot / L"Maps").wstring());
+    paths.mounts.loose_roots.push_back((workRoot / L"Maps").wstring());
     CaptureGraphicsMounts(paths.mounts, resourceRoot, package, [&](const std::string& replacement) {
         return AbsoluteInput(std::filesystem::path(replacement)).wstring();
     });
@@ -71,7 +71,7 @@ owned::EmbeddedHostPaths CaptureStartupPaths(const std::filesystem::path& engine
         for (const auto& replacement : replacements) {
             const auto path = AbsoluteInput(std::filesystem::path(replacement));
             if (std::filesystem::is_directory(path)) {
-                if (RuntimeDiagnostics::Enabled()) mounts.loose_roots.push_back(path.wstring());
+                mounts.loose_roots.push_back(path.wstring());
             } else mounts.archives.push_back(path.wstring());
         }
         if (!ignore) mounts.archives.push_back((resourceRoot / name).wstring());
