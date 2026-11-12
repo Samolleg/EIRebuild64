@@ -7,6 +7,26 @@ void require(bool ok, const char* name) {
 }
 int main() {
     using namespace Gamepad64;
+    MovieButtonGate movie;
+    require(!movie.Update(true, 0x1000, true), "held on movie entry cannot skip");
+    require(!movie.Update(true, 0x1000, true), "held button remains blocked");
+    require(!movie.Update(true, 0, true), "release arms movie input");
+    require(movie.Update(true, 0x1000, true), "fresh A skips movie");
+    require(!movie.Update(true, 0x1000, true), "hold does not repeat");
+    require(!movie.Update(false, 0, true), "focus loss/disconnection disarms");
+    require(!movie.Update(true, 0x0010, true), "held Start on reconnect cannot skip");
+    require(!movie.Update(true, 0, false), "release during unskippable movie");
+    require(!movie.Update(true, 0x0010, false), "unskippable movie consumes press");
+    require(!movie.Update(true, 0x0010, true), "becoming skippable cannot reuse held press");
+    require(!movie.Update(true, 0, true), "release before next press");
+    require(movie.Update(true, 0x0010, true), "fresh Start skips held frame");
+    MovieButtonGate nextMovie;
+    require(!nextMovie.Update(true, 0x0010, true), "press cannot skip next movie");
+    for (unsigned button = 1; button <= 0x8000; button <<= 1) {
+        MovieButtonGate gate;
+        require(!gate.Update(true, 0, true), "neutral movie entry");
+        require(gate.Update(true, button, true), "digital button skip");
+    }
     const int dead = 7849;
     require(NormalizeStick(0, 0, dead).x == 0, "center");
     require(NormalizeStick(dead, 0, dead).x == 0, "deadzone boundary");
@@ -37,5 +57,5 @@ int main() {
     require(!held.Set(false, true), "physical takes shared ownership");
     require(!held.Set(true, false) && held.Down(), "pad release preserves physical hold");
     require(held.Set(false, false) && !held.Down(), "last owner releases");
-    std::puts("PASS: stick grid, deadzones, trigger range, exhaustive dual-source button transitions");
+    std::puts("PASS: movie skip/release/focus/disconnect/permissions, stick grid, triggers, dual-source buttons");
 }

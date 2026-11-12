@@ -1,6 +1,8 @@
 #include "StdAfx.h"
 #include "MoviePlayback.h"
 #include "AgentBackground.h"
+#include "GamepadMovie64.h"
+#include "I3DMain.h"
 #include "LiveObserver.h"
 #include "MiniaudioOneShotSfx.h"
 #include <atomic>
@@ -104,6 +106,8 @@ bool Movie::Play(const char* name, unsigned long framePause, bool skipMovie,
     if (!video.BeginPlay(name, stopSounds)) return false;
     bool done = false, interrupted = false, holding = false;
     LiveMovieInputScope inputScope(video,done,interrupted,holding,skipMovie,skipFrame);
+    Gamepad64::MovieInput gamepad;
+    theInterface.ResetInputState();
     ULONGLONG pauseElapsed = 0, lastTick = GetTickCount64();
     while (!done) {
         MSG msg;
@@ -122,6 +126,8 @@ bool Movie::Play(const char* name, unsigned long framePause, bool skipMovie,
             if (msg.message >= WM_MOUSEFIRST && msg.message <= WM_MOUSELAST) continue;
             TranslateMessage(&msg); DispatchMessage(&msg);
         }
+        if (!done && gamepad.SkipPressed(!AgentBackground::Enabled() && !Inactive(),
+            skipMovie || (holding && skipFrame))) SkipLiveMovieInput();
         if (!done) LiveObserver::MovieFrame();
         if (done) break;
         if (!IsWindow(NGame::hWnd) || !video.player) { interrupted = true; break; }
@@ -134,6 +140,7 @@ bool Movie::Play(const char* name, unsigned long framePause, bool skipMovie,
         Sleep(Inactive() ? 10 : 1);
     }
     video.StopPlaying();
+    theInterface.ResetInputState();
     NGame::DestroyInputMessages();
     return !interrupted;
 }
