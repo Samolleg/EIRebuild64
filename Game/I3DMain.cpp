@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "AgentBackground.h"
+#include "Gamepad64.h"
 #include "RuntimePaths64.h"
 #include "CorePerf.h"
 #include "OwnedRender/E1TextLifetime.h"
@@ -1199,6 +1200,7 @@ void CInterface3D::CheckMissionTutorials(bool bForce)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::ResetInputState()
 {
+    Gamepad64::Cancel();
     bCtrlDown = false;
     bAltDown = false;
     bShiftDown = false;
