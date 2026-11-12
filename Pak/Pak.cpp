@@ -618,7 +618,13 @@ void BuildChanges(const fs::path& target,const Json& changes,const fs::path& bas
     if(!lines.empty())Save(work/L"_deleted.txt",Bytes(lines.begin(),lines.end()));
     Pack(work,tmp);Verify(tmp);Flush(tmp);
 }
-struct Target {fs::path path,tmp;Json changes;Json expected;};
+struct Target {fs::path path,tmp;Json changes;Json expected;bool raw=false;};
+void CheckFileTarget(const fs::path& path)
+{
+    auto ext=path.extension().wstring();
+    Require(_wcsicmp(ext.c_str(),L".exe")!=0&&_wcsicmp(ext.c_str(),L".dll")!=0&&_wcsicmp(ext.c_str(),L".tmp")!=0&&_wcsicmp(ext.c_str(),L".lock")!=0,"unsupported transaction file target");
+    Require(path.filename().wstring().rfind(L"pak-txn-",0)!=0,"reserved transaction filename");
+}
 std::vector<std::unique_ptr<Lock>> Locks(const std::vector<Target>& targets)
 {
     std::vector<std::unique_ptr<Lock>> locks;for(const auto& t:targets)locks.push_back(std::make_unique<Lock>(t.path));return locks;
@@ -637,15 +643,16 @@ void RecoverDirectory(const fs::path& directory)
         const auto& file=*cursor;
         if(file.is_directory()&&file.path().extension()==L".work"){cursor.disable_recursion_pending();continue;}
         auto name=file.path().filename().u8string();if(name.rfind("pak-txn-",0)!=0||file.path().extension()!=L".json")continue;
-        auto j=ReadJson(file.path());Require(j.at("version")==1,"unknown transaction manifest");std::vector<Target> targets;
+        auto j=ReadJson(file.path());Require(j.at("version")==1||j.at("version")==2,"unknown transaction manifest");std::vector<Target> targets;
         for(const auto& member:j.at("targets")) {
-            auto p=fs::u8path(member.at("target").get<std::string>());Require(!p.empty()&&!p.is_absolute()&&!p.has_root_name()&&_wcsicmp(p.extension().c_str(),L".pak")==0,"unsafe manifest target");for(const auto& part:p)Require(part!=L".."&&part!=L".","unsafe manifest component");auto tmp=p;tmp+=L".tmp";
-            Require(fs::u8path(member.at("tmp").get<std::string>())==tmp,"unsafe manifest tmp");targets.push_back({file.path().parent_path()/p,file.path().parent_path()/tmp,member});
+            auto kind=member.value("kind",std::string("pak"));Require(kind=="pak"||kind=="file","unknown manifest target kind");bool raw=kind=="file";Require(!raw||j.at("version")==2,"file target needs manifest version 2");
+            auto p=fs::u8path(member.at("target").get<std::string>());Require(!p.empty()&&!p.is_absolute()&&!p.has_root_name()&&(raw||_wcsicmp(p.extension().c_str(),L".pak")==0),"unsafe manifest target");for(const auto& part:p)Require(part!=L".."&&part!=L".","unsafe manifest component");if(raw)CheckFileTarget(p);auto tmp=p;tmp+=raw?L".eipak.tmp":L".tmp";
+            Require(fs::u8path(member.at("tmp").get<std::string>())==tmp,"unsafe manifest tmp");targets.push_back({file.path().parent_path()/p,file.path().parent_path()/tmp,member,nullptr,raw});
         }
         Require(!targets.empty(),"empty manifest");SortTargets(targets);auto locks=Locks(targets);
         // Re-read after locking: another recovery may have completed while we waited.
         Require(fs::exists(file.path()),"manifest disappeared; retry recovery");
-        for(const auto& t:targets){auto source=fs::exists(t.tmp)?t.tmp:t.path;Require(Digest(source)==t.changes.at("sha256").get<std::string>(),"transaction hash mismatch; preserved for investigation");Verify(source);}
+        for(const auto& t:targets){auto source=fs::exists(t.tmp)?t.tmp:t.path;Require(Digest(source)==t.changes.at("sha256").get<std::string>(),"transaction hash mismatch; preserved for investigation");if(!t.raw||_wcsicmp(t.path.extension().c_str(),L".pak")==0)Verify(source);}
         for(const auto& t:targets)if(fs::exists(t.tmp))Publish(t.tmp,t.path);
         Require(fs::remove(file.path()),"cannot remove committed manifest");
     }
@@ -653,10 +660,10 @@ void RecoverDirectory(const fs::path& directory)
     for(auto i=fs::recursive_directory_iterator(directory);i!=fs::recursive_directory_iterator();++i) {
         auto candidate=i->path();bool work=candidate.extension()==L".work";
         if(work){candidate.replace_extension();if(candidate.extension()==L".tmp")i.disable_recursion_pending();}
-        if(candidate.extension()!=L".tmp")continue;auto target=candidate;target.replace_extension();if(_wcsicmp(target.extension().c_str(),L".pak")!=0)continue;
+        if(candidate.extension()!=L".tmp")continue;auto target=candidate;target.replace_extension();if(_wcsicmp(target.extension().c_str(),L".pak")!=0&&target.extension()!=L".eipak")continue;
         orphans.push_back(i->path());
     }
-    for(const auto& orphan:orphans){auto target=orphan;if(target.extension()==L".work")target.replace_extension();target.replace_extension();Lock lock(target);NoPending(target.parent_path());fs::remove_all(orphan);}
+    for(const auto& orphan:orphans){auto target=orphan;if(target.extension()==L".work")target.replace_extension();target.replace_extension();if(target.extension()==L".eipak")target.replace_extension();Lock lock(target);NoPending(target.parent_path());fs::remove_all(orphan);}
 }
 }
 void List(const fs::path& path)
@@ -678,8 +685,11 @@ void Apply(const fs::path& path,const fs::path& changesFile)
 void Transaction(const fs::path& changesFile)
 {
     auto base=Absolute(changesFile).parent_path();auto j=ReadJson(changesFile);std::vector<Target> targets;
-    for(const auto& item:j.at("archives")) {
+    for(const auto& item:j.value("archives",Json::array())) {
         auto path=fs::u8path(item.at("pak").get<std::string>());if(path.is_relative())path=base/path;path=Absolute(path);Require(_wcsicmp(path.extension().c_str(),L".pak")==0,"target must be .pak");auto tmp=path;tmp+=L".tmp";targets.push_back({path,tmp,item.at("changes"),item.at("expected_sha256")});
+    }
+    for(const auto& item:j.value("files",Json::array())) {
+        auto path=fs::u8path(item.at("target").get<std::string>());if(path.is_relative())path=base/path;path=Absolute(path);CheckFileTarget(path);auto tmp=path;tmp+=L".eipak.tmp";targets.push_back({path,tmp,item,item.at("expected_sha256"),true});
     }
     Require(!targets.empty(),"empty transaction");SortTargets(targets);auto directory=targets.front().path.parent_path();for(const auto& t:targets) {
         Require(t.path.root_name()==directory.root_name(),"transaction targets must share a volume");
@@ -689,8 +699,12 @@ void Transaction(const fs::path& changesFile)
     for(const auto& t:targets)CheckExpected(t.path,t.expected);
     auto manifest=directory/(L"pak-txn-"+std::to_wstring(GetCurrentProcessId())+L"-"+std::to_wstring(GetTickCount64())+L".json");bool committed=false;
     try {
-        Json members=Json::array();for(const auto& t:targets){BuildChanges(t.path,t.changes,base,t.tmp);members.push_back({{"target",t.path.lexically_relative(directory).generic_u8string()},{"tmp",t.tmp.lexically_relative(directory).generic_u8string()},{"sha256",Digest(t.tmp)}});}
-        auto text=Json{{"version",1},{"targets",members}}.dump(2);Save(manifest,Bytes(text.begin(),text.end()));committed=true;
+        Json members=Json::array();for(const auto& t:targets){
+            if(t.raw){auto input=fs::u8path(t.changes.at("file").get<std::string>());if(input.is_relative())input=base/input;auto bytes=ReadFile(input);Require(Sha(bytes)==Unhex(t.changes.at("sha256").get<std::string>()),"input file changed before staging");Save(t.tmp,bytes);Flush(t.tmp);if(_wcsicmp(t.path.extension().c_str(),L".pak")==0)Verify(t.tmp);}
+            else BuildChanges(t.path,t.changes,base,t.tmp);
+            members.push_back({{"target",t.path.lexically_relative(directory).generic_u8string()},{"tmp",t.tmp.lexically_relative(directory).generic_u8string()},{"sha256",Digest(t.tmp)},{"kind",t.raw?"file":"pak"}});
+        }
+        auto text=Json{{"version",2},{"targets",members}}.dump(2);Save(manifest,Bytes(text.begin(),text.end()));committed=true;
         for(const auto& t:targets)Publish(t.tmp,t.path);Require(fs::remove(manifest),"cannot remove manifest");
     }catch(...){if(!committed)for(const auto& t:targets){std::error_code ec;fs::remove(t.tmp,ec);}throw;}
 }
