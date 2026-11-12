@@ -6676,3 +6676,5 @@ const int CI3DObjectOutput::GetMoney()
     return IWorldClient.GetParty().nMoney;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+
+#include "GamepadMission64.inl"

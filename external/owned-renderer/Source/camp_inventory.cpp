@@ -1,5 +1,6 @@
 #ifdef EID3D11_EMBEDDED
 #include "camp_inventory.h"
+#include <controller_input_state.h>
 #include "camp_presentation.h"
 #include "camp_session.h"
 #include "model_draw_lifetime.h"
@@ -34,6 +35,7 @@
 #include "camp_inventory_embedded.inl"
 #else
 #include "camp_inventory.h"
+#include <controller_input_state.h>
 #include "addon_hook_chain.h"
 #include "engine_bridge.h"
 #include "owned_asset_loader.h"
@@ -305,7 +307,7 @@ bool current_result_owner(void* self) noexcept {
 thread_local Role drawing = Role::none;
 thread_local void* tip_object = nullptr;
 unsigned item_modifiers() noexcept {
-    return ((GetKeyState(VK_CONTROL)&0x8000)?1u:0u)|((GetKeyState(VK_MENU)&0x8000)?2u:0u);
+    return (((GetKeyState(VK_CONTROL)&0x8000) || owned::controller_modifier_down(VK_CONTROL))?1u:0u)|(((GetKeyState(VK_MENU)&0x8000) || owned::controller_modifier_down(VK_MENU))?2u:0u);
 }
 
 struct Scope {
@@ -984,7 +986,7 @@ bool context_visible(unsigned card) noexcept {
     void* owner=card==2?comparison_owner:field<void*>(screen,card==0?0x164:0x1dc);
     if(!owner||!field<BOOL>(owner,0xe8))return false;
     if(card==1)return constructor_card!=ConstructorCard::none;
-    if(card==2)return comparison_current&&(GetKeyState(VK_SHIFT)&0x8000)&&hover_focus&&!hover_controls&&current_camp_input();
+    if(card==2)return comparison_current&&((GetKeyState(VK_SHIFT)&0x8000) || owned::controller_modifier_down(VK_SHIFT))&&hover_focus&&!hover_controls&&current_camp_input();
     return fresh_hover();
 }
 
@@ -1937,7 +1939,7 @@ void* make_comparison() {
     } __finally {if(!completed)destroy_comparison_stage(self,stage);}
 }
 void refresh_comparison(void* item) {
-    if(!comparison_owner||!item||!(GetKeyState(VK_SHIFT)&0x8000)||!current_camp_input()||!hover_focus||hover_controls)return;
+    if(!comparison_owner||!item||!((GetKeyState(VK_SHIFT)&0x8000) || owned::controller_modifier_down(VK_SHIFT))||!current_camp_input()||!hover_focus||hover_controls)return;
     void* person=current_person();
     if(!person)return;
     void* counterpart=nullptr;
@@ -2179,7 +2181,7 @@ BOOL __fastcall camp_draw(void* self, void*, void* visualizator) {
     result_help=0;
     ordinary_hover.touched=false;
     if(screen==self&&layout.wide){
-        const unsigned modifiers=item_modifiers()|((GetKeyState(VK_SHIFT)&0x8000)?4u:0u);
+        const unsigned modifiers=item_modifiers()|(((GetKeyState(VK_SHIFT)&0x8000) || owned::controller_modifier_down(VK_SHIFT))?4u:0u);
         // SetScreenMode hides the result card with Show(FALSE,TRUE) and shows
         // it again on a new surface made from a native copy, which lacks the
         // owned text; SetItem does not describe an unchanged result again.

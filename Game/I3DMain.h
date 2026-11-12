@@ -191,6 +191,7 @@ public:
     bool IsLDblClk() const { return bLDblClk; }
     bool IsRButDown() const { return bRButDown; }
 
+    bool IsConsoleVisible() const;
     void ResetInputState();
 
     // saving/loading

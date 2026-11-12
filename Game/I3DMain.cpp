@@ -1198,6 +1198,7 @@ void CInterface3D::CheckMissionTutorials(bool bForce)
     DoModal(pScr, true, false);
 }
 /////////////////////////////////////////////////////////////////////////////////////
+bool CInterface3D::IsConsoleVisible() const { return pConsole && pConsole->IsVisible(); }
 void CInterface3D::ResetInputState()
 {
     Gamepad64::Cancel();

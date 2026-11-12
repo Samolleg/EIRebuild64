@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "E4Camp.h"
+#include <controller_input_state.h>
 #include "E1RendererFacade.h"
 #include <utility>
 #include "../dx11/RendererDX11.h"
@@ -74,7 +75,7 @@ void BeginDraw(int value) noexcept {
     if(!host.context)return;
     if(mode!=value){owned::camp_inventory_cancel_drag();cards={};}
     mode=value;
-    const unsigned keys=((GetKeyState(VK_CONTROL)&0x8000)?1u:0u)|((GetKeyState(VK_MENU)&0x8000)?2u:0u)|((GetKeyState(VK_SHIFT)&0x8000)?4u:0u);
+    const unsigned keys=(((GetKeyState(VK_CONTROL)&0x8000) || owned::controller_modifier_down(VK_CONTROL))?1u:0u)|(((GetKeyState(VK_MENU)&0x8000) || owned::controller_modifier_down(VK_MENU))?2u:0u)|(((GetKeyState(VK_SHIFT)&0x8000) || owned::controller_modifier_down(VK_SHIFT))?4u:0u);
     session.begin(value,keys,Current());
     const bool want=owned::camp::make_layout(float(width),float(height),float(frame)).wide&&requested;
     if(want!=layout.wide){owned::camp_inventory_retire_textures();layout=owned::camp::make_layout(float(width),float(height),float(frame));layout.wide=want;valid=true;}
