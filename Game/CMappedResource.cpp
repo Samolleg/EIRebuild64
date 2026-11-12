@@ -131,7 +131,7 @@ BOOL CMappedResource::OpenResource(LPCSTR pszFileName, BOOL _bWriteAccess)
     OpenOverlays(pszFileName, _bWriteAccess);
     if (ignoreOriginal) return TRUE;
     if (!overlays.empty() && !std::filesystem::exists(sourcePath)) { ignoreOriginal = true; return TRUE; }
-    if (!_bWriteAccess && std::filesystem::is_directory(sourcePath) && RuntimeDiagnostics::Enabled()) {
+    if (!_bWriteAccess && std::filesystem::is_directory(sourcePath)) {
         looseDirectory = true; return TRUE;
     }
     if (_stricmp(std::filesystem::path(sourcePath).extension().string().c_str(),".pak") == 0) {
