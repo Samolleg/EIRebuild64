@@ -700,12 +700,15 @@ public:
     ~NativeSimulationScope() { if (ownsPhase) renderer->FinishSimulation(); }
 };
 }
+#include "Gamepad64.inl"
+
 static bool NGame::ProcessMessages()
 {
     MSG msg;
     bool bActive = true;
     // Decode advancement and rendering stay on the host thread, including
     // intervals between loading steps when the host pumps messages/idle.
+    Gamepad64::Poll();
     C2DScreenWait::Update();
     // Idle processing until no new message come
     while (!PeekMessage(&msg, 0, 0, 0,
@@ -713,6 +716,7 @@ static bool NGame::ProcessMessages()
     {
         CorePerf::Frame coreFrame;
         NativeSimulationScope simulation;
+        Gamepad64::Poll();
         GameJournal::MemoryFrame(GetTickCount());
         C2DScreenWait::Update();
         // Update render state
@@ -1181,6 +1185,7 @@ LRESULT NGame::WndProc(UINT message, WPARAM wParam, LPARAM lParam)
         return SendMessage(hWnd, message, wParam, lParam);
     if (message==WM_MOUSEMOVE || message==WM_LBUTTONDOWN || message==WM_RBUTTONDOWN)
         LiveObserver::ReleaseUiCursor();
+    if (!Gamepad64::PhysicalMessage(message, wParam, lParam)) return 1;
     E4CampAccess::BeginInput();
     if (OwnedRender::E2CampInput(message, wParam, lParam)) return 1;
     if (OwnedRender::E4::Message(NGame::hWnd, message, wParam, lParam)) return 1;
