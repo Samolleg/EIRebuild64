@@ -18,7 +18,7 @@ class EmbeddedHostConfiguration {
 public:
     void configure(EmbeddedHostPaths paths) {
         if (!absolute(paths.renderer_config) || !absolute(paths.world_map_layouts) ||
-            paths.mounts.loose_roots.empty() || paths.mounts.archives.empty())
+            paths.mounts.archives.empty())
             throw std::invalid_argument("incomplete embedded renderer host paths");
         for (const auto& path : paths.mounts.loose_roots)
             if (!absolute(path)) throw std::invalid_argument("relative embedded loose root");
