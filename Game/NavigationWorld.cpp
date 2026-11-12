@@ -12,6 +12,7 @@
 #include "WorldServer.h"
 #include "GameJournal.h"
 #include "CorePerf.h"
+#include "RuntimeFrame.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
 #include "ModCliTool.h"
@@ -701,8 +702,8 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
             Navigation::Route refused;refused.status=saved.status;return refused;
         }
     }
-    const auto frame=CorePerf::Get().frameNumber;
-    if(pathFrame!=frame){pathFrame=frame;pathBudgetMs=2.;}
+    const auto frame=RuntimeFrame::Current();
+    double* budget=pathBudget.ForFrame(frame);
     const bool sliced=unit&&(!request.obstacles||request.obstacles->empty())&&!request.reuseRoute;
     if(sliced) {
         auto& job=pathSearches[unit->GetID()];const auto& old=job.request;
@@ -719,9 +720,8 @@ Navigation::Route NavigationWorld::Find(CUnit* unit,Navigation::Point from,Navig
         request.start=job.request.start;request.goalSupport=job.request.goalSupport;
         // Tick order must not starve later units when earlier NPCs consume the
         // shared budget. Reserve one bounded batch per unit per host frame.
-        request.ensureProgress=job.progressFrame!=frame;
-        job.progressFrame=frame;
-        request.sliced=&job.search;request.frameBudgetMs=&pathBudgetMs;
+        request.ensureProgress=job.progress.FirstBatch(frame);
+        request.sliced=&job.search;request.frameBudgetMs=budget;
     }
     auto route=Navigation::Find(*mesh,request);
     if(route.status==Status::Updating)return route;

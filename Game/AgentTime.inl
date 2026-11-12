@@ -73,6 +73,7 @@ static bool AgentProcessMessages()
     static auto lastRender=std::chrono::steady_clock::now();
     C2DScreenWait::Update();
     while(!PeekMessage(&msg,0,0,0,PM_NOREMOVE)) {
+        RuntimeFrame::Begin();
         CorePerf::Frame coreFrame;
         GameJournal::MemoryFrame(GetTickCount());C2DScreenWait::Update();
         NGame::UpdateRenderEnable();

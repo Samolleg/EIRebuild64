@@ -41,6 +41,13 @@ $luaHeader=Join-Path $projectRoot 'builds/rebuild64/cache/work/out/x64/Release/l
 if(!(Test-Path -LiteralPath $luaHeader)){throw 'Run the standard build preparation before these checks (generated luajit.h required)'}
 Copy-Item -LiteralPath $luaHeader -Destination (Join-Path $out 'include/luajit.h') -Force
 $args+=@($sources|ForEach-Object{Join-Path $repo $_})
+# The production mapped-resource reader now supports PAK as well as RES.
+# Reuse the prepared native PAK/zstd objects; these are read-only inputs.
+$nativeObjects=Join-Path $projectRoot 'builds/rebuild64/cache/work/out/obj/x64/Release/EI_Rebuild'
+$pakObject=Join-Path $nativeObjects 'Pak.obj'
+if(!(Test-Path -LiteralPath $pakObject)){throw 'Prepared PAK object required'}
+$args+=$pakObject
+$args+=@(Get-ChildItem -LiteralPath $nativeObjects -Filter 'zstd_*.obj' -File | ForEach-Object FullName)
 $args+=@('/link','/OPT:REF','/SUBSYSTEM:CONSOLE','winmm.lib','psapi.lib')
 & $compiler @args *> (Join-Path $out 'compile.txt')
 if($LASTEXITCODE -ne 0){Select-String -LiteralPath (Join-Path $out 'compile.txt') -Pattern ': error|fatal error|LNK\d+' | Select-Object -First 25;throw 'Audit regression check compilation failed'}

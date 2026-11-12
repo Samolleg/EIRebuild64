@@ -1,4 +1,5 @@
 #pragma once
+#include "../RuntimeFrame.h"
 namespace owned {struct EmbeddedArenaInput;struct EmbeddedGolemInput;struct EmbeddedCurseInput;}
 namespace owned {struct HudPublishedVisual; struct EmbeddedHudVisualInput; struct EmbeddedHudPortraitInput;}
 #include <CommonStates.h>
@@ -61,7 +62,7 @@ private:
 
     std::shared_ptr<OwnedRender::RendererFacadeCore<owned::Renderer>> rendererFacade;
     OwnedRender::E2FrameTiming frameTiming;
-    std::uint64_t frameSerial = 0;
+    RuntimeFrame::Sequence frameSerial;
     ULONGLONG lastGpuPassReport = GetTickCount64();
     ULONGLONG fpsSampleTime = 0;
     std::uint64_t fpsReal = 0, fpsGenerated = 0;
@@ -94,7 +95,7 @@ private:
 
 public:
     enum class OwnedTerrainPassResult { unavailable, submitted, failed };
-    std::uint64_t ModelPreviewFrame() const noexcept { return frameSerial; }
+    std::uint64_t ModelPreviewFrame() const noexcept { return frameSerial.Current(); }
     bool Initialize(HWND hWnd, DWORD dwWidth, DWORD dwHeight);
     void SetGammaCorrection(float brightness, float contrast, float gamma) noexcept;
     ~CDX11();

@@ -2,6 +2,7 @@
 #include "RuntimePaths64.h"
 #include "SaveSlot.h"
 #include "CorePerf.h"
+#include "RuntimeFrame.h"
 #include "LiveObserver.h"
 #include "AgentBackground.h"
 #include "AgentTime.h"
@@ -714,6 +715,7 @@ static bool NGame::ProcessMessages()
     while (!PeekMessage(&msg, 0, 0, 0,
                         PM_NOREMOVE)) // no messages in the queue => process OnIdle
     {
+        RuntimeFrame::Begin();
         CorePerf::Frame coreFrame;
         NativeSimulationScope simulation;
         Gamepad64::Poll();
