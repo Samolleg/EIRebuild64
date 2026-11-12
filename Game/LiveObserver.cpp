@@ -924,13 +924,19 @@ json Status() {
         result["game_hours"]=world.GetWorldTime();result["game_tick"]=world.GetSegmentTimeCounter();
     } else {result["zone"]=nullptr;result["game_hours"]=nullptr;result["game_tick"]=nullptr;}
     double total=0;for(unsigned i=0;i<perf.liveFrameCount;++i)total+=perf.liveFrames[i];
-    result["fps"]=total>0?1000.0*perf.liveFrameCount/total:0.0;
+    result["fps"] = total>0?1000.0*perf.liveFrameCount/total:0.0;
+    result["diagnostics_enabled"] = RuntimeDiagnostics::Enabled();
+    result["fps_available"] = RuntimeDiagnostics::Enabled() && perf.liveFrameCount>0;
     AttachUiStatus(result);
     return result;
 }
 json Perf() {
     auto& s=CorePerf::Get();json result={{"ok",true},{"frames_ms",json::array()},
         {"top_scopes",json::array()},{"scope_thread","main"},{"scopes_inclusive",true},{"truncated",false}};
+    result["available"] = RuntimeDiagnostics::Enabled();
+    if (!RuntimeDiagnostics::Enabled()) {
+        result["reason"] = "diagnostics_disabled"; result["window_ms"] = 0; return result;
+    }
     for(unsigned n=0;n<s.liveFrameCount;++n) {
         const unsigned i=(s.liveFrameNext+120-s.liveFrameCount+n)%120;
         result["frames_ms"].push_back(s.liveFrames[i]);

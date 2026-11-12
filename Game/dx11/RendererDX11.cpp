@@ -964,11 +964,13 @@ void CDX11::EndFrame(bool present)
     frameTiming.End(SUCCEEDED(presented));
     if (SUCCEEDED(presented)) owned::frame_waits::frame.presented = true;
     FrameDiagnostics::Presented(presented);
-    if (RuntimeDiagnostics::Enabled() && SUCCEEDED(presented) && (++frameSerial % 120u) == 0) {
+    // Preview animation continuity is UI state, even without timing samples.
+    if (SUCCEEDED(presented)) frameSerial.Advance();
+    if (RuntimeDiagnostics::Enabled() && SUCCEEDED(presented) && (frameSerial.Current() % 120u) == 0) {
         const auto sample = frameTiming.Read();
         if (RuntimeDiagnostics::Enabled()) GameJournal::Event("RENDER", "frame_timing",
             "owner=c56 frame=%llu cpu_ms_median=%.3f cpu_ms_p95=%.3f cpu_n=%u gpu_ms_median=%.3f gpu_ms_p95=%.3f gpu_n=%u gpu_status=0x%08lX dropped=%llu invalid=%llu",
-            static_cast<unsigned long long>(frameSerial), sample.cpu.median, sample.cpu.p95,
+            static_cast<unsigned long long>(frameSerial.Current()), sample.cpu.median, sample.cpu.p95,
             sample.cpu.count, sample.gpu.median, sample.gpu.p95, sample.gpu.count,
             static_cast<unsigned long>(sample.gpuStatus),
             static_cast<unsigned long long>(sample.dropped),

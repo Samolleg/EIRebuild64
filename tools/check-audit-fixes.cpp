@@ -5,6 +5,7 @@
 #include "Game/ModPackage.h"
 #include "Game/SaveModIdentity.h"
 #include "Navigation/QueryFailure.h"
+#include "Pak/Pak.h"
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -19,6 +20,7 @@ std::string ConfigPath(const char* path) { return path; }
 bool CModPackage::ResourcePlan(const std::string&, std::vector<std::string>&, bool&) const { return false; }
 bool ReportError(const char*, ...) { return false; }
 void ReportWarning(const char*, ...) {}
+namespace GameJournal { void Event(const char*, const char*, const char*, ...) noexcept {} }
 
 namespace {
 namespace fs = std::filesystem;
@@ -155,6 +157,22 @@ void IdentityChecks(const fs::path& directory, const fs::path& configPath) {
     Check(SaveModIdentity::CurrentEnvelope(SaveModIdentity::SlotRoot), "new envelope refused");
     Check(!SaveModIdentity::CurrentEnvelope("EIRebuild64.slot.3"), "path envelope admitted");
 }
+void PakChecks(const fs::path& directory) {
+    const auto input = directory / "pak-input";
+    fs::create_directories(input);
+    const Bytes expected(8192, BYTE('x'));
+    Store(input / "example.bin", expected);
+    const auto archivePath = directory / "diagnostics-test.pak";
+    ei::pak::Pack(input, archivePath);
+    CMappedResource archive(true);
+    Check(archive.OpenResource(archivePath.string().c_str()), "PAK mount without diagnostics prerequisite");
+    DWORD size = 0;
+    const auto* bytes = archive.GetFile("example.bin", &size);
+    Check(bytes && size == expected.size() && memcmp(bytes, expected.data(), size) == 0,
+        "PAK decoding returns identical bytes under launch policy");
+    CStringArray names; archive.GetFileList(names);
+    Check(names.GetSize() == 1, "PAK enumeration independent of diagnostics");
+}
 void NavigationChecks() {
     using namespace Navigation;
     Request r;r.source={1,2,3};r.goal={10,2,3};r.maxLength=5;r.goalRadius=.15f;r.height=1.6f;
@@ -215,9 +233,9 @@ int main(int argc,char** argv) {
         if(argc<3)throw std::runtime_error("Usage: check-audit-fixes OUTPUT_DIR MOD_CONFIG [ARCHIVE...]");
         if(!AfxWinInit(GetModuleHandleW(nullptr),nullptr,GetCommandLineA(),0))throw std::runtime_error("MFC init");
         const fs::path output=argv[1];fs::create_directories(output);
-        ResourceChecks(output);IdentityChecks(output,argv[2]);NavigationChecks();
-        for(int i=3;i<argc;++i)RealArchive(argv[i]);
-        std::cout<<"AUDIT_FIXES_SUMMARY checks="<<checks<<" errors=0\n";
+        ResourceChecks(output);IdentityChecks(output,argv[2]);NavigationChecks();PakChecks(output);
+        for(int i=3;i<argc;++i)if(std::string(argv[i])!="--diagnostics")RealArchive(argv[i]);
+        std::cout<<"AUDIT_FIXES_SUMMARY checks="<<checks<<" errors=0 diagnostics="<<RuntimeDiagnostics::Enabled()<<"\n";
         return 0;
     } catch(const std::exception& e) {std::cerr<<"FAIL after="<<checks<<" reason="<<e.what()<<"\n";}
       catch(CException* e){e->Delete();std::cerr<<"MFC failure\n";}

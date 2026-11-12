@@ -1,5 +1,6 @@
 #pragma once
 #include "../Navigation/Query.h"
+#include "../Navigation/PathWorkBudget.h"
 #include "../Navigation/QueryFailure.h"
 #include "../Navigation/BodyTable.h"
 #include "../Navigation/Profiles.h"
@@ -48,11 +49,10 @@ class NavigationWorld {
         Navigation::Location start,goalSupport;
         const Navigation::Mesh* mesh=nullptr;
         std::uint64_t revision=0,generation=0;
-        std::uint64_t progressFrame=~std::uint64_t(0);
+        Navigation::PathProgress progress;
     };
     std::map<int,PathSearch> pathSearches;
-    double pathBudgetMs=2.;
-    std::uint64_t pathFrame=~std::uint64_t(0);
+    Navigation::PathWorkBudget pathBudget;
     using FailedQuery = Navigation::QueryFailure;
     std::map<int,std::vector<FailedQuery>> failedQueries;
     struct RejectedMove {
