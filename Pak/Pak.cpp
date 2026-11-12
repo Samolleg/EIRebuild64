@@ -135,6 +135,7 @@ public:
 };
 
 void Flush(const fs::path& path);
+void Publish(const fs::path& from,const fs::path& to);
 void NoPending(fs::path directory)
 {
     directory=fs::absolute(directory);
@@ -189,9 +190,7 @@ public:
         stream.close();
         Flush(staging);
         if(archive)Verify(staging);
-        if(staging!=target)Require(MoveFileExW(staging.c_str(), target.c_str(),
-                            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0,
-                "cannot publish " + target.string());
+        if(staging!=target)Publish(staging,target);
         staging.clear();
     }
 };
@@ -574,7 +573,20 @@ void Flush(const fs::path& path)
 }
 void Publish(const fs::path& from,const fs::path& to)
 {
-    Require(MoveFileExW(from.c_str(),to.c_str(),MOVEFILE_REPLACE_EXISTING|MOVEFILE_WRITE_THROUGH)!=0,"cannot publish "+to.u8string());
+    // POSIX replacement preserves existing immutable read handles. MoveFileEx
+    // fails for the documented FILE_SHARE_READ | FILE_SHARE_DELETE readers.
+    auto destination=fs::absolute(to).wstring();
+    const size_t bytes=offsetof(FILE_RENAME_INFO,FileName)+(destination.size()+1)*sizeof(wchar_t);
+    Require(bytes<=MAXDWORD,"rename path too long");Bytes storage(bytes,0);
+    auto info=reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
+    info->Flags=FILE_RENAME_FLAG_REPLACE_IF_EXISTS|FILE_RENAME_FLAG_POSIX_SEMANTICS;
+    info->FileNameLength=static_cast<DWORD>(destination.size()*sizeof(wchar_t));
+    memcpy(info->FileName,destination.data(),info->FileNameLength);
+    HANDLE file=CreateFileW(from.c_str(),GENERIC_WRITE|DELETE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,nullptr,OPEN_EXISTING,FILE_FLAG_WRITE_THROUGH,nullptr);
+    Require(file!=INVALID_HANDLE_VALUE,"cannot open publication source");
+    struct Close{HANDLE h;~Close(){CloseHandle(h);}} close{file};
+    Require(SetFileInformationByHandle(file,FileRenameInfoEx,info,static_cast<DWORD>(bytes))!=0,"cannot publish "+to.u8string()+" (win32 "+std::to_string(GetLastError())+")");
+    Require(FlushFileBuffers(file)!=0,"cannot flush published file "+to.u8string());
 }
 Json ReadJson(const fs::path& file){std::ifstream in(file,std::ios::binary);Require(bool(in),"cannot open JSON");Json j;in>>j;return j;}
 fs::path Absolute(const fs::path& path){return fs::absolute(path).lexically_normal();}

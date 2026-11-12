@@ -214,7 +214,7 @@ reading the old archive. Stale editor snapshots must be refreshed before Save.
 
 Single archive publication writes `<target>.pak.tmp`, flushes the file with
 `FlushFileBuffers`, fully verifies the table and every live payload, then uses
-`MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`. The old file is never edited in
+`SetFileInformationByHandle(FileRenameInfoEx)` with replace/Posix semantics and a flushed write-through file handle. The old file is never edited in
 place. `apply` holds the target lock throughout read/build/verify/rename.
 
 A group acquires every target lock in ascending case-insensitive absolute path
@@ -272,7 +272,7 @@ publication; runtime payload XXH64 checking remains diagnostic-only.
 ## Runtime integration
 
 `CModPackage::ResourcePlan` retains the existing configured archive order within
-each tier and resolves same-basename PAK siblings. Diagnostic loose files in the
+each tier and resolves same-basename PAK siblings. Loose files in the
 mod directory precede mod PAK, then unshadowed mod RES, then base RES according to
 the existing ignore-base configuration. Existing config entries can continue to
 name RES after conversion. An explicit PAK config path is also accepted.
@@ -285,7 +285,7 @@ other configured unshadowed archives or base RES; tombstones stop that search.
 payloads until CloseFile/CloseAllFiles. The embedded resource store mounts the
 same plans and reads PAK members through that implementation, with weak payload
 references. Graphics mount collection applies the PAK tier across categories.
-Loose mod mounts are enabled only for `--diagnostics` or `--background`.
+Since MAPSOURCE01, selected mod-root and map loose mounts are enabled in ordinary launches as well as diagnostics/background.
 PAK open/read errors emit journal/probe events containing the archive/member path
 and return failure to the resource caller.
 
