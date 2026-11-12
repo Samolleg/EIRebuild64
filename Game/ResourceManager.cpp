@@ -103,6 +103,7 @@ LPBYTE CResourceManager::GetFile(LPCSTR pszFileName, LPDWORD pnDataSize)
 
     for (auto pos = resources.begin(); pos != resources.end(); ++pos)
     {
+        if(pos->second->IsDeleted(pszFileName))return nullptr;
         lpData = pos->second->GetFile(pszFileName, pnDataSize);
         if (lpData)
             return lpData;
@@ -125,6 +126,7 @@ BOOL CResourceManager::CheckFileExist(LPCSTR pszFileName)
 {
     for (auto pos = resources.begin(); pos != resources.end(); ++pos)
     {
+        if(pos->second->IsDeleted(pszFileName))return FALSE;
         BOOL bRetVal = pos->second->CheckFileExist(pszFileName);
         if (bRetVal)
             return bRetVal;

@@ -127,7 +127,7 @@ std::int32_t read_i32(const std::uint8_t* bytes) noexcept {
 // code page (1251 or 1252) for the hash and the compare. Bytes 0xE0-0xFF are
 // lowercase letters in both, which tolower keeps; the other high bytes
 // depend on the code page and stay unsupported.
-bool high_byte_folds_to_itself(unsigned char value) noexcept { return value >= 0xE0u; }
+bool high_byte_folds_to_itself(unsigned char) noexcept { return true; }
 
 bool canonical_resource_name(const std::string& input, std::string& canonical,
                              ResourceFailure& failure) {
@@ -173,6 +173,7 @@ bool canonical_resource_name(const std::string& input, std::string& canonical,
              "resource name is absolute or escapes its loose root");
         return false;
     }
+    canonical=ei::pak::Normalize(canonical);
     failure = {};
     return true;
 }
@@ -186,16 +187,13 @@ bool ascii_name(const std::string& value) noexcept {
 }
 
 std::string fold_ascii(const std::string& input) {
-    std::string output = input;
-    for (char& value : output)
-        if (value >= 'A' && value <= 'Z') value = static_cast<char>(value + 32);
-    return output;
+    return ei::pak::Normalize(input);
 }
 
 std::uint32_t legacy_ascii_hash(const std::string& name,
                                 std::uint32_t entry_count) noexcept {
     std::uint32_t sum = 0;
-    for (unsigned char value : name) {
+    for (unsigned char value : ei::pak::Normalize(name)) {
         if (value >= 'A' && value <= 'Z') value += 'a' - 'A';
         sum += value;
     }
@@ -245,7 +243,7 @@ public:
 
     bool open(ResourceFailure& failure) {
         handle_ = CreateFileW(path_.c_str(), GENERIC_READ,
-                              FILE_SHARE_READ,
+                              FILE_SHARE_READ | FILE_SHARE_DELETE,
                               nullptr, OPEN_EXISTING,
                               FILE_ATTRIBUTE_NORMAL | FILE_FLAG_RANDOM_ACCESS,
                               nullptr);
@@ -889,6 +887,7 @@ bool ResourceStore::locate(const std::string& resource_name,
         if (archive.pak) {
             const auto* entry = archive.pak->Find(canonical);
             if (!entry) continue;
+            if(entry->method==2){fail(failure,ResourceFailureCode::not_found,"resource deleted by PAK: "+canonical);return false;}
             entry_index = static_cast<std::uint32_t>(entry - archive.pak->Entries().data());
         } else if (!find_archive_entry(archive.entries, canonical, entry_index)) continue;
         const ArchiveEntry& entry = archive.entries[entry_index];
