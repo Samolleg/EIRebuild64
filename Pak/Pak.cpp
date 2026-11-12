@@ -263,17 +263,18 @@ std::string ResourceName(const std::wstring& disk)
     for(size_t i=0;i<text.size();++i){if(text[i]=='%'){Require(i+2<text.size(),"incomplete name escape");auto b=Unhex(text.substr(i+1,2));out+=char(b[0]);i+=2;}else out+=text[i];}
     Normalize(out);return out;
 }
-// Until the spelling rule is extended, refuse lossy Windows directory mappings.
-void ValidateDiskNames(const std::vector<std::string>& names)
+// Directory spelling follows the first occurrence in archive record order.
+std::string CanonicalName(const std::string& name, std::map<std::string,std::string>& prefixes)
 {
-    std::map<std::string,std::string> prefixes;
-    for(const auto& name:names) {
-        for(size_t at=name.find('\\');at!=std::string::npos;at=name.find('\\',at+1)) {
-            auto raw=name.substr(0,at);auto inserted=prefixes.emplace(Normalize(raw),raw);
-            Require(inserted.second||inserted.first->second==raw,"directory spelling collision: "+raw+" versus "+inserted.first->second+"; raw-name mapping contract requires revision");
-        }
+    std::string result;size_t start=0;
+    for(size_t at=name.find('\\');at!=std::string::npos;at=name.find('\\',start)) {
+        auto raw=name.substr(0,at);
+        auto inserted=prefixes.emplace(Normalize(raw),result+name.substr(start,at-start));
+        result=inserted.first->second+'\\';start=at+1;
     }
-}fs::path Destination(const fs::path &root, const std::string &name)
+    return result+name.substr(start);
+}
+fs::path Destination(const fs::path &root, const std::string &name)
 {
     Normalize(name);Require(name.front()!=char(92)&&name.back()!=char(92)&&name.find(std::string(2,char(92)))==std::string::npos,"empty name component");fs::path relative(Wide(DiskName(name)));fs::path current=fs::absolute(root);
     Require(!fs::is_symlink(fs::symlink_status(current)),"symlink output directory");
@@ -524,11 +525,11 @@ void Unpack(const fs::path &input, const fs::path &output)
 {
     if (_wcsicmp(input.extension().c_str(), L".pak") == 0)
     {
-        Archive archive(input);std::vector<std::string> names;for(const auto& e:archive.Entries())if(e.method!=2)names.push_back(e.name);ValidateDiskNames(names);
+        Archive archive(input);std::map<std::string,std::string> prefixes;
         fs::create_directories(output);
         std::string deleted;
         for (const auto &e : archive.Entries())
-            if(e.method==2)deleted+=e.name+"\r\n";else Save(Destination(output,e.name),archive.Read(e,true));
+            if(e.method==2)deleted+=e.name+"\r\n";else Save(Destination(output,CanonicalName(e.name,prefixes)),archive.Read(e,true));
         if(!deleted.empty())Save(output/L"_deleted.txt",Bytes(deleted.begin(),deleted.end()));
         return;
     }
@@ -544,6 +545,7 @@ void Unpack(const fs::path &input, const fs::path &output)
             "RES table bounds");
     auto table = ReadAt(in, tableOffset, count * 22 + nameSize);
     std::map<std::string, std::pair<std::uint64_t, std::uint64_t>> entries;
+    std::map<std::string,std::string> prefixes;
     for (std::uint64_t i = 0; i < count; ++i)
     {
         auto *p = table.data() + i * 22;
@@ -556,12 +558,11 @@ void Unpack(const fs::path &input, const fs::path &output)
                 "RES entry bounds");
         std::string raw(reinterpret_cast<char *>(table.data() + count * 22 + name),
                         static_cast<size_t>(len));
-        Normalize(raw); auto normalized = raw;
+        Normalize(raw); auto normalized = CanonicalName(raw,prefixes);
         auto inserted = entries.emplace(normalized, std::make_pair(offset, size));
         Require(inserted.second || inserted.first->second == std::make_pair(offset, size),
                 "conflicting RES duplicate: " + raw);
     }
-    std::vector<std::string> names;for(const auto& e:entries)names.push_back(e.first);ValidateDiskNames(names);
     for (const auto &e : entries)
         Save(Destination(output, e.first), ReadAt(in, e.second.first, e.second.second));
 }
@@ -590,8 +591,8 @@ void BuildChanges(const fs::path& target,const Json& changes,const fs::path& bas
     struct Cleanup{fs::path path;~Cleanup(){std::error_code ec;fs::remove_all(path,ec);}} cleanup{work};
     std::map<std::string,std::string> deleted;
     if(fs::exists(target)) {
-        Archive archive(target);std::vector<std::string> names;for(const auto& e:archive.Entries())if(e.method!=2)names.push_back(e.name);ValidateDiskNames(names);
-        for(const auto& e:archive.Entries())if(e.method==2)deleted.emplace(Normalize(e.name),e.name);else Save(Destination(work,e.name),archive.Read(e,true));
+        Archive archive(target);std::map<std::string,std::string> prefixes;
+        for(const auto& e:archive.Entries())if(e.method==2)deleted.emplace(Normalize(e.name),e.name);else Save(Destination(work,CanonicalName(e.name,prefixes)),archive.Read(e,true));
     }
     std::set<std::string> seen;
     for(const auto& change:changes) {

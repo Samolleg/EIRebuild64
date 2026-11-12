@@ -1,12 +1,4 @@
-# EI PAK version 1.1 — integration contract (X64PACK03 draft)
-
-**Open issue:** the specified filename escaping is insufficient to preserve raw
-directory spelling on Windows. The 83-RES check found mixed-case directory names
-in mod `sfx.res` that collapse into one disk directory. An additional escaping
-rule or a raw-name manifest must be agreed before this draft is used for migration.
-Do not treat this draft or the current writer as a completed migration contract.
-The current extractor/materializer rejects such directory spelling collisions
-before writing any resource files, rather than silently losing original names.
+# EI PAK version 1.1 — integration contract
 
 One legacy archive maps to one PAK with the same basename, for example
 `figures.res` becomes `figures.pak`. Nested MOD/ANM containers remain unchanged
@@ -73,16 +65,22 @@ bytes with an empty or populated compression cache.
 ## Names and filesystem round-trip
 
 Names are original RES byte strings, not UTF-8 and not pre-folded. Names contain
-1 through 1024 non-NUL bytes. The implementation currently uses the CRT CP1251
-lowercase table (`_tolower_l(byte, _create_locale(LC_CTYPE, ".1251"))`) as its
-lookup key and leaves separators unchanged. Duplicate keys are rejected before
-opening an output archive. The exact RES code is `CResourceBase::GetIndexOfName`:
-its bucket is `sum(tolower(unsigned-byte)) % count`, and its comparison is
-`_strnicmp` with equal byte lengths. `CTextManager::Create` sets LC_CTYPE from
-`Font CharSet`; the default setting is `english`. CP1251 agrees for ASCII and
-E0-FF with the previous supported subset, but parity for other configured
-locales needs resolution before the contract is final. No Unicode case folding
-or Unicode normalization is applied to archive names.
+1 through 1024 non-NUL bytes. Lookup uses the fixed CRT CP1251 lowercase
+table (`_tolower_l(byte, _create_locale(LC_CTYPE, ".1251"))`), independent of
+Font CharSet and process locale, with separators unchanged. Duplicate lookup
+keys are rejected before publication. No Unicode folding or normalization is
+applied. The byte mapping is 41-5A -> 61-7A, C0-DF -> E0-FF,
+and 80:90, 81:83, 8A:9A, 8C:9C, 8D:9D, 8E:9E, 8F:9F,
+A1:A2, A3:BC, A5:B4, A8:B8, AA:BA, AF:BF, B2:B3, BD:BE
+(all hexadecimal); all other bytes remain unchanged.
+Legacy RES lookup remains unchanged: `CResourceBase::GetIndexOfName`
+uses `sum(tolower(unsigned-byte)) % count` and `_strnicmp` with equal lengths;
+`CTextManager::Create` selects LC_CTYPE from Font CharSet.
+
+Directory components with equal lookup keys use the spelling of their first
+occurrence in archive record order; file components retain their own spelling.
+Thus a folder round-trip preserves lookup keys and payload bytes, rather than
+the original directory case. No raw-name metadata is introduced.
 
 For disk paths, decode legacy bytes through CP1251 to Unicode. A backslash is
 a directory separator. Percent-encode `%`, `<>:"|?*`, `/`, bytes below 0x20,
@@ -172,7 +170,8 @@ adds/replaces a tombstone even when the name was not in the top archive. There
 is no operation that silently removes a tombstone and restores lower fallback.
 Repeated lookup keys in one change list are errors. Relative `file` paths are
 relative to the JSON file, never the process working directory. Unchanged
-members are read and verified, and their original names are retained. A failed
+members are read and verified; directory spelling follows the canonicalization rule above.
+A failed
 single-archive operation leaves the previously published PAK in place.
 
 `txn changes-group.json` applies a group on one filesystem volume:
