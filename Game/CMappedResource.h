@@ -37,6 +37,7 @@ public:
     LPBYTE OverlayFile(LPCSTR,LPDWORD);
     virtual LPBYTE GetFileExact(LPCSTR, LPDWORD);
     bool IsFileExistExact(LPCSTR);
+    bool IsDeleted(LPCSTR) const;
     virtual void GetFileList(CStringArray&,LPCSTR mask=NULL);
     virtual BOOL CheckFileExist(LPCSTR name){return IsFileExist(name);}
     virtual ~CMappedResource();

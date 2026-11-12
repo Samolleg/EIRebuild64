@@ -67,8 +67,18 @@ std::vector<std::string> BriefingCandidates(LPCSTR path)
     return {path};
 }
 }
+bool CMappedResource::IsDeleted(LPCSTR name) const
+{
+    for(const auto& child:overlays) {
+        if(child->IsDeleted(name))return true;
+        if(child->IsFileExistExact(name))return false;
+    }
+    if(ignoreOriginal||!pak)return false;
+    try{auto entry=pak->Find(name);return entry&&entry->method==2;}catch(const std::exception&){return false;}
+}
 std::string CMappedResource::FileProvider(LPCSTR name)
 {
+    if(IsDeleted(name))return {};
     for (auto& child : overlays)
         if (child->IsFileExistExact(name)) return child->sourcePath;
     return !ignoreOriginal && IsFileExistExact(name) ? sourcePath : std::string();
@@ -95,6 +105,7 @@ void CMappedResource::GetFileList(CStringArray&names,LPCSTR mask){
      }
      append();
  } else if(!ignoreOriginal){CResourceBase::GetFileList(local,mask);append();}
+ for(int i=names.GetSize()-1;i>=0;--i)if(IsDeleted(names[i]))names.RemoveAt(i);
 }
 namespace {
 bool ReadResourceBytes(int file, void* buffer, std::size_t bytes)
@@ -125,7 +136,11 @@ BOOL CMappedResource::OpenResource(LPCSTR pszFileName, BOOL _bWriteAccess)
     }
     if (_stricmp(std::filesystem::path(sourcePath).extension().string().c_str(),".pak") == 0) {
         if (_bWriteAccess) { GameJournal::Event("PAK","read_only","path=%s",sourcePath.c_str()); return FALSE; }
-        try { pak = std::make_unique<ei::pak::Archive>(sourcePath); return TRUE; }
+        try {
+            for(const auto& f:std::filesystem::directory_iterator(std::filesystem::absolute(sourcePath).parent_path()))
+                if(f.path().filename().string().rfind("pak-txn-",0)==0&&f.path().extension()==L".json")GameJournal::Event("PAK","pending_transaction","manifest=%s",f.path().string().c_str());
+            pak = std::make_unique<ei::pak::Archive>(sourcePath); return TRUE;
+        }
         catch (const std::exception& e) { GameJournal::Event("PAK","open_failed","%s",e.what()); return FALSE; }
     }
     hFile = _open(pszFileName, _O_BINARY | _O_RANDOM | (bWriteAccess ? _O_RDWR : _O_RDONLY));
@@ -188,6 +203,7 @@ bool CMappedResource::IsFileExist(LPCSTR pszFileName)
 {
     for (const auto& candidate : BriefingCandidates(pszFileName))
     {
+        if(IsDeleted(candidate.c_str()))return {};
         for (auto& child : overlays)
             if (child->IsFileExistExact(candidate.c_str()))
                 return true;
@@ -199,7 +215,7 @@ bool CMappedResource::IsFileExist(LPCSTR pszFileName)
 bool CMappedResource::IsFileExistExact(LPCSTR pszFileName)
 {
     try {
-        if (pak) return pak->Find(pszFileName) != nullptr;
+        if (pak) {auto e=pak->Find(pszFileName);return e&&e->method!=2;}
         if (looseDirectory) return std::filesystem::is_regular_file(std::filesystem::path(sourcePath)/ei::pak::Normalize(pszFileName));
     } catch (const std::exception&) { return false; }
     return pHashTable && pNamePool && GetIndexOfName(pszFileName) != DWORD(-1);
@@ -208,6 +224,7 @@ LPBYTE CMappedResource::GetFile(LPCSTR pszFileName, LPDWORD pnDataSize)
 {
     for (const auto& candidate : BriefingCandidates(pszFileName))
     {
+        if(IsDeleted(candidate.c_str()))return {};
         if (auto* data = OverlayFile(candidate.c_str(), pnDataSize))
             return data;
         if (!ignoreOriginal)
@@ -235,7 +252,7 @@ LPBYTE CMappedResource::GetFileExact(LPCSTR pszFileName, LPDWORD pnDataSize)
         try {
             ei::pak::Bytes bytes;
             if (pak) {
-                auto* entry = pak->Find(pszFileName); if (!entry) return nullptr;
+                auto* entry = pak->Find(pszFileName); if (!entry||entry->method==2) return nullptr;
                 bytes = pak->Read(*entry,RuntimeDiagnostics::Enabled());
             } else {
                 const auto path = std::filesystem::path(sourcePath)/ei::pak::Normalize(pszFileName);
@@ -402,6 +419,7 @@ LPBYTE CWin32MappedResource::GetFile(LPCSTR pszFileName, LPDWORD pnDataSize)
 {
     for (const auto& candidate : BriefingCandidates(pszFileName))
     {
+        if(IsDeleted(candidate.c_str()))return {};
         if (auto* data = OverlayFile(candidate.c_str(), pnDataSize))
             return data;
         if (!ignoreOriginal)

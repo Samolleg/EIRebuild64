@@ -568,7 +568,12 @@ bool CModPackage::ResourcePlan(const std::string&name,std::vector<std::string>&p
          auto pak=fs::path(original); pak.replace_extension(".pak");
          if(fs::is_regular_file(pak)) paths.push_back(pak.string());
      }
-     for(const auto& original:it->second) if(fs::is_regular_file(original) && Lower(fs::path(original).extension().string())!=".pak")paths.push_back(original);
+     for(const auto& original:it->second) {
+         auto sibling=fs::path(original);sibling.replace_extension(".pak");
+         if(fs::is_regular_file(sibling)) {
+             if(fs::is_regular_file(original)&&Lower(fs::path(original).extension().string())!=".pak")GameJournal::Event("PAK","res_shadowed","pak=%s res=%s",sibling.string().c_str(),original.c_str());
+         } else if(fs::is_regular_file(original)&&Lower(fs::path(original).extension().string())!=".pak")paths.push_back(original);
+     }
  }
  return it!=archives.end()||ignore;
 }
@@ -583,7 +588,7 @@ std::vector<unsigned char> CModPackage::ReadResource(const std::string &category
    GameJournal::Event("PAK","open_failed","path=%s error=%s",path.c_str(),e.what());
    continue;
   }
-  auto &res=*selected;DWORD size=0;BYTE *data=res.GetFile(entry.c_str(),&size);if(!data)continue;std::vector<unsigned char> result;try{result.assign(data,data+size);}catch(...){res.CloseFile(data);throw;}res.CloseFile(data);owner=path;return result;}return {};
+  auto &res=*selected;if(res.IsDeleted(entry.c_str()))return {};DWORD size=0;BYTE *data=res.GetFile(entry.c_str(),&size);if(!data)continue;std::vector<unsigned char> result;try{result.assign(data,data+size);}catch(...){res.CloseFile(data);throw;}res.CloseFile(data);owner=path;return result;}return {};
 }
 Json CModPackage::Describe(){
  Json report={{"stage","package-config-resources-lua-data"},{"gameplayActivated",false},{"fullMainExecuted",false},{"mainScript",mainScript},{"configCount",configs.size()},{"mapCount",maps.size()},{"resourceGroups",Json::array()},{"luaTables",Json::array()}};
