@@ -27,7 +27,8 @@ private:
     HGDIOBJ cpuPreviousBitmap = nullptr;
     void* cpuDcPixels = nullptr;
     void CloseCpuDC() noexcept;
-    bool PublishSurface(bool fullyOpaque = false) const noexcept;
+    bool PublishSurface(bool fullyOpaque = false,
+        std::shared_ptr<const std::vector<std::uint8_t>> alphaCutMask = {}) const noexcept;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> texture = 0;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> textureView = 0;
     Microsoft::WRL::ComPtr<ID3D11Texture2D> pixelReadbackStaging;
@@ -64,9 +65,10 @@ public:
     }
     // Complete a full CPU upload with its verified alpha evidence. Other writes
     // publish without that proof and remain conservative.
-    bool PublishUploadedOpacity(bool fullyOpaque) noexcept
+    bool PublishUploadedOpacity(bool fullyOpaque,
+        std::shared_ptr<const std::vector<std::uint8_t>> alphaCutMask = {}) noexcept
     {
-        return PublishSurface(fullyOpaque);
+        return PublishSurface(fullyOpaque, std::move(alphaCutMask));
     }
     DWORD GetWidth() const { return dwSurfaceWidth; };
     DWORD GetHeight() const { return dwSurfaceHeight; };

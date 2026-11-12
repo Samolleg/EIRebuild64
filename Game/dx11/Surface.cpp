@@ -317,10 +317,11 @@ BOOL CDXGISurface::CreateTexture(D3D11_TEXTURE2D_DESC *ptex2d)
     return ExtractSurfaceParams();
 }
 /////////////////////////////////////////////////////////////////////////////////////
-bool CDXGISurface::PublishSurface(bool fullyOpaque) const noexcept
+bool CDXGISurface::PublishSurface(bool fullyOpaque,
+    std::shared_ptr<const std::vector<std::uint8_t>> alphaCutMask) const noexcept
 {
-    return cpuImage ? ownedSurface.CompleteCpu(*cpuImage, fullyOpaque) :
-                      ownedSurface.Complete(texture.Get(), fullyOpaque);
+    return cpuImage ? ownedSurface.CompleteCpu(*cpuImage, fullyOpaque, std::move(alphaCutMask)) :
+                      ownedSurface.Complete(texture.Get(), fullyOpaque, std::move(alphaCutMask));
 }
 
 BOOL CDXGISurface::ExtractSurfaceParams()
