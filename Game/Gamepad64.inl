@@ -1,6 +1,7 @@
 // Host-thread adapter. Included once by GameMain.cpp, after NGame declarations.
 #include "Gamepad64.h"
 #include "GamepadState64.h"
+#include "GamepadWheel64.h"
 #include "GamepadGestures64.h"
 #include "GamepadMission64.h"
 #include <controller_input_state.h>
@@ -17,7 +18,8 @@ unsigned generation = 0;
 DWORD controller = XUSER_MAX_COUNT;
 ULONGLONG lastPoll = 0, nextProbe = 0, lastClick = 0;
 POINT clickPoint{};
-double remainderX = 0, remainderY = 0, wheel = 0;
+double remainderX = 0, remainderY = 0;
+TriggerWheel wheel;
 TimedPress leftPress, rightPress;
 unsigned previousButtons = 0;
 struct Picker {
@@ -88,7 +90,8 @@ void Cancel() noexcept {
     owned::set_controller_modifiers(0);
     for (auto& button : mouse) button = {};
     waitingNeutral = true;
-    remainderX = remainderY = wheel = 0;
+    remainderX = remainderY = 0;
+    wheel.Reset();
     lastClick = 0;
     ++generation;
     if (cancelDrag) {
@@ -292,14 +295,12 @@ void Poll() {
     const double wheelInput =
         (mission && pickers[1].input.BlocksWheel() ? 0 : Trigger(pad.bRightTrigger)) -
         (mission && pickers[0].input.BlocksWheel() ? 0 : Trigger(pad.bLeftTrigger));
-    if (!wheelInput) wheel = 0;
-    else wheel += wheelInput * 6.0 * dt;
-    const int steps = int(wheel);
-    if (steps && inside) {
-        wheel -= steps;
+    const int delta = inside ? wheel.Advance(wheelInput, dt, mission) : 0;
+    if (!inside) wheel.Reset();
+    if (delta) {
         POINT screen = point;
         if (ClientToScreen(NGame::hWnd, &screen))
-            Emit(WM_MOUSEWHEEL, MAKEWPARAM(MouseFlags(), short(steps * WHEEL_DELTA)), MAKELPARAM(screen.x, screen.y));
+            Emit(WM_MOUSEWHEEL, MAKEWPARAM(MouseFlags(), short(delta)), MAKELPARAM(screen.x, screen.y));
     }
 }
 }
