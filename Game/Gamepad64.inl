@@ -21,6 +21,7 @@ POINT clickPoint{};
 double remainderX = 0, remainderY = 0;
 TriggerWheel wheel;
 TimedPress leftPress, rightPress;
+StickClicks stickClicks;
 unsigned previousButtons = 0;
 struct Picker {
     TriggerPicker input;
@@ -83,7 +84,7 @@ void Key(int scan, bool down) {
 
 void Cancel() noexcept {
     CancelPreviews();
-    leftPress = {}; rightPress = {}; previousButtons = 0;
+    leftPress = {}; rightPress = {}; previousButtons = 0; stickClicks = {};
     for (auto& picker : pickers) picker = {};
     const bool cancelDrag = mouse[0].pad || mouse[1].pad;
     for (auto& key : keys) key = {};
@@ -227,7 +228,6 @@ void Poll() {
     if (mission) {
         auto& screen = *static_cast<CI3DScreenMission*>(theInterface.GetCurrentScreen());
         const unsigned pressed = pad.wButtons & ~previousButtons;
-        const unsigned old = previousButtons;
         previousButtons = pad.wButtons;
         const bool up = (pad.wButtons & XINPUT_GAMEPAD_DPAD_UP) != 0;
         const bool down = (pad.wButtons & XINPUT_GAMEPAD_DPAD_DOWN) != 0;
@@ -244,8 +244,12 @@ void Poll() {
             if (r == Press::shortPress) GamepadMissionAccess::CycleItem(screen);
             if (r == Press::longPress) GamepadMissionAccess::CycleHero(screen, -1);
         }
-        constexpr unsigned sticks = XINPUT_GAMEPAD_LEFT_THUMB | XINPUT_GAMEPAD_RIGHT_THUMB;
-        if ((pad.wButtons & sticks) == sticks && (old & sticks) != sticks && ModRuntime::Current())
+        const auto stickClick = stickClicks.Update(
+            (pad.wButtons & XINPUT_GAMEPAD_LEFT_THUMB) != 0,
+            (pad.wButtons & XINPUT_GAMEPAD_RIGHT_THUMB) != 0);
+        if (stickClick == StickClick::left) GamepadMissionAccess::TrackHero(screen);
+        if (stickClick == StickClick::right) GamepadMissionAccess::North(screen);
+        if (stickClick == StickClick::both && ModRuntime::Current())
             theCamera.ToggleFalloutMode();
         if (generation != epoch) return;
         for (int side = 0; side < 2; ++side) {
@@ -274,7 +278,7 @@ void Poll() {
     } else {
         CancelPreviews();
         for (auto& picker : pickers) picker = {};
-        leftPress = {}; rightPress = {}; previousButtons = 0;
+        leftPress = {}; rightPress = {}; previousButtons = 0; stickClicks = {};
     }
     for (int button = 0; button < 2; ++button) {
         const bool down = inside && (pad.wButtons & (button ? XINPUT_GAMEPAD_B : XINPUT_GAMEPAD_X));

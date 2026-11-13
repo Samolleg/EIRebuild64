@@ -11,6 +11,25 @@ void require(bool ok, const char* name) {
 }
 int main() {
     using namespace Gamepad64;
+    StickClicks sticks;
+    require(sticks.Update(true, false) == StickClick::none, "L3 waits for release or chord");
+    require(sticks.Update(true, false) == StickClick::none, "L3 hold does not repeat");
+    require(sticks.Update(false, false) == StickClick::left, "L3 alone tracks hero");
+    require(sticks.Update(false, false) == StickClick::none, "single command fires once");
+    require(sticks.Update(false, true) == StickClick::none, "R3 waits for release or chord");
+    require(sticks.Update(false, false) == StickClick::right, "R3 alone normalizes north");
+    for (bool leftFirst : {true, false}) {
+        StickClicks chord;
+        require(chord.Update(leftFirst, !leftFirst) == StickClick::none, "either chord order starts without single action");
+        require(chord.Update(true, true) == StickClick::both, "second stick triggers isometry");
+        require(chord.Update(true, true) == StickClick::none, "held chord fires once");
+        require(chord.Update(!leftFirst, leftFirst) == StickClick::none, "partial chord release has no single action");
+        require(chord.Update(true, true) == StickClick::none, "chord requires full release before reuse");
+        require(chord.Update(false, false) == StickClick::none, "full chord release has no single action");
+        require(chord.Update(true, true) == StickClick::both, "fresh simultaneous chord works");
+    }
+    sticks.Update(true, false); sticks = {};
+    require(sticks.Update(false, false) == StickClick::none, "focus/disconnect/context reset discards pending single action");
     TriggerWheel smooth;
     const int first = smooth.Advance(1, 1.0 / 120, true);
     require(first > 0 && first < 120, "mission zoom moves before a whole wheel detent");
