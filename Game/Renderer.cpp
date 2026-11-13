@@ -462,6 +462,8 @@ DXGI_FORMAT TextureFormatFromMMPFormat(DWORD mmpFormat)
         return DXGI_FORMAT_BC2_UNORM;
     case MMP_FORMAT_DXT3:
         return DXGI_FORMAT_BC2_UNORM;
+    case MMP_FORMAT_DXT5:
+        return DXGI_FORMAT_BC3_UNORM;
     case MMP_FORMAT_5650:
     case MMP_FORMAT_5550:
         return DXGI_FORMAT_B8G8R8A8_UNORM;
