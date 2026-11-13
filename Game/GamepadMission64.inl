@@ -1,6 +1,15 @@
 #include "GamepadMission64.h"
 #include "GamepadGestures64.h"
 
+void GamepadMissionAccess::TrackHero(CI3DScreenMission& mission) {
+    int count = 0, index = -1;
+    if (auto* unit = mission.GetSelection(count, index)) theCamera.SetCarrier(unit);
+    else theCamera.SetCarrier(DWORD(-1));
+}
+void GamepadMissionAccess::North(CI3DScreenMission& mission) {
+    mission.pMap->NormalizeCamera(false);
+}
+
 void GamepadMissionAccess::StepPose(CI3DScreenMission& mission, int direction) {
     if (!theWorld.GetPlayer()) return;
     for (int i = 0; i < mission.GetNumUnits(); ++i) {

@@ -2,6 +2,25 @@
 #include <cstdint>
 
 namespace Gamepad64 {
+enum class StickClick { none, left, right, both };
+struct StickClicks {
+    unsigned previous = 0;
+    bool chord = false;
+    StickClick Update(bool left, bool right) noexcept {
+        const unsigned down = (left ? 1u : 0u) | (right ? 2u : 0u);
+        if (chord) {
+            previous = down;
+            if (!down) chord = false;
+            return StickClick::none;
+        }
+        if (down == 3) { chord = true; previous = down; return StickClick::both; }
+        const unsigned released = previous & ~down;
+        previous = down;
+        if (released & 1) return StickClick::left;
+        if (released & 2) return StickClick::right;
+        return StickClick::none;
+    }
+};
 enum class Press { none, shortPress, longPress };
 struct TimedPress {
     bool held = false, fired = false;

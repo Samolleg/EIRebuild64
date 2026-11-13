@@ -5,6 +5,8 @@ class CI3DScreenMission;
 // Native mission commands, independent of keyboard remapping and modifier keys.
 // Preview only changes icon appearance; Commit invokes the same action as a click.
 struct GamepadMissionAccess {
+    static void TrackHero(CI3DScreenMission& mission);
+    static void North(CI3DScreenMission& mission);
     static void StepPose(CI3DScreenMission& mission, int direction);
     static void CycleHero(CI3DScreenMission& mission, int direction);
     static void CycleWeapon(CI3DScreenMission& mission);
