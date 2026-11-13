@@ -1,14 +1,56 @@
 #include "../Game/GamepadState64.h"
 #include "../Game/GamepadGestures64.h"
+#include "../Game/GamepadWheel64.h"
 #include "../external/owned-renderer/Source/controller_input_state.h"
 #include <cstdio>
 #include <cstdlib>
+#include <initializer_list>
 
 void require(bool ok, const char* name) {
     if (!ok) { std::fprintf(stderr, "FAIL: %s\n", name); std::exit(1); }
 }
 int main() {
     using namespace Gamepad64;
+    TriggerWheel smooth;
+    const int first = smooth.Advance(1, 1.0 / 120, true);
+    require(first > 0 && first < 120, "mission zoom moves before a whole wheel detent");
+    const auto wheelSum = [](double strength, int hz) {
+        TriggerWheel wheel;
+        int total = 0;
+        for (int n = 0; n < hz; ++n) {
+            const int delta = wheel.Advance(strength, 1.0 / hz, true);
+            require(delta > 0 && delta < 120, "continuous zoom on every sample");
+            total += delta;
+        }
+        return total;
+    };
+    for (int hz : {30, 60, 120}) {
+        require(std::abs(wheelSum(1, hz) - 720) <= 1, "zoom speed independent of polling rate");
+        require(std::abs(wheelSum(.5, hz) - 360) <= 1, "half trigger gives half zoom speed");
+    }
+    TriggerWheel partial;
+    partial.Advance(.1, .008, true);
+    require(partial.Advance(0, .008, true) == 0 && partial.remainder == 0, "release clears fractional zoom");
+    partial.Advance(.1, .008, true);
+    partial.Reset();
+    require(partial.Advance(.1, .008, true) == 0, "focus/disconnect reset does not carry fractional zoom");
+    require(partial.Advance(-1, .008, true) < 0, "reversal immediately changes zoom direction");
+    TriggerWheel menu;
+    require(menu.Advance(1, .008, false) == 0, "menu retains discrete wheel events");
+    for (int i = 0; i < 60; ++i) require(menu.Advance(1, 1.0/60, false) % 120 == 0, "menu events remain whole detents");
+    TriggerWheel context;
+    context.Advance(1, .05, false);
+    context.Advance(1, .05, false);
+    require(context.Advance(1, .008, true) <= 6, "UI remainder cannot burst into camera zoom");
+    require(context.Advance(1, 5, true) <= 36, "long stalls cannot cause a catch-up jump");
+    TriggerPicker zoomPicker;
+    zoomPicker.Update(true, 255);
+    TriggerWheel blockedZoom;
+    require(blockedZoom.Advance(zoomPicker.BlocksWheel() ? 0 : 1, .016, true) == 0, "picker blocks smooth zoom");
+    zoomPicker.Update(false, 255);
+    require(blockedZoom.Advance(zoomPicker.BlocksWheel() ? 0 : 1, .016, true) == 0, "bumper release does not leak held trigger");
+    zoomPicker.Update(false, 0);
+    require(blockedZoom.Advance(1, .016, true) > 0, "fresh trigger resumes smooth zoom");
     owned::set_controller_modifiers(6);
     require(owned::controller_modifier_down(0x10) && owned::controller_modifier_down(0x12) &&
         !owned::controller_modifier_down(0x11), "HUD receives Shift/Alt without physical key injection");
@@ -110,5 +152,5 @@ int main() {
     require(!held.Set(false, true), "physical takes shared ownership");
     require(!held.Set(true, false) && held.Down(), "pad release preserves physical hold");
     require(held.Set(false, false) && !held.Down(), "last owner releases");
-    std::puts("PASS: gestures, deferred picker, modifiers, stance/cycles, movie skip, sticks, dual-source buttons");
+    std::puts("PASS: smooth trigger zoom, gestures, deferred picker, modifiers, stance/cycles, movie skip, sticks, dual-source buttons");
 }
