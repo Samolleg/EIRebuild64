@@ -29,11 +29,14 @@ int main() try {
  auto hidden=other;hidden.skeleton=model;for(auto& p:hidden.parts)p.explicitly_hidden=true;add_astral_clumps(hidden);check(hidden.parts.size()==13);for(unsigned i=9;i<13;++i)check(hidden.parts[i].explicitly_hidden);
  model->visual_reference="SAMASTRIFT01.MOD";check(astral_model(a));
  model->visual_reference="samastrift01_extra";check(!astral_model(a));
+ model->visual_reference="samastrborder02";check(!astral_model(a));
+ model->visual_reference="samastrborder01_extra";check(!astral_model(a));
  // Installed 02/04 have four disconnected ribbons; 03 has two. Identical
  // atlas UV on every island must not concentrate all births on the first.
- for(unsigned modelNumber=2;modelNumber<=4;++modelNumber) {
+ for(unsigned modelNumber=2;modelNumber<=5;++modelNumber) {
+  const bool border=modelNumber==5;
   VisualAssemblyAsset family;auto skeleton=std::make_shared<ModelCpuAsset>();family.skeleton=skeleton;
-  skeleton->visual_reference="samastrift0"+std::to_string(modelNumber);
+  skeleton->visual_reference=border?"samastrborder01":"samastrift0"+std::to_string(modelNumber);
   const unsigned islands=modelNumber==3?2:4;
   auto ribbons=std::make_shared<FigureCpuAsset>();ribbons->shape_count=1;ribbons->position_groups=ribbons->normal_groups=islands;
   ribbons->positions.resize(islands);ribbons->normals.resize(islands);
@@ -41,7 +44,10 @@ int main() try {
    for(unsigned v=0;v<4;++v){auto& p=ribbons->positions[b];p.x[v]=float(b*10+v);p.y[v]=2;p.z[v]=10;p.w[v]=1;const auto ix=static_cast<uint16_t>(b*4+v);ribbons->components.push_back({ix,ix,ix});ribbons->texture_coordinates.push_back({v%2?.482421875f:.017578125f,v/2?.982421875f:.517578125f});}
    for(unsigned v:{0u,1u,2u,1u,3u,2u})ribbons->indices.push_back(static_cast<uint16_t>(b*4+v));
   }
-  for(const auto* name:{"EMPTY_Rift","EMPTY_MajorSlabs","EMPTY_Debris","EMPTY_AstralDepth","EMPTY_AstralFilaments","EMPTY_Veils"}){VisualPartAsset part;part.name=name;part.geometry=ribbons;part.skeleton_node=2;family.parts.push_back(part);}
+  const std::vector<const char*> partNames=border?
+   std::vector<const char*>{"EMPTY_Bank","EMPTY_Threshold","EMPTY_AstralSlates","EMPTY_AstralDepth","EMPTY_Veils","EMPTY_BoundaryVeils"}:
+   std::vector<const char*>{"EMPTY_Rift","EMPTY_MajorSlabs","EMPTY_Debris","EMPTY_AstralDepth","EMPTY_AstralFilaments","EMPTY_Veils"};
+  for(const auto* name:partNames){VisualPartAsset part;part.name=name;part.geometry=ribbons;part.skeleton_node=2;family.parts.push_back(part);}
   for(unsigned i=0;i<6;++i)check(astral_part(family,family.parts[i])==(i==5?1:0));
   check(astral_ribbons(family.parts[5]).size()==islands);
   add_astral_clumps(family);check(family.parts.size()==7);const auto& generated=*family.parts.back().geometry;
@@ -53,7 +59,11 @@ int main() try {
   }
   for(unsigned i=0;i<6;++i){check(family.parts[i].geometry==ribbons);if(i<5)check(family.parts[i].casts_shadow);}
   add_astral_clumps(family);check(family.parts.size()==7);
-  skeleton->visual_reference="SAMASTRIFT0"+std::to_string(modelNumber)+".MOD";check(astral_model(family));
+  skeleton->visual_reference=border?"SAMASTRBORDER01.MOD":"SAMASTRIFT0"+std::to_string(modelNumber)+".MOD";check(astral_model(family));
+  check(astral_part(family,family.parts[5])==1);
+  if(!border){VisualPartAsset wrongBorder;wrongBorder.name="EMPTY_BoundaryVeils";check(astral_part(family,wrongBorder)==0);}
+  auto hiddenFamily=family;hiddenFamily.parts.resize(6);for(auto& part:hiddenFamily.parts)part.explicitly_hidden=true;
+  add_astral_clumps(hiddenFamily);check(hiddenFamily.parts.size()==7&&hiddenFamily.parts.back().explicitly_hidden);
   VisualPartAsset wrong;wrong.name="EMPTY_VeilLow";check(astral_part(family,wrong)==0);
   skeleton->visual_reference+=".bak";check(!astral_model(family));
  }
