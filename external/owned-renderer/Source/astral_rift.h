@@ -17,12 +17,16 @@ inline bool astral_name(const std::string& a,const char* b) {
 inline bool astral_model(const VisualAssemblyAsset& a) {
     if(!a.skeleton)return false;
     for(const auto* name:{"samastrift01","samastrift01.mod","samastrift02","samastrift02.mod",
-        "samastrift03","samastrift03.mod","samastrift04","samastrift04.mod"})
+        "samastrift03","samastrift03.mod","samastrift04","samastrift04.mod",
+        "samastrborder01","samastrborder01.mod"})
         if(astral_name(a.skeleton->visual_reference,name))return true;
     return false;
 }
 inline unsigned astral_part(const VisualAssemblyAsset& a,const VisualPartAsset& p) {
     if(!astral_model(a))return 0;
+    if(astral_name(a.skeleton->visual_reference,"samastrborder01") ||
+        astral_name(a.skeleton->visual_reference,"samastrborder01.mod"))
+        return astral_name(p.name,"empty_boundaryveils")?1u:0u;
     const bool original=astral_name(a.skeleton->visual_reference,"samastrift01") ||
         astral_name(a.skeleton->visual_reference,"samastrift01.mod");
     if(!original)return astral_name(p.name,"empty_veils")?1u:0u;
@@ -37,14 +41,14 @@ inline bool astral_clumps(const VisualAssemblyAsset& a,const VisualPartAsset& p)
 inline bool astral_dynamic(const VisualAssemblyAsset& a,const VisualPartAsset& p) {
     return astral_part(a,p)!=0 || astral_clumps(a,p);
 }
-// 02--04 put multiple disconnected ribbons into one FIG. Partition by
+// 02--04 and the border put multiple disconnected ribbons into one FIG. Partition by
 // triangle connectivity, not spatial proximity or UV (all ribbons reuse UV).
 // 01 retains the exact original component order and emitter selection.
 inline std::vector<std::vector<const NativeVertexComponent*>> astral_ribbons(
     const VisualPartAsset& part) {
     const auto& f=*part.geometry;
     std::vector<std::vector<const NativeVertexComponent*>> result;
-    if(!astral_name(part.name,"empty_veils")) {
+    if(!astral_name(part.name,"empty_veils") && !astral_name(part.name,"empty_boundaryveils")) {
         result.emplace_back();for(const auto& c:f.components)result.back().push_back(&c);
         return result;
     }
