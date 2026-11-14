@@ -1171,7 +1171,7 @@ void Renderer::begin_scene_renderer(){
   const bool point_shadows=configured_boolean(config,"point_shadows",true);
   bridge_set_point_shadow_merge_distance(.5f*float(configured_integer(config,"point_shadow_merge",3)));
   bridge_set_point_shadow_fast_overlays(configured_integer(config,"point_shadow_fast_overlays",4));
-  bridge_set_fur_mode(configured_integer(config,"fur_mode",0)); // fur prototype: the submission side (fur.h)
+  bridge_set_fur_mode(fur_mode()); // fur prototype: the submission side (fur.h)
   {
    const int range=configured_integer(config,"shadow_close_range",0);
    bridge_set_shadow_close_range(float(range>0?range:64+16*std::clamp(configured_integer(config,"shadow_cascade_quality",1),0,2)));
@@ -1230,7 +1230,7 @@ void Renderer::begin_scene_renderer(){
  const bool point_shadows=configured_boolean(config,"point_shadows",true);
  bridge_set_point_shadow_merge_distance(.5f*float(configured_integer(config,"point_shadow_merge",3)));
  bridge_set_point_shadow_fast_overlays(configured_integer(config,"point_shadow_fast_overlays",4));
- bridge_set_fur_mode(configured_integer(config,"fur_mode",0)); // fur prototype: the submission side (fur.h)
+ bridge_set_fur_mode(fur_mode()); // fur prototype: the submission side (fur.h)
  // Close shadow band length: shadow_close_range metres, 0 by cascade quality.
  {
   const int range=configured_integer(config,"shadow_close_range",0);

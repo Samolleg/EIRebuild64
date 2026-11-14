@@ -37,7 +37,14 @@ struct MaterialClass {
     float tint_min = 0, tint_max = -1;
     // Grows strands (the fur pass): fur and pelt armour layers.
     bool strands = false;
+    // A gem (diamond): the shader's fire and light-through branch. It has no
+    // profile channel of its own: a gem is the only dielectric with F0 of
+    // .12 and up (the loader enforces both ways), which the shader tests.
+    bool gem = false;
     bool bare = false;
+    // A creature coat's length on this class, a multiple of the model's coat
+    // (a zebra's sleek hide, its mane). Bare classes take 0.
+    float coat = 1;
     bool defined = false;
 };
 
@@ -67,8 +74,9 @@ public:
                             std::string& note) const;
     // The classes that grow strands, one bit per class index (256 bits).
     std::array<std::uint32_t, 8> strand_classes() const noexcept;
-    // The classes no creature coat grows on, one bit per class index.
-    std::array<std::uint32_t, 8> bare_classes() const noexcept;
+    // Each class's creature coat factor (0 bare, 32 = 1x), one byte per
+    // class index, four to a word.
+    std::array<std::uint32_t, 64> coat_classes() const noexcept;
 
 private:
     struct Shape { std::string type; std::uint32_t first = 0, second = 0, type_id = 0; };
