@@ -3792,7 +3792,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
    // none (sunLight carries the sun visibility).
    if(medium&&materialFoliage)
     specular+=sunLight*t.rgb*(kFoliageTransmission*(pow(saturate(dot(-v,l)),4)+.25*saturate(-dot(n,l))));
-#ifndef NATIVE_LOW
+#if !defined(NATIVE_OFF_MATERIALS)&&!defined(NATIVE_LOW)
    // Gems (diamond, figures only; one flag test elsewhere). Fire: the sun and
    // lamp highlights and the sky reflection split into a spectrum whose phase
    // follows the reflection's angle to the sun and the painted facets' relief

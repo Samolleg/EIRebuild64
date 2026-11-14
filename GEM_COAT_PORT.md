@@ -12,3 +12,5 @@ Author coat functions and gem lamp loop were compared exactly (ignoring whitespa
 Required data: GEMCOATDATA01. Contains gem/crystal_cd/hide_sleek/mane, zebra00 binding and region map, plus eight gem region maps preserving existing non-gem labels and sidecar restrictions. Existing boar bone.bare is retained. Code and data must be installed together: the new loader rejects the old unmarked high-F0 diamond class.
 
 No gameplay/GPU screenshot acceptance is claimed. Build status is recorded in the task REPORT and build evidence, not inferred from source parity.
+
+Integration correction: the gem response block uses the same NATIVE_OFF_MATERIALS/NATIVE_LOW guards as nativeGemLampThrough. Initial full shader compilation exposed undeclared calls in no-material x64 specializations; the guarded block fixes those without changing the effect formulas.
