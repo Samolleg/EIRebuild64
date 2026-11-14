@@ -35,6 +35,7 @@ int main() try {
  // atlas UV on every island must not concentrate all births on the first.
  for(unsigned modelNumber=2;modelNumber<=5;++modelNumber) {
   const bool border=modelNumber==5;
+  auto originalAtlas=std::make_shared<TextureCpuAsset>();originalAtlas->source_name="samastrtex01";
   VisualAssemblyAsset family;auto skeleton=std::make_shared<ModelCpuAsset>();family.skeleton=skeleton;
   skeleton->visual_reference=border?"samastrborder01":"samastrift0"+std::to_string(modelNumber);
   const unsigned islands=modelNumber==3?2:4;
@@ -47,7 +48,7 @@ int main() try {
   const std::vector<const char*> partNames=border?
    std::vector<const char*>{"EMPTY_Bank","EMPTY_Threshold","EMPTY_AstralSlates","EMPTY_AstralDepth","EMPTY_Veils","EMPTY_BoundaryVeils"}:
    std::vector<const char*>{"EMPTY_Rift","EMPTY_MajorSlabs","EMPTY_Debris","EMPTY_AstralDepth","EMPTY_AstralFilaments","EMPTY_Veils"};
-  for(const auto* name:partNames){VisualPartAsset part;part.name=name;part.geometry=ribbons;part.skeleton_node=2;family.parts.push_back(part);}
+  for(const auto* name:partNames){VisualPartAsset part;part.name=name;part.geometry=ribbons;part.texture=originalAtlas;part.skeleton_node=2;family.parts.push_back(part);}
   for(unsigned i=0;i<6;++i)check(astral_part(family,family.parts[i])==(i==5?1:0));
   check(astral_ribbons(family.parts[5]).size()==islands);
   add_astral_clumps(family);check(family.parts.size()==7);const auto& generated=*family.parts.back().geometry;
@@ -58,6 +59,9 @@ int main() try {
    check(generated.texture_coordinates[b*64+k*8].u==float((b*8+k)*2));
   }
   for(unsigned i=0;i<6;++i){check(family.parts[i].geometry==ribbons);if(i<5)check(family.parts[i].casts_shadow);}
+  for(unsigned i=0;i<6;++i)check(family.parts[i].texture==(border&&i==5?astral_border_plain_texture():originalAtlas));
+  check(family.parts.back().texture==originalAtlas); // Clump atlas must not become a flat opaque square.
+  if(border){const auto tex=family.parts[5].texture;check(tex->width==1&&tex->height==1&&tex->mips.size()==1);check(*tex->source==std::vector<std::uint8_t>({233,171,189,255}));}
   add_astral_clumps(family);check(family.parts.size()==7);
   skeleton->visual_reference=border?"SAMASTRBORDER01.MOD":"SAMASTRIFT0"+std::to_string(modelNumber)+".MOD";check(astral_model(family));
   check(astral_part(family,family.parts[5])==1);
