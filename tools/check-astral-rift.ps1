@@ -12,7 +12,7 @@ $sv=(Get-ChildItem "$sdk/Include" -Directory | Where-Object {Test-Path "$($_.Ful
 $env:INCLUDE="$vc/include;$sdk/Include/$sv/ucrt;$sdk/Include/$sv/um;$sdk/Include/$sv/shared;$sdk/Include/$sv/winrt"
 $env:LIB="$vc/lib/x64;$sdk/Lib/$sv/ucrt/x64;$sdk/Lib/$sv/um/x64"
 $exe=Join-Path $out 'check-astral-rift.exe'
-& "$vc/bin/Hostx64/x64/cl.exe" /nologo /std:c++17 /EHsc /MT /O2 /DNOMINMAX /DEID3D11_EMBEDDED "/I$repo/external/owned-renderer/Source" "/Fo$out/" "/Fe$exe" "$repo/tools/check-astral-rift.cpp" *> "$out/compile.txt"
+& "$vc/bin/Hostx64/x64/cl.exe" /nologo /std:c++17 /EHsc /MT /O2 /DNOMINMAX /DEID3D11_EMBEDDED "/I$repo/external/owned-renderer/Source" "/Fo$out/" "/Fe$exe" "$repo/tools/check-astral-rift.cpp" /link d3d11.lib d3dcompiler.lib *> "$out/compile.txt"
 if($LASTEXITCODE -ne 0){Get-Content "$out/compile.txt";throw 'Astral check compile failed'}
 & $exe *> "$out/result.txt"
 Get-Content "$out/result.txt"
