@@ -5,6 +5,7 @@
 #include "neighbour_piece.h"
 #include "ground_cover_neighbour.h"
 #include "owned_resource_runtime.h"
+#include "astral_neighbour.h"
 #include "owned_terrain_front_end.h"
 #include "owned_resource_store.h"
 #include "retained_static_scene.h"
@@ -165,6 +166,7 @@ std::unique_ptr<NeighbourMapUpload> decode_neighbour(OwnedResourceLoader& loader
         RetainedStaticPrepareDiagnostic prepared;
         if(!why && !prepare_retained_static_candidate(map,map->terrain,object,candidate,&prepared))
             why=retained_static_prepare_result_name(prepared.result);
+        if(!why && !prepare_neighbour_astral_nodes(*candidate))why="astral.nodes";
         if(why){++upload->omitted_decorations;++omitted[why];continue;}
         // Trees (family 53, the class the main map's sway is given to) take
         // the main map's sway evidence; the assembly is still this worker's.
@@ -233,11 +235,14 @@ void prebuild_neighbour(NeighbourMapUpload& upload) noexcept {
         double lod_seconds=0;
         for(std::size_t i=0;i<upload.decorations.size() && !builder.failed;++i) {
             const auto& candidate=*upload.decorations[i];
-            for(const auto& node:candidate.nodes) {
+            for(std::size_t node_index=0;node_index<candidate.nodes.size();++node_index) {
+                const auto& node=candidate.nodes[node_index];
+                const bool astral=candidate.assembly && node_index<candidate.assembly->parts.size() &&
+                    astral_dynamic(*candidate.assembly,candidate.assembly->parts[node_index]);
                 if(builder.failed)break;
                 // A cut-out figure (its texture has transparency) gets its
                 // impostor bake input once per texture.
-                if(node.texture&&(node.texture->opaque_mips&1u)==0) {
+                if(!astral&&node.texture&&(node.texture->opaque_mips&1u)==0) {
                     const auto found=upload.impostor_sources.try_emplace({node.figure,node.texture_identity});
                     if(found.second) {
                         found.first->second.node=&node;
@@ -251,7 +256,7 @@ void prebuild_neighbour(NeighbourMapUpload& upload) noexcept {
                     const auto begin=std::chrono::steady_clock::now();
                     level=lods.emplace(node.figure,NativeMeshLods{}).first;
                     ++upload.lod_stats.figures;upload.lod_stats.full_triangles+=node.figure->indices.size()/3;
-                    if(build_static_lods(*node.figure,level->second)) {
+                    if(!astral&&build_static_lods(*node.figure,level->second)) {
                         ++upload.lod_stats.reduced_figures;
                         for(std::uint32_t k=0;k<level->second.levels;++k)upload.lod_stats.level_triangles[k]+=level->second.indices[k].size()/3;
                     }

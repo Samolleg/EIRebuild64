@@ -285,4 +285,9 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,
     std::size_t group_index,const NativeWorldBounds& bounds,NativeContribution contribution,
     double time,std::uint8_t fog,NativePreparedPartSubmission*& record);
 
+// Shared material/animation values for active and streamed astral parts.
+bool retained_visual_part_values(const RetainedVisualSample& sample,
+    const VisualPartAsset& part, double time, std::uint8_t fog,
+    NativePreparedPartValues& values);
+
 } // namespace owned

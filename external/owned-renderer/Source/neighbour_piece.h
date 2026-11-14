@@ -65,6 +65,8 @@ struct NeighbourPieceFigure {
 
 // One drawn decoration node.
 struct NeighbourPieceDecoration {
+    NativePreparedPartValues astral_values{}; // immutable base, phase set each frame
+    std::uint32_t astral_border = 0;
     std::uint32_t candidate = 0;         // nodes of one MOB object share it (contact span)
     std::uint32_t figure = 0;            // NeighbourPiece::figures
     std::uint32_t texture = 0;           // NeighbourPiece::textures
