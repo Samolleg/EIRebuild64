@@ -2894,7 +2894,9 @@ float4 nativeAstralSample(NativeOutput i){
  return t;
 }
 
+#if defined(NATIVE_TERRAIN_PS)||defined(NATIVE_LOW)
 @TERRAIN_ASTRAL_SHADER@
+#endif
 NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
 #ifdef EID3D12_HAZARDS
  nativeGpuReportBegin(2u,i.textureReference.x,uint(i.p.x)|(uint(i.p.y)<<16));
@@ -2919,6 +2921,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
  // Background geometry stays outside the authoritative map's open interior.
  if(i.neighbour!=0 && all(i.worldPosition.xy>nativeTerrainActiveBoundsPS.xy) &&
     all(i.worldPosition.xy<nativeTerrainActiveBoundsPS.zw))discard;
+#if defined(NATIVE_TERRAIN_PS)||defined(NATIVE_LOW)
  // Astral is an opaque depth-bearing surface, independently emissive.
  // Its base geometry, map visibility and fog retain the ordinary terrain contract.
  [branch]if((i.terrainVertexFlags&16384u)!=0&&((i.terrainVertexFlags>>16)&15u)==15u){
@@ -2931,6 +2934,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
   NativePixelResult astral;astral.color=float4(color,nativeHudOpacity);
   astral.shadow=float4(1,0,0,1);astral.ambient=float4(0,0,0,astral.color.a);return astral;
  }
+#endif
  // Evaluate derivatives before both the receiver branch and per-pixel
  // cascade selection. Adjacent lanes need not select the same receiver/map.
  float3 positionDx=ddx(i.worldPosition),positionDy=ddy(i.worldPosition);
@@ -3870,6 +3874,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
    c.rgb-=ambientShare*terrainFootContactDepth*contact;
    ambientShare*=1-contact;
   }
+#if defined(NATIVE_TERRAIN_PS)||defined(NATIVE_LOW)
   // Mixed Astral/land cells retain normal terrain shading on their land share.
   [branch]if((i.terrainVertexFlags&16384u)!=0){
    float coverage=terrainAstralCoverage(i.terrainVertexFlags,i.liquidTileLocal);
@@ -3877,6 +3882,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
        i.liquidDirections.y,length(abs(positionDx.xy)+abs(positionDy.xy))*.075);
    c.rgb=lerp(c.rgb,astralColor,coverage);ambientShare*=1-coverage;
   }
+#endif
   // World geometry (shadow mode 1 or 2: object_to_clip is the world camera)
   // measures fog and draw distance from its interpolated world position,
   // the point the pixel would unproject to; prepared vertices unproject.
