@@ -10,7 +10,7 @@
 static unsigned checks=0;
 static void check(bool b){++checks;if(!b)throw std::runtime_error("check "+std::to_string(checks));}
 #include "check-astral-neighbour.h"
-int main() try {
+int main(int argc,char** argv) try {
  using namespace owned;
  VisualAssemblyAsset a;auto model=std::make_shared<ModelCpuAsset>();a.skeleton=model;
  model->visual_reference="samastrift01";
@@ -62,9 +62,8 @@ int main() try {
    check(generated.texture_coordinates[b*64+k*8].u==float((b*8+k)*2));
   }
   for(unsigned i=0;i<6;++i){check(family.parts[i].geometry==ribbons);if(i<5)check(family.parts[i].casts_shadow);}
-  for(unsigned i=0;i<6;++i)check(family.parts[i].texture==(border&&i==5?astral_border_plain_texture():originalAtlas));
+  for(unsigned i=0;i<6;++i)check(family.parts[i].texture==originalAtlas);
   check(family.parts.back().texture==originalAtlas); // Clump atlas must not become a flat opaque square.
-  if(border){const auto tex=family.parts[5].texture;check(tex->width==1&&tex->height==1&&tex->mips.size()==1);check(*tex->source==std::vector<std::uint8_t>({233,171,189,48}));check(tex->opaque_mips==0);}
   add_astral_clumps(family);check(family.parts.size()==7);
   skeleton->visual_reference=border?"SAMASTRBORDER01.MOD":"SAMASTRIFT0"+std::to_string(modelNumber)+".MOD";check(astral_model(family));
   check(astral_part(family,family.parts[5])==1);
@@ -74,20 +73,10 @@ int main() try {
   VisualPartAsset wrong;wrong.name="EMPTY_VeilLow";check(astral_part(family,wrong)==0);
   skeleton->visual_reference+=".bak";check(!astral_model(family));
  }
- // Atlas wrapping and fades: no sample may escape the original rectangle;
- const double textureAlpha=(*astral_border_plain_texture()->source)[3]/255.0;
- for(unsigned frame=0;frame<=600;++frame){
-  const double time=frame/100.0/.055;NativePreparedPartValues lit,unlit,hidden,next;
-  lit.alpha=1;lit.lighting_enabled=1;unlit.alpha=1;unlit.default_diffuse=0x80443322;hidden.alpha=0;hidden.default_diffuse=0x00443322;next=lit;
-  astral_border_opacity(time,lit);astral_border_opacity(time,unlit);astral_border_opacity(time,hidden);astral_border_opacity(time+6/.055,next);
-  check(lit.alpha>=.6999f&&lit.alpha<=1.0001f);check(std::abs(lit.alpha-next.alpha)<1e-6f);
-  check(textureAlpha*lit.alpha<.19);check(std::pow(1-textureAlpha*lit.alpha,4)>.43);
-  check((unlit.default_diffuse&0xffffff)==0x443322);check((unlit.default_diffuse>>24)<=128);
-  check(hidden.alpha==0&&(hidden.default_diffuse>>24)==0);
- }
  // both sides of a seam converge to the same weighted sample.
  for(int step=0;step<=2000;++step){double x=step/2000.;double aUv=.0166015625+std::fmod(x,1.)*.466796875;double bUv=.0166015625+std::fmod(x+.5,1.)*.466796875;check(aUv>=.0166015625&&aUv<=.4833984375&&bUv>=.0166015625&&bUv<=.4833984375);}
  check_astral_neighbour();
- check_astral_alpha_gpu();
+ if(argc!=4)throw std::runtime_error("Expected shader header, source MMP and output directory");
+ check_astral_alpha_gpu(argv[1],argv[2],argv[3]);
  std::printf("Astral rift: %u checks PASS\n",checks);return 0;
 }catch(const std::exception& e){std::printf("FAIL %s\n",e.what());return 1;}

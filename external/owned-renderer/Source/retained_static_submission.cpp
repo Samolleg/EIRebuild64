@@ -2564,9 +2564,8 @@ bool retained_visual_part_values(const RetainedVisualSample& sample,const Visual
         // World precise time is logical 55 ms quants, including its fraction.
         values.astral={float(std::fmod(time*0.055/6.0,1.0)),
             astral_clumps(*sample.assembly,part)?2.f:1.f,
-            float(astral_part(*sample.assembly,part)),0.f};
+            float(astral_part(*sample.assembly,part)),astral_border_veil(*sample.assembly,part)?1.f:0.f};
         values.ordering=static_cast<UINT>(NativeOrdering::preserve);
-        if(astral_border_veil(*sample.assembly,part))astral_border_opacity(time,values);
         if(values.astral[1]==2.f) {
             values.lighting_enabled=0;values.default_diffuse=0xffffffffu;values.flags|=4u;
         }

@@ -40,12 +40,7 @@ static void check_astral_neighbour() {
     const float margin=astral_clumps(*assembly,part)?7.f:.5f;
     check(node.bounds.minimum[0]==-1-margin&&node.bounds.maximum[2]==3+margin);
    } else check(node.bounds.minimum==originals[source].bounds.minimum);
-   if(astral_border_veil(*assembly,part)) {
-    check(node.texture==astral_border_plain_texture().get());
-    check(node.texture_identity==node.texture->value_serial);
-    check(node.texture_format==NativeOwnedTextureFormat::argb8888);
-    check(node.texture_mips.size()==1&&node.texture_mips[0].data[3]==48);
-   } else {check(node.texture==texture.get());check(node.texture_identity==123);}
+   check(node.texture==texture.get());check(node.texture_identity==123);
    if(astral_clumps(*assembly,part))check(node.positions.size()==part.geometry->positions.size());
   }
  }
@@ -55,11 +50,9 @@ static void check_astral_neighbour() {
  check(neighbour_astral_values(0,base,true,paused));
  check(first.astral==paused.astral&&first.alpha==paused.alpha&&first.default_diffuse==paused.default_diffuse);
  check(neighbour_astral_values(1.5/.055,base,true,later));
- check(later.astral[0]>.2499f&&later.astral[0]<.2501f&&later.alpha>first.alpha);
+ check(later.astral[0]>.2499f&&later.astral[0]<.2501f&&later.alpha==first.alpha&&later.astral[3]==1);
  check(neighbour_astral_values(6/.055,base,true,period));
  check(std::abs(first.alpha-period.alpha)<1e-6f&&period.astral[0]==0);
- NativePreparedPartValues active=base;astral_border_opacity(1.5/.055,active);
- check(active.alpha==later.alpha&&active.default_diffuse==later.default_diffuse);
  check(!neighbour_astral_values(-1,base,true,later));
  check(!neighbour_astral_values(NAN,base,true,later));
  check(neighbour_astral_values(1.5/.055,base,false,later)&&later.alpha==base.alpha);

@@ -192,8 +192,8 @@ void piece_decorations(PieceBuilder& builder, const NeighbourMapUpload& upload) 
                 const auto& part = candidate.assembly->parts[node_index];
                 if (astral_dynamic(*candidate.assembly, part)) {
                     RetainedVisualSample sample; sample.assembly = candidate.assembly;
-                    // Peak opacity gives the unpulsed base; the frame applies the pulse.
-                    if (!retained_visual_part_values(sample, part, 1.5 / .055, 0, draw.astral_values))
+                    // Source material is unchanged; the frame supplies animation time.
+                    if (!retained_visual_part_values(sample, part, 0, 0, draw.astral_values))
                         throw std::runtime_error("Neighbour astral material unavailable");
                     draw.astral_values.astral[0] = 0;
                     draw.astral_border = astral_border_veil(*candidate.assembly, part) ? 1u : 0u;

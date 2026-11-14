@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$OutputDirectory)
+param([Parameter(Mandatory=$true)][string]$OutputDirectory,[Parameter(Mandatory=$true)][string]$TexturePath)
 $ErrorActionPreference='Stop'
 $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $out=[IO.Path]::GetFullPath($OutputDirectory)
@@ -14,6 +14,6 @@ $env:LIB="$vc/lib/x64;$sdk/Lib/$sv/ucrt/x64;$sdk/Lib/$sv/um/x64"
 $exe=Join-Path $out 'check-astral-rift.exe'
 & "$vc/bin/Hostx64/x64/cl.exe" /nologo /std:c++17 /EHsc /MT /O2 /DNOMINMAX /DEID3D11_EMBEDDED "/I$repo/external/owned-renderer/Source" "/Fo$out/" "/Fe$exe" "$repo/tools/check-astral-rift.cpp" /link d3d11.lib d3dcompiler.lib *> "$out/compile.txt"
 if($LASTEXITCODE -ne 0){Get-Content "$out/compile.txt";throw 'Astral check compile failed'}
-& $exe *> "$out/result.txt"
+& $exe "$repo/external/owned-renderer/Source/native_shader.h" ([IO.Path]::GetFullPath($TexturePath)) $out *> "$out/result.txt"
 Get-Content "$out/result.txt"
 if($LASTEXITCODE -ne 0){throw 'Astral check failed'}

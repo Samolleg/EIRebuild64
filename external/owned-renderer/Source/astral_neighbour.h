@@ -26,15 +26,6 @@ inline bool prepare_neighbour_astral_nodes(RetainedStaticSourceCandidate& candid
         auto& node = candidate.nodes[i];
         const auto& part = a.parts[i];
         if (!astral_dynamic(a, part)) continue;
-        if (astral_border_veil(a, part)) {
-            node.texture = part.texture.get();
-            node.texture_identity = part.texture->value_serial;
-            node.texture_format = NativeOwnedTextureFormat::argb8888;
-            node.texture_mips.clear();
-            for (const auto& mip : part.texture->mips)
-                node.texture_mips.push_back({part.texture->source->data() + mip.byte_offset,
-                    mip.width, mip.height, mip.bytes});
-        }
         const float margin = astral_clumps(a, part) ? 7.f : .5f;
         for (unsigned axis = 0; axis < 3; ++axis) {
             node.bounds.minimum[axis] -= margin;
@@ -44,13 +35,13 @@ inline bool prepare_neighbour_astral_nodes(RetainedStaticSourceCandidate& candid
     }
     return true;
 }
-// Base values are immutable: never compound the opacity pulse each frame.
+// Use the same phase and border-repair selector on both sides of a map edge.
 inline bool neighbour_astral_values(double time, const NativePreparedPartValues& base,
     bool border, NativePreparedPartValues& values) {
     if (!std::isfinite(time) || time < 0) return false;
     values = base;
     values.astral[0] = float(std::fmod(time * .055 / 6., 1.));
-    if (border) astral_border_opacity(time, values);
+    values.astral[3] = border ? 1.f : 0.f;
     return true;
 }
 }
