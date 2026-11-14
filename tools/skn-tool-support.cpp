@@ -6,6 +6,9 @@ void bridge_append_probe_event(const char *, const char *) noexcept {}
 void owned_terrain_reset_liquid_outflow(TerrainCpuAsset &) {
   throw std::logic_error("terrain is outside FIG converter");
 }
+void owned_terrain_prepare_astral(ResourceStore &, TerrainCpuAsset &) {
+  throw std::logic_error("terrain is outside FIG converter");
+}
 void owned_terrain_prepare_shading(TerrainCpuAsset &) {
   throw std::logic_error("terrain is outside FIG converter");
 }
