@@ -1,5 +1,6 @@
 #pragma once
 #include "retained_static_scene.h"
+#include "astral_border_mesh.h"
 #include <algorithm>
 #include <cmath>
 
@@ -44,31 +45,6 @@ inline bool astral_dynamic(const VisualAssemblyAsset& a,const VisualPartAsset& p
 inline bool astral_border_veil(const VisualAssemblyAsset& a,const VisualPartAsset& p) {
     return a.skeleton && (astral_name(a.skeleton->visual_reference,"samastrborder01") ||
         astral_name(a.skeleton->visual_reference,"samastrborder01.mod")) && astral_name(p.name,"empty_boundaryveils");
-}
-inline void astral_border_opacity(double time,NativePreparedPartValues& values) {
-    const float pulse=.85f+.15f*float(std::sin(std::fmod(time*.055/6.0,1.0)*6.283185307179586));
-    values.alpha*=pulse;
-    // The unlit/default-colour path takes alpha from the packed colour,
-    // whereas the lit path takes material alpha. Neither may bypass the pulse.
-    const auto alpha=static_cast<std::uint32_t>(std::lround(float(values.default_diffuse>>24)*pulse));
-    values.default_diffuse=(values.default_diffuse&0x00ffffffu)|(alpha<<24);
-}
-inline std::shared_ptr<const TextureCpuAsset> astral_border_plain_texture() {
-    // A flat texel sampled from the original atlas' untorn violet area.
-    // This is a surface-only override; emitted clumps retain the source atlas.
-    static const auto texture=[] {
-        auto t=std::make_shared<TextureCpuAsset>();
-        t->value_source=TextureValueSource::generated_memory;t->value_serial=0x7e41535452414c03ull;
-        t->source_name="astral_border_translucent_v2";t->width=t->height=1;t->bit_count=32;
-        t->format_signature=0x33544e50u;t->format=MmpFormat::argb8888;t->texel_offset=0;
-        t->masks={0xff0000,0xff00,0xff,0xff000000};t->shifts={16,8,0,24};t->channel_bits={8,8,8,8};
-        // 48/255 at peak: four overlapping sheets retain >43% background.
-        // A fully opaque texel here produced the rejected solid wall.
-        t->opaque_mips=0;
-        t->mips={{1,1,0,4}};t->source=std::make_shared<const std::vector<std::uint8_t>>(std::initializer_list<std::uint8_t>{233,171,189,48});
-        return std::shared_ptr<const TextureCpuAsset>(t);
-    }();
-    return texture;
 }
 // 02--04 and the border put multiple disconnected ribbons into one FIG. Partition by
 // triangle connectivity, not spatial proximity or UV (all ribbons reuse UV).
@@ -116,12 +92,7 @@ inline void add_astral_clumps(VisualAssemblyAsset& a) {
         const auto source=a.parts[pi]; const auto id=astral_part(a,source);
         if(!id||!source.geometry||source.geometry->shape_count!=1)continue;
         a.parts[pi].casts_shadow=false;
-        if(astral_name(source.name,"empty_boundaryveils")) {
-            // Keep source intact: the generated clump below copies its original
-            // texture, while only the existing veil loses the torn pattern.
-            auto& veil=a.parts[pi];veil.texture=astral_border_plain_texture();veil.surface.reset();
-            veil.texture_source_name=veil.texture->source_name;veil.material_name.clear();
-        }
+        if(astral_border_veil(a,source))a.parts[pi].geometry=close_astral_border_cuts(source.geometry);
         const auto& f=*source.geometry;
         auto g=std::make_shared<FigureCpuAsset>();
         g->identity=f.identity;g->identity.canonical_name+="/astral-clumps-v1";

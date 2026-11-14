@@ -4813,7 +4813,7 @@ private:
         std::weak_ptr<const void> weak_owner;
         NativeStaticSet opaque{{},{},false,1,4};
         std::vector<NativeSelectedRecord> ordered;
-        struct AstralRecord { UINT record; NativePreparedPartValues base; bool border; };
+        struct AstralRecord { UINT record; NativePreparedPartValues base; };
         std::vector<AstralRecord> astral;
         std::uint64_t epoch = 0, renderer_generation = 0;
         std::uint64_t geometry_bytes = 0, texture_bytes = 0, peak_decoded_bytes = 0;

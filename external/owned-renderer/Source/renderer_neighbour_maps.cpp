@@ -354,7 +354,7 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     const auto first_astral=neighbours_.ordered.size();
                     NativeGeometryResult result;if(!submit(&submission,view,result)){accepted=false;step="decoration.submit";break;}
                     if(astral)for(std::size_t i=first_astral;i<neighbours_.ordered.size();++i)
-                        neighbours_.astral.push_back({neighbours_.ordered[i].record,node.astral_values,node.astral_border!=0});
+                        neighbours_.astral.push_back({neighbours_.ordered[i].record,node.astral_values});
                     }
                 }
                 if(accepted) {
@@ -438,7 +438,7 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
         double time=0;
         if(bridge_current_world_time(time))for(const auto& animated:neighbours_.astral) {
             NativePreparedPartValues values;
-            if(!neighbour_astral_values(time,animated.base,animated.border,values))continue;
+            if(!neighbour_astral_values(time,animated.base,values))continue;
             auto& record=native_instance_records_[animated.record];
             auto& instance=record.command.instance;
             if(instance.astral[0]==values.astral[0] && instance.material_alpha==values.alpha &&
