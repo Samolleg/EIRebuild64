@@ -12,6 +12,7 @@
 #include "../LiveObserver.h"
 #include "../UnitClientSpecific.h"
 #include "embedded_host.h"
+#include "astral_rift.h"
 
 namespace OwnedRender {
 namespace {
@@ -60,7 +61,12 @@ bool E1CompleteVisualAppearance(CObject3DClientSpecific& specific,
         const auto& part=source->parts[i];
         auto* material=specific.FindMaterial(static_cast<ETypeIDs>(part.texture_type),
             static_cast<ETypeIDs>(part.material_type));
-        auto* figure=specific.FindFigure(part.name.c_str());
+        // Generated GPU clumps inherit visibility/material from their real
+        // veil node; they are not additional mutable host figures.
+        const auto& figureName=owned::astral_clumps(previous,part) && previous.skeleton &&
+            part.skeleton_node<previous.skeleton->nodes.size() ?
+            previous.skeleton->nodes[part.skeleton_node].name : part.name;
+        auto* figure=specific.FindFigure(figureName.c_str());
         if(!material || !figure)return reject("appearance.completed_part");
         auto value=completedMaterial(*material);
         const bool hidden=figure->CheckFlag(FIG_HIDDEN) || part.geometry->indices.empty();

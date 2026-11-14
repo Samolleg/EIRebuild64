@@ -1,4 +1,5 @@
 #include "retained_static_submission.h"
+#include "astral_rift.h"
 #include <map>
 #include <mutex>
 #include "fast_float.h"
@@ -688,6 +689,7 @@ bool prepare_retained_static_candidate(
             candidate->root_valid = std::all_of(candidate->root_world.begin(),
                 candidate->root_world.end(), finite);
         }
+        add_astral_clumps(*assembly);
         candidate->assembly = std::move(assembly);
         candidate->prepared = true;
         return true;
@@ -1193,6 +1195,7 @@ bool retained_visual_world_bounds(const RetainedVisualSample& sample,
     try{if(!skn_pose_bounds(sample,bounds,skn_present))return false;if(skn_present)return true;}
     catch(const std::exception& error){skn::report_rejection(sample.assembly->skeleton->visual_reference,error.what());return false;}
     float envelope_radius = sample.envelope_radius;
+    if(sample.assembly && astral_model(*sample.assembly))envelope_radius+=7.f;
     if (sample.values.unit && !sample.completed_pose &&
         !retained_visual_selection_envelope_radius(sample,envelope_radius)) return false;
     if (!finite_value(envelope_radius) || envelope_radius < 0) return false;
@@ -2214,6 +2217,7 @@ bool prepare_visual_part_envelope(const RetainedVisualSample& sample,
     }
     if (const auto* track=prepared.skeleton_binding->tracks[part.skeleton_node])
         radius+=track->morph_radius;
+    if(astral_dynamic(assembly,part))radius+=astral_clumps(assembly,part)?7.0:0.5;
     const auto& envelope=prepared.node_envelopes[part.skeleton_node];
     target.geometry_radius=next_float(static_cast<float>(radius),INFINITY);
     target.envelope_radius=next_float(static_cast<float>(
@@ -2555,10 +2559,21 @@ bool retained_visual_part_values(const RetainedVisualSample& sample,const Visual
     values.emissive=retained_visual_emissive(sample.values,sample.quest_light_active,*part.material);values.specular=sample.values.stunned?std::array<float,4>{sample.effects.stun_red,0,0,1}:part.material->specular;
     values.specular[3]=1;values.specular_enable=specular?TRUE:FALSE;
     values.flags|=retained_visual_sway_flags(sample,part);
+    if(sample.assembly && astral_dynamic(*sample.assembly,part)) {
+        if(!std::isfinite(time)||time<0)return false;
+        // World precise time is logical 55 ms quants, including its fraction.
+        values.astral={float(std::fmod(time*0.055/6.0,1.0)),
+            astral_clumps(*sample.assembly,part)?2.f:1.f,
+            float(astral_part(*sample.assembly,part)),0.f};
+        values.ordering=static_cast<UINT>(NativeOrdering::preserve);
+        if(values.astral[1]==2.f) {
+            values.lighting_enabled=0;values.default_diffuse=0xffffffffu;values.flags|=4u;
+        }
+    }
     // Rigid world objects meet the terrain with its colour; units never do.
-    if (!sample.values.unit) values.flags |= native_ground_contact_flag;
+    if (!sample.values.unit && values.astral[1]==0) values.flags |= native_ground_contact_flag;
     // Units carry the unit flag: snow build-up gives them a sheen only.
-    else values.flags |= native_unit_flag;
+    else if(sample.values.unit) values.flags |= native_unit_flag;
     if (sample.assembly && sample.assembly->sways && !sample.values.unit &&
         retained_visual_part_sway(part).foliage)
         values.flags |= native_foliage_part_flag;
@@ -3049,7 +3064,7 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
     if (target.bound_assembly!=sample.assembly) {
         view={};const auto& figure=*part.geometry;
         view.world.enabled=true;view.world.identity=&figure.identity;view.world.shape_count=figure.shape_count;
-        if(!sample.values.unit&&!assembly.sways)view.lod_figure=&figure;
+        if(!sample.values.unit&&!assembly.sways&&!astral_dynamic(assembly,part))view.lod_figure=&figure;
         view.geometry_revision={1,0,0,0,0};view.geometry_revision_valid=true;
         view.positions=figure.positions.data();view.position_groups=figure.position_groups;
         view.normals=figure.normals.data();view.normal_groups=figure.normal_groups;
@@ -3058,6 +3073,10 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
         view.indices=figure.indices.data();view.index_count=static_cast<UINT>(figure.indices.size());
         view.bounds_valid=true;view.bounds_flags=2;view.semantic_kind=SemanticKind::figure;
         retained_visual_part_fixed_state(sample,view.owned_fixed_state);
+        if(astral_dynamic(assembly,part)) {
+            view.owned_fixed_state.z_write_enable=FALSE;
+            view.owned_fixed_state.alpha_ref=1;
+        }
         if (part.surface) {
             view.owned_texture.identity=part.surface->id;view.owned_texture.generation=part.surface->generation;
             view.owned_texture.surface=part.surface.get();

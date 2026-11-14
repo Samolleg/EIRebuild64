@@ -2835,7 +2835,7 @@ HRESULT Renderer::queue_native_terrain(const NativeGeometryView& view,const Fixe
    std::copy(view.lighting.material_diffuse.begin(),view.lighting.material_diffuse.end(),draw.instance.material_diffuse);
    std::copy(view.lighting.emissive.begin(),view.lighting.emissive.end(),draw.instance.emissive);
    std::copy(view.lighting.specular.begin(),view.lighting.specular.end(),draw.instance.specular);
-   draw.instance.uv_shift[0]=view.u_shift;draw.instance.uv_shift[1]=view.v_shift;
+   draw.instance.uv_shift[0]=view.u_shift;draw.instance.uv_shift[1]=view.v_shift;std::copy(view.astral.begin(),view.astral.end(),draw.instance.astral);
    std::copy(view.bounds_minimum.begin(),view.bounds_minimum.end(),draw.bounds_min);
    std::copy(view.bounds_maximum.begin(),view.bounds_maximum.end(),draw.bounds_max);
    if(FAILED(hr=resolve_native_world_range(view,draw)))return fail(hr,"terrain.world_range");
@@ -3241,7 +3241,7 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
     view.flags=values.flags;view.default_diffuse=values.default_diffuse;view.default_specular=values.default_specular;
     view.lighting.enabled=values.lighting_enabled;view.lighting.material_alpha=alpha;
     view.lighting.material_diffuse=values.diffuse;view.lighting.emissive=values.emissive;view.lighting.specular=values.specular;
-    view.u_shift=values.u_shift;view.v_shift=values.v_shift;
+    view.u_shift=values.u_shift;view.v_shift=values.v_shift;view.astral=values.astral;
     view.ordering=wound?NativeOrdering::preserve:static_cast<NativeOrdering>(values.ordering);
     view.owned_fixed_state.specular_enable=values.specular_enable;
     auto state=native_owned_submission_state(frame,view.owned_fixed_state);
@@ -3275,6 +3275,7 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
       !std::equal(values.emissive.begin(),values.emissive.end(),retained.emissive)||
       !std::equal(values.specular.begin(),values.specular.end(),retained.specular)||
       retained.uv_shift[0]!=values.u_shift||retained.uv_shift[1]!=values.v_shift||
+      !std::equal(values.astral.begin(),values.astral.end(),retained.astral)||
       group.state.render[D3DRENDERSTATE_SPECULARENABLE]!=values.specular_enable||
       old.command.reorderable!=reorderable||old.command.preserve_order!=(ordering==NativeOrdering::preserve);
     }
@@ -3309,6 +3310,7 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
       std::copy(values.emissive.begin(),values.emissive.end(),value.emissive);
       std::copy(values.specular.begin(),values.specular.end(),value.specular);
       value.uv_shift[0]=values.u_shift;value.uv_shift[1]=values.v_shift;
+      std::copy(values.astral.begin(),values.astral.end(),value.astral);
       const auto& group=native_state_buckets_[draw.state_bucket];
       // Rebuild from the authored state: the prior opaque command has its
       // blend/test disabled, and cannot describe a later fade or mask.
@@ -3701,7 +3703,7 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
  auto object_to_clip=view.object_to_clip;
  if(widescreen::interface_owned&&!view.world.enabled)
   widescreen::compose_hud_clip(object_to_clip.data(),widescreen::hud_blit,float(canvas_width()),float(canvas_height()));
- NativeQueuedDraw draw{};if(widescreen::interface_owned)draw.hud_composition=widescreen::hud_blit;draw.mesh=mesh;draw.geometry_page=mesh->allocation.page;draw.index_count=view.index_count;draw.component_count=view.component_count;std::memcpy(&draw.instance.object_to_clip,object_to_clip.data(),sizeof(draw.instance.object_to_clip));jitter_clip(&draw.instance.object_to_clip._11);if(view.lighting.enabled)std::memcpy(&draw.instance.object_to_world,view.lighting.object_to_world.data(),sizeof(draw.instance.object_to_world));draw.instance.geometry_offsets={mesh->position_offset,mesh->normal_offset,mesh->texture_coordinate_offset,mesh->component_offset};draw.instance.color_offsets={mesh->diffuse_offset,mesh->specular_offset};draw.instance.uv_shift[0]=view.u_shift;draw.instance.uv_shift[1]=view.v_shift;draw.instance.flags=view.flags&~native_preview_specular_rgb_flag;draw.instance.default_diffuse=view.default_diffuse;draw.instance.default_specular=view.default_specular;draw.instance.morph_offset=morph_offset;draw.instance.morph_count=view.morph_count;draw.instance.terrain_vertex_offset=mesh->terrain_vertex_offset;draw.instance.terrain_phase_offset=terrain_phase_offset;native_terrain_values(draw.instance,view.terrain,view.semantic_kind==SemanticKind::terrain && !configured_boolean(debug_overlay_.config(),"terrain_normal_sunlight",true));draw.instance.lighting_enabled=view.lighting.enabled;std::copy(view.lighting.emissive.begin(),view.lighting.emissive.end(),draw.instance.emissive);std::copy(view.lighting.specular.begin(),view.lighting.specular.end(),draw.instance.specular);draw.instance.material_alpha=view.lighting.material_alpha;std::copy(view.lighting.material_diffuse.begin(),view.lighting.material_diffuse.end(),draw.instance.material_diffuse);
+ NativeQueuedDraw draw{};if(widescreen::interface_owned)draw.hud_composition=widescreen::hud_blit;draw.mesh=mesh;draw.geometry_page=mesh->allocation.page;draw.index_count=view.index_count;draw.component_count=view.component_count;std::memcpy(&draw.instance.object_to_clip,object_to_clip.data(),sizeof(draw.instance.object_to_clip));jitter_clip(&draw.instance.object_to_clip._11);if(view.lighting.enabled)std::memcpy(&draw.instance.object_to_world,view.lighting.object_to_world.data(),sizeof(draw.instance.object_to_world));draw.instance.geometry_offsets={mesh->position_offset,mesh->normal_offset,mesh->texture_coordinate_offset,mesh->component_offset};draw.instance.color_offsets={mesh->diffuse_offset,mesh->specular_offset};draw.instance.uv_shift[0]=view.u_shift;draw.instance.uv_shift[1]=view.v_shift;std::copy(view.astral.begin(),view.astral.end(),draw.instance.astral);draw.instance.flags=view.flags&~native_preview_specular_rgb_flag;draw.instance.default_diffuse=view.default_diffuse;draw.instance.default_specular=view.default_specular;draw.instance.morph_offset=morph_offset;draw.instance.morph_count=view.morph_count;draw.instance.terrain_vertex_offset=mesh->terrain_vertex_offset;draw.instance.terrain_phase_offset=terrain_phase_offset;native_terrain_values(draw.instance,view.terrain,view.semantic_kind==SemanticKind::terrain && !configured_boolean(debug_overlay_.config(),"terrain_normal_sunlight",true));draw.instance.lighting_enabled=view.lighting.enabled;std::copy(view.lighting.emissive.begin(),view.lighting.emissive.end(),draw.instance.emissive);std::copy(view.lighting.specular.begin(),view.lighting.specular.end(),draw.instance.specular);draw.instance.material_alpha=view.lighting.material_alpha;std::copy(view.lighting.material_diffuse.begin(),view.lighting.material_diffuse.end(),draw.instance.material_diffuse);
  std::uint32_t preview_rgb=0;
  if(camp_inventory_preview_specular_rgb(preview_rgb)){
   draw.instance.flags|=native_preview_specular_rgb_flag;

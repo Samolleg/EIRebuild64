@@ -3,6 +3,7 @@
 // the world command the scene thread runs (run_owned_visual_scene). Reads
 // only the captured frame copies (owned_world_frame.h); host-buildable.
 #include "owned_world_frame.h"
+#include "astral_rift.h"
 #include "world_scene_algorithms.h"
 #include "embedded_perf06.h"
 #include "combat_ui.h"
@@ -676,6 +677,7 @@ void retire_owned_static_color(const RetainedVisualSample& sample) noexcept {
 bool owned_static_color_eligible(const RetainedVisualSample& sample,
     const OwnedVisualFramePartState& prepared) noexcept {
     if(sample.values.unit || !sample.assembly || prepared.parts.size()!=sample.assembly->parts.size())return false;
+    if(astral_model(*sample.assembly))return false;
     bool any=false;
     for(std::size_t index=0;index<prepared.parts.size();++index) {
         if(!prepared.parts[index].visible)continue;
