@@ -1,4 +1,8 @@
+#include "retained_static_scene.h"
+// The game host still exposes Windows' max macro, unlike the renderer PCH.
+#define max(a,b) WINDOWS_MAX_MUST_NOT_EXPAND(a,b)
 #include "astral_rift.h"
+#undef max
 #include <cstdio>
 #include <stdexcept>
 static unsigned checks=0;

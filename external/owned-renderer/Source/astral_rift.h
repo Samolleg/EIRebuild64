@@ -68,7 +68,7 @@ inline void add_astral_clumps(VisualAssemblyAsset& a) {
                     const auto ix=static_cast<std::uint16_t>(start+v);
                     g->components.push_back({ix,ix,ix});
                     g->texture_coordinates.push_back({float(k*2)+x,y});
-                    g->shape_position_radii[0]=std::max(g->shape_position_radii[0],std::sqrt(p.x[v]*p.x[v]+p.y[v]*p.y[v]+p.z[v]*p.z[v]));
+                    g->shape_position_radii[0]=(std::max)(g->shape_position_radii[0],std::sqrt(p.x[v]*p.x[v]+p.y[v]*p.y[v]+p.z[v]*p.z[v]));
                 }
                 g->positions.push_back(p);g->normals.push_back(n);
                 for(unsigned v:{0u,1u,2u,0u,2u,3u,2u,1u,0u,3u,2u,0u})g->indices.push_back(static_cast<std::uint16_t>(start+v));
