@@ -4946,6 +4946,7 @@ private:
         bool coat = false;
         bool failed = false;       // no usable layer: the atlas stays unclassified
         bool unit = false;         // drawn on a unit: a fixed texture takes units.json
+        bool scenery = false;      // explicitly profiled static world texture
         // D3D12: keyed by a client surface itself (no owned-texture entry), so
         // it goes when that surface retires (retire_surface), not by trim.
         bool surface = false;
@@ -4965,6 +4966,7 @@ private:
     bool material_profiles_dirty_ = false;
     int material_prepared_level_ = -1;
     bool material_prepared_metal_mask_ = true;
+    bool material_world_on_ = true;
     int material_level() const noexcept;
     // The fur level in effect: F10 fur_mode, 0 at material_quality 0 (user
     // decision 2026-11-08: no fur at all there; the coats need the material

@@ -260,13 +260,14 @@ bool MaterialLibrary::load_items(const std::vector<std::uint8_t>& bytes) {
     return !materials_.empty() && !armor_.empty();
 }
 
-bool MaterialLibrary::load_units(const std::string& document, std::string& error) {
+bool MaterialLibrary::load_units(const std::string& document, std::string& error, bool scenery) {
+    const char* const file = scenery ? "scenery.json" : "units.json";
     using namespace small_json;
     try {
         const auto root = Reader(document).root();
         const auto named = [&](const std::string& name, std::uint8_t& index) {
             const auto found = class_index_.find(name);
-            if (found == class_index_.end()) { error = "units.json: unknown class " + name; return false; }
+            if (found == class_index_.end()) { error = std::string(file) + ": unknown class " + name; return false; }
             index = found->second;
             return true;
         };
@@ -284,16 +285,18 @@ bool MaterialLibrary::load_units(const std::string& document, std::string& error
                     }
                 }
             } else if (!named(value.str(), unit.primary)) return false;
-            units_[lower(entry.first)] = std::move(unit);
+            const std::string key = lower(entry.first);
+            if (scenery) { if (units_.count(key)) continue; scenery_.insert(key); }  // units.json wins
+            units_[key] = std::move(unit);
         }
-        if (root.members.count("skins"))
+        if (!scenery && root.members.count("skins"))
             for (const auto& entry : root.field("skins").members) {
                 std::uint8_t index = 0;
                 if (!named(entry.second.str(), index)) return false;
                 unit_skins_[lower(entry.first)] = index;
             }
     } catch (const std::exception& problem) {
-        error = std::string("units.json: ") + problem.what();
+        error = std::string(file) + ": " + problem.what();
         return false;
     }
     return true;
@@ -321,6 +324,9 @@ bool MaterialLibrary::load(std::string& error) {
         return false;
     }
     if (!load_units(std::string(bytes.begin(), bytes.end()), error)) return false;
+    // Optional: without scenery.json world objects keep the S2 response.
+    if (read_file(folder_ + L"scenery.json", bytes, 4u << 20) &&
+        !load_units(std::string(bytes.begin(), bytes.end()), error, true)) return false;
     ResourceStoreConfig mounts;
     ResourceStore store;
     ResourceFailure failure;
@@ -474,6 +480,10 @@ std::shared_ptr<const MaterialLibrary::RegionMap> MaterialLibrary::read_region_m
         return nullptr;
     }
     return map;
+}
+
+bool MaterialLibrary::scenery_listed(const std::string& texture) const {
+    return scenery_.count(lower(texture)) != 0;
 }
 
 std::array<std::uint32_t, 8> MaterialLibrary::strand_classes() const noexcept {
@@ -671,7 +681,7 @@ bool MaterialLibrary::build_unit_profile(const std::string& texture, std::uint32
     std::vector<std::uint8_t>& rgba, std::vector<std::uint8_t>& relief, std::vector<std::uint8_t>& classes,
     std::string& note) const {
     const auto found = units_.find(lower(texture));
-    if (found == units_.end()) { note = "not listed in units.json"; return false; }
+    if (found == units_.end()) { note = "not listed in units.json or scenery.json"; return false; }
     const auto& unit = found->second;
     // A reviewed region map maps\<texture>.png (labels; 0 = the unit's class)
     // separates painted regions (a dragon's scales, horns, wing membranes, eyes).
@@ -767,6 +777,9 @@ void Renderer::prepare_material_profiles() noexcept try {
         material_prepared_metal_mask_ = metal_mask;material_profiles_dirty_ = true;
         for (auto& item : material_profiles_) if (item.second.serial != UINT64_MAX) item.second.serial = 0;
     }
+    // F10 material_world: scenery profiles stop binding (D3D12 indices refresh).
+    const bool world = configured_boolean(debug_overlay_.config(), "material_world", true);
+    if (world != material_world_on_) { material_world_on_ = world;++material_profiles_revision_; }
     if (!level || material_profiles_.empty()) return;
     const std::uint64_t revision = retained_visual_scene().material_composition_revision();
     if (!material_profiles_dirty_ && revision == material_checked_revision_) return;
@@ -808,8 +821,8 @@ void Renderer::prepare_material_profiles() noexcept try {
             // A unit's fixed model texture: from units.json, once. Other
             // textures (world objects) take the S2 path and no profile.
             constexpr std::uint64_t kUnitTable = UINT64_MAX;  // never a composition serial
-            if (!entry.unit || entry.serial == kUnitTable) continue;
-            entry.serial = kUnitTable;entry.srv.Reset();entry.relief_srv.Reset();entry.class_srv.Reset();entry.profile12.reset();entry.class12.reset();++material_profiles_revision_;entry.strands = false;entry.coat = false;entry.failed = false;
+            if (entry.serial == kUnitTable || !(entry.unit || material_library_->scenery_listed(entry.name))) continue;
+            entry.serial = kUnitTable;entry.scenery = !entry.unit;entry.srv.Reset();entry.relief_srv.Reset();entry.class_srv.Reset();entry.profile12.reset();entry.class12.reset();++material_profiles_revision_;entry.strands = false;entry.coat = false;entry.failed = false;
             if (!material_library_->build_unit_profile(entry.name, side, pixels, relief, classes, note)) {
                 entry.failed = true;
                 bridge_report_event("materials", ("unit texture " + entry.name + ": " + note +
@@ -888,13 +901,13 @@ void Renderer::prepare_material_profiles() noexcept try {
 ID3D11ShaderResourceView* Renderer::material_profile_srv(std::uint64_t backing) noexcept {
     if (material_profiles_.empty()) return nullptr;
     const auto found = material_profiles_.find(backing);
-    if (found == material_profiles_.end()) return nullptr;
+    if (found == material_profiles_.end() || (found->second.scenery && !material_world_on_)) return nullptr;
     return found->second.srv.Get();
 }
 
 ID3D11ShaderResourceView* Renderer::material_relief_srv(std::uint64_t backing) noexcept {
     const auto found = material_profiles_.find(backing);
-    return found == material_profiles_.end() ? nullptr : found->second.relief_srv.Get();
+    return found == material_profiles_.end() || (found->second.scenery && !material_world_on_) ? nullptr : found->second.relief_srv.Get();
 }
 
 ID3D11ShaderResourceView* Renderer::material_class_srv(std::uint64_t backing, bool& strands, bool& coat) noexcept {
@@ -942,7 +955,7 @@ void Renderer::trim_material_profiles() noexcept try {
 std::uint32_t Renderer::material_profile_index_d3d12(std::uint64_t backing) noexcept {
     if (!d3d12_ || !backing || material_profiles_.empty() || material_level() <= 0) return 0;
     const auto found = material_profiles_.find(backing);
-    if (found == material_profiles_.end() || !found->second.profile12) return 0;
+    if (found == material_profiles_.end() || !found->second.profile12 || (found->second.scenery && !material_world_on_)) return 0;
     const std::uint32_t index = d3d12_->bindless_index(*found->second.profile12);
     return index == UINT32_MAX ? 0 : index;  // a full bindless region: unprofiled (magenta in view 2) until it grows
 }

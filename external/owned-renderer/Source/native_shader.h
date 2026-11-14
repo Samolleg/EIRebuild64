@@ -3617,7 +3617,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
     float crevice=max(around-luminance,0);
     occlusion=saturate(1-crevice*3);
     // World roughness: crevices and dark paint rougher, bright smooth paint a little less rough.
-    if(materialWorld)roughness=clamp(materialProfile.r+crevice*.5-smoothstep(.45,.85,luminance)*.2,.3,.98);
+    if(materialWorld||(((i.swaying>>29)&1u)==0&&metal<.5))roughness=clamp(materialProfile.r+crevice*.5-smoothstep(.45,.85,luminance)*.2,.3,.98);
     // Woven metal: a link is brighter than the weave around it (read at
     // least ~3 texels wide, also when the texture is magnified close up),
     // a gap darker. Links: polished full metal; gaps: rough, no metal, no
@@ -3710,7 +3710,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
    // ambient has no direction; the sky's does (brightest overhead, leaning
    // toward the sun's side), so a normal tilted toward it gains and one
    // tilted away loses (zero on average); crevices hold less sky light.
-   [branch]if(medium&&!materialWorld){
+   [branch]if(medium&&!materialWorld&&((i.swaying>>29)&1u)!=0){
     float3 skyDirection=normalize(float3(l.xy*.5,1));
     float ambientLight=max(1+3*dot(n-n0,skyDirection),0)*lerp(1,occlusion,.8);
     c.rgb+=max(c.rgb-c0,0)*(ambientLight-1);
