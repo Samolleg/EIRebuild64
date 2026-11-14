@@ -856,6 +856,7 @@ struct NativePrebuiltMesh {
 struct FurProfile;
 struct NativeLodIdentity;
 struct NativeGeometryView {
+    std::array<float,4> astral{}; // phase, kind (veil/clump), veil index, reserved
     // Borrowed at synchronous registration only; copied into the renderer record.
     const NativeLodIdentity* lod_observer = nullptr;
     float contact_world_height = 0;
@@ -992,6 +993,7 @@ struct NativeGeometryView {
 };
 
 struct NativePreparedPartValues {
+    std::array<float,4> astral{};
     std::uint32_t flags = 0, default_diffuse = 0xffffffffu, default_specular = 0xff000000u;
     std::uint32_t lighting_enabled = 0;
     float alpha = 1;
@@ -1000,7 +1002,7 @@ struct NativePreparedPartValues {
     float u_shift = 0,v_shift = 0;
     std::uint32_t specular_enable = 0,ordering = 0;
 };
-static_assert(sizeof(NativePreparedPartValues)==80,"Compact owned material values");
+static_assert(sizeof(NativePreparedPartValues)==96,"Compact owned material values");
 
 struct NativePreparedPartSubmission {
     const NativeGeometryView* source = nullptr;

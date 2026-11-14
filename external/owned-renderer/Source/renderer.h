@@ -2024,6 +2024,7 @@ private:
         bool retiring = false;
     };
     struct NativeInstanceGpu {
+        float astral[4]{};
         D3DMATRIX object_to_clip{};
         D3DMATRIX object_to_world{};
         std::array<UINT, 4> geometry_offsets{};
@@ -2114,7 +2115,7 @@ private:
         UINT padding = 0;
         float tangent[4]{};
     };
-    static_assert(sizeof(NativeInstanceGpu) == 416,
+    static_assert(sizeof(NativeInstanceGpu) == 432,
                   "NativeInstanceGpu must match the HLSL structured-buffer layout");
     static_assert(sizeof(NativeWorldLighting) == 48,
                   "NativeWorldLighting must match the HLSL constant-buffer layout");
@@ -2375,7 +2376,7 @@ private:
         NativeInstanceGpu value{};
         NativeDrawGpu descriptor{};
     };
-    static_assert(sizeof(NativeInstanceUpdate)==528,"NativeInstanceUpdate must match the structured HLSL layout");
+    static_assert(sizeof(NativeInstanceUpdate)==544,"NativeInstanceUpdate must match the structured HLSL layout");
     struct NativeBatch {
         std::size_t first_draw = 0;
         std::size_t draw_count = 0;

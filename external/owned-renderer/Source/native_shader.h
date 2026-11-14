@@ -35,7 +35,7 @@
 namespace owned {
 
 inline constexpr char kNativeShader[] = R"(
-struct NativeInstance{row_major float4x4 objectToClip;row_major float4x4 objectToWorld;uint4 geometryOffsets;uint2 colorOffsets;float2 nativeUvShift;uint nativeFlags;uint nativeDefaultDiffuse;uint nativeDefaultSpecular;uint morphOffset;uint morphCount;uint lightingEnabled;uint4 nativePadding;uint terrainVertexOffset;uint terrainPhaseOffset;uint terrainPhaseCount;uint terrainTilesPerSide;uint terrainFlags;float2 terrainWindDirection;float terrainWindForce;float terrainWindForceNormalized;float terrainWindPhase;float terrainPreciseTime;float2 terrainFogMin;float2 terrainFogMax;float terrainFogDistance;uint terrainFogEnabled;float4 nativeEmissive;float4 nativeSpecular;float nativeMaterialAlpha;float3 nativeMaterialDiffuse;uint worldGeometry;uint shapeCount;uint positionGroups;uint secondMorphOffset;float morphFraction;float3 shape;uint poseNode;uint4 sknMaps;float4 sknFactors;float4 sknEmission;float4 sknBase;};
+struct NativeInstance{float4 astral;row_major float4x4 objectToClip;row_major float4x4 objectToWorld;uint4 geometryOffsets;uint2 colorOffsets;float2 nativeUvShift;uint nativeFlags;uint nativeDefaultDiffuse;uint nativeDefaultSpecular;uint morphOffset;uint morphCount;uint lightingEnabled;uint4 nativePadding;uint terrainVertexOffset;uint terrainPhaseOffset;uint terrainPhaseCount;uint terrainTilesPerSide;uint terrainFlags;float2 terrainWindDirection;float terrainWindForce;float terrainWindForceNormalized;float terrainWindPhase;float terrainPreciseTime;float2 terrainFogMin;float2 terrainFogMax;float terrainFogDistance;uint terrainFogEnabled;float4 nativeEmissive;float4 nativeSpecular;float nativeMaterialAlpha;float3 nativeMaterialDiffuse;uint worldGeometry;uint shapeCount;uint positionGroups;uint secondMorphOffset;float morphFraction;float3 shape;uint poseNode;uint4 sknMaps;float4 sknFactors;float4 sknEmission;float4 sknBase;};
 struct NativeTerrainVertex{float noise;float windMultiplier;float3 objectColor;float depth;uint flags;uint animationIndex;uint animationBaseTile;uint gridIndex;float opacity;float3 emissive;float liquidDepth;float liquidMultiplier;float4 liquidUvBounds;float liquidBend;float liquidCascade;float2 liquidCurrent;float liquidSelfIllumination;float liquidBedEmission;uint slopeNormal;uint shiftObjects;float liquidDrop;float liquidFill;};
 struct NativeDraw{uint instanceIndex;uint componentOffset;uint indexOffset;uint indexCount;uint outputTriangleBase;uint indirectArgsByteOffset;uint orderedTriangleOffset;uint preservesOrder;float4 boundsMin;float4 boundsMax;uint preparedVertexBase;uint componentCount;uint prepareWorld;uint colorVisible;uint worldState;uint2 worldGeneration;float geometryRadius;uint steepFirstTriangle;};
 struct NativePreparedVertex{float4 p;float4 d;float4 s;float2 uv;uint2 textureReference;};
@@ -628,6 +628,7 @@ struct NativeOutput{float4 p:SV_Position;float4 d:COLOR0;float4 s:COLOR1;float2 
  float4 liquidFall:TEXCOORD27;
  // Facet flatness (terrain_facet_flatness: flattest, mean), interpolated per vertex.
  float2 terrainFlat:TEXCOORD29;
+ nointerpolation float4 astral:TEXCOORD30;
  // Rest (undisplaced) world position: shadow lookups stay attached to swaying leaves.
  float3 shadowPosition:TEXCOORD20;};
 // SKN is never liquid: reuse its interpolated tint for the tangent frame,
@@ -1553,6 +1554,24 @@ NativeOutput nativeVertex(uint vertexId,bool sway){
  // left every roof bare).
  if((instance.nativeFlags&0x2u)!=0)output.swaying|=1u<<29;
  if(instance.poseNode!=0xffffffff)instance.objectToWorld=nativeNodeMatrix(instance.poseNode+world.partNode);
+ output.astral=instance.astral;
+ [branch]if(instance.astral.y>0){
+  float phase=instance.astral.x*6.28318530718;
+  if(instance.astral.y<1.5){
+   float u=saturate((world.uv.x-.0166015625)/.466796875);
+   float w=sin(3.14159265359*u);w*=w;
+   float wave=sin(u*9.42477796077+instance.astral.z+phase)*w;
+   world.p.xyz+=mul((float3x3)instance.objectToWorld,float3(.10,.12,.28)*wave);
+  }else{
+   float id=floor(world.uv.x/2),age=frac(instance.astral.x*(2+fmod(id,2))+id*.61803398875);
+   float3 local=mul(inverseObjectLinear(instance.objectToWorld),world.p.xyz-float3(instance.objectToWorld[0][3],instance.objectToWorld[1][3],instance.objectToWorld[2][3]));
+   float2 outward=local.xy/max(length(local.xy),.001);
+   float3 drift=float3(-outward.y,outward.x,.15)*age*3+float3(outward*.9,.55)*age*age*2.6;
+   world.p.xyz+=mul((float3x3)instance.objectToWorld,drift);
+   output.astral.w=sin(3.14159265359*age);output.astral.w*=output.astral.w*.8;
+   world.uv=float2(.0166015625+fmod(world.uv.x,2)*.466796875,.5166015625+world.uv.y*.466796875);
+  }
+ }
  output.worldPosition=world.p.xyz;output.worldNormal=world.normal.xyz;
 
  output.p=mul(instance.objectToClip,world.p);
@@ -2830,6 +2849,24 @@ float3 nativeCaveExitGlow(float3 p){
 }
 // ambient: the part of color contributed by the ambient light, for AO (see ambient_occlusion.h).
 struct NativePixelResult{float4 color:SV_Target0;float4 shadow:SV_Target1;float4 ambient:SV_Target2;};
+
+float4 nativeAstralSample(NativeOutput i){
+ float2 dx=ddx_coarse(i.uv),dy=ddy_coarse(i.uv);
+ float4 t;
+ if(i.astral.y<1.5){
+  float x=frac((i.uv.x-.0166015625)/.466796875+i.astral.x+i.astral.z*.173);
+  float w=sin(3.14159265359*x);w*=w;
+  float2 a=float2(.0166015625+x*.466796875,i.uv.y);
+  float2 b=float2(.0166015625+frac(x+.5)*.466796875,i.uv.y);
+  t=lerp(terrainTapGrad(i.textureReference,b,dx,dy),terrainTapGrad(i.textureReference,a,dx,dy),w);
+ }else{
+  t=terrainTapGrad(i.textureReference,i.uv,dx,dy);
+  float2 uv=saturate((i.uv-float2(.0166015625,.5166015625))/.466796875);
+  t.a*=sin(3.14159265359*uv.x)*sin(3.14159265359*uv.y)*i.astral.w;
+ }
+ return t;
+}
+
 NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
 #ifdef EID3D12_HAZARDS
  nativeGpuReportBegin(2u,i.textureReference.x,uint(i.p.x)|(uint(i.p.y)<<16));
@@ -2872,6 +2909,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
  // values are held in registers across its stages.
 #ifndef NATIVE_LOW
   float4 t=float4(1,1,1,1);if(impostor)t=impostorTexel;else if(nativeTextured!=0)t=NATIVE_SAMPLE(i.textureReference,i.uv);
+  [branch]if(i.astral.y>0)t=nativeAstralSample(i);
 #endif
   t=nativeTerrainMaterialStages(i,t,shadowDx,shadowDy,uvDx,uvDy);
 )" R"(
@@ -2905,6 +2943,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
   else t=nativeTexture.SampleGrad(nativeSampler,i.uv,textureDx,textureDy);
 #endif
  }
+ [branch]if(i.astral.y>0)t=nativeAstralSample(i);
  [branch]if(nativeAlphaTest!=0){if(!nativeCompare(nativeCombineAlpha(i.d,i.s,t)))discard;}
 #endif
  // unlit: the same diffuse with the ambient term removed.
@@ -3126,6 +3165,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
 // Low: read and alpha-tested before the lighting; terrain: read with its material above.
 #if !defined(NATIVE_LOW)&&!defined(NATIVE_TERRAIN_PS)
   float4 t=float4(1,1,1,1);if(impostor)t=impostorTexel;else if(nativeTextured!=0)t=NATIVE_SAMPLE(i.textureReference,i.uv);
+  [branch]if(i.astral.y>0)t=nativeAstralSample(i);
 #endif
 #ifndef NATIVE_TERRAIN_PS
  if(nativeSknInstance(i)!=0){NativeInstance skn=nativeSknInstances[nativeSknInstance(i)-1];t.rgb*=skn.sknBase.rgb;if(skn.sknBase.w==0)t.a=1;}
