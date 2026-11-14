@@ -4943,7 +4943,7 @@ private:
         // atlas with a strand class: the fur pass reads it for fur armour.
         D3D12TextureRef class12;
         bool strands = false;
-        bool bare = false;
+        bool coat = false;
         bool failed = false;       // no usable layer: the atlas stays unclassified
         bool unit = false;         // drawn on a unit: a fixed texture takes units.json
         // D3D12: keyed by a client surface itself (no owned-texture entry), so
@@ -4966,16 +4966,20 @@ private:
     int material_prepared_level_ = -1;
     bool material_prepared_metal_mask_ = true;
     int material_level() const noexcept;
+    // The fur level in effect: F10 fur_mode, 0 at material_quality 0 (user
+    // decision 2026-11-08: no fur at all there; the coats need the material
+    // classes to keep off horn and mouths).
+    int fur_mode() const noexcept;
     void note_material_texture(const std::string& name, std::uint64_t backing, bool unit, bool surface = false) noexcept;
     void prepare_material_profiles() noexcept;
     ID3D11ShaderResourceView* material_profile_srv(std::uint64_t backing) noexcept;
     ID3D11ShaderResourceView* material_relief_srv(std::uint64_t backing) noexcept;
     // The atlas' class texture (null when it has none) and whether it holds
     // a strand class; the strand classes as a 256-bit mask (fur pass).
-    ID3D11ShaderResourceView* material_class_srv(std::uint64_t backing, bool& strands, bool& bare) noexcept;
-    const D3D12Texture* material_class_d3d12(std::uint64_t backing, bool& strands, bool& bare) noexcept;
+    ID3D11ShaderResourceView* material_class_srv(std::uint64_t backing, bool& strands, bool& coat) noexcept;
+    const D3D12Texture* material_class_d3d12(std::uint64_t backing, bool& strands, bool& coat) noexcept;
     std::array<std::uint32_t, 8> material_strand_classes() const noexcept;
-    std::array<std::uint32_t, 8> material_bare_classes() const noexcept;
+    std::array<std::uint32_t, 64> material_coat_classes() const noexcept;
     // A batch draws with its profile at t37/t38 (D3D11; on D3D12 each draw names its own, material_profile_index_d3d12).
     bool material_profile_bound(std::uint64_t backing) noexcept {
         return !d3d12_ && material_profile_srv(backing) && material_level() > 0;

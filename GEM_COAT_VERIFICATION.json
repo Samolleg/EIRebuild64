@@ -1,0 +1,13 @@
+{
+  "checks": [
+    "float furCoatAt( matches author",
+    "bool furCoatTriangle( matches author",
+    "MaterialLibrary::coat_classes( matches author",
+    "Renderer::fur_mode( matches author",
+    "float3 nativeGemLampThrough( matches author",
+    "coat 0/.25/1/3.5, clamps, bare priority and undefined default",
+    "all prepared classes satisfy author gem loader; gem and diamond survive RGBA8 threshold, ordinary .04 does not"
+  ],
+  "game_tested": false,
+  "gem_boundary_adaptation": "author >.48 replaced with >=122/255 for RGBA8 F0 .12"
+}

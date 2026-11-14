@@ -2407,6 +2407,28 @@ float3 nativePointLighting(NativeOutput i,out float3 glow,bool glowOnly,bool gro
 }
 float3 nativePointLighting(NativeOutput i,out float3 glow,bool glowOnly){float3 a,b;return nativePointLighting(i,glow,glowOnly,false,0,a,b);}
 float3 nativePointLighting(NativeOutput i,out float3 glow){return nativePointLighting(i,glow,false);}
+#if !defined(NATIVE_OFF_MATERIALS)&&!defined(NATIVE_LOW)
+// Gems (classes.json gem): the lamps' light through the stone, strongest from
+// behind, over the same lamps and falloff as nativePointLighting. Its own
+// loop, run by gem pixels only: kept in the shared lamp loop, the
+// accumulator and the gem flag stayed live through it for every material
+// pixel (two more registers on all figures).
+float3 nativeGemLampThrough(NativeOutput i){
+ float3 through=0;
+ float3 normal=normalize(i.worldNormal);
+ uint2 lightRange=nativePointLightRange(i.worldPosition);
+ [loop]for(uint lightSlot=lightRange.x;lightSlot<lightRange.y;++lightSlot){NATIVE_LOOP_GUARD(8u,lightSlot-lightRange.x,lightRange.y-lightRange.x)
+  NativePointLight light=nativePointLights[nativePointLightGrid[lightSlot]];
+  float3 delta=light.centerInverseRadiusSquared.xyz-i.worldPosition;
+  float distanceSquared=dot(delta,delta);
+  float reach=1-distanceSquared*light.centerInverseRadiusSquared.w;
+  if(reach<=0||light.color.w<0)continue;
+  float incidence=dot(normal,delta*rsqrt(max(distanceSquared,1e-12)));
+  through+=light.color.rgb*(reach*reach*saturate((.4-incidence)/1.4));
+ }
+ return through;
+}
+#endif
 // The previous frame's screen position of this world point, when the previous
 // depth there is the same surface (uv for filtered reads, pixel for exact ones).
 bool nativeShadowHistoryAt(float3 worldPosition,float3 positionDx,float3 positionDy,out float2 uv,out int2 pixel){
@@ -3770,6 +3792,32 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
    // none (sunLight carries the sun visibility).
    if(medium&&materialFoliage)
     specular+=sunLight*t.rgb*(kFoliageTransmission*(pow(saturate(dot(-v,l)),4)+.25*saturate(-dot(n,l))));
+#ifndef NATIVE_LOW
+   // Gems (diamond, figures only; one flag test elsewhere). Fire: the sun and
+   // lamp highlights and the sky reflection split into a spectrum whose phase
+   // follows the reflection's angle to the sun and the painted facets' relief
+   // normal, so it sparkles face by face as the view turns. Light through: a
+   // wrap term from the side away from the light and a forward-scatter peak
+   // looking toward it, a soft core tinted by the stone's colour. Neither
+   // takes the sun shadow (at the stone the shadow is the stone itself).
+   // A gem: a figure texel with dielectric F0 .12+ (profile b x4 > .48).
+   // RGBA8 stores the minimum gem F0 .12 as round(.12*4*255)=122.
+   // Compare against that encoded value so the author's gem class is included.
+   [branch]if(!materialWorld&&materialProfile.g<.5&&materialProfile.b>=122./255.){
+    float phase=dot(r,l)*7+dot(n-n0,float3(5.3,7.1,3.7));
+    float3 spectrum=saturate(.5+.5*cos(6.2831853*(phase+float3(0,.333,.667))));
+    specular*=lerp(1,spectrum*2.2,.65);skyReflection*=lerp(1,spectrum*2,.35);
+    // Cut stone: the painted facets facing away from the light go dark, those
+    // facing it stay bright, so the body reads as cut faces with sharp
+    // highlights rather than an evenly lit translucent candy (user 2026-11-06).
+    float body=lerp(.25,.85,saturate(.5+3*dot(n-n0,l)));c.rgb*=body;c0*=body;
+    float through=.25*saturate((.4-dot(n,l))/1.4)+.6*pow(saturate(dot(-v,l)),4);
+    float3 light=nativeWorldSunDiffuse.rgb*cloud*through;
+    [branch]if(nativePointLightCount!=0)light+=nativeGemLampThrough(i)*.5;
+    float3 transmitted=light*sqrt(max(t.rgb,1e-3))*(.6+.4*nv);
+    c.rgb+=transmitted;c0+=transmitted;
+   }
+#endif
    c.rgb+=specular+skyReflection;c0+=specular;
    // F10 material_view: 1 roughness, 2 metal, 3 F0 / sheen / occlusion.
    uint materialViewMode=(uint)nativeMaterialView;

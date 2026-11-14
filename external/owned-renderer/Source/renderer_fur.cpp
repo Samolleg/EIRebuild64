@@ -60,7 +60,7 @@ cbuffer FurDraw:register(b12){
  uint4 furStrandClasses[2];          // fur armour: the material classes that grow strands, one bit per class index
  uint furDepthHull;                  // 1: the hair depth hull (shell VS, kind 1, no colour)
  uint furCullMode;uint furSinkSlot;uint furOrderBase; // the record's D3DCULL (1 none, 2 CW, 3 CCW); the list entry of its trail sink; the order table in furNodes
- uint4 furBareClasses[2];            // creature coats: the material classes no coat grows on (horn, bone, eye), one bit per class index
+ uint4 furClassCoat[16];             // creature coats: each material class's coat factor, one byte per class (0 bare: horn, bone, eye; 32 = 1x)
 };
 // Per skeleton node: x length, y role, z hair border list start (-1 none);
 // then the profile's hair border distances, four to an element.
@@ -98,19 +98,24 @@ bool furWorldCurrent(NativeInstance instance){
  return all(s.geometry==furWorldGeneration)&&all(s.pose==nativePoseGeneration(instance));
 }
 struct FurCorner{float3 p;float3 n;float2 uv;float len;float role;float3 dp;uint index;uint node;};
-// Creature coats (roles 1-4): no coat on a triangle that touches a bare
-// class (antlers, tusks: islands of the head part's art, labelled by the
-// unit's region map). No class texture bound: the coat covers the part.
-bool furBareTexel(float2 uv){
+// Creature coats (roles 1-4): each corner's length takes its texel class's
+// coat factor (the unit's region map: a zebra's sleek hide and its mane); a
+// triangle touching a bare class (0: antlers, tusks, fangs, mouths, islands
+// of the head part's art) grows none. Corners are read a little toward the
+// centre (a corner on an island's border reads the texel outside). No class
+// texture bound: every factor is 1.
+float furCoatAt(float2 uv){
  uint w,h;furClasses.GetDimensions(w,h);
- if(w==0||h==0)return false;
+ if(w==0||h==0)return 1;
  uint c=furClasses.Load(int3(int2(frac(uv)*float2(w,h)),0));
- return ((furBareClasses[c>>7][(c>>5)&3]>>(c&31))&1u)!=0;
+ return ((furClassCoat[c>>4][(c>>2)&3]>>((c&3)*8))&255u)/32.;
 }
-bool furCoatTriangle(FurCorner c0,FurCorner c1,FurCorner c2){
+bool furCoatTriangle(inout FurCorner c0,inout FurCorner c1,inout FurCorner c2){
  if(c0.role<.5||c0.role>4.5)return true;
  float2 m=(c0.uv+c1.uv+c2.uv)/3;
- return !furBareTexel(lerp(c0.uv,m,.2))&&!furBareTexel(lerp(c1.uv,m,.2))&&!furBareTexel(lerp(c2.uv,m,.2));
+ float k0=furCoatAt(lerp(c0.uv,m,.2)),k1=furCoatAt(lerp(c1.uv,m,.2)),k2=furCoatAt(lerp(c2.uv,m,.2));
+ c0.len*=k0;c1.len*=k1;c2.len*=k2;
+ return min(k0,min(k1,k2))>0;
 }
 // The unit's sink into snow and sand trail troughs: the colour pass lowers
 // every vertex of a unit by it (nativeFigureTrailSink), so fur and hair grow
@@ -774,7 +779,7 @@ struct FurDrawConstants {
     float emissive[4];
     UINT strand_classes[8];
     UINT depth_hull, cull_mode, sink_slot, order_base;
-    UINT bare_classes[8];
+    UINT coat_classes[64];
 };
 static_assert(sizeof(FurDrawConstants) % 16 == 0, "FurDraw constant layout");
 
@@ -856,7 +861,7 @@ void Renderer::release_fur() noexcept { fur_.reset(); fur_failed_ = false; }
 // flush are still bound. Binds what it adds and restores the pipeline state
 // it changes.
 void Renderer::draw_fur_records() noexcept {
-    const int mode = configured_integer(debug_overlay_.config(), "fur_mode", 0);
+    const int mode = fur_mode();
     if (mode <= 0) { if (fur_ || fur_failed_) release_fur(); return; }
     if (fur_failed_) return;
     // Interface figures after composition (character pane, equipment screen)
@@ -1006,21 +1011,21 @@ void Renderer::draw_fur_records() noexcept {
                 if (material_level() <= 0) { fur_report(fur.reported, 9, "fur: fur armour needs material_quality 1 or more (material classes)", d3d12_); continue; }
                 // The atlas' class texture: D3D11 by the bucket's texture, D3D12
                 // by the record's own texture value (batches span textures there).
-                bool strand_texels = false, bare_texels = false;
-                if (d3d12_) classes12 = material_class_d3d12(command.material_backing, strand_texels, bare_texels);
-                else classes = material_class_srv(native_state_buckets_[command.state_bucket].material_key.texture_backing, strand_texels, bare_texels);
+                bool strand_texels = false, coat_texels = false;
+                if (d3d12_) classes12 = material_class_d3d12(command.material_backing, strand_texels, coat_texels);
+                else classes = material_class_srv(native_state_buckets_[command.state_bucket].material_key.texture_backing, strand_texels, coat_texels);
                 if (!strand_texels) continue;   // no fur on this atlas: nothing to grow
 #else
                 continue;
 #endif
-            } else if (kind == 0 && profile.fur && material_level() > 0) {
-                // A creature coat: its atlas' class texture when any texel is
-                // bare (horn, bone: antlers and tusks share the head part), so
-                // the coat skips those triangles (furCoatTriangle).
-                bool strand_texels = false, bare_texels = false;
-                if (d3d12_) classes12 = material_class_d3d12(command.material_backing, strand_texels, bare_texels);
-                else classes = material_class_srv(native_state_buckets_[command.state_bucket].material_key.texture_backing, strand_texels, bare_texels);
-                if (!bare_texels) classes = nullptr, classes12 = nullptr;
+            } else if (kind == 0 && profile.fur) {
+                // A creature coat: its atlas' class texture when any texel's
+                // class sets the coat (bare horn and bone: antlers and tusks
+                // share the head part; a sleek hide, a mane): furCoatTriangle.
+                bool strand_texels = false, coat_texels = false;
+                if (d3d12_) classes12 = material_class_d3d12(command.material_backing, strand_texels, coat_texels);
+                else classes = material_class_srv(native_state_buckets_[command.state_bucket].material_key.texture_backing, strand_texels, coat_texels);
+                if (!coat_texels) classes = nullptr, classes12 = nullptr;
             }
             items.push_back({selected.record, kind, kind == 1 || fur_coat_strands(mode) || armour, armour, classes, classes12, {}, 0u, true});
             items.back().clipped = ui_clip_rect(command.hud_composition, command.camp_clip, items.back().scissor);
@@ -1088,7 +1093,7 @@ void Renderer::draw_fur_records() noexcept {
 #if EID3D11_FUR_ARMOUR
             if (item.armour) { const auto bits = material_strand_classes(); std::copy(bits.begin(), bits.end(), c.strand_classes); }
 #endif
-            if (!item.armour && (item.classes || item.classes12)) { const auto bits = material_bare_classes(); std::copy(bits.begin(), bits.end(), c.bare_classes); }
+            if (!item.armour && (item.classes || item.classes12)) { const auto bytes = material_coat_classes(); std::copy(bytes.begin(), bytes.end(), c.coat_classes); }
             // LOD pixel radii at 4K-relative scale. User anchors (2026-10-29): the menu
             // view is a close-up (full detail); the max gameplay zoom-out is the lowest
             // strand level, never mesh only. Route10 put the menu tiger near 150 px and
