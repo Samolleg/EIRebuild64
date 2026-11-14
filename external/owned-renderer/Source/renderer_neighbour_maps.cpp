@@ -1,6 +1,7 @@
 #include "renderer.h"
 #include "neighbour_maps.h"
 #include "neighbour_piece.h"
+#include "astral_neighbour.h"
 #include "neighbour_client.h"
 #include "owned_resource_runtime.h"
 #include "retained_static_scene.h"
@@ -202,7 +203,13 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                             }
                         }
                     }
-                    const FixedState state=neighbour_submission_state(*context.frame,input.semantic_kind,input.ordering);
+                    FixedState state=neighbour_submission_state(*context.frame,input.semantic_kind,input.ordering);
+                    if(input.astral[1]>0) {
+                        state.render[D3DRENDERSTATE_ALPHAREF]=1;
+                        // Match the active map: double-sided authored triangles
+                        // must not both blend over the same pixel.
+                        state.render[D3DRENDERSTATE_CULLMODE]=D3DCULL_CW;
+                    }
                     const auto first=self.native_pending_draws_.size();
                     const HRESULT hr=self.queue_native_terrain(input,state,nullptr,&result);
                     if(FAILED(hr)) {
@@ -332,7 +339,22 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     const auto& span=contact[node.candidate];
                     view.contact_world_height=span[1]-span[0];view.contact_map=first_part+1;
                     view.ordering=NativeOrdering::reorderable;view.contribution={true,true,0};
+                    const bool astral=node.astral_values.astral[1]>0;
+                    if(astral) {
+                        const auto& values=node.astral_values;
+                        view.astral=values.astral;
+                        view.flags=native_neighbour_flag|values.flags;
+                        view.default_diffuse=values.default_diffuse;view.default_specular=values.default_specular;
+                        view.lighting.enabled=values.lighting_enabled;
+                        view.lighting.material_alpha=values.alpha;view.lighting.material_diffuse=values.diffuse;
+                        view.lighting.emissive=values.emissive;view.lighting.specular=values.specular;
+                        view.world.impostor=0;
+                        view.ordering=NativeOrdering::preserve;
+                    }
+                    const auto first_astral=neighbours_.ordered.size();
                     NativeGeometryResult result;if(!submit(&submission,view,result)){accepted=false;step="decoration.submit";break;}
+                    if(astral)for(std::size_t i=first_astral;i<neighbours_.ordered.size();++i)
+                        neighbours_.astral.push_back({neighbours_.ordered[i].record,node.astral_values,node.astral_border!=0});
                     }
                 }
                 if(accepted) {
@@ -359,7 +381,12 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                         for(const auto& draw:i->second)release_native_queued_draw(draw.record,false);
                         i=neighbours_.opaque.objects.erase(i);neighbours_.opaque.dirty=true;
                     }
-                    for(std::size_t i=first_ordered;i<neighbours_.ordered.size();++i)release_native_queued_draw(neighbours_.ordered[i].record,false);
+                    for(std::size_t i=first_ordered;i<neighbours_.ordered.size();++i) {
+                        const auto record=neighbours_.ordered[i].record;
+                        neighbours_.astral.erase(std::remove_if(neighbours_.astral.begin(),neighbours_.astral.end(),
+                            [record](const auto& value){return value.record==record;}),neighbours_.astral.end());
+                        release_native_queued_draw(record,false);
+                    }
                     neighbours_.ordered.resize(first_ordered);
                 }
                 // Ground cover inputs while the decoded map is still alive.
@@ -408,6 +435,19 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
             return flush_native_static_set(neighbours_.opaque,frame);
         }
         if(neighbours_.ordered.empty())return S_OK;
+        double time=0;
+        if(bridge_current_world_time(time))for(const auto& animated:neighbours_.astral) {
+            NativePreparedPartValues values;
+            if(!neighbour_astral_values(time,animated.base,animated.border,values))continue;
+            auto& record=native_instance_records_[animated.record];
+            auto& instance=record.command.instance;
+            if(instance.astral[0]==values.astral[0] && instance.material_alpha==values.alpha &&
+                instance.default_diffuse==values.default_diffuse)continue;
+            std::copy(values.astral.begin(),values.astral.end(),instance.astral);
+            instance.material_alpha=values.alpha;instance.default_diffuse=values.default_diffuse;
+            record.uploaded=false;
+            if(!record.scheduled){native_instance_dirty_.push_back(animated.record);record.scheduled=true;}
+        }
         for(const auto& draw:neighbours_.ordered)enqueue_native_record(draw);
         native_static_frame_=&frame;const auto hr=flush_native();native_static_frame_=nullptr;
         return hr;

@@ -9,6 +9,7 @@
 #include "check-astral-alpha-gpu.h"
 static unsigned checks=0;
 static void check(bool b){++checks;if(!b)throw std::runtime_error("check "+std::to_string(checks));}
+#include "check-astral-neighbour.h"
 int main() try {
  using namespace owned;
  VisualAssemblyAsset a;auto model=std::make_shared<ModelCpuAsset>();a.skeleton=model;
@@ -86,6 +87,7 @@ int main() try {
  }
  // both sides of a seam converge to the same weighted sample.
  for(int step=0;step<=2000;++step){double x=step/2000.;double aUv=.0166015625+std::fmod(x,1.)*.466796875;double bUv=.0166015625+std::fmod(x+.5,1.)*.466796875;check(aUv>=.0166015625&&aUv<=.4833984375&&bUv>=.0166015625&&bUv<=.4833984375);}
+ check_astral_neighbour();
  check_astral_alpha_gpu();
  std::printf("Astral rift: %u checks PASS\n",checks);return 0;
 }catch(const std::exception& e){std::printf("FAIL %s\n",e.what());return 1;}

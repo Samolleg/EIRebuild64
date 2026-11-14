@@ -6,6 +6,7 @@
 #include "d3d12_frame.h"
 
 #include "native_instance_flags.h"
+#include "astral_rift.h"
 #include "owned_terrain_views.h"
 
 #include <cfloat>
@@ -186,6 +187,17 @@ void piece_decorations(PieceBuilder& builder, const NeighbourMapUpload& upload) 
                 if (retained_visual_part_sway(part).foliage) draw.flags |= native_foliage_part_flag;
                 const auto sway = candidate.root_valid ? retained_object_space_sway_flags(*assembly, part) : 0u;
                 if (sway) { draw.flags |= sway; draw.sway = 1; draw.root_world = candidate.root_world; }
+            }
+            if (candidate.assembly && node_index < candidate.assembly->parts.size()) {
+                const auto& part = candidate.assembly->parts[node_index];
+                if (astral_dynamic(*candidate.assembly, part)) {
+                    RetainedVisualSample sample; sample.assembly = candidate.assembly;
+                    // Peak opacity gives the unpulsed base; the frame applies the pulse.
+                    if (!retained_visual_part_values(sample, part, 1.5 / .055, 0, draw.astral_values))
+                        throw std::runtime_error("Neighbour astral material unavailable");
+                    draw.astral_values.astral[0] = 0;
+                    draw.astral_border = astral_border_veil(*candidate.assembly, part) ? 1u : 0u;
+                }
             }
             piece.decorations.push_back(draw);
         }
