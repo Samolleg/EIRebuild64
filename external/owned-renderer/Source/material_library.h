@@ -37,6 +37,7 @@ struct MaterialClass {
     float tint_min = 0, tint_max = -1;
     // Grows strands (the fur pass): fur and pelt armour layers.
     bool strands = false;
+    bool bare = false;
     bool defined = false;
 };
 
@@ -66,6 +67,8 @@ public:
                             std::string& note) const;
     // The classes that grow strands, one bit per class index (256 bits).
     std::array<std::uint32_t, 8> strand_classes() const noexcept;
+    // The classes no creature coat grows on, one bit per class index.
+    std::array<std::uint32_t, 8> bare_classes() const noexcept;
 
 private:
     struct Shape { std::string type; std::uint32_t first = 0, second = 0, type_id = 0; };

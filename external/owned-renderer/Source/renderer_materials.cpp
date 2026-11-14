@@ -160,6 +160,7 @@ bool MaterialLibrary::load_classes(const std::string& document, std::string& err
             if (value.members.count("roughness_min")) target.roughness_min = float(value.field("roughness_min").num());
             if (value.members.count("relief_min")) target.relief_min = float(value.field("relief_min").num());
             if (value.members.count("strands")) target.strands = value.field("strands").text == "true";
+            if (value.members.count("bare")) target.bare = value.field("bare").text == "true";
             if (value.members.count("tint")) {
                 const auto& tint = value.field("tint").list();
                 if (tint.size() != 2) { error = "classes.json: tint must be [min, max] degrees"; return false; }
@@ -474,6 +475,13 @@ std::array<std::uint32_t, 8> MaterialLibrary::strand_classes() const noexcept {
     return bits;
 }
 
+std::array<std::uint32_t, 8> MaterialLibrary::bare_classes() const noexcept {
+    std::array<std::uint32_t, 8> bits{};
+    for (std::size_t index = 0; index < classes_.size(); ++index)
+        if (classes_[index].defined && classes_[index].bare) bits[index / 32] |= 1u << (index % 32);
+    return bits;
+}
+
 bool MaterialLibrary::metal_mask_texels(const TextureCpuAsset& texture, std::size_t mip, const TextureAlphaPixels& alpha,
                                         const MaterialClass& metal_class, std::vector<std::uint8_t>& off,
                                         std::uint32_t& metal, std::uint32_t& leather, std::uint32_t& cloth) const {
@@ -729,7 +737,7 @@ void Renderer::note_material_texture(const std::string& name, std::uint64_t back
     entry.surface = entry.surface || surface;
     if (unit && !entry.unit) { entry.unit = true;material_profiles_dirty_ = true; }
     if (entry.name == name) return;
-    entry.name = name;entry.serial = 0;entry.srv.Reset();entry.relief_srv.Reset();entry.class_srv.Reset();entry.profile12.reset();entry.class12.reset();++material_profiles_revision_;entry.strands = false;entry.failed = false;
+    entry.name = name;entry.serial = 0;entry.srv.Reset();entry.relief_srv.Reset();entry.class_srv.Reset();entry.profile12.reset();entry.class12.reset();++material_profiles_revision_;entry.strands = false;entry.bare = false;entry.failed = false;
     material_profiles_dirty_ = true;
 } catch (...) {}
 
@@ -771,7 +779,7 @@ void Renderer::prepare_material_profiles() noexcept try {
         if (retained_visual_scene().material_composition(entry.name, composition)) {
             // A composed atlas: from its layer list, once per layer list.
             if (entry.serial == composition.serial) continue;
-            entry.serial = composition.serial;entry.srv.Reset();entry.relief_srv.Reset();entry.class_srv.Reset();entry.profile12.reset();entry.class12.reset();++material_profiles_revision_;entry.strands = false;entry.failed = false;
+            entry.serial = composition.serial;entry.srv.Reset();entry.relief_srv.Reset();entry.class_srv.Reset();entry.profile12.reset();entry.class12.reset();++material_profiles_revision_;entry.strands = false;entry.bare = false;entry.failed = false;
             // Packed attachment atlases (weapons, shields: one per armed
             // unit) at up to 512: their 128-texel orc and redress art put a
             // mace haft ~2.5 texels wide at 256, and the head's gloss
@@ -786,7 +794,7 @@ void Renderer::prepare_material_profiles() noexcept try {
             // textures (world objects) take the S2 path and no profile.
             constexpr std::uint64_t kUnitTable = UINT64_MAX;  // never a composition serial
             if (!entry.unit || entry.serial == kUnitTable) continue;
-            entry.serial = kUnitTable;entry.srv.Reset();entry.relief_srv.Reset();entry.class_srv.Reset();entry.profile12.reset();entry.class12.reset();++material_profiles_revision_;entry.strands = false;entry.failed = false;
+            entry.serial = kUnitTable;entry.srv.Reset();entry.relief_srv.Reset();entry.class_srv.Reset();entry.profile12.reset();entry.class12.reset();++material_profiles_revision_;entry.strands = false;entry.bare = false;entry.failed = false;
             if (!material_library_->build_unit_profile(entry.name, side, pixels, relief, classes, note)) {
                 entry.failed = true;
                 bridge_report_event("materials", ("unit texture " + entry.name + ": " + note +
@@ -796,17 +804,22 @@ void Renderer::prepare_material_profiles() noexcept try {
         }
         if (d3d12_) {
             if (FAILED(upload_material_profile_d3d12(entry, side, pixels, relief))) { entry.failed = true;continue; }
-            // Fur armour: the class texture of an atlas with any strand texel.
+            // The fur pass's class texture: an atlas with any strand texel
+            // (fur armour) or any bare texel (no creature coat there).
             const auto strand_bits = material_library_->strand_classes();
-            entry.strands = false;
-            for (const auto value : classes) entry.strands = entry.strands || ((strand_bits[value / 32] >> (value % 32)) & 1u) != 0;
-            if (entry.strands) {
+            const auto bare_bits = material_library_->bare_classes();
+            entry.strands = entry.bare = false;
+            for (const auto value : classes) {
+                entry.strands = entry.strands || ((strand_bits[value / 32] >> (value % 32)) & 1u) != 0;
+                entry.bare = entry.bare || ((bare_bits[value / 32] >> (value % 32)) & 1u) != 0;
+            }
+            if (entry.strands || entry.bare) {
                 D3D12TextureRef class_texture;
                 const RECT rect{0, 0, LONG(side), LONG(side)};
                 if (SUCCEEDED(d3d12_->create_texture(side, side, DXGI_FORMAT_R8_UINT, class_texture)) &&
                     SUCCEEDED(d3d12_->write_texture(*class_texture, rect, classes.data(), side))) {
                     entry.class12 = std::move(class_texture);profiler_.add_upload(classes.size());
-                } else entry.strands = false;
+                } else entry.strands = entry.bare = false;
             }
             ++material_profiles_built_;++material_profiles_revision_;
             continue;
@@ -834,10 +847,15 @@ void Renderer::prepare_material_profiles() noexcept try {
         context_->GenerateMips(entry.relief_srv.Get());
         profiler_.add_upload(relief.size());
         // The class texture beside it (point-read, no mips) and whether any
-        // texel grows strands (the fur pass skips atlases without any).
+        // texel grows strands (the fur pass skips atlases without any) or is
+        // bare (no creature coat there).
         const auto strand_bits = material_library_->strand_classes();
-        entry.strands = false;
-        for (const auto value : classes) entry.strands = entry.strands || ((strand_bits[value / 32] >> (value % 32)) & 1u) != 0;
+        const auto bare_bits = material_library_->bare_classes();
+        entry.strands = entry.bare = false;
+        for (const auto value : classes) {
+            entry.strands = entry.strands || ((strand_bits[value / 32] >> (value % 32)) & 1u) != 0;
+            entry.bare = entry.bare || ((bare_bits[value / 32] >> (value % 32)) & 1u) != 0;
+        }
         D3D11_TEXTURE2D_DESC class_desc{};
         class_desc.Width = class_desc.Height = side;class_desc.MipLevels = 1;class_desc.ArraySize = 1;
         class_desc.Format = DXGI_FORMAT_R8_UINT;class_desc.SampleDesc.Count = 1;class_desc.Usage = D3D11_USAGE_IMMUTABLE;
@@ -846,7 +864,7 @@ void Renderer::prepare_material_profiles() noexcept try {
         ComPtr<ID3D11Texture2D> class_texture;
         if (FAILED(device_->CreateTexture2D(&class_desc, &class_data, &class_texture)) ||
             FAILED(device_->CreateShaderResourceView(class_texture.Get(), nullptr, entry.class_srv.ReleaseAndGetAddressOf()))) {
-            entry.class_srv.Reset();entry.strands = false;
+            entry.class_srv.Reset();entry.strands = entry.bare = false;
         } else profiler_.add_upload(classes.size());
         ++material_profiles_built_;
     }
@@ -864,21 +882,28 @@ ID3D11ShaderResourceView* Renderer::material_relief_srv(std::uint64_t backing) n
     return found == material_profiles_.end() ? nullptr : found->second.relief_srv.Get();
 }
 
-ID3D11ShaderResourceView* Renderer::material_class_srv(std::uint64_t backing, bool& strands) noexcept {
-    strands = false;
+ID3D11ShaderResourceView* Renderer::material_class_srv(std::uint64_t backing, bool& strands, bool& bare) noexcept {
+    strands = bare = false;
     const auto found = material_profiles_.find(backing);
     if (found == material_profiles_.end() || !found->second.class_srv) return nullptr;
-    strands = found->second.strands;
+    strands = found->second.strands; bare = found->second.bare;
     return found->second.class_srv.Get();
 }
 
-const D3D12Texture* Renderer::material_class_d3d12(std::uint64_t backing) noexcept {
+const D3D12Texture* Renderer::material_class_d3d12(std::uint64_t backing, bool& strands, bool& bare) noexcept {
+    strands = bare = false;
     const auto found = material_profiles_.find(backing);
-    return found == material_profiles_.end() || !found->second.strands ? nullptr : found->second.class12.get();
+    if (found == material_profiles_.end() || !found->second.class12) return nullptr;
+    strands = found->second.strands; bare = found->second.bare;
+    return found->second.class12.get();
 }
 
 std::array<std::uint32_t, 8> Renderer::material_strand_classes() const noexcept {
     return material_library_ ? material_library_->strand_classes() : std::array<std::uint32_t, 8>{};
+}
+
+std::array<std::uint32_t, 8> Renderer::material_bare_classes() const noexcept {
+    return material_library_ ? material_library_->bare_classes() : std::array<std::uint32_t, 8>{};
 }
 
 // A profile lives exactly as long as its texture value: an entry goes when
