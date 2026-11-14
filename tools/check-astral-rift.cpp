@@ -6,7 +6,7 @@
 #include <cstdio>
 #include <stdexcept>
 #include <cstring>
-#include "check-astral-alpha-gpu.h"
+#include "check-astral-border-mesh.h"
 static unsigned checks=0;
 static void check(bool b){++checks;if(!b)throw std::runtime_error("check "+std::to_string(checks));}
 #include "check-astral-neighbour.h"
@@ -76,7 +76,7 @@ int main(int argc,char** argv) try {
  // both sides of a seam converge to the same weighted sample.
  for(int step=0;step<=2000;++step){double x=step/2000.;double aUv=.0166015625+std::fmod(x,1.)*.466796875;double bUv=.0166015625+std::fmod(x+.5,1.)*.466796875;check(aUv>=.0166015625&&aUv<=.4833984375&&bUv>=.0166015625&&bUv<=.4833984375);}
  check_astral_neighbour();
- if(argc!=4)throw std::runtime_error("Expected shader header, source MMP and output directory");
- check_astral_alpha_gpu(argv[1],argv[2],argv[3]);
+ if(argc!=3)throw std::runtime_error("Expected source FIG and output OBJ");
+ check_astral_border_mesh(argv[1],argv[2]);
  std::printf("Astral rift: %u checks PASS\n",checks);return 0;
 }catch(const std::exception& e){std::printf("FAIL %s\n",e.what());return 1;}

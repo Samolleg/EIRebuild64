@@ -1,5 +1,6 @@
 #pragma once
 #include "retained_static_scene.h"
+#include "astral_border_mesh.h"
 #include <algorithm>
 #include <cmath>
 
@@ -91,6 +92,7 @@ inline void add_astral_clumps(VisualAssemblyAsset& a) {
         const auto source=a.parts[pi]; const auto id=astral_part(a,source);
         if(!id||!source.geometry||source.geometry->shape_count!=1)continue;
         a.parts[pi].casts_shadow=false;
+        if(astral_border_veil(a,source))a.parts[pi].geometry=close_astral_border_cuts(source.geometry);
         const auto& f=*source.geometry;
         auto g=std::make_shared<FigureCpuAsset>();
         g->identity=f.identity;g->identity.canonical_name+="/astral-clumps-v1";

@@ -26,6 +26,9 @@ inline bool prepare_neighbour_astral_nodes(RetainedStaticSourceCandidate& candid
         auto& node = candidate.nodes[i];
         const auto& part = a.parts[i];
         if (!astral_dynamic(a, part)) continue;
+        if(astral_border_veil(a,part) && node.figure!=part.geometry.get()) {
+            node.figure=part.geometry.get();node.normals=part.geometry->normals;
+        }
         const float margin = astral_clumps(a, part) ? 7.f : .5f;
         for (unsigned axis = 0; axis < 3; ++axis) {
             node.bounds.minimum[axis] -= margin;
@@ -35,13 +38,12 @@ inline bool prepare_neighbour_astral_nodes(RetainedStaticSourceCandidate& candid
     }
     return true;
 }
-// Use the same phase and border-repair selector on both sides of a map edge.
+// Use the same game-clock phase on both sides of a map edge.
 inline bool neighbour_astral_values(double time, const NativePreparedPartValues& base,
-    bool border, NativePreparedPartValues& values) {
+    NativePreparedPartValues& values) {
     if (!std::isfinite(time) || time < 0) return false;
     values = base;
     values.astral[0] = float(std::fmod(time * .055 / 6., 1.));
-    values.astral[3] = border ? 1.f : 0.f;
     return true;
 }
 }

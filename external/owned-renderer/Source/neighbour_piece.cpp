@@ -196,7 +196,6 @@ void piece_decorations(PieceBuilder& builder, const NeighbourMapUpload& upload) 
                     if (!retained_visual_part_values(sample, part, 0, 0, draw.astral_values))
                         throw std::runtime_error("Neighbour astral material unavailable");
                     draw.astral_values.astral[0] = 0;
-                    draw.astral_border = astral_border_veil(*candidate.assembly, part) ? 1u : 0u;
                 }
             }
             piece.decorations.push_back(draw);

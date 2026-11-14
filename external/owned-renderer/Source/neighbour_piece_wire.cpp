@@ -16,7 +16,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
 constexpr std::uint32_t kWireMagic = 0x5045494eu; // 'NIEP'
-constexpr std::uint32_t kWireVersion = 7; // 7: astral decoration values
+constexpr std::uint32_t kWireVersion = 8; // 8: source border material, no extra opacity pulse
 
 // Plain record types travel as bytes; both builds must agree on their sizes.
 template<class T> constexpr bool plain = std::is_trivially_copyable_v<T> && !std::is_pointer_v<T>;

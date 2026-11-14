@@ -2850,37 +2850,6 @@ float3 nativeCaveExitGlow(float3 p){
 // ambient: the part of color contributed by the ambient light, for AO (see ambient_occlusion.h).
 struct NativePixelResult{float4 color:SV_Target0;float4 shadow:SV_Target1;float4 ambient:SV_Target2;};
 
-// Astral border repair begin: shared verbatim with the GPU regression test.
-float4 nativeAstralVeilTap(NativeOutput i,float2 uv,float2 dx,float2 dy){
- float4 t=terrainTapGrad(i.textureReference,uv,dx,dy);
- [branch]if(i.astral.w>0.5&&t.a<0.35){
-  // Only fill missing coverage. Existing colour, highlights, UVs and motion
-  // remain authored. Transparent source texels contain black RGB, so gather
-  // nearby violet colour rather than exposing those black holes.
-  float3 colour=0;float support=0;
-  [unroll]for(uint ring=0;ring<2;ring++){
-   float radius=ring==0?0.025:0.10;
-   [unroll]for(uint direction=0;direction<8;direction++){
-    float angle=direction*0.78539816339;
-    float2 p=uv+float2(cos(angle),sin(angle))*radius;
-    p.x=0.0166015625+frac((p.x-0.0166015625)/0.466796875)*0.466796875;
-    p.y=clamp(p.y,0.5166015625,0.9833984375);
-    float4 neighbour=terrainTapGrad(i.textureReference,p,dx,dy);
-    float weight=neighbour.a*(ring==0?4:1);
-    colour+=neighbour.rgb*weight;support+=weight;
-   }
-  }
-  // The atlas' small solid-colour patch is also used by the main curtain.
-  // It supplies the hue if a distant mip has no neighbouring coverage.
-  float3 fill=support>0.0001?colour/support:
-   terrainTapGrad(i.textureReference,float2(0.290526,0.763184),dx,dy).rgb;
-  t.rgb=lerp(fill,t.rgb,smoothstep(0,0.35,t.a));
-  t.a=0.35;
- }
- return t;
-}
-// Astral border repair end.
-
 float4 nativeAstralSample(NativeOutput i){
  float2 dx=ddx_coarse(i.uv),dy=ddy_coarse(i.uv);
  float4 t;
@@ -2889,7 +2858,7 @@ float4 nativeAstralSample(NativeOutput i){
   float w=sin(3.14159265359*x);w*=w;
   float2 a=float2(.0166015625+x*.466796875,i.uv.y);
   float2 b=float2(.0166015625+frac(x+.5)*.466796875,i.uv.y);
-  t=lerp(nativeAstralVeilTap(i,b,dx,dy),nativeAstralVeilTap(i,a,dx,dy),w);
+  t=lerp(terrainTapGrad(i.textureReference,b,dx,dy),terrainTapGrad(i.textureReference,a,dx,dy),w);
  }else{
   t=terrainTapGrad(i.textureReference,i.uv,dx,dy);
   float2 uv=saturate((i.uv-float2(.0166015625,.5166015625))/.466796875);
