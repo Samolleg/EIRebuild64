@@ -29,6 +29,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "DirectXTK", "external\Direc
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "EIRebuild64Pack", "EIRebuild64Pack.vcxproj", "{F18DCB8A-4C4B-48C3-A4D7-EA760D5BE5B1}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "EIRebuild64ModelCheck", "EIRebuild64ModelCheck.vcxproj", "{3A825D1A-0903-4774-9915-491163840C31}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Release|x64 = Release|x64
@@ -60,6 +62,8 @@ Global
 		{8F045552-BA21-4F45-9902-631E6359DABD}.Release|x64.Build.0 = Release|x64
 		{F9F236B9-5E99-4BD6-B032-D727834B2329}.Release|x64.ActiveCfg = Release|x64
 		{F9F236B9-5E99-4BD6-B032-D727834B2329}.Release|x64.Build.0 = Release|x64
+        {3A825D1A-0903-4774-9915-491163840C31}.Release|x64.ActiveCfg = Release|x64
+        {3A825D1A-0903-4774-9915-491163840C31}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
