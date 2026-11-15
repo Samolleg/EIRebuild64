@@ -5,6 +5,7 @@
 #include "nlc_asset.h"
 #include <map>
 #include <mutex>
+namespace owned::gltf { struct Asset; }
 namespace owned::skn {
 // One rejection per model across bounds, construction and sink submission.
 inline void report_rejection(const std::string &model, const std::string &reason) noexcept try {
@@ -29,6 +30,7 @@ struct RuntimeAsset {
   std::vector<std::array<Dds, 4>> textures;
   std::vector<float> joint_radius;
   std::shared_ptr<const skm::Asset> motion;
+  std::shared_ptr<const gltf::Asset> gltf_asset;
 };
 inline Dds dds(ResourceBlob blob, unsigned map) {
   if (!blob.bytes)
@@ -163,7 +165,9 @@ inline std::shared_ptr<const RuntimeAsset> select(const std::string &name,
 }
 // An optional hero-specific resource is selected before the model-wide SKN.
 // A present but invalid override rejects; only an absent one uses normal lookup.
+std::shared_ptr<const RuntimeAsset> select_gltf(const std::string&,bool,bool&);
 inline std::shared_ptr<const RuntimeAsset> select_visual(const std::string& name,bool hero,bool& present){
+  auto gltf=select_gltf(name,hero,present);if(present)return gltf;
   if(hero){auto asset=select(name+".hero",present);if(present)return asset;}
   return select(name,present);
 }

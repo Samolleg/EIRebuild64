@@ -28,6 +28,7 @@ static_assert(sizeof(Vertex) == 48);
 struct Material {
   float base[4], emission[3], roughness, metallic, ao, cutoff;
   std::uint32_t alpha, two_sided;
+  bool unlit = false;
   std::array<std::string, 4> maps;
 };
 struct Submesh {

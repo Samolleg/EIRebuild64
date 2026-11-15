@@ -2,7 +2,7 @@
   "schema": "ei.character-profile",
   "version": 1,
   "id": "human.v1",
-  "status": "contract-only",
+  "status": "loader-idle-slice",
   "provenance": {
     "blend": "tasks/NALA378/armed-key-draft.blend",
     "blendSha256": "fb2c7e68712b80d547003c7152c73c1a9cf4cf4644841ab075d7e080a9718054",
@@ -26449,6 +26449,7 @@
   "resources": {
     "registry": "models/registry.v1.json",
     "profile": "profiles/human.v1.json",
+    "heroSelector": "registry.heroCharacter (optional character id; host main_hero_visual)",
     "characterPattern": "models/characters/<id>.glb",
     "itemPattern": "models/items/<id>.glb",
     "idPattern": "^[a-z0-9][a-z0-9_-]*$",
