@@ -20,7 +20,24 @@ bool prepare_baked_motion(const RetainedVisualSample& sample){
     for(const auto& part:assembly.parts)if(part.source_available&&
         part.name.find('.')!=std::string::npos&&slots.count(part.name.substr(0,part.name.find('.'))))equipment.insert(part.name);
     for(unsigned i=0;i<motion.contexts.size();++i)if(motion.contexts[i].equipment==equipment)prepared.motion_context=i;
-    if(prepared.motion_context==UINT_MAX){std::string names;for(const auto& n:equipment)names+=n+",";throw std::runtime_error("SKM unsupported equipment: "+names);}
+    if(prepared.motion_context==UINT_MAX){
+     std::string detail="SKM unsupported equipment selected=[";
+     for(const auto& name:equipment)detail+=name+",";
+     detail+="] parts=[";
+     for(unsigned i=0;i<assembly.parts.size();++i){
+      const auto& part=assembly.parts[i];
+      detail+="{index="+std::to_string(i)+" slot="+part.name.substr(0,part.name.find('.'))+
+          " name="+part.name+" node="+std::to_string(part.skeleton_node)+
+          " available="+std::to_string(part.source_available)+"}";
+     }
+     detail+="] contexts=[";
+     for(const auto& context:motion.contexts){
+      detail+="{name="+context.name+" equipment=[";
+      for(const auto& name:context.equipment)detail+=name+",";
+      detail+="]}";
+     }
+     throw std::runtime_error(detail+"]");
+    }
     std::map<std::string,unsigned> nodes;for(unsigned i=0;i<assembly.skeleton->nodes.size();++i)nodes.emplace(assembly.skeleton->nodes[i].name,i);
     const auto index=[&](const std::string& name){auto it=nodes.find(name);if(it==nodes.end())throw std::runtime_error("SKM missing LNK node: "+name);return it->second;};
     for(unsigned i=0;i<motion.nodes.size();++i){
