@@ -491,6 +491,7 @@ enum NativeTerrainVertexFlag : std::uint32_t {
     // per tile, the authored cliff art): no blend, material or cliff stage;
     // only the far de-tiling (terrainLongFar) and the material cache.
     native_terrain_long_tile = 1u << 12,
+    native_terrain_astral = 1u << 14,
     // Liquid tiles also carry their 3x3 liquid-neighbour mask (bits 16-24) and
     // the vertex's place in its tile in half-tile steps (x bits 25-26, y 27-28).
     native_terrain_liquid_edge = 1u << 15,

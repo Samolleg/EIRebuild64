@@ -179,7 +179,7 @@ void AssetEncoder::body(Out& out, const TerrainCpuAsset& v) {
     io(out, v.identity); io(out, v.project_resource); io(out, v.map_header_resource); io(out, v.maximum_z);
     io(out, v.sector_count_x); io(out, v.sector_count_y); io(out, v.texture_count); io(out, v.texture_size);
     io(out, v.tile_count); io(out, v.tile_size); io(out, v.tiles_per_texture_side); io(out, v.tiles_per_texture);
-    io(out, v.texture_resources); io(out, v.objects); io(out, v.tile_types); io(out, v.tile_animation_phases);
+    io(out, v.texture_resources); io(out, v.astral_slots); io(out, v.objects); io(out, v.tile_types); io(out, v.tile_animation_phases);
     io(out, v.sectors);
     io_count(out, v.pages.size()); // pages: count only (see the header)
     io(out, v.swamp_frame_cover); io(out, v.swamp_frame_texels); io(out, v.swamp_frame_side);
@@ -310,7 +310,7 @@ bool AssetDecoder::body(In& in, TerrainCpuAsset& v) {
     io(in, v.identity); io(in, v.project_resource); io(in, v.map_header_resource); io(in, v.maximum_z);
     io(in, v.sector_count_x); io(in, v.sector_count_y); io(in, v.texture_count); io(in, v.texture_size);
     io(in, v.tile_count); io(in, v.tile_size); io(in, v.tiles_per_texture_side); io(in, v.tiles_per_texture);
-    io(in, v.texture_resources); io(in, v.objects); io(in, v.tile_types); io(in, v.tile_animation_phases);
+    io(in, v.texture_resources); io(in, v.astral_slots); io(in, v.objects); io(in, v.tile_types); io(in, v.tile_animation_phases);
     io(in, v.sectors);
     const auto pages = in.count(0);
     if (pages > 65536) return false;

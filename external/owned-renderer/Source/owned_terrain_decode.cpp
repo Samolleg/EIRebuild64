@@ -7,6 +7,7 @@
 
 #include "contact_blend.h"
 #include "terrain_tile_presets.h"
+#include "terrain_astral.h"
 #include "terrain_tile_map_families.h"
 
 #include <bcrypt.h>
@@ -384,7 +385,10 @@ bool decode_owned_terrain_tiles(const OwnedTerrainSourceDecodeContext& decode,
                     }
                 }
                 const std::uint32_t tile_base = vertex_cursor;
-                const bool material_tile = !tile.transparent &&
+                const bool astral_tile = terrain_astral_tile(*context->source, tile);
+                const bool pure_astral = astral_tile && context->source->astral_slots[tile.tile_index]==15;
+                const unsigned astral_mask = astral_tile ? terrain_astral_world_mask(*context->source,tile,tile_uvs) : 0;
+                const bool material_tile = !pure_astral && !tile.transparent &&
                     tile.animation_ordinal == UINT_MAX &&
                     tile.material_index < context->source->texture_count;
                 const bool long_tile = !tile.transparent &&
@@ -529,6 +533,14 @@ bool decode_owned_terrain_tiles(const OwnedTerrainSourceDecodeContext& decode,
                             terrain_vertex.flags |= native_terrain_material_vertex;
                         else if (long_tile)
                             terrain_vertex.flags |= native_terrain_long_tile;
+                    }
+                    if (astral_tile) {
+                        terrain_vertex.flags |= native_terrain_astral | (astral_mask<<16);
+                        const unsigned origin=tile.vertex_indices[0];
+                        terrain_vertex.flags |= ((source_index%33-origin%33)<<25)|((source_index/33-origin/33)<<27);
+                        terrain_vertex.noise = terrain_astral_edge(*context->source,
+                            int(context->sector->map_x*32+source_index%33),
+                            int(context->sector->map_y*32+source_index/33));
                     }
                     const std::uint32_t group = vertex_cursor >> 2u;
                     const std::uint32_t lane = vertex_cursor & 3u;
@@ -1136,6 +1148,24 @@ TerrainTileMapInput terrain_tile_map_input(const TerrainCpuAsset& terrain){
 // 3. Families from the placements of every map of the atlas
 //    (terrain_tile_map_families.h); unnamed groups stay unassigned.
 // One log line per atlas names the source and its corner counts.
+namespace {
+std::string terrain_profile_member(const std::string& space) {
+ std::array<unsigned char,32> digest{};
+ BCRYPT_ALG_HANDLE algorithm=nullptr;BCRYPT_HASH_HANDLE hash=nullptr;
+ std::string hashed_space=space;
+ bool hashed=BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)==0&&
+  BCryptCreateHash(algorithm,&hash,nullptr,0,nullptr,0,0)==0&&
+  BCryptHashData(hash,reinterpret_cast<PUCHAR>(hashed_space.data()),ULONG(hashed_space.size()),0)==0&&
+  BCryptFinishHash(hash,digest.data(),ULONG(digest.size()),0)==0;
+ if(hash)BCryptDestroyHash(hash);
+ if(algorithm)BCryptCloseAlgorithmProvider(algorithm,0);
+ if(!hashed)return {};
+ std::string member="ei_atlas_profile_"+space+"_";
+ for(unsigned i=0;i<8;++i){member+="0123456789abcdef"[digest[i]>>4];member+="0123456789abcdef"[digest[i]&15];}
+ return member+".json";
+}
+}
+
 TerrainTileFamilies load_terrain_tile_families(ResourceStoreConfig mounts,TerrainTileMapInput input,
     const std::atomic<bool>* cancel) noexcept try{
  TerrainTileFamilies result;
@@ -1158,19 +1188,8 @@ TerrainTileFamilies load_terrain_tile_families(ResourceStoreConfig mounts,Terrai
   }catch(const std::exception& error){detail=" overrides_rejected="+std::string(error.what());}
   families.source="preserveAuthored="+std::to_string(families.preserve_authored.size())+detail+" | "+families.source;
  };
- std::array<unsigned char,32> digest{};
- BCRYPT_ALG_HANDLE algorithm=nullptr;BCRYPT_HASH_HANDLE hash=nullptr;
- std::string hashed_space=space;
- bool hashed=BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,nullptr,0)==0&&
-  BCryptCreateHash(algorithm,&hash,nullptr,0,nullptr,0,0)==0&&
-  BCryptHashData(hash,reinterpret_cast<PUCHAR>(hashed_space.data()),ULONG(hashed_space.size()),0)==0&&
-  BCryptFinishHash(hash,digest.data(),ULONG(digest.size()),0)==0;
- if(hash)BCryptDestroyHash(hash);
- if(algorithm)BCryptCloseAlgorithmProvider(algorithm,0);
- if(hashed){
-  std::string member="ei_atlas_profile_"+space+"_";
-  for(unsigned i=0;i<8;++i){member+="0123456789abcdef"[digest[i]>>4];member+="0123456789abcdef"[digest[i]&15];}
-  member+=".json";
+ const auto member=terrain_profile_member(space);
+ if(!member.empty()){
   ResourceStore store;ResourceFailure failure;ResourceBlob blob;
   if(store.open(mounts,failure)&&store.resolve(member,blob,failure)&&blob.bytes&&
      terrain_tile_signatures_from_profile(std::string(blob.bytes->begin(),blob.bytes->end()),space,slots,result.signatures,&result.names)){
@@ -1240,6 +1259,33 @@ TerrainTileFamilies load_terrain_tile_families(ResourceStoreConfig mounts,Terrai
  policy(result);
  return result;
 }catch(...){TerrainTileFamilies failed;failed.source="tile family load failed";return failed;}
+
+void owned_terrain_prepare_astral(const TerrainMemberResolver& resolve, TerrainCpuAsset& terrain) {
+ const auto space=terrain_tile_family_space(terrain);
+ const auto member=terrain_profile_member(space);
+ ResourceBlob blob;ResourceFailure failure;TerrainTileFamilies families;
+ const unsigned slots=terrain.texture_count*terrain.tiles_per_texture;
+ if(!member.empty() && resolve && resolve(member,blob,failure) && blob.bytes &&
+    terrain_tile_signatures_from_profile(std::string(blob.bytes->begin(),blob.bytes->end()),space,slots,families.signatures,&families.names))
+  terrain.astral_slots=terrain_astral_slots(families);
+ else terrain.astral_slots.assign(slots,0);
+ // The un-repacked source atlas has one authored Astral cell, slot zero.
+ for(unsigned page=0;page<terrain.texture_count&&page<terrain.texture_resources.size();++page){
+  std::string name=terrain.texture_resources[page];
+  for(char& c:name)if(c>='A'&&c<='Z')c+=32;
+  if(name=="ataman_astral000" && page*terrain.tiles_per_texture<slots)
+   terrain.astral_slots[page*terrain.tiles_per_texture]=15;
+ }
+ const auto count=std::count_if(terrain.astral_slots.begin(),terrain.astral_slots.end(),[](auto mask){return mask!=0;});
+ if(count)bridge_append_probe_event("astral_terrain",(space+": "+std::to_string(count)+" explicit slots").c_str());
+ if(!count)terrain.astral_slots.clear();
+}
+
+void owned_terrain_prepare_astral(ResourceStore& store, TerrainCpuAsset& terrain) {
+ owned_terrain_prepare_astral([&](const std::string& name,ResourceBlob& blob,ResourceFailure& failure){
+  return store.resolve(name,blob,failure);
+ },terrain);
+}
 
 std::string terrain_tile_family_space(const TerrainCpuAsset& terrain){
  const auto& name=terrain.map_header_resource;

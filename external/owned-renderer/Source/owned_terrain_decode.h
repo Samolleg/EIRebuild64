@@ -18,6 +18,9 @@
 
 namespace owned {
 
+void owned_terrain_prepare_astral(const TerrainMemberResolver& resolve, TerrainCpuAsset& terrain);
+void owned_terrain_prepare_astral(ResourceStore& store, TerrainCpuAsset& terrain);
+
 struct OwnedTerrainDynamicSector {
     bool captured = false;
     std::uint64_t source_revision = 0;
