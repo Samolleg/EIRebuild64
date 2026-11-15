@@ -158,6 +158,7 @@ it errors for an absent or deleted name and verifies the extracted payload.
 
 ```json
 {
+  "expected_sha256": "<lowercase SHA-256 of opened archive; null if new>",
   "changes": [
     {"op": "put", "name_hex": "6974656D2E616462", "file": "edited/item.adb"},
     {"op": "delete", "name_hex": "6F6C642E616462"}
@@ -179,10 +180,10 @@ single-archive operation leaves the previously published PAK in place.
 ```json
 {
   "archives": [
-    {"pak": "res/database.pak", "changes": [
+    {"pak": "res/database.pak", "expected_sha256": "<opened SHA-256>", "changes": [
       {"op": "put", "name_hex": "6974656D2E616462", "file": "edited/item.adb"}
     ]},
-    {"pak": "res/texts.pak", "changes": [
+    {"pak": "res/texts.pak", "expected_sha256": "<opened SHA-256>", "changes": [
       {"op": "put", "name_hex": "6974656D2E747874", "file": "edited/item.txt"}
     ]}
   ]
@@ -213,7 +214,7 @@ reading the old archive. Stale editor snapshots must be refreshed before Save.
 
 Single archive publication writes `<target>.pak.tmp`, flushes the file with
 `FlushFileBuffers`, fully verifies the table and every live payload, then uses
-`MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`. The old file is never edited in
+`SetFileInformationByHandle(FileRenameInfoEx)` with replace/Posix semantics and a flushed write-through file handle. The old file is never edited in
 place. `apply` holds the target lock throughout read/build/verify/rename.
 
 A group acquires every target lock in ascending case-insensitive absolute path
@@ -271,7 +272,7 @@ publication; runtime payload XXH64 checking remains diagnostic-only.
 ## Runtime integration
 
 `CModPackage::ResourcePlan` retains the existing configured archive order within
-each tier and resolves same-basename PAK siblings. Diagnostic loose files in the
+each tier and resolves same-basename PAK siblings. Loose files in the
 mod directory precede mod PAK, then unshadowed mod RES, then base RES according to
 the existing ignore-base configuration. Existing config entries can continue to
 name RES after conversion. An explicit PAK config path is also accepted.
@@ -284,7 +285,7 @@ other configured unshadowed archives or base RES; tombstones stop that search.
 payloads until CloseFile/CloseAllFiles. The embedded resource store mounts the
 same plans and reads PAK members through that implementation, with weak payload
 references. Graphics mount collection applies the PAK tier across categories.
-Loose mod mounts are enabled only for `--diagnostics` or `--background`.
+Since MAPSOURCE01, selected mod-root and map loose mounts are enabled in ordinary launches as well as diagnostics/background.
 PAK open/read errors emit journal/probe events containing the archive/member path
 and return failure to the resource caller.
 
@@ -299,3 +300,26 @@ decompression C sources with the static CRT for the engine and pack utility.
 `EIRebuild64Pack.vcxproj` is part of `EI_Rebuild.sln`. No dependency download or
 restore is performed. The dependency license and bundled xxHash notice are
 recorded in `THIRD_PARTY.md`.
+
+Every apply request and txn member requires expected_sha256: the lowercase SHA-256
+of the editor snapshot, or JSON null for a new archive. All preconditions are
+checked under all writer locks before staging any archive. A mismatch rejects
+the entire edit; callers must reload and resolve conflicts, never retry with a
+new hash attached to stale payloads.
+
+## Mixed editor transactions (PAKTXN01)
+The same `txn` request accepts `files` alongside `archives` (either can be omitted):
+```json
+{"archives": [], "files": [{"target":"Maps/zone1.mob", "file":"edited/zone1.mob", "sha256":"<payload SHA-256>", "expected_sha256":"<opened target SHA-256, or JSON null if new>"}]}
+```
+All paths are relative to request JSON, unless absolute. All targets share a volume.
+`files` may also publish a complete prebuilt `.pak`; its full integrity is verified.
+Executables, DLLs, staging/lock names and transaction manifest names are forbidden targets.
+The utility locks ALL archive and file targets, checks all snapshot preconditions, then
+stages all outputs and commits one manifest. Loose files use `<target>.eipak.tmp`.
+Manifest version 2 adds `kind: "pak" | "file"` to each member; recovery still reads
+version 1 manifests, but old utilities reject version 2 instead of partially recovering it.
+Recovery verifies every member hash and every PAK before replacing any remaining target.
+Editors must bundle this utility revision; a stale editor must never refresh only its hash.
+Native Qt/MinGW callers may invoke this pinned CLI (the reference C++ implementation)
+when their compiler cannot build its C++17 filesystem code; no duplicate serializer or ABI shim.
