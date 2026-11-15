@@ -15,7 +15,9 @@ bool prepare_baked_motion(const RetainedVisualSample& sample){
      throw std::runtime_error("SKM baked body shape does not match actor");
     std::set<std::string> equipment,slots;
     for(const auto& mount:motion.mounts)slots.insert(mount.name.substr(0,mount.name.find('.')));
-    for(const auto& part:assembly.parts)if(part.source_available&&part.geometry&&!part.geometry->indices.empty()&&
+    // SKN replaces the FIG surface. Empty attachment FIGs still identify the
+    // selected equipment and must participate in the motion signature.
+    for(const auto& part:assembly.parts)if(part.source_available&&
         part.name.find('.')!=std::string::npos&&slots.count(part.name.substr(0,part.name.find('.'))))equipment.insert(part.name);
     for(unsigned i=0;i<motion.contexts.size();++i)if(motion.contexts[i].equipment==equipment)prepared.motion_context=i;
     if(prepared.motion_context==UINT_MAX){std::string names;for(const auto& n:equipment)names+=n+",";throw std::runtime_error("SKM unsupported equipment: "+names);}

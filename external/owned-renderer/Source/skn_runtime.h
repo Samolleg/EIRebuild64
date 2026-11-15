@@ -113,8 +113,8 @@ inline std::shared_ptr<const RuntimeAsset> select(const std::string &name,
   if(store.resolve(name+".nlm",motion,failure)){
     if(!motion.bytes)throw std::runtime_error("NLM missing bytes");
     const auto read=[&](const std::string& resource){ResourceBlob member;ResourceFailure error;
-      if(!store.resolve(resource,member,error)||!member.bytes)throw std::runtime_error("NLC resource missing: "+resource);
-      return *member.bytes;};
+      if(!store.resolve(resource,member,error)||!member.bytes)throw std::runtime_error("NLC resource "+resource+": "+error.message);
+      return member.bytes;};
     auto decoded=std::make_shared<skm::Asset>(skm::decode_layered(*motion.bytes,*blob.bytes,read));
     if(decoded->correction_map.size()!=a->asset.vertices.size())
       throw std::runtime_error("NLS does not match selected SKN");
