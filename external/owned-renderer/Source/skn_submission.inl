@@ -53,20 +53,42 @@ bool build_skn_groups(const RetainedVisualSample &sample,
       if(used.size()+additional>65532){chunks.emplace_back(lists.size());used.clear();}
       for(unsigned v:triangle){chunks.back()[level].push_back(v);used.insert(v);}
     }
-    unsigned chunk_index=0;
-    for(const auto& chunk:chunks){
+    // Log once per authored group when an appearance is built, never per frame
+    // or per 16-bit geometry chunk. Logging must not reject a valid visual.
+    const auto report_selection = [&](const char* event, const char* reason) noexcept {
+      try {
+        const std::string detail = "model=\"" + asset->identity.canonical_name +
+            "\" part=\"" + data.joints[data.semantic_joints[sub]].name +
+            "\" material=" + std::to_string(mesh.material) +
+            " zone=" + std::to_string(mesh.zone) + " layer=" + std::to_string(mesh.layer) +
+            " base_map=\"" + data.materials[mesh.material].maps[0] +
+            "\" reason=\"" + reason + "\"";
+        bridge_append_probe_event(event, detail.c_str());
+      } catch (...) {
+      }
+    };
     unsigned semantic = nodes[data.semantic_joints[sub]], part = UINT_MAX;
     for (unsigned i = 0; i < sample.assembly->parts.size(); ++i)
       if (sample.assembly->parts[i].skeleton_node == semantic) {
         part = i;
         break;
       }
-    if (part == UINT_MAX)
+    if (part == UINT_MAX) {
+      report_selection("skn_material_skipped", "semantic_part_absent");
       continue;
+    }
     const auto& selected = sample.assembly->parts[part];
     if (!selected.source_available || selected.explicitly_hidden ||
-        (sample.values.unit && unit_service_node(selected.name.c_str())))
+        (sample.values.unit && unit_service_node(selected.name.c_str()))) {
+      const char* reason = !selected.source_available ? "source_unavailable" :
+          selected.explicitly_hidden ? "part_hidden" : "unit_service_node";
+      report_selection("skn_material_skipped", reason);
       continue;
+    }
+    if (selected.assembled_character_texture && !data.materials[mesh.material].maps[0].empty())
+      report_selection("skn_assembled_texture_skipped", "explicit_skn_base_map");
+    unsigned chunk_index=0;
+    for(const auto& chunk:chunks){
     std::map<unsigned, unsigned> unique;
     std::vector<unsigned> vertices;
     for(const auto& list:chunk)for(unsigned v:list) {
