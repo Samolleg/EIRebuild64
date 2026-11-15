@@ -719,7 +719,7 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
 #ifndef _A4
     if (auto* unit = dynamic_cast<CUnit*>(object)) {
         auto* client = IWorldClient.GetPlayer();
-        const auto* player = client ? client->GetPlayer() : nullptr;
+        auto* player = client ? client->GetPlayer() : nullptr;
         assembly->main_hero_visual = player && player->IsMainHero(unit);
     }
 #endif
