@@ -1,6 +1,7 @@
 #include "owned_asset_loader.h"
 #include "debug_output_paths.h"
 #include "owned_terrain_front_end.h"
+#include "owned_terrain_decode.h"
 #include "procedural_falls.h"
 #include "worker_priority.h"
 
@@ -3565,6 +3566,7 @@ struct OwnedResourceLoader::Impl {
                 catch (...) { terrain->swamp_frame_cover.clear(); terrain->swamp_frame_texels.clear(); terrain->swamp_frame_side = 0; line = "classification failed (exception)"; }
                 bridge_append_probe_event("swamp_frames", (name + ": " + line).c_str());
             }
+            owned_terrain_prepare_astral(*state->store, *terrain);
             state->terrain = std::move(terrain);
         } else {
             static std::atomic<bool> reported{false};

@@ -22,6 +22,7 @@
 #include "static_lod.h"
 #include "terrain_cliff.h"
 #include "terrain_material.h"
+#include "terrain_astral.h"
 #include "terrain_tile_blend.h"
 #include "terrain2.h"
 #include "terrain2_cache.h"
@@ -1677,6 +1678,10 @@ NativeOutput nativeVertex(uint vertexId,bool sway){
     output.liquidDirections=float4(terrain.liquidBend,0,0,0);
    }
   }
+  if((terrain.flags&16384u)!=0){
+   output.liquidDirections.y=terrain.noise;
+   output.liquidTileLocal=float2((terrain.flags>>25)&3u,(terrain.flags>>27)&3u)*.5;
+  }
   if(liquidSurfaceEnabled(terrain.flags)) {
    output.shadowMode=0; // Liquid overlays neither receive nor join caster commands.
    // Stock-look water (nativeLiquidLayer bit 3, water_simple): drawn by the
@@ -2889,6 +2894,9 @@ float4 nativeAstralSample(NativeOutput i){
  return t;
 }
 
+#if defined(NATIVE_TERRAIN_PS)||defined(NATIVE_LOW)
+@TERRAIN_ASTRAL_SHADER@
+#endif
 NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
 #ifdef EID3D12_HAZARDS
  nativeGpuReportBegin(2u,i.textureReference.x,uint(i.p.x)|(uint(i.p.y)<<16));
@@ -2913,6 +2921,20 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
  // Background geometry stays outside the authoritative map's open interior.
  if(i.neighbour!=0 && all(i.worldPosition.xy>nativeTerrainActiveBoundsPS.xy) &&
     all(i.worldPosition.xy<nativeTerrainActiveBoundsPS.zw))discard;
+#if defined(NATIVE_TERRAIN_PS)||defined(NATIVE_LOW)
+ // Astral is an opaque depth-bearing surface, independently emissive.
+ // Its base geometry, map visibility and fog retain the ordinary terrain contract.
+ [branch]if((i.terrainVertexFlags&16384u)!=0&&((i.terrainVertexFlags>>16)&15u)==15u){
+  float footprint=length(fwidth(i.worldPosition.xy))*.075;
+  float3 color=terrainAstralColor(i.worldPosition,fogEye.xyz,nativeTerrainClock.y*.055,i.liquidDirections.y,footprint);
+  if(nativeFogEnable!=0){
+   color=lerp(saturate(borderFogColorAt(i.worldPosition,nativeFogColor.rgb)),color,nativeFogFactor(i.s.a,i.p));
+   nativeAtmosphereAt(color,i.p,nativeFogColor.rgb,i.worldPosition);
+  }else if(nativeDrawDissolvedAt(i.p,i.worldPosition))discard;
+  NativePixelResult astral;astral.color=float4(color,nativeHudOpacity);
+  astral.shadow=float4(1,0,0,1);astral.ambient=float4(0,0,0,astral.color.a);return astral;
+ }
+#endif
  // Evaluate derivatives before both the receiver branch and per-pixel
  // cascade selection. Adjacent lanes need not select the same receiver/map.
  float3 positionDx=ddx(i.worldPosition),positionDy=ddy(i.worldPosition);
@@ -3852,6 +3874,15 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
    c.rgb-=ambientShare*terrainFootContactDepth*contact;
    ambientShare*=1-contact;
   }
+#if defined(NATIVE_TERRAIN_PS)||defined(NATIVE_LOW)
+  // Mixed Astral/land cells retain normal terrain shading on their land share.
+  [branch]if((i.terrainVertexFlags&16384u)!=0){
+   float coverage=terrainAstralCoverage(i.terrainVertexFlags,i.liquidTileLocal);
+   float3 astralColor=terrainAstralColor(i.worldPosition,fogEye.xyz,nativeTerrainClock.y*.055,
+       i.liquidDirections.y,length(abs(positionDx.xy)+abs(positionDy.xy))*.075);
+   c.rgb=lerp(c.rgb,astralColor,coverage);ambientShare*=1-coverage;
+  }
+#endif
   // World geometry (shadow mode 1 or 2: object_to_clip is the world camera)
   // measures fog and draw distance from its interpolated world position,
   // the point the pixel would unproject to; prepared vertices unproject.
@@ -4290,6 +4321,8 @@ struct NativeShaderFeatures {
 // avoids both dynamic resource indexing and MSVC's individual literal limit.
 inline std::string compose_native_shader_source(const NativeShaderFeatures& features = {}) {
   std::string text=kNativeShader;
+  const std::string astral_marker="@TERRAIN_ASTRAL_SHADER@";
+  text.replace(text.find(astral_marker),astral_marker.size(),kTerrainAstralShader);
   const std::string liquid_marker="@LIQUID_SURFACE@";
   text.replace(text.find(liquid_marker),liquid_marker.size(),std::string(kAtmosphereShader)+kSkyNativeShader+std::string(features.liquid_surface));
   const std::string glow_marker="@CAVE_EXIT_GLOW@";

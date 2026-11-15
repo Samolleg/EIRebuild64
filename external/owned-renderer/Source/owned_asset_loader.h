@@ -540,6 +540,8 @@ struct TerrainCpuAsset {
     std::uint32_t tiles_per_texture_side = 0;
     std::uint32_t tiles_per_texture = 0;
     std::vector<std::string> texture_resources;
+    // Explicit Astral slots from the authored map atlas profile; empty means none.
+    std::vector<std::uint8_t> astral_slots;
     std::vector<TerrainObjectDescriptor> objects;
     std::vector<std::uint32_t> tile_types;
     std::vector<std::uint32_t> tile_animation_phases;
