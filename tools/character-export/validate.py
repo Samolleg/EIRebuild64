@@ -321,9 +321,23 @@ def validate(doc, binary, profile, kind, d):
                 slots.update(material)
                 for field, value in slots.items():
                     if field.endswith('Texture') and isinstance(value, dict):
-                        uv = value.get('extensions', {}).get('KHR_texture_transform', {}).get('texCoord', value.get('texCoord', 0))
+                        transform = value.get('extensions', {}).get('KHR_texture_transform')
+                        uv = value.get('texCoord', 0)
+                        if transform is not None or uv != p['materials']['textureTexCoord']:
+                            d.error(where+'/'+field, 'per-map UV/transform unsupported in human.v1',
+                                    'use TEXCOORD_0 without KHR_texture_transform on every texture')
                         if uv not in p['gltf']['uvSets'] or 'TEXCOORD_'+str(uv) not in attrs:
-                            d.error(where, 'missing/unsupported texture UV', 'supply UV0/UV1 used by material')
+                            d.error(where, 'missing/unsupported texture UV', 'supply TEXCOORD_0 used by material')
+                if 'normalTexture' in material and p['materials']['normalMapRequiresTangent']:
+                    if 'TANGENT' not in attrs:
+                        d.error(where, 'normal map requires TANGENT', 'export authored glTF tangents')
+                    else:
+                        tangent = doc['accessors'][attrs['TANGENT']]
+                        if tangent['type'] != 'VEC4' or tangent['componentType'] != 5126:
+                            d.error(where, 'invalid TANGENT format', 'export float VEC4 tangents')
+                        elif any(abs(sum(x*x for x in row[:3])**0.5-1) > tolerance or
+                                 abs(abs(row[3])-1) > tolerance for row in a.get(attrs['TANGENT'])):
+                            d.error(where, 'invalid tangent direction/handedness', 'export unit tangents with w=+1 or -1')
     for node in nodes:
         if 'mesh' in node and kind != 'item' and 'skin' not in node:
             d.error(node.get('name', 'mesh'), 'mesh node has no skin', 'export an armature modifier')
@@ -359,7 +373,7 @@ def validate(doc, binary, profile, kind, d):
         d.error('animations', 'duplicate names', 'use unique clip names')
     if kind == 'character':
         for clip in p['clips']:
-            if clip['required'] and clip['name'] not in anim_names:
+            if clip['name'] in p['animation']['exportRequiredClips'] and clip['name'] not in anim_names:
                 d.error('animations', 'missing '+clip['name'], 'author named action and required events')
     for anim in animations:
         name = anim.get('name', '?')

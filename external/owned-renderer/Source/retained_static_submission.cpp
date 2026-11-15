@@ -10,6 +10,7 @@
 #include "fur.h"
 #include "figure_service_nodes.h"
 #include "skn_runtime.h"
+#include "gltf_asset.h"
 #include "world_scene_algorithms.h"
 
 #include <algorithm>
@@ -1146,6 +1147,17 @@ bool skn_pose_bounds(const RetainedVisualSample& sample,NativeWorldBounds& bound
  if(!present){prepared.skn_bounds_asset.reset();prepared.skn_bounds_valid=false;return true;}
  if(prepared.skn_bounds_valid&&asset==prepared.skn_bounds_asset&&owned_visual_pose_key_matches(prepared.skn_bounds_key,sample)){
   bounds=prepared.skn_bounds;return true;
+ }
+ if(asset->gltf_asset) {
+  const float radius=asset->gltf_asset->radius*(std::max)({std::abs(sample.assembly->scale[0]),std::abs(sample.assembly->scale[1]),std::abs(sample.assembly->scale[2])})+1e-4f;
+  for(unsigned axis=0;axis<3;++axis) {
+   const float position=sample.completed_pose?sample.object_pose.position[axis]:sample.pose.root[axis];
+   bounds.minimum[axis]=position-radius;bounds.maximum[axis]=position+radius;
+  }
+  bounds.valid=true;
+  if(!finite_world_bounds(bounds))return false;
+  prepared.skn_bounds_asset=asset;prepared.skn_bounds_key=owned_visual_pose_key(sample);
+  prepared.skn_bounds=bounds;prepared.skn_bounds_valid=true;return true;
  }
  std::vector<VisualNodeSample> pose;
  if(!sample_visual_skeleton(*sample.assembly->skeleton,sample.selection,retained_visual_shape(sample),
@@ -2340,6 +2352,7 @@ bool retained_visual_selection_envelope_radius(
 
 } // namespace
 
+#include "gltf_submission.inl"
 #include "skm_submission.inl"
 
 bool retained_visual_gpu_pose(const RetainedVisualSample& sample,
@@ -3334,7 +3347,7 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
         view.indices=geometry.indices.data();view.index_count=static_cast<UINT>(geometry.indices.size());
         view.bounds_valid=true;view.bounds_flags=2;view.semantic_kind=SemanticKind::figure;
         retained_visual_part_fixed_state(sample,view.owned_fixed_state);
-        const bool assembled_texture = group.skn_asset && part.surface &&
+        const bool assembled_texture = group.skn_asset && !group.skn_asset->gltf_asset && part.surface &&
             part.assembled_character_texture && group.skn_asset->asset.materials[group.skn_material].maps[0].empty();
         if(!group.skn_asset || assembled_texture){
          view.owned_texture.identity=part.surface->id;view.owned_texture.generation=part.surface->generation;
@@ -3358,6 +3371,7 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
          skn_material.factors[0]=material.roughness;skn_material.factors[1]=material.metallic;
          skn_material.factors[2]=material.ao;skn_material.factors[3]=material.two_sided?2.f:1.f;
          std::copy_n(material.emission,3,skn_material.emission);
+         skn_material.emission[3]=material.unlit?1.f:0.f;
          std::copy_n(material.base,4,skn_material.base);
          skn_material.base[3]=static_cast<float>(material.alpha);
          if(material.alpha==0)view.owned_texture.opaque_mips=UINT_MAX;
@@ -3397,7 +3411,7 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
     NativePreparedPartValues values;
     if (!retained_visual_part_values(sample,part,time,fog,values)) return false;
     values.flags|=0x40u;
-    if(group.skn_asset && (!part.assembled_character_texture || !group.skn_asset->asset.materials[group.skn_material].maps[0].empty())){
+    if(group.skn_asset && (group.skn_asset->gltf_asset || !part.assembled_character_texture || !group.skn_asset->asset.materials[group.skn_material].maps[0].empty())){
      const auto& m=group.skn_asset->asset.materials[group.skn_material];
      if(m.alpha!=0)values.alpha*=m.base[3];
 

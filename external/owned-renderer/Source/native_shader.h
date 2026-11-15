@@ -3868,6 +3868,12 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
   float causticDepth=i.bedLiquid.y>0?0:i.bedLiquid.x;float3 bed=liquidBedTransmission(i.bedLiquid.x);
   [branch]if(causticDepth>0)bed*=1+liquidBedCaustics(i.shadowPosition.xy,causticDepth,float4(shadowDx.xy,shadowDy.xy))*smoothstep(.6,.85,normalize(i.worldNormal).z)*dot(saturate(nativeWorldSunDiffuse.rgb),float3(.2126,.7152,.0722));
   c.rgb*=bed;
+#if !defined(NATIVE_TERRAIN_PS)
+  // glTF unlit keeps authored colour and alpha before the ordinary fog stage.
+  if(nativeSknInstance(i)!=0 && nativeSknInstances[nativeSknInstance(i)-1].sknEmission.w>0){
+   c.rgb=t.rgb;c0=c.rgb/ max(bed,1e-6);filteredShadow=1;
+  }
+#endif
 #ifndef NATIVE_LOW // Low: alpha-tested before the lighting (c.a is the same value)
   [branch]if(nativeAlphaTest!=0){if(!nativeCompare(c.a))discard;}
 #endif
