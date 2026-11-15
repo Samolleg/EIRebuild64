@@ -10,6 +10,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModSecondaryAtlas.h"
 #include "ModPrimaryAtlas.h"
 #include "ModTextureMemory.h"
+#include "ModCliTool.h"
 #include "ModPnt3Texture.h"
 
 #include "mmpFormat.h"
@@ -279,6 +280,10 @@ void CTextureManager::DeleteUnitLayerTextures()
     ModPrimaryAtlas::State().Clear();
     ModCriticalLifecycle::Clear(ModRuntime::Current());
     ModHitHistory::ClearRuntimeHitHistory("texture-layer-delete");
+    // The offline importer owns CPU textures only; it must not create or
+    // clean an installation cache during teardown (which can be read-only).
+    if (ModCliTool::CurrentKind() == ModCliTool::Kind::NavBake)
+        return;
     CFileFind find;
     CString szMaskName = CString(RuntimePaths64::Textures().c_str()) + "*.mmp";
     BOOL bCheck = find.FindFile(szMaskName);
