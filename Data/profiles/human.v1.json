@@ -26423,6 +26423,7 @@
     "embeddedResourcesOnly": true,
     "primitiveMode": 4,
     "maxJointInfluences": 4,
+      "maxIdleEdgeStretch": 10,
     "skins": true,
     "morphTargets": [
       "POSITION",

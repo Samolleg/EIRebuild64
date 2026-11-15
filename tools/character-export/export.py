@@ -264,6 +264,7 @@ def canonical_joint_frames(doc, binary, profile):
 
 def enrich(doc, binary, objects, profile, kind, meta):
     doc, binary = canonical_joint_frames(doc, binary, profile)
+    doc, binary = baked_joint_frames(doc, binary, objects, profile)
     key = profile['animation']['extrasKey']
     doc['asset'].setdefault('extras', {})[key] = meta
     materials = doc.get('materials', [])
@@ -287,6 +288,115 @@ def enrich(doc, binary, objects, profile, kind, meta):
             ei['events'] = sorted(events, key=lambda e: (e['time'], e['id']))
             anim.setdefault('extras', {})[key] = ei
     return doc, binary
+
+
+def baked_joint_frames(doc, binary, objects, profile):
+    """Bake evaluated bone frames, including Blender's non-inherited scale.
+
+    A scale compensation parent keeps each local frame TRS even when the
+    Blender child does not inherit its parent's nonuniform scale. Merely
+    decomposing parent^-1 * child would silently discard shear.
+    """
+    rigs = [o for o in objects if o.type == 'ARMATURE']
+    if not rigs or not doc.get('animations'):
+        return doc, binary
+    if len(rigs) != 1:
+        raise ValueError('one armature required for evaluated joint baking')
+    rig = rigs[0]
+    C = Matrix(profile['coordinates']['blenderToProfileRows'])
+    inverseC = C.inverted()
+    scene = bpy.context.scene
+    fps = scene.render.fps / scene.render.fps_base
+    joints = {j for skin in doc.get('skins', []) for j in skin['joints']}
+    parents = {child: i for i, node in enumerate(doc['nodes']) for child in node.get('children', [])}
+    source = Accessors(doc, binary)
+    result = bytearray(binary)
+    helpers = {}
+
+    def append(rows, kind):
+        result.extend(b'\0' * (-len(result) % 4))
+        offset = len(result)
+        values = [v for row in rows for v in row]
+        result.extend(struct.pack('<'+'f'*len(values), *values))
+        doc['bufferViews'].append({'buffer': 0, 'byteOffset': offset, 'byteLength': len(result)-offset})
+        doc['accessors'].append({'bufferView': len(doc['bufferViews'])-1,
+                                 'componentType': 5126, 'count': len(rows), 'type': kind})
+        return len(doc['accessors'])-1
+
+    for j in sorted(joints):
+        if doc['nodes'][j].get('name') not in rig.pose.bones:
+            raise ValueError('exported joint missing in Blender armature')
+        parent = parents.get(j)
+        if parent not in joints:
+            continue
+        helper = len(doc['nodes'])
+        helpers[j] = helper
+        doc['nodes'].append({'name': '#ei-scale-'+str(j), 'children': [j]})
+        doc['nodes'][parent]['children'] = [helper if c == j else c
+                                           for c in doc['nodes'][parent]['children']]
+
+    saved_frame, saved_subframe = scene.frame_current, scene.frame_subframe
+    saved_action = rig.animation_data.action
+    try:
+        for anim in doc['animations']:
+            action = bpy.data.actions.get(anim.get('name', ''))
+            if action is None:
+                raise ValueError('exported animation has no author action')
+            rig.animation_data.action = action
+            times = sorted({row[0] for channel in anim['channels']
+                            for row in source.get(anim['samplers'][channel['sampler']]['input'])})
+            channels = {j: {'translation': [], 'rotation': [], 'scale': []} for j in joints}
+            scales = {j: [] for j in helpers}
+            previous = {}
+            for time in times:
+                frame = action.frame_range[0] + time * fps
+                scene.frame_set(math.floor(frame), subframe=frame-math.floor(frame))
+                worlds = {j: C @ rig.pose.bones[doc['nodes'][j]['name']].matrix @ inverseC
+                          for j in joints}
+                for j in sorted(joints):
+                    parent = parents.get(j)
+                    parent_world = worlds[parent] if parent in joints else Matrix.Identity(4)
+                    compensation = Matrix.Identity(4)
+                    if j in helpers:
+                        # All evaluated world frames must be TRS. A general shear
+                        # cannot be represented by one glTF joint and scale node.
+                        _, _, parent_scale = parent_world.decompose()
+                        for c in range(3):
+                            if parent_scale[c] <= 0:
+                                raise ValueError('nonpositive evaluated parent scale')
+                            compensation[c][c] = 1 / parent_scale[c]
+                        scales[j].append([compensation[c][c] for c in range(3)])
+                    local = (parent_world @ compensation).inverted() @ worlds[j]
+                    t, q, s = local.decompose()
+                    if not close(local, Matrix.LocRotScale(t, q, s), 1e-4):
+                        raise ValueError('evaluated joint shear: '+doc['nodes'][j]['name'])
+                    if j in previous and q.dot(previous[j]) < 0:
+                        q.negate()
+                    previous[j] = q.copy()
+                    channels[j]['translation'].append(list(t))
+                    channels[j]['rotation'].append([q.x, q.y, q.z, q.w])
+                    channels[j]['scale'].append(list(s))
+            input_accessor = append([[t] for t in times], 'SCALAR')
+            doc['accessors'][input_accessor].update(min=[times[0]], max=[times[-1]])
+            anim['channels'] = [c for c in anim['channels']
+                                if c['target']['node'] not in joints
+                                or c['target']['path'] == 'weights']
+            def channel(node, path, rows):
+                sampler = len(anim['samplers'])
+                anim['samplers'].append({'input': input_accessor,
+                    'output': append(rows, 'VEC4' if path == 'rotation' else 'VEC3'),
+                    'interpolation': 'LINEAR'})
+                anim['channels'].append({'sampler': sampler, 'target': {'node': node, 'path': path}})
+            for j in sorted(joints):
+                for path, rows in channels[j].items():
+                    channel(j, path, rows)
+                if j in helpers:
+                    channel(helpers[j], 'scale', scales[j])
+    finally:
+        rig.animation_data.action = saved_action
+        scene.frame_set(saved_frame, subframe=saved_subframe)
+    doc['buffers'][0]['byteLength'] = len(result)
+    return doc, bytes(result)
 
 
 def main():

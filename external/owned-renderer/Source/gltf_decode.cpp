@@ -297,6 +297,9 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
             "asset profile/kind");
     const auto contract = json(profile);
     require(contract.at("id") == "human.v1" && contract.at("version") == 1, "profile version");
+    const double maxIdleEdgeStretch = contract.at("gltf").at("maxIdleEdgeStretch").get<double>();
+    require(std::isfinite(maxIdleEdgeStretch) && maxIdleEdgeStretch >= 1,
+            "profile idle edge stretch limit");
     std::map<std::string, const Json *> reference;
     for (const auto &bone : contract.at("skeleton").at("bones"))
         reference.emplace(bone.at("name").get<std::string>(), &bone);
@@ -788,6 +791,8 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
                     tan[i * 4 + c] /= std::sqrt(norm);
             }
             const unsigned base = static_cast<unsigned>(output->geometry.vertices.size());
+            std::vector<std::array<float, 3>> idlePositions;
+            idlePositions.reserve(positions->count);
             for (std::size_t v = 0; v < positions->count; ++v)
             {
                 skn::Vertex vertex{};
@@ -836,6 +841,7 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
                         for (unsigned c = 0; c < 3; ++c)
                             deformed[c] += point[c] * vertex.weights[k] / 65535.f;
                     }
+                idlePositions.push_back(deformed);
                 output->radius = (std::max)(output->radius, std::sqrt(deformed[0] * deformed[0] +
                                                                       deformed[1] * deformed[1] +
                                                                       deformed[2] * deformed[2]));
@@ -851,6 +857,28 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
                 require(index < positions->count, "vertex index");
                 output->geometry.indices.push_back(base + static_cast<unsigned>(index));
             }
+            // Matching rest matrices alone cannot detect a mesh normalized in a
+            // different frame from its skeleton. Reject catastrophic deformation
+            // in the very pose we display, using the same quantized skin as draws.
+            for (std::size_t i = 0; i < count; i += 3)
+                for (unsigned edge = 0; edge < 3; ++edge)
+                {
+                    const auto a = output->geometry.indices[first + i + edge] - base;
+                    const auto b = output->geometry.indices[first + i + (edge + 1) % 3] - base;
+                    double restSquared = 0, idleSquared = 0;
+                    for (unsigned c = 0; c < 3; ++c)
+                    {
+                        const double rest = double(pos[a * 3 + c]) - pos[b * 3 + c];
+                        const double idle = double(idlePositions[a][c]) - idlePositions[b][c];
+                        restSquared += rest * rest;
+                        idleSquared += idle * idle;
+                    }
+                    require(restSquared <= 1e-12 || idleSquared <=
+                                restSquared * maxIdleEdgeStretch * maxIdleEdgeStretch,
+                            "idle skin edge stretch exceeds profile limit; rebind mesh and skeleton together: " +
+                                std::string(node.name ? node.name : "mesh") +
+                                " triangle " + std::to_string(i / 3));
+                }
             output->geometry.submeshes.push_back(
                 { first, static_cast<unsigned>(count),
                   primitive.material ? static_cast<unsigned>(primitive.material - data.materials)
