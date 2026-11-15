@@ -3,7 +3,7 @@
 // DLL) and writes the table the DLL embeds as the EID3D11_SHADERS resource
 // (Source/shader_cache.h), plus the one-line .rc that names it.
 //
-//   shader_embed <output.bin> [--preset-cache] [--dxil-sources <directory>]
+//   shader_embed <output.bin> [--preset-cache] [--dxil-sources <directory>] [--prepare-keys]
 //
 // Optional EID3D11_SHADER_STORE=<folder>: compiled programs shared across
 // worktrees and commits (see store_file below), keyed by the preprocessed
@@ -248,26 +248,92 @@ void store_write(const ShaderKey& key, const void* code, std::size_t size) {
 // edit there recompiled all of them (~186 programs; a terrain edit reached
 // the ground cover, fog and critter programs too). Preprocessing a program
 // takes milliseconds; compiling a terrain variant takes tens of seconds.
-bool compile_key(const ShaderProgram& program, ShaderKey& key) {
+// Hash tokens rather than FXC's whitespace and source-location presentation.
+// Preserve token boundaries (a + +b differs from a++b), literal contents,
+// and expanded __LINE__ values, which can affect actual shader behaviour.
+void hash_preprocessed(shader_cache_detail::Hasher& h, const char* p, const char* end) {
+    bool line_start = true;
+    const auto identifier = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+    };
+    while (p < end && *p) {
+        if (std::isspace(static_cast<unsigned char>(*p))) {
+            if (*p == '\n') line_start = true;
+            ++p;
+            continue;
+        }
+        if (line_start && *p == '#') {
+            const char* directive = p + 1;
+            while (directive < end && (*directive == ' ' || *directive == '\t')) ++directive;
+            if ((end - directive >= 4 && !std::strncmp(directive, "line", 4) &&
+                 (directive + 4 == end || std::isspace(static_cast<unsigned char>(directive[4])))) ||
+                (directive < end && std::isdigit(static_cast<unsigned char>(*directive)))) {
+                while (p < end && *p && *p != '\n') ++p;
+                continue;
+            }
+        }
+        line_start = false;
+        const char* begin = p++;
+        if (*begin == '"' || *begin == '\'') {
+            while (p < end && *p) {
+                if (*p == '\\' && p + 1 < end) { p += 2; continue; }
+                if (*p++ == *begin) break;
+            }
+        } else if (std::isdigit(static_cast<unsigned char>(*begin)) ||
+                   (*begin == '.' && p < end && std::isdigit(static_cast<unsigned char>(*p)))) {
+            // Preprocessing numbers include hexadecimal and exponent signs.
+            while (p < end && (identifier(*p) || *p == '.' ||
+                   ((*p == '+' || *p == '-') && std::strchr("eEpP", p[-1])))) ++p;
+        } else if (identifier(*begin)) {
+            while (p < end && identifier(*p)) ++p;
+        } else {
+            static const char* const operators[] = {"<<=", ">>=", "...", "++", "--", "->", "&&", "||",
+                "<=", ">=", "==", "!=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<", ">>", "::", "##"};
+            for (const char* op : operators) {
+                const std::size_t size = std::strlen(op);
+                if (std::size_t(end - begin) >= size && !std::strncmp(begin, op, size)) {
+                    p = begin + size;
+                    break;
+                }
+            }
+        }
+        h.bytes(begin, std::size_t(p - begin));
+        h.text(nullptr); // token separator
+    }
+}
+bool compile_key(const ShaderProgram& program, ShaderKey& key, ShaderKey& legacy_key) {
     Microsoft::WRL::ComPtr<ID3DBlob> text, messages;
     if (FAILED(D3DPreprocess(program.source.data(), program.source.size(), program.name, program.defines, nullptr, &text,
                              &messages)))
         return false;
-    // Without its #line directives: an edit inside an excluded block shifts
-    // the line numbers of everything after it, and release DXBC carries no
-    // line information, so they would recompile programs whose code is the same.
     const char* p = static_cast<const char*>(text->GetBufferPointer());
     const char* const end = p + text->GetBufferSize();
     shader_cache_detail::Hasher h;
-    h.text("preprocessed 3");
+    // Migration only: remove after the first complete store migration.
+    // Reproduce v3 exactly, including its insignificant whitespace.
+    shader_cache_detail::Hasher legacy;
+    legacy.text("preprocessed 3");
+    legacy.bytes(&g_compiler_key.a, sizeof(g_compiler_key.a));
+    legacy.bytes(&g_compiler_key.b, sizeof(g_compiler_key.b));
+    for (const char* line = p; line < end;) {
+        const char* next = static_cast<const char*>(std::memchr(line, '\n', std::size_t(end - line)));
+        next = next ? next + 1 : end;
+        if (!(next - line >= 5 && !std::strncmp(line, "#line", 5))) legacy.bytes(line, std::size_t(next - line));
+        line = next;
+    }
+    legacy.text(program.entry);
+    legacy.text(program.profile);
+    legacy.bytes(&program.flags, sizeof(program.flags));
+    legacy_key = {legacy.a, legacy.b};
+    h.text("preprocessed tokens 4");
     h.bytes(&g_compiler_key.a, sizeof(g_compiler_key.a));
     h.bytes(&g_compiler_key.b, sizeof(g_compiler_key.b));
-    while (p < end) {
-        const char* line_end = static_cast<const char*>(std::memchr(p, '\n', std::size_t(end - p)));
-        line_end = line_end ? line_end + 1 : end;
-        if (!(line_end - p >= 5 && !std::strncmp(p, "#line", 5))) h.bytes(p, std::size_t(line_end - p));
-        p = line_end;
+    hash_preprocessed(h, p, end);
+    for (const D3D_SHADER_MACRO* define = program.defines; define && define->Name; ++define) {
+        h.text(define->Name);
+        h.text(define->Definition);
     }
+    h.text(nullptr); // end of macro fields
     h.text(program.entry);
     h.text(program.profile);
     h.bytes(&program.flags, sizeof(program.flags));
@@ -287,15 +353,16 @@ std::string program_label(const ShaderProgram& program) {
 } // namespace
 
 int main(int argc, char** argv) {
-    bool preset_cache = false, usage = argc < 2;
+    bool preset_cache = false, prepare_keys = false, usage = argc < 2;
     std::string dxil_directory;
     for (int i = 2; i < argc && !usage; ++i) {
-        if (!std::strcmp(argv[i], "--preset-cache")) preset_cache = true;
+        if (!std::strcmp(argv[i], "--prepare-keys")) prepare_keys = true;
+        else if (!std::strcmp(argv[i], "--preset-cache")) preset_cache = true;
         else if (!std::strcmp(argv[i], "--dxil-sources") && i + 1 < argc) dxil_directory = argv[++i];
         else usage = true;
     }
     if (usage) {
-        std::fprintf(stderr, "usage: shader_embed <output.bin> [--preset-cache] [--dxil-sources <directory>]\n");
+        std::fprintf(stderr, "usage: shader_embed <output.bin> [--preset-cache] [--dxil-sources <directory>] [--prepare-keys]\n");
         return 2;
     }
     const std::string output = argv[1];
@@ -354,20 +421,29 @@ int main(int argc, char** argv) {
     std::vector<std::pair<ShaderKey, std::string>> table(programs.size());
     std::vector<std::string> errors(programs.size());
     std::vector<double> seconds(programs.size(), 0.0);  // compile time of each compiled program
-    std::atomic<std::size_t> next{0}, compiled{0}, stored{0};
+    std::atomic<std::size_t> next{0}, compiled{0}, stored{0}, migrated{0}, missing{0};
     const auto work = [&]() {
         for (std::size_t i = next++; i < programs.size(); i = next++) {
             const ShaderProgram& program = programs[i];
             table[i].first = shader_key(program);
-            ShaderKey stored_key{};
-            const bool keyed = !g_store.empty() && compile_key(program, stored_key);
+            ShaderKey stored_key{}, legacy_key{};
+            const bool keyed = !g_store.empty() && compile_key(program, stored_key, legacy_key);
             const void* code = nullptr;
             std::size_t size = 0;
-            if (shader_cache_detail::find(table[i].first, code, size)) {
+            if (!prepare_keys && shader_cache_detail::find(table[i].first, code, size)) {
                 table[i].second.assign(static_cast<const char*>(code), size);
                 continue;
             }
             if (keyed && store_read(stored_key, table[i].second)) { ++stored; continue; }
+            if (keyed && store_read(legacy_key, table[i].second)) {
+                store_write(stored_key, table[i].second.data(), table[i].second.size());
+                std::string verified;
+                if (!store_read(stored_key, verified) || verified != table[i].second)
+                    errors[i] = program_label(program) + ": store migration write failed";
+                else ++migrated;
+                continue;
+            }
+            if (prepare_keys) { ++missing; continue; }
             LARGE_INTEGER start{}, stop{};
             QueryPerformanceCounter(&start);
             Microsoft::WRL::ComPtr<ID3DBlob> blob, messages;
@@ -395,6 +471,9 @@ int main(int argc, char** argv) {
         if (!error.empty()) { std::fprintf(stderr, "shader_embed: %s\n", error.c_str()); failed = true; }
     if (failed) return 1;
 
+    std::printf("shader_embed: %zu programs, %zu migrated, %zu already stored, %zu missing (key preparation)\n",
+                programs.size(), migrated.load(), stored.load(), missing.load());
+    if (prepare_keys) return missing ? 1 : 0;
     const std::vector<unsigned char> bytes = build_shader_table(std::move(table));
     if (bytes != previous) {
         std::ofstream out(output, std::ios::binary | std::ios::trunc);
@@ -459,12 +538,19 @@ int main(int argc, char** argv) {
         for (std::size_t i = special_next++; i < special.size(); i = special_next++) {
             const ShaderProgram& program = *special[i];
             wanted[i] = file_of(program);
-            ShaderKey key{};
-            const bool keyed = !g_store.empty() && compile_key(program, key);
+            ShaderKey key{}, legacy_key{};
+            const bool keyed = !g_store.empty() && compile_key(program, key, legacy_key);
             if (!keyed && GetFileAttributesA(wanted[i].c_str()) != INVALID_FILE_ATTRIBUTES) {
                 continue;
             }
             if (keyed && CopyFileA(store_file(key).c_str(), wanted[i].c_str(), FALSE)) { ++special_stored; continue; }
+            std::string legacy_code;
+            if (keyed && store_read(legacy_key, legacy_code)) {
+                store_write(key, legacy_code.data(), legacy_code.size());
+                if (CopyFileA(store_file(key).c_str(), wanted[i].c_str(), FALSE)) { ++special_stored; continue; }
+                special_errors[i] = program_label(program) + ": store migration write failed";
+                continue;
+            }
             Microsoft::WRL::ComPtr<ID3DBlob> blob, messages;
             if (FAILED(D3DCompile(program.source.data(), program.source.size(), program.name, program.defines, nullptr,
                                   program.entry, program.profile, program.flags, 0, &blob, &messages))) {
