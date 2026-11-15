@@ -44,7 +44,7 @@ Rigid item задаёт `asset.extras.ei.kind="rigid-item"`, `profile`, `socket`
 
 ## Выбор клипа и ADB
 
-Обязательные уникальные `animations[].name` приведены в таблице. Все девять клипов присутствуют в каждом body GLB.
+Обязательные уникальные `animations[].name` приведены в таблице. Все девять клипов присутствуют в полном body GLB. Для текущего статуса loader-idle-slice обязательный экспортный минимум задан animation.exportRequiredClips, как описано в разделе среза X64GLTF02.
 
 | Имя v1 | Цикл | Исходный ориентир | События |
 |---|---|---|---|
@@ -109,7 +109,7 @@ Skin одежды использует те же имена/иерархию/bin
 
 ## Материалы и гамма
 
-Используется core glTF metallic-roughness. POSITION и NORMAL обязательны. Для текстур обязателен соответствующий TEXCOORD_0/1. BaseColor factor и остальные factors берутся с glTF defaults. Карты baseColor, normal, metallicRoughness, occlusion и emissive опциональны. Normal map требует tangent VEC4 с handedness, при отсутствии tangent импортёр строит MikkTSpace с разделением швов. Нормали единичны, преобразуются inverse-transpose с нормализацией. Normal texture использует glTF tangent-space +Y. Occlusion читается из R, roughness из G, metallic из B. Раздельные textures/UV для occlusion и metallicRoughness сохраняются, импортёр может собрать ORM только с корректным пересэмплированием.
+Используется core glTF metallic-roughness. POSITION и NORMAL обязательны. Все карты материала используют TEXCOORD_0 без KHR_texture_transform. BaseColor factor и остальные factors берутся с glTF defaults. Карты baseColor, normal, metallicRoughness, occlusion и emissive опциональны. Normal map требует авторский float TANGENT VEC4 с handedness w=±1. Отсутствие атрибута означает отказ с причиной, импортёр MikkTSpace не генерирует. Нормали единичны, преобразуются inverse-transpose с нормализацией. Normal texture использует glTF tangent-space +Y. Occlusion читается из R, roughness из G, metallic из B. Раздельные textures для occlusion и metallicRoughness сохраняются с общей UV0. Разные UV-наборы и преобразования карт в v1 запрещены.
 
 BaseColor RGB и emissive RGB textures имеют sRGB encoding, alpha линейна. Normal/ORM линейны. BaseColorFactor и emissiveFactor являются линейными множителями. Цветовые операции glTF выполняются после sRGB decode. На границе текущего display-encoded renderer результат кодируется sRGB ровно один раз. Исправление `4edc1a2`/`skn_runtime.h` читает BC7 sRGB DDS через UNORM SRV, сохраняя display-encoded цвет игры. Будущий glTF import должен учитывать эту границу и исключить дополнительный SRV decode уже подготовленного цвета. Реализация полностью linear lighting потребует согласованного изменения границы. Прямой перенос glTF texture в нынешний SRV без согласования factors и lighting не подтверждает сохранность цвета.
 
@@ -121,7 +121,7 @@ OPAQUE игнорирует alpha при расчёте покрытия. MASK �
 
 Каналы animations включают translation, rotation, scale, weights. Поддерживаются STEP, LINEAR и CUBICSPLINE с glTF tangent/time scaling, quaternion normalization и shortest-path LINEAR rotation. Один animation содержит не более одного канала на node/path. Cameras/lights не используются в персонаже, активная сцена и body root однозначны.
 
-Allowlist extensions состоит из KHR_materials_unlit и KHR_texture_transform (offset/rotation/scale/texCoord, UV0/1). Draco, meshopt, BasisU/KTX2, material variants, transmission, volume, clearcoat и прочие extensions в v1 не реализуются. Любое неизвестное имя в extensionsRequired означает отказ. Optional extension допускается игнорировать только при наличии полноценного core fallback. Отсутствие доступного core buffer/image/material является ошибкой. Поддержка morphs и extensions в этом разделе является требованием к будущему загрузчику.
+Allowlist extensions состоит из KHR_materials_unlit. KHR_texture_transform и texCoord≠0 запрещены для всех карт материала v1. Draco, meshopt, BasisU/KTX2, material variants, transmission, volume, clearcoat и прочие extensions в v1 не реализуются. Любое неизвестное имя в extensionsRequired означает отказ. Optional extension допускается игнорировать только при наличии полноценного core fallback. Отсутствие доступного core buffer/image/material является ошибкой. Поддержка morphs и extensions в этом разделе является требованием к будущему загрузчику.
 
 ## Привязка и ресурсы
 
@@ -536,10 +536,25 @@ Host применяет его при уже установленном `main_he
 сохраняются вместе с неизменяемым документом cgltf. Начальные веса морфов
 применяются к геометрии. Текстуры декодируются WIC в BGRA, цветовые mip строятся
 через linear sRGB с однократным кодированием в дисплейную гамму игры.
-Срез использует одну UV-развёртку материала. TEXCOORD_0/1 и общий для его карт
-KHR_texture_transform применяются к примитиву. Разные UV-наборы/преобразования
-карт одного материала диагностируются до публикации. Для их исполнения
-потребуется расширить потоки/параметры GPU-материала.
+Все карты материала human.v1 используют TEXCOORD_0. texCoord≠0 и любое
+KHR_texture_transform запрещены в v1 и диагностируются экспортёром и загрузчиком.
+Normal map требует авторский float VEC4 TANGENT с единичным XYZ и w=±1.
+Политика задана materials.normalMapRequiresTangent, textureTexCoord=0,
+textureTransformAllowed=false. MikkTSpace при загрузке не генерируется.
+
+animation.exportRequiredClips задаёт обязательные клипы текущего этапа выгрузки.
+Для статуса loader-idle-slice это ["idle"], согласно разрешённому срезу выше.
+clips[].required сохраняет полный контракт следующего этапа. Каждый реально
+экспортированный клип проверяется вместе с его requiredEvents.
+
+Blender 5.2 glTF сохраняет дополнительные локальные оси суставов. Инструмент
+выгрузки приводит их к рамкам профиля общей сменой базиса из
+coordinates.blenderJointFrameCorrectionRows (Q=C⁻¹, +90° вокруг X).
+Для суставов G'=GQ, inverseBind'=Q⁻¹ inverseBind. Локальные рамки детей,
+сокеты и все каналы TRS преобразуются согласованно. Для этого signed-axis
+базиса каналы масштаба переставляют Y/Z, quaternion tangents преобразуются
+линейно. Геометрия и мировая деформация сохраняются, rest pose проверяется
+после сериализации. Имена модели в этом преобразовании не участвуют.
 
 Активная сцена берётся из glTF `scene`. При единственной сцене допустимо
 опустить этот индекс. Несколько сцен без выбора дают диагностический отказ.
@@ -547,6 +562,5 @@ KHR_texture_transform применяются к примитиву. Разные
 Каналы анимаций сохраняются во всём документе. При загрузке проверяются
 уникальность node/path, типы accessor, число выборок и возрастание времени.
 
-MikkTSpace в текущем срезе ещё не реализован. Normal map без авторского
-TANGENT отклоняется с явной причиной. Генерируемый для остальных материалов
+Normal map без авторского TANGENT отклоняется с явной причиной. Генерируемый для остальных материалов
 вспомогательный tangent не подтверждает выполнение требования MikkTSpace.

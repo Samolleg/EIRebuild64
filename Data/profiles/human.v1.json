@@ -13,6 +13,7 @@
     "adbSourceSha256": "b7e194c2d1f69643b766ab998adcef51b084c995cc495e5dc64697167892f7db"
   },
   "coordinates": {
+    "blenderJointFrameCorrectionRows": [[1, 0, 0, 0], [0, 0, -1, 0], [0, 1, 0, 0], [0, 0, 0, 1]],
     "unit": "metre",
     "handedness": "right",
     "up": "+Y",
@@ -14983,6 +14984,7 @@
     }
   ],
   "animation": {
+    "exportRequiredClips": ["idle"],
     "extrasKey": "ei",
     "requestFields": [
       "state",
@@ -26385,6 +26387,9 @@
   },
   "materials": {
     "workflow": "metallic-roughness",
+    "normalMapRequiresTangent": true,
+    "textureTexCoord": 0,
+    "textureTransformAllowed": false,
     "colorTextures": [
       "baseColor",
       "emissive"
@@ -26436,8 +26441,7 @@
       "CUBICSPLINE"
     ],
     "supportedExtensions": [
-      "KHR_materials_unlit",
-      "KHR_texture_transform"
+      "KHR_materials_unlit"
     ],
     "unknownRequiredExtension": "reject",
     "unsupportedOptionalExtension": "ignore only with valid core fallback",

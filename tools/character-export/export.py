@@ -3,15 +3,16 @@ import argparse
 import json
 import math
 import os
+import struct
 from pathlib import Path
 import sys
 import tempfile
 
 import bpy
-from mathutils import Matrix, Vector
+from mathutils import Matrix, Quaternion, Vector
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from validate import Diagnostics, close, matrix, read_glb, validate, validate_metadata, write_glb
+from validate import Accessors, Diagnostics, close, matrix, read_glb, validate, validate_metadata, write_glb
 
 
 def custom(owner, name, default=None):
@@ -166,7 +167,7 @@ def source_checks(objects, profile, kind, d):
         actions = {a.name: a for a in bpy.data.actions}
         for clip in p['clips']:
             action = actions.get(clip['name'])
-            if clip['required'] and action is None:
+            if clip['name'] in p['animation']['exportRequiredClips'] and action is None:
                 d.error('actions', 'missing '+clip['name'], 'author action with exact profile clip name')
             if action:
                 names = {m.name.split(':', 1)[0] for m in action.pose_markers}
@@ -176,7 +177,78 @@ def source_checks(objects, profile, kind, d):
                         d.error(action.name, 'missing event '+event, 'add action pose marker or ei.events entry')
 
 
+def canonical_joint_frames(doc, binary, profile):
+    """Express Blender-exported joint frames in the profile basis, preserving skinning."""
+    correction = Matrix(profile['coordinates']['blenderJointFrameCorrectionRows'])
+    inverse = correction.inverted()
+    rotation = correction.to_quaternion()
+    inverse_rotation = rotation.inverted()
+    joints = {j for skin in doc.get('skins', []) for j in skin['joints']}
+    parents = {child: i for i, node in enumerate(doc['nodes']) for child in node.get('children', [])}
+    source = Accessors(doc, binary)
+    result = bytearray(binary)
+
+    def append(rows, kind):
+        result.extend(b'\0' * (-len(result) % 4))
+        offset = len(result)
+        values = [x for row in rows for x in row]
+        result.extend(struct.pack('<' + 'f' * len(values), *values))
+        doc.setdefault('bufferViews', []).append({'buffer': 0, 'byteOffset': offset,
+                                                 'byteLength': len(result)-offset})
+        doc['accessors'].append({'bufferView': len(doc['bufferViews'])-1, 'componentType': 5126,
+                                 'count': len(rows), 'type': kind})
+        return len(doc['accessors'])-1
+
+    for i, node in enumerate(doc['nodes']):
+        local = matrix(node)
+        if parents.get(i) in joints:
+            local = inverse @ local
+        if i in joints:
+            local = local @ correction
+        if i in joints or parents.get(i) in joints:
+            t, q, s = local.decompose()
+            node.pop('matrix', None)
+            node.update(translation=list(t), rotation=[q.x, q.y, q.z, q.w], scale=list(s))
+    for skin in doc.get('skins', []):
+        rows = []
+        for row in source.get(skin['inverseBindMatrices']):
+            value = inverse @ matrix({'matrix': row})
+            rows.append([value[r][c] for c in range(4) for r in range(4)])
+        skin['inverseBindMatrices'] = append(rows, 'MAT4')
+    for animation in doc.get('animations', []):
+        for channel in animation['channels']:
+            target = channel['target']
+            node, path = target['node'], target['path']
+            if path not in ('rotation', 'translation', 'scale'):
+                continue
+            parent_joint = parents.get(node) in joints
+            if node not in joints and not parent_joint:
+                continue
+            sampler = dict(animation['samplers'][channel['sampler']])
+            rows = []
+            for row in source.get(sampler['output']):
+                if path == 'rotation':
+                    # Quaternion multiplication is linear, including CUBICSPLINE tangents.
+                    q = Quaternion((row[3], *row[:3]))
+                    if parent_joint:
+                        q = inverse_rotation @ q
+                    if node in joints:
+                        q = q @ rotation
+                    row = [q.x, q.y, q.z, q.w]
+                elif path == 'scale' and node in joints:
+                    row = [sum(abs(inverse[r][c])*row[c] for c in range(3)) for r in range(3)]
+                elif path == 'translation' and parent_joint:
+                    row = list(inverse.to_3x3() @ Vector(row))
+                rows.append(row)
+            sampler['output'] = append(rows, 'VEC4' if path == 'rotation' else 'VEC3')
+            channel['sampler'] = len(animation['samplers'])
+            animation['samplers'].append(sampler)
+    doc['buffers'][0]['byteLength'] = len(result)
+    return doc, bytes(result)
+
+
 def enrich(doc, binary, objects, profile, kind, meta):
+    doc, binary = canonical_joint_frames(doc, binary, profile)
     key = profile['animation']['extrasKey']
     doc['asset'].setdefault('extras', {})[key] = meta
     materials = doc.get('materials', [])
@@ -241,7 +313,7 @@ def main():
                 os.close(fd)
                 try:
                     result = bpy.ops.export_scene.gltf(
-                        filepath=candidate, export_format='GLB', use_selection=True,
+                        filepath=candidate, export_format='GLB', use_selection=True, use_active_scene=True,
                         export_yup=True, export_extras=True, export_cameras=False,
                         export_lights=False, export_normals=True, export_tangents=True,
                         export_animations=args.kind == 'character', export_animation_mode='ACTIONS',
