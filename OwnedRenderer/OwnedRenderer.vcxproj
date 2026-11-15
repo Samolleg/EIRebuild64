@@ -42,6 +42,9 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\hud_atlas_mutation.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\owned_resource_store.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\owned_asset_loader.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\nlc_asset.cpp">
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\dependencies\zstd\v1.5.7\lib;$(MSBuildThisFileDirectory)..\out\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
     <ClCompile Include="$(OwnedRendererRoot)Source\owned_visual_evaluation.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\hud_visual_publication.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\character_pane_owned_text.cpp" />

@@ -2,7 +2,7 @@
 #include "owned_asset_loader.h"
 #include "owned_resource_runtime.h"
 #include "skn_asset.h"
-#include "skm_asset.h"
+#include "nlc_asset.h"
 #include <map>
 #include <mutex>
 namespace owned::skn {
@@ -110,11 +110,14 @@ inline std::shared_ptr<const RuntimeAsset> select(const std::string &name,
   if (!blob.bytes || !decode(*blob.bytes, a->asset, error))
     throw std::runtime_error(error);
   ResourceBlob motion;
-  if(store.resolve(name+".skm",motion,failure)){
-    if(!motion.bytes)throw std::runtime_error("SKM missing bytes");
-    auto decoded=std::make_shared<skm::Asset>(skm::decode(*motion.bytes));
-    if(decoded->mesh_hash!=skm::hash(*blob.bytes)||decoded->correction_map.size()!=a->asset.vertices.size())
-      throw std::runtime_error("SKM does not match selected SKN");
+  if(store.resolve(name+".nlm",motion,failure)){
+    if(!motion.bytes)throw std::runtime_error("NLM missing bytes");
+    const auto read=[&](const std::string& resource){ResourceBlob member;ResourceFailure error;
+      if(!store.resolve(resource,member,error)||!member.bytes)throw std::runtime_error("NLC resource missing: "+resource);
+      return *member.bytes;};
+    auto decoded=std::make_shared<skm::Asset>(skm::decode_layered(*motion.bytes,*blob.bytes,read));
+    if(decoded->correction_map.size()!=a->asset.vertices.size())
+      throw std::runtime_error("NLS does not match selected SKN");
     a->motion=std::move(decoded);
   }else if(failure.code!=ResourceFailureCode::not_found)throw std::runtime_error(failure.message);
   // In joint-local bind space every influenced vertex lies in this sphere.
@@ -161,15 +164,8 @@ struct GpuVertex {
 };
 static_assert(sizeof(GpuVertex) == 244);
 inline std::shared_ptr<const skm::Clip> motion_clip(const skm::Asset& asset,const std::string& name,const skm::ClipRef& reference){
- static std::mutex mutex;static ResourceStore store;static std::uint64_t generation=0;
- static std::map<std::string,std::weak_ptr<const skm::Clip>> cache;
- std::lock_guard<std::mutex> guard(mutex);ResourceStoreConfig config;std::uint64_t current=0;ResourceFailure failure;
- if(!owned_resource_runtime_mounts(config,&current))throw std::runtime_error("SKM resource namespace missing");
- if(current!=generation){store.close();cache.clear();if(!store.open(config,failure))throw std::runtime_error(failure.message);generation=current;}
- const auto key=reference.resource+":"+std::to_string(reference.hash)+":"+std::to_string(asset.skeleton_hash);
- if(auto clip=cache[key].lock())return clip;
- ResourceBlob blob;if(!store.resolve(reference.resource,blob,failure)||!blob.bytes)throw std::runtime_error("SKM clip missing: "+reference.resource);
- if(skm::hash(*blob.bytes)!=reference.hash)throw std::runtime_error("SKM clip hash mismatch");
- auto clip=std::make_shared<skm::Clip>(skm::decode_clip(*blob.bytes,asset,name));cache[key]=clip;return clip;
+ if(!reference.clip||reference.clip->name!=name||reference.clip->common.size()!=(asset.nodes.size()+1)*3)
+   throw std::runtime_error("NLC selected clip identity mismatch");
+ return reference.clip;
 }
 } // namespace owned::skn
