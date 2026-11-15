@@ -784,6 +784,38 @@ struct NativeWorldGeometry {
     // A current owned pose is evaluated once on the GPU, independently of the
     // camera and pass. The binding owns immutable assets, never engine objects.
     struct Pose {
+        // A baked affine library supplies the same final node rows consumed by
+        // skinning and shadows. Extra records carry sparse post-skin targets.
+        struct Node {
+            std::array<float,4> rotation{}, translation{};
+            std::array<float,4> rows[3]{};
+            UINT morph_first=0,morph_second=0,morph_count=0;
+            float morph_fraction=0;
+            std::array<UINT,2> generation{};
+        };
+        std::shared_ptr<const std::vector<Node>> baked;
+        static std::vector<Node> place_baked(const std::vector<Node>& source,
+            const std::array<float,16>& m,const std::array<UINT,2>& generation){
+            auto result=source;
+            for(auto& node:result){
+                const auto input=node;node.generation=generation;
+                if(input.morph_count==UINT_MAX){
+                    for(unsigned r=0;r<3;++r){node.rows[0][r]=0;for(unsigned k=0;k<3;++k)node.rows[0][r]+=m[r*4+k]*input.rows[0][k];}
+                    const double a=m[0],b=m[1],c=m[2],d=m[4],e=m[5],f=m[6],g=m[8],h=m[9],i=m[10];
+                    const double determinant=a*(e*i-f*h)-b*(d*i-f*g)+c*(d*h-e*g);
+                    const auto& n=input.rows[1];
+                    double v[3]={(e*i-f*h)*n[0]+(f*g-d*i)*n[1]+(d*h-e*g)*n[2],
+                        (c*h-b*i)*n[0]+(a*i-c*g)*n[1]+(b*g-a*h)*n[2],
+                        (b*f-c*e)*n[0]+(c*d-a*f)*n[1]+(a*e-b*d)*n[2]};
+                    const double length=std::sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2])*(determinant<0?-1:1);
+                    for(unsigned k=0;k<3;++k)node.rows[1][k]=length?static_cast<float>(v[k]/length):0;
+                }else for(unsigned r=0;r<3;++r)for(unsigned c=0;c<4;++c){
+                    node.rows[r][c]=c==3?m[r*4+3]:0;
+                    for(unsigned k=0;k<3;++k)node.rows[r][c]+=m[r*4+k]*input.rows[k][c];
+                }
+            }
+            return result;
+        }
         std::shared_ptr<const VisualSkeletonBinding> binding;
         std::weak_ptr<const void> owner;
         std::array<float,16> root_to_world{};

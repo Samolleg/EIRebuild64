@@ -2,6 +2,7 @@
 #include "owned_asset_loader.h"
 #include "owned_resource_runtime.h"
 #include "skn_asset.h"
+#include "nlc_asset.h"
 #include <map>
 #include <mutex>
 namespace owned::skn {
@@ -27,6 +28,7 @@ struct RuntimeAsset {
   Asset asset;
   std::vector<std::array<Dds, 4>> textures;
   std::vector<float> joint_radius;
+  std::shared_ptr<const skm::Asset> motion;
 };
 inline Dds dds(ResourceBlob blob, unsigned map) {
   if (!blob.bytes)
@@ -107,6 +109,17 @@ inline std::shared_ptr<const RuntimeAsset> select(const std::string &name,
   std::string error;
   if (!blob.bytes || !decode(*blob.bytes, a->asset, error))
     throw std::runtime_error(error);
+  ResourceBlob motion;
+  if(store.resolve(name+".nlm",motion,failure)){
+    if(!motion.bytes)throw std::runtime_error("NLM missing bytes");
+    const auto read=[&](const std::string& resource){ResourceBlob member;ResourceFailure error;
+      if(!store.resolve(resource,member,error)||!member.bytes)throw std::runtime_error("NLC resource missing: "+resource);
+      return *member.bytes;};
+    auto decoded=std::make_shared<skm::Asset>(skm::decode_layered(*motion.bytes,*blob.bytes,read));
+    if(decoded->correction_map.size()!=a->asset.vertices.size())
+      throw std::runtime_error("NLS does not match selected SKN");
+    a->motion=std::move(decoded);
+  }else if(failure.code!=ResourceFailureCode::not_found)throw std::runtime_error(failure.message);
   // In joint-local bind space every influenced vertex lies in this sphere.
   // Positive normalized skin weights make the posed mesh a convex combination
   // of the posed joint spheres, including rotation and non-uniform scale.
@@ -130,6 +143,12 @@ inline std::shared_ptr<const RuntimeAsset> select(const std::string &name,
   cache[name] = a;
   return a;
 }
+// An optional hero-specific resource is selected before the model-wide SKN.
+// A present but invalid override rejects; only an absent one uses normal lookup.
+inline std::shared_ptr<const RuntimeAsset> select_visual(const std::string& name,bool hero,bool& present){
+  if(hero){auto asset=select(name+".hero",present);if(present)return asset;}
+  return select(name,present);
+}
 inline float half_float(std::uint16_t h) {
   float v;
   unsigned sign = h >> 15, e = (h >> 10) & 31, m = h & 1023;
@@ -141,6 +160,12 @@ struct GpuVertex {
   float weights[4];
   float inverse[4][12];
   float tangent[4];
+  std::uint32_t correction_node=UINT32_MAX;
 };
-static_assert(sizeof(GpuVertex) == 240);
+static_assert(sizeof(GpuVertex) == 244);
+inline std::shared_ptr<const skm::Clip> motion_clip(const skm::Asset& asset,const std::string& name,const skm::ClipRef& reference){
+ if(!reference.clip||reference.clip->name!=name||reference.clip->common.size()!=(asset.nodes.size()+1)*3)
+   throw std::runtime_error("NLC selected clip identity mismatch");
+ return reference.clip;
+}
 } // namespace owned::skn

@@ -1146,7 +1146,34 @@ void run_owned_preview_command(OwnedPreviewCommand& command) noexcept {
             transaction = g_native_sink_begin_object && g_native_sink_begin_object(g_native_sink_context);
             ok = transaction;
         }
-        for (std::size_t i = 0; ok && i < command.parts.size(); ++i) {
+        // A baked hero uses the same SKN in the inventory/portrait as in the
+        // world. Drawing the captured FIG parts here would show the old body.
+        const bool baked_preview=ok && bool(sample.prepared->motion_asset);
+        if(baked_preview){
+            ok=retained_visual_merged_groups(sample) && sample.prepared->skn_selected;
+            for(std::size_t index=0;ok && index<sample.prepared->merged_groups.size();++index){
+                const auto& group=sample.prepared->merged_groups[index];
+                const auto captured=std::find_if(command.parts.begin(),command.parts.end(),[&](const auto& part){
+                    return std::find(group.parts.begin(),group.parts.end(),part.ordinal)!=group.parts.end();
+                });
+                if(captured==command.parts.end())continue;
+                if(handoff.adopt_sinks)handoff.adopt_sinks(sinks,command.sets[captured->set].get());
+                NativeWorldBounds bounds{};NativePreparedPartSubmission* record=nullptr;
+                if(!retained_visual_part_bounds(sample,captured->ordinal,bounds)||
+                   !retained_visual_group_submission(sample,index,bounds,{true,true,0},command.texture_time,command.fog,record)){ok=false;break;}
+                NativeGeometryView view=*record->source;
+                view.world.pose=pose;view.world.owner=&pose->owner;
+                view.world.world_to_clip=command.world_to_clip;view.object_to_clip=command.world_to_clip;
+                view.prepared_identity.presentation_serial=command.presentation_serial;
+                view.lighting=captured->lighting;view.interface_preview=true;
+                view.ordering=NativeOrdering::preserve;view.contribution={true,true,0};
+                view.bounds_minimum=bounds.minimum;view.bounds_maximum=bounds.maximum;
+                view.flags=record->values.flags&native_unit_flag;
+                NativeGeometryResult result{};
+                if(!g_native_sink_submit(g_native_sink_context,view,result)){ok=false;break;}
+            }
+        }
+        for (std::size_t i = 0; ok && !baked_preview && i < command.parts.size(); ++i) {
             const auto& part = command.parts[i];
             if (handoff.adopt_sinks) handoff.adopt_sinks(sinks, command.sets[part.set].get());
             NativeWorldBounds bounds{};

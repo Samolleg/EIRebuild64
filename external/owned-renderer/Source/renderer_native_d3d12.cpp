@@ -1231,6 +1231,14 @@ HRESULT Renderer::prepare_native_poses_d3d12(){
   for(const auto& job:native_pose_work_){
    if(job.allocation>=native_pose_ranges_.size()||!native_pose_ranges_[job.allocation].references||
       native_pose_ranges_[job.allocation].generation!=job.allocation_generation)continue;
+   if(job.baked){
+    auto nodes=NativeWorldGeometry::Pose::place_baked(*job.baked,job.value.root_to_world,job.value.generation);
+    const HRESULT written=d3d12_->write_buffer(*native12_.pose_nodes,UINT64(job.value.output)*sizeof(NativePoseNodeGpu),nodes.data(),nodes.size()*sizeof(NativePoseNodeGpu));
+    if(FAILED(written))return written;
+    profiler_.add_upload(nodes.size()*sizeof(NativePoseNodeGpu));
+    auto& slot=native_pose_slots_[job.slot];if(slot.revision==job.revision&&slot.value.output==job.value.output)slot.valid=true;
+    continue;
+   }
    native_pose_upload_.push_back(job.value);
   }
   if(native_pose_upload_.empty())return S_OK;

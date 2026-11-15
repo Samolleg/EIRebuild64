@@ -16,9 +16,16 @@ bool build_skn_groups(const RetainedVisualSample &sample,
         nodes[j] = k;
         break;
       }
+  if(asset->motion)for(unsigned j=0;j<nodes.size();++j)if(nodes[j]==UINT_MAX)
+    for(unsigned i=0;i<asset->motion->nodes.size();++i)if(asset->motion->nodes[i].name==data.joints[j].name)
+      nodes[j]=static_cast<unsigned>(sample.assembly->skeleton->nodes.size())+i;
   for (unsigned node : nodes)
     if (node == UINT_MAX)
       throw std::runtime_error("SKN joint missing in legacy LNK");
+  // One SKN can bind to host skeletons with different unrelated nodes. The
+  // uploaded indices (including corrective records) are part of mesh identity.
+  std::string binding_layout;
+  for(unsigned node:nodes)binding_layout.append(reinterpret_cast<const char*>(&node),sizeof(node));
   // One draw per gameplay part/material/region, with a union vertex buffer
   // and independently authored index lists. LODs need not share vertices.
   std::set<std::array<unsigned,4>> built;
@@ -79,14 +86,14 @@ bool build_skn_groups(const RetainedVisualSample &sample,
     group.parts = {part};
     group.skn_asset = asset;
     group.skn_material = mesh.material;
-    group.skn_casts_shadow = selected.assembled_character_texture
+    group.skn_casts_shadow = selected.assembled_character_texture && data.materials[mesh.material].maps[0].empty()
         ? selected.casts_shadow : data.materials[mesh.material].alpha!=2;
     group.shape_count = 1;
     group.position_groups = group.normal_groups =
         static_cast<unsigned>((vertices.size() + 3) / 4);
     prepared.merged_part_group[part] = group_index;
     const std::string content =
-        "skn|" + asset->identity.key() + "|" + std::to_string(sub) + "|" + std::to_string(chunk_index++);
+        "skn|" + asset->identity.key() + "|" + std::to_string(sub) + "|" + std::to_string(chunk_index++) + "|" + binding_layout;
     group.geometry = merged_geometry(
         content, [&](VisualPreparedResources::MergedGeometry &g) {
           g.positions.resize(group.position_groups);
@@ -109,6 +116,8 @@ bool build_skn_groups(const RetainedVisualSample &sample,
                                     static_cast<std::uint16_t>(i),
                                     static_cast<std::uint16_t>(i)});
             skn::GpuVertex skin{};
+            if(asset->motion && asset->motion->correction_map[vertices[i]]>=0)
+              skin.correction_node=static_cast<unsigned>(sample.assembly->skeleton->nodes.size()+asset->motion->nodes.size())+asset->motion->correction_map[vertices[i]];
             for(unsigned k=0;k<4;++k)skin.tangent[k]=v.tangent[k]/32767.f;
             for (unsigned k = 0; k < 4; ++k) {
               skin.joints[k] = nodes[v.joints[k]];

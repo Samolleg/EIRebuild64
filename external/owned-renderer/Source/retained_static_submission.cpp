@@ -1142,7 +1142,7 @@ bool skn_pose_bounds(const RetainedVisualSample& sample,NativeWorldBounds& bound
  }
  std::shared_ptr<const skn::RuntimeAsset> asset;
  if(prepared.skn_bounds_asset&&prepared.skn_bounds_key.assembly==sample.assembly){asset=prepared.skn_bounds_asset;present=true;}
- else asset=skn::select(sample.assembly->skeleton->visual_reference,present);
+ else asset=skn::select_visual(sample.assembly->skeleton->visual_reference,sample.assembly->main_hero_visual,present);
  if(!present){prepared.skn_bounds_asset.reset();prepared.skn_bounds_valid=false;return true;}
  if(prepared.skn_bounds_valid&&asset==prepared.skn_bounds_asset&&owned_visual_pose_key_matches(prepared.skn_bounds_key,sample)){
   bounds=prepared.skn_bounds;return true;
@@ -1164,10 +1164,17 @@ bool skn_pose_bounds(const RetainedVisualSample& sample,NativeWorldBounds& bound
  std::array<float,16> node_zero{};
  if(pose.empty()||!node_matrix(0,node_zero))return false;
  for(unsigned axis=0;axis<3;++axis)bounds.minimum[axis]=bounds.maximum[axis]=node_zero[axis*4+3];
+ // Baked affine poses and post-skin targets are not bounded by legacy BON
+ // spheres. The cooked model-space envelope covers every declared clip.
+ if(asset->motion){
+  const double scale=(std::max)({std::abs(sample.assembly->scale[0]),std::abs(sample.assembly->scale[1]),std::abs(sample.assembly->scale[2])});
+  const float radius=static_cast<float>(asset->motion->radius*scale);
+  for(unsigned axis=0;axis<3;++axis){bounds.minimum[axis]-=radius;bounds.maximum[axis]+=radius;}
+ }
  std::unordered_map<std::string,unsigned> nodes;
  nodes.reserve(sample.assembly->skeleton->nodes.size());
  for(unsigned n=0;n<sample.assembly->skeleton->nodes.size();++n)nodes.emplace(sample.assembly->skeleton->nodes[n].name,n);
- for(unsigned j=0;j<asset->joint_radius.size();++j){
+ if(!asset->motion)for(unsigned j=0;j<asset->joint_radius.size();++j){
   if(asset->joint_radius[j]<0)continue;
   const auto found=nodes.find(asset->asset.joints[j].name);
   if(found==nodes.end())return false;
@@ -2333,6 +2340,8 @@ bool retained_visual_selection_envelope_radius(
 
 } // namespace
 
+#include "skm_submission.inl"
+
 bool retained_visual_gpu_pose(const RetainedVisualSample& sample,
     NativeWorldGeometry::Pose*& pose) {
     pose=nullptr;
@@ -2390,6 +2399,7 @@ bool retained_visual_gpu_pose(const RetainedVisualSample& sample,
         }
         current.contact_world_height=hi>=lo?hi-lo:FLT_MAX;
     }
+    if(!prepare_baked_motion(sample))return false;
     pose=&current;
     return true;
 }
@@ -3198,7 +3208,7 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
     if (!prepared.gpu_pose.binding) return true;
     bool skn_present=false;
     try {
-     const auto skn_asset=skn::select(assembly.skeleton->visual_reference,skn_present);
+     const auto skn_asset=skn::select_visual(assembly.skeleton->visual_reference,assembly.main_hero_visual,skn_present);
      prepared.skn_selected=skn_present;
      if(skn_present){
       const bool built=build_skn_groups(sample,skn_asset);
@@ -3325,7 +3335,7 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
         view.bounds_valid=true;view.bounds_flags=2;view.semantic_kind=SemanticKind::figure;
         retained_visual_part_fixed_state(sample,view.owned_fixed_state);
         const bool assembled_texture = group.skn_asset && part.surface &&
-            part.assembled_character_texture;
+            part.assembled_character_texture && group.skn_asset->asset.materials[group.skn_material].maps[0].empty();
         if(!group.skn_asset || assembled_texture){
          view.owned_texture.identity=part.surface->id;view.owned_texture.generation=part.surface->generation;
          view.owned_texture.surface=part.surface.get();
@@ -3387,7 +3397,7 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
     NativePreparedPartValues values;
     if (!retained_visual_part_values(sample,part,time,fog,values)) return false;
     values.flags|=0x40u;
-    if(group.skn_asset && !part.assembled_character_texture){
+    if(group.skn_asset && (!part.assembled_character_texture || !group.skn_asset->asset.materials[group.skn_material].maps[0].empty())){
      const auto& m=group.skn_asset->asset.materials[group.skn_material];
      if(m.alpha!=0)values.alpha*=m.base[3];
 

@@ -716,6 +716,13 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
         return reject("appearance.selected_skeleton");
     auto assembly = std::make_shared<owned::VisualAssemblyAsset>();
     assembly->skeleton = skeleton;
+#ifndef _A4
+    if (auto* unit = dynamic_cast<CUnit*>(object)) {
+        auto* client = IWorldClient.GetPlayer();
+        auto* player = client ? client->GetPlayer() : nullptr;
+        assembly->main_hero_visual = player && player->IsMainHero(unit);
+    }
+#endif
     if (++revision == 0) ++revision;
     assembly->revision = revision;
 
