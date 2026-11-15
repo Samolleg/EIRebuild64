@@ -1260,12 +1260,12 @@ TerrainTileFamilies load_terrain_tile_families(ResourceStoreConfig mounts,Terrai
  return result;
 }catch(...){TerrainTileFamilies failed;failed.source="tile family load failed";return failed;}
 
-void owned_terrain_prepare_astral(ResourceStore& store, TerrainCpuAsset& terrain) {
+void owned_terrain_prepare_astral(const TerrainMemberResolver& resolve, TerrainCpuAsset& terrain) {
  const auto space=terrain_tile_family_space(terrain);
  const auto member=terrain_profile_member(space);
  ResourceBlob blob;ResourceFailure failure;TerrainTileFamilies families;
  const unsigned slots=terrain.texture_count*terrain.tiles_per_texture;
- if(!member.empty() && store.resolve(member,blob,failure) && blob.bytes &&
+ if(!member.empty() && resolve && resolve(member,blob,failure) && blob.bytes &&
     terrain_tile_signatures_from_profile(std::string(blob.bytes->begin(),blob.bytes->end()),space,slots,families.signatures,&families.names))
   terrain.astral_slots=terrain_astral_slots(families);
  else terrain.astral_slots.assign(slots,0);
@@ -1279,6 +1279,12 @@ void owned_terrain_prepare_astral(ResourceStore& store, TerrainCpuAsset& terrain
  const auto count=std::count_if(terrain.astral_slots.begin(),terrain.astral_slots.end(),[](auto mask){return mask!=0;});
  if(count)bridge_append_probe_event("astral_terrain",(space+": "+std::to_string(count)+" explicit slots").c_str());
  if(!count)terrain.astral_slots.clear();
+}
+
+void owned_terrain_prepare_astral(ResourceStore& store, TerrainCpuAsset& terrain) {
+ owned_terrain_prepare_astral([&](const std::string& name,ResourceBlob& blob,ResourceFailure& failure){
+  return store.resolve(name,blob,failure);
+ },terrain);
 }
 
 std::string terrain_tile_family_space(const TerrainCpuAsset& terrain){

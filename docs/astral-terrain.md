@@ -48,3 +48,29 @@ After an explicitly authorized installation, remaining visual acceptance is:
 the painted allod edge and mixed transitions, pause/resume, camera movement and
 zoom, fog/day/night, map transition and visible neighbour maps. GPU unit previews
 and compilation do not establish in-game appearance or frame-time impact.
+
+## Active-map publication fix (ASTRALTERRAINFIX02)
+
+The original loader hook did not cover `E1PublishTerrainSource`: the active
+engine reconstructs its own terrain from map-member callbacks, independently
+of the resource loader. Consequently, a loader diagnostic could report Astral
+while the actually drawn active map had no mask. The active publisher now calls
+the same classifier through the engine's selected texture-resource callback,
+which can read the atlas JSON as well as MMP members. No shader or art change
+is involved. `astral_terrain_active` reports the active source's slot and placed
+base-tile counts once per publication.
+
+Build the x64 integration check with `tools/check-astral-publication.ps1
+-OutputDirectory <task>/check`, then run `check-astral-publication.exe <map.mpr>
+<texture-archive.res> <expected-Astral-slots>`. It uses the actual E1 publication,
+resource parsers, profile classifier and GPU stream decoder; only unrelated
+world-frame/lighting hooks are supplied by the harness. Unexpected calls to
+unrelated render hooks terminate the test. It also removes the profile and
+asserts that no effect is invented. The build reuses the standard build cache's
+Pak/Zstd objects and requires that x64 cache to have been prepared.
+`-PublicationSource <old-E1Terrain.cpp>` reproduces the regression on old code.
+
+The installed main-menu data exercised 6 slots, 2137 tiles and 19233 marked
+GPU vertices. The current Zone1 has no authored Astral and yields zero, as
+required. These checks establish publication and decode; a real in-game image
+is still the visual check.

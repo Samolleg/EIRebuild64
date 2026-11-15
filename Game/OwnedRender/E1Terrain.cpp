@@ -119,6 +119,24 @@ bool E1PublishTerrainSource(const void* owner, std::uint64_t world, std::uint64_
         // E1Surface GPU atlases, not these temporary MMP source copies.
         terrain->pages.clear();
     }
+    // Active-map geometry is published from the engine's map members, not
+    // from OwnedResourceLoader's separate terrain asset. Resolve the atlas
+    // profile through the same selected texture resources as these atlases.
+    const owned::TerrainMemberResolver profile = [&](const std::string& name,
+        owned::ResourceBlob& blob, owned::ResourceFailure& why) {
+        return readTexture && copy(readTexture, textureContext, name, blob, why);
+    };
+    owned::owned_terrain_prepare_astral(profile, *terrain);
+    const auto astralSlots = std::count_if(terrain->astral_slots.begin(), terrain->astral_slots.end(),
+        [](auto mask) { return mask != 0; });
+    if (astralSlots) {
+        std::size_t tiles = 0;
+        for (const auto& sector : terrain->sectors) for (const auto& tile : sector.tiles)
+            if (!tile.transparent && tile.animation_ordinal == UINT_MAX &&
+                tile.tile_index < terrain->astral_slots.size() && terrain->astral_slots[tile.tile_index]) ++tiles;
+        owned::bridge_append_probe_event("astral_terrain_active", (terrain->map_header_resource +
+            ": slots=" + std::to_string(astralSlots) + " placed_tiles=" + std::to_string(tiles)).c_str());
+    }
     source.source_generation = nextGeneration; source.source_revision = revision;
     source.prepared = std::make_shared<owned::OwnedTerrainPreparedResources>();
     source.terrain = std::move(terrain);
