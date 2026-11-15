@@ -7,6 +7,7 @@
 #include "figure_service_nodes.h"
 #include "model_preview_geometry.h"
 #include "model_preview_material.h"
+#include "gltf_asset.h"
 
 namespace owned {
 
@@ -42,6 +43,55 @@ bool produce_model_preview(const ModelPreviewInput& input, std::size_t count,
     NativeWorldGeometry::Pose* pose = nullptr;
     if (!retained_visual_gpu_pose(input.sample, pose) || !pose) return false;
     pose->root_to_world = input.object_to_world;
+    // Registry models own their geometry and materials in every view. Do not
+    // enumerate FIG visibility or bind a legacy equipment atlas for this path.
+    const auto replacement = input.sample.prepared->motion_asset;
+    if (replacement && replacement->gltf_asset) {
+        if (!retained_visual_merged_groups(input.sample) ||
+            !input.sample.prepared->skn_selected) return false;
+        const auto& groups = input.sample.prepared->merged_groups;
+        if (groups.empty()) return false;
+        NativeWorldBounds bounds{};
+        float scaleSquared = 0;
+        for (unsigned r = 0; r < 3; ++r)
+            for (unsigned c = 0; c < 3; ++c)
+                scaleSquared += input.object_to_world[r*4+c]*input.object_to_world[r*4+c];
+        const float radius = replacement->gltf_asset->radius * std::sqrt(scaleSquared) + 1e-4f;
+        for (unsigned c = 0; c < 3; ++c) {
+            bounds.minimum[c] = input.object_to_world[c*4+3] - radius;
+            bounds.maximum[c] = input.object_to_world[c*4+3] + radius;
+        }
+        bounds.valid = true;
+        // OPAQUE/MASK establish depth first; BLEND uses the native triangle
+        // ordering path, with the same material depth/cull state as the world.
+        for (unsigned pass = 0; pass < 2; ++pass) for (std::size_t i = 0; i < groups.size(); ++i) {
+            const auto& group = groups[i];
+            const auto& material = replacement->asset.materials[group.skn_material];
+            if ((material.alpha == 2) != (pass != 0)) continue;
+            NativePreparedPartSubmission* record = nullptr;
+            if (!retained_visual_group_submission(input.sample, i, bounds, {true,true,0},
+                    input.texture_time, input.fog, record) || !record || !record->source) return false;
+            NativeGeometryView view = *record->source;
+            view.world.pose = pose; view.world.owner = &pose->owner;
+            view.world.object_to_world = input.object_to_world;
+            view.world.world_to_clip = input.world_to_clip; view.object_to_clip = input.world_to_clip;
+            view.prepared_identity.presentation_serial = input.serial;
+            view.bounds_minimum = bounds.minimum; view.bounds_maximum = bounds.maximum;
+            view.flags = record->values.flags & ~(4u | 8u);
+            if (!input.ground_contact) view.flags &= ~native_ground_contact_flag;
+            view.lighting.enabled = true;
+            view.lighting.material_diffuse = {1,1,1};
+            view.lighting.material_alpha = material.alpha == 0 ? 1.f : material.base[3];
+            view.lighting.object_to_world = input.object_to_world;
+            view.ordering = NativeOrdering::derive_from_state;
+            view.interface_preview = true;
+            view.fog = input.fog;
+            ModelPreviewPart part; part.ordinal = group.parts.front();
+            if (!submit(view, part)) return false;
+            ++result.submitted; result.visible = 1;
+        }
+        return true;
+    }
     return produce_model_parts(count, read, bind,
         [&](std::size_t index, std::uint32_t& visible) {
             ModelPreviewPart part;

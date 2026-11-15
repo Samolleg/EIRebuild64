@@ -47,6 +47,14 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
     sample.lifecycle = {lpObject->GetID(), ownedPreviewResource, ownedPreviewResource};
     sample.assembly = ownedPreviewAssembly;
     sample.status = owned::RetainedVisualStatus::ready;
+    bool registrySelected = false;
+    const auto registryAsset = dynamic_cast<const CUnit*>(lpObject)
+        ? owned::skn::select_gltf(sample.assembly->skeleton->visual_reference,
+            sample.assembly->main_hero_visual, registrySelected) : nullptr;
+    // Preserve the established FIG/SKN preview facts. Only a registry visual
+    // needs unit group admission and a completed, privately placed pose.
+    sample.values.unit = registrySelected;
+    sample.completed_pose = registrySelected;
     sample.object_pose.shape = sample.assembly->shape;
     if (++ownedPreviewSerial == 0) ++ownedPreviewSerial;
     OwnedRender::E1AnimationSelection selected;
@@ -185,7 +193,8 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
         },
         [&](const owned::NativeGeometryView& view, const owned::ModelPreviewPart& part) {
             return renderer->GetD3D()->SubmitC74Figure(view,
-                part.material.default_colors ? nullptr : &illumination.world, illumination.points);
+                view.skn_material.identity || !part.material.default_colors ? &illumination.world : nullptr,
+                illumination.points);
         },
         [](std::size_t, const owned::ModelPreviewPart&) { return true; }, result);
     // Unlit camp submissions may be queued. Finish before this UI pose owner
