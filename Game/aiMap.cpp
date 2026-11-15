@@ -856,6 +856,18 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
 
             pSector += sizeof(header);
 
+            // Layer vertex heights are stored even where no layer object is drawn.
+            // Only an active water object can give the ground a water depth.
+            const WORD* layerObjects = bHaveLayers ? reinterpret_cast<const WORD*>(
+                pSector + sizeof(SSectVert2) * N_V_PSECTOR * 2 +
+                sizeof(TILE_ID) * N_TILES_PSECTOR * (bHaveLayerTiles ? 2 : 1)) : nullptr;
+            auto waterCell = [&](int x, int y) {
+                if (!layerObjects) return false;
+                const WORD object = layerObjects[(y / N_CL_PER_TILE_S) * N_TILES_PSECTOR_S + x / N_CL_PER_TILE_S];
+                return object != TILE_UNDEF && object < objects.GetSize() &&
+                    (objects[object].eType == TOT_WATER_NOTEXTURE || objects[object].eType == TOT_WATER);
+            };
+
             if(auto* navTerrain=navigation.Terrain()) {
             navTerrain->groundSources.emplace(navTerrain->ground.size(),pszSectorName);
             const auto* navVertices=reinterpret_cast<const SSectVert2*>(pSector);
@@ -867,7 +879,7 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
             for(int y=0;y<N_CL_PSECTOR_S;++y)for(int x=0;x<N_CL_PSECTOR_S;++x) {
                 auto lu=vertex(x,y),ru=vertex(x+1,y),ld=vertex(x,y+1),rd=vertex(x+1,y+1);
                 auto depth=[&](int vx,int vy,Navigation::Point base) {
-                    return bHaveLayers?(std::max)(0.f,GetFloatValueByRange(navVertices[N_V_PSECTOR+vy*N_V_PSECTOR_S+vx].usZ,fpMaxZ)-base.z):0.f;
+                    return waterCell(x,y)?(std::max)(0.f,GetFloatValueByRange(navVertices[N_V_PSECTOR+vy*N_V_PSECTOR_S+vx].usZ,fpMaxZ)-base.z):0.f;
                 };
                 const float wlu=depth(x,y,lu),wru=depth(x+1,y,ru),wld=depth(x,y+1,ld),wrd=depth(x+1,y+1,rd);
                 navTerrain->ground.push_back({lu,ru,rd,1,{wlu,wru,wrd}});
@@ -909,7 +921,7 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
                     assert(nH <= N_AI_MAX_HEIGHT);
                     map[nYIndex + 1][nXIndex + 1].nHeight = nH;
 
-                    if (bHaveLayers)
+                    if (waterCell(is, js))
                     {
                         float fpLrZlu = GetFloatValueByRange((pVert2 + N_V_PSECTOR)->usZ, fpMaxZ);
                         float fpLrZru = GetFloatValueByRange((pVert2 + 1 + N_V_PSECTOR)->usZ,
@@ -933,6 +945,13 @@ BOOL CAIMap::Load(LPCSTR pszMapName)
                         map[nYIndex][nXIndex + 1].nDepth = DepthFloatToInt(fpDepthru);
                         map[nYIndex + 1][nXIndex].nDepth = DepthFloatToInt(fpDepthld);
                         map[nYIndex + 1][nXIndex + 1].nDepth = DepthFloatToInt(fpDepthrd);
+                    }
+                    else
+                    {
+                        map[nYIndex][nXIndex].nDepth = 0;
+                        map[nYIndex][nXIndex + 1].nDepth = 0;
+                        map[nYIndex + 1][nXIndex].nDepth = 0;
+                        map[nYIndex + 1][nXIndex + 1].nDepth = 0;
                     }
                 }
                 pVert2++;

@@ -62,8 +62,10 @@ int main(int argc,char** argv)try{
  float4 ps(float4 pixel:SV_Position):SV_Target{
   float2 uv=pixel.xy/float2(960,640);float3 p=float3(uv.x*70,uv.y*46,0);
   if(unused.x>0)return float4(terrainAstralCoverage(10u<<16,uv),0,0,1);
+  float3 eye=float3(28,-15,55);
+  if(unused.y>0){p=float3(25,20,uv.y*60);eye=p+float3(3,-4,8);}
   float shore=shoreOn>0?max(0,(uv.x-.12)*70):4;
-  return float4(terrainAstralColor(p,float3(28,-15,55),seconds,shore,.006),1);
+  return float4(terrainAstralColor(p,eye,seconds,shore,.006),1);
  })";
  auto v=compile(shader,"vs","vs_5_0"),p=compile(shader,"ps","ps_5_0");
  ComPtr<ID3D11VertexShader> vs;ComPtr<ID3D11PixelShader> ps;hr(device->CreateVertexShader(v->GetBufferPointer(),v->GetBufferSize(),nullptr,&vs));hr(device->CreatePixelShader(p->GetBufferPointer(),p->GetBufferSize(),nullptr,&ps));
@@ -73,9 +75,9 @@ int main(int argc,char** argv)try{
  D3D11_BUFFER_DESC bd{};bd.ByteWidth=16;bd.BindFlags=D3D11_BIND_CONSTANT_BUFFER;ComPtr<ID3D11Buffer> cb;hr(device->CreateBuffer(&bd,nullptr,&cb));
  D3D11_VIEWPORT vp{0,0,960,640,0,1};context->RSSetViewports(1,&vp);context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);context->VSSetShader(vs.Get(),nullptr,0);context->PSSetShader(ps.Get(),nullptr,0);
  auto rt=rtv.Get();context->OMSetRenderTargets(1,&rt,nullptr);auto buffer=cb.Get();context->PSSetConstantBuffers(0,1,&buffer);
- std::vector<float> frames[5];
- for(unsigned frame=0;frame<5;++frame){
-  float constants[4]={frame==1?30.f:0.f,frame==3?0.f:1.f,frame==4?1.f:0.f,0};context->UpdateSubresource(cb.Get(),0,nullptr,constants,0,0);context->Draw(3,0);context->CopyResource(read.Get(),target.Get());
+ std::vector<float> frames[6];
+ for(unsigned frame=0;frame<6;++frame){
+  float constants[4]={frame==1?30.f:0.f,(frame==3||frame==5)?0.f:1.f,frame==4?1.f:0.f,frame==5?1.f:0.f};context->UpdateSubresource(cb.Get(),0,nullptr,constants,0,0);context->Draw(3,0);context->CopyResource(read.Get(),target.Get());
   D3D11_MAPPED_SUBRESOURCE mapped{};hr(context->Map(read.Get(),0,D3D11_MAP_READ,0,&mapped));auto& pixels=frames[frame];pixels.resize(960*640*4);
   for(unsigned y=0;y<640;++y)std::memcpy(pixels.data()+y*960*4,static_cast<char*>(mapped.pData)+y*mapped.RowPitch,960*16);context->Unmap(read.Get(),0);
   for(float c:pixels)require(std::isfinite(c)&&c>=0&&c<=1,"finite bounded output");
@@ -86,5 +88,15 @@ int main(int argc,char** argv)try{
  require(frames[0]==frames[2],"same game time must produce identical pixels");
  double delta=0,edge=0,distant=0;for(unsigned i=0;i<960*640;++i){delta+=std::abs(frames[0][i*4]-frames[1][i*4]);if(i%960<150)edge+=frames[0][i*4]-frames[3][i*4];if(i%960>300)distant+=std::abs(frames[0][i*4]-frames[3][i*4]);}
  require(delta>1&&edge>1&&distant==0,"animation and local shore haze");
+ std::vector<float> luminance;float minWall=1,maxWall=0;
+ for(unsigned i=0;i<960*640;++i){
+  const auto* p=frames[3].data()+i*4;luminance.push_back(p[0]*.2126f+p[1]*.7152f+p[2]*.0722f);
+  minWall=(std::min)(minWall,frames[5][i*4]);maxWall=(std::max)(maxWall,frames[5][i*4]);
+ }
+ std::sort(luminance.begin(),luminance.end());
+ std::cout<<"Luminance (linear, no shore): p10="<<luminance[luminance.size()/10]<<" p50="<<luminance[luminance.size()/2]
+          <<" p95="<<luminance[luminance.size()*95/100]<<" max="<<luminance.back()<<" wall_red_range="<<maxWall-minWall<<'\n';
+ require(luminance[luminance.size()/10]<.02f&&luminance[luminance.size()/2]>.04f&&luminance[luminance.size()/2]<.065f&&luminance.back()<.18f,"readable currents, dark gulf, bounded highlights");
+ require(maxWall-minWall>.01f,"flow varies over the height of steep Astral terrain");
  std::cout<<"PASS production HLSL on D3D11 WARP; finite pixels, deterministic pause, animated currents, localized haze\n";return 0;
 }catch(const std::exception& e){std::cerr<<e.what()<<'\n';return 1;}
