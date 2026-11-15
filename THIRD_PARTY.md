@@ -182,3 +182,11 @@ ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ```
+
+## cgltf v1.15
+
+`dependencies/cgltf/v1.15/cgltf.h` is prepared from the coordinator-provided
+`deps/cgltf/v1.15`, jkuhlmann/cgltf tag v1.15. Header-only MIT dependency.
+The archive SHA-256 is `84E352092E5CD6AAB7F66DE62DDB66BEB5E6F18D412CA9D12950D7A55BFEF25A`.
+The complete MIT text is copied alongside the header as `LICENSE` by
+`tools/prepare-worktree.ps1`. The source archive is already available locally.

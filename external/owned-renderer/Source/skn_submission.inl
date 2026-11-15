@@ -16,6 +16,8 @@ bool build_skn_groups(const RetainedVisualSample &sample,
         nodes[j] = k;
         break;
       }
+  if(asset->gltf_asset)for(unsigned j=0;j<nodes.size();++j)
+    nodes[j]=static_cast<unsigned>(sample.assembly->skeleton->nodes.size())+j;
   if(asset->motion)for(unsigned j=0;j<nodes.size();++j)if(nodes[j]==UINT_MAX)
     for(unsigned i=0;i<asset->motion->nodes.size();++i)if(asset->motion->nodes[i].name==data.joints[j].name)
       nodes[j]=static_cast<unsigned>(sample.assembly->skeleton->nodes.size())+i;
@@ -68,8 +70,15 @@ bool build_skn_groups(const RetainedVisualSample &sample,
       }
     };
     unsigned semantic = nodes[data.semantic_joints[sub]], part = UINT_MAX;
+    if(asset->gltf_asset)for(unsigned i=0;i<sample.assembly->parts.size();++i) {
+      const auto& candidate=sample.assembly->parts[i];
+      if(candidate.source_available && !candidate.explicitly_hidden && !candidate.weapon && !candidate.arrow &&
+          candidate.geometry && !candidate.geometry->indices.empty() && !unit_service_node(candidate.name.c_str())) {
+        part=i;break;
+      }
+    }
     for (unsigned i = 0; i < sample.assembly->parts.size(); ++i)
-      if (sample.assembly->parts[i].skeleton_node == semantic) {
+      if (!asset->gltf_asset && sample.assembly->parts[i].skeleton_node == semantic) {
         part = i;
         break;
       }
@@ -108,7 +117,7 @@ bool build_skn_groups(const RetainedVisualSample &sample,
     group.parts = {part};
     group.skn_asset = asset;
     group.skn_material = mesh.material;
-    group.skn_casts_shadow = selected.assembled_character_texture && data.materials[mesh.material].maps[0].empty()
+    group.skn_casts_shadow = !asset->gltf_asset && selected.assembled_character_texture && data.materials[mesh.material].maps[0].empty()
         ? selected.casts_shadow : data.materials[mesh.material].alpha!=2;
     group.shape_count = 1;
     group.position_groups = group.normal_groups =

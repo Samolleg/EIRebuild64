@@ -46,6 +46,15 @@ $d3d12Files = foreach ($package in $d3d12Packages) {
         }
     }
 }
+# cgltf v1.15 is header-only and provided by the coordinator's local deps.
+$cgltfSource = Join-Path $projectRoot 'deps/cgltf/v1.15'
+foreach ($file in 'cgltf.h','LICENSE') {
+    $source = Join-Path $cgltfSource $file
+    if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing cgltf v1.15 input: $source" }
+    $destination = Join-Path $repo ('dependencies/cgltf/v1.15/' + $file)
+    New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
+    Copy-Item -LiteralPath $source -Destination $destination -Force
+}
 $cache = Join-Path $projectRoot 'deps/nuget'
 [xml]$config = Get-Content -LiteralPath (Join-Path $repo 'packages.config') -Raw
 
