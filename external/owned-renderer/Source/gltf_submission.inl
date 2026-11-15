@@ -32,10 +32,31 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
         prepared.motion_pose_valid = false;
     }
     current.binding = prepared.motion_binding;
-    if (!prepared.motion_pose_valid)
+    if (!prepared.motion_pose_valid ||
+        !owned_visual_pose_key_matches(prepared.motion_pose_key, sample))
     {
         auto result = std::make_shared<std::vector<NativeWorldGeometry::Pose::Node>>(
             base + asset->gltf_asset->idle.size());
+        std::vector<VisualNodeSample> legacy;
+        if (!sample_visual_skeleton(*sample.assembly->skeleton, sample.selection,
+                                    current.shape, current.center_shift, sample.pose.phase,
+                                    legacy, false) || legacy.size() != base)
+            throw std::runtime_error("glTF host skeleton unavailable");
+        VisualPoseState local;
+        local.tilted_facing = local.root_rotation_valid = true;
+        local.root_rotation = { 1, 0, 0, 0 };
+        for (unsigned i = 0; i < legacy.size(); ++i)
+        {
+            std::array<float, 16> matrix{};
+            if (!visual_node_world_matrix(local, legacy[i], { 1, 1, 1 }, matrix))
+                throw std::runtime_error("glTF host transform invalid");
+            for (unsigned r = 0; r < 3; ++r)
+                for (unsigned c = 0; c < 4; ++c)
+                    (*result)[i].rows[r][c] = matrix[r * 4 + c];
+            (*result)[i].rotation = legacy[i].rotation;
+            for (unsigned c = 0; c < 3; ++c)
+                (*result)[i].translation[c] = legacy[i].translation[c];
+        }
         const skn::Matrix yToZ{ 1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1 };
         for (unsigned i = 0; i < asset->gltf_asset->idle.size(); ++i)
         {
@@ -45,6 +66,7 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
                     (*result)[base + i].rows[r][c] = matrix[c * 4 + r];
         }
         current.baked = std::move(result);
+        prepared.motion_pose_key = owned_visual_pose_key(sample);
         prepared.motion_pose_valid = true;
     }
     current.height_scale = 1;

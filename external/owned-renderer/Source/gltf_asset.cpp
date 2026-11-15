@@ -879,6 +879,9 @@ std::shared_ptr<const Asset> select(const std::string &visual, bool hero, bool &
     {
         auto asset = decode(store, read(store, resource), read(store, "profiles/human.v1.json"));
         asset->cache_key += "|" + cacheKey;
+        const std::string detail = "model=\"" + resource +
+            "\" glTF animation not wired: static idle frame";
+        bridge_append_probe_event("gltf_asset_loaded", detail.c_str());
         cache[cacheKey] = asset;
         return asset;
     }
