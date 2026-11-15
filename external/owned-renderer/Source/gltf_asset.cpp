@@ -497,6 +497,8 @@ std::shared_ptr<Asset> decode(ResourceStore &store, const ResourceBlob &blob,
         material.metallic = pbr.metallic_factor;
         material.ao = 1;
         material.alpha = static_cast<unsigned>(input.alpha_mode);
+        require(std::isfinite(input.alpha_cutoff) && input.alpha_cutoff >= 0,
+                "alpha cutoff");
         material.cutoff = input.alpha_cutoff;
         material.two_sided = input.double_sided;
         const cgltf_texture_view *views[] = { &pbr.base_color_texture, &input.normal_texture,
@@ -593,6 +595,16 @@ std::shared_ptr<Asset> decode(ResourceStore &store, const ResourceBlob &blob,
             for (const auto *candidate : candidates)
                 if (candidate->texture)
                 {
+                    if (candidate->has_transform)
+                    {
+                        const auto &transform = candidate->transform;
+                        require(std::isfinite(transform.rotation) &&
+                                    std::isfinite(transform.offset[0]) &&
+                                    std::isfinite(transform.offset[1]) &&
+                                    std::isfinite(transform.scale[0]) &&
+                                    std::isfinite(transform.scale[1]),
+                                "nonfinite texture transform");
+                    }
                     if (!selected)
                         selected = candidate;
                     else
@@ -648,7 +660,13 @@ std::shared_ptr<Asset> decode(ResourceStore &store, const ResourceBlob &blob,
                 }
             }
             auto tan = tangent ? values(tangent) : std::vector<float>();
+            require(!tangent || tangent->type == cgltf_type_vec4, "tangent VEC4 required");
             require(tan.empty() || tan.size() == positions->count * 4, "tangent size");
+            for (std::size_t i = 3; i < tan.size(); i += 4)
+                require(tan[i] == -1.f || tan[i] == 1.f, "tangent handedness");
+            for (float coordinate : tex)
+                require(std::isfinite(coordinate) && std::abs(coordinate) <= 65504.f,
+                        "UV outside GPU half-float range");
             require(pos.size() == positions->count * 3 && normal.size() == pos.size() &&
                         js.size() == positions->count * 4 && ws.size() == js.size() &&
                         tex.size() == positions->count * 2,
@@ -778,6 +796,24 @@ std::shared_ptr<Asset> decode(ResourceStore &store, const ResourceBlob &blob,
                     tan[i * 4 + 3] = handedness < 0 ? -1.f : 1.f;
                 }
             }
+            // Morph deltas can change the authored tangent length and orthogonality.
+            // Integer packing must never receive a nonfinite value.
+            for (std::size_t i = 0; i < positions->count; ++i)
+            {
+                float dot = 0;
+                for (unsigned c = 0; c < 3; ++c)
+                    dot += normal[i * 3 + c] * tan[i * 4 + c];
+                float norm = 0;
+                for (unsigned c = 0; c < 3; ++c)
+                {
+                    tan[i * 4 + c] -= normal[i * 3 + c] * dot;
+                    norm += tan[i * 4 + c] * tan[i * 4 + c];
+                    require(std::isfinite(pos[i * 3 + c]), "nonfinite morphed position");
+                }
+                require(std::isfinite(norm) && norm > 1e-12f, "invalid vertex tangent");
+                for (unsigned c = 0; c < 3; ++c)
+                    tan[i * 4 + c] /= std::sqrt(norm);
+            }
             const unsigned base = static_cast<unsigned>(output->geometry.vertices.size());
             for (std::size_t v = 0; v < positions->count; ++v)
             {
@@ -789,7 +825,8 @@ std::shared_ptr<Asset> decode(ResourceStore &store, const ResourceBlob &blob,
                     require(ws[v * 4 + k] >= 0, "negative weight");
                     sum += ws[v * 4 + k];
                 }
-                require(sum > 0, "zero weights");
+                require(std::isfinite(sum) && std::abs(sum - 1.f) <= 1e-4f,
+                        "skin weights must sum to one");
                 unsigned total = 0, biggest = 0;
                 for (unsigned k = 0; k < 4; ++k)
                 {
