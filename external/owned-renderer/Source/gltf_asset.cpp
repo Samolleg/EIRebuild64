@@ -250,7 +250,7 @@ std::shared_ptr<Asset> decode(ResourceStore &store, const ResourceBlob &blob,
     for (std::size_t i = 0; i < data.extensions_required_count; ++i)
     {
         const std::string name = data.extensions_required[i];
-        require(name == "KHR_materials_unlit" || name == "KHR_texture_transform",
+        require(name == "KHR_materials_unlit",
                 "required extension " + name);
     }
     for (std::size_t i = 0; i < data.buffers_count; ++i)
@@ -595,70 +595,25 @@ std::shared_ptr<Asset> decode(ResourceStore &store, const ResourceBlob &blob,
             for (const auto *candidate : candidates)
                 if (candidate->texture)
                 {
-                    if (candidate->has_transform)
-                    {
-                        const auto &transform = candidate->transform;
-                        require(std::isfinite(transform.rotation) &&
-                                    std::isfinite(transform.offset[0]) &&
-                                    std::isfinite(transform.offset[1]) &&
-                                    std::isfinite(transform.scale[0]) &&
-                                    std::isfinite(transform.scale[1]),
-                                "nonfinite texture transform");
-                    }
+                    require(candidate->texcoord == contract.at("materials").at("textureTexCoord").get<int>(),
+                            "human.v1 textures require TEXCOORD_0");
+                    require(!candidate->has_transform,
+                            "human.v1 forbids KHR_texture_transform");
                     if (!selected)
                         selected = candidate;
-                    else
-                    {
-                        const auto set = [](const cgltf_texture_view &view) {
-                            return view.has_transform && view.transform.has_texcoord
-                                       ? view.transform.texcoord
-                                       : view.texcoord;
-                        };
-                        require(set(*selected) == set(*candidate) &&
-                                    selected->has_transform == candidate->has_transform,
-                                "per-map UV layouts require a later renderer extension");
-                        if (selected->has_transform)
-                        {
-                            const auto &a = selected->transform;
-                            const auto &b = candidate->transform;
-                            require(a.offset[0] == b.offset[0] && a.offset[1] == b.offset[1] &&
-                                        a.scale[0] == b.scale[0] && a.scale[1] == b.scale[1] &&
-                                        a.rotation == b.rotation,
-                                    "per-map UV transforms require a later renderer extension");
-                        }
-                    }
                 }
-            const int uvSet = selected
-                                  ? (selected->has_transform && selected->transform.has_texcoord
-                                         ? selected->transform.texcoord
-                                         : selected->texcoord)
-                                  : 0;
-            require(uvSet >= 0 && uvSet <= 1, "UV set");
-            const auto *uv = cgltf_find_accessor(&primitive, cgltf_attribute_type_texcoord, uvSet);
+            const auto *uv = cgltf_find_accessor(&primitive, cgltf_attribute_type_texcoord, 0);
             require(!selected || uv, "texture coordinate attribute required");
             const auto *tangent = cgltf_find_accessor(&primitive, cgltf_attribute_type_tangent, 0);
-            // Normal-mapped assets must retain their authored tangent basis until
-            // the profile's MikkTSpace generator is available in this importer.
+            // human.v1 normal maps use the authored glTF tangent basis.
             require(!material->normal_texture.texture || tangent,
-                    "normal map without TANGENT requires MikkTSpace generation");
+                    "human.v1 normal map requires authored TANGENT");
             require(positions && normals && joints && weights &&
                         !cgltf_find_accessor(&primitive, cgltf_attribute_type_joints, 1),
                     "vertex attributes/influences");
             auto pos = values(positions), normal = values(normals), js = values(joints),
                  ws = values(weights);
             auto tex = uv ? values(uv) : std::vector<float>(positions->count * 2, 0);
-            if (selected && selected->has_transform)
-            {
-                const auto &transform = selected->transform;
-                const float c = std::cos(transform.rotation), s = std::sin(transform.rotation);
-                for (std::size_t i = 0; i < tex.size(); i += 2)
-                {
-                    const float u = tex[i] * transform.scale[0],
-                                v = tex[i + 1] * transform.scale[1];
-                    tex[i] = transform.offset[0] + c * u - s * v;
-                    tex[i + 1] = transform.offset[1] + s * u + c * v;
-                }
-            }
             auto tan = tangent ? values(tangent) : std::vector<float>();
             require(!tangent || tangent->type == cgltf_type_vec4, "tangent VEC4 required");
             require(tan.empty() || tan.size() == positions->count * 4, "tangent size");
@@ -731,7 +686,7 @@ std::shared_ptr<Asset> decode(ResourceStore &store, const ResourceBlob &blob,
                 for (unsigned c = 0; c < 3; ++c)
                     normal[i * 3 + c] /= std::sqrt(norm);
             }
-            if (tan.empty() || (selected && selected->has_transform))
+            if (tan.empty())
             {
                 tan.assign(positions->count * 4, 0);
                 std::vector<std::array<float, 3>> bitangent(positions->count);
