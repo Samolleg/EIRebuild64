@@ -7,12 +7,27 @@ import struct
 from pathlib import Path
 import sys
 import tempfile
+import subprocess
 
 import bpy
 from mathutils import Matrix, Quaternion, Vector
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from validate import Accessors, Diagnostics, close, matrix, read_glb, validate, validate_metadata, write_glb
+from validate import Accessors, Diagnostics, close, matrix, read_glb, validate_metadata, write_glb
+
+
+def check_glb(path, profile_path, d):
+    # Ship this executable beside export.py; GLB acceptance belongs to the runtime decoder.
+    checker = Path(__file__).resolve().with_name('EIRebuild64ModelCheck.exe')
+    if not checker.is_file():
+        raise ValueError('EIRebuild64ModelCheck.exe is missing beside export.py; copy it from the matching build kit')
+    result = subprocess.run([str(checker), str(path), '--profile', str(profile_path)],
+                            capture_output=True, text=True, encoding='utf-8', errors='replace')
+    if result.stdout:
+        print(result.stdout, end='', flush=True)
+    if result.returncode:
+        d.error('GLB', result.stderr.strip() or 'ModelCheck failed with code '+str(result.returncode),
+                'correct the runtime decoder diagnostic and export again')
 
 
 def custom(owner, name, default=None):
@@ -288,7 +303,7 @@ def main():
         if profile.get('schema') != 'ei.character-profile' or profile.get('version') != 1:
             raise ValueError('unsupported character profile schema/version')
         if args.check_glb:
-            validate(*read_glb(args.check_glb), profile, args.kind, d)
+            check_glb(args.check_glb, args.profile, d)
         else:
             if args.out is None or args.out.suffix.lower() != '.glb':
                 parser.error('--out must name a .glb file')
@@ -329,9 +344,9 @@ def main():
                         raise ValueError('Blender glTF exporter did not finish')
                     doc, binary = enrich(*read_glb(candidate), objects, profile, args.kind, meta)
                     write_glb(candidate, doc, binary)
-                    validate(*read_glb(candidate), profile, args.kind, d)
+                    check_glb(candidate, args.profile, d)
                     if not d.errors:
-                        # Re-read serialized result before atomic publication; existing output is preserved on failure.
+                        # The shared decoder accepted the serialized result; publish atomically.
                         os.replace(candidate, args.out)
                         print('EXPORTED '+str(args.out), flush=True)
                 finally:

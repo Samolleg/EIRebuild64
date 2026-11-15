@@ -20,6 +20,10 @@ struct Asset
     std::string cache_key;
     float radius = 0;
 };
+// CPU decoding/acceptance shared by the game and ModelCheck; no device required.
+using PublishPixels = std::function<ResourceBlob(const std::string &, const void *, std::uint32_t)>;
+std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &profile,
+                              const PublishPixels &publish);
 // Absence permits the established resource lookup. A selected invalid entry throws.
 std::shared_ptr<const Asset> select(const std::string &visual, bool hero, bool &present);
 } // namespace owned::gltf

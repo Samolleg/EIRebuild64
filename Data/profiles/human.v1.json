@@ -61,7 +61,7 @@
     "requiredCount": 26,
     "bindTolerance": 0.0001,
     "quaternionNormTolerance": 0.0001,
-    "optionalParentPolicy": "present nodes retain exact reference parent; include ancestor closure",
+    "optionalParentPolicy": "present joints retain the nearest profile parent; include ancestor closure; non-joint containers are allowed",
     "additionalJointPolicy": "reject unknown joint names in human.v1",
     "bones": [
       {

@@ -210,7 +210,7 @@ try {
     $kit = Join-Path $task 'kit'
     if (Test-Path -LiteralPath $kit) { throw "Kit already exists: $kit; retain evidence and use a fresh task for timing." }
     New-Item -ItemType Directory -Path $kit | Out-Null
-    foreach ($target in @(@('EI_Rebuild','EIRebuild64'),@('EIRebuild64NavBake','EIRebuild64NavBake'),@('EIRebuild64Pack','EIRebuild64Pack'))) {
+    foreach ($target in @(@('EI_Rebuild','EIRebuild64'),@('EIRebuild64NavBake','EIRebuild64NavBake'),@('EIRebuild64Pack','EIRebuild64Pack'),@('EIRebuild64ModelCheck','EIRebuild64ModelCheck'))) {
         Copy-Item -LiteralPath (Join-Path $repo "out/x64/Release/$($target[0])/$($target[1]).exe") -Destination $kit
         Copy-Item -LiteralPath (Join-Path $repo "out/x64/Release/$($target[0])/$($target[0]).pdb") -Destination (Join-Path $kit ($target[1] + '.pdb'))
     }
