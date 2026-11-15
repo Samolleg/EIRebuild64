@@ -22,6 +22,10 @@ bool build_skn_groups(const RetainedVisualSample &sample,
   for (unsigned node : nodes)
     if (node == UINT_MAX)
       throw std::runtime_error("SKN joint missing in legacy LNK");
+  // One SKN can bind to host skeletons with different unrelated nodes. The
+  // uploaded indices (including corrective records) are part of mesh identity.
+  std::string binding_layout;
+  for(unsigned node:nodes)binding_layout.append(reinterpret_cast<const char*>(&node),sizeof(node));
   // One draw per gameplay part/material/region, with a union vertex buffer
   // and independently authored index lists. LODs need not share vertices.
   std::set<std::array<unsigned,4>> built;
@@ -89,7 +93,7 @@ bool build_skn_groups(const RetainedVisualSample &sample,
         static_cast<unsigned>((vertices.size() + 3) / 4);
     prepared.merged_part_group[part] = group_index;
     const std::string content =
-        "skn|" + asset->identity.key() + "|" + std::to_string(sub) + "|" + std::to_string(chunk_index++);
+        "skn|" + asset->identity.key() + "|" + std::to_string(sub) + "|" + std::to_string(chunk_index++) + "|" + binding_layout;
     group.geometry = merged_geometry(
         content, [&](VisualPreparedResources::MergedGeometry &g) {
           g.positions.resize(group.position_groups);
