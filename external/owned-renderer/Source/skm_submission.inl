@@ -52,7 +52,12 @@ bool prepare_baked_motion(const RetainedVisualSample& sample){
   std::string clip_name=context.neutral;
   if(!sample.selection.neutral){
    if(!sample.selection.database||sample.selection.ordinal>=sample.selection.database->entries.size())throw std::runtime_error("SKM no selected clip");
-   clip_name=sample.selection.database->entries[sample.selection.ordinal].name;
+   if(!sample.selection.clip)throw std::runtime_error("SKM no resolved ANM clip");
+   // The controller can resolve an ADB name to a numbered ANM variant.
+   // Its already-selected immutable clip is authoritative for the bake key.
+   clip_name=sample.selection.clip->identity.canonical_name;
+   const auto separator=clip_name.find_last_of("/\\");
+   if(separator!=std::string::npos)clip_name=clip_name.substr(separator+1);
   }
   const auto reference=context.clips.find(clip_name);if(reference==context.clips.end())throw std::runtime_error("SKM selected clip missing: "+clip_name);
   if(!prepared.motion_clip||prepared.motion_clip->name!=clip_name){
