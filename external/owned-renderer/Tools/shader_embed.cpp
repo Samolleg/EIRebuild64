@@ -248,26 +248,76 @@ void store_write(const ShaderKey& key, const void* code, std::size_t size) {
 // edit there recompiled all of them (~186 programs; a terrain edit reached
 // the ground cover, fog and critter programs too). Preprocessing a program
 // takes milliseconds; compiling a terrain variant takes tens of seconds.
+// Hash tokens rather than FXC's whitespace and source-location presentation.
+// Preserve token boundaries (a + +b differs from a++b), literal contents,
+// and expanded __LINE__ values, which can affect actual shader behaviour.
+void hash_preprocessed(shader_cache_detail::Hasher& h, const char* p, const char* end) {
+    bool line_start = true;
+    const auto identifier = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+    };
+    while (p < end && *p) {
+        if (std::isspace(static_cast<unsigned char>(*p))) {
+            if (*p == '\n') line_start = true;
+            ++p;
+            continue;
+        }
+        if (line_start && *p == '#') {
+            const char* directive = p + 1;
+            while (directive < end && (*directive == ' ' || *directive == '\t')) ++directive;
+            if ((end - directive >= 4 && !std::strncmp(directive, "line", 4) &&
+                 (directive + 4 == end || std::isspace(static_cast<unsigned char>(directive[4])))) ||
+                (directive < end && std::isdigit(static_cast<unsigned char>(*directive)))) {
+                while (p < end && *p && *p != '\n') ++p;
+                continue;
+            }
+        }
+        line_start = false;
+        const char* begin = p++;
+        if (*begin == '"' || *begin == '\'') {
+            while (p < end && *p) {
+                if (*p == '\\' && p + 1 < end) { p += 2; continue; }
+                if (*p++ == *begin) break;
+            }
+        } else if (std::isdigit(static_cast<unsigned char>(*begin)) ||
+                   (*begin == '.' && p < end && std::isdigit(static_cast<unsigned char>(*p)))) {
+            // Preprocessing numbers include hexadecimal and exponent signs.
+            while (p < end && (identifier(*p) || *p == '.' ||
+                   ((*p == '+' || *p == '-') && std::strchr("eEpP", p[-1])))) ++p;
+        } else if (identifier(*begin)) {
+            while (p < end && identifier(*p)) ++p;
+        } else {
+            static const char* const operators[] = {"<<=", ">>=", "...", "++", "--", "->", "&&", "||",
+                "<=", ">=", "==", "!=", "+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<", ">>", "::", "##"};
+            for (const char* op : operators) {
+                const std::size_t size = std::strlen(op);
+                if (std::size_t(end - begin) >= size && !std::strncmp(begin, op, size)) {
+                    p = begin + size;
+                    break;
+                }
+            }
+        }
+        h.bytes(begin, std::size_t(p - begin));
+        h.text(nullptr); // token separator
+    }
+}
 bool compile_key(const ShaderProgram& program, ShaderKey& key) {
     Microsoft::WRL::ComPtr<ID3DBlob> text, messages;
     if (FAILED(D3DPreprocess(program.source.data(), program.source.size(), program.name, program.defines, nullptr, &text,
                              &messages)))
         return false;
-    // Without its #line directives: an edit inside an excluded block shifts
-    // the line numbers of everything after it, and release DXBC carries no
-    // line information, so they would recompile programs whose code is the same.
     const char* p = static_cast<const char*>(text->GetBufferPointer());
     const char* const end = p + text->GetBufferSize();
     shader_cache_detail::Hasher h;
-    h.text("preprocessed 3");
+    h.text("preprocessed tokens 4");
     h.bytes(&g_compiler_key.a, sizeof(g_compiler_key.a));
     h.bytes(&g_compiler_key.b, sizeof(g_compiler_key.b));
-    while (p < end) {
-        const char* line_end = static_cast<const char*>(std::memchr(p, '\n', std::size_t(end - p)));
-        line_end = line_end ? line_end + 1 : end;
-        if (!(line_end - p >= 5 && !std::strncmp(p, "#line", 5))) h.bytes(p, std::size_t(line_end - p));
-        p = line_end;
+    hash_preprocessed(h, p, end);
+    for (const D3D_SHADER_MACRO* define = program.defines; define && define->Name; ++define) {
+        h.text(define->Name);
+        h.text(define->Definition);
     }
+    h.text(nullptr); // end of macro fields
     h.text(program.entry);
     h.text(program.profile);
     h.bytes(&program.flags, sizeof(program.flags));
