@@ -89,10 +89,14 @@ std::array<double,9> Channel::sample(double phase)const{
  else for(unsigned j=0;j<(kind==1?9:3);++j)result[j]=a[j]*(1-i.mix)+b[j]*i.mix;return result;
 }
 Asset decode_layered(const Bytes&descriptor,const Bytes&mesh,const ResourceReader&read){
+ SharedResourceReader shared=[&](const std::string& resource){return std::make_shared<const Bytes>(read(resource));};
+ return decode_layered(descriptor,mesh,shared);
+}
+Asset decode_layered(const Bytes&descriptor,const Bytes&mesh,const SharedResourceReader&read){
  require(descriptor.size()<=1024*1024,"NLM descriptor too large");auto d=Json::parse(descriptor);require(d.at("schema")=="nala_runtime_layers_v1","NLM schema");
  auto mesh_sha=sha256(mesh);require(d.at("mesh_sha256")==mesh_sha,"NLM mesh identity");
- auto resource_bytes=[&](const Json&r){auto b=read(resource(r.at("resource")));require(sha256(b)==r.at("sha256"),"NLM resource checksum");return b;};
- auto common_bytes=resource_bytes(d.at("common"));auto base_sha=sha256(common_bytes);auto base=decode_bank(common_bytes);common_bytes.clear();common_bytes.shrink_to_fit();Asset a;
+ auto resource_bytes=[&](const Json&r){auto b=read(resource(r.at("resource")));require(bool(b),"NLM missing resource bytes");require(sha256(*b)==r.at("sha256"),"NLM resource checksum");return b;};
+ auto common_bytes=resource_bytes(d.at("common"));auto base_sha=sha256(*common_bytes);auto base=decode_bank(*common_bytes);common_bytes.reset();Asset a;
  require(integer(base.meta.at("author_nodes"),4096)==378,"NLC missing author nodes");const auto&names=base.meta.at("names");const auto&parents=base.meta.at("parents");const auto&rebases=base.meta.at("rebase");
  require(names.size()==378&&parents.size()==378&&rebases.size()==378&&base.meta.at("order").size()==378,"NLC rig dimensions");
  std::set<std::string> unique;for(unsigned n=0;n<378;++n){Node node;node.name=name(names[n]);require(unique.insert(node.name).second,"NLC duplicate node");node.parent=parents[n].get<int>();require(node.parent>=-1&&node.parent<378&&node.parent!=int(n),"NLC parent index");require(rebases[n].size()==4,"NLC rebase rows");for(unsigned row=0;row<4;++row){require(rebases[n][row].size()==4,"NLC rebase columns");for(unsigned col=0;col<4;++col)node.rebase[row*4+col]=real(rebases[n][row][col]);}a.nodes.push_back(node);}
@@ -100,14 +104,14 @@ Asset decode_layered(const Bytes&descriptor,const Bytes&mesh,const ResourceReade
  require(integer(base.meta.at("native_hz"),1000)==15,"NLC time base mismatch");
  require(d.at("shape").size()==3,"NLM body shape");for(unsigned i=0;i<3;++i)a.shape[i]=float(real(d["shape"][i]));a.radius=float(real(d.at("radius")));require(a.radius>0&&a.radius<=100,"NLM bounds");a.root_name=name(d.at("root_name"));
  require(d.at("mounts").size()==2,"NLM mounts");for(const auto&m:d["mounts"]){Mount mount;mount.name=name(m.at("name"));mount.anchor=integer(m.at("anchor"),377);require(unique.insert(mount.name).second,"NLM duplicate mount");a.mounts.push_back(mount);}
- read_surface(a,resource_bytes(d.at("surface")),mesh_sha);
+ read_surface(a,*resource_bytes(d.at("surface")),mesh_sha);
  const auto&clips=base.meta.at("clips");require(clips.is_object()&&clips.size()==325,"NLC clip coverage");
  std::map<std::string,std::shared_ptr<Clip>> common_clips;
  for(auto it=clips.begin();it!=clips.end();++it){auto c=std::make_shared<Clip>();c->name=it.key();require(c->name.size()<=256,"NLC clip name");const auto&m=it.value();c->scale=float(real(m.at("scale")));c->first=real(m.at("first_phase"));c->last=real(m.at("last_phase"));require(c->scale>0&&c->scale<100&&c->first==0&&c->last>=c->first,"NLC clip range");require(m.at("channels").size()==379*3,"NLC common tracks");for(const auto&v:m["channels"])c->common.push_back(find(base,nullptr,v));curve_kinds(c->common);common_clips.emplace(c->name,c);}
  a.unique_channels=base.channels.size();a.packed_curve_bytes=base.bytes;
  std::set<std::set<std::string>> signatures;require(d.at("contexts").is_array()&&!d["contexts"].empty()&&d["contexts"].size()<=128,"NLM context count");
  for(const auto&context:d["contexts"]){Context out;out.name=name(context.at("name"));out.neutral=name(context.at("neutral"));for(const auto&e:context.at("equipment"))require(out.equipment.insert(name(e)).second,"NLM duplicate equipment");require(signatures.insert(out.equipment).second,"NLM ambiguous equipment");
-  auto layer_bytes=resource_bytes(context.at("layer"));auto bank=decode_bank(layer_bytes);require(bank.meta.at("base_sha256")==base_sha,"NLL wrong common bank");
+  auto layer_bytes=resource_bytes(context.at("layer"));auto bank=decode_bank(*layer_bytes);require(bank.meta.at("base_sha256")==base_sha,"NLL wrong common bank");
   for(const auto&c:bank.channels)require(!base.channels.count(c.first),"NLL duplicated common channel");
   std::set<std::string> equipment;for(const auto&e:bank.meta.at("equipment"))equipment.insert(name(e));require(equipment==out.equipment,"NLL equipment mismatch");
   require(bank.meta.at("anchors").size()==a.mounts.size(),"NLL anchor count");for(unsigned i=0;i<a.mounts.size();++i)require(integer(bank.meta["anchors"][i],377)==a.mounts[i].anchor,"NLL anchor mismatch");

@@ -23,9 +23,9 @@ void CheckStartupPlan() {
     const auto selected = OwnedRender::CaptureStartupPaths(L"C:/App/Engine",
         L"D:\\Profiles\\Base", L"D:\\Profiles\\Base\\Res", &package);
     const std::vector<std::wstring> expected = {
-        L"D:\\Profiles\\Mods\\Selected\\a.res", L"D:\\Profiles\\Mods\\Selected\\a.res",
-        L"D:\\Profiles\\Mods\\Selected\\menu.res", L"D:\\Profiles\\Mods\\Selected\\tex.res",
-        L"D:\\Profiles\\Mods\\Selected\\menu.res", L"D:\\Profiles\\Base\\Res\\textures.res", L"D:\\Profiles\\Base\\Res\\redress.res", L"D:\\Profiles\\Base\\Res\\menus.res"};
+        L"D:\\Profiles\\Mods\\Selected\\a.res", L"D:\\Profiles\\Mods\\Selected\\tex.res",
+        L"D:\\Profiles\\Mods\\Selected\\menu.res", L"D:\\Profiles\\Base\\Res\\textures.res",
+        L"D:\\Profiles\\Base\\Res\\redress.res", L"D:\\Profiles\\Base\\Res\\menus.res"};
     require(selected.mounts.archives == expected);
     // mainmenu00 exists in both: HD textures must beat the legacy menu atlas.
     std::vector<std::wstring> textures;

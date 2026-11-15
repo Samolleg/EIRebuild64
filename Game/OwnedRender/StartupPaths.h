@@ -3,6 +3,7 @@
 #include "ResourceBootstrap.h"
 #include <filesystem>
 #include <array>
+#include <algorithm>
 #include "../../external/owned-renderer/Source/runtime_diagnostics.h"
 
 namespace OwnedRender {
@@ -23,16 +24,22 @@ void CaptureGraphicsMounts(owned::ResourceStoreConfig& mounts,
                 continue;
             }
             if ((_stricmp(std::filesystem::path(path).extension().string().c_str(),".pak") == 0) != pak) continue;
-            mounts.archives.push_back(resolve(path));
-            mounts.archive_kinds.push_back(kind);
+            const auto archive = std::filesystem::path(resolve(path)).lexically_normal().wstring();
+            const auto existing = std::find_if(mounts.archives.begin(), mounts.archives.end(),
+                [&](const std::wstring& mounted) { return _wcsicmp(mounted.c_str(), archive.c_str()) == 0; });
+            if (existing != mounts.archives.end()) {
+                mounts.archive_kinds[existing - mounts.archives.begin()] |= kind;
+            } else {
+                mounts.archives.push_back(archive);
+                mounts.archive_kinds.push_back(kind);
+            }
         }
     };
     for (bool pak : {true, false}) {
         addMod(0, owned::kArchiveFigures, pak);
-        addMod(3, owned::kArchiveFigures, pak);
         addMod(1, owned::kArchiveTextures, pak);
         addMod(2, owned::kArchiveTextures, pak);
-        addMod(3, owned::kArchiveTextures, pak);
+        addMod(3, owned::kArchiveAllKinds, pak);
     }
     for (size_t i = 0; i != ignore.size(); ++i) {
         if (ignore[i]) continue;
@@ -48,7 +55,7 @@ inline std::filesystem::path AbsoluteInput(const std::filesystem::path& value) {
 }
 
 // Package is CModPackage in production. Copy its already selected resource
-// plan, including duplicates and the ignore-original flag; never enumerate RES.
+// plan, combining archive categories and preserving the ignore-original flag.
 template<class Package>
 owned::EmbeddedHostPaths CaptureStartupPaths(const std::filesystem::path& engine,
     const std::filesystem::path& work,

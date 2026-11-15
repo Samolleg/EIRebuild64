@@ -34,6 +34,8 @@ struct Asset {
  std::size_t unique_channels=0,packed_curve_bytes=0;
 };
 using ResourceReader=std::function<Bytes(const std::string&)>;
+using SharedResourceReader=std::function<std::shared_ptr<const Bytes>(const std::string&)>;
+Asset decode_layered(const Bytes& descriptor,const Bytes& mesh,const SharedResourceReader& read);
 Asset decode_layered(const Bytes& descriptor,const Bytes& mesh,const ResourceReader& read);
 std::string sha256(const Bytes& bytes);
 struct Interval{unsigned first=0,second=0;double mix=0;};

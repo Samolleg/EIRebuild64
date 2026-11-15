@@ -945,7 +945,14 @@ bool ResourceStore::read(const ResourceLocation& location, ResourceBlob& blob,
             try {
                 const auto* entry = location.state_->pak->Find(location.state_->pak_name);
                 if (!entry) throw std::runtime_error("PAK entry disappeared");
-                *bytes = location.state_->pak->Read(*entry,RuntimeDiagnostics::Enabled());
+                if (entry->method == 0) {
+                    if (!location.state_->file->read(entry->offset, entry->size, *bytes, failure))
+                        return false;
+                    if (RuntimeDiagnostics::Enabled() && ei::pak::Hash(*bytes) != entry->hash)
+                        throw std::runtime_error("PAK entry hash mismatch");
+                } else {
+                    *bytes = location.state_->pak->Read(*entry,RuntimeDiagnostics::Enabled());
+                }
             } catch (const std::exception& e) {
                 bridge_append_probe_event("pak_read_failed",e.what());
                 fail(failure,ResourceFailureCode::file_read,e.what()); return false;
