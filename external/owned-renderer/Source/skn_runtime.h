@@ -48,9 +48,12 @@ inline Dds dds(ResourceBlob blob, unsigned map) {
     throw std::runtime_error("SKN DDS color space/BC format");
   Dds d;
   d.blob = std::move(blob);
-  d.format = map == 1   ? NativeOwnedTextureFormat::bc5
-             : map == 2 ? NativeOwnedTextureFormat::bc7
-                        : NativeOwnedTextureFormat::bc7_srgb;
+  // The world combiner and its lighting use display-encoded game colours.
+  // Keep authored sRGB RGB values in that space, as for legacy MMP albedo.
+  // An sRGB SRV would decode them without a matching output encode, making
+  // skin and emission too dark. BC7 UNORM preserves RGB and coverage alpha.
+  d.format = map == 1 ? NativeOwnedTextureFormat::bc5
+                     : NativeOwnedTextureFormat::bc7;
   unsigned full = 1;
   for (unsigned m = (std::max)(w, h); m > 1; m >>= 1)
     ++full;
@@ -130,7 +133,7 @@ inline std::shared_ptr<const RuntimeAsset> select(const std::string &name,
     a->joint_radius[v.joints[k]]=(std::max)(a->joint_radius[v.joints[k]],std::nextafter(r,INFINITY));
   }
   a->textures.resize(a->asset.materials.size());
-  for (unsigned i = 0; i < a->textures.size(); ++i)
+  for (unsigned i = 0; i < a->textures.size(); ++i) {
     for (unsigned k = 0; k < 4; ++k) {
       const auto &map = a->asset.materials[i].maps[k];
       if (map.empty())
@@ -140,6 +143,21 @@ inline std::shared_ptr<const RuntimeAsset> select(const std::string &name,
         throw std::runtime_error(failure.message);
       a->textures[i][k] = dds(std::move(texture), k);
     }
+    // A diagnostic failure must never discard a valid material.
+    try {
+      const auto& material = a->asset.materials[i];
+      const char* alpha = material.alpha == 0 ? "opaque" :
+                          material.alpha == 1 ? "mask" : "blend";
+      const std::string detail = "model=\"" + name + "\" material=" +
+          std::to_string(i) + " base_map=\"" + material.maps[0] +
+          "\" base_source=" + (material.maps[0].empty() ? "assembled" : "BC7_SRGB") +
+          " color_srv=BC7_UNORM color_space=game_gamma alpha=" +
+          alpha + " cutoff=" + std::to_string(material.cutoff) +
+          " metallic=" + std::to_string(material.metallic);
+      bridge_append_probe_event("skn_material_loaded", detail.c_str());
+    } catch (...) {
+    }
+  }
   cache[name] = a;
   return a;
 }
