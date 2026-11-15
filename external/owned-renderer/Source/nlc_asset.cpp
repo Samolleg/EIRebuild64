@@ -124,6 +124,16 @@ Asset decode_layered(const Bytes&descriptor,const Bytes&mesh,const SharedResourc
   }
   require(out.clips.count(out.neutral),"NLM missing neutral clip");a.unique_channels+=bank.channels.size();a.packed_curve_bytes+=bank.bytes;a.contexts.push_back(std::move(out));
  }
+ // Common curves are the authored unequipped pose. A descriptor may ship
+ // only equipment layers, so retain a base context when none was declared.
+ if(!signatures.count(std::set<std::string>{})){
+  Context base_context;
+  base_context.name="base";
+  base_context.neutral="cidle01";
+  require(common_clips.count(base_context.neutral),"NLC missing base neutral clip");
+  for(const auto& entry:common_clips)base_context.clips.emplace(entry.first,ClipRef{entry.second});
+  a.contexts.push_back(std::move(base_context));
+ }
  require(common_clips.count(a.correction_clip)&&a.correction_phases.front()==0&&a.correction_phases.back()<=common_clips.at(a.correction_clip)->last,"NLS clip coverage");return a;
 }
 } // namespace owned::skm
