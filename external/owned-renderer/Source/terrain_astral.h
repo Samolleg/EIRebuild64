@@ -69,20 +69,21 @@ float astralCloud(float2 p){return .57*astralNoise(p)+.28*astralNoise(p*2.03+17.
 float3 terrainAstralColor(float3 world,float3 eye,float seconds,float shoreDistance,float footprint){
  // Bounded camera offset: a suggestion of depth, with no geometry or depth-buffer displacement.
  float3 view=eye-world;float2 parallax=clamp(view.xy/max(abs(view.z),8),-2,2);
- float2 p=world.xy*float2(.055,.105);
+ // Include height so a steep painted backdrop retains visible structure in a low camera.
+ float2 p=world.xy*float2(.055,.105)+world.z*float2(.021,.045);
  float2 warp=float2(astralNoise(p*.65+11),astralNoise(p*.65-23))-.5;
  float2 deep=p+warp*1.6+parallax*.22+seconds*float2(.0022,-.0013);
  float2 near=p*1.8+warp*2+parallax*.07+seconds*float2(-.0031,.0018);
- float cloud=pow(smoothstep(.28,.78,astralCloud(deep)),2.2);
- float veil=pow(smoothstep(.4,.8,astralCloud(near)),1.7);
+ float cloud=pow(smoothstep(.28,.78,astralCloud(deep)),1.9);
+ float veil=pow(smoothstep(.4,.8,astralCloud(near)),1.5);
  float fil=sin(deep.x*2.1+deep.y*4.3+astralCloud(deep*1.4)*8);
- float thin=pow(saturate(1-abs(fil)),18)*smoothstep(.48,.72,astralNoise(deep*.7+41));
+ float thin=pow(saturate(1-abs(fil)),10)*smoothstep(.52,.78,astralNoise(deep*.7+41));
  thin*=1-smoothstep(.15,.65,footprint);
- float shore=(1-smoothstep(0,3.5,shoreDistance))*smoothstep(.3,.75,astralCloud(near*.8+7));
- // Deliberately dim: most of the gulf remains almost black, not neon water.
- return float3(.006,.005,.012)+float3(.032,.017,.055)*cloud+
-        float3(.026,.012,.043)*veil+float3(.008,.003,.014)*thin+
-        float3(.046,.021,.070)*shore;
+ float shore=(1-smoothstep(0,3.5,shoreDistance))*smoothstep(.25,.68,astralCloud(near*.8+7));
+ // Keep the black floor; raise only local violet currents and the broken shore haze.
+ return float3(.006,.005,.012)+float3(.140,.055,.230)*cloud+
+        float3(.100,.035,.170)*veil+float3(.035,.012,.060)*thin+
+        float3(.180,.060,.280)*shore;
 }
 )";
 } // namespace owned

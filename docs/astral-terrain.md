@@ -74,3 +74,20 @@ The installed main-menu data exercised 6 slots, 2137 tiles and 19233 marked
 GPU vertices. The current Zone1 has no authored Astral and yields zero, as
 required. These checks establish publication and decode; a real in-game image
 is still the visual check.
+
+
+## Readability from the main-menu camera (ASTRALREAD03)
+
+The black floor remains RGB (.006, .005, .012). Local violet cloud layers,
+filaments and broken shore haze carry more contrast; there is no global
+exposure or fog-setting change. World height now contributes to the continuous
+noise coordinates so steep painted terrain has variation in the menu's low
+camera. Drift speed, material masks, geometry and model veils are unchanged.
+
+On the repeatable GPU plane without shore haze, median linear luminance rises
+from .0179 to .0549; the darkest decile remains .0113 and the maximum .1517.
+The GPU check bounds median/highlight brightness and checks nonconstant flow
+on a vertical surface, in addition to the existing time, shore and mask tests.
+These figures are guardrails, not artistic acceptance: the ordinary main-menu
+camera after installation is the required visual comparison. Isolated previews
+use an sRGB display conversion and do not reproduce the complete game frame.
