@@ -16,6 +16,9 @@ bool build_skn_groups(const RetainedVisualSample &sample,
         nodes[j] = k;
         break;
       }
+  if(asset->motion)for(unsigned j=0;j<nodes.size();++j)if(nodes[j]==UINT_MAX)
+    for(unsigned i=0;i<asset->motion->nodes.size();++i)if(asset->motion->nodes[i].name==data.joints[j].name)
+      nodes[j]=static_cast<unsigned>(sample.assembly->skeleton->nodes.size())+i;
   for (unsigned node : nodes)
     if (node == UINT_MAX)
       throw std::runtime_error("SKN joint missing in legacy LNK");
@@ -79,7 +82,7 @@ bool build_skn_groups(const RetainedVisualSample &sample,
     group.parts = {part};
     group.skn_asset = asset;
     group.skn_material = mesh.material;
-    group.skn_casts_shadow = selected.assembled_character_texture
+    group.skn_casts_shadow = selected.assembled_character_texture && data.materials[mesh.material].maps[0].empty()
         ? selected.casts_shadow : data.materials[mesh.material].alpha!=2;
     group.shape_count = 1;
     group.position_groups = group.normal_groups =
@@ -109,6 +112,8 @@ bool build_skn_groups(const RetainedVisualSample &sample,
                                     static_cast<std::uint16_t>(i),
                                     static_cast<std::uint16_t>(i)});
             skn::GpuVertex skin{};
+            if(asset->motion && asset->motion->correction_map[vertices[i]]>=0)
+              skin.correction_node=static_cast<unsigned>(sample.assembly->skeleton->nodes.size()+asset->motion->nodes.size())+asset->motion->correction_map[vertices[i]];
             for(unsigned k=0;k<4;++k)skin.tangent[k]=v.tangent[k]/32767.f;
             for (unsigned k = 0; k < 4; ++k) {
               skin.joints[k] = nodes[v.joints[k]];

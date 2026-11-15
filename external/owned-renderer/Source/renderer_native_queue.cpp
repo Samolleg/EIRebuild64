@@ -1040,7 +1040,7 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
      !reserve(color_bytes,mesh.diffuse_storage_offset)||
      !reserve(color_bytes,mesh.specular_storage_offset)||
      (has_terrain&&!reserve(terrain_bytes,mesh.terrain_vertex_offset))||
-     (source.skin_vertices&&!reserve(std::uint64_t(source.component_count)*240,skin_at))||
+     (source.skin_vertices&&!reserve(std::uint64_t(source.component_count)*244,skin_at))||
      (lods&&!reserve(64,lod_table_at))||!reserve(index_bytes,mesh.index_offset))
   return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
  for(UINT level=0;lods&&level<lods->levels;++level)
@@ -1059,10 +1059,10 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
   try{blob.assign(cursor,0);}catch(const std::bad_alloc&){return abandon(E_OUTOFMEMORY);}
   const auto put=[&](UINT offset,const void* data,std::uint64_t bytes){if(data&&bytes)std::memcpy(blob.data()+offset,data,static_cast<std::size_t>(bytes));};
   if(source.skin_vertices){
-   put(skin_at,source.skin_vertices,std::uint64_t(source.component_count)*240);
+   put(skin_at,source.skin_vertices,std::uint64_t(source.component_count)*244);
    for(UINT i=0;i<components.size();++i){
     components[i].normal|=0x80000000u;
-    components[i].padding=mesh.allocation.offset+skin_at+i*240;
+    components[i].padding=mesh.allocation.offset+skin_at+i*244;
    }
   }
   put(mesh.position_offset,source.positions,position_bytes);
@@ -1402,6 +1402,7 @@ HRESULT Renderer::get_native_skeleton_asset(
    const auto length=static_cast<UINT>(value.size());key.append(reinterpret_cast<const char*>(&length),4);key.append(value);};
   add(binding->model->model_container);add(binding->model->bone_container);
   key.push_back(binding->rigid?1:(binding->neutral?2:3));if(binding->clip)add(binding->clip->identity);
+  key.append("|nodes="+std::to_string(binding->tracks.size()));
   const auto found=native_skeleton_assets_.find(key);
   if(found!=native_skeleton_assets_.end()){
    found->second.model=binding->model;found->second.clip=binding->clip;
@@ -1682,8 +1683,9 @@ HRESULT Renderer::resolve_native_pose(NativeWorldGeometry::Pose* pose,const Nati
   else {HRESULT hr=get_native_skeleton_asset(source.binding,value.asset,animation_allocation);if(FAILED(hr))return hr;}
   value.output=slot.value.output;
   value.generation=slot.value.generation;
-  const UINT count=static_cast<UINT>(source.binding->tracks.size());
-  const bool changed=slot.count!=count||std::memcmp(&slot.value,&value,sizeof(value))!=0||slot.binding!=source.binding;
+  if(source.baked&&(source.baked->size()<source.binding->tracks.size()||source.baked->size()>UINT_MAX))return E_INVALIDARG;
+  const UINT count=static_cast<UINT>(source.baked?source.baked->size():source.binding->tracks.size());
+  const bool changed=slot.count!=count||std::memcmp(&slot.value,&value,sizeof(value))!=0||slot.binding!=source.binding||slot.baked!=source.baked;
   if(changed){
    if(slot.allocation>=native_pose_ranges_.size()||slot.count!=count||native_pose_ranges_[slot.allocation].references){
     UINT allocation=UINT_MAX;
@@ -1700,11 +1702,11 @@ HRESULT Renderer::resolve_native_pose(NativeWorldGeometry::Pose* pose,const Nati
    if(++native_pose_ranges_[slot.allocation].generation==0)++native_pose_ranges_[slot.allocation].generation;
    if(++slot.revision==0)++slot.revision;
    value.generation={static_cast<UINT>(slot.revision),static_cast<UINT>(slot.revision>>32)};
-   slot.value=value;slot.count=count;slot.binding=source.binding;slot.valid=false;
+   slot.value=value;slot.count=count;slot.binding=source.binding;slot.baked=source.baked;slot.valid=false;
   }
   if(!slot.valid&&slot.scheduled!=slot.revision){
    native_pose_work_.push_back({slot.value,index,slot.count,slot.allocation,slot.revision,
-                               native_pose_ranges_[slot.allocation].generation});slot.scheduled=slot.revision;
+                               native_pose_ranges_[slot.allocation].generation,slot.baked});slot.scheduled=slot.revision;
   }
   draw.pose_slot=index;draw.pose_allocation=slot.allocation;
   draw.animation_allocation=slot.animation_allocation;
@@ -1721,6 +1723,13 @@ HRESULT Renderer::prepare_native_poses(){
   for(const auto& job:native_pose_work_){
    if(job.allocation>=native_pose_ranges_.size()||!native_pose_ranges_[job.allocation].references||
       native_pose_ranges_[job.allocation].generation!=job.allocation_generation)continue;
+   if(job.baked){
+    auto nodes=NativeWorldGeometry::Pose::place_baked(*job.baked,job.value.root_to_world,job.value.generation);
+    D3D11_BOX box{};box.left=job.value.output*sizeof(NativePoseNodeGpu);box.right=box.left+static_cast<UINT>(nodes.size()*sizeof(NativePoseNodeGpu));box.bottom=box.back=1;
+    context_->UpdateSubresource(native_pose_nodes_.Get(),0,&box,nodes.data(),0,0);profiler_.add_upload(box.right-box.left);
+    auto& slot=native_pose_slots_[job.slot];if(slot.revision==job.revision&&slot.value.output==job.value.output)slot.valid=true;
+    continue;
+   }
    native_pose_upload_.push_back(job.value);
   }
   if(native_pose_upload_.empty())return S_OK;
@@ -2476,7 +2485,7 @@ void Renderer::retire_native_source_values() noexcept{
   if(slot.animation_allocation<native_animation_ranges_.size()&&native_animation_ranges_[slot.animation_allocation].owners)
    --native_animation_ranges_[slot.animation_allocation].owners;
   slot.animation_allocation=UINT_MAX;
-  slot.active=false;slot.valid=false;slot.count=0;slot.allocation=UINT_MAX;slot.binding.reset();
+  slot.active=false;slot.valid=false;slot.count=0;slot.allocation=UINT_MAX;slot.binding.reset();slot.baked.reset();
   if(++slot.generation==0)++slot.generation;
  }
  for(UINT index=0;index<native_terrain_phases_.size();++index){

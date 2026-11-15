@@ -933,6 +933,16 @@ NativeWorldVertex prepareNativeWorldVertex(NativeInstance instance,uint componen
   output.p=float4(world,1);output.undeformedXY=world.xy;
   output.normal.xyz=normalize(worldNormal);
   output.tangent=float4(normalize(worldTangent),tangent.w);
+  uint correction=nativeGeometry.Load(component.w+240);
+  if(correction!=0xffffffff){
+   NativePoseNode target=nativePoseNodes[instance.poseNode+correction];
+   if(target.row0.w!=0){
+    output.p.xyz+=target.row0.xyz;output.undeformedXY=output.p.xy;
+    output.normal.xyz=normalize(target.row1.xyz);
+    float3 correctedTangent=worldTangent-output.normal.xyz*dot(worldTangent,output.normal.xyz);
+    output.tangent.xyz=normalize(correctedTangent);
+   }
+  }
  }
  [branch]if((instance.worldGeometry&@WORLD_VERTEX_OPACITY@)!=0)output.normal.w=loadPacked(instance.geometryOffsets.y,component.y).w;
  output.uv=asfloat(nativeGeometry.Load2(instance.geometryOffsets.z+component.z*8));

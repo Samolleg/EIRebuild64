@@ -2213,13 +2213,7 @@ private:
         std::array<float,16> root_to_world{};
         std::array<UINT,2> generation{};
     };
-    struct NativePoseNodeGpu {
-        std::array<float,4> rotation{}, translation{};
-        std::array<float,4> rows[3]{};
-        UINT morph_first = 0, morph_second = 0, morph_count = 0;
-        float morph_fraction = 0;
-        std::array<UINT,2> generation{};
-    };
+    using NativePoseNodeGpu = NativeWorldGeometry::Pose::Node;
     struct NativeWorldStateGpu {
         std::array<UINT,2> geometry{},pose{};
         UINT skn_lod = 0;
@@ -2228,6 +2222,7 @@ private:
     static_assert(sizeof(NativePoseGpu)==120 && sizeof(NativePoseNodeGpu)==104 && sizeof(NativeWorldStateGpu)==28,
         "Pose records must match the structured HLSL layout");
     struct NativePoseSlot {
+        std::shared_ptr<const std::vector<NativePoseNodeGpu>> baked;
         NativePreparedIdentity identity{};
         std::weak_ptr<const void> owner;
         std::shared_ptr<const VisualSkeletonBinding> binding;
@@ -2241,6 +2236,7 @@ private:
         NativePoseGpu value{};
         UINT slot = UINT_MAX, count = 0, allocation = UINT_MAX;
         std::uint64_t revision = 0, allocation_generation = 0;
+        std::shared_ptr<const std::vector<NativePoseNodeGpu>> baked;
     };
     struct NativePreparedMaterialSlot {
         NativePreparedIdentity identity{};

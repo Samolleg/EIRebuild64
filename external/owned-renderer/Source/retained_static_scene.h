@@ -21,6 +21,7 @@
 
 namespace owned {
 namespace skn {struct RuntimeAsset;}
+namespace skm {struct Clip;}
 
 struct RetainedStaticSourceCandidate;
 struct FurProfile;
@@ -109,6 +110,7 @@ struct MaterialComposition {
 // Immutable semantic appearance, built from cold named parts. The skeleton
 // is shared even when an attachment's FIG comes from a different model.
 struct VisualAssemblyAsset {
+    bool main_hero_visual=false;
     std::uint64_t revision = 0;
     std::shared_ptr<const ModelCpuAsset> skeleton;
     std::vector<VisualPartAsset> parts;
@@ -411,6 +413,14 @@ struct VisualPreparedResources {
     ColorPacket color_packet;
     std::shared_ptr<const VisualSkeletonBinding> skeleton_binding;
     NativeWorldGeometry::Pose gpu_pose;
+    std::shared_ptr<const skm::Clip> motion_clip;
+    std::shared_ptr<const skn::RuntimeAsset> motion_asset;
+    std::shared_ptr<const VisualAssemblyAsset> motion_assembly;
+    std::shared_ptr<const VisualSkeletonBinding> motion_source_binding,motion_binding;
+    std::vector<unsigned> motion_nodes,motion_mounts;
+    unsigned motion_context=UINT_MAX,motion_root=UINT_MAX;
+    PoseKey motion_pose_key;
+    bool motion_pose_valid=false;
     std::vector<VisualNodeEnvelope> node_envelopes;
     std::array<float,3> envelope_shape{}, envelope_center{};
     std::shared_ptr<const VisualSkeletonBinding> envelope_binding;
