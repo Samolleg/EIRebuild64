@@ -259,6 +259,29 @@ std::shared_ptr<Asset> decode(ResourceStore &store, const ResourceBlob &blob,
         require(!data.images[i].uri, "external image URI");
     require(cgltf_load_buffers(&options, raw, nullptr) == cgltf_result_success, "embedded buffers");
     require(cgltf_validate(raw) == cgltf_result_success, "validation");
+    const auto *scene = data.scene;
+    if (!scene && data.scenes_count == 1)
+        scene = data.scenes;
+    require(scene, "unambiguous active scene required");
+    std::set<const cgltf_node *> activeNodes;
+    std::vector<const cgltf_node *> pendingNodes;
+    for (std::size_t i = 0; i < scene->nodes_count; ++i)
+        pendingNodes.push_back(scene->nodes[i]);
+    while (!pendingNodes.empty())
+    {
+        const auto *node = pendingNodes.back();
+        pendingNodes.pop_back();
+        require(activeNodes.insert(node).second, "duplicate active scene node");
+        for (std::size_t i = 0; i < node->children_count; ++i)
+            pendingNodes.push_back(node->children[i]);
+    }
+    std::set<const cgltf_skin *> activeSkins;
+    for (const auto *node : activeNodes)
+        if (node->mesh)
+        {
+            require(node->skin, "body mesh skin required");
+            activeSkins.insert(node->skin);
+        }
     const auto metadata = extras(data.asset.extras).at("ei");
     require(metadata.at("profile") == "human.v1" && metadata.at("kind") == "body",
             "asset profile/kind");
@@ -302,12 +325,16 @@ std::shared_ptr<Asset> decode(ResourceStore &store, const ResourceBlob &blob,
         output->geometry.joints.push_back(j);
         visiting.erase(node);
     };
-    require(data.skins_count > 0, "skin required");
-    for (std::size_t i = 0; i < data.skins_count; ++i)
-        for (std::size_t j = 0; j < data.skins[i].joints_count; ++j)
-            append(data.skins[i].joints[j]);
+    require(!activeSkins.empty(), "active body skin required");
+    for (const auto *skin : activeSkins)
+        for (std::size_t j = 0; j < skin->joints_count; ++j)
+        {
+            require(activeNodes.count(skin->joints[j]), "skin joint outside active scene");
+            append(skin->joints[j]);
+        }
     for (std::size_t i = 0; i < data.nodes_count; ++i)
-        if (data.nodes[i].name && reference.count(data.nodes[i].name))
+        if (activeNodes.count(&data.nodes[i]) && data.nodes[i].name &&
+            reference.count(data.nodes[i].name))
             append(&data.nodes[i]);
     for (const auto &bone : contract.at("skeleton").at("bones"))
         if (bone.at("required").get<bool>())
@@ -316,9 +343,9 @@ std::shared_ptr<Asset> decode(ResourceStore &store, const ResourceBlob &blob,
     for (const auto &socket : contract.at("sockets"))
         require(names.count(socket.at("name").get<std::string>()),
                 "missing socket " + socket.at("name").get<std::string>());
-    for (std::size_t s = 0; s < data.skins_count; ++s)
+    for (const auto *activeSkin : activeSkins)
     {
-        const auto &skin = data.skins[s];
+        const auto &skin = *activeSkin;
         require(skin.inverse_bind_matrices && skin.inverse_bind_matrices->type == cgltf_type_mat4,
                 "inverse bind matrices");
         auto matrices = values(skin.inverse_bind_matrices);
@@ -349,13 +376,54 @@ std::shared_ptr<Asset> decode(ResourceStore &store, const ResourceBlob &blob,
     {
         const auto &animation = data.animations[a];
         require(animation.name && clips.insert(animation.name).second, "animation names");
+        std::set<std::pair<const cgltf_node *, cgltf_animation_path_type>> targets;
         for (std::size_t c = 0; c < animation.channels_count; ++c)
         {
             const auto &channel = animation.channels[c];
             require(channel.target_node && channel.sampler, "animation channel");
+            require(targets.emplace(channel.target_node, channel.target_path).second,
+                    "duplicate animation node/path");
+            const auto &sampler = *channel.sampler;
+            require(sampler.input && sampler.input->type == cgltf_type_scalar &&
+                        sampler.input->component_type == cgltf_component_type_r_32f &&
+                        sampler.output &&
+                        sampler.output->component_type == cgltf_component_type_r_32f,
+                    "animation accessor type");
+            require(sampler.interpolation == cgltf_interpolation_type_step ||
+                        sampler.interpolation == cgltf_interpolation_type_linear ||
+                        sampler.interpolation == cgltf_interpolation_type_cubic_spline,
+                    "animation interpolation");
+            std::size_t components = 0;
+            switch (channel.target_path)
+            {
+            case cgltf_animation_path_type_translation:
+            case cgltf_animation_path_type_scale:
+                require(sampler.output->type == cgltf_type_vec3, "animation TRS type");
+                components = 3;
+                break;
+            case cgltf_animation_path_type_rotation:
+                require(sampler.output->type == cgltf_type_vec4, "animation rotation type");
+                components = 4;
+                break;
+            case cgltf_animation_path_type_weights:
+                require(channel.target_node->mesh &&
+                            channel.target_node->mesh->primitives_count &&
+                            sampler.output->type == cgltf_type_scalar,
+                        "animation morph target");
+                components = channel.target_node->mesh->primitives[0].targets_count;
+                require(components > 0, "animation morph count");
+                break;
+            default:
+                require(false, "animation target path");
+            }
             const auto times = values(channel.sampler->input),
                        samples = values(channel.sampler->output);
             require(!times.empty() && times.front() >= 0, "animation time");
+            const std::size_t keysPerSample = sampler.interpolation ==
+                                                    cgltf_interpolation_type_cubic_spline
+                                                ? 3 : 1;
+            require(samples.size() == times.size() * components * keysPerSample,
+                    "animation sample count");
             for (std::size_t k = 1; k < times.size(); ++k)
                 require(times[k] > times[k - 1], "animation times increasing");
             if (std::strcmp(animation.name, "idle") || !indices.count(channel.target_node))
@@ -497,7 +565,7 @@ std::shared_ptr<Asset> decode(ResourceStore &store, const ResourceBlob &blob,
     for (std::size_t n = 0; n < data.nodes_count; ++n)
     {
         const auto &node = data.nodes[n];
-        if (!node.mesh)
+        if (!activeNodes.count(&node) || !node.mesh)
             continue;
         require(node.skin, "body mesh skin required");
         float world[16];
@@ -557,6 +625,10 @@ std::shared_ptr<Asset> decode(ResourceStore &store, const ResourceBlob &blob,
             const auto *uv = cgltf_find_accessor(&primitive, cgltf_attribute_type_texcoord, uvSet);
             require(!selected || uv, "texture coordinate attribute required");
             const auto *tangent = cgltf_find_accessor(&primitive, cgltf_attribute_type_tangent, 0);
+            // Normal-mapped assets must retain their authored tangent basis until
+            // the profile's MikkTSpace generator is available in this importer.
+            require(!material->normal_texture.texture || tangent,
+                    "normal map without TANGENT requires MikkTSpace generation");
             require(positions && normals && joints && weights &&
                         !cgltf_find_accessor(&primitive, cgltf_attribute_type_joints, 1),
                     "vertex attributes/influences");
