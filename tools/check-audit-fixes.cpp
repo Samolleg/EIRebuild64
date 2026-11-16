@@ -344,6 +344,9 @@ void RealArchive(const fs::path& path) {
     CWin32MappedResource resource(true);
     Check(resource.OpenResource(path.string().c_str()), "real archive open");
     CStringArray names;resource.GetFileList(names);Check(!names.IsEmpty(), "real archive empty");
+    ItemApproachArchiveIndex catalog;
+    for(INT_PTR i=0;i<names.GetSize();++i)
+        Check(catalog.Has(path.string(),names[i].GetString()),"catalog index agrees with real archive membership");
     unsigned nestedCount=0;
     for(INT_PTR i=0;i<names.GetSize();++i) {
         const std::string name=names[i].GetString();
