@@ -1480,10 +1480,15 @@ ID3D11ShaderResourceView* empty[5]{};context_->PSSetShaderResources(8,1,empty);c
   }
   const bool terrain_kind=bucket.semantic_kind==SemanticKind::terrain;
   // Only the batch kind's own program set is looked up.
-  ID3D11PixelShader* const batch_object_ps=terrain_kind?nullptr:contact?(masked?(low_pixels?native_pixel(&Renderer::native_masked_low_ps_,true,fast):native_pixel(&Renderer::native_masked_ps_,true,fast)):
+  ID3D11PixelShader* batch_object_ps=terrain_kind?nullptr:contact?(masked?(low_pixels?native_pixel(&Renderer::native_masked_low_ps_,true,fast):native_pixel(&Renderer::native_masked_ps_,true,fast)):
    low_pixels?native_pixel(&Renderer::native_low_ps_,true,fast):native_pixel(&Renderer::native_ps_,true,fast)):
    masked?(low_pixels?native_pixel(&Renderer::native_masked_low_ps_,false,fast):native_pixel(&Renderer::native_masked_ps_,false,fast)):
    low_pixels?native_pixel(&Renderer::native_low_ps_,false,fast):native_pixel(&Renderer::native_ps_,false,fast);
+  if(draw.instance.skn_factors[3]>0){
+   const auto member=masked?(low_pixels?&Renderer::native_gltf_masked_low_ps_:&Renderer::native_gltf_masked_ps_):
+    (low_pixels?&Renderer::native_gltf_low_ps_:&Renderer::native_gltf_ps_);
+   batch_object_ps=native_pixel(member,contact,fast);
+  }
   // Terrain: the same choice as above, from the contact-free set.
   const auto terrain_variant=[&](bool flat){
    if(masked){

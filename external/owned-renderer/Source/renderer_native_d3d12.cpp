@@ -2347,6 +2347,8 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
   return nullptr;
  };
  const ShaderProgram* const object_ps=pixel_program({});
+ const ShaderProgram* const gltf_ps=pixel_program({"NATIVE_GLTF"});
+ const ShaderProgram* const gltf_masked_ps=pixel_program({"NATIVE_GLTF","NATIVE_SHADOW_MASK"});
  // With a trail field: the snow trail variants (NATIVE_SNOW_TRAILS), as the D3D11 flush picks them.
  const ShaderProgram* const terrain_ps=snow_field?pixel_program({"NATIVE_TERRAIN_PS","NATIVE_SNOW_TRAILS"}):pixel_program({"NATIVE_TERRAIN_PS"});
  const ShaderProgram* const terrain_flat_ps=snow_field?pixel_program({"NATIVE_TERRAIN_PS","NATIVE_SNOW_TRAILS","NATIVE_TERRAIN_FLAT"}):
@@ -2597,7 +2599,10 @@ HRESULT Renderer::flush_native_d3d12(unsigned layout_slot){
   }
   if(!liquid){transition_profile_pass(native_pass);profiler_.add_draw(0,batch.draw_count);profiler_.add_batch();}
   if(!terrain){
-   hr=d3d12_->draw_indirect(programs[0],masked?*masked_object_ps:object_ps?*object_ps:programs[1],state,clipped?&clip_rect:nullptr,*native12_.arguments,
+   const bool gltf=draw.instance.skn_factors[3]>0;
+   const ShaderProgram* const pixel=gltf?(masked?gltf_masked_ps:gltf_ps):(masked?masked_object_ps:object_ps);
+   if(!pixel)return E_FAIL;
+   hr=d3d12_->draw_indirect(programs[0],*pixel,state,clipped?&clip_rect:nullptr,*native12_.arguments,
                             static_cast<UINT>(batch_index)*16u);
    if(FAILED(hr))return hr;
    const char* drawn_name=scene_composited_?"interface batches drawn":bucket.semantic_kind==SemanticKind::figure?"world figure batches drawn":

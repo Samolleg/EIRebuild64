@@ -3735,7 +3735,21 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
 // Authored SKN normals affect diffuse light at every quality level.
    {
     float3 relief=sunLight*t.rgb*keep*(nl-saturate(dot(n0,l)));
+#ifdef NATIVE_GLTF
+    float3 unlitRelief=relief;
+    // The vertex stage uses max(ambient, sun), so a back face or authored
+    // normal must replace that maximum, preserving the ambient floor.
+    if(sknMaterial){
+     float3 before=max(nativeWorldAmbient.rgb,sunLight*saturate(dot(n0,l)));
+     float3 after=max(nativeWorldAmbient.rgb,sunLight*nl);
+     relief=(after-before)*t.rgb*keep;
+    }
+#endif
+#ifdef NATIVE_GLTF
+    c.rgb=max(c.rgb+relief,0);c0=max(c0+unlitRelief,0);
+#else
     c.rgb=max(c.rgb+relief,0);c0=max(c0+relief,0);
+#endif
    }
    // Figures (Medium and up): the relief and the painted crevices shade the
    // ambient share too, so gear keeps its detail in shade. The game's
