@@ -4,6 +4,8 @@
 #include "model_preview_clock.h"
 #include <d3d11.h>
 #include <d3dcompiler.h>
+#include <d3d12.h>
+#include <dxgi1_4.h>
 #include <wrl/client.h>
 #include <iostream>
 #include <functional>
@@ -25,6 +27,53 @@ struct PoseGpu {
 };
 struct NodeGpu {Float4 rotation,translation,rows[3];unsigned first,second,count;float fraction;unsigned generation[2];};
 static_assert(sizeof(PoseGpu)==140&&sizeof(NodeGpu)==104);
+static std::vector<NodeGpu> gpu12(const Animation& a,const Playback& playback){
+    auto packed=pack(a,"test12");const unsigned base=2,total=base+packed->nodes+packed->morphs;
+    std::vector<unsigned char> bytes(32+packed->bytes.size());unsigned header[8]{0,0,0,0,0,0,32,base};
+    std::memcpy(bytes.data(),header,32);std::memcpy(bytes.data()+32,packed->bytes.data(),packed->bytes.size());
+    ComPtr<IDXGIFactory4> factory;hr(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));ComPtr<IDXGIAdapter> adapter;
+    hr(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)));ComPtr<ID3D12Device> device;
+    hr(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device)));
+    D3D12_ROOT_PARAMETER parameters[4]{};
+    parameters[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;parameters[0].Descriptor.ShaderRegister=10;
+    parameters[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;parameters[1].Descriptor.ShaderRegister=11;
+    parameters[2].ParameterType=D3D12_ROOT_PARAMETER_TYPE_UAV;parameters[2].Descriptor.ShaderRegister=4;
+    parameters[3].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;parameters[3].Constants.ShaderRegister=4;parameters[3].Constants.Num32BitValues=4;
+    D3D12_ROOT_SIGNATURE_DESC rootDesc{};rootDesc.NumParameters=4;rootDesc.pParameters=parameters;
+    ComPtr<ID3DBlob> rootBytes,error;hr(D3D12SerializeRootSignature(&rootDesc,D3D_ROOT_SIGNATURE_VERSION_1,&rootBytes,&error));
+    ComPtr<ID3D12RootSignature> root;hr(device->CreateRootSignature(0,rootBytes->GetBufferPointer(),rootBytes->GetBufferSize(),IID_PPV_ARGS(&root)));
+    static ComPtr<ID3DBlob> code;
+    if(!code){auto source=owned::compose_native_shader_source();hr(D3DCompile(source.data(),source.size(),nullptr,nullptr,nullptr,"nativePoseCS","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,&error));}
+    D3D12_COMPUTE_PIPELINE_STATE_DESC pipelineDesc{};pipelineDesc.pRootSignature=root.Get();pipelineDesc.CS={code->GetBufferPointer(),code->GetBufferSize()};
+    ComPtr<ID3D12PipelineState> pipeline;hr(device->CreateComputePipelineState(&pipelineDesc,IID_PPV_ARGS(&pipeline)));
+    const auto buffer=[&](UINT64 size,D3D12_HEAP_TYPE type,D3D12_RESOURCE_STATES state,D3D12_RESOURCE_FLAGS flags,const void* data){
+        D3D12_HEAP_PROPERTIES heap{};heap.Type=type;D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;d.Width=size;
+        d.Height=1;d.DepthOrArraySize=d.MipLevels=1;d.SampleDesc.Count=1;d.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;d.Flags=flags;
+        ComPtr<ID3D12Resource> resource;hr(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,state,nullptr,IID_PPV_ARGS(&resource)));
+        if(data){void* p=nullptr;D3D12_RANGE empty{0,0};hr(resource->Map(0,&empty,&p));std::memcpy(p,data,std::size_t(size));resource->Unmap(0,nullptr);}return resource;};
+    PoseGpu input;input.clip=playback.clip;input.previous=playback.previous;input.time=playback.time;input.previousTime=playback.previous_time;input.blend=playback.blend;
+    auto animation=buffer(bytes.size(),D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ,D3D12_RESOURCE_FLAG_NONE,bytes.data());
+    auto poses=buffer(sizeof(input),D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ,D3D12_RESOURCE_FLAG_NONE,&input);
+    auto output=buffer(total*sizeof(NodeGpu),D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,nullptr);
+    auto read=buffer(total*sizeof(NodeGpu),D3D12_HEAP_TYPE_READBACK,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_FLAG_NONE,nullptr);
+    D3D12_COMMAND_QUEUE_DESC queueDesc{};queueDesc.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;ComPtr<ID3D12CommandQueue> queue;
+    hr(device->CreateCommandQueue(&queueDesc,IID_PPV_ARGS(&queue)));ComPtr<ID3D12CommandAllocator> allocator;
+    hr(device->CreateCommandAllocator(queueDesc.Type,IID_PPV_ARGS(&allocator)));ComPtr<ID3D12GraphicsCommandList> commands;
+    hr(device->CreateCommandList(0,queueDesc.Type,allocator.Get(),pipeline.Get(),IID_PPV_ARGS(&commands)));
+    commands->SetComputeRootSignature(root.Get());commands->SetComputeRootShaderResourceView(0,animation->GetGPUVirtualAddress());
+    commands->SetComputeRootShaderResourceView(1,poses->GetGPUVirtualAddress());commands->SetComputeRootUnorderedAccessView(2,output->GetGPUVirtualAddress());
+    const unsigned work[4]{0,1,0,0};commands->SetComputeRoot32BitConstants(3,4,work,0);commands->Dispatch(1,1,1);
+    D3D12_RESOURCE_BARRIER barrier{};barrier.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;barrier.Transition.pResource=output.Get();
+    barrier.Transition.StateBefore=D3D12_RESOURCE_STATE_UNORDERED_ACCESS;barrier.Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_SOURCE;
+    barrier.Transition.Subresource=D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;commands->ResourceBarrier(1,&barrier);
+    commands->CopyResource(read.Get(),output.Get());hr(commands->Close());ID3D12CommandList* lists[]{commands.Get()};queue->ExecuteCommandLists(1,lists);
+    ComPtr<ID3D12Fence> fence;hr(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&fence)));hr(queue->Signal(fence.Get(),1));
+    HANDLE event=CreateEventW(nullptr,FALSE,FALSE,nullptr);check(event!=nullptr,"D3D12 fence event");
+    const auto waitResult=fence->SetEventOnCompletion(1,event);if(FAILED(waitResult)){CloseHandle(event);hr(waitResult);}
+    const auto waited=WaitForSingleObject(event,60000);CloseHandle(event);check(waited==WAIT_OBJECT_0,"D3D12 readback timeout");hr(device->GetDeviceRemovedReason());
+    void* mapped=nullptr;hr(read->Map(0,nullptr,&mapped));auto* first=static_cast<const NodeGpu*>(mapped)+base;
+    std::vector<NodeGpu> result(first,first+total-base);D3D12_RANGE empty{0,0};read->Unmap(0,&empty);return result;
+}
 static std::vector<NodeGpu> gpu(const Animation& a,const Playback& playback){
     auto packed=pack(a,"test");const unsigned base=2,total=base+packed->nodes+packed->morphs;
     std::vector<unsigned char> bytes(32+packed->bytes.size());
@@ -151,13 +200,16 @@ int wmain(int argc,wchar_t** argv)try{
     for(const Playback p:std::vector<Playback>{{0,UINT32_MAX,-1,0,1},{0,UINT32_MAX,.35f,0,1},{0,UINT32_MAX,1.3f,0,1},
         {1,UINT32_MAX,1,0,1},{0,1,.4f,1.2f,.37f},{UINT32_MAX,UINT32_MAX,0,0,1},{1,UINT32_MAX,3,0,1}}){
         const auto expected=evaluate(a,p);const auto actual=gpu(a,p);
+        const auto actual12=gpu12(a,p);
         for(unsigned i=0;i<a.nodes.size();++i)for(unsigned r=0;r<3;++r)for(unsigned c=0;c<4;++c)
             check_near(actual[i].rows[r][c],expected.joints[i][r*4+c],"CPU/GPU joint mismatch");
+        for(unsigned i=0;i<actual.size();++i)for(unsigned r=0;r<3;++r)for(unsigned c=0;c<4;++c)
+            check_near(actual12[i].rows[r][c],actual[i].rows[r][c],"D3D11/D3D12 pose/morph mismatch");
         for(unsigned i=0;i<a.morphs.size();++i)for(unsigned k=0;k<9;++k)
             check_near(actual[a.nodes.size()+i].rows[k/3][k%3],expected.morphs[i][k],"CPU/GPU morph mismatch");
         for(const auto& n:actual)check(n.generation[0]==1&&n.generation[1]==2,"generation stamp");
     }
-    std::cout<<"PASS GPU readback: STEP/LINEAR/CUBICSPLINE, quaternion, hierarchy/scale, morphs, blend/defaults/endpoints\n";
+    std::cout<<"PASS D3D11/D3D12 WARP readback: STEP/LINEAR/CUBICSPLINE, quaternion, hierarchy/scale, morphs, blend/defaults/endpoints\n";
     auto bad=a;bad.clips[0].tracks[0].times[1]=0;rejects([&]{validate(bad);});bad=a;bad.nodes[1].parent=1;rejects([&]{validate(bad);});
     bad=a;bad.clips[0].tracks.push_back(bad.clips[0].tracks[0]);rejects([&]{validate(bad);});bad=a;bad.clips[0].tracks[0].values[0]=NAN;rejects([&]{validate(bad);});
     bad=a;bad.nodes[0].scale[0]=0;rejects([&]{validate(bad);});
@@ -206,9 +258,11 @@ int wmain(int argc,wchar_t** argv)try{
         float maxError=0;
         for(float fraction:{0.f,.37f,1.f}){const Playback p{index,UINT32_MAX,animation.clips[index].duration*fraction,0,1};
             const auto actual=gpu(animation,p);const auto expected=evaluate(animation,p).joints;
+            const auto actual12=gpu12(animation,p);
             for(unsigned i=0;i<animation.nodes.size();++i)for(unsigned r=0;r<3;++r)for(unsigned c=0;c<4;++c){
                 maxError=(std::max)(maxError,std::abs(actual[i].rows[r][c]-expected[i][r*4+c]));
-                check_near(actual[i].rows[r][c],expected[i][r*4+c],"real GLB CPU/GPU matrix");}}
+                check_near(actual[i].rows[r][c],expected[i][r*4+c],"real GLB CPU/GPU matrix");
+                check_near(actual12[i].rows[r][c],expected[i][r*4+c],"real GLB CPU/D3D12 matrix");}}
         std::cout<<"PASS actual GLB: "<<animation.nodes.size()<<" nodes, 3 idle samples, max matrix error "<<maxError<<'\n';
     }
 #endif

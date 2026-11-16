@@ -219,9 +219,12 @@ footstep, sound и attachment_visibility не создают повторных 
 фаз требует отдельной привязки/авторского клипа, а не отключения проверки.
 
 Проверка `tools/check-gltf-animation.ps1 -OutputDirectory <папка задания>`
-исполняет production nativePoseCS и skinning через D3D11 WARP с GPU readback,
+исполняет production nativePoseCS через D3D11 и D3D12 WARP с readback,
+а также production skinning через D3D11 WARP,
 сверяет их с CPU reference и проверяет malformed данные, bindings, фазы,
-события/seek и переходы. Это не подтверждение игрового прогона или GPU D3D12.
+события/seek и переходы. Это проверка обоих API на программном адаптере, не игровой прогон на видеокарте.
+Опции `-Glb <файл> -Profile <профиль>` добавляют декодирование реального GLB и
+сверку трёх поз idle; перед этим нужен cgltf из `tools/prepare-worktree.ps1`.
 ModelCheck печатает также объём анимаций и радиус консервативной оболочки.
 Установленный Нала-GLB с одним idle требует отдельного комплекта клипов и bindings
 перед игровой установкой этого runtime. Полная приёмка шага 3 остаётся открытой.
