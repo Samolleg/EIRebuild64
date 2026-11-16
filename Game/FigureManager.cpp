@@ -181,7 +181,7 @@ delete pos->second;
 BOOL CFigureManager::AddNewResource(LPCSTR pszResourceFileName)
 {
     OwnedRender::E3HudResourceChanged(this);
-    if (_access(pszResourceFileName, 4) == -1)
+    if (_access(ei::pak::ResolveArchivePath(pszResourceFileName).string().c_str(), 4) == -1)
         return FALSE;
     // first, check for such resource
     for (auto pos = resources.begin(); pos != resources.end(); ++pos)

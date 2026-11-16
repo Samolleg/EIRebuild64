@@ -41,7 +41,7 @@ BOOL CGeometryManager::AddResource(const std::string &szFileName)
             return TRUE;
     }
     // add
-    if (_access(szFileName.c_str(), 4) == -1)
+    if (_access(ei::pak::ResolveArchivePath(szFileName).string().c_str(), 4) == -1)
         return FALSE;
     resources.push_back(SResourceDescriptor());
     SResourceDescriptor &descriptor = resources.back();
