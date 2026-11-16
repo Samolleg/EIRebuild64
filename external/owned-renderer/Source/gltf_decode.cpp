@@ -285,21 +285,60 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
         for (std::size_t i = 0; i < node->children_count; ++i)
             pendingNodes.push_back(node->children[i]);
     }
+    const auto metadata = extras(data.asset.extras).at("ei");
+    const bool rigid = metadata.at("kind") == "rigid-item";
+    require(metadata.at("profile") == "human.v1" &&
+        (rigid || metadata.at("kind") == "body"), "asset profile/kind");
+    output->rigid = rigid;
+    require(!rigid || (data.skins_count == 0 && data.animations_count == 0 &&
+        !metadata.contains("bindings")), "rigid item cannot own skin/animation bindings");
     std::set<const cgltf_skin *> activeSkins;
     for (const auto *node : activeNodes)
         if (node->mesh)
         {
-            require(node->skin, "body mesh skin required");
-            activeSkins.insert(node->skin);
+            require(rigid ? !node->skin : node->skin != nullptr, "mesh skin/kind");
+            if (node->skin) activeSkins.insert(node->skin);
         }
-    const auto metadata = extras(data.asset.extras).at("ei");
-    require(metadata.at("profile") == "human.v1" && metadata.at("kind") == "body",
-            "asset profile/kind");
     const auto contract = json(profile);
     require(contract.at("id") == "human.v1" && contract.at("version") == 1, "profile version");
     const double maxIdleEdgeStretch = contract.at("gltf").at("maxIdleEdgeStretch").get<double>();
     require(std::isfinite(maxIdleEdgeStretch) && maxIdleEdgeStretch >= 1,
             "profile idle edge stretch limit");
+    output->animation = std::make_shared<Animation>();
+    auto &runtime = *output->animation;
+    std::map<const cgltf_node *, unsigned> indices;
+    skn::Matrix inverseGrip = skn::identity();
+    if (rigid) {
+        output->socket = metadata.at("socket").get<std::string>();
+        bool known = false;
+        for (const auto& socket : contract.at("sockets"))
+            known = known || socket.at("name") == output->socket;
+        require(known, "unknown item socket");
+        auto grip = reference_joint(metadata.at("grip"));
+        float q = 0;
+        for (float v : grip.rotation) q += v*v;
+        require(std::isfinite(q) && std::abs(q-1) < 1e-4f, "grip quaternion");
+        for (float v : grip.translation) require(std::isfinite(v), "grip translation");
+        for (float v : grip.scale) require(std::isfinite(v) && v > 0, "grip scale");
+        const auto matrix = skn::trs(grip);
+        DirectX::XMFLOAT4X4 input, result;
+        std::copy_n(matrix.data(),16,&input.m[0][0]);
+        DirectX::XMStoreFloat4x4(&result,DirectX::XMMatrixInverse(nullptr,DirectX::XMLoadFloat4x4(&input)));
+        std::copy_n(&result.m[0][0],16,inverseGrip.begin());
+        for (float v : inverseGrip) require(std::isfinite(v), "inverse grip");
+        if(metadata.contains("anchors")) for(auto it=metadata.at("anchors").begin();it!=metadata.at("anchors").end();++it) {
+            require(it.key()=="cast" || it.key()=="particle", "item anchor kind");
+            const auto point=it.value().get<std::array<float,3>>();
+            for(float v:point)require(std::isfinite(v),"item anchor position");
+            output->anchors.emplace(it.key(),skn::point(inverseGrip,point.data()));
+        }
+        skn::Joint socket{}; socket.name=output->socket; socket.parent=-1;
+        socket.scale={1,1,1}; socket.rotation={0,0,0,1}; socket.inverse=skn::identity();
+        output->geometry.joints.push_back(socket);
+        output->idle.push_back(skn::identity());
+        runtime.nodes.emplace_back();
+        for (const auto* node : activeNodes) if (node->mesh) indices.emplace(node,0);
+    } else {
     std::map<std::string, const Json *> reference;
     for (const auto &bone : contract.at("skeleton").at("bones"))
         reference.emplace(bone.at("name").get<std::string>(), &bone);
@@ -309,7 +348,6 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
     for (const auto *skin : activeSkins)
         for (std::size_t j = 0; j < skin->joints_count; ++j)
             skinJoints.insert(skin->joints[j]);
-    std::map<const cgltf_node *, unsigned> indices;
     std::set<const cgltf_node *> visiting;
     std::map<std::string, unsigned> names;
     std::vector<const cgltf_node *> nodes;
@@ -401,8 +439,6 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
         if (reference.count(joint.name) && reference.at(joint.name)->contains("inverseBindMatrix"))
             matrix_equal(skn::multiply(matrix, joint.inverse), skn::identity(), joint.name);
     }
-    output->animation = std::make_shared<Animation>();
-    auto &runtime = *output->animation;
     for (std::size_t i = 0; i < nodes.size(); ++i) {
         const auto &j = output->geometry.joints[i];
         Node n; n.parent = j.parent; n.rotation = j.rotation;
@@ -531,6 +567,7 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
             m = skn::multiply(output->idle[pose[j].parent], m);
         output->idle.push_back(m);
     }
+    } // body skeleton/animation
     cgltf_material defaultMaterial{};
     std::fill_n(defaultMaterial.pbr_metallic_roughness.base_color_factor, 4, 1.f);
     defaultMaterial.pbr_metallic_roughness.metallic_factor = 1;
@@ -631,12 +668,17 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
         const auto &node = data.nodes[n];
         if (!activeNodes.count(&node) || !node.mesh)
             continue;
-        require(node.skin, "body mesh skin required");
+        require(rigid ? !node.skin : node.skin != nullptr, "mesh skin/kind");
         float world[16];
         cgltf_node_transform_world(&node, world);
         skn::Matrix meshWorld;
         std::copy_n(world, 16, meshWorld.begin());
-        matrix_equal(meshWorld, skn::identity(), "mesh container");
+        if (!rigid) matrix_equal(meshWorld, skn::identity(), "mesh container");
+        else {
+            for (auto* ancestor=&node; ancestor; ancestor=ancestor->parent) joint(*ancestor);
+            meshWorld=skn::multiply(inverseGrip,meshWorld);
+            for (float v : meshWorld) require(std::isfinite(v), "item transform");
+        }
         for (std::size_t p = 0; p < node.mesh->primitives_count; ++p)
         {
             const auto &primitive = node.mesh->primitives[p];
@@ -670,11 +712,13 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
             // human.v1 normal maps use the authored glTF tangent basis.
             require(!material->normal_texture.texture || tangent,
                     "human.v1 normal map requires authored TANGENT");
-            require(positions && normals && joints && weights &&
+            require(positions && normals && (rigid ? !joints && !weights && !primitive.targets_count : joints && weights) &&
                         !cgltf_find_accessor(&primitive, cgltf_attribute_type_joints, 1),
                     "vertex attributes/influences");
-            auto pos = values(positions), normal = values(normals), js = values(joints),
-                 ws = values(weights);
+            auto pos = values(positions), normal = values(normals);
+            auto js = rigid ? std::vector<float>(positions->count*4,0) : values(joints);
+            auto ws = rigid ? std::vector<float>(positions->count*4,0) : values(weights);
+            if (rigid) for (std::size_t v=0;v<positions->count;++v) ws[v*4]=1;
             auto tex = uv ? values(uv) : std::vector<float>(positions->count * 2, 0);
             auto tan = tangent ? values(tangent) : std::vector<float>();
             require(!tangent || tangent->type == cgltf_type_vec4, "tangent VEC4 required");
@@ -751,6 +795,28 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
                                              (n[2] * t[0] - n[0] * t[2]) * b[1] +
                                              (n[0] * t[1] - n[1] * t[0]) * b[2];
                     tan[i * 4 + 3] = handedness < 0 ? -1.f : 1.f;
+                }
+            }
+            if (rigid) {
+                // Bake hierarchy and inverse grip once. The GPU uses the body's
+                // socket matrix with identity inverse bind, without a second pose.
+                DirectX::XMFLOAT4X4 input, inverse;
+                std::copy_n(meshWorld.data(),16,&input.m[0][0]);
+                DirectX::XMStoreFloat4x4(&inverse,DirectX::XMMatrixInverse(nullptr,DirectX::XMLoadFloat4x4(&input)));
+                const float* inv=&inverse.m[0][0];
+                for (std::size_t v=0;v<positions->count;++v) {
+                    const auto p=skn::point(meshWorld,pos.data()+v*3);
+                    float n[3]{},t[3]{};
+                    for (unsigned r=0;r<3;++r) for (unsigned c=0;c<3;++c) {
+                        n[r]+=inv[r*4+c]*normal[v*3+c];
+                        t[r]+=meshWorld[c*4+r]*tan[v*4+c];
+                    }
+                    float nl=0,tl=0;
+                    for (unsigned c=0;c<3;++c) { nl+=n[c]*n[c];tl+=t[c]*t[c]; }
+                    require(std::isfinite(nl)&&std::isfinite(tl)&&nl>1e-12f&&tl>1e-12f,"item normal/tangent");
+                    for (unsigned c=0;c<3;++c) {
+                        pos[v*3+c]=p[c];normal[v*3+c]=n[c]/std::sqrt(nl);tan[v*4+c]=t[c]/std::sqrt(tl);
+                    }
                 }
             }
             const auto restPos = pos, restNormal = normal, restTan = tan;
@@ -863,11 +929,11 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
                 for (unsigned k = 0; k < 4; ++k)
                 {
                     const float index = js[v * 4 + k];
-                    require(index >= 0 && index < node.skin->joints_count &&
+                    require(index >= 0 && index < (rigid ? 1 : node.skin->joints_count) &&
                                 index == std::floor(index),
                             "joint index");
                     vertex.joints[k] = static_cast<std::uint16_t>(
-                        indices.at(node.skin->joints[static_cast<unsigned>(index)]));
+                        rigid ? 0 : indices.at(node.skin->joints[static_cast<unsigned>(index)]));
                     vertex.weights[k] = static_cast<std::uint16_t>(
                         std::floor(ws[v * 4 + k] / sum * 65535));
                     total += vertex.weights[k];
@@ -960,6 +1026,11 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
     lod.index_count = static_cast<unsigned>(output->geometry.indices.size());
     lod.submesh_count = static_cast<unsigned>(output->geometry.submeshes.size());
     output->geometry.lods.push_back(lod);
+    if (rigid) {
+        output->animation.reset();
+        output->animation_radius=output->radius;
+        return output;
+    }
     const auto selector = [&](const Json &value, const std::map<std::string,unsigned> &names) {
         if (value.is_number_unsigned() || value.is_number_integer()) return value.get<unsigned>();
         const auto found=names.find(value.get<std::string>());
@@ -990,7 +1061,14 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
         runtime.bindings.push_back(std::move(b));
     }
     output->gpu_animation=pack(runtime,{});
-    const auto limits=envelope(runtime);
+    for(const auto& socket:contract.at("sockets")) {
+        const auto name=socket.at("name").get<std::string>();
+        const auto found=std::find_if(output->geometry.joints.begin(),output->geometry.joints.end(),
+            [&](const skn::Joint& j){return j.name==name;});
+        output->sockets.emplace(name,socket_chain(runtime,unsigned(found-output->geometry.joints.begin())));
+    }
+    output->node_envelopes=envelope(runtime);
+    const auto& limits=output->node_envelopes;
     double radius=output->radius;
     for(std::size_t i=0;i<output->rest_vertices.size();++i){const auto& v=output->rest_vertices[i];
         double p[3]{std::abs(v.position[0]),std::abs(v.position[1]),std::abs(v.position[2])};

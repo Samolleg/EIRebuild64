@@ -114,8 +114,10 @@ bool completeVisualFrame(owned::RetainedVisualFrame& frame, bool combat) noexcep
         sample.values.locomotion=unit->GetUserUnitStats()->cLocomotion;
         sample.values.target_half_extent={unit->GetBoundingVolume().ptMax.x,
             unit->GetBoundingVolume().ptMax.y};
-        if (auto* specific=dynamic_cast<CUnitClientSpecific*>(unit->GetUnitSpecific()))
+        if (auto* specific=dynamic_cast<CUnitClientSpecific*>(unit->GetUnitSpecific())) {
             sample.values.fade_alpha=specific->GetFadeOutAlpha();
+            specific->PopulateOwnedVisibility(sample.visibility,sample.selection,sample.pose.phase);
+        }
         sample.visibility.casts_shadow=object->CheckFlag(OBJ_NOSHADOW)==0;
         sample.values.object_flags=(sample.values.object_flags&~0x00400000u)|
             ((object->CheckFlag(UNIT_VISIBLE)||ModEncounter::Draw(*object))?0x00400000u:0u);

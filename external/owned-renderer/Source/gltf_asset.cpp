@@ -1,4 +1,5 @@
 #include "gltf_asset.h"
+#include "gltf_equipment_registry.h"
 #include "../../../SDKs/JSON/json.hpp"
 namespace owned::gltf {
 using Json = nlohmann::json;
@@ -17,7 +18,9 @@ Json json(const ResourceBlob &blob) {
     return Json::parse(blob.bytes->begin(), blob.bytes->end());
 }
 } // namespace
-std::shared_ptr<const Asset> select(const std::string &visual, bool hero, bool &present)
+static std::shared_ptr<const Asset> select_resource(const std::string &visual, bool hero, bool &present,
+    const ItemBinding* itemBinding = nullptr, std::vector<ItemBinding>* selected = nullptr,
+    const VisualEquipmentItem* equipment = nullptr)
 {
     static std::mutex mutex;
     static ResourceStore store;
@@ -64,6 +67,7 @@ std::shared_ptr<const Asset> select(const std::string &visual, bool hero, bool &
     }
     if (entries.is_null())
         return {};
+    if (selected) { *selected=item_bindings(entries,*equipment); return {}; }
     const auto &characters = entries.at("characters");
     require(characters.is_object(), "registry characters");
     std::string key = visual;
@@ -78,10 +82,11 @@ std::shared_ptr<const Asset> select(const std::string &visual, bool hero, bool &
         present = true;
     const auto it = characters.find(key);
     require(!heroAlias || it != characters.end(), "heroCharacter entry missing: " + key);
-    if (it == characters.end())
+    if (!itemBinding && it == characters.end())
         return {};
     present = true;
-    const auto &binding = *it;
+    const Json itemEntry=itemBinding ? Json{{"profile","human.v1"},{"resource",itemBinding->resource}} : Json{};
+    const auto &binding = itemBinding ? itemEntry : *it;
     const auto validId = [](const std::string &id) {
         if (id.empty() || !((id[0] >= 'a' && id[0] <= 'z') || (id[0] >= '0' && id[0] <= '9')))
             return false;
@@ -89,15 +94,15 @@ std::shared_ptr<const Asset> select(const std::string &visual, bool hero, bool &
             return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-';
         });
     };
-    require(validId(key), "character id " + key);
+    require(itemBinding || validId(key), "character id " + key);
     require(binding.at("profile") == "human.v1", "registry profile");
     const auto resource = binding.at("resource").get<std::string>();
-    require(resource.rfind("models/characters/", 0) == 0 && resource.size() > 4 &&
+    require(resource.rfind(itemBinding ? "models/items/" : "models/characters/", 0) == 0 && resource.size() > 4 &&
                 resource.substr(resource.size() - 4) == ".glb" &&
                 resource.find("..") == std::string::npos &&
                 resource.find(':') == std::string::npos && resource.find('\\') == std::string::npos,
             "resource key");
-    const auto cacheKey = std::to_string(generation) + "|" + registryIdentity + "|" + key;
+    const auto cacheKey = std::to_string(generation) + "|" + registryIdentity + (itemBinding ? "|item|" : "|body|") + key;
     const auto rejected = failures.find(cacheKey);
     if (rejected != failures.end())
         throw std::runtime_error(rejected->second);
@@ -116,7 +121,8 @@ std::shared_ptr<const Asset> select(const std::string &visual, bool hero, bool &
         });
         asset->cache_key = blob.identity.key() + "|" + profile.identity.key();
         asset->cache_key += "|" + cacheKey;
-        asset->gpu_animation->key = asset->cache_key;
+        require(asset->rigid == (itemBinding != nullptr), "selected asset kind");
+        if (asset->gpu_animation) asset->gpu_animation->key = asset->cache_key;
         const std::string detail = "model=\"" + resource +
             "\" glTF GPU animation asset loaded";
         bridge_append_probe_event("gltf_asset_loaded", detail.c_str());
@@ -131,14 +137,33 @@ std::shared_ptr<const Asset> select(const std::string &visual, bool hero, bool &
         throw;
     }
 }
+std::shared_ptr<const Asset> select(const std::string& visual, bool hero, bool& present) {
+    return select_resource(visual,hero,present);
+}
+std::vector<EquipmentAsset> select_equipment(const std::vector<VisualEquipmentItem>& equipment) {
+    std::vector<EquipmentAsset> result;
+    for(const auto& item:equipment) {
+        std::vector<ItemBinding> bindings; bool present=false;
+        select_resource("",false,present,nullptr,&bindings,&item);
+        for(const auto& binding:bindings) {
+            auto asset=select_resource(binding.resource,false,present,&binding);
+            require(present && asset && asset->rigid,"item not available");
+            result.push_back({asset,binding.socket,item.slot,binding.weapon,binding.arrow});
+        }
+    }
+    return result;
+}
 } // namespace owned::gltf
 
 namespace owned::skn {
 std::shared_ptr<const RuntimeAsset> select_gltf(const std::string &name, bool hero, bool &present)
 {
     const auto loaded = gltf::select(name, hero, present);
-    if (!present)
-        return {};
+    if (!present) return {};
+    return from_gltf(loaded);
+}
+std::shared_ptr<const RuntimeAsset> from_gltf(const std::shared_ptr<const gltf::Asset>& loaded)
+{
     static std::mutex mutex;
     static std::map<std::string, std::weak_ptr<const RuntimeAsset>> cache;
     std::lock_guard<std::mutex> guard(mutex);

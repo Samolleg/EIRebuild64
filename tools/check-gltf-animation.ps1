@@ -1,4 +1,5 @@
-param([Parameter(Mandatory=$true)][string]$OutputDirectory,[string]$Glb,[string]$Profile)
+param([Parameter(Mandatory=$true)][string]$OutputDirectory,[string]$Glb,[string]$Profile,[switch]$Equipment)
+if($Equipment -and (!$Glb -or !$Profile)){throw "Equipment checks require -Glb and -Profile"}
 $ErrorActionPreference='Stop'
 $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $out=[IO.Path]::GetFullPath($OutputDirectory)
@@ -19,7 +20,8 @@ try {
     & $storage *> "$out/storage-result.txt"
     Get-Content "$out/storage-result.txt"
     if($LASTEXITCODE -ne 0){throw 'glTF storage check failed'}
-    $exe=Join-Path $out 'check-gltf-animation.exe'
+    $checkName=if($Equipment){'check-gltf-equipment'}else{'check-gltf-animation'}
+    $exe=Join-Path $out ($checkName+'.exe')
     $extra=@()
     if($Glb){
         if(!$Profile){throw 'The real GLB check requires -Profile'}
@@ -27,7 +29,7 @@ try {
         Copy-Item "$repo/SDKs/JSON/*" "$out/include/nlohmann" -Recurse -Force
         $extra=@('/DCHECK_GLTF_ASSET',"/I$out/include","$repo/external/owned-renderer/Source/gltf_decode.cpp")
     }
-    & "$vc/bin/Hostx64/x64/cl.exe" /nologo /std:c++17 /EHsc /MT /O2 /Gy /Gw /DNOMINMAX "/I$repo/external/owned-renderer/Source" "/Fo$out/" "/Fe$exe" "$repo/tools/check-gltf-animation.cpp" "$repo/external/owned-renderer/Source/owned_visual_evaluation.cpp" @extra /link /OPT:REF d3d11.lib d3d12.lib dxgi.lib d3dcompiler.lib windowscodecs.lib ole32.lib *> "$out/compile.txt"
+    & "$vc/bin/Hostx64/x64/cl.exe" /nologo /std:c++17 /EHsc /MT /O2 /Gy /Gw /DNOMINMAX "/I$repo/external/owned-renderer/Source" "/Fo$out/" "/Fe$exe" @extra "$repo/tools/$checkName.cpp" "$repo/external/owned-renderer/Source/owned_visual_evaluation.cpp" /link /OPT:REF d3d11.lib d3d12.lib dxgi.lib d3dcompiler.lib windowscodecs.lib ole32.lib *> "$out/compile.txt"
     if($LASTEXITCODE -ne 0){Get-Content "$out/compile.txt";throw 'glTF animation check compile failed'}
     if($Glb){& $exe $Glb $Profile *> "$out/result.txt"}else{& $exe *> "$out/result.txt"}
     Get-Content "$out/result.txt"

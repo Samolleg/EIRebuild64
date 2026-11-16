@@ -2179,6 +2179,25 @@ bool RetainedStaticScene::visual_preview_selection(VisualResourceIncarnation res
     return true;
 }
 
+bool RetainedStaticScene::visual_attachment_source(VisualResourceIncarnation resource,
+    double time, RetainedVisualSample& sample) const noexcept {
+    SharedLock guard(lock_);
+    const auto* entity=visual_find_unlocked(resource);
+    const auto member=live_.find(resource.signed_id);
+    if(!entity || !entity->constructed || entity->tick.unit || !entity->has_object_pose ||
+       !entity->assembly || !entity->prepared || member==live_.end() ||
+       entity->status!=RetainedVisualStatus::ready || !std::isfinite(time))return false;
+    sample={};sample.resource=resource;sample.lifecycle=member->second;
+    sample.assembly=entity->assembly;sample.prepared=entity->prepared;
+    sample.object_pose=entity->object_pose;sample.values=entity->tick;
+    sample.values.unit=true;sample.completed_pose=true;sample.status=entity->status;
+    sample.pose.root=entity->object_pose.position;sample.pose.root_rotation=entity->object_pose.quaternion;
+    sample.pose.root_rotation_valid=true;sample.pose.phase=entity->object_pose.phase;sample.pose.time=time;
+    sample.selection=entity->object_pose.selection;sample.pose_revision=entity->pose_revision;
+    sample.height_valid=true;sample.envelope_radius=entity->envelope_radius;
+    return true;
+}
+
 bool RetainedStaticScene::visual_preview_source(VisualResourceIncarnation resource,
     RetainedVisualSample& sample, std::uint64_t& selection_revision) const noexcept {
     SharedLock guard(lock_);
