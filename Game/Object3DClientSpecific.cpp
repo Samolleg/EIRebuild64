@@ -299,6 +299,7 @@ BOOL CObject3DClientSpecific::Create()
 void CObject3DClientSpecific::Destroy()
 {
     ownedAppearanceAttempted = false;
+    ownedPreviewVisualRole = {};
     ownedPreviewViews.reset();
     ownedPreviewAssembly.reset();
     ownedPreviewResource = 0;
@@ -683,6 +684,17 @@ void CObject3DClientSpecific::RecalcScreenRect()
     }
 }
 /////////////////////////////////////////////////////////////////////////////////////
+// Private preview objects retain source semantics independently of their IDs.
+void CObject3DClientSpecific::SetOwnedPreviewVisualRole(bool mainHero)
+{
+    ownedPreviewVisualRole.Capture(mainHero, [&] {
+        ownedPreviewViews.reset();
+        InvalidateOwnedAppearance();
+        GameJournal::Event("RENDER", "preview_visual_role", "id=%d main_hero=%d",
+            lpObject->GetID(), int(mainHero));
+    });
+}
+
 // c56 consumes owned copies only. Drop a previously published value as soon as a host owner changes.
 void CObject3DClientSpecific::InvalidateOwnedAppearance() noexcept
 {
@@ -720,7 +732,7 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
     if (auto* unit = dynamic_cast<CUnit*>(object)) {
         auto* client = IWorldClient.GetPlayer();
         auto* player = client ? client->GetPlayer() : nullptr;
-        assembly->main_hero_visual = player && player->IsMainHero(unit);
+        assembly->main_hero_visual = ownedPreviewVisualRole.Resolve(player && player->IsMainHero(unit));
     }
 #endif
     if (++revision == 0) ++revision;

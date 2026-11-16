@@ -2133,6 +2133,10 @@ void CWorldClient::DeployClientPersonages(CPersonages &people, bool bShowHelm)
             return;
         CObject3DClientSpecific *lpObject3DSpecific = ((CObject3DClientSpecific *)
                                                            pUnit->GetObjectSpecific());
+        // Deployment still has the private IDs in the party. Preserve its
+        // semantic role before the caller restores the original world IDs.
+        auto* previewPlayer = GetPlayer() ? GetPlayer()->GetPlayer() : nullptr;
+        lpObject3DSpecific->SetOwnedPreviewVisualRole(previewPlayer && previewPlayer->IsMainHero(pUnit));
         lpObject3DSpecific->SetMaterials();
         // get start animation name and load it
         pUnit->LoadAnimation(pers.szTemplate, NULL);
