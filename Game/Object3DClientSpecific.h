@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <memory>
+#include "OwnedRender/ModelPreviewVisualRole.h"
 namespace owned { struct ModelPreviewViews; struct VisualAssemblyAsset; }
 
 #include "Object.h"
@@ -84,6 +85,7 @@ private:
 
 private:
 
+    OwnedRender::ModelPreviewVisualRole ownedPreviewVisualRole;
     std::shared_ptr<owned::ModelPreviewViews> ownedPreviewViews;
     std::shared_ptr<const owned::VisualAssemblyAsset> ownedPreviewAssembly;
     std::uint64_t ownedPreviewSerial = 0, ownedPreviewResource = 0, ownedPreviewRevision = 0;
@@ -114,6 +116,7 @@ public:
         fScaleZ = fSZ;
     }
     void InvalidateOwnedAppearance() noexcept;
+    void SetOwnedPreviewVisualRole(bool mainHero);
     virtual void GetScaleCoeffs(float &fSX, float &fSY, float &fSZ) const
     {
         fSX = fScaleX;
