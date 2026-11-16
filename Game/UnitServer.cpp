@@ -4573,7 +4573,9 @@ void CUnitServer::GetAttackAnimation(SL0AnimationSeq &res, int &nHit, EUnitComma
     const bool directedAttack = cmd == UC_ATTACK &&
         (dwAttackFlags & ADB_MODIFIERS) !=
             (ADB_MODIFIER_HDIRECTION1_MIDDLE | ADB_MODIFIER_VDIRECTION1_MIDDLE);
-    pEntry = lpUnit->GetAnimation(dwAnimationFlags, false, !directedAttack);
+    // The strict attack lookup is only a probe: the ordinary/weapon-independent
+    // lookup below still runs on failure. Report a gap only after that lookup.
+    pEntry = lpUnit->GetAnimation(dwAnimationFlags, false, cmd != UC_ATTACK);
     const bool missingDirection = directedAttack && !pEntry;
     if ((pEntry == 0 || (pEntry->dwFlags & dwWeaponFlags) != dwWeaponFlags) && cmd == UC_ATTACK)
     {
