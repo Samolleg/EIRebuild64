@@ -6,6 +6,8 @@
 #include "Game/SaveModIdentity.h"
 #include "Navigation/QueryFailure.h"
 #include "Pak/Pak.h"
+#include "external/owned-renderer/Source/owned_resource_store.h"
+#include "Game/OwnedRender/StartupPaths.h"
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -21,6 +23,7 @@ bool CModPackage::ResourcePlan(const std::string&, std::vector<std::string>&, bo
 bool ReportError(const char*, ...) { return false; }
 void ReportWarning(const char*, ...) {}
 namespace GameJournal { void Event(const char*, const char*, const char*, ...) noexcept {} }
+namespace owned { void bridge_append_probe_event(const char*, const char*) noexcept {} }
 
 namespace {
 namespace fs = std::filesystem;
@@ -173,6 +176,65 @@ void PakChecks(const fs::path& directory) {
     CStringArray names; archive.GetFileList(names);
     Check(names.GetSize() == 1, "PAK enumeration independent of diagnostics");
 }
+void BasePakChecks(const fs::path& directory) {
+    const auto root=directory/"base-pak";fs::create_directories(root/"base-source");
+    const auto logical=root/"base.res", packed=root/"base.pak";
+    Store(logical,Archive("shared.bin"));
+    const auto read=[&](CMappedResource& reader,int expected){
+        Check(reader.OpenResource(logical.string().c_str()),"logical base archive open");
+        DWORD size=0;auto* p=reader.GetFile("SHARED.BIN",&size);
+        Check(p&&size==1&&*p==expected,"logical base payload/CP1251 lookup");
+        reader.CloseFile(p);reader.CloseResource();
+    };
+    CMappedResource raw(true), normal;CWin32MappedResource mapped(true);
+    read(raw,73);read(mapped,73);
+    Store(root/"base-source/shared.bin",Bytes{84});
+    Store(root/"base-source/base-only.bin",Bytes{85});
+    ei::pak::Pack(root/"base-source",packed);
+    read(raw,84);read(normal,84);read(mapped,84);
+    fs::remove(logical);read(raw,84);read(mapped,84);
+    fs::create_directories(root/"mod-source");
+    Store(root/"mod-source/shared.bin",Bytes{99});
+    ei::pak::Pack(root/"mod-source",root/"mod.pak");
+    struct Package {
+        std::string mod;bool ignore;
+        bool ResourcePlan(const std::string& category,std::vector<std::string>& paths,bool& skip) const {
+            paths.clear();skip=ignore;
+            if(category=="figures.res")paths.push_back(mod);
+            return true;
+        }
+    } package{(root/"mod.pak").string(),false};
+    fs::copy_file(packed,root/"figures.pak");
+    owned::ResourceStoreConfig captured;
+    OwnedRender::CaptureGraphicsMounts(captured,root,&package,[](const std::string& p){return fs::path(p).wstring();});
+    Check(captured.archives.size()==5&&captured.archives[0]==(root/"mod.pak").wstring()&&captured.archives[1]==(root/"figures.pak").wstring(),"startup keeps mod ahead of resolved base");
+    package.ignore=true;captured={};
+    OwnedRender::CaptureGraphicsMounts(captured,root,&package,[](const std::string& p){return fs::path(p).wstring();});
+    Check(captured.archives.size()==1&&captured.archives[0]==(root/"mod.pak").wstring(),"ignore-original suppresses all base mounts");
+    owned::ResourceStoreConfig config;config.archives={(root/"mod.pak").wstring(),logical.wstring()};
+    owned::ResourceStore store;owned::ResourceFailure failure;owned::ResourceBlob blob;
+    Check(store.open(config,failure),"renderer opens logical PAK-only base");
+    Check(store.resolve("shared.bin",blob,failure)&&(*blob.bytes)[0]==99,"mod wins over base PAK");
+    Check(store.resolve("base-only.bin",blob,failure)&&(*blob.bytes)[0]==85,"missing mod entry falls through to base PAK");
+    Check(!store.resolve("absent.bin",blob,failure),"missing stays missing");store.close();
+    config.archives={logical.wstring(),(root/"mod.pak").wstring()};
+    Check(store.open(config,failure)&&store.resolve("shared.bin",blob,failure)&&(*blob.bytes)[0]==84,"archive positions are never globally sorted by format");store.close();
+    fs::create_directories(root/"loose");Store(root/"loose/shared.bin",Bytes{100});
+    config.loose_roots={(root/"loose").wstring()};
+    Check(store.open(config,failure)&&store.resolve("shared.bin",blob,failure)&&(*blob.bytes)[0]==100,"loose precedence retained");store.close();
+    Store(root/"mod-source/_deleted.txt",Bytes{'b','a','s','e','-','o','n','l','y','.','b','i','n','\n'});
+    ei::pak::Pack(root/"mod-source",root/"mod.pak");config.loose_roots.clear();
+    config.archives={(root/"mod.pak").wstring(),logical.wstring()};
+    Check(store.open(config,failure)&&!store.resolve("base-only.bin",blob,failure),"mod tombstone blocks base");store.close();
+    Store(logical,Archive("shared.bin"));Store(packed,Bytes{0,1,2});
+    Check(!raw.OpenResource(logical.string().c_str()),"corrupt selected PAK does not reopen old RES");
+    Check(!mapped.OpenResource(logical.string().c_str()),"mapped reader does not reopen old RES");
+    config.archives={logical.wstring()};
+    Check(!store.open(config,failure)||!store.resolve("shared.bin",blob,failure),"renderer never falls back to shadowed RES");store.close();
+    fs::create_directories(root/"source.res");Store(root/"source.pak",Bytes{0});
+    Check(ei::pak::ResolveArchivePath(root/"source.res")==root/"source.res","source folder stays a folder");
+    std::cout<<"BASE_PAK priority/payload/mapped/renderer/tombstone PASS\n";
+}
 void NavigationChecks() {
     using namespace Navigation;
     Request r;r.source={1,2,3};r.goal={10,2,3};r.maxLength=5;r.goalRadius=.15f;r.height=1.6f;
@@ -233,7 +295,7 @@ int main(int argc,char** argv) {
         if(argc<3)throw std::runtime_error("Usage: check-audit-fixes OUTPUT_DIR MOD_CONFIG [ARCHIVE...]");
         if(!AfxWinInit(GetModuleHandleW(nullptr),nullptr,GetCommandLineA(),0))throw std::runtime_error("MFC init");
         const fs::path output=argv[1];fs::create_directories(output);
-        ResourceChecks(output);IdentityChecks(output,argv[2]);NavigationChecks();PakChecks(output);
+        ResourceChecks(output);IdentityChecks(output,argv[2]);NavigationChecks();PakChecks(output);BasePakChecks(output);
         for(int i=3;i<argc;++i)if(std::string(argv[i])!="--diagnostics")RealArchive(argv[i]);
         std::cout<<"AUDIT_FIXES_SUMMARY checks="<<checks<<" errors=0 diagnostics="<<RuntimeDiagnostics::Enabled()<<"\n";
         return 0;

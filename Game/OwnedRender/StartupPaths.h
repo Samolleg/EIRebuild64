@@ -1,6 +1,7 @@
 #pragma once
 #include "../RuntimePaths64.h"
 #include "ResourceBootstrap.h"
+#include "../../Pak/Pak.h"
 #include <filesystem>
 #include <array>
 #include <algorithm>
@@ -43,7 +44,7 @@ void CaptureGraphicsMounts(owned::ResourceStoreConfig& mounts,
     }
     for (size_t i = 0; i != ignore.size(); ++i) {
         if (ignore[i]) continue;
-        mounts.archives.push_back((resourceRoot / categories[i]).wstring());
+        mounts.archives.push_back(ei::pak::ResolveArchivePath(resourceRoot / categories[i]).wstring());
         mounts.archive_kinds.push_back(i == 0 ? owned::kArchiveFigures :
             i == 3 ? owned::kArchiveAllKinds : owned::kArchiveTextures);
     }
@@ -82,7 +83,7 @@ owned::EmbeddedHostPaths CaptureStartupPaths(const std::filesystem::path& engine
                 mounts.loose_roots.push_back(path.wstring());
             } else mounts.archives.push_back(path.wstring());
         }
-        if (!ignore) mounts.archives.push_back((resourceRoot / name).wstring());
+        if (!ignore) mounts.archives.push_back(ei::pak::ResolveArchivePath(resourceRoot / name).wstring());
     };
     captureFamily("texts.res", paths.text_mounts);
     captureFamily("database.res", paths.data_mounts);
