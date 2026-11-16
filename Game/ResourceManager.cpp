@@ -42,7 +42,7 @@ void CResourceManager::Destroy()
 BOOL CResourceManager::AddNewResource(LPCSTR pszResourceFileName)
 {
     OwnedRender::E3HudResourceChanged(this);
-    if (_access(pszResourceFileName, 4) == -1) {
+    if (_access(ei::pak::ResolveArchivePath(pszResourceFileName).string().c_str(), 4) == -1) {
         std::vector<std::string> paths;bool ignore=false;
         if(!ModRuntime::Resources()||!ModRuntime::Resources()->ResourcePlan(pszResourceFileName,paths,ignore)||(!ignore&&paths.empty()))return FALSE;
     }
