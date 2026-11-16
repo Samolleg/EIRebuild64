@@ -29,8 +29,12 @@ struct NodeGpu {Float4 rotation,translation,rows[3];unsigned first,second,count;
 static_assert(sizeof(PoseGpu)==140&&sizeof(NodeGpu)==104);
 static std::vector<NodeGpu> gpu12(const Animation& a,const Playback& playback){
     auto packed=pack(a,"test12");const unsigned base=2,total=base+packed->nodes+packed->morphs;
-    std::vector<unsigned char> bytes(32+packed->bytes.size());unsigned header[8]{0,0,0,0,0,0,32,base};
-    std::memcpy(bytes.data(),header,32);std::memcpy(bytes.data()+32,packed->bytes.data(),packed->bytes.size());
+    // Library precedes the skeleton header, so an accidentally relative pointer
+    // cannot pass this fixture. Independent skeletons use the same library.
+    const unsigned skeleton=unsigned((packed->bytes.size()+15)&~std::size_t(15));
+    std::vector<unsigned char> bytes(skeleton+64);unsigned header[8]{0,0,0,0,0,0,1,base};
+    std::memcpy(bytes.data(),packed->bytes.data(),packed->bytes.size());
+    std::memcpy(bytes.data()+skeleton,header,32);std::memcpy(bytes.data()+skeleton+32,header,32);
     ComPtr<IDXGIFactory4> factory;hr(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));ComPtr<IDXGIAdapter> adapter;
     hr(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)));ComPtr<ID3D12Device> device;
     hr(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device)));
@@ -51,7 +55,7 @@ static std::vector<NodeGpu> gpu12(const Animation& a,const Playback& playback){
         d.Height=1;d.DepthOrArraySize=d.MipLevels=1;d.SampleDesc.Count=1;d.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;d.Flags=flags;
         ComPtr<ID3D12Resource> resource;hr(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&d,state,nullptr,IID_PPV_ARGS(&resource)));
         if(data){void* p=nullptr;D3D12_RANGE empty{0,0};hr(resource->Map(0,&empty,&p));std::memcpy(p,data,std::size_t(size));resource->Unmap(0,nullptr);}return resource;};
-    PoseGpu input;input.clip=playback.clip;input.previous=playback.previous;input.time=playback.time;input.previousTime=playback.previous_time;input.blend=playback.blend;
+    PoseGpu input;input.asset=skeleton+32;input.clip=playback.clip;input.previous=playback.previous;input.time=playback.time;input.previousTime=playback.previous_time;input.blend=playback.blend;
     auto animation=buffer(bytes.size(),D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ,D3D12_RESOURCE_FLAG_NONE,bytes.data());
     auto poses=buffer(sizeof(input),D3D12_HEAP_TYPE_UPLOAD,D3D12_RESOURCE_STATE_GENERIC_READ,D3D12_RESOURCE_FLAG_NONE,&input);
     auto output=buffer(total*sizeof(NodeGpu),D3D12_HEAP_TYPE_DEFAULT,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,nullptr);
@@ -76,8 +80,10 @@ static std::vector<NodeGpu> gpu12(const Animation& a,const Playback& playback){
 }
 static std::vector<NodeGpu> gpu(const Animation& a,const Playback& playback){
     auto packed=pack(a,"test");const unsigned base=2,total=base+packed->nodes+packed->morphs;
-    std::vector<unsigned char> bytes(32+packed->bytes.size());
-    unsigned header[8]{0,0,0,0,0,0,32,base};std::memcpy(bytes.data(),header,32);std::memcpy(bytes.data()+32,packed->bytes.data(),packed->bytes.size());
+    const unsigned skeleton=unsigned((packed->bytes.size()+15)&~std::size_t(15));
+    std::vector<unsigned char> bytes(skeleton+64);
+    unsigned header[8]{0,0,0,0,0,0,1,base};std::memcpy(bytes.data(),packed->bytes.data(),packed->bytes.size());
+    std::memcpy(bytes.data()+skeleton,header,32);std::memcpy(bytes.data()+skeleton+32,header,32);
     ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level;
     hr(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,&level,&context));
     static ComPtr<ID3DBlob> code;
@@ -91,7 +97,7 @@ static std::vector<NodeGpu> gpu(const Animation& a,const Playback& playback){
     D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=DXGI_FORMAT_R32_TYPELESS;sd.ViewDimension=D3D11_SRV_DIMENSION_BUFFEREX;
     sd.BufferEx.Flags=D3D11_BUFFEREX_SRV_FLAG_RAW;sd.BufferEx.NumElements=desc.ByteWidth/4;
     ComPtr<ID3D11ShaderResourceView> rawView;hr(device->CreateShaderResourceView(raw.Get(),&sd,&rawView));
-    PoseGpu input;input.clip=playback.clip;input.previous=playback.previous;input.time=playback.time;input.previousTime=playback.previous_time;input.blend=playback.blend;
+    PoseGpu input;input.asset=skeleton;input.clip=playback.clip;input.previous=playback.previous;input.time=playback.time;input.previousTime=playback.previous_time;input.blend=playback.blend;
     desc.ByteWidth=sizeof(input);desc.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;desc.StructureByteStride=sizeof(input);
     init.pSysMem=&input;ComPtr<ID3D11Buffer> poses;hr(device->CreateBuffer(&desc,&init,&poses));
     ComPtr<ID3D11ShaderResourceView> poseView;hr(device->CreateShaderResourceView(poses.Get(),nullptr,&poseView));
