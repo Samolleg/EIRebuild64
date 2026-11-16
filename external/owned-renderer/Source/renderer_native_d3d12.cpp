@@ -991,6 +991,7 @@ HRESULT Renderer::get_native_owned_texture_d3d12(const NativeOwnedTextureView& s
   output=std::move(texture);
   return S_OK;
  }
+ if(source.value_source==1&&!source.resource)return fail(E_INVALIDARG,"texture.archive_identity");
  if(!source.mips&&source.value_source==1&&source.resource){
   // A neighbour piece texture (archive member) without mips: its resident
   // entry (adopt_prebuilt_textures) serves it, as on D3D11.

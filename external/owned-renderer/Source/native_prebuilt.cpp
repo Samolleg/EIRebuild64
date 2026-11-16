@@ -228,6 +228,10 @@ std::string native_owned_archive_texture_key(const ResourceIdentity& resource,
 }
 
 std::string native_owned_mip_texture_key(const NativeOwnedTextureView& source,bool generated){
+ // Archive/decoded images are identified by their resource, not the local
+ // view ID (all glTF material maps may use 1). Match D3D11 and the stream.
+ if(source.value_source==1&&source.resource)
+  return native_owned_archive_texture_key(*source.resource,source.generation,generated);
  return std::to_string(source.value_source)+":"+std::to_string(source.identity)+"|generation="+std::to_string(source.generation)+
   (generated?"|mips=full":"|mips=authored");
 }
