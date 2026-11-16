@@ -8,6 +8,7 @@
 #include "ModNativeCrtRandom.h"
 #include "ScenarioTracker.h"
 #include "ModPackage.h"
+#include "../Pak/Pak.h"
 #include "SettingsProfile.h"
 #include "ModNpcEquipment.h"
 #include "ModHitHistory.h"
@@ -577,7 +578,7 @@ bool CModPackage::ResourcePlan(const std::string&name,std::vector<std::string>&p
  }
  return it!=archives.end()||ignore;
 }
-CMappedResource &CModPackage::Open(const std::string &path){auto &slot=opened[path];if(!slot){if(!fs::exists(path))throw std::runtime_error("Missing archive: "+path);auto p=std::make_unique<CMappedResource>(true);if(!p->OpenResource(path.c_str()))throw std::runtime_error("Cannot open archive: "+path);slot=std::move(p);}return *slot;}
+CMappedResource &CModPackage::Open(const std::string &path){const auto resolved=ei::pak::ResolveArchivePath(path).string();auto &slot=opened[resolved];if(!slot){if(!fs::exists(resolved))throw std::runtime_error("Missing archive: "+resolved);auto p=std::make_unique<CMappedResource>(true);if(!p->OpenResource(resolved.c_str()))throw std::runtime_error("Cannot open archive: "+resolved);slot=std::move(p);}return *slot;}
 std::vector<unsigned char> CModPackage::ReadResource(const std::string &category,const std::string &entry,const std::string &base,std::string &owner){
  owner.clear();std::vector<std::string> paths;bool ignore=false;ResourcePlan(category,paths,ignore);if(!ignore&&!base.empty())paths.push_back(base);
  for(const auto &path:paths){

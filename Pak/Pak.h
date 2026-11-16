@@ -4,8 +4,19 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <cwchar>
 
 namespace ei::pak {
+// Keep a logical archive in its original mount position. A selected corrupt
+// PAK is an error, never a reason to silently read the old RES instead.
+inline std::filesystem::path ResolveArchivePath(const std::filesystem::path& path)
+{
+    if (_wcsicmp(path.extension().c_str(), L".res") != 0 || std::filesystem::is_directory(path))
+        return path;
+    auto pak = path;
+    pak.replace_extension(L".pak");
+    return std::filesystem::is_regular_file(pak) ? pak : path;
+}
 using Bytes = std::vector<std::uint8_t>;
 struct Entry
 {
