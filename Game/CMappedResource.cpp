@@ -124,8 +124,10 @@ BOOL CMappedResource::OpenResource(LPCSTR pszFileName, BOOL _bWriteAccess)
 {
     CloseResource();
     bWriteAccess = _bWriteAccess;
-    const std::string resolvedName = (!rawResource && !_bWriteAccess)
+    const std::string mappedName = (!rawResource && !_bWriteAccess)
         ? ModRuntime::MapPath(pszFileName) : std::string(pszFileName);
+    const std::string resolvedName = _bWriteAccess ? mappedName
+        : ei::pak::ResolveArchivePath(mappedName).string();
     sourcePath = resolvedName;
     pszFileName = resolvedName.c_str();
     OpenOverlays(pszFileName, _bWriteAccess);
@@ -370,6 +372,8 @@ CWin32MappedResource::~CWin32MappedResource()
 //--------------------------------------------------------------------------------------------
 BOOL CWin32MappedResource::OpenResource(LPCSTR name, BOOL write)
 {
+    const auto resolved = write ? std::string(name) : ei::pak::ResolveArchivePath(name).string();
+    name = resolved.c_str();
     if (_stricmp(std::filesystem::path(name).extension().string().c_str(),".pak") == 0 || std::filesystem::is_directory(name))
         return CMappedResource::OpenResource(name,write);
     CloseResource(); sourcePath = name; OpenOverlays(name, write, true);

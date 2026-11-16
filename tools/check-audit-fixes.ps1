@@ -22,6 +22,7 @@ $env:PATH="$vc/bin/Hostx64/x64;$sdk/bin/$sdkVersion/x64;"+$env:PATH
 foreach($name in 'CL','_CL_','LINK','_LINK_'){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
 $exe=Join-Path $out 'check-audit-fixes.exe'
 $sources=@('tools/check-audit-fixes.cpp','Game/CResourceBase.cpp','Game/CMappedResource.cpp','Game/CMMIOResource.cpp','Game/Win32Classes.cpp','Game/FileRegistry.cpp','Game/OwnedRender/ResourceMapping.cpp')
+$sources += 'external/owned-renderer/Source/owned_resource_store.cpp'
 $args=@('/nologo','/std:c++17','/EHsc','/MT','/O2','/Gy','/GS','/W3','/DNDEBUG','/DNOMINMAX','/DWIN32','/D_WIN32_WINNT=0x0A00','/D_CRT_SECURE_NO_WARNINGS','/D_CRT_NONSTDC_NO_WARNINGS',
     ('/I'+$repo),('/I'+(Join-Path $repo 'Game')),('/I'+(Join-Path $repo 'external/owned-renderer/Source')),('/I'+(Join-Path $out 'include')),('/I'+(Join-Path $repo 'third_party/luajit/src')),
     ('/Fo'+$out+'\'),('/Fe'+$exe),('/Fd'+(Join-Path $out 'check-audit-fixes.pdb')))
@@ -48,7 +49,7 @@ $pakObject=Join-Path $nativeObjects 'Pak.obj'
 if(!(Test-Path -LiteralPath $pakObject)){throw 'Prepared PAK object required'}
 $args+=$pakObject
 $args+=@(Get-ChildItem -LiteralPath $nativeObjects -Filter 'zstd_*.obj' -File | ForEach-Object FullName)
-$args+=@('/link','/OPT:REF','/SUBSYSTEM:CONSOLE','winmm.lib','psapi.lib')
+$args+=@('/link','/OPT:REF','/SUBSYSTEM:CONSOLE','winmm.lib','psapi.lib','bcrypt.lib')
 & $compiler @args *> (Join-Path $out 'compile.txt')
 if($LASTEXITCODE -ne 0){Select-String -LiteralPath (Join-Path $out 'compile.txt') -Pattern ': error|fatal error|LNK\d+' | Select-Object -First 25;throw 'Audit regression check compilation failed'}
 & $exe (Join-Path $out 'fixtures') $ModConfig @ResourcePaths *> (Join-Path $out 'result.txt')

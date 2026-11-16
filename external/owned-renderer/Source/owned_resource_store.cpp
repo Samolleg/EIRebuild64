@@ -715,7 +715,7 @@ bool ResourceStore::open(const ResourceStoreConfig& config,
     }
     impl_->loose_roots = config.loose_roots;
     for (std::size_t index = 0; index < config.archives.size(); ++index) {
-        auto file = std::make_shared<FileOwner>(config.archives[index],
+        auto file = std::make_shared<FileOwner>(ei::pak::ResolveArchivePath(config.archives[index]).wstring(),
                                                 impl_->counters, true);
         if (!file->open(failure)) {
             bridge_append_probe_event("resource_store_open_failed", failure.message.c_str());
