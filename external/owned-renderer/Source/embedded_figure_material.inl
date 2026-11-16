@@ -193,7 +193,12 @@ HRESULT Renderer::queue_embedded_figure(const NativeGeometryView& view,
   if(FAILED(hr))return hr;
   primary=combined.Get();
  }
- if(d3d12_) {
+ if(view.skn_material.identity && view.owned_texture.identity) {
+  // A registry/SKN preview carries its own textures and alpha/depth/cull state.
+  // Captured FIG atlases and wounds must not replace them on either backend.
+  const auto ownedState = native_owned_submission_state(state, view.owned_fixed_state);
+  hr = queue_native_owned(view, ownedState);
+ } else if(d3d12_) {
   D3D12TextureRef texture,overlay;
   std::uint64_t backing=0;
   if(primarySurface) {

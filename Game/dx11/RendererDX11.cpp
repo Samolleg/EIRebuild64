@@ -360,6 +360,16 @@ bool CDX11::SubmitC74Figure(const owned::NativeGeometryView& view,
         (ownedRenderer.FigureActive() && ownedRenderer.FigureValues().object_id == 0))
         state.render[D3DRENDERSTATE_FOGENABLE] = FALSE;
     state.render[D3DRENDERSTATE_SPECULARENABLE] = (model.flags & 8u) ? TRUE : FALSE;
+    if (model.skn_material.identity && model.owned_texture.identity) {
+        const HRESULT hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+            return renderer.queue_embedded_figure(model, state, nullptr, nullptr, lighting, lights);
+        });
+        RestoreHostBindings();
+        if (SUCCEEDED(hr)) { ++c56WorldFigurePrimitives; return true; }
+        if (camp) campPopupFailed = true;
+        ++c56WorldFigureQueueFailed; ++c56FigureSkippedRenderError; c56FigureLastRenderError = hr;
+        return false;
+    }
     const auto& pixel = GetConstantBuffers()->cb_ps_pixelshader.data;
     auto* primary = ownedRenderer.FigureActive() ? ownedRenderer.FigurePrimaryTexture() : boundFigureTextures[0].Get();
     auto* secondary = ownedRenderer.FigureActive() ? ownedRenderer.FigureSecondaryTexture() : boundFigureTextures[1].Get();
@@ -389,7 +399,7 @@ bool CDX11::SubmitC74Figure(const owned::NativeGeometryView& view,
     state.render[D3DRENDERSTATE_FOGCOLOR] = (byte(pixel.fogColor.x)<<16) |
         (byte(pixel.fogColor.y)<<8) | byte(pixel.fogColor.z);
     const HRESULT hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
-        if (camp && !lighting && !secondary && !nativeD3D12) {
+        if (camp && !model.skn_material.identity && !lighting && !secondary && !nativeD3D12) {
             const HRESULT flushed = renderer.has_pending_ui() ? renderer.flush_ui() : S_OK;
             if (FAILED(flushed)) return flushed;
             owned::Renderer::NativeQueueCheckpoint checkpoint;

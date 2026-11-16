@@ -4126,6 +4126,8 @@ private:
     ComPtr<ID3D11PixelShader> native_low_ps_;
     // Low unlit ordered batches (NATIVE_LOW and NATIVE_UNLIT: the stock sky).
     ComPtr<ID3D11PixelShader> native_low_unlit_ps_;
+    ComPtr<ID3D11PixelShader> native_gltf_ps_, native_gltf_low_ps_;
+    ComPtr<ID3D11PixelShader> native_gltf_masked_ps_, native_gltf_masked_low_ps_;
     // The flat tile class (NATIVE_TERRAIN_FLAT): terrain and snow terrain
     // (NativeBatch::flat_pixels).
     ComPtr<ID3D11PixelShader> native_terrain_flat_ps_,native_snow_flat_ps_;
@@ -4182,7 +4184,7 @@ private:
     // All sets being built share one queue of programs over one pool.
     struct NativeSpecialisationJob;
     struct NativeSpecialisationPool;
-    using NativeSpecialisedSet=std::array<ComPtr<ID3D11PixelShader>,15>;
+    using NativeSpecialisedSet=std::array<ComPtr<ID3D11PixelShader>,19>;
     std::shared_ptr<NativeSpecialisationPool> native_spec_pool_;
     std::vector<std::shared_ptr<NativeSpecialisationJob>> native_spec_jobs_; // sets building, in start order
     bool native_specialisation_building(std::uint32_t key) const noexcept;

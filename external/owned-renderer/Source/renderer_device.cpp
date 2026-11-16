@@ -1191,7 +1191,9 @@ const NativePixelMember* Renderer::native_specialised_members() noexcept{
  &Renderer::native_masked_ps_,&Renderer::native_masked_low_ps_,
  &Renderer::native_masked_terrain_ps_,&Renderer::native_masked_snow_ps_,
  &Renderer::native_masked_terrain_flat_ps_,&Renderer::native_masked_snow_flat_ps_,
- &Renderer::native_shadow_mask_ps_,&Renderer::native_low_shadow_mask_ps_};
+ &Renderer::native_shadow_mask_ps_,&Renderer::native_low_shadow_mask_ps_,
+ &Renderer::native_gltf_ps_,&Renderer::native_gltf_low_ps_,
+ &Renderer::native_gltf_masked_ps_,&Renderer::native_gltf_masked_low_ps_};
  static_assert(std::size(members)==std::tuple_size<NativeSpecialisedSet>::value,"one specialised slot per member");
  return members;
 }
@@ -1250,7 +1252,7 @@ bool native_specialised_programs(std::uint32_t key,NativeSpecialisedPrograms& ou
   out.macros.push_back(std::move(macros));out.programs.push_back(program);
  }
  for(std::size_t n=0;n<out.programs.size();++n)out.programs[n].defines=out.macros[n].data();
- return out.programs.size()==15;
+ return out.programs.size()==19;
 }
 namespace {
 
@@ -2755,6 +2757,12 @@ void append_native_shader_programs(std::vector<ShaderProgram>& out){
  out.push_back({source,nullptr,nullptr,"nativeMotionPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
  out.push_back({source,nullptr,nullptr,"nativeShadowMaskPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
  out.push_back({source,nullptr,low,"nativeShadowMaskPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ static const D3D_SHADER_MACRO gltf[]={{"NATIVE_GLTF","1"},{nullptr,nullptr}};
+ static const D3D_SHADER_MACRO gltf_low[]={{"NATIVE_GLTF","1"},{"NATIVE_LOW","1"},{nullptr,nullptr}};
+ static const D3D_SHADER_MACRO gltf_masked[]={{"NATIVE_GLTF","1"},{"NATIVE_SHADOW_MASK","1"},{nullptr,nullptr}};
+ static const D3D_SHADER_MACRO gltf_masked_low[]={{"NATIVE_GLTF","1"},{"NATIVE_SHADOW_MASK","1"},{"NATIVE_LOW","1"},{nullptr,nullptr}};
+ for(const D3D_SHADER_MACRO* variant:{gltf,gltf_low,gltf_masked,gltf_masked_low})
+  out.push_back({source,nullptr,variant,"nativePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
 // D3D12 (it has no specialisation sets): the native pixel programs again
@@ -2793,7 +2801,8 @@ HRESULT Renderer::create_native_pipeline(){
  retire_native_shadows();
  native_shadow_prepare_cs_.Reset();native_shadow_commit_cs_.Reset();native_shadow_build_cs_.Reset();native_shadow_vs_.Reset();native_shadow_ps_.Reset();
  bridge_set_native_terrain_animation_owned(false);
- native_vs_.Reset();native_ps_.Reset();native_terrain_ps_.Reset();native_snow_ps_.Reset();native_low_ps_.Reset();native_low_unlit_ps_.Reset();native_terrain_flat_ps_.Reset();native_snow_flat_ps_.Reset();native_masked_ps_.Reset();native_masked_low_ps_.Reset();native_masked_terrain_ps_.Reset();native_masked_snow_ps_.Reset();native_masked_terrain_flat_ps_.Reset();native_masked_snow_flat_ps_.Reset();native_prepass_ps_.Reset();native_low_prepass_ps_.Reset();native_shadow_mask_vs_.Reset();native_shadow_mask_ps_.Reset();native_low_shadow_mask_ps_.Reset();native_prepass_vs_.Reset();native_depth_clear_vs_.Reset();native_liquid_ps_.Reset();native_low_liquid_ps_.Reset();native_liquid_ssr_ps_.Reset();native_liquid_foam_ps_.Reset();native_water_ps_.Reset();native_water_ssr_ps_.Reset();native_low_water_ps_.Reset();native_lava_ps_.Reset();native_build_cs_.Reset();native_world_lighting_constants_.Reset();native_world_lighting_valid_=false;native_world_lighting_dirty_=false;native_point_light_constants_.Reset();native_point_light_buffer_.Reset();native_point_light_srv_.Reset();native_point_light_capacity_=0;native_point_light_grid_buffer_.Reset();native_point_light_grid_srv_.Reset();native_point_light_grid_capacity_=0;native_point_light_grid_={};native_point_light_grid_inputs_.clear();native_point_lights_.clear();native_point_light_inputs_.clear();native_point_lights_dirty_=false;native_prepared_vertices_.Reset();native_prepared_vertex_srv_.Reset();native_prepared_vertex_uav_.Reset();native_prepared_vertex_capacity_=0;native_world_vertices_.Reset();native_world_vertex_srv_.Reset();native_world_vertex_uav_.Reset();native_world_vertex_capacity_=native_world_vertex_used_=0;
+ native_vs_.Reset(); native_gltf_ps_.Reset();native_gltf_low_ps_.Reset();native_gltf_masked_ps_.Reset();native_gltf_masked_low_ps_.Reset();
+ native_ps_.Reset();native_terrain_ps_.Reset();native_snow_ps_.Reset();native_low_ps_.Reset();native_low_unlit_ps_.Reset();native_terrain_flat_ps_.Reset();native_snow_flat_ps_.Reset();native_masked_ps_.Reset();native_masked_low_ps_.Reset();native_masked_terrain_ps_.Reset();native_masked_snow_ps_.Reset();native_masked_terrain_flat_ps_.Reset();native_masked_snow_flat_ps_.Reset();native_prepass_ps_.Reset();native_low_prepass_ps_.Reset();native_shadow_mask_vs_.Reset();native_shadow_mask_ps_.Reset();native_low_shadow_mask_ps_.Reset();native_prepass_vs_.Reset();native_depth_clear_vs_.Reset();native_liquid_ps_.Reset();native_low_liquid_ps_.Reset();native_liquid_ssr_ps_.Reset();native_liquid_foam_ps_.Reset();native_water_ps_.Reset();native_water_ssr_ps_.Reset();native_low_water_ps_.Reset();native_lava_ps_.Reset();native_build_cs_.Reset();native_world_lighting_constants_.Reset();native_world_lighting_valid_=false;native_world_lighting_dirty_=false;native_point_light_constants_.Reset();native_point_light_buffer_.Reset();native_point_light_srv_.Reset();native_point_light_capacity_=0;native_point_light_grid_buffer_.Reset();native_point_light_grid_srv_.Reset();native_point_light_grid_capacity_=0;native_point_light_grid_={};native_point_light_grid_inputs_.clear();native_point_lights_.clear();native_point_light_inputs_.clear();native_point_lights_dirty_=false;native_prepared_vertices_.Reset();native_prepared_vertex_srv_.Reset();native_prepared_vertex_uav_.Reset();native_prepared_vertex_capacity_=0;native_world_vertices_.Reset();native_world_vertex_srv_.Reset();native_world_vertex_uav_.Reset();native_world_vertex_capacity_=native_world_vertex_used_=0;
  if(feature_level_<D3D_FEATURE_LEVEL_11_0)return S_FALSE;
  std::vector<ShaderProgram> programs;append_native_shader_programs(programs);
  ComPtr<ID3DBlob> shader,error;HRESULT hr=compile_shader(programs[0],&shader,&error);if(FAILED(hr)){if(error){std::fwrite(error->GetBufferPointer(),1,error->GetBufferSize(),stderr);std::fputc('\n',stderr);}return hr;}
@@ -2829,7 +2838,9 @@ HRESULT Renderer::create_native_pipeline(){
      &Renderer::native_terrain_flat_ps_,&Renderer::native_snow_flat_ps_,
      &Renderer::native_masked_ps_,&Renderer::native_masked_low_ps_,
      &Renderer::native_masked_terrain_ps_,&Renderer::native_masked_snow_ps_,
-     &Renderer::native_masked_terrain_flat_ps_,&Renderer::native_masked_snow_flat_ps_};
+     &Renderer::native_masked_terrain_flat_ps_,&Renderer::native_masked_snow_flat_ps_,
+     &Renderer::native_gltf_ps_,&Renderer::native_gltf_low_ps_,
+     &Renderer::native_gltf_masked_ps_,&Renderer::native_gltf_masked_low_ps_};
     if(pixel_variant>=std::size(variants))return native_program_failed(program,entry,E_UNEXPECTED);
     hr=create_shader(device_.Get(),shader->GetBufferPointer(),shader->GetBufferSize(),nullptr,(this->*variants[pixel_variant++]).ReleaseAndGetAddressOf());
    }
@@ -3500,6 +3511,7 @@ void Renderer::release() {
  discard_vertices_=true;
  discard_indices_=true;constant_ring_.release();draw_constants_bytes_=0;draw_constants_range_={};
  native_build_cs_.Reset();native_pose_cs_.Reset();retire_native_poses();
+  native_gltf_ps_.Reset();native_gltf_low_ps_.Reset();native_gltf_masked_ps_.Reset();native_gltf_masked_low_ps_.Reset();
  native_ps_.Reset();native_terrain_ps_.Reset();
  native_snow_ps_.Reset();native_low_ps_.Reset();native_low_unlit_ps_.Reset();native_terrain_flat_ps_.Reset();native_snow_flat_ps_.Reset();native_masked_ps_.Reset();native_masked_low_ps_.Reset();native_masked_terrain_ps_.Reset();native_masked_snow_ps_.Reset();native_masked_terrain_flat_ps_.Reset();native_masked_snow_flat_ps_.Reset();native_prepass_ps_.Reset();native_low_prepass_ps_.Reset();native_shadow_mask_vs_.Reset();native_shadow_mask_ps_.Reset();native_low_shadow_mask_ps_.Reset();native_liquid_ps_.Reset();native_low_liquid_ps_.Reset();native_liquid_ssr_ps_.Reset();native_liquid_foam_ps_.Reset();native_water_ps_.Reset();native_water_ssr_ps_.Reset();native_low_water_ps_.Reset();native_lava_ps_.Reset();
  
