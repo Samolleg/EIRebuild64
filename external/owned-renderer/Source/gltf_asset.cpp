@@ -116,8 +116,9 @@ std::shared_ptr<const Asset> select(const std::string &visual, bool hero, bool &
         });
         asset->cache_key = blob.identity.key() + "|" + profile.identity.key();
         asset->cache_key += "|" + cacheKey;
+        asset->gpu_animation->key = asset->cache_key;
         const std::string detail = "model=\"" + resource +
-            "\" glTF animation not wired: static idle frame";
+            "\" glTF GPU animation asset loaded";
         bridge_append_probe_event("gltf_asset_loaded", detail.c_str());
         cache[cacheKey] = asset;
         return asset;
@@ -146,6 +147,7 @@ std::shared_ptr<const RuntimeAsset> select_gltf(const std::string &name, bool he
     auto asset = std::make_shared<RuntimeAsset>();
     asset->gltf_asset = loaded;
     asset->asset = loaded->geometry;
+    asset->asset.vertices = loaded->rest_vertices;
     asset->textures = loaded->textures;
     asset->identity.canonical_name = loaded->cache_key;
     cache[loaded->cache_key] = asset;

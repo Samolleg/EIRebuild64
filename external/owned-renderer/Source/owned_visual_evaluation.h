@@ -9,6 +9,7 @@
 #include <vector>
 
 namespace owned {
+namespace gltf { struct GpuProgram; }
 
 constexpr std::size_t kVisualRoutePointLimit = 4096;
 constexpr std::size_t kVisualPartLimit = 4096;
@@ -108,6 +109,7 @@ struct VisualPoseState {
     double facing_time = 0;
     double phase = 0;
     std::size_t selection = 0;
+    std::uint64_t cycle = 0;
     float facing = 0;
     std::array<float, 3> root{};
     std::array<float, 4> root_rotation{1, 0, 0, 0};
@@ -190,6 +192,8 @@ struct VisualNodeSample {
 // Immutable model/clip linkage shared by pose consumers. Track pointers refer
 // only to the pinned immutable clip; they never identify engine state.
 struct VisualSkeletonBinding {
+    std::shared_ptr<const gltf::GpuProgram> gltf_animation;
+    std::uint32_t gltf_node_base = 0;
     std::shared_ptr<const ModelCpuAsset> model;
     std::shared_ptr<const AnimationDatabaseAsset> database;
     std::shared_ptr<const AnimationClipAsset> clip;

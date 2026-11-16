@@ -35,6 +35,10 @@ int wmain(int argc, wchar_t **argv) {
         std::cout << "ACCEPTED: " << asset->geometry.vertices.size() << " vertices, "
                   << asset->geometry.indices.size() / 3 << " triangles, "
                   << asset->geometry.joints.size() << " evaluation nodes\n";
+        std::cout << "Animation: " << asset->animation->clips.size() << " clips, "
+                  << asset->animation->morphs.size() << " morph vertices, "
+                  << asset->gpu_animation->bytes.size() << " GPU bytes; idle radius "
+                  << asset->radius << ", animation envelope " << asset->animation_radius << '\n';
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "REJECTED: " << error.what() << '\n';

@@ -3068,6 +3068,8 @@ bool parse_animation_database(const ResourceBlob& blob,
         value.length = read_u32(entry + 32);
         value.speed = read_float(entry + 36);
         value.hide_frames = {read_u32(entry + 40), read_u32(entry + 44)};
+        for(unsigned k=0;k<4;++k)value.step_frames[k]=read_u32(entry+48+k*4);
+        value.hit_frame=read_u32(entry+64);value.sound_frame=read_u32(entry+68);
         if (!std::isfinite(value.speed)) value.speed = 0.0f;  // unchecked by the game
         if (value.length > 0x1000000u) {
             fail(failure, ResourceFailureCode::parse, "invalid ADB duration or rate");

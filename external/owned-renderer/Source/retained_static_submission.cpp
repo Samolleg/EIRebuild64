@@ -1149,7 +1149,7 @@ bool skn_pose_bounds(const RetainedVisualSample& sample,NativeWorldBounds& bound
   bounds=prepared.skn_bounds;return true;
  }
  if(asset->gltf_asset) {
-  const float radius=asset->gltf_asset->radius*(std::max)({std::abs(sample.assembly->scale[0]),std::abs(sample.assembly->scale[1]),std::abs(sample.assembly->scale[2])})+1e-4f;
+  const float radius=asset->gltf_asset->animation_radius*(std::max)({std::abs(sample.assembly->scale[0]),std::abs(sample.assembly->scale[1]),std::abs(sample.assembly->scale[2])})+1e-4f;
   for(unsigned axis=0;axis<3;++axis) {
    const float position=sample.completed_pose?sample.object_pose.position[axis]:sample.pose.root[axis];
    bounds.minimum[axis]=position-radius;bounds.maximum[axis]=position+radius;

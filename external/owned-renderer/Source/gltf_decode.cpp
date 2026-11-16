@@ -364,6 +364,9 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
         if (activeNodes.count(&data.nodes[i]) && data.nodes[i].name &&
             reference.count(data.nodes[i].name))
             append(&data.nodes[i]);
+    // Mesh nodes own weights channels even when they are not skin joints.
+    for (const auto *node : activeNodes)
+        if (node->mesh) append(node);
     for (const auto &bone : contract.at("skeleton").at("bones"))
         if (bone.at("required").get<bool>())
             require(names.count(bone.at("name").get<std::string>()),
@@ -398,12 +401,36 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
         if (reference.count(joint.name) && reference.at(joint.name)->contains("inverseBindMatrix"))
             matrix_equal(skn::multiply(matrix, joint.inverse), skn::identity(), joint.name);
     }
+    output->animation = std::make_shared<Animation>();
+    auto &runtime = *output->animation;
+    for (std::size_t i = 0; i < nodes.size(); ++i) {
+        const auto &j = output->geometry.joints[i];
+        Node n; n.parent = j.parent; n.rotation = j.rotation;
+        std::copy_n(j.translation.begin(), 3, n.translation.begin());
+        std::copy_n(j.scale.begin(), 3, n.scale.begin());
+        if (nodes[i]->mesh) {
+            const auto count = nodes[i]->mesh->primitives[0].targets_count;
+            const auto *w = nodes[i]->weights ? nodes[i]->weights : nodes[i]->mesh->weights;
+            const auto size = nodes[i]->weights ? nodes[i]->weights_count : nodes[i]->mesh->weights_count;
+            require(!w || size == count, "morph defaults");
+            n.weights.resize(count, 0); if (w) std::copy_n(w, count, n.weights.begin());
+        }
+        runtime.nodes.push_back(std::move(n));
+    }
     auto pose = output->geometry.joints;
     std::set<std::string> clips;
     for (std::size_t a = 0; a < data.animations_count; ++a)
     {
         const auto &animation = data.animations[a];
         require(animation.name && clips.insert(animation.name).second, "animation names");
+        Clip runtimeClip; runtimeClip.name = animation.name;
+        const auto animationExtras = extras(animation.extras);
+        if (animationExtras.contains("ei") && animationExtras.at("ei").contains("events"))
+            for (const auto &event : animationExtras.at("ei").at("events")) {
+                require(event.at("payload").is_object(), "event payload object");
+                runtimeClip.events.push_back({event.at("id").get<std::string>(),
+                    event.at("name").get<std::string>(), event.at("payload").dump(), event.at("time").get<float>()});
+            }
         std::set<std::pair<const cgltf_node *, cgltf_animation_path_type>> targets;
         for (std::size_t c = 0; c < animation.channels_count; ++c)
         {
@@ -454,6 +481,17 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
                     "animation sample count");
             for (std::size_t k = 1; k < times.size(); ++k)
                 require(times[k] > times[k - 1], "animation times increasing");
+            runtimeClip.duration = (std::max)(runtimeClip.duration, times.back());
+            if (indices.count(channel.target_node)) {
+                Track track; track.node = indices.at(channel.target_node);
+                track.width = static_cast<unsigned>(components); track.times = times; track.values = samples;
+                track.interpolation = sampler.interpolation == cgltf_interpolation_type_step ? Interpolation::step :
+                    sampler.interpolation == cgltf_interpolation_type_linear ? Interpolation::linear : Interpolation::cubic;
+                track.path = channel.target_path == cgltf_animation_path_type_translation ? Path::translation :
+                    channel.target_path == cgltf_animation_path_type_rotation ? Path::rotation :
+                    channel.target_path == cgltf_animation_path_type_scale ? Path::scale : Path::weights;
+                runtimeClip.tracks.push_back(std::move(track));
+            }
             if (std::strcmp(animation.name, "idle") || !indices.count(channel.target_node))
                 continue;
             auto &j = pose[indices.at(channel.target_node)];
@@ -476,6 +514,7 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
             if (channel.target_path == cgltf_animation_path_type_scale)
                 std::copy_n(samples.data() + offset, 3, j.scale.begin());
         }
+        runtime.clips.push_back(std::move(runtimeClip));
     }
     for (std::size_t j = 0; j < pose.size(); ++j)
     {
@@ -647,66 +686,6 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
                         js.size() == positions->count * 4 && ws.size() == js.size() &&
                         tex.size() == positions->count * 2,
                     "attribute sizes");
-            std::vector<float> idleWeights;
-            for (std::size_t a = 0; a < data.animations_count; ++a)
-            {
-                const auto &animation = data.animations[a];
-                if (!animation.name || std::strcmp(animation.name, "idle"))
-                    continue;
-                for (std::size_t c = 0; c < animation.channels_count; ++c)
-                {
-                    const auto &channel = animation.channels[c];
-                    if (channel.target_node != &node ||
-                        channel.target_path != cgltf_animation_path_type_weights)
-                        continue;
-                    const auto samples = values(channel.sampler->output);
-                    const auto width = primitive.targets_count;
-                    const auto offset = channel.sampler->interpolation ==
-                                                cgltf_interpolation_type_cubic_spline
-                                            ? width
-                                            : 0;
-                    require(samples.size() >= offset + width, "morph animation output");
-                    idleWeights.assign(samples.begin() + offset, samples.begin() + offset + width);
-                }
-            }
-            const float *morphWeights = !idleWeights.empty() ? idleWeights.data()
-                                        : node.weights       ? node.weights
-                                                             : node.mesh->weights;
-            const auto morphCount = !idleWeights.empty() ? idleWeights.size()
-                                    : node.weights       ? node.weights_count
-                                                         : node.mesh->weights_count;
-            require(!morphWeights || morphCount == primitive.targets_count, "morph default count");
-            for (std::size_t t = 0; t < primitive.targets_count; ++t)
-            {
-                const float weight = morphWeights ? morphWeights[t] : 0;
-                require(std::isfinite(weight), "nonfinite morph weight");
-                const auto &target = primitive.targets[t];
-                for (std::size_t a = 0; a < target.attributes_count; ++a)
-                {
-                    const auto &attribute = target.attributes[a];
-                    const auto delta = values(attribute.data);
-                    require(delta.size() == positions->count * 3, "morph accessor size");
-                    if (attribute.type == cgltf_attribute_type_position)
-                        for (std::size_t k = 0; k < delta.size(); ++k)
-                            pos[k] += weight * delta[k];
-                    if (attribute.type == cgltf_attribute_type_normal)
-                        for (std::size_t k = 0; k < delta.size(); ++k)
-                            normal[k] += weight * delta[k];
-                    if (attribute.type == cgltf_attribute_type_tangent && !tan.empty())
-                        for (std::size_t k = 0; k < positions->count; ++k)
-                            for (unsigned c = 0; c < 3; ++c)
-                                tan[k * 4 + c] += weight * delta[k * 3 + c];
-                }
-            }
-            for (std::size_t i = 0; i < positions->count; ++i)
-            {
-                float norm = 0;
-                for (unsigned c = 0; c < 3; ++c)
-                    norm += normal[i * 3 + c] * normal[i * 3 + c];
-                require(std::isfinite(norm) && norm > 1e-12f, "invalid vertex normal");
-                for (unsigned c = 0; c < 3; ++c)
-                    normal[i * 3 + c] /= std::sqrt(norm);
-            }
             if (tan.empty())
             {
                 tan.assign(positions->count * 4, 0);
@@ -772,6 +751,76 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
                     tan[i * 4 + 3] = handedness < 0 ? -1.f : 1.f;
                 }
             }
+            const auto restPos = pos, restNormal = normal, restTan = tan;
+            std::vector<std::vector<std::array<float,9>>> morphDeltas(positions->count,
+                std::vector<std::array<float,9>>(primitive.targets_count));
+            require(primitive.targets_count == runtime.nodes.at(indices.at(&node)).weights.size(), "primitive morph count");
+            std::vector<float> idleWeights;
+            for (std::size_t a = 0; a < data.animations_count; ++a)
+            {
+                const auto &animation = data.animations[a];
+                if (!animation.name || std::strcmp(animation.name, "idle"))
+                    continue;
+                for (std::size_t c = 0; c < animation.channels_count; ++c)
+                {
+                    const auto &channel = animation.channels[c];
+                    if (channel.target_node != &node ||
+                        channel.target_path != cgltf_animation_path_type_weights)
+                        continue;
+                    const auto samples = values(channel.sampler->output);
+                    const auto width = primitive.targets_count;
+                    const auto offset = channel.sampler->interpolation ==
+                                                cgltf_interpolation_type_cubic_spline
+                                            ? width
+                                            : 0;
+                    require(samples.size() >= offset + width, "morph animation output");
+                    idleWeights.assign(samples.begin() + offset, samples.begin() + offset + width);
+                }
+            }
+            const float *morphWeights = !idleWeights.empty() ? idleWeights.data()
+                                        : node.weights       ? node.weights
+                                                             : node.mesh->weights;
+            const auto morphCount = !idleWeights.empty() ? idleWeights.size()
+                                    : node.weights       ? node.weights_count
+                                                         : node.mesh->weights_count;
+            require(!morphWeights || morphCount == primitive.targets_count, "morph default count");
+            for (std::size_t t = 0; t < primitive.targets_count; ++t)
+            {
+                const float weight = morphWeights ? morphWeights[t] : 0;
+                require(std::isfinite(weight), "nonfinite morph weight");
+                const auto &target = primitive.targets[t];
+                for (std::size_t a = 0; a < target.attributes_count; ++a)
+                {
+                    const auto &attribute = target.attributes[a];
+                    const auto delta = values(attribute.data);
+                    require(delta.size() == positions->count * 3, "morph accessor size");
+                    const unsigned lane = attribute.type == cgltf_attribute_type_position ? 0 :
+                        attribute.type == cgltf_attribute_type_normal ? 3 : 6;
+                    require(attribute.type == cgltf_attribute_type_position || attribute.type == cgltf_attribute_type_normal ||
+                        attribute.type == cgltf_attribute_type_tangent, "morph attribute kind");
+                    for (std::size_t v = 0; v < positions->count; ++v)
+                        std::copy_n(delta.data()+v*3,3,morphDeltas[v][t].begin()+lane);
+                    if (attribute.type == cgltf_attribute_type_position)
+                        for (std::size_t k = 0; k < delta.size(); ++k)
+                            pos[k] += weight * delta[k];
+                    if (attribute.type == cgltf_attribute_type_normal)
+                        for (std::size_t k = 0; k < delta.size(); ++k)
+                            normal[k] += weight * delta[k];
+                    if (attribute.type == cgltf_attribute_type_tangent && !tan.empty())
+                        for (std::size_t k = 0; k < positions->count; ++k)
+                            for (unsigned c = 0; c < 3; ++c)
+                                tan[k * 4 + c] += weight * delta[k * 3 + c];
+                }
+            }
+            for (std::size_t i = 0; i < positions->count; ++i)
+            {
+                float norm = 0;
+                for (unsigned c = 0; c < 3; ++c)
+                    norm += normal[i * 3 + c] * normal[i * 3 + c];
+                require(std::isfinite(norm) && norm > 1e-12f, "invalid vertex normal");
+                for (unsigned c = 0; c < 3; ++c)
+                    normal[i * 3 + c] /= std::sqrt(norm);
+            }
             // Morph deltas can change the authored tangent length and orthogonality.
             // Integer packing must never receive a nonfinite value.
             for (std::size_t i = 0; i < positions->count; ++i)
@@ -830,6 +879,19 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
                 for (unsigned k = 0; k < 2; ++k)
                     vertex.uv[k] = DirectX::PackedVector::XMConvertFloatToHalf(tex[v * 2 + k]);
                 output->geometry.vertices.push_back(vertex);
+                auto rest = vertex;
+                std::copy_n(restPos.data()+v*3,3,rest.position);
+                float length = 0; for (unsigned c=0;c<3;++c) length += restNormal[v*3+c]*restNormal[v*3+c];
+                require(std::abs(length-1.f)<.002f, "rest normal must be unit length");
+                for (unsigned c=0;c<3;++c) rest.normal[c]=static_cast<std::int16_t>(std::lround(
+                    (std::clamp)(restNormal[v*3+c],-1.f,1.f)*32767));
+                if (!restTan.empty()) for (unsigned c=0;c<4;++c) rest.tangent[c]=static_cast<std::int16_t>(std::lround(
+                    (std::clamp)(restTan[v*4+c],-1.f,1.f)*32767));
+                output->rest_vertices.push_back(rest);
+                if (primitive.targets_count) {
+                    output->vertex_morphs.push_back(static_cast<unsigned>(runtime.morphs.size()));
+                    runtime.morphs.push_back({indices.at(&node), std::move(morphDeltas[v])});
+                } else output->vertex_morphs.push_back(UINT32_MAX);
                 std::array<float, 3> deformed{};
                 for (unsigned k = 0; k < 4; ++k)
                     if (vertex.weights[k])
@@ -893,6 +955,51 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
     lod.index_count = static_cast<unsigned>(output->geometry.indices.size());
     lod.submesh_count = static_cast<unsigned>(output->geometry.submeshes.size());
     output->geometry.lods.push_back(lod);
+    const auto selector = [&](const Json &value, const std::map<std::string,unsigned> &names) {
+        if (value.is_number_unsigned() || value.is_number_integer()) return value.get<unsigned>();
+        const auto found=names.find(value.get<std::string>());
+        require(found!=names.end(), "binding selector"); return found->second;
+    };
+    const std::map<std::string,unsigned> states{{"neutral",0},{"rest",0x8000},{"attack",0x10000},{"warry",0x20000},{"lie",0x30000}};
+    const std::map<std::string,unsigned> actions{{"special",0x40000},{"attack",0x80000},{"attack_unarmed",0x80000},{"cast",0xc0000},{"run",0x100000},
+        {"walk",0x140000},{"idle",0x180000},{"death",0x1c0000},{"suffer",0x200000},{"cross",0x240000}};
+    const std::map<std::string,unsigned> stages{{"unique",0},{"start",0x40000000},{"cycle",0x80000000},{"end",0xc0000000}};
+    if (metadata.contains("bindings")) for (const auto &binding:metadata.at("bindings")) {
+        Binding b; b.clip=named_clip(runtime,binding.at("clip").get<std::string>());
+        require(b.clip!=UINT32_MAX,"binding names missing clip");
+        if (binding.contains("legacyClip")) {
+            b.legacy=binding.at("legacyClip").get<std::string>();
+            require(!b.legacy.empty(),"empty legacy binding");
+        } else {
+            const auto state=selector(binding.at("state"),states), action=selector(binding.at("action"),actions),
+                stage=selector(binding.at("stage"),stages), weapon=binding.at("weaponMask").get<unsigned>(),
+                modifiers=binding.at("modifierBits").get<unsigned>();
+            require(!(state&~0x38000u)&&!(action&~0x3c0000u)&&!(stage&~0xc0000000u)&&!(weapon&~0x7fffu)&&!(modifiers&~0x3fc00000u),"binding field mask");
+            b.flags=state|action|stage|weapon|modifiers;
+        }
+        for(const auto &prior:runtime.bindings) {
+            require(b.legacy.empty()||prior.legacy!=b.legacy,"duplicate legacy binding");
+            if(b.legacy.empty()&&prior.legacy.empty()&&(b.flags&~0x7fffu)==(prior.flags&~0x7fffu))
+                require((b.flags&prior.flags&0x7fffu)==0 && ((b.flags|prior.flags)&0x7fffu)!=0,"overlapping tuple bindings");
+        }
+        runtime.bindings.push_back(std::move(b));
+    }
+    output->gpu_animation=pack(runtime,{});
+    const auto limits=envelope(runtime);
+    double radius=output->radius;
+    for(std::size_t i=0;i<output->rest_vertices.size();++i){const auto& v=output->rest_vertices[i];
+        double p[3]{std::abs(v.position[0]),std::abs(v.position[1]),std::abs(v.position[2])};
+        if(output->vertex_morphs[i]!=UINT32_MAX){const auto& m=runtime.morphs[output->vertex_morphs[i]];
+            for(unsigned t=0;t<m.deltas.size();++t)for(unsigned c=0;c<3;++c)p[c]+=std::abs(m.deltas[t][c])*limits[m.node].weights[t];}
+        const double meshRadius=std::sqrt(p[0]*p[0]+p[1]*p[1]+p[2]*p[2]);double bound=0;
+        for(unsigned k=0;k<4;++k)if(v.weights[k]){const auto j=v.joints[k];const auto& inverse=output->geometry.joints[j].inverse;
+            double linear=0,offset=0;for(unsigned r=0;r<3;++r){offset+=double(inverse[12+r])*inverse[12+r];
+                for(unsigned c=0;c<3;++c)linear+=double(inverse[c*4+r])*inverse[c*4+r];}
+            bound+=(limits[j].translation+limits[j].scale*(std::sqrt(linear)*meshRadius+std::sqrt(offset)))*v.weights[k]/65535.0;}
+        radius=(std::max)(radius,bound);
+    }
+    require(std::isfinite(radius)&&radius<std::numeric_limits<float>::max()/4,"animation bounds overflow");
+    output->animation_radius=static_cast<float>(radius*(1+1e-5));
     return output;
 }
 } // namespace
