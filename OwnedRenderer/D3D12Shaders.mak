@@ -6,6 +6,11 @@ all: shared native
 
 !include "$(DXIL)\dxil.mak"
 
+!IFNDEF TOOLCHAIN_STAMP
+TOOLCHAIN_STAMP=$(DXC)
+!ENDIF
+$(DXIL_PROGRAMS): "$(TOOLCHAIN_STAMP)"
+
 shared: $(DXIL_PROGRAMS)
 
 native: $(DXIL)\diag_cs.dxil $(DXIL)\diag_vs.dxil $(DXIL)\diag_ps.dxil $(DXIL)\imgui_vs.dxil $(DXIL)\imgui_ps.dxil "$(HOST_D3D12)\eid3d11_d3d12_pipelines.shipped.list"

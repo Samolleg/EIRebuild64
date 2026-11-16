@@ -1869,6 +1869,10 @@ public:
         out.reset();
         if (!rt_device_) return E_NOINTERFACE;
         if (!geometries || !count || vertex_stride < 12 || (vertex_stride & 3)) return E_INVALIDARG;
+        if (!accept_resource(&vertices) || !accept_resource(&indices) || !accept_resource(previous.get()))
+            return DXGI_ERROR_DEVICE_RESET;
+        for (UINT n = 0; n < count; ++n)
+            if (!accept_resource(geometries[n].index_buffer)) return DXGI_ERROR_DEVICE_RESET;
         ID3D12GraphicsCommandList* list = open_list();
         if (!list) return E_FAIL;
         ComPtr<ID3D12GraphicsCommandList4> list4;
@@ -2091,6 +2095,11 @@ public:
         out.reset();
         if (!rt_device_) return E_NOINTERFACE;
         if (!instances || !count) return E_INVALIDARG;
+        if (!accept_resource(previous.get())) return DXGI_ERROR_DEVICE_RESET;
+        for (UINT n = 0; n < count; ++n) {
+            if (!instances[n].bottom) return E_INVALIDARG;
+            if (!accept_resource(instances[n].bottom)) return DXGI_ERROR_DEVICE_RESET;
+        }
         ID3D12GraphicsCommandList* list = open_list();
         if (!list) return E_FAIL;
         ComPtr<ID3D12GraphicsCommandList4> list4;

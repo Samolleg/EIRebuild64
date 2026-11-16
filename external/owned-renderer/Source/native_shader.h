@@ -877,7 +877,9 @@ struct NativeOutput{float4 p:SV_Position;float4 d:COLOR0;float4 s:COLOR1;float2 
 };
 uint nativeSknInstance(NativeOutput i){
 #ifdef NATIVE_GLTF
- return (i.swaying&(1u<<28))!=0?(uint)i.liquidFlow.w:0;
+ // The native batch selected this program from sknFactors.w. Every vertex
+ // carries the same instance index; round away interpolation roundoff.
+ return (uint)(i.liquidFlow.w+.5);
 #else
  return 0; // Both native backends select NATIVE_GLTF for every SKN material.
 #endif
@@ -4528,7 +4530,11 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace NATIVE_G
  bool pointLit=i.shadowMode==1&&(nativePointLightCount!=0||caveVolumeStrength>0);
 #if !defined(NATIVE_TERRAIN_PS)
  // Material pixels: lit figures drawn with a bound profile (nativeCombinerTail bit 1).
+#ifdef NATIVE_GLTF
+ const bool sknMaterial=true;
+#else
  bool sknMaterial=nativeSknInstance(i)!=0;
+#endif
  float3 sknBaseNormal=i.worldNormal;
  float sknAo=1;float3 sknEmission=0;
  float4 materialProfile=0;
