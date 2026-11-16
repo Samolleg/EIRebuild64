@@ -43,6 +43,16 @@ inline bool prepare_model_preview_phase(ModelPreviewView& view,
     double result = 0;
     if (!sample_visual_preview_phase(sample.selection, anchor_phase,
             (now - anchor_time) * rate, result)) return false;
+    std::uint64_t cycle=0;
+    if(sample.selection.database && sample.selection.ordinal<sample.selection.database->entries.size()) {
+        const auto& entry=sample.selection.database->entries[sample.selection.ordinal];
+        const double phaseNow=anchor_phase+(now-anchor_time)*rate;
+        if(entry.length && (entry.flags&0xc0000000u)==0x80000000u && phaseNow>entry.length) {
+            const double completed=std::ceil(phaseNow/entry.length)-1;
+            if(!std::isfinite(completed)||completed>=9007199254740991.0)return false;
+            cycle=static_cast<std::uint64_t>(completed);
+        }
+    }
     // Commit only a complete sample; a rejected view does not become an anchor.
     if (!same_resource || !view.prepared) view.prepared = std::make_shared<VisualPreparedResources>();
     view.resource = resource; view.selection = sample.selection; view.selection_revision = revision;
@@ -50,6 +60,8 @@ inline bool prepare_model_preview_phase(ModelPreviewView& view,
     view.last_frame = frame; view.last_time = now; view.rate = rate; view.active = true;
     sample.prepared = view.prepared;
     sample.pose.phase = result;
+    sample.pose.time = now;
+    sample.pose.cycle = cycle;
     return true;
 }
 } // namespace owned

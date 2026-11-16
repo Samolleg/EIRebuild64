@@ -7,6 +7,7 @@
 // source with the feature .hlsl files it reads from disk (Source/shaders).
 
 #include "cave_irradiance.h"
+#include "gltf_animation_shader.h"
 #include "contact_blend.h"
 #include "ground_cover_surface.h"
 #include "liquid_surface_shader.h"
@@ -264,7 +265,7 @@ bool loadNativeDraw(uint3 group,out NativeDraw draw){
 }
 StructuredBuffer<NativePreparedVertex> nativePreparedVertices:register(t7);
 StructuredBuffer<NativeWorldVertex> nativeWorldVertices:register(t8);
-struct NativePose{uint asset;uint outputBase;uint frame;float fraction;float3 shape;float heightScale;float3 centerShift;uint workCount;row_major float4x4 rootToWorld;uint2 generation;};
+struct NativePose{uint asset;uint outputBase;uint frame;float fraction;float3 shape;float heightScale;float3 centerShift;uint workCount;row_major float4x4 rootToWorld;uint2 generation;uint gltfClip;uint gltfPrevious;float gltfTime;float gltfPreviousTime;float gltfBlend;};
 struct NativePoseNode{float4 rotation;float4 translation;float4 row0;float4 row1;float4 row2;uint morphFirst;uint morphSecond;uint morphCount;float morphFraction;uint2 generation;};
 ByteAddressBuffer nativeAnimation:register(t10);
 StructuredBuffer<NativePose> nativePoses:register(t11);
@@ -743,6 +744,7 @@ float3 liquidViewDirection(row_major float4x4 clip,float3 position) {
 float4 nativeQuaternionMultiply(float4 a,float4 b){return float4(a.x*b.x-dot(a.yzw,b.yzw),a.x*b.yzw+b.x*a.yzw+cross(a.yzw,b.yzw));}
 float3 nativeQuaternionRotate(float4 q,float3 v){return nativeQuaternionMultiply(nativeQuaternionMultiply(q,float4(0,v)),float4(q.x,-q.yzw)).yzw;}
 float4x4 nativeNodeMatrix(uint node){NativePoseNode value=nativePoseNodes[node];return float4x4(value.row0,value.row1,value.row2,float4(0,0,0,1));}
+@GLTF_ANIMATION@
 [numthreads(64,1,1)]void nativePoseCS(uint3 group:SV_GroupID,uint lane:SV_GroupIndex){
  uint work=group.x+group.y*65535u;
  if(work>=nativeWorkCount)return;
@@ -809,6 +811,7 @@ float4x4 nativeNodeMatrix(uint node){NativePoseNode value=nativePoseNodes[node];
   }
   DeviceMemoryBarrierWithGroupSync();
  }
+ gltfPose(pose,lane);
 }
 )" R"(
 float4 unpackColor(uint value){return float4((value>>16)&255,(value>>8)&255,value&255,(value>>24)&255)/255.0;}
@@ -919,6 +922,11 @@ NativeWorldVertex prepareNativeWorldVertex(NativeInstance instance,uint componen
   float4 weights=asfloat(nativeGeometry.Load4(component.w+16));
   float3 world=0,worldNormal=0,worldTangent=0;
   float4 tangent=asfloat(nativeGeometry.Load4(component.w+224));
+  uint correction=nativeGeometry.Load(component.w+240);
+  if(correction!=0xffffffffu&&(correction&0x80000000u)!=0){
+   NativePoseNode target=nativePoseNodes[instance.poseNode+(correction&0x7fffffffu)];
+   position+=target.row0.xyz;normal+=target.row1.xyz;tangent.xyz+=target.row2.xyz;
+  }
   [unroll]for(uint influence=0;influence<4;++influence){
    if(weights[influence]>0){
     uint address=component.w+32+influence*48;
@@ -934,8 +942,7 @@ NativeWorldVertex prepareNativeWorldVertex(NativeInstance instance,uint componen
   output.p=float4(world,1);output.undeformedXY=world.xy;
   output.normal.xyz=normalize(worldNormal);
   output.tangent=float4(normalize(worldTangent),tangent.w);
-  uint correction=nativeGeometry.Load(component.w+240);
-  if(correction!=0xffffffff){
+  if(correction!=0xffffffffu&&(correction&0x80000000u)==0){
    NativePoseNode target=nativePoseNodes[instance.poseNode+correction];
    if(target.row0.w!=0){
     output.p.xyz+=target.row0.xyz;output.undeformedXY=output.p.xy;
@@ -4392,6 +4399,8 @@ inline std::string compose_native_shader_source(const NativeShaderFeatures& feat
   const std::string impostor_marker="@WORLD_IMPOSTOR@";
   text.replace(text.find(impostor_marker),impostor_marker.size(),std::to_string(native_world_impostor)+"u");
   const std::string frames_marker="@IMPOSTOR_FRAMES@";
+  const std::string gltf_marker="@GLTF_ANIMATION@";
+  text.replace(text.find(gltf_marker),gltf_marker.size(),gltf::kAnimationShader);
   text.replace(text.find(frames_marker),frames_marker.size(),std::string(kImpostorFrameHlsl)+
    "static const uint kImpostorMips="+std::to_string(kImpostorMips)+";\n");
   const std::string plane_marker="@SHADOW_PLANE_COMPARE@";

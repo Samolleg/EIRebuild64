@@ -2212,6 +2212,8 @@ private:
         UINT padding = 0;
         std::array<float,16> root_to_world{};
         std::array<UINT,2> generation{};
+        UINT gltf_clip = UINT32_MAX, gltf_previous = UINT32_MAX;
+        float gltf_time = 0, gltf_previous_time = 0, gltf_blend = 1;
     };
     using NativePoseNodeGpu = NativeWorldGeometry::Pose::Node;
     struct NativeWorldStateGpu {
@@ -2219,7 +2221,7 @@ private:
         UINT skn_lod = 0;
         UINT preparations = 0,components = 0; // test seam; production never increments these
     };
-    static_assert(sizeof(NativePoseGpu)==120 && sizeof(NativePoseNodeGpu)==104 && sizeof(NativeWorldStateGpu)==28,
+    static_assert(sizeof(NativePoseGpu)==140 && sizeof(NativePoseNodeGpu)==104 && sizeof(NativeWorldStateGpu)==28,
         "Pose records must match the structured HLSL layout");
     struct NativePoseSlot {
         std::shared_ptr<const std::vector<NativePoseNodeGpu>> baked;

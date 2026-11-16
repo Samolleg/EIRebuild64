@@ -51,8 +51,12 @@ bool advance_queue(const VisualPoseIntent& intent, VisualPoseState& state, const
         if (state.selection + 1 < intent.selections.size()) {
             state.phase -= current->length;
             ++state.selection;
+            state.cycle = 0;
         } else {
             if ((current->flags & 0xc0000000u) == 0x80000000u) {
+                const double completed = std::ceil(state.phase/current->length)-1;
+                if(completed>=9007199254740991.0 || double(state.cycle)+completed>=9007199254740991.0)return visual_failure(failure,"queue.cycle_overflow");
+                state.cycle += static_cast<std::uint64_t>(completed);
                 state.phase = std::fmod(state.phase, current->length);
                 // The native transition condition is strict: a positive exact
                 // multiple finishes at the last frame, not at frame zero.

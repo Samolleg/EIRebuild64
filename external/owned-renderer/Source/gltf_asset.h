@@ -1,5 +1,6 @@
 ﻿#pragma once
 #include "skn_runtime.h"
+#include "gltf_playback.h"
 #include <functional>
 
 struct cgltf_data;
@@ -17,8 +18,13 @@ struct Asset
     skn::Asset geometry;
     std::vector<std::array<skn::Dds, 4>> textures;
     std::vector<skn::Matrix> idle;
+    std::shared_ptr<Animation> animation;
+    std::shared_ptr<GpuProgram> gpu_animation;
+    std::vector<skn::Vertex> rest_vertices;
+    std::vector<std::uint32_t> vertex_morphs;
     std::string cache_key;
     float radius = 0;
+    float animation_radius = 0;
 };
 // CPU decoding/acceptance shared by the game and ModelCheck; no device required.
 using PublishPixels = std::function<ResourceBlob(const std::string &, const void *, std::uint32_t)>;

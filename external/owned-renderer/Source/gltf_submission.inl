@@ -6,6 +6,7 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
     auto &prepared = *sample.prepared;
     auto &current = prepared.gpu_pose;
     const auto base = current.binding->model->nodes.size();
+    if (prepared.motion_asset != asset) prepared.gltf_playback.reset();
     if (prepared.motion_asset != asset || prepared.motion_source_binding != current.binding)
     {
         prepared.motion_source_binding = current.binding;
@@ -27,48 +28,55 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
         auto binding = std::make_shared<VisualSkeletonBinding>(*current.binding);
         binding->model = std::move(model);
         binding->tracks.resize(binding->model->nodes.size(), nullptr);
+        binding->gltf_animation = asset->gltf_asset->gpu_animation;
+        binding->gltf_node_base = static_cast<unsigned>(base);
         prepared.motion_binding = std::move(binding);
         prepared.motion_asset = asset;
         prepared.motion_pose_valid = false;
     }
     current.binding = prepared.motion_binding;
-    if (!prepared.motion_pose_valid ||
-        !owned_visual_pose_key_matches(prepared.motion_pose_key, sample))
-    {
-        auto result = std::make_shared<std::vector<NativeWorldGeometry::Pose::Node>>(
-            base + asset->gltf_asset->idle.size());
-        std::vector<VisualNodeSample> legacy;
-        if (!sample_visual_skeleton(*sample.assembly->skeleton, sample.selection,
-                                    current.shape, current.center_shift, sample.pose.phase,
-                                    legacy, false) || legacy.size() != base)
-            throw std::runtime_error("glTF host skeleton unavailable");
-        VisualPoseState local;
-        local.tilted_facing = local.root_rotation_valid = true;
-        local.root_rotation = { 1, 0, 0, 0 };
-        for (unsigned i = 0; i < legacy.size(); ++i)
-        {
-            std::array<float, 16> matrix{};
-            if (!visual_node_world_matrix(local, legacy[i], { 1, 1, 1 }, matrix))
-                throw std::runtime_error("glTF host transform invalid");
-            for (unsigned r = 0; r < 3; ++r)
-                for (unsigned c = 0; c < 4; ++c)
-                    (*result)[i].rows[r][c] = matrix[r * 4 + c];
-            (*result)[i].rotation = legacy[i].rotation;
-            for (unsigned c = 0; c < 3; ++c)
-                (*result)[i].translation[c] = legacy[i].translation[c];
-        }
-        const skn::Matrix yToZ{ 1, 0, 0, 0, 0, 0, 1, 0, 0, -1, 0, 0, 0, 0, 0, 1 };
-        for (unsigned i = 0; i < asset->gltf_asset->idle.size(); ++i)
-        {
-            const auto matrix = skn::multiply(yToZ, asset->gltf_asset->idle[i]);
-            for (unsigned r = 0; r < 3; ++r)
-                for (unsigned c = 0; c < 4; ++c)
-                    (*result)[base + i].rows[r][c] = matrix[c * 4 + r];
-        }
-        current.baked = std::move(result);
-        prepared.motion_pose_key = owned_visual_pose_key(sample);
-        prepared.motion_pose_valid = true;
+    const auto &animation = *asset->gltf_asset->animation;
+    if (!prepared.gltf_playback) prepared.gltf_playback = std::make_shared<gltf::PlaybackState>();
+    auto &state = *prepared.gltf_playback;
+    gltf::Request request;
+    unsigned clip = UINT32_MAX;
+    const bool neutral = sample.selection.neutral;
+    if (neutral) {
+        clip = gltf::named_clip(animation, "idle");
+        gltf::animation_require(clip != UINT32_MAX, "neutral pose requires idle");
+        request.flags = 0x80180000u; request.frames = 1;
+    } else {
+        gltf::animation_require(sample.selection.database &&
+            sample.selection.ordinal < sample.selection.database->entries.size(), "host animation selection");
+        const auto &entry = sample.selection.database->entries[sample.selection.ordinal];
+        request.legacy = entry.name; request.flags = entry.flags; request.frames = entry.length;
+        request.event_flags = entry.special_flags; request.steps = entry.step_frames;
+        request.hit = entry.hit_frame; request.sound = entry.sound_frame; request.hides = entry.hide_frames;
+        clip = gltf::resolve_clip(animation, request);
+        gltf::validate_event_phase(animation.clips[clip], request);
     }
+    const double clock = sample.pose.time / 15.0;
+    const double absolute = double(sample.pose.cycle) + sample.pose.phase / request.frames;
+    const gltf::ActionToken token{sample.pose.intent_revision, sample.pose.selection,
+        neutral ? UINT32_MAX : sample.selection.ordinal};
+    const bool seek = state.active && (clock < state.last_clock ||
+        (state.events.active && token == state.events.action && absolute < state.events.absolute));
+    const auto playback = state.Update(clip, gltf::clip_time(animation.clips[clip], request, sample.pose.phase),
+        token, clock, seek, (request.flags & 0x3c0000u) == 0x1c0000u);
+    current.baked.reset();
+    current.gltf_clip = playback.clip; current.gltf_previous = playback.previous;
+    current.gltf_time = playback.time; current.gltf_previous_time = playback.previous_time; current.gltf_blend = playback.blend;
+    // These notifications describe the visual timeline only. Existing host ADB
+    // callbacks remain the sole source of damage, projectiles, sounds and hides.
+    // Private previews never deliver gameplay/cosmetic events to the host.
+    if (!sample.completed_pose && !neutral)
+        state.events.Advance(animation.clips[clip], token, absolute, gltf::loop_request(request), seek,
+            [&](std::uint64_t cycle, const gltf::Event &event) {
+                const std::string detail = "id=" + std::to_string(sample.resource.signed_id) +
+                    " action=" + std::to_string(token.intent) + " cycle=" + std::to_string(cycle) +
+                    " clip=" + animation.clips[clip].name + " event=" + event.id + " name=" + event.name;
+                bridge_append_probe_event("gltf_visual_event", detail.c_str());
+            });
     current.height_scale = 1;
     current.contact_world_height = asset->gltf_asset->radius * 2;
     return true;

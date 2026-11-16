@@ -1,5 +1,6 @@
 // Renderer native queue (record building): owned textures, meshes, materials, poses, instance records, world ranges, queue_native*, checkpoints and discards.
 #include <intrin.h>
+#include "gltf_animation.h"
 #include "point_shadow_policy.h"
 #include "cursor_image.h"
 #include "shadow_softness.h"
@@ -1403,6 +1404,7 @@ HRESULT Renderer::get_native_skeleton_asset(
   add(binding->model->model_container);add(binding->model->bone_container);
   key.push_back(binding->rigid?1:(binding->neutral?2:3));if(binding->clip)add(binding->clip->identity);
   key.append("|nodes="+std::to_string(binding->tracks.size()));
+  if(binding->gltf_animation)key.append("|gltf="+binding->gltf_animation->key+"|base="+std::to_string(binding->gltf_node_base));
   const auto found=native_skeleton_assets_.find(key);
   if(found!=native_skeleton_assets_.end()){
    found->second.model=binding->model;found->second.clip=binding->clip;
@@ -1440,8 +1442,10 @@ HRESULT Renderer::get_native_skeleton_asset(
    }
   }
   std::memcpy(bytes.data()+node_offset,nodes.data(),nodes.size()*sizeof(Node));
+  UINT gltf_offset=0;
+  if(binding->gltf_animation && !append(binding->gltf_animation->bytes.data(),binding->gltf_animation->bytes.size(),gltf_offset))return E_OUTOFMEMORY;
   const UINT header[8]={count,static_cast<UINT>(binding->level_offsets.size()-1),node_offset,
-   level_offsets,level_nodes,binding->rigid?1u:0u,0,0};std::memcpy(bytes.data(),header,sizeof(header));
+   level_offsets,level_nodes,binding->rigid?1u:0u,gltf_offset,binding->gltf_node_base};std::memcpy(bytes.data(),header,sizeof(header));
   if(bytes.size()>UINT_MAX-15u)return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
   const UINT aligned=static_cast<UINT>((bytes.size()+15ull)&~15ull);
   HRESULT hr=allocate_native_range(native_animation_ranges_,aligned,NativeRangeBuffer::animation,allocation);
@@ -1656,6 +1660,9 @@ HRESULT Renderer::resolve_native_pose(NativeWorldGeometry::Pose* pose,const Nati
  if(!source.binding||!source.binding->model||node>=source.binding->tracks.size()||
     !std::isfinite(source.fraction)||source.fraction<0||source.fraction>1||!std::isfinite(source.height_scale))return E_INVALIDARG;
  NativePoseGpu value{};value.frame=source.frame;value.fraction=source.fraction;value.height_scale=source.height_scale;
+ value.gltf_clip=source.gltf_clip;value.gltf_previous=source.gltf_previous;
+ value.gltf_time=source.gltf_time;value.gltf_previous_time=source.gltf_previous_time;value.gltf_blend=source.gltf_blend;
+ if(!std::isfinite(value.gltf_time)||!std::isfinite(value.gltf_previous_time)||!std::isfinite(value.gltf_blend)||value.gltf_blend<0||value.gltf_blend>1)return E_INVALIDARG;
  value.root_to_world=source.root_to_world;std::copy(source.shape.begin(),source.shape.end(),value.shape);
  std::copy(source.center_shift.begin(),source.center_shift.end(),value.center_shift);
  for(float f:value.root_to_world)if(!std::isfinite(f))return E_INVALIDARG;
@@ -1684,7 +1691,9 @@ HRESULT Renderer::resolve_native_pose(NativeWorldGeometry::Pose* pose,const Nati
   value.output=slot.value.output;
   value.generation=slot.value.generation;
   if(source.baked&&(source.baked->size()<source.binding->tracks.size()||source.baked->size()>UINT_MAX))return E_INVALIDARG;
-  const UINT count=static_cast<UINT>(source.baked?source.baked->size():source.binding->tracks.size());
+  const auto extra=source.binding->gltf_animation?source.binding->gltf_animation->morphs:0u;
+  if(source.binding->tracks.size()>UINT_MAX-extra)return E_OUTOFMEMORY;
+  const UINT count=static_cast<UINT>(source.baked?source.baked->size():source.binding->tracks.size()+extra);
   const bool changed=slot.count!=count||std::memcmp(&slot.value,&value,sizeof(value))!=0||slot.binding!=source.binding||slot.baked!=source.baked;
   if(changed){
    if(slot.allocation>=native_pose_ranges_.size()||slot.count!=count||native_pose_ranges_[slot.allocation].references){

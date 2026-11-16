@@ -794,6 +794,8 @@ struct NativeWorldGeometry {
             std::array<UINT,2> generation{};
         };
         std::shared_ptr<const std::vector<Node>> baked;
+        std::uint32_t gltf_clip = UINT32_MAX, gltf_previous = UINT32_MAX;
+        float gltf_time = 0, gltf_previous_time = 0, gltf_blend = 1;
         static std::vector<Node> place_baked(const std::vector<Node>& source,
             const std::array<float,16>& m,const std::array<UINT,2>& generation){
             auto result=source;

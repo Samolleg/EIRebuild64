@@ -147,6 +147,11 @@ bool build_skn_groups(const RetainedVisualSample &sample,
                                     static_cast<std::uint16_t>(i),
                                     static_cast<std::uint16_t>(i)});
             skn::GpuVertex skin{};
+            if(asset->gltf_asset){
+              const auto morph=asset->gltf_asset->vertex_morphs.at(vertices[i]);
+              if(morph!=UINT32_MAX)skin.correction_node=0x80000000u|
+                (static_cast<unsigned>(sample.assembly->skeleton->nodes.size()+data.joints.size())+morph);
+            }
             if(asset->motion && asset->motion->correction_map[vertices[i]]>=0)
               skin.correction_node=static_cast<unsigned>(sample.assembly->skeleton->nodes.size()+asset->motion->nodes.size())+asset->motion->correction_map[vertices[i]];
             for(unsigned k=0;k<4;++k)skin.tangent[k]=v.tangent[k]/32767.f;

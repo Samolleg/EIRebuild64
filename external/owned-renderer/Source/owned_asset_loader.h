@@ -178,6 +178,8 @@ struct AnimationEntryAsset {
     std::uint32_t length = 0;
     float speed = 0.0f;
     std::array<std::uint32_t, 2> hide_frames{};
+    std::array<std::uint32_t, 4> step_frames{};
+    std::uint32_t hit_frame = 0, sound_frame = 0;
 };
 
 // Opaque immutable ANM owner. A decoded ADB remembers only a weak alias to
