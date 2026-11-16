@@ -77,6 +77,7 @@
 #include "constant_ring.h"
 
 namespace owned {
+namespace gltf { struct GpuProgram; }
 // Allocation-free attribution, independent of the F10 profiler/recorders.
 struct RendererMemoryCounters {
     std::uint64_t geometry = 0, textures = 0, animation = 0, world = 0;
