@@ -7840,7 +7840,11 @@ bool Renderer::decide_ray_reconstruction_d3d12(int dlss_mode,int fsr_mode){
  const bool wanted=configured_boolean(debug_overlay_.config(),"rt_ray_reconstruction",false);
  const char* reason=nullptr;
  if(wanted){
+#ifdef EID3D11_EMBEDDED
+  if(rr_available_<0)rr_available_=embedded_d3d12_.dlss_rr_caps(rr_unavailable_,sizeof(rr_unavailable_))?1:0;
+#else
   if(rr_available_<0)rr_available_=x64remote::dlss_ray_reconstruction_caps(rr_unavailable_,sizeof(rr_unavailable_))?1:0;
+#endif
   const auto& config=debug_overlay_.config();
   if(dlss_mode<0||fsr_mode>=0)reason="DLSS upscaling is off (it applies only with Upscaling: NVIDIA DLSS)";
   // Only the ray traced lighting needs its denoiser (user decision 2026-11-13).
@@ -7880,7 +7884,12 @@ void Renderer::apply_upscaler_mode_d3d12(){
  // Retry the capability checks which may have observed the pending state,
  // once only; later evaluate failures remain session failures.
  if(dlss_initializing_){
-  x64remote::DlssCaps caps{};x64remote::dlss_caps(caps);
+  x64remote::DlssCaps caps{};
+#ifdef EID3D11_EMBEDDED
+  embedded_d3d12_.dlss_caps(caps);
+#else
+  x64remote::dlss_caps(caps);
+#endif
   dlss_initializing_=caps.initializing;
   if(!dlss_initializing_){
    set_dlss_unavailable_reason(caps.available?nullptr:caps.reason);

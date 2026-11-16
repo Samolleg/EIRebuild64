@@ -668,6 +668,7 @@ HRESULT Renderer::ensure_embedded_d3d12(){
   apply_config_settings();
   {x64remote::DlssCaps caps{};
    const bool available=embedded_d3d12_.dlss_caps(caps);
+   dlss_initializing_=caps.initializing;
    caps.reason[sizeof(caps.reason)-1]=0;
    set_dlss_unavailable_reason(available?nullptr:(caps.reason[0]?caps.reason:"not available"));}
   set_fsr_unavailable_reason(d3d12_->fsr_upscale_unavailable());

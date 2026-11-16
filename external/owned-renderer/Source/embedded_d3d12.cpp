@@ -154,10 +154,15 @@ void EmbeddedD3D12::finish_render() noexcept {
 bool EmbeddedD3D12::dlss_caps(x64remote::DlssCaps& out) const noexcept {
     out = {};
     if (!state_) { std::snprintf(out.reason, sizeof(out.reason), "Embedded D3D12 is not initialized"); return false; }
-    state_->ngx.poll_initialize(state_->caps);
+    out.initializing = !state_->ngx.poll_initialize(state_->caps);
     out.available = state_->caps.dlss_available != 0;
     std::snprintf(out.reason, sizeof(out.reason), "%s", state_->caps.dlss_reason);
     return out.available;
+}
+bool EmbeddedD3D12::dlss_rr_caps(char* reason, std::size_t reason_bytes) noexcept {
+    if (state_) return state_->ngx.ray_reconstruction_caps(reason, reason_bytes);
+    std::snprintf(reason, reason_bytes, "%s", "Embedded D3D12 is not initialized");
+    return false;
 }
 bool EmbeddedD3D12::dlss_size(UINT width, UINT height, int mode, UINT& w, UINT& h, bool ray_reconstruction) noexcept {
     w = h = 0;

@@ -24,6 +24,7 @@ public:
     HRESULT begin_render(int reflex_mode) noexcept;
     void finish_render() noexcept;
     bool dlss_caps(x64remote::DlssCaps& out) const noexcept;
+    bool dlss_rr_caps(char* reason, std::size_t reason_bytes) noexcept;
     bool dlss_size(UINT width, UINT height, int mode, UINT& w, UINT& h, bool ray_reconstruction = false) noexcept;
     HRESULT dlss_evaluate(ID3D12GraphicsCommandList* list, ID3D12Resource* const* resources,
                           const x64remote::DlssEvaluate& evaluate) noexcept;
