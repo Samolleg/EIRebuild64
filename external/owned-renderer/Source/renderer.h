@@ -81,6 +81,7 @@
 #include "constant_ring.h"
 
 namespace owned {
+namespace gltf { struct GpuProgram; }
 // Allocation-free attribution, independent of the F10 profiler/recorders.
 struct RendererMemoryCounters {
     std::uint64_t geometry = 0, textures = 0, animation = 0, world = 0;
@@ -2387,6 +2388,11 @@ private:
         std::weak_ptr<const ModelCpuAsset> model;
         std::weak_ptr<const AnimationClipAsset> clip;
         bool animated = false;
+        UINT gltf_allocation = UINT_MAX;
+    };
+    struct NativeGltfLibrary {
+        UINT allocation = UINT_MAX;
+        std::weak_ptr<const gltf::GpuProgram> program;
     };
     struct NativePoseGpu {
         UINT asset = 0, output = 0, frame = 0;
@@ -2806,6 +2812,9 @@ private:
     void invalidate_native_prepared_handles() noexcept;
     HRESULT get_native_skeleton_asset(const std::shared_ptr<const VisualSkeletonBinding>& binding,
                                      UINT& offset,UINT& allocation);
+    HRESULT get_native_gltf_library(const std::shared_ptr<const gltf::GpuProgram>& program,
+                                    UINT& offset,UINT& allocation);
+    void retire_native_animation_assets();
     HRESULT ensure_native_animation_buffer(UINT required);
     HRESULT resolve_native_terrain_phases(const NativeGeometryView& view,NativeQueuedDraw& draw);
     HRESULT queue_native_terrain(const NativeGeometryView& view,const FixedState& state,
@@ -5351,6 +5360,7 @@ private:
     UINT native_pose_input_capacity_ = 0, native_pose_node_capacity_ = 0, native_pose_node_used_ = 0;
     owned::FencedUploadRing native_pose_input_ring_{sizeof(NativePoseGpu)}; // see native_instance_update_ring_
     std::unordered_map<std::string,NativeSkeletonAsset> native_skeleton_assets_;
+    std::unordered_map<std::string,NativeGltfLibrary> native_gltf_libraries_;
     std::vector<NativePoseSlot> native_pose_slots_;
     std::vector<NativeGpuRange> native_pose_ranges_, native_world_ranges_, native_animation_ranges_;
     // Free ranges per NativeRangeBuffer ordered by (count, index), so the first

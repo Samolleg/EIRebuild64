@@ -1266,6 +1266,7 @@ void Renderer::release_world_state() noexcept try{
  // Poses, skeletons, morphs, terrain phases and their GPU range buffers.
  release_storage(native_pose_work_);release_storage(native_pose_upload_);release_storage(native_pose_slots_);
  release_storage(native_skeleton_assets_);
+ release_storage(native_gltf_libraries_);
  release_storage(native_pose_ranges_);release_storage(native_world_ranges_);release_storage(native_animation_ranges_);
  for(auto& free_ranges:native_free_ranges_)release_storage(free_ranges);native_free_ranges_complete_.fill(true);
  release_storage(native_terrain_phases_);release_storage(native_terrain_phase_lookup_);release_storage(native_terrain_phase_free_);release_storage(native_terrain_phase_work_);release_storage(native_terrain_phase_copies_);
