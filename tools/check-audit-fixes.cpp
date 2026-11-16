@@ -9,6 +9,8 @@
 #include "external/owned-renderer/Source/owned_resource_store.h"
 #include "Game/OwnedRender/StartupPaths.h"
 #include "Game/InstalledGameRoot.h"
+#include "Game/ItemApproachArchiveIndex.h"
+#include "external/owned-renderer/Source/critter_base_mounts.h"
 #include "external/owned-renderer/Source/neighbour_profile.h"
 #include <filesystem>
 #include <iostream>
@@ -237,6 +239,38 @@ void BasePakChecks(const fs::path& directory) {
     Check(ei::pak::ResolveArchivePath(root/"source.res")==root/"source.res","source folder stays a folder");
     std::cout<<"BASE_PAK priority/payload/mapped/renderer/tombstone PASS\n";
 }
+void ItemCatalogAndCritterChecks(const fs::path& directory) {
+    const auto root=directory/"item-catalog";fs::create_directories(root/"source");
+    const auto logical=root/"models.res", packed=root/"models.pak";
+    Store(logical,Archive("item.mod"));
+    { ItemApproachArchiveIndex index;Check(index.Has(logical.string(),"ITEM.MOD"),"catalog legacy RES index");
+      Check(!index.Has(logical.string(),"item.bon"),"catalog missing member rejected"); }
+    Store(root/"source/item.mod",Bytes{1});Store(root/"source/item.bon",Bytes{2});
+    Store(root/"source/items.idb",Bytes{3});ei::pak::Pack(root/"source",packed);
+    const auto live=CMappedResource::LivePayloadBytes();
+    { ItemApproachArchiveIndex index;
+      Check(index.Has(logical.string(),"item.bon"),"catalog resolves logical RES to PAK sibling");
+      Check(index.Has(packed.string(),"items.idb"),"catalog accepts actual PAK DB provider");
+      Check(CMappedResource::LivePayloadBytes()==live,"catalog membership loads no member payload");
+      Store(root/"foreign.res",Archive("unrelated.bin"));
+      Check(!index.Has((root/"foreign.res").string(),"items.idb"),"catalog does not borrow unrelated DB members"); }
+    Store(root/"source/_deleted.txt",Bytes{'i','t','e','m','.','m','o','d','\n'});
+    fs::remove(root/"source/item.mod");ei::pak::Pack(root/"source",packed);
+    { ItemApproachArchiveIndex index;Check(!index.Has(logical.string(),"item.mod"),"catalog tombstone hides old RES member"); }
+    Store(packed,Bytes{0,1,2});
+    { ItemApproachArchiveIndex index;Check(!index.Has(logical.string(),"item.mod"),"catalog corrupt PAK cannot fall back to RES"); }
+    fs::remove(packed);Store(logical,Bytes{0,1,2});
+    { ItemApproachArchiveIndex index;Check(!index.Has(logical.string(),"item.mod"),"catalog malformed optional RES stays unavailable without fatal reporting"); }
+    owned::ResourceStoreConfig mounts;
+    mounts.archives={L"C:/mod/figures.pak",L"C:/mod/textures.pak",L"C:/Base/Res/FIGURES.PAK",L"C:/Base/Res/textures.pak"};
+    auto base=owned::critter_base_mounts(mounts);
+    Check(base.archives.size()==2&&base.archives[0]==mounts.archives[2]&&base.archives[1]==mounts.archives[3],"larva selects last Base PAK families");
+    mounts.archives={L"C:/Base/Res/figures.res",L"C:/Base/Res/textures.res"};
+    Check(owned::critter_base_mounts(mounts).archives==mounts.archives,"larva retains RES family selection");
+    mounts.archives={L"C:/mod/samfigures.pak",L"C:/mod/textures.pak"};
+    Check(owned::critter_base_mounts(mounts).archives.empty(),"larva does not match another figure family by suffix");
+    std::cout<<"ITEM_CATALOG index/PAK/RES/provider/tombstone/no_payload and CRITTER_BASE PASS\n";
+}
 void PakPathChecks(const fs::path& directory) {
     const auto root=fs::absolute(directory/"pak-paths");
     const auto game=root/"portable",base=game/"Base",engine=game/"Engine64";
@@ -310,6 +344,9 @@ void RealArchive(const fs::path& path) {
     CWin32MappedResource resource(true);
     Check(resource.OpenResource(path.string().c_str()), "real archive open");
     CStringArray names;resource.GetFileList(names);Check(!names.IsEmpty(), "real archive empty");
+    ItemApproachArchiveIndex catalog;
+    for(INT_PTR i=0;i<names.GetSize();++i)
+        Check(catalog.Has(path.string(),names[i].GetString()),"catalog index agrees with real archive membership");
     unsigned nestedCount=0;
     for(INT_PTR i=0;i<names.GetSize();++i) {
         const std::string name=names[i].GetString();
@@ -330,7 +367,7 @@ int main(int argc,char** argv) {
         if(argc<3)throw std::runtime_error("Usage: check-audit-fixes OUTPUT_DIR MOD_CONFIG [ARCHIVE...]");
         if(!AfxWinInit(GetModuleHandleW(nullptr),nullptr,GetCommandLineA(),0))throw std::runtime_error("MFC init");
         const fs::path output=argv[1];fs::create_directories(output);
-        ResourceChecks(output);IdentityChecks(output,argv[2]);NavigationChecks();PakChecks(output);BasePakChecks(output);PakPathChecks(output);
+        ResourceChecks(output);IdentityChecks(output,argv[2]);NavigationChecks();PakChecks(output);BasePakChecks(output);PakPathChecks(output);ItemCatalogAndCritterChecks(output);
         for(int i=3;i<argc;++i)if(std::string(argv[i])!="--diagnostics")RealArchive(argv[i]);
         std::cout<<"AUDIT_FIXES_SUMMARY checks="<<checks<<" errors=0 diagnostics="<<RuntimeDiagnostics::Enabled()<<"\n";
         return 0;
