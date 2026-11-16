@@ -12,6 +12,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModRuntime.h"
 #include <filesystem>
 #include "RuntimePaths64.h"
+#include "InstalledGameRoot.h"
 /////////////////////////////////////////////////////////////////////////////////////
 SGeneralSettings theSettings;
 namespace {
@@ -22,17 +23,7 @@ float ImportedShortcutPitch(float value) {
 }
 std::filesystem::path InstalledGameRoot()
 {
-    const auto& engine = RuntimePaths64::Engine();
-    const auto portable = engine.parent_path() / "Base";
-    if (std::filesystem::is_regular_file(portable / "Res" / "database.res") &&
-        std::filesystem::is_directory(portable / "Maps")) return portable;
-    const auto root = engine.parent_path().parent_path();
-    std::error_code error;
-    if (!std::filesystem::is_regular_file(root / "Res" / "database.res", error) || error)
-        return {};
-    if (!std::filesystem::is_directory(root / "Maps", error) || error)
-        return {};
-    return root;
+    return InstalledGameData::FindRoot(RuntimePaths64::Engine());
 }
 CString DirectoryWithSlash(const std::filesystem::path &path)
 {
