@@ -2884,7 +2884,7 @@ bool decode_model_resources(const ResourceBlob& mod_blob,
                             const std::string& visual_reference,
                             ModelCpuAsset& model, ResourceFailure& failure) {
     model = {};
-    MemoryResourceArchive mod_archive;
+    MemoryResourceArchive mod_archive, bone_archive;
     // BON endpoints describe the skeleton, independently of FIG shape count.
     // Share the active-map LNK/BON decoder, then attach each node's geometry.
     if (!mod_archive.open(mod_blob, failure) ||

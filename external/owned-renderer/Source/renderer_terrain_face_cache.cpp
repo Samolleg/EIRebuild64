@@ -23,6 +23,7 @@
 #include <intrin.h>
 
 namespace owned {
+#ifndef EID3D11_SHADER_EMBED
 namespace {
 
 // Steep class (owned_terrain_decode.cpp kTerrainSteepClassZ): only a
@@ -413,6 +414,8 @@ std::shared_ptr<TerrainFaceAtlasJob> start_terrain_face_atlas_job(std::shared_pt
     return nullptr;
 }
 
+#endif
+
 void append_terrain_face_cache_shader_programs(std::vector<ShaderProgram>& out) {
     const std::string& source = owned_native_shader_source();
     static const D3D_SHADER_MACRO terrain[] = {{"NATIVE_TERRAIN_PS", "1"}, {"NATIVE_TERRAIN2_POOLS", "1"}, {nullptr, nullptr}};
@@ -429,6 +432,7 @@ void append_terrain_face_cache_d3d12_programs(std::vector<ShaderProgram>& out) {
     out.push_back({source, nullptr, terrain, "nativeFaceCacheCS", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
+#ifndef EID3D11_SHADER_EMBED
 HRESULT Renderer::ensure_terrain_face_programs() noexcept {
     if (d3d12_) {
         // D3D12: the programs (bake CS, feedback VS and PS) by key; the executor builds their pipelines.
@@ -1499,4 +1503,5 @@ void Renderer::update_terrain_face_cache() noexcept try {
     release_terrain_face_cache(); bind_terrain_face_cache();
 }
 
+#endif
 }  // namespace owned

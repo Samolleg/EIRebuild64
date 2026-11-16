@@ -1855,7 +1855,7 @@ public:
     // t slots ask for: binding it records no barrier.
     std::shared_ptr<owned::D3D12Buffer> raytracing_buffer(const ComPtr<ID3D12Resource>& structure) {
         auto buffer = std::make_shared<owned::D3D12Buffer>();
-        buffer->core = &core_;
+        buffer->owner = resource_owner_;
         buffer->resource = structure;
         buffer->bytes = structure->GetDesc().Width;
         buffer->state = kShaderRead;
@@ -2590,7 +2590,7 @@ public:
     // then the executor's heaps and root signature bound again and its
     // cached list state forgotten (the library set its own).
     HRESULT record_external(const char* name, const ExternalUse* uses, UINT count, const ExternalRecord& record) override {
-        constexpr UINT kMaximum = 8;
+        constexpr UINT kMaximum = 9;
         if (count > kMaximum || (count && !uses) || !record) return E_INVALIDARG;
         // Validate the complete set before opening a list or transitioning any
         // resource. A surviving snapshot must never reach NGX/FSR on a new device.
@@ -2601,8 +2601,6 @@ public:
         }
         ID3D12GraphicsCommandList* list = open_list();
         if (!list) return E_FAIL;
-        constexpr UINT kMaximum = 9;
-        if (count > kMaximum || !record) return E_INVALIDARG;
         ID3D12Resource* resources[kMaximum]{};
         if (g_hazards) g_hazards->command(name);
         for (UINT index = 0; index < count; ++index) {

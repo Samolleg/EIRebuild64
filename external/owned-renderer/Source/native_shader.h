@@ -875,7 +875,13 @@ struct NativeOutput{float4 p:SV_Position;float4 d:COLOR0;float4 s:COLOR1;float2 
  float4 motionClip:TEXCOORD30;
 #endif
 };
-uint nativeSknInstance(NativeOutput i){return (i.swaying&(1u<<28))!=0?(uint)i.liquidFlow.w:0;}
+uint nativeSknInstance(NativeOutput i){
+#ifdef NATIVE_GLTF
+ return (i.swaying&(1u<<28))!=0?(uint)i.liquidFlow.w:0;
+#else
+ return 0; // Both native backends select NATIVE_GLTF for every SKN material.
+#endif
+}
 @LIQUID_SURFACE@
 // Rain rings on wet flat ground: the height gradient of the drop rings,
 // rendered once per game-time step into a tiling texture (rainRingsCS,
@@ -1354,8 +1360,8 @@ void nativeImpostorSelect(NativeDraw draw,NativeInstance instance,inout uint fir
 // SKN switches discretely. Update history during world preparation, before
 // either colour or shadow index selection, using the camera projection.
 groupshared uint nativeSknSelectedLevel;
-void nativeSknLodUpdate(NativeDraw draw,NativeInstance instance){
- if(instance.sknFactors.w==0||draw.worldState==0xffffffffu||(instance.worldGeometry&@WORLD_LOD@)==0)return;
+uint nativeSknLodUpdate(NativeDraw draw,NativeInstance instance){
+ if(instance.sknFactors.w==0||draw.worldState==0xffffffffu||(instance.worldGeometry&@WORLD_LOD@)==0)return 0;
  uint table=draw.indexOffset-64,levels=min(nativeGeometry.Load(table),3u);
  NativeWorldState state=nativeWorldStateOutput[draw.worldState];
  uint chosen=all(state.geometry==draw.worldGeneration)?min(state.sknLod,levels):0;
@@ -1373,16 +1379,16 @@ void nativeSknLodUpdate(NativeDraw draw,NativeInstance instance){
   [loop]while(chosen<levels){float error=asfloat(nativeGeometry.Load(table+(chosen+1)*16+8))*pixels;
    float h=asfloat(nativeGeometry.Load(table+(chosen+1)*16+12));if(error>limit*(1-h))break;++chosen;}
  }
- nativeSknSelectedLevel=chosen;
  state.sknLod=chosen;nativeWorldStateOutput[draw.worldState]=state;
+ return chosen;
 }
 void nativeStaticLodSelect(NativeDraw draw,NativeInstance instance,inout uint firstOffset,inout uint firstCount,
-                           out uint secondOffset,out uint secondCount,out uint fade,out uint firstLevel,out uint secondLevel){
+                           out uint secondOffset,out uint secondCount,out uint fade,out uint firstLevel,out uint secondLevel,uint sknSelectedLevel){
  secondOffset=0;secondCount=0;fade=0;firstLevel=0;secondLevel=0xffffffffu;
  uint table=draw.indexOffset-64;
  uint levels=min(nativeGeometry.Load(table),3u);
  if(instance.sknFactors.w>0){
-  firstCount=nativeGeometry.Load(table+4);firstLevel=nativeSknSelectedLevel;
+  firstCount=nativeGeometry.Load(table+4);firstLevel=sknSelectedLevel;
   if(firstLevel>0){uint2 entry=nativeGeometry.Load2(table+firstLevel*16);firstOffset=entry.x;firstCount=entry.y;}
   return;
  }
@@ -1595,7 +1601,7 @@ uint nativeBuildEntry(uint local){return nativeWorkScratch+(nativeWorkBase+local
 )" R"(
 void nativeBuildWhole(uint3 groupId,uint lane){
  NativeDraw draw;if(!loadNativeDraw(groupId,draw))return;NativeInstance instance=loadNativeInstance(draw.instanceIndex);
- if(lane==0)nativeSknLodUpdate(draw,instance);
+ if(lane==0)nativeSknSelectedLevel=nativeSknLodUpdate(draw,instance);
  GroupMemoryBarrierWithGroupSync();
  if(instance.worldGeometry!=0){
   nativeCurrentBounds(draw,instance);
@@ -1624,7 +1630,7 @@ void nativeBuildWhole(uint3 groupId,uint lane){
  uint firstOffset=draw.indexOffset,firstCount=triangleCount,secondOffset=0,secondCount=0,fade=0;
  uint firstLevel=0,secondLevel=0xffffffffu;
  [branch]if((instance.worldGeometry&@WORLD_LOD@)!=0&&((nativeDistanceCull.z>0&&draw.preservesOrder==0)||instance.sknFactors.w>0)&&!split)
-  nativeStaticLodSelect(draw,instance,firstOffset,firstCount,secondOffset,secondCount,fade,firstLevel,secondLevel);
+  nativeStaticLodSelect(draw,instance,firstOffset,firstCount,secondOffset,secondCount,fade,firstLevel,secondLevel,nativeSknSelectedLevel);
  // Crown impostors: the record's quad far away, both in the crossfade band.
  bool impostorSecond=false;
  [branch]if((instance.worldGeometry&@WORLD_IMPOSTOR@)!=0&&nativeImpostorParams.x>0&&draw.preservesOrder==0&&!split)
@@ -1647,14 +1653,15 @@ void nativeBuildWhole(uint3 groupId,uint lane){
  // levels, with the codes the triangle loop below gives their corners.
  bool indexed=nativeIndexedBuild!=0&&(work.flags&4u)!=0&&draw.preservesOrder==0&&!split;
  uint secondOwners=work.ownerBase+draw.componentCount;
+ uint ownerVertexBase=(instance.worldGeometry&(@WORLD_OBJECT_SPACE@|@WORLD_LOD@))!=0?0:draw.preparedVertexBase;
  [branch]if(indexed){
   uint firstCode=fade!=0?fade<<16:0u;
   uint secondCode=(fade!=0?(fade|256u)<<16:0u)|(impostorSecond?1024u<<16:0u);
   for(uint component=lane;component<draw.componentCount;component+=64){
-   if(firstCount!=0)nativeOwnerOutput[work.ownerBase+component]=uint2(draw.instanceIndex,(draw.preparedVertexBase+component)|firstCode);
-   if(secondCount!=0&&!impostorSecond)nativeOwnerOutput[secondOwners+component]=uint2(draw.instanceIndex,(draw.preparedVertexBase+component)|secondCode);
+   if(firstCount!=0)nativeOwnerOutput[work.ownerBase+component]=uint2(draw.instanceIndex,(ownerVertexBase+component)|firstCode);
+   if(secondCount!=0&&!impostorSecond)nativeOwnerOutput[secondOwners+component]=uint2(draw.instanceIndex,(ownerVertexBase+component)|secondCode);
   }
-  if(impostorSecond&&lane<4)nativeOwnerOutput[secondOwners+lane]=uint2(draw.instanceIndex,(draw.preparedVertexBase+lane)|secondCode);
+  if(impostorSecond&&lane<4)nativeOwnerOutput[secondOwners+lane]=uint2(draw.instanceIndex,(ownerVertexBase+lane)|secondCode);
  }
 #endif
  for(uint tri=lane;tri<total;tri+=64){
@@ -1683,7 +1690,9 @@ void nativeBuildWhole(uint3 groupId,uint lane){
 void nativeBuildSelect(uint local){
  NativeDraw draw;if(!loadNativeDraw(uint3(local%65535u,local/65535u,0),draw))return;
  NativeInstance instance=loadNativeInstance(draw.instanceIndex);
- nativeSknLodUpdate(draw,instance);
+ // This dispatch selects 64 different records: its LOD belongs to the lane,
+ // not to the workgroup shared by those records.
+ uint sknSelectedLevel=nativeSknLodUpdate(draw,instance);
  bool visible;
  if(instance.worldGeometry!=0){
   nativeCurrentBounds(draw,instance);
@@ -1699,7 +1708,7 @@ void nativeBuildSelect(uint local){
  uint firstOffset=draw.indexOffset,firstCount=draw.indexCount/3,secondOffset=0,secondCount=0,fade=0;
  uint firstLevel=0,secondLevel=0xffffffffu;
  [branch]if((instance.worldGeometry&@WORLD_LOD@)!=0&&((nativeDistanceCull.z>0&&draw.preservesOrder==0)||instance.sknFactors.w>0)&&!split)
-  nativeStaticLodSelect(draw,instance,firstOffset,firstCount,secondOffset,secondCount,fade,firstLevel,secondLevel);
+  nativeStaticLodSelect(draw,instance,firstOffset,firstCount,secondOffset,secondCount,fade,firstLevel,secondLevel,sknSelectedLevel);
  bool impostorSecond=false;
  [branch]if((instance.worldGeometry&@WORLD_IMPOSTOR@)!=0&&nativeImpostorParams.x>0&&draw.preservesOrder==0&&!split)
   nativeImpostorSelect(draw,instance,firstCount,secondCount,fade,impostorSecond);
@@ -1753,14 +1762,15 @@ void nativeBuildChunk(uint3 groupId,uint lane){
  // Indexed records: this chunk's owner entries (the impostor quad's with the first chunk).
  bool indexed=nativeIndexedBuild!=0&&(work.flags&4u)!=0&&draw.preservesOrder==0&&!split;
  uint secondOwners=work.ownerBase+draw.componentCount;
+ uint ownerVertexBase=(instance.worldGeometry&(@WORLD_OBJECT_SPACE@|@WORLD_LOD@))!=0?0:draw.preparedVertexBase;
  [branch]if(indexed){
   uint firstCode=fade!=0?fade<<16:0u;
   uint secondCode=(fade!=0?(fade|256u)<<16:0u)|(impostorSecond?1024u<<16:0u);
   for(uint component=chunkFirst+lane;component<componentLast;component+=64){
-   if(firstCount!=0)nativeOwnerOutput[work.ownerBase+component]=uint2(draw.instanceIndex,(draw.preparedVertexBase+component)|firstCode);
-   if(secondCount!=0&&!impostorSecond)nativeOwnerOutput[secondOwners+component]=uint2(draw.instanceIndex,(draw.preparedVertexBase+component)|secondCode);
+   if(firstCount!=0)nativeOwnerOutput[work.ownerBase+component]=uint2(draw.instanceIndex,(ownerVertexBase+component)|firstCode);
+   if(secondCount!=0&&!impostorSecond)nativeOwnerOutput[secondOwners+component]=uint2(draw.instanceIndex,(ownerVertexBase+component)|secondCode);
   }
-  if(impostorSecond&&groupId.z==0&&lane<4)nativeOwnerOutput[secondOwners+lane]=uint2(draw.instanceIndex,(draw.preparedVertexBase+lane)|secondCode);
+  if(impostorSecond&&groupId.z==0&&lane<4)nativeOwnerOutput[secondOwners+lane]=uint2(draw.instanceIndex,(ownerVertexBase+lane)|secondCode);
  }
 #endif
  uint last=lastChunk?total:min(chunkFirst+kNativeBuildChunk,total);
@@ -1778,8 +1788,9 @@ void nativeBuildChunk(uint3 groupId,uint lane){
   [branch]if(indexed){nativeIndexOutput.Store3(outputTriangle*12u,(second?secondOwners:work.ownerBase)+componentIndex);continue;}
 #endif
   uint code=(fade!=0?(fade|(second?256u:0u))<<16:0u)|(second&&impostorSecond?1024u<<16:0u);
-  nativeTriangleOutput[outputTriangle]=uint4(draw.instanceIndex,(draw.preparedVertexBase+componentIndex.x)|code,
-                                           (draw.preparedVertexBase+componentIndex.y)|code,(draw.preparedVertexBase+componentIndex.z)|code);
+  uint base=(instance.worldGeometry&(@WORLD_OBJECT_SPACE@|@WORLD_LOD@))!=0?0:draw.preparedVertexBase;
+  nativeTriangleOutput[outputTriangle]=uint4(draw.instanceIndex,(base+componentIndex.x)|code,
+                                           (base+componentIndex.y)|code,(base+componentIndex.z)|code);
  }
 }
 [numthreads(64,1,1)]void nativeBuildCS(uint3 groupId:SV_GroupID,uint3 threadId:SV_GroupThreadID){
@@ -4306,20 +4317,6 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace NATIVE_G
  // Background geometry stays outside the authoritative map's open interior.
  if(i.neighbour!=0 && all(i.worldPosition.xy>nativeTerrainActiveBoundsPS.xy) &&
     all(i.worldPosition.xy<nativeTerrainActiveBoundsPS.zw))discard;
-#if defined(NATIVE_TERRAIN_PS)||defined(NATIVE_LOW)
- // Astral is an opaque depth-bearing surface, independently emissive.
- // Its base geometry, map visibility and fog retain the ordinary terrain contract.
- [branch]if((i.terrainVertexFlags&16384u)!=0&&((i.terrainVertexFlags>>16)&15u)==15u){
-  float footprint=length(fwidth(i.worldPosition.xy))*.075;
-  float3 color=terrainAstralColor(i.worldPosition,fogEye.xyz,nativeTerrainClock.y*.055,i.liquidDirections.y,footprint);
-  if(nativeFogEnable!=0){
-   color=lerp(saturate(borderFogColorAt(i.worldPosition,nativeFogColor.rgb)),color,nativeFogFactor(i.s.a,i.p));
-   nativeAtmosphereAt(color,i.p,nativeFogColor.rgb,i.worldPosition);
-  }else if(nativeDrawDissolvedAt(i.p,i.worldPosition))discard;
-  NativePixelResult astral;astral.color=float4(color,nativeHudOpacity);
-  astral.shadow=float4(1,0,0,1);astral.ambient=float4(0,0,0,astral.color.a);return astral;
- }
-#endif
  // Evaluate derivatives before both the receiver branch and per-pixel
  // cascade selection. Adjacent lanes need not select the same receiver/map.
  float3 positionDx=ddx(i.worldPosition),positionDy=ddy(i.worldPosition);
@@ -4558,6 +4555,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace NATIVE_G
   materialAlpha2=pow(materialProfile.r,4);
  }
 
+#ifndef NATIVE_OFF_MATERIALS
  [branch]if(!sknMaterial&&NATIVE_MATERIAL_BOUND(i)&&nativeMaterialLevel>0&&i.shadowMode==1&&!impostor){
   materialProfile=nativeMaterialProfileTap(i.textureReference.y,i.uv);
   materialActive=true;
@@ -4600,6 +4598,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace NATIVE_G
   materialProfile=float4(roughness,0,.16,materialFoliage?kFoliageSheen:0); // metal 0, F0 .04 (x4); leaves a soft sheen
   materialLamps=nativeMaterialWorldLevel>=3;
  }
+#endif
 #endif
 #endif
 #if NATIVE_CONTACT_LATE
@@ -5529,7 +5528,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace NATIVE_G
     c.rgb+=transmitted;c0+=transmitted;
    }
 #endif
-#ifdef NATIVE_CRYSTAL
+#if defined(NATIVE_CRYSTAL)&&!defined(NATIVE_OFF_MATERIALS)
    // Crystal texels (the crystal instance programs only, NATIVE_CRYSTAL):
    // big, smooth-painted, flat-faceted stones, where a glossy class alone
    // left the sun highlight on no facet and the gem branch dulled the body

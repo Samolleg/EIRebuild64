@@ -1909,7 +1909,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
   harness_stage_=0;harness_wait_=0;harness_overlay_shot_.clear();
  }
  // Capture and outer-frame recording use the same lifecycle on both backends.
- const bool f11_capture=debug_overlay_.consume_capture_request()||std::exchange(core_capture_request_,false);
+ const bool f11_capture=debug_overlay_.consume_capture_request()||take_core_capture();
  bool recorder_armed_this_present=false;
  const auto temporal_outcome=profiler_.shadow_temporal_present(presentation_frame_index_);
  if(harness_shadow_temporal_outcome_==ShadowTemporalPresentOutcome::waiting&&

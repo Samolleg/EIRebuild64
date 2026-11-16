@@ -1,5 +1,4 @@
 #include "../CorePerf.h"
-#include "../WorldServer.h"
 #include "E1VisualFrame.h"
 #include "E1PerfDiagnostics.h"
 #include "E1TerrainSubmission.h"
@@ -219,7 +218,7 @@ void shadowDiagnostics(void* context, std::uint64_t serial, const owned::NativeS
 bool pointLights(void* context, const owned::RetainedVisualFrame& frame) noexcept {
     try {
         std::vector<owned::RetainedFireSpell> spells;
-        theWorldServer.ReadVisualFireSpells(spells);
+        OwnedRender::E1ReadVisualFireSpells(spells);
         self(context)->renderer->set_fire_spells(spells, frame.time);
         return self(context)->renderer->set_native_point_lights(frame.world_point_lights, frame.time);
     } catch (...) {

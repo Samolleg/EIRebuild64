@@ -231,6 +231,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $repo 'external/owned-renderer/Host/d3d12/eid3d11_d3d12_pipelines.shipped.list') -Destination $kit
     Copy-Item -LiteralPath (Join-Path $repo 'external/owned-renderer/LICENSE.md') -Destination (Join-Path $kit 'licenses/EID3D11-LICENSE.md')
     Copy-Item -LiteralPath (Join-Path $repo 'external/owned-renderer/NOTICE.md') -Destination (Join-Path $kit 'licenses/EID3D11-NOTICE.md')
+    Copy-Item -LiteralPath (Join-Path $repo 'THIRD_PARTY.md') -Destination $kit
     foreach ($binary in Get-ChildItem $kit -File -Recurse | Where-Object Extension -in '.exe','.dll') {
         $imports = & $dumpbin /nologo /dependents $binary.FullName
         if ($LASTEXITCODE -ne 0) { throw "dumpbin failed: $($binary.Name)" }

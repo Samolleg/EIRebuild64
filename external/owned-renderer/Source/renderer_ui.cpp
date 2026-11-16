@@ -2040,9 +2040,11 @@ std::map<PreparedKey,PreparedHandles> g_core_prepared;
 std::uint64_t g_core_prepared_epoch=0;
 }
 // Host: stored packet arrays the game stopped referencing.
+#if !defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_TOOL)
 void PacketStoreEvict::run(Renderer&){
  for(const auto hash:hashes)core_packet_store().erase(hash);
 }
+#endif
 void Packet::run(Renderer& renderer){
  if(store_missing){
   // The game referenced arrays the store does not hold (a wire-order or

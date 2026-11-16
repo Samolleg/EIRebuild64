@@ -74,6 +74,7 @@
 // kind, the creation time, the DXBC checksum and our calling site (an offset
 // into this module, resolved with its .map). Silent when nothing is created.
 void frame_acct::report_shader_created_in_play(const char* kind,double ms,SIZE_T bytes,const void* code,const void* caller) noexcept{
+#ifndef EID3D11_SHADER_EMBED
  HMODULE self=nullptr;
  GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
   reinterpret_cast<LPCWSTR>(&frame_acct::report_shader_created_in_play),&self);
@@ -88,15 +89,18 @@ void frame_acct::report_shader_created_in_play(const char* kind,double ms,SIZE_T
  std::snprintf(text,sizeof(text),"kind=%s ms=%.2f bytes=%zu dxbc=%08x%08x caller=%s+0x%llx thread=%lu",
   kind,ms,static_cast<std::size_t>(bytes),checksum[0],checksum[1],from==self?"renderer":from?"other":"?",offset,GetCurrentThreadId());
  owned::bridge_report_event("shader_created_in_play",text);
+#endif
 }
 
 namespace owned {
 
 void report_slow_scene_command(const char* name,const char* site,double ms) noexcept{
+#ifndef EID3D11_SHADER_EMBED
  char text[384];
  std::snprintf(text,sizeof(text),"ms=%.2f frame=%llu site=%.60s command=%.260s",ms,
   static_cast<unsigned long long>(frame_acct::g_presentation_frame.load(std::memory_order_relaxed)),site?site:"?",name?name:"?");
  bridge_report_event("slow_scene_command",text);
+#endif
 }
 
 namespace {
@@ -213,7 +217,12 @@ constexpr UINT kScreenRectangleMaximumVertices = 5u * 6u;
 
 constexpr char kDebugResourceViewShader[] = R"(
 cbuffer DebugViewConstants:register(b0){float4 projectionCoefficients;uint debugMode;uint shadowEnabled;uint shadowValid;uint debugPadding;float4 shadowBoard;float4 receiverRectangle[5];};
-Texture2D<float> debugFloat:register(t0);Texture2D<uint> debugUint:register(t1);
+Texture2D<float> debugFloat:register(t0);
+#ifdef EID3D12
+Texture2D<uint2> debugUint:register(t1);
+#else
+Texture2D<uint> debugUint:register(t1);
+#endif
 Texture2DArray<float> debugShadow:register(t2);
 SamplerState pointClamp:register(s0);
 struct FullscreenOutput{float4 position:SV_Position;float2 uv:TEXCOORD0;};
@@ -241,7 +250,13 @@ float4 debugTexturePS(FullscreenOutput input):SV_Target{
   return float4(depth,depth,depth,1);
  }
  float value=0;
- if(debugMode==3u){uint w,h;debugUint.GetDimensions(w,h);value=debugUint.Load(int3(int2(input.uv*float2(w,h)),0))/255.0;}
+ if(debugMode==3u){uint w,h;debugUint.GetDimensions(w,h);
+#ifdef EID3D12
+ value=debugUint.Load(int3(int2(input.uv*float2(w,h)),0)).g/255.0;
+#else
+ value=debugUint.Load(int3(int2(input.uv*float2(w,h)),0))/255.0;
+#endif
+ }
  else value=debugFloat.SampleLevel(pointClamp,input.uv,0);
  if(debugMode==2u){
   float a=projectionCoefficients.x,b=projectionCoefficients.y;
@@ -655,7 +670,7 @@ HRESULT Renderer::ensure_embedded_d3d12(){
    const bool available=embedded_d3d12_.dlss_caps(caps);
    caps.reason[sizeof(caps.reason)-1]=0;
    set_dlss_unavailable_reason(available?nullptr:(caps.reason[0]?caps.reason:"not available"));}
-  set_fsr_unavailable_reason(Fsr2UpscalerD3D12::unavailable_reason(*d3d12_));
+  set_fsr_unavailable_reason(d3d12_->fsr_upscale_unavailable());
   render_scale_percent_=std::clamp(configured_integer(config,"render_scale",100),kRenderScaleMinimum,100);
   dlss_mode_=configured_dlss_mode();fsr_mode_=configured_fsr_mode();set_world_size();
   scene_composited_=true;

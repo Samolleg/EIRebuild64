@@ -1965,6 +1965,84 @@ static std::string native_program_key(const char* entry,std::vector<const char*>
  return key;
 }
 
+// rt_term_view (F10, diagnostic): the world image replaced by one input or
+// term of the ray traced passes per pixel, read from this frame's images:
+// 1 the owner the guides name (red a unit, green terrain by its facing
+//   rule, lime the ground cover on a traced frame, blue another lit
+//   receiver, yellow a surface with guides the traced passes do not light;
+//   grey a drawn pixel without
+//   guides; black the sky), the depth test's winner among the guide writers;
+// 2 the sun term of the mask; 3 the indirect factor (x4); 4 the ambient
+//   occlusion's visibility as resolved (half resolution, nearest);
+// 5 the guide albedo; 6 the guide normal; 7 the object motion a posed
+//   record wrote (red and green: 8 pixels a unit, blue: a record wrote it);
+// 8 the lighting factor the twin shaded with and the fog share (blue);
+// 9-12 the bounce light alone (rt_indirect_light): what it adds to the
+//   lighting factor, saturate(d + indirect) - d, no albedo, no other term;
+//   9 linear (x4) and 10 tonemapped (x8 / (1 + x8)) in the world image (the
+//   upscaler, Ray Reconstruction included, takes it as its input); 11 and
+//   12 the same drawn over the upscaled output, the render pixel nearest
+//   to each output pixel: the signal as the upscaler received it.
+// tvControl.zw: render pixels per output pixel (asfloat; 1 in the world image).
+constexpr char kRtTermViewShader[] =
+"cbuffer RtTermView:register(b1){uint4 tvControl;};\n"
+"Texture2D<float> tvDepth:register(t0);\n"
+"Texture2D<float4> tvNormal:register(t1);\n"
+"Texture2D<float4> tvDiffuse:register(t2);\n"
+"Texture2D<float4> tvSpecular:register(t3);\n"
+"Texture2D<float2> tvMask:register(t4);\n"
+"Texture2D<float4> tvIndirect:register(t5);\n"
+"Texture2D<float2> tvOcclusion:register(t6);\n"
+"Texture2D<float2> tvMotion:register(t7);\n"
+"Texture2D<float> tvMotionDepth:register(t8);\n"
+"float4 rtTermViewPS(float4 position:SV_Position):SV_Target{\n"
+" int3 at=int3(position.xy*asfloat(tvControl.zw),0);\n"
+" float z=tvDepth.Load(at);\n"
+" float4 n=tvNormal.Load(at),d=tvDiffuse.Load(at),sp=tvSpecular.Load(at);\n"
+" uint a=uint(d.a*65535+.5),b=uint(sp.a*65535+.5);\n"
+" bool guided=dot(n.xyz,n.xyz)>.25,lit=guided&&((b>>7)&255u)!=0&&((a>>14)&1u)!=0;\n"
+" uint mode=tvControl.x;\n"
+" if(mode==1){\n"
+"  if(!(z<1))return float4(0,0,0,1);\n"
+"  if(!guided)return float4(.5,.5,.5,1);\n"
+"  if(!lit)return float4(1,.9,0,1);\n"
+"  if(((b>>15)&1u)!=0)return ((a>>15)&1u)!=0?float4(.6,1,.1,1):float4(1,.1,.1,1);\n"
+"  return ((a>>15)&1u)!=0?float4(.1,.8,.1,1):float4(.15,.3,1,1);\n"
+" }\n"
+" if(mode==2){float v=tvMask.Load(at).x;return v>1.5?float4(.3,0,.3,1):float4(v,v,v,1);}\n"
+" if(mode==3)return float4(tvIndirect.Load(at).rgb*4,1);\n"
+" if(mode==4){float2 o=tvOcclusion.Load(int3(at.xy/max(tvControl.y,1u),0));return o.y>=65000?float4(0,0,.4,1):float4(o.x,o.x,o.x,1);}\n"
+" if(mode==5)return float4(d.rgb,1);\n"
+" if(mode==6)return float4(n.xyz*.5+.5,1);\n"
+" if(mode==7){float2 m=tvMotion.Load(at);float w=tvMotionDepth.Load(at);return float4(abs(m)/8,w!=0?1:0,1);}\n"
+" if(mode>=9){\n"
+"  float3 factor=float3(a&127u,(a>>7)&127u,b&127u)/127.0,bounce=saturate(factor+tvIndirect.Load(at).rgb)-factor;\n"
+"  if(!lit)bounce=0;\n"
+"  if(mode==9||mode==11)return float4(bounce*4,1);\n"
+"  float3 v=bounce*8;return float4(v/(1+v),1);\n"
+" }\n"
+" return float4(float(a&127u)/127.0,float((a>>7)&127u)/127.0,float((b>>7)&255u)/255.0,1);\n"
+"}\n";
+const ShaderProgram kRtTermViewPixel{{kRtTermViewShader, sizeof(kRtTermViewShader) - 1}, nullptr, nullptr, "rtTermViewPS",
+                                     "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3};
+void append_raytracing_shader_programs(std::vector<ShaderProgram>& out){
+ // The mask pass with the sun term traced (native_shader.h NATIVE_RT_SUN).
+ static const D3D_SHADER_MACRO rt_sun[]={{"NATIVE_RT_SUN","1"},{nullptr,nullptr}};
+ out.push_back(kRaytracingDebugVertex);
+ out.push_back(kRaytracingDebugPixel);
+ out.push_back(kRaytracingRepack);
+ out.push_back({owned_native_shader_source(),nullptr,rt_sun,"nativeShadowMaskPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ out.push_back(kRaytracingProbe);
+ const std::string& hit_debug=raytracing_hit_debug_source();
+ out.push_back({{hit_debug.data(),hit_debug.size()},nullptr,nullptr,"rtHitDebugPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ out.push_back(kRtTermViewPixel); // rt_term_view (after kRtPrograms' entries: drawn by its own constant)
+ // kRtPrepass: the depth prepass of rt_sun_shadows frames, with the crown
+ // impostor receiver and the unit flag the traced mask reads (native_shader.h
+ // NATIVE_RT_SUN). Every other frame draws the plain prepass, so the RT code
+ // costs the raster path no registers.
+ out.push_back({owned_native_shader_source(),nullptr,rt_sun,"nativePrepassPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+}
+
 // The native programs and the first geometry page on the D3D12 backend.
 #if !defined(EID3D11_SHADER_EMBED)
 HRESULT Renderer::surface_effect_d3d12(const SurfaceImage& source,const SurfaceImage& destination,
@@ -2611,7 +2689,7 @@ HRESULT Renderer::update_contact_maps_d3d12(){
   const HRESULT copied=copy_contact_atlas_d3d12(*source,material,contact_maps_);
   if(FAILED(copied))return copied;
   if(copied==S_FALSE){ // each material is refused once (its pending bit is cleared)
-   UINT width=0,height=0,mips=0;DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;d3d12_->texture_info(source,width,height,mips,format);
+   UINT width=0,height=0,mips=0;DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;d3d12_->texture_info(*source,width,height,mips,format);
    char text[256];
    std::snprintf(text,sizeof(text),"terrain atlas format or size differs (material=%u page=%ux%u mips=%u format=%u atlas=%ux%u mips=%u format=%u); affected contact art omitted",
     material,width,height,mips,unsigned(format),contact_maps_.width,contact_maps_.height,contact_maps_.mips,unsigned(contact_maps_.format));
@@ -3595,84 +3673,6 @@ HRESULT Renderer::ambient_occlusion_d3d12(const D3D12Texture* traced){
  d3d12_->clear_slots();
  if(hr==S_OK){profiler_.add_draw(4,4);profiler_.add_batch(4);}
  return hr;
-}
-
-// rt_term_view (F10, diagnostic): the world image replaced by one input or
-// term of the ray traced passes per pixel, read from this frame's images:
-// 1 the owner the guides name (red a unit, green terrain by its facing
-//   rule, lime the ground cover on a traced frame, blue another lit
-//   receiver, yellow a surface with guides the traced passes do not light;
-//   grey a drawn pixel without
-//   guides; black the sky), the depth test's winner among the guide writers;
-// 2 the sun term of the mask; 3 the indirect factor (x4); 4 the ambient
-//   occlusion's visibility as resolved (half resolution, nearest);
-// 5 the guide albedo; 6 the guide normal; 7 the object motion a posed
-//   record wrote (red and green: 8 pixels a unit, blue: a record wrote it);
-// 8 the lighting factor the twin shaded with and the fog share (blue);
-// 9-12 the bounce light alone (rt_indirect_light): what it adds to the
-//   lighting factor, saturate(d + indirect) - d, no albedo, no other term;
-//   9 linear (x4) and 10 tonemapped (x8 / (1 + x8)) in the world image (the
-//   upscaler, Ray Reconstruction included, takes it as its input); 11 and
-//   12 the same drawn over the upscaled output, the render pixel nearest
-//   to each output pixel: the signal as the upscaler received it.
-// tvControl.zw: render pixels per output pixel (asfloat; 1 in the world image).
-constexpr char kRtTermViewShader[] =
-"cbuffer RtTermView:register(b1){uint4 tvControl;};\n"
-"Texture2D<float> tvDepth:register(t0);\n"
-"Texture2D<float4> tvNormal:register(t1);\n"
-"Texture2D<float4> tvDiffuse:register(t2);\n"
-"Texture2D<float4> tvSpecular:register(t3);\n"
-"Texture2D<float2> tvMask:register(t4);\n"
-"Texture2D<float4> tvIndirect:register(t5);\n"
-"Texture2D<float2> tvOcclusion:register(t6);\n"
-"Texture2D<float2> tvMotion:register(t7);\n"
-"Texture2D<float> tvMotionDepth:register(t8);\n"
-"float4 rtTermViewPS(float4 position:SV_Position):SV_Target{\n"
-" int3 at=int3(position.xy*asfloat(tvControl.zw),0);\n"
-" float z=tvDepth.Load(at);\n"
-" float4 n=tvNormal.Load(at),d=tvDiffuse.Load(at),sp=tvSpecular.Load(at);\n"
-" uint a=uint(d.a*65535+.5),b=uint(sp.a*65535+.5);\n"
-" bool guided=dot(n.xyz,n.xyz)>.25,lit=guided&&((b>>7)&255u)!=0&&((a>>14)&1u)!=0;\n"
-" uint mode=tvControl.x;\n"
-" if(mode==1){\n"
-"  if(!(z<1))return float4(0,0,0,1);\n"
-"  if(!guided)return float4(.5,.5,.5,1);\n"
-"  if(!lit)return float4(1,.9,0,1);\n"
-"  if(((b>>15)&1u)!=0)return ((a>>15)&1u)!=0?float4(.6,1,.1,1):float4(1,.1,.1,1);\n"
-"  return ((a>>15)&1u)!=0?float4(.1,.8,.1,1):float4(.15,.3,1,1);\n"
-" }\n"
-" if(mode==2){float v=tvMask.Load(at).x;return v>1.5?float4(.3,0,.3,1):float4(v,v,v,1);}\n"
-" if(mode==3)return float4(tvIndirect.Load(at).rgb*4,1);\n"
-" if(mode==4){float2 o=tvOcclusion.Load(int3(at.xy/max(tvControl.y,1u),0));return o.y>=65000?float4(0,0,.4,1):float4(o.x,o.x,o.x,1);}\n"
-" if(mode==5)return float4(d.rgb,1);\n"
-" if(mode==6)return float4(n.xyz*.5+.5,1);\n"
-" if(mode==7){float2 m=tvMotion.Load(at);float w=tvMotionDepth.Load(at);return float4(abs(m)/8,w!=0?1:0,1);}\n"
-" if(mode>=9){\n"
-"  float3 factor=float3(a&127u,(a>>7)&127u,b&127u)/127.0,bounce=saturate(factor+tvIndirect.Load(at).rgb)-factor;\n"
-"  if(!lit)bounce=0;\n"
-"  if(mode==9||mode==11)return float4(bounce*4,1);\n"
-"  float3 v=bounce*8;return float4(v/(1+v),1);\n"
-" }\n"
-" return float4(float(a&127u)/127.0,float((a>>7)&127u)/127.0,float((b>>7)&255u)/255.0,1);\n"
-"}\n";
-const ShaderProgram kRtTermViewPixel{{kRtTermViewShader, sizeof(kRtTermViewShader) - 1}, nullptr, nullptr, "rtTermViewPS",
-                                     "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3};
-void append_raytracing_shader_programs(std::vector<ShaderProgram>& out){
- // The mask pass with the sun term traced (native_shader.h NATIVE_RT_SUN).
- static const D3D_SHADER_MACRO rt_sun[]={{"NATIVE_RT_SUN","1"},{nullptr,nullptr}};
- out.push_back(kRaytracingDebugVertex);
- out.push_back(kRaytracingDebugPixel);
- out.push_back(kRaytracingRepack);
- out.push_back({owned_native_shader_source(),nullptr,rt_sun,"nativeShadowMaskPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
- out.push_back(kRaytracingProbe);
- const std::string& hit_debug=raytracing_hit_debug_source();
- out.push_back({{hit_debug.data(),hit_debug.size()},nullptr,nullptr,"rtHitDebugPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
- out.push_back(kRtTermViewPixel); // rt_term_view (after kRtPrograms' entries: drawn by its own constant)
- // kRtPrepass: the depth prepass of rt_sun_shadows frames, with the crown
- // impostor receiver and the unit flag the traced mask reads (native_shader.h
- // NATIVE_RT_SUN). Every other frame draws the plain prepass, so the RT code
- // costs the raster path no registers.
- out.push_back({owned_native_shader_source(),nullptr,rt_sun,"nativePrepassPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
 void Renderer::release_rt_direct_d3d12() noexcept{

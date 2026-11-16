@@ -1,3 +1,23 @@
+# Renderer candidate 1126 integration (2026-11-16)
+
+Upstream: https://github.com/Ilufus/evil-islands-owned-renderer
+Candidate: 6bdebfa9be990b717b8dc667bbbb9405494f6be4 (claude/cand-1126).
+Previous complete vendor baseline: d17a6149e5b5d4c2d23873d18e037bc270269050.
+Local starting point: 9d463827646726d7d727aaaab5692a02228f8f79, plus accepted
+GLTF09P storage changes from 7d68bb42. Later integration state is the containing
+EIRebuild64 commit, not a claim that this directory is unmodified upstream.
+
+Author astral and vegetation/impostor algorithms replace the local variants.
+The native x64 game, PAK resource providers, glTF/SKN materials and world LOD,
+MCP diagnostics, capture path and D3D12 resource-lifetime checks are retained.
+Game particle type and fire-spell facts enter through typed C++ source APIs;
+retail x86 hooks and separate-process transport are excluded from this build.
+Shaders include the author RT/deferred/indexed/face-cache programs plus local
+skin/morph variants. The dependency pins and archive hashes are recorded in
+third_party/d3d12/renderer1126.lock.json at the repository root. Renderer assets
+are versioned separately in content. Existing notices and licenses remain.
+
+The older stage notes below are historical and do not describe this integration.
 # X64D3D12 curse material ingress, stage 31 (2026-11-11)
 
 The source curse producer now publishes carrier 720101's completed CPU surface

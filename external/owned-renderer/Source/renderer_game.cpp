@@ -750,6 +750,7 @@ HRESULT Renderer::core_readback_surface(SurfaceImage& image){
 // them; the D3D11 backend restores a released entry from its GPU home first,
 // Readback::run). If the host no longer holds the generation, its GPU home is
 // read as BGRA and packed: exact for the round-trip formats, none for blocks.
+#if !defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_TOOL)
 HRESULT Renderer::core_restore_surface_pixels(SurfaceImage& image){
  const bool blocks=(image.format.dwFlags&DDPF_FOURCC)!=0;
  const UINT rows=blocks?std::max(1u,(image.height+3u)/4u):image.height;
@@ -790,6 +791,8 @@ HRESULT Renderer::core_restore_surface_pixels(SurfaceImage& image){
  }
  return S_OK;
 }
+
+#endif
 
 // capture() in core mode: an unstretched copy becomes the target's GPU home
 // on the host (scene_ui::Capture, the target's new generation); a stretched

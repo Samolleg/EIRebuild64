@@ -3663,3 +3663,9 @@ void CWorldServer::ReadVisualFireSpells(std::vector<owned::RetainedFireSpell>& o
         if (spell && spell->ReadVisualFireSpell(value)) output.push_back(value);
     }
 }
+
+namespace OwnedRender {
+void E1ReadVisualFireSpells(std::vector<owned::RetainedFireSpell>& output) {
+    theWorldServer.ReadVisualFireSpells(output);
+}
+}

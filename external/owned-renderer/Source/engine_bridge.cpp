@@ -9051,7 +9051,9 @@ void finish_object_plan_transaction(
     if (!output.transaction_open) return;
     g_native_sink_end_object(g_native_sink_context, commit);
     output.transaction_open = false;
+#ifndef EID3D11_EMBEDDED
     close_preview_lighting();   // a preview's studio light ends with its transaction
+#endif
 }
 
 #if !defined(EID3D11_EMBEDDED)
@@ -15250,6 +15252,8 @@ void report_server_seed_omission(const char* reason) noexcept {
     } catch (...) {}
 }
 
+std::atomic<bool> g_fire_burn_enabled{false};
+#ifndef EID3D11_EMBEDDED
 // The local server's active spell list (CWorldServer +12E28, an MFC CList:
 // head +4, count +C, nodes {next, prev, data}; checked on this game.exe
 // against casts of fireball and fire wall, 2026-11-15). Reads only.
@@ -15317,7 +15321,6 @@ bool ground_lightning_burn_contract(const std::uint8_t* image) noexcept {
         visual_read(image, 0x280146, copy) && copy == expected &&
         visual_read(image, 0x2804ae, phase) && phase == action;
 }
-std::atomic<bool> g_fire_burn_enabled{false};
 void fire_burn_publish() noexcept {
     static bool published = false;
     const bool enabled = g_fire_burn_enabled.load(std::memory_order_acquire) && g_visual_game_image &&
@@ -15352,6 +15355,8 @@ void fire_burn_publish() noexcept {
         retained_visual_scene().visual_publish_fire_spells(std::move(out));
     } catch (...) {}
 }
+#endif // !EID3D11_EMBEDDED
+
 // Main thread, after the client tick: the server is between segments.
 #if !defined(EID3D11_EMBEDDED)
 void reconcile_server_seeds() noexcept {
@@ -26538,6 +26543,7 @@ bool uninstall_highlight_hooks(std::uint8_t* image) {
 }
 #endif // !EID3D11_EMBEDDED
 
+#ifndef EID3D11_EMBEDDED
 // CInterface3D::Draw2D, BG_FLAG_CREATE (DoModal with a saved, greyed
 // backdrop): GetFromScreen (call 5F548F) into pBGScreen; delete[] of the old
 // save thumbnail (5F549C); Stretch(256,192) (5FD440, called at 5F54B1) for
@@ -26708,6 +26714,8 @@ bool uninstall_modal_backdrop_hooks(std::uint8_t* image) {
     g_modal_backdrop_installed = false;
     return restored;
 }
+
+#endif // !EID3D11_EMBEDDED
 
 // The base (briefing) screen is open while it is on the interface screen stack
 // (DoModal 5F7350 pushes CI3DScreen*, GetCurrentScreen 5F7590 reads the top).
@@ -27486,6 +27494,7 @@ bool g_game_particles_installed = false;
 thread_local void* g_game_particle_sink_context = nullptr;
 thread_local GameParticleSubmitFn g_game_particle_sink = nullptr;
 
+#ifndef EID3D11_EMBEDDED
 // Base game.exe: the particle manager calls one particle's Draw at
 // 00498AC6 (ECX = particle, one renderer argument, ret 4). Its Create
 // dispatcher reads the type at +0x10 at 004855A3. Carry that value only
@@ -27539,6 +27548,8 @@ bool uninstall_particle_source_hook(std::uint8_t* image) noexcept {
     g_particle_source_type = 0;
     return true;
 }
+
+#endif // !EID3D11_EMBEDDED
 
 void report_game_particle_omission(const char* reason) noexcept {
     // One event per change of reason; the particles stay visibly missing.
@@ -28151,6 +28162,7 @@ bool uninstall_game_print_hooks(std::uint8_t* image) noexcept {
 }
 #endif // !EID3D11_EMBEDDED
 
+#ifndef EID3D11_EMBEDDED
 // Direct CDXDirect3D::Render calls (0x004EA4A0, thiscall, ret 24h: world
 // plots in groups of four, UVs, group count, indices, index count, diffuse,
 // specular, bounding volume, z coefficient) made by another module: the
@@ -28236,6 +28248,8 @@ bool uninstall_game_render_entry_hook(std::uint8_t* image) noexcept {
     g_game_render_entry_installed = false;
     return true;
 }
+
+#endif // !EID3D11_EMBEDDED
 
 // Owned floating combat text (combat_text.h). CWorldClient::Draw calls
 // CFlyingHitPoints::Draw(CVisualizator*) at 0x0056A337 (ecx = world +0x1B4,
@@ -28441,10 +28455,11 @@ bool bind_combat_text_texture(void* text, void* visualizator, bool& missing) noe
 }
 #endif // !EID3D11_EMBEDDED
 
-#ifndef EID3D11_EMBEDDED
-#if !defined(EID3D11_EMBEDDED)
 std::atomic<std::uint32_t> g_combat_hits{0};
 std::atomic<std::int64_t> g_combat_hit_qpc{0};
+
+#ifndef EID3D11_EMBEDDED
+#if !defined(EID3D11_EMBEDDED)
 
 BOOL __fastcall hook_combat_text(void* text, void*, void* visualizator) {
     SemanticScope scope(SemanticKind::particles, _ReturnAddress());
@@ -28626,6 +28641,12 @@ std::string debug_root() {
 }
 
 } // namespace
+
+void bridge_note_combat_hit() noexcept {
+    g_combat_hits.fetch_add(1, std::memory_order_relaxed);
+    LARGE_INTEGER now{}; QueryPerformanceCounter(&now);
+    g_combat_hit_qpc.store(now.QuadPart, std::memory_order_relaxed);
+}
 
 void bridge_combat_hit_stats(std::uint32_t& hits, std::int64_t& last_qpc) noexcept {
     hits = g_combat_hits.load(std::memory_order_relaxed);

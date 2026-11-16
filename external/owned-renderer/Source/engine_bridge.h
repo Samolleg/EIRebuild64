@@ -1483,6 +1483,7 @@ SemanticContext current_semantic_context();
 void bridge_report_event(const char* event, const char* detail) noexcept;
 // Combat hits the owned combat text has seen (new damage-list entries) and
 // the QPC of the latest: the frame stall line's last events.
+void bridge_note_combat_hit() noexcept;
 void bridge_combat_hit_stats(std::uint32_t& hits, std::int64_t& last_qpc) noexcept;
 // The game's world clock in ms (frozen while paused); false before the world
 // time is readable.

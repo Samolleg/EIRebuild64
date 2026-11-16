@@ -4673,7 +4673,7 @@ void Renderer::finish_native_lod_frame() noexcept try {
  if(d3d12_){
   for(auto& slot:native_lod_readbacks_)if(!slot.snapshot){
    const HRESULT hr=d3d12_->request_readback(*native_lod_observations12_,
-    UINT64(native_lod_capture_->record_capacity)*sizeof(NativeLodDecisionGpu),slot.ticket12);
+    UINT64(native_lod_capture_->record_capacity)*sizeof(NativeLodDecisionGpu),slot.ticket12,"native_lod");
    if(hr!=S_OK){native_lod_capture_->unavailable=true;native_lod_capture_->unavailable_reason="gpu_readback_failed";return;}
    native_lod_copied_request_=native_lod_capture_->request;slot.snapshot=std::move(native_lod_capture_);break;
   }

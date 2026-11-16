@@ -11,7 +11,7 @@
 | miniaudio | `third_party/miniaudio/miniaudio.h`, v0.11.25 (2026-03-04); https://github.com/mackron/miniaudio | Выбор public domain или MIT-0, полный текст `third_party/miniaudio/LICENSE` и в заголовке. Постоянный аудиобэкенд. |
 | nlohmann/json | `SDKs/JSON/`, v3.10.5; https://github.com/nlohmann/json | MIT, notice и полный текст в `SDKs/JSON/json.hpp`; это отдельный компонент, не удаляется вместе с dx7sdk. |
 | LuaJIT GC64 x64 | `third_party/luajit/`, v2.1, pin `a4c064539ea931274d407e1249b4bb575424a0f4`, 2026-10-21 15:09:24 +02:00, version timestamp `1792588164`; https://luajit.org/git/luajit.git | MIT, полный `COPYRIGHT`; [PROVENANCE](third_party/luajit/PROVENANCE.md), [рецепт](tools/luajit/README.md). Полный неизменённый source; VM генерируется при сборке, статическая библиотека x64 GC64 с `/MT`. P14: хост использует matching публичные заголовки и библиотеку; старые LuaState и luajit-x86 удалены. |
-| Рендер автора | `external/owned-renderer/`; upstream `ef7e12467db17ef673f8ce3b105063b4b3b16417`; https://github.com/Ilufus/evil-islands-owned-renderer | PolyForm Noncommercial 1.0.0; полные `LICENSE.md`, `NOTICE.md` и все Required Notice сохранены в vendor-копии. EID3D11 renderer by Ilufus. Это изменённая embedded-версия EIRebuild64; локальные отличия перечислены в `PROVENANCE.md`. Лицензии third-party сохраняют собственные условия. |
+| Рендер автора | `external/owned-renderer/`; candidate-1126 `6bdebfa9be990b717b8dc667bbbb9405494f6be4`; https://github.com/Ilufus/evil-islands-owned-renderer | PolyForm Noncommercial 1.0.0; полные `LICENSE.md`, `NOTICE.md` и все Required Notice сохранены в vendor-копии. EID3D11 renderer by Ilufus. Это изменённая embedded-версия EIRebuild64; локальные отличия перечислены в `PROVENANCE.md`. Лицензии third-party сохраняют собственные условия. |
 | Dear ImGui | `external/owned-renderer/ThirdParty/imgui/`; https://github.com/ocornut/imgui, commit `f1cc2ae15e53a861a874c3034aae6798fde194ab` | MIT; `LICENSE.txt` и `PROVENANCE.md` в каталоге компонента. |
 | meshoptimizer | `external/owned-renderer/ThirdParty/meshoptimizer/`; https://github.com/zeux/meshoptimizer, v1.1 | MIT; `LICENSE.md` и `PROVENANCE.md` в каталоге компонента. |
 | SMAA | `external/owned-renderer/ThirdParty/smaa/`; https://github.com/iryoku/smaa | MIT; `LICENSE.txt` и `PROVENANCE.md`. В provenance исходный upstream commit не указан; не приписывать снимку выдуманный pin. |
@@ -190,3 +190,20 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 The archive SHA-256 is `84E352092E5CD6AAB7F66DE62DDB66BEB5E6F18D412CA9D12950D7A55BFEF25A`.
 The complete MIT text is copied alongside the header as `LICENSE` by
 `tools/prepare-worktree.ps1`. The source archive is already available locally.
+
+## Renderer 1126 dependencies (2026-11-16)
+
+The current x64 kit additionally ships NVIDIA DLSS Ray Reconstruction
+nvngx_dlssd.dll from the existing v310.9.16 SDK, AMD FSR 3.1 upscaler runtime
+amd_fidelityfx_upscaler_dx12.dll from FidelityFX SDK 2.3.0, and Microsoft
+Direct3D Agility SDK 1.620.2 D3D12/D3D12Core.dll (SDK version 620).
+RTXDI-Library 3.2.0, commit b67f61cd0bfa6792acbf5429bb29a68ee5cdd808,
+is a build-time shader dependency. Its MIT license and the Agility SDK's
+unchanged LICENSE.txt are included in the kit's licenses directory.
+Existing DXC 1.9.2609, NVAPI 70d337db, DLSS SR/FG and AMD FG remain pinned.
+Official download URLs, lengths and SHA-256 are recorded in
+third_party/d3d12/renderer1126.lock.json. Dependencies are prepared locally;
+the build does not restore anything from the network.
+
+Sources: https://github.com/NVIDIA-RTX/RTXDI-Library/tree/b67f61cd0bfa6792acbf5429bb29a68ee5cdd808
+and https://www.nuget.org/packages/Microsoft.Direct3D.D3D12/1.620.2 .

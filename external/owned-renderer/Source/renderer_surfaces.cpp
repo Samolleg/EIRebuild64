@@ -737,11 +737,13 @@ HRESULT Renderer::restore_surface_pixels(SurfaceImage& image,bool pin_now){
   return S_OK;
  };
  // Core mode: the host's surface table holds the released generation.
+#if !defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_TOOL)
  if(core_mode_){
   const HRESULT restored=core_restore_surface_pixels(image);
   if(FAILED(restored))return restored;
   return finish();
  }
+#endif
  SCENE_ENTRY("restore_surface_pixels");
  if(!device_||!context_||!image.texture)return E_FAIL;
  D3D11_TEXTURE2D_DESC description{};image.texture->GetDesc(&description);

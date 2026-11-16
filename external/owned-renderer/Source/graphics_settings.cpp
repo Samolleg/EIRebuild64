@@ -497,6 +497,7 @@ const RtQualityRow* rt_quality_rows(std::size_t& count) noexcept {
     return kRtQualityRows;
 }
 
+#ifndef EID3D11_SHADER_EMBED
 bool rt_scene_wanted(const RendererConfig& config) noexcept {
     for (const char* key : {"rt_sun_shadows", "rt_direct_lights", "rt_indirect_light", "rt_ambient_occlusion", "rt_reflections"}) {
         const RendererOption* option = config.find(key);
@@ -540,6 +541,8 @@ void select_rt_quality(RendererConfig& config, RtQuality tier) noexcept {
             config.set_integer(row.key, static_cast<int>(std::lround(row.values[index])));
     }
 }
+
+#endif
 
 const char* graphics_preset_name(GraphicsPreset preset) noexcept {
     switch (preset) {

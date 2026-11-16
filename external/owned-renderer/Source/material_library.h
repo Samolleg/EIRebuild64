@@ -90,7 +90,6 @@ public:
     bool build_fire_burn_profile(const std::string& texture, std::uint32_t& width,
         std::uint32_t& height, std::vector<std::uint8_t>& labels) const;
     // The classes that grow strands, one bit per class index (256 bits).
-    bool scenery_listed(const std::string& texture) const;
     std::array<std::uint32_t, 8> strand_classes() const noexcept;
     // The crystal classes, one bit per class index.
     std::array<std::uint32_t, 8> crystal_classes() const noexcept;

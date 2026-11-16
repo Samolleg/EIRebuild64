@@ -34,6 +34,7 @@
 #include <unordered_map>
 
 namespace owned {
+#ifndef EID3D11_SHADER_EMBED
 namespace {
 constexpr float kFrontSeconds = 1.2f;    // a fireball's fire front crosses its radius
 constexpr float kGroundSeconds = 6.f;    // the ground and plants burn this long once reached
@@ -250,6 +251,8 @@ bool Renderer::update_fire_burns(double seconds) noexcept try {
 } catch (...) { reset_fire_burns(); return false; }
 
 
+#endif
+
 // The burn twins (D3D12 only, the host's DXIL table): each world program that
 // draws burnable surfaces again with NATIVE_FIRE_BURN, so the programs drawn
 // without a burn stay exactly the builds without the feature. Twinned: the
@@ -327,6 +330,7 @@ void append_fire_burn_programs(std::vector<ShaderProgram>& out) {
 
 // The map the D3D12 frame draws twins by (set_program_substitutes): every
 // program of the host's world lists with a twin, rebuilt when a list grew.
+#ifndef EID3D11_SHADER_EMBED
 void Renderer::update_fire_burn_substitutes() noexcept try {
     if (!d3d12_) return;
     // Option off: no twins at all. On: the twins warm from area load on and
@@ -358,4 +362,5 @@ void Renderer::update_fire_burn_substitutes() noexcept try {
     d3d12_->set_program_substitutes(&fire_burn_substitutes_, fire_burn_bound_);
 } catch (...) { fire_burn_substitutes_.clear(); fire_burn_programs_seen_ = 0; if (d3d12_) d3d12_->set_program_substitutes(nullptr, false); }
 
+#endif
 } // namespace owned
