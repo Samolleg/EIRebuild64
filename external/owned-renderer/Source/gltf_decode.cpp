@@ -409,7 +409,9 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
         std::copy_n(j.translation.begin(), 3, n.translation.begin());
         std::copy_n(j.scale.begin(), 3, n.scale.begin());
         if (nodes[i]->mesh) {
+            require(nodes[i]->mesh->primitives_count > 0, "empty evaluation mesh");
             const auto count = nodes[i]->mesh->primitives[0].targets_count;
+            require(count <= 256, "morph target limit");
             const auto *w = nodes[i]->weights ? nodes[i]->weights : nodes[i]->mesh->weights;
             const auto size = nodes[i]->weights ? nodes[i]->weights_count : nodes[i]->mesh->weights_count;
             require(!w || size == count, "morph defaults");
@@ -752,6 +754,9 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
                 }
             }
             const auto restPos = pos, restNormal = normal, restTan = tan;
+            require(primitive.targets_count <= 256 &&
+                std::uint64_t(positions->count) * primitive.targets_count * 36 <= 512ull*1024*1024,
+                "GPU morph storage limit");
             std::vector<std::vector<std::array<float,9>>> morphDeltas(positions->count,
                 std::vector<std::array<float,9>>(primitive.targets_count));
             require(primitive.targets_count == runtime.nodes.at(indices.at(&node)).weights.size(), "primitive morph count");
