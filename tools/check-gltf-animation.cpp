@@ -29,12 +29,12 @@ struct NodeGpu {Float4 rotation,translation,rows[3];unsigned first,second,count;
 static_assert(sizeof(PoseGpu)==140&&sizeof(NodeGpu)==104);
 static std::vector<NodeGpu> gpu12(const Animation& a,const Playback& playback){
     auto packed=pack(a,"test12");const unsigned base=2,total=base+packed->nodes+packed->morphs;
-    // Library precedes the skeleton header, so an accidentally relative pointer
-    // cannot pass this fixture. Independent skeletons use the same library.
+    // Library precedes two independent headers. Exercise uint32-relative
+    // addressing across the wrap boundary without changing the shader ABI.
     const unsigned skeleton=unsigned((packed->bytes.size()+15)&~std::size_t(15));
-    std::vector<unsigned char> bytes(skeleton+64);unsigned header[8]{0,0,0,0,0,0,1,base};
+    std::vector<unsigned char> bytes(skeleton+64);unsigned header[8]{0,0,0,0,0,0,0u-skeleton,base};
     std::memcpy(bytes.data(),packed->bytes.data(),packed->bytes.size());
-    std::memcpy(bytes.data()+skeleton,header,32);std::memcpy(bytes.data()+skeleton+32,header,32);
+    std::memcpy(bytes.data()+skeleton,header,32);header[6]=0u-(skeleton+32);std::memcpy(bytes.data()+skeleton+32,header,32);
     ComPtr<IDXGIFactory4> factory;hr(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));ComPtr<IDXGIAdapter> adapter;
     hr(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)));ComPtr<ID3D12Device> device;
     hr(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device)));
@@ -82,8 +82,8 @@ static std::vector<NodeGpu> gpu(const Animation& a,const Playback& playback){
     auto packed=pack(a,"test");const unsigned base=2,total=base+packed->nodes+packed->morphs;
     const unsigned skeleton=unsigned((packed->bytes.size()+15)&~std::size_t(15));
     std::vector<unsigned char> bytes(skeleton+64);
-    unsigned header[8]{0,0,0,0,0,0,1,base};std::memcpy(bytes.data(),packed->bytes.data(),packed->bytes.size());
-    std::memcpy(bytes.data()+skeleton,header,32);std::memcpy(bytes.data()+skeleton+32,header,32);
+    unsigned header[8]{0,0,0,0,0,0,0u-skeleton,base};std::memcpy(bytes.data(),packed->bytes.data(),packed->bytes.size());
+    std::memcpy(bytes.data()+skeleton,header,32);header[6]=0u-(skeleton+32);std::memcpy(bytes.data()+skeleton+32,header,32);
     ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level;
     hr(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,&level,&context));
     static ComPtr<ID3DBlob> code;

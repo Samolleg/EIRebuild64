@@ -76,9 +76,6 @@ HRESULT Renderer::get_native_skeleton_asset(
   UINT gltf_offset=0,gltf_allocation=UINT_MAX;
   if(binding->gltf_animation){
    HRESULT hr=get_native_gltf_library(binding->gltf_animation,gltf_offset,gltf_allocation);if(FAILED(hr))return hr;
-   // Absolute byte address plus one: zero means no glTF library. Independent
-   // legacy clips and previews share this immutable allocation.
-   ++gltf_offset;
   }
   const UINT header[8]={count,static_cast<UINT>(binding->level_offsets.size()-1),node_offset,
    level_offsets,level_nodes,binding->rigid?1u:0u,gltf_offset,binding->gltf_node_base};std::memcpy(bytes.data(),header,sizeof(header));
@@ -87,6 +84,14 @@ HRESULT Renderer::get_native_skeleton_asset(
   HRESULT hr=allocate_native_range(native_animation_ranges_,aligned,NativeRangeBuffer::animation,allocation);
   if(FAILED(hr))return hr;
   const UINT start=native_animation_ranges_[allocation].base;
+  if(gltf_allocation!=UINT_MAX){
+   // Keep the existing shader ABI: base = pose.asset + relative (uint32).
+   // A shared library can precede this header. Unsigned subtraction encodes
+   // that displacement modulo 2^32; shader addition restores its byte address.
+   // The two live allocations are disjoint, so zero still means no library.
+   const UINT relative=gltf_offset-start;
+   std::memcpy(bytes.data()+24,&relative,sizeof(relative));
+  }
   NativeSkeletonAsset asset{start,static_cast<UINT>(bytes.size()),allocation,binding->model,binding->clip,bool(binding->clip),gltf_allocation};
   D3D11_BOX box{};box.left=start;box.right=start+static_cast<UINT>(bytes.size());box.bottom=box.back=1;
   if(d3d12_){ // D3D12 backend: the skeleton asset into the executor's animation buffer

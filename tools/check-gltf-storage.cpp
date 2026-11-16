@@ -53,7 +53,7 @@ int main(){try{
    auto binding=std::make_shared<VisualSkeletonBinding>();binding->model=model;binding->clip=clip;
    binding->tracks.resize(1);binding->level_offsets={0,1};binding->level_nodes={0};binding->gltf_animation=program;
    UINT offset,allocation;check(SUCCEEDED(r.get_native_skeleton_asset(binding,offset,allocation)),"skeleton upload");
-   unsigned address;std::memcpy(&address,r.memory.data()+offset+24,4);check(address==1,"shared absolute library pointer");
+   unsigned relative;std::memcpy(&relative,r.memory.data()+offset+24,4);check(relative!=0&&offset+relative==0,"shared relative library pointer");
    const auto before=r.profiler_.bytes;UINT again,againAllocation;
    check(SUCCEEDED(r.get_native_skeleton_asset(binding,again,againAllocation))&&again==offset&&againAllocation==allocation,"preview reuses binding");
    check(r.profiler_.bytes==before,"preview uploaded twice");held.push_back(binding);allocations.push_back(allocation);

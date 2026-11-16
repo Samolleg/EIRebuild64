@@ -65,8 +65,8 @@ float4x4 gltfTrs(float3 t,float4 q,float3 s){
   2*(x*z-y*w)*s.x,2*(y*z+x*w)*s.y,(1-2*(x*x+y*y))*s.z,t.z,0,0,0,1);
 }
 void gltfPose(NativePose pose,uint lane){
- uint address=nativeAnimation.Load(pose.asset+24);if(address==0)return;
- uint base=address-1,nodeBase=nativeAnimation.Load(pose.asset+28);
+ uint relative=nativeAnimation.Load(pose.asset+24);if(relative==0)return;
+ uint base=pose.asset+relative,nodeBase=nativeAnimation.Load(pose.asset+28);
  uint nodes=nativeAnimation.Load(base),nodeTable=base+nativeAnimation.Load(base+8);
  uint levels=nativeAnimation.Load(base+24),ranges=base+nativeAnimation.Load(base+28),order=base+nativeAnimation.Load(base+32);
  const float4x4 yToZ=float4x4(1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1);
