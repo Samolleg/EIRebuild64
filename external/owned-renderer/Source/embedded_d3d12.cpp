@@ -7,6 +7,7 @@
 #include <shlobj.h>
 #include <d3d12.h>
 #include <cstdarg>
+#include <atomic>
 #include <cstdio>
 #include <cwchar>
 #include <filesystem>
@@ -23,6 +24,7 @@ const std::string& frame_executor_failure(owned::D3D12Frame&) noexcept;
 }
 
 namespace remote {
+std::atomic<std::uint64_t> g_startup_pipeline_progress{0};
 // Preserve the author's diagnostic call sites; route them to the engine's
 // journal instead of creating host.log or a second process.
 void host_log(const char* format, ...) {

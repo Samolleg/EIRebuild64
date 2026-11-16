@@ -1573,6 +1573,7 @@ void bridge_set_terrain_lod_hidden_distance(float metres) noexcept;
 void bridge_set_owned_sky(bool enabled) noexcept;
 // Fire burn (option fire_burn): publish the local server's burning fire spells each world tick.
 void bridge_set_fire_burn(bool enabled) noexcept;
+bool bridge_fire_burn_enabled() noexcept;
 bool bridge_owned_sky_installed() noexcept;
 // Owned precipitation: why the stock DrawRain/DrawSnow calls still draw
 // (both kept, doubled weather), or nullptr while both are suppressed.

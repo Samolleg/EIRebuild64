@@ -16,6 +16,7 @@ owned::WorldMistGridCache mist;
 owned::OwnedTerrainFramePacket view;
 owned::OwnedTerrainPreparedResources prepared;
 bool viewReady = false, terrainLod = true;
+float terrainHiddenDistance = 0.f;
 std::array<owned::NativeOwnedFixedState,2> materials{};
 std::array<std::uint64_t,2> materialGeometry{};
 std::vector<std::shared_ptr<const owned::OwnedTerrainDynamicSector>> sectors;
@@ -206,6 +207,7 @@ bool E1PublishTerrainView(const void* owner, const owned::OwnedTerrainFrameInput
     values.world_frame_serial = terrainFrame;
     values.dynamic_state_fingerprint = source.geometry->revision;
     values.force_full_detail = !terrainLod;
+    values.lod_hidden_distance = values.force_full_detail ? 0.f : terrainHiddenDistance;
     if (!owned::prepare_owned_terrain_frame(source.terrain, values, view) ||
         view.status != owned::OwnedTerrainPacketStatus::ready ||
         !owned::prepare_owned_terrain_spatial_parts(view, *source.geometry, transform, &prepared) ||
@@ -320,6 +322,10 @@ bool E1PublishTerrainFrame(const void* owner, const owned::OwnedTerrainGeometryV
 } catch (...) { terrainFrame = 0; return false; }
 }
 namespace owned {
+void bridge_set_terrain_lod_hidden_distance(float metres) noexcept {
+    // Match the author: never simplify visible ground before the fog fade ends.
+    terrainHiddenDistance = std::isfinite(metres) && metres > 0.f ? std::ceil(metres / 8.f) * 8.f : 0.f;
+}
 void bridge_set_terrain_lod_enabled(bool enabled) noexcept {
     if (terrainLod != enabled) { terrainLod = enabled; viewReady = false; }
 }

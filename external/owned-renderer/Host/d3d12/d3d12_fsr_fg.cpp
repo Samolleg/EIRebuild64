@@ -19,24 +19,17 @@ namespace remote { void host_log(const char* format, ...); }
 namespace d3d12::fidelityfx {
 Api api;
 
-bool load(std::string& reason) noexcept {
-    // Keep successful loads for the process lifetime: proxy worker threads
-    // and callbacks may outlive an individual frame-generation context.
+bool load(std::string& reason, bool upscaler) noexcept {
+    // Resolve the common loader once. Each optional provider is checked on
+    // its own, so missing frame generation does not disable FSR upscaling.
+    constexpr DWORD flags = LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
     static const std::string failure = [] {
         Api resolved;
-        HMODULE loader = nullptr, provider = nullptr;
-        DWORD error = ERROR_SUCCESS;
-        const wchar_t* failed = L"amd_fidelityfx_loader_dx12.dll";
-        constexpr DWORD flags = LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
-        loader = LoadLibraryExW(failed, nullptr, flags);
-        if (!loader) error = GetLastError();
-        else {
-            failed = L"amd_fidelityfx_framegeneration_dx12.dll";
-            provider = LoadLibraryExW(failed, nullptr, flags);
-            if (!provider) error = GetLastError();
-        }
+        HMODULE loader = LoadLibraryExW(L"amd_fidelityfx_loader_dx12.dll", nullptr,
+            LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+        DWORD error = loader ? ERROR_SUCCESS : GetLastError();
         const char* symbol = nullptr;
-        if (loader && provider) {
+        if (loader) {
 #define FFX_RESOLVE(member, type, name) \
             if (!symbol) { \
                 resolved.member = reinterpret_cast<type>(GetProcAddress(loader, name)); \
@@ -49,17 +42,31 @@ bool load(std::string& reason) noexcept {
             FFX_RESOLVE(dispatch, PfnFfxDispatch, "ffxDispatch");
 #undef FFX_RESOLVE
             if (!symbol) { api = resolved; return std::string{}; }
-            failed = L"amd_fidelityfx_loader_dx12.dll";
+            FreeLibrary(loader);
         }
-        char text[512];
-        std::snprintf(text, sizeof(text), "FSR FG unavailable: %ls%s%s (Windows error %lu). Install VC++ Redistributable 2015+ x64 and check FidelityFX DLLs beside the EXE",
-                      failed, symbol ? ": missing export " : " failed to load", symbol ? symbol : "", static_cast<unsigned long>(error));
-        if (provider) FreeLibrary(provider);
-        if (loader) FreeLibrary(loader);
+        char text[384];
+        std::snprintf(text, sizeof(text), "FidelityFX loader unavailable%s%s (Windows error %lu)",
+            symbol ? ": missing export " : "", symbol ? symbol : "", static_cast<unsigned long>(error));
         remote::host_log("d3d12: %s", text);
         return std::string(text);
     }();
     if (!failure.empty()) { reason = failure; return false; }
+    const auto provider = [flags](const wchar_t* name) {
+        // Keep successful modules alive: GPU workers can outlive a context.
+        if (LoadLibraryExW(name, nullptr, flags)) return std::string{};
+        char text[384];
+        std::snprintf(text, sizeof(text), "FidelityFX provider %ls unavailable (Windows error %lu)",
+            name, static_cast<unsigned long>(GetLastError()));
+        remote::host_log("d3d12: %s", text);
+        return std::string(text);
+    };
+    if (upscaler) {
+        static const std::string missing = provider(L"amd_fidelityfx_upscaler_dx12.dll");
+        if (!missing.empty()) { reason = missing; return false; }
+    } else {
+        static const std::string missing = provider(L"amd_fidelityfx_framegeneration_dx12.dll");
+        if (!missing.empty()) { reason = missing; return false; }
+    }
     return true;
 }
 } // namespace d3d12::fidelityfx
@@ -254,13 +261,12 @@ bool FsrFrameGeneration::configure(IDXGISwapChain* swap, ID3D12Resource* hudless
 }
 
 bool FsrUpscaler::available(ID3D12Device* device, std::string& reason) noexcept {
+    if (!fidelityfx::load(reason, true)) return false;
     static int state = -1;  // -1 unknown, 0 no, 1 yes
     static char text[200] = {};
     if (state < 0) {
         state = 0;
-        if (!LoadLibraryW(L"amd_fidelityfx_loader_dx12.dll") || !LoadLibraryW(L"amd_fidelityfx_upscaler_dx12.dll")) {
-            std::snprintf(text, sizeof(text), "%s", "the FidelityFX upscaler DLLs are missing beside the render host");
-        } else {
+        {
             std::uint64_t count = 8, ids[8]{};
             const char* names[8]{};
             ffxQueryDescGetVersions versions{};
@@ -270,7 +276,7 @@ bool FsrUpscaler::available(ID3D12Device* device, std::string& reason) noexcept 
             versions.outputCount = &count;
             versions.versionIds = ids;
             versions.versionNames = names;
-            if (ffxQuery(nullptr, &versions.header) != FFX_API_RETURN_OK || !count)
+            if (fidelityfx::api.query(nullptr, &versions.header) != FFX_API_RETURN_OK || !count)
                 std::snprintf(text, sizeof(text), "%s", "FidelityFX offers no FSR upscaling on this device");
             else state = 1;
         }
@@ -282,7 +288,7 @@ bool FsrUpscaler::available(ID3D12Device* device, std::string& reason) noexcept 
 void FsrUpscaler::destroy() noexcept {
     if (!context_) return;
     ffxContext context = static_cast<ffxContext>(context_);
-    ffxDestroyContext(&context, nullptr);
+    fidelityfx::api.destroy(&context, nullptr);
     context_ = nullptr;
     render_w_ = render_h_ = out_w_ = out_h_ = 0;
 }
@@ -304,7 +310,7 @@ unsigned FsrUpscaler::collect(std::uint64_t completed, std::uint64_t unsubmitted
         const Retired& retired = retired_[index];
         if (completed < retired.recorded && retired.recorded < unsubmitted) { ++index; continue; }
         ffxContext context = static_cast<ffxContext>(retired.context);
-        ffxDestroyContext(&context, nullptr);
+        fidelityfx::api.destroy(&context, nullptr);
         retired_.erase(retired_.begin() + static_cast<std::ptrdiff_t>(index));
         ++destroyed;
     }
@@ -339,7 +345,7 @@ bool FsrUpscaler::dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* cons
         desc.maxRenderSize = {(std::max)(d.render_w, d.out_w), (std::max)(d.render_h, d.out_h)};
         desc.maxUpscaleSize = {d.out_w, d.out_h};
         ffxContext context = nullptr;
-        const ffxReturnCode_t created = ffxCreateContext(&context, &desc.header, nullptr);
+        const ffxReturnCode_t created = fidelityfx::api.create(&context, &desc.header, nullptr);
         device->Release();
         if (created != FFX_API_RETURN_OK || !context) {
             char text[128];
@@ -375,7 +381,7 @@ bool FsrUpscaler::dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* cons
         mask.binaryValue = .9f;
         mask.flags = FFX_UPSCALE_AUTOREACTIVEFLAGS_APPLY_TONEMAP | FFX_UPSCALE_AUTOREACTIVEFLAGS_APPLY_THRESHOLD |
                      FFX_UPSCALE_AUTOREACTIVEFLAGS_USE_COMPONENTS_MAX;
-        const ffxReturnCode_t generated = ffxDispatch(&context, &mask.header);
+        const ffxReturnCode_t generated = fidelityfx::api.dispatch(&context, &mask.header);
         if (generated != FFX_API_RETURN_OK) {
             char text[96];
             std::snprintf(text, sizeof(text), "FidelityFX reactive mask generation failed (ffx %u)", unsigned(generated));
@@ -412,7 +418,7 @@ bool FsrUpscaler::dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* cons
     up.cameraFar = d.far_plane;
     up.cameraFovAngleVertical = d.fov_y;
     up.viewSpaceToMetersFactor = 1.f;
-    const ffxReturnCode_t result = ffxDispatch(&context, &up.header);
+    const ffxReturnCode_t result = fidelityfx::api.dispatch(&context, &up.header);
     if (generate) {
         D3D12_RESOURCE_BARRIER barrier{};
         barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -439,7 +445,7 @@ std::uint64_t upscaler_vram(void* handle) noexcept {
     ffxQueryDescUpscaleGetGPUMemoryUsage query{};
     query.header.type = FFX_API_QUERY_DESC_TYPE_UPSCALE_GPU_MEMORY_USAGE;
     query.gpuMemoryUsageUpscaler = &usage;
-    return ffxQuery(&context, &query.header) == FFX_API_RETURN_OK ? usage.totalUsageInBytes : 0;
+    return fidelityfx::api.query(&context, &query.header) == FFX_API_RETURN_OK ? usage.totalUsageInBytes : 0;
 }
 } // namespace
 

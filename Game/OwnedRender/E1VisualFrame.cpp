@@ -218,7 +218,7 @@ void shadowDiagnostics(void* context, std::uint64_t serial, const owned::NativeS
 bool pointLights(void* context, const owned::RetainedVisualFrame& frame) noexcept {
     try {
         std::vector<owned::RetainedFireSpell> spells;
-        OwnedRender::E1ReadVisualFireSpells(spells);
+        if (owned::bridge_fire_burn_enabled()) OwnedRender::E1ReadVisualFireSpells(spells);
         self(context)->renderer->set_fire_spells(spells, frame.time);
         return self(context)->renderer->set_native_point_lights(frame.world_point_lights, frame.time);
     } catch (...) {

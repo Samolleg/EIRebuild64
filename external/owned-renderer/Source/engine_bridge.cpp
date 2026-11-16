@@ -30888,6 +30888,9 @@ void bridge_set_change_driven_poses(bool enabled) noexcept {
     g_change_driven_poses = enabled;
 }
 
+void bridge_set_fire_burn(bool enabled) noexcept { g_fire_burn_enabled.store(enabled, std::memory_order_release); }
+bool bridge_fire_burn_enabled() noexcept { return g_fire_burn_enabled.load(std::memory_order_acquire); }
+
 #if !defined(EID3D11_EMBEDDED)
 void bridge_set_terrain_lod_enabled(bool enabled) noexcept {
     g_owned_terrain_lod_enabled=enabled;
@@ -30899,7 +30902,6 @@ void bridge_set_terrain_lod_hidden_distance(float metres) noexcept {
                                      std::memory_order_relaxed);
 }
 void bridge_set_owned_sky(bool enabled) noexcept { g_owned_sky_enabled = enabled; }
-void bridge_set_fire_burn(bool enabled) noexcept { g_fire_burn_enabled.store(enabled, std::memory_order_release); }
 bool bridge_owned_sky_installed() noexcept { return g_owned_sky_installed; }
 const char* bridge_owned_weather_problem() noexcept { return g_owned_weather_status.load(); }
 void bridge_set_weather_visual(int test, int strength_setting) noexcept {

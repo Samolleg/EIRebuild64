@@ -1,5 +1,5 @@
 #pragma once
-// Optional entry points, resolved only when FSR FG is selected.
+// Optional entry points and independent upscaling/frame-generation providers.
 #include <ffx_api.h>
 #include <string>
 
@@ -12,5 +12,5 @@ struct Api {
     PfnFfxDispatch dispatch = nullptr;
 };
 extern Api api;
-bool load(std::string& reason) noexcept;
+bool load(std::string& reason, bool upscaler = false) noexcept;
 } // namespace d3d12::fidelityfx
