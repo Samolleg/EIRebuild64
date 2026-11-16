@@ -854,7 +854,7 @@ BOOL CDXGISurface::AcquireDC(HDC *pDC)
     }));
     if(recordText || ownedTextDc){
         uiRecordingReset=false;
-        uiRecordingDc=owned::ui_layer_begin(this,&PromoteUiLayer);
+        uiRecordingDc=owned::ui_layer_begin(this,&PromoteUiLayer,GetWidth());
         if(!uiRecordingDc){
             GameJournal::Event("render","ui_text_recording_unavailable","surface=%llu",OwnedSurfaceId());
             IfFailedThrowHR(E_FAIL);

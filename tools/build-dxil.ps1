@@ -29,7 +29,12 @@ foreach ($path in $expected) {
 $compilerDir=Split-Path -Parent $Dxc
 $inputs=@($Dxc,(Join-Path $compilerDir 'dxcompiler.dll'),(Join-Path $compilerDir 'dxil.dll'))
 $inputs+=@(Get-ChildItem -LiteralPath (Join-Path $Rtxdi 'Include') -File -Recurse | Sort-Object FullName | ForEach-Object FullName)
-$fingerprint=(@($inputs | ForEach-Object { $_+'='+ (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash }) -join "`n")
+function Hash-Input([string]$Path) {
+    $stream=[IO.File]::OpenRead($Path); $sha=[Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($stream))).Replace('-','') }
+    finally { $stream.Dispose(); $sha.Dispose() }
+}
+$fingerprint=(@($inputs | ForEach-Object { $_+'='+ (Hash-Input $_) }) -join "`n")
 $stamp=Join-Path $dxil 'toolchain.stamp'
 if (![IO.File]::Exists($stamp) -or [IO.File]::ReadAllText($stamp) -cne $fingerprint) {
     [IO.File]::WriteAllText($stamp,$fingerprint,[Text.UTF8Encoding]::new($false))
