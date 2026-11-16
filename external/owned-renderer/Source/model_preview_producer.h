@@ -72,6 +72,9 @@ bool produce_model_preview(const ModelPreviewInput& input, std::size_t count,
             if (!retained_visual_group_submission(input.sample, i, bounds, {true,true,0},
                     input.texture_time, input.fog, record) || !record || !record->source) return false;
             NativeGeometryView view = *record->source;
+            // Pass admission lives on the submission, not its immutable source.
+            // The native queue requires an explicit color pass for posed views.
+            view.contribution = record->contribution;
             view.world.pose = pose; view.world.owner = &pose->owner;
             view.world.object_to_world = input.object_to_world;
             view.world.world_to_clip = input.world_to_clip; view.object_to_clip = input.world_to_clip;
