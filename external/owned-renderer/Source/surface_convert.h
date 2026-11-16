@@ -256,6 +256,56 @@ inline HRESULT prepare(const Source& image, const RECT& rect, UINT block_bytes, 
     const ChannelDecoder green = make_channel_decoder(image.format.dwGBitMask, 0);
     const ChannelDecoder blue = make_channel_decoder(image.format.dwBBitMask, 0);
     const ChannelDecoder alpha = make_channel_decoder(image.format.dwRGBAlphaBitMask, 255);
+    if (source_bytes == 2) {
+        // 16-bit sources: one table entry per raw value, built by the same
+        // per-channel decode and key test, so the result is identical. The
+        // per-texel decode took 5-12 ms for a 1024x1024 4444/1555 surface on
+        // the scene thread (laptop j199 slow_surface_write); a lookup per
+        // texel is a few times cheaper. Kept per thread for the last format
+        // and key; small surfaces with another format decode as before.
+        struct Table {
+            bool valid = false;
+            std::uint32_t masks[4]{};
+            bool keyed = false;
+            std::uint32_t key_low = 0, key_high = 0, key_mask = 0;
+            std::vector<std::uint32_t> values;
+        };
+        thread_local Table table;
+        const std::uint32_t masks[4] = {image.format.dwRBitMask, image.format.dwGBitMask,
+                                        image.format.dwBBitMask, image.format.dwRGBAlphaBitMask};
+        const bool same = table.valid && std::equal(masks, masks + 4, table.masks) &&
+            table.keyed == image.has_color_key &&
+            (!image.has_color_key || (table.key_low == image.color_key.dwColorSpaceLowValue &&
+                                      table.key_high == image.color_key.dwColorSpaceHighValue &&
+                                      table.key_mask == image.key_mask));
+        if (same || static_cast<std::uint64_t>(width) * height >= 16384u) {
+            if (!same) {
+                try { table.values.resize(65536u); } catch (const std::bad_alloc&) { return E_OUTOFMEMORY; }
+                table.valid = false;
+                for (std::uint32_t raw = 0; raw < 65536u; ++raw) {
+                    std::uint8_t a = image.format.dwRGBAlphaBitMask ? alpha.decode(raw) : 255u;
+                    if (image.has_color_key && key_match(image, raw)) a = 0;
+                    table.values[raw] = (static_cast<std::uint32_t>(a) << 24) |
+                        (static_cast<std::uint32_t>(red.decode(raw)) << 16) |
+                        (static_cast<std::uint32_t>(green.decode(raw)) << 8) | blue.decode(raw);
+                }
+                std::copy(masks, masks + 4, table.masks);
+                table.keyed = image.has_color_key;
+                table.key_low = image.color_key.dwColorSpaceLowValue;
+                table.key_high = image.color_key.dwColorSpaceHighValue;
+                table.key_mask = image.key_mask;
+                table.valid = true;
+            }
+            const std::uint32_t* values = table.values.data();
+            for (UINT y = 0; y < height; ++y) {
+                const auto* source = row_at(image, rect, y, 2);
+                auto* row = destination + static_cast<std::size_t>(y) * width;
+                for (UINT x = 0; x < width; ++x, source += 2)
+                    row[x] = values[load_pixel<2>(source)];
+            }
+            return S_OK;
+        }
+    }
     switch (source_bytes) {
     case 1: dispatch_alpha_conversion<1>(image, rect, width, height, red, green, blue, alpha, destination); break;
     case 2: dispatch_alpha_conversion<2>(image, rect, width, height, red, green, blue, alpha, destination); break;

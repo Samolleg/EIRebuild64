@@ -132,6 +132,18 @@ struct RendererResourceSnapshot {
     double surface_restore_readback_ms = 0.0;
     std::uint64_t pinned_surfaces = 0;
     std::uint64_t native_logical_draws = 0;
+    // Colour world records by kind (item 5): posed (pose node), active-map
+    // object space, neighbour object space; draws and LOD0 triangles.
+    struct WorldKinds { std::uint64_t posed = 0, object_space = 0, neighbour = 0,
+             posed_triangles = 0, object_space_triangles = 0, neighbour_triangles = 0; } native_world_kinds;
+    // Item 5 self-checks: catalog objects and nodes, objects the bridge
+    // admitted last pass, static-set keys holding object-space records and
+    // those records, refused registrations, caster records in the active
+    // bake and admitted objects also found in the static caster store.
+    struct { std::uint64_t catalog_objects = 0, catalog_nodes = 0, parked = 0, admitted = 0, registered = 0,
+             records = 0, refused = 0, casters = 0, doubled_casters = 0, impostor_objects = 0, impostors_baked = 0,
+             failures = 0, caster_objects = 0, lod_only_models = 0, batches = 0, eligible = 0, ready_models = 0,
+             failed_models = 0; bool building = false; double build_ms = 0; } active_statics;
     std::uint64_t native_object_generic_ingress_calls = 0;
     std::uint64_t native_object_prepared_ingress_calls = 0;
     std::uint64_t native_physical_batches = 0;
@@ -183,9 +195,12 @@ struct RendererResourceSnapshot {
     bool particle_problem = false;
     char precipitation_status[256] = "";  // owned rain/snow pass line (renderer_precipitation.cpp)
     bool precipitation_problem = false;
-    char critter_status[768] = "";
+    char critter_status[1280] = "";
     char emissive_status[192] = "";  // emissive-surface lights (lava) of the active map
     CritterSummary critters{};   // F11 normal_frame.json "critters"; zero when off or stale
+    // Impostor debug view (impostor_debug): one tag per neighbour impostor
+    // object (slice, model, MOB object id), viewport fractions as critters.labels.
+    std::vector<CritterSummary::Label> impostor_labels;
     std::uint64_t native_compute_dispatches = 0;
     std::uint64_t native_one_draw_batches = 0;
     // World X/Y point-light grid (point_light_grid.h): lights, grid size,
@@ -322,15 +337,18 @@ public:
     bool process_camp_input(UINT message,WPARAM wparam,LPARAM lparam) noexcept;
     // The "Preparing shaders" progress window alone, over the target the caller
     // bound and cleared (Renderer::prepare_shaders). No input is taken.
-    void render_shader_preparation(std::size_t done, std::size_t total) noexcept;
+    // False on ImGui's initial auto-size frame (no visible draw data).
+    bool render_shader_preparation(std::size_t done, std::size_t total) noexcept;
 
     // Developer monitor or full window only; the player settings window does
     // not turn the profiler on.
     bool wants_profiling() const noexcept;
+    // Frames until a requested capture is taken (1 once its warm-up ended); 0: none.
+    unsigned capture_warmup_left() const noexcept;
     bool consume_capture_request() noexcept;
     bool consume_display_apply(DisplaySettings& settings) noexcept;
     void finish_display_apply(const DisplaySettings& settings, HRESULT result, const char* message) noexcept;
-    // Shift+F11 or the overlay button: freeze/unfreeze the culling camera.
+    // Ctrl+F11 or the overlay button: freeze/unfreeze the culling camera.
     bool consume_cull_freeze_toggle() noexcept;
     DebugOverlayMode mode() const noexcept { return config_.overlay_mode(); }
     void set_mode(DebugOverlayMode mode) noexcept;

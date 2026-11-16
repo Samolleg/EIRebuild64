@@ -12,6 +12,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "EffectSpell.h"
+#include "retained_static_scene.h"
 #include "MapObject.h"
 #include "world.h"
 #include "Unit.h"
@@ -177,6 +178,22 @@ void CEffectSpell::RemoveLightEffect()
     pEffectLight = NULL;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+bool CEffectSpell::ReadVisualFireSpell(owned::RetainedFireSpell& output) const noexcept {
+    output = {};
+    if (castPhase != CP_ACTION) return false;
+    const auto kind = spell.GetSubtypeID() >> 16;
+    if (kind == 3) output.kind = 1;
+    else if (kind == 4 && nTimeLeft >= 0) output.kind = 3;
+    else if (kind == 6 && nTimeLeft >= 0 && !pEffect.IsEmpty() && pEffect->WhoAmI() == HPC_EFFECTWALL) {
+        output.kind = 2;
+        const auto* wall = static_cast<const CEffectWall*>(pEffect.GetPtr());
+        output.wall = {wall->ptWallDirection.x, wall->ptWallDirection.y};
+    } else return false;
+    output.center = {cp.x, cp.y, cp.z};
+    output.radius = spell.GetRadius();
+    return true;
+}
+
 CEffectWall *CEffectSpell::GetEffectWall()
 {
     ASSERT(!pEffect.IsEmpty() && pEffect->WhoAmI() == HPC_EFFECTWALL);

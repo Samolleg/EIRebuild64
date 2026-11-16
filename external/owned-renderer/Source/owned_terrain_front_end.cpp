@@ -1447,6 +1447,7 @@ bool finite_inputs(const OwnedTerrainFrameInputs& inputs) noexcept {
         if (!finite_value(value)) return false;
     for (float value : inputs.lod_distances)
         if (!finite_value(value) || value < 0.0f) return false;
+    if (!finite_value(inputs.lod_hidden_distance) || inputs.lod_hidden_distance < 0.0f) return false;
     for (float value : inputs.object_to_clip)
         if (!finite_value(value)) return false;
     if (inputs.game_visibility_rows.size() > 65536u) return false;
@@ -1508,12 +1509,19 @@ bool bounds_visible(const TerrainBounds& bounds,
 std::uint8_t select_lod(const TerrainSectorCpuAsset& sector,
                         const OwnedTerrainFrameInputs& inputs) noexcept {
     if (inputs.force_full_detail) return 0;
-    const float x = inputs.terrain_origin[0] +
-        (static_cast<float>(sector.map_x) + 0.5f) * 32.0f -
-        inputs.camera_position[0];
-    const float y = inputs.terrain_origin[1] +
-        (static_cast<float>(sector.map_y) + 0.5f) * 32.0f -
-        inputs.camera_position[1];
+    // The nearest point of the sector's 32 m square, not its centre: a sector
+    // whose near edge is close keeps the detail of that edge (the centre
+    // dropped a sector reaching right up to the camera to a coarser level).
+    const auto nearest = [](float origin, std::uint32_t cell, float camera) {
+        const float lo = origin + static_cast<float>(cell) * 32.0f, hi = lo + 32.0f;
+        return camera < lo ? lo - camera : camera > hi ? camera - hi : 0.0f;
+    };
+    const float x = nearest(inputs.terrain_origin[0], sector.map_x, inputs.camera_position[0]);
+    const float y = nearest(inputs.terrain_origin[1], sector.map_y, inputs.camera_position[1]);
+    // Only where the fog/draw-distance fade has wholly hidden the sector: its
+    // horizontal nearest distance bounds every point's eye distance from below.
+    const float hidden = inputs.lod_hidden_distance;
+    if (hidden <= 0.0f || x * x + y * y < hidden * hidden) return 0;
     const float z = inputs.terrain_origin[2] + sector.average_z -
         inputs.camera_position[2];
     const float distance_squared = x * x + y * y + z * z;
@@ -1550,6 +1558,7 @@ bool owned_terrain_frame_inputs_equal(
         left.world_frame_serial == right.world_frame_serial &&
         left.maximum_lod == right.maximum_lod &&
         left.force_full_detail == right.force_full_detail &&
+        left.lod_hidden_distance == right.lod_hidden_distance &&
         left.runtime_texture_count == right.runtime_texture_count &&
         left.terrain_render_state == right.terrain_render_state &&
         left.game_visibility_fingerprint == right.game_visibility_fingerprint &&
@@ -1702,6 +1711,23 @@ bool prepare_owned_terrain_frame(
                 state.subpart_visible[part] = state.visible && bounds_visible(
                     source_sector.subpart_bounds[part], inputs.object_to_clip);
             state.lod = select_lod(source_sector, inputs);
+        }
+        // Edge stitching (owned_terrain_render_command) joins a sector only to
+        // a neighbour exactly one level coarser; a two-level step left an
+        // unstitched T-junction. Each sector is held within one level of its
+        // finer neighbours (two passes settle levels 0..2).
+        if (!inputs.force_full_detail) {
+            const int sx = static_cast<int>(packet.source->sector_count_x), sy = static_cast<int>(packet.source->sector_count_y);
+            for (int pass = 0; pass < 2; ++pass)
+                for (int y = 0; y < sy; ++y) for (int x = 0; x < sx; ++x) {
+                    auto& lod = packet.sectors[static_cast<std::size_t>(y) * sx + x].lod;
+                    const auto bound = [&](int nx, int ny) {
+                        if (nx < 0 || ny < 0 || nx >= sx || ny >= sy) return;
+                        const auto other = packet.sectors[static_cast<std::size_t>(ny) * sx + nx].lod;
+                        if (lod > other + 1u) lod = static_cast<std::uint8_t>(other + 1u);
+                    };
+                    bound(x - 1, y); bound(x + 1, y); bound(x, y - 1); bound(x, y + 1);
+                }
         }
         const auto state_at = [&](int x, int y) -> const OwnedTerrainSectorState* {
             if (x < 0 || y < 0 || x >= static_cast<int>(packet.source->sector_count_x) ||

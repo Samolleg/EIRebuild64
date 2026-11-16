@@ -135,6 +135,46 @@ HRESULT create_completed_surface_texture(ID3D11Device* device, const SurfaceImag
     return hr;
 }
 
+HRESULT ensure_surface_texture(ID3D11Device* device, SurfaceImage& image, bool& write_needed, bool& recreated) {
+    write_needed = recreated = false;
+    if (!device || !image.width || !image.height || image.pitch <= 0) return E_INVALIDARG;
+    DXGI_FORMAT target_format = DXGI_FORMAT_UNKNOWN;
+    UINT block_bytes = 0;
+    if (!surface_dxgi_format(image.format, target_format, block_bytes)) return E_NOTIMPL;
+    const bool generate_mips = image.static_mip_hint && image.world_mip_use && !image.gpu_captured && !block_bytes;
+    const bool texture_matches = same_surface_upload_shape(image.uploaded_shape, surface_upload_shape(image)) &&
+        matching_texture(image.texture.Get(), image.width, image.height, target_format, generate_mips);
+    if (texture_matches && image.srv && image.uploaded_generation == image.generation) return S_OK;
+    if (!texture_matches) {
+        // The description upload_surface_image creates, without content.
+        D3D11_TEXTURE2D_DESC description{};
+        description.Width = image.width;
+        description.Height = image.height;
+        description.MipLevels = generate_mips ? full_mip_count(image.width, image.height) : 1;
+        description.ArraySize = 1;
+        description.Format = target_format;
+        description.SampleDesc.Count = 1;
+        description.Usage = D3D11_USAGE_DEFAULT;
+        description.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (generate_mips) { description.BindFlags |= D3D11_BIND_RENDER_TARGET; description.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS; }
+        ComPtr<ID3D11Texture2D> texture;
+        ComPtr<ID3D11ShaderResourceView> srv;
+        HRESULT hr = device->CreateTexture2D(&description, nullptr, &texture);
+        if (FAILED(hr)) return hr;
+        hr = device->CreateShaderResourceView(texture.Get(), nullptr, &srv);
+        if (FAILED(hr)) return hr;
+        image.texture = texture;
+        image.srv = srv;
+        ++image.texture_serial;
+        recreated = true;
+    } else if (!image.srv) {
+        const HRESULT hr = device->CreateShaderResourceView(image.texture.Get(), nullptr, &image.srv);
+        if (FAILED(hr)) return hr;
+    }
+    write_needed = true;
+    return S_OK;
+}
+
 HRESULT prepare_surface_upload(SurfaceImage& image, bool full, UINT block_bytes, RECT& rect,
                                PreparedUpload& output) {
     if (!image.width || !image.height || image.pitch <= 0) return E_INVALIDARG;
@@ -150,7 +190,8 @@ HRESULT prepare_surface_upload(SurfaceImage& image, bool full, UINT block_bytes,
 }
 
 HRESULT upload_surface_image(ID3D11Device* device, ID3D11DeviceContext* context,
-                             SurfaceImage& image, SurfaceUploadResult* result) {
+                             SurfaceImage& image, SurfaceUploadResult* result,
+                             const PreparedUpload* prepared, const RECT* prepared_rect) {
     if (result) *result = {};
     if (!device || !context || !image.width || !image.height || image.pitch <= 0)
         return E_INVALIDARG;
@@ -214,9 +255,12 @@ HRESULT upload_surface_image(ID3D11Device* device, ID3D11DeviceContext* context,
     const bool recreate = !texture_matches;
     const RECT dirty = normalize_dirty_rect(image, recreate, block_bytes);
     const bool full = is_full_rect(image, dirty);
-    PreparedUpload upload{};
-    HRESULT hr = prepare_upload(image, dirty, block_bytes, upload);
-    if (FAILED(hr)) return hr;
+    PreparedUpload converted{};
+    HRESULT hr = S_OK;
+    const bool use_prepared = prepared && prepared_rect && !recreate &&
+        std::memcmp(prepared_rect, &dirty, sizeof(RECT)) == 0;
+    if (!use_prepared && FAILED(hr = prepare_upload(image, dirty, block_bytes, converted))) return hr;
+    const PreparedUpload& upload = use_prepared ? *prepared : converted;
 
     ComPtr<ID3D11Texture2D> texture = image.texture;
     ComPtr<ID3D11ShaderResourceView> srv = image.srv;
@@ -261,8 +305,26 @@ HRESULT upload_surface_image(ID3D11Device* device, ID3D11DeviceContext* context,
             box.back = 1;
             box_pointer = &box;
         }
+        // Direct3D 11 runtime defect (documented for UpdateSubresource): on
+        // a deferred context whose driver has no command lists, the runtime
+        // adds the destination box's offset to the source pointer. The game
+        // thread uploads on a deferred context (Renderer::game_upload); a
+        // tester's GTX 1080 crashed in d3d11.dll reading upload.data +
+        // (top/4)*pitch + (left/4)*8 for a BC1 rectangle. There the pointer
+        // is moved back by that offset (elements: 4x4 blocks or 32-bit texels).
+        const void* source = upload.data;
+        if (box_pointer && context->GetType() == D3D11_DEVICE_CONTEXT_DEFERRED) {
+            D3D11_FEATURE_DATA_THREADING threading{};
+            if (SUCCEEDED(device->CheckFeatureSupport(D3D11_FEATURE_THREADING, &threading, sizeof(threading))) &&
+                !threading.DriverCommandLists) {
+                const std::size_t rows = block_bytes ? box.top / 4u : box.top;
+                const std::size_t offset = block_bytes ? std::size_t(box.left / 4u) * block_bytes
+                                                       : std::size_t(box.left) * 4u;
+                source = static_cast<const std::uint8_t*>(upload.data) - rows * upload.pitch - offset;
+            }
+        }
         context->UpdateSubresource(texture.Get(), 0, box_pointer,
-                                   upload.data, upload.pitch, 0);
+                                   source, upload.pitch, 0);
     }
 
     if(generate_mips)context->GenerateMips(srv.Get());

@@ -14,6 +14,7 @@
 
 #include <atomic>
 #include <cstring>
+#include <cwchar>
 #include <string_view>
 #include <unordered_map>
 
@@ -21,6 +22,7 @@ namespace owned {
 namespace {
 
 std::atomic<bool> g_russian{false};
+std::atomic<unsigned> g_game_text_code_page{CP_ACP};
 
 bool system_prefers_russian() noexcept {
     return PRIMARYLANGID(GetUserDefaultUILanguage()) == LANG_RUSSIAN || GetACP() == 1251;
@@ -81,6 +83,28 @@ void set_ui_language(int setting) noexcept {
 }
 
 bool ui_russian() noexcept { return g_russian.load(std::memory_order_relaxed); }
+
+void read_game_text_code_page(const wchar_t* registry_root) noexcept {
+    // The game applies the setting once per process; the first read with a
+    // known registry root stays for the run, so font and layout caches keyed
+    // without the code page cannot see it change.
+    static bool latched = false;
+    if (latched) return;
+    unsigned code_page = CP_ACP;
+    if (registry_root) {
+        latched = true;
+        wchar_t key[192]{};
+        wchar_t name[64]{};
+        DWORD size = sizeof(name);
+        if (std::swprintf(key, sizeof(key) / sizeof(key[0]), L"%ls\\Game Specific Settings", registry_root) > 0 &&
+            RegGetValueW(HKEY_CURRENT_USER, key, L"Font CharSet", RRF_RT_REG_SZ, nullptr, name, &size) == ERROR_SUCCESS &&
+            _wcsicmp(name, L"russian") == 0)
+            code_page = 1251;
+    }
+    g_game_text_code_page.store(code_page, std::memory_order_relaxed);
+}
+
+unsigned game_text_code_page() noexcept { return g_game_text_code_page.load(std::memory_order_relaxed); }
 
 const char* ui_text(const char* english) noexcept {
     if (!english || !ui_russian()) return english;

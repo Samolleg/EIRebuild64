@@ -93,7 +93,9 @@ namespace scene_core {
     X(map_preview_precache, ::owned::scene_core::MapPreviewPrecache) \
     X(map_marker_begin, ::owned::scene_core::MapMarkerBegin) \
     X(map_marker_end, ::owned::scene_core::MapMarkerEnd) \
-    X(map_markers_draw, ::owned::scene_core::MapMarkersDraw)
+    X(map_markers_draw, ::owned::scene_core::MapMarkersDraw) \
+    /* ---- core stream deltas (claude/stream-delta) ---- */ \
+    X(scene_packet_evict, ::owned::scene_ui::PacketStoreEvict)
 
 enum class Command : std::uint16_t {
     none = 0,

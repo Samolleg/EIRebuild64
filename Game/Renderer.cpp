@@ -278,7 +278,7 @@ BOOL CRenderer::Draw3DLine(CXYZWArray &points, const float fpLineWidth, const in
     return TRUE;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-BOOL CRenderer::DrawParticles(bool bUseAdd, CXYZWArray &points, CParticleToDrawArray &particles)
+BOOL CRenderer::DrawParticles(bool bUseAdd, CXYZWArray &points, CParticleToDrawArray &particles, DWORD sourceType)
 {
     CDXGeometryProcessor *pGPU = GetGPU();
     SetProjectionMatrix();
@@ -307,6 +307,7 @@ BOOL CRenderer::DrawParticles(bool bUseAdd, CXYZWArray &points, CParticleToDrawA
         view.clip_half_width = float(clipRect.right - clipRect.left) * 0.5f;
         view.clip_half_height = float(clipRect.bottom - clipRect.top) * 0.5f;
         view.additive = bUseAdd;
+        view.source_type = sourceType;
         pDX11->SubmitC56GameParticles(view);
         return TRUE;
     }

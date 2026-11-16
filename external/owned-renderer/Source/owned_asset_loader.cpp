@@ -1509,14 +1509,25 @@ bool texture_rgb_pixels(const TextureCpuAsset& texture, std::size_t index, std::
         if (!bgra)
             for (int c = 1; c < 4; ++c) if (!texture.masks[c] || !texture.channel_bits[c] || texture.channel_bits[c] > 8) return false;
         rgb.assign(std::size_t(w) * h * 3, 0);
+        // Each channel's 8-bit value for every field value (at most 8 bits),
+        // worked out once instead of a division per texel.
+        // (A mask wider than its channel bits divides as before.)
+        std::uint8_t expand[3][256]{};
+        std::uint32_t top[3]{};
+        if (!bgra)
+            for (int c = 0; c < 3; ++c) {
+                top[c] = (1u << texture.channel_bits[1 + c]) - 1;
+                for (std::uint32_t f = 0; f <= top[c]; ++f) expand[c][f] = std::uint8_t(f * 255u / top[c]);
+            }
         for (std::size_t i = 0; i < std::size_t(w) * h; ++i) {
             const std::uint8_t* q = data + i * bpp;
             if (bgra) { rgb[i * 3] = q[2]; rgb[i * 3 + 1] = q[1]; rgb[i * 3 + 2] = q[0]; continue; }
             const std::uint32_t v = bpp == 2 ? std::uint32_t(q[0] | (q[1] << 8)) :
                 std::uint32_t(q[0] | (q[1] << 8) | (q[2] << 16)) | (std::uint32_t(q[3]) << 24);
-            for (int c = 0; c < 3; ++c)
-                rgb[i * 3 + c] = std::uint8_t(((v & texture.masks[1 + c]) >> texture.shifts[1 + c]) * 255u /
-                                              ((1u << texture.channel_bits[1 + c]) - 1));
+            for (int c = 0; c < 3; ++c) {
+                const std::uint32_t f = (v & texture.masks[1 + c]) >> texture.shifts[1 + c];
+                rgb[i * 3 + c] = f <= top[c] ? expand[c][f] : std::uint8_t(f * 255u / top[c]);
+            }
         }
     }
     width = w; height = h;
@@ -2874,7 +2885,8 @@ bool decode_model_resources(const ResourceBlob& mod_blob,
                             ModelCpuAsset& model, ResourceFailure& failure) {
     model = {};
     MemoryResourceArchive mod_archive;
-    MemoryResourceArchive bone_archive;
+    // BON endpoints describe the skeleton, independently of FIG shape count.
+    // Share the active-map LNK/BON decoder, then attach each node's geometry.
     if (!mod_archive.open(mod_blob, failure) ||
         !bone_archive.open(bone_blob, failure))
         return false;
@@ -3540,6 +3552,9 @@ struct OwnedResourceLoader::Impl {
             }
             state->decoded_source_bytes.fetch_add(terrain_blob.identity.bytes,
                                                    std::memory_order_relaxed);
+            // Active/menu maps and neighbour maps all publish this asset.
+            // Core mode serializes it before slimming the game's copy.
+            owned_terrain_prepare_astral(*state->store, *terrain);
             if (state->request.prepare_terrain_shading)
                 owned_terrain_prepare_shading(*terrain);
             // The game's terrain surfaces carry one level; their shipped mip

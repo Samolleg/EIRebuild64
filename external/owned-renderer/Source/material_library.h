@@ -14,6 +14,7 @@
 #include <map>
 #include <set>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -38,14 +39,21 @@ struct MaterialClass {
     float tint_min = 0, tint_max = -1;
     // Grows strands (the fur pass): fur and pelt armour layers.
     bool strands = false;
-    // A gem (diamond): the shader's fire and light-through branch. It has no
-    // profile channel of its own: a gem is the only dielectric with F0 of
-    // .12 and up (the loader enforces both ways), which the shader tests.
-    bool gem = false;
+    // No creature coat grows here (the fur pass): horn, bone, eyes on a furry
+    // creature's own art (antlers and tusks are islands of its head part).
     bool bare = false;
     // A creature coat's length on this class, a multiple of the model's coat
     // (a zebra's sleek hide, its mane). Bare classes take 0.
     float coat = 1;
+    // A gem (diamond): the shader's fire and light-through branch. It has no
+    // profile channel of its own: a gem is the only dielectric with F0 of
+    // .12 and up (the loader enforces both ways), which the shader tests.
+    bool gem = false;
+    // A crystal (world crystals, crystal golems): the crystal instance programs
+    // (native_shader.h NATIVE_CRYSTAL). Marked like the gem by its F0: a
+    // crystal is the only dielectric with F0 .10 (the loader enforces both
+    // ways); the shader shades it with its own constants.
+    bool crystal = false;
     bool defined = false;
 };
 
@@ -73,15 +81,25 @@ public:
     bool build_unit_profile(const std::string& texture, std::uint32_t& side, std::vector<std::uint8_t>& rgba,
                             std::vector<std::uint8_t>& relief, std::vector<std::uint8_t>& classes,
                             std::string& note) const;
+    // Scenery (static world objects): scenery.json lists textures like
+    // units.json (class, optional maps\<texture>.png). Unlisted world
+    // textures keep the texture-derived world response (S2).
+    bool scenery_listed(const std::string& texture) const;
+    // Explicit plant labels (maps/burn_<texture>.png), otherwise the
+    // reviewed scenery classes/regions. Unclassified material is inert.
+    bool build_fire_burn_profile(const std::string& texture, std::uint32_t& width,
+        std::uint32_t& height, std::vector<std::uint8_t>& labels) const;
     // The classes that grow strands, one bit per class index (256 bits).
     bool scenery_listed(const std::string& texture) const;
     std::array<std::uint32_t, 8> strand_classes() const noexcept;
+    // The crystal classes, one bit per class index.
+    std::array<std::uint32_t, 8> crystal_classes() const noexcept;
     // Each class's creature coat factor (0 bare, 32 = 1x), one byte per
     // class index, four to a word.
     std::array<std::uint32_t, 64> coat_classes() const noexcept;
 
 private:
-    struct Shape { std::string type; std::uint32_t first = 0, second = 0, type_id = 0; };
+    struct Shape { std::string type, material; std::uint32_t first = 0, second = 0, type_id = 0; };  // material: the shape's item type (metal, bone...)
     struct Material { std::string type, code; };
     struct RegionMap {
         std::uint32_t width = 0, height = 0;
@@ -114,8 +132,8 @@ private:
         std::string model;                                         // .mod of the listed parts
         std::vector<std::pair<std::string, std::uint8_t>> parts;  // figure part -> class
     };
-    std::map<std::string, UnitTexture> units_;       // lower-case texture name
-    std::set<std::string> scenery_; // scenery.json names; units.json takes precedence
+    std::map<std::string, UnitTexture> units_;       // lower-case texture name (units.json, then scenery.json)
+    std::set<std::string> scenery_;                  // the scenery.json names among them
     std::map<std::string, std::uint8_t> unit_skins_;  // model -> class of <model>skin_NN layers
     float diffuse_keep_ = .35f;
     std::vector<Material> materials_;
@@ -124,6 +142,16 @@ private:
     // The texture archives the layers come from, opened once (render thread only).
     mutable ResourceStore layers_;
     mutable bool layers_open_ = false;
+    // Layers already reported as having no region map (one bridge event per name).
+    mutable std::set<std::string> unmapped_layers_;
+    // Across builds (builds run one at a time): decoded region maps by file
+    // key, type and code (null: no usable map), and parsed layer textures by
+    // name. Equips mostly reuse layers: without these each atlas re-read and
+    // re-decoded every layer and map (~100 ms an atlas).
+    mutable std::map<std::string, std::shared_ptr<const RegionMap>> region_cache_;
+    mutable std::map<std::string, std::shared_ptr<const TextureCpuAsset>> layer_cache_;
+    mutable std::vector<std::string> layer_cache_order_;
+    std::shared_ptr<const TextureCpuAsset> cached_layer(const std::string& name) const;
 
     bool load_classes(const std::string& text, std::string& error);
     bool load_items(const std::vector<std::uint8_t>& bytes);
@@ -143,6 +171,8 @@ private:
     std::shared_ptr<const RegionMap> region_map(const std::string& family, const std::string& type,
         const std::string& code, std::uint32_t variant, std::uint32_t width, std::uint32_t height) const;
     std::shared_ptr<const RegionMap> read_region_map(const std::string& key, const std::string& type,
+                                                     const std::string& code) const;
+    std::shared_ptr<const RegionMap> read_region_map_uncached(const std::string& key, const std::string& type,
                                                      const std::string& code) const;
 };
 

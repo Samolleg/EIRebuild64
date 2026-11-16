@@ -1,5 +1,6 @@
 #include "embedded_d3d12.h"
 #include "frame_waits.h"
+#include "dlss_frame.h"
 #include "../Host/dlss.h"
 #include "../Host/reflex.h"
 #include "engine_bridge.h"
@@ -9,6 +10,11 @@
 #include <cstdio>
 #include <cwchar>
 #include <filesystem>
+
+extern "C" {
+__declspec(dllexport) extern const UINT D3D12SDKVersion = 620;
+__declspec(dllexport) const char* D3D12SDKPath = ".\\D3D12\\";
+}
 
 namespace d3d12 {
 // Factory implemented by the author's Host/d3d12/d3d12_frame.cpp.
@@ -82,7 +88,10 @@ bool EmbeddedD3D12::initialize(HWND window, std::string& reason) noexcept {
         if (!state->executor) return false;
         D3D12Frame* executor = state->executor.get();
         state->ngx.initialize_embedded_d3d12(executor->device(), exe, ngx_data, state->caps, &ngx_log,
-                                           [executor] { executor->wait_idle(); });
+                                           [executor] { return executor->wait_idle(); },
+                                           [executor](std::uint64_t& recording, std::uint64_t& completed) {
+                                               executor->fence_state(recording, completed);
+                                           });
         // NGX absence disables only the NVIDIA features. The selected D3D12
         // executor remains the owner, including on AMD/Intel GPUs.
         state_ = std::move(state);
@@ -111,6 +120,8 @@ HRESULT EmbeddedD3D12::begin_simulation(int reflex_mode) noexcept {
 }
 HRESULT EmbeddedD3D12::begin_render(int reflex_mode) noexcept {
     if (!state_) return E_UNEXPECTED;
+    if (state_->ngx.poll_initialize(state_->caps))
+        set_dlss_unavailable_reason(state_->caps.dlss_available ? nullptr : state_->caps.dlss_reason);
     // A nested loading draw seals the prior engine invocation at this point.
     if (state_->phase == State::Phase::rendering) finish_render();
     // Loading movies and repeated capture/present calls can draw without an
@@ -143,14 +154,15 @@ void EmbeddedD3D12::finish_render() noexcept {
 bool EmbeddedD3D12::dlss_caps(x64remote::DlssCaps& out) const noexcept {
     out = {};
     if (!state_) { std::snprintf(out.reason, sizeof(out.reason), "Embedded D3D12 is not initialized"); return false; }
+    state_->ngx.poll_initialize(state_->caps);
     out.available = state_->caps.dlss_available != 0;
     std::snprintf(out.reason, sizeof(out.reason), "%s", state_->caps.dlss_reason);
     return out.available;
 }
-bool EmbeddedD3D12::dlss_size(UINT width, UINT height, int mode, UINT& w, UINT& h) noexcept {
+bool EmbeddedD3D12::dlss_size(UINT width, UINT height, int mode, UINT& w, UINT& h, bool ray_reconstruction) noexcept {
     w = h = 0;
     unsigned rw = 0, rh = 0;
-    if (!state_ || !state_->ngx.optimal(width, height, mode, rw, rh)) return false;
+    if (!state_ || !state_->ngx.optimal(width, height, mode, rw, rh, ray_reconstruction)) return false;
     w = rw; h = rh;
     return true;
 }
@@ -163,7 +175,12 @@ HRESULT EmbeddedD3D12::dlss_evaluate(ID3D12GraphicsCommandList* list, ID3D12Reso
     record.render_w = e.render_w; record.render_h = e.render_h; record.out_w = e.out_w; record.out_h = e.out_h;
     record.mode = e.mode; record.sharpness = e.sharpness;
     record.flags = (e.reset ? x64remote::dlss_reset : 0u) | (e.hdr ? x64remote::dlss_hdr : 0u) |
-                   (e.depth_inverted ? x64remote::dlss_depth_inverted : 0u);
+                   (e.depth_inverted ? x64remote::dlss_depth_inverted : 0u) |
+                   (e.bias_mask ? x64remote::dlss_bias_mask : 0u) |
+                   (e.ray_reconstruction ? x64remote::dlss_ray_reconstruction : 0u) |
+                   (e.specular_hit_distance ? x64remote::dlss_specular_hit_distance : 0u);
+    std::copy(std::begin(e.world_to_view),std::end(e.world_to_view),std::begin(record.world_to_view));
+    std::copy(std::begin(e.view_to_clip),std::end(e.view_to_clip),std::begin(record.view_to_clip));
     char error[200]{};
     if (state_->ngx.evaluate_d3d12(list, record, resources, error, sizeof(error))) return S_OK;
     ngx_log(error);

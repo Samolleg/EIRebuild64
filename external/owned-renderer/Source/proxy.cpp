@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <exception>
 #include <float.h>
+#include <share.h>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -37,6 +38,7 @@
 #include "res_mapping.h"
 #include "owned_ui_layers.h"
 #include "owned_resource_runtime.h"
+#include "ui_language.h"
 #include "renderer.h"
 #include "graphics_settings.h"
 #include "game_focus.h"
@@ -45,6 +47,7 @@
 #include "camp_inventory.h"
 #include "stall_watchdog.h"
 #include "scene_commands_ui.h"
+#include "error_report.h"
 
 namespace owned {
 #ifdef EID3D11_TESTING
@@ -161,10 +164,13 @@ DWORD WINAPI run(void*){
   Sample& s=g_ring[g_head.load(std::memory_order_relaxed)%kRing];s={};
   LARGE_INTEGER q;QueryPerformanceCounter(&q);s.qpc=q.QuadPart;
   if(GetThreadContext(g_main,&context)){
-   s.eip=context.Eip;unsigned found=0;const auto* slot=reinterpret_cast<const std::uintptr_t*>(context.Esp);
+   // At most 10 of our own frames, so a deep stack in this module still
+   // reaches the game's callers (j190: all 20 samples of one hitch filled
+   // the 16 slots inside the renderer).
+   s.eip=context.Eip;unsigned found=0,own=0;const auto* slot=reinterpret_cast<const std::uintptr_t*>(context.Esp);
    for(unsigned i=0;i<4096&&found<16;++i){std::uintptr_t value=0;__try{value=slot[i];}__except(EXCEPTION_EXECUTE_HANDLER){break;}
     if(value>=0x401000&&value<0x73a670)s.callers[found++]=static_cast<std::uint32_t>(value);
-    else if(value>g_self+0x1000&&value<g_self_end)s.callers[found++]=0x80000000u|static_cast<std::uint32_t>(value-g_self);}
+    else if(value>g_self+0x1000&&value<g_self_end&&own<10){++own;s.callers[found++]=0x80000000u|static_cast<std::uint32_t>(value-g_self);}}
   }
   ResumeThread(g_main);g_head.fetch_add(1,std::memory_order_release);
  }
@@ -172,9 +178,10 @@ DWORD WINAPI run(void*){
  return 0;
 }
 // Frames over 40 ms (present to present; EI_RENDERER_HITCH_MS sets another
-// threshold) dump their samples automatically to owned_hitches.log (at most
-// 300 dumps).
-std::int64_t g_previous_present=0;unsigned g_hitch_dumps=0;
+// threshold) dump their samples automatically to owned_hitches.log, every one
+// of them. The file stays open for the session (flushed per dump): opening and
+// closing the growing log in present slowed the frames after each dump.
+std::int64_t g_previous_present=0;unsigned g_hitch_dumps=0;FILE* g_hitch_file=nullptr;
 double hitch_threshold_ms() noexcept{
  static const double threshold=[]{
   char value[16]{};
@@ -189,16 +196,20 @@ void present(){
  LARGE_INTEGER f,n;QueryPerformanceFrequency(&f);QueryPerformanceCounter(&n);
  const std::int64_t previous=g_previous_present;g_previous_present=n.QuadPart;
  const double ms=previous?double(n.QuadPart-previous)*1000.0/double(f.QuadPart):0;
- if(ms<hitch_threshold_ms()||g_hitch_dumps>=300)return;
- char path[MAX_PATH]{};GetModuleFileNameA(g_module,path,MAX_PATH);char* slash=std::strrchr(path,'\\');
- if(slash)strcpy_s(slash+1,MAX_PATH-(size_t)(slash+1-path),"owned_hitches.log");
- // One session per file: the first dump keeps the previous session as
- // owned_hitches.prev.log and starts a fresh log.
- const bool first=g_hitch_dumps==0;
- if(first&&slash){char previous_path[MAX_PATH]{};strcpy_s(previous_path,path);
-  strcpy_s(previous_path+(slash+1-path),MAX_PATH-(size_t)(slash+1-path),"owned_hitches.prev.log");
-  MoveFileExA(path,previous_path,MOVEFILE_REPLACE_EXISTING);}
- FILE* file=nullptr;fopen_s(&file,path,first?"wb":"ab");if(!file)return;
+ if(ms<hitch_threshold_ms())return;
+ if(!g_hitch_file){
+  if(g_hitch_dumps)return;  // the log could not be opened
+  char path[MAX_PATH]{};GetModuleFileNameA(g_module,path,MAX_PATH);char* slash=std::strrchr(path,'\\');
+  if(slash)strcpy_s(slash+1,MAX_PATH-(size_t)(slash+1-path),"owned_hitches.log");
+  // One session per file: the first dump keeps the previous session as
+  // owned_hitches.prev.log and starts a fresh log.
+  if(slash){char previous_path[MAX_PATH]{};strcpy_s(previous_path,path);
+   strcpy_s(previous_path+(slash+1-path),MAX_PATH-(size_t)(slash+1-path),"owned_hitches.prev.log");
+   MoveFileExA(path,previous_path,MOVEFILE_REPLACE_EXISTING);}
+  g_hitch_file=_fsopen(path,"wb",_SH_DENYNO);
+  if(!g_hitch_file){g_hitch_dumps=1;return;}
+ }
+ FILE* file=g_hitch_file;
  if(!g_hitch_dumps++){
   HMODULE modules[512];DWORD needed=0;
   if(EnumProcessModules(GetCurrentProcess(),modules,sizeof(modules),&needed))
@@ -210,7 +221,7 @@ void present(){
  const unsigned head=g_head.load(std::memory_order_acquire);
  for(unsigned k=1;k<kRing&&k<=head;++k){const Sample& sample=g_ring[(head-k)%kRing];if(sample.qpc<previous)break;if(sample.qpc>n.QuadPart)continue;
   std::fprintf(file,"s %08lX",(unsigned long)sample.eip);for(auto c:sample.callers){if(!c)break;std::fprintf(file," %08lX",(unsigned long)c);}std::fprintf(file,"\n");}
- std::fclose(file);
+ std::fflush(file);
 }
 void start(){
  if(g_main)return;
@@ -241,15 +252,18 @@ void append(const char* event,const char* detail){
  char path[MAX_PATH+16];wsprintfA(path,"%s\\bridge.jsonl",g_root);
  HANDLE file=CreateFileA(path,FILE_APPEND_DATA,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
  if(file==INVALID_HANDLE_VALUE)return;
- char line[640];const int length=wsprintfA(line,"{\"event\":\"%s\",\"detail\":\"%s\",\"sites_verified\":false}\n",event,detail);
+ char line[800];const int length=wsprintfA(line,"{\"event\":\"%s\",\"detail\":\"%s\",\"sites_verified\":false}\n",event,detail);
  DWORD written=0;WriteFile(file,line,static_cast<DWORD>(length),&written,nullptr);CloseHandle(file);
 }
 void record(const char* bracket,DWORD thread,std::int64_t tenths){
  SYSTEMTIME t{};GetLocalTime(&t);char name[64];
  wsprintfA(name,"gpu-stall-%04u%02u%02u-%02u%02u%02u.dmp",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond);
- char detail[320];
- wsprintfA(detail,"bracket=%s seconds=%lu.%lu thread=%lu dump=%s",bracket?bracket:"?",
-  static_cast<unsigned long>(tenths/10),static_cast<unsigned long>(tenths%10),thread,name);
+ char detail[512];
+ // The latest 30 s residency summary (stall_watchdog.h), up to 30 s old.
+ const int residency=owned::stall_watch::residency_index.load(std::memory_order_acquire);
+ wsprintfA(detail,"bracket=%s seconds=%lu.%lu thread=%lu dump=%s last %s",bracket?bracket:"?",
+  static_cast<unsigned long>(tenths/10),static_cast<unsigned long>(tenths%10),thread,name,
+  residency>=0?owned::stall_watch::residency[residency]:"residency not yet checked");
  append("gpu_stall",detail);
  if(!g_write_dump){append("gpu_stall_dump","result=dbghelp_unavailable");return;}
  char path[MAX_PATH+80];wsprintfA(path,"%s\\%s",g_root,name);
@@ -314,225 +328,6 @@ void stop(){
  if(!g_thread)return;
  SetEvent(g_stop);WaitForSingleObject(g_done,2000);
  CloseHandle(g_thread);g_thread=nullptr;
-}
-}
-// Temporary crash diagnostic for the world-teardown crash at 005D58EA (issue
-// #161), opt-in: EID3D11_FEAR_WATCH=1. The CUMFear vtable (0073FF8C, .rdata)
-// slots for the deleting destructor (0), GetType (8) and Load (11) point at
-// thunks that record the object and the call-validated game return addresses
-// on its stack, then jump to the stock function; no code bytes change.
-// Deletions go to a fixed ring, first sightings to a table that a 20 ms
-// watcher uses to time a vtable change of a still-live object. A first-chance
-// access violation at 005D58EA looks up ecx, writes one fear_watch_crash line
-// to bridge.jsonl and a full-memory dump, and continues the search. In that
-// line deleted=yes means a virtual deletion of this address was recorded
-// after its latest sighting (freed while still listed); deleted=no with a
-// vtable_change time means the live object was overwritten. Verified
-// on game.exe SHA-256 be0fc330...; any differing slot or byte refuses the
-// install. Remove once the crash is understood.
-namespace fear_watch {
-constexpr std::uint32_t kVtable=0x0073FF8C,kDelete=0x005D2930,kDuplicate=0x005D2880,kGetType=0x005D2920,
- kRemoveReferences=0x004BA230,kLoad=0x005D3690,kCrashSite=0x005D58EA;
-constexpr std::uint32_t kRing=1u<<16,kSeen=1u<<14;constexpr int kFrames=10,kSeenFrames=6;
-struct Deletion{volatile LONG seq;std::uint32_t object,thread,flag;std::int64_t ticks;std::uint32_t frames[kFrames];};
-struct Seen{volatile LONG object,deleted;std::uint32_t thread,source;std::int64_t ticks;std::uint32_t frames[kSeenFrames];
- volatile LONG changed_value;std::int64_t changed_ticks;};
-Deletion* g_ring=nullptr;Seen* g_seen=nullptr;volatile LONG g_next=0,g_seen_drops=0,g_crash_taken=0;
-std::uintptr_t g_image=0,g_text=0,g_text_end=0;std::uint32_t* g_slots=nullptr;
-std::uint32_t g_original_delete=0,g_original_get_type=0,g_original_load=0;
-PVOID g_handler=nullptr;HANDLE g_watch_stop=nullptr;
-std::int64_t now(){LARGE_INTEGER t{};QueryPerformanceCounter(&t);return t.QuadPart;}
-// Game-relative addresses (0x400000 base) of game .text return addresses on
-// the stack: the game does not keep frame pointers, so a frame walk stops
-// early. A value counts when a call instruction ends exactly before it.
-int scan_stack(const std::uint32_t* esp,std::uint32_t* out,int capacity){
- const auto stack_base=static_cast<std::uintptr_t>(__readfsdword(4));int found=0;
- for(int i=0;i<384&&found<capacity;++i){
-  if(reinterpret_cast<std::uintptr_t>(esp+i+1)>stack_base)break;
-  const std::uintptr_t v=esp[i];if(v<g_text+6||v>=g_text_end)continue;
-  const auto* c=reinterpret_cast<const std::uint8_t*>(v);
-  if(c[-5]==0xE8||(c[-2]==0xFF&&((c[-1]>>3)&7)==2)||(c[-3]==0xFF&&((c[-2]>>3)&7)==2)||(c[-6]==0xFF&&((c[-5]>>3)&7)==2))
-   out[found++]=static_cast<std::uint32_t>(v-g_image+0x400000u);
- }
- return found;
-}
-Seen* find_seen(std::uint32_t object,bool claim){
- const std::uint32_t start=(object>>3)*2654435761u>>(32-14);
- for(std::uint32_t i=0;i<64;++i){Seen& s=g_seen[(start+i)&(kSeen-1)];
-  const LONG held=s.object;if(held==static_cast<LONG>(object))return &s;
-  if(!held){if(!claim)return nullptr;
-   const LONG prior=InterlockedCompareExchange(&s.object,static_cast<LONG>(object),0);
-   if(!prior||prior==static_cast<LONG>(object))return &s;}
- }
- if(claim)InterlockedIncrement(&g_seen_drops);
- return nullptr;
-}
-void __stdcall on_delete(std::uint32_t object,const std::uint32_t* esp){
- const LONG seq=InterlockedIncrement(&g_next);
- Deletion& d=g_ring[static_cast<std::uint32_t>(seq-1)&(kRing-1)];
- d.seq=0;d.object=object;d.thread=GetCurrentThreadId();d.flag=esp[1];d.ticks=now();
- std::memset(d.frames,0,sizeof(d.frames));scan_stack(esp,d.frames,kFrames);
- InterlockedExchange(&d.seq,seq);
- if(Seen* s=find_seen(object,false))InterlockedExchange(&s->deleted,1);
-}
-// source 1 = GetType (called as a fear is added), 2 = Load. A sighting is
-// refreshed after its object was deleted (address reuse) or on every Load.
-void __stdcall on_seen(std::uint32_t object,const std::uint32_t* esp,std::uint32_t source){
- Seen* s=find_seen(object,true);if(!s)return;
- if(s->ticks&&!s->deleted&&source==1)return;
- s->deleted=1;s->thread=GetCurrentThreadId();s->source=source;s->changed_ticks=0;s->changed_value=0;
- std::memset(s->frames,0,sizeof(s->frames));scan_stack(esp,s->frames,kSeenFrames);s->ticks=now();
- InterlockedExchange(&s->deleted,0);
-}
-__declspec(naked) void delete_thunk(){__asm{
- pushad
- lea eax,[esp+32]
- push eax
- push ecx
- call on_delete
- popad
- jmp dword ptr [g_original_delete]
-}}
-__declspec(naked) void get_type_thunk(){__asm{
- pushad
- lea eax,[esp+32]
- push 1
- push eax
- push ecx
- call on_seen
- popad
- jmp dword ptr [g_original_get_type]
-}}
-__declspec(naked) void load_thunk(){__asm{
- pushad
- lea eax,[esp+32]
- push 2
- push eax
- push ecx
- call on_seen
- popad
- jmp dword ptr [g_original_load]
-}}
-// A live (not deleted) object whose vtable dword stops being CUMFear's gets
-// the time and the new value, once per sighting. The destructor thunk marks
-// the object deleted before the stock destructor rewrites the vtable, so
-// the second deleted check rejects a legitimate deletion.
-DWORD WINAPI watch(void*){
- while(WaitForSingleObject(g_watch_stop,20)==WAIT_TIMEOUT){
-  for(std::uint32_t i=0;i<kSeen;++i){Seen& s=g_seen[i];
-   const LONG object=s.object;if(!object||s.deleted||s.changed_ticks||!s.ticks)continue;
-   std::uint32_t value=0;
-   __try{value=*reinterpret_cast<const volatile std::uint32_t*>(static_cast<std::uintptr_t>(object));}
-   __except(EXCEPTION_EXECUTE_HANDLER){value=0xFFFFFFFFu;}
-   if(value==g_image+kVtable-0x400000u||s.deleted)continue;
-   s.changed_value=static_cast<LONG>(value);s.changed_ticks=now();
-  }
- }
- return 0;
-}
-void format_frames(char* out,const std::uint32_t* frames,int count){
- int used=0;out[0]='-';out[1]=0;
- for(int i=0;i<count&&frames[i];++i)used+=wsprintfA(out+used,i?",%08lX":"%08lX",static_cast<unsigned long>(frames[i]));
-}
-unsigned long ms_before(std::int64_t then,std::int64_t at){
- LARGE_INTEGER f{};QueryPerformanceFrequency(&f);return then?static_cast<unsigned long>((at-then)*1000/f.QuadPart):0ul;
-}
-LONG CALLBACK on_exception(EXCEPTION_POINTERS* info){
- if(info->ExceptionRecord->ExceptionCode!=EXCEPTION_ACCESS_VIOLATION||
-  reinterpret_cast<std::uintptr_t>(info->ExceptionRecord->ExceptionAddress)!=g_image+kCrashSite-0x400000u||
-  InterlockedExchange(&g_crash_taken,1))return EXCEPTION_CONTINUE_SEARCH;
- const std::int64_t at=now();const CONTEXT* c=info->ContextRecord;const std::uint32_t object=c->Ecx;
- const Deletion* last=nullptr;unsigned long deletions=0;
- for(std::uint32_t i=0;i<kRing;++i){const Deletion& d=g_ring[i];
-  if(!d.seq||d.object!=object)continue;++deletions;if(!last||d.seq>last->seq)last=&d;}
- std::uint32_t head[2]{};
- __try{head[0]=reinterpret_cast<const std::uint32_t*>(static_cast<std::uintptr_t>(object))[0];
-  head[1]=reinterpret_cast<const std::uint32_t*>(static_cast<std::uintptr_t>(object))[1];}
- __except(EXCEPTION_EXECUTE_HANDLER){head[0]=head[1]=0xFFFFFFFFu;}
- const Seen* seen=find_seen(object,false);if(seen&&!seen->ticks)seen=nullptr;
- char delete_stack[128],seen_stack[80];
- format_frames(delete_stack,last?last->frames:nullptr,last?kFrames:0);
- format_frames(seen_stack,seen?seen->frames:nullptr,seen?kSeenFrames:0);
- char detail[600];
- wsprintfA(detail,"object=%08lX head=%08lX,%08lX deleted=%s deletions_of_object=%lu delete_ms_before_crash=%lu delete_thread=%lu delete_flag=%lu "
-  "delete_stack=%s crash_thread=%lu seen=%s seen_ms_before_crash=%lu seen_thread=%lu seen_stack=%s vtable_change_ms_before_crash=%lu "
-  "vtable_change_value=%08lX edi=%08lX esi=%08lX ring_total=%lu seen_drops=%ld",
-  static_cast<unsigned long>(object),static_cast<unsigned long>(head[0]),static_cast<unsigned long>(head[1]),!last?"no":!seen||last->ticks>=seen->ticks?"yes":"before_last_sighting",deletions,
-  last?ms_before(last->ticks,at):0ul,last?static_cast<unsigned long>(last->thread):0ul,last?static_cast<unsigned long>(last->flag):0ul,
-  delete_stack,GetCurrentThreadId(),!seen?"no":seen->source==2?"load":"get_type",seen?ms_before(seen->ticks,at):0ul,
-  seen?static_cast<unsigned long>(seen->thread):0ul,seen_stack,seen&&seen->changed_ticks?ms_before(seen->changed_ticks,at):0ul,
-  seen?static_cast<unsigned long>(seen->changed_value):0ul,static_cast<unsigned long>(c->Edi),static_cast<unsigned long>(c->Esi),
-  static_cast<unsigned long>(g_next),g_seen_drops);
- stall_watchdog::append("fear_watch_crash",detail);
- if(!stall_watchdog::g_write_dump){stall_watchdog::append("fear_watch_dump","result=dbghelp_unavailable");return EXCEPTION_CONTINUE_SEARCH;}
- SYSTEMTIME t{};GetLocalTime(&t);char name[64],path[MAX_PATH+80];
- wsprintfA(name,"crash-005D58EA-%04u%02u%02u-%02u%02u%02u.dmp",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond);
- wsprintfA(path,"%s\\%s",stall_watchdog::g_root,name);
- HANDLE file=CreateFileA(path,GENERIC_READ|GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
- if(file==INVALID_HANDLE_VALUE){wsprintfA(detail,"result=create_failed error=%lu",GetLastError());stall_watchdog::append("fear_watch_dump",detail);return EXCEPTION_CONTINUE_SEARCH;}
- MINIDUMP_EXCEPTION_INFORMATION exception{GetCurrentThreadId(),info,FALSE};
- const auto type=static_cast<MINIDUMP_TYPE>(MiniDumpWithFullMemory|MiniDumpWithHandleData|MiniDumpWithThreadInfo|
-  MiniDumpWithFullMemoryInfo|MiniDumpWithUnloadedModules);
- const BOOL ok=stall_watchdog::g_write_dump(GetCurrentProcess(),GetCurrentProcessId(),file,type,&exception,nullptr,nullptr);
- const DWORD error=ok?0:GetLastError();LARGE_INTEGER size{};GetFileSizeEx(file,&size);CloseHandle(file);
- wsprintfA(detail,"result=%s error=%08lx mb=%lu dump=%s",ok?"ok":"failed",error,static_cast<unsigned long>(size.QuadPart>>20),name);
- stall_watchdog::append("fear_watch_dump",detail);
- return EXCEPTION_CONTINUE_SEARCH;
-}
-bool write_slot(int slot,std::uint32_t value){
- DWORD protection=0,ignored=0;if(!VirtualProtect(g_slots+slot,4,PAGE_READWRITE,&protection))return false;
- InterlockedExchange(reinterpret_cast<volatile LONG*>(g_slots+slot),static_cast<LONG>(value));
- VirtualProtect(g_slots+slot,4,protection,&ignored);return true;
-}
-void install(){
- static bool attempted=false;if(attempted)return;attempted=true;
- char value[4]{};if(GetEnvironmentVariableA("EID3D11_FEAR_WATCH",value,sizeof(value))!=1||value[0]!='1')return;
- // Base game.exe only: its vtable address lies outside other images (LiA
- // faulted reading it before any check), so nothing is read elsewhere.
- if(running_game_sites().report.engine!=GameEngine::base){stall_watchdog::append("fear_watch_rejected","base_layout_only");return;}
- g_image=reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
- const auto rebase=[](std::uint32_t va){return g_image+va-0x400000u;};
- const auto* headers=reinterpret_cast<const IMAGE_NT_HEADERS*>(g_image+reinterpret_cast<const IMAGE_DOS_HEADER*>(g_image)->e_lfanew);
- const auto* text=IMAGE_FIRST_SECTION(headers);
- g_text=g_image+text->VirtualAddress;g_text_end=g_text+text->Misc.VirtualSize;
- g_slots=reinterpret_cast<std::uint32_t*>(rebase(kVtable));
- // The stock slot values, then the stock bytes of the hooked functions and
- // of the crash site (mov ecx,[eax+8]; mov eax,[ecx]; call [eax+28h]).
- static const std::uint8_t delete_bytes[]={0x56,0x8B,0xF1,0xE8,0x18,0x00,0x00,0x00,0xF6,0x44,0x24,0x08,0x01,0x74,0x09,0x56,
-  0xE8,0x93,0xDC,0x12,0x00,0x83,0xC4,0x04,0x8B,0xC6,0x5E,0xC2,0x04,0x00};
- static const std::uint8_t get_type_bytes[]={0xB8,0x07,0x00,0x00,0x00,0xC3};
- static const std::uint8_t load_bytes[]={0x56,0x8B,0x74,0x24,0x08,0x57,0x8B,0xF9};
- static const std::uint8_t crash_bytes[]={0x8B,0x48,0x08,0x8B,0x01,0xFF,0x50,0x28};
- const std::uint32_t expected[][2]={{0,kDelete},{3,kDuplicate},{8,kGetType},{10,kRemoveReferences},{11,kLoad}};
- const char* reason=nullptr;
- if(text->VirtualAddress!=0x1000||std::memcmp(text->Name,".text",6))reason="text_section_differs";
- for(const auto& e:expected)if(!reason&&g_slots[e[0]]!=rebase(e[1]))reason="vtable_slot_differs";
- if(!reason&&(std::memcmp(reinterpret_cast<void*>(rebase(kDelete)),delete_bytes,sizeof(delete_bytes))||
-  std::memcmp(reinterpret_cast<void*>(rebase(kGetType)),get_type_bytes,sizeof(get_type_bytes))||
-  std::memcmp(reinterpret_cast<void*>(rebase(kLoad)),load_bytes,sizeof(load_bytes))||
-  std::memcmp(reinterpret_cast<void*>(rebase(kCrashSite-5)),crash_bytes,sizeof(crash_bytes))))reason="function_bytes_differ";
- if(!reason){
-  g_ring=static_cast<Deletion*>(VirtualAlloc(nullptr,sizeof(Deletion)*kRing,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
-  g_seen=static_cast<Seen*>(VirtualAlloc(nullptr,sizeof(Seen)*kSeen,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));
-  g_watch_stop=CreateEventW(nullptr,TRUE,FALSE,nullptr);
-  if(!g_ring||!g_seen||!g_watch_stop)reason="allocation_failed";
- }
- if(reason){stall_watchdog::append("fear_watch_rejected",reason);return;}
- g_handler=AddVectoredExceptionHandler(1,on_exception);
- g_original_delete=g_slots[0];g_original_get_type=g_slots[8];g_original_load=g_slots[11];
- const bool ok=write_slot(0,reinterpret_cast<std::uint32_t>(&delete_thunk))&&write_slot(8,reinterpret_cast<std::uint32_t>(&get_type_thunk))&&
-  write_slot(11,reinterpret_cast<std::uint32_t>(&load_thunk));
- if(HANDLE thread=CreateThread(nullptr,0,watch,nullptr,0,nullptr))CloseHandle(thread);
- char detail[160];wsprintfA(detail,"result=%s vtable=%08lX ring=%lu seen=%lu",ok?"ok":"protect_failed",
-  static_cast<unsigned long>(kVtable),static_cast<unsigned long>(kRing),static_cast<unsigned long>(kSeen));
- stall_watchdog::append("fear_watch_installed",detail);
-}
-// DLL unload only: put the stock slots back and stop observing.
-void uninstall(){
- if(!g_original_delete)return;
- write_slot(0,g_original_delete);write_slot(8,g_original_get_type);write_slot(11,g_original_load);g_original_delete=0;
- if(g_watch_stop)SetEvent(g_watch_stop);
- if(g_handler){RemoveVectoredExceptionHandler(g_handler);g_handler=nullptr;}
 }
 }
 // Startup crash #160: Windows dinput.dll (32-bit, PE timestamp 871200FE)
@@ -618,9 +413,10 @@ void install_game_cursor_coordinates(bool sites_ok){
 void install_runtime_bridges(){
  window_sampler::start();
  stall_watchdog::start();
+ owned::start_error_report_check(); // the previous session's crash dump: offer a report
  dinput_guard::log_pending();
- fear_watch::install();
  bridge_set_completed_visual_surface_reader(&proxy_completed_visual_surface);
+ bridge_set_visual_surface_identity_reader(&proxy_visual_surface_identity);
  // Stock widescreen first; foreign layouts reject visibly. The bridge then
  // chains its native HUD, character-pane and camera hooks above ours.
  {const std::wstring ini=owned::renderer_config_path();owned::WidescreenSettings ws{};
@@ -721,6 +517,7 @@ HANDLE open_exceptions_log(){
  int used=wsprintfA(line,"%02u:%02u:%02u.%03u %s thread=%lu what=%s ddraw_rva:",now.wHour,now.wMinute,now.wSecond,now.wMilliseconds,reason,GetCurrentThreadId(),what);
  for(USHORT i=0;i<count&&used<980;++i){const auto a=reinterpret_cast<std::uintptr_t>(frames[i]);if(a>=base&&a<base+info.SizeOfImage)used+=wsprintfA(line+used," %06lX",static_cast<unsigned long>(a-base));}
  used+=wsprintfA(line+used,"\r\n");
+ bridge_async_drain(); // the log writer's queued lines before the crash line
  HANDLE file=open_exceptions_log();if(file!=INVALID_HANDLE_VALUE){DWORD written{};WriteFile(file,line,(DWORD)used,&written,nullptr);CloseHandle(file);}
  std::abort();
 }
@@ -746,6 +543,53 @@ LONG exception_trace_count(std::uint64_t key){
  }
  return 0;
 }
+// The faulting state of a game.exe or ddraw.dll access violation, so a crash
+// names its object without a dump: the registers; 48 dwords at each register
+// that points to readable memory (the object the faulting instruction reads,
+// for a game object its vtable +0, id +0C, manager +14 and position +1C); the
+// first 48 raw stack dwords; and 4 dwords at each of the first 12 of those
+// that point to readable memory outside the images and this stack (a hash
+// node shows its next, key and value). VirtualQuery decides what is read, so
+// nothing here faults.
+bool exception_trace_readable(std::uintptr_t address,std::size_t bytes){
+ MEMORY_BASIC_INFORMATION region{};
+ if(address<0x10000||!VirtualQuery(reinterpret_cast<LPCVOID>(address),&region,sizeof(region)))return false;
+ if(region.State!=MEM_COMMIT||(region.Protect&(PAGE_NOACCESS|PAGE_GUARD))||!(region.Protect&0xff))return false;
+ return address+bytes<=reinterpret_cast<std::uintptr_t>(region.BaseAddress)+region.RegionSize;
+}
+void exception_trace_state(HANDLE file,const CONTEXT& context,std::uintptr_t image,std::uintptr_t imageEnd,std::uintptr_t ddrawBase,std::uintptr_t ddrawEnd){
+ DWORD written{};char line[640]{};
+ int used=wsprintfA(line,"  regs: eax=%08lX ebx=%08lX ecx=%08lX edx=%08lX esi=%08lX edi=%08lX ebp=%08lX esp=%08lX eip=%08lX efl=%08lX\r\n",context.Eax,context.Ebx,context.Ecx,context.Edx,context.Esi,context.Edi,context.Ebp,context.Esp,context.Eip,context.EFlags);
+ WriteFile(file,line,(DWORD)used,&written,nullptr);
+ const char* const names[]{"eax","ebx","ecx","edx","esi","edi"};
+ const std::uintptr_t values[]{context.Eax,context.Ebx,context.Ecx,context.Edx,context.Esi,context.Edi};
+ for(int r=0;r<6;++r){
+  bool repeated=false;for(int earlier=0;earlier<r;++earlier)repeated=repeated||values[earlier]==values[r];
+  if(repeated||!exception_trace_readable(values[r],48*4))continue;
+  const auto* words=reinterpret_cast<const std::uint32_t*>(values[r]);
+  used=wsprintfA(line,"  %s=%08lX:",names[r],static_cast<unsigned long>(values[r]));
+  for(int i=0;i<48;++i)used+=wsprintfA(line+used," %08lX",static_cast<unsigned long>(words[i]));
+  used+=wsprintfA(line+used,"\r\n");WriteFile(file,line,(DWORD)used,&written,nullptr);
+ }
+ const std::uintptr_t stack=context.Esp;
+ if(!exception_trace_readable(stack,48*4))return;
+ const auto* slots=reinterpret_cast<const std::uint32_t*>(stack);
+ used=wsprintfA(line,"  stack_raw:");
+ for(int i=0;i<48;++i)used+=wsprintfA(line+used," %08lX",static_cast<unsigned long>(slots[i]));
+ used+=wsprintfA(line+used,"\r\n");WriteFile(file,line,(DWORD)used,&written,nullptr);
+ const auto* tib=reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
+ const std::uintptr_t stackLow=reinterpret_cast<std::uintptr_t>(tib->StackLimit),stackHigh=reinterpret_cast<std::uintptr_t>(tib->StackBase);
+ int shown=0;
+ for(int i=0;i<48&&shown<12;++i){
+  const std::uintptr_t value=slots[i];
+  if((value>=image&&value<imageEnd)||(value>=ddrawBase&&value<ddrawEnd)||(value>=stackLow&&value<stackHigh))continue;
+  bool repeated=false;for(int earlier=0;earlier<i;++earlier)repeated=repeated||slots[earlier]==value;
+  if(repeated||(value&3)||!exception_trace_readable(value,16))continue;
+  const auto* words=reinterpret_cast<const std::uint32_t*>(value);
+  used=wsprintfA(line,"  [%08lX]: %08lX %08lX %08lX %08lX\r\n",static_cast<unsigned long>(value),static_cast<unsigned long>(words[0]),static_cast<unsigned long>(words[1]),static_cast<unsigned long>(words[2]),static_cast<unsigned long>(words[3]));
+  WriteFile(file,line,(DWORD)used,&written,nullptr);++shown;
+ }
+}
 // Each line names the faulting module and the offset from its load base
 // (ddraw.dll RVAs match the map at 0x10000000+RVA); the first line of a
 // session records the game and ddraw.dll load bases.
@@ -765,6 +609,7 @@ LONG CALLBACK exception_trace(EXCEPTION_POINTERS* pointers){
  }
  if(InterlockedIncrement(&g_exception_lines)>kExceptionLineCap)return EXCEPTION_CONTINUE_SEARCH;
  char modulePath[MAX_PATH]{};if(owner)GetModuleFileNameA(owner,modulePath,MAX_PATH);
+ bridge_async_drain(); // the log writer's queued lines before this exception line
  HANDLE file=open_exceptions_log();if(file==INVALID_HANDLE_VALUE)return EXCEPTION_CONTINUE_SEARCH;
  const auto image=reinterpret_cast<std::uintptr_t>(GetModuleHandleA(nullptr));
  MODULEINFO self{};GetModuleInformation(GetCurrentProcess(),g_module,&self,sizeof(self));
@@ -776,6 +621,44 @@ LONG CALLBACK exception_trace(EXCEPTION_POINTERS* pointers){
  ULONG_PTR p0=record->NumberParameters>0?record->ExceptionInformation[0]:0,p1=record->NumberParameters>1?record->ExceptionInformation[1]:0,p2=record->NumberParameters>2?record->ExceptionInformation[2]:0;
  const auto faultOffset=owner?static_cast<unsigned long>(reinterpret_cast<std::uintptr_t>(record->ExceptionAddress)-reinterpret_cast<std::uintptr_t>(owner)):0ul;
  int length=wsprintfA(line,"%02u:%02u:%02u.%03u code=%08lX address=%p offset=+%06lX thread=%lu p0=%p p1=%p p2=%p module=%s count=%ld%s\r\n",now.wHour,now.wMinute,now.wSecond,now.wMilliseconds,record->ExceptionCode,record->ExceptionAddress,faultOffset,GetCurrentThreadId(),(void*)p0,(void*)p1,(void*)p2,modulePath,occurrence,g_exception_lines>=kExceptionLineCap?" (session line cap reached)":"");WriteFile(file,line,(DWORD)length,&written,nullptr);
+ // A C++ throw from another module (Direct3D reports a failed call this way
+ // before returning its HRESULT): its first three lines also name the module
+ // of the thrown type, the type, the first words of the thrown object (an
+ // HRESULT for _com_error) and the ddraw.dll return addresses on the stack,
+ // so the log names which of our calls failed and how. x86 ThrowInfo layout.
+ HMODULE thrower{};
+ if(record->ExceptionCode==0xE06D7363u&&occurrence<=3&&p2)GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,reinterpret_cast<LPCSTR>(p2),&thrower);
+ if(thrower&&thrower!=reinterpret_cast<HMODULE>(image)&&thrower!=g_module&&pointers->ContextRecord){
+  char throwerPath[MAX_PATH]{};if(thrower)GetModuleFileNameA(thrower,throwerPath,MAX_PATH);
+  const char* throwerName=std::strrchr(throwerPath,'\\');throwerName=throwerName?throwerName+1:throwerPath;
+  char type[96]="?";
+  if(exception_trace_readable(p2,16)){
+   const std::uintptr_t types=reinterpret_cast<const std::uint32_t*>(p2)[3];
+   if(exception_trace_readable(types,8)&&reinterpret_cast<const std::uint32_t*>(types)[0]>0){
+    const std::uintptr_t first=reinterpret_cast<const std::uint32_t*>(types)[1];
+    if(exception_trace_readable(first,8)){
+     const std::uintptr_t descriptor=reinterpret_cast<const std::uint32_t*>(first)[1];
+     if(exception_trace_readable(descriptor,8+sizeof(type))){
+      const char* name=reinterpret_cast<const char*>(descriptor+8);
+      std::size_t n=0;for(;n+1<sizeof(type)&&name[n]>=0x20&&name[n]<0x7f;++n)type[n]=name[n];
+      if(n)type[n]=0;
+     }
+    }
+   }
+  }
+  std::uint32_t object[4]{};if(exception_trace_readable(p1,sizeof(object)))std::memcpy(object,reinterpret_cast<const void*>(p1),sizeof(object));
+  char trace[1024]{};
+  int used=wsprintfA(trace,"  thrown: module=%s+%06lX type=%s object=%08lX %08lX %08lX %08lX ddraw_rva:",throwerName,
+   static_cast<unsigned long>(thrower?p2-reinterpret_cast<std::uintptr_t>(thrower):0u),type,
+   static_cast<unsigned long>(object[0]),static_cast<unsigned long>(object[1]),static_cast<unsigned long>(object[2]),static_cast<unsigned long>(object[3]));
+  const auto* slot=reinterpret_cast<const std::uintptr_t*>(pointers->ContextRecord->Esp);int found=0;
+  for(int i=0;i<4096&&found<24&&used<960;++i){
+   std::uintptr_t value=0;
+   __try{value=slot[i];}__except(EXCEPTION_EXECUTE_HANDLER){break;}
+   if(value>ddrawBase+0x1000&&value<ddrawEnd){used+=wsprintfA(trace+used," %06lX",static_cast<unsigned long>(value-ddrawBase));++found;}
+  }
+  used+=wsprintfA(trace+used,"\r\n");WriteFile(file,trace,(DWORD)used,&written,nullptr);
+ }
  // For an access violation in game.exe or ddraw.dll, the return addresses
  // found on the faulting stack name the caller chain: game addresses at the
  // 0x400000 image base, ddraw.dll ones as d+RVA.
@@ -791,6 +674,7 @@ LONG CALLBACK exception_trace(EXCEPTION_POINTERS* pointers){
    else if(value>ddrawBase+0x1000&&value<ddrawEnd){used+=wsprintfA(trace+used," d+%06lX",static_cast<unsigned long>(value-ddrawBase));++found;}
   }
   used+=wsprintfA(trace+used,"\r\n");WriteFile(file,trace,(DWORD)used,&written,nullptr);
+  exception_trace_state(file,*pointers->ContextRecord,image,text_end,ddrawBase,ddrawEnd);
  }
  CloseHandle(file);return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -976,7 +860,7 @@ void scene_surface_texture_erase(std::uint64_t id) noexcept{
 class Device;
 class DD final:public IDirectDraw7,public IDirect3D7 {
 public:
- DD(){trace("DD.Create");owned_resource_runtime_acquire(EngineBridge::instance().resource_registry_key());renderer.set_surface_texture_resolver(&resolve_proxy_surface_texture,this);}
+ DD(){trace("DD.Create");owned_resource_runtime_acquire(EngineBridge::instance().resource_registry_key());owned::read_game_text_code_page(EngineBridge::instance().resource_registry_key());renderer.set_surface_texture_resolver(&resolve_proxy_surface_texture,this);}
  ~DD(){trace("DD.Destroy");renderer.release();owned_resource_runtime_release();}
  Renderer renderer; HWND hwnd{};DWORD width{800},height{600},bpp{32},coop{};Surface* primary{};Surface* active_target{};Device* active_device{};
  // Device removal (driver timeout/TDR). The game treats a failed present,
@@ -1314,7 +1198,7 @@ public:
   bridge_set_hit_test_frame_sink(this,&Device::hitTestFrame);
   trace("Device.Create");
  }
- ~Device(){bridge_clear_engine_frame_begin_sink(this);bridge_clear_hit_test_frame_sink(this);bridge_clear_scene_handoff(this);if(scene_){bridge_set_native_geometry_sink(nullptr,nullptr);bridge_set_screen_rectangle_sink(nullptr,nullptr);bridge_set_game_particle_sink(nullptr,nullptr);bridge_set_game_ribbon_sink(nullptr,nullptr);bridge_set_game_selection_sink(nullptr,nullptr);bridge_set_game_print_sink(nullptr,nullptr,nullptr);bridge_set_game_glyph_sink(nullptr,nullptr);camp_inventory_set_popup_sink(nullptr,nullptr);}if(native_object_active_){dd_->renderer.rollback_native(native_object_checkpoint_);native_object_active_=false;}flushNativeVisual();clearPendingDraws();releaseRecordingTextures();for(auto& pair:blocks_)releaseBlock(pair.second);for(auto* t:textures_)if(t)t->Release();if(dd_->active_device==this)dd_->active_device=nullptr;if(dd_->active_target==target_)dd_->active_target=nullptr;if(target_)target_->Release();if(composition_target_)composition_target_->Release();dd_->Release();trace("Device.Destroy");}
+ ~Device(){preview_lighting_.reset();bridge_clear_engine_frame_begin_sink(this);bridge_clear_hit_test_frame_sink(this);bridge_clear_scene_handoff(this);if(scene_){bridge_set_native_geometry_sink(nullptr,nullptr);bridge_set_screen_rectangle_sink(nullptr,nullptr);bridge_set_game_particle_sink(nullptr,nullptr);bridge_set_game_ribbon_sink(nullptr,nullptr);bridge_set_game_selection_sink(nullptr,nullptr);bridge_set_game_print_sink(nullptr,nullptr,nullptr);bridge_set_game_glyph_sink(nullptr,nullptr);camp_inventory_set_popup_sink(nullptr,nullptr);}if(native_object_active_){dd_->renderer.rollback_native(native_object_checkpoint_);native_object_active_=false;}flushNativeVisual();clearPendingDraws();releaseRecordingTextures();for(auto& pair:blocks_)releaseBlock(pair.second);for(auto* t:textures_)if(t)t->Release();if(dd_->active_device==this)dd_->active_device=nullptr;if(dd_->active_target==target_)dd_->active_target=nullptr;if(target_)target_->Release();if(composition_target_)composition_target_->Release();dd_->Release();trace("Device.Destroy");}
  bool compositionTarget(const Surface* surface)const noexcept{return surface==composition_target_;}
  bool displayResizeIdle() const noexcept {return !scene_ && !recording_ && !native_batch_active_ && !native_object_active_ && pending_draws_.empty();}
  void resizeDisplayViewport(UINT old_width,UINT old_height,UINT width,UINT height) noexcept {
@@ -1326,7 +1210,7 @@ public:
  HRESULT STDMETHODCALLTYPE GetCaps(LPD3DDEVICEDESC7) override;
  HRESULT STDMETHODCALLTYPE EnumTextureFormats(LPD3DENUMPIXELFORMATSCALLBACK,LPVOID) override;
  HRESULT STDMETHODCALLTYPE BeginScene() override{bridge_profile_api_entry("BeginScene",_ReturnAddress());trace("Device.BeginScene");if(scene_)return D3DERR_SCENE_IN_SCENE;clearPendingDraws();HRESULT pending=flushNativeVisual();if(FAILED(pending))return dd_->checkDevice(pending);scene_=true;native_sequence_=false;native_batch_active_=false;native_object_active_=false;bridge_profile_begin_frame();dd_->renderer.begin_scene();bridge_set_native_geometry_sink(this,&Device::submitNativeGeometry,&Device::beginNativeGeometryBatch,&Device::endNativeGeometryBatch,&Device::beginNativeObject,&Device::endNativeObject,&Device::nativeFrameState,&Device::nativeWorldLighting,&Device::beginNativeShadows,&Device::endNativeShadows,&Device::shadowSourceDiagnostics,&Device::nativePointLights,&Device::beginNativePointShadowFaces,&Device::endNativePointShadowFaces,&Device::queueNativeStaticDepth,&Device::beginNativePointShadowBatch,&Device::publishNativePointShadows,&Device::allocateNativePointShadow,&Device::releaseNativePointShadow,&Device::nativeShadowCullProjection,&Device::queueNativeTerrainBake);bridge_set_rain_occlusion_sink(&Device::beginRainOcclusion,&Device::endRainOcclusion);bridge_set_screen_rectangle_sink(this,&Device::submitScreenRectangle);bridge_set_game_particle_sink(this,&Device::submitGameParticles);bridge_set_game_ribbon_sink(this,&Device::submitGameRibbon);bridge_set_game_selection_sink(this,&Device::submitGameSelection);bridge_set_game_print_sink(this,&Device::submitGamePrint,&Device::flushGamePrintsSink);bridge_set_game_glyph_sink(this,&Device::submitGameGlyphs);camp_inventory_set_popup_sink(this,&Device::submitCampPopup,dd_->renderer.resource_device());registerSceneHandoff();return D3D_OK;}
- HRESULT STDMETHODCALLTYPE EndScene() override{bridge_profile_api_entry("EndScene",_ReturnAddress());trace("Device.EndScene");if(!scene_)return D3DERR_SCENE_NOT_IN_SCENE;flushGamePrints();bridge_clear_scene_handoff(this);bridge_set_native_geometry_sink(nullptr,nullptr);bridge_set_screen_rectangle_sink(nullptr,nullptr);bridge_set_game_particle_sink(nullptr,nullptr);bridge_set_game_ribbon_sink(nullptr,nullptr);bridge_set_game_selection_sink(nullptr,nullptr);bridge_set_game_print_sink(nullptr,nullptr,nullptr);bridge_set_game_glyph_sink(nullptr,nullptr);camp_inventory_set_popup_sink(nullptr,nullptr);native_batch_active_=false;if(native_object_active_){dd_->renderer.rollback_native(native_object_checkpoint_);native_object_active_=false;}HRESULT hr=flushNativeVisual();native_sequence_=false;if(SUCCEEDED(hr)){if(!pending_draws_.empty())invalidateVisualTarget();hr=dd_->renderer.draw_frame_take(pending_draws_,pending_vertex_bytes_,pending_indices_);}clearPendingDraws();dd_->renderer.end_scene();scene_=false;bridge_profile_end_frame();return dd_->checkDevice(hr);}
+ HRESULT STDMETHODCALLTYPE EndScene() override{bridge_profile_api_entry("EndScene",_ReturnAddress());trace("Device.EndScene");if(!scene_)return D3DERR_SCENE_NOT_IN_SCENE;preview_lighting_.reset();flushGamePrints();bridge_clear_scene_handoff(this);bridge_set_native_geometry_sink(nullptr,nullptr);bridge_set_screen_rectangle_sink(nullptr,nullptr);bridge_set_game_particle_sink(nullptr,nullptr);bridge_set_game_ribbon_sink(nullptr,nullptr);bridge_set_game_selection_sink(nullptr,nullptr);bridge_set_game_print_sink(nullptr,nullptr,nullptr);bridge_set_game_glyph_sink(nullptr,nullptr);camp_inventory_set_popup_sink(nullptr,nullptr);native_batch_active_=false;if(native_object_active_){dd_->renderer.rollback_native(native_object_checkpoint_);native_object_active_=false;}HRESULT hr=flushNativeVisual();native_sequence_=false;if(SUCCEEDED(hr)){if(!pending_draws_.empty())invalidateVisualTarget();hr=dd_->renderer.draw_frame_take(pending_draws_,pending_vertex_bytes_,pending_indices_);}clearPendingDraws();dd_->renderer.end_scene();scene_=false;bridge_profile_end_frame();return dd_->checkDevice(hr);}
  HRESULT STDMETHODCALLTYPE GetDirect3D(LPDIRECT3D7* out) override{if(!out)return E_POINTER;*out=static_cast<IDirect3D7*>(dd_);dd_->AddRef();return D3D_OK;}
  HRESULT STDMETHODCALLTYPE SetRenderTarget(LPDIRECTDRAWSURFACE7,DWORD) override;
  HRESULT STDMETHODCALLTYPE GetRenderTarget(LPDIRECTDRAWSURFACE7*) override;
@@ -1410,14 +1294,23 @@ private:
  // and the device-state copy their scene sinks read.
  void registerSceneHandoff() noexcept{
   BridgeSceneHandoff handoff{};handoff.context=this;
-  // Camp inventory composition keeps the device path (its icon textures are
-  // resolved against the live bound surface). The world draws into the
-  // composition output too, so only the composing state can tell them apart.
-  // Core mode has no device path: camp composition is sent too, with the
-  // camp placement in the captured sinks (captureSceneSinks).
+  // Camp composition is queued too, with the camp placement in the captured
+  // sinks (captureSceneSinks), as in core mode: the inline device path made
+  // the game thread drain the scene thread on every camp packet (about 218
+  // waits a frame on the outfitting screen, laptop j214).
   handoff.active=[](void* context){
-   const auto& renderer=static_cast<Device*>(context)->dd_->renderer;
-   return (!camp::composing||renderer.core_mode())&&renderer.scene_queue();};
+   return static_cast<Device*>(context)->dd_->renderer.scene_queue();};
+  handoff.preview_lighting=[](void* context,const NativeWorldLighting* lighting)->bool{
+   Device* self=static_cast<Device*>(context);
+   try{
+    if(!lighting){self->preview_lighting_.reset();return true;}
+    if(!self->scene_||self->native_batch_active_)return false;
+    if(FAILED(self->flushPendingDraws())||FAILED(self->dd_->flushVisualUi())||FAILED(self->flushNativeVisual()))return false;
+    self->native_sequence_=false;
+    self->preview_lighting_.emplace(self->dd_->renderer,lighting);
+    if(self->preview_lighting_->ready())return true;
+    self->preview_lighting_.reset();return false;
+   }catch(...){self->preview_lighting_.reset();return false;}};
   handoff.post=[](void* context,std::function<void()> work){
    auto& renderer=static_cast<Device*>(context)->dd_->renderer;
    renderer.scene_note_native();renderer.scene_post_frame(std::move(work),"bridge_handoff_post");return true;};
@@ -1492,7 +1385,7 @@ private:
  }
  // Terrain prints: one list's prints are batched per texture/state run and
  // drawn when the bridge reports the list's last print (or at EndScene).
- struct GamePrintRun{SurfaceImage* texture=nullptr;FixedState state{};std::array<float,16> object_to_clip{};float half_width=0,half_height=0;UINT first=0,count=0;};
+ struct GamePrintRun{SurfaceImage* texture=nullptr;FixedState state{};std::array<float,16> object_to_clip{};float half_width=0,half_height=0;UINT first=0,count=0;bool interface_mark=false;};
  std::vector<GameParticleGpu> print_vertices_;std::vector<GamePrintRun> print_runs_;
  static bool submitGamePrint(void* context,const GamePrintView& view) noexcept{try{return static_cast<Device*>(context)->appendGamePrint(view);}catch(...){return false;}}
  static bool flushGamePrintsSink(void* context) noexcept{try{return static_cast<Device*>(context)->flushGamePrints();}catch(...){return false;}}
@@ -1508,17 +1401,19 @@ private:
   if(!print_runs_.empty()){
    GamePrintRun& last=print_runs_.back();
    if(last.texture==texture&&last.object_to_clip==view.object_to_clip&&last.half_width==view.clip_half_width&&
-      last.half_height==view.clip_half_height&&std::memcmp(&last.state,&state_,sizeof(FixedState))==0){last.count+=view.count;return true;}
+      last.half_height==view.clip_half_height&&last.interface_mark==view.interface_mark&&
+      std::memcmp(&last.state,&state_,sizeof(FixedState))==0){last.count+=view.count;return true;}
   }
   GamePrintRun run;run.texture=texture;run.state=state_;run.object_to_clip=view.object_to_clip;
   run.half_width=view.clip_half_width;run.half_height=view.clip_half_height;run.first=first;run.count=view.count;
+  run.interface_mark=view.interface_mark;
   print_runs_.push_back(run);return true;
  }
  bool flushGamePrints(){
   bool ok=true;
   if(scene_)for(const GamePrintRun& run:print_runs_)
    ok&=SUCCEEDED(dd_->renderer.draw_game_print_run(print_vertices_.data()+run.first,run.count,run.object_to_clip,
-    run.half_width,run.half_height,run.state,run.texture));
+    run.half_width,run.half_height,run.state,run.texture,run.interface_mark));
   print_vertices_.clear();print_runs_.clear();return ok;
  }
  static bool submitGameGlyphs(void* context,const GameGlyphView& view) noexcept{try{return static_cast<Device*>(context)->drawGameGlyphs(view);}catch(...){return false;}}
@@ -1545,7 +1440,7 @@ private:
   }catch(...){return false;}
  }
  static bool nativeWorldLighting(void* context,const NativeWorldLighting& lighting) noexcept{try{Device* self=static_cast<Device*>(context);return self&&self->scene_&&self->dd_->renderer.set_native_world_lighting(lighting);}catch(...){return false;}}
- static bool nativePointLights(void* context,const RetainedVisualFrame& frame) noexcept{try{Device* self=static_cast<Device*>(context);return self&&self->scene_&&self->dd_->renderer.set_native_point_lights(frame.world_point_lights,frame.time);}catch(...){return false;}}
+ static bool nativePointLights(void* context,const RetainedVisualFrame& frame) noexcept{try{Device* self=static_cast<Device*>(context);if(self&&self->scene_)self->dd_->renderer.set_fire_spells(frame.fire_spells,frame.time);return self&&self->scene_&&self->dd_->renderer.set_native_point_lights(frame.world_point_lights,frame.time);}catch(...){return false;}}
  static bool beginNativePointShadowBatch(void* context,std::uint64_t& generation,bool& pressure) noexcept{
   try{Device* self=static_cast<Device*>(context);if(!self||!self->scene_||self->native_batch_active_)return false;
    if(FAILED(self->flushPendingDraws())||FAILED(self->dd_->flushVisualUi()))return false;
@@ -1706,18 +1601,18 @@ private:
    packet.bound=scene_ui::surface_handle(*snapshot);command->residency.add({packet.bound,std::move(snapshot)});}
   if(wound)if(auto snapshot=dd_->renderer.scene_surface(wound->image())){
    packet.wound=scene_ui::surface_handle(*snapshot);command->residency.add({packet.wound,std::move(snapshot)});}
-  copy_scene_packet(view,packet);
+  if(dd_->renderer.core_mode())borrow_scene_packet(view,packet);else copy_scene_packet(view,packet);
   dd_->renderer.scene_note_native();
-  // Core mode: the host submits it through its own sinks (scene_ui::Packet::run).
-  if(dd_->renderer.core_mode()){
-   // ---- camp composition and prepared figures (claude/s3-store) ----
-   packet.camp_state=campSubmission();
-   packet.prepared_handles=std::uint8_t((view.prepared_mesh?1u:0u)|(view.prepared_material?2u:0u)|
-    (view.prepared_wound_material?4u:0u));
-   packet.view.prepared_mesh=nullptr;packet.view.prepared_material=nullptr;packet.view.prepared_wound_material=nullptr;
-   // A camp item icon: the bound native binding's owned GPU home replaces
-   // the bound texture, with the device path's submission state (the
-   // inline path queues it through queue_native_owned the same way).
+  // ---- camp composition (claude/s3-store; in process since claude/screen-open-hitch) ----
+  // The game thread's camp placement travels with the packet; SceneSinks::submit
+  // applies it where the packet runs (this process's scene thread or the host).
+  packet.camp_state=campSubmission();
+  // A camp item icon: the bound native binding's owned GPU home replaces
+  // the bound texture, with the device path's submission state (the
+  // inline path queued it through queue_native_owned the same way). The
+  // descriptor is copied (no pixels); in process its GPU home is the canvas
+  // texture the icon bind published to the scene thread.
+  {
    const bool owned_depth=view.owned_fixed_state.enabled&&view.contribution.known&&
     !view.contribution.color&&view.contribution.light_mask;
    if(camp::composing&&bound&&!view.owned_texture.identity&&!owned_depth){
@@ -1725,20 +1620,33 @@ private:
     if(!camp_inventory_texture(bound->id,bound->generation,camp_texture)){
      result.failure_operation="scene.camp_icon";return false;}
     if(camp_texture.identity&&camp_texture.surface){
-     packet.camp_surface=*camp_texture.surface;packet.camp_surface.alpha_cut_mask.reset();
+     packet.camp_surface=*camp_texture.surface;
+     // The host decodes its own icon home and reads no cut mask.
+     if(dd_->renderer.core_mode())packet.camp_surface.alpha_cut_mask.reset();
      packet.camp_surface_present=true;
      camp_texture.surface=nullptr;
      packet.view.owned_texture=camp_texture;packet.view.owned_fixed_state={};
      packet.state=submission_state;
     }
    }
-   dd_->renderer.core_post_command(packet,"scene_packet");return true;
+  }
+  // Core mode: the host submits it through its own sinks (scene_ui::Packet::run).
+  if(dd_->renderer.core_mode()){
+   // ---- prepared figures (claude/s3-store) ----
+   packet.prepared_handles=std::uint8_t((view.prepared_mesh?1u:0u)|(view.prepared_material?2u:0u)|
+    (view.prepared_wound_material?4u:0u));
+   packet.view.prepared_mesh=nullptr;packet.view.prepared_material=nullptr;packet.view.prepared_wound_material=nullptr;
+   dd_->renderer.core_packet_store(packet);dd_->renderer.core_post_command(packet,"scene_packet");return true;
   }
   dd_->renderer.scene_post_frame([renderer=&dd_->renderer,command=std::move(command)]{
    auto& packet=command->packet;
    auto bound=command->residency.snapshot(packet.bound);
    auto wound=packet.wound.present?command->residency.snapshot(packet.wound):nullptr;
-   submit_scene_packet(*renderer,packet,std::move(bound),std::move(wound));
+   // A camp icon that cannot be drawn is omitted here, and the camp then
+   // withdraws its wide layout as the inline path did (never drawn without it).
+   // E_PENDING: its texture is serviced at the next present (drawn then).
+   const HRESULT submitted=submit_scene_packet(*renderer,packet,std::move(bound),std::move(wound));
+   if(FAILED(submitted)&&submitted!=E_PENDING&&packet.camp_surface_present)camp_inventory_texture_failed_queued();
   });
   return true;
  }
@@ -1778,7 +1686,12 @@ private:
     return SUCCEEDED(hr);
    }
    if(!request.records){result.failure_hresult=E_INVALIDARG;result.failure_operation="proxy.static_records";return false;}
-   hr=dd_->renderer.set_native_static_object(request.key,*request.records,state_,registered,&result);
+   // Item 5, as SceneSinks: casters and object-space colour of admitted
+   // main-map statics (the posed set would take both and report them
+   // registered: no object-space colour on x86, casters under key 0).
+   if(request.caster){hr=dd_->renderer.set_native_active_caster(request,state_);return SUCCEEDED(hr);}
+   hr=request.object_space?dd_->renderer.set_native_static_object_space(request,state_,registered,&result):
+    dd_->renderer.set_native_static_object(request.key,*request.records,state_,registered,&result);
    request.registered=registered;
    if(FAILED(hr)){char detail[160];std::snprintf(detail,sizeof(detail),"hr=%08lx op=%s",static_cast<unsigned long>(hr),
     result.failure_operation?result.failure_operation:"-");owned::bridge_append_probe_event("static_set_failed",detail);}
@@ -1797,7 +1710,7 @@ private:
    invalidateVisualTarget();
    return SUCCEEDED(dd_->renderer.queue_native_records(submission,state_,wound?wound->image():nullptr,&result));
   }
-  if(dd_->renderer.scene_queue()&&(dd_->renderer.core_mode()?scenePacketEligible(view,true):!camp::composing&&scenePacketEligible(view))){
+  if(dd_->renderer.scene_queue()&&scenePacketEligible(view,dd_->renderer.core_mode())){
    try{return queueScenePacket(view,result);}
    catch(...){result.failure_operation="scene.packet_copy";return false;}
   }
@@ -1857,7 +1770,7 @@ private:
  HRESULT flushPendingDraws(){if(pending_draws_.empty())return D3D_OK;invalidateVisualTarget();HRESULT hr=dd_->renderer.draw_frame_take(pending_draws_,pending_vertex_bytes_,pending_indices_);clearPendingDraws();return hr;}
  void clearPendingDraws(){for(auto* texture:pending_texture_refs_)if(texture)texture->Release();pending_texture_refs_.clear();pending_draws_.clear();pending_vertex_bytes_.clear();pending_indices_.clear();}
  HRESULT unsupported(const char* n){trace(n);return E_NOTIMPL;}
- std::atomic<ULONG> refs_{1};DD* dd_{};Surface* target_{};Surface* composition_target_{};std::array<Surface*,8> textures_{};FixedState state_{},recording_state_{};bool scene_{},recording_{},native_sequence_{},native_batch_active_{},native_object_active_{};Renderer::NativeQueueCheckpoint native_object_checkpoint_{};std::array<bool,256> recording_render_mask_{};std::array<std::array<bool,32>,8> recording_stage_mask_{};std::array<Surface*,8> recording_textures_{};std::array<bool,8> recording_texture_mask_{};std::array<bool,4> recording_transform_mask_{};bool recording_viewport_mask_{},recording_material_mask_{};DWORD next_block_{1};std::unordered_map<DWORD,StateBlock> blocks_{};std::vector<LegacyDrawPacket> pending_draws_{};std::vector<std::uint8_t> pending_vertex_bytes_{};std::vector<WORD> pending_indices_{};std::vector<Surface*> pending_texture_refs_{};
+ std::atomic<ULONG> refs_{1};DD* dd_{};Surface* target_{};Surface* composition_target_{};std::array<Surface*,8> textures_{};FixedState state_{},recording_state_{};bool scene_{},recording_{},native_sequence_{},native_batch_active_{},native_object_active_{};Renderer::NativeQueueCheckpoint native_object_checkpoint_{};std::optional<Renderer::PortraitLightingScope> preview_lighting_;std::array<bool,256> recording_render_mask_{};std::array<std::array<bool,32>,8> recording_stage_mask_{};std::array<Surface*,8> recording_textures_{};std::array<bool,8> recording_texture_mask_{};std::array<bool,4> recording_transform_mask_{};bool recording_viewport_mask_{},recording_material_mask_{};DWORD next_block_{1};std::unordered_map<DWORD,StateBlock> blocks_{};std::vector<LegacyDrawPacket> pending_draws_{};std::vector<std::uint8_t> pending_vertex_bytes_{};std::vector<WORD> pending_indices_{};std::vector<Surface*> pending_texture_refs_{};
 };
 
 void DD::applyDisplay(const owned::DisplaySettings& settings){
@@ -1945,9 +1858,20 @@ Surface* completed_surface_receiver(IDirectDrawSurface7* surface) noexcept {
 
 bool proxy_completed_visual_surface(IDirectDrawSurface7* surface,
     std::shared_ptr<const OwnedVisualSurface>& value) noexcept {
+    const frame_acct::Scope accounted(frame_acct::ours_part_texture);
     value.reset();
     auto* receiver = completed_surface_receiver(surface);
     return receiver && receiver->completedVisualValue(value);
+}
+
+bool proxy_visual_surface_identity(IDirectDrawSurface7* surface, std::uint64_t& id,
+    std::uint64_t& generation) noexcept {
+    id = generation = 0;
+    auto* receiver = completed_surface_receiver(surface);
+    if (!receiver) return false;
+    id = receiver->image()->id;
+    generation = receiver->image()->generation;
+    return id != 0;
 }
 
 bool proxy_publish_camp_texture(IDirectDrawSurface7* surface,
@@ -1956,6 +1880,33 @@ bool proxy_publish_camp_texture(IDirectDrawSurface7* surface,
     value.reset();
     auto* receiver = completed_surface_receiver(surface);
     return receiver && receiver->publishCampIcon(icon,value);
+}
+
+HRESULT proxy_fade_modal_backdrop(IDirectDrawSurface7* surface) noexcept {
+    auto* receiver = completed_surface_receiver(surface);
+    if (!receiver) return E_NOINTERFACE;
+    HRESULT hr = E_FAIL;
+    try { hr = receiver->owner()->renderer.fade_capture(*receiver->image()); } catch (...) { hr = E_UNEXPECTED; }
+    // A CPU copy read back earlier is the unfaded capture.
+    if (hr == S_OK) { receiver->invalidateVisualCpu(); receiver->completedVisualMutation(); }
+    return hr;
+}
+
+HRESULT proxy_queue_modal_thumbnail(IDirectDrawSurface7* surface, unsigned width, unsigned height,
+    std::function<HRESULT(std::uint16_t*)>& read) noexcept {
+    read = nullptr;
+    auto* receiver = completed_surface_receiver(surface);
+    if (!receiver) return E_NOINTERFACE;
+    try {
+        Renderer* renderer = &receiver->owner()->renderer;
+        ComPtr<ID3D11Texture2D> staging;
+        const HRESULT hr = renderer->queue_thumbnail(*receiver->image(), width, height, staging);
+        if (hr != S_OK) return hr;
+        read = [renderer, staging, width, height](std::uint16_t* pixels) {
+            return renderer->read_thumbnail(staging.Get(), pixels, width, height);
+        };
+        return S_OK;
+    } catch (...) { read = nullptr; return E_OUTOFMEMORY; }
 }
 
 bool Surface::publishCampIcon(const PreparedCampIcon& icon,
@@ -1994,7 +1945,7 @@ bool Surface::publishCampIcon(const PreparedCampIcon& icon,
     visual_cpu_current_ = true; visual_source_observed_ = true;
     update_surface_memory_accounting(image_);
     if (core) {
-        owner_->renderer.core_post_command(scene_core::CampIconBind{icon.core_serial,image_.id,image_.generation},
+        owner_->renderer.core_post_command(scene_core::CampIconBind{icon.core_serial,image_.id,image_.generation,icon.core_name},
             "camp_icon_bind");
         return true;
     }
@@ -2089,6 +2040,35 @@ void DD::serviceSceneSurfaceRequests() noexcept{
     }
 }
 
+// Temporary (doll bug, 2026-11-06): which path retires a published surface
+// without a replacement (the per-character mo... atlases after the addon's
+// shared-name cap), once per site and reason.
+thread_local const char* g_visual_reject_reason = nullptr;
+void report_visual_surface_retire(const char* site, const char* reason, const SurfaceImage& image,
+                                  bool current, bool locked, bool dc, bool lost) noexcept {
+    static std::mutex lock;
+    static std::vector<std::string> seen;
+    try {
+        const std::string key = std::string(site) + "/" + (reason ? reason : "-");
+        {
+            std::lock_guard<std::mutex> guard(lock);
+            if (seen.size() >= 32 || std::find(seen.begin(), seen.end(), key) != seen.end()) return;
+            seen.push_back(key);
+        }
+        SYSTEMTIME time{}; GetLocalTime(&time);
+        char detail[320];
+        std::snprintf(detail, sizeof(detail),
+            "time=%02u:%02u:%02u.%03u site=%s reason=%s id=%llu %ux%u bpp=%lu generation=%llu published=%llu "
+            "cpu_current=%d locked=%d dc=%d lost=%d gpu_captured=%d cpu_released=%d cpu_access=%d pixels=%zu",
+            time.wHour, time.wMinute, time.wSecond, time.wMilliseconds, site, reason ? reason : "-",
+            static_cast<unsigned long long>(image.id), image.width, image.height, image.format.dwRGBBitCount,
+            static_cast<unsigned long long>(image.generation), static_cast<unsigned long long>(image.published_generation),
+            current ? 1 : 0, locked ? 1 : 0, dc ? 1 : 0, lost ? 1 : 0, image.gpu_captured ? 1 : 0,
+            image.cpu_released ? 1 : 0, image.cpu_access_active ? 1 : 0, image.pixels.size());
+        owned::bridge_append_probe_event("visual_surface_retired", detail);
+    } catch (...) {}
+}
+
 bool Surface::completedVisualValue(std::shared_ptr<const OwnedVisualSurface>& value) noexcept {
     // Keep an existing publication alive while replacing the caller's reference.
     auto cached = retained_visual_surface_value(image_.id, image_.generation);
@@ -2097,9 +2077,10 @@ bool Surface::completedVisualValue(std::shared_ptr<const OwnedVisualSurface>& va
     // Establish this source role before any upload can discard its bytes.
     // A generation whose publication fails no longer holds its bytes for it.
     image_.visual_source = true;
-    const auto reject = [this]() noexcept {
+    const auto reject = [this](const char* why) noexcept {
+        g_visual_reject_reason = why;
         image_.visual_source = false; held_publication_.reset(); return false; };
-    if (!visualCpuCurrent()) return reject();
+    if (!visualCpuCurrent()) return reject("cpu_not_current");
     value = std::move(cached);
     if (value) {
         held_publication_ = value;
@@ -2108,18 +2089,18 @@ bool Surface::completedVisualValue(std::shared_ptr<const OwnedVisualSurface>& va
         releaseCpuPixels();
         return true;
     }
-    if (FAILED(restoreReleased(false))) return reject();
+    if (FAILED(restoreReleased(false))) return reject("restore_failed");
     if (!visualCpuCurrent() ||
         !image_.id || !image_.generation || image_.pixels.empty() ||
         !image_.width || !image_.height || image_.width > 8192 || image_.height > 8192 ||
-        image_.pitch <= 0 || image_.format.dwSize != sizeof(DDPIXELFORMAT)) return reject();
+        image_.pitch <= 0 || image_.format.dwSize != sizeof(DDPIXELFORMAT)) return reject("pixels_or_shape");
     const auto& format = image_.format;
     const bool blocks = block_compressed(format);
     constexpr DWORD unsupported_rgb = DDPF_FOURCC | DDPF_PALETTEINDEXED1 |
         DDPF_PALETTEINDEXED2 | DDPF_PALETTEINDEXED4 | DDPF_PALETTEINDEXED8 | DDPF_PALETTEINDEXEDTO8;
     if (!blocks && (!(format.dwFlags & DDPF_RGB) || (format.dwFlags & unsupported_rgb) ||
         (format.dwRGBBitCount != 16 && format.dwRGBBitCount != 24 && format.dwRGBBitCount != 32)))
-        return reject();
+        return reject("format");
     const std::uint64_t rows = blocks ? (image_.height + 3u) / 4u : image_.height;
     const std::uint64_t row_bytes = blocks ?
         static_cast<std::uint64_t>((image_.width + 3u) / 4u) * block_bytes(format) :
@@ -2128,7 +2109,7 @@ bool Surface::completedVisualValue(std::shared_ptr<const OwnedVisualSurface>& va
     // Match the owned immutable source's existing 64 MiB per-resource bound.
     // This check precedes allocation; it never manufactures missing CPU data.
     if (row_bytes > static_cast<std::uint64_t>(image_.pitch) ||
-        bytes > 64u * 1024u * 1024u || bytes != image_.pixels.size()) return reject();
+        bytes > 64u * 1024u * 1024u || bytes != image_.pixels.size()) return reject("size");
     OwnedVisualSurface description;
     description.id = image_.id;
     description.generation = image_.generation;
@@ -2141,8 +2122,9 @@ bool Surface::completedVisualValue(std::shared_ptr<const OwnedVisualSurface>& va
     description.static_mip_hint = image_.static_mip_hint;
     image_.mip_source_used = true;
     if (!retained_visual_complete_surface(description, std::as_const(image_.pixels).data(), image_.pixels.size(), value)) {
+        report_visual_surface_retire("publish", "complete_failed", image_, visual_cpu_current_, locked_, dc_active_, lost_);
         retained_visual_retire_surface(image_.id);
-        return reject();
+        return reject("complete_failed");
     }
     visual_source_observed_ = true;
     held_publication_ = value;
@@ -2157,7 +2139,11 @@ void Surface::completedVisualMutation() noexcept {
     PostEngineSurfaceTimingScope timing(
         PostEngineSurfaceTimingKind::completed_surface);
     std::shared_ptr<const OwnedVisualSurface> next;
-    if (!completedVisualValue(next)) retained_visual_retire_surface(image_.id);
+    g_visual_reject_reason = nullptr;
+    if (!completedVisualValue(next)) {
+        report_visual_surface_retire("mutation", g_visual_reject_reason, image_, visual_cpu_current_, locked_, dc_active_, lost_);
+        retained_visual_retire_surface(image_.id);
+    }
     timing.finish(image_.pixels.size());
 }
 
@@ -2175,6 +2161,7 @@ void Surface::invalidateVisualCpu() noexcept {
     if (visual_source_observed_) {
         PostEngineSurfaceTimingScope timing(
             PostEngineSurfaceTimingKind::completed_surface);
+        report_visual_surface_retire("invalidate_cpu", nullptr, image_, false, locked_, dc_active_, lost_);
         retained_visual_retire_surface(image_.id);
         timing.finish(image_.pixels.size());
     }
@@ -2285,7 +2272,7 @@ HRESULT Surface::GetCaps(LPDDSCAPS2 c){if(!c)return DDERR_INVALIDPARAMS;*c=desc_
 HRESULT Surface::GetPixelFormat(LPDDPIXELFORMAT f){if(!f)return DDERR_INVALIDPARAMS;*f=image_.format;return DD_OK;}
 HRESULT Surface::GetSurfaceDesc(LPDDSURFACEDESC2 d){if(!d)return DDERR_INVALIDPARAMS;DWORD size=d->dwSize;*d=desc_;d->dwSize=size?size:sizeof(*d);d->lpSurface=locked_?image_.pixels.data():nullptr;return DD_OK;}
 HRESULT Surface::beginDibSession(){HRESULT hr=restoreReleased(false);if(FAILED(hr))return hr;hr=legacyCpuAccess();if(FAILED(hr))return hr;hr=ensureDcStorage();if(FAILED(hr))return hr;dc_last_present_=g_present_serial;image_.cpu_access_active=true;image_.last_cpu_present=g_present_serial;const auto& format=image_.format;const DWORD bytes=pixel_bytes(format);auto* output=static_cast<DWORD*>(dc_bits_);const bool native_bgra=format.dwRGBBitCount==32&&format.dwRBitMask==0x00ff0000&&format.dwGBitMask==0x0000ff00&&format.dwBBitMask==0x000000ff&&format.dwRGBAlphaBitMask==0xff000000;if(native_bgra){const size_t row_bytes=(size_t)image_.width*4;for(UINT y=0;y<image_.height;++y)std::memcpy(output+(size_t)y*image_.width,image_.pixels.data()+(size_t)y*image_.pitch,row_bytes);}else for(UINT y=0;y<image_.height;++y)for(UINT x=0;x<image_.width;++x){DWORD raw{};std::memcpy(&raw,image_.pixels.data()+(size_t)y*image_.pitch+(size_t)x*bytes,std::min<DWORD>(bytes,4));const BYTE r=expand_mask(raw,format.dwRBitMask,0),g=expand_mask(raw,format.dwGBitMask,0),b=expand_mask(raw,format.dwBBitMask,0),a=expand_mask(raw,format.dwRGBAlphaBitMask,255);output[(size_t)y*image_.width+x]=(DWORD(a)<<24)|(DWORD(r)<<16)|(DWORD(g)<<8)|b;}return DD_OK;}
-HRESULT Surface::GetDC(HDC* out){trace("Surface.GetDC","%ux%u flags=%08lx fourcc=%08lx bpp=%lu",image_.width,image_.height,image_.format.dwFlags,image_.format.dwFourCC,image_.format.dwRGBBitCount);if(!out)return DDERR_INVALIDPARAMS;*out=nullptr;if(dc_active_)return DDERR_DCALREADYCREATED;if(locked_||block_compressed(image_.format)||!(image_.format.dwFlags&DDPF_RGB))return DDERR_UNSUPPORTED;const bool owned_text=bridge_begin_character_pane_getdc(static_cast<IDirectDrawSurface7*>(this),_ReturnAddress(),image_.id,image_.width,image_.height,owner_->renderer.owned_text_raster_scale());if(owned_text){const HRESULT hr=ensureOwnedTextDc();if(FAILED(hr))return hr;dc_active_=true;dc_owned_text_=true;*out=owned_text_dc_;return DD_OK;}if(ownedLayerClaim(_ReturnAddress())){const HDC dc=ui_layer_begin(this,&Surface::promoteLayer);if(dc){dc_active_=true;dc_layer_=true;layer_dc_=dc;*out=dc;return DD_OK;}bridge_append_probe_event("owned_ui_text_omitted","recording_dc_unavailable");}const HRESULT hr=beginDibSession();if(FAILED(hr))return hr;dc_active_=true;dc_owned_text_=false;*out=dc_;return DD_OK;}
+HRESULT Surface::GetDC(HDC* out){trace("Surface.GetDC","%ux%u flags=%08lx fourcc=%08lx bpp=%lu",image_.width,image_.height,image_.format.dwFlags,image_.format.dwFourCC,image_.format.dwRGBBitCount);if(!out)return DDERR_INVALIDPARAMS;*out=nullptr;if(dc_active_)return DDERR_DCALREADYCREATED;if(locked_||block_compressed(image_.format)||!(image_.format.dwFlags&DDPF_RGB))return DDERR_UNSUPPORTED;const bool owned_text=bridge_begin_character_pane_getdc(static_cast<IDirectDrawSurface7*>(this),_ReturnAddress(),image_.id,image_.width,image_.height,owner_->renderer.owned_text_raster_scale());if(owned_text){const HRESULT hr=ensureOwnedTextDc();if(FAILED(hr))return hr;dc_active_=true;dc_owned_text_=true;*out=owned_text_dc_;return DD_OK;}if(ownedLayerClaim(_ReturnAddress())){const HDC dc=ui_layer_begin(this,&Surface::promoteLayer,image_.width);if(dc){dc_active_=true;dc_layer_=true;layer_dc_=dc;*out=dc;return DD_OK;}bridge_append_probe_event("owned_ui_text_omitted","recording_dc_unavailable");}const HRESULT hr=beginDibSession();if(FAILED(hr))return hr;dc_active_=true;dc_owned_text_=false;*out=dc_;return DD_OK;}
 HRESULT Surface::ReleaseDC(HDC value){trace("Surface.ReleaseDC");if(!dc_active_)return DDERR_NODC;if(dc_layer_)return releaseLayerDc(value);if(dc_owned_text_){if(!owned_text_dc_||value!=owned_text_dc_)return DDERR_NODC;bridge_finish_character_pane_releasedc(static_cast<IDirectDrawSurface7*>(this),_ReturnAddress(),image_.id,image_.generation);dc_active_=false;dc_owned_text_=false;return DD_OK;}if(!dc_||value!=dc_)return DDERR_NODC;dc_active_=false;
  // A GDI session publishes only the pixels it changed. Interface text redrawn
  // identically every frame (camp/store grids, cards, strips) then keeps its
@@ -2607,6 +2594,24 @@ HRESULT Surface::Blt(LPRECT dr,LPDIRECTDRAWSURFACE7 src,LPRECT sr,DWORD flags,LP
  if(primary()&&destinationArea>primaryArea/4){owner_->renderer.mark_load_picture();note_large_primary_picture(*s->image());trace("Surface.Blt.LargeCpuPresented","source=%ux%u destination=%ldx%ld",s->image()->width,s->image()->height,requested.right-requested.left,requested.bottom-requested.top);invalidateVisualTarget();HRESULT hr=owner_->renderer.present_image(*s->image(),sr,key,covers_screen?nullptr:&requested);if(SUCCEEDED(hr)){proxy_timing.finish();return owner_->presentVisual();}return owner_->checkDevice(hr);}
  RECT sourceRect=sr?*sr:RECT{0,0,(LONG)s->image()->width,(LONG)s->image()->height};const bool stretched=requested.right-requested.left!=sourceRect.right-sourceRect.left||requested.bottom-requested.top!=sourceRect.bottom-sourceRect.top;const bool publish_cpu=this!=owner_->active_target&&!primary();if(s==owner_->active_target&&this!=owner_->active_target){invalidateVisualCpu();if(owner_->renderer.has_pending_ui())owner_->invalidateVisualOutput();}const bool target_capture=s==owner_->active_target&&this!=owner_->active_target;
  if(target_capture){const HRESULT restored=restoreReleased();if(FAILED(restored))return restored;}
+ // Which game action makes a scaled copy of the screen into a surface: one
+ // line per distinct game caller (the first game.exe frame of this call),
+ // with both rectangles and the destination's size and format.
+ if(target_capture&&stretched){
+  void* frames[24]{};const USHORT count=CaptureStackBackTrace(0,24,frames,nullptr);
+  const void* game_caller=nullptr;
+  for(USHORT n=0;n<count&&!game_caller;++n){const auto a=reinterpret_cast<std::uintptr_t>(frames[n]);if(a>=0x401000&&a<0x73a670)game_caller=frames[n];}
+  static std::vector<const void*> seen;
+  if(seen.size()<64&&std::find(seen.begin(),seen.end(),game_caller)==seen.end()){
+   try{seen.push_back(game_caller);}catch(...){}
+   char text[320];std::snprintf(text,sizeof(text),
+    "game_caller=%p direct_caller=%p source=%ld,%ld,%ld,%ld destination=%ld,%ld,%ld,%ld surface=%ux%u flags=%08lx fourcc=%08lx bpp=%lu masks=%08lx/%08lx/%08lx/%08lx",
+    game_caller,_ReturnAddress(),sourceRect.left,sourceRect.top,sourceRect.right,sourceRect.bottom,
+    requested.left,requested.top,requested.right,requested.bottom,image_.width,image_.height,image_.format.dwFlags,image_.format.dwFourCC,
+    image_.format.dwRGBBitCount,image_.format.dwRBitMask,image_.format.dwGBitMask,image_.format.dwBBitMask,image_.format.dwRGBAlphaBitMask);
+   bridge_report_event("scaled_screen_capture",text);
+  }
+ }
  // The active target and primary are GPU-owned: the renderer blit below is
  // their only real write. Their CPU mirror cannot hold the GPU-rendered world,
  // so copying UI pixels into it only cost CPU (~1-3 GB/s in the store screen).
@@ -2630,18 +2635,25 @@ HRESULT Device::Load(LPDIRECTDRAWSURFACE7 destination,LPPOINT point,LPDIRECTDRAW
  trace("Device.Load.Result","hr=%08lx dst=%ux%u/%lu src=%ux%u/%lu point=%ld,%ld",hr,dst->image()->width,dst->image()->height,dst->image()->format.dwRGBBitCount,src->image()->width,src->image()->height,src->image()->format.dwRGBBitCount,x,y);if(state_trace_enabled()){RECT r=sourceRect?*sourceRect:RECT{0,0,(LONG)src->image()->width,(LONG)src->image()->height};char event[320]{};sprintf_s(event,"Diagnostic.Load.d%llu.s%llu.hr%08lx.p%ld.%ld.r%ld.%ld.%ld.%ld.dg%llu.sg%llu",(unsigned long long)dst->image()->id,(unsigned long long)src->image()->id,hr,x,y,r.left,r.top,r.right,r.bottom,(unsigned long long)dst->image()->generation,(unsigned long long)src->image()->generation);trace(event);}return dd_->checkDevice(hr);}
 
 namespace {
-DWORD WINAPI device_removed_message(LPVOID) {
+DWORD WINAPI device_removed_message(LPVOID parameter) {
  // Remote device: the x64 render host is gone; name its reason instead.
+ // Truncating formatters only: the *_s forms call the CRT invalid-parameter
+ // handler (fail-fast 0xC0000409) when text outgrows its buffer, which turned
+ // every device loss into a crash (laptop j200: a 96-byte line for a 102-character text).
  if(const char* reason=x64remote::remote_lost_reason()){
   wchar_t text[512];
-  swprintf_s(text,L"The x64 render host stopped (%hs). The game cannot draw without it and will close.\n\n"
+  _snwprintf_s(text,_TRUNCATE,L"The x64 render host stopped (%hs). The game cannot draw without it and will close.\n\n"
    L"host.log and x86_remote.log next to the host executable have the details.",reason);
-  MessageBoxW(nullptr,text,L"Evil Islands",MB_OK|MB_ICONERROR|MB_TOPMOST|MB_SETFOREGROUND);
+  char line[600];std::snprintf(line,sizeof(line),"x64 render host stopped: %s",reason);
+  owned::offer_error_report(text,line);
   return 0;
  }
- MessageBoxW(nullptr,
-  L"The graphics driver stopped responding (GPU timeout). Lower graphics settings (F10) or update the driver.",
-  L"Evil Islands",MB_OK|MB_ICONERROR|MB_TOPMOST|MB_SETFOREGROUND);
+ const unsigned long code=static_cast<unsigned long>(reinterpret_cast<std::uintptr_t>(parameter));
+ char line[192];std::snprintf(line,sizeof(line),"device removed (0x%08lX); host.log has the D3D12 removal reason and DRED report when on Direct3D 12",code);
+ wchar_t text[256];
+ _snwprintf_s(text,_TRUNCATE,L"The graphics driver stopped the game's GPU device (0x%08lX). The game cannot draw without it and will close.\n\n"
+  L"Lower graphics settings (F10) or update the driver.",code);
+ owned::offer_error_report(text,line);
  return 0;
 }
 }  // namespace
@@ -2652,10 +2664,10 @@ void DD::deviceRemovedExit(HRESULT reason) noexcept {
  // The message runs on its own thread: the game thread waits without pumping
  // window messages, so no game or renderer code runs again before the end.
  // That thread also has its own cursor state, visible over the message.
- if(const HANDLE thread=CreateThread(nullptr,0,&device_removed_message,nullptr,0,nullptr)){
+ if(const HANDLE thread=CreateThread(nullptr,0,&device_removed_message,reinterpret_cast<LPVOID>(static_cast<std::uintptr_t>(static_cast<unsigned long>(reason))),0,nullptr)){
   WaitForSingleObject(thread,INFINITE);
   CloseHandle(thread);
- } else device_removed_message(nullptr);
+ } else device_removed_message(reinterpret_cast<LPVOID>(static_cast<std::uintptr_t>(static_cast<unsigned long>(reason))));
  // No exit(): the game's CRT destructors are the crash this avoids.
  TerminateProcess(GetCurrentProcess(),static_cast<UINT>(reason));
  ExitProcess(static_cast<UINT>(reason));
@@ -2764,8 +2776,32 @@ using owned::DD;
 extern "C" HRESULT WINAPI DirectDrawCreateEx(GUID*,void** out,REFIID iid,IUnknown* outer){owned::enable_application_dpi_awareness();owned::install_runtime_bridges();owned::note_ddraw_create();owned::apply_initial_game_back_clip();owned::trace("Export.DirectDrawCreateEx");if(!out||outer)return DDERR_INVALIDPARAMS;*out=nullptr;auto* dd=new(std::nothrow)DD();if(!dd)return DDERR_OUTOFMEMORY;HRESULT hr=dd->QueryInterface(iid,out);dd->Release();return hr;}
 extern "C" HRESULT WINAPI DirectDrawCreate(GUID*,LPDIRECTDRAW* out,IUnknown* outer){owned::enable_application_dpi_awareness();owned::install_runtime_bridges();owned::note_ddraw_create();owned::apply_initial_game_back_clip();owned::trace("Export.DirectDrawCreate");if(!out||outer)return DDERR_INVALIDPARAMS;*out=nullptr;auto* core=new(std::nothrow)DD();if(!core)return DDERR_OUTOFMEMORY;auto* legacy=new(std::nothrow)owned::LegacyDD(core);if(!legacy){core->Release();return DDERR_OUTOFMEMORY;}*out=static_cast<IDirectDraw*>(legacy);return DD_OK;}
 extern "C" HRESULT WINAPI DirectDrawCreateClipper(DWORD,LPDIRECTDRAWCLIPPER*,IUnknown*){owned::trace("Export.DirectDrawCreateClipper");return DDERR_UNSUPPORTED;}
-extern "C" HRESULT WINAPI DirectDrawEnumerateExA(LPDDENUMCALLBACKEXA cb,LPVOID c,DWORD){owned::trace("Export.DirectDrawEnumerateExA");if(!owned::g_ddraw_enumerate_called.exchange(true))owned::bridge_log_ddraw_imports("first_enumerate");if(!cb)return DDERR_INVALIDPARAMS;char desc[]="Owned D3D11 renderer";char name[]="owned-d3d11";cb(nullptr,desc,name,c,nullptr);return DD_OK;}
-extern "C" HRESULT WINAPI DirectDrawEnumerateA(LPDDENUMCALLBACKA cb,LPVOID c){owned::trace("Export.DirectDrawEnumerateA");if(!cb)return DDERR_INVALIDPARAMS;char desc[]="Owned D3D11 renderer";char name[]="owned-d3d11";cb(nullptr,desc,name,c);return DD_OK;}
+namespace owned {
+// The game picks its DirectDraw driver by the registry index DrawingTarget
+// (General Settings under its own registry root; device init looks that entry
+// up in the enumerated list, and an index past the end shows a blocking
+// "Can't find driver by index" dialog). A PC that once had several adapters
+// keeps an index above 0, so the list is that long: every entry names this
+// one renderer (the primary with a null GUID first; DirectDrawCreate/Ex
+// ignore the GUID). Usually DrawingTarget is 0 and the list is one entry.
+const GUID kDriverAliases[8]={{},
+ {0x6f0a8e01,0x5c2b,0x4d1e,{0x9a,0x31,0x0e,0x1d,0x3d,0x11,0x00,0x01}},{0x6f0a8e01,0x5c2b,0x4d1e,{0x9a,0x31,0x0e,0x1d,0x3d,0x11,0x00,0x02}},
+ {0x6f0a8e01,0x5c2b,0x4d1e,{0x9a,0x31,0x0e,0x1d,0x3d,0x11,0x00,0x03}},{0x6f0a8e01,0x5c2b,0x4d1e,{0x9a,0x31,0x0e,0x1d,0x3d,0x11,0x00,0x04}},
+ {0x6f0a8e01,0x5c2b,0x4d1e,{0x9a,0x31,0x0e,0x1d,0x3d,0x11,0x00,0x05}},{0x6f0a8e01,0x5c2b,0x4d1e,{0x9a,0x31,0x0e,0x1d,0x3d,0x11,0x00,0x06}},
+ {0x6f0a8e01,0x5c2b,0x4d1e,{0x9a,0x31,0x0e,0x1d,0x3d,0x11,0x00,0x07}}};
+unsigned driver_entries() noexcept {
+ const wchar_t* root=EngineBridge::instance().resource_registry_key();
+ if(!root)return 1;
+ std::wstring key=std::wstring(root)+L"\\General Settings";
+ DWORD value=0,size=sizeof(value),type=0;
+ if(RegGetValueW(HKEY_CURRENT_USER,key.c_str(),L"DrawingTarget",RRF_RT_REG_DWORD,&type,&value,&size)!=ERROR_SUCCESS)return 1;
+ const unsigned count=value<8?unsigned(value)+1:8u;
+ if(count>1)trace("Export.DirectDrawEnumerate","DrawingTarget=%lu: %u driver entries",value,count);
+ return count;
+}
+}
+extern "C" HRESULT WINAPI DirectDrawEnumerateExA(LPDDENUMCALLBACKEXA cb,LPVOID c,DWORD){owned::trace("Export.DirectDrawEnumerateExA");if(!owned::g_ddraw_enumerate_called.exchange(true))owned::bridge_log_ddraw_imports("first_enumerate");if(!cb)return DDERR_INVALIDPARAMS;char desc[]="Owned D3D11 renderer";char name[]="owned-d3d11";const unsigned n=owned::driver_entries();for(unsigned i=0;i<n;++i){GUID id=owned::kDriverAliases[i];if(!cb(i?&id:nullptr,desc,name,c,nullptr))break;}return DD_OK;}
+extern "C" HRESULT WINAPI DirectDrawEnumerateA(LPDDENUMCALLBACKA cb,LPVOID c){owned::trace("Export.DirectDrawEnumerateA");if(!cb)return DDERR_INVALIDPARAMS;char desc[]="Owned D3D11 renderer";char name[]="owned-d3d11";const unsigned n=owned::driver_entries();for(unsigned i=0;i<n;++i){GUID id=owned::kDriverAliases[i];if(!cb(i?&id:nullptr,desc,name,c))break;}return DD_OK;}
 extern "C" HRESULT WINAPI DirectDrawEnumerateW(LPDDENUMCALLBACKW,LPVOID){return DDERR_UNSUPPORTED;}
 extern "C" HRESULT WINAPI DirectDrawEnumerateExW(LPDDENUMCALLBACKEXW,LPVOID,DWORD){return DDERR_UNSUPPORTED;}
 extern "C" void WINAPI AcquireDDThreadLock(){}
@@ -2776,5 +2812,5 @@ extern "C" HRESULT WINAPI DDInternalLock(){return E_NOTIMPL;}
 extern "C" HRESULT WINAPI DDInternalUnlock(){return E_NOTIMPL;}
 extern "C" HRESULT WINAPI DllCanUnloadNow(){return S_FALSE;}
 extern "C" HRESULT WINAPI DllGetClassObject(REFCLSID,REFIID,LPVOID*){return CLASS_E_CLASSNOTAVAILABLE;}
-BOOL WINAPI DllMain(HINSTANCE h,DWORD reason,LPVOID reserved){if(reason==DLL_PROCESS_ATTACH){owned::g_module=h;DisableThreadLibraryCalls(h);owned::g_exception_handler=AddVectoredExceptionHandler(1,owned::exception_trace);owned::dinput_guard::g_handler=AddVectoredExceptionHandler(1,owned::dinput_guard::on_exception);std::set_terminate(owned::terminate_trace);_set_purecall_handler(owned::purecall_trace);owned::bridge_log_ddraw_imports("dll_attach");}else if(reason==DLL_PROCESS_DETACH){if(!owned::g_ddraw_create_called.load())owned::bridge_log_never_called_at_exit();if(!reserved){owned::stall_watchdog::stop();owned::fear_watch::uninstall();owned::ui_layers_uninstall();owned::uninstall_res_mapping_hooks();if(owned::uninstall_game_focus()&&owned::EngineBridge::instance().uninstall())owned::widescreen_uninstall();}if(owned::dinput_guard::g_handler){RemoveVectoredExceptionHandler(owned::dinput_guard::g_handler);owned::dinput_guard::g_handler=nullptr;}if(owned::g_exception_handler){RemoveVectoredExceptionHandler(owned::g_exception_handler);owned::g_exception_handler=nullptr;}}return TRUE;}
+BOOL WINAPI DllMain(HINSTANCE h,DWORD reason,LPVOID reserved){if(reason==DLL_PROCESS_ATTACH){owned::g_module=h;DisableThreadLibraryCalls(h);owned::g_exception_handler=AddVectoredExceptionHandler(1,owned::exception_trace);owned::dinput_guard::g_handler=AddVectoredExceptionHandler(1,owned::dinput_guard::on_exception);std::set_terminate(owned::terminate_trace);_set_purecall_handler(owned::purecall_trace);owned::bridge_log_ddraw_imports("dll_attach");}else if(reason==DLL_PROCESS_DETACH){owned::bridge_async_drain();/* the log writer's queued lines */if(!owned::g_ddraw_create_called.load())owned::bridge_log_never_called_at_exit();if(!reserved){owned::stall_watchdog::stop();owned::ui_layers_uninstall();owned::uninstall_res_mapping_hooks();if(owned::uninstall_game_focus()&&owned::EngineBridge::instance().uninstall())owned::widescreen_uninstall();}if(owned::dinput_guard::g_handler){RemoveVectoredExceptionHandler(owned::dinput_guard::g_handler);owned::dinput_guard::g_handler=nullptr;}if(owned::g_exception_handler){RemoveVectoredExceptionHandler(owned::g_exception_handler);owned::g_exception_handler=nullptr;}}return TRUE;}
 namespace owned { void window_sampler_present(){ window_sampler::present(); } } // TEMPORARY

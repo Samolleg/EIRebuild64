@@ -115,6 +115,28 @@ inline CaveVolumeLayout cave_volume_layout(const std::array<float, 3>& low, cons
     return layout;
 }
 
+// The coarse world volume (outdoors, with loaded neighbour maps): 8 m cells
+// over the union of the active map and the loaded neighbours, so terrain past
+// the active map's edge gets the same sun bounce instead of none (the active
+// volume ends at its terrain bounds: a hard lighting step along the map edge,
+// user 2026-11-07 save1209). Injected from world height and painted colour
+// grids at kCaveWorldTexel metres, composed from every map's own grids.
+inline constexpr float kCaveWorldCell = 8.0f;
+inline constexpr float kCaveWorldTexel = 2.0f;
+inline CaveVolumeLayout cave_world_layout(const std::array<float, 3>& low, const std::array<float, 3>& high) noexcept {
+    CaveVolumeLayout layout{};
+    std::array<float, 3> top = high;
+    top[2] += 4.0f;
+    for (int k = 0; k < 3; ++k) {
+        const float extent = top[k] - low[k];
+        if (!std::isfinite(extent) || extent <= 0.0f) return {};
+        layout.size[k] = static_cast<std::uint32_t>(std::ceil(extent / kCaveWorldCell)) + 1u;
+        layout.origin[k] = low[k] - 0.5f * kCaveWorldCell;
+    }
+    layout.cell = kCaveWorldCell;
+    return layout;
+}
+
 // Slabs per full refresh (round-robin, one per frame), along y.
 inline std::uint32_t cave_volume_slabs(int quality) noexcept { return quality >= 2 ? 16u : 32u; }
 
@@ -124,23 +146,35 @@ struct CaveInjectConstants {
     std::uint32_t size[3]; std::uint32_t vpl_count;
     float grid_origin[2]; float grid_inverse_cell; float albedo;
     std::uint32_t grid_width, grid_height, pad0, pad1;
-    std::uint32_t pad2, light_count, slab_first, mode;  // slab_first in cells; mode: kCaveMode*
+    std::uint32_t out_z, light_count, slab_first, mode;  // out_z: the sub-volume's first z texel; slab_first in cells; mode: kCaveMode*
     float sun_toward[3]; float point_strength;
     float sun_color[3]; float sun_strength;
     std::uint32_t height_width, height_height, sun_samples; float sun_radius;
+    // Height grid frame: texel = (world - height_origin) * height_inverse_texel
+    // (the active map: 0 and 1, its 1 m vertices); the colour grid's level and
+    // texels per metre; bounce_cell: the active volume's cell (the near-field
+    // floor of the sun bounce, the same for both volumes).
+    float height_origin[2]; float height_inverse_texel; std::uint32_t color_level;
+    float color_inverse_texel; float bounce_cell; float pad3, pad4;
 };
-static_assert(sizeof(CaveInjectConstants) == 128, "cave inject constant layout");
+static_assert(sizeof(CaveInjectConstants) == 160, "cave inject constant layout");
 inline constexpr std::uint32_t kCaveModeOutdoor = 1, kCaveModeSunMaps = 2, kCaveModeGroundColor = 4,
                                kCaveModeHeights = 8;
 
 // Constants of the sampling (the tail of the native pixel shader's point-light
-// constants, b5): world to volume uvw, strength (0: no volume) and flags
-// (bit 0 the F10 bounce_debug view, bit 1 outdoors, bits 8+ the exit count).
+// constants, b5): strength (0: no volume) and flags (bit 0 the F10
+// bounce_debug view, bit 1 outdoors, bits 8+ the exit count). The textures
+// hold the active volume at z texels [0, fine_size.z) and the world volume
+// after it (texel_scale: 1 / the texture's size); world_inverse_cell 0: no
+// world volume.
 struct CaveSampleConstants {
     float origin[3]; float strength;
-    float inverse_extent[3]; float flags;
+    float fine_size[3]; float flags;
+    float world_origin[3]; float fine_inverse_cell;
+    float world_size[3]; float world_inverse_cell;
+    float texel_scale[3]; float fine_cell;
 };
-static_assert(sizeof(CaveSampleConstants) == 32, "cave sample constant layout");
+static_assert(sizeof(CaveSampleConstants) == 80, "cave sample constant layout");
 
 // ---- Cave exits (map.txt) and the outdoor light table ----------------------
 
@@ -363,17 +397,19 @@ cbuffer CaveInject:register(b0){
  float3 caveOrigin;float caveCell;uint3 caveSize;uint caveVplCount;
  float2 caveGridOrigin;float caveGridInverseCell;float caveAlbedo;
  uint caveGridWidth;uint caveGridHeight;uint2 cavePad0;
- uint cavePad1;uint caveLightCount;uint caveSlabFirst;uint caveMode;
+ uint caveOutZ;uint caveLightCount;uint caveSlabFirst;uint caveMode;
  float3 caveSunToward;float cavePointStrength;
  float3 caveSunColor;float caveSunStrength;
- uint caveHeightWidth;uint caveHeightHeight;uint caveSunSamples;float caveSunRadius;};
+ uint caveHeightWidth;uint caveHeightHeight;uint caveSunSamples;float caveSunRadius;
+ float2 caveHeightOrigin;float caveHeightInverseTexel;uint caveColorLevel;
+ float caveColorInverseTexel;float caveBounceCell;float2 cavePad3;};
 // The native sun shadow constants (native_shader.h b2), bound as they are.
 cbuffer CaveSunShadow:register(b1){row_major float4x4 caveShadowLight[6];row_major float4x4 caveShadowCamera[6];float4 caveShadowBias[6];uint4 caveShadowControl;};
 struct CaveLight{float4 centerInverseRadiusSquared;float4 color;float4 shadowCenter;float4 shadowSlots;};
 StructuredBuffer<CaveLight> caveLights:register(t0);
 StructuredBuffer<uint> caveGrid:register(t1);
-Texture2D<float> caveHeights:register(t3);       // terrain/liquid surface height, 1 m vertices
-Texture2D<float4> caveGroundColor:register(t4);  // painted ground colour (mip 1: 1 texel per metre)
+Texture2D<float> caveHeights:register(t3);       // terrain/liquid surface height (the active map: 1 m vertices)
+Texture2D<float4> caveGroundColor:register(t4);  // painted ground colour (the active map: mip 1, 1 texel per metre)
 Texture2DArray<float> caveSunDepth:register(t5); // sun cascades
 RWTexture3D<float4> caveOutR:register(u0);
 RWTexture3D<float4> caveOutG:register(u1);
@@ -389,9 +425,9 @@ void caveAdd(inout float4 r,inout float4 g,inout float4 b,float3 light,float3 fr
  float4 basis=float4(caveY0,caveY1*from.y,caveY1*from.z,caveY1*from.x);
  r+=light.r*basis;g+=light.g*basis;b+=light.b*basis;
 }
-// The active map's height grid (map-local metres are world metres).
+// The height grid (the active map: map-local metres are world metres).
 float caveHeight(float2 p){
- p=clamp(p,0,float2(caveHeightWidth,caveHeightHeight)-1.001);int2 i=int2(floor(p));float2 f=p-i;
+ p=clamp((p-caveHeightOrigin)*caveHeightInverseTexel,0,float2(caveHeightWidth,caveHeightHeight)-1.001);int2 i=int2(floor(p));float2 f=p-i;
  float a=caveHeights.Load(int3(i,0)),b=caveHeights.Load(int3(i+int2(1,0),0));
  float c=caveHeights.Load(int3(i+int2(0,1),0)),d=caveHeights.Load(int3(i+int2(1,1),0));
  return lerp(lerp(a,b,f.x),lerp(c,d,f.x),f.y);
@@ -403,8 +439,8 @@ float3 caveGroundNormal(float2 p){
 float3 caveGroundAlbedo(float2 q){
  float3 albedo=caveAlbedo;
  [branch]if((caveMode&4u)!=0){
-  uint w,h,levels;caveGroundColor.GetDimensions(1,w,h,levels);
-  float4 v=caveGroundColor.Load(int3(clamp(int2(floor(q)),0,int2(w,h)-1),1));
+  uint w,h,levels;caveGroundColor.GetDimensions(caveColorLevel,w,h,levels);
+  float4 v=caveGroundColor.Load(int3(clamp(int2(floor((q-caveHeightOrigin)*caveColorInverseTexel)),0,int2(w,h)-1),caveColorLevel));
   if(v.a>=.99)albedo=v.rgb;
  }
  return albedo;
@@ -461,7 +497,7 @@ void caveInjectCS(uint3 id:SV_DispatchThreadID){
  [branch]if((caveMode&1u)!=0&&heights&&caveSunToward.z>.02&&caveSunSamples>0){
   float3 sunLight=caveSunColor*caveSunStrength;
   float area=cavePi*caveSunRadius*caveSunRadius/caveSunSamples;
-  float minimum=.25*caveCell*caveCell;
+  float minimum=.25*caveBounceCell*caveBounceCell;
   [loop]for(uint k=0;k<caveSunSamples;++k){
    float radius=caveSunRadius*sqrt((k+.5)/caveSunSamples),angle=k*2.39996323+rotation;
    float2 q=at.xy+radius*float2(cos(angle),sin(angle));
@@ -552,9 +588,40 @@ void caveInjectCS(uint3 id:SV_DispatchThreadID){
    r.x+=uniformBounce.r*caveY0*4;g.x+=uniformBounce.g*caveY0*4;b.x+=uniformBounce.b*caveY0*4;
   }
  }
+ id.z+=caveOutZ;
  caveOutR[id]=r;caveOutG[id]=g;caveOutB[id]=b;
 }
 )";
+// The world colour grid (the world volume's albedo): per map, its painted
+// colour (alpha 1 where painted) resampled into the world grid texels it
+// covers (the world height grid is composed on the CPU from each map's
+// decoded terrain).
+constexpr char kCaveComposeShader[] = R"(
+cbuffer CaveCompose:register(b0){
+ float2 composeWorldOrigin;float composeTexel;uint composeColorLevel; // world grid low corner, metres per texel; the map colour's level
+ int2 composeFirst;uint2 composeCount;              // the world texels this map covers
+ float3 composeMapOrigin;float composeColorTexelsPerMetre; // world position of the map's vertex 0; its colour level's texels per metre (0: unpainted)
+ float2 composeMapSize;float2 composePad;           // its extent in metres
+};
+Texture2D<float4> composeColor:register(t1);
+SamplerState composeLinear:register(s0);
+RWTexture2D<unorm float4> worldColor:register(u1);
+[numthreads(8,8,1)]void caveComposeCS(uint3 id:SV_DispatchThreadID){
+ if(any(id.xy>=composeCount))return;
+ int2 t=composeFirst+int2(id.xy);
+ float2 local=composeWorldOrigin+(t+.5)*composeTexel-composeMapOrigin.xy; // metres from the map's corner
+ if(any(local<0)||any(local>composeMapSize))return;
+ uint w,h,levels;composeColor.GetDimensions(composeColorLevel,w,h,levels);
+ worldColor[t]=composeColor.SampleLevel(composeLinear,local*composeColorTexelsPerMetre/float2(w,h),composeColorLevel);
+}
+)";
+struct CaveComposeConstants {
+    float world_origin[2]; float texel; std::uint32_t color_level;
+    std::int32_t first[2]; std::uint32_t count[2];
+    float map_origin[3]; float color_texels_per_metre;
+    float map_size[2]; float pad[2];
+};
+static_assert(sizeof(CaveComposeConstants) == 64, "cave compose constant layout");
 
 // Cave mouths seen from inside (renderer_point_shadows.cpp
 // draw_cave_exit_glow): a cave has no sky, so past an exit at the map edge

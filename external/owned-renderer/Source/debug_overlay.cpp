@@ -2,6 +2,7 @@
 #include "debug_overlay.h"
 #include <controller_input_state.h>
 #include "embedded_process_policy.h"
+#include "error_report.h"
 #include "combat_ui.h"
 
 #include "cursor_confinement.h"
@@ -172,6 +173,32 @@ const char* blocked_option_note(const RendererConfig& config, const char* key) {
 #else
         return bridge_camera_pan_smoothing_unavailable_reason();
 #endif
+    // Ray tracing: only what an effect truly needs (a custom mix keeps every
+    // other setting its own). Direct3D 12 for all of it.
+    if (std::strncmp(key, "rt_", 3) == 0) {
+        if (!g_running_d3d12) return "needs Direct3D 12 renderer";
+        const auto on = [&](const char* name, bool fallback) {
+            const RendererOption* option = config.find(name);
+            return option && option->type == RendererOptionType::boolean ? option->boolean_value : fallback;
+        };
+        // Ray Reconstruction is part of DLSS.
+        if (std::strcmp(key, "rt_ray_reconstruction") == 0 && active_upscaler(config) != kUpscalerDlss)
+            return "needs NVIDIA DLSS upscaling";
+        // Smooth surfaces take their roughness from the material response.
+        if (std::strcmp(key, "rt_reflection_surfaces") == 0 && configured_value(config, "material_quality") <= 0)
+            return "needs Material quality above Off";
+        // Water's traced rays extend its own reflection pass; surfaces need materials.
+        if (std::strcmp(key, "rt_reflections") == 0 && !on("water_reflections", true) &&
+            configured_value(config, "material_quality") <= 0)
+            return "needs Water reflections or Material quality above Off";
+    }
+    // The traced sun mask is written per depth-prepassed receiver, so ray
+    // traced sun shadows keep the prepass on (Renderer::depth_prepass_d3d12).
+    if (std::strcmp(key, "depth_prepass") == 0 && g_running_d3d12) {
+        const RendererOption* traced = config.find("rt_sun_shadows");
+        if (traced && traced->type == RendererOptionType::boolean && traced->boolean_value)
+            return "on while ray traced sun shadows are on";
+    }
     // Terrain cliffs need the material blend (configured_terrain_cliffs).
     if (std::strcmp(key, "terrain_cliffs") == 0 && configured_value(config, "terrain_blend") <= 0)
         return "needs material blend";
@@ -496,7 +523,7 @@ void draw_live_statistics(const RendererResourceSnapshot& resources) {
         ImGui::TextUnformatted(ui_text("5s avg n/a  5s low n/a"));
     }
     if (resources.culling_frozen)
-        ImGui::TextColored(ImVec4(1.f, .35f, .2f, 1.f), ui_text("CULLING FROZEN (Shift+F11): objects culled for the frozen camera"));
+        ImGui::TextColored(ImVec4(1.f, .35f, .2f, 1.f), ui_text("CULLING FROZEN (Ctrl+F11): objects culled for the frozen camera"));
     if (resources.fog_status[0])
         ImGui::TextColored(resources.fog_problem ? ImVec4(1.f, .35f, .2f, 1.f) : ImVec4(.75f, .9f, 1.f, 1.f), "%s",
                            resources.fog_status);
@@ -563,7 +590,7 @@ void draw_live_statistics(const RendererResourceSnapshot& resources) {
     }
     const VramBudgetSnapshot& vram = resources.vram_budget;
     if (vram.known && vram.enforced)
-        ImGui::Text(ui_text("VRAM budget: %.0f/%.0f MiB%s, reduced: %s, idle evicted %.0f MiB"), mib(vram.usage_bytes),
+        ImGui::Text(ui_text("VRAM budget: %.0f/%.0f MiB%s now, reduced: %s, evicted this session %.0f MiB"), mib(vram.usage_bytes),
                     mib(vram.budget_bytes), vram.overridden ? ui_text(" (override)") : "",
                     ui_text(vram_budget_level_text(vram.level)), mib(vram.evicted_bytes));
     else if (vram.known && vram.uma)
@@ -759,7 +786,7 @@ void draw_performance_tab(DebugOverlay::Implementation& state, const RenderProfi
                 static_cast<unsigned long long>(resources.released_surfaces),
                 mib(resources.released_surface_bytes),
                 static_cast<unsigned long long>(resources.pinned_surfaces));
-    ImGui::Text(ui_text("Surface restore readbacks: %llu (%.2f ms total)"),
+    ImGui::Text(ui_text("Surface restore readbacks since start: %llu (%.2f ms total)"),
                 static_cast<unsigned long long>(resources.surface_restore_readbacks),
                 resources.surface_restore_readback_ms);
 
@@ -941,6 +968,7 @@ void draw_frame_generation_choice(RendererConfig& config, const RendererOption& 
 // Options grouped "Diagnostics" (debug views such as the critter showcase)
 // get their own tab; the Graphics tab lists every other group.
 constexpr const char* kDiagnosticsGroup = "Diagnostics";
+void draw_rt_quality_choice(RendererConfig& config);
 void draw_graphics_tab(RendererConfig& config, ImGuiTextFilter& filter, bool diagnostics = false,bool ui_only = false) {
     filter.Draw(ui_text("Search options"), -1.f);
     if (config.options().empty()) {
@@ -996,6 +1024,8 @@ void draw_graphics_tab(RendererConfig& config, ImGuiTextFilter& filter, bool dia
             int value = option.integer_value;
             if (option.key == "frame_generation") {
                 draw_frame_generation_choice(config, option);
+            } else if (option.key == "rt_quality") {
+                draw_rt_quality_choice(config);
             } else if (option.key == "camp_ui_layout") {
                 const char* choices[] = {ui_text("Original UI (comparison)"), ui_text("Wide grid")};
                 if (ImGui::Combo("##value", &value, choices, 2))
@@ -1230,7 +1260,7 @@ void hud_panel_options(RendererConfig& config,unsigned panel,const HudPanelBound
         const auto* wrap=config.find((prefix+"_slots_per_column").c_str());
         if(wrap) {int value=wrap->integer_value;
             const bool rows=(direction && config.find(direction) && config.find(direction)->integer_value>=2);
-            if(ImGui::SliderInt(ui_text(rows?"Slots per row":"Slots per column"),&value,wrap->integer_minimum,wrap->integer_maximum,value?"%d":ui_text("0 (one line)")))config.set_integer(wrap->key.c_str(),value);}
+            if(ImGui::SliderInt(ui_text(rows?"Slots per row":"Slots per column"),&value,wrap->integer_minimum,wrap->integer_maximum,value?"%d":ui_text(HudPanel(panel)==HudPanel::spells?"0 (wrap after 8)":"0 (one line)")))config.set_integer(wrap->key.c_str(),value);}
     }
     if(HudPanel(panel)==HudPanel::minimap || HudPanel(panel)==HudPanel::character_info || HudPanel(panel)==HudPanel::messages) {
         const std::string prefix=kHudPanels[panel].key;
@@ -1395,7 +1425,7 @@ void draw_full_overlay(DebugOverlay& overlay, DebugOverlay::Implementation& stat
                 draw_performance_tab(state, profile, bridge, resources);
                 ImGui::Separator();
                 if (ImGui::Button(ui_text("Capture next frame, pass by pass"))) state.capture_requested = true;
-                if (ImGui::Button(ui_text("Freeze / unfreeze culling camera (Shift+F11)"))) state.cull_freeze_toggle = true;
+                if (ImGui::Button(ui_text("Freeze / unfreeze culling camera (Ctrl+F11)"))) state.cull_freeze_toggle = true;
                 help_marker(ui_text("Explicit diagnostic capture. It may stall that captured frame; normal monitoring never writes to disk."));
                 ImGui::EndTabItem();
             }
@@ -1748,6 +1778,11 @@ void draw_video_memory(const DebugOverlay::Implementation& state, const Renderer
     row(ui_text("Terrain material cache"));
     if (memory.terrain_cache_known) text_megabytes(memory.terrain_cache_bytes);
     else ImGui::TextDisabled("%s", ui_text("n/a"));
+    if (resources.d3d12_backend) {
+        // The groups sum the renderer's Direct3D 11 resources; the D3D12 executor's own are not itemised yet.
+        row(ui_text("Direct3D 12: most feature memory is counted under Other"));
+        ImGui::TextDisabled("%s", "");
+    }
     if (measured && resources.gpu_usage_bytes > own) {
         row(ui_text("Other (driver, shaders, not listed)"));
         text_megabytes(resources.gpu_usage_bytes - own);
@@ -1759,7 +1794,7 @@ void draw_video_memory(const DebugOverlay::Implementation& state, const Renderer
 // this device can; why one is missing is shown below the list. A saved
 // method that is unavailable is marked here; embedded DLSS refuses world frames.
 void draw_upscaler_choice(RendererConfig& config, const RendererOption& option) {
-    static constexpr const char* kLabels[kUpscalerMethodMaximum + 1] = {"Off", "NVIDIA DLSS", "AMD FSR 2"};
+    static constexpr const char* kLabels[kUpscalerMethodMaximum + 1] = {"Off", "NVIDIA DLSS", "AMD FSR"};
     const char* dlss_reason = dlss_unavailable_reason();
     const char* fsr_reason = fsr_unavailable_reason();
     const auto available = [&](int value) {
@@ -1802,6 +1837,31 @@ void draw_upscaler_quality_choice(RendererConfig& config, const RendererOption& 
     if (note) ImGui::TextDisabled("%s", ui_text(note));
 }
 
+// Ray tracing preset: Off and the three presets, detected from the ray traced
+// options as the graphics preset is from its own; Custom is listed only
+// while it is the case (an option changed after choosing a preset). Choosing
+// a preset copies its values into those options and nothing else (no
+// upscaling, Ray Reconstruction or frame generation; user decision
+// 2026-11-15). The graphics presets never change these options.
+void draw_rt_quality_choice(RendererConfig& config) {
+    static constexpr const char* kLabels[] = {"Off", "Low", "Medium", "High", "Custom"};
+    const int custom = static_cast<int>(RtQuality::custom);
+    const int current = static_cast<int>(detect_rt_quality(config));
+    const char* note = !g_running_d3d12 ? "needs Direct3D 12 renderer" : nullptr;
+    ImGui::BeginDisabled(note != nullptr);
+    if (ImGui::BeginCombo("##value", ui_text(kLabels[current]))) {
+        for (int value = 0; value <= custom; ++value) {
+            if (value == custom && current != custom) continue;
+            const bool selected = value == current;
+            if (ImGui::Selectable(ui_text(kLabels[value]), selected) && !selected)
+                select_rt_quality(config, static_cast<RtQuality>(value));
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::EndDisabled();
+    if (note) ImGui::TextDisabled("%s", ui_text(note));
+}
+
 void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& setting, bool developer,
                          DebugOverlay::Implementation& state, const VideoMemoryBreakdown& memory) {
     const RendererOption* option = config.find(setting.key);
@@ -1813,6 +1873,12 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
             ImGui::TextColored(ImVec4(1.f, .35f, .2f, 1.f), ui_text("Missing option: %s"), setting.key);
         }
         return;
+    }
+    // The ray tracing preset heads its own group of the lighting options.
+    if (std::strcmp(setting.key, "rt_quality") == 0) {
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        ImGui::SeparatorText(ui_text("Ray tracing"));
     }
     ImGui::TableNextRow();
     ImGui::TableNextColumn();
@@ -1876,6 +1942,8 @@ void draw_player_setting(RendererConfig& config, const PlayerGraphicsSetting& se
             draw_upscaler_choice(config, *option);
         } else if (std::strcmp(setting.key, "upscaler_quality") == 0) {
             draw_upscaler_quality_choice(config, *option);
+        } else if (std::strcmp(setting.key, "rt_quality") == 0) {
+            draw_rt_quality_choice(config);
         } else if (std::strcmp(setting.key, "render_scale") == 0) {
             char preview[16]{};
             std::snprintf(preview, sizeof(preview), "%d%%", option->integer_value);
@@ -2035,7 +2103,7 @@ void draw_settings_window(DebugOverlay::Implementation& state, RendererConfig& c
             state.preset_slider = slider;
             apply_graphics_preset(config, static_cast<GraphicsPreset>(slider));
         }
-        ImGui::SetItemTooltip(ui_text("Drag to choose Low, Medium, High or Ultra. Changing an advanced option below makes it Custom."));
+        ImGui::SetItemTooltip(ui_text("Drag to choose Low, Medium, High or Ultra. Changing an advanced option below makes it Custom. Upscaling and render scale stay your own settings."));
         // Stop labels under the slider.
         const float width = ImGui::GetContentRegionAvail().x;
         const float left = ImGui::GetCursorPosX();
@@ -2480,7 +2548,8 @@ HRESULT DebugOverlay::render(const RenderProfileSnapshot* profile,
     if (world_map_notice_until_ && GetTickCount64() >= world_map_notice_until_) {
         world_map_notice_.clear(); world_map_notice_until_ = 0;
     }
-    if (!combat_visible && !visible() && resources.critters.labels.empty() && !notice_ && world_map_notice_.empty() && !capture_notice &&
+    if (!combat_visible && !visible() && resources.critters.labels.empty() && resources.impostor_labels.empty() && !notice_ &&
+        world_map_notice_.empty() && !capture_notice &&
         harness_banner_.empty()) return S_FALSE;
 
     apply_ui_language(*implementation_, config_);
@@ -2504,12 +2573,31 @@ HRESULT DebugOverlay::render(const RenderProfileSnapshot* profile,
                           profiler, shadows);
     draw_hud_editor(*implementation_,config_);
     if (implementation_->settings_open) draw_settings_window(*implementation_, config_, resources);
+    // Impostor debug view: each neighbour impostor object's slice, model and
+    // MOB object id at its centre (viewport fractions).
+    if (!resources.impostor_labels.empty()) {
+        ImDrawList* draw = ImGui::GetBackgroundDrawList();
+        for (const auto& label : resources.impostor_labels) {
+            const ImVec2 size = ImGui::CalcTextSize(label.text);
+            const ImVec2 at(label.x * io.DisplaySize.x - size.x * .5f, label.y * io.DisplaySize.y - size.y * .5f);
+            draw->AddRectFilled(ImVec2(at.x - 2, at.y - 1), ImVec2(at.x + size.x + 2, at.y + size.y + 1), IM_COL32(0, 0, 0, 170));
+            draw->AddText(at, label.color ? ImU32(label.color) : IM_COL32(255, 120, 255, 255), label.text);
+        }
+    }
     // Critter labels remain visible after closing F10 (viewport fractions).
     if (!resources.critters.labels.empty()) {
         ImDrawList* draw = ImGui::GetBackgroundDrawList();
         for (const auto& label : resources.critters.labels) {
             const ImVec2 size = ImGui::CalcTextSize(label.text);
             const ImVec2 at(label.x * io.DisplaySize.x - size.x * .5f, label.y * io.DisplaySize.y);
+            // A coloured label is an alarm (a unit with every model part): a
+            // filled box in its colour with a white frame and text.
+            if (label.color) {
+                draw->AddRectFilled(ImVec2(at.x - 6, at.y - 4), ImVec2(at.x + size.x + 6, at.y + size.y + 4), ImU32(label.color));
+                draw->AddRect(ImVec2(at.x - 6, at.y - 4), ImVec2(at.x + size.x + 6, at.y + size.y + 4), IM_COL32(255, 255, 255, 255), 0.f, 0, 2.f);
+                draw->AddText(at, IM_COL32(255, 255, 255, 255), label.text);
+                continue;
+            }
             draw->AddRectFilled(ImVec2(at.x - 2, at.y - 1), ImVec2(at.x + size.x + 2, at.y + size.y + 1), IM_COL32(0, 0, 0, 160));
             draw->AddText(at, IM_COL32(255, 240, 160, 255), label.text);
         }
@@ -2579,8 +2667,8 @@ void DebugOverlay::render_again() noexcept {
     if (ImDrawData* data = ImGui::GetDrawData(); data && data->Valid) renderer_->render(data);
 }
 
-void DebugOverlay::render_shader_preparation(std::size_t done, std::size_t total) noexcept {
-    if (!implementation_ || !implementation_->imgui) return;
+bool DebugOverlay::render_shader_preparation(std::size_t done, std::size_t total) noexcept {
+    if (!implementation_ || !implementation_->imgui) return false;
     ImGui::SetCurrentContext(implementation_->imgui);
     apply_ui_language(*implementation_, config_);
     if (!renderer_) ImGui_ImplDX11_NewFrame();
@@ -2603,6 +2691,8 @@ void DebugOverlay::render_shader_preparation(std::size_t done, std::size_t total
     ImGui::End();
     ImGui::Render();
     if (renderer_) renderer_->render(ImGui::GetDrawData()); else ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    const ImDrawData* data = ImGui::GetDrawData();
+    return data && data->DisplaySize.x > 0.f && data->DisplaySize.y > 0.f && data->TotalVtxCount > 0;
 }
 
 // F11 with the overlay hidden: frame timing is off then, so run it for
@@ -2646,8 +2736,13 @@ void DebugOverlay::maintain() noexcept {
     // Core mode: F11 goes to the host as its own command (core_present).
     const bool f11_down = !core_input && !host_child && native_user_input_enabled() && (GetAsyncKeyState(VK_F11) & 0x8000) != 0;
     if (focused && f11_down && !implementation_->f11_was_down) {
-        if (shift_down) implementation_->cull_freeze_toggle = true;
-        else request_capture(*implementation_, config_);
+        // F11 capture; Shift+F11 the same capture packed into the testers'
+        // diagnostics zip; Ctrl+F11 the developer's culling-camera freeze.
+        if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0) implementation_->cull_freeze_toggle = true;
+        else {
+            request_capture(*implementation_, config_);
+            if (shift_down) start_diagnostics_package();
+        }
     }
     implementation_->f11_was_down = f11_down;
     if (implementation_->capture_warmup && --implementation_->capture_warmup == 0)
@@ -2745,6 +2840,11 @@ bool DebugOverlay::wants_profiling() const noexcept {
                                implementation_->capture_warmup || implementation_->capture_requested);
 }
 
+unsigned DebugOverlay::capture_warmup_left() const noexcept {
+    if (!implementation_) return 0;
+    return implementation_->capture_requested ? 1u : implementation_->capture_warmup;
+}
+
 bool DebugOverlay::visible() const noexcept {
     return mode()!=DebugOverlayMode::hidden || settings_open() ||
         game_hud_editing();
@@ -2795,6 +2895,7 @@ const char* DebugOverlay::graphics_reset_notice(bool world_on_screen) noexcept {
 void DebugOverlay::add_graphics_reset_notice(const char* text) noexcept {
     if (!implementation_ || !text || !*text) return;
     auto& state = *implementation_;
+    if (!state.graphics_reset_pending) state.graphics_reset_until = 0;  // a later notice gets its own 20 s
     const std::size_t used = state.graphics_reset_pending ? std::strlen(state.graphics_reset_text) : 0;
     std::snprintf(state.graphics_reset_text + used, sizeof(state.graphics_reset_text) - used, "%s%s", used ? " " : "", text);
     state.graphics_reset_pending = true;

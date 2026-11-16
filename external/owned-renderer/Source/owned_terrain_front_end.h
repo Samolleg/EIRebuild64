@@ -304,6 +304,12 @@ struct OwnedTerrainFrameInputs {
     std::array<float, 2> lod_distances{};
     std::int32_t maximum_lod = 0;
     bool force_full_detail = false;
+    // Eye distance (m) beyond which this frame's world pixels are wholly faded
+    // into fog/sky (the renderer's fogStock.w: draw-distance fade end, nearer
+    // where fog alone covers), rounded up to 8 m. A sector leaves full detail
+    // only when all of it lies beyond it, so no level change is ever visible.
+    // 0: not known yet, full detail everywhere.
+    float lod_hidden_distance = 0.0f;
     std::uint32_t runtime_texture_count = 0;
     std::uint32_t terrain_render_state = 0;
     std::uint64_t game_visibility_fingerprint = 0;

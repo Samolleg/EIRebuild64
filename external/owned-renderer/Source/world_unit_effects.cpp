@@ -96,6 +96,7 @@ void build_ground_cover_units(const RetainedVisualFrame& frame,const TerrainCpuA
                     detail.stance=critters::stance_from_clip(s.database->entries[s.ordinal].name.c_str());
                 detail.dead=corpse;
                 detail.blood=unit.values.blood;
+                detail.all_model_parts=unit.assembly?unit.assembly->all_model_parts:0;
                 detail.visibility=unit.values.visibility;
                 detail.loudness=unit.values.loudness;
                 detail.vision=unit.values.vision;

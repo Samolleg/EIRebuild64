@@ -213,6 +213,9 @@ struct Capture {
 struct RetireSurface {
     static constexpr bool frame_values = false;
     std::uint64_t surface_id = 0;
+    // Core mode: drop this content from the host's content store (0: none;
+    // with surface_id 0 nothing else runs).
+    std::uint64_t evict_content = 0;
     void run(Renderer& renderer);  // core mode: also drops the host surface table entry
 };
 struct RetireCampTexture {
@@ -257,7 +260,31 @@ struct SurfaceWrite {
     RECT dirty{};
     std::uint32_t first_row = 0, rows = 0;
     std::vector<std::uint8_t> bytes;
+    // Core mode content store (keyed by content_hash, written and evicted
+    // only by these commands): to_store keeps this whole write's bytes there;
+    // from_store is a whole write without bytes that takes them from there.
+    std::uint64_t content_hash = 0;
+    bool to_store = false, from_store = false;
     void run(Renderer& renderer);
+};
+
+// Core mode: a scene packet's arrays held in the host's packet store (by
+// content hash), immutable once stored; their mips point into mip_bytes.
+struct PacketArrays {
+    std::vector<NativePackedGroup> positions, normals;
+    std::vector<std::uint32_t> diffuse, specular;
+    std::vector<NativeTextureCoordinate> coordinates;
+    std::vector<NativeVertexComponent> components;
+    std::vector<std::uint16_t> indices;
+    std::vector<NativeMorphOffset> morphs;
+    std::vector<NativeOwnedTextureMip> mips;
+    std::vector<std::vector<std::uint8_t>> mip_bytes;
+};
+// How a core-mode packet's arrays travel (Packet::store).
+enum class PacketStore : std::uint8_t {
+    inline_only = 0,  // in the message; not kept
+    keep = 1,         // in the message; the host keeps them under store_hash
+    stored = 2,       // not in the message: the host's store has store_hash
 };
 
 // Generic scene packet (legacy figure geometry, HUD figures; proxy
@@ -291,19 +318,64 @@ struct Packet {
     bool camp_surface_present = false;
     OwnedVisualSurface camp_surface{};
     std::uint8_t prepared_handles = 0;
-    // Points the view (and its owned-texture mips) at the arrays above.
+    // Core mode, encode side only (never on the wire): the game view whose
+    // arrays the encoder reads in place of the vectors above (the post is
+    // synchronous, so the game's arrays outlive it; borrow_scene_packet).
+    const NativeGeometryView* borrowed = nullptr;
+    // ---- core mode: the host's packet store (claude/stream-delta) ----
+    // The arrays' content hash and how they travel (Renderer::core_packet_store
+    // decides on the game side); on the host, `stored` holds them for
+    // PacketStore::keep/stored, and store_missing names a reference the store
+    // did not hold (the packet is omitted and logged).
+    PacketStore store = PacketStore::inline_only;
+    std::uint64_t store_hash = 0;
+    std::shared_ptr<PacketArrays> stored;
+    // The owned texture's mips apart from the arrays (one texture serves many
+    // packets and frames): texture_hash names them in the same store; with
+    // inline_only they travel and are kept with the arrays.
+    PacketStore texture_store = PacketStore::inline_only;
+    std::uint64_t texture_hash = 0;
+    std::shared_ptr<PacketArrays> stored_texture;
+    bool store_missing = false;
+    // Host only (never on the wire): a camp icon packet's coordinates mapped
+    // into its cropped home (Packet::run), in place of the arrays' own.
+    const std::vector<NativeTextureCoordinate>* remapped_coordinates = nullptr;
+    // The owned-texture mips the packet draws with (bound by bind()).
+    const std::vector<NativeOwnedTextureMip>& bound_mips() const noexcept {
+        return stored_texture ? stored_texture->mips : stored ? stored->mips : mips;
+    }
+    // Points the view (and its owned-texture mips) at the arrays above, or
+    // at the stored ones.
     void bind() noexcept {
         if (camp_surface_present) view.owned_texture.surface = &camp_surface;
-        view.positions = positions.data(); view.normals = normals.data();
-        view.diffuse = diffuse.empty() ? nullptr : diffuse.data();
-        view.specular = specular.empty() ? nullptr : specular.data();
-        view.texture_coordinates = coordinates.data(); view.components = components.data();
-        view.indices = indices.data();
-        view.morphs = morphs.empty() ? nullptr : morphs.data();
-        for (std::size_t index = 0; index < mips.size(); ++index)
-            mips[index].data = mip_bytes[index].empty() ? nullptr : mip_bytes[index].data();
-        if (!mips.empty()) view.owned_texture.mips = mips.data();
+        const auto& p = stored ? stored->positions : positions;
+        const auto& n = stored ? stored->normals : normals;
+        const auto& d = stored ? stored->diffuse : diffuse;
+        const auto& s = stored ? stored->specular : specular;
+        const auto& uv = remapped_coordinates ? *remapped_coordinates : stored ? stored->coordinates : coordinates;
+        const auto& c = stored ? stored->components : components;
+        const auto& i = stored ? stored->indices : indices;
+        const auto& m = stored ? stored->morphs : morphs;
+        view.positions = p.data(); view.normals = n.data();
+        view.diffuse = d.empty() ? nullptr : d.data();
+        view.specular = s.empty() ? nullptr : s.data();
+        view.texture_coordinates = uv.data(); view.components = c.data();
+        view.indices = i.data();
+        view.morphs = m.empty() ? nullptr : m.data();
+        if (!stored_texture && !stored)
+            for (std::size_t index = 0; index < mips.size(); ++index)
+                mips[index].data = mip_bytes[index].empty() ? nullptr : mip_bytes[index].data();
+        const auto& bound = bound_mips();
+        if (!bound.empty()) view.owned_texture.mips = bound.data();
     }
+    void run(Renderer& renderer);
+};
+
+// Core mode: stored packet arrays the game no longer references (unused for a
+// while, or over the store's budget) leave the host's packet store.
+struct PacketStoreEvict {
+    static constexpr bool frame_values = false;
+    std::vector<std::uint64_t> hashes;
     void run(Renderer& renderer);
 };
 

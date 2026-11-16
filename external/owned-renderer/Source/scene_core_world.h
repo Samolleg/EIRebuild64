@@ -83,18 +83,58 @@ template <class A> void opaque_pointer(A& a, void*& value) {
     if constexpr (A::decoding) value = reinterpret_cast<void*>(static_cast<std::uintptr_t>(wide));
 }
 
-template <class A> void terrain_frame_fields(A& a, OwnedTerrainRuntimeFrame& v) {
+// ---- Core stream deltas (claude/stream-delta) ----------------------------
+// The large per-frame vectors of WorldScene and TransparentTerrain travel only
+// when they changed: a set bit in the command's `same` mask says "the value
+// the host last decoded for this slot" (the game compared content hashes,
+// core_stream_delta in engine_bridge.cpp). Both commands share the slots, so
+// the transparent range reuses what its world frame just sent. The host keeps
+// the last decoded value of each slot (replay thread only).
+enum DeltaSlot : unsigned {
+    delta_sectors, delta_spatial_parts, delta_base_commands, delta_transparent_commands, delta_dynamic,
+    delta_publication_seen, delta_fog, delta_fog_ids, delta_fog_serials, delta_slot_count
+};
+struct DeltaSlots {
+    std::vector<OwnedTerrainSectorState> sectors;
+    std::vector<OwnedTerrainSpatialPart> spatial_parts;
+    std::vector<OwnedTerrainCommand> base_commands, transparent_commands;
+    std::vector<OwnedTerrainDynamicSector> dynamic;
+    std::vector<std::uint8_t> publication_seen;
+    std::vector<std::int16_t> fog;
+    std::vector<std::int32_t> fog_ids;
+    std::vector<std::uint64_t> fog_serials;
+};
+inline DeltaSlots& host_delta_slots() {
+    static DeltaSlots slots;
+    return slots;
+}
+template <class A, class T> void delta_field(A& a, std::uint32_t same, DeltaSlot slot, T& value, T& kept) {
+    if (same & (1u << slot)) {
+        if constexpr (A::decoding) value = kept;
+        return;
+    }
+    scene_wire::field(a, value);
+    if constexpr (A::decoding) kept = value;
+}
+
+template <class A> void terrain_frame_fields(A& a, OwnedTerrainRuntimeFrame& v, std::uint32_t same = 0) {
     auto& f = v.front_end;
+    auto& kept = host_delta_slots();
     std::uint8_t source_is_values = f.source && f.source == v.source_values.terrain ? 1 : 0;
     std::uint8_t source_present = v.source_values.terrain ? 1 : 0;
     std::uint64_t generation = v.source_values.source_generation, revision = v.source_values.source_revision;
-    scene_wire::fields_of(a, f.status, source_is_values, f.inputs, f.sectors, f.spatial_parts, f.base_commands,
-                          f.transparent_commands, f.spatial_object_to_world, f.spatial_geometry_revision,
+    scene_wire::fields_of(a, f.status, source_is_values, f.inputs);
+    delta_field(a, same, delta_sectors, f.sectors, kept.sectors);
+    delta_field(a, same, delta_spatial_parts, f.spatial_parts, kept.spatial_parts);
+    delta_field(a, same, delta_base_commands, f.base_commands, kept.base_commands);
+    delta_field(a, same, delta_transparent_commands, f.transparent_commands, kept.transparent_commands);
+    scene_wire::fields_of(a, f.spatial_object_to_world, f.spatial_geometry_revision,
                           f.spatial_bounds_computations, f.spatial_bounds_reuses, f.spatial_front_end_reuses,
                           f.spatial_receiver_reuses, f.spatial_caster_reuses, f.spatial_record_reuses,
                           f.preparation_count, f.base_submission_count, f.transparent_reuse_count, f.base_requested,
-                          f.base_submitted, f.failed_after_claim, f.spatial_ready, source_present, generation, revision,
-                          v.dynamic, v.publication_seen);
+                          f.base_submitted, f.failed_after_claim, f.spatial_ready, source_present, generation, revision);
+    delta_field(a, same, delta_dynamic, v.dynamic, kept.dynamic);
+    delta_field(a, same, delta_publication_seen, v.publication_seen, kept.publication_seen);
     std::uint32_t handles = static_cast<std::uint32_t>(v.texture_handles.size());
     scene_wire::field(a, handles);
     if constexpr (A::decoding) {
@@ -129,6 +169,7 @@ template <class A> void fields(A&, WorldEnd&) {}
 // queue_owned_visual_scene: the seam's whole world frame.
 struct WorldScene {
     static constexpr bool frame_values = true;
+    std::uint32_t same = 0;  // DeltaSlot bits: the host's kept value (core_stream_delta)
     std::uint64_t world_sequence = 0;  // the game thread's count of world frames sent (wound layers name it)
     std::array<float, 16> world_to_clip{};
     float camera_anchor_z = 0;  // the game camera's anchor height (NaN unknown)
@@ -153,17 +194,22 @@ struct WorldScene {
     void run(Renderer& renderer);
 };
 template <class A> void fields(A& a, WorldScene& v) {
-    scene_wire::fields_of(a, v.world_sequence, v.world_to_clip, v.camera_anchor_z, v.pass, v.time, v.flags, v.draw_undetected,
-                          v.shadow_source_revision);
-    terrain_frame_fields(a, v.terrain);
-    scene_wire::fields_of(a, v.lighting, v.fog, v.fog_ids, v.fog_serials, v.fog_revision, v.terrain_textures, v.terrain_shadow_textures,
-                          v.footprints, v.sinks);
+    scene_wire::fields_of(a, v.same, v.world_sequence, v.world_to_clip, v.camera_anchor_z, v.pass, v.time, v.flags,
+                          v.draw_undetected, v.shadow_source_revision);
+    terrain_frame_fields(a, v.terrain, v.same);
+    scene_wire::field(a, v.lighting);
+    auto& kept = host_delta_slots();
+    delta_field(a, v.same, delta_fog, v.fog, kept.fog);
+    delta_field(a, v.same, delta_fog_ids, v.fog_ids, kept.fog_ids);
+    delta_field(a, v.same, delta_fog_serials, v.fog_serials, kept.fog_serials);
+    scene_wire::fields_of(a, v.fog_revision, v.terrain_textures, v.terrain_shadow_textures, v.footprints, v.sinks);
 }
 
 // The transparent terrain range (draw_source_owned_terrain_range's
 // submit_transparent action).
 struct TransparentTerrain {
     static constexpr bool frame_values = true;
+    std::uint32_t same = 0;  // DeltaSlot bits (core_stream_delta)
     OwnedTerrainRuntimeFrame terrain;
     NativeWorldLightingFrame lighting{};
     std::vector<std::shared_ptr<SurfaceImage>> textures;
@@ -172,7 +218,8 @@ struct TransparentTerrain {
     void run(Renderer& renderer);
 };
 template <class A> void fields(A& a, TransparentTerrain& v) {
-    terrain_frame_fields(a, v.terrain);
+    scene_wire::field(a, v.same);
+    terrain_frame_fields(a, v.terrain, v.same);
     scene_wire::fields_of(a, v.lighting, v.textures);
     opaque_pointer(a, v.renderer);
     scene_wire::field(a, v.sinks);
@@ -208,15 +255,16 @@ struct Preview {
     std::uint64_t presentation_serial = 0;
     std::vector<OwnedPreviewPart> parts;
     std::vector<SceneSinkState> sets;
-    // Owned portraits: the face pictures of a non-neutral expression (the
-    // host loads them from its store and draws the changed texels over the head).
+    // Owned portraits: the neutral face picture (always, so the host builds
+    // every expression overlay ahead) and the expression picture of a
+    // non-neutral expression (the host draws its changed texels over the head).
     std::string face_neutral, face_expression;
     std::uint32_t bare_head = 0;   // 1: portrait_helmet off on a helmeted unit (bare hd / hr.HH)
     std::int32_t portrait_hair = -1;   // native hairstyle for bare_head; -1: no hair
     // Owned portraits: the frame's inner rectangle (native canvas pixels; left,
     // top, right, bottom), where the portrait's depth is its own.
     std::array<float, 4> portrait_clip{};
-    NativeWorldLighting portrait_lighting{};   // used only by owned portraits (view 2)
+    NativeWorldLighting portrait_lighting{};   // every view's studio light (interface_studio_lighting)
     void run(Renderer& renderer);
 };
 template <class A> void fields(A& a, Preview& v) {

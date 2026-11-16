@@ -291,6 +291,11 @@ struct State {
     unsigned long result_file_error = 0; // the last results.txt open failure named (0: none)
     bool clock_saved = false;
     float saved_scale = 0.0f, saved_modifier = 0.0f;
+    // Outfitting screen (camp) verbs: hand-off to the camp Draw entry.
+    bool camp_pending = false, camp_done = false, camp_ok = false;
+    std::string camp_detail;
+    std::uint64_t camp_frames = 0, camp_frames_at_open = 0, outfit_started_ms = 0;
+    unsigned camp_idle_presents = 0;
 };
 
 std::string entry_error(const State& s, std::uintptr_t rva,
@@ -1266,6 +1271,7 @@ const HarnessCommand* harness_present_step() noexcept {
             }
             return nullptr;
         }
+        case HarnessVerb::equip_cycle:
         case HarnessVerb::camera_path:
             // Temporary (camera-movement frame cost): one step at each world
             // frame (harness_world_frame); the renderer writes each present's
@@ -1279,7 +1285,53 @@ const HarnessCommand* harness_present_step() noexcept {
             }
             entry.posted = true;
             s.world_pending = true;s.world_done = false;
-            return &command;
+            // equip_cycle runs only at the world frame; the renderer times camera_path.
+            return command.verb == HarnessVerb::camera_path ? &command : nullptr;
+        case HarnessVerb::open_outfitting: {
+            if (!s.game_verified) { retire_front(false, "unsupported game image"); continue; }
+            if (!entry.posted) {
+                entry.posted = true;
+                s.world_pending = true;
+                s.world_done = false;
+                s.camp_detail.clear();
+                s.camp_frames_at_open = s.camp_frames;
+                s.outfit_started_ms = GetTickCount64();
+            }
+            if (s.world_done) {
+                if (!s.world_ok) { s.world_done = false; retire_front(false, s.world_detail); continue; }
+                if (s.camp_frames > s.camp_frames_at_open + 2) {
+                    s.world_done = false;
+                    retire_front(true, "outfitting screen open: " + s.camp_detail + "; " + s.world_detail);
+                    continue;
+                }
+            } else if (on_travel_map()) {
+                s.world_pending = false; retire_front(false, kTravelMapDetail); continue;
+            }
+            if (harness_timed_out(s.outfit_started_ms, GetTickCount64(), 30)) {
+                const bool pressed = s.world_done && s.world_ok;
+                s.world_pending = false; s.world_done = false;
+                retire_front(false, pressed ? "no camp screen within 30 s after the go-camp button (the addon "
+                    "refuses in combat, with enemies near or in an excluded zone): " + s.world_detail
+                    : std::string("no world frame within 30 s"));
+                continue;
+            }
+            return nullptr;
+        }
+        case HarnessVerb::outfit_equip:
+        case HarnessVerb::scroll_items:
+            if (!s.game_verified) { retire_front(false, "unsupported game image"); continue; }
+            if (entry.posted && s.camp_done && entry.progress >= command.frames) {
+                s.camp_pending = s.camp_done = false;
+                retire_front(s.camp_ok, s.camp_detail);
+                continue;
+            }
+            if (!entry.posted) { entry.posted = true; s.camp_pending = true; s.camp_done = false; s.camp_idle_presents = 0; }
+            if (++s.camp_idle_presents > kWorldCommandTimeoutPresents) {
+                s.camp_pending = s.camp_done = false;
+                retire_front(false, "no outfitting-screen frame within 600 presents (open_outfitting first)");
+                continue;
+            }
+            return nullptr;
         case HarnessVerb::camera:
         case HarnessVerb::clock_pin:
         case HarnessVerb::clock_release:
@@ -1526,6 +1578,228 @@ void debug_lightning_world_frame(void* world_client) noexcept {
     bridge_report_event("debug_lightning", detail);
 }
 
+// Outfitting screen (2026-11-06). Read from game.exe BE0FC330 and the
+// Dejavu addon's registrations; every site is checked in memory when a verb
+// runs (the addon installs its hooks after the first harness step):
+//  - theInterface 007C7D50: screen stack begin/end at +34/+38, the current
+//    screen is end[-1] (GetCurrentScreen 005F7590).
+//  - CI3DScreenMission (primary vtable 00740764) creates its CI3DObjectSkills
+//    (vtable 00742980) at 006355A1 and stores it at +1A0 (006355B2).
+//    CI3DObjectSkills: pScreen +148, nSkills +14C, nTypes data +15C, size
+//    +160 (ChangeSkill reads +15C/+148 at 0063FBE2; OnLButtonUp tests +14C).
+//  - A click on a skill button: OnLButtonUp calls ChangeSkill(slot) 0063FB50
+//    at 0063FE2B. The addon hooks that entry; its go-camp button is the last
+//    slot of type 2 (RPGMSKL_WAGON) and runs its go-camp request (combat,
+//    enemy-radius and zone checks, then GoCamp(IFACE_CAMP)).
+//  - CI3DScreenCamp (vtable 0074091C): slot 42 ClickOnItem(item, part)
+//    00610AD0 (addon-hooked), whose ISP_CAMPSLOTS case reads pWagon at +1E0
+//    (00610B1B); eScreenMode +190, nCurPers +1C8. ISP_WAGON = 1 is a click on
+//    a stash item: InventoryToPers -> Wear + NotifyItemsUpdated on the doll.
+//  - The stash CI3DObjectInventoryItems (vtable 0074197C): pAllItems +1AC
+//    (CSimplyArray: data +0, size +4; FormSortedList 0062131B), fToScroll
+//    +174 (OnMouseWheel adds delta/120 at 00621134 through its handler base
+//    +94; the wide layout's idle hook turns it into rows). Item typeId +10
+//    (PersToInventory 0060FE5A), armour = 3005h.
+//  - Base maps (CI3DScreenBase, vtable 007405AC) have no skill bar. A
+//    trader's "constr<N>" answer runs, in PlayBriefing at 006065A6:
+//    theHat.shops(007AA5D8).GetShop(N) 004A74F0; if found,
+//    IWorldServer(007AFEA6).SetConstructorNumber(float N) 00578560, then
+//    IWorldClient(007AFEA5).GoCamp(IFACE_CAMP = 5) 00578B00. The camp opens
+//    without a shop when constr.current is 0 (CI3DScreenCamp::OnActivate).
+constexpr std::uintptr_t kOutfitBaseVtableRva = 0x003405ac;
+constexpr std::uintptr_t kOutfitShopsRva = 0x003aa5d8, kOutfitGetShopRva = 0x000a74f0;
+constexpr std::uintptr_t kOutfitServerFaceRva = 0x003afea6, kOutfitSetConstructorRva = 0x00178560;
+constexpr std::uintptr_t kOutfitClientFaceRva = 0x003afea5, kOutfitGoCampRva = 0x00178b00;
+constexpr std::uintptr_t kOutfitInterfaceRva = 0x003c7d50;
+constexpr std::uintptr_t kOutfitMissionVtableRva = 0x00340764;
+constexpr std::uintptr_t kOutfitSkillsVtableRva = 0x00342980;
+constexpr std::uintptr_t kOutfitCampVtableRva = 0x0034091c;
+constexpr std::uintptr_t kOutfitStashVtableRva = 0x0034197c;
+constexpr std::uintptr_t kOutfitChangeSkillRva = 0x0023fb50;
+constexpr std::uintptr_t kOutfitClickOnItemRva = 0x00210ad0;
+constexpr std::uint32_t kOutfitArmourType = 0x3005;
+constexpr int kOutfitMaxArmour = 4096;
+struct OutfitSite { std::uintptr_t rva; std::uint8_t length; std::uint8_t bytes[16]; };
+constexpr OutfitSite kOutfitSites[] = {
+    {0x001f7590, 16, {0x8b,0x41,0x34,0x8b,0x51,0x38,0x3b,0xc2,0x74,0x06,0x8b,0xca,0x8b,0x41,0xfc,0xc3}},
+    {0x002355a1, 5, {0xe8,0x5a,0x9d,0x00,0x00}},
+    {0x002355b2, 6, {0x89,0x86,0xa0,0x01,0x00,0x00}},
+    {0x0023fe1c, 16, {0x3b,0x86,0xb8,0x00,0x00,0x00,0x7d,0x0c,0x50,0x8b,0xcf,0xc6,0x46,0x08,0x01,0xe8}},
+    {0x0023fe2c, 4, {0x20,0xfd,0xff,0xff}},
+    {0x0023fbe2, 12, {0x8b,0x96,0x5c,0x01,0x00,0x00,0x8b,0xb6,0x48,0x01,0x00,0x00}},
+    {0x00210b1b, 6, {0x8b,0x8e,0xe0,0x01,0x00,0x00}},
+    {0x0020fe5a, 8, {0x8b,0x43,0x10,0x3d,0x04,0x30,0x00,0x00}},
+    {0x0022131b, 11, {0x8b,0x86,0xac,0x01,0x00,0x00,0x33,0xdb,0x8b,0x48,0x04}},
+    {0x002210fd, 6, {0x8d,0x8e,0x6c,0xff,0xff,0xff}},
+    {0x00221134, 12, {0xd8,0x86,0xe0,0x00,0x00,0x00,0xd9,0x9e,0xe0,0x00,0x00,0x00}},
+    {0x002065a6, 15, {0x57,0xb9,0xd8,0xa5,0x7a,0x00,0xe8,0x3f,0x0f,0xea,0xff,0x85,0xc0,0x74,0x1e}},
+    {0x002065b5, 15, {0xdb,0x44,0x24,0x44,0x51,0xb9,0xa6,0xfe,0x7a,0x00,0xd9,0x1c,0x24,0xe8,0x99}},
+    {0x002065c4, 15, {0x1f,0xf7,0xff,0x6a,0x05,0xb9,0xa5,0xfe,0x7a,0x00,0xe8,0x2d,0x25,0xf7,0xff}},
+};
+const char* outfit_contract_error(const std::uint8_t* image) noexcept {
+    if (lia_harness()) return "not ported on LiA";
+    for (const auto& site : kOutfitSites)
+        if (std::memcmp(image + site.rva, site.bytes, site.length) != 0) return "outfitting screen site bytes differ";
+    std::uintptr_t click = 0;
+    std::memcpy(&click, image + kOutfitCampVtableRva + 42 * 4, sizeof(click));
+    if (click != reinterpret_cast<std::uintptr_t>(image) + kOutfitClickOnItemRva)
+        return "camp vtable slot 42 is not ClickOnItem 00610AD0";
+    return nullptr;
+}
+using OutfitChangeSkillFn = void(__thiscall*)(void*, int);
+using OutfitClickOnItemFn = void(__thiscall*)(void*, void*, int);
+// SEH only: no C++ objects in these frames.
+using OutfitGetShopFn = void*(__thiscall*)(void*, int);
+using OutfitSetConstructorFn = void(__thiscall*)(void*, float);
+using OutfitGoCampFn = void(__thiscall*)(void*, int);
+// Shop numbers 1..999 that GetShop finds (up to `capacity`); -1: fault.
+int outfit_shops(std::uint8_t* image, int* shops, int capacity) noexcept {
+    __try {
+        int found = 0;
+        for (int n = 1; n < 1000 && found < capacity; ++n)
+            if (reinterpret_cast<OutfitGetShopFn>(image + kOutfitGetShopRva)(image + kOutfitShopsRva, n)) shops[found++] = n;
+        return found;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+// The base map's trader answer: 0 opened, 6 no such shop, 5 fault.
+int outfit_base_camp(std::uint8_t* image, int shop) noexcept {
+    __try {
+        if (shop > 0 && !reinterpret_cast<OutfitGetShopFn>(image + kOutfitGetShopRva)(image + kOutfitShopsRva, shop))
+            return 6;
+        reinterpret_cast<OutfitSetConstructorFn>(image + kOutfitSetConstructorRva)(image + kOutfitServerFaceRva,
+                                                                                    static_cast<float>(shop));
+        reinterpret_cast<OutfitGoCampFn>(image + kOutfitGoCampRva)(image + kOutfitClientFaceRva, 5);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 5; }
+}
+// 0 pressed on a mission map, 7: the current screen is a base map's.
+int outfit_press_go_camp(std::uint8_t* image, int& slot_out, int& skills_out) noexcept {
+    __try {
+        std::uint8_t* face = image + kOutfitInterfaceRva;
+        const auto begin = *reinterpret_cast<std::uintptr_t*>(face + 0x34);
+        const auto end = *reinterpret_cast<std::uintptr_t*>(face + 0x38);
+        if (end <= begin || (end - begin) % 4 || end - begin > 64 * 4) return 1;
+        auto* top = *reinterpret_cast<std::uint8_t**>(end - 4);
+        if (top && *reinterpret_cast<std::uint8_t**>(top) == image + kOutfitBaseVtableRva) return 7;
+        if (!top || *reinterpret_cast<std::uint8_t**>(top) != image + kOutfitMissionVtableRva) return 2;
+        auto* skills = *reinterpret_cast<std::uint8_t**>(top + 0x1a0);
+        if (!skills || *reinterpret_cast<std::uint8_t**>(skills) != image + kOutfitSkillsVtableRva ||
+            *reinterpret_cast<std::uint8_t**>(skills + 0x148) != top) return 3;
+        const int count = *reinterpret_cast<int*>(skills + 0x14c);
+        const int* types = *reinterpret_cast<int**>(skills + 0x15c);
+        const int size = *reinterpret_cast<int*>(skills + 0x160);
+        skills_out = count;
+        if (count < 0 || count > 64 || count > size || (count && !types)) return 3;
+        int slot = -1;
+        for (int i = 0; i < count; ++i) if (types[i] == 2) slot = i;
+        if (slot < 0) return 4;
+        slot_out = slot;
+        reinterpret_cast<OutfitChangeSkillFn>(image + kOutfitChangeSkillRva)(skills, slot);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 5; }
+}
+// The stash's armour items (up to kOutfitMaxArmour) and the stash size;
+// -1: fault, -2: the stash list differs from the verified layout.
+int outfit_stash_armour(std::uint8_t* image, std::uint8_t* camp, void** armour, int& stash) noexcept {
+    __try {
+        auto* wagon = *reinterpret_cast<std::uint8_t**>(camp + 0x1e0);
+        if (!wagon || *reinterpret_cast<std::uint8_t**>(wagon) != image + kOutfitStashVtableRva) return -2;
+        auto* all = *reinterpret_cast<std::uint8_t**>(wagon + 0x1ac);
+        if (!all) return -2;
+        auto** items = *reinterpret_cast<std::uint8_t***>(all);
+        stash = *reinterpret_cast<int*>(all + 4);
+        if (stash < 0 || stash > 100000 || (stash && !items)) return -2;
+        int found = 0;
+        for (int i = 0; i < stash && found < kOutfitMaxArmour; ++i)
+            if (items[i] && *reinterpret_cast<std::uint32_t*>(items[i] + 0x10) == kOutfitArmourType)
+                armour[found++] = items[i];
+        return found;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+bool outfit_click(std::uint8_t* camp, void* item) noexcept {
+    __try {
+        void* const* table = *reinterpret_cast<void* const* const*>(camp);
+        reinterpret_cast<OutfitClickOnItemFn>(table[42])(camp, item, 1);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+bool outfit_scroll(std::uint8_t* image, std::uint8_t* camp, float rows) noexcept {
+    __try {
+        auto* wagon = *reinterpret_cast<std::uint8_t**>(camp + 0x1e0);
+        if (!wagon || *reinterpret_cast<std::uint8_t**>(wagon) != image + kOutfitStashVtableRva) return false;
+        *reinterpret_cast<float*>(wagon + 0x174) += rows;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+void* g_outfit_armour[kOutfitMaxArmour];
+std::string outfit_camp_state(std::uint8_t* image, std::uint8_t* camp) {
+    int stash = 0;
+    const int count = outfit_stash_armour(image, camp, g_outfit_armour, stash);
+    return text_of("mode %d, person %d, stash %d items, %d armour", field<int>(camp, 0x190),
+                   field<int>(camp, 0x1c8), stash, count);
+}
+
+void harness_camp_frame(void* camp_screen) noexcept {
+    std::lock_guard<std::recursive_mutex> guard(harness_lock());
+    try { apply_pending_completions(); } catch (...) {}
+    State& s = state();
+    if (!s.enabled || !s.image) return;
+    auto* camp = static_cast<std::uint8_t*>(camp_screen);
+    if (!camp || field<std::uint8_t*>(camp, 0) != s.image + kOutfitCampVtableRva) return;
+    ++s.camp_frames;
+    s.camp_idle_presents = 0;
+    if (s.queue.empty()) return;
+    Entry& entry = s.queue.front();
+    const HarnessCommand& command = entry.command;
+    if (command.verb == HarnessVerb::open_outfitting) {
+        try { s.camp_detail = outfit_camp_state(s.image, camp); } catch (...) {}
+        return;
+    }
+    if (!s.camp_pending) return;
+    if (command.verb != HarnessVerb::outfit_equip && command.verb != HarnessVerb::scroll_items) return;
+    // Steps count across commands, so consecutive lines keep moving on.
+    static std::uint32_t session_equips = 0, applied = 0, refused = 0;
+    const auto between = static_cast<unsigned>(command.number[0]);
+    if (entry.progress == 0) { s.camp_ok = true; s.camp_detail.clear(); }
+    try {
+        if (const char* error = outfit_contract_error(s.image)) {
+            s.camp_ok = false; s.camp_detail = error;
+        } else if (between && entry.progress % between == 0) {
+            if (command.verb == HarnessVerb::scroll_items) {
+                const bool ok = outfit_scroll(s.image, camp, command.number[1]);
+                s.camp_ok = s.camp_ok && ok;
+                s.camp_detail = ok ? text_of("%u wheel notches (%+d row each)", entry.progress / between + 1,
+                                             static_cast<int>(command.number[1]))
+                                   : "stash list not found";
+            } else {
+                int stash = 0;
+                const int count = outfit_stash_armour(s.image, camp, g_outfit_armour, stash);
+                if (count <= 0) {
+                    s.camp_ok = false;
+                    s.camp_detail = count < 0 ? "stash list differs or faulted" : "no armour in the stash";
+                } else {
+                    // A stride of 7 walks every stash item for most stash
+                    // sizes and changes the slot from one step to the next.
+                    void* item = g_outfit_armour[(session_equips * 7u) % static_cast<unsigned>(count)];
+                    ++session_equips;
+                    if (!outfit_click(camp, item)) { s.camp_ok = false; s.camp_detail = "ClickOnItem faulted"; }
+                    else {
+                        int after_stash = 0;
+                        const int after = outfit_stash_armour(s.image, camp, g_outfit_armour, after_stash);
+                        bool still = false;
+                        for (int i = 0; i < after; ++i) still = still || g_outfit_armour[i] == item;
+                        ++(still ? refused : applied);
+                        s.camp_detail = text_of("equip %u: %u worn, %u refused by the screen; stash %d items, %d armour",
+                                                session_equips, applied, refused, after_stash, after);
+                    }
+                }
+            }
+        }
+    } catch (...) { s.camp_ok = false; s.camp_detail = "allocation failed"; }
+    ++entry.progress;
+    s.camp_done = true;
+}
+
 void harness_world_frame(void* world_client) noexcept {
     std::lock_guard<std::recursive_mutex> guard(harness_lock());
     try { apply_pending_completions(); } catch (...) {}
@@ -1561,13 +1835,56 @@ void harness_world_frame(void* world_client) noexcept {
             ++entry.progress;
             const float t = static_cast<float>(entry.progress) / static_cast<float>(command.frames);
             HarnessCommand step = command;
+            // Yaw along the shorter arc; pitch from its equivalent nearest the
+            // target (a loaded save can hold 45 rad, read as 2578 degrees:
+            // without the wrap the camera turned about seven vertical circles in
+            // 600 frames and brought all ground around it into view).
             for (int i = 0; i < 5; ++i) {
                 float delta = command.number[i] - s.path_start[i];
                 if (i == 2) delta = std::remainder(delta, 360.0f);
+                if (i == 3) { step.number[i] = command.number[i] - std::remainder(delta, 360.0f) * (1.0f - t); continue; }
                 step.number[i] = s.path_start[i] + delta * t;
             }
             apply_camera(step);
             s.world_detail = text_of("step %u/%u; ", entry.progress, command.frames) + camera_state();
+        } else if (supported_world && command.verb == HarnessVerb::equip_cycle) {
+            // The last step's result stands until the next step.
+            static std::string step_detail;
+            static bool step_ok = true;
+            // Steps count across commands, so consecutive equip_cycle lines
+            // keep producing new sets instead of repeating the first ones.
+            static std::uint32_t session_steps = 0;
+            const auto between = static_cast<unsigned>(command.number[0]);
+            if (entry.progress == 0) { step_detail.clear(); step_ok = true; }
+            if (between && entry.progress % between == 0)
+                step_ok = bridge_harness_equip_step(session_steps++, step_detail) && step_ok;
+            s.world_ok = step_ok;
+            s.world_detail = step_detail;
+            ++entry.progress;
+        } else if (supported_world && command.verb == HarnessVerb::open_outfitting) {
+            if (const char* error = outfit_contract_error(s.image)) { s.world_ok = false; s.world_detail = error; }
+            else {
+                int slot = -1, skills = 0;
+                static const char* const kWhy[] = {"pressed", "interface screen stack unreadable",
+                    "the current screen is neither the mission nor the base screen (a dialog or menu is open)",
+                    "mission skill bar differs from the verified layout",
+                    "no go-camp button on the skill bar (select one own hero; JMVGoCamp off?)",
+                    "call faulted", "no such shop"};
+                const int shop = static_cast<int>(command.frames);
+                int result = outfit_press_go_camp(s.image, slot, skills);
+                if (result == 7) {
+                    int shops[16]{};
+                    const int count = outfit_shops(s.image, shops, 16);
+                    std::string list;
+                    for (int i = 0; i < count; ++i) list += text_of(i ? ",%d" : "%d", shops[i]);
+                    result = outfit_base_camp(s.image, shop);
+                    s.world_detail = text_of("base map: trader answer constr%d %s (shops found: %s)", shop,
+                                             kWhy[result], list.empty() ? "none" : list.c_str());
+                } else {
+                    s.world_detail = text_of("go-camp button %s (slot %d of %d)", kWhy[result], slot, skills);
+                }
+                s.world_ok = result == 0;
+            }
         } else if (supported_world && command.verb == HarnessVerb::pause) {
             entry.progress = 0;
             request_pause(command.frames != 0);

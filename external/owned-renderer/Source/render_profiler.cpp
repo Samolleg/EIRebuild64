@@ -22,6 +22,7 @@
 #include <tuple>
 
 namespace owned {
+void address_space_mb(std::uint64_t& used, std::uint64_t& largest_free, bool walk) noexcept; // renderer_diagnostics.cpp
 namespace {
 
 bool environment_flag(const char* name) {
@@ -351,6 +352,7 @@ std::string format_terrain_owned_front_end_json(
 }
 
 void RenderProfiler::refresh_enabled() noexcept {
+    if (!enabled_) { pass_timing_.clear(); pass_timing_frames_ = 0; }
     enabled_ = profiling_requested(environment_enabled_, attribution_.enabled(),
                                    requested_enabled_, capture_requested_);
 }
@@ -380,6 +382,12 @@ HRESULT RenderProfiler::initialize(ID3D11Device* device, ID3D11DeviceContext* co
         sub_scopes_enabled_ = !(GetEnvironmentVariableA("EI_RENDERER_PROFILE_SUBSCOPES", value,
                                                          static_cast<DWORD>(sizeof(value))) != 0 &&
                                 value[0] == '0');
+        // Pipeline statistics per pass cost GPU time at every pass boundary
+        // (measured 1.1-2.4 ms a frame on an RTX 3070 laptop at 2560x1600):
+        // only the frames a capture reads carry them, =1 asks for every frame.
+        pipeline_stats_enabled_ = GetEnvironmentVariableA("EI_RENDERER_PROFILE_PIPESTATS", value,
+                                                           static_cast<DWORD>(sizeof(value))) != 0 &&
+                                  value[0] == '1';
     }
     refresh_enabled();
 
@@ -491,6 +499,26 @@ void RenderProfiler::request_capture_next(const BridgeProfileSnapshot* bridge,
                               static_cast<unsigned long long>(pass.counters.uploads),
                               static_cast<unsigned long long>(pass.counters.upload_bytes));
                 metadata += line;
+                // Additive: the pass's pipeline statistics, null when not resolved.
+                if (pass.stats_valid) {
+                    const auto& s = pass.stats;
+                    std::snprintf(line, sizeof(line),
+                                  ",\"pipeline\":{\"ia_vertices\":%llu,\"ia_primitives\":%llu,\"vs_invocations\":%llu,"
+                                  "\"hs_invocations\":%llu,\"ds_invocations\":%llu,\"gs_invocations\":%llu,\"gs_primitives\":%llu,"
+                                  "\"c_invocations\":%llu,\"c_primitives\":%llu,\"ps_invocations\":%llu,\"cs_invocations\":%llu,\"vs_per_primitive\":%.3f}",
+                                  static_cast<unsigned long long>(s.IAVertices), static_cast<unsigned long long>(s.IAPrimitives),
+                                  static_cast<unsigned long long>(s.VSInvocations), static_cast<unsigned long long>(s.HSInvocations),
+                                  static_cast<unsigned long long>(s.DSInvocations), static_cast<unsigned long long>(s.GSInvocations),
+                                  static_cast<unsigned long long>(s.GSPrimitives), static_cast<unsigned long long>(s.CInvocations),
+                                  static_cast<unsigned long long>(s.CPrimitives), static_cast<unsigned long long>(s.PSInvocations),
+                                  static_cast<unsigned long long>(s.CSInvocations),
+                                  // Vertex program runs per input triangle: 3 without an index list; with one
+                                  // (indexed_object_draws) what the GPU's vertex reuse leaves.
+                                  s.IAPrimitives ? double(s.VSInvocations) / double(s.IAPrimitives) : 0.0);
+                    metadata += line;
+                } else {
+                    metadata += ",\"pipeline\":null";
+                }
                 // Additive: passes with GPU sub-scopes carry "children".
                 bool first_child = true;
                 for (UINT child = 0; child < render.child_count; ++child) {
@@ -734,6 +762,62 @@ void RenderProfiler::request_capture_next(const BridgeProfileSnapshot* bridge,
         } else {
             metadata += ",\n  \"terrain_submission\":null";
         }
+        if (resources) {
+            const auto& kinds = resources->native_world_kinds;
+            std::snprintf(line, sizeof(line),
+                          ",\n  \"world_record_kinds\":{\"posed\":%llu,\"object_space\":%llu,\"neighbour\":%llu,\"posed_triangles\":%llu,\"object_space_triangles\":%llu,\"neighbour_triangles\":%llu}",
+                          static_cast<unsigned long long>(kinds.posed),
+                          static_cast<unsigned long long>(kinds.object_space),
+                          static_cast<unsigned long long>(kinds.neighbour),
+                          static_cast<unsigned long long>(kinds.posed_triangles),
+                          static_cast<unsigned long long>(kinds.object_space_triangles),
+                          static_cast<unsigned long long>(kinds.neighbour_triangles));
+            metadata += line;
+            const auto& a = resources->active_statics;
+            // This process's address space (x86: the game's), at the capture.
+            std::uint64_t va_used = 0, va_free = 0;
+            address_space_mb(va_used, va_free, true);
+            std::snprintf(line, sizeof(line),
+                          ",\n  \"main_map_object_space\":{\"catalog_objects\":%llu,\"catalog_nodes\":%llu,\"parked\":%llu,\"admitted\":%llu,\"registered\":%llu,\"records\":%llu,\"refused\":%llu,\"failures\":%llu,\"casters\":%llu,\"doubled_casters\":%llu,\"impostor_objects\":%llu,\"impostors_baked\":%llu,\"building\":%s,\"build_ms\":%.1f,\"va_used_mb\":%llu,\"va_largest_free_mb\":%llu}",
+                          static_cast<unsigned long long>(a.catalog_objects), static_cast<unsigned long long>(a.catalog_nodes),
+                          static_cast<unsigned long long>(a.parked), static_cast<unsigned long long>(a.admitted),
+                          static_cast<unsigned long long>(a.registered), static_cast<unsigned long long>(a.records),
+                          static_cast<unsigned long long>(a.refused), static_cast<unsigned long long>(a.failures),
+                          static_cast<unsigned long long>(a.casters), static_cast<unsigned long long>(a.doubled_casters),
+                          static_cast<unsigned long long>(a.impostor_objects), static_cast<unsigned long long>(a.impostors_baked),
+                          a.building ? "true" : "false", a.build_ms,
+                          static_cast<unsigned long long>(va_used), static_cast<unsigned long long>(va_free));
+            metadata += line;
+            std::snprintf(line, sizeof(line),
+                          ",\n  \"main_map_object_space_models\":{\"eligible\":%llu,\"ready_models\":%llu,\"failed_models\":%llu,\"lod_only_models\":%llu,\"batches\":%llu,\"caster_objects\":%llu}",
+                          static_cast<unsigned long long>(a.eligible), static_cast<unsigned long long>(a.ready_models),
+                          static_cast<unsigned long long>(a.failed_models), static_cast<unsigned long long>(a.lod_only_models),
+                          static_cast<unsigned long long>(a.batches), static_cast<unsigned long long>(a.caster_objects));
+            metadata += line;
+            {
+                // Objects with drawn parts per object-space reason, then their parts.
+                static const char* const names[] = {"admitted", "not_eligible", "unit", "hidden", "animating", "scaled",
+                                                    "texture_kind", "model_failed", "model_pending", "refused"};
+                static_assert(sizeof(names) / sizeof(names[0]) == std::size_t(ObjectSpaceReason::count), "reason names");
+                const auto reasons = active_statics_reasons();
+                metadata += ",\n  \"main_map_object_space_reasons\":{";
+                for (std::size_t k = 0; k < std::size_t(ObjectSpaceReason::count); ++k) {
+                    std::snprintf(line, sizeof(line), "%s\"%s\":[%u,%u]", k ? "," : "", names[k], reasons[k],
+                                  reasons[std::size_t(ObjectSpaceReason::count) + k]);
+                    metadata += line;
+                }
+                metadata += "}";
+                // Refused registrations per failing step (colour and casters).
+                const auto refusals = active_statics_refusals();
+                metadata += ",\n  \"main_map_object_space_refusals\":{";
+                for (std::size_t k = 0; k < refusals.counts.size(); ++k) {
+                    std::snprintf(line, sizeof(line), "%s\"%s\":%u", k ? "," : "",
+                                  object_space_refusal_name(ObjectSpaceRefusal(k)), refusals.counts[k]);
+                    metadata += line;
+                }
+                metadata += "}";
+            }
+        }
         metadata += ",\n  \"terrain_owned_front_end\":";
         metadata += format_terrain_owned_front_end_json(bridge);
         metadata += ",\n  \"retained_static_submission\":";
@@ -824,6 +908,72 @@ bool RenderProfiler::read(const QueryPair& pair, bool end, UINT64& ticks) noexce
                              D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK;
 }
 
+// Captures with the overlay hidden number from 0 each session, so a folder is
+// reused: overwritten files would not touch its time (the diagnostics package
+// looks for a folder newer than its request) and an old capture's extra files
+// would stay mixed in.
+static void clear_capture_folder(const std::string& folder) {
+    WIN32_FIND_DATAA found{};
+    const HANDLE search = FindFirstFileA((folder + "\\*").c_str(), &found);
+    if (search == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!(found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) DeleteFileA((folder + "\\" + found.cFileName).c_str());
+    } while (FindNextFileA(search, &found));
+    FindClose(search);
+}
+
+void RenderProfiler::add_pass_timing(const RenderProfileSnapshot& snapshot) {
+    if (!snapshot.gpu_valid) return;
+    ++pass_timing_frames_;
+    for (UINT index = 0; index < snapshot.pass_count; ++index) {
+        const ProfilePassSnapshot& pass = snapshot.passes[index];
+        // Passes come in the same order every frame: try the same index first.
+        std::size_t total = index;
+        if (total >= pass_timing_.size() || std::strcmp(pass_timing_[total].name.data(), pass.name.data()) != 0) {
+            for (total = 0; total < pass_timing_.size(); ++total)
+                if (std::strcmp(pass_timing_[total].name.data(), pass.name.data()) == 0) break;
+            if (total == pass_timing_.size()) {
+                pass_timing_.emplace_back();
+                pass_timing_.back().name = pass.name;
+            }
+        }
+        PassTimingTotal& sum = pass_timing_[total];
+        sum.gpu_ms += pass.gpu_ms;
+        sum.cpu_ms += pass.cpu_ms;
+        sum.draws += pass.counters.draws;
+        sum.triangles += pass.counters.triangles;
+    }
+}
+
+void RenderProfiler::write_pass_timing() {
+    if (!pass_timing_frames_) return;
+    std::sort(pass_timing_.begin(), pass_timing_.end(),
+              [](const PassTimingTotal& a, const PassTimingTotal& b) { return a.gpu_ms > b.gpu_ms; });
+    const double frames = static_cast<double>(pass_timing_frames_);
+    double gpu_ms = 0.0, cpu_ms = 0.0;
+    for (const PassTimingTotal& sum : pass_timing_) { gpu_ms += sum.gpu_ms; cpu_ms += sum.cpu_ms; }
+    std::ostringstream output;
+    output.imbue(std::locale::classic());
+    output << std::fixed << std::setprecision(3);
+    output << "{\"frames\":" << pass_timing_frames_ << ",\"gpu_ms\":" << gpu_ms / frames << ",\"cpu_ms\":" << cpu_ms / frames << "}\n";
+    for (const PassTimingTotal& sum : pass_timing_) {
+        output << "{\"name\":";
+        write_json_string(output, std::string(sum.name.data()));
+        output << ",\"gpu_ms\":" << sum.gpu_ms / frames << ",\"cpu_ms\":" << sum.cpu_ms / frames
+               << ",\"draws\":" << static_cast<double>(sum.draws) / frames
+               << ",\"triangles\":" << static_cast<double>(sum.triangles) / frames << "}\n";
+    }
+    const std::string text = output.str();
+    FILE* file = nullptr;
+    fopen_s(&file, (capture_directory_ + "\\pass_timing.jsonl").c_str(), "wb");
+    if (file) {
+        std::fwrite(text.data(), 1, text.size(), file);
+        std::fclose(file);
+    }
+    pass_timing_.clear();
+    pass_timing_frames_ = 0;
+}
+
 void RenderProfiler::begin_frame(UINT width, UINT height) {
     if (!enabled_ || frame_active_ || (!timestamps_ && !context_)) return;
     FrameSlot& slot = slots_[next_frame_ % kBufferedFrames];
@@ -853,6 +1003,12 @@ void RenderProfiler::begin_frame(UINT width, UINT height) {
 
     const bool capture_next = environment_flag("EI_RENDERER_CAPTURE_NEXT") && !capture_next_consumed_;
     capture_active_ = capture_requested_ || capture_next || requested_capture_frame_ == next_frame_;
+    // The capture file's statistics come from the last frame resolved before
+    // the capture, so the frames right before it carry them too.
+    frame_statistics_ = pipeline_stats_enabled_ || capture_near_ || capture_active_ ||
+                        (requested_capture_frame_ != ~std::uint64_t{0} && next_frame_ <= requested_capture_frame_ &&
+                         requested_capture_frame_ - next_frame_ <= kCaptureStatisticsFrames);
+    slot.capture_statistics = frame_statistics_ && !pipeline_stats_enabled_;
     capture_requested_ = false;
     if (capture_next) capture_next_consumed_ = true;
     if (capture_active_) {
@@ -864,6 +1020,8 @@ void RenderProfiler::begin_frame(UINT width, UINT height) {
         const std::string captures = debug_root_ + "\\captures";
         CreateDirectoryA(captures.c_str(), nullptr);
         CreateDirectoryA(capture_directory_.c_str(), nullptr);
+        clear_capture_folder(capture_directory_);
+        write_pass_timing();
         if (!pending_normal_frame_metadata_.empty()) {
             const std::string metadata_path = capture_directory_ + "\\normal_frame.json";
             FILE* file = nullptr;
@@ -920,7 +1078,19 @@ void RenderProfiler::begin_pass(const char* name) {
     strncpy_s(pass.name.data(), pass.name.size(), name ? name : "unnamed", _TRUNCATE);
     pass.cpu_begin = qpc_now();
     if (attribution_.enabled()) pass.attribution_begin = attribution_.sample_point();
-    mark(current_->queries[current_pass_], false);
+    QueryPair& pair = current_->queries[current_pass_];
+    pair.stats_handle = 0;
+    pair.stats_issued = false;
+    if (frame_statistics_) {
+        if (timestamps_) pair.stats_issued = (pair.stats_handle = timestamps_->stats_begin()) != 0;
+        else {
+            // A failed statistics query only loses that pass's counts.
+            const D3D11_QUERY_DESC stats_desc{D3D11_QUERY_PIPELINE_STATISTICS, 0};
+            if (!pair.stats) (void)device_->CreateQuery(&stats_desc, &pair.stats);
+            if (pair.stats) { context_->Begin(pair.stats.Get()); pair.stats_issued = true; }
+        }
+    }
+    mark(pair, false);
     pass_active_ = true;
 }
 
@@ -1008,7 +1178,12 @@ void RenderProfiler::end_pass(ID3D11Texture2D* capture_source,
     if (!pass_active_ || !current_) return;
     end_sub_scope();
     PassRecord& pass = current_->passes[current_pass_];
-    mark(current_->queries[current_pass_], true);
+    QueryPair& pair = current_->queries[current_pass_];
+    mark(pair, true);
+    if (pair.stats_issued) {
+        if (timestamps_) timestamps_->stats_end(pair.stats_handle);
+        else context_->End(pair.stats.Get());
+    }
     pass.cpu_end = qpc_now();
     if (attribution_.enabled()) {
         pass.attribution_end = attribution_.sample_point();
@@ -1259,6 +1434,12 @@ bool RenderProfiler::resolve(FrameSlot& slot, bool wait) {
             : -1.0;
         resolved_pass.cpu_ms = cpu_ms;
         resolved_pass.gpu_ms = gpu_ms;
+        const QueryPair& pair = slot.queries[index];
+        resolved_pass.stats_valid = pair.stats_issued &&
+            (timestamps_ ? timestamps_->stats_value(pair.stats_handle, resolved_pass.stats)
+                         : context_->GetData(pair.stats.Get(), &resolved_pass.stats, sizeof(resolved_pass.stats),
+                                             D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK);
+        if (!resolved_pass.stats_valid) resolved_pass.stats = {};
         snapshot.frame_cpu_ms += cpu_ms;
         if (gpu_ms >= 0.0) snapshot.frame_gpu_ms += gpu_ms;
         else snapshot.gpu_valid = false;
@@ -1356,6 +1537,8 @@ bool RenderProfiler::resolve(FrameSlot& slot, bool wait) {
         journal_dlssg_.add(frame_passes["fg_dlssg"]);
         journal_fsr_prepare_.add(frame_passes["fg_fsr_prepare"]);
     } else if (journal_enabled_) ++journal_invalid_;
+    // Frames slowed by a capture's statistics stay out of the pass timing averages.
+    if (!slot.capture_statistics) add_pass_timing(snapshot);
     has_latest_snapshot_ = true;
     slot.pending = false;
     return true;

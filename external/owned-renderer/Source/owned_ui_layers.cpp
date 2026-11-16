@@ -1,17 +1,23 @@
 #include "owned_ui_layers.h"
 #include "game_sites.h"
+#include "ui_language.h"
 
 #include <richedit.h>
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstring>
 #include <string>
 #include <unordered_map>
 #include <utility>
 
 namespace owned {
+// Defined in engine_bridge.cpp (bridge.jsonl).
+void append_bridge_event(const char* event, const char* detail,
+                         bool sites_verified, const char* stage,
+                         const char* edge, unsigned sequence) noexcept;
 namespace {
 
 // CI3DSurface::GetDC / ReleaseDC call the surface's DirectDraw GetDC
@@ -185,6 +191,7 @@ struct Session {
     void* context = nullptr;
     UiLayerPromote promote = nullptr;
     HDC legacy = nullptr;
+    LONG width = 0;  // The surface the recipe replays onto.
     UiLayerFailure failure = UiLayerFailure::none;
     std::vector<std::uint8_t> recipe;
 };
@@ -310,6 +317,60 @@ void record_op(Session& session, Op op, const Record& record, Tail&& tail) noexc
 
 void no_tail(std::vector<std::uint8_t>&) {}
 
+std::vector<std::pair<LOGFONTA, HFONT>> g_fonts;
+
+// The game's text bytes are in its "Font CharSet" code page. When that is not
+// the Windows ANSI code page (Russian data on a ja-JP system), the A
+// functions would decode them wrongly, so replay converts with the game's
+// code page and draws with the W functions; measurement then uses the same
+// decoded text and the same replay font, so fit and draw agree.
+bool replay_wide() noexcept { return game_text_code_page() != CP_ACP; }
+
+std::wstring g_wide;
+
+bool widen(const std::uint8_t* text, int length) noexcept {
+    try {
+        g_wide.clear();
+        if (length <= 0) return true;
+        const UINT code_page = game_text_code_page();
+        const auto* bytes = reinterpret_cast<LPCSTR>(text);
+        const int count = MultiByteToWideChar(code_page, 0, bytes, length, nullptr, 0);
+        if (count <= 0) return false;
+        g_wide.resize(static_cast<std::size_t>(count));
+        return MultiByteToWideChar(code_page, 0, bytes, length, g_wide.data(), count) == count;
+    } catch (...) {
+        return false;
+    }
+}
+
+HFONT create_replay_font(const LOGFONTA& font) noexcept {
+    if (!replay_wide()) return CreateFontIndirectA(&font);
+    LOGFONTW wide{};
+    static_assert(offsetof(LOGFONTA, lfFaceName) == offsetof(LOGFONTW, lfFaceName));
+    std::memcpy(&wide, &font, offsetof(LOGFONTA, lfFaceName));
+    // GetObjectA returned the face name in the Windows ANSI code page.
+    const int face = static_cast<int>(strnlen(font.lfFaceName, LF_FACESIZE - 1));
+    if (face && MultiByteToWideChar(CP_ACP, 0, font.lfFaceName, face,
+                                    wide.lfFaceName, LF_FACESIZE - 1) <= 0)
+        return nullptr;
+    return CreateFontIndirectW(&wide);
+}
+
+HFONT replay_font(const LOGFONTA& font) noexcept {
+    for (const auto& entry : g_fonts)
+        if (std::memcmp(&entry.first, &font, sizeof(font)) == 0)
+            return entry.second;
+    const HFONT created = create_replay_font(font);
+    if (!created) return nullptr;
+    try {
+        g_fonts.emplace_back(font, created);
+    } catch (...) {
+        DeleteObject(created);
+        return nullptr;
+    }
+    return created;
+}
+
 // DrawText results for the recording DC: the height (and CALCRECT rectangle)
 // is a pure function of font, DC text state, format, rectangle and string,
 // so it is measured once on the recording DC (bounds accumulation paused)
@@ -344,8 +405,31 @@ int measure_draw_text(HDC dc, const TextState& state, LPCSTR text, int length,
         key.clear();
     }
     RECT measured = *rect;
+    int result = 0;
+    // The recording DC is a 1x1 bitmap: a drawing call here rasterizes every
+    // glyph only to discard it (laptop j214: ~10 samples, ~15 ms of the
+    // outfitting open, before the replay rasterized them again). Where the
+    // return value is the text height (no vertical alignment), DT_CALCRECT
+    // returns the same height without drawing; the caller's rectangle is
+    // left as a drawing call leaves it.
+    constexpr UINT kDrawnOnly = DT_CALCRECT | DT_VCENTER | DT_BOTTOM | DT_MODIFYSTRING |
+        DT_EDITCONTROL | DT_END_ELLIPSIS | DT_WORD_ELLIPSIS | DT_PATH_ELLIPSIS;
+    const bool height_only = length > 0 && !(format & kDrawnOnly);
+    RECT calculated = *rect;
+    RECT* const target = height_only ? &calculated : &measured;
+    const UINT call_format = height_only ? format | DT_CALCRECT : format;
     SetBoundsRect(dc, nullptr, DCB_DISABLE);
-    const int result = g_real.draw_text(dc, text, length, &measured, format);
+    if (!replay_wide()) {
+        result = g_real.draw_text(dc, text, length, target, call_format);
+    } else {
+        const HFONT font = replay_font(state.font);
+        const HGDIOBJ old = font ? SelectObject(dc, font) : nullptr;
+        if (old && old != HGDI_ERROR &&
+            widen(reinterpret_cast<const std::uint8_t*>(text), length))
+            result = DrawTextW(dc, g_wide.c_str(), static_cast<int>(g_wide.size()),
+                               target, call_format);
+        if (old && old != HGDI_ERROR) SelectObject(dc, old);
+    }
     SetBoundsRect(dc, nullptr, DCB_ENABLE);
     *rect = measured;
     if (!key.empty() && result) {
@@ -365,21 +449,112 @@ int measure_draw_text(HDC dc, const TextState& state, LPCSTR text, int length,
 
 // ---- Replay ----
 
-std::vector<std::pair<LOGFONTA, HFONT>> g_fonts;
+// ---- Whole descriptions ----
+// User rule: descriptions are never shortened. GDI ellipses replace the end
+// of a line with "..."; the addon's skill-card description lines (each a
+// one-line DrawMultiText rectangle) are the producer that asks for them, and
+// only those calls change here. They are drawn without ellipsis or clip. When
+// word wrapping would put text below the producer's rectangle (over its next
+// line) the line is drawn unwrapped; a line wider than its rectangle gets a
+// smaller font for this call down to kMinimumWholeFontPercent, then may use
+// the surface margin, and shrinks further only if the surface cannot hold it.
+constexpr UINT kEllipsisFlags = DT_END_ELLIPSIS | DT_WORD_ELLIPSIS | DT_PATH_ELLIPSIS;
+// The owned card lines' floor (character_pane_owned_text.cpp).
+constexpr LONG kMinimumWholeFontPercent = 80;
 
-HFONT replay_font(const LOGFONTA& font) noexcept {
-    for (const auto& entry : g_fonts)
-        if (std::memcmp(&entry.first, &font, sizeof(font)) == 0)
-            return entry.second;
-    const HFONT created = CreateFontIndirectA(&font);
-    if (!created) return nullptr;
-    try {
-        g_fonts.emplace_back(font, created);
-    } catch (...) {
-        DeleteObject(created);
-        return nullptr;
+// DrawText measurement with `state`'s font selected on dc, restored after;
+// on a recording DC it is cached like the other measurements.
+int measure_with_font(HDC dc, const TextState& state, bool recording,
+                      LPCSTR text, int length, RECT& rect, UINT format) noexcept {
+    const HFONT font = replay_font(state.font);
+    const HGDIOBJ previous = font ? SelectObject(dc, font) : nullptr;
+    if (!previous || previous == HGDI_ERROR) return 0;
+    int result = 0;
+    if (recording)
+        result = measure_draw_text(dc, state, text, length, &rect, format);
+    else if (!replay_wide())
+        result = g_real.draw_text(dc, text, length, &rect, format);
+    else if (widen(reinterpret_cast<const std::uint8_t*>(text), length))
+        result = DrawTextW(dc, g_wide.c_str(), static_cast<int>(g_wide.size()), &rect, format);
+    SelectObject(dc, previous);
+    return result;
+}
+
+// Rewrites an ellipsis call's format and, when needed, its font size: the
+// largest size (binary search, a few measurements) whose measured line fits
+// its rectangle, or above the floor the surface room. DT_CALCRECT widens the
+// rectangle for a word too wide to break, so width is checked even when the
+// wrapped text fits the rectangle's height.
+void fit_whole_text(HDC dc, TextState& state, bool recording, LPCSTR text,
+                    int length, const RECT& rect, LONG surface_width,
+                    UINT& format) noexcept {
+    format = (format & ~kEllipsisFlags) | DT_NOCLIP;
+    if (format & DT_CALCRECT) return;
+    const LONG width = rect.right - rect.left;
+    const LONG height = rect.bottom - rect.top;
+    if ((format & DT_WORDBREAK) && !(format & DT_SINGLELINE)) {
+        RECT wrapped = rect;
+        if (measure_with_font(dc, state, recording, text, length, wrapped,
+                              format | DT_CALCRECT) > height)
+            format &= ~DT_WORDBREAK;  // Wrapping would print over the next line.
     }
-    return created;
+    const bool wraps = (format & DT_WORDBREAK) && !(format & DT_SINGLELINE);
+    // Room for the aligned line inside the surface (DrawText centres an
+    // over-wide line on its rectangle).
+    const LONG room = surface_width <= 0 ? width
+        : (format & DT_CENTER)
+            ? width + 2 * (std::min)(rect.left, surface_width - rect.right)
+        : (format & DT_RIGHT) ? rect.right : surface_width - rect.left;
+    const LOGFONTA original = state.font;
+    const LONG size = original.lfHeight < 0 ? -original.lfHeight : original.lfHeight;
+    const LONG minimum =
+        (std::max)(1L, (size * kMinimumWholeFontPercent + 99) / 100);
+    const auto use = [&](LONG trial) {
+        if (trial == size || !size) {
+            state.font = original;
+            return;
+        }
+        state.font.lfHeight = original.lfHeight < 0 ? -trial : trial;
+        state.font.lfWidth = static_cast<LONG>(
+            (original.lfWidth * trial + size / 2) / size);
+    };
+    const auto fits = [&](LONG trial) {
+        use(trial);
+        RECT line = rect;
+        const int measured = measure_with_font(dc, state, recording, text,
+                                               length, line, format | DT_CALCRECT);
+        return measured > 0 && (!wraps || measured <= height) &&
+            line.right - line.left <= (trial > minimum ? width : room);
+    };
+    if (fits(size)) return;
+    LONG best = 0;
+    for (LONG low = 1, high = size - 1; low <= high;) {
+        const LONG middle = low + (high - low) / 2;
+        if (fits(middle)) {
+            best = middle;
+            low = middle + 1;
+        } else {
+            high = middle - 1;
+        }
+    }
+    use(best ? best : 1);
+    if (!best) {
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            append_bridge_event("ui_layer_text_overflow",
+                "a description line does not fit its surface even at 1 px; "
+                "its letters past the surface edge are cut", true,
+                nullptr, nullptr, 0);
+        }
+    }
+}
+
+LONG dc_bitmap_width(HDC dc) noexcept {
+    BITMAP bitmap{};
+    const HGDIOBJ selected = GetCurrentObject(dc, OBJ_BITMAP);
+    return selected && GetObjectA(selected, sizeof(bitmap), &bitmap) ==
+        static_cast<int>(sizeof(bitmap)) ? bitmap.bmWidth : 0;
 }
 
 bool apply_text(HDC target, const TextState& state) noexcept {
@@ -425,7 +600,13 @@ bool replay_one(Reader& reader, HDC target) noexcept {
         const auto* text = reader.take(static_cast<std::size_t>(record.length));
         if (!text || !apply_text(target, record.state)) return false;
         RECT rect = record.rect;
-        DrawTextA(target, reinterpret_cast<LPCSTR>(text), record.length, &rect,
+        if (!replay_wide()) {
+            DrawTextA(target, reinterpret_cast<LPCSTR>(text), record.length, &rect,
+                      record.format);
+            return true;
+        }
+        if (!widen(text, record.length)) return false;
+        DrawTextW(target, g_wide.c_str(), static_cast<int>(g_wide.size()), &rect,
                   record.format);
         return true;
     }
@@ -435,6 +616,16 @@ bool replay_one(Reader& reader, HDC target) noexcept {
         const auto* dx = reader.take(record.dx_values * sizeof(INT));
         const auto* text = reader.take(record.count);
         if (!dx || !text || !apply_text(target, record.state)) return false;
+        // Glyph indices are not text. The game's advances were measured on
+        // differently decoded characters, so the W text uses its own font
+        // advances (no dx).
+        if (replay_wide() && record.count && !(record.options & ETO_GLYPH_INDEX)) {
+            if (!widen(text, static_cast<int>(record.count))) return false;
+            ExtTextOutW(target, record.x, record.y, record.options & ~ETO_PDY,
+                        record.has_rect ? &record.rect : nullptr,
+                        g_wide.c_str(), static_cast<UINT>(g_wide.size()), nullptr);
+            return true;
+        }
         ExtTextOutA(target, record.x, record.y, record.options,
                     record.has_rect ? &record.rect : nullptr,
                     record.count ? reinterpret_cast<LPCSTR>(text) : nullptr,
@@ -447,8 +638,14 @@ bool replay_one(Reader& reader, HDC target) noexcept {
         if (!reader.get(record) || record.length < 0) return false;
         const auto* text = reader.take(static_cast<std::size_t>(record.length));
         if (!text || !apply_text(target, record.state)) return false;
-        TextOutA(target, record.x, record.y, reinterpret_cast<LPCSTR>(text),
-                 record.length);
+        if (!replay_wide()) {
+            TextOutA(target, record.x, record.y, reinterpret_cast<LPCSTR>(text),
+                     record.length);
+            return true;
+        }
+        if (!widen(text, record.length)) return false;
+        TextOutW(target, record.x, record.y, g_wide.c_str(),
+                 static_cast<int>(g_wide.size()));
         return true;
     }
     case Op::lines: {
@@ -501,9 +698,16 @@ bool replay_one(Reader& reader, HDC target) noexcept {
             static_cast<std::size_t>(record.tab_count) * sizeof(INT));
         const auto* text = reader.take(static_cast<std::size_t>(record.length));
         if (!tabs || !text || !apply_text(target, record.state)) return false;
-        TabbedTextOutA(target, record.x, record.y, reinterpret_cast<LPCSTR>(text),
-                       record.length, record.tab_count,
-                       record.tab_count ? reinterpret_cast<const INT*>(tabs) : nullptr,
+        const INT* tab_stops =
+            record.tab_count ? reinterpret_cast<const INT*>(tabs) : nullptr;
+        if (!replay_wide()) {
+            TabbedTextOutA(target, record.x, record.y, reinterpret_cast<LPCSTR>(text),
+                           record.length, record.tab_count, tab_stops, record.origin);
+            return true;
+        }
+        if (!widen(text, record.length)) return false;
+        TabbedTextOutW(target, record.x, record.y, g_wide.c_str(),
+                       static_cast<int>(g_wide.size()), record.tab_count, tab_stops,
                        record.origin);
         return true;
     }
@@ -664,7 +868,8 @@ bool ui_layer_getdc_caller(const void* return_address) noexcept {
     return g_image && return_address == g_image + g_get_dc_return_rva;
 }
 
-HDC ui_layer_begin(void* context, UiLayerPromote promote) noexcept {
+HDC ui_layer_begin(void* context, UiLayerPromote promote,
+                   std::uint32_t width) noexcept {
     for (auto& session : g_sessions) {
         if (session.active.load(std::memory_order_acquire)) continue;
         if (!ensure_session_dc(session)) return nullptr;
@@ -676,6 +881,7 @@ HDC ui_layer_begin(void* context, UiLayerPromote promote) noexcept {
         session.context = context;
         session.promote = promote;
         session.legacy = nullptr;
+        session.width = static_cast<LONG>(width);
         session.active.store(session.dc, std::memory_order_release);
         return session.dc;
     }
@@ -745,28 +951,50 @@ void ui_layer_commit(UiLayerState& state, std::vector<std::uint8_t>& recipe,
 int WINAPI ui_layer_draw_text_a(HDC dc, LPCSTR text, int count, LPRECT rect,
                                 UINT format) {
     Session* session = find_session(dc);
-    if (!session || !text || !rect)
-        return g_real.draw_text(dc, text, count, rect, format);
+    const bool whole = text && rect && (format & kEllipsisFlags);
+    if (!session || !text || !rect) {
+        if (!whole) return g_real.draw_text(dc, text, count, rect, format);
+        // A DC outside the recorded layers: fitted and drawn here.
+        TextState state{};
+        const HGDIOBJ current = GetCurrentObject(dc, OBJ_FONT);
+        if (!current || GetObjectA(current, sizeof(state.font), &state.font) !=
+                static_cast<int>(sizeof(state.font)))
+            return g_real.draw_text(dc, text, count, rect,
+                                    (format & ~kEllipsisFlags) | DT_NOCLIP);
+        fit_whole_text(dc, state, false, text, count, *rect,
+                       dc_bitmap_width(dc), format);
+        const HFONT fitted = replay_font(state.font);
+        const HGDIOBJ previous = fitted ? SelectObject(dc, fitted) : nullptr;
+        const int result = g_real.draw_text(dc, text, count, rect, format);
+        if (previous && previous != HGDI_ERROR) SelectObject(dc, previous);
+        return result;
+    }
     const int length = count < 0 ? static_cast<int>(std::strlen(text)) : count;
     TextState state{};
     if (format & DT_MODIFYSTRING) fail(*session, UiLayerFailure::unsupported_call);
+    const UINT whole_format =
+        whole ? (format & ~kEllipsisFlags) | DT_NOCLIP : format;
     if (!capture_text(*session, dc, state) ||
         session->failure != UiLayerFailure::none) {
         RECT ignored = *rect;
         SetBoundsRect(dc, nullptr, DCB_DISABLE);
-        const int result = g_real.draw_text(dc, text, length, &ignored, format);
+        const int result = g_real.draw_text(dc, text, length, &ignored, whole_format);
         SetBoundsRect(dc, nullptr, DCB_ENABLE);
         if (format & DT_CALCRECT) *rect = ignored;
         return result;
     }
     if (!(format & DT_CALCRECT)) {
+        // Recorded already rewritten, so replay_one draws it unchanged.
         DrawTextRecord record{state, *rect, format, length};
+        if (whole)
+            fit_whole_text(dc, record.state, true, text, length, *rect,
+                           session->width, record.format);
         record_op(*session, Op::draw_text, record,
                   [&](std::vector<std::uint8_t>& out) {
                       put_bytes(out, text, static_cast<std::size_t>(length));
                   });
     }
-    return measure_draw_text(dc, state, text, length, rect, format);
+    return measure_draw_text(dc, state, text, length, rect, whole_format);
 }
 
 BOOL WINAPI ui_layer_ext_text_out_a(HDC dc, int x, int y, UINT options,
@@ -894,13 +1122,27 @@ LONG WINAPI ui_layer_tabbed_text_out_a(HDC dc, int x, int y, LPCSTR text,
     if (!session)
         return g_real.tabbed_text_out(dc, x, y, text, count, tab_count, tabs,
                                       tab_origin);
-    // The returned extent depends on the tab origin: measure on the DC itself.
-    SetBoundsRect(dc, nullptr, DCB_DISABLE);
-    const LONG result = g_real.tabbed_text_out(dc, x, y, text, count, tab_count,
-                                               tabs, tab_origin);
-    SetBoundsRect(dc, nullptr, DCB_ENABLE);
+    // The returned extent depends on the tab origin: measure on the DC itself,
+    // with the decoded text and replay font when replay draws W text.
     TextState state{};
-    if (!capture_text(*session, dc, state)) return result;
+    const bool captured = capture_text(*session, dc, state);
+    LONG result = 0;
+    SetBoundsRect(dc, nullptr, DCB_DISABLE);
+    if (!captured || !replay_wide() || count < 0 || (count && !text)) {
+        result = g_real.tabbed_text_out(dc, x, y, text, count, tab_count, tabs,
+                                        tab_origin);
+    } else {
+        const HFONT font = replay_font(state.font);
+        const HGDIOBJ old = font ? SelectObject(dc, font) : nullptr;
+        if (old && old != HGDI_ERROR &&
+            widen(reinterpret_cast<const std::uint8_t*>(text), count))
+            result = TabbedTextOutW(dc, x, y, g_wide.c_str(),
+                                    static_cast<int>(g_wide.size()), tab_count,
+                                    tabs, tab_origin);
+        if (old && old != HGDI_ERROR) SelectObject(dc, old);
+    }
+    SetBoundsRect(dc, nullptr, DCB_ENABLE);
+    if (!captured) return result;
     if (count < 0 || (count && !text) || tab_count < 0 || (tab_count && !tabs)) {
         fail(*session, UiLayerFailure::unsupported_call);
         return result;

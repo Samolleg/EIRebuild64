@@ -60,7 +60,9 @@ bool ui_layers_active() noexcept;
 // CI3DSurface::GetDC of the verified image.
 bool ui_layer_getdc_caller(const void* return_address) noexcept;
 
-HDC ui_layer_begin(void* context, UiLayerPromote promote) noexcept;
+// `width` is the surface the recipe replays onto (DrawText margin room).
+HDC ui_layer_begin(void* context, UiLayerPromote promote,
+                   std::uint32_t width) noexcept;
 struct UiLayerEnd {
     UiLayerFailure failure = UiLayerFailure::none;
     bool promoted = false;

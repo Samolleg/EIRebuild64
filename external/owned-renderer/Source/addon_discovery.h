@@ -78,7 +78,12 @@ struct AddonVisualLayout {
     std::uint32_t hide_weapon = 0;
     std::uint32_t load_figures = 0;
     std::uint32_t anim_speed_flag = 0;
+    // Zero in builds whose AnimSpeed has no attack-rule gate: the 55071F
+    // jump and the 5327D0 hook then follow the animation-speed flag alone.
     std::uint32_t attack_rule_flag = 0;
+    std::uint32_t cast_coefficient = 0;      // target of the 55071F jump
+    std::uint32_t coefficient_callback = 0;  // GetAnimationCoeff (5327D0) hook
+    std::uint32_t coefficient_original = 0;  // slot holding its original
     std::uint32_t alias_flag = 0;
     std::uint32_t alias_map = 0;
     std::uint32_t completed_list = 0;

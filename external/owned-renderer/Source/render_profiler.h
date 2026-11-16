@@ -89,6 +89,11 @@ struct ProfilePassSnapshot {
     double cpu_ms = 0.0;
     double gpu_ms = -1.0;
     PassCounters counters{};
+    // The pass's GPU pipeline statistics (same layout on D3D12); invalid when
+    // the query was lost, not ready, or not taken (only the frames a capture
+    // reads take them, or every frame with EI_RENDERER_PROFILE_PIPESTATS=1).
+    bool stats_valid = false;
+    D3D11_QUERY_DATA_PIPELINE_STATISTICS stats{};
 };
 
 // GPU sub-scopes split one pass's GPU time between groups of its draws
@@ -176,6 +181,12 @@ struct ProfileTimestamps {
     virtual std::uint64_t stamp() noexcept = 0;
     virtual bool value(std::uint64_t stamp, std::uint64_t& ticks) noexcept = 0;
     virtual std::uint64_t frequency() noexcept = 0;
+    // Pipeline statistics around one pass (passes never nest): begin returns
+    // a handle (0 when none could be begun), value reads it once the GPU
+    // finished (false while not, or when lost, e.g. its list was split).
+    virtual std::uint64_t stats_begin() noexcept = 0;
+    virtual void stats_end(std::uint64_t handle) noexcept = 0;
+    virtual bool stats_value(std::uint64_t handle, D3D11_QUERY_DATA_PIPELINE_STATISTICS& stats) noexcept = 0;
 
 protected:
     ~ProfileTimestamps() = default;
@@ -190,6 +201,7 @@ public:
     // D3D12 backend (before initialize): passes are timed by these stamps;
     // the D3D11 queries are created but never issued.
     void set_timestamps(ProfileTimestamps* timestamps) noexcept { timestamps_ = timestamps; }
+    void reset_pass_timing() noexcept { pass_timing_.clear(); pass_timing_frames_ = 0; }
     void shutdown();
 
     void begin_frame(UINT width, UINT height);
@@ -223,8 +235,12 @@ public:
         return attribution_.marker_status();
     }
     bool attribution_enabled() const noexcept { return attribution_.enabled(); }
-    void set_enabled(bool enabled) noexcept {
+    // Frames this close before a capture carry per-pass pipeline statistics
+    // (the capture reads the last frame resolved before it).
+    static constexpr unsigned kCaptureStatisticsFrames = 16;
+    void set_enabled(bool enabled, bool capture_near = false) noexcept {
         requested_enabled_ = enabled;
+        capture_near_ = capture_near;
         refresh_enabled();
     }
     void request_capture_next(const BridgeProfileSnapshot* bridge,
@@ -291,6 +307,10 @@ private:
         ComPtr<ID3D11Query> begin;
         ComPtr<ID3D11Query> end;
         std::uint64_t begin_stamp = 0, end_stamp = 0;  // ProfileTimestamps (D3D12)
+        // Passes only (not sub-scopes): D3D11 query or D3D12 handle.
+        ComPtr<ID3D11Query> stats;
+        std::uint64_t stats_handle = 0;
+        bool stats_issued = false;
     };
     struct SubScopeRecord {
         std::array<char, 40> name{};
@@ -317,6 +337,7 @@ private:
         UINT width = 0;
         UINT height = 0;
         bool pending = false;
+        bool capture_statistics = false;  // took pipeline statistics for a capture: not in the pass timing averages
         bool attribution_present_returned = false;
         struct CpuScope { const char* name = nullptr; std::int64_t ticks = 0; std::uint64_t calls = 0; };
         std::array<CpuScope, kProfileCpuScopes> cpu_scopes{};
@@ -357,6 +378,9 @@ private:
     bool pass_active_ = false;
     bool sub_active_ = false;
     bool sub_scopes_enabled_ = true; // EI_RENDERER_PROFILE_SUBSCOPES=0 turns them off
+    bool pipeline_stats_enabled_ = false; // EI_RENDERER_PROFILE_PIPESTATS=1: every profiled frame
+    bool capture_near_ = false;           // set_enabled: a capture comes within kCaptureStatisticsFrames
+    bool frame_statistics_ = false;       // this frame's passes take pipeline statistics
     bool capture_active_ = false;
     bool capture_next_consumed_ = false;
     bool capture_requested_ = false;
@@ -365,6 +389,17 @@ private:
     std::string debug_root_;
     std::string capture_directory_;
     std::string pending_normal_frame_metadata_;
+    // Per-pass totals over the frames resolved since profiling last turned on;
+    // the next capture writes their averages as pass_timing.jsonl.
+    struct PassTimingTotal {
+        std::array<char, 64> name{};
+        double gpu_ms = 0.0, cpu_ms = 0.0;
+        std::uint64_t draws = 0, triangles = 0;
+    };
+    std::vector<PassTimingTotal> pass_timing_;
+    std::uint64_t pass_timing_frames_ = 0;
+    void add_pass_timing(const RenderProfileSnapshot& snapshot);
+    void write_pass_timing();
     struct ShadowTemporalSlot {
         ComPtr<ID3D11Texture2D> color, depth, shadows;
         D3D12TextureRef color12, depth12, shadows12;

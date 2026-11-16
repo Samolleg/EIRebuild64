@@ -96,15 +96,91 @@ bool append_owned_visual_shadow_values(std::vector<RetainedShadowCasterValue>& c
     return true;
 }
 
+// Item 5: the admitted objects of the world, kept with the store (sorted
+// ids) and published to the renderer's object-space caster bake.
+std::vector<std::int32_t> g_object_space_caster_ids;
+
+// Item 5: an admitted object's casting parts registered as its object-space
+// caster records at its live placement (Renderer::set_native_active_caster),
+// off screen or not. False: a part could not be prepared, placed or matched;
+// the object then casts from the store as posed.
+bool register_object_space_caster(std::size_t index,std::uint64_t model) {
+    auto& frame=g_owned_visual_world_frame;
+    auto& prepared=frame.prepared[index];
+    const auto& sample=frame.values->entities[index];
+    if(!model){active_statics_note_refusal(ObjectSpaceRefusal::model_missing);return false;}
+    if(!prepare_owned_visual_pose(sample)){active_statics_note_refusal(ObjectSpaceRefusal::pose);return false;}
+    static thread_local std::vector<NativePreparedPartSubmission*> records;
+    static thread_local std::vector<std::uint32_t> parts;
+    static thread_local std::vector<NativeWorldBounds> bounds;
+    static thread_local std::vector<std::array<float,16>> node_to_world;
+    static thread_local std::vector<std::uint32_t> sway_flags;
+    records.clear();parts.clear();bounds.clear();
+    for(std::size_t part=0;part<prepared.parts.size();++part) {
+        if(!prepared.parts[part].casts)continue;
+        const OwnedVisualPartPreparation* value=nullptr;
+        NativePreparedPartSubmission* record=nullptr;
+        if(!prepare_owned_visual_part(index,part,value)){active_statics_note_refusal(ObjectSpaceRefusal::part_prepare);return false;}
+        if(!retained_visual_part_submission(sample,part,value->bounds,{true,true,0},frame.values->time,255,record))
+            {active_statics_note_refusal(ObjectSpaceRefusal::part_submission);return false;}
+        records.push_back(record);parts.push_back(static_cast<std::uint32_t>(part));bounds.push_back(record->bounds);
+    }
+    if(records.empty())return true; // nothing of it casts
+    NativeStaticSubmission request;
+    if(!retained_visual_object_space_parts(sample,parts.data(),parts.size(),bounds.data(),node_to_world,sway_flags,
+        request.sway_root))return false;
+    NativePreparedSubmission submission;
+    submission.parts=records.data();submission.count=static_cast<UINT>(records.size());
+    submission.pose=&sample.prepared->gpu_pose;
+    submission.identity={sample.lifecycle.id,sample.lifecycle.generation,sample.lifecycle.positive_world_epoch,
+        sample.resource.serial,0,0,frame.serial,true};
+    submission.world_to_clip=&frame.coverage.world_to_clip;
+    request.records=&submission;request.caster=true;request.object_space=true;
+    request.object=sample.lifecycle.id;request.model=model;
+    request.node_to_world=node_to_world.data();request.sway_flags=sway_flags.data();
+    request.contact_height=sample.prepared->gpu_pose.contact_world_height;
+    NativeGeometryView view;view.static_submission=&request;NativeGeometryResult result{};
+    return g_native_sink_submit(g_native_sink_context,view,result) && request.registered;
+}
+
 bool append_owned_static_shadow_values(std::vector<RetainedShadowCasterValue>& casters,
     const std::vector<std::int32_t>& time_active_ids,
     const std::vector<std::int32_t>* selected_ids=nullptr) {
     auto& frame=g_owned_visual_world_frame;
+    // Item 5: objects admitted to object space cast their own records
+    // (Renderer::draw_native_active_shadows), not from this store.
+    const auto object_space_index=active_statics_index();
+    auto& admitted=g_object_space_caster_ids;
+    const auto before=admitted;
+    if(selected_ids) {
+        for(const auto id:*selected_ids) {
+            const auto it=std::lower_bound(admitted.begin(),admitted.end(),id);
+            if(it!=admitted.end() && *it==id)admitted.erase(it);
+        }
+    } else admitted.clear();
+    struct Publish {
+        const std::vector<std::int32_t>& before;const std::vector<std::int32_t>& now;
+        ~Publish(){if(now!=before)active_statics_casters_publish(now);}
+    } publish{before,admitted};
     const auto append_entity=[&](std::size_t index) {
         auto& prepared=frame.prepared[index];
         if(!prepared.bounds.valid || !prepared.casting_parts)return true;
         const auto& sample=frame.values->entities[index];
         if(std::binary_search(time_active_ids.begin(),time_active_ids.end(),sample.lifecycle.id))return true;
+        if(retained_visual_object_space_admitted(sample,object_space_index.get(),time_active_ids)) {
+            if(register_object_space_caster(index,retained_visual_object_space_model(sample))) {
+                admitted.insert(std::lower_bound(admitted.begin(),admitted.end(),sample.lifecycle.id),sample.lifecycle.id);
+                return true;
+            }
+            // Refused: posed from now on for this assembly and index, colour too.
+            sample.prepared->object_space_refused={sample.assembly.get(),sample.assembly->revision,object_space_index->revision};
+            active_statics_note_failure();
+        } else {
+            // Its model is requested once; the object stays posed until it is ready.
+            std::uint64_t model=0;
+            if(retained_visual_object_space_wanted(sample,object_space_index.get(),time_active_ids,model) &&
+               !object_space_index->models.count(model))active_statics_request(sample,model);
+        }
         if(!prepare_owned_visual_pose(sample))return false;
         for(std::size_t part=0;part<prepared.parts.size();++part) {
             if(!prepared.parts[part].casts)continue;
@@ -140,6 +216,23 @@ bool append_owned_static_shadow_values(std::vector<RetainedShadowCasterValue>& c
     }
     for(std::size_t index=0;index<frame.prepared.size();++index)
         if(!append_entity(index))return false;
+    // Item 5 self-check: why each object with drawn parts is (not) in object
+    // space, objects then parts, after this build's registrations.
+    {
+        std::array<std::uint32_t,2*std::size_t(ObjectSpaceReason::count)> counts{};
+        const auto index_now=active_statics_index();
+        for(std::size_t index=0;index<frame.prepared.size();++index) {
+            const auto& prepared=frame.prepared[index];
+            if(!prepared.bounds.valid)continue;
+            std::uint32_t parts=0;for(const auto& part:prepared.parts)parts+=part.visible?1u:0u;
+            if(!parts)continue;
+            std::uint64_t model=0;
+            const auto reason=static_cast<std::size_t>(retained_visual_object_space_reason(
+                frame.values->entities[index],index_now.get(),time_active_ids,model));
+            ++counts[reason];counts[std::size_t(ObjectSpaceReason::count)+reason]+=parts;
+        }
+        active_statics_reasons_publish(counts);
+    }
     return true;
 }
 
@@ -628,7 +721,7 @@ bool append_owned_terrain_shadow_values(std::vector<RetainedShadowCasterValue>& 
     const auto matches=[&]() noexcept {
         const auto& ci=cache.inputs;const auto& fi=frame.front_end.inputs;
         if(!cache.valid)return false;
-        if(!(ci.camera_position==fi.camera_position&&ci.terrain_origin==fi.terrain_origin&&ci.lod_distances==fi.lod_distances&&ci.maximum_lod==fi.maximum_lod&&ci.force_full_detail==fi.force_full_detail))return false;
+        if(!(ci.camera_position==fi.camera_position&&ci.terrain_origin==fi.terrain_origin&&ci.lod_distances==fi.lod_distances&&ci.lod_hidden_distance==fi.lod_hidden_distance&&ci.maximum_lod==fi.maximum_lod&&ci.force_full_detail==fi.force_full_detail))return false;
         if(ci.game_visibility_fingerprint!=fi.game_visibility_fingerprint)return false;
         if(!(ci.game_visibility_rows==fi.game_visibility_rows&&ci.game_visibility_min_y==fi.game_visibility_min_y))return false;
         if(ci.object_to_clip!=fi.object_to_clip)return false;
@@ -882,6 +975,7 @@ struct OwnedStaticCasterStore {
     std::vector<RetainedShadowCasterValue> casters;
     std::uint64_t revision = 0;
     std::uint64_t renderer_revision = 0;   // store revision the renderer last validated
+    std::uint64_t object_space_key = 0;    // object-space admission state it was built for (item 5)
     StaticShadowSummary summary;
     bool valid = false;
     // Per-map static revision (L-081): a map's static layer depends only on
@@ -941,22 +1035,31 @@ void update_owned_static_slice_revisions(OwnedStaticCasterStore& store,
     store.summary.slice_revision=store.slice_revision;
 }
 
-bool append_owned_shadow_source_values(std::vector<RetainedShadowCasterValue>& casters,
-    std::vector<OwnedTerrainShadowCommand>& terrain_commands,bool terrain_enabled,
-    RetainedStaticScene& terrain_scene,const OwnedShadowSourceDelta* delta,
-    const RetainedShadowSourceChanges* changes=nullptr,
-    const RetainedShadowInputDomain* static_previous=nullptr) {
- PERF06_SCOPE("shadow_caster_values");
-    auto& frame=g_owned_visual_world_frame;
-    const auto order=[](const auto& a,const auto& b) {
-        if(a.revision.terrain!=b.revision.terrain)return !a.revision.terrain;
-        if(a.revision.signed_id!=b.revision.signed_id)
-            return a.revision.signed_id<b.revision.signed_id;
-        return a.revision.part<b.revision.part;
-    };
-    if(frame.persistent_static_shadows && changes) {
+// Caster order: visuals before terrain, then id, then part.
+bool owned_caster_before(const RetainedShadowCasterValue& a,const RetainedShadowCasterValue& b) noexcept {
+    if(a.revision.terrain!=b.revision.terrain)return !a.revision.terrain;
+    if(a.revision.signed_id!=b.revision.signed_id)
+        return a.revision.signed_id<b.revision.signed_id;
+    return a.revision.part<b.revision.part;
+}
+
+// The persistent static caster store brought up to changes: in place for the
+// journal-dirty objects when incremental (changes since the store's last
+// update), else rebuilt. The sun pass and, in a cave, the ray tracing scene's
+// preparation (update_cave_raytracing_casters) keep the one store.
+bool update_owned_static_caster_store(const RetainedShadowSourceChanges* changes,bool incremental) {
+    PERF06_SCOPE("shadow_caster_values");
+    const auto order=owned_caster_before;
+    {
         auto& store=g_owned_static_casters;bool changed=false;
-        if(static_previous && store.valid) {
+        // Object-space admission changed for many objects at once (catalog
+        // published or released, a refused registration): rebuild the store.
+        {
+            const auto index=active_statics_index();
+            const std::uint64_t key=((index?index->revision:0)<<20)^active_statics_failures();
+            if(store.object_space_key!=key){store.object_space_key=key;store.valid=false;}
+        }
+        if(incremental && store.valid) {
             if(!changes->dirty_visuals.empty()) {
                 const auto dirty=[&](const RetainedShadowCasterValue& value){
                     return std::binary_search(changes->dirty_visuals.begin(),changes->dirty_visuals.end(),
@@ -1018,6 +1121,20 @@ bool append_owned_shadow_source_values(std::vector<RetainedShadowCasterValue>& c
             store.valid=true;changed=true;
         }
         if(changed){if(++store.revision==0)++store.revision;store.summary.valid=false;}
+    }
+    return true;
+}
+
+bool append_owned_shadow_source_values(std::vector<RetainedShadowCasterValue>& casters,
+    std::vector<OwnedTerrainShadowCommand>& terrain_commands,bool terrain_enabled,
+    RetainedStaticScene& terrain_scene,const OwnedShadowSourceDelta* delta,
+    const RetainedShadowSourceChanges* changes=nullptr,
+    const RetainedShadowInputDomain* static_previous=nullptr) {
+    auto& frame=g_owned_visual_world_frame;
+    const auto order=owned_caster_before;
+    if(frame.persistent_static_shadows && changes) {
+        if(!update_owned_static_caster_store(changes,static_previous!=nullptr))return false;
+        const auto& store=g_owned_static_casters;
         frame.shadow_source_diagnostic.static_casters_reused+=store.casters.size();
         if(g_bridge_sample.active)g_bridge_sample.shadow_static_casters_reused+=store.casters.size();
         // Per frame: only time-driven visuals and terrain. Terrain sorts after
@@ -1170,6 +1287,12 @@ struct TerrainNearPrewarm {
     std::array<float,16> scanned_clip{};
     std::uint32_t frames_since_scan = 0;
     bool failure_reported = false;
+    // The load hold's ring scan (any view direction) and its one report.
+    std::uint64_t ring_epoch = 0;
+    std::size_t ring_depth = 0, ring_color = 0;
+    float ring_depth_radius = 0, ring_color_radius = 0;
+    std::int64_t ring_ticks = 0;
+    bool ring_reported = false;
 };
 thread_local TerrainNearPrewarm g_terrain_near_prewarm;
 constexpr std::uint32_t kNearPrewarmColor = 0x80000000u;
@@ -1221,11 +1344,33 @@ void prewarm_owned_terrain_near_meshes() noexcept {
             command.spatial_index=index;return true;
         };
         if(state.frames_since_scan<UINT32_MAX)++state.frames_since_scan;
+        const std::uint64_t epoch=bridge_current_world_epoch();
+        const bool held=g_load_reveal_enabled.load(std::memory_order_relaxed) && epoch &&
+            epoch!=g_load_reveal_revealed_epoch.load(std::memory_order_relaxed);
+        const auto& coverage=g_owned_visual_world_frame.coverage;
+        // While the load is held, one ring scan prepares every part around the
+        // camera whatever the view direction (a turn of the camera after the
+        // reveal created up to 393 LOD 0 meshes in one frame, laptop j199/j201
+        // pf 618, 38-88 ms): depth parts within the near sun maps' reach, colour
+        // pieces within the LOD 0 radius. It waits for the sun maps' fit
+        // (coverage) so the depth radius is known; caves have none.
+        const bool ring_due=held && state.ring_epoch!=epoch && coverage.valid && state.frames_since_scan>=4;
+        if(held && state.ring_epoch!=epoch)g_terrain_ring_pending_epoch.store(coverage.valid?epoch:0,std::memory_order_relaxed);
         // Rescan after the camera moved; at most every fourth frame, since the
         // margins hold several frames of pan.
-        if(inputs.object_to_clip!=state.scanned_clip && state.frames_since_scan>=4) {
+        const bool ring_draining=state.ring_epoch==epoch && !state.ring_reported;
+        if(ring_due || (!ring_draining && inputs.object_to_clip!=state.scanned_clip && state.frames_since_scan>=4)) {
             state.queue.clear();state.head=0;state.frames_since_scan=0;state.scanned_clip=inputs.object_to_clip;
-            const auto& coverage=g_owned_visual_world_frame.coverage;
+            if(ring_due) {
+                state.ring_epoch=epoch;state.ring_depth=state.ring_color=0;state.ring_ticks=0;state.ring_reported=false;
+                // Near receivers lie within about two light radii (the square's
+                // side) of the camera; a margin as for the light squares below.
+                float near_radius=0;
+                if(coverage.directional)
+                    for(unsigned slice=0;slice<3;++slice)near_radius=(std::max)(near_radius,coverage.slices[slice].light_radius);
+                state.ring_depth_radius=2.f*near_radius*(1.f+kNearPrewarmLightMargin);
+                state.ring_color_radius=inputs.lod_hidden_distance>0.f?inputs.lod_hidden_distance:state.ring_depth_radius;
+            }
             std::array<NativeWorldBounds,3> near_squares{};
             if(coverage.valid && coverage.directional)
                 for(unsigned slice=0;slice<3;++slice) {
@@ -1257,6 +1402,20 @@ void prewarm_owned_terrain_near_meshes() noexcept {
                 }
                 return sum;
             };
+            // Ring scan: the nearest horizontal distance of a part's square
+            // from the camera, squared, against the ring radii.
+            const auto ring_reach=[&](const NativeWorldBounds& bounds) {
+                float sum=0;
+                for(unsigned axis=0;axis<2;++axis) {
+                    const float camera=inputs.camera_position[axis]-inputs.terrain_origin[axis];
+                    const float value=camera<bounds.minimum[axis]?bounds.minimum[axis]-camera:
+                        camera>bounds.maximum[axis]?camera-bounds.maximum[axis]:0.f;
+                    sum+=value*value;
+                }
+                return sum;
+            };
+            const float ring_depth2=state.ring_depth_radius*state.ring_depth_radius;
+            const float ring_color2=state.ring_color_radius*state.ring_color_radius;
             for(std::size_t begin=0;begin<spatial_parts.size();) {
                 const auto sector=spatial_parts[begin].source_sector;const auto material=spatial_parts[begin].material;
                 std::size_t end=begin;
@@ -1268,13 +1427,24 @@ void prewarm_owned_terrain_near_meshes() noexcept {
                 if((material>=threshold || !inputs.force_full_detail) && !(fixed_variant && state.color_warmed[first])) {
                     float nearest=INFINITY;
                     for(std::size_t index=begin;index<end;++index)
-                        if(retained_world_bounds_visible(spatial_parts[index].local_bounds,clip))
+                        if(ring_due?ring_reach(spatial_parts[index].local_bounds)<=ring_color2:
+                           retained_world_bounds_visible(spatial_parts[index].local_bounds,clip))
                             nearest=(std::min)(nearest,distance(spatial_parts[index].local_bounds));
                     OwnedTerrainCommand command{};
-                    if(nearest<INFINITY && piece_command(first,command) && state.color_warmed[first]!=variant_of(command)+1u)
+                    if(nearest<INFINITY && piece_command(first,command) && state.color_warmed[first]!=variant_of(command)+1u){
                         state.queue.push_back({nearest,first|kNearPrewarmColor});
+                        if(ring_due)++state.ring_color;
+                    }
                 }
-                if(light_ready && material<threshold && owned_terrain_base_shadow_material(source,material))
+                if(ring_due && material<threshold && owned_terrain_base_shadow_material(source,material))
+                    for(std::size_t index=begin;index<end;++index) {
+                        OwnedTerrainCommand command{};
+                        if((fixed_variant && state.depth_warmed[index]) || ring_reach(spatial_parts[index].local_bounds)>ring_depth2 ||
+                           !part_command(static_cast<std::uint32_t>(index),command) || state.depth_warmed[index]==variant_of(command)+1u)continue;
+                        state.queue.push_back({distance(spatial_parts[index].local_bounds),static_cast<std::uint32_t>(index)});
+                        ++state.ring_depth;
+                    }
+                else if(light_ready && material<threshold && owned_terrain_base_shadow_material(source,material))
                     for(std::size_t index=begin;index<end;++index) {
                         const auto& light=part_cache.parts[index];
                         if(!light.valid || !light.light_bounds.valid || (fixed_variant && state.depth_warmed[index]))continue;
@@ -1293,10 +1463,18 @@ void prewarm_owned_terrain_near_meshes() noexcept {
             }
             std::sort(state.queue.begin(),state.queue.end());
         }
-        if(state.head>=state.queue.size())return;
-        const std::uint64_t epoch=bridge_current_world_epoch();
-        const bool held=g_load_reveal_enabled.load(std::memory_order_relaxed) && epoch &&
-            epoch!=g_load_reveal_revealed_epoch.load(std::memory_order_relaxed);
+        const bool ring_active=state.ring_epoch==epoch && !state.ring_reported;
+        const auto ring_finished=[&]() {
+            if(!ring_active || state.head<state.queue.size())return;
+            state.ring_reported=true;
+            g_terrain_ring_pending_epoch.store(0,std::memory_order_relaxed);
+            char detail[192];
+            std::snprintf(detail,sizeof(detail),"depth=%zu color=%zu depth_radius=%.0f color_radius=%.0f ms=%.1f held=%d",
+                state.ring_depth,state.ring_color,state.ring_depth_radius,state.ring_color_radius,
+                1000.0*double(state.ring_ticks)/double(bridge_frequency()),held?1:0);
+            append_bridge_event("terrain_ring_prewarm",detail,false);
+        };
+        if(state.head>=state.queue.size()){ring_finished();return;}
         const std::int64_t frequency=static_cast<std::int64_t>(bridge_frequency());
         const std::int64_t remaining=static_cast<std::int64_t>(state.queue.size()-state.head);
         const std::int64_t budget_us=held?25000:std::clamp<std::int64_t>(remaining*40/8,300,2000);
@@ -1338,9 +1516,63 @@ void prewarm_owned_terrain_near_meshes() noexcept {
             }
             if(bridge_now()-begin>=budget)break;
         }
+        if(ring_active)state.ring_ticks+=bridge_now()-begin;
+        ring_finished();
     } catch(...) {
         g_terrain_near_prewarm.queue.clear();g_terrain_near_prewarm.head=0;
+        g_terrain_ring_pending_epoch.store(0,std::memory_order_relaxed);
     }
+}
+
+// In play, a sun pass that creates 32 or more LOD 0 terrain meshes names why
+// (laptop j199/j229 pf 618/619: 383-393 depth-only LOD 0 meshes with every
+// slice redrawn, despite the held ring of 794 parts): whether the terrain
+// source or the light axes changed since the last pass, the dirty slices,
+// and of this pass's near terrain casters how many the near/ring prewarm had
+// prepared at their current variant, with the horizontal distance range of
+// those it had not. At most 20 lines.
+void report_terrain_depth_burst(std::int64_t lod0_before,std::uint8_t dirty,
+    const std::vector<OwnedTerrainShadowCommand>& commands) noexcept {
+    try {
+        auto& frame=g_owned_terrain_frame;
+        const auto& coverage=g_owned_visual_world_frame.coverage;
+        static thread_local std::uint64_t last_generation=0,last_revision=0,last_structure=0;
+        static thread_local decltype(coverage.light_axes) last_axes{};
+        static thread_local unsigned lines=0;
+        const std::uint64_t structure=frame.source_values.geometry?frame.source_values.geometry->structural_revision:0;
+        const bool source_changed=last_generation!=frame.source_values.source_generation||last_revision!=frame.source_values.source_revision||
+            last_structure!=structure;
+        const bool axes_changed=last_axes!=coverage.light_axes;
+        last_generation=frame.source_values.source_generation;last_revision=frame.source_values.source_revision;
+        last_structure=structure;last_axes=coverage.light_axes;
+        const std::int64_t created=frame_acct::g_counters[frame_acct::mesh_terrain_lod0].load(std::memory_order_relaxed)-lod0_before;
+        if(created<32 || !frame_acct::g_in_play.load(std::memory_order_relaxed) || lines>=20)return;
+        ++lines;
+        const auto& prewarm=g_terrain_near_prewarm;
+        const auto& camera=frame.front_end.inputs.camera_position;
+        unsigned near_parts=0,warmed=0,unwarmed=0;float nearest=INFINITY,farthest=0;
+        for(const auto& item:commands) {
+            if(!(item.mask&0x07u))continue;
+            ++near_parts;
+            const auto variant=std::uint32_t(item.command.lod)|(item.command.lu_higher?4u:0u)|(item.command.rd_higher?8u:0u);
+            const auto index=item.command.spatial_index;
+            if(index<prewarm.depth_warmed.size() && prewarm.depth_warmed[index]==variant+1u){++warmed;continue;}
+            ++unwarmed;
+            float sum=0;
+            for(unsigned axis=0;axis<2;++axis) {
+                const float c=camera[axis];
+                const float v=c<item.bounds.minimum[axis]?item.bounds.minimum[axis]-c:c>item.bounds.maximum[axis]?c-item.bounds.maximum[axis]:0.f;
+                sum+=v*v;
+            }
+            const float distance=std::sqrt(sum);
+            nearest=(std::min)(nearest,distance);farthest=(std::max)(farthest,distance);
+        }
+        char text[320];
+        std::snprintf(text,sizeof(text),"created=%lld dirty=0x%02x source_changed=%d axes_changed=%d near_casters=%u warmed=%u unwarmed=%u unwarmed_m=%.0f..%.0f ring_epoch_current=%d ring_depth_radius=%.0f camera=%.1f,%.1f",
+            static_cast<long long>(created),unsigned(dirty),source_changed?1:0,axes_changed?1:0,near_parts,warmed,unwarmed,
+            unwarmed?nearest:0.f,farthest,prewarm.ring_epoch==bridge_current_world_epoch()?1:0,prewarm.ring_depth_radius,camera[0],camera[1]);
+        append_bridge_event("terrain_depth_burst",text,false);
+    } catch(...) {}
 }
 
 // Hands the renderer the static caster store: the whole store when its
@@ -1373,6 +1605,105 @@ bool send_owned_static_store(bool force_store,std::vector<RetainedShadowCasterVa
 // so a repeating failure is never silent after the first report.
 
 
+// A cave has no sun, so its sun pass neither keeps the static caster store nor
+// prepares the store's world vertices; the ray tracing scene takes its static
+// casters from the same sources as outdoors (Renderer::update_raytracing_statics_d3d12):
+// the object-space caster records the store build registers, and the store's
+// baked records with their prepared world vertices. While ray tracing is
+// wanted (bridge_set_cave_object_casters) a cave keeps the store as the sun
+// pass does and runs the store's preparation: the shelter collection without
+// its map (rain begin with side 0), one slice over every store caster, so the
+// renderer bakes the store, registers its missing casters through the depth
+// path and prepares their world vertices. Rerun when the world changes, when
+// the store changed (at most every 60 world frames, as the shelter), at once
+// while casters were missing (they join the bake on the next run) and 30
+// frames after a run that did not finish.
+std::atomic<bool> g_cave_object_casters_wanted{false};
+void update_cave_raytracing_casters(RetainedStaticScene& scene) {
+    static thread_local std::uint64_t seen_epoch=0,seen_revision=0,prepared_revision=0,prepared_frame=0;
+    static thread_local bool seen=false;
+    static thread_local unsigned again=0; // consecutive runs that left casters missing
+    if(!g_cave_object_casters_wanted.load(std::memory_order_relaxed)) {
+        if(seen){seen=false;if(!g_object_space_caster_ids.empty()){g_object_space_caster_ids.clear();active_statics_casters_publish({});}}
+        return;
+    }
+    auto& frame=g_owned_visual_world_frame;
+    if(!frame.values)return;
+    const auto epoch=bridge_current_world_epoch();
+    const bool all=!seen||epoch!=seen_epoch;
+    const auto changes=scene.shadow_source_changes(all?0:seen_revision);
+    if(!update_owned_static_caster_store(&changes,!all&&!changes.full)) {
+        seen=false;append_bridge_event("cave_raytracing_casters_failed","the static caster store could not be built",false);return;
+    }
+    seen=true;seen_epoch=epoch;seen_revision=changes.revision;
+    const auto& store=g_owned_static_casters;
+    // One line when the outcome changes: the store and the objects per admission reason.
+    {
+        static thread_local std::string logged;
+        const auto reasons=active_statics_reasons();
+        char text[360];
+        std::snprintf(text,sizeof(text),"cave: store_casters=%zu object_space_objects=%zu; objects admitted=%u not_eligible=%u unit=%u hidden=%u animating=%u "
+            "scaled=%u texture_kind=%u model_failed=%u model_pending=%u refused=%u",store.casters.size(),g_object_space_caster_ids.size(),reasons[0],reasons[1],
+            reasons[2],reasons[3],reasons[4],reasons[5],reasons[6],reasons[7],reasons[8],reasons[9]);
+        if(logged!=text){logged=text;append_bridge_event("cave_object_casters",text,false);}
+    }
+    const bool due=all||(again&&again<4)||(prepared_revision!=store.revision&&frame.serial-prepared_frame>=60)||
+        (!prepared_revision&&frame.serial-prepared_frame>=30);
+    if(!due||!store.valid||store.casters.empty())return;
+    if(!g_native_sink_context||!g_native_sink_rain_begin||!g_native_sink_rain_end||!g_native_sink_begin_batch||
+       !g_native_sink_end_batch||!g_native_sink_shadow_static_depth||!g_native_sink_submit)return;
+    prepared_frame=frame.serial;prepared_revision=0;
+    // The slice: straight down over every store caster (the preparation keeps
+    // a caster whose bounds reach it); the tiny texel size culls none by size.
+    float low[3]={INFINITY,INFINITY,INFINITY},high[3]={-INFINITY,-INFINITY,-INFINITY};
+    for(const auto& caster:store.casters)if(caster.bounds.valid)for(unsigned axis=0;axis<3;++axis){
+        low[axis]=(std::min)(low[axis],caster.bounds.minimum[axis]);high[axis]=(std::max)(high[axis],caster.bounds.maximum[axis]);}
+    if(!(low[0]<=high[0]))return;
+    const float h=(std::max)(high[0]-low[0],high[1]-low[1])*.5f+1.f;
+    const float cx=(low[0]+high[0])*.5f,cy=(low[1]+high[1])*.5f,top=high[2]+1.f,span=high[2]-low[2]+2.f;
+    NativeShadowSlice slice{};
+    slice.world_to_light={1/h,0,0,-cx/h, 0,1/h,0,-cy/h, 0,0,-1/span,top/span, 0,0,0,1};
+    slice.camera_slice=slice.world_to_light;
+    slice.bias={2*h/65536.f,1/span,0,0};
+    slice.enabled=true;
+    NativePointShadowFrame faces{};faces.slices[0]=slice;
+    bool collecting=false,batch=false;
+    const auto failed=[&](const char* reason) {
+        if(batch)g_native_sink_end_batch(g_native_sink_context,false);
+        if(collecting)g_native_sink_rain_end(g_native_sink_context,false);
+        static const char* last=nullptr;
+        if(last!=reason){append_bridge_event("cave_raytracing_casters_failed",reason,false);last=reason;}
+    };
+    try {
+        if(!g_native_sink_rain_begin(g_native_sink_context,slice,0))throw "preparation_begin";
+        collecting=true;
+        if(!g_native_sink_begin_batch(g_native_sink_context,SemanticKind::figure))throw "preparation_batch";
+        batch=true;
+        std::vector<RetainedShadowCasterValue> missing;
+        if(!send_owned_static_store(false,missing))throw "preparation_static_store";
+        frame.depth_selected.clear();
+        if(!collect_owned_missing_static_depth(missing,1))throw "preparation_missing_casters";
+        if(!frame.depth_selected.empty()) {
+            if(frame.depth_selected.size()>UINT_MAX)throw "preparation_selection_count";
+            const std::vector<OwnedTerrainShadowCommand> no_terrain;
+            OwnedDepthRegistration<NativePointShadowFrame> registration{no_terrain,faces};
+            NativeDepthSubmission submission{frame.depth_selected.data(),static_cast<UINT>(frame.depth_selected.size()),
+                &frame.coverage.world_to_clip,&registration,&register_owned_depth_part<NativePointShadowFrame>};
+            NativeGeometryView dispatch;dispatch.depth_submission=&submission;NativeGeometryResult result{};
+            if(!g_native_sink_submit(g_native_sink_context,dispatch,result))throw "preparation_submission";
+        }
+        frame.depth_selected.clear();
+        g_native_sink_end_batch(g_native_sink_context,true);batch=false;
+        const bool committed=g_native_sink_rain_end(g_native_sink_context,true);collecting=false;
+        if(!committed)throw "preparation_commit";
+        prepared_revision=store.revision;again=missing.empty()?0u:again+1u;
+    } catch(const char* reason) {
+        failed(reason);
+    } catch(...) {
+        failed("preparation_allocation");
+    }
+}
+
 thread_local std::vector<OwnedTerrainShadowCommand> g_terrain_command_storage;
 // execute_owned_shadow_pass scratch (plain values), cleared at each use.
 thread_local std::vector<RetainedShadowCasterValue> g_shadow_missing_static_storage;
@@ -1393,6 +1724,7 @@ bool execute_owned_shadow_pass(bool terrain_enabled,
     static thread_local bool cave_sun_retired=false;
     if(g_native_world_lighting_frame.cave) {
         if(!cave_sun_retired){retire_owned_shadow_maps();cave_sun_retired=true;}
+        try{update_cave_raytracing_casters(terrain_scene);}catch(...){}
         frame.shadow_ready=true;return true;
     }
     cave_sun_retired=false;
@@ -1429,6 +1761,8 @@ bool execute_owned_shadow_pass(bool terrain_enabled,
         CityRetainedOwnerGuard registration_timing(CityRetainedOwner::depth_registration);
         std::uint8_t dirty=0;
         if(!g_native_sink_shadow_begin(g_native_sink_context,shadows,dirty))throw "owned_shadow_begin";
+        // LOD 0 terrain meshes this pass creates (frame accounting counters).
+        const std::int64_t lod0_before=frame_acct::g_counters[frame_acct::mesh_terrain_lod0].load(std::memory_order_relaxed);
         OwnedSunDepthCull cull{};
         {
             NativeShadowCullProjection projection{};
@@ -1550,6 +1884,7 @@ bool execute_owned_shadow_pass(bool terrain_enabled,
         }
         const bool success=g_native_sink_shadow_end(g_native_sink_context,true);collecting=false;
         if(!success)throw "owned_shadow_end";
+        report_terrain_depth_burst(lod0_before,dirty,terrain_commands);
         if(terrain_enabled){prewarm_owned_terrain_far_shadow_meshes();prewarm_owned_terrain_near_meshes();}
         frame.shadow_ready=true;
         startup_end(StartupStage::shadow,traced,"completed");
@@ -1673,6 +2008,19 @@ void execute_owned_rain_occlusion_pass() noexcept {
     } catch(...) {
         failed("shelter_allocation");
     }
+}
+
+// A lamp's point shadow bake that failed (its cube or overlay is invalidated
+// and retried): the step that failed, counted, named for the first 16 and
+// then every 600th, so a repeating failure is never silent after the first.
+void report_point_shadow_bake_failure(const char* step,unsigned tier,unsigned light,std::uint64_t frame) noexcept {
+    static std::uint64_t failures=0;
+    ++failures;
+    if(failures>16 && failures%600)return;
+    char detail[192];
+    std::snprintf(detail,sizeof(detail),"step=%s %s light=%u frame=%llu failures=%llu",step?step:"unknown",
+        tier?"overlay":"static",light,static_cast<unsigned long long>(frame),static_cast<unsigned long long>(failures));
+    append_bridge_event("point_shadow_bake_failed",detail,false);
 }
 
 void execute_owned_point_shadow_pass(bool terrain_enabled,RetainedStaticScene& terrain_scene,
@@ -1937,10 +2285,13 @@ void execute_owned_point_shadow_pass(bool terrain_enabled,RetainedStaticScene& t
                     if(!committed)throw "point_shadow_commit";
                     if(tier){overlay=true;++stats.overlays;}else{baked=true;++stats.rebaked;}
                 }catch(...){
+                    const char* step="point_shadow_exception";
+                    try{throw;}catch(const char* thrown){step=thrown;}catch(...){}
                     if(batch)g_native_sink_end_batch(g_native_sink_context,false);
                     if(collecting)g_native_sink_point_shadow_end(g_native_sink_context,false);
                     if(tier)lamp.overlay_valid=false;else state.scheduler.invalidate(index);
                     report_world_point_light_omission("point_shadow_tier_failed");
+                    report_point_shadow_bake_failure(step,tier,index,state.frame);
                     break;
                 }
             }
@@ -2025,7 +2376,8 @@ bool same_shadow_terrain_inputs(const OwnedTerrainFrameInputs& a,
     const OwnedTerrainFrameInputs& b) noexcept {
     return a.source_generation==b.source_generation && a.source_revision==b.source_revision &&
         a.terrain_origin==b.terrain_origin && a.camera_position==b.camera_position &&
-        a.lod_distances==b.lod_distances && a.maximum_lod==b.maximum_lod &&
+        a.lod_distances==b.lod_distances && a.lod_hidden_distance==b.lod_hidden_distance &&
+        a.maximum_lod==b.maximum_lod &&
         a.force_full_detail==b.force_full_detail &&
         a.game_visibility_fingerprint==b.game_visibility_fingerprint &&
         a.game_visibility_domain_present==b.game_visibility_domain_present &&
@@ -2245,7 +2597,7 @@ void observe_shadow_reuse_inputs(const RetainedShadowInputDomain* cached,
             const auto& a=cached->terrain_inputs;const auto& b=t.front_end.inputs;
             note(Cause::terrain_origin,a.terrain_origin!=b.terrain_origin);
             note(Cause::terrain_camera_position,a.camera_position!=b.camera_position);
-            note(Cause::terrain_lod_distances,a.lod_distances!=b.lod_distances);
+            note(Cause::terrain_lod_distances,a.lod_distances!=b.lod_distances||a.lod_hidden_distance!=b.lod_hidden_distance);
             note(Cause::terrain_maximum_lod,a.maximum_lod!=b.maximum_lod);
             note(Cause::terrain_full_detail,a.force_full_detail!=b.force_full_detail);
             note(Cause::terrain_visibility_fingerprint,a.game_visibility_fingerprint!=b.game_visibility_fingerprint);
@@ -2484,7 +2836,6 @@ bool prepare_owned_world_shadows_from(OwnedShadowInputs in,
 namespace {
 
 
-
 } // namespace
 
 // The terrain caster caches, rebuilt on their next miss (bridge_release_world_caches).
@@ -2499,6 +2850,10 @@ void release_owned_terrain_shadow_caches() noexcept {
     g_terrain_shadow_part_cache.prepared_owner.reset();
     decltype(g_terrain_shadow_part_cache.parts)().swap(g_terrain_shadow_part_cache.parts);
     decltype(g_terrain_shadow_part_cache.order)().swap(g_terrain_shadow_part_cache.order);
+}
+
+void bridge_set_cave_object_casters(bool wanted) noexcept {
+    g_cave_object_casters_wanted.store(wanted, std::memory_order_relaxed);
 }
 
 void bridge_set_terrain_far_shadow_prewarm(bool enabled) noexcept {

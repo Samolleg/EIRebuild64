@@ -13,6 +13,7 @@
 namespace owned {
 
 struct FigureCpuAsset;
+struct NativePackedGroup;
 
 // Meshes smaller than this keep only their full level: their records cost
 // less than a level's bookkeeping saves.
@@ -42,19 +43,25 @@ inline constexpr std::uint32_t native_world_impostor = 8u;
 //   bit 4  immutable vertex opacity in normal.w; world normal XYZ and
 //          material lighting are unchanged, without terrain animation data.
 inline constexpr std::uint32_t native_world_vertex_opacity = 16u;
+//   bit 5  impostor follower (with bit 3): a part of an object whose merged
+//          impostor another part, its lead, draws. Its sphere block holds
+//          the object's sphere, so it switches with the lead, and it draws
+//          nothing where the lead draws the quad.
+inline constexpr std::uint32_t native_world_impostor_follower = 32u;
 
-// Crown impostors: each cut-out decoration figure is baked once into one
-// slice of an atlas array: kImpostorFrames x kImpostorFrames orthographic
-// views of kImpostorFrameTexels squared over the upper hemisphere
-// (hemi-octahedral), centred on the mean shape's bounding sphere, holding
-// albedo with coverage and object-space normals. The bake and the vertex
-// stage share these frame directions and image axes.
+// Crown impostors: each decoration object model with a cut-out part is baked
+// once, all its drawn parts together, into one slice of an atlas array:
+// kImpostorFrames x kImpostorFrames orthographic views of
+// kImpostorFrameTexels squared over the upper hemisphere (hemi-octahedral),
+// centred on the object's bounding sphere, holding albedo with coverage and
+// object-space normals. The bake and the vertex stage share these frame
+// directions and image axes.
 inline constexpr std::uint32_t kImpostorFrames = 4;
 inline constexpr std::uint32_t kImpostorFrameTexels = 64;
 inline constexpr std::uint32_t kImpostorMips = 4;
 // The crossfade band above the impostor size, as a fraction of it.
 inline constexpr float kImpostorBand = 0.5f;
-// Figures below this many triangles keep drawing their own triangles.
+// Objects below this many triangles keep drawing their own triangles.
 inline constexpr std::uint32_t kImpostorMinTriangles = 32;
 inline constexpr char kImpostorFrameHlsl[] = R"(
 static const uint kImpostorFrames=4;
@@ -80,15 +87,16 @@ void nativeImpostorBasis(float3 d,out float3 r,out float3 u){
 }
 )";
 
-// A figure's impostor bake input, prepared on the neighbour worker: per
-// component the mean shape's position, the normal and the UV (8 floats), the
-// triangle list, and the mean shape's bounding sphere.
-struct NativeImpostorSource {
+// One part of an object's impostor bake input, prepared on the neighbour
+// worker: per component the part's position at the object's shape moved by
+// offset (into the lead part's frame), the normal and the UV (8 floats), and
+// the triangle list.
+struct NativeImpostorPart {
     std::vector<float> vertices;
     std::vector<std::uint32_t> indices;
-    std::array<float, 4> sphere{};
 };
-bool build_impostor_source(const FigureCpuAsset& figure, NativeImpostorSource& output) noexcept;
+bool build_impostor_part(const FigureCpuAsset& figure, const NativePackedGroup* positions,
+    const std::array<float, 3>& offset, NativeImpostorPart& output) noexcept;
 
 struct NativeMeshLods {
     std::uint32_t levels = 0; // reduced levels, coarser in turn

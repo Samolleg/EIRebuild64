@@ -224,6 +224,14 @@ bool perf_enabled(){static const bool enabled=[](){char value[8]{};return GetEnv
 bool placed_hitch_profile_enabled(){static const bool enabled=[](){char value[8]{};return GetEnvironmentVariableA("EI_RENDERER_OUTER_FRAME_GAP_PROFILE",value,sizeof(value))&&value[0]=='1';}();return enabled;}
 std::int64_t perf_now(){LARGE_INTEGER value{};QueryPerformanceCounter(&value);return value.QuadPart;}
 std::int64_t perf_frequency(){static const std::int64_t frequency=[](){LARGE_INTEGER value{};QueryPerformanceFrequency(&value);return value.QuadPart;}();return frequency;}
+// CPU time of a renderer scope per frame (RenderProfiler::add_cpu_time; at most
+// kProfileCpuScopes names a frame): the game's per-object entries between
+// passes, and steps inside a pass. The name is compared by pointer: a literal.
+struct ProfileCpuTimer{
+ RenderProfiler& profiler;const char* name;std::int64_t begin;
+ ProfileCpuTimer(RenderProfiler& p,const char* n) noexcept:profiler(p),name(n),begin(p.enabled()?perf_now():0){}
+ ~ProfileCpuTimer(){if(begin)profiler.add_cpu_time(name,perf_now()-begin);}
+};
 struct ColorDiagnosticTicks {
  std::int64_t* total=nullptr;std::int64_t* nested=nullptr;std::int64_t* extra=nullptr;
  std::int64_t begin=0;

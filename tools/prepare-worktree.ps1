@@ -18,7 +18,9 @@ $dlssFiles = @('include/nvsdk_ngx.h', 'include/nvsdk_ngx_defs.h', 'include/nvsdk
     'lib/Windows_x86_64/x64/nvsdk_ngx_s.lib', 'lib/Windows_x86_64/x64/nvsdk_ngx_s_dbg.lib',
     'include/nvsdk_ngx_defs_dlssg.h', 'include/nvsdk_ngx_params_dlssg.h',
     'include/nvsdk_ngx_helpers_dlssg.h', 'include/nvsdk_ngx_helpers_dlssg_d3d.h',
-    'lib/Windows_x86_64/rel/nvngx_dlss.dll', 'lib/Windows_x86_64/rel/nvngx_dlssg.dll', 'LICENSE.txt')
+    'include/nvsdk_ngx_defs_dlssd.h', 'include/nvsdk_ngx_params_dlssd.h',
+    'include/nvsdk_ngx_helpers_dlssd.h', 'include/nvsdk_ngx_helpers_dlssd_d3d.h',
+    'lib/Windows_x86_64/rel/nvngx_dlss.dll', 'lib/Windows_x86_64/rel/nvngx_dlssg.dll', 'lib/Windows_x86_64/rel/nvngx_dlssd.dll', 'LICENSE.txt')
 foreach ($file in $dlssFiles) {
     if (!(Test-Path -LiteralPath (Join-Path $DlssSdkSource $file) -PathType Leaf)) {
         throw "Missing DLSS SDK v310.9.16 file: $DlssSdkSource/$file. Pass -DlssSdkSource or set EIREBUILD64_DLSS_SDK. Nothing will be downloaded."
@@ -29,7 +31,11 @@ $d3d12Packages = @(
     @{ Source='deps/fidelityfx-sdk/2.3.0'; Destination='dependencies/fidelityfx/2.3.0'; Files=@(
         'api/include/*','framegeneration/include/*','upscalers/include/*',
         'signedbin/amd_fidelityfx_loader_dx12.lib','signedbin/amd_fidelityfx_loader_dx12.dll',
-        'signedbin/amd_fidelityfx_framegeneration_dx12.dll','license.md') },
+        'signedbin/amd_fidelityfx_framegeneration_dx12.dll','signedbin/amd_fidelityfx_upscaler_dx12.dll','license.md') },
+    @{ Source='deps/rtxdi/3.2.0/RTXDI-Library-b67f61cd0bfa6792acbf5429bb29a68ee5cdd808'; Destination='dependencies/rtxdi/3.2.0'; Files=@(
+        'Include/*','LICENSE.txt') },
+    @{ Source='deps/agility-sdk/1.620.2'; Destination='dependencies/agility/1.620.2'; Files=@(
+        'build/native/include/*','build/native/bin/x64/D3D12Core.dll','LICENSE.txt') },
     @{ Source='deps/nvapi/70d337db/nvapi-70d337db9186e968eab622f7e786de7e437faf3d'; Destination='dependencies/nvapi/70d337db'; Files=@(
         '*.h','amd64/nvapi64.lib','License.txt') },
     @{ Source='deps/dxc/1.9.2609'; Destination='dependencies/dxc/1.9.2609'; Files=@(

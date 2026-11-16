@@ -28,6 +28,8 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_sky.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_fur.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_terrain2_cache.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_terrain_face_cache.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\renderer_fire_burn.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_impostors.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\renderer_point_shadows.cpp" />
     <ClInclude Include="$(OwnedRendererRoot)Source\frame_plan.h" />
@@ -42,7 +44,7 @@
   </Target>
   <Target Name="GenerateDxilResources" AfterTargets="GenerateRendererResources" Condition="'$(EICacheRendererShaders)'!='true'">
     <!-- nmake uses the author's generated per-program rules and incremental outputs. -->
-    <Exec Command="&quot;$(VCToolsInstallDir)bin\Hostx64\x64\nmake.exe&quot; /nologo /f &quot;$(MSBuildThisFileDirectory)D3D12Shaders.mak&quot; &quot;DXC=$(DxcRoot)bin\x64\dxc.exe&quot; &quot;HOST_D3D12=$(OwnedRendererRoot)Host\d3d12&quot;" WorkingDirectory="$(OutDir)" />
+    <Exec Command="&quot;$(VCToolsInstallDir)bin\Hostx64\x64\nmake.exe&quot; /nologo /f &quot;$(MSBuildThisFileDirectory)D3D12Shaders.mak&quot; &quot;DXC=$(DxcRoot)bin\x64\dxc.exe&quot; &quot;RTXDI_SDK=$(RtxdiRoot).&quot; &quot;HOST_D3D12=$(OwnedRendererRoot)Host\d3d12&quot;" WorkingDirectory="$(OutDir)" />
     <Exec Command="&quot;$([System.String]::Copy('$(WindowsSDK_ExecutablePath_x64)').Split(';').GetValue(0))\rc.exe&quot; /nologo /fo ..\eid3d11_dxil.res dxil.rc" WorkingDirectory="$(OutDir)dxil" />
     <Exec Command="&quot;$([System.String]::Copy('$(WindowsSDK_ExecutablePath_x64)').Split(';').GetValue(0))\rc.exe&quot; /nologo /fo ..\eid3d11_d3d12_shaders.res d3d12_shaders.rc" WorkingDirectory="$(OutDir)dxil" />
   </Target>

@@ -188,6 +188,7 @@ bool Presenter::create_swap(Core& core, ID3D12CommandQueue* queue, std::string& 
     // Two frames queued at most: latency, not a frame cap (present interval 0).
     swap_->SetMaximumFrameLatency(2);
     waitable_ = swap_->GetFrameLatencyWaitableObject();
+    latency_owed_ = 0;
     return acquire_buffers(core, reason);
 }
 
@@ -241,12 +242,28 @@ bool Presenter::resize(Core& core, UINT width, UINT height, std::string& reason)
     return acquire_buffers(core, reason);
 }
 
-void Presenter::wait_frame_latency() noexcept {
+// The latency object is a count: a wait takes one, a retired present returns
+// one. A wait that ends without taking one (the GPU did not retire a present
+// within the second: a load, a batch of ray tracing structure builds) leaves
+// that present's count untaken when it does retire, and from then on one
+// more frame is queued than SetMaximumFrameLatency asked for, for the rest
+// of the session: the frame fence became the throttle and every image came
+// a frame later. The untaken count is owed and taken at a later frame.
+void Presenter::take_frame_latency() noexcept {
     if (!waitable_) return;
     const owned::frame_waits::Scope wait(owned::frame_waits::swapchain);
-    const DWORD waited = WaitForSingleObjectEx(waitable_, 1000, TRUE);
-    if (waited != WAIT_OBJECT_0 && waited != WAIT_IO_COMPLETION)
-        remote::host_log("d3d12: swap chain frame latency wait failed: wait=%lu error=%lu", waited, GetLastError());
+    const auto take = [this] {
+        DWORD result = WAIT_IO_COMPLETION;
+        while (result == WAIT_IO_COMPLETION) result = WaitForSingleObjectEx(waitable_, 1000, TRUE);
+        return result == WAIT_OBJECT_0;
+    };
+    if (!take()) {
+        const unsigned owed = (std::min)(latency_owed_.load() + 1, 2u);
+        latency_owed_ = owed;
+        remote::host_log("d3d12: no present retired within 1 s (frame latency wait); the frame goes on and takes that count later (%u owed)", owed);
+        return;
+    }
+    if (latency_owed_ && take()) --latency_owed_;
 }
 
 Presenter::State Presenter::prepare(Core& core, std::string& reason, bool wait_latency) {
@@ -254,10 +271,10 @@ Presenter::State Presenter::prepare(Core& core, std::string& reason, bool wait_l
         // The owner sizes and orders the window. Minimized: no wait, since
         // only a Present returns the frame latency count a wait takes.
         if (!IsWindow(parent_) || IsIconic(parent_)) return State::minimized;
-        if (wait_latency) wait_frame_latency();
+        if (wait_latency) take_frame_latency();
         return State::ready;
     }
-    if (wait_latency) wait_frame_latency();
+    if (wait_latency) take_frame_latency();
     if (!IsWindow(parent_)) return State::minimized;  // the game is closing
     RECT client{};
     GetClientRect(parent_, &client);

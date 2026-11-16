@@ -5,6 +5,8 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace owned {
@@ -12,6 +14,15 @@ namespace owned {
 struct RetainedPreparedNode {
     const FigureCpuAsset* figure = nullptr;
     const TextureCpuAsset* texture = nullptr;
+    // Item 5 live-sourced models: the part's game surface instead of an
+    // archive texture (its pixels live only in the renderer's surface cache).
+    std::shared_ptr<const OwnedVisualSurface> surface;
+    // A surface part's cut-out class from the archive texture of the same
+    // name (its top level's opaque_mips), as the neighbour path classifies
+    // the model: 1 cut-out, 0 opaque, -1 no archive texture found.
+    std::int8_t archive_cut_out = -1;
+    // The game texture's name (surface parts), for that lookup.
+    std::string texture_name;
     std::vector<NativePackedGroup> positions;
     std::vector<NativePackedGroup> normals;
     std::vector<NativeOwnedTextureMip> texture_mips;
@@ -44,6 +55,9 @@ struct RetainedStaticSourceCandidate {
     std::shared_ptr<const VisualAssemblyAsset> assembly;
     RetainedStaticPrepareDiagnostic preparation{};
     bool prepared = false;
+    // False: some drawn part has no archive texture (prebuild_decorations
+    // then plans no impostor for it; item 5 live-sourced models).
+    bool impostor_inputs_complete = true;
 };
 
 struct RetainedPreparedInstance {
@@ -276,6 +290,105 @@ std::uint32_t retained_object_space_sway_flags(const VisualAssemblyAsset& assemb
 // that touch never separate. Zero when the object does not sway.
 std::uint32_t retained_visual_sway_flags(const RetainedVisualSample& sample,
     const VisualPartAsset& part) noexcept;
+// Item 5, main-map statics in object space. The renderer publishes which
+// MOB objects may enter (eligible: trees 53 and stones 55 of the active map's
+// MOB, no quest object) and which catalog models are ready. A model is the
+// live object's own resolved assembly at its complection
+// (retained_visual_object_space_model): the catalog is built from the
+// assemblies the game already resolved, never from a second load. Revision
+// changes with every publication (models ready, released).
+struct ActiveStaticsIndex {
+    std::uint64_t revision = 0;
+    // Changes only when the catalog is released or replaced: object-space
+    // registrations made under another catalog are stale.
+    std::uint64_t catalog = 0;
+    std::unordered_set<std::int32_t> eligible;   // MOB object ids
+    std::unordered_set<std::uint64_t> models;    // ready catalog models
+    std::unordered_set<std::uint64_t> failed;    // models the catalog could not build
+};
+void active_statics_index_publish(std::shared_ptr<ActiveStaticsIndex> index) noexcept;
+std::shared_ptr<const ActiveStaticsIndex> active_statics_index() noexcept;
+// The catalog model of a sample, by content: its model resource, complection,
+// scale and centre shift, and per part FIG resource, model node, texture name
+// (archive texture or game surface alike) and hidden flag. Cached per
+// assembly revision on the prepared state.
+std::uint64_t retained_visual_object_space_model(const RetainedVisualSample& sample) noexcept;
+// Models the bridge's caster store build found on eligible live objects and
+// not yet in the catalog: the renderer takes them as one worker batch. Each
+// model is requested once per index lifetime (released with a null publish).
+struct ActiveStaticsModelRequest {
+    std::uint64_t key = 0;
+    std::shared_ptr<const VisualAssemblyAsset> assembly;
+    std::array<float, 3> shape{};
+};
+void active_statics_request(const RetainedVisualSample& sample, std::uint64_t key) noexcept;
+std::vector<ActiveStaticsModelRequest> active_statics_take_requests() noexcept;
+// One catalog model built from a live assembly at its complection, as a
+// neighbour decoration candidate in the object's own frame (identity
+// placement): per assembly part one node (figure null when the part has no
+// geometry), positions selected at the shape, node placement from the neutral
+// skeleton. impostor_inputs_complete is false when a drawn part's texture is
+// not an archive texture (a game surface): that model gets static LOD only.
+bool prepare_live_static_candidate(const ActiveStaticsModelRequest& request,
+    StaticObjectSource& source, std::int32_t model_index,
+    std::shared_ptr<RetainedStaticSourceCandidate>& candidate) noexcept;
+// Registrations the renderer refused (a part it could not match): the
+// object stays posed; shadow stores rebuild when this changes.
+std::uint64_t active_statics_failures() noexcept;
+void active_statics_note_failure() noexcept;
+// The step an object-space registration (colour or caster) failed at, per
+// refusal: the bridge's part preparation and placement self-check, then the
+// renderer's catalog match and queueing. Counts and the first examples per
+// step reset with the index; the renderer logs them (F11 too).
+enum class ObjectSpaceRefusal : std::uint8_t { pose, part_prepare, part_submission, place_node, place_bounds,
+    invalid, model_missing, part_source, node_unmatched, figure_mismatch, queue, adopt, exception, count };
+const char* object_space_refusal_name(ObjectSpaceRefusal step) noexcept;
+void active_statics_note_refusal(ObjectSpaceRefusal step, const char* detail = nullptr) noexcept;
+struct ActiveStaticsRefusals {
+    std::array<std::uint32_t, std::size_t(ObjectSpaceRefusal::count)> counts{};
+    std::array<std::vector<std::string>, std::size_t(ObjectSpaceRefusal::count)> examples;
+    std::uint64_t revision = 0; // bumped per note
+};
+ActiveStaticsRefusals active_statics_refusals() noexcept;
+// Objects the bridge admitted to object space in its last colour pass.
+void active_statics_note_admitted(std::uint32_t objects) noexcept;
+std::uint32_t active_statics_admitted() noexcept;
+// The admitted objects of the whole world (sorted ids), from the sun caster
+// store's build: the renderer's object-space caster bake draws exactly
+// these, the store none of them. Revision changes with the set.
+struct ActiveStaticsCasters { std::uint64_t revision = 0; std::vector<std::int32_t> ids; };
+void active_statics_casters_publish(std::vector<std::int32_t> ids) noexcept;
+std::shared_ptr<const ActiveStaticsCasters> active_statics_casters() noexcept;
+// Per-frame admission from authoritative state: a catalog object, not a
+// unit, not hidden, dead or invisible, no clip selected and its animation
+// time inactive, unit scale and no centre shift, no time-scrolled or
+// order-preserving part (wanted: model is its catalog key), its model ready
+// in the catalog and no refused registration for this assembly under this
+// index. Anything else draws today's posed records this frame. Colour and
+// the sun caster store both decide by this; the store build requests the
+// model of a wanted object that is not ready.
+// Why an object is (not) in object space, first failing clause in order.
+enum class ObjectSpaceReason : std::uint8_t { admitted, not_eligible, unit, hidden, animating, scaled, texture_kind,
+    model_failed, model_pending, refused, count };
+ObjectSpaceReason retained_visual_object_space_reason(const RetainedVisualSample& sample,
+    const ActiveStaticsIndex* index, const std::vector<std::int32_t>& time_active_ids, std::uint64_t& model) noexcept;
+// The caster store's last full build: objects per reason, then their drawn
+// parts per reason (F11 main_map_object_space_reasons).
+void active_statics_reasons_publish(const std::array<std::uint32_t, 2 * std::size_t(ObjectSpaceReason::count)>& counts) noexcept;
+std::array<std::uint32_t, 2 * std::size_t(ObjectSpaceReason::count)> active_statics_reasons() noexcept;
+bool retained_visual_object_space_wanted(const RetainedVisualSample& sample,
+    const ActiveStaticsIndex* index, const std::vector<std::int32_t>& time_active_ids, std::uint64_t& model) noexcept;
+bool retained_visual_object_space_admitted(const RetainedVisualSample& sample,
+    const ActiveStaticsIndex* index, const std::vector<std::int32_t>& time_active_ids) noexcept;
+// The object-space placement of an admitted sample's parts at its neutral
+// pose, by the same evaluation as the posed geometry: per part its node's
+// world matrix and its object-space sway flags, and the sway anchor. False
+// when a part at that placement (its node origin and position radius) leaves
+// its posed bounds.
+bool retained_visual_object_space_parts(const RetainedVisualSample& sample,
+    const std::uint32_t* parts, std::size_t count, const NativeWorldBounds* posed_bounds,
+    std::vector<std::array<float, 16>>& node_to_world, std::vector<std::uint32_t>& sway_flags,
+    std::array<float, 3>& sway_root);
 // Character part merge (#65): (re)build the unit's merged groups for its
 // current assembly; parts that cannot merge stay per part.
 bool retained_visual_merged_groups(const RetainedVisualSample& sample);

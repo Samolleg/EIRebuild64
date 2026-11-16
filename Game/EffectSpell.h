@@ -1,5 +1,6 @@
 #pragma once
 namespace SaveSchema { class Writer; class Reader; }
+namespace owned { struct RetainedFireSpell; }
 
 #include "Effect.h"
 #include "SpellSystem.h"
@@ -111,6 +112,7 @@ public:
                      CMapObject *pTarg, const CPlot3D &ptTarg, bool _bQuiet);
     //
     BOOL Segment();
+    bool ReadVisualFireSpell(owned::RetainedFireSpell& output) const noexcept;
     // load&store
     static void SetCurrentWorld(CWorldServer *_pWS) { pWSstatic = _pWS; }
     void Load(CSave &file) = delete;

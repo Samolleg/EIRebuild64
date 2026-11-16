@@ -17,6 +17,8 @@
 //   whose size differs (a pointer or size_t member changes the size). A
 //   struct holding pointers is never registered; it gets a fields() visit.
 // Anything else fails to compile with "scene_wire: no wire form".
+#include <emmintrin.h>
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -65,6 +67,92 @@ struct Out {
         bytes.resize(at + size);
         std::memcpy(bytes.data() + at, data, size);
     }
+};
+
+// Sizing pass: the encoded size of a value (Out's bytes without writing them).
+struct Count {
+    std::size_t bytes = 0;
+    static constexpr bool decoding = false;
+    void raw(const void*, std::size_t size) noexcept { bytes += size; }
+};
+// Encoder into memory the caller sized with Count (a ring record itself).
+struct OutAt {
+    std::uint8_t* at;
+    static constexpr bool decoding = false;
+    void raw(const void* data, std::size_t size) noexcept {
+        if (!size) return;
+        std::memcpy(at, data, size);
+        at += size;
+    }
+};
+
+// 64-bit content hash of a byte stream (core-mode stream deltas: "has the
+// host these exact bytes"). SSE2, 64-byte stripes in the manner of XXH3's
+// accumulate: per 64-bit lane acc += lo32(d^k) * hi32(d^k) + swapped(d), with
+// keys that change per stripe (so stripe order matters); the lanes are mixed
+// once at the end with the length. Not keyed against adversaries: it tells
+// identical game data from changed game data.
+class Hasher {
+public:
+    Hasher() noexcept {
+        for (auto& lane : acc_) lane = _mm_setzero_si128();
+    }
+    void update(const void* data, std::size_t size) noexcept {
+        const auto* bytes = static_cast<const std::uint8_t*>(data);
+        length_ += size;
+        if (buffered_) {
+            const std::size_t take = (std::min)(size, std::size_t(64) - buffered_);
+            std::memcpy(buffer_ + buffered_, bytes, take);
+            buffered_ += take; bytes += take; size -= take;
+            if (buffered_ < 64) return;
+            stripe(buffer_);
+            buffered_ = 0;
+        }
+        for (; size >= 64; bytes += 64, size -= 64) stripe(bytes);
+        if (size) { std::memcpy(buffer_, bytes, size); buffered_ = size; }
+    }
+    std::uint64_t finish() noexcept {
+        if (buffered_) {
+            std::memset(buffer_ + buffered_, 0, 64 - buffered_);
+            stripe(buffer_);
+            buffered_ = 0;
+        }
+        alignas(16) std::uint64_t lanes[8];
+        for (int i = 0; i < 4; ++i) _mm_store_si128(reinterpret_cast<__m128i*>(lanes + 2 * i), acc_[i]);
+        std::uint64_t hash = 0x9E3779B97F4A7C15ull ^ (std::uint64_t(length_) * 0xC2B2AE3D27D4EB4Full);
+        for (const std::uint64_t lane : lanes) {
+            hash ^= lane + 0x165667B19E3779F9ull + (hash << 6) + (hash >> 2);
+            hash ^= hash >> 33; hash *= 0xFF51AFD7ED558CCDull; hash ^= hash >> 33;
+        }
+        hash ^= hash >> 29; hash *= 0xBF58476D1CE4E5B9ull; hash ^= hash >> 32;
+        return hash ? hash : 1;
+    }
+
+private:
+    void stripe(const std::uint8_t* p) noexcept {
+        const __m128i step = _mm_set1_epi32(static_cast<int>(stripes_++ * 0x9E3779B1u));
+        static const std::uint32_t keys[16] = {0xb8fe6c39u, 0x23a44bbeu, 0x7c01812cu, 0xf721ad1cu, 0xded46de9u, 0x839097dbu,
+            0x7240a4a4u, 0xb7b3671fu, 0xcb79e64eu, 0xccc0e578u, 0x825ad07du, 0xccff7221u, 0xb8084674u, 0xf743248eu,
+            0xe03590e6u, 0x81a20102u};
+        for (int i = 0; i < 4; ++i) {
+            const __m128i d = _mm_loadu_si128(reinterpret_cast<const __m128i*>(p + 16 * i));
+            const __m128i k = _mm_add_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(keys + 4 * i)), step);
+            const __m128i dk = _mm_xor_si128(d, k);
+            const __m128i product = _mm_mul_epu32(dk, _mm_shuffle_epi32(dk, _MM_SHUFFLE(0, 3, 0, 1)));
+            acc_[i] = _mm_add_epi64(acc_[i], _mm_add_epi64(product, _mm_shuffle_epi32(d, _MM_SHUFFLE(1, 0, 3, 2))));
+        }
+    }
+    __m128i acc_[4];
+    std::uint8_t buffer_[64];
+    std::size_t buffered_ = 0;
+    std::uint64_t length_ = 0;
+    std::uint32_t stripes_ = 0;
+};
+// The hash of a value's wire bytes (no bytes are produced).
+struct HashOut {
+    Hasher hasher;
+    static constexpr bool decoding = false;
+    void raw(const void* data, std::size_t size) noexcept { hasher.update(data, size); }
 };
 
 // Decoder over one whole message. A short or oversized read sets failed and

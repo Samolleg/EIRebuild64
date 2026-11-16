@@ -29,7 +29,67 @@ constexpr SkyQuality sky_quality(int level) noexcept {
     return level <= 1 ? SkyQuality{2, 1280, 20, 3, 256, 128} : SkyQuality{1, 2560, 48, 5, 512, 256};
 }
 constexpr float kSkyShadowExtent = 768.f;  // metres of ground around the view focus
+// skyCloudTransmittance's 150 m penumbra offset in shadow texels, when it is
+// a whole number of them (100 at 512, 50 at 256); else 0.
+constexpr unsigned sky_shadow_reach(unsigned size) noexcept {
+    return (150u * size) % 768u == 0 ? 150u * size / 768u : 0u;
+}
 float sky_mix(float a, float b, float t) noexcept { return a + (b - a) * t; }
+// The part of the screen whose view rays rise above the horizon, as texel
+// boxes {x0, y0, x1, y1} (end exclusive) of the reconstruction target and of
+// the march target: what skyCloudsCS and skyResolveCS dispatch over (skyBox).
+// skyRayHeight is a ratio of two functions linear across the screen, so with
+// one sign of the divisor those rays fill a half-plane: its part within the
+// screen (grown by 16 texels, so a horizon just off screen still counts) is
+// bounded by the corners above it and its edge crossings. The resolve box is
+// that bound grown by 8 texels (the sky draw's and the next resolve's history
+// reads lie within one texel of an above-horizon pixel), the march box half
+// of it grown by 8 more (the resolve reads within 3 march texels). Both
+// empty: no sky ray on screen. False: no usable projection, the whole targets.
+bool sky_horizon_box(const SkyFrameGpu& frame, unsigned march[4], unsigned resolve[4]) noexcept {
+    const float* const m = frame.clip_to_world;
+    const unsigned width = frame.reconstruct[0], height = frame.reconstruct[1];
+    if (!width || !height) return false;
+    const double grow_x = 32.0 / width, grow_y = 32.0 / height;
+    const double corner[4][2] = {{-1 - grow_x, -1 - grow_y}, {1 + grow_x, -1 - grow_y}, {1 + grow_x, 1 + grow_y}, {-1 - grow_x, 1 + grow_y}};
+    double above[4];
+    int sign = 0;
+    for (int i = 0; i < 4; ++i) {
+        const double z = double(m[8]) * corner[i][0] + double(m[9]) * corner[i][1] + m[10] + m[11];
+        const double w = double(m[12]) * corner[i][0] + double(m[13]) * corner[i][1] + m[14] + m[15];
+        if (!std::isfinite(z) || !std::isfinite(w) || w == 0) return false;
+        const int s = w > 0 ? 1 : -1;
+        if (sign && s != sign) return false;
+        sign = s;
+        above[i] = s * (z - double(frame.eye[2]) * w);
+    }
+    double lo[2] = {1e30, 1e30}, hi[2] = {-1e30, -1e30};
+    const auto take = [&](double x, double y) {
+        const double px = (x * .5 + .5) * width, py = (.5 - y * .5) * height;
+        lo[0] = std::min(lo[0], px);hi[0] = std::max(hi[0], px);lo[1] = std::min(lo[1], py);hi[1] = std::max(hi[1], py);
+    };
+    for (int i = 0; i < 4; ++i) {
+        const int j = (i + 1) & 3;
+        if (above[i] > 0) take(corner[i][0], corner[i][1]);
+        if ((above[i] > 0) != (above[j] > 0)) {
+            const double t = above[i] / (above[i] - above[j]);
+            take(corner[i][0] + (corner[j][0] - corner[i][0]) * t, corner[i][1] + (corner[j][1] - corner[i][1]) * t);
+        }
+    }
+    if (lo[0] > hi[0]) {
+        for (int k = 0; k < 4; ++k) march[k] = resolve[k] = 0;
+        return true;
+    }
+    const unsigned size[2] = {width, height}, march_size[2] = {frame.size[0], frame.size[1]};
+    for (int axis = 0; axis < 2; ++axis) {
+        const double first = std::clamp(std::floor(lo[axis]) - 8, 0.0, double(size[axis]));
+        const double end = std::clamp(std::ceil(hi[axis]) + 8, 0.0, double(size[axis]));
+        resolve[axis] = unsigned(first);resolve[axis + 2] = unsigned(end);
+        march[axis] = unsigned(std::clamp(std::floor(first * .5) - 8, 0.0, double(march_size[axis])));
+        march[axis + 2] = unsigned(std::clamp(std::ceil(end * .5) + 8, 0.0, double(march_size[axis])));
+    }
+    return true;
+}
 float sky_linear(float c) noexcept { return std::pow(std::clamp(c, 0.f, 1.f), 2.2f); }
 }  // namespace
 
@@ -59,6 +119,9 @@ void append_sky_shader_programs(std::vector<ShaderProgram>& out) {
         out.push_back({{kSkyShader, sizeof(kSkyShader) - 1}, nullptr, nullptr, entry, "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
     out.push_back({{kSkyShader, sizeof(kSkyShader) - 1}, nullptr, nullptr, "skyVS", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
     out.push_back({{kSkyShader, sizeof(kSkyShader) - 1}, nullptr, nullptr, "skyPS", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
+    // D3D12: the shadow field in two steps (11, 12; coverage_cuts 32).
+    for (const char* entry : {"skyShadowDepthCS", "skyShadowGatherCS"})
+        out.push_back({{kSkyShader, sizeof(kSkyShader) - 1}, nullptr, nullptr, entry, "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
 #if !defined(EID3D11_SHADER_EMBED)
@@ -200,6 +263,27 @@ void Renderer::bind_owned_sky_pixel_inputs() noexcept {
     context_->PSSetShaderResources(12, 1, &probe);
 }
 
+// World change (release_world_state): every weather value the renderer
+// integrates or ramps over game time belongs to the world it was built in.
+// The sky kept its cloud drift, storm front and coverage, and the shared wind
+// its ramped rain and snow, across a load; the first sky frame of the next
+// world then integrated the whole clock jump (menu clock to save clock) at
+// the previous world's storm speed and terrain wind, so the clouds and their
+// shadows over a loaded save depended on the menu's weather (issue #199).
+// The next world seeds all of it from its own clock, wind and weather
+// (prepare_owned_sky, update_weather_wind).
+void Renderer::release_weather_world() noexcept {
+    weather_wind_ = {};weather_wind_frame_ = UINT64_MAX;
+    ambient_terrain_frame_ = UINT64_MAX;  // the sky reads the terrain wind from it
+    sky_time_ = -1.0;sky_motion_seeded_ = false;sky_history_valid_ = false;
+    sky_wind_offset_[0] = sky_wind_offset_[1] = sky_wind_offset_[2] = 0.0;
+    sky_shadow_offset_[0] = sky_shadow_offset_[1] = 0.0;
+    sky_fair_coverage_ = sky_closure_ = -1.f;
+    sky_front_lead_ = sky_front_rear_ = kSkyFrontGone;sky_front_pre_ = 0.f;
+    sky_front_arrival_ = sky_local_cover_ = 0.f;sky_deck_kind_ = 1.f;
+    sky_strike_seconds_ = -1.0;sky_strike_keys_.clear();
+}
+
 void Renderer::prepare_owned_sky(FogFrameGpu& fog, const WorldEnvironment& env, const float eye[3]) noexcept {
     sky_draw_pending_ = false;sky_inputs_active_ = false;
     const auto& config = debug_overlay_.config();
@@ -276,6 +360,20 @@ void Renderer::prepare_owned_sky(FogFrameGpu& fog, const WorldEnvironment& env, 
         // EW_RAIN), and only as far as the deck has closed.
         const float rain_level = std::min(closed, weather_test == 1 ? closed : weather_test == 2 ? 0.f
                                                                  : std::clamp(weather_wind_.gpu.rain, 0.f, 1.f));
+        // The first sky of a world whose terrain wind is known: the drift
+        // starts from that world's own clock, wind and weather (the step
+        // below runs from zero to its game seconds), so a save shows the same
+        // sky whatever was on screen before it (release_weather_world).
+        if (!sky_motion_seeded_ && env.valid && ambient_terrain_frame_ != UINT64_MAX) {
+            sky_motion_seeded_ = true;sky_history_valid_ = false;
+            sky_wind_offset_[0] = sky_wind_offset_[1] = sky_wind_offset_[2] = 0.0;
+            sky_shadow_offset_[0] = sky_shadow_offset_[1] = 0.0;
+            sky_time_ = 0.0;
+            char seed[192];
+            std::snprintf(seed, sizeof(seed), "world_epoch=%llu game_seconds=%.1f storm=%.3f wind=%.3f,%.3f force=%.3f previous_clock=%.1f",
+                          static_cast<unsigned long long>(world_state_epoch_), seconds, storm, wx, wy, force, previous_time);
+            bridge_append_probe_event("sky_world_seed", seed);
+        }
         sky_step_motion(env, sky_time_, sky_wind_offset_, wx, wy, force, storm,
                         configured_floating_point(config, "sky_cloud_motion", 1.f),
                         configured_floating_point(config, "sky_cloud_wind_speed", kSkyCloudWindSpeed),
@@ -407,7 +505,8 @@ void Renderer::prepare_owned_sky(FogFrameGpu& fog, const WorldEnvironment& env, 
         // so distant terrain and the sky meet in one colour.
         const float* g = sky_fog_color_;
         float haze_color[3];
-        fog_lit_haze_color(g, fog.tint, fog.light, haze_color);
+        // Dusk, dawn and night: the game fog's own haze at full hue (day 0).
+        fog_lit_haze_color(g, fog.tint, fog.light, haze_color, 0.f);
         // Under a closing deck the horizon haze turns to a slightly lighter
         // grey of its own brightness, never the game fog's teal (runtime:
         // a cyan stripe under the dark storm deck).
@@ -416,6 +515,13 @@ void Renderer::prepare_owned_sky(FogFrameGpu& fog, const WorldEnvironment& env, 
             const float grey[3] = {lum * .9f, lum * .93f, lum * .98f};
             for (int k = 0; k < 3; ++k) haze_color[k] = sky_mix(haze_color[k], grey[k], .85f * closed);
         }
+        // By day (fog_haze_day, sun above 5-20 degrees) the horizon is the sky's
+        // own low-elevation colour (sky_clouds.h skyHorizonHaze) tinted by the
+        // region only (fog_region_tint: Gipat neutral green, Ingos blue-white,
+        // Suslanger ochre): the hourly game fog's midday teal drew a flat cyan
+        // band and, times Suslanger's warm tint, a mint one. A closing deck greys it.
+        set4(frame.horizon_day, sky_mix(fog.tint[0], 1.f, .85f * closed), sky_mix(fog.tint[1], 1.f, .85f * closed),
+             sky_mix(fog.tint[2], 1.f, .85f * closed), fog_haze_day(sky.sun_elevation));
         set4(frame.horizon, haze_color[0], haze_color[1], haze_color[2], std::clamp(.3f + haze * .5f + look.dust * .15f, 0.f, .8f));
         set4(frame.game, sky_linear(g[0]), sky_linear(g[1]), sky_linear(g[2]), night * 1.2f * night_brightness);
         set4(frame.stars, look.star_tint[0], look.star_tint[1], look.star_tint[2], look.dust);
@@ -427,6 +533,9 @@ void Renderer::prepare_owned_sky(FogFrameGpu& fog, const WorldEnvironment& env, 
         sky_reconstruct_offset(sky_jitter_++, frame.reconstruct + 2);
         ++sky_frame_;
         frame.control[0] = sky_frame_;frame.control[1] = q.steps;frame.control[2] = q.light_steps;frame.control[3] = sky_probe_width_;
+        // Option coverage_cuts (D3D12; the same image): 8 skyFinal below the
+        // horizon, 16 the march and resolve box (dispatch_owned_sky_d3d12).
+        frame.cuts[0] = d3d12_ && (configured_integer(config, "coverage_cuts", 63) & 8) ? 1u : 0u;
 
         D3D11_MAPPED_SUBRESOURCE mapped{};
         bool dispatched = false;
@@ -489,6 +598,7 @@ void Renderer::prepare_owned_sky(FogFrameGpu& fog, const WorldEnvironment& env, 
                 SUCCEEDED(context_->Map(sky_constants_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &shadow_mapped));
             if (shadow_uploaded && !shadow_current) {
                 std::memcpy(shadow_mapped.pData, &shadow_frame, sizeof(shadow_frame));context_->Unmap(sky_constants_.Get(), 0);
+                transition_profile_pass("sky_cloud_shadow");
                 run(sky_shadow_cs_.Get(), 3, sky_shadow_raw_uav_.Get(), (sky_shadow_size_ + 7) / 8, (sky_shadow_size_ + 7) / 8);
                 // The receivers' five-tap blur once per texel (skyShadowBlurCS), so
                 // skyCloudVisibility takes one sample per pixel.
@@ -505,10 +615,13 @@ void Renderer::prepare_owned_sky(FogFrameGpu& fog, const WorldEnvironment& env, 
                 std::memcpy(mapped.pData, &frame, sizeof(frame));context_->Unmap(sky_constants_.Get(), 0);
             }
             ID3D11ShaderResourceView* history = sky_probe_srv_[previous].Get();context_->CSSetShaderResources(5, 1, &history);
+            transition_profile_pass("sky_probe");
             run(sky_probe_cs_.Get(), 2, sky_probe_uav_[current].Get(), (sky_probe_width_ + 7) / 8, (sky_probe_width_ / 2 + 7) / 8);
+            transition_profile_pass("sky_clouds");
             run(sky_clouds_cs_.Get(), 2, sky_march_uav_.Get(), (sky_march_width_ + 7) / 8, (sky_march_height_ + 7) / 8);
             ID3D11ShaderResourceView* resolve[2] = {sky_march_srv_.Get(), sky_cloud_srv_[previous].Get()};
             context_->CSSetShaderResources(4, 2, resolve);
+            transition_profile_pass("sky_resolve");
             run(sky_resolve_cs_.Get(), 2, sky_cloud_uav_[current].Get(), (sky_cloud_width_ + 7) / 8, (sky_cloud_height_ + 7) / 8);
             context_->CSSetShaderResources(0, 6, none);
             ID3D11Buffer* no_buffer = nullptr;context_->CSSetConstantBuffers(0, 1, &no_buffer);
@@ -638,6 +751,12 @@ HRESULT Renderer::ensure_owned_sky_d3d12(int quality) noexcept try {
         if (FAILED(hr = d3d12_->create_storage_texture(q.shadow_size, q.shadow_size, 0, DXGI_FORMAT_R16_FLOAT, sky12_.shadow)) ||
             FAILED(hr = d3d12_->create_storage_texture(q.shadow_size, q.shadow_size, 0, DXGI_FORMAT_R16_FLOAT, sky12_.shadow_raw)))
             return fail("cloud shadow map could not be created: sky omitted", hr);
+        // The optical depth field of the two-step shadow (skyShadowDepthCS):
+        // without it the one-step program draws the same field.
+        sky12_.shadow_depth.reset();
+        if (const unsigned reach = sky_shadow_reach(q.shadow_size))
+            if (FAILED(d3d12_->create_storage_texture(q.shadow_size + 2 * reach, q.shadow_size + 2 * reach, 0, DXGI_FORMAT_R32_FLOAT, sky12_.shadow_depth)))
+                sky12_.shadow_depth.reset();
         sky_quality_ = quality;sky_cloud_width_ = cloud_width;sky_cloud_height_ = cloud_height;
         sky_march_width_ = march_width;sky_march_height_ = march_height;
         sky_shadow_size_ = q.shadow_size;sky_probe_width_ = q.probe_width;
@@ -652,8 +771,21 @@ HRESULT Renderer::ensure_owned_sky_d3d12(int quality) noexcept try {
 // skips (LUT and shadow field unchanged: not recomputed). The shadow passes
 // read their own constants (the slower shadow drift); set_constants copies
 // each block, so no re-upload follows. S_FALSE: a program is not ready.
-HRESULT Renderer::dispatch_owned_sky_d3d12(const SkyFrameGpu& frame) noexcept try {
+HRESULT Renderer::dispatch_owned_sky_d3d12(const SkyFrameGpu& source) noexcept try {
     const auto& programs = sky12_.programs;
+    // The march and the resolve over the above-horizon box (sky_horizon_box):
+    // on a camera that looks down most of both targets is below the horizon,
+    // where every thread only found that out (coverage_cuts without 16, or
+    // no usable projection: the whole targets from texel 0).
+    SkyFrameGpu frame = source;
+    unsigned march_box[4] = {0, 0, sky_march_width_, sky_march_height_}, resolve_box[4] = {0, 0, sky_cloud_width_, sky_cloud_height_};
+    if (!(configured_integer(debug_overlay_.config(), "coverage_cuts", 63) & 16) || !sky_horizon_box(frame, march_box, resolve_box)) {
+        march_box[0] = march_box[1] = resolve_box[0] = resolve_box[1] = 0;
+        march_box[2] = sky_march_width_;march_box[3] = sky_march_height_;resolve_box[2] = sky_cloud_width_;resolve_box[3] = sky_cloud_height_;
+    }
+    frame.box[0] = march_box[0];frame.box[1] = march_box[1];frame.box[2] = resolve_box[0];frame.box[3] = resolve_box[1];
+    const bool sky_on_screen = march_box[2] > march_box[0] && march_box[3] > march_box[1] &&
+                               resolve_box[2] > resolve_box[0] && resolve_box[3] > resolve_box[1];
     transition_profile_pass("sky_clouds");
     const unsigned current = 1u - sky_index_, previous = sky_index_;
     HRESULT hr = S_OK;
@@ -696,23 +828,40 @@ HRESULT Renderer::dispatch_owned_sky_d3d12(const SkyFrameGpu& frame) noexcept tr
     const double shadow_wind[3] = {sky_shadow_offset_[0], sky_shadow_offset_[1], sky_wind_offset_[2]};
     sky_noise_phases(shadow_wind, shadow_frame.noise_phase);
     sky_mid_phases(shadow_wind, shadow_frame.mid, shadow_frame.mid_shape);
+    // Two steps (coverage_cuts 32; skyShadowDepthCS): each ground column once.
+    const unsigned shadow_reach = sky12_.shadow_depth && programs.size() >= 13 &&
+        (configured_integer(debug_overlay_.config(), "coverage_cuts", 63) & 32) ? sky_shadow_reach(sky_shadow_size_) : 0u;
+    shadow_frame.cuts[1] = shadow_reach;
     SkyFrameGpu shadow_key = shadow_frame;
     shadow_key.control[0] = 0;shadow_key.reconstruct[2] = shadow_key.reconstruct[3] = 0;
     const auto* shadow_bytes = reinterpret_cast<const unsigned char*>(&shadow_key);
     if (sky_shadow_inputs_.size() != sizeof(shadow_key) || std::memcmp(sky_shadow_inputs_.data(), shadow_bytes, sizeof(shadow_key)) != 0) {
+        transition_profile_pass("sky_cloud_shadow");
         bind_common(shadow_frame);
-        const bool raw = run(programs[4], 3, sky12_.shadow_raw.get(), (sky_shadow_size_ + 7) / 8, (sky_shadow_size_ + 7) / 8);
+        bool raw = false;
+        if (shadow_reach) {
+            const unsigned groups = (sky_shadow_size_ + 2 * shadow_reach + 7) / 8;
+            // Shadows off (strength 0): the gather writes 1 and reads no depth.
+            raw = shadow_frame.light[3] == 0 || run(programs[11], 3, sky12_.shadow_depth.get(), groups, groups);
+            d3d12_->set_resource(6, sky12_.shadow_depth.get());
+            raw = run(programs[12], 3, sky12_.shadow_raw.get(), (sky_shadow_size_ + 7) / 8, (sky_shadow_size_ + 7) / 8) && raw;
+        } else raw = run(programs[4], 3, sky12_.shadow_raw.get(), (sky_shadow_size_ + 7) / 8, (sky_shadow_size_ + 7) / 8);
         d3d12_->set_resource(6, sky12_.shadow_raw.get());
         if (run(programs[5], 3, sky12_.shadow.get(), (sky_shadow_size_ + 7) / 8, (sky_shadow_size_ + 7) / 8) && raw)
             sky_shadow_inputs_.assign(shadow_bytes, shadow_bytes + sizeof(shadow_key));
     }
+    transition_profile_pass("sky_probe");
     bind_common(frame);
     d3d12_->set_resource(5, sky12_.probe[previous].get());
     run(programs[8], 2, sky12_.probe[current].get(), (sky_probe_width_ + 7) / 8, (sky_probe_width_ / 2 + 7) / 8);
     d3d12_->set_resource(5, static_cast<const D3D12Texture*>(nullptr));
-    run(programs[6], 2, sky12_.march.get(), (sky_march_width_ + 7) / 8, (sky_march_height_ + 7) / 8);
-    d3d12_->set_resource(4, sky12_.march.get());d3d12_->set_resource(5, sky12_.cloud[previous].get());
-    run(programs[7], 2, sky12_.cloud[current].get(), (sky_cloud_width_ + 7) / 8, (sky_cloud_height_ + 7) / 8);
+    if (sky_on_screen) {
+        transition_profile_pass("sky_clouds");
+        run(programs[6], 2, sky12_.march.get(), (march_box[2] - march_box[0] + 7) / 8, (march_box[3] - march_box[1] + 7) / 8);
+        d3d12_->set_resource(4, sky12_.march.get());d3d12_->set_resource(5, sky12_.cloud[previous].get());
+        transition_profile_pass("sky_resolve");
+        run(programs[7], 2, sky12_.cloud[current].get(), (resolve_box[2] - resolve_box[0] + 7) / 8, (resolve_box[3] - resolve_box[1] + 7) / 8);
+    }
     d3d12_->clear_slots();
     if (FAILED(hr)) {sky_reason_ = "sky passes failed on the D3D12 executor: sky omitted this frame";return hr;}
     if (waiting) {d3d12_->count("sky frames waiting for their programs");return S_FALSE;}

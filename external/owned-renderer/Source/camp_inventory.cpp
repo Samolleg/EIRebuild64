@@ -47,8 +47,10 @@
 #include "scene_core_types.h"
 #include "x64_remote_link.h"
 #include "x64_remote_protocol.h"
+#include "test_harness.h"
 
 #include <array>
+#include <atomic>
 #include <cstdio>
 #include <cmath>
 #include <cstring>
@@ -378,6 +380,7 @@ class CampIconLoader {
         std::string failure;
         bool reported = false, pending = true;
         std::uint64_t serial = 0; // core mode: the host request
+        std::uint64_t used_epoch = 0; // the last world epoch that requested it
     };
     std::mutex mutex_;
     std::condition_variable wake_;
@@ -398,21 +401,37 @@ class CampIconLoader {
     std::map<std::uint64_t, std::string> core_requested_; // unanswered serial -> name
     std::vector<std::uint64_t> core_priority_sent_;
 
-    // Icon GPU homes (256..2048 square BGRA, up to 16 MB each) serve the
-    // screens of one world; kept for the session they grew with every
-    // inventory ever streamed. A new world epoch drops every finished or
-    // queued entry; an icon a worker is decoding finishes into its kept
-    // entry. Bound native textures hold their own GPU reference.
+    // Icon GPU homes (256..2048 square BGRA, up to 16 MB each). A new world
+    // epoch keeps the finished icons the world just left requested (the
+    // party's equipment and wagon travel with it, so the next camp opens with
+    // them, not with placeholders while they decode again) and drops every
+    // older one and every queued request: the set stays what two consecutive
+    // worlds used, never every inventory of the session. A name decodes to
+    // the same archive member for the session (the workers' store is opened
+    // once). An icon a worker is decoding finishes into its kept entry.
+    // Bound native textures hold their own GPU reference.
     void retire_previous_world_locked() {
         const auto epoch = bridge_current_world_epoch();
         if (epoch == world_epoch_) return;
+        const auto previous = world_epoch_;
         world_epoch_ = epoch;
         pending_.clear();
         for (auto& lane : visible_) lane.clear();
         for (auto& tab : selected_) tab.clear();
+        if (x64remote::core_active()) {
+            // The host retires old-epoch results independently. An old request
+            // completing here cannot promise that its GPU home still exists.
+            // New requests get fresh serials; late old answers are ignored.
+            entries_.clear();
+            core_requested_.clear();
+            core_priority_sent_.clear();
+            return;
+        }
         for (auto entry = entries_.begin(); entry != entries_.end();) {
-            const bool decoding = !entry->second.pending && !entry->second.data && entry->second.failure.empty();
-            if (decoding) ++entry; else entry = entries_.erase(entry);
+            const auto& value = entry->second;
+            const bool decoding = !value.pending && !value.data && value.failure.empty();
+            const bool finished_last_world = !value.pending && !decoding && previous && value.used_epoch == previous;
+            if (decoding || finished_last_world) ++entry; else entry = entries_.erase(entry);
         }
     }
 
@@ -446,12 +465,16 @@ class CampIconLoader {
                     }
                     if (!name.empty()) selected_lane_=(lane+1)%selected_.size();
                 }
+                const bool shown = !name.empty();
                 while (name.empty() && !pending_.empty()) {
                     auto candidate = std::move(pending_.front()); pending_.pop_front();
                     if (entries_.at(candidate).pending) name = std::move(candidate);
                 }
                 if (name.empty()) continue;
                 entries_.at(name).pending = false;
+                // An icon the camp shows now decodes at normal priority (the
+                // placeholder pop); the catalogue stream stays below it.
+                SetThreadPriority(GetCurrentThread(), shown ? THREAD_PRIORITY_NORMAL : THREAD_PRIORITY_BELOW_NORMAL);
             }
             std::shared_ptr<const CampIconData> data;
             std::string error;
@@ -473,19 +496,25 @@ class CampIconLoader {
     }
 
     // Core mode: the host's answers (Control::camp_icon_answers) complete
-    // their entries. A ring that overflowed lost answers: every outstanding
-    // request is sent again (the host answers a known serial again).
+    // their entries. The host writes slot (count % ring) and then publishes
+    // count + 1, and this reader holds no lock: answer k is stable only while
+    // the published count stays below k + ring. Each answer is copied, then
+    // the count is read again; a copy the host may have been overwriting is
+    // dropped as lost. Surviving answers are consumed before the lost ones
+    // are requested again (the host answers a known serial again), so a
+    // resend cannot overflow the ring forever.
     void core_poll_locked() {
         auto& control = x64remote::control();
-        const long written = control.camp_icon_answers_written;
-        if (written - core_answers_read_ > long(x64remote::kCampIconAnswers)) {
-            core_answers_read_ = written;
-            for (const auto& [serial, name] : core_requested_)
-                core_send(scene_core::CampIconRequest{serial, world_epoch_, name});
-        }
-        for (; core_answers_read_ < written; ++core_answers_read_) {
+        constexpr long ring = long(x64remote::kCampIconAnswers);
+        bool lost = false;
+        for (long written = control.camp_icon_answers_written; core_answers_read_ != written;) {
+            if (written - core_answers_read_ >= ring) { core_answers_read_ = written - (ring - 1); lost = true; }
+            const volatile auto& slot = control.camp_icon_answers[static_cast<std::uint32_t>(core_answers_read_) % x64remote::kCampIconAnswers];
+            struct { std::uint64_t serial; std::uint32_t canvas, opaque; } answer{slot.serial, slot.canvas, slot.opaque};
             MemoryBarrier();
-            const auto answer = control.camp_icon_answers[static_cast<std::uint32_t>(core_answers_read_) % x64remote::kCampIconAnswers];
+            written = control.camp_icon_answers_written;
+            if (written - core_answers_read_ >= ring) continue; // overwritten while copied
+            ++core_answers_read_;
             const auto requested = core_requested_.find(answer.serial);
             if (requested == core_requested_.end()) continue;
             const auto found = entries_.find(requested->second);
@@ -503,11 +532,15 @@ class CampIconLoader {
                     description.format.dwRGBAlphaBitMask = 0x8000;
                     description.alpha_fully_opaque = answer.opaque != 0;
                     result->core_serial = answer.serial;
+                    result->core_name = requested->second;
                     entry.data = std::move(result);
                 }
             }
             core_requested_.erase(requested);
         }
+        if (lost)
+            for (const auto& [serial, name] : core_requested_)
+                core_send(scene_core::CampIconRequest{serial, world_epoch_, name});
     }
     std::shared_ptr<const CampIconData> core_request(const std::string& name, bool visible) {
         if (!core_started_) {
@@ -577,6 +610,7 @@ public:
         auto [where, inserted] = entries_.try_emplace(name);
         if (inserted) { pending_.push_back(name); wake_.notify_all(); }
         auto& entry = where->second;
+        entry.used_epoch = world_epoch_;
         if (visible && entry.pending && std::find(visible_[3].begin(),visible_[3].end(),name)==visible_[3].end())
             visible_[3].push_back(name);
         if (!entry.failure.empty() && !entry.reported) {
@@ -585,13 +619,6 @@ public:
             bridge_append_probe_event("camp_icon_omitted", detail.c_str());
         }
         return entry.data;
-    }
-    // The icon has no owned home and never will this world (its decode
-    // failed: no x4/x2/plain member in the icon mounts, or a bad file).
-    bool failed(const std::string& name) {
-        std::lock_guard lock(mutex_);
-        const auto found = entries_.find(name);
-        return found != entries_.end() && !found->second.failure.empty();
     }
     void begin_priority_frame(const std::array<bool,3>& reset) {
         std::lock_guard lock(mutex_);
@@ -891,11 +918,9 @@ bool __stdcall resolve_item_texture(const char* name, void* self, void** output)
         if (camp_textures.find(key)==camp_textures.end()) {
             if (!camp_icon_loader.request(key.second,true)) {
                 // An icon whose decode failed for good (sw_12.0, hl_05.1,
-                // hl_05.2: no member in any mounted archive) takes the game's
-                // own lookup, as the stock game does: the texture LRU's
-                // CreateObject (the addon's x4/x2/plain loader in Dejavu)
-                // makes its canvas for the name, white where nothing loads.
-                if (camp_icon_loader.failed(key.second)) { *output = nullptr; return false; }
+                // hl_05.2: no member in any mounted archive) is omitted like
+                // a pending one: its cell stays empty and camp_icon_omitted
+                // names it once. It never takes the game's own lookup.
                 return true;
             }
             miss.start();
@@ -2176,6 +2201,7 @@ void __fastcall deactivate(void* self, void*) {
     }
 }
 BOOL __fastcall camp_draw(void* self, void*, void* visualizator) {
+    if(self==screen)harness_camp_frame(self);
     comparison_current=false;
     constructor_card=ConstructorCard::none;
     result_help=0;
@@ -2788,8 +2814,16 @@ void camp_inventory_retire_textures() noexcept {
 }
 void camp_inventory_shutdown_icons() noexcept { camp_icon_loader.shutdown(); }
 
+// An icon the scene thread could not draw (camp_inventory_texture_failed_queued):
+// the game thread applies the same rejection as an inline failure at its next
+// icon lookup, so the wide layout is withdrawn rather than drawn without it.
+static std::atomic<bool> queued_icon_failure{false};
+
 bool camp_inventory_texture(std::uint64_t id, std::uint64_t generation,
                             NativeOwnedTextureView& value) noexcept {
+    if (queued_icon_failure.exchange(false, std::memory_order_acq_rel)) {
+        reject("icon_owned_gpu_admission_failed"); return false;
+    }
     const auto* scope = item_texture_scope;
     if (!scope || !scope->surface || scope->surface->id != id) return true;
     if (!valid || scope->surface->generation != generation) {
@@ -2858,6 +2892,9 @@ void camp_inventory_observe_modal_idle(std::int64_t begin,std::int64_t end) noex
 }
 
 void camp_inventory_texture_failed() noexcept { reject("icon_owned_gpu_admission_failed"); }
+void camp_inventory_texture_failed_queued() noexcept {
+    queued_icon_failure.store(true, std::memory_order_release);
+}
 
 bool camp_inventory_take_decoration(CampDecoration& value) noexcept {
     if(!decoration_pending||!screen||!layout.wide||!valid||drawing==Role::none||!camp::primary_output)return false;
@@ -3388,6 +3425,9 @@ void camp_inventory_set_popup_sink(void* context, CampPopupSink sink, ID3D11Devi
 }
 bool camp_inventory_preview_specular_rgb(std::uint32_t& rgb) noexcept {
     auto* scope = item_texture_scope;
+    // The scene thread has no item draw of its own: a queued camp submission
+    // carries the game thread's answer (camp::SubmissionScope, as on the host).
+    if (!scope && camp::preview_glow) { rgb = camp::preview_glow_rgb; return true; }
     if (!scope || !scope->active || !scope->preview_item || scope->owner != screen ||
         role_card(drawing) < 0 || !valid || !layout.wide) return false;
     if (!scope->preview_glow_ready) {

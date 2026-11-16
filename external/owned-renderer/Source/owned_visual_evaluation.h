@@ -128,6 +128,9 @@ struct VisualRateValues {
     bool movement_frozen = false;
     bool tilted_facing = false;
     bool scaled_animation = false;
+    // Attack and cast entries play at `coefficient` in every unfrozen mode
+    // (the addon's GetAnimationCoeff hook returns the received value).
+    bool action_coefficient = false;
 };
 
 struct VisualEffectState {

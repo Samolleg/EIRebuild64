@@ -37,6 +37,21 @@
 namespace owned {
 
 inline constexpr char kNativeShader[] = R"(
+#if defined(NATIVE_DOMAIN)&&NATIVE_DOMAIN>=5
+// Crystal material instances (renderer.h kNativeInstance*, classes.json
+// "crystal"): domain 5 is a world object, 6 a unit, each with a crystal class
+// in its profile. They are those domains' programs plus NATIVE_CRYSTAL (1 world
+// object: see-through; 2 unit: a closed body, no see-through).
+#if NATIVE_DOMAIN==5
+#define NATIVE_CRYSTAL 1
+#undef NATIVE_DOMAIN
+#define NATIVE_DOMAIN 2
+#else
+#define NATIVE_CRYSTAL 2
+#undef NATIVE_DOMAIN
+#define NATIVE_DOMAIN 1
+#endif
+#endif
 struct NativeInstance{float4 astral;row_major float4x4 objectToClip;row_major float4x4 objectToWorld;uint4 geometryOffsets;uint2 colorOffsets;float2 nativeUvShift;uint nativeFlags;uint nativeDefaultDiffuse;uint nativeDefaultSpecular;uint morphOffset;uint morphCount;uint lightingEnabled;uint4 nativePadding;uint terrainVertexOffset;uint terrainPhaseOffset;uint terrainPhaseCount;uint terrainTilesPerSide;uint terrainFlags;float2 terrainWindDirection;float terrainWindForce;float terrainWindForceNormalized;float terrainWindPhase;float terrainPreciseTime;float2 terrainFogMin;float2 terrainFogMax;float terrainFogDistance;uint terrainFogEnabled;float4 nativeEmissive;float4 nativeSpecular;float nativeMaterialAlpha;float3 nativeMaterialDiffuse;uint worldGeometry;uint shapeCount;uint positionGroups;uint secondMorphOffset;float morphFraction;float3 shape;uint poseNode;uint4 sknMaps;float4 sknFactors;float4 sknEmission;float4 sknBase;};
 struct NativeTerrainVertex{float noise;float windMultiplier;float3 objectColor;float depth;uint flags;uint animationIndex;uint animationBaseTile;uint gridIndex;float opacity;float3 emissive;float liquidDepth;float liquidMultiplier;float4 liquidUvBounds;float liquidBend;float liquidCascade;float2 liquidCurrent;float liquidSelfIllumination;float liquidBedEmission;uint slopeNormal;uint shiftObjects;float liquidDrop;float liquidFill;};
 struct NativeDraw{uint instanceIndex;uint componentOffset;uint indexOffset;uint indexCount;uint outputTriangleBase;uint indirectArgsByteOffset;uint orderedTriangleOffset;uint preservesOrder;float4 boundsMin;float4 boundsMax;uint preparedVertexBase;uint componentCount;uint prepareWorld;uint colorVisible;uint worldState;uint2 worldGeneration;float geometryRadius;uint steepFirstTriangle;};
@@ -97,7 +112,7 @@ cbuffer NativeWorldLightingConstants:register(b1){NATIVE_WORLD_LIGHTING_MEMBERS}
 // caveVolume*: the bounce light volume (cave_irradiance.h), strength 0 while it is off;
 // caveVolumeTail: flags (bit 0 the F10 bounce_debug view, bit 1 outdoors,
 // bits 8+ the cave exit count, caveExits t84).
-cbuffer NativePointLightConstants:register(b5){uint nativePointLightCount;uint2 nativePointLightGridSize;uint nativePointLightGlowCount;float2 nativePointLightGridOrigin;float nativePointLightGridInverseCell;float nativePointLightGridTail;float3 caveVolumeOrigin;float caveVolumeStrength;float3 caveVolumeInverseExtent;float caveVolumeTail;};
+cbuffer NativePointLightConstants:register(b5){uint nativePointLightCount;uint2 nativePointLightGridSize;uint nativePointLightGlowCount;float2 nativePointLightGridOrigin;float nativePointLightGridInverseCell;float nativePointLightGridTail;float3 caveVolumeOrigin;float caveVolumeStrength;float3 caveFineSize;float caveVolumeTail;float3 caveWorldOrigin;float caveFineInverseCell;float3 caveWorldSize;float caveWorldInverseCell;float3 caveTexelScale;float caveFineCell;};
 struct NativePointLight{float4 centerInverseRadiusSquared;float4 color;float4 shadowCenter;float4 shadowSlots;};
 StructuredBuffer<NativePointLight> nativePointLights:register(t18);
 // World X/Y light grid (point_light_grid.h): cell starts, then light indices
@@ -119,14 +134,32 @@ Texture3D<float4> caveIrradianceR:register(t80);
 Texture3D<float4> caveIrradianceG:register(t81);
 Texture3D<float4> caveIrradianceB:register(t82);
 SamplerState caveIrradianceSampler:register(s13);
+// The textures hold the active map's volume (z texels [0, caveFineSize.z))
+// and, outdoors with neighbour maps, the coarse world volume after it
+// (cave_irradiance.h kCaveWorldCell). Past the active volume's horizontal
+// edge the world volume lights the neighbours; over the active volume's last
+// world cell the two blend, so both sides of the map edge read the same
+// world value there (no step at the edge).
 float3 nativeCaveBounce(float3 worldPosition,float3 normal){
  [branch]if(!(caveVolumeStrength>0))return 0;
- float3 uvw=(worldPosition-caveVolumeOrigin)*caveVolumeInverseExtent;
- if(any(uvw<0)||any(uvw>1))return 0;
  float4 basis=float4(.886227,1.023328*normal.y,1.023328*normal.z,1.023328*normal.x);
- float3 e=float3(dot(caveIrradianceR.SampleLevel(caveIrradianceSampler,uvw,0),basis),
-  dot(caveIrradianceG.SampleLevel(caveIrradianceSampler,uvw,0),basis),
-  dot(caveIrradianceB.SampleLevel(caveIrradianceSampler,uvw,0),basis));
+ float3 f=(worldPosition-caveVolumeOrigin)*caveFineInverseCell,w=(worldPosition-caveWorldOrigin)*caveWorldInverseCell;
+ float2 inside=min(f.xy,caveFineSize.xy-f.xy);
+ float fine=f.z>=0&&f.z<=caveFineSize.z&&all(inside>=0)?1:0;
+ [branch]if(caveWorldInverseCell>0)fine*=saturate(min(inside.x,inside.y)*caveFineCell*caveWorldInverseCell);
+ float world=caveWorldInverseCell>0&&w.z>=0&&w.z<=caveWorldSize.z?1-fine:0;
+ // One sampling body for both volumes (k 0 the active one, 1 the world one).
+ float3 e=0;
+ [loop]for(uint k=0;k<2;++k){
+  float weight=k?world:fine;
+  [branch]if(weight>0){
+   float3 size=k?caveWorldSize:caveFineSize;
+   float3 uvw=(clamp(k?w:f,.5,size-.5)+float3(0,0,k?caveFineSize.z:0))*caveTexelScale;
+   e+=weight*float3(dot(caveIrradianceR.SampleLevel(caveIrradianceSampler,uvw,0),basis),
+    dot(caveIrradianceG.SampleLevel(caveIrradianceSampler,uvw,0),basis),
+    dot(caveIrradianceB.SampleLevel(caveIrradianceSampler,uvw,0),basis));
+  }
+ }
  return max(e,0)*caveVolumeStrength;
 }
 // Caves: the light the volume holds (cave exits, lamps) lights the fog there
@@ -136,7 +169,7 @@ float3 nativeCaveBounce(float3 worldPosition,float3 normal){
 // border fog past an exit at the map edge continues its light.
 float3 nativeCaveFogLight(float3 p){
  [branch]if(!(caveVolumeStrength>0)||(((uint)caveVolumeTail)&2u)!=0)return 0;
- float3 uvw=saturate((p-caveVolumeOrigin)*caveVolumeInverseExtent);
+ float3 uvw=clamp((p-caveVolumeOrigin)*caveFineInverseCell,.5,caveFineSize-.5)*caveTexelScale;
  return max(float3(caveIrradianceR.SampleLevel(caveIrradianceSampler,uvw,0).x,
   caveIrradianceG.SampleLevel(caveIrradianceSampler,uvw,0).x,
   caveIrradianceB.SampleLevel(caveIrradianceSampler,uvw,0).x)*.282095,0);
@@ -190,7 +223,7 @@ static uint nativeLoopCap=0,nativeLoopWho=0,nativeLoopPixel=0xFFFFFFFFu,nativeLo
 static bool nativeLoopTripped=false;
 void nativeGpuReportBegin(uint origin,uint who,uint pixel){nativeLoopCap=nativeGpuReport.Load(0);nativeLoopOrigin=origin;nativeLoopWho=who;nativeLoopPixel=pixel;}
 void nativeGpuReportWrite(uint id,uint value){uint slot;nativeGpuReport.InterlockedAdd(4,1u,slot);
- if(slot<64u)nativeGpuReport.Store4(32u+slot*16u,uint4(id|(nativeLoopOrigin<<16),value,nativeLoopWho,nativeLoopPixel));}
+ if(slot<63u)nativeGpuReport.Store4(32u+slot*16u,uint4(id|(nativeLoopOrigin<<16),value,nativeLoopWho,nativeLoopPixel));}
 bool nativeLoopRunaway(uint id,uint iteration,uint bound){
  if(nativeLoopCap==0u||iteration<nativeLoopCap)return false;nativeLoopTripped=true;nativeGpuReportWrite(id,bound);return true;}
 uint nativeBindlessIndex(uint index){const uint limit=nativeGpuReport.Load(8);if(limit==0u)return index;
@@ -242,9 +275,15 @@ ByteAddressBuffer nativeGeometry:register(t1);
 ByteAddressBuffer nativeDynamic:register(t2);
 StructuredBuffer<uint4> nativeVisibleTriangles:register(t4);
 StructuredBuffer<NativeDraw> nativeDraws:register(t5);
-struct NativeDrawWork{uint record;uint outputTriangleBase;uint indirectArgsByteOffset;uint orderedTriangleOffset;uint flags;uint preparedVertexBase;uint workCount;uint steepOutputTriangleBase;uint steepArgsByteOffset;};
+struct NativeDrawWork{uint record;uint outputTriangleBase;uint indirectArgsByteOffset;uint orderedTriangleOffset;uint flags;uint preparedVertexBase;uint workCount;uint steepOutputTriangleBase;uint steepArgsByteOffset;uint ownerBase;};
 StructuredBuffer<NativeDrawWork> nativeDrawWork:register(t16);
-cbuffer NativeWorkRange:register(b4){uint nativeWorkBase;uint nativeWorkCount;uint2 nativeWorkPadding;};
+// nativeIndexedBuild (D3D12, option indexed_object_draws): nonzero while this
+// flush draws its indexed-capable records (work flag 4) through index lists.
+// nativeWorkChunks, nativeWorkScratch: nativeBuildCS's step (bits 16-17) and
+// chunk depth (bits 0-15), and the byte offset of its record entries in
+// nativeIndirectArgs (nativeBuildSelect). Zero: the whole-record build.
+cbuffer NativeWorkRange:register(b4){uint nativeWorkBase;uint nativeWorkCount;uint nativeMotionStamp;uint nativeIndexedBuild;
+ uint nativeWorkChunks;uint nativeWorkScratch;uint2 nativeWorkPadding;};
 RWStructuredBuffer<NativeDraw> nativeDrawOutput:register(u7);
 RWByteAddressBuffer nativePhaseOutput:register(u0);
 [numthreads(64,1,1)]void nativeTerrainPhaseCS(uint3 group:SV_GroupID,uint lane:SV_GroupIndex){
@@ -271,7 +310,9 @@ ByteAddressBuffer nativeAnimation:register(t10);
 StructuredBuffer<NativePose> nativePoses:register(t11);
 StructuredBuffer<NativePoseNode> nativePoseNodes:register(t12);
 RWStructuredBuffer<NativePoseNode> nativePoseOutput:register(u4);
-cbuffer NativeWorldClip:register(b3){row_major float4x4 nativeCurrentWorldClip;row_major float4x4 nativeCullWorldClip;float4 nativeCullParams;float4 nativeHiZParams;float4 nativeDistanceCull;float4 nativeImpostorParams;};
+cbuffer NativeWorldClip:register(b3){row_major float4x4 nativeCurrentWorldClip;row_major float4x4 nativeCullWorldClip;float4 nativeCullParams;float4 nativeHiZParams;float4 nativeDistanceCull;float4 nativeImpostorParams;float4 nativeDitherParams;};
+// nativeDitherParams.y: the derivative-free terrain relief (terrain_relief_derivfree, #243).
+#define TERRAIN_RELIEF_DERIVFREE (nativeDitherParams.y!=0)
 Texture2D<float> nativeHiZ:register(t26);
 StructuredBuffer<NativeInstance> nativePersistentInstances:register(t13);
 // Pixel t13 is the contact height map; SKN reads the instance rows at t126.
@@ -330,6 +371,34 @@ struct NativeTerrainFrameValues{float4 nativeTerrainWindValue;float4 nativeTerra
  // (metres per unit of baked height), z crevice strength, w unused; then
  // the roughness of the terrain 2.0 cell classes 0-7 (classes.json "terrain").
  float4 nativeMaterialTerrainValue;float4 nativeMaterialTerrainRoughValue[2];};
+)" R"(
+#ifdef NATIVE_FIRE_BURN
+// Fire burn twins only (option fire_burn, D3D12; renderer_fire_burn.cpp): the
+// area's burn mask. Map rows: abs(r) heat 0..1 (negative on inert ground), g game second
+// the fire front reaches the ground there, b game second the fire reaches
+// that part of an ignited crown, a crown burn 0..1 (whole trees: their crown
+// disk); map metres times nativeBurnRow(0).y = texels. Its last row holds
+// this frame's values: (0) x game seconds now, y texels per metre, z a
+// crown's burning seconds, w structure-char enabled; (1) leaf darkness,
+// reserved leaf-loss value, the ground's burning
+// seconds, w 1 while the area has a burn.
+Texture2D<float4> nativeBurnMask:register(t72);
+Texture2D<uint> nativeBurnMaterials:register(t74);
+uint nativeBurnMaterial(uint reference,float2 uv){
+#ifdef EID3D12
+ uint w,h;nativeBurnMaterials.GetDimensions(w,h);
+ if(w==0||reference/1024u>=h)return 0;
+ uint index=nativeBurnMaterials.Load(int3(reference%1024u,reference/1024u,0));
+ if(index==0)return 0;
+ Texture2D<uint> labels=ResourceDescriptorHeap[NonUniformResourceIndex(nativeBindlessIndex(index))];
+ labels.GetDimensions(w,h);
+ return labels.Load(int3(min(uint2(frac(uv)*float2(w,h)),uint2(w-1,h-1)),0));
+#else
+ return 0;
+#endif
+}
+float4 nativeBurnRow(uint k){uint w,h;nativeBurnMask.GetDimensions(w,h);return h?nativeBurnMask.Load(int3(k,h-1,0)):0;}
+#endif
 Texture2D<float4> nativeShelter:register(t70); // shelterBlurCS: r rain cover, g snow cover, b blurred caster depth, a caster share
 StructuredBuffer<NativeTerrainFrameValues> nativeTerrainFrame:register(t127);
 // The element the frame values are read from: always 0. Terrain 2.0's map
@@ -356,9 +425,21 @@ static uint nativeFrameLane=0;
 #define nativeCliffBlend nativeTerrainFrame[nativeFrameLane].nativeCliffBlendValue
 #define nativeSnowTrailWindow nativeTerrainFrame[nativeFrameLane].nativeSnowTrailWindowValue
 #define nativeSnowTrailTiles nativeTerrainFrame[nativeFrameLane].nativeSnowTrailTilesValue
+// NATIVE_FRAME_DRY: the object programs of a frame without weather on its
+// surfaces. The renderer binds them only while the uploaded wet level
+// (nativeWetValue.x) and snow cover (nativeSnowValue.x) are both 0, so the
+// wet and snow build-up code, which those values switch off, compiles out.
+#ifdef NATIVE_FRAME_DRY
+#define nativeWet float4(0,nativeTerrainFrame[nativeFrameLane].nativeWetValue.yzw)
+#else
 #define nativeWet nativeTerrainFrame[nativeFrameLane].nativeWetValue
+#endif
 #define nativeShelterRow nativeTerrainFrame[nativeFrameLane].nativeShelterValue
+#ifdef NATIVE_FRAME_DRY
+#define nativeSnowCover float4(0,nativeTerrainFrame[nativeFrameLane].nativeSnowValue.yzw)
+#else
 #define nativeSnowCover nativeTerrainFrame[nativeFrameLane].nativeSnowValue
+#endif
 #define nativeTerrain2 nativeTerrainFrame[nativeFrameLane].nativeTerrain2Value
 #define nativeTerrain2Maps nativeTerrainFrame[nativeFrameLane].nativeTerrain2MapsValue
 #define nativeMaterialLevel nativeTerrainFrame[nativeFrameLane].nativeMaterialValue.x
@@ -385,6 +466,116 @@ float nativeSnowNoise(float2 p){
  float2 i=floor(p),f=p-i;f=f*f*(3-2*f);
  return lerp(lerp(nativeSnowHash(i),nativeSnowHash(i+float2(1,0)),f.x),lerp(nativeSnowHash(i+float2(0,1)),nativeSnowHash(i+1),f.x),f.y);
 }
+)" R"(
+#ifdef NATIVE_FIRE_BURN
+// Fire burn (fireball and fire wall; renderer-only, reset with the area).
+// The burn mask bilinear at map point p (four loads, clamped).
+float4 nativeBurnSample(float2 p){
+ uint w,h;nativeBurnMask.GetDimensions(w,h);
+ const float2 t=p*nativeBurnRow(0).y-.5;const int2 base=int2(floor(t));const float2 f=t-base;
+ float4 s=0;
+ [unroll]for(uint k=0;k<4;++k){
+  float4 tap=nativeBurnMask.Load(int3(clamp(base+int2(k&1u,k>>1),int2(0,0),int2(w-1,h-2)),0));
+  tap.r=abs(tap.r); // heat can burn a plant on inert terrain
+  s+=((k&1u)?f.x:1-f.x)*((k>>1)?f.y:1-f.y)*tap;
+ }
+ return s;
+}
+// nativeBurnAt: x the settled burn at ground point p (0 untouched, 1 fully
+// burnt; the mask's soft edge made ragged by two noise octaves), y game
+// seconds since the fire front reached p (negative: not yet). Frozen while
+// paused, scaled by game speed (the game clock).
+float2 nativeBurnAt(float2 p){
+ [branch]if(nativeBurnRow(1).w<=0)return float2(0,-1);
+ const float4 s=nativeBurnSample(p);
+ [branch]if(s.r<=0)return float2(0,-1);
+ const float n=nativeSnowNoise(p*.7)*.65+nativeSnowNoise(p*2.3+17)*.35;
+ return float2(smoothstep(.25,.75,s.r+(n-.5)*.45),nativeBurnRow(0).x-s.g);
+}
+float2 nativeBurnGroundAt(float2 p){
+ uint w,h;nativeBurnMask.GetDimensions(w,h);
+ float heat=nativeBurnMask.Load(int3(clamp(int2(floor(p*nativeBurnRow(0).y)),int2(0,0),int2(w-1,h-2)),0)).r;
+ return heat<=0?float2(0,-1):nativeBurnAt(p);
+}
+// nativeBurnCrownAt: the same for an ignited crown's leaves at p (its whole
+// disk; y counts from when the spread through the crown reaches p).
+// One texel: a crown burns whole, its disk needs no filtering.
+float2 nativeBurnCrownAt(float2 p){
+ [branch]if(nativeBurnRow(1).w<=0)return float2(0,-1);
+ uint w,h;nativeBurnMask.GetDimensions(w,h);
+ const float2 s=nativeBurnMask.Load(int3(clamp(int2(floor(p*nativeBurnRow(0).y)),int2(0,0),int2(w-1,h-2)),0)).ba;
+ return s.y<=0?float2(0,-1):float2(smoothstep(.2,.6,s.y),nativeBurnRow(0).x-s.x);
+}
+// The two looks of a burn: x the flame (the burning moment: up fast once the
+// front arrives, out over the burning seconds), y the char (settles over the
+// first ~60% of the burning seconds and stays).
+float2 nativeBurnPhaseFor(float2 burn,float seconds){
+ [branch]if(burn.x<=0||burn.y<0)return 0;
+ seconds=max(seconds,.5);
+ return burn.x*float2(saturate(burn.y/.35)*(1-smoothstep(.35*seconds,seconds,burn.y)),smoothstep(0,.6*seconds,burn.y));
+}
+float2 nativeBurnPhase(float2 burn){return nativeBurnPhaseFor(burn,nativeBurnRow(1).z);}
+float2 nativeBurnCrownPhase(float2 burn){return nativeBurnPhaseFor(burn,nativeBurnRow(0).z);}
+// Ember glow (linear, added light) of a burning point: flickering orange
+// hot spots, sparse, on game time.
+float3 nativeBurnEmber(float3 p,float flame){
+ [branch]if(flame<=0)return 0;
+ const float t=nativeBurnRow(0).x;
+ const float hot=nativeSnowNoise(p.xy*3.1+p.z*1.7+float2(t*1.9,-t*1.3))*.6+nativeSnowNoise(p.xy*7.3-p.z*2.9+float2(-t*3.7,t*2.3))*.4;
+ return float3(1.6,.5,.1)*flame*smoothstep(.55,.9,hot);
+}
+// The ground's own burning: a band at the fire front (its first second),
+// fading as the front moves on.
+float nativeBurnFront(float2 burn){
+ return burn.y<0?0:burn.x*saturate(burn.y/.15)*(1-smoothstep(.25,1.1,burn.y));
+}
+// Leaves of a burnt crown: dead brown leaves and black char (darkness), in
+// patches about a metre wide.
+float3 nativeBurnLeafColor(float3 leaf,float3 p,float charred){
+ const float black=saturate(nativeBurnRow(1).x*1.25-.25+(nativeSnowNoise(p.xy*1.3+p.z*.9+31)-.5)*.6);
+ const float luma=dot(leaf,float3(.3,.59,.11));
+ const float3 dead=luma*float3(1.05,.72,.42)*.75;
+ return lerp(leaf,lerp(dead,float3(.035,.03,.025),black),charred);
+}
+// Only explicitly labelled foliage loses coverage; wood keeps its silhouette.
+float nativeBurnLeafAlpha(float alpha,float3 p,float charred){
+ // No noise holes or permanent surviving islands. Only explicit foliage
+ // labels call this; wood never changes alpha in any pass.
+ return alpha*(1-smoothstep(.35,.95,charred));
+}
+float2 nativeBurnPlantAt(float3 p,float4 root){
+ float2 at=nativeBurnCrownAt(p.xy);
+ if(root.w<=0)return at;
+ float2 burn=nativeBurnCrownAt(root.xy);
+ if(burn.x<=0)return at;
+ // Keep the stamped front's original direction inside the crown disk.
+ if(at.x>0){at.x=1;return at;}
+ // Root ignition reaches the entire authored crown, including fronds
+ // beyond the old fixed disk. Its shape remains the asset's.
+ burn.x=1;burn.y-=min(length(p.xy-root.xy)/1.2,nativeBurnRow(0).z);
+ return burn;
+}
+float2 nativeBurnSurfacePhase(float3 p,float4 root){
+ return max(nativeBurnPhase(nativeBurnAt(p.xy)),nativeBurnCrownPhase(nativeBurnPlantAt(p,root)));
+}
+float3 nativeBurnWoodColor(float3 wood,float3 p,float charred){
+ float soot=lerp(.10,.22,nativeSnowNoise(p.xy*1.7+p.z*.8));
+ return lerp(wood,wood*soot+float3(.009,.008,.007),charred);
+}
+// Scorched ground: mottled soot, grey ash patches and the ground's own
+// darkened colour showing through, so its detail stays.
+float3 nativeBurnGroundColor(float3 ground,float2 p,float charred){
+ const float ash=nativeSnowNoise(p*1.9+5)*.6+nativeSnowNoise(p*6.1)*.4;
+ const float luma=dot(ground,float3(.3,.59,.11));
+ const float3 soot=lerp(float3(.07,.06,.05),ground*.35,.4);
+ const float3 scorch=lerp(soot,luma*float3(.78,.76,.73)+.04,smoothstep(.5,.85,ash)*.65);
+ // Snow does not char: the fire melts it (the snow trail field's stamp);
+ // bright, unsaturated ground takes only a faint wet darkening.
+ const float snow=smoothstep(.55,.75,luma)*(1-smoothstep(.04,.12,max(ground.r,max(ground.g,ground.b))-min(ground.r,min(ground.g,ground.b))));
+ return lerp(ground,lerp(scorch,ground*.82,snow),charred*.85);
+}
+#endif
+)" R"(
 // The build-up's large drift shape as a height slope (world metres per metre
 // of q, twice the terrain snow's relief scale): how far the build-up's drift
 // octave (4 m; the patch and fine octaves at their mean) stands above its
@@ -492,6 +683,12 @@ bool nativeSnowTrailNear(float2 lo,float2 hi){
 }
 )" R"(
 // A drawn triangle's rest (untessellated) corners near an active trail tile.
+// The slim terrain pass's per-triangle misses (terrain_slim): bit t of the
+// flush's visible triangle t, set by the slim pass where any pixel of it
+// missed the caches; nativeTerrainMissCompactCS lists those triangles for
+// the second pass.
+ByteAddressBuffer terrainMissTriangles:register(t124);
+bool terrainTriangleMissed(uint index){return ((terrainMissTriangles.Load((index>>5)*4)>>(index&31u))&1u)!=0;}
 bool nativeTriangleNearTrail(uint4 triangleRef){
  float2 a=nativeWorldVertices[triangleRef.y].p.xy,b=nativeWorldVertices[triangleRef.z].p.xy,c=nativeWorldVertices[triangleRef.w].p.xy;
  return nativeSnowTrailNear(min(a,min(b,c)),max(a,max(b,c)));
@@ -537,7 +734,7 @@ bool nativeTriangleNearTrail(uint4 triangleRef){
 #else
 #define NATIVE_SPEC_BLEND nativeTerrainCliffShared[0].z
 #endif
-#define nativeTerrainMaterial float4(0,NATIVE_SPEC_ANTITILE,NATIVE_SPEC_HEIGHT_BLEND,NATIVE_SPEC_TERRAIN_LOW)
+#define nativeTerrainMaterial float4(nativeTerrainMaterialSwitches.x,NATIVE_SPEC_ANTITILE,NATIVE_SPEC_HEIGHT_BLEND,NATIVE_SPEC_TERRAIN_LOW)
 #define nativeTerrainActiveBoundsPS nativeTerrainActiveBounds
 #define nativeContactBlend float2(NATIVE_SPEC_CONTACT,nativeTerrainContactShared.y)
 #define nativeContactMaterials asuint(nativeTerrainContactShared.zw)
@@ -595,7 +792,11 @@ NativeInstance loadNativeInstance(uint index){
  }
 }
 // Separate, bounded observation output; one lane writes each record.
+#ifdef EID3D12
+RWByteAddressBuffer nativeLodObservation:register(u8);
+#else
 RWByteAddressBuffer nativeLodObservation:register(u4);
+#endif
 float4x4 nativeNodeMatrix(uint node);
 void nativeObserveLod(NativeDraw draw,NativeInstance instance,uint state,uint firstLevel,uint secondLevel,
                      uint firstCount,uint secondCount,uint fade){
@@ -614,9 +815,37 @@ RWStructuredBuffer<uint4> nativeTriangleOutput:register(u0);
 RWByteAddressBuffer nativeIndirectArgs:register(u1);
 RWStructuredBuffer<NativePreparedVertex> nativePreparedOutput:register(u2);
 RWStructuredBuffer<NativeWorldVertex> nativeWorldOutput:register(u3);
+// Object motion (nativeMotionStamp nonzero; else unused): what a world
+// vertex was before this world frame's first rewrite, marked with the frame's
+// stamp in its specular (storeNativeWorldVertex).
+RWStructuredBuffer<NativeWorldVertex> nativePreviousWorldOutput:register(u5);
 struct NativeWorldState{uint2 geometry;uint2 pose;uint sknLod;uint preparations;uint components;};
 RWStructuredBuffer<NativeWorldState> nativeWorldStateOutput:register(u6);
 StructuredBuffer<NativeWorldState> nativeWorldStates:register(t15);
+#ifdef EID3D12
+// Indexed object draws (D3D12, option indexed_object_draws; Renderer::
+// flush_native_d3d12). A non-indexed draw runs the vertex program three times
+// a triangle; an indexed one lets the GPU reuse a vertex its neighbouring
+// triangles share. A vertex is one component of one visible record: its
+// owner entry (instance; prepared index with the crossfade code, the values
+// a visible triangle's corner holds) sits at the record's own id range
+// (NativeDrawWork::ownerBase: the first level's components, then the
+// crossfade successor's or the four impostor corners), and each triangle
+// writes three ids at its visible-triangle slot. NATIVE_INDEXED vertex
+// programs read the owner entry by SV_VertexID (the index value).
+RWStructuredBuffer<uint2> nativeOwnerOutput:register(u4);
+RWByteAddressBuffer nativeIndexOutput:register(u7);
+#endif
+#ifdef NATIVE_INDEXED
+StructuredBuffer<uint2> nativeVertexOwners:register(t40);
+#endif
+// Astral rift effects (astral_rift.h): only the astral programs
+// (NATIVE_ASTRAL: one vertex and one pixel program, and the Low pixel
+// program) carry them; batches of astral records draw with those. Records
+// mark themselves in nativeFlags bits 16-20 (native_instance_flags.h).
+#define NATIVE_ASTRAL_U0 .0166015625
+#define NATIVE_ASTRAL_UW .466796875
+#define NATIVE_ASTRAL_CLUMP_V0 .5166015625
 struct NativeOutput{float4 p:SV_Position;float4 d:COLOR0;float4 s:COLOR1;float2 uv:TEXCOORD0;nointerpolation uint2 textureReference:TEXCOORD1;float3 worldPosition:TEXCOORD2;float3 worldNormal:TEXCOORD3;float3 directional:TEXCOORD4;float3 emissive:TEXCOORD5;nointerpolation uint shadowMode:TEXCOORD6;float4 pointMaterial:TEXCOORD7;
  float4 liquidTintDepth:TEXCOORD8;nointerpolation float4 liquidFlow:TEXCOORD9;
  float4 liquidMaterial:TEXCOORD10;float3 liquidView:TEXCOORD11;
@@ -630,12 +859,22 @@ struct NativeOutput{float4 p:SV_Position;float4 d:COLOR0;float4 s:COLOR1;float2 
  float4 liquidFall:TEXCOORD27;
  // Facet flatness (terrain_facet_flatness: flattest, mean), interpolated per vertex.
  float2 terrainFlat:TEXCOORD29;
- nointerpolation float4 astral:TEXCOORD30;
+
  // Rest (undisplaced) world position: shadow lookups stay attached to swaying leaves.
- float3 shadowPosition:TEXCOORD20;};
-// SKN is never liquid: reuse its interpolated tint for the tangent frame,
-// and its flat flow.w for the instance row. Keep the tessellation signature
-// within the existing register budget. Swaying bit 28 tags the union.
+ float3 shadowPosition:TEXCOORD20;
+#ifdef NATIVE_FIRE_BURN
+ nointerpolation float4 burnRoot:TEXCOORD31;
+#endif
+#ifdef NATIVE_ASTRAL
+ // Astral rift part (nativeAstralVertex): kind, veil index, phase, clump fade.
+ nointerpolation float4 astral:TEXCOORD31;
+#endif
+#ifdef NATIVE_OBJECT_MOTION
+ // The upscaler's object motion (nativeMotionWorldVS): this vertex's
+ // last-frame clip position; w 0 where its motion is the camera's.
+ float4 motionClip:TEXCOORD30;
+#endif
+};
 uint nativeSknInstance(NativeOutput i){return (i.swaying&(1u<<28))!=0?(uint)i.liquidFlow.w:0;}
 @LIQUID_SURFACE@
 // Rain rings on wet flat ground: the height gradient of the drop rings,
@@ -995,7 +1234,11 @@ void nativeImpostorImages(NativeInstance instance,float3 p,out float4 frames01,o
  float3x3 inverse=inverseObjectLinear(instance.objectToWorld);
  float3 local=mul(inverse,view);local=dot(local,local)>1e-12?normalize(local):float3(0,0,1);
  float2 grid=nativeImpostorGrid(local)*(kImpostorFrames-1);
- uint2 base=min((uint2)floor(grid),uint2(kImpostorFrames-2,kImpostorFrames-2));
+ // Clamped as floats before the conversion: a far crown seen edge-on lands on
+ // the grid's edge, where floor() can give -1, and a negative float to uint
+ // is undefined (FXC gives 0; DXC on D3D12 need not, and the quad then showed
+ // another frame of the slice).
+ uint2 base=(uint2)clamp(floor(grid),0.0,float(kImpostorFrames-2));
  float2 t=saturate(grid-base);
  weights=float4((1-t.x)*(1-t.y),t.x*(1-t.y),(1-t.x)*t.y,t.x*t.y);
  float3 q=mul(inverse,p-centre)/max(sphere.w,1e-6);
@@ -1048,8 +1291,9 @@ NativeWorldVertex nativeObjectSpaceVertex(NativeInstance instance,uint component
 )" R"(
 groupshared uint nativeGroupVisible;
 groupshared uint nativeGroupPrepare;
-groupshared uint nativeShadowGroupBase; // also nativeBuildCS's first (flat) range
+groupshared uint nativeShadowGroupBase; // also nativeBuildWhole's flat range
 groupshared uint nativeBuildSteepBase;
+groupshared uint4 nativeBuildSelection[2];
 // Static LOD (static_lod.h, worldGeometry bit 2): the record's mesh holds a
 // 64-byte table before its full index list, {levels} then per reduced level
 // {index offset, triangles, error (object units)}, errors not decreasing.
@@ -1065,23 +1309,46 @@ groupshared uint nativeBuildSteepBase;
 // below the impostor size (nativeImpostorParams.x pixels across) draws its
 // impostor quad instead of its triangles; up to (1 + band) times that size
 // both draw, with complementary halves of the dither (as the static LOD).
-void nativeImpostorSelect(NativeDraw draw,NativeInstance instance,inout uint firstCount,out uint secondCount,
+// Outside its range it leaves the static LOD's choice (and crossfade) as is.
+#ifdef NATIVE_FIRE_BURN
+bool treeSwayAnchored(NativeInstance instance);
+float3 treeSwayBase(NativeInstance instance);
+#endif
+void nativeImpostorSelect(NativeDraw draw,NativeInstance instance,inout uint firstCount,inout uint secondCount,
                           inout uint fade,out bool impostorSecond){
- secondCount=0;impostorSecond=false;
+ impostorSecond=false;
  float4 sphere=asfloat(nativeGeometry.Load4(draw.componentOffset-64));
  float3 centre=mul(instance.objectToWorld,float4(sphere.xyz,1)).xyz;
+#ifdef NATIVE_FIRE_BURN
+ // An intact baked crown cannot represent changed material coverage.
+ // Its source triangles (and followers) own the burning silhouette.
+ float2 burnPoint=(instance.nativeFlags&0x200u)!=0&&treeSwayAnchored(instance)?treeSwayBase(instance).xy:centre.xy;
+ if(nativeBurnCrownAt(burnPoint).x>0||nativeBurnAt(burnPoint).x>0)return;
+#endif
  float w=dot(instance.objectToClip[3],float4(centre,1));
  if(w<=1e-3)return;
  float3x3 m=(float3x3)instance.objectToWorld;
  float scale=max(max(length(float3(m[0][0],m[1][0],m[2][0])),length(float3(m[0][1],m[1][1],m[2][1]))),
                  length(float3(m[0][2],m[1][2],m[2][2])));
- float size=2*sphere.w*scale*length(instance.objectToClip[1].xyz)*nativeCullParams.y*.5/w;
- float limit=nativeImpostorParams.x,fadeEnd=limit*(1+nativeImpostorParams.y);
+ // Output pixels (nativeImpostorParams.w: output over render height), so an
+ // upscaler's lower render resolution does not move the switch nearer.
+ float size=2*sphere.w*scale*length(instance.objectToClip[1].xyz)*nativeCullParams.y*max(nativeImpostorParams.w,1)*.5/w;
+ float limit=nativeImpostorParams.x;
+ // Far switch size (impostor_far_pixels/impostor_far_distance, default 160 px at 150 m):
+ // continuous in distance, so the crossfade never pops.
+ [branch]if(nativeDitherParams.z>limit&&nativeDistanceCull.x>0){
+  float metres=w*nativeDistanceCull.y/nativeDistanceCull.x;
+  limit=lerp(limit,nativeDitherParams.z,smoothstep(.75*nativeDitherParams.w,nativeDitherParams.w,metres));
+ }
+ float fadeEnd=limit*(1+nativeImpostorParams.y);
  if(size>=fadeEnd)return;
- impostorSecond=true;secondCount=2;
- if(size<=limit){firstCount=0;fade=0;return;}
  uint coverage=(uint)round(saturate((fadeEnd-size)/max(fadeEnd-limit,1e-6))*255);
- if(coverage==0){impostorSecond=false;secondCount=0;return;}
+ if(size>limit&&coverage==0)return;
+ // An object's other parts (static_lod.h native_world_impostor_follower):
+ // the same decision on the same sphere, but the lead draws the quad.
+ bool follower=(instance.worldGeometry&@WORLD_IMPOSTOR_FOLLOWER@)!=0;
+ secondCount=follower?0:2;impostorSecond=!follower;
+ if(size<=limit){firstCount=0;fade=0;return;}
  fade=512u|coverage;
 }
 // SKN switches discretely. Update history during world preparation, before
@@ -1128,7 +1395,7 @@ void nativeStaticLodSelect(NativeDraw draw,NativeInstance instance,inout uint fi
                  length(float3(m[0][2],m[1][2],m[2][2])));
  // Screen pixels per object unit at the centre (half the target height per
  // unit of clip y over w).
- float pixels=scale*length(instance.objectToClip[1].xyz)*nativeCullParams.y*.5/w;
+ float pixels=scale*length(instance.objectToClip[1].xyz)*nativeCullParams.y*max(nativeImpostorParams.w,1)*.5/w; // output pixels
  float limit=nativeDistanceCull.z,fadeEnd=limit*(1+nativeDistanceCull.w);
  uint chosen=0;float next=0;
  [loop]for(uint level=1;level<=levels;++level){NATIVE_LOOP_GUARD(3u,level-1u,levels)
@@ -1233,7 +1500,9 @@ float treeSwayLength(uint flags){return max(((flags>>22)&63u)*.25,.25)+1.5;}
 float treeSwayReach(NativeInstance instance){
  return treeSwayStrength(instance)*(.0306*treeSwayLength(instance.nativeFlags)+.046)*max(1,treeSwayDrive(1)*treeSwayLean(1));
 }
-float3 treeSwayOffset(float3 position,NativeInstance instance){
+// The sway at a world-segment clock (nativeTerrainClock.y for the frame;
+// the previous frame's for the upscaler's motion, nativeMotionVS).
+float3 treeSwayOffsetAt(float3 position,NativeInstance instance,float time){
  float strength=treeSwayStrength(instance);
  if(strength<=0)return 0;
  uint flags=instance.nativeFlags;
@@ -1250,7 +1519,7 @@ float3 treeSwayOffset(float3 position,NativeInstance instance){
  float2 steady=windLength>1e-6?wind/windLength:float2(.7071068,.7071068);
  float2 along=nativeWeatherWind.direction,across=float2(-along.y,along.x);
  float force=saturate(nativeWeatherWind.force); // map force raised to the wind floor
- float time=nativeTerrainClock.y; // world segments: stops and scales with the game clock
+ // time: world segments, stops and scales with the game clock
  float seed=frac(sin(dot(floor(base.xy*8),float2(12.9898,78.233)))*43758.5453);
  float phase=seed*6.2831853,rate=.85+.3*frac(seed*7.31);
  // Soft swells ~40 units apart drifting downwind at ~3 units per second.
@@ -1269,49 +1538,80 @@ float3 treeSwayOffset(float3 position,NativeInstance instance){
                       .5*sin(time*.27*rate+dot(relative,float3(1.9,1.1,2.4))));
  return offset+strength*.03*(.5+.5*force)*weight*motion*lerp(1,drive,.5)*wobble;
 }
+float3 treeSwayOffset(float3 position,NativeInstance instance){return treeSwayOffsetAt(position,instance,nativeTerrainClock.y);}
 )" R"(
-void nativePrepareWorld(NativeDraw draw,NativeInstance instance,uint lane){
- uint2 pose=nativePoseGeneration(instance);
- if(lane==0){nativeSknLodUpdate(draw,instance);nativeGroupPrepare=0;
+// A prepared world vertex into its slot. With a stamp (a world frame with a temporal
+// upscaler) the slot's old contents are kept first, once a world frame, so
+// the motion stages read where a vertex rewritten this frame was; a slot
+// without this frame's stamp has not moved.
+void storeNativeWorldVertex(uint index,NativeWorldVertex value){
+ [branch]if(nativeMotionStamp!=0&&nativePreviousWorldOutput[index].specular!=nativeMotionStamp){
+  NativeWorldVertex before=nativeWorldOutput[index];before.specular=nativeMotionStamp;
+  nativePreviousWorldOutput[index]=before;
+ }
+ nativeWorldOutput[index]=value;
+}
+// The build runs in steps per geometry page range (nativeWorkChunks bits
+// 16-17), so a large record -- a merged character, a water body -- spreads
+// across many groups while its triangles keep their order:
+// 0 whole (one group per record, all of it): ranges whose records fit one
+//   chunk or are many enough to fill the GPU (native_build_chunked);
+// 1 select (one thread per record): the visibility, the static LOD and
+//   impostor choice and the record's whole output ranges (one atomic each,
+//   as the whole build reserves them), written to its 32-byte entry in the
+//   tail of nativeIndirectArgs (nativeWorkScratch);
+// 2 chunks (one group per 512 of a record's components and triangles,
+//   dispatch z, nativeWorkChunks bits 0-15 deep; the last chunk takes any
+//   rest): prepares its components and writes its triangles at their place
+//   in the record's range, from the entry alone;
+// 3 commit (one thread per record): the prepared world state, after every
+//   chunk, so no chunk reads a state another chunk of the record advanced.
+static const uint kNativeBuildChunk=512;
+// Prepares components [first,last) when the record's world state is behind
+// (nativeGroupPrepare); the caller records the new state.
+void nativePrepareWorld(NativeDraw draw,NativeInstance instance,uint lane,uint first,uint last){
+ if(lane==0){nativeGroupPrepare=0;
   if(draw.worldState!=0xffffffffu){NativeWorldState previous=nativeWorldStateOutput[draw.worldState];
-   nativeGroupPrepare=any(previous.geometry!=draw.worldGeneration)||any(previous.pose!=pose);
+   nativeGroupPrepare=any(previous.geometry!=draw.worldGeneration)||any(previous.pose!=nativePoseGeneration(instance));
   }
  }
  GroupMemoryBarrierWithGroupSync();
  if(nativeGroupPrepare==0)return;
- for(uint component=lane;component<draw.componentCount;component+=64)
-  nativeWorldOutput[draw.preparedVertexBase+component]=prepareNativeWorldVertex(instance,draw.componentOffset+component*16);
- DeviceMemoryBarrierWithGroupSync();
- if(lane==0){NativeWorldState value=nativeWorldStateOutput[draw.worldState];value.geometry=draw.worldGeneration;value.pose=pose;
-#ifdef EID3D11_TESTING
-  value.preparations++;value.components+=draw.componentCount;
-#endif
-  nativeWorldStateOutput[draw.worldState]=value;
- }
+ for(uint component=first+lane;component<last;component+=64)
+  storeNativeWorldVertex(draw.preparedVertexBase+component,prepareNativeWorldVertex(instance,draw.componentOffset+component*16));
 }
-[numthreads(64,1,1)]void nativeBuildCS(uint3 groupId:SV_GroupID,uint3 threadId:SV_GroupThreadID){
+// A record's world state after its preparation.
+void nativeCommitWorld(NativeDraw draw,NativeInstance instance){
+ NativeWorldState value=nativeWorldStateOutput[draw.worldState];value.geometry=draw.worldGeneration;value.pose=nativePoseGeneration(instance);
+#ifdef EID3D11_TESTING
+ value.preparations++;value.components+=draw.componentCount;
+#endif
+ nativeWorldStateOutput[draw.worldState]=value;
+}
+// A record's selection entry: x visible (bit 31), impostor second (bit 30),
+// fade (bits 0-9); y, z the first level's index offset and triangles; w, then
+// the second's; the flat and steep output bases (vertices); the flat count.
+uint nativeBuildEntry(uint local){return nativeWorkScratch+(nativeWorkBase+local)*32u;}
+)" R"(
+void nativeBuildWhole(uint3 groupId,uint lane){
  NativeDraw draw;if(!loadNativeDraw(groupId,draw))return;NativeInstance instance=loadNativeInstance(draw.instanceIndex);
+ if(lane==0)nativeSknLodUpdate(draw,instance);
+ GroupMemoryBarrierWithGroupSync();
  if(instance.worldGeometry!=0){
   nativeCurrentBounds(draw,instance);
   float swayReach=treeSwayReach(instance);
   draw.boundsMin.xyz-=swayReach;draw.boundsMax.xyz+=swayReach;
-  if(threadId.x==0)nativeGroupVisible=draw.colorVisible!=0&&(draw.preservesOrder!=0||drawVisible(draw,instance));
-  GroupMemoryBarrierWithGroupSync();if(nativeGroupVisible==0){
-   if(threadId.x==0)nativeObserveLod(draw,instance,1,0xffffffffu,0xffffffffu,0,0,0);
-   return;
+  if(lane==0)nativeGroupVisible=draw.colorVisible!=0&&(draw.preservesOrder!=0||drawVisible(draw,instance));
+  GroupMemoryBarrierWithGroupSync();if(nativeGroupVisible==0){if(lane==0)nativeObserveLod(draw,instance,1,0xffffffffu,0xffffffffu,0,0,0);return;}
+  if(draw.prepareWorld!=0){
+   nativePrepareWorld(draw,instance,lane,0,draw.componentCount);
+   if(nativeGroupPrepare!=0){DeviceMemoryBarrierWithGroupSync();if(lane==0)nativeCommitWorld(draw,instance);}
   }
-  if(draw.prepareWorld!=0)nativePrepareWorld(draw,instance,threadId.x);
-  if(draw.colorVisible==0){
-   if(threadId.x==0)nativeObserveLod(draw,instance,1,0xffffffffu,0xffffffffu,0,0,0);
-   return;
-  }
+  if(draw.colorVisible==0)return;
  }else{
-  if(threadId.x==0)nativeGroupVisible=draw.preservesOrder!=0||drawVisible(draw,instance);
-  GroupMemoryBarrierWithGroupSync();if(nativeGroupVisible==0){
-   if(threadId.x==0)nativeObserveLod(draw,instance,1,0xffffffffu,0xffffffffu,0,0,0);
-   return;
-  }
-  for(uint component=threadId.x;component<draw.componentCount;component+=64)
+  if(lane==0)nativeGroupVisible=draw.preservesOrder!=0||drawVisible(draw,instance);
+  GroupMemoryBarrierWithGroupSync();if(nativeGroupVisible==0){if(lane==0)nativeObserveLod(draw,instance,1,0xffffffffu,0xffffffffu,0,0,0);return;}
+  for(uint component=lane;component<draw.componentCount;component+=64)
    nativePreparedOutput[draw.preparedVertexBase+component]=prepareNativeVertex(instance,draw.componentOffset+component*16);
  }
  uint triangleCount=draw.indexCount/3;
@@ -1329,20 +1629,35 @@ void nativePrepareWorld(NativeDraw draw,NativeInstance instance,uint lane){
  bool impostorSecond=false;
  [branch]if((instance.worldGeometry&@WORLD_IMPOSTOR@)!=0&&nativeImpostorParams.x>0&&draw.preservesOrder==0&&!split)
   nativeImpostorSelect(draw,instance,firstCount,secondCount,fade,impostorSecond);
- if(threadId.x==0)nativeObserveLod(draw,instance,2,firstCount!=0?firstLevel:0xffffffffu,
+ if(lane==0)nativeObserveLod(draw,instance,2,firstCount!=0?firstLevel:0xffffffffu,
   impostorSecond?0xfffffffeu:secondLevel,firstCount,secondCount,fade);
  uint total=firstCount+secondCount;
  // Every triangle of a visible record is emitted, so the group reserves its
  // whole range (and, when split, its steep range) with one atomic each.
  uint flatCount=split?min(draw.steepFirstTriangle,total):total;
- if(threadId.x==0&&draw.preservesOrder==0){
+ if(lane==0&&draw.preservesOrder==0){
   uint base=0;if(flatCount!=0)nativeIndirectArgs.InterlockedAdd(draw.indirectArgsByteOffset,flatCount*3,base);
   nativeShadowGroupBase=base;
   base=0;if(total>flatCount)nativeIndirectArgs.InterlockedAdd(work.steepArgsByteOffset,(total-flatCount)*3,base);
   nativeBuildSteepBase=base;
  }
  GroupMemoryBarrierWithGroupSync();
- for(uint tri=threadId.x;tri<total;tri+=64){
+#ifdef EID3D12
+ // Indexed records (never ordered or split): the owner entries of both
+ // levels, with the codes the triangle loop below gives their corners.
+ bool indexed=nativeIndexedBuild!=0&&(work.flags&4u)!=0&&draw.preservesOrder==0&&!split;
+ uint secondOwners=work.ownerBase+draw.componentCount;
+ [branch]if(indexed){
+  uint firstCode=fade!=0?fade<<16:0u;
+  uint secondCode=(fade!=0?(fade|256u)<<16:0u)|(impostorSecond?1024u<<16:0u);
+  for(uint component=lane;component<draw.componentCount;component+=64){
+   if(firstCount!=0)nativeOwnerOutput[work.ownerBase+component]=uint2(draw.instanceIndex,(draw.preparedVertexBase+component)|firstCode);
+   if(secondCount!=0&&!impostorSecond)nativeOwnerOutput[secondOwners+component]=uint2(draw.instanceIndex,(draw.preparedVertexBase+component)|secondCode);
+  }
+  if(impostorSecond&&lane<4)nativeOwnerOutput[secondOwners+lane]=uint2(draw.instanceIndex,(draw.preparedVertexBase+lane)|secondCode);
+ }
+#endif
+ for(uint tri=lane;tri<total;tri+=64){
   bool second=tri>=firstCount;
   uint indexBase=second?secondOffset+(tri-firstCount)*12:firstOffset+tri*12;
   uint3 componentIndex;
@@ -1353,16 +1668,155 @@ void nativePrepareWorld(NativeDraw draw,NativeInstance instance,uint lane){
   if(draw.preservesOrder!=0)outputTriangle=draw.outputTriangleBase+draw.orderedTriangleOffset+tri;
   else if(tri>=flatCount)outputTriangle=work.steepOutputTriangleBase+nativeBuildSteepBase/3+(tri-flatCount);
   else outputTriangle=draw.outputTriangleBase+nativeShadowGroupBase/3+tri;
-  // LOD records encode a mesh-relative 16-bit component plus the existing
-  // crossfade code. Prepared world ranges can start above 65535: their base
-  // lives in secondMorphOffset, independently of these dither bits.
+#ifdef EID3D12
+  [branch]if(indexed){nativeIndexOutput.Store3(outputTriangle*12u,(second?secondOwners:work.ownerBase)+componentIndex);continue;}
+#endif
+  // Crossfade code above the 16-bit component index (object-space records
+  // only): the successor level takes the other half of the dither.
   uint code=(fade!=0?(fade|(second?256u:0u))<<16:0u)|(second&&impostorSecond?1024u<<16:0u);
   uint base=(instance.worldGeometry&(@WORLD_OBJECT_SPACE@|@WORLD_LOD@))!=0?0:draw.preparedVertexBase;
   nativeTriangleOutput[outputTriangle]=uint4(draw.instanceIndex,(base+componentIndex.x)|code,
                                            (base+componentIndex.y)|code,(base+componentIndex.z)|code);
  }
 }
+)" R"(
+void nativeBuildSelect(uint local){
+ NativeDraw draw;if(!loadNativeDraw(uint3(local%65535u,local/65535u,0),draw))return;
+ NativeInstance instance=loadNativeInstance(draw.instanceIndex);
+ nativeSknLodUpdate(draw,instance);
+ bool visible;
+ if(instance.worldGeometry!=0){
+  nativeCurrentBounds(draw,instance);
+  float swayReach=treeSwayReach(instance);
+  draw.boundsMin.xyz-=swayReach;draw.boundsMax.xyz+=swayReach;
+  visible=draw.colorVisible!=0&&(draw.preservesOrder!=0||drawVisible(draw,instance));
+ }else visible=draw.preservesOrder!=0||drawVisible(draw,instance);
+ uint entry=nativeBuildEntry(local);
+ if(!visible){nativeObserveLod(draw,instance,1,0xffffffffu,0xffffffffu,0,0,0);nativeIndirectArgs.Store(entry,0);return;}
+ // The whole build's choices (nativeBuildWhole), once per record.
+ NativeDrawWork work=nativeDrawWork[nativeWorkBase+local];
+ bool split=work.steepArgsByteOffset!=0xffffffffu;
+ uint firstOffset=draw.indexOffset,firstCount=draw.indexCount/3,secondOffset=0,secondCount=0,fade=0;
+ uint firstLevel=0,secondLevel=0xffffffffu;
+ [branch]if((instance.worldGeometry&@WORLD_LOD@)!=0&&((nativeDistanceCull.z>0&&draw.preservesOrder==0)||instance.sknFactors.w>0)&&!split)
+  nativeStaticLodSelect(draw,instance,firstOffset,firstCount,secondOffset,secondCount,fade,firstLevel,secondLevel);
+ bool impostorSecond=false;
+ [branch]if((instance.worldGeometry&@WORLD_IMPOSTOR@)!=0&&nativeImpostorParams.x>0&&draw.preservesOrder==0&&!split)
+  nativeImpostorSelect(draw,instance,firstCount,secondCount,fade,impostorSecond);
+ nativeObserveLod(draw,instance,2,firstCount!=0?firstLevel:0xffffffffu,impostorSecond?0xfffffffeu:secondLevel,firstCount,secondCount,fade);
+ uint total=firstCount+secondCount;
+ uint flatCount=split?min(draw.steepFirstTriangle,total):total,flatBase=0,steepBase=0;
+ if(draw.preservesOrder==0){
+  if(flatCount!=0)nativeIndirectArgs.InterlockedAdd(draw.indirectArgsByteOffset,flatCount*3,flatBase);
+  if(total>flatCount)nativeIndirectArgs.InterlockedAdd(work.steepArgsByteOffset,(total-flatCount)*3,steepBase);
+ }
+ nativeIndirectArgs.Store4(entry,uint4(0x80000000u|(impostorSecond?0x40000000u:0u)|fade,firstOffset,firstCount,secondOffset));
+ nativeIndirectArgs.Store4(entry+16,uint4(secondCount,flatBase,steepBase,flatCount));
+}
+void nativeBuildCommit(uint local){
+ NativeDraw draw;if(!loadNativeDraw(uint3(local%65535u,local/65535u,0),draw))return;
+ if(draw.prepareWorld==0||draw.worldState==0xffffffffu)return;
+ if((nativeIndirectArgs.Load(nativeBuildEntry(local))&0x80000000u)==0)return;
+ NativeInstance instance=loadNativeInstance(draw.instanceIndex);
+ if(instance.worldGeometry==0)return;
+ NativeWorldState value=nativeWorldStateOutput[draw.worldState];
+ if(all(value.geometry==draw.worldGeneration)&&all(value.pose==nativePoseGeneration(instance)))return;
+ nativeCommitWorld(draw,instance);
+}
+)" R"(
+// One chunk of a selected record (step 2): its entry, its components and its
+// triangles in [512*z, 512*(z+1)), the last chunk to the end.
+void nativeBuildChunk(uint3 groupId,uint lane){
+ NativeDraw draw;if(!loadNativeDraw(groupId,draw))return;
+ uint local=groupId.x+groupId.y*65535u;
+ // The record's entry, through group memory (one read, uniform flow).
+ if(lane<2)nativeBuildSelection[lane]=nativeIndirectArgs.Load4(nativeBuildEntry(local)+lane*16);
+ GroupMemoryBarrierWithGroupSync();
+ uint4 selection=nativeBuildSelection[0],ranges=nativeBuildSelection[1];
+ if((selection.x&0x80000000u)==0)return;
+ uint firstOffset=selection.y,firstCount=selection.z,secondOffset=selection.w,secondCount=ranges.x;
+ uint fade=selection.x&1023u,total=firstCount+secondCount,flatCount=ranges.w;
+ bool impostorSecond=(selection.x&0x40000000u)!=0;
+ uint chunkFirst=groupId.z*kNativeBuildChunk;
+ bool lastChunk=groupId.z+1>=(nativeWorkChunks&0xffffu);
+ if(chunkFirst>=max(draw.componentCount,total))return;
+ NativeInstance instance=loadNativeInstance(draw.instanceIndex);
+ uint componentLast=lastChunk?draw.componentCount:min(chunkFirst+kNativeBuildChunk,draw.componentCount);
+ if(instance.worldGeometry!=0){
+  if(draw.prepareWorld!=0)nativePrepareWorld(draw,instance,lane,chunkFirst,componentLast);
+ }else
+  for(uint component=chunkFirst+lane;component<componentLast;component+=64)
+   nativePreparedOutput[draw.preparedVertexBase+component]=prepareNativeVertex(instance,draw.componentOffset+component*16);
+ NativeDrawWork work=nativeDrawWork[nativeWorkBase+local];
+ bool split=work.steepArgsByteOffset!=0xffffffffu;
+#ifdef EID3D12
+ // Indexed records: this chunk's owner entries (the impostor quad's with the first chunk).
+ bool indexed=nativeIndexedBuild!=0&&(work.flags&4u)!=0&&draw.preservesOrder==0&&!split;
+ uint secondOwners=work.ownerBase+draw.componentCount;
+ [branch]if(indexed){
+  uint firstCode=fade!=0?fade<<16:0u;
+  uint secondCode=(fade!=0?(fade|256u)<<16:0u)|(impostorSecond?1024u<<16:0u);
+  for(uint component=chunkFirst+lane;component<componentLast;component+=64){
+   if(firstCount!=0)nativeOwnerOutput[work.ownerBase+component]=uint2(draw.instanceIndex,(draw.preparedVertexBase+component)|firstCode);
+   if(secondCount!=0&&!impostorSecond)nativeOwnerOutput[secondOwners+component]=uint2(draw.instanceIndex,(draw.preparedVertexBase+component)|secondCode);
+  }
+  if(impostorSecond&&groupId.z==0&&lane<4)nativeOwnerOutput[secondOwners+lane]=uint2(draw.instanceIndex,(draw.preparedVertexBase+lane)|secondCode);
+ }
+#endif
+ uint last=lastChunk?total:min(chunkFirst+kNativeBuildChunk,total);
+ for(uint tri=chunkFirst+lane;tri<last;tri+=64){
+  bool second=tri>=firstCount;
+  uint indexBase=second?secondOffset+(tri-firstCount)*12:firstOffset+tri*12;
+  uint3 componentIndex;
+  [branch]if(second&&impostorSecond)componentIndex=tri==firstCount?uint3(0,1,2):uint3(2,1,3);
+  else componentIndex=uint3(nativeGeometry.Load(indexBase),nativeGeometry.Load(indexBase+4),nativeGeometry.Load(indexBase+8));
+  uint outputTriangle;
+  if(draw.preservesOrder!=0)outputTriangle=draw.outputTriangleBase+draw.orderedTriangleOffset+tri;
+  else if(tri>=flatCount)outputTriangle=work.steepOutputTriangleBase+ranges.z/3+(tri-flatCount);
+  else outputTriangle=draw.outputTriangleBase+ranges.y/3+tri;
+#ifdef EID3D12
+  [branch]if(indexed){nativeIndexOutput.Store3(outputTriangle*12u,(second?secondOwners:work.ownerBase)+componentIndex);continue;}
+#endif
+  uint code=(fade!=0?(fade|(second?256u:0u))<<16:0u)|(second&&impostorSecond?1024u<<16:0u);
+  nativeTriangleOutput[outputTriangle]=uint4(draw.instanceIndex,(draw.preparedVertexBase+componentIndex.x)|code,
+                                           (draw.preparedVertexBase+componentIndex.y)|code,(draw.preparedVertexBase+componentIndex.z)|code);
+ }
+}
+[numthreads(64,1,1)]void nativeBuildCS(uint3 groupId:SV_GroupID,uint3 threadId:SV_GroupThreadID){
+ uint step=(nativeWorkChunks>>16)&3u;
+ if(step==0){nativeBuildWhole(groupId,threadId.x);return;}
+ if(step==2){nativeBuildChunk(groupId,threadId.x);return;}
+ uint local=(groupId.x+groupId.y*65535u)*64u+threadId.x;
+ if(step==1)nativeBuildSelect(local);else nativeBuildCommit(local);
+}
 
+)" R"(
+// The slim terrain pass's miss lists (terrain_slim; NativeBatch::miss_list_*):
+// between a batch's two passes, the triangles of one region (nativeBuildCS
+// output) with a missed pixel (terrainMissTriangles, set by the slim pass)
+// are copied to the region's list, so the second pass rasterises only those.
+cbuffer NativeTerrainMissList:register(b9){uint missRegionBase;uint missRegionMax;uint missListBase;uint missRegionArgs;
+ uint missListArgs;uint3 missListPadding;};
+RWByteAddressBuffer terrainMissOriginOutput:register(u2); // each list entry's slot in its region (terrainMissOrigin)
+groupshared uint missGroupCount;
+groupshared uint missGroupBase;
+[numthreads(64,1,1)]void nativeTerrainMissCompactCS(uint3 groupId:SV_GroupID,uint3 threadId:SV_GroupThreadID){
+ uint index=(groupId.x+groupId.y*65535u)*64u+threadId.x;
+ uint count=min(nativeIndirectArgs.Load(missRegionArgs)/3u,missRegionMax);
+ if(threadId.x==0)missGroupCount=0;
+ GroupMemoryBarrierWithGroupSync();
+ bool keep=index<count&&terrainTriangleMissed(missRegionBase+index);
+ uint local=0;
+ if(keep)InterlockedAdd(missGroupCount,1u,local);
+ GroupMemoryBarrierWithGroupSync();
+ if(threadId.x==0){uint base=0;if(missGroupCount!=0)nativeIndirectArgs.InterlockedAdd(missListArgs,missGroupCount*3u,base);missGroupBase=base/3u;}
+ GroupMemoryBarrierWithGroupSync();
+ if(keep){
+  nativeTriangleOutput[missListBase+missGroupBase+local]=nativeTriangleOutput[missRegionBase+index];
+  terrainMissOriginOutput.Store((missListBase+missGroupBase+local)*4u,missRegionBase+index);
+ }
+}
+)" R"(
 // Shadow world preparation is split into chunks of a record's components
 // (dispatch z) so a large record -- a merged character -- spreads across many
 // groups. Chunks never write the record's prepared state; the commit pass
@@ -1388,7 +1842,7 @@ bool nativeShadowPrepareVisible(inout NativeDraw draw,NativeInstance instance){
  GroupMemoryBarrierWithGroupSync();if(nativeGroupPrepare==0)return;
  uint last=min(first+kNativeShadowChunk,draw.componentCount);
  for(uint component=first+threadId.x;component<last;component+=64)
-  nativeWorldOutput[draw.preparedVertexBase+component]=prepareNativeWorldVertex(instance,draw.componentOffset+component*16);
+  storeNativeWorldVertex(draw.preparedVertexBase+component,prepareNativeWorldVertex(instance,draw.componentOffset+component*16));
 }
 [numthreads(1,1,1)]void nativeShadowCommitCS(uint3 groupId:SV_GroupID){
  NativeDraw draw;if(!loadNativeDraw(groupId,draw))return;
@@ -1472,6 +1926,22 @@ void nativeShadowLodSelect(NativeDraw draw,NativeInstance instance,uint slice,in
                      lo.y>=shadowScrollCopied.z+keep&&hi.y<=shadowScrollCopied.w-keep;
    if(outside||copied)nativeGroupVisible=0;
   }
+#ifdef EID3D12_HAZARDS
+  // caster_check (item 5): the renderer tags the records of every admitted
+  // main-map static (bits 0-29 its check object, 30-31 its path: 1 posed in
+  // the static caster store, 2 object-space caster). Each object's paths that
+  // drew into a sun map this frame are or-ed into its mask; the header counts
+  // objects per path and those drawn by both (doubled). Header at byte 1040
+  // (the last report record): {table offset, table entries, objects of path
+  // 1 (low 16 bits) and 2 (high), doubled}; the masks follow the 2 MB table.
+  [branch]if(nativeGroupVisible!=0&&groupId.z==0){const uint checkTable=nativeGpuReport.Load(1040);
+   const uint checkRecord=draw.instanceIndex&0x7fffffffu;
+   [branch]if(checkTable!=0&&checkRecord<nativeGpuReport.Load(1044)){const uint tag=nativeGpuReport.Load(checkTable+checkRecord*4);
+    [branch]if(tag!=0){const uint bit=tag>>30;uint previous=0,ignored=0;
+     nativeGpuReport.InterlockedOr(checkTable+(1u<<21)+(tag&0x3fffffffu)*4,bit,previous);
+     if((previous&bit)==0)nativeGpuReport.InterlockedAdd(1048,bit==1u?1u:65536u,ignored);
+     if((previous|bit)==3u&&previous!=3u)nativeGpuReport.InterlockedAdd(1052,1u,ignored);}}}
+#endif
   // Every triangle survives with its group, so reserve its whole range once.
   if(nativeGroupVisible!=0)
    nativeIndirectArgs.InterlockedAdd(draw.indirectArgsByteOffset,triangleCount*3,nativeShadowGroupBase);
@@ -1509,9 +1979,70 @@ float nativeFigureTrailSink(NativeInstance instance){
  precise float sink=snowTrailHeight(snowTrailRaw(nativeFigureSnowTrail,nativeSnowTrailWindow,nativeSnowTrailTiles,root));
  return sink;
 }
+// F10 fur_debug draws through the material instance check programs
+// (NATIVE_DOMAIN_CHECK, debug only): only they carry its vertex bits,
+// discards and colours, so the shipping programs pay nothing for it.
+#ifdef NATIVE_DOMAIN_CHECK
+#define NATIVE_FUR_DEBUG 1
+#endif
+// Material instance vertex programs (the shader split, renderer.h
+// kNativeInstance*): an instance record is never terrain (native_material_
+// instance keeps terrain-vertex records general) and, outside the crown
+// impostor domain 4, never draws an impostor quad (no impostor table; the
+// pixel check run counted none). 72 -> 56 temps for nativeVS.
+#if defined(NATIVE_DOMAIN)&&NATIVE_DOMAIN!=0
+#define NATIVE_VS_TERRAIN(instance) false
+#else
+#define NATIVE_VS_TERRAIN(instance) ((instance).terrainVertexOffset!=0xffffffff)
+#endif
+#if defined(NATIVE_DOMAIN)&&NATIVE_DOMAIN>=1&&NATIVE_DOMAIN<=3
+#define NATIVE_VS_IMPOSTOR(objectSpace,preparedIndex) false
+#else
+#define NATIVE_VS_IMPOSTOR(objectSpace,preparedIndex) ((objectSpace)&&(((preparedIndex)>>16)&1024u)!=0)
+#endif
+#ifdef NATIVE_ASTRAL
+// Astral rift veils and clumps (astral_rift.h; nativeFlags bits 16-17 kind,
+// 18-20 veil index), on the game clock (nativeTerrainClock.y: world segments of 55 ms,
+// frozen on pause, scaled with the game speed; one cycle per 6 s). Applied
+// to the cached rest vertex through the node's matrix, so the object's
+// rotation and scale carry the motion.
+// Veils sway across the strip, still at its two edges. Clumps (U: id*2 +
+// 0..1) drift along and away from the node's axis and rise, fading over
+// their life; their UV becomes their atlas cell.
+void nativeAstralVertex(NativeInstance instance,inout NativeWorldVertex world,out float4 astral){
+ float phase=frac(nativeTerrainClock.y*(.055/6.));
+ float3x3 basis=(float3x3)instance.objectToWorld;
+ astral=float4((instance.nativeFlags>>16)&3u,(instance.nativeFlags>>18)&7u,phase,1);
+ [branch]if(astral.x<1.5){
+  float u=saturate((world.uv.x-NATIVE_ASTRAL_U0)/NATIVE_ASTRAL_UW);
+  float w=sin(3.14159265*u);w*=w;
+  float wave=sin(u*9.42477796+astral.y+phase*6.28318531)*w;
+  world.p.xyz+=mul(basis,float3(.10,.12,.28)*wave);
+ }else{
+  float id=floor(world.uv.x*.5),age=frac(phase*(2+fmod(id,2))+id*.61803399);
+  float3 local=mul(inverseObjectLinear(instance.objectToWorld),
+   world.p.xyz-float3(instance.objectToWorld[0][3],instance.objectToWorld[1][3],instance.objectToWorld[2][3]));
+  float2 outward=local.xy/max(length(local.xy),.001);
+  float3 drift=float3(-outward.y,outward.x,.15)*age*3+float3(outward*.9,.55)*age*age*2.6;
+  world.p.xyz+=mul(basis,drift);
+  float fade=sin(3.14159265*age);astral.w=fade*fade*.8;
+  world.uv=float2(NATIVE_ASTRAL_U0+fmod(world.uv.x,2)*NATIVE_ASTRAL_UW,NATIVE_ASTRAL_CLUMP_V0+world.uv.y*NATIVE_ASTRAL_UW);
+ }
+}
+#endif
+)" R"(
 NativeOutput nativeVertex(uint vertexId,bool sway){
+#ifdef NATIVE_INDEXED
+ // An indexed draw: the vertex id is the index value, its owner entry the
+ // instance and prepared index (nativeBuildCS). No terrain record draws
+ // indexed, so the per-triangle terrain paths below never run.
+ uint2 owner=nativeVertexOwners[vertexId];
+ uint4 triangleRef=uint4(owner.x,owner.yyy);
+ uint preparedIndex=owner.y;
+#else
  uint4 triangleRef=nativeVisibleTriangles[nativeTriangleBase+vertexId/3];
  uint preparedIndex=(vertexId%3)==0?triangleRef.y:((vertexId%3)==1?triangleRef.z:triangleRef.w);
+#endif
  NativeInstance instance=loadNativeInstance(triangleRef.x);NativeOutput output=(NativeOutput)0;
  if(instance.poseNode!=0xffffffff&&instance.worldGeometry==0)instance.objectToWorld=nativeNodeMatrix(instance.poseNode);
  if(instance.worldGeometry==0){
@@ -1521,7 +2052,7 @@ NativeOutput nativeVertex(uint vertexId,bool sway){
  }
  NativeWorldVertex world;
  bool objectSpace=(instance.worldGeometry&@WORLD_OBJECT_SPACE@)!=0;
- bool impostor=objectSpace&&((preparedIndex>>16)&1024u)!=0;
+ bool impostor=NATIVE_VS_IMPOSTOR(objectSpace,preparedIndex);
  [branch]if(impostor)world=nativeImpostorVertex(instance,preparedIndex&3u);
  else if(objectSpace)world=nativeObjectSpaceVertex(instance,preparedIndex&0xffffu);
  // Units sink into trail troughs, in every pass (shadow casters and the
@@ -1533,6 +2064,9 @@ NativeOutput nativeVertex(uint vertexId,bool sway){
  }
  // Depth-map passes keep the resting shape so cached static shadow maps stay valid.
  output.shadowPosition=world.p.xyz;
+#ifdef NATIVE_FIRE_BURN
+ if((instance.nativeFlags&0x200u)!=0&&treeSwayAnchored(instance))output.burnRoot=float4(treeSwayBase(instance),1);
+#endif
  // Height within the plant, 0 bottom to 1 top, for the snow on its branches
  // (liquidFall is free on figures; y 1 marks it valid). Two sources, one
  // per kind of record that draws a crown:
@@ -1571,29 +2105,19 @@ NativeOutput nativeVertex(uint vertexId,bool sway){
  // through pose nodes) are not units (c71 0c971bc2: keying on the pose node
  // left every roof bare).
  if((instance.nativeFlags&0x2u)!=0)output.swaying|=1u<<29;
+ // Bits 24-26: the F10 fur_debug code of a unit record (instance flag bits
+ // 10-12 without the sway flag, native_instance_flags.h); debug programs only.
+#ifdef NATIVE_FUR_DEBUG
+ if((instance.nativeFlags&0x200u)==0)output.swaying|=((instance.nativeFlags>>10)&7u)<<24;
+#endif
  if(instance.poseNode!=0xffffffff)instance.objectToWorld=nativeNodeMatrix(instance.poseNode+world.partNode);
- output.astral=instance.astral;
- [branch]if(instance.astral.y>0){
-  float phase=instance.astral.x*6.28318530718;
-  if(instance.astral.y<1.5){
-   float u=saturate((world.uv.x-.0166015625)/.466796875);
-   float w=sin(3.14159265359*u);w*=w;
-   float wave=sin(u*9.42477796077+instance.astral.z+phase)*w;
-   world.p.xyz+=mul((float3x3)instance.objectToWorld,float3(.10,.12,.28)*wave);
-  }else{
-   float id=floor(world.uv.x/2),age=frac(instance.astral.x*(2+fmod(id,2))+id*.61803398875);
-   float3 local=mul(inverseObjectLinear(instance.objectToWorld),world.p.xyz-float3(instance.objectToWorld[0][3],instance.objectToWorld[1][3],instance.objectToWorld[2][3]));
-   float2 outward=local.xy/max(length(local.xy),.001);
-   float3 drift=float3(-outward.y,outward.x,.15)*age*3+float3(outward*.9,.55)*age*age*2.6;
-   world.p.xyz+=mul((float3x3)instance.objectToWorld,drift);
-   output.astral.w=sin(3.14159265359*age);output.astral.w*=output.astral.w*.8;
-   world.uv=float2(.0166015625+fmod(world.uv.x,2)*.466796875,.5166015625+world.uv.y*.466796875);
-  }
- }
+#ifdef NATIVE_ASTRAL
+ nativeAstralVertex(instance,world,output.astral);
+#endif
  output.worldPosition=world.p.xyz;output.worldNormal=world.normal.xyz;
 
  output.p=mul(instance.objectToClip,world.p);
- bool isTerrain=instance.terrainVertexOffset!=0xffffffff;
+ bool isTerrain=NATIVE_VS_TERRAIN(instance);
  NativeTerrainVertex terrain=(NativeTerrainVertex)0;
  if(isTerrain){
   terrain=loadTerrainVertex(instance,world.sourcePosition);
@@ -1695,7 +2219,7 @@ NativeOutput nativeVertex(uint vertexId,bool sway){
     output.liquidDirections=float4(terrain.liquidBend,0,0,0);
    }
   }
-  if((terrain.flags&16384u)!=0){
+  if((terrain.flags&16384u)!=0) {
    output.liquidDirections.y=terrain.noise;
    output.liquidTileLocal=float2((terrain.flags>>25)&3u,(terrain.flags>>27)&3u)*.5;
   }
@@ -1867,36 +2391,133 @@ int nativeShadowEarly(uint slice,float2 texel,float side,float receiver,float2 d
  if(1-range.y+1e-6<saturate(receiver-extent))return 0;
  return -1;
 }
+// Held sun maps (sun_shadow_smooth). A close sun map keeps the sun it was
+// drawn along until the sun has turned far enough to redraw it, so lookups
+// along the held sun step the shadows across the ground. The ray from a
+// receiver toward the exact sun (nativeWorldSunDirection) crosses the held
+// map along a line: a blocker whose depth lies g (map depth) above the
+// receiver's sits at texel + shear * g. Zero while the correction is off
+// (shadowCamera[5][0].x: sun maps leave the sixth matrix to the lamp cubes)
+// or the map's sun is the exact one. The forward material programs keep the
+// held lookup (shader size gate); their surfaces are a small share of the
+// sun's receivers next to the mask pass, terrain and ground.
+float2 nativeShadowShear(uint slice,float side){
+#if defined(NATIVE_DOMAIN)&&!defined(NATIVE_SHADOW_MASK)
+ return 0;
+#else
+ if(shadowCamera[5][0].x<.5)return 0;
+ const float3 sun=nativeWorldSunDirection.xyz;
+ const float rise=dot(shadowLight[slice][2].xyz,sun);
+ if(abs(rise)<1e-12)return 0;
+ const float2 shear=float2(dot(shadowLight[slice][0].xyz,sun),dot(shadowLight[slice][1].xyz,sun))*float2(-.5*side,.5*side)/rise;
+ return all(isfinite(shear))?shear:0;
+#endif
+}
+// The soft filter for thin and cut-out casters (sun_foliage_filter,
+// shadowCamera[5][0].y): 0 soft as everywhere, 1 steady soft, 2 the fixed
+// filter where the blockers look cut-out or thin. The forward material
+// programs keep 0 (size gate).
+uint nativeSunFoliageFilter(){
+#if defined(NATIVE_DOMAIN)&&!defined(NATIVE_SHADOW_MASK)
+ return 0u;
+#else
+ return uint(shadowCamera[5][0].y+.5);
+#endif
+}
+// The soft filter's blocker search: x = blockers found, y = their summed
+// depth, z/w = nearest and farthest blocker depth. Each tap compares against
+// the receiver plane (with its bias) at the read texel's centre, which is
+// not its own blocker. gathered (steady soft): a tap compares its 2x2
+// footprint and counts the blocked share, so a cut-out caster's texel-sized
+// holes move the estimate by a quarter tap, not a whole one, when its map is
+// drawn again.
+float4 nativeShadowBlockers(uint slice,float3 coordinate,float2 texel,float2 depthStep,float bias,float side,
+                            float search,uint searchTaps,float2 start,bool gathered){
+ // nativeVogel's disk without a sincos per tap (as the ground cover's
+ // filter): each tap turns the direction by the golden angle (cos, sin of
+ // 2.39996323).
+ const float2 golden=float2(-.73736887,.67549029);
+ float2 direction=start;
+ float4 found=float4(0,0,1,0);
+ const float searchScale=search*rsqrt(float(searchTaps)); // sqrt((k+.5)/searchTaps)*search
+ [loop]for(uint k=0;k<searchTaps;++k){NATIVE_LOOP_GUARD(5u,k,searchTaps)
+  const float2 at=clamp(texel+direction*(sqrt(k+.5)*searchScale),.5,side-.5);
+  direction=float2(direction.x*golden.x-direction.y*golden.y,direction.x*golden.y+direction.y*golden.x);
+  [branch]if(gathered){
+   // Gather returns (0,1) (1,1) (1,0) (0,0) of the 2x2 block at base.
+   const float2 base=floor(at-.5);
+   const float4 stored=shadowDepth.GatherRed(shadowGatherSampler,float3((base+1)/side,slice));
+   const float2 corner=base+.5-texel;
+   const float4 plane=coordinate.z-bias+float4(dot(depthStep,corner+float2(0,1)),dot(depthStep,corner+1),
+                                               dot(depthStep,corner+float2(1,0)),dot(depthStep,corner));
+   const float4 hit=stored<plane?1:0;
+   found.x+=dot(hit,.25);found.y+=dot(hit,stored)*.25;
+   found.z=min(found.z,min(min(stored.x,stored.y),min(stored.z,stored.w))+(1-max(max(hit.x,hit.y),max(hit.z,hit.w))));
+   found.w=max(found.w,max(max(hit.x*stored.x,hit.y*stored.y),max(hit.z*stored.z,hit.w*stored.w)));
+  }else{
+   const float stored=shadowDepth.Load(int4(int2(at),slice,0));
+   if(stored<coordinate.z+dot(depthStep,floor(at)+.5-texel)-bias)
+    found=float4(found.x+1,found.y+stored,min(found.z,stored),max(found.w,stored));
+  }
+ }
+ return found;
+}
+// The fixed filters' centre on a held map: walk the exact sun's ray across
+// the map from the receiver's texel and stop at the first texel whose own
+// blocker gap puts it on that ray (within a texel), so a caster one texel
+// wide (a bare branch) is found wherever it lies, not only when a filter
+// tap lands on it. With no crossing, the held blocker at the receiver's
+// texel (if any) is off the exact ray: the centre moves by its gap, off it.
+// At most 32 texels (nativeShadowFilter widens its early-out reach by it).
+float2 nativeShadowRayShift(uint slice,float3 coordinate,float2 texel,float2 depthStep,float bias,float side,float2 shear){
+ const float speed=length(shear),reach=min(speed*coordinate.z,32.0);
+ if(reach<.25)return 0;
+ const float2 along=shear/speed;
+ const float2 own=clamp(texel,.5,side-.5);
+ const float held=coordinate.z-bias-shadowDepth.Load(int4(int2(own),slice,0));
+ const float ownGap=held+dot(depthStep,floor(own)+.5-texel);
+ if(ownGap>0&&speed*ownGap<=1)return along*min(speed*ownGap,reach);
+ const uint steps=uint(ceil(reach));
+ [loop]for(uint i=1;i<=steps;++i){NATIVE_LOOP_GUARD(12u,i,steps+1u)
+  const float2 at=clamp(texel+along*float(i),.5,side-.5);
+  const float gap=coordinate.z+dot(depthStep,floor(at)+.5-texel)-bias-shadowDepth.Load(int4(int2(at),slice,0));
+  if(gap>0&&abs(speed*gap-float(i))<=1)return along*min(speed*gap,reach);
+ }
+ return held>0?along*min(speed*held,reach):0;
+}
+// The soft filter. found: the blocker search (nativeShadowBlockers) at
+// radius search; shear moves the disk to the exact sun's blocker
+// (nativeShadowShear), kept inside the search.
 float nativeShadowSoft(uint slice,float3 coordinate,float2 texel,float2 depthStep,float bias,float side,
-                       float minTexels,float rotation){
+                       float minTexels,float search,float4 found,float2 start,float2 shear){
  // Orthographic maps: depth is linear, so depth differences are world gaps.
  float texelWorld=max(shadowBias[slice].x,1e-6),depthWorld=1/max(shadowBias[slice].y,1e-12);
  bool high=shadowBias[5].z>1.5;
- float search=nativeShadowSearch(slice,minTexels);
- uint searchTaps=high?16:8;
- float blockers=0,blockerDepth=0;
- [loop]for(uint k=0;k<searchTaps;++k){NATIVE_LOOP_GUARD(5u,k,searchTaps)
-  float2 at=clamp(texel+nativeVogel(k,searchTaps,rotation)*search,.5,side-.5);
-  float stored=shadowDepth.Load(int4(int2(at),slice,0));
-  // The receiver plane (with its bias) at the loaded texel's centre is not
-  // its own blocker.
-  if(stored<coordinate.z+dot(depthStep,floor(at)+.5-texel)-bias){blockers+=1;blockerDepth+=stored;}
- }
  // Every receiver is filtered: a missed search only narrows the kernel, it
  // never makes a binary lit decision along the texel grid.
  float radius=minTexels;
- if(blockers>0){
-  float gap=max(coordinate.z-blockerDepth/blockers,0)*depthWorld;
-  radius=clamp(gap*shadowBias[5].x/texelWorld,minTexels,search);
+ float2 shift=0;
+ if(found.x>0){
+  float gap=max(coordinate.z-found.y/found.x,0);
+  radius=clamp(gap*depthWorld*shadowBias[5].x/texelWorld,minTexels,search);
+  shift=shear*gap;
+  const float length2=dot(shift,shift);
+  if(length2>search*search)shift*=search*rsqrt(length2);
  }
  uint taps=high?24:12;
- float visibility=0;
+ float visibility=0;const float scale=radius*rsqrt(float(taps)); // sqrt((t+.5)/taps)*radius
+ // The filter disk is turned 1.3 rad from the search disk (cos, sin of 1.3),
+ // and turns by the golden angle per tap (nativeShadowBlockers).
+ const float2 golden=float2(-.73736887,.67549029);
+ float2 direction=float2(start.x*.26749883-start.y*.96355819,start.x*.96355819+start.y*.26749883);
  [loop]for(uint t=0;t<taps;++t){NATIVE_LOOP_GUARD(6u,t,taps)
-  float2 offset=nativeVogel(t,taps,rotation+1.3)*radius;
-  visibility+=nativeShadowPlaneTap(slice,side,texel+offset,texel,coordinate.z-bias,depthStep);
+  float2 offset=direction*(sqrt(t+.5)*scale);
+  direction=float2(direction.x*golden.x-direction.y*golden.y,direction.x*golden.y+direction.y*golden.x);
+  visibility+=nativeShadowPlaneTap(slice,side,texel+shift+offset,texel,coordinate.z-bias,depthStep);
  }
  return visibility/taps;
 }
+)" R"(
 float nativeShadowFilter(uint slice,float3 worldPosition,float3 positionDx,float3 positionDy,float rotation){
   float4 light=mul(shadowLight[slice],float4(worldPosition,1));float3 coordinate=light.xyz/light.w;
   if(abs(coordinate.x)>1||abs(coordinate.y)>1||coordinate.z<0||coordinate.z>1)return 1;
@@ -1916,16 +2537,41 @@ float nativeShadowFilter(uint slice,float3 worldPosition,float3 positionDx,float
   bool farFootprint=slice>=3&&shadowBias[4].z>.5;
   bool soft=shadowBias[5].z>.5;
   float minTexels=farFootprint?min(1.5,.5/max(shadowBias[slice].x,1e-6)):1.5;
+  const uint foliage=nativeSunFoliageFilter();
+  // Steady soft never takes a kernel narrower than the fixed filter's 2.5
+  // texels, so a re-drawn cut-out caster moves only a small share of taps.
+  if(soft&&foliage==1u)minTexels=max(minTexels,2.5);
+  const float search=nativeShadowSearch(slice,minTexels);
+  // Held-map correction: the soft disk moves by at most the search, the
+  // fixed filters' centre by at most the ray walk's 32 texels.
+  const float2 shear=nativeShadowShear(slice,side);
+  const float shearReach=min(length(shear)*coordinate.z,soft&&foliage!=2u?search:32.0);
   // Read reach per axis: the soft taps' radius stays within the search, the
   // far 3x3 taps within 1.5 texels, the 5x5 taps within 2.5; the plane
   // compare's 2x2 Gather adds 1.5.
   int early=nativeShadowEarly(slice,texel,side,coordinate.z-bias,depthStep,
-   (soft?nativeShadowSearch(slice,minTexels):farFootprint?1.5:2.5)+1.5);
+   (soft?search:farFootprint?1.5:2.5)+1.5+shearReach);
   [branch]if(early>=0)return early;
   // The soft kernel never falls below the fixed filter's footprint, so the
   // penumbra (a world radius) only widens the existing edge.
-  [branch]if(soft)
-   return nativeShadowSoft(slice,coordinate,texel,depthStep,bias,side,minTexels,rotation);
+  [branch]if(soft){
+   float2 start;sincos(rotation,start.y,start.x);
+   const float4 found=nativeShadowBlockers(slice,coordinate,texel,depthStep,bias,side,search,
+                                           shadowBias[5].z>1.5?16u:8u,start,foliage==1u);
+   // Fixed foliage filter: blockers that look cut-out (none found; grass
+   // within a metre of the receiver; crowns, needles and bare branches whose
+   // depths spread over more than half a metre in the search) take the
+   // fixed filter below. Solid casters stay soft.
+   const float depthWorld=1/max(shadowBias[slice].y,1e-12);
+   const bool cutOut=foliage==2u&&(found.x==0||(coordinate.z-found.y/found.x)*depthWorld<1||(found.w-found.z)*depthWorld>.5);
+   [branch]if(!cutOut)
+    return nativeShadowSoft(slice,coordinate,texel,depthStep,bias,side,minTexels,search,found,start,shear);
+  }
+  // Held-map correction for the fixed filters: their centre moves to where
+  // the exact sun's ray crosses a blocker; the receiver plane stays anchored
+  // at the receiver's own texel.
+  float2 lookupTexel=texel;
+  [branch]if(any(shear!=0))lookupTexel+=nativeShadowRayShift(slice,coordinate,texel,depthStep,bias,side,shear);
   // The owned spatial maps carry a world-space texel size for this footprint.
   if(farFootprint){
     // Keep the far filter's tap centers within one world unit even when a
@@ -1933,34 +2579,37 @@ float nativeShadowFilter(uint slice,float3 worldPosition,float3 positionDx,float
     // supplies the remaining subtexel transition.
     float spacing=min(1.5,.5/max(shadowBias[slice].x,1e-6));
     float visibility=0;
-    [unroll]for(int y=-1;y<=1;y++)[unroll]for(int x=-1;x<=1;x++){
-     float2 sampleTexel=texel+float2(x,y)*spacing;
+    [loop]for(int y=-1;y<=1;y++)[loop]for(int x=-1;x<=1;x++){
+     float2 sampleTexel=lookupTexel+float2(x,y)*spacing;
      float weight=(x==0?2:1)*(y==0?2:1);
      visibility+=weight*nativeShadowPlaneTap(slice,side,sampleTexel,texel,coordinate.z-bias,depthStep);
     }
     return visibility/16;
   }
-  float2 center=floor(texel)+.5,f=texel-center;
+  float2 center=floor(lookupTexel)+.5,f=lookupTexel-center;
   // A compact, C1-continuous 5x5 footprint softens moving raster silhouettes
   // without changing the sun or losing per-texel receiver-plane depth bias.
   // A tap reaches zero weight as it enters/leaves at 2.5 texels.
-  float wx[5],wy[5],sumx=0,sumy=0;
+  // Tap weights are recomputed per tap (no weight arrays), so the taps loop.
+  float2 sum=0;
   [unroll]for(int tap=-2;tap<=2;tap++){
    float2 distance=abs(float2(tap,tap)-f);
    float2 taper=saturate(1-distance*distance*(4.0/25.0));
-   float2 weight=taper*taper;
-   wx[tap+2]=weight.x;wy[tap+2]=weight.y;
-   sumx+=weight.x;sumy+=weight.y;
+   sum+=taper*taper;
   }
   float visibility=0;
-  [unroll]for(int y=-2;y<=2;y++)[unroll]for(int x=-2;x<=2;x++){
-   float2 sampleTexel=center+float2(x,y);
-   // Extrapolation beyond the depth range must still compare clear depth as lit.
-   float depth=saturate(coordinate.z+dot(depthStep,sampleTexel-texel)-bias);
-   visibility+=wx[x+2]*wy[y+2]*shadowDepth.SampleCmpLevelZero(
-    shadowSampler,float3(sampleTexel/side,slice),depth);
+  [loop]for(int y=-2;y<=2;y++){
+   float wy=saturate(1-(y-f.y)*(y-f.y)*(4.0/25.0));wy*=wy;
+   [loop]for(int x=-2;x<=2;x++){
+    float wx=saturate(1-(x-f.x)*(x-f.x)*(4.0/25.0));
+    float2 sampleTexel=center+float2(x,y);
+    // Extrapolation beyond the depth range must still compare clear depth as lit.
+    float depth=saturate(coordinate.z+dot(depthStep,sampleTexel-texel)-bias);
+    visibility+=wx*wx*wy*shadowDepth.SampleCmpLevelZero(
+     shadowSampler,float3(sampleTexel/side,slice),depth);
+   }
   }
-  return visibility/(sumx*sumy);
+  return visibility/(sum.x*sum.y);
 }
 float nativeShadowVisibility(float3 worldPosition,float3 positionDx,float3 positionDy,float2 pixel,bool temporal){
  uint slice=nativeShadowSlice(worldPosition);
@@ -1968,30 +2617,40 @@ float nativeShadowVisibility(float3 worldPosition,float3 positionDx,float3 posit
  if((shadowControl.x&(1u<<slice))==0)
   return shadowBias[4].z>.5?-1:1;
  float rotation=nativeShadowRotation(pixel,temporal);
- float visibility=nativeShadowFilter(slice,worldPosition,positionDx,positionDy,rotation);
- if(shadowBias[4].z<.5)return visibility;
- float4 light=mul(shadowLight[slice],float4(worldPosition,1));
- float edge=max(abs(light.x),abs(light.y))/light.w;
- const float blendStart=.75,blendEnd=1-7.0/max(1.0,(float)shadowControl.z);
- float blend=smoothstep(blendStart,blendEnd,edge);
- if(slice==4)return lerp(visibility,1,blend);
- if(slice<3&&shadowBias[slice].w>shadowBias[slice].z){
-  float4 camera=mul(shadowCamera[slice],float4(worldPosition,1));
-  // Perspective clip Z crowds most visible ground near 1. Blend over the
-  // actual linear view-distance overlap shared with the next close map.
-  blend=max(blend,smoothstep(shadowBias[slice].z,shadowBias[slice].w,camera.w));
- }
- if(blend<=0)return visibility;
- // The first enabled coarser map holding the point (its containment test
- // only for enabled maps past slice, and none after the first hit).
- uint next=5;
- [unroll]for(uint coarser=0;coarser<5;coarser++){
-  [branch]if(next==5&&coarser>slice&&(shadowControl.x&(1u<<coarser))!=0){
-   [branch]if(nativeShadowContains(coarser,worldPosition))next=coarser;
+ // The blend toward the next coarser map is decided before filtering, so
+ // one inlined filter serves both maps (a loop of one or two passes).
+ float blend=0;uint next=5;
+ [branch]if(shadowBias[4].z>=.5){
+  float4 light=mul(shadowLight[slice],float4(worldPosition,1));
+  float edge=max(abs(light.x),abs(light.y))/light.w;
+  const float blendStart=.75,blendEnd=1-7.0/max(1.0,(float)shadowControl.z);
+  blend=smoothstep(blendStart,blendEnd,edge);
+  if(slice<3&&shadowBias[slice].w>shadowBias[slice].z){
+   float4 camera=mul(shadowCamera[slice],float4(worldPosition,1));
+   // Perspective clip Z crowds most visible ground near 1. Blend over the
+   // actual linear view-distance overlap shared with the next close map.
+   blend=max(blend,smoothstep(shadowBias[slice].z,shadowBias[slice].w,camera.w));
+  }
+  // The first enabled coarser map holding the point (its containment test
+  // only for enabled maps past slice, and none after the first hit).
+  [branch]if(blend>0&&slice<4){
+   [unroll]for(uint coarser=0;coarser<5;coarser++){
+    [branch]if(next==5&&coarser>slice&&(shadowControl.x&(1u<<coarser))!=0){
+     [branch]if(nativeShadowContains(coarser,worldPosition))next=coarser;
+    }
+   }
   }
  }
- [branch]if(next<5)return lerp(visibility,nativeShadowFilter(next,worldPosition,positionDx,positionDy,rotation),blend);
- return lerp(visibility,1,blend);
+ // No coarser map: the blended share is lit. The loop carries three
+ // values (keeps the program's registers at the single-map count): the
+ // maps still to filter (4 bits each, 5 ends), the share and the sum.
+ float visibility=next<5?0:blend,weight=1-blend;
+ uint maps=slice|(next<<4)|(5u<<8);
+ [loop]for(uint current=slice;current<5;current=(maps>>=4)&15u){
+  visibility+=weight*nativeShadowFilter(current,worldPosition,positionDx,positionDy,rotation);
+  weight=1-weight;
+ }
+ return visibility;
 }
 #ifdef NATIVE_LOW
 )" R"(
@@ -2135,6 +2794,14 @@ float4 nativeShadowPS(NativeOutput i):SV_Target{
   t=i.textureReference.y!=0?nativeTextureArray.SampleGrad(nativeSampler,float3(i.uv,i.textureReference.x),g,g):nativeTexture.SampleGrad(nativeSampler,i.uv,g,g);
 #endif
  }else if(nativeTextured!=0)t=NATIVE_SAMPLE(i.textureReference,i.uv);
+#ifdef NATIVE_FIRE_BURN
+ // A burnt crown casts through its lost leaves (NATIVE_BURN_ALPHA below).
+ [branch]if(nativeBurnRow(1).w>0&&((i.swaying>>29)&1u)==0&&nativeBurnMaterial(i.textureReference.x,i.uv)==2u){
+  float charred=nativeBurnSurfacePhase(i.shadowPosition,i.burnRoot).y;
+  if(charred>=.95)discard;
+  t.a=nativeBurnLeafAlpha(t.a,i.shadowPosition,charred);
+ }
+#endif
  float alpha=nativeAlphaResult(nativeAlphaOp,nativeStageArg(nativeAlphaArg1,i.d,i.s,t),nativeStageArg(nativeAlphaArg2,i.d,i.s,t),i.d.a);
  if(nativeAlphaTest!=0&&!nativeCompare(alpha))discard;
  return ((i.swaying>>30)&1u)!=0?1:0;
@@ -2300,6 +2967,104 @@ float nativeMaterialReliefTap(uint ref,float2 uv,float2 dx,float2 dy){Texture2DA
 #define nativeMaterialProfileTap(ref,uv) nativeMaterialProfile.Sample(nativeSampler,uv)
 #define nativeMaterialReliefTap(ref,uv,dx,dy) nativeMaterialReliefMap.SampleGrad(nativeSampler,uv,dx,dy)
 #endif
+)" R"(
+// Material instance switches (the shader split): each record's material
+// picks them once at registration (Renderer::native_material_instance); its
+// batches draw the program compiled for them. NATIVE_DOMAIN: 0 the general
+// program (every record), 1 units (unit flag), 2 world objects (no unit,
+// foliage or impostor flag), 3 foliage parts without a crown impostor table,
+// 4 records with a crown impostor table (static_lod.h native_world_impostor:
+// trunk and crown parts of one decoration object). NATIVE_PROFILED 0: the texture has no material profile entry, so
+// the S1 figure material code is compiled out. Each folded test is the value
+// the record's own flags give at run time, so a program draws exactly the
+// general program's pixels; NATIVE_DOMAIN_CHECK (F10 shader_split_check)
+// compiles the run-time tests back in and paints a marker where one disagrees.
+#ifndef NATIVE_DOMAIN
+#define NATIVE_DOMAIN 0
+#endif
+#ifndef NATIVE_PROFILED
+#define NATIVE_PROFILED 1
+#endif
+#define NATIVE_RT_UNIT(i) ((((i).swaying>>29)&1u)!=0)
+#define NATIVE_RT_FOLIAGE(i) ((((i).swaying>>30)&1u)!=0)
+#define NATIVE_RT_IMPOSTOR(i) ((((i).swaying>>8)&1024u)!=0)
+#define NATIVE_RT_CONTACT(i) ((i).contact!=0)
+#ifdef NATIVE_FIRE_BURN
+// A burnt crown's leaf loss at an alpha test (nativeBurnLeafAlpha): every
+// test of a foliage or crown impostor texel takes it, so the depth prepass,
+// the shadow maps and the material pass drop the same leaves.
+#define NATIVE_BURN_ALPHA(i,t) [branch]if(nativeBurnRow(1).w>0&&!NATIVE_RT_UNIT(i)&&nativeBurnMaterial((i).textureReference.x,(i).uv)==2u)\
+ t.a=nativeBurnLeafAlpha(t.a,(i).shadowPosition,nativeBurnSurfacePhase((i).shadowPosition,(i).burnRoot).y)
+#else
+#define NATIVE_BURN_ALPHA(i,t)
+#endif
+#ifdef NATIVE_TERRAIN_LEAN
+// NATIVE_TERRAIN_LEAN (D3D12, option terrain_slim_cuts): the slim terrain
+// programs for batches whose every record is a plain terrain record
+// (NativeBatch::terrain_records: terrain vertices, neither the unit nor the
+// foliage flag, not object space). The vertex stage gives such a record
+// contact 0 and none of the unit, foliage or impostor bits, so these tests
+// are the constants the general terrain program reads at run time and the
+// object-only code behind them (crown impostor texel, foliage and unit
+// branches of wet and snow, the ground contact blend) compiles out.
+#define NATIVE_REC_UNIT(i) false
+#define NATIVE_REC_FOLIAGE(i) false
+#define NATIVE_REC_IMPOSTOR(i) false
+#define NATIVE_REC_CONTACT(i) false
+#elif NATIVE_DOMAIN==1
+#define NATIVE_REC_UNIT(i) true
+#define NATIVE_REC_FOLIAGE(i) false
+#define NATIVE_REC_IMPOSTOR(i) false
+#define NATIVE_REC_CONTACT(i) false
+#elif NATIVE_DOMAIN==2
+#define NATIVE_REC_UNIT(i) false
+#define NATIVE_REC_FOLIAGE(i) false
+#define NATIVE_REC_IMPOSTOR(i) false
+#define NATIVE_REC_CONTACT(i) NATIVE_RT_CONTACT(i)
+#elif NATIVE_DOMAIN==3
+#define NATIVE_REC_UNIT(i) false
+#define NATIVE_REC_FOLIAGE(i) true
+#define NATIVE_REC_IMPOSTOR(i) false
+#define NATIVE_REC_CONTACT(i) NATIVE_RT_CONTACT(i)
+#elif NATIVE_DOMAIN==4
+#define NATIVE_REC_UNIT(i) false
+#define NATIVE_REC_FOLIAGE(i) NATIVE_RT_FOLIAGE(i)
+#define NATIVE_REC_IMPOSTOR(i) NATIVE_RT_IMPOSTOR(i)
+#define NATIVE_REC_CONTACT(i) NATIVE_RT_CONTACT(i)
+#else
+#define NATIVE_REC_UNIT(i) NATIVE_RT_UNIT(i)
+#define NATIVE_REC_FOLIAGE(i) NATIVE_RT_FOLIAGE(i)
+#define NATIVE_REC_IMPOSTOR(i) NATIVE_RT_IMPOSTOR(i)
+#define NATIVE_REC_CONTACT(i) NATIVE_RT_CONTACT(i)
+#endif
+#ifdef EID3D12
+#define NATIVE_RT_PROFILE(i) ((i).textureReference.y!=0)
+#else
+#define NATIVE_RT_PROFILE(i) ((nativeCombinerTail&2u)!=0)
+#endif
+// The contact blend after the lamps and lighting (nativePS): crown impostor
+// records only (45/47 -> 42/44 temps); world objects and plants keep the early
+// blend (37 vs 39 temps prepassed late) and the general program stays as it was.
+#define NATIVE_CONTACT_LATE (NATIVE_DOMAIN==4)
+#if !NATIVE_PROFILED
+#undef NATIVE_MATERIAL_BOUND
+#define NATIVE_MATERIAL_BOUND(i) false
+#endif
+#if !NATIVE_PROFILED&&NATIVE_DOMAIN!=0
+#define NATIVE_MATERIAL_WORLD materialActive
+#elif NATIVE_DOMAIN==1
+#define NATIVE_MATERIAL_WORLD false
+#else
+#define NATIVE_MATERIAL_WORLD materialWorld
+#endif
+// A crystal texel (classes.json "crystal"): a dielectric whose profile F0 is
+// the crystal marker .10 (b = .4; gems take .12 and up). Only the crystal
+// instance programs test it; every other program has no crystal code.
+#ifdef NATIVE_CRYSTAL
+#define NATIVE_CRYSTAL_TEXEL(profile) ((profile).g<.5&&abs((profile).b-.4)<.02)
+#else
+#define NATIVE_CRYSTAL_TEXEL(profile) false
+#endif
 static bool materialActive=false;
 // materialWorld: a world object's profile derived from its own texture (S2);
 // materialLamps: the lamp loop adds GGX highlights for this pixel.
@@ -2319,8 +3084,23 @@ static const float kFoliageRoughness=.62,kFoliageSheen=.5,kFoliageTransmission=.
 // terrain's film highlight (S3, specular only) sees half its relief.
 static const float kWetRoughness=.3,kWetFoliageRoughness=.25,kWetMetalRoughness=.7,kWetReliefDamp=.25,kWetFilmFlatten=.5;
 float materialWetRoughness(float r,float target,float wet){return lerp(r,min(r,max(target,r*.45)),wet);}
-static float materialAlpha2=1;
+static float materialAlpha2=1,materialWear=0;
 static float3 materialView=float3(0,0,1);
+// materialNormal: a figure's texture relief normal, taken just before the lamp
+// loop (materialReliefLamps): its lamps, glow and lamp highlights light it.
+static float3 materialNormal=float3(0,0,1);static bool materialReliefLamps=false;
+// How much of the texture relief a pixel keeps. World objects (S2): none past
+// ~6 texels per pixel (their slope there is mip noise on walls seen edge-on).
+// Figures (S1): the taps follow the colour read's gradients, so at any
+// distance they read neighbouring texels of the mip the colour uses, a sound
+// slope; only a stretched footprint (a silhouette seen edge-on: 4:1 and more)
+// fades it. The texel rule faded world armour to nothing at play distance
+// (save1177 bz14h: ~5 texels per pixel, relief .2 of the doll's).
+float materialReliefFade(float2 dx,float2 dy,float2 size,float texels,bool figure){
+ if(!figure)return saturate((6-texels)*.25);
+ float a=length(dx*size),b=length(dy*size);
+ return saturate((8-max(a,b)/max(min(a,b),1e-3))*.25);
+}
 // The lamps' GGX sums: Schlick F = F0(1-Fc)+Fc, so the texel's F0 applies after the loop.
 static float3 materialPointSpecular=0,materialPointFresnel=0;
 float materialLuminance(float3 c){return dot(c,float3(.2126,.7152,.0722));}
@@ -2349,6 +3129,10 @@ float materialSheenAlbedo(float nv,float roughness){
 // sets (blended baked height, roughness) for pixels it draws completely
 // (y -1: none); the snow build-up its share for the roughness.
 static float2 terrainSurface=float2(.5,-1);
+// #243 (terrain_relief_derivfree): the pixel's terrainSurface came from the
+// material cache (terrain2CacheTap), whose height layer the relief can read
+// beside the pixel instead of differencing the height across the quad.
+static bool terrainSurfaceCached=false;
 static float terrainSnowShare=0;
 // The build-up's base normal (objects: the face's geometric normal), slope
 // share and patch threshold, for the covered share's relief (S2: its drift).
@@ -2364,6 +3148,12 @@ float3 terrainReliefNormal(float3 n0,float3 dpdx,float3 dpdy,float2 dh){
 float3 nativePointLighting(NativeOutput i,out float3 glow,bool glowOnly,bool ground,float3 groundNormal,out float3 groundLocal,out float3 groundGlow){
  float3 local=0;glow=0;groundLocal=0;groundGlow=0;
  float3 normal=normalize(i.worldNormal);
+#if !defined(NATIVE_OFF_MATERIALS)&&!defined(NATIVE_LOW)
+ // A figure's texture relief normal where it has one (materialNormal): lamp-
+ // lit gear (lava, camp fires) read flat while only its sun took the relief.
+ // The point shadow's bias takes it too (a small tilt; one normal held).
+ if(materialReliefLamps)normal=materialNormal;
+#endif
  uint2 lightRange=nativePointLightRange(i.worldPosition);
  [loop]for(uint lightSlot=lightRange.x;lightSlot<lightRange.y;++lightSlot){NATIVE_LOOP_GUARD(8u,lightSlot-lightRange.x,lightRange.y-lightRange.x)
   NativePointLight light=nativePointLights[nativePointLightGrid[lightSlot]];
@@ -2428,6 +3218,40 @@ float3 nativePointLighting(NativeOutput i,out float3 glow,bool glowOnly,bool gro
  return local;
 }
 float3 nativePointLighting(NativeOutput i,out float3 glow,bool glowOnly){float3 a,b;return nativePointLighting(i,glow,glowOnly,false,0,a,b);}
+// The contact blend's ground receiver alone (nativePointLighting's ground
+// terms, the same lamps, order, shared lamp-shadow lookup and bounce light;
+// pointLit: the pixel's own lamps ran, which gate the bounce): its own loop
+// where the blend runs, so nothing of it is held through the pixel's lighting.
+void nativeGroundPointLighting(NativeOutput i,bool pointLit,float3 groundNormal,out float3 groundLocal,out float3 groundGlow){
+ groundLocal=0;groundGlow=0;
+ float3 normal=normalize(i.worldNormal);
+ uint2 lightRange=nativePointLightRange(i.worldPosition);
+ [loop]for(uint lightSlot=lightRange.x;lightSlot<lightRange.y;++lightSlot){NATIVE_LOOP_GUARD(8u,lightSlot-lightRange.x,lightRange.y-lightRange.x)
+  NativePointLight light=nativePointLights[nativePointLightGrid[lightSlot]];
+  float3 delta=light.centerInverseRadiusSquared.xyz-i.worldPosition;
+  float distanceSquared=dot(delta,delta);
+  float reach=1-distanceSquared*light.centerInverseRadiusSquared.w;
+  if(reach<=0)continue;
+  float falloff=reach*reach;
+  float3 direction=delta*rsqrt(max(distanceSquared,1e-12));
+  float incidence=dot(normal,direction);
+  float groundIncidence=dot(groundNormal,direction);
+  if(light.color.w<0){groundGlow+=light.color.rgb*(falloff*saturate(groundIncidence*.6+.4));continue;}
+  float groundFacing=saturate(1+min(groundIncidence,0));
+  if(groundFacing<=0)continue;
+  float visibility=1;
+#if !defined(NATIVE_LOW)&&!defined(NATIVE_OFF_POINT_SHADOWS)
+  if(light.shadowSlots.x>0&&!liquidSurfaceEnabled(i.terrainVertexFlags)&&
+     max(i.emissive.r,max(i.emissive.g,i.emissive.b))<.25){
+   visibility=nativePointVisibility(light,i.shadowPosition,normal,incidence,shadowBias[5].z);
+  }
+#endif
+  float intensity=light.color.w>0?.65:1;
+  groundLocal+=light.color.rgb*(falloff*groundFacing*visibility*intensity);
+ }
+ [branch]if(pointLit&&caveVolumeStrength>0&&(((uint)caveVolumeTail)&1u)!=0)groundLocal=nativeCaveBounce(i.worldPosition,groundNormal)*8;
+ else [branch]if(pointLit&&caveVolumeStrength>0)groundLocal+=nativeCaveBounce(i.worldPosition,groundNormal);
+}
 float3 nativePointLighting(NativeOutput i,out float3 glow){return nativePointLighting(i,glow,false);}
 #if !defined(NATIVE_OFF_MATERIALS)&&!defined(NATIVE_LOW)
 // Gems (classes.json gem): the lamps' light through the stone, strongest from
@@ -2596,6 +3420,32 @@ float3 contactBlendColor(float3 p,float3 n,float3 pDx,float3 pDy,float worldHeig
  return saturate(terrain);
 }
 )" R"(
+#ifdef NATIVE_TERRAIN_SLIM
+RWTexture2D<uint> terrainMissMask:register(u4); // the slim pass's winner keys (R32_UINT; terrainSlimKey)
+RWByteAddressBuffer terrainMissTriangleFlags:register(u5); // and their triangles (terrainMissTriangles)
+static bool terrainSlimMiss=false;
+// The list mark (terrain_slim_stencil 2, nativeLiquidLayer bit 2048; D3D12
+// only): a miss lists its 2x2 quad once per flush, so the stencil mark
+// before the second passes draws those quads instead of the whole screen.
+// terrainMissQuads: each quad's last stamp (the flush sequence + 1; cleared
+// with the miss mask, when the sequence wraps). terrainMissQuadList: words
+// 0-3 the mark's draw arguments (instance count = quads listed), then one
+// word per quad (x | y << 16, in quads). Sized to the screen's quads, so a
+// flush can never list more than it holds. D3D12 DXIL only (EID3D12): the
+// D3D11 programs have no mark and stay without this code.
+#ifdef EID3D12
+RWTexture2D<uint> terrainMissQuads:register(u3);
+RWByteAddressBuffer terrainMissQuadList:register(u7);
+void terrainSlimListQuad(uint2 p){
+ [branch]if((nativeLiquidLayer&2048u)==0)return;
+ uint2 quad=p>>1;uint stamp=((nativeLiquidLayer>>24)&127u)+1u,last;
+ InterlockedExchange(terrainMissQuads[quad],stamp,last);
+ [branch]if(last!=stamp){uint at;terrainMissQuadList.InterlockedAdd(4u,1u,at);terrainMissQuadList.Store(16u+at*4u,quad.x|(quad.y<<16));}
+}
+#else
+void terrainSlimListQuad(uint2 p){}
+#endif
+#endif
 #ifdef NATIVE_TERRAIN_PS
 // Terrain-only material stages (blend, terrain material, cliffs) live in the terrain pixel variant: in the shared shader their
 // registers slowed every figure and object pixel.
@@ -2625,12 +3475,13 @@ float4 nativeTerrainMaterialStages(NativeOutput i,float4 t,float3 restDx,float3 
   // neighbour maps in the map table (the batch's entry + 1 in
   // nativeContactLayout.w; 0: not in the table, its tile art stays), faces
   // and rock included (projection planes, the map's own rock cells). Terrain
-  // 1.0 (tile blend, cliffs, edge mix) is retired: tiles 2.0 does not draw
+  // 1.0 (tile blend, cliffs, edge mix) is retired. With blending off the
+  // owned tile sample above stays unchanged; tiles 2.0 does not draw
   // (long, animated, liquid, maps beyond the table) keep their tile art.
   // Neighbour ground under nearly full seam fog fades to its tile art
   // between 3% and 1% fog factor: the pixel is at least 97% fog colour
   // there, and the fade spares the farthest ground the whole 2.0 cost.
-  [branch]if(nativeContactLayout.w>0&&nativeTextured!=0&&(i.terrainVertexFlags&16u)!=0){
+  [branch]if(nativeTerrain2.x>0&&nativeContactLayout.w>0&&nativeTextured!=0&&(i.terrainVertexFlags&16u)!=0){
    float3 t2Color=0;float t2Share=i.neighbour!=0?smoothstep(.01,.03,i.s.a):1;
    [branch]if(t2Share>.001){
     float3 n2=dot(i.terrainSlope,i.terrainSlope)>1e-8?normalize(i.terrainSlope):float3(0,0,1); // (a zero slope would be NaN)
@@ -2642,18 +3493,43 @@ float4 nativeTerrainMaterialStages(NativeOutput i,float4 t,float3 restDx,float3 
 #else
     float3 planes=nativeTerrainCliff.x>0?terrainCliffFacetPlanes(terrainCliffProjectionPlanes(n2,i.terrainFlat),restDx,restDy,i.liquidFall.y):float3(0,0,1);
 #endif
+    // terrain_quality Medium and Low (T2_LEAN): biplanar, the weakest of three
+    // planes subtracted from all (continuous: it is 0 where two planes meet).
+    [branch]if(T2_LEAN&&all(planes>.002)){float lo=min(planes.x,min(planes.y,planes.z));planes=max(planes-lo,0);planes/=planes.x+planes.y+planes.z;}
     // The material cache (terrain2_cache.h) where it holds exactly this
-    // colour: walkable ground (top plane only) with no liquid over it.
+    // colour: walkable ground (top plane only) where the liquid-bed fade
+    // leaves terrain2Color as baked: no liquid (depth 0), deep liquid (depth
+    // past t2BedBand: no fade), and dry ground under a liquid's footprint
+    // (negative depth) where no texel the read weighs carries the bed flag
+    // (x64; terrain2CacheTap). Ground within t2BedBand under liquid fades per pixel.
     // S3 (material level on): the reads also take the materials' heights;
     // cached ground reads its height layer and stored roughness.
     bool t2Cached=false;float2 t2Surf=float2(.5,-1);
 #if !defined(NATIVE_OFF_MATERIALS)&&!defined(NATIVE_LOW)
     t2Surface=nativeMaterialTerrainLevel>0;
 #endif
-    [branch]if(terrain2CacheParams[0].x>0&&planes.z>=.999&&i.bedLiquid.x==0)
-     t2Cached=terrain2CacheTap(i.shadowPosition.xy,restDx.xy,restDy.xy,t2Surface,t2Color,t2Surf);
+    bool t2DryBed=i.bedLiquid.x<0;
+    bool t2Eligible=terrain2CacheParams[0].x>0&&planes.z>=.999&&(i.bedLiquid.x<=0||i.bedLiquid.x>=t2BedBand);
+    [branch]if(t2Eligible)
+     t2Cached=terrain2CacheTap(i.shadowPosition.xy,restDx.xy,restDy.xy,t2Surface,t2DryBed,t2Color,t2Surf);
+    terrainSurfaceCached=t2Cached&&t2Share>=.999;
+#ifndef NATIVE_TERRAIN_FLAT
+    // The face cache (terrain2_cache.h kTerrainFaceCacheShader): faces of a
+    // map with an atlas (its table entry's header) read its baked pages
+    // (the active map's baked with the live liquid-bed depth).
+    uint faceMap=uint(nativeContactLayout.w)-1u;
+    [branch]if(!t2Cached&&planes.z<.999&&faceCacheData[0].x>0&&faceCacheData[faceCacheMap(faceMap)].y>0)
+     t2Cached=faceCacheTap(faceMap,tileP,restDx,restDy,t2Color,t2Surf)==0u;
+#endif
+#ifdef NATIVE_TERRAIN_SLIM
+    // The slim pass (terrain_slim): a pixel the caches miss is marked for the
+    // full program's second pass (terrainMissMask) and its colour here is
+    // overwritten there.
+    [branch]if(!t2Cached)terrainSlimMiss=true;
+#else
     [branch]if(!t2Cached)
      t2Color=terrain2Color(uint(nativeContactLayout.w)-1u,i.shadowPosition,tileP,layoutP,restDx,restDy,n2,planes,i.bedLiquid.x,i.liquidFall.x,t2Surf);
+#endif
     if(t2Share>=.999)terrainSurface=t2Surf;
     t.rgb=lerp(t.rgb,t2Color,t2Share);
    }
@@ -2683,12 +3559,18 @@ float4 nativeTerrainMaterialStages(NativeOutput i,float4 t,float3 restDx,float3 
 struct NativeDepthOutput{float4 p:SV_Position;float4 d:COLOR0;float4 s:COLOR1;float2 uv:TEXCOORD0;nointerpolation uint2 textureReference:TEXCOORD1;
  float3 worldPosition:TEXCOORD2;nointerpolation uint shadowMode:TEXCOORD6;nointerpolation uint terrainVertexFlags:TEXCOORD13;
  float3 terrainSlope:TEXCOORD17;nointerpolation uint swaying:TEXCOORD19;float3 shadowPosition:TEXCOORD20;nointerpolation uint neighbour:TEXCOORD21;
+#ifdef NATIVE_FIRE_BURN
+ nointerpolation float4 burnRoot:TEXCOORD31;
+#endif
  // Crown impostor frames (nativeVertex).
  float4 liquidTintDepth:TEXCOORD8;nointerpolation float4 liquidFlow:TEXCOORD9;float4 liquidMaterial:TEXCOORD10;nointerpolation float4 liquidUvBounds:TEXCOORD14;};
 NativeDepthOutput nativeDepthOf(NativeOutput o){
  NativeDepthOutput r;r.p=o.p;r.d=o.d;r.s=o.s;r.uv=o.uv;r.textureReference=o.textureReference;r.worldPosition=o.worldPosition;
  r.shadowMode=o.shadowMode;r.terrainVertexFlags=o.terrainVertexFlags;r.terrainSlope=o.terrainSlope;r.swaying=o.swaying;
  r.shadowPosition=o.shadowPosition;r.neighbour=o.neighbour;
+#ifdef NATIVE_FIRE_BURN
+ r.burnRoot=o.burnRoot;
+#endif
  r.liquidTintDepth=o.liquidTintDepth;r.liquidFlow=o.liquidFlow;r.liquidMaterial=o.liquidMaterial;r.liquidUvBounds=o.liquidUvBounds;return r;
 }
 #ifdef EID3D12
@@ -2719,6 +3601,48 @@ float3 nativeOctDecode(float2 e){
 // written here cancels the reconstruction exactly in the mask pass.
 float nativeDepth24(float z){return round(saturate(z)*16777215.0)/16777215.0;}
 struct NativePrepassResult{float4 rest:SV_Target0;float2 normal:SV_Target1;};
+// The slim terrain pass's misses (terrainMissMask) for the full programs'
+// second pass (nativePS, nativeLiquidLayer bit 64).
+Texture2D<uint> terrainMissInput:register(t125);
+ByteAddressBuffer terrainMissOrigin:register(t126); // a miss list entry's slot in its region (nativeTerrainMissCompactCS)
+// The slim pass's winner key: this flush's sequence (nativeLiquidLayer bits
+// 24-30; the mask is cleared when it wraps), the triangle's slot (24 bits:
+// the layout's triangle limit is 16M) and its miss. Slots rise in draw order
+// (a batch's flat region, then its steep one, batch after batch), so the
+// largest key at a pixel is the single pass's last writer at that pixel,
+// whatever order the GPU runs the fragments in.
+uint terrainSlimKey(uint slot,bool miss){return (((nativeLiquidLayer>>24)&127u)<<25)|((slot&0xffffffu)<<1)|(miss?1u:0u);}
+// The second passes' stencil mark (terrain_slim_stencil): full screen, before
+// a slim run's second passes, every pixel of a 2x2 quad (the rasteriser's
+// own, at even coordinates) holding a miss of this flush (sequence in
+// nativeLiquidLayer bits 24-30) marks the stencil. A second-pass pixel
+// survives only on its own triangle's miss key, so the second passes test
+// the mark and the other quads never start the full program. Whole quads:
+// a kept quad's pixels that are not the triangle's run on as real pixels and
+// leave at the program's end, after the screen differences (#243).
+void nativeSlimMissMarkPS(float4 position:SV_Position){
+ int2 quad=int2(position.xy)&~1;
+ uint sequence=(nativeLiquidLayer>>24)&127u,missed=0;
+ [unroll]for(uint k=0;k<4;++k){
+  uint key=terrainMissInput.Load(int3(quad+int2(k&1u,k>>1),0));
+  missed|=(key&1u)!=0&&(key>>25)==sequence?1u:0u;
+ }
+ if(missed==0)discard;
+}
+// The list mark's vertex stage (terrain_slim_stencil 2): instance = one
+// listed quad (terrainMissQuadList from word 4, at t123), two triangles over
+// its 2x2 pixels; drawn without a pixel program, the stencil only. D3D12 only.
+#ifdef EID3D12
+ByteAddressBuffer terrainMissQuadInput:register(t123);
+float4 nativeSlimQuadMarkVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID):SV_Position{
+ uint packed=terrainMissQuadInput.Load(16u+instance*4u),width,height;
+ terrainMissInput.GetDimensions(width,height);
+ float2 corner=float2((0x32u>>vertex)&1u,(0x2Cu>>vertex)&1u);
+ float2 pixel=(float2(packed&0xffffu,packed>>16)+corner)*2;
+ return float4(pixel.x/width*2-1,1-pixel.y/height*2,0,1);
+}
+#endif
+
 // Static LOD crossfade (nativeStaticLodSelect, code in swaying bits 8-17):
 // a level in its band keeps the pixels the other level leaves, by a fixed
 // per-pixel threshold (interleaved gradient noise), so the two levels cover
@@ -2734,16 +3658,27 @@ Texture2DArray nativeImpostorNormal:register(t45);
 // any branch: the impostor flag differs between neighbouring triangles).
 float nativeImpostorLod(float2 local){
  float2 dx=ddx(local),dy=ddy(local);
- return clamp(log2(max(max(length(dx),length(dy))*kImpostorFrameTexels,1e-6)),0,kImpostorMips-1);
+ // Upscaled: the output-resolution footprint (the negative mip bias of the
+ // upscaler guides, as the world textures take it).
+ return clamp(log2(max(max(length(dx),length(dy))*kImpostorFrameTexels/max(nativeImpostorParams.w,1),1e-6)),0,kImpostorMips-1);
 }
-float4 nativeImpostorTexel(float4 frames01,float4 frames23,float4 weights,float4 flow,float lod,float2 pixel,bool withNormal,out float3 normal){
- uint slice=(uint)(flow.x+.5);uint2 b=uint2((uint)(flow.y+.5),(uint)(flow.z+.5));
+float4 nativeImpostorTexel(float4 frames01,float4 frames23,float4 weights,float4 flow,float lod,bool withNormal,out float3 normal){
+ // The slice and frame base arrive as whole numbers in floats and are rounded
+ // as floats. With (float)(uint)(x+.5) instead, D3D12 sampled every odd slice
+ // as the NEXT slice (another object's impostor: the floating "stones" and
+ // "domes", 2026-11-06), measured in game by the self-checks below; D3D11 was
+ // correct. DXC's DXIL keeps the exact fptoui/uitofp pair, so the fold of
+ // that pair back to x+.5 (layer slice+.5, rounded to even) happens after
+ // DXIL, in the driver's compile (inference; not seen in SASS). Avoid
+ // float->int->float round trips on non-integral values in shaders.
+ const float layer=round(flow.x);const float2 base=round(flow.yz);
+ uint slice=(uint)layer;uint2 b=uint2(base);
  float2 uvs[4]={frames01.xy,frames01.zw,frames23.xy,frames23.zw};
  float4 albedo=0;float3 n=0;float coverage=0;
  [unroll]for(uint k=0;k<4;++k){
-  float2 frame=float2(b+uint2(k&1u,k>>1));
+  float2 frame=base+float2(k&1u,k>>1);
   float2 local=uvs[k];
-  float3 at=float3((frame+saturate(local))/kImpostorFrames,slice);
+  float3 at=float3((frame+saturate(local))/kImpostorFrames,layer);
   bool inside=all(local>=0)&&all(local<=1);
   [branch]if(inside&&weights[k]>0){
    albedo+=nativeImpostorAlbedo.SampleLevel(nativeSampler,at,lod)*weights[k];
@@ -2757,26 +3692,88 @@ float4 nativeImpostorTexel(float4 frames01,float4 frames23,float4 weights,float4
  }
  // Both images are premultiplied by coverage (empty texels hold zero).
  normal=albedo.a>1e-4?n/albedo.a*2-1:0;
- // Diagnostic view (F10 impostor_debug): the whole quad, magenta.
- if(flow.w>.5){normal=float3(0,0,1);return float4(1,0,1,1);}
- // Four views cover different leaves. A fixed 0.5 threshold keeps their
- // intersection and erases sparse crowns. Stable screen-door coverage keeps
- // the weighted area, with the same decision in depth and colour passes.
- // Offset from the LOD dither so their two coverages do not correlate.
- float threshold=frac(52.9829189*frac(dot(pixel+float2(29,71),float2(.06711056,.00583715))));
- return float4(albedo.a>1e-4?albedo.rgb/albedo.a:0,coverage>threshold?1:0);
+ // Diagnostic self-checks (impostor_debug and its frame view): pure blue where
+ // the bound atlas is not the impostor atlas (size, mips, slice range), where
+ // the slice's bake stamp (texel (0,0): slice / 255, 90 / 255) is not this
+ // slice's, or where the filtered level-0 sample is covered while the texels
+ // around that spot are empty (the 2026-11-06 floating impostors).
+ [branch]if(flow.w>.5&&flow.w<2.5){
+  normal=float3(0,0,1);
+  uint aw,ah,ae,al;nativeImpostorAlbedo.GetDimensions(0,aw,ah,ae,al);
+  if(slice>=ae||aw!=kImpostorFrames*(uint)kImpostorFrameTexels||ah!=aw||al!=kImpostorMips)return float4(0,0,1,1);
+  const float4 stamp=nativeImpostorAlbedo.Load(int4(0,0,slice,0));
+  if(abs(stamp.r*255-float(slice&255u))>.5||abs(stamp.g*255-90)>.5)return float4(0,0,1,1);
+  [unroll]for(uint q=0;q<4;++q){
+   const float2 lq=uvs[q];
+   if(!(all(lq>=0)&&all(lq<=1))||weights[q]<=0)continue;
+   const float3 aq=float3((base+float2(q&1u,q>>1)+saturate(lq))/kImpostorFrames,layer);
+   const int2 t0=clamp(int2(floor(aq.xy*aw-.5)),int2(0,0),int2(aw-2,aw-2));
+   float loaded=0;
+   [unroll]for(uint c=0;c<4;++c)loaded=max(loaded,nativeImpostorAlbedo.Load(int4(t0+int2(c&1u,c>>1),slice,0)).a);
+   if(nativeImpostorAlbedo.SampleLevel(nativeSampler,aq,0).a>=.5&&loaded<.1)return float4(0,0,1,1);
+   break;
+  }
+ }
+ // Frame view (impostor_debug_frames, w 2): the chosen view base, red its
+ // column, green its row (0-2 of the 4x4 grid).
+ if(flow.w>1.5&&flow.w<2.5){normal=float3(0,0,1);return float4(base/2,0,coverage>=.5?1:0);}
+ // Diagnostic view (F10 impostor_debug, w 1): the impostor's own silhouette in
+ // a solid colour per atlas slice (the debug labels use the same colour).
+ if(flow.w>.5&&flow.w<1.5){normal=float3(0,0,1);uint h=slice*2654435761u;
+  float3 tint=.25+.75*float3((h>>8)&255u,(h>>16)&255u,(h>>24)&255u)/255.0;return float4(tint,coverage>=.5?1:0);}
+ return float4(albedo.a>1e-4?albedo.rgb/albedo.a:0,coverage>=.5?1:0);
 }
+#if defined(EID3D12)&&defined(NATIVE_RT_SUN)
+// The crown's visible surface at an impostor pixel, in bounding sphere radii
+// from the quad's plane toward the viewer (-1 to 1): the four frames' baked
+// depth (the normal image's alpha, premultiplied by coverage as the albedo's
+// alpha is; renderer_impostors.cpp impostorBakePS).
+float nativeImpostorSurface(float4 frames01,float4 frames23,float4 weights,float4 flow,float lod){
+ const float layer=round(flow.x);const float2 base=round(flow.yz);
+ float2 uvs[4]={frames01.xy,frames01.zw,frames23.xy,frames23.zw};
+ float depth=0,cover=0;
+ [unroll]for(uint k=0;k<4;++k){
+  float2 local=uvs[k];
+  [branch]if(all(local>=0)&&all(local<=1)&&weights[k]>0){
+   float3 at=float3((base+float2(k&1u,k>>1)+saturate(local))/kImpostorFrames,layer);
+   depth+=nativeImpostorNormal.SampleLevel(nativeSampler,at,lod).a*weights[k];
+   cover+=nativeImpostorAlbedo.SampleLevel(nativeSampler,at,lod).a*weights[k];
+  }
+ }
+ return cover>1e-4?clamp(1-2*depth/cover,-1,1):0;
+}
+#endif
 bool nativeLodDiscard(uint swaying,float4 position){
  uint code=swaying>>8;
  if((code&512u)==0)return false;
- float noise=frac(52.9829189*frac(dot(floor(position.xy),float2(.06711056,.00583715))));
+ float noise=frac(52.9829189*frac(dot(floor(position.xy),float2(.06711056,.00583715)))+nativeDitherParams.x); // + per-frame offset under upscalers
  float coverage=(code&255u)/255.0;
  return (code&256u)!=0?noise>=coverage:noise<coverage;
 }
+)" R"(
 NativePrepassResult nativePrepassPS(NativeDepthOutput i){
  NATIVE_REPORT_PIXEL(4u,i.textureReference.x,i.p)
+#ifdef NATIVE_FIRE_BURN
+ // Opaque leaf geometry must leave depth as well as colour when consumed.
+ if(!NATIVE_RT_UNIT(i)&&nativeBurnMaterial(i.textureReference.x,i.uv)==2u&&
+    nativeBurnSurfacePhase(i.shadowPosition,i.burnRoot).y>=.95)discard;
+#endif
+ // The rest triangle's plane for the trail trough receiver below: taken
+ // here, at the top level (FXC moves a derivative into the branch that
+ // uses it, #243). NATIVE_PREPASS_OBJECT: the program of material instance
+ // batches (no terrain records: no lifted receiver, no trail trough).
+#ifndef NATIVE_PREPASS_OBJECT
+ float3 restDx=ddx(i.shadowPosition),restDy=ddy(i.shadowPosition);
+#endif
  if(nativeLodDiscard(i.swaying,i.p))discard;
+#ifdef NATIVE_FUR_DEBUG
+ if(((i.swaying>>24)&7u)==4u)discard;  // F10 fur_debug: a hidden layer
+#endif
  float impostorLod=nativeImpostorLod(i.liquidTintDepth.xy);
+#if defined(EID3D12)&&defined(NATIVE_RT_SUN)
+ // The first frame position's screen steps (the impostor receiver below), at the top level like restDx.
+ float2 frameDx=ddx(i.liquidTintDepth.xy),frameDy=ddy(i.liquidTintDepth.xy);
+#endif
  // The discards of nativePS that decide coverage: the neighbour interior,
  // the alpha test (the same texture read; terrain batches with an alpha
  // test stay out of the prepass) and the draw-distance dissolve.
@@ -2784,7 +3781,7 @@ NativePrepassResult nativePrepassPS(NativeDepthOutput i){
     all(i.worldPosition.xy<nativeTerrainActiveBoundsPS.zw))discard;
  [branch]if(nativeAlphaTest!=0){
   float4 t=float4(1,1,1,1);
-  [branch]if(((i.swaying>>8)&1024u)!=0){float3 unused;t=nativeImpostorTexel(i.liquidTintDepth,i.liquidMaterial,i.liquidUvBounds,i.liquidFlow,impostorLod,i.p.xy,false,unused);}
+  [branch]if(((i.swaying>>8)&1024u)!=0){float3 unused;t=nativeImpostorTexel(i.liquidTintDepth,i.liquidMaterial,i.liquidUvBounds,i.liquidFlow,impostorLod,false,unused);}
   else{
 #ifdef NATIVE_LOW
   [branch]if(nativeTextured!=0){
@@ -2800,30 +3797,78 @@ NativePrepassResult nativePrepassPS(NativeDepthOutput i){
   if(nativeTextured!=0)t=NATIVE_SAMPLE(i.textureReference,i.uv);
 #endif
   }
+  NATIVE_BURN_ALPHA(i,t);
   if(!nativeCompare(nativeCombineAlpha(i.d,i.s,t)))discard;
  }
  float3 fogPoint=i.worldPosition;
  [branch]if(i.shadowMode==0&&(fogStock.w>0||fogEye.w>.5))fogPoint=fogUnproject(i.p.xy*fogScreen.xy,i.p.z);
  if(nativeFogEnable==0&&nativeDrawDissolvedAt(i.p,fogPoint))discard;
  bool receiver=i.shadowMode==1||(i.shadowMode==2&&nativeRasterTail.y!=0);
+#ifdef NATIVE_PREPASS_OBJECT
+ uint flags=(receiver?1u:0u)|(nativeRasterTail.x==0&&(i.swaying&255u)==0?2u:0u);
+ NativePrepassResult r;
+ r.rest=float4(i.shadowPosition-fogUnproject(i.p.xy*fogScreen.xy,nativeDepth24(i.p.z)),flags);
+ r.normal=float2(.5,.5);
+ return r;
+#else
  bool lifted=(i.terrainVertexFlags&16)!=0&&dot(i.terrainSlope,i.terrainSlope)>1e-8;
+ // 8: a unit (swaying bit 29), for the traced sun mask's self-hit distance.
  uint flags=(receiver?1u:0u)|(nativeRasterTail.x==0&&(i.swaying&255u)==0?2u:0u)|(lifted?4u:0u);
+#if defined(EID3D12)&&defined(NATIVE_RT_SUN)
+ flags|=(i.swaying&(1u<<29))!=0?8u:0u;
+#endif
  // Snow trail troughs and berms (nativeTessGroundPosition) are drawn off the
  // untessellated terrain the sun maps hold. The receiver follows the drawn
  // point along its ray to the sun up to that terrain, so a shadow lands on
  // the trough floor where the drawn surface meets it, and the terrain in the
  // map never shadows its own trough. Only where the drawn point left the
  // rest point (the snow stages ran; untessellated trails stay at rest).
+ // That terrain is the rest triangle's own plane (normal n, from the rest
+ // position's screen derivatives: exact inside a triangle). The ray from the
+ // drawn point (rest + h up) meets it after t = -h n.z / dot(n, sun), and
+ // the receiver's height follows the plane there. Keeping the rest height
+ // (#217) was right on level ground only: where the ground rises toward the
+ // sun the receiver lay under the map's terrain by |h| cot(sun elevation)
+ // times that rise, past the receiver bias, and the mask shadowed the whole
+ // trough. The step keeps its old limit (4 |h| on level ground) and the
+ // receiver stays on the plane under it. A triangle steeper than about 78
+ // degrees or seen edge-on keeps the rest point.
  float3 rest=i.shadowPosition;
  [branch]if((i.terrainVertexFlags&16)!=0&&i.neighbour==0&&nativeSnowTrailWindow.w>0&&abs(i.worldPosition.z-rest.z)>1e-5&&nativeWorldSunDirection.z>0){
   float h=snowTrailHeight(snowTrailRaw(nativeSnowTrail,nativeSnowTrailWindow,nativeSnowTrailTiles,i.worldPosition.xy));
   float3 sun=normalize(nativeWorldSunDirection.xyz);
-  rest.xy-=h*sun.xy/max(sun.z,.25);
+  float3 n=cross(restDx,restDy);float nn=dot(n,n);
+  if(nn>1e-20){
+   n*=rsqrt(nn)*(n.z<0?-1:1);
+   if(n.z>.2){
+    float2 slide=-h*n.z/max(dot(n,sun),.25*n.z)*sun.xy;
+    rest.xy+=slide;rest.z-=dot(n.xy,slide)/n.z;
+   }
+  }
  }
+#if defined(EID3D12)&&defined(NATIVE_RT_SUN)
+ // A crown impostor under the traced sun (liquidFlow.w below 0: set only on
+ // a frame whose mask traces rays). Its quad is a plane through the crown's
+ // centre, and the ray tracing scene holds the crown itself: a sun ray from
+ // the plane starts inside the crown and its near half shadows it whatever
+ // side the sun is on (user capture 011216: the far trees half dark). The
+ // receiver is the crown's visible surface instead: the quad's point moved
+ // toward the eye by the baked depth of the impostor's frames, as the
+ // crown's own triangles would stand there. The bounding sphere's world
+ // radius comes from the frame position's rate over the quad (a frame image
+ // spans the sphere's diameter over kImpostorMargin).
+ [branch]if(((i.swaying>>8)&1024u)!=0&&i.liquidFlow.w<-.5){
+  float radius=kImpostorMargin*.5*sqrt((dot(restDx,restDx)+dot(restDy,restDy))/max(dot(frameDx,frameDx)+dot(frameDy,frameDy),1e-12));
+  float surface=nativeImpostorSurface(i.liquidTintDepth,i.liquidMaterial,i.liquidUvBounds,i.liquidFlow,impostorLod);
+  float3 toEye=fogEye.xyz-rest;
+  if(isfinite(radius)&&radius<200)rest+=toEye*rsqrt(max(dot(toEye,toEye),1e-12))*(surface*radius);
+ }
+#endif
  NativePrepassResult r;
  r.rest=float4(rest-fogUnproject(i.p.xy*fogScreen.xy,nativeDepth24(i.p.z)),flags);
  r.normal=lifted?nativeOctEncode(normalize(i.terrainSlope)):float2(.5,.5);
  return r;
+#endif
 }
 float4 nativeShadowMaskVS(uint id:SV_VertexID):SV_Position{
  float2 uv=float2((id<<1)&2,id&2);return float4(uv*float2(2,-2)+float2(-1,1),0,1);
@@ -2852,8 +3897,145 @@ float3 nativeTexelStep(bool hasA,float3 a,bool hasB,float3 b,float3 centre){
  if(hasA&&hasB)return dot(forward,forward)<=dot(backward,backward)?forward:backward;
  return hasA?forward:hasB?backward:float3(0,0,0);
 }
+)" R"(
+#if defined(EID3D12)&&defined(NATIVE_RT_SUN)
+// rt_sun_shadows (D3D12 only; renderer_native_d3d12.cpp update_raytracing_scene_d3d12):
+// the mask's sun term from rays through the ray tracing scene instead of the
+// sun maps. rtSunRecords: a 32-byte header {float tan of the sun disc's
+// radius, history weight, self-hit distance at the eye, and its growth per
+// metre of view distance; uint frame, rays a pixel, the foliage card mip
+// distance (float bits), records}, then four words a static record {its first
+// vertex, its first triangle, its texture's bindless index, its alpha
+// reference}; a record is a hit's instance id plus its geometry index. The
+// terrain's instance mask is 1, the static records' 2, the units' 4 (opaque).
+// rtSunVertices: 20 bytes a vertex (world position, texture coordinate);
+// rtSunIndices: three words a triangle, relative to the record's first vertex.
+RaytracingAccelerationStructure rtSunScene:register(t94);
+ByteAddressBuffer rtSunVertices:register(t95);
+ByteAddressBuffer rtSunIndices:register(t99);
+ByteAddressBuffer rtSunRecords:register(t113);
+// 1 when the sun reaches origin along direction, else 0. Terrain is opaque
+// and one-sided: its underside is culled, so a receiver the tessellation or
+// the depth's precision put under the scene's untessellated terrain is not
+// shadowed by the ground it lies on (a ray toward a sun above the horizon
+// enters solid ground only through its top side). Objects are two-sided (an
+// instance flag); cut-out cards pass where their texture's alpha fails the
+// record's alpha test, read at mip lod. mask: the instances the ray meets
+// (0xFF all; 0xFB the static scene; 4 the units).
+float nativeRtSunRay(float3 origin,float3 direction,float nearest,float lod,uint mask){
+ RayDesc ray;ray.Origin=origin;ray.Direction=direction;ray.TMin=nearest;ray.TMax=100000;
+ RayQuery<RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES|RAY_FLAG_ACCEPT_FIRST_HIT_AND_END_SEARCH|RAY_FLAG_CULL_BACK_FACING_TRIANGLES> query;
+ query.TraceRayInline(rtSunScene,RAY_FLAG_NONE,mask,ray);
+ while(query.Proceed()){
+  if(query.CandidateType()!=CANDIDATE_NON_OPAQUE_TRIANGLE)continue;
+  uint4 record=rtSunRecords.Load4(32+(query.CandidateInstanceID()+query.CandidateGeometryIndex())*16);
+  uint3 corner=rtSunIndices.Load3((record.y+query.CandidatePrimitiveIndex())*12);
+  float2 b=query.CandidateTriangleBarycentrics();
+  float2 uv=asfloat(rtSunVertices.Load2((record.x+corner.x)*20+12))*(1-b.x-b.y)+
+            asfloat(rtSunVertices.Load2((record.x+corner.y)*20+12))*b.x+
+            asfloat(rtSunVertices.Load2((record.x+corner.z)*20+12))*b.y;
+  Texture2D card=ResourceDescriptorHeap[NonUniformResourceIndex(nativeBindlessIndex(record.z))];
+  if(card.SampleLevel(nativeSampler,uv,lod).a>=asfloat(record.w))query.CommitNonOpaqueTriangleHit();
+ }
+ return query.CommittedStatus()==COMMITTED_TRIANGLE_HIT?0:1;
+}
+// The receiver's sun visibility: rays inside the sun disc's cone. A receiver
+// with history takes a different point of the disc each frame (a
+// low-discrepancy sequence offset per pixel), which the history averages; one
+// without (swaying leaves, critters, a frame without history) traces the
+// disc's centre, a hard shadow, instead of per-frame noise. lifted: a terrain
+// receiver with its slope normal; turned away from the sun it is shadowed
+// without a ray (its ray would start inside the ground and leave only
+// through a culled underside). unit: a creature or character; the scene
+// holds its pose of the frame before, so its own surface is skipped over a
+// longer distance (it keeps the shadows of its farther parts). mask: the
+// instances the rays meet (nativeRtSunRay).
+float nativeRtSunVisibility(float3 rest,int2 c,bool lifted,bool history,bool unit,uint mask){
+ float4 setup=asfloat(rtSunRecords.Load4(0));uint4 control=rtSunRecords.Load4(16);
+ float3 sun=nativeWorldSunDirection.xyz;
+ if(dot(sun,sun)<=1e-12)return 1;
+ sun=normalize(sun);
+ if(lifted&&dot(nativeOctDecode(nativeReceiverNormal.Load(int3(c,0))),sun)<=0)return 0;
+ float distance=length(rest-fogEye.xyz);
+ float nearest=setup.z+setup.w*distance+(unit?.25:0);
+ // rt_debug_view 4 (frame word bit 16): a sunward receiver whose nearest
+ // terrain surface toward the sun is an underside lies under the scene's
+ // terrain; -1 is the mask's failure value (magenta in the material pass).
+ [branch]if((control.x&0x10000u)!=0){
+  RayDesc probe;probe.Origin=rest;probe.Direction=sun;probe.TMin=nearest;probe.TMax=100000;
+  RayQuery<RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_SKIP_PROCEDURAL_PRIMITIVES> under;
+  under.TraceRayInline(rtSunScene,RAY_FLAG_NONE,0x01,probe);
+  under.Proceed();
+  if(under.CommittedStatus()==COMMITTED_TRIANGLE_HIT&&!under.CommittedTriangleFrontFace())return -1;
+ }
+ float lod=clamp(log2(max(distance,1e-3)/max(asfloat(control.z),1e-3)),0,3);
+ uint rays=history?clamp(control.y,1u,8u):1u;
+ float3 side=normalize(cross(sun,abs(sun.z)<.9?float3(0,0,1):float3(1,0,0))),up=cross(sun,side);
+ float2 offset=float2(frac(52.9829189*frac(dot(float2(c),float2(.06711056,.00583715)))),
+                      frac(52.9829189*frac(dot(float2(c)+float2(47.3,113.7),float2(.06711056,.00583715)))));
+ float lit=0;
+ [loop]for(uint k=0;k<rays;k++){
+  float3 direction=sun;
+  if(history){
+   float index=float((control.x&1023u)*rays+k);
+   float2 disc=frac(offset+index*float2(.7548776662,.5698402910));
+   float angle=6.2831853*disc.y;
+   direction=normalize(sun+setup.x*sqrt(disc.x)*(cos(angle)*side+sin(angle)*up));
+  }
+  lit+=nativeRtSunRay(rest,direction,nearest,lod,mask);
+ }
+ return lit/rays;
+}
+// The units' sun shadow this frame alone (instance mask 4; one ray at the
+// disc's centre: a unit's penumbra on the ground under it is a few
+// centimetres). It never enters the history, so a walking unit leaves no
+// trail of its old shadow. rest: a receiver that is not a unit.
+float nativeRtUnitShadow(float3 rest){
+ float3 sun=nativeWorldSunDirection.xyz;
+ if(dot(sun,sun)<=1e-12)return 1;
+ float4 setup=asfloat(rtSunRecords.Load4(0));
+ return nativeRtSunRay(rest,normalize(sun),setup.z+setup.w*length(rest-fogEye.xyz),0,4u);
+}
+// The renderer's own sun casters under rt_sun_shadows (ground cover, critters:
+// not in the ray tracing scene): the close sun map's layer that holds only
+// them (shadowControl.x bit 8: there is one; bits 9-11 its slice of the map
+// array and of shadowLight and shadowBias: a window of the close map's light
+// space around the near view), compared on the receiver's plane like the sun
+// maps' fixed filter, over 3x3 texels. The world's casters are not in that
+// layer, so the traced shadow is not counted twice. It fades to 1 over the
+// outer fifth of the window; 1 outside. Its casters sway, roll and walk, so
+// it is this frame's alone, applied after the history (nativeShadowMaskPS).
+float nativeRtCoverShadow(float3 worldPosition,float3 positionDx,float3 positionDy){
+ uint info=shadowControl.x;
+ [branch]if((info&256u)==0)return 1;
+ uint slice=(info>>9)&7u;float layer=float(slice);
+ float4 light=mul(shadowLight[slice],float4(worldPosition,1));float3 coordinate=light.xyz/light.w;
+ if(abs(coordinate.x)>1||abs(coordinate.y)>1||coordinate.z<0||coordinate.z>1)return 1;
+ float inside=saturate((1-max(abs(coordinate.x),abs(coordinate.y)))*5);
+ float3 dx=mul((float3x3)shadowLight[slice],positionDx);
+ float3 dy=mul((float3x3)shadowLight[slice],positionDy);
+ float side=max(1.0,(float)shadowControl.z);
+ float halfSide=.5*side;dx.xy*=float2(halfSide,-halfSide);dy.xy*=float2(halfSide,-halfSide);
+ float3 plane=cross(dx,dy);
+ if(plane.z==0||!all(isfinite(plane)))return 1;
+ float2 depthStep=-plane.xy/plane.z;
+ if(!all(isfinite(depthStep)))return 1;
+ float bias=.5*shadowBias[slice].x*shadowBias[slice].y;
+ float2 texel=float2(coordinate.x*.5+.5,.5-coordinate.y*.5)*side;
+ float visibility=0;
+ [loop]for(int y=-1;y<=1;y++)[loop]for(int x=-1;x<=1;x++){
+  float2 sampleTexel=texel+float2(x,y);
+  float depth=saturate(coordinate.z+dot(depthStep,sampleTexel-texel)-bias);
+  visibility+=(x==0?2:1)*(y==0?2:1)*shadowDepth.SampleCmpLevelZero(shadowSampler,float3(sampleTexel/side,layer),depth);
+ }
+ return lerp(1,visibility/16,inside);
+}
+#endif
+)" R"(
 float2 nativeShadowMaskPS(float4 position:SV_Position):SV_Target{
- int2 c=int2(position.xy);
+ // floor first: float2(c)+.5 below must stay this pixel's centre even if a
+ // compiler folds the int round trip (the impostor slice lesson, 2026-11-06).
+ int2 c=int2(floor(position.xy));
  uint w,h;nativeSceneDepth.GetDimensions(w,h);int2 size=int2(w,h);
  NativeReceiverTexel centre=nativeReceiverTexel(c,size);
  if(!centre.valid||(centre.flags&1u)==0)return float2(2,1);
@@ -2870,6 +4052,30 @@ float2 nativeShadowMaskPS(float4 position:SV_Position):SV_Target{
   float3 lookup=rest;
   if((flags&4u)!=0&&dot(nativeWorldSunDirection.xyz,nativeWorldSunDirection.xyz)>1e-12)
    lookup=terrainShadowLookup(rest,nativeOctDecode(nativeReceiverNormal.Load(int3(c,0))),normalize(nativeWorldSunDirection.xyz));
+#if defined(EID3D12)&&defined(NATIVE_RT_SUN)
+  // The rays start at the rest position itself (on the scene's untessellated
+  // terrain; the sun maps' slope lift is their bias, not a ray's). The
+  // history is a plain running average (the sun maps' clamp to their own
+  // filter's spread, nativeShadowHistoryClamp, would reject every one-ray
+  // sample) of the static scene alone: the history follows the camera only,
+  // so a moving caster's shadow in it stays where it was and fades over the
+  // history's length (a dark trail behind every walking unit and rolling
+  // tumbleweed, cand-1123). The units (instance mask 4) and the cover's
+  // layer (critters, tumbleweeds, swaying cover) join after it, this
+  // frame's alone, and the history target (the mask's y) keeps the static
+  // term. A unit's own surface moves under the camera-only reprojection: it
+  // takes no history and traces the whole scene.
+  bool unitReceiver=(flags&8u)!=0;
+  float3 drawn=centre.drawn;float2 historyUv;int2 historyPixel;
+  bool reuse=temporal&&!unitReceiver&&nativeShadowHistoryAt(drawn,nativeTexelStep(px.valid,px.drawn,nx.valid,nx.drawn,drawn),
+   nativeTexelStep(py.valid,py.drawn,ny.valid,ny.drawn,drawn),historyUv,historyPixel);
+  visibility=nativeRtSunVisibility(rest,c,(flags&4u)!=0,reuse,unitReceiver,unitReceiver?0xFFu:0xFBu);
+  [branch]if(reuse&&visibility>=0)visibility=lerp(visibility,previousShadowVisibility.SampleLevel(shadowHistorySampler,historyUv,0),
+   asfloat(rtSunRecords.Load(4)));
+  filtered=visibility;
+  [branch]if(!unitReceiver&&visibility>0)visibility=min(visibility,nativeRtUnitShadow(rest));
+  [branch]if(visibility>0)visibility=min(visibility,nativeRtCoverShadow(lookup,shadowDx,shadowDy));
+#else
 #ifdef NATIVE_LOW
   visibility=nativeLowShadowVisibility(lookup,shadowDx,shadowDy);
 #else
@@ -2884,6 +4090,7 @@ float2 nativeShadowMaskPS(float4 position:SV_Position):SV_Target{
     nativeTexelStep(py.valid,py.drawn,ny.valid,ny.drawn,drawn));
   }
   filtered=visibility;
+#endif
  }
  if(visibility>=0)visibility=min(visibility,cloud);
  return float2(visibility,filtered);
@@ -2897,44 +4104,200 @@ float3 nativeCaveExitGlow(float3 p){
  return glow;
 }
 // ambient: the part of color contributed by the ambient light, for AO (see ambient_occlusion.h).
-struct NativePixelResult{float4 color:SV_Target0;float4 shadow:SV_Target1;float4 ambient:SV_Target2;};
-
-float4 nativeAstralSample(NativeOutput i){
- float2 dx=ddx_coarse(i.uv),dy=ddy_coarse(i.uv);
- float4 t;
- if(i.astral.y<1.5){
-  float x=frac((i.uv.x-.0166015625)/.466796875+i.astral.x+i.astral.z*.173);
-  float w=sin(3.14159265359*x);w*=w;
-  float2 a=float2(.0166015625+x*.466796875,i.uv.y);
-  float2 b=float2(.0166015625+frac(x+.5)*.466796875,i.uv.y);
-  t=lerp(terrainTapGrad(i.textureReference,b,dx,dy),terrainTapGrad(i.textureReference,a,dx,dy),w);
- }else{
-  t=terrainTapGrad(i.textureReference,i.uv,dx,dy);
-  float2 uv=saturate((i.uv-float2(.0166015625,.5166015625))/.466796875);
-  t.a*=sin(3.14159265359*uv.x)*sin(3.14159265359*uv.y)*i.astral.w;
- }
- return t;
+#if defined(NATIVE_RR_GUIDES)||defined(GC_RR_GUIDES)
+// DLSS Ray Reconstruction's specular albedo (DLSS-RR Integration Guide,
+// appendix, EnvBRDFApprox2: Ray Tracing Gems chapter 32), from F0, the
+// squared roughness and N.V. Also the ground cover twins' (GC_RR_GUIDES).
+float3 rrSpecularAlbedo(float3 specularColor,float alpha,float nv){
+ nv=abs(nv);
+ float4 x=float4(1,nv,nv*nv,nv*nv*nv),y=float4(1,alpha,alpha*alpha,alpha*alpha*alpha);
+ float2x2 m1=float2x2(.99044,-1.28514,1.29678,-.755907);
+ float3x3 m2=float3x3(1,2.92338,59.4188,20.3225,-27.0302,222.592,121.563,626.13,316.627);
+ float2x2 m3=float2x2(.0365463,3.32707,9.0632,-9.04756);
+ float3x3 m4=float3x3(1,3.59685,-1.36772,9.04401,-16.3174,9.22949,5.56589,19.7886,-20.2123);
+ float bias=dot(mul(m1,x.xy),y.xy)*rcp(dot(mul(m2,x.xyw),y.xyw));
+ float scale=dot(mul(m3,x.xy),y.xy)*rcp(dot(mul(m4,x.xzw),y.xyw));
+ bias*=saturate(specularColor.g*50);
+ return mad(specularColor,max(0,scale),max(0,bias));
 }
-
+#endif
+#ifdef NATIVE_RR_GUIDES
+// rt_ray_reconstruction (D3D12 only; renderer_native_d3d12.cpp
+// append_native_guide_programs): the guide targets of DLSS Ray Reconstruction
+// (DLSS-RR Integration Guide 3.4), written by the twins of the world's opaque
+// and cut-out material programs from the values their shading computes.
+// Target 5: the world shading normal, the linear roughness in alpha (3.4.3,
+// 3.4.4: packed); 6: the diffuse albedo; 7: the specular albedo. Targets 3
+// and 4 stay the object motion's. A pixel no twin writes keeps the frame's
+// clear values, the guide's sky defaults.
+// They are out parameters written where the shading computes each value (the
+// geometric normal, roughness 1 and the dielectric F0 where no material
+// response runs), so no guide value is held in a register to the program's end.
+struct NativeGuides{float4 normal:SV_Target5;float4 diffuse:SV_Target6;float4 specular:SV_Target7;};
+// rt_direct_lights (renderer_native_d3d12.cpp direct_lights_d3d12): what its
+// last pass needs to add the traced lamp light exactly as the lamp loop
+// would have, in the two albedo targets' alpha (16 bits each while the
+// option is on; Ray Reconstruction reads their colour only). x, the diffuse
+// target: the lighting factor's red and green (7 bits each: i.d at the
+// combine step, already saturated, so saturate(it + lamps) - it is the lamp
+// loop's share of saturate(base + lamps) whether the sum was clamped or
+// not), bit 14 a lit receiver (it takes lamps; else the emissive glow
+// only), bit 15 the terrain's grazing-light facing rule. y, the specular
+// target: the factor's blue, then 8 bits of what the fog chain and a liquid
+// over the pixel leave of an added light (the product the ambient share
+// takes; 0: no traced light here), bit 15 a unit. Bit 16 (never written):
+// a shadow receiver.
+static uint2 nativeGuideLight=uint2(0,0);
+#define NATIVE_GUIDE_OUT ,out NativeGuides guides
+#define NATIVE_GUIDE_PASS ,guides
+void nativeGuideSurface(out NativeGuides guides,float3 n,float roughness,float3 f0,float3 view,float3 diffuse){
+ n=dot(n,n)>1e-8?normalize(n):float3(0,0,1);
+ guides.normal=float4(n,roughness);
+ guides.diffuse=float4(saturate(diffuse),1);
+ guides.specular=float4(saturate(rrSpecularAlbedo(f0,roughness*roughness,dot(n,view))),1);
+}
+// rt_reflections (renderer_native_d3d12.cpp reflections_d3d12): on a traced
+// frame the twins draw with the roughness cut-off in the lamp constants'
+// spare word (0: not traced), and a surface smoother than it leaves its
+// environment reflection (the sky probe or the ambient) to the traced pass,
+// by the same weight that pass adds with: none below cut-off - .1, all of
+// its own at the cut-off and above.
+float nativeGuideUntraced(float roughness){return nativePointLightGridTail>0?smoothstep(nativePointLightGridTail-.1,nativePointLightGridTail,roughness):1;}
+#define NATIVE_GUIDE_UNTRACED(roughness) *nativeGuideUntraced(roughness)
+#else
+#define NATIVE_GUIDE_OUT
+#define NATIVE_GUIDE_PASS
+#define NATIVE_GUIDE_UNTRACED(roughness)
+#endif
 #if defined(NATIVE_TERRAIN_PS)||defined(NATIVE_LOW)
 @TERRAIN_ASTRAL_SHADER@
 #endif
-NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
+struct NativePixelResult{float4 color:SV_Target0;float4 shadow:SV_Target1;float4 ambient:SV_Target2;};
+#ifdef NATIVE_TERRAIN_SLIM
+// The slim terrain pass (option terrain_slim; renderer_flush.cpp): the
+// prepassed terrain programs without terrain2Color. Every pixel takes the
+// larger of its key and the mask's (terrainMissMask, terrainSlimKey); the prepassed
+// full programs then draw again with nativeLiquidLayer bit 64: only the
+// triangles with a missed pixel (terrainMissTriangleFlags) reach the
+// rasteriser, and only the pixels whose mask is their own missed key
+// survive. Early depth/stencil here: the depth EQUAL test rejects before
+// the pixel stage (nothing writes depth or stencil), so only visible pixels
+// key the mask.
+[earlydepthstencil]
+#endif
+#ifdef NATIVE_OBJECT_MOTION
+#define nativePS nativeMaterialPS // the motion entry below wraps it
+#endif
+#ifdef NATIVE_TERRAIN_SLIM
+#define nativePS nativeSlimMaterialPS // the entry below writes Astral's hit key after all derivatives
+#endif
+#if !defined(NATIVE_OFF_MATERIALS)&&!defined(NATIVE_TERRAIN_PS)&&!defined(NATIVE_LOW)
+// A lamp-lit figure's texture relief normal (Medium and up), derived as the
+// material block derives it for the sun, here so that only the lamp loop
+// holds it (the camp-fire and lava-lit plates at bz14h read flat).
+void materialFigureLampRelief(NativeOutput i,float2 uvDx,float2 uvDy,float3 positionDx,float3 positionDy){
+ float levels;float2 size=terrainTapSize(i.textureReference,levels);
+ float2 su=float2(max(1/size.x,max(abs(uvDx.x),abs(uvDy.x))),0),sv=float2(0,max(1/size.y,max(abs(uvDx.y),abs(uvDy.y))));
+ // The colour read comes after the lighting: the centre tap here (the same address).
+ float centre=materialLuminance(terrainTapGrad(i.textureReference,i.uv,uvDx,uvDy).rgb);
+ float hu=materialLuminance(terrainTapGrad(i.textureReference,i.uv+su,uvDx,uvDy).rgb)-centre;
+ float hv=materialLuminance(terrainTapGrad(i.textureReference,i.uv+sv,uvDx,uvDy).rgb)-centre;
+ float3 n=normalize(i.worldNormal),c1=cross(positionDy,n),c2=cross(n,positionDx);
+ float3 tu=c1*uvDx.x+c2*uvDy.x,tv=c1*uvDx.y+c2*uvDy.y;
+ float frame=rsqrt(max(max(dot(tu,tu),dot(tv,tv)),1e-20));
+ float texels=max(su.x*size.x,sv.y*size.y);
+ float relief=nativeMaterialReliefTap(i.textureReference.y,i.uv,uvDx,uvDy);
+ materialNormal=normalize(n-(hu*tu+hv*tv)*(frame*6*nativeMaterialRelief*relief*materialReliefFade(uvDx,uvDy,size,texels,true)));
+ materialReliefLamps=true;
+}
+#define NATIVE_FIGURE_LAMP_RELIEF(pointLit) [branch]if((pointLit)&&materialActive&&!NATIVE_MATERIAL_WORLD&&NATIVE_REC_UNIT(i)&&nativeMaterialLevel>=2&&nativeTextured!=0)materialFigureLampRelief(i,uvDx,uvDy,positionDx,positionDy);
+#else
+#define NATIVE_FIGURE_LAMP_RELIEF(pointLit)
+#endif
+#ifdef NATIVE_ASTRAL
+// Astral rift veils and clumps (astral_rift.h; i.astral: kind, veil index,
+// phase, clump fade). Veils: the strip's U scrolls with the phase, read
+// twice half a period apart and blended with complementary sin^2 weights,
+// so the wrap never shows; V stays. Clumps: their cell of the atlas, faded
+// at the cell edges and over their life. Both read with the drawn UV's own
+// gradients (uvDx, uvDy), so the mip level follows the surface.
+float4 nativeAstralSample(NativeOutput i,float2 uvDx,float2 uvDy){
+ [branch]if(i.astral.x<1.5){
+  float x=frac((i.uv.x-NATIVE_ASTRAL_U0)/NATIVE_ASTRAL_UW+i.astral.z+i.astral.y*.173);
+  float w=sin(3.14159265*x);w*=w;
+  float4 a=terrainTapGrad(i.textureReference,float2(NATIVE_ASTRAL_U0+x*NATIVE_ASTRAL_UW,i.uv.y),uvDx,uvDy);
+  float4 b=terrainTapGrad(i.textureReference,float2(NATIVE_ASTRAL_U0+frac(x+.5)*NATIVE_ASTRAL_UW,i.uv.y),uvDx,uvDy);
+  return lerp(b,a,w);
+ }
+ float4 t=terrainTapGrad(i.textureReference,i.uv,uvDx,uvDy);
+ float2 cell=saturate((i.uv-float2(NATIVE_ASTRAL_U0,NATIVE_ASTRAL_CLUMP_V0))/NATIVE_ASTRAL_UW);
+ t.a*=sin(3.14159265*cell.x)*sin(3.14159265*cell.y)*i.astral.w;
+ return t;
+}
+#endif
+#if defined(NATIVE_TERRAIN_SLIM)||(defined(NATIVE_TERRAIN_PS)&&defined(NATIVE_SHADOW_MASK))
+NativePixelResult nativePS(NativeOutput i,uint primitive:SV_PrimitiveID,bool frontFace:SV_IsFrontFace NATIVE_GUIDE_OUT){
+#else
+NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace NATIVE_GUIDE_OUT){
+#endif
+#ifdef NATIVE_RR_GUIDES
+ // (The early returns below belong to frames that bind no guide target.)
+ guides.normal=0;guides.diffuse=0;guides.specular=0;
+#endif
+ bool slimForeign=false; // #243: the slim second pass's pixel that is not this triangle's (below)
+#if defined(NATIVE_TERRAIN_PS)&&defined(NATIVE_SHADOW_MASK)&&!defined(NATIVE_TERRAIN_SLIM)
+ // The second pass after the slim pass: only the pixels this triangle won
+ // with a miss (its slot: from the miss list's origin, bit 256, else drawn whole).
+ // #243 (the tester's Radeon RX 580, edge_check 16, package r4): a 2x2 quad
+ // leaves only when none of its pixels is this triangle's. A pixel of the
+ // quad that is not (the pixel outside the triangle along its edges holds the
+ // neighbour's key) runs on and leaves at the end. Discarded here, it never
+ // entered the material branch on the Radeon (view 16: green and blue along
+ // every triangle edge), so the screen differences the quad's own pixels took
+ // against it (the relief's block test) failed and the relief dropped along
+ // the edges. Unconfirmed on that GPU until its next package.
+ [branch]if((nativeLiquidLayer&64u)!=0){
+)" R"(
+  uint slot=nativeTriangleBase+primitive;
+  [branch]if((nativeLiquidLayer&256u)!=0)slot=terrainMissOrigin.Load(slot*4u);
+  float own=terrainMissInput.Load(int3(int2(i.p.xy),0))==terrainSlimKey(slot,true)?1:0;
+  if(own+abs(ddx_fine(own))+abs(ddy_fine(own))+abs(ddx_fine(ddy_fine(own)))==0)discard;
+  slimForeign=own==0;
+ }
+#endif
 #ifdef EID3D12_HAZARDS
  nativeGpuReportBegin(2u,i.textureReference.x,uint(i.p.x)|(uint(i.p.y)<<16));
 #endif
  // The zone hit-test frame (#200, nativeCombinerTail): the vertex colour
  // (the figure's default colour, unlit) exactly, opaque; nothing else.
- [branch]if((nativeCombinerTail&1u)!=0){NativePixelResult flat=(NativePixelResult)0;flat.color=float4(i.d.rgb,1);return flat;}
+ [branch]if((nativeCombinerTail&1u)!=0){if(slimForeign)discard;NativePixelResult flat=(NativePixelResult)0;flat.color=float4(i.d.rgb,1);return flat;}
  if(nativeLodDiscard(i.swaying,i.p))discard;
+#if defined(NATIVE_DOMAIN_CHECK)&&NATIVE_DOMAIN!=0
+ {
+  uint wrong=0;
+  if(NATIVE_RT_UNIT(i)!=NATIVE_REC_UNIT(i))wrong|=1u;
+  if(NATIVE_RT_FOLIAGE(i)!=NATIVE_REC_FOLIAGE(i)||NATIVE_RT_IMPOSTOR(i)!=NATIVE_REC_IMPOSTOR(i))wrong|=2u;
+  if(NATIVE_RT_CONTACT(i)!=NATIVE_REC_CONTACT(i))wrong|=4u;
+  if(!NATIVE_PROFILED&&NATIVE_RT_PROFILE(i))wrong|=8u;
+  [branch]if(wrong!=0){NativePixelResult marker=(NativePixelResult)0;
+#ifdef EID3D12_HAZARDS
+   // The GPU's own count (the hazards build's report buffer, d3d12_frame.cpp): id 200 + the wrong bits.
+   nativeGpuReportBegin(2u,i.textureReference.x,uint(i.p.x)|(uint(i.p.y)<<16));nativeGpuReportWrite(200u+wrong,NATIVE_DOMAIN|(NATIVE_PROFILED<<3));
+#endif
+   marker.color=float4((wrong&1u)?1:0,(wrong&2u)?1:0,(wrong&12u)?1:.5,1);if(slimForeign)discard;return marker;}
+ }
+#endif
+#ifdef NATIVE_FUR_DEBUG
+ if(((i.swaying>>24)&7u)==4u)discard;  // F10 fur_debug: a hidden layer
+#endif
  // Crown impostor: the baked albedo replaces the texture read below, and its
  // object-space normal relights the pixel exactly as the vertex stage lights
  // a crown vertex (calculateWorldLighting: ambient, sun, emissive).
- bool impostor=((i.swaying>>8)&1024u)!=0;
+ bool impostor=NATIVE_REC_IMPOSTOR(i);
  float4 impostorTexel=float4(1,1,1,1);float3 impostorNormal=float3(0,0,1);
  float impostorLod=nativeImpostorLod(i.liquidTintDepth.xy);
  [branch]if(impostor){
-  float3 n;impostorTexel=nativeImpostorTexel(i.liquidTintDepth,i.liquidMaterial,i.liquidUvBounds,i.liquidFlow,impostorLod,i.p.xy,true,n);
+  float3 n;impostorTexel=nativeImpostorTexel(i.liquidTintDepth,i.liquidMaterial,i.liquidUvBounds,i.liquidFlow,impostorLod,true,n);
   n=dot(n,n)>1e-8?normalize(n):float3(0,0,1);impostorNormal=n;
   float facing=i.liquidDirections.w>0?(nativeTerrainClock.z!=0?1:max(dot(n,i.liquidView),0)):0;
   i.directional=nativeWorldSunDiffuse.rgb*i.liquidDirections.xyz*facing;
@@ -2964,7 +4327,93 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
  // Sun-shadow receiver plane and lookups use the rest geometry (identical to
  // the drawn position everywhere except on swaying foliage).
  float3 shadowDx=ddx(i.shadowPosition),shadowDy=ddy(i.shadowPosition);
+#if !defined(NATIVE_LOW)&&!defined(NATIVE_TERRAIN_PS)&&!defined(NATIVE_SHADOW_MASK)
+ // Alpha-tested batches test before the lighting (as the Low path does):
+ // pixels the test discards (foliage cards, cutout edges) skip the lamps,
+ // the sun shadow and the material response. The lighting changes only
+ // i.d.rgb, so the alpha is the one the late combine and test below see; the
+ // texel is read with the quad's own gradients and only here, so nothing
+ // stays live across the lighting (the texture read below is unchanged).
+ // Not in the prepassed programs (NATIVE_SHADOW_MASK): they draw with depth
+ // EQUAL over a prepass that already alpha-tested, so a fragment this test
+ // would reject has no matching depth and never reaches the shader.
+ [branch]if(nativeAlphaTest!=0){
+  float4 coverage=float4(1,1,1,1);
+  if(impostor)coverage=impostorTexel;else [branch]if(nativeTextured!=0)coverage=terrainTapGrad(i.textureReference,i.uv,uvDx,uvDy);
+#ifdef NATIVE_ASTRAL
+  coverage=nativeAstralSample(i,uvDx,uvDy);
+#endif
+  NATIVE_BURN_ALPHA(i,coverage);
+  if(!nativeCompare(nativeCombineAlpha(i.d,i.s,coverage)))discard;
+ }
+#endif
+#ifdef EID3D12_HAZARDS
+ // prepass_depth_check on the GPU (renderer_native_d3d12.cpp): report word 7
+ // is the check mode while a check draw runs. Every fragment the alpha test
+ // keeps counts in word 6; word 5 counts those in front of the prepass depth
+ // (mode 1: what the material pass's EQUAL loses; mode 2 also counts equal
+ // depth, calibrating the counter). The check draw writes no colour.
+ {const uint depthCheck=nativeGpuReport.Load(28);
+  [branch]if(depthCheck!=0){
+   const float stored=nativeSceneDepth.Load(int3(i.p.xy,0));uint previous;
+   nativeGpuReport.InterlockedAdd(24,1u,previous);
+   // Fragments the material pass discards later anyway (the draw-distance
+   // dissolve without fog, which the prepass applies early) are not losses.
+   float3 checkFog=i.worldPosition;
+   [branch]if(i.shadowMode==0&&(fogStock.w>0||fogEye.w>.5))checkFog=fogUnproject(i.p.xy*fogScreen.xy,i.p.z);
+   const bool dissolved=nativeFogEnable==0&&nativeDrawDissolvedAt(i.p,checkFog);
+   [branch]if(!dissolved&&(i.p.z<stored||(depthCheck==2&&i.p.z==stored))){
+    nativeGpuReport.InterlockedAdd(20,1u,previous);
+    // The first reports name the batch kind (report 300; value bits: 1
+    // terrain variant, 2 impostor, 4 swaying, 8 neighbour, 16 terrain vertex
+    // flags set, 32 tessellation-split flag 16; bits 8+ the depth gap in
+    // 1e-7 units, capped).
+    [branch]if(depthCheck==1){
+     uint kind=0;
 #ifdef NATIVE_TERRAIN_PS
+     kind|=1u;
+#endif
+     kind|=((i.swaying>>8)&1024u)!=0?2u:0u;kind|=(i.swaying&255u)!=0?4u:0u;kind|=i.neighbour!=0?8u:0u;
+     kind|=i.terrainVertexFlags!=0?16u:0u;kind|=(i.terrainVertexFlags&16u)!=0?32u:0u;
+     nativeGpuReportWrite(300u,kind|(min(uint((stored-i.p.z)*1e7),0xFFFFu)<<8));
+    }
+   }
+   discard;
+  }}
+#endif
+#if defined(NATIVE_TERRAIN_PS)||defined(NATIVE_LOW)
+ // Pure Astral is an opaque emissive material on the existing terrain.
+ // Keep the current atmosphere -> border -> distance order, including the
+ // cave tint and fog-off dissolve; it has no surface-lighting/AO share.
+ [branch]if((i.terrainVertexFlags&16384u)!=0&&((i.terrainVertexFlags>>16)&15u)==15u){
+  float footprint=length(abs(positionDx.xy)+abs(positionDy.xy))*.075;
+  float3 color=terrainAstralColor(i.worldPosition,fogEye.xyz,nativeTerrainClock.y*.055,
+                                i.liquidDirections.y,footprint);
+  if(nativeFogEnable!=0){
+   float3 caveFog=nativeCaveFogLight(i.worldPosition)+nativeCaveExitGlow(i.worldPosition);
+   float fogFactor=nativeFogFactor(i.s.a,i.p);
+   [branch]if(nativeFogEnable==2u)fogFactor=min(fogFactor,smoothstep(0.,.1045,normalize(fogUnproject(i.p.xy*fogScreen.xy,i.p.z)-fogEye.xyz).z));
+   nativeAtmosphereCoreAt(color,i.p,saturate(nativeFogColor.rgb+caveFog),i.worldPosition,fogHazeColorFrame.w>.5);
+   color=lerp(saturate(borderFogColorAt(i.worldPosition,nativeFogColor.rgb)+caveFog),color,fogFactor);
+   nativeDrawFadeToAt(color,i.worldPosition,nativeFogColor.rgb);
+  }else if(nativeDrawDissolvedAt(i.p,i.worldPosition))discard;
+#ifdef NATIVE_RR_GUIDES
+  float3 normal=dot(i.worldNormal,i.worldNormal)>1e-8?normalize(i.worldNormal):float3(0,0,1);
+  guides.normal=float4(normal,1);guides.diffuse=0;guides.specular=0;
+#endif
+#if defined(NATIVE_TERRAIN_PS)&&defined(NATIVE_SHADOW_MASK)&&!defined(NATIVE_TERRAIN_SLIM)
+  if(slimForeign)discard;
+  [branch]if((nativeLiquidLayer&128u)!=0)color=lerp(color,float3(1,0,0),.3);
+#endif
+  NativePixelResult astral;
+  astral.color=float4(color,nativeHudOpacity);astral.shadow=float4(1,0,0,1);
+  astral.ambient=float4(0,0,0,nativeHudOpacity);return astral;
+ }
+#endif
+// Not in the D3D11 flat variants (#243, L-098): they have no facet split, and
+// with no top-level use FXC took these derivatives two branches deep, in
+// the snow foliage code terrain never runs.
+#if defined(NATIVE_TERRAIN_PS)&&(defined(EID3D12)||!defined(NATIVE_TERRAIN_FLAT))
  // Dry material terrain: liquidFall.y becomes the facet split's edge weight.
  {float3 b=i.liquidFall.yzw,bDx=ddx(b),bDy=ddy(b);float keep=terrainCliffFacetKeep(b,bDx,bDy);
   if((i.terrainVertexFlags&(16u|4096u))!=0&&!liquidSurfaceEnabled(i.terrainVertexFlags))i.liquidFall.y=keep;}
@@ -2974,8 +4423,22 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
  // interpolated inputs (never the lit colour), and none of the lighting's
  // values are held in registers across its stages.
 #ifndef NATIVE_LOW
+#ifdef EID3D12
   float4 t=float4(1,1,1,1);if(impostor)t=impostorTexel;else if(nativeTextured!=0)t=NATIVE_SAMPLE(i.textureReference,i.uv);
-  [branch]if(i.astral.y>0)t=nativeAstralSample(i);
+#else
+  // D3D11 (#243, L-098): the read is taken at the top level with the top
+  // level's gradients, as the Low read since 912ce172. Nested under the
+  // impostor and textured tests FXC compiled it two branches deep (the
+  // RX 580 drew dark dots along terrain triangle edges). Both reads use
+  // uvDx and uvDy directly under the top level, which also keeps those
+  // derivatives out of the long-tile branch, where FXC had taken them three
+  // branches deep. An impostor or untextured pixel reads a texel it does
+  // not use.
+  float4 t;
+  [branch]if(i.textureReference.y!=0)t=nativeTextureArray.SampleGrad(nativeSampler,float3(i.uv,i.textureReference.x),uvDx,uvDy);
+  else t=nativeTexture.SampleGrad(nativeSampler,i.uv,uvDx,uvDy);
+  if(impostor)t=impostorTexel;else if(nativeTextured==0)t=float4(1,1,1,1);
+#endif
 #endif
   t=nativeTerrainMaterialStages(i,t,shadowDx,shadowDy,uvDx,uvDy);
 )" R"(
@@ -2988,7 +4451,35 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
  float2 terrainHeightD=float2(ddx_fine(terrainHeight),ddy_fine(terrainHeight));
  bool terrainRelief=terrainHas>0&&ddx_fine(terrainHas)==0&&ddy_fine(terrainHas)==0&&nativeMaterialTerrainLevel>=1;
 #endif
+#if defined(NATIVE_TERRAIN_SLIM)&&defined(NATIVE_TERRAIN_LEAN)
+ // Layer bit 512: a missed quad leaves here, before the lighting. The second
+ // pass redraws every output of a missed pixel, so what the slim program
+ // would go on to shade for it is never seen. The miss spreads over its 2x2
+ // quad first (the rule at the end of this program, the same fine
+ // differences), so all four lanes leave together and no lane that stays
+ // takes a derivative against one that left. What decides whether a pixel
+ // keys the mask at the end of the program is decided here the same way:
+ // the alpha test (the alpha never depends on the lighting) and, with fog
+ // off, the draw-distance dissolve.
+ [branch]if((nativeLiquidLayer&512u)!=0){
+  {float lane=terrainSlimMiss?1:0;
+   float spread=abs(ddx_fine(lane))+abs(ddy_fine(lane))+abs(ddx_fine(ddy_fine(lane)));
+   if(spread>0)terrainSlimMiss=true;}
+  [branch]if(terrainSlimMiss){
+   [branch]if(nativeAlphaTest!=0){if(!nativeCompare(nativeCombineAlpha(i.d,i.s,t)))discard;}
+   float3 missFogPoint=i.worldPosition;
+   [branch]if(i.shadowMode==0&&(fogStock.w>0||fogEye.w>.5))missFogPoint=fogUnproject(i.p.xy*fogScreen.xy,i.p.z);
+   if(nativeFogEnable==0&&nativeDrawDissolvedAt(i.p,missFogPoint))discard;
+   InterlockedMax(terrainMissMask[uint2(i.p.xy)],terrainSlimKey(nativeTriangleBase+primitive,true));
+   terrainSlimListQuad(uint2(i.p.xy));
+   uint missTriangle=nativeTriangleBase+primitive,missAddress=(missTriangle>>5)*4,missBit=1u<<(missTriangle&31u);
+   [branch]if((terrainMissTriangleFlags.Load(missAddress)&missBit)==0)terrainMissTriangleFlags.InterlockedOr(missAddress,missBit);
+   NativePixelResult missed=(NativePixelResult)0;return missed;
+  }
+ }
 #endif
+#endif
+)" R"(
  // Liquid surfaces never reach this entry: liquid batches draw their liquid
  // triangles through nativeLiquidPS and the rest through this one (the
  // vertex stage collapses the other part, nativeLiquidLayer bits 1 and 2).
@@ -2999,17 +4490,29 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
  // point lights and the sun shadow; alpha never depends on the lighting, which
  // only changes i.d.rgb.
  float4 t=float4(1,1,1,1);
+#ifdef EID3D12
  [branch]if(impostor)t=impostorTexel;
  else [branch]if(nativeTextured!=0){
   float2 textureDx=ddx_coarse(i.uv),textureDy=ddy_coarse(i.uv);
-#ifdef EID3D12
   t=terrainTapGrad(i.textureReference,i.uv,textureDx,textureDy);
+ }
 #else
+ // D3D11 (#243, unconfirmed on the reporting GPU): the read is not nested
+ // under the impostor and textured tests. FXC moves a derivative down to the
+ // block that holds all its uses, so nested there the compiled program took
+ // the gradients inside two levels of flow control, whatever the source
+ // order (the RX 580 drew dark dots along terrain triangle edges). With both
+ // reads directly under the top level the gradients are taken at the top
+ // level; an impostor or untextured pixel reads a texel it does not use.
+ {float2 textureDx=ddx_coarse(i.uv),textureDy=ddy_coarse(i.uv);
   [branch]if(i.textureReference.y!=0)t=nativeTextureArray.SampleGrad(nativeSampler,float3(i.uv,i.textureReference.x),textureDx,textureDy);
   else t=nativeTexture.SampleGrad(nativeSampler,i.uv,textureDx,textureDy);
+  if(impostor)t=impostorTexel;else if(nativeTextured==0)t=float4(1,1,1,1);}
 #endif
- }
- [branch]if(i.astral.y>0)t=nativeAstralSample(i);
+#ifdef NATIVE_ASTRAL
+ t=nativeAstralSample(i,uvDx,uvDy);
+#endif
+ NATIVE_BURN_ALPHA(i,t);
  [branch]if(nativeAlphaTest!=0){if(!nativeCompare(nativeCombineAlpha(i.d,i.s,t)))discard;}
 #endif
  // unlit: the same diffuse with the ambient term removed.
@@ -3059,7 +4562,26 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
   materialProfile=nativeMaterialProfileTap(i.textureReference.y,i.uv);
   materialActive=true;
   materialView=NATIVE_INTERFACE?normalize(i.liquidView):normalize(fogEye.xyz-i.worldPosition);
-  float roughness=clamp(materialProfile.r,.08,.98);materialAlpha2=roughness*roughness*roughness*roughness;
+  float roughness=clamp(materialProfile.r,.08,.98);
+#ifndef NATIVE_LOW
+  // Worn metal (Medium and up; not chain mail, whose weave rides in the sheen
+  // slot): the texel's luma against its surroundings at least ~3 texels wide
+  // (also when magnified close up, where the 4x-gradient crevice tap reads
+  // the texel itself: crevice occlusion stayed 1 on blades). Darker holds
+  // grime (rougher, occluded), brighter is a polished bevel or edge. Set
+  // here so the lamp lobes take it too; the class constant alone left a blade
+  // one uniform lobe over its smooth paint, which read as plastic
+  // (weapons-1105: save996 mithril blade .15 everywhere in view 1).
+  [branch]if(nativeMaterialLevel>=2&&materialProfile.g>.5&&materialProfile.a<=0&&nativeTextured!=0){
+   float levels;float2 size=terrainTapSize(i.textureReference,levels);
+   float2 wx=uvDx*4,wy=uvDy*4;
+   wx*=max(1,3/(max(length(wx*size),1e-4)));wy*=max(1,3/(max(length(wy*size),1e-4)));
+   materialWear=materialLuminance(terrainTapGrad(i.textureReference,i.uv,uvDx,uvDy).rgb)-
+    materialLuminance(terrainTapGrad(i.textureReference,i.uv,wx,wy).rgb);
+   roughness=clamp(roughness+materialProfile.g*(min(max(-materialWear,0)*3.5,.3)-min(max(materialWear,0)*2.5,.12)),.06,.95);
+  }
+#endif
+  materialAlpha2=roughness*roughness*roughness*roughness;
   materialLamps=nativeMaterialLevel>=2;
  }
 #ifndef NATIVE_LOW
@@ -3069,10 +4591,10 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
  // are a rough dielectric whose roughness, relief and crevices come from
  // their own texture below; leaves take the foliage profile (materialFoliage,
  // no extra texture taps). The lamp loop takes the base roughness.
- else [branch]if(!sknMaterial&&nativeMaterialWorldLevel>=2&&i.shadowMode==1&&((i.swaying>>29)&1u)==0&&
+ else [branch]if(!sknMaterial&&nativeMaterialWorldLevel>=2&&i.shadowMode==1&&!NATIVE_REC_UNIT(i)&&
   (nativeTextured!=0||impostor)&&i.bedLiquid.x<=0){
   materialActive=materialWorld=true;
-  materialFoliage=((i.swaying>>30)&1u)!=0||impostor;
+  materialFoliage=NATIVE_REC_FOLIAGE(i)||impostor;
   materialView=NATIVE_INTERFACE?normalize(i.liquidView):normalize(fogEye.xyz-i.worldPosition);
   float roughness=saturate((materialFoliage?kFoliageRoughness:.75)+nativeMaterialWorldRoughness);materialAlpha2=roughness*roughness*roughness*roughness;
   materialProfile=float4(roughness,0,.16,materialFoliage?kFoliageSheen:0); // metal 0, F0 .04 (x4); leaves a soft sheen
@@ -3080,11 +4602,28 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
  }
 #endif
 #endif
+#if NATIVE_CONTACT_LATE
+ // The lamps of this pixel. The ground contact blend (contact_blend.h) and
+ // its ground receiver's lamps run where they are blended, below: carried
+ // through this loop and the lighting, their values held ~14 registers (the
+ // general program 46 -> 44 temps, the profiled crown impostor 47 -> 44).
+ // A pixel the contact blend alone brought here before (no lamps of its
+ // own) took only the emissive glow, which no light gives it without glow
+ // lights (nativePointLightGlowCount) or which it never adds (no receiver).
+ [branch]if(pointLit||(i.shadowMode==2&&nativePointLightGlowCount!=0&&nativeRasterTail.y!=0)){
+  NATIVE_FIGURE_LAMP_RELIEF(pointLit)
+  float3 lit=nativePointLighting(i,glow,!pointLit);
+  materialReliefLamps=false;
+  if(pointLit)local=lit;
+ }
+#else
  // Ground contact (contact_blend.h): the ground colour, blend weights and
- // ground normal first, so the lamp pass lights the ground receiver too.
+ // ground normal first, so the lamp pass lights the ground receiver too (the
+ // early blend: fewer registers than the late one for world objects and
+ // plants, 37 vs 39 temps prepassed).
  float2 contactK=0;float3 contactArt=0;float3 contactNormal=float3(0,0,1);bool contactLamps=false;
 #ifndef NATIVE_LOW // Low: ground contact blend off
- [branch]if(i.contact!=0&&nativeContactBlend.x>0){
+ [branch]if(NATIVE_REC_CONTACT(i)&&nativeContactBlend.x>0){
   contactArt=contactBlendColor(i.worldPosition,i.worldNormal,positionDx,positionDy,i.contactHeight,contactK);
   [branch]if(contactK.x>0){
    contactNormal=gcGroundNormal(contactGround,i.worldPosition.xy-nativeContactOrigin.xy);
@@ -3094,9 +4633,12 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
 #endif
  float3 groundLocal=0,groundGlow=0;
  [branch]if(pointLit||contactLamps||(i.shadowMode==2&&nativePointLightGlowCount!=0&&nativeRasterTail.y!=0)){
+  NATIVE_FIGURE_LAMP_RELIEF(pointLit)
   float3 lit=nativePointLighting(i,glow,!pointLit,contactLamps,contactNormal,groundLocal,groundGlow);
+  materialReliefLamps=false;
   if(pointLit)local=lit;
  }
+#endif
  // Ordered packed colors keep their existing behavior; lit materials retain
  // their existing receiver policy until transparent reception is decided.
  // Interface records receive no world sun or cloud shadow, wetness or snow (the
@@ -3215,14 +4757,54 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
 #if defined(NATIVE_TERRAIN_PS)&&!defined(NATIVE_OFF_MATERIALS)&&!defined(NATIVE_LOW)&&!defined(NATIVE_UNLIT)
  // Terrain relief (S3, material level 1 and up): the height normal rescales
  // the per-vertex sun inside the game's max(ambient, sun) model, as the snow
- // trails do: walls toward the sun brighter, away darker, zero on average,
- // nothing in shadow; the ambient floor is untouched.
+ // trails do: tilts toward the sun brighten, away darken; an unchanged
+ // normal keeps the existing sun. The ambient floor is untouched.
  float3 terrainN0=dot(i.terrainSlope,i.terrainSlope)>1e-8?normalize(i.terrainSlope):normalize(i.worldNormal),terrainN=terrainN0;
- [branch]if(terrainRelief&&i.shadowMode==1){
+ // #243 (terrain_relief_derivfree): a pixel whose height came from the
+ // material cache takes the height's world gradient from the cache's height
+ // layer (central differences beside the pixel, terrain2CacheHeightGradient)
+ // as a surface gradient on the vertex normal: no screen difference of the
+ // height or of the position, so what the other pixels of its 2x2 quad hold
+ // (another triangle's helper pixels, a pixel that computed its material per
+ // pixel) cannot reach it. A pixel without a cached height keeps the screen
+ // differences only where its whole quad has none either; a quad of both
+ // takes no relief on its uncached pixels. A pixel whose block test failed
+ // (terrainRelief false: on the tester's Radeon RX 580 every other pixel
+ // along triangle edges, as the block's pixel outside the triangle holds no
+ // height) and whose colour was computed per pixel reads the slope from the
+ // cache's height layer too where the cache holds its place and the ground
+ // is not a steep face (the cache is baked from above).
+ bool reliefFree=false;float3 reliefFreeN=terrainN0;
+ float reliefSource=terrainSurfaceCached?1:0;
+ bool reliefMixed=ddx_fine(reliefSource)!=0||ddy_fine(reliefSource)!=0;
+ bool reliefFromCache=terrainSurfaceCached;
+ [branch]if(TERRAIN_RELIEF_DERIVFREE&&!reliefFromCache&&!terrainRelief&&terrainHas>0&&terrainN0.z>.7&&i.shadowMode==1)
+  reliefFromCache=terrain2CacheHeightGradientHeld(i.shadowPosition.xy,shadowDx.xy,shadowDy.xy);
+ [branch]if(TERRAIN_RELIEF_DERIVFREE&&reliefFromCache&&terrainHas>0&&nativeMaterialTerrainLevel>=1&&i.shadowMode==1){
+  float3 gradient=float3(terrain2CacheHeightGradient(i.shadowPosition.xy,shadowDx.xy,shadowDy.xy)*nativeMaterialTerrainRelief,0);
+  float3 lifted=terrainN0-(gradient-terrainN0*dot(gradient,terrainN0));
+  reliefFreeN=dot(lifted,lifted)>1e-20?normalize(lifted):terrainN0;reliefFree=true;
+ }
+ // D3D11 (#243, L-098): flattened. As a branch FXC moved terrainHeightD's
+ // derivatives into it, and terrainRelief differs between the pixels of a
+ // quad next to a pixel without a height: the pixel diagonal to that one
+ // then took the difference against a quad pixel that had skipped the
+ // branch and never held the height (sun scale 0: a dark dot).
+#ifdef EID3D12
+ [branch]
+#else
+ [flatten]
+#endif
+ // #243: a pixel with a cached height slope (reliefFree) needs no other
+ // pixel of its block and takes the relief whatever the block test says.
+ if((terrainRelief||reliefFree)&&i.shadowMode==1){
   terrainN=terrainReliefNormal(terrainN0,positionDx,positionDy,terrainHeightD);
+  if(reliefFree)terrainN=reliefFreeN;
+  else if(TERRAIN_RELIEF_DERIVFREE&&reliefMixed)terrainN=terrainN0;
   float lengthSquared=dot(nativeWorldSunDirection.xyz,nativeWorldSunDirection.xyz);
   float3 sun=lengthSquared>1e-12?nativeWorldSunDirection.xyz*rsqrt(lengthSquared):float3(0,0,1);
-  float sunScale=clamp(saturate(dot(terrainN,sun))/max(saturate(dot(terrainN0,sun)),.25),0,1.6);
+  float baseFacing=saturate(dot(terrainN0,sun));
+  float sunScale=clamp(1+(saturate(dot(terrainN,sun))-baseFacing)/max(baseFacing,.25),0,1.6);
   float3 sunLight=i.directional*(filteredShadow>=0?min(saturate(filteredShadow),cloud):1);
   float3 before=max(nativeWorldAmbient.rgb,sunLight),after=max(nativeWorldAmbient.rgb,sunLight*sunScale);
   i.d.rgb=saturate(i.d.rgb+after-before);unlit=saturate(unlit+sunLight*(sunScale-1));
@@ -3231,14 +4813,34 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
 // Low: read and alpha-tested before the lighting; terrain: read with its material above.
 #if !defined(NATIVE_LOW)&&!defined(NATIVE_TERRAIN_PS)
   float4 t=float4(1,1,1,1);if(impostor)t=impostorTexel;else if(nativeTextured!=0)t=NATIVE_SAMPLE(i.textureReference,i.uv);
-  [branch]if(i.astral.y>0)t=nativeAstralSample(i);
+#ifdef NATIVE_ASTRAL
+  t=nativeAstralSample(i,uvDx,uvDy);
 #endif
-#ifndef NATIVE_TERRAIN_PS
- if(nativeSknInstance(i)!=0){NativeInstance skn=nativeSknInstances[nativeSknInstance(i)-1];t.rgb*=skn.sknBase.rgb;if(skn.sknBase.w==0)t.a=1;}
 #endif
 #ifdef NATIVE_SNOW_TRAILS
   // Packed trough floor: barely darker, cooler snow.
   t.rgb*=lerp(1,float3(.975,.98,.995),snowPacked);
+#endif
+#ifdef NATIVE_FIRE_BURN
+ // Fire burn (nativeBurnAt): scorched ground and burnt crowns, their embers
+ // while they burn (added after the game's combine, as the emissive glow).
+ float3 burnGlow=0;
+ [branch]if(nativeBurnRow(1).w>0&&i.shadowMode==1){
+#ifdef NATIVE_TERRAIN_PS
+  const float2 raw=nativeBurnGroundAt(i.worldPosition.xy),burn=nativeBurnPhase(raw);
+  t.rgb=nativeBurnGroundColor(t.rgb,i.worldPosition.xy,burn.y);
+  burnGlow=nativeBurnEmber(i.worldPosition,nativeBurnFront(raw)*.7);
+#else
+  const uint burnMaterial=NATIVE_REC_UNIT(i)?0:nativeBurnMaterial(i.textureReference.x,i.uv);
+  [branch]if(burnMaterial==1u||burnMaterial==2u||(burnMaterial==3u&&nativeBurnRow(0).w>0)){
+   const float2 burn=burnMaterial==3u?nativeBurnPhase(nativeBurnAt(i.shadowPosition.xy)):
+    nativeBurnSurfacePhase(i.shadowPosition,i.burnRoot);
+   t.rgb=burnMaterial==2u?nativeBurnLeafColor(t.rgb,i.shadowPosition,burn.y):nativeBurnWoodColor(t.rgb,i.shadowPosition,burn.y);
+   if(burnMaterial==2u){if(burn.y>=.95)discard;t.a=nativeBurnLeafAlpha(t.a,i.shadowPosition,burn.y);}
+   burnGlow=nativeBurnEmber(i.shadowPosition,burn.x);
+  }
+#endif
+ }
 #endif
 
 #ifndef NATIVE_UNLIT
@@ -3259,12 +4861,12 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
 #ifdef NATIVE_TERRAIN_PS
  wetPbr=terrainSurface.y>=0&&nativeMaterialTerrainLevel>=2&&i.shadowMode==1;
 #else
- wetPbr=materialActive&&(materialWorld?nativeMaterialWorldLevel:nativeMaterialLevel)>=2;
+ wetPbr=materialActive&&(NATIVE_MATERIAL_WORLD?nativeMaterialWorldLevel:nativeMaterialLevel)>=2;
 #endif
 #endif
  [branch]if(nativeWet.x>0&&shadowReceiver&&i.bedLiquid.x<=0){
   bool wetGround=(i.terrainVertexFlags&16)!=0;
-  bool wetFoliage=((i.swaying>>30)&1u)!=0||impostor,wetUnit=((i.swaying>>29)&1u)!=0;
+  bool wetFoliage=NATIVE_REC_FOLIAGE(i)||impostor,wetUnit=NATIVE_REC_UNIT(i);
   wetNormal=wetGround&&dot(i.terrainSlope,i.terrainSlope)>1e-8?normalize(i.terrainSlope):normalize(i.worldNormal);
   float up=saturate((wetNormal.z-.15)/.65);
   wet=nativeWet.x*lerp(.3,1,up)*(wetGround?1:.75);
@@ -3344,11 +4946,11 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
   // either map) is foliage with its baked crown normal. Impostors without
   // the flag took solid-object snow from their camera-facing quad, so a
   // pine whitened as it switched to its impostor (2bea38da user note).
-  bool foliage=(((i.swaying>>30)&1u)!=0||impostor)&&!snowGround;
+  bool foliage=(NATIVE_REC_FOLIAGE(i)||impostor)&&!snowGround;
   // Creatures and characters (bit 29: the unit flag) take no
   // build-up: at most a faint sheen on their up-facing surfaces, from their
   // own normal only, so nothing slides as they move (c71 user note).
-  bool animated=((i.swaying>>29)&1u)!=0;
+  bool animated=NATIVE_REC_UNIT(i);
   float3 sn=impostor?impostorNormal:normalize(i.worldNormal),plane_normal=sn;
   [branch]if(animated){
    float sheen=nativeSnowCover.x*saturate((sn.z-.55)/.4)*.18;
@@ -3465,6 +5067,22 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
  }
 #endif
 )" R"(
+#ifdef NATIVE_RR_GUIDES
+ // The surface as the game's lighting sees it, before any material response
+ // below replaces it: the texture after its wet, snow and surf changes as
+ // the diffuse albedo; matte, F0 .04.
+#if defined(NATIVE_TERRAIN_PS)&&!defined(NATIVE_OFF_MATERIALS)&&!defined(NATIVE_LOW)&&!defined(NATIVE_UNLIT)
+ // The ground: its relief normal and its cell classes' roughness (none: matte).
+ nativeGuideSurface(guides,terrainN,terrainSurface.y>=0?clamp(terrainSurface.y,.08,1):1,float3(.04,.04,.04),normalize(fogEye.xyz-i.worldPosition),t.rgb);
+#else
+ // The crown's baked normal, the ground's smooth slope normal, else the vertex normal.
+ nativeGuideSurface(guides,impostor?impostorNormal:((i.terrainVertexFlags&16)!=0&&dot(i.terrainSlope,i.terrainSlope)>1e-8?i.terrainSlope:i.worldNormal),
+  1,float3(.04,.04,.04),normalize(fogEye.xyz-i.worldPosition),t.rgb);
+#endif
+ {uint3 lit=uint3(saturate(i.d.rgb)*127+.5);
+  nativeGuideLight=uint2(lit.r|(lit.g<<7)|(i.shadowMode==1?0x4000u:0u)|(i.pointMaterial.w>.5?0x8000u:0u),
+                         lit.b|(NATIVE_REC_UNIT(i)?0x8000u:0u)|(shadowReceiver?0x10000u:0u));}
+#endif
  float4 c=i.d;c.rgb=nativeCombineColor(i.d,i.s,t);c.a=nativeCombineAlpha(i.d,i.s,t);
   float4 d0=float4(unlit,i.d.a);float3 c0=nativeCombineColor(d0,i.s,t);
   if(nativeSpecularEnable!=0){c.rgb=saturate(c.rgb+i.s.rgb);c0=saturate(c0+i.s.rgb);}
@@ -3474,13 +5092,28 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
 #if !defined(NATIVE_TERRAIN_PS)&&!defined(NATIVE_UNLIT)
   if(sknMaterial)c.rgb-=max(c.rgb-c0,0)*(1-sknAo);
 #endif
+#ifdef NATIVE_FIRE_BURN
+  c.rgb+=burnGlow;c0+=burnGlow;
+#endif
   // Blend finished material colours: blending t before the texture stage
   // also multiplied the ground by the object's diffuse/material response.
 #ifndef NATIVE_LOW // Low: ground contact blend off
-  [branch]if(i.contact!=0&&nativeContactBlend.x>0){
+  [branch]if(NATIVE_REC_CONTACT(i)&&nativeContactBlend.x>0){
+#if NATIVE_CONTACT_LATE
+   // The ground colour, blend weights and ground normal, then the ground
+   // receiver's lamps (nativeGroundPointLighting: the sums the shared lamp
+   // loop gave it, in the same order).
+   float2 k=0;float3 ground=contactBlendColor(i.worldPosition,i.worldNormal,positionDx,positionDy,i.contactHeight,k);
+#else
    float2 k=contactK;float3 ground=contactArt;
+#endif
    float3 groundColor=0,groundDirect=0;
    [branch]if(k.x>0){
+#if NATIVE_CONTACT_LATE
+    float3 contactNormal=gcGroundNormal(contactGround,i.worldPosition.xy-nativeContactOrigin.xy);
+    float3 groundLocal=0,groundGlow=0;
+    [branch]if(nativePointLightCount!=0)nativeGroundPointLighting(i,pointLit,contactNormal,groundLocal,groundGlow);
+#endif
     float lengthSquared=dot(nativeWorldSunDirection.xyz,nativeWorldSunDirection.xyz);
     float3 sun=nativeWorldSunDirection.xyz*rsqrt(max(lengthSquared,1e-12));
     float facing=nativeTerrainClock.z>0?1:saturate(dot(contactNormal,sun));
@@ -3506,6 +5139,9 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
   [branch]if(wetPbr){
    float roughness=clamp(lerp(materialWetRoughness(terrainSurface.y,kWetRoughness,wet),nativeMaterialTerrainRough[0].w,saturate(terrainSnowShare)),.08,1);
    float3 n=normalize(lerp(terrainN,wetNormal,kWetFilmFlatten*wet)),v=normalize(fogEye.xyz-i.worldPosition);
+#ifdef NATIVE_RR_GUIDES
+   nativeGuideSurface(guides,n,roughness,float3(.04,.04,.04),v,t.rgb); // the response's own normal and roughness
+#endif
    float sunLength=dot(nativeWorldSunDirection.xyz,nativeWorldSunDirection.xyz);
    float3 l=sunLength>1e-12?nativeWorldSunDirection.xyz*rsqrt(sunLength):float3(0,0,1);
    float3 h=normalize(l+v);float nl=saturate(dot(n,l)),nv=max(saturate(dot(n,v)),1e-3);
@@ -3524,7 +5160,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
      environment=lerp(nativeWorldAmbient.rgb,sky,smoothstep(-.15,.2,r.z));
     }
     float2 brdf=materialEnvBrdf(roughness,nv);
-    specular+=environment*(.04*brdf.x+brdf.y)*(saturate((.7-roughness)/.35)*nativeMaterialReflection*environmentWeight);
+    specular+=environment*(.04*brdf.x+brdf.y)*(saturate((.7-roughness)/.35)*nativeMaterialReflection*environmentWeight NATIVE_GUIDE_UNTRACED(roughness));
    }
    // Standing water (the surf swash) keeps the sharp film below instead.
    specular*=1-saturate(wetPuddle);
@@ -3584,7 +5220,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
    // in heavy rain at material_quality 0 while the scene darkened). For
    // units the probe is brought to the ambient level, a surface in sun shadow
    // keeps a fifth, and the film joins the ambient share (SSAO occludes it).
-   bool unitFilm=((i.swaying>>29)&1u)!=0;
+   bool unitFilm=NATIVE_REC_UNIT(i);
    float3 r=reflect(-v,n),sky=nativeWorldAmbient.rgb*(unitFilm?1:1.5);
    [branch]if(fogTemporal.z>.5&&fogEye.w>.5){
     float az=atan2(r.y,r.x)*(.5/3.14159265);az+=az<0?1:0;
@@ -3613,7 +5249,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
    float metal=materialProfile.g,dielectricF0=materialProfile.b*.25,sheenWeight=materialProfile.a;
    // Woven metal (chain mail, classes.json weave): a figure's metal texel
    // carries its weave in the sheen slot (metals take no cloth sheen).
-   float weave=!materialWorld&&metal>.5?sheenWeight:0,weaveLink=0;
+   float weave=!NATIVE_MATERIAL_WORLD&&metal>.5?sheenWeight:0,weaveLink=0;
    if(weave>0)sheenWeight=0;
    float luminance=materialLuminance(t.rgb);
    // Dark paint between metal (chain links, rivet gaps) reads rougher;
@@ -3622,11 +5258,12 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
    // EI's dark cloth, leather and skin at the .98 clamp, with no highlight
    // left), and their painted crevices lose specular through the occlusion.
    float roughness=sknMaterial?materialProfile.r:clamp(materialProfile.r+(1-smoothstep(.18,.65,luminance))*.28*saturate(materialProfile.r*1.5)*metal,.08,.98);
+   if(!sknMaterial&&!NATIVE_MATERIAL_WORLD)roughness=clamp(roughness+metal*(min(max(-materialWear,0)*3.5,.3)-min(max(materialWear,0)*2.5,.12)),.06,.98);
    float3 n=normalize(i.worldNormal),n0=sknMaterial?normalize(sknBaseNormal):n,v=materialView;
    // Leaves are thin two-sided cards: the side facing the viewer (an
    // impostor: its baked crown normal) takes the response.
    if(materialFoliage){n=impostor?impostorNormal:n;n=dot(n,v)<0?-n:n;n0=n;}
-   bool medium=(materialWorld?nativeMaterialWorldLevel:nativeMaterialLevel)>=2;
+   bool medium=(NATIVE_MATERIAL_WORLD?nativeMaterialWorldLevel:nativeMaterialLevel)>=2;
    // Specular occlusion: a painted crevice (texel darker than its blurred
    // surroundings) holds no highlight (Medium and up).
    float occlusion=1;
@@ -3636,8 +5273,9 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
     // height. Two taps one screen pixel (at least one texel) along u and v,
     // at the colour read's gradients, give its slope; a cotangent frame from
     // the screen derivatives (the game's meshes carry no tangents) tilts the
-    // normal. Past ~6 texels per pixel the slope is mip noise: the relief
-    // fades out. Figures scale it by their class relief (t38).
+    // normal. World objects lose it past ~6 texels per pixel, figures only on
+    // a stretched footprint (materialReliefFade). Figures scale it by their
+    // class relief (t38).
     float2 dx=uvDx,dy=uvDy; // outside the branches (derivatives)
     float levels;float2 size=terrainTapSize(i.textureReference,levels);
     float2 su=float2(max(1/size.x,max(abs(dx.x),abs(dy.x))),0),sv=float2(0,max(1/size.y,max(abs(dx.y),abs(dy.y))));
@@ -3649,19 +5287,29 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
     float frame=rsqrt(max(max(dot(tu,tu),dot(tv,tv)),1e-20));
     float texels=max(su.x*size.x,sv.y*size.y);
 #ifdef EID3D12
-    float relief=.5;[branch]if(!materialWorld)relief=nativeMaterialReliefTap(i.textureReference.y,i.uv,dx,dy);
+    float relief=.5;[branch]if(!NATIVE_MATERIAL_WORLD)relief=nativeMaterialReliefTap(i.textureReference.y,i.uv,dx,dy);
 #else
-    float relief=materialWorld?.5:nativeMaterialReliefMap.SampleGrad(nativeSampler,i.uv,dx,dy);
+    float relief=NATIVE_MATERIAL_WORLD?.5:nativeMaterialReliefMap.SampleGrad(nativeSampler,i.uv,dx,dy);
 #endif
     // The class relief map stores half the class value (classes run 0..2).
-    float strength=6*nativeMaterialRelief*relief*saturate((6-texels)*.25)*(1-kWetReliefDamp*(wetPbr?wet:0)); // a water film flattens it
+    float strength=6*nativeMaterialRelief*relief*materialReliefFade(dx,dy,size,texels,!NATIVE_MATERIAL_WORLD&&NATIVE_REC_UNIT(i))*(1-kWetReliefDamp*(wetPbr?wet:0)); // a water film flattens it
     n=normalize(n-(hu*tu+hv*tv)*(frame*strength));
     // Crevices: darker than the surroundings two mips up (a 4x wider read).
     float around=materialLuminance(terrainTapGrad(i.textureReference,i.uv,dx*4,dy*4).rgb);
     float crevice=max(around-luminance,0);
     occlusion=saturate(1-crevice*3);
+    // Worn metal (figures, set with the lamp roughness): its grime holds less light too.
+    occlusion=min(occlusion,saturate(1-max(-materialWear,0)*3));
     // World roughness: crevices and dark paint rougher, bright smooth paint a little less rough.
-    if(materialWorld||(((i.swaying>>29)&1u)==0&&metal<.5))roughness=clamp(materialProfile.r+crevice*.5-smoothstep(.45,.85,luminance)*.2,.3,.98);
+    // Profiled scenery (not a figure, bit 29): its stone and wood vary the
+    // same way, its iron keeps the metal path below.
+    // Crystal texels keep their class roughness (the crystal programs only;
+    // the others keep this test as it was, so their bytecode stays the same).
+#ifdef NATIVE_CRYSTAL
+    if(NATIVE_MATERIAL_WORLD||(!NATIVE_REC_UNIT(i)&&metal<.5&&!NATIVE_CRYSTAL_TEXEL(materialProfile)))roughness=clamp(materialProfile.r+crevice*.5-smoothstep(.45,.85,luminance)*.2,.3,.98);
+#else
+    if(NATIVE_MATERIAL_WORLD||(!NATIVE_REC_UNIT(i)&&metal<.5))roughness=clamp(materialProfile.r+crevice*.5-smoothstep(.45,.85,luminance)*.2,.3,.98);
+#endif
     // Woven metal: a link is brighter than the weave around it (read at
     // least ~3 texels wide, also when the texture is magnified close up),
     // a gap darker. Links: polished full metal; gaps: rough, no metal, no
@@ -3725,6 +5373,11 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
    float nv=max(saturate(dot(n,v)),1e-3);
    float3 f0=lerp(dielectricF0.xxx,t.rgb,metal);
    f0=lerp(f0,saturate(f0*1.6+.06),weaveLink*weave);   // polished link tops
+#ifdef NATIVE_RR_GUIDES
+   // The response's normal, roughness and F0; metals keep the share of the
+   // diffuse colour their shading keeps.
+   nativeGuideSurface(guides,n,roughness,f0,v,t.rgb*lerp(1,nativeMaterialDiffuseKeep,metal));
+#endif
    // Metals keep part of their diffuse light; emissive and highlight are exempt.
    float3 emission=t.rgb*i.emissive+(nativeSpecularEnable!=0?i.s.rgb:float3(0,0,0));
    float keep=lerp(1,nativeMaterialDiffuseKeep,metal);
@@ -3732,7 +5385,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
    // The game's own per-vertex specular on profiled pixels (user decision):
    // metal keeps it; a dielectric keeps it by its F0 (1 at .04) and
    // smoothness, so bone, leather and cloth stop shining like metal.
-   if(!materialWorld&&nativeSpecularEnable!=0){
+   if(!NATIVE_MATERIAL_WORLD&&nativeSpecularEnable!=0){
     float smooth=1-roughness;
     float3 drop=i.s.rgb*(1-lerp(saturate(dielectricF0*25)*smooth*smooth,1,metal));
     c.rgb=max(c.rgb-drop,0);c0=max(c0-drop,0);
@@ -3768,7 +5421,9 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
    // ambient has no direction; the sky's does (brightest overhead, leaning
    // toward the sun's side), so a normal tilted toward it gains and one
    // tilted away loses (zero on average); crevices hold less sky light.
-   [branch]if(medium&&!materialWorld&&((i.swaying>>29)&1u)!=0){
+   // Not on profiled scenery (bit 29 clear): like the S2 world response,
+   // its dark painted crevices and strips (wicker, planks) went near black.
+   [branch]if(medium&&!NATIVE_MATERIAL_WORLD&&NATIVE_REC_UNIT(i)){
     float3 skyDirection=normalize(float3(l.xy*.5,1));
     float ambientLight=max(1+3*dot(n-n0,skyDirection),0)*lerp(1,occlusion,.8);
     c.rgb+=max(c.rgb-c0,0)*(ambientLight-1);
@@ -3785,7 +5440,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
    // World objects reflect the sky at High only; leaves never (a rough card's
    // sky share is invisible, but its probe tap ran on every overdrawn leaf
    // pixel: ~0.4 ms of the figure pass at the save1027/save1133 4K views).
-   bool reflecting=!materialWorld||(nativeMaterialWorldLevel>=3&&!materialFoliage);
+   bool reflecting=!NATIVE_MATERIAL_WORLD||(nativeMaterialWorldLevel>=3&&!materialFoliage);
    float3 r=reflect(-v,n),environment=nativeWorldAmbient.rgb;
    [branch]if(reflecting&&fogTemporal.z>.5&&fogEye.w>.5){
     float probeWidth,probeHeight,probeLevels;skyProbe.GetDimensions(0,probeWidth,probeHeight,probeLevels);
@@ -3821,7 +5476,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
    [branch]if(reflectionWeight>0){
     float3 reflected=saturate((f0*brdf.x+brdf.y)*nativeMaterialReflection)*reflectionWeight;
     c.rgb-=max(c.rgb-c0,0)*reflected;
-    skyReflection=environment*reflected*occlusion*(sknMaterial?sknAo:1);
+    skyReflection=environment*reflected*occlusion*(sknMaterial?sknAo:1) NATIVE_GUIDE_UNTRACED(roughness);
    }
    specular*=occlusion;
    // Cloth and leather sheen in ambient light (Medium and up): the sheen
@@ -3859,9 +5514,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
    // looking toward it, a soft core tinted by the stone's colour. Neither
    // takes the sun shadow (at the stone the shadow is the stone itself).
    // A gem: a figure texel with dielectric F0 .12+ (profile b x4 > .48).
-   // RGBA8 stores the minimum gem F0 .12 as round(.12*4*255)=122.
-   // Compare against that encoded value so the author's gem class is included.
-   [branch]if(!materialWorld&&materialProfile.g<.5&&materialProfile.b>=122./255.){
+   [branch]if(!NATIVE_MATERIAL_WORLD&&materialProfile.g<.5&&materialProfile.b>=122./255.){
     float phase=dot(r,l)*7+dot(n-n0,float3(5.3,7.1,3.7));
     float3 spectrum=saturate(.5+.5*cos(6.2831853*(phase+float3(0,.333,.667))));
     specular*=lerp(1,spectrum*2.2,.65);skyReflection*=lerp(1,spectrum*2,.35);
@@ -3876,6 +5529,53 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
     c.rgb+=transmitted;c0+=transmitted;
    }
 #endif
+#ifdef NATIVE_CRYSTAL
+   // Crystal texels (the crystal instance programs only, NATIVE_CRYSTAL):
+   // big, smooth-painted, flat-faceted stones, where a glossy class alone
+   // left the sun highlight on no facet and the gem branch dulled the body
+   // (crystal preview 2026-11-14, user choice V+S+T). The body is lit from
+   // inside: each geometric facet (from the position derivatives, so smooth
+   // vertex normals still read as faces) bends the light to its own hashed
+   // direction, so faces go bright or dark as the sun or view turns; the
+   // sun through the stone (no sun shadow, as the gem), a wrap term and the
+   // lamps' light through it, all tinted by an absorption that deepens with
+   // the thickness the view crosses (.35 at the rim to 1 facing the view);
+   // a small inner glow in the art's own colour; world crystals then show
+   // the scene behind them (the crystal scene copy, liquidSceneColor slice
+   // 0, taken at the flush's first crystal batch; no copy bound: opaque),
+   // displaced along the refracted ray. A Schlick rim (F0 .05, quartz) of
+   // the sky probe and the class's GGX highlights sit on top.
+   [branch]if(NATIVE_CRYSTAL_TEXEL(materialProfile)){
+    float3 face=normalize(cross(positionDx,positionDy));face*=dot(face,n0)<0?-1:1;
+    float turn=6.2831853*frac(sin(dot(round(face*6),float3(12.9898,78.233,37.719)))*43758.5453);
+    float turnSin,turnCos;sincos(turn,turnSin,turnCos);
+    float3 inner=normalize(float3(face.x*turnCos-face.y*turnSin,face.x*turnSin+face.y*turnCos,abs(face.z)*.5+.35));
+    float3 sunThrough=nativeWorldSunDiffuse.rgb*cloud,ambient=nativeWorldAmbient.rgb;
+    float peak=max(t.r,max(t.g,t.b));
+    float3 tint=saturate(t.rgb/max(peak,.05)*sqrt(peak));
+    float facet=.12+1.5*pow(saturate(dot(inner,l)),3)+.35*saturate(inner.z);
+    float faceLight=saturate(dot(face,l)),forward=saturate(dot(-v,l));
+    float3 body=t.rgb*(ambient*.35+sunLight*(.25*faceLight))+tint*(sunLight*(facet*1.1)+ambient*.3+sunThrough*(.6*forward*forward*forward))+t.rgb*.2;
+    float thick=.35+.65*nv;
+    float3 absorb=pow(max(tint,1e-3),1+2*thick);
+    float back=1.4*forward*forward+.35*saturate(-dot(face,l));
+    float3 lamps=0;[branch]if(nativePointLightCount!=0)lamps=nativeGemLampThrough(i);
+    body=body*.55+absorb*(sunThrough*back+sunLight*(.55*saturate((dot(face,l)+.6)/1.6))+ambient*.55+lamps*.5);
+#if NATIVE_CRYSTAL==1
+    uint sceneWidth,sceneHeight,sceneSlices;liquidSceneColor.GetDimensions(sceneWidth,sceneHeight,sceneSlices);
+    [branch]if(sceneWidth>0){
+     float3 bend=(refract(-v,n,1/1.55)+v)*(.25*thick);
+     float2 shift=clamp(float2(dot(bend,positionDx)/max(dot(positionDx,positionDx),1e-8),dot(bend,positionDy)/max(dot(positionDy,positionDy),1e-8)),-64,64);
+     float3 behind=liquidSceneColor.SampleLevel(liquidSceneSampler,float3((i.p.xy+shift)/float2(sceneWidth,sceneHeight),0),0).rgb;
+     behind*=pow(max(sqrt(tint),1e-3),.4+1.2*thick)*1.25;
+     body=lerp(body,behind,.6)+body*.12;
+    }
+#endif
+    float rim=.05+.95*pow(1-nv,5);
+    c.rgb=body*(1-rim)+environment*(1.5*rim)+specular;c0=c.rgb;
+    specular=0;skyReflection=0;
+   }
+#endif
    c.rgb+=specular+skyReflection;c0+=specular;
    // F10 material_view: 1 roughness, 2 metal, 3 F0 / sheen / occlusion.
    uint materialViewMode=(uint)nativeMaterialView;
@@ -3884,7 +5584,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
    else if(materialViewMode==3){c.rgb=float3(dielectricF0*4,sheenWeight,occlusion);c0=c.rgb;}
   }
   // material_view 2: a lit unit drawn without a profile shows magenta.
-  else if((uint)nativeMaterialView==2&&nativeMaterialLevel>0&&((i.swaying>>29)&1u)!=0&&i.shadowMode==1){c.rgb=float3(1,0,1);c0=c.rgb;}
+  else if((uint)nativeMaterialView==2&&nativeMaterialLevel>0&&NATIVE_REC_UNIT(i)&&i.shadowMode==1){c.rgb=float3(1,0,1);c0=c.rgb;}
 #endif
   // Caustics on ground under water only (bed depth > 0, no bed emission);
   // everything else keeps bed 1 without the caustic terms.
@@ -3912,17 +5612,22 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
   // from per-vertex rise and wall height, replaces the screen-space AO there
   // (whose horizons pile up into blobs at every riser corner).
   [branch]if((i.terrainVertexFlags&16)!=0&&!liquidSurfaceEnabled(i.terrainVertexFlags)){
+)" R"(
    float contact=terrainFootContact(i.liquidFall.x,i.liquidDirections.x);
    c.rgb-=ambientShare*terrainFootContactDepth*contact;
    ambientShare*=1-contact;
   }
 #if defined(NATIVE_TERRAIN_PS)||defined(NATIVE_LOW)
-  // Mixed Astral/land cells retain normal terrain shading on their land share.
+  // Land keeps its normal shading. Astral replaces only its authored share,
+  // before the common fog chain, and contributes no ambient or traced light.
   [branch]if((i.terrainVertexFlags&16384u)!=0){
    float coverage=terrainAstralCoverage(i.terrainVertexFlags,i.liquidTileLocal);
-   float3 astralColor=terrainAstralColor(i.worldPosition,fogEye.xyz,nativeTerrainClock.y*.055,
-       i.liquidDirections.y,length(abs(positionDx.xy)+abs(positionDy.xy))*.075);
-   c.rgb=lerp(c.rgb,astralColor,coverage);ambientShare*=1-coverage;
+   float3 astral=terrainAstralColor(i.worldPosition,fogEye.xyz,nativeTerrainClock.y*.055,
+                                  i.liquidDirections.y,length(abs(positionDx.xy)+abs(positionDy.xy))*.075);
+   c.rgb=lerp(c.rgb,astral,coverage);ambientShare*=1-coverage;
+#ifdef NATIVE_RR_GUIDES
+   guides.diffuse.rgb*=1-coverage;guides.specular.rgb*=1-coverage;
+#endif
   }
 #endif
   // World geometry (shadow mode 1 or 2: object_to_clip is the world camera)
@@ -3930,13 +5635,35 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
   // the point the pixel would unproject to; prepared vertices unproject.
   float3 fogPoint=i.worldPosition;
   [branch]if(i.shadowMode==0&&(fogStock.w>0||fogEye.w>.5))fogPoint=fogUnproject(i.p.xy*fogScreen.xy,i.p.z);
+#ifdef NATIVE_RR_GUIDES
+  float lightKept=dot(bed,1.0/3); // what reaches the eye of a light added to the lit colour (rt_direct_lights)
+#endif
   if(nativeFogEnable!=0){
    // Caves: the exits' light in the fog (nativeCaveFogLight; 0 elsewhere),
    // and near an exit the border fog takes the exit glow's colour along
    // this view ray, so the ground strip blends into the glowing mouth.
    float3 caveFog=nativeCaveFogLight(fogPoint)+nativeCaveExitGlow(fogPoint);
-   float fogFactor=nativeFogFactor(i.s.a,i.p);c.rgb=lerp(saturate(borderFogColorAt(fogPoint,nativeFogColor.rgb)+caveFog),c.rgb,fogFactor);
-   ambientShare*=fogFactor*nativeAtmosphereAt(c.rgb,i.p,saturate(nativeFogColor.rgb+caveFog),fogPoint);}
+   // The atmosphere first, then the border fog, then the draw-distance fade:
+   // both of the last two end the world, so where either is complete the
+   // pixel is exactly the sky behind (borderFogColorAt). Haze laid over fully
+   // border-fogged land left it lighter than the sky beside it: a ghost slab
+   // with a hard vertical edge where a neighbour map ends.
+   float fogFactor=nativeFogFactor(i.s.a,i.p);
+   // The stock sky dome (fog mode 2, renderer_flush.cpp native_batch_constants):
+   // the full game fog colour at and below the eye horizon, rising smoothly to
+   // its own vertex fog at 6 degrees of elevation (sin 6 = .1045), so every
+   // end-of-world fog (game fog colour with the stock sky) fades up into the
+   // sky with no line; the stock clouds take the same fade. 14 degrees covered
+   // nearly all the sky the game camera shows (a flat fog sky, rejected).
+   [branch]if(nativeFogEnable==2u)fogFactor=min(fogFactor,smoothstep(0.,.1045,normalize(fogUnproject(i.p.xy*fogScreen.xy,i.p.z)-fogEye.xyz).z));
+   float kept=nativeAtmosphereCoreAt(c.rgb,i.p,saturate(nativeFogColor.rgb+caveFog),fogPoint,fogHazeColorFrame.w>.5);
+   c.rgb=lerp(saturate(borderFogColorAt(fogPoint,nativeFogColor.rgb)+caveFog),c.rgb,fogFactor);
+   float through=fogFactor*kept*nativeDrawFadeToAt(c.rgb,fogPoint,nativeFogColor.rgb);
+   ambientShare*=through;
+#ifdef NATIVE_RR_GUIDES
+   lightKept*=through;
+#endif
+  }
   else if(nativeDrawDissolvedAt(i.p,fogPoint))discard;
   // Preserve material alpha/discard and leave UI/prepared visuals unchanged.
 #ifdef NATIVE_LOW
@@ -3950,12 +5677,66 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
   [branch]if(nativeRasterTail.x!=0&&shadowReceiver){c.rgb=nativeShadowCoverage(i.shadowPosition);ambientShare=0;}
 #endif
 #endif
+  // Raw impostor view (impostor_debug_raw, w 3): the sampled impostor texel, unlit.
+  [branch]if(impostor&&i.liquidFlow.w>2.5){c.rgb=impostorTexel.rgb;ambientShare=0;}
+  // F10 fur_debug: 1 a wound layer (magenta), 2 a furry part's own colour
+  // record (blue), 3 a wound layer's alpha as grey, opaque.
+#ifdef NATIVE_FUR_DEBUG
+  {const uint furDebug=(i.swaying>>24)&7u;
+   [branch]if(furDebug!=0){c=furDebug==1u?float4(1,0,1,1):furDebug==2u?float4(0,0,1,1):float4(c.aaa,1);ambientShare=0;}}
+#endif
+#ifdef NATIVE_RR_GUIDES
+  guides.diffuse.a=(nativeGuideLight.x&0xffffu)/65535.0;
+  guides.specular.a=(nativeGuideLight.y&0x10000u)!=0?((nativeGuideLight.y&0x807fu)|(uint(saturate(lightKept)*255+.5)<<7))/65535.0:0;
+#endif
   NativePixelResult result;
   c.a*=nativeHudOpacity;
   result.color=c;
   result.shadow=float4(filteredShadow,0,0,1);
   result.ambient=float4(ambientShare,c.a);
+#ifdef NATIVE_TERRAIN_SLIM
+  // A miss marks its whole 2x2 quad: later stages take screen derivatives
+  // of material values (height, roughness), and a hit lane beside a miss
+  // lane differentiated against the value the slim program never computed.
+  // The full program redraws the quad (exact fine differences: any lane missed).
+  {float lane=terrainSlimMiss?1:0;
+   float spread=abs(ddx_fine(lane))+abs(ddy_fine(lane))+abs(ddx_fine(ddy_fine(lane)));
+   if(spread>0)terrainSlimMiss=true;}
+  // Every slim pixel keys the mask (terrainSlimKey, InterlockedMax without a
+  // return: no order between draws or fragments needed, nothing waits on it).
+  // A hit that kept out of the mask would let an earlier triangle's miss at
+  // the same pixel and depth redraw over the single pass's last writer.
+  InterlockedMax(terrainMissMask[uint2(i.p.xy)],terrainSlimKey(nativeTriangleBase+primitive,terrainSlimMiss));
+  // A triangle's missed pixels all set the same bit: read first, so only
+  // the first few of them contend for the atomic.
+  [branch]if(terrainSlimMiss){
+   terrainSlimListQuad(uint2(i.p.xy));
+   uint t=nativeTriangleBase+primitive,address=(t>>5)*4,bit=1u<<(t&31u);
+   [branch]if((terrainMissTriangleFlags.Load(address)&bit)==0)terrainMissTriangleFlags.InterlockedOr(address,bit);
+  }
+#endif
+#if defined(NATIVE_TERRAIN_PS)&&defined(NATIVE_SHADOW_MASK)&&!defined(NATIVE_TERRAIN_SLIM)
+  // terrain_slim 3: the slim pass's misses tinted red.
+  [branch]if((nativeLiquidLayer&128u)!=0)result.color.rgb=lerp(result.color.rgb,float3(1,0,0),.3);
+  // The second pass's pixels that are not this triangle's leave here, after
+  // every screen difference (#243, above).
+  if(slimForeign)discard;
+#endif
   return result;}
+#ifdef NATIVE_TERRAIN_SLIM
+#undef nativePS
+[earlydepthstencil]
+NativePixelResult nativePS(NativeOutput i,uint primitive:SV_PrimitiveID,bool frontFace:SV_IsFrontFace NATIVE_GUIDE_OUT){
+ NativePixelResult result=nativeSlimMaterialPS(i,primitive,frontFace NATIVE_GUIDE_PASS);
+ // Pure Astral needs no cached material, but must own the pixel's hit key.
+ // Keep this UAV write outside its early-return branch: FXC otherwise makes
+ // the later slim miss-quad derivatives depend on the UAV (X3662, ps_5_0).
+ // Discarded pixels never reach this write; the normal slim path is unchanged.
+ [branch]if((nativeCombinerTail&1u)==0&&(i.terrainVertexFlags&16384u)!=0&&((i.terrainVertexFlags>>16)&15u)==15u)
+  InterlockedMax(terrainMissMask[uint2(i.p.xy)],terrainSlimKey(nativeTriangleBase+primitive,false));
+ return result;
+}
+#endif
 // Liquid surfaces (liquid_surface.hlsl): their own pixel entry, bound to the
 // liquid triangles of liquid batches only. Ground pixels never hold the
 // liquid shader's registers and liquid pixels never hold the terrain
@@ -3988,7 +5769,7 @@ NativePixelResult nativeLiquidPS(NativeOutput i){
  // refraction again, made water opaque and pale toward every map edge).
  float3 haze=borderFogColorAt(i.worldPosition,nativeFogColor.rgb);
  c.rgb=lerp(c.rgb-liquidTransmitted.rgb,haze,border);haze*=border;
- if(nativeFogEnable!=0){float3 before=c.rgb;float kept=nativeAtmosphereCoreAt(c.rgb,i.p,nativeFogColor.rgb,i.worldPosition);haze=haze*kept+c.rgb-before*kept;}
+ if(nativeFogEnable!=0){float3 before=c.rgb;float kept=nativeAtmosphereCoreAt(c.rgb,i.p,nativeFogColor.rgb,i.worldPosition,fogHazeColorFrame.w>.5);haze=haze*kept+c.rgb-before*kept;}
  c.rgb+=liquidTransmitted.rgb-liquidTransmitted.a*haze;
  c.a=lerp(1,c.a,nativeDrawFadeToAt(c.rgb,i.worldPosition,nativeFogColor.rgb));
  if(nativeAlphaTest!=0&&!nativeCompare(c.a))discard;
@@ -4262,14 +6043,74 @@ NativeOutput nativeTerrainDSPlain(NativeTessFactors factors,float3 b:SV_DomainLo
 NativeDepthOutput nativePrepassVS(uint vertexId:SV_VertexID){
  NativeOutput o=nativeVertex(vertexId,true);precise float4 position=o.p;o.p=position;return nativeDepthOf(o);
 }
-// DLSS object motion (flush_native, posed batches after their material
-// draw): the same vertex as the material pass (precise, so a LESS_EQUAL test
-// meets its depth), plus where it was last frame. World-vertex records
-// (merged characters, posed figures) take the change of their prepared
-// position since the previous frame's copy of the world vertices (same
-// slot, same source vertex and part); other records only the camera.
-cbuffer NativeMotionConstants:register(b11){row_major float4x4 nativeMotionPreviousClip;float4 nativeMotionJitter;};
-StructuredBuffer<NativeWorldVertex> nativePreviousWorldVertices:register(t46);
+// Upscaler object motion in the material pass (the DLSS programming guide's
+// velocity: written by the geometry where it moves on its own, the camera
+// reprojection from depth everywhere else). Batches holding a posed or
+// swaying record draw with nativeMotionWorldVS and the NATIVE_OBJECT_MOTION
+// pixel variant, which also write the object motion targets 3 and 4 (motion
+// in render pixels toward last frame, and the depth it belongs to);
+// cameraMotionPS keeps it where that depth is still the visible one.
+// World-vertex records (merged characters, posed figures) take the change of
+// their prepared position since the previous frame's copy of the world
+// vertices (same slot, same source vertex and part); swaying plant parts the
+// sway at last frame's clock; other records keep the camera motion.
+cbuffer NativeMotionConstants:register(b11){row_major float4x4 nativeMotionPreviousClip;float4 nativeMotionJitter;float4 nativeMotionClock;};
+StructuredBuffer<NativeWorldVertex> nativePreviousWorldVertices:register(t46); // also the fur strands
+#ifdef NATIVE_OBJECT_MOTION
+NativeOutput nativeMotionWorldVS(uint vertexId:SV_VertexID){
+ NativeOutput o=nativeVertex(vertexId,true);precise float4 position=o.p;o.p=position;
+#ifdef NATIVE_INDEXED
+ uint2 owner=nativeVertexOwners[vertexId];
+ uint4 triangleRef=uint4(owner.x,owner.yyy);
+#else
+ uint4 triangleRef=nativeVisibleTriangles[nativeTriangleBase+vertexId/3];
+#endif
+ NativeInstance instance=loadNativeInstance(triangleRef.x);
+ o.motionClip=0;
+ [branch]if(instance.worldGeometry!=0){
+  float3 previous=o.worldPosition;bool own=false;
+  [branch]if((instance.worldGeometry&@WORLD_OBJECT_SPACE@)==0){
+   uint preparedIndex=(vertexId%3)==0?triangleRef.y:((vertexId%3)==1?triangleRef.z:triangleRef.w);
+   NativeWorldVertex now=nativeWorldVertices[preparedIndex],before=nativePreviousWorldVertices[preparedIndex];
+   // (No whole copy is kept: only a previous vertex with this world
+   // frame's stamp, nativeMotionClock.z, was rewritten this frame; any other has not moved.)
+   if(before.specular==asuint(nativeMotionClock.z)&&before.sourcePosition==now.sourcePosition&&before.partNode==now.partNode)previous+=before.p.xyz-now.p.xyz;
+   own=true;
+  }
+  [branch]if((instance.nativeFlags&0x200u)!=0&&nativeMotionClock.x!=nativeMotionClock.y&&treeSwayStrength(instance)>0){
+   // The drawn position less the rest position is this frame's sway (nativeVertex adds
+   // treeSwayOffset to the rest position and nothing else for these records), so only
+   // last frame's sway is evaluated here.
+   previous+=treeSwayOffsetAt(o.shadowPosition,instance,nativeMotionClock.x)-(o.worldPosition-o.shadowPosition);
+   own=true;
+  }
+  if(own)o.motionClip=mul(nativeMotionPreviousClip,float4(previous,1));
+ }
+ return o;
+}
+struct NativeMotionPixelResult{float4 color:SV_Target0;float4 shadow:SV_Target1;float4 ambient:SV_Target2;float2 motion:SV_Target3;float motionDepth:SV_Target4;};
+#undef nativePS
+NativeMotionPixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace NATIVE_GUIDE_OUT){
+ NativePixelResult material=nativeMaterialPS(i,frontFace NATIVE_GUIDE_PASS);
+ NativeMotionPixelResult r;r.color=material.color;r.shadow=material.shadow;r.ambient=material.ambient;
+ // Depth 2 is never a world depth: the camera motion there.
+ r.motion=0;r.motionDepth=2;
+ float4 cameraClip=mul(nativeMotionPreviousClip,float4(i.worldPosition,1));
+ [branch]if(i.motionClip.w>1e-6&&cameraClip.w>1e-6){
+  float2 size=nativeMotionJitter.zw;
+  float2 pixel=i.p.xy-nativeMotionJitter.xy;
+  float2 objectPixel=float2(i.motionClip.x/i.motionClip.w*.5+.5,.5-i.motionClip.y/i.motionClip.w*.5)*size;
+  float2 cameraPixel=float2(cameraClip.x/cameraClip.w*.5+.5,.5-cameraClip.y/cameraClip.w*.5)*size;
+  // A reused slot whose old contents happen to match (same source vertex)
+  // would give a jump across the screen: more than a tenth of the width
+  // beyond the camera motion keeps the camera motion.
+  if(length(objectPixel-cameraPixel)<=.1*size.x){r.motion=objectPixel-pixel;r.motionDepth=i.p.z;}
+ }
+ return r;
+}
+#endif
+// Direct3D 11 (renderer_frame.cpp draw_dlss_object_motion): posed batches
+// redraw through these stages after their material draw instead.
 struct NativeMotionOutput{float4 p:SV_Position;float4 d:COLOR0;float4 s:COLOR1;float2 uv:TEXCOORD0;nointerpolation uint2 textureReference:TEXCOORD1;
  float4 objectClip:TEXCOORD2;float4 cameraClip:TEXCOORD3;nointerpolation uint swaying:TEXCOORD4;};
 NativeMotionOutput nativeMotionVS(uint vertexId:SV_VertexID){
@@ -4286,8 +6127,11 @@ NativeMotionOutput nativeMotionVS(uint vertexId:SV_VertexID){
    uint worldIndex=(instance.worldGeometry&@WORLD_LOD@)!=0?
     instance.secondMorphOffset+(preparedIndex&0xffffu):preparedIndex;
    NativeWorldVertex now=nativeWorldVertices[worldIndex],before=nativePreviousWorldVertices[worldIndex];
-   if(before.sourcePosition==now.sourcePosition&&before.partNode==now.partNode)previous+=before.p.xyz-now.p.xyz;
+   if(before.specular==asuint(nativeMotionClock.z)&&before.sourcePosition==now.sourcePosition&&before.partNode==now.partNode)previous+=before.p.xyz-now.p.xyz;
   }
+  // A swaying plant part: where the sway had it at last frame's clock.
+  [branch]if((instance.nativeFlags&0x200u)!=0&&nativeMotionClock.x!=nativeMotionClock.y&&treeSwayStrength(instance)>0)
+   previous+=treeSwayOffsetAt(o.shadowPosition,instance,nativeMotionClock.x)-treeSwayOffsetAt(o.shadowPosition,instance,nativeMotionClock.y);
   r.objectClip=mul(nativeMotionPreviousClip,float4(previous,1));
  }
  return r;
@@ -4397,7 +6241,10 @@ inline std::string compose_native_shader_source(const NativeShaderFeatures& feat
   for(auto at=text.find(lod_marker);at!=std::string::npos;at=text.find(lod_marker,at))
    text.replace(at,lod_marker.size(),std::to_string(native_world_lod)+"u");
   const std::string impostor_marker="@WORLD_IMPOSTOR@";
-  text.replace(text.find(impostor_marker),impostor_marker.size(),std::to_string(native_world_impostor)+"u");
+  for(auto at=text.find(impostor_marker);at!=std::string::npos;at=text.find(impostor_marker,at))
+   text.replace(at,impostor_marker.size(),std::to_string(native_world_impostor)+"u");
+  const std::string follower_marker="@WORLD_IMPOSTOR_FOLLOWER@";
+  text.replace(text.find(follower_marker),follower_marker.size(),std::to_string(native_world_impostor_follower)+"u");
   const std::string frames_marker="@IMPOSTOR_FRAMES@";
   const std::string gltf_marker="@GLTF_ANIMATION@";
   text.replace(text.find(gltf_marker),gltf_marker.size(),gltf::kAnimationShader);
@@ -4416,7 +6263,7 @@ inline std::string compose_native_shader_source(const NativeShaderFeatures& feat
   // (ground cover GC_PS_KIND 3): every other program preprocesses it away,
   // so a terrain edit leaves them in the build's shader store (shader_embed).
   text.replace(text.find(blend_marker),blend_marker.size(),std::string(features.terrain_tile_blend)+
-   "\n#if defined(NATIVE_TERRAIN_PS)||GC_PS_KIND==3\n"+kTerrain2Shader+kTerrain2CacheShader+"\n#endif\n");
+   "\n#if defined(NATIVE_TERRAIN_PS)||GC_PS_KIND==3\n"+kTerrain2Shader+kTerrain2CacheShader+kTerrainFaceCacheShader+"\n#endif\n");
 #ifdef EID3D11_EMBEDDED
   embedded_triangle_shader(text);
 #endif

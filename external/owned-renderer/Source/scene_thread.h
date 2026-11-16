@@ -28,12 +28,18 @@
 #include <deque>
 #include <mutex>
 #include <type_traits>
+#include <typeinfo>
 #include <utility>
 #include "stall_watchdog.h"
 #include "frame_accounting.h"
 #include "frame_waits.h"
 
 namespace owned {
+
+// One event per queued command over 20 ms in play: its type (the lambda's
+// enclosing function), so a long scene_command frame is named
+// (renderer_device.cpp).
+void report_slow_scene_command(const char* name, const char* site, double ms) noexcept;
 
 class SceneThread {
 public:
@@ -91,7 +97,7 @@ public:
     DWORD thread_id() const noexcept { return thread_id_; }
 
     // Queues a callable. present marks the command that ends a frame.
-    template <class F> bool post(F&& function, bool present = false) noexcept {
+    template <class F> bool post(F&& function, bool present = false, const char* site = nullptr) noexcept {
         Command* command = nullptr;
         try {
             command = new Callable<std::decay_t<F>>(std::forward<F>(function));
@@ -99,6 +105,7 @@ public:
             return false;
         }
         command->present = present;
+        command->site = site;
         bool wake = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -142,11 +149,14 @@ private:
     struct Command {
         virtual ~Command() = default;
         virtual void run() noexcept = 0;
+        virtual const char* name() const noexcept = 0;
         bool present = false;
+        const char* site = nullptr;  // the posting function (scene_post), static storage
     };
     template <class F> struct Callable final : Command {
         explicit Callable(F&& value) : function(std::move(value)) {}
         explicit Callable(const F& value) : function(value) {}
+        const char* name() const noexcept override { return typeid(F).name(); }
         void run() noexcept override {
             try {
                 function();
@@ -194,7 +204,11 @@ private:
                 if (!frame_waits::frame.active) frame_waits::begin();
                 const frame_waits::Scope record(frame_waits::record);
                 const frame_acct::Scope running(frame_acct::scene_command);
+                const std::int64_t begin = frame_acct::now();
                 command->run();
+                const double ms = double(frame_acct::now() - begin) * frame_acct::ms_per_tick();
+                if (ms > 20.0 && frame_acct::g_in_play.load(std::memory_order_relaxed))
+                    report_slow_scene_command(command->name(), command->site, ms);
             }
             const bool present = command->present;
             delete command;

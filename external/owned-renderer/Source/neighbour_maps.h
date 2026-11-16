@@ -11,6 +11,8 @@
 #include <functional>
 #include <map>
 #include <string>
+#include <unordered_set>
+#include <vector>
 
 namespace owned {
 struct D3D12PreparedUpload;  // d3d12_frame.h
@@ -70,6 +72,9 @@ bool build_native_prebuilt_texture(ID3D11Device* device, D3D12Preparer* d3d12, c
 void neighbour_texture_resident(const std::string& key, bool resident) noexcept;
 void neighbour_textures_clear() noexcept;
 bool neighbour_texture_is_resident(const std::string& key) noexcept;
+// The [RES] mounts of the current world (set when its stream starts); null
+// before the first world.
+std::shared_ptr<const ResourceStoreConfig> neighbour_world_mounts() noexcept;
 struct NativePrebuiltBuilder {
     Microsoft::WRL::ComPtr<ID3D11Device> device;
     std::shared_ptr<D3D12Preparer> d3d12;  // D3D12 backend (no device): pages are prepared uploads
@@ -84,17 +89,23 @@ bool finish_native_prebuilt_pages(NativePrebuiltBuilder& builder) noexcept;
 // CPU's shape selection (positions), keyed by the figure and that shape
 // (get_native_mesh's shape_bits), so every node of every neighbour drawing the
 // figure at that shape shares one mesh. The node transform is per record
-// (NativeWorldGeometry::object_space).
+// (NativeWorldGeometry::object_space). A part of an impostor object also
+// carries the object's sphere in its own frame (its mesh's sphere block), so
+// the key holds it too (zero: the part's own sphere).
 struct NeighbourFigureShape {
     const FigureCpuAsset* figure = nullptr;
     std::array<std::uint32_t, 3> shape{};
+    std::array<std::uint32_t, 4> sphere{};
     bool operator<(const NeighbourFigureShape& other) const noexcept {
-        return figure != other.figure ? figure < other.figure : shape < other.shape;
+        if (figure != other.figure) return figure < other.figure;
+        return shape != other.shape ? shape < other.shape : sphere < other.sphere;
     }
 };
-inline NeighbourFigureShape neighbour_figure_shape(const FigureCpuAsset* figure, const std::array<float, 3>& shape) noexcept {
-    NeighbourFigureShape key{figure, {}};
+inline NeighbourFigureShape neighbour_figure_shape(const FigureCpuAsset* figure, const std::array<float, 3>& shape,
+    const std::array<float, 4>* sphere = nullptr) noexcept {
+    NeighbourFigureShape key{figure, {}, {}};
     std::memcpy(key.shape.data(), shape.data(), sizeof(key.shape));
+    if (sphere) std::memcpy(key.sphere.data(), sphere->data(), sizeof(key.sphere));
     return key;
 }
 inline NativeGeometryView neighbour_figure_view(const FigureCpuAsset& figure, const NativePackedGroup* positions,
@@ -146,14 +157,31 @@ struct NeighbourMapUpload {
     std::vector<std::uint32_t> prebuilt_terrain_keys;
     std::vector<NativePrebuiltMesh> prebuilt_terrain;
     std::map<NeighbourFigureShape, NativePrebuiltMesh> prebuilt_figures;
-    // Crown impostor bake inputs (static_lod.h), per cut-out figure and
-    // texture: the renderer bakes them into its atlas before the decorations
-    // register (Renderer::bake_neighbour_impostors).
-    struct ImpostorSource {
-        NativeImpostorSource source;
-        const RetainedPreparedNode* node = nullptr; // its texture
+    // Crown impostor bake inputs (static_lod.h), one per object model (its
+    // drawn parts and their textures), from the first decoration drawing it:
+    // the renderer bakes them into its atlas before the decorations register
+    // (Renderer::bake_neighbour_impostors). Empty parts: not bakeable.
+    struct ImpostorObject {
+        std::vector<NativeImpostorPart> parts;
+        std::vector<const RetainedPreparedNode*> nodes; // per part, its texture
+        std::array<float, 4> sphere{};                  // in the lead part's frame
     };
-    std::map<std::pair<const FigureCpuAsset*, std::uint64_t>, ImpostorSource> impostor_sources;
+    std::map<std::string, ImpostorObject> impostor_objects;
+    // Per decoration (index as decorations): its impostor object's key (empty:
+    // none), its lead node and the object's sphere at its own shape in each
+    // node's frame (per node; radius 0 for a node outside the object).
+    struct ImpostorPlan {
+        std::string key;
+        std::uint32_t lead = 0;
+        std::vector<std::array<float, 4>> spheres;
+        // Morphing parts (eight shapes): the shape group's bake is its
+        // representative's (decoration index); unit_points, every part
+        // vertex in the sphere's unit frame, only until the grouping.
+        bool morphs = false;
+        std::size_t representative = 0;
+        std::vector<float> unit_points;
+    };
+    std::vector<ImpostorPlan> impostor_plans;
     // Static LOD levels built for this neighbour's figures (log line).
     struct {
         std::uint32_t figures = 0, reduced_figures = 0;
@@ -329,6 +357,28 @@ bool neighbour_maps_settled(std::uint64_t epoch) noexcept;
 // Neighbours of this epoch's stream not yet uploaded (0 once settled); false
 // while the stream has not read its layout yet (count unknown).
 bool neighbour_maps_remaining(std::uint64_t epoch,std::size_t& remaining) noexcept;
+// Stream steps shared with the active map's object-space statics: every
+// decoration's meshes (static LOD levels once per figure, one mesh per figure
+// and shape) and impostor plans, one prebuilt texture per cache key, and the
+// decorations' textures.
+// shape_texels: the impostor shape groups' allowed error, in frame texels.
+void prebuild_decorations(NeighbourMapUpload& upload, NativePrebuiltBuilder& builder, float shape_texels);
+void prebuild_texture(NativePrebuiltBuilder& builder, NeighbourMapUpload& upload,
+    std::unordered_set<std::string>& seen, const NativeOwnedTextureView& view);
+void prebuild_decoration_textures(NeighbourMapUpload& upload, NativePrebuiltBuilder& builder,
+    std::unordered_set<std::string>& seen);
+// The active map's object-space statics (Renderer::update_active_statics):
+// the decoration piece a neighbour gets (static LOD meshes, impostor bake
+// inputs; no textures, no terrain), built on a worker for one batch of
+// catalog models, each from the live assembly the game resolved for an
+// eligible object (prepare_live_static_candidate) in the object's own frame.
+// take returns the finished piece of that generation once (null while
+// building, after a failure or for another generation) with the model key of
+// each piece object and the models that could not be prepared.
+void active_statics_begin(std::uint64_t generation, std::vector<ActiveStaticsModelRequest> requests) noexcept;
+std::unique_ptr<NeighbourPiece> active_statics_take(std::uint64_t generation, bool& failed, std::string& failure,
+    std::vector<std::uint64_t>& models, std::vector<std::uint64_t>& failed_models) noexcept;
+void active_statics_stop() noexcept;
 bool bridge_neighbour_world_transform(std::array<float,16>& placement) noexcept;
 void bridge_neighbour_diagnostic(const char* reason) noexcept;
 }

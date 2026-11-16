@@ -33,6 +33,11 @@
 #include <cstdlib>
 #include <unordered_set>
 #include <vector>
+#include <string>
+#include <psapi.h>
+#include "error_report.h"
+#include "stall_watchdog.h"
+#include <array>
 
 namespace owned {
 namespace {
@@ -103,7 +108,108 @@ std::uint64_t Renderer::evict_idle_textures_for_budget(std::uint64_t bytes) noex
  return freed;
 }catch(...){return 0;}
 
+// Testers' evidence for eviction (a GTX 1080 kept passes 7-100x slower on
+// unchanged work after a 5.7 s Present stall while its video memory use fell
+// ~840 MiB with no release of ours): the residency of our big, frequently
+// read resources, the largest few of each set. D3D11 only: D3D12 resources
+// are not DXGI resources and D3D12 has no residency query (the line keeps
+// the adapter's use and budget). Called at the memory_status cadence; the
+// query reads the kernel's residency state and waits for no GPU work.
+bool Renderer::memory_residency_summary(char* out,std::size_t size) noexcept try{
+ if(d3d12_){std::snprintf(out,size,"residency n/a (D3D12 has no per-resource residency query)");return true;}
+ ComPtr<IDXGIDevice> dxgi;
+ if(!device_||FAILED(device_.As(&dxgi))){std::snprintf(out,size,"residency unknown (no DXGI device)");return true;}
+ // arrays: batched texture-array pages and the terrain 2.0 atlas pools;
+ // textures: owned world/figure textures (what most buckets sample).
+ static constexpr const char* kSets[]={"arrays","textures","geometry","materials","smaa","ground"};
+ static constexpr std::size_t kCaps[]={16,16,8,12,2,6};  // at most 60 resources per query
+ struct Item{ComPtr<ID3D11Resource> resource;std::uint64_t bytes;};
+ std::array<std::vector<Item>,6> sets;
+ const auto add=[&](unsigned set,ID3D11Resource* r){if(r)sets[set].push_back({r,resource_video_bytes(r)});};
+ const auto add_view=[&](unsigned set,ID3D11View* v){if(!v)return;ComPtr<ID3D11Resource> r;v->GetResource(&r);add(set,r.Get());};
+ for(const auto& group:native_texture_arrays_)for(const auto& page:group.second)add(0,page.texture.Get());
+ for(const auto& pool:terrain2_pools_){add(0,pool.atlas.Get());add(0,pool.heights.Get());}
+ for(const auto& item:native_owned_textures_)add(1,item.second.texture.Get());
+ for(const auto& page:native_geometry_pages_)add(2,page.buffer.Get());
+ for(const auto& profile:material_profiles_)add_view(3,profile.second.srv.Get());
+ add_view(4,scene_composite_.smaa_area_view());add_view(4,scene_composite_.smaa_search_view());
+ add(5,gc_color_.Get());
+ for(auto* view:{gc_fields_srv_.Get(),gc_tiles_srv_.Get(),gc_bark_srv_.Get(),gc_stone_srv_.Get(),gc_trees_srv_.Get()})add_view(5,view);
+ std::vector<ComPtr<IDXGIResource>> resources;std::vector<unsigned> owner;std::vector<std::uint64_t> bytes;
+ for(unsigned s=0;s<sets.size();++s){
+  auto& items=sets[s];const std::size_t keep=(std::min)(items.size(),kCaps[s]);
+  std::partial_sort(items.begin(),items.begin()+static_cast<std::ptrdiff_t>(keep),items.end(),[](const Item& a,const Item& b){return a.bytes>b.bytes;});
+  for(std::size_t i=0;i<keep;++i){ComPtr<IDXGIResource> r;
+   if(SUCCEEDED(items[i].resource.As(&r))){resources.push_back(r);owner.push_back(s);bytes.push_back(items[i].bytes);}}
+ }
+ if(resources.empty()){std::snprintf(out,size,"residency: none of our resources exist yet");return true;}
+ std::vector<IUnknown*> list;for(const auto& r:resources)list.push_back(r.Get());
+ std::vector<DXGI_RESIDENCY> state(list.size(),DXGI_RESIDENCY(0));
+ const HRESULT hr=dxgi->QueryResourceResidency(list.data(),state.data(),static_cast<UINT>(list.size()));
+ if(FAILED(hr)){std::snprintf(out,size,"residency query failed %08lx",static_cast<unsigned long>(hr));return true;}
+ unsigned resident=0,shared=0,disk=0;std::uint64_t total=0,off=0;
+ std::array<unsigned,6> checked{},off_count{};std::array<std::uint64_t,6> off_bytes{};
+ for(std::size_t i=0;i<state.size();++i){
+  total+=bytes[i];++checked[owner[i]];
+  if(state[i]==DXGI_RESIDENCY_FULLY_RESIDENT){++resident;continue;}
+  if(state[i]==DXGI_RESIDENCY_RESIDENT_IN_SHARED_MEMORY)++shared;else ++disk;
+  off+=bytes[i];++off_count[owner[i]];off_bytes[owner[i]]+=bytes[i];
+ }
+ int n=std::snprintf(out,size,"residency %zu checked, %.0f MiB (arrays %u textures %u geometry %u materials %u smaa %u ground %u): %u resident, %u in shared memory, %u evicted, %.1f MiB not resident",
+  state.size(),mib(total),checked[0],checked[1],checked[2],checked[3],checked[4],checked[5],resident,shared,disk,mib(off));
+ for(unsigned s=0;s<sets.size()&&n>0&&std::size_t(n)<size;++s)if(off_count[s])
+  n+=std::snprintf(out+n,size-std::size_t(n)," [%s %u, %.1f MiB]",kSets[s],off_count[s],mib(off_bytes[s]));
+ return off==0&&!shared&&!disk;
+}catch(...){std::snprintf(out,size,"residency unknown (out of memory)");return true;}
+
+// Testers' evidence for background paging (a small card whose budget other
+// programs take while the game is in the background): every 30 s and at
+// each focus loss or return, one line with the process's video memory use
+// against its WDDM budget (local and shared), private bytes, CPU and frame
+// rate. A few system calls every 30 s; per frame only a tick read.
+void Renderer::log_memory_status() noexcept try{
+ auto& s=memory_status_;
+ const ULONGLONG now=GetTickCount64();
+ const bool front=window_in_front();
+ const bool focus_change=s.known&&front!=s.in_front;
+ if(s.known&&!focus_change&&now-s.at_ms<30000)return;
+ FILETIME created{},exited{},kernel{},user{};
+ GetProcessTimes(GetCurrentProcess(),&created,&exited,&kernel,&user);
+ const std::uint64_t cpu=((std::uint64_t(kernel.dwHighDateTime)<<32)|kernel.dwLowDateTime)+((std::uint64_t(user.dwHighDateTime)<<32)|user.dwLowDateTime);
+ SYSTEM_INFO system{};GetSystemInfo(&system);
+ const double seconds=s.known?double(now-s.at_ms)/1000.0:0.0;
+ const double cpu_percent=seconds>0?100.0*double(cpu-s.cpu_100ns)/1e7/seconds/double((std::max)(DWORD(1),system.dwNumberOfProcessors)):0.0;
+ const double fps=seconds>0?double(native_frame_index_-s.frame)/seconds:0.0;
+ PROCESS_MEMORY_COUNTERS_EX memory{};memory.cb=sizeof(memory);
+ GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory),sizeof(memory));
+ DXGI_QUERY_VIDEO_MEMORY_INFO local{},shared{};
+ if(adapter3_){adapter3_->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&local);adapter3_->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL,&shared);}
+ namespace sw=stall_watch;
+ const int slot=(sw::residency_index.load(std::memory_order_relaxed)+1)&1;
+ char* residency=sw::residency[slot];
+ const bool all_resident=memory_residency_summary(residency,sizeof(sw::residency[slot]));
+ sw::residency_index.store(slot,std::memory_order_release);
+ char line[640];
+ std::snprintf(line,sizeof(line),"%s: video memory %.0f/%.0f MiB, shared %.0f/%.0f MiB, private %.0f MiB, CPU %.0f%%, %.1f frames/s, %s, budget level %u, %s",
+  focus_change?(front?"focus back":"focus lost"):"every 30 s",mib(local.CurrentUsage),mib(local.Budget),mib(shared.CurrentUsage),mib(shared.Budget),
+  mib(memory.PrivateUsage),cpu_percent,fps,front?"in front":"in the background",vram_budget_.level,residency);
+ bridge_report_event("memory_status",line);
+ set_error_report_status(line);
+ // One event when the checked set stops (or again starts) being all resident.
+ if(s.residency_known?all_resident!=s.all_resident:!all_resident){
+  SYSTEMTIME t{};GetLocalTime(&t);TIME_ZONE_INFORMATION zone{};GetTimeZoneInformation(&zone);
+  char detail[480];
+  std::snprintf(detail,sizeof(detail),"%s at %04u-%02u-%02u %02u:%02u:%02u.%03u UTC%+ld min, frame %llu: %s",
+   all_resident?"all resident again":"not all resident",t.wYear,t.wMonth,t.wDay,t.wHour,t.wMinute,t.wSecond,t.wMilliseconds,
+   -static_cast<long>(zone.Bias),static_cast<unsigned long long>(native_frame_index_),residency);
+  bridge_report_event("vram_residency",detail);
+ }
+ s.residency_known=true;s.all_resident=all_resident;
+ s.known=true;s.in_front=front;s.at_ms=now;s.frame=native_frame_index_;s.cpu_100ns=cpu;
+}catch(...){}
+
 void Renderer::update_vram_budget() noexcept{
+ log_memory_status();
  auto& v=vram_budget_;
  if(!adapter3_||native_frame_index_<v.next_poll_frame)return;
  v.next_poll_frame=native_frame_index_+kPollFrames;

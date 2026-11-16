@@ -11,6 +11,9 @@
 #endif
 #include "neighbour_maps.h"
 #include "neighbour_client.h"
+#include "texture_mips.h"
+#include "frame_accounting.h"
+#include "engine_bridge.h"
 
 #include <windows.h>
 
@@ -23,10 +26,12 @@
 #include <map>
 #include <memory>
 #include <limits>
+#include <list>
 #include <mutex>
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -50,6 +55,124 @@ struct VisualAnimationLibrary final : OwnedAnimationLibraryOwner {
     // The fixed archive index gives stable addresses for aliasing consumers.
     // A clip never owns the library, so no shared-ownership cycle is possible.
     std::vector<Clip> clips;
+    std::size_t decoded_bytes = 0;  // decoded clip tracks so far (recent hold accounting)
+};
+
+// Approximate heap bytes of a decoded asset (vector capacities), for the
+// recent hold below.
+template<class T> std::size_t vector_bytes(const std::vector<T>& v) noexcept { return v.capacity()*sizeof(T); }
+std::size_t asset_bytes(const FigureCpuAsset& a) noexcept {
+    return sizeof(a)+vector_bytes(a.bounds)+vector_bytes(a.positions)+vector_bytes(a.normals)+
+        vector_bytes(a.texture_coordinates)+vector_bytes(a.indices)+vector_bytes(a.components)+
+        vector_bytes(a.morph_components)+vector_bytes(a.user_data);
+}
+std::size_t asset_bytes(const ModelCpuAsset& a) noexcept {
+    std::size_t bytes=sizeof(a)+vector_bytes(a.links)+vector_bytes(a.nodes);
+    for(const auto& node:a.nodes)bytes+=asset_bytes(node.figure)+vector_bytes(node.bone_positions)+node.name.capacity();
+    return bytes;
+}
+std::size_t asset_bytes(const AnimationDatabaseAsset& a) noexcept {
+    std::size_t bytes=sizeof(a)+vector_bytes(a.entries);
+    for(const auto& entry:a.entries)bytes+=entry.name.capacity();
+    return bytes;
+}
+std::size_t asset_bytes(const TextureCpuAsset& a) noexcept {
+    return sizeof(a)+(a.source?a.source->size():0)+vector_bytes(a.mips)+vector_bytes(a.user_data)+
+        (a.alpha_cut_mask?a.alpha_cut_mask->size():0);
+}
+std::size_t asset_bytes(const AnimationClipAsset& a) noexcept {
+    std::size_t bytes=sizeof(a);
+    for(const auto& track:a.tracks)bytes+=sizeof(track)+track.first.capacity()+vector_bytes(track.second.rotations)+
+        vector_bytes(track.second.translations)+vector_bytes(track.second.morphs);
+    return bytes;
+}
+std::size_t asset_bytes(const VisualAnimationLibrary& a) noexcept {
+    return sizeof(a)+std::size_t(a.outer_identity.bytes)+vector_bytes(a.clips)+a.decoded_bytes;
+}
+
+// Decoded assets stay alive for a while after their last holder lets go, so
+// a menu or dialog that is opened again (the Esc menu's model "unmoco1" and
+// its textures, created by every OnActivate: laptop j217, 2.75 ms of
+// ours_appearance re-decoding them at each open) finds them in its pool
+// instead of decoding them again. The weak pools stay the identity index.
+//
+// Every looked-up asset gets an entry. While others still use it the entry
+// costs no memory (the asset lives anyway) and counts against nothing. A
+// sweep of a few entries per lookup finds assets whose only owner left is
+// this hold and moves them to the released list, most recently released
+// first; only released bytes count, and the oldest released go past
+// kReleasedBytes. A lookup of a released asset takes it back into use.
+// Load-time assets that stay in use therefore never push a closed menu's
+// assets out (35c1c707 counted them: 31 MB held at load, laptop j223).
+// Game-thread and scene-thread lookups both run under RuntimeState::lock.
+struct RecentHold {
+    // Released bytes kept. The Esc menu's whole set ("unmoco1" .mod/.bon,
+    // 12 parts, textures) is 0.29 MB (laptop j223: reopened from the hold,
+    // ours_appearance 2.84 -> 0.45 ms); 4 MB leaves room for the other
+    // screens and dialogs that rebuild their models on every open.
+    static constexpr std::size_t kReleasedBytes = 4u << 20;
+    static constexpr unsigned kSweepPerLookup = 16;
+    struct Entry { std::shared_ptr<const void> value; std::size_t bytes = 0; bool released = false; };
+    using List = std::list<Entry>;
+    List in_use, released;
+    List::iterator cursor = in_use.end();
+    std::unordered_map<const void*, List::iterator> index;
+    std::size_t released_bytes = 0, reported_mb = 0;
+
+    // limit: entries looked at (a world change looks at all of them, so the
+    // old world's assets are not kept alive by their entries).
+    void sweep(std::size_t limit = kSweepPerLookup) noexcept {
+        for (std::size_t step = 0; step < limit && !in_use.empty(); ++step) {
+            if (cursor == in_use.end()) cursor = in_use.begin();
+            const auto current = cursor++;
+            if (current->value.use_count() != 1) continue;
+            current->released = true;
+            released_bytes += current->bytes;
+            released.splice(released.begin(), in_use, current);
+        }
+        while (released_bytes > kReleasedBytes && !released.empty()) {
+            released_bytes -= released.back().bytes;
+            index.erase(released.back().value.get());
+            released.pop_back();
+        }
+        const std::size_t mb = released_bytes >> 20;
+        if (mb > reported_mb) {
+            reported_mb = mb;
+            char text[112];
+            std::snprintf(text, sizeof(text), "released_mb=%zu released=%zu in_use=%zu limit_mb=%zu",
+                mb, released.size(), in_use.size(), kReleasedBytes >> 20);
+            owned::bridge_report_event("asset_recent_hold", text);
+        }
+    }
+
+    // A lookup of this asset. Its bytes are measured when it is first seen
+    // (assets are immutable) or, with update, again (an animation library
+    // grows as its clips are decoded).
+    template<class Asset>
+    void touch(const std::shared_ptr<Asset>& value, bool update = false) noexcept try {
+        const void* key = value.get();
+        if (!key) return;
+        const auto found = index.find(key);
+        if (found != index.end()) {
+            Entry& entry = *found->second;
+            const std::size_t value_bytes = update ? asset_bytes(*value) : entry.bytes;
+            if (entry.released) {
+                released_bytes -= entry.bytes;
+                entry.released = false;
+                in_use.splice(in_use.end(), released, found->second);
+            }
+            entry.bytes = value_bytes;
+        } else {
+            in_use.push_back(Entry{std::shared_ptr<const void>(value), asset_bytes(*value)});
+            try { index.emplace(key, std::prev(in_use.end())); } catch (...) {
+                if (cursor == std::prev(in_use.end())) cursor = in_use.end();
+                in_use.pop_back();
+                return;
+            }
+        }
+        sweep();
+    } catch (...) {}
+    void clear() noexcept { index.clear(); in_use.clear(); released.clear(); cursor = in_use.end(); released_bytes = 0; }
 };
 
 // Weak dictionaries are identity indexes, not admission budgets. Reclaim a
@@ -135,6 +258,7 @@ struct RuntimeState {
     WeakPool<std::string, std::weak_ptr<const AnimationDatabaseAsset>> visual_databases;
     WeakPool<std::string, std::weak_ptr<VisualAnimationLibrary>> visual_clips;
     WeakPool<std::uint64_t, std::weak_ptr<const OwnedVisualSurface>> visual_surfaces;
+    RecentHold recent;
 #ifdef EID3D11_TESTING
     OwnedVisualClipReuseTestStats clip_reuse;
     std::shared_ptr<OwnedResourceLoader> test_loader_pin;
@@ -185,6 +309,10 @@ std::shared_ptr<const AnimationClipAsset> visual_clip_from_library(
 #endif
         if (!decode_animation_clip(member,slot.asset,failure,&state.selected_resources)) return nullptr;
         slot.ready = true;
+        library->decoded_bytes += asset_bytes(slot.asset);
+        state.recent.touch(library, true);
+    } else {
+        state.recent.touch(library);
     }
     failure = {};
     return std::shared_ptr<const AnimationClipAsset>(std::move(library),&slot.asset);
@@ -202,6 +330,12 @@ void bind_visual_library(const std::shared_ptr<const AnimationDatabaseAsset>& da
 
 bool copy_visual_bytes(void* owned, const void* borrowed, std::uint32_t size) noexcept {
     __try { std::memcpy(owned, borrowed, size); return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// True only when the borrowed bytes are readable and equal to the owned ones.
+bool visual_bytes_equal(const void* owned, const void* borrowed, std::uint32_t size) noexcept {
+    __try { return std::memcmp(owned, borrowed, size) == 0; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
@@ -228,6 +362,7 @@ std::shared_ptr<const Asset> visual_asset(
     const auto found = pool.values.find(key);
     if (found != pool.values.end()) if (auto pinned = found->second.lock()) {
         if (diagnostic) diagnostic->cache_hit = true;
+        runtime().recent.touch(pinned);
         return pinned;
     }
     if (diagnostic) diagnostic->cache_miss = true;
@@ -252,15 +387,47 @@ std::shared_ptr<const Asset> visual_asset(
             }
         };
         bool decoded = false;
+        LARGE_INTEGER decode_begin{};
+        QueryPerformanceCounter(&decode_begin);
         {
             DecodeClock decode_clock(diagnostic);
             decoded = decode(*result);
+        }
+        // Created-in-play detector: an owned asset decoded on a frame thread
+        // while the world is shown is a hitch the player sees (j190: figures,
+        // part textures and alpha masks under the weapon-change hook). One
+        // event each, with the unit and game callback whose publication asked,
+        // and repeat=1 when this key was decoded before in this session (its
+        // cached copy had expired: the same asset parsed again).
+        bool repeat = false;
+        {
+            static std::mutex decoded_lock;
+            static std::unordered_set<std::string> decoded_keys;
+            std::lock_guard<std::mutex> guard(decoded_lock);
+            repeat = !decoded_keys.insert(key).second;
+        }
+        if (frame_acct::g_in_play.load(std::memory_order_relaxed) && frame_acct::t_frame_thread) {
+            static const char* const callbacks[] = {"unknown", "virtual_create", "load_template", "load_figures",
+                "addon_load_figures", "change_weapon", "set_materials", "load_figure", "add_unloaded", "final_data",
+                "load_textures", "change_texture", "highlight", "plan_add_figure", "plan_remove_figure", "complection",
+                "database_binding", "packet_finish"};
+            const std::uint8_t callback = frame_acct::t_asset_callback;
+            LARGE_INTEGER end{}, frequency{};
+            QueryPerformanceCounter(&end); QueryPerformanceFrequency(&frequency);
+            char text[384];
+            std::snprintf(text, sizeof(text), "%s ms=%.2f bytes=%zu repeat=%d unit=%d callback=%s thread=%lu", key.c_str(),
+                double(end.QuadPart - decode_begin.QuadPart) * 1000.0 / double(frequency.QuadPart),
+                decoded ? asset_bytes(*result) : std::size_t(0), repeat ? 1 : 0,
+                frame_acct::t_asset_unit, callback < std::size(callbacks) ? callbacks[callback] : "none",
+                GetCurrentThreadId());
+            owned::bridge_report_event("asset_decoded_in_play", text);
         }
         if (!decoded) {
             pool.erase(key);
             return nullptr;
         }
         pool.values.insert_or_assign(key, result);
+        runtime().recent.touch(result);
         return result;
     } catch (const std::bad_alloc&) {
         pool.erase(key);
@@ -387,7 +554,7 @@ std::shared_ptr<const TextureCpuAsset> visual_texture_asset(RuntimeState& state,
         failure={ResourceFailureCode::file_read,"generated texture has no successful completed source"};
         return nullptr;
     }
-    if (auto pinned=source.asset.lock()) { failure={}; return pinned; }
+    if (auto pinned=source.asset.lock()) { if(!generated)state.recent.touch(pinned); failure={}; return pinned; }
     try {
         auto result=std::make_shared<TextureCpuAsset>();
         if (!decode(*result)) {
@@ -401,6 +568,8 @@ std::shared_ptr<const TextureCpuAsset> visual_texture_asset(RuntimeState& state,
         if(!generated)if(auto stand_in=texture_host_stand_in(value))value=std::move(stand_in);
 #endif
         source.asset=value;
+        // Archive members only: a generated value is replaced by its writer.
+        if(!generated)state.recent.touch(value);
         failure={};
         return value;
     } catch (const std::bad_alloc&) {
@@ -669,7 +838,9 @@ void start_next_load(RuntimeState& state) noexcept {
     // (terrain_source_snapshot). A secondary MOB (an AddMob supplement) has
     // no terrain and nobody reads its textures; loading them there decoded
     // and streamed ~1.4 MB per supplement again (#203).
-    if (!request.terrain_resource.empty()) request.extra_textures = {"tree02", "stone02"};
+    // The Suslanger plant cards' atlases too (issue #251).
+    if (!request.terrain_resource.empty())
+        request.extra_textures = {"tree02", "stone02", "tree04", "bush03", "bushset01", "bushset02"};
     request.prepare_terrain_shading = !request.terrain_resource.empty(); // active map terrain
     ResourceFailure failure{};
     if (!state.loader->request(request, failure, &state.active.token)) {
@@ -875,6 +1046,7 @@ void owned_resource_runtime_release() noexcept {
         state.visual_texture_sources_available = true;
         state.visual_databases.clear();
         state.visual_clips.clear();
+        state.recent.clear();
         if (++state.resolver_generation == 0) ++state.resolver_generation;
         state.polling.store(false, std::memory_order_release);
     }
@@ -988,7 +1160,8 @@ std::uint64_t retained_static_begin_source(
         request.terrain_resource = load.terrain_resource;
         request.mounts = state.mounts;
         request.load_object_assets = false;
-        request.extra_textures = {"tree02", "stone02"}; // ground-cover bark and rock art
+        // Ground-cover bark and rock art and the plant cards' atlases (issue #251).
+        request.extra_textures = {"tree02", "stone02", "tree04", "bush03", "bushset01", "bushset02"};
         request.prepare_terrain_shading = true; // the active map's terrain is never edited
         ResourceFailure failure{};
         if (!state.loader->request(request, failure, &load.token)) {
@@ -1238,8 +1411,44 @@ std::shared_ptr<const TextureCpuAsset> retained_visual_generated_texture_asset(
     }
     auto& state=runtime();
     std::lock_guard<std::mutex> guard(state.lock);
+    // A writer that recomposes a name with the bytes it already holds (the
+    // addon redoes the per-character atlases on every equip once its shared
+    // names run out) keeps the current value: no new serial, so nothing is
+    // republished or sent to the host again.
+    // Recomposed names (past the addon's name cap: the hero's two atlases,
+    // ~9 completions per equip): a name completed more than once keeps its
+    // last value alive for kRecomposedHoldMs after its latest completion,
+    // so the publication stream keeps its asset defined on the host instead
+    // of releasing and defining it again between recompositions (outfit
+    // stress: cap-phase retained stream 10.6 -> 2.9 MB/frame, ~11 MB held).
+    constexpr ULONGLONG kRecomposedHoldMs=2000;
+    struct Recomposed { std::shared_ptr<const TextureCpuAsset> value; ULONGLONG at=0; unsigned completions=0; };
+    static std::unordered_map<std::string,Recomposed> recomposed;
+    const ULONGLONG now=GetTickCount64();
+    for (auto held=recomposed.begin();held!=recomposed.end();)
+        if (held->second.value && now-held->second.at>=kRecomposedHoldMs) held->second.value.reset(),++held;
+        else ++held;
+    if (event==GeneratedTextureEvent::completed && bytes && size) {
+        std::shared_ptr<const TextureCpuAsset> pinned;
+        const auto found=state.visual_textures.values.find("generated-memory:"+name);
+        if (found!=state.visual_textures.values.end() && found->second.source_available)
+            pinned=found->second.asset.lock();
+        bool held_only=false;
+        if (!pinned) if (const auto held=recomposed.find(name);held!=recomposed.end() && held->second.value) {
+            pinned=held->second.value;held_only=true;
+        }
+        if (pinned && pinned->source && pinned->source->size()==size &&
+            visual_bytes_equal(pinned->source->data(),bytes,size)) {
+            auto& entry=recomposed[name];
+            if (++entry.completions>1) { entry.value=pinned;entry.at=now; }
+            // A held value no longer in the index goes back into it.
+            if (held_only && found!=state.visual_textures.values.end()) found->second.asset=pinned;
+            failure={};
+            return pinned;
+        }
+    }
     // Exact case-sensitive source name from the completed native writer.
-    return visual_texture_asset(state,"generated-memory:"+name,true,event,failure,
+    auto result=visual_texture_asset(state,"generated-memory:"+name,true,event,failure,
         [&](TextureCpuAsset& result) {
             const auto address=reinterpret_cast<std::uintptr_t>(bytes);
             if (!bytes || size<76 || (size&3u) || size>UINTPTR_MAX-address) {
@@ -1257,6 +1466,11 @@ std::shared_ptr<const TextureCpuAsset> retained_visual_generated_texture_asset(
             result.source_name=name;
             return true;
         });
+    if (result && event==GeneratedTextureEvent::completed) try {
+        auto& entry=recomposed[name];
+        if (++entry.completions>1) { entry.value=result;entry.at=now; }
+    } catch (...) {}
+    return result;
 }
 
 std::shared_ptr<const AnimationDatabaseAsset> retained_visual_database_asset(
@@ -1434,6 +1648,17 @@ bool retained_visual_complete_surface(const OwnedVisualSurface& description,
             const bool readable = visual_surface_raw_alpha(*next, pixels, bytes, alpha);
             next->alpha_fully_opaque = readable && texture_alpha_fully_opaque(alpha);
             if (readable && !next->alpha_fully_opaque) next->alpha_cut_mask = texture_alpha_cut_mask(alpha);
+            // A block-compressed surface's content value: the renderer finds
+            // the archive member these bytes came from by it.
+            if ((next->format.dwFlags & DDPF_FOURCC) && next->pitch > 0) {
+                const DWORD code = next->format.dwFourCC;
+                const std::size_t block = code == MAKEFOURCC('D','X','T','1') ? 8u :
+                    (code == MAKEFOURCC('D','X','T','3') || code == MAKEFOURCC('D','X','T','5')) ? 16u : 0u;
+                const std::size_t row = std::size_t((next->width + 3u) / 4u) * block, rows = (next->height + 3u) / 4u;
+                const std::size_t pitch = static_cast<std::size_t>(next->pitch);
+                if (block && row && rows && pitch >= row && pitch * (rows - 1) + row <= bytes)
+                    block_content_value(pixels, pitch, row, rows, next->block_content);
+            }
         }
         state.visual_surfaces.values.insert_or_assign(id, next);
         if (!state.scene.visual_replace_surface(id, next)) {
@@ -1471,6 +1696,7 @@ void owned_resource_runtime_release_world_bookkeeping() noexcept {
             }
             pool.cleanup = pool.values.end();
         };
+        state.recent.sweep(state.recent.in_use.size());
         const auto weak = [](const auto& value) { return value.expired(); };
         sweep(state.visual_models, weak);
         sweep(state.visual_figures, weak);

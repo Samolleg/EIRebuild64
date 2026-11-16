@@ -5,3 +5,5 @@ D3D12_DIAG_VS RCDATA "..\\..\\build\\x64-host\\dxil\\diag_vs.dxil"
 D3D12_DIAG_PS RCDATA "..\\..\\build\\x64-host\\dxil\\diag_ps.dxil"
 D3D12_IMGUI_VS RCDATA "..\\..\\build\\x64-host\\dxil\\imgui_vs.dxil"
 D3D12_IMGUI_PS RCDATA "..\\..\\build\\x64-host\\dxil\\imgui_ps.dxil"
+// The shipped pipeline list (d3d12_frame.cpp request_recorded).
+D3D12_SHIPPED_PIPELINES RCDATA "eid3d11_d3d12_pipelines.shipped.list"

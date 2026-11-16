@@ -14,6 +14,7 @@ inline TextureSampler world_texture_sampler(DWORD /*min_filter*/,DWORD /*mag_fil
     d.MaxLOD=world||mip_filter!=D3DTFP_NONE?D3D11_FLOAT32_MAX:0.f;
     auto address=[](DWORD value){switch(value){case D3DTADDRESS_MIRROR:return D3D11_TEXTURE_ADDRESS_MIRROR;
         case D3DTADDRESS_CLAMP:return D3D11_TEXTURE_ADDRESS_CLAMP;
+        case D3DTADDRESS_BORDER:return D3D11_TEXTURE_ADDRESS_BORDER; // transparent black (a cropped camp icon)
         default:return D3D11_TEXTURE_ADDRESS_WRAP;}};
     d.AddressU=address(address_u);d.AddressV=address(address_v);d.AddressW=D3D11_TEXTURE_ADDRESS_WRAP;
     result.key=(d.MaxLOD==0?1ull<<63:0)|(std::uint64_t(d.MaxAnisotropy)<<48)|

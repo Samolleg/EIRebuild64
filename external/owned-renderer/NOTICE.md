@@ -38,6 +38,14 @@ code from them is included.
 | SMAA | `ThirdParty/smaa` | see `ThirdParty/smaa/LICENSE.txt` |
 | AMD FidelityFX Super Resolution 2 | `ThirdParty/fsr2` | MIT, see `ThirdParty/fsr2/LICENSE.txt` |
 | NVIDIA DLSS (nvngx_dlss.dll, not in this repository) | shipped with builds | NVIDIA RTX SDKs licence |
+| Microsoft DirectX 12 Agility SDK 1.620.2 (D3D12\D3D12Core.dll, not in this repository) | shipped with builds | Microsoft DirectX 12 Agility SDK licence (distributable code), `d3d12_agility_license.txt` |
+| NVIDIA RTXDI library 3.2.0 (ReSTIR direct lighting and ReSTIR GI; not in this repository) | compiled into the render host's shader programs only; its licence text ships with builds as `nvidia_rtxdi_license.txt` | NVIDIA RTX SDKs licence |
+
+This software contains source code provided by NVIDIA Corporation: the ray
+traced lamp light (`rt_direct_lights`) and indirect light (`rt_indirect_light`)
+use the NVIDIA RTXDI library, whose headers are compiled into five shader
+programs at build time from the SDK
+folder outside this repository.
 
 The camp UI art in `Assets/camp` was generated for this project; see
 `Assets/camp/PROVENANCE.txt`.

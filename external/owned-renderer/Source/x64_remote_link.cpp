@@ -11,6 +11,7 @@
 
 namespace owned {
 void bridge_report_event(const char* event, const char* detail) noexcept;
+void bridge_async_append(const wchar_t* path, const char* bytes, std::size_t size) noexcept;  // engine_bridge.cpp
 std::wstring renderer_config_path();
 }
 
@@ -50,6 +51,11 @@ struct Link {
     std::int64_t report_qpc = 0;
     std::uint64_t report_records = 0, report_bytes = 0, report_host_frames = 0;
     double qpc_to_ms = 0;
+    // Temporary (doll bug, 2026-11-06): bytes per scene command id and of the
+    // retained publication stream since the last report (scene_mutex /
+    // ring lock), to name what fills the ring on the outfitting screen.
+    std::uint64_t scene_command_bytes[256]{}, scene_command_messages[256]{};
+    std::uint64_t retained_bytes = 0;
 };
 
 Link& link() noexcept {
@@ -97,21 +103,83 @@ bool host_alive() noexcept {
     return true;
 }
 
+// Temporary (doll bug, 2026-11-06): the outfitting-screen hitches carry
+// ~50 ms main-thread waits, the length of this loop's poll. Per call site:
+// waits over 10 and 45 ms, the longest, and how the long ones ended (the
+// host's event, or a 50 ms poll timing out with the condition then true).
+enum WaitSite { kWaitSpace, kWaitReply, kWaitPresent, kWaitSites };
+const char* const kWaitSiteName[kWaitSites] = {"ring_space", "reply", "present"};
+struct WaitSiteStats {
+    std::uint64_t calls = 0, over10 = 0, over45 = 0, timed_out_polls = 0, ended_after_timeout = 0;
+    double max_ms = 0;
+};
+std::mutex g_wait_lock;
+WaitSiteStats g_wait_stats[kWaitSites];
+ULONGLONG g_wait_window = 0, g_wait_second = 0;
+unsigned g_wait_second_lines = 0;
+bool g_wait_window_long = false;
+
+void note_wait(WaitSite site, std::int64_t start, unsigned timeouts, unsigned signals,
+               bool last_wake_timeout, bool ok) noexcept {
+    const double ms = double(now_qpc() - start) * link().qpc_to_ms;
+    std::lock_guard<std::mutex> guard(g_wait_lock);
+    auto& stats = g_wait_stats[site];
+    ++stats.calls;
+    stats.timed_out_polls += timeouts;
+    if (ms >= 10) { ++stats.over10; g_wait_window_long = true; }
+    if (ms > stats.max_ms) stats.max_ms = ms;
+    const ULONGLONG tick = GetTickCount64();
+    if (ms >= 45) {
+        ++stats.over45;
+        if (ok && last_wake_timeout) ++stats.ended_after_timeout;
+        if (tick / 1000 != g_wait_second) { g_wait_second = tick / 1000; g_wait_second_lines = 0; }
+        if (g_wait_second_lines++ < 20)
+            log("long wait %s %.1f ms: %s; %u poll timeouts, %u host signals, last wake %s",
+                kWaitSiteName[site], ms, ok ? "condition true" : "gave up", timeouts, signals,
+                last_wake_timeout ? "poll timeout" : (timeouts || signals ? "host signal" : "spin"));
+    }
+    if (!g_wait_window) g_wait_window = tick;
+    if (tick - g_wait_window >= 5000) {
+        if (g_wait_window_long) {
+            char line[640]; int used = 0;
+            for (int i = 0; i < kWaitSites && used < int(sizeof(line)); ++i) {
+                const auto& w = g_wait_stats[i];
+                const int n = std::snprintf(line + used, sizeof(line) - used,
+                    "%s%s calls=%llu >=10ms=%llu >=45ms=%llu max=%.1fms poll_timeouts=%llu long_ended_by_timeout=%llu",
+                    i ? "; " : "", kWaitSiteName[i], static_cast<unsigned long long>(w.calls),
+                    static_cast<unsigned long long>(w.over10), static_cast<unsigned long long>(w.over45), w.max_ms,
+                    static_cast<unsigned long long>(w.timed_out_polls), static_cast<unsigned long long>(w.ended_after_timeout));
+                if (n > 0) used += n;
+            }
+            log("waits over %.1f s: %s", double(tick - g_wait_window) / 1000.0, line);
+        }
+        for (auto& w : g_wait_stats) w = {};
+        g_wait_window = tick;
+        g_wait_window_long = false;
+    }
+}
+
 // Waits until ready() holds, raising `flag` so the host signals `event`.
 // timeout_ms 0: until the host dies.
-template <class Ready> bool wait_until(Ready ready, volatile long& flag, HANDLE event, DWORD timeout_ms = 0) noexcept {
+template <class Ready> bool wait_until(Ready ready, volatile long& flag, HANDLE event, WaitSite site,
+                                       DWORD timeout_ms = 0) noexcept {
     const ULONGLONG deadline = timeout_ms ? GetTickCount64() + timeout_ms : 0;
     for (int spin = 0; spin < 64; ++spin) {
         if (ready()) return true;
         YieldProcessor();
     }
+    const std::int64_t start = now_qpc();
+    unsigned timeouts = 0, signals = 0;
+    bool last_timeout = false;
     for (;;) {
-        if (ready()) return true;
-        if (!host_alive()) return false;
-        if (deadline && GetTickCount64() > deadline) return false;
+        if (ready()) { note_wait(site, start, timeouts, signals, last_timeout, true); return true; }
+        if (!host_alive()) { note_wait(site, start, timeouts, signals, last_timeout, false); return false; }
+        if (deadline && GetTickCount64() > deadline) { note_wait(site, start, timeouts, signals, last_timeout, false); return false; }
         InterlockedExchange(&flag, 1);
-        if (ready()) { InterlockedExchange(&flag, 0); return true; }
-        WaitForSingleObject(event, 50);
+        if (ready()) { InterlockedExchange(&flag, 0); note_wait(site, start, timeouts, signals, last_timeout, true); return true; }
+        const DWORD woke = WaitForSingleObject(event, 50);
+        last_timeout = woke == WAIT_TIMEOUT;
+        if (last_timeout) ++timeouts; else ++signals;
         InterlockedExchange(&flag, 0);
     }
 }
@@ -136,7 +204,7 @@ bool ensure_space(std::uint32_t bytes) noexcept {
     const std::int64_t start = now_qpc();
     // A host that stops consuming (hung, not exited) fails the device
     // visibly instead of hanging the game.
-    if (!wait_until(fits, l.control->space_waiting, l.space, kHostStallMs) && !l.removed.load())
+    if (!wait_until(fits, l.control->space_waiting, l.space, kWaitSpace, kHostStallMs) && !l.removed.load())
         lose("the host stopped consuming commands for 20 s");
     ++l.space_waits;
     l.space_wait_ms += (now_qpc() - start) * l.qpc_to_ms;
@@ -300,10 +368,13 @@ void log(const char* format, ...) noexcept {
     va_end(args);
     SYSTEMTIME now{};
     GetLocalTime(&now);
-    FILE* file = nullptr;
-    if (!l.log_path.empty() && _wfopen_s(&file, l.log_path.c_str(), L"ab") == 0 && file) {
-        std::fprintf(file, "%02u:%02u:%02u.%03u %s\n", now.wHour, now.wMinute, now.wSecond, now.wMilliseconds, text);
-        std::fclose(file);
+    // Through the log writer thread: this runs on the game thread (window
+    // summaries every 2 s), where a file close could block it (frame stall fix).
+    if (!l.log_path.empty()) {
+        char line[1100];
+        const int length = std::snprintf(line, sizeof(line), "%02u:%02u:%02u.%03u %s\n", now.wHour, now.wMinute, now.wSecond,
+                                         now.wMilliseconds, text);
+        if (length > 0) owned::bridge_async_append(l.log_path.c_str(), line, std::size_t((std::min)(length, int(sizeof(line) - 1))));
     }
     OutputDebugStringA("EID3D11 x64 host link: ");
     OutputDebugStringA(text);
@@ -367,27 +438,97 @@ bool link_start(HWND game_window, UINT device_flags, char* error, std::size_t er
     wchar_t backend[16]{};
     GetPrivateProfileStringW(L"graphics", L"renderer_backend", L"d3d11", backend, 16, owned::renderer_config_path().c_str());
     const bool d3d12 = _wcsicmp(backend, L"d3d12") == 0 || _wcsicmp(backend, L"1") == 0;   // F10 Renderer: 1; older ini files: d3d12
-    wchar_t command[MAX_PATH + 128];
-    swprintf_s(command, L"\"%s\" --remote --pid %lu --hwnd %llu%s", host_path.c_str(), pid,
+    wchar_t arguments[128];
+    swprintf_s(arguments, L"--remote --pid %lu --hwnd %llu%s", pid,
                static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(game_window)), d3d12 ? L" --backend d3d12" : L"");
+    // --ini: the host's overlay starts from the game's ini before the start's
+    // shader preparation, so its "Preparing shaders" window can show.
+    std::wstring command = L"\"" + host_path + L"\" " + arguments + L" --ini \"" + owned::renderer_config_path() + L"\"";
+    // Developer diagnostics: EI_RENDERER_HOST_LAUNCHER starts the host through
+    // a tool that must launch the process it profiles (Nsight Graphics cannot
+    // attach to a host a 32-bit parent started). {exe} and {args} are
+    // replaced, e.g. "C:\...\ngfx.exe" --activity "GPU Trace Profiler"
+    // --exe "{exe}" --args "{args}". The host finds this process by its pid
+    // through named objects, so nothing is inherited. Unset: the host itself.
+    wchar_t launcher[2048]{};
+    const DWORD launcher_length = GetEnvironmentVariableW(L"EI_RENDERER_HOST_LAUNCHER", launcher, 2048);
+    const bool via_launcher = launcher_length && launcher_length < 2048;
+    if (via_launcher) {
+        command = launcher;
+        const auto replace = [&](const std::wstring& key, const std::wstring& value) {
+            for (auto at = command.find(key); at != std::wstring::npos; at = command.find(key, at + value.size()))
+                command.replace(at, key.size(), value);
+        };
+        replace(L"{exe}", host_path);
+        replace(L"{args}", arguments);
+        log("EI_RENDERER_HOST_LAUNCHER: the host is started through the launcher (diagnostics only)");
+    }
     if (d3d12) log("renderer_backend=d3d12: the host is asked for its Direct3D 12 backend");
     STARTUPINFOW startup{sizeof(startup)};
     PROCESS_INFORMATION process{};
-    if (!CreateProcessW(nullptr, command, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process))
+    if (!CreateProcessW(nullptr, &command[0], nullptr, nullptr, FALSE, via_launcher ? 0 : CREATE_NO_WINDOW, nullptr, nullptr, &startup, &process))
         return fail("host launch failed");
     CloseHandle(process.hThread);
     l.host_process = process.hProcess;
     log("host launched pid=%lu; waiting for its device", process.dwProcessId);
-    const ULONGLONG deadline = GetTickCount64() + 30000;
+    // The host reports its device after its start-up pipeline warm-up, which
+    // takes 28 s and more with a cold driver cache (first start, a driver
+    // update, changed shaders): every tester's first start. A working host
+    // keeps the wait going; it fails only when the host exits, uses under
+    // 0.5 s of CPU in 30 s (stalled), or is still not ready after 10 min.
+    // The host's CPU time is read once a second.
+    const ULONGLONG started = GetTickCount64();
+    const ULONGLONG stall_ms = via_launcher ? 180000 : 30000;  // a profiler starts slowly
+    const auto host_cpu_ms = [&]() -> std::uint64_t {
+        FILETIME created{}, exited{}, kernel{}, user{};
+        if (!GetProcessTimes(l.host_process, &created, &exited, &kernel, &user)) return 0;
+        const auto ticks = [](const FILETIME& t) { return (std::uint64_t(t.dwHighDateTime) << 32) | t.dwLowDateTime; };
+        return (ticks(kernel) + ticks(user)) / 10000u;
+    };
+    ULONGLONG window_start = started, next_sample = started + 1000;
+    std::uint64_t window_cpu = host_cpu_ms();
+    bool reported_slow = false;
     while (!l.control->host_ready) {
+        // This is the game's window thread, and the host may prepare shaders
+        // for many seconds (15.6 s on a GTX 1080). A thread that does not
+        // check its queue for 5 s is "not responding": Windows ghosts the
+        // window and offers to close the game (a tester's start was killed
+        // that way). Checking the queue without removing or dispatching
+        // anything (sent messages excluded) runs no game or hook code here;
+        // the same check as the in-process shader preparation.
+        MSG message;
+        PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE | PM_QS_INPUT | PM_QS_POSTMESSAGE | PM_QS_PAINT);
         if (WaitForSingleObject(l.host_process, 10) == WAIT_OBJECT_0) {
             DWORD code = 0;
             GetExitCodeProcess(l.host_process, &code);
             SetLastError(code); // fail() prints it: the host's exit code here
             return fail("the host exited during startup (exit code in parentheses; see host.log)");
         }
-        if (GetTickCount64() > deadline) return fail("the host did not report a device within 30 s (see host.log)");
+        const ULONGLONG now = GetTickCount64();
+        if (now < next_sample) continue;
+        next_sample = now + 1000;
+        const std::uint64_t cpu = host_cpu_ms();
+        if (cpu >= window_cpu + 500) {  // working: a new stall window
+            window_start = now;
+            window_cpu = cpu;
+        } else if (now - window_start > stall_ms) {
+            SetLastError(0);
+            return fail("the host stopped working before reporting its device (under 0.5 s of CPU in 30 s; see host.log)");
+        }
+        if (now - started > 600000) {
+            SetLastError(0);
+            return fail("the host did not report a device within 10 min (see host.log)");
+        }
+        if (!reported_slow && now - started > 30000) {
+            reported_slow = true;
+            char detail[128];
+            std::snprintf(detail, sizeof(detail), "still preparing after %llu s (host CPU %llu s); waiting while it works",
+                          static_cast<unsigned long long>((now - started) / 1000), static_cast<unsigned long long>(cpu / 1000));
+            log("%s", detail);
+            owned::bridge_report_event("x64_host_slow_start", detail);
+        }
     }
+    log("host reported its device after %llu ms", static_cast<unsigned long long>(GetTickCount64() - started));
     if (l.control->host_ready != 1) {
         MemoryBarrier();
         char reason[sizeof(l.control->host_reason) + 1]{};
@@ -436,6 +577,8 @@ void scene_message(std::uint16_t command, const std::uint8_t* data, std::size_t 
     // Fragments far below a record's limit (a quarter of the ring).
     const std::size_t fragment = (std::min<std::size_t>)(std::size_t(1) << 20, chunk_bytes() - sizeof(SceneFragment));
     std::lock_guard<std::mutex> lock(l.scene_mutex);
+    l.scene_command_bytes[command & 255u] += bytes;
+    ++l.scene_command_messages[command & 255u];
     std::size_t at = 0;
     do {
         const std::size_t part = (std::min)(fragment, bytes - at);
@@ -447,6 +590,28 @@ void scene_message(std::uint16_t command, const std::uint8_t* data, std::size_t 
     } while (at < bytes);
 } catch (...) {
     lose("a scene message could not be written (lock failure)");
+}
+void scene_message_fill(std::uint16_t command, std::size_t bytes, void (*fill)(void*, std::uint8_t*),
+                        void* context) noexcept try {
+    auto& l = link();
+    if (!l.connected) return;
+    const std::size_t fragment = (std::min<std::size_t>)(std::size_t(1) << 20, chunk_bytes() - sizeof(SceneFragment));
+    if (bytes > fragment) {
+        std::vector<std::uint8_t> staged(bytes);
+        fill(context, staged.data());
+        scene_message(command, staged.data(), staged.size());
+        return;
+    }
+    std::lock_guard<std::mutex> lock(l.scene_mutex);
+    l.scene_command_bytes[command & 255u] += bytes;
+    ++l.scene_command_messages[command & 255u];
+    const SceneFragment header{static_cast<std::uint32_t>(bytes), command, std::uint16_t(1)};
+    Writer w(Op::scene, static_cast<std::uint32_t>(sizeof(header) + bytes));
+    w.put(header);
+    // A dropped record (lost link) still fills its scratch buffer.
+    fill(context, w.take(static_cast<std::uint32_t>(bytes)));
+} catch (...) {
+    lose("a scene message could not be written (lock or allocation failure)");
 }
 void check_host() noexcept {
     if (!link().connected) return;
@@ -464,9 +629,13 @@ bool dlss_caps(DlssCaps& out) noexcept {
     strncpy_s(out.reason, "needs the 64-bit render host", _TRUNCATE);
     return false;
 }
-bool dlss_render_size(UINT, UINT, int, UINT&, UINT&) noexcept { return false; }
+bool dlss_render_size(UINT, UINT, int, UINT&, UINT&, bool) noexcept { return false; }
 HRESULT dlss_evaluate(ID3D11DeviceContext*, const DlssEvaluate&) noexcept { return E_NOTIMPL; }
 HRESULT dlss_evaluate_d3d12(ID3D12GraphicsCommandList*, ID3D12Resource* const*, const DlssEvaluate&) noexcept { return E_NOTIMPL; }
+bool dlss_ray_reconstruction_caps(char* reason, std::size_t reason_bytes) noexcept {
+    strncpy_s(reason, reason_bytes, "needs the 64-bit render host", _TRUNCATE);
+    return false;
+}
 void dlss_release() noexcept {}
 bool dlssg_caps(DlssgCaps& out) noexcept {
     out = {};
@@ -519,6 +688,7 @@ Writer::Writer(Op op, std::uint32_t payload_bytes) noexcept {
     end_ = l.write_pos;
     ++l.records;
     l.bytes += total;
+    if (op == Op::retained) l.retained_bytes += total;
 }
 
 Writer::~Writer() {
@@ -546,7 +716,7 @@ HRESULT wait_reply(std::uint64_t serial) noexcept {
     auto& l = link();
     publish();
     const std::int64_t start = now_qpc();
-    const bool ok = wait_until([&] { return l.control->reply_serial >= serial; }, l.control->reply_waiting, l.reply, kHostStallMs);
+    const bool ok = wait_until([&] { return l.control->reply_serial >= serial; }, l.control->reply_waiting, l.reply, kWaitReply, kHostStallMs);
     if (!ok && !l.removed.load()) lose("the host did not answer a request for 20 s");
     const HRESULT hr = ok ? static_cast<HRESULT>(l.control->reply_hr) : static_cast<HRESULT>(DXGI_ERROR_DEVICE_REMOVED);
     l.readback_ms += (now_qpc() - start) * l.qpc_to_ms;
@@ -561,7 +731,7 @@ void wait_presents(std::uint64_t serial) noexcept {
     if (ready()) return;
     const std::int64_t start = now_qpc();
     // Bounded: a host present stuck behind this thread must not hang the game.
-    if (!wait_until(ready, l.control->present_waiting, l.present, 2000) && !l.removed.load())
+    if (!wait_until(ready, l.control->present_waiting, l.present, kWaitPresent, 2000) && !l.removed.load())
         log("waited 2 s for host present %llu (host at %llu); continuing", static_cast<unsigned long long>(serial),
             static_cast<unsigned long long>(l.control->presents_done));
     ++l.present_waits;
@@ -589,6 +759,39 @@ void report_frame() noexcept {
         (bytes - l.report_bytes) / frames / 1024.0, static_cast<unsigned long long>(space_waits), space_ms,
         static_cast<unsigned long long>(l.present_waits.exchange(0)), l.present_wait_ms / frames, l.readback_ms / frames,
         static_cast<unsigned long long>(host_frames - l.report_host_frames), static_cast<unsigned long>(l.removed.load()));
+    // Heavy streams (over 2 MB a frame): the largest scene commands by id
+    // (scene_core.h order) and the retained publication stream.
+    if (frames > 0 && (bytes - l.report_bytes) / frames > 2.0 * 1024 * 1024) {
+        std::uint64_t retained = 0;
+        std::uint64_t command_bytes[256], command_messages[256];
+        {
+            std::lock_guard<std::mutex> lock(l.scene_mutex);
+            std::memcpy(command_bytes, l.scene_command_bytes, sizeof(command_bytes));
+            std::memcpy(command_messages, l.scene_command_messages, sizeof(command_messages));
+        }
+        EnterCriticalSection(&l.ring_lock);
+        retained = l.retained_bytes;
+        LeaveCriticalSection(&l.ring_lock);
+        char line[512]; int used = std::snprintf(line, sizeof(line), "retained=%.1f KB/frame;",
+            double(retained) / frames / 1024.0);
+        for (int top = 0; top < 5 && used > 0 && used < int(sizeof(line)); ++top) {
+            int best = -1;
+            for (int i = 0; i < 256; ++i) if (command_bytes[i] && (best < 0 || command_bytes[i] > command_bytes[best])) best = i;
+            if (best < 0) break;
+            used += std::snprintf(line + used, sizeof(line) - used, " cmd%d=%.1f KB/frame (%.1f msgs/frame)", best,
+                double(command_bytes[best]) / frames / 1024.0, double(command_messages[best]) / frames);
+            command_bytes[best] = 0;
+        }
+        log("heavy stream: %s", line);
+    }
+    {
+        std::lock_guard<std::mutex> lock(l.scene_mutex);
+        std::memset(l.scene_command_bytes, 0, sizeof(l.scene_command_bytes));
+        std::memset(l.scene_command_messages, 0, sizeof(l.scene_command_messages));
+    }
+    EnterCriticalSection(&l.ring_lock);
+    l.retained_bytes = 0;
+    LeaveCriticalSection(&l.ring_lock);
     l.report_records = records;
     l.report_bytes = bytes;
     l.report_host_frames = host_frames;

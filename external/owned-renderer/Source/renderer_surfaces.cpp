@@ -61,6 +61,9 @@
 #include <thread>
 #include <deque>
 #include <mutex>
+#include <future>
+#include <condition_variable>
+#include <functional>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -74,10 +77,16 @@ namespace {
 
 
 // The texture holds exactly this generation and nothing needs the CPU bytes.
-bool surface_pixels_releasable(const SurfaceImage& image) noexcept {
+// Core mode (`core`): the host's surface table holds this generation (its
+// last surface write), so the game process keeps no texture of its own; a
+// Lock restores the written bytes from the host (core_restore_surface_pixels),
+// exact for every format, block formats included (#234).
+bool surface_pixels_releasable(const SurfaceImage& image,bool core) noexcept {
  return !image.scene_snapshot&&!(image.visual_source&&image.published_generation!=image.generation)&&
     image.gpu_primary&&!image.cpu_pinned&&!image.cpu_released&&!image.cpu_access_active&&
-    !image.gpu_captured&&!image.pixels.empty()&&image.texture&&image.srv&&
+    !image.gpu_captured&&!image.pixels.empty()&&
+    (core?same_surface_upload_shape(image.uploaded_shape,surface_upload_shape(image))
+         :image.texture&&image.srv)&&
     image.uploaded_generation==image.generation&&!image.dirty_full&&!image.dirty_rect_valid&&
     surface_pixels_round_trip_exact(image);
 }
@@ -89,7 +98,7 @@ void drop_surface_pixels(SurfaceImage& image) noexcept {
 // Upload alone is not consumption: loading and composition still need these
 // bytes. Only draw-only generations that survived the sampling grace may drop
 // their exact CPU copy. Known CPU readers remain resident.
-void release_uploaded_surface_pixels(SurfaceImage& image) noexcept {
+void release_uploaded_surface_pixels(SurfaceImage& image,bool core=false) noexcept {
  // A published visual source is consumed as soon as its publication took
  // its CPU facts: the owned renderer draws the published value, never this
  // proxy surface, so its sampling grace would never start (the per-load
@@ -97,10 +106,63 @@ void release_uploaded_surface_pixels(SurfaceImage& image) noexcept {
  const bool published=image.visual_source&&image.published_generation==image.generation;
  if(!published&&(image.sampled_generation!=image.generation||
     image.sampled_frames<Renderer::kSurfaceCpuGraceFrames))return;
- if(!surface_pixels_releasable(image))return;
+ if(!surface_pixels_releasable(image,core))return;
  drop_surface_pixels(image);
 }
+
+// Scene-thread surface writes: the rows converted ahead on one background
+// thread (game_upload posts, the scene-thread write waits on done).
+struct SurfaceConversion {
+ std::shared_ptr<SurfaceImage> image;   // the write's own snapshot; nothing else touches it meanwhile
+ RECT rect{};
+ surface_convert::Prepared prepared{};
+ HRESULT hr=E_FAIL;
+ std::promise<void> promise;
+ std::shared_future<void> done;
+};
+// Started by the first post. Stopped and joined when the scene thread ends
+// (Renderer::set_scene_mode(false), which release() runs at teardown and a
+// device reset passes through): every posted write has then run and waited
+// for its rows, so no job is pending and no waiter remains; any job still
+// queued is dropped. The next post starts it again. Never destroyed (no
+// joinable std::thread at static destruction) and never joined from DllMain.
+class SurfaceConversionWorker {
+public:
+ bool post(std::function<void()> task) noexcept {
+  try{
+   std::lock_guard<std::mutex> guard(lock_);
+   if(!thread_.joinable()){stop_=false;thread_=std::thread(&SurfaceConversionWorker::run,this);}
+   queue_.push_back(std::move(task));
+  }catch(...){return false;}
+  wake_.notify_one();
+  return true;
+ }
+ void stop() noexcept {
+  std::thread ending;std::deque<std::function<void()>> dropped;
+  {std::lock_guard<std::mutex> guard(lock_);
+   if(!thread_.joinable())return;
+   stop_=true;ending=std::move(thread_);dropped.swap(queue_);}
+  wake_.notify_one();
+  ending.join();
+ }
+private:
+ void run() noexcept {
+  for(;;){
+   std::function<void()> task;
+   {std::unique_lock<std::mutex> guard(lock_);
+    wake_.wait(guard,[this]{return stop_||!queue_.empty();});
+    if(stop_)return;
+    task=std::move(queue_.front());queue_.pop_front();}
+   try{task();}catch(...){}
+  }
+ }
+ std::mutex lock_;std::condition_variable wake_;std::deque<std::function<void()>> queue_;
+ std::thread thread_;bool stop_=false;
+};
+SurfaceConversionWorker& surface_conversion_worker() noexcept {static auto* worker=new SurfaceConversionWorker;return *worker;}
 }  // namespace
+
+void stop_surface_conversion_worker() noexcept {surface_conversion_worker().stop();}
 
 // A surface the renderer never samples (the game's own textures for objects
 // the owned scene draws from its archive copies; DrawAll creates hundreds of
@@ -108,7 +170,7 @@ void release_uploaded_surface_pixels(SurfaceImage& image) noexcept {
 // for a while. The caller counts presents, so a blocking load (no presents)
 // keeps every byte it may still read; a later Lock restores exactly.
 void Renderer::release_idle_surface_pixels(SurfaceImage& image) noexcept {
- if(surface_pixels_releasable(image))drop_surface_pixels(image);
+ if(surface_pixels_releasable(image,core_mode_))drop_surface_pixels(image);
 }
 
 HRESULT Renderer::upload(SurfaceImage& i,SurfaceUploadResult* output){
@@ -220,6 +282,8 @@ HRESULT Renderer::upload_d3d12(SurfaceImage& i,SurfaceUploadResult* output){
  // Captures have no current CPU copy. A replacement executor cannot restore
  // their content from the old allocation or from the stale pixels vector.
  if(i.gpu_captured&&!matches)return DXGI_ERROR_DEVICE_RESET;
+ // This generation's unit atlas chain is the GPU home (unit_atlas_mips_d3d12).
+ if(i.unit_chain&&i.d3d12&&i.uploaded_generation==i.generation&&same_surface_upload_shape(i.uploaded_shape,shape))return S_OK;
  if(i.cpu_released){
   // A queued command's pixel-free snapshot (surface_snapshot): the host
   // table's image of the same generation keeps the bytes on this backend;
@@ -228,7 +292,7 @@ HRESULT Renderer::upload_d3d12(SurfaceImage& i,SurfaceUploadResult* output){
   if(found==core_surfaces_.end()||!found->second||found->second.get()==&i||found->second->generation!=i.generation||
      found->second->cpu_released)return E_UNEXPECTED;
   const HRESULT uploaded=upload_d3d12(*found->second,output);if(FAILED(uploaded))return uploaded;
-  i.d3d12=found->second->d3d12;i.texture_serial=found->second->texture_serial;
+  i.d3d12=found->second->d3d12;i.texture_serial=found->second->texture_serial;i.unit_chain=found->second->unit_chain;
   i.uploaded_generation=found->second->uploaded_generation;i.uploaded_shape=found->second->uploaded_shape;
   return S_OK;
  }
@@ -237,6 +301,7 @@ HRESULT Renderer::upload_d3d12(SurfaceImage& i,SurfaceUploadResult* output){
   const HRESULT hr=surface_mips_d3d12(i,texture);if(FAILED(hr))return hr;
   if(texture!=i.d3d12){i.d3d12=std::move(texture);++i.texture_serial;}
   d3d12_account_surface(*i.d3d12,texture_storage_bytes(i.d3d12.get()));
+  i.unit_chain=false;
   i.uploaded_generation=i.generation;i.uploaded_shape=shape;i.mip_source_used=true;
   clear_surface_dirty(i);
   if(output){output->uploaded=true;output->recreated=!matches;output->dirty_rect=RECT{0,0,LONG(i.width),LONG(i.height)};
@@ -258,6 +323,7 @@ HRESULT Renderer::upload_d3d12(SurfaceImage& i,SurfaceUploadResult* output){
  }
  if(texture!=i.d3d12){i.d3d12=std::move(texture);++i.texture_serial;}
   d3d12_account_surface(*i.d3d12,texture_storage_bytes(i.d3d12.get()));
+ i.unit_chain=false; // a new generation's one level: the next unit draw builds its chain
  i.uploaded_generation=i.generation;i.uploaded_shape=shape;i.gpu_captured=false;i.mip_source_used=true;
  clear_surface_dirty(i);
  if(output){output->uploaded=true;output->recreated=!matches;output->dirty_rect=rect;output->upload_bytes=prepared.bytes;
@@ -265,26 +331,24 @@ HRESULT Renderer::upload_d3d12(SurfaceImage& i,SurfaceUploadResult* output){
  return S_OK;
 }
 
-HRESULT Renderer::write_box_mips_d3d12(D3D12Texture& texture,std::vector<std::uint32_t>& level,UINT width,UINT height,UINT levels){
+HRESULT Renderer::write_box_mips_d3d12(D3D12Texture& texture,std::vector<std::uint32_t>& level,UINT width,UINT height,UINT levels,bool cut_outs){
  UINT w=width,h=height;
- std::vector<std::uint32_t> next;
+ std::vector<std::uint32_t> next,kept;
+ // A cut-out keeps its alpha-test coverage down the chain (texture_mips.h):
+ // each level is filtered from the unscaled one above, then written scaled.
+ float coverage=0;
+ const bool cut_out=cut_outs&&cut_out_coverage(level.data(),level.size(),coverage);
  for(UINT index=0;;++index){
-  const HRESULT hr=d3d12_->write_texture(texture,RECT{0,0,LONG(w),LONG(h)},level.data(),w*4u,index);
+  const std::uint32_t* pixels=level.data();
+  if(cut_out&&index){
+   try{kept=level;}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+   preserve_alpha_coverage(kept.data(),kept.size(),coverage);pixels=kept.data();
+  }
+  const HRESULT hr=d3d12_->write_texture(texture,RECT{0,0,LONG(w),LONG(h)},pixels,w*4u,index);
   if(FAILED(hr)||index+1>=levels)return hr;
   const UINT nw=(std::max)(1u,w/2),nh=(std::max)(1u,h/2);
   try{next.resize(std::size_t(nw)*nh);}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
-  for(UINT y=0;y<nh;++y){
-   const std::uint32_t* const r0=level.data()+std::size_t((std::min)(y*2,h-1))*w;
-   const std::uint32_t* const r1=level.data()+std::size_t((std::min)(y*2+1,h-1))*w;
-   for(UINT x=0;x<nw;++x){
-    const UINT x0=(std::min)(x*2,w-1),x1=(std::min)(x*2+1,w-1);
-    const std::uint32_t a=r0[x0],b=r0[x1],c=r1[x0],d=r1[x1];
-    std::uint32_t out=0;
-    for(UINT shift=0;shift<32;shift+=8)
-     out|=((((a>>shift)&255u)+((b>>shift)&255u)+((c>>shift)&255u)+((d>>shift)&255u)+2u)/4u)<<shift;
-    next[std::size_t(y)*nw+x]=out;
-   }
-  }
+  box_mip_level(level.data(),w,h,next.data());
   level.swap(next);w=nw;h=nh;
  }
 }
@@ -309,10 +373,11 @@ HRESULT Renderer::surface_mips_d3d12(SurfaceImage& image,D3D12TextureRef& textur
   texture.reset();
   if(FAILED(hr=d3d12_->create_texture(width,height,format,texture,levels)))return hr;
  }
- return write_box_mips_d3d12(*texture,level,width,height,levels);
+ // The 4444 spell atlases are blended art: filtered only.
+ return write_box_mips_d3d12(*texture,level,width,height,levels,image.format.dwRGBAlphaBitMask!=0xf000u);
 }
 
-void Renderer::release_surface_pixels(SurfaceImage& image) noexcept{if(!image.scene_snapshot&&!d3d12_)release_uploaded_surface_pixels(image);}
+void Renderer::release_surface_pixels(SurfaceImage& image) noexcept{if(!image.scene_snapshot&&!d3d12_)release_uploaded_surface_pixels(image,core_mode_);}
 
 HRESULT Renderer::detach_shared_surface_texture(SurfaceImage& image,const char* writer){
  if(!image.texture_shared||!image.texture)return S_OK;
@@ -373,11 +438,32 @@ HRESULT Renderer::game_upload(SurfaceImage& i,SurfaceUploadResult* output){
  // stay (core_surface_write).
  if(core_mode_)return core_surface_write(i);
  if(!device_)return E_FAIL;
+ // Game-thread time over 2 ms names its path and steps (laptop j216 pf 5619:
+ // 8.67 ms of ours_surface_upload on the game thread in play, owner unknown).
+ const std::int64_t began=perf_now();std::int64_t restored_at=began;
+ const bool was_released=i.cpu_released;
+ struct SlowGameUpload{
+  Renderer& r;SurfaceImage& i;const std::int64_t& began;const std::int64_t& restored_at;bool released;const char* path="recorded";
+  double create_ms=0,copy_ms=0;bool recreated=false;
+  ~SlowGameUpload(){
+   const std::int64_t end=perf_now();const double to_ms=1000.0/double(perf_frequency());
+   if(double(end-began)*to_ms<=2.0)return;
+   static unsigned lines=0;if(lines>=40)return;++lines;
+   char text[288];
+   std::snprintf(text,sizeof(text),"frame=%llu ms=%.2f restore_ms=%.2f create_ms=%.2f copy_ms=%.2f recreated=%d path=%s released=%d id=%llu %ux%u bpp=%lu fourcc=%08lx alpha=%08lx mips=%d",
+    static_cast<unsigned long long>(r.presentation_frame_index_),double(end-began)*to_ms,double(restored_at-began)*to_ms,create_ms,copy_ms,recreated?1:0,
+    path,released?1:0,static_cast<unsigned long long>(i.id),i.width,i.height,i.format.dwRGBBitCount,i.format.dwFourCC,i.format.dwRGBAlphaBitMask,
+    i.static_mip_hint&&i.world_mip_use?1:0);
+   bridge_report_event("slow_game_upload",text);
+  }
+ } slow{*this,i,began,restored_at,was_released};
+ const double to_ms=1000.0/double(perf_frequency());
  if(i.cpu_released&&(i.uploaded_generation!=i.generation||
     !same_surface_upload_shape(i.uploaded_shape,surface_upload_shape(i)))){
   // The released bytes come back by a GPU readback: synchronous.
   scene_sync("surface_restore_for_upload");
   const HRESULT restored=restore_surface_pixels(i);if(FAILED(restored))return restored;
+  restored_at=perf_now();
  }
  if(!game_upload_context_){const HRESULT created=device_->CreateDeferredContext(0,&game_upload_context_);if(FAILED(created))return created;}
  // A published (possibly shared) GPU home is never written in place.
@@ -385,6 +471,92 @@ HRESULT Renderer::game_upload(SurfaceImage& i,SurfaceUploadResult* output){
   const HRESULT detached=scene_detach_surface_texture(i,"upload");if(FAILED(detached))return detached;
  }
  ID3D11Texture2D* const shared_before=i.texture_shared?i.texture.Get():nullptr; // compared only, never dereferenced
+ // The game thread only names the GPU home (created empty when the shape
+ // changed) and hands a copy of the bytes to the scene thread, which
+ // converts and writes them in queue order, ahead of every command that
+ // reads them: writing a 4-8 MB texture here took 2.6-10 ms of the game
+ // thread (laptop j190). A released surface (mip relayout from its texture)
+ // keeps the recorded path below.
+ if(!i.cpu_released&&scene_thread_){
+  slow.path="scene_thread";
+  bool write=false,recreated=false;
+  const std::int64_t create_begin=perf_now();
+  HRESULT hr=ensure_surface_texture(device_.Get(),i,write,recreated);
+  slow.create_ms=double(perf_now()-create_begin)*to_ms;slow.recreated=recreated;
+  if(shared_before&&i.texture.Get()!=shared_before){i.texture_shared=false;scene_unshare_surface_texture(i.id,shared_before);}
+  if(FAILED(hr)){update_surface_memory_accounting(i);return hr;}
+  if(!write)return S_OK;
+  std::shared_ptr<SurfaceImage> copy;
+  const std::int64_t copy_begin=perf_now();
+  try{copy=std::make_shared<SurfaceImage>(i);}catch(...){return E_OUTOFMEMORY;}
+  slow.copy_ms=double(perf_now()-copy_begin)*to_ms;
+  copy->scene_snapshot=true;  // never accounted
+  copy->dirty_full=copy->dirty_full||recreated;
+  copy->uploaded_shape=surface_upload_shape(i);  // its texture matches: the write goes into it
+  copy->uploaded_generation=i.generation+1;      // any other generation: the content is written
+  DXGI_FORMAT stored=DXGI_FORMAT_UNKNOWN;UINT block_bytes=0;(void)surface_dxgi_format(i.format,stored,block_bytes);
+  const UINT rows=block_bytes?(std::max)(1u,(i.height+3)/4):i.height;
+  SurfaceUploadResult result{};
+  result.uploaded=true;result.recreated=recreated;
+  result.full_surface=recreated||i.dirty_full||!i.dirty_rect_valid;
+  result.dirty_rect=result.full_surface?RECT{0,0,LONG(i.width),LONG(i.height)}:i.dirty_rect;
+  result.upload_bytes=std::uint64_t(i.pitch)*rows;
+  // What upload_surface_image records on success, now on the game thread's image.
+  i.mip_source_used=true;i.uploaded_generation=i.generation;i.uploaded_shape=surface_upload_shape(i);i.gpu_captured=false;
+  clear_surface_dirty(i);
+  if(game_upload_pending_)flush_game_uploads();  // recorded copies and writes go first
+  const std::uint64_t id=i.id;
+  // The rows are converted on the surface conversion thread meanwhile: the
+  // conversion was most of a write's scene-thread time (laptop j192: 8.8 ms
+  // for a 4 MB texture whose D3D calls took 0.7 ms; j216: 4444 1024x1024
+  // 2.8-6.3 ms, ARGB 2.1 ms). The scene thread waits for it only when it
+  // reaches the write first. Block-compressed rows need no conversion.
+  std::shared_ptr<SurfaceConversion> conversion;
+  if(!block_bytes){
+   try{
+    conversion=std::make_shared<SurfaceConversion>();conversion->image=copy;conversion->done=conversion->promise.get_future().share();
+    if(!surface_conversion_worker().post([conversion]{
+       conversion->hr=prepare_surface_upload(*conversion->image,false,0,conversion->rect,conversion->prepared);
+       conversion->promise.set_value();}))conversion.reset();
+   }catch(...){conversion.reset();}
+  }
+  const auto run=[this,copy,id,conversion]{
+   const frame_acct::Scope upload_scope(frame_acct::ours_surface_upload);
+   const std::int64_t begin=perf_now();
+   const bool queued=std::any_of(pending_blits_.begin(),pending_blits_.end(),
+    [&](const PendingBlit& blit){return blit.gpu&&blit.source_is_surface&&blit.source_id==id;});
+   if(queued)(void)render_pending_blits();
+   const std::int64_t blits=perf_now();
+   SurfaceUploadResult written{};
+   const bool converted=conversion&&(conversion->done.wait(),SUCCEEDED(conversion->hr));
+   const std::int64_t waited=perf_now();
+   if(FAILED(upload_surface_image(device_.Get(),context_.Get(),*copy,&written,
+       converted?&conversion->prepared:nullptr,converted?&conversion->rect:nullptr))){
+    static unsigned reported=0;
+    if(reported<4){++reported;bridge_report_event("render_thread_upload_failed","a surface write on the scene thread failed; that texture keeps older pixels");}
+   }
+   profiler_.add_upload(written.upload_bytes);
+   // A write over 2 ms names itself (laptop j192: 8.8 ms in this scope for a
+   // 4 MB texture whose D3D calls took 0.7 ms): format, size, whole or
+   // dirty part, mips, and the queued blits flushed first.
+   const std::int64_t end=perf_now();
+   const double to_ms=1000.0/double(perf_frequency());
+   if(double(end-begin)*to_ms>2.0){
+    char text[320];
+    std::snprintf(text,sizeof(text),"ms=%.2f blits_ms=%.2f convert_wait_ms=%.2f converted=%d write_ms=%.2f id=%llu %ux%u pitch=%ld fourcc=%08lx bpp=%lu masks=%08lx/%08lx/%08lx/%08lx key=%d full=%d recreated=%d bytes=%llu mips=%d",
+     double(end-begin)*to_ms,double(blits-begin)*to_ms,double(waited-blits)*to_ms,converted?1:0,double(end-waited)*to_ms,static_cast<unsigned long long>(id),copy->width,copy->height,
+     static_cast<long>(copy->pitch),copy->format.dwFourCC,copy->format.dwRGBBitCount,copy->format.dwRBitMask,copy->format.dwGBitMask,
+     copy->format.dwBBitMask,copy->format.dwRGBAlphaBitMask,copy->has_color_key?1:0,written.full_surface?1:0,written.recreated?1:0,
+     static_cast<unsigned long long>(written.upload_bytes),copy->static_mip_hint&&copy->world_mip_use?1:0);
+    bridge_report_event("slow_surface_write",text);
+   }
+  };
+  if(!scene_thread_->post(run,false,"game_upload")){scene_thread_->sync();run();}  // allocation failed: here, in order
+  update_surface_memory_accounting(i);
+  release_uploaded_surface_pixels(i);
+  if(output)*output=result;
+  return S_OK;
+ }
  SurfaceUploadResult result{};
  const HRESULT hr=upload_surface_image(device_.Get(),game_upload_context_.Get(),i,&result);
  if(shared_before&&i.texture.Get()!=shared_before){i.texture_shared=false;scene_unshare_surface_texture(i.id,shared_before);} // recreated (mip layout)
@@ -404,7 +576,16 @@ void Renderer::flush_game_uploads() noexcept{
  const frame_acct::Scope upload_scope(frame_acct::ours_surface_upload);
  game_upload_pending_=false;
  ComPtr<ID3D11CommandList> list;
- if(FAILED(game_upload_context_->FinishCommandList(FALSE,&list))||!list){
+ const std::int64_t began=perf_now();
+ const HRESULT finished=game_upload_context_->FinishCommandList(FALSE,&list);
+ if(const double ms=double(perf_now()-began)*1000.0/double(perf_frequency());ms>2.0){
+  static unsigned lines=0;
+  if(lines<40){++lines;char text[128];
+   std::snprintf(text,sizeof(text),"frame=%llu finish_ms=%.2f surfaces=%zu bytes=%llu",static_cast<unsigned long long>(presentation_frame_index_),
+    ms,game_upload_surfaces_.size(),static_cast<unsigned long long>(game_upload_bytes_));
+   bridge_report_event("slow_game_upload_flush",text);}
+ }
+ if(FAILED(finished)||!list){
   static unsigned reported=0;
   if(reported<4){++reported;bridge_report_event("render_thread_upload_failed","a surface upload list could not be finished; those textures keep older pixels");}
   game_upload_surfaces_.clear();game_upload_bytes_=0;return;
@@ -418,7 +599,7 @@ void Renderer::flush_game_uploads() noexcept{
   context_->ExecuteCommandList(list.Get(),TRUE);
   profiler_.add_upload(bytes);
  };
- if(scene_thread_->post(run))return;
+ if(scene_thread_->post(run,false,"flush_game_uploads"))return;
  // Allocation failed: run it here, in order, with the scene thread drained.
  {
  #ifdef EID3D11_EMBEDDED
@@ -535,9 +716,34 @@ HRESULT Renderer::restore_surface_pixels(SurfaceImage& image,bool pin_now){
   if(pin_now&&!image.cpu_pinned&&image.gpu_primary){image.cpu_pinned=true;g_pinned_surfaces.fetch_add(1,std::memory_order_relaxed);}
   return S_OK;
  }
+ LARGE_INTEGER start{};QueryPerformanceCounter(&start);
+ const auto finish=[&]{
+  image.cpu_released=false;
+  ++image.restore_readbacks;
+  const bool repeated=image.restore_readbacks>1&&native_frame_index_-image.last_restore_frame<=kSurfaceRepeatReadFrames;
+  image.last_restore_frame=native_frame_index_;
+  if((pin_now||repeated)&&!image.cpu_pinned){image.cpu_pinned=true;g_pinned_surfaces.fetch_add(1,std::memory_order_relaxed);}
+  update_surface_memory_accounting(image);
+  LARGE_INTEGER end{};QueryPerformanceCounter(&end);
+  g_restore_readbacks.fetch_add(1,std::memory_order_relaxed);
+  g_restore_readback_qpc.fetch_add(static_cast<std::uint64_t>(end.QuadPart-start.QuadPart),std::memory_order_relaxed);
+  // One line per restore so a hot reader is visible; pinning bounds it to two per surface.
+  LARGE_INTEGER frequency{};QueryPerformanceFrequency(&frequency);
+  char detail[192];std::snprintf(detail,sizeof(detail),"id=%llu %ux%u fourcc=%08lx bpp=%lu count=%u pinned=%d elapsed_ms=%.3f",
+   static_cast<unsigned long long>(image.id),image.width,image.height,image.format.dwFourCC,
+   image.format.dwRGBBitCount,image.restore_readbacks,image.cpu_pinned?1:0,
+   frequency.QuadPart?1000.0*double(end.QuadPart-start.QuadPart)/frequency.QuadPart:0.0);
+  bridge_append_probe_event("surface_restore_readback",detail);
+  return S_OK;
+ };
+ // Core mode: the host's surface table holds the released generation.
+ if(core_mode_){
+  const HRESULT restored=core_restore_surface_pixels(image);
+  if(FAILED(restored))return restored;
+  return finish();
+ }
  SCENE_ENTRY("restore_surface_pixels");
  if(!device_||!context_||!image.texture)return E_FAIL;
- LARGE_INTEGER start{};QueryPerformanceCounter(&start);
  D3D11_TEXTURE2D_DESC description{};image.texture->GetDesc(&description);
  const bool blocks=(image.format.dwFlags&DDPF_FOURCC)!=0;
  if(description.Width!=image.width||description.Height!=image.height||
@@ -563,23 +769,7 @@ HRESULT Renderer::restore_surface_pixels(SurfaceImage& image,bool pin_now){
  }
  context_->Unmap(staging.Get(),0);
  staging.Reset(); // Release the readback resource/VA before accounting or logging.
- image.cpu_released=false;
- ++image.restore_readbacks;
- const bool repeated=image.restore_readbacks>1&&native_frame_index_-image.last_restore_frame<=kSurfaceRepeatReadFrames;
- image.last_restore_frame=native_frame_index_;
- if((pin_now||repeated)&&!image.cpu_pinned){image.cpu_pinned=true;g_pinned_surfaces.fetch_add(1,std::memory_order_relaxed);}
- update_surface_memory_accounting(image);
- LARGE_INTEGER end{};QueryPerformanceCounter(&end);
- g_restore_readbacks.fetch_add(1,std::memory_order_relaxed);
- g_restore_readback_qpc.fetch_add(static_cast<std::uint64_t>(end.QuadPart-start.QuadPart),std::memory_order_relaxed);
- // One line per restore so a hot reader is visible; pinning bounds it to two per surface.
- LARGE_INTEGER frequency{};QueryPerformanceFrequency(&frequency);
- char detail[192];std::snprintf(detail,sizeof(detail),"id=%llu %ux%u fourcc=%08lx bpp=%lu count=%u pinned=%d elapsed_ms=%.3f",
-  static_cast<unsigned long long>(image.id),image.width,image.height,image.format.dwFourCC,
-  image.format.dwRGBBitCount,image.restore_readbacks,image.cpu_pinned?1:0,
-  frequency.QuadPart?1000.0*double(end.QuadPart-start.QuadPart)/frequency.QuadPart:0.0);
- bridge_append_probe_event("surface_restore_readback",detail);
- return S_OK;
+ return finish();
 }
 
 HRESULT Renderer::get_native_texture_array_slice(
@@ -942,10 +1132,102 @@ FixedState native_owned_submission_state(
  return result;
 }
 
+// The archive member a block-compressed game surface was made from, when it
+// carries more levels than the surface: the member of the surface's texture
+// name through the world's [RES] mounts, same format and size, level 0 with
+// the surface's content value (block_content_value: the same bytes). The
+// bytes are read here only to create the texture and are not kept.
+Renderer::AuthoredSurfaceChain* Renderer::authored_surface_chain(const NativeOwnedTextureView& source,AuthoredSurfaceLoad& load) try{
+ const OwnedVisualSurface* surface=source.surface;
+ if(!surface||!source.material_name||source.material_name->empty()||!(surface->format.dwFlags&DDPF_FOURCC)||
+    !(surface->block_content[0]|surface->block_content[1]))return nullptr;
+ auto& chain=authored_surface_chains_[surface->id];
+ if(chain.generation==surface->generation){
+  if(chain.key.empty())return nullptr;
+  const auto resident=native_owned_textures_.find(chain.key);
+  if(resident!=native_owned_textures_.end()&&resident->second.generation==1&&
+     (d3d12_?bool(resident->second.d3d12):bool(resident->second.srv)))return &chain;
+  if(native_frame_index_<chain.retry_frame)return nullptr; // evicted: its member is read again, not every frame
+ }
+ auto mounts=neighbour_world_mounts();
+ if(!mounts)return nullptr; // no world yet: examined at a later draw
+ if(mounts!=authored_mounts_||!authored_store_){
+  authored_store_.reset();authored_mounts_=mounts;
+  auto store=std::make_shared<ResourceStore>();ResourceFailure failure;
+  if(!store->open(*mounts,failure)){
+   OutputDebugStringA("EID3D11: the world's archives did not open for authored surface mip chains; game surfaces keep one level");
+   return nullptr;
+  }
+  authored_store_=std::move(store);
+ }
+ chain.generation=surface->generation;chain.key.clear();chain.retry_frame=native_frame_index_+600;
+ ResourceBlob blob;ResourceFailure failure;
+ auto asset=std::make_shared<TextureCpuAsset>();
+ if(!authored_store_->resolve(*source.material_name+".mmp",blob,failure)||!parse_texture_asset(blob,*asset,failure))return nullptr;
+ const DWORD code=surface->format.dwFourCC;
+ const bool same_format=(code==MAKEFOURCC('D','X','T','1')&&asset->format==MmpFormat::dxt1)||
+  (code==MAKEFOURCC('D','X','T','3')&&asset->format==MmpFormat::dxt3)||(code==MAKEFOURCC('D','X','T','5')&&asset->format==MmpFormat::dxt5);
+ if(!same_format||asset->width!=surface->width||asset->height!=surface->height||asset->mips.empty()||asset->mips.size()>32||!asset->source)return nullptr;
+ const std::size_t row=std::size_t((asset->width+3u)/4u)*(asset->format==MmpFormat::dxt1?8u:16u),rows=(asset->height+3u)/4u;
+ const MmpMipLevel& top=asset->mips[0];
+ if(!row||!rows||top.byte_offset>asset->source->size()||row*rows>asset->source->size()-top.byte_offset)return nullptr;
+ std::uint64_t value[2]{};
+ block_content_value(asset->source->data()+top.byte_offset,row,row,rows,value);
+ if(value[0]!=surface->block_content[0]||value[1]!=surface->block_content[1])return nullptr;
+ const UINT full=full_mip_count(asset->width,asset->height),authored=static_cast<UINT>(asset->mips.size());
+ for(UINT index=0;index<authored;++index){
+  const MmpMipLevel& mip=asset->mips[index];
+  const UINT w=(std::max)(1u,asset->width>>index),h=(std::max)(1u,asset->height>>index);
+  const std::uint64_t bytes=std::uint64_t((std::max)(1u,(w+3u)/4u))*(std::max)(1u,(h+3u)/4u)*(asset->format==MmpFormat::dxt1?8u:16u);
+  if(mip.width!=w||mip.height!=h||bytes>mip.bytes||mip.byte_offset>asset->source->size()||mip.bytes>asset->source->size()-mip.byte_offset)return nullptr;
+ }
+ if(authored<full&&(std::max)(1u,(std::max)(asset->width,asset->height)>>(authored-1))>4u){
+  // A short chain (lizhouse1, the doors, footprints, arrow01): its levels
+  // decoded and the missing ones generated, a cut-out's with its coverage.
+  const unsigned kind=asset->format==MmpFormat::dxt1?1u:asset->format==MmpFormat::dxt3?3u:5u;
+  load.pixels.resize(full);
+  UINT w=asset->width,h=asset->height,above_w=0,above_h=0;
+  for(UINT index=0;index<full;++index){
+   auto& level=load.pixels[index];level.resize(std::size_t(w)*h);
+   if(index<authored)decode_dxt_level(asset->source->data()+asset->mips[index].byte_offset,w,h,kind,level.data());
+   else box_mip_level(load.pixels[index-1].data(),above_w,above_h,level.data());
+   load.mips.push_back({reinterpret_cast<const std::uint8_t*>(level.data()),w,h,static_cast<std::uint32_t>(level.size()*4u)});
+   above_w=w;above_h=h;w=(std::max)(1u,w/2);h=(std::max)(1u,h/2);
+  }
+  float coverage=0;
+  if(cut_out_coverage(load.pixels[0].data(),load.pixels[0].size(),coverage))
+   for(UINT index=authored;index<full;++index)preserve_alpha_coverage(load.pixels[index].data(),load.pixels[index].size(),coverage);
+  load.view={};load.view.identity=(surface->block_content[0]^surface->block_content[1])|(1ull<<63);
+  load.view.generation=1;load.view.value_source=2;load.view.format=NativeOwnedTextureFormat::argb8888;
+  load.view.mips=load.mips.data();load.view.mip_count=full;
+  load.view.opaque_mips=(asset->opaque_mips&1u)?(full>=32?~0u:(1u<<full)-1u):0u;
+  chain.key=native_owned_mip_texture_key(load.view,false);
+  return &chain;
+ }
+ load.mips.reserve(asset->mips.size());
+ for(const MmpMipLevel& mip:asset->mips)load.mips.push_back({asset->source->data()+mip.byte_offset,mip.width,mip.height,mip.bytes});
+ load.asset=std::move(asset);
+ load.view={};load.view.identity=1;load.view.generation=1;load.view.value_source=1;
+ load.view.resource=&load.asset->identity;
+ load.view.format=load.asset->format==MmpFormat::dxt1?NativeOwnedTextureFormat::dxt1:
+  load.asset->format==MmpFormat::dxt3?NativeOwnedTextureFormat::dxt3:NativeOwnedTextureFormat::dxt5;
+ load.view.mips=load.mips.data();load.view.mip_count=static_cast<std::uint32_t>(load.mips.size());
+ load.view.opaque_mips=load.asset->opaque_mips;
+ chain.key=native_owned_archive_texture_key(load.asset->identity,1,false);
+ return &chain;
+}catch(...){return nullptr;}
+
+std::uint64_t Renderer::authored_surface_backing(AuthoredSurfaceChain& chain,std::uint64_t shared) noexcept{
+ if(chain.backing&&chain.shared_backing==shared)return chain.backing;
+ if(chain.backing&&material_profiles_.erase(chain.backing))++material_profiles_revision_;
+ chain.shared_backing=shared;chain.backing=(3ull<<62)|(++native_owned_texture_serial_&((1ull<<62)-1));
+ return chain.backing;
+}
+
 HRESULT Renderer::get_native_owned_texture(
  const NativeOwnedTextureView& source,
  ComPtr<ID3D11ShaderResourceView>& output,std::uint64_t& backing,NativeGeometryResult* result,bool world_mips,
- bool budget_reducible){
+ bool budget_reducible,bool unit){
  const auto fail=[&](HRESULT hr,const char* operation){return native_geometry_failure(result,hr,operation,true);};
  backing=0;
  output.Reset();if(!device_||!source.identity||!source.generation||
@@ -954,6 +1236,22 @@ HRESULT Renderer::get_native_owned_texture(
  if(source.surface&&(source.surface->id!=source.identity ||
      source.surface->generation!=source.generation))return fail(E_INVALIDARG,"texture.surface_generation");
  if(source.camp_surface_alias&&(!source.surface||world_mips))return fail(E_INVALIDARG,"texture.camp_source");
+ // A block-compressed world surface draws its archive member's mip chain.
+ if(source.surface&&world_mips){
+  AuthoredSurfaceLoad load;
+  if(AuthoredSurfaceChain* chain=authored_surface_chain(source,load)){
+   if(load.view.mips){
+    if(SUCCEEDED(get_native_owned_texture(load.view,output,backing,nullptr,true,budget_reducible))&&output){
+     backing=authored_surface_backing(*chain,backing);return S_OK;
+    }
+    output.Reset();backing=0; // not created now: the surface's own level draws
+   }else{
+    auto& texture=native_owned_textures_.find(chain->key)->second;
+    texture.last_used=native_queue_epoch_;texture.last_used_frame=native_frame_index_;
+    output=texture.srv;backing=authored_surface_backing(*chain,texture.backing);return S_OK;
+   }
+  }
+ }
  std::string key;
  try{
   if(source.surface)key="surface:"+std::to_string(source.surface->id);
@@ -1008,7 +1306,8 @@ HRESULT Renderer::get_native_owned_texture(
  case NativeOwnedTextureFormat::argb8888:format=DXGI_FORMAT_B8G8R8A8_UNORM;pixel_bytes=4;break;
  default:return fail(E_INVALIDARG,"texture.format");
  }
- const bool static_source=source.surface?source.surface->static_mip_hint:
+ // A unit's composed atlas (32-bit, no static hint) is a world texture too.
+ const bool static_source=source.surface?source.surface->static_mip_hint||(unit&&format==DXGI_FORMAT_B8G8R8A8_UNORM):
   (source.value_source==1||source.value_source==3);
  const bool generate_mips=world_mips&&static_source&&mip_count==1&&!block_bytes;
  // Generated levels belong to this immutable source generation and domain.
@@ -1065,7 +1364,8 @@ HRESULT Renderer::get_native_owned_texture(
    if(FAILED(resolved)||!surface_texture)
     return fail(FAILED(resolved)?resolved:E_FAIL,"texture.surface_unavailable");
    D3D11_TEXTURE2D_DESC surface_description{};surface_texture->GetDesc(&surface_description);
-   if(surface_description.Width!=width||surface_description.Height!=height||
+   // A camp icon home is the canvas cropped and reduced (Host/core_camp.cpp).
+   if((!source.camp_surface_alias&&(surface_description.Width!=width||surface_description.Height!=height))||
       surface_description.Format!=format||surface_description.SampleDesc.Count!=1)
     return fail(E_INVALIDARG,"texture.surface_layout");
    uploaded=block_bytes?static_cast<std::uint64_t>((width+3u)/4u)*block_bytes*(std::max)(1u,(height+3u)/4u):
@@ -1132,7 +1432,7 @@ HRESULT Renderer::get_native_owned_texture(
   bool reuse_camp=false;
   if(source.camp_surface_alias){
    D3D11_TEXTURE2D_DESC current{};surface_texture->GetDesc(&current);
-   reuse_camp=current.ArraySize==1&&current.MipLevels==description.MipLevels&&
+   reuse_camp=current.ArraySize==1&&
     current.Format==description.Format&&(current.BindFlags&D3D11_BIND_SHADER_RESOURCE)&&
     !current.MiscFlags;
    if(!reuse_camp)return fail(E_INVALIDARG,"texture.camp_descriptor");

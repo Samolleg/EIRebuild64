@@ -46,6 +46,7 @@ struct PieceBuilder {
     std::unordered_map<std::string, std::uint32_t> identity_index, texture_index;
     std::map<const FigureCpuAsset*, std::uint32_t> figure_index;
     std::map<const NativePrebuiltMesh*, std::uint32_t> mesh_index;
+    std::unordered_map<std::string, std::uint32_t> impostor_index; // NeighbourPieceImpostor::key
 
     std::uint32_t identity(const ResourceIdentity& value) {
         auto key = value.key();
@@ -66,7 +67,9 @@ struct PieceBuilder {
         if (found != texture_index.end()) return found->second;
         NeighbourPieceTexture made;
         made.identity = value; made.view_identity = view_identity;
-        made.format = format; made.mip_count = mip_count; made.opaque_mips = opaque_mips;
+        made.format = format; made.mip_count = mip_count;
+        // Only the levels the piece binds; anything past them is unknown.
+        made.opaque_mips = mip_count >= 32 ? opaque_mips : opaque_mips & ((std::uint32_t{1} << mip_count) - 1u);
         if (!block_compressed(format) && mips) {
             std::size_t total = 0;
             for (std::uint32_t i = 0; i < mip_count; ++i) total += mips[i].bytes;
@@ -165,18 +168,38 @@ void piece_decorations(PieceBuilder& builder, const NeighbourMapUpload& upload) 
     auto& piece = builder.piece;
     for (std::size_t candidate_index = 0; candidate_index < upload.decorations.size(); ++candidate_index) {
         const auto& candidate = *upload.decorations[candidate_index];
+        // Its impostor object, when baked (piece_impostors).
+        const auto* plan = candidate_index < upload.impostor_plans.size() && !upload.impostor_plans[candidate_index].key.empty() ?
+            &upload.impostor_plans[candidate_index] : nullptr;
+        std::uint32_t impostor = 0;
+        if (plan) {
+            const auto found = builder.impostor_index.find(plan->key);
+            if (found != builder.impostor_index.end()) impostor = found->second + 1;
+        }
+        const std::size_t first_draw = piece.decorations.size();
+        bool lead_drawn = false;
         for (std::size_t node_index = 0; node_index < candidate.nodes.size(); ++node_index) {
             const auto& node = candidate.nodes[node_index];
-            if (!node.figure || !node.texture) { ++piece.unbuilt_decorations; continue; }
-            const auto found = upload.prebuilt_figures.find(neighbour_figure_shape(node.figure, candidate.source->shape));
+            // A part without an archive texture (item 5: a live game surface)
+            // keeps its mesh; its draw binds the posed record's texture.
+            if (!node.figure || (!node.texture && !node.surface && candidate.impostor_inputs_complete)) { ++piece.unbuilt_decorations; continue; }
+            const bool in_object = plan && plan->spheres[node_index][3] > 0;
+            const auto found = upload.prebuilt_figures.find(neighbour_figure_shape(node.figure, candidate.source->shape,
+                in_object ? &plan->spheres[node_index] : nullptr));
             if (found == upload.prebuilt_figures.end() || !found->second.bytes) { ++piece.unbuilt_decorations; continue; }
             NeighbourPieceDecoration draw;
             draw.candidate = static_cast<std::uint32_t>(candidate_index);
             draw.figure = builder.figure(*node.figure);
-            draw.texture = builder.texture(node.texture->identity, node.texture_identity, node.texture_format,
-                node.texture_mips.data(), static_cast<std::uint32_t>(node.texture_mips.size()), node.texture->opaque_mips);
+            draw.texture = node.texture ? builder.texture(node.texture->identity, node.texture_identity, node.texture_format,
+                node.texture_mips.data(), static_cast<std::uint32_t>(node.texture_mips.size()), node.texture->opaque_mips) : UINT32_MAX;
             draw.mesh = builder.mesh(found->second);
             draw.shape = candidate.source->shape;
+            draw.object = candidate.signed_id;
+            draw.node = candidate.assembly && node_index < candidate.assembly->parts.size() ?
+                candidate.assembly->parts[node_index].skeleton_node : UINT32_MAX;
+            if (candidate.assembly && node_index < candidate.assembly->parts.size())
+                draw.flags |= astral_record_flags(*candidate.assembly, candidate.assembly->parts[node_index]);
+            if (candidate.source) retained_object_matrix(candidate.world_position, candidate.source->quaternion, draw.object_placement);
             draw.object_to_world = node.object_to_world;
             draw.bounds_center = node.bounds.center;
             draw.bounds_minimum = node.bounds.minimum; draw.bounds_maximum = node.bounds.maximum;
@@ -188,60 +211,65 @@ void piece_decorations(PieceBuilder& builder, const NeighbourMapUpload& upload) 
                 const auto sway = candidate.root_valid ? retained_object_space_sway_flags(*assembly, part) : 0u;
                 if (sway) { draw.flags |= sway; draw.sway = 1; draw.root_world = candidate.root_world; }
             }
-            if (candidate.assembly && node_index < candidate.assembly->parts.size()) {
-                const auto& part = candidate.assembly->parts[node_index];
-                if (astral_dynamic(*candidate.assembly, part)) {
-                    RetainedVisualSample sample; sample.assembly = candidate.assembly;
-                    // Source material is unchanged; the frame supplies animation time.
-                    if (!retained_visual_part_values(sample, part, 0, 0, draw.astral_values))
-                        throw std::runtime_error("Neighbour astral material unavailable");
-                    draw.astral_values.astral[0] = 0;
-                }
+            if (in_object && impostor) {
+                draw.impostor = impostor;
+                draw.impostor_lead = node_index == plan->lead;
+                lead_drawn |= node_index == plan->lead;
             }
             piece.decorations.push_back(draw);
         }
+        // Without its lead nothing would draw the object far away: its parts
+        // keep their triangles.
+        if (!lead_drawn)
+            for (std::size_t i = first_draw; i < piece.decorations.size(); ++i) piece.decorations[i].impostor = 0;
     }
 }
 
+// One part's buffers (false: a creation failed, the object gets no bake).
+bool piece_impostor_part(const NativeImpostorPart& source, NeighbourPieceImpostorPart& made, ID3D11Device* device,
+    D3D12Preparer* d3d12) {
+    made.index_count = static_cast<std::uint32_t>(source.indices.size());
+    if (!device)
+        // D3D12 backend: created and filled here; the bake records the copies.
+        return SUCCEEDED(d3d12->prepare_buffer(source.vertices.size() * sizeof(float), source.vertices.data(), made.vertices12)) &&
+            SUCCEEDED(d3d12->prepare_buffer(source.indices.size() * sizeof(std::uint32_t), source.indices.data(), made.indices12));
+    D3D11_BUFFER_DESC vertices{};
+    vertices.ByteWidth = static_cast<UINT>(source.vertices.size() * sizeof(float));
+    vertices.Usage = D3D11_USAGE_IMMUTABLE;
+    vertices.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    vertices.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
+    vertices.StructureByteStride = 8 * sizeof(float);
+    const D3D11_SUBRESOURCE_DATA vertex_data{source.vertices.data(), 0, 0};
+    D3D11_BUFFER_DESC indices{};
+    indices.ByteWidth = static_cast<UINT>(source.indices.size() * sizeof(std::uint32_t));
+    indices.Usage = D3D11_USAGE_IMMUTABLE;
+    indices.BindFlags = D3D11_BIND_INDEX_BUFFER;
+    const D3D11_SUBRESOURCE_DATA index_data{source.indices.data(), 0, 0};
+    return SUCCEEDED(device->CreateBuffer(&vertices, &vertex_data, &made.vertices)) &&
+        SUCCEEDED(device->CreateShaderResourceView(made.vertices.Get(), nullptr, &made.vertex_view)) &&
+        SUCCEEDED(device->CreateBuffer(&indices, &index_data, &made.indices));
+}
+
+// Before the decorations: they name their object's entry.
 void piece_impostors(PieceBuilder& builder, const NeighbourMapUpload& upload, ID3D11Device* device, D3D12Preparer* d3d12) {
     if (!device && !d3d12) return;
-    for (const auto& [key, source] : upload.impostor_sources) {
-        if (source.source.indices.empty() || !source.node || !source.node->texture || !key.first) continue;
-        const auto& node = *source.node;
+    for (const auto& [key, source] : upload.impostor_objects) {
+        if (source.parts.empty() || source.parts.size() != source.nodes.size()) continue;
         NeighbourPieceImpostor made;
-        made.figure = builder.figure(*key.first);
-        made.texture = builder.texture(node.texture->identity, node.texture_identity, node.texture_format,
-            node.texture_mips.data(), static_cast<std::uint32_t>(node.texture_mips.size()), node.texture->opaque_mips);
-        if (!device) {
-            // D3D12 backend: created and filled here; the bake records the copies.
-            if (FAILED(d3d12->prepare_buffer(source.source.vertices.size() * sizeof(float), source.source.vertices.data(),
-                    made.vertices12)) ||
-                FAILED(d3d12->prepare_buffer(source.source.indices.size() * sizeof(std::uint32_t), source.source.indices.data(),
-                    made.indices12)))
-                continue;
-            made.index_count = static_cast<std::uint32_t>(source.source.indices.size());
-            made.sphere = source.source.sphere;
-            builder.piece.impostors.push_back(std::move(made));
-            continue;
+        made.key = key;
+        made.sphere = source.sphere;
+        bool ok = true;
+        for (std::size_t i = 0; i < source.parts.size() && ok; ++i) {
+            const auto& node = *source.nodes[i];
+            NeighbourPieceImpostorPart part;
+            if (node.surface) { part.texture = UINT32_MAX; part.surface = node.surface; }
+            else part.texture = builder.texture(node.texture->identity, node.texture_identity, node.texture_format,
+                node.texture_mips.data(), static_cast<std::uint32_t>(node.texture_mips.size()), node.texture->opaque_mips);
+            ok = piece_impostor_part(source.parts[i], part, device, d3d12);
+            made.parts.push_back(std::move(part));
         }
-        D3D11_BUFFER_DESC vertices{};
-        vertices.ByteWidth = static_cast<UINT>(source.source.vertices.size() * sizeof(float));
-        vertices.Usage = D3D11_USAGE_IMMUTABLE;
-        vertices.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        vertices.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-        vertices.StructureByteStride = 8 * sizeof(float);
-        const D3D11_SUBRESOURCE_DATA vertex_data{source.source.vertices.data(), 0, 0};
-        D3D11_BUFFER_DESC indices{};
-        indices.ByteWidth = static_cast<UINT>(source.source.indices.size() * sizeof(std::uint32_t));
-        indices.Usage = D3D11_USAGE_IMMUTABLE;
-        indices.BindFlags = D3D11_BIND_INDEX_BUFFER;
-        const D3D11_SUBRESOURCE_DATA index_data{source.source.indices.data(), 0, 0};
-        if (FAILED(device->CreateBuffer(&vertices, &vertex_data, &made.vertices)) ||
-            FAILED(device->CreateShaderResourceView(made.vertices.Get(), nullptr, &made.vertex_view)) ||
-            FAILED(device->CreateBuffer(&indices, &index_data, &made.indices)))
-            continue; // as the render-thread bake skipped a failed creation
-        made.index_count = static_cast<std::uint32_t>(source.source.indices.size());
-        made.sphere = source.source.sphere;
+        if (!ok) continue; // its parts draw their own triangles
+        builder.impostor_index.emplace(key, static_cast<std::uint32_t>(builder.piece.impostors.size()));
         builder.piece.impostors.push_back(std::move(made));
     }
 }
@@ -288,8 +316,8 @@ std::unique_ptr<NeighbourPiece> make_neighbour_piece(NeighbourMapUpload& upload,
     if (upload.prebuilt_pages.empty()) piece->terrain_failure = "terrain.prebuild_failed";
     else {
         piece_terrain(builder, upload);
-        piece_decorations(builder, upload);
         piece_impostors(builder, upload, device, d3d12);
+        piece_decorations(builder, upload);
     }
     piece_ground_cover(builder, upload);
     piece->pages = std::move(upload.prebuilt_pages);

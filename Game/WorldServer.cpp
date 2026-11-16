@@ -19,6 +19,7 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "io.h"
 #include "WorldServer.h"
+#include "retained_static_scene.h"
 #include "Camera.h"
 
 #include "ServerSpecificManager.h"
@@ -3653,3 +3654,12 @@ void CWorldServer::StoreSave(CSave &file)
 /////////////////////////////////////////////////////////////////////////////////////
 
 #include "ModAnimationIdSave.inl"
+
+void CWorldServer::ReadVisualFireSpells(std::vector<owned::RetainedFireSpell>& output) const {
+    output.clear();
+    for (POSITION pos = spells.GetHeadPosition(); pos;) {
+        const CEffectSpell* spell = spells.GetNext(pos);
+        owned::RetainedFireSpell value;
+        if (spell && spell->ReadVisualFireSpell(value)) output.push_back(value);
+    }
+}

@@ -5,6 +5,7 @@
 // game window's client size. Present, resize and frame latency live here.
 #include "d3d12_core.h"
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <thread>
@@ -45,7 +46,7 @@ public:
     bool proxy() const noexcept { return proxy_context_ != nullptr; }
     IDXGISwapChain* swap_chain() const noexcept { return swap_.Get(); }
     // The frame latency wait the pacer takes before each Present.
-    void wait_frame_latency() noexcept;
+    void wait_frame_latency() noexcept { take_frame_latency(); }
     // Runs before any resize or destroy (the pacer drains its presents).
     void set_before_resize(void (*hook)(void*), void* context) noexcept { before_resize_ = hook; before_resize_context_ = context; }
     // After Core::end_frame. Interval 0 tears where the display allows it.
@@ -78,6 +79,10 @@ private:
     ComPtr<IDXGISwapChain3> swap_;
     void* proxy_context_ = nullptr;  // ffxContext of the FidelityFX proxy swap chain
     HANDLE waitable_ = nullptr;
+    // take_frame_latency: counts a timed-out wait left untaken. One thread
+    // waits at a time (the render thread, or the pacer with frame generation).
+    std::atomic<unsigned> latency_owed_{0};
+    void take_frame_latency() noexcept;
     UINT flags_ = 0, width_ = 0, height_ = 0;
     bool tearing_ = false, adopted_ = false;
     ComPtr<ID3D12DescriptorHeap> rtv_heap_;

@@ -31,7 +31,7 @@ cbuffer Precipitation:register(b0){
  float4 pcShelter0;float4 pcShelter1;float4 pcShelter2;
  float4 pcSplash;   // x splash slots per tile, y splash life (s), z splash height (m), w opacity
  float4 pcSnow;     // blowing snow/sand: x share of flakes, y speed over the drift, z height (m), w life (s)
- float4 pcSheet;    // x sideways sheet scroll (sand), y share of sand sheets (puffs), z sheet size (m), w sheet opacity
+ float4 pcSheet;    // x unused, y share of sand sheets (puffs), z sheet size (m), w sheet opacity
  float4 pcDrift;    // xy wind drift of the falling field (metres, integrated on game time by the CPU)
  float4 pcSand;     // x share of the sand sheets lying on the ground, y share of grains that billow at walls and cliffs, z billow rise (m), w lee march steps
  float4 pcBand;     // x upright band weight, y ground sheet weight (0..1, the view-angle budget), zw band distance fade start/end (m)
@@ -40,6 +40,11 @@ cbuffer Precipitation:register(b0){
  float4 pcFogSeam;float4 pcFogCurve;float4 pcFogSpanLo;float4 pcFogSpanHi; // neighbour seam fog (neighbour_fog.h)
  float4 pcSnowLight;// snow material: rgb ambient (tinted), w 1 while the scene's lamps light the flakes
  float4 pcSnowSun;  // rgb sun or moon light (tinted), w sparkle strength
+ // Blowing sand on the ground: xy the wind integrated on game seconds times
+ // the shared gust pulse (metres), z game seconds times the pulse, w gust
+ // contrast 0..1 (weather_wind.h gust, raised for a storm).
+ float4 pcFlow;
+ float4 pcFrame;    // xy the map's wind (no wander: the streaks' fixed frame), zw the current wind (gust fronts)
 };
 // The world's lamps (the native shader's records, b5/t17/t18, bound by the
 // precipitation draw while pcSnowLight.w is set): falling snow takes the
@@ -172,15 +177,21 @@ PcOut precipitationVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
  // Blowing snow (blizzard): a share of the flakes skims the ground with the
  // wind instead of falling, fading in and out over its short run.
  bool drifter=snow&&pcRandom(seed^0x3d4d51c3u)<pcSnow.x;
+ // Ground sheet candidates (sand): patches of blowing sand on the ground
+ // live 3-5x a grain's run, each its own length, and creep at a fifth of
+ // the wind; the sand streams through them (precipitationPS). A shared
+ // 1.6 s run made every sheet appear, slide and vanish on one beat.
+ bool sheetCandidate=pcShape.z>2.5&&pcRandom(seed^0x9e3779b1u)<pcSheet.y&&pcRandom(seed^0x4b1d2f6fu)<pcSand.x;
  if(drifter){
-  float run=pcRandom(seed^0x1b56c4e9u)+pcMotion.w/pcSnow.w;
+  float runLife=pcSnow.w*(sheetCandidate?3+2*pcRandom(seed^0x2f6b1c3du):1);
+  float run=pcRandom(seed^0x1b56c4e9u)+pcMotion.w/runLife;
   float runCycle=floor(run),a=run-runCycle;
   cycleSeed=pcHash(seed^uint(int(runCycle))*0x27d4eb2du);
   // Each run has its own pace and a slight sideways heading, so the stream
   // never moves as one sheet.
   float pace=.7+.6*pcRandom(cycleSeed^0x2545f491u);
   float2 heading=pcMotion.xy+float2(-pcMotion.y,pcMotion.x)*(pcRandom(cycleSeed^0x5851f42du)-.5)*.25;
-  float2 xy=tileOrigin+pcDrift.xy+float2(pcRandom(cycleSeed),pcRandom(cycleSeed^0x68bc21ebu))*period+heading*pcSnow.y*pace*a*pcSnow.w;
+  float2 xy=tileOrigin+pcDrift.xy+float2(pcRandom(cycleSeed),pcRandom(cycleSeed^0x68bc21ebu))*period+heading*pcSnow.y*pace*a*runLife*(sheetCandidate?.2:1);
   float lift=pcRandom(cycleSeed^0x165667b1u);
   float groundHere=pcGround(xy);
   p=float3(xy,groundHere+.05+pcSnow.z*lift*lift*(.6+.4*sin(a*3.14159)));
@@ -198,7 +209,7 @@ PcOut precipitationVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
  // map's top just downwind) or up a steep slope (the ground rising downwind)
  // curls upward, grows and fades over its run.
  bool billow=false;
- if(drifter&&pcShape.z>2.5&&pcRandom(seed^0x7a3c5e91u)<pcSand.y){
+ if(drifter&&pcShape.z>2.5&&!sheetCandidate&&pcRandom(seed^0x7a3c5e91u)<pcSand.y){
   float2 w=length(pcMotion.xy)>1e-3?normalize(pcMotion.xy):float2(1,0);
   float here=pcGround(p.xy);
   float wall=max(max(pcShelterTop(p.xy+w*.8),pcShelterTop(p.xy+w*1.6))-here-1.,pcGround(p.xy+w*1.2)-here-.6);
@@ -229,7 +240,7 @@ PcOut precipitationVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
  bool puff=drifter&&!billow&&pcRandom(seed^0x9e3779b1u)<pcSheet.y;
  // Some sheets lie flat on the ground, so the storm also reads from above
  // (a steep camera sees upright bands edge-on).
- bool groundSheet=puff&&pcRandom(seed^0x4b1d2f6fu)<pcSand.x;
+ bool groundSheet=puff&&sheetCandidate;
  if(puff)p.z=pcGround(p.xy)+(groundSheet?.12+.2*pcRandom(cycleSeed^0x2c1b3c6du):.15+.6*pcRandom(cycleSeed^0x2c1b3c6du)*pcSnow.z/3);
  // The view angle picks how many band candidates show (a soft per-band
  // threshold, so a tilt fades bands in and out instead of popping), and
@@ -287,16 +298,17 @@ PcOut precipitationVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
   // A dust band lies along the wind, its width across facing the camera.
   float2 w=length(pcMotion.xy)>1e-3?normalize(pcMotion.xy):float2(1,0);
   halfLength=pcSheet.z*(groundSheet?1+1.2*pcRandom(cycleSeed^0x7f4a7c15u):.6+.8*pcRandom(cycleSeed^0x7f4a7c15u));
-  // Bands follow the ground's slope along and across the wind, and thin out
-  // on steep ground: on a dune face a level band read as a soft streak
-  // painted down the slope (03430630/3fd330a6 sand2_mid).
+  // Upright bands thin out on steep ground: on a dune face a level band
+  // read as a soft streak painted down the slope (03430630/3fd330a6
+  // sand2_mid). Ground sheets lie on the slope (every corner sits on the
+  // ground under it, below) up to about 35 degrees, sand's angle of repose.
   float2 sw=float2(-w.y,w.x);
   float rise=(pcGround(p.xy+w*halfLength)-pcGround(p.xy-w*halfLength))/(2*halfLength);
   float riseSide=(pcGround(p.xy+sw*1.5)-pcGround(p.xy-sw*1.5))/3;
-  fade*=1-smoothstep(.12,.3,length(float2(rise,riseSide)));
+  fade*=groundSheet?1-smoothstep(.5,.75,length(float2(rise,riseSide))):1-smoothstep(.12,.3,length(float2(rise,riseSide)));
   axis=normalize(float3(w,rise));across=cross(axis,view);float l=length(across);
   across=l>1e-6?across/l:float3(0,0,1);
-  if(groundSheet)across=normalize(float3(sw,riseSide));
+  if(groundSheet){axis=float3(w,0);across=float3(sw,0);}
   // A band reaching under a roof or into a building is not drawn.
   if(pcShelterTop(p.xy+axis.xy*halfLength)>p.z||pcShelterTop(p.xy-axis.xy*halfLength)>p.z)fade=0;
  } else if(snow){
@@ -342,6 +354,16 @@ PcOut precipitationVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
  float u=(vertex>>1)&1u,side=(vertex&1u)?1:-1;
  float along=puff?(u*2-1)*halfLength:snow?(u*2-1)*(shown*.5+halfLength):(u*2-1)*halfLength;
  float3 corner=p+axis*along+across*side*shown*.5;
+ // Sheets and bands take the ground under each corner (the height field per
+ // vertex): a plane through the centre's slope floated over hollows and cut
+ // into rises along a 3-13 m sheet (11-05 user note). A ground sheet keeps
+ // its lift over the ground at every corner; an upright band's foot follows
+ // the ground at both ends.
+ [branch]if(puff&&fade>0){
+  float lift=p.z-ground;
+  if(groundSheet)corner.z=pcGround(corner.xy)+lift;
+  else{float3 foot=p+axis*along;corner.z+=pcGround(foot.xy)+lift-foot.z;}
+ }
  if(fade<=0)corner=p; // a hidden drop collapses to a point
  o.position=mul(pcClip,float4(corner,1));o.viewW=o.position.w;
  float fog=1;
@@ -371,7 +393,9 @@ PcOut precipitationVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
  // Snow crystals (not blowing snow or sand): one of the game's four flake
  // shapes, turning slowly and tumbling (its width breathes as it rolls);
  // out-of-focus near flakes sample a blurrier mip and fade.
- o.flake=float4(1,0,0,groundSheet?-2:-1); // w -2: a ground sheet (close soft depth)
+ // w -2: a ground sheet (close soft depth), its corner's world position in
+ // xyz (the pixel stage samples the ground's sand flow there).
+ o.flake=groundSheet?float4(corner,-2):float4(1,0,0,-1);
  if(pcShape.z>1.5&&pcShape.z<2.5&&!drifter){
   float t=pcMotion.w,spin=(pcRandom(cycleSeed^0x6c8e9cf5u)-.5)*3,turn=pcRandom(cycleSeed^0x5f356495u)*6.2832+t*spin;
   float roll=.6+.4*abs(cos(t*(.8+1.6*pcRandom(cycleSeed^0x2f8b2c1du))+turn));
@@ -396,25 +420,45 @@ float pcValue(float2 p){
  float d=pcRandom(c.x*0x8da6b343u^(c.y+1)*0xd8163841u),e=pcRandom((c.x+1)*0x8da6b343u^(c.y+1)*0xd8163841u);
  return lerp(lerp(a,b,f.x),lerp(d,e,f.x),f.y);
 }
+float2 pcTurn(float2 v,float c,float s){return float2(v.x*c-v.y*s,v.x*s+v.y*c);}
+// Blowing sand on the ground at world point x (the veil's streaks and the
+// ground sheets), 0..1. No scrolled texture: three streak layers, each on
+// its own heading (the wind, 12 degrees one way, 7 the other) and at its
+// own share of the flow (.4-.85), slide through one another, so streaks
+// keep forming, merging and breaking up and the pattern never repeats
+// (11-05 user note: the panned texture moved very repetitively; e3945375's
+// two-phase cross-fade pulsed on one 4 s beat). A slow 25 m meander bends
+// them. The flow (pcFlow.xy) is the wind integrated on game seconds times
+// the shared gust pulse, so the sand surges in gusts and stops on pause.
+// The streaks lie along the map's wind (pcFrame.xy, no wander): a turning
+// frame swung the whole pattern about the world origin. The surface height
+// z bends them across the wind (a streak line keeps across + 1.5 z), so on
+// a slope they turn toward its contour instead of running straight over it.
+float pcSandGround(float2 x,float z){
+ float2 wd=pcFrame.xy,ws=float2(-wd.y,wd.x);
+ float run=dot(pcFlow.xy,wd),drift=dot(pcFlow.xy,ws);
+ float along=dot(x,wd),across=dot(x,ws)+z*1.5;
+ across+=(pcValue(float2(along-run*.3,across-drift*.3)*.04+3.7)-.5)*5;
+ float n1=pcValue(float2((along-run*.6)*.16,(across-drift*.6)*1.5)+11.3);
+ float2 x2=pcTurn(float2(along,across),.978,-.208),x3=pcTurn(float2(along,across),.993,.122);
+ float n2=pcValue(float2((x2.x-run*.4)*.1,(x2.y-drift*.4)*.9)+37.1);
+ float n3=pcValue(float2((x3.x-run*.85)*.3,(x3.y-drift*.85)*2.6)+71.9);
+ return saturate(smoothstep(.45,.8,n1)*(.5+.6*n2)+.45*smoothstep(.6,.9,n3)*n2);
+}
+// Gusts in the sand at x, 0..1 (.5 without contrast): broad patches of
+// thicker and thinner air drift with the flow (90 m), and the shared gust
+// fronts (the grass's gcWindSway fronts: 8 m, 1.9 rad per game second along
+// the current wind) swell inside them; pcFlow.w is the gust contrast.
+float pcSandGust(float2 x){
+ float broad=pcValue((x-pcFlow.xy*1.1)/90.+31.7);
+ float front=.5+.5*sin(dot(x,pcFrame.zw)*.78539816-pcMotion.w*1.9);
+ return lerp(.5,saturate(broad*(.75+.5*front)),saturate(pcFlow.w*1.4));
+}
+// Rain and snow (precipitationPS) and sand (precipitationSandPS) are separate
+// programs: the sand's bands and ground sheets cost the rain and snow
+// nothing (one shared program carried the sheets' noise into every drop).
 float4 precipitationPS(PcOut i):SV_Target{
  float a=i.color.a;
- [branch]if(i.softness<0){
-  // Dust band: a soft lens broken into wisps that stream along it.
-  float2 d=float2(i.uv.x*2-1,i.uv.y);float lens=saturate(1-dot(d,d));
-  // The faint rim and corners (about a third of the quad) skip the noise.
-  if(lens*lens*a<.004)discard;
-  float s=-i.softness,t=pcMotion.w*.8;
-  // Domain-warped wisps in three decorrelated octaves, each band with its
-  // own stretch and drift: no two bands share a pattern, and the fine octave
-  // keeps the edges crisp up close.
-  float2 q=float2(i.uv.x*(4+2*frac(s*.37))-t*(.8+.4*frac(s*.71))+s*13.1,i.uv.y*(1.6+.8*frac(s*.53))+s*7.3);
-  float2 warp=float2(pcValue(q*.5+s),pcValue(q*.5+s+5.2))-.5;
-  float wisps=pcValue(q+warp*1.6)*.6+pcValue(q*2.7+warp*2.2+float2(s*3.1-t*.7,s))*.28+pcValue(q*7.9+s*1.7)*.12;
-  a*=lens*lens*smoothstep(.32,.72,wisps);
-  a*=saturate((pcSceneW(pcSceneDepth.Load(int3(i.position.xy,0)))-i.viewW)/(i.flake.w<-1.5?.3:1.2));
-  if(a<=1e-4)discard;
-  return float4(i.color.rgb*a,a); // fogged per corner (precipitationVS)
- }
  [branch]if(i.flake.w>=0){
   // The quad's square, turned and squashed into the flake's atlas cell.
   float2 d=float2(i.uv.x*2-1,i.uv.y);
@@ -424,14 +468,54 @@ float4 precipitationPS(PcOut i):SV_Target{
   float2 cell=float2((column+q.x*.5+.5)*.25,.5+(q.y*.5+.5)*.25);
   a*=pcFlakes.SampleLevel(pcFlakeSampler,cell,i.flake.w).a/(1+i.flake.w);
  } else if(pcShape.z>1.5){
-  // Snow: a soft round flake; sand: a crisp fleck with a hard edge.
-  float2 d=float2(i.uv.x*2-1,i.uv.y);float r=saturate(1-dot(d,d));a*=pcShape.z>2.5?smoothstep(0,.35,r):r*sqrt(r);
+  // Snow: a soft round flake.
+  float2 d=float2(i.uv.x*2-1,i.uv.y);float r=saturate(1-dot(d,d));a*=r*sqrt(r);
  } else {
   // A streak: bright core, soft edge (softer when out of focus), brightest
   // near the head and tapering to the tail.
   float edge=saturate(1-abs(i.uv.y));float core=pow(edge,lerp(1.2,2.5,saturate(i.softness-1)));
   a*=core*smoothstep(0,.55,i.uv.x)*(1-.4*smoothstep(.8,1,i.uv.x));
  }
+ a*=saturate((pcSceneW(pcSceneDepth.Load(int3(i.position.xy,0)))-i.viewW)/pcDepth.z);
+ if(a<=1e-4)discard;
+ return float4(i.color.rgb*a,a);
+}
+float4 precipitationSandPS(PcOut i):SV_Target{
+ float a=i.color.a;
+ [branch]if(i.softness<0){
+  // Dust band: a soft lens broken into wisps that stream along it.
+  float2 d=float2(i.uv.x*2-1,i.uv.y);float lens=saturate(1-dot(d,d));
+  // The faint rim and corners (about a third of the quad) skip the noise.
+  if(lens*lens*a<.004)discard;
+  float sceneGap=pcSceneW(pcSceneDepth.Load(int3(i.position.xy,0)))-i.viewW;
+  [branch]if(i.flake.w<-1.5){
+   // Ground sheet: a denser patch of the ground's own streaming sand (its
+   // own stretch of the same flow), held to the ground: it fades where the
+   // surface under it drops more than about a metre below (a hollow between
+   // its corners) and softly where it meets the ground (a rise).
+   float s=-i.softness;
+   float drop=sceneGap*(pcEye.z-i.flake.z)/max(i.viewW,1e-3);
+   a*=lens*lens*smoothstep(.08,.5,pcSandGround(i.flake.xy+s*float2(37.1,-19.3),i.flake.z));
+   a*=saturate(sceneGap/.3)*(1-smoothstep(.7,1.3,drop));
+   if(a<=1e-4)discard;
+   return float4(i.color.rgb*a,a);
+  }
+  // Upright band: its wisps run on game seconds times the gust pulse, so
+  // they quicken in gusts.
+  float s=-i.softness,t=pcFlow.z*.8;
+  // Domain-warped wisps in three decorrelated octaves, each band with its
+  // own stretch and drift: no two bands share a pattern, and the fine octave
+  // keeps the edges crisp up close.
+  float2 q=float2(i.uv.x*(4+2*frac(s*.37))-t*(.8+.4*frac(s*.71))+s*13.1,i.uv.y*(1.6+.8*frac(s*.53))+s*7.3);
+  float2 warp=float2(pcValue(q*.5+s),pcValue(q*.5+s+5.2))-.5;
+  float wisps=pcValue(q+warp*1.6)*.6+pcValue(q*2.7+warp*2.2+float2(s*3.1-t*.7,s))*.28+pcValue(q*7.9+s*1.7)*.12;
+  a*=lens*lens*smoothstep(.32,.72,wisps);
+  a*=saturate(sceneGap/1.2);
+  if(a<=1e-4)discard;
+  return float4(i.color.rgb*a,a); // fogged per corner (precipitationVS)
+ }
+ // A sand grain: a crisp fleck with a hard edge.
+ float2 d=float2(i.uv.x*2-1,i.uv.y);a*=smoothstep(0,.35,saturate(1-dot(d,d)));
  a*=saturate((pcSceneW(pcSceneDepth.Load(int3(i.position.xy,0)))-i.viewW)/pcDepth.z);
  if(a<=1e-4)discard;
  return float4(i.color.rgb*a,a);
@@ -512,24 +596,26 @@ float pcNoise(float2 p){
  float d=pcRandom(c.x*0x8da6b343u^(c.y+1)*0xd8163841u),e=pcRandom((c.x+1)*0x8da6b343u^(c.y+1)*0xd8163841u);
  return lerp(lerp(a,b,f.x),lerp(d,e,f.x),f.y);
 }
-// Sand dust (world space, game seconds). No rigid scroll: each pattern
-// drifts downwind for pcDustLife seconds while it fades in and out, and a
-// freshly seeded one takes over half a cycle later (two phases, variance
-// kept), so structures form, travel and dissolve (4f227551 user note: the
-// far overlay panned like one texture). A domain warp bends every pattern,
-// the fine layer travels faster than the coarse one, and broad gust pulses
-// sweep through the field with the wind. Far away only the coarse layer and
-// the gusts remain: slow, soft density change. The rain and snow veil keep
+// Sand dust density at x (world space), 0..1. No rigid scroll (4f227551
+// user note: the far overlay panned like one texture) and no cross-faded
+// phases (11-05: a 4 s beat): two coarse layers (32 and 47 m) drift at .45
+// and .3 of the flow on headings 10 and 15 degrees either side of it, bent
+// by a slow shared warp across the wind, so the dust keeps reshaping. Near
+// the eye (fineWeight) two fine layers (9 and 6.5 m) race at the full and
+// .7 flow on their own headings. Far away only the coarse layers and the
+// gusts remain: slow, soft density change. The rain and snow veil keep
 // their screen-space sheets.
-static const float pcDustLife=8.;
-float pcDustSeed(float cycle){return frac(cycle*.6180339)*97.;}
-float pcDustPhase(float2 p,float2 shift,float seed){
- float2 q=(p-shift)/32.+seed*float2(1.713,.971);
- q+=(pcNoise(q*.43+seed*.37)-.5)*1.3;
- return pcNoise(q);
-}
-float pcDustBlend(float n0,float n1,float w0,float w1){
- return ((n0-.5)*w0+(n1-.5)*w1)*rsqrt(max(w0*w0+w1*w1,1e-4))+.5;
+float pcSandHaze(float2 x,float fineWeight){
+ float2 o=pcFlow.xy,wd=pcFrame.xy;
+ float2 bend=float2(-wd.y,wd.x)*(pcNoise((x-o*.2)/60.+5.3)-.5)*14;
+ float c1=pcNoise((x+bend-pcTurn(o,.985,.174)*.45)/32.+1.7);
+ float c2=pcNoise((x-bend*.6-pcTurn(o,.966,-.259)*.3)/47.+23.9);
+ float field=(c1+c2-1)*.7071+.5;
+ [branch]if(fineWeight>0){
+  float f1=pcNoise((x-o)/9.+float2(.51,.33)),f2=pcNoise((x-pcTurn(o,.990,-.139)*.7)/6.5+11.7);
+  field=lerp(field,field*.6+((f1+f2-1)*.7071+.5)*.4,fineWeight);
+ }
+ return field;
 }
 float4 precipitationVeilPS(float4 position:SV_Position):SV_Target{
  float d=pcSceneDepth.Load(int3(position.xy,0));
@@ -543,7 +629,7 @@ float4 precipitationVeilPS(float4 position:SV_Position):SV_Target{
   [unroll]for(uint k=0;k<2;++k){
    // Nearer layers are larger and fall faster; the slant follows the wind.
    float scale=4.+5.*k,fall=t*(1.4-.3*k);
-   float2 q=float2((uv.x*scale+pcSheet.x*t*(1.4-.3*k))*pcScreen.w+uv.y*pcMotion.x*.08,uv.y*scale+fall);
+   float2 q=float2(uv.x*scale*pcScreen.w+uv.y*pcMotion.x*.08,uv.y*scale+fall);
    // A slow domain warp breaks the value-noise lattice so the sheets never
    // show a repeating cell pattern.
    q+=(float2(pcNoise(q*.31+k*5.1+t*.05),pcNoise(q*.31+k*9.7-t*.04))-.5)*1.4;
@@ -558,41 +644,27 @@ float4 precipitationVeilPS(float4 position:SV_Position):SV_Target{
  float3 ray=fogUnproject(suv,.5)-fogEye.xyz;ray*=rsqrt(max(dot(ray,ray),1e-12));
  float dist=d<1?min(length(world-fogEye.xyz),300.):300.;
  float3 dustPoint=fogEye.xyz+ray*dist;
- // Streaks lie on near-level ground only: on a wall or cliff the world-XY
- // pattern stretched into moving vertical stripes (9b32ff4a user note).
- // The surface normal comes from the reconstructed position's derivatives
- // (outside the depth branch, where they are defined).
+ // Streaks lie on the ground up to sand's angle of repose (about 37
+ // degrees full, gone by 52): on a wall or cliff the world-XY pattern
+ // stretched into moving vertical stripes (9b32ff4a user note), but the
+ // old 8-20 degree cut left every dune slope bare, so the streaks read as
+ // a texture panned over the flats (11-05 user note). The surface normal
+ // comes from the reconstructed position's derivatives (outside the depth
+ // branch, where they are defined).
  float3 facing=cross(ddx(world),ddy(world));
  float flatness=dot(facing,facing)>1e-12?abs(facing.z)*rsqrt(dot(facing,facing)):0;
- float tt=pcMotion.w,ph=tt/pcDustLife,f0=frac(ph),f1=frac(ph+.5);
- float s0=pcDustSeed(floor(ph)),s1=pcDustSeed(floor(ph+.5)+.5);
- float w0=1-abs(2*f0-1),w1=1-w0;
  float2 wind=pcMotion.xy;
- float gust=pcNoise((dustPoint.xy-wind*tt*.9)/160.+31.7);
+ float gust=pcSandGust(dustPoint.xy);
  float a=amount*(.7+.6*gust);
- // Coarse layer at under half the wind's speed, fine layer (near only) at
- // its full speed; none on Low (no sheets).
- [branch]if(pcVeil.z>0){
-  float field=pcDustBlend(pcDustPhase(dustPoint.xy,wind*.45*f0*pcDustLife,s0),
-                          pcDustPhase(dustPoint.xy,wind*.45*f1*pcDustLife,s1),w0,w1);
-  float fineWeight=saturate(1-dist/140);
-  [branch]if(fineWeight>0){
-   float fine=pcDustBlend(pcNoise((dustPoint.xy-wind*f0*pcDustLife)/9.+s0*float2(.51,.33)),
-                          pcNoise((dustPoint.xy-wind*f1*pcDustLife)/9.+s1*float2(.51,.33)+11.7),w0,w1);
-   field=lerp(field,field*.6+fine*.4,fineWeight);
-  }
-  a*=lerp(1,saturate(field*1.6-.25),pcVeil.z);
- }
+ // The dust field; none on Low (no sheets).
+ [branch]if(pcVeil.z>0)a*=lerp(1,saturate(pcSandHaze(dustPoint.xy,saturate(1-dist/140))*1.6-.25),pcVeil.z);
  // World-anchored streaks of blowing sand on the ground (read from above
- // and on to the horizon), the same two-phase drift along the wind, and the
- // near haze and streaks cut inside wind shadows and narrow streets (the
- // scene point's own lee test).
+ // and on to the horizon, pcSandGround: layered flow, bent by the surface
+ // height), and the near haze and streaks cut inside wind shadows and
+ // narrow streets (the scene point's own lee test).
  [branch]if(d<1){
   float2 wd=length(wind)>1e-3?normalize(wind):float2(1,0),wside=float2(-wd.y,wd.x);
-  float along=dot(world.xy,wd),across=dot(world.xy,wside),run=length(wind)*.6*pcDustLife;
-  float n=pcDustBlend(pcNoise(float2((along-run*f0)*.16,across*1.5)+s0*float2(.29,.83)),
-                      pcNoise(float2((along-run*f1)*.16,across*1.5)+s1*float2(.29,.83)+7.3),w0,w1);
-  float streak=smoothstep(.48,.8,n)*pcSand2.x*saturate((60-max(w-140,0))/60)*smoothstep(.94,.99,flatness)*(.7+.6*gust);
+  float streak=smoothstep(.3,.72,pcSandGround(world.xy,world.z))*pcSand2.x*saturate((60-max(w-140,0))/60)*smoothstep(.62,.8,flatness)*(.7+.6*gust);
   float base=world.z,occluded=0;
   [unroll]for(uint m=1;m<=3;++m){
    float dd=2.5*m*m;float h=pcShelterTop(world.xy-wd*dd)-base;

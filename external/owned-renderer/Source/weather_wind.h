@@ -62,6 +62,7 @@ struct WeatherWindState {
     float surface_rain = 0.0f; // short game-time smoothing for water impacts only
     double surface_rain_seconds = -1.0;
     double wisp[2]{};           // integrated fog-wisp drift, world units
+    float base[2]{.7071068f, .7071068f}; // the map's wind direction without wander (a fixed frame for patterns that must not turn)
 };
 
 // A full dry/wet change settles in 1.5 game seconds. Pause holds the value;
@@ -148,6 +149,7 @@ inline void update_weather_wind(WeatherWindState& s, const float base_direction[
     float along[2]{.7071068f, .7071068f};
     const float length = std::sqrt(base_direction[0] * base_direction[0] + base_direction[1] * base_direction[1]);
     if (length > 1e-6f) { along[0] = base_direction[0] / length; along[1] = base_direction[1] / length; }
+    s.base[0] = along[0]; s.base[1] = along[1];
     WeatherWindGpu w{};
     w.force = weather_wind_effective_force(base_force, wind_floor);
     // Ramp history may outlive an outdoor frame; it cannot rain or drive a

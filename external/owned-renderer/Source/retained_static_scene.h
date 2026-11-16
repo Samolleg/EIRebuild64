@@ -127,6 +127,11 @@ struct VisualAssemblyAsset {
     bool sways = false;
     std::uint32_t sway_shape = 0;
     std::uint32_t sway_root = 0;
+    // Diagnostic only (F10 critter_labels marker): the published part count
+    // when the game loaded every part of the model (a unit created with an
+    // empty body-part list holds several armour variants of one body part
+    // at once); 0 otherwise. Never changes drawing.
+    std::uint32_t all_model_parts = 0;
     // Selected model/bone member bytes this assembly was built from. Holding
     // them keeps the resource store's weak backing alive, so republishing an
     // unchanged appearance does not read and allocate the member again.
@@ -405,6 +410,9 @@ struct VisualPreparedResources {
         // fields above (all visible parts, GPU-culled) for this set generation.
         bool static_registered = false;
         std::uint64_t static_generation = 0;
+        // Registered as object-space records (item 5) under that catalog.
+        bool object_space = false;
+        std::uint64_t object_space_index = 0;
         // The object journal does not change when neighbour rendering arrives.
         std::uint64_t border_fog_revision = 0;
         bool static_current(std::uint64_t generation, std::uint64_t fog_revision) const noexcept {
@@ -412,6 +420,13 @@ struct VisualPreparedResources {
         }
     };
     ColorPacket color_packet;
+    // Item 5: the assembly whose object-space registration the renderer
+    // refused, under which catalog (retained_visual_object_space_admitted).
+    struct { const VisualAssemblyAsset* assembly = nullptr; std::uint64_t revision = 0, index = 0; } object_space_refused;
+    // Its catalog model key for that assembly and complection
+    // (retained_visual_object_space_model).
+    struct { const VisualAssemblyAsset* assembly = nullptr; std::uint64_t revision = 0, key = 0;
+        std::array<float, 3> shape{}; } object_space_model;
     std::shared_ptr<const VisualSkeletonBinding> skeleton_binding;
     NativeWorldGeometry::Pose gpu_pose;
     std::shared_ptr<gltf::PlaybackState> gltf_playback;
@@ -495,6 +510,28 @@ struct RetainedWorldPointLight {
     float shadow_fade = 1; // retained lamps fade their shadow out after the game drops them
     bool attached = false; // unit attachment: never remembered in place
     bool hero = false; // current game-defined hero attachment, captured with manager membership
+    // A spell's own light: LIT_MAGICSHADOW (0x800) is set only by
+    // CEffectSpell::CreateLight (0x67F81F stores 0x840) and spell arrows, and
+    // CEffectPointLight::ApplyParams ORs it into the CLight. Positive range
+    // only (no LIT_UNSHADOW 0x400): the healing light is given a negative one.
+    // It marks where a spell lands or flies (critters keep away).
+    bool spell = false;
+};
+
+// A fire spell burning on the local server (option fire_burn; read each world
+// tick from the server's active spell list, never written): a fireball
+// explosion (kind 1, from the tick its explosion lands) or a fire wall (kind
+// 2: the strip centre +/- wall, about 1 m wide, while it burns), or a
+// ground lightning strike (kind 3, landed cp and spell radius). The renderer
+// starts its own burns from these (renderer_fire_burn.cpp).
+struct RetainedFireSpell {
+    std::uint8_t kind = 0;
+    std::array<float,3> center{};
+    std::array<float,2> wall{};
+    float radius = 0;
+    bool operator==(const RetainedFireSpell& o) const noexcept {
+        return kind == o.kind && center == o.center && wall == o.wall && radius == o.radius;
+    }
 };
 
 inline std::array<float,3> retained_point_shadow_center(
@@ -512,6 +549,7 @@ struct RetainedVisualFrame {
     std::vector<RetainedVisualSample> entities;
     std::vector<RetainedQuestLight> quest_lights;
     std::vector<RetainedWorldPointLight> world_point_lights;
+    std::vector<RetainedFireSpell> fire_spells;
     OwnedVisualDiagnostic diagnostic{};
     OwnedVisualRejection first_failure{};
 };
@@ -530,9 +568,10 @@ struct RetainedShadowSourceChanges {
     std::vector<std::uint32_t> wave_active_terrain_sectors;
 };
 
-// ground_contacts: the ground-cover object contact store (#164); it reads
-// value and lifecycle changes, not shadow state.
-enum class RetainedShadowConsumer : std::uint8_t { directional, point, persistent_scene, ground_contacts, count };
+// ground_contacts: the ground-cover object contact store (#164); hosted_plants:
+// the hosted plants' host records (#251). Both read value and lifecycle
+// changes, not shadow state.
+enum class RetainedShadowConsumer : std::uint8_t { directional, point, persistent_scene, ground_contacts, hosted_plants, count };
 
 // The scene lock protects this journal. Consumers acknowledge only completed
 // publications. Inactive consumers retain no history and begin with a full read.
@@ -885,6 +924,11 @@ public:
         std::shared_ptr<const VisualAssemblyAsset> assembly, bool weapons_replaced = false) noexcept;
     std::shared_ptr<const VisualAssemblyAsset> visual_assembly(
         VisualResourceIncarnation resource) const noexcept;
+    // The published assembly only while it stands: every part's source
+    // available and no rejection waiting for a new appearance (a publication
+    // that would rebuild the same parts may then keep it).
+    std::shared_ptr<const VisualAssemblyAsset> visual_standing_assembly(
+        VisualResourceIncarnation resource) const noexcept;
     bool visual_replace_surface(std::uint64_t id,
         std::shared_ptr<const OwnedVisualSurface> value) noexcept;
     // Entities whose drawn surface was destroyed under them (a native texture
@@ -933,6 +977,15 @@ public:
         VisualClipSelection& selection) const noexcept;
     bool visual_preview_source(VisualResourceIncarnation resource,
         RetainedVisualSample& sample, std::uint64_t& selection_revision) const noexcept;
+    // Temporary (doll bug, 2026-11-06): why visual_preview_source refuses,
+    // with the parts whose source is unavailable. Empty when it would not.
+    std::string visual_preview_diagnosis(VisualResourceIncarnation resource) const;
+    // An interface preview draws a unit whose drawn surface was retired with
+    // no replacement: true when its bindings are due for a re-read now (the
+    // world walk's rebind schedule, visual_surface_rebind_candidates), on the
+    // preview's own frame counter. Screens without the world walk (the
+    // outfitting doll) otherwise never re-read them.
+    bool visual_preview_rebind_due(VisualResourceIncarnation resource, std::uint64_t frame) noexcept;
     bool visual_publish_object_pose(VisualResourceIncarnation resource,
         const VisualObjectPose& values) noexcept;
     bool visual_object_publication_snapshot(std::int32_t signed_id,
@@ -956,6 +1009,7 @@ public:
     void visual_publish_highlight(const RetainedHighlightState& state) noexcept;
     bool visual_publish_world_point_lights(std::vector<RetainedWorldPointLight> lights,
         const char** failure = nullptr) noexcept;
+    void visual_publish_fire_spells(std::vector<RetainedFireSpell> spells) noexcept;
 #ifdef EID3D11_TESTING
     std::uint64_t visual_bridge_index_rebuilds_for_test() const noexcept;
 #endif
@@ -1251,6 +1305,7 @@ private:
     std::vector<RetainedQuestLight> quest_lights_;
     RetainedHighlightState highlight_;
     std::vector<RetainedWorldPointLight> world_point_lights_;
+    std::vector<RetainedFireSpell> fire_spells_;
     bool bridge_index_dirty_ = false;
 #ifdef EID3D11_TESTING
     std::uint64_t bridge_index_rebuilds_ = 0;

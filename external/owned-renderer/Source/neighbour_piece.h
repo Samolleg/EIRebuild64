@@ -26,6 +26,7 @@
 namespace owned {
 
 struct LiquidSurfField;
+struct TerrainFaceGrid; // terrain_face_atlas.h
 
 // A texture a draw binds: the archive member whose key the owned texture
 // cache uses. Block-compressed members arrive created (NeighbourPiece::
@@ -36,7 +37,9 @@ struct NeighbourPieceTexture {
     std::uint64_t view_identity = 0;     // NativeOwnedTextureView::identity
     NativeOwnedTextureFormat format = NativeOwnedTextureFormat::dxt1;
     std::uint32_t mip_count = 0;
-    std::uint32_t opaque_mips = 0;      // proof for the original mip range, even without CPU bytes
+    // Bit i: mip i proven alpha1 (TextureCpuAsset::opaque_mips); unknown and
+    // transparent mips stay 0. The material class reads it (static LOD).
+    std::uint32_t opaque_mips = 0;
     struct Mip { std::uint32_t offset = 0, width = 0, height = 0, bytes = 0; };
     std::vector<Mip> mips;               // into bytes; empty when created by the stream
     std::vector<std::uint8_t> bytes;
@@ -65,10 +68,9 @@ struct NeighbourPieceFigure {
 
 // One drawn decoration node.
 struct NeighbourPieceDecoration {
-    NativePreparedPartValues astral_values{}; // immutable base, phase set each frame
     std::uint32_t candidate = 0;         // nodes of one MOB object share it (contact span)
     std::uint32_t figure = 0;            // NeighbourPiece::figures
-    std::uint32_t texture = 0;           // NeighbourPiece::textures
+    std::uint32_t texture = 0;           // NeighbourPiece::textures (UINT32_MAX: none, item 5 surface part)
     std::uint32_t mesh = 0;              // NeighbourPiece::meshes (its figure at its shape)
     std::array<float, 3> shape{};
     std::array<float, 16> object_to_world{}; // map-local node placement
@@ -76,19 +78,36 @@ struct NeighbourPieceDecoration {
     std::uint32_t flags = 0;             // foliage and sway bits for the record
     std::uint32_t sway = 0;              // nonzero: root_world is the sway anchor
     std::array<float, 3> root_world{};   // map-local
+    // Its object's crown impostor: NeighbourPiece::impostors index + 1 (0:
+    // none), and whether this node is the part that draws it (the lead).
+    std::uint32_t impostor = 0;
+    std::uint32_t impostor_lead = 0;
+    std::int32_t object = 0;             // its MOB object id (impostor debug labels)
+    std::uint32_t node = 0;              // its model node (the active map's statics match live parts by it)
+    std::array<float, 16> object_placement{}; // its object's map-local placement (no node offset)
 };
 
-// Crown impostor bake input of one cut-out figure and texture, its triangles
-// already on the GPU (8 floats per vertex, 32-bit indices).
-struct NeighbourPieceImpostor {
-    std::uint32_t figure = 0, texture = 0;
+// One part of a crown impostor object: its texture and its triangles already
+// on the GPU (8 floats per vertex in the lead part's frame, 32-bit indices).
+struct NeighbourPieceImpostorPart {
+    std::uint32_t texture = 0;           // NeighbourPiece::textures (UINT32_MAX: surface)
+    // Item 5 live-sourced models only (never a neighbour piece, never sent
+    // across the remote link): the part's game surface, resolved by the
+    // renderer's surface cache.
+    std::shared_ptr<const OwnedVisualSurface> surface;
     Microsoft::WRL::ComPtr<ID3D11Buffer> vertices, indices;
     Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> vertex_view;
     // D3D12 backend: both buffers created with their bytes in upload memory
     // on the stream worker; the bake records their copies (finish_buffer).
     std::shared_ptr<D3D12PreparedUpload> vertices12, indices12;
     std::uint32_t index_count = 0;
-    std::array<float, 4> sphere{};
+};
+// Crown impostor bake input of one object model: all its drawn parts, baked
+// together into one atlas slice named by key.
+struct NeighbourPieceImpostor {
+    std::string key;
+    std::vector<NeighbourPieceImpostorPart> parts;
+    std::array<float, 4> sphere{};       // the lead part's frame
 };
 
 struct NeighbourPiece {
@@ -121,6 +140,10 @@ struct NeighbourPiece {
     std::vector<NeighbourPieceImpostor> impostors;
     std::shared_ptr<GroundCoverNeighbourInputs> ground_cover;
     std::shared_ptr<const LiquidSurfField> liquid_surf;
+    // Its terrain face grid (terrain_face_atlas.h) from the welded terrain:
+    // the renderer builds the face atlas from it whenever the face cache is
+    // on. Not on the remote link (remote mode keeps neighbour faces per pixel).
+    std::shared_ptr<const TerrainFaceGrid> face_grid;
     // Filled by the renderer at adoption.
     NeighbourBounds fog_edges;
     NeighbourFogField fog_cull;

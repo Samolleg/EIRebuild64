@@ -50,8 +50,12 @@ float shadowPlaneCompare(Texture2DArray<float> map,SamplerState clampSampler,uin
  float2 base=floor(at-.5),f=at-.5-base;
  // Gather order: x=(0,1) y=(1,1) z=(1,0) w=(0,0) texels from base.
  float4 stored=map.GatherRed(clampSampler,float3((base+1)/side,slice));
- float4 tx=base.x+float4(0,1,1,0),ty=base.y+float4(1,1,0,0);
- stored=min(min(tx,ty),side-1-max(tx,ty))<0?1:stored;
+ // Texels outside the map compare lit: columns base.x, base.x+1 and rows
+ // base.y, base.y+1 tested once each, then spread to the gather lanes
+ // (2-wide flags keep the callers' register count down).
+ const float2 limit=side-1;
+ const bool2 out0=base<0||base>limit,out1=base+1<0||base+1>limit;
+ stored=bool4(out0.x||out1.y,out1.x||out1.y,out1.x||out0.y,out0.x||out0.y)?1:stored;
  float2 corner=base+.5-origin;
  float4 reference=saturate(receiver+float4(dot(depthStep,corner+float2(0,1)),dot(depthStep,corner+1),
                                             dot(depthStep,corner+float2(1,0)),dot(depthStep,corner)));

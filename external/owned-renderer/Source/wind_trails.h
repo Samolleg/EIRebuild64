@@ -70,7 +70,7 @@ inline constexpr float kIntensityLow = .3f, kIntensityHigh = 1.2f;
 // calm spells or in weak wind, 3 rising to 12 (times the level scale) as the
 // wind strengthens and gusts.
 inline float target_count(const WeatherWindGpu& w, ambient::ZoneClass zone, const Quality& q) noexcept {
-    if (q.slots == 0 || zone == ambient::zone_cave || zone == ambient::zone_gipat_cave) return 0.0f;
+    if (q.slots == 0 || ambient::cave_zone(zone)) return 0.0f;
     const float e = windiness(w);
     const float presence = fog_smoothstep(kCalmSpeed, kWindySpeed, w.speed) * fog_smoothstep(kPresenceLow, kPresenceHigh, e);
     if (!(presence > 0.0f)) return 0.0f;

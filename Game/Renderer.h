@@ -170,7 +170,7 @@ public:
     BOOL DrawPolyline(CPolyLine *pPolyline);
     BOOL Draw3DLine(CXYZWArray &points, const float fpLineWidth, const int nBVClipFlags,
                     float fpTextureLength, float fpTexVStart, float fpTexVWidth);
-    BOOL DrawParticles(bool bUseAdd, CXYZWArray &points, CParticleToDrawArray &particles);
+    BOOL DrawParticles(bool bUseAdd, CXYZWArray &points, CParticleToDrawArray &particles, DWORD sourceType = 0);
     BOOL DrawSelection(const CPlot3D &cp, const float fSize, const CPlot3D &ptXAxis,
                        const CPlot3D &ptYAxis);
     BOOL DrawFrameSelection(int x1, int y1, int x2, int y2, char cAlpha = 64, bool bFrame = true);

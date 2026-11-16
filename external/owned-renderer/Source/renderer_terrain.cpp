@@ -339,13 +339,26 @@ void Renderer::bake_terrain2_heights(Terrain2Map& map,const ContactBlendMaps& co
    return fail("height bake scratch");
  }
  // The GPU work already queued is waited for first, so the logged time is the bake's own.
+ // Bounded: a GPU that never completes the queued work (07-07, 2026-11-14:
+ // the host spun here for 40 min) names the stall and skips the bake this
+ // frame (map.dirty: tried again) instead of spinning forever.
  D3D11_QUERY_DESC done_desc{D3D11_QUERY_EVENT,0};ComPtr<ID3D11Query> done;
- const auto wait=[&]{
-  if(!done&&FAILED(device_->CreateQuery(&done_desc,&done)))return;
+ const auto wait=[&](const char* phase)->bool{
+  if(!done&&FAILED(device_->CreateQuery(&done_desc,&done)))return true;
   context_->End(done.Get());BOOL finished=FALSE;
-  while(context_->GetData(done.Get(),&finished,sizeof(finished),0)==S_FALSE)std::this_thread::yield();
+  const auto begin=std::chrono::steady_clock::now();
+  constexpr auto kLimit=std::chrono::seconds(5);
+  while(context_->GetData(done.Get(),&finished,sizeof(finished),0)==S_FALSE){
+   if(std::chrono::steady_clock::now()-begin>kLimit){
+    char text[192];std::snprintf(text,sizeof(text),"map=%s GPU work %s the height bake not finished after 5 s; bake skipped this frame",name,phase);
+    bridge_append_probe_event("terrain2_height_bake_wait_timeout",text);
+    return false;
+   }
+   std::this_thread::yield();
+  }
+  return true;
  };
- wait();
+ if(!wait("queued before")){map.dirty=true;return;}
  const auto start=std::chrono::steady_clock::now();
  // The height pools are written: the map table's (t90-t93) unbound.
  ID3D11ShaderResourceView* empty_ps[kTerrain2Pools]{};context_->PSSetShaderResources(90,kTerrain2Pools,empty_ps);
@@ -399,7 +412,7 @@ void Renderer::bake_terrain2_heights(Terrain2Map& map,const ContactBlendMaps& co
  context_->CSSetUnorderedAccessViews(0,3,no_uavs,nullptr);context_->CSSetShaderResources(0,1,&no_source);
  context_->CSSetConstantBuffers(0,1,&no_constants);context_->CSSetSamplers(0,1,&no_sampler);context_->CSSetShader(nullptr,nullptr,0);
  context_->GenerateMips(map.height_srv.Get());
- wait(); // map load only: the log carries the bake's real time
+ wait("of"); // map load only: the log carries the bake's real time
  const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
  const double mb=double(width)*height*contact.slices*4/3/1048576.0;
  char text[224];std::snprintf(text,sizeof(text),"map=%s cells=%zu baked=%zu ms=%.2f array=%ux%ux%u (%.1f MB) pool=%d base=%u",name,pending.size(),map.baked.size(),ms,
@@ -870,10 +883,9 @@ HRESULT Renderer::update_contact_blend_maps() noexcept try{
     contact_map_generation_==ambient_map_generation_&&poll_terrain_tile_families()){
   if(FAILED(hr=apply_terrain_tile_blend(tile_families_)))return hr;
  }
- // Terrain 2.0: every map's rows keep its own vertex families at its edges
- // (no family shared by name with another map); each map's heights follow
- // its copied atlas slices. A map without rows shows the marker colour.
- if(!tile_blend_own_edges_){tile_blend_own_edges_=true;update_terrain_tile_blend_seams();}
+ // Terrain 2.0: each map's heights follow its copied atlas slices (rows keep
+ // their own edge families, tile_blend_own_edges_). A map without rows shows
+ // the marker colour.
  {
   if(terrain2_map_.dirty||contact_maps_.ready!=terrain2_map_.seen_ready)bake_terrain2_heights(terrain2_map_,contact_maps_,"active");
   for(auto& n:gc_neighbours_)
@@ -945,8 +957,7 @@ HRESULT Renderer::update_contact_blend_maps() noexcept try{
     static_cast<unsigned long long>(contact_maps_.ready),static_cast<unsigned long long>(contact_maps_.pending));
    bridge_report_event("contact_terrain_atlas",detail);
   }
-  if(hr==S_FALSE&&!contact_incompatible_logged_){
-   contact_incompatible_logged_=true;
+  if(hr==S_FALSE){ // each material is refused once (its pending bit is cleared)
    char text[256];
    std::snprintf(text,sizeof(text),"terrain atlas format or size differs (%s); affected contact art omitted",detail);
 #ifdef EID3D11_EMBEDDED
@@ -1098,6 +1109,8 @@ HRESULT Renderer::set_native_terrain_frame(const NativeTerrainState& game_terrai
   float(configured_integer(config,"tree_sway_strength",100))/100.f:0.f;
  // One renderer wind per world frame, from the same game wind and clock.
  if(weather_wind_frame_!=native_frame_index_){
+  // Tree sway clocks for the upscaler's motion: last world frame's and this one's.
+  sway_clock_[0]=weather_wind_frame_+1u==native_frame_index_?sway_clock_[1]:terrain.precise_time;sway_clock_[1]=terrain.precise_time;
   weather_wind_frame_=native_frame_index_;
   update_weather_wind(weather_wind_,terrain.wind_direction,terrain.wind_force_normalized,
    bridge_world_fog_snapshot().environment,configured_boolean(config,"weather_wind_variation",true),
@@ -1110,7 +1123,7 @@ HRESULT Renderer::set_native_terrain_frame(const NativeTerrainState& game_terrai
   (full_sun||!configured_boolean(config,"terrain_normal_sunlight",true))?1.f:0.f,1.f,
   terrain.fog_min[0],terrain.fog_min[1],terrain.fog_max[0],terrain.fog_max[1],
   terrain.fog_distance,terrain.fog_enabled?1.f:0.f,tree_sway,terrain.waves_enabled?1.f:0.f,
-  0.f,material.antitile?1.f:0.f, // x unused (the removed material side projection)
+  configured_integer(config,"terrain_quality",2)<=1?float(0x100000):0.f,material.antitile?1.f:0.f, // x: bit 20 T2_LEAN (terrain2.hlsl: Medium and Low)
   material.height_blend?1.f:0.f,0.f}; // w: set below
  values[19]=configured_integer(config,"terrain_quality",2)<=0?1.f:0.f; // switches w: Terrain 2.0's Low path (T2_LOW)
  std::memcpy(values+20,&weather_wind_.gpu,sizeof(WeatherWindGpu));
@@ -1141,9 +1154,10 @@ HRESULT Renderer::set_native_terrain_frame(const NativeTerrainState& game_terrai
  // on, and the tessellation's largest factor and offset once its stages exist.
  if(configured_terrain_cliffs(config)&&map_source.terrain)values[44]=1.f;
  // Terrain material blend (nativeTerrainCliff.zw): its rows are in the grid,
- // and a slot's atlas padding as a fraction of its side. Terrain 2.0 reads
- // the blend rows' vertex cells, so the blend is on whenever its rows are.
- if(tile_blend_rows_&&(contact_maps_.tiles||contact_maps_.tiles12)&&map_source.terrain){values[46]=1.f;values[47]=tile_blend_margin_;}
+ // and a slot's atlas padding as a fraction of its side. Rows may stay
+ // resident while blending is off; their existence is not activation.
+ const bool terrain_blend=configured_terrain_blend(config);
+ if(tile_blend_rows_&&(contact_maps_.tiles||contact_maps_.tiles12)&&map_source.terrain){values[46]=terrain_blend?1.f:0.f;values[47]=tile_blend_margin_;}
  // The switched-off terrain features as uploaded (native specialisation key
  // bits 0-4) and the Low terrain path (bit 14, NATIVE_TERRAIN_LOW).
  native_spec_terrain_bits_=(values[17]==0?1u:0u)|(values[18]==0?2u:0u)|(values[32]==0?4u:0u)|(values[44]==0?8u:0u)|(values[46]==0?16u:0u)|
@@ -1159,7 +1173,7 @@ HRESULT Renderer::set_native_terrain_frame(const NativeTerrainState& game_terrai
   // D3D12 loads no masks: no terrain 2.0 program reads them (nor the styles
   // buffer), so its mask bits stay 0 (read only by the cache's input hash).
   if(!terrain2_masks_tried_&&!d3d12_)load_terrain2_masks();
-  const bool on=static_cast<bool>(map_source.terrain);
+  const bool on=terrain_blend&&map_source.terrain;
   values[kTerrain2First]=on?1.f:0.f;
   values[kTerrain2First+2]=float(terrain2_mask_bits_);
   update_terrain2_table(on,values+kTerrain2MapsFirst);terrain2_records_first_=kTerrain2MapsFirst;
@@ -1333,8 +1347,18 @@ HRESULT Renderer::set_native_terrain_frame(const NativeTerrainState& game_terrai
    context_->PSSetShaderResources(kNativeRainRingsSlot,1,&rings);
   }
  }
+ // Fire burn (renderer_fire_burn.cpp, option fire_burn, D3D12): the area's
+ // burns on the game clock (pause holds them, game speed scales them), their
+ // mask (t72) and the frame's values in its last row.
+ {
+  const auto& environment=bridge_world_fog_snapshot().environment;
+  (void)update_fire_burns(environment.valid?environment.world_time*kWeatherSecondsPerSegment:-1.0);
+  update_fire_burn_substitutes();
+ }
  if(d3d12_){
   try{native_terrain_frame_d3d12_.assign(values,values+kTerrainFrameFloats);}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
+  // The shader tests of the values just kept (nativeWet.x>0, nativeSnowCover.x>0).
+  native_frame_dry_=!(values[kTerrainWetFirst]>0)&&!(values[kTerrainSnowFirst]>0);
  }else{
   std::memcpy(mapped.pData,values,sizeof(values));
   context_->Unmap(native_terrain_frame_constants_.Get(),0);

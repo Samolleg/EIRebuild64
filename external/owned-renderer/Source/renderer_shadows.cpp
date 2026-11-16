@@ -19,6 +19,7 @@
 #include "native_shader.h"
 #include "owned_terrain_decode.h"
 #include "renderer.h"
+#include "retained_static_submission.h"
 #include "graphics_settings.h"
 #include "ui_language.h"
 #include "game_focus.h"
@@ -115,7 +116,20 @@ HRESULT Renderer::upload_native_shadow_constants(UINT slice){
   constants.bias[index]=value.bias;
   if(native_shadows_enabled_&&value.enabled&&!native_point_shadow_active_&&native_shadow_valid_[index])constants.control[0]|=1u<<index;
  }
- if(!native_point_shadow_active_)constants.bias[5]=native_shadow_softness_;
+ if(!native_point_shadow_active_){
+  constants.bias[5]=native_shadow_softness_;
+  constants.camera[5][0]=native_sun_filter_[0];constants.camera[5][1]=native_sun_filter_[1]; // nativeShadowShear, nativeSunFoliageFilter
+ }
+ // rt_sun_shadows: the layer of the renderer's own casters (nativeRtCoverShadow):
+ // bit 8, its slice, the close map it was drawn with (valid, and still the only one).
+ // Its matrix and bias stand at its (otherwise unused) slice of the block; its
+ // camera selector stays empty, so no map selection ever picks it.
+ if(!native_point_shadow_active_&&native_traced_sun_&&native_rt_cover_layer_<3&&native_rt_cover_source_<3&&
+    !native_shadow_frame_.slices[native_rt_cover_layer_].enabled&&configured_boolean(debug_overlay_.config(),"rt_sun_cover_shadows",true)&&
+    (native_rt_cover_drawing_||(constants.control[0]&7u)==(1u<<native_rt_cover_source_))){
+  constants.light[native_rt_cover_layer_]=native_rt_cover_light_;constants.bias[native_rt_cover_layer_]=native_rt_cover_bias_;
+  constants.control[0]|=256u|(UINT(native_rt_cover_layer_)<<9)|(UINT(native_rt_cover_source_)<<12);
+ }
  constants.control[1]=slice;constants.control[2]=native_shadow_side_;constants.control[3]=native_point_shadow_side_;
  if(native_shadow_bake_active_&&!native_point_shadow_active_&&slice<5){
   // Masked (terrain) bakes carry the bridge's final masks; the store bake
@@ -408,6 +422,14 @@ bool Renderer::begin_native_shadows(const NativeShadowFrame& frame,std::uint8_t&
  const auto prior_selected=decision.selected_per_slice;
  const auto begin_calls=decision.begin_calls+1;
  decision={};decision.begin_calls=begin_calls;decision.selected_per_slice=prior_selected;
+ // What this begin replaces, restored if its collection is aborted before
+ // any map is cleared or drawn (end_native_shadows(false)): the bridge's
+ // reuse check begins with its cached frame and aborts when maps are dirty.
+ // Without the restore that check left the close maps invalid every frame,
+ // so the real begin redrew their whole static layer each frame.
+ {auto& r=native_shadow_rollback_;
+  r.frame=native_shadow_frame_;r.valid=native_shadow_valid_;r.drawn_camera=native_shadow_drawn_camera_;
+  r.far_waits=native_shadow_far_waits_;r.range_mask=native_shadow_range_mask_;r.extras_key=native_shadow_extras_key_;r.armed=true;}
  const auto reject=[&](){
   native_shadow_valid_.fill(false);native_shadow_collecting_=false;
   native_shadow_dirty_mask_=0;dirty_mask=0;
@@ -420,15 +442,15 @@ bool Renderer::begin_native_shadows(const NativeShadowFrame& frame,std::uint8_t&
   // copied on that path.
   // Neighbour-map casters are renderer-owned static content: a static layer
   // drawn with another membership or level is stale like changed validity.
-  const auto neighbour_key=neighbour_caster_key();
-  // Moving renderer-owned casters (critters, swaying cover) redraw the close
-  // maps' per-frame layer every frame: no value reuse while they exist.
+  const auto neighbour_key=object_caster_key();
+  // Moving renderer-owned casters (critters that moved, swaying cover) redraw
+  // the close maps' per-frame layer: no value reuse on those frames.
   // A changed set of those casters (ground_cover_shadows or critters
   // switched, the first placement ready) redraws the close maps once.
   const std::uint32_t extras_key=owned_shadow_casters_key();
   const bool extras_changed=extras_key!=native_shadow_extras_key_;
   native_shadow_extras_key_=extras_key;
-  const bool animate=extras_changed||owned_shadow_casters_animate();
+  const std::uint8_t animate=extras_changed?std::uint8_t(7):owned_shadow_casters_animate();
   if(!animate&&frame.publication_serial &&
      frame.publication_serial==native_shadow_frame_.publication_serial &&
      frame.world_epoch==native_shadow_frame_.world_epoch &&
@@ -609,7 +631,7 @@ bool Renderer::begin_native_shadows(const NativeShadowFrame& frame,std::uint8_t&
    const bool projection_same=numeric_same||retained;
    const bool static_same=deferred||(projection_same&&neighbour_same&&same_validity(old.static_validity,next.static_validity));
    bool same=deferred||(projection_same&&static_same&&same_validity(old.validity,next.validity));
-   if(animate&&index<3&&next.enabled&&!deferred)same=false;
+   if(((animate>>index)&1u)&&index<3&&next.enabled&&!deferred)same=false;
    if(next.enabled&&(!static_same||!native_shadow_static_valid_[index])){
     static_dirty|=bit;
     if(!scrolled)witness(index>=3?ShadowRendererDifference::far_static_redraw:
@@ -698,8 +720,15 @@ bool Renderer::end_native_shadows(bool commit) noexcept {
  HRESULT hr=E_FAIL;
  try{if(commit&&!native_shadow_failed_)hr=flush_native_shadows();else discard_native();}
  catch(...){discard_native();}
- if(FAILED(hr))for(UINT slice=0;slice<5;++slice)
+ auto& rollback=native_shadow_rollback_;
+ if(!commit&&rollback.armed&&!native_shadow_cleared_mask_&&!native_shadow_static_cleared_mask_){
+  // Aborted before any map was cleared or drawn: every map still holds the
+  // content of the frame record begin replaced (see begin_native_shadows).
+  native_shadow_frame_=rollback.frame;native_shadow_valid_=rollback.valid;native_shadow_drawn_camera_=rollback.drawn_camera;
+  native_shadow_far_waits_=rollback.far_waits;native_shadow_range_mask_=rollback.range_mask;native_shadow_extras_key_=rollback.extras_key;
+ }else if(FAILED(hr))for(UINT slice=0;slice<5;++slice)
   if(native_shadow_dirty_mask_&(1u<<slice))native_shadow_valid_[slice]=false;
+ rollback.armed=false;
  native_shadow_collecting_=false;native_shadow_dirty_mask_=0;native_shadow_phase_=0;
  if(FAILED(upload_native_shadow_constants(0))){native_shadow_constants_dirty_=true;return false;}
  native_shadow_constants_dirty_=false;
@@ -745,7 +774,7 @@ HRESULT Renderer::flush_native_shadows(){
    context_->CSSetUnorderedAccessViews(0,4,uavs,nullptr);context_->CSSetShaderResources(1,8,empty);
    context_->VSSetShaderResources(1,8,empty);context_->PSSetShaderResources(0,1,empty);context_->PSSetShaderResources(6,1,empty);
    context_->CSSetShaderResources(10,5,empty);context_->VSSetShaderResources(10,1,empty);context_->VSSetShaderResources(12,2,empty);
-   context_->CSSetShaderResources(15,2,empty);context_->CSSetUnorderedAccessViews(6,1,uavs,nullptr);
+   context_->CSSetShaderResources(15,2,empty);context_->CSSetUnorderedAccessViews(5,1,uavs,nullptr);context_->CSSetUnorderedAccessViews(6,1,uavs,nullptr);
    context_->CSSetShaderResources(35,1,empty);context_->VSSetShaderResources(36,1,empty);
    ID3D11Buffer* empty_constant=nullptr;context_->CSSetConstantBuffers(4,1,&empty_constant);
    context_->CSSetShader(nullptr,nullptr,0);context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
@@ -814,18 +843,21 @@ HRESULT Renderer::flush_native_shadows(){
     context_->CSSetUnorderedAccessViews(6,1,native_world_state_uav_.GetAddressOf(),nullptr);
     context_->CSSetShader(native_shadow_prepare_cs_.Get(),nullptr,0);
     context_->CSSetUnorderedAccessViews(3,1,native_world_vertex_uav_.GetAddressOf(),nullptr);
+    // Object motion: rewritten world vertices keep their old contents (u5, the b4 stamp); unbound after the dispatches (t46 reads it).
+    ID3D11UnorderedAccessView* previous_world_uav=dlss_previous_world_uav();context_->CSSetUnorderedAccessViews(5,1,&previous_world_uav,nullptr);
+    const UINT motion_stamp=previous_world_uav?dlss_motion_stamp_:0u;
     for(std::size_t dispatch=0;dispatch<layout.dispatches.size();++dispatch){
      const auto& range=layout.dispatches[dispatch];if(!range.preparations)continue;
      inputs[0]=native_geometry_page_srv(range.geometry_page);if(!inputs[0])return native_flush_failure_line_=__LINE__,finish(E_FAIL);
      context_->CSSetShaderResources(1,5,inputs);
-     if(FAILED(hr=upload_native_work_range(range)))return native_flush_failure_line_=__LINE__,finish(hr);
+     if(FAILED(hr=upload_native_work_range(range,motion_stamp)))return native_flush_failure_line_=__LINE__,finish(hr);
      UINT width=0,height=0;if(!native_dispatch_dimensions(range.count,width,height))return native_flush_failure_line_=__LINE__,finish(HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW));
      const UINT chunks=bake?active->dispatch_chunks[dispatch]:native_shadow_chunks(layout,range,false);
      transition_profile_pass("compute_shadow_prepare");context_->Dispatch(width,height,chunks);++perf_native_compute_dispatches_;++native_frame_stats_.native_compute_dispatches;
      context_->CSSetShader(native_shadow_commit_cs_.Get(),nullptr,0);context_->Dispatch(width,height,1);
      context_->CSSetShader(native_shadow_prepare_cs_.Get(),nullptr,0);
     }
-    context_->CSSetUnorderedAccessViews(3,1,empty_uavs,nullptr);
+    context_->CSSetUnorderedAccessViews(3,1,empty_uavs,nullptr);context_->CSSetUnorderedAccessViews(5,1,empty_uavs,nullptr);
     context_->CSSetUnorderedAccessViews(6,1,empty_uavs,nullptr);
     if(bake){native_world_prepared_vertices_+=active->prepared_vertices;native_shadow_prepared_records_+=active->preparations;}
     else for(const auto& work:native_draw_work_staging_)if(work.record!=UINT_MAX&&(work.flags&2u)){native_world_prepared_vertices_+=native_instance_records_[work.record].command.component_count;++native_shadow_prepared_records_;}
@@ -930,6 +962,13 @@ HRESULT Renderer::flush_native_shadows(){
      const auto& bucket=native_state_buckets_[batch.state_bucket];FixedState state=bucket.state;
      state.render[D3DRENDERSTATE_ZENABLE]=D3DZB_TRUE;state.render[D3DRENDERSTATE_ZWRITEENABLE]=TRUE;state.render[D3DRENDERSTATE_ZFUNC]=D3DCMP_LESSEQUAL;
      state.render[D3DRENDERSTATE_ALPHABLENDENABLE]=FALSE;
+     // A cut-out caster casts its two-sided silhouette (native_material_state).
+     // Records queued as colour records keep the game's cull mode in their
+     // bucket: the active map's object-space casters and the neighbour
+     // decorations. One-sided, a fir's drooping branch cards turned away from
+     // the sun dropped out and its shadow was the trunk with a few arms
+     // (JMV zone11, save1006).
+     if(bucket.opacity==NativeOpacityClass::cutout)state.render[D3DRENDERSTATE_CULLMODE]=D3DCULL_NONE;
      if(shadow_foliage_opaque(native_far_foliage_opaque_,native_point_shadow_active_,slice,
         batch.foliage?native_foliage_part_flag:0u,state.render[D3DRENDERSTATE_ALPHATESTENABLE]!=0))
       state.render[D3DRENDERSTATE_ALPHATESTENABLE]=FALSE;
@@ -1046,7 +1085,7 @@ HRESULT Renderer::flush_native_shadows(){
     context_->VSSetShader(native_shadow_vs_.Get(),nullptr,0);context_->IASetIndexBuffer(nullptr,DXGI_FORMAT_UNKNOWN,0);
     if(records){ID3D11ShaderResourceView* none[3]{};context_->VSSetShaderResources(1,3,none);}
    }
-   if(static_layer){native_shadow_static_valid_[slice]=true;native_shadow_neighbour_drawn_[slice]=neighbour_caster_key();}
+   if(static_layer){native_shadow_static_valid_[slice]=true;native_shadow_neighbour_drawn_[slice]=object_caster_key();}
    else if(!native_point_shadow_active_&&!native_rain_active_)native_shadow_valid_[slice]=true;
   }
   return native_flush_failure_line_=__LINE__,finish(S_OK);
@@ -1409,6 +1448,63 @@ HRESULT Renderer::draw_native_neighbour_shadows() noexcept try{
  return draw_native_shadow_bake(bake);
 }catch(...){release_native_shadow_bake(native_neighbour_shadow_bake_);return E_OUTOFMEMORY;}
 
+std::uint64_t Renderer::object_caster_key() const noexcept{
+ const auto casters=active_statics_casters();
+ const std::uint64_t active=active_statics_.casters.empty()||!casters||casters->ids.empty()?0u:
+  (casters->revision^(active_statics_.caster_revision<<40))*0x9E3779B97F4A7C15ull;
+ return neighbour_caster_key()^active;
+}
+
+// The active map's object-space statics as sun and shelter casters (layout
+// slot kActiveCasterLayout): the parked catalog records of every admitted
+// object of the world (the bridge publishes that set from its caster store
+// build, which then holds none of them), each casting once into every map.
+// Rebuilt when the set changes. The doubled count checks the rule against
+// the store each redraw: an admitted object found there casts twice.
+HRESULT Renderer::draw_native_active_shadows() noexcept try{
+ static_assert(kActiveCasterLayout==kMapOrderedLayout+kMapPreviewSections,"active caster layout slot");
+ auto& bake=native_active_shadow_bake_;
+ const auto casters=active_statics_casters();
+ if(active_statics_.casters.empty()||!casters||casters->ids.empty()){
+  if(bake.built||!bake.records.empty())release_native_shadow_bake(bake);
+  native_active_casters_=native_active_doubled_casters_=0;return S_OK;
+ }
+ const std::uint64_t key=casters->revision^(active_statics_.caster_revision<<40);
+ if(!bake.built||bake.built_key!=key||bake.built_content_revision!=native_static_content_revision_||
+    bake.far_foliage_opaque!=native_far_foliage_opaque_){
+  release_native_shadow_bake(bake);
+  bake.layout_slot=kActiveCasterLayout;bake.slice_mask=0x1fu;
+  // Objects that left the published set give their caster records back.
+  {std::vector<std::int32_t> gone;
+   for(const auto& [id,caster]:active_statics_.casters){(void)caster;
+    if(!std::binary_search(casters->ids.begin(),casters->ids.end(),id))gone.push_back(id);}
+   for(const auto id:gone)release_active_caster(id);}
+  for(const auto id:casters->ids){
+   const auto found=active_statics_.casters.find(id);
+   if(found==active_statics_.casters.end())continue;
+   for(const auto index:found->second.records){
+    if(index>=native_instance_records_.size())continue;
+    const auto& record=native_instance_records_[index];
+    if(!record.occupied||record.owner.expired())continue;
+    bake.records.push_back({index,bake.slice_mask<<8});
+   }
+  }
+  if(const HRESULT hr=finish_native_shadow_bake(bake);FAILED(hr))return hr;
+  bake.built_key=casters->revision^(active_statics_.caster_revision<<40);
+  bake.built_content_revision=native_static_content_revision_;
+  bake.far_foliage_opaque=native_far_foliage_opaque_;bake.built=true;
+ }
+ (void)key;
+ native_active_casters_=bake.records.size();native_active_doubled_casters_=0;
+ const auto& store=native_static_shadow_bake_.store;
+ for(const auto id:casters->ids){
+  const auto it=std::lower_bound(store.begin(),store.end(),id,
+   [](const RetainedShadowCasterValue& value,std::int32_t object){return value.revision.signed_id<object;});
+  if(it!=store.end()&&it->revision.signed_id==id&&it->persistent_static)++native_active_doubled_casters_;
+ }
+ return draw_native_shadow_bake(bake);
+}catch(...){release_native_shadow_bake(native_active_shadow_bake_);return E_OUTOFMEMORY;}
+
 // A store change usually touches a few casters: switch their baked work
 // entries off in place (record UINT_MAX is skipped by every pass) and let
 // their new values wait as absent casters. False asks for a full rebuild (a
@@ -1522,6 +1618,28 @@ bool Renderer::queue_native_static_shadow_depth(
    bake.absent.clear();for(const auto member:absent)bake.absent.push_back(bake.store[member_caster[member]]);
    bake.built_store_revision=bake.store_revision;
   }
+  // caster_check (D3D12 GPU reports): tag the records of every admitted
+  // main-map static drawn this redraw, the store's (path 1) and its
+  // object-space casters' (path 2); the shadow build counts per object.
+  if(d3d12_&&configured_boolean(debug_overlay_.config(),"caster_check",false))try{
+   const auto ids=active_statics_casters();
+   std::vector<std::uint32_t> table(native_instance_records_.size(),0u);
+   UINT objects=0;
+   std::unordered_map<std::int32_t,std::uint32_t> object_of;
+   if(ids)for(const auto id:ids->ids){
+    const std::uint32_t object=++objects;object_of.emplace(id,object);
+    const auto active=active_statics_.casters.find(id);
+    if(active!=active_statics_.casters.end())for(const auto record:active->second.records)
+     if(record<table.size())table[record]=object|(2u<<30);
+   }
+   // Their store entries (keys id << 32 | part), if any remained.
+   for(const auto& entry:bake.entries){
+    const auto found=object_of.find(static_cast<std::int32_t>(entry.key>>32));
+    if(found!=object_of.end()&&entry.record<bake.records.size()&&bake.records[entry.record].record<table.size())
+     table[bake.records[entry.record].record]=found->second|(1u<<30);
+   }
+   d3d12_->set_caster_check(table.data(),static_cast<UINT>(table.size()),objects);
+  }catch(...){}
   if(FAILED(draw_native_shadow_bake(bake)))return reject("store_bake_draw");
   // Neighbour-map decorations join the same static layer (and shelter).
   // A bake that cannot be built is omitted (named once); a failed draw has
@@ -1530,6 +1648,14 @@ bool Renderer::queue_native_static_shadow_depth(
    if(native_shadow_failed_)return reject("neighbour_bake_draw");
    static bool reported=false;
    if(!reported)std::fprintf(stderr,"Neighbour sun casters unavailable (0x%08lx); neighbour shadows omitted.\n",static_cast<unsigned long>(hr));
+   reported=true;
+  }
+  // The active map's object-space statics: their own records cast (they
+  // are not in the store).
+  if(const HRESULT hr=draw_native_active_shadows();FAILED(hr)){
+   if(native_shadow_failed_)return false;
+   static bool reported=false;
+   if(!reported)std::fprintf(stderr,"Main-map object-space sun casters unavailable (0x%08lx); their shadows omitted.\n",static_cast<unsigned long>(hr));
    reported=true;
   }
   // Store casters without a current record that a redrawn map reaches are

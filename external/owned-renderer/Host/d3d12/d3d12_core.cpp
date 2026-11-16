@@ -4,7 +4,9 @@
 
 #include <psapi.h>
 
+#include <algorithm>
 #include <cstdio>
+#include <cstring>
 
 namespace remote { void host_log(const char* format, ...); }
 
@@ -85,6 +87,9 @@ bool DescriptorHeap::grow(ID3D12Device* device, std::uint32_t persistent, std::u
     const auto source = persistent_heap ? persistent_heap->GetCPUDescriptorHandleForHeapStart() : persistent_cpu_;
     if (next_unused_) device->CopyDescriptorsSimple(next_unused_, heap->GetCPUDescriptorHandleForHeapStart(), source, type_);
     if (persistent_heap) { persistent_heap_ = std::move(persistent_heap); persistent_cpu_ = source; }
+    try { previous_.push_back({heap_, cpu_, persistent_, 0}); } catch (...) {
+        reason = "descriptor heap growth: replaced-heap list allocation"; return false;
+    }
     previous = std::move(heap_);
     heap_ = std::move(heap);
     cpu_ = heap_->GetCPUDescriptorHandleForHeapStart();
@@ -189,12 +194,16 @@ std::uint32_t DescriptorHeap::transient(std::uint32_t count) noexcept {
 }
 
 void DescriptorHeap::end_frame(std::uint64_t fence_value) noexcept try {
+    for (auto& old : previous_) if (!old.fence) old.fence = fence_value;
     frames_.emplace_back(fence_value, frame_taken_);
     frame_taken_ = 0;
 } catch (...) {
 }
 
 void DescriptorHeap::retire(std::uint64_t completed) noexcept try {
+    previous_.erase(std::remove_if(previous_.begin(), previous_.end(),
+                                   [completed](const Replaced& old) { return old.fence && old.fence <= completed; }),
+                    previous_.end());
     while (!frames_.empty() && frames_.front().first <= completed) {
         used_ -= frames_.front().second;
         frames_.pop_front();
@@ -280,6 +289,14 @@ bool create_root_signature(ID3D12Device* device, ComPtr<ID3D12RootSignature>& ro
                           D3D12_ROOT_SIGNATURE_FLAG_SAMPLER_HEAP_DIRECTLY_INDEXED;
     ComPtr<ID3DBlob> blob, errors;
     HRESULT hr = D3D12SerializeVersionedRootSignature(&desc, &blob, &errors);
+    // A device from a device factory (Windows' own runtime after the bundled
+    // one failed, Core::create) serializes through its own configuration.
+    ComPtr<ID3D12DeviceConfiguration> configuration;
+    if (FAILED(hr) && SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&configuration)))) {
+        blob.Reset();
+        errors.Reset();
+        hr = configuration->SerializeVersionedRootSignature(&desc, &blob, &errors);
+    }
     if (FAILED(hr)) {
         reason = hresult_text("D3D12SerializeVersionedRootSignature", hr);
         if (errors) reason += std::string(": ") + static_cast<const char*>(errors->GetBufferPointer());
@@ -289,6 +306,75 @@ bool create_root_signature(ID3D12Device* device, ComPtr<ID3D12RootSignature>& ro
     if (FAILED(hr)) { reason = hresult_text("CreateRootSignature", hr); return false; }
     root->SetName(L"eid3d11 global root signature");
     return true;
+}
+
+// Windows' own D3D12 runtime (System32\D3D12Core.dll): its SDK version from
+// its exported D3D12SDKVersion (the redistributable documentation's way to
+// name a core's version), read from an image mapping that runs none of its
+// code. 0 when the file or the export is missing.
+UINT inbox_d3d12_sdk_version() noexcept {
+    wchar_t path[MAX_PATH]{};
+    const UINT length = GetSystemDirectoryW(path, MAX_PATH);
+    if (!length || length > MAX_PATH - 20) return 0;
+    wcscat_s(path, L"\\D3D12Core.dll");
+    const HMODULE module = LoadLibraryExW(path, nullptr, LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+    if (!module) return 0;
+    const auto* base = reinterpret_cast<const BYTE*>(reinterpret_cast<ULONG_PTR>(module) & ~ULONG_PTR(3));
+    UINT version = 0;
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
+    if (dos->e_magic == IMAGE_DOS_SIGNATURE && nt->Signature == IMAGE_NT_SIGNATURE &&
+        nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC) {
+        const IMAGE_DATA_DIRECTORY& directory = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+        if (directory.VirtualAddress && directory.Size) {
+            const auto* exports = reinterpret_cast<const IMAGE_EXPORT_DIRECTORY*>(base + directory.VirtualAddress);
+            const auto* names = reinterpret_cast<const DWORD*>(base + exports->AddressOfNames);
+            const auto* ordinals = reinterpret_cast<const WORD*>(base + exports->AddressOfNameOrdinals);
+            const auto* functions = reinterpret_cast<const DWORD*>(base + exports->AddressOfFunctions);
+            for (DWORD i = 0; i < exports->NumberOfNames; ++i)
+                if (std::strcmp(reinterpret_cast<const char*>(base + names[i]), "D3D12SDKVersion") == 0) {
+                    version = *reinterpret_cast<const UINT*>(base + functions[ordinals[i]]);
+                    break;
+                }
+        }
+    }
+    FreeLibrary(module);
+    return version;
+}
+
+// ID3D12DeviceFactory as the D3D12 runtimes ship it (Agility SDK headers,
+// IID 61f307d3): CreateDevice takes the feature level. The Windows SDK
+// 10.0.22621 header this host compiles with still declares the preview
+// interface (another IID, no feature level), which current runtimes do not serve.
+MIDL_INTERFACE("61f307d3-d34e-4e7c-8374-3ba4de23cccb")
+D3D12DeviceFactoryShipped : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE InitializeFromGlobalState() = 0;
+    virtual HRESULT STDMETHODCALLTYPE ApplyToGlobalState() = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetFlags(D3D12_DEVICE_FACTORY_FLAGS flags) = 0;
+    virtual D3D12_DEVICE_FACTORY_FLAGS STDMETHODCALLTYPE GetFlags() = 0;
+    virtual HRESULT STDMETHODCALLTYPE GetConfigurationInterface(REFCLSID clsid, REFIID iid, void** ppv) = 0;
+    virtual HRESULT STDMETHODCALLTYPE EnableExperimentalFeatures(UINT count, const IID* iids, void* configurations, UINT* sizes) = 0;
+    virtual HRESULT STDMETHODCALLTYPE CreateDevice(IUnknown* adapter, D3D_FEATURE_LEVEL level, REFIID riid, void** device) = 0;
+};
+
+// The device from Windows' own runtime through a device factory, asked for
+// with that runtime's own SDK version (the redistributable rule: a version no
+// newer than Windows' own runs Windows' own runtime, so the path is not read).
+// On failure step names the call.
+HRESULT create_inbox_device(IDXGIAdapter1* adapter, UINT version, ComPtr<ID3D12Device>& device, std::string& step) {
+    ComPtr<ID3D12SDKConfiguration1> configuration;
+    HRESULT hr = D3D12GetInterface(CLSID_D3D12SDKConfiguration, IID_PPV_ARGS(&configuration));
+    if (FAILED(hr)) { step = "D3D12GetInterface(CLSID_D3D12SDKConfiguration, ID3D12SDKConfiguration1)"; return hr; }
+    ComPtr<D3D12DeviceFactoryShipped> factory;
+    if (FAILED(hr = configuration->CreateDeviceFactory(version, ".\\", IID_PPV_ARGS(&factory)))) {
+        step = "ID3D12SDKConfiguration1::CreateDeviceFactory";
+        return hr;
+    }
+    if (FAILED(hr = factory->CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device)))) {
+        step = "ID3D12DeviceFactory::CreateDevice (feature level 11_0)";
+        return hr;
+    }
+    return S_OK;
 }
 
 } // namespace
@@ -333,8 +419,23 @@ bool Core::create(bool debug_layer, std::string& reason, bool gpu_validation) {
     adapter_->GetDesc1(&adapter);
     adapter_name_ = adapter.Description;
     if (adapter.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) return fail("the default adapter is a software adapter; D3D12 mode needs a GPU");
-    if (FAILED(hr = D3D12CreateDevice(adapter_.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device_))))
-        return fail(hresult_text("D3D12CreateDevice (feature level 11_0)", hr));
+    runtime_note_.clear();
+    if (FAILED(hr = D3D12CreateDevice(adapter_.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device_)))) {
+#ifdef EID3D11_EMBEDDED
+        return fail(hresult_text("D3D12CreateDevice with packaged Agility runtime",hr));
+#else
+        // The process's runtime refused (e.g. 0x887E0003 D3D12_ERROR_INVALID_REDIST:
+        // the bundled D3D12\D3D12Core.dll is missing or does not match): Windows'
+        // own runtime through a device factory before D3D12 is refused.
+        const std::string bundled = hresult_text("D3D12CreateDevice (feature level 11_0)", hr);
+        const UINT inbox = inbox_d3d12_sdk_version();
+        if (!inbox) return fail(bundled + "; Windows' own runtime: System32\\D3D12Core.dll or its D3D12SDKVersion not found");
+        std::string step;
+        if (FAILED(hr = create_inbox_device(adapter_.Get(), inbox, device_, step)))
+            return fail(bundled + "; Windows' own runtime (SDK " + std::to_string(inbox) + "): " + hresult_text(step.c_str(), hr));
+        runtime_note_ = "Windows' own D3D12 runtime (SDK " + std::to_string(inbox) + ") after the bundled runtime failed: " + bundled;
+#endif
+    }
 
     // M1 requirements (plan 2.2): SM 6.6 for ResourceDescriptorHeap and
     // binding tier 3. No descriptor-table variant exists.

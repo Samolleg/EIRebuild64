@@ -11,6 +11,7 @@
 // log line per name, the F11 list), never drawn through D3D11.
 #include "fixed_state_descs.h"
 
+#include <unordered_map>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -105,9 +106,15 @@ struct D3D12NativeState {
     // of `blend` (the post passes' additive and alpha-over blends that keep
     // the target alpha); kCustomBlendMotionTargets, targets 1 and 2 (object
     // motion RG, its depth R) blended by the output alpha, so alpha 0 keeps
-    // them (the fur motion variants). Whole words only: the state is a
-    // pipeline key, byte for byte.
-    static constexpr UINT kCustomBlendOver = 1, kCustomBlendMotionTargets = 2;
+    // them (the fur motion variants); kCustomTarget1Off, target 1 not
+    // written (target 0 keeps `blend`: the depth prepass's batches that never
+    // write a terrain normal). Whole words only: the state is a pipeline key,
+    // byte for byte.
+    static constexpr UINT kCustomBlendOver = 1, kCustomBlendMotionTargets = 2, kCustomTarget1Off = 4;
+    // The world pass's guide targets (5-7) take the output unblended while
+    // targets 0-4 keep the state's blend: a blended opaque draw's guide
+    // alpha carries packed words, never a coverage.
+    static constexpr UINT kCustomGuideTargetsOpaque = 8;
     struct CustomBlend {
         UINT custom = 0, source = D3D11_BLEND_ONE, destination = D3D11_BLEND_ZERO, op = D3D11_BLEND_OP_ADD;
         UINT source_alpha = D3D11_BLEND_ONE, destination_alpha = D3D11_BLEND_ZERO, op_alpha = D3D11_BLEND_OP_ADD;
@@ -116,6 +123,33 @@ struct D3D12NativeState {
 };
 
 struct ShaderProgram;  // shader_cache.h
+
+// Ray tracing (D3D12Frame::build_raytracing_bottom / build_raytracing_top).
+// One triangle geometry of a bottom-level structure: byte offsets into the
+// vertex and index buffers. opaque false: its triangles are candidates the
+// ray query's own alpha test accepts or passes.
+struct D3D12RaytracingGeometry {
+    UINT64 vertex_offset = 0, index_offset = 0;
+    UINT vertex_count = 0, index_count = 0;
+    bool opaque = true;
+    // Its own index buffer instead of the call's (null: the call's).
+    D3D12Buffer* index_buffer = nullptr;
+};
+// One instance of a top-level structure. id: the ray query's instance id (24
+// bits). two_sided: its triangles ignore the ray's back-face cull. mask: the
+// instance mask a ray's own mask selects it by (8 bits).
+struct D3D12RaytracingInstance {
+    const D3D12Buffer* bottom = nullptr;
+    UINT id = 0;
+    bool two_sided = false;
+    UINT mask = 0xFF;
+    // placed: its object-to-world rows 0-2 (else the identity). opacity: 0
+    // its geometries' own, 1 every triangle opaque, 2 every triangle a
+    // candidate of the ray query's alpha test.
+    bool placed = false;
+    UINT opacity = 0;
+    float transform[12]{};
+};
 
 // A one-off upload prepared off the render thread (defined in the host): its
 // destination resource, created, and an upload buffer holding every byte in
@@ -184,8 +218,11 @@ public:
     // count > 1: slices [slice, slice + count) at once (d3d12_mip_array_range_program).
     virtual HRESULT generate_mips(D3D12Texture& texture, const ShaderProgram& downsample, UINT slice = 0, UINT count = 1) = 0;
     // A GPU copy of one subresource (D3D11CalcSubresource numbering), stream order.
+    // source_target_next: the source is a render target whose next use is to be
+    // cleared or drawn into again; it is left in render-target state (see the
+    // definition) instead of shader read.
     virtual HRESULT copy_texture(D3D12Texture& destination, UINT destination_subresource, D3D12Texture& source,
-                                 UINT source_subresource) = 0;
+                                 UINT source_subresource, bool source_target_next = false) = 0;
     // An offscreen colour target (shader-readable; B8G8R8A8 for the camp
     // popup, R11G11B10 for the world) with its own depth: D24S8 (readable as
     // R24_UNORM), D32 (readable as R32_FLOAT) or none (UNKNOWN); format
@@ -202,6 +239,21 @@ public:
     // (that output's writes are discarded, as an unbound D3D11 slot); the
     // world target keeps its world role (omitted-pass marker) in a set.
     virtual void set_targets(D3D12Texture* const* colors, UINT count, D3D12Texture* depth) noexcept = 0;
+    // set_targets with `depth` bound read-only (depth and stencil tests, no
+    // writes), so the same depth can be a shader input (set_depth_resource)
+    // in the same draws.
+    virtual void set_targets_read_depth(D3D12Texture* const* colors, UINT count, D3D12Texture* depth) noexcept = 0;
+    // EI_RENDERER_D3D12_HAZARDS: one header word (5-7) of the shader report
+    // buffer (native_shader.h nativeGpuReport), in stream order; off: nothing.
+    virtual void set_gpu_report_word(UINT word, UINT value) noexcept = 0;
+    // EI_RENDERER_D3D12_HAZARDS, caster_check (native_shader.h
+    // nativeShadowBuildCS): per native record its check tag (0 none, bits
+    // 0-29 the check object, 30-31 its path), `objects` masks cleared, for
+    // the sun-map draws recorded after this call; present logs the counts.
+    virtual void set_caster_check(const std::uint32_t* table, UINT entries, UINT objects) noexcept = 0;
+    // The viewport of the next draws, in target pixels (as D3D11
+    // RSSetViewports; depth 0-1); null: the whole bound target again.
+    virtual void set_viewport(const RECT* rect) noexcept = 0;
     // Any target's colour or a storage texture's level (mip), cleared now; the bound targets stay.
     virtual void clear_texture(D3D12Texture& target, const float color[4], UINT mip = 0) noexcept = 0;
     // An integer-format storage texture's mip 0, cleared now to values.
@@ -211,8 +263,14 @@ public:
     virtual HRESULT copy_depth(D3D12Texture& destination, D3D12Texture& source) = 0;
     // A target's depth as a shader input (t0-t127).
     virtual void set_depth_resource(UINT slot, const D3D12Texture* target) noexcept = 0;
-    // D24S8 stencil plane as Texture2D<uint>; other depth formats bind null.
+    // A D24S8 target's stencil plane as a shader input (Texture2D<uint2>, the
+    // value in g); a D32 target has none and binds nothing.
     virtual void set_stencil_resource(UINT slot, const D3D12Texture* target) noexcept = 0;
+    // The bound target's depth through its read-only view for the next draws
+    // (depth tested, never written; the same depth may then be read with
+    // set_depth_resource, as a D3D11 read-only DSV). Every target change
+    // returns to the writable view.
+    virtual void set_depth_read_only(bool read_only) noexcept = 0;
     // A depth array (shadow maps): D16 or D32 slices, readable as Texture2DArray
     // (plain: one slice read as Texture2D, the rain shelter map).
     virtual HRESULT create_depth_array(UINT side, UINT slices, D3D12TextureRef& out,
@@ -236,6 +294,8 @@ public:
     // A target's own depth (not bound now): the world depth the D3D11 frame
     // shares with the interface depth at full render scale.
     virtual void clear_depth_of(D3D12Texture& target, float depth, UINT8 stencil) noexcept = 0;
+    // Its stencil alone (depth kept), not bound now; a D32 target has none.
+    virtual void clear_stencil_of(D3D12Texture& target, UINT8 stencil) noexcept = 0;
     virtual bool texture_matches(const D3D12Texture& texture, UINT width, UINT height, DXGI_FORMAT format) const noexcept = 0;
     // rect in texels of mip (4-aligned for block formats); data is the rect's
     // first row (block row), pitch bytes apart. Recorded in order with the draws.
@@ -253,7 +313,9 @@ public:
     // memory comes from a separate pool, so a load's hundreds of MB never
     // grow the per-frame upload blocks.
     virtual HRESULT write_buffer_bulk(D3D12Buffer& buffer, UINT64 offset, const void* data, UINT64 bytes) = 0;
-    virtual HRESULT copy_buffer(D3D12Buffer& destination, D3D12Buffer& source, UINT64 bytes) = 0;
+    // bytes from source at source_offset to destination at destination_offset.
+    virtual HRESULT copy_buffer(D3D12Buffer& destination, D3D12Buffer& source, UINT64 bytes, UINT64 destination_offset = 0,
+                                UINT64 source_offset = 0) = 0;
     // The shared native HLSL's D3D11 register model, slot by slot, for the
     // next dispatch or draw: a thin per-flush translation of slots to
     // descriptors, nothing more (M2 world passes read bindless indices).
@@ -274,8 +336,9 @@ public:
     virtual HRESULT dispatch(const ShaderProgram& program, UINT x, UINT y, UINT z) = 0;
     // A dispatch whose group counts are three words of arguments at offset.
     virtual HRESULT dispatch_indirect(const ShaderProgram& program, D3D12Buffer& arguments, UINT offset) = 0;
-    // The 32-bit index buffer of the next indexed draws (null: none).
-    virtual void set_index_buffer(D3D12Buffer* indices) noexcept = 0;
+    // The 32-bit index buffer of the next indexed draws (null: none), read
+    // from first_byte on (a multiple of 4).
+    virtual void set_index_buffer(D3D12Buffer* indices, UINT64 first_byte = 0) noexcept = 0;
     // An indexed draw from five argument words at offset (DrawIndexedInstancedIndirect).
     virtual HRESULT draw_indexed_indirect(const ShaderProgram& vertex, const ShaderProgram& pixel, const D3D12NativeState& state,
                                           const RECT* scissor, D3D12Buffer& arguments, UINT offset) = 0;
@@ -283,9 +346,46 @@ public:
     virtual void clear_buffer_uint(D3D12Buffer& buffer, UINT value) noexcept = 0;
     // Non-blocking readback: the buffer's first bytes copied in stream order;
     // poll_readback returns S_FALSE while in flight, then S_OK with the bytes
-    // (once; the ticket is gone after). Unpolled copies are dropped past 32.
-    virtual HRESULT request_readback(D3D12Buffer& source, UINT64 bytes, std::uint64_t& ticket) = 0;
+    // (once; the ticket is gone after). Unpolled copies are dropped past 32;
+    // the first drop of a session is logged with its owner (a static name).
+    virtual HRESULT request_readback(D3D12Buffer& source, UINT64 bytes, std::uint64_t& ticket, const char* owner) = 0;
+    // One subresource of a texture, its rows at a 256-byte aligned pitch
+    // (polled with poll_readback).
+    virtual HRESULT request_texture_readback(D3D12Texture& source, UINT subresource, std::uint64_t& ticket, const char* owner) = 0;
     virtual HRESULT poll_readback(std::uint64_t ticket, std::vector<std::uint8_t>& data) = 0;
+    // ---- Ray tracing (DXR 1.1 inline ray queries; the rt_* options) -------
+    // Why this device cannot trace (null: it can). The executor logs the
+    // adapter's ray tracing tier and this reason once at its start.
+    virtual const char* raytracing_unavailable() const noexcept = 0;
+    // A bottom-level structure of triangle geometries held in two executor
+    // buffers (positions: three floats at the start of each vertex_stride
+    // bytes; 32-bit indices, three a triangle, relative to the geometry's
+    // first vertex), built now, in stream order after the passes that wrote
+    // the buffers. The structure keeps none of its inputs. Geometries keep
+    // their order (a ray query's geometry index). out is only an instance of
+    // build_raytracing_top, never a slot's resource. dynamic: a structure
+    // built again every frame (fast build); out, when it already holds a
+    // dynamic structure with room, is built again in place.
+    virtual HRESULT build_raytracing_bottom(D3D12Buffer& vertices, UINT vertex_stride, D3D12Buffer& indices,
+                                            const D3D12RaytracingGeometry* geometries, UINT count, D3D12BufferRef& out,
+                                            bool dynamic = false) = 0;
+    // A top-level structure of instances of bottom-level structures (at the
+    // identity transform unless placed), built now. out binds at a t slot
+    // (set_resource) as a RaytracingAccelerationStructure; the caller keeps
+    // every bottom level for as long as it binds out. The executor logs one
+    // line a build (instances, and the bottom-level builds since the last).
+    // dynamic: as above (built again in place when out has room; no log line).
+    virtual HRESULT build_raytracing_top(const D3D12RaytracingInstance* instances, UINT count, D3D12BufferRef& out,
+                                         bool dynamic = false) = 0;
+    // Compaction of the static bottom-level structures whose compacted size
+    // the GPU has reported since their build: each is copied compacted into
+    // other pool memory, in stream order, and keeps its buffer. True: some
+    // moved, so every top level naming them must be built again (this frame,
+    // after this call). The executor logs the memory before and after.
+    virtual bool compact_raytracing() = 0;
+    // Built static bottom-level structures whose compaction has not run yet
+    // (their sizes are still on the way back): the load hold waits for them.
+    virtual bool raytracing_compaction_pending() const noexcept = 0;
     // A native draw into the frame's back buffer and interface depth.
     // pixel: a program without an entry (ShaderProgram{}) draws depth only.
     // hull/domain: the tessellation stages (3-point patches) when both are set.
@@ -311,9 +411,29 @@ public:
                                   float z, UINT8 stencil_value) noexcept = 0;
     // Pipelines built so far for native passes, and their total build time.
     virtual void native_pipeline_stats(UINT& count, double& milliseconds) const noexcept = 0;
+    // Program twins (fire burn: the NATIVE_FIRE_BURN programs). With a map,
+    // every native pipeline built so far and from now on also has its twin
+    // pipeline requested on the workers (warm); with draw, draws use the twins.
+    // Null: none. The map stays the caller's. A twin whose pipeline cannot be
+    // made draws its original (counted, its first program logged).
+    virtual void set_program_substitutes(const std::unordered_map<const ShaderProgram*, const ShaderProgram*>* map, bool draw) noexcept = 0;
     // The game's one-shot picking frame is data: every requested pipeline
     // must finish compiling before its draws/dispatches can be copied out.
     virtual void set_hit_test_frame(bool active) noexcept = 0;
+    // The pixel programs the batches of the next native draws can switch to in
+    // play (the dry-frame and no-contact variants of a material instance, at
+    // most 4; null or 0: none): a native pipeline first requested while they
+    // are set also requests, in the background, the same pipeline with each of
+    // them, so a later switch finds it built instead of compiling it in a frame.
+    virtual void set_pixel_twins(const ShaderProgram* const* twins, UINT count) noexcept = 0;
+    // Load-time work that must not be omitted (the neighbour impostor bake):
+    // while set, a pipeline still building is waited for, not skipped.
+    virtual void set_wait_for_pipelines(bool wait) noexcept = 0;
+    // A load is about to be revealed (the loading picture is still shown and
+    // the game paused): pipelines first requested since the last save are
+    // written now, never in play (a library write held a present for
+    // 280-330 ms, laptop j187).
+    virtual void save_new_pipelines() noexcept = 0;
     // Copies box of what the frame drew so far to (x, y) of texture; with a
     // source, box of that offscreen target instead (the zone hit-test frame).
     virtual HRESULT capture(D3D12Texture& texture, UINT x, UINT y, const RECT& box, D3D12Texture* source = nullptr) = 0;
@@ -375,6 +495,22 @@ public:
     virtual void set_fsr_hudless(D3D12Texture* hudless) noexcept = 0;
     // FSR: the frame generation context's VRAM (bytes, 0: unknown).
     virtual std::uint64_t fsr_vram() const noexcept = 0;
+    // FSR 3.1 upscaling (upscaler 2; the host's FidelityFX upscaler). Why it
+    // cannot run (null: it can). fsr_upscale inside record_external:
+    // resources colour, depth, motion, output, reactive (written), transparency,
+    // world colour before and after the transparent effects (the SDK's
+    // reactive mask generation; reactive and both colours, or null).
+    struct FsrUpscale {
+        UINT render_w = 0, render_h = 0, out_w = 0, out_h = 0;
+        float jitter_x = 0, jitter_y = 0;  // render pixels, the upscaler's
+        float frame_ms = 0, sharpness = 0;
+        bool reset = false;
+        float near_plane = 0, far_plane = 0, fov_y = 0;
+    };
+    virtual const char* fsr_upscale_unavailable() noexcept = 0;
+    virtual HRESULT fsr_upscale(ID3D12GraphicsCommandList* list, ID3D12Resource* const* resources, const FsrUpscale& upscale) noexcept = 0;
+    virtual void fsr_upscale_release() noexcept = 0;
+    virtual std::uint64_t fsr_upscale_vram() const noexcept = 0;
     virtual D3D12Texture* frame_image_texture() noexcept = 0;
     virtual D3D12Texture* generated_image() noexcept = 0;
     virtual void select_generated_screen() noexcept = 0;
@@ -417,7 +553,12 @@ public:
     // Waits until the GPU finished every submitted frame, the frame being
     // recorded keeping its fence value (callable mid-frame; before NGX
     // releases a feature those frames may still run).
-    virtual void wait_idle() noexcept = 0;
+    // False: they did not finish (timeout); a removed device counts as finished.
+    virtual bool wait_idle() noexcept = 0;
+    // The fence value the frame being recorded will signal when submitted,
+    // and the value the GPU has completed (NGX: a feature recorded into the
+    // open list is released only after the fence passes that value).
+    virtual void fence_state(std::uint64_t& recording, std::uint64_t& completed) noexcept = 0;
     // frame_limit caps total output FPS, including generated frames (0: off).
     virtual HRESULT present(UINT sync_interval, int frame_limit = 0) = 0;
     virtual HRESULT resize(UINT width, UINT height) = 0;
@@ -425,6 +566,11 @@ public:
     virtual std::string omitted() const = 0;
     // The F10 overlay's draw lists go through the executor.
     virtual OverlayRenderer& overlay_renderer() noexcept = 0;
+    // x64 host start: true while the start's pipelines are still being built
+    // (done and total so far); the call that finds them all ready finishes
+    // the start (its log line and library save) and returns false. Called
+    // until false before the first real frame.
+    virtual bool start_warming(std::size_t& done, std::size_t& total) = 0;
     // The renderer's profiler times its passes with these GPU timestamps.
     virtual ProfileTimestamps& profile_timestamps() noexcept = 0;
 };
