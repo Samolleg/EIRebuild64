@@ -35,6 +35,11 @@ int wmain(int argc, wchar_t **argv) {
         std::cout << "ACCEPTED: " << asset->geometry.vertices.size() << " vertices, "
                   << asset->geometry.indices.size() / 3 << " triangles, "
                   << asset->geometry.joints.size() << " evaluation nodes\n";
+        if(asset->rigid) {
+            std::cout << "Rigid item: " << asset->socket << "; " << asset->anchors.size()
+                      << " anchors; radius " << asset->radius << "; no animation allocation\n";
+            return 0;
+        }
         std::cout << "Animation: " << asset->animation->clips.size() << " clips, "
                   << asset->animation->morphs.size() << " morph vertices, "
                   << asset->gpu_animation->bytes.size() << " GPU bytes; idle radius "

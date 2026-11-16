@@ -2,7 +2,7 @@
 #include <cstdint>
 #include <memory>
 #include "OwnedRender/ModelPreviewVisualRole.h"
-namespace owned { struct ModelPreviewViews; struct VisualAssemblyAsset; }
+namespace owned { struct ModelPreviewViews; struct VisualAssemblyAsset; struct VisualClipVisibility; struct VisualClipSelection; }
 
 #include "Object.h"
 #include "Material.h"

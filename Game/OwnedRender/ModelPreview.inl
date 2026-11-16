@@ -72,6 +72,11 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
             OwnedPreviewSourceAccess::Rate(dynamic_cast<const CUnit*>(lpObject))))
         return reject("preview.phase");
 
+#ifndef _A4
+    if(auto* unit=dynamic_cast<CUnit*>(lpObject))
+        if(auto* client=dynamic_cast<CUnitClientSpecific*>(unit->GetUnitSpecific()))
+            client->PopulateOwnedVisibility(sample.visibility,sample.selection,sample.pose.phase);
+#endif
     auto* gpu = renderer->GetGPU();
     if (!gpu->IsHaveMatrix(MAT_STACK_PROJSPACE)) return reject("preview.projection");
     std::array<float,16> worldToClip{}, objectToWorld{};

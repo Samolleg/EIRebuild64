@@ -241,6 +241,9 @@ bool retained_visual_current_nodes(const RetainedVisualSample& sample,
 #endif
 bool retained_visual_gpu_pose(const RetainedVisualSample& sample,
     NativeWorldGeometry::Pose*& pose);
+// 0: legacy visual, 1: world point, -1: selected glTF rejected.
+int retained_visual_equipment_point(const RetainedVisualSample& sample, const char* slot,
+    const char* anchor, std::array<float,3>& point) noexcept;
 bool retained_visual_combat_anchor(const RetainedVisualSample& sample,
     std::array<float,3>& anchor);
 // Owned party portrait: the box of the listed parts in the neutral pose, in

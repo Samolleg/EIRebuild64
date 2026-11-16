@@ -1,14 +1,16 @@
 ﻿// Included inside namespace owned, after merged_geometry's cache helper.
 namespace {
 bool build_skn_groups(const RetainedVisualSample &sample,
-                      const std::shared_ptr<const skn::RuntimeAsset> &asset) {
+                      const std::shared_ptr<const skn::RuntimeAsset> &asset,
+                      const std::vector<unsigned>* attachmentNodes=nullptr,
+                      bool weapon=false, bool arrow=false) {
   auto &prepared = *sample.prepared;
   const auto &data = asset->asset;
   if (data.semantic_joints.size() != data.submeshes.size())
     throw std::runtime_error(
         "SKN gameplay reference required for unit visibility");
   // SKN owns absent variants too: never expose an unmatched FIG draw.
-  prepared.merged_part_group.assign(sample.assembly->parts.size(), 0);
+  if(!attachmentNodes) prepared.merged_part_group.assign(sample.assembly->parts.size(), 0);
   std::vector<unsigned> nodes(data.joints.size(), UINT_MAX);
   for (unsigned j = 0; j < nodes.size(); ++j)
     for (unsigned k = 0; k < sample.assembly->skeleton->nodes.size(); ++k)
@@ -21,6 +23,7 @@ bool build_skn_groups(const RetainedVisualSample &sample,
   if(asset->motion)for(unsigned j=0;j<nodes.size();++j)if(nodes[j]==UINT_MAX)
     for(unsigned i=0;i<asset->motion->nodes.size();++i)if(asset->motion->nodes[i].name==data.joints[j].name)
       nodes[j]=static_cast<unsigned>(sample.assembly->skeleton->nodes.size())+i;
+  if(attachmentNodes) nodes=*attachmentNodes;
   for (unsigned node : nodes)
     if (node == UINT_MAX)
       throw std::runtime_error("SKN joint missing in legacy LNK");
@@ -116,13 +119,14 @@ bool build_skn_groups(const RetainedVisualSample &sample,
     auto &group = prepared.merged_groups.back();
     group.parts = {part};
     group.skn_asset = asset;
+    group.gltf_weapon=weapon;group.gltf_arrow=arrow;
     group.skn_material = mesh.material;
     group.skn_casts_shadow = !asset->gltf_asset && selected.assembled_character_texture && data.materials[mesh.material].maps[0].empty()
         ? selected.casts_shadow : data.materials[mesh.material].alpha!=2;
     group.shape_count = 1;
     group.position_groups = group.normal_groups =
         static_cast<unsigned>((vertices.size() + 3) / 4);
-    prepared.merged_part_group[part] = group_index;
+    if(!attachmentNodes) prepared.merged_part_group[part] = group_index;
     const std::string content =
         "skn|" + asset->identity.key() + "|" + std::to_string(sub) + "|" + std::to_string(chunk_index++) + "|" + binding_layout;
     group.geometry = merged_geometry(
