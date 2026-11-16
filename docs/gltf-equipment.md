@@ -43,8 +43,11 @@ absent from `items` is not registered for the new equipment path; no item mesh
 is invented. A registered shape with a missing material/slot or invalid GLB
 is rejected with diagnostics, without substituting another item's surface.
 
-Allowed sockets: `socket_hand_r`, `socket_hand_l`, `socket_back`, `socket_belt`,
-`socket_head`. The registry chooses placement; GLB metadata declares a valid
+Allowed targets: `socket_hand_r`, `socket_hand_l`, `socket_back`, `socket_belt`,
+`socket_head`, or any named bone declared in `human.v1` and present in the body.
+For example, a strapped shield can select `CC_Base_Forearm.L` with its own grip.
+Generated helper nodes and unknown bones are rejected. X64GLTF10J adds these
+profile bone targets without changing the profile bind or GPU ABI. The registry chooses placement; GLB metadata declares a valid
 default socket. `visibility` is `weapon`, `arrow`, or `always`. Its default is
 `weapon` for weapons and `always` for armor. Arrow visibility includes weapon
 hiding. Private preview visibility uses its own clip phase and the host's
@@ -87,8 +90,9 @@ ordering. Changing equipment only rebuilds the cold appearance/group binding.
 ## Boundaries and verification
 
 This stage adds the common rigid attachment runtime. The installed content
-registry currently has no item mappings: game art/mappings must be prepared
-before the new path can display those items. Do not install an EXE alone and
+registry currently has no item mappings. X64GLTF10A prepares a control saber
+and strapped shield as separate resources; the rest of the item catalog still
+requires explicit assets/mappings. Do not install an EXE alone and
 claim that every existing weapon has been converted. Clothing surface binding,
 body coverage and shared garment morphs belong to the following stage; the
 author's ready starter wool set is its source. Animated bow/crossbow mechanics

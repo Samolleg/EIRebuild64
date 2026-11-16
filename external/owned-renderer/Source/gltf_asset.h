@@ -19,7 +19,8 @@ struct Asset
     bool rigid = false;
     std::string socket;
     std::map<std::string,std::array<float,3>> anchors;
-    std::map<std::string,SocketChain> sockets;
+    mutable std::map<std::string,SocketChain> sockets;
+    mutable std::mutex socket_mutex;
     Document document;
     skn::Asset geometry;
     std::vector<std::array<skn::Dds, 4>> textures;
@@ -32,6 +33,17 @@ struct Asset
     float radius = 0;
     float animation_radius = 0;
     std::vector<NodeEnvelope> node_envelopes;
+    // Bone attachments share the body's existing palette. Build only CPU
+    // query chains actually requested, once per asset (not per actor/item).
+    const SocketChain& attachment_chain(const std::string& name) const {
+        std::lock_guard<std::mutex> guard(socket_mutex);
+        const auto found=sockets.find(name);
+        if(found!=sockets.end())return found->second;
+        const auto node=std::find_if(geometry.joints.begin(),geometry.joints.end(),
+            [&](const skn::Joint& joint){return joint.name==name;});
+        animation_require(animation && node!=geometry.joints.end(),"attachment node missing");
+        return sockets.emplace(name,socket_chain(*animation,unsigned(node-geometry.joints.begin()))).first->second;
+    }
 };
 struct EquipmentAsset {
     std::shared_ptr<const Asset> asset;

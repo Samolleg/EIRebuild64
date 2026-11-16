@@ -127,8 +127,8 @@ def validate_metadata(meta, p, kind, d):
         if not isinstance(hides, list) or len(set(hides)) != len(hides) or any(z not in p['zones'] for z in hides):
             d.error('hides', 'missing/invalid zones', 'set unique profile zone names; [] is allowed')
     if kind == 'item':
-        if meta.get('socket') not in {s['name'] for s in p['sockets']}:
-            d.error('item.socket', 'unknown socket', 'choose a profile socket')
+        if meta.get('socket') not in {s['name'] for s in p['sockets']} | {b['name'] for b in p['skeleton']['bones']}:
+            d.error('item.socket', 'unknown attachment node', 'choose a profile socket or named profile bone')
         grip = meta.get('grip', {})
         if any(not isinstance(grip.get(f), list) or len(grip[f]) != n or not all(math.isfinite(x) for x in grip[f])
                for f, n in [('translation', 3), ('rotation', 4), ('scale', 3)]):
