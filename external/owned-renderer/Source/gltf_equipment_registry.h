@@ -34,8 +34,11 @@ inline std::vector<ItemBinding> item_bindings(const nlohmann::json& registry,
             "item resource key");
         binding.socket=entry.at("socket").get<std::string>();
         const auto& socket=binding.socket;
-        require(socket=="socket_hand_r" || socket=="socket_hand_l" || socket=="socket_back" ||
-            socket=="socket_belt" || socket=="socket_head","socket");
+        // The decoder checks the profile, and the body bind checks presence.
+        // Internal helper nodes (#...) and paths are never attachment targets.
+        require(!socket.empty() && socket.size()<=128 && std::all_of(socket.begin(),socket.end(),[](char c) {
+            return (c>='a'&&c<='z') || (c>='A'&&c<='Z') || (c>='0'&&c<='9') || c=='_' || c=='.' || c=='-';
+        }),"attachment node");
         const auto visibility=entry.value("visibility",item.kind==VisualEquipmentItem::Kind::weapon ? "weapon" : "always");
         require(visibility=="weapon" || visibility=="arrow" || visibility=="always","visibility");
         binding.weapon=visibility=="weapon" || visibility=="arrow";

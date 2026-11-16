@@ -313,7 +313,9 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
         bool known = false;
         for (const auto& socket : contract.at("sockets"))
             known = known || socket.at("name") == output->socket;
-        require(known, "unknown item socket");
+        for (const auto& bone : contract.at("skeleton").at("bones"))
+            known = known || bone.at("name") == output->socket;
+        require(known, "unknown item attachment node");
         auto grip = reference_joint(metadata.at("grip"));
         float q = 0;
         for (float v : grip.rotation) q += v*v;

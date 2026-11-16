@@ -122,6 +122,11 @@ int wmain(int argc,wchar_t** argv)try {
     must_reject([&]{decode(fixture(changed),profile,publish);});
     changed=doc;changed["asset"]["extras"]["ei"]["kind"]="body";
     must_reject([&]{decode(fixture(changed),profile,publish);});
+    changed=doc;changed["asset"]["extras"]["ei"]["socket"]="CC_Base_Forearm.L";
+    const auto forearm=decode(fixture(changed),profile,publish);
+    check(forearm->socket=="CC_Base_Forearm.L" && !forearm->gpu_animation,"profile bone attachment");
+    changed["asset"]["extras"]["ei"]["socket"]="CC_Base_Absent";
+    must_reject([&]{decode(fixture(changed),profile,publish);});
     changed=doc;changed["nodes"][0]["scale"]={-1,1,1};
     must_reject([&]{decode(fixture(changed),profile,publish);});
     changed=doc;changed["nodes"][0]["scale"]={2,3,4};
@@ -130,6 +135,9 @@ int wmain(int argc,wchar_t** argv)try {
     check_near(scaled->rest_vertices[0].position[1],9,"scaled hierarchy y");
     std::cout<<"PASS host selection/removal/private preview, registry rejection, rigid GLB hierarchy/grip/material/anchors\n";
     const auto body=decode(read_file(argv[1]),profile,publish);const auto& animation=*body->animation;
+    const auto& forearmChain=body->attachment_chain("CC_Base_Forearm.L");
+    check(&forearmChain==&body->attachment_chain("CC_Base_Forearm.L") && body->sockets.size()==6,
+        "bone attachment chain must be cached once");
     const unsigned idle=named_clip(animation,"idle");check(idle!=UINT32_MAX,"body idle");
     unsigned moving=idle;
     for(unsigned c=0;c<animation.clips.size();++c)if(animation.clips[c].name.find("attack")!=std::string::npos){moving=c;break;}
@@ -156,6 +164,6 @@ int wmain(int argc,wchar_t** argv)try {
     }
     const auto out=std::filesystem::path(argv[0]).parent_path()/"rigid-fixture.glb";
     std::ofstream file(out,std::ios::binary);file.write(reinterpret_cast<const char*>(itemBytes.bytes->data()),itemBytes.bytes->size());
-    std::cout<<"PASS five actual-body sockets, weapon transforms and transition on D3D11/D3D12 WARP; max error "<<maxError<<'\n';
+    std::cout<<"PASS five actual-body sockets plus forearm bone, weapon transforms and transition on D3D11/D3D12 WARP; max error "<<maxError<<'\n';
     return 0;
 }catch(const std::exception& e){std::cerr<<"FAIL "<<e.what()<<'\n';return 1;}

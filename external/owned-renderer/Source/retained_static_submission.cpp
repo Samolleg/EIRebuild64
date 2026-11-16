@@ -2468,7 +2468,7 @@ int retained_visual_equipment_point(const RetainedVisualSample& sample,const cha
     const gltf::Playback playback{pose->gltf_clip,pose->gltf_previous,pose->gltf_time,
         pose->gltf_previous_time,pose->gltf_blend};
     const auto matrix=gltf::multiply(pose->root_to_world,
-        gltf::socket_pose(*body.animation,body.sockets.at(socket),playback));
+        gltf::socket_pose(*body.animation,body.attachment_chain(socket),playback));
     for(unsigned r=0;r<3;++r) {
         point[r]=matrix[r*4+3];
         for(unsigned c=0;c<3;++c)point[r]+=matrix[r*4+c]*local[c];
