@@ -2718,8 +2718,8 @@ struct NativePrepassResult{float4 rest:SV_Target0;float2 normal:SV_Target1;};
 // each pixel once and the prepass and the material pass agree.
 // Crown impostor texel (static_lod.h): the four frames' albedo (premultiplied
 // by coverage) and object-space normal, blended by the record's weights; a
-// frame position outside its image is empty. Coverage of at least one half
-// passes the record's own alpha test (alpha 1). The sampler is the batch's
+// frame position outside its image is empty. Weighted coverage
+// is resolved into a binary cutout shared by both passes. The sampler is the batch's
 // own (bilinear, mips); positions stay inside their frame's image.
 Texture2DArray nativeImpostorAlbedo:register(t44);
 Texture2DArray nativeImpostorNormal:register(t45);
@@ -2729,7 +2729,7 @@ float nativeImpostorLod(float2 local){
  float2 dx=ddx(local),dy=ddy(local);
  return clamp(log2(max(max(length(dx),length(dy))*kImpostorFrameTexels,1e-6)),0,kImpostorMips-1);
 }
-float4 nativeImpostorTexel(float4 frames01,float4 frames23,float4 weights,float4 flow,float lod,bool withNormal,out float3 normal){
+float4 nativeImpostorTexel(float4 frames01,float4 frames23,float4 weights,float4 flow,float lod,float2 pixel,bool withNormal,out float3 normal){
  uint slice=(uint)(flow.x+.5);uint2 b=uint2((uint)(flow.y+.5),(uint)(flow.z+.5));
  float2 uvs[4]={frames01.xy,frames01.zw,frames23.xy,frames23.zw};
  float4 albedo=0;float3 n=0;float coverage=0;
@@ -2752,7 +2752,12 @@ float4 nativeImpostorTexel(float4 frames01,float4 frames23,float4 weights,float4
  normal=albedo.a>1e-4?n/albedo.a*2-1:0;
  // Diagnostic view (F10 impostor_debug): the whole quad, magenta.
  if(flow.w>.5){normal=float3(0,0,1);return float4(1,0,1,1);}
- return float4(albedo.a>1e-4?albedo.rgb/albedo.a:0,coverage>=.5?1:0);
+ // Four views cover different leaves. A fixed 0.5 threshold keeps their
+ // intersection and erases sparse crowns. Stable screen-door coverage keeps
+ // the weighted area, with the same decision in depth and colour passes.
+ // Offset from the LOD dither so their two coverages do not correlate.
+ float threshold=frac(52.9829189*frac(dot(pixel+float2(29,71),float2(.06711056,.00583715))));
+ return float4(albedo.a>1e-4?albedo.rgb/albedo.a:0,coverage>threshold?1:0);
 }
 bool nativeLodDiscard(uint swaying,float4 position){
  uint code=swaying>>8;
@@ -2772,7 +2777,7 @@ NativePrepassResult nativePrepassPS(NativeDepthOutput i){
     all(i.worldPosition.xy<nativeTerrainActiveBoundsPS.zw))discard;
  [branch]if(nativeAlphaTest!=0){
   float4 t=float4(1,1,1,1);
-  [branch]if(((i.swaying>>8)&1024u)!=0){float3 unused;t=nativeImpostorTexel(i.liquidTintDepth,i.liquidMaterial,i.liquidUvBounds,i.liquidFlow,impostorLod,false,unused);}
+  [branch]if(((i.swaying>>8)&1024u)!=0){float3 unused;t=nativeImpostorTexel(i.liquidTintDepth,i.liquidMaterial,i.liquidUvBounds,i.liquidFlow,impostorLod,i.p.xy,false,unused);}
   else{
 #ifdef NATIVE_LOW
   [branch]if(nativeTextured!=0){
@@ -2922,7 +2927,7 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace){
  float4 impostorTexel=float4(1,1,1,1);float3 impostorNormal=float3(0,0,1);
  float impostorLod=nativeImpostorLod(i.liquidTintDepth.xy);
  [branch]if(impostor){
-  float3 n;impostorTexel=nativeImpostorTexel(i.liquidTintDepth,i.liquidMaterial,i.liquidUvBounds,i.liquidFlow,impostorLod,true,n);
+  float3 n;impostorTexel=nativeImpostorTexel(i.liquidTintDepth,i.liquidMaterial,i.liquidUvBounds,i.liquidFlow,impostorLod,i.p.xy,true,n);
   n=dot(n,n)>1e-8?normalize(n):float3(0,0,1);impostorNormal=n;
   float facing=i.liquidDirections.w>0?(nativeTerrainClock.z!=0?1:max(dot(n,i.liquidView),0)):0;
   i.directional=nativeWorldSunDiffuse.rgb*i.liquidDirections.xyz*facing;

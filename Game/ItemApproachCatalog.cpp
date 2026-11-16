@@ -13,6 +13,7 @@
 #include <vector>
 #include <windows.h>
 #include "ItemApproachCatalog.h"
+#include "ItemApproachArchiveIndex.h"
 #include "ItemDatabase.h"
 #include "ModRuntime.h"
 #include "ModPackage.h"
@@ -163,41 +164,7 @@ std::vector<unsigned char> Read(std::ifstream& f, size_t size) {
     std::vector<unsigned char> b(size);if(size)f.read(reinterpret_cast<char*>(b.data()),std::streamsize(size));
     Require(bool(f),"Truncated catalog/RES");return b;
 }
-uint32_t ReadCatalogU32(const std::vector<unsigned char>& b,size_t p) {
-    Require(p<=b.size() && 4<=b.size()-p,"Truncated RES integer");
-    return uint32_t(b[p])|(uint32_t(b[p+1])<<8)|(uint32_t(b[p+2])<<16)|(uint32_t(b[p+3])<<24);
-}
-// Only an index is needed. Never load model/texture payload on a path request.
-class Archives {
-    std::map<std::string,std::set<std::string>> cache;
-public:
-    bool Has(const std::string& path,const std::string& member) {
-        const std::string key=Lower(path);auto it=cache.find(key);
-        if(it==cache.end()) {
-            std::set<std::string> names;
-            try {
-                std::ifstream f(Wide(path),std::ios::binary);Require(bool(f),"Missing RES");
-                f.seekg(0,std::ios::end);const auto length=f.tellg();Require(length>=16,"Invalid RES size");
-                f.seekg(0);const auto h=Read(f,16);
-                const uint32_t count=ReadCatalogU32(h,4),offset=ReadCatalogU32(h,8),bytes=ReadCatalogU32(h,12);
-                const uint64_t table=uint64_t(count)*22;
-                Require(ReadCatalogU32(h,0)==0x019ce23c && count>0 && count<=1000000 && offset>=16
-                    && bytes<=32u*1024u*1024u && uint64_t(offset)+table+bytes<=uint64_t(length),"Invalid RES index");
-                f.seekg(offset);const auto index=Read(f,size_t(table)+bytes);
-                for(uint32_t i=0;i<count;++i) {
-                    const size_t p=size_t(i)*22;const uint32_t next=ReadCatalogU32(index,p),size=ReadCatalogU32(index,p+4),data=ReadCatalogU32(index,p+8),name=ReadCatalogU32(index,p+18);
-                    const uint32_t n=index[p+16]|(uint32_t(index[p+17])<<8);
-                    Require((next==0xffffffff || next<count) && uint64_t(data)+size<=uint64_t(length)
-                        && name<=bytes && n<=bytes-name,"Invalid RES entry");
-                    const std::string value(reinterpret_cast<const char*>(index.data()+size_t(table)+name),n);
-                    names.insert(Lower(value));
-                }
-            } catch(const std::exception&) { names.clear(); }
-            it=cache.emplace(key,std::move(names)).first;
-        }
-        return it->second.count(Lower(member))!=0;
-    }
-};
+using Archives = ItemApproachArchiveIndex;
 
 enum Kind { Weapon, Armor, Quick, Quest };
 struct Binding {
@@ -252,7 +219,9 @@ void LoadWeapons(const Json& root,const std::string& directory,Archives& archive
     if(hasArmor && (!armor.At("table").Is("items.armors") || armor.At("identity_field").Int()!=0
         || armor.At("armor_type_field").Int()!=2 || armor.At("model_index_field").Int()!=5))return;
     const std::string archive=root.At("model_archive").text;
-    if(!Leaf(archive) || archive.size()<4 || Lower(archive.substr(archive.size()-4))!=".res")return;
+    if(!Leaf(archive) || archive.size()<4)return;
+    const auto extension=Lower(archive.substr(archive.size()-4));
+    if(extension!=".res" && extension!=".pak")return;
     for(const auto& row:root.At("models").items) {
         const auto model=row.At("model").text;
         if(!Leaf(model) || row.At("mod").text!=model+".mod" || row.At("bon").text!=model+".bon"

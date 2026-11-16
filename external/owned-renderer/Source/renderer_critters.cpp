@@ -39,6 +39,7 @@
 #include "owned_resource_runtime.h"
 #include "owned_resource_store.h"
 #include "renderer.h"
+#include "critter_base_mounts.h"
 #include "engine_bridge.h"
 #include "world_fog.h"
 #include "world_texture_sampler.h"
@@ -1775,20 +1776,8 @@ std::shared_ptr<CritterAssets> build_assets(ResourceStoreConfig mounts) {
         ResourceStore base_store;
         bool own_base = false;
         {
-            const auto last = [&](const wchar_t* file) {
-                const std::wstring tail(file);
-                for (auto it = mounts.archives.rbegin(); it != mounts.archives.rend(); ++it) {
-                    if (it->size() < tail.size()) continue;
-                    std::wstring end = it->substr(it->size() - tail.size());
-                    for (auto& c : end) c = wchar_t(std::towlower(c));
-                    if (end == tail) return *it;
-                }
-                return std::wstring();
-            };
-            ResourceStoreConfig base_mounts;
-            const std::wstring figures = last(L"\\figures.res"), textures = last(L"\\textures.res");
-            if (!figures.empty() && !textures.empty()) {
-                base_mounts.archives = {figures, textures};
+            const auto base_mounts = critter_base_mounts(mounts);
+            if (!base_mounts.archives.empty()) {
                 ResourceFailure ignored;
                 own_base = base_store.open(base_mounts, ignored);
             }

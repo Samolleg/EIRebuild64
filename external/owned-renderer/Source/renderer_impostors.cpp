@@ -62,7 +62,10 @@ struct ImpostorBakeTargets{float4 albedo:SV_Target0;float4 normal:SV_Target1;};
 // the object-space normal, empty ones stay zero (premultiplied by coverage
 // through the mips).
 ImpostorBakeTargets impostorBakePS(ImpostorBakeOutput i){
- float4 t=bakeTexture.Sample(bakeSampler,i.uv);
+ // Preserve leaf coverage while baking the small atlas. Filtered mip alpha
+ // removes sparse cards before the impostor ever reaches the screen. Keep
+ // colour and coverage from the same source sample.
+ float4 t=bakeTexture.SampleLevel(bakeSampler,i.uv,0);
  if(t.a<=200.0/255.0)discard;
  float3 n=dot(i.n,i.n)>1e-12?normalize(i.n):float3(0,0,1);
  ImpostorBakeTargets o;o.albedo=float4(t.rgb,1);o.normal=float4(n*.5+.5,1);return o;
