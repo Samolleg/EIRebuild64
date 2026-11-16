@@ -2118,6 +2118,10 @@ CPlot3D CUnit::GetCastPointPosition()
     CPlot3D position;
     if (!GetWorld()->IsServer())
     {
+        if (auto* client=dynamic_cast<CUnitClientSpecific*>(lpUnitSpecific)) {
+            const int attachment=client->GetOwnedEquipmentPoint(false,"cast",position);
+            if(attachment)return attachment>0?position:GetCP();
+        }
         if (GetTypeID() == MOTID_HUMAN)
         {
             CFigure *pHand;

@@ -1,3 +1,4 @@
+#include "gltf_equipment.h"
 #pragma once
 #include "static_lod.h"
 
@@ -66,6 +67,8 @@ enum class RetainedVisualStatus : std::uint8_t {
 };
 const char* retained_visual_status_name(std::uint32_t status) noexcept;
 
+namespace gltf { struct EquipmentSelection; }
+
 struct VisualPartAsset {
     std::string name;
     std::shared_ptr<const FigureCpuAsset> geometry;
@@ -115,6 +118,7 @@ struct VisualAssemblyAsset {
     std::uint64_t revision = 0;
     std::shared_ptr<const ModelCpuAsset> skeleton;
     std::vector<VisualPartAsset> parts;
+    std::vector<VisualEquipmentItem> equipment;
     std::array<float, 3> shape{};
     std::array<float, 3> center_shift{};
     std::array<float, 3> scale{1, 1, 1};
@@ -325,10 +329,13 @@ struct VisualPreparedResources {
     PoseKey skn_bounds_key{};
     NativeWorldBounds skn_bounds{};
     bool skn_bounds_valid = false;
+    std::shared_ptr<const VisualAssemblyAsset> gltf_equipment_assembly;
+    std::shared_ptr<const gltf::EquipmentSelection> gltf_equipment;
     struct MergedGroup {
         std::shared_ptr<const skn::RuntimeAsset> skn_asset;
         std::uint32_t skn_material = 0;
         bool skn_casts_shadow = true;
+        bool gltf_weapon = false, gltf_arrow = false;
         std::vector<std::uint32_t> parts;
         std::uint32_t shape_count = 0, position_groups = 0, normal_groups = 0;
         std::shared_ptr<const MergedGeometry> geometry;
@@ -931,6 +938,9 @@ public:
         const VisualClipSelection& selection) noexcept;
     bool visual_preview_selection(VisualResourceIncarnation resource, std::uint32_t view,
         VisualClipSelection& selection) const noexcept;
+    // Synchronous host attachment query: one resource, no world traversal or GPU readback.
+    bool visual_attachment_source(VisualResourceIncarnation resource, double time,
+        RetainedVisualSample& sample) const noexcept;
     bool visual_preview_source(VisualResourceIncarnation resource,
         RetainedVisualSample& sample, std::uint64_t& selection_revision) const noexcept;
     bool visual_publish_object_pose(VisualResourceIncarnation resource,

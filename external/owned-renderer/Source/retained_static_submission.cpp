@@ -1134,6 +1134,26 @@ const std::array<float,3>& retained_visual_shape(const RetainedVisualSample& sam
 }
 
 namespace {
+const gltf::EquipmentSelection& prepare_gltf_equipment(const RetainedVisualSample& sample,
+    const gltf::Asset& body) {
+ auto& prepared=*sample.prepared;
+ if(prepared.gltf_equipment_assembly==sample.assembly && prepared.gltf_equipment)
+  return *prepared.gltf_equipment;
+ auto selected=std::make_shared<gltf::EquipmentSelection>();
+ selected->items=gltf::select_equipment(sample.assembly->equipment);
+ selected->radius=body.animation_radius;
+ for(const auto& item:selected->items) {
+  auto found=std::find_if(body.geometry.joints.begin(),body.geometry.joints.end(),
+      [&](const skn::Joint& j){return j.name==item.socket;});
+  if(found==body.geometry.joints.end())throw std::runtime_error("glTF equipment socket missing in body");
+  const auto& limit=body.node_envelopes.at(found-body.geometry.joints.begin());
+  const double radius=limit.translation+limit.scale*item.asset->radius;
+  if(!std::isfinite(radius)||radius>FLT_MAX/4)throw std::runtime_error("glTF equipment bounds overflow");
+  selected->radius=(std::max)(selected->radius,static_cast<float>(radius)*(1+1e-5f));
+ }
+ prepared.gltf_equipment=std::move(selected);prepared.gltf_equipment_assembly=sample.assembly;
+ return *prepared.gltf_equipment;
+}
 bool skn_pose_bounds(const RetainedVisualSample& sample,NativeWorldBounds& bounds,bool& present){
  present=false;
  if(!sample.values.unit||!sample.assembly||!sample.assembly->skeleton)return true;
@@ -1149,7 +1169,7 @@ bool skn_pose_bounds(const RetainedVisualSample& sample,NativeWorldBounds& bound
   bounds=prepared.skn_bounds;return true;
  }
  if(asset->gltf_asset) {
-  const float radius=asset->gltf_asset->animation_radius*(std::max)({std::abs(sample.assembly->scale[0]),std::abs(sample.assembly->scale[1]),std::abs(sample.assembly->scale[2])})+1e-4f;
+  const float radius=prepare_gltf_equipment(sample,*asset->gltf_asset).radius*(std::max)({std::abs(sample.assembly->scale[0]),std::abs(sample.assembly->scale[1]),std::abs(sample.assembly->scale[2])})+1e-4f;
   for(unsigned axis=0;axis<3;++axis) {
    const float position=sample.completed_pose?sample.object_pose.position[axis]:sample.pose.root[axis];
    bounds.minimum[axis]=position-radius;bounds.maximum[axis]=position+radius;
@@ -2383,6 +2403,18 @@ bool retained_visual_gpu_pose(const RetainedVisualSample& sample,
     current.root_to_world=root;current.shape=retained_visual_shape(sample);current.center_shift=assembly.center_shift;
     current.frame=phase.frame;current.fraction=phase.fraction;current.height_scale=static_cast<float>(height);
     current.contact_world_height=0;
+    // A glTF body owns its contact envelope and GPU pose. Attachment queries
+    // need only socket ancestors; do not evaluate every legacy FIG node here.
+    if(sample.values.unit) try {
+        bool present=false;
+        const auto gltf=skn::select_gltf(assembly.skeleton->visual_reference,assembly.main_hero_visual,present);
+        if(present) {
+            if(!prepare_gltf_pose(sample,gltf))return false;
+            pose=&current;return true;
+        }
+    } catch(const std::exception& error) {
+        skn::report_rejection(assembly.skeleton->visual_reference,error.what());return false;
+    }
     if(object_pose){
         // Use the same selected skeleton pose and FIG boxes as the owned geometry,
         // without copying vertex or morph payloads. Pose-key reuse skips this work.
@@ -2415,6 +2447,37 @@ bool retained_visual_gpu_pose(const RetainedVisualSample& sample,
     if(!prepare_baked_motion(sample))return false;
     pose=&current;
     return true;
+}
+
+int retained_visual_equipment_point(const RetainedVisualSample& sample,const char* slot,
+    const char* anchor,std::array<float,3>& point) noexcept try {
+    if(!sample.assembly||!sample.assembly->skeleton||!sample.prepared)return 0;
+    bool present=false;
+    const auto asset=skn::select_gltf(sample.assembly->skeleton->visual_reference,
+        sample.assembly->main_hero_visual,present);
+    if(!present||!asset->gltf_asset)return 0;
+    NativeWorldGeometry::Pose* pose=nullptr;
+    if(!retained_visual_gpu_pose(sample,pose)||!pose)return -1;
+    const auto& body=*asset->gltf_asset;
+    std::string socket=std::string(slot)=="hand_l"?"socket_hand_l":"socket_hand_r";
+    std::array<float,3> local{};
+    for(const auto& item:prepare_gltf_equipment(sample,body).items) if(item.slot==slot) {
+        const auto found=item.asset->anchors.find(anchor);
+        if(found!=item.asset->anchors.end()) {socket=item.socket;local=found->second;break;}
+    }
+    const gltf::Playback playback{pose->gltf_clip,pose->gltf_previous,pose->gltf_time,
+        pose->gltf_previous_time,pose->gltf_blend};
+    const auto matrix=gltf::multiply(pose->root_to_world,
+        gltf::socket_pose(*body.animation,body.sockets.at(socket),playback));
+    for(unsigned r=0;r<3;++r) {
+        point[r]=matrix[r*4+3];
+        for(unsigned c=0;c<3;++c)point[r]+=matrix[r*4+c]*local[c];
+        if(!std::isfinite(point[r]))return -1;
+    }
+    return 1;
+} catch(const std::exception& error) {
+    skn::report_rejection(sample.assembly?sample.assembly->skeleton->visual_reference:"",error.what());
+    return -1;
 }
 
 bool retained_visual_combat_anchor(const RetainedVisualSample& sample,
@@ -3225,6 +3288,16 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
      prepared.skn_selected=skn_present;
      if(skn_present){
       const bool built=build_skn_groups(sample,skn_asset);
+      if(built && skn_asset->gltf_asset) {
+       const auto& body=*skn_asset->gltf_asset;
+       for(const auto& item:prepare_gltf_equipment(sample,body).items) {
+        const auto found=std::find_if(body.geometry.joints.begin(),body.geometry.joints.end(),
+            [&](const skn::Joint& j){return j.name==item.socket;});
+        const std::vector<unsigned> nodes{static_cast<unsigned>(assembly.skeleton->nodes.size()+
+            (found-body.geometry.joints.begin()))};
+        build_skn_groups(sample,skn::from_gltf(item.asset),&nodes,item.weapon,item.arrow);
+       }
+      }
       if(built)prepared.merged_assembly=sample.assembly;
       return built;
      }
@@ -3318,6 +3391,8 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
         !contribution.known||(!contribution.color&&!contribution.light_mask)||!finite_world_bounds(bounds)||
         !sample.prepared->gpu_pose.binding) return false;
     auto& prepared=*sample.prepared;auto& group=prepared.merged_groups[group_index];
+    if((group.gltf_weapon && sample.visibility.hide_weapons) ||
+       (group.gltf_arrow && sample.visibility.hide_arrow)) return false;
     const auto& part=sample.assembly->parts[group.parts[0]];
     auto& view=group.record;
     // Every node lies within the already-scaled world selection envelope.

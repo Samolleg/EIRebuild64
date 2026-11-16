@@ -836,6 +836,11 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
         part.explicitly_hidden = figure->CheckFlag(FIG_HIDDEN) || part.geometry->indices.empty();
         assembly->parts.push_back(std::move(part));
     }
+#ifndef _A4
+    if(auto* unit=dynamic_cast<CUnit*>(object))
+        if(auto* client=dynamic_cast<CUnitClientSpecific*>(unit->GetUnitSpecific()))
+            client->PopulateOwnedEquipment(*assembly);
+#endif
     owned::add_astral_clumps(*assembly);
     // Match the retail bridge's tree classification before publication.
     if (object->WhoAmI() == HPC_TREE) owned::sway_tree_assembly(*assembly);

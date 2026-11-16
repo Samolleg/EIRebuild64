@@ -1,5 +1,6 @@
 #pragma once
 namespace SaveSchema { class Writer; class Reader; }
+namespace owned { struct VisualAssemblyAsset; struct VisualClipVisibility; struct VisualClipSelection; }
 /////////////////////////////////////////////////////////////////////////////////////
 #include "Unit.h"
 #include "SoundTypes.h"
@@ -109,6 +110,9 @@ private:
     void MouthClose(bool bForce = false);
 
 public:
+    void PopulateOwnedEquipment(owned::VisualAssemblyAsset&) const;
+    void PopulateOwnedVisibility(owned::VisualClipVisibility&, const owned::VisualClipSelection&, double) const;
+    int GetOwnedEquipmentPoint(bool left, const char* anchor, CPlot3D& point) const;
     DWORD GetWeaponSubtype(DWORD index) const { return GetWeapon(index); }
     void SetBriefingWeaponHidden(bool hidden);
     CUnitClientSpecific();

@@ -56,7 +56,7 @@ bool produce_model_preview(const ModelPreviewInput& input, std::size_t count,
         for (unsigned r = 0; r < 3; ++r)
             for (unsigned c = 0; c < 3; ++c)
                 scaleSquared += input.object_to_world[r*4+c]*input.object_to_world[r*4+c];
-        const float radius = replacement->gltf_asset->radius * std::sqrt(scaleSquared) + 1e-4f;
+        const float radius = (input.sample.prepared->gltf_equipment ? input.sample.prepared->gltf_equipment->radius : replacement->gltf_asset->animation_radius) * std::sqrt(scaleSquared) + 1e-4f;
         for (unsigned c = 0; c < 3; ++c) {
             bounds.minimum[c] = input.object_to_world[c*4+3] - radius;
             bounds.maximum[c] = input.object_to_world[c*4+3] + radius;
@@ -66,7 +66,9 @@ bool produce_model_preview(const ModelPreviewInput& input, std::size_t count,
         // ordering path, with the same material depth/cull state as the world.
         for (unsigned pass = 0; pass < 2; ++pass) for (std::size_t i = 0; i < groups.size(); ++i) {
             const auto& group = groups[i];
-            const auto& material = replacement->asset.materials[group.skn_material];
+            if((group.gltf_weapon && input.sample.visibility.hide_weapons) ||
+                (group.gltf_arrow && input.sample.visibility.hide_arrow)) continue;
+            const auto& material = group.skn_asset->asset.materials[group.skn_material];
             if ((material.alpha == 2) != (pass != 0)) continue;
             NativePreparedPartSubmission* record = nullptr;
             if (!retained_visual_group_submission(input.sample, i, bounds, {true,true,0},

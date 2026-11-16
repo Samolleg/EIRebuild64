@@ -311,6 +311,9 @@ CPlot3D CParticle::GetCarrierCP(CObject3D *pOldCarrier)
             case bpLStaff:
                 if (pUnit->GetUnitSpecific()->WhoAmI() == HPC_UNITCLIENTSPECIFIC) {
                     auto *specific = static_cast<CUnitClientSpecific *>(pUnit->GetUnitSpecific());
+                    CPlot3D point;
+                    const int attachment=specific->GetOwnedEquipmentPoint(bindPlace==bpLStaff,"particle",point);
+                    if(attachment)return attachment>0?point:pUnit->GetCP();
                     const auto node = specific->GetWeaponParticleNode(bindPlace == bpLStaff);
                     return GetBodyPartCP(pUnit, node.c_str());
                 }

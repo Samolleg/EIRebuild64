@@ -202,7 +202,8 @@ bool collect_owned_visual_depth(std::uint8_t dirty,const ShadowFrame& shadows,
             if(part_index>=kMergedPartBase) {
                 const auto group_index=part_index-kMergedPartBase;
                 auto& group=sample.prepared->merged_groups[group_index];
-                if(!group.skn_casts_shadow)continue;
+                if(!group.skn_casts_shadow || (group.gltf_weapon && sample.visibility.hide_weapons) ||
+                    (group.gltf_arrow && sample.visibility.hide_arrow))continue;
                 bool casts=false;for(const auto member:group.parts)casts|=member<prepared.parts.size()&&prepared.parts[member].casts;
                 if(!casts)continue;
                 const auto mask=shadow_depth_slice_mask(point_light ? dirty : prepared.contribution.light_mask,

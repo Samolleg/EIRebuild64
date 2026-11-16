@@ -1,0 +1,49 @@
+#pragma once
+#include "gltf_equipment.h"
+#include "../../../SDKs/JSON/json.hpp"
+#include <stdexcept>
+
+namespace owned::gltf {
+struct ItemBinding {
+    std::string resource, socket;
+    bool weapon = false, arrow = false;
+};
+// Pure cold selection, also used by tests. A missing shape is not registered;
+// a registered shape must describe every selected material and inventory slot.
+inline std::vector<ItemBinding> item_bindings(const nlohmann::json& registry,
+                                             const VisualEquipmentItem& item)
+{
+    const auto require=[](bool v,const char* why) {
+        if (!v) throw std::runtime_error(std::string("glTF equipment: ")+why);
+    };
+    const auto& items=registry.at("items");
+    require(items.is_object(),"items object");
+    auto found=items.find(item.shape);
+    if(found==items.end()) return {};
+    const auto& list=found->at("materials").at(item.material).at(item.slot);
+    require(list.is_array() && list.size()<=16,"attachment array limit");
+    std::vector<ItemBinding> result;
+    for(const auto& entry:list) {
+        require(entry.at("profile")=="human.v1","profile");
+        ItemBinding binding;
+        binding.resource=entry.at("resource").get<std::string>();
+        const auto& path=binding.resource;
+        require(path.rfind("models/items/",0)==0 && path.size()>17 &&
+            path.substr(path.size()-4)==".glb" && path.find("..") == std::string::npos &&
+            path.find(':')==std::string::npos && path.find('\\')==std::string::npos,
+            "item resource key");
+        binding.socket=entry.at("socket").get<std::string>();
+        const auto& socket=binding.socket;
+        require(socket=="socket_hand_r" || socket=="socket_hand_l" || socket=="socket_back" ||
+            socket=="socket_belt" || socket=="socket_head","socket");
+        const auto visibility=entry.value("visibility",item.kind==VisualEquipmentItem::Kind::weapon ? "weapon" : "always");
+        require(visibility=="weapon" || visibility=="arrow" || visibility=="always","visibility");
+        binding.weapon=visibility=="weapon" || visibility=="arrow";
+        binding.arrow=visibility=="arrow";
+        for(const auto& prior:result)
+            require(prior.resource!=binding.resource || prior.socket!=binding.socket,"duplicate attachment");
+        result.push_back(std::move(binding));
+    }
+    return result;
+}
+} // namespace owned::gltf

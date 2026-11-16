@@ -37,6 +37,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "ModItemSpellPolicy.h"
 #include "dx11/Surface.h"
 #include "OwnedRender/E1Scene.h"
+#include "OwnedRender/EquipmentSelection.h"
+#include "retained_static_submission.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -750,6 +752,18 @@ void CUnitClientSpecific::PoseChanged()
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // change weapon - change models and notify to change texture
+int CUnitClientSpecific::GetOwnedEquipmentPoint(bool left, const char* anchor, CPlot3D& point) const
+{
+    const auto resource=OwnedRender::E1Scene().Resource(lpUnit);
+    if(!resource.serial)return 0;
+    owned::RetainedVisualSample sample;
+    if(!OwnedRender::E1Scene().Scene().visual_attachment_source(resource,theWorld.GetPreciseTime(),sample))return 0;
+    std::array<float,3> position{};
+    const int result=owned::retained_visual_equipment_point(sample,left?"hand_l":"hand_r",anchor,position);
+    if(result==1)point=CPlot3D(position[0],position[1],position[2]);
+    return result;
+}
+
 std::string CUnitClientSpecific::GetWeaponParticleNode(bool left) const
 {
     const int slot = left ? ResolveVisualLeftHand(*lpUnit,
@@ -813,6 +827,7 @@ BOOL CUnitClientSpecific::ChangeWeapon(DWORD dwToWeapon)
     }
 
     lpUnit->dwCurrentWeapon = dwToWeapon;
+    static_cast<CObject3DClientSpecific*>(lpUnit->GetObjectSpecific())->InvalidateOwnedAppearance();
     bWeaponHidden = false;
     if (dwNewWeapon != DWORD(-1))
     {
@@ -1230,46 +1245,69 @@ bool IsItemInArmorLayer(DWORD dwShape, ETypeIDs tidTypeID, DWORD dwALIndex)
 // Keep offhand atlas selection aligned with the installed addon's currentWeapons::GetWeapons.
 template<class WeaponAt> static int ResolveVisualLeftHand(const CUnit& unit, WeaponAt weaponAt)
 {
-    const int currentSlot = int(unit.GetCurrentWeaponSlotIndex());
-    if (currentSlot < 0 || currentSlot >= int(QI_MAX_WEAPONS) || weaponAt(currentSlot) == DWORD(-1)) return -1;
-    int shieldSlot = -1;
+    std::array<OwnedRender::EquipmentWeapon, QI_MAX_WEAPONS> slots{};
     for (int i = 0; i < int(QI_MAX_WEAPONS); ++i) {
-        DWORD item = weaponAt(i);
-        if (item == DWORD(-1)) continue;
-        const auto shape = theItemDatabase.weapons[CItem::GetShape(item)];
-        if (shape && shape->dwTypeID == RPGWST_HANDS1) { shieldSlot = i; break; }
+        const DWORD item = weaponAt(i);
+        const auto* shape = item != DWORD(-1) ? theItemDatabase.weapons[CItem::GetShape(item)] : nullptr;
+        if (!shape) continue;
+        const int type = int(shape->dwTypeID);
+        slots[i] = {true, ModStats::IsTwohandedWeapon(type, &unit),
+            type == RPGWST_HANDS1, type == RPGWST_HANDS3 || type == RPGWST_HANDS7};
     }
-    const int firstSlot = 0, dualSlot = 1;
-    const DWORD currentItem = weaponAt(currentSlot), firstItem = weaponAt(firstSlot), dualItem = weaponAt(dualSlot);
-    if (firstItem == DWORD(-1) || dualItem == DWORD(-1)) return -1;
-    const auto current = theItemDatabase.weapons[CItem::GetShape(currentItem)];
-    const auto first = theItemDatabase.weapons[CItem::GetShape(firstItem)];
-    const auto dual = theItemDatabase.weapons[CItem::GetShape(dualItem)];
-    if (!current || !first || !dual) return -1;
-    const int currentType = int(current->dwTypeID), firstType = int(first->dwTypeID), dualType = int(dual->dwTypeID);
-    const bool currentTwoHanded = ModStats::IsTwohandedWeapon(currentType, &unit);
-    const bool firstTwoHanded = ModStats::IsTwohandedWeapon(firstType, &unit);
-    const bool dualTwoHanded = ModStats::IsTwohandedWeapon(dualType, &unit);
-    const bool dualIsShield = dualType == RPGWST_HANDS1;
-    const bool currentIsStaff = currentType == RPGWST_HANDS3 || currentType == RPGWST_HANDS7;
-    const bool firstIsStaff = firstType == RPGWST_HANDS3 || firstType == RPGWST_HANDS7;
-    const bool dualIsStaff = dualType == RPGWST_HANDS3 || dualType == RPGWST_HANDS7;
-    if (currentTwoHanded) return -1;
-    if (currentIsStaff || dualIsStaff || firstIsStaff) {
-        if (currentSlot == dualSlot) {
-            if (dualIsShield) return shieldSlot;
-            return !firstTwoHanded && firstIsStaff && dualIsStaff ? firstSlot : -1;
+    return OwnedRender::EquipmentLeftHand(slots, int(unit.GetCurrentWeaponSlotIndex()));
+}
+
+void CUnitClientSpecific::PopulateOwnedVisibility(owned::VisualClipVisibility& visibility,
+    const owned::VisualClipSelection& selection, double phase) const
+{
+    owned::VisualEquipmentValues values;
+    const auto weapon=GetCurrentWeapon();
+    const auto* mod=ModRuntime::Current();
+    values.has_weapon=weapon!=DWORD(-1) && mod && mod->CombatSetting("JMVAttacks");
+    values.weapon_is_bow=weapon!=DWORD(-1) && CItemWeapon::GetWeaponType(weapon)==RPGWST_BOW;
+    values.arrow_is_bow=values.weapon_is_bow;
+    values.human=lpUnit->GetTypeID()==MOTID_HUMAN;
+    values.speaking=bMouthSpeakingMode;
+    values.forced_hidden=bBriefingWeaponForcedHidden;
+    visibility=owned::sample_visual_visibility(selection.neutral?nullptr:
+        &selection.database->entries.at(selection.ordinal),phase,lpUnit->IsDead()!=FALSE,values,bWeaponHidden);
+}
+
+// One host selection for retained world visuals and independent UI copies.
+void CUnitClientSpecific::PopulateOwnedEquipment(owned::VisualAssemblyAsset& assembly) const
+{
+    using Item = owned::VisualEquipmentItem;
+    const auto add = [&](DWORD value, Item::Kind kind, const std::string& slot) {
+        if (value == DWORD(-1)) return;
+        const SIDBItemGeneralShape* shape = kind == Item::Kind::weapon
+            ? static_cast<const SIDBItemGeneralShape*>(theItemDatabase.weapons[CItem::GetShape(value)])
+            : static_cast<const SIDBItemGeneralShape*>(theItemDatabase.armors[CItem::GetShape(value)]);
+        const auto* material = theItemDatabase.materials[CItem::GetMaterial(value)];
+        if (!shape || !material) return;
+        Item item; item.kind = kind; item.shape = shape->GetCode();
+        item.material = material->GetCode(); item.slot = slot;
+        assembly.equipment.push_back(std::move(item));
+    };
+    add(GetCurrentWeapon(), Item::Kind::weapon, "hand_r");
+    const int left = ResolveVisualLeftHand(*lpUnit, [this](int i) { return GetWeapon(DWORD(i)); });
+    if (left >= 0 && left != int(lpUnit->dwCurrentWeapon))
+        add(GetWeapon(DWORD(left)), Item::Kind::weapon, "hand_l");
+    for (unsigned i = 0; i < RPG_NUM_ARMOR_TYPES; ++i)
+        add(armors[i], Item::Kind::armor, "armor_" + std::to_string(i));
+    // Exclude all attachment variants from the body's host visibility proxy.
+    for (DWORD value : weapons) {
+        if (value == DWORD(-1)) continue;
+        for (bool right : {false, true}) {
+            CStringArray names;
+            CItemWeapon::GetWeaponModelNames(CItem::GetShape(value), names, right);
+            for (auto& part : assembly.parts)
+                for (int i = 0; i < names.GetSize(); ++i)
+                    if (part.name == LPCSTR(names[i])) {
+                        part.weapon = true;
+                        part.arrow = part.name == "rh3.arrow00";
+                    }
         }
-        if (shieldSlot >= 0) return shieldSlot;
-        return !dualTwoHanded && dualIsStaff && currentIsStaff ? dualSlot : -1;
     }
-    if (currentSlot == dualSlot) {
-        if (dualIsShield) return shieldSlot;
-        if (!firstTwoHanded) return firstSlot;
-        return -1;
-    }
-    if (shieldSlot >= 0) return shieldSlot;
-    return !dualTwoHanded ? dualSlot : -1;
 }
 
 static const DWORD UCS_PRIMARY_TEXTURE_SIZE = 256;
@@ -2104,6 +2142,7 @@ bool CUnitClientSpecific::Wear(DWORD dwArmor)
     if (armors[eArmorType] == dwArmor)
         return true;
     armors[eArmorType] = dwArmor;
+    static_cast<CObject3DClientSpecific*>(lpUnit->GetObjectSpecific())->InvalidateOwnedAppearance();
     // change (or add) figure
     CFigureManager *pFigureManager = (CFigureManager *)theWorld.GetFigureManager();
     int nModelShapeIndex = -1;
@@ -2181,6 +2220,7 @@ bool CUnitClientSpecific::Remove(ERPGArmorTypes eArmorType)
     if ((dwShape == 0xFFFF) || (dwMaterial == 0xFFFF))
         return false;
     armors[eArmorType] = -1;
+    static_cast<CObject3DClientSpecific*>(lpUnit->GetObjectSpecific())->InvalidateOwnedAppearance();
     // remove model bodyparts
     CFigureManager *pFigureManager = (CFigureManager *)theWorld.GetFigureManager();
     int nModelShapeIndex = -1;
@@ -2240,6 +2280,7 @@ bool CUnitClientSpecific::Remove(ERPGArmorTypes eArmorType)
 /////////////////////////////////////////////////////////////////////////////////////
 void CUnitClientSpecific::SetWeapons(DWORD *pWeapons, DWORD dwNumWeapons)
 {
+    static_cast<CObject3DClientSpecific*>(lpUnit->GetObjectSpecific())->InvalidateOwnedAppearance();
     // clear all the old weapons
     MemSetDWord(weapons, -1, QI_MAX_WEAPONS);
     // fill with new weapons
@@ -2268,6 +2309,7 @@ bool CUnitClientSpecific::AddWeapon(DWORD dwWeapon)
     if ((dwShape == 0xFFFF) || (dwMaterial == 0xFFFF))
         return false;
     weapons[num] = dwWeapon;
+    static_cast<CObject3DClientSpecific*>(lpUnit->GetObjectSpecific())->InvalidateOwnedAppearance();
 
     return true;
 }
@@ -2279,6 +2321,7 @@ bool CUnitClientSpecific::RemoveWeapon(DWORD dwWeapon)
         if (weapons[i] == dwWeapon)
         {
             weapons[i] = -1;
+            static_cast<CObject3DClientSpecific*>(lpUnit->GetObjectSpecific())->InvalidateOwnedAppearance();
             return true;
         }
     }
