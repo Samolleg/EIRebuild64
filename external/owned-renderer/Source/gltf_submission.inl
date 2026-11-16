@@ -1,4 +1,4 @@
-п»ї// Included in namespace owned. Uses the same retained pose binding and GPU pool.
+﻿// Included in namespace owned. Uses the same retained pose binding and GPU pool.
 namespace {
 bool prepare_gltf_pose(const RetainedVisualSample &sample,
                        const std::shared_ptr<const skn::RuntimeAsset> &asset)

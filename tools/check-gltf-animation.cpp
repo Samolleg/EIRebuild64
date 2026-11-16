@@ -1,11 +1,17 @@
 #include "gltf_animation.h"
 #include "native_shader.h"
 #include "gltf_playback.h"
+#include "model_preview_clock.h"
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
 #include <iostream>
 #include <functional>
+#ifdef CHECK_GLTF_ASSET
+#include "gltf_asset.h"
+#include <filesystem>
+#include <fstream>
+#endif
 using namespace owned::gltf;
 using Microsoft::WRL::ComPtr;
 static void check(bool v,const char* reason){if(!v)throw std::runtime_error(reason);}
@@ -96,7 +102,37 @@ static std::vector<NodeGpu> gpu(const Animation& a,const Playback& playback){
     }
     return values;
 }
-int main()try{
+int wmain(int argc,wchar_t** argv)try{
+    {
+        auto database=std::make_shared<owned::AnimationDatabaseAsset>();database->entries.resize(2);
+        database->entries[0].length=10;database->entries[0].flags=0x80180000;
+        database->entries[1].length=8;database->entries[1].flags=0x00180000;
+        auto clip=std::make_shared<owned::AnimationClipAsset>();
+        owned::VisualPoseIntent intent;intent.revision=1;intent.resource_source_generation=1;
+        intent.selections.push_back({database,clip,0,false});
+        owned::VisualPoseState anchor,pose;const char* failure=nullptr;
+        check(owned::anchor_visual_pose(intent,{},anchor,&failure),"host phase anchor");
+        owned::VisualRateValues rates;rates.dont_move=true;owned::VisualRouteSample route;
+        check(owned::sample_visual_pose(intent,anchor,rates,route,25,pose,&failure),"host loop sample");
+        check(pose.cycle==2&&pose.phase==5,"host loop count");
+        check(owned::sample_visual_pose(intent,anchor,rates,route,30,pose,&failure),"host exact endpoint");
+        check(pose.cycle==2&&pose.phase==10,"legacy exact endpoint changed");
+        anchor=pose;check(owned::sample_visual_pose(intent,anchor,rates,route,30.5,pose,&failure),"host continued sample");
+        check(pose.cycle==3&&pose.phase==.5,"host cycle accumulation");
+        rates.frozen=true;anchor=pose;check(owned::sample_visual_pose(intent,anchor,rates,route,100,pose,&failure),"host freeze");
+        check(pose.cycle==3&&pose.phase==.5,"frozen phase moved");rates.frozen=false;
+        intent.selections.push_back({database,clip,1,false});intent.phase=25;
+        check(owned::anchor_visual_pose(intent,{},anchor,&failure),"queued anchor");
+        check(anchor.selection==1&&anchor.cycle==0&&anchor.phase==8,"queue end clamp/reset");
+        owned::ModelPreviewView view;owned::RetainedVisualSample preview;preview.selection={database,clip,0,false};
+        check(owned::prepare_model_preview_phase(view,preview,1,1,0,0,1),"preview anchor");
+        check(owned::prepare_model_preview_phase(view,preview,1,2,25,0,1),"preview loop");
+        check(preview.pose.cycle==2&&preview.pose.phase==5,"preview cycle/phase");
+        const auto before=view.last_time;
+        check(!owned::prepare_model_preview_phase(view,preview,1,3,1e30,0,1),"preview overflowing cycles accepted");
+        check(view.last_time==before,"rejected preview changed anchor");
+        std::cout<<"PASS host ADB loop/exact endpoint/queue/freeze and private preview clock regression\n";
+    }
     Animation a;a.nodes.resize(3);a.nodes[1].parent=0;a.nodes[1].translation={0,2,0,0};a.nodes[2].weights={.25f,.5f};
     Clip c;c.name="idle";c.duration=2;
     c.tracks.push_back({0,3,Path::translation,Interpolation::linear,{0,.7f,2},{0,0,0, 1,2,3, 2,0,1}});
@@ -157,5 +193,24 @@ int main()try{
         for(unsigned i=0;i<a.nodes.size();++i){double distance=0;for(unsigned c=0;c<3;++c)distance+=double(pose.joints[i][c*4+3])*pose.joints[i][c*4+3];
             check(std::sqrt(distance)<=bounds[i].translation+1e-5,"animated translation outside envelope");
             for(unsigned c=0;c<local[i].weights.size();++c)check(std::abs(local[i].weights[c])<=bounds[i].weights[c]+1e-5,"weight outside envelope");}}
-    std::cout<<"PASS bindings, loop/clamp, event phases/deduplication/seek, transitions, cubic motion bounds\n";return 0;
+    std::cout<<"PASS bindings, loop/clamp, event phases/deduplication/seek, transitions, cubic motion bounds\n";
+#ifdef CHECK_GLTF_ASSET
+    if(argc==3){
+        const auto read=[](const wchar_t* path){std::ifstream f(std::filesystem::path(path),std::ios::binary|std::ios::ate);
+            check(bool(f),"asset open");const auto size=f.tellg();check(size>0&&size<=512*1024*1024,"asset size");
+            owned::ResourceBlob blob;auto bytes=std::make_shared<std::vector<std::uint8_t>>(std::size_t(size));f.seekg(0);
+            check(bool(f.read(reinterpret_cast<char*>(bytes->data()),size)),"asset read");blob.bytes=bytes;return blob;};
+        const auto asset=decode(read(argv[1]),read(argv[2]),[](const std::string&,const void* p,std::uint32_t n){
+            owned::ResourceBlob b;const auto* bytes=static_cast<const std::uint8_t*>(p);b.bytes=std::make_shared<std::vector<std::uint8_t>>(bytes,bytes+n);return b;});
+        const auto& animation=*asset->animation;const auto index=named_clip(animation,"idle");check(index!=UINT32_MAX,"asset idle");
+        float maxError=0;
+        for(float fraction:{0.f,.37f,1.f}){const Playback p{index,UINT32_MAX,animation.clips[index].duration*fraction,0,1};
+            const auto actual=gpu(animation,p);const auto expected=evaluate(animation,p).joints;
+            for(unsigned i=0;i<animation.nodes.size();++i)for(unsigned r=0;r<3;++r)for(unsigned c=0;c<4;++c){
+                maxError=(std::max)(maxError,std::abs(actual[i].rows[r][c]-expected[i][r*4+c]));
+                check_near(actual[i].rows[r][c],expected[i][r*4+c],"real GLB CPU/GPU matrix");}}
+        std::cout<<"PASS actual GLB: "<<animation.nodes.size()<<" nodes, 3 idle samples, max matrix error "<<maxError<<'\n';
+    }
+#endif
+    return 0;
 }catch(const std::exception& e){std::cerr<<"FAIL "<<e.what()<<'\n';return 1;}
