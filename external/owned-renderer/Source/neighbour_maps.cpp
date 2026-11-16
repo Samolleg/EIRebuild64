@@ -1,4 +1,5 @@
 #include "neighbour_maps.h"
+#include "neighbour_profile.h"
 #ifdef EID3D11_EMBEDDED
 #include "embedded_host.h"
 #endif
@@ -115,19 +116,6 @@ std::string map_name(std::string name) {
     name=neighbour_key(std::move(name));
     if(name.size()>4 && name.substr(name.size()-4)==".mpr")name.resize(name.size()-4);
     return name;
-}
-bool profile_matches(const ResourceStoreConfig& mounts,const std::wstring& layout) {
-    for(const auto& path:mounts.archives) {
-        const auto slash=path.find_last_of(L"/\\");
-        auto name=path.substr(slash==std::wstring::npos?0:slash+1);
-        for(auto& c:name)if(c>=L'A'&&c<=L'Z')c+=32;
-        if(name==L"databasejmv.res")return true;
-    }
-    // Dejavu ships databaseJmv.res in the addon's res folder without listing
-    // it among the visual archives.
-    const auto database=layout.substr(0,layout.find_last_of(L"/\\")+1)+L"res\\databaseJmv.res";
-    const auto attributes=GetFileAttributesW(database.c_str());
-    return attributes!=INVALID_FILE_ATTRIBUTES&&!(attributes&FILE_ATTRIBUTE_DIRECTORY);
 }
 void set_error(Stream& s,const std::string& error) {
     std::lock_guard<std::mutex> guard(s.lock);s.error=error;
@@ -325,7 +313,7 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
     try {
         const auto& file=source_inputs.layout_file;
         if(file.empty())throw std::runtime_error("Neighbour maps: loaded addon unavailable (no layout file)");
-        if(!profile_matches(mounts,file))throw std::runtime_error("No verified neighbour resource profile");
+        if(!neighbour_profile_matches(mounts,file))throw std::runtime_error("No verified neighbour resource profile");
         const auto root=file.substr(0,file.find_last_of(L"/\\")+1);
         const auto layout=parse_neighbour_layout(read_layout(file));
         {

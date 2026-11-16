@@ -8,6 +8,8 @@
 #include "Pak/Pak.h"
 #include "external/owned-renderer/Source/owned_resource_store.h"
 #include "Game/OwnedRender/StartupPaths.h"
+#include "Game/InstalledGameRoot.h"
+#include "external/owned-renderer/Source/neighbour_profile.h"
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
@@ -235,6 +237,39 @@ void BasePakChecks(const fs::path& directory) {
     Check(ei::pak::ResolveArchivePath(root/"source.res")==root/"source.res","source folder stays a folder");
     std::cout<<"BASE_PAK priority/payload/mapped/renderer/tombstone PASS\n";
 }
+void PakPathChecks(const fs::path& directory) {
+    const auto root=fs::absolute(directory/"pak-paths");
+    const auto game=root/"portable",base=game/"Base",engine=game/"Engine64";
+    fs::create_directories(base/"Res");fs::create_directories(engine);
+    const auto before=fs::current_path();fs::current_path(root);
+    Check(InstalledGameData::FindRoot(engine).empty(),"empty portable root rejected");
+    Store(base/"Res/database.pak",Bytes{1});
+    Check(InstalledGameData::FindRoot(engine).empty(),"database alone does not make a data root");
+    fs::create_directories(base/"Maps");
+    Check(InstalledGameData::FindRoot(engine)==base,"PAK-only portable root found without settings");
+    fs::rename(base/"Res/database.pak",base/"Res/database.res");
+    Check(InstalledGameData::FindRoot(engine)==base,"RES-only portable root retained");
+    Store(base/"Res/database.pak",Bytes{2});
+    Check(InstalledGameData::FindRoot(engine)==base,"both archive formats preserve data-root identity");
+    const auto classic=root/"classic";fs::create_directories(classic/"Res");fs::create_directories(classic/"Maps");
+    Store(classic/"Res/database.pak",Bytes{3});
+    Check(InstalledGameData::FindRoot(classic/"bin/Engine64")==classic,"classic root accepts PAK");
+    fs::current_path(before);
+    owned::ResourceStoreConfig mounts;
+    const auto mod=root/"MODS/Dejavu";fs::create_directories(mod/"res");
+    const auto layout=(mod/"world-map-layouts.json").wstring();
+    Check(!owned::neighbour_profile_matches(mounts,layout),"unverified profile rejected");
+    Store(mod/"res/databaseJmv.pak",Bytes{4});
+    Check(owned::neighbour_profile_matches(mounts,layout),"PAK-only neighbour profile detected outside visual mounts");
+    fs::rename(mod/"res/databaseJmv.pak",mod/"res/databaseJmv.res");
+    Check(owned::neighbour_profile_matches(mounts,layout),"RES neighbour profile retained");
+    mounts.archives={L"C:/fixture/DATABASEJMV.PAK"};
+    Check(owned::neighbour_profile_matches(mounts,L""),"configured PAK identity is case insensitive");
+    mounts.archives={L"C:/fixture/database.pak"};
+    Check(!owned::neighbour_profile_matches(mounts,L""),"ordinary database cannot enable neighbours");
+    Check(!owned::neighbour_profile_matches(mounts,L"world-map-layouts.json"),"relative layout does not probe process CWD");
+    std::cout<<"PAK_PATHS portable/classic/profile/CWD PASS\n";
+}
 void NavigationChecks() {
     using namespace Navigation;
     Request r;r.source={1,2,3};r.goal={10,2,3};r.maxLength=5;r.goalRadius=.15f;r.height=1.6f;
@@ -295,7 +330,7 @@ int main(int argc,char** argv) {
         if(argc<3)throw std::runtime_error("Usage: check-audit-fixes OUTPUT_DIR MOD_CONFIG [ARCHIVE...]");
         if(!AfxWinInit(GetModuleHandleW(nullptr),nullptr,GetCommandLineA(),0))throw std::runtime_error("MFC init");
         const fs::path output=argv[1];fs::create_directories(output);
-        ResourceChecks(output);IdentityChecks(output,argv[2]);NavigationChecks();PakChecks(output);BasePakChecks(output);
+        ResourceChecks(output);IdentityChecks(output,argv[2]);NavigationChecks();PakChecks(output);BasePakChecks(output);PakPathChecks(output);
         for(int i=3;i<argc;++i)if(std::string(argv[i])!="--diagnostics")RealArchive(argv[i]);
         std::cout<<"AUDIT_FIXES_SUMMARY checks="<<checks<<" errors=0 diagnostics="<<RuntimeDiagnostics::Enabled()<<"\n";
         return 0;
