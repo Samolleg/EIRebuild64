@@ -2,6 +2,7 @@
 #define NOMINMAX
 #endif
 #include "PhysicsFxCore.h"
+#include "../external/owned-renderer/Source/secondary_physics.h"
 #include <PxPhysicsAPI.h>
 #include <gpu/PxGpu.h>
 #include <cudamanager/PxCudaContextManager.h>
@@ -82,6 +83,9 @@ std::array<float,4> interpolate(const std::array<float,4>& a,const std::array<fl
     length=std::sqrt(length);for(float& v:result)v/=length;return result;
 }
 }
+
+#include "PhysicsBreast.inl"
+
 std::array<Vec,6> StoneVertices(unsigned shape,float r){
     const float k=float(shape%4);
     return {{{r,0,.13f*r},{-.83f*r,.08f*r,0},{0,(.72f+.06f*k)*r,0},

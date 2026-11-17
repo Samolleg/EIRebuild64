@@ -2416,6 +2416,7 @@ private:
         "Pose records must match the structured HLSL layout");
     struct NativePoseSlot {
         std::shared_ptr<const std::vector<NativePoseNodeGpu>> baked;
+        std::shared_ptr<const std::vector<NativeWorldGeometry::Pose::Override>> overrides;
         NativePreparedIdentity identity{};
         std::weak_ptr<const void> owner;
         std::shared_ptr<const VisualSkeletonBinding> binding;
@@ -2430,6 +2431,7 @@ private:
         UINT slot = UINT_MAX, count = 0, allocation = UINT_MAX;
         std::uint64_t revision = 0, allocation_generation = 0;
         std::shared_ptr<const std::vector<NativePoseNodeGpu>> baked;
+        std::shared_ptr<const std::vector<NativeWorldGeometry::Pose::Override>> overrides;
     };
     struct NativePreparedMaterialSlot {
         NativePreparedIdentity identity{};

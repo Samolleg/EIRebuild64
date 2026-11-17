@@ -77,6 +77,18 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
                     " clip=" + animation.clips[clip].name + " event=" + event.id + " name=" + event.name;
                 bridge_append_probe_event("gltf_visual_event", detail.c_str());
             });
+    current.overrides.reset();
+    if (sample.assembly->main_hero_visual && sample.secondary_physics && !neutral) {
+        auto& secondary=prepared.breast_physics;
+        if(!secondary || secondary->asset!=asset->gltf_asset) {
+            secondary=std::make_shared<gltf::BreastState>();
+            if(!secondary->bind(asset->gltf_asset))secondary.reset();
+        }
+        if(secondary) {
+            secondary->update(sample.secondary_clock,playback,current.root_to_world,seek,unsigned(base),sample.secondary_frozen);
+            current.overrides=secondary->overrides;
+        }
+    }
     current.height_scale = 1;
     current.contact_world_height = asset->gltf_asset->radius * 2;
     return true;

@@ -12,6 +12,7 @@
 #include "figure_service_nodes.h"
 #include "skn_runtime.h"
 #include "gltf_asset.h"
+#include "gltf_breast.h"
 #include "world_scene_algorithms.h"
 
 #include <algorithm>
@@ -1150,7 +1151,7 @@ const gltf::EquipmentSelection& prepare_gltf_equipment(const RetainedVisualSampl
   return *prepared.gltf_equipment;
  auto selected=std::make_shared<gltf::EquipmentSelection>();
  selected->items=gltf::select_equipment(sample.assembly->equipment,body.resource_key);
- selected->radius=body.animation_radius;
+ selected->radius=body.animation_radius + gltf::secondary_limit;
  for(auto& item:selected->items) {
   if(item.asset->wearable) {
    item.body_nodes=gltf::wearable_nodes(*item.asset,body);
