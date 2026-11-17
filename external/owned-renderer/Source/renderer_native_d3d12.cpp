@@ -254,9 +254,10 @@ struct RaytracingRepackJob{
 // The static caster store's probe (update_raytracing_statics_d3d12): one
 // word a candidate, 1 when the GPU's world state of its range holds its
 // generation (the store bake's prepare pass wrote its world vertices).
+// Match NativeWorldStateGpu including sknLod: DXIL uses the declared structure stride.
 constexpr char kRaytracingProbeShader[] =
 "struct RtProbe{uint state;uint2 generation;uint probePadding;};\n"
-"struct RtWorldState{uint2 geometry;uint2 pose;uint preparations;uint components;};\n"
+"struct RtWorldState{uint2 geometry;uint2 pose;uint sknLod;uint preparations;uint components;};\n"
 "cbuffer RtProbeConstants:register(b12){uint rtProbeCount;uint3 rtProbePadding;};\n"
 "StructuredBuffer<RtProbe> rtProbes:register(t40);\n"
 "StructuredBuffer<RtWorldState> rtWorldStates:register(t60);\n"
@@ -271,11 +272,12 @@ constexpr char kRaytracingProbeShader[] =
 const ShaderProgram kRaytracingProbe{{kRaytracingProbeShader, sizeof(kRaytracingProbeShader) - 1}, nullptr, nullptr, "rtProbeCS",
                                      "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3};
 static_assert(sizeof(RaytracingRepackJob)==128);
+// RtWorldVertex must include NativeWorldVertexGpu::tangent even though repacking only reads p and uv.
 constexpr char kRaytracingRepackShader[] =
 "struct RtJob{float4 row0;float4 row1;float4 row2;uint positionOffset;uint componentOffset;uint uvOffset;uint indexOffset;\n"
 " uint shapeCount;uint positionGroups;uint componentCount;uint triangleCount;float3 shape;uint vertexBase;\n"
 " uint triangleBase;float2 uvShift;uint firstThread;uint terrainVertexOffset;uint worldBase;uint2 jobPadding;};\n"
-"struct RtWorldVertex{float4 p;float4 normal;float2 uv;float2 undeformed;uint4 tail;};\n"
+"struct RtWorldVertex{float4 p;float4 normal;float2 uv;float2 undeformed;uint4 tail;float4 tangent;};\n"
 "StructuredBuffer<RtWorldVertex> rtWorld:register(t65);\n"
 "cbuffer RtRepack:register(b12){uint rtJobFirst;uint rtJobCount;uint rtThreads;uint rtRepackPadding;};\n"
 "StructuredBuffer<RtJob> rtJobs:register(t40);\n"
