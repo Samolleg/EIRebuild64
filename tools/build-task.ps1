@@ -134,6 +134,22 @@ try {
     $sourceRepo = $repo
     $repo = Join-Path $CacheRoot 'work'
     Sync-Tree $sourceRepo $repo $tracked
+    # NavBake links host objects by glob. Switching between physics-enabled
+    # and older task sources must not link orphan objects from the other tree.
+    # Keep them as task evidence; the shared cache lock is held throughout.
+    $sourceNames=@{}
+    foreach($relative in $tracked){if($relative -match '\.(cpp|c|cc|cxx)$'){$sourceNames[[IO.Path]::GetFileNameWithoutExtension($relative).ToLowerInvariant()]=$true}}
+    $hostObjects=[IO.Path]::GetFullPath((Join-Path $repo 'out/obj/x64/Release/EI_Rebuild'))
+    if(!$hostObjects.StartsWith($CacheRoot+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Host object directory outside cache.'}
+    foreach($objectFile in @(Get-ChildItem -LiteralPath $hostObjects -File -Filter '*.obj' -ErrorAction SilentlyContinue)) {
+        if($objectFile.Name -notmatch '^(PhysicsFx.*|E1PhysicsDebris)\.obj$' -or $sourceNames.ContainsKey($objectFile.BaseName.ToLowerInvariant())){continue}
+        $orphanRoot=Join-Path $task 'cache-orphans';New-Item -ItemType Directory -Force -Path $orphanRoot | Out-Null
+        $objectHash=Hash-File $objectFile.FullName
+        $backup=Join-Path $orphanRoot ($objectHash+'-'+$objectFile.Name)
+        if(Test-Path -LiteralPath $backup){throw ('Orphan backup already exists: '+$backup)}
+        Move-Item -LiteralPath $objectFile.FullName -Destination $backup
+        Write-Host ('Quarantined source-less cached object: '+$objectFile.Name+' SHA256='+$objectHash)
+    }
     Set-Location $repo
     foreach ($relative in $tracked | Where-Object { $_ -match '\.(vcxproj|props|targets|ps1|cs)$' }) { $inventory.Add($relative + '=' + (Hash-File (Join-Path $repo $relative))) }
     foreach ($directory in @((Join-Path $vc 'include'),(Join-Path $vc 'atlmfc/include'),(Join-Path $sdk "Include/$sdkversion"))) {
