@@ -257,13 +257,12 @@ try {
     & (Join-Path $repo 'tools/prepare-worktree.ps1') -VSInstallDir $vs
     if (!$?) { throw 'Preparation failed.' }
     Write-Host "MSBuild workers: $cores; compiler /MP; isolated endpoint $env:_MSPDBSRV_ENDPOINT_"
-    Add-Type -Path (Join-Path $PSScriptRoot 'BuildProcess.cs')
     $arguments += "/flp:logfile=$task/build.log;verbosity=normal"
-    # Quote Windows argv, doubling trailing backslashes before the closing quote.
-    $commandLine = ($arguments | ForEach-Object {
-        '"' + ([regex]::Replace(([regex]::Replace($_, '(\\*)"', '$1$1\"')), '(\\+)$', '$1$1')) + '"'
-    }) -join ' '
-    $buildExit = [EIBuildProcess]::Run($msbuild, $commandLine, $repo)
+    Push-Location $repo
+    try {
+        & (Join-Path $PSScriptRoot 'invoke-build.ps1') $msbuild @arguments
+        $buildExit = $LASTEXITCODE
+    } finally { Pop-Location }
     if ($buildExit -ne 0) { throw "MSBuild failed ($buildExit); no serial retry." }
     if ($shaderReuse) {
         $log = Get-Content -LiteralPath (Join-Path $task 'build.log') -Raw
@@ -294,7 +293,7 @@ try {
         # Keep the shared work tree locked through this dependent native check build.
         $checkArgs = @($arguments | Where-Object { $_ -notlike '*.sln' -and $_ -notlike '/flp:*' })
         $checkArgs = @($checkArgs | Where-Object { $_ -notlike '/t:*' })
-        & $msbuild (Join-Path $repo 'PhysicsFxRenderCheck.vcxproj') @checkArgs /p:BuildProjectReferences=false *> (Join-Path $task 'physics-render-build.txt')
+        & (Join-Path $PSScriptRoot 'invoke-build.ps1') $msbuild (Join-Path $repo 'PhysicsFxRenderCheck.vcxproj') @checkArgs /p:BuildProjectReferences=false *> (Join-Path $task 'physics-render-build.txt')
         if ($LASTEXITCODE -ne 0) { throw 'Physics render check build failed.' }
     }
     foreach ($name in 'DirectXTex','DirectXTK') {
