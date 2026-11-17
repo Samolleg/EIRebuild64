@@ -315,7 +315,9 @@ bool neighbour_impostor_plan(const RetainedStaticSourceCandidate& candidate,Neig
         const auto& node=candidate.nodes[i];
         if(!part(node))continue;
         plan.spheres[i]={centre[0]-node.object_local[3],centre[1]-node.object_local[7],centre[2]-node.object_local[11],radius};
-        plan.key+=node.figure->identity.key()+"|"+std::to_string(node.texture_identity)+(i==plan.lead?"*;":";");
+        const auto source=candidate.assembly&&i<candidate.assembly->parts.size()?candidate.assembly->parts[i].environment_geometry:nullptr;
+        plan.key+=(source?source->identity:node.figure->identity).key()+"|"+std::to_string(node.texture_identity)+(i==plan.lead?"*;":";");
+        plan.morphs=plan.morphs||(source&&source->shape_count==8);
     }
     // A decoration whose parts morph (eight shapes) keeps its vertices in
     // the sphere's unit frame, where the bake image lives: prebuild_decorations
@@ -388,7 +390,7 @@ void neighbour_impostor_object(const RetainedStaticSourceCandidate& candidate,co
         const std::array<float,3> offset{node.object_local[3]-lead.object_local[3],node.object_local[7]-lead.object_local[7],
             node.object_local[11]-lead.object_local[11]};
         NativeImpostorPart made;
-        if(!build_impostor_part(*node.figure,node.positions.data(),offset,made,node.normals.empty()?nullptr:node.normals.data())){object.parts.clear();object.nodes.clear();return;}
+        if(!build_impostor_part(*node.figure,node.positions.data(),offset,made)){object.parts.clear();object.nodes.clear();return;}
         object.parts.push_back(std::move(made));object.nodes.push_back(&node);
     }
 } catch(...) {
@@ -486,7 +488,7 @@ void prebuild_decorations(NeighbourMapUpload& upload,NativePrebuiltBuilder& buil
                 }
                 auto view=neighbour_figure_view(*node.figure,node.positions.data(),candidate.source->shape);
                 view.lods=&level->second;
-                if(sphere&&!view.world.shape_normals)view.world.impostor_sphere=*sphere;
+                if(sphere)view.world.impostor_sphere=*sphere;
                 if(!build_native_prebuilt_mesh(builder,view,inserted.first->second))inserted.first->second=NativePrebuiltMesh{};
             }
         }

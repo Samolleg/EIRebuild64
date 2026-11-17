@@ -4,6 +4,7 @@ param(
     [string]$CacheRoot,
     [string]$RendererAssetsSource,
     [string]$RendererMaterialsSource,
+    [string]$RendererShaderSource,
     [ValidateRange(1,1024)][int]$CacheLimitGB = 20,
     [ValidateRange(1,100)][int]$CacheVersions = 2
 )
@@ -19,6 +20,7 @@ while (!(Test-Path -LiteralPath (Join-Path $project 'RULES.md'))) {
 if (!$CacheRoot) { $CacheRoot = Join-Path $project 'builds/rebuild64/cache' }
 if (!$RendererAssetsSource) { $RendererAssetsSource = Join-Path $project 'content/renderer-assets/Engine64' }
 if (!$RendererMaterialsSource) { $RendererMaterialsSource = Join-Path $project 'content/renderer-materials/Engine64' }
+if ($RendererShaderSource) { $RendererShaderSource = [IO.Path]::GetFullPath($RendererShaderSource) }
 if (!(Test-Path -LiteralPath (Join-Path $RendererAssetsSource 'eid3d_hosted/hosted_plants.bin'))) { throw 'Renderer 1126 hosted assets are missing from the selected content source.' }
 if (!(Test-Path -LiteralPath (Join-Path $RendererMaterialsSource 'classes.json'))) { throw 'Renderer materials are missing from the selected content source.' }
 $CacheRoot = [IO.Path]::GetFullPath($CacheRoot).TrimEnd('\','/')
@@ -180,6 +182,28 @@ try {
             } else { Remove-CacheEntry $entry }
         }
         Write-Host "$($group.Name): cache hit=$($group.Hit) key=$($group.Key)"
+    }
+    if($RendererShaderSource) {
+        $donorRoot=[IO.Path]::GetFullPath($RendererShaderSource)
+        $receipt=Get-Content -LiteralPath (Join-Path $donorRoot 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+        if($receipt.format -ne 'renderer-bytecode-reuse.v1' -or @($receipt.sources).Count -lt 36){throw 'Invalid shader reuse receipt.'}
+        foreach($shaderInput in $receipt.sources) {
+            $path=[IO.Path]::GetFullPath((Join-Path $sourceRepo $shaderInput.path))
+            if(!$path.StartsWith($sourceRepo+'\',[StringComparison]::OrdinalIgnoreCase) -or
+               (Hash-File $path) -ne $shaderInput.sha256){throw ('Shader source differs from donor: '+$shaderInput.path)}
+        }
+        $shaderTarget=Join-Path $repo 'out/x64/Release/RendererShaders'
+        New-Item -ItemType Directory -Force -Path $shaderTarget | Out-Null
+        $required=@('eid3d11_shaders.res','eid3d11_dxil.res','eid3d11_d3d12_shaders.res','eid3d11_camp_art.res','eid3d11_shaders.bin')
+        foreach($name in $required) {
+            $entry=@($receipt.files | Where-Object path -eq $name)
+            $shaderFile=Join-Path $donorRoot $name
+            if($entry.Count -ne 1 -or (Hash-File $shaderFile) -ne $entry[0].sha256){throw ('Shader resource hash mismatch: '+$name)}
+            Copy-Item -LiteralPath $shaderFile -Destination (Join-Path $shaderTarget $name) -Force
+        }
+        $arguments+='/p:EICacheRendererShaders=true'
+        Copy-Item -LiteralPath (Join-Path $donorRoot 'manifest.json') -Destination (Join-Path $task 'shader-reuse.json')
+        Write-Host 'Verified existing D3D11/D3D12 resources; shader compilation disabled.'
     }
     & (Join-Path $repo 'tools/prepare-worktree.ps1') -VSInstallDir $vs
     if (!$?) { throw 'Preparation failed.' }

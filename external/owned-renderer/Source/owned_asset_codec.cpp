@@ -129,6 +129,7 @@ void AssetEncoder::dependencies(const VisualAssemblyAsset& value) {
     id(value.skeleton);
     for (const auto& part : value.parts) {
         id(part.geometry); id(part.texture); id(part.surface); id(part.material);
+        if(part.environment_geometry)id(part.environment_geometry);
         if(part.environment_material)for(const auto& texture:part.environment_material->textures)if(texture)id(texture->asset);
     }
 }
@@ -178,6 +179,7 @@ void AssetEncoder::body(Out& out, const VisualAssemblyAsset& v) {
         io(out, p.arrow); io(out, p.explicitly_hidden); io(out, p.casts_shadow);
         io(out,p.environment_foliage);io(out,bool(p.environment_material));
         if(p.environment_material) {
+            ref(out,p.environment_geometry);
             const auto& m=*p.environment_material;
             io(out,m.base);io(out,m.emission);io(out,m.roughness);io(out,m.metallic);io(out,m.cutoff);
             io(out,m.alpha_factor);io(out,m.alpha);io(out,m.two_sided);io(out,m.unlit);
@@ -317,6 +319,7 @@ bool AssetDecoder::body(In& in, VisualAssemblyAsset& v) {
         io(in, p.arrow); io(in, p.explicitly_hidden); io(in, p.casts_shadow);
         bool hasEnvironment=false;io(in,p.environment_foliage);io(in,hasEnvironment);
         if(hasEnvironment) {
+            ref(in,p.environment_geometry);
             auto m=std::make_shared<environment::Material>();
             io(in,m->base);io(in,m->emission);io(in,m->roughness);io(in,m->metallic);io(in,m->cutoff);
             io(in,m->alpha_factor);io(in,m->alpha);io(in,m->two_sided);io(in,m->unlit);

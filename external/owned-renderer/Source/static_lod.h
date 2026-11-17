@@ -48,7 +48,6 @@ inline constexpr std::uint32_t native_world_vertex_opacity = 16u;
 //          the object's sphere, so it switches with the lead, and it draws
 //          nothing where the lead draws the quad.
 inline constexpr std::uint32_t native_world_impostor_follower = 32u;
-inline constexpr std::uint32_t native_world_shape_normals = 64u;
 
 // Crown impostors: each decoration object model with a cut-out part is baked
 // once, all its drawn parts together, into one slice of an atlas array:
@@ -97,7 +96,7 @@ struct NativeImpostorPart {
     std::vector<std::uint32_t> indices;
 };
 bool build_impostor_part(const FigureCpuAsset& figure, const NativePackedGroup* positions,
-    const std::array<float, 3>& offset, NativeImpostorPart& output,const NativePackedGroup* normals=nullptr) noexcept;
+    const std::array<float, 3>& offset, NativeImpostorPart& output) noexcept;
 
 struct NativeMeshLods {
     std::uint32_t levels = 0; // reduced levels, coarser in turn

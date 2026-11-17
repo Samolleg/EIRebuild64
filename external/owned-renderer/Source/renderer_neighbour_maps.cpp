@@ -338,7 +338,6 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     view.component_count=figure.component_count;view.index_count=figure.index_count;
                     view.world.enabled=true;view.world.identity=&upload->identities[figure.identity];
                     view.world.shape=node.shape;view.world.object_space=true;
-                    view.world.shape_count=figure.shape_count;view.world.shape_normals=figure.shape_normals!=0;
                     view.prebuilt_mesh=&upload->meshes[node.mesh];
                     // Its object's merged impostor: the lead part draws the
                     // quad, the others switch with it (static_lod.h).
@@ -384,7 +383,7 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                         view.owned_fixed_state.z_write_enable=node.environment_alpha!=2;
                         view.owned_fixed_state.alpha_blend_enable=node.environment_alpha==2;
                         view.owned_fixed_state.alpha_test_enable=node.environment_alpha==1;
-                        view.owned_fixed_state.alpha_func=D3DCMP_GREATEREQUAL;
+                        view.owned_fixed_state.alpha_func=D3DCMP_GREATER;
                         view.owned_fixed_state.alpha_ref=UINT(node.environment_cutoff*255);
                         view.owned_fixed_state.address_u=node.environment_address_u;view.owned_fixed_state.address_v=node.environment_address_v;
                         view.owned_fixed_state.cull_mode=node.environment_factors[3]>1?D3DCULL_NONE:D3DCULL_CW;
@@ -552,7 +551,6 @@ NativeGeometryView Renderer::active_static_view(const NeighbourPiece& piece,Acti
     view.component_count=figure.component_count;view.index_count=figure.index_count;
     view.world.enabled=true;view.world.identity=&piece.identities[figure.identity];
     view.world.shape=draw.shape;view.world.object_space=true;
-    view.world.shape_count=figure.shape_count;view.world.shape_normals=figure.shape_normals!=0;
     view.prebuilt_mesh=&piece.meshes[draw.mesh];
     // Its model's merged impostor (shared with neighbours by model key).
     if(draw.impostor) {

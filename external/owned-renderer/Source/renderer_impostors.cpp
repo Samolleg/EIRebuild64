@@ -26,7 +26,7 @@ struct ImpostorBakeVertex{float3 position;float3 normal;float2 uv;};
 StructuredBuffer<ImpostorBakeVertex> bakeVertices:register(t1);
 Texture2D bakeTexture:register(t0);
 SamplerState bakeSampler:register(s0);
-cbuffer ImpostorBake:register(b0){float4 bakeSphere;uint4 bakeFrame;float4 bakeColor;float4 bakeAlpha;};
+cbuffer ImpostorBake:register(b0){float4 bakeSphere;uint4 bakeFrame;};
 #ifdef EID3D12
 // D3D12 (Renderer::bake_neighbour_impostors_d3d12): as D3D11, one draw per
 // frame into that frame's viewport cell (bakeFrame), the triangles read
@@ -60,9 +60,7 @@ struct ImpostorBakeTargets{float4 albedo:SV_Target0;float4 normal:SV_Target1;};
 // albedo's coverage.
 ImpostorBakeTargets impostorBakePS(ImpostorBakeOutput i){
  float4 t=bakeTexture.Sample(bakeSampler,i.uv);
- if(bakeAlpha.z<0){if(t.a<=bakeAlpha.x)discard;}
- else if(bakeAlpha.z==1&&t.a*bakeAlpha.y<bakeAlpha.x)discard;
- t.rgb*=bakeColor.rgb;
+ if(t.a<=200.0/255.0)discard;
  float3 n=dot(i.n,i.n)>1e-12?normalize(i.n):float3(0,0,1);
  ImpostorBakeTargets o;o.albedo=float4(t.rgb,1);o.normal=float4(n*.5+.5,saturate(i.p.z));return o;
 }
@@ -95,8 +93,6 @@ ImpostorBakeTargets impostorMarkPS(ImpostorLevelOutput i){
 struct ImpostorBakeConstants {
     float sphere[4];
     std::uint32_t frame[4];
-    float color[4]{1,1,1,1};
-    float alpha[4]{200.f/255.f,1,-1,0};
 };
 
 #endif
@@ -295,15 +291,14 @@ HRESULT Renderer::bake_neighbour_impostors(const NeighbourPiece& upload) noexcep
                 const D3D11_VIEWPORT viewport{float(x * kImpostorFrameTexels), float(y * kImpostorFrameTexels),
                                               float(kImpostorFrameTexels), float(kImpostorFrameTexels), 0.f, 1.f};
                 context_->RSSetViewports(1, &viewport);
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                if (FAILED(context_->Map(impostors_.constants.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) continue;
                 ImpostorBakeConstants values{{source.sphere[0], source.sphere[1], source.sphere[2], source.sphere[3]},
                                              {x, y, 0, 0}};
+                std::memcpy(mapped.pData, &values, sizeof(values));
+                context_->Unmap(impostors_.constants.Get(), 0);
                 // Every part of the object, each with its own texture.
                 for (std::size_t part = 0; part < source.parts.size(); ++part) {
-                    std::copy_n(source.parts[part].color.begin(),4,values.color);
-                    std::copy_n(source.parts[part].alpha_policy.begin(),4,values.alpha);
-                    D3D11_MAPPED_SUBRESOURCE mapped{};
-                    if(FAILED(context_->Map(impostors_.constants.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))continue;
-                    std::memcpy(mapped.pData,&values,sizeof(values));context_->Unmap(impostors_.constants.Get(),0);
                     context_->VSSetShaderResources(1, 1, source.parts[part].vertex_view.GetAddressOf());
                     context_->PSSetShaderResources(0, 1, item.textures[part].GetAddressOf());
                     context_->IASetIndexBuffer(source.parts[part].indices.Get(), DXGI_FORMAT_R32_UINT, 0);
@@ -389,7 +384,6 @@ HRESULT Renderer::bake_neighbour_impostors_d3d12(const NeighbourPiece& upload) n
     if (impostors_.failed || upload.impostors.empty() || !d3d12_) return S_OK;
     const auto start = std::chrono::steady_clock::now();
     struct Part {
-        std::array<float,4> color{},alpha_policy{};
         D3D12TextureRef texture;
         D3D12BufferRef vertices, indices;
         UINT index_count = 0;
@@ -409,7 +403,6 @@ HRESULT Renderer::bake_neighbour_impostors_d3d12(const NeighbourPiece& upload) n
             // The part's own texture (the cache entry its records share).
             const NativeOwnedTextureView view = impostor_part_texture_view(upload, part, texture_mips);
             Part made;
-            made.color=part.color;made.alpha_policy=part.alpha_policy;
             made.index_count = part.index_count;
             std::uint64_t backing = 0;
             const HRESULT texture_hr = get_native_owned_texture_d3d12(view, made.texture, backing, nullptr, true);
@@ -476,11 +469,10 @@ HRESULT Renderer::bake_neighbour_impostors_d3d12(const NeighbourPiece& upload) n
             const UINT x = frame % kImpostorFrames, y = frame / kImpostorFrames;
             const RECT cell{LONG(x * kImpostorFrameTexels), LONG(y * kImpostorFrameTexels),
                             LONG((x + 1) * kImpostorFrameTexels), LONG((y + 1) * kImpostorFrameTexels)};
-            ImpostorBakeConstants values{{source.sphere[0], source.sphere[1], source.sphere[2], source.sphere[3]}, {x, y, 0, 0}};
+            const ImpostorBakeConstants values{{source.sphere[0], source.sphere[1], source.sphere[2], source.sphere[3]}, {x, y, 0, 0}};
+            d3d12_->set_constants(0, &values, sizeof(values));
             d3d12_->set_viewport(&cell);
             for (const auto& part : item.parts) {
-                std::copy_n(part.color.begin(),4,values.color);std::copy_n(part.alpha_policy.begin(),4,values.alpha);
-                d3d12_->set_constants(0,&values,sizeof(values));
                 d3d12_->set_resource(0, part.texture.get());
                 d3d12_->set_resource(1, part.vertices.get());
                 d3d12_->set_resource(2, part.indices.get());

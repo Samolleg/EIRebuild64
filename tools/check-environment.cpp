@@ -81,11 +81,19 @@ int wmain(int argc,wchar_t** argv) try {
     const auto outside=owned::environment::collision(sp,{2,0,0});check(outside.maximum[0]==3,"unclamped MOB shape");
     auto plant=owned::environment::assembly(shaped,{},1,{.5f,.5f,.5f});
     check(plant->sways&&plant->sway_root==0&&plant->parts[0].skeleton_node==0&&plant->parts[0].environment_foliage,"explicit anchored wind");
+    const auto form=plant->parts[0].geometry;
+    check(form->shape_count==1&&form->normal_groups==form->position_groups,"ordinary renderer mesh layout");
+    check(form->bounds[0].minimum==std::array<float,3>{-1.5f,-1.5f,0}&&form->bounds[0].maximum==std::array<float,3>{1.5f,1.5f,3},"resolved geometry matches collision");
+    for(unsigned i=0;i<1000;++i)check(owned::environment::assembly(shaped,{},i,{.5f,.5f,.5f})->parts[0].geometry==form,"1000 forms share one prepared mesh");
+    auto other=owned::environment::assembly(shaped,{},1,{1,1,1});
+    check(other->parts[0].geometry!=form&&other->parts[0].geometry->bounds[0].maximum==std::array<float,3>{2,2,4},"distinct prepared form");
+    auto restored=*other;owned::environment::reshape(restored,{.5f,.5f,.5f});check(restored.parts[0].geometry==form,"reshape reuses prepared geometry");
     auto pbr=owned::environment::decode(read(root/L"pbr.glb"),"pbr");const auto& m=*pbr->parts[0].pbr;
-    check(m.alpha==1&&m.two_sided&&m.cutoff==.3f&&m.roughness==.6f&&m.metallic==.4f&&m.textures[3],"PBR mask emissive maps");
+    check(m.alpha==1&&m.two_sided&&m.cutoff==200.f/255.f&&m.alpha_factor==1&&m.roughness==.6f&&m.metallic==.4f&&m.textures[3],"PBR stock mask/emissive maps");
     auto textured=owned::environment::decode(read(root/L"textured.glb"),"textured");
     check(textured->parts[0].texture->width==2&&textured->parts[0].texture->mips.size()==2,"embedded image mip chain");
     check(textured->parts[0].geometry->texture_coordinates.size()==24,"UV preserved");
+    check((*textured->parts[0].texture->source)[3]>200&&(*textured->parts[0].texture->source)[7]<=200,"stock alpha preserves opaque/transparent pixels");
     wireCheck(plant);wireCheck(owned::environment::assembly(pbr,{},1));wireCheck(owned::environment::assembly(textured,{},1));
     const auto exchangeSource=read(root/L"forms-wind.glb");unsigned parts=0;char error[512]{};
     const auto sink=[](void* context,const EiEnvironmentPart* p)->int32_t {

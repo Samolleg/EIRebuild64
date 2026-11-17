@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cfloat>
+#include <cstring>
 #include <mutex>
 #include <set>
 #include <stdexcept>
@@ -159,8 +160,9 @@ std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& 
                     vb.radius=mesh->shape_position_radii[shape];mesh->bounds.push_back(vb);
                 }
                 for(const auto& b:cb)for(unsigned a=0;a<3;++a){out->minimum[a]=(std::min)(out->minimum[a],b.minimum[a]);out->maximum[a]=(std::max)(out->maximum[a],b.maximum[a]);}
-                // Normals retain each endpoint too; ENV8 marks that layout for the GPU.
-                if(shapes==8){mesh->normal_groups*=8;mesh->user_data={'E','N','V','8'};}
+                // Private CPU endpoints. Rendering resolves these into ordinary
+                // one-shape geometry before publishing an assembly.
+                if(shapes==8)mesh->normal_groups*=8;
                 out->geometry_bytes+=mesh->positions.size()*sizeof(NativePackedGroup)+mesh->normals.size()*sizeof(NativePackedGroup)+
                     mesh->components.size()*sizeof(NativeVertexComponent)+mesh->indices.size()*2+mesh->texture_coordinates.size()*sizeof(NativeTextureCoordinate);
                 require(out->geometry_bytes<=64u*1024*1024,"decoded geometry budget");
@@ -171,9 +173,6 @@ std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& 
     };
     for(size_t k=0;k<scene->nodes_count;++k)visit(scene->nodes[k],0);
     require(!out->parts.empty(),"empty scene");
-    std::array<float,4> sphere{};float radius2=0;
-    for(unsigned a=0;a<3;++a){sphere[a]=(out->minimum[a]+out->maximum[a])*.5f-out->wind_root[a];const auto e=(out->maximum[a]-out->minimum[a])*.5f;radius2+=e*e;}sphere[3]=std::sqrt(radius2);
-    for(auto& p:out->parts)if(p.geometry->shape_count==8){auto mesh=std::const_pointer_cast<FigureCpuAsset>(p.geometry);const auto* bytes=reinterpret_cast<const std::uint8_t*>(sphere.data());mesh->user_data.insert(mesh->user_data.end(),bytes,bytes+sizeof(sphere));}
     return out;
 }
 
@@ -198,9 +197,13 @@ std::string reference(ResourceStore& store,const std::string& visual) {
 bool assigned(ResourceStore& store,const std::string& visual){return !reference(store,visual).empty();}
 std::shared_ptr<const Asset> select(ResourceStore& store,const std::string& visual) {
     const auto path=reference(store,visual);if(path.empty())return {};
-    const auto blob=read(store,path);const auto key=blob.identity.key()+"|"+lower(visual);
+    ResourceLocation location;ResourceFailure failure;require(store.locate(path,location,failure),"resource "+path+": "+failure.message);
+    auto identity=location.identity();const bool physical=identity.container_file_key!=0;
+    if(physical)identity.container_incarnation=identity.container_file_key;
+    const auto key=std::string(physical?"file:":"scope:")+identity.key()+"|"+lower(visual);
     static std::mutex lock;static std::map<std::string,std::weak_ptr<const Asset>> cache;
     std::lock_guard<std::mutex> guard(lock);if(auto found=cache[key].lock())return found;
+    ResourceBlob blob;require(store.read(location,blob,failure),"resource read: "+failure.message);
     auto result=decode(blob,lower(visual));cache[key]=result;
     if(cache.size()>1024)for(auto i=cache.begin();i!=cache.end();)i=i->second.expired()?cache.erase(i):std::next(i);
     return result;
@@ -225,7 +228,47 @@ FigureBounds collision(const Part& p,const std::array<float,3>& shape) {
 bool selected(const Part& p,const std::vector<std::string>& names) {
     return names.empty()||std::any_of(names.begin(),names.end(),[&](const auto& s){return lower(s)==lower(p.name)||lower(s)==lower(p.logical_name);});
 }
+namespace {
+// One immutable ordinary mesh per resource and exact authored form. Instance
+// count does not multiply vertex buffers; no work is scheduled per frame.
+std::shared_ptr<const FigureCpuAsset> resolved(const std::shared_ptr<const FigureCpuAsset>& source,const std::array<float,3>& shape) {
+    require(std::all_of(shape.begin(),shape.end(),[](float v){return std::isfinite(v);}),"shape finite");
+    if(source->shape_count==1)return source;
+    require(source->shape_count==8&&source->normal_groups==source->position_groups*8,"source endpoint layout");
+    std::array<std::uint32_t,3> bits{};for(unsigned a=0;a<3;++a){const float v=shape[a]==0?0:shape[a];std::memcpy(&bits[a],&v,4);}
+    using Key=std::pair<const FigureCpuAsset*,decltype(bits)>;
+    struct Entry {std::weak_ptr<const FigureCpuAsset> source,geometry;};
+    static std::mutex lock;static std::map<Key,Entry> cache;
+    std::lock_guard<std::mutex> guard(lock);const Key key{source.get(),bits};auto& entry=cache[key];
+    if(entry.source.lock()==source)if(auto geometry=entry.geometry.lock())return geometry;
+    auto output=std::make_shared<FigureCpuAsset>();
+    output->identity=source->identity;output->identity.canonical_name+="/form/"+std::to_string(bits[0])+"/"+std::to_string(bits[1])+"/"+std::to_string(bits[2]);
+    output->signature=0x31474946;output->shape_count=1;output->position_groups=output->normal_groups=source->position_groups;
+    output->material_group=source->material_group;output->texture_number=source->texture_number;
+    output->components=source->components;output->indices=source->indices;output->texture_coordinates=source->texture_coordinates;
+    output->positions.resize(output->position_groups);output->normals.resize(output->normal_groups);
+    std::array<float,8> weights{};for(unsigned s=0;s<8;++s)weights[s]=weight(s,shape);
+    FigureBounds bounds;bounds.minimum={FLT_MAX,FLT_MAX,FLT_MAX};bounds.maximum={-FLT_MAX,-FLT_MAX,-FLT_MAX};float radius2=0;
+    for(unsigned i=0;i<source->components.size();++i) {
+        std::array<float,3> position{},normal{};
+        for(unsigned s=0;s<8;++s) {
+            const auto& p=source->positions[s*source->position_groups+i/4];const auto& n=source->normals[s*source->position_groups+i/4];const auto lane=i%4;
+            const float xyz[]{p.x[lane],p.y[lane],p.z[lane]},nn[]{n.x[lane],n.y[lane],n.z[lane]};
+            for(unsigned a=0;a<3;++a){position[a]+=xyz[a]*weights[s];normal[a]+=nn[a]*weights[s];}
+        }
+        float norm2=0,r2=0;for(unsigned a=0;a<3;++a){require(std::isfinite(position[a])&&std::abs(position[a])<100000,"resolved vertex range");norm2+=normal[a]*normal[a];r2+=position[a]*position[a];bounds.minimum[a]=(std::min)(bounds.minimum[a],position[a]);bounds.maximum[a]=(std::max)(bounds.maximum[a],position[a]);}
+        require(std::isfinite(norm2),"resolved normal finite");if(norm2>1e-12f)for(auto& v:normal)v/=std::sqrt(norm2);
+        else {const auto& n=source->normals[i/4];normal={n.x[i%4],n.y[i%4],n.z[i%4]};}
+        pack(output->positions,output->position_groups,0,i,position);pack(output->normals,output->normal_groups,0,i,normal);radius2=(std::max)(radius2,r2);
+    }
+    bounds.radius=std::sqrt(radius2);output->bounds.push_back(bounds);output->shape_position_radii[0]=bounds.radius;
+    entry={source,output};
+    if(cache.size()>4096)for(auto it=cache.begin();it!=cache.end();)it=it->second.geometry.expired()?cache.erase(it):std::next(it);
+    return output;
+}
+}
 void reshape(VisualAssemblyAsset& out,const std::array<float,3>& shape) {
+    for(auto& part:out.parts)if(part.environment_geometry)part.geometry=resolved(part.environment_geometry,shape);
     out.shape=shape;if(out.environment_wind.empty())return;
     std::array<float,3> trunk{};for(unsigned s=0;s<out.environment_wind.size();++s){const float w=out.environment_wind.size()==1?1:weight(s,shape);for(unsigned a=0;a<3;++a)trunk[a]+=w*out.environment_wind[s][a];}
     auto code=[](float v,float steps){require(std::isfinite(v),"wind shape finite");return unsigned((std::clamp)(std::ceil(v*steps),0.f,63.f));};
@@ -236,15 +279,17 @@ std::shared_ptr<const VisualAssemblyAsset> assembly(const std::shared_ptr<const 
     require(asset!=nullptr,"assembly asset");
     for(const auto& name:selection)require(std::any_of(asset->parts.begin(),asset->parts.end(),[&](const auto& p){return selected(p,{name});}),"unknown selected part "+name);
     auto out=std::make_shared<VisualAssemblyAsset>();out->skeleton=asset->transforms;out->revision=revision;out->shape=shape;
+    out->environment_source=asset;
     for(const auto& source:asset->parts)if(source.render&&selected(source,selection)){
-        VisualPartAsset part;part.name=source.name;part.geometry=source.geometry;part.material=source.material;part.texture=source.texture;
+        VisualPartAsset part;part.name=source.name;part.environment_geometry=source.geometry;part.material=source.material;part.texture=source.texture;
         part.environment_material=source.pbr;part.environment_foliage=source.foliage;part.texture_source_name=source.texture->identity.canonical_name;
         part.skeleton_node=0;out->parts.push_back(std::move(part));
     }
     require(!out->parts.empty(),"empty selection");
     if(asset->plant) {
-        out->environment_wind=asset->wind;reshape(*out,shape);
+        out->environment_wind=asset->wind;
     }
+    reshape(*out,shape);
     return out;
 }
 }

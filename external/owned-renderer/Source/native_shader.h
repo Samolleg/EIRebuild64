@@ -1163,13 +1163,6 @@ NativeWorldVertex prepareNativeWorldVertex(NativeInstance instance,uint componen
  }
  output.p=mul(instance.objectToWorld,float4(position,1));
  float3 normal=loadPacked(instance.geometryOffsets.y,component.y).xyz;
- if((instance.worldGeometry&64u)!=0&&instance.shapeCount==8){
-  normal=0;
-  [unroll]for(uint s=0;s<8;++s){
-   float3 w=float3((s&1)?instance.shape.x:1-instance.shape.x,(s&2)?instance.shape.y:1-instance.shape.y,(s&4)?instance.shape.z:1-instance.shape.z);
-   normal+=loadPacked(instance.geometryOffsets.y+s*instance.positionGroups*64,component.y).xyz*w.x*w.y*w.z;
-  }
- }
  output.normal.xyz=normalize(mul(transpose(inverseObjectLinear(instance.objectToWorld)),normal));
  if(skinned){
   uint4 joints=nativeGeometry.Load4(component.w);
@@ -1294,13 +1287,6 @@ NativeWorldVertex nativeObjectSpaceVertex(NativeInstance instance,uint component
  precise float4 world=mul(instance.objectToWorld,float4(position,1));
  output.p=world;output.undeformedXY=world.xy;
  float3 normal=loadPacked(instance.geometryOffsets.y,component.y).xyz;
- if((instance.worldGeometry&64u)!=0&&instance.shapeCount==8){
-  normal=0;
-  [unroll]for(uint s=0;s<8;++s){
-   float3 w=float3((s&1)?instance.shape.x:1-instance.shape.x,(s&2)?instance.shape.y:1-instance.shape.y,(s&4)?instance.shape.z:1-instance.shape.z);
-   normal+=loadPacked(instance.geometryOffsets.y+s*instance.positionGroups*64,component.y).xyz*w.x*w.y*w.z;
-  }
- }
  output.normal.xyz=normalize(mul(transpose(inverseObjectLinear(instance.objectToWorld)),normal));
  [branch]if((instance.worldGeometry&@WORLD_VERTEX_OPACITY@)!=0)output.normal.w=loadPacked(instance.geometryOffsets.y,component.y).w;
  output.uv=asfloat(nativeGeometry.Load2(instance.geometryOffsets.z+component.z*8));

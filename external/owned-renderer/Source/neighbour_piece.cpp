@@ -89,7 +89,6 @@ struct PieceBuilder {
         const auto found = figure_index.find(&value);
         if (found != figure_index.end()) return found->second;
         NeighbourPieceFigure made;
-        if(value.user_data.size()==20&&!std::memcmp(value.user_data.data(),"ENV8",4)){made.shape_count=8;made.shape_normals=1;}
         made.identity = identity(value.identity);
         made.position_groups = value.position_groups; made.normal_groups = value.normal_groups;
         made.texture_coordinate_count = static_cast<std::uint32_t>(value.texture_coordinates.size());
@@ -278,10 +277,6 @@ void piece_impostors(PieceBuilder& builder, const NeighbourMapUpload& upload, ID
         for (std::size_t i = 0; i < source.parts.size() && ok; ++i) {
             const auto& node = *source.nodes[i];
             NeighbourPieceImpostorPart part;
-            if(node.environment_material) {
-                const auto& m=*node.environment_material;part.color=m.base;
-                part.alpha_policy={m.cutoff,m.alpha_factor,float(m.alpha),0};
-            }
             if (node.surface) { part.texture = UINT32_MAX; part.surface = node.surface; }
             else part.texture = builder.texture(node.texture->identity, node.texture_identity, node.texture_format,
                 node.texture_mips.data(), static_cast<std::uint32_t>(node.texture_mips.size()), node.texture->opaque_mips);

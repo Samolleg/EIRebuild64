@@ -53,7 +53,11 @@ Nondefault IOR/specular extensions are rejected.
 PNG/JPEG are editable inputs. Distribution preparation bakes base factors,
 normal scale and AO strength, packs AO into ORM, and embeds full BC3 DDS mip
 chains through `MSFT_texture_dds`. Color mip filtering uses linear light;
-MASK preserves coverage. The decoder also accepts BC1/BC2 full mip chains.
+MASK preserves coverage and remaps alpha to the stock renderer's `alpha > 200`
+test. OPAQUE images receive alpha 255. Prepared color factors are baked into
+albedo. Near geometry and crown baking therefore use the same existing shader
+policy. The decoder also accepts BC1/BC2 full mip chains with prepared factors
+and cutoff. Preparation version 2 marks this distribution representation.
 Prepared normal scale/AO strength must be 1. Preparation retains editable
 sources, writes a new file and validates it before publication.
 
@@ -84,9 +88,16 @@ No GLB parsing, image compression or mip generation occurs per frame. Prepared
 DDS avoids PNG decoding/mip generation during distribution asset loading.
 
 `FigureCpuAsset` is the packed renderer layout, not an intermediate FIG file.
-Eight-form meshes keep all endpoints in one shared mesh with matching weighted
-normals. The existing static simplification and crown impostor pipeline consume
-these meshes on active and neighbouring maps. Collision and selection remain
+Eight-form sources retain CPU endpoints. At loading or form changes, positions
+and normals are resolved to an ordinary one-shape mesh, shared by exact form.
+Identical instances do not duplicate this mesh. Distinct authored forms have
+distinct prepared meshes, as the existing static scene path does; they are not
+recomputed per frame. Source/variant caches use weak entries and live assemblies
+keep their source alive. Physical resource identities also share decoding
+between map stores. The existing static simplification and crown impostor
+pipeline consume these meshes on active and neighbouring maps. Impostor shapes
+still use the existing grouping by projected error, avoiding one atlas slice
+per instance. Collision and selection remain
 independent of visual LOD. Neighbour piece wire is version 10; asset wire carries
 environment material references and wind. Editor CPU exchange ABI 1 exposes
 flattened geometry, forms, colliders and albedo without creating a GPU session.
@@ -103,5 +114,7 @@ These commands do not deploy the installed game.
 `tools/environment-fixture.py` plus `tools/check-environment.ps1` cover malformed
 input, transforms, logical selections, sharing, forms, wind metadata, materials,
 mips, editor CPU ABI and resource-wire roundtrip. Private runtime evidence stays
-in the task. CPU checks/build success do not establish gameplay, visual, LOD or
+in the task. `check-environment-renderer.py` verifies unchanged common shader
+producers against the agreed baseline. No new GPU layout, HLSL or shared shader
+logic is introduced. CPU checks/build success do not establish gameplay, visual, LOD or
 performance acceptance; those require control scenes in D3D11 and D3D12.

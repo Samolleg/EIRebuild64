@@ -2956,9 +2956,7 @@ bool prepare_live_static_candidate(const ActiveStaticsModelRequest& request,
             node.bounds = figure.bounds.front(); node.positions = figure.positions;
         } else return false;
         node.figure = &figure;node.environment_material=part.environment_material;
-        node.normals.clear();
-        if(part.environment_material&&figure.shape_count==8)
-            if(!selected_groups(figure.normals,figure.position_groups,8,request.shape,node.normals))return false;
+        node.normals=figure.normals;
         // The bake reads the texture the posed records made resident: an
         // archive member under the same cache key, or the game surface by its
         // id and generation. A generated CPU texture has no bake input yet.
@@ -3519,7 +3517,6 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
     if (target.bound_assembly!=sample.assembly) {
         view={};const auto& figure=*part.geometry;
         view.world.enabled=true;view.world.identity=&figure.identity;view.world.shape_count=figure.shape_count;
-        view.world.shape_normals=part.environment_material&&figure.shape_count==8;
         if(!sample.values.unit&&!assembly.sways&&!astral_kind(assembly,part))view.lod_figure=&figure;
         view.geometry_revision={1,0,0,0,0};view.geometry_revision_valid=true;
         view.positions=figure.positions.data();view.position_groups=figure.position_groups;
@@ -3554,7 +3551,7 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
             view.skn_material=m.native();
             if(m.alpha==0)view.owned_texture.opaque_mips=UINT_MAX;
             view.owned_fixed_state.z_write_enable=m.alpha!=2;
-            view.owned_fixed_state.alpha_func=D3DCMP_GREATEREQUAL;
+            view.owned_fixed_state.alpha_func=D3DCMP_GREATER;
             view.owned_fixed_state.cull_mode=m.two_sided?D3DCULL_NONE:D3DCULL_CW;
             view.owned_fixed_state.alpha_test_enable=m.alpha==1;
             view.owned_fixed_state.alpha_ref=static_cast<UINT>(m.cutoff*255);

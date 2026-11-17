@@ -3445,8 +3445,8 @@ struct OwnedResourceLoader::Impl {
         std::set<const FigureCpuAsset*> environmentGeometry;
         std::set<const std::vector<std::uint8_t>*> environmentTextures;
         for(const auto& entry:snapshot->environment)for(const auto& part:entry.second->parts) {
-            if(part.geometry&&environmentGeometry.insert(part.geometry.get()).second) {
-                const auto& g=*part.geometry;
+            for(const auto& geometry:{part.geometry,part.environment_geometry})if(geometry&&environmentGeometry.insert(geometry.get()).second) {
+                const auto& g=*geometry;
                 owned_bytes+=g.positions.size()*sizeof(NativePackedGroup)+g.normals.size()*sizeof(NativePackedGroup)+
                     g.components.size()*sizeof(NativeVertexComponent)+g.indices.size()*sizeof(std::uint16_t)+g.texture_coordinates.size()*sizeof(NativeTextureCoordinate);
             }

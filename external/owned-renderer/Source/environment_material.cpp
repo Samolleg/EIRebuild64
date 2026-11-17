@@ -66,13 +66,25 @@ std::shared_ptr<TextureCpuAsset> rgba(unsigned w,unsigned h,std::vector<std::uin
         }
         offset=next;w=nw;h=nh;
     }
+    // Preserve the authored cutoff in the stock renderer's alpha > 200 domain.
+    // The affine remap commutes with bilinear filtering; mip coverage was
+    // measured before remapping. No shader or extra bake texture is needed.
+    if(alpha==1)for(size_t p=3;p<pixels.size();p+=4) {
+        const float a=pixels[p]/255.f,target=200.5f/255.f;
+        const float v=cutoff<=0?1:cutoff>1?0:
+            (cutoff==1?(a>=1?1:0):target+(a-cutoff)*(std::min)(target/cutoff,(1-target)/(1-cutoff)));
+        pixels[p]=std::uint8_t(std::lround((std::clamp)(v,0.f,1.f)*255));
+    }
+    if(alpha==1)t->opaque_mips=0;
     t->source=std::make_shared<const std::vector<std::uint8_t>>(std::move(pixels));return t;
 }
-std::shared_ptr<const Texture> image(const cgltf_image& input,bool colour,unsigned alpha,float cutoff) {
+std::shared_ptr<const Texture> image(const cgltf_image& input,bool colour,unsigned alpha,float cutoff,const float* base=nullptr) {
     require(!input.uri&&input.buffer_view&&input.buffer_view->buffer->data,"embedded image required");
     const auto& v=*input.buffer_view;require(v.offset<=v.buffer->size&&v.size<=v.buffer->size-v.offset&&v.size<=16u*1024*1024,"image byte budget");
     const auto* data=static_cast<const std::uint8_t*>(v.buffer->data)+v.offset;
     if(v.size>=128&&!std::memcmp(data,"DDS ",4)) {
+        require(!base||(base[0]==1&&base[1]==1&&base[2]==1),"bake DDS base color during preparation");
+        require(alpha!=1||std::abs(cutoff-200.f/255.f)<1e-6f,"prepare MASK DDS for stock alpha > 200");
         require(u32(data+4)==124&&u32(data+76)==32,"DDS header");
         unsigned w=u32(data+16),h=u32(data+12),levels=u32(data+28),code=u32(data+84);
         require(w&&h&&w<=1024&&h<=1024&&levels&&levels<=11,"DDS dimensions/mips");
@@ -105,6 +117,9 @@ std::shared_ptr<const Texture> image(const cgltf_image& input,bool colour,unsign
     ComPtr<IWICFormatConverter> converter;check(factory->CreateFormatConverter(&converter),"image converter");
     check(converter->Initialize(frame.Get(),GUID_WICPixelFormat32bppBGRA,WICBitmapDitherTypeNone,nullptr,0,WICBitmapPaletteTypeCustom),"BGRA conversion");
     std::vector<std::uint8_t> pixels(w*h*4);check(converter->CopyPixels(nullptr,w*4,UINT(pixels.size()),pixels.data()),"image pixels");
+    if(base)for(size_t p=0;p<pixels.size();p+=4)for(unsigned c=0;c<3;++c)
+        pixels[p+2-c]=std::uint8_t(std::lround(srgb(linear(pixels[p+2-c]/255.f)*base[c])*255));
+    if(base&&alpha==0)for(size_t p=3;p<pixels.size();p+=4)pixels[p]=255;
     return finish(rgba(w,h,std::move(pixels),colour,alpha,cutoff),colour);
 }
 std::shared_ptr<const Texture> constant(std::array<std::uint8_t,4> pixel,bool colour) {return finish(rgba(1,1,{pixel.begin(),pixel.end()},colour,0,0),colour);}
@@ -154,9 +169,12 @@ std::shared_ptr<const Material> material(const cgltf_material* input,const Resou
             require(index<document.images_count,"DDS image index");imageSource=&document.images[index];
         }
         require(imageSource,"texture image missing");
-        m->textures[k]=image(*imageSource,k==0||k==3,k==0?m->alpha:0,k==0&&m->alpha_factor>0?m->cutoff/m->alpha_factor:m->cutoff);
+        const float cutoff=m->alpha_factor>0?m->cutoff/m->alpha_factor:(m->cutoff>0?2.f:0.f);
+        m->textures[k]=image(*imageSource,k==0||k==3,k==0?m->alpha:0,k==0?cutoff:0,k==0?p.base_color_factor:nullptr);
     }
-    if(!m->textures[0]) {std::array<std::uint8_t,4> bgra{};for(unsigned k=0;k<3;++k)bgra[2-k]=std::uint8_t(std::lround(m->base[k]*255));bgra[3]=255;m->textures[0]=constant(bgra,true);m->base[0]=m->base[1]=m->base[2]=1;}
+    if(!m->textures[0]) {std::array<std::uint8_t,4> bgra{};for(unsigned k=0;k<3;++k)bgra[2-k]=std::uint8_t(std::lround(m->base[k]*255));bgra[3]=m->alpha==1&&m->alpha_factor<m->cutoff?0:255;m->textures[0]=constant(bgra,true);}
+    m->base[0]=m->base[1]=m->base[2]=1;
+    if(m->alpha==1){m->cutoff=200.f/255.f;m->alpha_factor=1;}
     if(s.normal_texture.texture)require(s.normal_texture.scale==1,"normal scale must be baked during preparation");
     if(s.occlusion_texture.texture) {
         require(s.occlusion_texture.scale==1,"AO strength must be baked during preparation");
