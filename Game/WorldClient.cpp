@@ -639,6 +639,7 @@ void CWorldClient::RemoveQuickItemsAndSpells()
 // destroy all internal data structures
 void CWorldClient::Destroy()
 {
+    stoneEffects.Reset();
     LiveObserver::ResetCamera();
     ModArenaVisual::Reset();
     ModFinalGolem::ResetVisual();
@@ -1042,6 +1043,7 @@ int CWorldClient::Segment()
         coreEffects.Finish();
     }
 
+    stoneEffects.Tick(*this, IsCombatPause());
     CorePerf::Scope coreParticles(CorePerf::ClientParticles);
     // Particles segment
     if (pParticleManager)
@@ -2363,6 +2365,7 @@ BOOL CWorldClient::NewZone(CMemorySave &packet)
     //
     dangerState = WDS_NORMAL;
     packet.Read(nSegmentTimeCounter);
+    stoneEffects.Reset(nSegmentTimeCounter);
     szZone = packet.ReadString();
     szMob = packet.ReadString();
     LoadCArray(exits, packet);
@@ -3115,6 +3118,8 @@ BOOL CWorldClient::Draw()
             return static_cast<CTerrain*>(terrain)->GetObjectFogAlpha(CPlot3D(p[0], p[1], p[2]));
         };
         visuals.fogContext = pTerrain;
+        if (CheckFlag(WC_RENDER_EFFECTS))
+            visuals.debris = stoneEffects.Sample(float(GetRenderTimeSegments()-GetSegmentTimeCounter()));
         OwnedRender::E3CombatBeginFrame(IsCombatPause() || IWorld.IsMissionCombatPause());
         coreParts.Stage(CorePerf::WorldRender);
         pRend->GetD3D()->RunC56WorldPass(&visuals);

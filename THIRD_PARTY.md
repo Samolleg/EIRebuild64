@@ -207,3 +207,9 @@ the build does not restore anything from the network.
 
 Sources: https://github.com/NVIDIA-RTX/RTXDI-Library/tree/b67f61cd0bfa6792acbf5429bb29a68ee5cdd808
 and https://www.nuget.org/packages/Microsoft.Direct3D.D3D12/1.620.2 .
+## Jolt Physics (JOLTFX01)
+
+Jolt Physics 5.3.0, commit 0373ec0dd762e4bc2f6acdb08371ee84fa23c6db.
+MIT; unmodified sources and LICENSE in third_party/jolt, source SHA and origin
+in third_party/jolt/PROVENANCE.md. Static x64 /MT, SSE2 baseline, tools/jolt/Jolt.vcxproj.
+Client-only decorative stone debris; not authoritative combat or navigation.
