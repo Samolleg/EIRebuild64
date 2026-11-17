@@ -11,6 +11,7 @@ struct BreastState {
     std::vector<Affected> affected;
     double clock=-1, physics_clock=0;
     bool frozen=false;
+    unsigned node_base=UINT32_MAX;
     Playback playback;
     Affine placement{};
     bool initialized=false, reported=false;
@@ -38,7 +39,7 @@ struct BreastState {
         return true;
     }
     void update(double now,const Playback& pose,const Affine& root,bool reset,unsigned base,bool paused=false) {
-        if(initialized&&!reset&&now==clock&&paused==frozen&&root==placement&&pose.clip==playback.clip&&
+        if(initialized&&!reset&&base==node_base&&now==clock&&paused==frozen&&root==placement&&pose.clip==playback.clip&&
            pose.previous==playback.previous&&pose.time==playback.time&&
            pose.previous_time==playback.previous_time&&pose.blend==playback.blend)return;
         if(!initialized)physics_clock=now;
@@ -46,7 +47,7 @@ struct BreastState {
             reset|=now<clock;
             if(!paused&&!frozen)physics_clock+=(std::max)(0.,now-clock);
         }
-        clock=now;frozen=paused;placement=root;playback=pose;initialized=true;
+        clock=now;frozen=paused;node_base=base;placement=root;playback=pose;initialized=true;
         if(!physics&&secondary_factory)physics=secondary_factory();
         if(!physics)return;
         SecondaryPoints points{};

@@ -84,6 +84,7 @@ public:
                 if(sdk->errors.count)throw std::runtime_error(sdk->errors.Message());
                 for(unsigned i=0;i<2;++i) {
                     auto delta=bodies[i]->getGlobalPose().p-anchors[i]->getGlobalPose().p;
+                    if(!delta.isFinite())throw std::runtime_error("Nonfinite breast simulation");
                     const float length=delta.magnitude();
                     if(length>owned::gltf::secondary_limit)delta*=owned::gltf::secondary_limit/length;
                     offsets[i]={delta.x,delta.y,delta.z};

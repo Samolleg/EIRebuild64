@@ -1151,7 +1151,7 @@ const gltf::EquipmentSelection& prepare_gltf_equipment(const RetainedVisualSampl
   return *prepared.gltf_equipment;
  auto selected=std::make_shared<gltf::EquipmentSelection>();
  selected->items=gltf::select_equipment(sample.assembly->equipment,body.resource_key);
- selected->radius=body.animation_radius + gltf::secondary_limit;
+ selected->radius=body.animation_radius;
  for(auto& item:selected->items) {
   if(item.asset->wearable) {
    item.body_nodes=gltf::wearable_nodes(*item.asset,body);
@@ -1166,6 +1166,7 @@ const gltf::EquipmentSelection& prepare_gltf_equipment(const RetainedVisualSampl
   if(!std::isfinite(radius)||radius>FLT_MAX/4)throw std::runtime_error("glTF equipment bounds overflow");
   selected->radius=(std::max)(selected->radius,static_cast<float>(radius)*(1+1e-5f));
  }
+ selected->radius+=gltf::secondary_limit; // include the same possible displacement for wearables
  prepared.gltf_equipment=std::move(selected);prepared.gltf_equipment_assembly=sample.assembly;
  return *prepared.gltf_equipment;
 }

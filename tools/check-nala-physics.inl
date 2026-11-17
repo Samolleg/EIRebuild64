@@ -49,6 +49,13 @@ static void check_nala_physics(const fs::path& game,const fs::path& out) {
     require(peak>.001f&&moved>100&&moved<body->rest_vertices.size()/2,"Nala existing weights produce localized motion");
     auto previous=state.overrides;state.update(state.clock,state.playback,state.placement,false,0);
     require(state.overrides==previous,"Nala repeated render reuses immutable pose");
+    const auto oldIndices=state.overrides;
+    state.update(state.clock,state.playback,state.placement,false,17);
+    require(state.overrides!=oldIndices,"Nala equipment palette base invalidates sparse cache");
+    for(unsigned i=0;i<state.overrides->size();++i) {
+        require((*state.overrides)[i].node==(*oldIndices)[i].node+17,"Nala equipment remaps sparse node index");
+        for(unsigned r=0;r<3;++r)require((*state.overrides)[i].value.rows[r]==(*oldIndices)[i].value.rows[r],"Nala equipment preserves physical pose");
+    }
     const auto before=state.physics_clock;
     state.update(state.clock+1,state.playback,state.placement,false,0,true);
     require(state.physics_clock==before,"Nala host combat pause freezes physics time");
