@@ -2181,6 +2181,11 @@ float retained_visual_effective_alpha(const RetainedVisualSample& sample,
     const VisualPartAsset& part) noexcept {
     // Default-color figures use authored packed alpha; their material/effect
     // alpha is not read by the packed GPU color path.
+    if (part.environment_material && part.material) {
+        const auto& material=*part.environment_material;
+        const float factor=material.alpha==0?1.f:material.alpha_factor;
+        return std::clamp(part.material->diffuse[3]*sample.values.fade_alpha*factor,0.f,1.f);
+    }
     if (part.figure_flags & 0x100u) return float(part.diffuse>>24)/255.f;
     if (!part.material) return 0;
     // A completed host material already includes fade/invisibility. Do not
@@ -3581,7 +3586,6 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
     view.prepared_mesh=&target.mesh;view.prepared_material=&target.material;view.prepared_wound_material=&target.wound_material;
     NativePreparedPartValues values;
     if (!retained_visual_part_values(sample,part,time,fog,values)) return false;
-    if(part.environment_material&&part.environment_material->alpha!=0)values.alpha*=part.environment_material->alpha_factor;
     auto& submission=target.submission;
     if(!submission.values_revision||std::memcmp(&submission.values,&values,sizeof(values))!=0){
         submission.values=values;if(++submission.values_revision==0)++submission.values_revision;

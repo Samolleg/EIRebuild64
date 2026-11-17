@@ -1810,7 +1810,7 @@ bool execute_owned_shadow_pass(bool terrain_enabled,
                         &frame.coverage.world_to_clip,&registration,&register_owned_depth_part<OwnedSunDepthCull>};
                     NativeGeometryView dispatch;dispatch.depth_submission=&submission;
                     NativeGeometryResult result{};
-                    if(!g_native_sink_submit(g_native_sink_context,dispatch,result))throw "owned_shadow_bulk_selection";
+                    if(!g_native_sink_submit(g_native_sink_context,dispatch,result))throw result.failure_operation?result.failure_operation:"owned_shadow_bulk_selection";
                     frame.shadow_submitted+=frame.depth_selected.size();
                     if(frame.observed_hover.signed_id)for(const auto& selected:frame.depth_selected)
                         if(!selected.identity.terrain_source && selected.identity.signed_id==frame.observed_hover.signed_id &&
