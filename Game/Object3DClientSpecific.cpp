@@ -22,6 +22,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "GraphicsProcessor.h"
 
 #include "Object3DClientSpecific.h"
+#include "environment_asset.h"
 #include "FigureClientSpecific.h"
 #include "AnimationSystem2.h"
 #include "OwnedRender/E1Scene.h"
@@ -721,6 +722,10 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
         if (failedStage) *failedStage = stage;
         return {};
     };
+    if (object && object->GetEnvironment()) {
+        if (++revision==0) ++revision;
+        return owned::environment::assembly(object->GetEnvironment(),object->GetEnvironmentSelection(),revision);
+    }
     if (!animation || !geometry || object->GetNumFigures() <= 0)
         return reject("appearance.sources_ready");
     auto skeleton = animation->GetOwnedSkeleton();
@@ -863,7 +868,7 @@ bool CObject3DClientSpecific::PublishOwnedAppearance() noexcept try
                                 predicate, "host.object_appearance");
         return false;
     };
-    if (!resource.serial || !animation || !geometry || object->GetNumFigures() <= 0)
+    if (!resource.serial || (!object->GetEnvironment() && (!animation || !geometry || object->GetNumFigures() <= 0)))
         return reject("appearance.sources_ready");
 
     const char* failure = nullptr;
@@ -871,7 +876,7 @@ bool CObject3DClientSpecific::PublishOwnedAppearance() noexcept try
     if (!assembly) return reject(failure ? failure : "appearance.host_snapshot_exception");
     // The retained scene claims this object's mesh (game.exe bridge:
     // visual_publish_appearance); the owned-visual frame then draws it.
-    if (!scene.visual_declare_mesh(resource, object->GetNumFigures() > 0))
+    if (!scene.visual_declare_mesh(resource, object->GetEnvironment() || object->GetNumFigures() > 0))
         return reject("appearance.declaration_publish");
     if (!scene.visual_publish_assembly(resource, std::move(assembly)))
         return reject("appearance.publish_current_resource");
@@ -905,14 +910,18 @@ bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
     if (!resource.serial) return reject("object_pose.resource");
     if (!object) return reject("object_pose.object");
     CAnimationSystem2* animation = object->GetAnimationSystem2();
-    if (!animation) return reject("object_pose.animation_system");
+    if (!animation && !object->GetEnvironment()) return reject("object_pose.animation_system");
 
     const auto assembly = scene.visual_assembly(resource);
     if (!assembly) return reject("object_pose.assembly");
     OwnedRender::E1AnimationSelection selected;
     const char* selectionFailure = nullptr;
-    if (!animation->GetOwnedCurrentAnimationSelection(selected, &selectionFailure) ||
-        !selected.valid)
+    if (object->GetEnvironment()) {
+        selected.valid=true;selected.visual.neutral=true;
+        selected.source_generation=object->GetEnvironment()->identity.container_incarnation;
+    }
+    if (!object->GetEnvironment() && (!animation->GetOwnedCurrentAnimationSelection(selected, &selectionFailure) ||
+        !selected.valid))
         return reject(selectionFailure ? selectionFailure : "selection.result_invalid");
     if (!selected.visual.neutral && !hostScene.BindDatabase(resource, selected))
         return reject("object_pose.animation_database");
@@ -1040,6 +1049,7 @@ bool CObject3DClientSpecific::PrepareOwnedVisual(CRenderer *pRend, bool visibleO
         }
         return published;
     }
+    if (static_cast<CObject3D*>(lpObject)->GetEnvironment()) return published;
     const auto type = lpObject->WhoAmI();
     auto* mapObject = dynamic_cast<CMapObject*>(lpObject);
     if (published && owned::bridge_skip_scenery_draw_walk_enabled() &&
@@ -1439,6 +1449,7 @@ BOOL CObject3DClientSpecific::LoadTextures(LPCSTR pszPrimaryTextureName,
                                            LPCSTR pszSecondaryTextureName,
                                            BOOL bReportMissing)
 {
+    if (static_cast<CObject3D*>(lpObject)->GetEnvironment()) return TRUE;
     CTextureManager *lpTextureManager = (CTextureManager *)((CWorldClient *)GetWorld())
                                             ->GetTextureManager();
     CTexture *lpTexture = NULL;

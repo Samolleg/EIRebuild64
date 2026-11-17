@@ -42,6 +42,7 @@
     <ClCompile Include="$(OwnedRendererRoot)Source\hud_atlas_mutation.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\owned_resource_store.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Source\owned_asset_loader.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Source\environment_asset.cpp"><AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\out\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
     <ClCompile Include="$(OwnedRendererRoot)Source\gltf_asset.cpp"><AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\out\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
     <ClCompile Include="$(OwnedRendererRoot)Source\gltf_decode.cpp"><AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\out\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
     <ClCompile Include="$(OwnedRendererRoot)Source\nlc_asset.cpp">

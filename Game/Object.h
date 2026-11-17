@@ -2,6 +2,10 @@
 namespace SaveSchema { class Writer; class Reader; }
 
 #include <AfxTempl.h>
+#include <memory>
+#include <vector>
+#include <string>
+namespace owned { namespace environment { struct Asset; } }
 
 #include <math.h>
 
@@ -157,6 +161,9 @@ protected:
     CRect rcScreenRect;
     //
     CStringArray szBodyPartNames;
+    std::shared_ptr<const owned::environment::Asset> environmentAsset;
+    std::vector<std::string> environmentSelection;
+    bool LoadEnvironment(LPCSTR name, const CStringArray* selected);
 
 public:
     SBoundingVolume bv;                              // this object's bounding volume
@@ -165,6 +172,8 @@ private:
     const SADBFileHeader *SetADFileHdr() const;
 
 public:
+    const std::shared_ptr<const owned::environment::Asset>& GetEnvironment() const { return environmentAsset; }
+    const std::vector<std::string>& GetEnvironmentSelection() const { return environmentSelection; }
     CObject3D();
     CObject3D(const CObject3D &A);
     virtual ~CObject3D();

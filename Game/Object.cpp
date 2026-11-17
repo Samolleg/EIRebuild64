@@ -4,6 +4,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include <math.h>
 
 #include "Object.h"
+#include "environment_asset.h"
 #include "Object3DClientSpecific.h"
 #include "model_draw.h"
 #include "OwnedRender/E1Scene.h"
@@ -102,6 +103,8 @@ void CObject3D::Destroy()
         }
     }
     figures.RemoveAll();
+    environmentAsset.reset();
+    environmentSelection.clear();
     // remove unloaded figures
     for (int i = 0; i < ufigures.GetSize(); i++)
     {
@@ -153,6 +156,8 @@ const SADEntry *CObject3D::GetCurrentADEntry() const
 /////////////////////////////////////////////////////////////////////////////////////
 void CObject3D::operator=(const CObject3D &object)
 {
+    environmentAsset=object.environmentAsset;
+    environmentSelection=object.environmentSelection;
     figures.Copy(object.figures);
     CBase3D::operator=(object);
 }
@@ -403,6 +408,7 @@ void CObject3D::SetSpecific(LPGAMEBASE lpNewSpecific)
 // load all unit geometry data by skeleton name
 BOOL CObject3D::LoadByTemplate(LPCSTR pszTemplateName, CStringArray &szNames, BOOL bLoadData)
 {
+    if (LoadEnvironment(pszTemplateName, &szNames)) return TRUE;
     CString szString, szTemplateName = pszTemplateName;
     //
     SetMaskName(pszTemplateName);
@@ -618,6 +624,7 @@ int CObject3D::GetFigureIndexByName(LPCSTR pszFigureName)
 // load bounding volume
 void CObject3D::LoadFigureBoundingVolumes(LPCSTR pszTemplate)
 {
+    if (LoadEnvironment(pszTemplate, nullptr)) return;
 #if !(defined(_A4) || defined(__OBJECT_CONVERTOR_A4__))
     CFigureManager *pFigureManager = (CFigureManager *)((CWorld *)GetWorld())->GetFigureManager();
     float maxx = -FLT_MAX, maxy = -FLT_MAX, maxz = -FLT_MAX;
@@ -824,6 +831,7 @@ BOOL CObject3D::LinkFigure(CFigure *lpFigure)
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CObject3D::LoadAnimation(LPCSTR pszTemplate, const SADEntry *lpNewEntry)
 {
+    if (environmentAsset) return TRUE;
     if (lpAnimationSystem)
         lpAnimationSystem->SetAnimation(lpNewEntry);
 
@@ -832,6 +840,7 @@ BOOL CObject3D::LoadAnimation(LPCSTR pszTemplate, const SADEntry *lpNewEntry)
 /////////////////////////////////////////////////////////////////////////////////////
 void CObject3D::InitAnimation()
 {
+    if (environmentAsset) return;
     if (lpAnimationSystem)
     {
         lpAnimationSystem->SetTime(0);
@@ -1094,3 +1103,37 @@ void CObject3D::SetDefaultSpecular(DWORD dwColor)
 /////////////////////////////////////////////////////////////////////////////////////
 
 CParticle* CObject3D::FindPowerHitGlow(int hit){for(POSITION pos=particles.GetHeadPosition();pos;){auto*p=particles.GetNext(pos);if(p&&p->IsPowerHitGlow(hit))return p;}return nullptr;}
+
+bool CObject3D::LoadEnvironment(LPCSTR name, const CStringArray* selected)
+{
+    if (WhoAmI()==HPC_UNIT) return false;
+    auto asset=owned::environment::select(name);
+    if (!asset) { environmentAsset.reset();environmentSelection.clear();return false; }
+    if (WhoAmI()!=HPC_BUILDING && WhoAmI()!=HPC_STONE && WhoAmI()!=HPC_STUFF_OBJECT)
+        throw std::runtime_error("environment GLB: this object class is not in the rigid slice");
+    std::vector<std::string> selection;
+    if (selected) for(INT_PTR i=0;i<selected->GetSize();++i) {
+        const std::string part=(*selected)[i];
+        if(std::none_of(asset->parts.begin(),asset->parts.end(),[&](const auto& p){return _stricmp(p.name.c_str(),part.c_str())==0;}))
+            throw std::runtime_error("environment GLB: unknown selected part "+part);
+        selection.push_back(part);
+    }
+    environmentAsset=asset;environmentSelection=std::move(selection);SetMaskName(name);
+    fbvs.SetSize(asset->parts.size());szBodyPartNames.SetSize(asset->parts.size());
+    for(size_t i=0;i<asset->parts.size();++i) {
+        const auto& part=asset->parts[i];
+        CPlot3D lo(part.minimum[0],part.minimum[1],part.minimum[2]);
+        CPlot3D hi(part.maximum[0],part.maximum[1],part.maximum[2]);
+        auto& box=fbvs[i];box=SBoundingVolume{};const auto center=(lo+hi)*.5f;
+        box.SetCenter(center);box.SetBox(lo-center,hi-center);box.SetRadius(fabs(hi-center));
+        box.SetBone(CPlot3D(0,0,0));box.SetIgnore(!part.solid);
+        if(!part.solid){box.SetPassability(AI_PASS_EASY);box.SetOpacity(AI_OPACITY_25);}
+        szBodyPartNames[i]=part.name.c_str();
+    }
+    const CPlot3D lo(asset->minimum[0],asset->minimum[1],asset->minimum[2]);
+    const CPlot3D hi(asset->maximum[0],asset->maximum[1],asset->maximum[2]);
+    const auto center=(lo+hi)*.5f;bv=SBoundingVolume{};
+    bv.SetCenter(center);bv.SetBox(lo-center,hi-center);bv.SetRadius(fabs(hi-center));
+    SetFlag(OBJ_LOADED|OBJ_STATIC);
+    return true;
+}

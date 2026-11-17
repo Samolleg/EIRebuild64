@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "NavigationBake.h"
+#include "environment_asset.h"
 #include "NavigationCanopy.h"
 #include "TextureManager.h"
 #include "NavigationObject.h"
@@ -293,6 +294,7 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
     // Failure is reported by the original labelled per-part path below.
     for(INT_PTR n=0;n<parts.GetSize();++n) {
         const int i=object->GetFigureIndexByName(parts[n]);if(i<0||object->fbvs[i].IsIgnored())continue;
+        if(object->GetEnvironment())continue;
         try {QueueFigure(*static_cast<CFigureManager*>(object->GetWorld()->GetFigureManager()),object->GetMaskName(),parts[n]);}catch(const std::exception&) {}
     }
     constexpr float canopyCell=.3f;
@@ -308,7 +310,7 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
         {
             std::ostringstream label;label<<"object NID="<<id<<" model="<<object->GetMaskName()<<" part="<<parts[n].GetString();
             try {
-                const auto figure=Figure(*static_cast<CFigureManager*>(object->GetWorld()->GetFigureManager()),object->GetMaskName(),parts[n]);const auto& c=object->GetComplection();
+                const auto figure=object->GetEnvironment()?object->GetEnvironment()->parts.at(i).geometry:Figure(*static_cast<CFigureManager*>(object->GetWorld()->GetFigureManager()),object->GetMaskName(),parts[n]);const auto& c=object->GetComplection();
                 const float shape[3]={c.strength,c.grace,c.tall};float weights[8]{};
                 for(unsigned s=0;s<figure->shape_count;++s) {
                     weights[s]=1;
