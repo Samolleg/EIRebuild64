@@ -685,6 +685,12 @@ void Renderer::adopt_active_statics(std::shared_ptr<NeighbourPiece> piece,const 
         NativeGeometryResult result;
         const HRESULT hr=queue_native_terrain(view,state,nullptr,&result);
         if(FAILED(hr) || native_pending_draws_.size()!=first+1) {
+            if(p.decorations[node.decoration].environment_material) {
+                const auto& figure=p.figures[p.decorations[node.decoration].figure];
+                const auto detail=p.identities[figure.identity].canonical_name+" hr="+std::to_string(hr)+
+                    " step="+(result.failure_operation?result.failure_operation:"enqueue_count");
+                active_statics_note_refusal(ObjectSpaceRefusal::adopt,detail.c_str());
+            }
             for(std::size_t k=first;k<native_pending_draws_.size();++k)release_native_queued_draw(native_pending_draws_[k].record,true);
             native_pending_draws_.resize(first);continue;
         }
