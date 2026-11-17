@@ -3,6 +3,7 @@
 param(
     [string]$CacheRoot = $env:EIREBUILD64_BUILD_CACHE,
     [switch]$PhysicsFxCheck,
+    [string]$ShaderResourceManifest,
     [string]$RendererAssetsSource,
     [string]$RendererMaterialsSource,
     [ValidateRange(1,1024)][int]$CacheLimitGB = 20,
@@ -23,6 +24,7 @@ if (!$RendererMaterialsSource) { $RendererMaterialsSource = Join-Path $project '
 if (!(Test-Path -LiteralPath (Join-Path $RendererAssetsSource 'eid3d_hosted/hosted_plants.bin'))) { throw 'Renderer 1126 hosted assets are missing from the selected content source.' }
 if (!(Test-Path -LiteralPath (Join-Path $RendererMaterialsSource 'classes.json'))) { throw 'Renderer materials are missing from the selected content source.' }
 $CacheRoot = [IO.Path]::GetFullPath($CacheRoot).TrimEnd('\','/')
+if ($ShaderResourceManifest) { $ShaderResourceManifest = [IO.Path]::GetFullPath($ShaderResourceManifest) }
 if ($CacheRoot.StartsWith($task + '\',[StringComparison]::OrdinalIgnoreCase) -or
     $CacheRoot -eq $project -or $CacheRoot -eq $repo) { throw 'Cache must be outside task worktrees.' }
 if ((Split-Path $repo -Leaf) -ne 'wt' -or !(Test-Path (Join-Path $task 'BRIEF.md'))) { throw 'Run from a task worktree.' }
@@ -132,6 +134,55 @@ try {
     # survive between tasks; the task worktree keeps only sources and the kit.
     $sourceRepo = $repo
     $repo = Join-Path $CacheRoot 'work'
+    $shaderReuse = $null
+    if ($ShaderResourceManifest) {
+        # Only a clean task, an accepted current EXE and a pinned change list may
+        # borrow the shader bytes. Refuse changes to shader inputs, stale cache
+        # libraries, unknown payloads or a moving main instead of recompiling.
+        $shaderReuse = Get-Content -LiteralPath $ShaderResourceManifest -Raw | ConvertFrom-Json
+        if ($shaderReuse.version -ne 1 -or $shaderReuse.base_commit -notmatch '^[0-9a-f]{40}$') { throw 'Invalid shader reuse manifest.' }
+        $accepted = [IO.Path]::GetFullPath((Join-Path $project 'builds/rebuild64/current/EIRebuild64.exe'))
+        if ([IO.Path]::GetFullPath([string]$shaderReuse.accepted_exe) -ine $accepted -or
+            (Hash-File $accepted) -cne [string]$shaderReuse.accepted_exe_sha256) { throw 'Accepted shader source EXE changed.' }
+        $base = [string]$shaderReuse.base_commit
+        $main = (& git -C $sourceRepo rev-parse main).Trim()
+        if ($LASTEXITCODE -ne 0 -or $main -cne $base) { throw 'Shader reuse base differs from current main.' }
+        $receipt = @(Get-Content -LiteralPath (Join-Path $project 'docs/tasks.log') | Where-Object {
+            $v = $_ -split "`t"; $v.Count -ge 7 -and $v[3] -ceq $base -and $v[5] -ceq [string]$shaderReuse.accepted_exe_sha256 -and $v[6] -eq 'accepted'
+        })
+        if (!$receipt.Count) { throw 'Accepted EXE and base commit lack a task receipt.' }
+        & git -C $sourceRepo merge-base --is-ancestor $base HEAD
+        if ($LASTEXITCODE -ne 0) { throw 'Shader reuse base is not an ancestor.' }
+        $status = @(& git -C $sourceRepo status --porcelain --untracked-files=all)
+        if ($LASTEXITCODE -ne 0 -or $status.Count) { throw 'Shader reuse requires a clean task worktree.' }
+        $actual = @(& git -C $sourceRepo -c core.quotepath=false diff --name-only "$base...HEAD" | Sort-Object)
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot list shader reuse changes.' }
+        $expected = @($shaderReuse.changes | ForEach-Object { [string]$_.path } | Sort-Object)
+        if (($actual -join "`n") -cne ($expected -join "`n")) { throw 'Shader reuse changed-file list differs.' }
+        foreach ($change in $shaderReuse.changes) {
+            $relative = [string]$change.path
+            if ($relative -match '(?i)(^|/)(shader[^/]*|[^/]*\.(hlsl|fx|fxh|dxil|dxbc))$' -or
+                $relative -match '(?i)^OwnedRenderer/RendererShaders\.vcxproj$') { throw "Shader input changed: $relative" }
+            if ((Hash-File (Join-Path $sourceRepo $relative)) -cne [string]$change.sha256) { throw "Changed-file SHA mismatch: $relative" }
+        }
+        $librarySources = @($tracked | Where-Object { $_ -match '^external/(DirectXTex|DirectXTK)/' })
+        if (!$librarySources.Count) { throw 'DirectX library source inventory missing.' }
+        foreach ($relative in $librarySources) {
+            $cached = Join-Path $repo $relative
+            if (!(Test-Path -LiteralPath $cached -PathType Leaf) -or
+                (Hash-File $cached) -cne (Hash-File (Join-Path $sourceRepo $relative))) { throw "Cached library source differs: $relative" }
+        }
+        foreach ($name in 'DirectXTex','DirectXTK') {
+            $entry = @($shaderReuse.libraries | Where-Object { $_.name -ceq $name })
+            if ($entry.Count -ne 1) { throw "Missing library receipt: $name" }
+            $folder = Join-Path $repo "out/x64/Release/$name"
+            foreach ($pair in @(@('.lib','sha256'),@('.pdb','pdb_sha256'))) {
+                $payload = Join-Path $folder ($name+$pair[0])
+                if (!(Test-Path -LiteralPath $payload -PathType Leaf) -or
+                    (Hash-File $payload) -cne [string]$entry[0].($pair[1])) { throw "Cached library payload changed: $payload" }
+            }
+        }
+    }
     Sync-Tree $sourceRepo $repo $tracked
     Set-Location $repo
     foreach ($relative in $tracked | Where-Object { $_ -match '\.(vcxproj|props|targets|ps1|cs)$' }) { $inventory.Add($relative + '=' + (Hash-File (Join-Path $repo $relative))) }
@@ -156,6 +207,23 @@ try {
     $sourceCommit = (& git -C $sourceRepo -c "safe.directory=$sourceRepo" describe --always --abbrev=12 --dirty --exclude=*).Trim()
     if ($LASTEXITCODE -ne 0 -or !$sourceCommit) { throw 'Cannot identify source commit.' }
     $arguments = @("/p:ScriptCheckCommit=$sourceCommit",'EI_Rebuild.sln',"/m:$cores",'/nr:false','/t:Build','/p:Configuration=Release','/p:Platform=x64','/p:PreferredToolArchitecture=x64',"/p:VCToolsVersion=$vcversion","/p:WindowsTargetPlatformVersion=$sdkversion","/p:UserRootDir=$privateTemp\",'/nologo','/v:minimal')
+    if ($shaderReuse) {
+        $reuseFolder = Split-Path -Parent $ShaderResourceManifest
+        $destination = Join-Path $repo 'out/x64/Release/RendererShaders'
+        New-Item -ItemType Directory -Force -Path $destination | Out-Null
+        $expectedNames = @('eid3d11_shaders.res','eid3d11_dxil.res','eid3d11_d3d12_shaders.res','eid3d11_camp_art.res')
+        if (@($shaderReuse.files).Count -ne $expectedNames.Count) { throw 'Shader reuse payload count.' }
+        foreach ($name in $expectedNames) {
+            $entry = @($shaderReuse.files | Where-Object { $_.name -ceq $name })
+            if ($entry.Count -ne 1 -or [string]$entry[0].sha256 -notmatch '^[0-9a-f]{64}$') { throw "Shader reuse entry: $name" }
+            $source = Join-Path $reuseFolder $name
+            if ((Hash-File $source) -cne [string]$entry[0].sha256) { throw "Shader resource SHA mismatch: $name" }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $destination $name) -Force
+            if ((Hash-File (Join-Path $destination $name)) -cne [string]$entry[0].sha256) { throw "Shader resource copy mismatch: $name" }
+        }
+        $arguments += '/p:EICacheRendererShaders=true','/p:EICacheDirectXTex=true','/p:EICacheDirectXTK=true'
+        Write-Host 'Verified accepted shader resources and existing DirectX libraries; shader generation is disabled.'
+    }
     foreach ($group in $groups) {
         $sourceInventory = @($key)
         foreach ($relative in $tracked | Where-Object { $_ -match $group.Sources }) { $sourceInventory += ($relative + '=' + (Hash-File (Join-Path $repo $relative))) }
@@ -193,6 +261,18 @@ try {
     }) -join ' '
     $buildExit = [EIBuildProcess]::Run($msbuild, $commandLine, $repo)
     if ($buildExit -ne 0) { throw "MSBuild failed ($buildExit); no serial retry." }
+    if ($shaderReuse) {
+        $log = Get-Content -LiteralPath (Join-Path $task 'build.log') -Raw
+        if ($log -match '(?im)^\s*(?:\d+>\s*)?(?:"[^"\r\n]*[\\/])?(?:fxc|dxc|RendererShaderEmbed)\.exe(?:"|\s)' -or
+            $log -match '(?im)shader_embed:|DXIL:\s*\d+ programs|CompileShaders\.cmd') {
+            throw 'Shader compiler or shader generation appeared in build log.'
+        }
+        foreach ($entry in $shaderReuse.files) {
+            $file = Join-Path $repo ('out/x64/Release/RendererShaders/' + [string]$entry.name)
+            if ((Hash-File $file) -cne [string]$entry.sha256) { throw "Shader resource changed during build: $($entry.name)" }
+        }
+        Write-Host 'Shader reuse confirmed: no shader compilation or resource regeneration in build log.'
+    }
     if ($PhysicsFxCheck) {
         # Keep the shared work tree locked through this dependent native check build.
         $checkArgs = @($arguments | Where-Object { $_ -notlike '*.sln' -and $_ -notlike '/flp:*' })
