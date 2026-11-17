@@ -1,3 +1,5 @@
+#requires -Version 7.6.10
+#requires -PSEdition Core
 param(
     [string]$VSInstallDir,
     [string]$FFmpegSource,

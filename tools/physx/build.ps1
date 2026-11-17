@@ -1,3 +1,5 @@
+#requires -Version 7.6.10
+#requires -PSEdition Core
 param([string]$ProjectRoot,[switch]$Force)
 $ErrorActionPreference='Stop'
 if(!$ProjectRoot){$ProjectRoot=$PSScriptRoot;while(!(Test-Path -LiteralPath (Join-Path $ProjectRoot 'RULES.md'))){$ProjectRoot=Split-Path $ProjectRoot;if(!$ProjectRoot){throw 'Project root missing'}}}
