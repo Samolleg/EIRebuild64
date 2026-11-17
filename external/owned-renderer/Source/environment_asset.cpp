@@ -286,6 +286,11 @@ std::shared_ptr<const VisualAssemblyAsset> assembly(const std::shared_ptr<const 
         part.skeleton_node=0;out->parts.push_back(std::move(part));
     }
     require(!out->parts.empty(),"empty selection");
+    // Ordered BLEND must see this assembly's opaque depth/colour first.
+    // Resolve once at assembly creation; do not sort every frame.
+    std::stable_partition(out->parts.begin(),out->parts.end(),[](const auto& part){
+        return !part.environment_material || part.environment_material->alpha!=2;
+    });
     if(asset->plant) {
         out->environment_wind=asset->wind;
     }

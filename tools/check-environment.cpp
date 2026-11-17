@@ -74,6 +74,11 @@ int wmain(int argc,wchar_t** argv) try {
     auto multiple=owned::environment::decode(read(root/L"multipart.glb"),"multipart");
     check(owned::environment::assembly(multiple,{"crate"},1)->parts.size()==2,"logical material primitives selection");
     check(owned::environment::assembly(multiple,{"crate#1"},1)->parts.size()==1,"single primitive selection");
+    auto mixed=std::make_shared<owned::environment::Asset>(*multiple);
+    auto glass=std::make_shared<owned::environment::Material>(*mixed->parts[0].pbr);
+    glass->alpha=2;mixed->parts[0].pbr=glass;
+    const auto blended=owned::environment::assembly(mixed,{},1);
+    check(blended->parts.back().environment_material->alpha==2&&blended->parts.front().environment_material->alpha!=2,"opaque before glass regardless of GLB node order");
     auto shaped=owned::environment::decode(read(root/L"forms-wind.glb"),"forms-wind");
     const auto& sp=shaped->parts[0];check(sp.geometry->shape_count==8&&sp.geometry->normal_groups==sp.geometry->position_groups*8,"endpoint layout");
     const auto middle=owned::environment::collision(sp,{.5f,.5f,.5f});
