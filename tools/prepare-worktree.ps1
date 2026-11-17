@@ -12,6 +12,12 @@ while (!(Test-Path -LiteralPath (Join-Path $projectRoot 'RULES.md') -PathType Le
     $projectRoot = $parent
 }
 if (!$FFmpegSource) { $FFmpegSource = Join-Path $projectRoot 'deps/ffmpeg/8.1.3/x64' }
+& (Join-Path $PSScriptRoot 'physx/build.ps1') -ProjectRoot $projectRoot
+$physxDestination = Join-Path $repo 'dependencies/physx/5.6.1'
+New-Item -ItemType Directory -Force -Path $physxDestination | Out-Null
+Get-ChildItem -LiteralPath (Join-Path $projectRoot 'deps/physx/5.6.1/sdk') | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination $physxDestination -Recurse -Force
+}
 if (!$DlssSdkSource) { $DlssSdkSource = Join-Path $projectRoot 'deps/dlss-sdk/v310.9.16' }
 $dlssFiles = @('include/nvsdk_ngx.h', 'include/nvsdk_ngx_defs.h', 'include/nvsdk_ngx_params.h',
     'include/nvsdk_ngx_helpers.h', 'include/nvsdk_ngx_helpers_d3d.h', 'include/nvsdk_ngx_helpers_cuda.h',

@@ -804,7 +804,7 @@ enum class InterfaceShader : std::size_t {
 enum class WorldSupportShader : std::size_t {
  clear_vs,clear_ps,game_particle_vs,game_particle_ps,shadow_scroll_vs,shadow_scroll_ps,
  interface_scaled_ps,game_particle_depth_ps,game_ribbon_vs,game_selection_vs,game_mesh_vs,game_glyph_vs,interface_text_ps,
- game_particle_debug_ps,count
+ game_particle_debug_ps,terrain_print_vs,terrain_print_hs,terrain_print_ds,count
 };
 ShaderProgram interface_shader_program(InterfaceShader shader);
 ShaderProgram world_support_shader_program(WorldSupportShader shader);
@@ -4762,6 +4762,10 @@ private:
     bool game_particle_pipeline_failed_ = false;
     HRESULT ensure_game_particle_pipeline();
     ComPtr<ID3D11VertexShader> game_ribbon_vs_, game_selection_vs_, game_mesh_vs_, game_glyph_vs_;
+    ComPtr<ID3D11VertexShader> terrain_print_vs_;
+    ComPtr<ID3D11HullShader> terrain_print_hs_;
+    ComPtr<ID3D11DomainShader> terrain_print_ds_;
+    HRESULT ensure_terrain_print_pipeline();
     // One draw of game effect elements (particles, ribbons) with the call's state.
     struct GameEffectDraw {
         const float* object_to_clip = nullptr;
@@ -4771,6 +4775,7 @@ private:
         WorldSupportShader vertex_program = WorldSupportShader::game_particle_vs;  // the same program (D3D12 backend)
         bool fog = true, reflection_depth = true;
         bool ribbon_antialias = false; // untextured UI ribbon side coverage
+        bool terrain_print = false;
         bool soft = false;             // world particle call: soft fade into the world depth (game_effect_constants)
         const char* profile_pass = "";
     };
@@ -6725,6 +6730,7 @@ private:
         D3D12BufferRef point_lights, point_light_grid;
         std::array<std::uint32_t, 28> point_light_constants{};
         D3D12TextureRef terrain_noise;
+        D3D12BufferRef terrain_print_args;
         D3D12BufferRef game_effects;  // the game effect elements of the latest draw (t7)
         std::uint32_t layer_shift_revision = 0;
         UINT instance_capacity = 0;

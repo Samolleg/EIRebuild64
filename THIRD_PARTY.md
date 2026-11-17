@@ -207,3 +207,12 @@ the build does not restore anything from the network.
 
 Sources: https://github.com/NVIDIA-RTX/RTXDI-Library/tree/b67f61cd0bfa6792acbf5429bb29a68ee5cdd808
 and https://www.nuget.org/packages/Microsoft.Direct3D.D3D12/1.620.2 .
+## NVIDIA PhysX 5 GPU
+
+PhysX 5.6.1, tag 107.3-physx-5.6.1, commit 5ca9f472105a90d70d957c243cb0ef36fe251a9f.
+BSD-3-Clause. Official source: https://github.com/NVIDIA-Omniverse/PhysX/tree/5ca9f472105a90d70d957c243cb0ef36fe251a9f
+Pinned source and CUDA 12.8.1 download hashes: tools/physx/fetch-dependencies.ps1.
+Offline build and packaging: tools/physx/build.ps1; details: tools/physx/README.md.
+Static x64 /MT host libraries and PhysXGpu_64.dll, built together from source.
+CUDA libraries retain NVIDIA license terms; kit licenses include original SDK notices.
+GPU dynamics/broadphase for client-only stone debris; no authoritative combat changes.

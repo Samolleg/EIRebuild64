@@ -46,6 +46,12 @@ std::shared_ptr<const owned::TerrainAtlasSnapshot> E1CaptureTerrainAtlases() {
     }
     return snapshot; // Survives surface replacement and world retirement.
 }
+bool E1PhysicsTerrainSource(owned::RetainedTerrainSourceSnapshot& output) noexcept {
+    output = {};
+    if (!sourceOwner || !source.terrain || OwnedRender::E1WorldGeneration() != worldIdentity) return false;
+    output = source;
+    return true;
+}
 bool E1CurrentTerrainSource(owned::RetainedTerrainSourceSnapshot& output) noexcept {
     output = {};
     if (!current()) return false;

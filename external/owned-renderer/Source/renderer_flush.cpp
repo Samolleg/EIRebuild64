@@ -317,6 +317,18 @@ HRESULT Renderer::ensure_game_particle_pipeline(){
  return S_OK;
 }
 
+HRESULT Renderer::ensure_terrain_print_pipeline(){
+ if(d3d12_||(terrain_print_vs_&&terrain_print_hs_&&terrain_print_ds_))return S_OK;
+ ComPtr<ID3DBlob> v,h,d,error;HRESULT hr=compile_shader(world_support_shader_program(WorldSupportShader::terrain_print_vs),&v,&error);
+ if(SUCCEEDED(hr))hr=compile_shader(world_support_shader_program(WorldSupportShader::terrain_print_hs),&h,&error);
+ if(SUCCEEDED(hr))hr=compile_shader(world_support_shader_program(WorldSupportShader::terrain_print_ds),&d,&error);
+ if(SUCCEEDED(hr))hr=create_shader(device_.Get(),v->GetBufferPointer(),v->GetBufferSize(),nullptr,&terrain_print_vs_);
+ if(SUCCEEDED(hr))hr=create_shader(device_.Get(),h->GetBufferPointer(),h->GetBufferSize(),nullptr,&terrain_print_hs_);
+ if(SUCCEEDED(hr))hr=create_shader(device_.Get(),d->GetBufferPointer(),d->GetBufferSize(),nullptr,&terrain_print_ds_);
+ if(FAILED(hr)){if(error)OutputDebugStringA(static_cast<const char*>(error->GetBufferPointer()));bridge_report_event("terrain_print_pipeline","creation_failed");}
+ return hr;
+}
+
 HRESULT Renderer::draw_game_particles(const GameParticleView& view,const FixedState& st,SurfaceImage* texture){
  PERF06_SCOPE("particle_submit");
  if(scene_queue()){
@@ -566,7 +578,7 @@ void Renderer::game_effect_constants(const GameEffectDraw& draw,const FixedState
  const bool modulating=blended&&(source==D3DBLEND_ZERO||source==D3DBLEND_DESTCOLOR);
  c.coverage_mode=modulating?3u:!blended||destination!=D3DBLEND_ONE?0u:source==D3DBLEND_SRCALPHA?1u:2u;
  c.padding[0]=draw.ribbon_antialias?1u:0u;
- c.padding[1]=draw.vertex_program==WorldSupportShader::game_ribbon_vs?1u:draw.vertex_program==WorldSupportShader::game_selection_vs?2u:
+ c.padding[1]=draw.terrain_print?5u:draw.vertex_program==WorldSupportShader::game_ribbon_vs?1u:draw.vertex_program==WorldSupportShader::game_selection_vs?2u:
   draw.vertex_program==WorldSupportShader::game_glyph_vs?3u:draw.vertex_program==WorldSupportShader::game_mesh_vs?4u:0u;
  // Soft particles: world particle calls that blend over the world (colour
  // weighed by source alpha, or premultiplied/additive with source ONE),
@@ -574,6 +586,15 @@ void Renderer::game_effect_constants(const GameEffectDraw& draw,const FixedState
  // depth over `soft_particles` radii. The world depth is then read by the
  // same draw through a read-only depth view (both backends). Text, markers,
  // ribbons and ground prints never fade (draw.soft only on particle calls).
+ if(draw.terrain_print){
+  c.padding[0]=terrain_tessellation_frame_==native_frame_index_?2u:0u;
+  if(const auto terrain=retained_static_terrain_source_snapshot();terrain.terrain){
+   std::array<float,16> placement{};bridge_neighbour_world_transform(placement);
+   c.soft[0]=placement[3];c.soft[1]=placement[7];c.soft[2]=placement[3]+32.f*terrain.terrain->sector_count_x;c.soft[3]=placement[7]+32.f*terrain.terrain->sector_count_y;
+  }
+  const auto camera=bridge_scene_world_to_clip_snapshot();if(camera.valid){const auto& m=camera.world_to_clip;
+   c.clip_half[3]=.5f*output_height_*std::sqrt(m[4]*m[4]+m[5]*m[5]+m[6]*m[6]);}
+ }
  const float range=draw.soft?configured_floating_point(debug_overlay_.config(),"soft_particles",.5f):0.f;
  if(range>0&&!scene_composited_&&!hit_test_active_&&blended&&!modulating&&(source==D3DBLEND_ONE||source==D3DBLEND_SRCALPHA)&&
     st.render[D3DRENDERSTATE_ZENABLE]!=0&&st.render[D3DRENDERSTATE_ZWRITEENABLE]==0&&st.render[D3DRENDERSTATE_STENCILENABLE]==0){
@@ -624,8 +645,8 @@ HRESULT Renderer::draw_game_effect(const GameEffectDraw& draw,const FixedState& 
  const DWORD source=st.render[D3DRENDERSTATE_SRCBLEND],destination=st.render[D3DRENDERSTATE_DESTBLEND];
  const bool blended=st.render[D3DRENDERSTATE_ALPHABLENDENABLE]!=0;
  // Soft particles read the world depth they are tested against (read-only view).
- const bool soft=c.soft[3]!=0&&depth_srv_&&world_depth_read_only_dsv_&&dsv_.Get()==world_dsv_.Get();
- if(!soft)c.soft[3]=0;
+ const bool soft=draw.soft&&c.soft[3]!=0&&depth_srv_&&world_depth_read_only_dsv_&&dsv_.Get()==world_dsv_.Get();
+ if(!soft&&!draw.terrain_print)c.soft[3]=0;
  ID3D11PixelShader* pixel_shader=game_particle_ps_.Get();
  if(configured_boolean(debug_overlay_.config(),"soft_particles_debug",false)){
   if(!game_particle_debug_ps_){
@@ -649,6 +670,11 @@ HRESULT Renderer::draw_game_effect(const GameEffectDraw& draw,const FixedState& 
  context_->VSSetShader(draw.vertex_shader,nullptr,0);context_->PSSetShader(pixel_shader,nullptr,0);
  context_->GSSetShader(nullptr,nullptr,0);context_->HSSetShader(nullptr,nullptr,0);context_->DSSetShader(nullptr,nullptr,0);
  context_->VSSetConstantBuffers(0,1,game_particle_constants_.GetAddressOf());context_->PSSetConstantBuffers(0,1,game_particle_constants_.GetAddressOf());
+ if(draw.terrain_print){
+  context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_3_CONTROL_POINT_PATCHLIST);
+  context_->HSSetShader(terrain_print_hs_.Get(),nullptr,0);context_->DSSetShader(terrain_print_ds_.Get(),nullptr,0);
+  context_->HSSetConstantBuffers(0,1,game_particle_constants_.GetAddressOf());context_->DSSetConstantBuffers(0,1,game_particle_constants_.GetAddressOf());
+ }
  D3D11_VIEWPORT viewport=target_viewport();context_->RSSetViewports(1,&viewport);
  // Blended world particles also feed the bloom glow target (cleared on
  // first use each frame): additive ones are light (magic), alpha-blended
@@ -674,6 +700,7 @@ HRESULT Renderer::draw_game_effect(const GameEffectDraw& draw,const FixedState& 
  if(soft)context_->PSSetShaderResources(2,1,depth_srv_.GetAddressOf());
  profiler_.add_draw(static_cast<std::uint64_t>(draw.vertex_count/3u),1);profiler_.add_batch();
  context_->Draw(draw.vertex_count,0);
+ if(draw.terrain_print){context_->HSSetShader(nullptr,nullptr,0);context_->DSSetShader(nullptr,nullptr,0);}
  if(soft){ID3D11ShaderResourceView* none=nullptr;context_->PSSetShaderResources(2,1,&none);}
  if(targets[1]||soft)context_->OMSetRenderTargets(1,rtv_.GetAddressOf(),dsv_.Get());
  if(draw.reflection_depth&&c.coverage_mode!=3u&&!scene_composited_&&particle_depth_wanted())draw_game_particle_depth(draw.vertex_count);
@@ -705,9 +732,10 @@ HRESULT Renderer::draw_embedded_ribbon(const EmbeddedRibbonInput& input,
 HRESULT EmbeddedPrintBatch::append(const EmbeddedPrintInput& input, const FixedState& state,
     std::shared_ptr<SurfaceImage> texture) noexcept try {
     if(!input.index_count)return S_OK;
-    if(!input.groups || !input.maps || !input.indices || input.index_count%3 ||
-       input.group_count>UINT_MAX/4u || vertices.size()>UINT_MAX-input.index_count)return E_INVALIDARG;
-    for(std::uint32_t k=0;k<input.index_count;++k)
+    if(input.index_count%3||vertices.size()>UINT_MAX-input.index_count)return E_INVALIDARG;
+    if(!input.terrain_vertices&&(!input.groups || !input.maps || !input.indices ||
+       input.group_count>UINT_MAX/4u || vertices.size()>UINT_MAX-input.index_count))return E_INVALIDARG;
+    if(!input.terrain_vertices)for(std::uint32_t k=0;k<input.index_count;++k)
         if(input.indices[k]>=input.group_count*4u || input.indices[k]>=input.map_count)return E_INVALIDARG;
     const auto first=vertices.size();
     const auto needed=first+input.index_count;
@@ -715,13 +743,14 @@ HRESULT EmbeddedPrintBatch::append(const EmbeddedPrintInput& input, const FixedS
     if(runs.size()==runs.capacity())runs.reserve((std::max)(runs.size()+1,runs.capacity()*2));
     vertices.resize(first+input.index_count);
     for(std::uint32_t k=0;k<input.index_count;++k) {
+        if(input.terrain_vertices){vertices[first+k]=input.terrain_vertices[k];vertices[first+k].color=input.color;continue;}
         const auto i=input.indices[k];
         game_print_vertex_gpu(input.groups[i/4u].data(),i%4u,input.maps[i][0],input.maps[i][1],
             input.color,vertices[first+k]);
     }
     if(!runs.empty()) {
         auto& last=runs.back();
-        if(last.texture==texture && last.projection.object_to_clip==input.projection.object_to_clip &&
+        if(vertices[last.first].padding[2]==vertices[first].padding[2]&&last.texture==texture && last.projection.object_to_clip==input.projection.object_to_clip &&
            last.projection.clip_half_width==input.projection.clip_half_width &&
            last.projection.clip_half_height==input.projection.clip_half_height &&
            std::memcmp(&last.state,&state,sizeof(FixedState))==0) {
@@ -920,6 +949,10 @@ HRESULT Renderer::draw_game_print_run_held(std::vector<GameParticleGpu> vertices
  draw.clip_half_width=clip_half_width;draw.clip_half_height=clip_half_height;
  const UINT count=static_cast<UINT>(game_effect_elements_.size());
  draw.element_count=count;draw.vertex_count=count;draw.vertex_shader=game_mesh_vs_.Get();draw.vertex_program=WorldSupportShader::game_mesh_vs;
+ if(count&&game_effect_elements_[0].padding[2]==kTerrainPrintTag){
+  if(HRESULT created=ensure_terrain_print_pipeline();FAILED(created))return created;
+  draw.terrain_print=true;draw.vertex_shader=terrain_print_vs_.Get();draw.vertex_program=WorldSupportShader::terrain_print_vs;
+ }
  // Ground marks fog like the terrain under them; they stay out of reflections.
  draw.fog=true;draw.reflection_depth=false;draw.profile_pass="owned_game_prints";
  return draw_game_effect(draw,st,texture.get());

@@ -9,6 +9,7 @@
 
 #include "ConstantBuffer.h"
 #include "RendererDX11.h"
+#include "../OwnedRender/E1PhysicsDebris.h"
 #include "../LiveObserver.h"
 #include "embedded_hud_visual.h"
 #include "embedded_arena.h"
@@ -776,6 +777,8 @@ void CDX11::RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals)
         HRESULT hr = S_OK;
         if (!visuals || !OwnedRender::E1OwnedVisualFrameFlushedStatics())
             hr = renderer.flush_native_static(frame, ownedWorldToClip);
+        if (SUCCEEDED(hr) && visuals && owned)
+            OwnedRender::E1DrawPhysicsDebris(renderer, frame, *visuals);
         // Complete queued colour before the host draws remaining overlays.
         if (SUCCEEDED(hr)) hr = renderer.flush_native();
         if (FAILED(hr)) renderer.discard_native();
