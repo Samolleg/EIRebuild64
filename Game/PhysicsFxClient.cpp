@@ -14,7 +14,7 @@ struct Client::Impl {
     struct Request {int id,start;Vec position;float power,radius;};
     std::vector<Request> pending;
     std::uint64_t generation=0,revision=0;
-    int lastReport=0;
+    int lastReport=0;bool reported=false;std::string reportedError;
 };
 Client::Client():impl(std::make_unique<Impl>()){}
 Client::~Client()=default;
@@ -30,10 +30,15 @@ void Client::Tick(CWorldClient& host,bool paused){
     if(paused)return;
     auto& s=*impl;
     owned::RetainedTerrainSourceSnapshot source;
-    if(!OwnedRender::E1PhysicsTerrainSource(source)) {s.pending.clear();s.world.Clear();return;}
+    if(!OwnedRender::E1PhysicsTerrainSource(source)) {s.pending.clear();s.world.Clear();s.reported=false;s.reportedError.clear();return;}
     if(s.generation!=source.source_generation||s.revision!=source.source_revision){
-        s.world.Clear();s.generation=source.source_generation;s.revision=source.source_revision;
+        s.world.Clear();s.reported=false;s.reportedError.clear();s.generation=source.source_generation;s.revision=source.source_revision;
     }
+    const auto reportFailure=[&](){if(s.reportedError!=s.world.Error()){
+        s.reportedError=s.world.Error();GameJournal::Event("PHYSICS_FX","gpu_unavailable","backend=PhysX-5.6.1 fallback=none reason=%s",s.reportedError.c_str());
+    }};
+    if(!s.world.Initialize()){s.pending.clear();reportFailure();return;}
+    if(!s.reported){s.reported=true;GameJournal::Event("PHYSICS_FX","gpu_ready","backend=PhysX-5.6.1 dynamics=GPU broadphase=GPU device=%s",s.world.Device().c_str());}
     unsigned spawned=0;double prepareMs=0;
     for(const auto& request:s.pending){
         if(s.world.Statistics().bodies>=MaxStones)break;
@@ -56,10 +61,11 @@ void Client::Tick(CWorldClient& host,bool paused){
         spawned+=s.world.Burst(key,hit.point,hit.normal,request.power,seed);
     }
     s.pending.clear();s.world.Tick(false);
+    if(!s.world.Error().empty()){reportFailure();return;}
     const auto stats=s.world.Statistics();
     if(spawned||stats.errors||(stats.bodies&&host.GetSegmentTimeCounter()-s.lastReport>=18)){
-        GameJournal::Event("PHYSICS_FX","stone_debris","spawned=%u bodies=%u active=%u patches=%u prepare_ms=%.3f step_ms=%.3f errors=%u",
-            spawned,stats.bodies,stats.active,stats.patches,prepareMs,stats.stepMs,stats.errors);
+        GameJournal::Event("PHYSICS_FX","stone_debris","backend=PhysX-5.6.1 spawned=%u bodies=%u active=%u patches=%u prepare_ms=%.3f step_ms=%.3f errors=%u gpu_dynamics=%d gpu_broadphase=%d gpu_heap=%llu gpu_solver=%llu gpu_contacts=%u",
+            spawned,stats.bodies,stats.active,stats.patches,prepareMs,stats.stepMs,stats.errors,int(stats.gpuDynamics),int(stats.gpuBroadPhase),stats.gpuHeapBytes,stats.gpuSolverBytes,stats.gpuContacts);
         s.lastReport=host.GetSegmentTimeCounter();
     }
 }

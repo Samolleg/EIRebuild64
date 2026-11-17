@@ -18,6 +18,11 @@ owned::TerrainCpuAsset fixture(unsigned material){
     owned::TerrainTileDescriptor tile;for(unsigned i=0;i<9;++i)tile.vertex_indices[i]=std::uint16_t(i);s.tiles.push_back(tile);return t;
 }
 int main(int argc,char** argv)try{
+    if(argc>1&&std::string(argv[1])=="--expect-gpu-unavailable"){
+        World missing;check(!missing.Initialize()&&!missing.Error().empty(),"missing runtime rejected");
+        check(!missing.AddPatch(1,{0,0,0},plane())&&missing.Burst(1,{0,0,0},{0,0,1},1,1)==0,"no CPU fallback");
+        std::cout<<missing.Error()<<'\n';return 0;
+    }
     Events e;e.Reset(100);
     check(!e.Admit(1,100,100,false),"initial sync suppressed");
     check(e.Admit(2,103,103,true),"fresh event admitted");
@@ -33,14 +38,20 @@ int main(int argc,char** argv)try{
     check(StoneTerrain(2)&&StoneTerrain(4)&&StoneTerrain(15)&&!StoneTerrain(0)&&!StoneTerrain(6),"stone emission classification");
     // Two worlds with the same events must match despite different render sample counts.
     const auto controlBefore=_mm_getcsr()&~0x3fu;
-    World a,b;check(a.AddPatch(1,{0,0,0},plane())&&b.AddPatch(1,{0,0,0},plane()),"Jolt terrain created");
+    World a,b;if(!a.Initialize())throw std::runtime_error(a.Error());
+    check(a.Statistics().gpuDynamics&&a.Statistics().gpuBroadPhase,"GPU dynamics and GPU broadphase enabled");
+    std::cout<<"GPU_DEVICE "<<a.Device()<<'\n';
+    check(a.AddPatch(1,{0,0,0},plane())&&b.AddPatch(1,{0,0,0},plane()),"PhysX GPU terrain created");
     check(a.Burst(1,{0,0,0},{0,0,1},1,123)==12&&b.Burst(1,{0,0,0},{0,0,1},1,123)==12,"12 convex stones");
     auto paused=a.Sample(1);for(int i=0;i<20;++i)a.Tick(true);auto after=a.Sample(1);
     check(after.size()==paused.size()&&after[0].pose.position.z==paused[0].pose.position.z,"pause freezes pose and lifetime");
-    float highest=0,lowest=100;std::vector<double> timings;std::ofstream trajectory;
+    float highest=0,lowest=100;bool gpuContacts=false,gpuMemory=false;std::ofstream trajectory;
     if(argc>1){trajectory.open(argv[1]);trajectory<<"tick,index,x,y,z,radius,alpha\n";}
     for(int tick=0;tick<95;++tick){
         a.Tick(false);b.Tick(false);for(float phase:{0.f,.13f,.4f,.9f})a.Sample(phase);
+        if(!a.Error().empty()||!b.Error().empty())throw std::runtime_error(a.Error()+b.Error());
+        const auto stats=a.Statistics();gpuContacts|=stats.gpuContacts>0;
+        gpuMemory|=stats.gpuHeapBytes>0&&stats.gpuBroadPhaseBytes>0&&stats.gpuSolverBytes>0;
         const auto sa=a.Sample(1),sb=b.Sample(1);check(sa.size()==sb.size(),"render FPS independent count");
         for(unsigned i=0;i<sa.size();++i){
             const auto p=sa[i].pose.position,q=sb[i].pose.position;
@@ -51,15 +62,16 @@ int main(int argc,char** argv)try{
     }
     check(highest>.12f&&lowest>-.01f,"flight and terrain contact without tunnelling");
     check(a.Statistics().bodies==0&&a.Statistics().patches==0,"expiry releases bodies and terrain");
-    check((_mm_getcsr()&~0x3fu)==controlBefore,"Jolt preserves floating-point control");
+    check(gpuContacts&&gpuMemory,"GPU contact buffers and solver/broadphase allocations used");
+    check((_mm_getcsr()&~0x3fu)==controlBefore,"PhysX preserves floating-point control");
     check(a.AddPatch(2,{0,0,0},plane(.4f)),"sloped terrain created");
     for(unsigned i=0;i<20;++i)a.Burst(2,{0,0,.01f},{-.37139f,0,.928477f},1,27+i);
     check(a.Statistics().bodies==128,"hard body budget");
     float worstGap=0;
-    for(int tick=0;tick<55;++tick){a.Tick(false);timings.push_back(a.Statistics().stepMs);for(const auto& stone:a.Sample(1))worstGap=(std::min)(worstGap,stone.pose.position.z-.4f*stone.pose.position.x);}
+    for(int tick=0;tick<55;++tick){a.Tick(false);if(!a.Error().empty())throw std::runtime_error(a.Error());for(const auto& stone:a.Sample(1))worstGap=(std::min)(worstGap,stone.pose.position.z-.4f*stone.pose.position.x);}
     check(worstGap>-.015f&&a.Statistics().errors==0,"128 CCD bodies on slope");
-    std::sort(timings.begin(),timings.end());std::cout<<"JOLT_128_SEGMENT_P95_MS "<<timings[timings.size()*95/100]<<'\n';
     a.Clear();check(a.Statistics().bodies==0&&a.Statistics().patches==0,"world generation cleanup");
+    b.Clear();check(a.Initialize(),"GPU runtime reinitializes after all worlds released");
     // The render mesh must describe the same convex hull as the physics shape.
     for(unsigned kind=0;kind<4;++kind){OwnedRender::DebrisMesh mesh(kind);auto points=StoneVertices(kind,1);
         for(unsigned i=0;i<6;++i)check(mesh.positions[i/4].x[i%4]==points[i].x,"render/physics shape agreement");

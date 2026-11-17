@@ -31,15 +31,11 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "EIRebuild64Pack", "EIRebuil
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "EIRebuild64ModelCheck", "EIRebuild64ModelCheck.vcxproj", "{3A825D1A-0903-4774-9915-491163840C31}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "Jolt", "tools\jolt\Jolt.vcxproj", "{80F307BB-2D9A-4C32-A4BE-6BD6FC41D9CD}"
-EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Release|x64 = Release|x64
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
-		{80F307BB-2D9A-4C32-A4BE-6BD6FC41D9CD}.Release|x64.ActiveCfg = Release|x64
-		{80F307BB-2D9A-4C32-A4BE-6BD6FC41D9CD}.Release|x64.Build.0 = Release|x64
 		{F18DCB8A-4C4B-48C3-A4D7-EA760D5BE5B1}.Release|x64.ActiveCfg = Release|x64
 		{F18DCB8A-4C4B-48C3-A4D7-EA760D5BE5B1}.Release|x64.Build.0 = Release|x64
 		{DA2B3309-0011-4321-ABCD-222222222222}.Release|x64.ActiveCfg = Release|x64

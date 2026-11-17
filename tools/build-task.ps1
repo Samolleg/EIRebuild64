@@ -2,6 +2,7 @@
 # Compiler-keyed entries share the cache size limit (20 GB by default).
 param(
     [string]$CacheRoot,
+    [switch]$PhysicsFxCheck,
     [string]$RendererAssetsSource,
     [string]$RendererMaterialsSource,
     [ValidateRange(1,1024)][int]$CacheLimitGB = 20,
@@ -192,6 +193,13 @@ try {
     }) -join ' '
     $buildExit = [EIBuildProcess]::Run($msbuild, $commandLine, $repo)
     if ($buildExit -ne 0) { throw "MSBuild failed ($buildExit); no serial retry." }
+    if ($PhysicsFxCheck) {
+        # Keep the shared work tree locked through this dependent native check build.
+        $checkArgs = @($arguments | Where-Object { $_ -notlike '*.sln' -and $_ -notlike '/flp:*' })
+        $checkArgs = @($checkArgs | Where-Object { $_ -notlike '/t:*' })
+        & $msbuild (Join-Path $repo 'PhysicsFxRenderCheck.vcxproj') @checkArgs /p:BuildProjectReferences=false *> (Join-Path $task 'physics-render-build.txt')
+        if ($LASTEXITCODE -ne 0) { throw 'Physics render check build failed.' }
+    }
     foreach ($name in 'DirectXTex','DirectXTK') {
         $compilerPdb = Join-Path $repo "out/obj/x64/Release/$name/$name.compiler.pdb"
         if (Test-Path -LiteralPath $compilerPdb) { Copy-Item -LiteralPath $compilerPdb -Destination (Join-Path $repo "out/x64/Release/$name/") -Force }
@@ -221,6 +229,8 @@ try {
         Copy-Item -LiteralPath (Join-Path $repo "out/x64/Release/$($target[0])/$($target[0]).pdb") -Destination (Join-Path $kit ($target[1] + '.pdb'))
     }
     foreach ($name in 'avcodec-62.dll','avformat-62.dll','avutil-60.dll','swscale-9.dll','swresample-6.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/ffmpeg/8.1.3/x64/bin/' + $name)) -Destination $kit }
+    Copy-Item -LiteralPath (Join-Path $repo 'dependencies/physx/5.6.1/bin/PhysXGpu_64.dll') -Destination $kit
+    Copy-Item -LiteralPath (Join-Path $repo 'dependencies/physx/5.6.1/bin/PhysXGpu_64.pdb') -Destination $kit
     foreach ($name in 'nvngx_dlss.dll','nvngx_dlssg.dll','nvngx_dlssd.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/dlss/v310.9.16/lib/Windows_x86_64/rel/' + $name)) -Destination $kit }
     foreach ($name in 'amd_fidelityfx_loader_dx12.dll','amd_fidelityfx_framegeneration_dx12.dll','amd_fidelityfx_upscaler_dx12.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/fidelityfx/2.3.0/signedbin/' + $name)) -Destination $kit }
     New-Item -ItemType Directory -Path (Join-Path $kit 'D3D12') | Out-Null
@@ -251,6 +261,9 @@ try {
         }
     }
     Write-Utf8 (Join-Path $kit 'SHA256SUMS') (Manifest $kit)
+    if ($PhysicsFxCheck) {
+        & (Join-Path $repo 'tools/check-physics-fx-render.ps1') -OutputDirectory (Join-Path $task 'checks/render') -Prepared -SkipBuild -KitDirectory $kit
+    }
     $clock.Stop()
     $bytes = (Get-ChildItem -LiteralPath $CacheRoot -File -Recurse | Measure-Object Length -Sum).Sum
     Write-Utf8 (Join-Path $task 'build-result.txt') @("Seconds=$($clock.Elapsed.TotalSeconds)","MSBuildWorkers=$cores","CacheBytes=$bytes","CacheKey=$key","CacheRoot=$CacheRoot",("Hits=" + (($groups | Where-Object Hit | ForEach-Object Name) -join ',')))

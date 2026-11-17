@@ -20,7 +20,7 @@ bool E1CompleteVisualFrame(owned::RetainedVisualFrame& frame) noexcept;
 bool E1CompleteAmbientFrame(owned::RetainedVisualFrame& frame) noexcept;
 // Host values of one world draw, without renderer headers (WorldClient).
 struct E1VisualInputs {
-    std::vector<PhysicsFx::Stone> debris; // copied values, no game/Jolt pointers
+    std::vector<PhysicsFx::Stone> debris; // copied values, no game/physics pointers
     double time = 0; // segment ticks + fraction
     std::uint32_t sceneFlags = 0;           // CWorldClient flags (WC_RENDER_*)
     bool drawUndetected = true;

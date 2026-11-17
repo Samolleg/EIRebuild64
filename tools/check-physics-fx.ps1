@@ -11,17 +11,26 @@ $sdk=Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10'
 $sv=(Get-ChildItem "$sdk/Include" -Directory | Where-Object {Test-Path "$($_.FullName)/um/Windows.h"} | Sort-Object {[version]$_.Name} -Descending | Select-Object -First 1).Name
 $savedInclude=$env:INCLUDE;$savedLib=$env:LIB
 try {
-    & "$vs/MSBuild/Current/Bin/MSBuild.exe" "$repo/tools/jolt/Jolt.vcxproj" /nologo /v:minimal /m:4 /nr:false /p:Configuration=Release /p:Platform=x64 *> "$out/jolt-build.txt"
-    if($LASTEXITCODE -ne 0){Get-Content "$out/jolt-build.txt" -Tail 24;throw 'Jolt build failed'}
-    $env:INCLUDE="$repo/third_party/jolt;$repo/external/owned-renderer/Source;$vc/include;$sdk/Include/$sv/ucrt;$sdk/Include/$sv/um;$sdk/Include/$sv/shared;$sdk/Include/$sv/winrt"
+    $project=$repo;while(!(Test-Path "$project/RULES.md")){$project=Split-Path $project;if(!$project){throw 'Project root missing'}}
+    & "$repo/tools/physx/build.ps1" -ProjectRoot $project
+    $physx="$project/deps/physx/5.6.1/sdk"
+    $env:INCLUDE="$physx/include;$repo/external/owned-renderer/Source;$vc/include;$sdk/Include/$sv/ucrt;$sdk/Include/$sv/um;$sdk/Include/$sv/shared;$sdk/Include/$sv/winrt"
     $env:LIB="$vc/lib/x64;$sdk/Lib/$sv/ucrt/x64;$sdk/Lib/$sv/um/x64"
     $exe=Join-Path $out 'check-physics-fx.exe'
     Push-Location $out
     try {
-        & "$vc/bin/Hostx64/x64/cl.exe" /nologo /std:c++17 /EHsc /MT /O2 /DNDEBUG /DNOMINMAX "/Fe$exe" "$repo/tools/check-physics-fx.cpp" "$repo/Game/PhysicsFxCore.cpp" "$repo/out/x64/Release/Jolt/Jolt.lib" *> "$out/compile.txt"
+        $libs=@(Get-ChildItem "$physx/lib" -Filter '*.lib' -File | ForEach-Object FullName)
+        & "$vc/bin/Hostx64/x64/cl.exe" /nologo /std:c++17 /EHsc /MT /O2 /DNDEBUG /DNOMINMAX /DPX_PHYSX_STATIC_LIB "/Fe$exe" "$repo/tools/check-physics-fx.cpp" "$repo/Game/PhysicsFxPhysX.cpp" @libs /link user32.lib advapi32.lib *> "$out/compile.txt"
         if($LASTEXITCODE -ne 0){Get-Content "$out/compile.txt";throw 'Physics check compile failed'}
+        Copy-Item "$physx/bin/PhysXGpu_64.dll" $out -Force
         & $exe "$out/trajectory.csv" *> "$out/result.txt"
         Get-Content "$out/result.txt" -Tail 12
         if($LASTEXITCODE -ne 0){throw 'Physics check failed'}
+        $negative=Join-Path $out 'missing-runtime';New-Item -ItemType Directory -Force $negative | Out-Null
+        if(Test-Path "$negative/PhysXGpu_64.dll"){throw 'Missing-runtime fixture contaminated'}
+        Copy-Item $exe $negative -Force
+        & "$negative/check-physics-fx.exe" --expect-gpu-unavailable *> "$out/missing-runtime.txt"
+        Get-Content "$out/missing-runtime.txt"
+        if($LASTEXITCODE -ne 0){throw 'Missing GPU runtime check failed'}
     } finally {Pop-Location}
 } finally {$env:INCLUDE=$savedInclude;$env:LIB=$savedLib}

@@ -1,4 +1,4 @@
-// Integration check: production Jolt trajectory -> production native mesh draw -> pixels.
+// Integration check: production PhysX GPU trajectory -> production native mesh draw -> pixels.
 #define NOMINMAX
 #include "../Game/OwnedRender/E1PhysicsDebris.h"
 #include "../Game/OwnedRender/E1VisualFrame.h"
@@ -43,7 +43,7 @@ int wmain(int argc,wchar_t** argv)try{
     auto renderer=std::make_unique<owned::Renderer>();
     hr(dx12?renderer->ensure(window,640,480):renderer->ensure_for_test_warp(window,640,480),"renderer initialize");
     PhysicsFx::World physics;std::vector<PhysicsFx::Triangle> terrain={{{-14,-14,0},{14,-14,0},{14,14,0}},{{-14,-14,0},{14,14,0},{-14,14,0}}};
-    require(physics.AddPatch(1,{0,0,0},terrain)&&physics.Burst(1,{0,0,0},{0,0,1},1,42)==12,"Jolt burst");
+    require(physics.AddPatch(1,{0,0,0},terrain)&&physics.Burst(1,{0,0,0},{0,0,1},1,42)==12,"PhysX GPU burst");
     OwnedRender::E1VisualInputs frame;frame.lightingValid=true;frame.ambient={.08f,.08f,.08f,1};frame.sunDiffuse={.9f,.9f,.9f,1};frame.sunDirection={.4f,-.4f,.82f,0};
     // An orthographic close view, +Z up, the ground recedes with +Y.
     frame.worldToClip={.55f,0,0,0, 0,.35f,.8f,-.25f, 0,.04f,-.03f,.5f, 0,0,0,1};
@@ -54,6 +54,8 @@ int wmain(int argc,wchar_t** argv)try{
     Image previous;unsigned changes=0;
     for(int tick=0;tick<=60;++tick){
         if(tick)physics.Tick(false);
+        if(!physics.Error().empty())throw std::runtime_error(physics.Error());
+        require(physics.Statistics().gpuDynamics&&physics.Statistics().gpuBroadPhase,"GPU simulation active");
         if(tick!=0&&tick!=6&&tick!=18&&tick!=40&&tick!=60)continue;
         renderer->begin_scene();hr(renderer->bind_embedded_targets(),"bind targets");const float color[]={.025f,.035f,.055f,1},depth=1;
         hr(renderer->clear_embedded_targets(color,&depth),"clear targets");require(renderer->set_native_world_lighting(light),"lighting");

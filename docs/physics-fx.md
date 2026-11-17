@@ -1,6 +1,6 @@
-# Decorative stone debris (JOLTFX01)
+# Decorative stone debris (PhysX 5 GPU)
 
-Jolt 5.3.0 handles client-only stone chips from fresh `PTID_FIREBLAST` events.
+PhysX 5.6.1 GPU handles client-only stone chips from fresh `PTID_FIREBLAST` events.
 Fireball and explosive shot already share this effect. Damage, projectile travel,
 navigation and network/save formats are unchanged.
 
@@ -28,7 +28,7 @@ path. It uses world lighting and depth, no own shadows, and draws before water
 and visibility-fog overlays. Alpha fade uses ordered transparent draws. Source
 visibility remains the server's effect admission; border fog is also respected.
 
-Files: `PhysicsFxCore` (Jolt and event gate), `PhysicsFxTerrain` (source geometry),
+Files: `PhysicsFxCore.h` / `PhysicsFxPhysX.cpp` (GPU simulation and event gate), `PhysicsFxTerrain` (source geometry),
 `PhysicsFxClient` (game boundary), `OwnedRender/E1PhysicsDebris` (native meshes).
 `CWorldClient` owns lifecycle; `CEffectParticle` submits the existing blast event.
 `E1PhysicsTerrainSource` provides immutable source values outside render-frame scope.
@@ -36,14 +36,13 @@ Files: `PhysicsFxCore` (Jolt and event gate), `PhysicsFxTerrain` (source geometr
 Checks:
 
 ```powershell
-powershell -NoProfile -File tools/check-physics-fx.ps1 -OutputDirectory <task>/checks/cpu
-powershell -NoProfile -File tools/build-task.ps1
-powershell -NoProfile -File tools/check-physics-fx-render.ps1 -OutputDirectory <task>/checks/gpu
+powershell -NoProfile -File tools/check-physics-fx.ps1 -OutputDirectory <task>/checks/core
+powershell -NoProfile -File tools/build-task.ps1 -PhysicsFxCheck
 ```
 
-CPU checks cover event replay, source materials/topology, pause, framerate independence,
+GPU correctness checks cover event replay, source materials/topology, pause, framerate independence,
 CCD/contacts, capacity, cleanup and mesh transforms. Render checks use production
-Jolt trajectories and native submissions on D3D11 WARP and D3D12 hardware, recording
+PhysX GPU trajectories and native submissions on D3D11 WARP and D3D12 hardware, recording
 pixels at several moments. These checks do not replace real spell casts, saved-game
 loading, pause/menu/speed regression and performance acceptance in the game.
 
@@ -51,13 +50,29 @@ The `PHYSICS_FX/stone_debris` journal event reports counts, source preparation a
 simulation milliseconds; it is diagnostic data, not a gameplay event. Journal
 outputs stay in the private task directory. No persistent player option is added.
 
-## Validation, 2026-11-17
+## GPU execution and availability
 
-CPU integration checks passed, including a 128-body slope/CCD run (local synthetic
-p95: 0.9399 ms per 55 ms game tick). Native D3D11 WARP and D3D12 hardware checks
-passed at ticks 0, 6, 18, 40 and 60; captured frames were visually inspected.
-The render fixture uses directed light to expose facet shading. Release x64 kit
-was built and its manifest produced. These are standalone results, not in-game
-acceptance. The available MCP launcher only starts the installed executable;
-no candidate game session or installation was performed. Real spells, menu/background
-pause, save/load, zone transitions and whole-game performance remain unverified.
+GPU dynamics, broadphase and GPU cooking are mandatory. Every convex hull is
+checked for GPU compatibility. Speculative CCD protects small fragments; scene
+pair buffers cover the full 128-body/16-patch budget before collision filtering.
+The NVIDIA GPU runtime loads only from beside the executable. Context/scene setup
+and SDK warnings/errors are checked. An unavailable GPU disables this decorative
+effect and emits `PHYSICS_FX/gpu_unavailable`; it never switches to CPU simulation.
+`gpu_ready` records the device; `stone_debris` includes GPU flags, heap/solver bytes
+and contact count. CPU still extracts/cooks local terrain, queues events and reads
+poses for the existing renderer. There is no CUDA/D3D direct rendering interop.
+
+The GPU context is prepared when the zone terrain becomes available. All state is
+released on zone reset. Dependency provenance and reproducible offline build are
+in `tools/physx/README.md`. No new settings or player switches are introduced.
+
+## Validation status
+
+The standalone GPU check passed on NVIDIA GeForce RTX 4070 SUPER, including
+GPU contact/solver/broadphase allocations, 128 bodies on a slope, pause, event
+admission, framerate independence, expiry and runtime recreation (147 checks).
+The separate missing-runtime process passed and created no CPU bodies. Native
+D3D11 WARP and D3D12 hardware checks passed at ticks 0, 6, 18, 40 and 60; captured
+frames were visually inspected. Release x64 kit and static CRT imports passed.
+The candidate game run is tracked in the task report. These checks are distinct
+from owner gameplay/visual acceptance.

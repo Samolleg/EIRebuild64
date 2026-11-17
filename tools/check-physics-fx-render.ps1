@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$OutputDirectory,[string]$GameRoot='C:\GOG Games\PZ',[switch]$Prepared)
+param([Parameter(Mandatory=$true)][string]$OutputDirectory,[string]$GameRoot='C:\GOG Games\PZ',[switch]$Prepared,[switch]$SkipBuild,[string]$KitDirectory)
 $ErrorActionPreference='Stop'
 $built=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $out=[IO.Path]::GetFullPath($OutputDirectory)
@@ -6,20 +6,22 @@ New-Item -ItemType Directory -Force -Path $out | Out-Null
 $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
 $vs=& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
 $lock=[IO.File]::Open((Join-Path $out '.check.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
-$savedEndpoint=$env:_MSPDBSRV_ENDPOINT_;$env:_MSPDBSRV_ENDPOINT_='JoltCheck-'+[guid]::NewGuid().ToString('N')
+$savedEndpoint=$env:_MSPDBSRV_ENDPOINT_;$env:_MSPDBSRV_ENDPOINT_='PhysXCheck-'+[guid]::NewGuid().ToString('N')
 try {
     if(!$Prepared){
         & "$built/tools/prepare-worktree.ps1" -VSInstallDir $vs
         if(!$?){throw 'Check dependency preparation failed'}
     }
-    & "$vs/MSBuild/Current/Bin/MSBuild.exe" "$built/PhysicsFxRenderCheck.vcxproj" /nologo /v:minimal /m:4 /nr:false /p:Configuration=Release /p:Platform=x64 *> "$out/build.txt"
-    if($LASTEXITCODE -ne 0){Get-Content "$out/build.txt" -Tail 30;throw 'Native render check build failed'}
+    if(!$SkipBuild){
+        & "$vs/MSBuild/Current/Bin/MSBuild.exe" "$built/PhysicsFxRenderCheck.vcxproj" /nologo /v:minimal /m:4 /nr:false /p:Configuration=Release /p:Platform=x64 *> "$out/build.txt"
+        if($LASTEXITCODE -ne 0){Get-Content "$out/build.txt" -Tail 30;throw 'Native render check build failed'}
+    }
     $builtBin=Join-Path $built 'out/x64/Release/PhysicsFxRenderCheck'
     $bin=Join-Path $out 'bin'
     New-Item -ItemType Directory -Force -Path $bin | Out-Null
     Copy-Item -LiteralPath "$builtBin/PhysicsFxRenderCheck.exe" -Destination $bin -Force
     $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-    $kit=Join-Path (Split-Path $repo) 'kit'
+    $kit=$KitDirectory;if(!$kit){$kit=Join-Path (Split-Path $repo) 'kit'}
     foreach($file in Get-ChildItem -LiteralPath $kit -Filter '*.dll' -File){Copy-Item -LiteralPath $file.FullName -Destination $bin -Force}
     foreach($name in 'eid3d_materials','eid3d_hosted'){
         if(!(Test-Path -LiteralPath (Join-Path $bin $name))){Copy-Item -LiteralPath (Join-Path $kit $name) -Destination $bin -Recurse}
