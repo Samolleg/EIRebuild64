@@ -816,6 +816,7 @@ struct NativeWorldGeometry {
     // sphere (its own frame) in its sphere block; radius 0: the mesh's own.
     std::array<float, 4> impostor_sphere{};
     std::uint32_t shape_count = 1;
+    bool shape_normals = false; // environment endpoint normals, same stride as positions
     std::array<float, 3> shape{};
     std::array<float, 16> object_to_world{};
     std::array<float, 16> world_to_clip{};

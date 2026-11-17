@@ -40,6 +40,8 @@
   <ItemGroup>
     <ClCompile Include="tools\model-check.cpp" />
     <ClCompile Include="external\owned-renderer\Source\gltf_decode.cpp" />
+    <ClCompile Include="external\owned-renderer\Source\environment_asset.cpp"><PreprocessorDefinitions>ENVIRONMENT_ASSET_CHECK;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>
+    <ClCompile Include="external\owned-renderer\Source\environment_material.cpp" />
   </ItemGroup>
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

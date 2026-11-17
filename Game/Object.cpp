@@ -612,6 +612,8 @@ void CObject3D::ResetFlagsFromAllFigures(DWORD dwFlags)
 /////////////////////////////////////////////////////////////////////////////////////
 int CObject3D::GetFigureIndexByName(LPCSTR pszFigureName)
 {
+    if(environmentAsset)for(size_t i=0;i<environmentAsset->parts.size();++i)
+        if(owned::environment::selected(environmentAsset->parts[i],{pszFigureName}))return int(i);
     for (int i = 0; i < szBodyPartNames.GetSize(); i++)
     {
         if (szBodyPartNames[i] == pszFigureName)
@@ -695,6 +697,8 @@ void CObject3D::CalculateBoundingVolume()
 // recalc bounding volume with current figures placement
 void CObject3D::RecalcBoundingVolume()
 {
+    if(environmentAsset){CStringArray names;for(const auto& s:environmentSelection)names.Add(s.c_str());
+        CString name=GetMaskName();LoadEnvironment(name,&names);return;}
     if (CheckFlag(OBJ_LOADED) == 0)
         return;
     float maxx = -FLT_MAX, maxy = -FLT_MAX, maxz = -FLT_MAX;
@@ -717,6 +721,8 @@ void CObject3D::RecalcBoundingVolume()
 /////////////////////////////////////////////////////////////////////////////////////
 void CObject3D::RecalcBoundingVolumeFast()
 {
+    if(environmentAsset){CStringArray names;for(const auto& s:environmentSelection)names.Add(s.c_str());
+        CString name=GetMaskName();LoadEnvironment(name,&names);return;}
     float maxx = -FLT_MAX, maxy = -FLT_MAX, maxz = -FLT_MAX;
     float minx = FLT_MAX, miny = FLT_MAX, minz = FLT_MAX;
     int i;
@@ -1109,12 +1115,12 @@ bool CObject3D::LoadEnvironment(LPCSTR name, const CStringArray* selected)
     if (WhoAmI()==HPC_UNIT) return false;
     auto asset=owned::environment::select(name);
     if (!asset) { environmentAsset.reset();environmentSelection.clear();return false; }
-    if (WhoAmI()!=HPC_BUILDING && WhoAmI()!=HPC_STONE && WhoAmI()!=HPC_STUFF_OBJECT)
+    if (WhoAmI()!=HPC_BUILDING && WhoAmI()!=HPC_STONE && WhoAmI()!=HPC_STUFF_OBJECT && WhoAmI()!=HPC_TREE)
         throw std::runtime_error("environment GLB: this object class is not in the rigid slice");
     std::vector<std::string> selection;
     if (selected) for(INT_PTR i=0;i<selected->GetSize();++i) {
         const std::string part=(*selected)[i];
-        if(std::none_of(asset->parts.begin(),asset->parts.end(),[&](const auto& p){return _stricmp(p.name.c_str(),part.c_str())==0;}))
+        if(std::none_of(asset->parts.begin(),asset->parts.end(),[&](const auto& p){return owned::environment::selected(p,{part});}))
             throw std::runtime_error("environment GLB: unknown selected part "+part);
         selection.push_back(part);
     }
@@ -1122,16 +1128,30 @@ bool CObject3D::LoadEnvironment(LPCSTR name, const CStringArray* selected)
     fbvs.SetSize(asset->parts.size());szBodyPartNames.SetSize(asset->parts.size());
     for(size_t i=0;i<asset->parts.size();++i) {
         const auto& part=asset->parts[i];
-        CPlot3D lo(part.minimum[0],part.minimum[1],part.minimum[2]);
-        CPlot3D hi(part.maximum[0],part.maximum[1],part.maximum[2]);
+        const auto bounds=owned::environment::collision(part,{complection.strength,complection.grace,complection.tall});
+        CPlot3D lo(bounds.minimum[0],bounds.minimum[1],bounds.minimum[2]);
+        CPlot3D hi(bounds.maximum[0],bounds.maximum[1],bounds.maximum[2]);
         auto& box=fbvs[i];box=SBoundingVolume{};const auto center=(lo+hi)*.5f;
         box.SetCenter(center);box.SetBox(lo-center,hi-center);box.SetRadius(fabs(hi-center));
-        box.SetBone(CPlot3D(0,0,0));box.SetIgnore(!part.solid);
-        if(!part.solid){box.SetPassability(AI_PASS_EASY);box.SetOpacity(AI_OPACITY_25);}
+        box.SetBone(CPlot3D(0,0,0));
+        box.SetIgnore(part.role==owned::environment::Part::Role::none || !owned::environment::selected(part,environmentSelection));
+        box.SetBridgeFlag(part.role==owned::environment::Part::Role::walkable);
+        box.SetPassability(part.passability);box.SetOpacity(part.opacity);
         szBodyPartNames[i]=part.name.c_str();
     }
-    const CPlot3D lo(asset->minimum[0],asset->minimum[1],asset->minimum[2]);
-    const CPlot3D hi(asset->maximum[0],asset->maximum[1],asset->maximum[2]);
+    std::array<float,3> minimum{FLT_MAX,FLT_MAX,FLT_MAX},maximum{-FLT_MAX,-FLT_MAX,-FLT_MAX};
+    const std::array<float,3> shape{complection.strength,complection.grace,complection.tall};
+    for(const auto& part:asset->parts)if(owned::environment::selected(part,environmentSelection)) {
+        const auto logical=owned::environment::collision(part,shape);
+        std::array<float,3> a{},b{};const auto& mesh=*part.geometry;
+        for(unsigned s=0;s<mesh.shape_count;++s) {
+            float w=1;if(mesh.shape_count==8)for(unsigned axis=0;axis<3;++axis)w*=s&(1u<<axis)?shape[axis]:1-shape[axis];
+            for(unsigned axis=0;axis<3;++axis) {a[axis]+=w*(w>=0?mesh.bounds[s].minimum[axis]:mesh.bounds[s].maximum[axis]);b[axis]+=w*(w>=0?mesh.bounds[s].maximum[axis]:mesh.bounds[s].minimum[axis]);}
+        }
+        for(unsigned axis=0;axis<3;++axis) {minimum[axis]=(std::min)({minimum[axis],logical.minimum[axis],a[axis]+asset->wind_root[axis]});maximum[axis]=(std::max)({maximum[axis],logical.maximum[axis],b[axis]+asset->wind_root[axis]});}
+    }
+    const CPlot3D lo(minimum[0],minimum[1],minimum[2]);
+    const CPlot3D hi(maximum[0],maximum[1],maximum[2]);
     const auto center=(lo+hi)*.5f;bv=SBoundingVolume{};
     bv.SetCenter(center);bv.SetBox(lo-center,hi-center);bv.SetRadius(fabs(hi-center));
     SetFlag(OBJ_LOADED|OBJ_STATIC);

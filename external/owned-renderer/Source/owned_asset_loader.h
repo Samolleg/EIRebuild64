@@ -13,6 +13,7 @@
 #include <vector>
 
 namespace owned {
+struct VisualAssemblyAsset;
 
 struct MobChunkRecord {
     std::uint32_t id = 0;
@@ -46,6 +47,7 @@ enum class StaticObjectRejection : std::uint8_t {
 const char* static_object_rejection_name(StaticObjectRejection reason) noexcept;
 
 struct StaticObjectSource {
+    bool environment_profile=false;
     std::uint32_t nid = 0;
     std::uint32_t family = 0;
     std::string name;
@@ -678,6 +680,7 @@ struct OwnedMapSnapshot {
     std::shared_ptr<const TerrainCpuAsset> terrain;
     std::vector<StaticObjectSource> objects;
     std::map<std::string, std::shared_ptr<const ModelCpuAsset>> models;
+    std::map<std::string, std::shared_ptr<const VisualAssemblyAsset>> environment;
     std::map<std::string, std::shared_ptr<const TextureCpuAsset>> textures;
     std::vector<ResourceContainerInfo> containers;
     std::vector<std::string> failures;

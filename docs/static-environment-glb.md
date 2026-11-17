@@ -1,79 +1,107 @@
-# Static environment GLB: first rigid slice
+# Static environment GLB
 
-The environment registry selects a separate rigid loader. It does not use the
-character profile, skin, character database or animation assets. A new object
-requires no FIG/MOD/BON/ANM counterpart. Existing unassigned objects keep their
-normal path; a selected invalid GLB throws a labelled error.
+`environment.v1` is the rigid profile for trees, buildings, stones and scenery
+(MOB types 53–56). It does not use the character profile/database, skin or
+animation assets. No FIG/MOD/BON/ANM counterpart is required. Unassigned models
+keep their existing path; an assigned invalid GLB raises a labelled error.
 
-This is an implementation checkpoint, not the complete building/vegetation
-feature. The verified fixture is a single solid matte part. Trees, wind, alpha
-foliage, texture maps, authored LOD/impostors, deformation forms, interactive
-objects, walkable bridges and Ataman authoring remain subsequent work.
+## Resource and gameplay contract
 
-## Resource contract
-
-Merge an entry into the existing `models/registry.v1.json`, preserving the other
-sections:
+Merge an entry into `models/registry.v1.json`, preserving other sections:
 
 ```json
-{"version":1,"environment":{"sgcrate01":{
-  "profile":"environment.v1",
-  "resource":"models/environment/sgcrate01.glb"
+{"version":1,"environment":{"example_tree":{
+  "profile":"environment.v1","resource":"models/environment/example_tree.glb"
 }}}
 ```
 
-GLB asset extras: `{"ei":{"profile":"environment.v1","kind":"environment"}}`.
-Each named mesh node has one triangle primitive with positions and normals and
-explicit extras, for example:
+Asset extras are `{"ei":{"profile":"environment.v1","kind":"environment"}}`.
+Each uniquely named mesh node carries explicit collision metadata:
 
 ```json
-{"ei":{"collision":{"role":"solid","min":[-1,-1,0],"max":[1,1,2]}}}
+{"ei":{"collision":{"role":"solid","min":[-1,-1,0],"max":[1,1,2]},
+        "render":true,"foliage":false}}
 ```
 
-Collision coordinates are model-local **game Z-up** coordinates. They are
-independent of visual mesh bounds and render simplification. `none` ignores that
-part as an obstacle. The first slice exposes no bridge/crown/passability modes.
-Vertices use normal glTF Y-up coordinates; flattening node transforms converts
-them to `(x,-z,y)`, transforms normals with the inverse transpose and reverses
-winding for a mirrored transform. Collision coordinates must already match the
-flattened model; a node transform does not transform them a second time.
+Roles: `solid`, `none`, `crown`, `walkable`. Optional collision `passability`
+uses 0=blocked, 1=hard, 2=easy, 3=danger. `opacity` uses 0=100%, 1=50%, 2=25%,
+3=0%. Crown/none default to easy/25%; other roles to blocked/100%. Walkable marks
+a bridge surface. `render:false` retains collision without drawing geometry.
 
-Limits: embedded GLB buffer, 64 MiB file, 128 parts, 65532 vertices and 3000000
-indices per part. Reject skin, animation, morphs, images/maps, unsupported vertex
-attributes and non-matte materials. A supplied material must be opaque,
-single-sided metallic-roughness with metallic=0 and roughness=1. The linear
-baseColorFactor is converted once to a shared one-pixel sRGB albedo; no full PBR
-equivalence is claimed. The alpha factor is ignored for opaque material.
+Collider coordinates are **model-local game Z-up**, already including node
+transforms. Visual vertices use glTF Y-up and flatten to `(x,-z,y)`; normals
+use inverse transpose and mirrored transforms reverse winding. Colliders are
+not transformed a second time. A doorway needs separate wall/lintel volumes;
+a visible hole alone does not provide a legacy AI passage.
 
-Only building, stone and stuff-object host classes enter this path. Use an empty
-MOB bodyparts list for the first verified whole-model case. Multipart selection,
-save/load, neighbouring maps and gameplay visibility queries still need their
-own acceptance cases before broadening the supported authoring workflow.
+Multiple material primitives become `node#0`, `node#1`, etc. Selecting a logical
+node selects all its primitives. Empty MOB bodyparts select the whole model.
+MOB retains model ID, type, transform and complection. Primary/secondary texture
+must be empty or `none`; embedded materials replace legacy texture overrides.
+Nonempty overrides are rejected. Interactive doors, levers, destruction and
+skeletal/character animation are outside this static profile.
 
-## Runtime and costs
+## Materials and preparation
 
-The immutable packed mesh uses the renderer's existing `FigureCpuAsset` storage
-as an internal vertex/index layout. No FIG is serialized or decoded. Rigid
-scene nodes use shared neutral transforms, with no skin weights or animated
-host figure objects. Assets are cached by name and resource mount generation;
-instances share geometry, material, texture and rigid transforms. The host
-publishes a retained scene object and skips legacy figure/texture loading.
+Supported: metallic-roughness PBR, base color, normal, packed ORM, emission,
+emissive strength, unlit, OPAQUE/MASK/BLEND, cutoff and double-sided faces.
+Repeat/clamp/mirrored-repeat and `KHR_texture_transform` are supported. All maps
+of one material need a common UV set, transform and sampler. Vertex colors and
+advanced transmission/clearcoat/sheen/iridescence/anisotropy need baking.
+Nondefault IOR/specular extensions are rejected.
 
-Game bounding volumes come from explicit collision metadata. Nav64 receives the
-same rigid geometry directly where it formerly requested a FIG. The shared
-renderer can build its regular static LODs from this packed layout; this does
-not prove authored LOD, vegetation impostors or wind support.
+PNG/JPEG are editable inputs. Distribution preparation bakes base factors,
+normal scale and AO strength, packs AO into ORM, and embeds full BC3 DDS mip
+chains through `MSFT_texture_dds`. Color mip filtering uses linear light;
+MASK preserves coverage. The decoder also accepts BC1/BC2 full mip chains.
+Prepared normal scale/AO strength must be 1. Preparation retains editable
+sources, writes a new file and validates it before publication.
 
-## Reproduction
+Limits: embedded buffers/images; 64 MiB GLB; 4096 nodes; 128 primitives; 65532
+vertices and 3 million indices per primitive; 64 MiB packed geometry; 128 MiB
+unique texture payload per asset; texture sides at most 1024. Split larger
+meshes during authoring. Sparse accessors are supported. Skin/animation are
+rejected.
 
-`tools/environment-fixture.py --output <new-private-directory>` generates the
-24-vertex, 12-triangle fixture and malformed/scaled inputs. Run
-`tools/check-environment.ps1 -OutputDirectory <private-check> -Fixtures <fixtures>`
-after preparing worktree dependencies. The check verifies axis/scale conversion,
-explicit bounds, invalid input rejection, exact albedo pixels and resource
-sharing over 1000 assembly descriptions. Packed geometry is 992 bytes; this
-excludes GPU allocations, instance state, cache/container overhead and textures.
+## Forms, wind and LOD
 
-Runtime verification and private evidence belong to STATICGLB02/STATICGLB02A,
-not this repository. Do not treat this CPU check as 1000 GPU instances or as
-proof of scene performance.
+Asset `ei.shape:"trilinear8"` enables Basis plus seven morph targets. Target
+`s-1` is endpoint `s` minus endpoint 0. Endpoint bits are strength=0, grace=1,
+height=2. Position/normal endpoints share topology, UVs and materials. Collision
+can have one fixed min/max box or eight `shapes` entries containing min/max.
+The same unclamped MOB trilinear weights drive geometry, normals and collision.
+
+Optional asset `ei.wind` contains `enabled`, game-space `root`, `trunkRadius`,
+`trunkHeight`, `height`. Eight forms may instead specify eight `shapes` vectors
+`[radius,protectedTrunkHeight,plantHeight]`. All parts use one anchored rigid
+root and the existing GPU sway. `foliage` explicitly selects leaf behavior.
+Wind never moves gameplay volumes. The existing packed sway quantizes radius
+at 1/16 and heights at 1/4, saturating at 63 units of each scale.
+
+Immutable geometry/materials/textures are shared by resource identity. Texture
+sharing includes format, mip layout, color interpretation and opacity policy.
+No GLB parsing, image compression or mip generation occurs per frame. Prepared
+DDS avoids PNG decoding/mip generation during distribution asset loading.
+
+`FigureCpuAsset` is the packed renderer layout, not an intermediate FIG file.
+Eight-form meshes keep all endpoints in one shared mesh with matching weighted
+normals. The existing static simplification and crown impostor pipeline consume
+these meshes on active and neighbouring maps. Collision and selection remain
+independent of visual LOD. Neighbour piece wire is version 10; asset wire carries
+environment material references and wind. Editor CPU exchange ABI 1 exposes
+flattened geometry, forms, colliders and albedo without creating a GPU session.
+
+## Tools and verification
+
+Tools repository: `pz_environment_blender.py` exports tagged meshes;
+`pz_environment.py prepare` prepares distribution textures; `install` previews
+or publishes to an offline content checkout. One guarded engine transaction
+updates GLB, registry and catalog while preserving unrelated entries.
+`EIRebuild64ModelCheck --environment file.glb` validates the runtime contract.
+These commands do not deploy the installed game.
+
+`tools/environment-fixture.py` plus `tools/check-environment.ps1` cover malformed
+input, transforms, logical selections, sharing, forms, wind metadata, materials,
+mips, editor CPU ABI and resource-wire roundtrip. Private runtime evidence stays
+in the task. CPU checks/build success do not establish gameplay, visual, LOD or
+performance acceptance; those require control scenes in D3D11 and D3D12.

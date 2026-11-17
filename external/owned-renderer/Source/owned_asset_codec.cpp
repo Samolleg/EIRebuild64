@@ -6,6 +6,7 @@
 #include "owned_terrain_decode.h"
 #include "owned_terrain_front_end.h"
 #include "retained_static_scene.h"
+#include "environment_material.h"
 
 namespace owned {
 namespace {
@@ -51,6 +52,7 @@ OWNED_CODEC_FIELDS(TerrainSectorCpuAsset,
     io(s, v.base_tile_ids); io(s, v.materials); io(s, v.animation_count); io(s, v.base_slope_normals);
     io(s, v.base_facet_flatness);)
 OWNED_CODEC_FIELDS(StaticObjectSource,
+    io(s,v.environment_profile);
     io(s, v.nid); io(s, v.family); io(s, v.name); io(s, v.prototype_reference); io(s, v.prototype_nid);
     io(s, v.visual_reference); io(s, v.primary_texture); io(s, v.secondary_texture); io(s, v.position);
     io(s, v.quaternion); io(s, v.shape); io(s, v.owner); io(s, v.quest); io(s, v.shadow);
@@ -127,12 +129,14 @@ void AssetEncoder::dependencies(const VisualAssemblyAsset& value) {
     id(value.skeleton);
     for (const auto& part : value.parts) {
         id(part.geometry); id(part.texture); id(part.surface); id(part.material);
+        if(part.environment_material)for(const auto& texture:part.environment_material->textures)if(texture)id(texture->asset);
     }
 }
 void AssetEncoder::dependencies(const OwnedMapSnapshot& value) {
     if (value.mob) id(value.mob->bytes);
     id(value.terrain);
     for (const auto& item : value.models) id(item.second);
+    for (const auto& item : value.environment) id(item.second);
     for (const auto& item : value.textures) id(item.second);
 }
 
@@ -172,9 +176,18 @@ void AssetEncoder::body(Out& out, const VisualAssemblyAsset& v) {
         io(out, p.diffuse); io(out, p.specular); io(out, p.texture_type); io(out, p.material_type);
         io(out, p.figure_flags); io(out, p.material_flags); io(out, p.texture_flags); io(out, p.weapon);
         io(out, p.arrow); io(out, p.explicitly_hidden); io(out, p.casts_shadow);
+        io(out,p.environment_foliage);io(out,bool(p.environment_material));
+        if(p.environment_material) {
+            const auto& m=*p.environment_material;
+            io(out,m.base);io(out,m.emission);io(out,m.roughness);io(out,m.metallic);io(out,m.cutoff);
+            io(out,m.alpha_factor);io(out,m.alpha);io(out,m.two_sided);io(out,m.unlit);
+            io(out,m.uv_set);io(out,m.uv);io(out,m.address_u);io(out,m.address_v);
+            for(const auto& t:m.textures)ref(out,t?t->asset:std::shared_ptr<const TextureCpuAsset>{});
+        }
     }
     io(out, v.shape); io(out, v.center_shift); io(out, v.scale); io(out, v.envelope_radius);
     io(out, v.sways); io(out, v.sway_shape); io(out, v.sway_root);
+    io(out,v.environment_wind);
 }
 void AssetEncoder::body(Out& out, const TerrainCpuAsset& v) {
     io(out, v.identity); io(out, v.project_resource); io(out, v.map_header_resource); io(out, v.maximum_z);
@@ -197,6 +210,7 @@ void AssetEncoder::body(Out& out, const OwnedMapSnapshot& v) {
     ref(out, v.terrain); io(out, v.objects);
     io_count(out, v.models.size());
     for (const auto& item : v.models) { io(out, item.first); ref(out, item.second); }
+    io_count(out,v.environment.size());for(const auto& item:v.environment){io(out,item.first);ref(out,item.second);}
     io_count(out, v.textures.size());
     for (const auto& item : v.textures) { io(out, item.first); ref(out, item.second); }
     io(out, v.containers); io(out, v.failures); io(out, v.store_stats); io(out, v.metrics);
@@ -301,10 +315,29 @@ bool AssetDecoder::body(In& in, VisualAssemblyAsset& v) {
         io(in, p.diffuse); io(in, p.specular); io(in, p.texture_type); io(in, p.material_type);
         io(in, p.figure_flags); io(in, p.material_flags); io(in, p.texture_flags); io(in, p.weapon);
         io(in, p.arrow); io(in, p.explicitly_hidden); io(in, p.casts_shadow);
+        bool hasEnvironment=false;io(in,p.environment_foliage);io(in,hasEnvironment);
+        if(hasEnvironment) {
+            auto m=std::make_shared<environment::Material>();
+            io(in,m->base);io(in,m->emission);io(in,m->roughness);io(in,m->metallic);io(in,m->cutoff);
+            io(in,m->alpha_factor);io(in,m->alpha);io(in,m->two_sided);io(in,m->unlit);
+            io(in,m->uv_set);io(in,m->uv);io(in,m->address_u);io(in,m->address_v);
+            for(auto& t:m->textures) {
+                std::shared_ptr<const TextureCpuAsset> asset;ref(in,asset);if(!asset)continue;
+                auto texture=std::make_shared<environment::Texture>();texture->asset=asset;
+                if(!asset->source)return false;
+                for(const auto& mip:asset->mips) {
+                    if(mip.byte_offset>asset->source->size()||mip.bytes>asset->source->size()-mip.byte_offset)return false;
+                    texture->mips.push_back({asset->source->data()+mip.byte_offset,mip.width,mip.height,mip.bytes});
+                }
+                t=texture;
+            }
+            p.environment_material=m;
+        }
         if (!in.ok()) return false;
     }
     io(in, v.shape); io(in, v.center_shift); io(in, v.scale); io(in, v.envelope_radius);
     io(in, v.sways); io(in, v.sway_shape); io(in, v.sway_root);
+    io(in,v.environment_wind);
     return in.ok();
 }
 bool AssetDecoder::body(In& in, TerrainCpuAsset& v) {
@@ -341,6 +374,7 @@ bool AssetDecoder::body(In& in, OwnedMapSnapshot& v) {
     for (std::size_t i = 0, n = in.count(1); i < n && in.ok(); ++i) {
         std::string name; io(in, name); ref(in, v.models[name]);
     }
+    for(std::size_t i=0,n=in.count(1);i<n&&in.ok();++i){std::string name;io(in,name);ref(in,v.environment[name]);}
     for (std::size_t i = 0, n = in.count(1); i < n && in.ok(); ++i) {
         std::string name; io(in, name); ref(in, v.textures[name]);
     }

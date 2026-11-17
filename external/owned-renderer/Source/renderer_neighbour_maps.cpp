@@ -338,6 +338,7 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     view.component_count=figure.component_count;view.index_count=figure.index_count;
                     view.world.enabled=true;view.world.identity=&upload->identities[figure.identity];
                     view.world.shape=node.shape;view.world.object_space=true;
+                    view.world.shape_count=figure.shape_count;view.world.shape_normals=figure.shape_normals!=0;
                     view.prebuilt_mesh=&upload->meshes[node.mesh];
                     // Its object's merged impostor: the lead part draws the
                     // quad, the others switch with it (static_lod.h).
@@ -371,6 +372,25 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     view.terrain.fog_max[0]=map_placement[3]+float(upload->fog_edges.x1);
                     view.terrain.fog_max[1]=map_placement[7]+float(upload->fog_edges.y1);
                     view.owned_texture=neighbour_piece_texture_view(texture,texture_mips);
+                    std::array<std::vector<NativeOwnedTextureMip>,3> environmentMips;
+                    if(node.environment_material) {
+                        view.skn_material.identity=node.environment_material;
+                        std::copy_n(node.environment_factors.begin(),4,view.skn_material.factors);
+                        std::copy_n(node.environment_base.begin(),4,view.skn_material.base);
+                        std::copy_n(node.environment_emission.begin(),4,view.skn_material.emission);
+                        for(unsigned k=0;k<3;++k)if(node.environment_maps[k]<upload->textures.size())
+                            view.skn_material.maps[k]=neighbour_piece_texture_view(upload->textures[node.environment_maps[k]],environmentMips[k]);
+                        retained_visual_part_fixed_state(RetainedVisualSample{},view.owned_fixed_state);
+                        view.owned_fixed_state.z_write_enable=node.environment_alpha!=2;
+                        view.owned_fixed_state.alpha_blend_enable=node.environment_alpha==2;
+                        view.owned_fixed_state.alpha_test_enable=node.environment_alpha==1;
+                        view.owned_fixed_state.alpha_func=D3DCMP_GREATEREQUAL;
+                        view.owned_fixed_state.alpha_ref=UINT(node.environment_cutoff*255);
+                        view.owned_fixed_state.address_u=node.environment_address_u;view.owned_fixed_state.address_v=node.environment_address_v;
+                        view.owned_fixed_state.cull_mode=node.environment_factors[3]>1?D3DCULL_NONE:D3DCULL_CW;
+                        if(node.environment_alpha==0)view.owned_texture.opaque_mips=UINT_MAX;
+                        else view.lighting.material_alpha*=node.environment_alpha_factor;
+                    }
                     view.semantic_kind=SemanticKind::figure;view.flags=native_neighbour_flag|native_ground_contact_flag|8u;
                     // Sway and foliage by the main map's rule (the stream read
                     // them from the assembly): a tree's parts sway around its
@@ -386,6 +406,7 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     const auto& span=contact[node.candidate];
                     view.contact_world_height=span[1]-span[0];view.contact_map=first_part+1;
                     view.ordering=NativeOrdering::reorderable;view.contribution={true,true,0};
+                    if(node.environment_material&&node.environment_alpha==2)view.ordering=NativeOrdering::preserve;
                     if(native_astral_record(node.flags)) {
                         // Astral rift veils and clumps (astral_rift.h): blended in
                         // order without depth writes, no ground contact; the clumps
@@ -531,6 +552,7 @@ NativeGeometryView Renderer::active_static_view(const NeighbourPiece& piece,Acti
     view.component_count=figure.component_count;view.index_count=figure.index_count;
     view.world.enabled=true;view.world.identity=&piece.identities[figure.identity];
     view.world.shape=draw.shape;view.world.object_space=true;
+    view.world.shape_count=figure.shape_count;view.world.shape_normals=figure.shape_normals!=0;
     view.prebuilt_mesh=&piece.meshes[draw.mesh];
     // Its model's merged impostor (shared with neighbours by model key).
     if(draw.impostor) {
@@ -573,7 +595,7 @@ void Renderer::update_active_statics(const FixedState& frame,const std::array<fl
         auto index=std::make_shared<ActiveStaticsIndex>();
         index->catalog=++catalogs;
         for(const auto& object:source.map->objects)
-            if((object.family==53 || object.family==55) && object.quest==0 &&
+            if((object.family==53 || object.family==55 || (object.environment_profile&&object.family>=53&&object.family<=56)) && object.quest==0 &&
                object.rejection==StaticObjectRejection::none && object.nid && object.nid<=0x7fffffffu)
                 index->eligible.insert(static_cast<std::int32_t>(object.nid));
         a.generation=generation;a.catalog=index->catalog;a.index=index;
@@ -787,6 +809,7 @@ HRESULT Renderer::queue_active_static_parts(const NativeStaticSubmission& reques
         view.bounds_minimum=part.bounds.minimum;view.bounds_maximum=part.bounds.maximum;
         // The posed record's texture (archive member or game surface).
         view.owned_texture=part.source->owned_texture;
+        view.skn_material=part.source->skn_material;
         // The posed sway bits name the root pose node; object space carries
         // the anchor instead (retained_object_space_sway_flags).
         view.flags=((values.flags&native_sway_flag)?(values.flags&(native_sway_flag-1u)):values.flags)|request.sway_flags[i];

@@ -104,6 +104,7 @@ struct NeighbourFigureShape {
 inline NeighbourFigureShape neighbour_figure_shape(const FigureCpuAsset* figure, const std::array<float, 3>& shape,
     const std::array<float, 4>* sphere = nullptr) noexcept {
     NeighbourFigureShape key{figure, {}, {}};
+    if(figure&&figure->user_data.size()==20&&!std::memcmp(figure->user_data.data(),"ENV8",4))return key;
     std::memcpy(key.shape.data(), shape.data(), sizeof(key.shape));
     if (sphere) std::memcpy(key.sphere.data(), sphere->data(), sizeof(key.sphere));
     return key;
@@ -119,6 +120,10 @@ inline NativeGeometryView neighbour_figure_view(const FigureCpuAsset& figure, co
     view.indices=figure.indices.data();view.index_count=static_cast<std::uint32_t>(figure.indices.size());
     view.world.enabled=true;view.world.identity=&figure.identity;view.world.shape=shape;
     view.world.object_space=true;
+    if(figure.user_data.size()==20&&!std::memcmp(figure.user_data.data(),"ENV8",4)) {
+        view.positions=figure.positions.data();view.world.shape_count=8;view.world.shape_normals=true;
+        std::memcpy(view.world.impostor_sphere.data(),figure.user_data.data()+4,16);
+    }
     return view;
 }
 // The CPU inputs of a neighbour's ground cover and contact maps, computed by

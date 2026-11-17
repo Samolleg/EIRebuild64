@@ -724,7 +724,8 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
     };
     if (object && object->GetEnvironment()) {
         if (++revision==0) ++revision;
-        return owned::environment::assembly(object->GetEnvironment(),object->GetEnvironmentSelection(),revision);
+        return owned::environment::assembly(object->GetEnvironment(),object->GetEnvironmentSelection(),revision,
+            {object->GetComplection().strength,object->GetComplection().grace,object->GetComplection().tall});
     }
     if (!animation || !geometry || object->GetNumFigures() <= 0)
         return reject("appearance.sources_ready");
@@ -1449,7 +1450,12 @@ BOOL CObject3DClientSpecific::LoadTextures(LPCSTR pszPrimaryTextureName,
                                            LPCSTR pszSecondaryTextureName,
                                            BOOL bReportMissing)
 {
-    if (static_cast<CObject3D*>(lpObject)->GetEnvironment()) return TRUE;
+    if (static_cast<CObject3D*>(lpObject)->GetEnvironment()) {
+        const auto assigned=[](LPCSTR name){return name&&*name&&_stricmp(name,"none")!=0;};
+        if(assigned(pszPrimaryTextureName)||assigned(pszSecondaryTextureName))
+            throw std::runtime_error("environment GLB: legacy texture override requires authored material conversion");
+        return TRUE;
+    }
     CTextureManager *lpTextureManager = (CTextureManager *)((CWorldClient *)GetWorld())
                                             ->GetTextureManager();
     CTexture *lpTexture = NULL;

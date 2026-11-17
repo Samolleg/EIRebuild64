@@ -1,4 +1,5 @@
 #include "neighbour_maps.h"
+#include "environment_material.h"
 #include "neighbour_profile.h"
 #ifdef EID3D11_EMBEDDED
 #include "embedded_host.h"
@@ -380,7 +381,7 @@ void neighbour_impostor_object(const RetainedStaticSourceCandidate& candidate,co
         const std::array<float,3> offset{node.object_local[3]-lead.object_local[3],node.object_local[7]-lead.object_local[7],
             node.object_local[11]-lead.object_local[11]};
         NativeImpostorPart made;
-        if(!build_impostor_part(*node.figure,node.positions.data(),offset,made)){object.parts.clear();object.nodes.clear();return;}
+        if(!build_impostor_part(*node.figure,node.positions.data(),offset,made,node.normals.empty()?nullptr:node.normals.data())){object.parts.clear();object.nodes.clear();return;}
         object.parts.push_back(std::move(made));object.nodes.push_back(&node);
     }
 } catch(...) {
@@ -478,7 +479,7 @@ void prebuild_decorations(NeighbourMapUpload& upload,NativePrebuiltBuilder& buil
                 }
                 auto view=neighbour_figure_view(*node.figure,node.positions.data(),candidate.source->shape);
                 view.lods=&level->second;
-                if(sphere)view.world.impostor_sphere=*sphere;
+                if(sphere&&!view.world.shape_normals)view.world.impostor_sphere=*sphere;
                 if(!build_native_prebuilt_mesh(builder,view,inserted.first->second))inserted.first->second=NativePrebuiltMesh{};
             }
         }
@@ -500,6 +501,8 @@ void prebuild_texture(NativePrebuiltBuilder& builder,NeighbourMapUpload& upload,
 }
 void prebuild_decoration_textures(NeighbourMapUpload& upload,NativePrebuiltBuilder& builder,
     std::unordered_set<std::string>& seen) {
+    for(const auto& candidate:upload.decorations)if(candidate->assembly)for(const auto& part:candidate->assembly->parts)
+        if(part.environment_material)for(const auto& texture:part.environment_material->textures)if(texture)prebuild_texture(builder,upload,seen,texture->view());
     for(const auto& candidate:upload.decorations)for(const auto& node:candidate->nodes) {
         if(!node.texture || node.texture_mips.empty())continue;
         NativeOwnedTextureView view{};

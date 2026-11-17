@@ -12,6 +12,8 @@
 #include "figure_service_nodes.h"
 #include "skn_runtime.h"
 #include "gltf_asset.h"
+#include "environment_material.h"
+#include "environment_asset.h"
 #include "world_scene_algorithms.h"
 
 #include <algorithm>
@@ -299,6 +301,7 @@ bool retained_static_node_selected(const StaticObjectSource& source,
 const char* retained_static_structure_omission(
     const StaticObjectSource& source,
     const OwnedMapSnapshot& snapshot) noexcept {
+    if(snapshot.environment.count(source.visual_reference))return nullptr;
     const auto model = snapshot.models.find(source.visual_reference);
     if (model == snapshot.models.end() || !model->second) return "model_lookup";
     if (model->second->nodes.empty() ||
@@ -369,7 +372,7 @@ bool retained_static_source_eligible(
     if (source.rejection != StaticObjectRejection::none || source.nid == 0 ||
         source.nid > static_cast<std::uint32_t>(
             (std::numeric_limits<std::int32_t>::max)()) ||
-        (source.family != 53 && source.family != 55) || source.quest != 0 ||
+        (source.family != 53 && source.family != 55 && !(source.family>=53&&source.family<=56&&snapshot.environment.count(source.visual_reference))) || source.quest != 0 ||
         !source.unknown_field_ids.empty())
         return false;
     return !retained_static_structure_omission(source, snapshot);
@@ -487,6 +490,27 @@ bool prepare_retained_static_candidate(
                 diagnostic, RetainedStaticPrepareResult::source_values,
                 source_index, kRetainedStaticPrepareNoIndex, signed_id);
 
+        const auto environment=candidate->snapshot->environment.find(object.visual_reference);
+        if(environment!=candidate->snapshot->environment.end()) {
+            auto assembly=std::make_shared<VisualAssemblyAsset>(*environment->second);
+            environment::reshape(*assembly,object.shape);
+            if(!object.part_names.empty()) {
+                assembly->parts.erase(std::remove_if(assembly->parts.begin(),assembly->parts.end(),[&](const auto& p){
+                    return std::none_of(object.part_names.begin(),object.part_names.end(),[&](const auto& n){return n==p.name||n==p.name.substr(0,p.name.find('#'));});}),assembly->parts.end());
+                if(assembly->parts.empty())return prepare_failed(diagnostic,RetainedStaticPrepareResult::figure_structure,source_index,0,signed_id);
+            }
+            StaticObjectSource prototype=object;ActiveStaticsModelRequest request{0,assembly,object.shape};
+            auto snapshotOwner=candidate->snapshot;
+            if(!prepare_live_static_candidate(request,prototype,signed_id,candidate))return prepare_failed(diagnostic,RetainedStaticPrepareResult::figure_structure,source_index,0,signed_id);
+            candidate->snapshot=std::move(snapshotOwner);candidate->source=&object;candidate->nid=object.nid;candidate->family=object.family;
+            float ground=0;if(!sample_terrain_height(*terrain,object.position[0],object.position[1],ground))return prepare_failed(diagnostic,RetainedStaticPrepareResult::terrain_sample,source_index,0,signed_id);
+            candidate->world_position=object.position;candidate->world_position[2]+=ground;
+            std::array<float,16> placement{};if(!retained_object_matrix(candidate->world_position,object.quaternion,placement))return false;
+            for(auto& node:candidate->nodes)node.object_to_world=retained_multiply_matrix(placement,node.object_local);
+            const auto root=candidate->root_world;
+            for(unsigned a=0;a<3;++a)candidate->root_world[a]=placement[a*4]*root[0]+placement[a*4+1]*root[1]+placement[a*4+2]*root[2]+placement[a*4+3];
+            prepared=candidate;return true;
+        }
         const auto model_found = candidate->snapshot->models.find(
             object.visual_reference);
         if (model_found == candidate->snapshot->models.end() ||
@@ -2752,6 +2776,7 @@ TrunkShape retained_visual_trunk_shape(const FigureCpuAsset& figure,
 }
 
 PartSwayEvidence retained_visual_part_sway(const VisualPartAsset& part) noexcept {
+    if(part.environment_material) return {part.environment_foliage,{}};
     if (!part.geometry || !(part.surface || part.texture)) return {};
     try {
         // Shared figure and texture values classify once per session, not
@@ -2932,6 +2957,8 @@ bool prepare_live_static_candidate(const ActiveStaticsModelRequest& request,
         } else return false;
         node.figure = &figure;
         node.normals.clear();
+        if(part.environment_material&&figure.shape_count==8)
+            if(!selected_groups(figure.normals,figure.position_groups,8,request.shape,node.normals))return false;
         // The bake reads the texture the posed records made resident: an
         // archive member under the same cache key, or the game surface by its
         // id and generation. A generated CPU texture has no bake input yet.
@@ -2952,6 +2979,7 @@ bool prepare_live_static_candidate(const ActiveStaticsModelRequest& request,
             identity = hash_string(identity, part.texture_source_name);
             node.texture_identity = identity ? identity : 1u;
             node.texture_format = texture_format(texture->format);
+            for(const auto& mip:texture->mips)node.texture_mips.push_back({texture->source->data()+mip.byte_offset,mip.width,mip.height,mip.bytes});
         } else candidate->impostor_inputs_complete = false;
         std::uint64_t geometry = hash_string(1469598103934665603ull, figure.identity.key());
         geometry = hash_bytes(geometry, request.shape.data(), sizeof(float) * 3);
@@ -3491,6 +3519,7 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
     if (target.bound_assembly!=sample.assembly) {
         view={};const auto& figure=*part.geometry;
         view.world.enabled=true;view.world.identity=&figure.identity;view.world.shape_count=figure.shape_count;
+        view.world.shape_normals=part.environment_material&&figure.shape_count==8;
         if(!sample.values.unit&&!assembly.sways&&!astral_kind(assembly,part))view.lod_figure=&figure;
         view.geometry_revision={1,0,0,0,0};view.geometry_revision_valid=true;
         view.positions=figure.positions.data();view.position_groups=figure.position_groups;
@@ -3520,6 +3549,18 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
             view.owned_texture.opaque_mips=texture.opaque_mips;
         } else return false;
         if (!part.material_name.empty()) view.owned_texture.material_name=&part.material_name;
+        if(part.environment_material) {
+            const auto& m=*part.environment_material;
+            view.skn_material=m.native();
+            if(m.alpha==0)view.owned_texture.opaque_mips=UINT_MAX;
+            view.owned_fixed_state.z_write_enable=m.alpha!=2;
+            view.owned_fixed_state.alpha_func=D3DCMP_GREATEREQUAL;
+            view.owned_fixed_state.cull_mode=m.two_sided?D3DCULL_NONE:D3DCULL_CW;
+            view.owned_fixed_state.alpha_test_enable=m.alpha==1;
+            view.owned_fixed_state.alpha_ref=static_cast<UINT>(m.cutoff*255);
+            view.owned_fixed_state.alpha_blend_enable=m.alpha==2;
+            view.owned_fixed_state.address_u=m.address_u;view.owned_fixed_state.address_v=m.address_v;
+        }
         target.bound_assembly=sample.assembly;
         if (++target.record_revision==0) ++target.record_revision;
         view.world.record_revision=target.record_revision;view.world.owner=&prepared.gpu_pose.owner;
@@ -3543,6 +3584,7 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
     view.prepared_mesh=&target.mesh;view.prepared_material=&target.material;view.prepared_wound_material=&target.wound_material;
     NativePreparedPartValues values;
     if (!retained_visual_part_values(sample,part,time,fog,values)) return false;
+    if(part.environment_material&&part.environment_material->alpha!=0)values.alpha*=part.environment_material->alpha_factor;
     auto& submission=target.submission;
     if(!submission.values_revision||std::memcmp(&submission.values,&values,sizeof(values))!=0){
         submission.values=values;if(++submission.values_revision==0)++submission.values_revision;
@@ -3904,6 +3946,7 @@ bool retained_visual_preserve_color_order(const RetainedVisualSample& sample,
     if (!part.material || retained_visual_effective_alpha(sample,part) != 1.f ||
         ((part.figure_flags&0x100u) && (part.diffuse>>24)!=255u))
         return true;
+    if(part.environment_material)return part.environment_material->alpha==2;
     // Actual alpha1 content removes the old format-only order constraint.
     // Other textures retain their established format-based ordering policy.
     if (part.surface) {

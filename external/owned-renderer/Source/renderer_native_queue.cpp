@@ -4036,6 +4036,7 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
  if(view.world.enabled){
   draw.instance.world_geometry=native_world_geometry|(view.world.object_space?native_world_object_space:0u);
   if(view.world.vertex_opacity)draw.instance.world_geometry|=native_world_vertex_opacity;
+  if(view.world.shape_normals)draw.instance.world_geometry|=native_world_shape_normals;
   draw.instance.shape_count=view.world.shape_count;
   draw.instance.position_groups=view.position_groups;
   std::copy(view.world.shape.begin(),view.world.shape.end(),draw.instance.shape);
