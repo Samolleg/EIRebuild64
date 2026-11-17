@@ -189,7 +189,7 @@ std::size_t Renderer::NativeTextureArrayKeyHash::operator()(
 }
 
 std::size_t Renderer::NativeMeshKeyHash::operator()(const NativeMeshKey& key) const noexcept{
- std::uint64_t hash=hash_bytes(1469598103934665603ull,key.resource_key.data(),key.resource_key.size());auto mix=[&](std::uint64_t value){hash^=value+0x9e3779b97f4a7c15ull+(hash<<6)+(hash>>2);};const auto& selector=key.selector;mix(selector.cache_identity);mix(selector.object_token);mix(selector.figure_token);mix(selector.geometry_token);mix(selector.positions);mix(selector.normals);mix(selector.components);mix(selector.texture_coordinates);mix(selector.indices);mix(selector.content_fingerprint);mix(selector.content_keyed?1u:0u);mix(key.world_part);mix(key.static_lods?1u:0u);mix(key.object_space?1u:0u);mix(key.shape_count);mix(key.shape_bits[0]);mix(key.shape_bits[1]);mix(key.shape_bits[2]);mix(key.position_groups);mix(key.normal_groups);mix(key.component_count);mix(key.texture_coordinate_count);mix(key.index_count);mix(key.decoded_channels);return static_cast<std::size_t>(hash^(hash>>32));
+ std::uint64_t hash=hash_bytes(1469598103934665603ull,key.resource_key.data(),key.resource_key.size());auto mix=[&](std::uint64_t value){hash^=value+0x9e3779b97f4a7c15ull+(hash<<6)+(hash>>2);};const auto& selector=key.selector;mix(selector.cache_identity);mix(selector.object_token);mix(selector.figure_token);mix(selector.geometry_token);mix(selector.positions);mix(selector.normals);mix(selector.components);mix(selector.texture_coordinates);mix(selector.indices);mix(selector.content_fingerprint);mix(selector.content_keyed?1u:0u);mix(key.world_part);mix(key.static_lods?1u:0u);mix(key.shape_count);mix(key.shape_bits[0]);mix(key.shape_bits[1]);mix(key.shape_bits[2]);mix(key.position_groups);mix(key.normal_groups);mix(key.component_count);mix(key.texture_coordinate_count);mix(key.index_count);mix(key.decoded_channels);return static_cast<std::size_t>(hash^(hash>>32));
 }
 
 std::size_t Renderer::NativeMaterialKeyHash::operator()(const NativeMaterialKey& key) const noexcept{
@@ -769,10 +769,10 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
  NativeMeshKey key{};key.selector=native_mesh_cache_selector(view,content);
  key.shape_count=shape_count;
  key.static_lods=view.lod_figure!=nullptr || view.lods!=nullptr;
- // Shape zero otherwise aliases the posed input before the prebuilt LOD
- // catalog arrives, losing its object sphere and impostor switch data.
- key.object_space=view.world.enabled&&view.world.object_space;
  if(view.world.enabled){key.resource_key=view.world.identity->key();key.world_part=view.world.part;key.selector={};}
+ // Keep prebuilt object-space LOD/sphere payload separate from posed input.
+ // Shape zero otherwise hits the earlier posed mesh without its impostor.
+ if(view.world.enabled&&view.world.object_space)key.resource_key+="|object-space";
  // An object-space record's shape-resolved mesh is shared by every record
  // of that figure with exactly this shape.
  if(view.world.enabled&&shape_count==1&&view.world.object_space)
