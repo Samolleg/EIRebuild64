@@ -4,6 +4,7 @@ param(
     [string]$DlssSdkSource = $env:EIREBUILD64_DLSS_SDK
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'build-io.ps1')
 $repo = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $projectRoot = $repo
 while (!(Test-Path -LiteralPath (Join-Path $projectRoot 'RULES.md') -PathType Leaf)) {
@@ -14,10 +15,7 @@ while (!(Test-Path -LiteralPath (Join-Path $projectRoot 'RULES.md') -PathType Le
 if (!$FFmpegSource) { $FFmpegSource = Join-Path $projectRoot 'deps/ffmpeg/8.1.3/x64' }
 & (Join-Path $PSScriptRoot 'physx/build.ps1') -ProjectRoot $projectRoot
 $physxDestination = Join-Path $repo 'dependencies/physx/5.6.1'
-New-Item -ItemType Directory -Force -Path $physxDestination | Out-Null
-Get-ChildItem -LiteralPath (Join-Path $projectRoot 'deps/physx/5.6.1/sdk') | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination $physxDestination -Recurse -Force
-}
+Copy-BuildTree (Join-Path $projectRoot 'deps/physx/5.6.1/sdk') $physxDestination
 if (!$DlssSdkSource) { $DlssSdkSource = Join-Path $projectRoot 'deps/dlss-sdk/v310.9.16' }
 $dlssFiles = @('include/nvsdk_ngx.h', 'include/nvsdk_ngx_defs.h', 'include/nvsdk_ngx_params.h',
     'include/nvsdk_ngx_helpers.h', 'include/nvsdk_ngx_helpers_d3d.h', 'include/nvsdk_ngx_helpers_cuda.h',
@@ -66,7 +64,7 @@ foreach ($file in 'cgltf.h','LICENSE') {
     if (!(Test-Path -LiteralPath $source -PathType Leaf)) { throw "Missing cgltf v1.15 input: $source" }
     $destination = Join-Path $repo ('dependencies/cgltf/v1.15/' + $file)
     New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
-    Copy-Item -LiteralPath $source -Destination $destination -Force
+    $null=Copy-BuildFile $source $destination
 }
 $cache = Join-Path $projectRoot 'deps/nuget'
 [xml]$config = Get-Content -LiteralPath (Join-Path $repo 'packages.config') -Raw
@@ -103,14 +101,14 @@ if ($ffmpegMissing -and !(Test-Path -LiteralPath $FFmpegSource -PathType Contain
 # Only ignored packages/, out/ and dependencies/ receive generated/copied files.
 foreach ($file in $d3d12Files) {
     New-Item -ItemType Directory -Force -Path (Split-Path $file.Destination) | Out-Null
-    Copy-Item -LiteralPath $file.Source -Destination $file.Destination -Force
+    $null=Copy-BuildFile $file.Source $file.Destination
 }
 Write-Output 'Prepared FidelityFX 2.3.0, NVAPI 70d337db and DXC 1.9.2609 from local deps.'
 $dlssDestination = Join-Path $repo 'dependencies/dlss/v310.9.16'
 foreach ($file in $dlssFiles) {
     $destination = Join-Path $dlssDestination $file
     New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
-    Copy-Item -LiteralPath (Join-Path $DlssSdkSource $file) -Destination $destination -Force
+    $null=Copy-BuildFile (Join-Path $DlssSdkSource $file) $destination
 }
 Write-Output "Prepared DLSS SDK v310.9.16 x64 /MT and release runtime from $DlssSdkSource."
 if ($ffmpegMissing) {
@@ -121,16 +119,12 @@ if ($ffmpegMissing) {
 foreach ($package in $packages) {
     $destination = Join-Path $repo ('packages/' + $package.Id + '.' + $package.Version)
     New-Item -ItemType Directory -Force -Path $destination | Out-Null
-    Get-ChildItem -LiteralPath $package.Source -Force | ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName -Destination $destination -Recurse -Force
-    }
+    Copy-BuildTree $package.Source $destination
     Write-Output "Prepared NuGet $($package.Id) $($package.Version) from local cache."
 }
 $jsonDestination = Join-Path $repo 'out/include/nlohmann'
 New-Item -ItemType Directory -Force -Path $jsonDestination | Out-Null
-Get-ChildItem -LiteralPath $jsonSource -Force | ForEach-Object {
-    Copy-Item -LiteralPath $_.FullName -Destination $jsonDestination -Recurse -Force
-}
+Copy-BuildTree $jsonSource $jsonDestination
 Write-Output 'Prepared out/include/nlohmann from SDKs/JSON.'
 
 $luaOutput = Join-Path $repo 'out/x64/Release/luajit'
@@ -152,4 +146,5 @@ $zstdSource = Join-Path $projectRoot "deps/zstd/v1.5.7"
 if (!(Test-Path (Join-Path $zstdSource "lib/zstd.h"))) { throw "Missing local zstd 1.5.7; nothing will be downloaded." }
 $zstdDestination = Join-Path $repo "dependencies/zstd/v1.5.7"
 New-Item -ItemType Directory -Force -Path $zstdDestination | Out-Null
-Copy-Item -LiteralPath (Join-Path $zstdSource "lib"), (Join-Path $zstdSource "LICENSE"), (Join-Path $zstdSource "COPYING") -Destination $zstdDestination -Recurse -Force
+Copy-BuildTree (Join-Path $zstdSource "lib") (Join-Path $zstdDestination "lib")
+foreach($name in "LICENSE","COPYING"){$null=Copy-BuildFile (Join-Path $zstdSource $name) (Join-Path $zstdDestination $name)}

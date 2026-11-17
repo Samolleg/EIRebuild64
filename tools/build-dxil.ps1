@@ -7,6 +7,7 @@ param(
     [Parameter(Mandatory=$true)][string]$HostD3D12
 )
 $ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'shader-build.ps1')
 $OutputDirectory=[IO.Path]::GetFullPath($OutputDirectory).TrimEnd('\')
 $dxil=Join-Path $OutputDirectory 'dxil'
 $resourceList=Join-Path $dxil 'dxil.rc'
@@ -77,4 +78,22 @@ if ($failed.Count) {
     throw "DXC rejected $($failed.Count) of $($expected.Count) programs; no kit may be produced."
 }
 Complete-Part (Start-Part 'native')
+foreach($name in 'diag_cs.dxil','diag_vs.dxil','diag_ps.dxil','imgui_vs.dxil','imgui_ps.dxil'){
+    $nativeFile=Join-Path $dxil $name
+    if(![IO.File]::Exists($nativeFile) -or ([IO.FileInfo]::new($nativeFile)).Length -eq 0){throw "Missing native DXIL output: $name"}
+}
+$pipelineSource=Join-Path $HostD3D12 'eid3d11_d3d12_pipelines.shipped.list'
+$pipelineOutput=Join-Path $dxil 'eid3d11_d3d12_pipelines.shipped.list'
+if(![IO.File]::Exists($pipelineOutput) -or (Get-ShaderFileHash $pipelineSource) -cne (Get-ShaderFileHash $pipelineOutput)){
+    [IO.File]::Copy($pipelineSource,$pipelineOutput,$true)
+}
+$nativeResources=@(
+    'D3D12_DIAG_CS RCDATA "diag_cs.dxil"',
+    'D3D12_DIAG_VS RCDATA "diag_vs.dxil"',
+    'D3D12_DIAG_PS RCDATA "diag_ps.dxil"',
+    'D3D12_IMGUI_VS RCDATA "imgui_vs.dxil"',
+    'D3D12_IMGUI_PS RCDATA "imgui_ps.dxil"',
+    'D3D12_SHIPPED_PIPELINES RCDATA "eid3d11_d3d12_pipelines.shipped.list"'
+) -join "`r`n"
+Write-ShaderText (Join-Path $dxil 'd3d12_shaders.rc') ($nativeResources+"`r`n")
 Write-Output "DXIL: all $($expected.Count) expected programs are present and nonempty."
