@@ -21,7 +21,7 @@ namespace owned::critters {
 
 enum Species : std::uint8_t {
     sp_rat = 0, sp_spider, sp_larva, sp_frog, sp_lizard, sp_snake, sp_scolopendra, sp_dungbeetle,
-    sp_bird, sp_raven, sp_vulture, sp_crab, sp_snowbird, sp_snowmouse, sp_bat, sp_count,
+    sp_bird, sp_raven, sp_vulture, sp_crab, sp_snowbird, sp_snowmouse, sp_bat, sp_fish, sp_squirrel, sp_prairiedog, sp_cat, sp_count,
 };
 enum Exit : std::uint8_t { exit_cover, exit_water, exit_mound, exit_flock, exit_soar };
 enum Bird : std::uint8_t {
@@ -67,13 +67,13 @@ inline const SpeciesRule& species_rule(Species s) noexcept {
     using namespace ambient;
     constexpr Bird n = bird_none;
     static const SpeciesRule rules[sp_count] = {
-        // rat
-        {.24f, zbit(zone_cave) | zbit(zone_gipat_cave), kBare, 0, 0, 1.f, 1.f, 1.f, 1, 1, 3.5f, 2.f, exit_cover, false, {n, n, n}},
+        // rat: caves, and the city of Suslanger (fits_at: inside the city, near-black skin; user 2026-11-14)
+        {.24f, zbit(zone_cave) | zbit(zone_gipat_cave) | zbit(zone_desert_cave) | zbit(zone_desert), kBare, 0, 0, 1.f, 1.f, 1.f, 1, 1, 3.5f, 2.f, exit_cover, false, {n, n, n}},
         // spider
-        {.12f, zbit(zone_cave) | zbit(zone_gipat_cave) | zbit(zone_dead_city), kBare, 0, 0, .7f, 1.f, 1.f, 1, 1, 2.f, 1.f, exit_cover, false, {n, n, n}},
+        {.12f, zbit(zone_cave) | zbit(zone_gipat_cave) | zbit(zone_desert_cave) | zbit(zone_dead_city), kBare, 0, 0, .7f, 1.f, 1.f, 1, 1, 2.f, 1.f, exit_cover, false, {n, n, n}},
         // larva: wherever a live crawler is (larva_habitat): the Gipat swamp
         // (zone4) and caves (zone5_1); speed follows the wave
-        {kLarvaLength, zbit(zone_outdoor) | zbit(zone_cave) | zbit(zone_gipat_cave), kBare | kGrass | kDry | kSand, 0, 0, 2.f, 1.f, 1.f, 2, 4, 1.5f, kLarvaStride / kLarvaFleePeriod, exit_cover, false, {n, n, n}},
+        {kLarvaLength, zbit(zone_outdoor) | zbit(zone_cave) | zbit(zone_gipat_cave) | zbit(zone_desert_cave), kBare | kGrass | kDry | kSand, 0, 0, 2.f, 1.f, 1.f, 2, 4, 1.5f, kLarvaStride / kLarvaFleePeriod, exit_cover, false, {n, n, n}},
         // frog: near swamp or water
         {.065f, zbit(zone_outdoor), kGrass | kBare, kSwamp | kWater, 3.f, 1.f, 1.f, 2.f, 1, 1, 2.5f, 1.2f, exit_water, true, {n, n, n}},
         // lizard
@@ -100,8 +100,19 @@ inline const SpeciesRule& species_rule(Species s) noexcept {
         {.13f, zbit(zone_snow), kSnow, 0, 0, 1.f, 1.f, 1.f, 1, 1, 3.f, 2.f, exit_mound, true, {n, n, n}},
         // cave bat swarms (length: wingspan with the wings spread in its flight clip); far smaller and
         // darker than the game's attackable bats
-        {.33f, zbit(zone_cave) | zbit(zone_gipat_cave), kBare | kGrass | kDry | kSand | kSwamp, 0, 0, 1.2f, 1.f, 1.f, 5, 8, 4.f, 3.5f,
+        {.33f, zbit(zone_cave) | zbit(zone_gipat_cave) | zbit(zone_desert_cave), kBare | kGrass | kDry | kSand | kSwamp, 0, 0, 1.2f, 1.f, 1.f, 5, 8, 4.f, 3.5f,
          exit_flock, false, {bird_bat, n, n}},   // weight 1.2 while someone moves (species_weight)
+        // fish: no zone or habitat here (the land director never picks them); schools follow fish_rule
+        {.2f, 0, 0, 0, 0, 0.f, 1.f, 1.f, 1, 1, 4.f, .5f, exit_water, true, {n, n, n}},
+        // squirrels (#112): by trees in Gipat (red-brown) and Ingos (light grey), by day; flee to cover
+        {.24f, zbit(zone_outdoor) | zbit(zone_snow), kGrass | kBare | kDry | kSnow, 0, 0, 1.f, 1.f, 0.f, 1, 1, 4.f, 2.6f,
+         exit_cover, true, {n, n, n}},
+        // prairie dogs (#112): Suslanger, small colonies far from monsters, by day; drop into a burrow
+        {.30f, zbit(zone_desert), kSand | kBare | kDry | kGrass, 0, 0, 1.f, 1.f, 0.f, 1, 3, 6.f, 2.2f, exit_mound, true, {n, n, n}},
+        // town cats (#113): by the houses of Ingos and Suslanger towns (cat_town), day and night;
+        // run from people close by and slip away
+        {.55f, zbit(zone_snow) | zbit(zone_desert), kBare | kGrass | kDry | kSand | kSnow, 0, 0, 1.5f, 1.f, 1.f, 1, 1, 2.5f, 3.f,
+         exit_cover, true, {n, n, n}},
     };
     return rules[s < sp_count ? s : 0];
 }
@@ -128,7 +139,12 @@ inline DisplaySize species_size(Species s) noexcept {
         {18, .6f * h, .85f * h}, {44, .4f, .55f},                                                 // small birds, ravens
         {45, .5f, .65f},                                                                          // vulture (span ~2.5x)
         {20, .6f * h, .85f * h}, {18, .6f * h, .85f * h}, {20, .5f * h, .7f * h},                 // crab snowbird snowmouse
-        {14, 1.2f * h, 1.8f * h}};                                                                // bat (wingspan, 2x)
+        {14, 1.2f * h, 1.8f * h},                                                                 // bat (wingspan, 2x)
+        {20, .5f * h, h},                                                                        // fish (own lengths: fish_rule)
+        // squirrel 0.22-0.26 m and prairie dog 0.28-0.32 m nose to tail tip: clearly below the
+        // 0.55 m town cat (user, 2026-11-13 preview)
+        {22, .22f, .26f}, {24, .28f, .32f},
+        {40, .55f, .55f}};   // cat: real size (user 2026-11-14), its shapes baked at their own lengths
     return sizes[s < sp_count ? s : 0];
 }
 // Authored body length (m) of each bird variant (proportions only: the bird
@@ -193,7 +209,7 @@ inline bool project_ground(const float* m, float width, float height,
 
 // Unit stance from the current clip name (the game's own clip names:
 // cwalk*, crun*, ccrawl*, uattack*, ucast*, uhit*, udeath* in figures.res).
-enum Stance : std::uint8_t { stance_idle = 0, stance_walk, stance_run, stance_crawl, stance_attack };
+enum Stance : std::uint8_t { stance_idle = 0, stance_walk, stance_run, stance_crawl, stance_attack, stance_hit };
 inline bool clip_prefix(const char* name, const char* prefix) noexcept {
     for (; *prefix; ++name, ++prefix) {
         char c = *name;
@@ -206,6 +222,7 @@ inline Stance stance_from_clip(const char* name) noexcept {
     if (!name) return stance_idle;
     if (clip_prefix(name, "uattack") || clip_prefix(name, "ucast"))
         return stance_attack;
+    if (clip_prefix(name, "uhit")) return stance_hit;
     if (clip_prefix(name, "ccrawl")) return stance_crawl;
     if (clip_prefix(name, "crun")) return stance_run;
     if (clip_prefix(name, "cwalk")) return stance_walk;
@@ -332,7 +349,7 @@ constexpr float kCarrionDelayMin = 60.f, kCarrionDelayMax = 120.f; // game secon
 // Dead City wall; vultures in Suslanger, crows in Ingos, ravens in Gipat,
 // on the Dead City outskirts and near the undead (user, 2026-10-03).
 inline Bird carrion_bird(ambient::ZoneClass zone, bool near_undead, bool inside_wall) noexcept {
-    if (zone == ambient::zone_cave || zone == ambient::zone_gipat_cave) return bird_none;
+    if (ambient::cave_zone(zone)) return bird_none;
     if (zone == ambient::zone_dead_city && inside_wall) return bird_none;
     if (zone == ambient::zone_desert) return bird_vulture;
     if (zone == ambient::zone_snow && !near_undead) return bird_crow;
@@ -431,6 +448,126 @@ inline std::vector<PerchPick> select_perches(const std::vector<PerchCandidate>& 
     return picks;
 }
 
+// ---------------------------------------------------------------- fish (issue #114)
+// Schools in the water, from the approved offline previews (claude/fish-boids,
+// Prototypes/fish): species per zone and water kind, body length (m; 0.5-1
+// head like the land critters, the pike the one large fish), school size,
+// the depth band below the surface a fish keeps (bottom: it keeps to the bed
+// instead), the hearing reach of a walking unit (threat_reach), its pace,
+// how often it is picked against the others that fit the water, and its shine.
+enum Fish : std::uint8_t {
+    fish_roach = 0, fish_perch, fish_bream, fish_rudd, fish_tench, fish_pike, fish_char, fish_grayling, fish_whitefish,
+    fish_burbot, fish_tilapia, fish_killifish, fish_catfish, fish_barbel, fish_mullet, fish_wels, fish_jewel, fish_rosybarb, fish_panchax, fish_count,
+};
+enum FishWater : std::uint8_t { water_none = 0, water_fresh = 1, water_swamp = 2, water_sea = 4 };
+struct FishRule {
+    const char* name;
+    float length;
+    std::uint32_t zones;        // ZoneClass bits
+    std::uint8_t water;         // FishWater bits
+    std::uint8_t group_lo, group_hi;
+    float depth_lo, depth_hi;   // m below the surface
+    bool bottom;
+    float flee_r, pace, weight;
+    // How mirror-like its scales are, 0-1: the silvery schooling fish flash
+    // in the sun as they turn, the dark and the bottom fish stay dull. The
+    // critter pixel shader's sun glint takes it; a ray traced material should
+    // read the same value (roughness about 0.55 - 0.33 x shine).
+    float shine;
+};
+inline const FishRule& fish_rule(Fish f) noexcept {
+    using namespace ambient;
+    constexpr std::uint32_t gipat = zbit(zone_outdoor), ingos = zbit(zone_snow), suslanger = zbit(zone_desert);
+    static const FishRule rules[fish_count] = {
+        {"roach", .17f, gipat, water_fresh, 6, 12, .25f, .7f, false, 4.f, 1.f, 1.2f, .75f},
+        {"perch", .21f, gipat, water_fresh, 1, 4, .3f, .8f, false, 4.f, 1.f, 1.f, .35f},
+        {"bream", .24f, gipat, water_fresh, 4, 8, .3f, .8f, false, 4.f, 1.f, .8f, .50f},
+        {"rudd", .18f, gipat, water_fresh, 5, 10, .25f, .7f, false, 4.f, 1.f, 1.f, .60f},
+        {"tench", .24f, gipat, water_swamp, 1, 2, .3f, .9f, false, 4.f, 1.f, 1.f, .25f},
+        {"pike", .55f, gipat, water_fresh, 1, 1, .35f, 1.f, false, 5.f, 1.f, .25f, .25f},
+        {"char", .24f, ingos, water_fresh, 2, 5, .3f, .9f, false, 4.f, 1.f, 1.f, .35f},
+        {"grayling", .25f, ingos, water_fresh, 2, 4, .3f, .8f, false, 4.f, 1.f, 1.f, .50f},
+        {"whitefish", .22f, ingos, water_fresh, 6, 12, .3f, .8f, false, 4.f, 1.f, 1.2f, .80f},
+        {"burbot", .25f, ingos, water_fresh, 1, 1, .4f, 1.2f, true, 3.f, 1.f, .4f, .15f},
+        {"tilapia", .20f, suslanger, water_fresh, 3, 6, .25f, .7f, false, 4.f, 1.f, 1.f, .35f},
+        {"killifish", .13f, suslanger, water_fresh, 8, 16, .12f, .4f, false, 4.f, 1.6f, 1.2f, .90f},
+        {"catfish", .25f, suslanger, water_fresh, 1, 1, .4f, 1.2f, true, 3.f, 1.f, .4f, .20f},
+        {"barbel", .25f, suslanger, water_fresh, 2, 5, .3f, 1.f, true, 4.f, 1.f, .8f, .40f},
+        // brackish and coastal water only: the sea of an open-air zone other than Ingos
+        {"mullet", .23f, gipat | suslanger, water_sea, 5, 10, .25f, .7f, false, 4.f, 1.f, 1.f, .80f},
+        // Gipat's catfish (user, 2026-11-14): the Suslanger catfish's shape at wels size, the second
+        // large fish; single, on the bed of rivers, lakes and swamps, a little commoner than its cousin
+        {"wels", .50f, gipat, water_fresh | water_swamp, 1, 1, .5f, 1.4f, true, 3.5f, 1.f, .5f, .20f},
+        // Suslanger's colourful warm-water fish (user, 2026-11-14; approved preview 9): a jewel cichlid in
+        // small groups, a rosy barb in quick flashing shoals, a blue panchax near the surface
+        {"jewel cichlid", .16f, suslanger, water_fresh, 3, 6, .25f, .7f, false, 4.f, 1.f, 1.f, .50f},
+        {"rosy barb", .13f, suslanger, water_fresh, 8, 16, .2f, .6f, false, 4.f, 1.4f, 1.2f, .85f},
+        {"panchax", .13f, suslanger, water_fresh, 4, 8, .1f, .35f, false, 4.f, 1.f, 1.f, .70f},
+    };
+    return rules[f < fish_count ? f : 0];
+}
+constexpr unsigned kSchoolFish = 16;      // most fish in one school
+// The single bottom fish (wels, catfish, burbot) slide on the bed (approved
+// preview 8): the belly a few centimetres over it, never up in the water;
+// long rests lying still, slow slides of a few body lengths with a long wave
+// that reaches the head, wide turns, and when disturbed a heavy lunge along
+// the bottom instead of a C-start.
+inline bool fish_slides(const FishRule& rule) noexcept { return rule.bottom && rule.group_hi == 1; }
+constexpr float kFishSlide = .5f, kFishLunge = 2.5f, kFishSlideTurn = 3.f, kFishBedGap = .03f;   // lengths/s, lengths/s, lengths, metres
+// The speed a calm fish travels at (its school's station speed).
+inline float fish_cruise_speed(const FishRule& rule) noexcept {
+    return fish_slides(rule) ? kFishSlide * rule.length : 2 * rule.length * rule.pace;
+}
+// The current a fish feels (user, 2026-11-14): the full current near the
+// surface, falling smoothly to kFishBedCurrent of it at the bed (the boundary
+// layer), and never more than its cruise speed / kFishUpstream, so every
+// species makes way upstream (cruise >= 1.5x, a burst several times the
+// current). A slider lying on the bed feels none.
+constexpr float kFishBedCurrent = .2f, kFishUpstream = 1.5f;
+inline float fish_current_share(float depth, float bed) noexcept {
+    const float t = bed > 1e-3f ? std::clamp(depth / bed, 0.f, 1.f) : 1.f, s = t * t * (3 - 2 * t);
+    return 1 + (kFishBedCurrent - 1) * s;
+}
+// A school lives in water at least kFishMinDepth deep and no fish swims where
+// it is shallower than kFishHardDepth. Reaction to a threat: per-fish delay
+// min(cap, k x distance) + jitter, a C-start and a burst away, then the
+// school regroups in deep water beyond the reach and settles after the quiet
+// time; scattered for kFishLeave seconds it leaves.
+constexpr float kFishMinDepth = .6f, kFishHardDepth = .45f;
+constexpr float kFishReactCap = .30f, kFishReactK = .03f, kFishReactJitter = .10f;
+constexpr float kFishQuiet = 3.f, kFishLeave = 25.f, kFishBurst = 1.2f;
+// Fish in a new school, from two random values in [0,1): mostly anywhere in
+// the species' range; one school in five is a small party (two to four of a
+// shoaling species, one or two of a predator-like one) and one in ten a large
+// school, up to a third over the range. Single species stay single.
+inline unsigned fish_school_size(const FishRule& rule, float u, float v) noexcept {
+    const unsigned lo = rule.group_lo, hi = rule.group_hi;
+    const auto pick = [u](unsigned from, unsigned count) { return from + std::min(count - 1, unsigned(u * float(count))); };
+    if (hi <= 2) return pick(lo, hi - lo + 1);
+    if (v < .2f) return lo <= 3 ? pick(1, 2) : pick(2, 3);
+    if (v > .9f) return std::min(kSchoolFish, pick(hi, hi / 3 + 1));
+    return pick(lo, hi - lo + 1);
+}
+// A calm school rests (hovers on station; a bottom or single fish rests
+// longer), cruises to a new place in its water, or now and then mills.
+constexpr float kFishRest[2] = {5.f, 20.f}, kFishCruise[2] = {3.f, 10.f}, kFishMill[2] = {3.f, 6.f}, kFishMillChance = .15f;
+constexpr float kFishCruiseReach[2] = {5.f, 12.f};   // metres to a cruise target
+// A fish moves only along its heading and turns only while it moves: its turn
+// rate is at most speed / (kFishTurnLengths body lengths), so no speed means no
+// turn and every turn is an arc (user, 2026-11-14: no turning on the spot); a
+// fish that has to turn takes at least kFishTurnSpeed lengths/s. A C-start is
+// the one fast turn (a bend with thrust). At rest in still water it creeps
+// ahead at kFishCreep lengths/s.
+constexpr float kFishTurnLengths = 1.5f, kFishTurnSpeed = .25f, kFishStartTurn = 14.f, kFishCreep = .15f;
+// A school's stations and cruise targets stay within kFishLeash metres of the
+// place it started, in its own water. kFishCurrent: metres a second of a level
+// river reach's full current (the outflow field gives direction and a 0-1
+// strength, no speed: this value is the renderer's choice).
+constexpr float kFishLeash = 20.f, kFishCurrent = .3f;
+// Schools at once and the share of a species' school size, by the critters setting.
+inline unsigned fish_schools(int level) noexcept { return level < 2 ? 1u : 3u; }
+inline float fish_school_share(int level) noexcept { return level < 2 ? .6f : 1.f; }
+
 // ---------------------------------------------------------------- hashing
 inline std::uint64_t splitmix(std::uint64_t x) noexcept {
     x += 0x9E3779B97F4A7C15ull;
@@ -515,7 +652,11 @@ constexpr float kSpotBand = 1.4f;         // approach band just outside the view
 constexpr float kSpotForget = 2.f;        // beyond this (NDC) a resident is dropped, a spot re-armed
 // On-screen budget shared by director events and spot residents (carrion
 // flocks keep their own); scaled by the critters setting.
-inline unsigned critter_budget(int level) noexcept { return level < 2 ? 2u : 3u; }
+// Ground, water-edge and air events run concurrently (one each) beside the
+// spot residents: low 3, high 5 on screen.
+inline unsigned critter_budget(int level) noexcept { return level < 2 ? 3u : 5u; }
+// World-spot residents keep their former share of it (low 2, high 3).
+inline unsigned resident_budget(int level) noexcept { return level < 2 ? 2u : 3u; }
 
 // ---------------------------------------------------------------- showcase (debug)
 // critter_showcase: every walking species once, a small flock of every bird
@@ -526,10 +667,14 @@ struct ShowcaseSlot { Species species; Bird bird; std::uint8_t count; bool flyin
 inline std::vector<ShowcaseSlot> showcase_layout(float spacing) {
     std::vector<ShowcaseSlot> out;
     const Species ground[] = {sp_rat, sp_snowmouse, sp_spider, sp_larva, sp_frog, sp_crab,
-                              sp_lizard, sp_scolopendra, sp_dungbeetle, sp_snake};
-    constexpr unsigned n = sizeof(ground) / sizeof(*ground);
-    for (unsigned i = 0; i < n; ++i)
-        out.push_back({ground[i], bird_none, 1, false, (float(i) - (n - 1) * .5f) * spacing, 0});
+                              sp_lizard, sp_scolopendra, sp_dungbeetle, sp_snake, sp_squirrel, sp_prairiedog, sp_cat};
+    // two rows (the second just beyond the first) so a low, zoomed-in
+    // camera still sees every animal
+    constexpr unsigned n = sizeof(ground) / sizeof(*ground), half = (n + 1) / 2;
+    for (unsigned i = 0; i < n; ++i) {
+        const unsigned k = i % half, row = i / half;
+        out.push_back({ground[i], bird_none, 1, false, (float(k) - (half - 1) * .5f) * spacing, row * 1.2f * spacing});
+    }
     const std::pair<Species, Bird> birds[] = {{sp_bird, bird_finch}, {sp_bird, bird_sparrow}, {sp_bird, bird_bunting},
                                               {sp_snowbird, bird_snowbird}, {sp_raven, bird_crow}, {sp_raven, bird_raven}};
     for (unsigned i = 0; i < 6; ++i)

@@ -123,6 +123,32 @@ HarnessCommand parse_harness_command(std::string_view line) {
         command.number[0] = values[0]; command.number[1] = values[1]; command.number[2] = values[2];
         command.number[3] = values[4]; command.number[4] = values[3];
         command.verb = HarnessVerb::camera_path;
+    } else if (verb == "equip_cycle") {
+        std::uint32_t steps = 0, between = 0;
+        if (w.size() != 3 || !whole(w[1], steps) || !whole(w[2], between) || steps == 0 || steps > 10000 ||
+            between == 0 || between > 600)
+            return rejected("usage: equip_cycle <steps 1..10000> <presents_between 1..600>");
+        command.frames = steps * between;
+        command.number[0] = static_cast<float>(between);
+        command.verb = HarnessVerb::equip_cycle;
+    } else if (verb == "outfit_equip" || verb == "scroll_items") {
+        std::uint32_t steps = 0, between = 0;
+        bool negative = false;
+        std::string_view count = w.size() == 3 ? w[1] : std::string_view{};
+        if (verb == "scroll_items" && !count.empty() && count.front() == '-') { negative = true; count.remove_prefix(1); }
+        if (w.size() != 3 || !whole(count, steps) || !whole(w[2], between) || steps == 0 || steps > 10000 ||
+            between == 0 || between > 600)
+            return rejected(verb == "outfit_equip" ? "usage: outfit_equip <steps 1..10000> <presents_between 1..600>"
+                                                   : "usage: scroll_items <[-]steps 1..10000> <presents_between 1..600>");
+        command.frames = steps * between;
+        command.number[0] = static_cast<float>(between);
+        command.number[1] = negative ? -1.0f : 1.0f;
+        command.verb = verb == "outfit_equip" ? HarnessVerb::outfit_equip : HarnessVerb::scroll_items;
+    } else if (verb == "open_outfitting") {
+        // Optional shop number (base maps): 0 or none opens the camp without a shop.
+        if (w.size() > 2 || (w.size() == 2 && (!whole(w[1], command.frames) || command.frames > 100000)))
+            return rejected("usage: open_outfitting [shop 0..100000]");
+        command.verb = HarnessVerb::open_outfitting;
     } else if (verb == "state" || verb == "capture" || verb == "dump_units" ||
                verb == "list_saves" || verb == "quit" || verb == "main_menu") {
         if (w.size() != 1) return rejected("this command takes no arguments");
@@ -131,6 +157,11 @@ HarnessCommand parse_harness_command(std::string_view line) {
                        verb == "dump_units" ? HarnessVerb::dump_units :
                        verb == "list_saves" ? HarnessVerb::list_saves :
                        verb == "main_menu" ? HarnessVerb::main_menu : HarnessVerb::quit;
+    } else if (verb == "diagnostics_package") {
+        // Shift+F11 without a key: the F11 capture, packed into the testers' zip.
+        if (w.size() != 1) return rejected("this command takes no arguments");
+        command.verb = HarnessVerb::capture;
+        command.name = "package";
     } else if (verb == "clock") {
         if (w.size() != 2) return rejected("usage: clock <hour> | clock release");
         if (w[1] == "release") {

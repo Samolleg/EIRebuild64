@@ -52,7 +52,7 @@ cbuffer FurDraw:register(b12){
  float4 furHeadSphere;               // head part bounds in head-node space (w radius; 0 none)
  float furDensity;float furWidth;float furLengthScale;uint furKind; // kind 0 fur, 1 hair
  float2 furViewport;uint furListBase;uint furArgsOffset;
- uint furHairAxis;uint3 furAxisPadding;  // hair: 0 along texture U, 1 along V
+ uint furHairAxis;uint furDebug;uint2 furAxisPadding;  // hair: 0 along texture U, 1 along V; F10 fur_debug 4: fur drawn green
  uint2 furTextureRef;uint furFogEnable;uint furMotion;   // the record's nativePadding.xy (texture slice or bindless index, array flag); its fog; DLSS object motion
  float furBodyRadius;float furLodMin;float furLodFull;float furInterface; // LOD: creature radius; pixel radii of no / full detail; 1: an interface record
  float4 furFogColor;                 // the record's game fog colour, w its stock fog factor (default specular alpha)
@@ -146,7 +146,9 @@ FurCorner furLoadCorner(uint tri,uint corner,float3 forward){
  c.dp=0;
  [branch]if(furMotion!=0){
   NativeWorldVertex b=nativePreviousWorldVertices[furPreparedBase+index];
-  if(b.sourcePosition==w.sourcePosition&&b.partNode==w.partNode)c.dp=b.p.xyz-w.p.xyz;
+  // Only a vertex rewritten this frame carries the stamp in nativeMotionClock.z (storeNativeWorldVertex).
+  uint stamp=asuint(nativeMotionClock.z);
+  if(b.specular==stamp&&b.sourcePosition==w.sourcePosition&&b.partNode==w.partNode)c.dp=b.p.xyz-w.p.xyz;
  }
  return c;
 }
@@ -174,14 +176,16 @@ FurPixel furMotionPixel(float4 color,float4 p,float4 objectClip,float4 cameraCli
  return o;
 }
 // The record's fog, as the native colour pass applies it to figures: the
-// stock fog factor with the depth fog, border fog colour, cave fog light,
-// then the atmosphere and draw-distance fade.
+// atmosphere, then the stock fog factor with the depth fog to the border fog
+// colour (cave fog light), then the draw-distance fade (nativePS's order).
 float3 furFog(float3 c,float4 p,float3 wp){
+ [branch]if(furDebug!=0)return float3(0,1,0);   // F10 fur_debug 4: every fur fragment green
  [branch]if(furFogEnable==0)return c;
  float3 caveFog=nativeCaveFogLight(wp)+nativeCaveExitGlow(wp);
  float f=nativeFogFactor(furFogColor.w,p);
+ nativeAtmosphereCoreAt(c,p,saturate(furFogColor.rgb+caveFog),wp);
  c=lerp(saturate(borderFogColorAt(wp,furFogColor.rgb)+caveFog),c,f);
- nativeAtmosphereAt(c,p,saturate(furFogColor.rgb+caveFog),wp);
+ nativeDrawFadeToAt(c,wp,furFogColor.rgb);
  return c;
 }
 // Coat direction on the surface: toward the tail and down the flanks.
@@ -522,8 +526,17 @@ uint furStrandCount(uint tri,NativeInstance instance){
   // Hair: strands about 1.6x the triangle's size, enough ribbons to cover it
   // furDensity times over.
   float3 tangent;float radius=furHeadRadius();
-  if(abs(c0.role-5)>.5||radius<=0||!furHairTangent(c0,c1,c2,tangent)||
-     !furHairFaceDrawn(instance.objectToClip,c0,c1,c2))return 0;
+  if(abs(c0.role-5)>.5||radius<=0||!furHairTangent(c0,c1,c2,tangent))return 0;
+  // Faces just past the outline keep their strands: those strands reach
+  // over the hair's edge, and dropping them as their face turned past
+  // edge-on made the edge strands pop in and out with the view angle
+  // (user, Karansul, tip probe 2026-11-13). Faces turned clearly away
+  // (inner caps, above helmets) still grow none (furHairFaceDrawn).
+  if(!furHairFaceDrawn(instance.objectToClip,c0,c1,c2)){
+   float3 fn=cross(c1.p-c0.p,c2.p-c0.p);
+   if(dot(fn,fn)<=1e-20)return 0;
+   if(abs(dot(normalize(fn),liquidViewDirection(instance.objectToClip,(c0.p+c1.p+c2.p)/3)))>.3)return 0;
+  }
   wanted=area*furDensity/(1.6*sqrt(area)*furWidth*radius);
  }else{
   if(max(c0.len,max(c1.len,c2.len))<=0||abs(c0.role-5)<.5)return 0;
@@ -621,7 +634,7 @@ FurStrandOut furStrandVS(uint vid:SV_VertexID,uint iid:SV_InstanceID){
   float turn=(furHash(clump*5u+21u)-.5)*.35;
   float3 Bn=cross(n,T);T=normalize(T*cos(turn)+Bn*sin(turn));
   // Loose strays, more toward the ends (downward faces): a little longer,
-  // with more wave across the strand, lying on the hair like every strand.
+  // with the same wave and wind as every strand, lying on the hair.
   // Rejected (user, twice): strays lifting off the surface and 2.5x-long
   // strays; both stood out of the outline as spikes (fur_debug red, 78faeabb).
   float stray=furHash(seed+8u)<.08+.12*saturate(-n.z)?1:0;
@@ -653,10 +666,14 @@ FurStrandOut furStrandVS(uint vid:SV_VertexID,uint iid:SV_InstanceID){
   // Every strand, strays included, follows the scalp's curvature along its
   // length: a stray drawn straight (tangent at its root, 2.5x longer) rose
   // off a curved scalp at both ends (user: spikes; fur_debug run, 49d4e4fc).
-  float3 p=root+T*s+n*(depth-.5*bend*s*s)+B*sin(t*6.2831853+furHash(seed+7u)*6.2831853)*radius*(.003+.01*stray);
+  // Strays wave and sway like every strand: their own wider wave (0.013 of
+  // the head radius) and tip-weighted wind (0.09) crossed the flow, and at
+  // the outline, where the surface is seen edge-on, that sideways push read
+  // as strands sticking out at odd angles (user, tip probe blue strands).
+  float3 p=root+T*s+n*(depth-.5*bend*s*s)+B*sin(t*6.2831853+furHash(seed+7u)*6.2831853)*radius*.003;
   // Wind moves strands along the surface only, never off it (same reason).
   float3 wind=furWind(root);wind-=n*dot(wind,n);
-  p+=wind*radius*(.03+.06*stray*t);
+  p+=wind*radius*.03;
   float3 dir=T-n*bend*s;
   // No body collision: the strands lie on the authored hair mesh, which
   // already rests on the body. Pushing points out of the body collision shapes swung
@@ -762,6 +779,26 @@ FurPixel furShellMotionPS(FurShellOut i){float4 c=furShellColor(i);if(c.a<0)disc
 FurPixel furFinMotionPS(FurFinOut i){float4 c=furFinColor(i);if(c.a<0)discard;return furMotionPixel(c,i.p,i.objectClip,i.cameraClip,i.p.z,1);}
 // A strand's motion where it covers at least half the pixel.
 FurPixel furStrandMotionPS(FurStrandOut i){float4 c=furStrandColor(i);return furMotionPixel(c,i.p,i.objectClip,i.cameraClip,-1,c.a>=.5?1:0);}
+// rt_ray_reconstruction (D3D12): the hair depth hull also writes the guide
+// targets 5-7 (native_shader.h NativeGuides), unblended, with the colour and
+// motion targets masked. Without it the hair pixels kept the guides of what
+// lies behind the hair (the head, ear, neck or the background): Ray
+// Reconstruction rebuilt those through the hair and the traced add passes
+// lit the hair with the light of that surface (user, Karansul, 2026-11-13).
+// The hair's own guides: the mesh normal toward the eye, a hair roughness,
+// the hair texture as diffuse albedo, a dielectric specular albedo. Both
+// alphas 0: no traced light here (kept share 0, not a lit receiver); the
+// strands keep their own sun, lamp loop and bounce light volume.
+struct FurGuides{float4 normal:SV_Target5;float4 diffuse:SV_Target6;float4 specular:SV_Target7;};
+FurGuides furHullGuidePS(FurShellOut i){
+ FurGuides g;
+ float3 n=dot(i.n,i.n)>1e-8?normalize(i.n):float3(0,0,1);
+ if(dot(n,fogEye.xyz-i.wp)<0)n=-n;
+ g.normal=float4(n,.45);
+ g.diffuse=float4(saturate(furTexel(i.reference,i.uv).rgb),0);
+ g.specular=float4(.04,.04,.04,0);
+ return g;
+}
 )";
 
 struct FurDrawConstants {
@@ -772,7 +809,7 @@ struct FurDrawConstants {
     float head_sphere[4];
     float density, width, length_scale; UINT kind;
     float viewport[2]; UINT list_base, args_offset;
-    UINT hair_axis, axis_padding[3];
+    UINT hair_axis, debug, axis_padding[2];
     UINT texture_ref[2], fog_enable, motion;
     float body_radius, lod_min, lod_full, interface_record;
     float fog_color[4];
@@ -784,12 +821,13 @@ struct FurDrawConstants {
 static_assert(sizeof(FurDrawConstants) % 16 == 0, "FurDraw constant layout");
 
 enum FurProgram : unsigned { fur_shell_vs, fur_shell_ps, fur_fin_vs, fur_fin_ps, fur_count_cs, fur_strand_vs,
-    fur_strand_ps, fur_shell_motion_ps, fur_fin_motion_ps, fur_strand_motion_ps, fur_order_cs, fur_program_count };
+    fur_strand_ps, fur_shell_motion_ps, fur_fin_motion_ps, fur_strand_motion_ps, fur_order_cs, fur_hull_guide_ps,
+    fur_program_count };
 constexpr const char* kFurEntries[fur_program_count][2] = {
     {"furShellVS", "vs_5_0"}, {"furShellPS", "ps_5_0"}, {"furFinVS", "vs_5_0"}, {"furFinPS", "ps_5_0"},
     {"furStrandCountCS", "cs_5_0"}, {"furStrandVS", "vs_5_0"}, {"furStrandPS", "ps_5_0"},
     {"furShellMotionPS", "ps_5_0"}, {"furFinMotionPS", "ps_5_0"}, {"furStrandMotionPS", "ps_5_0"},
-    {"furStrandOrderCS", "cs_5_0"}};
+    {"furStrandOrderCS", "cs_5_0"}, {"furHullGuidePS", "ps_5_0"}};
 
 constexpr UINT kFurSegments = 4, kHairSegments = 6, kFurStrandSlots = 192, kHairStrandSlots = 256;
 
@@ -863,6 +901,7 @@ void Renderer::release_fur() noexcept { fur_.reset(); fur_failed_ = false; }
 void Renderer::draw_fur_records() noexcept {
     const int mode = fur_mode();
     if (mode <= 0) { if (fur_ || fur_failed_) release_fur(); return; }
+    if (fur_debug_ == 2 || fur_debug_ == 3) return;   // F10 fur_debug: base or wound layer alone
     if (fur_failed_) return;
     // Interface figures after composition (character pane, equipment screen)
     // are owned unit records with the same profiles and bindings: both
@@ -1074,6 +1113,7 @@ void Renderer::draw_fur_records() noexcept {
             std::copy(profile.head_sphere.begin(), profile.head_sphere.end(), c.head_sphere);
             if (!profile.head_sphere_valid) c.head_sphere[3] = 0;
             c.hair_axis = profile.hair_axis;
+            c.debug = fur_debug_ == 4 ? 1u : 0u;
             c.texture_ref[0] = command.instance.padding[0]; c.texture_ref[1] = command.instance.padding[1];
             // The record's fog, as its colour batch takes it (native_batch_constants):
             // the bucket's fog state and the stock fog factor in its default
@@ -1287,6 +1327,12 @@ void Renderer::draw_fur_records() noexcept {
                 D3D12NativeState hull_state = opaque;
                 hull_state.custom_blend.custom = D3D12NativeState::kCustomBlendOver;
                 hull_state.custom_blend.write_mask = 0;
+                // rt_ray_reconstruction: the hull writes the hair's guides
+                // (furHullGuidePS), the colour and motion targets masked.
+                const bool hull_guides = !interface12 && guide_frame_d3d12();
+                D3D12NativeState guide_state = hull_state;
+                guide_state.custom_blend.custom |= D3D12NativeState::kCustomGuideTargetsOpaque;
+                if (hull_guides) bind_world_targets_d3d12(world_history_bound12_, false, true);
                 for (const auto& item : items) {
                     if (item.kind != 1 || !item.c.strands_per_triangle) continue;
                     const D3D12Buffer* page = page12(item);
@@ -1294,8 +1340,21 @@ void Renderer::draw_fur_records() noexcept {
                     FurDrawConstants hull = item.c; hull.depth_hull = 1;
                     d3d12_->set_resource(1, page);
                     d3d12_->set_constants(12, &hull, sizeof(hull));
-                    if (!report12(d3d12_->draw_instanced(programs[fur_shell_vs], ShaderProgram{}, hull_state,
-                            item.clipped ? &item.scissor : nullptr, hull.triangles * 3u, 1, false), "fur hair depth hull (draw failed)")) continue;
+                    HRESULT drawn = hull_guides ? d3d12_->draw_instanced(programs[fur_shell_vs], programs[fur_hull_guide_ps], guide_state,
+                        item.clipped ? &item.scissor : nullptr, hull.triangles * 3u, 1, false) : S_FALSE;
+                    if (hull_guides && drawn == S_OK) d3d12_->count("fur hair hulls with their Ray Reconstruction guides");
+                    if (drawn == S_FALSE) {
+                        // No guide frame, or the guide pipeline is not built yet:
+                        // the depth hull alone (counted on a guide frame).
+                        if (hull_guides) {
+                            d3d12_->set_target(world_d3d12_.get(), !hit_test_active_);
+                            d3d12_->count("fur hair hulls without Ray Reconstruction guides (pipeline not ready)");
+                        }
+                        drawn = d3d12_->draw_instanced(programs[fur_shell_vs], ShaderProgram{}, hull_state,
+                            item.clipped ? &item.scissor : nullptr, hull.triangles * 3u, 1, false);
+                        if (hull_guides) bind_world_targets_d3d12(world_history_bound12_, false, true);
+                    }
+                    if (!report12(drawn, "fur hair depth hull (draw failed)")) continue;
                     profiler_.add_draw(hull.triangles, 1); profiler_.add_batch();
                 }
             }
@@ -1303,7 +1362,7 @@ void Renderer::draw_fur_records() noexcept {
             d3d12_->set_resource(96, no_buffer); d3d12_->set_resource(97, no_buffer);
             d3d12_->set_resource(98, static_cast<const D3D12Texture*>(nullptr));
             if (motion) {
-                // b11 is also the ground cover and critter frame slot: zero after (draw_object_motion_d3d12).
+                // b11 is also the ground cover and critter frame slot: zero after (as flush_native_d3d12).
                 const std::array<float, 20> zero{};
                 d3d12_->set_constants(11, zero.data(), UINT(sizeof(zero)));
                 d3d12_->set_resource(46, no_buffer);

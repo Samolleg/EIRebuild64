@@ -29,7 +29,7 @@ namespace {
 using namespace ambient;
 
 
-static_assert(em_count == 15, "ambient_displacement_ holds one drift per emitter");
+static_assert(em_count == 18, "ambient_displacement_ holds one drift per emitter");
 
 std::string ambient_basename(std::string name) {
     const auto slash = name.find_last_of("\\/");
@@ -92,6 +92,10 @@ void append_ambient_particle_shader_programs(std::vector<ShaderProgram>& out) {
     out.push_back({source, "ambient", nullptr, "ambientPS", "ps_4_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
     out.push_back({source, "ambient", nullptr, "fallShellVS", "vs_4_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
     out.push_back({source, "ambient", nullptr, "fallShellPS", "ps_4_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
+    // Fire burn twins (D3D12, option fire_burn): the burn emitters' programs.
+    static const D3D_SHADER_MACRO burn[]={{"NATIVE_FIRE_BURN","1"},{nullptr,nullptr}};
+    out.push_back({source, "ambient", burn, "ambientVS", "vs_4_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
+    out.push_back({source, "ambient", burn, "ambientPS", "ps_4_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
 #if !defined(EID3D11_SHADER_EMBED)
@@ -106,6 +110,7 @@ void Renderer::release_ambient_world() noexcept {
     ambient_terrain_.reset(); ambient_geometry_.reset(); ambient_source_map_.reset();
     ambient12_.area.reset(); ambient12_.height.reset(); ambient12_.ground.reset(); ambient12_.sources.reset();
     ambient12_.fall_tiles.reset(); ambient12_.falls.reset(); ambient12_.shells.reset();
+    release_raytracing_d3d12();  // the ray tracing scene leaves with its map
     ambient_area_srv_.Reset(); ambient_height_srv_.Reset(); ambient_ground_srv_.Reset(); ambient_type_srv_.Reset();
     ambient_sources_srv_.Reset(); ambient_fall_tiles_srv_.Reset(); ambient_falls_srv_.Reset(); ambient_fall_shell_srv_.Reset();
     ambient_fall_tile_count_ = ambient_fall_impact_count_ = ambient_fall_count_ = 0; ambient_fall_shell_vertices_ = 0;
@@ -380,7 +385,7 @@ void Renderer::render_ambient_particles() {
     const double weather_elapsed = ambient_weather_hours_ < 0 ? -1.0 : environment.game_hours - ambient_weather_hours_;
     const Weather weather = ramp_weather({ambient_rain_,ambient_snow_}, weather_amount(environment), weather_elapsed);
     ambient_rain_ = weather.rain;ambient_snow_ = weather.snow;ambient_weather_hours_ = environment.game_hours;
-    const bool sheltered = zone == zone_cave || zone == zone_gipat_cave;
+    const bool sheltered = cave_zone(zone);
     const WeatherWindGpu& shared_wind = weather_wind();
     const double wind[2]{shared_wind.direction[0],shared_wind.direction[1]};
     const double wind_speed = (.35+2.4*std::clamp(double(inputs.wind_force_normalized),0.0,1.0))*(sheltered?.1:1.0)*
@@ -507,15 +512,51 @@ void Renderer::render_ambient_particles() {
         c.gust[2] = sheltered ? 0.f : sand_gust_strength(shared_wind.gust,shared_wind.force,shared_wind.pulse);
         c.gust[3] = float(ambient_sand_front_);
     }
+    // Fire burns (renderer_fire_burn.cpp): their flames, embers and ash fill
+    // 8 m tiles over the burns still burning or shedding ash (their extent
+    // plus the crowns they lit); none at all without such a burn.
+    double burn_min[2]{0,0}, burn_max[2]{-1,-1};
+    if (fire_burn_bound_) {
+        const double now = fire_burn_values_[0], active = 1.5*std::max(fire_burn_values_[6],fire_burn_values_[2])+4.0;
+        for (const auto& b : fire_burns_) {
+            if (now - b.start < 0 || now - b.start > active) continue;
+            const double reach = (b.kind != 2 ? 1.05*b.radius : 1.6) + 8.0;
+            const double ax = std::min(b.x-b.wx,b.x+b.wx)-reach, bx = std::max(b.x-b.wx,b.x+b.wx)+reach;
+            const double ay = std::min(b.y-b.wy,b.y+b.wy)-reach, by = std::max(b.y-b.wy,b.y+b.wy)+reach;
+            if (burn_max[0] < burn_min[0]) { burn_min[0] = ax;burn_min[1] = ay;burn_max[0] = bx;burn_max[1] = by; }
+            else { burn_min[0] = std::min(burn_min[0],ax);burn_min[1] = std::min(burn_min[1],ay);burn_max[0] = std::max(burn_max[0],bx);burn_max[1] = std::max(burn_max[1],by); }
+        }
+    }
+    // D3D12 only: the burn twins of the ambient programs (programs12[4], [5]).
+    const bool burning = d3d12_ && programs12.size() >= 6 && burn_max[0] >= burn_min[0];
+    if (burning && !ambient_fire_failed_ && !ambient12_.fire)
+        if (const char* why = load_game_atlas("tendrismoke.mmp",ambient_fire_srv_,ambient12_.fire)) {
+            ambient_fire_failed_ = true;bridge_report_event("fire_burn_flames_unavailable",why);
+        }
+    std::uint32_t burn_columns = 0, burn_rows = 0;
+    if (burning) {
+        const double tile = kBurnTileSide;
+        const double x0 = std::floor(burn_min[0]/tile)*tile, y0 = std::floor(burn_min[1]/tile)*tile;
+        burn_columns = std::uint32_t(std::floor(burn_max[0]/tile)-x0/tile)+1u;burn_rows = std::uint32_t(std::floor(burn_max[1]/tile)-y0/tile)+1u;
+        burn_min[0] = x0;burn_min[1] = y0;
+        if (d3d12_) {
+            d3d12_->set_resource(9,fire_burn_mask12());d3d12_->set_resource(10,ambient12_.fire.get());
+            D3D11_SAMPLER_DESC sampler{};sampler.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+            sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;sampler.MaxLOD = D3D11_FLOAT32_MAX;
+            d3d12_->set_sampler(1,sampler);
+        }
+    }
     unsigned draws = 0, instances = 0;
     Quality scaled = quality;scaled.density *= std::max(density,0.f);
     char drawn[128] = "";const bool status_text = status_text_wanted();
-    static const char* const kNames[em_count] = {"pollen","leaves","motes","cavedust","drips","spores","embers","ash","sand","fireflies","snow glitter","splashes","mist","fall foam","lip spray"};
+    static const char* const kNames[em_count] = {"pollen","leaves","motes","cavedust","drips","spores","embers","ash","sand","fireflies","snow glitter","splashes","mist","fall foam","lip spray","burn flames","burn embers","burn ash"};
     for (unsigned index = 0; index < em_count; ++index) {
         const auto e = static_cast<Emitter>(index);
         const auto& style = emitter_style(e,zone);
         auto& displacement = ambient_displacement_[index];
-        const double side = 2.0*quality.radius, band = style.height_max-style.height_min;
+        const bool burn = burn_emitter(e);
+        if (burn && (!burning || (e == em_burn_flame && ambient_fire_failed_))) continue;
+        const double side = burn ? double(kBurnTileSide) : 2.0*quality.radius, band = style.height_max-style.height_min;
         const double drift = wind_speed*style.wind_response;
         displacement[0] = std::fmod(displacement[0]+wind[0]*drift*dt,side);
         displacement[1] = std::fmod(displacement[1]+wind[1]*drift*dt,side);
@@ -527,7 +568,8 @@ void Renderer::render_ambient_particles() {
         const bool mushroom = e == em_spores && sheltered;
         // Waterfall emitters fill the map's waterfall tiles (no window scan).
         std::uint32_t fall_first = 0, fall_count = 0;
-        if (waterfall_emitter(e)) {
+        if (burn) {
+        } else if (waterfall_emitter(e)) {
             ambient_fall_range(e,ambient_fall_impact_count_,ambient_fall_count_,fall_first,fall_count);
             if (!fall_count) continue;
         } else {
@@ -549,16 +591,17 @@ void Renderer::render_ambient_particles() {
         }
         const double velocity[2]{wind[0]*drift,wind[1]*drift};
         ambient_emitter_constants(c,e,style,table,mushroom,pool,scale,displacement.data(),velocity);
-        const float window_x = c.window[0];
+        const float window_saved[3]{c.window[0],c.window[1],c.window[2]}, focus_side = c.focus[2];
         if (waterfall_emitter(e)) c.window[0] = float(fall_first);
-        const unsigned count = waterfall_emitter(e) ? pool*fall_count : pool*columns*rows;
+        if (burn) { c.window[0] = float(burn_min[0]);c.window[1] = float(burn_min[1]);c.window[2] = float(burn_columns);c.focus[2] = kBurnTileSide; }
+        const unsigned count = waterfall_emitter(e) ? pool*fall_count : burn ? pool*burn_columns*burn_rows : pool*columns*rows;
         if (d3d12_) {
             d3d12_->set_constants(0,&c,sizeof(c));
             const HRESULT hr = d3d12_->draw_instanced(programs12[0],programs12[1],state12,nullptr,4,count,true);
             if (FAILED(hr)) { d3d12_->omit("ambient particles (draw failed)",false);break; }
             if (hr != S_OK) { if (hr == S_FALSE) d3d12_->omit("ambient particles (pipeline not ready)",false);break; }
         } else if (FAILED(push_constants(constant_vs|constant_ps,0,&c,sizeof(c),ambient_constants_.Get()))) break;
-        c.window[0] = window_x;
+        c.window[0] = window_saved[0];c.window[1] = window_saved[1];c.window[2] = window_saved[2];c.focus[2] = focus_side;
         if (!d3d12_) context_->DrawInstanced(4,count,0,0);
         ++draws;instances += count;
         if (status_text) {
@@ -566,7 +609,7 @@ void Renderer::render_ambient_particles() {
             std::snprintf(drawn+used,sizeof(drawn)-used,"%s%s %u",used?", ":"",kNames[index],count);
         }
     }
-    static const char* const kZones[zone_count] = {"outdoor","dead city","cave","gipat cave","snow","desert"};
+    static const char* const kZones[zone_count] = {"outdoor","dead city","cave","gipat cave","snow","desert","desert cave"};
     static const char* const kAreas[area_count] = {"bare","grass","dry","sand","snow","swamp","water","lava"};
     const int fx = int(focus[0]*.5), fy = int(focus[1]*.5);
     const std::uint8_t at = fx >= 0 && fy >= 0 && fx < int(ambient_tiles_x_) && fy < int(ambient_tiles_y_)

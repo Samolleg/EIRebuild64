@@ -803,7 +803,7 @@ void RetainedStaticScene::positive_lifecycle_reset(
         positive_epoch_ = new_epoch;
         retire_all_detached_unlocked();
         quest_lights_.clear();
-        world_point_lights_.clear();
+        world_point_lights_.clear();fire_spells_.clear();
         visual_values_changed_unlocked();
         for(auto it=shadow_time_active_visuals_.begin();it!=shadow_time_active_visuals_.end();)
             if(*it>0)it=shadow_time_active_visuals_.erase(it);
@@ -883,7 +883,7 @@ void RetainedStaticScene::reset() noexcept {
     source_index_.clear();
     live_.clear();
     quest_lights_.clear();
-    world_point_lights_.clear();
+    world_point_lights_.clear();fire_spells_.clear();
     visuals_.clear();
     detached_.clear();
     detached_count_.store(0, std::memory_order_release);
@@ -1714,11 +1714,35 @@ bool RetainedStaticScene::visual_surface_rebind_candidates(std::uint64_t world_f
     return true;
 }
 
+bool RetainedStaticScene::visual_preview_rebind_due(VisualResourceIncarnation resource,
+    std::uint64_t frame) noexcept {
+    ExclusiveLock guard(lock_);
+    auto* entity = visual_find_unlocked(resource);
+    if (!entity || !entity->surface_lost || !entity->assembly || entity->source_available) return false;
+    const std::uint64_t wait = std::uint64_t{30} << (std::min)(entity->surface_rebind_attempts, 5u);
+    const bool published = entity->surface_rebind_serial != surface_publish_serial_;
+    if (!published && entity->surface_rebind_attempts && frame - entity->surface_rebind_frame < wait) return false;
+    entity->surface_rebind_serial = surface_publish_serial_;
+    entity->surface_rebind_frame = frame;
+    if (entity->surface_rebind_attempts < 31) ++entity->surface_rebind_attempts;
+    return true;
+}
+
 std::shared_ptr<const VisualAssemblyAsset> RetainedStaticScene::visual_assembly(
     VisualResourceIncarnation resource) const noexcept {
     SharedLock guard(lock_);
     const auto* entity = visual_find_unlocked(resource);
     return entity ? entity->assembly : nullptr;
+}
+
+std::shared_ptr<const VisualAssemblyAsset> RetainedStaticScene::visual_standing_assembly(
+    VisualResourceIncarnation resource) const noexcept {
+    SharedLock guard(lock_);
+    const auto* entity = visual_find_unlocked(resource);
+    if (!entity || !entity->assembly || !entity->source_available || entity->surface_lost ||
+        entity->status == RetainedVisualStatus::invalid_asset ||
+        entity->status == RetainedVisualStatus::unsupported_appearance) return nullptr;
+    return entity->assembly;
 }
 
 bool RetainedStaticScene::visual_replace_surface(std::uint64_t id,
@@ -2024,6 +2048,7 @@ bool RetainedStaticScene::visual_publish_tick_values(VisualResourceIncarnation r
         a.coefficient!=b.coefficient || a.tall!=b.tall || a.frozen!=b.frozen ||
         a.dont_move!=b.dont_move || a.movement_frozen!=b.movement_frozen ||
         a.tilted_facing!=b.tilted_facing || a.scaled_animation!=b.scaled_animation ||
+        a.action_coefficient!=b.action_coefficient ||
         x.has_weapon!=y.has_weapon || x.weapon_is_bow!=y.weapon_is_bow ||
         x.arrow_is_bow!=y.arrow_is_bow || x.human!=y.human ||
         x.speaking!=y.speaking || x.forced_hidden!=y.forced_hidden ||
@@ -2211,6 +2236,30 @@ bool RetainedStaticScene::visual_preview_source(VisualResourceIncarnation resour
     sample.status = RetainedVisualStatus::ready;
     selection_revision = entity->intent.revision;
     return true;
+}
+
+std::string RetainedStaticScene::visual_preview_diagnosis(VisualResourceIncarnation resource) const {
+    SharedLock guard(lock_);
+    const auto* entity = visual_find_unlocked(resource);
+    if (!entity) return "no_entity";
+    if (entity->constructed && entity->source_available && entity->mesh_declared && entity->assembly) return {};
+    std::string text = "constructed=" + std::to_string(entity->constructed) +
+        " source_available=" + std::to_string(entity->source_available) +
+        " mesh_declared=" + std::to_string(entity->mesh_declared) +
+        " assembly=" + std::to_string(bool(entity->assembly)) +
+        " readiness=" + (entity->readiness_reason ? entity->readiness_reason : "-") +
+        " failure_scope=" + (entity->failure_scope ? entity->failure_scope : "-");
+    if (entity->assembly) {
+        text += " parts=" + std::to_string(entity->assembly->parts.size()) + " unavailable:";
+        unsigned listed = 0;
+        for (const auto& part : entity->assembly->parts) {
+            if (part.source_available || listed >= 12) continue;
+            ++listed;
+            text += " " + part.name + "(tex=" + part.texture_source_name + " material=" + part.material_name +
+                " value=" + std::to_string(bool(part.texture)) + " surface=" + std::to_string(bool(part.surface)) + ")";
+        }
+    }
+    return text;
 }
 
 bool RetainedStaticScene::visual_publish_object_pose(VisualResourceIncarnation resource,
@@ -2487,6 +2536,16 @@ void RetainedStaticScene::visual_publish_highlight(const RetainedHighlightState&
     visual_frame_changed_unlocked();
 }
 
+void RetainedStaticScene::visual_publish_fire_spells(std::vector<RetainedFireSpell> spells) noexcept {
+    try {
+        ExclusiveLock guard(lock_);
+        if (spells == fire_spells_) return;
+        if (auto* r = recorder()) r->delta(RetainedOp::visual_publish_fire_spells, [&](RetainedDeltaOut& d) { delta_io(d, spells); });
+        fire_spells_.swap(spells);
+        visual_frame_changed_unlocked();
+    } catch (...) {}
+}
+
 bool RetainedStaticScene::visual_publish_world_point_lights(
     std::vector<RetainedWorldPointLight> lights, const char** failure) noexcept {
     try {
@@ -2505,7 +2564,7 @@ bool RetainedStaticScene::visual_publish_world_point_lights(
                     return a.source_id==b.source_id && a.center==b.center &&
                         a.color==b.color && a.radius==b.radius &&
                         a.casts_shadow==b.casts_shadow &&
-                        a.attached==b.attached && a.hero==b.hero;
+                        a.attached==b.attached && a.hero==b.hero && a.spell==b.spell;
                 })) return true;
         // Recorded where it changes the scene (an unchanged list is per frame).
         if (auto* r = recorder()) r->delta(RetainedOp::visual_publish_world_point_lights, [&](RetainedDeltaOut& d) { delta_io(d, lights); });
@@ -2640,6 +2699,7 @@ void RetainedStaticScene::visual_frame_unlocked(double time, bool diagnose,Retai
     result.entities.clear();result.diagnostic={};result.first_failure={};
     result.quest_lights=quest_lights_;
     result.world_point_lights=world_point_lights_;
+    result.fire_spells=fire_spells_;
     result.time = time;
     // Diagnostics are part of the immutable evaluated value. The public flag
     // controls recorder exposure, not whether a same-time reader gets a second

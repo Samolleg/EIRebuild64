@@ -542,7 +542,9 @@ struct TerrainCpuAsset {
     std::uint32_t tiles_per_texture_side = 0;
     std::uint32_t tiles_per_texture = 0;
     std::vector<std::string> texture_resources;
-    // Explicit Astral slots from the authored map atlas profile; empty means none.
+    // Authored Astral coverage per atlas slot, from a profile or the exact
+    // original-page rule, in profile corner order (NW, NE, SE, SW).
+    // Low four bits only; empty when none are declared.
     std::vector<std::uint8_t> astral_slots;
     std::vector<TerrainObjectDescriptor> objects;
     std::vector<std::uint32_t> tile_types;

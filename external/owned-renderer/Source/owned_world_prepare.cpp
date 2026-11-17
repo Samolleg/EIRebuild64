@@ -314,11 +314,17 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
         static_generation=query.generation;
     }
     const auto border_fog_revision=current_border_fog_revision();
+    // Item 5: a new object-space index (models ready, catalog released)
+    // changes which statics register in object space: one full pass.
+    const auto object_space_admission_index=active_statics_index();
+    const std::uint64_t object_space_admission_revision=object_space_admission_index?object_space_admission_index->revision:0ull;
+    const std::uint64_t object_space_admission_catalog=object_space_admission_index?object_space_admission_index->catalog:0ull;
     // Persistent admission (OwnedAdmissionCache): the frame-level conditions,
     // then the identity at every index.
     bool incremental=cache_was_valid && static_skip && !frame.diagnostic.profile_frame && !membership_probe &&
         cache.draw_undetected==draw_undetected && cache.shadows==shadows_enabled && cache.class_flags==class_flags &&
         cache.static_generation==static_generation && cache.border_fog_revision==border_fog_revision &&
+        cache.object_space_revision==object_space_admission_revision &&
         dirty_since<=cache.through && receiver_cell>0 &&
         cache.entries.size()==entity_count && frame.prepared.size()==entity_count;
     for(std::size_t i=0;incremental && i<entity_count;++i) {
@@ -414,7 +420,14 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
         if (static_skip && !sample.values.unit && sample.prepared->derived_admission_valid &&
             sample.prepared->derived_world_bounds_valid) {
             const auto& packet=sample.prepared->color_packet;
+            // Item 5: a registration in the other kind (posed or object
+            // space) than this index admits is not reused: the colour pass
+            // re-registers it (catalog ready, released or switched off).
+            const bool object_space=retained_visual_object_space_admitted(sample,object_space_admission_index.get(),
+                frame.shadow_time_active_visuals);
             if (packet.static_current(static_generation,border_fog_revision) &&
+                packet.object_space==object_space &&
+                (!object_space || packet.object_space_index==object_space_admission_catalog) &&
                 !std::binary_search(static_dirty->begin(),static_dirty->end(),sample.lifecycle.id)) {
                 const auto found=g_owned_static_registry.find(owned_static_key(sample));
                 if (found!=g_owned_static_registry.end()) {
@@ -650,6 +663,7 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
     if(receiver_cell>0 && static_dirty && ordered) {
         cache.draw_undetected=draw_undetected;cache.shadows=shadows_enabled;cache.class_flags=class_flags;
         cache.static_generation=static_generation;cache.border_fog_revision=border_fog_revision;
+    cache.object_space_revision=object_space_admission_revision;
         cache.through=dirty_through;cache.valid=static_skip;
     }
     return true;
@@ -766,6 +780,16 @@ bool submit_owned_visual_color(void* fog_controller, bool prepare_light_only,
         if(!g_native_sink_submit(g_native_sink_context,query_view,ignored))throw "owned_static_generation";
         const auto generation=query.generation;
         const auto border_fog_revision=current_border_fog_revision();
+        // Item 5: admitted trees and stones register object-space records
+        // (catalog LOD meshes and impostors) instead of posed ones.
+        const auto object_space_index=active_statics_index();
+        const std::uint64_t object_space_revision=object_space_index?object_space_index->revision:0;
+        const std::uint64_t object_space_catalog=object_space_index?object_space_index->catalog:0;
+        std::uint32_t object_space_objects=0;
+        std::vector<std::uint32_t> object_space_parts;
+        std::vector<NativeWorldBounds> object_space_bounds;
+        std::vector<std::array<float,16>> node_to_world;
+        std::vector<std::uint32_t> sway_flags;
         for (const auto i:submission_order) {
             const auto& sample = frame.values->entities[i];
             auto& prepared = frame.prepared[i];
@@ -775,14 +799,17 @@ bool submit_owned_visual_color(void* fog_controller, bool prepare_light_only,
             if (!(sample.values.object_flags & 0x800u) &&
                 !owned_visual_fog(fog_controller,i,sample,fog)) continue;   // per-frame path reports
             auto& packet=sample.prepared->color_packet;
+            const bool object_space=retained_visual_object_space_admitted(sample,object_space_index.get(),
+                frame.shadow_time_active_visuals);
             std::size_t parts_drawn=0;
             if (owned_static_color_current(packet,sample,prepared,fog,generation,border_fog_revision) &&
+                packet.object_space==object_space && (!object_space || packet.object_space_index==object_space_catalog) &&
                 g_owned_static_registry.count(owned_static_key(sample))) {
                 for(std::size_t index=0;index<prepared.parts.size();++index)
                     if(prepared.parts[index].visible){prepared.parts[index].color_admitted=true;++parts_drawn;}
             } else {
                 // Every visible part, whatever the current frustum: the GPU culls.
-                frame.selected.clear();
+                frame.selected.clear();object_space_parts.clear();
                 bool built=true;
                 for(std::size_t index=0;index<prepared.parts.size() && built;++index) {
                     if(!prepared.parts[index].visible)continue;
@@ -791,7 +818,7 @@ bool submit_owned_visual_color(void* fog_controller, bool prepare_light_only,
                     built=prepare_owned_visual_part(i,index,part_value) &&
                         retained_visual_part_submission(sample,index,part_value->bounds,{true,true,0},
                             frame.values->time,fog,record);
-                    if(built)frame.selected.push_back(record);
+                    if(built){frame.selected.push_back(record);object_space_parts.push_back(static_cast<std::uint32_t>(index));}
                 }
                 packet.static_registered=false;
                 if(!built || frame.selected.empty())continue;
@@ -802,8 +829,33 @@ bool submit_owned_visual_color(void* fog_controller, bool prepare_light_only,
                     sample.resource.serial,0,0,frame.serial,true};
                 submission.world_to_clip=&world_to_clip;submission.retained_color_diagnostic=true;
                 NativeStaticSubmission request;request.key=owned_static_key(sample);request.records=&submission;
+                bool placed=false;
+                if(object_space) {
+                    object_space_bounds.clear();
+                    for(const auto* record:frame.selected)object_space_bounds.push_back(record->bounds);
+                    placed=retained_visual_object_space_parts(sample,object_space_parts.data(),object_space_parts.size(),
+                        object_space_bounds.data(),node_to_world,sway_flags,request.sway_root);
+                    if(placed) {
+                        request.object_space=true;request.object=sample.lifecycle.id;
+                        request.model=retained_visual_object_space_model(sample);
+                        request.node_to_world=node_to_world.data();request.sway_flags=sway_flags.data();
+                        request.contact_height=sample.prepared->gpu_pose.contact_world_height;
+                    }
+                }
                 NativeGeometryView view;view.static_submission=&request;NativeGeometryResult result{};
-                if(!g_native_sink_submit(g_native_sink_context,view,result) || !request.registered)continue;
+                bool submitted=g_native_sink_submit(g_native_sink_context,view,result);
+                if(object_space && (!placed || !submitted || !request.registered)) {
+                    // Refused (placement check or an unmatched part): posed from
+                    // now on for this assembly and catalog, also as a caster.
+                    sample.prepared->object_space_refused={sample.assembly.get(),sample.assembly->revision,object_space_revision};
+                    active_statics_note_failure();
+                    if(request.object_space) {
+                        request.object_space=false;request.registered=false;
+                        submitted=g_native_sink_submit(g_native_sink_context,view,result);
+                    }
+                }
+                packet.object_space=request.object_space;packet.object_space_index=object_space_catalog;
+                if(!submitted || !request.registered)continue;
                 packet.visible.resize(prepared.parts.size());
                 for(std::size_t index=0;index<prepared.parts.size();++index)packet.visible[index]=prepared.parts[index].visible;
                 packet.assembly=sample.assembly.get();packet.assembly_revision=sample.assembly->revision;
@@ -817,7 +869,9 @@ bool submit_owned_visual_color(void* fog_controller, bool prepare_light_only,
             }
             static_drawn[i]=1;prepared.submitted=true;
             ++frame.eligible;frame.submitted_parts+=parts_drawn;
+            if(packet.object_space)++object_space_objects;
         }
+        active_statics_note_admitted(object_space_objects);
         const auto remove_unseen=[&](std::unordered_map<std::uint64_t,std::uint64_t>::iterator it) {
             NativeStaticSubmission request;request.operation=NativeStaticSubmission::Operation::remove;
             request.key=it->first;NativeGeometryView view;view.static_submission=&request;
@@ -1155,7 +1209,6 @@ void run_owned_visual_scene(OwnedSceneCommand& command) noexcept {
     }
     clear_owned_scene_inputs(command.handoff);
 }
-
 
 
 #endif // !EID3D11_EMBEDDED

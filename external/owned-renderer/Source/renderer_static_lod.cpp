@@ -27,18 +27,16 @@ bool build_static_lods(const FigureCpuAsset& figure, NativeMeshLods& output) noe
     output = {};
     const std::size_t index_count = figure.indices.size();
     const std::size_t vertex_count = figure.components.size();
-    const std::uint32_t shape_count = figure.shape_count;
-    if ((shape_count != 1 && shape_count != 8) || index_count % 3 || index_count / 3 < kStaticLodMinTriangles ||
+    if ((figure.shape_count != 1 && figure.shape_count != 8) || index_count % 3 || index_count / 3 < kStaticLodMinTriangles ||
         !vertex_count || figure.position_groups == 0 ||
-        figure.positions.size() != std::size_t(figure.position_groups) * shape_count)
+        figure.positions.size() != std::size_t(figure.position_groups) * figure.shape_count)
         return false;
     const std::size_t position_count = std::size_t(figure.position_groups) * 4u;
     const std::size_t normal_count = figure.normals.size() * 4u;
     // Per component: the mean shape's position, then normal and UV.
     std::vector<float> positions(vertex_count * 3), shape_positions(vertex_count * 3), attributes(vertex_count * 5);
     float largest_scale = 0;
-    const float shape_weight = 1.0f / float(shape_count);
-    for (std::uint32_t shape = 0; shape < shape_count; ++shape) {
+    for (std::uint32_t shape = 0; shape < figure.shape_count; ++shape) {
         for (std::size_t vertex = 0; vertex < vertex_count; ++vertex) {
             const auto& component = figure.components[vertex];
             if (component.position >= position_count || component.normal >= normal_count ||
@@ -50,7 +48,7 @@ bool build_static_lods(const FigureCpuAsset& figure, NativeMeshLods& output) noe
             for (unsigned axis = 0; axis < 3; ++axis) {
                 if (!std::isfinite(value[axis])) return false;
                 shape_positions[vertex * 3 + axis] = value[axis];
-                positions[vertex * 3 + axis] += value[axis] * shape_weight;
+                positions[vertex * 3 + axis] += value[axis] / float(figure.shape_count);
             }
         }
         largest_scale = (std::max)(largest_scale, meshopt_simplifyScale(shape_positions.data(), vertex_count, 12));
@@ -100,47 +98,31 @@ bool build_static_lods(const FigureCpuAsset& figure, NativeMeshLods& output) noe
 
 namespace owned {
 
-bool build_impostor_source(const FigureCpuAsset& figure, NativeImpostorSource& output) noexcept try {
+bool build_impostor_part(const FigureCpuAsset& figure, const NativePackedGroup* positions,
+    const std::array<float, 3>& offset, NativeImpostorPart& output) noexcept try {
     output = {};
     const std::size_t index_count = figure.indices.size();
     const std::size_t vertex_count = figure.components.size();
-    if (figure.shape_count != 8 || index_count % 3 || index_count / 3 < kImpostorMinTriangles || !vertex_count ||
-        figure.position_groups == 0 || figure.positions.size() != std::size_t(figure.position_groups) * 8u)
-        return false;
+    if (!positions || index_count % 3 || !index_count || !vertex_count || figure.position_groups == 0) return false;
     const std::size_t position_count = std::size_t(figure.position_groups) * 4u;
     const std::size_t normal_count = figure.normals.size() * 4u;
     output.vertices.assign(vertex_count * 8, 0.f);
-    float low[3] = {1e30f, 1e30f, 1e30f}, high[3] = {-1e30f, -1e30f, -1e30f};
     for (std::size_t vertex = 0; vertex < vertex_count; ++vertex) {
         const auto& component = figure.components[vertex];
         if (component.position >= position_count || component.normal >= normal_count ||
             component.texture >= figure.texture_coordinates.size())
             return false;
         float* out = &output.vertices[vertex * 8];
+        const auto& group = positions[component.position >> 2];
         const unsigned lane = component.position & 3u;
-        for (std::uint32_t shape = 0; shape < 8; ++shape) {
-            const auto& group = figure.positions[shape * figure.position_groups + (component.position >> 2)];
-            out[0] += group.x[lane] * 0.125f; out[1] += group.y[lane] * 0.125f; out[2] += group.z[lane] * 0.125f;
-        }
+        out[0] = group.x[lane] + offset[0]; out[1] = group.y[lane] + offset[1]; out[2] = group.z[lane] + offset[2];
         const auto& normal = figure.normals[component.normal >> 2];
         const unsigned normal_lane = component.normal & 3u;
         out[3] = normal.x[normal_lane]; out[4] = normal.y[normal_lane]; out[5] = normal.z[normal_lane];
         out[6] = figure.texture_coordinates[component.texture].u;
         out[7] = figure.texture_coordinates[component.texture].v;
         for (unsigned k = 0; k < 8; ++k) if (!std::isfinite(out[k])) return false;
-        for (unsigned axis = 0; axis < 3; ++axis) {
-            low[axis] = (std::min)(low[axis], out[axis]); high[axis] = (std::max)(high[axis], out[axis]);
-        }
     }
-    float radius = 0;
-    for (unsigned axis = 0; axis < 3; ++axis) output.sphere[axis] = (low[axis] + high[axis]) * 0.5f;
-    for (std::size_t vertex = 0; vertex < vertex_count; ++vertex) {
-        const float* p = &output.vertices[vertex * 8];
-        const float dx = p[0] - output.sphere[0], dy = p[1] - output.sphere[1], dz = p[2] - output.sphere[2];
-        radius = (std::max)(radius, std::sqrt(dx * dx + dy * dy + dz * dz));
-    }
-    if (!(radius > 0) || !std::isfinite(radius)) return false;
-    output.sphere[3] = radius;
     output.indices.assign(figure.indices.begin(), figure.indices.end());
     for (const std::uint32_t index : output.indices) if (index >= vertex_count) return false;
     return true;

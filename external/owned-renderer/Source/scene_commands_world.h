@@ -188,6 +188,7 @@ struct GamePrintRun {
     float clip_half_width = 0.0f, clip_half_height = 0.0f;
     FixedState state;
     SurfaceHandle texture;
+    bool interface_mark = false;  // another module's mark (draw_game_print_run_held)
     void run(Renderer& renderer);
 };
 

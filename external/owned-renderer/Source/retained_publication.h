@@ -34,6 +34,7 @@ struct VisualObjectPublicationSnapshot;
 struct RetainedHighlightState;
 struct RetainedWorldPointLight;
 struct RetainedQuestLight;
+struct RetainedFireSpell;
 
 // First byte of a message. 1 and 2 are the asset tags (owned_asset_codec.h).
 enum class RetainedOp : std::uint8_t {
@@ -48,7 +49,7 @@ enum class RetainedOp : std::uint8_t {
     visual_publish_forced_weapon_ids, visual_publish_bridges, visual_publish_quest_lights,
     visual_publish_highlight, visual_publish_world_point_lights, visual_reject, visual_reject_all,
     visual_commit_tick, publish_terrain_geometry, publish_terrain_texture,
-    visual_publish_preview, material_publish_composition,
+    visual_publish_preview, material_publish_composition, visual_publish_fire_spells,
     end
 };
 
@@ -101,6 +102,8 @@ void delta_io(RetainedDeltaOut& s, const RetainedHighlightState& v);
 void delta_io(RetainedDeltaIn& s, RetainedHighlightState& v);
 void delta_io(RetainedDeltaOut& s, const std::vector<RetainedWorldPointLight>& v);
 void delta_io(RetainedDeltaIn& s, std::vector<RetainedWorldPointLight>& v);
+void delta_io(RetainedDeltaOut& s, const std::vector<RetainedFireSpell>& v);
+void delta_io(RetainedDeltaIn& s, std::vector<RetainedFireSpell>& v);
 void delta_io(RetainedDeltaOut& s, const std::vector<RetainedQuestLight>& v);
 void delta_io(RetainedDeltaIn& s, std::vector<RetainedQuestLight>& v);
 void delta_io(RetainedDeltaOut& s, const OwnedTerrainGeometryValues& v);

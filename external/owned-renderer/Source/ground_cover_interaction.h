@@ -14,16 +14,18 @@ float gcTuftPixels(float4x4 clip,float3 root,float size,float screenHeight){
  float3 gradient=(clip[1].xyz-dot(clip[1],float4(root,1))/w*clip[3].xyz)/w;
  return size*length(gradient)*.5*screenHeight;
 }
-// Thinned tufts, and tufts drawn so small that their leaves are about a pixel
-// wide at the root (leafPixels: drawn scale times the mesh's root leaf width),
+// Thinned tufts, and tufts drawn so small that their leaves are about two to
+// three pixels wide at the root (leafPixels: drawn scale times the mesh's root
+// leaf width; issue #230: at one pixel, half of 1207's cover triangles were
+// 50-100 m near-mesh slivers),
 // use their far mesh of fewer, wider leaves: sub-pixel slivers shade whole
 // 2x2 pixel quads and shimmer. Returns the far mesh's share: 0 near mesh only,
 // 1 far mesh only, between: both drawn with complementary dither (issue #196:
 // the former instant swap at keep .45 changed every tuft's shape on one ring
 // as the camera moved). The per-instance variation (0-1) spreads each tuft's
-// switch point (keep .35-.55, leaf width 1.2-1.92 px) so no ring shows.
+// switch point (keep .35-.55, leaf width 2.4-3.84 px) so no ring shows.
 float gcTuftFarWeight(float keep,float leafPixels,float variation){
- const float atKeep=.35+.2*frac(variation*7.31),atPixels=lerp(1.2,1.92,variation);
+ const float atKeep=.35+.2*frac(variation*7.31),atPixels=lerp(2.4,3.84,variation);
  return max(1-smoothstep(atKeep-.08,atKeep+.08,keep),1-smoothstep(atPixels,atPixels*1.5,leafPixels));
 }
 float gcWindSway(float2 p,float2 direction,float seconds,float travel,float gust,float phase){
@@ -44,9 +46,9 @@ float gcWindSway(float2 p,float2 direction,float seconds,float travel,float gust
 // patch lattice. A lattice cell holds at most one patch, kept wholly inside
 // the cell; cells divide the 4 m placement cell, so a candidate moved into
 // its cell's patch never leaves its placement cell's culling bounds.
-// Kind 1 flower patches, 2 snow-grass clumps: x cell metres, yz patch radius
-// range, w base presence (fraction of cells with a patch).
-float4 gcClusterShape(uint kind){return kind==1u?float4(4,.9,1.5,.25):float4(2,.16,.3,.25);}
+// Kind 1 flowers, 2 snow grass, 3 desert plants: x cell metres, yz radius,
+// w presence. Desert presence/species are selected once by gcCellClump.
+float4 gcClusterShape(uint kind){return kind==1u?float4(4,.9,1.5,.25):kind==2u?float4(2,.16,.3,.25):float4(4,.8,1.05,1);}
 // Shore kelp clumps (ground_cover.h kelp_shore_clump): candidates are kept,
 // not moved, inside the patch of their lattice cell.
 float4 gcKelpShape(){return float4(4,.6,1.6,.7);}
@@ -62,6 +64,14 @@ GcPatch gcPatchAt(float2 p,float cell,float2 radius,uint seed){
  o.centre=float2(c)*cell+margin+float2((h>>8)&255u,(h>>16)&255u)/255.0*max(cell-2*margin,0);
  o.chance=(h>>24)/256.0; // the patch exists where chance < its presence
  return o;
+}
+GcPatch gcClusterPatch(float2 p,uint kind){
+ const float4 shape=gcClusterShape(kind);
+ GcPatch pc=gcPatchAt(p,shape.x,shape.yz,kind*0x9e3779b9u);
+ // Desert clumps in adjacent selected cells still leave open ground
+ // between their roots: keep centre jitter inside the middle of the cell.
+ if(kind==3u)pc.centre=lerp((floor(p/shape.x)+.5)*shape.x,pc.centre,.4);
+ return pc;
 }
 // A uniform candidate (u in [0,1)^2) moved into the patch: denser toward the
 // centre, inside a lumpy outline of at most radius * (1 + kGcPatchLump).

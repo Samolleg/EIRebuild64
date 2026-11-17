@@ -147,14 +147,25 @@ static NativeOpacityClass native_material_state(const FixedState& state,float ma
  return opacity;
 }
 
-// Static LOD: opaque, effectively reorderable rigid records with reduced
-// levels. Retained statics keep their prepared world vertices; cut-outs,
-// units, swaying and animated parts keep their complete index list.
-// Crown impostors: cut-out, reorderable object-space records with a baked
-// impostor and a mesh that holds its bounding sphere.
+// Static LOD: opaque, reorderable object-space records whose mesh holds
+// reduced levels. Cut-out records keep every triangle (a collapse there
+// removes silhouette, not detail); ordered and order-preserving records
+// draw their full list in order.
+// Crown impostors: reorderable object-space parts of an object with a baked
+// impostor, whose mesh holds the object's sphere. The lead part, drawing the
+// quad, is cut-out; the others (followers) only switch with it.
+// Reorderable here: declared so (neighbour pieces), or derived from a state
+// that is not ordered (the active map's statics carry their posed parts'
+// derive_from_state; each rule's opacity test already excludes ordered).
+static bool native_record_reorderable(const NativeGeometryView& view) noexcept{
+ return view.ordering==NativeOrdering::reorderable||view.ordering==NativeOrdering::derive_from_state;
+}
 bool native_record_takes_impostor(const NativeGeometryView& view,NativeOpacityClass opacity,bool sphere_block) noexcept{
- return view.world.impostor&&sphere_block&&view.world.object_space&&opacity==NativeOpacityClass::cutout&&
-  view.ordering==NativeOrdering::reorderable;
+ return view.world.impostor&&sphere_block&&view.world.object_space&&native_record_reorderable(view)&&
+  (view.world.impostor_follower?opacity!=NativeOpacityClass::ordered:opacity==NativeOpacityClass::cutout);
+}
+std::uint32_t native_record_impostor_flags(const NativeGeometryView& view) noexcept{
+ return native_world_impostor|(view.world.impostor_follower?native_world_impostor_follower:0u);
 }
 bool native_record_takes_lod(const NativeGeometryView& view,NativeOpacityClass opacity,UINT lod_levels) noexcept{
  const bool reorderable=view.ordering==NativeOrdering::reorderable ||
@@ -189,6 +200,7 @@ std::size_t Renderer::NativeMaterialKeyHash::operator()(const NativeMaterialKey&
  hash=hash_bytes(hash,&key.contact_map,sizeof(key.contact_map));
  hash=hash_bytes(hash,&key.texture_backing,sizeof(key.texture_backing));
  hash=hash_bytes(hash,&key.texture_generation,sizeof(key.texture_generation));
+ hash=hash_bytes(hash,&key.program,sizeof(key.program));
  return static_cast<std::size_t>(hash^(hash>>32));
 }
 
@@ -750,7 +762,9 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
     index_bytes>kNativeRawBufferLimit)
   return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
  NativeMeshContentKey content{};
- if(!view.geometry_revision_valid){content=native_mesh_content_key(view);
+ if(!view.geometry_revision_valid){
+  if(view.content_fingerprint_valid&&!view.decode)content={view.content_fingerprint,true};
+  else content=native_mesh_content_key(view);
   if(!content.valid)return E_INVALIDARG;}
  NativeMeshKey key{};key.selector=native_mesh_cache_selector(view,content);
  key.shape_count=shape_count;
@@ -853,6 +867,7 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
    mesh.index_offset=prebuilt.index_offset;mesh.lod_levels=prebuilt.lod_levels;mesh.lod_extra_triangles=prebuilt.lod_extra_triangles;
    mesh.sphere_block=prebuilt.sphere_block;
    mesh.has_liquid=prebuilt.has_liquid;mesh.has_ground=prebuilt.has_ground;mesh.liquid_types=prebuilt.liquid_types;
+   mesh.liquid_wave_multiplier=prebuilt.liquid_wave_multiplier;
    mesh.steep_first_triangle=prebuilt.steep_first_triangle==UINT32_MAX?UINT_MAX:prebuilt.steep_first_triangle;
    std::copy(std::begin(prebuilt.bounds_min),std::end(prebuilt.bounds_min),mesh.bounds_min);
    std::copy(std::begin(prebuilt.bounds_max),std::end(prebuilt.bounds_max),mesh.bounds_max);
@@ -929,11 +944,12 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
  };
  auto update_bounds=[&](NativeMesh& mesh){
   mesh.steep_first_triangle=steep_index_begin<=source.index_count?steep_index_begin/3u:UINT_MAX;
-  mesh.has_liquid=false;mesh.has_ground=source.terrain_vertex_count==0;mesh.liquid_types=0;
+  mesh.has_liquid=false;mesh.has_ground=source.terrain_vertex_count==0;mesh.liquid_types=0;mesh.liquid_wave_multiplier=0;
   for(UINT i=0;i<source.terrain_vertex_count;++i){
    const bool liquid=(source.terrain_vertices[i].flags&native_terrain_water_vertex)!=0;
    mesh.has_liquid|=liquid;mesh.has_ground|=!liquid;
    if(liquid)mesh.liquid_types|=native_liquid_vertex_types(source.terrain_vertices[i]);
+   if(liquid)mesh.liquid_wave_multiplier=std::max(mesh.liquid_wave_multiplier,std::abs(source.terrain_vertices[i].wind_multiplier));
   }
   mesh.bounds_min[0]=mesh.bounds_min[1]=mesh.bounds_min[2]=std::numeric_limits<float>::max();
   mesh.bounds_max[0]=mesh.bounds_max[1]=mesh.bounds_max[2]=-std::numeric_limits<float>::max();
@@ -1169,6 +1185,28 @@ HRESULT Renderer::append_native_dynamic(const NativeGeometryView& view,UINT& mor
 }
 
 HRESULT Renderer::ensure_native_stream_buffers(UINT dynamic_bytes,UINT draw_count,UINT triangle_count,UINT component_count,UINT batch_count){
+ // In play, a growth of these shared stream buffers names itself: post-reveal
+ // static set submissions created 11 buffers (17.8 and 39.5 MB) in one frame
+ // (laptop j199 x86 frames 105, 137) and the owner was not known.
+ const UINT before[5]={native_dynamic_capacity_,native_draw_work_capacity_,native_visible_triangle_capacity_,
+  native_prepared_vertex_capacity_,native_indirect_args_capacity_};
+ const HRESULT hr=grow_native_stream_buffers(dynamic_bytes,draw_count,triangle_count,component_count,batch_count);
+ const UINT after[5]={native_dynamic_capacity_,native_draw_work_capacity_,native_visible_triangle_capacity_,
+  native_prepared_vertex_capacity_,native_indirect_args_capacity_};
+ if(frame_acct::g_in_play.load(std::memory_order_relaxed)&&!std::equal(before,before+5,after)){
+  static unsigned lines=0;
+  if(lines<40){
+   ++lines;char text[320];
+   std::snprintf(text,sizeof(text),"frame=%llu static_layout=%d dynamic=%u->%u draw_work=%u->%u(%u) triangles=%u->%u(%u) components=%u->%u(%u) indirect=%u->%u(%u)",
+    static_cast<unsigned long long>(presentation_frame_index_),native_static_frame_?1:0,before[0],after[0],before[1],after[1],draw_count,
+    before[2],after[2],triangle_count,before[3],after[3],component_count,before[4],after[4],batch_count);
+   bridge_report_event("native_stream_growth_in_play",text);
+  }
+ }
+ return hr;
+}
+
+HRESULT Renderer::grow_native_stream_buffers(UINT dynamic_bytes,UINT draw_count,UINT triangle_count,UINT component_count,UINT batch_count){
  if(!device_||!draw_count)return E_INVALIDARG;HRESULT hr;dynamic_bytes=std::max(16u,dynamic_bytes);
  if(!native_dynamic_||dynamic_bytes>native_dynamic_capacity_){if(dynamic_bytes>256u*1024u*1024u)return E_OUTOFMEMORY;const UINT capacity=grow_capacity(dynamic_bytes,16u*1024u*1024u,256u*1024u*1024u);D3D11_BUFFER_DESC description{};description.ByteWidth=capacity;description.Usage=D3D11_USAGE_DYNAMIC;description.BindFlags=D3D11_BIND_SHADER_RESOURCE;description.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;description.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;native_dynamic_.Reset();native_dynamic_srv_.Reset();if(FAILED(hr=device_->CreateBuffer(&description,nullptr,&native_dynamic_)))return hr;D3D11_SHADER_RESOURCE_VIEW_DESC srv{};srv.Format=DXGI_FORMAT_R32_TYPELESS;srv.ViewDimension=D3D11_SRV_DIMENSION_BUFFEREX;srv.BufferEx.NumElements=capacity/4;srv.BufferEx.Flags=D3D11_BUFFEREX_SRV_FLAG_RAW;if(FAILED(hr=device_->CreateShaderResourceView(native_dynamic_.Get(),&srv,&native_dynamic_srv_))){native_dynamic_.Reset();return hr;}native_dynamic_capacity_=capacity;}
  if(!native_draw_work_||draw_count>native_draw_work_capacity_){
@@ -1301,11 +1339,28 @@ void Renderer::order_native_groups(bool shadows){
   for(UINT group:native_active_groups_){auto& selected=native_state_buckets_[group].selected;
    std::stable_sort(selected.begin(),selected.end(),[&](std::size_t left,std::size_t right){
     const auto& a=native_queued_draw(left);const auto& b=native_queued_draw(right);
-    if(a.geometry_page!=b.geometry_page||!shadows)return a.geometry_page<b.geometry_page;
+    if(a.geometry_page!=b.geometry_page)return a.geometry_page<b.geometry_page;
+    // Colour batches: one material instance each (one pixel program per indirect draw).
+    if(!shadows)return a.material_instance<b.material_instance;
     return (a.instance.flags&native_foliage_part_flag)<(b.instance.flags&native_foliage_part_flag);
    });
    native_draw_order_.insert(native_draw_order_.end(),selected.begin(),selected.end());selected.clear();}
   native_active_groups_.clear();
+ };
+ // World crystals (colour only) draw after the other reorderable opaque work
+ // before the next order-preserving draw, or at the end: their first batch
+ // copies the scene they see through (the crystal scene copy).
+ native_crystal_order_.clear();
+ const auto emit_crystals=[&]{
+  if(native_crystal_order_.empty())return;
+  std::stable_sort(native_crystal_order_.begin(),native_crystal_order_.end(),[&](std::size_t left,std::size_t right){
+   const auto& a=native_queued_draw(left);const auto& b=native_queued_draw(right);
+   if(a.state_bucket!=b.state_bucket)return a.state_bucket<b.state_bucket;
+   if(a.geometry_page!=b.geometry_page)return a.geometry_page<b.geometry_page;
+   return a.material_instance<b.material_instance;
+  });
+  native_draw_order_.insert(native_draw_order_.end(),native_crystal_order_.begin(),native_crystal_order_.end());
+  native_crystal_order_.clear();
  };
  for(std::size_t index=0;index<native_pending_draws_.size();++index){
   const auto& draw=native_queued_draw(index);
@@ -1313,11 +1368,12 @@ void Renderer::order_native_groups(bool shadows){
   if(shadows?!(passes&(UINT(native_shadow_dirty_mask_)<<8)):!(passes&1u))continue;
   auto& bucket=native_state_buckets_[draw.state_bucket];
   if(bucket.selection_epoch!=native_queue_epoch_){bucket.selection_epoch=native_queue_epoch_;++native_frame_stats_.native_material_buckets;}
-  if(!shadows&&!draw.reorderable){emit();native_draw_order_.push_back(index);continue;}
+  if(!shadows&&!draw.reorderable){emit();emit_crystals();native_draw_order_.push_back(index);continue;}
+  if(!shadows&&(draw.material_instance&7u)==kNativeCrystalWorldDomain){native_crystal_order_.push_back(index);continue;}
   if(bucket.selected.empty())native_active_groups_.push_back(draw.state_bucket);
   bucket.selected.push_back(index);
  }
- emit();
+ emit();emit_crystals();
 }
 
 HRESULT Renderer::resolve_native_prepared_material(
@@ -1745,6 +1801,8 @@ UINT Renderer::allocate_native_instance_record(){
 
 HRESULT Renderer::resolve_native_instance(const NativeGeometryView& view,NativeQueuedDraw& draw){
  if(!view.world.record_revision)return S_OK;
+ // F10 fur_debug on owned previews (panel doll, outfit, portrait) as in the world.
+ draw.instance.flags|=fur_debug_bits(view.fur&&*view.fur,view.wound_surface_interface!=0,draw.instance.flags);
  if(!view.prepared_material||view.prepared_material->slot>=native_prepared_material_slots_.size())return E_INVALIDARG;
  auto& material=native_prepared_material_slots_[view.prepared_material->slot];
  UINT& current=material.persistent_instance[native_shadow_collecting_?1:0];
@@ -1792,7 +1850,7 @@ HRESULT Renderer::store_native_instance(UINT& current,const std::weak_ptr<const 
    old.world_generation==draw.world_generation && old.geometry_radius==draw.geometry_radius && old.prepare_world==draw.prepare_world &&
    old.pose_slot==draw.pose_slot && old.pose_allocation==draw.pose_allocation &&
    old.animation_allocation==draw.animation_allocation &&
-   old.geometry_page==draw.geometry_page;
+   old.geometry_page==draw.geometry_page&&old.material_instance==draw.material_instance;
  };
  try{
   bool instance_changed=current>=native_instance_records_.size()||!native_instance_records_[current].owned||
@@ -1814,6 +1872,7 @@ HRESULT Renderer::store_native_instance(UINT& current,const std::weak_ptr<const 
       record.command.instance.world_geometry!=draw.instance.world_geometry||
       record.command.reorderable!=draw.reorderable||record.command.preserve_order!=draw.preserve_order||
       ((record.command.instance.flags^draw.instance.flags)&native_foliage_part_flag)!=0||
+      record.command.material_instance!=draw.material_instance||
       record.command.geometry_page!=draw.geometry_page)
      native_layout_changed();
    bind_native_material_group(record,draw.state_bucket);
@@ -1870,7 +1929,7 @@ Renderer::NativeDrawGpu Renderer::native_draw_descriptor(const NativeQueuedDraw&
 }
 
 // The world-clip constants (b3, NativeWorldClip) both executors upload.
-void Renderer::native_world_clip_values(std::array<std::uint8_t,sizeof(std::array<float,16>)*2+64>& values){
+void Renderer::native_world_clip_values(std::array<std::uint8_t,sizeof(std::array<float,16>)*2+80>& values){
  float distance_cull=native_draw_distance_;
  if(fog_cull_distance_>0&&fog_cull_frame_+1>=native_frame_index_)distance_cull=(std::min)(distance_cull,fog_cull_distance_);
  std::uint8_t* const out=values.data();
@@ -1881,7 +1940,7 @@ void Renderer::native_world_clip_values(std::array<std::uint8_t,sizeof(std::arra
   (native_cull_frozen_?native_cull_clip_:native_world_clip_).data(),sizeof(native_world_clip_));
  const float cull_params[4]={float(width_),float(height_),native_cull_min_screen_,native_shadow_cull_min_texels_};
  std::memcpy(out+sizeof(native_world_clip_)*2,cull_params,sizeof(cull_params));
- const float hiz_params[4]={native_occlusion_active()?1.f:0.f,float(native_hiz_width_),float(native_hiz_height_),float(native_hiz_mips_)};
+ const float hiz_params[4]={native_occlusion_active()?1.f:0.f,(std::max)(1.f,float(width_)*.5f),(std::max)(1.f,float(height_)*.5f),float(native_hiz_mips_)};
  std::memcpy(out+sizeof(native_world_clip_)*2+16,hiz_params,sizeof(hiz_params));
  // Clip w grows by the length of its row per metre of planar view depth.
  const auto& cull=native_cull_frozen_?native_cull_clip_:native_world_clip_;
@@ -1892,10 +1951,38 @@ void Renderer::native_world_clip_values(std::array<std::uint8_t,sizeof(std::arra
   native_lod_error_px_,kStaticLodBand};
  std::memcpy(out+sizeof(native_world_clip_)*2+32,distance_params,sizeof(distance_params));
  // The crown impostor size (0: off) and crossfade band (nativeImpostorSelect).
- const float impostor_params[4]={native_impostor_pixels_,kImpostorBand,native_impostor_debug_?1.f:0.f,0.f};
+ // z: the debug views (1 to 3), or below 0 on a frame whose sun mask traces rays: the impostor's sun
+ // receiver is the crown's baked surface (nativePrepassPS).
+ const int impostor_receiver=d3d12_&&native_traced_sun_?1:0;
+ const float impostor_params[4]={native_impostor_pixels_,kImpostorBand, native_impostor_debug_?(native_impostor_raw_?3.f:native_impostor_frames_?2.f:1.f):-float(impostor_receiver),
+  native_impostor_output_scale()};
  std::memcpy(out+sizeof(native_world_clip_)*2+48,impostor_params,sizeof(impostor_params));
+ // The screen-door crossfade's per-frame offset (nativeLodDiscard): under a
+ // temporal upscaler it walks the jitter's Halton sequence, so DLSS/FSR
+ // resolve the dither into a blend instead of a fixed checker (as dithered
+ // LOD transitions under TAA); without one it stays fixed.
+ const float dither_params[4]={temporal_upscaler()?dlss_jitter_[0]+.5f:0.f,terrain_relief_derivfree_?1.f:0.f/* #243 */,native_temp_far_px_,native_impostor_far_metres()};
+ std::memcpy(out+sizeof(native_world_clip_)*2+64,dither_params,sizeof(dither_params));
  native_distance_cull_uploaded_=distance_cull;native_lod_error_uploaded_=native_lod_error_px_;
- native_impostor_pixels_uploaded_=native_impostor_pixels_;native_impostor_debug_uploaded_=native_impostor_debug_;
+ // Impostor table (harness runs, impostor_debug turning on): every registered
+ // impostor record (screen position at registration, 3840x2160; world centre;
+ // slice; lead; MOB object; model key) and the slice -> key table, into
+ // impostors_N.txt in the harness folder.
+ if(native_impostor_debug_&&!native_impostor_debug_uploaded_)try{
+  char dir[MAX_PATH]{};
+  if(GetEnvironmentVariableA("EI_RENDERER_HARNESS_DIR",dir,MAX_PATH)>0){
+   static unsigned dumps=0;
+   const std::string path=std::string(dir)+"\\impostors_"+std::to_string(++dumps)+".txt";
+   if(FILE* file=std::fopen(path.c_str(),"w")){
+    std::fprintf(file,"render %ux%u records %zu slices %zu\n",unsigned(width_),unsigned(height_),impostor_probe_.size(),impostors_.slices.size());
+    for(const auto& e:impostor_probe_)std::fprintf(file,"record screen %.0f %.0f w=%.1f world %.2f %.2f %.2f slice=%u lead=%d object=%d %s\n",
+     e.screen[0],e.screen[1],e.screen[2],e.centre[0],e.centre[1],e.centre[2],e.slice,e.lead?1:0,e.object,e.key.c_str());
+    for(const auto& [key,slice]:impostors_.slices)std::fprintf(file,"slice %u %s\n",slice,key.c_str());
+    std::fclose(file);
+   }
+  }
+ }catch(...){}
+ native_impostor_pixels_uploaded_=native_impostor_pixels_;native_impostor_debug_uploaded_=native_impostor_debug_;native_impostor_frames_uploaded_=native_impostor_frames_;native_impostor_scale_uploaded_=native_impostor_output_scale();native_impostor_raw_uploaded_=native_impostor_raw_;native_temp_far_uploaded_=native_temp_far_px_*4096.f+native_impostor_far_metres();
 }
 
 HRESULT Renderer::upload_native_instances(){
@@ -1904,12 +1991,14 @@ HRESULT Renderer::upload_native_instances(){
  float distance_cull=native_draw_distance_;
  if(fog_cull_distance_>0&&fog_cull_frame_+1>=native_frame_index_)distance_cull=(std::min)(distance_cull,fog_cull_distance_);
  if(distance_cull!=native_distance_cull_uploaded_||native_lod_error_px_!=native_lod_error_uploaded_||
-    native_impostor_pixels_!=native_impostor_pixels_uploaded_||native_impostor_debug_!=native_impostor_debug_uploaded_)native_world_clip_dirty_=true;
+    native_impostor_pixels_!=native_impostor_pixels_uploaded_||native_impostor_debug_!=native_impostor_debug_uploaded_||
+    native_impostor_frames_!=native_impostor_frames_uploaded_||native_impostor_raw_!=native_impostor_raw_uploaded_||
+    native_impostor_output_scale()!=native_impostor_scale_uploaded_||native_temp_far_px_*4096.f+native_impostor_far_metres()!=native_temp_far_uploaded_)native_world_clip_dirty_=true;
  if(native_world_clip_dirty_){
-  if(!native_world_clip_constants_){D3D11_BUFFER_DESC description{};description.ByteWidth=sizeof(native_world_clip_)*2+64;
+  if(!native_world_clip_constants_){D3D11_BUFFER_DESC description{};description.ByteWidth=sizeof(native_world_clip_)*2+80;
    description.Usage=D3D11_USAGE_DYNAMIC;description.BindFlags=D3D11_BIND_CONSTANT_BUFFER;description.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
    HRESULT hr=device_->CreateBuffer(&description,nullptr,&native_world_clip_constants_);if(FAILED(hr))return hr;}
-  std::array<std::uint8_t,sizeof(native_world_clip_)*2+64> values;native_world_clip_values(values);
+  std::array<std::uint8_t,sizeof(native_world_clip_)*2+80> values;native_world_clip_values(values);
   D3D11_MAPPED_SUBRESOURCE mapped{};HRESULT hr=context_->Map(native_world_clip_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped);
   if(FAILED(hr))return hr;
   std::memcpy(mapped.pData,values.data(),values.size());
@@ -2198,7 +2287,25 @@ void Renderer::native_layout_changed() noexcept{
  }
 }
 
+// The layouts reserve the slim pass's miss lists only while the pass can draw
+// (terrain_slim_mode): turning it on or off rebuilds every layout and static bake.
+void Renderer::note_terrain_slim_lists() noexcept{
+ const bool slim_lists=terrain_slim_mode(debug_overlay_.config(),d3d12_!=nullptr)>0;
+ if(slim_lists==native_slim_lists_)return;
+ native_slim_lists_=slim_lists;native_layout_changed();native_static_content_changed();
+ if(slim_lists)terrain_miss_clear_needed_=true; // keys from an earlier time it was on could outrank new ones
+}
+// The most slim flushes one frame has taken, logged when it grows (the key
+// sequence wraps at 128 and clears the mask: more in one frame only clears more often).
+void Renderer::count_terrain_slim_flush() noexcept{
+ if(terrain_slim_count_frame_!=native_frame_index_){terrain_slim_count_frame_=native_frame_index_;terrain_slim_frame_flushes_=0;}
+ if(++terrain_slim_frame_flushes_<=terrain_slim_flushes_max_)return;
+ terrain_slim_flushes_max_=terrain_slim_frame_flushes_;
+ char text[64];std::snprintf(text,sizeof(text),"most slim flushes in a frame: %u",terrain_slim_flushes_max_);
+ bridge_report_event("terrain_slim_flushes",text);
+}
 HRESULT Renderer::prepare_native_submission_layout(bool shadows,unsigned slot){
+ note_terrain_slim_lists(); // before the layout is reused
  auto& layout=native_submission_layouts_[slot];
  std::size_t prefix=0;
 #ifdef EID3D11_TESTING
@@ -2222,12 +2329,17 @@ HRESULT Renderer::prepare_native_submission_layout(bool shadows,unsigned slot){
  layout.source_draws.clear();layout.source_records.clear();
  layout.dispatches.clear();layout.geometry_dispatches.clear();
  layout.batches.clear();layout.arguments.clear();
- std::uint64_t triangles=0,components=0;
+ std::uint64_t triangles=0,components=0,owners=0;layout.owners=0;
  try{
+  // units: the record's larger of components and emitted triangles (its build chunks).
   struct PendingWork {NativeDrawWorkGpu value{};std::size_t draw=0;
-   UINT geometry=UINT_MAX;};
+   UINT geometry=UINT_MAX;UINT units=0;};
   std::vector<PendingWork> pending;pending.reserve(native_draw_order_.size());
-  UINT split_batches=0;
+  UINT split_batches=0;bool miss_lists=false;
+  // The slim terrain pass's lists only while it can draw (terrain_slim_mode):
+  // with it off the layout is the one before it.
+  const bool slim_lists=!shadows&&terrain_slim_mode(debug_overlay_.config(),d3d12_!=nullptr)>0;
+  static_assert(16u*1024u*1024u<=(1u<<24),"terrainSlimKey keeps 24 bits of a triangle slot (the limit below)");
   for(std::size_t first=0;first<native_draw_order_.size();){
    constexpr UINT maximum_batches=kNativeRawElementLimit/4u;
    if(layout.batches.size()>=maximum_batches)
@@ -2238,8 +2350,14 @@ HRESULT Renderer::prepare_native_submission_layout(bool shadows,unsigned slot){
    };
    NativeBatch batch;batch.first_draw=first;batch.state_bucket=draw.state_bucket;
    batch.foliage=(draw.instance.flags&native_foliage_part_flag)!=0;
+   batch.material_instance=shadows?0:draw.material_instance;
    batch.geometry_page=draw.geometry_page;
    batch.preserves_order=!shadows&&native_state_buckets_[draw.state_bucket].semantic_kind==SemanticKind::figure&&supports_order(draw);
+   // D3D12 indexed object draws (NativeBatch::indexed): opaque and cutout
+   // material instance batches; ordered ones keep their visible triangles.
+   batch.indexed=!shadows&&d3d12_&&batch.material_instance!=0&&!batch.preserves_order&&
+    native_state_buckets_[draw.state_bucket].semantic_kind!=SemanticKind::terrain&&
+    native_state_buckets_[draw.state_bucket].opacity!=NativeOpacityClass::ordered;
    std::size_t last=first+1;
    if(shadows||draw.reorderable||batch.preserves_order)
     while(last<native_draw_order_.size()&&last-first<4096){
@@ -2248,7 +2366,8 @@ HRESULT Renderer::prepare_native_submission_layout(bool shadows,unsigned slot){
         !widescreen::same_composition(candidate.hud_composition,draw.hud_composition)||
         (shadows&&native_far_foliage_opaque_&&
          ((candidate.instance.flags&native_foliage_part_flag)!=0)!=batch.foliage)||
-        (!shadows&&(draw.reorderable?!candidate.reorderable:!supports_order(candidate))))break;
+        (!shadows&&(draw.reorderable?!candidate.reorderable:!supports_order(candidate)))||
+        (!shadows&&candidate.material_instance!=draw.material_instance))break;
      ++last;
     }
    batch.draw_count=last-first;batch.output_triangle_base=static_cast<UINT>(triangles);
@@ -2270,11 +2389,23 @@ HRESULT Renderer::prepare_native_submission_layout(bool shadows,unsigned slot){
    }
    // A batch with an unclassified draw keeps one region and the full variant.
    if(!batch.flat_pixels)steep_triangles=0;
+   // NativeBatch::terrain_records: what the vertex stage reads to give a
+   // record its unit, foliage, impostor and contact bits.
+   if(!shadows&&native_state_buckets_[draw.state_bucket].semantic_kind==SemanticKind::terrain){
+    batch.terrain_records=true;
+    for(std::size_t i=first;i<last&&batch.terrain_records;++i){
+     const auto& queued=native_queued_draw(native_draw_order_[i]);
+     batch.terrain_records=queued.instance.terrain_vertex_offset!=UINT_MAX&&
+      (queued.instance.flags&(native_unit_flag|native_foliage_part_flag))==0&&
+      (queued.instance.world_geometry&(native_world_object_space|native_world_lod|native_world_impostor))==0;
+    }
+   }
    // Ground contact: terrain never takes it; other batches only when a draw
    // can reach the contact band (the flush then binds the contact variant).
    if(!shadows){
     const auto& kind=native_state_buckets_[draw.state_bucket];
     for(std::size_t i=first;!batch.posed&&i<last;++i)batch.posed=native_queued_draw(native_draw_order_[i]).instance.pose_node!=UINT_MAX;
+    for(std::size_t i=first;!batch.swaying&&i<last;++i)batch.swaying=(native_queued_draw(native_draw_order_[i]).instance.flags&native_sway_flag)!=0;
     batch.contact=false;
     for(std::size_t i=first;kind.semantic_kind!=SemanticKind::terrain&&!batch.contact&&i<last;++i)
      batch.contact=native_draw_may_contact(native_queued_draw(native_draw_order_[i]),kind.material_key.contact_map);
@@ -2291,13 +2422,39 @@ HRESULT Renderer::prepare_native_submission_layout(bool shadows,unsigned slot){
     work.flags=batch.preserves_order?1u:0u;
     work.prepared_vertex_base=queued.instance.world_geometry?queued.world_base:static_cast<UINT>(components);
     if(batch.steep_args_slot!=UINT_MAX){work.steep_output_triangle_base=batch.steep_triangle_base;work.steep_args_byte_offset=batch.steep_args_slot;}
-    pending.push_back({work,native_draw_order_[i],queued.geometry_page});
+    // An indexed record's owner ids: its components, then the larger of its
+    // crossfade successor's components and its impostor quad's four corners.
+    if(batch.indexed){
+     work.flags|=4u;work.owner_base=static_cast<UINT>(owners);
+     owners+=std::uint64_t(queued.component_count)+(std::max)((queued.instance.world_geometry&native_world_lod)?queued.component_count:0u,
+      (queued.instance.world_geometry&native_world_impostor)?4u:0u);
+     if(owners>UINT_MAX)return E_OUTOFMEMORY;
+    }
     // A static LOD record may emit two levels in its crossfade band (at most
     // the full list and the first reduced level).
-    triangles+=queued.index_count/3u+((queued.instance.world_geometry&native_world_lod)?queued.mesh->lod_extra_triangles:0u)+
+    const UINT emitted=queued.index_count/3u+((queued.instance.world_geometry&native_world_lod)?queued.mesh->lod_extra_triangles:0u)+
      ((queued.instance.world_geometry&native_world_impostor)?2u:0u); // a crown's impostor quad
+    pending.push_back({work,native_draw_order_[i],queued.geometry_page,(std::max)(emitted,static_cast<UINT>(queued.component_count))});
+    triangles+=emitted;
     if(!queued.instance.world_geometry)components+=queued.component_count;
     if(triangles>16u*1024u*1024u||components>8u*1024u*1024u)return E_OUTOFMEMORY;
+   }
+   // The slim terrain pass's miss lists (NativeBatch::miss_list_*): a range of
+   // each region's size after the batch's own triangles. Liquid batches draw
+   // their own way; LOD or impostor records could emit more than the region.
+   if(batch_triangles&&slim_lists){
+    bool other=false;
+    for(std::size_t i=first;i<last&&!other;++i){
+     const auto& queued=native_queued_draw(native_draw_order_[i]);
+     other=!queued.mesh||queued.mesh->has_liquid||(queued.instance.world_geometry&(native_world_lod|native_world_impostor))!=0;
+    }
+    if(!other){
+     batch.miss_list_max[0]=batch_triangles-steep_triangles;batch.miss_list_max[1]=steep_triangles;
+     for(unsigned region=0;region<2;++region)if(batch.miss_list_max[region]){
+      batch.miss_list_base[region]=static_cast<UINT>(triangles);triangles+=batch.miss_list_max[region];miss_lists=true;
+     }
+     if(triangles>16u*1024u*1024u)return E_OUTOFMEMORY;
+    }
    }
    layout.arguments.insert(layout.arguments.end(),
     {batch.preserves_order?static_cast<UINT>((triangles-batch.output_triangle_base)*3u):0u,1u,0u,0u});
@@ -2312,6 +2469,22 @@ HRESULT Renderer::prepare_native_submission_layout(bool shadows,unsigned slot){
     batch.steep_args_slot+=batch_slots;layout.arguments.insert(layout.arguments.end(),{0u,1u,0u,0u});
    }
   }
+  // Then the miss lists' slots (counted up by the compaction pass).
+  if(miss_lists)for(auto& batch:layout.batches)for(unsigned region=0;region<2;++region)if(batch.miss_list_max[region]){
+   batch.miss_list_slot[region]=static_cast<UINT>(layout.arguments.size()/4u);
+   layout.arguments.insert(layout.arguments.end(),{0u,1u,0u,0u});
+  }
+  // Then the indexed batches' five-word slots (NativeBatch::indexed_args_offset),
+  // which their records count into instead of the batch's four-word slot.
+  bool indexed_slots=false;
+  for(auto& batch:layout.batches)if(batch.indexed){
+   batch.indexed_args_offset=static_cast<UINT>(layout.arguments.size()*sizeof(UINT));indexed_slots=true;
+   layout.arguments.insert(layout.arguments.end(),{0u,1u,0u,0u,0u});
+  }
+  if(indexed_slots)for(auto& item:pending){
+   const auto& batch=layout.batches[item.value.indirect_args_byte_offset/16u];
+   if(batch.indexed)item.value.indirect_args_byte_offset=batch.indexed_args_offset;
+  }
   std::stable_sort(pending.begin(),pending.end(),[](const PendingWork& left,
                                                    const PendingWork& right){
    return left.geometry<right.geometry;
@@ -2325,6 +2498,8 @@ HRESULT Renderer::prepare_native_submission_layout(bool shadows,unsigned slot){
    if(layout.dispatches.empty()||layout.dispatches.back().geometry_page!=item.geometry)
     layout.dispatches.push_back({index,1,item.geometry,0});
    else ++layout.dispatches.back().count;
+   auto& build_chunks=layout.dispatches.back().build_chunks;
+   build_chunks=(std::min)(65535u,(std::max)(build_chunks,(item.units+511u)/512u));
    if(layout.geometry_dispatches.empty()||
       layout.geometry_dispatches.back().geometry_page!=item.geometry)
     layout.geometry_dispatches.push_back({index,1,item.geometry,0});
@@ -2334,7 +2509,7 @@ HRESULT Renderer::prepare_native_submission_layout(bool shadows,unsigned slot){
   layout.source_records.reserve(native_draw_order_.size());
   for(const auto pending_index:native_draw_order_)
    layout.source_records.push_back(native_pending_draws_[pending_index].record);
-  layout.triangles=static_cast<UINT>(triangles);layout.components=static_cast<UINT>(components);
+  layout.triangles=static_cast<UINT>(triangles);layout.components=static_cast<UINT>(components);layout.owners=static_cast<UINT>(owners);
   layout.source_revision=native_layout_revision_;
 #ifdef EID3D11_TESTING
   ++test_native_layout_rebuilds_;
@@ -2374,7 +2549,7 @@ void Renderer::refresh_native_draw_work(NativeSubmissionLayout& layout,bool shad
     else {batch.slice_triangles[slice]-=draw.index_count/3u;--batch.slice_records[slice];}
    }
   }
-  work.flags=(work.flags&1u)|mask;
+  work.flags=(work.flags&5u)|mask; // 1 ordered, 4 indexed: the layout's
   if(draw.instance.world_geometry)work.prepared_vertex_base=draw.world_base;
   if(draw.prepare_world&&draw.world_allocation<native_world_ranges_.size()){
    auto& range=native_world_ranges_[draw.world_allocation];
@@ -2532,16 +2707,6 @@ void Renderer::release_native_queued_draw(UINT index,bool mesh_pending) noexcept
  }
  release_native_instance(index);
 }
-namespace {
-
-// The game's per-object entries into the renderer, between passes: their CPU
-// time per frame (RenderProfiler::add_cpu_time).
-struct ProfileCpuTimer{
- RenderProfiler& profiler;const char* name;std::int64_t begin;
- ProfileCpuTimer(RenderProfiler& p,const char* n) noexcept:profiler(p),name(n),begin(p.enabled()?perf_now():0){}
- ~ProfileCpuTimer(){if(begin)profiler.add_cpu_time(name,perf_now()-begin);}
-};
-}  // namespace
 HRESULT Renderer::queue_native(const NativeGeometryView& view,const FixedState& st,SurfaceImage* texture,NativeGeometryResult* result){SCENE_ENTRY("queue_native");
  const ProfileCpuTimer timer(profiler_,"queue_native");
  ++native_generic_ingress_calls_;
@@ -2621,29 +2786,34 @@ HRESULT Renderer::queue_native_owned_impl(const NativeGeometryView& view,const F
   D3D12TextureRef d3d12_texture;std::uint64_t d3d12_backing=0;
   const HRESULT d3d12_hr=get_native_owned_texture_d3d12(view.owned_texture,d3d12_texture,d3d12_backing,result,
    !view.owned_texture.camp_surface_alias&&!scene_composited_&&view.semantic_kind!=SemanticKind::ui,
-   view.semantic_kind!=SemanticKind::terrain); // terrain atlases keep their texel gutters
+   view.semantic_kind!=SemanticKind::terrain, // terrain atlases keep their texel gutters
+   (view.flags&native_unit_flag)!=0);
   if(FAILED(d3d12_hr))return d3d12_hr;
   ++native_generic_ingress_calls_;
   // A retained figure part's composed atlas: its material profile (as below).
   // A client surface's texture is keyed by the surface itself (2<<62|id, no
-  // owned-texture entry): its profile goes with the surface (retire_surface).
+  // owned-texture entry): its profile goes with the surface (retire_surface),
+  // as does that of a surface drawing its authored chain (its own backing).
   if(!native_shadow_collecting_&&view.owned_texture.material_name)
    note_material_texture(*view.owned_texture.material_name,d3d12_backing,(view.flags&native_unit_flag)!=0,
-    view.owned_texture.surface&&d3d12_backing==((2ull<<62)|view.owned_texture.identity));
+    view.owned_texture.surface&&(d3d12_backing==((2ull<<62)|view.owned_texture.identity)||authored_surface_backing_value(d3d12_backing)));
   return queue_native_impl(view,st,nullptr,result,false,nullptr,d3d12_backing,view.owned_texture.generation,false,0,registered,&d3d12_texture);
  }
  ComPtr<ID3D11ShaderResourceView> texture;
  std::uint64_t backing=0;
  HRESULT hr=get_native_owned_texture(view.owned_texture,texture,backing,result,
   !view.owned_texture.camp_surface_alias&&!scene_composited_&&view.semantic_kind!=SemanticKind::ui,
-  view.semantic_kind!=SemanticKind::terrain); // terrain atlases keep their texel gutters
+  view.semantic_kind!=SemanticKind::terrain, // terrain atlases keep their texel gutters
+  (view.flags&native_unit_flag)!=0);
  if(FAILED(hr))return hr;
  if(!texture)return native_geometry_failure(result,E_FAIL,"texture.srv",true);
  // Alpha-tested shadow casters sample the same owned texture as the colour
  // pass: one texture per image, no shadow texture-array copy (#142).
  if(!native_shadow_collecting_)++native_generic_ingress_calls_;
  // A retained figure part's composed atlas: its material profile (colour only).
- if(!native_shadow_collecting_&&view.owned_texture.material_name)note_material_texture(*view.owned_texture.material_name,backing,(view.flags&native_unit_flag)!=0);
+ // A surface drawing its authored chain: its own backing, retired with it.
+ if(!native_shadow_collecting_&&view.owned_texture.material_name)note_material_texture(*view.owned_texture.material_name,backing,(view.flags&native_unit_flag)!=0,
+  authored_surface_backing_value(backing));
  return queue_native_impl(view,st,nullptr,result,false,texture.Get(),
   backing,view.owned_texture.generation,false,0,registered);
 }
@@ -2776,7 +2946,13 @@ HRESULT Renderer::queue_native_terrain(const NativeGeometryView& view,const Fixe
    std::copy(view.lighting.material_diffuse.begin(),view.lighting.material_diffuse.end(),draw.instance.material_diffuse);
    std::copy(view.lighting.emissive.begin(),view.lighting.emissive.end(),draw.instance.emissive);
    std::copy(view.lighting.specular.begin(),view.lighting.specular.end(),draw.instance.specular);
-   draw.instance.uv_shift[0]=view.u_shift;draw.instance.uv_shift[1]=view.v_shift;std::copy(view.astral.begin(),view.astral.end(),draw.instance.astral);
+   draw.instance.uv_shift[0]=view.u_shift;draw.instance.uv_shift[1]=view.v_shift;
+   std::memcpy(&draw.instance.padding[3],&view.contact_world_height,sizeof(float));
+   if(view.world.object_space){ // its sway anchor (queue_native_impl)
+    std::memcpy(&draw.instance.morph_offset,&view.world.sway_root[0],sizeof(float));
+    std::memcpy(&draw.instance.morph_count,&view.world.sway_root[1],sizeof(float));
+    draw.instance.morph_fraction=view.world.sway_root[2];
+   }
    std::copy(view.bounds_minimum.begin(),view.bounds_minimum.end(),draw.bounds_min);
    std::copy(view.bounds_maximum.begin(),view.bounds_maximum.end(),draw.bounds_max);
    if(FAILED(hr=resolve_native_world_range(view,draw)))return fail(hr,"terrain.world_range");
@@ -2785,17 +2961,23 @@ HRESULT Renderer::queue_native_terrain(const NativeGeometryView& view,const Fixe
    const FixedState* material_state=nullptr;
    const auto opacity=native_material_state(state,view.lighting.material_alpha,
     native_alpha_evidence(view,view.lighting.material_alpha,view.owned_texture.identity!=0),native_shadow_collecting_,shadow_state,material_state);
-   draw.instance.world_geometry=(draw.instance.world_geometry&~(native_world_lod|native_world_impostor))|
+   draw.instance.world_geometry=(draw.instance.world_geometry&~(native_world_lod|native_world_impostor|native_world_impostor_follower))|
     (native_record_takes_lod(view,opacity,draw.mesh->lod_levels)?native_world_lod:0u)|
-    (native_record_takes_impostor(view,opacity,draw.mesh->sphere_block)?native_world_impostor:0u);
+    (native_record_takes_impostor(view,opacity,draw.mesh->sphere_block)?native_record_impostor_flags(view):0u);
    if(draw.instance.world_geometry&native_world_impostor)draw.instance.second_morph_offset=view.world.impostor-1;
    else if((draw.instance.world_geometry&native_world_lod)&&!view.world.object_space)
     draw.instance.second_morph_offset=draw.world_base;
-   const auto key=native_material_key(*material_state,SemanticKind::terrain,opacity,view.lighting.enabled!=0,
+   // The material instance from this frame's flags and impostor bits (the
+   // active map's object-space statics take this warm path; their impostor
+   // and unit/foliage bits may differ from the stored record's).
+   draw.material_instance=native_material_instance(view.semantic_kind,draw,
+    d3d12_?draw.material_backing:group.material_key.texture_backing);
+   auto key=native_material_key(*material_state,view.semantic_kind,opacity,view.lighting.enabled!=0,
     group.texture_srv!=nullptr||group.texture_d3d12,group.texture_array,group.material_key.texture_backing,group.material_key.texture_generation,group.material_key.contact_map);
+   key.program=native_astral_record(view.flags)?1u:0u;
    if(!(key==group.material_key)){
     const auto srv=group.texture_srv;const bool array=group.texture_array;const D3D12TextureRef texture12=group.texture_d3d12;
-    if(FAILED(hr=get_native_material_group(key,*material_state,srv.Get(),array,SemanticKind::terrain,opacity,
+    if(FAILED(hr=get_native_material_group(key,*material_state,srv.Get(),array,view.semantic_kind,opacity,
        native_material_state_key(key),draw.state_bucket,texture12?&texture12:nullptr)))return fail(hr,"terrain.material_group");
    }
    draw.reorderable=view.ordering==NativeOrdering::reorderable||
@@ -2923,9 +3105,10 @@ HRESULT Renderer::queue_native_depth(const NativeDepthSubmission& submission,
   const auto& group=native_state_buckets_[group_index];
   if(!group.occupied)return E_FAIL;
   FixedState state=group.state;state.stage[0][D3DTSS_MIPFILTER]=inherited_mip;
-  const auto key=native_material_key(state,group.semantic_kind,group.opacity,false,
+  auto key=native_material_key(state,group.semantic_kind,group.opacity,false,
    group.texture_srv!=nullptr||group.texture_d3d12,group.texture_array,group.material_key.texture_backing,
    group.material_key.texture_generation);
+  key.program=group.material_key.program;
   if(!(key==group.material_key)){
    NativeQueuedDraw draw=record.command;
    const auto texture=group.texture_srv;const bool texture_array=group.texture_array;
@@ -3091,6 +3274,15 @@ HRESULT Renderer::queue_native_depth(const NativeDepthSubmission& submission,
 
 HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submission,
  const FixedState& frame,SurfaceImage* wound,NativeGeometryResult* result){SCENE_ENTRY("queue_native_records");
+ // A cut-out part of a fully opaque static-set object draws alpha tested and
+ // unblended, as the neighbour maps and the object-space statics draw the
+ // same models (queue_active_static_parts): it takes the depth prepass and
+ // the shadow mask and shades only its visible texels. A fading object
+ // keeps its blend.
+ const auto static_opaque_cutout=[&](FixedState& state,float alpha){
+  if(native_static_registration_&&state.render[D3DRENDERSTATE_ALPHATESTENABLE]&&state.render[D3DRENDERSTATE_ALPHABLENDENABLE]&&
+     state.render[D3DRENDERSTATE_ZWRITEENABLE]&&alpha>=254.5f/255.f)state.render[D3DRENDERSTATE_ALPHABLENDENABLE]=FALSE;
+ };
  bool color_diagnostic_enabled=placed_hitch_profile_.active();
 #ifdef EID3D11_TESTING
  color_diagnostic_enabled|=test_color_resource_diagnostic_;
@@ -3179,13 +3371,14 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
     view.world.object_to_world=submission.pose->root_to_world;view.world.shape=submission.pose->shape;
     view.contribution=part->contribution;view.bounds_minimum=part->bounds.minimum;view.bounds_maximum=part->bounds.maximum;
     view.contact_world_height=submission.pose->contact_world_height;
-    view.flags=values.flags;view.default_diffuse=values.default_diffuse;view.default_specular=values.default_specular;
+    view.flags=values.flags|fur_debug_bits(part->fur!=nullptr,wound!=nullptr,values.flags);view.default_diffuse=values.default_diffuse;view.default_specular=values.default_specular;
     view.lighting.enabled=values.lighting_enabled;view.lighting.material_alpha=alpha;
     view.lighting.material_diffuse=values.diffuse;view.lighting.emissive=values.emissive;view.lighting.specular=values.specular;
     view.u_shift=values.u_shift;view.v_shift=values.v_shift;view.astral=values.astral;
     view.ordering=wound?NativeOrdering::preserve:static_cast<NativeOrdering>(values.ordering);
     view.owned_fixed_state.specular_enable=values.specular_enable;
     auto state=native_owned_submission_state(frame,view.owned_fixed_state);
+    if(!wound)static_opaque_cutout(state,alpha);
     if(wound){
      view.owned_texture={};
      state.render[D3DRENDERSTATE_SRCBLEND]=D3DBLEND_SRCALPHA;
@@ -3201,7 +3394,10 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
     mesh_slot.last_used_frame=native_frame_index_;mesh_slot.mesh->last_used_frame=native_frame_index_;
     if(mesh_slot.world_valid)++native_world_reused_records_;
     bool material_changed=old.inherited_state!=inherited;
-    if(!material_changed&&(old.values_revision!=part->values_revision||old.command.instance.material_alpha!=alpha)){
+    // F10 fur_debug changes the flags without a new producer revision.
+    const UINT wanted_flags=(values.flags|fur_debug_bits(part->fur!=nullptr,wound!=nullptr,values.flags))&~native_preview_specular_rgb_flag;
+    if(!material_changed&&(old.values_revision!=part->values_revision||old.command.instance.material_alpha!=alpha||
+       old.command.instance.flags!=wanted_flags)){
      // Color and depth share the producer revision, but retain separate commands.
      // A change for the other pass need not reconstruct this pass's material.
      const auto& retained=old.command.instance;
@@ -3209,7 +3405,7 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
      const auto ordering=wound?NativeOrdering::preserve:static_cast<NativeOrdering>(values.ordering);
      const bool reorderable=ordering==NativeOrdering::reorderable||
       (ordering==NativeOrdering::derive_from_state&&group.opacity!=NativeOpacityClass::ordered);
-     material_changed=retained.flags!=values.flags||retained.default_diffuse!=values.default_diffuse||
+     material_changed=retained.flags!=wanted_flags||retained.default_diffuse!=values.default_diffuse||
       retained.default_specular!=values.default_specular||retained.lighting_enabled!=values.lighting_enabled||
       retained.material_alpha!=alpha||
       !std::equal(values.diffuse.begin(),values.diffuse.end(),retained.material_diffuse)||
@@ -3245,7 +3441,7 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
 #ifdef EID3D11_TESTING
       ++test_native_material_reconstructions_;
 #endif
-      auto& value=draw.instance;value.flags=values.flags&~native_preview_specular_rgb_flag;value.default_diffuse=values.default_diffuse;
+      auto& value=draw.instance;value.flags=wanted_flags;value.default_diffuse=values.default_diffuse;
       value.default_specular=values.default_specular;value.lighting_enabled=values.lighting_enabled;
       value.material_alpha=alpha;std::copy(values.diffuse.begin(),values.diffuse.end(),value.material_diffuse);
       std::copy(values.emissive.begin(),values.emissive.end(),value.emissive);
@@ -3263,6 +3459,10 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
       state.render[D3DRENDERSTATE_ALPHATESTENABLE]=source.owned_fixed_state.alpha_test_enable;
       state.render[D3DRENDERSTATE_ALPHAFUNC]=source.owned_fixed_state.alpha_func;
       state.render[D3DRENDERSTATE_ALPHAREF]=source.owned_fixed_state.alpha_ref;
+      // The blend follows the new alpha (static_opaque_cutout): a static that
+      // starts to fade gets its authored blend back.
+      if(!wound&&native_static_registration_){state.render[D3DRENDERSTATE_ALPHABLENDENABLE]=native_owned_submission_state(frame,source.owned_fixed_state).render[D3DRENDERSTATE_ALPHABLENDENABLE];
+       static_opaque_cutout(state,alpha);}
       const FixedState* material_state=nullptr;
       // The proof must use the drawn alpha, including the zero that hides
       // original hair beneath the fur pass, rather than its original alpha.
@@ -3272,6 +3472,7 @@ HRESULT Renderer::queue_native_records(const NativePreparedSubmission& submissio
        group.texture_srv!=nullptr||group.texture_d3d12,group.texture_array,group.material_key.texture_backing,group.material_key.texture_generation,group.material_key.contact_map);
       key.skn_material=source.skn_material.identity;
       const auto skn_textures=group.skn_textures;
+      key.program=native_astral_record(wanted_flags)?1u:0u;
       const auto ordering=wound?NativeOrdering::preserve:static_cast<NativeOrdering>(values.ordering);
       draw.reorderable=ordering==NativeOrdering::reorderable||
        (ordering==NativeOrdering::derive_from_state&&opacity!=NativeOpacityClass::ordered);
@@ -3356,6 +3557,20 @@ static bool native_lighting_is_valid(const NativeWorldLighting& lighting) noexce
  return true;
 }
 
+static std::array<float,4> fractional_visual_sun(double hour) noexcept {
+ // Independently evaluated from the verified retail direction curve. The
+ // shipped elevation is 60 degrees at noon, 30 at 04/20 and 75 at midnight.
+ const double degrees = hour < 4.0 ? 75.0-11.25*hour :
+  hour > 20.0 ? 30.0+11.25*(hour-20.0) : 60.0-3.75*std::abs(hour-12.0);
+ constexpr double pi = 3.14159265358979323846;
+ const double elevation = degrees*(pi/180.0),azimuth = hour*(pi/12.0);
+ const double horizontal = std::cos(elevation);
+ // The bridge's lighting vector points toward the sun; the game's stored
+ // vector travels away from it. This analytic direction is unit length.
+ return {float(-std::cos(azimuth)*horizontal),float(-std::sin(azimuth)*horizontal),
+  float(std::sin(elevation)),0.f};
+}
+
 bool Renderer::set_native_world_lighting(
     const NativeWorldLighting& lighting,const WorldEnvironment* captured) noexcept {
  if(!native_lighting_is_valid(lighting))return false;
@@ -3371,6 +3586,22 @@ bool Renderer::set_native_world_lighting(
   cave_lighting_profile(environment.cave,configured_floating_point(debug_overlay_.config(),
    "cave_brightness",kDefaultCaveBrightness),configured_floating_point(debug_overlay_.config(),
    "cave_ambient_floor",kDefaultCaveAmbientFloor),shaped.ambient,shaped.sunlight_diffuse);
+
+ const bool smooth_sun = configured_integer(debug_overlay_.config(),"sun_shadow_correction",0)>=1;
+ const char* sun_clock_reason = nullptr;
+ if(smooth_sun && !native_world_cave_){
+  if(!environment.valid || !environment.visual_sun_time_valid){
+   sun_clock_reason = environment.valid && !environment.visual_sun_supported ?
+    "fractional visual sun unsupported for this game/lighting owner; captured game direction retained" :
+    "fractional visual sun time unavailable; captured game direction retained";
+  }else shaped.sunlight_direction = fractional_visual_sun(environment.visual_sun_hour);
+ }
+ // Availability only: no per-frame light/time telemetry. Unsupported owners
+ // (including unverified LiA) keep their captured direction explicitly.
+ static const char* previous_sun_clock_reason = nullptr;
+ if(sun_clock_reason && sun_clock_reason != previous_sun_clock_reason)
+  bridge_append_probe_event("visual_sun_unavailable",sun_clock_reason);
+ previous_sun_clock_reason = sun_clock_reason;
  return apply_native_lighting(shaped);
 }
 
@@ -3453,7 +3684,7 @@ void Renderer::refresh_emissive_lights() noexcept try{
  for(std::size_t i=0;i<emissive_clusters_.size();++i)
   emissive_colors_[i]=emissive::rendered_color(emissive_clusters_[i].emission,liquid_lava_samples_);
  emissive_colors_sampled_=!liquid_lava_samples_.empty();
- emissive_generation_=ambient_map_generation_;emissive_level_=level;
+ emissive_generation_=ambient_map_generation_;emissive_level_=level;++emissive_revision_;
  char line[200];
  const auto colour=emissive_colors_.empty()?std::array<float,3>{}:emissive_colors_.front();
  std::snprintf(line,sizeof(line),"EID3D11 emissive lights: %zu lights from %zu emissive tiles (level %d), lava colour %.2f %.2f %.2f (%s).\n",
@@ -3467,14 +3698,74 @@ void Renderer::refresh_emissive_lights() noexcept try{
  OutputDebugStringA("EID3D11 emissive lights: out of memory; emissive lighting omitted on this map.\n");
 }
 
+// rt_emissive: the frame's particle samples into the clusters and their lamps
+// (particle_lights.h), once a world frame, on the world clock's game seconds
+// (the liquid shader's: frozen on pause, scaled with the game speed). Particle
+// lamps are independent of the game's lights. One rt_emissive_lights
+// event when the lamps' count changes (at most every 300 world frames) and
+// every 1800 world frames while particles arrive: what was gathered, what
+// glowed, what was rejected as smoke and how many clusters game lights own.
+void Renderer::update_particle_lights(const std::vector<RetainedWorldPointLight>& lights,double world_time){
+ if(!rt_emissive_enabled_){
+  if(!particle_light_clusters_.empty()||!particle_lights_published_.empty()||!particle_light_samples_.empty()){
+   particle_light_clusters_.clear();particle_lights_published_.clear();particle_light_samples_.clear();
+  }
+  particle_light_frame_samples_=particle_light_additive_=particle_light_glowing_=particle_light_rejected_=particle_light_owned_=0;
+  particle_light_seconds_=-1;particle_light_update_frame_=UINT64_MAX;particle_light_logged_count_=SIZE_MAX;
+  return;
+ }
+ if(particle_light_update_frame_==native_frame_index_)return; // the same world frame: its samples are still being drawn
+ particle_light_update_frame_=native_frame_index_;
+ const auto& config=debug_overlay_.config();
+ const double seconds=std::isfinite(world_time)?world_time*.055:particle_light_seconds_;
+ double dt=particle_light_seconds_>=0?seconds-particle_light_seconds_:0;
+ if(!(dt>=0)||dt>2){particle_light_clusters_.clear();dt=0;} // another world or a loaded game: start over
+ particle_light_seconds_=seconds;
+ // No game light owns the flames beside it: every flame makes its own warm
+ // lamp, added to the map's light (user decision 2026-11-16). Torch map
+ // lights are white and 1.5 m wide, so suppressing the flame left torches
+ // without their warm light.
+ (void)lights;
+ const std::vector<std::array<float,3>> owners;
+ particle_light_frame_samples_=particle_light_samples_.size();
+ particle_light_owned_=particle_lights::update(particle_light_clusters_,particle_light_next_id_,particle_light_samples_,float(dt),owners);
+ particle_light_samples_.clear();
+ particle_lights::lights(particle_light_clusters_,
+  std::clamp(configured_floating_point(config,"rt_emissive_particle_strength",1.f),0.f,4.f),particle_lights_published_);
+ const std::size_t count=particle_lights_published_.size();
+ const bool arriving=particle_light_frame_samples_||particle_light_rejected_;
+ if((count!=particle_light_logged_count_&&(particle_light_logged_count_==SIZE_MAX||native_frame_index_-particle_light_logged_frame_>=300))||
+    (arriving&&native_frame_index_-particle_light_logged_frame_>=1800)){
+  particle_light_logged_count_=count;particle_light_logged_frame_=native_frame_index_;
+  char line[512];
+  if(count){
+   int at=std::snprintf(line,sizeof(line),"%zu particle lights from %zu clusters, %zu owned by %zu game lights (samples %zu: %zu additive, %zu glowing, %zu rejected as smoke or dark); brightest:",
+    count,particle_light_clusters_.size(),particle_light_owned_,owners.size(),particle_light_frame_samples_,particle_light_additive_,particle_light_glowing_,particle_light_rejected_);
+   // The three brightest lamps: place, radius, the cluster's spread and colour.
+   std::vector<const particle_lights::Light*> order;for(const auto& l:particle_lights_published_)order.push_back(&l);
+   std::sort(order.begin(),order.end(),[](auto* x,auto* y){return particle_lights::luminance(x->color)>particle_lights::luminance(y->color);});
+   for(std::size_t n=0;n<order.size()&&n<3&&at>0&&at<int(sizeof(line))-90;++n)
+    at+=std::snprintf(line+at,sizeof(line)-at," [at %.1f %.1f %.1f, radius %.2f m, spread %.2f m, colour %.3f %.3f %.3f]",order[n]->centre[0],order[n]->centre[1],
+     order[n]->centre[2],order[n]->radius,order[n]->spread,order[n]->color[0],order[n]->color[1],order[n]->color[2]);
+  }else std::snprintf(line,sizeof(line),"no particle lights (%zu clusters, %zu owned by %zu game lights; samples %zu: %zu additive, %zu glowing, %zu rejected as smoke or dark)",
+   particle_light_clusters_.size(),particle_light_owned_,owners.size(),particle_light_frame_samples_,particle_light_additive_,particle_light_glowing_,particle_light_rejected_);
+  bridge_append_probe_event("rt_emissive_lights",line);
+ }
+ particle_light_additive_=particle_light_glowing_=particle_light_rejected_=0;
+}
+
 bool Renderer::set_native_point_lights(
     const std::vector<RetainedWorldPointLight>& lights,double world_time) noexcept {SCENE_ENTRY("set_native_point_lights");
  const auto& config=debug_overlay_.config();
+ try{update_particle_lights(lights,world_time);}
+ catch(const std::bad_alloc&){particle_light_clusters_.clear();particle_lights_published_.clear();particle_light_samples_.clear();}
+ const std::size_t particle_count=ambient_menu_?0:particle_lights_published_.size();
  const bool hero_light=configured_boolean(config,"hero_light",false);
  const bool emissive=configured_integer(config,"emissive_lights",1)>0&&!ambient_menu_&&
   emissive_generation_==ambient_map_generation_;
  const std::size_t emissive_count=emissive?emissive_clusters_.size():0;
- if(lights.size()>UINT_MAX/sizeof(NativePointLightGpu)-emissive_count)return false;
+ if(emissive_count>UINT_MAX/sizeof(NativePointLightGpu)-particle_count||
+    lights.size()>UINT_MAX/sizeof(NativePointLightGpu)-emissive_count-particle_count)return false;
  std::vector<NativePointLightGpu> next;std::vector<RetainedWorldPointLight> next_inputs;
  try {
   // A strike light not listed last frame is a new game lightning strike: the
@@ -3489,7 +3780,7 @@ bool Renderer::set_native_point_lights(
    strikes.push_back(key);
   }
   sky_strike_keys_.swap(strikes);
-  next_inputs=lights;next.reserve(lights.size()+emissive_count);
+  next_inputs=lights;next.reserve(lights.size()+emissive_count+particle_count);
   for(const auto& light:lights){
    if(!std::isfinite(light.radius)||light.radius<=0)return false;
    for(float value:light.center)if(!std::isfinite(value))return false;
@@ -3537,6 +3828,16 @@ bool Renderer::set_native_point_lights(
    }
   }
   emissive_published_=emissive_count;
+  // rt_emissive: the particle clusters' lamps last (update_particle_lights):
+  // plain lamps without a shadow cube. The ray traced lamp light gives them
+  // their shadows; the lamp loop adds them unshadowed where it still runs.
+  for(std::size_t i=0;i<particle_count;++i){
+   const auto& light=particle_lights_published_[i];
+   NativePointLightGpu gpu{};
+   gpu.center_inverse_radius_squared={light.centre[0],light.centre[1],light.centre[2],1.f/(light.radius*light.radius)};
+   gpu.color={light.color[0],light.color[1],light.color[2],0.f};
+   next.push_back(gpu);
+  }
  }catch(const std::bad_alloc&){return false;}
  if(next.size()==native_point_lights_.size()&&
     std::equal(next.begin(),next.end(),native_point_lights_.begin(),[](const auto& a,const auto& b){
@@ -3599,7 +3900,86 @@ std::uint64_t Renderer::native_material_state_key(const NativeMaterialKey& mater
   state_key=hash_bytes(state_key,&material_key.contact_map,sizeof(material_key.contact_map));
   state_key=hash_bytes(state_key,&material_key.texture_backing,sizeof(material_key.texture_backing));
   state_key=hash_bytes(state_key,&material_key.texture_generation,sizeof(material_key.texture_generation));
+  state_key=hash_bytes(state_key,&material_key.program,sizeof(material_key.program));
  return state_key;
+}
+
+namespace {
+// Texels of a width x height texture per target pixel along the most
+// magnified direction (the smallest singular value of the texel-by-pixel
+// Jacobian); 0 when no triangle measures. Final clip transform, unclipped,
+// base shape (no morph offsets).
+// An item icon is a textured model: its unwrap has seams and slivers whose
+// coordinates collapse to a line or a point, and those measure near zero
+// whatever the texture's size. Triangles with no area in either space, or
+// wholly outside the texture or the target, are left out.
+// The answer is the density that half of the measured pixel area reaches or
+// exceeds: the size the icon as a whole is shown at. An unwrap is uneven: on
+// a third of the shipped item models (figures and icon art of the Dejavu
+// archives, flat view at grid size) 5% or more of the pixel area has 4-8
+// times fewer texels than the median (leggings and helmets most), and the
+// density that 95% of the area reaches asked those icons for their full-size
+// image, 16-64 times the bytes, for parts the art itself draws coarsely.
+// `low` receives that 95% density (the accounting line reports it).
+float native_texel_density(const NativeGeometryView& view,const float* m,float target_width,float target_height,
+ float texture_width,float texture_height,float& low) noexcept{
+ low=0;
+ if(!view.positions||!view.components||!view.texture_coordinates||!view.indices)return 0;
+ thread_local std::vector<std::pair<float,float>> measured; // density, pixel area
+ measured.clear();
+ double total=0;
+ for(std::uint32_t triangle=0;triangle<view.index_count/3u;++triangle){
+  float x[3],y[3],u[3],v[3];bool valid=true;
+  for(unsigned corner=0;corner<3;++corner){
+   const std::uint32_t component=view.indices[triangle*3u+corner];
+   if(component>=view.component_count){valid=false;break;}
+   const auto& c=view.components[component];
+   if(c.position>=view.position_groups*4u||c.texture>=view.texture_coordinate_count){valid=false;break;}
+   const auto& group=view.positions[c.position/4u];const unsigned lane=c.position%4u;
+   const float px=group.x[lane],py=group.y[lane],pz=group.z[lane];
+   const float w=m[12]*px+m[13]*py+m[14]*pz+m[15];
+   if(!(w>1e-6f)){valid=false;break;}
+   x[corner]=(m[0]*px+m[1]*py+m[2]*pz+m[3])/w*target_width*.5f;
+   y[corner]=(m[4]*px+m[5]*py+m[6]*pz+m[7])/w*target_height*.5f;
+   u[corner]=view.texture_coordinates[c.texture].u*texture_width;v[corner]=view.texture_coordinates[c.texture].v*texture_height;
+  }
+  if(!valid)continue;
+  // Wholly outside the texture (transparent border) or the target.
+  const float half_width=target_width*.5f,half_height=target_height*.5f;
+  if((u[0]<0&&u[1]<0&&u[2]<0)||(u[0]>texture_width&&u[1]>texture_width&&u[2]>texture_width)||
+     (v[0]<0&&v[1]<0&&v[2]<0)||(v[0]>texture_height&&v[1]>texture_height&&v[2]>texture_height)||
+     (x[0]<-half_width&&x[1]<-half_width&&x[2]<-half_width)||(x[0]>half_width&&x[1]>half_width&&x[2]>half_width)||
+     (y[0]<-half_height&&y[1]<-half_height&&y[2]<-half_height)||(y[0]>half_height&&y[1]>half_height&&y[2]>half_height))continue;
+  // Edges in pixels (P) and texels (T): the Jacobian A = T * inverse(P).
+  const float p00=x[1]-x[0],p01=x[2]-x[0],p10=y[1]-y[0],p11=y[2]-y[0];
+  const float t00=u[1]-u[0],t01=u[2]-u[0],t10=v[1]-v[0],t11=v[2]-v[0];
+  const float pixels=p00*p11-p01*p10;
+  if(!(std::fabs(pixels)>.25f)||!std::isfinite(pixels))continue;
+  // No texture area: a seam or sliver of the unwrap, nothing a finer home resolves.
+  if(!(std::fabs(t00*t11-t01*t10)>.25f))continue;
+  const float a00=(t00*p11-t01*p10)/pixels,a01=(t01*p00-t00*p01)/pixels;
+  const float a10=(t10*p11-t11*p10)/pixels,a11=(t11*p00-t10*p01)/pixels;
+  // sigma_min = |det| / sigma_max: no subtraction of near-equal terms.
+  const double sum=double(a00)*a00+double(a01)*a01+double(a10)*a10+double(a11)*a11;
+  const double determinant=std::fabs(double(a00)*a11-double(a01)*a10);
+  if(!std::isfinite(sum)||!(determinant>0))continue;
+  const double largest=std::sqrt((sum+std::sqrt((std::max)(0.0,sum*sum-4.0*determinant*determinant)))*.5);
+  if(!(largest>0))continue;
+  const float smallest=float(determinant/largest);
+  if(!(smallest>0)||!std::isfinite(smallest))continue;
+  try{measured.emplace_back(smallest,std::fabs(pixels));}catch(const std::bad_alloc&){return 0;}
+  total+=std::fabs(pixels);
+ }
+ if(measured.empty())return 0;
+ std::sort(measured.begin(),measured.end());
+ double below=0;
+ for(const auto& [density,area]:measured){
+  below+=area;
+  if(!(low>0)&&below>total*.05)low=density;
+  if(below>total*.5)return density;
+ }
+ return measured.back().first;
+}
 }
 
 HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedState& st,SurfaceImage* texture,NativeGeometryResult* result,bool prepared,ID3D11ShaderResourceView* direct_texture,std::uint64_t direct_texture_identity,std::uint64_t direct_texture_generation,bool direct_array,UINT direct_slice,UINT* registered,const D3D12TextureRef* d3d12_texture){
@@ -3692,6 +4072,21 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
   camp::compose_clip(&draw.instance.object_to_clip._11,camp::visual,float(canvas_width()),float(canvas_height()));
   draw.camp_clip=camp::visual.clip;
  }
+ if(view.owned_texture.camp_surface_alias&&!view.world.enabled&&!native_shadow_collecting_){
+  float texture_width=0,texture_height=0;
+  // Measured once per home, geometry and transform (a cell that stays put
+  // costs nothing on later frames; a dragged or turning item measures on).
+  std::uint64_t use=hash_bytes(1469598103934665603ull,&draw.instance.object_to_clip,sizeof(draw.instance.object_to_clip));
+  const std::uint32_t shape[6]={view.position_groups,view.component_count,view.texture_coordinate_count,view.index_count,target_width(),target_height()};
+  use=hash_bytes(use,shape,sizeof(shape));
+  if(view.content_fingerprint_valid)use=hash_bytes(use,&view.content_fingerprint,sizeof(view.content_fingerprint));
+  else{use=hash_bytes(use,&view.positions,sizeof(view.positions));use=hash_bytes(use,&view.texture_coordinates,sizeof(view.texture_coordinates));}
+  if(scene_ui::core_camp_icon_texels(view.owned_texture.identity,view.owned_texture.generation,use,texture_width,texture_height)){
+   float low=0;
+   const float density=native_texel_density(view,&draw.instance.object_to_clip._11,float(target_width()),float(target_height()),texture_width,texture_height,low);
+   scene_ui::core_camp_icon_density(view.owned_texture.identity,view.owned_texture.generation,density,low);
+  }
+ }
  if(!view.world.enabled&&view.terrain.waves_enabled&&std::isfinite(view.terrain.wind_force)&&
     std::isfinite(view.terrain.maximum_wind_multiplier)){
   const float maximum=std::abs(view.terrain.wind_force)*
@@ -3712,13 +4107,13 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
  FixedState shadow_state;
  const FixedState* material_state=nullptr;
  const NativeOpacityClass opacity=native_material_state(st,view.lighting.material_alpha,
-  native_alpha_evidence(view,view.lighting.material_alpha,direct_texture!=nullptr && texture==nullptr),native_shadow_collecting_,shadow_state,material_state);
+  native_alpha_evidence(view,view.lighting.material_alpha,(direct_texture!=nullptr||d3d12_texture!=nullptr) && texture==nullptr),native_shadow_collecting_,shadow_state,material_state);
  if(native_record_takes_lod(view,opacity,mesh->lod_levels)){
   draw.instance.world_geometry|=native_world_lod;
   if(!view.world.object_space)draw.instance.second_morph_offset=draw.world_base;
  }
  if(native_record_takes_impostor(view,opacity,mesh->sphere_block)){
-  draw.instance.world_geometry|=native_world_impostor;draw.instance.second_morph_offset=view.world.impostor-1;
+  draw.instance.world_geometry|=native_record_impostor_flags(view);draw.instance.second_morph_offset=view.world.impostor-1;
  }
  const bool native_world=view.semantic_kind==SemanticKind::figure||
   view.semantic_kind==SemanticKind::terrain||
@@ -3762,6 +4157,7 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
    texture_srv!=nullptr||(d3d12_texture&&*d3d12_texture)||surface_d3d12,texture_array,d3d12_?0:current_texture_backing,
    d3d12_?0:current_texture_generation,view.contact_map);
   material_key.skn_material=view.skn_material.identity;
+  material_key.program=native_astral_record(view.flags)?1u:0u;
   const auto state_key=native_material_state_key(material_key);
   if(prepared){
    hr=resolve_native_prepared_material(view,*material_state,texture,texture_srv.Get(),
@@ -3817,6 +4213,7 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
    if(texture_srv!=nullptr||texture_array)d3d12_->omit("native draw textures with no D3D12 texture (drawn with the null view)",false);
   }
  }
+ draw.material_instance=native_material_instance(view.semantic_kind,draw,current_texture_backing);
  draw.state_bucket=bucket_index;draw.reorderable=reorderable;draw.preserve_order=view.ordering==NativeOrdering::preserve;
  if(FAILED(hr=resolve_native_terrain_phases(view,draw)))return fail(hr,"terrain.phases");
  if(FAILED(hr=resolve_native_instance(view,draw)))return fail(hr,"resolve_native_instance");
@@ -3843,6 +4240,15 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
  return S_OK;
 }
 
+void Renderer::count_native_world_kind(RendererResourceSnapshot::WorldKinds& kinds,
+ const NativeQueuedDraw& draw,UINT passes){
+ if(!(passes&1u)||!(draw.instance.world_geometry&native_world_geometry))return;
+ const std::uint64_t triangles=draw.index_count/3u;
+ if(draw.instance.flags&native_neighbour_flag){++kinds.neighbour;kinds.neighbour_triangles+=triangles;}
+ else if(draw.instance.world_geometry&native_world_object_space){++kinds.object_space;kinds.object_space_triangles+=triangles;}
+ else{++kinds.posed;kinds.posed_triangles+=triangles;}
+}
+
 void Renderer::enqueue_native_record(NativeSelectedRecord selected){
 #ifdef EID3D11_TESTING
  if(test_native_enqueue_failure_&&!--test_native_enqueue_failure_)throw std::bad_alloc();
@@ -3862,6 +4268,7 @@ void Renderer::enqueue_native_record(NativeSelectedRecord selected){
  if(draw.animation_allocation<native_animation_ranges_.size())++native_animation_ranges_[draw.animation_allocation].references;
  if(draw.world_allocation<native_world_ranges_.size())++native_world_ranges_[draw.world_allocation].references;
  ++native_frame_stats_.native_logical_draws;
+ count_native_world_kind(native_frame_stats_.native_world_kinds,draw,selected.passes);
  if(draw.reorderable)++native_frame_stats_.native_reorderable_draws;
  else ++native_frame_stats_.native_ordered_draws;
  const auto opacity=native_state_buckets_[draw.state_bucket].opacity;
@@ -4266,7 +4673,7 @@ void Renderer::finish_native_lod_frame() noexcept try {
  if(d3d12_){
   for(auto& slot:native_lod_readbacks_)if(!slot.snapshot){
    const HRESULT hr=d3d12_->request_readback(*native_lod_observations12_,
-    UINT64(native_lod_capture_->record_capacity)*sizeof(NativeLodDecisionGpu),slot.ticket12);
+    UINT64(native_lod_capture_->record_capacity)*sizeof(NativeLodDecisionGpu),slot.ticket12,"native_lod");
    if(hr!=S_OK){native_lod_capture_->unavailable=true;native_lod_capture_->unavailable_reason="gpu_readback_failed";return;}
    native_lod_copied_request_=native_lod_capture_->request;slot.snapshot=std::move(native_lod_capture_);break;
   }
@@ -4283,5 +4690,35 @@ void Renderer::finish_native_lod_frame() noexcept try {
 } // namespace owned
 
 namespace owned {
+
+} // namespace owned
+namespace owned {
+// The record's material instance (renderer.h kNativeInstance*), from its
+// final flags: the unit flag, the crown impostor table, the foliage part flag
+// (one producer sets them, retained_static_submission.cpp: units never carry
+// the foliage or contact flag), and whether its texture has a material profile
+// entry (note_material_texture runs before the record is queued; a texture
+// without one never gets a profile, so the S1 code compiles out). World
+// figures and objects only; terrain and everything else draw the general
+// program. The F10 shader_split_check programs paint any record whose
+// run-time bits disagree.
+std::uint8_t Renderer::native_material_instance(SemanticKind kind,const NativeQueuedDraw& draw,std::uint64_t texture_backing) const noexcept{
+ if(draw.instance.skn_factors[3]>0)return 0; // embedded glTF/SKN keeps its authored material programs
+ // Terrain-vertex records stay general (the instance vertex programs have no terrain code).
+ if(kind!=SemanticKind::figure&&kind!=SemanticKind::simple_geometry)return 0;
+ if(draw.instance.terrain_vertex_offset!=UINT_MAX)return 0;
+ // A record without world geometry takes nativeVertex's prepared-vertex
+ // return: every record bit reaches the pixel stage as 0 whatever its flags
+ // (the shader_split_check run found unit-flagged ones, report 201), which
+ // the world domain's constants are.
+ const std::uint8_t domain=!draw.instance.world_geometry?2u:(draw.instance.flags&native_unit_flag)?1u:
+  (draw.instance.world_geometry&native_world_impostor)?4u:
+  (draw.instance.flags&native_foliage_part_flag)?3u:2u;
+ const auto profile=texture_backing?material_profiles_.find(texture_backing):material_profiles_.end();
+ const bool profiled=profile!=material_profiles_.end();
+ // A profile with a crystal class: units and world objects take the crystal domains.
+ const bool crystal=profiled&&profile->second.crystal&&(domain==1u||domain==2u);
+ return std::uint8_t((crystal?(domain==1u?kNativeCrystalUnitDomain:kNativeCrystalWorldDomain):domain)|(profiled?8u:0u));
+}
 
 } // namespace owned

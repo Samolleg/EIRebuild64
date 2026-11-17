@@ -5,7 +5,9 @@
 #include <dx12/ffx_api_dx12.h>
 #include <ffx_framegeneration.h>
 #include <dx12/ffx_api_framegeneration_dx12.h>
+#include <ffx_upscale.h>
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include "frame_waits.h"
@@ -17,24 +19,17 @@ namespace remote { void host_log(const char* format, ...); }
 namespace d3d12::fidelityfx {
 Api api;
 
-bool load(std::string& reason) noexcept {
-    // Keep successful loads for the process lifetime: proxy worker threads
-    // and callbacks may outlive an individual frame-generation context.
+bool load(std::string& reason, bool upscaler) noexcept {
+    // Resolve the common loader once. Each optional provider is checked on
+    // its own, so missing frame generation does not disable FSR upscaling.
+    constexpr DWORD flags = LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
     static const std::string failure = [] {
         Api resolved;
-        HMODULE loader = nullptr, provider = nullptr;
-        DWORD error = ERROR_SUCCESS;
-        const wchar_t* failed = L"amd_fidelityfx_loader_dx12.dll";
-        constexpr DWORD flags = LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32;
-        loader = LoadLibraryExW(failed, nullptr, flags);
-        if (!loader) error = GetLastError();
-        else {
-            failed = L"amd_fidelityfx_framegeneration_dx12.dll";
-            provider = LoadLibraryExW(failed, nullptr, flags);
-            if (!provider) error = GetLastError();
-        }
+        HMODULE loader = LoadLibraryExW(L"amd_fidelityfx_loader_dx12.dll", nullptr,
+            LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+        DWORD error = loader ? ERROR_SUCCESS : GetLastError();
         const char* symbol = nullptr;
-        if (loader && provider) {
+        if (loader) {
 #define FFX_RESOLVE(member, type, name) \
             if (!symbol) { \
                 resolved.member = reinterpret_cast<type>(GetProcAddress(loader, name)); \
@@ -47,17 +42,31 @@ bool load(std::string& reason) noexcept {
             FFX_RESOLVE(dispatch, PfnFfxDispatch, "ffxDispatch");
 #undef FFX_RESOLVE
             if (!symbol) { api = resolved; return std::string{}; }
-            failed = L"amd_fidelityfx_loader_dx12.dll";
+            FreeLibrary(loader);
         }
-        char text[512];
-        std::snprintf(text, sizeof(text), "FSR FG unavailable: %ls%s%s (Windows error %lu). Install VC++ Redistributable 2015+ x64 and check FidelityFX DLLs beside the EXE",
-                      failed, symbol ? ": missing export " : " failed to load", symbol ? symbol : "", static_cast<unsigned long>(error));
-        if (provider) FreeLibrary(provider);
-        if (loader) FreeLibrary(loader);
+        char text[384];
+        std::snprintf(text, sizeof(text), "FidelityFX loader unavailable%s%s (Windows error %lu)",
+            symbol ? ": missing export " : "", symbol ? symbol : "", static_cast<unsigned long>(error));
         remote::host_log("d3d12: %s", text);
         return std::string(text);
     }();
     if (!failure.empty()) { reason = failure; return false; }
+    const auto provider = [flags](const wchar_t* name) {
+        // Keep successful modules alive: GPU workers can outlive a context.
+        if (LoadLibraryExW(name, nullptr, flags)) return std::string{};
+        char text[384];
+        std::snprintf(text, sizeof(text), "FidelityFX provider %ls unavailable (Windows error %lu)",
+            name, static_cast<unsigned long>(GetLastError()));
+        remote::host_log("d3d12: %s", text);
+        return std::string(text);
+    };
+    if (upscaler) {
+        static const std::string missing = provider(L"amd_fidelityfx_upscaler_dx12.dll");
+        if (!missing.empty()) { reason = missing; return false; }
+    } else {
+        static const std::string missing = provider(L"amd_fidelityfx_framegeneration_dx12.dll");
+        if (!missing.empty()) { reason = missing; return false; }
+    }
     return true;
 }
 } // namespace d3d12::fidelityfx
@@ -249,6 +258,203 @@ bool FsrFrameGeneration::configure(IDXGISwapChain* swap, ID3D12Resource* hudless
     }
     enabled_ = enabled;
     return true;
+}
+
+bool FsrUpscaler::available(ID3D12Device* device, std::string& reason) noexcept {
+    if (!fidelityfx::load(reason, true)) return false;
+    static int state = -1;  // -1 unknown, 0 no, 1 yes
+    static char text[200] = {};
+    if (state < 0) {
+        state = 0;
+        {
+            std::uint64_t count = 8, ids[8]{};
+            const char* names[8]{};
+            ffxQueryDescGetVersions versions{};
+            versions.header.type = FFX_API_QUERY_DESC_TYPE_GET_VERSIONS;
+            versions.createDescType = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
+            versions.device = device;
+            versions.outputCount = &count;
+            versions.versionIds = ids;
+            versions.versionNames = names;
+            if (fidelityfx::api.query(nullptr, &versions.header) != FFX_API_RETURN_OK || !count)
+                std::snprintf(text, sizeof(text), "%s", "FidelityFX offers no FSR upscaling on this device");
+            else state = 1;
+        }
+    }
+    if (!state) reason = text;
+    return state == 1;
+}
+
+void FsrUpscaler::destroy() noexcept {
+    if (!context_) return;
+    ffxContext context = static_cast<ffxContext>(context_);
+    fidelityfx::api.destroy(&context, nullptr);
+    context_ = nullptr;
+    render_w_ = render_h_ = out_w_ = out_h_ = 0;
+}
+
+void FsrUpscaler::retire() noexcept {
+    if (!context_) return;
+    try {
+        retired_.push_back({context_, recorded_});
+    } catch (...) {
+        // No room to defer: never destroyed early; the process exit frees it.
+    }
+    context_ = nullptr;
+    render_w_ = render_h_ = out_w_ = out_h_ = 0;
+}
+
+unsigned FsrUpscaler::collect(std::uint64_t completed, std::uint64_t unsubmitted) noexcept {
+    unsigned destroyed = 0;
+    for (std::size_t index = 0; index < retired_.size();) {
+        const Retired& retired = retired_[index];
+        if (completed < retired.recorded && retired.recorded < unsubmitted) { ++index; continue; }
+        ffxContext context = static_cast<ffxContext>(retired.context);
+        fidelityfx::api.destroy(&context, nullptr);
+        retired_.erase(retired_.begin() + static_cast<std::ptrdiff_t>(index));
+        ++destroyed;
+    }
+    return destroyed;
+}
+
+bool FsrUpscaler::dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* const* resources, const Dispatch& d, std::string& error) noexcept {
+    bool reset = d.reset;
+    // The context is sized for the output (maxRenderSize = upscale size, the
+    // FidelityFX dynamic-resolution contract), so a quality change (a new
+    // render size) only resets the history. Destroying it there freed
+    // resources the frames still on the GPU were using: a TDR in scene_fsr
+    // when switching native to ultra performance (2026-11-07).
+    if (context_ && (d.render_w != render_w_ || d.render_h != render_h_)) {
+        render_w_ = d.render_w; render_h_ = d.render_h;
+        reset = true;
+    }
+    if (!context_ || d.out_w != out_w_ || d.out_h != out_h_ || d.render_w > out_w_ || d.render_h > out_h_) {
+        // The old context may still be in use by the frames in flight: it is
+        // retired (destroyed by collect once the fence passes its last
+        // dispatch) and the new one is created beside it.
+        retire();
+        ID3D12Device* device = nullptr;
+        if (FAILED(list->GetDevice(IID_PPV_ARGS(&device))) || !device) { error = "no device for the FSR upscaler"; return false; }
+        ffxCreateBackendDX12Desc backend{};
+        backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_DX12;
+        backend.device = device;
+        ffxCreateContextDescUpscale desc{};
+        desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
+        desc.header.pNext = &backend.header;
+        desc.flags = 0;  // LDR colour (exposure 1), standard finite depth, render-size unjittered motion
+        desc.maxRenderSize = {(std::max)(d.render_w, d.out_w), (std::max)(d.render_h, d.out_h)};
+        desc.maxUpscaleSize = {d.out_w, d.out_h};
+        ffxContext context = nullptr;
+        const ffxReturnCode_t created = fidelityfx::api.create(&context, &desc.header, nullptr);
+        device->Release();
+        if (created != FFX_API_RETURN_OK || !context) {
+            char text[128];
+            std::snprintf(text, sizeof(text), "FidelityFX FSR upscaler %ux%u to %ux%u could not be created (ffx %u)",
+                          d.render_w, d.render_h, d.out_w, d.out_h, unsigned(created));
+            error = text;
+            return false;
+        }
+        context_ = context;
+        render_w_ = d.render_w; render_h_ = d.render_h; out_w_ = d.out_w; out_h_ = d.out_h;
+        reset = true;
+    }
+    const auto read = [](ID3D12Resource* r) {
+        return r ? ffxApiGetResourceDX12(r, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ) : FfxApiResource{};
+    };
+    // The reactive mask from the world colour before and after the
+    // transparent effects (resources 6, 7; SDK GenerateReactiveMask), into
+    // resource 4, then read by the upscale (back to unordered access after,
+    // the state the executor recorded for it).
+    ffxContext context = static_cast<ffxContext>(context_);
+    recorded_ = d.recorded;  // this list now holds the context's commands
+    const bool generate = resources[4] && resources[6] && resources[7];
+    if (generate) {
+        ffxDispatchDescUpscaleGenerateReactiveMask mask{};
+        mask.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE_GENERATEREACTIVEMASK;
+        mask.commandList = list;
+        mask.colorOpaqueOnly = read(resources[6]);
+        mask.colorPreUpscale = read(resources[7]);
+        mask.outReactive = ffxApiGetResourceDX12(resources[4], FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+        mask.renderSize = {d.render_w, d.render_h};
+        mask.scale = 1.f;  // the SDK sample's values
+        mask.cutoffThreshold = .2f;
+        mask.binaryValue = .9f;
+        mask.flags = FFX_UPSCALE_AUTOREACTIVEFLAGS_APPLY_TONEMAP | FFX_UPSCALE_AUTOREACTIVEFLAGS_APPLY_THRESHOLD |
+                     FFX_UPSCALE_AUTOREACTIVEFLAGS_USE_COMPONENTS_MAX;
+        const ffxReturnCode_t generated = fidelityfx::api.dispatch(&context, &mask.header);
+        if (generated != FFX_API_RETURN_OK) {
+            char text[96];
+            std::snprintf(text, sizeof(text), "FidelityFX reactive mask generation failed (ffx %u)", unsigned(generated));
+            error = text;
+            return false;
+        }
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = resources[4];
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        list->ResourceBarrier(1, &barrier);
+    }
+    ffxDispatchDescUpscale up{};
+    up.header.type = FFX_API_DISPATCH_DESC_TYPE_UPSCALE;
+    up.commandList = list;
+    up.color = read(resources[0]);
+    up.depth = read(resources[1]);
+    up.motionVectors = read(resources[2]);
+    up.output = ffxApiGetResourceDX12(resources[3], FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);
+    up.reactive = generate ? read(resources[4]) : FfxApiResource{};
+    up.transparencyAndComposition = read(resources[5]);
+    up.jitterOffset = {d.jitter_x, d.jitter_y};
+    up.motionVectorScale = {1.f, 1.f};  // render pixels
+    up.renderSize = {d.render_w, d.render_h};
+    up.upscaleSize = {d.out_w, d.out_h};
+    up.enableSharpening = d.sharpness > 0.f;
+    up.sharpness = d.sharpness;
+    up.frameTimeDelta = d.frame_ms;
+    up.preExposure = 1.f;
+    up.reset = reset;
+    up.cameraNear = d.near_plane;
+    up.cameraFar = d.far_plane;
+    up.cameraFovAngleVertical = d.fov_y;
+    up.viewSpaceToMetersFactor = 1.f;
+    const ffxReturnCode_t result = fidelityfx::api.dispatch(&context, &up.header);
+    if (generate) {
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        barrier.Transition.pResource = resources[4];
+        barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        list->ResourceBarrier(1, &barrier);
+    }
+    if (result != FFX_API_RETURN_OK) {
+        char text[96];
+        std::snprintf(text, sizeof(text), "FidelityFX FSR upscale failed (ffx %u)", unsigned(result));
+        error = text;
+        return false;
+    }
+    return true;
+}
+
+namespace {
+std::uint64_t upscaler_vram(void* handle) noexcept {
+    if (!handle) return 0;
+    ffxContext context = static_cast<ffxContext>(handle);
+    FfxApiEffectMemoryUsage usage{};
+    ffxQueryDescUpscaleGetGPUMemoryUsage query{};
+    query.header.type = FFX_API_QUERY_DESC_TYPE_UPSCALE_GPU_MEMORY_USAGE;
+    query.gpuMemoryUsageUpscaler = &usage;
+    return fidelityfx::api.query(&context, &query.header) == FFX_API_RETURN_OK ? usage.totalUsageInBytes : 0;
+}
+} // namespace
+
+std::uint64_t FsrUpscaler::vram() const noexcept { return upscaler_vram(context_); }
+
+std::uint64_t FsrUpscaler::retired_vram() const noexcept {
+    std::uint64_t total = 0;
+    for (const Retired& retired : retired_) total += upscaler_vram(retired.context);
+    return total;
 }
 
 std::uint64_t FsrFrameGeneration::dispatches() noexcept { return g_dispatches.load(std::memory_order_relaxed); }

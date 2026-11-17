@@ -1,5 +1,6 @@
 #include "retained_static_submission.h"
 #include "astral_rift.h"
+#include <atomic>
 #include <map>
 #include <mutex>
 #include "fast_float.h"
@@ -15,8 +16,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cfloat>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -39,8 +42,14 @@ std::array<float, 4> retained_visual_emissive(
     stack.oldest = material.oldest_highlight_emissive;
     stack.has_previous = material.has_previous_highlight_emissive;
     stack.has_oldest = material.has_oldest_highlight_emissive;
-    return visual_highlight_emissive(values.object_flags, values.unit,
+    std::array<float, 4> shown = visual_highlight_emissive(values.object_flags, values.unit,
         values.timed_highlight_active, quest_light_active, values.highlight, stack);
+    // Ray traced lighting takes the authored emissive, never a highlight.
+    const std::array<float, 4> authored = visual_authored_emissive(stack);
+    if (shown[0] != authored[0] || shown[1] != authored[1] || shown[2] != authored[2])
+        shown[3] = visual_pack_authored_emissive(authored);
+    else if (shown[3] < 0.0f) shown[3] = 0.0f;
+    return shown;
 }
 
 bool retained_visual_selection_envelope_radius(
@@ -690,7 +699,7 @@ bool prepare_retained_static_candidate(
             candidate->root_valid = std::all_of(candidate->root_world.begin(),
                 candidate->root_world.end(), finite);
         }
-        add_astral_clumps(*assembly);
+        add_astral_clumps(*assembly);  // astral rift veils (astral_rift.h), before the assembly is shared
         candidate->assembly = std::move(assembly);
         candidate->prepared = true;
         return true;
@@ -1237,6 +1246,8 @@ bool retained_visual_world_bounds(const RetainedVisualSample& sample,
     if(sample.assembly && astral_model(*sample.assembly))envelope_radius+=7.f;
     if (sample.values.unit && !sample.completed_pose &&
         !retained_visual_selection_envelope_radius(sample,envelope_radius)) return false;
+    // Astral rift clumps drift up to kAstralClumpMargin beyond the rest shape.
+    if (sample.assembly && astral_model(*sample.assembly)) envelope_radius += kAstralClumpMargin;
     if (!finite_value(envelope_radius) || envelope_radius < 0) return false;
     std::array<float,3> extent{envelope_radius,envelope_radius,envelope_radius};
     auto root = sample.pose.root;
@@ -2256,7 +2267,7 @@ bool prepare_visual_part_envelope(const RetainedVisualSample& sample,
     }
     if (const auto* track=prepared.skeleton_binding->tracks[part.skeleton_node])
         radius+=track->morph_radius;
-    if(astral_dynamic(assembly,part))radius+=astral_clumps(assembly,part)?7.0:0.5;
+    radius+=astral_margin(assembly,part);   // astral veil sway and clump drift
     const auto& envelope=prepared.node_envelopes[part.skeleton_node];
     target.geometry_radius=next_float(static_cast<float>(radius),INFINITY);
     target.envelope_radius=next_float(static_cast<float>(
@@ -2645,19 +2656,13 @@ bool retained_visual_part_values(const RetainedVisualSample& sample,const Visual
     values.emissive=retained_visual_emissive(sample.values,sample.quest_light_active,*part.material);values.specular=sample.values.stunned?std::array<float,4>{sample.effects.stun_red,0,0,1}:part.material->specular;
     values.specular[3]=1;values.specular_enable=specular?TRUE:FALSE;
     values.flags|=retained_visual_sway_flags(sample,part);
-    if(sample.assembly && astral_dynamic(*sample.assembly,part)) {
-        if(!std::isfinite(time)||time<0)return false;
-        // World precise time is logical 55 ms quants, including its fraction.
-        values.astral={float(std::fmod(time*0.055/6.0,1.0)),
-            astral_clumps(*sample.assembly,part)?2.f:1.f,
-            float(astral_part(*sample.assembly,part)),0.f};
-        values.ordering=static_cast<UINT>(NativeOrdering::preserve);
-        if(values.astral[1]==2.f) {
-            values.lighting_enabled=0;values.default_diffuse=0xffffffffu;values.flags|=4u;
-        }
-    }
-    // Rigid world objects meet the terrain with its colour; units never do.
-    if (!sample.values.unit && values.astral[1]==0) values.flags |= native_ground_contact_flag;
+    // Astral rift clumps glow in the atlas colours: unlit, white default diffuse.
+    const unsigned astral=sample.assembly?astral_kind(*sample.assembly,part):0u;
+    if (astral) values.flags|=astral_record_flags(*sample.assembly,part);
+    if (astral==2) { values.lighting_enabled=0; values.default_diffuse=0xffffffffu; values.flags|=4u; }
+    // Rigid world objects meet the terrain with its colour; units never do
+    // (nor the floating astral veils and clumps).
+    if (!sample.values.unit) { if (!astral) values.flags |= native_ground_contact_flag; }
     // Units carry the unit flag: snow build-up gives them a sheen only.
     else if(sample.values.unit) values.flags |= native_unit_flag;
     if (sample.assembly && sample.assembly->sways && !sample.values.unit &&
@@ -2785,6 +2790,337 @@ std::uint32_t retained_visual_sway_flags(const RetainedVisualSample& sample,
         part.skeleton_node - sample.assembly->sway_root > native_sway_root_max) return 0;
     return native_sway_flag | sample.assembly->sway_shape |
         native_sway_root_bits(part.skeleton_node - sample.assembly->sway_root);
+}
+
+namespace {
+std::mutex g_active_statics_lock;
+std::shared_ptr<const ActiveStaticsIndex> g_active_statics_index;
+std::uint64_t g_active_statics_revision = 0;
+std::atomic<std::uint64_t> g_active_statics_failures{0};
+std::atomic<std::uint32_t> g_active_statics_admitted{0};
+std::shared_ptr<const ActiveStaticsCasters> g_active_statics_casters;
+std::uint64_t g_active_statics_caster_revision = 0;
+std::mutex g_active_statics_refusal_lock;
+ActiveStaticsRefusals g_active_statics_refusals;
+}
+void active_statics_casters_publish(std::vector<std::int32_t> ids) noexcept try {
+    auto value = std::make_shared<ActiveStaticsCasters>();
+    value->ids = std::move(ids);
+    std::lock_guard<std::mutex> guard(g_active_statics_lock);
+    value->revision = ++g_active_statics_caster_revision;
+    g_active_statics_casters = std::move(value);
+} catch (...) {}
+std::shared_ptr<const ActiveStaticsCasters> active_statics_casters() noexcept {
+    std::lock_guard<std::mutex> guard(g_active_statics_lock);
+    return g_active_statics_casters;
+}
+namespace {
+std::mutex g_active_statics_request_lock;
+std::vector<ActiveStaticsModelRequest> g_active_statics_requests;
+std::unordered_set<std::uint64_t> g_active_statics_requested;
+}
+void active_statics_index_publish(std::shared_ptr<ActiveStaticsIndex> index) noexcept try {
+    if (!index) {
+        // Released: the next catalog requests its models afresh.
+        std::lock_guard<std::mutex> guard(g_active_statics_request_lock);
+        g_active_statics_requests.clear(); g_active_statics_requested.clear();
+        std::lock_guard<std::mutex> refusals(g_active_statics_refusal_lock);
+        g_active_statics_refusals = {};
+    }
+    std::lock_guard<std::mutex> guard(g_active_statics_lock);
+    if (!index) index = std::make_shared<ActiveStaticsIndex>();
+    index->revision = ++g_active_statics_revision;
+    g_active_statics_index = std::move(index);
+} catch (...) {}
+void active_statics_request(const RetainedVisualSample& sample, std::uint64_t key) noexcept try {
+    std::lock_guard<std::mutex> guard(g_active_statics_request_lock);
+    if (!g_active_statics_requested.insert(key).second) return;
+    g_active_statics_requests.push_back({key, sample.assembly, retained_visual_shape(sample)});
+} catch (...) {}
+std::vector<ActiveStaticsModelRequest> active_statics_take_requests() noexcept {
+    std::vector<ActiveStaticsModelRequest> taken;
+    std::lock_guard<std::mutex> guard(g_active_statics_request_lock);
+    taken.swap(g_active_statics_requests);
+    return taken;
+}
+namespace {
+// A part's texture by content: the game texture's name, the same whether the
+// part draws the archive .mmp or the game's own surface of it.
+std::string retained_visual_texture_content_name(const VisualPartAsset& part) {
+    std::string name = part.texture_source_name.empty() ? part.material_name : part.texture_source_name;
+    for (auto& c : name) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return name;
+}
+}
+std::uint64_t retained_visual_object_space_model(const RetainedVisualSample& sample) noexcept try {
+    if (!sample.assembly || !sample.prepared) return 0;
+    const auto& shape = retained_visual_shape(sample);
+    auto& cache = sample.prepared->object_space_model;
+    if (cache.assembly == sample.assembly.get() && cache.revision == sample.assembly->revision &&
+        std::memcmp(cache.shape.data(), shape.data(), sizeof(float) * 3) == 0) return cache.key;
+    const auto& assembly = *sample.assembly;
+    // Content identity only: the model resource, each part's FIG resource and
+    // its texture's name. Never asset pointers or game surface ids: the same
+    // model arrives with an archive texture after a direct load and with the
+    // game's own surface (one per object) after travel, and pointer keys gave
+    // every object its own catalog model and impostor (zone13 after zone12:
+    // 1174 models / 1112 impostors instead of 102 / 12, houses missing).
+    std::uint64_t key = 1469598103934665603ull;
+    if (assembly.skeleton) {
+        key = hash_string(key, assembly.skeleton->visual_reference);
+        key = hash_string(key, assembly.skeleton->model_container.key());
+    }
+    key = hash_bytes(key, shape.data(), sizeof(float) * 3);
+    key = hash_bytes(key, assembly.scale.data(), sizeof(float) * 3);
+    key = hash_bytes(key, assembly.center_shift.data(), sizeof(float) * 3);
+    for (const auto& part : assembly.parts) {
+        key = hash_string(key, part.geometry ? part.geometry->identity.key() : std::string());
+        key = hash_string(key, retained_visual_texture_content_name(part));
+        const std::uint32_t values[2]{part.skeleton_node, (part.explicitly_hidden ? 1u : 0u) | (part.source_available ? 2u : 0u)};
+        key = hash_bytes(key, values, sizeof(values));
+    }
+    if (!key) key = 1;
+    cache.assembly = sample.assembly.get(); cache.revision = assembly.revision; cache.key = key; cache.shape = shape;
+    return key;
+} catch (...) {
+    return 0;
+}
+bool prepare_live_static_candidate(const ActiveStaticsModelRequest& request,
+    StaticObjectSource& source, std::int32_t model_index,
+    std::shared_ptr<RetainedStaticSourceCandidate>& prepared) noexcept try {
+    prepared.reset();
+    if (!request.assembly || !request.assembly->skeleton) return false;
+    const auto& assembly = *request.assembly;
+    source.shape = request.shape; source.position = {}; source.quaternion = {1, 0, 0, 0};
+    auto candidate = std::make_shared<RetainedStaticSourceCandidate>();
+    candidate->signed_id = model_index;
+    candidate->source = &source;
+    candidate->assembly = request.assembly;
+    // The neutral node placement retained_visual_object_space_parts
+    // evaluates for the live object, without its world placement.
+    std::vector<VisualNodeSample> nodes;
+    VisualClipSelection neutral{}; neutral.neutral = true;
+    if (!sample_visual_skeleton(*assembly.skeleton, neutral, request.shape, assembly.center_shift, 0, nodes, false)) return false;
+    VisualPoseState local_root;
+    local_root.tilted_facing = local_root.root_rotation_valid = true;
+    local_root.root_rotation = {1, 0, 0, 0};
+    const auto finite = [](float value) { return finite_value(value); };
+    const auto node_local = [&](std::uint32_t node, std::array<float, 16>& local) {
+        return node < nodes.size() && visual_node_world_matrix(local_root, nodes[node], assembly.scale, local) &&
+            std::all_of(local.begin(), local.end(), finite);
+    };
+    candidate->nodes.resize(assembly.parts.size());
+    bool drawn = false;
+    for (std::size_t index = 0; index < assembly.parts.size(); ++index) {
+        const auto& part = assembly.parts[index];
+        auto& node = candidate->nodes[index];
+        if (!part.geometry || part.explicitly_hidden || !part.source_available) continue;
+        const auto& figure = *part.geometry;
+        if (!node_local(part.skeleton_node, node.object_local)) return false;
+        node.object_to_world = node.object_local;
+        if (figure.shape_count == 8 && figure.bounds.size() == 8) {
+            node.bounds = selected_bounds(figure, request.shape);
+            if (!selected_groups(figure.positions, figure.position_groups, figure.shape_count, request.shape, node.positions)) return false;
+        } else if (figure.shape_count == 1 && !figure.bounds.empty() &&
+                   figure.positions.size() == figure.position_groups) {
+            node.bounds = figure.bounds.front(); node.positions = figure.positions;
+        } else return false;
+        node.figure = &figure;
+        node.normals.clear();
+        // The bake reads the texture the posed records made resident: an
+        // archive member under the same cache key, or the game surface by its
+        // id and generation. A generated CPU texture has no bake input yet.
+        const auto* texture = part.texture.get();
+        if (part.surface) {
+            // The impostor key names the texture the surface was created
+            // from, never the surface id: objects drawing the same texture
+            // through their own surfaces (zone13 after travel: one per
+            // object) share one key and one bake.
+            node.surface = part.surface;
+            node.texture_name = retained_visual_texture_content_name(part);
+            const std::uint64_t identity = hash_string(1469598103934665603ull, "texture:" + node.texture_name);
+            node.texture_identity = identity ? identity : 1u;
+        } else if (texture && texture->value_source == TextureValueSource::archive && texture->source &&
+            !texture->mips.empty()) {
+            node.texture = texture;
+            std::uint64_t identity = hash_string(1469598103934665603ull, texture->identity.key());
+            identity = hash_string(identity, part.texture_source_name);
+            node.texture_identity = identity ? identity : 1u;
+            node.texture_format = texture_format(texture->format);
+        } else candidate->impostor_inputs_complete = false;
+        std::uint64_t geometry = hash_string(1469598103934665603ull, figure.identity.key());
+        geometry = hash_bytes(geometry, request.shape.data(), sizeof(float) * 3);
+        node.geometry_identity = folded_identity(geometry);
+        drawn = true;
+    }
+    if (!drawn) return false;
+    if (assembly.sways) {
+        std::array<float, 16> root{};
+        if (node_local(assembly.sway_root, root)) {
+            candidate->root_world = {root[3], root[7], root[11]};
+            candidate->root_valid = true;
+        }
+    }
+    candidate->prepared = true;
+    prepared = std::move(candidate);
+    return true;
+} catch (...) {
+    prepared.reset();
+    return false;
+}
+std::shared_ptr<const ActiveStaticsIndex> active_statics_index() noexcept {
+    std::lock_guard<std::mutex> guard(g_active_statics_lock);
+    return g_active_statics_index;
+}
+std::uint64_t active_statics_failures() noexcept { return g_active_statics_failures.load(); }
+void active_statics_note_failure() noexcept { ++g_active_statics_failures; }
+const char* object_space_refusal_name(ObjectSpaceRefusal step) noexcept {
+    static const char* const names[] = {"pose", "part_prepare", "part_submission", "place_node", "place_bounds",
+        "invalid", "model_missing", "part_source", "node_unmatched", "figure_mismatch", "queue", "adopt", "exception"};
+    static_assert(sizeof(names) / sizeof(names[0]) == std::size_t(ObjectSpaceRefusal::count), "refusal names");
+    return step < ObjectSpaceRefusal::count ? names[std::size_t(step)] : "?";
+}
+void active_statics_note_refusal(ObjectSpaceRefusal step, const char* detail) noexcept try {
+    if (step >= ObjectSpaceRefusal::count) return;
+    std::lock_guard<std::mutex> guard(g_active_statics_refusal_lock);
+    auto& r = g_active_statics_refusals;
+    ++r.counts[std::size_t(step)]; ++r.revision;
+    auto& examples = r.examples[std::size_t(step)];
+    if (detail && examples.size() < 3) examples.emplace_back(detail);
+} catch (...) {}
+ActiveStaticsRefusals active_statics_refusals() noexcept try {
+    std::lock_guard<std::mutex> guard(g_active_statics_refusal_lock);
+    return g_active_statics_refusals;
+} catch (...) { return {}; }
+void active_statics_note_admitted(std::uint32_t objects) noexcept { g_active_statics_admitted = objects; }
+std::uint32_t active_statics_admitted() noexcept { return g_active_statics_admitted.load(); }
+
+ObjectSpaceReason retained_visual_object_space_reason(const RetainedVisualSample& sample,
+    const ActiveStaticsIndex* index, const std::vector<std::int32_t>& time_active_ids, std::uint64_t& model) noexcept {
+    model = 0;
+    if (!index || !sample.assembly || !sample.prepared || !sample.assembly->skeleton ||
+        !index->eligible.count(sample.lifecycle.id)) return ObjectSpaceReason::not_eligible;
+    if (sample.values.unit) return ObjectSpaceReason::unit;
+    if (sample.values.hidden || sample.values.dead || sample.values.invisible) return ObjectSpaceReason::hidden;
+    if (!sample.selection.neutral ||
+        std::binary_search(time_active_ids.begin(), time_active_ids.end(), sample.lifecycle.id))
+        return ObjectSpaceReason::animating;
+    // Unit scale and no centre shift, as every catalog model so far.
+    for (unsigned axis = 0; axis < 3; ++axis)
+        if (sample.assembly->scale[axis] != 1.f || sample.assembly->center_shift[axis] != 0.f)
+            return ObjectSpaceReason::scaled;
+    for (const auto& part : sample.assembly->parts)
+        if (part.texture_type == 13 || part.texture_type == 14 || part.texture_type == 16 ||
+            retained_visual_preserve_color_order(sample, part)) return ObjectSpaceReason::texture_kind;
+    model = retained_visual_object_space_model(sample);
+    if (!model || index->failed.count(model)) return ObjectSpaceReason::model_failed;
+    if (!index->models.count(model)) return ObjectSpaceReason::model_pending;
+    const auto& refused = sample.prepared->object_space_refused;
+    if (refused.assembly == sample.assembly.get() && refused.revision == sample.assembly->revision &&
+        refused.index == index->revision) return ObjectSpaceReason::refused;
+    return ObjectSpaceReason::admitted;
+}
+
+bool retained_visual_object_space_wanted(const RetainedVisualSample& sample,
+    const ActiveStaticsIndex* index, const std::vector<std::int32_t>& time_active_ids, std::uint64_t& model) noexcept {
+    const auto reason = retained_visual_object_space_reason(sample, index, time_active_ids, model);
+    return reason == ObjectSpaceReason::admitted || reason == ObjectSpaceReason::model_pending ||
+        reason == ObjectSpaceReason::refused;
+}
+
+namespace {
+std::array<std::atomic<std::uint32_t>, 2 * std::size_t(ObjectSpaceReason::count)> g_object_space_reasons{};
+}
+void active_statics_reasons_publish(const std::array<std::uint32_t, 2 * std::size_t(ObjectSpaceReason::count)>& counts) noexcept {
+    for (std::size_t k = 0; k < counts.size(); ++k) g_object_space_reasons[k] = counts[k];
+}
+std::array<std::uint32_t, 2 * std::size_t(ObjectSpaceReason::count)> active_statics_reasons() noexcept {
+    std::array<std::uint32_t, 2 * std::size_t(ObjectSpaceReason::count)> counts{};
+    for (std::size_t k = 0; k < counts.size(); ++k) counts[k] = g_object_space_reasons[k];
+    return counts;
+}
+
+bool retained_visual_object_space_admitted(const RetainedVisualSample& sample,
+    const ActiveStaticsIndex* index, const std::vector<std::int32_t>& time_active_ids) noexcept {
+    std::uint64_t model = 0;
+    return retained_visual_object_space_reason(sample, index, time_active_ids, model) == ObjectSpaceReason::admitted;
+}
+
+bool retained_visual_object_space_parts(const RetainedVisualSample& sample,
+    const std::uint32_t* parts, std::size_t count, const NativeWorldBounds* posed_bounds,
+    std::vector<std::array<float, 16>>& node_to_world, std::vector<std::uint32_t>& sway_flags,
+    std::array<float, 3>& sway_root) {
+    node_to_world.clear(); sway_flags.clear(); sway_root = {};
+    // Each false is one refused registration (active_statics_note_refusal).
+    char detail[256];
+    const auto refuse = [&](ObjectSpaceRefusal step, const char* text) {
+        active_statics_note_refusal(step, text); return false; };
+    const auto node_failed = [&](const char* what, std::size_t part) {
+        std::snprintf(detail, sizeof(detail), "object=%d %s part=%zu", sample.lifecycle.id, what, part);
+        return refuse(ObjectSpaceRefusal::place_node, detail); };
+    if (!sample.assembly || !sample.assembly->skeleton) return node_failed("no_skeleton", 0);
+    const auto& assembly = *sample.assembly;
+    // retained_visual_gpu_pose's object placement and neutral node samples
+    // (its contact span evaluates the parts the same way).
+    std::vector<VisualNodeSample> nodes;
+    VisualClipSelection neutral{}; neutral.neutral = true;
+    const auto& shape = retained_visual_shape(sample);
+    if (!sample_visual_skeleton(*assembly.skeleton, neutral, shape, assembly.center_shift, 0, nodes, false)) return node_failed("skeleton_sample", 0);
+    std::array<float, 16> placement{};
+    if (!retained_object_matrix(sample.object_pose.position, sample.object_pose.quaternion, placement)) return node_failed("object_matrix", 0);
+    VisualPoseState local_root;
+    local_root.tilted_facing = local_root.root_rotation_valid = true;
+    local_root.root_rotation = {1, 0, 0, 0};
+    const auto node_world = [&](std::uint32_t node, std::array<float, 16>& world) {
+        std::array<float, 16> local{};
+        if (node >= nodes.size() || !visual_node_world_matrix(local_root, nodes[node], assembly.scale, local)) return false;
+        world = retained_multiply_matrix(placement, local);
+        return std::all_of(world.begin(), world.end(), [](float v) { return std::isfinite(v); });
+    };
+    if (assembly.sways) {
+        std::array<float, 16> root{};
+        if (!node_world(assembly.sway_root, root)) return node_failed("sway_root", 0);
+        sway_root = {root[3], root[7], root[11]};
+    }
+    node_to_world.resize(count); sway_flags.resize(count);
+    for (std::size_t k = 0; k < count; ++k) {
+        if (parts[k] >= assembly.parts.size()) return node_failed("part_index", k);
+        const auto& part = assembly.parts[parts[k]];
+        if (!part.geometry || !node_world(part.skeleton_node, node_to_world[k])) return node_failed("node_matrix", parts[k]);
+        sway_flags[k] = retained_object_space_sway_flags(assembly, part);
+        // Self-check: every vertex of the part at this placement lies in its
+        // posed bounds, else the placement disagrees. The vertices are within
+        // the shape-weighted position radius of the node origin (the radius
+        // the posed envelope is built from, prepare_visual_part_envelope);
+        // the authored FIG box is no bound of the complection-blended
+        // positions and refused agreeing placements (0.07-0.11 m outside).
+        const auto& figure = *part.geometry;
+        if (posed_bounds && posed_bounds[k].valid && (figure.shape_count == 1 || figure.shape_count == 8) &&
+            figure.shape_position_radii.size() >= figure.shape_count) {
+            double radius = 0;
+            for (unsigned endpoint = 0; endpoint < figure.shape_count; ++endpoint) {
+                double weight = 1;
+                if (figure.shape_count == 8) for (unsigned axis = 0; axis < 3; ++axis)
+                    weight *= endpoint & (1u << axis) ? shape[axis] : 1.0 - shape[axis];
+                radius += std::abs(weight) * figure.shape_position_radii[endpoint];
+            }
+            const auto& m = node_to_world[k];
+            for (unsigned axis = 0; axis < 3; ++axis) {
+                const double row = std::sqrt(double(m[axis * 4]) * m[axis * 4] + double(m[axis * 4 + 1]) * m[axis * 4 + 1] +
+                    double(m[axis * 4 + 2]) * m[axis * 4 + 2]);
+                const double origin = m[axis * 4 + 3], extent = radius * row;
+                const double slack = 0.05 + 1e-3 * std::abs(origin);
+                if (origin - extent < posed_bounds[k].minimum[axis] - slack || origin + extent > posed_bounds[k].maximum[axis] + slack) {
+                    std::snprintf(detail, sizeof(detail),
+                        "object=%d part=%u node=%u axis=%u origin=%.3f radius=%.3f posed=[%.3f,%.3f] shapes=%u",
+                        sample.lifecycle.id, parts[k], part.skeleton_node, axis, origin, extent,
+                        posed_bounds[k].minimum[axis], posed_bounds[k].maximum[axis], unsigned(figure.shape_count));
+                    return refuse(ObjectSpaceRefusal::place_bounds, detail);
+                }
+            }
+        }
+    }
+    return true;
 }
 
 std::uint32_t retained_object_space_sway_flags(const VisualAssemblyAsset& assembly,
@@ -3150,7 +3486,7 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
     if (target.bound_assembly!=sample.assembly) {
         view={};const auto& figure=*part.geometry;
         view.world.enabled=true;view.world.identity=&figure.identity;view.world.shape_count=figure.shape_count;
-        if(!sample.values.unit&&!assembly.sways&&!astral_dynamic(assembly,part))view.lod_figure=&figure;
+        if(!sample.values.unit&&!assembly.sways&&!astral_kind(assembly,part))view.lod_figure=&figure;
         view.geometry_revision={1,0,0,0,0};view.geometry_revision_valid=true;
         view.positions=figure.positions.data();view.position_groups=figure.position_groups;
         view.normals=figure.normals.data();view.normal_groups=figure.normal_groups;
@@ -3159,10 +3495,9 @@ bool retained_visual_part_submission(const RetainedVisualSample& sample,std::siz
         view.indices=figure.indices.data();view.index_count=static_cast<UINT>(figure.indices.size());
         view.bounds_valid=true;view.bounds_flags=2;view.semantic_kind=SemanticKind::figure;
         retained_visual_part_fixed_state(sample,view.owned_fixed_state);
-        if(astral_dynamic(assembly,part)) {
-            view.owned_fixed_state.z_write_enable=FALSE;
-            view.owned_fixed_state.alpha_ref=1;
-        }
+        // Astral rift veils and clumps: blended over everything without
+        // writing depth, nearly every texel kept (astral_rift.h).
+        if (astral_kind(assembly,part)) { view.owned_fixed_state.z_write_enable=FALSE; view.owned_fixed_state.alpha_ref=1; }
         if (part.surface) {
             view.owned_texture.identity=part.surface->id;view.owned_texture.generation=part.surface->generation;
             view.owned_texture.surface=part.surface.get();
@@ -3314,7 +3649,8 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
     std::vector<std::vector<std::uint32_t>> members;
     for (std::uint32_t index=0;index<assembly.parts.size();++index) {
         const auto& part=assembly.parts[index];
-        if (!merge_part_eligible(part) || part.skeleton_node>=prepared.gpu_pose.binding->tracks.size()) continue;
+        if (!merge_part_eligible(part) || astral_kind(assembly,part) ||
+            part.skeleton_node>=prepared.gpu_pose.binding->tracks.size()) continue;
         std::size_t group=0;
         while (group<members.size() && !merge_parts_compatible(assembly.parts[members[group][0]],part)) ++group;
         if (group==members.size()) members.emplace_back();
@@ -3553,6 +3889,7 @@ bool retained_visual_current_nodes(const RetainedVisualSample& sample,
 
 bool retained_visual_preserve_color_order(const RetainedVisualSample& sample,
     const VisualPartAsset& part) noexcept {
+    if (sample.assembly && astral_kind(*sample.assembly,part)) return true;
     if (!part.material || retained_visual_effective_alpha(sample,part) != 1.f ||
         ((part.figure_flags&0x100u) && (part.diffuse>>24)!=255u))
         return true;

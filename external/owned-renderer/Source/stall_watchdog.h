@@ -33,6 +33,13 @@ inline thread_local int depth = 0;
 
 inline Slot& own_slot() noexcept { return slots[slot_index]; }
 
+// The latest memory_status residency summary (renderer_vram_budget.cpp, every
+// 30 s), appended to the stall record. Two buffers: the writer fills the one
+// not published, then publishes its index; 30 s apart, a reader never sees a
+// buffer being rewritten.
+inline char residency[2][320]{};
+inline std::atomic<int> residency_index{-1};
+
 inline std::int64_t now() noexcept {
     LARGE_INTEGER value;
     QueryPerformanceCounter(&value);

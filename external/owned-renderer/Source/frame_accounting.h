@@ -91,9 +91,13 @@ enum Part : std::uint8_t {
     ours_ground_cover, // render_ground_cover outside the two parts below
     ours_gc_units,     // unit, footprint and corpse reads for cover bending/tracks
     ours_gc_objects,   // object contact store: journal update, window query, builds
+    ours_gc_hosted,    // hosted plants (bridge_hosted_plants): host records of the scene
     ours_critters,     // render_critters
     ours_static_set,   // flush_native_static_set: expiry scan, set rebuild, enqueue
     ours_static_submit, // that set's flush_native (ordering, layout, uploads, draws)
+    ours_appearance,   // a unit's appearance publication (finish_visual_appearance), game thread
+    ours_part_texture, // a part texture's completion (alpha facts, retained copy) in appearance publication
+    ours_composed_texture, // a composed unit atlas's retained copy after the game's ComposeTexture
     count,
     none = 0xff
 };
@@ -112,8 +116,9 @@ inline const char* part_name(unsigned part) noexcept {
         "ret_color_submission", "ret_point_shadow", "ret_terrain_base", "ret_lighting_publish",
         "ours_object_draw", "ours_figure_hooks", "mesh_build", "mesh_upload", "terrain_record",
         "geometry_growth", "point_pool_growth", "ours_static_flush", "ours_static_hiz",
-        "ours_ground_cover", "ours_gc_units", "ours_gc_objects", "ours_critters",
-        "ours_static_set", "ours_static_submit"};
+        "ours_ground_cover", "ours_gc_units", "ours_gc_objects", "ours_gc_hosted", "ours_critters",
+        "ours_static_set", "ours_static_submit", "ours_appearance", "ours_part_texture",
+        "ours_composed_texture"};
     return part < count ? names[part] : "?";
 }
 
@@ -153,6 +158,8 @@ struct Record {
     std::array<std::int64_t, count> ticks{};     // sums to wall
     double oncpu_ms = -1.0;                      // thread cycles in the interval (TSC estimate)
     unsigned overflow = 0;                       // scopes dropped (stack full)
+    std::uint32_t marks = 0;                     // mark() bits set in the interval
+    std::int64_t mark_at = 0;                    // QPC ticks from the frame begin to the first mark
 };
 
 struct ThreadState {
@@ -234,8 +241,32 @@ inline double tsc_per_ms(std::uint64_t tsc, std::int64_t qpc) noexcept {
 
 // Ends this thread's frame at this instant; the open scopes stay open and
 // keep charging into the next frame.
+// A thread that presents frames (the game thread, the scene thread): set at
+// its first frame boundary, every session (the created-in-play detectors).
+inline thread_local bool t_frame_thread = false;
+// Why an owned asset is decoded now (asset_decoded_in_play): the unit and
+// the game callback (OuterFrameAppearanceCallback) whose publication asks.
+inline thread_local std::int32_t t_asset_unit = 0;
+inline thread_local std::uint8_t t_asset_callback = 0xff;
+struct AssetCause {
+    std::int32_t unit; std::uint8_t callback;
+    AssetCause(std::int32_t u, std::uint8_t c) noexcept : unit(t_asset_unit), callback(t_asset_callback) { t_asset_unit = u; t_asset_callback = c; }
+    ~AssetCause() { t_asset_unit = unit; t_asset_callback = callback; }
+    AssetCause(const AssetCause&) = delete; AssetCause& operator=(const AssetCause&) = delete;
+};
+// Marks a game event in this thread's open frame, so that frame is logged
+// whatever its length (hitch_parts.jsonl). Bits: 1 = modal backdrop created
+// (CInterface3D::Draw2D BG_FLAG_CREATE, inside DoModal's own DrawFrame).
+inline thread_local std::uint32_t t_marks = 0;
+inline thread_local std::int64_t t_mark_qpc = 0;
+inline void mark(std::uint32_t bit) noexcept {
+    if (!enabled()) return;
+    if (!t_marks) t_mark_qpc = now();
+    t_marks |= bit;
+}
 inline Record close_frame() noexcept {
     Record record{};
+    t_frame_thread = true;
     if (!enabled()) return record;
     ThreadState& s = t_state;
     const std::int64_t at = now();
@@ -249,6 +280,8 @@ inline Record close_frame() noexcept {
         record.wall = at - s.begin;
         record.ticks = s.acc;
         record.overflow = s.overflow;
+        record.marks = t_marks;
+        record.mark_at = t_marks && t_mark_qpc > s.begin ? t_mark_qpc - s.begin : 0;
         const double rate = tsc_per_ms(tsc, at);
         if (rate > 0.0 && s.cycles) record.oncpu_ms = static_cast<double>(cycles - s.cycles) / rate;
     } else {
@@ -256,6 +289,8 @@ inline Record close_frame() noexcept {
     }
     s.acc = {};
     s.overflow = 0;
+    t_marks = 0;
+    t_mark_qpc = 0;
     s.begin = at;
     s.cycles = cycles;
     s.tsc = tsc;
@@ -343,6 +378,16 @@ inline bool format_is_block(DXGI_FORMAT format) noexcept {
         format >= DXGI_FORMAT_BC6H_TYPELESS && format <= DXGI_FORMAT_BC7_UNORM_SRGB;
 }
 
+// Shader objects created in play (shipping detector, every session): the
+// world is revealed and no load is held, so a creation then is a hitch the
+// player sees. Set and cleared by the load reveal (renderer_diagnostics.cpp).
+inline std::atomic<bool> g_in_play{false};
+// The renderer's presentation frame number (renderer_frame.cpp), so events
+// raised on the scene thread line up with hitch_parts rows.
+inline std::atomic<std::uint64_t> g_presentation_frame{0};
+// One bridge event per shader created in play (renderer_device.cpp).
+void report_shader_created_in_play(const char* kind, double ms, SIZE_T bytes, const void* code, const void* caller) noexcept;
+
 namespace vt {
 using CreateBufferFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*, const D3D11_BUFFER_DESC*, const D3D11_SUBRESOURCE_DATA*, ID3D11Buffer**);
 using CreateTexture2DFn = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*, const D3D11_TEXTURE2D_DESC*, const D3D11_SUBRESOURCE_DATA*, ID3D11Texture2D**);
@@ -404,7 +449,12 @@ inline HRESULT STDMETHODCALLTYPE create_layout(ID3D11Device* self, const D3D11_I
 template <unsigned Slot> HRESULT STDMETHODCALLTYPE create_shader(ID3D11Device* self, const void* code, SIZE_T length, ID3D11ClassLinkage* linkage, void** out) {
     const std::int64_t begin = now();
     const HRESULT hr = device_original<CreateShaderFn>(Slot)(self, code, length, linkage, out);
-    add(shader_ticks, now() - begin); add(shaders, 1);
+    const std::int64_t ticks = now() - begin;
+    add(shader_ticks, ticks); add(shaders, 1);
+    // Frame threads only: the specialisation workers create off the frame.
+    if (g_in_play.load(std::memory_order_relaxed) && t_frame_thread)
+        report_shader_created_in_play(Slot == d_vs ? "vs" : Slot == d_ps ? "ps" : Slot == d_gs ? "gs" : Slot == d_hs ? "hs" : Slot == d_ds ? "ds" : "cs",
+            double(ticks) * ms_per_tick(), length, code, _ReturnAddress());
     return hr;
 }
 template <unsigned Slot> HRESULT STDMETHODCALLTYPE create_state(ID3D11Device* self, const void* desc, void** out) {
@@ -478,11 +528,20 @@ inline void restore(void** table, unsigned slot, void* original) noexcept {
 // at device creation.
 inline void install_device_counters(ID3D11Device* device, ID3D11DeviceContext* context) noexcept {
     using namespace vt;
-    if (!enabled() || !device || !context || g_device_table) return;
+    if (!device || !context || g_device_table) return;
     g_device_table = *reinterpret_cast<void***>(device);
     g_context_table = *reinterpret_cast<void***>(context);
     auto& d = g_device_original;
     auto& c = g_context_original;
+    // The shader slots in every session (the created-in-play detector); the
+    // rest only while accounting is on.
+    patch(g_device_table, d_vs, reinterpret_cast<void*>(&create_shader<d_vs>), d[d_vs]);
+    patch(g_device_table, d_gs, reinterpret_cast<void*>(&create_shader<d_gs>), d[d_gs]);
+    patch(g_device_table, d_ps, reinterpret_cast<void*>(&create_shader<d_ps>), d[d_ps]);
+    patch(g_device_table, d_hs, reinterpret_cast<void*>(&create_shader<d_hs>), d[d_hs]);
+    patch(g_device_table, d_ds, reinterpret_cast<void*>(&create_shader<d_ds>), d[d_ds]);
+    patch(g_device_table, d_cs, reinterpret_cast<void*>(&create_shader<d_cs>), d[d_cs]);
+    if (!enabled()) return;
     patch(g_device_table, d_buffer, reinterpret_cast<void*>(&create_buffer), d[d_buffer]);
     patch(g_device_table, d_tex2d, reinterpret_cast<void*>(&create_texture2d), d[d_tex2d]);
     patch(g_device_table, d_tex3d, reinterpret_cast<void*>(&create_texture3d), d[d_tex3d]);
@@ -491,12 +550,6 @@ inline void install_device_counters(ID3D11Device* device, ID3D11DeviceContext* c
     patch(g_device_table, d_rtv, reinterpret_cast<void*>(&create_view<d_rtv>), d[d_rtv]);
     patch(g_device_table, d_dsv, reinterpret_cast<void*>(&create_view<d_dsv>), d[d_dsv]);
     patch(g_device_table, d_layout, reinterpret_cast<void*>(&create_layout), d[d_layout]);
-    patch(g_device_table, d_vs, reinterpret_cast<void*>(&create_shader<d_vs>), d[d_vs]);
-    patch(g_device_table, d_gs, reinterpret_cast<void*>(&create_shader<d_gs>), d[d_gs]);
-    patch(g_device_table, d_ps, reinterpret_cast<void*>(&create_shader<d_ps>), d[d_ps]);
-    patch(g_device_table, d_hs, reinterpret_cast<void*>(&create_shader<d_hs>), d[d_hs]);
-    patch(g_device_table, d_ds, reinterpret_cast<void*>(&create_shader<d_ds>), d[d_ds]);
-    patch(g_device_table, d_cs, reinterpret_cast<void*>(&create_shader<d_cs>), d[d_cs]);
     patch(g_device_table, d_blend, reinterpret_cast<void*>(&create_state<d_blend>), d[d_blend]);
     patch(g_device_table, d_depth, reinterpret_cast<void*>(&create_state<d_depth>), d[d_depth]);
     patch(g_device_table, d_raster, reinterpret_cast<void*>(&create_state<d_raster>), d[d_raster]);

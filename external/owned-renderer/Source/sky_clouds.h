@@ -566,8 +566,11 @@ struct SkyFrameGpu {
     float deck_types[4]{};      // the storm deck's cloud type base, spread, storm, 1 (types holds the fair sky's)
     float deck_cloud[4]{};      // deck coverage, density, leading and trailing edge (m upwind of the eye)
     float deck_axis[4]{};       // upwind direction x, y, edge build width (m), pre-storm overhead cover
+    float horizon_day[4]{};     // daytime horizon hue (region tint ratio), w: day weight (fog_haze_day)
+    std::uint32_t box[4]{};     // first texel of this frame's march dispatch x, y and of its resolve dispatch x, y
+    std::uint32_t cuts[4]{};    // x: 1 below the horizon skyFinal is the haze alone (option coverage_cuts 8); y: the shadow penumbra offset in texels (skyShadowGatherCS)
 };
-static_assert(sizeof(SkyFrameGpu) == 768, "sky constants must match HLSL");
+static_assert(sizeof(SkyFrameGpu) == 816, "sky constants must match HLSL");
 
 // Temporal cloud reconstruction: each frame marches one sub-pixel of every
 // 2x2 block of the reconstruction target, so four consecutive frames march
@@ -597,7 +600,8 @@ cbuffer SkyFrame:register(b0){row_major float4x4 skyClipToWorld;row_major float4
  float4 skyShadow;float4 skyHorizon;float4 skyGame;float4 skyStars;float4 skySunDisc;float4 skyMoonDisc;uint4 skySize;uint4 skyControl;uint4 skyReconstruct;
  float4 skyTypes;float4 skyCirrus;float4 skyCirrusPhase;
  float4 skyCloudBottom;float4 skyCloudTop;float4 skyCirrusLight;float4 skyStormLight;float4 skyFlash;float4 skyRain;
- float4 skyMid;float4 skyMidShape;float4 skyDeckTypes;float4 skyDeckCloud;float4 skyDeckAxis;};
+ float4 skyMid;float4 skyMidShape;float4 skyDeckTypes;float4 skyDeckCloud;float4 skyDeckAxis;float4 skyHorizonDay;
+ uint4 skyBox;uint4 skyCuts;};
 static const float SKY_PI=3.14159265;
 static const float2 SKY_LUT=float2(192,108);
 Texture3D<float> skyShapeNoise:register(t0);
@@ -706,9 +710,15 @@ float3 skyBaseRadiance(float3 d){
  float az=atan2(d.y,d.x+1e-7)*(.5/SKY_PI);
  float v=clamp(skyLutV(asin(clamp(d.z,-1,1))),.5/SKY_LUT.y,1-.5/SKY_LUT.y);
  float3 L=skyLut.SampleLevel(skyWrap,float2(az,v),0).rgb;
- // Stylized grade: pull the horizon toward the game's authored sky colour.
+ // Stylized grade: pull the horizon toward the game's authored sky colour,
+ // its hue held within kFogHazeChroma (.12) of neutral as the fog haze is:
+ // at full chroma Gipat's teal and Suslanger's mint fog painted the horizon.
  float horizon=pow(1-saturate(abs(d.z)),4);
- L=lerp(L,skyGame.rgb*dot(L,float3(.2126,.7152,.0722))*2.2,horizon*.35);
+ float gameLuma=dot(skyGame.rgb,float3(.2126,.7152,.0722));
+ float3 gameHue=gameLuma>1e-4?skyGame.rgb/gameLuma:float3(1,1,1);
+ float hueDeviation=max(abs(gameHue.x-1),max(abs(gameHue.y-1),abs(gameHue.z-1)));
+ gameHue=1+(gameHue-1)*lerp(1,min(1,.12/max(hueDeviation,1e-6)),skyHorizonDay.w); // by day only
+ L=lerp(L,gameHue*gameLuma*dot(L,float3(.2126,.7152,.0722))*2.2,horizon*.35);
  // Overcast: a bright grey dome. Under a storm deck with an edge (skyRain.w)
  // the low sky beyond that edge keeps its own colour: the bright horizon gap.
  float3 grey=dot(L,float3(.3,.5,.2))*float3(.95,.97,1)*1.1+.03*(1-skyMoon.w);
@@ -1173,7 +1183,20 @@ float4 skyCirrusLayer(float3 rd,float pixelAngle){
  float3 c=skyCirrusLight.rgb*(skyPhaseHG(cosT,.5)*SKY_PI+.35)+skyBaseRadiance(float3(0,0,1))*.9;
  return float4(c,alpha);
 }
+// The horizon haze: the sky's own colour a few degrees up in this azimuth
+// (brighter toward the sun, warm at dusk, dark at night), tinted by the map's
+// region's hue (skyHorizonDay.rgb, a ratio near 1, renderer_sky.cpp). A single
+// colour at the lit white drew a flat bright plate along the horizon.
+float3 skyHorizonHaze(float3 rd){
+ float2 h=rd.xy;float l=length(h);h=l>1e-4?h/l:float2(1,0);
+ // Dusk, dawn and night keep the game fog's own haze colour (skyHorizon.rgb).
+ return lerp(skyHorizon.rgb,skyDisplay(skyBackground(float3(h*.9995,.03),false))*skyHorizonDay.rgb,skyHorizonDay.w);
+}
 float3 skyFinal(float3 rd,float4 clouds,bool discs,float pixelAngle){
+ // Below the horizon the result is the haze alone (w is 1 there): the
+ // background, cirrus and display curve it would replace are not computed
+ // (half of the probe's texels; skyCuts.x 0: computed and replaced).
+ [branch]if(rd.z<0&&skyCuts.x!=0)return skyHorizonHaze(rd);
  // Sun, moon and stars sit behind every cloud: the bright discs take a much
  // stronger cloud attenuation than the sky, or a thin edge lets them shine
  // through as if drawn over the clouds.
@@ -1191,7 +1214,7 @@ float3 skyFinal(float3 rd,float4 clouds,bool discs,float pixelAngle){
  float k=lerp(40,18,skyStars.w);
  float rise=exp(-max(rd.z,0)*k);
  float w=rd.z<0?1:lerp(skyHorizon.w*rise*clouds.a,1,rise*rise);
- return lerp(c,skyHorizon.rgb,w);
+ return lerp(c,skyHorizonHaze(rd),w);
 }
 float3 skyRay(float2 uv){
  float4 p=mul(skyClipToWorld,float4(uv.x*2-1,1-uv.y*2,1,1));
@@ -1205,23 +1228,30 @@ float3 skyRay(float2 uv){
 // the previous reconstruction is reprojected by direction and clamped to the
 // current march neighbourhood (bounds ghosting); fast turns fall back to the
 // upsampled current march instead of smearing.
-[numthreads(8,8,1)]void skyCloudsCS(uint3 id:SV_DispatchThreadID){
- if(any(id.xy>=skySize.xy))return;
- float2 uv=(id.xy*2+skyReconstruct.zw+.5)/skyReconstruct.xy;
+// The march and the resolve dispatch over the screen box that holds the sky
+// above the horizon (skyBox: its first texel; 0 and the whole target without
+// it). Texels outside keep old values and are never read: the resolve and
+// the sky draw read around above-horizon pixels only, well inside the box
+// (renderer_sky.cpp sky_horizon_box).
+[numthreads(8,8,1)]void skyCloudsCS(uint3 thread:SV_DispatchThreadID){
+ uint2 id=thread.xy+skyBox.xy;
+ if(any(id>=skySize.xy))return;
+ float2 uv=(id*2+skyReconstruct.zw+.5)/skyReconstruct.xy;
  float3 rd=skyRay(uv);
  float4 current=float4(0,0,0,1);
  [branch]if(rd.z>0){
   float pixelAngle=length(skyRay(uv+float2(1.0/skyReconstruct.x,0))-rd);
-  current=skyMarchClouds(skyEye.xyz,rd,(int)skyControl.y,(int)skyControl.z,frac(skyIgn(id.xy)+skyControl.x*.618034),60000,pixelAngle);
+  current=skyMarchClouds(skyEye.xyz,rd,(int)skyControl.y,(int)skyControl.z,frac(skyIgn(id)+skyControl.x*.618034),60000,pixelAngle);
  }
- skyColorOut[id.xy]=current;
+ skyColorOut[id]=current;
 }
 // The vertical component's sign of skyRay(uv), without the normalisation.
 float skyRayHeight(float2 uv){
  float4 p=mul(skyClipToWorld,float4(uv.x*2-1,1-uv.y*2,1,1));
  return p.z/p.w-skyEye.z;
 }
-[numthreads(8,8,1)]void skyResolveCS(uint3 id:SV_DispatchThreadID){
+[numthreads(8,8,1)]void skyResolveCS(uint3 thread:SV_DispatchThreadID){
+ uint3 id=uint3(thread.xy+skyBox.zw,0);
  if(any(id.xy>=skyReconstruct.xy))return;
  int2 last=(int2)skySize.xy-1,m=min((int2)(id.xy/2),last);
  // Well below the horizon: every march texel this pixel reads (the 3x3
@@ -1335,6 +1365,34 @@ float skyCloudTransmittance(float2 ground,int samples){
  [branch]if(skyLight.w==0){skyShadowOut[id.xy]=1;return;}
  float2 ground=skyShadow.xy+(id.xy+.5)/float2(width,height)*skyShadow.z;
  float t=lerp(1,skyCloudTransmittance(ground,12),skyLight.w);
+ skyShadowOut[id.xy]=t+(1-t)*skyShadow.w;
+}
+)" R"(
+// The same field in two steps (D3D12, option coverage_cuts 32). skyShadowCS
+// integrates five columns per texel: its own and four 150 m away, which are
+// other texels' own columns a whole number of texels off (skyCuts.y: 100 at
+// 512, 50 at 256). Here each column is integrated once, over the field grown
+// by that many texels on every side (skyShadowDepthCS, optical depth), and
+// the penumbra reads its five (skyShadowGatherCS): 1.9 columns a texel for
+// 5, the same weights, sum order and response.
+[numthreads(8,8,1)]void skyShadowDepthCS(uint3 id:SV_DispatchThreadID){
+ uint width,height;skyShadowOut.GetDimensions(width,height);
+ if(any(id.xy>=uint2(width,height)))return;
+ float reach=skyCuts.y;
+ float2 ground=skyShadow.xy+(float2(id.xy)-reach+.5)/(float2(width,height)-2*reach)*skyShadow.z;
+ skyShadowOut[id.xy]=skyCloudOpticalDepth(ground,12);
+}
+[numthreads(8,8,1)]void skyShadowGatherCS(uint3 id:SV_DispatchThreadID){
+ uint width,height;skyShadowOut.GetDimensions(width,height);
+ if(any(id.xy>=uint2(width,height)))return;
+ [branch]if(skyLight.w==0){skyShadowOut[id.xy]=1;return;}
+ int reach=skyCuts.y;int3 c=int3(id.xy+reach,0);
+ float od=skyShadowRaw.Load(c)*.4;
+ od+=skyShadowRaw.Load(c+int3(reach,0,0))*.15;
+ od+=skyShadowRaw.Load(c-int3(reach,0,0))*.15;
+ od+=skyShadowRaw.Load(c+int3(0,reach,0))*.15;
+ od+=skyShadowRaw.Load(c-int3(0,reach,0))*.15;
+ float t=lerp(1,skyCloudShadowResponse(od),skyLight.w);
  skyShadowOut[id.xy]=t+(1-t)*skyShadow.w;
 }
 float4 skyVS(uint id:SV_VertexID):SV_Position{

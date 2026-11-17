@@ -51,9 +51,16 @@ bool finish_native_prebuilt_pages(NativePrebuiltBuilder& builder) noexcept {
  return ok;
 }
 
-// A liquid vertex's type bits (NativeMesh::liquid_types).
+// A liquid vertex's type bits (NativeMesh::liquid_types). 8 (native_liquid_flowing):
+// the fall tessellation may split and displace it, i.e. its tess weight
+// (liquid_surface.hlsl liquidTessWeight = liquidFoamLayerWeight) can be
+// above zero: not self-illuminated, with cascade foam or any current (the
+// shader's .015 run onset is not relied on, so this never misses a fall).
 std::uint8_t native_liquid_vertex_types(const NativeTerrainVertex& vertex) noexcept{
- return std::uint8_t((vertex.liquid_self_illumination>0?2u:1u)|(((vertex.flags>>native_terrain_swamp_shift)&7u)!=0?4u:0u));
+ const bool flowing=vertex.liquid_self_illumination<=0&&
+  (vertex.liquid_cascade>0||vertex.liquid_current[0]!=0||vertex.liquid_current[1]!=0);
+ return std::uint8_t((vertex.liquid_self_illumination>0?2u:1u)|(((vertex.flags>>native_terrain_swamp_shift)&7u)!=0?4u:0u)|
+                     (flowing?native_liquid_flowing:0u));
 }
 
 bool build_native_prebuilt_mesh(NativePrebuiltBuilder& builder,const NativeGeometryView& view,
@@ -167,7 +174,12 @@ bool build_native_prebuilt_mesh(NativePrebuiltBuilder& builder,const NativeGeome
   }
   output.lod_levels=lods->levels;output.lod_extra_triangles=static_cast<std::uint32_t>(lods->indices[0].size()/3);
  }
- if(sphere_block){
+ if(sphere_block&&view.world.impostor_sphere[3]>0){
+  // A part of an impostor object: the object's sphere in this part's frame.
+  const auto& sphere=view.world.impostor_sphere;
+  if(!std::isfinite(sphere[0]+sphere[1]+sphere[2]+sphere[3])){builder.blob.resize(base);return false;}
+  std::memcpy(out+sphere_at,sphere.data(),sizeof(float)*4);output.sphere_block=true;
+ }else if(sphere_block){
   constexpr float big=std::numeric_limits<float>::max();float low[3]={big,big,big},high[3]={-big,-big,-big};
   const auto point=[&](std::uint32_t index,unsigned axis){const auto& g=positions[index>>2];const auto lane=index&3u;
    return axis==0?g.x[lane]:axis==1?g.y[lane]:g.z[lane];};
@@ -200,6 +212,7 @@ bool build_native_prebuilt_mesh(NativePrebuiltBuilder& builder,const NativeGeome
   const bool liquid=(terrain[i].flags&native_terrain_water_vertex)!=0;
   output.has_liquid|=liquid;output.has_ground|=!liquid;
   if(liquid)output.liquid_types|=native_liquid_vertex_types(terrain[i]);
+  if(liquid)output.liquid_wave_multiplier=(std::max)(output.liquid_wave_multiplier,std::abs(terrain[i].wind_multiplier));
  }
  for(unsigned axis=0;axis<3;++axis){output.bounds_min[axis]=std::numeric_limits<float>::max();output.bounds_max[axis]=-std::numeric_limits<float>::max();}
  for(std::uint32_t index=0;index<position_count;++index){
@@ -276,24 +289,19 @@ bool native_owned_box_mips(const NativeOwnedTextureView& source,std::vector<std:
  UINT w=width,h=height;
  for(UINT index=0;;++index){
   levels.push_back(std::move(level));
-  if(index+1>=count)return true;
+  if(index+1>=count)break;
   const std::vector<std::uint32_t>& above=levels.back();
   const UINT nw=(std::max)(1u,w/2),nh=(std::max)(1u,h/2);
   level.assign(std::size_t(nw)*nh,0);
-  for(UINT y=0;y<nh;++y){
-   const std::uint32_t* const r0=above.data()+std::size_t((std::min)(y*2,h-1))*w;
-   const std::uint32_t* const r1=above.data()+std::size_t((std::min)(y*2+1,h-1))*w;
-   for(UINT x=0;x<nw;++x){
-    const UINT x0=(std::min)(x*2,w-1),x1=(std::min)(x*2+1,w-1);
-    const std::uint32_t a=r0[x0],b=r0[x1],c=r1[x0],d=r1[x1];
-    std::uint32_t out=0;
-    for(UINT shift=0;shift<32;shift+=8)
-     out|=((((a>>shift)&255u)+((b>>shift)&255u)+((c>>shift)&255u)+((d>>shift)&255u)+2u)/4u)<<shift;
-    level[std::size_t(y)*nw+x]=out;
-   }
-  }
+  box_mip_level(above.data(),w,h,level.data());
   w=nw;h=nh;
  }
+ // A cut-out keeps its alpha-test coverage down the chain (texture_mips.h);
+ // the 4444 spell atlases are blended art and stay as filtered.
+ float coverage=0;
+ if(source.format!=NativeOwnedTextureFormat::argb4444&&cut_out_coverage(levels[0].data(),levels[0].size(),coverage))
+  for(std::size_t index=1;index<levels.size();++index)preserve_alpha_coverage(levels[index].data(),levels[index].size(),coverage);
+ return true;
 }
 
 namespace {

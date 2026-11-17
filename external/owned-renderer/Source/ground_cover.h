@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <tuple>
 #include <vector>
 #include "ambient_particles.h"
 #include "neighbour_fog.h"
@@ -50,8 +51,25 @@ enum Mesh : std::uint32_t {
     // Far meshes of the tall and dense tufts: fewer, wider leaves and fewer
     // segments where the near leaves would be about a pixel wide.
     gm_flower_far, gm_reed_far, gm_cattail_far, gm_seagrass_far,
+    // Suslanger plants (issue #251 3a; desert_plants_mesh.h, in its order):
+    // textured cards of the game's own plant atlases (mat_plant) and three
+    // grasses in procedural colour.
+    gm_thorn_bush, gm_drinn, gm_agave, gm_ball_cactus, gm_stonecrop, gm_needle_grass, gm_seed_heads,
+    gm_dome_shrub_a, gm_dome_shrub_b, gm_saltbush, gm_calotropis,
+    gm_oasis_scrub_a, gm_oasis_scrub_b, gm_oasis_oleander, gm_oasis_shipped_a, gm_oasis_shipped_b, gm_oasis_shipped_c,
+    // Cave lichen colonies (issue #251, lookdev round 11; hosted_plants.bin
+    // kCaveColonyKind, in its order): rosettes and the painted crust on a
+    // 0.45 m disc (art 6), Gipat cave greens and Suslanger cave browns.
+    gm_cave_lichen_gipat_a, gm_cave_lichen_gipat_b, gm_cave_lichen_desert_a, gm_cave_lichen_desert_b,
+    // Hosted plants (issue #251 3c; hosted_plants.h): one entry per hosted
+    // kind (kHostedKinds), drawn by vertex pulling from the map's hosted models,
+    // placed on their host models' map objects, never by the placement rules.
+    gm_hosted_dead_vines, gm_hosted_lichen_rosettes, gm_hosted_lichen_cards,
+    gm_hosted_moss_light, gm_hosted_moss_full, gm_hosted_vines_green,
     gm_count,
 };
+constexpr std::uint32_t gm_first_hosted = gm_hosted_dead_vines;
+constexpr bool hosted_mesh(std::uint32_t mesh) noexcept { return mesh >= gm_first_hosted && mesh < gm_count; }
 
 // Bits of GroundCoverRule::flags.
 enum RuleFlag : std::uint32_t {
@@ -69,7 +87,8 @@ enum Palette : std::uint32_t { pal_none = 0, pal_flower, pal_leaf, pal_stone };
 // Material art in the pixel shader: procedural colour, the game's tree bark /
 // end grain, the placed stone props' rock art, snow pile.
 enum Material : std::uint32_t { mat_plain = 0, mat_bark, mat_stone, mat_snow, mat_ground, mat_wet, mat_glow,
-    mat_strand, mat_wrack }; // painted, alpha-cut strands (procedural, own pixel kind 4): seagrass; beach wrack
+    mat_strand, mat_wrack, // painted, alpha-cut strands (procedural, own pixel kind 4): seagrass; beach wrack
+    mat_plant }; // alpha-tested plant cards of the game's plant atlases (pixel kind 5)
 
 // The decoded loader keys are ASCII-folded. Both base and HD packs preserve
 // these square atlas layouts; normalized crops do not depend on pixel size.
@@ -108,7 +127,30 @@ struct GroundCoverRule {
 };
 // Clustered rules move every candidate into the patch of its world-space
 // lattice cell (ground_cover_interaction.h gcPatchAt) or drop it.
-enum Cluster : std::uint32_t { cl_none = 0, cl_flower_patch, cl_snow_clump };
+enum Cluster : std::uint32_t { cl_none = 0, cl_flower_patch, cl_snow_clump, cl_desert_clump, cl_desert_extra };
+// Zone18 alone uses the desert clumps. Keep every original rule and its
+// index for other maps; cl_desert_extra marks the additional waterside
+// rules that must not scatter plants outside zone18's selected clump.
+inline bool desert_clump_map(const std::string& name) noexcept {
+    const auto slash = name.find_last_of("/\\");
+    const auto start = slash == std::string::npos ? 0 : slash + 1;
+    return name.compare(start, std::string::npos, "zone18") == 0 || name.compare(start, std::string::npos, "zone18.mpr") == 0;
+}
+constexpr bool desert_oasis_mesh(std::uint32_t mesh) noexcept { return mesh >= gm_oasis_scrub_a && mesh <= gm_oasis_shipped_c; }
+// Candidates per occupied 4 m cell at full density, one mesh per clump.
+// Also emitted into the shader; these are not independent GPU defaults.
+constexpr unsigned kDesertClumpPlants[]{4,12,5,6,8,12,10,4,4,4,3,6,6,5,5,5,5};
+static_assert(std::size(kDesertClumpPlants) == gm_oasis_shipped_c - gm_thorn_bush + 1);
+// CPU masks and allocation bounds use the same map-specific rule as the
+// shader's gcPlacementRule. The uploaded table remains the original one.
+inline GroundCoverRule placement_rule(GroundCoverRule r, bool desert_clumps) noexcept {
+    if (r.cluster < cl_desert_clump) return r;
+    if (!desert_clumps) { r.cluster = cl_none; return r; }
+    r.density = r.cluster == cl_desert_extra ? 0.f : float(kDesertClumpPlants[r.mesh - gm_thorn_bush]) / 16.f;
+    r.areas = area_bit(ambient::area_bare) | area_bit(ambient::area_grass) | area_bit(ambient::area_dry) | area_bit(ambient::area_sand);
+    r.field = fd_none; r.clump_lo = r.clump_hi = 0;
+    return r;
+}
 static_assert(sizeof(GroundCoverRule) == 160, "GroundCoverRule must match the HLSL GcRule");
 
 // Per-mesh defaults from the prototype's R(): orientation, contact blend and
@@ -180,6 +222,21 @@ inline GroundCoverRule make_rule(std::uint32_t mesh, std::uint32_t areas, float 
     case gm_mound:
         r.material = mat_snow; r.align = 1; r.normal_blend = .7f; r.sx_min = 1; r.sx_max = 1.8f; r.sz_min = .8f; r.sz_max = 1.2f;
         r.contact = 1; r.lod_near = 70; r.lod_far = 180; r.flags = rf_snow_pile; break;
+    // Suslanger plants: upright, the art's own colour (own white, mixed fully),
+    // the ground's colour a few centimetres up the base. Shrubs and cacti read
+    // from afar (large casters, lod_near 70); the grasses thin like tufts.
+    case gm_drinn:
+        r.align = .2f; r.normal_blend = .5f; r.sz_min = .85f; r.sz_max = 1.2f; r.lod_near = 45; r.lod_far = 120; r.far_keep = .3f;
+        r.own_mix = 1; break;
+    case gm_needle_grass: case gm_seed_heads:
+        r.align = .2f; r.normal_blend = .6f; r.sz_min = .85f; r.sz_max = 1.2f; r.lod_near = 40; r.lod_far = 110; r.far_keep = .25f;
+        r.flags = rf_tuft; break;
+    case gm_thorn_bush: case gm_agave: case gm_ball_cactus: case gm_stonecrop: case gm_dome_shrub_a: case gm_dome_shrub_b:
+    case gm_saltbush: case gm_calotropis: case gm_oasis_scrub_a: case gm_oasis_scrub_b: case gm_oasis_oleander:
+    case gm_oasis_shipped_a: case gm_oasis_shipped_b: case gm_oasis_shipped_c:
+    case gm_cave_lichen_gipat_a: case gm_cave_lichen_gipat_b: case gm_cave_lichen_desert_a: case gm_cave_lichen_desert_b:
+        r.material = mat_plant; r.own_mix = 1; r.align = .15f; r.normal_blend = .2f; r.sz_min = .9f; r.sz_max = 1.1f;
+        r.contact = .5f; r.blend_height = .05f; r.lod_near = 70; r.lod_far = 180; r.far_keep = .5f; break;
     default: break;
     }
     switch (mesh) { // far LOD: what still reads at the farthest gameplay zoom
@@ -227,10 +284,12 @@ inline void add_tree_litter_influence(std::array<std::uint8_t, 4>& value,
     else add(value[2]);
 }
 
-inline const std::array<GroundCoverRule, 61>& rule_table() noexcept {
-    static const std::array<GroundCoverRule, 61> table = [] {
+// The rule table's size (exact: rule_table aborts on one rule more or less).
+constexpr std::size_t kGroundCoverRuleCount = 91;
+inline const std::array<GroundCoverRule, kGroundCoverRuleCount>& rule_table() noexcept {
+    static const std::array<GroundCoverRule, kGroundCoverRuleCount> table = [] {
         using namespace ambient;
-        std::array<GroundCoverRule, 61> t{};
+        std::array<GroundCoverRule, kGroundCoverRuleCount> t{};
         unsigned n = 0;
         // The table size is exact: one more rule must grow it (a write past it corrupts memory).
         const auto add = [&](GroundCoverRule r) { if (n >= t.size()) std::abort(); t[n++] = r; return &t[n - 1]; };
@@ -355,7 +414,7 @@ inline const std::array<GroundCoverRule, 61>& rule_table() noexcept {
         // Cave sets use the drawn base type and liquid layer, never a map-name
         // exception. The lava band follows the actual shoreline, not ground
         // types below an overlay. Ground-art materials sample the painted tile.
-        const auto caves = zone_bit(zone_cave) | zone_bit(zone_gipat_cave);
+        const auto caves = zone_bit(zone_cave) | zone_bit(zone_gipat_cave) | zone_bit(ambient::zone_desert_cave);
         const auto cave = [&](std::uint32_t mesh, std::uint32_t areas, float d, float lo, float hi) {
             auto* r = add(make_rule(mesh,areas,d,lo,hi)); r->zones=caves; return r;
         };
@@ -363,8 +422,22 @@ inline const std::array<GroundCoverRule, 61>& rule_table() noexcept {
         auto* scoria = cave(gm_pebble,bare|dry,.5f,.02f,.06f); field(scoria,fd_lava_edge,0,5); tint(scoria,.58f,.55f,.5f);
         auto* obsidian = cave(gm_shard,bare|dry,.12f,.06f,.14f); field(obsidian,fd_lava_edge,0,3); tint(obsidian,.28f,.3f,.34f);
         auto* crust = cave(gm_slab,bare|dry,.35f,.18f,.4f); field(crust,fd_lava_edge,0,1.8f); tint(crust,.48f,.43f,.39f);
+        // Moss and lichen: the flat patches in other caves; in Gipat and
+        // Suslanger caves the round-11 lichen colonies (user, 2026-11-14) on
+        // the same damp ground and wall bands, sparser (a colony is 0.9 m).
         auto* moss = cave(gm_patch,bare|grass|sand,1.2f,.18f,.5f); field(moss,fd_damp,0,5); tint(moss,.65f,.93f,.62f); clump(moss,.35f,.4f,.65f);
         auto* lichen = cave(gm_patch,bare,.18f,.1f,.32f); lichen->flags=rf_rock; field(lichen,fd_wall,0,2); tint(lichen,.86f,.94f,.72f);
+        moss->zones = lichen->zones = zone_bit(zone_cave);
+        for (const auto& [a, b, zone] : {std::tuple{gm_cave_lichen_gipat_a, gm_cave_lichen_gipat_b, zone_bit(zone_gipat_cave)},
+                                         std::tuple{gm_cave_lichen_desert_a, gm_cave_lichen_desert_b, zone_bit(ambient::zone_desert_cave)}}) {
+            for (const std::uint32_t mesh : {a, b}) {
+                // Colonies lie on the ground or wall: its normal (align 1), its colour at the rim.
+                auto* floor = add(make_rule(mesh, bare|grass|sand, .09f, .8f, 1.2f)); floor->zones = zone; floor->align = 1;
+                field(floor, fd_damp, 0, 5); clump(floor, .35f, .4f, .65f);
+                auto* wall = add(make_rule(mesh, bare, .05f, .7f, 1.1f)); wall->zones = zone; wall->flags = rf_rock; wall->align = 1;
+                field(wall, fd_wall, 0, 2);
+            }
+        }
         auto* fern = cave(gm_fern,bare|grass|sand,.24f,.18f,.4f); field(fern,fd_damp,0,4); tint(fern,.62f,.94f,.57f);
         auto* roots = cave(gm_roots,bare|grass|sand,.04f,.4f,.9f); field(roots,fd_wall,.15f,1.2f);
         auto* mushroom = cave(gm_mushroom,bare|grass|sand,.14f,.08f,.18f); field(mushroom,fd_damp,0,6);
@@ -376,10 +449,80 @@ inline const std::array<GroundCoverRule, 61>& rule_table() noexcept {
         auto* web = cave(gm_web,bare,.018f,.25f,.65f); field(web,fd_corner,0,2);
         auto* crystals = cave(gm_crystal,bare,.065f,.03f,.09f); crystals->flags=rf_rock;
         auto* cave_snow = add(*mound); cave_snow->zones=caves; cave_snow->density=.04f;
+        // Suslanger (issue #251 3a): dry and sparse in the open, a band of
+        // oasis bushes and lusher grass within 5.5 m of lakes and rivers
+        // (fd_river: never the sea). Densities per m2; the grass-like plants
+        // most common, the shrubs about one per 250-350 m2 each.
+        const std::uint32_t desert = zone_bit(zone_desert), dry_land = bare | dry | sand;
+        const auto plant_rule = [&](std::uint32_t mesh, std::uint32_t areas, float d, float lo, float hi) {
+            auto* r = add(make_rule(mesh, areas, d, lo, hi)); r->zones = desert; r->cluster = cl_desert_clump; return r;
+        };
+        auto* drinn = plant_rule(gm_drinn, sand | dry, .015f, .5f, .75f); clump(drinn, .35f, .2f, .5f);
+        // The lookdev's ground-tinted grasses: rule tint, own colour and mix.
+        const auto needle_look = [&](GroundCoverRule* r) { tint(r, .95f, .9f, .7f); own(r, .86f, .78f, .55f); r->own_mix = .55f; };
+        needle_look(plant_rule(gm_needle_grass, sand | dry, .02f, .45f, .6f));
+        auto* seeds = plant_rule(gm_seed_heads, dry_land, .01f, .45f, .6f); tint(seeds, .9f, .85f, .68f); own(seeds, .78f, .68f, .48f);
+        seeds->own_mix = .5f;
+        plant_rule(gm_thorn_bush, dry_land, .003f, .65f, 1.0f);
+        plant_rule(gm_agave, dry | bare, .003f, .5f, .75f);
+        plant_rule(gm_ball_cactus, dry_land, .005f, .8f, 1.2f);
+        plant_rule(gm_stonecrop, dry | bare, .006f, .8f, 1.1f);
+        auto* dome = plant_rule(gm_dome_shrub_a, dry_land, .003f, .7f, .9f);
+        plant_rule(gm_dome_shrub_b, dry_land, .003f, .85f, 1.1f);
+        plant_rule(gm_saltbush, sand | dry, .004f, .8f, 1.1f);
+        auto* calo = plant_rule(gm_calotropis, dry_land, .0015f, .7f, 1.0f);
+        // Oasis bushes in three styles at the water: knee to thigh high
+        // (0.38-0.8 m), waist high (0.82-0.95 m) rarely. The shipped style's
+        // three variants share that style's density (.02).
+        const std::uint32_t oasis = dry_land | grass;
+        for (const std::uint32_t mesh : {gm_oasis_scrub_a, gm_oasis_scrub_b, gm_oasis_oleander,
+                                         gm_oasis_shipped_a, gm_oasis_shipped_b, gm_oasis_shipped_c}) {
+            const bool scrub = mesh == gm_oasis_scrub_a || mesh == gm_oasis_scrub_b;
+            const bool shipped = mesh == gm_oasis_shipped_a || mesh == gm_oasis_shipped_b || mesh == gm_oasis_shipped_c;
+            auto* r = plant_rule(mesh, oasis, scrub ? .025f : shipped ? .02f / 3 : .02f, .38f, .8f);
+            field(r, fd_river, 0, 5.5f);
+        }
+        auto* waist = plant_rule(gm_oasis_scrub_a, oasis, .004f, .82f, .95f); field(waist, fd_river, 0, 4.5f); waist->cluster = cl_desert_extra;
+        // Lusher grass and shrubs at the water's edge.
+        auto* drinn_w = add(*drinn); drinn_w->areas = oasis; drinn_w->density = .12f; drinn_w->scale_min = .55f; drinn_w->scale_max = .8f;
+        field(drinn_w, fd_river, 0, 5.5f); drinn_w->cluster = cl_desert_extra;
+        auto* needle_w = plant_rule(gm_needle_grass, oasis, .08f, .5f, .65f); needle_look(needle_w); field(needle_w, fd_river, 0, 5.5f); needle_w->cluster = cl_desert_extra;
+        auto* dome_w = add(*dome); dome_w->areas = oasis; dome_w->density = .015f; field(dome_w, fd_river, 0, 5.5f); dome_w->cluster = cl_desert_extra;
+        auto* calo_w = add(*calo); calo_w->areas = oasis; calo_w->density = .006f; field(calo_w, fd_river, 0, 5.5f); calo_w->cluster = cl_desert_extra;
         return t;
     }();
     return table;
 }
+
+// Hosted plant kinds (issue #251 3c), in the export's kind order: the zone
+// classes whose map objects carry them (a host: a model and texture of the
+// exported data), the dither fade band (metres, scaled like a rule's by the
+// cover distance) and whether they cast sun shadow. Dead vines: the dead
+// city's walls, arch and gatehouse, and in Dejavu's dead city its gravestones
+// and tomb slabs (user scope 2026-11-14; not grilles, posts, low gate walls,
+// crystals or chests). Ingos lichen (round 10): the rosettes as geometry in
+// the near band, the colony cards with the painted crust to 30 m; lying
+// 1-2 mm off the stone, neither casts.
+// Lichen also on Suslanger rocks (round 11, its own palette: separate models
+// of the same kinds, told apart by their hosts' textures and zone).
+// Gipat moss and green vines (rounds 4-5, round-12 hosts): moss on stones,
+// stumps and walls in two amounts and ivy on stumps and walls, all following
+// gipat5's shade rule per placement (shade; the bridge, hosted_shade_selects):
+// from the canopy of the swaying trees within 6 m of the host and the host's
+// hash, a placement keeps the light moss, the full moss or none; vines stay
+// on shaded hosts and on half the sunny ones. Swaying trees host none (their
+// crowns move).
+enum HostedShade : std::uint32_t { hs_none = 0, hs_moss_light, hs_moss_full, hs_vines };
+struct HostedKind { std::uint32_t mesh; std::uint32_t zones; float lod_near, lod_far; bool casts; std::uint32_t shade; };
+constexpr HostedKind kHostedKinds[] = {
+    {gm_hosted_dead_vines, zone_bit(ambient::zone_dead_city), 45, 90, true, hs_none},
+    {gm_hosted_lichen_rosettes, zone_bit(ambient::zone_snow) | zone_bit(ambient::zone_desert), 12, 20, false, hs_none},
+    {gm_hosted_lichen_cards, zone_bit(ambient::zone_snow) | zone_bit(ambient::zone_desert), 22, 30, false, hs_none},
+    {gm_hosted_moss_light, zone_bit(ambient::zone_outdoor), 35, 50, false, hs_moss_light},
+    {gm_hosted_moss_full, zone_bit(ambient::zone_outdoor), 35, 50, false, hs_moss_full},
+    {gm_hosted_vines_green, zone_bit(ambient::zone_outdoor), 30, 45, false, hs_vines},
+};
+static_assert(std::size(kHostedKinds) == gm_count - gm_first_hosted, "one kind a hosted mesh, in mesh order");
 
 // Shore kelp clumps (rf_shore_clumps). Mirrors gcPlaceCS: the patch lattice
 // of gcPatchAt (ground_cover_interaction.h) with gcKelpShape, a candidate kept

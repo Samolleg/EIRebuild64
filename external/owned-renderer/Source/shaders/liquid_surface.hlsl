@@ -213,6 +213,19 @@ Texture2D<float> liquidSceneDepth:register(t112);
 #else
 Texture2D<float> liquidSceneDepth:register(t19);
 #endif
+// NATIVE_LIQUID_SWIMMERS: the variants bound while the depth snapshot carries
+// swimmer marks; every other variant holds none of this code.
+#ifdef NATIVE_LIQUID_SWIMMERS
+// The depth snapshot's stencil plane (g): the frame's swimmers (fish) are
+// marked in it just before the snapshot (Renderer::mark_swimmers; bit 0 on
+// D3D11, any value on D3D12, whose receiver marks are cleared by then).
+Texture2D<uint2> liquidSceneStencil:register(t113);
+#ifdef EID3D12
+#define LIQUID_SWIMMER(mark) ((mark)!=0u)
+#else
+#define LIQUID_SWIMMER(mark) (((mark)&1u)!=0u)
+#endif
+#endif
 // The previous frame's nearest visible game-particle screen depth (1: none),
 // drawn with liquidHistoryClip; particles never write the scene depth.
 Texture2D<float> liquidParticleDepth:register(t28);
@@ -1615,6 +1628,15 @@ float liquidRefractionHit(float3 p,float surface,float spread,out float2 uv,out 
 }
 // Scene behind the surface along the Snell-refracted ray (rgb) and the view
 // path through the water measured against the opaque depth snapshot (a).
+#ifdef NATIVE_LIQUID_SWIMMERS
+// A swimmer (a fish, marked in the snapshot's stencil) is looked up from the
+// near side: the bed's refraction reach lands far beyond a small body near
+// the surface, so a pixel that looks straight at a swimmer shows it, shifted
+// along the refracted ray by the swimmer's own depth where that still lands
+// on one, and absorbed along the path to that depth, not to the bed far
+// below. liquidSwimmer: this pixel shows a swimmer.
+static float liquidSwimmer=0;
+#endif
 float4 liquidRefraction(LiquidSurfaceInput i,float3 n,float3 v) {
  int2 pixel=int2(i.pixel);
  float z=liquidSceneDepth.Load(int3(pixel,0));
@@ -1629,6 +1651,19 @@ float4 liquidRefraction(LiquidSurfaceInput i,float3 n,float3 v) {
  }
  float2 uv=(float2(pixel)+.5)/liquidReflectionTarget.xy,refracted;
  float3 t=refract(-v,n,1/liquidRefractionIndex);
+#ifdef NATIVE_LIQUID_SWIMMERS
+ [branch]if(z<1) {
+  [branch]if(LIQUID_SWIMMER(liquidSceneStencil.Load(int3(pixel,0)).g)) {
+   const float below=max(i.position.z-liquidScenePoint(pixel,z).z,0);
+   float2 at=uv,moved;
+   [branch]if(t.z<0&&liquidProject(i.position+t*(below/max(-t.z,.25)),moved)) {
+    if(LIQUID_SWIMMER(liquidSceneStencil.Load(int3(int2(moved*liquidReflectionTarget.xy),0)).g))at=moved;
+   }
+   liquidSwimmer=1;
+   return float4(liquidSceneColor.SampleLevel(liquidSceneSampler,float3(at,0),0).rgb,below/max(v.z,.2));
+  }
+ }
+#endif
  float reach=min(vertical,liquidRefractionDepth)/max(-t.z,.25);
  // A sample counts only where what it shows lies below the surface: above-
  // water geometry (a figure's head and torso) must not leak in. The bed
@@ -1661,6 +1696,13 @@ float4 liquidRefraction(LiquidSurfaceInput i,float3 n,float3 v) {
   [branch]if(hit>0&&hit<rayDepth*.9)
    hit=liquidRefractionHit(i.position+t*(hit/max(-t.z,.25)),i.position.z,spread,refracted,clear);
   float3 own=liquidSceneColor.SampleLevel(liquidSceneSampler,float3(uv,0),0).rgb;
+  // A swimmer at the bed's reach is a ghost at the wrong parallax (it shows
+  // where a pixel looks straight at it): this pixel keeps its own bed.
+#ifdef NATIVE_LIQUID_SWIMMERS
+  [branch]if(hit>0&&clear>0) {
+   if(LIQUID_SWIMMER(liquidSceneStencil.Load(int3(int2(refracted*liquidReflectionTarget.xy),0)).g))clear=0;
+  }
+#endif
   [branch]if(hit>0&&clear>0)
    return float4(lerp(own,liquidSceneColor.SampleLevel(liquidSceneSampler,float3(refracted,0),0).rgb,clear),path);
   return float4(own,path);
@@ -2276,7 +2318,14 @@ float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
    // Sea surf: the bed seen through clear sea water turns turquoise, then
    // deeper blue, per channel along the view path (red goes first).
    float3 absorbed=liquidChannelAbsorbed(bodyTint,behind.a);
+   // Over a swimmer the surface veil (the shallow share of the authored
+   // opacity) thins to a fifth: the fish is what the pixel shows, absorbed by
+   // its own short path, as in the approved preview.
+#ifdef NATIVE_LIQUID_SWIMMERS
+   float3 opacity=authored*lerp(lerp(liquidShallowOpacity,liquidMudOpacity,mud)*(1-.8*liquidSwimmer),1,absorbed);
+#else
    float3 opacity=authored*lerp(lerp(liquidShallowOpacity,liquidMudOpacity,mud),1,absorbed);
+#endif
    opacity=min(authored,opacity+shore*liquidShoreOpacity);
    opacity=max(opacity,ripples.z*liquidWaveFoamOpacity);
    opacity=max(opacity,max(surfFoam*.92,surfShade*.35));
@@ -2302,7 +2351,11 @@ float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
     // under the sea are coarsely quantized, so the raw path stepped and the
     // absorbed colour banded in rings following the bed.
     float smoothPath=max(surfLevel.w,0)/max(v.z,.25);
+#ifdef NATIVE_LIQUID_SWIMMERS
+    float seaPath=lerp(behind.a,smoothPath,smoothstep(1.2,3.5,surfLevel.w)*(1-liquidSwimmer)); // a swimmer keeps its own path
+#else
     float seaPath=lerp(behind.a,smoothPath,smoothstep(1.2,3.5,surfLevel.w));
+#endif
     float3 T=exp(-liquidSurfAbsorb*liquidSurfLookParams.y*seaPath);
     float3 inscatter=liquidSurfDeepColor*(ambient*.9+sunColor*.55*saturate(l.z));
     float3 water=behind.rgb*T+inscatter*(1-T)+liquidSurfShallowColor*sunColor*seaScatter*liquidSurfGlow;

@@ -3,18 +3,24 @@
     <FidelityFxRoot Condition="'$(FidelityFxRoot)'==''">$(MSBuildThisFileDirectory)..\dependencies\fidelityfx\2.3.0\</FidelityFxRoot>
     <NvapiRoot Condition="'$(NvapiRoot)'==''">$(MSBuildThisFileDirectory)..\dependencies\nvapi\70d337db\</NvapiRoot>
     <DxcRoot Condition="'$(DxcRoot)'==''">$(MSBuildThisFileDirectory)..\dependencies\dxc\1.9.2609\</DxcRoot>
+    <RtxdiRoot Condition="'$(RtxdiRoot)'==''">$(MSBuildThisFileDirectory)..\dependencies\rtxdi\3.2.0\</RtxdiRoot>
+    <AgilityRoot Condition="'$(AgilityRoot)'==''">$(MSBuildThisFileDirectory)..\dependencies\agility\1.620.2\</AgilityRoot>
     <FidelityFxRoot>$([MSBuild]::EnsureTrailingSlash('$(FidelityFxRoot)'))</FidelityFxRoot>
     <NvapiRoot>$([MSBuild]::EnsureTrailingSlash('$(NvapiRoot)'))</NvapiRoot>
     <DxcRoot>$([MSBuild]::EnsureTrailingSlash('$(DxcRoot)'))</DxcRoot>
   </PropertyGroup>
   <ItemDefinitionGroup>
-    <ClCompile><AdditionalIncludeDirectories>$(FidelityFxRoot)api\include;$(FidelityFxRoot)framegeneration\include;$(FidelityFxRoot)upscalers\include;$(NvapiRoot);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
+    <ClCompile><AdditionalIncludeDirectories>$(AgilityRoot)build\native\include;$(FidelityFxRoot)api\include;$(FidelityFxRoot)framegeneration\include;$(FidelityFxRoot)upscalers\include;$(NvapiRoot);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
     <Link><AdditionalDependencies>d3d12.lib;$(NvapiRoot)amd64\nvapi64.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
   </ItemDefinitionGroup>
   <Target Name="VerifyD3D12Sdk" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(RtxdiRoot)Include\Rtxdi\RtxdiParameters.h') Or !Exists('$(RtxdiRoot)LICENSE.txt') Or !Exists('$(AgilityRoot)build\native\bin\x64\D3D12Core.dll') Or !Exists('$(AgilityRoot)LICENSE.txt') Or !Exists('$(FidelityFxRoot)signedbin\amd_fidelityfx_upscaler_dx12.dll')" Text="Renderer 1126 pinned RTXDI, Agility or FSR upscaler files missing; run tools/prepare-worktree.ps1." />
     <Error Condition="!Exists('$(FidelityFxRoot)api\include\ffx_api.h') Or !Exists('$(FidelityFxRoot)framegeneration\include\ffx_framegeneration.h') Or !Exists('$(FidelityFxRoot)signedbin\amd_fidelityfx_loader_dx12.lib') Or !Exists('$(FidelityFxRoot)signedbin\amd_fidelityfx_loader_dx12.dll') Or !Exists('$(FidelityFxRoot)signedbin\amd_fidelityfx_framegeneration_dx12.dll') Or !Exists('$(FidelityFxRoot)license.md') Or !Exists('$(NvapiRoot)nvapi.h') Or !Exists('$(NvapiRoot)amd64\nvapi64.lib') Or !Exists('$(NvapiRoot)License.txt') Or !Exists('$(DxcRoot)bin\x64\dxc.exe') Or !Exists('$(DxcRoot)bin\x64\dxcompiler.dll') Or !Exists('$(DxcRoot)bin\x64\dxil.dll')" Text="D3D12 SDK inputs missing. Run tools/prepare-worktree.ps1 using the coordinator's pinned local deps. Nothing is downloaded." />
   </Target>
   <Target Name="CopyD3D12Runtime" AfterTargets="Build" Condition="'$(ConfigurationType)'=='Application' and '$(MSBuildProjectName)'=='EI_Rebuild'">
+    <Copy SourceFiles="$(FidelityFxRoot)signedbin\amd_fidelityfx_upscaler_dx12.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(AgilityRoot)build\native\bin\x64\D3D12Core.dll" DestinationFolder="$(OutDir)D3D12" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(RtxdiRoot)LICENSE.txt;$(AgilityRoot)LICENSE.txt" DestinationFiles="$(OutDir)licenses\NVIDIA-RTXDI-LICENSE.txt;$(OutDir)licenses\Microsoft-Agility-LICENSE.txt" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(FidelityFxRoot)signedbin\amd_fidelityfx_loader_dx12.dll;$(FidelityFxRoot)signedbin\amd_fidelityfx_framegeneration_dx12.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="$(FidelityFxRoot)license.md;$(NvapiRoot)License.txt" DestinationFiles="$(OutDir)licenses\AMD-FidelityFX-LICENSE.md;$(OutDir)licenses\NVIDIA-NVAPI-LICENSE.txt" SkipUnchangedFiles="true" />
   </Target>

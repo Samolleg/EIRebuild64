@@ -17,8 +17,13 @@ RWTexture2D<float> destination:register(u0);
  uint2 size;destination.GetDimensions(size.x,size.y);if(any(id.xy>=size))return;
  uint2 full;source.GetDimensions(full.x,full.y);
  int2 a=int2(id.xy)*2;int2 b=min(a+1,int2(full)-1);
- destination[id.xy]=max(max(source.Load(int3(a,0)),source.Load(int3(b.x,a.y,0))),
-                        max(source.Load(int3(a.x,b.y,0)),source.Load(int3(b,0))));
+ float d=max(max(source.Load(int3(a,0)),source.Load(int3(b.x,a.y,0))),
+             max(source.Load(int3(a.x,b.y,0)),source.Load(int3(b,0))));
+ // The half-size texture rounds down: include the odd full-resolution edge.
+ if(id.x==size.x-1&&(full.x&1)!=0)d=max(d,max(source.Load(int3(full.x-1,a.y,0)),source.Load(int3(full.x-1,b.y,0))));
+ if(id.y==size.y-1&&(full.y&1)!=0)d=max(d,max(source.Load(int3(a.x,full.y-1,0)),source.Load(int3(b.x,full.y-1,0))));
+ if(id.x==size.x-1&&id.y==size.y-1&&(full.x&1)!=0&&(full.y&1)!=0)d=max(d,source.Load(int3(full-1,0)));
+ destination[id.xy]=d;
 }
 [numthreads(8,8,1)]void hizReduceCS(uint3 id:SV_DispatchThreadID){
  uint2 size;destination.GetDimensions(size.x,size.y);if(any(id.xy>=size))return;
@@ -29,6 +34,7 @@ RWTexture2D<float> destination:register(u0);
  // Odd parent dimensions fold their last row/column into the edge texel.
  if(id.x==size.x-1&&(parent.x&1)!=0)d=max(d,max(source.Load(int3(parent.x-1,a.y,0)),source.Load(int3(parent.x-1,b.y,0))));
  if(id.y==size.y-1&&(parent.y&1)!=0)d=max(d,max(source.Load(int3(a.x,parent.y-1,0)),source.Load(int3(b.x,parent.y-1,0))));
+ if(id.x==size.x-1&&id.y==size.y-1&&(parent.x&1)!=0&&(parent.y&1)!=0)d=max(d,source.Load(int3(parent-1,0)));
  destination[id.xy]=d;
 }
 )";

@@ -12,8 +12,10 @@
 #include "neighbour_piece.h"
 #include "owned_asset_loader.h"
 #include "worker_priority.h"
+#include "native_prebuilt.h"
 #include <d3dcompiler.h>
 #include <algorithm>
+#include <cfloat>
 #include <chrono>
 #include <climits>
 #include <future>
@@ -185,6 +187,7 @@ void Renderer::clear_water_reflection_bindings() noexcept {
  ID3D11ShaderResourceView* empty=nullptr;
  ID3D11Buffer* constant=nullptr;ID3D11SamplerState* sampler=nullptr;
  context_->PSSetShaderResources(3,1,&empty);context_->PSSetShaderResources(19,1,&empty);context_->PSSetShaderResources(28,1,&empty);
+ context_->PSSetShaderResources(113,1,&empty);
  context_->PSSetConstantBuffers(7,1,&constant);context_->PSSetConstantBuffers(8,1,&constant);context_->PSSetSamplers(5,1,&sampler);
 }
 
@@ -435,6 +438,37 @@ void Renderer::bind_liquid_ripple_units(const float lo[2],const float hi[2]) {
  context_->PSSetConstantBuffers(8,1,liquid_ripple_batch_constants_.GetAddressOf());
 }
 
+// The liquid layers take the hull/domain stages only where they can split
+// and displace (native_shader.h nativeTessVS/nativeTerrainDomain): falling or
+// running water (native_liquid_flowing), or water the surf field reaches.
+// liquidSurfLoad returns no surf outside the composite's window
+// (liquid_surf_window_, the shader's world frame: terrain records draw with
+// an identity object-to-world, so their mesh positions are that frame), so a
+// batch whose liquid meshes' XY range, widened by the game waves' reach,
+// misses the window has none. Calm water elsewhere arrives at factor 1 with
+// no displacement: the stages only returned its triangles unchanged.
+bool Renderer::liquid_layers_tessellated(const NativeBatch& batch,const NativeSubmissionLayout::StaticBake::Batch* baked) {
+ std::uint8_t types=0;float lo[2]{FLT_MAX,FLT_MAX},hi[2]{-FLT_MAX,-FLT_MAX};
+ if(baked){
+  types=baked->liquid_types;
+  const float reach=3.f*std::abs(native_instance_records_[baked->first_record].command.instance.terrain_wind_force)*baked->liquid_wave_multiplier;
+  for(int axis=0;axis<2;++axis){lo[axis]=baked->liquid_xy_min[axis]-reach;hi[axis]=baked->liquid_xy_max[axis]+reach;}
+ }else for(std::size_t n=batch.first_draw;n<batch.first_draw+batch.draw_count;++n){
+  const NativeQueuedDraw& draw=native_queued_draw(native_draw_order_[n]);
+  if(!draw.mesh->has_liquid)continue;
+  types|=draw.mesh->liquid_types;
+  const float reach=3.f*std::abs(draw.instance.terrain_wind_force)*draw.mesh->liquid_wave_multiplier;
+  for(int axis=0;axis<2;++axis){
+   lo[axis]=(std::min)(lo[axis],draw.mesh->bounds_min[axis]-reach);hi[axis]=(std::max)(hi[axis],draw.mesh->bounds_max[axis]+reach);
+  }
+ }
+ if((types&native_liquid_flowing)!=0)return true;
+ if(!liquid_surf_srv_&&!liquid12_.surf)return false; // liquidSurfMode.x 0: no surf anywhere
+ const auto& w=liquid_surf_window_;
+ if(!(w[2]>0)||!(w[3]>0)||!std::isfinite(lo[0]+lo[1]+hi[0]+hi[1]))return true; // no usable window: keep the stages
+ return hi[0]>=w[0]&&lo[0]<=w[0]+1.f/w[2]&&hi[1]>=w[1]&&lo[1]<=w[1]+1.f/w[3];
+}
+
 void Renderer::prepare_liquid_ripples() {
  if(liquid_ripple_frame_!=native_frame_index_) {
   liquid_ripple_ready_=false;
@@ -524,14 +558,15 @@ void Renderer::prepare_liquid_ripples() {
 // whenever that set changes. Pieces are placed at whole tiles; the active
 // map is written last, so it wins where pieces overlap.
 void Renderer::update_liquid_surf() noexcept try {
- neighbour_maps_set_no_sea_maps(liquid_surf_no_sea_maps());
+ neighbour_maps_set_no_sea_maps(liquid_surf_field_no_sea_maps());
  if(liquid_surf_job_.valid()&&liquid_surf_job_.wait_for(std::chrono::seconds(0))==std::future_status::ready){
   auto field=liquid_surf_job_.get();
   if(field&&liquid_surf_generation_==ambient_map_generation_){
    liquid_surf_active_=std::move(field);++liquid_surf_serial_;
    const auto& s=liquid_surf_active_->impact_spots;
-   char line[400];std::snprintf(line,sizeof(line),"active map: %u tiles with surf, max effective fetch %.0f m (%ux%u tiles); "
+   char line[480];std::snprintf(line,sizeof(line),"active map %s%s: %u tiles with surf, max effective fetch %.0f m (%ux%u tiles); "
     "steep-shore spots x,y,score,incoming_deg: %.0f,%.0f,%.2f,%.0f | %.0f,%.0f,%.2f,%.0f | %.0f,%.0f,%.2f,%.0f",
+    ambient_map_name_.c_str(),liquid_surf_map_takes_sea(ambient_map_name_,liquid_lake_maps())?"":" (lake, water_lake_maps: no sea)",
     liquid_surf_active_->surf_cells,liquid_surf_active_->max_exposure,liquid_surf_active_->tiles_x,liquid_surf_active_->tiles_y,
     s[0][0],s[0][1],s[0][2],s[0][3],s[1][0],s[1][1],s[1][2],s[1][3],s[2][0],s[2][1],s[2][2],s[2][3]);
    bridge_report_event("water_surf",line);
@@ -542,7 +577,7 @@ void Renderer::update_liquid_surf() noexcept try {
   liquid_surf_generation_=ambient_map_generation_;
   if(liquid_surf_active_){liquid_surf_active_.reset();++liquid_surf_serial_;}
   liquid_surf_job_=std::async(std::launch::async,[area=ambient_area_,liquid=ambient_liquid_level_.liquid_area,height=ambient_height_,ground=ambient_liquid_level_.ground,
-                                                     x=ambient_tiles_x_,y=ambient_tiles_y_,sea=liquid_surf_map_takes_sea(ambient_map_name_,liquid_surf_no_sea_maps())]()->std::shared_ptr<const LiquidSurfField>{
+                                                     x=ambient_tiles_x_,y=ambient_tiles_y_,sea=liquid_surf_map_takes_sea(ambient_map_name_,liquid_surf_field_no_sea_maps())]()->std::shared_ptr<const LiquidSurfField>{
    const BackgroundWorkerPriority priority;
    try{return std::make_shared<LiquidSurfField>(build_liquid_surf_field(area,liquid,height,ground,x,y,sea));}catch(...){return nullptr;}
   });
@@ -770,7 +805,7 @@ void Renderer::add_liquid_surf_neighbour(const NeighbourPiece& upload,const std:
 
 void Renderer::reset_water_reflections() noexcept {
  clear_water_reflection_bindings();
- water_scene_srv_.Reset();water_history_srv_.Reset();water_scene_color_.Reset();water_scene_depth_srv_.Reset();water_scene_dsv_.Reset();water_scene_depth_.Reset();
+ water_scene_srv_.Reset();water_history_srv_.Reset();water_scene_color_.Reset();water_scene_depth_srv_.Reset();water_scene_stencil_srv_.Reset();water_scene_dsv_.Reset();water_scene_depth_.Reset();
  water_history_frame_=UINT64_MAX;
  for(UINT slot=0;slot<2;++slot){particle_depth_srv_[slot].Reset();particle_depth_rtv_[slot].Reset();particle_depth_[slot].Reset();} particle_depth12_={};
  particle_depth_width_=particle_depth_height_=0;particle_depth_frame_=particle_depth_history_frame_=UINT64_MAX;
@@ -823,6 +858,12 @@ HRESULT Renderer::create_water_reflection_targets() {
  if(FAILED(hr=device_->CreateTexture2D(&depth_description,nullptr,&depth_copy)))return hr;
  D3D11_SHADER_RESOURCE_VIEW_DESC depth_view{};depth_srv_->GetDesc(&depth_view);
  if(FAILED(hr=device_->CreateShaderResourceView(depth_copy.Get(),&depth_view,&depth_copy_srv)))return hr;
+ // Its stencil plane: the swimmer marks (mark_swimmers) the water reads at t113.
+ ComPtr<ID3D11ShaderResourceView> stencil_copy_srv;
+ if(depth_description.Format==DXGI_FORMAT_R24G8_TYPELESS){
+  D3D11_SHADER_RESOURCE_VIEW_DESC stencil_view=depth_view;stencil_view.Format=DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+  if(FAILED(hr=device_->CreateShaderResourceView(depth_copy.Get(),&stencil_view,&stencil_copy_srv)))return hr;
+ }
  // Ground marks held past the water test against it (the water writes the real depth).
  ComPtr<ID3D11DepthStencilView> depth_copy_dsv;D3D11_DEPTH_STENCIL_VIEW_DESC depth_target{};dsv_->GetDesc(&depth_target);
  if(FAILED(hr=device_->CreateDepthStencilView(depth_copy.Get(),&depth_target,&depth_copy_dsv)))return hr;
@@ -836,7 +877,7 @@ HRESULT Renderer::create_water_reflection_targets() {
  if(FAILED(hr=device_->CreateSamplerState(&sampling,&sampler)))return hr;
  water_scene_color_=std::move(color);water_scene_srv_=std::move(srv);water_history_srv_=std::move(history_srv);
  water_scene_levels_=levels;water_history_frame_=UINT64_MAX;
- water_scene_depth_=std::move(depth_copy);water_scene_depth_srv_=std::move(depth_copy_srv);water_scene_dsv_=std::move(depth_copy_dsv);water_reflection_constants_=std::move(constants);
+ water_scene_depth_=std::move(depth_copy);water_scene_depth_srv_=std::move(depth_copy_srv);water_scene_stencil_srv_=std::move(stencil_copy_srv);water_scene_dsv_=std::move(depth_copy_dsv);water_reflection_constants_=std::move(constants);
  water_reflection_sampler_=std::move(sampler);return S_OK;
 }
 // The half-resolution water reflection targets (flush_native trace_water),
@@ -975,6 +1016,8 @@ bool Renderer::prepare_water_reflections(const FixedState& state) {
    std::snprintf(line,sizeof(line),"EID3D11 water reflections: quality %d, %.0f march steps",quality,constants.quality[0]);
    bridge_append_probe_event("water_reflections",line);
   }
+  // The swimmers in the stencil the depth snapshot takes with it.
+  water_swimmers_=d3d12_?mark_swimmers_d3d12():water_scene_stencil_srv_&&mark_swimmers();
   if(d3d12_){ // D3D12: the constants stay here (b7, set per draw); the copies in stream order
    water12_.constants=constants;
    transition_profile_pass("liquid_scene_copy");
@@ -1011,6 +1054,28 @@ bool Renderer::prepare_water_reflections(const FixedState& state) {
   delta=std::max(delta,std::abs(native_world_clip_[k]-water_capture_clip_[k]));
  }
  return delta<=scale*.01f;
+}
+bool Renderer::prepare_crystal_scene() {
+ if(crystal_scene_frame_==native_frame_index_&&crystal_scene_flush_==native_flush_serial_)return crystal_scene_ready_;
+ crystal_scene_frame_=native_frame_index_;crystal_scene_flush_=native_flush_serial_;crystal_scene_ready_=false;
+ if(!configured_boolean(debug_overlay_.config(),"material_crystal_see_through",true))return false;
+ if(FAILED(d3d12_?create_water_reflection_targets_d3d12():create_water_reflection_targets())){
+  if(!crystal_scene_failure_reported_){crystal_scene_failure_reported_=true;
+   bridge_report_event("crystal_scene","scene copy target unavailable: world crystals draw opaque");}
+  return false;
+ }
+ transition_profile_pass("crystal_scene_copy");
+ if(d3d12_){
+  if(FAILED(d3d12_->copy_texture(*water12_.scene,0,*world_d3d12_,0))){end_profile_pass();return false;} // slice 0, level 0
+ }else{
+  clear_water_reflection_bindings();
+  ComPtr<ID3D11Resource> source;rtv_->GetResource(&source);
+  context_->OMSetRenderTargets(0,nullptr,nullptr); // the flush binds its targets again
+  context_->CopySubresourceRegion(water_scene_color_.Get(),D3D11CalcSubresource(0,0,water_scene_levels_),0,0,0,source.Get(),0,nullptr);
+ }
+ end_profile_pass();
+ crystal_scene_ready_=true;
+ return true;
 }
 // The finished world colour of a frame whose liquids reflected, kept for the
 // next frame's reflections (Blightbound: reflections read the previous

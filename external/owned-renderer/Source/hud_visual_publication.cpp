@@ -299,9 +299,23 @@ void HudVisualPublication::clear_publications() noexcept {
     activation_failed_ = false;
 }
 
+void HudVisualPublication::retire_texture_asset(const CachedAsset& value) noexcept {
+    if (!value.texture || !value.source[0]) return;
+    if (retired_texture_bytes_ + value.owned_bytes > kMaximumCachedBytes) {
+        retired_textures_.clear();
+        retired_texture_bytes_ = 0;
+    }
+    try {
+        if (retired_textures_.emplace(value.source, value.texture).second)
+            retired_texture_bytes_ += value.owned_bytes;
+    } catch (...) {
+    }
+}
+
 void HudVisualPublication::clear_role_assets(HudResourceRole role) noexcept {
     for (auto item = assets_.begin(); item != assets_.end();) {
         if (item->first.role == role) {
+            retire_texture_asset(item->second);
             cached_asset_bytes_ -= item->second.owned_bytes;
             item = assets_.erase(item);
         } else {
@@ -360,6 +374,7 @@ void HudVisualPublication::initialize_overlay(std::uint32_t variant) noexcept {
     overlay_ready_ = true;
     if (++overlay_generation_ == 0u) ++overlay_generation_;
     invalidate_publications();
+    for (const auto& item : assets_) retire_texture_asset(item.second);
     assets_.clear();
     cached_asset_bytes_ = 0;
 }
@@ -376,6 +391,8 @@ void HudVisualPublication::clear_contract() noexcept {
     clear_publications();
     assets_.clear();
     cached_asset_bytes_ = 0;
+    retired_textures_.clear();
+    retired_texture_bytes_ = 0;
     if (++texture_generation_ == 0u) ++texture_generation_;
     if (++figure_generation_ == 0u) ++figure_generation_;
     if (++overlay_generation_ == 0u) ++overlay_generation_;
@@ -599,7 +616,20 @@ bool HudVisualPublication::load(HudResourceRole role,
     }
     try {
         ResourceFailure parse_failure{};
-        if (source_found && role == HudResourceRole::texture) {
+        if (source_found && role == HudResourceRole::texture &&
+            blob.identity.container_file_key) {
+            value.source = {blob.identity.container_file_key,
+                            blob.identity.absolute_offset, blob.identity.bytes};
+            const auto retired = retired_textures_.find(value.source);
+            if (retired != retired_textures_.end()) {
+                value.texture = retired->second;
+                value.owned_bytes = texture_bytes(*value.texture);
+                value.resolved = true;
+            }
+        }
+        if (value.resolved) {
+            // Decoded before a generation change (retired_textures_).
+        } else if (source_found && role == HudResourceRole::texture) {
             TextureCpuAsset decoded{};
             auto asset = std::make_shared<TextureCpuAsset>();
             if (!parse_texture_asset(blob, decoded, parse_failure)) {

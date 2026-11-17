@@ -35,6 +35,50 @@ constexpr std::uint32_t kTerrainGrassObjectType = 4;
 // all have both corners at or above terrainFlatEdgeZ (below this value), so
 // a steep neighbour keeps every shared edge whole (nativeTessFactorsOf).
 constexpr float kTerrainSteepClassZ = .76604444f + .002f;
+
+std::uint32_t astral_tile_mask(const TerrainCpuAsset& terrain,
+                             const TerrainTileDescriptor& tile) {
+    if (tile.transparent || tile.animation_ordinal != UINT_MAX ||
+        tile.vertex_indices[0] >= kTerrainLayerVertexOffset ||
+        tile.material_index >= terrain.texture_count ||
+        tile.tile_index >= terrain.astral_slots.size()) return 0;
+    return terrain.astral_slots[tile.tile_index];
+}
+
+std::uint32_t astral_world_mask(std::uint32_t mask,
+                               const std::array<NativeTextureCoordinate, 9>& uv) {
+    std::array<std::uint32_t, 4> signature{};
+    for (unsigned corner = 0; corner < 4; ++corner)
+        signature[corner] = (mask >> corner) & 1u;
+    const auto corners = terrain_tile_world_corners(signature,
+        {{{uv[0].u, uv[0].v}, {uv[2].u, uv[2].v},
+          {uv[6].u, uv[6].v}, {uv[8].u, uv[8].v}}});
+    return corners[0] | (corners[1] << 1) | (corners[2] << 2) | (corners[3] << 3);
+}
+
+// Shared grid coordinates make both copies of a sector-edge vertex agree.
+// Only actual non-pure base tiles make a shore; missing tiles and the map's
+// exterior do not. The bounded search is paid at geometry decode, not draw.
+float astral_shore_distance(const TerrainCpuAsset& terrain, int vx, int vy) {
+    float nearest_squared = 16.f;
+    for (int ty = vy / 2 - 2; ty <= vy / 2 + 2; ++ty) {
+        if (ty < 0 || ty >= int(terrain.sector_count_y * 16u)) continue;
+        for (int tx = vx / 2 - 2; tx <= vx / 2 + 2; ++tx) {
+            if (tx < 0 || tx >= int(terrain.sector_count_x * 16u)) continue;
+            const auto sector = std::size_t(ty / 16) * terrain.sector_count_x + tx / 16;
+            const auto slot = terrain.sectors[sector].base_tile_ids[(ty % 16) * 16 + tx % 16];
+            if (slot == UINT16_MAX) continue;
+            const bool animated = slot < terrain.tile_animation_phases.size() &&
+                                  terrain.tile_animation_phases[slot] != 0;
+            if (!animated && slot < terrain.astral_slots.size() && terrain.astral_slots[slot] == 15u)
+                continue;
+            const float dx = float((std::max)({tx * 2 - vx, 0, vx - tx * 2 - 2}));
+            const float dy = float((std::max)({ty * 2 - vy, 0, vy - ty * 2 - 2}));
+            nearest_squared = (std::min)(nearest_squared, dx * dx + dy * dy);
+        }
+    }
+    return std::sqrt(nearest_squared);
+}
 } // namespace
 
 bool prepare_owned_terrain_source_view(const OwnedTerrainFramePacket& packet,
@@ -385,10 +429,9 @@ bool decode_owned_terrain_tiles(const OwnedTerrainSourceDecodeContext& decode,
                     }
                 }
                 const std::uint32_t tile_base = vertex_cursor;
-                const bool astral_tile = terrain_astral_tile(*context->source, tile);
-                const bool pure_astral = astral_tile && context->source->astral_slots[tile.tile_index]==15;
-                const unsigned astral_mask = astral_tile ? terrain_astral_world_mask(*context->source,tile,tile_uvs) : 0;
-                const bool material_tile = !pure_astral && !tile.transparent &&
+                const auto astral_slot = astral_tile_mask(*context->source, tile);
+                const auto astral_mask = astral_slot ? astral_world_mask(astral_slot, tile_uvs) : 0u;
+                const bool material_tile = !tile.transparent &&
                     tile.animation_ordinal == UINT_MAX &&
                     tile.material_index < context->source->texture_count;
                 const bool long_tile = !tile.transparent &&
@@ -534,13 +577,14 @@ bool decode_owned_terrain_tiles(const OwnedTerrainSourceDecodeContext& decode,
                         else if (long_tile)
                             terrain_vertex.flags |= native_terrain_long_tile;
                     }
-                    if (astral_tile) {
-                        terrain_vertex.flags |= native_terrain_astral | (astral_mask<<16);
-                        const unsigned origin=tile.vertex_indices[0];
-                        terrain_vertex.flags |= ((source_index%33-origin%33)<<25)|((source_index/33-origin/33)<<27);
-                        terrain_vertex.noise = terrain_astral_edge(*context->source,
-                            int(context->sector->map_x*32+source_index%33),
-                            int(context->sector->map_y*32+source_index/33));
+                    if (astral_mask) {
+                        const auto origin = tile.vertex_indices[0];
+                        terrain_vertex.flags |= native_terrain_astral_vertex | (astral_mask << 16) |
+                            ((source_index % 33u - origin % 33u) << 25) |
+                            ((source_index / 33u - origin / 33u) << 27);
+                        terrain_vertex.noise = astral_shore_distance(*context->source,
+                            int(context->sector->map_x * 32u + source_index % 33u),
+                            int(context->sector->map_y * 32u + source_index / 33u));
                     }
                     const std::uint32_t group = vertex_cursor >> 2u;
                     const std::uint32_t lane = vertex_cursor & 3u;
@@ -1166,6 +1210,100 @@ std::string terrain_profile_member(const std::string& space) {
 }
 }
 
+void owned_terrain_prepare_astral(const TerrainMemberResolver& resolve, TerrainCpuAsset& terrain) {
+    terrain.astral_slots.clear();
+    const auto space = terrain_tile_family_space(terrain);
+    const auto member = terrain_profile_member(space);
+    const std::uint64_t slots = std::uint64_t(terrain.texture_count) * terrain.tiles_per_texture;
+    ResourceBlob profile;
+    ResourceFailure failure;
+    TerrainTileFamilies families;
+    std::string status;
+    if (member.empty()) status = "profile name unavailable";
+    else if (slots > UINT_MAX) status = "atlas slot count exceeds profile range";
+    else if (!resolve || !resolve(member, profile, failure) || !profile.bytes)
+        status = failure.code == ResourceFailureCode::not_found ? "no authored profile" : "profile unavailable: " + failure.message;
+    else if (!terrain_tile_signatures_from_profile(
+                 std::string(profile.bytes->begin(), profile.bytes->end()), space,
+                 static_cast<unsigned>(slots), families.signatures, &families.names))
+        status = "profile rejected (namespace, layout or slot count)";
+    else {
+        // Never use inferred families, terrain types or dark texture pixels.
+        std::set<std::uint32_t> astral_families;
+        for (const auto& family : families.names) {
+            std::string name = family.second;
+            for (char& c : name) if (c >= 'A' && c <= 'Z') c = char(c + ('a' - 'A'));
+            if (family.first && name == "astral") astral_families.insert(family.first);
+        }
+        if (!astral_families.empty()) {
+            terrain.astral_slots.resize(families.signatures.size(), 0);
+            for (std::size_t slot = 0; slot < families.signatures.size(); ++slot)
+                for (unsigned corner = 0; corner < 4; ++corner)
+                    if (astral_families.count(families.signatures[slot][corner]))
+                        terrain.astral_slots[slot] |= std::uint8_t(1u << corner);
+        }
+        status = "profile " + member;
+    }
+    // Original, unrepacked atlas: only the first authored cell of this exact
+    // page is Astral (all four corners). Names follow ASCII resource folding;
+    // no aliases, numbered-page ranges, pixel tests or repacked-slot guesses.
+    // Apply after the profile, so this cell's full mask wins if both name it.
+    std::set<std::uint32_t> page_rule_slots;
+    if (slots <= UINT_MAX) {
+        for (std::size_t page = 0; page < terrain.texture_count &&
+             page < terrain.texture_resources.size(); ++page) {
+            std::string name = terrain.texture_resources[page];
+            for (char& c : name) if (c >= 'A' && c <= 'Z') c = char(c + ('a' - 'A'));
+            if (name != "ataman_astral000" || !terrain.tiles_per_texture) continue;
+            const auto slot = static_cast<std::uint32_t>(page * terrain.tiles_per_texture);
+            terrain.astral_slots.resize(static_cast<std::size_t>(slots), 0);
+            terrain.astral_slots[slot] = 15u;
+            page_rule_slots.insert(slot);
+        }
+    }
+    const std::size_t marked = std::count_if(terrain.astral_slots.begin(), terrain.astral_slots.end(),
+                                           [](std::uint8_t mask) { return mask != 0; });
+    std::size_t profile_tiles = 0, page_rule_tiles = 0;
+    if (marked) {
+        for (const auto& sector : terrain.sectors)
+            for (const auto& tile : sector.tiles) {
+                if (!astral_tile_mask(terrain, tile)) continue;
+                if (page_rule_slots.count(tile.tile_index)) ++page_rule_tiles;
+                else ++profile_tiles;
+            }
+    } else terrain.astral_slots.clear();
+    // One event per loaded map asset. Attribute an overlapping slot/tile to
+    // the page rule, which supplied its final mask, rather than count it twice.
+    bridge_append_probe_event("astral_terrain", (terrain.project_resource + ": " + status +
+        "; profile_slots=" + std::to_string(marked - page_rule_slots.size()) +
+        " profile_base_tiles=" + std::to_string(profile_tiles) +
+        "; page_rule=ataman_astral000:first-slot:15 page_rule_slots=" + std::to_string(page_rule_slots.size()) +
+        " page_rule_base_tiles=" + std::to_string(page_rule_tiles) +
+        "; slots=" + std::to_string(marked) + " base_tiles=" + std::to_string(profile_tiles + page_rule_tiles)).c_str());
+}
+
+void owned_terrain_report_astral_received(const TerrainCpuAsset& terrain) {
+    const auto slots = std::count_if(terrain.astral_slots.begin(), terrain.astral_slots.end(),
+                                     [](std::uint8_t mask) { return mask != 0; });
+    std::size_t pure_tiles = 0, mixed_tiles = 0;
+    for (const auto& sector : terrain.sectors)
+        for (const auto& tile : sector.tiles) {
+            const auto mask = astral_tile_mask(terrain, tile);
+            if (mask == 15u) ++pure_tiles;
+            else if (mask) ++mixed_tiles;
+        }
+    // The producer's profile/page-rule report is in the game's bridge.jsonl.
+    // The same bridge API here reaches host.log in core mode. Report what
+    // crossed the wire, including zero masks, without reopening the profile
+    // or overwriting the game-prepared classification.
+    bridge_append_probe_event("astral_terrain", (terrain.project_resource +
+        ": scene_wire_received; atlas=" + terrain.map_header_resource +
+        "; slots=" + std::to_string(slots) +
+        " base_tiles=" + std::to_string(pure_tiles + mixed_tiles) +
+        " pure_base_tiles=" + std::to_string(pure_tiles) +
+        " mixed_base_tiles=" + std::to_string(mixed_tiles)).c_str());
+}
+
 TerrainTileFamilies load_terrain_tile_families(ResourceStoreConfig mounts,TerrainTileMapInput input,
     const std::atomic<bool>* cancel) noexcept try{
  TerrainTileFamilies result;
@@ -1260,26 +1398,7 @@ TerrainTileFamilies load_terrain_tile_families(ResourceStoreConfig mounts,Terrai
  return result;
 }catch(...){TerrainTileFamilies failed;failed.source="tile family load failed";return failed;}
 
-void owned_terrain_prepare_astral(const TerrainMemberResolver& resolve, TerrainCpuAsset& terrain) {
- const auto space=terrain_tile_family_space(terrain);
- const auto member=terrain_profile_member(space);
- ResourceBlob blob;ResourceFailure failure;TerrainTileFamilies families;
- const unsigned slots=terrain.texture_count*terrain.tiles_per_texture;
- if(!member.empty() && resolve && resolve(member,blob,failure) && blob.bytes &&
-    terrain_tile_signatures_from_profile(std::string(blob.bytes->begin(),blob.bytes->end()),space,slots,families.signatures,&families.names))
-  terrain.astral_slots=terrain_astral_slots(families);
- else terrain.astral_slots.assign(slots,0);
- // The un-repacked source atlas has one authored Astral cell, slot zero.
- for(unsigned page=0;page<terrain.texture_count&&page<terrain.texture_resources.size();++page){
-  std::string name=terrain.texture_resources[page];
-  for(char& c:name)if(c>='A'&&c<='Z')c+=32;
-  if(name=="ataman_astral000" && page*terrain.tiles_per_texture<slots)
-   terrain.astral_slots[page*terrain.tiles_per_texture]=15;
- }
- const auto count=std::count_if(terrain.astral_slots.begin(),terrain.astral_slots.end(),[](auto mask){return mask!=0;});
- if(count)bridge_append_probe_event("astral_terrain",(space+": "+std::to_string(count)+" explicit slots").c_str());
- if(!count)terrain.astral_slots.clear();
-}
+
 
 void owned_terrain_prepare_astral(ResourceStore& store, TerrainCpuAsset& terrain) {
  owned_terrain_prepare_astral([&](const std::string& name,ResourceBlob& blob,ResourceFailure& failure){

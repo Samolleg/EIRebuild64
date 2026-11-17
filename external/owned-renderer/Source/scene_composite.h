@@ -40,7 +40,7 @@ class SceneComposite {
     Ptr<ID3D11ShaderResourceView> color_srv_, edges_srv_, weights_srv_, resolved_srv_, area_, search_;
     Ptr<ID3D11VertexShader> vs_;
     Ptr<ID3D11PixelShader> edge_ps_, weight_ps_, blend_ps_, copy_ps_, upscale_ps_, upscale_depth_ps_;
-    Ptr<ID3D11PixelShader> motion_ps_, present_ps_, present_depth_ps_;
+    Ptr<ID3D11PixelShader> motion_ps_, present_ps_, present_depth_ps_, stretch_ps_, fade_ps_;
     // Temporal upscaler (DLSS or FSR) only: render-size camera motion (RG16F,
     // render pixels, current -> previous) and the output-size upscaled image
     // the upscaler writes (the DLSS host or FSR through the UAV).
@@ -62,6 +62,9 @@ public:
     ID3D11RenderTargetView* target() const { return color_rtv_.Get(); }
     ID3D11Texture2D* color() const { return color_.Get(); }
     ID3D11ShaderResourceView* color_view() const { return color_srv_.Get(); }
+    // SMAA's lookup textures (memory_status residency summary).
+    ID3D11ShaderResourceView* smaa_area_view() const { return area_.Get(); }
+    ID3D11ShaderResourceView* smaa_search_view() const { return search_.Get(); }
     std::uint64_t storage_bytes() const { return color_?std::uint64_t(width_)*height_*(resolved_?14u:10u)+AREATEX_SIZE+SEARCHTEX_SIZE+
         (motion_?std::uint64_t(width_)*height_*12u+std::uint64_t(output_width_)*output_height_*4u:0u):0; }
     // The object motion targets (motion, depth), bound by the world pass.
@@ -248,10 +251,29 @@ float2 cameraMotionPS(FullVertex i) : SV_Target {
 // The host's upscaled image (output size) to the output, and with depth the
 // world depth (nearest world texel) to the interface depth.
 float4 dlssPresentPS(FullVertex i) : SV_Target { return float4(input0.Load(int3(i.position.xy, 0)).rgb, 1); }
+// DLSS bias-current-colour mask (D3D12): the world colour as the transparent
+// effects started (t0) against the finished one (t1), the FSR reactive mask
+// rule (tonemapped, largest channel; under .2 none, else .9).
+float reactivePS(FullVertex i) : SV_Target {
+    int3 p = int3(i.position.xy, 0);
+    float3 a = input0.Load(p).rgb, b = input1.Load(p).rgb;
+    a /= 1 + max(a.r, max(a.g, a.b)); b /= 1 + max(b.r, max(b.g, b.b));
+    float3 d = abs(b - a);
+    return max(d.r, max(d.g, d.b)) < .2 ? 0 : .9;
+}
 UpscaleOutput dlssPresentDepthPS(FullVertex i) {
     UpscaleOutput o; o.color = float4(input0.Load(int3(i.position.xy, 0)).rgb, 1);
     int2 texel = min(int2(i.uv * metrics.zw), int2(metrics.zw) - 1);
     o.depth = worldDepth.Load(int3(texel, 0)); return o;
+}
+// A scaled copy (the game's stretched Blt of part of the screen into another
+// surface): the whole source at the viewport, nearest texel as the CPU copy.
+float4 stretchPS(FullVertex i) : SV_Target { return input0.SampleLevel(PointSampler, i.uv, 0); }
+// The game's modal backdrop fade (CI3DSurface::Fade, 32-bit X8R8G8B8 branch)
+// on the captured screen: grey = (B + 4G + 2R) >> 4 on the 8-bit channels.
+float4 fadePS(FullVertex i) : SV_Target {
+    uint3 c = uint3(round(saturate(input0.Load(int3(i.position.xy, 0)).rgb) * 255));
+    return float4(((c.b + 4 * c.g + 2 * c.r) >> 4).xxx / 255.0, 1);
 }
 )";
     }
@@ -263,7 +285,7 @@ public:
         if(source.empty())return;
         out.push_back({source,"SMAA",nullptr,"sceneVS","vs_4_1",D3DCOMPILE_OPTIMIZATION_LEVEL3});
         for(const char* entry:{"edgePS","weightPS","blendPS","copyPS","upscalePS","upscaleDepthPS",
-                               "cameraMotionPS","dlssPresentPS","dlssPresentDepthPS"})
+                               "cameraMotionPS","dlssPresentPS","dlssPresentDepthPS","reactivePS","stretchPS","fadePS"})
             out.push_back({source,"SMAA",nullptr,entry,"ps_4_1",D3DCOMPILE_OPTIMIZATION_LEVEL3});
     }
 private:
@@ -294,6 +316,11 @@ private:
                                            &motion_ps_,&present_ps_,&present_depth_ps_};
         for(unsigned i=0;i<9;++i){code.Reset();if(FAILED(hr=compile(programs[1+i],code)))return hr;
             if(FAILED(hr=create_shader(device,code->GetBufferPointer(),code->GetBufferSize(),nullptr,shaders[i]->GetAddressOf())))return hr;}
+        // programs[10] is reactivePS (D3D12 only); [11] stretchPS; [12] fadePS.
+        code.Reset();if(FAILED(hr=compile(programs[11],code)))return hr;
+        if(FAILED(hr=create_shader(device,code->GetBufferPointer(),code->GetBufferSize(),nullptr,stretch_ps_.GetAddressOf())))return hr;
+        code.Reset();if(FAILED(hr=compile(programs[12],code)))return hr;
+        if(FAILED(hr=create_shader(device,code->GetBufferPointer(),code->GetBufferSize(),nullptr,fade_ps_.GetAddressOf())))return hr;
         D3D11_SAMPLER_DESC s{};s.AddressU=s.AddressV=s.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;
         s.MaxLOD=0;s.Filter=D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
         if(FAILED(hr=device->CreateSamplerState(&s,&linear_)))return hr;
@@ -346,6 +373,40 @@ public:
         context->PSSetShaderResources(0,4,views);
         context->PSSetShader(depth?upscale_depth_ps_.Get():upscale_ps_.Get(),nullptr,0);context->Draw(3,0);
         context->PSSetShaderResources(0,4,empty);
+    }
+    // The whole of source into viewport of target, nearest texel (stretchPS).
+    // False when the shaders are not created yet.
+    bool stretch(ID3D11DeviceContext* context,ID3D11RenderTargetView* target,ID3D11ShaderResourceView* source,
+                 const D3D11_VIEWPORT& viewport) const {
+        if(!vs_||!stretch_ps_||!point_)return false;
+        ID3D11ShaderResourceView* empty[1]{};
+        context->PSSetShaderResources(0,1,empty);
+        context->OMSetRenderTargets(1,&target,nullptr);
+        context->IASetInputLayout(nullptr);context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context->VSSetShader(vs_.Get(),nullptr,0);context->GSSetShader(nullptr,nullptr,0);
+        context->HSSetShader(nullptr,nullptr,0);context->DSSetShader(nullptr,nullptr,0);
+        context->RSSetState(nullptr);context->RSSetViewports(1,&viewport);context->OMSetDepthStencilState(nullptr,0);
+        context->OMSetBlendState(nullptr,nullptr,~0u);
+        ID3D11SamplerState* samplers[]={linear_.Get(),point_.Get()};context->PSSetSamplers(0,2,samplers);
+        context->PSSetShaderResources(0,1,&source);
+        context->PSSetShader(stretch_ps_.Get(),nullptr,0);context->Draw(3,0);
+        context->PSSetShaderResources(0,1,empty);
+        return true;
+    }
+    // The modal backdrop fade (fadePS): source texel for texel into target, both
+    // width x height. False when the shaders are not created yet.
+    bool fade(ID3D11DeviceContext* context,ID3D11RenderTargetView* target,ID3D11ShaderResourceView* source,
+              UINT width,UINT height) const {
+        if(!vs_||!fade_ps_)return false;
+        ID3D11ShaderResourceView* empty[1]{};
+        context->PSSetShaderResources(0,1,empty);
+        context->OMSetRenderTargets(1,&target,nullptr);
+        bind_full_screen(context,width,height,nullptr);
+        context->OMSetBlendState(nullptr,nullptr,~0u);
+        context->PSSetShaderResources(0,1,&source);
+        context->PSSetShader(fade_ps_.Get(),nullptr,0);context->Draw(3,0);
+        context->PSSetShaderResources(0,1,empty);
+        return true;
     }
 private:
     void bind_full_screen(ID3D11DeviceContext* context,UINT width,UINT height,ID3D11DepthStencilState* depth) const {

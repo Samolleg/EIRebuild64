@@ -57,6 +57,8 @@ public:
     // Persistent indices in use (allocated and not yet returned).
     std::uint32_t persistent_used() noexcept;
     std::uint32_t transient_capacity() const noexcept { return transient_; }
+    // Ring descriptors not held by this frame or the frames in flight.
+    std::uint32_t transient_free() const noexcept { return transient_ - used_; }
     std::uint32_t size() const noexcept { return persistent_ + transient_; }
     std::uint32_t stride() const noexcept { return stride_; }
 
@@ -83,8 +85,15 @@ public:
     D3D12_CPU_DESCRIPTOR_HANDLE persistent_cpu(std::uint32_t index) const noexcept {
         return {persistent_cpu_.ptr + std::size_t(index) * stride_};
     }
-    void publish(ID3D12Device* device, std::uint32_t index) const noexcept {
+    // Also into each replaced heap a recorded or in-flight frame still binds:
+    // after a growth during the frame, commands recorded before the switch
+    // read the old heap, and GPU-driven passes among them may read records
+    // written later in the frame with an index published after the switch.
+    void publish(ID3D12Device* device, std::uint32_t index) noexcept {
         device->CopyDescriptorsSimple(1, cpu(index), persistent_cpu(index), type_);
+        for (const auto& old : previous_)
+            if (index < old.persistent)
+                device->CopyDescriptorsSimple(1, {old.cpu.ptr + std::size_t(index) * stride_}, persistent_cpu(index), type_);
     }
     D3D12_GPU_DESCRIPTOR_HANDLE gpu(std::uint32_t index) const noexcept { return {gpu_.ptr + std::uint64_t(index) * stride_}; }
 
@@ -102,6 +111,15 @@ private:
     // next index, tail the oldest still in flight, used the count in flight.
     std::uint32_t transient_ = 0, head_ = 0, used_ = 0, frame_taken_ = 0;
     std::deque<std::pair<std::uint64_t, std::uint32_t>> frames_;  // fence value, count taken
+    // Heaps replaced by grow(), until the last frame that can bind them
+    // completes (fence 0: the frame being recorded; end_frame sets it).
+    struct Replaced {
+        ComPtr<ID3D12DescriptorHeap> heap;
+        D3D12_CPU_DESCRIPTOR_HANDLE cpu{};
+        std::uint32_t persistent = 0;
+        std::uint64_t fence = 0;
+    };
+    std::vector<Replaced> previous_;
     D3D12_DESCRIPTOR_HEAP_TYPE type_ = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 };
 
@@ -155,7 +173,7 @@ enum RootSlot : UINT {
 };
 constexpr UINT kRootConstantCount = 8;
 // The D3D11 register model's slot counts (space 0 tables).
-constexpr UINT kD3D11ConstantTableSlots = 13, kD3D11ResourceSlots = 128, kD3D11UnorderedSlots = 8, kD3D11SamplerSlots = 16;
+constexpr UINT kD3D11ConstantTableSlots = 13, kD3D11ResourceSlots = 128, kD3D11UnorderedSlots = 16, kD3D11SamplerSlots = 16;
 
 class Core {
 public:
@@ -169,7 +187,12 @@ public:
     // up to the tier-2 guaranteed limit. Samplers: the API maximum of a
     // shader-visible sampler heap (2048 descriptors, 64 KB), all persistent.
     static constexpr std::uint32_t kViewDescriptorLimit = D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2;
-    static constexpr std::uint32_t kViewPersistent = 1024;
+    // Bindless start: a whole map load's textures arrive in one frame (a zone12 ->
+    // zone13 travel took ~1350, and 1024 dropped that frame's draws while it grew
+    // next frame). Growing inside the frame is not safe: passes recorded before the
+    // switch read records written later with indices the old heap does not hold
+    // (TDR). 16384 views cost 512 KB; the region still doubles by demand.
+    static constexpr std::uint32_t kViewPersistent = 16384;
     static constexpr std::uint32_t kViewTransientStart = 16384;
     static constexpr std::uint32_t kSamplerDescriptors = D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE;
     // Persistent samplers: the UI's single samplers and the native draws'
@@ -185,6 +208,10 @@ public:
     // capability or the failed call; nothing is left half-created.
     // debug_layer: the D3D12 debug layer (EI_RENDERER_X64_D3D12_DEBUG=1).
     bool create(bool debug_layer, std::string& reason, bool gpu_validation = true);
+    // Empty when the device came from the process's runtime (the bundled
+    // Agility runtime, or Windows' own where that is newer); otherwise why it
+    // came from Windows' own runtime through a device factory instead.
+    const std::string& runtime_note() const noexcept { return runtime_note_; }
 
     ID3D12Device* device() const noexcept { return device_.Get(); }
     IDXGIAdapter1* adapter() const noexcept { return adapter_.Get(); }
@@ -243,6 +270,7 @@ private:
     ComPtr<IDXGIFactory4> factory_;
     ComPtr<IDXGIAdapter1> adapter_;
     std::wstring adapter_name_;
+    std::string runtime_note_;
     ComPtr<ID3D12Device> device_;
     ComPtr<ID3D12CommandQueue> queue_;
     ComPtr<ID3D12Fence> fence_;

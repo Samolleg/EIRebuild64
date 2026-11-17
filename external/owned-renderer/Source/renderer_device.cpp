@@ -69,7 +69,40 @@
 #include "renderer_internal.h"
 #include "scene_commands_ui.h"
 
+// Created-in-play detector (frame_accounting.h): a shader object created while
+// the world is shown is a hitch the player sees. One event each, naming the
+// kind, the creation time, the DXBC checksum and our calling site (an offset
+// into this module, resolved with its .map). Silent when nothing is created.
+void frame_acct::report_shader_created_in_play(const char* kind,double ms,SIZE_T bytes,const void* code,const void* caller) noexcept{
+#ifndef EID3D11_SHADER_EMBED
+ HMODULE self=nullptr;
+ GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+  reinterpret_cast<LPCWSTR>(&frame_acct::report_shader_created_in_play),&self);
+ HMODULE from=nullptr;
+ GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+  reinterpret_cast<LPCWSTR>(caller),&from);
+ const unsigned long long offset=from?static_cast<unsigned long long>(static_cast<const char*>(caller)-reinterpret_cast<const char*>(from)):0ull;
+ // DXBC: "DXBC", then a 16-byte checksum.
+ std::uint32_t checksum[2]{};
+ if(code&&bytes>=20&&std::memcmp(code,"DXBC",4)==0)std::memcpy(checksum,static_cast<const char*>(code)+4,sizeof(checksum));
+ char text[192];
+ std::snprintf(text,sizeof(text),"kind=%s ms=%.2f bytes=%zu dxbc=%08x%08x caller=%s+0x%llx thread=%lu",
+  kind,ms,static_cast<std::size_t>(bytes),checksum[0],checksum[1],from==self?"renderer":from?"other":"?",offset,GetCurrentThreadId());
+ owned::bridge_report_event("shader_created_in_play",text);
+#endif
+}
+
 namespace owned {
+
+void report_slow_scene_command(const char* name,const char* site,double ms) noexcept{
+#ifndef EID3D11_SHADER_EMBED
+ char text[384];
+ std::snprintf(text,sizeof(text),"ms=%.2f frame=%llu site=%.60s command=%.260s",ms,
+  static_cast<unsigned long long>(frame_acct::g_presentation_frame.load(std::memory_order_relaxed)),site?site:"?",name?name:"?");
+ bridge_report_event("slow_scene_command",text);
+#endif
+}
+
 namespace {
 
 struct NativeShadowHistoryConstants {
@@ -184,7 +217,12 @@ constexpr UINT kScreenRectangleMaximumVertices = 5u * 6u;
 
 constexpr char kDebugResourceViewShader[] = R"(
 cbuffer DebugViewConstants:register(b0){float4 projectionCoefficients;uint debugMode;uint shadowEnabled;uint shadowValid;uint debugPadding;float4 shadowBoard;float4 receiverRectangle[5];};
-Texture2D<float> debugFloat:register(t0);Texture2D<uint> debugUint:register(t1);
+Texture2D<float> debugFloat:register(t0);
+#ifdef EID3D12
+Texture2D<uint2> debugUint:register(t1);
+#else
+Texture2D<uint> debugUint:register(t1);
+#endif
 Texture2DArray<float> debugShadow:register(t2);
 SamplerState pointClamp:register(s0);
 struct FullscreenOutput{float4 position:SV_Position;float2 uv:TEXCOORD0;};
@@ -212,7 +250,13 @@ float4 debugTexturePS(FullscreenOutput input):SV_Target{
   return float4(depth,depth,depth,1);
  }
  float value=0;
- if(debugMode==3u){uint w,h;debugUint.GetDimensions(w,h);value=debugUint.Load(int3(int2(input.uv*float2(w,h)),0))/255.0;}
+ if(debugMode==3u){uint w,h;debugUint.GetDimensions(w,h);
+#ifdef EID3D12
+ value=debugUint.Load(int3(int2(input.uv*float2(w,h)),0)).g/255.0;
+#else
+ value=debugUint.Load(int3(int2(input.uv*float2(w,h)),0))/255.0;
+#endif
+ }
  else value=debugFloat.SampleLevel(pointClamp,input.uv,0);
  if(debugMode==2u){
   float a=projectionCoefficients.x,b=projectionCoefficients.y;
@@ -391,11 +435,14 @@ bool scene_thread_default() noexcept{return std::thread::hardware_concurrency()>
 // default before (bool 0/1): an ini saved before that version that still
 // holds the old default drops it and takes the new one. Any other saved value
 // is a choice and stays. Raise kSettingsVersion with each new entry.
-constexpr int kSettingsVersion=5;
+// Version 7: the ray tracing preset became detected from the rt_* options
+// (migrate_rt_quality), not a stored tier that overrode them.
+constexpr int kSettingsVersion=7;
 constexpr struct{const char* key;int version;float old_default;} kChangedDefaults[]={
  {"depth_of_field",1,2.f}, // 2 -> 0, in no preset (candidate-67)
  {"render_thread",1,0.f},  // off -> on, off below 4 logical processors (candidate-71)
  {"fur_mode",5,0.f},       // prototype off -> full fur (High preset), in the player menu; an old 3 clamps to 2 (full)
+ {"rt_reflection_roughness",7,.4f}, // 0.4 -> 0.5 (user decision 2026-11-14); no ray tracing preset sets it, so every preset with reflections takes it
 };
 
 // Version 3 split the one Upscaling list (dlss_mode, with FSR's own
@@ -444,11 +491,20 @@ void migrate_settings(RendererConfig& config,const wchar_t* save_path) noexcept 
  }
  // A file saved on a named preset of the old table takes that preset's
  // current values (graphics_settings.cpp keeps the old rows for version 1).
+ // Version 6: a file saved at 5 holds fur_mode 2 on a named preset only from
+ // version 5's default reset (graphics_settings.cpp kPresetRowsBeforeVersion6);
+ // any other value there is a choice and stays.
+ const RendererOption* fur=config.find("fur_mode");
+ const int fur_saved=fur&&fur->type==RendererOptionType::integer?fur->integer_value:-1;
  const GraphicsPreset preset=reapply_graphics_preset_before(config,saved);
  if(terrain_quality>=0)config.set_integer("terrain_quality",terrain_quality); // the old Low preset keeps Medium
+ if(saved==5&&preset!=GraphicsPreset::custom&&fur_saved>=0&&fur_saved!=2)config.set_integer("fur_mode",fur_saved);
  std::string reset;
  for(const auto& change:kChangedDefaults){
   if(change.version<=saved)continue;
+  // A row of the re-applied preset holds the preset's value (Low: fur_mode
+  // 0), not the old default: version 5 turned full fur on at Low this way.
+  if(preset!=GraphicsPreset::custom&&graphics_preset_row(change.key))continue;
   const RendererOption* option=config.find(change.key);
   if(!option)continue;
   const bool old_default=option->type==RendererOptionType::boolean?option->boolean_value==(change.old_default!=0.f):
@@ -456,12 +512,15 @@ void migrate_settings(RendererConfig& config,const wchar_t* save_path) noexcept 
    option->type==RendererOptionType::floating_point&&std::fabs(option->floating_value-change.old_default)<1e-4f;
   if(old_default&&config.reset_to_default(change.key)){reset+=reset.empty()?"":" ";reset+=change.key;}
  }
+ // Version 7: a tier saved in rt_quality overrode the rt_* options; its
+ // values move into them (the look stays) and rt_quality goes back to Custom.
+ const int rt_saved=saved<7?static_cast<int>(migrate_rt_quality(config)):static_cast<int>(RtQuality::custom);
  config.set_settings_version(kSettingsVersion);
  if(save_path&&config.save(save_path))config.clear_dirty();
- char detail[384];
- std::snprintf(detail,sizeof(detail),"settings_version %d -> %d; old defaults reset: %s; preset %s%s; upscaling: %s",saved,kSettingsVersion,
+ char detail[416];
+ std::snprintf(detail,sizeof(detail),"settings_version %d -> %d; old defaults reset: %s; preset %s%s; upscaling: %s; rt_quality %d%s",saved,kSettingsVersion,
   reset.empty()?"none":reset.c_str(),graphics_preset_name(preset),preset!=GraphicsPreset::custom?" re-applied from the old table":" (no old preset matched)",
-  upscaling.c_str());
+  upscaling.c_str(),rt_saved,rt_saved!=static_cast<int>(RtQuality::custom)?" moved into the rt_* options":"");
  bridge_report_event("settings_migrated",detail);
 }catch(...){}
 
@@ -533,6 +592,18 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
  register_config_options();
  auto& config=debug_overlay_.config();
  if(hwnd_){debug_overlay_.initialize(hwnd_,device_.Get(),context_.Get());if(debug_overlay_.initialized()){migrate_settings(config,renderer_config_path().c_str());debug_overlay_.sync_interface_profile();recover_shader_crash();}}
+ // Neighbour surf fields take this list when their stream starts, which the
+ // first map load can do before any world frame publishes it.
+ neighbour_maps_set_no_sea_maps(liquid_surf_field_no_sea_maps());
+#ifndef EID3D11_EMBEDDED
+ // Record which cache files the driver mapped, for deletion at the next start.
+ if(debug_overlay_.initialized()){
+  const std::string cache_id=mapped_nvidia_cache_id();
+  if(!cache_id.empty()&&cache_id!=config.nvidia_cache_id()){
+   config.set_nvidia_cache_id(cache_id);config.save(renderer_config_path().c_str());
+  }
+ }
+#endif
  apply_config_settings();
  render_scale_percent_=std::clamp(configured_integer(config,"render_scale",100),kRenderScaleMinimum,100);
  dlss_mode_=configured_dlss_mode();fsr_mode_=configured_fsr_mode();set_world_size();
@@ -597,9 +668,10 @@ HRESULT Renderer::ensure_embedded_d3d12(){
   apply_config_settings();
   {x64remote::DlssCaps caps{};
    const bool available=embedded_d3d12_.dlss_caps(caps);
+   dlss_initializing_=caps.initializing;
    caps.reason[sizeof(caps.reason)-1]=0;
    set_dlss_unavailable_reason(available?nullptr:(caps.reason[0]?caps.reason:"not available"));}
-  set_fsr_unavailable_reason(Fsr2UpscalerD3D12::unavailable_reason(*d3d12_));
+  set_fsr_unavailable_reason(d3d12_->fsr_upscale_unavailable());
   render_scale_percent_=std::clamp(configured_integer(config,"render_scale",100),kRenderScaleMinimum,100);
   dlss_mode_=configured_dlss_mode();fsr_mode_=configured_fsr_mode();set_world_size();
   scene_composited_=true;
@@ -629,11 +701,52 @@ void Renderer::register_config_options(){
 config.register_boolean("camera_pan_smoothing","Camera pan smoothing (experimental)","Input",false,false,"Smooths horizontal camera panning. Off by default. Requires compatible camera controls; unavailable if another component owns the same updates. A missed camera reset may briefly slide the view; turn this off if loads, camera cuts or picking look wrong.");
 #endif
 config.register_boolean("confine_cursor","Confine cursor to game client area","Input",true,false,"Keeps pointer-driven camera and interaction input inside the active game client area; releases immediately when the game loses focus.");config.register_boolean("vsync","Vertical sync","Presentation",present_interval()!=0,false,"Use a synchronized Present interval. Disabled remains the uncapped performance default. Forced off in developer mode.");config.register_integer("background_mode","In the background","Presentation",0,0,1,1,false,"What the game does while its window is not in front. 0: keeps running and drawing (capped by the background frame limit). 1: pauses; the world stops and the last frame stays on screen. Either way it never minimises itself or reloads its textures on return.");config.register_integer("background_frame_limit","Background frame limit (FPS)","Presentation",30,0,240,1,false,"While the game window is not in front, Present is paced to at most this many frames per second, so a game left in the background idles quietly. 0: off.");config.register_integer("frame_limit","Frame rate limit (FPS)","Presentation",0,0,500,1,false,"0: off (uncapped). Otherwise Present is paced to this many frames per second, measured from the previous present (high-resolution timer plus a short final spin). Forced off in developer mode.");config.register_boolean("shadows","Shadows","Graphics",true,false,"Render owned directional shadow maps and sample them in world shading. Changes apply at the next scene boundary.");config.register_boolean("terrain_normal_sunlight","Terrain normal sunlight","Graphics",true,false,"Compare terrain shading. On uses terrain normals for direct sun; off applies full direct sun while keeping projected shadows, ambient light, textures, and fog.");
+config.register_boolean("terrain_relief_derivfree","Terrain relief without screen differences (#243)","Materials",true,false,"Ground whose height comes from the Terrain 2.0 material cache takes its relief slope from the cache's height layer beside the pixel instead of from the differences between the screen pixels of a 2x2 block, which another triangle's pixels can upset (dotted lines along terrain triangle edges on a Radeon RX 580). A pixel whose block test fails on ground the cache holds reads its slope there too. Off: the screen differences (the comparison).");
 config.register_boolean("smaa","Anti-aliasing: SMAA","Graphics",true,false,"SMAA 1x on the world scene, before interface rendering.");
-config.register_boolean("depth_prepass","Depth prepass and shadow mask","Performance",true,false,"Opaque and alpha-tested world surfaces first draw depth only; one full-screen pass then takes the sun and cloud shadow per visible pixel, and the full material shading runs once per pixel. Off draws every surface with its own shadow lookups (more overdraw).");
-config.register_integer("upscaler","Upscaling","Graphics",kUpscalerOff,kUpscalerOff,kUpscalerMethodMaximum,1,false,"0: off (the world renders at the render scale). 1: NVIDIA DLSS (64-bit render host and an RTX card). 2: AMD FSR 2 (any Direct3D 11.3 card, both modes). The world renders at a lower resolution set by the upscaling quality and is reconstructed at the screen size; it replaces SMAA and the render scale. Applies at the next frame.");
+config.register_integer("rt_quality","Ray tracing preset (experimental)","Lighting",5,0,5,1,false,"The ray tracing preset, its own choice beside the graphics preset (which never changes a ray traced option). Off, Low, Medium, High: choosing one writes its values into the ray traced options it names (graphics_settings.cpp, the ray tracing preset table) and nothing else: no preset reads or writes upscaling, Ray Reconstruction or frame generation (user decision 2026-11-15). The menu shows the preset those options match, Custom after one of them changed, Off while no ray traced term is on. D3D12 with a ray tracing tier 1.1 adapter. Low: ray traced sun shadows, ambient occlusion (occlusion rays alone, a quarter of the render size a side) and water reflections. Medium: adds the indirect light (half of the render size a side, one spatial sample, no final visibility ray; a quarter flickered at DLSS Performance) and the lamp light. High: the indirect light at half of the render size with two spatial samples and the final visibility ray, and reflections on smooth surfaces (in a preset only with rt_ray_reconstruction on). Every traced term runs without Ray Reconstruction, the player's own toggle (off by default: ~13 ms GPU at DLSS Quality and ~27 ms at DLAA on a 3070 at 2560x1600). The former Ultra (High's options at DLAA, told apart by the upscaler) is folded into High. The stored value only carries an older build's choice into the options once (settings version 7; its 4, Ultra, becomes High); a harness 'config rt_quality N' applies preset N (0 Off to 3 High).");
+config.register_boolean("rt_sun_shadows","Ray traced sun shadows (experimental)","Lighting",false,false,"D3D12 with a ray tracing tier 1.1 adapter only (elsewhere it does nothing and names the reason once). The sun shadow of opaque and cut-out world surfaces comes from rays instead of the sun shadow maps: from each visible point toward the sun through the active map's terrain and the static objects of the active and neighbour maps (foliage cards by their texture's alpha). Units cast from their pose of the frame before, and only those on screen. Not traced: grass as a caster. While it is on, the sun shadow maps drop to one close map at the smallest size plus the far maps: blended surfaces, fog shafts and grass and fur shading keep reading them. It keeps the depth prepass on whatever depth_prepass says (the traced mask shades the prepassed receivers) and turns the sun shadow receivers on by itself, so it also works with the raster Sun shadows option off.");
+config.register_boolean("rt_ray_reconstruction","DLSS Ray Reconstruction (experimental)","Lighting",false,false,"Only while ray tracing is on (rt_sun_shadows or rt_direct_lights, on a ray tracing adapter) and with NVIDIA DLSS upscaling on (Upscaling: NVIDIA DLSS, any quality including DLAA), on D3D12; without ray tracing, with DLSS off or with another upscaler it does nothing and DLSS Super Resolution or the plain path stays. DLSS Ray Reconstruction replaces DLSS Super Resolution as the upscaler and anti-aliasing of the world image and denoises the ray traced lighting itself; the traced options also run without it, except a ray tracing preset's smooth-surface reflections (rt_reflection_surfaces), which a preset draws only with it on. The world's opaque and cut-out surfaces and the ground cover also write its guide images (surface normal with roughness, diffuse colour, specular colour) through their own program variants. Needs an RTX card, driver 580 or newer and material quality above Off; otherwise DLSS Super Resolution stays and the reason is named once. Not yet in the guide images: creature fur, critters, water surfaces, particles and precipitation (they keep the guides of the surface behind them); strand hair writes its own guides through its depth hull and takes no traced light. DLSS exposure and sharpening do not apply to it; the Sharpening option still runs after it. No ray tracing preset writes it (off by default: it costs ~13 ms GPU at Medium/High and ~27 ms at Ultra/DLAA on a 3070 at 2560x1600).");
+config.register_boolean("rt_sun_cover_shadows","Ray traced sun shadows: ground cover and critter shadows","Lighting",true,false,"With rt_sun_shadows: the grass and other ground cover (by the Ground cover shadows setting) and the critters are not in the ray tracing scene, so the rays do not see them. On, they are drawn every frame into their own shadow map around the near view (rt_sun_cover_range) and their shadow joins the traced one there. Off, they cast no sun shadow while rt_sun_shadows is on.");
+config.register_floating_point("rt_sun_cover_range","Ray traced sun shadows: ground cover shadow range (metres)","Lighting",16.f,4.f,64.f,1.f,false,"Half the side of the square near the camera in which the ground cover and the critters cast sun shadows while rt_sun_shadows is on (rt_sun_cover_shadows). Smaller is sharper: the square always takes one whole shadow map.");
+config.register_floating_point("rt_sun_softness","Ray traced sun shadows: sun disc radius (degrees)","Lighting",.5f,0.f,3.f,.05f,false,"Angular radius of the sun disc the shadow rays sample: 0 gives hard shadows, larger values wider penumbrae far from the caster. The real sun is 0.27.");
+config.register_integer("rt_sun_rays","Ray traced sun shadows: rays per pixel","Lighting",1,1,8,1,false,"Shadow rays per visible pixel each frame. One relies on the shadow history to average the penumbra; more cost proportionally more and leave less noise.");
+config.register_floating_point("rt_sun_history","Ray traced sun shadows: history weight","Lighting",.9f,0.f,.98f,.01f,false,"Share of the previous frames kept in the traced sun shadow each frame. Higher is smoother and slower to follow the sun; 0 shows each frame's own rays.");
+config.register_boolean("rt_direct_lights","Ray traced lamp light (experimental)","Lighting",false,false,"D3D12 with a ray tracing tier 1.1 adapter and material quality above Off only (elsewhere it does nothing and names the reason once). The direct light of lamps, torches, fires and emissive surfaces (lava) on the world's opaque and cut-out surfaces comes from ReSTIR direct lighting (NVIDIA RTXDI) with ray traced visibility instead of the lamp loop and the point shadow cubes: every lamp is a small sphere and every lava light a rectangle, so their shadows are soft by distance. The sun stays on rt_sun_shadows or the sun maps. Water, particles, fur, critters, ground cover and the fog keep the lamp loop and the shadow cubes. It runs with or without rt_ray_reconstruction (user decision 2026-11-15); with it, DLSS Ray Reconstruction also denoises the result. Memory: 72 bytes a render pixel plus 8 for the wider guide images (logged once).");
+config.register_floating_point("rt_direct_light_radius","Ray traced lamp light: lamp radius (metres)","Lighting",.15f,0.f,1.f,.01f,false,"Radius of the sphere a lamp's shadow rays aim at: 0 gives hard lamp shadows, larger values wider penumbrae.");
+config.register_floating_point("rt_direct_light_clearance","Ray traced lamp light: clearance around a lamp (metres)","Diagnostics",.35f,0.f,2.f,.05f,false,"A lamp's shadow rays end this far before the lamp, so the lamp's own model (the lantern or torch around the light) does not shadow it; the point shadow cubes' near plane does the same.");
+config.register_boolean("rt_indirect_light","Ray traced indirect light (experimental)","Lighting",false,false,"D3D12 with a ray tracing tier 1.1 adapter and material quality above Off only (elsewhere it does nothing and names the reason once). One bounce of diffuse indirect light on the world's opaque and cut-out surfaces from rays (ReSTIR GI, NVIDIA RTXDI) at half of the render resolution, instead of the bounce light volume on those surfaces: what a ray from the surface hits is lit by the sun (one shadow ray), a lamp of its place (one shadow ray) and the bounce light volume there (the later bounces), and sends that light back with its own colour. The ambient light stays as it is. Water, particles, fur, critters, ground cover and the fog keep the bounce light volume. It runs with or without rt_ray_reconstruction (user decision 2026-11-15); with it, DLSS Ray Reconstruction also denoises the result. Memory: 28 bytes a render pixel plus 8 for the wider guide images (logged once).");
+config.register_boolean("rt_ambient_occlusion","Ray traced ambient occlusion (experimental)","Lighting",false,false,"D3D12, a ray tracing adapter. The occlusion of the ambient light comes from the indirect light's bounce rays instead of the screen-space search (without rt_indirect_light those rays are traced for the occlusion alone), so it knows what is off screen or hidden behind something: the ground under a roof, between buildings and under tree crowns loses its sky light, not only creases. With rt_indirect_light no extra rays are cast. It replaces the ambient occlusion passes' search (also when Ambient occlusion is 0) and keeps their strength setting; a surface the ray traced indirect light does not cover (fur, critters, particles) gets no occlusion of its own. Without rt_indirect_light the screen-space ambient occlusion stays.");
+config.register_boolean("rt_ao_contact","Ray traced ambient occlusion: screen-space contact detail","Lighting",true,false,"With rt_ambient_occlusion: grass blades, fur and critters are not in the ray tracing scene, so the rays do not see them. On, the screen-space search (reach rt_ao_contact_radius) adds their contact shading: each point takes the darker of the ray traced and the screen-space occlusion, so nothing the screen-space ambient occlusion shades is lost. Off shows the rays alone and skips the search.");
+config.register_floating_point("rt_ao_contact_radius","Ray traced ambient occlusion: contact reach (metres)","Lighting",1.5f,.1f,4.f,.05f,false,"World-space reach of the screen-space contact search rt_ao_contact adds (never more than the AO radius).");
+config.register_floating_point("rt_ao_radius","Ray traced ambient occlusion: reach (metres)","Lighting",5.f,.5f,30.f,.5f,false,"How far away a surface above a point still hides the sky from it outdoors: an upward bounce ray's hit closer than this occludes, fully next to the point and fading to nothing at this distance. Level and downward rays (toward the ground) occlude within the AO radius only. In a cave the reach is the AO radius setting (contact shading only: a cave has no sky).");
+config.register_boolean("rt_indirect_cave_exits","Ray traced indirect light: cave exit daylight","Lighting",false,false,"With rt_indirect_light in a cave: a bounce ray that leaves through a cave exit's opening returns the outdoor light of the hour, so daylight floods in through the exits from rays. Off, the exits' light reaches a traced surface only as a later bounce from the bounce light volume. It assumes nothing of the cave's own geometry closes the opening in front of the exit.");
+config.register_boolean("rt_reflections","Ray traced reflections (experimental)","Lighting",false,false,"D3D12 with a ray tracing tier 1.1 adapter and material quality above Off only (elsewhere it does nothing and names the reason once). Water reflects what its mirror rays meet in the ray tracing scene, on screen or not: the screen's colour where the hit is visible, else the hit lit by the sun, the lamps and the ambient light; a ray that meets nothing keeps the screen reflection and the sky. Smooth surfaces (polished metal, crystal, glass, lacquer, wet material) reflect their surroundings from one ray a pixel instead of the sky probe alone; rougher ones keep the probe (rt_reflection_roughness). Off: the screen-space water reflections and the sky probe, unchanged.");
+config.register_floating_point("rt_reflection_roughness","Ray traced reflections: roughness cut-off","Lighting",.5f,.1f,1.f,.05f,false,"With rt_reflections: surfaces rougher than this keep the sky probe reflection; the traced share fades in over the 0.1 of roughness below it.");
+config.register_floating_point("rt_reflection_water_reach","Ray traced reflections: water ray reach (metres)","Lighting",250.f,10.f,4000.f,10.f,false,"With rt_reflections: how far a water reflection ray looks for the scene. A hit in the last two fifths of the reach fades into the screen reflection and the sky, so distant backdrop relief does not darken open water.");
+config.register_integer("rt_indirect_resolution","Ray traced indirect light: resolution","Lighting",0,0,2,1,false,"The size the indirect light's bounce rays and reservoirs run at (rt_indirect_light, rt_ambient_occlusion). 0: half of the render size a side (a ray for every fourth render pixel each frame). 1: a quarter (a ray for every sixteenth); the ambient occlusion passes then run at a quarter too. 2: the full render size (a ray for every render pixel); rt_ambient_occlusion reuses one bounce ray per 2x2 quad at half the render size. Occlusion alone runs at half size at most. With DLSS Ray Reconstruction 0 also runs at the full size (Ray Reconstruction needs an independent sample in every pixel).");
+config.register_boolean("rt_indirect_visibility","Ray traced indirect light: final visibility ray","Lighting",true,false,"With rt_indirect_light: after the spatial resampling one ray checks that the kept sample is visible from the pixel (ReSTIR GI's final visibility). Off saves that ray; bounce light may then leak through thin walls and into corners.");
+config.register_boolean("rt_indirect_denoise","Ray traced indirect light: denoiser","Lighting",true,false,"With rt_indirect_light and without DLSS Ray Reconstruction: the bounce light is accumulated over the frames a surface stays in view (up to 24) and filtered across neighbouring pixels of the same surface (a temporal pass and three edge-aware a-trous passes, as SVGF and NVIDIA's ReLAX do for diffuse light), so it does not show as grain. Ray Reconstruction denoises it itself and takes the undenoised light. Memory: 48 bytes a render pixel. Off: the bounce light as traced.");config.register_floating_point("rt_indirect_rr_randomization","Ray traced indirect light: Ray Reconstruction history randomization","Lighting",0.f,0.f,200.f,10.f,false,"With rt_indirect_light and DLSS Ray Reconstruction: the temporal reuse takes its history sample from a random place within this radius (pixels per 960 of the width) around the pixel's reprojected place, so neighbouring pixels do not share one sample for many frames (RTX Remix's DLSS-RR compatibility mode, which uses 80). 0 (default): the reprojected place itself; measured 2026-11-15 on the save1403 sand, 20 to 80 added grain and brightened the bounce light by 2 to 5 percent, and at the Ingos pine it made no reliable difference.");config.register_floating_point("rt_indirect_outlier_clamp","Ray traced indirect light: outlier clamp","Lighting",5.f,0.f,20.f,.5f,false,"With rt_indirect_light and DLSS Ray Reconstruction: a pixel's bounce light is held to this many times the mean of its 8x8 pixel block, so a rare bright sample does not come out of Ray Reconstruction as a bright flickering dot. 0: no clamp.");
+config.register_integer("rt_indirect_spatial_samples","Ray traced indirect light: spatial samples","Lighting",2,0,4,1,false,"With rt_indirect_light: how many neighbours the spatial resampling takes a sample from each frame (ReSTIR GI). 0: no spatial resampling. More leaves less noise for the denoiser and costs more.");
+config.register_boolean("rt_reflection_surfaces","Ray traced reflections: smooth surfaces","Lighting",true,false,"With rt_reflections: polished metal, crystal, glass, lacquer and wet material reflect their surroundings from rays. Off: only water takes its reflection from rays; the surfaces keep the sky probe. In a ray tracing preset (not Custom) they apply only with rt_ray_reconstruction on (rt_reflections_omitted names it once).");
+config.register_boolean("rt_emissive","Ray tracing: light from particles and lava","Lighting",true,false,"Only with rt_direct_lights or rt_indirect_light on. Magic and fire light the world: the game's additive particle effects (sparks, healing, protection spheres, portals, lightning blasts), lightning bolts, and the bright, saturated flame and spell colours of the other particle effects (fireball, firewall, fire, campfires; grey or dark smoke and dust do not): they are grouped by place into lamps whose strength follows the particles' own colour and size, with ray traced shadows under rt_direct_lights and a bounce under rt_indirect_light; where the ray traced lamp light does not reach (water, fur, ground cover) the lamp loop adds them without shadows. Each flame adds its own lamp beside the map's lights. Torch and campfire flames have 4-8 m reach from their size and brightness and bridge brief sample gaps before fading; fireball and firewall keep their size-based reach. Buffs stay within 0.5 m. With rt_indirect_light, a bounce ray that reaches lava returns the lava's own colour beyond the reach of the lava glow lights (Emissive lighting), so lava lights far cliffs and cave walls. The lights follow game time: frozen on pause.");
+config.register_floating_point("rt_emissive_particle_strength","Ray tracing: particle light strength","Lighting",1.f,0.f,4.f,.05f,false,"Brightness of the lamps rt_emissive makes from glowing particles. 1 is the strength the particles' own colour and size give.");
+config.register_boolean("rt_instancing","Ray tracing: instanced static casters","Diagnostics",true,false,"The static casters of the ray tracing scene as instances of their unique meshes, each built once in object space. Off holds a world-space copy of every caster instead (more memory, a smaller top level): the comparison this option exists for. host.log names the bottom-level memory and the top level's size after each change; the rt_statics event names the arenas.");config.register_integer("rt_term_view","Ray tracing term view (diagnostic)","Diagnostics",0,0,12,1,false,"With a ray traced option on: replace the world image with one input or term of the traced passes per pixel. 1: the owner the guide images name (red a unit, green terrain, blue another lit surface, yellow ground cover and other surfaces the traced passes do not light, grey drawn without guides, black sky). 2: the sun term. 3: the indirect light (x4). 4: the ambient occlusion's visibility. 5: the guide albedo. 6: the guide normal. 7: the object motion (blue where a posed record wrote it). 8: the lighting factor and the fog share. 9-12 (rt_indirect_light): the bounce light alone, what it adds to the lighting factor without albedo or any other term: 9 linear (x4) and 10 tonemapped as the upscaler's input (its output shows what DLSS or Ray Reconstruction makes of it); 11 linear and 12 tonemapped drawn over the upscaled output from the render pixels, the signal exactly as the upscaler received it (a temporal upscaler only).");config.register_integer("rt_debug_view","Ray tracing debug view (diagnostic)","Diagnostics",0,0,7,1,false,"5 to 7 (shading data at ray hits): replace the world image with what a ray from the eye through each pixel returns at its nearest hit, not the drawn image: 5 the hit's albedo (terrain from the terrain 2.0 material cache's whole-world level, a brown constant where that is off or not baked; objects their texture; units their texture's mean colour), 6 the hit lit by the ambient light, the sun through one shadow ray and the lamps of its place, 7 its normal. Dark blue: no hit. 4 (with rt_sun_shadows on; the world image stays): magenta where a receiver that faces the sun starts its ray under the scene's terrain (its nearest terrain surface toward the sun is an underside), the acceptance check of the rest-position rule: none beyond single pixels is expected, with terrain tessellation on or off. Modes 1-3: D3D12 with a ray tracing tier 1.1 adapter only (elsewhere it does nothing and names the reason once). 1: replaces the world image with one hard sun ray per pixel traced from the world depth through the ray tracing scene (the active map's untessellated terrain and the static casters of rt_sun_shadows, every triangle opaque): warm where the sun reaches, dark blue where terrain blocks it or the surface is turned away from the sun. 2: terrain alone, from the drawn depth position (not the rest position the traced mask uses, so red on tessellated cliffs is expected; mode 4 checks the mask's own receivers): the side of the nearest terrain surface each ray hits (blue top: terrain shadow; red underside: a sunward receiver under the scene surface; grey none; near black: turned away from the sun, not traced), a check of the scene itself. 3: where a traced ray is blocked by terrain, green if this frame's raster sun-shadow mask shadows the pixel too, magenta if it does not (yellow: no mask). Turning it on builds the terrain's ray tracing scene once per map; 0 releases it and runs nothing.");
+config.register_integer("prepass_depth_check","Depth prepass check (diagnostic)","Diagnostics",0,0,3,1,false,"D3D12: after each prepassed world batch, mark in red (green and blue zeroed) its fragments in front of the prepass depth that the alpha test keeps: what the material pass's depth EQUAL rejects. It also starts the shadow mask at no value, so a receiver the mask pass's stencil test skipped shows magenta. Calibration: 2 marks every fragment, 3 inverts the stencil test.");
+config.register_boolean("shader_split","Material instance shaders","Performance",true,false,"World figures and objects draw the pixel program compiled for their material instance (unit, world object, foliage, crown impostor; with or without a material profile). Off is a debug comparison only: the general program draws them, with the same image.");
+config.register_integer("terrain_slim_stencil","Terrain second pass: stencil mark","Performance",2,0,2,1,false,"Debug comparison (D3D12, terrain slim pass): before the second passes, the 2x2 quads holding a pixel the slim pass missed are marked in stencil, so the full terrain program starts only on them, not on every pixel of a missed triangle. 2: the slim pass lists the missed quads and the mark draws only those. 1: the mark is a full-screen pass reading the misses. 0: no mark; the program discards the other pixels itself. The same image in all three.");
+config.register_boolean("prepass_object_program","Depth prepass: object program","Performance",true,false,"Debug comparison (D3D12): material instance batches (figures, objects, foliage, crown impostors) draw their depth prepass with a program without the terrain receiver code. Off: the general prepass program, with the same image.");
+config.register_boolean("prepass_cutouts_last","Depth prepass: cut-outs last","Performance",true,false,"Debug comparison (D3D12): the depth prepass draws alpha-tested batches (crowns, foliage, their impostors) after the other batches, so depth rejects their hidden fragments before the texture read. Off: build order, with the same image.");
+config.register_integer("object_program_cuts","Object program variants","Performance",3,0,3,1,false,"Debug comparison (D3D12), two switches added together. 1: world figures and objects draw the dry-frame programs (no wet or snow code) while the wet level and snow cover of the frame are both 0. 2: world object and foliage batches with no draw in reach of the ground draw the programs without the ground contact blend, as crown impostor batches always do. 0: the full programs, with the same image.");
+config.register_integer("shader_split_check","Material instance check","Performance",0,0,2,1,false,"Debug. 1: material instance batches draw the check programs, which paint a marker where a record's own flags disagree with its instance (red unit, green foliage or impostor, blue contact or profile) and, in the D3D12 hazards build, report them. 2: the same with every batch given the next domain's check program (a known-bad run: the markers and reports must appear). Set before the game starts (the check programs are created with the pipeline).");
+config.register_boolean("deferred_world_material","Terrain material after objects","Performance",true,false,"Direct3D 12: the terrain and neighbour-map material draws after the ground cover, critters and objects have drawn their depth, so the ground they hide is not shaded (the same image). Off: the terrain material draws before them.");
+config.register_boolean("indexed_object_draws","Indexed object draws","Performance",true,false,"Direct3D 12: world figure and object batches drawn through their material instance programs use index lists, so the GPU reuses a vertex its neighbouring triangles share instead of running the vertex program three times a triangle (the same image). Off: every triangle corner runs it.");
+config.register_boolean("depth_prepass","Depth prepass and shadow mask","Performance",true,false,"Opaque and alpha-tested world surfaces first draw depth only; one full-screen pass then takes the sun and cloud shadow per visible pixel, and the full material shading runs once per pixel. Off draws every surface with its own shadow lookups (more overdraw). Direct3D 12: ray traced sun shadows keep it on while they are on.");
+config.register_integer("ground_cover_owner_cull","Ground cover owner culling","Performance",1,0,1,1,false,"D3D12. 1: the cover depth prepass records which instance each covered pixel shows, and the material pass draws only those instances (same image). 0: every visible instance draws twice.");
+config.register_integer("ground_cover_neighbour_reuse","Ground cover neighbour placement reuse","Performance",1,0,1,1,false,"D3D12. 1: while the camera and a neighbour map's cover inputs stay the same, that map keeps last frame's placed cover instead of placing it again (same image). 0: placed every frame.");
+config.register_integer("ground_cover_occlusion","Ground cover occlusion","Performance",1,0,1,1,false,"D3D12. 1: ground cover instances hidden behind this frame's terrain are not drawn (their sun shadows stay). 0: every placed instance draws.");
+config.register_integer("upscaler","Upscaling","Graphics",kUpscalerOff,kUpscalerOff,kUpscalerMethodMaximum,1,false,"0: off (the world renders at the render scale). 1: NVIDIA DLSS (64-bit render host and an RTX card). 2: AMD FSR (FSR 3.1 with Direct3D 12, FSR 2 with Direct3D 11; most cards). The world renders at a lower resolution set by the upscaling quality and is reconstructed at the screen size; it replaces SMAA and the render scale. Applies at the next frame.");
 config.register_integer("upscaler_quality","Upscaling quality","Graphics",0,0,kUpscalerQualityMaximum,1,false,"0: Quality, 1: Balanced, 2: Performance, 3: Ultra Performance, 4: native resolution anti-aliasing (DLAA with DLSS, Native AA with FSR). Sets the internal resolution while upscaling is on.");
-config.register_floating_point("upscale_sharpness","Sharpening","Graphics",.2f,0.f,1.f,.05f,false,"Strength of the RCAS sharpening after either upscaler (DLSS or FSR 2). 0 turns it off; keep it low to stay close to the game's look.");
+config.register_floating_point("upscale_sharpness","Sharpening","Graphics",.2f,0.f,1.f,.05f,false,"Strength of the RCAS sharpening after either upscaler (DLSS or FSR). 0 turns it off; keep it low to stay close to the game's look.");
 config.register_integer("render_scale","Render scale (%)","Graphics",100,kRenderScaleMinimum,100,1,false,"The 3D world (and every world effect) renders at this percentage of the screen size and is upscaled before the interface, which always stays at full resolution. Applies at the next frame.");
 config.register_integer("camp_ui_layout","Camp layout","Interface",1,0,1,1,false,"Switch the open camp without restarting: original UI comparison or inventory grid. Keeps the current mode and transaction; supports compact 16:10 and wider displays.");
 config.register_integer("ui_language","Menu language","Language",0,0,2,1,false,"Language of the renderer's menus. 0: auto (Russian when the Windows display language is Russian or its ANSI code page is 1251), 1: English, 2: Russian. Applies at the next frame.");
@@ -654,7 +767,9 @@ config.register_integer("renderer_backend","Renderer","Display",0,0,1,1,false,"0
 config.register_integer("display_mode","Display mode","Display",0,0,1,1,false,"0: borderless fullscreen on the primary monitor, 1: a movable window of the chosen window size. Use Apply display to change this during gameplay.");
 config.register_integer("window_width","Window width","Display",0,0,16384,1,false,"Client width of the windowed mode (0: the monitor's size). Use Apply display to change this during gameplay.");
 config.register_integer("window_height","Window height","Display",0,0,16384,1,false,"Client height of the windowed mode (0: the monitor's size). Use Apply display to change this during gameplay.");
-config.register_boolean("owned_ui_text","Owned interface text","Performance",false,false,"Interface text and line drawing is recorded instead of drawn, and a panel is redrawn (with the same GDI output) only when what it draws changes. Off draws every panel through GDI each time the game asks.");
+config.register_boolean("owned_ui_text","Owned interface text","Performance",false,false,owned_ui_text_forced()?
+ "Interface text and line drawing is recorded instead of drawn, and a panel is redrawn (with the same GDI output) only when what it draws changes. Off draws every panel through GDI each time the game asks. (Forced on: the system code page isn't 1251, and only this path draws the game's Russian text readably.)":
+ "Interface text and line drawing is recorded instead of drawn, and a panel is redrawn (with the same GDI output) only when what it draws changes. Off draws every panel through GDI each time the game asks.");
 config.register_integer("anisotropy","Anisotropic filtering","Graphics",3,0,4,1,false,"Texture filtering for the world, previews, interface and images: 1, 2, 4, 8 or 16 samples.");
 config.register_boolean("water_reflections","Water reflections","Graphics",true,false,
  "Reflect the current opaque scene on non-emissive liquids; misses use the sky.");
@@ -703,6 +818,8 @@ config.register_floating_point("water_surf_cliff_burst","Sea cliff burst strengt
  "How high the white water and spray burst up cliffs and quays, and how far the foam is thrown back off the rock, per arriving crest.");
 config.register_text("water_surf_no_sea_maps","Maps without sea","Graphics",
  "Comma-separated map names (for example zone7) whose water never counts as sea: no surf, sea colour or foam there, whatever its open water. Takes effect on the next map load.","zone7");
+config.register_text("water_lake_maps","Maps with a lake","Graphics",
+ "Comma-separated map names (default zone18 and zone19, Suslanger) whose open water is an inland lake, not the sea: plain water with only the ordinary ripples and the map's own water colour, with no sea swell, shore waves, surf, foam or sea colour. Takes effect on the next map load.","zone18,zone19");
 config.register_floating_point("water_surf_edge_fade","Sea surf edge fade (m)","Graphics",40.f,0.f,120.f,5.f,false,
  "Where the sea runs off the maps around the hero, the surf, swell and foam fade into plain water over this distance.");
 config.register_integer("bloom","Bloom","Graphics",2,0,2,1,false,"Soft glow around the brightest world light: sun highlights, sky near the sun, lava, fire, lamps and magic. 0: off, 1: low (4 half-resolution blur levels), 2: high (6 levels, wider glow). The interface never glows.");
@@ -712,9 +829,15 @@ config.register_floating_point("bloom_strength","Bloom strength","Graphics",1.f,
 config.register_floating_point("bloom_threshold","Bloom threshold","Graphics",1.f,1.f,3.f,.05f,false,"Where glow starts, relative to the brightest lit surface or fog this frame (1: just above it). Only light brighter than that glows: fire, lamps, lava, magic and sun glints; fogged objects and the sky never do.");
 config.register_integer("depth_of_field","Depth of field","Graphics",0,0,2,1,false,"Softly blurs the far background when the camera is tilted toward the horizon; the area around the screen centre stays sharp. The steep gameplay view (50 degrees and steeper) never blurs. 0: off, 1: low (16-tap blur), 2: high (40-tap blur, smoother large blur). The interface never blurs.");
 config.register_floating_point("depth_of_field_strength","Depth of field strength","Graphics",.2f,0.f,3.f,.05f,false,"How strongly the background blurs and how close behind the focus the blur begins. 1 is subtle; 3 is a strong cinematic blur.");
+config.register_integer("depth_of_field_debug_view","Depth of field debug view","Graphics",0,0,8,1,false,"Direct3D 12 diagnostic. 1: the depth of field path (red blur radius, green sharp, blue sky with its blur coverage; after DLSS/FSR red the stable blend weight, blue the stable layer's weight). 2-5 after DLSS/FSR, marked over the image: 2 motion source (magenta: object motion differs from the camera reprojection of the depth, yellow: zero motion written where the camera moved, cyan: sky, faint green: camera motion); 3 history alignment (red: last frame's colour fetched along the history motion does not match, orange: only the nearest-depth dilation misses, green: moved and matched, white: off screen); 4 history lag (red: the shown blur differs from this frame's, blue: the neighbourhood clamp cut the history); 5 blur radius per pixel (red radius, green sharp, cyan sky); 7 motion scale where the colour has contrast (the scale of the pixel's motion at which last frame's colour matches: blue 0, cyan 0.5, green 1 = right, yellow 1.5, red 2, magenta -1). 6 disocclusion (magenta: the blur layer drops its history, where last frame held a nearer surface than anything around the pixel now); 8 blend weight lag (red: blur laid where this frame is sharp, blue: sharp where this frame blurs, faint yellow: all-sky pixels). Views 2-8 show the last frame whose camera moved.");
 config.register_boolean("bloom_debug_view","Bloom debug view","Graphics",false,false,"Shows only the glow that bloom adds, on black; the interface still draws on top.");
 config.register_integer("ground_cover","Ground cover","Effects",2,0,3,1,false,"Procedural grass and debris on the ground: lush grass and flowers on meadows, dry tufts, fallen leaves and twigs near trees, small stones, dead bushes, reeds around swamps, kelp and shells on lake and sea shores, seagrass under open water, snow piles in Ingos. Grass sways in the map wind and parts around units. Distant cover thins to a sparser far level instead of ending. 0: off, 1: low (shorter full-density range, half density), 2: normal, 3: high (full density 1.6x farther).");
-config.register_integer("critters","Critters","Effects",2,0,2,1,false,"Small ambient creatures, miniatures of the game's own models and procedural ones: rats, spiders and crawler larvae in caves, frogs by swamps, lizards and snakes, scolopendras and dung beetles in Suslanger, shore crabs, bird flocks, ravens near the undead and outside the Dead City wall, vultures circling high over Suslanger, snow birds and snow mice in Ingos, carrion birds at corpses. They hide or flee from units they can hear or see (louder, more visible, running units from further away; crawling or standing still is quieter) and stay away from combat. 0: off, 1: low (rarer, smaller flocks), 2: high.");
+config.register_boolean("fire_burn","Fire burns the land (D3D12 only)","Effects",false,false,"Fireballs, fire walls and the ground lightning spell ignite grass and trees in their blast. Fire spreads through crowns; foliage burns away, trunks and stumps stay whole and become sooty. Live moss, lichen and vines burn; dead vines and stone stay unchanged. Wood and straw structures have a separate option. Cosmetic only, on the game clock; loading an area resets it. D3D12 only. Weather lightning ignition is not yet supported.");
+config.register_boolean("fire_burn_structures","Fire chars wooden structures","Effects",false,false,"With fire_burn: fire leaves wood and straw dark and sooty. Cosmetic only: structures keep their geometry and gameplay. Stone and metal stay unchanged. Experimental look, off by default.");
+config.register_integer("critters","Critters","Effects",2,0,2,1,false,"Small ambient creatures, miniatures of the game's own models and procedural ones: rats, spiders and crawler larvae in caves, rats in the city of Suslanger, frogs by swamps, lizards and snakes, scolopendras and dung beetles in Suslanger, shore crabs, bird flocks, ravens near the undead and outside the Dead City wall, vultures circling high over Suslanger, snow birds and snow mice in Ingos, schools of fish in rivers, lakes, swamps and coastal water, squirrels by trees in Gipat and Ingos, prairie dogs in Suslanger, cats in the towns of Ingos and Suslanger, carrion birds at corpses. They hide or flee from units they can hear or see (louder, more visible, running units from further away; crawling or standing still is quieter) and stay away from combat. 0: off, 1: low (rarer, smaller flocks), 2: high.");
+config.register_integer("critter_fish_showcase","Fish showcase (diagnostic)","Diagnostics",0,0,19,1,false,"Diagnostic: keeps one school of the chosen fish species (1 roach, 2 perch, 3 bream, 4 rudd, 5 tench, 6 pike, 7 char, 8 grayling, 9 whitefish, 10 burbot, 11 tilapia, 12 killifish, 13 catfish, 14 barbel, 15 mullet, 16 wels, 17 jewel cichlid, 18 rosy barb, 19 panchax) in the water nearest the screen centre, whatever the zone or the party's sight. 0 off.");
+config.register_boolean("tumbleweeds","Tumbleweeds","Effects",true,false,"Balls of dry twigs rolling with the wind over the Suslanger desert; one rests now and then in the lee of a rock or a wall. They pause with the game, follow its speed, and a unit walking into one kicks it away. Off: none appear; ones already out leave.");
+config.register_integer("tumbleweed_showcase","Tumbleweed showcase (diagnostic)","Diagnostics",0,0,1,1,false,"Diagnostic: in Suslanger, puts two tumbleweeds 5 m and 14 m upwind of the party for the wind to carry into it, once each time this is switched on, and logs where they start and each push. 0 off.");
 for(const auto& type:kCritterTypeSettings){
  config.register_boolean(type.key,type.label,"Effects",true,false,(std::string(type.tooltip)+" Off: this type never appears; ones already out vanish.").c_str());
  config.register_integer(type.weight_key,(std::string(type.label)+" spawn weight (%)").c_str(),"Effects",kCritterWeightDefault,0,kCritterWeightMaximum,5,false,
@@ -739,11 +862,13 @@ config.register_floating_point("material_reflections","Sky reflection strength",
 config.register_boolean("material_metal_mask","Metal masks","Materials",true,false,"Metal equipment: texels clearly off the layer's metal tint (brown straps, coloured cloth) read as leather or cloth, and dark chain-mail gaps lose their metal shine relative to their surroundings (uniformly dark metals keep it). Off reads each metal layer as uniformly metal.");
 config.register_boolean("material_world","World object materials","Materials",true,false,"Buildings, rocks and props: relief, crevice occlusion and a rough sun highlight derived from their own texture (material_quality 2 and up; 3 adds the sky reflection and lamp highlights). Off draws them as before.");
 config.register_floating_point("material_relief","World relief strength","Materials",1.f,0.f,2.f,.1f,false,"Strength of the relief world objects take from their texture brightness. 0 keeps the flat normal (the highlight and crevices remain).");
-config.register_floating_point("material_world_roughness","World roughness offset","Materials",0.f,-.4f,.2f,.05f,false,"Added to the world objects' base roughness (.75). Negative is glossier.");
+config.register_boolean("material_scenery","Scenery materials","Materials",true,false,"Gates, doors, walls and rocks listed in eid3d_materials\scenery.json take their material classes (iron fittings shine as metal; stone and wood stay rough). Off: they take the plain world object response. Needs World object materials on.");config.register_boolean("material_crystal_see_through","Crystal see-through","Materials",true,false,"World crystals (classes.json crystal) show the scene behind them, bent by the stone: one copy of the world colour on frames that draw a crystal. Off: they draw opaque, lit from inside.");config.register_floating_point("material_world_roughness","World roughness offset","Materials",0.f,-.4f,.2f,.05f,false,"Added to the world objects' base roughness (.75). Negative is glossier.");
 config.register_boolean("material_terrain","Terrain materials","Materials",true,false,"Terrain 2.0 ground: relief from each material's baked height (material_quality 1 and up), a sun highlight at the roughness of its material class with crevices rough (2 and up; dry soil, grass and rock stay near matte), and the sky on smooth snow, ice and mud (3). Off draws it as before.");
 config.register_floating_point("material_terrain_relief","Terrain relief depth","Materials",.06f,0.f,.2f,.01f,false,"Metres of relief per unit of a terrain 2.0 material's baked height. 0 keeps the flat normal.");
 config.register_floating_point("material_terrain_crevices","Terrain crevice roughness","Materials",1.f,0.f,2.f,.1f,false,"How much a terrain texel darker than its material's mean reads rough (no highlight there).");
 config.register_integer("shadow_softness","Shadow softness","Shadows",1,0,2,1,false,"0: fixed soft edge (previous filter). 1: contact-hardening soft shadows, low sample count. 2: high sample count. Penumbrae widen with the distance between caster and receiver.");
+config.register_integer("sun_shadow_correction","Sun shadow motion","Shadows",0,0,1,1,false,"Close sun maps keep their sun until it turns 0.25 degrees. 1: shadow lookups follow the exact sun across a held map, so shadows move smoothly. 0: lookups along the held sun (shadows step).");
+config.register_integer("sun_foliage_filter","Foliage shadow filter","Shadows",kDefaultSunFoliageFilter,0,2,1,false,"Shadow edges for grass, tree crowns and bare branches. 0: soft, as solid objects. 1: steady soft, the stable, safe default while shadows move. 2: a fixed soft edge with sharper branch shadows.");
 config.register_integer("shadow_sun_angle","Sun size (0.1 degree)","Shadows",15,1,60,1,false,"Angular diameter of the sun in tenths of a degree when shadow softness is on; larger values give wider sun penumbrae.");
 config.register_integer("point_shadow_light_size","Lamp size (%)","Shadows",100,10,400,10,false,"Scales the spherical size of shadow-casting lamps when shadow softness is on; larger lamps give wider penumbrae.");
 #ifdef EID3D11_EMBEDDED
@@ -805,7 +930,7 @@ for(const unsigned i:{0u,1u,4u,5u,6u}) {
     config.register_integer((prefix+"_padding").c_str(),"Icon padding (px)","HUD layout",0,-100,100,1,false);
     config.register_boolean((prefix+"_preview").c_str(),"Preview slots","HUD layout",false,false,"Faint labeled placeholders, visible only while the HUD is unlocked.");
     config.register_integer((prefix+"_preview_count").c_str(),"Preview slot count","HUD layout",i==5||i==6?4:3,1,i==5||i==6?4:32,1,false);
-    if(i!=4)config.register_integer((prefix+"_slots_per_column").c_str(),"Slots per column","HUD layout",0,0,32,1,false,"Wrap the bar into another column (or row, for left/right alignment) every this many slots. 0 keeps one line.");
+    if(i!=4)config.register_integer((prefix+"_slots_per_column").c_str(),"Slots per column","HUD layout",0,0,32,1,false,"Wrap the bar into another column (or row, for left/right alignment) every this many slots. 0 keeps one line (spell bar: wraps after 8 slots, so Dejavu's 16 slots take two lines).");
 }
 config.register_integer("message_panel_text_scale","Info panel text scale (%)","Interface",100,50,300,5,false,"Size of loot and quest text, independent of the panel dimensions and multiplied by global HUD scale.");
 config.register_integer("hud_border_scale","Panel border scale (%)","Interface",100,0,300,5,false,"Width of gameplay panel borders. Global UI scale also applies; individual widget size does not.");
@@ -861,7 +986,7 @@ config.register_floating_point("neighbour_fog_range","Neighbour fog range","Grap
 config.register_integer("ground_cover_distance","Ground cover distance (m)","Effects",200,50,1000,25,false,"How far grass and other ground cover is drawn, independent of draw_distance. The far sparse level ends here.");
 config.register_integer("ground_cover_shadows","Ground cover shadows","Effects",1,0,2,1,false,"Sun shadows of the procedural ground cover in the close shadow layers. 0: none. 1: large cover only (fallen logs and branches, dead bushes, cave wall roots). 2: everything except seagrass, beach wrack, snow and sand piles and the distant tuft meshes; the swaying grass then redraws the close shadow layers every frame. Needs sun shadows and ground cover. Critters always cast sun shadows when sun shadows are on.");
 config.register_integer("effect_distance","Effect distance (m)","Effects",300,100,1000,25,false,"How far game effects are kept and drawn: campfires, torches, map particle sources, lights and lightning. Capped by draw_distance. The game itself keeps them only within 100 m.");
-config.register_boolean("impostors","Crown impostors","Graphics",true,false,"Cut-out parts of neighbouring-map objects (tree crowns, bushes) draw a baked camera-facing impostor where they are smaller on screen than the impostor size, crossfading with a screen-door dither. Off draws every triangle.");config.register_floating_point("impostor_pixels","Crown impostor size (px)","Graphics",64.f,16.f,256.f,8.f,false,"On-screen size (pixels across the crown's bounding sphere) below which a crown draws its impostor. The crossfade runs from this size to one and a half times it.");config.register_boolean("impostor_debug","Crown impostor diagnostic view","Graphics",false,false,"Draws every crown impostor quad as a solid magenta square (placement check).");config.register_boolean("lod","Static object LOD","Graphics",true,false,"Opaque parts of neighbouring-map objects draw a reduced triangle level where its largest deviation projects below the pixel limit, crossfading between levels with a screen-door dither. Off draws every triangle.");config.register_floating_point("lod_pixel_error","Static LOD pixel limit","Graphics",1.f,.25f,8.f,.25f,false,"Largest on-screen deviation (pixels at the current resolution) a reduced level may have where it is drawn. The crossfade to the next level runs from this limit to twice it.");config.register_integer("draw_distance","Draw distance (m)","Graphics",300,100,1000,25,false,"How far terrain, objects and neighbouring maps are drawn, in world metres (the unit of the game's FarClipDistance). The last tenth fades into the sky or fog colour; beyond it nothing is drawn, and nearer where fog already hides everything. Shadows inside the range keep their casters. Also caps how deep neighbouring maps load (neighbour_fog_range), so changing it can reload them.");
+config.register_boolean("impostors","Crown impostors","Graphics",true,false,"Cut-out parts of neighbouring-map objects (tree crowns, bushes) draw a baked camera-facing impostor where they are smaller on screen than the impostor size, crossfading with a screen-door dither. Off draws every triangle.");config.register_floating_point("impostor_pixels","Crown impostor size (px)","Graphics",64.f,16.f,256.f,8.f,false,"On-screen size (pixels across the crown's bounding sphere) below which a crown draws its impostor. The crossfade runs from this size to one and a half times it.");config.register_boolean("impostor_debug_raw","Impostor texel diagnostic","Graphics",false,false,"With the impostor diagnostic view: each impostor pixel shows the texel it samples, unlit and unfogged.");config.register_boolean("impostor_debug_frames","Impostor view diagnostic","Graphics",false,false,"With the impostor diagnostic view: colour each impostor pixel by the baked view it samples (red: column, green: row).");config.register_integer("fur_debug","Fur layer diagnostic","Graphics",0,0,4,1,false,"Furry units, world and previews: 1 fur only (the part's own colour and wound layers hidden); 2 the colour records only (no fur, no wound layer); 3 the wound layer only, its alpha as grey; 4 identity colours: wound layer magenta, a furry part's own colour record blue, fur green. 0 off. Debug only: while on, figures and objects draw the material instance check programs (shader_split on), which alone carry this code, and units skip the depth prepass.");config.register_boolean("debug_no_fog","No fog (diagnostic)","Graphics",false,false,"Diagnostic captures: the world draws without any fog (game, map-edge and added fog).");config.register_floating_point("soft_particles","Soft particles","Graphics",.5f,0.f,2.f,.25f,false,"Fire, smoke, magic and dust fade out where they meet the ground, walls and objects instead of cutting a hard line, over this many particle radii. 0 turns it off.");config.register_boolean("soft_particles_debug","Soft particle diagnostic","Graphics",false,false,"Draws game particle effects in flat colours by class: soft particles red (faded) to green (unfaded); white hard particles, blue ribbons, magenta selection, cyan text, yellow ground prints; orange/purple are depth self-check failures.");config.register_boolean("impostor_debug","Crown impostor diagnostic view","Graphics",false,false,"Draws every crown impostor quad as a solid magenta square (placement check).");config.register_boolean("main_map_object_space","Main-map statics in object space","Graphics",true,false,"Trees and stones of the current map draw like neighbouring-map objects: static LOD levels, crown impostors and their own sun casters, built once per map on a worker. An object that animates, hides or changes draws its posed geometry for that frame. Off draws every main-map object posed.");config.register_boolean("caster_check","Main-map caster check (diagnostic)","Diagnostics",false,false,"D3D12 with GPU reports (EI_RENDERER_D3D12_HAZARDS): each static-layer redraw counts, on the GPU, the admitted main-map statics drawn into the sun maps by their object-space casters, by the posed caster store and by both (doubled); the host log names the counts.");config.register_boolean("lod","Static object LOD","Graphics",true,false,"Opaque parts of neighbouring-map objects draw a reduced triangle level where its largest deviation projects below the pixel limit, crossfading between levels with a screen-door dither. Off draws every triangle.");config.register_floating_point("lod_pixel_error","Static LOD pixel limit","Graphics",1.f,.25f,8.f,.25f,false,"Largest on-screen deviation (pixels at the current resolution) a reduced level may have where it is drawn. The crossfade to the next level runs from this limit to twice it.");config.register_integer("impostor_far_pixels","Far crown impostor size (px)","Graphics",160,0,512,8,false,"Beyond impostor_far_distance, crowns switch to their impostor below this on-screen size instead of impostor_pixels (0: off). Ramps in continuously with distance, so the crossfade never pops.");config.register_integer("impostor_far_distance","Far crown impostor distance (m)","Graphics",150,10,1000,10,false,"Distance where impostor_far_pixels is fully reached at 1600 output lines (ramps in from 3/4 of it); scales with output height, so smaller screens start impostors nearer.");config.register_integer("draw_distance","Draw distance (m)","Graphics",300,100,1000,25,false,"How far terrain, objects and neighbouring maps are drawn, in world metres (the unit of the game's FarClipDistance). The last tenth fades into the sky or fog colour; beyond it nothing is drawn, and nearer where fog already hides everything. Shadows inside the range keep their casters. Also caps how deep neighbouring maps load (neighbour_fog_range), so changing it can reload them.");
 config.register_boolean("terrain_lod","Terrain LOD","Graphics",false,false,"Switch terrain detail by distance. Disable to keep the highest detail everywhere; this costs terrain geometry work.");
 config.register_integer("terrain_quality","Terrain detail","Graphics",2,0,2,1,false,"Terrain 2.0 ground quality. 2: high (two warp octaves on material edges, fine edge noise, large-scale brightness variation). 1: medium (one warp octave, no fine noise or large-scale variation). 0: low, for weak cards (also hex detail from two cells instead of three, the two strongest materials only, edges decided by noise without the textures' heights, no wall-foot band).");
 config.register_boolean("terrain_antitile","Terrain anti-repetition","Graphics",true,false,"Replace repeated tile detail with randomly turned and shifted reads on a hex lattice, plus faint large-scale brightness variation. Tile colours, paths and transitions are kept. Off is cheapest.");
@@ -879,10 +1004,19 @@ config.register_boolean("neighbour_fog_skip","Skip blend under neighbour fog","G
 config.register_boolean("terrain_blend_neighbours","Terrain blend on neighbour maps","Graphics",true,false,"Temporary cost switch: neighbour maps' terrain reads their own tile grid and atlas for the material blend and cliffs. Off binds none, so neighbour terrain keeps its tile art.");
 config.register_integer("terrain_blend","Terrain material blend","Graphics",1,0,1,1,false,"Tile transitions (a path meeting snow, grass meeting dirt) are redrawn from the plain textures of the materials at the map grid's corners, mixed by a smooth noisy field so edges meander naturally instead of repeating 2 m tile shapes; snow, sand and grass settle into the joints of stone. Corner materials come from the map editor's atlas profile shipped with the map, else its built-in table. Long and animated tiles and maps without tile families keep their art. Steep faces keep their painted cover (grass stays grass, snow stays snow) read through world-space side projections, and nearby ground or stone shows through in irregular patches and down-slope streaks where the face is steepest. Terrain 2.0 draws it; 0 also turns off the cliff texturing (an old saved 2 loads as 1).");
 config.register_integer("terrain_tessellation","Terrain cliff tessellation","Graphics",1,0,1,1,false,"Round off the crests and feet of steep terrain with GPU tessellation (smooth Phong surface through the game's own heightfield and slope normals; no texture relief). Subdivision is fixed in world space, so it never changes as the camera moves, and flat or evenly sloped ground is never subdivided. Walkable ground moves at most 15 cm, steeper faces at most 70 cm; nothing moves at the map border. 0: off (standard terrain), 1: on (up to 8x). Shadow maps keep the untessellated terrain. Costs GPU time on every terrain triangle while on.");
-config.register_integer("terrain2_cache","Terrain 2.0 material cache","Graphics",0,0,2,1,false,"With terrain 2.0 on. 0: every terrain 2.0 pixel computes its blend (the reference). 1: walkable ground without liquid over it reads a camera-centred cache of the finished blend (world-aligned texel grid at power-of-two densities, re-baked only where the view moves into new ground or the terrain inputs change); faces, rock, wall feet and liquid beds stay per pixel. 2: as 1 with cached pixels tinted by cache level. Switch 0/1 at the same camera for the comparison. Off frees the cache.");
+config.register_integer("terrain2_cache","Terrain 2.0 material cache","Graphics",1,0,2,1,false,"With terrain 2.0 on. 0: every terrain 2.0 pixel computes its blend (the reference). 1: walkable ground without liquid over it reads a camera-centred cache of the finished blend (world-aligned texel grid at power-of-two densities, re-baked only where the view moves into new ground or the terrain inputs change); faces, rock, wall feet and liquid beds stay per pixel. 2: as 1 with cached pixels tinted by cache level. Switch 0/1 at the same camera for the comparison. Off frees the cache.");
+config.register_integer("terrain2_cache_nearest","Terrain 2.0 cache: nearest visible ground","Performance",1,0,1,1,false,"0: the finest cache level is chosen for the ground level under the camera (ground rising toward the camera nearer than that computes its material per pixel). 1 (default): also for the nearest visible ground of the active map, so that ground reads the cache; costs one more fine level (window side squared times 6 bytes: about 48 MB at 2560x1600, 100 MB at 4K) while such ground is in view. The log line terrain2_cache names the levels and megabytes.");
+config.register_integer("terrain2_cache_ahead","Terrain 2.0 cache: windows ahead of the camera","Performance",0,0,1,1,false,"0: every fine cache level is a square around the camera position. 1: the squares sit ahead of the camera along the view (half of the depth a level serves), so the ground at the sides of the screen stays inside them; no more memory, but turning the camera now moves the windows and bakes their new edges.");
 config.register_integer("terrain2_cache_density","Terrain 2.0 cache size (%)","Graphics",100,25,200,25,false,"Window side of the fine cache levels as a share of the size at which no cached texel is coarser than the per-pixel reference on flat ground (3x the screen's pixels per metre at depth 1). Lower: less video memory, softer ground near each level's edge.");
 config.register_integer("terrain2_cache_bake","Terrain 2.0 cache bake per frame (k texels)","Graphics",4096,256,65536,256,false,"Most cache texels baked in one frame (nearest levels last). While a level is incomplete the pixels that need it stay per pixel.");
 config.register_floating_point("terrain2_cache_bias","Terrain 2.0 cache level bias","Diagnostics",0.f,-1.f,1.f,.25f,false,"Shifts the cache level each pixel reads: negative sharper (needs a larger window), positive softer.");
+config.register_integer("terrain_face_cache","Terrain 2.0 face cache","Graphics",1,0,2,1,false,"With terrain 2.0 on. 0: faces (cliffs and slopes past the walk limit) compute their blend per pixel (the reference). 1: faces of the active map read a baked atlas of the finished blend (near-planar charts of the steep base triangles, pages baked on demand at power-of-two densities). 2: as 1 with cached face pixels tinted by level.");
+config.register_integer("terrain_slim","Terrain slim pass","Graphics",2,0,3,1,false,"With the terrain 2.0 material cache on. 1: prepassed terrain draws first with a program without the per-pixel material (fewer registers); only the pixels the material and face caches miss draw again with the full program (the same image). 0: one pass with the full program (the reference). 2 (default): 1 with the D3D12 backend, 0 with D3D11 (where the two passes cost more than one). 3: as 1 with the second pass's pixels tinted red.");
+config.register_integer("coverage_cuts","Water and sky coverage cuts","Performance",63,0,63,1,false,"Direct3D 12 (the same image; for in-run comparison), switches added together. 1: the sky and the cave exit glow draw after the world depth prepass, which rejects their covered pixels. 2: the water reflection trace clears only the two targets its passes do not overwrite whole. 4: neighbour-map liquid sectors outside the view are not queued, and with none in view their liquid pass and its reflection frame are skipped. 8: the sky's final colour below the horizon is the haze alone (half of the reflection probe). 16: the cloud march and resolve run only over the screen box above the horizon. 32: the cloud shadow field integrates each ground column once and gathers its penumbra from that field. 0: off, 63 (default): all.");
+config.register_integer("terrain_slim_cuts","Terrain slim pass cuts","Performance",3,0,3,1,false,"Direct3D 12, with the terrain slim pass (the same image; for in-run comparison). 0: off. Bit 1: the slim pass draws programs compiled for plain terrain records (no crown impostor, foliage, unit or ground contact code). Bit 2 (with 1): a pixel the caches miss leaves the slim program before the lighting (the second pass shades it). 3 (default): both.");
+config.register_integer("terrain_face_cache_bake","Terrain 2.0 face cache bake per frame (pages)","Graphics",64,1,4096,16,false,"Most 64 x 64 face cache pages baked in one frame (coarse levels first). Pages are requested by what the view's pixels read (GPU feedback, a few frames late); pixels whose page is not baked yet compute per pixel.");
+config.register_floating_point("terrain_face_cache_bias","Terrain 2.0 face cache level bias","Diagnostics",0.f,-1.f,1.f,.25f,false,"Shifts the face cache level each pixel reads: negative sharper, positive softer.");
+config.register_integer("terrain_face_cache_check","Terrain 2.0 face cache check","Diagnostics",0,0,4,1,false,"With the face cache on (1, untinted). Every 60 frames the charted faces in view are drawn offscreen and each pixel compares the cache read with the per-pixel blend at its own footprint; the counts (compared, misses, off by more than 2/255 and 8/255) go to the probe log as terrain_face_cache_check. 2 also writes the difference x8 (misses blue) as face-check-<frame>.bmp beside the F11 captures; 3 writes the cached colour there, 4 the live one.");
 config.register_boolean("terrain_height_blend","Terrain transition sharpening","Graphics",true,false,"Bias soft tile transitions by the texture's own detail so the brighter material breaks through. Off is cheapest.");
 config.register_integer("sky_weather_test","Sky weather test","Diagnostics",0,0,2,1,false,"Render-only sky test: 1 builds a rain storm in the owned sky (deck, rain shafts, lightning), 2 clears it, 0 follows the game's weather. The game's rain, fog and gameplay are untouched.");
 config.register_integer("critter_labels","Critter labels","Diagnostics",0,0,1,1,false,"Label every live ambient critter and bird with species, state and distance to the nearest party member, including hidden critters outside party sight. Render only.");
@@ -915,6 +1049,8 @@ native_close_shadow_cascades_=static_cast<std::uint8_t>(configured_integer(confi
 native_far_shadows_enabled_=configured_boolean(config,"shadow_far",true);
 native_far_foliage_opaque_=configured_boolean(config,"shadow_far_foliage_opaque",true);
 native_point_shadows_enabled_=configured_boolean(config,"point_shadows",true);
+native_sun_filter_={configured_integer(config,"sun_shadow_correction",0)>=1?1.f:0.f,
+ float(std::clamp(configured_integer(config,"sun_foliage_filter",kDefaultSunFoliageFilter),0,2))};
 native_shadow_softness_=shadow_softness_constants(configured_integer(config,"shadow_softness",1),
  configured_integer(config,"shadow_sun_angle",15),configured_integer(config,"point_shadow_light_size",100));
 // The common coverage/scheduler and the GPU consume the same settings,
@@ -924,10 +1060,11 @@ bridge_set_shadow_settings(native_shadow_side_,native_close_shadow_cascades_,
 // Core mode, game process: the host applies the shadow switch at its
 // BeginScene (begin_scene_renderer never runs here), so the flag the world
 // capture reads (native_shadows_enabled) follows the same option here (#204).
-if(core_mode_)native_shadows_enabled_=configured_boolean(config,"shadows",true);
+if(core_mode_)native_shadows_enabled_=configured_boolean(config,"shadows",true)||configured_boolean(config,"rt_sun_shadows",false); // as begin_scene_renderer (traced sun shadows need the receivers)
 neighbour_maps_enable(configured_boolean(config,"neighbour_maps",true));
 bridge_set_terrain_lod_enabled(configured_boolean(config,"terrain_lod",false));
 bridge_set_owned_sky(configured_integer(config,"sky_clouds",2)>0);
+bridge_set_fire_burn(configured_boolean(config,"fire_burn",false)&&configured_integer(config,"renderer_backend",0)==1);
 }
 
 void Renderer::detect_device_options() noexcept{
@@ -965,12 +1102,13 @@ HRESULT Renderer::ensure_host_d3d12(HWND window,UINT w,UINT h){
  core_host_=true;
  output_width_=std::max(1u,w);output_height_=std::max(1u,h);hwnd_=window;
  debug_overlay_set_running_renderer("64-bit render host, Direct3D 12",true);debug_overlay_set_running_d3d12(true);
- // DLSS on the executor's device (core_host.cpp moved the host's NGX there)
- // and FSR 2 through its compute slots (fsr2_upscaler_d3d12.h).
+ // DLSS starts asynchronously on the executor's device (core_host.cpp)
+ // and FSR 3.1 through the host's FidelityFX upscaler (D3D12Frame::fsr_upscale).
  {x64remote::DlssCaps caps{};
   if(!x64remote::dlss_caps(caps)){caps.reason[sizeof(caps.reason)-1]=0;set_dlss_unavailable_reason(caps.reason[0]?caps.reason:"not available");}
-  else set_dlss_unavailable_reason(nullptr);}
- set_fsr_unavailable_reason(Fsr2UpscalerD3D12::unavailable_reason(*d3d12_));
+  else set_dlss_unavailable_reason(nullptr);
+  dlss_initializing_=caps.initializing;}
+ set_fsr_unavailable_reason(d3d12_->fsr_upscale_unavailable());
  // The executor's adapter (the device that owns every GPU resource here):
  // the VRAM budget, the point shadow pool's pressure check and the telemetry
  // query its local segment.
@@ -1000,11 +1138,65 @@ HRESULT Renderer::ensure_host_d3d12(HWND window,UINT w,UINT h){
  return S_OK;
 }
 
+// x64 host, before ensure_host (renderer.h). Same steps as the host's first
+// config command took (the overlay, then the settings migration), earlier:
+// the start's shader preparation (D3D11 prepare_shaders, D3D12 below) shows
+// its progress window only with an initialized overlay.
+bool Renderer::host_start_overlay(HWND window,const wchar_t* ini_path) noexcept try{
+ if(debug_overlay_.initialized())return true;
+ if(!window||!ini_path||!*ini_path||!device_||!context_)return false;
+ register_config_options();
+ if(d3d12_)debug_overlay_.set_renderer(&d3d12_->overlay_renderer());
+ if(FAILED(debug_overlay_.initialize_host(window,device_.Get(),context_.Get(),ini_path)))return false;
+ migrate_settings(debug_overlay_.config(),ini_path);
+ return true;
+}catch(...){return false;}
+
+// x64 host, D3D12 executor: the start's pipelines are built before the first
+// real frame. A cold library or driver cache takes many seconds (28 s on a
+// tester's first start). Count from host entry, not from this late polling
+// loop: executor creation/NGX and start_warming itself can do most of the
+// work. The host window thread paints a plain message until this GPU UI is
+// ready, including during device creation and the pipeline library save.
+// Its counter is published by the pipeline queue even while this thread
+// is still inside executor/NGX/overlay setup.
+void Renderer::host_warm_d3d12(HWND window,ULONGLONG startup_started,void (*after_present)() noexcept) noexcept try{
+ if(!d3d12_)return;
+ const std::int64_t begin=perf_now();
+ bool shown=false;std::size_t done=0,total=0;
+ while(d3d12_->start_warming(done,total)){
+  // If the first poll completes warming, leave the GDI counter up until
+  // the first game frame. A completion-only ImGui frame auto-sizes its
+  // window invisibly and would replace the message with a black frame.
+  if(debug_overlay_.initialized()&&GetTickCount64()-startup_started>=2000){
+   const float background[4]={.035f,.035f,.04f,1.f};
+   d3d12_->clear(background);
+   const bool visible=debug_overlay_.render_shader_preparation(done,total);
+   const HRESULT hr=d3d12_->present(0);  // a failure is the executor's, named by its first frame
+   if(visible&&hr==S_OK&&!IsIconic(GetParent(window))){
+    if(after_present){after_present();after_present=nullptr;}
+    if(!shown){
+     shown=true;
+     char detail[96];std::snprintf(detail,sizeof(detail),"done=%zu total=%zu host_ms=%llu",done,total,
+      static_cast<unsigned long long>(GetTickCount64()-startup_started));
+     bridge_report_event("start_pipelines_window",detail);
+    }
+   }
+  }
+  Sleep(16);
+ }
+ const double ms=1000.0*static_cast<double>(perf_now()-begin)/static_cast<double>(perf_frequency());
+ char text[128];std::snprintf(text,sizeof(text),"pipelines=%zu ms=%.0f host_ms=%llu window=%s",total,ms,
+  static_cast<unsigned long long>(GetTickCount64()-startup_started),shown?"shown":"not_shown");
+ bridge_report_event("start_pipelines",text);
+}catch(...){}
+
 // x64 host, core mode (Host/core_host.cpp), after adopt_host_device: the
 // frame resources ensure() creates, presenting into `window` (the host's
-// child of the game window). The game process owns the ini: the options
-// start at their registered defaults and take the game's values from its
-// first config command, which precedes every frame.
+// child of the game window). The options start at the game's ini
+// (host_start_overlay) or, without it, at their registered defaults, and
+// take the game's values from its first config command, which precedes
+// every frame.
 // Not yet in core mode (listed): DLSS (the host's NGX feature is the
 // call-stream replay's), NVAPI's shader disk cache switch, the debug overlay.
 #endif // !EID3D11_EMBEDDED
@@ -1114,7 +1306,7 @@ void Renderer::apply_render_scale(){
  // previous-vertex copy goes too. DLSS off also releases the host's NGX feature.
  if(had_upscaler&&!temporal_upscaler()){
   context_->VSSetShaderResources(46,1,&empty_history[0]);
-  dlss_previous_world_.Reset();dlss_previous_world_srv_.Reset();dlss_motion_constants_.Reset();
+  dlss_previous_world_.Reset();dlss_previous_world_srv_.Reset();dlss_previous_world_uav_.Reset();dlss_motion_constants_.Reset();
  }
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
  if(old_mode>=0&&dlss_mode_<0)dlss_backend_.release_feature();
@@ -1157,10 +1349,10 @@ void Renderer::set_world_size() noexcept {
 #endif
   UINT w=0,h=0;
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
-  const bool sized=d3d12_?embedded_d3d12_.dlss_size(output_width_,output_height_,dlss_mode_,w,h):
+  const bool sized=d3d12_?embedded_d3d12_.dlss_size(output_width_,output_height_,dlss_mode_,w,h,ray_reconstruction_on()):
    dlss_backend_.optimal(output_width_,output_height_,static_cast<DlssQuality>(dlss_mode_),w,h);
 #else
-  const bool sized=x64remote::dlss_render_size(output_width_,output_height_,dlss_mode_,w,h);
+  const bool sized=x64remote::dlss_render_size(output_width_,output_height_,dlss_mode_,w,h,ray_reconstruction_on());
 #endif
   if(sized&&w&&h&&w<=output_width_&&h<=output_height_){
    width_=w;height_=h;return;
@@ -1192,9 +1384,11 @@ const NativePixelMember* Renderer::native_specialised_members() noexcept{
  &Renderer::native_masked_terrain_ps_,&Renderer::native_masked_snow_ps_,
  &Renderer::native_masked_terrain_flat_ps_,&Renderer::native_masked_snow_flat_ps_,
  &Renderer::native_shadow_mask_ps_,&Renderer::native_low_shadow_mask_ps_,
+ &Renderer::native_masked_terrain_slim_ps_,&Renderer::native_masked_snow_slim_ps_,
+ &Renderer::native_masked_terrain_slim_flat_ps_,&Renderer::native_masked_snow_slim_flat_ps_,
  &Renderer::native_gltf_ps_,&Renderer::native_gltf_low_ps_,
  &Renderer::native_gltf_masked_ps_,&Renderer::native_gltf_masked_low_ps_};
- static_assert(std::size(members)==std::tuple_size<NativeSpecialisedSet>::value,"one specialised slot per member");
+ static_assert(std::size(members)==kNativeSpecialisedMembers,"one specialised slot per member");
  return members;
 }
 #else
@@ -1243,6 +1437,9 @@ bool native_specialised_programs(std::uint32_t key,NativeSpecialisedPrograms& ou
  std::vector<ShaderProgram> general;append_native_shader_programs(general);
  for(const auto& program:general){
   if(std::strcmp(program.entry,"nativePS")!=0&&std::strcmp(program.entry,"nativeShadowMaskPS")!=0)continue;
+  bool check=false;for(const D3D_SHADER_MACRO* define=program.defines;define&&define->Name;++define)check|=std::strcmp(define->Name,"NATIVE_DOMAIN_CHECK")==0;
+  if(check)continue; // F10 shader_split_check: general table only
+  if(program.defines&&std::strcmp(program.defines[0].Name,"NATIVE_ASTRAL")==0)continue; // astral rift: general programs only
   std::vector<D3D_SHADER_MACRO> macros;
   for(const D3D_SHADER_MACRO* define=program.defines;define&&define->Name;++define)macros.push_back(*define);
   for(unsigned bit=0;bit<std::size(kNativeSpecDefines);++bit)if(key&(1u<<bit))macros.push_back({kNativeSpecDefines[bit],"1"});
@@ -1252,7 +1449,7 @@ bool native_specialised_programs(std::uint32_t key,NativeSpecialisedPrograms& ou
   out.macros.push_back(std::move(macros));out.programs.push_back(program);
  }
  for(std::size_t n=0;n<out.programs.size();++n)out.programs[n].defines=out.macros[n].data();
- return out.programs.size()==19;
+ return out.programs.size()==kNativeSpecialisedPrograms+4;
 }
 namespace {
 
@@ -1270,7 +1467,7 @@ template<class Value> std::uint32_t native_play_specialisation_key(const Value& 
  if(!blend||value("terrain_cliffs",1.f)<=0)key|=8u; // configured_terrain_cliffs
  if(!blend)key|=16u;
  if(value("point_shadows",1.f)<=0)key|=32u;
- if(value("shadows",1.f)<=0)key|=64u;
+ if(value("shadows",1.f)<=0&&value("rt_sun_shadows",0.f)<=0)key|=64u; // traced sun shadows need the receivers
  const float fog=value("fog_preset",2.f);
  if(fog<1)key|=128u;else if(fog<2)key|=256u;
  if(value("shadow_softness",1.f)<=0)key|=1024u; // shadowBias[5].z
@@ -1542,7 +1739,13 @@ bool Renderer::native_specialisation_settled() const noexcept{
 void Renderer::update_native_specialisation() noexcept{
  const std::uint32_t key=native_specialisation_key();
  pump_native_specialisation(false);
- if(key!=native_spec_candidate_){native_spec_candidate_=key;native_spec_candidate_frame_=native_frame_index_;}
+ // Only the world flush names the candidate. An interface flush after
+ // composition (owned HUD meshes, portraits) uploads its own fog values, so
+ // with fog_preset above faithful its key differs from the world's in bits
+ // 7-8 every frame; counted here it reset the 60-frame hold twice a frame
+ // and a preset changed in play never got its set (issue #243: Medium stayed
+ // on the general programs).
+ if(!scene_composited_&&key!=native_spec_candidate_){native_spec_candidate_=key;native_spec_candidate_frame_=native_frame_index_;}
  const auto resident=[&](std::uint32_t k){return k==0||native_spec_sets_.count(k)!=0;};
  if(device_){
   // Then the same key with the point-shadow bit flipped, and both without
@@ -1572,7 +1775,7 @@ ID3D11PixelShader* Renderer::native_pixel(ComPtr<ID3D11PixelShader> Renderer::* 
   const auto found=native_spec_sets_.find(key);
   if(found!=native_spec_sets_.end()&&found->second[0]){
    const NativePixelMember* members=native_specialised_members();
-   for(std::size_t n=0;n<found->second.size();++n)if(members[n]==member)return found->second[n].Get();
+   for(std::size_t n=0;n<kNativeSpecialisedMembers;++n)if(members[n]==member)return found->second[n].Get();
   }
  }
  return native_pixel(member);
@@ -1615,10 +1818,56 @@ bool Renderer::native_draw_may_contact(const NativeQueuedDraw& draw,UINT contact
 ID3D11PixelShader* Renderer::native_pixel(ComPtr<ID3D11PixelShader> Renderer::* member) const noexcept{
  if(native_spec_active_){
   const NativePixelMember* members=native_specialised_members();
-  for(std::size_t n=0;n<native_spec_active_->size();++n)
+  for(std::size_t n=0;n<kNativeSpecialisedMembers;++n)
    if(members[n]==member)return (*native_spec_active_)[n].Get();
  }
  return (this->*member).Get();
+}
+
+// F10 shader_split_check: the check programs from the embedded table, once
+// (not with the pipeline: 16 programs of 32-bit address space nobody uses).
+void Renderer::ensure_native_instance_check_programs() noexcept try{
+ if(native_instance_check_tried_||!device_)return;
+ native_instance_check_tried_=true;
+ std::vector<ShaderProgram> programs;append_native_shader_programs(programs);
+ unsigned created=0;
+ for(const auto& program:programs)
+  for(std::size_t c=0;c<kNativeInstanceVertexClasses;++c)
+   if(program.defines==native_instance_vertex_defines(c,false,true)){
+    ComPtr<ID3DBlob> shader,error;
+    if(SUCCEEDED(compile_shader(program,&shader,&error))&&
+       SUCCEEDED(device_->CreateVertexShader(shader->GetBufferPointer(),shader->GetBufferSize(),nullptr,native_instance_check_vs_[c].ReleaseAndGetAddressOf())))++created;
+   }
+ for(const auto& program:programs)
+  for(std::size_t slot=0;slot<kNativeInstanceSlots;++slot)for(const bool masked:{false,true})
+   if(program.defines==native_instance_defines(slot,masked,true,false)){
+    ComPtr<ID3DBlob> shader,error;
+    if(SUCCEEDED(compile_shader(program,&shader,&error))&&
+       SUCCEEDED(device_->CreatePixelShader(shader->GetBufferPointer(),shader->GetBufferSize(),nullptr,native_instance_check_ps_[slot*2u+(masked?1u:0u)].ReleaseAndGetAddressOf())))++created;
+   }
+ char text[64];std::snprintf(text,sizeof(text),"check programs created=%u",created);
+ bridge_report_event("shader_split",text);
+}catch(...){}
+
+// A batch's material instance program: the resident specialised set of the
+// current key with the contact and fast-combiner extras (as native_pixel),
+// else the current key's set, else the general table's; with F10
+// shader_split_check the check program. Null for a missing program: the
+// caller omits the batch (never the general program in its place).
+ID3D11PixelShader* Renderer::native_instance_pixel(std::uint8_t instance,bool masked,bool contact,bool fast_combiner,bool check) const noexcept{
+ if(!(instance&7u)||(instance&7u)>kNativeInstanceDomains)return nullptr;
+ const std::size_t index=native_instance_slot(instance)*2u+(masked?1u:0u);
+ if(!native_instance_built(index/2u))return nullptr; // omitted and named by the caller
+ if(check)return native_instance_check_ps_[index].Get();
+ const std::size_t position=kNativeSpecialisedMembers+native_built_instance_slots_before(index/2u)*2u+(index&1u);
+ const std::uint32_t base=native_spec_current_key_,extra=(contact?0u:4u)|(fast_combiner?2048u:0u);
+ for(const std::uint32_t key:{base|extra,base|(extra&4u)}){
+  if(key==base)break;
+  const auto found=native_spec_sets_.find(key);
+  if(found!=native_spec_sets_.end()&&found->second[0])return found->second[position].Get();
+ }
+ if(native_spec_active_)return (*native_spec_active_)[position].Get();
+ return native_instance_ps_[index].Get();
 }
 
 // Depth prepass and sun-shadow mask targets (world size) and pass states.
@@ -1627,8 +1876,11 @@ HRESULT Renderer::create_prepass_targets(){
  prepass_rest_rtv_.Reset();prepass_normal_rtv_.Reset();shadow_mask_rtv_.Reset();
  prepass_rest_srv_.Reset();prepass_normal_srv_.Reset();shadow_mask_srv_.Reset();
  world_depth_read_only_dsv_.Reset();
+ terrain_miss_.Reset();terrain_miss_uav_.Reset();terrain_miss_srv_.Reset();
  if(feature_level_<D3D_FEATURE_LEVEL_11_0||!depth_)return S_FALSE;
  HRESULT hr=S_OK;
+ // The slim terrain pass's mask (terrain_miss_) is made by the first flush
+ // that draws the slim pass (renderer_flush.cpp), at this size.
  const auto target=[&](DXGI_FORMAT format,ComPtr<ID3D11Texture2D>& texture,ComPtr<ID3D11RenderTargetView>& rtv,ComPtr<ID3D11ShaderResourceView>& srv){
   D3D11_TEXTURE2D_DESC desc{};desc.Width=width_;desc.Height=height_;desc.MipLevels=desc.ArraySize=desc.SampleDesc.Count=1;
   desc.Format=format;desc.BindFlags=D3D11_BIND_RENDER_TARGET|D3D11_BIND_SHADER_RESOURCE;
@@ -1753,6 +2005,7 @@ bool Renderer::prepare_shadow_history() noexcept {
  // Soft-shadow disks rotate per frame only while history can integrate them.
  const float phase=float(native_frame_index_%64u);
  if(can_reuse)constants.jitter={phase*7.f,phase*13.f,0,0};
+ if(can_reuse&&d3d12_)d3d12_->count("sun-shadow history reused");
  return upload(constants);
 }
 
@@ -2076,13 +2329,16 @@ ShaderProgram world_support_shader_program(WorldSupportShader shader){
  case WorldSupportShader::game_glyph_vs:return {particles,"game_particles",nullptr,"gameGlyphVS","vs_5_0",optimized};
  case WorldSupportShader::interface_text_ps:
   return {{kInterfaceTextShader,sizeof(kInterfaceTextShader)-1},nullptr,nullptr,"interfaceTextPS","ps_5_0",0};
+ case WorldSupportShader::game_particle_debug_ps:{
+  static const D3D_SHADER_MACRO debug[]={{"GP_SOFT_DEBUG","1"},{nullptr,nullptr}};
+  return {particles,"game_particles",debug,"gameParticlePS","ps_5_0",optimized};}
  case WorldSupportShader::count:break;
  }
  return {};
 }
 #pragma warning(pop)
 static_assert(static_cast<std::size_t>(InterfaceShader::count)==5,"interface list size changed: name the new program");
-static_assert(static_cast<std::size_t>(WorldSupportShader::count)==13,"world-support list size changed: name the new program");
+static_assert(static_cast<std::size_t>(WorldSupportShader::count)==14,"world-support list size changed: name the new program");
 
 // The preparation lists: every named program, in enum order.
 void append_interface_shader_programs(std::vector<ShaderProgram>& out){
@@ -2179,8 +2435,11 @@ constexpr ShaderGroup kShaderGroups[]={
   "upscaler",[](RendererConfig& c){c.set_integer("upscaler",kUpscalerOff);}},
  {"terrain2",[](std::vector<ShaderProgram>& out){append_terrain2_shader_programs(out);append_terrain2_cover_programs(out);append_snow_surface_program(out);},[](const RendererConfig&){return true;},nullptr,nullptr},
  // The material cache's bake, with terrain 2.0 (its objects are created after the preparation).
- {"terrain2_cache",append_terrain2_cache_shader_programs,[](const RendererConfig& c){return configured_integer(c,"terrain2_cache",0)>0;},
+ {"terrain2_cache",append_terrain2_cache_shader_programs,[](const RendererConfig& c){return configured_integer(c,"terrain2_cache",1)>0;},
   "terrain2_cache",[](RendererConfig& c){c.set_integer("terrain2_cache",0);}},
+ // The face cache's bake (terrain_face_atlas.h).
+ {"terrain_face_cache",append_terrain_face_cache_shader_programs,[](const RendererConfig& c){return configured_integer(c,"terrain_face_cache",1)>0;},
+  "terrain_face_cache",[](RendererConfig& c){c.set_integer("terrain_face_cache",0);}},
  {"cave_gi",append_cave_irradiance_shader_programs,
   [](const RendererConfig& c){return configured_integer(c,"cave_gi",2)>0;},
   "cave_gi",[](RendererConfig& c){c.set_integer("cave_gi",0);}},
@@ -2218,18 +2477,28 @@ struct ShaderMarker {
  const char* phase="preparation";
  unsigned workers=0;  // preparation workers handing programs to the driver
  const std::vector<std::uint8_t>* program_groups=nullptr;  // group of each program in the list
+ bool abandoned=false;  // x64 host: the game process is gone; no marker is written again
 };
 ShaderMarker& shader_marker() noexcept{static ShaderMarker marker;return marker;}
 
 std::wstring shader_marker_path(){
  std::wstring path=renderer_config_path();
  const std::size_t slash=path.find_last_of(L"\\/");
- return (slash==std::wstring::npos?std::wstring():path.substr(0,slash+1))+L"eid3d11_shader_crash.txt";
+ // One marker per writer: the x64 host (the only 64-bit build of this file)
+ // and the in-process renderer share the ini folder, and each recovers only
+ // from its own preparations. A tester's in-process start read a marker the
+ // killed host had left and switched to serial preparation for good.
+#if defined(_WIN64)
+ const wchar_t* const name=L"eid3d11_shader_crash_x64.txt";
+#else
+ const wchar_t* const name=L"eid3d11_shader_crash.txt";
+#endif
+ return (slash==std::wstring::npos?std::wstring():path.substr(0,slash+1))+name;
 }
 
 // Caller holds the marker's mutex.
 void write_shader_marker(const ShaderMarker& marker) noexcept try{
- if(marker.group<0)return;
+ if(marker.group<0||marker.abandoned)return;
  char text[128];
  const int length=std::snprintf(text,sizeof(text),"group=%s\r\nphase=%s\r\nworkers=%u\r\n",kShaderGroups[marker.group].name,
   marker.phase,marker.workers);
@@ -2260,6 +2529,16 @@ std::string marker_value(const std::string& text,const char* key){
  return {};
 }
 }  // namespace
+
+// The x64 host calls this once the game process is gone: a preparation it
+// is in was not ended by a driver crash (the game was closed or killed), so
+// its marker must not turn on crash recovery at the next start.
+void abandon_shader_marker() noexcept{
+ ShaderMarker& marker=shader_marker();
+ std::lock_guard<std::mutex> lock(marker.mutex);
+ marker.abandoned=true;
+ try{DeleteFileW(shader_marker_path().c_str());}catch(...){}
+}
 
 void Renderer::close_shader_marker() noexcept{
  if(!shader_marker_open_.exchange(false))return;
@@ -2683,7 +2962,7 @@ void append_native_shader_programs(std::vector<ShaderProgram>& out){
  out.push_back({source,nullptr,nullptr,"nativeVS","vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
  out.push_back({source,nullptr,nullptr,"nativePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
  for(const char* entry:{"nativeBuildCS","nativeTerrainPhaseCS","nativeInstanceUpdateCS","nativePoseCS","nativeShadowPrepareCS",
-                        "nativeShadowCommitCS","nativeShadowBuildCS","nativeShadowVS","nativeShadowPS"})
+                        "nativeShadowCommitCS","nativeShadowBuildCS","nativeShadowVS","nativeShadowPS","nativeTerrainMissCompactCS"})
   out.push_back({source,nullptr,defines,entry,std::strstr(entry,"CS")?"cs_5_0":(std::strstr(entry,"VS")?"vs_5_0":"ps_5_0"),
                  D3DCOMPILE_OPTIMIZATION_LEVEL3});
  // Then the terrain pixel variant (NATIVE_TERRAIN_PS: tile blend, terrain
@@ -2723,7 +3002,12 @@ void append_native_shader_programs(std::vector<ShaderProgram>& out){
  static const D3D_SHADER_MACRO lava[]={{"NATIVE_LIQUID_BODY","1"},{"NATIVE_LIQUID_LAVA","1"},{nullptr,nullptr}};
  // The half-resolution reflection's inputs (every liquid type), then its march.
  static const D3D_SHADER_MACRO liquid_ssr_input[]={{"NATIVE_LIQUID_BODY","1"},{"NATIVE_LIQUID_SSR_INPUT","1"},{nullptr,nullptr}};
- for(const D3D_SHADER_MACRO* variant:{liquid_body,liquid_body_low,liquid_ssr,liquid_foam,water,water_ssr,water_low,lava,liquid_ssr_input})
+ // The full liquid and water bodies with the swimmer lookup (fish marked in
+ // the depth snapshot's stencil): bound only for such a snapshot, so the
+ // programs above carry none of it.
+ static const D3D_SHADER_MACRO liquid_swim[]={{"NATIVE_LIQUID_BODY","1"},{"NATIVE_LIQUID_SWIMMERS","1"},{nullptr,nullptr}};
+ static const D3D_SHADER_MACRO water_swim[]={{"NATIVE_LIQUID_BODY","1"},{"NATIVE_LIQUID_WATER","1"},{"NATIVE_LIQUID_SWIMMERS","1"},{nullptr,nullptr}};
+ for(const D3D_SHADER_MACRO* variant:{liquid_body,liquid_body_low,liquid_ssr,liquid_foam,water,water_ssr,water_low,lava,liquid_ssr_input,liquid_swim,water_swim})
   out.push_back({source,nullptr,variant,"nativeLiquidPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
  out.push_back({source,nullptr,nullptr,"nativeLiquidSsrPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
  out.push_back({source,nullptr,nullptr,"nativeLiquidSsrFilterPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
@@ -2757,14 +3041,75 @@ void append_native_shader_programs(std::vector<ShaderProgram>& out){
  out.push_back({source,nullptr,nullptr,"nativeMotionPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
  out.push_back({source,nullptr,nullptr,"nativeShadowMaskPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
  out.push_back({source,nullptr,low,"nativeShadowMaskPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ // The slim terrain pass (terrain_slim): the prepassed terrain, snow terrain
+ // and their flat variants without the per-pixel material.
+ static const D3D_SHADER_MACRO masked_slim[]={{"NATIVE_SHADOW_MASK","1"},{"NATIVE_TERRAIN_PS","1"},{"NATIVE_TERRAIN_SLIM","1"},{nullptr,nullptr}};
+ static const D3D_SHADER_MACRO masked_snow_slim[]={{"NATIVE_SHADOW_MASK","1"},{"NATIVE_TERRAIN_PS","1"},{"NATIVE_SNOW_TRAILS","1"},{"NATIVE_TERRAIN_SLIM","1"},{nullptr,nullptr}};
+ static const D3D_SHADER_MACRO masked_slim_flat[]={{"NATIVE_SHADOW_MASK","1"},{"NATIVE_TERRAIN_PS","1"},{"NATIVE_TERRAIN_FLAT","1"},{"NATIVE_TERRAIN_SLIM","1"},{nullptr,nullptr}};
+ static const D3D_SHADER_MACRO masked_snow_slim_flat[]={{"NATIVE_SHADOW_MASK","1"},{"NATIVE_TERRAIN_PS","1"},{"NATIVE_SNOW_TRAILS","1"},{"NATIVE_TERRAIN_FLAT","1"},{"NATIVE_TERRAIN_SLIM","1"},{nullptr,nullptr}};
+ for(const D3D_SHADER_MACRO* variant:{masked_slim,masked_snow_slim,masked_slim_flat,masked_snow_slim_flat})
+  out.push_back({source,nullptr,variant,"nativePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
  static const D3D_SHADER_MACRO gltf[]={{"NATIVE_GLTF","1"},{nullptr,nullptr}};
  static const D3D_SHADER_MACRO gltf_low[]={{"NATIVE_GLTF","1"},{"NATIVE_LOW","1"},{nullptr,nullptr}};
  static const D3D_SHADER_MACRO gltf_masked[]={{"NATIVE_GLTF","1"},{"NATIVE_SHADOW_MASK","1"},{nullptr,nullptr}};
  static const D3D_SHADER_MACRO gltf_masked_low[]={{"NATIVE_GLTF","1"},{"NATIVE_SHADOW_MASK","1"},{"NATIVE_LOW","1"},{nullptr,nullptr}};
  for(const D3D_SHADER_MACRO* variant:{gltf,gltf_low,gltf_masked,gltf_masked_low})
   out.push_back({source,nullptr,variant,"nativePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ // The material instance programs (renderer.h kNativeInstance*): each slot's
+ // object and prepassed programs, then the same with NATIVE_DOMAIN_CHECK
+ // (F10 shader_split_check; never in the specialised sets).
+ for(const bool check:{false,true})
+  for(std::size_t slot=0;slot<kNativeInstanceSlots;++slot)
+   for(const bool prepassed:{false,true})if(native_instance_built(slot))
+    out.push_back({source,nullptr,native_instance_defines(slot,prepassed,check,false),"nativePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ // Their vertex programs by class: colour, then prepass.
+ for(std::size_t vertex_class=0;vertex_class<kNativeInstanceVertexClasses;++vertex_class)
+  for(const char* entry:{"nativeVS","nativePrepassVS"})
+   out.push_back({source,nullptr,native_instance_vertex_defines(vertex_class,false),entry,"vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ // The colour programs' check twins (debug: they carry the fur_debug vertex bits).
+ for(std::size_t vertex_class=0;vertex_class<kNativeInstanceVertexClasses;++vertex_class)
+  out.push_back({source,nullptr,native_instance_vertex_defines(vertex_class,false,true),"nativeVS","vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ // The astral rift programs (NATIVE_ASTRAL, astral_rift.h): the vertex
+ // program, the pixel program and its Low twin. Only batches of astral
+ // records (NativeMaterialKey::program 1) draw with them, so no other
+ // program carries the effect.
+ static const D3D_SHADER_MACRO astral[]={{"NATIVE_ASTRAL","1"},{nullptr,nullptr}};
+ static const D3D_SHADER_MACRO astral_low[]={{"NATIVE_ASTRAL","1"},{"NATIVE_LOW","1"},{nullptr,nullptr}};
+ out.push_back({source,nullptr,astral,"nativeVS","vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ out.push_back({source,nullptr,astral,"nativePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ out.push_back({source,nullptr,astral_low,"nativePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
+const D3D_SHADER_MACRO* native_instance_vertex_defines(std::size_t vertex_class,bool motion,bool check) noexcept{
+ static const D3D_SHADER_MACRO lists[kNativeInstanceVertexClasses][2][2][4]={
+  {{{{"NATIVE_DOMAIN","2"},{nullptr,nullptr}},{{"NATIVE_DOMAIN","2"},{"NATIVE_DOMAIN_CHECK","1"},{nullptr,nullptr}}},
+   {{{"NATIVE_DOMAIN","2"},{"NATIVE_OBJECT_MOTION","1"},{nullptr,nullptr}},{{"NATIVE_DOMAIN","2"},{"NATIVE_OBJECT_MOTION","1"},{"NATIVE_DOMAIN_CHECK","1"},{nullptr,nullptr}}}},
+  {{{{"NATIVE_DOMAIN","4"},{nullptr,nullptr}},{{"NATIVE_DOMAIN","4"},{"NATIVE_DOMAIN_CHECK","1"},{nullptr,nullptr}}},
+   {{{"NATIVE_DOMAIN","4"},{"NATIVE_OBJECT_MOTION","1"},{nullptr,nullptr}},{{"NATIVE_DOMAIN","4"},{"NATIVE_OBJECT_MOTION","1"},{"NATIVE_DOMAIN_CHECK","1"},{nullptr,nullptr}}}}};
+ return vertex_class<kNativeInstanceVertexClasses?lists[vertex_class][motion?1:0][check?1:0]:nullptr;
+}
+
+const D3D_SHADER_MACRO* native_instance_defines(std::size_t slot,bool masked,bool check,bool motion,bool no_contact,bool dry) noexcept{
+ // Per slot, 32 lists (masked | check<<1 | motion<<2 | no_contact<<3 | dry<<4) of at most 7 defines and the terminator.
+ static const auto table=[]{
+  std::array<std::array<D3D_SHADER_MACRO,8>,kNativeInstanceSlots*32u> lists{};
+  static const char* const domains[kNativeInstanceDomains]={"1","2","3","4","5","6"};
+  for(std::size_t s=0;s<kNativeInstanceSlots;++s)for(unsigned variant=0;variant<32u;++variant){
+   auto& list=lists[s*32u+variant];std::size_t n=0;
+   list[n++]={"NATIVE_DOMAIN",domains[s/2u]};
+   list[n++]={"NATIVE_PROFILED",(s&1u)?"1":"0"};
+   if(variant&4u)list[n++]={"NATIVE_OBJECT_MOTION","1"};
+   if(variant&1u)list[n++]={"NATIVE_SHADOW_MASK","1"};
+   if(variant&2u)list[n++]={"NATIVE_DOMAIN_CHECK","1"};
+   if(variant&8u)list[n++]={"NATIVE_OFF_CONTACT","1"};
+   if(variant&16u)list[n++]={"NATIVE_FRAME_DRY","1"};
+   list[n]={nullptr,nullptr};
+  }
+  return lists;
+ }();
+ if(slot>=kNativeInstanceSlots)return nullptr;
+ return table[slot*32u+(masked?1u:0u)+(check?2u:0u)+(motion?4u:0u)+(no_contact?8u:0u)+(dry?16u:0u)].data();
+}
 // D3D12 (it has no specialisation sets): the native pixel programs again
 // without the S1-S3 material code (NATIVE_OFF_MATERIALS), drawn while
 // material quality is Off. Present but switched off, that code cost ~0.2 ms
@@ -2776,9 +3121,127 @@ void append_native_off_material_programs(std::vector<ShaderProgram>& out){
   for(const auto& program:general){
    if(std::strcmp(program.entry,"nativePS")!=0)continue;
    std::vector<D3D_SHADER_MACRO> macros;bool low=false;
-   for(const D3D_SHADER_MACRO* define=program.defines;define&&define->Name;++define){macros.push_back(*define);low|=std::strcmp(define->Name,"NATIVE_LOW")==0;}
-   if(low)continue;
+   for(const D3D_SHADER_MACRO* define=program.defines;define&&define->Name;++define){macros.push_back(*define);low|=std::strcmp(define->Name,"NATIVE_LOW")==0||std::strcmp(define->Name,"NATIVE_DOMAIN")==0;}
+   if(low)continue; // nor the material instances (material quality Off draws the general programs)
    macros.push_back({"NATIVE_OFF_MATERIALS","1"});macros.push_back({nullptr,nullptr});
+   built.macros.push_back(std::move(macros));built.programs.push_back(program);
+  }
+  for(std::size_t n=0;n<built.programs.size();++n)built.programs[n].defines=built.macros[n].data();
+  return built;
+ }();
+ out.insert(out.end(),programs.programs.begin(),programs.programs.end());
+}
+
+// D3D12: the slim terrain pass's programs again with NATIVE_TERRAIN_LEAN
+// (option terrain_slim_cuts, flush_native_d3d12): terrain, snow terrain and
+// their flat variants. None without the material code: material quality Off
+// draws the slim programs above.
+void append_native_slim_lean_programs(std::vector<ShaderProgram>& out){
+ const std::string& source=native_shader_source();
+ static const D3D_SHADER_MACRO lean[]={{"NATIVE_SHADOW_MASK","1"},{"NATIVE_TERRAIN_PS","1"},{"NATIVE_TERRAIN_SLIM","1"},{"NATIVE_TERRAIN_LEAN","1"},{nullptr,nullptr}};
+ static const D3D_SHADER_MACRO snow_lean[]={{"NATIVE_SHADOW_MASK","1"},{"NATIVE_TERRAIN_PS","1"},{"NATIVE_SNOW_TRAILS","1"},{"NATIVE_TERRAIN_SLIM","1"},{"NATIVE_TERRAIN_LEAN","1"},{nullptr,nullptr}};
+ static const D3D_SHADER_MACRO lean_flat[]={{"NATIVE_SHADOW_MASK","1"},{"NATIVE_TERRAIN_PS","1"},{"NATIVE_TERRAIN_FLAT","1"},{"NATIVE_TERRAIN_SLIM","1"},{"NATIVE_TERRAIN_LEAN","1"},{nullptr,nullptr}};
+ static const D3D_SHADER_MACRO snow_lean_flat[]={{"NATIVE_SHADOW_MASK","1"},{"NATIVE_TERRAIN_PS","1"},{"NATIVE_SNOW_TRAILS","1"},{"NATIVE_TERRAIN_FLAT","1"},{"NATIVE_TERRAIN_SLIM","1"},{"NATIVE_TERRAIN_LEAN","1"},{nullptr,nullptr}};
+ for(const D3D_SHADER_MACRO* variant:{lean,snow_lean,lean_flat,snow_lean_flat})
+  out.push_back({source,nullptr,variant,"nativePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+}
+
+// D3D12: the terrain second passes' stencil mark (option terrain_slim_stencil):
+// the full-screen pixel program (1) and the listed quads' vertex stage (2).
+void append_native_slim_mark_program(std::vector<ShaderProgram>& out){
+ out.push_back({native_shader_source(),nullptr,nullptr,"nativeSlimMissMarkPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ out.push_back({native_shader_source(),nullptr,nullptr,"nativeSlimQuadMarkVS","vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+}
+
+// D3D12: the depth prepass program of material instance batches
+// (NATIVE_PREPASS_OBJECT: no terrain record code; option prepass_object_program).
+void append_native_prepass_object_program(std::vector<ShaderProgram>& out){
+ static const D3D_SHADER_MACRO object[]={{"NATIVE_PREPASS_OBJECT","1"},{nullptr,nullptr}};
+ out.push_back({native_shader_source(),nullptr,object,"nativePrepassPS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+}
+
+// D3D12: the material pass's object motion stages (NATIVE_OBJECT_MOTION,
+// flush_native_d3d12): the vertex stage with the last-frame clip position,
+// then the object pixel program and its prepassed (shadow mask) variant,
+// each also without the material code (material quality Off).
+void append_native_motion_programs(std::vector<ShaderProgram>& out){
+ const std::string& source=native_shader_source();
+ static const D3D_SHADER_MACRO motion[]={{"NATIVE_OBJECT_MOTION","1"},{nullptr,nullptr}};
+ static const D3D_SHADER_MACRO masked[]={{"NATIVE_OBJECT_MOTION","1"},{"NATIVE_SHADOW_MASK","1"},{nullptr,nullptr}};
+ static const D3D_SHADER_MACRO off[]={{"NATIVE_OBJECT_MOTION","1"},{"NATIVE_OFF_MATERIALS","1"},{nullptr,nullptr}};
+ static const D3D_SHADER_MACRO masked_off[]={{"NATIVE_OBJECT_MOTION","1"},{"NATIVE_SHADOW_MASK","1"},{"NATIVE_OFF_MATERIALS","1"},{nullptr,nullptr}};
+ out.push_back({source,nullptr,motion,"nativeMotionWorldVS","vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ for(std::size_t vertex_class=0;vertex_class<kNativeInstanceVertexClasses;++vertex_class)
+  for(const bool check:{false,true})
+   out.push_back({source,nullptr,native_instance_vertex_defines(vertex_class,true,check),"nativeMotionWorldVS","vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ for(const D3D_SHADER_MACRO* variant:{motion,masked,off,masked_off})
+  out.push_back({source,nullptr,variant,"nativePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ static const D3D_SHADER_MACRO gltf_motion[]={{"NATIVE_GLTF","1"},{"NATIVE_OBJECT_MOTION","1"},{nullptr,nullptr}};
+ static const D3D_SHADER_MACRO gltf_motion_masked[]={{"NATIVE_GLTF","1"},{"NATIVE_OBJECT_MOTION","1"},{"NATIVE_SHADOW_MASK","1"},{nullptr,nullptr}};
+ for(const D3D_SHADER_MACRO* variant:{gltf_motion,gltf_motion_masked})
+  out.push_back({source,nullptr,variant,"nativePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ // The material instances' motion programs (object and prepassed, then the check programs).
+ for(const bool check:{false,true})
+  for(std::size_t slot=0;slot<kNativeInstanceSlots;++slot)
+   for(const bool prepassed:{false,true})if(native_instance_built(slot))
+    out.push_back({source,nullptr,native_instance_defines(slot,prepassed,check,true),"nativePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ // The per-batch and per-frame variants of the material instances (object, prepassed, then with the
+ // object motion): without the contact blend for world object, foliage and crown impostor batches
+ // out of contact reach (NativeBatch::contact false; D3D11 binds the contact-off specialised set
+ // instead; unit programs carry no contact code), and every instance program again for dry frames
+ // (NATIVE_FRAME_DRY, native_frame_dry_).
+ for(const bool dry:{false,true})for(const bool no_contact:{false,true}){
+  if(!dry&&!no_contact)continue; // the programs above
+  for(std::size_t slot=no_contact?2u:0u;slot<kNativeInstanceSlots;++slot)if(native_instance_built(slot))
+   for(const bool motion:{false,true})for(const bool prepassed:{false,true})
+    out.push_back({source,nullptr,native_instance_defines(slot,prepassed,false,motion,no_contact,dry),"nativePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ }
+}
+
+// D3D12 indexed object draws (option indexed_object_draws, native_shader.h
+// NATIVE_INDEXED): the material instance vertex programs that read their
+// vertex owner by SV_VertexID. Per class: colour, prepass, object motion.
+const D3D_SHADER_MACRO* native_indexed_vertex_defines(std::size_t vertex_class,bool motion) noexcept{
+ static const D3D_SHADER_MACRO lists[kNativeInstanceVertexClasses][2][4]={
+  {{{"NATIVE_DOMAIN","2"},{"NATIVE_INDEXED","1"},{nullptr,nullptr}},{{"NATIVE_DOMAIN","2"},{"NATIVE_INDEXED","1"},{"NATIVE_OBJECT_MOTION","1"},{nullptr,nullptr}}},
+  {{{"NATIVE_DOMAIN","4"},{"NATIVE_INDEXED","1"},{nullptr,nullptr}},{{"NATIVE_DOMAIN","4"},{"NATIVE_INDEXED","1"},{"NATIVE_OBJECT_MOTION","1"},{nullptr,nullptr}}}};
+ return vertex_class<kNativeInstanceVertexClasses?lists[vertex_class][motion?1:0]:nullptr;
+}
+void append_native_indexed_programs(std::vector<ShaderProgram>& out){
+ const std::string& source=native_shader_source();
+ for(std::size_t vertex_class=0;vertex_class<kNativeInstanceVertexClasses;++vertex_class){
+  for(const char* entry:{"nativeVS","nativePrepassVS"})
+   out.push_back({source,nullptr,native_indexed_vertex_defines(vertex_class,false),entry,"vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+  out.push_back({source,nullptr,native_indexed_vertex_defines(vertex_class,true),"nativeMotionWorldVS","vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ }
+}
+
+// D3D12, rt_ray_reconstruction: which world material pixel programs have a
+// guide twin: every nativePS of the native lists but the Low path (no
+// material response), the unlit ordered ones (the stock sky: the guide's sky
+// defaults stay) and the debug check programs. The material-off programs
+// have twins too: they write the matte dielectric guide (the geometric
+// normal, roughness 1, F0 .04), so the traced lamp and bounce light, the
+// traced occlusion and Ray Reconstruction run with material quality Off
+// (a custom mix: the original look with ray traced light).
+bool native_guide_twinned(const ShaderProgram& program) noexcept{
+ if(std::strcmp(program.entry,"nativePS")!=0)return false;
+ for(const D3D_SHADER_MACRO* define=program.defines;define&&define->Name;++define)
+  for(const char* excluded:{"NATIVE_LOW","NATIVE_UNLIT","NATIVE_DOMAIN_CHECK","EID3D11_TESTING"})
+   if(std::strcmp(define->Name,excluded)==0)return false;
+ return true;
+}
+void append_native_guide_programs(std::vector<ShaderProgram>& out){
+ static const auto programs=[]{
+  struct Built{std::vector<ShaderProgram> programs;std::vector<std::vector<D3D_SHADER_MACRO>> macros;};
+  Built built;std::vector<ShaderProgram> sources;
+  append_native_shader_programs(sources);append_native_off_material_programs(sources);append_native_motion_programs(sources);
+  append_native_indexed_programs(sources);append_native_slim_lean_programs(sources); // native12_.programs' order (the lean slim terrain programs are twinned)
+  for(const auto& program:sources){
+   if(!native_guide_twinned(program))continue;
+   std::vector<D3D_SHADER_MACRO> macros;
+   for(const D3D_SHADER_MACRO* define=program.defines;define&&define->Name;++define)macros.push_back(*define);
+   macros.push_back({"NATIVE_RR_GUIDES","1"});macros.push_back({nullptr,nullptr});
    built.macros.push_back(std::move(macros));built.programs.push_back(program);
   }
   for(std::size_t n=0;n<built.programs.size();++n)built.programs[n].defines=built.macros[n].data();
@@ -2801,8 +3264,11 @@ HRESULT Renderer::create_native_pipeline(){
  retire_native_shadows();
  native_shadow_prepare_cs_.Reset();native_shadow_commit_cs_.Reset();native_shadow_build_cs_.Reset();native_shadow_vs_.Reset();native_shadow_ps_.Reset();
  bridge_set_native_terrain_animation_owned(false);
- native_vs_.Reset(); native_gltf_ps_.Reset();native_gltf_low_ps_.Reset();native_gltf_masked_ps_.Reset();native_gltf_masked_low_ps_.Reset();
- native_ps_.Reset();native_terrain_ps_.Reset();native_snow_ps_.Reset();native_low_ps_.Reset();native_low_unlit_ps_.Reset();native_terrain_flat_ps_.Reset();native_snow_flat_ps_.Reset();native_masked_ps_.Reset();native_masked_low_ps_.Reset();native_masked_terrain_ps_.Reset();native_masked_snow_ps_.Reset();native_masked_terrain_flat_ps_.Reset();native_masked_snow_flat_ps_.Reset();native_prepass_ps_.Reset();native_low_prepass_ps_.Reset();native_shadow_mask_vs_.Reset();native_shadow_mask_ps_.Reset();native_low_shadow_mask_ps_.Reset();native_prepass_vs_.Reset();native_depth_clear_vs_.Reset();native_liquid_ps_.Reset();native_low_liquid_ps_.Reset();native_liquid_ssr_ps_.Reset();native_liquid_foam_ps_.Reset();native_water_ps_.Reset();native_water_ssr_ps_.Reset();native_low_water_ps_.Reset();native_lava_ps_.Reset();native_build_cs_.Reset();native_world_lighting_constants_.Reset();native_world_lighting_valid_=false;native_world_lighting_dirty_=false;native_point_light_constants_.Reset();native_point_light_buffer_.Reset();native_point_light_srv_.Reset();native_point_light_capacity_=0;native_point_light_grid_buffer_.Reset();native_point_light_grid_srv_.Reset();native_point_light_grid_capacity_=0;native_point_light_grid_={};native_point_light_grid_inputs_.clear();native_point_lights_.clear();native_point_light_inputs_.clear();native_point_lights_dirty_=false;native_prepared_vertices_.Reset();native_prepared_vertex_srv_.Reset();native_prepared_vertex_uav_.Reset();native_prepared_vertex_capacity_=0;native_world_vertices_.Reset();native_world_vertex_srv_.Reset();native_world_vertex_uav_.Reset();native_world_vertex_capacity_=native_world_vertex_used_=0;
+ for(auto& program:native_instance_ps_)program.Reset();for(auto& program:native_instance_check_ps_)program.Reset();
+ for(auto& program:native_instance_vs_)program.Reset();for(auto& program:native_instance_prepass_vs_)program.Reset();for(auto& program:native_instance_check_vs_)program.Reset();
+ native_astral_vs_.Reset();native_astral_ps_.Reset();native_astral_low_ps_.Reset();
+ native_gltf_ps_.Reset();native_gltf_low_ps_.Reset();native_gltf_masked_ps_.Reset();native_gltf_masked_low_ps_.Reset();
+ native_vs_.Reset();native_ps_.Reset();native_terrain_ps_.Reset();native_snow_ps_.Reset();native_low_ps_.Reset();native_low_unlit_ps_.Reset();native_terrain_flat_ps_.Reset();native_snow_flat_ps_.Reset();native_masked_ps_.Reset();native_masked_low_ps_.Reset();native_masked_terrain_ps_.Reset();native_masked_snow_ps_.Reset();native_masked_terrain_flat_ps_.Reset();native_masked_snow_flat_ps_.Reset();native_masked_terrain_slim_ps_.Reset();native_masked_snow_slim_ps_.Reset();native_masked_terrain_slim_flat_ps_.Reset();native_masked_snow_slim_flat_ps_.Reset();native_terrain_miss_compact_cs_.Reset();terrain_miss_list_constants_.Reset();native_prepass_ps_.Reset();native_low_prepass_ps_.Reset();native_shadow_mask_vs_.Reset();native_shadow_mask_ps_.Reset();native_low_shadow_mask_ps_.Reset();native_prepass_vs_.Reset();native_depth_clear_vs_.Reset();native_liquid_ps_.Reset();native_low_liquid_ps_.Reset();native_liquid_ssr_ps_.Reset();native_liquid_foam_ps_.Reset();native_water_ps_.Reset();native_water_ssr_ps_.Reset();native_low_water_ps_.Reset();native_lava_ps_.Reset();native_liquid_swim_ps_.Reset();native_water_swim_ps_.Reset();native_build_cs_.Reset();native_world_lighting_constants_.Reset();native_world_lighting_valid_=false;native_world_lighting_dirty_=false;native_point_light_constants_.Reset();native_point_light_buffer_.Reset();native_point_light_srv_.Reset();native_point_light_capacity_=0;native_point_light_grid_buffer_.Reset();native_point_light_grid_srv_.Reset();native_point_light_grid_capacity_=0;native_point_light_grid_={};native_point_light_grid_inputs_.clear();native_point_lights_.clear();native_point_light_inputs_.clear();native_point_lights_dirty_=false;native_prepared_vertices_.Reset();native_prepared_vertex_srv_.Reset();native_prepared_vertex_uav_.Reset();native_prepared_vertex_capacity_=0;native_world_vertices_.Reset();native_world_vertex_srv_.Reset();native_world_vertex_uav_.Reset();native_world_vertex_capacity_=native_world_vertex_used_=0;
  if(feature_level_<D3D_FEATURE_LEVEL_11_0)return S_FALSE;
  std::vector<ShaderProgram> programs;append_native_shader_programs(programs);
  ComPtr<ID3DBlob> shader,error;HRESULT hr=compile_shader(programs[0],&shader,&error);if(FAILED(hr)){if(error){std::fwrite(error->GetBufferPointer(),1,error->GetBufferSize(),stderr);std::fputc('\n',stderr);}return hr;}
@@ -2827,6 +3293,35 @@ HRESULT Renderer::create_native_pipeline(){
    else if(std::strcmp(entry,"nativeShadowPrepareCS")==0)hr=create_shader(device_.Get(),shader->GetBufferPointer(),shader->GetBufferSize(),nullptr,&native_shadow_prepare_cs_);
    else if(std::strcmp(entry,"nativeShadowCommitCS")==0)hr=create_shader(device_.Get(),shader->GetBufferPointer(),shader->GetBufferSize(),nullptr,&native_shadow_commit_cs_);
    else if(std::strcmp(entry,"nativeShadowBuildCS")==0)hr=create_shader(device_.Get(),shader->GetBufferPointer(),shader->GetBufferSize(),nullptr,&native_shadow_build_cs_);
+   else if(std::strcmp(entry,"nativeTerrainMissCompactCS")==0)hr=create_shader(device_.Get(),shader->GetBufferPointer(),shader->GetBufferSize(),nullptr,&native_terrain_miss_compact_cs_);
+   else if(programs[program].defines&&std::strcmp(programs[program].defines[0].Name,"NATIVE_ASTRAL")==0){
+    // The astral rift programs (append_native_shader_programs' last three).
+    if(std::strcmp(entry,"nativeVS")==0)hr=create_shader(device_.Get(),shader->GetBufferPointer(),shader->GetBufferSize(),nullptr,native_astral_vs_.ReleaseAndGetAddressOf());
+    else hr=create_shader(device_.Get(),shader->GetBufferPointer(),shader->GetBufferSize(),nullptr,
+     programs[program].defines[1].Name?native_astral_low_ps_.ReleaseAndGetAddressOf():native_astral_ps_.ReleaseAndGetAddressOf());
+   }
+   else if(std::strstr(entry,"VS")&&programs[program].defines&&std::strcmp(programs[program].defines[0].Name,"NATIVE_DOMAIN")==0){
+    // A material instance vertex program (class from its define list).
+    std::size_t vertex_class=SIZE_MAX;bool check=false;
+    for(std::size_t c=0;c<kNativeInstanceVertexClasses;++c){
+     if(programs[program].defines==native_instance_vertex_defines(c,false))vertex_class=c;
+     else if(programs[program].defines==native_instance_vertex_defines(c,false,true)){vertex_class=c;check=true;}
+    }
+    if(vertex_class==SIZE_MAX)return native_program_failed(program,entry,E_UNEXPECTED);
+    if(check)continue; // created with the check pixel programs, on first use
+    auto& target=std::strcmp(entry,"nativePrepassVS")==0?native_instance_prepass_vs_[vertex_class]:native_instance_vs_[vertex_class];
+    hr=create_shader(device_.Get(),shader->GetBufferPointer(),shader->GetBufferSize(),nullptr,target.ReleaseAndGetAddressOf());
+   }
+   else if(std::strcmp(entry,"nativePS")==0&&programs[program].defines&&std::strcmp(programs[program].defines[0].Name,"NATIVE_DOMAIN")==0){
+    // Its slot from its define list (native_instance_defines' own pointers).
+    std::size_t index=SIZE_MAX;bool check=false;
+    for(std::size_t slot=0;slot<kNativeInstanceSlots&&index==SIZE_MAX;++slot)for(unsigned variant=0;variant<4u;++variant)
+     if(programs[program].defines==native_instance_defines(slot,(variant&1u)!=0,(variant&2u)!=0,false)){index=slot*2u+(variant&1u);check=(variant&2u)!=0;break;}
+    if(index==SIZE_MAX)return native_program_failed(program,entry,E_UNEXPECTED);
+    // The check programs are created on first use (ensure_native_instance_check_programs).
+    if(check)continue;
+    hr=create_shader(device_.Get(),shader->GetBufferPointer(),shader->GetBufferSize(),nullptr,native_instance_ps_[index].ReleaseAndGetAddressOf());
+   }
    else if(std::strcmp(entry,"nativePS")==0){
     // The one index->member mapping, in append_native_shader_programs order.
     // Pointers to members: WRL's &comptr is a ComPtrRef whose conversion to
@@ -2839,8 +3334,10 @@ HRESULT Renderer::create_native_pipeline(){
      &Renderer::native_masked_ps_,&Renderer::native_masked_low_ps_,
      &Renderer::native_masked_terrain_ps_,&Renderer::native_masked_snow_ps_,
      &Renderer::native_masked_terrain_flat_ps_,&Renderer::native_masked_snow_flat_ps_,
-     &Renderer::native_gltf_ps_,&Renderer::native_gltf_low_ps_,
-     &Renderer::native_gltf_masked_ps_,&Renderer::native_gltf_masked_low_ps_};
+     &Renderer::native_masked_terrain_slim_ps_,&Renderer::native_masked_snow_slim_ps_,
+     &Renderer::native_masked_terrain_slim_flat_ps_,&Renderer::native_masked_snow_slim_flat_ps_,
+ &Renderer::native_gltf_ps_,&Renderer::native_gltf_low_ps_,
+ &Renderer::native_gltf_masked_ps_,&Renderer::native_gltf_masked_low_ps_};
     if(pixel_variant>=std::size(variants))return native_program_failed(program,entry,E_UNEXPECTED);
     hr=create_shader(device_.Get(),shader->GetBufferPointer(),shader->GetBufferSize(),nullptr,(this->*variants[pixel_variant++]).ReleaseAndGetAddressOf());
    }
@@ -2848,7 +3345,7 @@ HRESULT Renderer::create_native_pipeline(){
     static constexpr ComPtr<ID3D11PixelShader> Renderer::* liquids[]={&Renderer::native_liquid_ps_,&Renderer::native_low_liquid_ps_,
      &Renderer::native_liquid_ssr_ps_,&Renderer::native_liquid_foam_ps_,
      &Renderer::native_water_ps_,&Renderer::native_water_ssr_ps_,&Renderer::native_low_water_ps_,&Renderer::native_lava_ps_,
-     &Renderer::native_liquid_ssr_input_ps_};
+     &Renderer::native_liquid_ssr_input_ps_,&Renderer::native_liquid_swim_ps_,&Renderer::native_water_swim_ps_};
     if(liquid_variant>=std::size(liquids))return native_program_failed(program,entry,E_UNEXPECTED);
     hr=create_shader(device_.Get(),shader->GetBufferPointer(),shader->GetBufferSize(),nullptr,(this->*liquids[liquid_variant++]).ReleaseAndGetAddressOf());
    }
@@ -2878,17 +3375,18 @@ HRESULT Renderer::create_native_pipeline(){
   }
   find_prebuilt_native_specialisations(); // the prebuilt specialised sets, once (key changes only look up)
   queue_startup_specialisations();
+  (void)create_shelter_filter_shaders();  // never at the first rain or snow bake in play
   D3D11_BUFFER_DESC shadows{};shadows.ByteWidth=sizeof(NativeShadowConstants);shadows.Usage=D3D11_USAGE_DYNAMIC;shadows.BindFlags=D3D11_BIND_CONSTANT_BUFFER;shadows.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
   if(FAILED(hr=reserve_native_owned_texture_bytes(shadows.ByteWidth,true)))return hr;
   if(FAILED(hr=device_->CreateBuffer(&shadows,nullptr,&native_shadow_constants_))||FAILED(hr=upload_native_shadow_constants(0)))return hr;
   D3D11_BUFFER_DESC lighting{};lighting.ByteWidth=sizeof(NativeWorldLighting);lighting.Usage=D3D11_USAGE_DYNAMIC;lighting.BindFlags=D3D11_BIND_CONSTANT_BUFFER;lighting.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
   if(FAILED(hr=device_->CreateBuffer(&lighting,nullptr,&native_world_lighting_constants_)))return hr;
   // 32 bytes of point-light grid, then the cave volume (cave_irradiance.h).
-  D3D11_BUFFER_DESC point_count{};point_count.ByteWidth=64;point_count.Usage=D3D11_USAGE_DYNAMIC;point_count.BindFlags=D3D11_BIND_CONSTANT_BUFFER;point_count.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
-  const std::array<UINT,16> no_point_lights{};D3D11_SUBRESOURCE_DATA initial_count{};initial_count.pSysMem=no_point_lights.data();
+  D3D11_BUFFER_DESC point_count{};point_count.ByteWidth=112;point_count.Usage=D3D11_USAGE_DYNAMIC;point_count.BindFlags=D3D11_BIND_CONSTANT_BUFFER;point_count.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
+  const std::array<UINT,28> no_point_lights{};D3D11_SUBRESOURCE_DATA initial_count{};initial_count.pSysMem=no_point_lights.data();
   if(FAILED(hr=device_->CreateBuffer(&point_count,&initial_count,&native_point_light_constants_)))return hr;
   native_point_constants_dirty_=true;
- D3D11_BUFFER_DESC work_range{};work_range.ByteWidth=16;work_range.Usage=D3D11_USAGE_DYNAMIC;
+ D3D11_BUFFER_DESC work_range{};work_range.ByteWidth=32;work_range.Usage=D3D11_USAGE_DYNAMIC;
  work_range.BindFlags=D3D11_BIND_CONSTANT_BUFFER;work_range.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
  if(FAILED(hr=device_->CreateBuffer(&work_range,nullptr,&native_work_range_constants_)))return hr;
  // Terrain value-noise lattice (terrainNoise): each texel is the top byte of
@@ -3328,11 +3826,10 @@ HRESULT Renderer::upload_native_geometry(UINT page_index,UINT offset,const void*
  profiler_.add_upload(bytes);return S_OK;
 }
 
-HRESULT Renderer::upload_native_work_range(const NativeDispatchRange& range,bool capture_lod){
+HRESULT Renderer::upload_native_work_range(const NativeDispatchRange& range,UINT motion_stamp,UINT chunks,UINT scratch,bool capture_lod){
  PERF06_SCOPE("upload_work");
  if(!context_||!native_work_range_constants_||!range.count)return E_INVALIDARG;
- // Only the main-camera colour dispatch opts in; pose and shadow work stays zero.
- const std::array<UINT,4> values{range.first,range.count,capture_lod?1u:0u,0};
+ const std::array<UINT,8> values{range.first,range.count,motion_stamp,0,chunks,scratch,capture_lod?1u:0u,0}; // nativeMotionStamp (storeNativeWorldVertex), nativeWorkChunks, nativeWorkScratch
  D3D11_MAPPED_SUBRESOURCE mapped{};
  const HRESULT hr=context_->Map(native_work_range_constants_.Get(),0,
   D3D11_MAP_WRITE_DISCARD,0,&mapped);if(FAILED(hr))return hr;
@@ -3402,6 +3899,11 @@ void Renderer::release() {
  release_terrain2_cache();terrain2_cache_vs_.Reset();terrain2_cache_ps_.Reset();terrain2_cache_sampler_.Reset();terrain2_cache_raster_.Reset();
  terrain2_cache_bake_constants_.Reset();terrain2_cache_params_.Reset();terrain2_cache_params_srv_.Reset();
  terrain2_cache_failed_=false;terrain2_cache_frame_=UINT64_MAX;
+ release_terrain_face_cache();face_vs_.Reset();face_ps_.Reset();face_sampler_.Reset();face_raster_.Reset();face_bake_constants_.Reset();
+ face_failed_=false;face_frame_=UINT64_MAX;face_map_=UINT64_MAX;face_atlas_job_={};
+ face_fb_vs_.Reset();face_fb_ps_.Reset();face_fb_constants_.Reset();face_fb_depth_.Reset();face_fb_dsv_.Reset();face_fb_depth_write_.Reset();face_fb_depth_test_.Reset();face_programs12_.clear();
+ face_check_vs_.Reset();face_check_ps_.Reset();face_check_view_.Reset();face_check_depth_.Reset();face_check_staging_view_.Reset();face_check_rtv_.Reset();
+ face_check_dsv_.Reset();face_check_depth_state_.Reset();face_check_counters_.Reset();face_check_staging_.Reset();face_check_constants_.Reset();face_check_uav_.Reset();face_check_pending_=0;
  retire_native_shadows();
  native_shadow_prepare_cs_.Reset();native_shadow_commit_cs_.Reset();native_shadow_build_cs_.Reset();native_shadow_vs_.Reset();native_shadow_ps_.Reset();
  finish_placed_hitch_profile(PlacedHitchFinishReason::renderer_release);
@@ -3434,7 +3936,7 @@ void Renderer::release() {
 #endif
  if(context_)context_->ClearState();
 
- game_particle_vs_.Reset();game_particle_ps_.Reset();game_particle_constants_.Reset();game_particle_buffer_.Reset();game_particle_srv_.Reset();
+ game_particle_vs_.Reset();game_particle_ps_.Reset();game_particle_debug_ps_.Reset();game_particle_constants_.Reset();game_particle_buffer_.Reset();game_particle_srv_.Reset();
  game_ribbon_vs_.Reset();game_selection_vs_.Reset();game_mesh_vs_.Reset();game_glyph_vs_.Reset();std::vector<GameParticleGpu>().swap(game_effect_elements_);
  game_particle_capacity_=0;game_particle_pipeline_failed_=false;std::vector<std::uint32_t>().swap(game_particle_order_);
  reset_pipeline_warmup();warmup_query_.Reset();warmup_targets_.clear();warmup_depths_.clear();
@@ -3513,7 +4015,7 @@ void Renderer::release() {
  native_build_cs_.Reset();native_pose_cs_.Reset();retire_native_poses();
   native_gltf_ps_.Reset();native_gltf_low_ps_.Reset();native_gltf_masked_ps_.Reset();native_gltf_masked_low_ps_.Reset();
  native_ps_.Reset();native_terrain_ps_.Reset();
- native_snow_ps_.Reset();native_low_ps_.Reset();native_low_unlit_ps_.Reset();native_terrain_flat_ps_.Reset();native_snow_flat_ps_.Reset();native_masked_ps_.Reset();native_masked_low_ps_.Reset();native_masked_terrain_ps_.Reset();native_masked_snow_ps_.Reset();native_masked_terrain_flat_ps_.Reset();native_masked_snow_flat_ps_.Reset();native_prepass_ps_.Reset();native_low_prepass_ps_.Reset();native_shadow_mask_vs_.Reset();native_shadow_mask_ps_.Reset();native_low_shadow_mask_ps_.Reset();native_liquid_ps_.Reset();native_low_liquid_ps_.Reset();native_liquid_ssr_ps_.Reset();native_liquid_foam_ps_.Reset();native_water_ps_.Reset();native_water_ssr_ps_.Reset();native_low_water_ps_.Reset();native_lava_ps_.Reset();
+ native_snow_ps_.Reset();native_low_ps_.Reset();native_low_unlit_ps_.Reset();native_astral_vs_.Reset();native_astral_ps_.Reset();native_astral_low_ps_.Reset();native_terrain_flat_ps_.Reset();native_snow_flat_ps_.Reset();native_masked_ps_.Reset();native_masked_low_ps_.Reset();native_masked_terrain_ps_.Reset();native_masked_snow_ps_.Reset();native_masked_terrain_flat_ps_.Reset();native_masked_snow_flat_ps_.Reset();native_masked_terrain_slim_ps_.Reset();native_masked_snow_slim_ps_.Reset();native_masked_terrain_slim_flat_ps_.Reset();native_masked_snow_slim_flat_ps_.Reset();native_terrain_miss_compact_cs_.Reset();terrain_miss_list_constants_.Reset();native_prepass_ps_.Reset();native_low_prepass_ps_.Reset();native_shadow_mask_vs_.Reset();native_shadow_mask_ps_.Reset();native_low_shadow_mask_ps_.Reset();native_liquid_ps_.Reset();native_low_liquid_ps_.Reset();native_liquid_ssr_ps_.Reset();native_liquid_foam_ps_.Reset();native_water_ps_.Reset();native_water_ssr_ps_.Reset();native_low_water_ps_.Reset();native_lava_ps_.Reset();native_liquid_swim_ps_.Reset();native_water_swim_ps_.Reset();
  
  native_vs_.Reset();
  for(auto& value:shadow_history_srv_)value.Reset();
@@ -3562,14 +4064,14 @@ void Renderer::release() {
  reset_water_reflections();
  debug_stencil_srv_.Reset();
  depth_srv_.Reset();
- dsv_.Reset();world_dsv_.Reset();world_depth_read_only_dsv_.Reset();prepass_rest_.Reset();prepass_normal_.Reset();shadow_mask_.Reset();prepass_rest_rtv_.Reset();prepass_normal_rtv_.Reset();shadow_mask_rtv_.Reset();prepass_rest_srv_.Reset();prepass_normal_srv_.Reset();shadow_mask_srv_.Reset();for(auto& state:prepass_depth_states_)state.Reset();masked_depth_state_.Reset();shadow_mask_depth_state_.Reset();shadow_mask_raster_.Reset();interface_dsv_.Reset();interface_depth_.Reset();
+ dsv_.Reset();world_dsv_.Reset();world_depth_read_only_dsv_.Reset();prepass_rest_.Reset();prepass_normal_.Reset();shadow_mask_.Reset();prepass_rest_rtv_.Reset();prepass_normal_rtv_.Reset();shadow_mask_rtv_.Reset();prepass_rest_srv_.Reset();prepass_normal_srv_.Reset();shadow_mask_srv_.Reset();terrain_miss_.Reset();terrain_miss_uav_.Reset();terrain_miss_srv_.Reset();terrain_miss_tris_.Reset();terrain_miss_tris_uav_.Reset();terrain_miss_tris_srv_.Reset();terrain_miss_tris_words_=0;terrain_miss_origin_.Reset();terrain_miss_origin_uav_.Reset();terrain_miss_origin_srv_.Reset();terrain_miss_origin_words_=0;for(auto& state:prepass_depth_states_)state.Reset();masked_depth_state_.Reset();shadow_mask_depth_state_.Reset();shadow_mask_raster_.Reset();interface_dsv_.Reset();interface_depth_.Reset();
  depth_.Reset();
  rtv_.Reset();backbuffer_rtv_.Reset();scene_composite_.reset();scene_composited_=false;
- dlss_previous_world_.Reset();dlss_previous_world_srv_.Reset();dlss_motion_constants_.Reset();dlss_motion_depth_.Reset();
+ dlss_previous_world_.Reset();dlss_previous_world_srv_.Reset();dlss_previous_world_uav_.Reset();dlss_motion_constants_.Reset();dlss_motion_depth_.Reset();
  release_fur();
  native_motion_vs_.Reset();native_motion_ps_.Reset();dlss_mode_=-1;fsr_.reset();upscale_sharpen_.reset();fsr_mode_=-1;
  gamma_lut_.Reset();gamma_lut_srv_.Reset();gamma_copy_.Reset();gamma_copy_srv_.Reset();
- gamma_vs_.Reset();gamma_ps_.Reset();gamma_sampler_.Reset();gamma_failed_=false;scene_updated_=false;deferred_ground_marks_.clear();
+ gamma_vs_.Reset();gamma_ps_.Reset();gamma_sampler_.Reset();gamma_failed_=false;scene_updated_=false;deferred_ground_marks_.clear();deferred_combat_text_.clear();
  adapter3_.Reset();
  frame_acct::uninstall_device_counters();
  context1_.Reset();context_.Reset();

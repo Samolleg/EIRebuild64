@@ -33,6 +33,25 @@ enum class HarnessVerb : std::uint8_t {
     // to the target over that many world frames, one step per present, and
     // each present's timing goes to <dir>\camera_path.jsonl.
     camera_path,
+    // equip_cycle <steps> <presents_between>: every <presents_between> world
+    // frames the first hero's appearance wears a new armour set drawn from
+    // the armour the world's units wear (SetArmors + NotifyItemsUpdated, the
+    // inventory-update path that assembles the character atlases). Visual
+    // only; the inventory does not change. Equipment-load stress.
+    equip_cycle,
+    // Outfitting-screen stress (2026-11-06), through the game's own screen calls:
+    // open_outfitting [shop]: on a mission map the Dejavu addon's go-camp
+    // skill button (the same ChangeSkill call a click makes); on a base map
+    // what a trader's "constr<shop>" dialog answer runs (SetConstructorNumber,
+    // GoCamp); then waits for the camp screen.
+    // outfit_equip <steps> <presents_between>: every <presents_between> camp
+    // frames, the screen's own ClickOnItem(stash armour, ISP_WAGON), as a
+    // click on a stash item: the doll wears it (InventoryToPers).
+    // scroll_items <steps> <presents_between>: every <presents_between> camp
+    // frames one wheel notch on the stash list (signed: + scrolls down).
+    open_outfitting,
+    outfit_equip,
+    scroll_items,
 };
 
 struct HarnessCommand {

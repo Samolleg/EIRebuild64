@@ -835,23 +835,22 @@ HRESULT Renderer::queue_character_pane_text(
     const auto map_x=[&](double p){return double(widescreen::compose_x(float(destination.left+(p-sr.left)*kx),composition))*sx;};
     const auto map_y=[&](double p){return double(widescreen::compose_y(float(destination.top+(p-sr.top)*ky),composition))*sy;};
     // A fitted card frame (CharacterPaneTextFit): surface positions scaled
-    // about the block top, glyphs composed that much smaller; a line still
-    // ending below the visible surface is left out whole.
+    // about the block top, glyphs composed that much smaller; the fit holds
+    // every line inside the visible surface.
     const double f=fit?double(fit->scale):1.0;
     const auto fx=[&](double p){return fit?double(fit->center_x)+(p-fit->center_x)*f:p;};
     const auto fy=[&](double p){return fit?double(fit->top)+(p-fit->top)*f:p;};
-    if(fit&&fy(command.clip.bottom)>double(fit->bottom)+.5)continue;
     const double ex=kx*composition.scale*sx*f,ey=ky*composition.scale_y*sy*f,rs=command.raster_scale;
-    // Per axis: a horizontal-only difference (uneven canvas rounding) keeps
-    // glyph heights 1:1. The next raster uses the scale composed here, so a
-    // pane blit that scales its surface converges to 1:1 too (#185).
-    const bool exact_x=std::abs(ex-rs)<=rs*1e-4,exact_y=std::abs(ey-rs)<=rs*1e-4,exact=exact_x&&exact_y;
+    // Per axis, within kOwnedTextScaleTolerance the raster is placed 1:1
+    // (uneven canvas rounding, hair-sized rect changes). The bridge
+    // rasterizes the next pane/chat frame at the scale its blit composes at
+    // (held per source, game side, so the x64 host path gets it too), so only
+    // a real scale change is drawn filtered, for one frame (#185).
+    const double tolerance=rs*kOwnedTextScaleTolerance;
+    const bool exact_x=std::abs(ex-rs)<=tolerance,exact_y=std::abs(ey-rs)<=tolerance,exact=exact_x&&exact_y;
     const double gx=exact_x?1.0:ex/rs,gy=exact_y?1.0:ey/rs;
-    if(!exact_y&&observe_scale){
-     if(text_scale_mismatch_reports_<4){++text_scale_mismatch_reports_;char detail[128];
-      std::snprintf(detail,sizeof(detail),"raster=%.4f composed_x=%.4f composed_y=%.4f",rs,ex,ey);bridge_append_probe_event("owned_text_scale",detail);}
-     observed_text_scale_=float(ey);
-    }
+    if(!exact_y&&observe_scale&&text_scale_mismatch_reports_<4){++text_scale_mismatch_reports_;char detail[128];
+     std::snprintf(detail,sizeof(detail),"raster=%.4f composed_x=%.4f composed_y=%.4f",rs,ex,ey);bridge_append_probe_event("owned_text_scale",detail);}
     const LONG ax=std::lround(map_x(fx(command.anchor.x)))+std::lround(command.shift.x*ex),ay=std::lround(map_y(fy(command.anchor.y)))+std::lround(command.shift.y*ey);
     RECT glyph{ax+std::lround(command.offset.x*gx),ay+std::lround(command.offset.y*gy),0,0};
     glyph.right=glyph.left+std::max<LONG>(1,std::lround(source_width*gx));glyph.bottom=glyph.top+std::max<LONG>(1,std::lround(source_height*gy));
@@ -876,7 +875,6 @@ HRESULT Renderer::queue_character_pane_text(
    RECT placed=command.destination;
    if(fit){
     const double f=fit->scale;
-    if(fit->top+(placed.bottom-fit->top)*f>double(fit->bottom)+.5)continue;
     placed={std::lround(fit->center_x+(placed.left-fit->center_x)*f),std::lround(fit->top+(placed.top-fit->top)*f),
      std::lround(fit->center_x+(placed.right-fit->center_x)*f),std::lround(fit->top+(placed.bottom-fit->top)*f)};
     if(placed.bottom<=placed.top)placed.bottom=placed.top+1;
@@ -939,6 +937,71 @@ HRESULT Renderer::capture(SurfaceImage& destination,const RECT& destination_rect
    advance_surface_generation(destination,nullptr);destination.uploaded_generation=destination.generation;destination.uploaded_shape=surface_upload_shape(destination);clear_surface_dirty(destination);destination.gpu_captured=true;update_surface_memory_accounting(destination);
    return S_OK;
   }
+  // A scaled copy of part of the screen into the surface (the game's
+  // stretched Blt). The CPU path below drained the scene thread and waited
+  // for the GPU on a staging Map: 49.8 ms (laptop j190, map_stall_type 1,
+  // usage 13, 4,096,000 bytes). Here the scene thread copies the source
+  // region and draws it scaled into the destination's GPU home, in queue
+  // order, and keeps a staging copy so a later Lock reads it back without
+  // waiting for that frame. An unclipped, wholly visible source only.
+  const bool whole_source=source_rect.left>=0&&source_rect.top>=0&&
+   source_rect.right<=LONG(output_width_)&&source_rect.bottom<=LONG(output_height_);
+  const bool unclipped=clipped_destination.left==destination_rect.left&&clipped_destination.top==destination_rect.top&&
+   clipped_destination.right==destination_rect.right&&clipped_destination.bottom==destination_rect.bottom;
+  if(whole_source&&unclipped&&(destination.format.dwFlags&DDPF_RGB)&&!(destination.format.dwFlags&DDPF_FOURCC)){
+   if(destination.texture_shared){const HRESULT detached=scene_detach_surface_texture(destination,"capture");if(FAILED(detached))return detached;}
+   D3D11_TEXTURE2D_DESC td{};if(destination.texture)destination.texture->GetDesc(&td);
+   if(!destination.texture||td.Width!=destination.width||td.Height!=destination.height||td.Format!=DXGI_FORMAT_B8G8R8A8_UNORM||
+      !(td.BindFlags&D3D11_BIND_RENDER_TARGET)){
+    destination.texture.Reset();destination.srv.Reset();update_surface_memory_accounting(destination);
+    td={};td.Width=destination.width;td.Height=destination.height;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;td.Format=DXGI_FORMAT_B8G8R8A8_UNORM;
+    td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;
+    if(FAILED(device_->CreateTexture2D(&td,nullptr,&destination.texture)))return E_FAIL;
+    if(FAILED(device_->CreateShaderResourceView(destination.texture.Get(),nullptr,&destination.srv))){update_surface_memory_accounting(destination);return E_FAIL;}
+    ++destination.texture_serial;
+    update_surface_memory_accounting(destination);
+   }
+   const auto target=scene_ui::surface_handle(destination);
+   scene_ui::Residency residency;
+   try{residency.add({target,nullptr,destination.texture,nullptr});}catch(...){return E_OUTOFMEMORY;}
+   scene_ui_pending_=false;scene_native_pending_=false;
+   advance_surface_generation(destination,nullptr);
+   const std::uint64_t id=destination.id,generation=destination.generation;
+   const D3D11_BOX box{UINT(source_rect.left),UINT(source_rect.top),0,UINT(source_rect.right),UINT(source_rect.bottom),1};
+   const D3D11_VIEWPORT viewport{float(destination_rect.left),float(destination_rect.top),
+    float(destination_rect.right-destination_rect.left),float(destination_rect.bottom-destination_rect.top),0.f,1.f};
+   scene_post_frame([this,target,residency=std::move(residency),box,viewport,id,generation]{
+    const auto* home=residency.find(target);
+    ComPtr<ID3D11Texture2D> back;HRESULT hr=home?capture_source(back):E_UNEXPECTED;
+    ComPtr<ID3D11Texture2D> region;ComPtr<ID3D11ShaderResourceView> region_srv;ComPtr<ID3D11RenderTargetView> output;
+    if(SUCCEEDED(hr)){
+     D3D11_TEXTURE2D_DESC d{};back->GetDesc(&d);
+     d.Width=box.right-box.left;d.Height=box.bottom-box.top;d.MipLevels=d.ArraySize=1;d.SampleDesc.Count=1;d.SampleDesc.Quality=0;
+     d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_SHADER_RESOURCE;d.CPUAccessFlags=0;d.MiscFlags=0;
+     hr=device_->CreateTexture2D(&d,nullptr,&region);
+    }
+    if(SUCCEEDED(hr))hr=device_->CreateShaderResourceView(region.Get(),nullptr,&region_srv);
+    if(SUCCEEDED(hr))hr=device_->CreateRenderTargetView(home->texture.Get(),nullptr,&output);
+    if(SUCCEEDED(hr)){
+     const DebugViewStateGuard guard(context_.Get());  // this draw restores what the stream had bound
+     ID3D11ShaderResourceView* null_view=nullptr;context_->PSSetShaderResources(0,1,&null_view);
+     context_->CopySubresourceRegion(region.Get(),0,0,0,0,back.Get(),0,&box);
+     if(!scene_composite_.stretch(context_.Get(),output.Get(),region_srv.Get(),viewport))hr=E_NOT_VALID_STATE;
+    }
+    if(SUCCEEDED(hr)){
+     D3D11_TEXTURE2D_DESC s{};home->texture->GetDesc(&s);
+     s.Usage=D3D11_USAGE_STAGING;s.BindFlags=0;s.CPUAccessFlags=D3D11_CPU_ACCESS_READ;s.MiscFlags=0;
+     ComPtr<ID3D11Texture2D> staging;
+     if(SUCCEEDED(device_->CreateTexture2D(&s,nullptr,&staging))){
+      context_->CopyResource(staging.Get(),home->texture.Get());
+      try{capture_stagings_[id]={home->texture.Get(),generation,staging};}catch(...){}
+     }
+    }
+    report_scene_failure("capture",hr);});
+   destination.uploaded_generation=destination.generation;destination.uploaded_shape=surface_upload_shape(destination);
+   clear_surface_dirty(destination);destination.gpu_captured=true;update_surface_memory_accounting(destination);
+   return S_OK;
+  }
  }
  SCENE_ENTRY("capture");
  const RECT source_rect{MulDiv(native_source_rect.left,output_width_,canvas_width()),MulDiv(native_source_rect.top,output_height_,canvas_height()),MulDiv(native_source_rect.right,output_width_,canvas_width()),MulDiv(native_source_rect.bottom,output_height_,canvas_height())};
@@ -956,11 +1019,103 @@ HRESULT Renderer::capture(SurfaceImage& destination,const RECT& destination_rect
  D3D11_MAPPED_SUBRESOURCE mapped{};if(FAILED(hr=context_->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped)))return hr;const DWORD bytes=std::max<DWORD>(1,destination.format.dwRGBBitCount/8);const size_t required=(size_t)destination.pitch*destination.height;std::uint8_t* pixels=nullptr;try{if(destination.pixels.size()<required)destination.pixels.resize(required);pixels=destination.pixels.data();}catch(const std::bad_alloc&){context_->Unmap(staging.Get(),0);return E_OUTOFMEMORY;}for(LONG y=clipped_destination.top;y<clipped_destination.bottom;++y)for(LONG x=clipped_destination.left;x<clipped_destination.right;++x){const POINT source=capture_stretch_source_point(source_rect,destination_rect,x,y);if(source.x<clipped_source.left||source.x>=clipped_source.right||source.y<clipped_source.top||source.y>=clipped_source.bottom)continue;const auto* row=reinterpret_cast<const std::uint32_t*>(static_cast<const std::uint8_t*>(mapped.pData)+(size_t)(source.y-clipped_source.top)*mapped.RowPitch);const std::uint32_t bgra=row[source.x-clipped_source.left];const BYTE b=(BYTE)bgra,g=(BYTE)(bgra>>8),r=(BYTE)(bgra>>16),a=(BYTE)(bgra>>24);const DWORD raw=pack_channel(r,destination.format.dwRBitMask)|pack_channel(g,destination.format.dwGBitMask)|pack_channel(b,destination.format.dwBBitMask)|pack_channel(a,destination.format.dwRGBAlphaBitMask);std::memcpy(pixels+(size_t)y*destination.pitch+(size_t)x*bytes,&raw,std::min<DWORD>(bytes,4));}context_->Unmap(staging.Get(),0);destination.gpu_captured=false;mark_surface_dirty(destination,clipped_destination);advance_surface_generation(destination,&clipped_destination);update_surface_memory_accounting(destination);return S_OK;
 }
 
+HRESULT Renderer::fade_capture(SurfaceImage& image){
+ // CInterface3D::Draw2D fades the modal backdrop right after capturing it
+ // (BG_FLAG_CREATE). The game's Fade locks the surface: a scene-thread drain
+ // and a same-frame readback of the capture. The capture is on the GPU here,
+ // so the fade is a pass from its home into a new home, in queue order.
+ if(core_mode_||!scene_queue()||!image.gpu_captured||!image.texture||image.cpu_released)return S_FALSE;
+ if(!device_||!context_)return E_FAIL;
+ // CI3DSurface::Fade's 32-bit branch (masks FF0000/FF00/FF), the one the
+ // proxy's display format selects; the 16-bit branches are another formula.
+ if(image.format.dwRGBBitCount!=32||image.format.dwRBitMask!=0xFF0000u||image.format.dwGBitMask!=0xFF00u||image.format.dwBBitMask!=0xFFu)return E_NOTIMPL;
+ D3D11_TEXTURE2D_DESC td{};image.texture->GetDesc(&td);
+ if(td.Width!=image.width||td.Height!=image.height||td.Format!=DXGI_FORMAT_B8G8R8A8_UNORM)return E_NOTIMPL;
+ if(image.texture_shared){const HRESULT detached=scene_detach_surface_texture(image,"fade_capture");if(FAILED(detached))return detached;}
+ ComPtr<ID3D11ShaderResourceView> source=image.srv;
+ if(!source)return E_UNEXPECTED;
+ td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;td.SampleDesc.Quality=0;td.Usage=D3D11_USAGE_DEFAULT;
+ td.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;td.CPUAccessFlags=0;td.MiscFlags=0;
+ ComPtr<ID3D11Texture2D> faded;ComPtr<ID3D11ShaderResourceView> faded_srv;
+ if(FAILED(device_->CreateTexture2D(&td,nullptr,&faded))||FAILED(device_->CreateShaderResourceView(faded.Get(),nullptr,&faded_srv)))return E_FAIL;
+ image.texture=faded;image.srv=faded_srv;++image.texture_serial;
+ const auto target=scene_ui::surface_handle(image);
+ scene_ui::Residency residency;
+ try{residency.add({target,nullptr,image.texture,nullptr});}catch(...){return E_OUTOFMEMORY;}
+ scene_ui_pending_=false;scene_native_pending_=false;
+ const UINT width=td.Width,height=td.Height;
+ scene_post_frame([this,target,residency=std::move(residency),source,width,height]{
+  const auto* home=residency.find(target);
+  ComPtr<ID3D11RenderTargetView> output;
+  HRESULT hr=home?device_->CreateRenderTargetView(home->texture.Get(),nullptr,&output):E_UNEXPECTED;
+  if(SUCCEEDED(hr)){
+   const DebugViewStateGuard guard(context_.Get());  // restores what the stream had bound
+   if(!scene_composite_.fade(context_.Get(),output.Get(),source.Get(),width,height))hr=E_NOT_VALID_STATE;
+  }
+  report_scene_failure("fade_capture",hr);});
+ // A scaled capture's staging copy (scene thread state) is of the previous
+ // generation now, so readback no longer takes it.
+ advance_surface_generation(image,nullptr);
+ image.uploaded_generation=image.generation;image.uploaded_shape=surface_upload_shape(image);
+ clear_surface_dirty(image);image.gpu_captured=true;update_surface_memory_accounting(image);
+ return S_OK;
+}
+
+HRESULT Renderer::queue_thumbnail(const SurfaceImage& source,UINT width,UINT height,ComPtr<ID3D11Texture2D>& staging){
+ // Stretch blits the whole backdrop into a width x height surface and locks
+ // it in the same frame: a scene-thread drain and a Map that waited for the
+ // GPU (laptop j199: 51.6 ms). Here the scaled copy and its staging copy are
+ // queued; the game's buffer is filled from the staging copy when it is read.
+ staging.Reset();
+ if(core_mode_||!scene_queue()||!source.gpu_captured||!source.srv||source.cpu_released)return S_FALSE;
+ if(!device_||!context_||!width||!height)return E_FAIL;
+ D3D11_TEXTURE2D_DESC td{};td.Width=width;td.Height=height;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;
+ td.Format=DXGI_FORMAT_B8G8R8A8_UNORM;td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_RENDER_TARGET;
+ ComPtr<ID3D11Texture2D> scaled,copy;
+ if(FAILED(device_->CreateTexture2D(&td,nullptr,&scaled)))return E_FAIL;
+ td.Usage=D3D11_USAGE_STAGING;td.BindFlags=0;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+ if(FAILED(device_->CreateTexture2D(&td,nullptr,&copy)))return E_FAIL;
+ ComPtr<ID3D11ShaderResourceView> view=source.srv;  // the capture as queued so far
+ scene_ui_pending_=false;scene_native_pending_=false;
+ scene_post_frame([this,view,scaled,copy,width,height]{
+  ComPtr<ID3D11RenderTargetView> output;
+  HRESULT hr=device_->CreateRenderTargetView(scaled.Get(),nullptr,&output);
+  if(SUCCEEDED(hr)){
+   const DebugViewStateGuard guard(context_.Get());  // restores what the stream had bound
+   const D3D11_VIEWPORT viewport{0.f,0.f,float(width),float(height),0.f,1.f};
+   if(scene_composite_.stretch(context_.Get(),output.Get(),view.Get(),viewport))context_->CopyResource(copy.Get(),scaled.Get());
+   else hr=E_NOT_VALID_STATE;
+  }
+  report_scene_failure("thumbnail",hr);});
+ staging=copy;
+ return S_OK;
+}
+
+HRESULT Renderer::read_thumbnail(ID3D11Texture2D* staging,std::uint16_t* pixels,UINT width,UINT height){
+ SCENE_ENTRY("thumbnail");
+ if(!staging||!pixels||!context_)return E_FAIL;
+ D3D11_MAPPED_SUBRESOURCE mapped{};const HRESULT hr=context_->Map(staging,0,D3D11_MAP_READ,0,&mapped);if(FAILED(hr))return hr;
+ for(UINT y=0;y<height;++y){
+  const auto* row=reinterpret_cast<const std::uint32_t*>(static_cast<const std::uint8_t*>(mapped.pData)+(size_t)y*mapped.RowPitch);
+  for(UINT x=0;x<width;++x){const std::uint32_t p=row[x]&0xFFFFFFu;  // 0xRRGGBB, as Stretch decomposes it
+   pixels[(size_t)y*width+x]=std::uint16_t(((p>>8)&0xF800u)|((p>>5)&0x07E0u)|((p>>3)&0x001Fu));}
+ }
+ context_->Unmap(staging,0);
+ return S_OK;
+}
+
 HRESULT Renderer::readback(SurfaceImage& image){if(core_mode_)return core_readback_surface(image);SCENE_ENTRY("readback");
  if(!image.gpu_captured||!image.texture)return S_OK;if(!device_||!context_)return E_FAIL;
  D3D11_TEXTURE2D_DESC sourceDesc{};image.texture->GetDesc(&sourceDesc);if(sourceDesc.Format!=DXGI_FORMAT_B8G8R8A8_UNORM)return E_NOTIMPL;
  D3D11_TEXTURE2D_DESC stagingDesc=sourceDesc;stagingDesc.Usage=D3D11_USAGE_STAGING;stagingDesc.BindFlags=0;stagingDesc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;stagingDesc.MiscFlags=0;
- ComPtr<ID3D11Texture2D> staging;HRESULT hr=device_->CreateTexture2D(&stagingDesc,nullptr,&staging);if(FAILED(hr))return hr;context_->CopyResource(staging.Get(),image.texture.Get());
+ // A scaled capture of this generation left a staging copy taken with it
+ // (capture): read that, already done on the GPU, instead of a copy now.
+ ComPtr<ID3D11Texture2D> staging;HRESULT hr=S_OK;
+ if(const auto kept=capture_stagings_.find(image.id);kept!=capture_stagings_.end()){
+  if(kept->second.texture==image.texture.Get()&&kept->second.generation==image.generation)staging=kept->second.staging;
+  capture_stagings_.erase(kept);
+ }
+ if(!staging){hr=device_->CreateTexture2D(&stagingDesc,nullptr,&staging);if(FAILED(hr))return hr;context_->CopyResource(staging.Get(),image.texture.Get());}
  D3D11_MAPPED_SUBRESOURCE mapped{};hr=context_->Map(staging.Get(),0,D3D11_MAP_READ,0,&mapped);if(FAILED(hr))return hr;
  const UINT bytes=std::max<UINT>(1,image.format.dwRGBBitCount/8);const size_t required=(size_t)image.pitch*image.height;std::uint8_t* pixels=nullptr;try{if(image.pixels.size()<required)image.pixels.resize(required);pixels=image.pixels.data();}catch(const std::bad_alloc&){context_->Unmap(staging.Get(),0);return E_OUTOFMEMORY;}
  const UINT copyWidth=std::min(image.width,sourceDesc.Width),copyHeight=std::min(image.height,sourceDesc.Height);const PackedChannelTables tables(image.format);for(UINT y=0;y<copyHeight;++y){const auto* source=reinterpret_cast<const std::uint32_t*>(static_cast<const std::uint8_t*>(mapped.pData)+(size_t)y*mapped.RowPitch);pack_bgra_row(pixels+(size_t)y*image.pitch,source,copyWidth,std::min<UINT>(bytes,4),tables);}
@@ -972,13 +1127,24 @@ void Renderer::retire_surface(std::uint64_t surface_id) noexcept {
  if(scene_queue()){
   for(auto entry=overlay_mirror_.begin();entry!=overlay_mirror_.end();){
    if(entry->second.surface_id==surface_id)entry=overlay_mirror_.erase(entry);else ++entry;}
-  if(core_mode_){core_post_command(scene_ui::RetireSurface{surface_id},"retire_surface");return;}
+  if(core_mode_){
+   core_content_release(surface_id);
+   core_store_expire(GetTickCount64());
+   core_post_command(scene_ui::RetireSurface{surface_id},"retire_surface");
+   return;
+  }
   scene_post([this,command=scene_ui::RetireSurface{surface_id}]{retire_surface(command.surface_id);});
   return;
  }
  scene_mip_textures_.erase(surface_id);
+ capture_stagings_.erase(surface_id);  // a scaled capture's staging copy
  // D3D12: a material profile keyed by this surface (note_material_texture).
  if(d3d12_&&!material_profiles_.empty()&&material_profiles_.erase((2ull<<62)|surface_id))++material_profiles_revision_;
+ // Its authored chain record and that chain's per-surface profile.
+ if(const auto chain=authored_surface_chains_.find(surface_id);chain!=authored_surface_chains_.end()){
+  if(chain->second.backing&&material_profiles_.erase(chain->second.backing))++material_profiles_revision_;
+  authored_surface_chains_.erase(chain);
+ }
  // A completed Blt owns its queued pixels even if its source is released
  // before the UI flush. Keep cache hits alive only through those queued draws.
  for(auto& pending:pending_blits_){
@@ -1069,6 +1235,35 @@ void Renderer::retire_camp_texture(std::uint64_t surface_id,std::uint64_t genera
  // Queued buckets retain their COM references until normal submission/discard.
  // Unreferenced buckets can retire now, without flushing another pass.
  trim_native_material_groups();
+}
+
+void Renderer::core_release_camp_homes(const std::vector<std::uint64_t>& surface_ids) noexcept {
+ if(surface_ids.empty())return;
+ {std::lock_guard<std::mutex> guard(native_owned_textures_lock_);
+ for(const auto id:surface_ids)try{
+  // The camp alias key of get_native_owned_texture and its D3D12 twin.
+  native_owned_textures_.erase("surface:"+std::to_string(id)+"|mips=authored|camp");
+ }catch(...){}}
+ for(const auto id:surface_ids)core_surfaces_.erase(id);
+ trim_native_material_groups();
+}
+
+HRESULT Renderer::core_upload_camp_home(SurfaceImage& image,const std::vector<std::vector<std::uint32_t>>& levels){
+ if(!d3d12_)return S_FALSE;
+ if(levels.empty()||!image.width||!image.height||levels.size()!=full_mip_count(image.width,image.height))return E_INVALIDARG;
+ D3D12TextureRef texture;
+ HRESULT hr=d3d12_->create_texture(image.width,image.height,DXGI_FORMAT_B8G8R8A8_UNORM,texture,UINT(levels.size()));
+ if(FAILED(hr)||!texture)return FAILED(hr)?hr:E_FAIL;
+ for(UINT level=0;level<levels.size();++level){
+  const UINT width=(std::max)(1u,image.width>>level),height=(std::max)(1u,image.height>>level);
+  if(levels[level].size()<std::size_t(width)*height)return E_INVALIDARG;
+  if(FAILED(hr=d3d12_->write_texture(*texture,RECT{0,0,LONG(width),LONG(height)},levels[level].data(),width*4u,level)))return hr;
+ }
+ // Uploaded for this generation with its whole chain: upload_d3d12 keeps it.
+ image.d3d12=std::move(texture);++image.texture_serial;
+ image.uploaded_generation=image.generation;image.uploaded_shape=surface_upload_shape(image);
+ image.pixels.clear();image.cpu_released=true;
+ return S_OK;
 }
 
 void Renderer::invalidate_camp_popup() noexcept{
@@ -1553,8 +1748,19 @@ void Renderer::ui_run_present_image(scene_ui::PresentImage& command,const scene_
  }catch(...){report_scene_failure("present_image",E_OUTOFMEMORY);}
 }
 void Renderer::ui_run_draw_frame(scene_ui::DrawFrame& command,const scene_ui::Residency& residency){
- for(std::size_t index=0;index<command.packets.size()&&index<command.textures.size();++index)
-  command.packets[index].texture=residency.image(command.textures[index]);
+ // A packet that samples a camp icon binding is not drawn at all (its
+ // cropped home has no coordinate mapping here; Host/core_camp.cpp logs it):
+ // never as an untextured polygon.
+ std::size_t kept=0;
+ for(std::size_t index=0;index<command.packets.size();++index){
+  const bool named=index<command.textures.size();
+  if(named&&command.textures[index].present&&
+     scene_ui::core_camp_icon_unmapped(command.textures[index].id,command.textures[index].generation))continue;
+  if(named)command.packets[index].texture=residency.image(command.textures[index]);
+  if(kept!=index)command.packets[kept]=std::move(command.packets[index]);
+  ++kept;
+ }
+ command.packets.resize(kept);
  report_scene_failure("draw_frame",draw_frame(command.packets,command.vertex_bytes,command.indices));
 }
 
@@ -1563,10 +1769,47 @@ void Renderer::ui_run_draw_frame(scene_ui::DrawFrame& command,const scene_ui::Re
 // pitch) as a SurfaceWrite; the host mirrors it and uploads it on its device.
 // The CPU pixels stay here: nothing can restore released bytes from the host
 // yet, so core mode never releases them (listed for S4/S5).
+namespace {
+// 64-bit content hash of a surface's bytes (core_sent_hash); never 0.
+std::uint64_t surface_bytes_hash(const std::uint8_t* data,std::size_t size) noexcept{
+ std::uint64_t hash=0x9E3779B97F4A7C15ull^size;
+ std::size_t at=0;
+ for(;at+8<=size;at+=8){
+  std::uint64_t word;std::memcpy(&word,data+at,8);
+  hash^=word*0xC2B2AE3D27D4EB4Full;hash=(hash<<31)|(hash>>33);hash*=0x9E3779B97F4A7C15ull;
+ }
+ for(;at<size;++at){hash^=data[at]*0x165667B19E3779F9ull;hash=(hash<<11)|(hash>>53);hash*=0x9E3779B97F4A7C15ull;}
+ hash^=hash>>29;hash*=0xBF58476D1CE4E5B9ull;hash^=hash>>32;
+ return hash?hash:1;
+}
+}  // namespace
+
+void Renderer::core_content_release(std::uint64_t id) noexcept{
+ const auto found=core_surface_content_.find(id);
+ if(found==core_surface_content_.end())return;
+ const auto stored=core_store_.find(found->second);
+ if(stored!=core_store_.end()&&stored->second.holders&&!--stored->second.holders)stored->second.released=GetTickCount64();
+ core_surface_content_.erase(found);
+}
+
+// Stored content no surface has held for kCoreStoreGraceMs leaves the host's
+// store (the game drops a reloaded atlas's old surface just before it loads
+// the same bytes into a new one).
+namespace { constexpr ULONGLONG kCoreStoreGraceMs = 2000; }
+void Renderer::core_store_expire(ULONGLONG now) noexcept{
+ for(auto stored=core_store_.begin();stored!=core_store_.end();){
+  if(stored->second.holders||now-stored->second.released<kCoreStoreGraceMs){++stored;continue;}
+  try{scene_ui::RetireSurface evict;evict.evict_content=stored->first;core_post_command(evict,"retire_surface");}
+  catch(...){++stored;continue;}  // still held there: keep its record
+  stored=core_store_.erase(stored);
+ }
+}
+
 #if defined(EID3D11_EMBEDDED) || defined(EID3D11_SHADER_TOOL)
 HRESULT Renderer::core_surface_write(SurfaceImage& image) { return E_NOTIMPL; }
 #else
 HRESULT Renderer::core_surface_write(SurfaceImage& image){
+ if(!core_store_.empty())core_store_expire(GetTickCount64());
  const bool shape_same=same_surface_upload_shape(image.uploaded_shape,surface_upload_shape(image));
  if(image.uploaded_generation==image.generation&&!image.dirty_full&&!image.dirty_rect_valid&&shape_same)return S_OK;
  if(image.pixels.empty()||image.pitch<=0||image.cpu_released)return E_FAIL;
@@ -1585,10 +1828,39 @@ HRESULT Renderer::core_surface_write(SurfaceImage& image){
    write.whole=false;write.dirty=image.dirty_rect;write.first_row=std::uint32_t(first);write.rows=std::uint32_t(rows);
    write.bytes.assign(pixels+offset,pixels+offset+bytes);
   }else{
-   write.whole=true;write.rows=image.height;
-   write.bytes.assign(pixels,pixels+image.pixels.size());
+   const std::uint64_t hash=surface_bytes_hash(pixels,image.pixels.size());
+   if(shape_same&&image.uploaded_generation&&!image.gpu_captured&&
+      image.uploaded_generation==image.core_sent_generation&&image.core_sent_hash==hash){
+    // The host holds these exact bytes: an empty partial write moves its
+    // generation (SurfaceWrite::run) without the bytes.
+    write.whole=false;write.dirty=RECT{};write.first_row=0;write.rows=0;
+   }else{
+    write.whole=true;write.rows=image.height;
+    image.core_sent_hash=hash;
+    // Bytes the host's content store holds go as a reference to them.
+    core_content_release(image.id);
+    const auto stored=image.gpu_captured?core_store_.end():core_store_.find(hash);
+    const bool same_shape=stored!=core_store_.end()&&stored->second.width==image.width&&
+     stored->second.height==image.height&&stored->second.pitch==image.pitch&&
+     std::memcmp(&stored->second.format,&image.format,sizeof(image.format))==0;
+    if(same_shape){
+     write.from_store=true;write.content_hash=hash;
+    }else{
+     write.bytes.assign(pixels,pixels+image.pixels.size());
+     if(!image.gpu_captured&&stored==core_store_.end()){
+      CoreStoredContent content;content.width=image.width;content.height=image.height;
+      content.pitch=image.pitch;content.format=image.format;
+      core_store_.emplace(hash,content);
+      write.to_store=true;write.content_hash=hash;
+     }
+    }
+    if(write.from_store||write.to_store){core_surface_content_[image.id]=hash;++core_store_[hash].holders;}
+   }
   }
+  if(partial)image.core_sent_hash=0;
+  if(partial||image.gpu_captured)core_content_release(image.id);
   core_post_command(write,"surface_write");
+  image.core_sent_generation=image.generation;
  }catch(...){return E_OUTOFMEMORY;}
  image.uploaded_generation=image.generation;image.uploaded_shape=surface_upload_shape(image);
  clear_surface_dirty(image);
@@ -1640,6 +1912,7 @@ scene_ui::Residency Renderer::core_residency(const std::vector<scene_ui::Surface
  scene_ui::Residency residency;
  for(const auto& handle:handles){
   if(!handle.present||residency.find(handle))continue;
+  if(scene_ui::core_camp_icon_unmapped(handle.id,handle.generation))continue;
   auto snapshot=core_surface_snapshot(handle.id,handle.generation);
   if(!snapshot)continue;
   ComPtr<ID3D11Texture2D> texture=snapshot->texture;ComPtr<ID3D11ShaderResourceView> srv=snapshot->srv;
@@ -1649,6 +1922,15 @@ scene_ui::Residency Renderer::core_residency(const std::vector<scene_ui::Surface
  return residency;
 }
 #endif
+
+namespace {
+// Host: a game surface's table entry. Its memory accounting (the F10 game-texture
+// bytes) goes when the last holder drops it; the table erases and replaces entries
+// without the game process's Surface destructor that releases it there.
+std::shared_ptr<SurfaceImage> new_core_surface(){
+ return std::shared_ptr<SurfaceImage>(new SurfaceImage,[](SurfaceImage* image){release_surface_memory_accounting(*image);delete image;});
+}
+}  // namespace
 
 namespace scene_ui {
 
@@ -1666,13 +1948,28 @@ void SurfaceWrite::run(Renderer& renderer){
    bridge_report_event("core_surface_write_failed",detail);
    return;
   }
-  entry=std::make_shared<SurfaceImage>();
+  entry=new_core_surface();
   entry->id=id;entry->width=width;entry->height=height;entry->pitch=pitch;entry->format=format;
  }
  SurfaceImage& image=*entry;
- if(whole){
+ if(whole&&from_store){
+  // The game process sends from_store only for content it stored and has
+  // not evicted, in this same command stream.
+  const auto stored=renderer.core_content_store_.find(content_hash);
+  // (Its shape equals this surface's there; block formats are not pitch*height bytes.)
+  if(stored==renderer.core_content_store_.end()||stored->second.empty()){
+   renderer.core_surfaces_.erase(id);
+   char detail[160];std::snprintf(detail,sizeof(detail),"surface=%llu: content %016llx is not in the host's store (protocol fault; omitted until a whole write)",
+    static_cast<unsigned long long>(id),static_cast<unsigned long long>(content_hash));
+   bridge_report_event("core_surface_write_failed",detail);
+   return;
+  }
+  image.pixels=stored->second;
+  mark_surface_dirty_full(image);
+ }else if(whole){
   image.pixels=bytes;
   mark_surface_dirty_full(image);
+  if(to_store)try{renderer.core_content_store_.insert_or_assign(content_hash,image.pixels);}catch(...){}
  }else{
   const std::size_t offset=std::size_t(first_row)*std::size_t(pitch);
   if(offset+bytes.size()>image.pixels.size()){
@@ -1708,6 +2005,8 @@ void Cursor::run(Renderer& renderer){
  Renderer::report_scene_failure("queue_cursor",renderer.queue_cursor(cache_key,pixels,width,height,destination));
 }
 void RetireSurface::run(Renderer& renderer){
+ if(evict_content)renderer.core_content_store_.erase(evict_content);
+ if(!surface_id)return;
  renderer.core_surfaces_.erase(surface_id);
  renderer.retire_surface(surface_id);
 }
@@ -1725,9 +2024,6 @@ void HudFrameLayer::run(Renderer& renderer){
 }
 
 // ---- core mode: camp icons and prepared figures (claude/s3-store) ----
-// The host icon worker's alpha fact for a bound camp icon surface
-// (Host/core_camp.cpp; the game process's build answers false).
-bool core_camp_icon_opaque(std::uint64_t id,std::uint64_t generation,bool& opaque) noexcept;
 namespace {
 // The host's prepared handles per prepared identity: what the game process
 // keeps in its object plan (the renderer validates every handle against its
@@ -1743,7 +2039,65 @@ struct PreparedHandles{NativePreparedMeshHandle mesh;NativePreparedMaterialHandl
 std::map<PreparedKey,PreparedHandles> g_core_prepared;
 std::uint64_t g_core_prepared_epoch=0;
 }
+// Host: stored packet arrays the game stopped referencing.
+#if !defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_TOOL)
+void PacketStoreEvict::run(Renderer&){
+ for(const auto hash:hashes)core_packet_store().erase(hash);
+}
+#endif
 void Packet::run(Renderer& renderer){
+ if(store_missing){
+  // The game referenced arrays the store does not hold (a wire-order or
+  // eviction fault): the packet is omitted, never drawn from other bytes.
+  static bool logged=false;
+  if(!logged){logged=true;bridge_report_event("core_packet_store_missing","a scene packet named arrays the host store does not hold (omitted)");}
+  if(renderer.d3d12_)renderer.d3d12_->omit("scene_packet (store reference missing)",!renderer.scene_composited_);
+  return;
+ }
+ // A camp icon's home holds only the used rectangle of the game's canvas,
+ // reduced to display size with its mip chain (Host/core_camp.cpp). The
+ // packet's canvas coordinates are mapped into it here, in a copy that lives
+ // through the submit (the mesh is keyed by these bytes, never by the game
+ // figure's revision or a prepared handle). Outside the rectangle the canvas
+ // is transparent: the border address mode answers the same.
+ std::vector<NativeTextureCoordinate> camp_coordinates;
+ const bool camp_alias=camp_surface_present&&view.owned_texture.camp_surface_alias;
+ if(camp_alias||bound.present){
+  CampIconHome home;
+  const std::uint64_t id=camp_alias?camp_surface.id:bound.id,generation=camp_alias?camp_surface.generation:bound.generation;
+  const int found=core_camp_icon_home(renderer,id,generation,home);
+  if(found==2)return;
+  if(found==1){
+   const auto& source=stored?stored->coordinates:coordinates;
+   try{camp_coordinates.resize(source.size());}catch(const std::bad_alloc&){Renderer::report_scene_failure("scene.camp_icon",E_OUTOFMEMORY);return;}
+   float least_u=0,most_u=1,least_v=0,most_v=1;
+   for(std::size_t index=0;index<source.size();++index){
+    const float u=source[index].u+view.u_shift,v=source[index].v+view.v_shift;
+    least_u=(std::min)(least_u,u);most_u=(std::max)(most_u,u);least_v=(std::min)(least_v,v);most_v=(std::max)(most_v,v);
+    camp_coordinates[index].u=(u-home.u0)*home.su;
+    camp_coordinates[index].v=(v-home.v0)*home.sv;
+   }
+   // Canvas coordinates outside 0..1 repeat or clamp the canvas: a cropped
+   // axis cannot answer that, so this surface's next home keeps it whole.
+   // Until that home is installed the packet is not drawn (never with a
+   // transparent border where the game repeats the canvas).
+   const bool outside_u=home.border_u&&(least_u<-1e-4f||most_u>1.0001f),outside_v=home.border_v&&(least_v<-1e-4f||most_v>1.0001f);
+   if(outside_u||outside_v){core_camp_icon_outside(id,generation,outside_u,outside_v);return;}
+   remapped_coordinates=&camp_coordinates;
+   // The mapped arrays' identity without hashing them on every draw: the
+   // packet store's hash of the game's arrays and what was applied to them.
+   if(store_hash){
+    const float mapping[6]={view.u_shift,view.v_shift,home.u0,home.v0,home.su,home.sv};
+    view.content_fingerprint=native_mesh_content_hash_bytes(native_mesh_content_hash_bytes(0x63616d7069636f6eull,&store_hash,sizeof(store_hash)),mapping,sizeof(mapping));
+    view.content_fingerprint_valid=true;
+   }
+   view.u_shift=view.v_shift=0;view.geometry_revision_valid=false;prepared_handles=0;
+   if(home.border_u)state.stage[0][D3DTSS_ADDRESSU]=D3DTADDRESS_BORDER;
+   if(home.border_v)state.stage[0][D3DTSS_ADDRESSV]=D3DTADDRESS_BORDER;
+   state.stage[0][D3DTSS_MIPFILTER]=D3DTFP_LINEAR;
+   if(camp_alias){camp_surface.alpha_fully_opaque=home.opaque;view.owned_texture.opaque_mips=home.opaque?1u:0u;}
+  }
+ }
  if(renderer.d3d12_){
   // D3D12 backend: interface packets are queued: the owned HUD meshes and
   // every plain packet after the frame's world composite (the interface 3D;
@@ -1753,7 +2107,7 @@ void Packet::run(Renderer& renderer){
   const bool interface_time=renderer.scene_composited_||view.semantic_kind==SemanticKind::ui;
   const bool plain=!camp_surface_present&&!prepared_handles&&!view.world.enabled&&!view.static_submission&&
    !view.prepared_submission&&!view.depth_submission&&
-   (!view.owned_texture.identity||(!view.owned_texture.surface&&!mips.empty()));
+   (!view.owned_texture.identity||(!view.owned_texture.surface&&!bound_mips().empty()));
   // A camp icon packet (the popup's item icons) samples its host-decoded
   // icon through the owned texture cache, as on D3D11.
   const bool camp=camp_surface_present&&!prepared_handles&&view.owned_texture.camp_surface_alias;
@@ -1779,10 +2133,6 @@ void Packet::run(Renderer& renderer){
    return;
   }
   if(camp){
-   bool opaque=false;
-   if(core_camp_icon_opaque(camp_surface.id,camp_surface.generation,opaque)){
-    camp_surface.alpha_fully_opaque=opaque;view.owned_texture.opaque_mips=opaque?1u:0u;
-   }
    renderer.d3d12_->count("interface packets queued (camp icons)");
    submit_scene_packet(renderer,*this,nullptr,nullptr);
    return;
@@ -1803,10 +2153,6 @@ void Packet::run(Renderer& renderer){
   if(prepared_handles&4u)view.prepared_wound_material=&handles.wound;
  }
  if(camp_surface_present){
-  bool opaque=false;
-  if(core_camp_icon_opaque(camp_surface.id,camp_surface.generation,opaque)){
-   camp_surface.alpha_fully_opaque=opaque;view.owned_texture.opaque_mips=opaque?1u:0u;
-  }
   submit_scene_packet(renderer,*this,nullptr,nullptr);
   return;
  }
@@ -1820,7 +2166,7 @@ void Capture::run(Renderer& renderer){
  if(renderer.d3d12_){
   // The D3D12 frame drawn so far into the surface's own D3D12 texture.
   if(!entry||entry->width!=width||entry->height!=height||!entry->d3d12){
-   entry=std::make_shared<SurfaceImage>();entry->id=target.id;entry->width=width;entry->height=height;entry->pitch=LONG(width*4);
+   entry=new_core_surface();entry->id=target.id;entry->width=width;entry->height=height;entry->pitch=LONG(width*4);
    entry->format.dwSize=sizeof(DDPIXELFORMAT);entry->format.dwFlags=DDPF_RGB;entry->format.dwRGBBitCount=32;
    entry->format.dwRBitMask=0x00ff0000;entry->format.dwGBitMask=0x0000ff00;entry->format.dwBBitMask=0x000000ff;
    if(FAILED(renderer.d3d12_->create_texture(width,height,DXGI_FORMAT_B8G8R8A8_UNORM,entry->d3d12))){
@@ -1838,7 +2184,7 @@ void Capture::run(Renderer& renderer){
   return;
  }
  if(!entry||entry->width!=width||entry->height!=height||!entry->texture){
-  entry=std::make_shared<SurfaceImage>();entry->id=target.id;entry->width=width;entry->height=height;entry->pitch=LONG(width*4);
+  entry=new_core_surface();entry->id=target.id;entry->width=width;entry->height=height;entry->pitch=LONG(width*4);
   entry->format.dwSize=sizeof(DDPIXELFORMAT);entry->format.dwFlags=DDPF_RGB;entry->format.dwRGBBitCount=32;
   entry->format.dwRBitMask=0x00ff0000;entry->format.dwGBitMask=0x0000ff00;entry->format.dwBBitMask=0x000000ff;
   D3D11_TEXTURE2D_DESC td{};td.Width=width;td.Height=height;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;

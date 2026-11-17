@@ -113,7 +113,9 @@ HRESULT Renderer::set_native_static_object(std::uint64_t key,const NativePrepare
  if(native_shadow_collecting_)return E_FAIL;
  remove_native_static_object(key);
  const auto first=native_pending_draws_.size();
+ native_static_registration_=true;
  const HRESULT hr=queue_native_records(submission,frame,nullptr,result);
+ native_static_registration_=false;
  if(FAILED(hr))return hr;
  return adopt_native_static_draws(native_static_set_,key,first,registered);
 }
@@ -131,6 +133,7 @@ HRESULT Renderer::set_native_static_terrain(std::uint64_t key,const NativeGeomet
 
 void Renderer::remove_native_static_object(std::uint64_t key,bool terrain) noexcept{SCENE_ENTRY("remove_native_static_object");
  auto& set=terrain?native_terrain_set_:native_static_set_;
+ if(!terrain)active_statics_.keys.erase(key);
  const auto found=set.objects.find(key);
  if(found==set.objects.end())return;
  // An added key is not in the bake: removing it leaves the bake current.
@@ -142,6 +145,7 @@ void Renderer::remove_native_static_object(std::uint64_t key,bool terrain) noexc
 }
 
 HRESULT Renderer::flush_native_static_set(NativeStaticSet& set,const FixedState& frame){
+ note_terrain_slim_lists(); // before the bake is reused
  // Expiry scan, enqueue and flush preparation of the persistent static set
  // are its own CPU work, not the preceding pass's (ground cover/critters).
  transition_profile_pass("static_set_prepare");
@@ -223,6 +227,10 @@ HRESULT Renderer::flush_native_static_set(NativeStaticSet& set,const FixedState&
   native_frame_stats_.native_opaque_draws+=bake.opaque_draws;
   native_frame_stats_.native_cutout_draws+=bake.cutout_draws;
   native_frame_stats_.native_material_buckets+=bake.material_buckets;
+  auto& kinds=native_frame_stats_.native_world_kinds;const auto& baked=bake.world_kinds;
+  kinds.posed+=baked.posed;kinds.object_space+=baked.object_space;kinds.neighbour+=baked.neighbour;
+  kinds.posed_triangles+=baked.posed_triangles;kinds.object_space_triangles+=baked.object_space_triangles;
+  kinds.neighbour_triangles+=baked.neighbour_triangles;
  }else{
   native_static_bake_=native_pending_draws_.empty();
   try{native_pending_draws_.reserve(native_pending_draws_.size()+set.draws.size());}
@@ -246,8 +254,9 @@ HRESULT Renderer::bake_native_static_layout(NativeSubmissionLayout& layout) try{
  bake.batches.reserve(layout.batches.size());
  bake.prepared_vertices=0;bake.logical_draws=native_pending_draws_.size();
  bake.opaque_draws=bake.cutout_draws=bake.material_buckets=0;
- bake.reorderable_draws=bake.ordered_draws=0;
+ bake.reorderable_draws=bake.ordered_draws=0;bake.world_kinds={};
  for(const auto& selected:native_pending_draws_){
+  count_native_world_kind(bake.world_kinds,native_instance_records_[selected.record].command,selected.passes);
   if(native_instance_records_[selected.record].command.reorderable)++bake.reorderable_draws;
   else ++bake.ordered_draws;
  }
@@ -258,6 +267,8 @@ HRESULT Renderer::bake_native_static_layout(NativeSubmissionLayout& layout) try{
   NativeSubmissionLayout::StaticBake::Batch totals;
   totals.first_record=native_pending_draws_[native_draw_order_[batch.first_draw]].record;
   totals.xy_min[0]=totals.xy_min[1]=std::numeric_limits<float>::max();totals.xy_max[0]=totals.xy_max[1]=-std::numeric_limits<float>::max();
+  totals.liquid_xy_min[0]=totals.liquid_xy_min[1]=std::numeric_limits<float>::max();
+  totals.liquid_xy_max[0]=totals.liquid_xy_max[1]=-std::numeric_limits<float>::max();
   const auto& bucket=native_state_buckets_[batch.state_bucket];
   if(batch.state_bucket!=previous_bucket){++bake.material_buckets;previous_bucket=batch.state_bucket;}
   for(std::size_t n=batch.first_draw;n<batch.first_draw+batch.draw_count;++n){
@@ -266,6 +277,13 @@ HRESULT Renderer::bake_native_static_layout(NativeSubmissionLayout& layout) try{
    for(int axis=0;axis<2;++axis){totals.xy_min[axis]=std::min(totals.xy_min[axis],draw.bounds_min[axis]);totals.xy_max[axis]=std::max(totals.xy_max[axis],draw.bounds_max[axis]);}
    if(draw.instance.lighting_enabled){++totals.lit_draws;totals.unlit=false;}
    if(bucket.semantic_kind==SemanticKind::terrain){totals.liquid|=draw.mesh->has_liquid;totals.ground|=draw.mesh->has_ground;totals.liquid_types|=draw.mesh->liquid_types;}
+   if(bucket.semantic_kind==SemanticKind::terrain&&draw.mesh->has_liquid){
+    for(int axis=0;axis<2;++axis){
+     totals.liquid_xy_min[axis]=std::min(totals.liquid_xy_min[axis],draw.mesh->bounds_min[axis]);
+     totals.liquid_xy_max[axis]=std::max(totals.liquid_xy_max[axis],draw.mesh->bounds_max[axis]);
+    }
+    totals.liquid_wave_multiplier=std::max(totals.liquid_wave_multiplier,draw.mesh->liquid_wave_multiplier);
+   }
    totals.neighbour|=(draw.instance.flags&native_neighbour_flag)!=0;
    if(bucket.opacity==NativeOpacityClass::opaque)++bake.opaque_draws;
    else if(bucket.opacity==NativeOpacityClass::cutout)++bake.cutout_draws;
@@ -291,6 +309,15 @@ HRESULT Renderer::upload_native_static_work(NativeSubmissionLayout& layout){
   constexpr UINT maximum=(std::min)(kNativeRawElementLimit,UINT_MAX/static_cast<UINT>(sizeof(NativeDrawWorkGpu)));
   if(count>maximum)return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
   const UINT capacity=demand_growth_capacity(count,bake.work_capacity,maximum);
+  if(frame_acct::g_in_play.load(std::memory_order_relaxed)){
+   static unsigned lines=0;
+   if(lines<40){
+    ++lines;char text[160];
+    std::snprintf(text,sizeof(text),"frame=%llu work=%u->%u demand=%u",
+     static_cast<unsigned long long>(presentation_frame_index_),bake.work_capacity,capacity,count);
+    bridge_report_event("static_bake_growth_in_play",text);
+   }
+  }
   bake.work.Reset();bake.work_srv.Reset();bake.work_capacity=0;
   D3D11_BUFFER_DESC description{};description.ByteWidth=capacity*static_cast<UINT>(sizeof(NativeDrawWorkGpu));
   description.Usage=D3D11_USAGE_DEFAULT;description.BindFlags=D3D11_BIND_SHADER_RESOURCE;
@@ -310,9 +337,21 @@ HRESULT Renderer::flush_native_static_terrain(const FixedState& frame,const std:
  if(native_shadow_collecting_)return E_FAIL;
  if(!native_pending_draws_.empty()){const HRESULT hr=flush_native();if(FAILED(hr))return hr;}
  if(!set_native_world_clip(world_to_clip))return E_FAIL;
- const HRESULT hr=flush_native_static_set(native_terrain_set_,frame);
+ // Before this frame's objects register: the catalog they may draw from.
+ update_active_statics(frame,world_to_clip);
+ // D3D12 deferred world material (renderer_native_d3d12.cpp): both sets
+ // keep their material for flush_native_static when they can.
+ const bool defer=deferred_world_wanted_d3d12();
+ const auto deferred_flush=[&](auto&& flush)->HRESULT{
+  native_flush_phase_=defer?1:0;
+  HRESULT result=flush();
+  native_flush_phase_=0;
+  if(SUCCEEDED(result)&&native_deferred_depth_writer_)result=resume_deferred_world_d3d12(true);
+  return result;
+ };
+ const HRESULT hr=deferred_flush([&]{return flush_native_static_set(native_terrain_set_,frame);});
  if(FAILED(hr))return hr;
- return render_neighbour_maps(frame,world_to_clip,false);
+ return deferred_flush([&]{return render_neighbour_maps(frame,world_to_clip,false);});
 }
 
 HRESULT Renderer::flush_native_static(const FixedState& frame,const std::array<float,16>& world_to_clip){SCENE_ENTRY("flush_native_static");
@@ -327,12 +366,25 @@ HRESULT Renderer::flush_native_static(const FixedState& frame,const std::array<f
   // Native cover runs at the same opaque-terrain boundary as D3D11.
   if(!set_native_world_clip(world_to_clip))return E_FAIL;
   {const frame_acct::Scope hiz(frame_acct::ours_static_hiz);(void)build_native_hiz_d3d12();}
-  {const frame_acct::Scope cover(frame_acct::ours_ground_cover);
-   const HRESULT cover_hr=render_ground_cover(frame,world_to_clip);if(FAILED(cover_hr))return cover_hr;}
+  const bool kept=!deferred_world12_.empty(); // terrain or neighbour material kept (deferred_world12_)
+  // A failed cover pass names itself (d3d12_->omit) and is left out; the
+  // statics below never depend on it (as on D3D11). With the terrain
+  // material kept, cover and critters draw before it: it is depth EQUAL
+  // against its own prepass, so it leaves every pixel they cover.
+  {const frame_acct::Scope cover(frame_acct::ours_ground_cover);(void)render_ground_cover(frame,world_to_clip);}
   // Ambient critters, as on D3D11 below: opaque, depth-correct, lit like world objects.
   if(critters_||critters_failed_||configured_integer(debug_overlay_.config(),"critters",2)>0||configured_integer(debug_overlay_.config(),"critter_showcase",0)>0)
    {const frame_acct::Scope critters(frame_acct::ours_critters);(void)render_critters(frame,world_to_clip);}
-  const HRESULT static_hr=flush_native_static_set(native_static_set_,frame);
+  // The static set keeps its material too: its prepass and mask meet the
+  // same depth as before, the terrain and neighbour material the final one.
+  native_flush_phase_=kept?1:0;
+  HRESULT static_hr=flush_native_static_set(native_static_set_,frame);
+  native_flush_phase_=0;
+  if(SUCCEEDED(static_hr)&&kept){
+   if(native_deferred_depth_writer_)static_hr=resume_deferred_world_d3d12(true);
+   if(SUCCEEDED(static_hr))static_hr=resume_deferred_world_d3d12(false);
+   if(SUCCEEDED(static_hr))static_hr=resume_deferred_world_d3d12(true);
+  }
   if(FAILED(static_hr))return static_hr;
   // Neighbour liquids wait for composite_world_d3d12, as on D3D11 below.
   neighbour_liquids_pending_=true;neighbour_liquids_frame_index_=native_frame_index_;

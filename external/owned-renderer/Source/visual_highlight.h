@@ -66,6 +66,33 @@ inline std::array<float, 4> visual_highlight_emissive(std::uint32_t object_flags
     return result;
 }
 
+// The material's own emissive under the game's white highlight pushes: what the
+// surface emits. A highlight is a marker for the player, not light: ray traced
+// lighting reads this value, never the highlighted one.
+inline std::array<float, 4> visual_authored_emissive(const HighlightMaterial& material) noexcept {
+    const bool white = material.emissive[0] == 1.0f && material.emissive[1] == 1.0f &&
+        material.emissive[2] == 1.0f && material.has_previous;
+    return !white ? material.emissive : material.has_oldest ? material.oldest : material.previous;
+}
+// A highlighted emissive carries the authored one in its unused fourth
+// component: -(1 + 8 bits a channel), exact in a float. Zero or above: the
+// colour is the authored one.
+inline float visual_pack_authored_emissive(const std::array<float, 4>& authored) noexcept {
+    const auto byte = [](float value) {
+        return static_cast<std::uint32_t>((value > 0.0f ? (value < 1.0f ? value : 1.0f) : 0.0f) * 255.0f + 0.5f);
+    };
+    return -static_cast<float>(1u + (byte(authored[0]) | (byte(authored[1]) << 8) | (byte(authored[2]) << 16)));
+}
+inline void visual_emitted_colour(const float emissive[4], float emitted[3]) noexcept {
+    if (emissive[3] < 0.0f) {
+        const auto packed = static_cast<std::uint32_t>(-emissive[3]) - 1u;
+        for (unsigned channel = 0; channel < 3; ++channel)
+            emitted[channel] = static_cast<float>((packed >> (8u * channel)) & 255u) / 255.0f;
+    } else {
+        for (unsigned channel = 0; channel < 3; ++channel) emitted[channel] = emissive[channel];
+    }
+}
+
 // Cursor modes (supported game.exe CI3DCursor +0x18, A3Cursor ECursorType).
 enum : std::int32_t {
     kCursorDefault = 0, kCursorAttack = 1, kCursorSpell = 2, kCursorUse = 4,

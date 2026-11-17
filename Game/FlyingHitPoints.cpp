@@ -14,6 +14,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "WorldClient.h"
 #include "dx11/RendererDX11.h"
 /////////////////////////////////////////////////////////////////////////////////////
+namespace owned { void bridge_note_combat_hit() noexcept; }
 CFlyingHitPoints::CFlyingHitPoints()
 {
     pTexture = 0;
@@ -38,6 +39,7 @@ void CFlyingHitPoints::ReceiveDamage(int nUnitID, int nAmount, DWORD dwDamageFla
         hp.nUnitID = nUnitID;
         hp.dwDamageFlags = dwDamageFlags;
         damages.push_back(hp);
+        owned::bridge_note_combat_hit();
     }
 }
 

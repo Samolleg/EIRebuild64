@@ -21,7 +21,15 @@ unsigned camp_icon_canvas(const std::string& name, unsigned variant) noexcept;
 // surface and expanded as the normal upload expands it) and `description`
 // (the 1555 surface the native binding has, with its alpha facts). Returns
 // an empty string on success, else the reason. Throws on allocation failure.
+// An icon no mounted archive holds under any of those names decodes as the
+// game's own canvas for it, a 256 opaque white square (`placeholder` set).
+// basis (display pixels the content's larger side must keep, with one
+// level of margin) or factor (canvas texels per home texel, a power of two)
+// selects the icon's own mip level instead of level 0: image is then the
+// canvas reduced by 2^level (level_out), description stays the game's full
+// canvas and carries no cut mask. Both 0: the full canvas, as before.
 std::string decode_camp_icon(const ResourceStore& store, const std::string& name, bool high_resolution,
-                             SurfaceImage& image, OwnedVisualSurface& description);
+                             SurfaceImage& image, OwnedVisualSurface& description, bool* placeholder = nullptr,
+                             unsigned basis = 0, unsigned factor = 0, unsigned* level_out = nullptr);
 
 }  // namespace owned

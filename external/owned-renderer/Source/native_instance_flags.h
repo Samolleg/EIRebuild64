@@ -22,9 +22,15 @@ namespace owned {
 //   8       0x00000100  foliage part (native_foliage_part_flag, shadow_foliage.h)
 //   9       0x00000200  part of a swaying plant (native_sway_flag)
 //   10-15   0x0000fc00  sway trunk top, 1/4 unit
+//   10-12   0x00001c00  without the sway flag (units): F10 fur_debug code
+//                       (Renderer::fur_debug_bits; 0 off, 1 magenta, 2 blue,
+//                       3 alpha as grey, 4 hidden)
 //   16-21   0x003f0000  sway trunk radius, 1/16 unit
 //   22-27   0x0fc00000  sway plant height, 1/4 unit
 //   28-31   0xf0000000  sway part node distance from the root pose node (0-15)
+//   16-20   0x001f0000  without the sway flag: astral rift part (astral_rift.h;
+//                       16-17 kind: 1 veil, 2 clumps; 18-20 veil index). Such
+//                       records draw only with the astral programs (NATIVE_ASTRAL).
 //
 // The shader reads the sway fields with the literal shifts above and gets the
 // neighbour, contact and preview masks substituted from these constants.
@@ -36,10 +42,20 @@ constexpr std::uint32_t native_neighbour_flag = 0x20u;
 constexpr std::uint32_t native_unit_flag = 0x2u;
 constexpr std::uint32_t native_preview_specular_rgb_flag = 0x10u;
 constexpr std::uint32_t native_sway_flag = 0x200u;
+constexpr unsigned native_fur_debug_shift = 10;
 constexpr std::uint32_t native_sway_shape_mask = 0x0ffffc00u;
 constexpr unsigned native_sway_root_shift = 28;
 constexpr std::uint32_t native_sway_root_mask = 0xfu << native_sway_root_shift;
 constexpr std::uint32_t native_sway_root_max = 15u;
+constexpr unsigned native_astral_shift = 16;
+constexpr std::uint32_t native_astral_mask = 0x1fu << native_astral_shift;
+constexpr std::uint32_t native_astral_flags(std::uint32_t kind, std::uint32_t veil) noexcept {
+    return ((kind & 3u) | (veil & 7u) << 2) << native_astral_shift;
+}
+// An astral record: the field is set and the sway flag (which owns bits 10-31) is not.
+constexpr bool native_astral_record(std::uint32_t flags) noexcept {
+    return (flags & native_sway_flag) == 0 && (flags & (3u << native_astral_shift)) != 0;
+}
 
 constexpr std::uint32_t native_sway_root_bits(std::uint32_t offset) noexcept {
     return (offset & native_sway_root_max) << native_sway_root_shift;
@@ -64,5 +80,6 @@ static_assert(0x1u + native_unit_flag + 0x4u + 0x8u + native_preview_specular_rg
 static_assert((native_low_instance_flags & (native_sway_shape_mask | native_sway_root_mask)) == 0,
     "instance flag overlaps the sway fields");
 static_assert((native_sway_shape_mask & native_sway_root_mask) == 0, "sway fields overlap");
+static_assert((native_low_instance_flags & native_astral_mask) == 0, "instance flag overlaps the astral field");
 
 } // namespace owned

@@ -39,11 +39,12 @@ struct ResourceIdentity;
 struct VisualSkeletonBinding;
 struct RetainedVisualFrame;
 struct RetainedWorldPointLight;
+struct RetainedFireSpell;
 struct TerrainCpuAsset;
 struct FigureCpuAsset;
 struct TerrainTexturePage;
 struct OwnedTerrainGeometryValues;
-namespace ground_cover { struct FootprintSplat; }
+namespace ground_cover { struct FootprintSplat; struct HostedPlantFrame; }
 // The requested 16-unit visual budget. No persistent unit ownership/history.
 struct NativeLiquidRipples {
     std::array<float,4> meta{};
@@ -109,6 +110,10 @@ bool bridge_critter_perches(float x, float y, float radius, std::vector<CritterP
 // world that has none yet, within budget_us of this call. True when none is
 // left (the load reveal holds until then: one model takes 20-50 ms).
 bool bridge_prepare_critter_perch_models(unsigned budget_us) noexcept;
+// Hosted plants (issue #251 3c, hosted_plants.h): one record per host object of
+// the current visual world in this zone class (ambient::ZoneClass). frame keeps
+// its contents while its revision is current; false: no world frame.
+bool bridge_hosted_plants(int zone, ground_cover::HostedPlantFrame& frame) noexcept;
 // Ground cover: units standing on the ground within radius of a point, as
 // x, y, z (ground contact) and envelope radius. Units the game does not show
 // the player (retained_visual_sample_shown: hidden or undetected), invisible,
@@ -124,6 +129,7 @@ struct GroundUnitDetail {
     bool dead = false;
     bool undead = false;       // undead model family
     bool crawler = false;      // crawler model; renderer-owned larva habitat
+    std::uint32_t all_model_parts = 0; // VisualAssemblyAsset::all_model_parts (F10 label only)
     // Exact local-server percepts, or rounded client values when unavailable, and the
     // replicated pose/moving state that select the game's sense modifiers.
     float visibility = 1;
@@ -191,6 +197,11 @@ struct OwnedVisualSurface {
     std::shared_ptr<const std::vector<std::uint8_t>> alpha_cut_mask;
     bool alpha_fully_opaque = false;
     bool static_mip_hint = false;
+    // Block-compressed surfaces only: the content value of this generation's
+    // bytes (block_content_value), set at publication; zero: none. The
+    // renderer binds the archive member's authored mip chain when its level 0
+    // has the same value (authored_surface_chain).
+    std::uint64_t block_content[2]{};
 };
 using CompletedVisualSurfaceReader = bool (*)(IDirectDrawSurface7*,
     std::shared_ptr<const OwnedVisualSurface>&) noexcept;
@@ -198,6 +209,22 @@ void bridge_set_completed_visual_surface_reader(CompletedVisualSurfaceReader rea
 bool proxy_completed_visual_surface(IDirectDrawSurface7* surface,
     std::shared_ptr<const OwnedVisualSurface>& value) noexcept;
 void proxy_retire_camp_texture(std::uint64_t id, std::uint64_t generation) noexcept;
+// The modal backdrop fade on the GPU (Renderer::fade_capture): S_OK done,
+// S_FALSE when the surface's CPU pixels are current (the game's Fade applies),
+// a failure otherwise.
+HRESULT proxy_fade_modal_backdrop(IDirectDrawSurface7* surface) noexcept;
+// The modal backdrop's save thumbnail scaled on the GPU (Renderer::
+// queue_thumbnail): S_OK with read set to fill the game's 5:6:5 buffer later,
+// S_FALSE when the surface's CPU pixels are current, a failure otherwise.
+HRESULT proxy_queue_modal_thumbnail(IDirectDrawSurface7* surface, unsigned width, unsigned height,
+    std::function<HRESULT(std::uint16_t*)>& read) noexcept;
+// A proxy surface's identity and current generation (no completion, no
+// upload): the input an appearance recipe compares.
+using VisualSurfaceIdentityReader = bool (*)(IDirectDrawSurface7*, std::uint64_t& id,
+    std::uint64_t& generation) noexcept;
+void bridge_set_visual_surface_identity_reader(VisualSurfaceIdentityReader reader) noexcept;
+bool proxy_visual_surface_identity(IDirectDrawSurface7* surface, std::uint64_t& id,
+    std::uint64_t& generation) noexcept;
 // The actual initialized overlay/window owner registers after subclass success
 // and clears this before shutdown. No renderer scene lifetime is used for input.
 void bridge_set_camp_input_overlay(DebugOverlay* overlay) noexcept;
@@ -229,6 +256,7 @@ struct PreparedCampIcon {
     // Core mode (claude/s3-store): no texture here; the host decoded this
     // icon (CampIconRequest serial) and binds it to the native surface.
     std::uint64_t core_serial = 0;
+    std::string core_name; // the icon's asset name: the host reacquires a released home by it
 };
 bool proxy_publish_camp_texture(IDirectDrawSurface7* surface,
     const PreparedCampIcon& icon,
@@ -451,7 +479,7 @@ struct NativeMorphOffset {
 // animated-tile UV selection consume these in the native shader instead of a
 // CPU-mutated/reuploaded vertex stream.
 struct NativeTerrainVertex {
-    float noise = 0.0f;
+    float noise = 0.0f; // Layer wind noise; static Astral base vertices: shore distance in grid units.
     float wind_multiplier = 0.0f;
     float object_color[3]{};
     float depth = 0.0f;
@@ -491,7 +519,11 @@ enum NativeTerrainVertexFlag : std::uint32_t {
     // per tile, the authored cliff art): no blend, material or cliff stage;
     // only the far de-tiling (terrainLongFar) and the material cache.
     native_terrain_long_tile = 1u << 12,
-    native_terrain_astral = 1u << 14,
+    // Static base tiles only. Bits 16-19 hold Astral at world corners
+    // (00, 10, 01, 11); bits 25-26 / 27-28 hold local x/y in half-tile
+    // steps. These payload bits and noise are otherwise unused on base
+    // tiles; the liquid-edge payload below is confined to liquid layers.
+    native_terrain_astral_vertex = 1u << 14,
     // Liquid tiles also carry their 3x3 liquid-neighbour mask (bits 16-24) and
     // the vertex's place in its tile in half-tile steps (x bits 25-26, y 27-28).
     native_terrain_liquid_edge = 1u << 15,
@@ -777,6 +809,12 @@ struct NativeWorldGeometry {
     // Its crown impostor's atlas slice + 1 (0: none): a cut-out object-space
     // record draws the impostor far away (static_lod.h native_world_impostor).
     std::uint32_t impostor = 0;
+    // A part of an impostor object other than its lead (static_lod.h
+    // native_world_impostor_follower); impostor then names the lead's slice.
+    bool impostor_follower = false;
+    // Prebuilt meshes: a part of an impostor object stores the object's
+    // sphere (its own frame) in its sphere block; radius 0: the mesh's own.
+    std::array<float, 4> impostor_sphere{};
     std::uint32_t shape_count = 1;
     std::array<float, 3> shape{};
     std::array<float, 16> object_to_world{};
@@ -861,6 +899,22 @@ struct NativeStaticSubmission {
     const std::array<float,16>* world_to_clip = nullptr;         // flush only
     mutable bool registered = false;                            // set: false keeps the object per-frame
     mutable std::uint64_t generation = 0;                       // renderer static-set generation
+    // set, item 5: draw records->parts as the active map's object-space
+    // statics of MOB object `object` (Renderer::set_native_static_object_space):
+    // per part its node's world matrix and object-space sway flags (the
+    // part values carry the posed ones), the sway anchor and contact height.
+    // model: its catalog model (retained_visual_object_space_model). caster:
+    // the bridge's caster store build registers the object's sun and shelter
+    // caster records instead (Renderer::set_native_active_caster); records
+    // then holds its casting parts and registered reports the outcome.
+    bool object_space = false;
+    bool caster = false;
+    std::int32_t object = 0;
+    std::uint64_t model = 0;
+    const std::array<float,16>* node_to_world = nullptr;
+    const std::uint32_t* sway_flags = nullptr;
+    std::array<float,3> sway_root{};
+    float contact_height = 0;
 };
 
 // A mesh decoded off the render thread into a dedicated geometry page (the
@@ -885,6 +939,7 @@ struct NativePrebuiltMesh {
     bool has_liquid = false, has_ground = true;
     // Liquid vertices by type (NativeMesh::liquid_types): 1 water, 2 lava (self-illuminated), 4 swamp share.
     std::uint8_t liquid_types = 0;
+    float liquid_wave_multiplier = 0; // NativeMesh::liquid_wave_multiplier
     std::uint32_t steep_first_triangle = UINT32_MAX; // NativeMesh::steep_first_triangle
 };
 
@@ -964,6 +1019,13 @@ struct NativeGeometryView {
     // event.
     std::array<std::uint32_t, 5> geometry_revision{};
     bool geometry_revision_valid = false;
+    // Host only (never on the wire): the identity of these arrays' bytes when
+    // the submitter already has one (a camp icon packet: its packet-store
+    // hash and the home mapping of its coordinates). Without a geometry
+    // revision the mesh cache takes it in place of hashing every array again
+    // on every draw.
+    std::uint64_t content_fingerprint = 0;
+    bool content_fingerprint_valid = false;
     // Mutable color ownership is independent of immutable topology. A
     // retained mesh may therefore refresh only its diffuse/specular ranges
     // after an authoritative lighting event without decoding or uploading
@@ -1229,6 +1291,9 @@ struct GameParticleView {
     float clip_half_width = 0.0f, clip_half_height = 0.0f;
     bool additive = false;
     bool interface_pass = false;
+    // Game-owned particle type, copied during its manager's Draw call. Zero
+    // means no verified owner; never derive lighting identity from a surface.
+    std::uint32_t source_type = 0;
 };
 using GameParticleSubmitFn = bool (*)(void* context, const GameParticleView& view);
 // Registered by the device for the duration of a D3D7 scene. Without it the
@@ -1268,6 +1333,10 @@ struct GamePrintView {
     std::uint32_t count = 0;
     std::array<float, 16> object_to_clip{};
     float clip_half_width = 0.0f, clip_half_height = 0.0f;
+    // Another module's direct Render call (an addon's target ring): a
+    // diegetic interface mark, drawn over the world's effects. False for the
+    // game's own blood, foot and fire prints, which are part of the world.
+    bool interface_mark = false;
 };
 using GamePrintSubmitFn = bool (*)(void* context, const GamePrintView& view);
 using GamePrintFlushFn = bool (*)(void* context);
@@ -1412,6 +1481,21 @@ private:
 
 SemanticContext current_semantic_context();
 void bridge_report_event(const char* event, const char* detail) noexcept;
+// Combat hits the owned combat text has seen (new damage-list entries) and
+// the QPC of the latest: the frame stall line's last events.
+void bridge_note_combat_hit() noexcept;
+void bridge_combat_hit_stats(std::uint32_t& hits, std::int64_t& last_qpc) noexcept;
+// The game's world clock in ms (frozen while paused); false before the world
+// time is readable.
+bool bridge_game_clock_ms(std::uint32_t& ms) noexcept;
+// Harness equip_cycle: one equipment step on the first hero's client appearance.
+bool bridge_harness_equip_step(std::uint32_t step, std::string& detail) noexcept;
+// Appends bytes to a log file on the log writer thread (engine_bridge.cpp
+// async_log): never file I/O on the calling thread.
+void bridge_async_append(const wchar_t* path, const char* bytes, std::size_t size) noexcept;
+// Writes the log writer's queued lines now, on the calling thread (process
+// exit, crash and exception paths).
+void bridge_async_drain() noexcept;
 bool bridge_consume_hud_atlas_window(
     IDirectDrawSurface7* surface, const void* lock_caller,
     HudAtlasMutationWindow& window) noexcept;
@@ -1477,9 +1561,19 @@ void bridge_set_highlight_options(bool briefing, bool selected, bool hover_chara
                                   bool hover_objects) noexcept;
 void bridge_set_change_driven_poses(bool enabled) noexcept;
 void bridge_set_terrain_far_shadow_prewarm(bool enabled) noexcept;
+// Ray tracing is wanted: a cave keeps the static caster store and prepares it
+// for the ray tracing scene (update_cave_raytracing_casters, owned_world_shadows.cpp).
+void bridge_set_cave_object_casters(bool wanted) noexcept;
 void bridge_set_terrain_lod_enabled(bool enabled) noexcept;
+// Where the renderer's fog/draw-distance fade wholly hides world pixels (m,
+// fogStock.w of the last world frame; 0: unknown). Terrain LOD switches only
+// beyond it (OwnedTerrainFrameInputs::lod_hidden_distance).
+void bridge_set_terrain_lod_hidden_distance(float metres) noexcept;
 // Owned sky (sky_clouds.h): false keeps the game's own sky pass.
 void bridge_set_owned_sky(bool enabled) noexcept;
+// Fire burn (option fire_burn): publish the local server's burning fire spells each world tick.
+void bridge_set_fire_burn(bool enabled) noexcept;
+bool bridge_fire_burn_enabled() noexcept;
 bool bridge_owned_sky_installed() noexcept;
 // Owned precipitation: why the stock DrawRain/DrawSnow calls still draw
 // (both kept, doubled weather), or nullptr while both are suppressed.
@@ -1562,6 +1656,9 @@ void bridge_release_world_caches() noexcept;
 // Load reveal state for the load pause at the world Draw entry: the hold is
 // wanted while enabled and the current world epoch is not yet revealed.
 void bridge_set_load_reveal(bool enabled, std::uint64_t revealed_epoch) noexcept;
+// The held load's ring of terrain meshes around the camera (any view
+// direction) is still being prepared (owned_world_shadows.cpp).
+bool bridge_terrain_ring_prewarm_pending() noexcept;
 // The game's open progress movie (005DA400): its size, frame count and BINK
 // current frame (1-based, one past the frame last decoded and shown, so the
 // shown frame's 0-based index is current - 2), and the file the game opens
@@ -1636,6 +1733,10 @@ struct BridgeSceneHandoff {
     // that sends typed world commands to the host (null outside core mode;
     // the bridge then posts closures as above).
     Renderer* (*core_renderer)(void* context) = nullptr;
+    // Game thread, device path (no scene thread): the next native records
+    // draw with this preview studio light until called with null, which
+    // flushes them and restores the world light.
+    bool (*preview_lighting)(void* context, const NativeWorldLighting* lighting) = nullptr;
 };
 void bridge_set_scene_handoff(const BridgeSceneHandoff& handoff) noexcept;
 void bridge_clear_scene_handoff(void* context) noexcept;

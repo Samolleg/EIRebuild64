@@ -272,6 +272,7 @@ public:
     }
     virtual float GetBridgeZValue(float x, float y) const { return GetZValue(x, y); }
     virtual float GetBridgeSurfaceZValue(float x, float y) const { return GetSurfaceValue(x, y); }
+    void ReadVisualFireSpells(std::vector<owned::RetainedFireSpell>& output) const;
     // spells
     void CastSpell(CSpell *pSpell, CUnit *pWho, const CPlot3D &ptFrom, CMapObject *pTarget,
                    const CPlot3D &ptTarget, bool bQuiet = false);

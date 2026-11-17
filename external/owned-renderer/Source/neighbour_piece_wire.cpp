@@ -16,7 +16,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
 constexpr std::uint32_t kWireMagic = 0x5045494eu; // 'NIEP'
-constexpr std::uint32_t kWireVersion = 8; // 8: source border material, no extra opacity pulse
+constexpr std::uint32_t kWireVersion = 9; // Embedded 1126 layout, separate from earlier local cache 8. // 7: texture opaque_mips; 6: per-object crown impostors; 5: authored-family policy plus retained name provenance; 4: family-name provenance
 
 // Plain record types travel as bytes; both builds must agree on their sizes.
 template<class T> constexpr bool plain = std::is_trivially_copyable_v<T> && !std::is_pointer_v<T>;
@@ -246,8 +246,10 @@ template<class A> void visit_piece(A& a, NeighbourPiece& v) {
     });
     a.vec(v.terrain); a.vec(v.figures); a.vec(v.decorations);
     list(a, v.impostors, [](A& b, NeighbourPieceImpostor& i) {
-        b.pod(i.figure); b.pod(i.texture); b.object(i.vertices); b.object(i.indices); b.object(i.vertex_view);
-        b.pod(i.index_count); b.pod(i.sphere);
+        b.str(i.key); b.pod(i.sphere);
+        list(b, i.parts, [](A& c, NeighbourPieceImpostorPart& p) {
+            c.pod(p.texture); c.object(p.vertices); c.object(p.indices); c.object(p.vertex_view); c.pod(p.index_count);
+        });
     });
     optional(a, v.ground_cover, [](A& b, GroundCoverNeighbourInputs& g) { visit_ground_cover(b, g); });
     optional(a, v.liquid_surf, [](A& b, LiquidSurfField& s) { visit_surf(b, s); });

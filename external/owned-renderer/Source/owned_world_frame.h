@@ -20,6 +20,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -145,7 +146,7 @@ struct OwnedAdmissionCache {
     bool valid=false;
     bool draw_undetected=false,shadows=false;
     std::uint32_t class_flags=0;
-    std::uint64_t static_generation=0,border_fog_revision=0,through=0;
+    std::uint64_t static_generation=0,border_fog_revision=0,through=0,object_space_revision=0;
     float receiver_cell=0;
     std::vector<Entry> entries;
     std::map<std::uint64_t,Cell> cells;
@@ -516,6 +517,7 @@ extern thread_local HRESULT g_owned_terrain_failure_hresult;
 extern thread_local BridgeFrameSample g_bridge_sample;
 extern std::atomic<bool> g_load_reveal_enabled;
 extern std::atomic<std::uint64_t> g_load_reveal_revealed_epoch;
+extern std::atomic<std::uint64_t> g_terrain_ring_pending_epoch;
 extern bool g_merge_character_parts;
 extern thread_local NativeGeometryBatchBeginFn g_native_sink_begin_batch;
 extern thread_local void* g_native_sink_context;
@@ -593,13 +595,29 @@ std::shared_ptr<OwnedPortraitOverlay> build_owned_portrait_overlay(const Texture
 // The expression picture of a neutral face picture name (ChangeFaceTexture
 // 0x640670: 1 happy +"a", 2 pain +"c", 3 tired +"b"); empty for neutral.
 std::string owned_portrait_expression_name(const std::string& neutral, std::int32_t expression);
+// Expression overlays of every face shown, kept per face picture pair. A face
+// is a small fixed set (neutral + 3 expressions): the first request for a
+// neutral picture reads all its pictures through `pictures` (calling thread)
+// and builds the three overlays on worker threads, so a combat expression
+// change is a lookup, not a ~100 ms CPU rebuild on the frame. Faces not
+// requested for a minute are dropped when another face is added.
+using OwnedPortraitPictures = std::function<bool(const std::string& neutral, const std::string& expression,
+    std::shared_ptr<const TextureCpuAsset>& neutral_texture, std::shared_ptr<const TextureCpuAsset>& expression_texture)>;
+void prefetch_owned_portrait_overlays(const std::string& neutral, const OwnedPortraitPictures& pictures) noexcept;
+// The overlay of one expression (waits only if its build is still running).
+std::shared_ptr<OwnedPortraitOverlay> owned_portrait_overlay(const std::string& neutral, std::int32_t expression,
+    const OwnedPortraitPictures& pictures, const char*& reason) noexcept;
 // Bare-head portrait (portrait_helmet off): a copy of the unit's assembly in
 // which each helmet head/hair part (hd.armorTT, hr.HH.armorTT) is replaced in
 // place by its bare part (hd, hr.HH) from the unit's model archive. If dressing
 // omitted hair entirely, append the exact native portrait hairstyle (-1: none).
-// Existing ordinals stay those of the unit's assembly.
+// Existing ordinals stay those of the unit's assembly. The bare figures are
+// kept by their model and part name (the unit's republished assembly does not
+// change them), so `model` (the unit's .mod) is resolved and opened only for
+// a figure not read before; a rebuild for a new assembly is then a copy.
+using OwnedPortraitModel = std::function<bool(ResourceBlob& model)>;
 std::shared_ptr<const VisualAssemblyAsset> build_owned_portrait_bare_assembly(
-    const VisualAssemblyAsset& unit, const ResourceBlob& model, std::int32_t hair,
+    const VisualAssemblyAsset& unit, const OwnedPortraitModel& model, std::int32_t hair,
     const char*& reason) noexcept;
 struct OwnedPreviewCommand {
     RetainedVisualSample sample;
@@ -612,7 +630,10 @@ struct OwnedPreviewCommand {
     BridgeSceneHandoff handoff;
     std::shared_ptr<OwnedPortraitOverlay> portrait_overlay;   // portraits only
     bool portrait = false;   // a party portrait: its records keep HUD submission order
-    NativeWorldLighting portrait_lighting{};   // captured UI light; never shaped by the map
+    NativeWorldLighting portrait_lighting{};   // the preview's studio light (every view); never shaped by the map
+    // Portraits: the frame's inner rectangle (native canvas pixels; left, top,
+    // right, bottom), where the portrait's depth is its own (run_owned_preview_command).
+    std::array<float,4> portrait_clip{};
 };
 void run_owned_preview_command(OwnedPreviewCommand& command) noexcept;
 // One object's wound layer (owned_world_state.cpp): the parts and wound
@@ -640,6 +661,7 @@ std::uint64_t snow_trail_key(const VisualResourceIncarnation& resource) noexcept
 float snow_trail_extent(const std::array<float,2>& half) noexcept;
 void release_owned_terrain_shadow_caches() noexcept;
 void release_critter_perch_models() noexcept;
+void release_hosted_plants() noexcept;
 
 // ---- Shared between the scene-half files ----------------------------------
 bool owned_point_shadow_influence(const NativeWorldBounds& bounds,

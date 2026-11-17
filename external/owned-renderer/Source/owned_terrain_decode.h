@@ -19,7 +19,15 @@
 namespace owned {
 
 void owned_terrain_prepare_astral(const TerrainMemberResolver& resolve, TerrainCpuAsset& terrain);
+
+// Once per map, before publication: explicit atlas-profile families resolved
+// with its textures, plus the exact ataman_astral000 first-cell rule (mask 15).
+// Logs final slot/base-tile counts by source; no inferred classification.
 void owned_terrain_prepare_astral(ResourceStore& store, TerrainCpuAsset& terrain);
+
+// Receipt for a decoded wire asset, before publication. Counts the received
+// masks; it does not reclassify them from the receiver's resource mounts.
+void owned_terrain_report_astral_received(const TerrainCpuAsset& terrain);
 
 struct OwnedTerrainDynamicSector {
     bool captured = false;

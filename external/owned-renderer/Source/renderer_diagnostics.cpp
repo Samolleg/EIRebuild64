@@ -1,6 +1,7 @@
 // Renderer diagnostics: status and resource snapshots, placed-hitch profile, test harness steps, load reveal and release_world_state.
 #include <intrin.h>
 #include "build_version.h"
+#include "error_report.h"
 #include "point_shadow_policy.h"
 #include "cursor_image.h"
 #include "shadow_softness.h"
@@ -21,6 +22,7 @@
 #include "owned_terrain_decode.h"
 #include "renderer.h"
 #include "../../DirectXTex/DDS.h"
+#include "retained_static_submission.h"
 #include "graphics_settings.h"
 #include "ui_language.h"
 #include "game_focus.h"
@@ -67,6 +69,7 @@
 #include <cstring>
 #include <limits>
 #include <new>
+#include <new.h>
 #include <unordered_set>
 #include "renderer_internal.h"
 
@@ -151,8 +154,51 @@ bool Renderer::status_text_wanted() const noexcept {
  return debug_overlay_.visible()||debug_overlay_.wants_profiling()||profiler_.attribution_enabled()||
   placed_hitch_profile_.active()||harness_enabled()||!critters_summary_.labels.empty();
 }
+// Impostor debug view: a tag per on-screen impostor object (its lead record),
+// nearest first, at most 400, in viewport fractions.
+void Renderer::impostor_debug_labels(std::vector<CritterSummary::Label>& labels) const {
+ labels.clear();
+ if(!native_impostor_debug_)return;
+ try{
+  struct Tag{float w;CritterSummary::Label label;};std::vector<Tag> tags;
+  const auto& m=impostor_label_clip_;
+  for(const auto& e:impostor_probe_){
+   if(!e.lead)continue;
+   const float* p=e.centre;
+   const float w=m[12]*p[0]+m[13]*p[1]+m[14]*p[2]+m[15];if(w<=1e-3f)continue;
+   const float x=(m[0]*p[0]+m[1]*p[1]+m[2]*p[2]+m[3])/w,y=(m[4]*p[0]+m[5]*p[1]+m[6]*p[2]+m[7])/w;
+   if(x<-1||x>1||y<-1||y>1)continue;
+   // Only objects drawn as impostors now (nativeImpostorSelect: the sphere across
+   // fewer pixels than the impostor size and band; the bounds stand in for the sphere).
+   const float pixels=2*e.extent*std::sqrt(m[4]*m[4]+m[5]*m[5]+m[6]*m[6])*float(height_)*native_impostor_output_scale()*.5f/w; // output pixels, as the shader
+   if(native_impostor_pixels_<=0||pixels>=native_impostor_pixels_*(1+kImpostorBand))continue;
+   Tag tag{w,{x*.5f+.5f,.5f-y*.5f,{}}};
+   // The lead part's model name from the key (identity:...:<model>.mod/<part>|texture*).
+   const auto mod=e.key.find(".mod/");const auto start=mod==std::string::npos?std::string::npos:e.key.rfind(':',mod);
+   const std::string model=start!=std::string::npos?e.key.substr(start+1,mod-start-1):"?";
+   std::snprintf(tag.label.text,sizeof(tag.label.text),"s%u %s #%d",e.slice,model.c_str(),e.object);
+   {const std::uint32_t h=e.slice*2654435761u;const auto c=[&](unsigned s){return std::uint32_t(63.75f+.75f*float((h>>s)&255u));};
+    tag.label.color=0xff000000u|(c(24)<<16)|(c(16)<<8)|c(8);} // as the shader's slice tint (ImGui ABGR)
+   tags.push_back(tag);
+  }
+  std::sort(tags.begin(),tags.end(),[](const Tag& a,const Tag& b){return a.w<b.w;});
+  if(tags.size()>400)tags.resize(400);
+  for(const auto& tag:tags)labels.push_back(tag.label);
+ }catch(...){labels.clear();}
+}
+
 RendererResourceSnapshot Renderer::resource_snapshot() const {
  RendererResourceSnapshot snapshot=native_frame_stats_;
+ {auto& s=snapshot.active_statics;const auto& a=active_statics_;
+  s.catalog_objects=a.models.size();for(const auto& [key,model]:a.models){(void)key;s.catalog_nodes+=model.nodes.size();}
+  s.caster_objects=a.casters.size();s.lod_only_models=a.lod_only_models;s.batches=a.batches;
+  if(a.index){s.eligible=a.index->eligible.size();s.ready_models=a.index->models.size();s.failed_models=a.index->failed.size();}
+  s.parked=a.parked;s.admitted=active_statics_admitted();s.registered=a.keys.size();
+  for(const auto& [key,object]:a.keys){(void)object;const auto found=native_static_set_.objects.find(key);
+   if(found!=native_static_set_.objects.end())s.records+=found->second.size();}
+  s.refused=a.refused;s.casters=native_active_casters_;s.doubled_casters=native_active_doubled_casters_;
+  s.impostor_objects=a.impostor_objects;s.impostors_baked=a.impostors_baked;s.failures=active_statics_failures();
+  s.building=a.building;s.build_ms=a.build_ms;}
  {const auto& grid=native_point_light_grid_;const std::uint64_t cells=std::uint64_t(grid.width)*grid.height;
   snapshot.point_light_grid={native_point_lights_.size(),grid.width,grid.height,
    grid.data.size()>cells?grid.data.size()-cells-1:0,grid.max_per_cell,emissive_published_};}
@@ -170,6 +216,7 @@ RendererResourceSnapshot Renderer::resource_snapshot() const {
  if(critters_status_frame_==UINT64_MAX||critters_status_frame_+2<native_frame_index_)
   std::snprintf(snapshot.critter_status,sizeof(snapshot.critter_status),"Critters: pass not reached (no world draw this frame)");
  else{std::snprintf(snapshot.critter_status,sizeof(snapshot.critter_status),"%s",critters_status_);snapshot.critters=critters_summary_;}
+ impostor_debug_labels(snapshot.impostor_labels);
  std::snprintf(snapshot.sky_status,sizeof(snapshot.sky_status),"%s",sky_status_);snapshot.sky_problem=sky_status_problem_;if(configured_integer(debug_overlay_.config(),"sky_clouds",2)>0&&!bridge_owned_sky_installed()){
   std::snprintf(snapshot.sky_status,sizeof(snapshot.sky_status),"Sky PROBLEM: owned hook rejected; stock sky omitted");snapshot.sky_problem=true;}
 
@@ -230,7 +277,7 @@ RendererResourceSnapshot Renderer::resource_snapshot() const {
  if(d3d12_){
   snapshot.d3d12_backend=true;
   for(const auto* buffer:{native12_.dynamic.get(),native12_.work.get(),native12_.arguments.get(),native12_.visible.get(),
-                          native12_.prepared.get(),native12_.point_lights.get(),native12_.point_light_grid.get()})
+                          native12_.prepared.get(),native12_.owners.get(),native12_.indices.get(),native12_.point_lights.get(),native12_.point_light_grid.get()})
    if(buffer)snapshot.transient_upload_bytes+=d3d12_->buffer_bytes(*buffer);
  }
  for(const auto& pending:pending_blits_)snapshot.transient_upload_bytes+=pending.pixels.capacity()*sizeof(std::uint32_t);
@@ -440,6 +487,53 @@ void Renderer::finish_harness_path_row(const frame_acct::Record& game_frame,cons
  const auto shadow_previous=fa_shadow_witness_;fa_shadow_witness_=shadow_now;
  auto& map_stall=frame_acct::vt::g_map_stall;
  const std::int64_t stall=map_stall.ticks.exchange(0,std::memory_order_relaxed);
+ // A frame over 30 ms on either thread, with or without a camera_path:
+ // its parts and the previous frame's to hitch_parts.jsonl (frame stalls
+ // inside plain waits had no rows, laptop j190).
+ {
+  const double scale=frame_acct::ms_per_tick();
+  const frame_acct::Record empty{};
+  const frame_acct::Record& scene=scene_frame?*scene_frame:empty;
+  // A marked frame (frame_acct::mark: the modal backdrop) and the three
+  // after it are written whatever their length.
+  if(game_frame.marks)fa_after_mark_=4;
+  const unsigned after_mark=fa_after_mark_?4u-fa_after_mark_:0u;
+  const bool marked=fa_after_mark_>0;if(fa_after_mark_)--fa_after_mark_;
+  if(frame_acct::enabled()&&(marked||double(game_frame.wall)*scale>=30.0||double(scene.wall)*scale>=30.0)){
+   std::string text;
+   char part[160];
+   const auto emit=[&](const char* prefix,const frame_acct::Record& record){
+    if(!record.valid)return;
+    std::snprintf(part,sizeof(part),",\"%s_wall_ms\":%.3f,\"%s_oncpu_ms\":%.3f",prefix,double(record.wall)*scale,prefix,record.oncpu_ms);text+=part;
+    for(unsigned p=0;p<frame_acct::count;++p)if(record.ticks[p]){
+     std::snprintf(part,sizeof(part),",\"%s_%s\":%.3f",prefix,frame_acct::part_name(p),double(record.ticks[p])*scale);text+=part;}
+   };
+   std::snprintf(part,sizeof(part),"{\"presentation_frame\":%llu,\"map_stall_ms\":%.3f",
+    static_cast<unsigned long long>(presentation_frame_index_),double(stall)*scale);text+=part;
+   if(marked){std::snprintf(part,sizeof(part),",\"marks\":%u,\"frames_after_mark\":%u,\"mark_at_ms\":%.3f",
+    game_frame.marks,after_mark,double(game_frame.mark_at)*scale);text+=part;}
+   emit("gt",game_frame);emit("st",scene);emit("prev_gt",fa_previous_game_);emit("prev_st",fa_previous_scene_);
+   // This present's D3D11 creation, Map and mesh counters (as the path rows).
+   for(unsigned counter=0;counter<frame_acct::counter_count;++counter){
+    const std::int64_t delta=counters[counter]-previous[counter];
+    if(!delta)continue;
+    if(frame_acct::counter_is_ticks(counter))
+     std::snprintf(part,sizeof(part),",\"d3d_%s\":%.3f",frame_acct::counter_name(counter),double(delta)*scale);
+    else std::snprintf(part,sizeof(part),",\"d3d_%s\":%lld",frame_acct::counter_name(counter),static_cast<long long>(delta));
+    text+=part;
+   }
+   text+="}\n";
+   static const std::wstring path=[]{
+    const std::string narrow=harness_directory()+"hitch_parts.jsonl";
+    std::wstring wide(narrow.size(),L'\0');
+    const int length=MultiByteToWideChar(CP_ACP,0,narrow.data(),int(narrow.size()),wide.data(),int(wide.size()));
+    wide.resize(length>0?std::size_t(length):0);
+    return wide;
+   }();
+   bridge_async_append(path.c_str(),text.data(),text.size());
+  }
+  fa_previous_game_=game_frame;fa_previous_scene_=scene;
+ }
  if(harness_path_line_.empty())return;
  const frame_acct::Scope scope(frame_acct::pf_harness);
  std::string& line=harness_path_line_;
@@ -502,15 +596,23 @@ void Renderer::finish_harness_path_row(const frame_acct::Record& game_frame,cons
  }
  harness_path_rows_+=line;harness_path_rows_+="}\n";
  line.clear();
- if(harness_path_rows_.size()>(4u<<20))write_harness_path_rows();
+ // 1 MB batches stay well inside the writer queue's 8 MB limit.
+ if(harness_path_rows_.size()>(1u<<20))write_harness_path_rows();
 }catch(...){harness_path_line_.clear();}
 
-// Buffered camera_path rows to disk (frame accounting).
+// Buffered camera_path rows, queued for the log writer thread, which keeps the
+// file open. An fopen/fclose of the growing file here blocked the stepping
+// thread at every leg change, longer each leg (laptop j187, 2026-11-14).
 void Renderer::write_harness_path_rows() noexcept{
  if(harness_path_rows_.empty())return;
- if(FILE* file=nullptr;fopen_s(&file,(harness_directory()+"camera_path.jsonl").c_str(),"ab")==0&&file){
-  std::fwrite(harness_path_rows_.data(),1,harness_path_rows_.size(),file);std::fclose(file);
- }
+ static const std::wstring path=[]{
+  const std::string narrow=harness_directory()+"camera_path.jsonl";
+  std::wstring wide(narrow.size(),L'\0');
+  const int length=MultiByteToWideChar(CP_ACP,0,narrow.data(),int(narrow.size()),wide.data(),int(wide.size()));
+  wide.resize(length>0?std::size_t(length):0);
+  return wide;
+ }();
+ bridge_async_append(path.c_str(),harness_path_rows_.data(),harness_path_rows_.size());
  harness_path_rows_.clear();
 }
 
@@ -537,7 +639,7 @@ Renderer::HarnessRequest Renderer::step_test_harness(const ScenePresentInputs* i
   else
 #endif
    harness_complete(ok,detail);
-  harness_stage_=0;harness_wait_=0;};
+  harness_stage_=0;harness_wait_=0;harness_capture_lead_=0;};
  std::string detail;
  switch(command->verb){
  case HarnessVerb::capture:
@@ -549,7 +651,14 @@ Renderer::HarnessRequest Renderer::step_test_harness(const ScenePresentInputs* i
      "capture blocked for 600 presents: the outer frame gap recorder is active");
     return HarnessRequest::none;
    }
-   harness_wait_=0;harness_stage_=1;return HarnessRequest::capture;
+   // The capture file reads the last frame resolved before the capture: the
+   // frames before it take the per-pass pipeline statistics first (F11 has
+   // its warm-up for this; a harness capture had none).
+   if(++harness_capture_lead_<=RenderProfiler::kCaptureStatisticsFrames+8)return HarnessRequest::none;
+   harness_capture_lead_=0;
+   harness_wait_=0;harness_stage_=1;
+   if(command->name=="package")start_diagnostics_package(); // diagnostics_package: Shift+F11's zip of this capture
+   return HarnessRequest::capture;
   }
   if(harness_stage_==1){
     if(d3d12_&&harness_shadow_temporal_outcome_!=ShadowTemporalPresentOutcome::none){
@@ -781,6 +890,15 @@ const char* Renderer::load_reveal_world_wait() noexcept{
  const auto source=retained_static_terrain_source_snapshot();
  if(!source.map||!source.terrain)return "terrain source";
  if(ambient_terrain_frame_!=native_frame_index_)return "terrain frame";
+ if(d3d12_&&configured_terrain_blend(debug_overlay_.config())){
+  // Enabled Terrain 2.0 needs its own material rows even when cover is absent or off.
+  if(contact_map_generation_!=ambient_map_generation_||!tile_blend_ready_)return "terrain tile families";
+  // The flush can apply the rows after set_native_terrain_frame published
+  // this frame. Its terrain bit 4 still says no rows: that frame shows the
+  // marker. Wait for a frame containing the rows, not just the finished job.
+  // A completed attempt without rows remains a visible material failure.
+  if(tile_blend_rows_&&(native_spec_terrain_bits_&16u))return "terrain material frame";
+ }
  return nullptr;
 }
 
@@ -829,6 +947,20 @@ const char* Renderer::load_reveal_waiting_on(LoadRevealWait& kind) noexcept try{
  // background (same key as play) shows at once and the sets keep building.
  if(bridge_local_single_player_mission()&&!native_specialisation_settled())return "shader specialisation";
  if(const char* cover=load_reveal_ground_cover_wait())return cover;
+ // Terrain meshes around the camera in every direction, so a turn of the
+ // camera after the reveal creates none (laptop j199/j201 pf 618: 393 at once).
+ if(load_reveal_holding_&&bridge_terrain_ring_prewarm_pending())return "terrain around the camera";
+ // D3D12: the main map's object-space statics batch, then the ray tracing
+ // scene's static casters built from it (and from the sun-bake store) and
+ // compacted, with the GPU past that work. Revealed earlier, their 0.3-1.8M
+ // triangle builds ran in the first frames of play and the next frame's list
+ // open waited 84-272 ms for them (walk_1027_rt, cand-1123).
+ if(load_reveal_holding_&&d3d12_){
+  if(active_statics_.building)return "main map statics";
+  constexpr std::uint64_t kGpuFrames=4; // the executor's frames in flight, and one more
+  if(rt12_.frame!=UINT64_MAX&&(d3d12_->raytracing_compaction_pending()||native_frame_index_<rt12_.statics_busy_frame+kGpuFrames))
+   return "ray tracing statics";
+ }
  // The driver has compiled every combination a later first draw would
  // (pump_pipeline_warmup runs each held frame, alongside the waits above).
  if(load_reveal_holding_&&!warmup_done_)return "pipeline warm-up";
@@ -886,6 +1018,71 @@ void address_space_mb(std::uint64_t& used,std::uint64_t& largest_free,bool walk)
   address=static_cast<std::uint8_t*>(region.BaseAddress)+region.RegionSize;
  }
  largest_free>>=20;
+}
+
+// Doll bug (2026-11-06, settled): a line in memory_failures.log for each failed
+// operator new (the first few, then powers of two) with the requested size and the caller.
+namespace {
+std::uint64_t private_bytes_mb() noexcept {
+ PROCESS_MEMORY_COUNTERS_EX counters{};counters.cb=sizeof(counters);
+ return GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),sizeof(counters))
+  ?counters.PrivateUsage>>20:0;
+}
+}  // namespace
+
+
+// Called from the failing operator new: no heap use (fixed buffers, Win32 file calls).
+void report_allocation_failure(std::size_t bytes,const void* caller) noexcept {
+ static std::atomic<std::uint32_t> failures{0};
+ const std::uint32_t count=failures.fetch_add(1,std::memory_order_relaxed)+1;
+ if(count>4&&(count&(count-1)))return;
+ char folder[MAX_PATH]{};
+ DWORD length=GetEnvironmentVariableA("EI_RENDERER_DEBUG_DIR",folder,MAX_PATH);
+ char path[MAX_PATH+40]{};
+ if(length&&length<MAX_PATH)std::snprintf(path,sizeof(path),"%s\\memory_failures.log",folder);
+ else{
+  length=GetEnvironmentVariableA("LOCALAPPDATA",folder,MAX_PATH);
+  if(!length||length>=MAX_PATH)return;
+  std::snprintf(path,sizeof(path),"%s\\EID3D11\\memory_failures.log",folder);
+ }
+ HMODULE module=nullptr;
+ GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+  reinterpret_cast<LPCWSTR>(&report_allocation_failure),&module);
+ const auto base=reinterpret_cast<std::uintptr_t>(module);
+ const auto at=reinterpret_cast<std::uintptr_t>(caller);
+ std::uint64_t used=0,largest=0;address_space_mb(used,largest,true);
+ SYSTEMTIME time{};GetLocalTime(&time);
+ char line[640];
+ int size=std::snprintf(line,sizeof(line),
+  "%02u:%02u:%02u.%03u pid=%lu bits=%u failure=%u bytes=%llu caller=%p rva=%08llX thread=%lu va_used_mb=%llu va_largest_free_mb=%llu private_mb=%llu stack_rva=",
+  time.wHour,time.wMinute,time.wSecond,time.wMilliseconds,GetCurrentProcessId(),
+  static_cast<unsigned>(sizeof(void*)*8),count,static_cast<unsigned long long>(bytes),caller,
+  static_cast<unsigned long long>(at>=base?at-base:0),GetCurrentThreadId(),
+  static_cast<unsigned long long>(used),static_cast<unsigned long long>(largest),
+  static_cast<unsigned long long>(private_bytes_mb()));
+ if(size<=0||size>=static_cast<int>(sizeof(line)))return;
+ // The direct caller is often a folded allocator helper: the callers above it
+ // name the owner (this module's frames as RVAs, others as addresses).
+ void* frames[12]{};
+ const USHORT captured=RtlCaptureStackBackTrace(1,12,frames,nullptr);
+ for(USHORT n=0;n<captured&&size<static_cast<int>(sizeof(line))-24;++n){
+  const auto frame=reinterpret_cast<std::uintptr_t>(frames[n]);
+  HMODULE owner=nullptr;
+  GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+   reinterpret_cast<LPCWSTR>(frames[n]),&owner);
+  const int added=owner==module
+   ?std::snprintf(line+size,sizeof(line)-size,"%08llX,",static_cast<unsigned long long>(frame-base))
+   :std::snprintf(line+size,sizeof(line)-size,"@%p,",frames[n]);
+  if(added<=0)break;
+  size+=added;
+ }
+ if(size>static_cast<int>(sizeof(line))-3)size=static_cast<int>(sizeof(line))-3;
+ line[size++]='\r';line[size++]='\n';
+ const HANDLE file=CreateFileA(path,FILE_APPEND_DATA,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+ if(file==INVALID_HANDLE_VALUE)return;
+ DWORD written=0;
+ WriteFile(file,line,static_cast<DWORD>((std::min)(size,static_cast<int>(sizeof(line)-1))),&written,nullptr);
+ CloseHandle(file);
 }
 namespace {
 
@@ -1119,6 +1316,11 @@ void Renderer::release_world_state() noexcept try{
  impostors_.albedo.Reset();impostors_.normal.Reset();impostors_.albedo_srv.Reset();impostors_.normal_srv.Reset();
  impostors_.albedo12.reset();impostors_.normal12.reset(); // D3D12 backend (the bake targets stay)
  impostors_.capacity=impostors_.count=0;release_storage(impostors_.slices);
+ // A failure (an atlas the shape groups outgrew, a refused allocation) was
+ // this world's: the next world bakes again (the frame's config read turns
+ // native_impostor_pixels_ back on). A dump still pending names this
+ // world's slices (impostor_atlas_dump_forget).
+ impostors_.failed=false;impostor_atlas_dump_forget();
  // Shadows: static layers and point atlases belong to the world; the maps
  // themselves are sized by settings and stay.
  native_shadow_static_valid_.fill(false);native_shadow_frame_={};native_shadow_dirty_mask_=native_shadow_cleared_mask_=0;
@@ -1135,6 +1337,7 @@ void Renderer::release_world_state() noexcept try{
  // Subsystems keyed by map: shared grids (and everything keyed by them),
  // ground cover pools, critter director state.
  release_ambient_world();
+ release_weather_world();
  release_ground_cover_world();
  release_critters_world();
  // Outside the renderer: bridge world caches, expired identity-index entries
@@ -1206,12 +1409,30 @@ void Renderer::apply_load_reveal() noexcept try{
  const std::uint64_t epoch=bridge_current_world_epoch();
  if(epoch&&epoch!=load_reveal_epoch_){
   load_reveal_epoch_=epoch;load_reveal_tracking_=true;load_reveal_holding_=enabled&&picture_matches();
+  frame_acct::g_in_play.store(false,std::memory_order_relaxed);
   bridge_set_load_reveal(load_reveal_holding_,load_reveal_revealed_epoch_);
   load_reveal_first_world_=load_reveal_last_world_=0;load_reveal_held_ms_=load_reveal_neighbour_held_ms_=0;
   load_reveal_frames_=0;load_reveal_va_peak_=0;load_reveal_waits_={};
   load_reveal_progress_peak_={};load_reveal_perches_ready_=false;
   (void)take_load_cursor_presents(); // counted from this hold on
   reset_pipeline_warmup();
+  // The camp screen's embedded art (three PNGs, 1536x1024 twice and
+  // 1254x1254, decoded by WIC and created as textures) loads in the first
+  // world hold, not on the scene thread in the first camp open's frame.
+  if(!camp_art_attempted_){
+   camp_art_attempted_=true;
+   LARGE_INTEGER begin{},end{},frequency{};QueryPerformanceCounter(&begin);
+   const HRESULT loaded=load_camp_art();
+   QueryPerformanceCounter(&end);QueryPerformanceFrequency(&frequency);
+   if(FAILED(loaded))camp_inventory_art_failed();
+   // Once per device: its cost inside the hold and the GPU memory it keeps
+   // (B8G8R8A8: 1536x1024 twice and 1254x1254, no mips).
+   char text[128];
+   std::snprintf(text,sizeof(text),"hr=%08lx ms=%.1f texture_bytes=%u",static_cast<unsigned long>(loaded),
+    frequency.QuadPart?1000.0*double(end.QuadPart-begin.QuadPart)/double(frequency.QuadPart):0.0,
+    (1536u*1024u*2u+1254u*1254u)*4u);
+   bridge_report_event("camp_art_loaded",text);
+  }
   // D3D12: no D3D11 warm-up draws; pipelines build ahead on the executor's
   // workers from its pipeline library, so the hold does not wait for them.
   if(d3d12_)warmup_done_=true;
@@ -1292,7 +1513,10 @@ void Renderer::apply_load_reveal() noexcept try{
   }
   return;
  }
- // Ready (or capped): this frame shows the world.
+ // Ready (or capped): this frame shows the world. The loading picture is
+ // still on screen and the game paused: D3D12 pipelines first created since
+ // the last save are written now, not in play.
+ if(d3d12_&&load_reveal_holding_)d3d12_->save_new_pipelines();
  address_space_mb(used,largest,true);
  load_reveal_va_peak_=(std::max)(load_reveal_va_peak_,used);
  const MainLoadTiming timing=retained_static_main_load_timing();
@@ -1325,18 +1549,53 @@ void Renderer::apply_load_reveal() noexcept try{
  load_reveal_tracking_=load_reveal_holding_=false;load_picture_.Reset();load_picture12_.reset();
  load_progress_movie_={};load_progress_movie_valid_=false;cancel_load_progress_decode();
  load_reveal_revealed_epoch_=epoch;bridge_set_load_reveal(enabled,epoch);
+ frame_acct::g_in_play.store(true,std::memory_order_relaxed); // shader objects created from here on are named
 }catch(...){
  load_reveal_tracking_=load_reveal_holding_=false;load_picture_.Reset();load_picture12_.reset();
  load_progress_movie_={};load_progress_movie_valid_=false;cancel_load_progress_decode();
  load_reveal_revealed_epoch_=bridge_current_world_epoch();bridge_set_load_reveal(false,load_reveal_revealed_epoch_);
 }
 
+// The ray tracing preset the options read as and the values of the options
+// it sets, for the harness's result line (graphics_preset, rt_* steps).
+static bool apply_config_value(RendererConfig& config,const HarnessCommand& command,std::string& detail) noexcept;
+static std::string rt_preset_summary(const RendererConfig& config){
+ static constexpr const char* names[]={"Off","Low","Medium","High","Custom"};
+ std::string text=std::string("; rt preset ")+names[static_cast<int>(detect_rt_quality(config))]+":";
+ std::size_t count=0;const RtQualityRow* rows=rt_quality_rows(count);
+ for(std::size_t n=0;n<count;++n){
+  const RendererOption* option=config.find(rows[n].key);
+  if(!option)continue;
+  text+=std::string(" ")+rows[n].key+"="+std::to_string(option->type==RendererOptionType::boolean?int(option->boolean_value):option->integer_value);
+ }
+ // Not preset rows: every preset with reflections takes the option's cut-off;
+ // Ray Reconstruction is the player's own toggle (no preset writes it).
+ char roughness[128];
+ std::snprintf(roughness,sizeof(roughness)," rt_reflection_roughness=%.2f rt_ray_reconstruction=%d depth_prepass=%d upscaler=%d upscaler_quality=%d",
+  configured_floating_point(config,"rt_reflection_roughness",.5f),int(configured_boolean(config,"rt_ray_reconstruction",false)),
+  int(configured_boolean(config,"depth_prepass",true)),configured_integer(config,"upscaler",0),configured_integer(config,"upscaler_quality",0));
+ return text+roughness;
+}
+
 // Sets an F10 option for this session only (nothing is saved). Options that
 // the renderer reads once at device creation take effect on the next launch.
 bool Renderer::apply_harness_config(const HarnessCommand& command,std::string& detail) noexcept {
- RendererConfig& config=debug_overlay_.config();
+ const bool ok=apply_config_value(debug_overlay_.config(),command,detail);
+ if(command.name=="graphics_preset"||command.name.compare(0,3,"rt_")==0)detail+=rt_preset_summary(debug_overlay_.config());
+ return ok;
+}
+
+static bool apply_config_value(RendererConfig& config,const HarnessCommand& command,std::string& detail) noexcept {
  const char* key=command.name.c_str();
  const char* value=command.value.c_str();
+ // The ray tracing preset as the menu applies it (its values into the
+ // options only).
+ if(command.name=="rt_quality"){
+  char* end=nullptr;const long tier=std::strtol(value,&end,10);
+  if(!end||*end||tier<0||tier>=kRtQualityTiers){detail="rt_quality: 0 (Off) .. 3 (High)";return false;}
+  select_rt_quality(config,static_cast<RtQuality>(tier));
+  detail="rt_quality "+command.value+" applied";return true;
+ }
  if(command.name=="overlay"){
   DebugOverlayMode mode{};
   if(!parse_debug_overlay_mode(value,mode)){detail="overlay: hidden|compact|full";return false;}
@@ -2002,3 +2261,15 @@ bool Renderer::test_arm_shadow_temporal_pair() noexcept {
 #endif
 
 } // namespace owned
+
+// Temporary (doll bug, 2026-11-06): this module's operator new, as the CRT's
+// (malloc, then the new handler, then std::bad_alloc), but a failure is
+// recorded first with its size and caller (owned::report_allocation_failure).
+void* __cdecl operator new(std::size_t size) {
+ for(;;){
+  if(void* block=std::malloc(size?size:1))return block;
+  if(_callnewh(size))continue;
+  owned::report_allocation_failure(size,_ReturnAddress());
+  throw std::bad_alloc();
+ }
+}

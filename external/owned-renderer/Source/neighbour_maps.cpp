@@ -6,13 +6,23 @@
 #include "neighbour_piece.h"
 #include "ground_cover_neighbour.h"
 #include "owned_resource_runtime.h"
-#include "astral_neighbour.h"
+#include "owned_asset_loader.h"
 #include "owned_terrain_front_end.h"
 #include "owned_resource_store.h"
 #include "retained_static_scene.h"
 #include "worker_priority.h"
+#include "native_instance_flags.h"
+#include "terrain_face_atlas.h"
+#include "engine_bridge.h"
+#include "astral_rift.h"
 #include <windows.h>
 #include <chrono>
+#include <cmath>
+#include <cstring>
+#include <algorithm>
+#include <deque>
+#include <limits>
+#include <unordered_map>
 #include <unordered_set>
 #include <atomic>
 #include <condition_variable>
@@ -120,6 +130,45 @@ std::string map_name(std::string name) {
 void set_error(Stream& s,const std::string& error) {
     std::lock_guard<std::mutex> guard(s.lock);s.error=error;
 }
+// Astral rift models (astral_rift.h): the stream's nodes stop at the authored
+// FIGs, one per assembly part. Their generated clump parts get the node of
+// the veil they belong to with the clump geometry, and every animated node
+// its motion margin in its box (fog culling and visibility). False: an
+// assembly that does not have that shape (the decoration is omitted).
+static bool prepare_neighbour_astral_nodes(RetainedStaticSourceCandidate& candidate) {
+    if (!candidate.assembly || !astral_model(*candidate.assembly)) return true;
+    const auto& assembly = *candidate.assembly;
+    const std::size_t authored = candidate.nodes.size();
+    if (authored > assembly.parts.size()) return false;
+    for (std::size_t index = authored; index < assembly.parts.size(); ++index) {
+        const auto& part = assembly.parts[index];
+        const unsigned veil = astral_clumps(assembly, part);
+        if (!veil || !part.geometry) return false;
+        std::size_t source = 0;
+        while (source < authored && (astral_veil(assembly, assembly.parts[source]) != veil ||
+            assembly.parts[source].skeleton_node != part.skeleton_node)) ++source;
+        if (source == authored) return false;
+        RetainedPreparedNode node = candidate.nodes[source];
+        const auto& figure = *part.geometry;
+        node.figure = &figure;
+        node.positions = figure.positions;
+        node.normals = figure.normals;
+        node.geometry_identity ^= static_cast<std::uintptr_t>(0x9e3779b9u);
+        node.geometry_revision[2] = figure.position_groups;
+        node.geometry_revision[3] = figure.normal_groups;
+        node.geometry_revision[4] = static_cast<std::uint32_t>(figure.indices.size());
+        candidate.nodes.push_back(std::move(node));
+    }
+    for (std::size_t index = 0; index < candidate.nodes.size(); ++index) {
+        const float margin = astral_margin(assembly, assembly.parts[index]);
+        if (margin <= 0) continue;
+        auto& bounds = candidate.nodes[index].bounds;
+        for (unsigned axis = 0; axis < 3; ++axis) { bounds.minimum[axis] -= margin; bounds.maximum[axis] += margin; }
+        bounds.radius += margin;
+    }
+    return true;
+}
+
 std::unique_ptr<NeighbourMapUpload> decode_neighbour(OwnedResourceLoader& loader,const std::wstring& root,
     const std::vector<NeighbourSelection>& neighbours,std::size_t index,std::uint64_t epoch,const ResourceStoreConfig& mounts) {
     const auto& n=neighbours[index];
@@ -154,7 +203,7 @@ std::unique_ptr<NeighbourMapUpload> decode_neighbour(OwnedResourceLoader& loader
         RetainedStaticPrepareDiagnostic prepared;
         if(!why && !prepare_retained_static_candidate(map,map->terrain,object,candidate,&prepared))
             why=retained_static_prepare_result_name(prepared.result);
-        if(!why && !prepare_neighbour_astral_nodes(*candidate))why="astral.nodes";
+        if(!why && !prepare_neighbour_astral_nodes(*candidate))why="astral_nodes";
         if(why){++upload->omitted_decorations;++omitted[why];continue;}
         // Trees (family 53, the class the main map's sway is given to) take
         // the main map's sway evidence; the assembly is still this worker's.
@@ -196,6 +245,147 @@ std::unique_ptr<NeighbourMapUpload> decode_neighbour(OwnedResourceLoader& loader
     }
     return upload;
 }
+// A decoration's crown impostor object (static_lod.h): every node with a
+// figure and a texture, led by its first cut-out node, baked together once
+// per model (the key: each part's figure and texture, and which one leads)
+// and switched as one on the object's sphere. That sphere (centre of the
+// bounding box of every part vertex at the decoration's shape, radius to the
+// farthest) is the one nativeImpostorSelect and the bake both use.
+bool neighbour_impostor_plan(const RetainedStaticSourceCandidate& candidate,NeighbourMapUpload::ImpostorPlan& plan) noexcept try {
+    plan={};
+    // Astral rift models keep their triangles: a bake would freeze the veils.
+    if(candidate.assembly&&astral_model(*candidate.assembly))return false;
+    const auto part=[](const RetainedPreparedNode& node){
+        const auto& m=node.object_local;
+        // Node placements are translations (retained_static_submission.cpp).
+        return node.figure&&(node.texture||node.surface)&&!node.positions.empty()&&m[0]==1&&m[5]==1&&m[10]==1&&
+            m[1]==0&&m[2]==0&&m[4]==0&&m[6]==0&&m[8]==0&&m[9]==0;
+    };
+    // Cut-out: the archive texture's top level; for a game surface the
+    // archive texture of the same name (build_active_statics), never the
+    // surface's own alpha scan (zone13 after travel: per-object surfaces
+    // classed houses cut-out, 1112 crown impostors).
+    const auto cut_out=[](const RetainedPreparedNode& node){
+        return node.texture?(node.texture->opaque_mips&1u)==0:node.archive_cut_out==1;
+    };
+    std::size_t triangles=0;bool led=false;
+    for(std::size_t i=0;i<candidate.nodes.size();++i) {
+        const auto& node=candidate.nodes[i];
+        if(!part(node))continue;
+        triangles+=node.figure->indices.size()/3;
+        if(!led&&cut_out(node)){led=true;plan.lead=static_cast<std::uint32_t>(i);}
+    }
+    if(!led||triangles<kImpostorMinTriangles)return false;
+    constexpr float big=std::numeric_limits<float>::max();
+    float low[3]={big,big,big},high[3]={-big,-big,-big};
+    const auto each_point=[&](auto&& visit){
+        for(const auto& node:candidate.nodes) {
+            if(!part(node))continue;
+            const std::size_t count=std::size_t(node.figure->position_groups)*4u;
+            if(node.positions.size()*4u<count)return false;
+            for(const auto& component:node.figure->components) {
+                if(component.position>=count)return false;
+                const auto& group=node.positions[component.position>>2];const auto lane=component.position&3u;
+                visit(group.x[lane]+node.object_local[3],group.y[lane]+node.object_local[7],group.z[lane]+node.object_local[11]);
+            }
+        }
+        return true;
+    };
+    if(!each_point([&](float x,float y,float z){
+        const float p[3]={x,y,z};
+        for(unsigned axis=0;axis<3;++axis){low[axis]=(std::min)(low[axis],p[axis]);high[axis]=(std::max)(high[axis],p[axis]);}
+    }))return false;
+    const float centre[3]={(low[0]+high[0])*.5f,(low[1]+high[1])*.5f,(low[2]+high[2])*.5f};
+    float radius=0;
+    each_point([&](float x,float y,float z){
+        const float dx=x-centre[0],dy=y-centre[1],dz=z-centre[2];
+        radius=(std::max)(radius,std::sqrt(dx*dx+dy*dy+dz*dz));
+    });
+    if(!(radius>0)||!std::isfinite(radius+centre[0]+centre[1]+centre[2]))return false;
+    plan.spheres.assign(candidate.nodes.size(),{});
+    for(std::size_t i=0;i<candidate.nodes.size();++i) {
+        const auto& node=candidate.nodes[i];
+        if(!part(node))continue;
+        plan.spheres[i]={centre[0]-node.object_local[3],centre[1]-node.object_local[7],centre[2]-node.object_local[11],radius};
+        plan.key+=node.figure->identity.key()+"|"+std::to_string(node.texture_identity)+(i==plan.lead?"*;":";");
+    }
+    // A decoration whose parts morph (eight shapes) keeps its vertices in
+    // the sphere's unit frame, where the bake image lives: prebuild_decorations
+    // groups its model's shapes by them (neighbour_impostor_group).
+    for(const auto& node:candidate.nodes)plan.morphs=plan.morphs||(part(node)&&node.figure->shape_count==8);
+    if(plan.morphs) {
+        if(!candidate.source){plan={};return false;}
+        each_point([&](float x,float y,float z){
+            plan.unit_points.push_back((x-centre[0])/radius);plan.unit_points.push_back((y-centre[1])/radius);
+            plan.unit_points.push_back((z-centre[2])/radius);
+        });
+    }
+    return true;
+} catch(...) {
+    plan={};
+    return false;
+}
+// Morphing decorations' impostors (plan.morphs): one bake per group of a
+// model's shapes. Keyed by model alone, every palm of a map showed the
+// first-baked palm's image stretched into its own sphere (far palms of other
+// shapes lost their wide crowns, save1027 oasis, 2026-11-08); one bake per
+// exact shape (per-object designer values, nearly all distinct) took the
+// save1207 session's atlas from 114 to ~1400 slices. A shape joins the first
+// group whose representative's vertices all lie within one bake texel of
+// its own in the sphere's unit frame (the image each object draws into its
+// own sphere), taken in shape order, so the groups and their keys (the
+// representative's exact shape) are the same on every load of the map.
+void neighbour_impostor_group(const NeighbourMapUpload& upload,std::vector<NeighbourMapUpload::ImpostorPlan>& plans,float shape_texels) {
+    // One frame texel in the unit frame: the frame's kImpostorFrameTexels span
+    // the sphere's diameter at the bake margin (.94, kImpostorFrameHlsl).
+    // shape_texels: the allowed error, in frame texels (prebuild_decorations).
+    const float texel=shape_texels*2.f/(.94f*kImpostorFrameTexels);
+    std::map<std::string,std::vector<std::size_t>> models;
+    for(std::size_t i=0;i<plans.size();++i)if(!plans[i].key.empty()&&plans[i].morphs)models[plans[i].key].push_back(i);
+    for(auto& [model,members]:models) {
+        const auto shape=[&](std::size_t i){return upload.decorations[i]->source->shape;};
+        std::sort(members.begin(),members.end(),[&](std::size_t a,std::size_t b){
+            const auto sa=shape(a),sb=shape(b);return sa!=sb?sa<sb:a<b;});
+        std::vector<std::size_t> representatives;
+        for(const std::size_t i:members) {
+            const auto& points=plans[i].unit_points;
+            std::size_t chosen=i;
+            for(const std::size_t r:representatives) {
+                const auto& other=plans[r].unit_points;
+                if(other.size()!=points.size())continue;
+                bool within=true;
+                for(std::size_t k=0;within&&k<points.size();k+=3) {
+                    const float dx=points[k]-other[k],dy=points[k+1]-other[k+1],dz=points[k+2]-other[k+2];
+                    within=dx*dx+dy*dy+dz*dz<=texel*texel;
+                }
+                if(within){chosen=r;break;}
+            }
+            if(chosen==i)representatives.push_back(i);
+            std::uint32_t bits[3]{};std::memcpy(bits,shape(chosen).data(),sizeof(bits));
+            plans[i].representative=chosen;
+            plans[i].key+="shape:"+std::to_string(bits[0])+","+std::to_string(bits[1])+","+std::to_string(bits[2])+";";
+        }
+    }
+    for(auto& plan:plans)std::vector<float>().swap(plan.unit_points);
+}
+// The bake input of a plan's object, from this decoration's parts in its lead
+// node's frame (empty parts: not bakeable).
+void neighbour_impostor_object(const RetainedStaticSourceCandidate& candidate,const NeighbourMapUpload::ImpostorPlan& plan,
+    NeighbourMapUpload::ImpostorObject& object) noexcept try {
+    const auto& lead=candidate.nodes[plan.lead];
+    object.sphere=plan.spheres[plan.lead];
+    for(std::size_t i=0;i<candidate.nodes.size();++i) {
+        if(!(plan.spheres[i][3]>0))continue;
+        const auto& node=candidate.nodes[i];
+        const std::array<float,3> offset{node.object_local[3]-lead.object_local[3],node.object_local[7]-lead.object_local[7],
+            node.object_local[11]-lead.object_local[11]};
+        NativeImpostorPart made;
+        if(!build_impostor_part(*node.figure,node.positions.data(),offset,made)){object.parts.clear();object.nodes.clear();return;}
+        object.parts.push_back(std::move(made));object.nodes.push_back(&node);
+    }
+} catch(...) {
+    object.parts.clear();object.nodes.clear();
+}
 // After the weld: decode every terrain command and decoration node into
 // dedicated geometry pages on this worker, so the render thread only adopts
 // them. A failed page drops the whole prebuild (the render thread then decodes
@@ -217,63 +407,15 @@ void prebuild_neighbour(NeighbourMapUpload& upload) noexcept {
             t.upload->prebuilt_terrain_keys.push_back((sector<<16)|material);
             t.upload->prebuilt_terrain.push_back(mesh);
         },&terrain);
-        // Static LOD levels once per figure; every shape of it shares them.
-        std::map<const FigureCpuAsset*,NativeMeshLods> lods;
-        const auto lod_start=std::chrono::steady_clock::now();
-        double lod_seconds=0;
-        for(std::size_t i=0;i<upload.decorations.size() && !builder.failed;++i) {
-            const auto& candidate=*upload.decorations[i];
-            for(std::size_t node_index=0;node_index<candidate.nodes.size();++node_index) {
-                const auto& node=candidate.nodes[node_index];
-                const bool astral=candidate.assembly && node_index<candidate.assembly->parts.size() &&
-                    astral_dynamic(*candidate.assembly,candidate.assembly->parts[node_index]);
-                if(builder.failed)break;
-                // A cut-out figure (its texture has transparency) gets its
-                // impostor bake input once per texture.
-                if(!astral&&node.texture&&(node.texture->opaque_mips&1u)==0) {
-                    const auto found=upload.impostor_sources.try_emplace({node.figure,node.texture_identity});
-                    if(found.second) {
-                        found.first->second.node=&node;
-                        build_impostor_source(*node.figure,found.first->second.source); // empty: not bakeable
-                    }
-                }
-                const auto inserted=upload.prebuilt_figures.try_emplace(neighbour_figure_shape(node.figure,candidate.source->shape));
-                if(!inserted.second)continue;
-                auto level=lods.find(node.figure);
-                if(level==lods.end()) {
-                    const auto begin=std::chrono::steady_clock::now();
-                    level=lods.emplace(node.figure,NativeMeshLods{}).first;
-                    ++upload.lod_stats.figures;upload.lod_stats.full_triangles+=node.figure->indices.size()/3;
-                    if(!astral&&build_static_lods(*node.figure,level->second)) {
-                        ++upload.lod_stats.reduced_figures;
-                        for(std::uint32_t k=0;k<level->second.levels;++k)upload.lod_stats.level_triangles[k]+=level->second.indices[k].size()/3;
-                    }
-                    lod_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-begin).count();
-                }
-                auto view=neighbour_figure_view(*node.figure,node.positions.data(),candidate.source->shape);
-                view.lods=&level->second;
-                if(!build_native_prebuilt_mesh(builder,view,inserted.first->second))inserted.first->second=NativePrebuiltMesh{};
-            }
-        }
-        upload.lod_stats.milliseconds=lod_seconds*1000.0;
-        upload.lod_stats.prebuild_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-lod_start).count();
+        // Neighbour maps are seen only far away, where a frame texel is far
+        // under a pixel: their shape groups allow 3 texels (the active map 1).
+        prebuild_decorations(upload,builder,3.f);
         if(!finish_native_prebuilt_pages(builder) || builder.failed){drop();return;}
         upload.prebuilt_pages=std::move(builder.pages);
         // Its atlas pages and decoration textures, once each. Always created:
         // its piece carries no mips, so adoption must find every texture it binds
         // (one already resident wins there and this copy is dropped).
         std::unordered_set<std::string> seen;
-        const auto texture=[&](const NativeOwnedTextureView& view) {
-            if(!view.resource)return;
-            // D3D12 uncompressed members are keyed by their view (native_owned_mip_texture_key).
-            UINT pixel_bytes=0;
-            const bool by_view=builder.d3d12&&native_owned_uncompressed_format(view.format,pixel_bytes)!=DXGI_FORMAT_UNKNOWN;
-            const auto key=by_view?native_owned_mip_texture_key(view,view.mip_count==1):
-                native_owned_archive_texture_key(*view.resource,view.generation,false);
-            if(!seen.insert(key).second)return;
-            NativePrebuiltTexture made;
-            if(build_native_prebuilt_texture(builder.device.Get(),builder.d3d12.get(),view,made))upload.prebuilt_textures.push_back(std::move(made));
-        };
         const auto& map_terrain=*upload.map->terrain;
         for(const auto& page:map_terrain.pages) {
             if(!page.texture || page.mips.empty())continue;
@@ -282,18 +424,92 @@ void prebuild_neighbour(NeighbourMapUpload& upload) noexcept {
             view.resource=&page.texture->identity;view.value_source=1;
             view.format=static_cast<NativeOwnedTextureFormat>(page.texture->format);
             view.mips=page.mips.data();view.mip_count=static_cast<std::uint32_t>(page.mips.size());
-            texture(view);
+            prebuild_texture(builder,upload,seen,view);
         }
-        for(const auto& candidate:upload.decorations)for(const auto& node:candidate->nodes) {
-            if(!node.texture || node.texture_mips.empty())continue;
-            NativeOwnedTextureView view{};
-            view.identity=node.texture_identity;view.generation=1;view.resource=&node.texture->identity;
-            view.value_source=1;view.format=node.texture_format;
-            view.mips=node.texture_mips.data();view.mip_count=static_cast<std::uint32_t>(node.texture_mips.size());
-            texture(view);
-        }
+        prebuild_decoration_textures(upload,builder,seen);
     } catch(...) {drop();}
 }
+} // namespace
+// The decorations' meshes: static LOD levels once per figure (every shape of
+// it shares them), one mesh per figure and exact shape, and each object's
+// impostor plan and bake input once per model.
+void prebuild_decorations(NeighbourMapUpload& upload,NativePrebuiltBuilder& builder,float shape_texels) {
+        std::map<const FigureCpuAsset*,NativeMeshLods> lods;
+        const auto lod_start=std::chrono::steady_clock::now();
+        double lod_seconds=0;
+        upload.impostor_plans.assign(upload.decorations.size(),{});
+        for(std::size_t i=0;i<upload.decorations.size();++i) {
+            auto& plan=upload.impostor_plans[i];
+            if(!(upload.decorations[i]->impostor_inputs_complete && neighbour_impostor_plan(*upload.decorations[i],plan)))plan={};
+            plan.representative=i;
+        }
+        neighbour_impostor_group(upload,upload.impostor_plans,shape_texels);
+        for(std::size_t i=0;i<upload.decorations.size() && !builder.failed;++i) {
+            const auto& candidate=*upload.decorations[i];
+            // An object with a cut-out part gets its impostor bake input once
+            // per model (per shape group: its representative's parts); each of
+            // its parts' meshes holds the object's own sphere.
+            const auto& plan=upload.impostor_plans[i];
+            if(!plan.key.empty()) {
+                const auto found=upload.impostor_objects.try_emplace(plan.key);
+                if(found.second)neighbour_impostor_object(*upload.decorations[plan.representative],
+                    upload.impostor_plans[plan.representative],found.first->second);
+            }
+            for(std::size_t n=0;n<candidate.nodes.size();++n) {
+                const auto& node=candidate.nodes[n];
+                if(builder.failed)break;
+                const auto* sphere=!plan.key.empty()&&plan.spheres[n][3]>0?&plan.spheres[n]:nullptr;
+                const auto inserted=upload.prebuilt_figures.try_emplace(neighbour_figure_shape(node.figure,candidate.source->shape,sphere));
+                if(!inserted.second)continue;
+                auto level=lods.find(node.figure);
+                if(level==lods.end()) {
+                    const auto begin=std::chrono::steady_clock::now();
+                    level=lods.emplace(node.figure,NativeMeshLods{}).first;
+                    ++upload.lod_stats.figures;upload.lod_stats.full_triangles+=node.figure->indices.size()/3;
+                    // No reduced levels for astral rift veils and clumps (their
+                    // vertex stage animates the full mesh).
+                    const bool astral=candidate.assembly&&n<candidate.assembly->parts.size()&&
+                        astral_kind(*candidate.assembly,candidate.assembly->parts[n]);
+                    if(!astral&&build_static_lods(*node.figure,level->second)) {
+                        ++upload.lod_stats.reduced_figures;
+                        for(std::uint32_t k=0;k<level->second.levels;++k)upload.lod_stats.level_triangles[k]+=level->second.indices[k].size()/3;
+                    }
+                    lod_seconds+=std::chrono::duration<double>(std::chrono::steady_clock::now()-begin).count();
+                }
+                auto view=neighbour_figure_view(*node.figure,node.positions.data(),candidate.source->shape);
+                view.lods=&level->second;
+                if(sphere)view.world.impostor_sphere=*sphere;
+                if(!build_native_prebuilt_mesh(builder,view,inserted.first->second))inserted.first->second=NativePrebuiltMesh{};
+            }
+        }
+        upload.lod_stats.milliseconds=lod_seconds*1000.0;
+        upload.lod_stats.prebuild_milliseconds=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-lod_start).count();
+}
+// One texture the stream creates for its piece, once per cache key.
+void prebuild_texture(NativePrebuiltBuilder& builder,NeighbourMapUpload& upload,
+    std::unordered_set<std::string>& seen,const NativeOwnedTextureView& view) {
+    if(!view.resource)return;
+    // D3D12 uncompressed members are keyed by their view (native_owned_mip_texture_key).
+    UINT pixel_bytes=0;
+    const bool by_view=builder.d3d12&&native_owned_uncompressed_format(view.format,pixel_bytes)!=DXGI_FORMAT_UNKNOWN;
+    const auto key=by_view?native_owned_mip_texture_key(view,view.mip_count==1):
+        native_owned_archive_texture_key(*view.resource,view.generation,false);
+    if(!seen.insert(key).second)return;
+    NativePrebuiltTexture made;
+    if(build_native_prebuilt_texture(builder.device.Get(),builder.d3d12.get(),view,made))upload.prebuilt_textures.push_back(std::move(made));
+}
+void prebuild_decoration_textures(NeighbourMapUpload& upload,NativePrebuiltBuilder& builder,
+    std::unordered_set<std::string>& seen) {
+    for(const auto& candidate:upload.decorations)for(const auto& node:candidate->nodes) {
+        if(!node.texture || node.texture_mips.empty())continue;
+        NativeOwnedTextureView view{};
+        view.identity=node.texture_identity;view.generation=1;view.resource=&node.texture->identity;
+        view.value_source=1;view.format=node.texture_format;
+        view.mips=node.texture_mips.data();view.mip_count=static_cast<std::uint32_t>(node.texture_mips.size());
+        prebuild_texture(builder,upload,seen,view);
+    }
+}
+namespace {
 std::string read_layout(const std::wstring& file) {
     std::ifstream input(file,std::ios::binary|std::ios::ate);
     const auto bytes=input.tellg();
@@ -490,6 +706,13 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
                         if(device)device->Release();
                         piece->lod_stats.load_milliseconds=std::chrono::duration<double,std::milli>(
                             std::chrono::steady_clock::now()-load_start).count();
+                        // Its face grid from the welded terrain (the faces its batches
+                        // draw): the renderer builds its face atlas from it when the
+                        // face cache is on, without the decoded terrain.
+                        if(piece && upload->map->terrain) {
+                            auto grid=std::make_shared<TerrainFaceGrid>();std::string failure;
+                            if(build_terrain_face_grid(*upload->map->terrain,*grid,failure))piece->face_grid=std::move(grid);
+                        }
                     }
                     catch(const std::exception& e) {set_error(s,neighbours[index].placement.zone+": "+e.what());}
                     catch(...) {set_error(s,neighbours[index].placement.zone+": neighbour piece allocation failed");}
@@ -773,8 +996,16 @@ void neighbour_maps_set_no_sea_maps(const std::string& maps) noexcept {
     try {std::lock_guard<std::mutex> guard(g_no_sea_lock);if(g_no_sea_maps!=maps)g_no_sea_maps=maps;} catch(...) {}
 }
 std::string neighbour_maps_no_sea_maps() {std::lock_guard<std::mutex> guard(g_no_sea_lock);return g_no_sea_maps;}
+// The mounts of the current world (the stream's): the active statics worker
+// reads archive textures by name from them.
+std::mutex g_world_mounts_lock;std::shared_ptr<const ResourceStoreConfig> g_world_mounts;
+std::shared_ptr<const ResourceStoreConfig> neighbour_world_mounts() noexcept {
+    std::lock_guard<std::mutex> guard(g_world_mounts_lock);return g_world_mounts;
+}
 static void start_stream(const std::string& mpr,std::uint64_t epoch,const ResourceStoreConfig& mounts,
     NeighbourStreamSource source,bool restart) noexcept {
+    try {auto copy=std::make_shared<const ResourceStoreConfig>(mounts);
+        std::lock_guard<std::mutex> guard(g_world_mounts_lock);g_world_mounts=std::move(copy);} catch(...) {}
     auto& s=stream();
     std::string no_sea_maps;
     try {std::lock_guard<std::mutex> guard(g_no_sea_lock);no_sea_maps=g_no_sea_maps;} catch(...) {}
@@ -845,5 +1076,118 @@ bool neighbour_maps_remaining(std::uint64_t epoch,std::size_t& remaining) noexce
 }
 std::string neighbour_maps_error(std::uint64_t epoch) {
     auto& s=stream();std::lock_guard<std::mutex> guard(s.lock);return s.epoch==epoch?s.error:std::string{};
+}
+
+namespace {
+struct ActiveStaticsJob {
+    std::uint64_t generation = 0;
+    std::vector<ActiveStaticsModelRequest> requests;
+    std::mutex lock;
+    std::unique_ptr<NeighbourPiece> piece;   // under lock
+    std::vector<std::uint64_t> models;       // under lock: piece decoration object -> model key
+    std::vector<std::uint64_t> failed_models;// under lock
+    bool done = false, failed = false;       // under lock
+    std::string failure;                     // under lock: step and candidate counts
+};
+std::mutex active_statics_lock;
+std::shared_ptr<ActiveStaticsJob> active_statics_job;
+void build_active_statics(const std::shared_ptr<ActiveStaticsJob>& job) noexcept {
+    const BackgroundWorkerPriority priority;
+    std::unique_ptr<NeighbourPiece> piece;
+    std::string failure="exception";
+    try {
+        NeighbourMapUpload upload;upload.epoch=job->generation;
+        // One candidate per requested model, from the live assembly the game
+        // resolved (no load here): the candidate index is the model's piece
+        // object (NeighbourPieceDecoration::object).
+        std::deque<StaticObjectSource> sources;
+        std::vector<std::uint64_t> models,failed_models;
+        std::uint32_t surface_models=0,archive_classed=0,sway_classed=0;
+        // A surface part's cut-out class from the archive texture of its
+        // name (the content the game surface was made from), once per name.
+        std::shared_ptr<const ResourceStoreConfig> mounts;
+        {std::lock_guard<std::mutex> guard(g_world_mounts_lock);mounts=g_world_mounts;}
+        ResourceStore store;bool store_open=false;
+        if(mounts){ResourceFailure failure;store_open=store.open(*mounts,failure);}
+        std::unordered_map<std::string,std::int8_t> archive_classes;
+        const auto archive_cut_out=[&](const std::string& name)->std::int8_t {
+            if(!store_open || name.empty())return -1;
+            const auto found=archive_classes.find(name);
+            if(found!=archive_classes.end())return found->second;
+            ResourceBlob blob;ResourceFailure failure;TextureCpuAsset texture;
+            std::int8_t value=-1;
+            if(store.resolve(name+".mmp",blob,failure) && parse_texture_asset(blob,texture,failure))
+                value=(texture.opaque_mips&1u)?0:1;
+            archive_classes.emplace(name,value);
+            return value;
+        };
+        for(const auto& request:job->requests) {
+            sources.emplace_back();
+            std::shared_ptr<RetainedStaticSourceCandidate> candidate;
+            if(!prepare_live_static_candidate(request,sources.back(),static_cast<std::int32_t>(upload.decorations.size()),candidate))
+                {failed_models.push_back(request.key);++upload.omitted_decorations;continue;}
+            // No archive texture of that name: only a tree (its live class
+            // sways) may be cut-out, by its surface's alpha; a building never.
+            const bool tree=candidate->assembly && candidate->assembly->sways;
+            for(auto& node:candidate->nodes) {
+                if(!node.surface)continue;
+                node.archive_cut_out=archive_cut_out(node.texture_name);
+                if(node.archive_cut_out>=0){++archive_classed;continue;}
+                node.archive_cut_out=tree && !node.surface->alpha_fully_opaque?1:0;++sway_classed;
+            }
+            if(!candidate->impostor_inputs_complete)++surface_models;
+            models.push_back(request.key);upload.decorations.push_back(std::move(candidate));
+        }
+        upload.decoration_summary="models="+std::to_string(upload.decorations.size())+" refused="+
+            std::to_string(failed_models.size())+" lod_only_surface_models="+std::to_string(surface_models)+
+            " surface_parts_classed archive="+std::to_string(archive_classed)+" sway_rule="+std::to_string(sway_classed);
+        {std::lock_guard<std::mutex> guard(job->lock);job->models=models;job->failed_models=failed_models;}
+        NativePrebuiltBuilder builder;
+        ID3D11Device* device=nullptr;
+        {std::lock_guard<std::mutex> guard(device_lock);device=stream_device;if(device)device->AddRef();else builder.d3d12=stream_preparer();}
+        builder.device=device;
+        failure=upload.decorations.empty()?"no_candidates":(!device && !builder.d3d12)?"no_device":"prebuild";
+        if(!upload.decorations.empty() && (device || builder.d3d12)) {
+            prebuild_decorations(upload,builder,1.f);
+            // No textures: every draw binds its posed record's texture, and
+            // the impostor bake reads the archive textures those made
+            // resident under the same cache keys.
+            if(finish_native_prebuilt_pages(builder) && !builder.failed) {
+                upload.prebuilt_pages=std::move(builder.pages);
+                failure="piece";
+                piece=make_neighbour_piece(upload,device,builder.d3d12.get());
+            }
+        }
+        failure+=" "+upload.decoration_summary;
+        if(device)device->Release();
+    } catch(const std::exception& e) {piece.reset();try{failure+=std::string(": ")+e.what();}catch(...){}}
+    catch(...) {piece.reset();}
+    std::lock_guard<std::mutex> guard(job->lock);
+    job->failed=!piece;job->piece=std::move(piece);job->done=true;job->failure=std::move(failure);
+    job->requests.clear();
+}
+} // namespace
+void active_statics_begin(std::uint64_t generation, std::vector<ActiveStaticsModelRequest> requests) noexcept try {
+    auto job=std::make_shared<ActiveStaticsJob>();
+    job->generation=generation;job->requests=std::move(requests);
+    {std::lock_guard<std::mutex> guard(active_statics_lock);active_statics_job=job;}
+    // A superseded build finishes into its own job, which nobody takes.
+    std::thread([job]{build_active_statics(job);}).detach();
+} catch(...) {}
+std::unique_ptr<NeighbourPiece> active_statics_take(std::uint64_t generation, bool& failed, std::string& failure,
+    std::vector<std::uint64_t>& models, std::vector<std::uint64_t>& failed_models) noexcept {
+    failed=false;
+    std::shared_ptr<ActiveStaticsJob> job;
+    {std::lock_guard<std::mutex> guard(active_statics_lock);job=active_statics_job;}
+    if(!job || job->generation!=generation)return nullptr;
+    std::lock_guard<std::mutex> guard(job->lock);
+    if(!job->done)return nullptr;
+    failed=job->failed;job->failed=false;
+    try{failure=job->failure;models.swap(job->models);failed_models.swap(job->failed_models);}catch(...){}
+    {std::lock_guard<std::mutex> guard2(active_statics_lock);if(active_statics_job==job)active_statics_job.reset();}
+    return std::move(job->piece);
+}
+void active_statics_stop() noexcept {
+    std::lock_guard<std::mutex> guard(active_statics_lock);active_statics_job.reset();
 }
 }

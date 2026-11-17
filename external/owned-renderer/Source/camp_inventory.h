@@ -35,6 +35,9 @@ void camp_inventory_embedded_texture_manager(void* owner) noexcept;
 bool camp_inventory_texture(std::uint64_t id, std::uint64_t generation,
                             NativeOwnedTextureView& value) noexcept;
 void camp_inventory_texture_failed() noexcept;
+// Any thread: a queued camp icon submission failed (scene thread); the game
+// thread rejects as camp_inventory_texture_failed at its next icon lookup.
+void camp_inventory_texture_failed_queued() noexcept;
 void camp_inventory_observe_texture(const NativeGeometryView&,const FixedState&,const SurfaceImage*) noexcept;
 bool camp_inventory_observation_enabled() noexcept;
 void camp_inventory_observe_count_time_clock(std::int64_t begin) noexcept;

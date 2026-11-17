@@ -161,7 +161,7 @@ Renderer::native_static_set_for_layout(unsigned slot) noexcept {
     return &neighbours_.opaque;
   if (slot >= kMapOpaqueLayout && slot < kMapOrderedLayout)
     return &map_preview_opaque_[slot - kMapOpaqueLayout];
-  if (slot >= kMapOrderedLayout && slot < native_submission_layouts_.size())
+  if (slot >= kMapOrderedLayout && slot < kMapOrderedLayout + kMapPreviewSections)
     return &map_preview_ordered_[slot - kMapOrderedLayout];
   return nullptr;
 }

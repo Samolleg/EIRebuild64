@@ -1,0 +1,50 @@
+[
+  {
+    "File": "rtxdi.zip",
+    "URL": "https://codeload.github.com/NVIDIA-RTX/RTXDI-Library/zip/b67f61cd0bfa6792acbf5429bb29a68ee5cdd808",
+    "Bytes": 152345,
+    "SHA256": "ACB3DE842F8F234AF76303ABC0C67C93B389BE70BC3E5C9660248B2FEF774E08"
+  },
+  {
+    "File": "agility.zip",
+    "URL": "https://api.nuget.org/v3-flatcontainer/microsoft.direct3d.d3d12/1.620.2/microsoft.direct3d.d3d12.1.620.2.nupkg",
+    "Bytes": 35006223,
+    "SHA256": "70489669C2BBEAF318B62D72B0AC3E753D521387BFC848C9763791C4E920BFCC"
+  },
+  {
+    "File": "nvngx_dlssd.dll",
+    "URL": "https://raw.githubusercontent.com/NVIDIA/DLSS/v310.9.16/lib/Windows_x86_64/rel/nvngx_dlssd.dll",
+    "Bytes": 48343664,
+    "SHA256": "B49435AE346F227FEAFE7BBE937D88277EA0EE7323975EC06488F377FDB46CEE"
+  },
+  {
+    "File": "amd_fidelityfx_upscaler_dx12.dll",
+    "URL": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/v2.3.0/Kits/FidelityFX/signedbin/amd_fidelityfx_upscaler_dx12.dll",
+    "Bytes": 28761864,
+    "SHA256": "D0DCCCC74A43C44BA435B7A369B456E0970D8A4464E4BD683119B374F2C9FB46"
+  },
+  {
+    "File": "nvsdk_ngx_defs_dlssd.h",
+    "URL": "https://raw.githubusercontent.com/NVIDIA/DLSS/v310.9.16/include/nvsdk_ngx_defs_dlssd.h",
+    "Bytes": 14693,
+    "SHA256": "2E97FE1595B1334F71B51724F2CB67496E8C296A7A2EEC5606DA53055882E716"
+  },
+  {
+    "File": "nvsdk_ngx_params_dlssd.h",
+    "URL": "https://raw.githubusercontent.com/NVIDIA/DLSS/v310.9.16/include/nvsdk_ngx_params_dlssd.h",
+    "Bytes": 1199,
+    "SHA256": "D41E3BA8F1D72583B55273092C99BF426DC4A0D46DE827229E25D5B1325A370E"
+  },
+  {
+    "File": "nvsdk_ngx_helpers_dlssd.h",
+    "URL": "https://raw.githubusercontent.com/NVIDIA/DLSS/v310.9.16/include/nvsdk_ngx_helpers_dlssd.h",
+    "Bytes": 732,
+    "SHA256": "A25FDDA925B479DFE869593AEBA311EF08793DA54E0391F2FE2FE756CBEF5532"
+  },
+  {
+    "File": "nvsdk_ngx_helpers_dlssd_d3d.h",
+    "URL": "https://raw.githubusercontent.com/NVIDIA/DLSS/v310.9.16/include/nvsdk_ngx_helpers_dlssd_d3d.h",
+    "Bytes": 72668,
+    "SHA256": "6DF9D02C6F47FEEE3AFC8D12340A9F554A7DDCE4DDACB1B6A13A42B26C2C6293"
+  }
+]

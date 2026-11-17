@@ -201,11 +201,14 @@ constexpr char kGameParticleShader[] = R"(
 cbuffer GameParticleFrame:register(b0){row_major float4x4 gpObjectToClip;float4 gpClipHalf;float4 gpViewport;
  float4 gpFogColor;float4 gpTextureFactor;uint gpColorOp;uint gpAlphaOp;uint gpColorArg1;uint gpColorArg2;
  uint gpAlphaArg1;uint gpAlphaArg2;uint gpAlphaTest;uint gpAlphaFunc;float gpAlphaRef;uint gpTextured;uint gpFogMode;uint gpFirst;
- uint gpCoverageMode;uint gpCount;uint2 gpPadding;};
+ uint gpCoverageMode;uint gpCount;uint2 gpPadding;float4 gpSoft;};
 struct GameParticle{float4 centerRadius;float4 uv;uint color;uint3 padding;};
 StructuredBuffer<GameParticle> gpParticles:register(t7);
 Texture2D gpTexture:register(t0);SamplerState gpSampler:register(s0);
-struct GameParticleOut{float4 p:SV_Position;float4 d:COLOR0;float2 uv:TEXCOORD0;};
+// Soft particles: the world depth (tested read-only by the same draw).
+Texture2D<float> gpSceneDepth:register(t2);
+// r: the particle's clip-scaled radius (gameParticleVS; 0 for the others).
+struct GameParticleOut{float4 p:SV_Position;float4 d:COLOR0;float2 uv:TEXCOORD0;float r:TEXCOORD1;};
 GameParticleOut gameParticleVS(uint id:SV_VertexID){
  GameParticle q=gpParticles[gpFirst+id/6];
  uint local=id%6;uint corner=local==0||local==3?0:(local==1?2:(local==2?1:(local==4?3:2)));
@@ -220,6 +223,7 @@ GameParticleOut gameParticleVS(uint id:SV_VertexID){
  o.p=float4((sx-gpViewport.x*k.w)/gpViewport.z*2-k.w,k.w-(sy-gpViewport.y*k.w)/gpViewport.w*2,k.z,k.w);
  o.d=float4((q.color>>16)&255,(q.color>>8)&255,q.color&255,q.color>>24)/255.0;
  o.uv=float2(right>0?q.uv.z:q.uv.x,down>0?q.uv.w:q.uv.y);
+ o.r=r;
  return o;
 }
 // Stock screen point times W (sx, sy) to the D3D11 clip position.
@@ -243,7 +247,7 @@ GameParticleOut gameRibbonVS(uint id:SV_VertexID){
  GameParticleOut o;
  o.p=gpClipFromScreen((k.x+k.w)*gpClipHalf.x+s*d.y,(k.w-k.y)*gpClipHalf.y-s*d.x,k);
  o.d=float4((q.color>>16)&255,(q.color>>8)&255,q.color&255,q.color>>24)/255.0;
- o.uv=float2(q.uv.x,side>0?q.uv.y:q.uv.z);
+ o.uv=float2(q.uv.x,side>0?q.uv.y:q.uv.z);o.r=0;
  return o;
 }
 // Selection marker (game_particles.h, DrawSelection): element = (point at the
@@ -257,7 +261,7 @@ GameParticleOut gameSelectionVS(uint id:SV_VertexID){
  GameParticleOut o;
  o.p=gpClipFromScreen((k.x+k.w)*gpClipHalf.x,(k.w-k.y)*gpClipHalf.y,k);
  o.d=float4((q.color>>16)&255,(q.color>>8)&255,q.color&255,q.color>>24)/255.0;
- o.uv=0;
+ o.uv=0;o.r=0;
  return o;
 }
 // World-space triangle list (terrain prints): element = vertex (xyz, uv, colour).
@@ -267,7 +271,7 @@ GameParticleOut gameMeshVS(uint id:SV_VertexID){
  GameParticleOut o;
  o.p=gpClipFromScreen((k.x+k.w)*gpClipHalf.x,(k.w-k.y)*gpClipHalf.y,k);
  o.d=float4((q.color>>16)&255,(q.color>>8)&255,q.color&255,q.color>>24)/255.0;
- o.uv=q.uv.xy;
+ o.uv=q.uv.xy;o.r=0;
  return o;
 }
 // Screen-space glyph quads (combat text, combat_text.h): element = (x, y, w, h)
@@ -281,7 +285,7 @@ GameParticleOut gameGlyphVS(uint id:SV_VertexID){
  GameParticleOut o;
  o.p=float4((s.x-gpViewport.x)/gpViewport.z*2-1,1-(s.y-gpViewport.y)/gpViewport.w*2,1,1);
  o.d=float4((q.color>>16)&255,(q.color>>8)&255,q.color&255,q.color>>24)/255.0;
- o.uv=float2(right>0?q.uv.z:q.uv.x,down>0?q.uv.w:q.uv.y);
+ o.uv=float2(right>0?q.uv.z:q.uv.x,down>0?q.uv.w:q.uv.y);o.r=0;
  return o;
 }
 float4 gpArg(uint selector,float4 diffuse,float4 textureSample){
@@ -314,9 +318,39 @@ GameParticlePixel gameParticlePS(GameParticleOut i){
  const float flame=gpCoverageMode==0?gpFlameKey(c.rgb):1; // authored colour, before fog
  // 1: blended like a surface (takes fog colour and in-scatter); 2: additive
  // light, only attenuated.
- [branch]if(gpFogMode==1){c.rgb=lerp(gpFogColor.rgb,c.rgb,nativeFogFactor(1,i.p));nativeAtmosphere(c.rgb,i.p,gpFogColor.rgb);}
+ // A blended effect is light and smoke, not a surface: past the draw distance
+ // it fades out with the cull (its colour already eased to the sky's) instead
+ // of standing as a sky-coloured puff, and takes its glow with it.
+ [branch]if(gpFogMode==1){c.rgb=lerp(gpFogColor.rgb,c.rgb,nativeFogFactor(1,i.p));nativeAtmosphere(c.rgb,i.p,gpFogColor.rgb);c.a*=nativeDrawFade(i.p);}
  else if(gpFogMode==2){float3 added=0;c.rgb*=nativeFogFactor(1,i.p)*nativeAtmosphere(added,i.p,gpFogColor.rgb);}
- GameParticlePixel o;o.color=c;o.glow=float4(c.rgb*flame,c.a);return o;
+ // Soft particles (world particle calls, gpSoft.w: 1 the blend weighs the
+ // colour by alpha, 2 additive light): where the world behind the particle
+ // is nearer than gpSoft.z times its radius, the particle fades out there
+ // instead of cutting a hard line into the ground or a wall. View distance
+ // W = B / (z - A) (gpSoft.xy, from the call's own projection) for the world
+ // depth and the particle's depth alike.
+ float fade=1,scene=1;
+ [branch]if(gpSoft.w!=0){
+  scene=gpSceneDepth.Load(int3(i.p.xy,0));
+  fade=saturate((gpSoft.y/(scene-gpSoft.x)-gpSoft.y/(i.p.z-gpSoft.x))/max(i.r*gpSoft.z,1e-5));
+  if(gpSoft.w>1.5)c*=fade;else c.a*=fade;
+ }
+ GameParticlePixel o;o.color=c;o.glow=float4(c.rgb*flame,c.a);
+#ifdef GP_SOFT_DEBUG
+ // Diagnostic (soft_particles_debug): one flat colour per effect class.
+ // Soft world particles: red where fully faded to green where unfaded.
+ // Self-checks: orange = the depth read is 0 (no depth bound); purple = the
+ // read depth lies in front of a pixel the depth test passed (the read and
+ // tested depths differ). Other classes through this program: white =
+ // particle call left hard (blend, depth write, interface), blue = ribbon,
+ // magenta = selection, cyan = glyph, yellow = ground print.
+ float shape=gpCoverageMode==2?max(t.r,max(t.g,t.b))*t.a:t.a;
+ if(gpTextured!=0&&shape<.05)discard;
+ float3 m=gpPadding.y==1?float3(0,0,1):gpPadding.y==2?float3(1,0,1):gpPadding.y==3?float3(0,1,1):gpPadding.y==4?float3(1,1,0):float3(1,1,1);
+ if(gpSoft.w!=0)m=scene<=0?float3(1,.5,0):scene<i.p.z-1e-6?float3(.5,0,1):lerp(float3(1,0,0),float3(0,1,0),fade);
+ o.color=float4(m,1);o.glow=0;
+#endif
+ return o;
 }
 // Reflection depth (#140): the particle's screen depth where it covers the
 // pixel visibly, for the next frame's water reflections; min-blended into a
@@ -348,8 +382,9 @@ struct GameParticleConstants {
     std::uint32_t textured, fog_mode, first;
     std::uint32_t coverage_mode;  // reflection depth coverage (gameParticleDepthPS)
     std::uint32_t count;          // ribbon point count (gameRibbonVS)
-    std::uint32_t padding[2];     // x: opt-in UI ribbon analytic coverage
+    std::uint32_t padding[2];     // x: opt-in UI ribbon analytic coverage; y: effect class (soft particle diagnostic)
+    float soft[4];                // soft particles: depth A, B (W = B / (z - A)), range per clip radius, mode (0 off)
 };
-static_assert(sizeof(GameParticleConstants) == 192, "game particle constants must match HLSL");
+static_assert(sizeof(GameParticleConstants) == 208, "game particle constants must match HLSL");
 
 }  // namespace owned

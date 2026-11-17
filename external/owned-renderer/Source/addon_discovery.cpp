@@ -650,12 +650,64 @@ const char* discover_visual(const Image& image, const Resolver& resolver,
     DISCOVER_REQUIRE(anim_count >= 1 && anim_count <= 4 &&
                      (layout.anim_speed_flag = absolute_rva(image, anim_tests[anim_count - 1] + 2)) != 0,
                      "visual.anim_speed_flag");
-    // The attack-rule flag skips the 55071F patch.
-    std::uint32_t attack_rule = 0;
+    // AnimSpeed writes the cast-coefficient jump at 55071F and registers its
+    // GetAnimationCoeff (5327D0) hook in one block behind the animation-speed
+    // flag. Older builds also skip the block while the attack-rule flag is
+    // set (after the animation-speed test, or as the only test in front of
+    // the block in the shipped JamaisVu 1.35 addon); later builds have no
+    // such gate.
+    std::uint32_t cast_write = 0;
     DISCOVER_REQUIRE(find_unique(image, sig(
-        "80 3d ?? ?? ?? ?? 00 75 64 6a 01 8d 45 ec c6 45 ec e9 50 68 1f 07 55 00"), attack_rule) &&
-        (layout.attack_rule_flag = absolute_rva(image, attack_rule + 2)) != 0,
-        "visual.attack_rule_flag");
+        "6a 01 8d 45 ec c6 45 ec e9 50 68 1f 07 55 00 8d 4d d4 e8 ?? ?? ?? ?? b8 ?? ?? ?? ?? "
+        "8d 4d d4 2d 24 07 55 00 89 45 e8 8d 45 e8 6a 04 50 68 20 07 55 00 e8 ?? ?? ?? ?? "
+        "8d 45 d4 ba 04 00 00 00 50 68 ?? ?? ?? ?? 68 ?? ?? ?? ?? 6a 03 b9 d0 27 53 00 e8"),
+        cast_write) && cast_write >= 18, "visual.coefficient_registration");
+    if (exact(image, cast_write - 18, "80 3d ?? ?? ?? ?? 00 74 6d 80 3d ?? ?? ?? ?? 00 75 64")) {
+        DISCOVER_REQUIRE(absolute_rva(image, cast_write - 16) == layout.anim_speed_flag &&
+            (layout.attack_rule_flag = absolute_rva(image, cast_write - 7)) != 0,
+            "visual.attack_rule_flag");
+    } else if (exact(image, cast_write - 9, "80 3d ?? ?? ?? ?? 00 75 64")) {
+        // The shipped JamaisVu 1.35 addon: the attack-rule test alone in front
+        // of the block, no animation-speed test there.
+        DISCOVER_REQUIRE((layout.attack_rule_flag = absolute_rva(image, cast_write - 7)) != 0 &&
+            layout.attack_rule_flag != layout.anim_speed_flag, "visual.attack_rule_flag");
+    } else {
+        DISCOVER_REQUIRE(exact(image, cast_write - 9, "80 3d ?? ?? ?? ?? 00 74 64") &&
+            absolute_rva(image, cast_write - 7) == layout.anim_speed_flag,
+            "visual.coefficient_guard");
+    }
+    // The jump target stores length / cast time in the server unit's +178 and
+    // resumes at 550724.
+    layout.cast_coefficient = absolute_rva(image, cast_write + 24);
+    DISCOVER_REQUIRE(in_text(image, layout.cast_coefficient) && exact(image, layout.cast_coefficient,
+        "d9 c0 da 74 24 2c 8b 57 1c d9 9a 78 01 00 00 50 d9 5c 24 24 68 24 07 55 00 c3"),
+        "visual.cast_coefficient");
+    // The callback tests the entry action bits, and for the other actions
+    // calls its registered original and stores the result in the unit's +178.
+    // Its body runs up to the int3 padding after it (compiler builds have
+    // moved the original call from +0x2F to +0x23 and +0xE6, with or without
+    // an out-of-line attack helper that calls the original too); within it
+    // the action test is unique and some original call is followed by the
+    // +178 store.
+    layout.coefficient_original = absolute_rva(image, cast_write + 65);
+    layout.coefficient_callback = absolute_rva(image, cast_write + 70);
+    const std::uint32_t coefficient = layout.coefficient_callback;
+    Sig original_call = sig("ff 15");
+    add_word(original_call, word(image, cast_write + 65));
+    std::uint32_t action_test = 0, body_end = 0, stored = 0;
+    std::uint32_t forwarded[4]{};
+    DISCOVER_REQUIRE(layout.coefficient_original && layout.coefficient_original <= image.size - 4 &&
+        !in_text(image, layout.coefficient_original) && in_text(image, coefficient) &&
+        exact(image, coefficient, "55 8b ec") &&
+        find_all(image, coefficient, coefficient + 0x400, sig("cc cc"), &body_end, 1) != 0,
+        "visual.coefficient_callback");
+    const std::uint32_t forwards = find_all(image, coefficient, body_end, original_call, forwarded, 4);
+    bool forwarded_store = false;
+    for (std::uint32_t index = 0; index < forwards && index < 4 && !forwarded_store; ++index)
+        forwarded_store = find_unique(image, forwarded[index] + 6, forwarded[index] + 0x18,
+                                      sig("78 01 00 00"), stored);
+    DISCOVER_REQUIRE(find_unique(image, coefficient, body_end, sig("25 00 00 3c 00"), action_test) &&
+        forwards >= 1 && forwards <= 4 && forwarded_store, "visual.coefficient_callback");
 
     // Generated-texture lookup: the route test is preceded by the mouth-atlas
     // alias flag test and the alias map head load.

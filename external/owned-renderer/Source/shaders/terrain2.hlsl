@@ -45,11 +45,14 @@ R"hlsl( //"
 // terrain_quality Medium and Low (nativeTerrainMaterial.z 0): the large
 // warp only and two noise octaves. Low (nativeTerrainMaterial.w 1, T2_LOW;
 // constant in the D3D11 Low specialisation, a uniform test elsewhere)
-// also cuts, each continuously (no new seam or step): hex detail from the
-// two strongest cells (the weakest weight subtracted), the two strongest
+// also cuts, each continuously (no new seam or step): the two strongest
 // materials (the third share subtracted), no texel-height decisions (edges
 // from the weights and class noise) and no wall-foot band.
 #define T2_LOW (nativeTerrainMaterial.w>0)
+// Medium and Low (frame switches x bit 20, set_native_terrain_frame):
+// decisions prefiltered nearer (t2DecisionFarLean),
+// biplanar projection (the terrain pixel stage).
+#define T2_LEAN ((uint(nativeTerrainMaterial.x)&0x100000u)!=0u||T2_LOW)
 SamplerState terrain2Sampler:register(s9);            // the contact sampler
 float4 terrain2Record(uint entry,uint r){return nativeTerrain2Maps[4*entry+r];}
 // Record 3 (update_terrain2_table): w the atlas width (asfloat) on both
@@ -119,6 +122,7 @@ float terrain2HeightGrad(uint m,float3 uvw,float2 dx,float2 dy){float r=0;T2_POO
 // cell classes (nativeMaterialTerrainRough) with the read's crevices (its
 // detail darker than the cell mean) packed in: surf = (height, roughness).
 static bool t2Surface=false;
+static bool t2BedSensitive=false; // terrain2Ground: the liquid-bed fade could change the result (cache bake)
 static const float t2CavityGain=4; // detail luma below the mean to crevice share
 #ifdef TERRAIN2_COVER
 float terrain2Roughness(uint v){return 1;}
@@ -147,6 +151,8 @@ static const float t2LoneCore=.1,t2LoneEdge=.9,t2LoneWarp=.18,t2LoneRagged=.4; /
 static const float t2PlaneKeep=.1;     // the weaker side plane reads from this share of the side up
 static const float t2FootBand=.8;      // m the floor material climbs a face
 static const float t2DecisionTexel=.04;// m: the texel size every decision reads at
+static const float2 t2DecisionFar=float2(4,8); // decision texels of pixel footprint: the texel term fades to its mean over this range
+static const float2 t2DecisionFarLean=float2(2,4); // the same for Medium (T2_LEAN)
 static const float t2HeightGain=.6;    // baked height (.5 +- amp/2) to the texel term (1.0 read luma about the mean)
 static const float t2BedBand=.15,t2BedDry=.6; // liquid-bed fade (m of liquid; dry weight where it is gone)
 // t2SnowSoft: how much snow widens the rock edge (1.0's 2 tripled it: rock
@@ -273,9 +279,14 @@ Terrain2Hex terrain2HexCells(float2 s,float2 sDx,float2 sDy,float aw){
  Terrain2Hex x;
  float hold=terrain2Hold(sDx,sDy,aw);sDx*=hold;sDy*=hold;
  float3 w;int2 v1,v2,v3;terrainHexGrid(s*terrainHexLattice,w,v1,v2,v3);w=max(w,0);w*=w*w;w/=w.x+w.y+w.z;
- // Cells under 1/64 drop out continuously (subtracted, renormalised); Low
- // subtracts the weakest cell's weight, so two cells are read.
- w=max(w-(T2_LOW?min(w.x,min(w.y,w.z)):1.0/64),0);w/=T2_LOW?max(w.x+w.y+w.z,1e-6):w.x+w.y+w.z; // (Low: zero at an exact three-way tie)
+ // Cells under 1/64 drop out continuously (subtracted, renormalised), on
+ // every quality. #252: Medium and Low subtracted the weakest cell's weight
+ // instead (two cells read), but renormalising those differences takes every
+ // ratio of the three cells within any radius of a hex triangle's centre
+ // (all three weights equal there): the baked height jumped at every centre
+ // and kinked along the medians, the relief drew a dark notch with three
+ // bright creases on a lattice (Medium-only, reproduced on both backends).
+ w=max(w-1.0/64,0);w/=w.x+w.y+w.z;
  float total=0,squares=0;
  [unroll]for(int j=0;j<3;++j){
   x.w[j]=w.x;
@@ -431,7 +442,7 @@ float3 terrain2Read(uint m,uint cell,Terrain2Planes P,float3 wp,bool authored,ui
 #ifdef TERRAIN2_COVER
  float3 col=terrain2CoverValue(cell,mean); // the cover pass's per-material value (terrain2_cover.h)
 #else
- float3 detail=0;float squares=0,h=0,hw=0;
+ float3 detail=0,topAlbedoDelta=0;float squares=0,h=0,hw=0;
  [unroll]for(int p=0;p<3;++p){
   [branch]if(projected[p]){
    Terrain2Hex x=P.h[p];float3 sum=0;
@@ -442,11 +453,13 @@ float3 terrain2Read(uint m,uint cell,Terrain2Planes P,float3 wp,bool authored,ui
     }
    }
    detail+=wp[p]*sum*x.gain;squares+=wp[p]*wp[p];
+   if(p==0)topAlbedoDelta=wp[p]*sum*(1-x.gain);
   }
  }
  detail*=min(rsqrt(max(squares,1e-8)),terrainDetailGainLimit);
  hc=float2(hw>0?h/hw:.5,saturate(-dot(detail,float3(.2126,.7152,.0722))*t2CavityGain));
- float3 col=saturate(mean+detail);
+ // Preserve boosted cavity detail; cancel only the top colour's hex gain.
+ float3 col=saturate(mean+detail+topAlbedoDelta*min(rsqrt(max(squares,1e-8)),terrainDetailGainLimit));
 #endif
  [branch]if(authored){hc=top*topHc+side*hc;return unvaried+side*col;}
  return col;
@@ -564,12 +577,15 @@ float3 terrain2Ground(uint mi,float3 p,float3 pw,float3 pDx,float3 pDy,float3 nr
  }
  // Liquid-bed materials (cell bit 15) above the waterline fade out as the
  // dry materials' weight grows (no liquid: bedDepth exactly 0).
+ // t2BedSensitive: the fade would change this result on dry ground under a
+ // liquid's footprint (a bed material with weight beside dry weight); the
+ // material cache stores it per texel (terrain2_cache.h), so dry banks read
+ // cached texels wherever it is clear.
+ bool4 bed=valid&&(sc&0x8000u)!=0u;
+ float dry=dot(valid&&!bed?wq:0,1);
+ t2BedSensitive=t2BedSensitive||(any(bed&&wq>0)&&dry>0);
  float bedKeep=saturate(bedDepth/t2BedBand);
- [branch]if(bedKeep<1&&bedDepth!=0){
-  bool4 bed=valid&&(sc&0x8000u)!=0u;
-  float dry=dot(valid&&!bed?wq:0,1);
-  wq*=bed?lerp(1,bedKeep,smoothstep(0,t2BedDry,dry)):1;
- }
+ [branch]if(bedKeep<1&&bedDepth!=0)wq*=bed?lerp(1,bedKeep,smoothstep(0,t2BedDry,dry)):1;
  // Thin kernel tails drop out; where none clears the tail the weights stay.
  float4 wqAll=valid?wq:0;
  wq=valid?max(wq-t2Tail,0):0;
@@ -603,11 +619,21 @@ float3 terrain2Ground(uint mi,float3 p,float3 pw,float3 pDx,float3 pDy,float3 nr
    need=cliffRock!=0xffffu&&cliffW>.001&&m0>reach;
   }
  }
- // Decisions (texel heights): the slots where contested or on a face, then
- // the rocks (side planes only); one read in a loop (compiled once), the
- // slot vectors rotated (four turns restore their order).
+ // Decisions (texel heights): the slots where contested, or on a face that
+ // shows rock (the rock edge reads the cover's height: coverHeight), then the
+ // rocks (side planes only); one read in a loop (compiled once), the slot
+ // vectors rotated (four turns restore their order). Uncontested without
+ // rock the slot terms are never read (scores add them only where
+ // contested), so they are not decided.
  float3 wr=float3(0,fw)/max(fw.x+fw.y,1e-6);
- bool decide=!T2_LOW&&(contested>0||faceShare>.002),decideRock=!T2_LOW;
+ // Far pixels: the texel term varies at t2DecisionTexel, so once the
+ // pixel's surface footprint spans several decision texels it is sub-pixel
+ // noise the upscaler's jitter only averages. It fades to its mean (0: the
+ // bake's middle) between t2DecisionFar.x and .y decision texels of
+ // footprint (prefiltering), and past that is not read.
+ float2 decisionFar=T2_LEAN?t2DecisionFarLean:t2DecisionFar;
+ float decisionKeep=1-smoothstep(decisionFar.x,decisionFar.y,max(length(pDx),length(pDy))/t2DecisionTexel);
+ bool decide=!T2_LOW&&decisionKeep>0&&(contested>0||(faceShare>.002&&any(need))),decideRock=!T2_LOW&&decisionKeep>0;
  // Snow blends decide on the colour's luma (terrain2Decide), eased in with
  // the snow's share so nothing steps where snow enters the field.
  float lumaShare=smoothstep(0,.25,dot(valid&&kind==3u?wq:0,1));
@@ -622,6 +648,7 @@ float3 terrain2Ground(uint mi,float3 p,float3 pw,float3 pDx,float3 pDy,float3 nr
   if(rk){cliffRock=cliffRock.yzwx;cliffW=cliffW.yzwx;rockQ=rockQ.yzwx;need=need.yzwx;}
   else{sc=sc.yzwx;wq=wq.yzwx;texQ=texQ.yzwx;authored=authored.yzwx;}
  }
+ texQ*=decisionKeep;rockQ*=decisionKeep;
  // Scores: weight plus, where contested, the texel term, class noise and,
  // for a looser material, its harder partner's low texels.
  uint4 order=uint4(0,1,2,3);float4 score=-9;

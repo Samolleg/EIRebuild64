@@ -28,9 +28,11 @@
 #include <atomic>
 #include <array>
 #include <cstring>
+#include <chrono>
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <set>
 #include <mutex>
 #include <memory>
 #include <tuple>
@@ -39,9 +41,45 @@
 #include <unordered_map>
 #include <vector>
 
-namespace remote { void host_log(const char* format, ...); }
+namespace remote {
+void host_log(const char* format, ...);
+extern std::atomic<std::uint64_t> g_startup_pipeline_progress;
+}
+extern "C" { extern const UINT D3D12SDKVersion; }  // Host/host.cpp: the Agility SDK the host asks for
 
 namespace owned {
+
+// One host.log line after D3D12 device creation (also when it was refused):
+// which D3D12 runtime the process loaded (the Agility SDK's D3D12\D3D12Core.dll
+// beside the host, or Windows' own in System32 when the Agility runtime does
+// not load) and the highest shader model the device reports.
+static void log_d3d12_runtime(ID3D12Device* device) noexcept {
+    wchar_t path[MAX_PATH]{};
+    const HMODULE core = GetModuleHandleW(L"D3D12Core.dll");
+    if (core) GetModuleFileNameW(core, path, MAX_PATH);
+    char text[MAX_PATH * 3]{};
+    WideCharToMultiByte(CP_UTF8, 0, path, -1, text, sizeof(text) - 1, nullptr, nullptr);
+    char model[48] = "no device";
+    if (device) {
+        // The newest model these headers name; a runtime that does not know
+        // it rejects the query, then 6.6 (create() already required it).
+        D3D12_FEATURE_DATA_SHADER_MODEL query{D3D_HIGHEST_SHADER_MODEL};
+        if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &query, sizeof(query)))) {
+            query.HighestShaderModel = D3D_SHADER_MODEL_6_6;
+            if (FAILED(device->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &query, sizeof(query))))
+                query.HighestShaderModel = D3D_SHADER_MODEL_5_1;
+        }
+        std::snprintf(model, sizeof(model), "%u.%u", unsigned(query.HighestShaderModel) >> 4, unsigned(query.HighestShaderModel) & 15);
+    }
+    wchar_t own[MAX_PATH]{};
+    GetModuleFileNameW(nullptr, own, MAX_PATH);
+    std::wstring agility(own);
+    agility = agility.substr(0, agility.find_last_of(L"\\/") + 1) + L"D3D12\\D3D12Core.dll";
+    const bool loaded = core && _wcsicmp(path, agility.c_str()) == 0;
+    remote::host_log("d3d12: runtime %s (Agility SDK %u requested: %s); highest shader model %s",
+                     core ? text : "none loaded", static_cast<unsigned>(D3D12SDKVersion),
+                     loaded ? "loaded" : "not loaded, Windows' own runtime", model);
+}
 
 // Shader reads of textures and buffers use one combined state.
 constexpr D3D12_RESOURCE_STATES kShaderRead =
@@ -76,8 +114,12 @@ struct D3D12Texture {
     // An offscreen target (create_target): its colour view and its own depth.
     d3d12::ComPtr<ID3D12DescriptorHeap> rtv_heap, dsv_heap;
     D3D12_CPU_DESCRIPTOR_HANDLE rtv{}, dsv{};
+    // The depth's read-only view (depth and stencil read-only, the next DSV
+    // heap entry): bound while the same depth is a shader input
+    // (set_targets_read_depth, set_depth_read_only).
+    D3D12_CPU_DESCRIPTOR_HANDLE dsv_read_only{};
     D3D12_CPU_DESCRIPTOR_HANDLE depth_srv{};  // the target's depth as R24_UNORM or R32_FLOAT (staging)
-    D3D12_CPU_DESCRIPTOR_HANDLE stencil_srv{};
+    D3D12_CPU_DESCRIPTOR_HANDLE stencil_srv{};  // a D24S8 target's stencil plane as X24_G8_UINT (staging)
     d3d12::ComPtr<ID3D12Resource> depth;
     d3d12::ComPtr<ID3D12Heap> heap;  // a placed texture's heap (prepare_texture_batch), kept while it lives
     DXGI_FORMAT depth_format = DXGI_FORMAT_UNKNOWN;  // its depth view's format (none: no depth)
@@ -148,7 +190,17 @@ struct D3D12Buffer {
     UINT stride = 0, flags = 0;
     D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
     bool written = false;  // a dispatch wrote it as a UAV since its last barrier
+    // Byte ranges copies wrote since it entered COPY_DEST: copies into one
+    // buffer are unordered without a barrier, so an overlapping copy waits
+    // (copy_into).
+    std::vector<std::pair<UINT64, UINT64>> copy_writes;
     D3D12_CPU_DESCRIPTOR_HANDLE clear_uav{};  // clear_buffer_uint's raw view (made on first use)
+    // A dynamic ray tracing structure (built again in place every frame): its
+    // scratch memory and, for a top level, its instance descriptions.
+    d3d12::ComPtr<ID3D12Resource> rt_scratch;
+    std::shared_ptr<D3D12Buffer> rt_input;
+    // A static bottom-level structure: its place in the pool page `resource` is.
+    UINT64 rt_offset = 0;
     D3D12Buffer() = default;
     D3D12Buffer(const D3D12Buffer&) = delete;
     D3D12Buffer& operator=(const D3D12Buffer&) = delete;
@@ -164,6 +216,7 @@ struct D3D12Buffer {
         if (clear_uav.ptr) core->staging().free(clear_uav);
         if (hazard_forget) hazard_forget(resource.Get());
         core->release_later(resource);
+        if (rt_scratch) core->release_later(rt_scratch);
     }
 };
 
@@ -792,6 +845,9 @@ public:
                              count, milliseconds, core_.views().transient_capacity(), core_.views().persistent_capacity(),
                              core_.views().persistent_used(), core_.staging().blocks());
             remote::host_log("d3d12: session end: %u pipelines were first requested in play, not warmed at start (named above)", unwarmed_);
+            remote::host_log("d3d12: session end: %u variant pipelines requested beside the drawn ones (dry-frame and no-contact twins)", twin_requests_);
+            remote::host_log("d3d12: session end: fire burn twins: %u pipelines requested ahead, %u draws by their original (twin unavailable)",
+                             burn_twin_requests_, burn_twin_fallbacks_);
             pipelines_.wait_all();
             save_pipelines("at exit");
             // One line an entry: the log truncates long lines (the diag counts were lost).
@@ -802,7 +858,17 @@ public:
             if (g_hazards) g_hazards->summary("session end");
             for (const auto& entry : gpu_report_seen_)
                 remote::host_log("d3d12 gpu loop (session end): x%llu report %s (loop id:bound or 100:index, then :origin)", entry.second, entry.first.c_str());
-            core_.wait_idle();
+            // Idle, and the fence passed a context's last dispatch (or that
+            // list was never submitted): its resources are no longer in
+            // flight. Otherwise it is not destroyed; the process exit frees it.
+            const bool idle = core_.wait_idle();
+            fsr_upscaler_.retire();
+            if (idle) fsr_upscaler_.collect(core_.completed(), core_.recording_value());
+            if (fsr_upscaler_.retired()) {
+                remote::host_log("d3d12: %zu FSR upscaler context(s) not destroyed at session end: the GPU did not confirm that the last dispatch finished",
+                                 fsr_upscaler_.retired());
+                fsr_upscaler_.abandon();
+            }
             presenter_.destroy(core_);  // drains the pacer first (before_resize)
             pacer_.stop();
 #ifdef EID3D11_EMBEDDED
@@ -838,7 +904,10 @@ public:
                 debug = false;
             } else FreeLibrary(layers);
         }
-        if (!core_.create(debug, reason, gpu_validation)) return false;
+        const bool created = core_.create(debug, reason, gpu_validation);
+        owned::log_d3d12_runtime(created ? core_.device() : nullptr);
+        if (created && !core_.runtime_note().empty()) remote::host_log("d3d12: device from %s", core_.runtime_note().c_str());
+        if (!created) return false;
         debug_ = debug;
         // EI_RENDERER_D3D12_HAZARDS=1: the hazard checker (Hazards, above).
         if (env_value("EI_RENDERER_D3D12_HAZARDS") == '1') {
@@ -877,6 +946,7 @@ public:
         char adapter[256]{};
         WideCharToMultiByte(CP_UTF8, 0, core_.adapter_name().c_str(), -1, adapter, sizeof(adapter) - 1, nullptr, nullptr);
         remote::host_log("d3d12: device %s (SM 6.6, binding tier 3); %s", adapter, core_.heap_cost().c_str());
+        query_raytracing();
         if (!upload_.create(core_.device(), reason)) return false;
         if (!bulk_.create(core_.device(), reason, L"eid3d11 bulk upload block")) return false;
         try { preparer_ = std::make_shared<Preparer>(core_.device(), resource_owner_); } catch (...) { reason = "the upload preparer could not be created"; return false; }
@@ -897,27 +967,32 @@ public:
         if (!create_native_objects(reason)) return false;
         std::string note;
         const unsigned workers = (std::max)(1u, std::thread::hardware_concurrency() / 2);
-        if (!pipelines_.open(core_.device(), directory + L"eid3d11_d3d12_pipelines.bin", workers, note, reason)) return false;
+        // EI_RENDERER_D3D12_PIPELINE_DIR (fresh-install runs): the pipeline
+        // library and the recorded list in that folder (created) instead of
+        // beside the host.
+        std::wstring records_directory = directory;
+        {
+            wchar_t folder[MAX_PATH]{};
+            const DWORD length = GetEnvironmentVariableW(L"EI_RENDERER_D3D12_PIPELINE_DIR", folder, MAX_PATH);
+            if (length && length < MAX_PATH) {
+                records_directory = folder;
+                if (records_directory.back() != L'\\' && records_directory.back() != L'/') records_directory += L'\\';
+                CreateDirectoryW(records_directory.c_str(), nullptr);
+                remote::host_log("d3d12: pipeline library and recorded list in EI_RENDERER_D3D12_PIPELINE_DIR");
+            }
+        }
+        if (!pipelines_.open(core_.device(), records_directory + L"eid3d11_d3d12_pipelines.bin", workers, note, reason,
+                             &remote::g_startup_pipeline_progress)) return false;
         if (!note.empty()) remote::host_log("d3d12: %s", note.c_str());
         // Build-ahead cost of this backend's whole pipeline set: the fixed
         // ones and every pipeline earlier sessions recorded (loaded from the
         // library, or created when the driver or a program changed), waited
-        // for here so their first use draws.
-        LARGE_INTEGER frequency{}, begin{}, end{};
-        QueryPerformanceFrequency(&frequency);
-        QueryPerformanceCounter(&begin);
+        // for (start_warming) before the first real frame so their first use
+        // draws.
+        QueryPerformanceCounter(&warm_begin_);
         if (!request_programs(reason)) return false;
-        std::uint32_t recorded = 0, dropped = 0, shipped = 0;
-        request_recorded(directory, recorded, dropped, shipped);
-        pipelines_.wait_all();
-        warmed_ = true;
-        QueryPerformanceCounter(&end);
-        remote::host_log("d3d12: %u pipelines ready in %.1f ms on %u workers (%u loaded from the library, %u created; "
-                         "%u from the recorded lists (%u shipped), %u records dropped: program gone or unused for %u starts)",
-                         pipelines_.loaded() + pipelines_.created(), double(end.QuadPart - begin.QuadPart) * 1000.0 / double(frequency.QuadPart),
-                         workers, pipelines_.loaded(), pipelines_.created(), recorded, shipped, dropped, kRecordIdleStarts);
-        save_pipelines("at start");
-        remote::host_log("d3d12: presenting %ux%u in the host child window", presenter_.width(), presenter_.height());
+        request_recorded(records_directory, warm_recorded_, warm_dropped_, warm_shipped_);
+        warm_workers_ = workers;
         // The GPU report buffer every native program binds (u0 space3).
         if (!create_gpu_reports()) {
             reason = "the GPU report buffer (u0 space3) could not be created";
@@ -926,7 +1001,31 @@ public:
         return true;
     }
 
+    bool start_warming(std::size_t& done, std::size_t& total) override {
+        if (warmed_) return false;
+        // The "Preparing shaders" window draws with the overlay pipeline:
+        // built first (on this thread when no worker took it yet).
+        if (imgui_pipeline_ != UINT32_MAX) (void)pipelines_.wait(imgui_pipeline_);
+        done = pipelines_.loaded() + pipelines_.created();
+        total = pipelines_.requested();
+        if (!pipelines_.idle()) return true;
+        pipelines_.wait_all();
+        pipelines_.end_startup_progress();
+        warmed_ = true;
+        LARGE_INTEGER frequency{}, end{};
+        QueryPerformanceFrequency(&frequency);
+        QueryPerformanceCounter(&end);
+        remote::host_log("d3d12: %u pipelines ready in %.1f ms on %u workers (%u loaded from the library, %u created; "
+                         "%u from the recorded lists (%u shipped), %u records dropped: program gone or unused for %u starts)",
+                         pipelines_.loaded() + pipelines_.created(), double(end.QuadPart - warm_begin_.QuadPart) * 1000.0 / double(frequency.QuadPart),
+                         warm_workers_, pipelines_.loaded(), pipelines_.created(), warm_recorded_, warm_shipped_, warm_dropped_, kRecordIdleStarts);
+        save_pipelines("at start");
+        remote::host_log("d3d12: presenting %ux%u in the host child window", presenter_.width(), presenter_.height());
+        return false;
+    }
+
     const std::string& failure() const noexcept { return failure_; }
+    const std::string& runtime_note() const noexcept { return core_.runtime_note(); }
 
     // ---- D3D12Frame ------------------------------------------------------------
     HRESULT create_texture(UINT width, UINT height, DXGI_FORMAT format, owned::D3D12TextureRef& out, UINT mips = 1) override {
@@ -974,7 +1073,7 @@ public:
         height = texture.height;
         mips = texture.mips;
         format = texture.format;
-        return true;
+        return texture.resource != nullptr || texture.depth != nullptr; // depth-only targets keep their resource in depth
     }
 
     HRESULT create_texture_array(UINT width, UINT height, DXGI_FORMAT format, UINT mips, UINT slices, owned::D3D12TextureRef& out) override {
@@ -1153,17 +1252,26 @@ public:
             if (!barriers.empty()) list->ResourceBarrier(UINT(barriers.size()), barriers.data());
             barriers.clear();
         };
-        const auto range = [&](UINT subresource) {  // in the generated slices, a level below the last
+        // Levels below `read_levels` of the generated slices are already readable.
+        UINT read_levels = 0;
+        const auto range = [&](UINT subresource) {
             const UINT at = subresource / texture.mips, mip = subresource % texture.mips;
-            return at >= slice && at < slice + count && mip + 1 < texture.mips;
+            return at >= slice && at < slice + count && mip < read_levels;
         };
+        HRESULT result = S_OK;
         for (UINT mip = 1; mip < texture.mips; ++mip) {
             for (UINT at = slice; at < slice + count; ++at) to_read(at * texture.mips + mip - 1);
             flush();
+            read_levels = mip;
             resources_[0] = {texture.mip_views[(mip - 1) * 2], nullptr, nullptr};
             unordered_[0] = {texture.mip_views[mip * 2 + 1], nullptr, nullptr};
             slots_dirty_ = true;
-            if (!bind_slots(list, true, code, nullptr)) return owned::kD3D12Dropped;
+            // Out of descriptors (the ring grows next frame): the remaining
+            // levels are not generated, but every subresource still leaves in
+            // the one state the texture records. A return here once left the
+            // upper levels in UAV state with the write open (the occlusion
+            // pyramid's next-frame dispatch: hazard UAV WAW, compute_hiz).
+            if (!bind_slots(list, true, code, nullptr)) { result = owned::kD3D12Dropped; break; }
             set_pipeline(list, pipeline);
             const UINT width = (std::max)(1u, texture.width >> mip), height = (std::max)(1u, texture.height >> mip);
             list->Dispatch((width + 7) / 8, (height + 7) / 8, count);
@@ -1176,10 +1284,11 @@ public:
         texture.written = false;
         if (g_hazards) g_hazards->transition(texture.resource.Get(), kShaderRead);  // the per-level barriers above
         clear_slots();
-        return S_OK;
+        return result;
     }
 
-    HRESULT copy_texture(D3D12Texture& destination, UINT destination_subresource, D3D12Texture& source, UINT source_subresource) override {
+    HRESULT copy_texture(D3D12Texture& destination, UINT destination_subresource, D3D12Texture& source, UINT source_subresource,
+                         bool source_target_next = false) override {
         if (!accept_resource(&destination) || !accept_resource(&source)) return DXGI_ERROR_DEVICE_RESET;
         ID3D12GraphicsCommandList* list = open_list();
         if (!list) return E_FAIL;
@@ -1199,7 +1308,13 @@ public:
         }
         list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
         transition(list, destination, kShaderRead);
-        transition(list, source, kShaderRead);
+        // A render target the caller clears or draws into next goes straight to
+        // render-target state: COPY_SOURCE -> shader read is a read-to-read
+        // transition that need not wait for the copy, and the following
+        // shader-read -> render-target barrier then let the next clear
+        // overwrite the target while the copy still read it (the impostor
+        // bake's atlas slices came out partly or wholly cleared).
+        transition(list, source, source_target_next && source.rtv.ptr ? D3D12_RESOURCE_STATE_RENDER_TARGET : kShaderRead);
         return S_OK;
     }
 
@@ -1284,7 +1399,7 @@ public:
         owned::D3D12BufferRef buffer;
         const HRESULT hr = adopt_buffer(std::move(upload.resource), upload.bytes, stride, flags, buffer);
         if (FAILED(hr)) return hr;
-        transition(list, *buffer, D3D12_RESOURCE_STATE_COPY_DEST);
+        copy_into(list, *buffer, 0, upload.bytes);
         if (g_hazards) { g_hazards->command("prepared buffer upload"); g_hazards->access(buffer->resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, true, "copy destination"); }
         list->CopyBufferRegion(buffer->resource.Get(), 0, upload.upload.Get(), 0, upload.bytes);
         core_.release_later(std::move(upload.upload));  // read by this frame's copy
@@ -1356,26 +1471,38 @@ public:
         if (!ring.push(core_, data, bytes, 16, upload, reason)) return fail(E_OUTOFMEMORY, reason);
         if (g_hazards) g_hazards->taken(Hazards::kUploadRing, upload.gpu, bytes, core_.recording_value(), core_.completed());
         if (&ring == &upload_) upload_buffer_bytes_ += bytes;
-        transition(list, buffer, D3D12_RESOURCE_STATE_COPY_DEST);
+        copy_into(list, buffer, offset, bytes);
         if (g_hazards) { g_hazards->command("write_buffer"); g_hazards->access(buffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, true, "copy destination"); }
         list->CopyBufferRegion(buffer.resource.Get(), offset, upload.resource, upload.offset, bytes);
         return S_OK;
     }
 
-    HRESULT copy_buffer(owned::D3D12Buffer& destination, owned::D3D12Buffer& source, UINT64 bytes) override {
+    HRESULT copy_buffer(owned::D3D12Buffer& destination, owned::D3D12Buffer& source, UINT64 bytes, UINT64 destination_offset,
+                        UINT64 source_offset) override {
         if (!accept_resource(&destination) || !accept_resource(&source)) return DXGI_ERROR_DEVICE_RESET;
         if (!bytes) return S_OK;
-        if (bytes > destination.bytes || bytes > source.bytes) return E_INVALIDARG;
+        if (destination_offset > destination.bytes || bytes > destination.bytes - destination_offset ||
+            source_offset > source.bytes || bytes > source.bytes - source_offset)
+            return E_INVALIDARG;
         ID3D12GraphicsCommandList* list = open_list();
         if (!list) return E_FAIL;
-        transition(list, destination, D3D12_RESOURCE_STATE_COPY_DEST);
+        copy_into(list, destination, destination_offset, bytes);
         transition(list, source, D3D12_RESOURCE_STATE_COPY_SOURCE);
         if (g_hazards) {
             g_hazards->command("copy_buffer");
             g_hazards->access(destination.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, true, "copy destination");
             g_hazards->access(source.resource.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, false, "copy source");
         }
-        list->CopyBufferRegion(destination.resource.Get(), 0, source.resource.Get(), 0, bytes);
+        list->CopyBufferRegion(destination.resource.Get(), destination_offset, source.resource.Get(), source_offset, bytes);
+        // Leave the copy state: a following write into this buffer (the rows
+        // written right after a growth copy, upload_native_instances_d3d12)
+        // is another copy into COPY_DEST, and COPY_DEST -> COPY_DEST is no
+        // barrier, so the two copies were unordered and the old contents could
+        // land over the new rows (stale instance rows: neighbour crowns drew
+        // other objects' transforms and geometry). This transition makes the
+        // next write's COPY_DEST transition wait for this copy.
+        transition(list, destination, kShaderRead);
+        transition(list, source, kShaderRead);
         return S_OK;
     }
 
@@ -1512,7 +1639,11 @@ public:
         return S_OK;
     }
 
-    void set_index_buffer(owned::D3D12Buffer* indices) noexcept override { if (accept_resource(indices)) index_buffer_ = indices; }
+    void set_index_buffer(owned::D3D12Buffer* indices, UINT64 first_byte = 0) noexcept override {
+        if (!accept_resource(indices)) return;
+        index_buffer_ = indices;
+        index_first_byte_ = first_byte;
+    }
 
     // An indexed draw (the index buffer, 32-bit) from five argument words at
     // offset, as D3D11 DrawIndexedInstancedIndirect reads them.
@@ -1522,7 +1653,9 @@ public:
         if (!accept_resource(&arguments)) return DXGI_ERROR_DEVICE_RESET;
         ID3D12GraphicsCommandList* list = open_target();
         if (!list) return failure_.empty() ? S_OK : E_FAIL;  // minimized: nothing visible
-        if (!index_buffer_ || !indexed_signature_) return E_INVALIDARG;
+        if (!index_buffer_ || !indexed_signature_ || index_first_byte_ >= index_buffer_->bytes ||
+            UINT64(offset) + 20 > arguments.bytes)
+            return E_INVALIDARG;
         const ProgramCode* codes[2] = {};
         ID3D12PipelineState* pipeline = native_pipeline(vertex, pixel, state, nullptr, nullptr, codes);
         if (!pipeline) return S_FALSE;
@@ -1530,7 +1663,8 @@ public:
         if (!bind_slots(list, false, vertex_code, pixel_code, &arguments)) return owned::kD3D12Dropped;
         transition(list, arguments, indirect_state(arguments));
         transition(list, *index_buffer_, D3D12_RESOURCE_STATE_INDEX_BUFFER);
-        const D3D12_INDEX_BUFFER_VIEW view{index_buffer_->resource->GetGPUVirtualAddress(), UINT(index_buffer_->bytes), DXGI_FORMAT_R32_UINT};
+        const D3D12_INDEX_BUFFER_VIEW view{index_buffer_->resource->GetGPUVirtualAddress() + index_first_byte_,
+                                           UINT(index_buffer_->bytes - index_first_byte_), DXGI_FORMAT_R32_UINT};
         bind_index_view(list, view);
         bind_target(list, true);
         set_pipeline(list, pipeline);
@@ -1573,26 +1707,15 @@ public:
 
     // A non-blocking readback: bytes of the buffer copied in stream order;
     // poll_readback hands them over once the frame that copied them finished.
-    HRESULT request_readback(owned::D3D12Buffer& source, UINT64 bytes, std::uint64_t& ticket) override {
+    HRESULT request_readback(owned::D3D12Buffer& source, UINT64 bytes, std::uint64_t& ticket, const char* owner) override {
         ticket = 0;
         if (!accept_resource(&source)) return DXGI_ERROR_DEVICE_RESET;
         ID3D12GraphicsCommandList* list = open_list();
         if (!list) return E_FAIL;
         bytes = (std::min)(bytes, source.bytes);
         if (!bytes) return E_INVALIDARG;
-        D3D12_HEAP_PROPERTIES heap{};
-        heap.Type = D3D12_HEAP_TYPE_READBACK;
-        D3D12_RESOURCE_DESC desc{};
-        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
-        desc.Width = bytes;
-        desc.Height = 1;
-        desc.DepthOrArraySize = 1;
-        desc.MipLevels = 1;
-        desc.SampleDesc.Count = 1;
-        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         Readback readback;
-        HRESULT hr = core_.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                             IID_PPV_ARGS(&readback.heap));
+        const HRESULT hr = readback_heap(bytes, readback.heap);
         if (FAILED(hr)) return hr;
         transition(list, source, D3D12_RESOURCE_STATE_COPY_SOURCE);
         if (g_hazards) { g_hazards->command("readback"); g_hazards->access(source.resource.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, false, "copy source"); }
@@ -1600,18 +1723,42 @@ public:
         readback.ticket = next_readback_++;
         readback.fence = core_.recording_value();
         readback.bytes = bytes;
-        // Unpolled copies are dropped past a small bound (their owner moved on).
-        // The GPU may still be copying into the dropped one: released by fence.
-        if (readbacks_.size() >= 32) {
-            const Readback& dropped = readbacks_.front();
-            if (g_hazards) g_hazards->released("an unpolled readback buffer", dropped.fence, core_.completed());
-            core_.release_later(dropped.heap);
-            readbacks_.erase(readbacks_.begin());
-        }
-        readbacks_.push_back(std::move(readback));
-        ticket = readbacks_.back().ticket;
+        readback.owner = owner ? owner : "?";
+        keep_readback(std::move(readback), ticket);
         return S_OK;
     }
+    HRESULT request_texture_readback(D3D12Texture& source, UINT subresource, std::uint64_t& ticket, const char* owner) override {
+        ticket = 0;
+        ID3D12GraphicsCommandList* list = open_list();
+        if (!list || !source.resource) return E_FAIL;
+        const D3D12_RESOURCE_DESC texture_desc = source.resource->GetDesc();
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint{};
+        UINT rows = 0;
+        UINT64 row_bytes = 0, total = 0;
+        core_.device()->GetCopyableFootprints(&texture_desc, subresource, 1, 0, &footprint, &rows, &row_bytes, &total);
+        if (!total || total == UINT64_MAX) return E_INVALIDARG;
+        Readback readback;
+        const HRESULT hr = readback_heap(total, readback.heap);
+        if (FAILED(hr)) return hr;
+        transition(list, source, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        if (g_hazards) { g_hazards->command("texture readback"); g_hazards->access(source.resource.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, false, "copy source"); }
+        D3D12_TEXTURE_COPY_LOCATION to{}, from{};
+        to.pResource = readback.heap.Get();
+        to.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        to.PlacedFootprint = footprint;
+        from.pResource = source.resource.Get();
+        from.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        from.SubresourceIndex = subresource;
+        list->CopyTextureRegion(&to, 0, 0, 0, &from, nullptr);
+        transition(list, source, kShaderRead);
+        readback.ticket = next_readback_++;
+        readback.fence = core_.recording_value();
+        readback.bytes = total;
+        readback.owner = owner ? owner : "?";
+        keep_readback(std::move(readback), ticket);
+        return S_OK;
+    }
+
     HRESULT poll_readback(std::uint64_t ticket, std::vector<std::uint8_t>& data) override {
         for (auto it = readbacks_.begin(); it != readbacks_.end(); ++it) {
             if (it->ticket != ticket) continue;
@@ -1626,10 +1773,433 @@ public:
                 const D3D12_RANGE written{0, 0};
                 it->heap->Unmap(0, &written);
             }
+            // The copy has finished: the buffer serves the next readback of its size.
+            // The oldest kept one gives way when the list is full (the sizes in use change).
+            if (readback_free_.size() >= kReadbackFree) readback_free_.erase(readback_free_.begin());
+            readback_free_.push_back(std::move(it->heap));
             readbacks_.erase(it);
             return hr;
         }
         return E_INVALIDARG;
+    }
+    // A readback buffer of exactly bytes: a finished one of that size, else a new one.
+    HRESULT readback_heap(UINT64 bytes, ComPtr<ID3D12Resource>& out) {
+        for (auto it = readback_free_.begin(); it != readback_free_.end(); ++it)
+            if ((*it)->GetDesc().Width == bytes) { out = std::move(*it); readback_free_.erase(it); return S_OK; }
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        desc.Width = bytes;
+        desc.Height = 1;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.SampleDesc.Count = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        return core_.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                       IID_PPV_ARGS(&out));
+    }
+
+    // ---- Ray tracing (DXR 1.1 inline ray queries; the rt_* options) -------
+    const char* raytracing_unavailable() const noexcept override { return rt_unavailable_.empty() ? nullptr : rt_unavailable_.c_str(); }
+
+    // The adapter's ray tracing tier and highest shader model, logged once at
+    // the start. Inline ray queries (RayQuery in any shader stage) need tier
+    // 1.1; without it rt_unavailable_ names the reason and nothing traces.
+    void query_raytracing() {
+        D3D12_FEATURE_DATA_D3D12_OPTIONS5 options{};
+        const HRESULT interface_result = core_.device()->QueryInterface(IID_PPV_ARGS(&rt_device_));
+        const HRESULT options_result = core_.device()->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS5, &options, sizeof(options));
+        // The highest model this runtime and driver accept (an unknown value is refused: step down).
+        unsigned shader_model = 0;
+        for (unsigned model = 0x69; model >= 0x60 && !shader_model; --model) {
+            D3D12_FEATURE_DATA_SHADER_MODEL data{static_cast<D3D_SHADER_MODEL>(model)};
+            if (SUCCEEDED(core_.device()->CheckFeatureSupport(D3D12_FEATURE_SHADER_MODEL, &data, sizeof(data))))
+                shader_model = unsigned(data.HighestShaderModel);
+        }
+        const int tier = SUCCEEDED(options_result) ? int(options.RaytracingTier) : 0;
+        if (FAILED(interface_result)) rt_unavailable_ = hresult_text("this D3D12 runtime has no ID3D12Device5: QueryInterface", interface_result);
+        else if (FAILED(options_result)) rt_unavailable_ = hresult_text("CheckFeatureSupport (D3D12_FEATURE_D3D12_OPTIONS5)", options_result);
+        else if (options.RaytracingTier == D3D12_RAYTRACING_TIER_NOT_SUPPORTED) rt_unavailable_ = "the adapter or its driver reports no ray tracing support";
+        else if (options.RaytracingTier < D3D12_RAYTRACING_TIER_1_1)
+            rt_unavailable_ = "the adapter reports ray tracing tier 1.0; inline ray queries need tier 1.1";
+        if (!rt_unavailable_.empty()) rt_device_.Reset();
+        if (rt_unavailable_.empty())
+            remote::host_log("d3d12: ray tracing tier %d.%d, highest shader model %u.%u: inline ray queries available (rt_* options)", tier / 10,
+                             tier % 10, shader_model >> 4, shader_model & 15u);
+        else
+            remote::host_log("d3d12: ray tracing off: %s (tier value %d, highest shader model %u.%u); the rt_* options do nothing",
+                             rt_unavailable_.c_str(), tier, shader_model >> 4, shader_model & 15u);
+    }
+
+    // Acceleration-structure memory: structures live in their state for
+    // good; scratch memory is written as unordered access during a build only.
+    HRESULT raytracing_memory(UINT64 bytes, D3D12_RESOURCE_STATES state, const wchar_t* name, ComPtr<ID3D12Resource>& resource) {
+        D3D12_RESOURCE_DESC desc{};
+        desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        desc.Width = (bytes + 255) & ~UINT64(255);  // D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BYTE_ALIGNMENT
+        desc.Height = 1;
+        desc.DepthOrArraySize = 1;
+        desc.MipLevels = 1;
+        desc.SampleDesc.Count = 1;
+        desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+        D3D12_HEAP_PROPERTIES heap{};
+        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+        const HRESULT created = core_.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr, IID_PPV_ARGS(&resource));
+        if (SUCCEEDED(created)) resource->SetName(name);
+        return created;
+    }
+    // A built structure as an executor buffer. An acceleration structure
+    // never leaves its state, so the tracked state is the shader-read one the
+    // t slots ask for: binding it records no barrier.
+    std::shared_ptr<owned::D3D12Buffer> raytracing_buffer(const ComPtr<ID3D12Resource>& structure) {
+        auto buffer = std::make_shared<owned::D3D12Buffer>();
+        buffer->owner = resource_owner_;
+        buffer->resource = structure;
+        buffer->bytes = structure->GetDesc().Width;
+        buffer->state = kShaderRead;
+        return buffer;
+    }
+
+    HRESULT build_raytracing_bottom(owned::D3D12Buffer& vertices, UINT vertex_stride, owned::D3D12Buffer& indices,
+                                    const owned::D3D12RaytracingGeometry* geometries, UINT count, owned::D3D12BufferRef& out,
+                                    bool dynamic) override {
+        owned::D3D12BufferRef previous = std::move(out);
+        out.reset();
+        if (!rt_device_) return E_NOINTERFACE;
+        if (!geometries || !count || vertex_stride < 12 || (vertex_stride & 3)) return E_INVALIDARG;
+        if (!accept_resource(&vertices) || !accept_resource(&indices) || !accept_resource(previous.get()))
+            return DXGI_ERROR_DEVICE_RESET;
+        for (UINT n = 0; n < count; ++n)
+            if (!accept_resource(geometries[n].index_buffer)) return DXGI_ERROR_DEVICE_RESET;
+        ID3D12GraphicsCommandList* list = open_list();
+        if (!list) return E_FAIL;
+        ComPtr<ID3D12GraphicsCommandList4> list4;
+        HRESULT hr = list->QueryInterface(IID_PPV_ARGS(&list4));
+        if (FAILED(hr)) return hr;
+        std::vector<D3D12_RAYTRACING_GEOMETRY_DESC> descs;
+        try { descs.resize(count); } catch (...) { return E_OUTOFMEMORY; }
+        const D3D12_GPU_VIRTUAL_ADDRESS vertex_base = vertices.resource->GetGPUVirtualAddress(), index_base = indices.resource->GetGPUVirtualAddress();
+        UINT64 triangles = 0;
+        for (UINT n = 0; n < count; ++n) {
+            const auto& source = geometries[n];
+            const owned::D3D12Buffer& index_source = source.index_buffer ? *source.index_buffer : indices;
+            if (!source.vertex_count || source.index_count < 3 || source.index_count % 3 || (source.vertex_offset & 3) || (source.index_offset & 3) ||
+                source.vertex_offset + UINT64(source.vertex_count) * vertex_stride > vertices.bytes ||
+                source.index_offset + UINT64(source.index_count) * 4 > index_source.bytes)
+                return E_INVALIDARG;
+            auto& geometry = descs[n];
+            geometry.Type = D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
+            geometry.Flags = source.opaque ? D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE : D3D12_RAYTRACING_GEOMETRY_FLAG_NONE;
+            geometry.Triangles.IndexFormat = DXGI_FORMAT_R32_UINT;
+            geometry.Triangles.VertexFormat = DXGI_FORMAT_R32G32B32_FLOAT;
+            geometry.Triangles.IndexCount = source.index_count;
+            geometry.Triangles.VertexCount = source.vertex_count;
+            geometry.Triangles.IndexBuffer = (source.index_buffer ? source.index_buffer->resource->GetGPUVirtualAddress() : index_base) + source.index_offset;
+            geometry.Triangles.VertexBuffer.StartAddress = vertex_base + source.vertex_offset;
+            geometry.Triangles.VertexBuffer.StrideInBytes = vertex_stride;
+            triangles += source.index_count / 3;
+        }
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC bottom{};
+        bottom.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
+        // Static: built once, traced every frame. Dynamic: built every frame.
+        bottom.Inputs.Flags = dynamic ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD
+                                      : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE |
+                                            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION;
+        bottom.Inputs.NumDescs = count;
+        bottom.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        bottom.Inputs.pGeometryDescs = descs.data();
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO size{};
+        rt_device_->GetRaytracingAccelerationStructurePrebuildInfo(&bottom.Inputs, &size);
+        if (!size.ResultDataMaxSizeInBytes) {
+            raytracing_failed("the driver gave no bottom-level structure size");
+            return E_FAIL;
+        }
+        ComPtr<ID3D12Resource> structure, scratch;
+        std::shared_ptr<owned::D3D12Buffer> built;
+        // A dynamic structure with room is built again in place (the queue
+        // runs the frames in order); a new one takes half as much again.
+        const bool reuse = dynamic && previous && previous->rt_scratch && previous->bytes >= size.ResultDataMaxSizeInBytes &&
+                           previous->rt_scratch->GetDesc().Width >= size.ScratchDataSizeInBytes;
+        UINT64 offset = 0;
+        if (reuse) {
+            built = std::move(previous);
+            structure = built->resource;
+            scratch = built->rt_scratch;
+        } else if (dynamic) {
+            if (FAILED(hr = raytracing_memory(size.ResultDataMaxSizeInBytes + size.ResultDataMaxSizeInBytes / 2,
+                                              D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, L"eid3d11 ray tracing bottom level",
+                                              structure)) ||
+                FAILED(hr = raytracing_memory(size.ScratchDataSizeInBytes + size.ScratchDataSizeInBytes / 2,
+                                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"eid3d11 ray tracing scratch", scratch))) {
+                raytracing_failed(hresult_text("bottom-level structure memory", hr));
+                return hr;
+            }
+            try { built = raytracing_buffer(structure); } catch (...) { return E_OUTOFMEMORY; }
+            built->rt_scratch = scratch;
+            hazard_created(*built);
+        } else {
+            // Static structures share pool pages (a committed buffer of its
+            // own costs 64 KB at least; a small mesh's structure is far
+            // smaller) and one scratch buffer, used by one build at a time
+            // (a UAV barrier after each). A page is released with the last
+            // structure in it; the pool keeps only the page it is filling.
+            const UINT64 need = (size.ResultDataMaxSizeInBytes + 255) & ~UINT64(255);
+            if (!rt_pool_page_ || rt_pool_used_ + need > rt_pool_size_) {
+                rt_pool_page_.Reset();
+                rt_pool_size_ = (std::max<UINT64>)(need, 16ull << 20);
+                rt_pool_used_ = 0;
+                if (FAILED(hr = raytracing_memory(rt_pool_size_, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+                                                  L"eid3d11 ray tracing bottom levels", rt_pool_page_))) {
+                    rt_pool_size_ = 0;
+                    raytracing_failed(hresult_text("bottom-level structure memory", hr));
+                    return hr;
+                }
+            }
+            if (!rt_pool_scratch_ || rt_pool_scratch_->GetDesc().Width < size.ScratchDataSizeInBytes) {
+                if (rt_pool_scratch_) core_.release_later(rt_pool_scratch_);
+                rt_pool_scratch_.Reset();
+                if (FAILED(hr = raytracing_memory((std::max<UINT64>)(size.ScratchDataSizeInBytes, 4ull << 20),
+                                                  D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"eid3d11 ray tracing scratch", rt_pool_scratch_))) {
+                    raytracing_failed(hresult_text("bottom-level scratch memory", hr));
+                    return hr;
+                }
+            }
+            structure = rt_pool_page_;
+            scratch = rt_pool_scratch_;
+            offset = rt_pool_used_;
+            rt_pool_used_ += need;
+            try { built = raytracing_buffer(structure); } catch (...) { return E_OUTOFMEMORY; }
+            built->bytes = need;
+            built->rt_offset = offset;
+        }
+        transition(list, vertices, kShaderRead);
+        transition(list, indices, kShaderRead);
+        for (UINT n = 0; n < count; ++n)
+            if (geometries[n].index_buffer) transition(list, *geometries[n].index_buffer, kShaderRead);
+        if (g_hazards) {
+            g_hazards->command("raytracing bottom-level build");
+            g_hazards->access(vertices.resource.Get(), kShaderRead, false, "acceleration structure input");
+            g_hazards->access(indices.resource.Get(), kShaderRead, false, "acceleration structure input");
+        }
+        bottom.DestAccelerationStructureData = structure->GetGPUVirtualAddress() + offset;
+        bottom.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
+        // A static structure's compacted size goes to the batch's info buffer
+        // (8 bytes each; compact_raytracing reads it back). Without a slot the
+        // structure simply stays as built.
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_DESC post{};
+        bool reported = false;
+        if (!dynamic) {
+            if (rt_info_ && rt_info_structures_.size() >= kRaytracingInfoSlots) raytracing_close_batch();
+            if (!rt_info_ && FAILED(create_buffer(kRaytracingInfoSlots * 8, 0, owned::kD3D12BufferUnordered, rt_info_))) rt_info_.reset();
+            if (rt_info_) {
+                try { rt_info_structures_.push_back(built); reported = true; } catch (...) {}
+            }
+            if (reported) {
+                transition(list, *rt_info_, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                post.DestBuffer = rt_info_->resource->GetGPUVirtualAddress() + (rt_info_structures_.size() - 1) * 8;
+                post.InfoType = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_POSTBUILD_INFO_COMPACTED_SIZE;
+                rt_info_->written = true;
+            }
+        }
+        list4->BuildRaytracingAccelerationStructure(&bottom, reported ? 1 : 0, reported ? &post : nullptr);
+        // A structure is readable (by a top-level build, by rays) after a UAV barrier on its memory.
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        barrier.UAV.pResource = structure.Get();
+        list->ResourceBarrier(1, &barrier);
+        // The scratch memory is written again by the next build.
+        barrier.UAV.pResource = scratch.Get();
+        list->ResourceBarrier(1, &barrier);
+        if (!dynamic) {
+            rt_bottom_bytes_ += built->bytes;
+            ++rt_bottom_builds_;
+            rt_bottom_triangles_ += triangles;
+        }
+        out = std::move(built);
+        return S_OK;
+    }
+
+    // The info buffer's batch ends: its sizes are read back once the GPU has written them.
+    void raytracing_close_batch() noexcept {
+        if (!rt_info_ || rt_info_structures_.empty()) return;
+        std::uint64_t ticket = 0;
+        if (SUCCEEDED(request_readback(*rt_info_, UINT64(rt_info_structures_.size()) * 8, ticket, "ray tracing compaction"))) {
+            try { rt_batches_.push_back({ticket, std::move(rt_info_structures_)}); } catch (...) {}
+        }
+        rt_info_structures_.clear();
+        rt_info_.reset();
+    }
+
+    bool raytracing_compaction_pending() const noexcept override { return !rt_batches_.empty() || !rt_info_structures_.empty(); }
+
+    bool compact_raytracing() override {
+        if (rt_batches_.empty() || !rt_device_) return false;
+        ID3D12GraphicsCommandList* list = nullptr;
+        ComPtr<ID3D12GraphicsCommandList4> list4;
+        UINT moved = 0;
+        UINT64 before = 0, after = 0;
+        std::vector<std::uint8_t> data;
+        for (auto batch = rt_batches_.begin(); batch != rt_batches_.end();) {
+            const HRESULT polled = poll_readback(batch->ticket, data);
+            if (polled == S_FALSE) { ++batch; continue; }
+            for (std::size_t n = 0; polled == S_OK && n < batch->structures.size() && (n + 1) * 8 <= data.size(); ++n) {
+                const auto structure = batch->structures[n].lock();
+                UINT64 compacted = 0;
+                std::memcpy(&compacted, data.data() + n * 8, 8);
+                const UINT64 need = (compacted + 255) & ~UINT64(255);
+                if (!structure || !compacted || need >= structure->bytes) continue;
+                if (!list) {
+                    list = open_list();
+                    if (!list || FAILED(list->QueryInterface(IID_PPV_ARGS(&list4)))) return false;
+                }
+                if (!rt_compact_page_ || rt_compact_used_ + need > rt_compact_size_) {
+                    rt_compact_page_.Reset();
+                    rt_compact_size_ = (std::max<UINT64>)(need, 16ull << 20);
+                    rt_compact_used_ = 0;
+                    if (FAILED(raytracing_memory(rt_compact_size_, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+                                                 L"eid3d11 ray tracing bottom levels (compacted)", rt_compact_page_))) {
+                        rt_compact_size_ = 0;
+                        raytracing_failed("compacted bottom-level structure memory");
+                        break;
+                    }
+                }
+                const D3D12_GPU_VIRTUAL_ADDRESS destination = rt_compact_page_->GetGPUVirtualAddress() + rt_compact_used_;
+                list4->CopyRaytracingAccelerationStructure(destination, structure->resource->GetGPUVirtualAddress() + structure->rt_offset,
+                                                           D3D12_RAYTRACING_ACCELERATION_STRUCTURE_COPY_MODE_COMPACT);
+                D3D12_RESOURCE_BARRIER barrier{};
+                barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+                barrier.UAV.pResource = rt_compact_page_.Get();
+                list->ResourceBarrier(1, &barrier);
+                core_.release_later(structure->resource);  // the page it leaves, kept until this copy has run
+                before += structure->bytes;
+                after += need;
+                structure->resource = rt_compact_page_;
+                structure->rt_offset = rt_compact_used_;
+                structure->bytes = need;
+                rt_compact_used_ += need;
+                ++moved;
+            }
+            batch = rt_batches_.erase(batch);
+        }
+        if (moved)
+            remote::host_log("d3d12: ray tracing scene: %u static bottom-level structures compacted, %.2f MB -> %.2f MB", moved,
+                             double(before) / (1024.0 * 1024.0), double(after) / (1024.0 * 1024.0));
+        return moved != 0;
+    }
+
+    HRESULT build_raytracing_top(const owned::D3D12RaytracingInstance* instances, UINT count, owned::D3D12BufferRef& out,
+                                 bool dynamic) override {
+        owned::D3D12BufferRef previous = std::move(out);
+        out.reset();
+        if (!rt_device_) return E_NOINTERFACE;
+        if (!instances || !count) return E_INVALIDARG;
+        if (!accept_resource(previous.get())) return DXGI_ERROR_DEVICE_RESET;
+        for (UINT n = 0; n < count; ++n) {
+            if (!instances[n].bottom) return E_INVALIDARG;
+            if (!accept_resource(instances[n].bottom)) return DXGI_ERROR_DEVICE_RESET;
+        }
+        ID3D12GraphicsCommandList* list = open_list();
+        if (!list) return E_FAIL;
+        ComPtr<ID3D12GraphicsCommandList4> list4;
+        HRESULT hr = list->QueryInterface(IID_PPV_ARGS(&list4));
+        if (FAILED(hr)) return hr;
+        std::vector<D3D12_RAYTRACING_INSTANCE_DESC> descs;
+        try { descs.resize(count); } catch (...) { return E_OUTOFMEMORY; }
+        for (UINT n = 0; n < count; ++n) {
+            if (!instances[n].bottom) return E_INVALIDARG;
+            auto& instance = descs[n];
+            if (instances[n].placed) std::memcpy(instance.Transform, instances[n].transform, sizeof(instance.Transform));
+            else instance.Transform[0][0] = instance.Transform[1][1] = instance.Transform[2][2] = 1.0f;  // a world-space structure
+            instance.InstanceID = instances[n].id & 0xFFFFFFu;
+            instance.InstanceMask = instances[n].mask & 0xFFu;
+            instance.Flags = (instances[n].two_sided ? D3D12_RAYTRACING_INSTANCE_FLAG_TRIANGLE_CULL_DISABLE : D3D12_RAYTRACING_INSTANCE_FLAG_NONE) |
+                             (instances[n].opacity == 1 ? D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_OPAQUE
+                              : instances[n].opacity == 2 ? D3D12_RAYTRACING_INSTANCE_FLAG_FORCE_NON_OPAQUE : D3D12_RAYTRACING_INSTANCE_FLAG_NONE);
+            instance.AccelerationStructure = instances[n].bottom->resource->GetGPUVirtualAddress() + instances[n].bottom->rt_offset;
+        }
+        owned::D3D12BufferRef input;
+        const UINT64 input_bytes = UINT64(count) * sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
+        if (dynamic && previous && previous->rt_input && previous->rt_input->bytes >= input_bytes) input = previous->rt_input;
+        else if (FAILED(hr = create_buffer(dynamic ? input_bytes * 2 : input_bytes, 0, 0, input))) return hr;
+        if (FAILED(hr = write_buffer(*input, 0, descs.data(), input_bytes))) return hr;
+        list = open_list();  // the write may have opened the frame's list
+        if (!list) return E_FAIL;
+        D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC top{};
+        top.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+        top.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        top.Inputs.NumDescs = count;
+        top.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+        top.Inputs.InstanceDescs = input->resource->GetGPUVirtualAddress();
+        D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO size{};
+        rt_device_->GetRaytracingAccelerationStructurePrebuildInfo(&top.Inputs, &size);
+        if (!size.ResultDataMaxSizeInBytes) {
+            raytracing_failed("the driver gave no top-level structure size");
+            return E_FAIL;
+        }
+        ComPtr<ID3D12Resource> structure, scratch;
+        std::shared_ptr<owned::D3D12Buffer> scene;
+        const bool reuse = dynamic && previous && previous->rt_scratch && previous->rt_input == input && previous->srv.ptr &&
+                           previous->bytes >= size.ResultDataMaxSizeInBytes &&
+                           previous->rt_scratch->GetDesc().Width >= size.ScratchDataSizeInBytes;
+        if (reuse) {
+            scene = std::move(previous);
+            structure = scene->resource;
+            scratch = scene->rt_scratch;
+        } else {
+            const UINT64 factor = dynamic ? 2 : 1;
+            if (FAILED(hr = raytracing_memory(size.ResultDataMaxSizeInBytes * factor, D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE,
+                                              L"eid3d11 ray tracing top level", structure)) ||
+                FAILED(hr = raytracing_memory(size.ScratchDataSizeInBytes * factor, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                              L"eid3d11 ray tracing scratch", scratch))) {
+                raytracing_failed(hresult_text("top-level structure memory", hr));
+                return hr;
+            }
+            // The scene as a buffer the t slots take: its view is the top level's address.
+            try { scene = raytracing_buffer(structure); } catch (...) { return E_OUTOFMEMORY; }
+            scene->srv = core_.staging().allocate();
+            if (!scene->srv.ptr) {
+                raytracing_failed("no staging descriptor block");
+                return E_OUTOFMEMORY;
+            }
+            D3D12_SHADER_RESOURCE_VIEW_DESC view{};
+            view.ViewDimension = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE;
+            view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+            view.RaytracingAccelerationStructure.Location = structure->GetGPUVirtualAddress();
+            core_.device()->CreateShaderResourceView(nullptr, &view, scene->srv);
+            if (dynamic) { scene->rt_scratch = scratch; scene->rt_input = input; }
+            hazard_created(*scene);
+        }
+        transition(list, *input, kShaderRead);
+        if (g_hazards) {
+            g_hazards->command("raytracing top-level build");
+            g_hazards->access(input->resource.Get(), kShaderRead, false, "acceleration structure input");
+        }
+        top.DestAccelerationStructureData = structure->GetGPUVirtualAddress();
+        top.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
+        list4->BuildRaytracingAccelerationStructure(&top, 0, nullptr);
+        D3D12_RESOURCE_BARRIER barrier{};
+        barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+        barrier.UAV.pResource = structure.Get();
+        list->ResourceBarrier(1, &barrier);
+        if (dynamic) {
+            barrier.UAV.pResource = scratch.Get();
+            list->ResourceBarrier(1, &barrier);
+            if (rt_bottom_builds_) raytracing_close_batch();
+            // Built again in place with no static structure new: no line.
+            if (reuse && !rt_bottom_builds_) { out = std::move(scene); return S_OK; }
+        } else core_.release_later(scratch);
+        if (rt_bottom_builds_) raytracing_close_batch();
+        // One line a scene change: what the static bottom-level builds since the last line added.
+        remote::host_log("d3d12: ray tracing scene: top level of %u instances (needs %.1f KB, scratch %.1f KB); since the last line %u static "
+                         "bottom-level builds, %llu triangles, %.2f MB of bottom-level structures (not compacted, pooled)",
+                         count, double(size.ResultDataMaxSizeInBytes) / 1024.0, double(size.ScratchDataSizeInBytes) / 1024.0, rt_bottom_builds_,
+                         static_cast<unsigned long long>(rt_bottom_triangles_), double(rt_bottom_bytes_) / (1024.0 * 1024.0));
+        rt_bottom_builds_ = 0;
+        rt_bottom_triangles_ = rt_bottom_bytes_ = 0;
+        out = std::move(scene);
+        return S_OK;
     }
 
     HRESULT draw_indirect(const owned::ShaderProgram& vertex, const owned::ShaderProgram& pixel, const owned::D3D12NativeState& state,
@@ -1708,7 +2278,7 @@ public:
         if (clipped.empty()) return;
         const UINT n = UINT(clipped.size());
         if (g_hazards) g_hazards->command("clear_rectangles");
-        if (color) {
+        if (color && !(offscreen_ && !offscreen_->rtv.ptr)) {  // a depth-only target has no colour to clear
             if (offscreen_) {
                 transition(list, *offscreen_, D3D12_RESOURCE_STATE_RENDER_TARGET);
                 if (g_hazards) g_hazards->access(offscreen_->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, true, "cleared colour");
@@ -1739,6 +2309,12 @@ public:
         }
     }
 
+    const std::unordered_map<const owned::ShaderProgram*, const owned::ShaderProgram*>* substitutes_ = nullptr;
+    const std::unordered_map<const owned::ShaderProgram*, const owned::ShaderProgram*>* warm_map_ = nullptr;
+    std::size_t warm_size_ = 0;
+    std::unordered_map<const ProgramCode*, const owned::ShaderProgram*> warm_codes_;  // base program code -> its twin
+    std::unordered_map<std::uint32_t, UINT> pipeline_targets_;  // native pipeline id -> its colour target count
+    std::uint32_t burn_twin_requests_ = 0, burn_twin_fallbacks_ = 0;
     void native_pipeline_stats(UINT& count, double& milliseconds) const noexcept override {
         count = 0;
         milliseconds = 0.0;
@@ -1895,9 +2471,11 @@ public:
             // D24S8 readable as R24_UNORM, or D32 readable as R32_FLOAT.
             const bool d32 = depth_format == DXGI_FORMAT_D32_FLOAT;
             views.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV;
+            views.NumDescriptors = 2;  // the writable view and a read-only one
             if (FAILED(hr = core_.device()->CreateDescriptorHeap(&views, IID_PPV_ARGS(&texture->dsv_heap))))
                 return failed(hr, "CreateDescriptorHeap (offscreen depth)");
             texture->dsv = texture->dsv_heap->GetCPUDescriptorHandleForHeapStart();
+            texture->dsv_read_only = {texture->dsv.ptr + core_.device()->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_DSV)};
             desc.Format = d32 ? DXGI_FORMAT_R32_TYPELESS : DXGI_FORMAT_R24G8_TYPELESS;
             desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
             clear.Format = depth_format;
@@ -1911,6 +2489,8 @@ public:
             dsv.Format = depth_format;
             dsv.ViewDimension = D3D12_DSV_DIMENSION_TEXTURE2D;
             core_.device()->CreateDepthStencilView(texture->depth.Get(), &dsv, texture->dsv);
+            dsv.Flags = d32 ? D3D12_DSV_FLAG_READ_ONLY_DEPTH : D3D12_DSV_FLAG_READ_ONLY_DEPTH | D3D12_DSV_FLAG_READ_ONLY_STENCIL;
+            core_.device()->CreateDepthStencilView(texture->depth.Get(), &dsv, texture->dsv_read_only);
             texture->depth_srv = core_.staging().allocate();
             if (!texture->depth_srv.ptr) return failed(E_OUTOFMEMORY, "staging descriptor block");
             D3D12_SHADER_RESOURCE_VIEW_DESC depth_view{};
@@ -1919,6 +2499,13 @@ public:
             depth_view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
             depth_view.Texture2D.MipLevels = 1;
             core_.device()->CreateShaderResourceView(texture->depth.Get(), &depth_view, texture->depth_srv);
+            if (!d32) {  // the stencil plane (set_stencil_resource)
+                texture->stencil_srv = core_.staging().allocate();
+                if (!texture->stencil_srv.ptr) return failed(E_OUTOFMEMORY, "staging descriptor block");
+                depth_view.Format = DXGI_FORMAT_X24_TYPELESS_G8_UINT;
+                depth_view.Texture2D.PlaneSlice = 1;
+                core_.device()->CreateShaderResourceView(texture->depth.Get(), &depth_view, texture->stencil_srv);
+            }
         }
         hazard_created(*texture, "target");
         out = std::move(texture);
@@ -1943,6 +2530,25 @@ public:
         depth_override_ = true;
         depth_owner_ = depth && depth->dsv.ptr ? depth : nullptr;
         depth_target_ = nullptr;
+        depth_read_only_ = false;
+    }
+    void set_caster_check(const std::uint32_t* table, UINT entries, UINT objects) noexcept override {
+        if (!g_hazards || !gpu_reports_ || !table) return;
+        entries = (std::min)(entries, kCasterCheckRecords);
+        objects = (std::min)(objects + 1, kCasterCheckObjects);
+        const UINT64 base = caster_check_offset(), masks = base + UINT64(kCasterCheckRecords) * 4;
+        if (entries) (void)write_buffer(*gpu_reports_, base, table, UINT64(entries) * 4);
+        const std::vector<std::uint32_t> zero(objects, 0u);
+        (void)write_buffer(*gpu_reports_, masks, zero.data(), UINT64(objects) * 4);
+        const std::uint32_t header[4]{static_cast<std::uint32_t>(base), entries, 0, 0};
+        (void)write_buffer(*gpu_reports_, kCasterCheckHeader, header, sizeof(header));
+    }
+    void set_gpu_report_word(UINT word, UINT value) noexcept override {
+        if (g_hazards && gpu_reports_ && word >= 5 && word < 8) (void)write_buffer(*gpu_reports_, UINT64(word) * 4, &value, 4);
+    }
+    void set_targets_read_depth(D3D12Texture* const* colors, UINT count, D3D12Texture* depth) noexcept override {
+        set_targets(colors, count, depth);
+        depth_read_only_ = depth_owner_ && depth_owner_->dsv_read_only.ptr;
     }
 
     // Any target's colour, cleared now (the bound targets are not changed).
@@ -1993,7 +2599,7 @@ public:
     // then the executor's heaps and root signature bound again and its
     // cached list state forgotten (the library set its own).
     HRESULT record_external(const char* name, const ExternalUse* uses, UINT count, const ExternalRecord& record) override {
-        constexpr UINT kMaximum = 8;
+        constexpr UINT kMaximum = 9;
         if (count > kMaximum || (count && !uses) || !record) return E_INVALIDARG;
         // Validate the complete set before opening a list or transitioning any
         // resource. A surviving snapshot must never reach NGX/FSR on a new device.
@@ -2027,8 +2633,10 @@ public:
     // Not Core::wait_idle: NGX calls this inside record_external, with the
     // frame's list open (a new fence value there retired the frame's own
     // ring memory and releases early: the TDR of the first DLSS mode change).
-    void wait_idle() noexcept override {
-        if (!core_.wait_submitted()) fail(E_FAIL, "the GPU did not finish submitted work within 20 s");
+    bool wait_idle() noexcept override { const bool done=core_.wait_submitted();if(!done)fail(E_FAIL,"the GPU did not finish submitted work within 20 s");return done; }
+    void fence_state(std::uint64_t& recording, std::uint64_t& completed) noexcept override {
+        recording = core_.recording_value();
+        completed = core_.completed();
     }
 
     // One target's depth into another's of the same size and format (stream order).
@@ -2062,24 +2670,14 @@ public:
     }
 
     void set_stencil_resource(UINT slot, const D3D12Texture* target) noexcept override {
-        if (!accept_resource(target) || slot >= kD3D11ResourceSlots) return;
-        auto* texture = const_cast<D3D12Texture*>(target);
-        if (texture && texture->depth_format == DXGI_FORMAT_D24_UNORM_S8_UINT && !texture->stencil_srv.ptr) {
-            texture->stencil_srv = core_.staging().allocate();
-            if (!texture->stencil_srv.ptr) { fail(E_OUTOFMEMORY, "stencil staging descriptor"); return; }
-            D3D12_SHADER_RESOURCE_VIEW_DESC view{};
-            view.Format = DXGI_FORMAT_X24_TYPELESS_G8_UINT;
-            view.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-            view.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
-            view.Texture2D.MipLevels = 1;
-            view.Texture2D.PlaneSlice = 1;
-            core_.device()->CreateShaderResourceView(texture->depth.Get(), &view, texture->stencil_srv);
-        }
-        const bool readable = texture && texture->stencil_srv.ptr;
-        resources_[slot] = {readable ? texture->stencil_srv : D3D12_CPU_DESCRIPTOR_HANDLE{}, nullptr,
-                            readable ? texture : nullptr, true};
+        if (!accept_resource(target)) return;
+        if (slot >= kD3D11ResourceSlots) return;
+        const bool readable = target && target->stencil_srv.ptr;
+        resources_[slot] = {readable ? target->stencil_srv : D3D12_CPU_DESCRIPTOR_HANDLE{}, nullptr,
+                            readable ? const_cast<D3D12Texture*>(target) : nullptr, true};
         slots_dirty_ = true;
     }
+
     // A depth array (shadow maps): D16/D32 readable as Texture2DArray,
     // one depth view per slice.
     HRESULT create_depth_array(UINT side, UINT slices, owned::D3D12TextureRef& out, DXGI_FORMAT depth_format, bool plain) override {
@@ -2193,22 +2791,28 @@ public:
 
     void set_target(D3D12Texture* target, bool world = false) noexcept override {
         if (!accept_resource(target)) return;
-        offscreen_ = target && target->rtv.ptr ? target : nullptr;
+        // A depth-only target (no colour view) binds its depth and no colour target.
+        offscreen_ = target && (target->rtv.ptr || target->dsv.ptr) ? target : nullptr;
         offscreen_world_ = offscreen_ && world;
         if (offscreen_world_) world_target_ = offscreen_;
-        target_count_ = 1;
+        target_count_ = offscreen_ && !offscreen_->rtv.ptr ? 0 : 1;
         depth_override_ = false;
         depth_owner_ = nullptr;
         depth_target_ = nullptr;
+        depth_read_only_ = false;
     }
+    void set_depth_read_only(bool read_only) noexcept override { depth_read_only_ = read_only; }
 
     void clear_target(const float* color, bool depth) noexcept override {
         ID3D12GraphicsCommandList* list = open_target();
         if (!list || !offscreen_) return;
-        transition(list, *offscreen_, D3D12_RESOURCE_STATE_RENDER_TARGET);
-        if (g_hazards) { g_hazards->command("clear_target"); g_hazards->access(offscreen_->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, true, "cleared colour"); }
+        if (g_hazards) g_hazards->command("clear_target");
+        if (offscreen_->rtv.ptr) {
+            transition(list, *offscreen_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+            if (g_hazards) g_hazards->access(offscreen_->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, true, "cleared colour");
+        }
         // The world target keeps the marker colour once a world pass was omitted.
-        if (color) list->ClearRenderTargetView(offscreen_->rtv, offscreen_world_ && world_omitted_ ? kWorldMarker : color, 0, nullptr);
+        if (color && offscreen_->rtv.ptr) list->ClearRenderTargetView(offscreen_->rtv, offscreen_world_ && world_omitted_ ? kWorldMarker : color, 0, nullptr);
         if (depth && offscreen_->dsv.ptr) {
             transition_depth(list, *offscreen_, D3D12_RESOURCE_STATE_DEPTH_WRITE);
             if (g_hazards) g_hazards->access(offscreen_->depth.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, true, "cleared depth");
@@ -2226,6 +2830,17 @@ public:
             g_hazards->access(target.depth ? target.depth.Get() : target.resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, true, "cleared depth");
         }
         list->ClearDepthStencilView(target.dsv, depth_clear_flags(target), depth, stencil, 0, nullptr);
+    }
+    void clear_stencil_of(D3D12Texture& target, UINT8 stencil) noexcept override {
+        if (!target.dsv.ptr || target.depth_format == DXGI_FORMAT_D32_FLOAT) return;  // no stencil plane
+        ID3D12GraphicsCommandList* list = open_target();
+        if (!list) return;
+        transition_depth(list, target, D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        if (g_hazards) {
+            g_hazards->command("clear_stencil_of");
+            g_hazards->access(target.depth ? target.depth.Get() : target.resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, true, "cleared stencil");
+        }
+        list->ClearDepthStencilView(target.dsv, D3D12_CLEAR_FLAG_STENCIL, 1.0f, stencil, 0, nullptr);
     }
 
     HRESULT draw_ui(const owned::D3D12UiPass& pass) override {
@@ -2363,6 +2978,45 @@ public:
     }
     void set_fsr_hudless(D3D12Texture* hudless) noexcept override { if (accept_resource(hudless)) fsr_hudless_ = fsr_on_ ? hudless : nullptr; }
     std::uint64_t fsr_vram() const noexcept override { return fsr_.vram(); }
+    // ---- FSR 3.1 upscaling (FidelityFX upscaler) ----
+    const char* fsr_upscale_unavailable() noexcept override {
+        static std::string reason;
+        return d3d12::FsrUpscaler::available(core_.device(), reason) ? nullptr : reason.c_str();
+    }
+    HRESULT fsr_upscale(ID3D12GraphicsCommandList* list, ID3D12Resource* const* resources, const FsrUpscale& in) noexcept override {
+        d3d12::FsrUpscaler::Dispatch d;
+        d.render_w = in.render_w; d.render_h = in.render_h; d.out_w = in.out_w; d.out_h = in.out_h;
+        d.jitter_x = in.jitter_x; d.jitter_y = in.jitter_y; d.frame_ms = in.frame_ms; d.sharpness = in.sharpness;
+        d.reset = in.reset; d.near_plane = in.near_plane; d.far_plane = in.far_plane; d.fov_y = in.fov_y;
+        d.recorded = core_.recording_value();
+        std::string error;
+        const std::uint64_t old_recorded = fsr_upscaler_.recorded();
+        const std::size_t retired = fsr_upscaler_.retired();
+        const bool ok = fsr_upscaler_.dispatch(list, resources, d, error);
+        if (fsr_upscaler_.retired() > retired)  // an output resize: both contexts live until the old one's frames finish
+            remote::host_log("d3d12: FSR upscaler resized to %ux%u output: the old context is destroyed once the fence passes %llu "
+                             "(retired %.1f MB, new %.1f MB)",
+                             d.out_w, d.out_h, static_cast<unsigned long long>(old_recorded), fsr_upscaler_.retired_vram() / 1048576.0,
+                             fsr_upscaler_.vram() / 1048576.0);
+        if (!ok) { remote::host_log("d3d12: %s", error.c_str()); return E_FAIL; }
+        return S_OK;
+    }
+    // The context is destroyed only once the fence passed the last list that
+    // dispatched it (a removed device completes every value). Otherwise (that
+    // list is still open, or the wait for the submitted frames failed) it is
+    // retired and destroyed at a later frame's start (open_list).
+    void fsr_upscale_release() noexcept override {
+        if (!fsr_upscaler_.created()) return;
+        const std::uint64_t recorded = fsr_upscaler_.recorded();
+        if (recorded < core_.recording_value()) (void)core_.wait_submitted();
+        fsr_upscaler_.retire();
+        fsr_upscaler_.collect(core_.completed());
+        if (fsr_upscaler_.retired())
+            remote::host_log("d3d12: FSR upscaler release deferred: the GPU has not finished its last dispatch (fence: recorded %llu, recording %llu, completed %llu)",
+                             static_cast<unsigned long long>(recorded), static_cast<unsigned long long>(core_.recording_value()),
+                             static_cast<unsigned long long>(core_.completed()));
+    }
+    std::uint64_t fsr_upscale_vram() const noexcept override { return fsr_upscaler_.vram(); }
     D3D12Texture* frame_image_texture() noexcept override { return frame_image(); }
     D3D12Texture* generated_image() noexcept override { return fg_on_ ? generated_[fg_slot_].get() : nullptr; }
     void select_generated_screen() noexcept override {
@@ -2629,6 +3283,7 @@ public:
         }
         target_ = drawn_ = world_omitted_ = frame_image_active_ = false;
         offscreen_ = nullptr;
+        target_count_ = 1;
         world_target_ = nullptr;
         offscreen_world_ = world_drawn_ = false;
         std::memcpy(background_, kBlack, sizeof(background_));
@@ -2675,13 +3330,16 @@ public:
             std::string error;
             fsr_.configure(presenter_.swap_chain(), nullptr, error);  // nothing presented: no generation from this frame
         }
+        // Minimized (nothing shown): no Present, so no vsync or present-queue
+        // wait either. The frame limit (with the background limit the renderer
+        // puts into it) still applies, or the hidden frames ran as fast as the
+        // CPU and GPU allowed for as long as the game stayed minimized.
+        if (!shown) presentation_limiter_.wait(frame_limit);
         fsr_hudless_ = nullptr;
         screen_ = nullptr;
         generated_drawn_ = false;
-        // Pipelines first used in play are written once all are built (at
-        // most every 30 s), so a session that crashes still leaves them for
-        // the next start.
-        if (records_dirty_ && GetTickCount64() - records_saved_tick_ >= 30000 && pipelines_.idle()) save_pipelines("in play");
+        // Pipelines first used in play are written at the next load's reveal
+        // (save_new_pipelines) and at the session end, never on this path.
         return hr;
     }
 
@@ -2741,6 +3399,47 @@ public:
     std::uint64_t frequency() noexcept override {
         UINT64 frequency = 0;
         return SUCCEEDED(core_.queue()->GetTimestampFrequency(&frequency)) ? frequency : 0;
+    }
+    // Pipeline statistics: begin and end must share a command list; a query
+    // still open when the list is submitted (a mid-frame readback split) is
+    // ended there and reported lost.
+    std::uint64_t stats_begin() noexcept override {
+        ID3D12GraphicsCommandList* list = open_list();
+        if (!list || stats_open_slot_) return 0;
+        StampSlot& slot = stamp_slots_[core_.frame_slot()];
+        ++slot.stats_wanted;
+        if (slot.stats_used >= slot.stats_capacity) return 0;  // lost; the slot grows when it comes round again
+        stats_open_index_ = slot.stats_used++;
+        stats_open_slot_ = &slot;
+        list->BeginQuery(slot.stats_heap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, stats_open_index_);
+        const std::uint64_t serial = slot.stats_first + stats_open_index_;
+        next_stats_ = serial + 1;
+        return serial;
+    }
+    void stats_end(std::uint64_t serial) noexcept override {
+        StampSlot* slot = stats_open_slot_;
+        if (!slot || !list_ || serial != slot->stats_first + stats_open_index_) return;  // ended at a split: lost
+        list_->EndQuery(slot->stats_heap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, stats_open_index_);
+        stats_open_slot_ = nullptr;
+    }
+    bool stats_value(std::uint64_t serial, D3D11_QUERY_DATA_PIPELINE_STATISTICS& stats) noexcept override {
+        if (!serial) return false;
+        auto find = [&]() -> const StatsEntry* {
+            if (stats_history_.empty()) return nullptr;
+            const StatsEntry& entry = stats_history_[serial % stats_history_.size()];
+            return entry.serial == serial ? &entry : nullptr;
+        };
+        const StatsEntry* entry = find();
+        if (!entry) {
+            for (auto& slot : stamp_slots_)
+                if (slot.submitted && serial >= slot.stats_first && serial < slot.stats_first + slot.stats_used &&
+                    core_.completed() >= slot.fence)
+                    harvest(slot);
+            entry = find();
+        }
+        if (!entry || !entry->valid) return false;
+        stats = entry->data;
+        return true;
     }
 
     // ---- OverlayRenderer (Dear ImGui 1.92 renderer backend) ------------------
@@ -2851,6 +3550,10 @@ private:
         }
         upload_.retire(core_.completed());
         bulk_.retire(core_.completed());
+        if (fsr_upscaler_.retired()) {  // released or resized FSR upscaler contexts
+            if (const unsigned destroyed = fsr_upscaler_.collect(core_.completed()))
+                remote::host_log("d3d12: %u retired FSR upscaler context(s) destroyed after the GPU finished their last dispatch", destroyed);
+        }
         begin_stamps();
         // Demand sizing: the ring holds the frames in flight, so it doubles
         // before this frame records anything once a frame's peak times the
@@ -2896,12 +3599,47 @@ private:
         return list_;
     }
 
+    // The ring doubles now, in the frame being recorded, when this frame's
+    // demand outruns it (the first world frame after a load: 15711 of 16384
+    // with the menu frames still in flight, so that frame omitted draws).
+    // The frames in flight keep their ranges in the old heap, released with
+    // this frame's fence; the list switches heaps and every descriptor table
+    // is bound again (slots_dirty_; tables_ is dropped through view_writes_).
+    // Only the device's shader-visible limit stops it (named).
+    bool grow_ring_now() noexcept {
+        if (!list_) return false;
+        const std::uint32_t capacity = core_.views().transient_capacity(), persistent = core_.views().persistent_capacity();
+        const std::uint32_t ring_limit = Core::kViewDescriptorLimit - persistent - kD3D11ResourceSlots;
+        if (capacity >= ring_limit) return false;
+        const std::uint32_t grown = (std::min)(capacity * 2, ring_limit);
+        std::string reason;
+        if (!core_.grow_views(persistent, grown, reason)) {
+            remote::host_log("d3d12: descriptor ring not grown during the frame: %s", reason.c_str());
+            return false;
+        }
+        ID3D12DescriptorHeap* heaps[] = {core_.views().heap(), core_.samplers().heap()};
+        list_->SetDescriptorHeaps(2, heaps);
+        slots_dirty_ = true;
+        ++view_writes_;
+        remote::host_log("d3d12: descriptor heap: ring %u -> %u during the frame (this frame took %u so far)", capacity, grown,
+                         ring_frame_taken_);
+        return true;
+    }
+    // Room for every table one bind_slots call may write (constants,
+    // resources, unordered views; a wrap skip each), so the ring never has to
+    // grow between the tables of one draw (an earlier table would name the
+    // old heap).
+    void reserve_ring_for_tables() noexcept {
+        constexpr std::uint32_t kTables = kD3D11ConstantTableSlots + kD3D11ResourceSlots + kD3D11UnorderedSlots;
+        if (core_.views().transient_free() < 2 * kTables) (void)grow_ring_now();
+    }
     // count consecutive ring descriptors for the frame being recorded, or
-    // UINT32_MAX when the ring is full (that draw is omitted; it grows next frame).
+    // UINT32_MAX when the ring is full and cannot grow (that draw is omitted).
     std::uint32_t ring(UINT count) noexcept {
-        const std::uint32_t index = core_.views().transient(count);
+        std::uint32_t index = core_.views().transient(count);
+        if (index == UINT32_MAX && !building_tables_ && grow_ring_now()) index = core_.views().transient(count);
         if (index == UINT32_MAX) {
-            omit("draws beyond the descriptor ring (it grows next frame)", false);  // every one, named
+            omit("draws beyond the descriptor ring (at the device's descriptor limit)", false);  // every one, named
             ring_full_ = true;
             return index;
         }
@@ -3150,7 +3888,7 @@ private:
             else set_targets_viewport(list, 0, nullptr, &dsv, viewport);
             return;
         }
-        if (offscreen_) transition(list, *offscreen_, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        if (offscreen_ && offscreen_->rtv.ptr) transition(list, *offscreen_, D3D12_RESOURCE_STATE_RENDER_TARGET);
         D3D12_CPU_DESCRIPTOR_HANDLE rtvs[8] = {offscreen_ ? offscreen_->rtv : back_rtv(list)};
         for (UINT index = 1; index < target_count_; ++index) {
             if (!extra_targets_[index - 1]) { rtvs[index] = null_target_view(); continue; }
@@ -3158,15 +3896,25 @@ private:
             rtvs[index] = extra_targets_[index - 1]->rtv;
         }
         D3D12Texture* const owner = depth_override_ ? depth_owner_ : offscreen_;
-        if (owner && owner->dsv.ptr) transition_depth(list, *owner, D3D12_RESOURCE_STATE_DEPTH_WRITE);
-        const D3D12_CPU_DESCRIPTOR_HANDLE dsv = owner ? owner->dsv : depth_dsv_;
+        // Read-only depth: tested while shaders read it (kDepthRead, as
+        // set_depth_resource leaves it); the writable view needs DEPTH_WRITE.
+        const bool read_only = depth_read_only_ && owner && owner->dsv_read_only.ptr;
+        if (owner && owner->dsv.ptr) transition_depth(list, *owner, read_only ? kDepthRead : D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        const D3D12_CPU_DESCRIPTOR_HANDLE dsv = owner ? (read_only ? owner->dsv_read_only : owner->dsv) : depth_dsv_;
         // A target made without depth binds none (its pipelines take no depth
         // format): a null view handle here crashed the driver (281c932a, SMAA
         // edges target, nvwgf2umx OMSetRenderTargets).
         const bool with_depth = depth && (owner ? owner->dsv.ptr != 0 : !depth_override_ && !offscreen_ && depth_);
-        const D3D12_VIEWPORT viewport{0.0f, 0.0f, float(target_width()), float(target_height()), 0.0f, 1.0f};
+        const D3D12_VIEWPORT viewport = viewport_set_ ? viewport_ :
+            D3D12_VIEWPORT{0.0f, 0.0f, float(target_width()), float(target_height()), 0.0f, 1.0f};
         set_targets_viewport(list, target_count_, rtvs, with_depth ? &dsv : nullptr, viewport);
     }
+    void set_viewport(const RECT* rect) noexcept override {
+        viewport_set_ = rect != nullptr;
+        if (rect) viewport_ = {float(rect->left), float(rect->top), float(rect->right - rect->left), float(rect->bottom - rect->top), 0.0f, 1.0f};
+    }
+    bool viewport_set_ = false;
+    D3D12_VIEWPORT viewport_{};
 
     // The list's current pipeline, topology, scissor, index buffer, targets
     // and viewport: a call that sets what is already set is not recorded
@@ -3233,6 +3981,26 @@ private:
     void harvest(StampSlot& slot) noexcept {
         if (!slot.submitted) return;
         slot.submitted = false;
+        const D3D12_RANGE written{0, 0};
+        if (slot.stats_used) {
+            static_assert(sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS) == sizeof(D3D11_QUERY_DATA_PIPELINE_STATISTICS),
+                          "the D3D12 and D3D11 pipeline statistics share one layout");
+            bool ready = !stats_history_.empty();
+            if (!ready) try { stats_history_.resize(4096); ready = true; } catch (...) {}
+            void* mapped = nullptr;
+            const D3D12_RANGE range{0, SIZE_T(slot.stats_used) * sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS)};
+            if (ready && SUCCEEDED(slot.stats_readback->Map(0, &range, &mapped))) {
+                const auto* data = static_cast<const D3D11_QUERY_DATA_PIPELINE_STATISTICS*>(mapped);
+                for (UINT index = 0; index < slot.stats_used; ++index) {
+                    StatsEntry& entry = stats_history_[(slot.stats_first + index) % stats_history_.size()];
+                    entry.serial = slot.stats_first + index;
+                    entry.valid = std::find(slot.stats_lost.begin(), slot.stats_lost.end(), index) == slot.stats_lost.end();
+                    entry.data = data[index];
+                }
+                slot.stats_readback->Unmap(0, &written);
+            }
+        }
+        if (!slot.used) return;
         if (stamp_history_.empty()) {
             try { stamp_history_.resize(1u << 15); } catch (...) { return; }
         }
@@ -3242,13 +4010,13 @@ private:
         const auto* ticks = static_cast<const UINT64*>(mapped);
         for (UINT index = 0; index < slot.used; ++index)
             stamp_history_[(slot.first + index) % stamp_history_.size()] = {slot.first + index, ticks[index]};
-        const D3D12_RANGE written{0, 0};
         slot.readback->Unmap(0, &written);
     }
     // A new list on this frame slot: read what it timed last, then start over
     // (grown when the last use wanted more stamps than it held).
     void begin_stamps() noexcept {
         StampSlot& slot = stamp_slots_[core_.frame_slot()];
+        stats_open_slot_ = nullptr;  // only a list that failed before submission left one open
         harvest(slot);
         if (slot.wanted > slot.capacity) {
             const UINT capacity = (std::max)(256u, slot.wanted * 2);
@@ -3273,14 +4041,54 @@ private:
                 slot.capacity = capacity;
             }
         }
+        // Sized by the passes the profiler stamps (a pass takes at least two
+        // stamps), so the first frame that asks for statistics (a capture's)
+        // already has the room.
+        if ((std::max)(slot.stats_wanted, slot.wanted / 2) > slot.stats_capacity) {
+            const UINT capacity = (std::max)(64u, (std::max)(slot.stats_wanted, slot.wanted / 2) * 2);
+            D3D12_QUERY_HEAP_DESC heap{};
+            heap.Type = D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS;
+            heap.Count = capacity;
+            D3D12_RESOURCE_DESC desc{};
+            desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+            desc.Width = UINT64(capacity) * sizeof(D3D12_QUERY_DATA_PIPELINE_STATISTICS);
+            desc.Height = desc.DepthOrArraySize = desc.MipLevels = 1;
+            desc.SampleDesc.Count = 1;
+            desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+            D3D12_HEAP_PROPERTIES readback{};
+            readback.Type = D3D12_HEAP_TYPE_READBACK;
+            d3d12::ComPtr<ID3D12QueryHeap> queries;
+            d3d12::ComPtr<ID3D12Resource> buffer;
+            if (SUCCEEDED(core_.device()->CreateQueryHeap(&heap, IID_PPV_ARGS(&queries))) &&
+                SUCCEEDED(core_.device()->CreateCommittedResource(&readback, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                                  nullptr, IID_PPV_ARGS(&buffer)))) {
+                slot.stats_heap = std::move(queries);
+                slot.stats_readback = std::move(buffer);
+                slot.stats_capacity = capacity;
+            }
+        }
         slot.used = slot.wanted = 0;
         slot.first = next_stamp_;
+        slot.stats_used = slot.stats_wanted = 0;
+        slot.stats_first = next_stats_;
+        slot.stats_lost.clear();
     }
-    // Before a list is submitted: its stamps into the slot's readback buffer.
+    // Before a list is submitted: its stamps (and pipeline statistics, an
+    // open one ended here and marked lost) into the slot's readback buffers.
     void resolve_stamps() noexcept {
         StampSlot& slot = stamp_slots_[core_.frame_slot()];
-        if (!slot.used || !list_) return;
-        list_->ResolveQueryData(slot.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, slot.used, slot.readback.Get(), 0);
+        if (!list_) return;
+        if (stats_open_slot_) {
+            list_->EndQuery(stats_open_slot_->stats_heap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, stats_open_index_);
+            try { stats_open_slot_->stats_lost.push_back(stats_open_index_); } catch (...) {}
+            stats_open_slot_ = nullptr;
+        }
+        if (!slot.used && !slot.stats_used) return;
+        if (slot.used)
+            list_->ResolveQueryData(slot.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, slot.used, slot.readback.Get(), 0);
+        if (slot.stats_used)
+            list_->ResolveQueryData(slot.stats_heap.Get(), D3D12_QUERY_TYPE_PIPELINE_STATISTICS, 0, slot.stats_used,
+                                    slot.stats_readback.Get(), 0);
         slot.fence = core_.recording_value();
         slot.submitted = true;
     }
@@ -3370,6 +4178,21 @@ private:
         if (g_hazards) g_hazards->transition(buffer.resource.Get(), state);
         buffer.state = state;
         buffer.written = false;
+        buffer.copy_writes.clear();
+    }
+    // A copy into [offset, offset + bytes) of buffer: COPY_DEST, after any
+    // earlier copy into an overlapping range has finished (COPY_DEST ->
+    // COPY_DEST is no barrier, and two copies into one place race: an older
+    // whole-buffer or row copy could land over a newer one).
+    static void copy_into(ID3D12GraphicsCommandList* list, owned::D3D12Buffer& buffer, UINT64 offset, UINT64 bytes) noexcept {
+        if (buffer.state == D3D12_RESOURCE_STATE_COPY_DEST)
+            for (const auto& written : buffer.copy_writes)
+                if (offset < written.first + written.second && written.first < offset + bytes) {
+                    transition(list, buffer, kShaderRead);
+                    break;
+                }
+        transition(list, buffer, D3D12_RESOURCE_STATE_COPY_DEST);
+        try { buffer.copy_writes.emplace_back(offset, bytes); } catch (...) { transition(list, buffer, kShaderRead); transition(list, buffer, D3D12_RESOURCE_STATE_COPY_DEST); }
     }
 
     // ---- EI_RENDERER_D3D12_HAZARDS: what each recorded command touches ----
@@ -3396,7 +4219,7 @@ private:
             if (depth_target_color_) h.access(depth_target_color_->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, true, "depth slice colour");
             return;
         }
-        if (offscreen_) h.access(offscreen_->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, true, "colour target");
+        if (offscreen_) { if (offscreen_->rtv.ptr) h.access(offscreen_->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, true, "colour target"); }
         else if (const D3D12Texture* image = frame_image()) h.access(image->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, true, "frame image");
         else if (screen_) h.access(screen_->resource.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, true, "frame generation screen");
         else {
@@ -3408,7 +4231,9 @@ private:
         if (!depth) return;
         D3D12Texture* const owner = depth_override_ ? depth_owner_ : offscreen_;
         if (owner && owner->dsv.ptr) {
-            h.access(owner->depth ? owner->depth.Get() : owner->resource.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, true, "depth target");
+            const bool read_only = depth_read_only_ && owner->dsv_read_only.ptr;
+            h.access(owner->depth ? owner->depth.Get() : owner->resource.Get(), read_only ? kDepthRead : D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                     !read_only, read_only ? "read-only depth target" : "depth target");
         } else if (!owner && !depth_override_ && !offscreen_ && depth_) {
             h.external(depth_.Get(), "interface depth");
             h.access(depth_.Get(), D3D12_RESOURCE_STATE_DEPTH_WRITE, true, "depth target");
@@ -3432,7 +4257,8 @@ private:
                 if (slot.view.ptr != slot.buffer->srv.ptr) h.untracked_view(how, "the slot's view is not its buffer's");
                 h.access(slot.buffer->resource.Get(), kShaderRead, false, how);
             } else if (slot.texture && slot.depth) {
-                if (slot.view.ptr != slot.texture->depth_srv.ptr) h.untracked_view(how, "the slot's view is not its target's depth view");
+                if (slot.view.ptr != slot.texture->depth_srv.ptr && slot.view.ptr != slot.texture->stencil_srv.ptr)
+                    h.untracked_view(how, "the slot's view is not its target's depth or stencil view");
                 h.access(slot.texture->depth ? slot.texture->depth.Get() : slot.texture->resource.Get(), kShaderRead, false, how);
             } else if (slot.texture) {
                 if (slot.view.ptr != slot.texture->srv.ptr) h.untracked_view(how, "the slot's view is not its texture's");
@@ -3495,8 +4321,16 @@ private:
     // index} and the live bindless bitmap, and present reads the reports back.
     static constexpr std::uint32_t kNullBindlessIndex = owned::kD3D12NullTextureIndex;
     static constexpr UINT kGpuReportRecords = 64, kGpuReportBitmap = 32 + kGpuReportRecords * 16, kGpuReportCap = 256;
+    // The last record slot holds the caster_check header (byte 1040: table
+    // offset, entries, objects drawn by path 1 | path 2 << 16, doubled);
+    // its table and masks follow the live bitmap.
+    static constexpr UINT kCasterCheckHeader = 32 + (kGpuReportRecords - 1) * 16;
+    static constexpr UINT kCasterCheckRecords = 1u << 19 /* native_shader.h: masks at table + 2 MB */, kCasterCheckObjects = 1u << 16;
+    static constexpr UINT64 caster_check_offset() {
+        return (UINT64(kGpuReportBitmap) + Core::kViewDescriptorLimit / 8 + 15) & ~UINT64(15);
+    }
     bool create_gpu_reports() {
-        const UINT64 bytes = g_hazards ? kGpuReportBitmap + Core::kViewDescriptorLimit / 8 : 64;
+        const UINT64 bytes = g_hazards ? caster_check_offset() + UINT64(kCasterCheckRecords + kCasterCheckObjects) * 4 : 64;
         if (FAILED(create_buffer(bytes, 0, owned::kD3D12BufferUnordered, gpu_reports_)) || !gpu_reports_) return false;
         if (!g_hazards) return true;
         remote::host_log("d3d12: GPU reports on: loops stop at %u iterations, bindless indices checked against the live set", kGpuReportCap);
@@ -3531,7 +4365,7 @@ private:
     void gpu_report_frame_end() {
         static const char* const loops[] = {"?", "neighbour piece scan", "neighbour piece sweep", "shadow cascade levels", "?",
                                             "PCSS blocker search", "PCSS/PCF taps", "point-shadow blocker search",
-                                            "point-light grid range", "cave exit glow", "neighbour fog piece scan", "neighbour fog piece sweep"};
+                                            "point-light grid range", "cave exit glow", "neighbour fog piece scan", "neighbour fog piece sweep", "sun ray walk"};
         for (auto it = gpu_report_tickets_.begin(); it != gpu_report_tickets_.end();) {
             std::vector<std::uint8_t> data;
             const HRESULT hr = poll_readback(it->first, data);
@@ -3540,7 +4374,21 @@ private:
             it = gpu_report_tickets_.erase(it);
             if (FAILED(hr) || data.size() < kGpuReportBitmap) continue;
             const auto* words = reinterpret_cast<const std::uint32_t*>(data.data());
-            const std::uint32_t taken = words[1], records = (std::min)(taken, kGpuReportRecords);
+            const std::uint32_t taken = words[1], records = (std::min)(taken, kGpuReportRecords - 1);
+            // caster_check (native_shader.h nativeShadowBuildCS): admitted main-map
+            // statics drawn into a sun map this frame, by path. Logged per change.
+            if (words[kCasterCheckHeader / 4]) {
+                const std::uint32_t* check = words + kCasterCheckHeader / 4;
+                char key[64];
+                std::snprintf(key, sizeof(key), "cc:%u:%u", check[2], check[3]);
+                if (!gpu_report_seen_[key]++)
+                    remote::host_log("d3d12 gpu caster check: admitted statics drawn into the sun maps: object-space %u, posed store %u, "
+                                     "both (doubled) %u; frame %llu", check[2] >> 16, check[2] & 0xFFFFu, check[3], static_cast<unsigned long long>(frame));
+            }
+            // prepass_depth_check (native_shader.h): fragments checked, and those in front of the prepass depth.
+            if (words[6])
+                remote::host_log("d3d12 gpu depth check: %u of %u kept fragments in front of the prepass depth; frame %llu", words[5],
+                                 words[6], static_cast<unsigned long long>(frame));
             for (std::uint32_t r = 0; r < records; ++r) {
                 const std::uint32_t* record = words + 8 + r * 4;
                 // id: the report in the low 16 bits, the entry point above (native_shader.h).
@@ -3555,7 +4403,13 @@ private:
                 if (!origin) std::snprintf(where, sizeof(where), "%s", program);
                 else if (pixel == 0xFFFFFFFFu) std::snprintf(where, sizeof(where), "%s, vertex %u", program, who);
                 else std::snprintf(where, sizeof(where), "%s, pixel (%u, %u), texture reference %u", program, pixel & 0xFFFFu, pixel >> 16, who);
-                if (id == 100)
+                if (id == 300)
+                    remote::host_log("d3d12 gpu depth check: in front of the prepass depth: kind 0x%02x, gap %u e-7; %s; frame %llu", value & 255u,
+                                     value >> 8, where, static_cast<unsigned long long>(frame));
+                else if (id >= 200 && id < 216)
+                    remote::host_log("d3d12 gpu check: material instance 0x%02x drew a record whose bits disagree (wrong 0x%x: 1 unit, 2 foliage/impostor, 4 contact, 8 profile); %s; frame %llu; %u reports that frame",
+                                     value, id - 200, where, static_cast<unsigned long long>(frame), taken);
+                else if (id == 100)
                     remote::host_log("d3d12 gpu loop: bindless index %u is not a live texture (sampled the null view instead); %s; frame %llu; "
                                      "%u reports that frame",
                                      value, where, static_cast<unsigned long long>(frame), taken);
@@ -3567,7 +4421,7 @@ private:
             }
         }
         std::uint64_t ticket = 0;
-        if (SUCCEEDED(request_readback(*gpu_reports_, kGpuReportBitmap, ticket)) && ticket)
+        if (SUCCEEDED(request_readback(*gpu_reports_, kGpuReportBitmap, ticket, "gpu reports")) && ticket)
             gpu_report_tickets_.push_back({ticket, frame_serial_});
     }
 
@@ -3609,7 +4463,13 @@ private:
             if (slot.buffer) transition(list, *slot.buffer, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
             else if (slot.texture) transition(list, *slot.texture, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
+        reserve_ring_for_tables();
         if (slots_dirty_) {
+            const struct TableBuild {
+                bool& flag;
+                explicit TableBuild(bool& f) noexcept : flag(f) { flag = true; }
+                ~TableBuild() { flag = false; }
+            } table_build(building_tables_);
             // Every slot a program declares is written: a native program may
             // read any declared slot (D3D11 reads unbound slots as zero), and a
             // ring slot past the last bound one would hold an older frame's
@@ -3924,22 +4784,61 @@ private:
         if (found == compute_pipelines_.end()) {
             const std::wstring name = compute_name(found_code->name);
             found = compute_pipelines_.emplace(found_code, pipelines_.request(name, compute_desc(found_code->bytecode))).first;
+            label_pipeline(found->second, "compute " + found_code->entry);
             PipelineRecord record;
             record.kind = PipelineRecord::kCompute;
             record.programs[0] = found_code->identity;
             record.exact[0] = name_hash(found_code->name);
             if (note_pipeline(name, record))
-                remote::host_log("d3d12: pipeline not warmed at start, built on first use (its work is omitted until ready; recorded "
-                                 "for the next start): compute %s",
+                remote::host_log("d3d12: pipeline not in the warm list (recorded for the next start): compute %s",
                                  found_code->entry.c_str());
         }
         return ready_pipeline(found->second);
     }
 
     // codes: the vertex and pixel programs' reflection (for bind_slots), when asked.
+    void set_program_substitutes(const std::unordered_map<const owned::ShaderProgram*, const owned::ShaderProgram*>* map, bool draw) noexcept override {
+        if (map && map->empty()) map = nullptr;
+        if (map != warm_map_ || (map && map->size() != warm_size_)) {
+            warm_map_ = map; warm_size_ = map ? map->size() : 0;
+            warm_codes_.clear();
+            try {
+                if (map) {
+                    for (const auto& [base, twin] : *map) {
+                        const ProgramCode* code = nullptr;
+                        if (program_code(*base, nullptr, &code) && code) warm_codes_.emplace(code, twin);
+                    }
+                    for (const auto& [key, id] : native_pipelines_) {
+                        const auto targets = pipeline_targets_.find(id);
+                        if (targets != pipeline_targets_.end()) request_burn_twin(key, targets->second);
+                    }
+                }
+            } catch (...) { warm_codes_.clear(); }
+        }
+        substitutes_ = draw ? map : nullptr;
+    }
+    // The pipeline of a draw: its programs' twins while substitutes are set
+    // (set_program_substitutes), else (or while a twin's pipeline is not
+    // ready) the programs themselves.
     ID3D12PipelineState* native_pipeline(const owned::ShaderProgram& vertex, const owned::ShaderProgram& pixel,
                                          const owned::D3D12NativeState& state, const owned::ShaderProgram* hull = nullptr,
                                          const owned::ShaderProgram* domain = nullptr, const ProgramCode** codes = nullptr) {
+        if (substitutes_) {
+            const auto v = substitutes_->find(&vertex), p = substitutes_->find(&pixel);
+            if (v != substitutes_->end() || p != substitutes_->end()) {
+                ID3D12PipelineState* twin = native_pipeline_of(v != substitutes_->end() ? *v->second : vertex,
+                                                               p != substitutes_->end() ? *p->second : pixel, state, hull, domain, codes);
+                if (twin) return twin;
+                if (burn_twin_fallbacks_++ == 0)
+                    remote::host_log("d3d12: fire burn twin pipeline unavailable, its original drawn (first: %s)",
+                                     p != substitutes_->end() ? p->second->entry : v->second->entry);
+            }
+        }
+        return native_pipeline_of(vertex, pixel, state, hull, domain, codes);
+    }
+    ID3D12PipelineState* native_pipeline_of(const owned::ShaderProgram& vertex, const owned::ShaderProgram& pixel,
+                                            const owned::D3D12NativeState& state, const owned::ShaderProgram* hull,
+                                            const owned::ShaderProgram* domain, const ProgramCode** codes) {
         // A program without an entry: no pixel stage (depth-only draws).
         const bool no_pixel = !pixel.entry || !pixel.entry[0];
         NativePipelineKey key;  // zeroed whole: compared and hashed byte for byte
@@ -3974,12 +4873,30 @@ private:
             std::memcpy(record.formats, key.formats, sizeof(key.formats));
             const std::wstring name = native_name(names, state, key.formats);
             found = native_pipelines_.emplace(key, pipelines_.request(name, native_desc(code, state, key.formats, targets))).first;
-            if (note_pipeline(name, record)) {
-                const auto entry = [&](int stage) { return key.programs[stage] ? key.programs[stage]->entry.c_str() : "-"; };
-                remote::host_log("d3d12: pipeline not warmed at start, built on first use (its draws are omitted until ready; "
-                                 "recorded for the next start): vs=%s ps=%s hs=%s ds=%s targets=%u formats=%u,%u depth=%u",
-                                 entry(0), entry(1), entry(2), entry(3), targets, unsigned(key.formats[0]),
-                                 unsigned(key.formats[1]), unsigned(key.formats[8]));
+            pipeline_targets_[found->second] = targets;
+            request_burn_twin(key, targets);
+            const auto entry = [&](int stage) { return key.programs[stage] ? key.programs[stage]->entry.c_str() : "-"; };
+            char label[320];
+            std::snprintf(label, sizeof(label), "vs=%s ps=%s hs=%s ds=%s targets=%u formats=%u,%u depth=%u zfunc=%u zwrite=%u cull=%u",
+                          entry(0), entry(1), entry(2), entry(3), targets, unsigned(key.formats[0]),
+                          unsigned(key.formats[1]), unsigned(key.formats[8]), unsigned(state.depth.DepthFunc),
+                          unsigned(state.depth.DepthWriteMask), unsigned(state.raster.CullMode));
+            label_pipeline(found->second, label);
+            if (note_pipeline(name, record))
+                remote::host_log("d3d12: pipeline not in the warm list (recorded for the next start): %s", label);
+            // set_pixel_twins: the same pipeline with each twin pixel program,
+            // on the workers (from the library when an earlier session built
+            // it), so the first frame that switches to one finds it ready.
+            for (UINT twin = 0; twin < pixel_twin_count_ && ps; ++twin) {
+                const ProgramCode* twin_code = nullptr;
+                const D3D12_SHADER_BYTECODE* twin_ps = pixel_twins_[twin] ? program_code(*pixel_twins_[twin], nullptr, &twin_code) : nullptr;
+                if (!twin_ps || twin_code == key.programs[1]) continue;
+                const D3D12_SHADER_BYTECODE* twin_codes[4] = {vs, twin_ps, hs, ds};
+                const std::string* twin_names[4] = {names[0], &twin_code->name, names[2], names[3]};
+                const std::wstring twin_name = native_name(twin_names, state, key.formats);
+                if (records_.count(twin_name) || !precached_.insert(twin_name).second) continue;
+                pipelines_.request(twin_name, native_desc(twin_codes, state, key.formats, targets));
+                ++twin_requests_;
             }
         }
         last_native_key_ = key;
@@ -4043,6 +4960,22 @@ private:
                                                                 : D3D12_COLOR_WRITE_ENABLE_RED);
             }
         }
+        if (state.custom_blend.custom & owned::D3D12NativeState::kCustomGuideTargetsOpaque) {
+            desc.BlendState.IndependentBlendEnable = TRUE;
+            for (UINT index = 1; index < 8; ++index) {
+                auto& target = desc.BlendState.RenderTarget[index];
+                target = desc.BlendState.RenderTarget[0];
+                if (index >= 5) {
+                    target.BlendEnable = FALSE;
+                    target.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+                }
+            }
+        }
+        if (state.custom_blend.custom & owned::D3D12NativeState::kCustomTarget1Off) {
+            desc.BlendState.IndependentBlendEnable = TRUE;
+            desc.BlendState.RenderTarget[1] = desc.BlendState.RenderTarget[0];
+            desc.BlendState.RenderTarget[1].RenderTargetWriteMask = 0;
+        }
         desc.RasterizerState.FillMode = static_cast<D3D12_FILL_MODE>(state.raster.FillMode);
         desc.RasterizerState.CullMode = static_cast<D3D12_CULL_MODE>(state.raster.CullMode);
         desc.RasterizerState.FrontCounterClockwise = state.raster.FrontCounterClockwise;
@@ -4076,15 +5009,38 @@ private:
     }
 
     void set_hit_test_frame(bool active) noexcept override { hit_test_frame_ = active; }
+    void set_wait_for_pipelines(bool wait) noexcept override { wait_for_pipelines_ = wait; }
+    void save_new_pipelines() noexcept override {
+        if (!records_dirty_) return;
+        try {
+            pipelines_.wait_all();  // the loading picture is still up: finish what was queued, then write it
+            save_pipelines("before a reveal");
+        } catch (...) {}
+    }
+    void set_pixel_twins(const owned::ShaderProgram* const* twins, UINT count) noexcept override {
+        pixel_twin_count_ = twins ? (std::min)(count, UINT(std::size(pixel_twins_))) : 0;
+        for (UINT index = 0; index < pixel_twin_count_; ++index) pixel_twins_[index] = twins[index];
+    }
 
-    // A requested pipeline when built; a failure is named once. The game's
-    // one-shot zone mask is copied immediately, so it cannot omit cold work
-    // and rely on another displayed frame to finish it.
+    // What a pipeline is, for its miss line (ready_pipeline).
+    void label_pipeline(std::uint32_t id, std::string label) {
+        try { pipeline_labels_.emplace(id, std::move(label)); } catch (...) {}
+    }
+
+    // A requested pipeline, created now when it is not ready yet (GD3D11's
+    // rule: one hitch, never an undrawn object); every such miss is logged
+    // with its pipeline and the pass that met it, so a gap in the warm list
+    // stays visible. A failure is named once (its draw is omitted).
     ID3D12PipelineState* ready_pipeline(std::uint32_t id) {
         ID3D12PipelineState* pipeline = pipelines_.get(id);
-        if (!pipeline && hit_test_frame_) {
-            pipelines_.wait_all();
-            pipeline = pipelines_.get(id);
+        if (!pipeline && pipelines_.failure(id).empty()) {
+            const auto begin = std::chrono::steady_clock::now();
+            pipeline = pipelines_.wait(id);
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+            const auto label = pipeline_labels_.find(id);
+            remote::host_log("d3d12: pipeline miss: %s created synchronously in %.1f ms (pass %s)%s",
+                             label != pipeline_labels_.end() ? label->second.c_str() : "?", ms,
+                             last_marker_ ? last_marker_ : "-", pipeline ? "" : "; it FAILED, its draw is omitted");
         }
         if (!pipeline) {
             const std::string why = pipelines_.failure(id);
@@ -4327,9 +5283,11 @@ private:
     // identities, so a start requests (and waits for) all of them and their
     // first use draws instead of omitting. A record unused for
     // kRecordIdleStarts starts is dropped, as is one whose program this build
-    // no longer has. A package may carry eid3d11_d3d12_pipelines.shipped.list
-    // (a harness run's list, staged under that name): read first, never
-    // written, so a player's first start is warm too.
+    // no longer has. The host carries a shipped list (resource
+    // D3D12_SHIPPED_PIPELINES, Host\d3d12\eid3d11_d3d12_pipelines.shipped.list:
+    // a broad recorded list of this PC, program names and states only, no
+    // driver data): read first, never written, so a fresh install's first
+    // view finds its pipelines warm too.
     static constexpr std::uint32_t kRecordMagic = 0x4c504945u;  // "EIPL"
     static constexpr std::uint32_t kRecordVersion = 2;  // 2: exact program names beside the identities
     static constexpr std::uint32_t kRecordIdleStarts = 30;
@@ -4368,30 +5326,33 @@ private:
         }
         records_.emplace(name, record);
         records_dirty_ = true;
-        if (!warmed_) return false;
+        if (!warmed_ || precached_.count(name)) return false;  // a precached sibling was warm
         ++unwarmed_;
         return true;
     }
 
     // A list's records, or none (absent, another layout or damaged: named).
-    static std::vector<PipelineRecord> read_records(const std::wstring& path, const char* what) {
+    static std::vector<PipelineRecord> parse_records(const char* bytes, std::size_t size, const char* what) {
+        std::vector<PipelineRecord> records;
+        if (!bytes || !size) return records;
+        RecordHeader header{};
+        if (size >= sizeof(header)) std::memcpy(&header, bytes, sizeof(header));
+        if (header.magic != kRecordMagic || header.version != kRecordVersion || header.record_bytes != sizeof(PipelineRecord) ||
+            size != sizeof(header) + std::size_t(header.count) * sizeof(PipelineRecord)) {
+            remote::host_log("d3d12: the %s pipeline list is from another build layout or damaged; not used", what);
+            return records;
+        }
+        records.resize(header.count);
+        std::memcpy(static_cast<void*>(records.data()), bytes + sizeof(header), records.size() * sizeof(PipelineRecord));
+        return records;
+    }
+    static std::vector<PipelineRecord> read_records(const std::wstring& path) {
         std::vector<char> bytes;
         {
             std::ifstream in(path, std::ios::binary);
             if (in) bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
         }
-        std::vector<PipelineRecord> records;
-        if (bytes.empty()) return records;
-        RecordHeader header{};
-        if (bytes.size() >= sizeof(header)) std::memcpy(&header, bytes.data(), sizeof(header));
-        if (header.magic != kRecordMagic || header.version != kRecordVersion || header.record_bytes != sizeof(PipelineRecord) ||
-            bytes.size() != sizeof(header) + std::size_t(header.count) * sizeof(PipelineRecord)) {
-            remote::host_log("d3d12: the %s pipeline list is from another build layout or damaged; not used", what);
-            return records;
-        }
-        records.resize(header.count);
-        std::memcpy(static_cast<void*>(records.data()), bytes.data() + sizeof(header), records.size() * sizeof(PipelineRecord));
-        return records;
+        return parse_records(bytes.data(), bytes.size(), "recorded");
     }
 
     // At start: requests every recorded pipeline this build can still make.
@@ -4399,11 +5360,13 @@ private:
         requested = dropped = shipped = 0;
         records_path_ = directory + L"eid3d11_d3d12_pipelines.list";
         records_dirty_ = true;  // idle counts change; a damaged list is replaced
-        std::vector<PipelineRecord> records = read_records(directory + L"eid3d11_d3d12_pipelines.shipped.list", "shipped");
+        const D3D12_SHADER_BYTECODE shipped_list = resource_program("D3D12_SHIPPED_PIPELINES");
+        std::vector<PipelineRecord> records =
+            parse_records(static_cast<const char*>(shipped_list.pShaderBytecode), shipped_list.BytecodeLength, "shipped");
         for (PipelineRecord& record : records) record.idle_starts = 0;  // shipped: never idle
         const std::size_t shipped_count = records.size();
         {
-            std::vector<PipelineRecord> own = read_records(records_path_, "recorded");
+            std::vector<PipelineRecord> own = read_records(records_path_);
             records.insert(records.end(), own.begin(), own.end());
         }
         if (records.empty()) return;  // nothing recorded yet
@@ -4440,6 +5403,83 @@ private:
             name = found->second.name;
             return true;
         };
+        // A pixel program's tier family: its identity without the defines a
+        // session switches between (NATIVE_OFF_MATERIALS: material quality
+        // Off and the others), so every recorded material pipeline is also
+        // precached for the tiers the player did not use last time (UE5's
+        // precaching: the first launch at material quality 0 from a list
+        // recorded at quality 2 drew no world). NATIVE_TERRAIN_LEAN too: the
+        // slim terrain pass's lean programs (option terrain_slim_cuts) pair
+        // with the same vertex and tessellation stages, so a list recorded
+        // with the other setting still warms them (a slim pass draw waits for
+        // its pipeline: 570-670 ms on the 3070 laptop when cuts changed).
+        // NATIVE_FRAME_DRY and NATIVE_OFF_CONTACT too: the material instance
+        // programs of dry frames and of batches out of contact reach (option
+        // object_program_cuts) are the drawn program's pixel twins
+        // (set_pixel_twins), so they are warm at start, not only after the
+        // first draw of their recorded twin.
+        const auto family_of = [](const owned::ShaderProgram& program) {
+            std::uint64_t hash = 1469598103934665603ull;
+            const auto text = [&hash](const char* value) {
+                for (; value && *value; ++value) hash = (hash ^ std::uint8_t(*value)) * 1099511628211ull;
+                hash = (hash ^ 0xffu) * 1099511628211ull;
+            };
+            text(program.name);
+            text(program.entry);
+            text(program.profile);
+            for (const D3D_SHADER_MACRO* define = program.defines; define && define->Name; ++define) {
+                if (std::strcmp(define->Name, "NATIVE_OFF_MATERIALS") == 0 || std::strcmp(define->Name, "NATIVE_TERRAIN_LEAN") == 0 ||
+                    std::strcmp(define->Name, "NATIVE_FRAME_DRY") == 0 || std::strcmp(define->Name, "NATIVE_OFF_CONTACT") == 0)
+                    continue;
+                text(define->Name);
+                text(define->Definition);
+            }
+            return hash;
+        };
+        // A vertex program's family: its identity without NATIVE_INDEXED (the
+        // material instance classes' indexed twins, option
+        // indexed_object_draws: the same stage reading its vertex by
+        // SV_VertexID, the same pipeline state). With general (a pipeline
+        // whose pixel program is a general one, no NATIVE_DOMAIN) also
+        // without NATIVE_DOMAIN and NATIVE_DOMAIN_CHECK, and only general
+        // vertex programs join it: a general batch's object motion drew the
+        // crown impostor class's motion vertex program before 018ced48 and
+        // the general one since, so a list recorded before still warms it.
+        const auto has_define = [](const owned::ShaderProgram& program, const char* name) {
+            for (const D3D_SHADER_MACRO* define = program.defines; define && define->Name; ++define)
+                if (std::strcmp(define->Name, name) == 0) return true;
+            return false;
+        };
+        const auto vertex_family_of = [](const owned::ShaderProgram& program, bool general) {
+            std::uint64_t hash = 1469598103934665603ull;
+            const auto text = [&hash](const char* value) {
+                for (; value && *value; ++value) hash = (hash ^ std::uint8_t(*value)) * 1099511628211ull;
+                hash = (hash ^ 0xffu) * 1099511628211ull;
+            };
+            text(program.name);
+            text(program.entry);
+            text(program.profile);
+            for (const D3D_SHADER_MACRO* define = program.defines; define && define->Name; ++define) {
+                if (std::strcmp(define->Name, "NATIVE_INDEXED") == 0) continue;
+                if (general && (std::strcmp(define->Name, "NATIVE_DOMAIN") == 0 || std::strcmp(define->Name, "NATIVE_DOMAIN_CHECK") == 0))
+                    continue;
+                text(define->Name);
+                text(define->Definition);
+            }
+            return hash;
+        };
+        std::unordered_map<std::uint64_t, std::vector<std::size_t>> families, vertex_families, general_vertex;
+        std::vector<D3D12_SHADER_BYTECODE> codes(programs.size());
+        for (std::size_t index = 0; index < programs.size(); ++index) {
+            codes[index] = by_exact[name_hash(names[index])].code;
+            if (!codes[index].BytecodeLength || !programs[index].entry || !programs[index].profile) continue;
+            if (std::strcmp(programs[index].entry, "nativePS") == 0) families[family_of(programs[index])].push_back(index);
+            if (std::strncmp(programs[index].profile, "vs_", 3) == 0) {
+                vertex_families[vertex_family_of(programs[index], false)].push_back(index);
+                if (!has_define(programs[index], "NATIVE_DOMAIN")) general_vertex[vertex_family_of(programs[index], true)].push_back(index);
+            }
+        }
+        std::uint32_t siblings = 0;
         for (std::size_t index = 0; index < records.size(); ++index) {
             PipelineRecord record = records[index];
             if (record.idle_starts >= kRecordIdleStarts) { ++dropped; continue; }
@@ -4454,6 +5494,34 @@ private:
                 if (!ok || record.targets > 8) { ++dropped; continue; }
                 name = native_name(program_names, record.state, record.formats);
                 if (!records_.count(name)) pipelines_.request(name, native_desc(code, record.state, record.formats, record.targets));
+                // Siblings: every vertex family member with every pixel family member.
+                const std::size_t vertex = std::size_t(program_names[0] - names.data());
+                std::vector<std::size_t> vertices{vertex}, pixels;
+                const auto add = [](std::vector<std::size_t>& to, const std::vector<std::size_t>& from) {
+                    for (const std::size_t index : from)
+                        if (std::find(to.begin(), to.end(), index) == to.end()) to.push_back(index);
+                };
+                if (const auto found = vertex_families.find(vertex_family_of(programs[vertex], false)); found != vertex_families.end())
+                    add(vertices, found->second);
+                if (program_names[1]) {
+                    const std::size_t pixel = std::size_t(program_names[1] - names.data());
+                    pixels.push_back(pixel);
+                    if (const auto found = families.find(family_of(programs[pixel])); found != families.end()) add(pixels, found->second);
+                    if (!has_define(programs[pixel], "NATIVE_DOMAIN"))
+                        if (const auto found = general_vertex.find(vertex_family_of(programs[vertex], true)); found != general_vertex.end())
+                            add(vertices, found->second);
+                }
+                for (const std::size_t v : vertices)
+                    for (std::size_t p = 0; p < (std::max)(pixels.size(), std::size_t(1)); ++p) {
+                        const std::string* pixel_name = pixels.empty() ? nullptr : &names[pixels[p]];
+                        if (v == vertex && pixel_name == program_names[1]) continue;
+                        const std::string* sibling_names[4] = {&names[v], pixel_name, program_names[2], program_names[3]};
+                        const D3D12_SHADER_BYTECODE* sibling_code[4] = {&codes[v], pixels.empty() ? nullptr : &codes[pixels[p]], code[2], code[3]};
+                        const std::wstring sibling = native_name(sibling_names, record.state, record.formats);
+                        if (records_.count(sibling) || !precached_.insert(sibling).second) continue;
+                        pipelines_.request(sibling, native_desc(sibling_code, record.state, record.formats, record.targets));
+                        ++siblings;
+                    }
             } else if (record.kind == PipelineRecord::kCompute) {
                 const D3D12_SHADER_BYTECODE* code = nullptr;
                 const std::string* program_name = nullptr;
@@ -4474,6 +5542,7 @@ private:
                 if (index < shipped_count) ++shipped;
             }
         }
+        if (siblings) remote::host_log("d3d12: %u material pipelines precached as siblings (material quality, slim cuts, dry-frame and no-contact, indexed and general motion vertex programs)", siblings);
     }
 
     // Writes the pipeline library and the recorded list (when either changed).
@@ -4552,13 +5621,14 @@ private:
             record.ui_format = target_format();
             const std::wstring name = ui_name(program, blend, target_format());
             found = ui_pipelines_.emplace(key, pipelines_.request(name, ui_desc(program, blend, record.targets, record.formats))).first;
+            char label[160];
+            std::snprintf(label, sizeof(label), "interface program %u blend %u/%u/%u format %u", unsigned(program),
+                          unsigned(blend.enabled != 0), unsigned(blend.source), unsigned(blend.destination), unsigned(target_format()));
+            label_pipeline(found->second, label);
             if (note_pipeline(name, record))
-                remote::host_log("d3d12: pipeline not warmed at start, built on first use (its quads are omitted until ready; "
-                                 "recorded for the next start): interface program %u blend %u/%u/%u format %u",
-                                 unsigned(program), unsigned(blend.enabled != 0), unsigned(blend.source), unsigned(blend.destination),
-                                 unsigned(target_format()));
+                remote::host_log("d3d12: pipeline not in the warm list (recorded for the next start): %s", label);
         }
-        ID3D12PipelineState* pipeline = pipelines_.get(found->second);
+        ID3D12PipelineState* pipeline = ready_pipeline(found->second);
         if (!pipeline) {
             const std::string why = pipelines_.failure(found->second);
             if (!why.empty()) report_once(pipeline_failures_, "a UI pipeline", why);
@@ -4651,6 +5721,7 @@ private:
     // presents and the proxy's interpolation dispatches when it came on.
     bool fsr_on_ = false;
     d3d12::FsrFrameGeneration fsr_;
+    d3d12::FsrUpscaler fsr_upscaler_;  // FSR 3.1 upscaling (upscaler 2); retires replaced contexts by fence value
     D3D12Texture* fsr_hudless_ = nullptr;
     std::uint64_t fsr_real_ = 0;
     std::uint64_t fsr_dispatch_base_ = 0;
@@ -4694,6 +5765,7 @@ private:
     }
     bool depth_override_ = false;
     D3D12Texture* depth_owner_ = nullptr;
+    bool depth_read_only_ = false;  // set_depth_read_only / set_targets_read_depth: the owner's read-only view (reset by every target change)
     // set_depth_target: the depth array slice the next draws write (no colour).
     D3D12Texture* depth_target_ = nullptr;
     D3D12Texture* depth_target_color_ = nullptr;  // set_depth_target colour (read only while depth_target_ is set)
@@ -4706,13 +5778,29 @@ private:
         UINT capacity = 0, used = 0, wanted = 0;
         std::uint64_t first = 1, fence = 0;
         bool submitted = false;  // resolved into readback, not yet read
+        // Pipeline statistics (one per profiled pass), the same scheme.
+        d3d12::ComPtr<ID3D12QueryHeap> stats_heap;
+        d3d12::ComPtr<ID3D12Resource> stats_readback;
+        UINT stats_capacity = 0, stats_used = 0, stats_wanted = 0;
+        std::uint64_t stats_first = 1;
+        std::vector<UINT> stats_lost;  // ended early by a list split
     };
     StampSlot stamp_slots_[Core::kFramesInFlight];
     std::uint64_t next_stamp_ = 1;
     std::vector<std::pair<std::uint64_t, std::uint64_t>> stamp_history_;  // serial, ticks (a ring)
+    struct StatsEntry {
+        std::uint64_t serial = 0;
+        bool valid = false;
+        D3D11_QUERY_DATA_PIPELINE_STATISTICS data{};
+    };
+    std::uint64_t next_stats_ = 1;
+    std::vector<StatsEntry> stats_history_;  // a ring
+    StampSlot* stats_open_slot_ = nullptr;  // the open query's slot and index
+    UINT stats_open_index_ = 0;
     bool bindless_full_ = false;  // a bindless index was refused this frame: the persistent region grows
     bool world_omitted_ = false;  // a world pass was omitted this frame: the marker colour
     bool hit_test_frame_ = false;  // one-shot data frame: no cold pipeline omissions
+    bool wait_for_pipelines_ = false;  // set_wait_for_pipelines: no cold pipeline omissions
     float background_[4] = {0.0f, 0.0f, 0.0f, 1.0f};  // the frame clear (the game's whole-target clear)
     std::string failure_;
     std::vector<std::pair<std::string, std::uint64_t>> omitted_;
@@ -4743,6 +5831,7 @@ private:
 
     // ---- descriptor ring demand (open_list grows it) ----
     bool ring_full_ = false;
+    bool building_tables_ = false;  // bind_slots is writing tables: the ring must not grow under them
     std::uint32_t ring_frame_peak_ = 0, ring_frame_taken_ = 0;
 
     // ---- native passes ----
@@ -4833,6 +5922,30 @@ private:
         }
         bool operator==(const NativePipelineKey& other) const noexcept { return std::memcmp(this, &other, sizeof(*this)) == 0; }
     };
+    // The twin pipeline of a native pipeline (set_program_substitutes), on the
+    // workers like the pixel twins below.
+    void request_burn_twin(const NativePipelineKey& key, UINT targets) {
+        if (warm_codes_.empty()) return;
+        const ProgramCode* codes[4] = {key.programs[0], key.programs[1], key.programs[2], key.programs[3]};
+        bool twinned = false;
+        for (int stage = 0; stage < 2; ++stage) {
+            if (!codes[stage]) continue;
+            const auto found = warm_codes_.find(codes[stage]);
+            if (found == warm_codes_.end()) continue;
+            const ProgramCode* twin = nullptr;
+            if (!program_code(*found->second, nullptr, &twin) || !twin) return;
+            codes[stage] = twin; twinned = true;
+        }
+        if (!twinned) return;
+        const D3D12_SHADER_BYTECODE* code[4] = {};
+        const std::string* names[4] = {};
+        for (int stage = 0; stage < 4; ++stage)
+            if (codes[stage]) { code[stage] = &codes[stage]->bytecode; names[stage] = &codes[stage]->name; }
+        const std::wstring name = native_name(names, key.state, key.formats);
+        if (records_.count(name) || !precached_.insert(name).second) return;
+        pipelines_.request(name, native_desc(code, key.state, key.formats, targets));
+        ++burn_twin_requests_;
+    }
     struct NativePipelineHash {
         std::size_t operator()(const NativePipelineKey& key) const noexcept {
             const auto* bytes = reinterpret_cast<const unsigned char*>(&key);
@@ -4855,21 +5968,86 @@ private:
     ComPtr<ID3D12CommandSignature> draw_signature_;
     ComPtr<ID3D12CommandSignature> dispatch_signature_, indexed_signature_;
     owned::D3D12Buffer* index_buffer_ = nullptr;  // set_index_buffer
+    UINT64 index_first_byte_ = 0;
     struct Readback {
         std::uint64_t ticket = 0, fence = 0, bytes = 0;
+        const char* owner = "?";  // static name (request_readback)
         ComPtr<ID3D12Resource> heap;
     };
     std::vector<Readback> readbacks_;
+    // Ray tracing: the device interface while inline ray queries are available
+    // (else the reason), and the scene builds whose report (three timestamps
+    // and the compacted size) the GPU has not finished yet.
+    ComPtr<ID3D12Device5> rt_device_;
+    std::string rt_unavailable_;
+    // Bottom-level builds since the last top-level build (its log line).
+    UINT rt_bottom_builds_ = 0;
+    UINT64 rt_bottom_triangles_ = 0, rt_bottom_bytes_ = 0;
+    // The pool page static bottom-level structures are placed in, and their shared scratch memory.
+    ComPtr<ID3D12Resource> rt_pool_page_, rt_pool_scratch_;
+    UINT64 rt_pool_size_ = 0, rt_pool_used_ = 0;
+    // Compaction: the info buffer the current batch of static builds writes
+    // its compacted sizes to (one slot a structure, in build order), the
+    // batches whose sizes are being read back, and the compacted pool page.
+    static constexpr std::size_t kRaytracingInfoSlots = 4096;
+    owned::D3D12BufferRef rt_info_;
+    std::vector<std::weak_ptr<owned::D3D12Buffer>> rt_info_structures_;
+    struct RaytracingBatch {
+        std::uint64_t ticket = 0;
+        std::vector<std::weak_ptr<owned::D3D12Buffer>> structures;
+    };
+    std::vector<RaytracingBatch> rt_batches_;
+    ComPtr<ID3D12Resource> rt_compact_page_;
+    UINT64 rt_compact_size_ = 0, rt_compact_used_ = 0;
+    bool raytracing_failures_ = false;
+    void raytracing_failed(const std::string& reason) {
+        if (raytracing_failures_) return;
+        raytracing_failures_ = true;
+        remote::host_log("d3d12: ray tracing scene not built: %s (logged once)", reason.c_str());
+    }
+    bool readback_drop_logged_ = false;
+    // Unpolled copies are dropped past a small bound (their owner moved on).
+    // The GPU may still be copying into the dropped one: released by fence.
+    // A drop takes a copy its owner may still poll (that poll then fails):
+    // the first one of the session is logged with both owners.
+    void keep_readback(Readback&& readback, std::uint64_t& ticket) {
+        if (readbacks_.size() >= 32) {
+            const Readback& dropped = readbacks_.front();
+            if (!readback_drop_logged_) {
+                readback_drop_logged_ = true;
+                remote::host_log("d3d12: readback list full (32 unpolled): dropped ticket %llu of '%s' for '%s'; "
+                                 "its owner's poll fails (logged once per session)",
+                                 static_cast<unsigned long long>(dropped.ticket), dropped.owner, readback.owner);
+            }
+            if (g_hazards) g_hazards->released("an unpolled readback buffer", dropped.fence, core_.completed());
+            core_.release_later(dropped.heap);
+            readbacks_.erase(readbacks_.begin());
+        }
+        readbacks_.push_back(std::move(readback));
+        ticket = readbacks_.back().ticket;
+    }
     std::uint64_t next_readback_ = 1;
+    // Readback buffers whose copy has finished, reused by size (a per-frame
+    // readback would otherwise create and release a committed buffer each frame).
+    static constexpr std::size_t kReadbackFree = 16;
+    std::vector<ComPtr<ID3D12Resource>> readback_free_;
     ComPtr<ID3D12Resource> depth_;
     ComPtr<ID3D12DescriptorHeap> depth_heap_;
     D3D12_CPU_DESCRIPTOR_HANDLE depth_dsv_{};
     bool buffer_failures_ = false, program_failures_ = false, native_pipeline_failures_ = false;
     // The recorded pipelines (request_recorded), by library name.
     std::map<std::wstring, PipelineRecord> records_;
+    std::set<std::wstring> precached_;  // tier siblings requested at start (request_recorded) and pixel twins, recorded when used
+    const owned::ShaderProgram* pixel_twins_[4]{};  // set_pixel_twins
+    UINT pixel_twin_count_ = 0;
+    std::uint32_t twin_requests_ = 0;  // twin pipelines requested this session
+    std::unordered_map<std::uint32_t, std::string> pipeline_labels_;  // pipeline id -> what it is (label_pipeline)
     std::wstring records_path_;
     bool records_dirty_ = false;
     bool warmed_ = false;            // the start's requests are done: later first uses are named
+    LARGE_INTEGER warm_begin_{};     // the start's requests began (start_warming logs the time)
+    std::uint32_t warm_recorded_ = 0, warm_dropped_ = 0, warm_shipped_ = 0;
+    unsigned warm_workers_ = 0;
     std::uint32_t unwarmed_ = 0;     // pipelines first requested after the start
     ULONGLONG records_saved_tick_ = 0;
 };
@@ -4888,6 +6066,10 @@ std::unique_ptr<owned::D3D12Frame> create_frame_executor(HWND child, const std::
 
 const std::string& frame_executor_failure(owned::D3D12Frame& frame) noexcept {
     return static_cast<Executor&>(frame).failure();
+}
+
+const std::string& frame_executor_runtime_note(owned::D3D12Frame& frame) noexcept {
+    return static_cast<Executor&>(frame).runtime_note();
 }
 
 } // namespace d3d12

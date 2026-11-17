@@ -25,6 +25,27 @@ Texture2D<float> ambBase:register(t8);
 #define AMB_BASE ambSceneDepth
 #endif
 Texture2D<float4> ambSources:register(t3); // spray, cave drip and mushroom weights per 2 m tile
+#ifdef NATIVE_FIRE_BURN
+// Fire burn twins (kinds 8-10): the area's burn mask (renderer_fire_burn.cpp:
+// r ground burn, g its front time, b crown front time, a crown burn; its last
+// row this frame's values, native_shader.h nativeBurnRow) and the game's fire
+// frames (tendrismoke.mmp, a 4x4 atlas; frames 0-7 are flame).
+Texture2D<float4> ambBurnMask:register(t9);
+Texture2D<float4> ambFire:register(t10);
+SamplerState ambFireSampler:register(s1);
+// One mask texel at p: x ground flame, y crown flame (0..1, up fast when the
+// front arrives, out over the burning seconds), z seconds since the ground's
+// front (-1 none), w the same for the crown.
+float4 ambBurnAt(float2 p){
+ uint w,h;ambBurnMask.GetDimensions(w,h);
+ if(w==0||h<2)return float4(0,0,-1,-1);
+ const float4 ambBurn=float4(ambBurnMask.Load(int3(0,h-1,0)).xy,ambBurnMask.Load(int3(1,h-1,0)).z,ambBurnMask.Load(int3(0,h-1,0)).z);
+ const float4 m=ambBurnMask.Load(int3(clamp(int2(floor(p*ambBurn.y)),int2(0,0),int2(w-1,h-2)),0));
+ const float g=m.r>.3?ambBurn.x-m.g:-1,c=m.a>.3?ambBurn.x-m.b:-1;
+ const float sg=max(ambBurn.z,.5),sc=max(ambBurn.w,.5);
+ return float4(g<0?0:saturate(g/.35)*(1-smoothstep(.35*sg,sg,g)),c<0?0:saturate(c/.35)*(1-smoothstep(.35*sc,sc,c)),g<0?-1:g/sg,c<0?-1:c/sc);
+}
+#endif
 // Waterfall kinds (2, 5-7) place their particles in the map's waterfall tiles
 // (ambient_fall_tiles: impact tiles, then fall tiles; packed x | y << 16)
 // instead of the camera window: ambWindow.x is the list offset, ambWindow.w
@@ -105,7 +126,11 @@ AmbOut ambientVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
  if(ambVelocity.w==2){
   uint packed=ambFallTiles[uint(ambWindow.x)+tile];
   p=float2(packed&0xffffu,packed>>16)*2+float2(r0,r1)*2+wobble;
- }else if(ambVelocity.w>=5){
+ }else if(ambVelocity.w>=5
+#ifdef NATIVE_FIRE_BURN
+  &&ambVelocity.w<8
+#endif
+ ){
   fallIndex=uint(ambWindow.x)+tile;
   p=ambFalls[fallIndex*2].xy;
  }
@@ -220,7 +245,21 @@ AmbOut ambientVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
 #ifdef __cplusplus
 //")hlsl" R"hlsl( //"
 #endif
+#ifdef NATIVE_FIRE_BURN
+ // Fire burn kinds: flames and embers while the ground or a crown burns,
+ // ash for half as long again after; a particle rides a crown (2-7 m up)
+ // where the crown burns harder than the ground.
+ bool burnKind=ambVelocity.w>=8,burnCrown=false;float burnPresence=0,burnAge=0;
+ [branch]if(burnKind){
+  const float4 b=ambBurnAt(p);
+  burnCrown=b.y>b.x*(.5+r9);
+  if(ambVelocity.w<9.5)burnPresence=max(b.x,b.y);
+  else{const float a=max(b.z,b.w);burnPresence=a<.2?0:1-smoothstep(1.2,1.8,a);}
+ }
+ fade*=saturate((((spray||fixedPos)?1:burnKind?burnPresence:mist?pow(saturate(ambSourcesAt(p).r*1.6),2):mushroom?ambMushroomAt(p):ambAffinity(p))*ambMisc.z*density-r3)*8);
+#else
  fade*=saturate((((spray||fixedPos)?1:mist?pow(saturate(ambSourcesAt(p).r*1.6),2):mushroom?ambMushroomAt(p):ambAffinity(p))*ambMisc.z*density-r3)*8);
+#endif
  // Mist rises only from open water (not from liquid tiles buried under rock).
  if(fade<=.002)return o;
  // Splashes stay on their fixed water point and own spawn/landing checks.
@@ -238,6 +277,9 @@ AmbOut ambientVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
   // Fade from 0.3 m before the ground reaches the particle's own height.
   rise=ground-(surface+ambBand.x+h*ambBand.y*lift)+.45;}
  float3 center=float3(p,surface+ambBand.x+h*ambBand.y*lift+(sand?.02:0));
+#ifdef NATIVE_FIRE_BURN
+ if(burnCrown)center.z+=2+5*r8;
+#endif
  if(fixedPos)center=fixedCenter;
  float eyeDistance=length(center-ambEye.xyz);
  fade*=saturate((ambReach.x-eyeDistance)/ambReach.y)*saturate((eyeDistance-ambReach.z)/ambReach.z);
@@ -266,6 +308,9 @@ AmbOut ambientVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
  if(sparse){size*=lerp(.7,1.35,ambRand(seed,10));fade*=lerp(.4,1,ambRand(seed,11));}
  if(veil){size*=9;fade*=.1;}
  size*=sizeScale;
+#ifdef NATIVE_FIRE_BURN
+ if(ambVelocity.w==8){size*=pow(.85,h*8);puffAge=h;}
+#endif
  if(fleck)size*=2.4;
  // Keep sub-pixel particles at 1.5 px with matching coverage: no shimmer.
  float grow=max(1,1.5/max(size*ambRight.w/clipCenter.w,1e-4));
@@ -295,7 +340,11 @@ AmbOut ambientVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
  float3 view=normalize(center-ambEye.xyz),toSun=normalize(ambSunDir.xyz);
  float scatter=pow(saturate(dot(view,toSun)),4);
  float3 ambientLight=ambAmbient.rgb,sunLight=ambSunColor.rgb;
- if(ambVelocity.w==2||ambVelocity.w>=5){
+ if(ambVelocity.w==2||ambVelocity.w>=5
+#ifdef NATIVE_FIRE_BURN
+  &&ambVelocity.w<8
+#endif
+ ){
   // Water spray and foam: a desaturated light, so warm sunlight does not
   // tint it cream (liquid_surface.hlsl liquidFoamLight).
   ambientLight=lerp(dot(ambientLight,float3(.2126,.7152,.0722)).xxx,ambientLight,.35);
@@ -313,7 +362,11 @@ AmbOut ambientVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
  o.border=fog;
  float alpha=ambColorA.a*fade;
  o.color=float4(lit*alpha*(1-emissive)+albedo*glow*1.5*alpha*emissive,alpha*(1-emissive));
- o.shape=float3(uv,emissive>0?2:(spin>0?1:(mist?4:(puffAge>=0?3:0))));
+ o.shape=float3(uv,
+#ifdef NATIVE_FIRE_BURN
+  ambVelocity.w==8?5:
+#endif
+  emissive>0?2:(spin>0?1:(mist?4:(puffAge>=0?3:0))));
  // Soft particles: big mist fades into the scene over half its size.
  // Fall foam/lip spray ride just off the fall: a short soft range.
  o.puff=float3(saturate(puffAge),(fallFoam||lipSpray)?.04:max(ambDepth.z,mist?size*.5:0),r9*61.7);
@@ -321,6 +374,18 @@ AmbOut ambientVS(uint vertex:SV_VertexID,uint instance:SV_InstanceID){
 }
 float4 ambientPS(AmbOut i):SV_Target{
  float2 q=i.shape.xy;float r2=dot(q,q),a;
+#ifdef NATIVE_FIRE_BURN
+ if(i.shape.z>4.5){
+  // Burn flame: the game's fire frame of this moment of its life (frames 0-7
+  // of the 4x4 atlas, the game's UV rule: v from the top row down), additive.
+  const float frame=min(floor(i.puff.x*8),7);
+  const float2 cell=float2(fmod(frame,4),floor(frame/4));
+  const float2 f=float2(q.x*.5+.5,.5-q.y*.5);
+  const float4 tx=ambFire.Sample(ambFireSampler,(cell+lerp(.5/256,1-.5/256,f))*.25);
+  i.color.rgb*=tx.rgb;a=tx.a;
+ }
+ else
+#endif
  if(i.shape.z>1.5)a=(exp(-r2*3)+.35*exp(-r2))*saturate(1-r2);         // glowing core and halo
  else if(i.shape.z>.5)a=saturate((1-(q.x*q.x*(1.5+.7*q.y)+q.y*q.y))*3); // leaf
  else if(i.shape.z>3.5){

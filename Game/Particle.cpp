@@ -5896,7 +5896,7 @@ BOOL CParticle::Draw(CRenderer *pTarget)
         pTarget->SetRenderState(D3DRENDERSTATE_ALPHATESTENABLE, TRUE);
         pTarget->SetRenderState(D3DRENDERSTATE_ALPHAREF, 1);
     }
-    const BOOL drawn = pTarget->DrawParticles(bUseAddEffect != FALSE, inCoords, resParts);
+    const BOOL drawn = pTarget->DrawParticles(bUseAddEffect != FALSE, inCoords, resParts, GetTypeID());
     LiveObserver::ObserveParticle(*this,drawn!=FALSE);
     if (clipTransparentExit)
     {

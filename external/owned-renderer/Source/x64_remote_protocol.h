@@ -19,7 +19,7 @@
 namespace x64remote {
 
 constexpr std::uint32_t kMagic = 0x44524945u; // 'EIRD'
-constexpr std::uint32_t kVersion = 36; // 36: authored Astral terrain corner masks in asset publication; 35: owned unknown-map FIG/MapG cover; 34: same-frame map marker controls and border tint; 33: standalone loading-screen map cache; 32: footstep native-contact removal reserved; 30: owned world-map preview commands; 28: authored-family policy with name provenance (neighbor piece5); 27: GameStatus::addon_notice; 26: terrain family/neighbor policy (separate integration); 25: Preview::portrait_hair; 24: Preview::portrait_lighting; 23: game-owned camera pan availability in GameStatus; 22: host_window_work removed again; 21: Control::host_window_work, release_delay_us; 20: cave flag in NativeWorldLightingFrame (#208); 19: zone-mask HitTestFrame (#200); 18: candidate-1025 (S7 17 + grass-cull WorldScene camera anchor height); 17: S7, the call-stream ops, queries, prefetch and neighbour status removed; 16: game_clean_exit; 15: combined-1
+constexpr std::uint32_t kVersion = 41; // 41: TerrainCpuAsset authored Astral corner masks; 40: GameParticleView::source_type for emitter lighting policy; 39: VisualRateValues::action_coefficient in the retained tick values; 38: CampIconBind carries the asset name; 37: owned textures apart in the packet store; 36: core stream deltas (packet store, world/terrain same-field bits); 35: owned unknown-map FIG/MapG cover; 34: same-frame map marker controls and border tint; 33: standalone loading-screen map cache; 32: footstep native-contact removal reserved; 30: owned world-map preview commands; 28: authored-family policy with name provenance (neighbor piece5); 27: GameStatus::addon_notice; 26: terrain family/neighbor policy (separate integration); 25: Preview::portrait_hair; 24: Preview::portrait_lighting; 23: game-owned camera pan availability in GameStatus; 22: host_window_work removed again; 21: Control::host_window_work, release_delay_us; 20: cave flag in NativeWorldLightingFrame (#208); 19: zone-mask HitTestFrame (#200); 18: candidate-1025 (S7 17 + grass-cull WorldScene camera anchor height); 17: S7, the call-stream ops, queries, prefetch and neighbour status removed; 16: game_clean_exit; 15: combined-1
 constexpr std::uint32_t kHarnessAcks = 16;              // harness step acks in flight (one step runs at a time)
 constexpr std::uint32_t kSurfaceRequests = 1024;         // surface writes the host asked for, in flight
 constexpr std::uint32_t kOverlayInputs = 64;             // window messages for the host's F10 overlay, in flight
@@ -41,7 +41,8 @@ enum class Op : std::uint16_t {
 };
 
 // DLSS evaluation inputs (host-internal: host_bridge.cpp hands them to Dlss).
-enum DlssFlags : std::uint32_t { dlss_reset = 1, dlss_hdr = 2, dlss_depth_inverted = 4 };
+enum DlssFlags : std::uint32_t { dlss_reset = 1, dlss_hdr = 2, dlss_depth_inverted = 4, dlss_bias_mask = 8, dlss_ray_reconstruction = 16,
+                                 dlss_specular_hit_distance = 32 };
 struct DlssEvaluateRecord {
     std::uint32_t color, depth, motion, output, exposure; // unused in core mode (resources are passed directly)
     float jitter_x, jitter_y, mv_scale_x, mv_scale_y;
@@ -50,6 +51,7 @@ struct DlssEvaluateRecord {
     float sharpness;
     std::uint32_t flags; // DlssFlags
     std::uint32_t reserved[2];
+    float world_to_view[16], view_to_clip[16]; // dlss_specular_hit_distance: Ray Reconstruction's camera matrices (row vectors)
 };
 
 // ---- retained-scene publication -------------------------------------------
@@ -134,6 +136,7 @@ struct alignas(64) Control {
     char harness_directory[520];                 // UTF-8, NUL-terminated
     alignas(64) volatile long harness_acks_written; // acks published (slot = count % kHarnessAcks)
     volatile long overlay_mirror_resets;         // core mode: the host dropped stale cached UI quads (the game clears its mirror)
+    volatile long terrain_lod_hidden_cm;         // core mode: the host's fogStock.w in cm (bridge_set_terrain_lod_hidden_distance)
     // core mode: completed visual surfaces the host's resolver missed (id,
     // generation). The game process sends their write at its next present.
     // Host-written ring: slot = count % kSurfaceRequests, published by count.
@@ -208,7 +211,7 @@ struct alignas(64) Control {
 #pragma warning(pop)
 
 static_assert(sizeof(Record) == 8, "wire");
-static_assert(sizeof(DlssEvaluateRecord) == 72, "wire");
+static_assert(sizeof(DlssEvaluateRecord) == 200, "wire");
 static_assert(sizeof(AdapterInfo) == 256 + 16 + 24 + 16 + 8, "wire");
 static_assert(sizeof(RetainedFragment) == 8, "wire");
 static_assert(sizeof(SceneFragment) == 8, "wire");

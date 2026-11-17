@@ -24,12 +24,17 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <future>
 #include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -343,6 +348,14 @@ void bridge_set_load_reveal(bool enabled, std::uint64_t revealed_epoch) noexcept
 }
 
 #endif // !EID3D11_EMBEDDED
+// Set by the terrain ring prewarm (owned_world_shadows.cpp) while the held
+// load still prepares the terrain around the camera.
+std::atomic<std::uint64_t> g_terrain_ring_pending_epoch{0};
+bool bridge_terrain_ring_prewarm_pending() noexcept {
+    const std::uint64_t epoch = g_terrain_ring_pending_epoch.load(std::memory_order_relaxed);
+    return epoch && epoch == bridge_current_world_epoch();
+}
+
 // Far lamp memory and the mobile-light rule live in world_lamp_memory.h.
 WorldLampMemory<RetainedWorldPointLight> g_world_lamp_memory;
 
@@ -925,13 +938,39 @@ bool bridge_neighbour_world_transform(std::array<float,16>& placement) noexcept 
 
 #endif // !EID3D11_EMBEDDED
 std::shared_ptr<const VisualAssemblyAsset> build_owned_portrait_bare_assembly(
-    const VisualAssemblyAsset& unit, const ResourceBlob& model, std::int32_t hair,
+    const VisualAssemblyAsset& unit, const OwnedPortraitModel& model, std::int32_t hair,
     const char*& reason) noexcept {
     try {
         if (!unit.skeleton) { reason = "bare_head_skeleton"; return nullptr; }
-        MemoryResourceArchive archive;
         ResourceFailure failure;
-        if (!archive.open(model, failure)) { reason = "bare_head_model_archive"; return nullptr; }
+        // Bare figures by model and part name, kept for the session (a few
+        // head and hair figures per hero). The laptop's host rebuilt the bare
+        // head about every 12 s with nothing changed (50-68 ms on the replay
+        // thread, j192): resolving and opening the .mod was that cost.
+        static std::mutex figures_lock;
+        static std::unordered_map<std::string, std::shared_ptr<const FigureCpuAsset>> figures;
+        MemoryResourceArchive archive;
+        ResourceBlob model_blob;
+        bool archive_open = false, archive_failed = false;
+        const auto bare_figure = [&](const std::string& name, std::shared_ptr<const FigureCpuAsset>& geometry) {
+            const std::string key = unit.skeleton->visual_reference + '|' + name;
+            {
+                std::lock_guard<std::mutex> guard(figures_lock);
+                if (const auto found = figures.find(key); found != figures.end()) { geometry = found->second; return true; }
+            }
+            if (!archive_open) {
+                if (archive_failed || !model || !model(model_blob) || !archive.open(model_blob, failure)) {
+                    archive_failed = true;
+                    return false;
+                }
+                archive_open = true;
+            }
+            ResourceBlob blob;
+            if (!archive.resolve(name, blob, failure) || !(geometry = retained_visual_figure_asset(blob, failure))) return false;
+            std::lock_guard<std::mutex> guard(figures_lock);
+            figures[key] = geometry;
+            return true;
+        };
         auto bare = std::make_shared<VisualAssemblyAsset>(unit);
         char hair_name[32]{};
         if (hair >= 0) std::snprintf(hair_name, sizeof(hair_name), "hr.%02d", int(hair));
@@ -953,10 +992,9 @@ std::shared_ptr<const VisualAssemblyAsset> build_owned_portrait_bare_assembly(
                 part.explicitly_hidden = true;
                 continue;
             }
-            ResourceBlob blob;
             std::shared_ptr<const FigureCpuAsset> geometry;
-            if (!archive.resolve(name, blob, failure) || !(geometry = retained_visual_figure_asset(blob, failure))) {
-                reason = "bare_head_part_missing"; return nullptr;
+            if (!bare_figure(name, geometry)) {
+                reason = archive_failed ? "bare_head_model_archive" : "bare_head_part_missing"; return nullptr;
             }
             // Its own node; the shipped LNK/BON (unhuma) link hd.armorTT,
             // hr.HH and hr.HH.armorTT to hd, and hr.HH and hr.HH.armorTT share
@@ -995,11 +1033,9 @@ std::shared_ptr<const VisualAssemblyAsset> build_owned_portrait_bare_assembly(
             if (existing == bare->parts.end()) {
                 // A helmet without a matching hair FIG removes hair outright.
                 // Recover only the character's native choice, never another style.
-                ResourceBlob blob;
                 std::shared_ptr<const FigureCpuAsset> geometry;
-                if (!archive.resolve(hair_name, blob, failure) ||
-                    !(geometry = retained_visual_figure_asset(blob, failure)) || geometry->indices.empty()) {
-                    reason = "bare_head_hair_missing"; return nullptr;
+                if (!bare_figure(hair_name, geometry) || geometry->indices.empty()) {
+                    reason = archive_failed ? "bare_head_model_archive" : "bare_head_hair_missing"; return nullptr;
                 }
                 std::uint32_t node = UINT_MAX;
                 for (std::uint32_t i = 0; i < unit.skeleton->nodes.size(); ++i)
@@ -1128,13 +1164,103 @@ std::shared_ptr<OwnedPortraitOverlay> build_owned_portrait_overlay(const Texture
     } catch (...) { reason = "overlay_exception"; return nullptr; }
 }
 
+namespace {
+struct PortraitOverlayBuild {
+    std::shared_ptr<OwnedPortraitOverlay> overlay;
+    const char* reason = "face_picture_missing";
+};
+struct PortraitFace {
+    std::array<std::shared_future<PortraitOverlayBuild>,3> expressions;   // expression 1..3
+    std::uint64_t used_ms = 0;
+};
+struct PortraitOverlayCache {
+    std::mutex mutex;
+    std::unordered_map<std::string,PortraitFace> faces;   // by neutral face picture name
+};
+// Never destroyed: no worker join or texture release during DLL unload.
+PortraitOverlayCache& portrait_overlay_cache() {
+    static auto* cache = new PortraitOverlayCache;
+    return *cache;
+}
+// With cache.mutex held.
+PortraitFace& portrait_face(PortraitOverlayCache& cache, const std::string& neutral,
+    const OwnedPortraitPictures& pictures) {
+    const std::uint64_t now = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+    if (auto found = cache.faces.find(neutral); found != cache.faces.end()) {
+        found->second.used_ms = now;
+        return found->second;
+    }
+    for (auto it = cache.faces.begin(); it != cache.faces.end();)
+        it = now - it->second.used_ms > 60000 ? cache.faces.erase(it) : std::next(it);
+    PortraitFace& face = cache.faces[neutral];
+    face.used_ms = now;
+    for (std::int32_t expression = 1; expression <= 3; ++expression) {
+        PortraitOverlayBuild failed;
+        std::shared_ptr<const TextureCpuAsset> a, b;
+        const std::string name = owned_portrait_expression_name(neutral, expression);
+        if (!pictures(neutral, name, a, b)) {
+            std::promise<PortraitOverlayBuild> done; done.set_value(failed);
+            face.expressions[expression - 1] = done.get_future().share();
+            continue;
+        }
+        face.expressions[expression - 1] = std::async(std::launch::async, [a, b] {
+            PortraitOverlayBuild result;
+            result.overlay = build_owned_portrait_overlay(*a, *b, result.reason);
+            return result;
+        }).share();
+    }
+    return face;
+}
+} // namespace
+
+void prefetch_owned_portrait_overlays(const std::string& neutral, const OwnedPortraitPictures& pictures) noexcept {
+    try {
+        if (neutral.empty()) return;
+        auto& cache = portrait_overlay_cache();
+        std::lock_guard<std::mutex> lock(cache.mutex);
+        (void)portrait_face(cache, neutral, pictures);
+    } catch (...) {}
+}
+
+std::shared_ptr<OwnedPortraitOverlay> owned_portrait_overlay(const std::string& neutral, std::int32_t expression,
+    const OwnedPortraitPictures& pictures, const char*& reason) noexcept {
+    try {
+        if (expression < 1 || expression > 3) { reason = "expression_range"; return nullptr; }
+        auto& cache = portrait_overlay_cache();
+        std::shared_future<PortraitOverlayBuild> build;
+        {
+            std::lock_guard<std::mutex> lock(cache.mutex);
+            build = portrait_face(cache, neutral, pictures).expressions[expression - 1];
+        }
+        const PortraitOverlayBuild& result = build.get();
+        if (!result.overlay) reason = result.reason;
+        return result.overlay;
+    } catch (...) { reason = "overlay_exception"; return nullptr; }
+}
+
 // One object preview through its captured device-state sets.
 void run_owned_preview_command(OwnedPreviewCommand& command) noexcept {
     if (command.sets.empty()) return;
     const auto& handoff = command.handoff;
     void* sinks = command.sets.front().get();
-    Renderer::PortraitLightingScope lighting(*SceneSinks::of(sinks).renderer,
-        command.portrait ? &command.portrait_lighting : nullptr);
+    Renderer& renderer = *SceneSinks::of(sinks).renderer;
+    // An owned portrait's depth is its own inside its frame, on the x64 host
+    // and the in-process scene thread alike. The game draws the slot's HP/MP
+    // bars (figures 5i+2, 5i+3) after the face (5i+1) in the same depth: the
+    // real head and hair reach over the bars where the baked face never did,
+    // and their depth hid the bars under the hair. The panel's earlier work
+    // draws first, the frame's depth is cleared, the portrait draws (its
+    // lighting scope flushes it) and its depth is cleared again below.
+    const auto& clip = command.portrait_clip;
+    const bool frame_depth = command.portrait && clip[2] > clip[0] && clip[3] > clip[1];
+    if (frame_depth) {
+        (void)renderer.flush_native();
+        renderer.clear_interface_depth(clip[0], clip[1], clip[2], clip[3]);
+    }
+    // Every preview (portrait, panel doll, inventory) takes its studio light,
+    // never the world's sun, ambient or weather (engine_bridge.cpp interface_studio_lighting).
+    Renderer::PortraitLightingScope lighting(renderer,&command.portrait_lighting);
     install_owned_scene_inputs(sinks, handoff, nullptr, nullptr, nullptr, 0);
     bool transaction = false, ok = lighting.ready();
     try {
@@ -1244,6 +1370,7 @@ void run_owned_preview_command(OwnedPreviewCommand& command) noexcept {
             append_bridge_event("owned_preview_omitted","scene thread: preview submission failed; the preview is omitted",true);
     }
     clear_owned_scene_inputs(handoff);
+    if (frame_depth) renderer.clear_interface_depth(clip[0], clip[1], clip[2], clip[3]);
 }
 
 // The footprint snapshot of the world command being prepared (scene thread,

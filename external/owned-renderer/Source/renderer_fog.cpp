@@ -3,6 +3,7 @@
 #include "renderer.h"
 #include "ambient_occlusion.h"
 #include "world_fog.h"
+#include "sky_clouds.h"
 
 #include <d3dcompiler.h>
 #include <cmath>
@@ -316,7 +317,15 @@ HRESULT Renderer::bind_world_fog() noexcept {
             // after rain and at night; open water mists at dawn and night.
             const float wisps = desert ? .15f : std::clamp(.35f + morning + .6f * wetness + .3f * night, 0.f, 1.f);
             set4(frame.wisps, static_cast<float>(std::fmod(env.world_time, 100000.0)), wisps,
-                 map_known ? strength * fog_open_water_density(env.region, morning, night, wetness) : 0.f, 0.f);
+                 map_known ? strength * fog_open_water_density(env.region, morning, night, wetness) : 0.f, fog_haze_day(sky_celestial(float(env.hour), frame.sun).sun_elevation));
+            // Both backends upload this frame block. Outdoor material fog is
+            // uniform; caves still evaluate their spatially varying fog colour
+            // in the pixel shader. Match that shader's biased lit-white fit.
+            fog_lit_haze_color(sky_fog_color_, frame.tint, frame.light, frame.haze_color, frame.wisps[3], 1e-6f);
+            frame.haze_color[3] = outdoor ? 1.f : 0.f;
+            for (int c = 0; c < 3; ++c) {
+                frame.haze_limit[c] = std::clamp(light[c], 0.f, 1.f) + 1e-6f;
+            }
             std::memcpy(frame.previous_eye, fog_previous_eye_.data(), sizeof(float) * 4);
             // Sun shafts (sun_shafts.h): volumetric terms in the frame haze
             // colour (the sky's horizon formula on the flush's game fog
@@ -367,6 +376,8 @@ HRESULT Renderer::bind_world_fog() noexcept {
             // everything: the camera-pass cull takes the nearer of the two.
             fog_cull_distance_ = fog_full_cover_distance(preset, fog.valid, p.end, frame.stock[2], hazeFree);
             frame.stock[3] = fog_draw_fade_distance(native_draw_distance_, fog_cull_distance_);
+            terrain_lod_hidden_distance_ = frame.stock[3];
+            bridge_set_terrain_lod_hidden_distance(terrain_lod_hidden_distance_);
             fog_cull_frame_ = native_frame_index_;
             std::memcpy(fog_previous_clip_.data(), clip.world_to_clip.data(), sizeof(float) * 16);
             fog_previous_eye_ = {eye[0], eye[1], eye[2], 0.f};

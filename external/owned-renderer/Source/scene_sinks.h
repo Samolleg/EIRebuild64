@@ -32,9 +32,9 @@ struct SceneSinks {
  std::uintptr_t wound_interface=0;std::shared_ptr<SurfaceImage> wound;
  bool sequence=false,batch_active=false,object_active=false;
  Renderer::NativeQueueCheckpoint checkpoint{};
- // Core mode: the game thread's camp placement at the capture (camp
- // composition is sent, not drawn inline). Applied around each submission
- // only while composing; standard mode never captures a composing state.
+ // The game thread's camp placement at the capture (camp composition is
+ // queued or sent, never drawn inline). Applied around each submission
+ // only while composing.
  camp::SubmissionState camp_state{};
  void flushUi(){if(renderer->has_pending_ui())(void)renderer->flush_ui();}
  SurfaceImage* woundImage(std::uintptr_t surface_interface) const{return surface_interface&&surface_interface==wound_interface?wound.get():nullptr;}
@@ -80,7 +80,9 @@ struct SceneSinks {
      request.registered=registered;return SUCCEEDED(hr);
     }
     if(!request.records){result.failure_hresult=E_INVALIDARG;result.failure_operation="scene.static_records";return false;}
-    hr=renderer.set_native_static_object(request.key,*request.records,self.state,registered,&result);
+    if(request.caster){hr=renderer.set_native_active_caster(request,self.state);return SUCCEEDED(hr);}
+    hr=request.object_space?renderer.set_native_static_object_space(request,self.state,registered,&result):
+     renderer.set_native_static_object(request.key,*request.records,self.state,registered,&result);
     request.registered=registered;
     if(FAILED(hr)){char detail[160];std::snprintf(detail,sizeof(detail),"hr=%08lx op=%s",static_cast<unsigned long>(hr),
      result.failure_operation?result.failure_operation:"-");owned::bridge_append_probe_event("static_set_failed",detail);}
@@ -141,7 +143,7 @@ struct SceneSinks {
   try{return of(context).renderer->set_native_world_lighting(lighting);}catch(...){return false;}
  }
  static bool pointLights(void* context,const RetainedVisualFrame& frame) noexcept{
-  try{return of(context).renderer->set_native_point_lights(frame.world_point_lights,frame.time);}catch(...){return false;}
+  try{of(context).renderer->set_fire_spells(frame.fire_spells,frame.time);return of(context).renderer->set_native_point_lights(frame.world_point_lights,frame.time);}catch(...){return false;}
  }
  static bool pointShadowBatch(void* context,std::uint64_t& generation,bool& pressure) noexcept{
   try{auto& self=of(context);if(self.batch_active)return false;self.flushUi();self.sequence=true;
@@ -198,10 +200,10 @@ struct SceneSinks {
  }
 };
 
-// A packet's arrays copied off a borrowed view (the game process: a proxy
-// scene packet or a HUD figure view). The view's array pointers are left null:
-// Packet::bind points them at the copies when the command runs.
-inline void copy_scene_packet(const NativeGeometryView& source,scene_ui::Packet& packet){
+// The packet's view of a borrowed one (the game process: a proxy scene packet
+// or a HUD figure view), its array pointers null: Packet::bind points them at
+// the packet's arrays when the command runs.
+inline void scene_packet_view(const NativeGeometryView& source,scene_ui::Packet& packet){
   auto& view=packet.view;view=source;
   if(!view.cache_identity&&!view.cache_pointers_valid){
    view.cache_pointers={reinterpret_cast<std::uintptr_t>(source.positions),reinterpret_cast<std::uintptr_t>(source.normals),
@@ -209,6 +211,21 @@ inline void copy_scene_packet(const NativeGeometryView& source,scene_ui::Packet&
     reinterpret_cast<std::uintptr_t>(source.indices)};
    view.cache_pointers_valid=true;
   }
+  if(!source.morphs||!source.morph_count)view.morph_count=0;
+  view.positions=nullptr;view.normals=nullptr;view.diffuse=nullptr;view.specular=nullptr;
+  view.texture_coordinates=nullptr;view.components=nullptr;view.indices=nullptr;view.morphs=nullptr;
+  view.owned_texture.mips=nullptr;
+}
+// Core mode: the same packet with its arrays left in the game's memory; the
+// encoder reads them from `source` (the synchronous post's lifetime), the
+// same wire bytes as the copies.
+inline void borrow_scene_packet(const NativeGeometryView& source,scene_ui::Packet& packet){
+  scene_packet_view(source,packet);
+  packet.borrowed=&source;
+}
+// A packet's arrays copied off a borrowed view (the scene thread's queue).
+inline void copy_scene_packet(const NativeGeometryView& source,scene_ui::Packet& packet){
+  scene_packet_view(source,packet);
   const std::size_t colors=static_cast<std::size_t>(source.normal_groups)*4u;
   packet.positions.assign(source.positions,source.positions+source.position_groups);
   packet.normals.assign(source.normals,source.normals+source.normal_groups);
@@ -218,7 +235,6 @@ inline void copy_scene_packet(const NativeGeometryView& source,scene_ui::Packet&
   packet.components.assign(source.components,source.components+source.component_count);
   packet.indices.assign(source.indices,source.indices+source.index_count);
   if(source.morphs&&source.morph_count)packet.morphs.assign(source.morphs,source.morphs+source.morph_count);
-  else view.morph_count=0;
   if(source.owned_texture.identity&&source.owned_texture.mips){
    packet.mips.assign(source.owned_texture.mips,source.owned_texture.mips+source.owned_texture.mip_count);
    packet.mip_bytes.resize(packet.mips.size());
@@ -228,15 +244,12 @@ inline void copy_scene_packet(const NativeGeometryView& source,scene_ui::Packet&
     mip.data=nullptr;
    }
   }
-  view.positions=nullptr;view.normals=nullptr;view.diffuse=nullptr;view.specular=nullptr;
-  view.texture_coordinates=nullptr;view.components=nullptr;view.indices=nullptr;view.morphs=nullptr;
-  view.owned_texture.mips=nullptr;
  }
 
 // One generic scene packet through sinks over its device-state copy (the
 // game process's scene thread and the core-mode host). The packet's arrays
 // are bound here; bound/wound are the resolved surface snapshots.
-inline void submit_scene_packet(Renderer& renderer, scene_ui::Packet& packet, std::shared_ptr<SurfaceImage> bound,
+inline HRESULT submit_scene_packet(Renderer& renderer, scene_ui::Packet& packet, std::shared_ptr<SurfaceImage> bound,
                                 std::shared_ptr<SurfaceImage> wound) {
     packet.bind();
     SceneSinks sinks;
@@ -246,9 +259,10 @@ inline void submit_scene_packet(Renderer& renderer, scene_ui::Packet& packet, st
     sinks.bound = std::move(bound);
     if (packet.wound.present) { sinks.wound_interface = packet.view.wound_surface_interface; sinks.wound = std::move(wound); }
     NativeGeometryResult ignored{};
-    if (!SceneSinks::submit(&sinks, packet.view, ignored))
-        Renderer::report_scene_failure(ignored.failure_operation ? ignored.failure_operation : "scene.packet",
-                                       ignored.failure_hresult ? ignored.failure_hresult : E_FAIL);
+    if (SceneSinks::submit(&sinks, packet.view, ignored)) return S_OK;
+    const HRESULT failure = FAILED(ignored.failure_hresult) ? ignored.failure_hresult : E_FAIL;
+    Renderer::report_scene_failure(ignored.failure_operation ? ignored.failure_operation : "scene.packet", failure);
+    return failure;
 }
 
 }  // namespace owned

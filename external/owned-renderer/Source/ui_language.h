@@ -29,4 +29,14 @@ const char* ui_option_description(const RendererOption& option) noexcept;
 const char* ui_setting_label(const PlayerGraphicsSetting& setting) noexcept;
 const char* ui_setting_tooltip(const PlayerGraphicsSetting& setting) noexcept;
 
+// Code page of the game's own text bytes. game.exe passes its "Font CharSet"
+// setting (HKCU <game root>\Game Specific Settings, default "english") to the
+// CRT as setlocale(LC_CTYPE, name). "russian" (any case) means 1251; any other
+// value, or a missing one, keeps the Windows ANSI code page (CP_ACP), which is
+// what the Russian release relies on with "english" on a 1251 system.
+// Read at the first DirectDraw creation that knows the registry root, then
+// fixed for the run; CP_ACP until then.
+void read_game_text_code_page(const wchar_t* registry_root) noexcept;
+unsigned game_text_code_page() noexcept;
+
 } // namespace owned

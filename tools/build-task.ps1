@@ -2,6 +2,8 @@
 # Compiler-keyed entries share the cache size limit (20 GB by default).
 param(
     [string]$CacheRoot,
+    [string]$RendererAssetsSource,
+    [string]$RendererMaterialsSource,
     [ValidateRange(1,1024)][int]$CacheLimitGB = 20,
     [ValidateRange(1,100)][int]$CacheVersions = 2
 )
@@ -15,6 +17,10 @@ while (!(Test-Path -LiteralPath (Join-Path $project 'RULES.md'))) {
     $project = $parent
 }
 if (!$CacheRoot) { $CacheRoot = Join-Path $project 'builds/rebuild64/cache' }
+if (!$RendererAssetsSource) { $RendererAssetsSource = Join-Path $project 'content/renderer-assets/Engine64' }
+if (!$RendererMaterialsSource) { $RendererMaterialsSource = Join-Path $project 'content/renderer-materials/Engine64' }
+if (!(Test-Path -LiteralPath (Join-Path $RendererAssetsSource 'eid3d_hosted/hosted_plants.bin'))) { throw 'Renderer 1126 hosted assets are missing from the selected content source.' }
+if (!(Test-Path -LiteralPath (Join-Path $RendererMaterialsSource 'classes.json'))) { throw 'Renderer materials are missing from the selected content source.' }
 $CacheRoot = [IO.Path]::GetFullPath($CacheRoot).TrimEnd('\','/')
 if ($CacheRoot.StartsWith($task + '\',[StringComparison]::OrdinalIgnoreCase) -or
     $CacheRoot -eq $project -or $CacheRoot -eq $repo) { throw 'Cache must be outside task worktrees.' }
@@ -215,13 +221,22 @@ try {
         Copy-Item -LiteralPath (Join-Path $repo "out/x64/Release/$($target[0])/$($target[0]).pdb") -Destination (Join-Path $kit ($target[1] + '.pdb'))
     }
     foreach ($name in 'avcodec-62.dll','avformat-62.dll','avutil-60.dll','swscale-9.dll','swresample-6.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/ffmpeg/8.1.3/x64/bin/' + $name)) -Destination $kit }
-    foreach ($name in 'nvngx_dlss.dll','nvngx_dlssg.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/dlss/v310.9.16/lib/Windows_x86_64/rel/' + $name)) -Destination $kit }
-    foreach ($name in 'amd_fidelityfx_loader_dx12.dll','amd_fidelityfx_framegeneration_dx12.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/fidelityfx/2.3.0/signedbin/' + $name)) -Destination $kit }
-    foreach ($binary in Get-ChildItem $kit -File | Where-Object Extension -in '.exe','.dll') {
+    foreach ($name in 'nvngx_dlss.dll','nvngx_dlssg.dll','nvngx_dlssd.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/dlss/v310.9.16/lib/Windows_x86_64/rel/' + $name)) -Destination $kit }
+    foreach ($name in 'amd_fidelityfx_loader_dx12.dll','amd_fidelityfx_framegeneration_dx12.dll','amd_fidelityfx_upscaler_dx12.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/fidelityfx/2.3.0/signedbin/' + $name)) -Destination $kit }
+    New-Item -ItemType Directory -Path (Join-Path $kit 'D3D12') | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repo 'dependencies/agility/1.620.2/build/native/bin/x64/D3D12Core.dll') -Destination (Join-Path $kit 'D3D12')
+    Copy-Item -LiteralPath (Join-Path $repo 'out/x64/Release/EI_Rebuild/licenses') -Destination (Join-Path $kit 'licenses') -Recurse
+    Copy-Item -LiteralPath $RendererMaterialsSource -Destination (Join-Path $kit 'eid3d_materials') -Recurse
+    Copy-Item -LiteralPath (Join-Path $RendererAssetsSource 'eid3d_hosted') -Destination (Join-Path $kit 'eid3d_hosted') -Recurse
+    Copy-Item -LiteralPath (Join-Path $repo 'external/owned-renderer/Host/d3d12/eid3d11_d3d12_pipelines.shipped.list') -Destination $kit
+    Copy-Item -LiteralPath (Join-Path $repo 'external/owned-renderer/LICENSE.md') -Destination (Join-Path $kit 'licenses/EID3D11-LICENSE.md')
+    Copy-Item -LiteralPath (Join-Path $repo 'external/owned-renderer/NOTICE.md') -Destination (Join-Path $kit 'licenses/EID3D11-NOTICE.md')
+    Copy-Item -LiteralPath (Join-Path $repo 'THIRD_PARTY.md') -Destination $kit
+    foreach ($binary in Get-ChildItem $kit -File -Recurse | Where-Object Extension -in '.exe','.dll') {
         $imports = & $dumpbin /nologo /dependents $binary.FullName
         if ($LASTEXITCODE -ne 0) { throw "dumpbin failed: $($binary.Name)" }
         $imports | Out-File (Join-Path $task ($binary.Name + '.dependents.txt')) -Encoding utf8
-        if ($binary.Name -match '^(nvngx_|amd_fidelityfx_).*\.dll$') {
+        if ($binary.Name -match '^(nvngx_|amd_fidelityfx_).*\.dll$' -or $binary.Name -eq 'D3D12Core.dll') {
             $signature = Get-AuthenticodeSignature -LiteralPath $binary.FullName
             if ($signature.Status -ne 'Valid') { throw "Invalid vendor signature: $($binary.Name): $($signature.Status)" }
         } elseif ($imports -match '(?i)(MSVCP\d+|VCRUNTIME\d+|mfc\d+|ucrtbase|api-ms-win-crt-).*\.dll') {

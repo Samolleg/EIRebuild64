@@ -19,9 +19,11 @@ Pipelines::~Pipelines() {
     for (auto& worker : workers_) worker.join();
 }
 
-bool Pipelines::open(ID3D12Device* device, const std::wstring& path, unsigned workers, std::string& note, std::string& reason) {
+bool Pipelines::open(ID3D12Device* device, const std::wstring& path, unsigned workers, std::string& note, std::string& reason,
+                     std::atomic<std::uint64_t>* startup_progress) {
     device_ = device;
     path_ = path;
+    startup_progress_ = startup_progress;
     ComPtr<ID3D12Device1>& device1 = device1_;
     HRESULT hr = device->QueryInterface(IID_PPV_ARGS(&device1));
     if (FAILED(hr)) { reason = hresult_text("QueryInterface(ID3D12Device1) for the pipeline library", hr); return false; }
@@ -61,6 +63,7 @@ std::uint32_t Pipelines::enqueue(std::unique_ptr<Entry> entry) {
         entries_.push_back(std::move(entry));
         queue_.push_back(id);
         ++outstanding_;
+        publish_startup_progress();
     }
     work_ready_.notify_one();
     return id;
@@ -96,6 +99,7 @@ void Pipelines::work() {
             std::lock_guard<std::mutex> lock(mutex_);
             entry->done = true;
             --outstanding_;
+            publish_startup_progress();
         }
         work_done_.notify_all();
     }
@@ -169,6 +173,49 @@ void Pipelines::wait_all() {
         remote::host_log("d3d12: pipeline compilation still pending after 20 s: %u requests; waiting before using or releasing PSO inputs", outstanding);
         lock.lock();
     }
+}
+
+ID3D12PipelineState* Pipelines::wait(std::uint32_t id) {
+    Entry* entry = nullptr;
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (id >= entries_.size()) return nullptr;
+        entry = entries_[id].get();
+        if (entry->done) return entry->pipeline.Get();
+        const auto queued = std::find(queue_.begin(), queue_.end(), id);
+        if (queued == queue_.end()) {
+            // A worker is building it: wait for that one.
+            work_done_.wait(lock, [entry] { return entry->done; });
+            return entry->pipeline.Get();
+        }
+        queue_.erase(queued);  // still queued: built here, now
+    }
+    build(*entry);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        entry->done = true;
+        --outstanding_;
+        publish_startup_progress();
+    }
+    work_done_.notify_all();
+    return entry->pipeline.Get();
+}
+
+void Pipelines::publish_startup_progress() {
+    if (startup_progress_) {
+        const std::uint64_t total = entries_.size();
+        startup_progress_->store(((total - outstanding_) << 32) | total, std::memory_order_relaxed);
+    }
+}
+
+void Pipelines::end_startup_progress() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    startup_progress_ = nullptr;
+}
+
+std::uint32_t Pipelines::requested() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return static_cast<std::uint32_t>(entries_.size());
 }
 
 bool Pipelines::idle() const {

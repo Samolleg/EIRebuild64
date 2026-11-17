@@ -2,11 +2,15 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 class CObject3DClientSpecific;
 namespace owned { class Renderer; struct FixedState; struct OwnedVisualSurface; struct RetainedVisualFrame; struct VisualResourceIncarnation; }
 
+namespace owned { struct RetainedFireSpell; }
 namespace OwnedRender {
+// Typed local-server facts sampled on the game thread between simulation ticks.
+void E1ReadVisualFireSpells(std::vector<owned::RetainedFireSpell>& output);
 // Publish live source appearance before retained frame sampling.
 bool E1CompleteVisualAppearance(CObject3DClientSpecific& specific,
     owned::VisualResourceIncarnation resource) noexcept;

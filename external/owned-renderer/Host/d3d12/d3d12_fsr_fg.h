@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace d3d12 {
 
@@ -74,6 +75,61 @@ private:
     std::uint64_t frame_id_ = 0;
     bool prepared_ = false;  // this frame id has a prepare
     bool enabled_ = false;   // the last configure turned generation on
+};
+
+// FSR 3.1 upscaling (upscaler 2 on D3D12; the same SDK, plus the signed
+// amd_fidelityfx_upscaler_dx12.dll beside the host exe). One context for the
+// output size, recreated when it changes. A replaced or released context is
+// retired and destroyed only once the fence passed its last dispatch, so two
+// may be alive for the frames in flight (each holds its own resources;
+// ffx-api.md). Inputs as for FSR
+// frame generation (depth D24S8 or D32, motion in render pixels, current to
+// previous, unjittered), LDR colour (exposure 1), optional R8 reactive and
+// transparency-and-composition masks; the output is an unordered-access image.
+class FsrUpscaler {
+public:
+    struct Dispatch {
+        UINT render_w = 0, render_h = 0, out_w = 0, out_h = 0;
+        float jitter_x = 0, jitter_y = 0;  // render pixels
+        float frame_ms = 0, sharpness = 0;
+        bool reset = false;
+        float near_plane = 0, far_plane = 0, fov_y = 0;
+        std::uint64_t recorded = 0;  // the fence value of the list recorded into
+    };
+    ~FsrUpscaler() { destroy(); }
+    // Whether the FidelityFX DLLs load and offer upscaling (once; the reason otherwise).
+    static bool available(ID3D12Device* device, std::string& reason) noexcept;
+    // resources: colour, depth, motion, output, reactive (unordered access),
+    // transparency, then the world colour before and after the transparent
+    // effects. With reactive and both world colours the SDK generates the
+    // reactive mask first; any of them null: no mask. Creates the context first when needed.
+    bool dispatch(ID3D12GraphicsCommandList* list, ID3D12Resource* const* resources, const Dispatch& d, std::string& error) noexcept;
+    void destroy() noexcept;  // the current context, at once
+    // Moves the current context to the retired list with the fence value of
+    // its last dispatch; the next dispatch creates a new one.
+    void retire() noexcept;
+    // Destroys the retired contexts whose last dispatch the fence passed
+    // (completed), or (teardown, GPU idle) whose list was never submitted
+    // (recorded at or after unsubmitted). Returns how many.
+    unsigned collect(std::uint64_t completed, std::uint64_t unsubmitted = ~0ull) noexcept;
+    // Forgets the current and retired contexts without destroying them
+    // (teardown with their GPU work not confirmed finished: the process exit frees them).
+    void abandon() noexcept { context_ = nullptr; retired_.clear(); }
+    bool created() const noexcept { return context_ != nullptr; }
+    std::size_t retired() const noexcept { return retired_.size(); }
+    std::uint64_t recorded() const noexcept { return recorded_; }  // the fence value of the current context's last dispatch
+    std::uint64_t vram() const noexcept;          // the current context
+    std::uint64_t retired_vram() const noexcept;  // the retired contexts
+
+private:
+    struct Retired {
+        void* context;           // ffxContext
+        std::uint64_t recorded;  // the fence value of its last dispatch
+    };
+    void* context_ = nullptr;  // ffxContext
+    std::uint64_t recorded_ = 0;
+    std::vector<Retired> retired_;
+    UINT render_w_ = 0, render_h_ = 0, out_w_ = 0, out_h_ = 0;
 };
 
 } // namespace d3d12

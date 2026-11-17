@@ -4,6 +4,7 @@
 #include "owned_asset_loader.h"
 #include "owned_terrain_decode.h"
 #include "retained_static_submission.h"
+#include "../ThirdParty/meshoptimizer/src/meshoptimizer.h"
 
 #include <algorithm>
 #include <atomic>
@@ -548,18 +549,42 @@ std::uint64_t texture_bytes(const Texture &texture) {
   return texture.bytes.capacity() +
          texture.mips.capacity() * sizeof(NativeOwnedTextureMip);
 }
+bool block_compressed(NativeOwnedTextureFormat format) {
+  return format == NativeOwnedTextureFormat::dxt1 ||
+         format == NativeOwnedTextureFormat::dxt3 ||
+         format == NativeOwnedTextureFormat::dxt5;
+}
+// Whether a view whose first `dropped` levels are gone can drop one more. A
+// block-compressed top level needs both sides divisible by 4: a 2x2 or 1x1
+// DXT mip never becomes the top of a texture.
+bool reducible(const Texture &texture, std::size_t dropped) {
+  if (dropped + 1 >= texture.mips.size())
+    return false;
+  const auto &next = texture.mips[dropped + 1];
+  return !block_compressed(texture.format) ||
+         (next.width % 4 == 0 && next.height % 4 == 0);
+}
+// Retained bytes after reduce_texture_view(texture, dropped).
+std::uint64_t retained_bytes(const Texture &texture, std::size_t dropped) {
+  if (!dropped)
+    return texture_bytes(texture);
+  const std::uint8_t *end = texture.bytes.data() + texture.bytes.size();
+  return std::uint64_t(end - texture.mips[dropped].data) +
+         (texture.mips.size() - dropped) * sizeof(NativeOwnedTextureMip);
+}
 // Quality is selected while loading, on the existing immutable mip views.
 // The limit admits compacted retained data, not temporary vector capacity.
-std::uint64_t reduce_texture_view(Texture &texture) {
-  if (texture.mips.size() < 2)
+// Drops the first `levels` mips (each step checked by reducible).
+std::uint64_t reduce_texture_view(Texture &texture, std::size_t levels) {
+  if (!levels || levels >= texture.mips.size())
     return 0;
   const auto before = texture_bytes(texture);
-  const auto &top = texture.mips[1];
+  const auto &top = texture.mips[levels];
   const std::uint8_t *end = texture.bytes.data() + texture.bytes.size();
   std::vector<std::uint8_t> bytes(top.data, end);
   std::vector<NativeOwnedTextureMip> mips;
-  mips.reserve(texture.mips.size() - 1);
-  for (std::size_t i = 1; i < texture.mips.size(); ++i) {
+  mips.reserve(texture.mips.size() - levels);
+  for (std::size_t i = levels; i < texture.mips.size(); ++i) {
     const auto &source = texture.mips[i];
     mips.push_back({bytes.data() + (source.data - top.data), source.width,
                     source.height, source.bytes});
@@ -568,25 +593,293 @@ std::uint64_t reduce_texture_view(Texture &texture) {
       (texture.generation & kDerivedTextureView) != 0, top.width, top.height);
   texture.bytes = std::move(bytes);
   texture.mips = std::move(mips);
-  texture.opaque_mips >>= 1;
+  texture.opaque_mips >>= levels;
   return before - texture_bytes(texture);
 }
-Texture *largest_reducible_texture(Section &section) {
+// Planned reductions of an admission: levels to drop per texture. Nothing is
+// reduced until the whole admission fits.
+using ReductionPlan = std::map<Texture *, std::size_t>;
+Texture *largest_reducible_texture(Section &section,
+                                   const ReductionPlan &plan) {
   Texture *largest = nullptr;
+  std::uint32_t largest_bytes = 0;
   for (auto &texture : section.textures) {
-    if (texture.mips.size() < 2)
-      continue;
-    const bool compressed = texture.format == NativeOwnedTextureFormat::dxt1 ||
-                            texture.format == NativeOwnedTextureFormat::dxt3 ||
-                            texture.format == NativeOwnedTextureFormat::dxt5;
-    const auto &next = texture.mips[1];
-    // Small BC mips are valid inside a chain, but cannot become its base level.
-    if (compressed && (next.width % 4 || next.height % 4))
-      continue;
-    if (!largest || texture.mips.front().bytes > largest->mips.front().bytes)
+    const auto found = plan.find(&texture);
+    const std::size_t dropped = found == plan.end() ? 0 : found->second;
+    if (reducible(texture, dropped) &&
+        (!largest || texture.mips[dropped].bytes > largest_bytes)) {
       largest = &texture;
+      largest_bytes = texture.mips[dropped].bytes;
+    }
   }
   return largest;
+}
+// Texels per prepared-space unit each texture's top level spends on the
+// surfaces that bind it: per triangle the larger singular value of its
+// surface-to-texel map (what mip selection follows), averaged by surface area.
+// Instanced meshes are measured in their instances' placement (rest shape).
+std::vector<double> texture_density(const Section &section) {
+  std::vector<double> weighted(section.textures.size()),
+      area(section.textures.size());
+  const auto add = [&](std::uint32_t t, const Vec3 (&p)[3],
+                       const NativeTextureCoordinate *(&uv)[3]) {
+    if (t >= section.textures.size() || section.textures[t].mips.empty())
+      return;
+    const auto &top = section.textures[t].mips.front();
+    const Vec3 e1{p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]},
+        e2{p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]};
+    const double l1 = std::sqrt(e1[0] * e1[0] + e1[1] * e1[1] + e1[2] * e1[2]);
+    if (!(l1 > 0))
+      return;
+    const double x2 = (e2[0] * e1[0] + e2[1] * e1[1] + e2[2] * e1[2]) / l1;
+    const double y2 = std::sqrt((std::max)(
+        e2[0] * e2[0] + e2[1] * e2[1] + e2[2] * e2[2] - x2 * x2, 0.0));
+    if (!(y2 > l1 * 1e-6))
+      return;
+    const double du1 = (uv[1]->u - uv[0]->u) * top.width,
+                 dv1 = (uv[1]->v - uv[0]->v) * top.height,
+                 du2 = (uv[2]->u - uv[0]->u) * top.width,
+                 dv2 = (uv[2]->v - uv[0]->v) * top.height;
+    const double j00 = du1 / l1, j10 = dv1 / l1,
+                 j01 = (du2 - du1 * x2 / l1) / y2,
+                 j11 = (dv2 - dv1 * x2 / l1) / y2;
+    const double frobenius = j00 * j00 + j01 * j01 + j10 * j10 + j11 * j11,
+                 det = j00 * j11 - j01 * j10;
+    const double largest = std::sqrt(
+        (frobenius +
+         std::sqrt((std::max)(frobenius * frobenius - 4 * det * det, 0.0))) *
+        .5);
+    if (!std::isfinite(largest))
+      return;
+    const double a = .5 * l1 * y2;
+    weighted[t] += a * largest;
+    area[t] += a;
+  };
+  const auto mesh = [&](const Batch &batch, std::uint32_t texture,
+                        const std::array<float, 16> *placement) {
+    for (std::size_t i = 0; i + 2 < batch.indices.size(); i += 3) {
+      Vec3 p[3];
+      const NativeTextureCoordinate *uv[3];
+      bool valid = true;
+      for (unsigned k = 0; k < 3 && valid; ++k) {
+        const auto index = batch.indices[i + k];
+        valid = index < batch.components.size();
+        if (!valid)
+          break;
+        const auto &c = batch.components[index];
+        valid = std::size_t(c.position) / 4 < batch.positions.size() &&
+                c.texture < batch.uv.size();
+        if (!valid)
+          break;
+        p[k] = point(batch.positions.data(), c.position);
+        if (placement)
+          p[k] = transform(*placement, p[k]);
+        uv[k] = &batch.uv[c.texture];
+      }
+      if (valid)
+        add(texture, p, uv);
+    }
+  };
+  for (const auto &batch : section.batches)
+    if (!batch.instanced)
+      mesh(batch, batch.texture, nullptr);
+  for (const auto &instance : section.instances)
+    if (instance.batch < section.batches.size())
+      mesh(section.batches[instance.batch], instance.texture,
+           &instance.object_to_section);
+  for (std::size_t t = 0; t < weighted.size(); ++t)
+    weighted[t] = area[t] > 0 ? weighted[t] / area[t] : 0;
+  return weighted;
+}
+// The largest output the preview is shown on (4K), in pixels.
+constexpr double kDisplayWidth = 3840, kDisplayHeight = 2160;
+// Keeps each texture's top level at the smallest level that still gives at
+// least one texel per output pixel where its section is shown largest. A
+// section is never drawn larger than the display: its XY extent fits the
+// output, so a prepared unit covers at most
+// min(width / longer side, height / shorter side) pixels.
+// Returns the bytes released.
+double display_pixels_per_unit(const Section &section) {
+  double low[2]{(std::numeric_limits<double>::max)(),
+                (std::numeric_limits<double>::max)()},
+      high[2]{std::numeric_limits<double>::lowest(),
+              std::numeric_limits<double>::lowest()};
+  const auto add = [&](const Vec3 &p) {
+    for (unsigned a = 0; a < 2; ++a) {
+      low[a] = (std::min)(low[a], p[a]);
+      high[a] = (std::max)(high[a], p[a]);
+    }
+  };
+  for (const auto &batch : section.batches)
+    if (!batch.instanced) {
+      add(batch.minimum);
+      add(batch.maximum);
+    }
+  for (const auto &instance : section.instances)
+    for (unsigned c = 0; c < 8; ++c) {
+      Vec3 p{};
+      for (unsigned a = 0; a < 3; ++a)
+        p[a] = (c & (1u << a)) ? instance.bounds.maximum[a]
+                               : instance.bounds.minimum[a];
+      add(transform(instance.object_to_section, p));
+    }
+  const double ex = high[0] - low[0], ey = high[1] - low[1];
+  if (!(ex > 0) || !(ey > 0))
+    return 0;
+  return (std::min)(kDisplayWidth / (std::max)(ex, ey),
+                    kDisplayHeight / (std::min)(ex, ey));
+}
+std::uint64_t fit_textures_to_display(Section &section) {
+  const double pixels_per_unit = display_pixels_per_unit(section);
+  if (!(pixels_per_unit > 0))
+    return 0;
+  const auto density = texture_density(section);
+  std::uint64_t saved = 0;
+  for (std::size_t t = 0; t < section.textures.size(); ++t) {
+    auto &texture = section.textures[t];
+    // No measured surface: keep it as prepared.
+    if (!(density[t] > 0))
+      continue;
+    std::size_t levels = 0;
+    while (reducible(texture, levels) &&
+           density[t] / double(std::uint64_t{2} << levels) >= pixels_per_unit)
+      ++levels;
+    saved += reduce_texture_view(texture, levels);
+  }
+  section.status.cpu_bytes -= saved;
+  return saved;
+}
+// Keeps only the referenced vertices of a batch after its indices changed
+// (positions per shape, normals and UVs remapped as compact_static_mesh).
+void compact_batch(Batch &batch, const std::vector<std::uint32_t> &indices) {
+  const std::size_t groups = batch.positions.size() / batch.shape_count;
+  std::vector<std::uint32_t> components(batch.components.size(), UINT32_MAX),
+      positions(groups * 4, UINT32_MAX),
+      normals(batch.normals.size() * 4, UINT32_MAX),
+      coordinates(batch.uv.size(), UINT32_MAX);
+  std::vector<std::uint32_t> position_sources, normal_sources, uv_sources;
+  const auto remap = [](auto &map, auto &sources, std::uint32_t source) {
+    auto &index = map[source];
+    if (index == UINT32_MAX) {
+      index = std::uint32_t(sources.size());
+      sources.push_back(source);
+    }
+    return std::uint16_t(index);
+  };
+  std::vector<NativeVertexComponent> kept;
+  std::vector<std::uint16_t> kept_indices;
+  kept_indices.reserve(indices.size());
+  for (const auto i : indices) {
+    auto &index = components[i];
+    if (index == UINT32_MAX) {
+      const auto &source = batch.components[i];
+      index = std::uint32_t(kept.size());
+      kept.push_back({remap(positions, position_sources, source.position),
+                      remap(normals, normal_sources, source.normal),
+                      remap(coordinates, uv_sources, source.texture)});
+    }
+    kept_indices.push_back(std::uint16_t(index));
+  }
+  const auto copy_lane = [](const NativePackedGroup &source, unsigned from,
+                            NativePackedGroup &target, unsigned to) {
+    target.x[to] = source.x[from];
+    target.y[to] = source.y[from];
+    target.z[to] = source.z[from];
+    target.w[to] = source.w[from];
+  };
+  const auto kept_groups = (position_sources.size() + 3) / 4;
+  std::vector<NativePackedGroup> kept_positions(kept_groups *
+                                                batch.shape_count);
+  for (unsigned shape = 0; shape < batch.shape_count; ++shape)
+    for (std::size_t i = 0; i < position_sources.size(); ++i)
+      copy_lane(batch.positions[shape * groups + position_sources[i] / 4],
+                position_sources[i] % 4,
+                kept_positions[shape * kept_groups + i / 4], unsigned(i % 4));
+  std::vector<NativePackedGroup> kept_normals((normal_sources.size() + 3) / 4);
+  for (std::size_t i = 0; i < normal_sources.size(); ++i)
+    copy_lane(batch.normals[normal_sources[i] / 4], normal_sources[i] % 4,
+              kept_normals[i / 4], unsigned(i % 4));
+  std::vector<NativeTextureCoordinate> kept_uv;
+  kept_uv.reserve(uv_sources.size());
+  for (const auto source : uv_sources)
+    kept_uv.push_back(batch.uv[source]);
+  batch.positions = std::move(kept_positions);
+  batch.normals = std::move(kept_normals);
+  batch.uv = std::move(kept_uv);
+  batch.components = std::move(kept);
+  batch.indices = std::move(kept_indices);
+}
+// Simplifies one batch to an absolute geometric error (in its own position
+// units, rest shape). Open borders stay: section outlines, cut edges and card
+// edges keep their silhouette. A batch whose vertex opacity carries a layer
+// blend keeps every vertex: the error bound does not cover opacity.
+void simplify_batch(Batch &batch, float error) {
+  if (batch.vertex_opacity || batch.indices.size() < 6 || !(error > 0) ||
+      batch.shape_count == 0 || batch.positions.size() % batch.shape_count)
+    return;
+  const std::size_t vertices = batch.components.size();
+  const std::size_t groups = batch.positions.size() / batch.shape_count;
+  std::vector<float> positions(vertices * 3);
+  for (std::size_t v = 0; v < vertices; ++v) {
+    const auto source = batch.components[v].position;
+    if (std::size_t(source) / 4 >= groups)
+      return;
+    const auto p = point(batch.positions.data(), source);
+    for (unsigned a = 0; a < 3; ++a)
+      positions[v * 3 + a] = float(p[a]);
+  }
+  std::vector<std::uint32_t> indices(batch.indices.begin(),
+                                     batch.indices.end()),
+      reduced(indices.size());
+  for (const auto i : indices)
+    if (i >= vertices)
+      return;
+  float result = 0;
+  const auto count = meshopt_simplify(
+      reduced.data(), indices.data(), indices.size(), positions.data(),
+      vertices, 3 * sizeof(float), 0, error,
+      meshopt_SimplifyLockBorder | meshopt_SimplifyErrorAbsolute, &result);
+  if (count < 3 || count % 3 || count >= indices.size())
+    return;
+  reduced.resize(count);
+  compact_batch(batch, reduced);
+}
+// The same display bound for geometry: every batch keeps the detail whose
+// removal would move its surface by at least one output pixel where its
+// section is shown largest. Instanced meshes are measured in object units at
+// the largest scale any of their instances places them.
+void simplify_for_display(Section &section) {
+  const double pixels_per_unit = display_pixels_per_unit(section);
+  if (!(pixels_per_unit > 0))
+    return;
+  std::vector<double> instance_scale(section.batches.size(), 0);
+  for (const auto &instance : section.instances) {
+    if (instance.batch >= section.batches.size())
+      continue;
+    const auto &m = instance.object_to_section;
+    double largest = 0;
+    for (unsigned c = 0; c < 3; ++c)
+      largest = (std::max)(largest, std::sqrt(double(m[c]) * m[c] +
+                                              double(m[4 + c]) * m[4 + c] +
+                                              double(m[8 + c]) * m[8 + c]));
+    instance_scale[instance.batch] =
+        (std::max)(instance_scale[instance.batch], largest);
+  }
+  std::uint64_t triangles = 0;
+  for (std::size_t b = 0; b < section.batches.size(); ++b) {
+    auto &batch = section.batches[b];
+    if (batch.surface == Surface::cover)
+      continue;
+    const double scale = batch.instanced ? instance_scale[b] : 1.0;
+    if (scale > 0)
+      simplify_batch(batch, float(1.0 / (pixels_per_unit * scale)));
+    if (!batch.instanced)
+      triangles += batch.indices.size() / 3;
+  }
+  for (const auto &instance : section.instances)
+    if (instance.batch < section.batches.size())
+      triangles += section.batches[instance.batch].indices.size() / 3;
+  section.status.triangles = triangles;
 }
 // Clips once during preparation. The projected union must not duplicate
 // coverage, including where translucent terrain layers cross folded FIGs.
@@ -1368,6 +1661,7 @@ std::shared_ptr<Section> prepare(std::uint64_t generation, std::uint32_t index,
     cover.texture = builder.texture(std::move(texture));
     result->batches.push_back(std::move(cover));
   }
+  simplify_for_display(*result);
   finish_geometry(*result, std::move(builder.outline_edges));
   if (!builder.omissions.empty()) {
     result->status.reason = description.zone + ": omitted static shapes";
@@ -1403,6 +1697,7 @@ std::shared_ptr<Section> prepare(std::uint64_t generation, std::uint32_t index,
             (std::max)(result->status.maximum[a], float(p[a]));
       }
     }
+  fit_textures_to_display(*result);
   // Allocate the identity through the same authority as other owned memory
   // resources. Retaining this small source description gives the prepared
   // result its own lifetime, without inventing an archive-member identity,
@@ -1582,16 +1877,24 @@ bool WorldMapPreview::precache_loading(
               cache->descriptions[j].unknown_texture_resource ==
                   description.unknown_texture_resource)
             bytes += cache->sections[j]->status.cpu_bytes;
+        // Plan the reductions first and apply them only once the allod fits:
+        // a section that cannot be admitted leaves the others as they were.
+        ReductionPlan plan;
+        std::map<Texture *, Section *> owners;
         while (bytes > kAllodBytes) {
           Section *selected = made.get();
-          Texture *texture = largest_reducible_texture(*made);
+          Texture *texture = largest_reducible_texture(*made, plan);
+          const auto top = [&](Texture *t) {
+            const auto found = plan.find(t);
+            return t->mips[found == plan.end() ? 0 : found->second].bytes;
+          };
           for (std::size_t j = 0; j < i; ++j)
             if (cache->sections[j] &&
                 cache->descriptions[j].unknown_texture_resource ==
                     description.unknown_texture_resource) {
-              auto *candidate = largest_reducible_texture(*cache->sections[j]);
-              if (candidate && (!texture || candidate->mips.front().bytes >
-                                                texture->mips.front().bytes)) {
+              auto *candidate =
+                  largest_reducible_texture(*cache->sections[j], plan);
+              if (candidate && (!texture || top(candidate) > top(texture))) {
                 selected = cache->sections[j].get();
                 texture = candidate;
               }
@@ -1600,10 +1903,15 @@ bool WorldMapPreview::precache_loading(
             throw std::runtime_error(
                 "Compacted preview data requires " + std::to_string(bytes) +
                 " bytes; allod limit is " + std::to_string(kAllodBytes));
-          const auto saved = reduce_texture_view(*texture);
-          selected->status.cpu_bytes -= saved;
-          bytes -= saved;
+          auto &dropped = plan[texture];
+          owners[texture] = selected;
+          bytes -= retained_bytes(*texture, dropped) -
+                   retained_bytes(*texture, dropped + 1);
+          ++dropped;
         }
+        for (const auto &[texture, levels] : plan)
+          owners[texture]->status.cpu_bytes -=
+              reduce_texture_view(*texture, levels);
         // Publish only after admission. A section that cannot fit must not
         // discard already valid sections or unrelated worlds.
         cache->status[i] = made->status;

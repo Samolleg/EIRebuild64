@@ -16,6 +16,14 @@ struct CritterSummary {
     float min_px = 0, max_px = 0;        // on-screen body length of the on-screen instances (whole px:
                                          // no decimal point, so the C locale cannot matter)
     std::uint32_t drawn_species = 0;     // bit per critters::Species, on-screen instances only
+    // town cats: live cats, the map's towns, the nearest town house (m, -1
+    // none) and every resident's fixed identity (town, slot, coat, shape, size
+    // in percent of the 0.55 m figure), whether it is alive, how often it has
+    // come (spawns) and where it is (whole metres)
+    std::uint32_t cats = 0, cat_towns = 0;
+    float cat_nearest_house = -1;
+    struct TownCat { std::uint32_t town, spawns, size_pct; std::uint8_t slot, shape; bool alive; std::int32_t x, y; char coat[8]; };
+    std::vector<TownCat> town_cats;
     // Where the first submitted instances are: NDC x/y in percent (|v| > 100
     // is off screen), body px and height above the ground in decimetres.
     struct Probe { std::uint8_t species; std::int16_t ndc_x, ndc_y; std::uint16_t px; std::int16_t alt_dm; };
@@ -23,7 +31,7 @@ struct CritterSummary {
     Probe probes[kProbes]{};
     std::uint32_t probe_count = 0;
     // Diagnostic labels: viewport fraction 0..1, top-left origin. Sized by live population.
-    struct Label { float x, y; char text[64]; };
+    struct Label { float x, y; char text[64]; std::uint32_t color = 0; }; // color: 0 the default
     std::vector<Label> labels;
     // Carrion director (the F10 status line's carrion row): present/tracked
     // edible corpses, corpses still on their arrival timer and the soonest (s),
@@ -42,7 +50,7 @@ struct CritterSummary {
 // Names in critters::Species order.
 inline constexpr const char* kCritterSpeciesNames[] = {
     "rat", "spider", "larva", "frog", "lizard", "snake", "centipede", "beetle",
-    "bird", "raven/crow", "vulture", "crab", "snowbird", "mouse", "bat"};
+    "bird", "raven/crow", "vulture", "crab", "snowbird", "mouse", "bat", "fish", "squirrel", "prairie dog", "cat"};
 
 // Player switches per critter type, in critters::Species order (issue #126):
 // key (boolean, on) and weight_key (integer percent, 100) in eid3d11.ini. The
@@ -51,7 +59,7 @@ inline constexpr const char* kCritterSpeciesNames[] = {
 // stays the same. Off or 0 % keeps the type away, carrion flocks included.
 struct CritterTypeSetting { const char* key; const char* weight_key; const char* label; const char* tooltip; };
 inline constexpr CritterTypeSetting kCritterTypeSettings[] = {
-    {"critter_rats", "critter_rats_weight", "Rats", "Rats in caves."},
+    {"critter_rats", "critter_rats_weight", "Rats", "Rats in caves and in the city of Suslanger."},
     {"critter_spiders", "critter_spiders_weight", "Spiders", "Spiders in caves and the Dead City."},
     {"critter_larvae", "critter_larvae_weight", "Crawler larvae", "Larvae crawling around a live crawler."},
     {"critter_frogs", "critter_frogs_weight", "Frogs", "Frogs by swamps and water."},
@@ -69,6 +77,13 @@ inline constexpr CritterTypeSetting kCritterTypeSettings[] = {
     {"critter_snow_birds", "critter_snow_birds_weight", "Snow birds", "Small bird flocks in Ingos, by day."},
     {"critter_snow_mice", "critter_snow_mice_weight", "Snow mice", "Mice in the snow of Ingos."},
     {"critter_bats", "critter_bats_weight", "Cave bats", "Bat swarms flying past moving heroes in caves."},
+    {"critter_fish", "critter_fish_weight", "Fish",
+     "Schools of fish in rivers, lakes, swamps and coastal water. They scatter when someone comes close."},
+    {"critter_squirrels", "critter_squirrels_weight", "Squirrels",
+     "Squirrels near trees in Gipat (red-brown) and Ingos (light grey), by day."},
+    {"critter_prairie_dogs", "critter_prairie_dogs_weight", "Prairie dogs",
+     "Prairie dogs in Suslanger, by day, away from monsters; they stand up to look round and drop into their burrows."},
+    {"critter_cats", "critter_cats_weight", "Cats", "One resident cat per town of Ingos and Suslanger (two in a city), always the same cat in the same town; it wanders the town, sits, grooms, suns itself and hunts mice, and keeps its distance from people."},
 };
 static_assert(sizeof(kCritterTypeSettings) / sizeof(*kCritterTypeSettings) ==
               sizeof(kCritterSpeciesNames) / sizeof(*kCritterSpeciesNames), "one setting per critter species");
@@ -92,7 +107,17 @@ inline void append_critter_summary_json(std::string& out, const CritterSummary& 
         out += '"';
         first = false;
     }
-    out += "],\"instances\":[";
+    std::snprintf(line, sizeof(line), "],\"cats\":{\"live\":%u,\"towns\":%u,\"nearest_house_m\":%.0f,\"residents\":[",
+        c.cats, c.cat_towns, double(c.cat_nearest_house));
+    out += line;
+    for (std::size_t i = 0; i < c.town_cats.size(); ++i) {
+        const auto& t = c.town_cats[i];
+        std::snprintf(line, sizeof(line), "%s{\"town\":%u,\"slot\":%u,\"coat\":\"%s\",\"shape\":%u,\"size_pct\":%u,"
+            "\"alive\":%u,\"spawns\":%u,\"x\":%d,\"y\":%d}", i ? "," : "", t.town, unsigned(t.slot), t.coat, unsigned(t.shape),
+            t.size_pct, t.alive ? 1u : 0u, t.spawns, int(t.x), int(t.y));
+        out += line;
+    }
+    out += "]},\"instances\":[";
     for (unsigned i = 0; i < c.probe_count && i < CritterSummary::kProbes; ++i) {
         const auto& p = c.probes[i];
         std::snprintf(line, sizeof(line), "%s{\"species\":\"%s\",\"ndc_pct\":[%d,%d],\"px\":%u,\"alt_dm\":%d}",

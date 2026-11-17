@@ -63,6 +63,9 @@ struct WorldEnvironment {
     float precipitation_strength = 1.0f; // visual strength of the rain/snow (precipitation.h), 0.2..1
     double world_time = 0.0;  // tick + fraction: world animation time, pauses with the game
     int region = 0;           // fog_region(): from the region name that selects Lights<region>.ini
+    bool visual_sun_supported = false;  // verified live base-game lighting owner
+    bool visual_sun_time_valid = false;
+    double visual_sun_hour = 0.0;       // fractional visual clock, wrapped to [0,24)
 };
 
 // Supported game: 004E40B0 updates the 64-step particle power; 004E5680
@@ -117,18 +120,50 @@ inline void fog_region_tint(int region, bool cave, float out[3]) noexcept {
 // The authored fog supplies the hue; the current world light also supplies
 // energy, bounded by the non-emissive lit-white surface under that light.
 // Shared with the CPU sky horizon; fogHazeColor below is the shader equivalent.
+// The haze's largest channel deviation from the light's own colour, as a
+// share of its luma (the shader's kFogHazeChroma below must match).
+inline constexpr float kFogHazeChroma = .12f;
+// The day weight of the haze treatment: 1 with the sun above 20 degrees,
+// 0 below 5 (dusk, dawn and night keep the game fog's full hue, as authored).
+inline float fog_haze_day(float sun_elevation_degrees) noexcept {
+    const float t = std::clamp((sun_elevation_degrees - 5.f) / 15.f, 0.f, 1.f);
+    return t * t * (3.f - 2.f * t);
+}
 inline void fog_lit_haze_color(const float game[3], const float tint[4], const float light[4],
-                               float out[3]) noexcept {
+                               float out[3], float day = 1.f, float fit_bias = 0.f) noexcept {
     const float luma = .2126f * game[0] + .7152f * game[1] + .0722f * game[2];
     const float light_luma = .2126f * light[0] + .7152f * light[1] + .0722f * light[2];
     const float brightness = (std::max)(luma, light_luma);
+    float light_hue[3];
     for (int k = 0; k < 3; ++k) {
         const float hue = luma > 1e-4f ? game[k] / luma : 1.f;
-        const float light_hue = light_luma > 1e-4f ? light[k] / light_luma : 1.f;
+        light_hue[k] = light_luma > 1e-4f ? light[k] / light_luma : 1.f;
         const float c = 1.f + (hue - 1.f) * tint[3];
-        out[k] = std::clamp((c + (light_hue - c) * light[3]) * tint[k] * brightness,
-                            0.f, std::clamp(light[k], 0.f, 1.f));
+        out[k] = (std::max)((c + (light_hue[k] - c) * light[3]) * tint[k] * brightness, 0.f);
     }
+    // Dusk, dawn and night (day 0): the game fog's hue clamped per channel, as before.
+    float authored[3];
+    for (int k = 0; k < 3; ++k) authored[k] = (std::min)(out[k], std::clamp(light[k], 0.f, 1.f));
+    // The haze stays within kFogHazeChroma (of its luma) of the light's own
+    // colour: a strongly coloured authored fog (Gipat's midday teal) keeps
+    // only a hint of its hue, while dusk's orange light keeps its orange.
+    const float out_luma = .2126f * out[0] + .7152f * out[1] + .0722f * out[2];
+    float deviation = 0.f;
+    for (int k = 0; k < 3; ++k) deviation = (std::max)(deviation, std::fabs(out[k] - light_hue[k] * out_luma));
+    if (deviation > kFogHazeChroma * out_luma && deviation > 0.f) {
+        const float share = kFogHazeChroma * out_luma / deviation;
+        for (int k = 0; k < 3; ++k) out[k] = light_hue[k] * out_luma + (out[k] - light_hue[k] * out_luma) * share;
+    }
+    // Bounded by the lit white per channel, scaled as a whole so the hue
+    // holds (a per-channel clamp flattened a bright teal into a flat cyan band).
+    float fit = 1.f;
+    for (int k = 0; k < 3; ++k) {
+        // World pixels use a 1e-6 numerator bias in their fit. Keep the
+        // existing sky/shaft callers' unbiased fit unless requested.
+        const float limit = std::clamp(light[k], 0.f, 1.f) + fit_bias;
+        if (out[k] > limit) fit = (std::min)(fit, out[k] > 0.f ? limit / out[k] : 0.f);
+    }
+    for (int k = 0; k < 3; ++k) out[k] = authored[k] + ((std::max)(out[k] * fit, 0.f) - authored[k]) * day;
 }
 
 inline float fog_smoothstep(float a, float b, float x) noexcept {
@@ -197,7 +232,12 @@ inline FogDensity fog_density(float base, float morning, float wetness, float pr
                               float night) noexcept {
     FogDensity d;
     d.height = base * (1.0f + 3.0f * morning + 1.5f * wetness + precipitation);
-    d.mist = 0.15f * (0.4f + 0.6f * night + morning + wetness);
+    // Swamp mist: the dry-day layer (0.06/m) thickens with morning fog only.
+    // Night and rain used to add 0.6 and 1.0 of it (0.30/m at night in rain,
+    // under 10% left through the 6 m layer at pitch 45): a flat haze-coloured
+    // wall over the swamp, zoomed in or out (look1123-swamp-before, save1401).
+    // They now add a little (0.08/m at night in rain, about half left).
+    d.mist = 0.15f * (0.4f + 0.06f * night + morning + 0.08f * wetness);
     return d;
 }
 
@@ -286,12 +326,14 @@ struct FogFrameGpu {
     float air[4]{};         // haze-free near distance, sun glow, debug test state, debug component
     float tint[4]{};        // region haze tint (luminance 1), saturation kept from the game colour
     float light[4]{};       // non-emissive lit white, blend toward its hue
-    float wisps[4]{};       // world time, wisp strength, open-water mist density, unused
+    float wisps[4]{};       // world time, wisp strength, open-water mist density, haze day weight
     float volume_cell[4]{}; // half a froxel in uv (x, y), wisp drift offset in world units (z, w)
     float shaft[4]{};       // sun shafts (sun_shafts.h): shadow darkening share, forward boost, headroom, unused
     float shaft_haze[4]{};  // frame haze colour the shaft term is measured in, anisotropic blend
+    float haze_color[4]{};  // fogHazeColor of the frame's game fog, w: outdoor frame colour usable
+    float haze_limit[4]{};  // saturated lit white + 1e-6, for the shader's hue-preserving fits
 };
-static_assert(sizeof(FogFrameGpu) == 432, "fog frame constants must match HLSL");
+static_assert(sizeof(FogFrameGpu) == 464, "fog frame constants must match HLSL");
 
 // The owned sky's inputs to the world pixels: t10 and t12 in DXBC; on D3D12
 // one t table serves every stage and the world vertex programs read t10-t12
@@ -304,7 +346,8 @@ constexpr unsigned kSkyCloudShadowSlotD3D12 = 110, kSkyProbeSlotD3D12 = 111;
 constexpr char kAtmosphereShader[] = R"(
 cbuffer FogFrame:register(b10){row_major float4x4 fogClipToWorld;row_major float4x4 fogPreviousWorldToClip;
  float4 fogEye;float4 fogHeight;float4 fogVolumeRange;float4 fogScreen;float4 fogProjection;float4 fogSun;
- float4 fogSunColor;float4 fogMistGrid;float4 fogCloud;float4 fogTemporal;float4 fogStock;float4 fogPreviousEye;float4 fogAir;float4 fogTint;float4 fogLight;float4 fogWisps;float4 fogVolumeCell;float4 fogShaft;float4 fogShaftHaze;};
+ float4 fogSunColor;float4 fogMistGrid;float4 fogCloud;float4 fogTemporal;float4 fogStock;float4 fogPreviousEye;float4 fogAir;float4 fogTint;float4 fogLight;float4 fogWisps;float4 fogVolumeCell;float4 fogShaft;float4 fogShaftHaze;
+ float4 fogHazeColorFrame;float4 fogHazeLimit;};
 Texture3D<float4> fogIntegrated:register(t11);
 SamplerState fogLinearClamp:register(s7);
 // Owned sky probe (sky_clouds.h skyProbeCS): equirectangular display colour,
@@ -351,6 +394,7 @@ float fogSunResponse(float c){
  return (strength/(1+strength))*fogPhase(clamp(c,-1,1),fogSun.w)/fogPhase(1,fogSun.w);
 }
 // Match fog_lit_haze_color: retain the authored hue and world-light energy.
+static const float kFogHazeChroma=.12; // = world_fog.h kFogHazeChroma
 float3 fogHazeColor(float3 gameFog){
  float luma=dot(gameFog,float3(.2126,.7152,.0722));
  float lightLuma=dot(fogLight.rgb,float3(.2126,.7152,.0722));
@@ -358,7 +402,38 @@ float3 fogHazeColor(float3 gameFog){
  float3 lightHue=lightLuma>1e-4?fogLight.rgb/lightLuma:float3(1,1,1);
  float3 c=lerp(float3(1,1,1),hue,fogTint.w);
  c=lerp(c,lightHue,fogLight.w);
- return min(max(c*fogTint.rgb*max(luma,lightLuma),0),saturate(fogLight.rgb));
+ float3 haze=max(c*fogTint.rgb*max(luma,lightLuma),0);
+ float3 authored=min(haze,saturate(fogLight.rgb)); // dusk, dawn, night (fogWisps.w: the day weight)
+ // Within kFogHazeChroma of the light's colour, then fitted under the lit
+ // white as a whole (fog_lit_haze_color).
+ float hazeLuma=dot(haze,float3(.2126,.7152,.0722));
+ float3 d=haze-lightHue*hazeLuma;float deviation=max(abs(d.x),max(abs(d.y),abs(d.z)));
+ if(deviation>kFogHazeChroma*hazeLuma&&deviation>0)haze=lightHue*hazeLuma+d*(kFogHazeChroma*hazeLuma/deviation);
+ float3 limit=saturate(fogLight.rgb);
+ float3 ratio=(limit+1e-6)/max(haze,1e-6);
+ return lerp(authored,haze*min(1,min(ratio.x,min(ratio.y,ratio.z))),fogWisps.w);
+}
+// The haze along a view direction: with the owned sky, its horizon haze in
+// that azimuth (sky_clouds.h skyHorizonHaze, read from the sky probe just
+// above the horizon), so land and sky meet in one colour that follows the
+// sun's side; fitted under the lit white as fogHazeColor. Otherwise the
+// game-fog formula.
+float3 fogHazeColorAt(float3 gameFog,float3 view,bool frameHaze){
+ float3 haze;
+ [branch]if(frameHaze)haze=fogHazeColorFrame.rgb;
+ else haze=fogHazeColor(gameFog);
+ [branch]if(fogTemporal.z>.5&&fogEye.w>.5){
+  // Azimuth without atan2: on the octant atan(t) ~ t(pi/4 + .273(1 - t))
+  // (error under 0.004 rad, a fraction of a probe texel), then unfolded.
+  float2 m=abs(view.xy);float t=min(m.x,m.y)/max(max(m.x,m.y),1e-6);
+  float a=t*(.7853982+.273*(1-t));a=m.y>m.x?1.5707963-a:a;a=view.x<0?3.1415927-a:a;
+  float az=(view.y<0?-a:a)*(.5/3.14159265);az+=az<0?1:0;
+  float3 sky=skyProbe.SampleLevel(fogLinearClamp,float2(az,.5-.03/3.14159265),0).rgb;
+  float3 limit=frameHaze?fogHazeLimit.rgb:(saturate(fogLight.rgb)+1e-6);
+  float3 ratio=limit/max(sky,1e-6);
+  return lerp(haze,sky*min(1,min(ratio.x,min(ratio.y,ratio.z))),fogWisps.w);
+ }
+ return haze;
 }
 // Scatter spends the remaining fog-light budget instead of stacking on haze.
 // Both analytic and integrated-volume paths use this composition. Its bound
@@ -425,13 +500,15 @@ float nativeFogFactor(float border,float4 position){
  if(fogProjection.w<.5||fogEye.w>.5)return border;
  return min(border,1-smoothstep(fogStock.x,fogStock.y,fogViewDepth(position.z)));
 }
-// Colour the border fog blends to. With the owned sky (presets 1 and 2) it is
-// the sky the pixel would show without terrain, so fully fogged land and the
-// empty space beyond the last map merge into the sky's horizon haze; the
-// faithful preset and the stock sky keep the game's fog colour.
+// Colour the border fog and the draw-distance fade blend to. With the owned
+// sky, at every fog preset, it is the sky the pixel would show without
+// terrain, so fully fogged land and the empty space beyond the last map merge
+// into the sky's horizon haze. The game's fog colour there (faithful preset)
+// drew the draw-distance ring and the map edges as flat cyan pieces and walls
+// in front of the owned sky. The stock sky keeps the game's fog colour.
 float3 borderFogColorAt(float3 p,float3 gameFog){
  float3 c=gameFog;
- [branch]if(fogTemporal.z>.5&&fogEye.w>.5){
+ [branch]if(fogTemporal.z>.5){
   float3 r=normalize(p-fogEye.xyz);
   float az=atan2(r.y,r.x)*(.5/3.14159265);az+=az<0?1:0;
   c=skyProbe.SampleLevel(fogLinearClamp,float2(az,.5-asin(clamp(r.z,-1,1))/3.14159265),0).rgb;
@@ -439,7 +516,7 @@ float3 borderFogColorAt(float3 p,float3 gameFog){
  return c;
 }
 float3 borderFogColor(float4 position,float3 gameFog){
- [branch]if(fogTemporal.z>.5&&fogEye.w>.5)return borderFogColorAt(fogUnproject(position.xy*fogScreen.xy,position.z),gameFog);
+ [branch]if(fogTemporal.z>.5)return borderFogColorAt(fogUnproject(position.xy*fogScreen.xy,position.z),gameFog);
  return gameFog;
 }
 )" R"(
@@ -458,7 +535,7 @@ float3 borderFogColor(float4 position,float3 gameFog){
 #endif
 // Atmosphere for presets 1 and 2 on top of the border-fogged colour. Returns
 // the transmittance applied to the surface (AO scales its ambient share).
-float nativeAtmosphereCoreAt(inout float3 color,float4 position,float3 fogColor,float3 p){
+float nativeAtmosphereCoreAt(inout float3 color,float4 position,float3 fogColor,float3 p,bool frameHaze=false){
  if(!NATIVE_FOG_ATMOSPHERE_ON||position.z>=1)return 1;
  float2 uv=position.xy*fogScreen.xy;
  float3 view=p-fogEye.xyz;float distance=length(view);view/=max(distance,1e-4);
@@ -488,7 +565,7 @@ float nativeAtmosphereCoreAt(inout float3 color,float4 position,float3 fogColor,
  // F10 component isolation: shafts (4) and lamps (5) show only their light.
  if(fogAir.w>3.5){color+=abs(inscatter);return 1;}
  float headroom=NATIVE_FOG_VOLUME_ON?fogShaft.z:0;
- color=color*transmittance+fogLighting(fogHazeColor(fogColor),transmittance,inscatter,headroom);
+ color=color*transmittance+fogLighting(fogHazeColorAt(fogColor,view,frameHaze),transmittance,inscatter,headroom);
  return transmittance;
 }
 float nativeAtmosphereCore(inout float3 color,float4 position,float3 fogColor){
@@ -512,10 +589,6 @@ float nativeDrawFadeToAt(inout float3 color,float3 p,float3 gameFog){
 float nativeAtmosphere(inout float3 color,float4 position,float3 fogColor){
  float transmittance=nativeAtmosphereCore(color,position,fogColor);
  return transmittance*nativeDrawFadeTo(color,position,fogColor);
-}
-float nativeAtmosphereAt(inout float3 color,float4 position,float3 fogColor,float3 p){
- float transmittance=nativeAtmosphereCoreAt(color,position,fogColor,p);
- return transmittance*nativeDrawFadeToAt(color,p,fogColor);
 }
 )";
 

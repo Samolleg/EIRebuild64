@@ -188,6 +188,9 @@ private:
         std::size_t owned_bytes = 0;
         bool resolved = false;
         bool native_source_found = true;
+        // The archive member a decoded texture came from (container file
+        // key, absolute offset, bytes); file key 0: no stable source.
+        std::array<std::uint64_t, 3> source{};
     };
     struct PendingIcon {
         std::shared_ptr<const TextureCpuAsset> texture;
@@ -251,6 +254,13 @@ private:
     std::array<LanePublication, 4> provisional_lanes_{};
     std::map<AssetKey, CachedAsset> assets_;
     std::size_t cached_asset_bytes_ = 0;
+    // Decoded icon textures whose cache entries a generation change dropped
+    // (a resource archive added or closed, an overlay change: the camp screen
+    // does both). A later load that resolves to the same archive member
+    // takes the decoded texture instead of parsing and converting it again.
+    std::map<std::array<std::uint64_t, 3>, std::shared_ptr<const TextureCpuAsset>> retired_textures_;
+    std::size_t retired_texture_bytes_ = 0;
+    void retire_texture_asset(const CachedAsset& value) noexcept;
 };
 
 } // namespace owned

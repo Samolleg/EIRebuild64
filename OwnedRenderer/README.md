@@ -6,9 +6,16 @@ Submodule и доступ к локальным Git-коммитам разра�
 
 `OwnedRenderer.vcxproj` собирает статическую библиотеку. `RendererShaders.vcxproj`
 собирает инструмент генерации ресурсов, компилирует шейдеры и camp art.
-EIRebuild линкует библиотеку и ресурсы внутрь EXE. Конфигурация: Release Win32,
-v143; в solution выбирается Release/x86. Входная команда — `py -3 build-local.py`
-из корня репозитория.
+EIRebuild64 линкует библиотеку и ресурсы внутрь EXE. Конфигурация: Release x64,
+v143. Входная команда задания — `tools/build-task.ps1`; она готовит локальные
+зависимости, компилирует DXBC/DXIL и формирует проверяемый комплект.
+
+Текущая база автора: candidate-1126, `6bdebfa9be990b717b8dc667bbbb9405494f6be4`.
+Астрал и растительность используют алгоритмы этой версии. Адаптеры x64,
+PAK, glTF/SKN и MCP остаются частью EIRebuild64. Материалы и hosted plants
+берутся из content/renderer-materials/Engine64 и content/renderer-assets/Engine64.
+Для проверки ещё не принятого content сборка принимает явные
+`-RendererMaterialsSource` и `-RendererAssetsSource`.
 
 `Renderer.props` задаёт относительный путь к исходникам. Исторический commit
 в `EID3D11_BUILD_COMMIT` обозначает происхождение включённой редакции;

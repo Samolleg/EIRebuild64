@@ -189,7 +189,7 @@ int main() {
     widescreen_set_landscape_radius(5000.f);
     require(E3DrawRadius(123.f, 800, 600) == 1000.f && E3DrawRadius(123.f, 3840, 1080) > 1000.f, "radius cap and wide square");
     for (int percent : {-1, 50, 100, 200, 300, 400}) {
-        widescreen_set_combat_text_scale(percent);
+        widescreen_set_combat_text_scale(percent, 0);
         float vertices[2][4] = {{110.f, 80.f, .25f, .75f}, {90.f, 120.f, .5f, .1f}};
         E3CombatVertices(vertices, 2, sizeof(vertices[0]));
         const float expected = std::clamp(percent, 50, 300) / 100.f;

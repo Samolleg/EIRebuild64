@@ -6,6 +6,7 @@
 #include "world_scene_algorithms.h"
 #include "embedded_perf06.h"
 #include "critters.h"
+#include "hosted_plants.h"
 
 #include <algorithm>
 #include <array>
@@ -16,11 +17,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <future>
 #include <limits>
 #include <map>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -609,6 +612,581 @@ bool bridge_ground_cover_objects(float x,float y,float radius,
 // Critter perches per model (bridge_release_world_caches).
 void release_critter_perch_models() noexcept {
     decltype(g_perch_models)().swap(g_perch_models);
+}
+
+// ---- Hosted plants (issue #251 3c; hosted_plants.h) ------------------------
+namespace {
+using ground_cover::HostedPlantData;
+using ground_cover::HostedPlantRecord;
+using ground_cover::HostedModelRecord;
+
+std::string hosted_lower(std::string text) {
+    for(char& c:text)if(c>='A'&&c<='Z')c=char(c+32);
+    return text;
+}
+// A fixed-size name field of the exported data.
+std::string hosted_name(const char* field,std::size_t size) {
+    return std::string(field,strnlen(field,size));
+}
+// A part's texture name without folder and extension, folded.
+std::string hosted_texture_stem(const VisualPartAsset& part) {
+    std::string name=hosted_lower(part.texture_source_name.empty()?part.material_name:part.texture_source_name);
+    const auto slash=name.find_last_of("/\\");if(slash!=std::string::npos)name.erase(0,slash+1);
+    const auto dot=name.find('.');if(dot!=std::string::npos)name.erase(dot);
+    return name;
+}
+// The exported host a placed object stands for (its model and first part's
+// texture), or -1: a model whose texture is not the grown-on one is no host.
+int hosted_host_of(const HostedPlantData& data,const RetainedVisualSample& sample) {
+    static const auto names=[&data]{
+        std::vector<std::pair<std::string,std::string>> folded;
+        for(const auto& host:data.hosts)
+            folded.push_back({hosted_lower(hosted_name(host.model,sizeof(host.model))),hosted_lower(hosted_name(host.texture,sizeof(host.texture)))});
+        return folded;
+    }();
+    const std::string model=hosted_lower(sample.assembly->skeleton->visual_reference);
+    std::string texture;
+    int first=-1;
+    for(std::uint32_t h=0;h<names.size();++h) {
+        if(model!=names[h].first)continue;
+        if(texture.empty()&&!sample.assembly->parts.empty())texture=hosted_texture_stem(sample.assembly->parts[0]);
+        if(texture!=names[h].second)continue;
+        if(first<0)first=int(h);
+        // A model drawn with one of several alternative parts (Dejavu's
+        // gravestone stst46: rip1 or rip2, each the whole stone) has one host a
+        // part: the host whose parts the drawn model all has.
+        const auto& host=data.hosts[h];bool all=true;
+        for(std::uint32_t k=0;k<host.parts&&all;++k) {
+            const std::string want=hosted_lower(hosted_name(data.parts[host.first_part+k].name,sizeof(data.parts[host.first_part+k].name)));
+            all=std::any_of(sample.assembly->parts.begin(),sample.assembly->parts.end(),[&](const auto& part){return hosted_lower(part.name)==want;});
+        }
+        if(all)return int(h);
+    }
+    if(first<0&&!texture.empty()) {
+        // A host model drawn with another texture is no host: named once per model and texture.
+        static std::unordered_set<std::string> named;
+        if(named.size()<64&&named.insert(model+"|"+texture).second) {
+            std::string want;
+            for(const auto& n:names)if(n.first==model)want+=(want.empty()?"":",")+n.second;
+            if(!want.empty())bridge_append_probe_event("hosted_plants_omitted",(model+": drawn with texture "+texture+", grown on "+want+"; its hosted plants are not drawn").c_str());
+        }
+    }
+    return first; // none matches whole: its check names the missing part
+}
+// Posed model-space points of every exported part (FIG components, in the
+// exported part order) at one complection: what perch_model_point gives.
+bool hosted_pose(const RetainedVisualSample& sample,const std::vector<std::uint32_t>& part_map,const std::array<float,3>& shape,
+    std::vector<std::vector<std::array<double,3>>>& points) {
+    const auto& assembly=*sample.assembly;
+    std::vector<VisualNodeSample> nodes;
+    if(!sample_visual_skeleton(*assembly.skeleton,sample.selection,shape,assembly.center_shift,0,nodes,true))return false;
+    points.assign(part_map.size(),{});
+    for(std::size_t k=0;k<part_map.size();++k) {
+        const auto& part=assembly.parts[part_map[k]];
+        if(part.skeleton_node>=nodes.size())return false;
+        const auto& figure=*part.geometry;
+        points[k].resize(figure.components.size());
+        for(std::uint32_t c=0;c<figure.components.size();++c)points[k][c]=perch_model_point(figure,nodes[part.skeleton_node],shape,c);
+    }
+    return true;
+}
+// Once per model: the installed model is the one the plants were grown on.
+struct HostedModel { bool ok=false; std::vector<std::uint32_t> part_map; };
+std::unordered_map<std::string,HostedModel> g_hosted_models;
+std::string hosted_model_key(const RetainedVisualSample& sample) {
+    std::string key=sample.assembly->skeleton->visual_reference;
+    for(const auto& part:sample.assembly->parts)key+='|'+part.name+':'+part.texture_source_name;
+    return key;
+}
+HostedModel hosted_check_model(const HostedPlantData& data,const RetainedVisualSample& sample,int host) {
+    HostedModel result;
+    const auto& h=data.hosts[host];
+    const std::string model=hosted_name(h.model,sizeof(h.model)),texture=hosted_name(h.texture,sizeof(h.texture));
+    const auto& assembly=*sample.assembly;
+    const auto omit=[&](const std::string& why) {
+        bridge_append_probe_event("hosted_plants_omitted",(model+": "+why+"; its hosted plants are not drawn").c_str());
+        return result;
+    };
+    for(std::uint32_t k=0;k<h.parts;++k) {
+        const auto& want=data.parts[h.first_part+k];
+        const std::string name=hosted_name(want.name,sizeof(want.name));
+        std::uint32_t found=UINT32_MAX;
+        for(std::uint32_t p=0;p<assembly.parts.size();++p)
+            if(hosted_lower(assembly.parts[p].name)==hosted_lower(name)){found=p;break;}
+        if(found==UINT32_MAX) {
+            std::string have;
+            for(const auto& part:assembly.parts)have+=(have.empty()?"":",")+part.name+":"+std::to_string(part.geometry?part.geometry->indices.size()/3:0);
+            return omit("no part "+name+" (the drawn model "+assembly.skeleton->visual_reference+" has "+have+")");
+        }
+        const auto& part=assembly.parts[found];
+        if(!part.geometry||!perch_figure_valid(*part.geometry))return omit("part "+name+" has no readable geometry");
+        if(part.geometry->indices.size()!=std::size_t(want.triangles)*3)
+            return omit("part "+name+" has "+std::to_string(part.geometry->indices.size()/3)+" triangles, not "+std::to_string(want.triangles));
+        if(hosted_texture_stem(part)!=hosted_lower(texture))return omit("part "+name+" draws "+hosted_texture_stem(part)+", not "+texture);
+        result.part_map.push_back(found);
+    }
+    // The mean shape (every complection endpoint weighted alike) the plants were grown on.
+    std::vector<std::vector<std::array<double,3>>> mean;
+    if(!hosted_pose(sample,result.part_map,{.5f,.5f,.5f},mean))return omit("its rest pose cannot be sampled");
+    double lo[3]{DBL_MAX,DBL_MAX,DBL_MAX},hi[3]{-DBL_MAX,-DBL_MAX,-DBL_MAX};
+    for(const auto& part:mean)for(const auto& p:part)for(int a=0;a<3;++a){lo[a]=(std::min)(lo[a],p[a]);hi[a]=(std::max)(hi[a],p[a]);}
+    double off=0;for(int a=0;a<3;++a)off=(std::max)({off,std::abs(lo[a]-h.lo[a]),std::abs(hi[a]-h.hi[a])});
+    if(!(off<.01)) {
+        char text[200];
+        std::snprintf(text,sizeof(text),"mean-shape bounds (%.3f %.3f %.3f)-(%.3f %.3f %.3f) differ from the grown-on model's by %.3f m",
+            lo[0],lo[1],lo[2],hi[0],hi[1],hi[2],off);
+        return omit(text);
+    }
+    result.ok=true;
+    return result;
+}
+
+// Per host placement: the incarnation it was built for, its record and, for
+// a rebound host, its own vertices.
+struct HostedEntry {
+    LifecycleIdentity lifecycle{};
+    VisualResourceIncarnation resource{};
+    VisualPreparedResources::PoseKey key;
+    std::shared_ptr<VisualPreparedResources> prepared;
+    bool ok=false;
+    HostedPlantRecord record{};
+    // 8 floats a vertex (position in mesh units, normal), shared by every placement
+    // whose posed host shape is the same (hosted_rebind_key): one copy per shape.
+    std::shared_ptr<const std::vector<float>> rebound;
+    std::shared_future<std::shared_ptr<const std::vector<float>>> pending;  // the rebind, off the frame thread
+    std::uint64_t rebind_key=0;
+};
+// Rebinds by model and posed host shape, shared between placements; dropped with the scene.
+std::unordered_map<std::uint64_t,std::shared_future<std::shared_ptr<const std::vector<float>>>> g_hosted_rebinds;
+// The scene's host placements, kept between frames and changed only by the
+// retained scene's change journal (RetainedShadowConsumer::hosted_plants).
+struct HostedScene {
+    std::map<std::uint64_t,HostedEntry> entries; // by host object id (high word) and model
+    std::vector<std::int32_t> todo;              // objects to visit: journal changes, the budget's rest (sorted)
+    std::vector<std::uint64_t> pending;          // entries whose rebind runs
+    int zone=-1;
+    bool valid=false;
+};
+HostedScene g_hosted_scene;
+std::uint64_t g_hosted_revision=0;
+std::uint64_t hosted_entry_key(std::int32_t id,std::uint32_t model) noexcept { return std::uint64_t(std::uint32_t(id))<<32|model; }
+
+// One model's vertices re-expressed on a posed host (the binding words).
+void hosted_rebind(const HostedPlantData& data,const HostedModelRecord& model,const std::vector<std::vector<std::array<double,3>>>& points,
+    const std::vector<std::vector<std::uint16_t>>& indices,const std::vector<bool>& flips,std::vector<float>& out) {
+    const auto s16=[](std::uint32_t x){return double(std::int16_t(std::uint16_t(x&0xffffu)))/16384.0;};
+    const auto s8=[](std::uint32_t x){return double(std::int8_t(std::uint8_t(x&0xffu)))/127.0;};
+    std::vector<std::uint32_t> words;
+    if(!ground_cover::hosted_read_binds(data,model,words)){out.clear();return;}
+    out.resize(std::size_t(model.vertices)*8);
+    for(std::uint32_t v=0;v<model.vertices;++v) {
+        const std::uint32_t* w=&words[std::size_t(v)*5];
+        const std::uint32_t part=w[0]>>24,tri=w[0]&0xffffffu;
+        const auto& pts=points.at(part);const auto& idx=indices.at(part);
+        std::array<double,3> A=pts.at(idx.at(tri*3)),B=pts.at(idx.at(tri*3+1)),C=pts.at(idx.at(tri*3+2));
+        if(flips[part])std::swap(B,C);
+        const double wa=double(w[1]&0xffffu)/65535.0,wb=double(w[1]>>16)/65535.0,wc=1-wa-wb;
+        double e1[3],e2[3],n[3],t1[3],t2[3];
+        for(int a=0;a<3;++a){e1[a]=B[a]-A[a];e2[a]=C[a]-A[a];}
+        n[0]=e1[1]*e2[2]-e1[2]*e2[1];n[1]=e1[2]*e2[0]-e1[0]*e2[2];n[2]=e1[0]*e2[1]-e1[1]*e2[0];
+        const double ln=std::sqrt(n[0]*n[0]+n[1]*n[1]+n[2]*n[2]),l1=std::sqrt(e1[0]*e1[0]+e1[1]*e1[1]+e1[2]*e1[2]);
+        for(int a=0;a<3;++a){n[a]/=ln>0?ln:1;t1[a]=e1[a]/(l1>0?l1:1);}
+        t2[0]=n[1]*t1[2]-n[2]*t1[1];t2[1]=n[2]*t1[0]-n[0]*t1[2];t2[2]=n[0]*t1[1]-n[1]*t1[0];
+        const double o1=s16(w[2]),o2=s16(w[2]>>16),on=s16(w[3]),n1=s8(w[3]>>16),n2=s8(w[3]>>24),n3=s8(w[4]);
+        double p[3],q[3];
+        for(int a=0;a<3;++a){
+            p[a]=wa*A[a]+wb*B[a]+wc*C[a]+o1*t1[a]+o2*t2[a]+on*n[a];
+            q[a]=n1*t1[a]+n2*t2[a]+n3*n[a];
+        }
+        const double lq=std::sqrt(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]);
+        float* o=&out[std::size_t(v)*8];
+        for(int a=0;a<3;++a){o[a]=float(p[a]/model.scale);o[4+a]=float(q[a]/(lq>0?lq:1));}
+        o[3]=o[7]=0;
+    }
+}
+
+// The cover frame of a linear map L (columns: the model's x, y, z axes in the
+// world): rotation with up = L z, yaw inside the tilted frame, per-axis scale.
+bool hosted_frame(const double L[3][3],HostedPlantRecord& record,double scale[3]) {
+    double R[3][3];
+    for(int c=0;c<3;++c) {
+        scale[c]=std::sqrt(L[0][c]*L[0][c]+L[1][c]*L[1][c]+L[2][c]*L[2][c]);
+        if(!(scale[c]>1e-6))return false;
+        for(int r=0;r<3;++r)R[r][c]=L[r][c]/scale[c];
+    }
+    const auto dot=[&](int a,int b){return R[0][a]*R[0][b]+R[1][a]*R[1][b]+R[2][a]*R[2][b];};
+    if(std::abs(dot(0,1))>2e-3||std::abs(dot(0,2))>2e-3||std::abs(dot(1,2))>2e-3)return false; // a sheared placement
+    const double det=R[0][0]*(R[1][1]*R[2][2]-R[1][2]*R[2][1])-R[0][1]*(R[1][0]*R[2][2]-R[1][2]*R[2][0])+R[0][2]*(R[1][0]*R[2][1]-R[1][1]*R[2][0]);
+    if(!(det>0))return false;   // mirrored
+    const double up[3]{R[0][2],R[1][2],R[2][2]};
+    if(!(up[2]>.05))return false; // the cover frame's tilt keeps up above the horizon
+    // tx = x - up * up.x, ty = up x tx (gcVertexFrameAt)
+    double tx[3]{1-up[0]*up[0],-up[1]*up[0],-up[2]*up[0]};
+    const double lt=std::sqrt(tx[0]*tx[0]+tx[1]*tx[1]+tx[2]*tx[2]);for(double& v:tx)v/=lt;
+    const double ty[3]{up[1]*tx[2]-up[2]*tx[1],up[2]*tx[0]-up[0]*tx[2],up[0]*tx[1]-up[1]*tx[0]};
+    const double c=R[0][0]*tx[0]+R[1][0]*tx[1]+R[2][0]*tx[2],s=R[0][0]*ty[0]+R[1][0]*ty[1]+R[2][0]*ty[2];
+    const double ls=std::sqrt(c*c+s*s);if(!(ls>.5))return false;
+    record.frame[0]=float(c/ls);record.frame[1]=float(s/ls);
+    record.up[0]=float(up[0]);record.up[1]=float(up[1]);record.up[2]=float(up[2]);
+    return true;
+}
+} // namespace
+
+// The exported hosted plants (eid3d_hosted\hosted_plants.bin beside this
+// module: ddraw.dll, or the x64 host for itself), tables read once.
+namespace {
+bool hosted_read_at(const std::wstring& path,std::uint64_t offset,std::size_t bytes,void* out) noexcept {
+    FILE* file=nullptr;
+    if(_wfopen_s(&file,path.c_str(),L"rb")||!file)return false;
+    const bool ok=_fseeki64(file,std::int64_t(offset),SEEK_SET)==0&&(bytes==0||std::fread(out,1,bytes,file)==bytes);
+    std::fclose(file);
+    return ok;
+}
+void hosted_read_failed() noexcept {
+    static bool named=false;
+    if(!named){named=true;bridge_append_probe_event("hosted_plants_omitted","eid3d_hosted\\hosted_plants.bin could not be read; hosted plants are not drawn");}
+}
+} // namespace
+const ground_cover::HostedPlantData* ground_cover::hosted_plant_data() noexcept {
+    static const HostedPlantData* parsed=[]() -> const HostedPlantData* {
+        static HostedPlantData data;
+        const auto fail=[](const char* why){bridge_append_probe_event("hosted_plants_omitted",why);return nullptr;};
+        HMODULE module=nullptr;wchar_t path[MAX_PATH]{};
+        if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&ground_cover::hosted_plant_data),&module)||!GetModuleFileNameW(module,path,MAX_PATH))
+            return fail("module path unknown; no hosted plants");
+        std::wstring folder=path;const auto slash=folder.find_last_of(L"\\/");
+        if(slash==std::wstring::npos)return fail("module path unknown; no hosted plants");
+        data.path=folder.substr(0,slash+1)+L"eid3d_hosted\\hosted_plants.bin";
+        FILE* file=nullptr;
+        if(_wfopen_s(&file,data.path.c_str(),L"rb")||!file)return fail("eid3d_hosted\\hosted_plants.bin is missing; no hosted plants");
+        _fseeki64(file,0,SEEK_END);const std::int64_t size=_ftelli64(file);std::fclose(file);
+        ground_cover::HostedFileHeader header{};
+        if(size<std::int64_t(sizeof(header))||!hosted_read_at(data.path,0,sizeof(header),&header))return fail("eid3d_hosted\\hosted_plants.bin is damaged; no hosted plants");
+        const std::uint64_t tables=std::uint64_t(header.hosts)*sizeof(ground_cover::HostedHostRecord)+
+            std::uint64_t(header.parts)*sizeof(ground_cover::HostedPartRecord)+std::uint64_t(header.models)*sizeof(HostedModelRecord)+
+            std::uint64_t(header.textures)*sizeof(ground_cover::HostedTextureRecord);
+        const std::uint64_t need=sizeof(header)+tables+(std::uint64_t(header.vertex_words)+header.bind_words+header.indices)*4+header.texture_bytes;
+        if(std::memcmp(header.magic,"HPL2",4)||header.version!=ground_cover::kHostedFileVersion||std::uint64_t(size)!=need||tables>(1u<<20))
+            return fail("eid3d_hosted\\hosted_plants.bin is from another build or damaged; no hosted plants");
+        data.hosts.resize(header.hosts);data.parts.resize(header.parts);data.models.resize(header.models);data.textures.resize(header.textures);
+        std::uint64_t at=sizeof(header);
+        const auto table=[&](auto& vector){
+            const std::size_t bytes=vector.size()*sizeof(vector[0]);
+            const bool ok=hosted_read_at(data.path,at,bytes,vector.data());at+=bytes;return ok;};
+        if(!table(data.hosts)||!table(data.parts)||!table(data.models)||!table(data.textures))
+            return fail("eid3d_hosted\\hosted_plants.bin could not be read; no hosted plants");
+        data.vertex_at=at;at+=std::uint64_t(header.vertex_words)*4;
+        data.bind_at=at;at+=std::uint64_t(header.bind_words)*4;
+        data.index_at=at;at+=std::uint64_t(header.indices)*4;
+        data.texture_at=at;
+        // Every range inside the file (validated once: the tables are then trusted).
+        for(const auto& texture:data.textures) {
+            std::uint64_t bytes=0;
+            for(std::uint32_t level=0;level<texture.mips;++level){
+                const std::uint32_t w=texture.width>>level,h=texture.height>>level;
+                if(w<4||h<4||w%4||h%4)return fail("a hosted plant texture's levels are damaged; no hosted plants");
+                bytes+=std::uint64_t(w/4)*(h/4)*8;
+            }
+            if(!texture.mips||texture.mips>16||bytes!=texture.bytes||std::uint64_t(texture.first_byte)+texture.bytes>header.texture_bytes)
+                return fail("a hosted plant texture's ranges are damaged; no hosted plants");
+        }
+        for(const auto& model:data.models) {
+            const bool colony=model.kind==ground_cover::kCaveColonyKind;
+            if((colony?model.host!=ground_cover::kNoHost:(model.kind>=std::size(ground_cover::kHostedKinds)||model.host>=data.hosts.size()))||
+               !(model.scale>0)||std::uint64_t(model.first_vertex)+model.vertices>header.vertex_words/6||
+               std::uint64_t(model.first_index)+model.indices>header.indices||(model.binds&&(model.binds!=model.vertices||
+               std::uint64_t(model.first_bind)+model.binds>header.bind_words/5))||model.texture>data.textures.size())
+                return fail("a hosted plant model's ranges are damaged; no hosted plants");
+        }
+        for(const auto& host:data.hosts)
+            if(std::uint64_t(host.first_part)+host.parts>data.parts.size())return fail("a hosted plant host's parts are damaged; no hosted plants");
+        return &data;
+    }();
+    return parsed;
+}
+bool ground_cover::hosted_read_vertices(const HostedPlantData& data,const HostedModelRecord& model,std::vector<std::uint32_t>& words) noexcept try {
+    words.resize(std::size_t(model.vertices)*6);
+    if(hosted_read_at(data.path,data.vertex_at+std::uint64_t(model.first_vertex)*24,words.size()*4,words.data()))return true;
+    hosted_read_failed();words.clear();return false;
+} catch(...) {words.clear();return false;}
+bool ground_cover::hosted_read_binds(const HostedPlantData& data,const HostedModelRecord& model,std::vector<std::uint32_t>& words) noexcept try {
+    words.resize(std::size_t(model.binds)*5);
+    if(hosted_read_at(data.path,data.bind_at+std::uint64_t(model.first_bind)*20,words.size()*4,words.data()))return true;
+    hosted_read_failed();words.clear();return false;
+} catch(...) {words.clear();return false;}
+bool ground_cover::hosted_read_indices(const HostedPlantData& data,const HostedModelRecord& model,std::vector<std::uint32_t>& indices) noexcept try {
+    indices.resize(model.indices);
+    if(!hosted_read_at(data.path,data.index_at+std::uint64_t(model.first_index)*4,indices.size()*4,indices.data())){hosted_read_failed();indices.clear();return false;}
+    for(const auto index:indices)if(index>=model.vertices){
+        bridge_append_probe_event("hosted_plants_omitted","a hosted plant model's indices are damaged; it is not drawn");indices.clear();return false;}
+    return true;
+} catch(...) {indices.clear();return false;}
+bool ground_cover::hosted_read_texture(const HostedPlantData& data,const HostedTextureRecord& texture,std::vector<std::uint8_t>& bytes) noexcept try {
+    bytes.resize(texture.bytes);
+    if(hosted_read_at(data.path,data.texture_at+texture.first_byte,bytes.size(),bytes.data()))return true;
+    hosted_read_failed();bytes.clear();return false;
+} catch(...) {bytes.clear();return false;}
+
+namespace {
+// The object a host sample stands for may host: the published, drawn, placed
+// non-unit objects (the former per-frame walk's rule).
+bool hosted_candidate(const RetainedVisualSample& sample) noexcept {
+    return !(sample.values.unit||sample.values.hidden||(sample.values.object_flags&0x40u)||
+             sample.status!=RetainedVisualStatus::ready||!sample.height_valid||!sample.assembly||
+             !sample.assembly->skeleton||!sample.prepared);
+}
+bool hosted_entry_current(const HostedEntry& entry,const RetainedVisualSample& sample) {
+    const double still=0;
+    return same_lifecycle_identity(entry.lifecycle,sample.lifecycle)&&same_visual_resource(entry.resource,sample.resource)&&
+        entry.prepared==sample.prepared&&owned_visual_pose_key_matches(entry.key,sample,&still);
+}
+// One new or changed placement: its record and, for a host that is no
+// per-axis scale of the grown-on shape, its rebind (started off the frame
+// thread). The entry keeps the incarnation it was built for, failed or not.
+void hosted_build(const HostedPlantData& data,const RetainedVisualSample& sample,int host,std::uint32_t model_id,
+    std::uint64_t entry_key,HostedEntry& entry) {
+    const auto& model=data.models[model_id];
+    const std::int32_t id=sample.resource.signed_id;
+    entry=HostedEntry{};
+    entry.lifecycle=sample.lifecycle;entry.resource=sample.resource;
+    entry.key=owned_visual_pose_key(sample);entry.key.phase=0;entry.prepared=sample.prepared;
+    const std::string model_key=hosted_model_key(sample);
+    auto found=g_hosted_models.find(model_key);
+    if(found==g_hosted_models.end())found=g_hosted_models.emplace(model_key,hosted_check_model(data,sample,host)).first;
+    if(!found->second.ok||!prepare_owned_visual_pose(sample))return;
+    const auto& part_map=found->second.part_map;
+    std::vector<std::vector<std::array<double,3>>> mean,posed;
+    if(!hosted_pose(sample,part_map,{.5f,.5f,.5f},mean)||!hosted_pose(sample,part_map,retained_visual_shape(sample),posed))return;
+    // Per-axis scale of the placement's complection against the mean shape.
+    double sm[3]{},mm[3]{};
+    for(std::size_t k=0;k<mean.size();++k)for(std::size_t c=0;c<mean[k].size();++c)for(int a=0;a<3;++a){
+        sm[a]+=posed[k][c][a]*mean[k][c][a];mm[a]+=mean[k][c][a]*mean[k][c][a];}
+    double s[3];for(int a=0;a<3;++a)s[a]=mm[a]>1e-12?sm[a]/mm[a]:1;
+    double residual=0,lo[3]{DBL_MAX,DBL_MAX,DBL_MAX},hi[3]{-DBL_MAX,-DBL_MAX,-DBL_MAX};
+    for(std::size_t k=0;k<mean.size();++k)for(std::size_t c=0;c<mean[k].size();++c)for(int a=0;a<3;++a){
+        residual=(std::max)(residual,std::abs(posed[k][c][a]-s[a]*mean[k][c][a]));
+        lo[a]=(std::min)(lo[a],posed[k][c][a]);hi[a]=(std::max)(hi[a],posed[k][c][a]);}
+    const bool scaled=residual<.02;
+    const std::string host_name=hosted_name(data.hosts[host].model,sizeof(data.hosts[host].model));
+    if(!scaled&&!model.binds) {
+        char text[160];std::snprintf(text,sizeof(text),"%s placement %d: complection is no per-axis scale of the grown-on shape (%.3f m off)",
+            host_name.c_str(),id,residual);
+        bridge_append_probe_event("hosted_plants_omitted",text);
+        return;
+    }
+    const auto& root=sample.prepared->gpu_pose.root_to_world;
+    double L[3][3];
+    for(int r=0;r<3;++r)for(int c=0;c<3;++c)L[r][c]=double(root[r*4+c])*(scaled?s[c]:1.0);
+    HostedPlantRecord& record=entry.record;double axis[3];
+    if(!hosted_frame(L,record,axis)) {
+        char text[160];std::snprintf(text,sizeof(text),"%s placement %d: its rotation is sheared, mirrored or tilted past the horizon",
+            host_name.c_str(),id);
+        bridge_append_probe_event("hosted_plants_omitted",text);
+        return;
+    }
+    record.model=model_id;
+    record.root[0]=root[3];record.root[1]=root[7];record.root[2]=root[11];
+    record.root[3]=float(model.scale*axis[1]);
+    record.frame[2]=float(axis[0]/axis[1]);record.frame[3]=float(axis[2]/axis[1]);
+    // Bounds: the posed host's model-space box through the placement.
+    double centre[3],half=0;
+    for(int a=0;a<3;++a)centre[a]=.5*(lo[a]+hi[a]);
+    for(int r=0;r<3;++r)record.bounds[r]=float(root[r*4]*centre[0]+root[r*4+1]*centre[1]+root[r*4+2]*centre[2]+root[r*4+3]);
+    double rs=0;for(int c=0;c<3;++c)rs=(std::max)(rs,std::sqrt(double(root[c])*root[c]+double(root[4+c])*root[4+c]+double(root[8+c])*root[8+c]));
+    for(int a=0;a<3;++a)half+=(hi[a]-lo[a])*(hi[a]-lo[a]);
+    record.bounds[3]=float(.5*std::sqrt(half)*rs+.3);  // spurs and drapers stand off the surface
+    std::uint32_t hash=std::uint32_t(id)*0x9e3779b1u;hash^=hash>>15;hash*=0x2c1b3c6du;hash^=hash>>12;record.hash=hash;
+    record.rebound=0;
+    if(scaled){entry.ok=true;return;}
+    // Rebind off the frame thread: the posed parts and their triangles go with it.
+    std::vector<std::vector<std::uint16_t>> indices;std::vector<bool> flips;
+    const auto& h=data.hosts[host];
+    for(std::size_t k=0;k<part_map.size();++k){
+        indices.push_back(sample.assembly->parts[part_map[k]].geometry->indices);flips.push_back(data.parts[h.first_part+k].flip!=0);}
+    // Placements of one host model with the same posed shape (their complection
+    // and parts, to 0.1 mm) share one rebind and one vertex copy.
+    std::uint64_t rk=0xcbf29ce484222325ull^(std::uint64_t(model_id)*0x9e3779b97f4a7c15ull);
+    for(const auto& part:posed)for(const auto& p:part)for(int a=0;a<3;++a){
+        rk^=std::uint64_t(std::int64_t(std::llround(p[a]*1e4)));rk*=0x100000001b3ull;}
+    entry.rebind_key=rk;
+    auto cached=g_hosted_rebinds.find(rk);
+    if(cached==g_hosted_rebinds.end()) {
+        const HostedPlantData* source=&data;
+        cached=g_hosted_rebinds.emplace(rk,std::async(std::launch::async,[source,model,points=std::move(posed),indices=std::move(indices),flips=std::move(flips)]() {
+            auto out=std::make_shared<std::vector<float>>();
+            try{hosted_rebind(*source,model,points,indices,flips,*out);}catch(...){out->clear();}
+            return std::shared_ptr<const std::vector<float>>(std::move(out));
+        }).share()).first;
+    }
+    entry.pending=cached->second;
+    g_hosted_scene.pending.push_back(entry_key);
+}
+// One object's entries against its sample (nullptr: it left the world).
+// False: an entry still waits (a running rebind, or the frame's budget ran
+// out before its build), so the object stays queued.
+// gipat5's shade rule (ground_cover.h HostedShade): the canopy is the sum of
+// a smoothstep falloff to 6 m from each swaying tree taller than 3 m (the
+// tree influence map knows only the shipped tree models, not Dejavu's samt
+// trees), saturating at 1; the object hash varies the amount and leaves many
+// sunny hosts bare. Static map objects: their shade never changes.
+struct HostedShadeAt { double canopy=-1,hash=0; };
+bool hosted_shade_selects(std::uint32_t shade,const std::vector<RetainedVisualSample>& entities,const RetainedVisualSample& sample,
+    HostedShadeAt& at) {
+    if(shade==ground_cover::hs_none)return true;
+    if(at.canopy<0) {   // once a visit
+        double canopy=0;
+        const auto& root=sample.pose.root;
+        for(const auto& tree:entities) {
+            if(tree.values.unit||!tree.assembly||!tree.assembly->sways||((tree.assembly->sway_shape>>22)&63u)<12u)continue;
+            const double t=(std::min)(std::hypot(double(tree.pose.root[0])-root[0],double(tree.pose.root[1])-root[1])/6.0,1.0);
+            canopy+=1-t*t*(3-2*t);
+            if(canopy>=1)break;
+        }
+        at.canopy=(std::min)(canopy,1.0);
+        std::uint32_t h=std::uint32_t(sample.resource.signed_id)*0x9e3779b1u;h^=h>>15;h*=0x2c1b3c6du;h^=h>>12;
+        at.hash=(h&0xffffu)/65536.0;
+    }
+    const double amount=at.canopy<.25&&at.hash<.45?0:(.12+.95*at.canopy)*(.55+.7*at.hash);
+    if(shade==ground_cover::hs_moss_light)return amount>=.2&&amount<.75;
+    if(shade==ground_cover::hs_moss_full)return amount>=.75;
+    return at.canopy>=.25||at.hash>=.5;   // hs_vines
+}
+// Dead vines vary per placement (user 2026-11-15: the same pattern on every
+// grave): a hash of the placement's world position picks none (25%), the
+// host's first dead-vine model "few" (35%) or its last "many" (40%); a host
+// exported with one model shows it or none.
+bool hosted_amount_selects(const HostedPlantData& data,std::uint32_t model_id,const RetainedVisualSample& sample) {
+    const auto& model=data.models[model_id];
+    if(model.kind!=0u)return true; // kHostedKinds[0]: dead vines
+    std::uint32_t rank=0,count=0;
+    for(std::uint32_t m=0;m<data.models.size();++m)
+        if(data.models[m].host==model.host&&data.models[m].kind==model.kind){if(m<model_id)++rank;++count;}
+    const auto cell=[](float v){return std::uint32_t(std::int32_t(std::floor(v*4.0f)));};
+    std::uint32_t h=cell(sample.pose.root[0])*0x9e3779b1u^cell(sample.pose.root[1])*0x85ebca77u;h^=h>>15;h*=0x2c1b3c6du;h^=h>>12;
+    const double u=(h&0xffffu)/65536.0;
+    if(u<.25)return false;
+    if(count<2)return true;
+    return rank==(u<.6?0u:count-1);
+}
+bool hosted_visit(const HostedPlantData& data,int zone,std::int32_t id,const RetainedVisualSample* sample,
+    bool budget_left,bool& changed,const std::vector<RetainedVisualSample>& entities) {
+    auto& entries=g_hosted_scene.entries;
+    const auto first=entries.lower_bound(hosted_entry_key(id,0)),last=entries.upper_bound(hosted_entry_key(id,UINT32_MAX));
+    const int host=sample&&hosted_candidate(*sample)?hosted_host_of(data,*sample):-1;
+    bool done=true;
+    // Entries of models this object no longer hosts (or of an object that left).
+    for(auto it=first;it!=last;) {
+        const std::uint32_t model_id=std::uint32_t(it->first);
+        const bool hosted=host>=0&&data.models[model_id].host==std::uint32_t(host);
+        if(hosted){++it;continue;}
+        if(it->second.pending.valid()){done=false;++it;continue;} // dropped when its rebind returns
+        changed|=it->second.ok;it=entries.erase(it);
+    }
+    if(host<0)return done;
+    HostedShadeAt shade_at;
+    // Every model grown on this host for a kind of this zone (the lichen's
+    // rosettes and cards): one entry each.
+    for(std::uint32_t model_id=0;model_id<data.models.size();++model_id) {
+        const auto& model=data.models[model_id];
+        if(model.host!=std::uint32_t(host)||model.kind==ground_cover::kCaveColonyKind||
+           !((ground_cover::kHostedKinds[model.kind].zones>>zone)&1u))continue;
+        const std::uint64_t key=hosted_entry_key(id,model_id);
+        auto found=entries.find(key);
+        if(!hosted_shade_selects(ground_cover::kHostedKinds[model.kind].shade,entities,*sample,shade_at)||
+           !hosted_amount_selects(data,model_id,*sample)) {
+            if(found!=entries.end()&&!found->second.pending.valid()){changed|=found->second.ok;entries.erase(found);}
+            else if(found!=entries.end())done=false;
+            continue;
+        }
+        if(found!=entries.end()) {
+            if(found->second.pending.valid()){done=false;continue;}
+            if(hosted_entry_current(found->second,*sample))continue;
+        }
+        if(!budget_left){done=false;continue;}
+        auto& entry=found!=entries.end()?found->second:entries[key];
+        changed|=entry.ok;
+        hosted_build(data,*sample,host,model_id,key,entry);
+        changed|=entry.ok;
+        if(entry.pending.valid())done=false;
+    }
+    return done;
+}
+} // namespace
+
+// The hosted plants' host records: kept between frames, revisited only for
+// the objects the retained scene's change journal names (a full read: every
+// object), new placements within a 1.5 ms budget a frame.
+bool bridge_hosted_plants(int zone,ground_cover::HostedPlantFrame& frame) noexcept try {
+    const auto& visual=g_owned_visual_world_frame;
+    const HostedPlantData* data=ground_cover::hosted_plant_data();
+    if(!visual.active||!visual.values||!data)return false;
+    const auto& entities=visual.values->entities;
+    auto& store=g_hosted_scene;
+    auto& scene=retained_visual_scene();
+    const auto changes=scene.visual_source_changes(RetainedShadowConsumer::hosted_plants);
+    bool changed=false;
+    if(store.zone!=zone) {
+        // Another zone hosts other kinds.
+        changed=!store.entries.empty();
+        store.entries.clear();store.pending.clear();store.todo.clear();g_hosted_rebinds.clear();
+        store.zone=zone;store.valid=false;
+    }
+    std::vector<std::int32_t> visit;
+    if(!store.valid||changes.full||(changes.terrain_dirty&&!changes.terrain_time_only)) {
+        // Every object, and every object an entry is kept for.
+        visit.reserve(entities.size()+store.entries.size());
+        for(const auto& sample:entities)visit.push_back(sample.resource.signed_id);
+        for(const auto& entry:store.entries)visit.push_back(std::int32_t(std::uint32_t(entry.first>>32)));
+        store.valid=true;
+    } else visit=changes.dirty_visuals;
+    // The scene thread's frame may predate the newest changes: they stay
+    // unacknowledged and are read again next frame.
+    scene.acknowledge_shadow_source_changes(RetainedShadowConsumer::hosted_plants,owned_scene_ack_revision(changes.revision));
+    // Finished rebinds.
+    for(std::size_t k=0;k<store.pending.size();) {
+        const auto found=store.entries.find(store.pending[k]);
+        if(found==store.entries.end()){store.pending[k]=store.pending.back();store.pending.pop_back();continue;}
+        auto& entry=found->second;
+        if(entry.pending.wait_for(std::chrono::seconds(0))!=std::future_status::ready){++k;continue;}
+        entry.rebound=entry.pending.get();entry.pending={};entry.ok=entry.rebound&&!entry.rebound->empty();changed|=entry.ok;
+        visit.push_back(std::int32_t(std::uint32_t(found->first>>32))); // its object as it is now
+        store.pending[k]=store.pending.back();store.pending.pop_back();
+    }
+    if(!visit.empty()||!store.todo.empty()) {
+        visit.insert(visit.end(),store.todo.begin(),store.todo.end());
+        std::sort(visit.begin(),visit.end());visit.erase(std::unique(visit.begin(),visit.end()),visit.end());
+        store.todo.clear();
+        const auto start=std::chrono::steady_clock::now();
+        for(const auto id:visit) {
+            const bool budget_left=std::chrono::steady_clock::now()-start<std::chrono::microseconds(1500);
+            if(!hosted_visit(*data,zone,id,ground_contact_sample(entities,id),budget_left,changed,entities))store.todo.push_back(id);
+        }
+    }
+    if(changed)++g_hosted_revision;
+    if(frame.revision!=g_hosted_revision) {
+        frame.records.clear();frame.rebound.clear();
+        std::unordered_map<const std::vector<float>*,std::uint32_t> copies; // one copy a shared rebind
+        for(const auto& item:store.entries) {
+            const auto& entry=item.second;
+            if(!entry.ok)continue;
+            frame.records.push_back(entry.record);
+            if(entry.rebound&&!entry.rebound->empty()) {
+                auto [at,fresh]=copies.emplace(entry.rebound.get(),std::uint32_t(1+frame.rebound.size()/8));
+                frame.records.back().rebound=at->second;
+                if(fresh)frame.rebound.insert(frame.rebound.end(),entry.rebound->begin(),entry.rebound->end());
+            }
+        }
+        frame.revision=g_hosted_revision;
+    }
+    return true;
+} catch(...) {return false;}
+
+void release_hosted_plants() noexcept {
+    g_hosted_scene=HostedScene{};                         // waits for any rebind still running
+    g_hosted_rebinds.clear();
+    decltype(g_hosted_models)().swap(g_hosted_models);
+    ++g_hosted_revision;
 }
 
 } // namespace owned

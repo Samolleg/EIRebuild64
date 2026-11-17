@@ -165,8 +165,8 @@ bool compile_visual_route(VisualRouteValues values, std::uint64_t generation,
         !std::isfinite(values.rotation_delta) || !std::isfinite(values.angular_speed) ||
         !std::isfinite(values.hit_tick) || !std::isfinite(values.turn_finish_tick) ||
         values.points.size() > kVisualRoutePointLimit) return false;
-    if (values.kind == VisualRouteKind::attack && values.turn_finish_tick < values.start_tick)
-        return false;
+    // An Attack turn deadline may predate this route's start: the turn is
+    // already complete, so target facing needs no interpolation.
     try {
         CompiledVisualRoute result{};
         result.generation = generation;
@@ -274,8 +274,6 @@ bool face_visual_target(const CompiledVisualRoute& route, double time, double st
                         VisualRouteSample& sample) noexcept {
     if (route.values.kind != VisualRouteKind::attack) return true;
     if (!std::isfinite(route.values.turn_finish_tick) ||
-        route.values.turn_finish_tick < start_tick ||
-        route.values.turn_finish_tick < route.values.start_tick ||
         !std::isfinite(time) || !std::isfinite(start_tick)) return false;
     time = (std::max)(time,start_tick);
     if (!target) { sample.direction = direction(route.values.start_angle); return true; }
@@ -284,6 +282,8 @@ bool face_visual_target(const CompiledVisualRoute& route, double time, double st
     const double dy = (*target)[1] - route.values.start[1];
     const double finish = route.values.turn_finish_tick;
     const double begin = start_tick;
+    // Time is clamped to begin above. A deadline at or before begin goes
+    // straight to target facing, including after the active start advances.
     if (time < finish && finish != begin) {
         const double delta = angle_delta(std::atan2(dy, dx) - route.values.start_angle);
         sample.direction = direction(route.values.start_angle + delta *
@@ -386,7 +386,13 @@ bool sample_visual_pose(const VisualPoseIntent& intent,
         const auto forward = rotate(result.root_rotation, {0, -1, 0});
         result.facing = std::atan2(forward[1], forward[0]);
     }
-    double coefficient = rates.scaled_animation ? rates.coefficient : 1;
+    // Client 535850 stores GetAnimationCoeff in +178 for a speedless entry;
+    // the hooked form returns the received +178 for the attack (80000) and
+    // cast (C0000) actions, and the patched 535C71 test applies it.
+    const std::uint32_t action = current ? current->flags & 0x3c0000u : 0;
+    const bool received_action = rates.action_coefficient && current && current->speed == 0 &&
+        (action == 0x80000u || action == 0xc0000u);
+    double coefficient = rates.scaled_animation || received_action ? rates.coefficient : 1;
     if (rates.movement_frozen) coefficient = 1;
     else if (rates.scaled_animation && !rates.dont_move && current && current->speed != 0) {
         const double clip_speed = current->speed * height_scale(*selection.database, rates.tall) * 2;

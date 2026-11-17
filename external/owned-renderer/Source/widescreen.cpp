@@ -461,6 +461,7 @@ void compare_hud_activity(HudPanel panel,std::vector<std::uint64_t>& previous,co
 }
 
 float g_combat_text_scale = 1.f;
+float g_combat_text_output_height = 0.f;  // the output's height (widescreen_set_combat_text_scale)
 void* g_hud_frame_owner=nullptr;
 void (*g_hud_frame_sink)(void*) noexcept=nullptr;
 widescreen::Layout g_layout = widescreen::make_layout(800.0f, 600.0f);
@@ -1169,8 +1170,16 @@ int slot_direction(unsigned panel) noexcept {
     const int d=g_hud_panels[panel].direction;
     return panel!=4?d:d==1?1:d==2?0:d==4?3:2;
 }
-// Slots per line (column for vertical bars, row for horizontal ones); 0 = one line.
-unsigned slots_per_line(unsigned panel) noexcept {return panel==4?0u:g_hud_panels[panel].slots_per_line;}
+// Slots per line (column for vertical bars, row for horizontal ones). 0 = one
+// line, except the spell bar: 0 there wraps after 8 slots, so an 8-slot spell
+// book (most mods) stays one line and Dejavu's 16 slots fill a second line
+// only after the first is full. Halving by the current count put every other
+// learned spell in the second line.
+unsigned slots_per_line(unsigned panel,unsigned count) noexcept {
+    if(panel==4)return 0u;
+    const unsigned per=g_hud_panels[panel].slots_per_line;
+    return per?per:panel==0&&count>8?8u:0u;
+}
 // Further lines grow away from the anchored edge: vertical bars toward the
 // screen interior across x, horizontal bars up from the bottom (or down).
 bool lines_grow_negative(unsigned panel) noexcept {
@@ -1179,7 +1188,7 @@ bool lines_grow_negative(unsigned panel) noexcept {
 }
 void slot_extent(unsigned panel,const void* object,float& width,float& height) noexcept {
     const unsigned count=layout_slot_count(panel,object);width=height=0.f;
-    const bool horizontal=slot_direction(panel)>=2;const unsigned per=slots_per_line(panel);
+    const bool horizontal=slot_direction(panel)>=2;const unsigned per=slots_per_line(panel,count);
     float length=0.f,line=0.f,cross=0.f;unsigned lines=count?1u:0u;
     for(unsigned i=0;i<count;++i) {float w,h;slot_dimensions(panel,i,object,w,h);
         if(per && i && i%per==0){length=(std::max)(length,line);line=0.f;++lines;}
@@ -1555,7 +1564,7 @@ bool slot_screen_bounds(unsigned panel,unsigned slot,const void* object,HudPanel
     const int direction=slot_direction(panel);const bool horizontal=direction>=2;
     const float unit=g_layout.unit*g_layout.scale*g_hud_panels[panel].scale_percent/100.f;
     float width,height;slot_dimensions(panel,slot,object,width,height);width*=unit;height*=unit;
-    const unsigned per=slots_per_line(panel),count=layout_slot_count(panel,object);
+    const unsigned count=layout_slot_count(panel,object),per=slots_per_line(panel,count);
     const unsigned line=per?slot/per:0u;
     float prefix=0.f;
     for(unsigned i=line*(per?per:0u);i<slot;++i){float w,h;slot_dimensions(panel,i,object,w,h);prefix+=(std::max)(1.f,(horizontal?w:h)+g_hud_panels[panel].padding)*unit;}
@@ -3668,10 +3677,15 @@ void widescreen_set_hud_frame_sink(void* owner,void (*sink)(void*) noexcept) noe
 void widescreen_clear_hud_frame_sink(void* owner) noexcept {
     if(g_hud_frame_owner==owner){g_hud_frame_owner=nullptr;g_hud_frame_sink=nullptr;}
 }
-void widescreen_set_combat_text_scale(int percent) noexcept {
+void widescreen_set_combat_text_scale(int percent, long output_height) noexcept {
     g_combat_text_scale=std::clamp(percent,50,300)/100.f;
+    g_combat_text_output_height=output_height>0?float(output_height):0.f;
 }
-float widescreen_combat_text_scale() noexcept { return g_combat_text_scale; }
+float widescreen_combat_text_scale() noexcept {
+    // The canvas keeps the output's aspect, so the height ratio is the scale.
+    const float canvas_per_output=g_combat_text_output_height>0.f?g_layout.height/g_combat_text_output_height:1.f;
+    return g_combat_text_scale*canvas_per_output;
+}
 void widescreen_set_message_panel(const MessagePanelSettings& settings) noexcept {
     g_message_panel.width_percent=std::clamp(settings.width_percent,50.f,800.f);
     g_message_panel.height_percent=std::clamp(settings.height_percent,50.f,600.f);

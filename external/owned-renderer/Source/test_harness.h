@@ -45,6 +45,9 @@ void harness_complete_entry(unsigned long entry_id, bool ok, const std::string& 
 // (AdjustLightingWithTime runs inside Draw, after this point). Save completion
 // is observed at present, after a successful Draw in the new world epoch.
 void harness_world_frame(void* world_client) noexcept;
+// CI3DScreenCamp::Draw entry (camp_inventory's hook), before the original
+// body: runs a pending outfit_equip or scroll_items step on that screen.
+void harness_camp_frame(void* camp_screen) noexcept;
 // Debug lightning strike at the camera focus (the rain's own strike script); the F10
 // Diagnostics button requests it, the next world frame strikes.
 void request_debug_lightning() noexcept;

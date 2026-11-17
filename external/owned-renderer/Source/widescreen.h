@@ -127,8 +127,14 @@ struct MessagePanelSettings {
 struct MessagePanelBounds { float left = 0, top = 0, width = 0, height = 0; };
 // Owned dimensions/reflow and uniform composition; native text/mode/slide time remain authoritative.
 void widescreen_set_message_panel(const MessagePanelSettings& settings) noexcept;
-void widescreen_set_combat_text_scale(int percent) noexcept;
-// The independent combat text size (owned combat text, combat_text.h).
+// output_height: the game window's client height (the output, as
+// game_output_to_native maps it); 0 when unknown.
+void widescreen_set_combat_text_scale(int percent, long output_height) noexcept;
+// The owned combat text's size factor for its stock glyph pixels, which live
+// in the native canvas: combat_text_scale times canvas/output, so the text
+// is its stock pixel size on the output whatever the game's own resolution
+// setting (an 800x600 setting gives a 960x600 canvas on 2560x1600: without
+// the ratio every glyph was drawn 2.67 times its size).
 float widescreen_combat_text_scale() noexcept;
 bool widescreen_message_panel_bounds(MessagePanelBounds& bounds) noexcept;
 

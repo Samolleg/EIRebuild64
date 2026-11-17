@@ -40,10 +40,41 @@ GraphicsPreset detect_graphics_preset(const RendererConfig& config) noexcept;
 // (rows that left the preset go back to their defaults) and returns it;
 // otherwise changes nothing and returns custom.
 GraphicsPreset reapply_graphics_preset_before(RendererConfig& config, int saved_version) noexcept;
+// True for a key that the named presets set.
+bool graphics_preset_row(const char* key) noexcept;
 // First-run suggestion from the adapter: integrated (UMA) GPUs get Low,
 // discrete cards are graded by their WDDM local-memory budget (64-bit even
 // in this 32-bit process). A rough hint only; the player chooses.
 GraphicsPreset suggest_graphics_preset(bool integrated, std::uint64_t video_memory_bytes) noexcept;
+
+// Ray tracing preset: the player's choice over the ray traced options, its
+// own group beside the graphics presets (Low..Ultra never touch rt_*). It
+// works like those presets: choosing one writes its values into the options,
+// the renderer reads the options, and the shown preset is detected from them
+// (changing one of them afterwards reads as Custom). The table in
+// graphics_settings.cpp is the single place that says what each preset sets.
+// rt_quality is only the menu row's key; migrate_rt_quality turns a value an
+// older build saved (when the tier overrode the options) into the options.
+// Ultra (High at DLAA) was folded into High (user decision 2026-11-15: no
+// preset reads or writes upscaling; High and Ultra had the same rt_* values).
+enum class RtQuality : int { off = 0, low, medium, high, custom };
+constexpr int kRtQualityTiers = 4;  // off .. high
+struct RtQualityRow {
+    const char* key;
+    float values[kRtQualityTiers];  // Off, Low, Medium, High (bool: 0/1)
+};
+const RtQualityRow* rt_quality_rows(std::size_t& count) noexcept;
+// Off while no ray traced term is on, else the preset whose every row
+// matches, else Custom.
+RtQuality detect_rt_quality(const RendererConfig& config) noexcept;
+// Settings migration (version 7): a saved rt_quality tier's values into the
+// options, rt_quality back to its default; returns the saved value.
+RtQuality migrate_rt_quality(RendererConfig& config) noexcept;
+// True while any option that needs the ray tracing scene is on.
+bool rt_scene_wanted(const RendererConfig& config) noexcept;
+// The menu's choice of a preset: its values copied into the individual
+// options. It never touches upscaling (or any option outside its table).
+void select_rt_quality(RendererConfig& config, RtQuality tier) noexcept;
 
 // Display pacing. Both are player choices that default off and that no
 // preset touches; developer mode forces both off so captures stay uncapped.

@@ -18,6 +18,12 @@
 #include <cstdio>
 #include <cstring>
 #include <unordered_set>
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <thread>
+#include <exception>
 
 namespace owned {
 namespace {
@@ -114,6 +120,76 @@ float source_alpha(const TextureAlphaPixels& source, std::uint32_t x, std::uint3
     return float((raw & source.alpha_mask) >> shift) / float(mask);
 }
 
+// source_alpha for one layer's many texels: a packed format's alpha shift
+// and every value of its alpha field (at most 8 bits) are worked out once,
+// with the same arithmetic, so each texel is a load and a table read.
+class AlphaReader {
+public:
+    explicit AlphaReader(const TextureAlphaPixels& source) noexcept : source_(source) {
+        if (source.format != TextureAlphaFormat::packed || !source.alpha_mask) return;
+        std::uint32_t mask = source.alpha_mask;
+        while (!(mask & 1)) { ++shift_; mask >>= 1; }
+        if (mask > 255) return;
+        for (std::uint32_t v = 0; v <= mask; ++v) table_[v] = float(v) / float(mask);
+        fast_ = true;
+    }
+    float operator()(std::uint32_t x, std::uint32_t y) const noexcept {
+        if (!fast_) return source_alpha(source_, x, y);
+        std::uint32_t raw = 0;
+        const auto* at = source_.data + std::size_t(y) * source_.pitch + std::size_t(x) * source_.pixel_bytes;
+        if (source_.pixel_bytes == 4) std::memcpy(&raw, at, 4);
+        else std::memcpy(&raw, at, source_.pixel_bytes);
+        return table_[(raw & source_.alpha_mask) >> shift_];
+    }
+private:
+    const TextureAlphaPixels& source_;
+    bool fast_ = false;
+    unsigned shift_ = 0;
+    float table_[256]{};
+};
+
+// std::lround(v * 255) of a clamped 0..1 value without the CRT call: v * 255
+// is a float in 0..255, so its double plus .5 is exact and truncates to the
+// same half-away-from-zero rounding.
+inline std::uint8_t unorm8(float v) noexcept {
+    const float scaled = std::clamp(v, 0.f, 1.f) * 255.f;
+    return std::uint8_t(int(double(scaled) + .5));
+}
+
+// Threads for one profile build (it already runs off the render thread):
+// half the logical cores, at most 8; none extra on 4 cores or fewer.
+unsigned profile_threads() noexcept {
+    const unsigned cores = std::thread::hardware_concurrency();
+    return cores <= 4 ? 1u : std::clamp(cores / 2, 1u, 8u);
+}
+
+// task(0..count-1) over up to `workers` threads, this one included; the
+// extra threads run below normal priority so they never compete with the
+// game and render threads. A thread that cannot start leaves its share here.
+template <class Task> void run_parallel(unsigned count, unsigned workers, const Task& task) {
+    workers = std::max(1u, std::min(workers, count));
+    std::exception_ptr failure;
+    std::mutex failure_lock;
+    const auto share = [&](unsigned first) {
+        try { for (unsigned at = first; at < count; at += workers) task(at); }
+        catch (...) { std::lock_guard<std::mutex> guard(failure_lock); if (!failure) failure = std::current_exception(); }
+    };
+    std::vector<std::thread> threads;
+    unsigned started = 1;
+    for (; started < workers; ++started) {
+        try {
+            threads.emplace_back([&share, started] {
+                SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                share(started);
+            });
+        } catch (...) { break; }
+    }
+    share(0);
+    for (unsigned rest = started; rest < workers; ++rest) share(rest);
+    for (auto& thread : threads) thread.join();
+    if (failure) std::rethrow_exception(failure);
+}
+
 // An 8-bit palette or grey PNG: its raw indices (WIC, no conversion).
 bool decode_index_png(const std::vector<std::uint8_t>& bytes, std::uint32_t& width, std::uint32_t& height,
                       std::vector<std::uint8_t>& indices) {
@@ -160,15 +236,22 @@ bool MaterialLibrary::load_classes(const std::string& document, std::string& err
             if (value.members.count("roughness_min")) target.roughness_min = float(value.field("roughness_min").num());
             if (value.members.count("relief_min")) target.relief_min = float(value.field("relief_min").num());
             if (value.members.count("strands")) target.strands = value.field("strands").text == "true";
+            if (value.members.count("bare")) target.bare = value.field("bare").text == "true";
+            if (value.members.count("coat")) target.coat = std::clamp(float(value.field("coat").num()), 0.f, 7.9f);
             if (value.members.count("gem")) target.gem = value.field("gem").text == "true";
+            if (value.members.count("crystal")) target.crystal = value.field("crystal").text == "true";
+            // The crystal marker is its F0 (profile b .4), as the gem's is .12 and up.
+            if (target.metal < .5f && (target.f0 >= .09f && target.f0 < .11f) != target.crystal) {
+                error = "classes.json: " + entry.first + (target.crystal ? ": a crystal needs f0 .10" : ": f0 .09 to .11 is reserved for crystals");
+                return false;
+            }
+            if (target.crystal && target.metal >= .5f) { error = "classes.json: " + entry.first + ": a crystal is a dielectric"; return false; }
             // The shader tells a gem by its F0 (profile F0 is f0 x 4, at most .25).
             if (target.metal < .5f && (target.f0 >= .12f) != target.gem) {
                 error = "classes.json: " + entry.first + (target.gem ? ": a gem needs f0 .12 to .25" : ": f0 .12 and up is reserved for gems");
                 return false;
             }
             if (target.gem && (target.metal >= .5f || target.f0 > .25f)) { error = "classes.json: " + entry.first + ": a gem is a dielectric with f0 .12 to .25"; return false; }
-            if (value.members.count("bare")) target.bare = value.field("bare").text == "true";
-            if (value.members.count("coat")) target.coat = std::clamp(float(value.field("coat").num()), 0.f, 7.9f);
             if (value.members.count("tint")) {
                 const auto& tint = value.field("tint").list();
                 if (tint.size() != 2) { error = "classes.json: tint must be [min, max] degrees"; return false; }
@@ -254,7 +337,7 @@ bool MaterialLibrary::load_items(const std::vector<std::uint8_t>& bytes) {
             if (!children(row, fields)) return false;
             const auto first = field(fields, 5), second = field(fields, 6), type_id = field(fields, 2);
             if (first.size != 4 || second.size != 4 || (table == 2 && type_id.size != 4)) return false;
-            shapes.push_back({text(field(fields, 1)), word(first.data), word(second.data), table == 2 ? word(type_id.data) : 0u});
+            shapes.push_back({text(field(fields, 1)), text(field(fields, 3)), word(first.data), word(second.data), table == 2 ? word(type_id.data) : 0u});
         }
     }
     return !materials_.empty() && !armor_.empty();
@@ -381,9 +464,11 @@ MaterialLibrary::LayerClass MaterialLibrary::layer_class(const std::string& laye
 // An item layer the user data names no item for (the addon's attachment
 // atlases tag the helm and weapon but leave the shield slot empty): its own
 // name <model><kind>_<NN>.<code>.<variant> gives the material. One code
-// names two types (br: bone and bronze); the family's own texture set then
-// decides, by which type's codes the same family and variant exist in
-// (unhumasd_08 is bb/bg/bs/br: bone; unhumasd_10 is am/br/ir/mr/mt: metal).
+// names two types (br: bone and bronze); the items.idb shapes of that
+// <kind>_<NN>.<variant> name their material type and decide (sw_13 "ancient
+// bronze sword": Metal). Only where the shapes do not decide does the
+// family's own texture set, by which type's codes the same family and variant
+// exist in (unhumasd_08 is bb/bg/bs/br: bone; unhumasd_10 is am/br/ir/mr/mt: metal).
 MaterialLibrary::LayerClass MaterialLibrary::untagged_layer_class(const std::string& layer,
     const std::string& name, LayerClass result, std::uint32_t width, std::uint32_t height) const {
     const auto first_dot = name.find('.');
@@ -403,7 +488,19 @@ MaterialLibrary::LayerClass MaterialLibrary::untagged_layer_class(const std::str
         if (m.code == code && std::find(types.begin(), types.end(), m.type) == types.end()) types.push_back(m.type);
     if (types.empty()) return result;
     std::string type = types.front();
+    std::vector<std::string> shape_types;   // the code's types the family's item shapes are made of
     if (types.size() > 1) {
+        const auto number = std::uint32_t(std::stoul(family.substr(underscore + 1)));
+        const auto variant = std::uint32_t(std::stoul(variant_text));
+        for (const auto* shapes : {&weapon_, &armor_})
+            for (const auto& s : *shapes)
+                if ((shapes == &armor_ ? armor_kind(s.type) : weapon_kind(s.type_id)) == kind && s.first == number &&
+                    s.second == variant && std::find(types.begin(), types.end(), s.material) != types.end() &&
+                    std::find(shape_types.begin(), shape_types.end(), s.material) == shape_types.end())
+                    shape_types.push_back(s.material);
+        if (shape_types.size() == 1) type = shape_types.front();
+    }
+    if (types.size() > 1 && shape_types.size() != 1) {
         // The layer's own file name past the variant (".x2.mmp") names its siblings.
         const std::string original = lower(layer);
         const auto at = original.find(name);
@@ -424,7 +521,7 @@ MaterialLibrary::LayerClass MaterialLibrary::untagged_layer_class(const std::str
         }
         if (!best || tie) {
             char line[200];
-            std::snprintf(line, sizeof(line), "layer %s: code %s names several material types and the family's textures do not decide; skin class kept", layer.c_str(), code.c_str());
+            std::snprintf(line, sizeof(line), "layer %s: code %s names several material types and neither the item shapes nor the family's textures decide; skin class kept", layer.c_str(), code.c_str());
             bridge_report_event("materials", line);
             return result;
         }
@@ -447,10 +544,48 @@ std::shared_ptr<const MaterialLibrary::RegionMap> MaterialLibrary::region_map(co
     const std::string plain = family + '.' + std::to_string(variant);
     for (const auto& key : {coded + size, coded, plain + size, plain})
         if (auto map = read_region_map(key, type, code)) return map;
+    // Other humanoid models (unhusk skeletons, unhufe, unor*) wear the same
+    // equipment families, often the human art byte for byte: the human
+    // <kind>_NN maps apply (the @WxH key and the sidecar checks still decide).
+    const auto underscore = family.rfind('_');
+    if (underscore != std::string::npos && underscore >= 8 && family.compare(0, 2, "un") == 0 &&
+        family.compare(0, 6, "unhuma") != 0)
+        return region_map("unhuma" + family.substr(underscore - 2), type, code, variant, width, height);
     return nullptr;
 }
 
 std::shared_ptr<const MaterialLibrary::RegionMap> MaterialLibrary::read_region_map(const std::string& key,
+    const std::string& type, const std::string& code) const {
+    const std::string cache_key = key + '|' + type + '|' + code;
+    if (const auto found = region_cache_.find(cache_key); found != region_cache_.end()) return found->second;
+    // Decoded maps are kept (a map is at most its art's size, one byte a texel);
+    // past 256 the oldest go, so the cache stays bounded.
+    if (region_cache_.size() >= 256) region_cache_.erase(region_cache_.begin());
+    auto& slot = region_cache_[cache_key];
+    slot = read_region_map_uncached(key, type, code);
+    return slot;
+}
+
+std::shared_ptr<const TextureCpuAsset> MaterialLibrary::cached_layer(const std::string& name) const {
+    if (const auto found = layer_cache_.find(name); found != layer_cache_.end()) return found->second;
+    ResourceFailure failure;
+    ResourceLocation location;
+    ResourceBlob blob;
+    auto texture = std::make_shared<TextureCpuAsset>();
+    if (!layers_.locate(name, location, failure) || !layers_.read(location, blob, failure) ||
+        !parse_texture_asset(blob, *texture, failure) || texture->mips.empty()) return nullptr; // the game skips it too
+    // The most recent 96 layers (an equipment set's art is a handful).
+    if (layer_cache_order_.size() >= 96) {
+        layer_cache_.erase(layer_cache_order_.front());
+        layer_cache_order_.erase(layer_cache_order_.begin());
+    }
+    layer_cache_order_.push_back(name);
+    std::shared_ptr<const TextureCpuAsset> value = std::move(texture);
+    layer_cache_[name] = value;
+    return value;
+}
+
+std::shared_ptr<const MaterialLibrary::RegionMap> MaterialLibrary::read_region_map_uncached(const std::string& key,
     const std::string& type, const std::string& code) const {
     std::vector<std::uint8_t> bytes;
     if (!read_file(folder_ + L"maps\\" + widen(key) + L".png", bytes, 16u << 20)) return nullptr;
@@ -486,10 +621,39 @@ bool MaterialLibrary::scenery_listed(const std::string& texture) const {
     return scenery_.count(lower(texture)) != 0;
 }
 
+bool MaterialLibrary::build_fire_burn_profile(const std::string& texture, std::uint32_t& width,
+    std::uint32_t& height, std::vector<std::uint8_t>& labels) const {
+    if (const auto map = read_region_map("burn_" + lower(texture), "", "")) {
+        if (std::any_of(map->classes.begin(), map->classes.end(), [](auto c) { return c > 3; })) return false;
+        width = map->width; height = map->height; labels = map->classes;
+        return true;
+    }
+    if (!scenery_listed(texture)) return false;
+    std::vector<std::uint8_t> rgba, relief, classes;
+    std::string note;
+    if (!build_unit_profile(texture, width, rgba, relief, classes, note)) return false;
+    height = width; labels.resize(classes.size());
+    bool combustible = false;
+    for (std::size_t i = 0; i < classes.size(); ++i) {
+        // Use the same reviewed regions as shading: stone and metal in a
+        // mixed wood/stone atlas stay inert, independent of material quality.
+        labels[i] = classes_[classes[i]].name == "scenery_wood" ? 3 : 0;
+        combustible = combustible || labels[i] != 0;
+    }
+    return combustible;
+}
+
 std::array<std::uint32_t, 8> MaterialLibrary::strand_classes() const noexcept {
     std::array<std::uint32_t, 8> bits{};
     for (std::size_t index = 0; index < classes_.size(); ++index)
         if (classes_[index].defined && classes_[index].strands) bits[index / 32] |= 1u << (index % 32);
+    return bits;
+}
+
+std::array<std::uint32_t, 8> MaterialLibrary::crystal_classes() const noexcept {
+    std::array<std::uint32_t, 8> bits{};
+    for (std::size_t index = 0; index < classes_.size(); ++index)
+        if (classes_[index].defined && classes_[index].crystal) bits[index / 32] |= 1u << (index % 32);
     return bits;
 }
 
@@ -512,16 +676,31 @@ bool MaterialLibrary::metal_mask_texels(const TextureCpuAsset& texture, std::siz
     const auto& m = metal_mask_;
     const bool tinted = metal_class.tint_max >= metal_class.tint_min;
     off.assign(std::size_t(w) * h, 0);
+    const AlphaReader alpha_at(alpha);
+    float unit[256];
+    for (unsigned v = 0; v < 256; ++v) unit[v] = v / 255.f;
+    // Whether a texel's brightest and darkest channel bytes pass the value
+    // and saturation tests below (most metal art is grey and stops here).
+    std::vector<std::uint8_t> coloured(256 * 256, 0);
+    for (unsigned hb = 0; hb < 256; ++hb) for (unsigned lb = 0; lb <= hb; ++lb) {
+        const float high = unit[hb], range = high - unit[lb];
+        const float saturation = high > 0 ? range / high : 0.f;
+        coloured[hb * 256 + lb] = !(high < m.min_value || saturation <= m.saturation);
+    }
     for (std::uint32_t y = 0; y < h; ++y) for (std::uint32_t x = 0; x < w; ++x) {
-        if (source_alpha(alpha, x, y) < .5f) continue;
+        if (alpha_at(x, y) < .5f) continue;
         ++metal;
         const std::size_t i = std::size_t(y) * w + x;
-        const float r = rgb[i * 3] / 255.f, g = rgb[i * 3 + 1] / 255.f, b = rgb[i * 3 + 2] / 255.f;
+        const std::uint8_t* p = rgb.data() + i * 3;
+        if (!coloured[std::max({p[0], p[1], p[2]}) * 256u + std::min({p[0], p[1], p[2]})]) continue;
+        const float r = unit[p[0]], g = unit[p[1]], b = unit[p[2]];
         const float high = std::max({r, g, b}), low = std::min({r, g, b}), range = high - low;
         const float saturation = high > 0 ? range / high : 0.f;
         if (high < m.min_value || saturation <= m.saturation) continue;
         const float hue = 60.f * (high == r ? std::fmod((g - b) / range + 6.f, 6.f) : high == g ? (b - r) / range + 2.f : (r - g) / range + 4.f);
-        if (tinted && hue >= metal_class.tint_min && hue <= metal_class.tint_max) continue;
+        // A tint may run past 360 to wrap through red ([270, 420]: magenta to orange).
+        if (tinted && ((hue >= metal_class.tint_min && hue <= metal_class.tint_max) ||
+                       (hue + 360.f >= metal_class.tint_min && hue + 360.f <= metal_class.tint_max))) continue;
         if (hue >= m.brown_hue_min && hue <= m.brown_hue_max) { off[i] = m.leather; ++leather; }
         else if (saturation >= m.cloth_saturation) { off[i] = m.cloth; ++cloth; }
     }
@@ -537,24 +716,52 @@ bool MaterialLibrary::build_profile(const MaterialComposition& composition, std:
         return std::array<float, 5>{value.roughness, value.metal, std::clamp(value.f0 * 4.f, 0.f, 1.f), value.weave_or_sheen(), value.relief};
     };
     const auto skin = encode(classes_[skin_]);
+    std::array<std::array<float, 5>, 256> encoded;  // every class' surface values
+    for (std::size_t c = 0; c < classes_.size(); ++c) encoded[c] = encode(classes_[c]);
     std::vector<float> profile(std::size_t(side) * side * 5);
     for (std::size_t at = 0; at < profile.size(); at += 5) std::copy(skin.begin(), skin.end(), profile.begin() + at);
     classes.assign(std::size_t(side) * side, skin_);
-    ResourceFailure failure;
     if (!open_layers(note)) return false;
-    const ResourceStore& store = layers_;
     const bool packed = composition.slots[0] >= 0 || composition.slots[1] >= 0 ||
                         composition.slots[2] >= 0 || composition.slots[3] >= 0;
+
+    // The usable layers in composition order: placement, mip, alpha, class,
+    // metal mask, and the lookup tables their sampling reads.
+    struct LayerWork {
+        std::shared_ptr<const TextureCpuAsset> texture;
+        const std::string* name = nullptr;
+        std::uint32_t x = 0, y = 0, width = 0, height = 0;
+        std::size_t mip = 0;
+        TextureAlphaPixels alpha;
+        LayerClass layer;
+        std::array<float, 5> primary{};
+        bool masked = false, mask_ok = false;
+        std::vector<std::uint8_t> off;
+        std::uint32_t metal = 0, leather = 0, cloth = 0;
+        double mip_scale = 1;
+        unsigned block = 1;
+        // Per region-map value: the surface it gives a texel (null: the
+        // layer's class, or the metal mask's), the class it gives the block
+        // centre (0: none), and its class for the strand test.
+        std::array<std::array<float, 5>, 256> inherited;
+        const float* region_value[256];
+        std::uint8_t region_centre[256], region_bare[256];
+        // The region-map texel of each layer column and row (the map may be
+        // smaller or larger than the mip); each profile column's first layer
+        // column (-1: outside the layer).
+        std::vector<std::uint32_t> map_column;
+        std::vector<std::size_t> map_row;
+        std::vector<int> column_start;
+    };
+    std::vector<LayerWork> work;
+    work.reserve(composition.layers.size());
+    const double source_per_profile = double(dimension) / side;
     std::uint32_t x = 0, y = 0, classified = 0;
-    std::uint32_t mask_layers = 0, mask_metal = 0, mask_leather = 0, mask_cloth = 0;
-    std::string mask_detail;  // per metal layer: name, region map, reference, counts
     for (std::size_t index = 0; index < composition.layers.size(); ++index) {
         const auto& name = composition.layers[index];
-        ResourceLocation location;
-        ResourceBlob blob;
-        TextureCpuAsset texture;
-        if (!store.locate(name, location, failure) || !store.read(location, blob, failure) ||
-            !parse_texture_asset(blob, texture, failure) || texture.mips.empty()) continue; // the game skips it too
+        auto layer_texture = cached_layer(name);
+        if (!layer_texture) continue; // the game skips it too
+        const TextureCpuAsset& texture = *layer_texture;
         // Packed attachment atlases (addon PutLayersWeapons): each listed layer
         // fills its 512 quadrant; an unlisted one keeps the previous placement.
         if (packed) {
@@ -566,113 +773,180 @@ bool MaterialLibrary::build_profile(const MaterialComposition& composition, std:
         const std::uint32_t width = texture.width, height = texture.height;
         if (x > dimension || width > dimension - x || y > dimension || height > dimension - y) continue;
         // The mip whose texel matches one profile texel (area sampling from the mips).
-        const double source_per_profile = double(dimension) / side;
         std::size_t mip = 0;
         while (mip + 1 < texture.mips.size() && double(1u << (mip + 1)) <= source_per_profile) ++mip;
         TextureAlphaPixels alpha;
         if (!texture_alpha_pixels(texture, mip, alpha) || !alpha.width || !alpha.height) continue;
         const auto layer = layer_class(name, composition.user_data, width, height);
-        const auto primary = encode(classes_[layer.primary]);
+        // Diagnostic: a figure layer with no region map (once per name): which
+        // model, item kind and code the resolver saw, so unmapped equipment shows.
+        if (!layer.regions && lower(name).find("skin_") == std::string::npos && unmapped_layers_.insert(lower(name)).second) {
+            char line[240];
+            std::snprintf(line, sizeof(line), "layer %s: no region map (%ux%u, class %s)", name.c_str(), width, height,
+                          classes_[layer.primary].name.c_str());
+            bridge_report_event("materials", line);
+        }
         if (layer.primary != skin_) ++classified;
+        work.emplace_back();
+        auto& w = work.back();
+        w.texture = std::move(layer_texture);w.name = &name;
+        w.x = x;w.y = y;w.width = width;w.height = height;w.mip = mip;w.alpha = alpha;w.layer = layer;
+        w.primary = encode(classes_[layer.primary]);
         // Metal masks: a metal layer's texels its reviewed region map (if
         // any) leaves at the item class; the map's own classes win.
-        std::vector<std::uint8_t> off;
-        if (metal_mask && metal_mask_.defined && classes_[layer.primary].metal >= .5f) {
-            std::uint32_t metal = 0, leather = 0, cloth = 0;
-            const auto& metal_class = classes_[layer.primary];
-            char line[200];
-            if (metal_mask_texels(texture, mip, alpha, metal_class, off, metal, leather, cloth)) {
-                ++mask_layers;mask_metal += metal;mask_leather += leather;mask_cloth += cloth;
-                char tint[32] = "grey";
-                if (metal_class.tint_max >= metal_class.tint_min)
-                    std::snprintf(tint, sizeof(tint), "tint h%.0f-%.0f", metal_class.tint_min, metal_class.tint_max);
-                std::snprintf(line, sizeof(line), "; %s%s %s %s leather %u cloth %u of %u", name.c_str(),
-                              layer.regions ? " (map)" : "", metal_class.name.c_str(), tint, leather, cloth, metal);
-            } else std::snprintf(line, sizeof(line), "; %s colour unreadable", name.c_str());
-            mask_detail += line;
-        }
-        const double mip_scale = double(alpha.width) / width;            // mip texels per source texel
-        const unsigned block = std::max(1u, unsigned(std::lround(source_per_profile * mip_scale)));
-        for (std::uint32_t py = 0; py < side; ++py) for (std::uint32_t px = 0; px < side; ++px) {
-            // This profile texel's source rectangle within the layer.
-            const double sx = (px + .5) * source_per_profile - x - source_per_profile * .5;
-            const double sy = (py + .5) * source_per_profile - y - source_per_profile * .5;
-            if (sx < -.5 || sy < -.5 || sx >= width - .5 || sy >= height - .5) continue;
-            const int mx = int(sx * mip_scale), my = int(sy * mip_scale);
-            float coverage = 0;
-            std::array<float, 5> surface{};
-            std::uint8_t texel_class = layer.primary;   // the class at the block's centre
-            // Any opaque texel of the block in a class without strands
-            // (bone, eyes, cloth beside a pelt): the fur pass reads one class
-            // texel per 4-8 layer texels, so a centre-only class let strands
-            // grow over thin bare art (fangs, muzzle edge).
-            std::uint8_t bare_class = 0;
-            for (unsigned j = 0; j < block; ++j) for (unsigned k = 0; k < block; ++k) {
-                const std::uint32_t tx = std::uint32_t(std::clamp(mx + int(k), 0, int(alpha.width) - 1));
-                const std::uint32_t ty = std::uint32_t(std::clamp(my + int(j), 0, int(alpha.height) - 1));
-                const float opacity = source_alpha(alpha, tx, ty);
-                coverage += opacity;
-                std::array<float, 5> value = primary;
-                if (layer.regions) {
-                    const auto& map = *layer.regions;
-                    const std::uint32_t rx = std::min(map.width - 1, std::uint32_t((tx + .5) / alpha.width * map.width));
-                    const std::uint32_t ry = std::min(map.height - 1, std::uint32_t((ty + .5) / alpha.height * map.height));
-                    const std::uint8_t region = map.classes[std::size_t(ry) * map.width + rx];
-                    if (region && classes_[region].defined) {
-                        const auto& c = classes_[region];
-                        if (c.inherit_primary) value[0] = std::max(value[0], c.roughness_min), value[4] = std::max(value[4], c.relief_min);
-                        else value = encode(c);
-                        if (!c.inherit_primary && j == block / 2 && k == block / 2) texel_class = region;
-                    } else if (!off.empty()) {
-                        if (const std::uint8_t c = off[std::size_t(ty) * alpha.width + tx]) {
-                            value = encode(classes_[c]);
-                            if (j == block / 2 && k == block / 2) texel_class = c;
-                        }
-                    }
-                } else if (!off.empty()) {
-                    if (const std::uint8_t c = off[std::size_t(ty) * alpha.width + tx]) {
-                        value = encode(classes_[c]);
-                        if (j == block / 2 && k == block / 2) texel_class = c;
-                    }
-                }
-                for (unsigned c = 0; c < 5; ++c) surface[c] += value[c] * opacity;
-                if (opacity >= .5f && !bare_class) {
-                    std::uint8_t sample_class = layer.primary;
-                    if (layer.regions) {
-                        const auto& map = *layer.regions;
-                        const std::uint32_t rx = std::min(map.width - 1, std::uint32_t((tx + .5) / alpha.width * map.width));
-                        const std::uint32_t ry = std::min(map.height - 1, std::uint32_t((ty + .5) / alpha.height * map.height));
-                        const std::uint8_t region = map.classes[std::size_t(ry) * map.width + rx];
-                        if (region && classes_[region].defined && !classes_[region].inherit_primary) sample_class = region;
-                    }
-                    if (!classes_[sample_class].strands) bare_class = sample_class;
-                }
-            }
-            if (bare_class && classes_[texel_class].strands) texel_class = bare_class;
-            const float samples = float(block * block);
-            coverage /= samples;
-            float* target = profile.data() + (std::size_t(py) * side + px) * 5;
-            for (unsigned c = 0; c < 5; ++c) {
-                const float previous = packed ? skin[c] : target[c];
-                target[c] = previous * (1 - coverage) + surface[c] / samples;
-            }
-            auto& texel = classes[std::size_t(py) * side + px];
-            if (coverage >= .5f) texel = texel_class;
-            else if (packed) texel = skin_;
-        }
+        w.masked = metal_mask && metal_mask_.defined && classes_[layer.primary].metal >= .5f;
+        w.mip_scale = double(alpha.width) / width;            // mip texels per source texel
+        w.block = std::max(1u, unsigned(std::lround(source_per_profile * w.mip_scale)));
     }
     if (!classified) { note = "no item layer"; return false; }
+
+    // The metal layers' masks, one thread each (each reads only its layer).
+    std::vector<LayerWork*> metal_layers;
+    for (auto& w : work) if (w.masked) metal_layers.push_back(&w);
+    run_parallel(unsigned(metal_layers.size()), profile_threads(), [&](unsigned at) {
+        auto& w = *metal_layers[at];
+        w.mask_ok = metal_mask_texels(*w.texture, w.mip, w.alpha, classes_[w.layer.primary], w.off, w.metal, w.leather, w.cloth);
+    });
+    std::uint32_t mask_layers = 0, mask_metal = 0, mask_leather = 0, mask_cloth = 0;
+    std::string mask_detail;  // per metal layer: name, region map, reference, counts
+    for (const auto* w : metal_layers) {
+        const auto& metal_class = classes_[w->layer.primary];
+        char line[200];
+        if (w->mask_ok) {
+            ++mask_layers;mask_metal += w->metal;mask_leather += w->leather;mask_cloth += w->cloth;
+            char tint[32] = "grey";
+            if (metal_class.tint_max >= metal_class.tint_min)
+                std::snprintf(tint, sizeof(tint), "tint h%.0f-%.0f", metal_class.tint_min, metal_class.tint_max);
+            std::snprintf(line, sizeof(line), "; %s%s %s %s leather %u cloth %u of %u", w->name->c_str(),
+                          w->layer.regions ? " (map)" : "", metal_class.name.c_str(), tint, w->leather, w->cloth, w->metal);
+        } else std::snprintf(line, sizeof(line), "; %s colour unreadable", w->name->c_str());
+        mask_detail += line;
+    }
+
+    for (auto& w : work) {
+        for (unsigned r = 0; r < 256; ++r) {
+            const auto& c = classes_[r];
+            w.region_value[r] = nullptr;w.region_centre[r] = 0;w.region_bare[r] = w.layer.primary;
+            if (!r || !c.defined) continue;
+            if (c.inherit_primary) {
+                auto& value = w.inherited[r];
+                value = w.primary;
+                value[0] = std::max(value[0], c.roughness_min), value[4] = std::max(value[4], c.relief_min);
+                w.region_value[r] = value.data();
+            } else {
+                w.region_value[r] = encoded[r].data();w.region_centre[r] = std::uint8_t(r);w.region_bare[r] = std::uint8_t(r);
+            }
+        }
+        if (const RegionMap* map = w.layer.regions.get()) {
+            w.map_column.resize(w.alpha.width);w.map_row.resize(w.alpha.height);
+            for (std::uint32_t tx = 0; tx < w.alpha.width; ++tx)
+                w.map_column[tx] = std::min(map->width - 1, std::uint32_t((tx + .5) / w.alpha.width * map->width));
+            for (std::uint32_t ty = 0; ty < w.alpha.height; ++ty)
+                w.map_row[ty] = std::size_t(std::min(map->height - 1, std::uint32_t((ty + .5) / w.alpha.height * map->height))) * map->width;
+        }
+        w.column_start.resize(side);
+        for (std::uint32_t px = 0; px < side; ++px) {
+            const double sx = (px + .5) * source_per_profile - w.x - source_per_profile * .5;
+            w.column_start[px] = sx < -.5 || sx >= w.width - .5 ? -1 : int(sx * w.mip_scale);
+        }
+    }
+
+    // Area sampling. Profile rows are independent: each thread takes every
+    // n-th row and applies the layers to it in composition order. A row's
+    // texels are summed side by side, block row by block row; each texel
+    // keeps its own order (rows, then columns of its block).
+    const unsigned threads = std::max(1u, std::min(profile_threads(), side / 16));
+    std::vector<std::vector<float>> thread_sums(threads, std::vector<float>(std::size_t(side) * 6));
+    std::vector<std::vector<std::uint8_t>> thread_centre(threads, std::vector<std::uint8_t>(side)),
+                                           thread_bare(threads, std::vector<std::uint8_t>(side));
+    run_parallel(threads, threads, [&](unsigned thread) {
+        auto& sums = thread_sums[thread];
+        auto& row_centre = thread_centre[thread];
+        auto& row_bare = thread_bare[thread];
+        for (std::uint32_t py = thread; py < side; py += threads) for (const auto& w : work) {
+            // This profile row's source rows within the layer.
+            const double sy = (py + .5) * source_per_profile - w.y - source_per_profile * .5;
+            if (sy < -.5 || sy >= w.height - .5) continue;
+            const int my = int(sy * w.mip_scale);
+            const AlphaReader alpha_at(w.alpha);
+            const unsigned block = w.block, centre = block / 2;
+            const RegionMap* map = w.layer.regions.get();
+            const std::uint8_t primary_class = w.layer.primary;
+            // Per texel: coverage and the five surface sums; the class at the
+            // block's centre; and any opaque texel of the block in a class
+            // without strands (bone, eyes, cloth beside a pelt): the fur pass
+            // reads one class texel per 4-8 layer texels, so a centre-only
+            // class let strands grow over thin bare art (fangs, muzzle edge).
+            std::fill(sums.begin(), sums.end(), 0.f);
+            std::fill(row_centre.begin(), row_centre.end(), primary_class);
+            std::fill(row_bare.begin(), row_bare.end(), std::uint8_t(0));
+            for (unsigned j = 0; j < block; ++j) {
+                const std::uint32_t ty = std::uint32_t(std::clamp(my + int(j), 0, int(w.alpha.height) - 1));
+                const std::uint8_t* region_line = map ? map->classes.data() + w.map_row[ty] : nullptr;
+                const std::uint8_t* off_line = w.off.empty() ? nullptr : w.off.data() + std::size_t(ty) * w.alpha.width;
+                for (std::uint32_t px = 0; px < side; ++px) {
+                    const int mx = w.column_start[px];
+                    if (mx < 0) continue;
+                    float* stored = sums.data() + std::size_t(px) * 6;
+                    float sum[6] = {stored[0], stored[1], stored[2], stored[3], stored[4], stored[5]};
+                    std::uint8_t texel_class = row_centre[px], bare_class = row_bare[px];
+                    for (unsigned k = 0; k < block; ++k) {
+                        const std::uint32_t tx = std::uint32_t(std::clamp(mx + int(k), 0, int(w.alpha.width) - 1));
+                        const float opacity = alpha_at(tx, ty);
+                        const bool at_centre = j == centre && k == centre;
+                        // A clear texel adds nothing (+0) to the sums; only the
+                        // block centre's class still counts.
+                        if (opacity == 0.f && !at_centre) continue;
+                        const float* value = w.primary.data();
+                        std::uint8_t region = 0;
+                        if (region_line && (region = region_line[w.map_column[tx]], w.region_value[region])) {
+                            value = w.region_value[region];
+                            if (at_centre && w.region_centre[region]) texel_class = w.region_centre[region];
+                        } else if (off_line) {
+                            if (const std::uint8_t c = off_line[tx]) {
+                                value = encoded[c].data();
+                                if (at_centre) texel_class = c;
+                            }
+                        }
+                        sum[0] += opacity;
+                        for (unsigned c = 0; c < 5; ++c) sum[1 + c] += value[c] * opacity;
+                        if (opacity >= .5f && !bare_class) {
+                            const std::uint8_t sample_class = region_line ? w.region_bare[region] : primary_class;
+                            if (!classes_[sample_class].strands) bare_class = sample_class;
+                        }
+                    }
+                    for (unsigned c = 0; c < 6; ++c) stored[c] = sum[c];
+                    row_centre[px] = texel_class;row_bare[px] = bare_class;
+                }
+            }
+            const float samples = float(block * block);
+            for (std::uint32_t px = 0; px < side; ++px) {
+                if (w.column_start[px] < 0) continue;
+                const float* sum = sums.data() + std::size_t(px) * 6;
+                std::uint8_t texel_class = row_centre[px];
+                if (row_bare[px] && classes_[texel_class].strands) texel_class = row_bare[px];
+                const float coverage = sum[0] / samples;
+                float* target = profile.data() + (std::size_t(py) * side + px) * 5;
+                for (unsigned c = 0; c < 5; ++c) {
+                    const float previous = packed ? skin[c] : target[c];
+                    target[c] = previous * (1 - coverage) + sum[1 + c] / samples;
+                }
+                auto& texel = classes[std::size_t(py) * side + px];
+                if (coverage >= .5f) texel = texel_class;
+                else if (packed) texel = skin_;
+            }
+        }
+    });
     if (!mask_detail.empty()) {
         char line[160];
         std::snprintf(line, sizeof(line), "metal mask: %u layer(s), %u of %u metal texels reclassified (leather %u, cloth %u)",
                       mask_layers, mask_leather + mask_cloth, mask_metal, mask_leather, mask_cloth);
         note = line + mask_detail;
     }
-    const auto unorm = [](float v) { return std::uint8_t(std::lround(std::clamp(v, 0.f, 1.f) * 255.f)); };
     rgba.resize(std::size_t(side) * side * 4);relief.resize(std::size_t(side) * side);
     for (std::size_t i = 0; i < relief.size(); ++i) {
-        for (unsigned c = 0; c < 4; ++c) rgba[i * 4 + c] = unorm(profile[i * 5 + c]);
-        relief[i] = unorm(profile[i * 5 + 4] * .5f); // stored halved: class relief runs 0..2
+        for (unsigned c = 0; c < 4; ++c) rgba[i * 4 + c] = unorm8(profile[i * 5 + c]);
+        relief[i] = unorm8(profile[i * 5 + 4] * .5f); // stored halved: class relief runs 0..2
     }
     return true;
 }
@@ -758,16 +1032,109 @@ int Renderer::fur_mode() const noexcept {
 // A figure texture value registered for colour with its game texture name.
 void Renderer::note_material_texture(const std::string& name, std::uint64_t backing, bool unit, bool surface) noexcept try {
     if (name.empty() || !backing) return;
-    auto& entry = material_profiles_[backing];
+    const auto [found, added] = material_profiles_.try_emplace(backing);
+    if (added) ++material_instances_revision_;  // records of this texture become profiled instances
+    auto& entry = found->second;
     entry.surface = entry.surface || surface;
     if (unit && !entry.unit) { entry.unit = true;material_profiles_dirty_ = true; }
     if (entry.name == name) return;
-    entry.name = name;entry.serial = 0;entry.srv.Reset();entry.relief_srv.Reset();entry.class_srv.Reset();entry.profile12.reset();entry.class12.reset();++material_profiles_revision_;entry.strands = false;entry.coat = false;entry.failed = false;
+    entry.name = name;entry.serial = 0;entry.pending = {};entry.ticket.cancel();entry.srv.Reset();entry.relief_srv.Reset();entry.class_srv.Reset();entry.profile12.reset();entry.class12.reset();entry.burn12.reset();entry.burn_tried=false;++material_profiles_revision_;entry.strands = false;entry.coat = false;entry.failed = false;
     material_profiles_dirty_ = true;
 } catch (...) {}
 
 // Before a colour flush: (re)build the profiles whose composition changed,
 // once per change (a new texture, a new layer list, the level turned on).
+namespace {
+// One background thread builds composed atlas profiles, newest first (the
+// library's caches and layer store are not shared between builds). A
+// promise's future never blocks the render thread on destruction; a task
+// whose entry was superseded or erased before it starts is skipped.
+class MaterialProfileWorker {
+public:
+    static MaterialProfileWorker& instance() { static MaterialProfileWorker worker; return worker; }
+    bool post(std::function<void()> task) {
+        try {
+            std::lock_guard<std::mutex> guard(lock_);
+            if (!started_) { std::thread(&MaterialProfileWorker::run, this).detach(); started_ = true; }
+            queue_.push_back(std::move(task));
+        } catch (...) { return false; }
+        wake_.notify_one();
+        return true;
+    }
+    std::mutex& library_lock() { return library_lock_; }
+private:
+    void run() {
+        for (;;) {
+            std::function<void()> task;
+            {
+                std::unique_lock<std::mutex> guard(lock_);
+                wake_.wait(guard, [this] { return !queue_.empty(); });
+                // Newest first: the look on screen now (the equip just made)
+                // is built next; earlier atlases still drain when it is idle.
+                task = std::move(queue_.back());
+                queue_.pop_back();
+            }
+            try { task(); } catch (...) {}
+        }
+    }
+    std::mutex lock_, library_lock_;
+    std::condition_variable wake_;
+    std::deque<std::function<void()>> queue_;
+    bool started_ = false;
+};
+}  // namespace
+
+void Renderer::prepare_fire_burn_materials() noexcept try {
+    if (!d3d12_ || !fire_burn_bound_ || !material_library_) return;
+    // The lookup describes renderer-owned textures, not engine objects or
+    // draw history. Backing replacement/retirement owns map lifetime too.
+    std::vector<std::uint32_t> table(1024, 0);
+    const auto add = [&](std::uint64_t backing, std::uint32_t descriptor) {
+        const auto found = material_profiles_.find(backing);
+        if (found == material_profiles_.end() || found->second.unit || descriptor == UINT_MAX) return;
+        auto& entry = found->second;
+        if (!entry.burn_tried) {
+            entry.burn_tried = true;
+            std::uint32_t width = 0, height = 0;
+            std::vector<std::uint8_t> labels;
+            bool classified = false;
+            {
+                std::lock_guard<std::mutex> guard(MaterialProfileWorker::instance().library_lock());
+                classified = material_library_->build_fire_burn_profile(entry.name, width, height, labels);
+            }
+            if (classified && (FAILED(d3d12_->create_texture(width, height, DXGI_FORMAT_R8_UINT, entry.burn12)) ||
+                FAILED(d3d12_->write_texture(*entry.burn12, RECT{0,0,LONG(width),LONG(height)}, labels.data(), width)))) {
+                entry.burn12.reset();
+                bridge_report_event("fire_burn_material_unavailable", entry.name.c_str());
+            }
+        }
+        if (!entry.burn12) return;
+        const auto index = d3d12_->bindless_index(*entry.burn12);
+        if (index == UINT_MAX) return;
+        if (table.size() <= descriptor) table.resize((std::size_t(descriptor) / 1024 + 1) * 1024, 0);
+        table[descriptor] = index;
+    };
+    for (const auto& item : native_owned_textures_)
+        if (item.second.d3d12) add(item.second.backing, d3d12_->bindless_index(*item.second.d3d12));
+    // Surface-backed retained statics can own their texture directly.
+    for (const auto& record : native_instance_records_)
+        if (record.occupied && record.command.texture12) {
+            const auto found = material_profiles_.find(record.command.material_backing);
+            if (found != material_profiles_.end() && found->second.surface)
+                add(record.command.material_backing, record.command.instance.padding[0]);
+        }
+    if (table == fire_material_table_ && fire_material_table12_) return;
+    D3D12TextureRef texture;
+    const UINT height = UINT(table.size() / 1024);
+    if (FAILED(d3d12_->create_texture(1024, height, DXGI_FORMAT_R32_UINT, texture)) ||
+        FAILED(d3d12_->write_texture(*texture, RECT{0,0,1024,LONG(height)}, table.data(), 1024 * sizeof(std::uint32_t)))) {
+        fire_material_table12_.reset();
+        bridge_report_event("fire_burn_material_unavailable", "descriptor table");
+        return;
+    }
+    fire_material_table12_ = std::move(texture); fire_material_table_ = std::move(table);
+} catch (...) { fire_material_table12_.reset(); }
+
 void Renderer::prepare_material_profiles() noexcept try {
     const int level = material_level();
     if (level != material_prepared_level_) { material_prepared_level_ = level;material_profiles_dirty_ = true;++material_profiles_revision_; }
@@ -777,12 +1144,18 @@ void Renderer::prepare_material_profiles() noexcept try {
         material_prepared_metal_mask_ = metal_mask;material_profiles_dirty_ = true;
         for (auto& item : material_profiles_) if (item.second.serial != UINT64_MAX) item.second.serial = 0;
     }
-    // F10 material_world: scenery profiles stop binding (D3D12 indices refresh).
-    const bool world = configured_boolean(debug_overlay_.config(), "material_world", true);
+    // F10 material_world or material_scenery off: scenery profiles stop
+    // binding (D3D12 indices refresh); material_scenery alone is the A/B.
+    const bool world = configured_boolean(debug_overlay_.config(), "material_world", true) &&
+                       configured_boolean(debug_overlay_.config(), "material_scenery", true);
     if (world != material_world_on_) { material_world_on_ = world;++material_profiles_revision_; }
-    if (!level || material_profiles_.empty()) return;
+    const bool burning = d3d12_ && fire_burn_bound_;
+    if ((!level && !burning) || material_profiles_.empty()) return;
     const std::uint64_t revision = retained_visual_scene().material_composition_revision();
-    if (!material_profiles_dirty_ && revision == material_checked_revision_) return;
+    if (!material_profiles_dirty_ && revision == material_checked_revision_) {
+        if (burning) prepare_fire_burn_materials();
+        return;
+    }
     material_profiles_dirty_ = false;material_checked_revision_ = revision;
     if (!material_library_tried_) {
         auto library = std::make_shared<MaterialLibrary>();
@@ -798,16 +1171,51 @@ void Renderer::prepare_material_profiles() noexcept try {
         }
     }
     if (!material_library_) return;
+    if (burning) prepare_fire_burn_materials();
+    if (!level) return;
+    // One build at a time: the library's layer store and caches are shared.
+    std::mutex& build_lock = MaterialProfileWorker::instance().library_lock();
     for (auto& item : material_profiles_) {
         auto& entry = item.second;
         MaterialComposition composition;
         std::uint32_t side = 0;
         std::vector<std::uint8_t> pixels, relief, classes;
         std::string note;
-        if (retained_visual_scene().material_composition(entry.name, composition)) {
+        const bool composed = entry.serial != UINT64_MAX &&
+                              retained_visual_scene().material_composition(entry.name, composition);
+        if (entry.pending.valid() && composed && composition.serial != entry.serial) {
+            // Latest wins: a newer layer list replaces the build in flight.
+            // A queued task is skipped; a running one finishes unread.
+            entry.pending = {};entry.ticket.cancel();
+        }
+        if (entry.pending.valid()) {
+            // A background build: upload it once ready; keep checking until then.
+            if (entry.pending.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+                material_profiles_dirty_ = true;
+                continue;
+            }
+            auto built = entry.pending.get();
+            material_profiles_dirty_ = true;  // a newer layer list may be waiting
+            {
+                // Build times: a running summary every 50 builds.
+                static unsigned builds = 0;
+                static double total_ms = 0, max_ms = 0;
+                ++builds;total_ms += built.build_ms;max_ms = std::max(max_ms, built.build_ms);
+                if (builds % 50 == 0) {
+                    char line[160];
+                    std::snprintf(line, sizeof(line), "build %u: %.1f ms (mean %.1f ms, max %.1f ms over %u builds)", builds,
+                                  built.build_ms, total_ms / builds, max_ms, builds);
+                    bridge_report_event("material_profile_time", line);
+                }
+            }
+            if (built.serial != entry.serial) continue;
+            if (!built.ok) { entry.failed = true;continue; }
+            side = built.side;pixels = std::move(built.pixels);relief = std::move(built.relief);classes = std::move(built.classes);
+            if (!built.note.empty()) bridge_report_event("materials", ("atlas " + entry.name + ": " + built.note).c_str());
+        } else if (composed) {
             // A composed atlas: from its layer list, once per layer list.
             if (entry.serial == composition.serial) continue;
-            entry.serial = composition.serial;entry.srv.Reset();entry.relief_srv.Reset();entry.class_srv.Reset();entry.profile12.reset();entry.class12.reset();++material_profiles_revision_;entry.strands = false;entry.coat = false;entry.failed = false;
+            entry.serial = composition.serial;entry.srv.Reset();entry.relief_srv.Reset();entry.class_srv.Reset();entry.profile12.reset();entry.class12.reset();entry.burn12.reset();entry.burn_tried=false;++material_profiles_revision_;entry.strands = false;entry.coat = false;entry.failed = false;
             // Packed attachment atlases (weapons, shields: one per armed
             // unit) at up to 512: their 128-texel orc and redress art put a
             // mace haft ~2.5 texels wide at 256, and the head's gloss
@@ -815,15 +1223,46 @@ void Renderer::prepare_material_profiles() noexcept try {
             const bool packed = composition.slots[0] >= 0 || composition.slots[1] >= 0 ||
                                 composition.slots[2] >= 0 || composition.slots[3] >= 0;
             side = std::min<std::uint32_t>(composition.dimension, packed ? 512u : 256u);
-            if (!material_library_->build_profile(composition, side, metal_mask, pixels, relief, classes, note)) { entry.failed = true;continue; }
-            if (!note.empty()) bridge_report_event("materials", ("atlas " + entry.name + ": " + note).c_str());
+            // Until it is uploaded the atlas draws without a profile, as
+            // between the reset above and the upload before.
+            std::shared_ptr<const MaterialLibrary> library = material_library_;
+            auto promise = std::make_shared<std::promise<MaterialProfileGpu::Built>>();
+            entry.pending = promise->get_future();
+            entry.ticket.serial = std::make_shared<std::atomic<std::uint64_t>>(composition.serial);
+            const bool posted = MaterialProfileWorker::instance().post(
+                [library, promise, ticket = entry.ticket.serial, composition = std::move(composition), side, metal_mask, &build_lock]() {
+                    MaterialProfileGpu::Built built;
+                    built.serial = composition.serial;built.side = side;
+                    try {
+                        std::lock_guard<std::mutex> guard(build_lock);
+                        // Superseded or erased before it started: nobody reads it.
+                        if (ticket->load() != composition.serial) {
+                            promise->set_value(std::move(built));
+                            return;
+                        }
+                        const auto start = std::chrono::steady_clock::now();
+                        built.ok = library->build_profile(composition, side, metal_mask, built.pixels, built.relief,
+                                                          built.classes, built.note);
+                        built.build_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+                    } catch (...) { built.ok = false; }
+                    promise->set_value(std::move(built));
+                });
+            if (!posted) { entry.pending = {};entry.failed = true; }
+            material_profiles_dirty_ = true;
+            continue;
         } else {
-            // A unit's fixed model texture: from units.json, once. Other
-            // textures (world objects) take the S2 path and no profile.
+            // A unit's fixed model texture (units.json) or a listed scenery
+            // texture (scenery.json): from the table, once. Other world
+            // object textures take the S2 path and no profile.
             constexpr std::uint64_t kUnitTable = UINT64_MAX;  // never a composition serial
             if (entry.serial == kUnitTable || !(entry.unit || material_library_->scenery_listed(entry.name))) continue;
-            entry.serial = kUnitTable;entry.scenery = !entry.unit;entry.srv.Reset();entry.relief_srv.Reset();entry.class_srv.Reset();entry.profile12.reset();entry.class12.reset();++material_profiles_revision_;entry.strands = false;entry.coat = false;entry.failed = false;
-            if (!material_library_->build_unit_profile(entry.name, side, pixels, relief, classes, note)) {
+            entry.serial = kUnitTable;entry.scenery = !entry.unit;entry.srv.Reset();entry.relief_srv.Reset();entry.class_srv.Reset();entry.profile12.reset();entry.class12.reset();entry.burn12.reset();entry.burn_tried=false;++material_profiles_revision_;entry.strands = false;entry.coat = false;entry.failed = false;
+            bool unit_built = false;
+            {
+                std::lock_guard<std::mutex> guard(build_lock);
+                unit_built = material_library_->build_unit_profile(entry.name, side, pixels, relief, classes, note);
+            }
+            if (!unit_built) {
                 entry.failed = true;
                 bridge_report_event("materials", ("unit texture " + entry.name + ": " + note +
                     "; drawn without a material profile (magenta in material_view 2)").c_str());
@@ -836,6 +1275,10 @@ void Renderer::prepare_material_profiles() noexcept try {
             // (fur armour) or any bare texel (no creature coat there).
             const auto strand_bits = material_library_->strand_classes();
             const auto coat_bytes = material_library_->coat_classes();
+            // A crystal class anywhere: the record takes a crystal instance (native_material_instance).
+            {const auto crystal_bits = material_library_->crystal_classes();bool crystal = false;
+             for (const auto value : classes) crystal = crystal || ((crystal_bits[value / 32] >> (value % 32)) & 1u) != 0;
+             if (crystal != entry.crystal) { entry.crystal = crystal;++material_instances_revision_; }}
             entry.strands = entry.coat = false;
             for (const auto value : classes) {
                 entry.strands = entry.strands || ((strand_bits[value / 32] >> (value % 32)) & 1u) != 0;
@@ -879,6 +1322,10 @@ void Renderer::prepare_material_profiles() noexcept try {
         // bare (no creature coat there).
         const auto strand_bits = material_library_->strand_classes();
         const auto coat_bytes = material_library_->coat_classes();
+        // A crystal class anywhere: the record takes a crystal instance (native_material_instance).
+        {const auto crystal_bits = material_library_->crystal_classes();bool crystal = false;
+         for (const auto value : classes) crystal = crystal || ((crystal_bits[value / 32] >> (value % 32)) & 1u) != 0;
+         if (crystal != entry.crystal) { entry.crystal = crystal;++material_instances_revision_; }}
         entry.strands = entry.coat = false;
         for (const auto value : classes) {
             entry.strands = entry.strands || ((strand_bits[value / 32] >> (value % 32)) & 1u) != 0;
@@ -958,6 +1405,32 @@ std::uint32_t Renderer::material_profile_index_d3d12(std::uint64_t backing) noex
     if (found == material_profiles_.end() || !found->second.profile12 || (found->second.scenery && !material_world_on_)) return 0;
     const std::uint32_t index = d3d12_->bindless_index(*found->second.profile12);
     return index == UINT32_MAX ? 0 : index;  // a full bindless region: unprofiled (magenta in view 2) until it grows
+}
+
+// Material instances (renderer.h): a texture that gained a profile entry
+// after its records were registered (another view of the same texture named
+// it later) moves those records to the profiled instance, so their batches
+// draw the program with the S1 code. Once per new entry, before the layout.
+void Renderer::refresh_native_material_instances() noexcept {
+    if (material_instances_checked_ == material_instances_revision_) return;
+    material_instances_checked_ = material_instances_revision_;
+    for (auto& record : native_instance_records_) {
+        const std::uint8_t instance = record.command.material_instance, domain = instance & 7u;
+        if (!record.occupied || !domain) continue;
+        const std::uint64_t backing = d3d12_ ? record.command.material_backing :
+            (record.command.state_bucket < native_state_buckets_.size() ? native_state_buckets_[record.command.state_bucket].material_key.texture_backing : 0);
+        const auto profile = backing ? material_profiles_.find(backing) : material_profiles_.end();
+        if (profile == material_profiles_.end()) continue;
+        // Profiled; a crystal profile moves units and world objects to the
+        // crystal domains (and back when the profile loses its crystal class).
+        std::uint8_t wanted = domain;
+        if (profile->second.crystal) wanted = domain == 1u ? kNativeCrystalUnitDomain : domain == 2u ? kNativeCrystalWorldDomain : domain;
+        else wanted = domain == kNativeCrystalUnitDomain ? 1u : domain == kNativeCrystalWorldDomain ? 2u : domain;
+        const std::uint8_t updated = std::uint8_t(wanted | 8u);
+        if (updated == instance) continue;
+        record.command.material_instance = updated;
+        native_layout_changed();
+    }
 }
 
 // Retained records keep their instance values across frames: when the

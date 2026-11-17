@@ -21,6 +21,7 @@
 #include "scene_core.h"
 #include "scene_wire.h"
 #include "test_harness_command.h"
+#include <unordered_map>
 
 // ---- raw wire PODs (layout-checked at connect) ------------------------------
 SCENE_WIRE_POD_NAMED(owned::WorldDrawCompletionSnapshot, world_draw_completion)
@@ -85,7 +86,7 @@ template <class A> void fields(A& a, std::shared_ptr<const OwnedVisualSurface>& 
     std::vector<std::uint8_t> mask = has_mask && !A::decoding ? *value.alpha_cut_mask : std::vector<std::uint8_t>{};
     scene_wire::fields_of(a, value.id, value.generation, value.width, value.height, value.pitch, value.format,
                           value.has_color_key, value.color_key, has_mask, mask, value.alpha_fully_opaque,
-                          value.static_mip_hint);
+                          value.static_mip_hint, value.block_content[0], value.block_content[1]);
     if constexpr (A::decoding) {
         if (has_mask) value.alpha_cut_mask = std::make_shared<const std::vector<std::uint8_t>>(std::move(mask));
         v = std::make_shared<const OwnedVisualSurface>(std::move(value));
@@ -178,7 +179,7 @@ template <class A> void fields(A& a, DrawFrame& v) {
 template <class A> void fields(A& a, Cursor& v) {
     scene_wire::fields_of(a, v.cache_key, v.pixels, v.width, v.height, v.destination);
 }
-template <class A> void fields(A& a, RetireSurface& v) { scene_wire::field(a, v.surface_id); }
+template <class A> void fields(A& a, RetireSurface& v) { scene_wire::fields_of(a, v.surface_id, v.evict_content); }
 template <class A> void fields(A&, FlushUi&) {}
 template <class A> void fields(A& a, ScreenRectangle& v) { scene_wire::fields_of(a, v.request, v.viewport); }
 template <class A> void fields(A& a, HudFrameLayer& v) { scene_wire::field(a, v.frames); }
@@ -212,7 +213,7 @@ template <class A> void fields(A& a, Capture& v) {
 template <class A> void fields(A& a, SurfaceWrite& v) {
     scene_wire::fields_of(a, v.id, v.generation, v.width, v.height, v.pitch, v.format, v.has_color_key, v.color_key,
                           v.static_mip_hint, v.world_mip_use, v.mip_source_used, v.whole, v.dirty, v.first_row, v.rows,
-                          v.bytes);
+                          v.bytes, v.content_hash, v.to_store, v.from_store);
 }
 }  // namespace scene_ui
 
@@ -231,7 +232,7 @@ template <class A> void fields(A& a, std::shared_ptr<SurfaceImage>& v) {
 }
 
 template <class A> void fields(A& a, GameParticleView& v) {  // particles/count travel in the command
-    scene_wire::fields_of(a, v.object_to_clip, v.clip_half_width, v.clip_half_height, v.additive, v.interface_pass);
+    scene_wire::fields_of(a, v.object_to_clip, v.clip_half_width, v.clip_half_height, v.additive, v.interface_pass, v.source_type);
     if constexpr (A::decoding) { v.particles = nullptr; v.count = 0; }
 }
 template <class A> void fields(A& a, GameRibbonView& v) {  // points/count travel in the command
@@ -246,7 +247,8 @@ template <class A> void fields(A& a, GameRibbon& v) { scene_wire::fields_of(a, v
 template <class A> void fields(A& a, GameSelection& v) { scene_wire::fields_of(a, v.view, v.state, v.texture); }
 template <class A> void fields(A& a, GameGlyphs& v) { scene_wire::fields_of(a, v.glyphs, v.state, v.texture); }
 template <class A> void fields(A& a, GamePrintRun& v) {
-    scene_wire::fields_of(a, v.vertices, v.object_to_clip, v.clip_half_width, v.clip_half_height, v.state, v.texture);
+    scene_wire::fields_of(a, v.vertices, v.object_to_clip, v.clip_half_width, v.clip_half_height, v.state, v.texture,
+                          v.interface_mark);
 }
 template <class A> void fields(A& a, WorldLighting& v) { scene_wire::fields_of(a, v.lighting, v.environment); }
 template <class A> void fields(A&, DiscardNative&) {}
@@ -306,15 +308,122 @@ template <class A> void camp_surface_fields(A& a, bool& present, OwnedVisualSurf
 }
 
 namespace scene_ui {
+// A borrowed array in the std::vector wire form (u32 count, raw elements).
+template <class A, class T> void borrowed_array(A& a, const T* data, std::uint32_t count) {
+    static_assert(scene_wire::raw_v<T>, "borrowed arrays are raw on the wire");
+    scene_wire::field(a, count);
+    if (count) a.raw(data, sizeof(T) * count);
+}
+// The arrays copy_scene_packet would have copied, read from the game's view
+// (the same bytes as the vectors' wire form).
+template <class A> void borrowed_packet_geometry(A& a, const NativeGeometryView& s) {
+    const std::uint32_t colors = s.normal_groups * 4u;
+    borrowed_array(a, s.positions, s.position_groups);
+    borrowed_array(a, s.normals, s.normal_groups);
+    borrowed_array(a, s.diffuse, s.diffuse ? colors : 0u);
+    borrowed_array(a, s.specular, s.specular ? colors : 0u);
+    borrowed_array(a, s.texture_coordinates, s.texture_coordinate_count);
+    borrowed_array(a, s.components, s.component_count);
+    borrowed_array(a, s.indices, s.index_count);
+    borrowed_array(a, s.morphs, s.morphs && s.morph_count ? s.morph_count : 0u);
+}
+template <class A> void borrowed_packet_mips(A& a, const NativeGeometryView& s) {
+    const bool mips = s.owned_texture.identity && s.owned_texture.mips;
+    std::uint32_t mip_count = mips ? s.owned_texture.mip_count : 0u;
+    scene_wire::field(a, mip_count);
+    for (std::uint32_t index = 0; index < mip_count; ++index) {
+        NativeOwnedTextureMip mip = s.owned_texture.mips[index];
+        scene_wire::field(a, mip);
+    }
+    scene_wire::field(a, mip_count);
+    for (std::uint32_t index = 0; index < mip_count; ++index) {
+        const auto& mip = s.owned_texture.mips[index];
+        borrowed_array(a, mip.data, mip.data && mip.bytes ? static_cast<std::uint32_t>(mip.bytes) : 0u);
+    }
+}
+// The packet's geometry arrays and its owned-texture mips as they travel
+// (encode side: the borrowed view's or the vectors). The game's store hashes
+// are the hashes of exactly these bytes.
+template <class A> void packet_geometry_fields(A& a, Packet& v) {
+    if constexpr (!A::decoding) {
+        if (v.borrowed) { borrowed_packet_geometry(a, *v.borrowed); return; }
+    }
+    scene_wire::fields_of(a, v.positions, v.normals, v.diffuse, v.specular, v.coordinates, v.components, v.indices,
+                          v.morphs);
+}
+template <class A> void packet_mip_fields(A& a, Packet& v) {
+    if constexpr (!A::decoding) {
+        if (v.borrowed) { borrowed_packet_mips(a, *v.borrowed); return; }
+    }
+    scene_wire::fields_of(a, v.mips, v.mip_bytes);
+}
+// The arrays the packet store keeps under store_hash: the geometry, and the
+// mips when the texture does not travel on its own (texture_store inline_only).
+template <class A> void packet_arrays_fields(A& a, Packet& v) {
+    packet_geometry_fields(a, v);
+    if (v.texture_store == PacketStore::inline_only) packet_mip_fields(a, v);
+}
+// Host: the packet store (replay thread only; written by Packet decodes and
+// PacketStoreEvict, keyed by the game's content hashes: packet arrays and,
+// apart, owned textures).
+inline std::unordered_map<std::uint64_t, std::shared_ptr<PacketArrays>>& core_packet_store() {
+    static std::unordered_map<std::uint64_t, std::shared_ptr<PacketArrays>> store;
+    return store;
+}
+// Host: the decoded vectors of `v` moved into a new stored value (mips bound).
+inline std::shared_ptr<PacketArrays> keep_packet_arrays(Packet& v, bool geometry, bool mips) {
+    auto kept = std::make_shared<PacketArrays>();
+    if (geometry) {
+        kept->positions = std::move(v.positions); kept->normals = std::move(v.normals);
+        kept->diffuse = std::move(v.diffuse); kept->specular = std::move(v.specular);
+        kept->coordinates = std::move(v.coordinates); kept->components = std::move(v.components);
+        kept->indices = std::move(v.indices); kept->morphs = std::move(v.morphs);
+    }
+    if (mips) {
+        kept->mips = std::move(v.mips); kept->mip_bytes = std::move(v.mip_bytes);
+        for (std::size_t index = 0; index < kept->mips.size() && index < kept->mip_bytes.size(); ++index)
+            kept->mips[index].data = kept->mip_bytes[index].empty() ? nullptr : kept->mip_bytes[index].data();
+    }
+    return kept;
+}
+inline std::shared_ptr<PacketArrays> stored_packet_arrays(std::uint64_t hash, bool& missing) {
+    const auto found = core_packet_store().find(hash);
+    if (found != core_packet_store().end()) return found->second;
+    missing = true;
+    return nullptr;
+}
 template <class A> void fields(A& a, Packet& v) {
     packet_view_fields(a, v.view);
-    scene_wire::fields_of(a, v.positions, v.normals, v.diffuse, v.specular, v.coordinates, v.components, v.indices,
-                          v.morphs, v.mips, v.mip_bytes, v.state, v.frame, v.frame_valid, v.bound, v.wound);
+    scene_wire::fields_of(a, v.store, v.store_hash, v.texture_store, v.texture_hash);
+    // The owned texture's mips on their own (texture_store keep), then the
+    // arrays (store inline_only/keep; with the mips when the texture travels
+    // with them).
+    if (v.texture_store == PacketStore::keep) packet_mip_fields(a, v);
+    if constexpr (A::decoding) {
+        if (v.texture_store == PacketStore::keep && !a.failed) {
+            v.stored_texture = keep_packet_arrays(v, false, true);
+            core_packet_store()[v.texture_hash] = v.stored_texture;
+        } else if (v.texture_store == PacketStore::stored) {
+            v.stored_texture = stored_packet_arrays(v.texture_hash, v.store_missing);
+        }
+    }
+    if (v.store != PacketStore::stored) packet_arrays_fields(a, v);
+    if constexpr (A::decoding) {
+        // The host's store: keep this packet's arrays, or take the kept ones.
+        if (v.store == PacketStore::stored) {
+            v.stored = stored_packet_arrays(v.store_hash, v.store_missing);
+        } else if (v.store == PacketStore::keep && !a.failed) {
+            v.stored = keep_packet_arrays(v, true, v.texture_store == PacketStore::inline_only);
+            core_packet_store()[v.store_hash] = v.stored;
+        }
+    }
+    scene_wire::fields_of(a, v.state, v.frame, v.frame_valid, v.bound, v.wound);
     camp_placement_fields(a, v.camp_state);
     camp_surface_fields(a, v.camp_surface_present, v.camp_surface);
     scene_wire::field(a, v.prepared_handles);
 }
 template <class A> void fields(A& a, RetireCampTexture& v) { scene_wire::fields_of(a, v.surface_id, v.generation); }
+template <class A> void fields(A& a, PacketStoreEvict& v) { scene_wire::field(a, v.hashes); }
 }  // namespace scene_ui
 
 namespace scene_core {
@@ -430,20 +539,24 @@ struct Readback {
     std::uint64_t id = 0, generation = 0;
     std::uint32_t left = 0, top = 0, right = 0, bottom = 0;  // back buffer box
     std::uint32_t first_byte = 0, bytes = 0;
+    // 1: the surface's bytes as last written (the host table's copy), not its
+    // GPU home; a host that no longer holds them answers E_PENDING.
+    std::uint8_t raw = 0;
     void run(Renderer& renderer);  // host (core_host.cpp)
 };
 template <class A> void fields(A& a, Readback& v) {
     scene_wire::fields_of(a, v.reply, v.back_buffer, v.id, v.generation, v.left, v.top, v.right, v.bottom, v.first_byte,
-                          v.bytes);
+                          v.bytes, v.raw);
 }
 
 // F11 in core mode (the overlay that handles it is off in the game process):
 // the host Renderer's next present takes the existing F11 capture.
 struct CaptureRequest {
     static constexpr bool frame_values = false;
+    bool package = false;  // Shift+F11: also the diagnostics zip (error_report.h)
     void run(Renderer& renderer);  // host (core_host.cpp)
 };
-template <class A> void fields(A&, CaptureRequest&) {}
+template <class A> void fields(A& a, CaptureRequest& v) { scene_wire::fields_of(a, v.package); }
 
 // The progress movie frames a host decode request asked for, decoded by the
 // game process with the game's binkw32 (renderer_load_progress.cpp).
@@ -609,13 +722,16 @@ struct CampIconPriority {
 };
 template <class A> void fields(A& a, CampIconPriority& v) { scene_wire::field(a, v.serials); }
 // A game surface (id, generation) became the native binding of icon serial:
-// the icon's host texture is that surface's GPU home.
+// the icon's host texture is that surface's GPU home while its cell draws.
+// The binding carries the asset name, so the host can decode the home again
+// after it released it, whatever became of the request serial.
 struct CampIconBind {
     static constexpr bool frame_values = false;
     std::uint64_t serial = 0, id = 0, generation = 0;
+    std::string name;
     void run(Renderer& renderer);  // host (core_camp.cpp)
 };
-template <class A> void fields(A& a, CampIconBind& v) { scene_wire::fields_of(a, v.serial, v.id, v.generation); }
+template <class A> void fields(A& a, CampIconBind& v) { scene_wire::fields_of(a, v.serial, v.id, v.generation, v.name); }
 
 // The game process's result of a display Apply the host overlay asked for
 // (Control::display_apply_serial): the overlay shows the message.

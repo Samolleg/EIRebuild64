@@ -150,7 +150,8 @@ void Renderer::begin_scene_game(){
      fades[i]={configured_boolean(config,key[hk_auto_fade].c_str(),false),float(configured_integer(config,key[hk_fade_transparency].c_str(),80))};}
  widescreen_set_hud_fades(fades,{configured_floating_point(config,"stance_scale",100.f),configured_floating_point(config,"game_speed_scale",100.f)},
      {configured_integer(config,"hud_fade_duration",250),configured_integer(config,"hud_fade_in_duration",250),configured_integer(config,"hud_fade_delay",2000)});
- widescreen_set_combat_text_scale(configured_integer(config,"combat_text_scale",100));
+ {RECT client{};const long output_height=hwnd_&&GetClientRect(hwnd_,&client)?client.bottom:0;
+  widescreen_set_combat_text_scale(configured_integer(config,"combat_text_scale",100),output_height);}
  widescreen_set_message_panel({configured_floating_point(config,"message_panel_width",100.f),configured_floating_point(config,"message_panel_height",100.f),
                               configured_floating_point(config,"message_panel_x",50.f),configured_floating_point(config,"message_panel_y",0.f),float(configured_integer(config,"message_panel_text_scale",100)),
                               float(configured_integer(config,"message_panel_buttons_scale",100)),configured_integer(config,"message_panel_buttons_side",0),float(configured_integer(config,"message_panel_border_padding",3))});
@@ -171,6 +172,7 @@ void Renderer::begin_scene_game(){
  bridge_set_change_driven_poses(configured_boolean(config,"change_driven_object_poses",true));
  bridge_set_terrain_lod_enabled(configured_boolean(config,"terrain_lod",false));
  bridge_set_owned_sky(configured_integer(config,"sky_clouds",2)>0);
+ bridge_set_fire_burn(configured_boolean(config,"fire_burn",false)&&configured_integer(config,"renderer_backend",0)==1);
 }
 
 void window_sampler_present(); // TEMPORARY (proxy.cpp)
@@ -195,6 +197,7 @@ void Renderer::set_scene_mode(bool active) noexcept{
   scene_sync("render_thread_off");
   scene_mode_.store(false,std::memory_order_release);
   scene_thread_->stop();
+  stop_surface_conversion_worker();  // every write that used it has run
   // The game thread presents again with the device's own latency.
   if(scene_frame_latency_restore_){ComPtr<IDXGIDevice1> dxgi;if(SUCCEEDED(device_.As(&dxgi)))dxgi->SetMaximumFrameLatency(scene_frame_latency_restore_);}
   scene_frame_latency_=0;
@@ -209,6 +212,98 @@ void Renderer::set_scene_mode(bool active) noexcept{
  bridge_report_event("render_thread",detail);
 }
 
+// owned_exceptions.log beside this module (as proxy.cpp's exception lines);
+// the line goes through the log writer thread (bridge_async_append).
+const wchar_t* frame_stall_log_path() noexcept {
+ static wchar_t path[MAX_PATH]{};
+ if(!path[0]){
+  HMODULE self=nullptr;
+  if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+     reinterpret_cast<LPCWSTR>(&frame_stall_log_path),&self))return nullptr;
+  wchar_t module[MAX_PATH]{};if(!GetModuleFileNameW(self,module,MAX_PATH))return nullptr;
+  wchar_t* slash=std::wcsrchr(module,L'\\');if(!slash)return nullptr;
+  wcscpy_s(slash+1,MAX_PATH-static_cast<std::size_t>(slash+1-module),L"owned_exceptions.log");
+  wcscpy_s(path,module);
+ }
+ return path;
+}
+
+// Frame stall detector (user decision 2026-11-14): the game thread's
+// present-to-present interval, every frame (one QPC read and one thread-time
+// read). An interval over kStallMs while the game clock runs (not paused, not
+// a menu) and outside the first seconds of a world (the load hold) writes one
+// loud line to owned_exceptions.log and bridge.jsonl/host.log: the interval,
+// how much of it the game thread was on the CPU (the rest it was blocked:
+// file I/O, a lock, a wait), the host present wait, the frame accounting's
+// top parts when they are on (harness runs), and the latest combat hits.
+// At most one line per 2 s and 200 a session; error_report's summary counts them.
+namespace frame_stall {
+constexpr double kStallMs = 250.0, kWorldGraceMs = 15000.0, kLineGapMs = 2000.0;
+std::int64_t g_previous = 0, g_epoch_qpc = 0, g_last_line = 0;
+std::uint64_t g_epoch = 0, g_thread_100ns = 0;
+std::uint32_t g_clock = 0;
+bool g_clock_valid = false;
+double g_host_wait_ms = 0;   // the previous present's wait for a host slot (core mode)
+// Captures (harness capture/screenshot/profile steps, F11) read the frame back
+// on the host: the presents around them wait for it by design (0.3-0.8 s on
+// the 3070 laptop). Stalls up to kCaptureQuietMs after the last one are skipped.
+constexpr double kCaptureQuietMs = 1500.0;
+std::int64_t g_capture_qpc = 0;
+void note_capture() noexcept { LARGE_INTEGER now{}; QueryPerformanceCounter(&now); g_capture_qpc = now.QuadPart; }
+void note_harness_step(bool valid, HarnessVerb verb) noexcept {
+ if(valid&&(verb==HarnessVerb::capture||verb==HarnessVerb::screenshot||verb==HarnessVerb::profile))note_capture();
+}
+unsigned g_lines = 0;
+std::uint64_t thread_time_100ns() noexcept {
+ FILETIME created{},exited{},kernel{},user{};
+ if(!GetThreadTimes(GetCurrentThread(),&created,&exited,&kernel,&user))return 0;
+ return ((std::uint64_t(kernel.dwHighDateTime)<<32)|kernel.dwLowDateTime)+((std::uint64_t(user.dwHighDateTime)<<32)|user.dwLowDateTime);
+}
+// Game thread, at the top of Renderer::present (the frame record just closed).
+void check(const frame_acct::Record& frame) noexcept {
+ LARGE_INTEGER now_value{},frequency{};QueryPerformanceCounter(&now_value);QueryPerformanceFrequency(&frequency);
+ const std::int64_t now=now_value.QuadPart;const double to_ms=1000.0/double(frequency.QuadPart);
+ const std::uint64_t thread=thread_time_100ns();
+ std::uint32_t clock=0;const bool clock_valid=bridge_game_clock_ms(clock);
+ const std::uint64_t epoch=bridge_current_world_epoch();
+ if(epoch!=g_epoch){g_epoch=epoch;g_epoch_qpc=now;}
+ const double interval=g_previous?double(now-g_previous)*to_ms:0;
+ const double cpu=g_thread_100ns&&thread>=g_thread_100ns?double(thread-g_thread_100ns)/10000.0:-1;
+ const bool clock_ran=clock_valid&&g_clock_valid&&clock!=g_clock;
+ const double host_wait=g_host_wait_ms;
+ g_previous=now;g_thread_100ns=thread;g_clock=clock;g_clock_valid=clock_valid;g_host_wait_ms=0;
+ if(GetAsyncKeyState(VK_F11)&0x8000)g_capture_qpc=now;  // F11 / Shift+F11 capture
+ if(interval<kStallMs||!epoch||!clock_ran||double(now-g_epoch_qpc)*to_ms<kWorldGraceMs)return;
+ if(g_capture_qpc&&double(now-g_capture_qpc)*to_ms<interval+kCaptureQuietMs)return;  // inside or just after a capture
+ if(g_lines>=200||(g_last_line&&double(now-g_last_line)*to_ms<kLineGapMs))return;
+ g_last_line=now;++g_lines;
+ char parts[200]="scopes off (harness runs only)";
+ if(frame.valid){
+  std::array<unsigned,frame_acct::count> order{};for(unsigned i=0;i<order.size();++i)order[i]=i;
+  std::partial_sort(order.begin(),order.begin()+3,order.end(),[&](unsigned a,unsigned b){return frame.ticks[a]>frame.ticks[b];});
+  const double scale=frame_acct::ms_per_tick();
+  std::snprintf(parts,sizeof(parts),"%s %.0f, %s %.0f, %s %.0f",frame_acct::part_name(order[0]),double(frame.ticks[order[0]])*scale,
+   frame_acct::part_name(order[1]),double(frame.ticks[order[1]])*scale,frame_acct::part_name(order[2]),double(frame.ticks[order[2]])*scale);
+ }
+ std::uint32_t hits=0;std::int64_t hit_qpc=0;bridge_combat_hit_stats(hits,hit_qpc);
+ char last_hit[64]="no hit yet";
+ if(hit_qpc)std::snprintf(last_hit,sizeof(last_hit),"last hit %.1f s before the frame end",double(now-hit_qpc)*to_ms/1000.0);
+ SYSTEMTIME t{};GetLocalTime(&t);
+ char line[640];
+ const int length=std::snprintf(line,sizeof(line),
+  "!!!! FRAME STALL %.0f ms at %02u:%02u:%02u.%03u world_epoch=%llu | game thread on CPU %.0f ms, blocked %.0f ms | host present wait %.0f ms | "
+  "top parts: %s | last events: %u combat hits so far, %s\r\n",
+  interval,t.wHour,t.wMinute,t.wSecond,t.wMilliseconds,static_cast<unsigned long long>(epoch),cpu,cpu>=0?(std::max)(0.0,interval-cpu-host_wait):-1.0,
+  host_wait,parts,hits,last_hit);
+ if(length<=0)return;
+ const int used=(std::min)(length,int(sizeof(line)-1));
+ bridge_async_append(frame_stall_log_path(),line,std::size_t(used));
+ int end=used;while(end>0&&(line[end-1]=='\r'||line[end-1]=='\n'))--end;
+ line[end]=0;
+ bridge_report_event("frame_stall",line);
+}
+}  // namespace frame_stall
+
 // DD::presentVisual, game thread. Off: the frame is presented here. On: the
 // game thread copies what only it may read (harness step, outer frame timing,
 // bridge values), waits only while the previous frame has not presented, and
@@ -219,6 +314,7 @@ HRESULT Renderer::present(){
  // is charged to the next frame, outside its named steps as pf_other
  // (present_entry while the scene thread presents).
  fa_game_frame_=frame_acct::close_frame();
+ frame_stall::check(fa_game_frame_);
  // After this present the game is outside its draw until the next
  // BeginFrame (game_other unless the outer-frame hooks name the segment).
  frame_acct::set_root(frame_acct::game_other);
@@ -286,6 +382,7 @@ HRESULT Renderer::queue_present(){
 #ifndef EID3D11_EMBEDDED
  inputs.harness_command_valid=harness_present_step_copy(inputs.harness_command,inputs.harness_entry_id,
   inputs.harness_camera_steps,inputs.harness_on_travel_map);
+ frame_stall::note_harness_step(inputs.harness_command_valid,inputs.harness_command.verb);
  inputs.harness_banner=harness_banner_text();
 #endif
  if(!bridge_capture_frame_values(inputs.bridge))return E_FAIL;
@@ -306,7 +403,7 @@ HRESULT Renderer::queue_present(){
   bridge_install_profile_values(shared->profile);
   const HRESULT hr=present_frame(shared.get());
   scene_thread_->set_present_result(hr);
- },true);
+ },true,"present_frame");
  // A load progress movie decode the scene thread asked for (the game's
  // binkw32 imports run on this thread only), after this frame's present was queued.
  if(queued){
@@ -405,6 +502,111 @@ void Renderer::core_send(std::uint16_t command,const std::vector<std::uint8_t>& 
 #else
 void Renderer::core_send(std::uint16_t command,const std::vector<std::uint8_t>& bytes) noexcept{
  x64remote::scene_message(command,bytes.data(),bytes.size());
+}
+void Renderer::core_send_fill(std::uint16_t command,std::size_t bytes,void (*fill)(void*,std::uint8_t*),void* context) noexcept{
+ x64remote::scene_message_fill(command,bytes,fill,context);
+}
+
+// ---- Core mode: the host's packet store (claude/stream-delta) ----------------
+namespace {
+constexpr std::size_t kPacketStoreMinimumBytes=4096;          // smaller arrays travel inline
+constexpr std::uint64_t kPacketStoreUnusedFrames=300;         // then a hash leaves the store
+constexpr std::uint64_t kPacketStoreBudget=256ull<<20;        // host bytes kept at most
+constexpr std::uint64_t kPacketStoreTrimTo=192ull<<20;
+}
+void Renderer::core_packet_store(scene_ui::Packet& packet,
+ const std::shared_ptr<const std::vector<std::uint8_t>>* texture_source) noexcept try{
+ if(core_packet_store_enabled_<0){
+  wchar_t value[8]{};
+  core_packet_store_enabled_=GetEnvironmentVariableW(L"EID3D11_STREAM_STORE",value,8)&&value[0]==L'0'?0:1;
+ }
+ packet.store=scene_ui::PacketStore::inline_only;packet.store_hash=0;
+ packet.texture_store=scene_ui::PacketStore::inline_only;packet.texture_hash=0;
+ if(!core_packet_store_enabled_||core_packet_store_reset_)return;
+ // The owned texture on its own: its content hash once per immutable source
+ // buffer, the mips into the host's store once, then only the hash.
+ const NativeGeometryView* source_view=packet.borrowed;
+ if(texture_source&&*texture_source&&source_view&&source_view->owned_texture.identity&&
+    source_view->owned_texture.mips&&source_view->owned_texture.mip_count){
+  const auto& buffer=**texture_source;
+  const auto& texture=source_view->owned_texture;
+  // The slices the view takes from the buffer (all inside it, or no memo).
+  scene_wire::Hasher layout_hash;bool inside=true;std::uint64_t texture_bytes=0;
+  for(std::uint32_t index=0;index<texture.mip_count;++index){
+   const auto& mip=texture.mips[index];
+   const std::uintptr_t begin=reinterpret_cast<std::uintptr_t>(buffer.data()),at=reinterpret_cast<std::uintptr_t>(mip.data);
+   if(!mip.data||at<begin||at-begin+mip.bytes>buffer.size()){inside=false;break;}
+   const std::uint32_t slice[4]={static_cast<std::uint32_t>(at-begin),mip.width,mip.height,mip.bytes};
+   layout_hash.update(slice,sizeof(slice));texture_bytes+=mip.bytes;
+  }
+  if(inside){
+   const std::uint64_t layout=layout_hash.finish();
+   auto& memo=core_texture_memo_[*texture_source];
+   if(!memo.hash||memo.layout!=layout){
+    scene_wire::HashOut hash;scene_ui::packet_mip_fields(hash,packet);
+    memo.hash=hash.hasher.finish()^0x7E87A5E5D1F0C0DEull;  // apart from packet array hashes
+    if(!memo.hash)memo.hash=1;
+    memo.layout=layout;
+   }
+   auto& seen=core_packet_seen_[memo.hash];
+   packet.texture_hash=memo.hash;
+   if(seen.kept)packet.texture_store=scene_ui::PacketStore::stored;
+   else{packet.texture_store=scene_ui::PacketStore::keep;seen.kept=true;core_packet_kept_bytes_+=texture_bytes;}
+   seen.last_frame=core_packet_frame_;seen.bytes=static_cast<std::uint32_t>(texture_bytes);
+  }
+ }
+ scene_wire::Count count;scene_ui::packet_arrays_fields(count,packet);
+ if(count.bytes<kPacketStoreMinimumBytes)return;
+ scene_wire::HashOut hash;scene_ui::packet_arrays_fields(hash,packet);
+ const std::uint64_t key=hash.hasher.finish();
+ auto& seen=core_packet_seen_[key];
+ packet.store_hash=key;
+ if(seen.kept)packet.store=scene_ui::PacketStore::stored;
+ else if(seen.last_frame){
+  // Seen in an earlier post: these bytes repeat, the host keeps them.
+  packet.store=scene_ui::PacketStore::keep;seen.kept=true;core_packet_kept_bytes_+=count.bytes;
+ }
+ seen.last_frame=core_packet_frame_;seen.bytes=static_cast<std::uint32_t>(count.bytes);
+}catch(...){
+ // A texture already marked kept stays consistent: the reset resends all.
+ packet.store=scene_ui::PacketStore::inline_only;packet.store_hash=0;
+ packet.texture_store=scene_ui::PacketStore::inline_only;packet.texture_hash=0;
+ core_packet_store_reset_=true;
+}
+
+// Each present: hashes unused for kPacketStoreUnusedFrames leave the mirror
+// (and the host's store when kept); a store over its budget drops its least
+// recently used arrays. After a refused post the whole store starts over.
+void Renderer::core_packet_store_frame() noexcept try{
+ const std::uint64_t frame=core_packet_frame_++;
+ if(!core_packet_store_reset_&&(frame%30u)!=0&&core_packet_kept_bytes_<=kPacketStoreBudget)return;
+ for(auto memo=core_texture_memo_.begin();memo!=core_texture_memo_.end();)
+  memo=memo->first.expired()?core_texture_memo_.erase(memo):std::next(memo);
+ scene_ui::PacketStoreEvict evict;
+ if(core_packet_store_reset_){
+  for(const auto& entry:core_packet_seen_)if(entry.second.kept)evict.hashes.push_back(entry.first);
+  core_packet_seen_.clear();core_packet_kept_bytes_=0;
+ }else{
+  for(auto entry=core_packet_seen_.begin();entry!=core_packet_seen_.end();){
+   if(entry->second.last_frame+kPacketStoreUnusedFrames>=frame){++entry;continue;}
+   if(entry->second.kept){evict.hashes.push_back(entry->first);core_packet_kept_bytes_-=entry->second.bytes;}
+   entry=core_packet_seen_.erase(entry);
+  }
+  if(core_packet_kept_bytes_>kPacketStoreBudget){
+   std::vector<std::pair<std::uint64_t,std::uint64_t>> kept;  // last frame, hash
+   for(const auto& entry:core_packet_seen_)if(entry.second.kept)kept.push_back({entry.second.last_frame,entry.first});
+   std::sort(kept.begin(),kept.end());
+   for(const auto& item:kept){
+    if(core_packet_kept_bytes_<=kPacketStoreTrimTo)break;
+    auto found=core_packet_seen_.find(item.second);
+    core_packet_kept_bytes_-=found->second.bytes;evict.hashes.push_back(item.second);core_packet_seen_.erase(found);
+   }
+  }
+ }
+ core_packet_store_reset_=false;
+ if(!evict.hashes.empty())core_post_command(evict,"scene_packet_evict");
+}catch(...){
+ core_packet_store_reset_=true;
 }
 #endif
 
@@ -543,6 +745,55 @@ HRESULT Renderer::core_readback_surface(SurfaceImage& image){
 }
 #endif
 
+// Core mode: a released surface's bytes come back from the host's surface
+// table as they were written, exact for every format (the D3D12 backend keeps
+// them; the D3D11 backend restores a released entry from its GPU home first,
+// Readback::run). If the host no longer holds the generation, its GPU home is
+// read as BGRA and packed: exact for the round-trip formats, none for blocks.
+#if !defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_TOOL)
+HRESULT Renderer::core_restore_surface_pixels(SurfaceImage& image){
+ const bool blocks=(image.format.dwFlags&DDPF_FOURCC)!=0;
+ const UINT rows=blocks?std::max(1u,(image.height+3u)/4u):image.height;
+ const std::size_t required=std::size_t(image.pitch)*rows;
+ if(image.pitch<=0)return E_NOTIMPL;
+ const std::size_t area=x64remote::readback_bytes();
+ if(!area)return E_FAIL;
+ std::vector<std::uint8_t> bytes;
+ try{bytes.resize(required);}catch(...){return E_OUTOFMEMORY;}
+ HRESULT hr=S_OK;
+ for(std::size_t first=0;first<required&&SUCCEEDED(hr);first+=area){
+  scene_core::Readback command;
+  command.back_buffer=0;command.raw=1;command.id=image.id;command.generation=image.generation;
+  command.first_byte=static_cast<std::uint32_t>(first);
+  command.bytes=static_cast<std::uint32_t>(std::min(area,required-first));
+  command.reply=x64remote::next_reply_serial();
+  core_post_command(command,"readback");
+  hr=x64remote::wait_reply(command.reply);
+  if(SUCCEEDED(hr))std::memcpy(bytes.data()+first,x64remote::readback_area(),command.bytes);
+  x64remote::end_reply();
+ }
+ if(SUCCEEDED(hr)){
+  try{image.pixels=bytes;}catch(...){return E_OUTOFMEMORY;}
+  return S_OK;
+ }
+ if(blocks)return hr;
+ std::vector<std::uint8_t> bgra;
+ hr=core_readback(false,image.id,image.generation,RECT{0,0,LONG(image.width),LONG(image.height)},bgra);
+ if(FAILED(hr))return hr;
+ if(bgra.size()<std::size_t(image.width)*image.height*4u)return E_FAIL;
+ try{image.pixels.resize(required);}catch(...){return E_OUTOFMEMORY;}
+ std::uint8_t* pixels=image.pixels.data();
+ const UINT bytes_per_pixel=std::max<UINT>(1,image.format.dwRGBBitCount/8);
+ const PackedChannelTables tables(image.format);
+ for(UINT y=0;y<image.height;++y){
+  const auto* source=reinterpret_cast<const std::uint32_t*>(bgra.data()+(size_t)y*image.width*4u);
+  pack_bgra_row(pixels+(size_t)y*image.pitch,source,image.width,std::min<UINT>(bytes_per_pixel,4),tables);
+ }
+ return S_OK;
+}
+
+#endif
+
 // capture() in core mode: an unstretched copy becomes the target's GPU home
 // on the host (scene_ui::Capture, the target's new generation); a stretched
 // one is read back and converted here, as the standard CPU path does.
@@ -573,6 +824,7 @@ HRESULT Renderer::core_capture(SurfaceImage& destination,const RECT& destination
   command.width=destination.width;command.height=destination.height;
   scene_ui_pending_=false;scene_native_pending_=false;
   core_post_command(command,"capture");
+  core_content_release(destination.id);
   destination.uploaded_generation=destination.generation;destination.uploaded_shape=surface_upload_shape(destination);
   clear_surface_dirty(destination);destination.gpu_captured=true;update_surface_memory_accounting(destination);
   return S_OK;
@@ -714,15 +966,22 @@ HRESULT Renderer::core_present(){
   // The host dropped cached UI quads this mirror still claimed: resend them.
   if(control.overlay_mirror_resets!=core_overlay_resets_seen_){
    core_overlay_resets_seen_=control.overlay_mirror_resets;overlay_mirror_.clear();
-  }}
+  }
+  bridge_set_terrain_lod_hidden_distance(float(control.terrain_lod_hidden_cm)*.01f);}
  try{
   scene_core::Present command;
   auto& inputs=command.inputs;
+  // Import a completed host/F10 save before applying this present's config
+  // command. Reloading afterward could discard the acknowledged session
+  // value before core_send_config delivered it to the host.
+  {const long saved=x64remote::control().config_saved;
+   if(saved!=core_config_saved_seen_){core_config_saved_seen_=saved;debug_overlay_.reload_config();apply_config_settings();}}
   inputs.harness_command_valid=harness_present_step_copy(inputs.harness_command,inputs.harness_entry_id,
    inputs.harness_camera_steps,inputs.harness_on_travel_map);
+  frame_stall::note_harness_step(inputs.harness_command_valid,inputs.harness_command.verb);
   inputs.harness_banner=harness_banner_text();
-  // A config step changes this process's options (it owns the ini); the
-  // host takes them with the config command below, before this present.
+  // A config step changes this process's options; the host takes them with
+  // the config command below, before this present (the host owns the ini).
   if(inputs.harness_command_valid&&inputs.harness_command.verb==HarnessVerb::config){
    if(inputs.harness_entry_id!=core_harness_config_entry_){
     std::string detail;const bool ok=apply_harness_config(inputs.harness_command,detail);
@@ -730,10 +989,6 @@ HRESULT Renderer::core_present(){
    }
    inputs.harness_command_valid=false;
   }
-  // The host overlay saved the ini (F10): reload and apply it here (this
-  // process owns the hooks it drives); the options then go to the host.
-  {const long saved=x64remote::control().config_saved;
-   if(saved!=core_config_saved_seen_){core_config_saved_seen_=saved;debug_overlay_.reload_config();apply_config_settings();}}
   debug_overlay_.maintain(); // cursor confinement and focus (window hook mode)
   // The host's neighbour border fog: the game's per-entity fog (WorldScene
   // fog table, neighbour_continued_border_fog) continues the band with it.
@@ -786,6 +1041,11 @@ HRESULT Renderer::core_present(){
     core_widescreen_sent_=std::move(encoded);
    }}
   core_send_mounts(); // the game's resource mounts for the host's own resource readers
+  // The host's overlay draws the combat UI at every present, also on frames
+  // that carry only a loading picture (PresentImage), where no world or UI
+  // command synced it: its last mission, portraits and effects stayed and
+  // were drawn over the loading screen.
+  core_sync_combat();
   // This process's address space per load (the renderer's load_reveal line
   // reports the host's in core mode): 10 s after the world epoch changes.
   {const std::uint64_t epoch=bridge_current_world_epoch();const ULONGLONG now=GetTickCount64();
@@ -803,7 +1063,8 @@ HRESULT Renderer::core_present(){
   // F11: the capture runs on the host Renderer (edge, game window focused).
   {const bool down=(GetAsyncKeyState(VK_F11)&0x8000)!=0;
    if(down&&!core_f11_down_&&GetForegroundWindow()==hwnd_){
-    std::vector<std::uint8_t> request{0};scene_wire::encode_into(request,scene_core::CaptureRequest{});
+    scene_core::CaptureRequest capture{};capture.package=(GetAsyncKeyState(VK_SHIFT)&0x8000)!=0; // Shift+F11: the diagnostics zip too
+    std::vector<std::uint8_t> request{0};scene_wire::encode_into(request,capture);
     core_send(static_cast<std::uint16_t>(scene_core::Command::capture_request),request);
    }
    core_f11_down_=down;}
@@ -830,10 +1091,14 @@ HRESULT Renderer::core_present(){
   std::vector<std::uint8_t> bytes{0};
   scene_wire::encode_into(bytes,command);
   core_send(static_cast<std::uint16_t>(scene_core::Command::present),bytes);
+  core_packet_store_frame();
   // Records reach the host only when published (the writer batches up to
   // 256 KB): the present closes the frame, so it publishes everything.
   x64remote::publish();
-  {const stall_watch::Exempt wait;const frame_acct::Scope wait_scope(frame_acct::wait_present_slot);x64remote::wait_presents(command.serial);
+  {const stall_watch::Exempt wait;const frame_acct::Scope wait_scope(frame_acct::wait_present_slot);
+   const std::int64_t wait_start=perf_now();
+   x64remote::wait_presents(command.serial);
+   frame_stall::g_host_wait_ms+=double(perf_now()-wait_start)*1000.0/double(perf_frequency());
    // latency_pacing (host-set): start the next frame later, so its present
    // reaches the host when it can take it instead of queueing in the ring.
    // A high-resolution timer to the last half millisecond, then a spin.
@@ -856,6 +1121,12 @@ HRESULT Renderer::core_present(){
 
 // Core mode: the camp icons are decoded on the host (Host/core_camp.cpp), which
 // answers their alpha facts; this process never runs a host command.
-namespace scene_ui { bool core_camp_icon_opaque(std::uint64_t,std::uint64_t,bool&) noexcept { return false; } }
+namespace scene_ui {
+int core_camp_icon_home(Renderer&,std::uint64_t,std::uint64_t,CampIconHome&) noexcept { return 0; }
+bool core_camp_icon_unmapped(std::uint64_t,std::uint64_t) noexcept { return false; }
+void core_camp_icon_outside(std::uint64_t,std::uint64_t,bool,bool) noexcept {}
+bool core_camp_icon_texels(std::uint64_t,std::uint64_t,std::uint64_t,float&,float&) noexcept { return false; }
+void core_camp_icon_density(std::uint64_t,std::uint64_t,float,float) noexcept {}
+}
 
 } // namespace owned

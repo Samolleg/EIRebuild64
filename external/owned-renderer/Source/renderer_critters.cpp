@@ -15,15 +15,20 @@
 //    scolopendra, dung beetle and ball, shore crab): rigid smooth parts with
 //    authored UVs and vertex normals on painted slices over game-skin grain.
 //
-// Simulation: a small CPU state (at most two critters, one ambient
-// flock and two carrion flocks of up to eight birds, nearby tracked corpses),
+//  * Fish (issue #114, critter_fish.inl): schools of procedural fish in the
+//    water, their body wave in the vertex shader. They cast no sun shadow and
+//    are marked in the world stencil for the water (mark_swimmers).
+//
+// Simulation: a small CPU state (a ground and a water-edge critter group, one
+// ambient flock, each from its own spawn lane, and two carrion flocks of up to
+// eight birds, nearby tracked corpses),
 // stepped by the game clock (frozen while paused, faster at fast speed).
 // Besides the time-based director, the world holds critter spots: at most one
 // per 32 m terrain sector, fixed by the map (sector_spot), biased by the
 // sector's game soundscape (sector_sound) and kept clear of campfires. A spot
 // is found occupied as it approaches the view edge, so the player runs into
 // creatures already there; it rests on game time after they were disturbed.
-// Director events and residents share one sparse on-screen budget.
+// Director lanes and residents share one sparse on-screen budget.
 // Per frame the CPU writes only instance roots and the procedural part
 // matrices of the live critters into small dynamic buffers; every mesh,
 // clip and skin is GPU-resident and the CPU build data is freed after upload.
@@ -38,12 +43,18 @@
 #include "owned_asset_loader.h"
 #include "owned_resource_runtime.h"
 #include "owned_resource_store.h"
+#include "liquid_surf.h"
 #include "renderer.h"
 #include "critter_base_mounts.h"
+#include "renderer_internal.h"
 #include "engine_bridge.h"
+#include "retained_static_scene.h"   // RetainedWorldPointLight::spell (critter spell blasts)
 #include "world_fog.h"
 #include "world_texture_sampler.h"
+#include "wind_trails.h"   // windiness and the grass's gust fronts (tumbleweeds)
 #include <d3dcompiler.h>
+#include <wincodec.h>
+#include <cstdio>
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -64,6 +75,9 @@ using namespace critters;
 
 constexpr double kSecondsPerSegment = .055;   // the ambient particles' game-clock scale
 constexpr float TAU = 6.28318531f, PI = 3.14159265f;
+// append_critter_shader_programs: crVS, crPS, crShadowVS; the CR_FISH crVS,
+// crPS, crMarkVS; the CR_CUTOUT crVS, crPS, crShadowCutVS, crShadowCutPS.
+constexpr unsigned kCritterPrograms = 10;
 
 constexpr char kCritterShader[] = R"(
 struct CrVertex{float3 p;uint bone;float2 uv;float s;uint flags;};
@@ -85,7 +99,14 @@ Texture2DArray crSkins:register(t31);
 SamplerState crWrap:register(s8);
 float3 crApply(CrBone b,float3 p){float4 h=float4(p,1);return float3(dot(b.r0,h),dot(b.r1,h),dot(b.r2,h));}
 struct CrOut{float4 p:SV_Position;float3 wp:TEXCOORD0;float2 uv:TEXCOORD1;nointerpolation uint slice:TEXCOORD2;
- nointerpolation float alpha:TEXCOORD3;float border:TEXCOORD4;float3 n:TEXCOORD5;};
+ nointerpolation float alpha:TEXCOORD3;float border:TEXCOORD4;float3 n:TEXCOORD5;
+#ifdef CR_FISH
+ nointerpolation float shine:TEXCOORD6;
+#endif
+#ifdef CR_CUTOUT
+ float tone:TEXCOORD6;
+#endif
+};
 // Smooth parts carry an octahedral normal (flags bit 1, 2 x 12 bits).
 float3 crNormal(uint f){float2 e=float2((f>>8)&4095u,(f>>20)&4095u)/4095.0*2-1;float3 n=float3(e,1-abs(e.x)-abs(e.y));
  if(n.z<0)n.xy=(1-abs(n.yx))*float2(n.x>=0?1:-1,n.y>=0?1:-1);return normalize(n);}
@@ -103,6 +124,20 @@ float3 crPlace(uint vid,uint iid,out float3 ln){
    lp+=lerp(crBaked[asuint(inst.c.x)+plot].r0.xyz,crBaked[asuint(inst.c.y)+plot].r0.xyz,inst.b.y);
   }
  }
+#ifdef CR_FISH
+ else if(mode==3u){
+  // Fish (critter_fish.inl): the travelling body wave at the vertex's body
+  // coordinate (v.s: 0 nose .. 1 tail tip; phase b.z in cycles, amplitude b.w
+  // x length c.x), the C-start bend c.y, and the paired fins (v.bone: kind in
+  // the low byte, fin coordinate above) sculling about their roots (c.z) and
+  // folding to the body in a burst (c.w).
+  // The wave's envelope: the tail's own (a.z 0), or a slider's eel-like one that reaches the head (a.z 1).
+  float3 w=v.p;const float u=v.s,e=max(u-.15,0)/.85;
+  w.x+=inst.c.x*(inst.b.w*lerp(.02+e*e,.25+.75*u,asfloat(inst.a.z))*sin(6.2831853*(u*.95-inst.b.z))+inst.c.y*(u-.3)*(u-.3));
+  if((v.bone&255u)>=2u){const float ft=float((v.bone>>8)&255u)/255.0;w.y+=inst.c.z*ft;w.x-=sign(v.p.x)*ft*inst.c.w;}
+  lp=w;if((v.flags&2u)!=0u)ln=crNormal(v.flags);
+ }
+#endif
  else{
   // Larva: mandibles from the crawler's idle clip while it casts about, then
   // the peristaltic wave tail to head (prototype critters.py larva_mesh).
@@ -128,6 +163,12 @@ CrOut crVS(uint vid:SV_VertexID,uint iid:SV_InstanceID){
  CrOut o;
  o.wp=crPlace(vid,iid,ln);
  o.p=mul(crClip,float4(o.wp,1));o.uv=v.uv;o.slice=inst.a.y>>8;o.alpha=inst.b.x;
+#ifdef CR_FISH
+ o.shine=inst.b.y; // fish scales (critters.h FishRule shine)
+#endif
+#ifdef CR_CUTOUT
+ o.tone=v.s; // tumbleweed cards: tone x baked occlusion (critter_tumbleweed.inl)
+#endif
  o.n=float3(dot(inst.r0.xyz,ln),dot(inst.r1.xyz,ln),dot(inst.r2.xyz,ln));
  o.border=1;
  if(crFogControl.y!=0&&crFogControl.x>0){
@@ -143,6 +184,26 @@ float4 crShadowVS(uint vid:SV_VertexID,uint iid:SV_InstanceID):SV_Position{
  if(crInstances[crBase+iid].b.x<.5)return float4(0,0,-1,1);
  return mul(shadowLight[shadowControl.y],float4(wp,1));
 }
+#ifdef CR_FISH
+// Swimmer mark (Renderer::mark_swimmers): the drawn fish again, depth and
+// stencil only. One mostly faded out leaves no mark.
+float4 crMarkVS(uint vid:SV_VertexID,uint iid:SV_InstanceID):SV_Position{
+ float3 ln;const float3 wp=crPlace(vid,iid,ln);
+ if(crInstances[crBase+iid].b.x<.5)return float4(0,0,-1,1);
+ return mul(crClip,float4(wp,1));
+}
+#endif
+#ifdef CR_CUTOUT
+// Cutout caster (tumbleweed twig cards): crShadowVS plus the skin's alpha.
+struct CrCutShadow{float4 p:SV_Position;float2 uv:TEXCOORD0;nointerpolation uint slice:TEXCOORD1;};
+CrCutShadow crShadowCutVS(uint vid:SV_VertexID,uint iid:SV_InstanceID){
+ float3 ln;const float3 wp=crPlace(vid,iid,ln);const CrInstance inst=crInstances[crBase+iid];
+ CrCutShadow o;o.uv=crVertices[crFirst+vid].uv;o.slice=inst.a.y>>8;
+ o.p=inst.b.x<.5?float4(0,0,-1,1):mul(shadowLight[shadowControl.y],float4(wp,1));
+ return o;
+}
+void crShadowCutPS(CrCutShadow i){clip(crSkins.Sample(crWrap,float3(i.uv,i.slice)).a-.45);}
+#endif
 struct CrPixel{float4 color:SV_Target0;float4 shadow:SV_Target1;float4 ambient:SV_Target2;};
 CrPixel crPS(CrOut i){
  // Fade in/out: screen-door dither (4x4 Bayer), the pass stays opaque. A
@@ -159,7 +220,14 @@ CrPixel crPS(CrOut i){
  float3 n=dot(i.n,i.n)>1e-12?i.n:cross(positionDy,positionDx);
  n=dot(n,n)>1e-20?normalize(n):float3(0,0,1);
  if(dot(n,crEye.xyz-i.wp)<0)n=-n;
+#ifdef CR_CUTOUT
+ // Alpha-cut cards (the lookdev's cut .45 on the atlas's 1-bit alpha).
+ const float4 texel=crSkins.Sample(crWrap,float3(i.uv,i.slice));
+ clip(texel.a-.45);
+ float3 alb=texel.rgb*i.tone;
+#else
  float3 alb=crSkins.Sample(crWrap,float3(i.uv,i.slice)).rgb;
+#endif
  float3 sun=dot(nativeWorldSunDirection.xyz,nativeWorldSunDirection.xyz)>1e-12?normalize(nativeWorldSunDirection.xyz):float3(0,0,1);
  float facing=saturate(dot(n,sun));
  float visibility=1;
@@ -181,6 +249,19 @@ CrPixel crPS(CrOut i){
  float3 directional=nativeWorldSunDiffuse.rgb*facing*visibility;
  float3 c=alb*(saturate(max(nativeWorldAmbient.rgb,directional)+local)+glow);
  float3 ambientShare=max(c-alb*(saturate(directional+local)+glow),0);
+#ifdef CR_FISH
+ {
+  // Fish scales: a sun glint that flashes as the body bends and turns. The
+  // lobe narrows and brightens with the species' shine; the painted pattern
+  // carries it (bright flanks mirror, the dark back and the fins barely do).
+  // Bounded, so a school sparkles without strobing.
+  float3 toEye=crEye.xyz-i.wp;toEye*=rsqrt(max(dot(toEye,toEye),1e-12));
+  const float power=lerp(12,72,i.shine);
+  const float lobe=min((power+2)*.125*pow(saturate(dot(n,normalize(sun+toEye))),power),2.5);
+  const float mirror=saturate(dot(alb,float3(.4,.4,.4))*1.4-.12);
+  c+=nativeWorldSunDiffuse.rgb*(visibility*facing*lobe*i.shine*mirror*.45);
+ }
+#endif
  if(crSwitches.y>0){
   // Caves: the volume's light and the exit glow in the fog, as on terrain.
   float3 caveFog=nativeCaveFogLight(i.wp)+nativeCaveExitGlow(i.wp);
@@ -265,15 +346,32 @@ static_assert(sizeof(CrFrame) % 16 == 0);
 
 // ---------------------------------------------------------------- meshes
 enum Mesh : std::uint8_t {
-    m_rat = 0, m_snowmouse, m_spider, m_frog, m_larva, m_bat,
+    m_rat = 0, m_snowmouse, m_spider, m_frog, m_larva, m_bat, m_squirrel, m_prairiedog,
+    m_cat_standard, m_cat_chonky, m_cat_lean, m_cat_short,
     m_lizard, m_snake, m_crab, m_scolopendra, m_dung, m_ball,
-    m_bird, m_corvid, m_bird_far, m_vulture, m_vulture_perch, m_count,
+    m_bird, m_corvid, m_bird_far, m_vulture, m_vulture_perch,
+    m_tumble,   // tumbleweed (critter_tumbleweed.inl): the cutout programs, the last range before the fish
+    m_fish, m_count = m_fish + 2 * fish_count,   // per fish: its near mesh, then its far one (the last meshes: they cast no shadow)
 };
+// Miniatures: m_rat .. m_cat_short (slice index = mesh index up to m_prairiedog; cats wear coat slices).
+constexpr unsigned kMiniCount = 12;
+static_assert(m_cat_short + 1 == kMiniCount, "the miniatures come first");
 enum Slice : std::uint8_t {
-    s_rat = 0, s_snowmouse, s_spider, s_frog, s_larva, s_bat, s_lizard, s_snake, s_finch, s_sparrow, s_bunting, s_snowbird,
-    s_crow, s_raven, s_vulture, s_crab, s_dung, s_scolopendra, s_count,
+    s_rat = 0, s_snowmouse, s_spider, s_frog, s_larva, s_bat, s_squirrel, s_prairiedog, s_lizard, s_snake, s_finch, s_sparrow,
+    s_bunting, s_snowbird, s_crow, s_raven, s_vulture, s_crab, s_dung, s_scolopendra, s_squirrel_ingos,
+    s_rat_city, s_fish, s_cat_tabby = s_fish + fish_count, s_cat_ginger, s_cat_grey, s_cat_black, s_cat_white, s_cat_tuxedo,
+    s_tumble, s_count,
 };
-constexpr unsigned kSkin = 128;
+// Two skin arrays: the cat coats (256 px: user 2026-11-14) and the tumbleweed's
+// twig crops (laid out on a 256 px slice, look approved by the user at that size)
+// are painted at kSkin and sit in their own array (layer = slice - s_cat_tabby);
+// every other skin is painted at kPaint (128 px) or less and sits in the kPaint
+// array (layer = slice), so only those slices pay for 256 px in the 32-bit game's
+// address space.
+constexpr unsigned kSkin = 256, kPaint = 128;
+constexpr unsigned kPaintSlices = s_cat_tabby, kCoatSlices = s_count - s_cat_tabby;
+bool coat_slice(unsigned s) { return s >= s_cat_tabby; }
+bool coat_mesh(unsigned m) { return (m >= m_cat_standard && m <= m_cat_short) || m == m_tumble; }   // samples the kSkin array
 
 // Bird variants: painted slice and the near / far meshes (lengths: bird_length).
 struct BirdLook { Slice slice; Mesh near_mesh, far_mesh; };
@@ -1009,6 +1107,34 @@ Image resize(const Image& img, unsigned n) {   // nearest, texel centres
         }
     return out;
 }
+// Suslanger city rat: rat00 recoloured near black (user 2026-11-14 preview):
+// the fur takes a dark warm grey scaled by its own painted detail (luminance
+// over the skin's median, ^1.15), so the strokes stay; the pink naked parts
+// (tail, ears, nose, feet: saturated red hues) keep their colour, a little greyer.
+Image city_rat_skin(const Image& img) {
+    Image out = img;
+    const std::size_t n = std::size_t(img.w) * img.h;
+    std::vector<float> lum(n);
+    for (std::size_t i = 0; i < n; ++i)
+        lum[i] = (.3f * img.rgb[i * 3] + .59f * img.rgb[i * 3 + 1] + .11f * img.rgb[i * 3 + 2]) / 255.f;
+    std::vector<float> sorted = lum;
+    std::nth_element(sorted.begin(), sorted.begin() + n / 2, sorted.end());
+    const float median = std::max(sorted[n / 2], 1e-3f);
+    for (std::size_t i = 0; i < n; ++i) {
+        const float r = img.rgb[i * 3] / 255.f, g = img.rgb[i * 3 + 1] / 255.f, b = img.rgb[i * 3 + 2] / 255.f;
+        const float mx = std::max({r, g, b}), mn = std::min({r, g, b}), dd = std::max(mx - mn, 1e-6f);
+        const float sat = (mx - mn) / std::max(mx, 1e-6f);
+        float hue = mx == r ? std::fmod((g - b) / dd + 6.f, 6.f) : mx == g ? (b - r) / dd + 2 : (r - g) / dd + 4;
+        hue /= 6;
+        const float t = std::clamp((sat - .2f) / .25f, 0.f, 1.f);
+        const float pink = t * t * (3 - 2 * t) * ((hue < .08f || hue > .9f) ? 1.f : 0.f);
+        const float detail = std::pow(std::clamp(lum[i], .04f, 1.f) / median, 1.15f);
+        const float fur[3]{.17f * detail, .155f * detail, .15f * detail}, keep[3]{r * .92f, g * .86f, b * .84f};
+        for (int k = 0; k < 3; ++k)
+            out.rgb[i * 3 + k] = std::uint8_t(std::clamp((std::min(fur[k], 1.f) * (1 - pink) + keep[k] * pink) * 255.f + .5f, 0.f, 255.f));
+    }
+    return out;
+}
 Image downsample(const Image& img, unsigned n) {   // box filter to n x n
     const unsigned s = img.w / n;
     Image out; out.w = out.h = n; out.rgb.resize(std::size_t(n) * n * 3);
@@ -1064,7 +1190,7 @@ const BirdPaint& bird_paint(Bird b) {
     return paints[b < bird_count ? b : 0];
 }
 Image paint_bird(const BirdPaint& c, const Image& feathers) {
-    Image img; img.w = img.h = kSkin; img.rgb.assign(std::size_t(kSkin) * kSkin * 3, 0);
+    Image img; img.w = img.h = kPaint; img.rgb.assign(std::size_t(kPaint) * kPaint * 3, 0);
     const auto ss = [](float a, float b, float x) { x = std::clamp((x - a) / (b - a), 0.f, 1.f); return x * x * (3 - 2 * x); };
     const auto frac = [](float x) { return x - std::floor(x); };
     // feather luminance of the game bird at 256 px coordinates, relative to
@@ -1086,9 +1212,9 @@ Image paint_bird(const BirdPaint& c, const Image& feathers) {
         if (l > 25) { mean += l; ++n; }
     }
     mean = n > 0 ? mean / n : 128.f;
-    for (unsigned y = 0; y < kSkin; ++y)
-        for (unsigned x = 0; x < kSkin; ++x) {
-            const float u = (x + .5f) / kSkin, v = (y + .5f) / kSkin;
+    for (unsigned y = 0; y < kPaint; ++y)
+        for (unsigned x = 0; x < kPaint; ++x) {
+            const float u = (x + .5f) / kPaint, v = (y + .5f) / kPaint;
             float col[3], detail = 1, strength = .5f;
             const auto mix = [&](const float* a, const float* b, float t) { for (int k = 0; k < 3; ++k) col[k] = a[k] + (b[k] - a[k]) * t; };
             const auto set = [&](const float* a) { for (int k = 0; k < 3; ++k) col[k] = a[k]; };
@@ -1139,7 +1265,7 @@ Image paint_bird(const BirdPaint& c, const Image& feathers) {
                 const float hu = (u - .89f) / .007f, ht = (t - .63f) / .02f;
                 if (hu * hu + ht * ht < 1) { const float glint[3]{210, 210, 200}; toward(glint, .8f); }
             }
-            for (int k = 0; k < 3; ++k) img.rgb[(std::size_t(y) * kSkin + x) * 3 + k] = std::uint8_t(std::clamp(col[k], 0.f, 255.f));
+            for (int k = 0; k < 3; ++k) img.rgb[(std::size_t(y) * kPaint + x) * 3 + k] = std::uint8_t(std::clamp(col[k], 0.f, 255.f));
         }
     return img;
 }
@@ -1153,15 +1279,15 @@ struct StripPaint {
     Pattern pattern; float marks, head_u, eye_u;
 };
 Image paint_strip(const StripPaint& c, const Image& grain) {
-    Image img; img.w = img.h = kSkin; img.rgb.assign(std::size_t(kSkin) * kSkin * 3, 0);
+    Image img; img.w = img.h = kPaint; img.rgb.assign(std::size_t(kPaint) * kPaint * 3, 0);
     const auto ss = [](float a, float b, float x) { x = std::clamp((x - a) / (b - a), 0.f, 1.f); return x * x * (3 - 2 * x); };
     const auto frac = [](float x) { return x - std::floor(x); };
     float mean = 0;
     for (const auto v : grain.rgb) mean += v;
     mean = std::max(mean / std::max<std::size_t>(grain.rgb.size(), 1), 1.f);
-    for (unsigned y = 0; y < kSkin; ++y)
-        for (unsigned x = 0; x < kSkin; ++x) {
-            const float u = (x + .5f) / kSkin, v = (y + .5f) / kSkin;
+    for (unsigned y = 0; y < kPaint; ++y)
+        for (unsigned x = 0; x < kPaint; ++x) {
+            const float u = (x + .5f) / kPaint, v = (y + .5f) / kPaint;
             float col[3];
             const auto set = [&](const float* a) { for (int k = 0; k < 3; ++k) col[k] = a[k]; };
             const auto toward = [&](const float* b, float t) { for (int k = 0; k < 3; ++k) col[k] += (b[k] - col[k]) * t; };
@@ -1204,7 +1330,7 @@ Image paint_strip(const StripPaint& c, const Image& grain) {
             }
             const std::size_t gi = (std::size_t(y % grain.h) * grain.w + x % grain.w) * 3;
             const float g = std::clamp((grain.rgb[gi] + grain.rgb[gi + 1] + grain.rgb[gi + 2]) / (3 * mean), .8f, 1.2f);
-            for (int k = 0; k < 3; ++k) img.rgb[(std::size_t(y) * kSkin + x) * 3 + k] = std::uint8_t(std::clamp(col[k] * g, 0.f, 255.f));
+            for (int k = 0; k < 3; ++k) img.rgb[(std::size_t(y) * kPaint + x) * 3 + k] = std::uint8_t(std::clamp(col[k] * g, 0.f, 255.f));
         }
     return img;
 }
@@ -1343,8 +1469,11 @@ bool load_model(const ResourceStore& store, const std::string& name, Model& mode
 }
 
 // Node rotations and positions at a clip frame (prototype eimodel.py world():
-// keys interpolated linearly / normalised, wrapping per track).
-void model_pose(const Model& m, const Clip* clip, float frame, std::vector<Q4>& Q, std::vector<V3>& P) {
+// keys interpolated linearly / normalised, wrapping per track). extra: an
+// optional rotation per node composed after its key (q e); root: an optional
+// rotation of the whole figure about its root node (r q, r p).
+void model_pose(const Model& m, const Clip* clip, float frame, std::vector<Q4>& Q, std::vector<V3>& P,
+                const std::vector<Q4>* extra = nullptr, const Q4* root = nullptr) {
     const std::size_t n = m.nodes.size();
     Q.assign(n, {1, 0, 0, 0}); P.assign(n, {});
     const int whole = int(std::floor(frame));
@@ -1368,8 +1497,11 @@ void model_pose(const Model& m, const Clip* clip, float frame, std::vector<Q4>& 
             const std::size_t f0 = std::size_t(whole) % t.size(), f1 = (f0 + 1) % t.size();
             p = t[f0] * (1 - a) + t[f1] * a;
         }
-        if (m.parent[i] == UINT_MAX) { Q[i] = q; P[i] = p; }
-        else {
+        if (extra) q = qmul(q, (*extra)[i]);
+        if (m.parent[i] == UINT_MAX) {
+            if (root) { q = qmul(*root, q); p = qrot(*root, p); }
+            Q[i] = q; P[i] = p;
+        } else {
             const auto j = m.parent[i];
             P[i] = P[j] + qrot(Q[j], m.offset[i]);
             Q[i] = qmul(q, Q[j]);
@@ -1698,13 +1830,289 @@ bool build_statue(const Model& fly, const Model& perch, StatueBird& s, std::stri
     return true;
 }
 
+enum MiniBuild : std::uint8_t { build_plain = 0, build_squirrel, build_prairiedog, build_cat };
+bool rodent_build(MiniBuild b) { return b == build_squirrel || b == build_prairiedog; }
+
+// ---- rodents on the game hare (#112): squirrel and prairie dog
+// The approved offline preview (2026-11-13) in the renderer's terms: the
+// hare figure and clips, ears shrunk, a tail of the hare's own fur, sit-up
+// poses as rotations on top of the hare's idle (rodent_extras), and the
+// hare's skin recoloured in place (rodent_skin). Hare model units, the
+// figure's own frame (z up, head towards -Y).
+Q4 axis_q(V3 a, float degrees) {
+    const float h = degrees * PI / 360.f, s = std::sin(h);
+    return {std::cos(h), a.x * s, a.y * s, a.z * s};
+}
+Q4 qconj(const Q4& q) { return {q[0], -q[1], -q[2], -q[3]}; }
+float smooth_step(float e0, float e1, float x) {
+    const float t = std::clamp((x - e0) / (e1 - e0), 0.f, 1.f);
+    return t * t * (3 - 2 * t);
+}
+float ease(float x) { return smooth_step(0, 1, x); }
+// Ear figures: shrunk about their joint (squirrel 0.42, prairie dog 0.22).
+float rodent_ear_scale(MiniBuild b) { return b == build_squirrel ? .42f : .22f; }
+// Tail: a tapered tube along a Catmull-Rom curve in the root (box01) frame,
+// textured from a plain fur patch of the skin (u .5-.7, v .12-.26): the
+// squirrel's bushy S curve up behind the back, the prairie dog's short stub.
+void rodent_tail(MiniBuild b, std::vector<std::array<V3, 3>>& out_p, std::vector<std::array<std::array<float, 2>, 3>>& out_uv) {
+    const bool squirrel = b == build_squirrel;
+    const std::vector<V3> pts = squirrel
+        ? std::vector<V3>{{0, .08f, .02f}, {0, .17f, .03f}, {0, .24f, .13f}, {0, .24f, .27f}, {0, .14f, .38f}, {0, .04f, .40f}}
+        : std::vector<V3>{{0, .07f, .04f}, {0, .13f, .05f}, {0, .18f, .10f}};
+    const int per = squirrel ? 3 : 4, sides = squirrel ? 10 : 8;
+    std::vector<V3> c;
+    for (std::size_t i = 0; i + 1 < pts.size(); ++i) {
+        const V3 p0 = i ? pts[i - 1] : pts[0] * 2.f - pts[1], p1 = pts[i], p2 = pts[i + 1];
+        const V3 p3 = i + 2 < pts.size() ? pts[i + 2] : pts[i + 1] * 2.f - pts[i];
+        for (int k = 0; k < per; ++k) {
+            const float t = float(k) / float(per), t2 = t * t, t3 = t2 * t;
+            c.push_back((p1 * 2.f + (p2 - p0) * t + (p0 * 2.f - p1 * 5.f + p2 * 4.f - p3) * t2 + (p1 * 3.f - p0 - p2 * 3.f + p3) * t3) * .5f);
+        }
+    }
+    c.push_back(pts.back());
+    const std::size_t n = c.size();
+    std::vector<V3> ring;
+    std::vector<std::array<float, 2>> uv;
+    constexpr float u0 = .5f, v0 = .12f, u1 = .7f, v1 = .26f;
+    for (std::size_t i = 0; i < n; ++i) {
+        V3 t = c[std::min(i + 1, n - 1)] - c[i ? i - 1 : 0];
+        t = t * (1 / std::max(len3(t), 1e-9f));
+        V3 bn = cross3(t, {1, 0, 0});
+        bn = bn * (1 / std::max(len3(bn), 1e-9f));
+        const V3 cn = cross3(bn, t);
+        const float s = float(i) / float(n - 1);
+        float r = squirrel ? .035f + .055f * std::pow(std::sin(PI * std::clamp(s * .95f + .08f, 0.f, 1.f)), .6f) : .026f * (1 - .6f * s);
+        if (squirrel && i == 0) r = .03f;
+        if (squirrel && i == n - 1) r = .012f;
+        const float flat = squirrel ? .8f : 1.f;
+        for (int k = 0; k <= sides; ++k) {
+            const float a = TAU * float(k) / float(sides);
+            ring.push_back(c[i] + cn * (std::cos(a) * r) + bn * (std::sin(a) * r * flat));
+            uv.push_back({u0 + (u1 - u0) * float(k) / float(sides), v0 + (v1 - v0) * s});
+        }
+    }
+    for (std::size_t i = 0; i + 1 < n; ++i)
+        for (int k = 0; k < sides; ++k) {
+            const std::size_t a = i * (sides + 1) + k, bb = a + 1, cc = a + sides + 1, d = bb + sides + 1;
+            out_p.push_back({ring[a], ring[cc], ring[bb]}); out_uv.push_back({uv[a], uv[cc], uv[bb]});
+            out_p.push_back({ring[bb], ring[cc], ring[d]}); out_uv.push_back({uv[bb], uv[cc], uv[d]});
+        }
+}
+// Sit-up on top of the hare's idle: the whole figure pitches up about its
+// root (hips) by k, the hind legs stay planted, the forelegs come up and the
+// head levels. sitting: the held pose's loop at phase 0..1 (squirrel: paws
+// to the mouth, nibbling; prairie dog: the head turns to look round).
+void rodent_extras(const Model& m, MiniBuild b, float k, bool sitting, float phase, std::vector<Q4>& e, Q4& root) {
+    e.assign(m.nodes.size(), Q4{1, 0, 0, 0});
+    const auto set = [&](const char* node, const Q4& q) {
+        for (std::size_t i = 0; i < m.nodes.size(); ++i) if (m.nodes[i] == node) e[i] = q;
+    };
+    const V3 X{1, 0, 0}, Z{0, 0, 1};
+    if (b == build_squirrel) {
+        const float nib = sitting ? .5f - .5f * std::cos(TAU * 6 * phase) : 0.f;
+        root = axis_q(X, -70 * k);
+        set("ll1", axis_q(X, 70 * k)); set("rl1", axis_q(X, 70 * k));
+        set("lh1", axis_q(X, -45 * k - 8 * nib)); set("rh1", axis_q(X, -45 * k - 8 * nib));
+        set("lh2", axis_q(X, 40 * k)); set("rh2", axis_q(X, 40 * k));
+        set("nc", axis_q(X, 55 * k + 5 * nib));
+    } else {
+        root = axis_q(X, -80 * k);
+        set("ll1", axis_q(X, 80 * k)); set("rl1", axis_q(X, 80 * k));
+        set("lh1", axis_q(X, -30 * k)); set("rh1", axis_q(X, -30 * k));
+        set("lh2", axis_q(X, 30 * k)); set("rh2", axis_q(X, 30 * k));
+        set("nc", sitting ? qmul(axis_q(X, 65 * k), axis_q(Z, 30 * std::sin(TAU * phase))) : axis_q(X, 65 * k));
+    }
+}
+// The hare's skin recoloured in place at the miniature's 64 px: back colour
+// carried by the painted fur's light and dark, a light underside where the
+// rest pose faces down, darker ears, the eye kept dark.
+struct RodentPaint { float back[3], belly[3], ear[3]; };
+Image rodent_skin(const Model& m, const Image& skin64, const RodentPaint& c) {
+    const unsigned N = skin64.w;
+    std::vector<float> nz(std::size_t(N) * N, 0.f);
+    std::vector<int> part(std::size_t(N) * N, -1);
+    std::vector<Q4> Q; std::vector<V3> P;
+    model_pose(m, m.clip("cidle"), 0, Q, P);
+    for (std::size_t i = 0; i < m.nodes.size(); ++i) {
+        const Part& pt = m.parts[i];
+        if (m.nodes[i].compare(0, 3, "box") == 0) continue;
+        for (const auto& t : pt.tris) {
+            const V3 w0 = qrot(Q[i], pt.p[t[0]]) + P[i], w1 = qrot(Q[i], pt.p[t[1]]) + P[i], w2 = qrot(Q[i], pt.p[t[2]]) + P[i];
+            V3 n = cross3(w1 - w0, w2 - w0);
+            n = n * (1 / std::max(len3(n), 1e-12f));
+            float u[3], v[3];
+            for (int k = 0; k < 3; ++k) { u[k] = pt.uv[t[k]][0] * float(N); v[k] = pt.uv[t[k]][1] * float(N); }
+            const float area = (u[1] - u[0]) * (v[2] - v[0]) - (u[2] - u[0]) * (v[1] - v[0]);
+            if (std::abs(area) < 1e-9f) continue;
+            const int x0 = std::max(0, int(std::floor(std::min({u[0], u[1], u[2]}))));
+            const int x1 = std::min(int(N) - 1, int(std::ceil(std::max({u[0], u[1], u[2]}))));
+            const int y0 = std::max(0, int(std::floor(std::min({v[0], v[1], v[2]}))));
+            const int y1 = std::min(int(N) - 1, int(std::ceil(std::max({v[0], v[1], v[2]}))));
+            for (int y = y0; y <= y1; ++y)
+                for (int x = x0; x <= x1; ++x) {
+                    const float px = float(x) + .5f, py = float(y) + .5f;
+                    const float a0 = ((u[1] - px) * (v[2] - py) - (u[2] - px) * (v[1] - py)) / area;
+                    const float a1 = ((u[2] - px) * (v[0] - py) - (u[0] - px) * (v[2] - py)) / area;
+                    if (a0 < -.05f || a1 < -.05f || a0 + a1 > 1.05f) continue;
+                    nz[std::size_t(y) * N + x] = n.z; part[std::size_t(y) * N + x] = int(i);
+                }
+        }
+    }
+    std::vector<float> under(nz.size()), blurred(nz.size());
+    for (std::size_t i = 0; i < nz.size(); ++i) under[i] = part[i] >= 0 ? smooth_step(-.25f, -.7f, nz[i]) : 0.f;
+    for (unsigned y = 0; y < N; ++y)
+        for (unsigned x = 0; x < N; ++x) {
+            float sum = 0; int count = 0;
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const int xx = int(x) + dx, yy = int(y) + dy;
+                    if (xx < 0 || yy < 0 || xx >= int(N) || yy >= int(N)) continue;
+                    sum += under[std::size_t(yy) * N + xx]; ++count;
+                }
+            blurred[std::size_t(y) * N + x] = sum / float(count);
+        }
+    Image out = skin64;
+    for (std::size_t i = 0; i < nz.size(); ++i) {
+        const float src[3]{skin64.rgb[i * 3] / 255.f, skin64.rgb[i * 3 + 1] / 255.f, skin64.rgb[i * 3 + 2] / 255.f};
+        const float L = .3f * src[0] + .59f * src[1] + .11f * src[2], detail = L / .55f;
+        const bool ear = part[i] >= 0 && (m.nodes[std::size_t(part[i])] == "r_ear" || m.nodes[std::size_t(part[i])] == "l_ear");
+        const float eye = smooth_step(.16f, .08f, L), u = blurred[i], keep = std::clamp(detail, .6f, 1.4f);
+        for (int k = 0; k < 3; ++k) {
+            float o = c.back[k] * detail;
+            o = o * (1 - u) + c.belly[k] * keep * u;
+            if (ear) o = c.ear[k] * detail;
+            o = o * (1 - eye) + src[k] * .6f * eye;
+            out.rgb[i * 3 + k] = std::uint8_t(std::clamp(o * 255.f, 0.f, 255.f));
+        }
+    }
+    return out;
+}
+const RodentPaint& rodent_paint(Slice s) {
+    static const RodentPaint gipat{{.66f, .30f, .13f}, {.93f, .86f, .72f}, {.42f, .18f, .08f}};   // red-brown
+    static const RodentPaint ingos{{.60f, .60f, .62f}, {.94f, .93f, .92f}, {.40f, .40f, .43f}};   // light grey
+    static const RodentPaint sand{{.74f, .56f, .36f}, {.88f, .78f, .60f}, {.48f, .34f, .20f}};    // prairie dog
+    return s == s_squirrel ? gipat : s == s_squirrel_ingos ? ingos : sand;
+}
+
+// ---- the town cat (#113): the user's figure, the game tiger's clips
+// cat.bin (outputs\cat2\bake_game_data.py): its critter LOD per joint frame,
+// the joint offsets (from where its parts meet), the tiger's root-translation
+// scale and the jaw rotation that keeps its open-mouthed figure shut.
+std::wstring critter_data_folder() {
+    HMODULE module = nullptr;
+    wchar_t path[MAX_PATH]{};
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&critter_data_folder), &module) || !GetModuleFileNameW(module, path, MAX_PATH)) return {};
+    std::wstring folder = path;
+    const auto slash = folder.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? std::wstring() : folder.substr(0, slash + 1) + L"eid3d_materials\\critters\\";
+}
+bool read_data_file(const std::wstring& path, std::vector<std::uint8_t>& bytes) {
+    FILE* file = nullptr;
+    if (_wfopen_s(&file, path.c_str(), L"rb") || !file) return false;
+    std::fseek(file, 0, SEEK_END); const long size = std::ftell(file); std::fseek(file, 0, SEEK_SET);
+    bool ok = size > 0 && size < (8l << 20);
+    if (ok) { bytes.resize(std::size_t(size)); ok = std::fread(bytes.data(), 1, bytes.size(), file) == bytes.size(); }
+    std::fclose(file);
+    return ok;
+}
+// An RGB(A) PNG coat as RGB (WIC).
+bool decode_coat_png(const std::vector<std::uint8_t>& bytes, Image& out) {
+    const HRESULT init = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    struct Uninit { bool active; ~Uninit() { if (active) CoUninitialize(); } } uninit{SUCCEEDED(init)};
+    ComPtr<IWICImagingFactory> factory; ComPtr<IWICStream> stream; ComPtr<IWICBitmapDecoder> decoder;
+    ComPtr<IWICBitmapFrameDecode> frame; ComPtr<IWICFormatConverter> converter;
+    UINT w = 0, h = 0;
+    if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) ||
+        FAILED(factory->CreateStream(&stream)) ||
+        FAILED(stream->InitializeFromMemory(const_cast<BYTE*>(bytes.data()), DWORD(bytes.size()))) ||
+        FAILED(factory->CreateDecoderFromStream(stream.Get(), nullptr, WICDecodeMetadataCacheOnDemand, &decoder)) ||
+        FAILED(decoder->GetFrame(0, &frame)) || FAILED(frame->GetSize(&w, &h)) || w != kSkin || h != kSkin ||
+        FAILED(factory->CreateFormatConverter(&converter)) ||
+        FAILED(converter->Initialize(frame.Get(), GUID_WICPixelFormat24bppRGB, WICBitmapDitherTypeNone, nullptr, 0, WICBitmapPaletteTypeCustom)))
+        return false;
+    out.w = w; out.h = h; out.rgb.resize(std::size_t(w) * h * 3);
+    return SUCCEEDED(converter->CopyPixels(nullptr, w * 3, UINT(out.rgb.size()), out.rgb.data()));
+}
+// The cat figure from cat.bin, animated by the tiger's clips (same node names).
+bool load_cat(const Model& tiger, Model& cat, std::string& error) {
+    std::vector<std::uint8_t> b;
+    if (!read_data_file(critter_data_folder() + L"cat.bin", b)) { error = "eid3d_materials\\critters\\cat.bin missing"; return false; }
+    std::size_t at = 0;
+    const auto take = [&](void* dst, std::size_t n) { if (at + n > b.size()) return false; std::memcpy(dst, &b[at], n); at += n; return true; };
+    char magic[4]; std::uint32_t version = 0, count = 0; float root_scale = 1; Q4 jaw{};
+    if (!take(magic, 4) || std::memcmp(magic, "EICT", 4) || !take(&version, 4) || version != 1 || !take(&count, 4) ||
+        !count || count > 64 || !take(&root_scale, 4) || !take(jaw.data(), 16)) { error = "cat.bin header"; return false; }
+    cat = Model{};
+    cat.nodes.resize(count); cat.parent.resize(count); cat.offset.resize(count); cat.parts.resize(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        char name[17]{}; std::int32_t parent = -1; float off[3]; std::uint32_t tris = 0;
+        if (!take(name, 16) || !take(&parent, 4) || !take(off, 12) || !take(&tris, 4) || tris > 4096 ||
+            parent >= std::int32_t(i) || parent < -1) { error = "cat.bin node"; return false; }
+        cat.nodes[i] = folded(name); cat.parent[i] = parent < 0 ? UINT_MAX : std::uint32_t(parent); cat.offset[i] = {off[0], off[1], off[2]};
+        Part& part = cat.parts[i];
+        for (std::uint32_t k = 0; k < tris * 3; ++k) {
+            float c[5];
+            if (!take(c, 20)) { error = "cat.bin triangles"; return false; }
+            part.p.push_back({c[0], c[1], c[2]}); part.uv.push_back({c[3], c[4]});
+        }
+        for (std::uint32_t t = 0; t < tris; ++t) part.tris.push_back({t * 3, t * 3 + 1, t * 3 + 2});
+    }
+    // The tiger's clips by node name; root translations at the cat's size, the jaw held shut.
+    for (const auto& clip : tiger.clips) {
+        Clip c; c.name = clip.name; c.frames = clip.frames; c.tracks.resize(count);
+        for (std::uint32_t i = 0; i < count; ++i) {
+            for (std::size_t t = 0; t < tiger.nodes.size(); ++t)
+                if (tiger.nodes[t] == cat.nodes[i]) { c.tracks[i] = clip.tracks[t]; break; }
+            if (cat.parent[i] == UINT_MAX) for (auto& v : c.tracks[i].translations) v = v * root_scale;
+            if (cat.nodes[i] == "chelust") c.tracks[i].rotations.assign(1, jaw);
+            c.tracks[i].morph_frames = c.tracks[i].morph_points = 0; c.tracks[i].morphs.clear();
+        }
+        cat.clips.push_back(std::move(c));
+    }
+    return true;
+}
+// Body shapes as per-cat data (preview rev. 2): trunk width / depth / torso
+// length and leg thickness; the neck, hind legs and tail follow the torso.
+struct CatShape { float width, depth, length, leg; };
+constexpr CatShape kCatShapes[4] = {{1, 1, 1, 1}, {1.12f, 1.08f, 1, 1.08f}, {.9f, .95f, 1, .9f}, {1, 1, .9f, 1}};
+Model cat_shape(const Model& base, unsigned shape) {
+    Model m = base;
+    const CatShape& c = kCatShapes[shape < 4 ? shape : 0];
+    for (std::size_t i = 0; i < m.nodes.size(); ++i) {
+        const std::string& n = m.nodes[i];
+        V3 s{1, 1, 1};
+        if (n == "hp" || n == "bd" || n == "nc") s = {c.width, c.length, c.depth};
+        else if (n.size() >= 3 && (n[0] == 'l' || n[0] == 'r') && (n[1] == 'h' || n[1] == 'l') && n[2] >= '1' && n[2] <= '4') s = {c.leg, c.leg, 1};
+        for (auto& v : m.parts[i].p) v = {v.x * s.x, v.y * s.y, v.z * s.z};
+        if (n == "nc" || n == "ll1" || n == "rl1" || n == "tl1") m.offset[i] = m.offset[i] * c.length;
+    }
+    return m;
+}
+// Coats per town (data): Ingos and Suslanger; Gipat and the Dead City have none.
+const std::array<Slice, 3>& town_coats(ambient::ZoneClass zone) {
+    static const std::array<Slice, 3> ingos{s_cat_grey, s_cat_white, s_cat_black}, suslanger{s_cat_ginger, s_cat_tuxedo, s_cat_tabby};
+    return zone == ambient::zone_snow ? ingos : suslanger;
+}
+const char* cat_coat_name(ambient::ZoneClass zone, unsigned coat) {
+    static const char* ingos[]{"grey", "white", "black"};
+    static const char* suslanger[]{"ginger", "tuxedo", "tabby"};
+    return (zone == ambient::zone_snow ? ingos : suslanger)[std::min(2u, coat)];
+}
+constexpr unsigned kRiseFrames = 10;
+constexpr float kSitLoopSquirrel = 4.19f, kSitLoopPrairie = 4.49f;   // seconds per sitting loop
+constexpr float kCatScale = .55f / .91f;   // cat figure units: 0.91 nose to tail tip in the idle pose
+#include "critter_fish.inl"
+
 struct Mini {
     const char* model; const char* skin; float length; unsigned budget; std::vector<std::string> drop; bool tinted; float tint[3];
     const char* clips[3];   // idle, walk, run (the bat: its two flight loops)
     bool flyer = false;     // authored upright, flying: laid level, posed by its first clip, never decimated, morphs kept
+    MiniBuild build = build_plain;   // a rodent on the game hare: small ears, own tail, sit-up clips (rodent_*)
+    float fixed_scale = 0;           // > 0: model units to metres as given (the cat's shapes keep their own lengths)
 };
 const Mini& mini_spec(Mesh m) {
-    static const Mini specs[6] = {
+    static const Mini specs[kMiniCount] = {
         {"unanwira", "rat00", .24f, 240, {"box01", "chelust"}, false, {}, {"cidle", "cwalk", "crun"}},
         {"unanwira", "rat00", .13f, 200, {"box01", "chelust", "tl3", "tl4", "tl5"}, true, {205, 200, 196}, {"cidle", "cwalk", "crun"}},
         {"unmosp", "spider00", .12f, 260, {"box01"}, false, {}, {"cidle", "cwalk", "crun"}},
@@ -1715,27 +2123,48 @@ const Mini& mini_spec(Mesh m) {
         // cave bat: the game's bat figure at a quarter metre span, its skin darkened so it never reads as
         // one of the game's attackable bats (1.16 m span, orange-brown)
         {"unanwiba", "bat00", .25f, 4000, {"box"}, true, {92, 76, 66}, {"cflight01", "cflight01", "cflight02"}, true},
+        // squirrel and prairie dog (#112, preview approved 2026-11-13): the game hare's figure and
+        // clips at rodent size, its skin recoloured in place (rodent_skin), ears shrunk and a tail
+        // of its own fur (rodent_tail); two baked sit-up clips besides idle, walk and run
+        {"unanhoha", "hare00", .24f, 300, {"box01"}, false, {}, {"cidle", "cwalk", "crun"}, false, build_squirrel},
+        {"unanhoha", "hare00", .30f, 300, {"box01"}, false, {}, {"cidle", "cwalk", "crun"}, false, build_prairiedog},
+        // town cats (#113, preview approved 2026-11-14): the user's cat figure (critters\cat.bin, its
+        // 1152-triangle critter LOD with joints) on the game tiger's clips, four body shapes, 0.55 m
+        {"unanwica", nullptr, .55f, 0, {}, false, {}, {"cidle", "cwalk", "crun"}, false, build_cat, kCatScale},
+        {"unanwica", nullptr, .55f, 0, {}, false, {}, {"cidle", "cwalk", "crun"}, false, build_cat, kCatScale},
+        {"unanwica", nullptr, .55f, 0, {}, false, {}, {"cidle", "cwalk", "crun"}, false, build_cat, kCatScale},
+        {"unanwica", nullptr, .55f, 0, {}, false, {}, {"cidle", "cwalk", "crun"}, false, build_cat, kCatScale},
     };
-    return specs[m <= m_bat ? m : 0];
+    return specs[m < kMiniCount ? m : 0];
 }
 constexpr float kMiniFps = 15.f;
 
 struct MeshRange { std::uint32_t first = 0, count = 0; };
-constexpr const char* kMeshNames[m_count] = {"rat", "snow mouse", "spider", "frog", "larva", "bat", "lizard", "snake", "crab",
-    "centipede", "dung beetle", "dung ball", "small bird", "crow/raven", "far bird", "vulture", "perched vulture"};
+constexpr const char* kMeshNames[m_count] = {"rat", "snow mouse", "spider", "frog", "larva", "bat", "squirrel", "prairie dog",
+    "cat", "chonky cat", "lean cat", "short cat", "lizard", "snake", "crab",
+    "centipede", "dung beetle", "dung ball", "small bird", "crow/raven", "far bird", "vulture", "perched vulture", "tumbleweed"};
+std::string mesh_name(unsigned m) {
+    return m < m_fish ? kMeshNames[m] : std::string(fish_rule(Fish((m - m_fish) / 2)).name) + ((m - m_fish) & 1u ? " (far)" : "");
+}
 // Species that cannot be drawn because one of their meshes was omitted.
 std::uint32_t unavailable_species(const std::array<std::string, m_count>& omitted) {
     static const std::initializer_list<Mesh> uses[sp_count] = {
         {m_rat}, {m_spider}, {m_larva}, {m_frog}, {m_lizard}, {m_snake}, {m_scolopendra}, {m_dung, m_ball},
         {m_bird, m_bird_far}, {m_corvid, m_bird_far}, {m_vulture, m_vulture_perch}, {m_crab}, {m_bird, m_bird_far},
-        {m_snowmouse}, {m_bat}};
+        {m_snowmouse}, {m_bat}, {m_squirrel}, {m_prairiedog}, {m_cat_standard, m_cat_chonky, m_cat_lean, m_cat_short}};
     std::uint32_t mask = 0;
     for (unsigned s = 0; s < sp_count; ++s)
         for (const Mesh m : uses[s]) if (!omitted[m].empty()) mask |= 1u << s;
+    for (unsigned m = m_fish; m < m_count; ++m) if (!omitted[m].empty()) mask |= 1u << sp_fish;   // one grain serves them all
     return mask;
 }
+// Baked clips: idle, walk, run; a rodent adds sit-up (kClipRise, played by
+// its sit amount) and the sitting loop (kClipSit, at kMiniFps); a cat adds
+// sitting down, lying down (both played by its posture) and the lying loop.
+constexpr unsigned kClipRise = 3, kClipSit = 4, kMiniClips = 6;
+constexpr unsigned kCatSitDown = 3, kCatLieDown = 4, kCatRest = 5;
 struct MiniClips {
-    std::uint32_t start[3]{}, frames[3]{}; std::uint32_t nodes = 0; float scale = 1;
+    std::uint32_t start[kMiniClips]{}, frames[kMiniClips]{}; std::uint32_t nodes = 0; float scale = 1;
     std::uint32_t morph_start = 0, morph_points = 0, morph_frames = 0;   // first clip's vertex morphs (baked offsets)
 };
 struct CritterAssets {
@@ -1743,23 +2172,28 @@ struct CritterAssets {
     std::vector<CrVertex> vertices;
     std::array<MeshRange, m_count> meshes{};
     std::vector<Bone> baked;
-    std::array<MiniClips, m_bat + 1> minis{};
+    std::array<MiniClips, kMiniCount> minis{};
     std::uint32_t jaw_start = 0, jaw_frames = 1;
     float larva_length = .07f, larva_center_z = 0, larva_tail_y = 0;
-    std::vector<std::uint8_t> texels;
+    std::vector<std::uint8_t> texels, coat_texels;   // kPaintSlices of kPaint^2, kCoatSlices of kSkin^2 RGBA
     std::shared_ptr<StatueBird> statue;
     // A mesh whose game asset failed to load is omitted with its reason; its
     // species stays out, every other species keeps going.
-    std::array<std::string, m_count> omitted;   // s_count slices of kSkin^2 RGBA
+    std::array<std::string, m_count> omitted;
 };
 
 void put_slice(CritterAssets& a, Slice s, const Image& img) {
-    const Image src = img.w == kSkin ? img : resize(img, kSkin);
-    std::uint8_t* out = &a.texels[std::size_t(s) * kSkin * kSkin * 4];
-    for (std::size_t i = 0; i < std::size_t(kSkin) * kSkin; ++i) {
+    const bool coat = coat_slice(s);
+    const unsigned n = coat ? kSkin : kPaint;
+    const Image src = img.w == n ? img : img.w > n && img.w % n == 0 ? downsample(img, n) : resize(img, n);
+    std::uint8_t* out = coat ? &a.coat_texels[std::size_t(s - s_cat_tabby) * n * n * 4] : &a.texels[std::size_t(s) * n * n * 4];
+    for (std::size_t i = 0; i < std::size_t(n) * n; ++i) {
         out[i * 4] = src.rgb[i * 3]; out[i * 4 + 1] = src.rgb[i * 3 + 1]; out[i * 4 + 2] = src.rgb[i * 3 + 2]; out[i * 4 + 3] = 255;
     }
 }
+
+std::vector<CrVertex> tumbleweed_mesh(std::uint64_t seed);                                     // critter_tumbleweed.inl
+bool tumbleweed_skin(const TextureCpuAsset& atlas, std::uint8_t* slice, std::string& why);
 
 std::shared_ptr<CritterAssets> build_assets(ResourceStoreConfig mounts) {
     auto assets = std::make_shared<CritterAssets>();
@@ -1803,7 +2237,8 @@ std::shared_ptr<CritterAssets> build_assets(ResourceStoreConfig mounts) {
         const struct { const char* skin; std::initializer_list<Mesh> users; } skin_users[] = {
             {"rat00", {m_rat, m_snowmouse}}, {"spider00", {m_spider}}, {"toad00", {m_frog, m_lizard, m_snake}},
             {"crab00", {m_crab, m_scolopendra, m_dung, m_ball}},
-            {"bird", {m_bird, m_corvid, m_bird_far, m_vulture, m_vulture_perch}}, {"bat00", {m_bat}}};
+            {"bird", {m_bird, m_corvid, m_bird_far, m_vulture, m_vulture_perch}}, {"bat00", {m_bat}},
+            {"hare00", {m_squirrel, m_prairiedog}}};
         for (const auto& entry : skin_users) {
             std::string why;
             if (!decode_skin(store, entry.skin, skins[entry.skin], why)) { skins.erase(entry.skin); for (const Mesh m : entry.users) omit(m, why); }
@@ -1813,15 +2248,17 @@ std::shared_ptr<CritterAssets> build_assets(ResourceStoreConfig mounts) {
             std::string why;
             if (!decode_skin(larva_store, "crab00", larva_skin, why)) omit(m_larva, why);
         }
-        a.texels.assign(std::size_t(s_count) * kSkin * kSkin * 4, 0);
-        // Miniature skins at the prototype's 64 px (shown on 128 px slices).
-        for (const Mesh m : {m_rat, m_snowmouse, m_spider, m_frog, m_larva, m_bat}) {
-            if (!ok(m)) continue;
+        a.texels.assign(std::size_t(kPaintSlices) * kPaint * kPaint * 4, 0);
+        a.coat_texels.assign(std::size_t(kCoatSlices) * kSkin * kSkin * 4, 0);
+        // Miniature skins at the prototype's 64 px (shown on kPaint slices by pixel replication).
+        for (const Mesh m : {m_rat, m_snowmouse, m_spider, m_frog, m_larva, m_bat, m_squirrel, m_prairiedog, m_cat_standard, m_cat_chonky, m_cat_lean, m_cat_short}) {
+            if (!ok(m) || mini_spec(m).build != build_plain) continue;   // rodents and cats: their own skins below
             const auto& spec = mini_spec(m);
             Image skin = m == m_larva ? larva_skin : skins[spec.skin];
             if (spec.tinted) skin = tint(skin, spec.tint);
             put_slice(a, Slice(m), downsample(skin, 64));
         }
+        if (ok(m_rat)) put_slice(a, s_rat_city, downsample(city_rat_skin(skins["rat00"]), 64));
         // Procedural atlases: four tinted 64 px crops of game skins.
         struct Crop { const char* skin; float box[4]; float rgb[3]; };
         const float toad_body[4]{.02f, .52f, .36f, .9f},
@@ -1834,19 +2271,19 @@ std::shared_ptr<CritterAssets> build_assets(ResourceStoreConfig mounts) {
         };
         for (const auto& atlas : atlases) {
             if (!ok(m_crab)) continue;
-            Image img; img.w = img.h = kSkin; img.rgb.assign(std::size_t(kSkin) * kSkin * 3, 0);
+            Image img; img.w = img.h = kPaint; img.rgb.assign(std::size_t(kPaint) * kPaint * 3, 0);
             for (int i = 0; i < 4; ++i) {
                 const Image tile = tint(resize(crop(skins[atlas.crops[i].first], atlas.crops[i].second.data()), 64), atlas.rgb[i]);
                 const unsigned ox = (i % 2) * 64, oy = (i / 2) * 64;
-                for (unsigned y = 0; y < 64; ++y) std::memcpy(&img.rgb[(std::size_t(oy + y) * kSkin + ox) * 3], &tile.rgb[std::size_t(y) * 64 * 3], 64 * 3);
+                for (unsigned y = 0; y < 64; ++y) std::memcpy(&img.rgb[(std::size_t(oy + y) * kPaint + ox) * 3], &tile.rgb[std::size_t(y) * 64 * 3], 64 * 3);
             }
             put_slice(a, atlas.slice, img);
         }
         // Spined critters and the beetle: painted strips over toad / scrab grain.
         {
             const bool have_toad = skins.count("toad00") != 0, have_scrab = skins.count("crab00") != 0;
-            const Image toad = have_toad ? resize(crop(skins["toad00"], toad_body), kSkin) : Image{};
-            const Image scrab = have_scrab ? resize(crop(skins["crab00"], crab_plate), kSkin) : Image{};
+            const Image toad = have_toad ? resize(crop(skins["toad00"], toad_body), kPaint) : Image{};
+            const Image scrab = have_scrab ? resize(crop(skins["crab00"], crab_plate), kPaint) : Image{};
             const StripPaint lizard{{176, 164, 116}, {118, 112, 66}, {66, 60, 38}, {110, 104, 62}, {104, 96, 60}, {104, 96, 60},
                                     pt_blotches, 7, .9f, .955f};
             const StripPaint snake{{170, 160, 118}, {92, 98, 70}, {44, 42, 32}, {80, 84, 60}, {92, 98, 70}, {92, 98, 70},
@@ -1867,20 +2304,51 @@ std::shared_ptr<CritterAssets> build_assets(ResourceStoreConfig mounts) {
 
         // Miniatures.
         std::map<std::string, Model> models;
-        for (const Mesh m : {m_rat, m_snowmouse, m_spider, m_frog, m_larva, m_bat}) {
+        for (const Mesh m : {m_rat, m_snowmouse, m_spider, m_frog, m_larva, m_bat, m_squirrel, m_prairiedog, m_cat_standard, m_cat_chonky, m_cat_lean, m_cat_short}) {
             const auto& spec = mini_spec(m);
             if (!ok(m) || models.count(spec.model)) continue;
             std::string error;
+            if (spec.build == build_cat) {
+                Model tiger;
+                if (!load_model(larva_store, "unanwiti", tiger, error) || !load_cat(tiger, models[spec.model], error)) {
+                    models.erase(spec.model);
+                    for (const Mesh other : {m_cat_standard, m_cat_chonky, m_cat_lean, m_cat_short}) omit(other, error);
+                }
+                continue;
+            }
             if (!load_model(m == m_larva ? larva_store : store, spec.model, models[spec.model], error)) {
                 models.erase(spec.model);
-                for (const Mesh other : {m_rat, m_snowmouse, m_spider, m_frog, m_larva, m_bat})
+                for (const Mesh other : {m_rat, m_snowmouse, m_spider, m_frog, m_larva, m_bat, m_squirrel, m_prairiedog, m_cat_standard, m_cat_chonky, m_cat_lean, m_cat_short})
                     if (mini_spec(other).model == spec.model) omit(other, error);
             }
         }
+        if (models.count("unanhoha") && skins.count("hare00")) {
+            const Image hare = downsample(skins["hare00"], 64);
+            const Model& model = models["unanhoha"];
+            if (ok(m_squirrel)) {
+                put_slice(a, s_squirrel, rodent_skin(model, hare, rodent_paint(s_squirrel)));
+                put_slice(a, s_squirrel_ingos, rodent_skin(model, hare, rodent_paint(s_squirrel_ingos)));
+            }
+            if (ok(m_prairiedog)) put_slice(a, s_prairiedog, rodent_skin(model, hare, rodent_paint(s_prairiedog)));
+        }
+        if (models.count("unanwica")) {
+            const wchar_t* names[6]{L"cat_tabby.png", L"cat_ginger.png", L"cat_grey.png", L"cat_black.png", L"cat_white.png", L"cat_tuxedo.png"};
+            for (unsigned c = 0; c < 6; ++c) {
+                std::vector<std::uint8_t> bytes; Image coat;
+                if (!read_data_file(critter_data_folder() + names[c], bytes) || !decode_coat_png(bytes, coat)) {
+                    for (const Mesh other : {m_cat_standard, m_cat_chonky, m_cat_lean, m_cat_short})
+                        omit(other, "eid3d_materials\\critters: coat missing or not 256 px");
+                    break;
+                }
+                put_slice(a, Slice(s_cat_tabby + c), coat);
+            }
+        }
         std::vector<Q4> Q; std::vector<V3> P;
+        Model shaped;
         const auto build_mini = [&](Mesh m) -> std::string {
             const auto& spec = mini_spec(m);
-            const Model& model = models[spec.model];
+            if (spec.build == build_cat) shaped = cat_shape(models[spec.model], unsigned(m - m_cat_standard));
+            const Model& model = spec.build == build_cat ? shaped : models[spec.model];
             std::size_t total = 0;
             std::vector<char> kept(model.nodes.size(), 0);
             for (std::size_t i = 0; i < model.nodes.size(); ++i) {
@@ -1899,17 +2367,38 @@ std::shared_ptr<CritterAssets> build_assets(ResourceStoreConfig mounts) {
                 std::size_t target = std::max<std::size_t>(6, std::size_t(std::lround(n * ratio)));
                 if (n >= 80) target = std::max<std::size_t>(target, 40);
                 target = std::min(n, target);
-                if (spec.flyer) {   // the whole figure: its morphing membrane keeps every plot
+                if (spec.flyer || spec.build == build_cat) {   // the whole figure (the cat's LOD is already reduced)
                     const Part& part = model.parts[i];
                     for (const auto& t : part.tris) {
                         dec_p[i].push_back({part.p[t[0]], part.p[t[1]], part.p[t[2]]});
                         dec_uv[i].push_back({part.uv[t[0]], part.uv[t[1]], part.uv[t[2]]});
                     }
                 } else decimate(model.parts[i], target, dec_p[i], dec_uv[i]);
+                if (rodent_build(spec.build) && (model.nodes[i] == "r_ear" || model.nodes[i] == "l_ear"))
+                    for (auto& t : dec_p[i]) for (auto& v : t) v = v * rodent_ear_scale(spec.build);
             }
+            // A rodent's tail is one more node after the figure's own: it rides the
+            // root (box01) but keeps its shape while the body sits up, and sways.
+            const std::size_t figure_nodes = model.nodes.size();
+            std::size_t root_node = figure_nodes;
+            for (std::size_t i = 0; i < figure_nodes; ++i) if (model.parent[i] == UINT_MAX) { root_node = i; break; }
+            if (rodent_build(spec.build)) {
+                if (root_node == figure_nodes) return std::string(spec.model) + ": no root node";
+                dec_p.emplace_back(); dec_uv.emplace_back();
+                rodent_tail(spec.build, dec_p.back(), dec_uv.back());
+            }
+            // Pose with the tail node: its rotation is the root's without the sit-up
+            // pitch, turned by its own sway.
+            const auto pose_all = [&](const Clip* clip, float frame, const std::vector<Q4>* extra, const Q4* pitch, const Q4& sway) {
+                model_pose(model, clip, frame, Q, P, extra, pitch);
+                if (dec_p.size() > figure_nodes) {
+                    Q.push_back(qmul(pitch ? qmul(Q[root_node], qconj(*pitch)) : Q[root_node], sway));
+                    P.push_back(P[root_node]);
+                }
+            };
             // Scale to the target length and stand on z=0 in the idle pose
             // ("cidle", or the bind pose when the model has no such clip).
-            model_pose(model, m == m_larva ? nullptr : model.clip(spec.flyer ? spec.clips[0] : "cidle"), 0, Q, P);
+            pose_all(m == m_larva ? nullptr : model.clip(spec.flyer ? spec.clips[0] : "cidle"), 0, nullptr, nullptr, Q4{1, 0, 0, 0});
             // A flyer whose clip has no vertex morphs is authored upright (head
             // +Z, belly +Y): lay it level, head forward along the figure's -Y.
             // A morphing flyer (Dejavu's bat) is laid level by its morphs.
@@ -1919,7 +2408,7 @@ std::shared_ptr<CritterAssets> build_assets(ResourceStoreConfig mounts) {
             if (flight) for (const auto& t : flight->tracks) morphs = morphs || t.morph_points;
             if (spec.flyer && !morphs) pre = columns({-1, 0, 0}, {0, 0, -1}, {0, -1, 0});
             float lo[3]{1e9f, 1e9f, 1e9f}, hi[3]{-1e9f, -1e9f, -1e9f};
-            for (std::size_t i = 0; i < model.nodes.size(); ++i)
+            for (std::size_t i = 0; i < dec_p.size(); ++i)
                 for (const auto& t : dec_p[i])
                     for (const auto& v : t) {
                         const V3 w = pre * (qrot(Q[i], v) + P[i]);
@@ -1928,7 +2417,7 @@ std::shared_ptr<CritterAssets> build_assets(ResourceStoreConfig mounts) {
                     }
             const float span = std::max(hi[0] - lo[0], hi[1] - lo[1]);
             if (span <= 1e-6f) return std::string(spec.model) + ": empty bounds";
-            const float scale = spec.length / span, ground = lo[2] * scale;
+            const float scale = spec.fixed_scale > 0 ? spec.fixed_scale : spec.length / span, ground = lo[2] * scale;
             M3 flip; flip.m[0][0] = -scale; flip.m[1][1] = -scale; flip.m[2][2] = scale;   // EI models face -Y
             flip = flip * pre;
             auto& range = a.meshes[m];
@@ -1946,8 +2435,8 @@ std::shared_ptr<CritterAssets> build_assets(ResourceStoreConfig mounts) {
                         if (!t.morph_points || !kept[i]) continue;
                         morph_base[i] = morph_size; morph_size += t.morph_points; morph_frames = std::max(morph_frames, t.morph_frames);
                     }
-                for (std::size_t i = 0; i < model.nodes.size(); ++i) {
-                    const bool morph = morph_size && first->tracks[i].morph_points && kept[i];
+                for (std::size_t i = 0; i < dec_p.size(); ++i) {
+                    const bool morph = morph_size && i < figure_nodes && first->tracks[i].morph_points && kept[i];
                     for (std::size_t k = 0; k < dec_p[i].size(); ++k)
                         for (int c = 0; c < 3; ++c) {
                             CrVertex v{{dec_p[i][k][c].x, dec_p[i][k][c].y, dec_p[i][k][c].z}, std::uint32_t(i),
@@ -1961,8 +2450,9 @@ std::shared_ptr<CritterAssets> build_assets(ResourceStoreConfig mounts) {
                 }
                 // Baked clips: one matrix per node and frame.
                 auto& clips = a.minis[m];
-                clips.nodes = std::uint32_t(model.nodes.size());
+                clips.nodes = std::uint32_t(dec_p.size());
                 clips.scale = scale;
+                const V3 tail_axis_x{1, 0, 0}, tail_axis_z{0, 0, 1};
                 for (int c = 0; c < 3; ++c) {
                     const char* const* names = spec.clips;
                     const Clip* clip = model.clip(names[c]);
@@ -1970,9 +2460,57 @@ std::shared_ptr<CritterAssets> build_assets(ResourceStoreConfig mounts) {
                     clips.start[c] = std::uint32_t(a.baked.size());
                     clips.frames[c] = clip->frames;
                     for (unsigned f = 0; f < clip->frames; ++f) {
-                        model_pose(model, clip, float(f), Q, P);
-                        for (std::size_t i = 0; i < model.nodes.size(); ++i)
+                        // the tail sways once per idle loop and flicks with each bound of the run
+                        const float phase = TAU * float(f) / float(clip->frames);
+                        const Q4 sway = !rodent_build(spec.build) ? Q4{1, 0, 0, 0} : c == 0 ? axis_q(tail_axis_z, 10 * std::sin(phase))
+                            : c == 2 ? axis_q(tail_axis_x, 12 * std::sin(phase)) : axis_q(tail_axis_z, 4 * std::sin(phase));
+                        pose_all(clip, float(f), nullptr, nullptr, sway);
+                        for (std::size_t i = 0; i < dec_p.size(); ++i)
                             a.baked.push_back(affine(flip * qmatrix(Q[i]), flip * P[i] - V3{0, 0, ground}));
+                    }
+                }
+                // Rodents: sit-up (kRiseFrames, eased) and the sitting loop on the
+                // idle; the lowest point of each frame stays on the ground (the
+                // hind feet carry the sitting body).
+                if (spec.build == build_cat) {
+                    // sitting down and lying down (the tiger's ucross01 halves) and the lying loop (crest)
+                    const Clip* cross = model.clip("ucross01");
+                    const Clip* rest = model.clip("crest");
+                    if (!cross || !rest || cross->frames < 81) return std::string("unanwiti: clips ucross01/crest");
+                    const auto bake_range = [&](unsigned slot, const Clip* clip, unsigned f0, unsigned f1) {
+                        clips.start[slot] = std::uint32_t(a.baked.size()); clips.frames[slot] = f1 - f0 + 1;
+                        for (unsigned f = f0; f <= f1; ++f) {
+                            pose_all(clip, float(f), nullptr, nullptr, Q4{1, 0, 0, 0});
+                            for (std::size_t i = 0; i < dec_p.size(); ++i)
+                                a.baked.push_back(affine(flip * qmatrix(Q[i]), flip * P[i] - V3{0, 0, ground}));
+                        }
+                    };
+                    bake_range(kCatSitDown, cross, 0, 34);
+                    bake_range(kCatLieDown, cross, 34, 80);
+                    bake_range(kCatRest, rest, 0, rest->frames - 1);
+                }
+                if (rodent_build(spec.build)) {
+                    const Clip* idle = model.clip("cidle");
+                    const float loop = spec.build == build_squirrel ? kSitLoopSquirrel : kSitLoopPrairie;
+                    const unsigned sit_frames = unsigned(std::lround(loop * kMiniFps));
+                    std::vector<Q4> extra;
+                    const auto bake = [&](float k, bool sitting, float phase, float idle_frame) {
+                        Q4 pitch{1, 0, 0, 0};
+                        rodent_extras(model, spec.build, k, sitting, phase, extra, pitch);
+                        pose_all(idle, idle_frame, &extra, &pitch, axis_q(tail_axis_z, sitting ? 8 * std::sin(TAU * phase) : 0.f));
+                        float low = 1e9f;
+                        for (std::size_t i = 0; i < dec_p.size(); ++i)
+                            for (const auto& t : dec_p[i]) for (const auto& v : t) low = std::min(low, (qrot(Q[i], v) + P[i]).z * scale);
+                        for (std::size_t i = 0; i < dec_p.size(); ++i)
+                            a.baked.push_back(affine(flip * qmatrix(Q[i]), flip * P[i] - V3{0, 0, low}));
+                    };
+                    clips.start[kClipRise] = std::uint32_t(a.baked.size()); clips.frames[kClipRise] = kRiseFrames;
+                    for (unsigned f = 0; f < kRiseFrames; ++f) bake(ease(float(f) / float(kRiseFrames - 1)), false, 0, 0);
+                    clips.start[kClipSit] = std::uint32_t(a.baked.size()); clips.frames[kClipSit] = sit_frames;
+                    const float idle_frames = float(idle ? idle->frames : 1);
+                    for (unsigned f = 0; f < sit_frames; ++f) {
+                        const float phase = float(f) / float(sit_frames);
+                        bake(1, true, phase, phase * idle_frames);
                     }
                 }
                 // The first clip's vertex morphs: per frame, one baked entry per
@@ -2049,7 +2587,7 @@ std::shared_ptr<CritterAssets> build_assets(ResourceStoreConfig mounts) {
             range.count = std::uint32_t(a.vertices.size()) - range.first;
             return std::string();
         };
-        for (const Mesh m : {m_rat, m_snowmouse, m_spider, m_frog, m_larva, m_bat}) {
+        for (const Mesh m : {m_rat, m_snowmouse, m_spider, m_frog, m_larva, m_bat, m_squirrel, m_prairiedog, m_cat_standard, m_cat_chonky, m_cat_lean, m_cat_short}) {
             if (!ok(m)) continue;
             const std::size_t vertices = a.vertices.size(), baked = a.baked.size();
             const std::string why = build_mini(m);
@@ -2066,7 +2604,7 @@ std::shared_ptr<CritterAssets> build_assets(ResourceStoreConfig mounts) {
         }
         // Procedural meshes: record canonical pieces at the rest pose and the
         // prototype's per-part planar UVs into atlas tiles.
-        for (unsigned mi = m_lizard; mi < m_count; ++mi) {
+        for (unsigned mi = m_lizard; mi < m_fish; ++mi) {
             const Mesh m = Mesh(mi);
             if (!procedural_rig(m) || !ok(m)) continue;
             std::vector<Bone> bones;
@@ -2100,6 +2638,36 @@ std::shared_ptr<CritterAssets> build_assets(ResourceStoreConfig mounts) {
             }
             range.count = std::uint32_t(a.vertices.size()) - range.first;
         }
+        // Fish: painted slices over the base game's dragon skin scale grain
+        // (never a mod's replacement art) and their two meshes each.
+        {
+            Image dragon;
+            std::string why;
+            if (!decode_skin(larva_store, "dragon00", dragon, why)) for (unsigned m = m_fish; m < m_count; ++m) omit(Mesh(m), why);
+            else {
+                const FishGrain grain = fish_grain(dragon);
+                for (unsigned f = 0; f < fish_count; ++f) {
+                    put_slice(a, Slice(s_fish + f), paint_fish(Fish(f), grain));
+                    for (unsigned lod = 0; lod < 2; ++lod) {
+                        const std::vector<CrVertex> mesh = fish_mesh(Fish(f), lod != 0);
+                        a.meshes[m_fish + 2 * f + lod] = {std::uint32_t(a.vertices.size()), std::uint32_t(mesh.size())};
+                        a.vertices.insert(a.vertices.end(), mesh.begin(), mesh.end());
+                    }
+                }
+            }
+        }
+        // Tumbleweed: its mesh, and the base game's tree04 twig art (never a mod's
+        // replacement atlas, whose layout the crops do not know) on its slice.
+        {
+            ResourceBlob blob; TextureCpuAsset atlas; std::string why;
+            if (!larva_store.resolve("tree04.mmp", blob, failure) || !parse_texture_asset(blob, atlas, failure)) why = "tree04: " + failure.message;
+            else if (tumbleweed_skin(atlas, &a.coat_texels[std::size_t(s_tumble - s_cat_tabby) * kSkin * kSkin * 4], why)) {
+                const std::vector<CrVertex> mesh = tumbleweed_mesh(key("tumbleweed"));
+                a.meshes[m_tumble] = {std::uint32_t(a.vertices.size()), std::uint32_t(mesh.size())};
+                a.vertices.insert(a.vertices.end(), mesh.begin(), mesh.end());
+            }
+            if (!why.empty()) omit(m_tumble, why);
+        }
         // Every mesh must have triangles: one without geometry is omitted
         // (named, logged), never a silently skipped draw.
         for (unsigned m = 0; m < m_count; ++m)
@@ -2117,6 +2685,47 @@ std::shared_ptr<CritterAssets> build_assets(ResourceStoreConfig mounts) {
 constexpr float kFirstDelay = 3.f, kAttemptEvery = 1.f, kAttemptChance = .5f, kSpeciesCooldown = 60.f;
 constexpr float kCooldownMin = 8.f, kCooldownMax = 18.f, kIdleMin = 15.f, kIdleMax = 35.f;
 constexpr float kCombatQuiet = 20.f, kUndeadExclusion = 35.f, kDeadZoneWeight = .4f;
+constexpr float kPrairieMonsterKeepout = 30.f;   // prairie dogs: metres from any unit outside the party
+// Town cats (#113, the approved design of 2026-11-14): a town is a cluster of
+// the map's houses (houses within kTownLink link up, at least kTownHouses),
+// found once at zone load. Its outline is the ground within kCatReach of one of
+// its houses; its points (where its cats walk, rest and come back) ring its
+// houses; its cover points are the map's other objects inside the outline
+// (where a mouse hides). Each town has one resident cat, a city two.
+constexpr float kCatReach = 14.f, kTownLink = 24.f;
+// Where cats live (user 2026-11-14), from the map's houses, walls, gates and
+// MOB units: a city or town (kCityHouses or more: Suslanger's city two cats,
+// Ingos town one) and a bigger walled, gated estate (kEstateHouses or more,
+// kEstateWalls wall pieces and a gate within kEstateReach of its houses) that
+// is not a quarter of a city (kCityQuarter); none in hamlets, in barracks and
+// fortresses (kArmyShare of the human units soldiers), in a necromancer or
+// undead area (kUndeadArea such units inside), and no town point within
+// kUndeadSight of an undead or necromancer unit's place.
+constexpr unsigned kTownHouses = 3, kCityHouses = 40, kEstateHouses = 8, kEstateWalls = 6, kUndeadArea = 3;
+constexpr float kEstateReach = 20.f, kCityQuarter = 150.f, kArmyShare = .6f, kUndeadSight = 25.f;
+constexpr float kCatWalk = .6f, kCatTrot = 1.4f, kCatStalk = .35f, kCatDash = 3.2f, kMouseRun = 2.6f;   // m/s
+constexpr float kCatNextPoint = 18.f, kCatHomeShare = .35f;   // the next point within this; home now and then
+constexpr float kCatUnseen = 25.f, kCatRespawnAway = 22.f;   // back after this long unseen, this far from the party
+constexpr float kCatDashAt = 1.6f, kMouseEveryMin = 25.f, kMouseEveryMax = 60.f;
+// walk and run clip strides at the cat figure's scale 1 (m per cycle)
+constexpr float kCatWalkStride = .333f, kCatRunStride = 1.2f;
+enum TownKind : std::uint8_t { town_hamlet, town_city, town_estate, town_quarter, town_military, town_undead };
+struct Town {
+    TownKind kind = town_hamlet;
+    float x = 0, y = 0, extent = 0;   // middle and the outline's reach from it
+    std::uint32_t house0 = 0, houses = 0, point0 = 0, points = 0, cover0 = 0, covers = 0;
+    std::uint8_t cats = 1;
+};
+struct TownMap {
+    std::vector<Town> towns;
+    std::vector<Point> houses, points, covers;
+    bool inside(const Town& t, float x, float y) const {
+        for (std::uint32_t i = t.house0; i < t.house0 + t.houses; ++i)
+            if (std::hypot(houses[i].x - x, houses[i].y - y) < kCatReach) return true;
+        return false;
+    }
+};
+constexpr float kFlockStayMin = 45.f, kFlockStayMax = 90.f;   // game seconds an undisturbed ambient flock stays
 // Every living critter avoids the undead: none appears within kUndeadExclusion
 // of one, and one coming within kUndeadReach (or its own sight/hearing reach)
 // sends it off, whatever its size.
@@ -2161,6 +2770,8 @@ struct Agent {
     float x = 0, y = 0, z = 0, yaw = 0, pitch = 0, t = 0, age = 0, gait = 0, speed = 0, alpha = 0;
     float seen = 0;   // party sight: 1 inside a controlled unit's vision, fading on game time
     float pushup = 0, peck = 0, caw = 0, wing = 0, soar = 0, claw = 0, push = 0, search = 0;
+    float rise = 0, sit = 0;   // rodents: sit-up amount 0..1 (cats: 0 stand, 1 sit, 2 lie) and seconds at rest (game time)
+    std::uint8_t look = 0;     // cats: coat slice offset (low 4 bits) and body shape (high 4 bits)
     float scale = 1; // immutable display scale, chosen using the spawn camera
     float idle_limit = 0, tx = 0, ty = 0, fx = 0, fy = 1;
     float vx = 0, vy = 0, vz = 0, slot_x = 0, slot_y = 0, delay = 0;
@@ -2205,6 +2816,9 @@ struct Flock {
     float margin = 99; std::uint8_t refused = 0;
     float scale = 1;   // immutable display scale, chosen using the spawn camera
     float spot[2]{}, center[2]{}, exit[2]{0, 1};
+    // ambient (director) flock: game seconds it has stayed and how long it stays
+    // before it flies on (0: not chosen yet)
+    float stay = 0, stay_limit = 0;
     Agent birds[kFlockBirds];
 };
 // A corpse keeps its age by retained entity ID while the body stays in the
@@ -2235,6 +2849,11 @@ struct Obstacles {
     // trunk only (its box spans the whole crown, which a bird lands under).
     std::vector<float> ground_top;
     std::vector<std::array<float, 6>> boxes;
+    // What stands on the ground, exactly: each box's footprint (a tree's trunk
+    // only) with its top, for point tests finer than the 2 m grid.
+    // x0, y0, x1, y1, top, and the cos/sin of its object's yaw (1, 0: none matched or a
+    // tree's trunk square)
+    std::vector<std::array<float, 7>> footprints;
     std::vector<CritterPerchTree> perches;   // bridge_critter_perches: trees and cacti with mesh perches
     float ground_top_near(float x, float y, float r) const {
         float best = -std::numeric_limits<float>::infinity();
@@ -2259,22 +2878,39 @@ struct Obstacles {
         n = int(2 * kRadius / kCell); x0 = x - kRadius; y0 = y - kRadius;
         top.assign(std::size_t(n) * n, -std::numeric_limits<float>::infinity());
         ground_top.assign(std::size_t(n) * n, -std::numeric_limits<float>::infinity());
+        footprints.clear();
         if (!bridge_critter_obstacles(x, y, kRadius, boxes)) boxes.clear();
         if (!bridge_critter_perches(x, y, kRadius, perches)) perches.clear();
+        // the map objects near the view, for each box's object (its yaw, or a tree's trunk)
+        std::vector<const StaticObjectSource*> close_objects;
+        if (objects)
+            for (const auto& o : *objects)
+                if (std::abs(o.position[0] - x) < kRadius + 20 && std::abs(o.position[1] - y) < kRadius + 20) close_objects.push_back(&o);
         for (const auto& b : boxes) {
             if (b[5] - b[2] < .25f) continue;   // flat decals and pebbles
             const int ix0 = std::max(0, int(std::floor((b[0] - x0) / kCell))), ix1 = std::min(n - 1, int(std::floor((b[3] - x0) / kCell)));
             const int iy0 = std::max(0, int(std::floor((b[1] - y0) / kCell))), iy1 = std::min(n - 1, int(std::floor((b[4] - y0) / kCell)));
             for (int iy = iy0; iy <= iy1; ++iy)
                 for (int ix = ix0; ix <= ix1; ++ix) { float& t = top[std::size_t(iy) * n + ix]; t = std::max(t, b[5]); }
-            float fx0 = b[0], fx1 = b[3], fy0 = b[1], fy1 = b[4];
-            if (objects)
-                for (const auto& o : *objects)
-                    if (o.position[0] >= b[0] && o.position[0] <= b[3] && o.position[1] >= b[1] && o.position[1] <= b[4] &&
-                        ambient::tree_kind(o.visual_reference.c_str()) != ambient::tree_none) {
-                        fx0 = o.position[0] - .6f; fx1 = o.position[0] + .6f; fy0 = o.position[1] - .6f; fy1 = o.position[1] + .6f;
-                        break;
-                    }
+            float fx0 = b[0], fx1 = b[3], fy0 = b[1], fy1 = b[4], yc = 1, ys = 0;
+            // The box's object: the map object standing inside it nearest its centre.
+            const StaticObjectSource* owner = nullptr;
+            float best = std::numeric_limits<float>::infinity();
+            const float bx = .5f * (b[0] + b[3]), by = .5f * (b[1] + b[4]);
+            for (const auto* o : close_objects) {
+                if (o->position[0] < b[0] || o->position[0] > b[3] || o->position[1] < b[1] || o->position[1] > b[4]) continue;
+                const float dd = std::hypot(o->position[0] - bx, o->position[1] - by);
+                if (dd < best) { best = dd; owner = o; }
+            }
+            if (owner && ambient::tree_kind(owner->visual_reference.c_str()) != ambient::tree_none) {
+                fx0 = owner->position[0] - .6f; fx1 = owner->position[0] + .6f; fy0 = owner->position[1] - .6f; fy1 = owner->position[1] + .6f;
+            } else if (owner) {
+                // its yaw: the object's local x axis in the world (quaternion w,x,y,z as retained_object_matrix)
+                const auto& q = owner->quaternion;
+                const float ax = 1 - 2 * (q[2] * q[2] + q[3] * q[3]), ay = 2 * (q[1] * q[2] + q[0] * q[3]), len = std::hypot(ax, ay);
+                if (len > 1e-6f) { yc = ax / len; ys = ay / len; }
+            }
+            footprints.push_back({fx0, fy0, fx1, fy1, b[5], yc, ys});
             const int gx0 = std::max(0, int(std::floor((fx0 - x0) / kCell))), gx1 = std::min(n - 1, int(std::floor((fx1 - x0) / kCell)));
             const int gy0 = std::max(0, int(std::floor((fy0 - y0) / kCell))), gy1 = std::min(n - 1, int(std::floor((fy1 - y0) / kCell)));
             for (int iy = gy0; iy <= gy1; ++iy)
@@ -2282,12 +2918,30 @@ struct Obstacles {
         }
     }
 };
+// Spell blasts: where a spell's own light burns (RetainedWorldPointLight::
+// spell: the fireball's flight and explosion, lightning, acid column, fire and
+// lightning walls, poison fog, fireworks; never a heal). Every critter treats
+// one like the loudest unit there can be, running, and then some for the
+// spell's size: max(3 x its hearing reach (the shipped units' loudest hearing
+// percept 1.5 x the game's running or casting x2), the 15 m a hunting crawler
+// scares from) plus half the light's range, up to 45 m. The spot stays avoided
+// while the light lasts and kBlastLinger game seconds after.
+constexpr float kBlastNoise = 3.f, kBlastFloor = 15.f, kBlastSize = .5f, kBlastReachMax = 45.f;
+constexpr double kBlastLinger = 20;
+constexpr float kBlastMerge = 3.f;   // a light this near a blast is that effect a tick on (a flying fireball moves < 1 m)
+constexpr std::size_t kBlasts = 8;
+struct Blast { float x = 0, y = 0, radius = 0; double until = 0; };
+inline float blast_reach(float flee_r, float radius) {
+    return std::min(kBlastReachMax, std::max(kBlastNoise * flee_r, kBlastFloor) + kBlastSize * radius);
+}
 // Read-only world view of one tick.
 struct WorldView {
+    const std::vector<std::array<float, 3>>* spell_lights = nullptr;   // this frame's spell lights: x, y, range
+    const std::vector<Blast>* blasts = nullptr;                         // the director's live blasts
     const Obstacles* obstacles = nullptr;
     std::uint32_t unavailable = 0;   // species whose game assets failed to load
     // Player per-type spawn weight (kCritterTypeSettings): 1 is the normal mix, 0 the type is off.
-    float type_weight[sp_count] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
+    float type_weight[sp_count] = {1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1};
     bool party_moving = false;       // a living unit near the view is walking (bats fly past then)
     const SpotMap* spot_map = nullptr;
     ambient::ZoneClass zone = ambient::zone_outdoor;
@@ -2296,8 +2950,44 @@ struct WorldView {
     const float* height = nullptr; std::uint32_t verts_x = 0, verts_y = 0;
     const std::vector<StaticObjectSource>* objects = nullptr;
     const std::vector<Point>* ring = nullptr;
+    const TownMap* towns = nullptr;   // town cats: the map's towns (Ingos and Suslanger)
+    // Suslanger city rats: inside the city (a town of kind town_city) in Suslanger.
+    bool in_city(float px, float py) const {
+        if (zone != ambient::zone_desert || !towns) return false;
+        for (const auto& t : towns->towns)
+            if (t.kind == town_city && towns->inside(t, px, py)) return true;
+        return false;
+    }
+    // Solid ground objects a cat may not stand in or walk through: every object's
+    // own rectangle, recovered from its axis-aligned box and its MOB yaw, so a
+    // diagonal fence blocks along its length and leaves the street beside it
+    // free (axis-aligned boxes refused 164 of 167 candidates by Ingos houses).
+    bool solid_at(float px, float py) const {
+        if (!obstacles) return false;
+        const float g = ground(px, py) + .3f;
+        for (const auto& f : obstacles->footprints) {
+            if (!(px >= f[0] && px <= f[2] && py >= f[1] && py <= f[3] && f[4] > g)) continue;
+            // half sizes a (local x) and b (local y) whose turned box is this world box
+            // (W = a|c| + b|s|, H = a|s| + b|c|); near 45 degrees, where that cannot be
+            // solved, the thinner of a square or the box's own short side
+            const float c = f[5], sn = f[6], W = .5f * (f[2] - f[0]), H = .5f * (f[3] - f[1]);
+            const float ac = std::abs(c), as = std::abs(sn), det = ac * ac - as * as;
+            float ra, rb;
+            if (std::abs(det) > .2f) { ra = (W * ac - H * as) / det; rb = (H * ac - W * as) / det; }
+            else ra = rb = std::min(W, H) / std::max(ac + as, 1e-3f);
+            ra = std::max(ra, .15f); rb = std::max(rb, .15f);
+            const float dx = px - .5f * (f[0] + f[2]), dy = py - .5f * (f[1] + f[3]);
+            const float lx = c * dx + sn * dy, ly = -sn * dx + c * dy;
+            if (std::abs(lx) < ra && std::abs(ly) < rb) return true;
+        }
+        return false;
+    }
     const float* clip = nullptr; float width = 0, height_px = 0;
     V3 eye{}, focus{};
+    // critter_fish_showcase (diagnostic): 1 + the Fish kept as one school at the
+    // water nearest the screen centre's ground point (camera_focus); 0 off.
+    int fish_showcase = 0;
+    V3 camera_focus{};
     float view_radius = 30;
     const std::vector<std::array<float, 4>>* units = nullptr;
     const std::vector<GroundUnitDetail>* details = nullptr;
@@ -2476,9 +3166,38 @@ struct SpotMemory { std::uint32_t sector = 0; double quiet_until = 0; bool rolle
 struct Resident { bool active = false, is_flock = false, disturbed = false; std::uint32_t sector = 0; Agent critter; Flock birds; };
 constexpr unsigned kResidents = 4;
 
+// A town's resident cat: a fixed identity (coat, body, size, home point) from
+// the map, its town and its slot; alive while the party is near, back by a
+// respawn out of view at one of its own town's points.
+enum CatMode : std::uint8_t { cm_rest, cm_walk, cm_away };   // resting at a point, walking to one, moving off
+enum Hunt : std::uint8_t { hu_none, hu_forage, hu_stalk, hu_dash, hu_escape };
+struct TownCat {
+    std::uint32_t town = 0, home = 0, target = 0, picks = 0, spawns = 0, mice = 0;
+    std::uint8_t slot = 0, look = 0, activity = 0;   // activity: 0 looks about, 1 sits, 2 grooms (sitting), 3 lies in the sun
+    std::uint64_t key = 0;
+    float size = 1, timer = 0, best = 0, stuck = 0;
+    bool alive = false;
+    double away_since = -1e9, next_try = 0, next_mouse = 0;
+    CatMode mode = cm_rest;
+    Agent cat;
+    // at most one mouse, only while the cat is seen: out of its cover point, nibbling, then back in
+    Hunt hunt = hu_none;
+    Agent mouse;
+    float hunt_t = 0, notice = 1, forage = .7f, cover_x = 0, cover_y = 0;
+};
+// Spawn lanes: each runs its own attempt and cooldown cycle at the designed
+// pace, concurrently, so one kind of animal never keeps another away (user,
+// 2026-11-13): ground critters, water-edge critters (frogs, shore crabs) and
+// the air (bird flocks, vulture thermals, cave bat fly-bys). Carrion keeps its
+// own budget; the shared on-screen budget still caps the total.
+enum Lane : unsigned { lane_ground = 0, lane_shore, lane_air, kLanes };
+inline Lane lane_of(Species s) {
+    const auto& r = species_rule(s);
+    return r.exit == exit_flock || r.exit == exit_soar ? lane_air : r.exit == exit_water ? lane_shore : lane_ground;
+}
 struct Director {
     std::uint64_t seed = 1;
-    double clock = 0, next_attempt = kFirstDelay, last_combat = -1e9;
+    double clock = 0, next_attempt[kLanes]{kFirstDelay, kFirstDelay + 1, kFirstDelay + 2}, last_combat = -1e9;
     std::uint32_t attempt = 0, events = 0;
     // Map-local totals; spot rejects count candidate checks, not random draws.
     std::uint64_t spawn_attempts = 0, no_spot = 0, no_species = 0, quiet_reject = 0;
@@ -2486,19 +3205,32 @@ struct Director {
     std::uint64_t carrion_arrivals = 0, carrion_landed = 0;
     std::uint64_t slots_wanted = 0, slots_found = 0, slots_failed = 0;   // carrion landing slots, reserved once per flock
     std::uint64_t spot_rolls = 0, spot_found = 0, spot_faded = 0, spot_disturbed = 0, budget_reject = 0;
+    std::uint64_t blasts_seen = 0, blast_scared = 0, blast_reject = 0;   // spell blasts, critters/flocks they sent off, spawns refused
+    std::vector<Blast> blasts;  // at most kBlasts
     double last_species[sp_count];
-    Agent critters[4];
+    Agent critters[8];          // the ground and water-edge lanes' events (a group each)
     unsigned critter_count = 0;
     Flock flock;                // ambient flock (one event)
     Flock carrion[2];
     std::vector<Corpse> corpses;
     Resident residents[kResidents];
     std::vector<SpotMemory> spot_memory;
+    std::vector<TownCat> town_cats;
+    // Fish schools: their own budget (fish_schools), in the water only.
+    School schools[3];
+    double next_school = kFirstDelay;
+    std::uint32_t school_serial = 0, school_events = 0;
     Director() { std::fill(std::begin(last_species), std::end(last_species), -1e9); }
 };
 // Director events and spot residents on screen or about to be.
+bool lane_active(const Director& d, Lane lane) {
+    if (lane == lane_air) return d.flock.active;
+    for (unsigned i = 0; i < d.critter_count; ++i) if (lane_of(d.critters[i].species) == lane) return true;
+    return false;
+}
 unsigned on_screen(const Director& d) {
-    unsigned n = (d.critter_count ? 1u : 0u) + (d.flock.active ? 1u : 0u);
+    unsigned n = 0;
+    for (unsigned l = 0; l < kLanes; ++l) n += lane_active(d, Lane(l)) ? 1u : 0u;
     for (const auto& r : d.residents) n += r.active ? 1u : 0u;
     return n;
 }
@@ -2517,6 +3249,7 @@ void move(const WorldView& w, Agent& c, float v, float dt, bool sideways = false
     for (const float turn : {0.f, .9f, -.9f, 1.8f, -1.8f}) {
         const float a = c.yaw + off + turn, nx = c.x + std::sin(a) * v * dt, ny = c.y + std::cos(a) * v * dt;
         if (!w.walkable(nx, ny)) continue;
+        if (c.species == sp_rat && w.zone == ambient::zone_desert && w.solid_at(nx, ny)) continue;   // city rats go round objects
         c.x = nx; c.y = ny; c.yaw += turn * std::min(1.f, dt * 4);
         return;
     }
@@ -2604,12 +3337,66 @@ void begin_flee(const Director& dir, Agent& c, float threat_x, float threat_y, c
     c.has_target = goal; c.tx = gx; c.ty = gy; c.fx = ax; c.fy = ay;
 }
 
+// The nearest live blast whose reach for this hearing covers a point.
+Threat blast_threat(const WorldView& w, float x, float y, float flee_r) {
+    Threat t; float best = std::numeric_limits<float>::infinity();
+    if (!w.blasts) return t;
+    for (const auto& b : *w.blasts) {
+        const float d = std::hypot(b.x - x, b.y - y);
+        if (d < blast_reach(flee_r, b.radius) && d < best) { best = d; t = {true, b.x, b.y}; }
+    }
+    return t;
+}
+
+// This frame's spell lights keep their blasts alive (the same effect: the
+// nearest blast within kBlastMerge follows it); a blast ends kBlastLinger
+// game seconds after its last light. Full: the soonest to end gives way.
+void blasts_tick(Director& d, const WorldView& w) {
+    if (w.spell_lights)
+        for (const auto& s : *w.spell_lights) {
+            Blast* m = nullptr; float best = kBlastMerge;
+            for (auto& b : d.blasts) { const float dd = std::hypot(b.x - s[0], b.y - s[1]); if (dd < best) { best = dd; m = &b; } }
+            if (!m) {
+                if (d.blasts.size() < kBlasts) { d.blasts.emplace_back(); m = &d.blasts.back(); }
+                else { m = &*std::min_element(d.blasts.begin(), d.blasts.end(), [](const Blast& a, const Blast& b) { return a.until < b.until; }); *m = Blast{}; }
+                ++d.blasts_seen;
+            }
+            m->x = s[0]; m->y = s[1]; m->radius = std::max(m->radius, s[2]); m->until = d.clock + kBlastLinger;
+        }
+    d.blasts.erase(std::remove_if(d.blasts.begin(), d.blasts.end(), [&](const Blast& b) { return d.clock > b.until; }), d.blasts.end());
+}
+
+// A blast sends a ground critter off at once, at full pace and away from it
+// (the loudest unit's response); a larva burrows on the spot.
+void blast_scare_critter(Director& d, Agent& c, const WorldView& w) {
+    if (c.state == st_vanish || c.state == st_gone) return;
+    const Threat t = blast_threat(w, c.x, c.y, species_rule(c.species).flee_r);
+    if (!t.found) return;
+    if (c.species == sp_larva) { c.state = st_vanish; c.t = 0; ++d.blast_scared; return; }
+    if (c.state == st_flee && c.fx * (c.x - t.x) + c.fy * (c.y - t.y) >= 0) return;   // already running away from it
+    begin_flee(d, c, t.x, t.y, w, false);
+    ++d.blast_scared;
+}
+
 void critter_idle(const Director& dir, Agent& c, float dt, const WorldView& w, float tail_y) {
     const Species k = c.species;
     const float t = c.t;
     c.speed = 0;
     const int slot = int(t / 2.5f);
     const float r = rnd(dir, c.key, key("idle"), std::uint64_t(slot));
+    if (k == sp_squirrel || k == sp_prairiedog) {
+        // Sits up for a while (the squirrel nibbling, the prairie dog on the
+        // lookout), drops back down, now and then shuffles a little.
+        const float goal = r < (k == sp_prairiedog ? .55f : .4f) ? 1.f : 0.f;
+        c.rise = goal > c.rise ? std::min(goal, c.rise + dt / .6f) : std::max(goal, c.rise - dt / .5f);
+        c.sit = c.rise >= 1 ? c.sit + dt : 0.f;   // the sitting loop starts where the sit-up ends
+        if (!(goal > 0) && !(c.rise > 0) && r > .85f && std::fmod(t, 2.5f) < .45f) {
+            c.speed = .4f; c.gait += dt * 2;
+            move(w, c, .15f, dt);
+            face(c, std::sin(float(slot)), std::cos(float(slot)), 3, dt);
+        }
+        return;
+    }
     if (k == sp_dungbeetle) {
         if (!c.has_ball) { c.has_ball = true; c.ball_x = c.x - std::sin(c.yaw) * .028f * c.scale; c.ball_y = c.y - std::cos(c.yaw) * .028f * c.scale; c.ball_roll = 0; }
         c.push = 1; c.speed = .5f;
@@ -2661,6 +3448,7 @@ void critter_flee(const Director& dir, Agent& c, float dt, const WorldView& w, b
     const auto& rule = species_rule(c.species);
     const Species k = c.species;
     const float pace = calm ? .45f : 1.f;
+    c.rise = std::max(0.f, c.rise - dt / .2f); c.sit = 0;
     // dart: straight and fast towards cover with small jinks; no pathing
     const float jit = (rnd(dir, c.key, key("zig"), std::uint64_t(c.t / .35f)) - .5f) * (k == sp_lizard ? .9f : .4f);
     const float dx = c.fx * std::cos(jit) - c.fy * std::sin(jit), dy = c.fx * std::sin(jit) + c.fy * std::cos(jit);
@@ -2686,7 +3474,8 @@ void critter_flee(const Director& dir, Agent& c, float dt, const WorldView& w, b
         c.speed = 1;
         float rate = 6;
         switch (k) { case sp_snowmouse: rate = 7; break; case sp_spider: rate = 5; break; case sp_lizard: rate = 9; break;
-                     case sp_snake: rate = 2.5f; break; case sp_scolopendra: rate = 4; break; default: break; }
+                     case sp_snake: rate = 2.5f; break; case sp_scolopendra: rate = 4; break;
+                     default: break; }
         c.gait += dt * rate;
         if (k == sp_dungbeetle) c.push = 0;   // abandons the ball where it is
         move(w, c, rule.speed * pace, dt);
@@ -2832,6 +3621,27 @@ void flock_alarm(Flock& f, const Director& dir, float tx, float ty) {
     f.exit[0] = ax / n; f.exit[1] = ay / n;
     const BirdFlight fl = bird_flight(f.variant, f.scale);
     f.center[0] = cx + f.exit[0] * fl.radius * .8f; f.center[1] = cy + f.exit[1] * fl.radius * .8f;
+}
+
+// A blast reaching any bird of a flock (on the ground, perched, landing or
+// circling) sends the whole flock up and away for good, staggered by distance
+// as from a unit; a bat swarm just goes.
+void blast_scare_flock(Director& d, Flock& f, const WorldView& w) {
+    if (!f.active || f.state == fl_leave || f.state == fl_gone) return;
+    const float flee = bird_flight(f.variant, f.scale).flee;
+    for (unsigned j = 0; j < f.count; ++j) {
+        const Agent& b = f.birds[j];
+        if (b.state == st_gone) continue;
+        const Threat t = blast_threat(w, b.x, b.y, flee);
+        if (!t.found) continue;
+        if (f.variant != bird_bat) {
+            flock_alarm(f, d, t.x, t.y);
+            for (auto& o : f.birds) o.solo = 0;   // everyone goes along
+        }
+        f.state = fl_leave; f.t = 0;
+        ++d.blast_scared;
+        return;
+    }
 }
 
 // Ground hop, weighted: an anticipation crouch during which the bird turns
@@ -3227,6 +4037,8 @@ float landing_margin(const WorldView& w, const float* spot, float flee) {
         const float reach = std::min(10.f, threat_reach(flee, senses_of(det)));
         closest = std::min(closest, std::hypot(u[0] - spot[0], u[1] - spot[1]) - (det.undead ? std::max(reach, kUndeadReach) : reach));
     }
+    if (w.blasts)   // and nobody lands in a blast's reach
+        for (const auto& b : *w.blasts) closest = std::min(closest, std::hypot(b.x - spot[0], b.y - spot[1]) - blast_reach(flee, b.radius));
     return closest;
 }
 
@@ -3404,6 +4216,7 @@ float species_weight(const WorldView& w, Species s) {
     const bool grim = w.zone == ambient::zone_dead_city;
     if ((w.unavailable >> s) & 1u) return 0;   // its game assets failed to load (logged once)
     if (!(w.type_weight[s] > 0)) return 0;     // the player turned this type off
+    if (s == sp_cat) return 0;                  // town cats live in their towns (town_cats_tick), never as events
     if (s == sp_bat && !w.party_moving) return 0;   // bats fly past moving heroes, never idle ones
     if (!((rule.zones >> w.zone) & 1u) || (grim && rule.cute)) return 0;
     return rule.weight * w.type_weight[s] * (w.day ? rule.day : rule.night) * (s == sp_raven && !grim ? .6f : 1.f);
@@ -3418,11 +4231,26 @@ float weight_now(const Director& d, const WorldView& w, Species s) {
 // when none is near. Thermal-riding vultures keep their spot.
 void open_spot(const WorldView& w, Species s, float& x, float& y) {
     const auto& rule = species_rule(s);
+    if (rule.near_mask) return;   // water-edge animals stay at the edge (shore_spot)
     const std::uint32_t open = rule.habitat & kOpenGround;
     const auto a = w.area_at(x, y);
     if (rule.exit == exit_soar || !open || a == 0xff || ((open >> a) & 1u)) return;
     float ox, oy;
     if (w.nearest(x, y, open, kOpenSearch, ox, oy) && w.habitat(rule, ox, oy)) { x = ox; y = oy; }
+}
+// A water-edge animal (frog, shore crab) lives within near_r of water or swamp:
+// a candidate spot steps to the shore nearest it within kShoreSearch, onto a
+// habitat tile beside that water. Spots are drawn at random over the party's
+// sight, and almost none of them lies within 3 m of a shore (census: 0 of ~190
+// water-edge attempts in Gipat found one). Unchanged when no shore is near.
+constexpr float kShoreSearch = 12.f;
+void shore_spot(const WorldView& w, Species s, float& x, float& y) {
+    const auto& rule = species_rule(s);
+    if (!rule.near_mask || w.habitat(rule, x, y)) return;
+    float wx, wy, hx, hy;
+    if (!w.nearest(x, y, rule.near_mask, kShoreSearch, wx, wy) ||
+        !w.nearest(wx, wy, rule.habitat & ~rule.near_mask, rule.near_r, hx, hy)) return;
+    x = hx; y = hy;
 }
 // Whether a species may appear at a ground point: habitat, undead and wall
 // rules, and no unit close enough to scare it at once. On success, the world
@@ -3432,13 +4260,24 @@ bool fits_at(Director& d, const WorldView& w, Species s, float x, float y, float
     const bool grim = w.zone == ambient::zone_dead_city;
     scale = species_scale(s);
     if (s == sp_larva && !larva_habitat(w, x, y)) { ++d.habitat_reject; return false; }
-    if (!w.habitat(rule, x, y) || (rule.exit != exit_soar && s != sp_bat && !w.walkable(x, y))) { ++d.habitat_reject; return false; }
+    // Suslanger rats live in the city only, on its open ground (its streets: no area class rule).
+    const bool city_rat = s == sp_rat && w.zone == ambient::zone_desert;
+    if ((city_rat ? !w.in_city(x, y) || w.solid_at(x, y) : !w.habitat(rule, x, y)) ||
+        (rule.exit != exit_soar && s != sp_bat && !w.walkable(x, y))) { ++d.habitat_reject; return false; }
     bool near_undead = false;
     for (std::size_t k = 0; k < w.units->size(); ++k)
         if ((*w.details)[k].undead && !(*w.details)[k].dead && std::hypot((*w.units)[k][0] - x, (*w.units)[k][1] - y) < kUndeadExclusion)
             near_undead = true;
     // Every living critter keeps away from the undead; Dead City ravens stay outside its wall.
     if (near_undead || (s == sp_raven && grim && !w.outside_walls(x, y))) { ++d.undead_reject; return false; }
+    if (s == sp_squirrel) {   // squirrels live by trees
+        float tree[2], perches[kPerchCount][3];
+        if (!perch_tree(w, x, y, 10, nullptr, 0, false, tree, perches)) { ++d.habitat_reject; return false; }
+    }
+    if (s == sp_prairiedog)   // a colony keeps far from monsters (any unit outside the party)
+        for (std::size_t k = 0; k < w.units->size(); ++k)
+            if (!(*w.details)[k].dead && !(*w.details)[k].controlled &&
+                std::hypot((*w.units)[k][0] - x, (*w.units)[k][1] - y) < kPrairieMonsterKeepout) { ++d.threat_reject; return false; }
     if (s == sp_raven && !grim) {   // a wild corvid sits in a tree
         float tree[2], perches[kPerchCount][3];
         if (!perch_tree(w, x, y, 20, nullptr, 0, false, tree, perches)) { ++d.habitat_reject; return false; }
@@ -3450,6 +4289,7 @@ bool fits_at(Director& d, const WorldView& w, Species s, float x, float y, float
         margin = std::min(margin, std::hypot(u[0] - x, u[1] - y) - threat_reach(rule.flee_r, senses_of((*w.details)[k])));
     }
     if (margin < 2) { ++d.threat_reject; return false; }
+    if (blast_threat(w, x, y, rule.flee_r).found) { ++d.blast_reject; return false; }   // nobody comes back while a spell burns
     // Other ground critters keep well away from crawlers (they are prey).
     if (s != sp_larva && rule.exit != exit_flock && rule.exit != exit_soar && s != sp_bat)
         for (std::size_t k = 0; k < w.units->size(); ++k)
@@ -3491,7 +4331,7 @@ bool start_flock(Flock& f, const Director& d, const WorldView& w, Species s, flo
 
 // Select only species with a visible, habitat-valid, unthreatened candidate.
 // A rare habitat outside the view must not waste the whole spawn opportunity.
-void try_spawn(Director& d, const WorldView& w, const std::vector<V3>& spots) {
+void try_spawn(Director& d, const WorldView& w, const std::vector<V3>& spots, Lane lane) {
     ++d.spawn_attempts;
     const std::uint32_t a = d.attempt;
     float weights[sp_count]{}, scales[sp_count]{}, cx[sp_count]{}, cy[sp_count]{}, total = 0;
@@ -3503,6 +4343,7 @@ void try_spawn(Director& d, const WorldView& w, const std::vector<V3>& spots) {
         if (!(*w.details)[k].dead && (*w.details)[k].controlled) { party_z += w.ground((*w.units)[k][0], (*w.units)[k][1]); ++party_n; }
     if (party_n) party_z /= float(party_n);
     for (unsigned s = 0; s < sp_count; ++s) {
+        if (lane_of(Species(s)) != lane) continue;
         float wt = species_weight(w, Species(s));
         if (!(wt > 0)) continue;
         eligible_species = true;
@@ -3536,6 +4377,7 @@ void try_spawn(Director& d, const WorldView& w, const std::vector<V3>& spots) {
             const auto& level_rule = species_rule(Species(s));
             if (party_n && level_rule.exit != exit_flock && level_rule.exit != exit_soar && s != sp_bat &&
                 std::fabs(w.ground(x, y) - party_z) > 4.f) { ++d.habitat_reject; continue; }
+            shore_spot(w, Species(s), x, y);
             open_spot(w, Species(s), x, y);
             if (!fits_at(d, w, Species(s), x, y, scale)) continue;
             cx[s] = x; cy[s] = y; scales[s] = scale;
@@ -3562,15 +4404,16 @@ void try_spawn(Director& d, const WorldView& w, const std::vector<V3>& spots) {
             if (!start_flock(d.flock, d, w, species, x, y, splitmix(d.seed ^ (std::uint64_t(d.events) << 8) ^ key("f")))) return;
         } else {
             n = species == sp_larva ? std::min(n, 4u) : std::min(n, w.level < 2 ? 1u : 2u);   // grubs come in small clutches
+            n = std::min(n, unsigned(std::size(d.critters)) - d.critter_count);
             for (unsigned j = 0; j < n; ++j) {
-                Agent& c = d.critters[j];
+                Agent& c = d.critters[d.critter_count + j];
                 c = Agent{};
                 c.species = species; c.scale = scales[s]; c.key = splitmix(d.seed ^ (std::uint64_t(d.events) << 8) ^ (j + 1));
                 c.x = x + (rnd(d, a, j, key("ox")) - .5f) * .6f * j; c.y = y + (rnd(d, a, j, key("oy")) - .5f) * .6f * j;
                 c.yaw = rrange(d, 0, TAU, c.key, key("yaw"));
                 c.idle_limit = rrange(d, kIdleMin, kIdleMax, c.key, key("idle"));
             }
-            d.critter_count = n;
+            d.critter_count += n;
         }
         d.last_species[s] = d.clock;
         ++d.events;
@@ -3594,7 +4437,7 @@ bool populate_spot(Director& d, const WorldView& w, std::uint32_t sector, const 
         if (species_rule(Species(s)).exit == exit_soar) continue;   // vultures ride thermals, not spots
         float wt = species_weight(w, Species(s));
         cx[s] = cell.x; cy[s] = cell.y;
-        if (wt > 0) open_spot(w, Species(s), cx[s], cy[s]);
+        if (wt > 0) { shore_spot(w, Species(s), cx[s], cy[s]); open_spot(w, Species(s), cx[s], cy[s]); }
         if (!(wt > 0) || !fits_at(d, w, Species(s), cx[s], cy[s], scales[s])) continue;
         wt *= weight_now(d, w, Species(s)) * sound_bias(Species(s), cell.sound);
         weights[s] = wt; total += wt;
@@ -3693,7 +4536,9 @@ void spots_tick(Director& d, float dt, const WorldView& w, const std::vector<std
             if (!(extent <= kSpotForget)) { if (m && !m->occupied) m->rolled = false; continue; }
             if (m && (m->occupied || m->rolled || d.clock < m->quiet_until)) continue;
             if (extent > kSpotBand || quiet) continue;   // wait for the approach band; no finds right after a fight
-            if (on_screen(d) >= critter_budget(w.level)) { ++d.budget_reject; continue; }
+            unsigned living = 0;
+            for (const auto& r : d.residents) living += r.active ? 1u : 0u;
+            if (on_screen(d) >= critter_budget(w.level) || living >= resident_budget(w.level)) { ++d.budget_reject; continue; }
             m = spot_memory(d, sector, true);
             m->rolled = true;
             ++d.spot_rolls;
@@ -3744,29 +4589,354 @@ void drop_disabled_types(Director& d, const WorldView& w) {
     for (auto& r : d.residents)
         if (r.active && off(r.is_flock ? bird_species(r.birds.variant) : r.critter.species)) end_resident(d, r);
     for (auto& f : d.carrion) if (f.active && off(bird_species(f.variant))) f.active = false;
+    for (auto& c : d.town_cats) if (c.alive && off(sp_cat)) { c.alive = false; c.hunt = hu_none; c.away_since = d.clock; }
+    if (off(sp_fish)) for (auto& s : d.schools) s.active = false;
 }
 
+// ---- town cats
+// The map's units as its MOB places them (unit chunks: prototype 0xbbbb0002,
+// model 0xb006, position 0xb009): undead by model family or a necromancer or
+// undead prototype, soldiers by an army prototype.
+struct MapUnit { float x = 0, y = 0; bool undead = false, soldier = false, human = false; };
+std::vector<MapUnit> map_units(const OwnedMapSnapshot& map) {
+    std::vector<MapUnit> out;
+    if (!map.mob || !map.mob->bytes) return out;
+    const auto& bytes = *map.mob->bytes;
+    const auto text = [&](const MobChunkRecord& f) {
+        std::string v(reinterpret_cast<const char*>(bytes.data() + f.payload_offset), f.payload_bytes);
+        v = v.substr(0, v.find('\0'));
+        for (auto& ch : v) if (ch >= 'A' && ch <= 'Z') ch = char(ch - 'A' + 'a');
+        return v;
+    };
+    const auto walk = [&](const auto& self, const std::vector<MobChunkRecord>& chunks) -> void {
+        for (const auto& chunk : chunks) {
+            if (chunk.id == 0xbbbb0000u) {
+                std::string proto, model; const MobChunkRecord* position = nullptr;
+                for (const auto& f : chunk.children) {
+                    if (f.id == 0xbbbb0002u) proto = text(f);
+                    if (f.id == 0xb006u) model = text(f);
+                    if (f.id == 0xb009u && f.payload_bytes == 12 && !position) position = &f;
+                }
+                if (!position) continue;
+                MapUnit u;
+                float p[3]; std::memcpy(p, bytes.data() + position->payload_offset, sizeof(p));
+                if (!std::isfinite(p[0]) || !std::isfinite(p[1])) continue;
+                u.x = p[0]; u.y = p[1];
+                u.undead = undead_model(model.c_str());
+                for (const char* w : {"necro", "zombie", "undead", "banshee", "skeleton", "deathknight", "lich", "ghost", "vampire", "mummy"})
+                    u.undead = u.undead || proto.find(w) != std::string::npos;
+                u.human = proto.compare(0, 5, "human") == 0;
+                u.soldier = proto.find(" army") != std::string::npos || proto.find("battlesis") != std::string::npos;
+                out.push_back(u);
+                continue;
+            }
+            self(self, chunk.children);
+        }
+    };
+    walk(walk, map.mob->roots);
+    return out;
+}
+// A cat's step: like move(), but never into an object or out of its town.
+bool cat_step(const WorldView& w, const Town& t, Agent& c, float v, float dt) {
+    for (const float turn : {0.f, .6f, -.6f, 1.2f, -1.2f, 1.8f, -1.8f}) {
+        const float a = c.yaw + turn, nx = c.x + std::sin(a) * v * dt, ny = c.y + std::cos(a) * v * dt;
+        if (!w.walkable(nx, ny) || w.solid_at(nx, ny) || !w.towns->inside(t, nx, ny)) continue;
+        c.x = nx; c.y = ny; c.yaw += turn * std::min(1.f, dt * 4);
+        return true;
+    }
+    return false;
+}
+bool cat_point_ok(const WorldView& w, const Point& p) { return w.walkable(p.x, p.y) && !w.solid_at(p.x, p.y); }
+// The town's points in a seeded order (7919 is prime and above any town's
+// point count, so the stride visits every point once).
+std::uint32_t town_point(const Town& t, std::uint32_t start, std::uint32_t k) { return t.point0 + (start + k * 7919u) % t.points; }
+// The next point within kCatNextPoint: home now and then, else the first open
+// one in a seeded order; moving off a threat, the open one farthest from it
+// (at least min_away). -1 when none fits.
+int cat_next_point(const Director& d, const WorldView& w, TownCat& tc, const float* away, float min_away) {
+    const Town& t = w.towns->towns[tc.town];
+    const Agent& c = tc.cat;
+    ++tc.picks;
+    const auto& pts = w.towns->points;
+    if (!away && tc.target != tc.home && rnd(d, tc.key, tc.picks, key("home")) < kCatHomeShare &&
+        std::hypot(pts[tc.home].x - c.x, pts[tc.home].y - c.y) < kCatNextPoint && cat_point_ok(w, pts[tc.home])) return int(tc.home);
+    const std::uint32_t start = std::uint32_t(rnd(d, tc.key, tc.picks, key("start")) * float(t.points));
+    int best = -1; float best_away = -1; unsigned open = 0;
+    for (std::uint32_t k = 0; k < t.points && open < 12; ++k) {
+        const std::uint32_t i = town_point(t, start, k);
+        const float dist = std::hypot(pts[i].x - c.x, pts[i].y - c.y);
+        if (dist > kCatNextPoint || dist < 3) continue;
+        const float da = away ? std::hypot(pts[i].x - away[0], pts[i].y - away[1]) : 0.f;
+        if (away && da < min_away) continue;
+        if (!cat_point_ok(w, pts[i])) continue;
+        ++open;
+        if (!away) return int(i);
+        if (da > best_away) { best_away = da; best = int(i); }
+    }
+    return best;
+}
+// Where a cat comes back: one of its town's points out of party sight (but
+// near enough to be met) and kCatRespawnAway from every party member. Its
+// first arrival after a load is like a spot resident's: inside party sight
+// too (it fades in), kCatFirstAway from every party member.
+constexpr float kCatFirstAway = 6.f;
+int cat_respawn_point(const Director& d, const WorldView& w, const TownCat& tc) {
+    const bool first = tc.spawns == 0;
+    const Town& t = w.towns->towns[tc.town];
+    const auto& pts = w.towns->points;
+    const std::uint32_t start = std::uint32_t(rnd(d, tc.key, tc.spawns, key("respawn")) * float(t.points));
+    unsigned tried = 0;
+    for (std::uint32_t k = 0; k < t.points && tried < 16; ++k) {
+        const std::uint32_t i = town_point(t, start, k);
+        const float e = w.party_extent(pts[i].x, pts[i].y);
+        if (!((first || e > 1.f) && e <= kSpotForget)) continue;
+        bool crowded = false;
+        for (std::size_t u = 0; u < w.units->size() && !crowded; ++u) {
+            const auto& det = (*w.details)[u];
+            crowded = !det.dead && det.controlled &&
+                      std::hypot((*w.units)[u][0] - pts[i].x, (*w.units)[u][1] - pts[i].y) < (first ? kCatFirstAway : kCatRespawnAway);
+        }
+        if (crowded) continue;
+        ++tried;
+        if (cat_point_ok(w, pts[i])) return int(i);
+    }
+    return -1;
+}
+void cat_rest(const Director& d, TownCat& tc) {
+    ++tc.picks;
+    const float r = rnd(d, tc.key, tc.picks, key("act"));
+    tc.activity = r < .25f ? 0 : r < .5f ? 1 : r < .7f ? 2 : 3;
+    static constexpr float lo[]{2, 5, 4, 20}, hi[]{4, 12, 8, 45};   // s: look, sit, groom, sun
+    tc.timer = rrange(d, lo[tc.activity], hi[tc.activity], tc.key, tc.picks, key("dur"));
+    tc.mode = cm_rest;
+}
+// Posture 0 stands, 1 sits, 2 lies: the tiger's sit-down and lie-down clips, played by it.
+void cat_posture(Agent& c, float goal, float dt) {
+    const float rate = c.rise < 1 || (c.rise == 1 && goal < 1) ? 1 / 2.3f : 1 / 3.1f;   // clip lengths at kMiniFps
+    c.rise = goal > c.rise ? std::min(goal, c.rise + dt * rate) : std::max(goal, c.rise - dt * rate * 1.5f);
+    c.sit = c.rise >= 2 ? c.sit + dt : 0.f;
+}
+// A mouse noses out of cover 3-6 m away inside the cat's 120 degree view.
+void cat_start_hunt(Director& d, TownCat& tc, const Town& t, const WorldView& w) {
+    Agent& c = tc.cat;
+    ++tc.mice;
+    tc.next_mouse = d.clock + rrange(d, kMouseEveryMin, kMouseEveryMax, tc.key, tc.mice, key("mouse"));
+    const float fx = std::sin(c.yaw), fy = std::cos(c.yaw);
+    int best = -1; float bd = 1e9f;
+    for (std::uint32_t i = t.cover0; i < t.cover0 + t.covers; ++i) {
+        const Point& q = w.towns->covers[i];
+        const float dx = q.x - c.x, dy = q.y - c.y, dist = std::hypot(dx, dy);
+        if (dist < 3 || dist > 6 || (dx * fx + dy * fy) < .5f * dist) continue;
+        if (std::abs(dist - 4.5f) < bd) { bd = std::abs(dist - 4.5f); best = int(i); }
+    }
+    if (best < 0) return;
+    // the cover's edge towards the cat: from the object's middle out to open ground
+    const Point& q = w.towns->covers[best];
+    const float dist = std::hypot(c.x - q.x, c.y - q.y), ux = (c.x - q.x) / dist, uy = (c.y - q.y) / dist;
+    float ex = q.x, ey = q.y; bool open = false;
+    for (float step = 0; step < 3 && !open; step += .2f) {
+        ex = q.x + ux * step; ey = q.y + uy * step;
+        open = w.walkable(ex, ey) && !w.solid_at(ex, ey);
+    }
+    if (!open || std::hypot(ex - c.x, ey - c.y) < 2.5f) return;
+    Agent& m = tc.mouse;
+    m = Agent{};
+    m.species = sp_snowmouse; m.scale = species_scale(sp_snowmouse); m.key = splitmix(c.key ^ tc.mice);
+    m.x = ex; m.y = ey; m.state = st_idle; m.alpha = 0;
+    m.yaw = std::atan2(ux, uy) + rrange(d, -.8f, .8f, m.key, key("yaw"));
+    tc.cover_x = ex; tc.cover_y = ey;
+    tc.forage = rrange(d, .5f, 1.f, m.key, key("out")); tc.notice = rrange(d, 1, 2, m.key, key("notice"));
+    tc.hunt = hu_forage; tc.hunt_t = 0;
+}
+// The hunt: the cat notices, creeps in and pounces at kCatDashAt; the mouse
+// always bolts back into its cover and is gone.
+void cat_hunt(Director& d, TownCat& tc, const Town& t, float dt, const WorldView& w) {
+    if (tc.hunt == hu_none) return;
+    Agent& c = tc.cat; Agent& m = tc.mouse;
+    m.t += dt; m.age += dt; tc.hunt_t += dt;
+    m.alpha = m.state == st_vanish ? std::max(0.f, m.alpha - dt / .4f) : std::min(1.f, m.alpha + dt / .4f);
+    const float mdx = m.x - c.x, mdy = m.y - c.y, md = std::hypot(mdx, mdy);
+    if (tc.hunt == hu_forage) {
+        if (std::hypot(m.x - tc.cover_x, m.y - tc.cover_y) < tc.forage) { m.speed = .3f; m.gait += dt * 4; move(w, m, .25f, dt); }
+        else { m.speed = 0; m.yaw += .6f * std::sin(m.t * 2) * dt; }   // nibbling, nose about
+        if (tc.hunt_t > tc.notice) { tc.hunt = hu_stalk; tc.hunt_t = 0; }
+    } else if (tc.hunt == hu_stalk) {
+        face(c, mdx, mdy, 3, dt);
+        if (c.rise > 0) cat_posture(c, 0, dt);
+        else {
+            c.speed = .3f; c.gait += dt * kCatStalk / (kCatWalkStride * c.scale);
+            cat_step(w, t, c, kCatStalk, dt);
+        }
+        if (md < kCatDashAt || tc.hunt_t > 12) { tc.hunt = hu_dash; tc.hunt_t = 0; m.state = st_flee; }
+    } else if (tc.hunt == hu_dash) {
+        if (tc.hunt_t < .9f) {
+            face(c, mdx, mdy, 8, dt);
+            c.speed = 1; c.gait += dt * kCatDash / (kCatRunStride * c.scale);
+            cat_step(w, t, c, kCatDash, dt);
+        } else c.speed = 0;
+    }
+    if (m.state == st_flee) {   // straight back to its cover point
+        const float cx = tc.cover_x - m.x, cy = tc.cover_y - m.y, cd = std::hypot(cx, cy);
+        if (cd > .1f) {
+            face(m, cx, cy, 20, dt);
+            const float stepm = std::min(kMouseRun * dt, cd);
+            m.x += std::sin(m.yaw) * stepm; m.y += std::cos(m.yaw) * stepm;
+            m.speed = 1; m.gait += dt * 7;
+        } else { m.state = st_vanish; m.speed = 0; }
+    }
+    if (m.state == st_vanish && m.alpha <= 0 && (tc.hunt != hu_dash || tc.hunt_t > .9f)) {
+        const bool chased = tc.hunt == hu_dash;
+        tc.hunt = hu_none; c.speed = 0;
+        if (chased) cat_rest(d, tc);
+    }
+}
+void cat_update(Director& d, TownCat& tc, const Town& t, float dt, const WorldView& w, const std::vector<std::array<float, 2>>& combat) {
+    Agent& c = tc.cat;
+    c.t += dt; c.age += dt;
+    if (c.state == st_appear) {   // found on arrival inside party sight: fades in, then lives
+        c.alpha = std::min(1.f, c.alpha + dt / .4f);
+        if (c.alpha >= 1) c.state = st_idle;
+    }
+    if (c.state == st_vanish) {
+        c.speed = 0; c.alpha = std::max(0.f, c.alpha - dt / .5f);
+        if (c.alpha <= 0) c.state = st_gone;
+        return;
+    }
+    // Seen no more: no mouse (mice exist only while the cat is seen).
+    if (tc.hunt != hu_none && !(w.party_extent(c.x, c.y) <= 1 && c.seen > 0)) tc.hunt = hu_none;
+    // A fight within 12 m sends it off far; a unit in its personal space, to the next point away.
+    Threat scare;
+    for (const auto& f : combat) if (std::hypot(f[0] - c.x, f[1] - c.y) < 12) scare = {true, f[0], f[1]};
+    const Threat threat = scare.found ? scare : threatened(c, w, species_rule(sp_cat).flee_r);
+    if (threat.found && tc.mode != cm_away) {
+        if (tc.hunt != hu_none) { tc.hunt = hu_escape; tc.mouse.state = st_flee; }
+        const float from[2]{threat.x, threat.y};
+        const int p = cat_next_point(d, w, tc, from, scare.found ? 15.f : 6.f);
+        if (p < 0) { c.state = st_vanish; c.t = 0; return; }   // cornered: it slips away
+        tc.target = std::uint32_t(p); tc.mode = cm_away; tc.stuck = 0; tc.best = 1e9f;
+    }
+    cat_hunt(d, tc, t, dt, w);
+    if (tc.mode == cm_rest) {
+        if (tc.hunt == hu_stalk || tc.hunt == hu_dash) return;   // the hunt moves it
+        c.speed = 0;
+        cat_posture(c, tc.hunt == hu_forage ? std::min(c.rise, 1.f) : tc.activity == 3 ? 2.f : tc.activity == 0 ? 0.f : 1.f, dt);
+        if (tc.hunt != hu_none) return;
+        tc.timer -= dt;
+        if (tc.timer <= 0) {
+            const int p = cat_next_point(d, w, tc, nullptr, 0);
+            if (p >= 0) { tc.target = std::uint32_t(p); tc.mode = cm_walk; tc.stuck = 0; tc.best = 1e9f; }
+            else cat_rest(d, tc);
+        } else if (d.clock >= tc.next_mouse && w.party_extent(c.x, c.y) <= 1 && c.seen >= 1) cat_start_hunt(d, tc, t, w);
+        return;
+    }
+    if (c.rise > 0) { c.speed = 0; cat_posture(c, 0, dt); return; }   // gets up first
+    const Point& p = w.towns->points[tc.target];
+    const float dx = p.x - c.x, dy = p.y - c.y, dist = std::hypot(dx, dy);
+    if (dist < .4f) { cat_rest(d, tc); return; }
+    const bool trot = tc.mode == cm_away;
+    const float v = trot ? kCatTrot : kCatWalk;
+    face(c, dx, dy, 3.5f, dt);
+    cat_step(w, t, c, std::min(v, dist / std::max(dt, 1e-3f)), dt);
+    c.speed = trot ? 1.f : .3f;
+    c.gait += dt * v / ((trot ? kCatRunStride : kCatWalkStride) * c.scale);
+    // no 0.3 m of progress in 4 s (an object in the way): rest here, then choose again
+    if (dist < tc.best - .3f) { tc.best = dist; tc.stuck = 0; }
+    else if ((tc.stuck += dt) > 4) cat_rest(d, tc);
+}
+// Alive while its town is near and the cat within the forget range of party
+// sight; gone, it comes back only after kCatUnseen, at one of its own points.
+void town_cats_tick(Director& d, float dt, const WorldView& w, const std::vector<std::array<float, 2>>& combat) {
+    if (!w.towns) return;
+    const bool off = !(w.type_weight[sp_cat] > 0) || ((w.unavailable >> sp_cat) & 1u);
+    for (auto& tc : d.town_cats) {
+        const Town& t = w.towns->towns[tc.town];
+        Agent& c = tc.cat;
+        const bool nearby = std::hypot(t.x - w.focus.x, t.y - w.focus.y) < t.extent + w.view_radius + 40;
+        if (tc.alive && (off || !nearby || c.state == st_gone || !(w.party_extent(c.x, c.y) <= kSpotForget))) {
+            tc.alive = false; tc.hunt = hu_none; tc.away_since = d.clock;
+            continue;
+        }
+        if (tc.alive) { cat_update(d, tc, t, dt, w, combat); continue; }
+        if (off || !nearby || d.clock - tc.away_since < kCatUnseen || d.clock < tc.next_try || d.clock - d.last_combat < kCombatQuiet) continue;
+        tc.next_try = d.clock + 1;
+        const int i = cat_respawn_point(d, w, tc);
+        if (i < 0) continue;
+        ++tc.spawns;
+        c = Agent{};
+        c.species = sp_cat; c.key = splitmix(tc.key ^ tc.spawns); c.scale = species_scale(sp_cat) * tc.size; c.look = tc.look;
+        c.x = w.towns->points[i].x; c.y = w.towns->points[i].y;
+        c.yaw = rrange(d, 0, TAU, c.key, key("yaw"));
+        const bool in_sight = w.party_extent(c.x, c.y) <= 1;
+        c.state = in_sight ? st_appear : st_idle; c.alpha = in_sight ? 0.f : 1.f;
+        tc.alive = true; tc.target = std::uint32_t(i); tc.hunt = hu_none;
+        cat_rest(d, tc);
+        tc.next_mouse = d.clock + rrange(d, kMouseEveryMin, kMouseEveryMax, c.key, key("mouse"));
+    }
+}
+
+// A fight: an attack or cast clip of a party member, or of a unit exchanging
+// blows with a unit within kFightReach (a party member, or one itself in an
+// attack or hit clip). A townsperson playing an attack animation on her own or
+// at a bystander (Ingos city: unhufe uattack08, census 2026-11-13) is no fight
+// and keeps no critter away.
+constexpr float kFightReach = 4.f;
+bool fighting(const WorldView& w, std::size_t i) {
+    const auto& d = (*w.details)[i];
+    if (d.dead || d.stance != stance_attack || !w.near_activity((*w.units)[i])) return false;
+    if (d.controlled) return true;
+    for (std::size_t k = 0; k < w.units->size(); ++k)
+        if (k != i && !(*w.details)[k].dead &&
+            ((*w.details)[k].controlled || (*w.details)[k].stance == stance_attack || (*w.details)[k].stance == stance_hit) &&
+            std::hypot((*w.units)[k][0] - (*w.units)[i][0], (*w.units)[k][1] - (*w.units)[i][1]) < kFightReach) return true;
+    return false;
+}
 void director_tick(Director& d, float dt, const WorldView& w, const std::vector<V3>& spots, float tail_y, double elapsed) {
     drop_disabled_types(d, w);   // also while paused: the switch is the player's
     if (elapsed <= 0) return; // pause holds state and transitions
     d.clock += elapsed;
+    // Spell blasts first: whatever they reach is already running when the
+    // ordinary threat checks see it.
+    blasts_tick(d, w);
+    if (!d.blasts.empty()) {
+        for (unsigned i = 0; i < d.critter_count; ++i) blast_scare_critter(d, d.critters[i], w);
+        blast_scare_flock(d, d.flock, w);
+        for (auto& f : d.carrion) blast_scare_flock(d, f, w);
+        for (auto& r : d.residents) {
+            if (!r.active) continue;
+            if (r.is_flock) blast_scare_flock(d, r.birds, w); else blast_scare_critter(d, r.critter, w);
+        }
+    }
     // Combat anywhere near: no spawns for a while; fighting within 12 m
     // sends every critter and flock running at once.
     std::vector<std::array<float, 2>> combat;
     for (std::size_t i = 0; i < w.units->size(); ++i)
-        if (!(*w.details)[i].dead && (*w.details)[i].stance == stance_attack && w.near_activity((*w.units)[i]))
-            combat.push_back({(*w.units)[i][0], (*w.units)[i][1]});
+        if (fighting(w, i)) combat.push_back({(*w.units)[i][0], (*w.units)[i][1]});
     if (!combat.empty()) d.last_combat = d.clock;
     const auto scare_at = [&](float x, float y) {
         Threat t;
         for (const auto& c : combat) if (std::hypot(c[0] - x, c[1] - y) < 12) t = {true, c[0], c[1]};
         return t;
     };
-    const unsigned before = d.critter_count + (d.flock.active ? 1u : 0u);
+    bool before[kLanes];
+    for (unsigned l = 0; l < kLanes; ++l) before[l] = lane_active(d, Lane(l));
     for (unsigned i = 0; i < d.critter_count; ++i) critter_update(d, d.critters[i], dt, w, scare_at(d.critters[i].x, d.critters[i].y), tail_y);
     if (d.flock.active) {
         float cx, cy; flock_centroid(d.flock, cx, cy);
         flock_update(d.flock, dt, w, d, scare_at(cx, cy), true);
+        // An ambient flock feeds (or rides its thermal) for a while, then flies
+        // on by itself, as a ground critter leaves after its idle time; until
+        // then it holds the director's one event, so an undisturbed flock
+        // would otherwise keep every other type away for good.
+        Flock& f = d.flock;
+        if (!f.carrion && f.variant != bird_bat && f.state != fl_leave && f.state != fl_gone) {
+            if (!(f.stay_limit > 0)) f.stay_limit = rrange(d, kFlockStayMin, kFlockStayMax, f.key, key("stay"));
+            f.stay += dt;
+            if (f.stay > f.stay_limit) {
+                const float a = rrange(d, 0, TAU, f.key, key("away"));
+                flock_alarm(f, d, cx - std::cos(a), cy - std::sin(a));   // staggered take-off along a
+                f.state = fl_leave; f.t = 0;
+            }
+        }
     }
     // Leave party sight: critters a little past its edge, flocks well beyond it.
     unsigned kept = 0;
@@ -3779,19 +4949,21 @@ void director_tick(Director& d, float dt, const WorldView& w, const std::vector<
         float cx, cy; flock_centroid(d.flock, cx, cy);
         if (d.flock.state == fl_gone || std::hypot(cx - w.focus.x, cy - w.focus.y) > w.view_radius + 15) d.flock.active = false;
     }
-    const unsigned after = d.critter_count + (d.flock.active ? 1u : 0u);
-    if (after < before && !after) d.next_attempt = d.clock + rrange(d, kCooldownMin, kCooldownMax, d.events, key("cd")) * (w.level < 2 ? 1.5f : 1.f);
     spots_tick(d, dt, w, combat, tail_y);
-    if (!after) {
-        while (d.clock >= d.next_attempt) {
+    town_cats_tick(d, dt, w, combat);
+    for (unsigned l = 0; l < kLanes; ++l) {
+        const Lane lane = Lane(l);
+        if (lane_active(d, lane)) continue;
+        if (before[l]) d.next_attempt[l] = d.clock + rrange(d, kCooldownMin, kCooldownMax, d.events, key("cd"), l) * (w.level < 2 ? 1.5f : 1.f);
+        while (d.clock >= d.next_attempt[l]) {
             ++d.attempt;
-            d.next_attempt += kAttemptEvery;
+            d.next_attempt[l] += kAttemptEvery;
             if (d.clock - d.last_combat < kCombatQuiet) { ++d.quiet_reject; continue; }
             if (on_screen(d) >= critter_budget(w.level)) { ++d.budget_reject; continue; }
             const float rate = kAttemptChance * (w.zone == ambient::zone_dead_city ? kDeadZoneWeight : 1.f) * (w.level < 2 ? .5f : 1.f);
             if (rnd(d, d.attempt, key("p")) < rate) {
-                try_spawn(d, w, spots);
-                if (d.critter_count || d.flock.active) break;
+                try_spawn(d, w, spots, lane);
+                if (lane_active(d, lane)) break;
             }
         }
     }
@@ -3835,6 +5007,7 @@ void director_tick(Director& d, float dt, const WorldView& w, const std::vector<
         for (const auto& f : d.carrion) { flocked = flocked || (f.active && f.corpse == c.id); active += f.active ? 1u : 0u; }
         if (!c.in_scene) { if (!flocked) c.used = false; continue; }
         if (!c.present) continue;
+        if (blast_threat(w, c.x, c.y, species_rule(sp_raven).flee_r).found) continue;   // no carrion birds into a burning spell
         bool near_undead = false;
         for (std::size_t i = 0; i < w.units->size(); ++i) {
             const auto& det = (*w.details)[i];
@@ -3918,8 +5091,104 @@ void director_tick(Director& d, float dt, const WorldView& w, const std::vector<
     sight_flock(d.flock);
     for (auto& f : d.carrion) sight_flock(f);
     for (auto& r : d.residents) if (r.active) { if (r.is_flock) sight_flock(r.birds); else sight(r.critter); }
+    for (auto& c : d.town_cats) if (c.alive) { sight(c.cat); if (c.hunt != hu_none) sight(c.mouse); }
     d.corpses.erase(std::remove_if(d.corpses.begin(), d.corpses.end(),
         [](const Corpse& c) { return !c.used; }), d.corpses.end());
+}
+
+// Fish schools: step the live ones, drop those far out of party sight or
+// switched off, and start a new one in water the party sees and the camera
+// shows, away from every unit's reach. After director_tick (its clock).
+void fish_tick(Director& d, float dt, double elapsed, const WorldView& w, const WaterField& water) {
+    const float weight = w.type_weight[sp_fish];
+    const bool available = weight > 0 && water.swim && !((w.unavailable >> sp_fish) & 1u);
+    const unsigned limit = available ? std::min<unsigned>(fish_schools(w.level), unsigned(std::size(d.schools))) : 0u;
+    unsigned live = 0;
+    if (w.fish_showcase > 0 && water.swim) {
+        // Diagnostic: one school of the chosen species where the camera looks,
+        // whatever the zone, the party's sight or the species' water kind.
+        const Fish kind = Fish(w.fish_showcase - 1);
+        School& s = d.schools[0];
+        for (unsigned k = 1; k < std::size(d.schools); ++k) d.schools[k].active = false;
+        if (!s.active || s.kind != kind || s.leaving) {
+            s.active = false;
+            const FishRule& rule = fish_rule(kind);
+            for (int r = 0; r <= 8 && !s.active; ++r)
+                for (int a = 0; a < 12 && !s.active; ++a) {
+                    const float x = w.camera_focus.x + float(r) * std::cos(TAU * a / 12.f), y = w.camera_focus.y + float(r) * std::sin(TAU * a / 12.f);
+                    if (!school_water(water, x, y, water_fresh | water_swamp | water_sea, kFishMinDepth + .2f)) continue;
+                    const std::uint32_t serial = ++d.school_serial;
+                    school_init(s, kind, fish_school_size(rule, rnd(d, serial, key("fn")), .5f), x, y, splitmix(d.seed ^ serial ^ key("school")), water,
+                                water_fresh | water_swamp | water_sea);
+                }
+        }
+        if (s.active && elapsed > 0) { school_update(s, dt, water, *w.units, *w.details); s.seen = 1; }
+        return;
+    }
+    for (auto& s : d.schools) {
+        if (!s.active) continue;
+        if (!available) { s.active = false; continue; }   // the player's switch, also while paused
+        if (elapsed > 0) {
+            school_update(s, dt, water, *w.units, *w.details);
+            float cx, cy; school_centroid(s, cx, cy);
+            const float extent = w.party_extent(cx, cy);
+            s.seen = std::clamp(s.seen + (extent <= 1 ? dt : -dt) / kSightFade, 0.f, 1.f);
+            if (extent > kSpotForget) s.active = false;
+            else if (water.depth(cx, cy) < kFishHardDepth) s.leaving = true;   // the water fell away (a changed level)
+        }
+        live += s.active ? 1u : 0u;
+    }
+    if (elapsed <= 0 || live >= limit || d.clock < d.next_school) return;
+    d.next_school = d.clock + kAttemptEvery;
+    std::vector<std::size_t> members;
+    for (std::size_t i = 0; i < w.units->size(); ++i)
+        if (!(*w.details)[i].dead && (*w.details)[i].controlled && (*w.details)[i].vision > 0) members.push_back(i);
+    if (members.empty()) return;
+    const std::uint32_t serial = ++d.school_serial;
+    for (unsigned k = 0; k < 8; ++k) {
+        const std::size_t m = members[std::min(members.size() - 1, std::size_t(rnd(d, serial, k, key("fm")) * members.size()))];
+        const float radius = (*w.details)[m].vision * .95f * std::sqrt(rnd(d, serial, k, key("fr"))), angle = rrange(d, 0, TAU, serial, k, key("ft"));
+        const float x = (*w.units)[m][0] + radius * std::cos(angle), y = (*w.units)[m][1] + radius * std::sin(angle);
+        const std::uint8_t kind = water.kind_at(x, y);
+        if (!kind || w.party_extent(x, y) > 1) continue;
+        // the species that live in this water
+        float total = 0, weights[fish_count]{};
+        for (unsigned f = 0; f < fish_count; ++f) {
+            const FishRule& rule = fish_rule(Fish(f));
+            if (!((rule.zones >> w.zone) & 1u) || !(rule.water & kind) || !school_water(water, x, y, rule.water, kFishMinDepth + .2f)) continue;
+            bool taken = false;
+            for (const auto& s : d.schools) taken = taken || (s.active && s.kind == f);
+            total += weights[f] = taken ? rule.weight * .25f : rule.weight;
+        }
+        if (!(total > 0)) continue;
+        float pick = rnd(d, serial, k, key("fs")) * total;
+        unsigned f = 0;
+        for (; f + 1 < fish_count; ++f) { if (weights[f] > 0 && pick < weights[f]) break; pick -= weights[f]; }
+        if (!(weights[f] > 0)) continue;
+        const FishRule& rule = fish_rule(Fish(f));
+        float nx, ny, ppm;
+        if (!w.project({x, y, water.level(x, y)}, nx, ny, ppm) || std::abs(nx) > 1 || std::abs(ny) > 1 || rule.length * ppm < kSpawnPixels) continue;
+        bool blocked = false;
+        for (std::size_t i = 0; i < w.units->size() && !blocked; ++i) {
+            const auto& u = (*w.details)[i];
+            blocked = !u.dead && std::hypot((*w.units)[i][0] - x, (*w.units)[i][1] - y) < threat_reach(rule.flee_r, senses_of(u)) + 3;
+        }
+        for (const auto& s : d.schools) {
+            if (!s.active) continue;
+            float cx, cy; school_centroid(s, cx, cy);
+            blocked = blocked || std::hypot(cx - x, cy - y) < 8;
+        }
+        if (blocked) continue;
+        for (auto& s : d.schools) {
+            if (s.active) continue;
+            const unsigned size = fish_school_size(rule, rnd(d, serial, key("fn")), rnd(d, serial, key("fv")));
+            const unsigned count = unsigned(std::max(1.f, std::floor(float(size) * fish_school_share(w.level) + .5f)));
+            school_init(s, Fish(f), count, x, y, splitmix(d.seed ^ serial ^ key("school")), water, rule.water);
+            ++d.school_events;
+            d.next_school = d.clock + rrange(d, kCooldownMin, kCooldownMax, serial, key("fc")) / std::clamp(weight, .25f, 10.f);
+            return;
+        }
+    }
 }
 
 // critter_showcase: idle animation in place (no repositioning, no fleeing).
@@ -3935,6 +5204,18 @@ void showcase_idle(Agent& c, float dt) {
         const bool crawling = std::fmod(c.t, 7.f) < 5.f;
         if (crawling) c.gait += dt / kLarvaPeriod;
         c.search += ((crawling ? 0.f : 1.f) - c.search) * std::min(1.f, dt * 2);
+        break;
+    }
+    case sp_cat: {   // stands, sits, lies, rests, gets up: a 16 s cycle
+        const float ph = std::fmod(c.t, 16.f), goal = ph < 3 ? 0.f : ph < 7 ? 1.f : 2.f;
+        c.rise = goal > c.rise ? std::min(goal, c.rise + dt / 2.3f) : std::max(goal, c.rise - dt / 1.5f);
+        c.sit = c.rise >= 2 ? c.sit + dt : 0.f;
+        break;
+    }
+    case sp_squirrel: case sp_prairiedog: {   // sits up for 5 s of every 8, then drops back
+        const float goal = std::fmod(c.t, 8.f) > 3.f ? 1.f : 0.f;
+        c.rise = goal > c.rise ? std::min(goal, c.rise + dt / .6f) : std::max(goal, c.rise - dt / .5f);
+        c.sit = c.rise >= 1 ? c.sit + dt : 0.f;
         break;
     }
     case sp_dungbeetle:
@@ -3959,32 +5240,47 @@ HRESULT make_structured_srv(ID3D11Device* device, ID3D11Buffer* buffer, UINT cou
     return device->CreateShaderResourceView(buffer, &v, &srv);
 }
 
+#include "critter_tumbleweed.inl"
+
 } // namespace
 
 
 struct Renderer::CritterState {
-    std::future<std::array<ComPtr<ID3DBlob>, 3>> compile;
+    std::future<std::array<ComPtr<ID3DBlob>, kCritterPrograms>> compile;
     std::future<std::shared_ptr<CritterAssets>> assets;
-    ComPtr<ID3D11VertexShader> vs, shadow_vs; ComPtr<ID3D11PixelShader> ps;
+    ComPtr<ID3D11VertexShader> vs, shadow_vs, fish_vs, mark_vs; ComPtr<ID3D11PixelShader> ps, fish_ps;   // fish_*, mark_vs: the CR_FISH programs
+    // cut_*: the CR_CUTOUT programs (tumbleweed twig cards: alpha cut, tone; their sun caster).
+    ComPtr<ID3D11VertexShader> cut_vs, cut_shadow_vs; ComPtr<ID3D11PixelShader> cut_ps, cut_shadow_ps;
+    TumbleWeeds tumble;   // the Suslanger tumbleweeds (critter_tumbleweed.inl)
+    // Fish: the drawn frame's instances from first_swimmer on (the last
+    // meshes; the sun shadow pass draws only those before it), the frame the
+    // world stencil carries their mark for (D3D11), and the map's swim
+    // depth and water kind grids at swim_key (map generation, liquid level).
+    std::size_t first_swimmer = 0;
+    std::uint64_t marked_frame = UINT64_MAX, swim_key = UINT64_MAX;
+    std::vector<float> swim, water_level;
+    std::shared_ptr<const TerrainLiquidOutflowField> flow;   // the map's level-reach current (the terrain's own cache)
+    std::vector<std::uint8_t> water_kind;
+    ComPtr<ID3D11RasterizerState> mark_raster; ComPtr<ID3D11DepthStencilState> mark_depth;
     // The instance and part buffers and instances_scratch hold a drawn frame
     // (the next frame's sun shadow pass draws them before render_critters).
     bool shadow_ready = false;
     ComPtr<ID3D11Buffer> frame_constants, draw_constants, vertices, baked, instances, bones;
-    ComPtr<ID3D11ShaderResourceView> vertex_srv, baked_srv, instance_srv, bone_srv, skins_srv;
+    ComPtr<ID3D11ShaderResourceView> vertex_srv, baked_srv, instance_srv, bone_srv, skins_srv, coats_srv;
     ComPtr<ID3D11RasterizerState> raster; ComPtr<ID3D11DepthStencilState> depth; ComPtr<ID3D11BlendState> blend;
     ComPtr<ID3D11SamplerState> sampler;
     // D3D12 backend: the same buffers and skins (no D3D11 objects), the frame
     // constants kept for the shadow pass, and the crVS/crPS/crShadowVS programs.
     D3D12BufferRef vertices12, baked12, instances12, bones12;
-    D3D12TextureRef skins12;
+    D3D12TextureRef skins12, coats12;
     std::vector<ShaderProgram> programs12;
     std::vector<std::uint8_t> frame12;
-    UINT skin_mips12 = 1; std::uint32_t skin_mips_done12 = 0;  // slices whose mips the downsample made
+    UINT skin_mips12 = 1, coat_mips12 = 1; std::uint64_t skin_mips_done12 = 0;  // slices (by Slice) whose mips the downsample made
     bool ready = false;
     UINT instance_capacity = 0, bone_capacity = 0;
     // Small metadata kept from the asset build (the data itself is on the GPU).
     std::array<MeshRange, m_count> meshes{};
-    std::array<MiniClips, m_bat + 1> minis{};
+    std::array<MiniClips, kMiniCount> minis{};
     std::uint32_t jaw_start = 0, jaw_frames = 1;
     float larva_length = .07f, larva_center_z = 0, larva_tail_y = 0;
     std::shared_ptr<const StatueBird> statue;   // vulture hinges (part matrices per frame)
@@ -3994,17 +5290,22 @@ struct Renderer::CritterState {
     Director director;
     std::weak_ptr<const TerrainCpuAsset> terrain;
     std::vector<Point> ring;
+    TownMap towns;   // town cats: the map's towns (zone load)
     SpotMap spot_map;
     double world_time = -1;
     std::vector<std::array<float, 4>> units;
     std::vector<GroundUnitDetail> details;
     std::vector<V3> spots;
+    std::vector<std::array<float, 3>> spell_lights;   // this frame's spell lights (WorldView::spell_lights)
     std::vector<float> offset_x, offset_y;   // drawn terrain vertex XY offsets beside the height grid
     Obstacles obstacles;
     float obstacle_age = 0;
     std::vector<Bone> bone_scratch;
     std::vector<std::pair<Mesh, CrInstance>> instances_scratch;
     std::vector<CrInstance> instance_upload;
+    // The uploaded casters' content (game time, instances, part matrices) and
+    // the content the close shadow maps last drew (owned_shadow_casters_animate).
+    std::uint64_t shadow_stamp = 0, shadow_stamp_drawn = 0;
     // critter_showcase (debug): render-only animals in a fixed layout; the
     // director is not ticked while it is on. Re-anchored when the mode
     // changes or the camera focus moves away.
@@ -4023,14 +5324,17 @@ struct Renderer::CritterState {
 void Renderer::release_critters_world() noexcept {
     if (!critters_) return;
     auto& cr = *critters_;
-    cr.terrain.reset(); cr.director = Director{}; cr.spot_map = SpotMap{}; cr.world_time = -1;
+    cr.terrain.reset(); cr.director = Director{}; cr.tumble = TumbleWeeds{}; cr.spot_map = SpotMap{}; cr.world_time = -1;
     std::vector<Point>().swap(cr.ring);
+    cr.towns = TownMap{};
     std::vector<float>().swap(cr.offset_x); std::vector<float>().swap(cr.offset_y);
     decltype(cr.units)().swap(cr.units); decltype(cr.details)().swap(cr.details); decltype(cr.spots)().swap(cr.spots);
     cr.obstacles = Obstacles{}; cr.obstacle_age = 0;
     decltype(cr.bone_scratch)().swap(cr.bone_scratch);
     decltype(cr.instances_scratch)().swap(cr.instances_scratch);
     decltype(cr.instance_upload)().swap(cr.instance_upload);
+    cr.first_swimmer = 0; cr.swim_key = UINT64_MAX; cr.flow.reset();
+    std::vector<float>().swap(cr.swim); std::vector<float>().swap(cr.water_level); std::vector<std::uint8_t>().swap(cr.water_kind);
     cr.instances.Reset(); cr.instance_srv.Reset(); cr.instance_capacity = 0;
     cr.bones.Reset(); cr.bone_srv.Reset(); cr.bone_capacity = 0;
     decltype(cr.showcase_critters)().swap(cr.showcase_critters);
@@ -4045,9 +5349,10 @@ std::uint64_t Renderer::critter_video_bytes() const noexcept {
     for (ID3D11Buffer* buffer : {c.frame_constants.Get(), c.draw_constants.Get(), c.vertices.Get(), c.baked.Get(),
                                  c.instances.Get(), c.bones.Get()})
         bytes += resource_video_bytes(buffer);
-    if (c.skins_srv) {
+    for (ID3D11ShaderResourceView* view : {c.skins_srv.Get(), c.coats_srv.Get()}) {
+        if (!view) continue;
         ComPtr<ID3D11Resource> skins;
-        c.skins_srv->GetResource(&skins);
+        view->GetResource(&skins);
         bytes += resource_video_bytes(skins.Get());
     }
     return bytes;
@@ -4061,6 +5366,18 @@ void append_critter_shader_programs(std::vector<ShaderProgram>& out) {
     out.push_back({source, "critters", nullptr, "crVS", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
     out.push_back({source, "critters", nullptr, "crPS", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
     out.push_back({source, "critters", nullptr, "crShadowVS", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
+    // Fish only (CR_FISH): the body wave, the scale glint and the swimmer mark.
+    // The three programs above hold no fish code.
+    static const D3D_SHADER_MACRO fish[] = {{"CR_FISH", "1"}, {nullptr, nullptr}};
+    out.push_back({source, "critters", fish, "crVS", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
+    out.push_back({source, "critters", fish, "crPS", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
+    out.push_back({source, "critters", fish, "crMarkVS", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
+    // Cutout cards only (CR_CUTOUT, the tumbleweed): tone and alpha cut, and their sun caster.
+    static const D3D_SHADER_MACRO cutout[] = {{"CR_CUTOUT", "1"}, {nullptr, nullptr}};
+    out.push_back({source, "critters", cutout, "crVS", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
+    out.push_back({source, "critters", cutout, "crPS", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
+    out.push_back({source, "critters", cutout, "crShadowCutVS", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
+    out.push_back({source, "critters", cutout, "crShadowCutPS", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
 }
 
 #if !defined(EID3D11_SHADER_EMBED)
@@ -4095,8 +5412,8 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             append_critter_shader_programs(programs);
             if (!d3d12_) state->compile = std::async(std::launch::async, [programs = std::move(programs)]() {
                 const BackgroundWorkerPriority priority;
-                std::array<ComPtr<ID3DBlob>, 3> blobs;
-                for (unsigned k = 0; k < 3; ++k) {
+                std::array<ComPtr<ID3DBlob>, kCritterPrograms> blobs;
+                for (unsigned k = 0; k < kCritterPrograms; ++k) {
                     ComPtr<ID3DBlob> errors;
                     if (FAILED(compile_shader(programs[k], &blobs[k], &errors))) {
                         if (errors) OutputDebugStringA(static_cast<const char*>(errors->GetBufferPointer()));
@@ -4125,7 +5442,7 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
                 // one array whose mips the executor's downsample makes (per frame
                 // until every slice is done, before the first draw).
                 append_critter_shader_programs(cr.programs12);
-                if (cr.programs12.size() < 3) return fail("D3D12 programs unavailable");
+                if (cr.programs12.size() < kCritterPrograms) return fail("D3D12 programs unavailable");
                 const auto buffer = [&](D3D12BufferRef& out, const void* data, UINT64 bytes, UINT stride) {
                     D3D12BufferRef created;
                     HRESULT result = d3d12_->create_buffer(bytes, stride, 0, created);
@@ -4136,24 +5453,36 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
                 if (!buffer(cr.vertices12, a.vertices.data(), UINT64(a.vertices.size()) * sizeof(CrVertex), sizeof(CrVertex)) ||
                     !buffer(cr.baked12, a.baked.data(), UINT64(a.baked.size()) * sizeof(Bone), sizeof(Bone)))
                     return fail("mesh or clip buffers unavailable (D3D12)");
-                cr.skin_mips12 = 1; for (UINT n = kSkin; n > 1; n >>= 1) ++cr.skin_mips12;
-                if (FAILED(d3d12_->create_storage_texture(kSkin, kSkin, 0, DXGI_FORMAT_R8G8B8A8_UNORM, cr.skins12, cr.skin_mips12, s_count)))
+                cr.skin_mips12 = 1; for (UINT n = kPaint; n > 1; n >>= 1) ++cr.skin_mips12;
+                cr.coat_mips12 = 1; for (UINT n = kSkin; n > 1; n >>= 1) ++cr.coat_mips12;
+                if (FAILED(d3d12_->create_storage_texture(kPaint, kPaint, 0, DXGI_FORMAT_R8G8B8A8_UNORM, cr.skins12, cr.skin_mips12, kPaintSlices)) ||
+                    FAILED(d3d12_->create_storage_texture(kSkin, kSkin, 0, DXGI_FORMAT_R8G8B8A8_UNORM, cr.coats12, cr.coat_mips12, kCoatSlices)))
                     return fail("skin texture unavailable (D3D12)");
                 for (unsigned s = 0; s < s_count; ++s) {
+                    const bool coat = coat_slice(s);
+                    const UINT n = coat ? kSkin : kPaint, layer = coat ? s - s_cat_tabby : s;
                     D3D12TextureRef slice;
-                    HRESULT result = d3d12_->create_texture(kSkin, kSkin, DXGI_FORMAT_R8G8B8A8_UNORM, slice);
-                    if (SUCCEEDED(result)) result = d3d12_->write_texture(*slice, RECT{0, 0, LONG(kSkin), LONG(kSkin)},
-                        &a.texels[std::size_t(s) * kSkin * kSkin * 4], kSkin * 4);
-                    if (SUCCEEDED(result)) result = d3d12_->copy_texture(*cr.skins12, D3D11CalcSubresource(0, s, cr.skin_mips12), *slice, 0);
+                    HRESULT result = d3d12_->create_texture(n, n, DXGI_FORMAT_R8G8B8A8_UNORM, slice);
+                    if (SUCCEEDED(result)) result = d3d12_->write_texture(*slice, RECT{0, 0, LONG(n), LONG(n)},
+                        &(coat ? a.coat_texels : a.texels)[std::size_t(layer) * n * n * 4], n * 4);
+                    if (SUCCEEDED(result)) result = d3d12_->copy_texture(coat ? *cr.coats12 : *cr.skins12,
+                        D3D11CalcSubresource(0, layer, coat ? cr.coat_mips12 : cr.skin_mips12), *slice, 0);
                     if (FAILED(result)) return fail("skin texture upload failed (D3D12)");
                 }
             } else {
             const auto blobs = cr.compile.get();
-            if (!blobs[0] || !blobs[1] || !blobs[2]) return fail("shaders unavailable");
+            for (const auto& blob : blobs) if (!blob) return fail("shaders unavailable");
             HRESULT hr = S_OK;
             if (FAILED(hr = create_shader(device_.Get(),blobs[0]->GetBufferPointer(), blobs[0]->GetBufferSize(), nullptr, &cr.vs)) ||
                 FAILED(hr = create_shader(device_.Get(),blobs[1]->GetBufferPointer(), blobs[1]->GetBufferSize(), nullptr, &cr.ps)) ||
-                FAILED(hr = create_shader(device_.Get(),blobs[2]->GetBufferPointer(), blobs[2]->GetBufferSize(), nullptr, &cr.shadow_vs)))
+                FAILED(hr = create_shader(device_.Get(),blobs[2]->GetBufferPointer(), blobs[2]->GetBufferSize(), nullptr, &cr.shadow_vs)) ||
+                FAILED(hr = create_shader(device_.Get(),blobs[3]->GetBufferPointer(), blobs[3]->GetBufferSize(), nullptr, &cr.fish_vs)) ||
+                FAILED(hr = create_shader(device_.Get(),blobs[4]->GetBufferPointer(), blobs[4]->GetBufferSize(), nullptr, &cr.fish_ps)) ||
+                FAILED(hr = create_shader(device_.Get(),blobs[5]->GetBufferPointer(), blobs[5]->GetBufferSize(), nullptr, &cr.mark_vs)) ||
+                FAILED(hr = create_shader(device_.Get(),blobs[6]->GetBufferPointer(), blobs[6]->GetBufferSize(), nullptr, &cr.cut_vs)) ||
+                FAILED(hr = create_shader(device_.Get(),blobs[7]->GetBufferPointer(), blobs[7]->GetBufferSize(), nullptr, &cr.cut_ps)) ||
+                FAILED(hr = create_shader(device_.Get(),blobs[8]->GetBufferPointer(), blobs[8]->GetBufferSize(), nullptr, &cr.cut_shadow_vs)) ||
+                FAILED(hr = create_shader(device_.Get(),blobs[9]->GetBufferPointer(), blobs[9]->GetBufferSize(), nullptr, &cr.cut_shadow_ps)))
                 return fail("shader objects unavailable");
             if (FAILED(make_buffer(device_.Get(), UINT(a.vertices.size() * sizeof(CrVertex)), D3D11_BIND_SHADER_RESOURCE,
                     D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, sizeof(CrVertex), a.vertices.data(), cr.vertices, D3D11_USAGE_IMMUTABLE)) ||
@@ -4166,20 +5495,23 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
                 FAILED(make_buffer(device_.Get(), 16, D3D11_BIND_CONSTANT_BUFFER, 0, 0, nullptr, cr.draw_constants,
                     D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE)))
                 return fail("mesh or clip buffers unavailable");
-            // Skins: one texture array with mips.
-            {
-                D3D11_TEXTURE2D_DESC d{}; d.Width = d.Height = kSkin; d.MipLevels = 0; d.ArraySize = s_count;
+            // Skins: the kPaint array and the cat coats' kSkin array, with mips.
+            for (const bool coat : {false, true}) {
+                const UINT n = coat ? kSkin : kPaint, layers = coat ? kCoatSlices : kPaintSlices;
+                const auto& texels = coat ? a.coat_texels : a.texels;
+                D3D11_TEXTURE2D_DESC d{}; d.Width = d.Height = n; d.MipLevels = 0; d.ArraySize = layers;
                 d.Format = DXGI_FORMAT_R8G8B8A8_UNORM; d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_DEFAULT;
                 d.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET; d.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
                 ComPtr<ID3D11Texture2D> texture;
+                auto& view = coat ? cr.coats_srv : cr.skins_srv;
                 if (FAILED(device_->CreateTexture2D(&d, nullptr, &texture)) ||
-                    FAILED(device_->CreateShaderResourceView(texture.Get(), nullptr, &cr.skins_srv)))
+                    FAILED(device_->CreateShaderResourceView(texture.Get(), nullptr, &view)))
                     return fail("skin texture unavailable");
                 texture->GetDesc(&d);
-                for (unsigned s = 0; s < s_count; ++s)
-                    context_->UpdateSubresource(texture.Get(), D3D11CalcSubresource(0, s, d.MipLevels), nullptr,
-                        &a.texels[std::size_t(s) * kSkin * kSkin * 4], kSkin * 4, 0);
-                context_->GenerateMips(cr.skins_srv.Get());
+                for (unsigned layer = 0; layer < layers; ++layer)
+                    context_->UpdateSubresource(texture.Get(), D3D11CalcSubresource(0, layer, d.MipLevels), nullptr,
+                        &texels[std::size_t(layer) * n * n * 4], n * 4, 0);
+                context_->GenerateMips(view.Get());
             }
             D3D11_RASTERIZER_DESC raster{}; raster.FillMode = D3D11_FILL_SOLID; raster.CullMode = D3D11_CULL_NONE; raster.DepthClipEnable = TRUE;
             D3D11_DEPTH_STENCIL_DESC depth{}; depth.DepthEnable = TRUE; depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
@@ -4190,6 +5522,16 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
                       xray.DepthFunc = D3D11_COMPARISON_ALWAYS; return FAILED(device_->CreateDepthStencilState(&xray, &cr.depth_xray)); }() ||
                 FAILED(device_->CreateBlendState(&blend, &cr.blend)))
                 return fail("pipeline states unavailable");
+            // Swimmer mark (mark_swimmers): the drawn fish's own pixels (depth
+            // tested, a few depth steps of bias for the second program's
+            // rounding) set stencil bit 0; nothing else uses that bit.
+            D3D11_RASTERIZER_DESC mark_raster = raster; mark_raster.DepthBias = -4;
+            D3D11_DEPTH_STENCIL_DESC mark{}; mark.DepthEnable = TRUE; mark.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+            mark.DepthFunc = D3D11_COMPARISON_LESS_EQUAL; mark.StencilEnable = TRUE; mark.StencilReadMask = 1; mark.StencilWriteMask = 1;
+            mark.FrontFace = {D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_REPLACE, D3D11_COMPARISON_ALWAYS};
+            mark.BackFace = mark.FrontFace;
+            if (FAILED(device_->CreateRasterizerState(&mark_raster, &cr.mark_raster)) || FAILED(device_->CreateDepthStencilState(&mark, &cr.mark_depth)))
+                return fail("pipeline states unavailable");
             }
             cr.meshes = a.meshes; cr.minis = a.minis; cr.jaw_start = a.jaw_start; cr.jaw_frames = std::max(1u, a.jaw_frames);
             cr.larva_length = a.larva_length; cr.larva_center_z = a.larva_center_z; cr.larva_tail_y = a.larva_tail_y;
@@ -4197,7 +5539,8 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             cr.unavailable = unavailable_species(a.omitted);
             for (unsigned m = 0; m < m_count; ++m) {
                 if (a.omitted[m].empty()) continue;
-                const std::string line = std::string(kMeshNames[m]) + ": " + a.omitted[m];
+                if (m > m_fish && a.omitted[m] == a.omitted[m_fish]) continue;   // the fish share one reason: named once
+                const std::string line = (m == m_fish ? std::string("fish") : mesh_name(m)) + ": " + a.omitted[m];
                 OutputDebugStringA(("EID3D11 critters: " + line + "; that critter omitted.\n").c_str());
                 bridge_append_probe_event("critters_species_omitted", line.c_str());
                 if (!cr.omitted_text.empty()) cr.omitted_text += "; ";
@@ -4226,7 +5569,110 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             cr.director = Director{};
             const std::string name = inputs.map ? inputs.map->terrain_resource : inputs.terrain->project_resource;
             cr.director.seed = splitmix(key(name.c_str()) ^ std::uint64_t(environment.world_time * 1000));
+            cr.tumble = TumbleWeeds{}; cr.tumble.seed = splitmix(cr.director.seed ^ key("tumbleweed"));
             cr.ring.clear();
+            cr.towns = TownMap{};
+            if ((ambient_zone_ == ambient::zone_snow || ambient_zone_ == ambient::zone_desert) && inputs.map) {
+                // Towns: single-linkage clusters of the map's houses (stbuho, stbuto) of at least kTownHouses.
+                const auto house = [](const std::string& v) { return v.compare(0, 6, "stbuho") == 0 || v.compare(0, 6, "stbuto") == 0; };
+                std::vector<Point> all;
+                for (const auto& o : inputs.map->objects)
+                    if (house(o.visual_reference)) all.push_back({o.position[0], o.position[1]});
+                std::vector<std::size_t> root(all.size());
+                for (std::size_t i = 0; i < all.size(); ++i) root[i] = i;
+                const auto find = [&](std::size_t i) { while (root[i] != i) i = root[i] = root[root[i]]; return i; };
+                for (std::size_t i = 0; i < all.size(); ++i)
+                    for (std::size_t j = i + 1; j < all.size(); ++j)
+                        if (std::hypot(all[i].x - all[j].x, all[i].y - all[j].y) < kTownLink) root[find(i)] = find(j);
+                std::map<std::size_t, std::vector<std::size_t>> groups;   // by first house: a stable town order
+                for (std::size_t i = 0; i < all.size(); ++i) groups[find(i)].push_back(i);
+                std::vector<std::vector<std::size_t>> clusters;
+                for (auto& [r, members] : groups) if (members.size() >= kTownHouses) clusters.push_back(std::move(members));
+                std::sort(clusters.begin(), clusters.end(), [](const auto& a, const auto& b) { return a.front() < b.front(); });
+                auto& tm = cr.towns;
+                const auto units = map_units(*inputs.map);
+                std::string line;
+                for (const auto& members : clusters) {
+                    Town t;
+                    t.house0 = std::uint32_t(tm.houses.size()); t.houses = std::uint32_t(members.size());
+                    for (const auto m : members) { tm.houses.push_back(all[m]); t.x += all[m].x; t.y += all[m].y; }
+                    t.x /= float(t.houses); t.y /= float(t.houses);
+                    for (const auto m : members) t.extent = std::max(t.extent, std::hypot(all[m].x - t.x, all[m].y - t.y) + kCatReach);
+                    // What it is: walls and gates by its houses, the units the map puts in it.
+                    const auto from_house = [&](float x, float y) {
+                        float best = std::numeric_limits<float>::infinity();
+                        for (const auto m : members) best = std::min(best, std::hypot(all[m].x - x, all[m].y - y));
+                        return best;
+                    };
+                    unsigned walls = 0, gates = 0, undead = 0, humans = 0, soldiers = 0;
+                    for (const auto& o : inputs.map->objects) {
+                        const auto& v = o.visual_reference;
+                        const bool wall = v.compare(0, 4, "stwa") == 0, gate = v.compare(0, 4, "stga") == 0;
+                        if ((wall || gate) && from_house(o.position[0], o.position[1]) < kEstateReach) (wall ? walls : gates) += 1;
+                    }
+                    for (const auto& u : units) {
+                        if (from_house(u.x, u.y) >= kCatReach) continue;
+                        undead += u.undead ? 1u : 0u; humans += u.human ? 1u : 0u; soldiers += u.human && u.soldier ? 1u : 0u;
+                    }
+                    t.kind = undead >= kUndeadArea ? town_undead
+                           : humans && float(soldiers) >= kArmyShare * float(humans) ? town_military
+                           : t.houses >= kCityHouses ? town_city
+                           : t.houses >= kEstateHouses && walls >= kEstateWalls && gates ? town_estate : town_hamlet;
+                    // points: two rings of eight around each house, clear of every house's middle
+                    // and out of sight of every undead or necromancer unit's place
+                    t.point0 = std::uint32_t(tm.points.size());
+                    for (const auto m : members)
+                        for (const float r : {6.f, 9.f})
+                            for (int k = 0; k < 8; ++k) {
+                                const float a = (float(k) + (r > 7 ? .5f : 0.f)) * TAU / 8;
+                                const Point p{all[m].x + r * std::cos(a), all[m].y + r * std::sin(a)};
+                                bool clear = true;
+                                for (const auto n : members) clear = clear && std::hypot(all[n].x - p.x, all[n].y - p.y) >= 5.f;
+                                for (const auto& u : units) clear = clear && !(u.undead && std::hypot(u.x - p.x, u.y - p.y) < kUndeadSight);
+                                if (clear) tm.points.push_back(p);
+                            }
+                    t.points = std::uint32_t(tm.points.size()) - t.point0;
+                    // cover: the map's other objects inside the outline
+                    t.cover0 = std::uint32_t(tm.covers.size());
+                    for (const auto& o : inputs.map->objects)
+                        if (!house(o.visual_reference) && std::hypot(o.position[0] - t.x, o.position[1] - t.y) < t.extent &&
+                            tm.inside(t, o.position[0], o.position[1])) tm.covers.push_back({o.position[0], o.position[1]});
+                    t.covers = std::uint32_t(tm.covers.size()) - t.cover0;
+                    tm.towns.push_back(t);
+                }
+                // An estate within kCityQuarter of a city is one of its quarters; then the cats.
+                static const char* kinds[]{"hamlet", "city", "estate", "quarter", "military", "undead"};
+                for (auto& t : tm.towns) {
+                    for (const auto& c : tm.towns)
+                        if (t.kind == town_estate && c.kind == town_city && std::hypot(c.x - t.x, c.y - t.y) < kCityQuarter) t.kind = town_quarter;
+                    t.cats = !t.points ? 0 : t.kind == town_city ? (ambient_zone_ == ambient::zone_desert ? 2 : 1) : t.kind == town_estate ? 1 : 0;
+                    char entry[96];
+                    std::snprintf(entry, sizeof(entry), "%s%uh@%.0f,%.0f %s %uc", line.empty() ? "" : "; ", t.houses, t.x, t.y, kinds[t.kind], unsigned(t.cats));
+                    line += entry;
+                }
+                // Residents: identity from the map, the town and the slot (fixed across loads):
+                // a coat of the town's three (a city's two cats differ), a body shape, a size
+                // of 1.3-1.4 x the 0.55 m figure (user 2026-11-14) and a home point.
+                const std::uint64_t map_key = key(name.c_str());
+                for (std::uint32_t ti = 0; ti < tm.towns.size(); ++ti) {
+                    const Town& t = tm.towns[ti];
+                    const std::uint64_t town_key = splitmix(map_key ^ (std::uint64_t(ti + 1) << 16) ^ key("town"));
+                    const unsigned first = std::min(2u, unsigned(hash01(town_key, key("coat")) * 3));
+                    for (std::uint8_t slot = 0; slot < t.cats; ++slot) {
+                        TownCat c;
+                        c.town = ti; c.slot = slot; c.key = splitmix(town_key ^ (slot + 1));
+                        const unsigned coat = slot == 0 ? first : (first + 1 + std::min(1u, unsigned(hash01(c.key, key("coat")) * 2))) % 3;
+                        const unsigned shape = std::min(3u, unsigned(hash01(c.key, key("shape")) * 4));
+                        c.look = std::uint8_t(coat | (shape << 4));
+                        c.size = 1.3f + .1f * hash01(c.key, key("size"));
+                        c.home = t.point0 + std::min(t.points - 1, std::uint32_t(hash01(c.key, key("home")) * float(t.points)));
+                        c.target = c.home;
+                        cr.director.town_cats.push_back(c);
+                    }
+                }
+                line = std::to_string(tm.towns.size()) + " towns, " + std::to_string(cr.director.town_cats.size()) + " cats (" + line + ")";
+                bridge_append_probe_event("critter_cat_towns", line.c_str());
+            }
             if (ambient_zone_ == ambient::zone_dead_city && inputs.map) {
                 std::vector<std::pair<bool, Point>> pieces;
                 for (const auto& o : inputs.map->objects) {
@@ -4256,7 +5702,10 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         // time reset) restarts the director's clock-relative state.
         float dt = float((environment.world_time - cr.world_time) * kSecondsPerSegment);
         cr.world_time = environment.world_time;
-        if (!(dt >= 0) || dt > 30) { const auto seed = cr.director.seed; cr.director = Director{}; cr.director.seed = seed; dt = 0; }
+        if (!(dt >= 0) || dt > 30) {
+            const auto seed = cr.director.seed; cr.director = Director{}; cr.director.seed = seed; dt = 0;
+            const auto tumble_seed = cr.tumble.seed; cr.tumble = TumbleWeeds{}; cr.tumble.seed = splitmix(tumble_seed);
+        }
         const double elapsed = dt; // timers retain game time; only motion is bounded
         dt = std::min(dt, .25f);
 
@@ -4271,10 +5720,31 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         if (cr.offset_x.size() == ambient_height_.size()) { w.offset_x = cr.offset_x.data(); w.offset_y = cr.offset_y.data(); }
         w.objects = inputs.map ? &inputs.map->objects : nullptr;
         w.ring = &cr.ring;
+        w.towns = &cr.towns;
         w.spot_map = &cr.spot_map;
         w.clip = world_to_clip.data(); w.width = float(width_); w.height_px = float(height_);
         w.eye = {inverse[2] / inverse[14], inverse[6] / inverse[14], inverse[10] / inverse[14]};
         w.level = level;
+        // The water of the fish: rebuilt with the map and with every liquid
+        // level step (ambient_liquid_level_updates_: the dam quest).
+        // Sea: the surf's own rule (a map the water_surf_no_sea_maps setting excludes has none).
+        const bool takes_sea = liquid_surf_map_takes_sea(ambient_map_name_, liquid_surf_no_sea_maps());
+        const std::uint64_t swim_key = splitmix(ambient_map_generation_ * 2 + (takes_sea ? 1u : 0u)) ^ ambient_liquid_level_updates_;
+        if (cr.swim_key != swim_key) {
+            cr.swim_key = swim_key; cr.swim.clear(); cr.water_level.clear(); cr.water_kind.clear();
+            cr.flow = owned_terrain_liquid_outflow(*inputs.terrain, inputs.geometry.get());
+            bool zone_fish = false;
+            for (unsigned f = 0; f < fish_count; ++f) zone_fish = zone_fish || ((fish_rule(Fish(f)).zones >> ambient_zone_) & 1u);
+            if (zone_fish)
+                build_swim_grids(ambient_height_, ambient_liquid_level_.ground, ambient_area_,
+                    takes_sea ? ground_cover_sea_mask(ambient_area_, ambient_tiles_x_, ambient_tiles_y_) : std::vector<std::uint8_t>{}, ambient_tiles_x_, ambient_tiles_y_, cr.swim, cr.water_level, cr.water_kind);
+        }
+        WaterField water;
+        if (cr.swim.size() == ambient_height_.size() && cr.water_level.size() == cr.swim.size() && !cr.water_kind.empty()) {
+            water.surface = cr.water_level.data(); water.swim = cr.swim.data(); water.kind = cr.water_kind.data();
+            water.verts_x = w.verts_x; water.verts_y = w.verts_y; water.tiles_x = ambient_tiles_x_; water.tiles_y = ambient_tiles_y_;
+            if (cr.flow && cr.flow->size() == cr.swim.size()) water.flow = cr.flow.get();
+        }
         static_assert(std::size(kCritterTypeSettings) == sp_count, "one player setting per species");
         for (unsigned s = 0; s < sp_count; ++s) {
             const auto& type = kCritterTypeSettings[s];
@@ -4307,10 +5777,19 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         if (!ground_hit(0, 0, w.focus)) {
             if (showcase) return status("camera focus misses ground");
             w.focus = {};
+        } else {
+            w.camera_focus = w.focus;
+            w.fish_showcase = std::clamp(configured_integer(debug_overlay_.config(), "critter_fish_showcase", 0), 0, int(fish_count));
         }
         if (!bridge_ground_cover_units(w.focus.x, w.focus.y, std::numeric_limits<float>::infinity(), cr.units, &cr.details)) return status("active world unit rows unavailable");
         if (cr.details.size() != cr.units.size()) return fail("unit detail row mismatch");
         w.units = &cr.units; w.details = &cr.details;
+        // Spell lights from the published world light list (one pass over the
+        // game's lights, usually a few dozen).
+        cr.spell_lights.clear();
+        for (const auto& light : native_point_light_inputs_)
+            if (light.spell) cr.spell_lights.push_back({light.center[0], light.center[1], light.radius});
+        w.spell_lights = &cr.spell_lights; w.blasts = &cr.director.blasts;
         std::vector<std::size_t> members;   // live party members with a known vision range
         for (std::size_t i = 0; i < cr.units.size(); ++i)
             if (!cr.details[i].dead && cr.details[i].controlled && cr.details[i].vision > 0) members.push_back(i);
@@ -4349,7 +5828,15 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             const float x = cr.units[m][0] + radius * std::cos(angle), y = cr.units[m][1] + radius * std::sin(angle);
             cr.spots.push_back({x, y, w.ground(x, y)});
         }
-        if (!showcase) { cr.showcase_mode = 0; director_tick(cr.director, dt, w, cr.spots, cr.larva_tail_y, elapsed); }
+        if (!showcase) {
+            cr.showcase_mode = 0;
+            director_tick(cr.director, dt, w, cr.spots, cr.larva_tail_y, elapsed);
+            fish_tick(cr.director, dt, elapsed, w, water);
+            // Tumbleweeds: Suslanger's desert only (user 2026-11-14), never in its caves.
+            const bool tumbleweeds = w.zone == ambient::zone_desert && cr.meshes[m_tumble].count &&
+                configured_boolean(debug_overlay_.config(), "tumbleweeds", true);
+            tumble_tick(cr.tumble, dt, w, weather_wind(), precipitation_sand_visible_, tumbleweeds, configured_integer(debug_overlay_.config(), "tumbleweed_showcase", 0) > 0);
+        }
         else {
             // Showcase: rows on the ground in front of the camera focus, axes
             // from the screen (x right, y up the screen), each animal at the
@@ -4365,8 +5852,8 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
                 const float rl = len3(r), fl = len3(f);
                 if (!(rl > 1e-3f) || !(fl > 1e-3f)) return status("showcase: degenerate camera axes");
                 r = r * (1 / rl); f = f * (1 / fl);
-                // The ground row (10 slots) fits the screen width (about 4 rl).
-                const float spacing = std::min(2.f * (showcase == 2 ? 1.6f : 1.f), 4 * rl / 11.f);
+                // The ground rows (7 slots each) fit the screen width (about 4 rl).
+                const float spacing = std::min(2.f * (showcase == 2 ? 1.6f : 1.f), 4 * rl / 10.f);
                 cr.showcase_mode = showcase; cr.showcase_right = r; cr.showcase_forward = f;
                 cr.showcase_anchor = w.focus - f * (1.5f * spacing);
                 cr.showcase_critters.clear(); cr.showcase_flocks.clear();
@@ -4382,7 +5869,8 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
                     if (!w.project({x, y, w.ground(x, y)}, nx, ny, ppm)) ppm = 0;
                     if (s.bird == bird_none) {
                         Agent c;
-                        c.species = s.species; c.scale = species_scale(s.species, ppm) * size; c.key = splitmix(index);
+                        c.species = s.species; c.scale = species_scale(s.species, ppm) * size * (s.species == sp_cat ? 1.35f : 1.f);
+                        c.key = splitmix(index);
                         c.x = x; c.y = y; c.yaw = facing; c.state = st_idle; c.alpha = 1;
                         cr.showcase_critters.push_back({s, c});
                         continue;
@@ -4484,13 +5972,52 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             switch (c.species) {
             case sp_rat: case sp_snowmouse: case sp_spider: case sp_frog: {
                 mesh = c.species == sp_rat ? m_rat : c.species == sp_snowmouse ? m_snowmouse : c.species == sp_spider ? m_spider : m_frog;
-                slice = Slice(mesh);
+                slice = c.species == sp_rat && w.zone == ambient::zone_desert ? s_rat_city : Slice(mesh);
                 const auto& clips = cr.minis[mesh];
                 const int clip = c.hop_clip || c.speed > .6f ? 2 : c.speed > 0 ? 1 : 0;
                 const float n = float(clips.frames[clip]);
                 float f = clip == 0 ? c.age * kMiniFps / std::sqrt(clips.scale * 4) : c.gait * n;   // small bodies move faster
                 f = std::fmod(std::max(f, 0.f), n);
                 const std::uint32_t f0 = std::uint32_t(f) % clips.frames[clip], f1 = (f0 + 1) % clips.frames[clip];
+                inst.a[0] = clips.start[clip] + f0 * clips.nodes; inst.a[2] = clips.start[clip] + f1 * clips.nodes;
+                inst.a[1] = 1; inst.b[1] = f - std::floor(f);
+                break;
+            }
+            case sp_cat: {
+                // posture 0..1 sitting down, 1..2 lying down (clips played by it), 2 the lying loop
+                const unsigned shape = std::min(3u, unsigned(c.look >> 4));
+                mesh = Mesh(m_cat_standard + shape);
+                slice = town_coats(w.zone)[std::min(2u, unsigned(c.look & 15u))];   // the coat of its town's three
+                const auto& clips = cr.minis[mesh];
+                int clip; float f;
+                if (c.rise >= 2) { clip = kCatRest; f = std::fmod(c.sit * kMiniFps, float(clips.frames[clip])); }
+                else if (c.rise > 1) { clip = kCatLieDown; f = (c.rise - 1) * float(clips.frames[clip] - 1); }
+                else if (c.rise > 0) { clip = kCatSitDown; f = c.rise * float(clips.frames[clip] - 1); }
+                else {
+                    clip = c.speed > .6f ? 2 : c.speed > 0 ? 1 : 0;
+                    const float n = float(clips.frames[clip]);
+                    f = std::fmod(std::max(clip == 0 ? c.age * kMiniFps : c.gait * n, 0.f), n);
+                }
+                const bool loop = clip <= 2 || clip == int(kCatRest);
+                const std::uint32_t f0 = std::uint32_t(f) % clips.frames[clip];
+                const std::uint32_t f1 = loop ? (f0 + 1) % clips.frames[clip] : std::min(f0 + 1, clips.frames[clip] - 1);
+                inst.a[0] = clips.start[clip] + f0 * clips.nodes; inst.a[2] = clips.start[clip] + f1 * clips.nodes;
+                inst.a[1] = 1; inst.b[1] = f - std::floor(f);
+                break;
+            }
+            case sp_squirrel: case sp_prairiedog: {
+                // the hare's clips, or the sit-up (by its amount) and the sitting loop
+                mesh = c.species == sp_squirrel ? m_squirrel : m_prairiedog;
+                slice = c.species == sp_prairiedog ? s_prairiedog : w.zone == ambient::zone_snow ? s_squirrel_ingos : s_squirrel;
+                const auto& clips = cr.minis[mesh];
+                const bool sitting = c.rise >= 1, rising = c.rise > 0 && !sitting;
+                const int clip = sitting ? int(kClipSit) : rising ? int(kClipRise) : c.speed > .6f ? 2 : c.speed > 0 ? 1 : 0;
+                const float n = float(clips.frames[clip]);
+                float f = rising ? c.rise * (n - 1) : clip == int(kClipSit) ? c.sit * kMiniFps
+                        : clip == 0 ? c.age * kMiniFps / std::sqrt(clips.scale * 4) : c.gait * n;
+                f = rising ? std::clamp(f, 0.f, n - 1) : std::fmod(std::max(f, 0.f), n);
+                const std::uint32_t f0 = std::uint32_t(f) % clips.frames[clip];
+                const std::uint32_t f1 = rising ? std::min(f0 + 1, clips.frames[clip] - 1) : (f0 + 1) % clips.frames[clip];
                 inst.a[0] = clips.start[clip] + f0 * clips.nodes; inst.a[2] = clips.start[clip] + f1 * clips.nodes;
                 inst.a[1] = 1; inst.b[1] = f - std::floor(f);
                 break;
@@ -4522,10 +6049,13 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             }
             default: return;
             }
-            inst.a[1] |= std::uint32_t(slice) << 8;
+            inst.a[1] |= std::uint32_t(coat_slice(slice) ? slice - s_cat_tabby : slice) << 8;   // the layer in its array
             cr.instances_scratch.push_back({mesh, inst});
         };
         if (!showcase) for (unsigned i = 0; i < cr.director.critter_count; ++i) emit_critter(cr.director.critters[i]);
+        if (!showcase)
+            for (const auto& c : cr.director.town_cats)
+                if (c.alive) { emit_critter(c.cat); if (c.hunt != hu_none) emit_critter(c.mouse); }
         // Render only: a bird near the lens fades out over about two body
         // lengths before it can fill the screen or cross the near plane.
         const auto near_fade = [&](V3 p, float length) {
@@ -4587,6 +6117,61 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
                 cr.instances_scratch.push_back({mesh, inst});
             }
         };
+        // Fish: one instance each at its place in the water column, the
+        // wave values the school stepped; the far mesh under kFishFarPixels.
+        const auto emit_school = [&](const School& s) {
+            if (!s.active || !(s.seen > 0)) return;
+            const FishRule& rule = fish_rule(s.kind);
+            for (unsigned i = 0; i < s.count; ++i) {
+                const FishAgent& a = s.fish[i];
+                if (a.out) continue;
+                const V3 p{a.x, a.y, water.level(a.x, a.y) - a.depth};
+                const float px = measure(p, rule.length, sp_fish);
+                if (px < kMinPixels) continue;
+                const float alpha = s.alpha * s.seen * near_fade(p, rule.length);
+                if (!(alpha > 0)) continue;
+                CrInstance inst{}; inst.b[0] = alpha;
+                const float speed = std::hypot(a.vx, a.vy);
+                const bool slides = fish_slides(rule);
+                float pitch = std::clamp(.8f * std::atan2(-a.vz, std::max(speed, 1e-4f)), -.6f, .6f);
+                if (slides) {   // it lies along the bed: pitched with the bed's slope under its length
+                    const float fx = std::sin(a.yaw) * rule.length * .5f, fy = std::cos(a.yaw) * rule.length * .5f;
+                    const auto bed = [&](float x, float y) { return water.level(x, y) - water.depth(x, y); };
+                    pitch = std::clamp(std::atan2(bed(a.x + fx, a.y + fy) - bed(a.x - fx, a.y - fy), rule.length), -.7f, .7f);
+                }
+                root(inst, p, a.yaw, pitch, 1.f);
+                inst.a[1] = 3u | (std::uint32_t(s_fish + s.kind) << 8);
+                { const float eel = slides ? 1.f : 0.f; std::memcpy(&inst.a[2], &eel, 4); }   // the wave's envelope (a slider's reaches the head)
+                inst.b[1] = rule.shine; inst.b[2] = a.phase; inst.b[3] = a.amp;
+                // The bend, to the fish's right (+x, the side a growing heading turns to): the tail and the head
+                // swing to the inside of the turn (the spine is concave toward the turn centre), in a C-start
+                // (bend: counter-clockwise in world x, y, so to -x) as in a swimming turn (omega: clockwise).
+                inst.c[0] = rule.length; inst.c[1] = -1.44f * a.bend + 1.6f * std::clamp(.22f * a.omega, -.5f, .5f);
+                inst.c[2] = .10f * rule.length * std::sin(TAU * a.scull) * (1 - .85f * a.dart);
+                inst.c[3] = .125f * fish_height(s.kind) * a.dart;
+                cr.instances_scratch.push_back({Mesh(m_fish + 2 * s.kind + (px < kFishFarPixels ? 1 : 0)), inst});
+            }
+        };
+        if (!showcase) for (const auto& s : cr.director.schools) emit_school(s);
+        // Tumbleweeds: their whole orientation in the root, one shared identity
+        // part matrix (mode 0 carries the card normals).
+        unsigned tumble_drawn = 0;
+        if (!showcase) {
+            std::uint32_t identity = UINT32_MAX;
+            for (const Tumble& b : cr.tumble.weed) {
+                if (!b.active) continue;
+                const V3 p{b.x, b.y, w.ground(b.x, b.y) + kTumbleRoll * b.scale + b.h};
+                const float alpha = b.alpha * near_fade(p, 2 * kTumbleRadius * b.scale);
+                if (!(alpha > 0)) continue;
+                if (identity == UINT32_MAX) { identity = std::uint32_t(cr.bone_scratch.size()); cr.bone_scratch.push_back(affine(M3{}, {})); }
+                CrInstance inst{}; inst.b[0] = alpha;
+                for (int i = 0; i < 3; ++i) { for (int j = 0; j < 3; ++j) inst.r[i][j] = b.rot.m[i][j] * b.scale; }
+                inst.r[0][3] = p.x; inst.r[1][3] = p.y; inst.r[2][3] = p.z;
+                inst.a[0] = identity; inst.a[1] = std::uint32_t(s_tumble - s_cat_tabby) << 8;   // its layer in the kSkin array
+                cr.instances_scratch.push_back({m_tumble, inst});
+                ++tumble_drawn;
+            }
+        }
         if (showcase) {
             for (const auto& entry : cr.showcase_critters) emit_critter(entry.second);
             for (const auto& entry : cr.showcase_flocks) emit_flock(entry.second);
@@ -4655,6 +6240,40 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             for (const auto& r : cr.director.residents) if (r.active) {
                 if (r.is_flock) flock_labels(r.birds); else ground_label(r.critter);
             }
+            static const char* modes[]{"rest", "walk", "away"};
+            static const char* hunts[]{"", " mouse", " stalk", " pounce", " mouse-away"};
+            for (const auto& c : cr.director.town_cats) {
+                if (!c.alive) continue;
+                char text[48];
+                std::snprintf(text, sizeof(text), "t%u/%u %s %s%s", c.town, unsigned(c.slot), cat_coat_name(w.zone, c.look & 15u),
+                              modes[c.mode], hunts[c.hunt]);
+                label(c.cat, text, sp_cat);
+                if (c.hunt != hu_none) label(c.mouse, "hunted", sp_snowmouse);
+            }
+            // A unit holding every part of its model (empty body-part list, a
+            // mod setup bug; engine_bridge report_all_model_parts): a red tag
+            // above it.
+            for (std::size_t i = 0; i < cr.units.size(); ++i) {
+                if (!cr.details[i].all_model_parts) continue;
+                const auto& u = cr.units[i];
+                float nx, ny, ppm;
+                if (!w.project({u[0], u[1], u[2] + std::max(2.f, 2.f * u[3])}, nx, ny, ppm) ||
+                    std::abs(nx) > 1 || std::abs(ny) > 1) continue;
+                summary.labels.emplace_back();
+                auto& l = summary.labels.back();
+                l.x = (nx + 1) * .5f; l.y = (1 - ny) * .5f;
+                l.color = 0xff2020e0u; // ImGui ABGR: red
+                std::snprintf(l.text, sizeof(l.text), "EMPTY PARTS LIST: all %u model figures", cr.details[i].all_model_parts);
+            }
+            for (const auto& b : cr.director.blasts) {   // spell blasts: centre, light range, time left
+                float nx, ny, ppm;
+                if (!w.project({b.x, b.y, w.ground(b.x, b.y) + 1.f}, nx, ny, ppm) || std::abs(nx) > 1 || std::abs(ny) > 1) continue;
+                summary.labels.emplace_back();
+                auto& l = summary.labels.back();
+                l.x = (nx + 1) * .5f; l.y = (1 - ny) * .5f;
+                l.color = 0xff3030ffu;   // ImGui ABGR: red
+                std::snprintf(l.text, sizeof(l.text), "SPELL BLAST range %.0fm, %.0fs left", b.radius, float(b.until - cr.director.clock));
+            }
         }
         // Report simulation population even when every current instance is below
         // draw size. Spot rejection totals distinguish habitat, size and threats.
@@ -4666,6 +6285,16 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         };
         count_flock(cr.director.flock);
         for (const auto& f : cr.director.carrion) count_flock(f);
+        unsigned live_cats = 0;
+        for (const auto& c : cr.director.town_cats)
+            if (c.alive) { ++counts[sp_cat]; ++live_cats; if (c.hunt != hu_none) ++counts[sp_snowmouse]; }
+        float nearest_house = -1;
+        for (const auto& h : cr.towns.houses) {
+            const float m = std::hypot(h.x - w.focus.x, h.y - w.focus.y);
+            if (nearest_house < 0 || m < nearest_house) nearest_house = m;
+        }
+        unsigned schools = 0;
+        for (const auto& s : cr.director.schools) if (s.active) { ++schools; counts[sp_fish] += s.count; }
         unsigned residents = 0, ground_residents = 0;
         for (const auto& r : cr.director.residents) {
             if (!r.active) continue;
@@ -4700,17 +6329,23 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         const bool status_text = status_text_wanted();
         if (status_text) std::snprintf(critters_status_, sizeof(critters_status_),
             "Party: %zu members, vision %.1f-%.1fm; spawn band %.1fx sight\n"
+            "Spell blasts: %zu live of %llu seen (%zu spell lights); sent off %llu; spawns refused %llu\n"
             "Critters active: rat %u spider %u larva %u frog %u lizard %u snake %u centipede %u beetle %u "
-            "bird %u raven/crow %u vulture %u crab %u snowbird %u mouse %u bat %u; instances %zu, on screen %u (body %.0f-%.0f px)\n"
+            "bird %u raven/crow %u vulture %u crab %u snowbird %u mouse %u bat %u fish %u (schools %u, started %u) squirrel %u prairie dog %u cat %u; "
+            "instances %zu, on screen %u (body %.0f-%.0f px)\n"
+            "Town cats: %zu towns, %zu residents, %u live; nearest town house %.0f m\n"
             "Spawns %u/%llu; rejected attempts no species %llu/no spot %llu; quiet ticks %llu (%.1fs left)\n"
             "Rejected spots size %llu/habitat %llu/undead-wall %llu/threat %llu/budget %llu; zone %u, spots %zu\n"
             "World spots: residents %u (budget %u on screen %u); found %llu (faded in %llu) of %llu armed; disturbed %llu; memory %zu\n"
             "Carrion: corpses %u/%zu present/tracked; oldest %.1fs; timers %u next %.1fs due %u zone-blocked %u; "
             "flocks %u arriving %u arrivals %llu (landed %llu); slots %llu/%llu found, %llu flocks without; clock %.1fs (+%.3fs)",
             members.size(), members.empty() ? 0.f : vision_min, vision_max, kSpotBand,
+            d.blasts.size(),d.blasts_seen,cr.spell_lights.size(),d.blast_scared,d.blast_reject,
             counts[0],counts[1],counts[2],counts[3],counts[4],counts[5],counts[6],counts[7],
-            counts[8],counts[9],counts[10],counts[11],counts[12],counts[13],counts[14],cr.instances_scratch.size(),visible_instances,
+            counts[8],counts[9],counts[10],counts[11],counts[12],counts[13],counts[14],counts[sp_fish],schools,d.school_events,counts[sp_squirrel],counts[sp_prairiedog],counts[sp_cat],
+            cr.instances_scratch.size(),visible_instances,
             visible_instances ? drawn_min_px : 0.f, drawn_max_px,
+            cr.towns.towns.size(), d.town_cats.size(), live_cats, nearest_house,
             d.events,d.spawn_attempts,d.no_species,d.no_spot,d.quiet_reject,
             float(std::max(0., kCombatQuiet-(d.clock-d.last_combat))),
             d.size_reject,d.habitat_reject,d.undead_reject,d.threat_reject,d.budget_reject,unsigned(w.zone),cr.spots.size(),
@@ -4718,6 +6353,15 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             present,d.corpses.size(),oldest,timers,next,due,zone_blocked,
             flocks,arriving,d.carrion_arrivals,d.carrion_landed,d.slots_found,d.slots_wanted,d.slots_failed,d.clock,elapsed);
         summary.active = d.critter_count + ground_residents;
+        summary.cats = live_cats; summary.cat_towns = std::uint32_t(cr.towns.towns.size()); summary.cat_nearest_house = nearest_house;
+        summary.town_cats.clear();
+        for (const auto& c : d.town_cats) {
+            CritterSummary::TownCat r{};
+            r.town = c.town; r.slot = c.slot; r.shape = std::uint8_t(c.look >> 4); r.alive = c.alive; r.spawns = c.spawns;
+            r.size_pct = std::uint32_t(std::lround(c.size * 100)); r.x = std::int32_t(std::lround(c.cat.x)); r.y = std::int32_t(std::lround(c.cat.y));
+            std::snprintf(r.coat, sizeof(r.coat), "%s", cat_coat_name(w.zone, c.look & 15u));
+            summary.town_cats.push_back(r);
+        }
         summary.flock_active = d.flock.active ? 1u : 0u; summary.flock_birds = d.flock.active ? d.flock.count : 0u;
         summary.spot_residents = residents; summary.carrion_flocks = flocks; summary.carrion_birds = carrion_birds;
         summary.drawn_instances = std::uint32_t(cr.instances_scratch.size()); summary.on_screen_instances = visible_instances;
@@ -4738,11 +6382,21 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             const std::size_t used = std::strlen(critters_status_);
             std::snprintf(critters_status_ + used, sizeof(critters_status_) - used, "\nOmitted: %s", cr.omitted_text.c_str());
         }
+        if (status_text && !showcase && w.zone == ambient::zone_desert) {
+            unsigned out = 0;
+            for (const Tumble& b : cr.tumble.weed) out += b.active ? 1u : 0u;
+            const std::size_t used = std::strlen(critters_status_);
+            std::snprintf(critters_status_ + used, sizeof(critters_status_) - used,
+                "\nTumbleweeds: %u out, %u drawn; ground wind %.1f m/s (windiness %.2f, sand storm %.2f); unit pushes %u; out of sight %u, came %u",
+                out, tumble_drawn, cr.tumble.wind, cr.tumble.windiness, cr.tumble.storm, cr.tumble.pushes, cr.tumble.drops, cr.tumble.spawns);
+        }
+        cr.first_swimmer = 0;
         if (cr.instances_scratch.empty()) return S_OK;
 
         // Upload: instances grouped by mesh, buffers sized by demand.
         std::stable_sort(cr.instances_scratch.begin(), cr.instances_scratch.end(),
                          [](const auto& a, const auto& b) { return a.first < b.first; });
+        while (cr.first_swimmer < cr.instances_scratch.size() && cr.instances_scratch[cr.first_swimmer].first < m_fish) ++cr.first_swimmer;
         cr.instance_upload.clear();
         for (const auto& value : cr.instances_scratch) cr.instance_upload.push_back(value.second);
         const UINT instance_count = UINT(cr.instance_upload.size()), bone_count = std::max<UINT>(1, UINT(cr.bone_scratch.size()));
@@ -4751,13 +6405,15 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             // D3D12: the skin array's mips first (the downsample may still be
             // compiling: no draw until every slice has them), then the same
             // demand-sized buffers, written in stream order.
-            const std::uint32_t all_slices = (1u << s_count) - 1u;
+            static_assert(s_count < 64, "skin_mips_done12 holds a bit per slice");
+            const std::uint64_t all_slices = (1ull << s_count) - 1u;
             for (unsigned s = 0; s < s_count && cr.skin_mips_done12 != all_slices; ++s) {
-                if (cr.skin_mips_done12 & (1u << s)) continue;
-                const HRESULT hr = d3d12_->generate_mips(*cr.skins12, d3d12_mip_array_program(), s);
+                if (cr.skin_mips_done12 & (1ull << s)) continue;
+                const HRESULT hr = coat_slice(s) ? d3d12_->generate_mips(*cr.coats12, d3d12_mip_array_program(), s - s_cat_tabby)
+                                                 : d3d12_->generate_mips(*cr.skins12, d3d12_mip_array_program(), s);
                 if (FAILED(hr)) return fail("skin mips failed (D3D12)");
                 if (hr != S_OK) break;
-                cr.skin_mips_done12 |= 1u << s;
+                cr.skin_mips_done12 |= 1ull << s;
             }
             if (cr.skin_mips_done12 != all_slices) return status("skin mips pending (D3D12 downsample not ready)");
             if (instance_count > cr.instance_capacity || !cr.instances12) {
@@ -4801,6 +6457,20 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
         }
         }
         cr.shadow_ready = true;
+        {
+            // What the sun casters draw: game time, the casting instances and
+            // every part matrix (FNV-1a). Unchanged (paused, nothing moved):
+            // the close shadow maps keep their layer.
+            std::uint64_t stamp = 14695981039346656037ull;
+            const auto mix = [&stamp](const void* data, std::size_t bytes) {
+                const auto* p = static_cast<const std::uint8_t*>(data);
+                for (std::size_t i = 0; i < bytes; ++i) { stamp ^= p[i]; stamp *= 1099511628211ull; }
+            };
+            mix(&cr.world_time, sizeof(cr.world_time)); mix(&cr.first_swimmer, sizeof(cr.first_swimmer));
+            mix(cr.instance_upload.data(), cr.first_swimmer * sizeof(CrInstance));
+            mix(cr.bone_scratch.data(), cr.bone_scratch.size() * sizeof(Bone));
+            cr.shadow_stamp = stamp;
+        }
         CrFrame c{};
         std::memcpy(c.clip, world_to_clip.data(), sizeof(c.clip));
         jitter_clip(c.clip);
@@ -4873,7 +6543,10 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
                 const auto& range = cr.meshes[mesh];
                 const std::uint32_t values[4]{std::uint32_t(begin), range.first, 0, 0};
                 d3d12_->set_constants(12, values, sizeof(values));
-                hr = d3d12_->draw_instanced(cr.programs12[0], cr.programs12[1], state, nullptr, range.count, UINT(end - begin), false);
+                d3d12_->set_resource(31, coat_mesh(mesh) ? cr.coats12.get() : cr.skins12.get());
+                // the fish programs for the fish ranges (the last ones), the cutout ones for the tumbleweed
+                const unsigned set = mesh >= m_fish ? 3u : mesh == m_tumble ? 6u : 0u;
+                hr = d3d12_->draw_instanced(cr.programs12[set], cr.programs12[set + 1], state, nullptr, range.count, UINT(end - begin), false);
                 if (hr == S_OK) { ++draws; triangles += std::uint64_t(range.count / 3) * (end - begin); }
                 begin = end;
             }
@@ -4940,6 +6613,11 @@ HRESULT Renderer::render_critters(const FixedState& frame, const std::array<floa
             // checked on hardware and WARP): the mesh offset goes in crFirst.
             const std::uint32_t values[4]{std::uint32_t(begin), range.first, 0, 0};
             if (FAILED(push_constants(constant_vs | constant_ps, 12, values, sizeof(values), cr.draw_constants.Get()))) break;
+            context_->PSSetShaderResources(31, 1, (coat_mesh(mesh) ? cr.coats_srv : cr.skins_srv).GetAddressOf());
+            if (mesh >= m_fish && begin == cr.first_swimmer) {   // the fish programs for the fish ranges (the last ones)
+                context_->VSSetShader(cr.fish_vs.Get(), nullptr, 0); context_->PSSetShader(cr.fish_ps.Get(), nullptr, 0);
+            }
+            if (mesh == m_tumble) { context_->VSSetShader(cr.cut_vs.Get(), nullptr, 0); context_->PSSetShader(cr.cut_ps.Get(), nullptr, 0); }
             context_->DrawInstanced(range.count, UINT(end - begin), 0, 0);
             ++draws; triangles += std::uint64_t(range.count / 3) * (end - begin);
             begin = end;
@@ -4972,7 +6650,7 @@ void Renderer::draw_critter_shadows(UINT slice) noexcept {
     (void)slice;
     if (!critters_ || critters_failed_) return;
     auto& cr = *critters_;
-    if (!cr.ready || !cr.shadow_ready || !cr.shadow_vs || cr.instances_scratch.empty() || !cr.vertex_srv ||
+    if (!cr.ready || !cr.shadow_ready || !cr.shadow_vs || !cr.first_swimmer || !cr.vertex_srv ||
         !cr.instance_srv || !cr.baked_srv || !cr.frame_constants || !cr.draw_constants || !cr.raster)
         return;
     if (profiler_.pass_active()) profiler_.sub_scope("critter_shadows");
@@ -4986,12 +6664,17 @@ void Renderer::draw_critter_shadows(UINT slice) noexcept {
     context_->RSSetState(cr.raster.Get()); context_->OMSetDepthStencilState(cr.depth.Get(), 0);
     context_->VSSetShader(cr.shadow_vs.Get(), nullptr, 0); context_->PSSetShader(nullptr, nullptr, 0);
     UINT draws = 0;
-    for (std::size_t begin = 0; begin < cr.instances_scratch.size();) {
+    for (std::size_t begin = 0; begin < cr.first_swimmer;) {   // fish cast no sun shadow
         const Mesh mesh = cr.instances_scratch[begin].first;
         std::size_t end = begin;
-        while (end < cr.instances_scratch.size() && cr.instances_scratch[end].first == mesh) ++end;
+        while (end < cr.first_swimmer && cr.instances_scratch[end].first == mesh) ++end;
         const auto& range = cr.meshes[mesh];
         const std::uint32_t values[4]{std::uint32_t(begin), range.first, 0, 0};
+        if (mesh == m_tumble) {   // the last caster range: twig cards cast through their alpha cut
+            if (!cr.cut_shadow_vs || !cr.cut_shadow_ps || !cr.coats_srv || !cr.sampler) break;
+            context_->VSSetShader(cr.cut_shadow_vs.Get(), nullptr, 0); context_->PSSetShader(cr.cut_shadow_ps.Get(), nullptr, 0);
+            context_->PSSetShaderResources(31, 1, cr.coats_srv.GetAddressOf()); context_->PSSetSamplers(8, 1, cr.sampler.GetAddressOf());
+        }
         if (FAILED(push_constants(constant_vs, 12, values, sizeof(values), cr.draw_constants.Get()))) break;
         context_->DrawInstanced(range.count, UINT(end - begin), 0, 0);
         ++draws;
@@ -4999,7 +6682,9 @@ void Renderer::draw_critter_shadows(UINT slice) noexcept {
     }
     if (profiler_.pass_active()) profiler_.add_sub_draw(draws, 0);
     ID3D11ShaderResourceView* empty[4]{};
-    context_->VSSetShaderResources(27, 4, empty);
+    context_->VSSetShaderResources(27, 4, empty); context_->PSSetShaderResources(31, 1, empty);
+    ID3D11SamplerState* no_sampler = nullptr; context_->PSSetSamplers(8, 1, &no_sampler);
+    context_->PSSetShader(nullptr, nullptr, 0);
     ID3D11Buffer* no_buffers[2]{};
     context_->VSSetConstantBuffers(11, 2, no_buffers);
 }
@@ -5009,12 +6694,13 @@ void Renderer::draw_critter_shadows(UINT slice) noexcept {
 // caster layer): the same previous-frame instances through crShadowVS,
 // depth only, into the depth target, viewport and slice constants (b2) the
 // caller bound; scissor is the caller's map rect. Sets b11, b12 and t27-t30
+// (the tumbleweed's cutout casters also t31 and s8; t27-t31 are left unbound)
 // and leaves the other slots as they were.
 void Renderer::draw_critter_shadows_d3d12(UINT slice, const RECT* scissor) noexcept {
     (void)slice;
     if (!d3d12_ || !critters_ || critters_failed_) return;
     auto& cr = *critters_;
-    if (!cr.ready || !cr.shadow_ready || cr.programs12.size() < 3 || cr.instances_scratch.empty() || cr.frame12.empty() ||
+    if (!cr.ready || !cr.shadow_ready || cr.programs12.size() < 3 || !cr.first_swimmer || cr.frame12.empty() ||
         !cr.vertices12 || !cr.instances12 || !cr.baked12)
         return;
     if (profiler_.pass_active()) profiler_.sub_scope("critter_shadows");
@@ -5026,14 +6712,21 @@ void Renderer::draw_critter_shadows_d3d12(UINT slice, const RECT* scissor) noexc
     state.depth.DepthEnable = TRUE; state.depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL; state.depth.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
     static const ShaderProgram no_pixel{};
     UINT draws = 0;
-    for (std::size_t begin = 0; begin < cr.instances_scratch.size();) {
+    for (std::size_t begin = 0; begin < cr.first_swimmer;) {   // fish cast no sun shadow
         const Mesh mesh = cr.instances_scratch[begin].first;
         std::size_t end = begin;
-        while (end < cr.instances_scratch.size() && cr.instances_scratch[end].first == mesh) ++end;
+        while (end < cr.first_swimmer && cr.instances_scratch[end].first == mesh) ++end;
         const auto& range = cr.meshes[mesh];
         const std::uint32_t values[4]{std::uint32_t(begin), range.first, 0, 0};
         d3d12_->set_constants(12, values, sizeof(values));
-        const HRESULT hr = d3d12_->draw_instanced(cr.programs12[2], no_pixel, state, scissor, range.count, UINT(end - begin), false);
+        const bool cut = mesh == m_tumble;   // twig cards cast through their alpha cut
+        if (cut) {
+            if (!cr.coats12 || cr.programs12.size() < kCritterPrograms) break;
+            d3d12_->set_resource(31, cr.coats12.get());
+            d3d12_->set_sampler(8, world_texture_sampler(D3DTFN_LINEAR, D3DTFG_LINEAR, D3DTFP_LINEAR,
+                D3DTADDRESS_WRAP, D3DTADDRESS_WRAP, true, 1u << configured_integer(debug_overlay_.config(), "anisotropy", 3)).description);
+        }
+        const HRESULT hr = d3d12_->draw_instanced(cr.programs12[cut ? 8 : 2], cut ? cr.programs12[9] : no_pixel, state, scissor, range.count, UINT(end - begin), false);
         if (hr != S_OK) { if (FAILED(hr)) d3d12_->omit("critter sun shadow casters (draw failed)", false); break; }
         ++draws;
         begin = end;
@@ -5041,12 +6734,130 @@ void Renderer::draw_critter_shadows_d3d12(UINT slice, const RECT* scissor) noexc
     if (profiler_.pass_active()) profiler_.add_sub_draw(draws, 0);
     d3d12_->set_resource(27, static_cast<const D3D12Buffer*>(nullptr)); d3d12_->set_resource(28, static_cast<const D3D12Buffer*>(nullptr));
     d3d12_->set_resource(29, static_cast<const D3D12Buffer*>(nullptr)); d3d12_->set_resource(30, static_cast<const D3D12Buffer*>(nullptr));
+    d3d12_->set_resource(31, static_cast<const D3D12Texture*>(nullptr));
 }
 
-bool Renderer::owned_shadow_casters_animate() const noexcept {
-    if (critters_ && !critters_failed_ && critters_->shadow_ready && !critters_->instances_scratch.empty()) return true;
-    return gc_shadow_ready_ && configured_integer(debug_overlay_.config(), "ground_cover_shadows", 1) >= 2 &&
+// The frame's fish marked in the world stencil for the water (the depth
+// snapshot carries the stencil; liquid_surface.hlsl liquidRefraction). The
+// critter pass drew them into colour and depth earlier in the frame; this
+// draws them again from the same buffers, depth tested against what is
+// visible now, writing only stencil bit 0. Called inside the native flush:
+// every state it sets is restored.
+bool Renderer::mark_swimmers() noexcept {
+    if (!critters_ || critters_failed_ || critters_drawn_frame_ != native_frame_index_ || !context_ || !dsv_) return false;
+    auto& cr = *critters_;
+    if (!cr.ready || !cr.shadow_ready || cr.first_swimmer >= cr.instances_scratch.size() || !cr.mark_vs || !cr.mark_depth ||
+        !cr.vertex_srv || !cr.instance_srv || !cr.frame_constants || !cr.draw_constants)
+        return false;
+    if (cr.marked_frame == native_frame_index_) return true;   // the bit stays until the frame's depth clear
+    cr.marked_frame = native_frame_index_;
+    transition_profile_pass("swimmer_mark");
+    {
+        const DebugViewStateGuard restore(context_.Get());
+        context_->OMSetRenderTargets(0, nullptr, dsv_.Get());
+        D3D11_VIEWPORT viewport = target_viewport(); context_->RSSetViewports(1, &viewport);
+        context_->RSSetState(cr.mark_raster.Get()); context_->OMSetDepthStencilState(cr.mark_depth.Get(), 1);
+        context_->IASetInputLayout(nullptr); context_->IASetVertexBuffers(0, 0, nullptr, nullptr, nullptr);
+        context_->IASetIndexBuffer(nullptr, DXGI_FORMAT_UNKNOWN, 0);
+        context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        context_->VSSetShader(cr.mark_vs.Get(), nullptr, 0); context_->PSSetShader(nullptr, nullptr, 0);
+        context_->GSSetShader(nullptr, nullptr, 0); context_->HSSetShader(nullptr, nullptr, 0); context_->DSSetShader(nullptr, nullptr, 0);
+        ID3D11Buffer* frame_buffers[2]{cr.frame_constants.Get(), cr.draw_constants.Get()};
+        context_->VSSetConstantBuffers(11, 2, frame_buffers);
+        ID3D11ShaderResourceView* vs_srvs[4]{cr.vertex_srv.Get(), cr.instance_srv.Get(), cr.bone_srv.Get(), cr.baked_srv.Get()};
+        context_->VSSetShaderResources(27, 4, vs_srvs);
+        UINT draws = 0; std::uint64_t triangles = 0;
+        for (std::size_t begin = cr.first_swimmer; begin < cr.instances_scratch.size();) {
+            const Mesh mesh = cr.instances_scratch[begin].first;
+            std::size_t end = begin;
+            while (end < cr.instances_scratch.size() && cr.instances_scratch[end].first == mesh) ++end;
+            const auto& range = cr.meshes[mesh];
+            const std::uint32_t values[4]{std::uint32_t(begin), range.first, 0, 0};
+            if (FAILED(push_constants(constant_vs, 12, values, sizeof(values), cr.draw_constants.Get()))) break;
+            context_->DrawInstanced(range.count, UINT(end - begin), 0, 0);
+            ++draws; triangles += std::uint64_t(range.count / 3) * (end - begin);
+            begin = end;
+        }
+        ID3D11ShaderResourceView* empty[4]{};
+        context_->VSSetShaderResources(27, 4, empty);
+        ID3D11Buffer* no_buffers[2]{};
+        context_->VSSetConstantBuffers(11, 2, no_buffers);
+        profiler_.add_draw(triangles, draws); profiler_.add_batch(draws);
+    }
+    return true;
+}
+
+// mark_swimmers on D3D12. Its receiver marks count in the whole stencil and
+// the mask pass clears it, so the marks are made here, at every snapshot:
+// the stencil cleared (no receiver mark is pending in the material phase),
+// then every visible fish pixel counted up (the command list's reference
+// stays 0). The world targets stay bound; no pixel program runs.
+bool Renderer::mark_swimmers_d3d12() noexcept {
+    if (!d3d12_ || !critters_ || critters_failed_ || critters_drawn_frame_ != native_frame_index_ || !world_d3d12_bound_ || !world_d3d12_) return false;
+    auto& cr = *critters_;
+    if (!cr.ready || !cr.shadow_ready || cr.first_swimmer >= cr.instances_scratch.size() || cr.programs12.size() < 6 || cr.frame12.empty() ||
+        !cr.vertices12 || !cr.instances12 || !cr.baked12)
+        return false;
+    transition_profile_pass("swimmer_mark");
+    d3d12_->clear_stencil_of(*world_d3d12_, 0);
+    bind_world_targets_d3d12(world_history_bound12_);
+    d3d12_->set_constants(11, cr.frame12.data(), UINT(cr.frame12.size()));
+    d3d12_->set_resource(27, cr.vertices12.get()); d3d12_->set_resource(28, cr.instances12.get());
+    d3d12_->set_resource(29, cr.bones12.get()); d3d12_->set_resource(30, cr.baked12.get());
+    D3D12NativeState state;
+    state.raster.FillMode = D3D11_FILL_SOLID; state.raster.CullMode = D3D11_CULL_NONE; state.raster.DepthClipEnable = TRUE;
+    state.raster.DepthBias = -4;   // a few depth steps for the second program's rounding
+    state.depth.DepthEnable = TRUE; state.depth.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO; state.depth.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+    state.depth.StencilEnable = TRUE; state.depth.StencilReadMask = 0xFF; state.depth.StencilWriteMask = 0xFF;
+    state.depth.FrontFace = {D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_KEEP, D3D11_STENCIL_OP_INCR_SAT, D3D11_COMPARISON_ALWAYS};
+    state.depth.BackFace = state.depth.FrontFace;
+    static const ShaderProgram no_pixel{};
+    UINT draws = 0; std::uint64_t triangles = 0;
+    for (std::size_t begin = cr.first_swimmer; begin < cr.instances_scratch.size();) {
+        const Mesh mesh = cr.instances_scratch[begin].first;
+        std::size_t end = begin;
+        while (end < cr.instances_scratch.size() && cr.instances_scratch[end].first == mesh) ++end;
+        const auto& range = cr.meshes[mesh];
+        const std::uint32_t values[4]{std::uint32_t(begin), range.first, 0, 0};
+        d3d12_->set_constants(12, values, sizeof(values));
+        const HRESULT hr = d3d12_->draw_instanced(cr.programs12[5], no_pixel, state, nullptr, range.count, UINT(end - begin), false);
+        if (hr != S_OK) { if (FAILED(hr)) d3d12_->omit("swimmer marks (draw failed)", false); break; }
+        ++draws; triangles += std::uint64_t(range.count / 3) * (end - begin);
+        begin = end;
+    }
+    // The flush's own slots: t27-t30 unbound (the water inputs at t28-t31 are
+    // bound after the snapshot), b11 zero as its motion draws leave it.
+    d3d12_->set_resource(27, static_cast<const D3D12Buffer*>(nullptr)); d3d12_->set_resource(28, static_cast<const D3D12Buffer*>(nullptr));
+    d3d12_->set_resource(29, static_cast<const D3D12Buffer*>(nullptr)); d3d12_->set_resource(30, static_cast<const D3D12Buffer*>(nullptr));
+    const std::array<float, 24> zero{};
+    d3d12_->set_constants(11, zero.data(), UINT(sizeof(zero)));
+    if (draws) d3d12_->count("swimmer mark draws");
+    profiler_.add_draw(triangles, draws); profiler_.add_batch(draws);
+    return draws != 0;
+}
+
+std::uint8_t Renderer::owned_shadow_casters_animate() noexcept {
+    // Maps 1 and 2 draw the cover with frozen sway: they change only with the
+    // cover set (two standing placements: the casters may come from the
+    // previous one), and keep it once drawn from a standing set.
+    const bool standing = gc_still_placements_ >= 2, kept = standing && gc_cover_maps_still_;
+    gc_cover_maps_still_ = standing;
+    // Critters redraw the close maps when what they cast changed (game time
+    // moved, the instances or their poses): paused, the maps keep their layer.
+    if (critters_ && !critters_failed_ && critters_->shadow_ready && critters_->first_swimmer &&
+        critters_->shadow_stamp != critters_->shadow_stamp_drawn) {
+        critters_->shadow_stamp_drawn = critters_->shadow_stamp;
+        return 7;
+    }
+    const bool cover = gc_shadow_ready_ && configured_integer(debug_overlay_.config(), "ground_cover_shadows", 1) >= 2 &&
         configured_integer(debug_overlay_.config(), "ground_cover", 2) > 0;
+    // rt_sun_shadows: the single close map is map 2, and its pass draws the
+    // cover's own layer, a window that follows the camera: every frame while
+    // any cover casts (also the large cover of level 1, which does not sway).
+    if (native_traced_sun_ && gc_shadow_ready_ && configured_integer(debug_overlay_.config(), "ground_cover_shadows", 1) >= 1 &&
+        configured_integer(debug_overlay_.config(), "ground_cover", 2) > 0 &&
+        configured_boolean(debug_overlay_.config(), "rt_sun_cover_shadows", true)) return 7;
+    return cover ? (kept ? 1 : 7) : 0;
 }
 
 
@@ -5054,7 +6865,7 @@ std::uint32_t Renderer::owned_shadow_casters_key() const noexcept {
     const auto& config = debug_overlay_.config();
     const int cover = configured_integer(config, "ground_cover", 2) > 0 ?
         std::clamp(configured_integer(config, "ground_cover_shadows", 1), 0, 2) : 0;
-    const bool critters = critters_ && !critters_failed_ && critters_->shadow_ready && !critters_->instances_scratch.empty();
+    const bool critters = critters_ && !critters_failed_ && critters_->shadow_ready && critters_->first_swimmer != 0;
     return std::uint32_t(cover) | (gc_shadow_ready_ ? 4u : 0u) | (critters ? 8u : 0u) |
         (configured_integer(config, "critters", 2) > 0 ? 16u : 0u);
 }

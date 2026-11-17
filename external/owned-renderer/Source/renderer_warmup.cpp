@@ -154,15 +154,16 @@ void Renderer::pump_pipeline_warmup() noexcept try {
     // NativeSpecialisedSet order (native_specialised_members): 0 object,
     // 1 terrain, 2 snow, 3 low, 4 low unlit, 5 terrain flat, 6 snow flat,
     // 7 masked, 8 masked low, 9 masked terrain, 10 masked snow, 11 masked
-    // terrain flat, 12 masked snow flat, 13 shadow mask, 14 low shadow mask.
+    // terrain flat, 12 masked snow flat, 13 shadow mask, 14 low shadow mask,
+    // 15 masked terrain slim, 16 masked snow slim, 17 and 18 their flat variants.
     const auto material = [&](std::size_t index, ID3D11PixelShader* ps) {
         if (!ps) return;
         const bool low_member = index == 3 || index == 4 || index == 8 || index == 14;
-        const bool snow = index == 2 || index == 6 || index == 10 || index == 12;
+        const bool snow = index == 2 || index == 6 || index == 10 || index == 12 || index == 16 || index == 18;
         // The Low path binds only the low members (and snow terrain under a
         // trail field); the full path never binds a low member.
         if (low ? !(low_member || snow) : low_member) return;
-        if (index >= 13) { // the full-screen sun-shadow mask pass
+        if (index == 13 || index == 14) { // the full-screen sun-shadow mask pass
             if (masked)
                 add(native_shadow_mask_vs_.Get(), nullptr, nullptr, ps, WarmTargets{{mask_format}, 1}, world_depth,
                     nullptr, shadow_mask_depth_state_.Get(), shadow_mask_raster_.Get());
@@ -184,10 +185,18 @@ void Renderer::pump_pipeline_warmup() noexcept try {
                     snow ? terrain_ds_.Get() : terrain_ds_plain_.Get(), ps, *targets, world_depth, nullptr, depth_state);
         }
     };
-    for (const NativeSpecialisedSet* set : sets)
-        for (std::size_t n = 0; n < set->size(); ++n) material(n, (*set)[n].Get());
-    if (general)
-        for (std::size_t n = 0; n < std::tuple_size<NativeSpecialisedSet>::value; ++n) material(n, (this->*members[n]).Get());
+    // Then the material instance programs (renderer.h kNativeInstance*), each
+    // drawn as the object member (0) or the prepassed object member (7).
+    for (const NativeSpecialisedSet* set : sets) {
+        for (std::size_t n = 0; n < kNativeSpecialisedMembers; ++n) material(n, (*set)[n].Get());
+        for (std::size_t n = 0; n < kNativeInstancePrograms; ++n)
+            if (native_instance_built(n / 2u))
+                material((n & 1u) ? 7u : 0u, (*set)[kNativeSpecialisedMembers + native_built_instance_slots_before(n / 2u) * 2u + (n & 1u)].Get());
+    }
+    if (general) {
+        for (std::size_t n = 0; n < kNativeSpecialisedMembers; ++n) material(n, (this->*members[n]).Get());
+        for (std::size_t n = 0; n < kNativeInstancePrograms; ++n) material((n & 1u) ? 7u : 0u, native_instance_ps_[n].Get());
+    }
 
     // Liquid surfaces (general programs only): patches while tessellation is
     // on, else the plain vertex stage; the program choice follows flush_native.

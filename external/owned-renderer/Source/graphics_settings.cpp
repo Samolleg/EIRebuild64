@@ -2,6 +2,7 @@
 
 #include "critter_summary.h"
 #include "debug_overlay_config.h"
+#include "shadow_foliage.h"
 #include "ui_language.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
@@ -45,7 +46,7 @@ constexpr PlayerGraphicsSetting kSettings[] = {
     {"upscaler", kCategories[0], "Upscaling",
      "Renders the world at a lower resolution and rebuilds a sharp, smooth image at the screen size. "
      "Replaces anti-aliasing and render scale while on. NVIDIA DLSS needs the 64-bit render host and an RTX card; "
-     "AMD FSR 2 runs on most graphics cards from 2015 on, in both modes. Off renders at the render scale.",
+     "AMD FSR runs on most graphics cards from 2015 on (FSR 3.1 with Direct3D 12, FSR 2 with Direct3D 11). Off renders at the render scale.",
      nullptr, false, {0, 0, 0, 0}},
     {"upscaler_quality", kCategories[0], "Upscaling quality",
      "The internal resolution of the upscaler. Quality looks best, Ultra Performance is fastest; "
@@ -71,8 +72,8 @@ constexpr PlayerGraphicsSetting kSettings[] = {
      "Off\0" "On\0" "On + Boost\0", false, {0, 0, 0, 0}},
     {"render_scale", kCategories[0], "Render scale",
      "The 3D world renders at this share of the screen resolution and is sharpened back up to it. "
-     "The interface, text and cursor always stay at full resolution. Lower is faster. Only with Upscaling off.",
-     nullptr, true, {67, 85, 100, 100}},
+     "The interface, text and cursor always stay at full resolution. Lower is faster. Only with Upscaling off. The graphics presets do not change it.",
+     nullptr, false, {100, 100, 100, 100}},
     {"smaa", kCategories[0], "Anti-aliasing (SMAA)",
      "Smooths jagged edges in the world. Cheap.", nullptr, true, {0, 1, 1, 1}},
     {"anisotropy", kCategories[0], "Texture filtering",
@@ -124,6 +125,15 @@ constexpr PlayerGraphicsSetting kSettings[] = {
     {"shadow_softness", kCategories[1], "Soft shadows",
      "Shadow edges grow softer further from the object that casts them.",
      "Off\0" "Low\0" "High\0", true, {0, 1, 1, 2}},
+    {"sun_shadow_correction", kCategories[1], "Sun shadow motion",
+     "Smooth movement of sun shadows. Experimental: shadow edges may become broader or darker and it can reduce frame rate. "
+     "Stepped keeps the usual movement.",
+     "Stepped\0" "Smooth\0", false, {0, 0, 0, 0}},
+    {"sun_foliage_filter", kCategories[1], "Foliage shadow filter",
+     "Soft shadows of thin and cut-out casters: grass, tree crowns and bare branches. "
+     "Soft: as solid objects. Steady soft: the stable, safe default while the sun moves. Fixed: a fixed soft edge, sharp branch shadows.",
+     "Soft\0" "Steady soft\0" "Fixed\0", false,
+     {kDefaultSunFoliageFilter, kDefaultSunFoliageFilter, kDefaultSunFoliageFilter, kDefaultSunFoliageFilter}},
     {"point_shadows", kCategories[1], "Lamp and torch shadows",
      "Lamps, torches and fires cast shadows.", nullptr, true, {0, 1, 1, 1}},
     {"point_shadow_quality", kCategories[1], "Lamp shadow resolution",
@@ -131,7 +141,7 @@ constexpr PlayerGraphicsSetting kSettings[] = {
      "Low\0" "Medium\0" "High\0", true, {0, 1, 2, 2}},
     {"ao_quality", kCategories[1], "Ambient occlusion",
      "Soft shading in corners, creases and where objects meet the ground.",
-     "Off\0" "Low\0" "High\0", true, {0, 1, 2, 2}},
+     "Off\0" "Low\0" "High\0", true, {0, 1, 1, 2}},
     {"emissive_lights", kCategories[1], "Lava glow lighting",
      "Lava and other glowing surfaces light up their surroundings.",
      "Off\0" "On\0" "Fine\0", true, {0, 1, 1, 2}},
@@ -142,6 +152,39 @@ constexpr PlayerGraphicsSetting kSettings[] = {
     {"cave_gi", kCategories[1], "Bounce light",
      "Torch, campfire, lamp and lava light bounces off the ground and rock and lights the surroundings; the sun bounces off the ground, and daylight comes in through cave exits.",
      "Off\0" "Low\0" "High\0", true, {0, 1, 2, 2}},
+    // Lighting & Shadows, ray tracing: the preset, then the options it sets
+    // (the ray tracing preset table below). No graphics preset touches them.
+    {"rt_quality", kCategories[1], "Ray tracing preset (experimental)",
+     "Direct3D 12 renderer and a ray tracing graphics card. Sun shadows, ambient occlusion, bounce light, lamp light and reflections from rays. "
+     "Low: sun shadows, ambient occlusion and water reflections. "
+     "Medium and High add bounce light and lamp light; High also adds smooth-surface reflections (with DLSS Ray Reconstruction on). Every preset works with any upscaling or none. "
+     "No preset turns DLSS Ray Reconstruction on: it is your choice below, and it costs a lot of GPU time. "
+     "The presets never change upscaling. Changing an option below makes it Custom; the graphics preset never changes these options.",
+     "Off\0" "Low\0" "Medium\0" "High\0" "Custom\0", false, {0, 0, 0, 0}},
+    {"rt_sun_shadows", kCategories[1], "Ray traced sun shadows",
+     "The sun's shadows from rays instead of shadow maps: exact contact shadows and soft edges far from the caster.",
+     nullptr, false, {0, 0, 0, 0}},
+    {"rt_ambient_occlusion", kCategories[1], "Ray traced ambient occlusion",
+     "Shading of the ambient light from rays: it also knows what is off screen or hidden, under roofs and between buildings.",
+     nullptr, false, {0, 0, 0, 0}},
+    {"rt_reflections", kCategories[1], "Ray traced reflections",
+     "Water reflects the world from rays, also what is off screen (with Water reflections on).", nullptr, false, {0, 0, 0, 0}},
+    {"rt_reflection_surfaces", kCategories[1], "Ray traced reflections: smooth surfaces",
+     "Polished metal, crystal, glass and wet surfaces also reflect from rays (needs Material quality above Off; in a ray tracing preset also DLSS Ray Reconstruction). Off: water only.", nullptr, false, {0, 0, 0, 0}},
+    {"rt_indirect_light", kCategories[1], "Ray traced bounce light",
+     "One bounce of sun, sky and lamp light from rays.", nullptr, false, {0, 0, 0, 0}},
+    {"rt_direct_lights", kCategories[1], "Ray traced lamp light",
+     "Light and shadows of lamps, torches, fires and lava from rays.", nullptr, false, {0, 0, 0, 0}},
+    {"rt_ray_reconstruction", kCategories[1], "DLSS Ray Reconstruction",
+     "NVIDIA DLSS Ray Reconstruction replaces DLSS upscaling and denoises the ray traced light itself. The ray traced options work without it, except a preset's smooth-surface reflections. "
+     "Costs a lot of GPU time, so it is off by default and no preset turns it on. Needs NVIDIA DLSS upscaling.", nullptr, false, {0, 0, 0, 0}},
+    {"rt_indirect_resolution", kCategories[1], "Bounce light resolution",
+     "The size the bounce light and the ray traced ambient occlusion are traced at. Quarter is faster and coarser.",
+     "Half\0" "Quarter\0", false, {0, 0, 0, 0}},
+    {"rt_indirect_visibility", kCategories[1], "Bounce light visibility ray",
+     "One more ray per pixel checks the bounce light is not blocked; fewer light leaks.", nullptr, false, {0, 0, 0, 0}},
+    {"rt_indirect_spatial_samples", kCategories[1], "Bounce light neighbour samples",
+     "How many neighbouring pixels share their bounce light each frame. More is less noisy and slower.", nullptr, false, {0, 0, 0, 0}},
     // Terrain
     {"terrain_quality", kCategories[2], "Terrain detail",
      "Ground texture quality: less visible tiling and sharper transitions.",
@@ -200,7 +243,7 @@ constexpr PlayerGraphicsSetting kSettings[] = {
      "Volumetric: adds swamp mist and light shafts.",
      "Faithful\0" "Atmospheric\0" "Volumetric\0", true, {0, 1, 2, 2}},
     {"fog_volume_quality", kCategories[5], "Volumetric fog quality",
-     "Detail of volumetric fog (Volumetric fog only).", "Low\0" "High\0", true, {0, 0, 1, 1}},
+     "Detail of volumetric fog (Volumetric fog only).", "Low\0" "High\0", true, {0, 0, 0, 1}},
     {"sun_shafts", kCategories[5], "Sun shafts",
      "Beams of sunlight through trees, fog and mist. Simple is cheap.",
      "Off\0" "Simple\0" "Volumetric\0" "Both\0", true, {0, 1, 2, 3}},
@@ -212,7 +255,7 @@ constexpr PlayerGraphicsSetting kSettings[] = {
     // Effects & Particles
     {"bloom", kCategories[6], "Bloom",
      "Soft glow around bright light: sun, lava, fire and magic.",
-     "Off\0" "Low\0" "High\0", true, {0, 1, 2, 2}},
+     "Off\0" "Low\0" "High\0", true, {0, 1, 1, 2}},
     {"depth_of_field", kCategories[6], "Depth of field",
      "Blurs the far background when the camera is tilted toward the horizon. "
      "The steep gameplay view stays sharp. High gives a smoother blur. Off by default; no preset turns it on.",
@@ -257,6 +300,7 @@ constexpr PlayerGraphicsSetting kSettings[] = {
     CRITTER_TYPE_ROW(0), CRITTER_TYPE_ROW(1), CRITTER_TYPE_ROW(2), CRITTER_TYPE_ROW(3), CRITTER_TYPE_ROW(4),
     CRITTER_TYPE_ROW(5), CRITTER_TYPE_ROW(6), CRITTER_TYPE_ROW(7), CRITTER_TYPE_ROW(8), CRITTER_TYPE_ROW(9),
     CRITTER_TYPE_ROW(10), CRITTER_TYPE_ROW(11), CRITTER_TYPE_ROW(12), CRITTER_TYPE_ROW(13), CRITTER_TYPE_ROW(14),
+    CRITTER_TYPE_ROW(15), CRITTER_TYPE_ROW(16), CRITTER_TYPE_ROW(17), CRITTER_TYPE_ROW(18),
 #undef CRITTER_TYPE_ROW
     // Interface & Cursor (the menu language has its own section at the top)
     {"world_map_previews", kCategories[8], "World map previews",
@@ -364,7 +408,7 @@ constexpr PlayerGraphicsSetting kSettings[] = {
      nullptr, false, {0, 0, 0, 0}},
 };
 
-static_assert(std::size(kCritterTypeSettings) == 15, "add a CRITTER_TYPE_ROW for the new critter type");
+static_assert(std::size(kCritterTypeSettings) == 19, "add a CRITTER_TYPE_ROW for the new critter type");
 
 // The rows of kSettings that read differently before settings_version 1 (the
 // table of accepted candidate-66), kept only for the migration: a file saved
@@ -399,6 +443,14 @@ constexpr PresetRowBeforeVersion1 kPresetRowsBeforeVersion5[] = {
     {"fur_mode", false, {0, 0, 0, 0}},
 };
 
+// settings_version 5's migration re-applied a named preset (Low: fur_mode 0)
+// and then reset fur_mode's old default 0 to the new default 2, so a file
+// saved at 5 on a named preset holds full fur there, not a choice (tester
+// report 2026-11-05: fur on at Low). Version 6 matches such a file without it.
+constexpr PresetRowBeforeVersion1 kPresetRowsBeforeVersion6[] = {
+    {"fur_mode", false, {0, 0, 0, 0}},
+};
+
 bool option_matches(const RendererOption& option, float value) noexcept {
     switch (option.type) {
     case RendererOptionType::boolean: return option.boolean_value == (value != 0.0f);
@@ -409,6 +461,88 @@ bool option_matches(const RendererOption& option, float value) noexcept {
 }
 
 } // namespace
+
+namespace {
+// THE ray tracing preset table: Off, Low, Medium, High. High is every option
+// at the value the full set was accepted with. Costs that drove each row are
+// in RENDERER_ARCHITECTURE.md, "Ray tracing quality tiers".
+// No tier needs Ray Reconstruction: the sun term and the occlusion have their
+// own history, the water rays are mirror rays, and the lamp and bounce light
+// run without it (user decision 2026-11-15 on laptop j227). Off turns the ray traced
+// terms off and leaves the knobs at their registered defaults, so a fresh
+// eid3d11.ini reads as Off and turning one term on from Off starts there.
+// As with the graphics presets, a preset only writes these options; the
+// options are what the renderer reads, and the preset is detected from them.
+// No preset reads or writes upscaling, Ray Reconstruction or frame
+// generation (user decision 2026-11-15): Ultra, which was High's options at
+// DLAA and told apart by the upscaler, is folded into High.
+// rt_ray_reconstruction is not a row (user decision 2026-11-14): it costs
+// ~13 ms GPU at Medium/High (DLSS Quality) and ~27 ms at DLAA on a 3070 at
+// 2560x1600, so it is the player's own toggle, off by default.
+constexpr RtQualityRow kRtQualityRows[] = {
+    {"rt_sun_shadows",              {0, 1, 1, 1}},
+    {"rt_ambient_occlusion",        {0, 1, 1, 1}},
+    {"rt_reflections",              {0, 1, 1, 1}},
+    {"rt_reflection_surfaces",      {1, 0, 0, 1}},  // off: water only
+    {"rt_indirect_light",           {0, 0, 1, 1}},
+    {"rt_direct_lights",            {0, 0, 1, 1}},
+    {"rt_indirect_resolution",      {0, 1, 0, 0}},  // 0: half of the render size a side, 1: a quarter (Low: occlusion rays only)
+    {"rt_indirect_visibility",      {1, 0, 0, 1}},  // the final visibility ray
+    {"rt_indirect_spatial_samples", {2, 0, 1, 2}},
+};
+} // namespace
+
+const RtQualityRow* rt_quality_rows(std::size_t& count) noexcept {
+    count = std::size(kRtQualityRows);
+    return kRtQualityRows;
+}
+
+#ifndef EID3D11_SHADER_EMBED
+bool rt_scene_wanted(const RendererConfig& config) noexcept {
+    for (const char* key : {"rt_sun_shadows", "rt_direct_lights", "rt_indirect_light", "rt_ambient_occlusion", "rt_reflections"}) {
+        const RendererOption* option = config.find(key);
+        if (option && option->type == RendererOptionType::boolean && option->boolean_value) return true;
+    }
+    return false;
+}
+
+RtQuality detect_rt_quality(const RendererConfig& config) noexcept {
+    if (!rt_scene_wanted(config)) return RtQuality::off;
+    const RendererOption* options[std::size(kRtQualityRows)]{};
+    for (std::size_t n = 0; n < std::size(kRtQualityRows); ++n) options[n] = config.find(kRtQualityRows[n].key);
+    for (int tier = static_cast<int>(RtQuality::low); tier <= static_cast<int>(RtQuality::high); ++tier) {
+        bool matches = true;
+        for (std::size_t n = 0; n < std::size(kRtQualityRows) && matches; ++n)
+            matches = !options[n] || option_matches(*options[n], kRtQualityRows[n].values[tier]);
+        if (matches) return static_cast<RtQuality>(tier);
+    }
+    return RtQuality::custom;
+}
+
+RtQuality migrate_rt_quality(RendererConfig& config) noexcept {
+    const RendererOption* option = config.find("rt_quality");
+    if (!option || option->type != RendererOptionType::integer) return RtQuality::custom;
+    // The stored numbering of those builds: 0 Off .. 3 High, 4 Ultra (now High), 5 Custom.
+    const int stored = std::clamp(option->integer_value, 0, 5);
+    const RtQuality saved = stored >= 5 ? RtQuality::custom : stored == 4 ? RtQuality::high : static_cast<RtQuality>(stored);
+    if (saved != RtQuality::custom) select_rt_quality(config, saved);
+    config.reset_to_default("rt_quality");
+    return saved;
+}
+
+void select_rt_quality(RendererConfig& config, RtQuality tier) noexcept {
+    if (tier == RtQuality::custom) return;
+    const int index = static_cast<int>(tier);
+    for (const auto& row : kRtQualityRows) {
+        const RendererOption* option = config.find(row.key);
+        if (!option) continue;
+        if (option->type == RendererOptionType::boolean) config.set_boolean(row.key, row.values[index] != 0.0f);
+        else if (option->type == RendererOptionType::integer)
+            config.set_integer(row.key, static_cast<int>(std::lround(row.values[index])));
+    }
+}
+
+#endif
 
 const char* graphics_preset_name(GraphicsPreset preset) noexcept {
     switch (preset) {
@@ -481,6 +615,9 @@ GraphicsPreset detect_preset(const RendererConfig& config, int saved_version) no
             if (saved_version < 5)
                 for (const auto& row : kPresetRowsBeforeVersion5)
                     if (std::strcmp(row.key, setting.key) == 0) { in_preset = row.in_preset; values = row.values; }
+            if (saved_version < 6)
+                for (const auto& row : kPresetRowsBeforeVersion6)
+                    if (std::strcmp(row.key, setting.key) == 0) { in_preset = row.in_preset; values = row.values; }
             if (!in_preset) continue;
             const RendererOption* option = config.find(setting.key);
             if (option && !option_matches(*option, values[index])) { matches = false; break; }
@@ -492,7 +629,13 @@ GraphicsPreset detect_preset(const RendererConfig& config, int saved_version) no
 } // namespace
 
 GraphicsPreset detect_graphics_preset(const RendererConfig& config) noexcept {
-    return detect_preset(config, 5); // the current table
+    return detect_preset(config, 6); // the current table
+}
+
+bool graphics_preset_row(const char* key) noexcept {
+    for (const auto& setting : kSettings)
+        if (std::strcmp(setting.key, key) == 0) return setting.in_preset;
+    return false;
 }
 
 GraphicsPreset reapply_graphics_preset_before(RendererConfig& config, int saved_version) noexcept {

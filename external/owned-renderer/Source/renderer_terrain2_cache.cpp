@@ -125,6 +125,11 @@ HRESULT Renderer::ensure_terrain2_cache_programs() noexcept{
  return hr;
 }
 
+// The material cache's height layer: x64 adds the bed flag channel (terrain2_cache.h;
+// +1/4 of the colour memory); the 32-bit renderer keeps R8 (address space) and its
+// dry banks under liquids stay per pixel.
+static constexpr DXGI_FORMAT kTerrain2CacheHeightFormat=sizeof(void*)==8?DXGI_FORMAT_R8G8_UNORM:DXGI_FORMAT_R8_UNORM;
+
 // Textures and levels; the programs and fixed states stay.
 void Renderer::release_terrain2_cache() noexcept{
  terrain2_cache_fine_.Reset();terrain2_cache_fine_srv_.Reset();terrain2_cache_fine_rtvs_.clear();
@@ -243,7 +248,7 @@ bool Renderer::bake_terrain2_cache_rect(unsigned l,const Terrain2CacheRect& rect
      d3d12_->set_constants(0,&constants,sizeof(constants));d3d12_->set_constants(12,&values,sizeof(values));
      d3d12_->set_resource(kContactGroundSlotD3D12,views12[0]);d3d12_->set_resource(kContactColorSlotD3D12,views12[1]);
      d3d12_->set_resource(15,views12[2]);d3d12_->set_resource(16,views12[3]);
-     d3d12_->set_resource(127,native12_.terrain_frame.get());
+     d3d12_->set_resource(127,native12_.terrain_frame.get());d3d12_->set_resource(72,fire_burn_mask12());if(fire_burn_bound_)d3d12_->set_resource(74,fire_burn_materials12());
      d3d12_->set_resource(PointShadowTextureLayout::terrain_noise_srv,native12_.terrain_noise.get());
      d3d12_->set_sampler(8,contact);d3d12_->set_sampler(9,contact);d3d12_->set_sampler(12,noise);
      d3d12_->set_unordered(0,terrain2_cache_fine12_.get());d3d12_->set_unordered(1,terrain2_cache_coarse12_.get());
@@ -271,12 +276,67 @@ bool Renderer::bake_terrain2_cache_rect(unsigned l,const Terrain2CacheRect& rect
  return true;
 }
 
+// Everything terrain2Color reads besides the texel's position (both caches' input hash).
+std::uint64_t Renderer::terrain2_inputs_hash() const noexcept{
+ std::uint64_t inputs=1469598103934665603ull;
+ inputs=fnv(inputs,terrain2_cache_frame_values_.data(),sizeof(terrain2_cache_frame_values_));
+ inputs=fnv(inputs,terrain_surface_bake_.data(),sizeof(terrain_surface_bake_)); // S3: crevice strength and class roughness (baked alpha)
+ inputs=fnv(inputs,&terrain2_cache_revision_,sizeof(terrain2_cache_revision_));
+ inputs=fnv(inputs,&contact_maps_.ready,sizeof(contact_maps_.ready));
+ inputs=fnv(inputs,&ambient_map_generation_,sizeof(ambient_map_generation_));
+ inputs=fnv(inputs,&contact_map_generation_,sizeof(contact_map_generation_));
+ inputs=fnv(inputs,&contact_constants_generation_,sizeof(contact_constants_generation_));
+ inputs=fnv(inputs,terrain2_table_.data(),sizeof(terrain2_table_));
+ inputs=fnv(inputs,terrain_layout_origin_.data(),sizeof(terrain_layout_origin_));
+ // (D3D12: the same states of its resources; heights once their levels are made.)
+ {const bool own_ground=gc_map_generation_==ambient_map_generation_&&
+   (d3d12_?gc12_.map.ground&&gc12_.map.generation==ambient_map_generation_:bool(ambient_ground_srv_));
+  inputs=fnv(inputs,&own_ground,sizeof(own_ground));}
+ for(const auto& n:gc_neighbours_){
+  const unsigned char state=d3d12_?
+   (n.cover12.color_ready?1:0)|(n.contact.tiles12?2:0)|(n.contact.atlas12?4:0)|(n.terrain2.height12&&!n.terrain2.mips12?8:0):
+   (n.prepared?1:0)|(n.contact.tiles?2:0)|(n.contact.atlas?4:0)|(n.terrain2.height_srv?8:0);
+  inputs=fnv(inputs,&n.contact_map,sizeof(n.contact_map));inputs=fnv(inputs,&state,1);inputs=fnv(inputs,&n.contact.ready,sizeof(n.contact.ready));
+ }
+ return inputs;
+}
+
+// The D3D11 state a bake pass changes, saved before it and restored after
+// (the material cache and the face cache bakes run inside the world flush).
+void Renderer::save_bake_state(BakeStateD3D11& s) noexcept{
+ context_->VSGetShader(&s.vs,nullptr,nullptr);context_->PSGetShader(&s.ps,nullptr,nullptr);context_->HSGetShader(&s.hs,nullptr,nullptr);
+ context_->DSGetShader(&s.ds,nullptr,nullptr);context_->GSGetShader(&s.gs,nullptr,nullptr);
+ context_->IAGetPrimitiveTopology(&s.topology);context_->IAGetInputLayout(&s.layout);context_->RSGetState(&s.raster);
+ s.viewport_count=D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;context_->RSGetViewports(&s.viewport_count,s.viewports);
+ context_->OMGetBlendState(&s.blend,s.blend_factor,&s.sample_mask);context_->OMGetDepthStencilState(&s.depth,&s.stencil_ref);
+ {ID3D11RenderTargetView* raw[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};ID3D11DepthStencilView* raw_depth=nullptr;
+  context_->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,raw,&raw_depth);
+  for(unsigned k=0;k<D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT;++k)s.targets[k].Attach(raw[k]);s.depth_view.Attach(raw_depth);}
+ context_->PSGetConstantBuffers(12,1,&s.ps_b12);
+ {ID3D11ShaderResourceView* raw[4]{};context_->PSGetShaderResources(13,4,raw);for(unsigned k=0;k<4;++k)s.contact[k].Attach(raw[k]);
+  ID3D11ShaderResourceView* f=nullptr;context_->PSGetShaderResources(127,1,&f);s.frame.Attach(f);}
+ try{s.constants.assign(draw_constants_copy_.begin(),draw_constants_copy_.begin()+draw_constants_bytes_);}catch(...){s.constants.clear();}
+}
+void Renderer::restore_bake_state(const BakeStateD3D11& s) noexcept{
+ context_->VSSetShader(s.vs.Get(),nullptr,0);context_->PSSetShader(s.ps.Get(),nullptr,0);context_->HSSetShader(s.hs.Get(),nullptr,0);
+ context_->DSSetShader(s.ds.Get(),nullptr,0);context_->GSSetShader(s.gs.Get(),nullptr,0);
+ context_->IASetPrimitiveTopology(s.topology);context_->IASetInputLayout(s.layout.Get());
+ context_->RSSetState(s.raster.Get());if(s.viewport_count)context_->RSSetViewports(s.viewport_count,s.viewports);
+ context_->OMSetBlendState(s.blend.Get(),s.blend_factor,s.sample_mask);context_->OMSetDepthStencilState(s.depth.Get(),s.stencil_ref);
+ {ID3D11RenderTargetView* raw[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};for(unsigned k=0;k<D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT;++k)raw[k]=s.targets[k].Get();
+  context_->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,raw,s.depth_view.Get());}
+ {ID3D11Buffer* b=s.ps_b12.Get();context_->PSSetConstantBuffers(12,1,&b);}
+ {ID3D11ShaderResourceView* raw[4]{s.contact[0].Get(),s.contact[1].Get(),s.contact[2].Get(),s.contact[3].Get()};context_->PSSetShaderResources(13,4,raw);
+  ID3D11ShaderResourceView* f=s.frame.Get();context_->PSSetShaderResources(127,1,&f);}
+ if(!s.constants.empty())(void)upload_draw_constants(s.constants.data(),UINT(s.constants.size()));
+}
+
 // Once a world frame, before the terrain draws: levels for this view,
 // invalidation, the bake within its budget, the pixel stage's params.
 void Renderer::update_terrain2_cache() noexcept try{
  if(scene_composited_)return;
  const auto& config=debug_overlay_.config();
- const int mode=std::clamp(configured_integer(config,"terrain2_cache",0),0,2);
+ const int mode=std::clamp(configured_integer(config,"terrain2_cache",1),0,2);
  const bool on=mode>0&&terrain2_table_count_>0&&native_world_clip_valid_&&
   !terrain2_cache_failed_&&feature_level_>=D3D_FEATURE_LEVEL_11_0;
  if(!on){
@@ -333,6 +393,36 @@ void Renderer::update_terrain2_cache() noexcept try{
  // rising toward the camera nearer than this reads the first level slightly
  // magnified.)
  nearest=std::clamp(nearest,height,4*height);
+ // Option terrain2_cache_nearest: the estimate above takes the ground level
+ // under the eye for the whole view, so ground that rises toward the camera
+ // (the camera on or behind a hill) is nearer than it, wants a finer level
+ // than the first and runs per pixel (probe on saves 1027, 1207 and 1202:
+ // three quarters of the pixels the cache missed). With the option the
+ // nearest visible vertex of the active map's ground grid counts too: its
+ // view depth, which is what a pixel's footprint follows, less one grid
+ // step (a pixel between vertices). Only vertices nearer than the estimate
+ // can lower it, so the scan covers that radius around the eye.
+ const bool nearest_visible=configured_integer(config,"terrain2_cache_nearest",1)>0;
+ if(nearest_visible){
+  const std::uint32_t vx=ambient_tiles_x_*2u+1u,vy=ambient_tiles_y_*2u+1u;
+  if(ambient_height_.size()==std::size_t(vx)*vy&&vx&&vy){
+   const int reach=int(std::ceil(nearest))+1;
+   const int x0=std::clamp(int(std::floor(eye[0]))-reach,0,int(vx)-1),x1=std::clamp(int(std::ceil(eye[0]))+reach,0,int(vx)-1);
+   const int y0=std::clamp(int(std::floor(eye[1]))-reach,0,int(vy)-1),y1=std::clamp(int(std::ceil(eye[1]))+reach,0,int(vy)-1);
+   double depth=nearest+1;
+   for(int y=y0;y<=y1;++y)for(int x=x0;x<=x1;++x){
+    const double z=ambient_height_[std::size_t(y)*vx+x];
+    const double w=clip[12]*x+clip[13]*y+clip[14]*z+clip[15];
+    if(!(w>0)||w>=depth)continue;
+    // Inside the view, with a margin for the triangles a vertex just outside it belongs to.
+    const double cx=clip[0]*x+clip[1]*y+clip[2]*z+clip[3],cy=clip[4]*x+clip[5]*y+clip[6]*z+clip[7];
+    const double margin=w*1.1+2.0*pixels/(width_*.5);
+    if(std::abs(cx)>margin||std::abs(cy)>margin)continue;
+    depth=w;
+   }
+   nearest=std::clamp(depth-1,1.0,nearest);
+  }
+ }
 
  // World rectangle: every map of the table.
  const float* records=terrain2_cache_frame_values_.data()+24;
@@ -347,7 +437,15 @@ void Renderer::update_terrain2_cache() noexcept try{
  // Levels and side.
  const int density_percent=std::clamp(configured_integer(config,"terrain2_cache_density",100),25,200);
  const int side=std::clamp(int(std::ceil(kTerrain2CacheSideFactor*pixels*density_percent/100.0/256.0))*256,512,16384);
- const unsigned first=unsigned(std::clamp(int(std::floor(std::log2(kTerrain2CacheTopDensity*nearest/pixels))),0,int(kTerrain2CacheLevels)-2));
+ int first_level=std::clamp(int(std::floor(std::log2(kTerrain2CacheTopDensity*nearest/pixels))),0,int(kTerrain2CacheLevels)-2);
+ // With the option the first level only rises again once the nearest ground
+ // is a quarter farther than the level needs: a camera moving along a rise
+ // would otherwise drop and bake the finest level over and over.
+ if(nearest_visible&&terrain2_cache_first_held_>=0&&first_level>terrain2_cache_first_held_&&
+    std::clamp(int(std::floor(std::log2(kTerrain2CacheTopDensity*nearest*.8/pixels))),0,int(kTerrain2CacheLevels)-2)<=terrain2_cache_first_held_)
+  first_level=terrain2_cache_first_held_;
+ terrain2_cache_first_held_=nearest_visible?first_level:-1;
+ const unsigned first=unsigned(first_level);
  unsigned last=first+1;
  while(last<kTerrain2CacheLevels-1&&extent*level_density(last)>128)++last;
  const auto texel_lo=[&](double v,float d){return int(std::floor(v*d))-kTerrain2CacheMargin;};
@@ -374,7 +472,8 @@ void Renderer::update_terrain2_cache() noexcept try{
   const int slices=int(fine_count);
   terrain2_cache_fine_.Reset();terrain2_cache_fine_srv_.Reset();terrain2_cache_fine_rtvs_.clear();terrain2_cache_fine12_.reset();
   terrain2_cache_height_fine_.Reset();terrain2_cache_height_fine_srv_.Reset();terrain2_cache_height_fine_rtvs_.clear();terrain2_cache_height_fine12_.reset();
-  // The colour levels (RGBA8: colour, S3 roughness) and the R8 height layer.
+  // The colour levels (RGBA8: colour, S3 roughness) and the height layer (S3
+  // height; x64 R8G8 with the bed flag: terrain2_cache.h).
   const auto fine=[&](DXGI_FORMAT format,D3D12TextureRef& texture12,ComPtr<ID3D11Texture2D>& texture,ComPtr<ID3D11ShaderResourceView>& srv,
                       std::vector<ComPtr<ID3D11RenderTargetView>>& rtvs)->HRESULT{
    if(d3d12_)return d3d12_->create_storage_texture(UINT(side),UINT(side),0,format,texture12,1,UINT(slices));
@@ -391,7 +490,7 @@ void Renderer::update_terrain2_cache() noexcept try{
    return result;
   };
   hr=fine(DXGI_FORMAT_R8G8B8A8_UNORM,terrain2_cache_fine12_,terrain2_cache_fine_,terrain2_cache_fine_srv_,terrain2_cache_fine_rtvs_);
-  if(SUCCEEDED(hr))hr=fine(DXGI_FORMAT_R8_UNORM,terrain2_cache_height_fine12_,terrain2_cache_height_fine_,terrain2_cache_height_fine_srv_,terrain2_cache_height_fine_rtvs_);
+  if(SUCCEEDED(hr))hr=fine(kTerrain2CacheHeightFormat,terrain2_cache_height_fine12_,terrain2_cache_height_fine_,terrain2_cache_height_fine_srv_,terrain2_cache_height_fine_rtvs_);
   terrain2_cache_side_=side;terrain2_cache_slices_=slices;reset_all=true;
  }
  if(SUCCEEDED(hr)&&(coarse_w!=terrain2_cache_coarse_size_[0]||coarse_h!=terrain2_cache_coarse_size_[1])){
@@ -409,7 +508,7 @@ void Renderer::update_terrain2_cache() noexcept try{
    return result;
   };
   hr=coarse(DXGI_FORMAT_R8G8B8A8_UNORM,terrain2_cache_coarse12_,terrain2_cache_coarse_,terrain2_cache_coarse_srv_,terrain2_cache_coarse_rtv_);
-  if(SUCCEEDED(hr))hr=coarse(DXGI_FORMAT_R8_UNORM,terrain2_cache_height_coarse12_,terrain2_cache_height_coarse_,terrain2_cache_height_coarse_srv_,terrain2_cache_height_coarse_rtv_);
+  if(SUCCEEDED(hr))hr=coarse(kTerrain2CacheHeightFormat,terrain2_cache_height_coarse12_,terrain2_cache_height_coarse_,terrain2_cache_height_coarse_srv_,terrain2_cache_height_coarse_rtv_);
   terrain2_cache_coarse_size_[0]=coarse_w;terrain2_cache_coarse_size_[1]=coarse_h;reset_all=true;
  }
  if(FAILED(hr)){
@@ -420,33 +519,14 @@ void Renderer::update_terrain2_cache() noexcept try{
  }
  if(reset_all){
   for(auto& level:terrain2_cache_levels_)level=Terrain2CacheLevelState{};
-  const double mb=(double(side)*side*terrain2_cache_slices_*(fine_count?1:0)+double(coarse_w)*coarse_h)*5/1048576.0; // RGBA8 colour + R8 height (S3)
+  const double mb=(double(side)*side*terrain2_cache_slices_*(fine_count?1:0)+double(coarse_w)*coarse_h)*(sizeof(void*)==8?6:5)/1048576.0; // RGBA8 colour + the height layer (S3; x64: R8G8 with the bed flag)
   char text[256];std::snprintf(text,sizeof(text),"side=%d px_per_m=%.0f nearest=%.1f levels=%u..%u fine=%u slices=%d atlas=%dx%d mb=%.1f",
    side,pixels,nearest,first,last,fine_count,terrain2_cache_slices_,coarse_w,coarse_h,mb);
   bridge_append_probe_event("terrain2_cache",text);
  }
 
  // Inputs: everything terrain2Color reads besides the texel's position.
- std::uint64_t inputs=1469598103934665603ull;
- inputs=fnv(inputs,terrain2_cache_frame_values_.data(),sizeof(terrain2_cache_frame_values_));
- inputs=fnv(inputs,terrain_surface_bake_.data(),sizeof(terrain_surface_bake_)); // S3: crevice strength and class roughness (baked alpha)
- inputs=fnv(inputs,&terrain2_cache_revision_,sizeof(terrain2_cache_revision_));
- inputs=fnv(inputs,&contact_maps_.ready,sizeof(contact_maps_.ready));
- inputs=fnv(inputs,&ambient_map_generation_,sizeof(ambient_map_generation_));
- inputs=fnv(inputs,&contact_map_generation_,sizeof(contact_map_generation_));
- inputs=fnv(inputs,&contact_constants_generation_,sizeof(contact_constants_generation_));
- inputs=fnv(inputs,terrain2_table_.data(),sizeof(terrain2_table_));
- inputs=fnv(inputs,terrain_layout_origin_.data(),sizeof(terrain_layout_origin_));
- // (D3D12: the same states of its resources; heights once their levels are made.)
- {const bool own_ground=gc_map_generation_==ambient_map_generation_&&
-   (d3d12_?gc12_.map.ground&&gc12_.map.generation==ambient_map_generation_:bool(ambient_ground_srv_));
-  inputs=fnv(inputs,&own_ground,sizeof(own_ground));}
- for(const auto& n:gc_neighbours_){
-  const unsigned char state=d3d12_?
-   (n.cover12.color_ready?1:0)|(n.contact.tiles12?2:0)|(n.contact.atlas12?4:0)|(n.terrain2.height12&&!n.terrain2.mips12?8:0):
-   (n.prepared?1:0)|(n.contact.tiles?2:0)|(n.contact.atlas?4:0)|(n.terrain2.height_srv?8:0);
-  inputs=fnv(inputs,&n.contact_map,sizeof(n.contact_map));inputs=fnv(inputs,&state,1);inputs=fnv(inputs,&n.contact.ready,sizeof(n.contact.ready));
- }
+ const std::uint64_t inputs=terrain2_inputs_hash();
  const bool changed=inputs!=terrain2_cache_inputs_;
  terrain2_cache_inputs_=inputs;
  // Inputs that never settle would keep every level empty (all per pixel,
@@ -457,6 +537,26 @@ void Renderer::update_terrain2_cache() noexcept try{
   bridge_append_probe_event("terrain2_cache_unsettled","terrain 2.0 inputs changed on 120 frames in a row; the cache stays empty and terrain 2.0 per pixel");
  }
 
+ // Option terrain2_cache_ahead: the fine windows sit ahead of the eye. A
+ // level is read as the coarser of a pixel's two levels by pixels up to the
+ // view depth where the footprint is one of its texels, z = pixels / density
+ // metres. Seen from above those pixels fill the view's wedge: forward up
+ // to z, sideways up to z times the half width over pixels (1.48 at 16:9
+ // and this field of view). Around the eye that wedge reaches 1.75 z along
+ // a world axis when the view is diagonal to the grid, past the window's
+ // half side of 1.5 z, and the pixels at the screen's sides ran per pixel
+ // (probe: "coarser level outside its window", 21 to 35 thousand pixels a
+ // save at 2560x1600). Around a point half of z ahead of the eye it reaches
+ // 1.48 z at most. In texels of any level that offset is half of pixels
+ // along the view's horizontal direction (shorter as the view turns down).
+ double ahead[2]{0,0};
+ if(configured_integer(config,"terrain2_cache_ahead",0)>0){
+  std::array<double,3> a{},b{};
+  if(unproject(0,0,.1,a)&&unproject(0,0,.9,b)){
+   const double v[3]{b[0]-a[0],b[1]-a[1],b[2]-a[2]},length=std::sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]);
+   if(length>1e-9){ahead[0]=.5*pixels*v[0]/length;ahead[1]=.5*pixels*v[1]/length;}
+  }
+ }
  // Levels: windows, validity, pending rectangles.
  for(unsigned l=0;l<kTerrain2CacheLevels;++l){
   auto& level=terrain2_cache_levels_[l];
@@ -468,8 +568,9 @@ void Renderer::update_terrain2_cache() noexcept try{
   level.bakeable={texel_lo(wx0,d),texel_lo(wy0,d),texel_hi(wx1,d),texel_hi(wy1,d)};
   Terrain2CacheRect window;
   if(fine){
-   // Centred on the eye, moved in whole steps (a step of hysteresis).
-   const int wantx=int(std::lround(eye[0]*d))-side/2,wanty=int(std::lround(eye[1]*d))-side/2;
+   // Centred on the eye (option terrain2_cache_ahead: ahead of it, below),
+   // moved in whole steps (a step of hysteresis).
+   const int wantx=int(std::lround(eye[0]*d+ahead[0]))-side/2,wanty=int(std::lround(eye[1]*d+ahead[1]))-side/2;
    if(level.window.empty())window={wantx-terrain2_cache_mod(wantx,kTerrain2CacheStep),wanty-terrain2_cache_mod(wanty,kTerrain2CacheStep),0,0};
    else{
     window=level.window;
@@ -541,27 +642,7 @@ void Renderer::update_terrain2_cache() noexcept try{
   };
   if(d3d12_)bake_all();
   else{
-  // The state this pass changes, restored after it.
-  ComPtr<ID3D11VertexShader> vs;ComPtr<ID3D11PixelShader> ps;ComPtr<ID3D11HullShader> hs;ComPtr<ID3D11DomainShader> ds;ComPtr<ID3D11GeometryShader> gs;
-  context_->VSGetShader(&vs,nullptr,nullptr);context_->PSGetShader(&ps,nullptr,nullptr);context_->HSGetShader(&hs,nullptr,nullptr);
-  context_->DSGetShader(&ds,nullptr,nullptr);context_->GSGetShader(&gs,nullptr,nullptr);
-  D3D11_PRIMITIVE_TOPOLOGY topology{};context_->IAGetPrimitiveTopology(&topology);
-  ComPtr<ID3D11InputLayout> layout;context_->IAGetInputLayout(&layout);
-  ComPtr<ID3D11RasterizerState> raster;context_->RSGetState(&raster);
-  UINT viewport_count=D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE;D3D11_VIEWPORT viewports[D3D11_VIEWPORT_AND_SCISSORRECT_OBJECT_COUNT_PER_PIPELINE]{};
-  context_->RSGetViewports(&viewport_count,viewports);
-  ComPtr<ID3D11BlendState> blend;float blend_factor[4]{};UINT sample_mask=0;context_->OMGetBlendState(&blend,blend_factor,&sample_mask);
-  ComPtr<ID3D11DepthStencilState> depth;UINT stencil_ref=0;context_->OMGetDepthStencilState(&depth,&stencil_ref);
-  ComPtr<ID3D11RenderTargetView> targets[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT];ComPtr<ID3D11DepthStencilView> depth_view;
-  {ID3D11RenderTargetView* raw[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};ID3D11DepthStencilView* raw_depth=nullptr;
-   context_->OMGetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,raw,&raw_depth);
-   for(unsigned k=0;k<D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT;++k)targets[k].Attach(raw[k]);depth_view.Attach(raw_depth);}
-  ComPtr<ID3D11Buffer> ps_b12;context_->PSGetConstantBuffers(12,1,&ps_b12);
-  ComPtr<ID3D11ShaderResourceView> contact[4],frame;
-  {ID3D11ShaderResourceView* raw[4]{};context_->PSGetShaderResources(13,4,raw);for(unsigned k=0;k<4;++k)contact[k].Attach(raw[k]);
-   ID3D11ShaderResourceView* f=nullptr;context_->PSGetShaderResources(127,1,&f);frame.Attach(f);}
-  const std::vector<unsigned char> saved_constants(draw_constants_copy_.begin(),draw_constants_copy_.begin()+draw_constants_bytes_);
-
+  BakeStateD3D11 state;save_bake_state(state);
   ID3D11ShaderResourceView* none[3]{};context_->PSSetShaderResources(116,3,none); // the targets
   context_->PSSetShaderResources(78,2,none); // the S3 height targets
   context_->IASetInputLayout(nullptr);context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
@@ -576,17 +657,7 @@ void Renderer::update_terrain2_cache() noexcept try{
 
   bake_all();
 
-  context_->VSSetShader(vs.Get(),nullptr,0);context_->PSSetShader(ps.Get(),nullptr,0);context_->HSSetShader(hs.Get(),nullptr,0);
-  context_->DSSetShader(ds.Get(),nullptr,0);context_->GSSetShader(gs.Get(),nullptr,0);
-  context_->IASetPrimitiveTopology(topology);context_->IASetInputLayout(layout.Get());
-  context_->RSSetState(raster.Get());if(viewport_count)context_->RSSetViewports(viewport_count,viewports);
-  context_->OMSetBlendState(blend.Get(),blend_factor,sample_mask);context_->OMSetDepthStencilState(depth.Get(),stencil_ref);
-  {ID3D11RenderTargetView* raw[D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT]{};for(unsigned k=0;k<D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT;++k)raw[k]=targets[k].Get();
-   context_->OMSetRenderTargets(D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT,raw,depth_view.Get());}
-  {ID3D11Buffer* b=ps_b12.Get();context_->PSSetConstantBuffers(12,1,&b);}
-  {ID3D11ShaderResourceView* raw[4]{contact[0].Get(),contact[1].Get(),contact[2].Get(),contact[3].Get()};context_->PSSetShaderResources(13,4,raw);
-   ID3D11ShaderResourceView* f=frame.Get();context_->PSSetShaderResources(127,1,&f);}
-  if(!saved_constants.empty())(void)upload_draw_constants(saved_constants.data(),UINT(saved_constants.size()));
+  restore_bake_state(state);
   }
   end_profile_pass();
  }
@@ -595,6 +666,7 @@ void Renderer::update_terrain2_cache() noexcept try{
  float params[kTerrain2CacheParamCount][4]{};
  params[0][0]=float(mode);params[0][1]=float(side);params[0][2]=float(first);params[0][3]=float(last);
  params[1][0]=configured_floating_point(config,"terrain2_cache_bias",0.f);params[1][1]=float(side)/16.f;params[1][2]=2.5f; // filter margin: the Catmull-Rom read reaches 2 texels
+ params[1][3]=kTerrain2CacheHeightFormat==DXGI_FORMAT_R8G8_UNORM?1.f:0.f; // the bed flag is stored: dry banks may read the cache
  for(unsigned l=first;l<=last;++l){
   const auto& level=terrain2_cache_levels_[l];
   float* p=params[2+4*l];

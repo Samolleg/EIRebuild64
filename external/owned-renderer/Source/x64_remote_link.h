@@ -65,6 +65,11 @@ void signal_clean_exit() noexcept;
 // Core mode: one scene message (scene_core.h command id, scene_wire bytes)
 // as Op::scene fragments, with no other scene record between them.
 void scene_message(std::uint16_t command, const std::uint8_t* data, std::size_t bytes) noexcept;
+// Core mode: one scene message written by `fill` straight into its ring
+// record (`bytes` exactly; no staging copy). A message above one fragment
+// is staged and goes through scene_message.
+void scene_message_fill(std::uint16_t command, std::size_t bytes, void (*fill)(void* context, std::uint8_t* at),
+                        void* context) noexcept;
 // Picks up a host failure (exit, removal, failed creation) into the lost
 // state; called once per Present.
 void check_host() noexcept;
@@ -74,13 +79,15 @@ void check_host() noexcept;
 // process they report DLSS unavailable.
 struct DlssCaps {
     bool available;
+    bool initializing; // host-local async D3D12 startup; no wire-layout change
     char reason[128]; // why not, when unavailable
 };
 // NGX initialised and DLSS available on this GPU and driver.
 bool dlss_caps(DlssCaps& out) noexcept;
 // Optimal render size for an output size and mode (0 performance, 1
 // balanced, 2 quality, 3 ultra performance, 4 DLAA = output size).
-bool dlss_render_size(UINT out_w, UINT out_h, int mode, UINT& render_w, UINT& render_h) noexcept;
+// ray_reconstruction: the size DLSS Ray Reconstruction asks for instead.
+bool dlss_render_size(UINT out_w, UINT out_h, int mode, UINT& render_w, UINT& render_h, bool ray_reconstruction = false) noexcept;
 struct DlssEvaluate {
     ID3D11Resource* color;    // render-res colour input (SRV-capable texture)
     ID3D11Resource* depth;    // render-res depth (D32/R32 typeless depth texture)
@@ -100,6 +107,17 @@ struct DlssEvaluate {
     bool reset;
     bool hdr;
     bool depth_inverted;
+    bool bias_mask = false; // D3D12: resources[4] is the R8 bias-current-colour mask
+    // D3D12: DLSS Ray Reconstruction instead of Super Resolution (same sizes
+    // and mode). resources[5] the world normals with the linear roughness in
+    // alpha, [6] the diffuse albedo, [7] the specular albedo (render size).
+    bool ray_reconstruction = false;
+    // With ray_reconstruction: resources[8] the specular hit distance (R16F,
+    // world units from the surface to its reflection ray's hit; 65504: none)
+    // and the camera's matrices it is read with, 16 floats each in row order
+    // for row vectors (DLSS-RR Integration Guide 3.4.9).
+    bool specular_hit_distance = false;
+    float world_to_view[16]{}, view_to_clip[16]{};
 };
 // One evaluation on the immediate context. The host recreates its feature
 // when render size, output size, mode, hdr, depth_inverted or auto exposure
@@ -110,6 +128,8 @@ HRESULT dlss_evaluate(ID3D11DeviceContext* ctx, const DlssEvaluate& e) noexcept;
 // record_external). resources: colour, depth, motion, output, already in
 // their states; the D3D11 pointers of e are not read.
 HRESULT dlss_evaluate_d3d12(ID3D12GraphicsCommandList* list, ID3D12Resource* const* resources, const DlssEvaluate& e) noexcept;
+// DLSS Ray Reconstruction on the host's D3D12 device (false with the reason).
+bool dlss_ray_reconstruction_caps(char* reason, std::size_t reason_bytes) noexcept;
 // Releases the host's DLSS feature and its memory (DLSS turned off).
 void dlss_release() noexcept;
 // DLSS Frame Generation (D3D12 backend in the host only). One generated

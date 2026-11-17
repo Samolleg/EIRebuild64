@@ -3,6 +3,7 @@
 
 #include <atomic>
 
+#include "owned_terrain_decode.h"
 #include "owned_terrain_front_end.h"
 #include "retained_static_scene.h"
 
@@ -151,7 +152,7 @@ void AssetEncoder::body(Out& out, const MaterialCpuAsset& value) { io(out, value
 void AssetEncoder::body(Out& out, const OwnedVisualSurface& v) {
     io(out, v.id); io(out, v.generation); io(out, v.width); io(out, v.height); io(out, v.pitch);
     io(out, v.format); io(out, v.has_color_key); io(out, v.color_key); ref(out, v.alpha_cut_mask);
-    io(out, v.alpha_fully_opaque); io(out, v.static_mip_hint);
+    io(out, v.alpha_fully_opaque); io(out, v.static_mip_hint); io(out, v.block_content[0]); io(out, v.block_content[1]);
 }
 void AssetEncoder::body(Out& out, const AnimationDatabaseAsset& v) {
     io(out, v.identity); io(out, v.heights); io(out, v.entries);
@@ -273,7 +274,7 @@ bool AssetDecoder::body(In& in, MaterialCpuAsset& value) { io(in, value); return
 bool AssetDecoder::body(In& in, OwnedVisualSurface& v) {
     io(in, v.id); io(in, v.generation); io(in, v.width); io(in, v.height); io(in, v.pitch);
     io(in, v.format); io(in, v.has_color_key); io(in, v.color_key); ref(in, v.alpha_cut_mask);
-    io(in, v.alpha_fully_opaque); io(in, v.static_mip_hint);
+    io(in, v.alpha_fully_opaque); io(in, v.static_mip_hint); io(in, v.block_content[0]); io(in, v.block_content[1]);
     return in.ok();
 }
 bool AssetDecoder::body(In& in, AnimationDatabaseAsset& v) {
@@ -320,7 +321,10 @@ bool AssetDecoder::body(In& in, TerrainCpuAsset& v) {
     bool outflow = false;
     io(in, outflow);
     if (outflow) owned_terrain_reset_liquid_outflow(v);
-    if (in.ok()) if (const auto resolver = g_terrain_page_resolver.load(std::memory_order_acquire)) resolver(v);
+    if (in.ok()) {
+        owned_terrain_report_astral_received(v);
+        if (const auto resolver = g_terrain_page_resolver.load(std::memory_order_acquire)) resolver(v);
+    }
     return in.ok();
 }
 bool AssetDecoder::body(In& in, OwnedMapSnapshot& v) {

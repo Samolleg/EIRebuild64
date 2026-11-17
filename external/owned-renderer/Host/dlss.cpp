@@ -10,6 +10,7 @@
 #include <nvsdk_ngx.h>
 #include <nvsdk_ngx_helpers.h>
 #include <nvsdk_ngx_helpers_dlssg_d3d.h>
+#include <nvsdk_ngx_helpers_dlssd_d3d.h>
 #include <dxgiformat.h>
 #include <d3d12.h>
 
@@ -91,6 +92,7 @@ constexpr char kProjectId[] = "666beccc-e6e1-4a4e-b13e-5bb45c14de81"; // EIRebui
 #else
 constexpr char kProjectId[] = "6d0f1b52-3c7e-4a9d-8e41-2b5f7c9a0d63";
 #endif
+constexpr char kInitializing[] = "NGX is initialising on Direct3D 12";
 
 NVSDK_NGX_PerfQuality_Value quality_of(int mode) noexcept {
     switch (mode) {
@@ -145,14 +147,7 @@ void Dlss::initialize_owned(ID3D11Device* device, const std::wstring& folder, x6
 }
 
 void Dlss::initialize_d3d12_owned(ID3D12Device* device, x64remote::Capabilities& caps) noexcept {
-    shutdown_owned();  // the D3D11 instance (nothing when its init failed)
-    device_ = nullptr;
     device12_ = device;
-    if (folder_.empty()) {  // initialize never ran: nowhere to find nvngx_dlss.dll
-        std::snprintf(caps.dlss_reason, sizeof(caps.dlss_reason), "%s", "NGX was not initialised");
-        caps.dlss_available = 0;
-        return;
-    }
     info_ = {};
     paths_[0] = folder_.c_str();
     info_.PathListInfo.Path = paths_;
@@ -179,6 +174,7 @@ void Dlss::initialize_d3d12_owned(ID3D12Device* device, x64remote::Capabilities&
     initialized_ = true;
     query_capabilities(caps);
     query_frame_generation();
+    query_ray_reconstruction();
 }
 
 void Dlss::query_capabilities(x64remote::Capabilities& caps) noexcept {
@@ -219,17 +215,23 @@ void Dlss::query_capabilities(x64remote::Capabilities& caps) noexcept {
     if (log_) log_(device12_ ? "DLSS Super Resolution available (NGX initialised on Direct3D 12)" : "DLSS Super Resolution available (NGX initialised)");
 }
 
-bool Dlss::optimal_owned(unsigned out_w, unsigned out_h, int mode, unsigned& render_w, unsigned& render_h) noexcept {
+bool Dlss::optimal_owned(unsigned out_w, unsigned out_h, int mode, unsigned& render_w, unsigned& render_h,
+                         bool ray_reconstruction) noexcept {
     render_w = render_h = 0;
     if (!available_ || !out_w || !out_h) return false;
+    if (ray_reconstruction && !rr_available_) return false;
     if (mode == 4) { render_w = out_w; render_h = out_h; return true; } // DLAA renders at output size
     unsigned max_w = 0, max_h = 0, min_w = 0, min_h = 0;
-    float sharpness = 0;
-    const NVSDK_NGX_Result result = NGX_DLSS_GET_OPTIMAL_SETTINGS(capabilities_, out_w, out_h, quality_of(mode), &render_w,
-                                                                  &render_h, &max_w, &max_h, &min_w, &min_h, &sharpness);
+    float sharpness = 0;  // Ray Reconstruction: always ignored (guide 5.5)
+    const NVSDK_NGX_Result result = ray_reconstruction ?
+        NGX_DLSSD_GET_OPTIMAL_SETTINGS(capabilities_, out_w, out_h, quality_of(mode), &render_w, &render_h, &max_w, &max_h, &min_w, &min_h,
+                                       &sharpness) :
+        NGX_DLSS_GET_OPTIMAL_SETTINGS(capabilities_, out_w, out_h, quality_of(mode), &render_w, &render_h, &max_w, &max_h, &min_w, &min_h,
+                                      &sharpness);
     if (NVSDK_NGX_FAILED(result) || !render_w || !render_h) {
         char text[160];
-        std::snprintf(text, sizeof(text), "DLSS optimal settings %ux%u mode %d failed (0x%08x)", out_w, out_h, mode,
+        std::snprintf(text, sizeof(text), "%s optimal settings %ux%u mode %d failed (0x%08x)",
+                      ray_reconstruction ? "DLSS Ray Reconstruction" : "DLSS", out_w, out_h, mode,
                       static_cast<unsigned>(result));
         log_(text);
         return false;
@@ -261,10 +263,13 @@ bool Dlss::evaluate_owned(ID3D11DeviceContext* context, const x64remote::DlssEva
     shape.out_h = record.out_h;
     shape.mode = record.mode;
     shape.flags = feature_flags(record, !exposure);
+    collect_retired(false);
     if (!feature_ || !(shape == shape_)) {
         release_feature();
         NVSDK_NGX_DLSS_Create_Params create = create_params(record, shape.flags);
+        log_overlay_hooks();
         const NVSDK_NGX_Result result = NGX_D3D11_CREATE_DLSS_EXT(context, &feature_, parameters_, &create);
+        evaluations_ = 0;
         char text[200];
         std::snprintf(text, sizeof(text), "DLSS feature %s: render %ux%u -> output %ux%u mode %d flags 0x%x: 0x%08x",
                       shape_.mode < 0 ? "created" : "recreated", shape.render_w, shape.render_h, shape.out_w, shape.out_h,
@@ -292,6 +297,7 @@ bool Dlss::evaluate_owned(ID3D11DeviceContext* context, const x64remote::DlssEva
     eval.InMVScaleX = record.mv_scale_x != 0.f ? record.mv_scale_x : 1.f;
     eval.InMVScaleY = record.mv_scale_y != 0.f ? record.mv_scale_y : 1.f;
     const NVSDK_NGX_Result result = NGX_D3D11_EVALUATE_DLSS_EXT(context, feature_, parameters_, &eval);
+    if (evaluations_++ == 0) log_first_evaluate("DLSS", static_cast<unsigned>(result));
     if (NVSDK_NGX_FAILED(result)) {
         std::snprintf(error, error_bytes, "DLSS evaluate failed (NVSDK_NGX_Result 0x%08x)", static_cast<unsigned>(result));
         return false;
@@ -308,28 +314,110 @@ bool Dlss::evaluate_d3d12_owned(ID3D12GraphicsCommandList* list, const x64remote
         std::snprintf(error, error_bytes, "DLSS evaluate with a missing list or resource");
         return false;
     }
+    const bool ray_reconstruction = (record.flags & x64remote::dlss_ray_reconstruction) != 0;
+    if (ray_reconstruction && !rr_available_) {
+        std::snprintf(error, error_bytes, "DLSS Ray Reconstruction is not available: %s", rr_reason_);
+        return false;
+    }
+    if (ray_reconstruction && (!resources[5] || !resources[6] || !resources[7])) {
+        std::snprintf(error, error_bytes, "DLSS Ray Reconstruction evaluate with a missing guide (normals %p diffuse %p specular %p)",
+                      static_cast<void*>(resources[5]), static_cast<void*>(resources[6]), static_cast<void*>(resources[7]));
+        return false;
+    }
     Shape shape;
     shape.render_w = record.render_w;
     shape.render_h = record.render_h;
     shape.out_w = record.out_w;
     shape.out_h = record.out_h;
     shape.mode = record.mode;
-    shape.flags = feature_flags(record, true);
+    // Ray Reconstruction takes no exposure (guide 3.7: exposure and auto
+    // exposure are not supported): the flag stays out of its feature.
+    shape.flags = feature_flags(record, !ray_reconstruction);
+    shape.ray_reconstruction = ray_reconstruction;
+    collect_retired(false);
+    std::uint64_t recording = 0, completed = 0;
+    if (fence_state_) fence_state_(recording, completed);
     if (!feature_ || !(shape == shape_)) {
+        // Super Resolution and Ray Reconstruction share the one slot: the
+        // other kind's feature goes through the same confirmed release (#193).
         release_feature();
-        NVSDK_NGX_DLSS_Create_Params create = create_params(record, shape.flags);
-        const NVSDK_NGX_Result result = NGX_D3D12_CREATE_DLSS_EXT(list, 1, 1, &feature_, parameters_, &create);
-        char text[200];
-        std::snprintf(text, sizeof(text), "DLSS feature (Direct3D 12) %s: render %ux%u -> output %ux%u mode %d flags 0x%x: 0x%08x",
-                      shape_.mode < 0 ? "created" : "recreated", shape.render_w, shape.render_h, shape.out_w, shape.out_h,
-                      shape.mode, static_cast<unsigned>(shape.flags), static_cast<unsigned>(result));
+        log_overlay_hooks();
+        NVSDK_NGX_Result result;
+        if (ray_reconstruction) {
+            // Guide 5.3. The normals carry the roughness in alpha (3.4.4.2:
+            // packed), the depth is the hardware depth (3.4.7.1), the render
+            // preset stays the default (3.13: recommended for every mode).
+            NVSDK_NGX_DLSSD_Create_Params create{};
+            create.InDenoiseMode = NVSDK_NGX_DLSS_Denoise_Mode_DLUnified;
+            create.InRoughnessMode = NVSDK_NGX_DLSS_Roughness_Mode_Packed;
+            create.InUseHWDepth = NVSDK_NGX_DLSS_Depth_Type_HW;
+            create.InWidth = record.render_w;
+            create.InHeight = record.render_h;
+            create.InTargetWidth = record.out_w;
+            create.InTargetHeight = record.out_h;
+            create.InPerfQualityValue = quality_of(record.mode);
+            create.InFeatureCreateFlags = shape.flags;
+            result = NGX_D3D12_CREATE_DLSSD_EXT(list, 1, 1, &feature_, parameters_, &create);
+        } else {
+            NVSDK_NGX_DLSS_Create_Params create = create_params(record, shape.flags);
+            result = NGX_D3D12_CREATE_DLSS_EXT(list, 1, 1, &feature_, parameters_, &create);
+        }
+        feature_recorded_ = recording;
+        evaluations_ = 0;
+        char text[300], fence[80];
+        fence_text(fence, sizeof(fence));
+        std::snprintf(text, sizeof(text), "%s feature (Direct3D 12) %s: render %ux%u -> output %ux%u mode %d flags 0x%x: 0x%08x%s",
+                      ray_reconstruction ? "DLSS Ray Reconstruction" : "DLSS", shape_.mode < 0 ? "created" : "recreated",
+                      shape.render_w, shape.render_h, shape.out_w, shape.out_h, shape.mode, static_cast<unsigned>(shape.flags),
+                      static_cast<unsigned>(result), fence);
         log_(text);
         if (NVSDK_NGX_FAILED(result) || !feature_) {
             feature_ = nullptr;
-            std::snprintf(error, error_bytes, "DLSS feature creation failed (NVSDK_NGX_Result 0x%08x)", static_cast<unsigned>(result));
+            std::snprintf(error, error_bytes, "%s feature creation failed (NVSDK_NGX_Result 0x%08x)",
+                          ray_reconstruction ? "DLSS Ray Reconstruction" : "DLSS", static_cast<unsigned>(result));
             return false;
         }
         shape_ = shape;
+    }
+    if (ray_reconstruction) {
+        // Guide 5.4 and 3.4: colour, depth, motion and output as Super
+        // Resolution takes them; the diffuse and specular albedo and the
+        // normals with the roughness in alpha. No specular motion vectors;
+        // with rt_reflections the specular hit distance and the two camera
+        // matrices Ray Reconstruction derives them from (guide 3.4.9).
+        NVSDK_NGX_D3D12_DLSSD_Eval_Params eval{};
+        eval.pInColor = resources[0];
+        eval.pInOutput = resources[3];
+        eval.pInDepth = resources[1];
+        eval.pInMotionVectors = resources[2];
+        eval.pInNormals = resources[5];
+        eval.pInRoughness = resources[5];  // packed: read from the normals' alpha
+        eval.pInDiffuseAlbedo = resources[6];
+        eval.pInSpecularAlbedo = resources[7];
+        float world_to_view[16], view_to_clip[16];
+        if ((record.flags & x64remote::dlss_specular_hit_distance) && resources[8]) {
+            std::memcpy(world_to_view, record.world_to_view, sizeof(world_to_view));
+            std::memcpy(view_to_clip, record.view_to_clip, sizeof(view_to_clip));
+            eval.pInSpecularHitDistance = resources[8];
+            eval.pInWorldToViewMatrix = world_to_view;
+            eval.pInViewToClipMatrix = view_to_clip;
+        }
+        if (record.flags & x64remote::dlss_bias_mask) eval.pInBiasCurrentColorMask = resources[4];  // R8, shader read
+        eval.InJitterOffsetX = record.jitter_x;
+        eval.InJitterOffsetY = record.jitter_y;
+        eval.InRenderSubrectDimensions.Width = record.render_w;
+        eval.InRenderSubrectDimensions.Height = record.render_h;
+        eval.InReset = (record.flags & x64remote::dlss_reset) ? 1 : 0;
+        eval.InMVScaleX = record.mv_scale_x != 0.f ? record.mv_scale_x : 1.f;
+        eval.InMVScaleY = record.mv_scale_y != 0.f ? record.mv_scale_y : 1.f;
+        feature_recorded_ = recording;
+        const NVSDK_NGX_Result result = NGX_D3D12_EVALUATE_DLSSD_EXT(list, feature_, parameters_, &eval);
+        if (evaluations_++ == 0) log_first_evaluate("DLSS Ray Reconstruction", static_cast<unsigned>(result));
+        if (NVSDK_NGX_FAILED(result)) {
+            std::snprintf(error, error_bytes, "DLSS Ray Reconstruction evaluate failed (NVSDK_NGX_Result 0x%08x)", static_cast<unsigned>(result));
+            return false;
+        }
+        return true;
     }
     NVSDK_NGX_D3D12_DLSS_Eval_Params eval{};
     eval.Feature.pInColor = resources[0];
@@ -337,6 +425,7 @@ bool Dlss::evaluate_d3d12_owned(ID3D12GraphicsCommandList* list, const x64remote
     eval.Feature.InSharpness = record.sharpness;
     eval.pInDepth = resources[1];
     eval.pInMotionVectors = resources[2];
+    if (record.flags & x64remote::dlss_bias_mask) eval.pInBiasCurrentColorMask = resources[4];  // R8, shader read
     eval.InJitterOffsetX = record.jitter_x;
     eval.InJitterOffsetY = record.jitter_y;
     eval.InRenderSubrectDimensions.Width = record.render_w;
@@ -344,7 +433,9 @@ bool Dlss::evaluate_d3d12_owned(ID3D12GraphicsCommandList* list, const x64remote
     eval.InReset = (record.flags & x64remote::dlss_reset) ? 1 : 0;
     eval.InMVScaleX = record.mv_scale_x != 0.f ? record.mv_scale_x : 1.f;
     eval.InMVScaleY = record.mv_scale_y != 0.f ? record.mv_scale_y : 1.f;
+    feature_recorded_ = recording;
     const NVSDK_NGX_Result result = NGX_D3D12_EVALUATE_DLSS_EXT(list, feature_, parameters_, &eval);
+    if (evaluations_++ == 0) log_first_evaluate("DLSS", static_cast<unsigned>(result));
     if (NVSDK_NGX_FAILED(result)) {
         std::snprintf(error, error_bytes, "DLSS evaluate failed (NVSDK_NGX_Result 0x%08x)", static_cast<unsigned>(result));
         return false;
@@ -352,18 +443,211 @@ bool Dlss::evaluate_d3d12_owned(ID3D12GraphicsCommandList* list, const x64remote
     return true;
 }
 
+// ---- Fault report (issue 193) ------------------------------------------------
+// The host crashed in the display driver 14-25 ms after a feature creation with
+// nothing of NGX on the faulting stack. Each create, first evaluate after a
+// create and release writes one host.log line with the NGX result and the
+// fence state, so the last line before a crash names where the feature was.
+void Dlss::fence_text(char* text, std::size_t bytes) noexcept {
+    text[0] = 0;
+    if (!device12_ || !fence_state_) return;
+    std::uint64_t recording = 0, completed = 0;
+    fence_state_(recording, completed);
+    std::snprintf(text, bytes, " (fence: recording %llu, completed %llu)", static_cast<unsigned long long>(recording),
+                  static_cast<unsigned long long>(completed));
+}
+
+void Dlss::log_first_evaluate(const char* what, unsigned result) noexcept {
+    if (!log_) return;
+    char text[200], fence[80];
+    fence_text(fence, sizeof(fence));
+    std::snprintf(text, sizeof(text), "%s first evaluate after the feature creation: 0x%08x%s", what, result, fence);
+    log_(text);
+}
+
+// Once, before the first feature creation: the third-party overlay hooks
+// injected into the host. They draw inside our Present with their own
+// Direct3D calls (the issue 193 dumps fault below RTSSHooks64's Present hook).
+void Dlss::log_overlay_hooks() noexcept {
+    if (hooks_logged_ || !log_) return;
+    hooks_logged_ = true;
+    constexpr const char* kHooks[] = {
+        "RTSSHooks64.dll",                        // RivaTuner Statistics Server (MSI Afterburner)
+        "GameOverlayRenderer64.dll",              // Steam overlay
+        "DiscordHook64.dll",                      // Discord overlay
+        "graphics-hook64.dll",                    // OBS game capture
+        "EOSOverlayRenderer-Win64-Shipping.dll",  // Epic overlay
+    };
+    char text[260] = "overlay hooks in the host before the first DLSS feature creation:";
+    bool any = false;
+    for (const char* hook : kHooks) {
+        if (!GetModuleHandleA(hook)) continue;
+        strcat_s(text, any ? ", " : " ");
+        strcat_s(text, hook);
+        any = true;
+    }
+    if (!any) strcat_s(text, " none known");
+    log_(text);
+}
+
+// Direct3D 11: true once the GPU is confirmed to have finished everything the
+// immediate context had submitted when `done` was ended (an event query,
+// created, ended and flushed here on first use), or the device is confirmed
+// removed (nothing is in flight then). Polls for at most wait_ms (INFINITE:
+// until one of the two is confirmed). False: not confirmed; never a reason to
+// release.
+bool Dlss::d3d11_finished(ID3D11Query*& done, DWORD wait_ms) noexcept {
+    if (!device_) return false;
+    ID3D11DeviceContext* context = nullptr;
+    device_->GetImmediateContext(&context);
+    if (!context) return false;
+    bool finished = false;
+    if (!done) {
+        const D3D11_QUERY_DESC desc{D3D11_QUERY_EVENT, 0};
+        if (SUCCEEDED(device_->CreateQuery(&desc, &done)) && done) {
+            context->End(done);
+            context->Flush();
+        } else {
+            done = nullptr;
+        }
+    }
+    const ULONGLONG start = GetTickCount64();
+    for (;;) {
+        if (device_->GetDeviceRemovedReason() != S_OK) { finished = true; break; }
+        if (!done) break;  // no query and the device is alive: cannot be confirmed
+        BOOL signalled = FALSE;
+        const HRESULT hr = context->GetData(done, &signalled, sizeof(signalled), 0);
+        if (hr == S_OK) { finished = true; break; }
+        if (hr != S_FALSE) {  // an error: confirmed only by the device's own removal reason
+            finished = device_->GetDeviceRemovedReason() != S_OK;
+            break;
+        }
+        if (wait_ms != INFINITE && GetTickCount64() - start >= wait_ms) break;
+        Sleep(1);
+    }
+    context->Release();
+    return finished;
+}
+
+// A feature whose release could not be confirmed safe yet waits in retired_.
+void Dlss::defer_release(const Retired& retired, const char* why) noexcept {
+    char text[280];
+    try {
+        retired_.push_back(retired);
+        if (!why) return;  // teardown: collect_retired(true) waits and logs
+        std::snprintf(text, sizeof(text), "%s feature release deferred: %s", retired.what, why);
+    } catch (...) {
+        // No room to defer: never released early; NGX's own shutdown is skipped too.
+        if (retired.done) retired.done->Release();
+        unconfirmed_ = true;
+        std::snprintf(text, sizeof(text), "%s feature release could not be deferred (%s): the feature is left unreleased", retired.what,
+                      why ? why : "teardown");
+    }
+    if (log_) log_(text);
+}
+
+// The one place a feature handle is released (DLSS Programming Guide 5.5:
+// only once the work that evaluated it is no longer in flight): after a
+// confirmed completion or a confirmed device removal, otherwise deferred.
+void Dlss::release_handle(NVSDK_NGX_Handle* feature, std::uint64_t recorded, unsigned evaluations, const char* what) noexcept {
+    if (!feature) return;
+    // Teardown: the one bounded wait is collect_retired(true)'s.
+    if (teardown_deadline_) { defer_release({feature, recorded, what, nullptr}, nullptr); return; }
+    char text[280];
+    if (!device12_) {
+        ID3D11Query* done = nullptr;
+        const ULONGLONG start = GetTickCount64();
+        if (!d3d11_finished(done, 2000)) {
+            defer_release({feature, 0, what, done}, done ? "the GPU did not confirm within 2 s that its last evaluate finished"
+                                                         : "no event query to confirm that its last evaluate finished");
+            return;
+        }
+        if (done) done->Release();
+        const NVSDK_NGX_Result result = NVSDK_NGX_D3D11_ReleaseFeature(feature);
+        if (log_) {
+            std::snprintf(text, sizeof(text), "%s feature release: 0x%08x after %u evaluations; the GPU finished its submitted work in %llu ms",
+                          what, static_cast<unsigned>(result), evaluations, static_cast<unsigned long long>(GetTickCount64() - start));
+            log_(text);
+        }
+        return;
+    }
+    std::uint64_t recording = 0, completed = 0;
+    if (fence_state_) fence_state_(recording, completed);
+    if (fence_state_ && recorded >= recording && completed < recorded) {
+        // Recorded into the list that is still open: nothing to wait for yet.
+        std::snprintf(text, sizeof(text), "the list that recorded it (fence %llu) is not submitted yet", static_cast<unsigned long long>(recorded));
+        defer_release({feature, recorded, what, nullptr}, text);
+        return;
+    }
+    // Frames already submitted may still run the feature. The fence passing
+    // its last list is the confirmation (a removed device completes every value).
+    const bool waited = !wait_idle_ || wait_idle_();
+    if (fence_state_) fence_state_(recording, completed);
+    if (!waited || (fence_state_ && completed < recorded)) {
+        std::snprintf(text, sizeof(text), "the GPU did not finish the submitted frames (fence: last recorded %llu, completed %llu)",
+                      static_cast<unsigned long long>(recorded), static_cast<unsigned long long>(completed));
+        defer_release({feature, recorded, what, nullptr}, text);
+        return;
+    }
+    const NVSDK_NGX_Result result = NVSDK_NGX_D3D12_ReleaseFeature(feature);
+    if (log_) {
+        std::snprintf(text, sizeof(text),
+                      "%s feature release: 0x%08x after %u evaluations (fence: last recorded %llu, recording %llu, completed %llu)", what,
+                      static_cast<unsigned>(result), evaluations, static_cast<unsigned long long>(recorded),
+                      static_cast<unsigned long long>(recording), static_cast<unsigned long long>(completed));
+        log_(text);
+    }
+}
+
+// Releases the deferred features whose work the GPU is confirmed to have
+// finished. all (teardown: nothing more is recorded or submitted): waits for
+// the confirmations until teardown_deadline_; a feature still unconfirmed
+// then is never released (unconfirmed_: shutdown_owned skips NGX's shutdown).
+void Dlss::collect_retired(bool all) noexcept {
+    for (std::size_t index = 0; index < retired_.size();) {
+        Retired& retired = retired_[index];
+        const ULONGLONG now = GetTickCount64();
+        const DWORD remaining = all && teardown_deadline_ > now ? static_cast<DWORD>(teardown_deadline_ - now) : 0;
+        bool finished = false;
+        if (!device12_) {
+            finished = d3d11_finished(retired.done, remaining);
+        } else {
+            for (;;) {
+                std::uint64_t recording = 0, completed = 0;
+                if (fence_state_) fence_state_(recording, completed);
+                // Passed by the fence, or (teardown) in a list that is never submitted.
+                finished = !fence_state_ || completed >= retired.recorded || (all && retired.recorded >= recording);
+                if (finished || !all || GetTickCount64() >= teardown_deadline_) break;
+                Sleep(1);
+            }
+        }
+        if (finished) {
+            const NVSDK_NGX_Result result = device12_ ? NVSDK_NGX_D3D12_ReleaseFeature(retired.feature) : NVSDK_NGX_D3D11_ReleaseFeature(retired.feature);
+            if (log_) {
+                char text[200];
+                std::snprintf(text, sizeof(text), "%s feature released after the GPU finished its work: 0x%08x", retired.what,
+                              static_cast<unsigned>(result));
+                log_(text);
+            }
+        } else if (all) {
+            unconfirmed_ = true;  // one line in shutdown_owned
+        } else {
+            ++index;
+            continue;
+        }
+        if (retired.done) retired.done->Release();
+        retired_.erase(retired_.begin() + static_cast<std::ptrdiff_t>(index));
+    }
+}
+
 void Dlss::release_feature() noexcept {
     if (!feature_) return;
-    if (device12_) {
-        if (wait_idle_) wait_idle_();  // frames already submitted may still run the feature
-        NVSDK_NGX_D3D12_ReleaseFeature(feature_);
-    } else {
-        NVSDK_NGX_D3D11_ReleaseFeature(feature_);
-    }
+    release_handle(feature_, feature_recorded_, evaluations_, feature_name());
     feature_ = nullptr;
 }
 
 void Dlss::release_owned() noexcept {
+    collect_retired(false);
     if (!feature_) return;
     release_feature();
     shape_ = Shape{};
@@ -371,11 +655,24 @@ void Dlss::release_owned() noexcept {
 }
 
 void Dlss::shutdown_owned() noexcept {
+    // The exit never hangs on the GPU: 5 s in total for every feature's confirmation.
+    teardown_deadline_ = GetTickCount64() + 5000;
     release_frame_generation_owned();
     fg_available_ = false;
+    rr_available_ = false;
     release_feature();
+    collect_retired(true);
+    teardown_deadline_ = 0;
     shape_ = Shape{};
-    if (device12_) {
+    if (unconfirmed_) {
+        // A feature's work may still be in flight (guide 5.6: shut down only
+        // when no work of a feature is): nothing is released early; the
+        // process exit frees the feature, the parameter maps and NGX.
+        if (log_) log_("DLSS teardown: the GPU did not confirm within 5 s that a feature's work finished; the feature release, the "
+                       "parameter destruction and the NGX shutdown are skipped");
+        unconfirmed_ = false;
+        parameters_ = capabilities_ = nullptr;
+    } else if (device12_) {
         if (parameters_) { NVSDK_NGX_D3D12_DestroyParameters(parameters_); parameters_ = nullptr; }
         if (capabilities_) { NVSDK_NGX_D3D12_DestroyParameters(capabilities_); capabilities_ = nullptr; }
         if (initialized_) NVSDK_NGX_D3D12_Shutdown1(device12_);
@@ -428,6 +725,55 @@ void Dlss::query_frame_generation() noexcept {
     }
 }
 
+// ---- DLSS Ray Reconstruction (D3D12) ---------------------------------------
+// DLSS-RR Integration Guide 2.1: support is queried as Super Resolution's is,
+// for the Ray Reconstruction feature (the capability map's
+// SuperSamplingDenoising entries); the driver must be 580.00 or newer.
+void Dlss::query_ray_reconstruction() noexcept {
+    rr_available_ = false;
+    if (!device12_ || !capabilities_ || !parameters_ || !available_) {
+        std::snprintf(rr_reason_, sizeof(rr_reason_), "%s", "DLSS is not available (NGX)");
+    } else {
+        int available = 0, needs_driver = 0, init_result = 0;
+        unsigned major = 0, minor = 0;
+        NVSDK_NGX_Parameter_GetI(capabilities_, NVSDK_NGX_Parameter_SuperSamplingDenoising_Available, &available);
+        if (!available) {
+            NVSDK_NGX_Parameter_GetI(capabilities_, NVSDK_NGX_Parameter_SuperSamplingDenoising_NeedsUpdatedDriver, &needs_driver);
+            NVSDK_NGX_Parameter_GetI(capabilities_, NVSDK_NGX_Parameter_SuperSamplingDenoising_FeatureInitResult, &init_result);
+            NVSDK_NGX_Parameter_GetUI(capabilities_, NVSDK_NGX_Parameter_SuperSamplingDenoising_MinDriverVersionMajor, &major);
+            NVSDK_NGX_Parameter_GetUI(capabilities_, NVSDK_NGX_Parameter_SuperSamplingDenoising_MinDriverVersionMinor, &minor);
+            if (needs_driver)
+                std::snprintf(rr_reason_, sizeof(rr_reason_),
+                              "DLSS Ray Reconstruction needs a newer driver (%u.%02u or newer; feature init 0x%08x)", major, minor,
+                              static_cast<unsigned>(init_result));
+            else
+                std::snprintf(rr_reason_, sizeof(rr_reason_),
+                              "DLSS Ray Reconstruction not available on this GPU/driver (feature init 0x%08x; is nvngx_dlssd.dll beside the host?)",
+                              static_cast<unsigned>(init_result));
+        } else {
+            rr_available_ = true;
+            rr_reason_[0] = 0;
+        }
+    }
+    if (log_) {
+        char line[260];
+        if (rr_available_) std::snprintf(line, sizeof(line), "%s", "DLSS Ray Reconstruction available");
+        else std::snprintf(line, sizeof(line), "DLSS Ray Reconstruction unavailable: %s", rr_reason_);
+        log_(line);
+    }
+}
+
+bool Dlss::ray_reconstruction_caps(char* reason, std::size_t reason_bytes) noexcept {
+    if (initializing()) { std::snprintf(reason, reason_bytes, "%s", kInitializing); return false; }
+    bool available = false;
+    auto job = [&] {
+        available = rr_available_;
+        std::snprintf(reason, reason_bytes, "%s", rr_reason_);
+    };
+    if (!worker_.joinable() || !run(job)) std::snprintf(reason, reason_bytes, "%s", "NGX is not initialised");
+    return available;
+}
+
 bool Dlss::evaluate_frame_generation_owned(ID3D12GraphicsCommandList* list, const x64remote::DlssgEvaluate& record,
                                            ID3D12Resource* const* resources, char* error, std::size_t error_bytes) noexcept {
     if (!fg_available_ || !device12_) {
@@ -438,6 +784,9 @@ bool Dlss::evaluate_frame_generation_owned(ID3D12GraphicsCommandList* list, cons
         std::snprintf(error, error_bytes, "DLSS Frame Generation evaluate with a missing list or resource");
         return false;
     }
+    collect_retired(false);
+    std::uint64_t recording = 0, completed = 0;
+    if (fence_state_) fence_state_(recording, completed);
     if (!fg_feature_ || fg_width_ != record.width || fg_height_ != record.height || fg_render_w_ != record.render_w ||
         fg_render_h_ != record.render_h) {
         release_frame_generation_owned();
@@ -448,10 +797,14 @@ bool Dlss::evaluate_frame_generation_owned(ID3D12GraphicsCommandList* list, cons
         create.RenderWidth = record.render_w;
         create.RenderHeight = record.render_h;
         create.DynamicResolutionScaling = false;
+        log_overlay_hooks();
         const NVSDK_NGX_Result result = NGX_D3D12_CREATE_DLSSG(list, 1, 1, &fg_feature_, parameters_, &create);
-        char text[200];
-        std::snprintf(text, sizeof(text), "DLSS Frame Generation feature created: %ux%u (depth/motion %ux%u): 0x%08x", record.width,
-                      record.height, record.render_w, record.render_h, static_cast<unsigned>(result));
+        fg_recorded_ = recording;
+        fg_evaluations_ = 0;
+        char text[280], fence[80];
+        fence_text(fence, sizeof(fence));
+        std::snprintf(text, sizeof(text), "DLSS Frame Generation feature created: %ux%u (depth/motion %ux%u): 0x%08x%s", record.width,
+                      record.height, record.render_w, record.render_h, static_cast<unsigned>(result), fence);
         if (log_) log_(text);
         if (NVSDK_NGX_FAILED(result) || !fg_feature_) {
             fg_feature_ = nullptr;
@@ -495,7 +848,9 @@ bool Dlss::evaluate_frame_generation_owned(ID3D12GraphicsCommandList* list, cons
     opt.cameraMotionIncluded = true;     // the motion pass writes camera and object motion
     opt.reset = record.reset;
     opt.notRenderingGameFrames = false;  // such presents are not evaluated at all
+    fg_recorded_ = recording;
     const NVSDK_NGX_Result result = NGX_D3D12_EVALUATE_DLSSG(list, fg_feature_, parameters_, &eval, &opt);
+    if (fg_evaluations_++ == 0) log_first_evaluate("DLSS Frame Generation", static_cast<unsigned>(result));
     if (NVSDK_NGX_FAILED(result)) {
         log_fg_inputs(log_, parameters_, list, resources, opt);
         std::snprintf(error, error_bytes, "DLSS Frame Generation evaluate failed (NVSDK_NGX_Result 0x%08x)", static_cast<unsigned>(result));
@@ -505,9 +860,9 @@ bool Dlss::evaluate_frame_generation_owned(ID3D12GraphicsCommandList* list, cons
 }
 
 void Dlss::release_frame_generation_owned() noexcept {
+    collect_retired(false);
     if (!fg_feature_) return;
-    if (wait_idle_) wait_idle_();  // frames already submitted may still run the feature
-    NVSDK_NGX_D3D12_ReleaseFeature(fg_feature_);
+    release_handle(fg_feature_, fg_recorded_, fg_evaluations_, "DLSS Frame Generation");
     fg_feature_ = nullptr;
     fg_width_ = fg_height_ = fg_render_w_ = fg_render_h_ = 0;
     if (log_) log_("DLSS Frame Generation feature released");
@@ -515,6 +870,7 @@ void Dlss::release_frame_generation_owned() noexcept {
 
 bool Dlss::frame_generation_caps(x64remote::DlssgCaps& out) noexcept {
     out = {};
+    if (initializing()) { std::snprintf(out.reason, sizeof(out.reason), "%s", kInitializing); return false; }
     auto job = [&] {
         out.available = fg_available_;
         out.multi_frame_max = fg_multi_frame_max_;
@@ -526,6 +882,7 @@ bool Dlss::frame_generation_caps(x64remote::DlssgCaps& out) noexcept {
 
 bool Dlss::evaluate_frame_generation_d3d12(ID3D12GraphicsCommandList* list, const x64remote::DlssgEvaluate& record,
                                            ID3D12Resource* const* resources, char* error, std::size_t error_bytes) noexcept {
+    if (initializing()) { std::snprintf(error, error_bytes, "%s", kInitializing); return false; }
     bool result = false;
     auto job = [&] { result = evaluate_frame_generation_owned(list, record, resources, error, error_bytes); };
     if (!run(job)) std::snprintf(error, error_bytes, "DLSS unavailable: the NGX thread could not be started");
@@ -533,12 +890,13 @@ bool Dlss::evaluate_frame_generation_d3d12(ID3D12GraphicsCommandList* list, cons
 }
 
 void Dlss::release_frame_generation() noexcept {
-    if (!worker_.joinable()) return;
+    if (initializing() || !worker_.joinable()) return;
     auto job = [&] { release_frame_generation_owned(); };
     run(job);
 }
 
 std::uint64_t Dlss::frame_generation_vram(unsigned width, unsigned height, unsigned render_w, unsigned render_h) noexcept {
+    if (initializing()) return 0;
     std::uint64_t bytes = 0;
     auto job = [&] {
         if (!fg_available_ || !capabilities_) return;
@@ -554,9 +912,9 @@ std::uint64_t Dlss::frame_generation_vram(unsigned width, unsigned height, unsig
 
 // ---- The NGX thread --------------------------------------------------------
 // Every NGX call (init, capability and optimal-size queries, feature create,
-// evaluate, release, shutdown) runs on this one thread; the caller blocks
-// until it has finished, so the immediate context is never used from two
-// threads at once (nvsdk_ngx.h: "Methods in this library are NOT thread
+// evaluate, release, shutdown) runs on this one thread; except for D3D12
+// startup the caller blocks until it has finished, so the immediate context
+// is never used from two threads at once (nvsdk_ngx.h: "Methods in this library are NOT thread
 // safe. It is up to the client to ensure that thread safety is enforced as
 // needed."). The reason it is a separate thread: the NVIDIA D3D11 driver
 // keeps a pointer derived from the sampler description NGX passes when NGX
@@ -566,7 +924,7 @@ std::uint64_t Dlss::frame_generation_vram(unsigned width, unsigned height, unsig
 // the replay thread that address was a dead NGX frame of the replay thread's
 // stack, and later renderer frames there were corrupted. On this thread it
 // is this thread's own stack below its wait, where nothing else lives.
-bool Dlss::run_raw(void (*job)(void*), void* context) noexcept {
+bool Dlss::run_raw(void (*job)(void*), void* context, bool wait) noexcept {
     if (worker_failed_) return false; // NGX never runs anywhere else (see above)
     if (worker_.joinable() && GetCurrentThreadId() == worker_id_.load()) { job(context); return true; }
     if (!worker_.joinable()) {
@@ -607,16 +965,19 @@ bool Dlss::run_raw(void (*job)(void*), void* context) noexcept {
     std::unique_lock<std::mutex> lock(mutex_);
     const bool d3d12_job = device12_ != nullptr;
     const Log wait_log = log_;
+    // An async init may still be queued (not yet claimed by the worker).
+    // In particular, shutdown must not overwrite that job before it starts.
+    done_.wait(lock, [this] { return job_ == nullptr; });
     job_context_ = context;
     job_ = job;
     wake_.notify_one();
-    if (d3d12_job) {
+    if (wait && d3d12_job) {
         while (!done_.wait_for(lock, std::chrono::seconds(20), [this] { return job_ == nullptr; })) {
             lock.unlock();
             if (wait_log) wait_log("D3D12 NGX operation still pending after 20 s; waiting before releasing its inputs");
             lock.lock();
         }
-    } else {
+    } else if (wait) {
         done_.wait(lock, [this] { return job_ == nullptr; });
     }
     return true;
@@ -643,9 +1004,10 @@ void Dlss::initialize(ID3D11Device* device, const std::wstring& folder, x64remot
     }
 }
 
-bool Dlss::optimal(unsigned out_w, unsigned out_h, int mode, unsigned& render_w, unsigned& render_h) noexcept {
+bool Dlss::optimal(unsigned out_w, unsigned out_h, int mode, unsigned& render_w, unsigned& render_h, bool ray_reconstruction) noexcept {
+    if (initializing()) { render_w = render_h = 0; return false; }
     bool result = false;
-    auto job = [&] { result = optimal_owned(out_w, out_h, mode, render_w, render_h); };
+    auto job = [&] { result = optimal_owned(out_w, out_h, mode, render_w, render_h, ray_reconstruction); };
     run(job);
     return result;
 }
@@ -653,51 +1015,80 @@ bool Dlss::optimal(unsigned out_w, unsigned out_h, int mode, unsigned& render_w,
 bool Dlss::evaluate(ID3D11DeviceContext* context, const x64remote::DlssEvaluateRecord& record, ID3D11Resource* color,
                     ID3D11Resource* depth, ID3D11Resource* motion, ID3D11Resource* output, ID3D11Resource* exposure,
                     char* error, std::size_t error_bytes) noexcept {
+    if (initializing()) { std::snprintf(error, error_bytes, "%s", kInitializing); return false; }
     bool result = false;
     auto job = [&] { result = evaluate_owned(context, record, color, depth, motion, output, exposure, error, error_bytes); };
     if (!run(job)) std::snprintf(error, error_bytes, "DLSS unavailable: the NGX thread could not be started");
     return result;
 }
 
-void Dlss::initialize_d3d12(ID3D12Device* device, x64remote::Capabilities& caps, std::function<void()> wait_idle) noexcept {
+void Dlss::initialize_d3d12(ID3D12Device* device, const std::wstring& folder, x64remote::Capabilities& caps,
+                            std::function<bool()> wait_idle, FenceState fence_state, Log log) noexcept {
+    folder_ = folder;
+    log_ = log;
     wait_idle_ = std::move(wait_idle);
-    auto job = [&] { initialize_d3d12_owned(device, caps); };
-    if (!run(job)) {
-        std::snprintf(caps.dlss_reason, sizeof(caps.dlss_reason), "%s", "the NGX thread could not be started");
-        caps.dlss_available = 0;
+    fence_state_ = std::move(fence_state);
+    device12_ = device;
+    caps.dlss_available = 0;
+    std::snprintf(caps.dlss_reason, sizeof(caps.dlss_reason), "%s", kInitializing);
+    init_caps_ = {};
+    init_pending_ = true;
+    init_done_.store(false, std::memory_order_release);
+    if (log_) log_("DLSS: Direct3D 12 NGX initialization queued; startup continues without waiting");
+    // No references to this call's stack or Control: NGX owns its inputs and
+    // result until replay publishes them. All later NGX calls keep one owner.
+    if (!run_raw([](void* context) {
+            auto& self = *static_cast<Dlss*>(context);
+            const ULONGLONG started = GetTickCount64();
+            self.initialize_d3d12_owned(self.device12_, self.init_caps_);
+            if (self.log_) {
+                char line[128];
+                std::snprintf(line, sizeof(line), "DLSS: Direct3D 12 NGX initialization finished in %llu ms (available=%u)",
+                              static_cast<unsigned long long>(GetTickCount64() - started), self.init_caps_.dlss_available);
+                self.log_(line);
+            }
+            self.init_done_.store(true, std::memory_order_release);
+        }, this, false)) {
+        std::snprintf(init_caps_.dlss_reason, sizeof(init_caps_.dlss_reason), "%s", "the NGX thread could not be started");
+        init_done_.store(true, std::memory_order_release);
     }
 }
 
 #ifdef EID3D11_EMBEDDED
 void Dlss::initialize_embedded_d3d12(ID3D12Device* device, const std::wstring& dll_folder,
     const std::wstring& data_folder, x64remote::Capabilities& caps, Log log,
-    std::function<void()> wait_idle) noexcept {
+    std::function<bool()> wait_idle, FenceState fence_state) noexcept {
     // Old features wait on the old executor before any callback/path changes.
     shutdown();
     caps.dlss_available = 0;
-    if (!device || dll_folder.empty() || data_folder.empty() || !log || !wait_idle) {
+    if (!device || dll_folder.empty() || data_folder.empty() || !log || !wait_idle || !fence_state) {
         std::snprintf(caps.dlss_reason, sizeof(caps.dlss_reason), "Invalid embedded NGX device, paths, logger or GPU wait");
         return;
     }
     try {
         folder_ = dll_folder;
         data_folder_ = data_folder;
-        wait_idle_ = std::move(wait_idle);
     } catch (...) {
         std::snprintf(caps.dlss_reason, sizeof(caps.dlss_reason), "Embedded NGX initialization allocation failed");
         return;
     }
-    log_ = log;
-    auto job = [&] { initialize_d3d12_owned(device, caps); };
-    if (!run(job)) {
-        std::snprintf(caps.dlss_reason, sizeof(caps.dlss_reason), "the NGX thread could not be started");
-        caps.dlss_available = 0;
-    }
+    initialize_d3d12(device, dll_folder, caps, std::move(wait_idle), std::move(fence_state), log);
 }
 #endif
 
+bool Dlss::poll_initialize(x64remote::Capabilities& caps) noexcept {
+    if (!init_pending_) return true;
+    if (initializing()) return false;
+    caps.dlss_available = init_caps_.dlss_available;
+    std::memcpy(caps.dlss_reason, init_caps_.dlss_reason, sizeof(caps.dlss_reason));
+    init_pending_ = false;
+    if (log_) log_("DLSS: Direct3D 12 NGX initialization result published on the render thread");
+    return true;
+}
+
 bool Dlss::evaluate_d3d12(ID3D12GraphicsCommandList* list, const x64remote::DlssEvaluateRecord& record,
                           ID3D12Resource* const* resources, char* error, std::size_t error_bytes) noexcept {
+    if (initializing()) { std::snprintf(error, error_bytes, "%s", kInitializing); return false; }
     bool result = false;
     auto job = [&] { result = evaluate_d3d12_owned(list, record, resources, error, error_bytes); };
     if (!run(job)) std::snprintf(error, error_bytes, "DLSS unavailable: the NGX thread could not be started");
@@ -705,7 +1096,7 @@ bool Dlss::evaluate_d3d12(ID3D12GraphicsCommandList* list, const x64remote::Dlss
 }
 
 void Dlss::release() noexcept {
-    if (!worker_.joinable()) return; // no NGX thread: NGX was never initialised
+    if (initializing() || !worker_.joinable()) return; // no feature while NGX initializes
     auto job = [&] { release_owned(); };
     run(job);
 }

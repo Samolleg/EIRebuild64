@@ -23,6 +23,7 @@ void io_resource(RetainedDeltaIn& s, VisualResourceIncarnation& v) { io(s.in, v.
 template<class S, class R, class E> void tick_fields(S& s, R& rate, E& equipment) {
     io(s, rate.coefficient); io(s, rate.tall); io(s, rate.frozen); io(s, rate.dont_move);
     io(s, rate.movement_frozen); io(s, rate.tilted_facing); io(s, rate.scaled_animation);
+    io(s, rate.action_coefficient);
     io(s, equipment.has_weapon); io(s, equipment.weapon_is_bow); io(s, equipment.arrow_is_bow);
     io(s, equipment.human); io(s, equipment.speaking); io(s, equipment.forced_hidden);
 }
@@ -50,7 +51,7 @@ template<class S, class T> void pose_tail(S& s, T& v) {
 }
 template<class S, class T> void light_fields(S& s, T& v) {
     io(s, v.source_id); io(s, v.center); io(s, v.color); io(s, v.radius); io(s, v.casts_shadow);
-    io(s, v.shadow_fade); io(s, v.attached); io(s, v.hero);
+    io(s, v.shadow_fade); io(s, v.attached); io(s, v.hero); io(s, v.spell);
 }
 template<class S, class T> void geometry_fields(S& s, T& v) {
     io(s, v.revision); io(s, v.structural_revision); io(s, v.noise_revision); io(s, v.layer_shifts);
@@ -117,6 +118,14 @@ void delta_io(RetainedDeltaOut& s, const std::vector<RetainedWorldPointLight>& v
 void delta_io(RetainedDeltaIn& s, std::vector<RetainedWorldPointLight>& v) {
     v.resize(s.in.count(1));
     for (auto& light : v) light_fields(s.in, light);
+}
+void delta_io(RetainedDeltaOut& s, const std::vector<RetainedFireSpell>& v) {
+    codec::io_count(s.out, v.size());
+    for (const auto& f : v) { io(s.out, f.kind); io(s.out, f.center); io(s.out, f.wall); io(s.out, f.radius); }
+}
+void delta_io(RetainedDeltaIn& s, std::vector<RetainedFireSpell>& v) {
+    v.resize(s.in.count(1));
+    for (auto& f : v) { io(s.in, f.kind); io(s.in, f.center); io(s.in, f.wall); io(s.in, f.radius); }
 }
 void delta_io(RetainedDeltaOut& s, const std::vector<RetainedQuestLight>& v) {
     codec::io_count(s.out, v.size());

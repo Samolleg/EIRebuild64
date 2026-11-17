@@ -61,18 +61,18 @@ void character_pane_text_content(const CharacterPaneTextFrame& frame) noexcept;
 
 // A retained text frame placed smaller than recorded so its whole block fits
 // the visible surface (item cards, claude/s3-store): surface positions are
-// scaled by scale about (center_x, top); lines whose scaled rectangle ends
-// below bottom (the visible surface height) are left out.
+// scaled by scale about (center_x, top) so the whole block ends above bottom
+// (the visible surface height). No line is left out (user rule: descriptions
+// are never shortened), however small the block has to be placed.
 struct CharacterPaneTextFit {
     float scale = 1.0f;
     float center_x = 0.0f, top = 0.0f, bottom = 0.0f;
 };
 // The fit of a recorded frame into visible_height surface rows: none (false)
-// when every line already ends inside; else uniformly smaller down to
-// minimum_scale, the lines that still do not fit then left out.
+// when every line already ends inside; else uniformly smaller until the
+// whole block ends inside.
 bool fit_retained_text_frame(const CharacterPaneTextFrame& frame,
-    std::uint32_t visible_height, float minimum_scale,
-    CharacterPaneTextFit& fit) noexcept;
+    std::uint32_t visible_height, CharacterPaneTextFit& fit) noexcept;
 
 enum class CharacterPaneTextFailure : std::uint8_t {
     none,
@@ -143,6 +143,15 @@ public:
             failure_ == CharacterPaneTextFailure::none;
     }
     CharacterPaneTextFailure failure() const noexcept { return failure_; }
+    // Card lines since the last call that stayed wider than their panel at
+    // the minimum fitted size: margin (drawn into the panel margin) or cut
+    // (wider than the surface even at 1 px, so letters are lost).
+    enum class CardOverflow : std::uint8_t { none, margin, cut };
+    CardOverflow take_card_overflow() noexcept {
+        const CardOverflow overflowed = card_overflow_;
+        card_overflow_ = CardOverflow::none;
+        return overflowed;
+    }
     std::uint64_t font_generation() const noexcept { return font_generation_; }
     std::size_t cached_glyphs() const noexcept { return glyphs_.size(); }
     std::size_t cached_glyph_bytes() const noexcept { return glyph_bytes_; }
@@ -169,6 +178,12 @@ private:
         FontDefinition font;
         bool operator<(const GlyphKey& other) const noexcept;
     };
+    // A glyph's raster ink (origin x and black box width), as realize_glyph
+    // would place it: fit_card_lines measures every trial size with it.
+    struct GlyphInk {
+        int left = 0;
+        int width = 0;
+    };
     struct GlyphMask {
         int left = 0;
         int top = 0;
@@ -192,6 +207,7 @@ private:
         std::size_t start = 0;
         std::size_t length = 0;
         int width = 0;
+        int ink_left = 0, ink_right = 0;
         ShapedRun shaped;
     };
     struct LayoutKey {
@@ -200,6 +216,9 @@ private:
         UINT format = 0;
         LONG width = 0;
         LONG height = 0;
+        LONG card_width = 0;
+        // Card lines may use the surface margin: their fit depends on it.
+        LONG surface_width = 0;
         // Card producer scope, at every raster key; zero for pane/chat text.
         std::uint32_t spacing = 0;
         std::string text;
@@ -207,6 +226,7 @@ private:
         bool operator<(const LayoutKey& other) const noexcept;
     };
     struct TextLayout {
+        FontDefinition font;
         DisplayText display;
         std::vector<Line> lines;
         int height = 0;
@@ -226,14 +246,11 @@ private:
                     DisplayText& output) noexcept;
     bool shape_run(HDC dc, const wchar_t* text, std::size_t length,
                    ShapedRun& output) noexcept;
-    bool layout(HDC dc, const DisplayText& text, int maximum_width,
-                bool word_break, bool single_line, UINT ellipsis,
-                std::vector<Line>& lines) noexcept;
     bool layout_lines(HDC dc, const DisplayText& text, int maximum_width,
                       bool word_break, bool single_line, bool whole_words,
                       std::vector<Line>& lines) noexcept;
-    bool ellipsize(HDC dc, const DisplayText& text, int maximum_width,
-                   Line& line) noexcept;
+    bool fit_card_lines(HFONT font, std::uint32_t font_slot, int width,
+                        UINT format, TextLayout& layout) noexcept;
     bool draw_line(HDC dc, const DisplayText& text, const Line& line,
                    int x, int baseline, int shift, COLORREF color,
                    const RECT& clip,
@@ -274,6 +291,8 @@ private:
     std::uint32_t height_ = 0;
     std::vector<CharacterPaneGlyphQuad> quads_;
     std::map<GlyphKey, GlyphMask> glyphs_;
+    // Trial-size ink of glyphs not (yet) in the atlas; same key and lifetime.
+    std::map<GlyphKey, GlyphInk> glyph_ink_;
     std::vector<AtlasPage> pages_;
     std::map<LayoutKey, TextLayout> layouts_;
     std::uint64_t layout_sweep_ = 1;
@@ -282,6 +301,7 @@ private:
     std::size_t glyph_bytes_ = 0;
     float raster_scale_ = 1.0f;
     bool letter_spacing_ = false;
+    CardOverflow card_overflow_ = CardOverflow::none;
     std::uint32_t raster_key_ = 0;
     // Owned replay/scaled copies; normal and temporary definitions coexist.
     std::map<std::tuple<std::uint32_t, std::uint32_t, FontDefinition>, HFONT> raster_fonts_;

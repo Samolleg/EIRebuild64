@@ -274,6 +274,7 @@ void append_cave_irradiance_shader_programs(std::vector<ShaderProgram>& out){
  static const std::string glow=std::string(kCaveExitGlowHlsl)+kCaveGlowShader;
  out.push_back({glow,nullptr,nullptr,"caveGlowVS","vs_4_0",0});
  out.push_back({glow,nullptr,nullptr,"caveGlowPS","ps_5_0",0});
+ out.push_back({{kCaveComposeShader,sizeof(kCaveComposeShader)-1},nullptr,nullptr,"caveComposeCS","cs_5_0",0});
 }
 
 #if !defined(EID3D11_SHADER_EMBED)
@@ -296,6 +297,11 @@ void Renderer::release_cave_irradiance() noexcept {
  cave_volume_size_={};cave_volume_slab_=0;cave_volume_quality_=0;cave_volume_outdoor_=false;
  cave_volume_frame_=UINT64_MAX;cave_volume_map_generation_=UINT64_MAX;
  cave_volume_active_=false;cave_volume_failed_=false;
+ cave_world_height_.Reset();cave_world_color_.Reset();cave_world_height_srv_.Reset();cave_world_color_srv_.Reset();
+ cave_world_height_uav_.Reset();cave_world_color_uav_.Reset();cave_world_heights_.clear();cave_compose_cs_.Reset();cave_compose_constants_.Reset();
+ cave_compose_sampler_.Reset();cave12_.world_height.reset();cave12_.world_color.reset();
+ cave_world_layout_={};cave_volume_texture_={};cave_world_grid_origin_={};cave_world_grid_size_={};
+ cave_world_key_=UINT64_MAX;cave_world_slab_=0;cave_world_active_=false;
 }
 
 namespace {
@@ -376,6 +382,33 @@ void Renderer::update_cave_irradiance() noexcept try {
  }
  const auto layout=cave_volume_layout(cave_terrain_low_,cave_terrain_high_,quality);
  if(!layout.valid()){cave_volume_active_=false;return;}
+ // The world volume (outdoors): the union of the active map and every loaded
+ // neighbour whose height grid exists (neighbours: heights in their own frame
+ // from vertex 0 at n.origin; the active map's frame is the world's). Its key
+ // names those maps and whether each one's painted colour is ready.
+ CaveVolumeLayout world{};
+ std::uint64_t world_key=UINT64_MAX;
+ {
+  auto low=cave_terrain_low_,high=cave_terrain_high_;
+  std::uint64_t key=1469598103934665603ull;
+  const auto mix=[&](const void* data,std::size_t bytes){
+   for(std::size_t i=0;i<bytes;++i){key^=static_cast<const std::uint8_t*>(data)[i];key*=1099511628211ull;}};
+  mix(&ambient_map_generation_,sizeof(ambient_map_generation_));
+  std::size_t maps=0;
+  for(const auto& n:gc_neighbours_){
+   if(n.bounce_heights.empty()||!n.tiles_x||!n.tiles_y)continue;
+   const float x1=n.origin[0]+2.f*n.tiles_x,y1=n.origin[1]+2.f*n.tiles_y;
+   low[0]=std::min(low[0],n.origin[0]);low[1]=std::min(low[1],n.origin[1]);low[2]=std::min(low[2],n.origin[2]+n.lowest);
+   high[0]=std::max(high[0],x1);high[1]=std::max(high[1],y1);high[2]=std::max(high[2],n.origin[2]+n.highest);
+   const bool painted=d3d12_?n.cover12.color_ready:n.prepared&&n.color!=nullptr;
+   mix(n.origin.data(),sizeof(float)*3);mix(&n.tiles_x,sizeof(n.tiles_x));mix(&n.tiles_y,sizeof(n.tiles_y));mix(&painted,1);
+   ++maps;
+  }
+  const bool painted=d3d12_?gc12_.map.color&&gc12_.map.color_ready&&gc12_.map.generation==ambient_map_generation_:
+   gc_color_srv_&&gc_map_generation_==ambient_map_generation_&&!gc_color_unpainted_;
+  mix(&painted,1);
+  if(outdoor&&maps){world=cave_world_layout(low,high);world_key=key;}
+ }
  // The terrain height grid (1 m vertices) of this map, once built.
  const std::uint32_t height_width=ambient_tiles_x_*2u+1u,height_height=ambient_tiles_y_*2u+1u;
  // (D3D12: the shared grid texture ambient12_.height.)
@@ -450,7 +483,7 @@ void Renderer::update_cave_irradiance() noexcept try {
  auto& cave12=cave12_;
  if(d3d12_){
   if(cave12.programs.empty())append_cave_irradiance_shader_programs(cave12.programs);
-  if(cave12.programs.size()<3)return fail(E_FAIL,"inject shader");
+  if(cave12.programs.size()<4)return fail(E_FAIL,"inject shader");
   if(!d3d12_->storage_supported(DXGI_FORMAT_R16G16B16A16_FLOAT))return fail(E_FAIL,"volume format not writable by compute");
  }else if(!cave_inject_cs_){
   std::vector<ShaderProgram> programs;append_cave_irradiance_shader_programs(programs);
@@ -467,7 +500,11 @@ void Renderer::update_cave_irradiance() noexcept try {
   sampler.ComparisonFunc=D3D11_COMPARISON_NEVER;sampler.MaxLOD=D3D11_FLOAT32_MAX;
   if(FAILED(hr=device_->CreateSamplerState(&sampler,&cave_volume_sampler_)))return fail(hr,"sampler");
  }
- const bool resized=cave_volume_size_!=layout.size;
+ // One set of textures: the active volume at z [0, its depth), the world
+ // volume after it.
+ const std::array<std::uint32_t,3> texture{std::max(layout.size[0],world.valid()?world.size[0]:0u),
+  std::max(layout.size[1],world.valid()?world.size[1]:0u),layout.size[2]+(world.valid()?world.size[2]:0u)};
+ const bool resized=cave_volume_size_!=layout.size||cave_volume_texture_!=texture;
  if(resized){
   // Sized by the map (demand): three RGBA16F grids (L1 red, green, blue).
   for(auto& t:cave_volume_)t.Reset();
@@ -477,11 +514,11 @@ void Renderer::update_cave_irradiance() noexcept try {
   cave_volume_size_={};
   if(d3d12_){
    for(int c=0;c<3;++c)
-    if(FAILED(hr=d3d12_->create_storage_texture(layout.size[0],layout.size[1],layout.size[2],DXGI_FORMAT_R16G16B16A16_FLOAT,cave12.volume[c])))
+    if(FAILED(hr=d3d12_->create_storage_texture(texture[0],texture[1],texture[2],DXGI_FORMAT_R16G16B16A16_FLOAT,cave12.volume[c])))
      return fail(hr,"volume textures");
   }else{
-   D3D11_TEXTURE3D_DESC description{};description.Width=layout.size[0];description.Height=layout.size[1];
-   description.Depth=layout.size[2];description.MipLevels=1;description.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;
+   D3D11_TEXTURE3D_DESC description{};description.Width=texture[0];description.Height=texture[1];
+   description.Depth=texture[2];description.MipLevels=1;description.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;
    description.Usage=D3D11_USAGE_DEFAULT;description.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
    for(int c=0;c<3;++c){
     if(FAILED(hr=device_->CreateTexture3D(&description,nullptr,&cave_volume_[c]))||
@@ -490,7 +527,7 @@ void Renderer::update_cave_irradiance() noexcept try {
      return fail(hr,"volume textures");
    }
   }
-  cave_volume_size_=layout.size;full=true;
+  cave_volume_size_=layout.size;cave_volume_texture_=texture;full=true;cave_world_key_=UINT64_MAX;
  }
  // The bounce grid: the point-light grid's binning over each source's
  // bounce reach (kCaveBounceReach radii), so a probe visits only the sources
@@ -649,6 +686,7 @@ void Renderer::update_cave_irradiance() noexcept try {
  values.sun_strength=std::clamp(configured_floating_point(config,"sun_bounce_strength",kDefaultSunBounceStrength),0.f,4.f);
  values.height_width=height_width;values.height_height=height_height;
  values.sun_samples=quality>=2?16u:8u;values.sun_radius=3.f*layout.cell;
+ values.height_inverse_texel=1.f;values.color_level=1;values.color_inverse_texel=1.f;values.bounce_cell=layout.cell;
  // The slab: all group rows on a full fill, else the next 1/slabs of them.
  const UINT groups_x=(layout.size[0]+3)/4,groups_y=(layout.size[1]+3)/4,groups_z=(layout.size[2]+3)/4;
  const UINT per_slab=(groups_y+cave_volume_slabs(quality)-1)/cave_volume_slabs(quality);
@@ -699,6 +737,69 @@ void Renderer::update_cave_irradiance() noexcept try {
   context_->CSSetUnorderedAccessViews(0,4,no_outputs,nullptr);context_->CSSetShaderResources(0,7,no_inputs);
   context_->CSSetConstantBuffers(0,2,no_constants);context_->CSSetShader(nullptr,nullptr,0);
  }
+ // The world volume: compose its grids when its maps change, then fill it
+ // whole, else one round-robin slab per frame, with the active volume's sun
+ // bounce (same samples, radius and near-field floor: the same estimate at
+ // coarser probe spacing) and no lamps (their bounce stays in the active volume).
+ cave_world_active_=false;
+ if(world.valid()&&heights){
+  const bool compose=cave_world_key_!=world_key||cave_world_layout_.size!=world.size||cave_world_layout_.origin!=world.origin;
+  HRESULT composed=S_OK;
+  if(compose&&FAILED(composed=compose_cave_world(world)))return fail(composed,"world grids");
+  if(compose&&composed==S_OK){cave_world_key_=world_key;cave_world_layout_=world;}
+  CaveInjectConstants w=values;
+  for(int k=0;k<3;++k){w.origin[k]=world.origin[k];w.size[k]=world.size[k];}
+  w.cell=world.cell;w.light_count=0;w.out_z=layout.size[2];
+  w.mode=kCaveModeOutdoor|kCaveModeHeights|(sun_maps?kCaveModeSunMaps:0u)|kCaveModeGroundColor;
+  w.height_width=cave_world_grid_size_[0];w.height_height=cave_world_grid_size_[1];
+  w.height_origin[0]=cave_world_grid_origin_[0];w.height_origin[1]=cave_world_grid_origin_[1];
+  w.height_inverse_texel=1.f/kCaveWorldTexel;w.color_level=0;w.color_inverse_texel=1.f/kCaveWorldTexel;
+  const UINT wx=(world.size[0]+3)/4,wy=(world.size[1]+3)/4,wz=(world.size[2]+3)/4;
+  const UINT world_slabs=32,world_per=(wy+world_slabs-1)/world_slabs,world_count=(wy+world_per-1)/world_per;
+  UINT world_first=0,world_rows=wy;
+  if(!(full||compose)){
+   cave_world_slab_%=world_count;world_first=cave_world_slab_*world_per;world_rows=std::min(world_per,wy-world_first);
+   cave_world_slab_=(cave_world_slab_+1)%world_count;
+  }else cave_world_slab_=0;
+  w.slab_first=world_first*4u;
+  if(composed!=S_OK){} // its compose pipeline is not ready: no world volume this frame
+  else if(d3d12_){
+   d3d12_->clear_slots();
+   d3d12_->set_constants(0,&w,sizeof(w));
+   if(sun_maps)d3d12_->set_constants(1,&shadow12_.constants,sizeof(shadow12_.constants));
+   d3d12_->set_resource(3,cave12.world_height.get());
+   d3d12_->set_resource(4,cave12.world_color.get());
+   d3d12_->set_resource(5,sun_maps?shadow12_.maps.get():nullptr);
+   for(UINT c=0;c<3;++c)d3d12_->set_unordered(c,cave12.volume[c].get());
+   hr=world_rows?d3d12_->dispatch(cave12.programs[0],wx,world_rows,wz):S_OK;
+   d3d12_->clear_slots();
+   if(FAILED(hr))return fail(hr,"world inject dispatch");
+   cave_world_active_=hr==S_OK||!(full||compose);
+   if(hr!=S_OK&&(full||compose))cave_world_key_=UINT64_MAX; // filled once its pipeline is ready
+  }else{
+   if(FAILED(hr=context_->Map(cave_inject_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return fail(hr,"inject constants map");
+   std::memcpy(mapped.pData,&w,sizeof(w));context_->Unmap(cave_inject_constants_.Get(),0);
+   ID3D11Buffer* constant_buffers[2]={cave_inject_constants_.Get(),sun_maps?native_shadow_constants_.Get():nullptr};
+   ID3D11ShaderResourceView* inputs[7]={nullptr,nullptr,nullptr,cave_world_height_srv_.Get(),cave_world_color_srv_.Get(),
+    sun_maps?native_shadow_depth_srv_.Get():nullptr,nullptr};
+   context_->CSSetConstantBuffers(0,2,constant_buffers);
+   context_->CSSetShaderResources(0,7,inputs);
+   ID3D11UnorderedAccessView* outputs[3]={cave_volume_uav_[0].Get(),cave_volume_uav_[1].Get(),cave_volume_uav_[2].Get()};
+   context_->CSSetUnorderedAccessViews(0,3,outputs,nullptr);
+   context_->CSSetShader(cave_inject_cs_.Get(),nullptr,0);
+   if(world_rows)context_->Dispatch(wx,world_rows,wz);
+   ID3D11ShaderResourceView* no_inputs[7]{};ID3D11UnorderedAccessView* no_outputs[4]{};ID3D11Buffer* no_constants[2]{};
+   context_->CSSetUnorderedAccessViews(0,4,no_outputs,nullptr);context_->CSSetShaderResources(0,7,no_inputs);
+   context_->CSSetConstantBuffers(0,2,no_constants);context_->CSSetShader(nullptr,nullptr,0);
+   cave_world_active_=true;
+  }
+  if(full||compose){
+   char line[200];
+   std::snprintf(line,sizeof(line),"world grid %ux%ux%u cell %.0f m at %.0f,%.0f,%.0f, inputs %ux%u at %.0f m",world.size[0],world.size[1],world.size[2],
+    world.cell,world.origin[0],world.origin[1],world.origin[2],cave_world_grid_size_[0],cave_world_grid_size_[1],kCaveWorldTexel);
+   bridge_append_probe_event("cave_gi_world",line);
+  }
+ }
  cave_volume_origin_=layout.origin;cave_volume_cell_=layout.cell;
  cave_volume_quality_=quality;cave_volume_outdoor_=outdoor;cave_volume_active_=true;
  cave_glow_pending_=!outdoor&&cave_exit_count_>0;
@@ -712,6 +813,133 @@ void Renderer::update_cave_irradiance() noexcept try {
   bridge_append_probe_event("cave_gi",line);
  }
 }catch(...){cave_volume_active_=false;}
+
+// The world volume's inputs: height and painted colour grids at
+// kCaveWorldTexel over its horizontal extent, cleared to its lowest ground
+// and unpainted, then each map (the active one in the world frame, each
+// neighbour from its vertex 0 at n.origin) resampled into the texels it covers.
+HRESULT Renderer::compose_cave_world(const CaveVolumeLayout& world) noexcept try {
+ HRESULT hr=S_OK;
+ const std::array<float,2> origin{world.origin[0],world.origin[1]};
+ const std::array<std::uint32_t,2> size{
+  std::uint32_t(std::ceil(world.size[0]*world.cell/kCaveWorldTexel)),std::uint32_t(std::ceil(world.size[1]*world.cell/kCaveWorldTexel))};
+ // Heights (CPU): each texel centre from the map that holds it, bilinear in
+ // that map's vertex grid (the active map: its 1 m grid in the world frame;
+ // a neighbour: its 2 m copy from n.origin); elsewhere the lowest ground.
+ auto& heights=cave_world_heights_;
+ heights.assign(std::size_t(size[0])*size[1],world.origin[2]+.5f*world.cell);
+ const auto sample=[](const std::vector<float>& grid,UINT w,UINT h,float x,float y){
+  x=std::clamp(x,0.f,float(w-1));y=std::clamp(y,0.f,float(h-1));
+  const UINT i=std::min(UINT(x),w-2),j=std::min(UINT(y),h-2);const float fx=x-i,fy=y-j;
+  const auto at=[&](UINT a,UINT b){return grid[std::size_t(b)*w+a];};
+  return (at(i,j)*(1-fx)+at(i+1,j)*fx)*(1-fy)+(at(i,j+1)*(1-fx)+at(i+1,j+1)*fx)*fy;
+ };
+ const auto fill=[&](float x0,float y0,float extent_x,float extent_y,const auto& height_at){
+  const long tx0=std::max(0l,long(std::floor((x0-origin[0])/kCaveWorldTexel))),ty0=std::max(0l,long(std::floor((y0-origin[1])/kCaveWorldTexel)));
+  const long tx1=std::min(long(size[0]),long(std::ceil((x0+extent_x-origin[0])/kCaveWorldTexel))),ty1=std::min(long(size[1]),long(std::ceil((y0+extent_y-origin[1])/kCaveWorldTexel)));
+  for(long ty=ty0;ty<ty1;++ty)for(long tx=tx0;tx<tx1;++tx){
+   const float x=origin[0]+(tx+.5f)*kCaveWorldTexel-x0,y=origin[1]+(ty+.5f)*kCaveWorldTexel-y0;
+   if(x<0||y<0||x>extent_x||y>extent_y)continue;
+   heights[std::size_t(ty)*size[0]+tx]=height_at(x,y);
+  }
+ };
+ const UINT avx=ambient_tiles_x_*2u+1u,avy=ambient_tiles_y_*2u+1u;
+ if(ambient_tiles_x_&&ambient_tiles_y_&&ambient_height_.size()==std::size_t(avx)*avy)
+  fill(0.f,0.f,float(avx-1),float(avy-1),[&](float x,float y){return sample(ambient_height_,avx,avy,x,y);});
+ for(const auto& n:gc_neighbours_){
+  if(n.bounce_heights.empty())continue;
+  const UINT w=n.tiles_x+1u,h=n.tiles_y+1u;const float z=n.origin[2];
+  fill(n.origin[0],n.origin[1],2.f*n.tiles_x,2.f*n.tiles_y,[&](float x,float y){return sample(n.bounce_heights,w,h,.5f*x,.5f*y)+z;});
+ }
+ const bool resized=cave_world_grid_size_!=size;
+ if(d3d12_){
+  cave12_.world_height.reset();
+  if(FAILED(hr=d3d12_->create_texture(size[0],size[1],DXGI_FORMAT_R32_FLOAT,cave12_.world_height))||
+     FAILED(hr=d3d12_->write_texture(*cave12_.world_height,RECT{0,0,LONG(size[0]),LONG(size[1])},heights.data(),size[0]*4u)))return hr;
+  if(resized){cave12_.world_color.reset();
+   if(FAILED(hr=d3d12_->create_storage_texture(size[0],size[1],0,DXGI_FORMAT_R8G8B8A8_UNORM,cave12_.world_color)))return hr;}
+ }else{
+  D3D11_TEXTURE2D_DESC grid{};grid.Width=size[0];grid.Height=size[1];grid.MipLevels=grid.ArraySize=1;grid.SampleDesc.Count=1;
+  grid.Usage=D3D11_USAGE_IMMUTABLE;grid.BindFlags=D3D11_BIND_SHADER_RESOURCE;grid.Format=DXGI_FORMAT_R32_FLOAT;
+  const D3D11_SUBRESOURCE_DATA initial{heights.data(),size[0]*4u,0};
+  if(FAILED(hr=device_->CreateTexture2D(&grid,&initial,cave_world_height_.ReleaseAndGetAddressOf()))||
+     FAILED(hr=device_->CreateShaderResourceView(cave_world_height_.Get(),nullptr,cave_world_height_srv_.ReleaseAndGetAddressOf())))return hr;
+  if(resized){
+   cave_world_color_.Reset();
+   D3D11_TEXTURE2D_DESC d{};d.Width=size[0];d.Height=size[1];d.MipLevels=d.ArraySize=1;d.SampleDesc.Count=1;
+   d.Usage=D3D11_USAGE_DEFAULT;d.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;d.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+   if(FAILED(hr=device_->CreateTexture2D(&d,nullptr,cave_world_color_.ReleaseAndGetAddressOf()))||
+      FAILED(hr=device_->CreateShaderResourceView(cave_world_color_.Get(),nullptr,cave_world_color_srv_.ReleaseAndGetAddressOf()))||
+      FAILED(hr=device_->CreateUnorderedAccessView(cave_world_color_.Get(),nullptr,cave_world_color_uav_.ReleaseAndGetAddressOf())))return hr;
+  }
+ }
+ cave_world_grid_size_=size;cave_world_grid_origin_=origin;
+ if(!d3d12_&&!cave_compose_cs_){
+  std::vector<ShaderProgram> programs;append_cave_irradiance_shader_programs(programs);
+  ComPtr<ID3DBlob> code,errors;
+  if(FAILED(hr=compile_shader(programs[3],&code,&errors))||
+     FAILED(hr=create_shader(device_.Get(),code->GetBufferPointer(),code->GetBufferSize(),nullptr,&cave_compose_cs_)))return hr;
+  D3D11_BUFFER_DESC constants{};constants.Usage=D3D11_USAGE_DYNAMIC;constants.BindFlags=D3D11_BIND_CONSTANT_BUFFER;
+  constants.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;constants.ByteWidth=sizeof(CaveComposeConstants);
+  if(FAILED(hr=device_->CreateBuffer(&constants,nullptr,&cave_compose_constants_)))return hr;
+ }
+ D3D11_SAMPLER_DESC linear{};linear.Filter=D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+ linear.AddressU=linear.AddressV=linear.AddressW=D3D11_TEXTURE_ADDRESS_CLAMP;linear.ComparisonFunc=D3D11_COMPARISON_NEVER;linear.MaxLOD=D3D11_FLOAT32_MAX;
+ if(!d3d12_&&!cave_compose_sampler_&&FAILED(hr=device_->CreateSamplerState(&linear,&cave_compose_sampler_)))return hr;
+ // Colour (GPU): unpainted everywhere, then each painted map (the bounce
+ // takes the default albedo where the alpha is not 1).
+ const float unpainted[4]{};
+ if(d3d12_)d3d12_->clear_texture(*cave12_.world_color,unpainted);
+ else context_->ClearUnorderedAccessViewFloat(cave_world_color_uav_.Get(),unpainted);
+ const auto add=[&](std::array<float,3> map_origin,float extent_x,float extent_y,ID3D11ShaderResourceView* color,const D3D12Texture* color12,
+                    float color_texels_per_metre)->HRESULT{
+  if(!color&&!color12)return S_OK;
+  CaveComposeConstants c{};
+  c.world_origin[0]=origin[0];c.world_origin[1]=origin[1];c.texel=kCaveWorldTexel;c.color_level=0;
+  for(int k=0;k<3;++k)c.map_origin[k]=map_origin[k];
+  c.map_size[0]=extent_x;c.map_size[1]=extent_y;c.color_texels_per_metre=color_texels_per_metre;
+  const long x0=std::max(0l,long(std::floor((map_origin[0]-origin[0])/kCaveWorldTexel))),y0=std::max(0l,long(std::floor((map_origin[1]-origin[1])/kCaveWorldTexel)));
+  const long x1=std::min(long(size[0]),long(std::ceil((map_origin[0]+extent_x-origin[0])/kCaveWorldTexel))),y1=std::min(long(size[1]),long(std::ceil((map_origin[1]+extent_y-origin[1])/kCaveWorldTexel)));
+  if(x1<=x0||y1<=y0)return S_OK;
+  c.first[0]=std::int32_t(x0);c.first[1]=std::int32_t(y0);c.count[0]=std::uint32_t(x1-x0);c.count[1]=std::uint32_t(y1-y0);
+  const UINT gx=(c.count[0]+7)/8,gy=(c.count[1]+7)/8;
+  if(d3d12_){
+   d3d12_->clear_slots();d3d12_->set_constants(0,&c,sizeof(c));
+   d3d12_->set_resource(1,color12);d3d12_->set_sampler(0,linear);
+   d3d12_->set_unordered(1,cave12_.world_color.get());
+   const HRESULT r=d3d12_->dispatch(cave12_.programs[3],gx,gy,1);
+   d3d12_->clear_slots();
+   return r; // S_FALSE: its pipeline is not ready yet
+  }
+  D3D11_MAPPED_SUBRESOURCE mapped{};HRESULT r;
+  if(FAILED(r=context_->Map(cave_compose_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped)))return r;
+  std::memcpy(mapped.pData,&c,sizeof(c));context_->Unmap(cave_compose_constants_.Get(),0);
+  ID3D11UnorderedAccessView* outputs[2]={nullptr,cave_world_color_uav_.Get()};
+  context_->CSSetConstantBuffers(0,1,cave_compose_constants_.GetAddressOf());
+  context_->CSSetShaderResources(1,1,&color);context_->CSSetSamplers(0,1,cave_compose_sampler_.GetAddressOf());
+  context_->CSSetUnorderedAccessViews(0,2,outputs,nullptr);context_->CSSetShader(cave_compose_cs_.Get(),nullptr,0);
+  context_->Dispatch(gx,gy,1);
+  ID3D11ShaderResourceView* no_input=nullptr;ID3D11UnorderedAccessView* no_outputs[2]{};ID3D11Buffer* no_constants=nullptr;
+  context_->CSSetUnorderedAccessViews(0,2,no_outputs,nullptr);context_->CSSetShaderResources(1,1,&no_input);
+  context_->CSSetConstantBuffers(0,1,&no_constants);context_->CSSetShader(nullptr,nullptr,0);
+  return S_OK;
+ };
+ // The active map's colour: 2 texels per metre at level 0 (4 per tile; D3D12 its own count).
+ const bool active_painted=d3d12_?gc12_.map.color&&gc12_.map.color_ready&&gc12_.map.generation==ambient_map_generation_:
+  gc_color_srv_&&gc_map_generation_==ambient_map_generation_&&!gc_color_unpainted_;
+ if(FAILED(hr=add({0,0,0},2.f*ambient_tiles_x_,2.f*ambient_tiles_y_,!d3d12_&&active_painted?gc_color_srv_.Get():nullptr,
+                  d3d12_&&active_painted?gc12_.map.color.get():nullptr,d3d12_?.5f*float(gc12_.map.color_texels):2.f)))return hr;
+ bool pending=hr!=S_OK;
+ // Each painted neighbour (2 colour texels per tile: 1 per metre).
+ for(const auto& n:gc_neighbours_){
+  const bool painted=d3d12_?n.cover12.color_ready:n.prepared&&n.color!=nullptr;
+  if(!painted)continue;
+  if(FAILED(hr=add(n.origin,2.f*n.tiles_x,2.f*n.tiles_y,d3d12_?nullptr:n.color.Get(),d3d12_?n.cover12.color.get():nullptr,
+                   d3d12_?.5f*float(n.cover12.color_texels):1.f)))return hr;
+  pending|=hr!=S_OK;
+ }
+ return pending?S_FALSE:S_OK;
+}catch(...){return E_FAIL;}
 
 // Caves only, once per frame from the colour flush where the sky would
 // draw: the daylight haze past each exit (kCaveGlowShader). Additive, behind
@@ -813,8 +1041,13 @@ CaveSampleConstants Renderer::cave_sample_constants() const noexcept {
  CaveSampleConstants values{};
  if(!cave_volume_active_||!(cave_volume_cell_>0)||hit_test_active_)return values;
  for(int k=0;k<3;++k){
-  values.origin[k]=cave_volume_origin_[k];
-  values.inverse_extent[k]=cave_volume_size_[k]?1.f/(cave_volume_size_[k]*cave_volume_cell_):0.f;
+  values.origin[k]=cave_volume_origin_[k];values.fine_size[k]=float(cave_volume_size_[k]);
+  values.texel_scale[k]=cave_volume_texture_[k]?1.f/float(cave_volume_texture_[k]):0.f;
+ }
+ values.fine_cell=cave_volume_cell_;values.fine_inverse_cell=1.f/cave_volume_cell_;
+ if(cave_world_active_&&cave_world_layout_.valid())for(int k=0;k<3;++k){
+  values.world_origin[k]=cave_world_layout_.origin[k];values.world_size[k]=float(cave_world_layout_.size[k]);
+  values.world_inverse_cell=1.f/cave_world_layout_.cell;
  }
  values.strength=1.f;
  values.flags=float((configured_boolean(debug_overlay_.config(),"bounce_debug",false)?1u:0u)|(cave_volume_outdoor_?2u:0u)|

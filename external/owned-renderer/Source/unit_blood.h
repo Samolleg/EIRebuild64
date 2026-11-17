@@ -62,4 +62,61 @@ bool read_unit_blood(const void* image, const void* unit, std::uint32_t& blood,
     return true;
 }
 
+// The unit database skin of a unit the game gave no texture name (script
+// AddUnitToServer: CreatePersonage fills no texture for non-humans). Same
+// verified prototype/race rows as above; prototype +0Ch is the skin index,
+// race +E8h the model mask (CString) and +ECh the primary texture list
+// (vector<CString> begin/end). The mask must equal the unit's own figure
+// mask, which confirms the record layout on every read.
+template<class Read>
+bool read_unit_race_skin(const void* image, const void* unit, const char* figure_mask,
+                         char (&texture)[64], Read read,
+                         const UnitBloodIdentity& identity = {}) noexcept {
+    static_assert(sizeof(void*) == 4, "supported game ABI is x86");
+    texture[0] = 0;
+    const auto get = [&](const void* base, std::size_t offset, auto& value) {
+        return read(base, offset, &value, sizeof(value));
+    };
+    const auto row = [&](std::size_t rva, std::uint32_t index, std::size_t stride, const void*& out) {
+        std::uintptr_t first = 0, last = 0;
+        if (!get(image, rva, first) || !get(image, rva + 4, last) || !first || last < first ||
+            (last - first) % stride || index >= (last - first) / stride) return false;
+        out = reinterpret_cast<const void*>(first + index * stride);
+        return true;
+    };
+    const auto text = [&](const char* source, char* out, std::size_t size) {
+        if (!source) return false;
+        for (std::size_t i = 0; i < size; ++i) {
+            if (!get(source, i, out[i])) return false;
+            if (!out[i]) return true;
+        }
+        return false;
+    };
+    std::uint32_t subtype = 0, race = 0, skin = 0;
+    const void* prototype = nullptr;
+    const void* model = nullptr;
+    const char* mask = nullptr;
+    std::uintptr_t first = 0, last = 0;
+    char mask_text[64]{};
+    if (!figure_mask || !get(unit, 0x18, subtype) || !row(identity.prototypes, subtype, 288, prototype) ||
+        !get(prototype, 8, race) || !get(prototype, 0xc, skin) ||
+        !row(identity.races, race, 360, model) || !get(model, 0xe8, mask) ||
+        !text(mask, mask_text, sizeof(mask_text))) return false;
+    for (std::size_t i = 0;; ++i) {
+        const auto fold = [](char c) { return c >= 'A' && c <= 'Z' ? char(c + 32) : c; };
+        const char a = fold(mask_text[i]), b = fold(figure_mask[i]);
+        if (a != b) return false;
+        if (!a) break;
+    }
+    const char* name = nullptr;
+    if (!get(model, 0xec, first) || !get(model, 0xf0, last) || !first || last < first ||
+        (last - first) % 4 || skin >= (last - first) / 4 ||
+        !get(reinterpret_cast<const void*>(first), skin * 4, name) ||
+        !text(name, texture, sizeof(texture)) || !texture[0]) {
+        texture[0] = 0;
+        return false;
+    }
+    return true;
+}
+
 } // namespace owned::critters
