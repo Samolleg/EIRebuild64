@@ -26,6 +26,7 @@ foreach ($file in $dlssFiles) {
         throw "Missing DLSS SDK v310.9.16 file: $DlssSdkSource/$file. Pass -DlssSdkSource or set EIREBUILD64_DLSS_SDK. Nothing will be downloaded."
     }
 }
+. (Join-Path $PSScriptRoot 'sdk-files.ps1')
 # Resolve pinned local D3D12 inputs before copying any dependencies.
 $d3d12Packages = @(
     @{ Source='deps/fidelityfx-sdk/2.3.0'; Destination='dependencies/fidelityfx/2.3.0'; Files=@(
@@ -45,7 +46,7 @@ $d3d12Packages = @(
 $d3d12Files = foreach ($package in $d3d12Packages) {
     $source = Join-Path $projectRoot $package.Source
     foreach ($pattern in $package.Files) {
-        $matches = @(Get-ChildItem -Path (Join-Path $source $pattern) -File -Recurse -ErrorAction Stop)
+        $matches = @(Get-LocalSdkFiles $source $pattern)
         if (!$matches.Count) { throw "Missing local D3D12 SDK input: $source/$pattern. Nothing will be downloaded." }
         foreach ($file in $matches) {
             [pscustomobject]@{ Source=$file.FullName; Destination=(Join-Path (Join-Path $repo $package.Destination) $file.FullName.Substring($source.Length+1)) }
