@@ -19,9 +19,11 @@ int wmain(int argc,wchar_t** argv) try {
     check(mesh.shape_count==1 && mesh.morph_components.empty(),"rigid memory layout");
     check(asset->minimum==std::array<float,3>{-1,-1,0} && asset->maximum==std::array<float,3>{1,1,2},"axis conversion/collider bounds");
     check(asset->geometry_bytes<=1100,"compact vertex/index budget");
+    check(*asset->parts[0].texture->source==std::vector<std::uint8_t>{53,97,160,255},"linear baseColorFactor to sRGB BGRA");
+    check(asset->parts[0].material->diffuse==std::array<float,4>{1,1,1,1},"albedo factor applied once");
     for(unsigned i=0;i<1000;++i) {
         auto instance=owned::environment::assembly(asset,{},i+1);
-        check(instance->parts[0].geometry==asset->parts[0].geometry && instance->parts[0].texture==asset->white,"resource duplication");
+        check(instance->parts[0].geometry==asset->parts[0].geometry && instance->parts[0].texture==asset->parts[0].texture,"resource duplication");
         check(instance->skeleton==asset->transforms && instance->equipment.empty(),"shared rigid transforms");
     }
     auto scaled=owned::environment::decode(read(root/L"scaled.glb"),"scaled");

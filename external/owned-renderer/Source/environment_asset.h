@@ -8,6 +8,7 @@ struct Part {
     std::string name;
     std::shared_ptr<const FigureCpuAsset> geometry;
     std::shared_ptr<const MaterialCpuAsset> material;
+    std::shared_ptr<const TextureCpuAsset> texture;
     std::array<float,3> minimum{}, maximum{}; // explicit model-local, game Z-up collider
     bool solid = false;
 };
@@ -15,7 +16,6 @@ struct Asset {
     ResourceIdentity identity;
     std::vector<Part> parts;
     std::shared_ptr<const ModelCpuAsset> transforms; // rigid scene nodes, no joints/skin
-    std::shared_ptr<const TextureCpuAsset> white;
     std::array<float,3> minimum{}, maximum{};
     std::uint64_t geometry_bytes = 0;
 };

@@ -68,6 +68,7 @@ std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& 
     auto model=std::make_shared<ModelCpuAsset>();model->visual_reference=visual;
     model->model_container=blob.identity;
     std::set<const cgltf_node*> visited;std::set<std::string> names;
+    std::map<std::array<std::uint8_t,4>,std::shared_ptr<const TextureCpuAsset>> colours;
     std::function<void(const cgltf_node*,unsigned)> visit;
     visit=[&](const cgltf_node* node,unsigned depth) {
         require(depth<64 && visited.insert(node).second,"cyclic/repeated scene node");
@@ -139,6 +140,7 @@ std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& 
             bounds.radius=mesh->shape_position_radii[0];mesh->bounds.push_back(bounds);
             auto material=std::make_shared<MaterialCpuAsset>();material->source=MaterialValueSource::completed_native;
             material->diffuse=material->ambient={1,1,1,1};material->specular={0,0,0,1};material->emissive={0,0,0,1};
+            std::array<std::uint8_t,4> bgra={255,255,255,255};
             if(const auto* input=primitive.material) {
                 require(input->alpha_mode==cgltf_alpha_mode_opaque && !input->double_sided && input->has_pbr_metallic_roughness &&
                         input->pbr_metallic_roughness.metallic_factor==0 && input->pbr_metallic_roughness.roughness_factor==1 &&
@@ -148,10 +150,22 @@ std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& 
                         !input->has_anisotropy && !input->has_dispersion && !input->unlit,"first rigid slice: opaque matte material");
                 for(unsigned a=0;a<3;++a) {
                     const float c=input->pbr_metallic_roughness.base_color_factor[a];
-                    require(std::isfinite(c) && c>=0 && c<=1,"base colour");material->diffuse[a]=material->ambient[a]=srgb(c);
+                    require(std::isfinite(c) && c>=0 && c<=1,"base colour");bgra[2-a]=static_cast<std::uint8_t>(std::lround(255*srgb(c)));
                     require(input->emissive_factor[a]==0,"first rigid slice: no emission");
                 }
             }
+            // The native lighting path samples albedo from the texture. Keep the
+            // material neutral and bake the glTF linear factor to sRGB texels.
+            auto& colour=colours[bgra];
+            if(!colour) {
+                auto texture=std::make_shared<TextureCpuAsset>();texture->identity=blob.identity;
+                texture->identity.canonical_name+="#environment-colour/"+std::to_string(bgra[0])+"/"+std::to_string(bgra[1])+"/"+std::to_string(bgra[2]);
+                texture->width=texture->height=1;texture->bit_count=32;texture->format=MmpFormat::argb8888;
+                texture->masks={0xff0000,0xff00,0xff,0xff000000};texture->shifts={16,8,0,24};texture->channel_bits={8,8,8,8};
+                texture->source=std::make_shared<const std::vector<std::uint8_t>>(bgra.begin(),bgra.end());texture->texel_offset=0;
+                texture->opaque_mips=1;texture->mips.push_back({1,1,0,4});colour=texture;
+            }
+            part.texture=colour;
             output->geometry_bytes+=mesh->positions.size()*sizeof(NativePackedGroup)+mesh->normals.size()*sizeof(NativePackedGroup)+
                 mesh->components.size()*sizeof(NativeVertexComponent)+mesh->indices.size()*sizeof(std::uint16_t)+sizeof(NativeTextureCoordinate);
             part.geometry=mesh;part.material=material;output->parts.push_back(std::move(part));
@@ -162,11 +176,6 @@ std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& 
     };
     for(cgltf_size i=0;i<scene->nodes_count;++i)visit(scene->nodes[i],0);
     require(!output->parts.empty(),"empty scene");output->transforms=model;
-    auto texture=std::make_shared<TextureCpuAsset>();texture->identity=blob.identity;texture->identity.canonical_name+="#environment-white";
-    texture->width=texture->height=1;texture->bit_count=32;texture->format=MmpFormat::argb8888;
-    texture->masks={0xff0000,0xff00,0xff,0xff000000};texture->shifts={16,8,0,24};texture->channel_bits={8,8,8,8};
-    texture->source=std::make_shared<const std::vector<std::uint8_t>>(4,255);texture->texel_offset=0;
-    texture->opaque_mips=1;texture->mips.push_back({1,1,0,4});output->white=texture;
     return output;
 }
 
@@ -206,7 +215,7 @@ std::shared_ptr<const VisualAssemblyAsset> assembly(const std::shared_ptr<const 
         const auto& source=asset->parts[i];
         if(!selected.empty() && std::none_of(selected.begin(),selected.end(),[&](const auto& s){return lower(s)==lower(source.name);}))continue;
         VisualPartAsset part;part.name=source.name;part.geometry=source.geometry;part.material=source.material;
-        part.texture=asset->white;part.skeleton_node=i;
+        part.texture=source.texture;part.skeleton_node=i;
         result->parts.push_back(std::move(part));
     }
     require(!result->parts.empty(),"empty part selection");return result;
