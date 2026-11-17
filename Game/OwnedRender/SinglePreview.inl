@@ -1,3 +1,4 @@
+#include "model_draw.h"
 // Source resource adapter for SinglePreview.h presentation and pass ordering.
 struct SourceSinglePreview {
     CI3DItemScreen* screen;
@@ -65,6 +66,7 @@ struct SourceSinglePreview {
         figure->Draw(renderer);
     }
     void draw_head() {
+        owned::ModelDrawScope preview(owned::ModelDrawDomain::preview);
         OwnedRender::E4::Icon binding(figure,icon);
         figure->Draw(renderer);
     }

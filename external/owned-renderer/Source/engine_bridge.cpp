@@ -60,7 +60,6 @@
 #include "model_preview_geometry.h"
 #include "model_preview_clock.h"
 #include "model_preview_material.h"
-#include "model_preview_lighting.h"
 #include "model_preview_producer.h"
 #include "model_preview_presentation.h"
 #include "model_lighting.h"
@@ -8060,7 +8059,7 @@ bool preview_world_to_clip(const std::array<float,16>& world,
 
 #if !defined(EID3D11_EMBEDDED)
 bool interface_studio_lighting(void* renderer, const std::array<float,16>& clip,
-    const FigureBoundingVolume& box, NativeWorldLighting& lighting) noexcept;
+    const FigureBoundingVolume& box, NativeWorldLighting& lighting, bool doll_fill = false) noexcept;
 
 // The device path's preview studio light (BridgeSceneHandoff::preview_lighting),
 // open from the preview's object transaction until that transaction ends.
@@ -8121,7 +8120,7 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
             FigureBoundingVolume origin{};
             for (unsigned axis=0;axis<3;++axis) origin.minimum[axis]=origin.maximum[axis]=base_world[axis*4+3];
             NativeWorldLighting studio{};
-            if (!interface_studio_lighting(renderer,world_to_clip,origin,studio) || !g_scene_handoff.preview_lighting ||
+            if (!interface_studio_lighting(renderer,world_to_clip,origin,studio,true) || !g_scene_handoff.preview_lighting ||
                 g_scene_handoff.context!=g_native_sink_context ||
                 !g_scene_handoff.preview_lighting(g_scene_handoff.context,&studio)) return fail("preview.lighting");
             g_preview_lighting_open=true;
@@ -8251,7 +8250,7 @@ ObjectPlanExecutionStatus execute_owned_preview_render_plan(
             // The studio light from the viewer toward the figure's origin.
             FigureBoundingVolume origin{};
             for (unsigned axis=0;axis<3;++axis) origin.minimum[axis]=origin.maximum[axis]=base_world[axis*4+3];
-            if (!interface_studio_lighting(renderer,world_to_clip,origin,command->portrait_lighting))
+            if (!interface_studio_lighting(renderer,world_to_clip,origin,command->portrait_lighting,true))
                 return fail("preview.lighting");
             command->sample=std::move(sample);
             command->texture_time=texture_time; command->fog=fog;
@@ -8303,18 +8302,78 @@ bool read_owned_world_time(const std::uint8_t* image, double& time) noexcept;
 bool read_portrait_world_time(double& time) noexcept;
 constexpr std::uint32_t kPortraitPreviewView = 2;   // views 0/1: panel and inventory previews
 
-// All interface previews share one camera-relative studio policy. The native
-// pipeline already supplies its ambient floor and single directional light.
+// The interface previews' studio light (portraits, the character panel and
+// inventory doll): a fixed neutral key from the viewer and a fixed ambient,
+// independent of the world's time of day, sun and weather. clip: the
+// preview's complete clip of the space the box is in; the key comes from the
+// eye toward the box centre (orthographic: along the view).
 bool interface_studio_lighting(void*, const std::array<float,16>& clip,
-    const FigureBoundingVolume& box, NativeWorldLighting& lighting) noexcept {
+    const FigureBoundingVolume& box, NativeWorldLighting& lighting, bool doll_fill) noexcept {
+    // The same eye/backwards-ray construction as liquidViewDirection in the
+    // native shader: this complete interface clip owns the preview's view.
+    const auto cross = [](const std::array<float,3>& a, const std::array<float,3>& b) {
+        return std::array<float,3>{a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]};
+    };
+    const auto dot = [](const std::array<float,3>& a, const std::array<float,3>& b) {
+        return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+    };
+    const std::array<float,3> a{clip[0],clip[1],clip[2]}, b{clip[4],clip[5],clip[6]},
+        c{clip[12],clip[13],clip[14]}, depth{clip[8],clip[9],clip[10]};
+    const auto bc=cross(b,c), ca=cross(c,a), ab=cross(a,b);
+    const float determinant=dot(a,bc);
+    std::array<float,3> direction{};
+    for (unsigned axis=0;axis<3;++axis)
+        direction[axis]=std::abs(determinant)>1e-8f ?
+            (-clip[3]*bc[axis]-clip[7]*ca[axis]-clip[15]*ab[axis])/determinant-
+                .5f*(box.minimum[axis]+box.maximum[axis]) :
+            -ab[axis]*(dot(ab,depth)<0 ? -1.f : 1.f);
+    const float length_squared=dot(direction,direction);
+    if (!std::isfinite(length_squared) || length_squared<=1e-12f) return false;
+    const float inverse_length=1.f/std::sqrt(length_squared);
+    // Authored UI policy, pending human appearance confirmation: 40% ambient,
+    // 60% frontal key, both neutral white.
+    lighting.ambient={.4f,.4f,.4f,1}; lighting.sunlight_diffuse={.6f,.6f,.6f,1};
+    lighting.sunlight_direction={0,0,0,0};
+    std::array<float,3> key{};
+    for (unsigned axis=0;axis<3;++axis) lighting.sunlight_direction[axis]=key[axis]=direction[axis]*inverse_length;
+    if (!doll_fill) return true;
+    // Doll previews (character pane, outfitting): a soft fill from the
+    // viewer's side, ~20 degrees above the eye, slightly warm, added to the
+    // key. The world's lighting model has one directional light: key and
+    // fill are summed into it, which is exact wherever a surface faces both
+    // (the doll's front), and a small ambient lift stands for the fill's
+    // share on surfaces turned from the key. No shader or world change.
+    // Screen up at the figure, from this clip: the gradient of NDC y there.
     std::array<float,3> center{};
-    for(unsigned axis=0;axis<3;++axis)
-        center[axis]=.5f*box.minimum[axis]+.5f*box.maximum[axis];
-    PreviewStudioLighting studio;
-    if(!make_preview_studio_lighting(clip,center,studio))return false;
-    lighting.ambient=studio.ambient;
-    lighting.sunlight_diffuse=studio.diffuse;
-    lighting.sunlight_direction=studio.direction;
+    for (unsigned axis=0;axis<3;++axis) center[axis]=.5f*(box.minimum[axis]+box.maximum[axis]);
+    const std::array<float,3> row_y{clip[4],clip[5],clip[6]}, row_w{clip[12],clip[13],clip[14]};
+    const float clip_y=dot(row_y,center)+clip[7], clip_w=dot(row_w,center)+clip[15];
+    std::array<float,3> up{};
+    for (unsigned axis=0;axis<3;++axis) up[axis]=row_y[axis]*clip_w-row_w[axis]*clip_y;
+    const float along=dot(up,key);
+    for (unsigned axis=0;axis<3;++axis) up[axis]-=along*key[axis];
+    const float up_squared=dot(up,up);
+    const float up_scale=std::isfinite(up_squared) && up_squared>1e-12f ? 1.f/std::sqrt(up_squared) : 0.f;
+    // The game draws the outfitting doll and its face figures with ambient
+    // 1,1,1 (CI3DItemScreen::DrawUnit/DrawHead): full texture brightness on
+    // every surface. The key keeps the doll's shape, its front reaches that
+    // brightness, and the ambient floor (kDollAmbient) keeps the face, curved
+    // and under helmet brows, close to it instead of the portraits' 0.4.
+    constexpr float kKey=.7f, kFill=.3f, kFillSin=.342f, kFillCos=.94f;   // 20 degrees above the eye
+    constexpr float kDollAmbient=.68f;
+    constexpr float kWarm[3]={1.f,.96f,.9f};
+    std::array<float,3> fill{};
+    for (unsigned axis=0;axis<3;++axis) fill[axis]=key[axis]*kFillCos+up[axis]*up_scale*kFillSin;
+    std::array<float,3> sum{};
+    for (unsigned axis=0;axis<3;++axis) sum[axis]=kKey*key[axis]+kFill*fill[axis];
+    const float sum_length=std::sqrt(dot(sum,sum));
+    for (unsigned axis=0;axis<3;++axis) lighting.sunlight_direction[axis]=sum[axis]/sum_length;
+    for (unsigned c=0;c<3;++c) {
+        std::array<float,3> tinted{};
+        for (unsigned axis=0;axis<3;++axis) tinted[axis]=kKey*key[axis]+kFill*kWarm[c]*fill[axis];
+        lighting.sunlight_diffuse[c]=std::sqrt(dot(tinted,tinted));
+        lighting.ambient[c]=kDollAmbient+.04f*kWarm[c];
+    }
     return true;
 }
 

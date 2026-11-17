@@ -1,4 +1,6 @@
 #include "model_preview_producer.h"
+#include "../Game/OwnedRender/ModelPreviewLighting.h"
+#include "model_draw.h"
 #include <iostream>
 #include <stdexcept>
 
@@ -144,6 +146,29 @@ int main() try {
         },wound,result), "FIG preview failed");
     require(draws == 1 && binds == 1 && partCalls == 1 && !groupCalls, "FIG hidden part/set handling changed");
     std::cout << "PASS FIG preview color/material and hidden-part regression\n";
+    OwnedRender::ModelPreviewLighting studio;
+    studio.world.ambient={1,1,1,1};studio.points.resize(3);
+    require(OwnedRender::produce_model_preview_lighting(clip,{0,0,5},studio),"embedded studio policy rejected");
+    require(studio.points.empty() && studio.world.ambient[0]==.3f &&
+        studio.world.sunlight_direction[0]<0 && studio.world.sunlight_direction[1]>0,
+        "embedded preview retained full ambient/world point lights");
+    draws=0;
+    require(produce_model_preview(input,2,
+        [](std::size_t,ModelPartFacts&){return true;},[](unsigned){return true;},
+        [](std::size_t i,ModelPreviewPart& part){part.ordinal=i;part.hidden=i==1;
+            part.material.default_colors=false;
+            part.material.lighting=OwnedRender::model_preview_tinted_lighting(placement,0xff808080u);return true;},
+        [&](const NativeGeometryView& view,const ModelPreviewPart&){
+            require(view.lighting.enabled && !(view.flags&4u),"embedded FIG bypassed studio lighting");
+            require(std::abs(view.lighting.material_diffuse[0]-128.f/255)<1e-6f &&
+                view.lighting.object_to_world==placement,"preview tint/placement lost");++draws;return true;},wound,result),"lit FIG preview failed");
+    require(draws==1,"lit FIG pass count changed");
+    const auto priorDomain=model_draw_domain;
+    { ModelDrawScope head(ModelDrawDomain::preview);
+      require(model_draw_is_preview(),"standalone head studio scope missing");
+    }
+    require(model_draw_domain==priorDomain,"head scope leaked to item icons/world");
+    std::cout<<"PASS embedded x64 studio replaces full ambient/world points, FIG retains tint with one color submission, portrait scope restores\n";
     return 0;
 } catch (const std::exception& error) {
     std::cerr << "FAIL " << error.what() << '\n'; return 1;

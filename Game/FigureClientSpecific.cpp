@@ -16,6 +16,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "native_placed_figure.h"
 #include "model_draw.h"
 #include "model_preview_material.h"
+#include "OwnedRender/ModelPreviewLighting.h"
 #include "GameJournal.h"
 #include "CorePerf.h"
 /////////////////////////////////////////////////////////////////////////////////////
@@ -226,7 +227,8 @@ bool CFigureClientSpecific::SubmitNativeFigure(CRenderer* renderer, CMaterial* m
             static_cast<std::uint32_t>(pFigure->nIndices)};
     }
     const bool defaults = pFigure->CheckFlag(FIG_USE_DEFAULT_COLORS) != 0;
-    const bool prelit = !lights && !defaults && pFigure->CheckFlag(FIG_LIGHTED);
+    const bool studioPreview = owned::model_draw_is_preview();
+    const bool prelit = !studioPreview && !lights && !defaults && pFigure->CheckFlag(FIG_LIGHTED);
     if (prelit) {
         streams.diffuse = reinterpret_cast<const std::uint32_t*>(pFigure->colors.GetData());
         streams.specular = reinterpret_cast<const std::uint32_t*>(pFigure->speculars.GetData());
@@ -240,7 +242,17 @@ bool CFigureClientSpecific::SubmitNativeFigure(CRenderer* renderer, CMaterial* m
     owned::NativeLighting response;
     owned::NativeWorldLighting illumination;
     std::vector<owned::RetainedWorldPointLight> points;
-    if (lights && !defaults) {
+    if (studioPreview) {
+        // Standalone head figures use a uniform UI scale. Compute the camera
+        // frame in their local space, so ordinary item icons remain untouched.
+        OwnedRender::ModelPreviewLighting studio;
+        if(!OwnedRender::produce_model_preview_lighting(view.object_to_clip,{0,0,0},studio))
+            return reject("preview.studio_lighting");
+        illumination=studio.world;
+        const std::array<float,16> local{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+        response=OwnedRender::model_preview_tinted_lighting(local,defaults?pFigure->GetDefaultColor():0xffffffffu);
+        view.interface_preview=true;
+    } else if (lights && !defaults) {
         if (!material || !gpu->IsHaveMatrix(MAT_STACK_WORLDSPACE)) return reject("material_or_world_matrix");
         std::array<float,16> world;
         memcpy(world.data(), &gpu->GetMatrix(MAT_STACK_WORLDSPACE), sizeof(SHMatrix));
@@ -269,10 +281,10 @@ bool CFigureClientSpecific::SubmitNativeFigure(CRenderer* renderer, CMaterial* m
     owned::apply_native_placed_state(view,
         reinterpret_cast<const owned::NativeMorphOffset*>(pFigure->morphs.GetData()),
         pFigure->morphs.GetSize(), response, owned::NativeOrdering::preserve,
-        defaults || (!lights && !prelit),
+        !studioPreview && (defaults || (!lights && !prelit)),
         defaults ? pFigure->GetDefaultColor() : renderer->GetAmbientColor(),
         defaults ? pFigure->GetDefaultSpecular() : (std::uint32_t(fog) << 24));
-    owned::apply_model_preview_material(view, {defaults || (!lights && !prelit),
+    owned::apply_model_preview_material(view, {!studioPreview && (defaults || (!lights && !prelit)),
         material && material->CheckFlag(MAT_USE_SPECULAR), view.default_diffuse,
         view.default_specular, response, owned::NativeOrdering::preserve});
     return renderer->GetD3D()->SubmitC74Figure(view, response.enabled ? &illumination : nullptr, points);

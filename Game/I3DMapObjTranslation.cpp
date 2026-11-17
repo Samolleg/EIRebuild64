@@ -59,7 +59,7 @@ void CI3DMapObjTranslation::Draw(CRenderer *pRend)
     m_pMapObject->SetExactPosition(previewTime);
     OwnedRender::ModelPreviewPresentation presentation;
     presentation.id = m_pMapObject->GetID();
-    presentation.full_ambient = presentation.default_fog = true;
+    presentation.default_fog = true;
     OwnedRender::ModelPreviewPresentationScope presentationScope(presentation);
     owned::ModelDrawScope previewScope(owned::ModelDrawDomain::preview);
     m_pMapObject->Draw(pRend);

@@ -1,44 +1,31 @@
 #pragma once
 #include "model_lighting.h"
+#include "model_preview_lighting.h"
 
 namespace OwnedRender {
-using owned::ModelLightingFacts;
-using owned::ModelPointLightFacts;
-using owned::NativeWorldLighting;
-using owned::RetainedWorldPointLight;
-using owned::produce_model_lighting;
-
-inline bool admit_model_preview_point_light(const ModelPointLightFacts& input,
-    const std::array<float,3>& object) noexcept {
-    if (!owned::admit_model_point_light(input)) return false;
-    float distance_squared = 0;
-    for (unsigned i = 0; i < 3; ++i) {
-        if (!std::isfinite(object[i])) return false;
-        const float delta = object[i] - input.value.center[i];
-        distance_squared += delta * delta;
-    }
-    const float reach = input.value.radius + 10.f;
-    return distance_squared <= reach * reach;
-}
-
 struct ModelPreviewLighting {
-    NativeWorldLighting world{};
-    std::vector<RetainedWorldPointLight> points;
+    owned::NativeWorldLighting world{};
+    std::vector<owned::RetainedWorldPointLight> points;
 };
-// Source preview selection uses the shared renderer ambient/sun and point admission.
-template<class Next>
-bool produce_model_preview_lighting(const ModelLightingFacts& world,
-    const std::array<float,3>& object, Next&& next, ModelPreviewLighting& output) {
+// The embedded x64 host owns this path. No world ambient, sun, point-light
+// manager, or legacy full-ambient flag can override the interface studio.
+inline bool produce_model_preview_lighting(const std::array<float,16>& clip,
+    const std::array<float,3>& object, ModelPreviewLighting& output) {
+    owned::PreviewStudioLighting studio;
+    if(!owned::make_preview_studio_lighting(clip,object,studio))return false;
+    output.world={};
+    output.world.ambient=studio.ambient;
+    output.world.sunlight_diffuse=studio.diffuse;
+    output.world.sunlight_direction=studio.direction;
     output.points.clear();
-    if (!produce_model_lighting(world, output.world)) return false;
-    ModelPointLightFacts light;
-    while (next(light)) {
-        if (admit_model_preview_point_light(light, object)) {
-            if (!light.value.source_id) light.value.source_id = int(output.points.size()) + 1;
-            output.points.push_back(light.value);
-        }
-        light = {};
-    }
     return true;
+}
+inline owned::NativeLighting model_preview_tinted_lighting(const std::array<float,16>& world,
+    std::uint32_t color) noexcept {
+    owned::NativeLighting result;
+    result.enabled=1;result.object_to_world=world;
+    result.material_diffuse={float((color>>16)&255)/255.f,float((color>>8)&255)/255.f,float(color&255)/255.f};
+    result.material_alpha=float(color>>24)/255.f;
+    return result;
 }
 } // namespace OwnedRender
