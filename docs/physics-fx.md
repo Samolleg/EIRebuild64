@@ -5,7 +5,11 @@ Fireball and explosive shot already share this effect. Damage, projectile travel
 navigation and network/save formats are unchanged.
 
 The source must be within 0.35–2 metres (bounded by the effect radius) of stone,
-rock or high-rock base terrain. Water/lava/swamp, Astral, upper layers and known
+rock or high-rock base terrain. Natural grass/soil/snow/dry-grass cover also emits
+stone on source triangles steeper than the 40-degree walk limit: the base sound
+type alone does not describe a rocky cliff. Flat cover, sand and ice do not gain
+stone emission. This geometric decision is independent of graphics settings.
+Water/lava/swamp, Astral, upper layers and known
 bridges are not impact sources. No static-object, actor or debris/debris collision
 is introduced. Terrain is the source mesh, not camera LOD or shader cliff expansion.
 This first stage is intended for open terrain; walls/trees/boulders are not colliders.
@@ -13,7 +17,7 @@ This first stage is intended for open terrain; walls/trees/boulders are not coll
 Physics owns up to 128 bodies and 16 local terrain patches. Adjacent effects may
 have overlapping patches; per-patch collision layers prevent duplicate contacts.
 Shapes have six vertices and eight facets, shared by the physical and render shapes.
-Eight to twelve fragments, 3.6–12 cm across, live for 3–5 game seconds, fading in
+Forty-eight to sixty-four fragments: 5–12 cm chips and 6–8 larger 16–26 cm chunks, live for 3–5 game seconds, fading in
 their last 0.6 seconds. A patch extends 12 m from its centre; outlying fragments
 retire before its boundary. Shapes and patches are released when no longer needed.
 
@@ -22,6 +26,13 @@ all four steps; drawing never advances simulation. Combat pause freezes age and
 poses. No wall-clock catch-up exists. Zone reset destroys all physical state.
 Events are keyed by effect ID/start tick, consumed during initial sync, and stale
 or repeated visible incarnations are ignored. Cosmetic randomness is private.
+
+The fragments sample the game's `stones00` rock atlas through the normal texture
+manager/provider order. Every facet has separate inset UVs into one of its four
+cells. The texture is retained with the physics client and its completed surface
+publication is pinned for the render frame; world reset releases it. No shader
+changes, new texture files or particle-option switches are required. Missing art
+is logged as `texture_unavailable`; fragments are not drawn as untextured stand-ins.
 
 The render bridge queues four cached meshes through the existing native figure
 path. It uses world lighting and depth, no own shadows, and draws before water

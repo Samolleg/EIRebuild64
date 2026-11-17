@@ -34,3 +34,9 @@ as `EIREBUILD64_SHADER_RESOURCE_MANIFEST` to a child process, including
 build, the checked-out main may be the merge of the pinned base and the exact
 manifest changes. Both resulting EXEs are checked against every manifest
 resource before the build can complete or installation can start.
+
+A pinned accepted shader source may be `current` or `previous`; both still require
+the exact EXE hash and acceptance receipt. The build HEAD must include current
+main, and the manifest covers the complete diff from the accepted source commit,
+including explicit deleted non-shader files verified against Git. This permits
+CPU-only intervening acceptances without silently recompiling shaders.

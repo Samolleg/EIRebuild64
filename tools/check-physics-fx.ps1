@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$OutputDirectory)
+param([Parameter(Mandatory=$true)][string]$OutputDirectory,[string]$SourceCases)
 $ErrorActionPreference='Stop'
 $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $out=[IO.Path]::GetFullPath($OutputDirectory)
@@ -23,7 +23,8 @@ try {
         & "$vc/bin/Hostx64/x64/cl.exe" /nologo /std:c++17 /EHsc /MT /O2 /DNDEBUG /DNOMINMAX /DPX_PHYSX_STATIC_LIB "/Fe$exe" "$repo/tools/check-physics-fx.cpp" "$repo/Game/PhysicsFxPhysX.cpp" @libs /link user32.lib advapi32.lib *> "$out/compile.txt"
         if($LASTEXITCODE -ne 0){Get-Content "$out/compile.txt";throw 'Physics check compile failed'}
         Copy-Item "$physx/bin/PhysXGpu_64.dll" $out -Force
-        & $exe "$out/trajectory.csv" *> "$out/result.txt"
+        $checkArgs=@("$out/trajectory.csv");if($SourceCases){$checkArgs+=[IO.Path]::GetFullPath($SourceCases)}
+        & $exe @checkArgs *> "$out/result.txt"
         Get-Content "$out/result.txt" -Tail 12
         if($LASTEXITCODE -ne 0){throw 'Physics check failed'}
         $negative=Join-Path $out 'missing-runtime';New-Item -ItemType Directory -Force $negative | Out-Null

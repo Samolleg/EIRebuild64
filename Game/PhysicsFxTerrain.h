@@ -11,6 +11,15 @@ struct GroundHit {Vec point,normal;unsigned material=8;bool found=false;};
 inline constexpr unsigned TerrainIndices[24]={0,1,4,0,4,3,1,2,5,1,5,4,3,4,7,3,7,6,4,5,8,4,8,7};
 inline bool SolidTerrain(unsigned material){return material!=6&&material!=13&&material!=14&&material!=8;}
 inline bool StoneTerrain(unsigned material){return material==2||material==4||material==15;}
+// Natural cover can label a cliff as snow/grass/soil. The contact geometry,
+// not the atlas sound type alone, identifies exposed rock. Use the game's
+// 40 degree walk limit; sand, ice and liquids are not rock by slope alone.
+inline bool StoneSurface(const GroundHit& hit){
+    if(!hit.found)return false;
+    if(StoneTerrain(hit.material))return true;
+    const bool cover=hit.material==0||hit.material==1||hit.material==9||hit.material==11;
+    return cover&&std::isfinite(hit.normal.z)&&hit.normal.z>0&&hit.normal.z<.76604444f;
+}
 inline bool PlaneHit(const Triangle& t,Vec point,GroundHit& out){
     const Vec u{t.b.x-t.a.x,t.b.y-t.a.y,t.b.z-t.a.z},v{t.c.x-t.a.x,t.c.y-t.a.y,t.c.z-t.a.z};
     Vec n{u.y*v.z-u.z*v.y,u.z*v.x-u.x*v.z,u.x*v.y-u.y*v.x};
