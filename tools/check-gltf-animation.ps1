@@ -1,4 +1,4 @@
-param([Parameter(Mandatory=$true)][string]$OutputDirectory,[string]$Glb,[string]$Profile,[switch]$Equipment)
+param([Parameter(Mandatory=$true)][string]$OutputDirectory,[string]$Glb,[string]$Profile,[switch]$Equipment,[string]$ClothingDirectory)
 if($Equipment -and (!$Glb -or !$Profile)){throw "Equipment checks require -Glb and -Profile"}
 $ErrorActionPreference='Stop'
 $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -31,7 +31,8 @@ try {
     }
     & "$vc/bin/Hostx64/x64/cl.exe" /nologo /std:c++17 /EHsc /MT /O2 /Gy /Gw /DNOMINMAX "/I$repo/external/owned-renderer/Source" "/Fo$out/" "/Fe$exe" @extra "$repo/tools/$checkName.cpp" "$repo/external/owned-renderer/Source/owned_visual_evaluation.cpp" /link /OPT:REF d3d11.lib d3d12.lib dxgi.lib d3dcompiler.lib windowscodecs.lib ole32.lib *> "$out/compile.txt"
     if($LASTEXITCODE -ne 0){Get-Content "$out/compile.txt";throw 'glTF animation check compile failed'}
-    if($Glb){& $exe $Glb $Profile *> "$out/result.txt"}else{& $exe *> "$out/result.txt"}
+    if($ClothingDirectory){& $exe $Glb $Profile $ClothingDirectory *> "$out/result.txt"}
+    elseif($Glb){& $exe $Glb $Profile *> "$out/result.txt"}else{& $exe *> "$out/result.txt"}
     Get-Content "$out/result.txt"
     if($LASTEXITCODE -ne 0){throw 'glTF animation check failed'}
 } finally {

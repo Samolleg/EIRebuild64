@@ -121,7 +121,8 @@ static std::shared_ptr<const Asset> select_resource(const std::string &visual, b
         });
         asset->cache_key = blob.identity.key() + "|" + profile.identity.key();
         asset->cache_key += "|" + cacheKey;
-        require(asset->rigid == (itemBinding != nullptr), "selected asset kind");
+        require(itemBinding ? (itemBinding->skinned ? asset->wearable : asset->rigid) :
+            (!asset->rigid && !asset->wearable), "selected asset kind");
         if (asset->gpu_animation) asset->gpu_animation->key = asset->cache_key;
         const std::string detail = "model=\"" + resource +
             "\" glTF GPU animation asset loaded";
@@ -147,7 +148,7 @@ std::vector<EquipmentAsset> select_equipment(const std::vector<VisualEquipmentIt
         select_resource("",false,present,nullptr,&bindings,&item);
         for(const auto& binding:bindings) {
             auto asset=select_resource(binding.resource,false,present,&binding);
-            require(present && asset && asset->rigid,"item not available");
+            require(present && asset && (binding.skinned ? asset->wearable : asset->rigid),"item not available");
             result.push_back({asset,binding.socket,item.slot,binding.weapon,binding.arrow});
         }
     }

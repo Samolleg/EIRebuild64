@@ -1151,7 +1151,12 @@ const gltf::EquipmentSelection& prepare_gltf_equipment(const RetainedVisualSampl
  auto selected=std::make_shared<gltf::EquipmentSelection>();
  selected->items=gltf::select_equipment(sample.assembly->equipment);
  selected->radius=body.animation_radius;
- for(const auto& item:selected->items) {
+ for(auto& item:selected->items) {
+  if(item.asset->wearable) {
+   item.body_nodes=gltf::wearable_nodes(*item.asset,body);
+   selected->radius=(std::max)(selected->radius,gltf::wearable_radius(*item.asset,body,item.body_nodes));
+   continue;
+  }
   auto found=std::find_if(body.geometry.joints.begin(),body.geometry.joints.end(),
       [&](const skn::Joint& j){return j.name==item.socket;});
   if(found==body.geometry.joints.end())throw std::runtime_error("glTF equipment socket missing in body");
@@ -3626,10 +3631,16 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
       if(built && skn_asset->gltf_asset) {
        const auto& body=*skn_asset->gltf_asset;
        for(const auto& item:prepare_gltf_equipment(sample,body).items) {
-        const auto found=std::find_if(body.geometry.joints.begin(),body.geometry.joints.end(),
-            [&](const skn::Joint& j){return j.name==item.socket;});
-        const std::vector<unsigned> nodes{static_cast<unsigned>(assembly.skeleton->nodes.size()+
-            (found-body.geometry.joints.begin()))};
+        std::vector<unsigned> nodes;
+        if(item.asset->wearable) {
+         nodes=item.body_nodes;
+         for(auto& n:nodes)n+=static_cast<unsigned>(assembly.skeleton->nodes.size());
+        } else {
+         const auto found=std::find_if(body.geometry.joints.begin(),body.geometry.joints.end(),
+             [&](const skn::Joint& j){return j.name==item.socket;});
+         nodes.push_back(static_cast<unsigned>(assembly.skeleton->nodes.size()+
+             (found-body.geometry.joints.begin())));
+        }
         build_skn_groups(sample,skn::from_gltf(item.asset),&nodes,item.weapon,item.arrow);
        }
       }

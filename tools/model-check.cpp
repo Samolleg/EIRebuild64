@@ -35,8 +35,8 @@ int wmain(int argc, wchar_t **argv) {
         std::cout << "ACCEPTED: " << asset->geometry.vertices.size() << " vertices, "
                   << asset->geometry.indices.size() / 3 << " triangles, "
                   << asset->geometry.joints.size() << " evaluation nodes\n";
-        if(asset->rigid) {
-            std::cout << "Rigid item: " << asset->socket << "; " << asset->anchors.size()
+        if(asset->rigid || asset->wearable) {
+            std::cout << (asset->wearable ? "Skinned item (shared body pose): " : "Rigid item: ") << asset->socket << "; " << asset->anchors.size()
                       << " anchors; radius " << asset->radius << "; no animation allocation\n";
             return 0;
         }

@@ -287,9 +287,12 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
     }
     const auto metadata = extras(data.asset.extras).at("ei");
     const bool rigid = metadata.at("kind") == "rigid-item";
+    const bool wearable = metadata.at("kind") == "skinned-item";
     require(metadata.at("profile") == "human.v1" &&
-        (rigid || metadata.at("kind") == "body"), "asset profile/kind");
-    output->rigid = rigid;
+        (rigid || wearable || metadata.at("kind") == "body"), "asset profile/kind");
+    output->rigid = rigid; output->wearable = wearable;
+    require(!wearable || (data.animations_count == 0 && !metadata.contains("bindings") &&
+        !metadata.contains("socket")), "skinned item shares body pose; no clips/socket");
     require(!rigid || (data.skins_count == 0 && data.animations_count == 0 &&
         !metadata.contains("bindings")), "rigid item cannot own skin/animation bindings");
     std::set<const cgltf_skin *> activeSkins;
@@ -408,11 +411,11 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
     for (const auto *node : activeNodes)
         if (node->mesh) append(node);
     for (const auto &bone : contract.at("skeleton").at("bones"))
-        if (bone.at("required").get<bool>())
+        if (!wearable && bone.at("required").get<bool>())
             require(names.count(bone.at("name").get<std::string>()),
                     "missing bone " + bone.at("name").get<std::string>());
     for (const auto &socket : contract.at("sockets"))
-        require(names.count(socket.at("name").get<std::string>()),
+        require(wearable || names.count(socket.at("name").get<std::string>()),
                 "missing socket " + socket.at("name").get<std::string>());
     for (const auto *activeSkin : activeSkins)
     {
@@ -450,6 +453,7 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
             require(nodes[i]->mesh->primitives_count > 0, "empty evaluation mesh");
             const auto count = nodes[i]->mesh->primitives[0].targets_count;
             require(count <= 256, "morph target limit");
+            require(!wearable || count == 0, "skinned item cannot own unbound morph weights");
             const auto *w = nodes[i]->weights ? nodes[i]->weights : nodes[i]->mesh->weights;
             const auto size = nodes[i]->weights ? nodes[i]->weights_count : nodes[i]->mesh->weights_count;
             require(!w || size == count, "morph defaults");
@@ -1028,7 +1032,7 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
     lod.index_count = static_cast<unsigned>(output->geometry.indices.size());
     lod.submesh_count = static_cast<unsigned>(output->geometry.submeshes.size());
     output->geometry.lods.push_back(lod);
-    if (rigid) {
+    if (rigid || wearable) {
         output->animation.reset();
         output->animation_radius=output->radius;
         return output;
