@@ -6,7 +6,9 @@ namespace owned {
 
 // Semantic caller facts replace return-address tests in source hosts. A
 // preview is independent of the world pass, even for a positive world id.
-enum class ModelDrawDomain : std::uint8_t { normal, preview };
+// Both interface domains keep private poses and never update world picking.
+// Only character previews opt into the camera-relative studio light.
+enum class ModelDrawDomain : std::uint8_t { normal, preview, interface_decoration };
 inline thread_local ModelDrawDomain model_draw_domain = ModelDrawDomain::normal;
 class ModelDrawScope {
     ModelDrawDomain previous_;
@@ -18,14 +20,17 @@ public:
     ModelDrawScope& operator=(const ModelDrawScope&) = delete;
 };
 inline bool model_draw_is_preview() noexcept {
+    return model_draw_domain != ModelDrawDomain::normal;
+}
+inline bool model_draw_is_character_preview() noexcept {
     return model_draw_domain == ModelDrawDomain::preview;
 }
 inline bool model_draw_uses_retained_world(bool world_pass, bool claimed,
     ModelDrawDomain domain) noexcept {
-    return world_pass && claimed && domain != ModelDrawDomain::preview;
+    return world_pass && claimed && domain == ModelDrawDomain::normal;
 }
 inline bool model_draw_writes_pick_state(ModelDrawDomain domain) noexcept {
-    return domain != ModelDrawDomain::preview;
+    return domain == ModelDrawDomain::normal;
 }
 
 struct ModelPartFacts {

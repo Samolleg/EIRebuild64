@@ -113,9 +113,33 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
             }
         }
     }
+    const bool studioPreview=owned::model_draw_is_character_preview();
     OwnedRender::ModelPreviewLighting illumination;
-    if(!OwnedRender::produce_model_preview_lighting(worldToClip,placement.position,illumination))
-        return reject("preview.studio_lighting");
+    if(studioPreview) {
+        if(!OwnedRender::produce_model_preview_lighting(worldToClip,placement.position,illumination))
+            return reject("preview.studio_lighting");
+    } else {
+        // CI3DMapObjTranslation marks decorative menus explicitly. Restore
+        // their pre-X64GLTF12 light facts; no model name or CUnit heuristic.
+        owned::ModelLightingFacts worldLight;
+        const auto* sun=renderer->GetSunlight();
+        if(sun) {
+            const auto& color=sun->GetDiffuse();const auto& direction=sun->GetDirection();
+            worldLight.sunlight=true;worldLight.diffuse={color.r,color.g,color.b};
+            worldLight.direction={direction.x,direction.y,direction.z};
+        }
+        CManagerIterator iterator;
+        auto* light=static_cast<CLight*>(iterator.GetFirst(theWorld.GetLightManager()));
+        if(!OwnedRender::produce_interface_decoration_lighting(worldLight,placement.position,
+            [&](owned::ModelPointLightFacts& facts) {
+                if(!light)return false;
+                const auto* current=light;light=static_cast<CLight*>(iterator.GetNext());
+                const auto& center=current->GetCP();const auto& color=current->GetDiffuse();
+                facts.sunlight=current==sun;facts.inactive=current->CheckFlag(LIT_INACTIVE)!=0;
+                facts.value.center={center.x,center.y,center.z};facts.value.color={color.r,color.g,color.b};
+                facts.value.radius=current->GetRange();return true;
+            },illumination))return reject("preview.decoration_lighting");
+    }
     const BYTE fog = (presentation && presentation->default_fog) || lpObject->CheckFlag(OBJ_USE_DEFAULT_FOG) ? 255 :
         static_cast<CWorldClient*>(GetWorld())->GetTerrain()->GetObjectFogAlpha(lpObject->GetCP());
     const double textureTime = theWorld.GetPreciseTime();
@@ -165,9 +189,9 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
                 if (!owned::make_native_figure_lighting(&material.diffuse.r, &material.emissive.r,
                         &material.specular.r, objectToWorld, lighting)) return false;
             }
-            if(defaults)lighting=OwnedRender::model_preview_tinted_lighting(objectToWorld,
+            if(defaults && studioPreview)lighting=OwnedRender::model_preview_tinted_lighting(objectToWorld,
                 overrideColors ? presentation->diffuse : part.figure->GetDefaultColor());
-            output.material = {false,
+            output.material = {defaults && !studioPreview,
                 part.material && part.material->CheckFlag(MAT_USE_SPECULAR),
                 overrideColors ? presentation->diffuse : defaults ? part.figure->GetDefaultColor() : 0xffffffffu,
                 overrideColors ? presentation->specular : defaults ? part.figure->GetDefaultSpecular() : (std::uint32_t(fog) << 24),
@@ -176,7 +200,7 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
         },
         [&](const owned::NativeGeometryView& view, const owned::ModelPreviewPart& part) {
             return renderer->GetD3D()->SubmitC74Figure(view,
-                &illumination.world,
+                view.skn_material.identity || !part.material.default_colors ? &illumination.world : nullptr,
                 illumination.points);
         },
         [](std::size_t, const owned::ModelPreviewPart&) { return true; }, result);

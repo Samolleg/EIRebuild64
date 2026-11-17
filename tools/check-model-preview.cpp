@@ -169,6 +169,58 @@ int main() try {
     }
     require(model_draw_domain==priorDomain,"head scope leaked to item icons/world");
     std::cout<<"PASS embedded x64 studio replaces full ambient/world points, FIG retains tint with one color submission, portrait scope restores\n";
+    // The UI caller, not CUnit/model name/id, selects decorative-menu semantics.
+    for(const char* menu:{"ESC","options","save-load"}) {
+        (void)menu;
+        ModelDrawScope character(ModelDrawDomain::preview);
+        require(model_draw_is_character_preview(),"character role lost");
+        const auto characterLight=studio.world;
+        {
+            ModelDrawScope decoration(ModelDrawDomain::interface_decoration);
+            require(model_draw_is_preview() && !model_draw_is_character_preview(),"decoration inherited character light");
+            for(bool claimed:{false,true}) {
+                require(!model_draw_uses_retained_world(true,claimed,model_draw_domain),"decoration entered world route");
+                require(!model_draw_writes_pick_state(model_draw_domain),"decoration wrote world picking");
+            }
+            owned::ModelLightingFacts world;world.ambient=0xff102030u;world.sunlight=true;
+            world.diffuse={.2f,.4f,.6f};world.direction={0,0,-2};
+            std::vector<owned::ModelPointLightFacts> candidates(5);
+            for(auto& p:candidates){p.value.radius=1;p.value.color={.1f,.2f,.3f};}
+            candidates[0].value.center={10.5f,0,0}; // radius + ten-unit admission margin
+            candidates[1].value.center={12,0,0};
+            candidates[2].inactive=true;candidates[3].sunlight=true;candidates[4].value.radius=-1;
+            unsigned cursor=0;OwnedRender::ModelPreviewLighting menuLight;
+            require(OwnedRender::produce_interface_decoration_lighting(world,{0,0,0},
+                [&](owned::ModelPointLightFacts& p){if(cursor==candidates.size())return false;p=candidates[cursor++];return true;},menuLight),"menu light rejected");
+            auto oldFacts=world;oldFacts.ambient=0xffffffffu;
+            NativeWorldLighting expected;
+            require(produce_model_lighting(oldFacts,expected),"pre-X64GLTF12 reference");
+            require(menuLight.world.ambient==expected.ambient && menuLight.world.sunlight_diffuse==expected.sunlight_diffuse &&
+                menuLight.world.sunlight_direction==expected.sunlight_direction,"decorative lighting differs from pre-X64GLTF12 facts");
+            require(menuLight.points.size()==1 && menuLight.points[0].source_id==1 &&
+                menuLight.points[0].center==candidates[0].value.center,"decorative point admission changed");
+            // Default FIG colours must remain prelit/default; no conversion to studio tint.
+            draws=0;
+            require(produce_model_preview(input,2,
+                [](std::size_t,ModelPartFacts&){return true;},[](unsigned){return true;},
+                [](std::size_t i,ModelPreviewPart& part){part.ordinal=i;part.hidden=i==1;
+                    part.material.default_colors=!model_draw_is_character_preview();part.material.diffuse=0xff123456;return true;},
+                [&](const NativeGeometryView& view,const ModelPreviewPart&){
+                    require(!view.lighting.enabled && (view.flags&4u) && view.default_diffuse==0xff123456,
+                        "menu default colour converted to lit tint");++draws;return true;},wound,result),"decorative FIG preview");
+            require(draws==1,"menu added colour/shadow submissions");
+            { ModelDrawScope head(ModelDrawDomain::preview);
+              require(model_draw_is_character_preview(),"nested head inherited decoration role");
+            }
+            require(model_draw_domain==ModelDrawDomain::interface_decoration,"head failed to restore menu role");
+        }
+        require(model_draw_is_character_preview(),"menu failed to restore character role");
+        require(OwnedRender::produce_model_preview_lighting(clip,{0,0,5},studio),"character light after menu");
+        require(studio.world.ambient==characterLight.ambient && studio.world.sunlight_direction==characterLight.sunlight_direction &&
+            studio.world.sunlight_diffuse==characterLight.sunlight_diffuse,"hero studio parameters changed after menu");
+    }
+    require(model_draw_domain==priorDomain,"menu scope leaked into normal world draw");
+    std::cout<<"PASS ESC/options/save-load decoration role, pre-X64GLTF12 light/FIG colours, nested head/hero restoration and world/picking isolation\n";
     return 0;
 } catch (const std::exception& error) {
     std::cerr << "FAIL " << error.what() << '\n'; return 1;
