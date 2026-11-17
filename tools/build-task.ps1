@@ -3,7 +3,7 @@
 param(
     [string]$CacheRoot = $env:EIREBUILD64_BUILD_CACHE,
     [switch]$PhysicsFxCheck,
-    [string]$ShaderResourceManifest,
+    [string]$ShaderResourceManifest = $env:EIREBUILD64_SHADER_RESOURCE_MANIFEST,
     [string]$RendererAssetsSource,
     [string]$RendererMaterialsSource,
     [ValidateRange(1,1024)][int]$CacheLimitGB = 20,
@@ -146,7 +146,11 @@ try {
             (Hash-File $accepted) -cne [string]$shaderReuse.accepted_exe_sha256) { throw 'Accepted shader source EXE changed.' }
         $base = [string]$shaderReuse.base_commit
         $main = (& git -C $sourceRepo rev-parse main).Trim()
-        if ($LASTEXITCODE -ne 0 -or $main -cne $base) { throw 'Shader reuse base differs from current main.' }
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot determine current main.' }
+        $head = (& git -C $sourceRepo rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0 -or ($main -cne $base -and $main -cne $head)) {
+            throw 'Shader reuse requires the pinned main or the exact merged-main checkout.'
+        }
         $receipt = @(Get-Content -LiteralPath (Join-Path $project 'docs/tasks.log') | Where-Object {
             $v = $_ -split "`t"; $v.Count -ge 7 -and $v[3] -ceq $base -and $v[5] -ceq [string]$shaderReuse.accepted_exe_sha256 -and $v[6] -eq 'accepted'
         })
@@ -270,6 +274,19 @@ try {
         foreach ($entry in $shaderReuse.files) {
             $file = Join-Path $repo ('out/x64/Release/RendererShaders/' + [string]$entry.name)
             if ((Hash-File $file) -cne [string]$entry.sha256) { throw "Shader resource changed during build: $($entry.name)" }
+        }
+        $records = @($shaderReuse.resources)
+        if (!$records.Count) { throw 'Compiled-resource comparison list is empty.' }
+        Add-Type -Path (Join-Path $sourceRepo 'tools/VerifyShaderResources.cs')
+        $names = [string[]]@($records | ForEach-Object { [string]$_.name })
+        $languages = [int[]]@($records | ForEach-Object { [int]$_.language })
+        $sizes = [long[]]@($records | ForEach-Object { [long]$_.size })
+        $hashes = [string[]]@($records | ForEach-Object { [string]$_.sha256 })
+        foreach ($image in @('out/x64/Release/EI_Rebuild/EIRebuild64.exe',
+                              'out/x64/Release/EIRebuild64NavBake/EIRebuild64NavBake.exe')) {
+            $count = [EIShaderResourceVerifier]::Verify((Join-Path $repo $image),$names,$languages,$sizes,$hashes)
+            if ($count -ne $records.Count) { throw "Compiled-resource comparison incomplete: $image" }
+            Write-Host "Verified $count accepted resources in $image."
         }
         Write-Host 'Shader reuse confirmed: no shader compilation or resource regeneration in build log.'
     }

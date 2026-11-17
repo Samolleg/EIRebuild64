@@ -28,4 +28,9 @@ verified resources and disables the renderer shader, DirectXTex and DirectXTK
 build targets. Missing or incompatible inputs fail the build rather than fall
 back to shader compilation. The build log and resource hashes are checked
 again after MSBuild; independently compare the resulting EXE's resources to the
-accepted EXE before considering the kit verified.
+accepted EXE before considering the kit verified. The same path can be supplied
+as `EIREBUILD64_SHADER_RESOURCE_MANIFEST` to a child process, including
+`task accept`; explicit command-line input takes priority. For an acceptance
+build, the checked-out main may be the merge of the pinned base and the exact
+manifest changes. Both resulting EXEs are checked against every manifest
+resource before the build can complete or installation can start.
