@@ -5,7 +5,11 @@ Fireball and explosive shot already share this effect. Damage, projectile travel
 navigation and network/save formats are unchanged.
 
 The source must be within 0.35–2 metres (bounded by the effect radius) of stone,
-rock or high-rock base terrain. Water/lava/swamp, Astral, upper layers and known
+rock or high-rock base terrain. Natural grass/soil/snow/dry-grass cover also emits
+stone on source triangles steeper than the 40-degree walk limit: the base sound
+type alone does not describe a rocky cliff. Flat cover, sand and ice do not gain
+stone emission. This geometric decision is independent of graphics settings.
+Water/lava/swamp, Astral, upper layers and known
 bridges are not impact sources. No static-object, actor or debris/debris collision
 is introduced. Terrain is the source mesh, not camera LOD or shader cliff expansion.
 This first stage is intended for open terrain; walls/trees/boulders are not colliders.

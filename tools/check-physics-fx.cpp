@@ -36,6 +36,36 @@ int main(int argc,char** argv)try{
     ground.astral_slots={1};ExtractTerrain(ground,{1,1,0},{1,1,1},triangles);check(triangles.empty(),"astral excluded");
     ground=fixture(2);ground.sectors[0].tiles[0].object_id=0;ExtractTerrain(ground,{1,1,0},{1,1,1},triangles);check(triangles.empty(),"upper layer excluded");
     check(StoneTerrain(2)&&StoneTerrain(4)&&StoneTerrain(15)&&!StoneTerrain(0)&&!StoneTerrain(6),"stone emission classification");
+    for(unsigned material:{0u,1u,9u,11u}){
+        auto terrain=fixture(material);
+        auto gentle=ExtractTerrain(terrain,{1,1,0},{.25f,.7f,1},triangles);
+        check(!StoneSurface(gentle),"gentle natural cover does not emit stones");
+        for(auto& v:terrain.sectors[0].vertices)v.z=2.f*v.x;
+        auto cliff=ExtractTerrain(terrain,{1,1,0},{.25f,.7f,1},triangles);
+        check(StoneSurface(cliff),"steep covered cliff emits stones");
+    }
+    for(unsigned material:{3u,6u,8u,10u,12u,13u,14u}){
+        GroundHit excluded;excluded.found=true;excluded.material=material;excluded.normal={.9f,0,.3f};
+        check(!StoneSurface(excluded),"sand ice snowballs liquids unknown are not rock cliffs");
+    }
+    GroundHit boundary;boundary.found=true;boundary.material=9;boundary.normal={0,0,.76604444f};
+    check(!StoneSurface(boundary),"walk limit itself is not a cliff");
+    boundary.normal.z=.765f;check(StoneSurface(boundary),"beyond walk limit is cliff");
+    boundary.found=false;check(!StoneSurface(boundary),"missing ground never emits stones");
+    // Optional private source cases: query XY, expected emission and nine actual
+    // source vertices. Run the production terrain extraction, not a copied rule.
+    if(argc>2){
+        std::ifstream cases(argv[2]);if(!cases)throw std::runtime_error("source cases missing");
+        unsigned count=0,material,expected;float x,y;
+        while(cases>>material>>x>>y>>expected){
+            auto terrain=fixture(material);
+            for(auto& v:terrain.sectors[0].vertices)if(!(cases>>v.x>>v.y>>v.z))throw std::runtime_error("truncated source case");
+            terrain.sectors[0].bounds.minimum={x-3,y-3,-100};terrain.sectors[0].bounds.maximum={x+3,y+3,100};
+            auto actual=ExtractTerrain(terrain,{x,y,0},{x,y,0},triangles);
+            check(actual.found&&StoneSurface(actual)==bool(expected),"actual terrain impact source classification");++count;
+        }
+        check(count==8,"all eight owner impact coordinates checked");
+    }
     // Two worlds with the same events must match despite different render sample counts.
     const auto controlBefore=_mm_getcsr()&~0x3fu;
     World a,b;if(!a.Initialize())throw std::runtime_error(a.Error());
