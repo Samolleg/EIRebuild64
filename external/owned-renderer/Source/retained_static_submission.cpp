@@ -3167,7 +3167,8 @@ std::uint32_t retained_object_space_sway_flags(const VisualAssemblyAsset& assemb
 }
 
 void sway_tree_assembly(VisualAssemblyAsset& assembly) noexcept {
-    if (!assembly.skeleton) return;
+    // GLB wind dimensions were resolved together with its geometry.
+    if (assembly.environment_source || !assembly.skeleton) return;
     const auto& links = assembly.skeleton->links;
     std::uint32_t roots = 0, root = 0;
     for (std::uint32_t i = 0; i < links.size(); ++i)

@@ -670,10 +670,18 @@ void Renderer::adopt_active_statics(std::shared_ptr<NeighbourPiece> piece,const 
     const FixedState state=neighbour_submission_state(frame,SemanticKind::figure,NativeOrdering::reorderable);
     std::vector<NativeOwnedTextureMip> mips;
     std::uint64_t nodes_total=0,parked=0;
+    unsigned environment_examples=0;
     for(const auto key:batch)for(auto& node:a.models[key].nodes) {
         ++nodes_total;
         const auto first=native_pending_draws_.size();
         auto view=active_static_view(p,node,world_to_clip,mips);
+        if(p.decorations[node.decoration].environment_material && environment_examples++<16) {
+            const auto& draw=p.decorations[node.decoration];
+            const auto& figure=p.figures[draw.figure];
+            bridge_neighbour_diagnostic(("main_map_glb model="+p.identities[figure.identity].canonical_name+
+                " planned_impostor="+std::to_string(draw.impostor)+" atlas="+std::to_string(view.world.impostor)+
+                " lead="+std::to_string(draw.impostor_lead)).c_str());
+        }
         NativeGeometryResult result;
         const HRESULT hr=queue_native_terrain(view,state,nullptr,&result);
         if(FAILED(hr) || native_pending_draws_.size()!=first+1) {
