@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "skn_runtime.h"
 #include "gltf_equipment.h"
 #include "gltf_playback.h"
@@ -30,7 +30,7 @@ struct Asset
     std::shared_ptr<GpuProgram> gpu_animation;
     std::vector<skn::Vertex> rest_vertices;
     std::vector<std::uint32_t> vertex_morphs;
-    std::string cache_key;
+    std::string cache_key, resource_key;
     float radius = 0;
     float animation_radius = 0;
     std::vector<NodeEnvelope> node_envelopes;
@@ -88,7 +88,7 @@ struct EquipmentAsset {
     std::vector<unsigned> body_nodes;
 };
 struct EquipmentSelection { std::vector<EquipmentAsset> items; float radius=0; };
-std::vector<EquipmentAsset> select_equipment(const std::vector<VisualEquipmentItem>& equipment);
+std::vector<EquipmentAsset> select_equipment(const std::vector<VisualEquipmentItem>& equipment, const std::string& body_resource);
 // CPU decoding/acceptance shared by the game and ModelCheck; no device required.
 using PublishPixels = std::function<ResourceBlob(const std::string &, const void *, std::uint32_t)>;
 std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &profile,

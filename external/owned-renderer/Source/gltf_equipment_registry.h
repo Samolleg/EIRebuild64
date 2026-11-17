@@ -2,16 +2,19 @@
 #include "gltf_equipment.h"
 #include "../../../SDKs/JSON/json.hpp"
 #include <stdexcept>
+#include <algorithm>
+#include <set>
 
 namespace owned::gltf {
 struct ItemBinding {
-    std::string resource, socket;
+    std::string resource, socket, slot;
     bool weapon = false, arrow = false, skinned = false;
 };
 // Pure cold selection, also used by tests. A missing shape is not registered;
 // a registered shape must describe every selected material and inventory slot.
 inline std::vector<ItemBinding> item_bindings(const nlohmann::json& registry,
-                                             const VisualEquipmentItem& item)
+                                             const VisualEquipmentItem& item,
+                                             const std::vector<VisualEquipmentItem>* outfit=nullptr)
 {
     const auto require=[](bool v,const char* why) {
         if (!v) throw std::runtime_error(std::string("glTF equipment: ")+why);
@@ -24,8 +27,24 @@ inline std::vector<ItemBinding> item_bindings(const nlohmann::json& registry,
     require(list.is_array() && list.size()<=16,"attachment array limit");
     std::vector<ItemBinding> result;
     for(const auto& entry:list) {
+        const auto matches=[&](const char* key) {
+            const auto& condition=entry.at(key);
+            require(condition.is_object() && condition.at("slot").is_string() && condition.at("shape").is_string(),"equipment condition");
+            const auto slot=condition.at("slot").get<std::string>();
+            const auto shape=condition.at("shape").get<std::string>();
+            require(slot.rfind("armor_",0)==0 && !shape.empty() && shape.size()<=128,"equipment condition target");
+            const auto match=[&](const VisualEquipmentItem& other) {
+                return other.kind==VisualEquipmentItem::Kind::armor && other.slot==slot && other.shape==shape &&
+                    (!condition.contains("material") || condition.at("material")==other.material);
+            };
+            // Conditions read the immutable inventory, never other conditions.
+            return outfit ? std::any_of(outfit->begin(),outfit->end(),match) : match(item);
+        };
+        if(entry.contains("requiresEquipment") && !matches("requiresEquipment"))continue;
+        if(entry.contains("unlessEquipment") && matches("unlessEquipment"))continue;
         require(entry.at("profile")=="human.v1","profile");
         ItemBinding binding;
+        binding.slot=item.slot;
         binding.resource=entry.at("resource").get<std::string>();
         const auto& path=binding.resource;
         require(path.rfind("models/items/",0)==0 && path.size()>17 &&
@@ -52,6 +71,45 @@ inline std::vector<ItemBinding> item_bindings(const nlohmann::json& registry,
         for(const auto& prior:result)
             require(prior.resource!=binding.resource || prior.socket!=binding.socket,"duplicate attachment");
         result.push_back(std::move(binding));
+    }
+    return result;
+}
+
+inline std::vector<ItemBinding> outfit_bindings(const nlohmann::json& registry,
+    const std::vector<VisualEquipmentItem>& equipment,const std::string& body_resource)
+{
+    std::vector<ItemBinding> result;
+    std::set<std::string> covered;
+    for(const auto& item:equipment) {
+        const auto bindings=item_bindings(registry,item,&equipment);
+        for(const auto& binding:bindings)if(binding.skinned)covered.insert(item.slot);
+        result.insert(result.end(),bindings.begin(),bindings.end());
+    }
+    if(!registry.contains("baseLayers"))return result;
+    const auto& layers=registry.at("baseLayers");
+    if(!layers.is_object())throw std::runtime_error("glTF equipment: base layers object");
+    auto body=layers.find(body_resource);if(body==layers.end())return result;
+    if(!body->is_array() || body->size()>8)throw std::runtime_error("glTF equipment: base layer limit");
+    std::set<std::string> slots;
+    for(const auto& layer:*body) {
+        const auto slot=layer.at("slot").get<std::string>();
+        if(slot.rfind("base_",0)!=0 || !slots.insert(slot).second)throw std::runtime_error("glTF equipment: base layer slot");
+        const auto& hidden=layer.at("hiddenBySlots");
+        if(!hidden.is_array() || hidden.size()>8)throw std::runtime_error("glTF equipment: base layer coverage");
+        bool hide=false;
+        for(const auto& value:hidden) {
+            const auto key=value.get<std::string>();
+            if(key.rfind("armor_",0)!=0)throw std::runtime_error("glTF equipment: coverage slot");
+            hide|=covered.count(key)!=0;
+        }
+        if(hide)continue;
+        // Reuse strict resource/skin validation; base layers are ordinary skins.
+        VisualEquipmentItem item;item.kind=VisualEquipmentItem::Kind::armor;
+        item.shape="base";item.material="base";item.slot=slot;
+        nlohmann::json minimal;minimal["items"]["base"]["materials"]["base"][slot]=nlohmann::json::array({layer});
+        const auto parsed=item_bindings(minimal,item);
+        if(parsed.size()!=1 || !parsed[0].skinned)throw std::runtime_error("glTF equipment: base layer skin required");
+        result.push_back(parsed[0]);
     }
     return result;
 }
