@@ -80,6 +80,33 @@ int wmain(int argc,wchar_t** argv)try {
     broken=registry;broken["items"]["sword01"]["materials"]["iron"]["hand_r"].push_back(entry);
     must_reject([&]{item_bindings(broken,selected);});
     selected.shape="unregistered";check(item_bindings(registry,selected).empty(),"unregistered item");
+    {
+     const std::string bodyKey="models/characters/control.glb";
+     auto skin=[](const char* file){return Json{{"profile","human.v1"},{"resource",std::string("models/items/")+file+".glb"},{"binding","skin"},{"visibility","always"}};};
+     Json layers;auto free=skin("shirt-free"),tucked=skin("shirt-tucked");
+     const Json condition={{"slot","armor_4"},{"shape","pants"}};
+     free["unlessEquipment"]=condition;tucked["requiresEquipment"]=condition;
+     layers["items"]["shirt"]["materials"]["wool"]["armor_3"]=Json::array({free,tucked});
+     layers["items"]["pants"]["materials"]["wool"]["armor_4"]=Json::array({skin("pants")});
+     layers["items"]["pants"]["materials"]["missing"]["armor_4"]=Json::array();
+     auto upper=skin("base-upper"),lower=skin("base-lower");
+     upper["slot"]="base_upper";upper["hiddenBySlots"]=Json::array({"armor_3"});
+     lower["slot"]="base_lower";lower["hiddenBySlots"]=Json::array({"armor_4"});
+     layers["baseLayers"][bodyKey]=Json::array({upper,lower});
+     owned::VisualEquipmentItem shirt,pants;shirt.kind=pants.kind=owned::VisualEquipmentItem::Kind::armor;
+     shirt.shape="shirt";pants.shape="pants";shirt.slot="armor_3";pants.slot="armor_4";shirt.material=pants.material="wool";
+     for(unsigned mask=0;mask<4;++mask){
+      std::vector<owned::VisualEquipmentItem> outfit;if(mask&1)outfit.push_back(shirt);if(mask&2)outfit.push_back(pants);
+      const auto selected=outfit_bindings(layers,outfit,bodyKey);check(selected.size()==2,"base layer equip/remove atomic selection");
+      if(mask&1)check(selected[0].resource==(mask&2?"models/items/shirt-tucked.glb":"models/items/shirt-free.glb"),"whole-outfit condition");
+     }
+     pants.material="missing";auto empty=outfit_bindings(layers,{pants},bodyKey);check(empty.size()==2 && empty[0].slot=="base_upper" && empty[1].slot=="base_lower","empty registered visual must not hide base layer");
+     check(outfit_bindings(layers,{},"models/characters/other.glb").empty(),"base layer body identity isolation");
+     auto broken=layers;broken["baseLayers"][bodyKey].push_back(upper);must_reject([&]{outfit_bindings(broken,{},bodyKey);});
+     broken=layers;broken["items"]["shirt"]["materials"]["wool"]["armor_3"][0]["unlessEquipment"]=nullptr;
+     must_reject([&]{outfit_bindings(broken,{shirt},bodyKey);});
+     std::cout<<"PASS conditional outfit variants, base layer equip/remove, empty visual and body isolation\n";
+    }
     const auto profile=read_file(argv[2]);Json doc;
     const auto itemBytes=fixture(doc);const auto item=decode(itemBytes,profile,publish);
     check(item->rigid && !item->gpu_animation && !item->animation,"item must not allocate animation");
@@ -147,8 +174,15 @@ int wmain(int argc,wchar_t** argv)try {
      shirt.kind=owned::VisualEquipmentItem::Kind::armor;
      wardrobe["items"]["shirt"]["materials"]["wool"]["armor_3"][0]["socket"]="socket_head";
      must_reject([&]{item_bindings(wardrobe,shirt);});
-     for(const wchar_t* name:{L"vlcsh-wool.glb",L"vlcpt-wool.glb",L"vlcgl-wool.glb",L"vlcbt-wool.glb"}) {
-      auto garment=decode(read_file((std::filesystem::path(argv[3])/name).c_str()),profile,publish);
+     const auto registryBlob=read_file((std::filesystem::path(argv[3]).parent_path()/"registry.v1.json").c_str());
+     const auto actualRegistry=Json::parse(registryBlob.bytes->begin(),registryBlob.bytes->end());
+     std::set<std::string> resources;
+     for(const auto& shape:actualRegistry.at("items"))for(const auto& material:shape.at("materials"))for(const auto& slot:material)for(const auto& entry:slot)
+      if(entry.value("binding","")=="skin")resources.insert(entry.at("resource").get<std::string>());
+     for(const auto& layers:actualRegistry.at("baseLayers"))for(const auto& entry:layers)resources.insert(entry.at("resource").get<std::string>());
+     check(resources.size()==66,"complete author wardrobe resources");
+     for(const auto& name:resources) {
+      auto garment=decode(read_file((std::filesystem::path(argv[3])/std::filesystem::path(name).filename()).c_str()),profile,publish);
       check(garment->wearable && !garment->rigid && !garment->animation && !garment->gpu_animation,"garment allocated animation");
       auto nodes=wearable_nodes(*garment,*body);
       check(wearable_radius(*garment,*body,nodes)>0,"garment bounds");
@@ -171,24 +205,37 @@ int wmain(int argc,wchar_t** argv)try {
       must_reject([&]{wearable_nodes(*garment,*body);});garment->geometry.joints[used].name=oldName;
       garments.push_back(std::move(garment));
      }
-     const auto registryBlob=read_file((std::filesystem::path(argv[3]).parent_path()/"registry.v1.json").c_str());
-     const auto actualRegistry=Json::parse(registryBlob.bytes->begin(),registryBlob.bytes->end());
      const char* shapes[]={"vlcsh","vlcpt","vlcgl","vlcbt"};
      const char* armorSlots[]={"armor_3","armor_4","armor_6","armor_5"};
-     for(unsigned mask=0;mask<16;++mask) {
-      unsigned count=0;
+     unsigned variants=0;
+     for(unsigned family=0;family<3;++family)for(const char* material:{"wool","cotton","silk red","silk blue","astral thread"})for(unsigned i=0;i<4;++i){
+      owned::VisualEquipmentItem selected;selected.kind=owned::VisualEquipmentItem::Kind::armor;
+      selected.shape=std::string(shapes[i])+(family?std::to_string(family):"");selected.material=material;selected.slot=armorSlots[i];
+      const std::vector<owned::VisualEquipmentItem> outfit{selected};const auto list=item_bindings(actualRegistry,selected,&outfit);
+      if(family==2 && selected.material!="wool")check(list.empty(),"unauthored simple material substituted");
+      else {check(!list.empty(),"authored variant absent");++variants;}
+     }
+     check(variants==44,"complete selectable wardrobe");
+     for(unsigned family=0;family<3;++family)for(unsigned mask=0;mask<16;++mask) {
+      std::vector<owned::VisualEquipmentItem> outfit;
       for(unsigned i=0;i<4;++i)if(mask&(1u<<i)) {
        owned::VisualEquipmentItem selected;selected.kind=owned::VisualEquipmentItem::Kind::armor;
-       selected.shape=shapes[i];selected.material="wool";selected.slot=armorSlots[i];
-       auto list=item_bindings(actualRegistry,selected);check(list.size()==1 && list[0].skinned,"actual wool binding");count+=unsigned(list.size());
-       for(const char* material:{"cotton","silk red","silk blue","astral thread"}) {
-        selected.material=material;check(item_bindings(actualRegistry,selected).empty(),"unconverted cloth material substituted");
-       }
+       selected.shape=std::string(shapes[i])+(family?std::to_string(family):"");selected.material=family==2?"wool":(i%2?"silk red":"cotton");selected.slot=armorSlots[i];outfit.push_back(selected);
       }
+      const auto list=outfit_bindings(actualRegistry,outfit,"models/characters/nala.glb");
       unsigned expected=0;for(unsigned i=0;i<4;++i)expected+=(mask>>i)&1;
-      check(count==expected,"partial/removed outfit selection");
+      expected+=!(mask&1);expected+=!(mask&2);if(family==0 && (mask&2))++expected;if(family==1 && (mask&1))++expected;
+      check(list.size()==expected,"partial/removed outfit layer count");
+      bool upper=false,lower=false;
+      for(const auto& binding:list){
+       check(resources.count(binding.resource)==1 && binding.skinned,"unknown wardrobe layer");
+       upper|=binding.slot=="base_upper";lower|=binding.slot=="base_lower";
+       if(family==0 && binding.slot=="armor_3")check((binding.resource.find("-tucked")!=std::string::npos)==bool(mask&2),"starter shirt tuck condition");
+       if(family==0 && binding.resource.find("-wrap-")!=std::string::npos)check((binding.resource.find("-wrap-over")!=std::string::npos)==bool(mask&1),"starter wrap condition");
+      }
+      check(upper==!(mask&1) && lower==!(mask&2),"underwear equip/remove");
      }
-     std::cout<<"PASS four clip-free garments, shared palette, bind rejection, actual registry 16 equip/remove combinations and body/weapon group preservation\n";
+     std::cout<<"PASS 66 clip-free layers, 44 variants, 48 equip/remove combinations with mixed materials, shared palette, bind rejection and body/weapon preservation\n";
     }
     const unsigned idle=named_clip(animation,"idle");check(idle!=UINT32_MAX,"body idle");
     unsigned moving=idle;

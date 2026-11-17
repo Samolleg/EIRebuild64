@@ -20,7 +20,7 @@ Json json(const ResourceBlob &blob) {
 } // namespace
 static std::shared_ptr<const Asset> select_resource(const std::string &visual, bool hero, bool &present,
     const ItemBinding* itemBinding = nullptr, std::vector<ItemBinding>* selected = nullptr,
-    const VisualEquipmentItem* equipment = nullptr)
+    const std::vector<VisualEquipmentItem>* equipment = nullptr)
 {
     static std::mutex mutex;
     static ResourceStore store;
@@ -67,7 +67,7 @@ static std::shared_ptr<const Asset> select_resource(const std::string &visual, b
     }
     if (entries.is_null())
         return {};
-    if (selected) { *selected=item_bindings(entries,*equipment); return {}; }
+    if (selected) { *selected=outfit_bindings(entries,*equipment,visual); return {}; }
     const auto &characters = entries.at("characters");
     require(characters.is_object(), "registry characters");
     std::string key = visual;
@@ -119,6 +119,7 @@ static std::shared_ptr<const Asset> select_resource(const std::string &visual, b
             require(store.copy_selected_memory(name, data, size, pixels, failure), failure.message);
             return pixels;
         });
+        asset->resource_key = resource;
         asset->cache_key = blob.identity.key() + "|" + profile.identity.key();
         asset->cache_key += "|" + cacheKey;
         require(itemBinding ? (itemBinding->skinned ? asset->wearable : asset->rigid) :
@@ -141,16 +142,14 @@ static std::shared_ptr<const Asset> select_resource(const std::string &visual, b
 std::shared_ptr<const Asset> select(const std::string& visual, bool hero, bool& present) {
     return select_resource(visual,hero,present);
 }
-std::vector<EquipmentAsset> select_equipment(const std::vector<VisualEquipmentItem>& equipment) {
+std::vector<EquipmentAsset> select_equipment(const std::vector<VisualEquipmentItem>& equipment,const std::string& body_resource) {
     std::vector<EquipmentAsset> result;
-    for(const auto& item:equipment) {
-        std::vector<ItemBinding> bindings; bool present=false;
-        select_resource("",false,present,nullptr,&bindings,&item);
-        for(const auto& binding:bindings) {
-            auto asset=select_resource(binding.resource,false,present,&binding);
-            require(present && asset && (binding.skinned ? asset->wearable : asset->rigid),"item not available");
-            result.push_back({asset,binding.socket,item.slot,binding.weapon,binding.arrow});
-        }
+    std::vector<ItemBinding> bindings;bool present=false;
+    select_resource(body_resource,false,present,nullptr,&bindings,&equipment);
+    for(const auto& binding:bindings) {
+        auto asset=select_resource(binding.resource,false,present,&binding);
+        require(present && asset && (binding.skinned ? asset->wearable : asset->rigid),"item not available");
+        result.push_back({asset,binding.socket,binding.slot,binding.weapon,binding.arrow});
     }
     return result;
 }
