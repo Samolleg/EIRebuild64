@@ -124,8 +124,7 @@ Unbound morphs and per-item clips are rejected. Future morph-bearing clothes req
 an explicit shared-weight contract; absence is never silently treated as support.
 
 World/panel/camp use the existing immutable equipment snapshot. Invalid bindings
-reject the visual atomically. Removing a selection removes its groups; the current
-starter has no lower-layer mesh to hide and preserves the complete body. This does
+reject the visual atomically. Removing a selection removes its groups. This does
 not claim general multilayer occlusion or arbitrary body-shape morph support.
 Bounds use the body's animation envelopes and each weighted vertex in joint space.
 
@@ -134,3 +133,23 @@ checks saved garments, actual registry combinations, body/weapon preservation an
 shared D3D11/D3D12 poses. Surface-bound source clothes are cooked offline to four
 ordinary bone influences; their visual fit must be reviewed, not inferred from
 successful decoding. No shader/pose ABI change is needed for this path.
+
+## Outfit conditions and default layers (X64GLTF14)
+
+An attachment may specify `requiresEquipment` or `unlessEquipment`, each an object
+with an exact `slot`, `shape`, and optional `material`. These conditions read the
+immutable inventory snapshot, not the results of other conditions. Mutual shirt
+and pants conditions therefore cannot recurse. The garment cut and fabric remain
+data; no character-specific names are present in the renderer.
+
+Optional `baseLayers` is keyed by the selected body's exact resource key. Each
+entry is an ordinary skinned attachment plus a unique `base_*` slot and a
+`hiddenBySlots` array of armor slots. A base layer is hidden only if a selected
+skinned attachment actually covers one of those slots; empty/unregistered visuals
+do not suppress it. Maximum eight default layers, selected only on outfit changes.
+This is whole-layer visibility, not body polygon removal or general cloth collision.
+The complete body and its animation library are unchanged.
+
+The wardrobe regression loads all 66 render assets, checks 44 selectable variants,
+48 equip/remove cases with mixed materials, base-layer return, shirt/wrap variants,
+and body identity isolation, followed by D3D11/D3D12 shared-pose comparisons.

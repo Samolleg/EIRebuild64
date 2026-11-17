@@ -1149,7 +1149,7 @@ const gltf::EquipmentSelection& prepare_gltf_equipment(const RetainedVisualSampl
  if(prepared.gltf_equipment_assembly==sample.assembly && prepared.gltf_equipment)
   return *prepared.gltf_equipment;
  auto selected=std::make_shared<gltf::EquipmentSelection>();
- selected->items=gltf::select_equipment(sample.assembly->equipment);
+ selected->items=gltf::select_equipment(sample.assembly->equipment,body.resource_key);
  selected->radius=body.animation_radius;
  for(auto& item:selected->items) {
   if(item.asset->wearable) {
