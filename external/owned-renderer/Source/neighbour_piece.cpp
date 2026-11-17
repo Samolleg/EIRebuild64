@@ -278,6 +278,10 @@ void piece_impostors(PieceBuilder& builder, const NeighbourMapUpload& upload, ID
         for (std::size_t i = 0; i < source.parts.size() && ok; ++i) {
             const auto& node = *source.nodes[i];
             NeighbourPieceImpostorPart part;
+            if(node.environment_material) {
+                const auto& m=*node.environment_material;part.color=m.base;
+                part.alpha_policy={m.cutoff,m.alpha_factor,float(m.alpha),0};
+            }
             if (node.surface) { part.texture = UINT32_MAX; part.surface = node.surface; }
             else part.texture = builder.texture(node.texture->identity, node.texture_identity, node.texture_format,
                 node.texture_mips.data(), static_cast<std::uint32_t>(node.texture_mips.size()), node.texture->opaque_mips);

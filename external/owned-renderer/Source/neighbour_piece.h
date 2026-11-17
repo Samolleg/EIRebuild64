@@ -97,6 +97,8 @@ struct NeighbourPieceDecoration {
 // One part of a crown impostor object: its texture and its triangles already
 // on the GPU (8 floats per vertex in the lead part's frame, 32-bit indices).
 struct NeighbourPieceImpostorPart {
+    std::array<float,4> color{1,1,1,1};
+    std::array<float,4> alpha_policy{200.f/255.f,1,-1,0}; // cutoff, factor, mode (-1 legacy), reserved
     std::uint32_t texture = 0;           // NeighbourPiece::textures (UINT32_MAX: surface)
     // Item 5 live-sourced models only (never a neighbour piece, never sent
     // across the remote link): the part's game surface, resolved by the

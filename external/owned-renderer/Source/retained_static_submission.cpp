@@ -2955,7 +2955,7 @@ bool prepare_live_static_candidate(const ActiveStaticsModelRequest& request,
                    figure.positions.size() == figure.position_groups) {
             node.bounds = figure.bounds.front(); node.positions = figure.positions;
         } else return false;
-        node.figure = &figure;
+        node.figure = &figure;node.environment_material=part.environment_material;
         node.normals.clear();
         if(part.environment_material&&figure.shape_count==8)
             if(!selected_groups(figure.normals,figure.position_groups,8,request.shape,node.normals))return false;

@@ -248,6 +248,7 @@ template<class A> void visit_piece(A& a, NeighbourPiece& v) {
     list(a, v.impostors, [](A& b, NeighbourPieceImpostor& i) {
         b.str(i.key); b.pod(i.sphere);
         list(b, i.parts, [](A& c, NeighbourPieceImpostorPart& p) {
+            c.pod(p.color);c.pod(p.alpha_policy);
             c.pod(p.texture); c.object(p.vertices); c.object(p.indices); c.object(p.vertex_view); c.pod(p.index_count);
         });
     });

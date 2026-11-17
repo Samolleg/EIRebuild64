@@ -256,6 +256,12 @@ bool neighbour_impostor_plan(const RetainedStaticSourceCandidate& candidate,Neig
     plan={};
     // Astral rift models keep their triangles: a bake would freeze the veils.
     if(candidate.assembly&&astral_model(*candidate.assembly))return false;
+    // A single coverage atlas cannot represent blended or independently
+    // emissive layers. Those objects retain their ordinary material-aware LODs.
+    for(const auto& node:candidate.nodes)if(node.environment_material) {
+        const auto& m=*node.environment_material;
+        if(m.alpha==2||m.unlit||m.textures[3])return false;
+    }
     const auto part=[](const RetainedPreparedNode& node){
         const auto& m=node.object_local;
         // Node placements are translations (retained_static_submission.cpp).
@@ -267,6 +273,7 @@ bool neighbour_impostor_plan(const RetainedStaticSourceCandidate& candidate,Neig
     // surface's own alpha scan (zone13 after travel: per-object surfaces
     // classed houses cut-out, 1112 crown impostors).
     const auto cut_out=[](const RetainedPreparedNode& node){
+        if(node.environment_material)return node.environment_material->alpha==1;
         return node.texture?(node.texture->opaque_mips&1u)==0:node.archive_cut_out==1;
     };
     std::size_t triangles=0;bool led=false;

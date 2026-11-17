@@ -12,6 +12,7 @@
 namespace owned {
 
 struct RetainedPreparedNode {
+    std::shared_ptr<const environment::Material> environment_material;
     const FigureCpuAsset* figure = nullptr;
     const TextureCpuAsset* texture = nullptr;
     // Item 5 live-sourced models: the part's game surface instead of an
