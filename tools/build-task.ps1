@@ -163,11 +163,18 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Cannot list shader reuse changes.' }
         $expected = @($shaderReuse.changes | ForEach-Object { [string]$_.path } | Sort-Object)
         if (($actual -join "`n") -cne ($expected -join "`n")) { throw 'Shader reuse changed-file list differs.' }
+        $deleted = @(& git -C $sourceRepo diff --name-only --diff-filter=D "$base...HEAD")
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot verify deleted shader-reuse inputs.' }
         foreach ($change in $shaderReuse.changes) {
             $relative = [string]$change.path
             if ($relative -match '(?i)(^|/)(shader[^/]*|[^/]*\.(hlsl|fx|fxh|dxil|dxbc))$' -or
                 $relative -match '(?i)^OwnedRenderer/RendererShaders\.vcxproj$') { throw "Shader input changed: $relative" }
-            if ((Hash-File (Join-Path $sourceRepo $relative)) -cne [string]$change.sha256) { throw "Changed-file SHA mismatch: $relative" }
+            $removed = $change.PSObject.Properties.Name -contains 'deleted' -and [bool]$change.deleted
+            if ($removed) {
+                if ($relative -cnotin $deleted -or (Test-Path -LiteralPath (Join-Path $sourceRepo $relative))) {
+                    throw "Deleted shader-reuse input is still present: $relative"
+                }
+            } elseif ((Hash-File (Join-Path $sourceRepo $relative)) -cne [string]$change.sha256) { throw "Changed-file SHA mismatch: $relative" }
         }
         $librarySources = @($tracked | Where-Object { $_ -match '^external/(DirectXTex|DirectXTK)/' })
         if (!$librarySources.Count) { throw 'DirectX library source inventory missing.' }
