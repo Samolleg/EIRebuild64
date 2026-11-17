@@ -141,15 +141,20 @@ try {
         # libraries, unknown payloads or a moving main instead of recompiling.
         $shaderReuse = Get-Content -LiteralPath $ShaderResourceManifest -Raw | ConvertFrom-Json
         if ($shaderReuse.version -ne 1 -or $shaderReuse.base_commit -notmatch '^[0-9a-f]{40}$') { throw 'Invalid shader reuse manifest.' }
-        $accepted = [IO.Path]::GetFullPath((Join-Path $project 'builds/rebuild64/current/EIRebuild64.exe'))
-        if ([IO.Path]::GetFullPath([string]$shaderReuse.accepted_exe) -ine $accepted -or
+        $accepted = [IO.Path]::GetFullPath([string]$shaderReuse.accepted_exe)
+        $acceptedPaths = @('current','previous' | ForEach-Object {
+            [IO.Path]::GetFullPath((Join-Path $project "builds/rebuild64/$_/EIRebuild64.exe"))
+        })
+        if ($acceptedPaths -notcontains $accepted -or
             (Hash-File $accepted) -cne [string]$shaderReuse.accepted_exe_sha256) { throw 'Accepted shader source EXE changed.' }
         $base = [string]$shaderReuse.base_commit
         $main = (& git -C $sourceRepo rev-parse main).Trim()
         if ($LASTEXITCODE -ne 0) { throw 'Cannot determine current main.' }
         $head = (& git -C $sourceRepo rev-parse HEAD).Trim()
-        if ($LASTEXITCODE -ne 0 -or ($main -cne $base -and $main -cne $head)) {
-            throw 'Shader reuse requires the pinned main or the exact merged-main checkout.'
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot determine build HEAD.' }
+        & git -C $sourceRepo merge-base --is-ancestor $main HEAD
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Shader reuse requires all current main changes in the build checkout.'
         }
         $receipt = @(Get-Content -LiteralPath (Join-Path $project 'docs/tasks.log') | Where-Object {
             $v = $_ -split "`t"; $v.Count -ge 7 -and $v[3] -ceq $base -and $v[5] -ceq [string]$shaderReuse.accepted_exe_sha256 -and $v[6] -eq 'accepted'
