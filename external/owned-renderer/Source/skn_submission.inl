@@ -3,7 +3,8 @@ namespace {
 bool build_skn_groups(const RetainedVisualSample &sample,
                       const std::shared_ptr<const skn::RuntimeAsset> &asset,
                       const std::vector<unsigned>* attachmentNodes=nullptr,
-                      bool weapon=false, bool arrow=false) {
+                      bool weapon=false, bool arrow=false,
+                      const std::map<unsigned,std::shared_ptr<const skn::Dds>>* overrides=nullptr) {
   auto &prepared = *sample.prepared;
   const auto &data = asset->asset;
   if (data.semantic_joints.size() != data.submeshes.size())
@@ -119,6 +120,10 @@ bool build_skn_groups(const RetainedVisualSample &sample,
     auto &group = prepared.merged_groups.back();
     group.parts = {part};
     group.skn_asset = asset;
+    if(overrides) {
+      auto replacement=overrides->find(mesh.material);
+      if(replacement!=overrides->end())group.skn_base_color_override=replacement->second;
+    }
     group.gltf_weapon=weapon;group.gltf_arrow=arrow;
     group.skn_material = mesh.material;
     group.skn_casts_shadow = !asset->gltf_asset && selected.assembled_character_texture && data.materials[mesh.material].maps[0].empty()

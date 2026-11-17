@@ -142,6 +142,53 @@ static std::shared_ptr<const Asset> select_resource(const std::string &visual, b
 std::shared_ptr<const Asset> select(const std::string& visual, bool hero, bool& present) {
     return select_resource(visual,hero,present);
 }
+static std::map<unsigned,std::shared_ptr<const skn::Dds>> select_textures(
+    const ItemBinding& binding, const Asset& asset)
+{
+    std::map<unsigned,std::shared_ptr<const skn::Dds>> result;
+    if(binding.textures.empty())return result;
+    // Decode only selected materials, on appearance changes. Geometry remains
+    // in the normal GLB cache and is never copied for a texture variant.
+    static std::mutex mutex;
+    static ResourceStore store;
+    static std::uint64_t generation=0;
+    static std::map<std::string,std::weak_ptr<const skn::Dds>> cache;
+    static unsigned insertions=0;
+    std::lock_guard<std::mutex> lock(mutex);
+    ResourceStoreConfig mounts;std::uint64_t current=0;ResourceFailure failure;
+    require(owned_resource_runtime_mounts(mounts,&current),"texture mounts unavailable");
+    if(current!=generation) {
+        store.close();cache.clear();
+        require(store.open(mounts,failure),failure.message);generation=current;
+    }
+    for(const auto& requested:binding.textures) {
+        const unsigned index=requested.material;
+        require(index<asset.geometry.materials.size() && index<asset.base_color_factors.size() &&
+                !asset.geometry.materials[index].maps[0].empty(),
+                "texture override requires an existing textured material");
+        require(std::any_of(asset.geometry.submeshes.begin(),asset.geometry.submeshes.end(),
+            [&](const skn::Submesh& mesh){return mesh.material==index;}),
+            "texture override material is unused");
+        const auto source=read(store,requested.resource);
+        const auto& factor=asset.base_color_factors[index];
+        std::string key=source.identity.key();
+        key.append(reinterpret_cast<const char*>(factor.data()),sizeof(float)*factor.size());
+        auto selected=cache[key].lock();
+        if(!selected) {
+            auto decoded=decode_base_color(source,[&](const std::string& name,const void* data,std::uint32_t size) {
+                ResourceBlob pixels;ResourceFailure error;
+                require(store.copy_selected_memory(name,data,size,pixels,error),error.message);
+                return pixels;
+            },factor);
+            selected=std::make_shared<const skn::Dds>(std::move(decoded));cache[key]=selected;
+            if(++insertions%64==0)
+                for(auto it=cache.begin();it!=cache.end();)
+                    if(it->second.expired())it=cache.erase(it);else ++it;
+        }
+        result.emplace(index,std::move(selected));
+    }
+    return result;
+}
 std::vector<EquipmentAsset> select_equipment(const std::vector<VisualEquipmentItem>& equipment,const std::string& body_resource) {
     std::vector<EquipmentAsset> result;
     std::vector<ItemBinding> bindings;bool present=false;
@@ -150,6 +197,7 @@ std::vector<EquipmentAsset> select_equipment(const std::vector<VisualEquipmentIt
         auto asset=select_resource(binding.resource,false,present,&binding);
         require(present && asset && (binding.skinned ? asset->wearable : asset->rigid),"item not available");
         result.push_back({asset,binding.socket,binding.slot,binding.weapon,binding.arrow});
+        result.back().base_color_overrides=select_textures(binding,*asset);
     }
     return result;
 }

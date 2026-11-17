@@ -3641,7 +3641,7 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
          nodes.push_back(static_cast<unsigned>(assembly.skeleton->nodes.size()+
              (found-body.geometry.joints.begin())));
         }
-        build_skn_groups(sample,skn::from_gltf(item.asset),&nodes,item.weapon,item.arrow);
+        build_skn_groups(sample,skn::from_gltf(item.asset),&nodes,item.weapon,item.arrow,&item.base_color_overrides);
        }
       }
       if(built)prepared.merged_assembly=sample.assembly;
@@ -3776,7 +3776,8 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
          view.owned_texture.surface=part.surface.get();
         }else{
          const auto& material=group.skn_asset->asset.materials[group.skn_material];
-         const auto& texture=group.skn_asset->textures[group.skn_material][0];
+         const auto& texture=group.skn_base_color_override ? *group.skn_base_color_override :
+             group.skn_asset->textures[group.skn_material][0];
          view.owned_texture.identity=1;view.owned_texture.generation=1;view.owned_texture.value_source=1;
          if(!texture.mips.empty()){
           view.owned_texture.resource=&texture.blob.identity;view.owned_texture.format=texture.format;

@@ -11,3 +11,26 @@ cache hash validation and size limits remain in force. Do not reuse another
 running build's mutable `work` directory. A temporary acceptance cache can live
 under the parent task, outside its generated `accept-main-*/wt` build task; it is
 removed by the normal task closeout. Set the variable only for that process.
+
+## Reusing accepted shader resources
+
+`tools/build-task.ps1 -ShaderResourceManifest <manifest.json>` builds CPU code
+while reusing four existing `.res` payloads beside the manifest. The version 1
+manifest pins the current accepted EXE path and SHA, its main commit, the exact
+changed-file list and SHA values, each resource SHA, and the cached DirectXTex
+and DirectXTK library/PDB SHA values. The caller must first prove that the
+resource contents match the accepted EXE and review the listed changes as
+non-shader changes.
+
+While holding the normal build lock, the script checks the acceptance receipt,
+clean worktree, unchanged library sources and all hashes. It then copies the
+verified resources and disables the renderer shader, DirectXTex and DirectXTK
+build targets. Missing or incompatible inputs fail the build rather than fall
+back to shader compilation. The build log and resource hashes are checked
+again after MSBuild; independently compare the resulting EXE's resources to the
+accepted EXE before considering the kit verified. The same path can be supplied
+as `EIREBUILD64_SHADER_RESOURCE_MANIFEST` to a child process, including
+`task accept`; explicit command-line input takes priority. For an acceptance
+build, the checked-out main may be the merge of the pinned base and the exact
+manifest changes. Both resulting EXEs are checked against every manifest
+resource before the build can complete or installation can start.

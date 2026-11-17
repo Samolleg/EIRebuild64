@@ -6,9 +6,14 @@
 #include <set>
 
 namespace owned::gltf {
+struct ItemTexture {
+    unsigned material = 0;
+    std::string resource;
+};
 struct ItemBinding {
     std::string resource, socket, slot;
     bool weapon = false, arrow = false, skinned = false;
+    std::vector<ItemTexture> textures;
 };
 // Pure cold selection, also used by tests. A missing shape is not registered;
 // a registered shape must describe every selected material and inventory slot.
@@ -23,10 +28,17 @@ inline std::vector<ItemBinding> item_bindings(const nlohmann::json& registry,
     require(items.is_object(),"items object");
     auto found=items.find(item.shape);
     if(found==items.end()) return {};
-    const auto& list=found->at("materials").at(item.material).at(item.slot);
+    const auto& selection=found->at("materials").at(item.material).at(item.slot);
+    // An explicit array is the complete material-specific model selection and
+    // takes priority over the shape's common model, including an empty array.
+    // An object changes textures on the explicitly declared common selection.
+    require(selection.is_array() || selection.is_object(),"slot selection");
+    const auto& list=selection.is_array() ? selection : found->at("defaults").at(item.slot);
     require(list.is_array() && list.size()<=16,"attachment array limit");
     std::vector<ItemBinding> result;
-    for(const auto& entry:list) {
+    std::vector<std::size_t> selected(list.size(), std::size_t(-1));
+    for(std::size_t sourceIndex=0;sourceIndex<list.size();++sourceIndex) {
+        const auto& entry=list[sourceIndex];
         const auto matches=[&](const char* key) {
             const auto& condition=entry.at(key);
             require(condition.is_object() && condition.at("slot").is_string() && condition.at("shape").is_string(),"equipment condition");
@@ -70,7 +82,34 @@ inline std::vector<ItemBinding> item_bindings(const nlohmann::json& registry,
         require(!binding.skinned || visibility=="always", "skin visibility");
         for(const auto& prior:result)
             require(prior.resource!=binding.resource || prior.socket!=binding.socket,"duplicate attachment");
+        selected[sourceIndex]=result.size();
         result.push_back(std::move(binding));
+    }
+    if(selection.is_object()) {
+        require(selection.size()==1 && selection.contains("textures"),"unknown material selection fields");
+        const auto& textures=selection.at("textures");
+        require(textures.is_array() && textures.size()<=64,"texture override array limit");
+        std::set<std::pair<unsigned,unsigned>> textureTargets;
+        for(const auto& texture:textures) {
+            require(texture.is_object() && texture.size()==3 && texture.contains("binding") &&
+                texture.contains("material") && texture.contains("baseColor"),"texture override fields");
+            require(texture.at("binding").is_number_unsigned() && texture.at("material").is_number_unsigned(),"texture indices");
+            require(texture.at("binding").get<std::uint64_t>()<=UINT32_MAX &&
+                texture.at("material").get<std::uint64_t>()<=UINT32_MAX,"texture index overflow");
+            const auto index=texture.at("binding").get<unsigned>();
+            const auto material=texture.at("material").get<unsigned>();
+            const auto path=texture.at("baseColor").get<std::string>();
+            require(index<list.size(),"texture binding index");
+            require(textureTargets.emplace(index,material).second,"duplicate material texture");
+            require(path.rfind("models/items/textures/",0)==0 && path.size()>27 &&
+                path.substr(path.size()-4)==".png" && path.find("..") == std::string::npos &&
+                path.find(':')==std::string::npos && path.find('\\')==std::string::npos,
+                "texture resource key");
+            // Texture binding indices address the original list, even when an
+            // outfit condition omits an earlier attachment from this selection.
+            if(selected[index]!=std::size_t(-1))
+                result[selected[index]].textures.push_back({material,path});
+        }
     }
     return result;
 }
