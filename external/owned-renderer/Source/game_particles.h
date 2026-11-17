@@ -33,6 +33,7 @@
 #include <vector>
 
 namespace owned {
+inline constexpr std::uint32_t kTerrainPrintTag=0x46505254u;
 
 struct GameParticle {
     float x = 0, y = 0, z = 0, radius = 0;
@@ -208,7 +209,7 @@ Texture2D gpTexture:register(t0);SamplerState gpSampler:register(s0);
 // Soft particles: the world depth (tested read-only by the same draw).
 Texture2D<float> gpSceneDepth:register(t2);
 // r: the particle's clip-scaled radius (gameParticleVS; 0 for the others).
-struct GameParticleOut{float4 p:SV_Position;float4 d:COLOR0;float2 uv:TEXCOORD0;float r:TEXCOORD1;};
+struct GameParticleOut{float4 p:SV_Position;float4 d:COLOR0;float2 uv:TEXCOORD0;float r:TEXCOORD1;nointerpolation float2 printData:TEXCOORD2;};
 GameParticleOut gameParticleVS(uint id:SV_VertexID){
  GameParticle q=gpParticles[gpFirst+id/6];
  uint local=id%6;uint corner=local==0||local==3?0:(local==1?2:(local==2?1:(local==4?3:2)));
@@ -219,7 +220,7 @@ GameParticleOut gameParticleVS(uint id:SV_VertexID){
  // Stock screen point times W: linear in clip space, so hardware clipping
  // replaces the stock screen-space clipper without changing visible pixels.
  float sx=(k.x+k.w+right*r)*gpClipHalf.x,sy=(k.w-k.y)*gpClipHalf.y+down*r*gpClipHalf.x;
- GameParticleOut o;
+ GameParticleOut o=(GameParticleOut)0;
  o.p=float4((sx-gpViewport.x*k.w)/gpViewport.z*2-k.w,k.w-(sy-gpViewport.y*k.w)/gpViewport.w*2,k.z,k.w);
  o.d=float4((q.color>>16)&255,(q.color>>8)&255,q.color&255,q.color>>24)/255.0;
  o.uv=float2(right>0?q.uv.z:q.uv.x,down>0?q.uv.w:q.uv.y);
@@ -244,7 +245,7 @@ GameParticleOut gameRibbonVS(uint id:SV_VertexID){
  float4 k=mul(gpObjectToClip,float4(q.centerRadius.xyz,1));
  // Stock offset 15 * width / W pixels; the world clip scale as for particles.
  float s=side*q.centerRadius.w*gpClipHalf.z;
- GameParticleOut o;
+ GameParticleOut o=(GameParticleOut)0;
  o.p=gpClipFromScreen((k.x+k.w)*gpClipHalf.x+s*d.y,(k.w-k.y)*gpClipHalf.y-s*d.x,k);
  o.d=float4((q.color>>16)&255,(q.color>>8)&255,q.color&255,q.color>>24)/255.0;
  o.uv=float2(q.uv.x,side>0?q.uv.y:q.uv.z);o.r=0;
@@ -258,7 +259,7 @@ GameParticleOut gameSelectionVS(uint id:SV_VertexID){
  float r=q.centerRadius.w;float2 X=q.uv.xy,Y=q.uv.zw;
  float2 a=v==0?3*r*X+2*r*Y:(v==1?-3*r*X+2*r*Y:(v==2?-5*r*Y:(v==3?2*r*X+1.4*r*Y:(v==4?-2*r*X+1.4*r*Y:-4*r*Y))));
  float4 k=mul(gpObjectToClip,float4(q.centerRadius.xy+a,q.centerRadius.z,1));
- GameParticleOut o;
+ GameParticleOut o=(GameParticleOut)0;
  o.p=gpClipFromScreen((k.x+k.w)*gpClipHalf.x,(k.w-k.y)*gpClipHalf.y,k);
  o.d=float4((q.color>>16)&255,(q.color>>8)&255,q.color&255,q.color>>24)/255.0;
  o.uv=0;o.r=0;
@@ -268,7 +269,7 @@ GameParticleOut gameSelectionVS(uint id:SV_VertexID){
 GameParticleOut gameMeshVS(uint id:SV_VertexID){
  GameParticle q=gpParticles[gpFirst+id];
  float4 k=mul(gpObjectToClip,float4(q.centerRadius.xyz,1));
- GameParticleOut o;
+ GameParticleOut o=(GameParticleOut)0;
  o.p=gpClipFromScreen((k.x+k.w)*gpClipHalf.x,(k.w-k.y)*gpClipHalf.y,k);
  o.d=float4((q.color>>16)&255,(q.color>>8)&255,q.color&255,q.color>>24)/255.0;
  o.uv=q.uv.xy;o.r=0;
@@ -282,7 +283,7 @@ GameParticleOut gameGlyphVS(uint id:SV_VertexID){
  uint local=id%6;uint corner=local==0?0:(local==1||local==4?2:(local==5?3:1));
  float right=corner&1,down=corner>>1;
  float2 s=q.centerRadius.xy+float2(right,down)*q.centerRadius.zw;
- GameParticleOut o;
+ GameParticleOut o=(GameParticleOut)0;
  o.p=float4((s.x-gpViewport.x)/gpViewport.z*2-1,1-(s.y-gpViewport.y)/gpViewport.w*2,1,1);
  o.d=float4((q.color>>16)&255,(q.color>>8)&255,q.color&255,q.color>>24)/255.0;
  o.uv=float2(right>0?q.uv.z:q.uv.x,down>0?q.uv.w:q.uv.y);o.r=0;
@@ -304,6 +305,10 @@ float gpFlameKey(float3 c){float hi=max(c.r,max(c.g,c.b)),lo=min(c.r,min(c.g,c.b
  return smoothstep(.5,.9,hi)*smoothstep(.35,.65,(hi-lo)/max(hi,1e-4));}
 struct GameParticlePixel{float4 color:SV_Target0;float4 glow:SV_Target1;};
 GameParticlePixel gameParticlePS(GameParticleOut i){
+ if(gpPadding.y==5u){
+  uint cell=(uint)i.printData.x;float2 lo=float2(cell&1u,cell>>1)*.5;
+  clip(i.uv-lo);clip(lo+.5-i.uv);clip(i.printData.y-i.r);
+ }
  float4 t=gpTextured!=0?gpTexture.Sample(gpSampler,i.uv):float4(1,1,1,1),c=i.d;
  c.rgb=gpColor(gpColorOp,gpArg(gpColorArg1,i.d,t),gpArg(gpColorArg2,i.d,t),c.rgb);
  c.a=gpAlpha(gpAlphaOp,gpArg(gpAlphaArg1,i.d,t),gpArg(gpAlphaArg2,i.d,t),c.a);
@@ -311,7 +316,7 @@ GameParticlePixel gameParticlePS(GameParticleOut i){
  // Opt-in untextured UI ribbon: uv.y is the signed cross-section. The
  // derivative makes a one-pixel inner coverage ramp at either edge. Its
  // caller uses ONE/INVSRCALPHA, so colour and alpha are premultiplied here.
- [branch]if(gpPadding.x!=0){
+ [branch]if((gpPadding.x&1u)!=0){
   float coverage=saturate((1-abs(i.uv.y))/max(fwidth(i.uv.y),1e-6));
   c*=coverage;
  }
@@ -330,7 +335,7 @@ GameParticlePixel gameParticlePS(GameParticleOut i){
  // W = B / (z - A) (gpSoft.xy, from the call's own projection) for the world
  // depth and the particle's depth alike.
  float fade=1,scene=1;
- [branch]if(gpSoft.w!=0){
+ [branch]if(gpPadding.y!=5u&&gpSoft.w!=0){
   scene=gpSceneDepth.Load(int3(i.p.xy,0));
   fade=saturate((gpSoft.y/(scene-gpSoft.x)-gpSoft.y/(i.p.z-gpSoft.x))/max(i.r*gpSoft.z,1e-5));
   if(gpSoft.w>1.5)c*=fade;else c.a*=fade;
@@ -347,7 +352,7 @@ GameParticlePixel gameParticlePS(GameParticleOut i){
  float shape=gpCoverageMode==2?max(t.r,max(t.g,t.b))*t.a:t.a;
  if(gpTextured!=0&&shape<.05)discard;
  float3 m=gpPadding.y==1?float3(0,0,1):gpPadding.y==2?float3(1,0,1):gpPadding.y==3?float3(0,1,1):gpPadding.y==4?float3(1,1,0):float3(1,1,1);
- if(gpSoft.w!=0)m=scene<=0?float3(1,.5,0):scene<i.p.z-1e-6?float3(.5,0,1):lerp(float3(1,0,0),float3(0,1,0),fade);
+ if(gpPadding.y!=5u&&gpSoft.w!=0)m=scene<=0?float3(1,.5,0):scene<i.p.z-1e-6?float3(.5,0,1):lerp(float3(1,0,0),float3(0,1,0),fade);
  o.color=float4(m,1);o.glow=0;
 #endif
  return o;

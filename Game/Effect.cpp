@@ -712,6 +712,7 @@ void CEffectParticle::UpdateParticleParams()
         //
         if (typeID == PTID_FIREBLAST)
         {
+            theWorld.StoneEffects().Fireblast(theWorld, GetID(), nStartSegment, GetCP(), fpPower, fpPower2);
             float _fpPower = Min(1.0f, 0.6f * fpPower);
             theWorld.AddFirePrints(GetCP().x, GetCP().y, fpPower2, fpPower2,
                                    random.GetFloat(0, 6.3f), _fpPower);

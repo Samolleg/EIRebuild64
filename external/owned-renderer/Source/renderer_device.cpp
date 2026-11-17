@@ -13,6 +13,7 @@
 #include "world_fog.h"
 #include "ambient_occlusion.h"
 #include "game_particles.h"
+#include "terrain_print_shader.h"
 #include "sky_clouds.h"
 #include "cave_lighting.h"
 #include "terrain_material.h"
@@ -2310,7 +2311,7 @@ ShaderProgram interface_shader_program(InterfaceShader shader){
 
 // Feature level 11 world support: the depth/colour clear, then game particles.
 ShaderProgram world_support_shader_program(WorldSupportShader shader){
- static const std::string particles=std::string(kAtmosphereShader)+kGameParticleShader;
+ static const std::string particles=std::string(kAtmosphereShader)+kTerrainCliffShader+kGameParticleShader+kTerrainPrintShader;
  const std::string_view clear(kClearShader,sizeof(kClearShader)-1),scroll(kShadowScrollShader,sizeof(kShadowScrollShader)-1);
  constexpr UINT optimized=D3DCOMPILE_OPTIMIZATION_LEVEL3;
  switch(shader){
@@ -2332,13 +2333,16 @@ ShaderProgram world_support_shader_program(WorldSupportShader shader){
  case WorldSupportShader::game_particle_debug_ps:{
   static const D3D_SHADER_MACRO debug[]={{"GP_SOFT_DEBUG","1"},{nullptr,nullptr}};
   return {particles,"game_particles",debug,"gameParticlePS","ps_5_0",optimized};}
+ case WorldSupportShader::terrain_print_vs:return {particles,"game_particles",nullptr,"terrainPrintVS","vs_5_0",optimized};
+ case WorldSupportShader::terrain_print_hs:return {particles,"game_particles",nullptr,"terrainPrintHS","hs_5_0",optimized};
+ case WorldSupportShader::terrain_print_ds:return {particles,"game_particles",nullptr,"terrainPrintDS","ds_5_0",optimized};
  case WorldSupportShader::count:break;
  }
  return {};
 }
 #pragma warning(pop)
 static_assert(static_cast<std::size_t>(InterfaceShader::count)==5,"interface list size changed: name the new program");
-static_assert(static_cast<std::size_t>(WorldSupportShader::count)==14,"world-support list size changed: name the new program");
+static_assert(static_cast<std::size_t>(WorldSupportShader::count)==17,"world-support list size changed: name the new program");
 
 // The preparation lists: every named program, in enum order.
 void append_interface_shader_programs(std::vector<ShaderProgram>& out){
@@ -3937,6 +3941,7 @@ void Renderer::release() {
  if(context_)context_->ClearState();
 
  game_particle_vs_.Reset();game_particle_ps_.Reset();game_particle_debug_ps_.Reset();game_particle_constants_.Reset();game_particle_buffer_.Reset();game_particle_srv_.Reset();
+ terrain_print_vs_.Reset();terrain_print_hs_.Reset();terrain_print_ds_.Reset();
  game_ribbon_vs_.Reset();game_selection_vs_.Reset();game_mesh_vs_.Reset();game_glyph_vs_.Reset();std::vector<GameParticleGpu>().swap(game_effect_elements_);
  game_particle_capacity_=0;game_particle_pipeline_failed_=false;std::vector<std::uint32_t>().swap(game_particle_order_);
  reset_pipeline_warmup();warmup_query_.Reset();warmup_targets_.clear();warmup_depths_.clear();
