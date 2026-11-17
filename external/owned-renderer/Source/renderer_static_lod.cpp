@@ -99,7 +99,7 @@ bool build_static_lods(const FigureCpuAsset& figure, NativeMeshLods& output) noe
 namespace owned {
 
 bool build_impostor_part(const FigureCpuAsset& figure, const NativePackedGroup* positions,
-    const std::array<float, 3>& offset, NativeImpostorPart& output,const NativePackedGroup* normals) noexcept try {
+    const std::array<float, 3>& offset, NativeImpostorPart& output) noexcept try {
     output = {};
     const std::size_t index_count = figure.indices.size();
     const std::size_t vertex_count = figure.components.size();
@@ -116,7 +116,7 @@ bool build_impostor_part(const FigureCpuAsset& figure, const NativePackedGroup* 
         const auto& group = positions[component.position >> 2];
         const unsigned lane = component.position & 3u;
         out[0] = group.x[lane] + offset[0]; out[1] = group.y[lane] + offset[1]; out[2] = group.z[lane] + offset[2];
-        const auto& normal = (normals?normals:figure.normals.data())[component.normal >> 2];
+        const auto& normal = figure.normals[component.normal >> 2];
         const unsigned normal_lane = component.normal & 3u;
         out[3] = normal.x[normal_lane]; out[4] = normal.y[normal_lane]; out[5] = normal.z[normal_lane];
         out[6] = figure.texture_coordinates[component.texture].u;
