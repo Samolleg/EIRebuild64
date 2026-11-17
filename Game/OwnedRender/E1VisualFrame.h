@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include "../PhysicsFxCore.h"
+#include "engine_bridge.h"
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -21,6 +22,8 @@ bool E1CompleteAmbientFrame(owned::RetainedVisualFrame& frame) noexcept;
 // Host values of one world draw, without renderer headers (WorldClient).
 struct E1VisualInputs {
     std::vector<PhysicsFx::Stone> debris; // copied values, no game/physics pointers
+    std::shared_ptr<const owned::OwnedVisualSurface> debrisSurface; // owns the publication through submission
+    owned::NativeOwnedTextureView debrisTexture;
     double time = 0; // segment ticks + fraction
     std::uint32_t sceneFlags = 0;           // CWorldClient flags (WC_RENDER_*)
     bool drawUndetected = true;

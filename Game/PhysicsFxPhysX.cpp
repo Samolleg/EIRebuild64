@@ -166,9 +166,12 @@ unsigned World::Burst(std::uint64_t key,Vec point,Vec normal,float power,std::ui
     if(!HasPatch(key)||!finite(point)||!finite(normal)||!std::isfinite(power)||!failure.empty())return 0;
     auto& patch=impl->patches.at(key);PxVec3 n=px(normal);if(n.normalize()<.0001f)n={0,0,1};
     if(!seed)seed=0x95d1a73u;
-    const unsigned count=std::min(unsigned(8+std::clamp(power,0.f,1.f)*4),MaxStones-unsigned(impl->stones.size()));unsigned made=0;
+    const unsigned count=std::min(unsigned(48+std::clamp(power,0.f,1.f)*16),MaxStones-unsigned(impl->stones.size()));unsigned made=0;
     for(unsigned i=0;i<count;++i){
-        const unsigned kind=unsigned(random01(seed)*4);const float radius=.018f+random01(seed)*.042f;
+        const unsigned kind=unsigned(random01(seed)*4);
+        // A dense chip spray plus 6-8 readable chunks that survive the flash.
+        const bool large=(i%8)==0;
+        const float radius=large?.08f+random01(seed)*.05f:.025f+random01(seed)*.035f;
         PxVec3 outward(random01(seed)*2-1,random01(seed)*2-1,random01(seed)*.5f);if(outward.normalize()<.0001f)outward={0,0,1};
         const PxVec3 p=px(point)+n*(radius+.012f)+outward*.04f;
         Owned<PxRigidDynamic> actor(impl->sdk->physics->createRigidDynamic(PxTransform(p)));
@@ -178,7 +181,7 @@ unsigned World::Burst(std::uint64_t key,Vec point,Vec normal,float power,std::ui
         actor->attachShape(*shape);PxRigidBodyExt::updateMassAndInertia(*actor,1800.f);
         actor->setRigidBodyFlag(PxRigidBodyFlag::eENABLE_SPECULATIVE_CCD,true);
         actor->setLinearDamping(.12f);actor->setAngularDamping(.4f);actor->setMaxAngularVelocity(30.f);actor->setSolverIterationCounts(4,2);
-        actor->setLinearVelocity(outward*(.7f+random01(seed)*1.6f)+n*(1.4f+random01(seed)*1.8f));
+        actor->setLinearVelocity(outward*(1.4f+random01(seed)*2.6f)+n*(2.6f+random01(seed)*2.4f)+PxVec3(0,0,1.2f+random01(seed)*1.2f));
         actor->setAngularVelocity({random01(seed)*20-10,random01(seed)*20-10,random01(seed)*20-10});impl->scene->addActor(*actor);
         Impl::Body body{};body.actor=std::move(actor);body.patch=key;body.shape=kind;body.radius=radius;body.life=3.f+random01(seed)*2;
         const unsigned shade=110+unsigned(random01(seed)*55);body.color=0xff000000u|(shade<<16)|((shade-3)<<8)|(shade-12);
