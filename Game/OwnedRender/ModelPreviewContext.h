@@ -30,7 +30,7 @@ public:
 struct ModelPreviewPresentation {
     std::int32_t id = 0;
     ModelPlacementFacts placement{};
-    bool placed = false, full_ambient = false, default_fog = false;
+    bool placed = false, default_fog = false;
     bool default_colors = false;
     std::uint32_t diffuse = 0xffffffffu, specular = 0xff000000u;
 };
