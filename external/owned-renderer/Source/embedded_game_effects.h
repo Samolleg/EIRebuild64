@@ -22,6 +22,8 @@ struct EmbeddedRibbonInput {
 };
 struct EmbeddedPrintInput {
     EmbeddedEffectProjection projection{};
+    // Original base-terrain control triangles, with slope normal and atlas cell.
+    const GameParticleGpu* terrain_vertices = nullptr;
     // One SXYZW4 group: xxxx yyyy zzzz wwww; UVs in vertex order.
     const std::array<float, 16>* groups = nullptr;
     std::uint32_t group_count = 0;

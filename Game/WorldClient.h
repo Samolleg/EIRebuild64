@@ -261,7 +261,7 @@ public:
     void CastShadowToTerrain(const CPlot3D &ptSunDir, const CPlot3D &ptCenter, float fpRadius,
                              CXYZW4Array &srcRect, CXYZW4Array &dstGeoms, CPlot2DArray &dstMaps,
                              CWORDArray &dstIndices, bool bSmallPrint = false,
-                             bool bCastOnBridges = true);
+                             bool bCastOnBridges = true, bool bCastOnTerrain = true);
     CPlot3D GetTerrainXYZFromScreenXY(int sx, int sy);
     CPlot3D GetTerrainXYZFromScreenXYWithBridge(int sx, int sy);
     CPlot3D GetTerrainXYZFromScreen(CPoint ptOnScreen)

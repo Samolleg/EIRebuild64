@@ -3720,14 +3720,14 @@ CPlot3D CWorldClient::GetTerrainXYZFromScreenXYWithBridge(int sx, int sy)
 void CWorldClient::CastShadowToTerrain(const CPlot3D &ptSunDir, const CPlot3D &ptCenter,
                                        float fpRadius, CXYZW4Array &srcRect, CXYZW4Array &dstGeoms,
                                        CPlot2DArray &dstMaps, CWORDArray &dstIndices,
-                                       bool bSmallPrint, bool bCastOnBridges)
+                                       bool bSmallPrint, bool bCastOnBridges, bool bCastOnTerrain)
 {
     // void AddTriangle( const CPlot3D &ptA, const CPlot3D &ptB, const CPlot3D &ptC );
     // void AllocForTriangles( int nTris );
     static CShadowBuilder builder;
     static CXYZWArray result;
     builder.Setup(dstGeoms, dstMaps, dstIndices, srcRect, ptSunDir, ptCenter, fpRadius);
-    if (!bSmallPrint || !IsBridge(ptCenter.x, ptCenter.y))
+    if (bCastOnTerrain && (!bSmallPrint || !IsBridge(ptCenter.x, ptCenter.y)))
         pTerrain->BuildShadowMesh(builder, srcRect);
     //
     CDXGeometryProcessor *pGPU = theRenderer.GetGPU();

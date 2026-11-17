@@ -74,5 +74,7 @@ admission, framerate independence, expiry and runtime recreation (147 checks).
 The separate missing-runtime process passed and created no CPU bodies. Native
 D3D11 WARP and D3D12 hardware checks passed at ticks 0, 6, 18, 40 and 60; captured
 frames were visually inspected. Release x64 kit and static CRT imports passed.
-The candidate game run is tracked in the task report. These checks are distinct
-from owner gameplay/visual acceptance.
+In-game fireball impacts also produced GPU-simulated fragments on rock; pause and
+expiry were exercised on D3D11 and D3D12. The revealed scorch/terrain mismatch is
+fixed as described in `terrain-prints.md`. These checks are distinct from owner
+gameplay/visual acceptance.
