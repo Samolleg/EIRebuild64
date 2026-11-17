@@ -17,6 +17,7 @@ struct Document
 struct Asset
 {
     bool rigid = false;
+    bool wearable = false;
     std::string socket;
     std::map<std::string,std::array<float,3>> anchors;
     mutable std::map<std::string,SocketChain> sockets;
@@ -45,10 +46,46 @@ struct Asset
         return sockets.emplace(name,socket_chain(*animation,unsigned(node-geometry.joints.begin()))).first->second;
     }
 };
+// Resolve only weighted joints; mesh/container nodes do not enter the pose palette.
+// Runs once on an immutable equipment change, never during frame submission.
+inline std::vector<unsigned> wearable_nodes(const Asset& item,const Asset& body) {
+    animation_require(item.wearable && !body.wearable && !body.rigid,"wearable/body kinds");
+    std::vector<unsigned> nodes(item.geometry.joints.size(),0);
+    std::set<unsigned> used;
+    for(const auto& v:item.rest_vertices)for(unsigned k=0;k<4;++k)
+        if(v.weights[k])used.insert(v.joints[k]);
+    for(unsigned i:used) {
+        const auto& joint=item.geometry.joints.at(i);
+        auto found=std::find_if(body.geometry.joints.begin(),body.geometry.joints.end(),
+            [&](const skn::Joint& j){return j.name==joint.name;});
+        animation_require(found!=body.geometry.joints.end() && !joint.name.empty() && joint.name[0]!='#',
+            "wearable joint missing in body");
+        for(unsigned c=0;c<16;++c)animation_require(std::abs(joint.inverse[c]-found->inverse[c])<1e-4f,
+            "wearable inverse bind differs from body");
+        nodes[i]=unsigned(found-body.geometry.joints.begin());
+    }
+    return nodes;
+}
+inline float wearable_radius(const Asset& item,const Asset& body,const std::vector<unsigned>& nodes) {
+    double result=0;
+    for(const auto& v:item.rest_vertices) {
+        double radius=0;
+        for(unsigned k=0;k<4;++k)if(v.weights[k]) {
+            const auto point=skn::point(item.geometry.joints.at(v.joints[k]).inverse,v.position);
+            const auto& limit=body.node_envelopes.at(nodes.at(v.joints[k]));
+            const double length=std::sqrt(double(point[0])*point[0]+double(point[1])*point[1]+double(point[2])*point[2]);
+            radius+=(limit.translation+limit.scale*length)*v.weights[k]/65535.;
+        }
+        result=(std::max)(result,radius);
+    }
+    animation_require(std::isfinite(result) && result<1e30,"wearable bounds overflow");
+    return static_cast<float>(result*(1+1e-5));
+}
 struct EquipmentAsset {
     std::shared_ptr<const Asset> asset;
     std::string socket, slot;
     bool weapon=false, arrow=false;
+    std::vector<unsigned> body_nodes;
 };
 struct EquipmentSelection { std::vector<EquipmentAsset> items; float radius=0; };
 std::vector<EquipmentAsset> select_equipment(const std::vector<VisualEquipmentItem>& equipment);

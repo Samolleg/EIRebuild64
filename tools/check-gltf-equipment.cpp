@@ -56,7 +56,7 @@ static void must_reject(const std::function<void()>& action) {
     check(rejected,"invalid equipment accepted");
 }
 int wmain(int argc,wchar_t** argv)try {
-    check(argc==3,"usage: check-gltf-equipment body.glb profile.json");
+    check(argc==3 || argc==4,"usage: check-gltf-equipment body.glb profile.json [clothing-directory]");
     using W=OwnedRender::EquipmentWeapon;
     const W sword{true,false,false,false},shield{true,false,true,false},staff{true,false,false,true},two{true,true,false,false};
     std::array<W,4> slots{sword,shield,{},two};
@@ -138,6 +138,58 @@ int wmain(int argc,wchar_t** argv)try {
     const auto& forearmChain=body->attachment_chain("CC_Base_Forearm.L");
     check(&forearmChain==&body->attachment_chain("CC_Base_Forearm.L") && body->sockets.size()==6,
         "bone attachment chain must be cached once");
+    std::vector<std::shared_ptr<owned::gltf::Asset>> garments;
+    if(argc==4) {
+     Json wardrobe=Json::parse(R"({"items":{"shirt":{"materials":{"wool":{"armor_3":[{"profile":"human.v1","resource":"models/items/shirt.glb","binding":"skin"}]}}}}})");
+     owned::VisualEquipmentItem shirt;shirt.kind=owned::VisualEquipmentItem::Kind::armor;shirt.shape="shirt";shirt.material="wool";shirt.slot="armor_3";
+     auto binding=item_bindings(wardrobe,shirt);check(binding.size()==1 && binding[0].skinned && binding[0].socket.empty(),"wardrobe skin selection");
+     shirt.kind=owned::VisualEquipmentItem::Kind::weapon;must_reject([&]{item_bindings(wardrobe,shirt);});
+     shirt.kind=owned::VisualEquipmentItem::Kind::armor;
+     wardrobe["items"]["shirt"]["materials"]["wool"]["armor_3"][0]["socket"]="socket_head";
+     must_reject([&]{item_bindings(wardrobe,shirt);});
+     for(const wchar_t* name:{L"vlcsh-wool.glb",L"vlcpt-wool.glb",L"vlcgl-wool.glb",L"vlcbt-wool.glb"}) {
+      auto garment=decode(read_file((std::filesystem::path(argv[3])/name).c_str()),profile,publish);
+      check(garment->wearable && !garment->rigid && !garment->animation && !garment->gpu_animation,"garment allocated animation");
+      auto nodes=wearable_nodes(*garment,*body);
+      check(wearable_radius(*garment,*body,nodes)>0,"garment bounds");
+      auto rt=std::make_shared<owned::skn::RuntimeAsset>();rt->gltf_asset=garment;rt->asset=garment->geometry;rt->asset.vertices=garment->rest_vertices;
+      for(auto& node:nodes)node+=7;
+      auto before=visual.prepared->merged_groups.size();
+      owned::build_skn_groups(visual,rt,&nodes);
+      check(visual.prepared->merged_groups.size()>before && visual.prepared->merged_part_group[0]==0,"garment replaced body/weapon membership");
+      const auto& group=visual.prepared->merged_groups.back();
+      check(!group.gltf_weapon && !group.gltf_arrow && group.skn_asset==rt,"garment visibility/material ownership");
+      for(std::size_t offset=0;offset<group.geometry->skin_vertices.size();offset+=sizeof(owned::skn::GpuVertex)) {
+       owned::skn::GpuVertex v{};std::memcpy(&v,group.geometry->skin_vertices.data()+offset,sizeof(v));
+       check(v.correction_node==UINT32_MAX,"unbound garment corrective");
+       for(unsigned k=0;k<4;++k)if(v.weights[k])check(v.joints[k]>=7 && v.joints[k]<7+body->geometry.joints.size(),"garment palette range");
+      }
+      const unsigned used=garment->rest_vertices[0].joints[0];
+      auto old=garment->geometry.joints[used].inverse[0];garment->geometry.joints[used].inverse[0]+=1;
+      must_reject([&]{wearable_nodes(*garment,*body);});garment->geometry.joints[used].inverse[0]=old;
+      auto oldName=garment->geometry.joints[used].name;garment->geometry.joints[used].name="missing-profile-joint";
+      must_reject([&]{wearable_nodes(*garment,*body);});garment->geometry.joints[used].name=oldName;
+      garments.push_back(std::move(garment));
+     }
+     const auto registryBlob=read_file((std::filesystem::path(argv[3]).parent_path()/"registry.v1.json").c_str());
+     const auto actualRegistry=Json::parse(registryBlob.bytes->begin(),registryBlob.bytes->end());
+     const char* shapes[]={"vlcsh","vlcpt","vlcgl","vlcbt"};
+     const char* armorSlots[]={"armor_3","armor_4","armor_6","armor_5"};
+     for(unsigned mask=0;mask<16;++mask) {
+      unsigned count=0;
+      for(unsigned i=0;i<4;++i)if(mask&(1u<<i)) {
+       owned::VisualEquipmentItem selected;selected.kind=owned::VisualEquipmentItem::Kind::armor;
+       selected.shape=shapes[i];selected.material="wool";selected.slot=armorSlots[i];
+       auto list=item_bindings(actualRegistry,selected);check(list.size()==1 && list[0].skinned,"actual wool binding");count+=unsigned(list.size());
+       for(const char* material:{"cotton","silk red","silk blue","astral thread"}) {
+        selected.material=material;check(item_bindings(actualRegistry,selected).empty(),"unconverted cloth material substituted");
+       }
+      }
+      unsigned expected=0;for(unsigned i=0;i<4;++i)expected+=(mask>>i)&1;
+      check(count==expected,"partial/removed outfit selection");
+     }
+     std::cout<<"PASS four clip-free garments, shared palette, bind rejection, actual registry 16 equip/remove combinations and body/weapon group preservation\n";
+    }
     const unsigned idle=named_clip(animation,"idle");check(idle!=UINT32_MAX,"body idle");
     unsigned moving=idle;
     for(unsigned c=0;c<animation.clips.size();++c)if(animation.clips[c].name.find("attack")!=std::string::npos){moving=c;break;}
@@ -146,6 +198,19 @@ int wmain(int argc,wchar_t** argv)try {
         Playback p{moving,idle,animation.clips[moving].duration*.37f,animation.clips[idle].duration*.61f,blend};
         const auto reference=evaluate(animation,p).joints;
         const auto actual=gpu(animation,p),actual12=gpu12(animation,p);
+        for(const auto& garment:garments) {
+            const auto nodes=wearable_nodes(*garment,*body);
+            for(const auto& v:garment->rest_vertices)for(unsigned r=0;r<3;++r) {
+                float expected=0,got11=0,got12=0;
+                for(unsigned k=0;k<4;++k)if(v.weights[k]) {
+                    auto point=owned::skn::point(garment->geometry.joints[v.joints[k]].inverse,v.position);
+                    unsigned j=nodes[v.joints[k]];float a=reference[j][r*4+3],b=actual[j].rows[r][3],c=actual12[j].rows[r][3];
+                    for(unsigned col=0;col<3;++col){a+=reference[j][r*4+col]*point[col];b+=actual[j].rows[r][col]*point[col];c+=actual12[j].rows[r][col]*point[col];}
+                    float weight=v.weights[k]/65535.f;expected+=a*weight;got11+=b*weight;got12+=c*weight;
+                }
+                check_near(expected,got11,"garment D3D11 shared pose");check_near(expected,got12,"garment D3D12 shared pose");
+            }
+        }
         for(const auto& named:body->sockets) {
             const unsigned index=named.second.back().node;
             const auto matrix=socket_pose(animation,named.second,p);

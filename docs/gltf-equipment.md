@@ -112,3 +112,25 @@ of the actual body with D3D11/D3D12 production pose compute, including transitio
 The preview check exercises the production producer with distinct body/item
 materials, expanded bounds, hidden weapons/arrows and the existing FIG path.
 These checks do not replace in-game fit, lighting, effects and FPS acceptance.
+
+## Skinned wardrobe items
+
+`asset.extras.ei.kind = "skinned-item"` uses standard GLB skins and the existing
+human.v1 named bones/inverse binds. Registry armor entries select `"binding":"skin"`
+and omit `socket`. Each item has its own geometry/materials; only referenced joints
+are mapped into the body's current palette, once per immutable outfit change.
+No item animation, morph channels, private GPU pose, or per-frame CPU mesh deformation.
+Unbound morphs and per-item clips are rejected. Future morph-bearing clothes require
+an explicit shared-weight contract; absence is never silently treated as support.
+
+World/panel/camp use the existing immutable equipment snapshot. Invalid bindings
+reject the visual atomically. Removing a selection removes its groups; the current
+starter has no lower-layer mesh to hide and preserves the complete body. This does
+not claim general multilayer occlusion or arbitrary body-shape morph support.
+Bounds use the body's animation envelopes and each weighted vertex in joint space.
+
+`tools/check-gltf-animation.ps1 -Equipment -Glb ... -Profile ... -ClothingDirectory ...`
+checks saved garments, actual registry combinations, body/weapon preservation and
+shared D3D11/D3D12 poses. Surface-bound source clothes are cooked offline to four
+ordinary bone influences; their visual fit must be reviewed, not inferred from
+successful decoding. No shader/pose ABI change is needed for this path.
