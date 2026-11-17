@@ -27,6 +27,13 @@ poses. No wall-clock catch-up exists. Zone reset destroys all physical state.
 Events are keyed by effect ID/start tick, consumed during initial sync, and stale
 or repeated visible incarnations are ignored. Cosmetic randomness is private.
 
+The fragments sample the game's `stones00` rock atlas through the normal texture
+manager/provider order. Every facet has separate inset UVs into one of its four
+cells. The texture is retained with the physics client and its completed surface
+publication is pinned for the render frame; world reset releases it. No shader
+changes, new texture files or particle-option switches are required. Missing art
+is logged as `texture_unavailable`; fragments are not drawn as untextured stand-ins.
+
 The render bridge queues four cached meshes through the existing native figure
 path. It uses world lighting and depth, no own shadows, and draws before water
 and visibility-fog overlays. Alpha fade uses ordered transparent draws. Source

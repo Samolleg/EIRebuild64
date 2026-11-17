@@ -106,6 +106,11 @@ int main(int argc,char** argv)try{
     for(unsigned kind=0;kind<4;++kind){OwnedRender::DebrisMesh mesh(kind);auto points=StoneVertices(kind,1);
         for(unsigned i=0;i<6;++i)check(mesh.positions[i/4].x[i%4]==points[i].x,"render/physics shape agreement");
         for(auto index:mesh.indices)if(index>=mesh.components.size())throw std::runtime_error("invalid triangle index");
+        for(unsigned face=0;face<8;++face){
+            const auto& a=mesh.uv[face*3];const auto& b=mesh.uv[face*3+1];const auto& c=mesh.uv[face*3+2];
+            check(std::abs((b.u-a.u)*(c.v-a.v)-(b.v-a.v)*(c.u-a.u))>.05f,"nondegenerate texture facet");
+            for(unsigned j=0;j<3;++j){const unsigned index=face*3+j;check(mesh.components[index].texture==index,"facet UV component binding");}
+        }
     }
     Stone stone;stone.radius=.1f;stone.pose.position={1,2,3};stone.pose.rotation={0,0,.70710678f,.70710678f};
     const auto m=OwnedRender::DebrisMatrix(stone);check(std::abs(m[4]-.1f)<1e-6f&&m[3]==1&&m[7]==2&&m[11]==3,"quaternion/scale/translation render matrix");

@@ -48,6 +48,12 @@ int wmain(int argc,wchar_t** argv)try{
     // An orthographic close view, +Z up, the ground recedes with +Y.
     frame.worldToClip={.55f,0,0,0, 0,.35f,.8f,-.25f, 0,.04f,-.03f,.5f, 0,0,0,1};
     frame.fog=[](void*,const float*)->unsigned char{return 255;};
+    // Deliberately varied texels exercise native UV sampling on both backends.
+    const std::uint32_t texels[]={0xffc6bca4,0xff615d52,0xff8d8778,0xffe0d8c6};
+    const owned::NativeOwnedTextureMip mip{reinterpret_cast<const std::uint8_t*>(texels),2,2,sizeof(texels)};
+    frame.debrisTexture.identity=0x5048595358544558ull;frame.debrisTexture.generation=1;
+    frame.debrisTexture.format=owned::NativeOwnedTextureFormat::argb8888;
+    frame.debrisTexture.mips=&mip;frame.debrisTexture.mip_count=1;frame.debrisTexture.opaque_mips=1;
     owned::FixedState state;state.viewport.dwWidth=640;state.viewport.dwHeight=480;state.viewport.dvMinZ=0;state.viewport.dvMaxZ=1;
     state.render[D3DRENDERSTATE_FILLMODE]=D3DFILL_SOLID;state.render[D3DRENDERSTATE_FOGENABLE]=FALSE;
     owned::NativeWorldLighting light;light.ambient=frame.ambient;light.sunlight_direction=frame.sunDirection;light.sunlight_diffuse=frame.sunDiffuse;

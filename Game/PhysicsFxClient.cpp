@@ -3,6 +3,7 @@
 #include "PhysicsFxTerrain.h"
 #include "WorldClient.h"
 #include "Terrain.h"
+#include "TextureManager.h"
 #include "OwnedRender/E1Terrain.h"
 #include "GameJournal.h"
 #include "retained_static_scene.h"
@@ -11,6 +12,7 @@
 namespace PhysicsFx {
 struct Client::Impl {
     World world;Events events;
+    ITexturePtr stoneTexture;bool textureAttempted=false;
     struct Request {int id,start;Vec position;float power,radius;};
     std::vector<Request> pending;
     std::uint64_t generation=0,revision=0;
@@ -67,6 +69,14 @@ void Client::Tick(CWorldClient& host,bool paused){
         const std::uint32_t seed=std::uint32_t(request.id)*0x9e3779b9u^std::uint32_t(request.start)*0x85ebca6bu;
         spawned+=s.world.Burst(key,hit.point,hit.normal,request.power,seed);
     }
+    if(spawned&&!s.textureAttempted){
+        s.textureAttempted=true;
+        auto* manager=host.GetTextureManager();
+        s.stoneTexture=manager->CreateTexture(TTID_STONE_MAIN,"stones00");
+        const bool loaded=!s.stoneTexture.IsEmpty()&&manager->LoadTexture(s.stoneTexture);
+        if(!loaded)s.stoneTexture=nullptr;
+        GameJournal::Event("PHYSICS_FX",loaded?"texture_ready":"texture_unavailable","name=stones00");
+    }
     s.pending.clear();s.world.Tick(false);
     if(!s.world.Error().empty()){reportFailure();return;}
     const auto stats=s.world.Statistics();
@@ -77,4 +87,9 @@ void Client::Tick(CWorldClient& host,bool paused){
     }
 }
 std::vector<Stone> Client::Sample(float fraction) const{return impl->world.Sample(fraction);}
+std::uint64_t Client::TextureSurface() const{
+    const auto* texture=impl->stoneTexture.GetPtr();
+    auto* surface=texture?texture->GetSurface():nullptr;
+    return surface&&surface->EnsureOwnedSurfacePublished()?surface->OwnedSurfaceId():0;
+}
 }
