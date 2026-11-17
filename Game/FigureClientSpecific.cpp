@@ -227,7 +227,7 @@ bool CFigureClientSpecific::SubmitNativeFigure(CRenderer* renderer, CMaterial* m
             static_cast<std::uint32_t>(pFigure->nIndices)};
     }
     const bool defaults = pFigure->CheckFlag(FIG_USE_DEFAULT_COLORS) != 0;
-    const bool studioPreview = owned::model_draw_is_preview();
+    const bool studioPreview = owned::model_draw_is_character_preview();
     const bool prelit = !studioPreview && !lights && !defaults && pFigure->CheckFlag(FIG_LIGHTED);
     if (prelit) {
         streams.diffuse = reinterpret_cast<const std::uint32_t*>(pFigure->colors.GetData());

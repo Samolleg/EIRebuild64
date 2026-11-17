@@ -61,7 +61,9 @@ void CI3DMapObjTranslation::Draw(CRenderer *pRend)
     presentation.id = m_pMapObject->GetID();
     presentation.default_fog = true;
     OwnedRender::ModelPreviewPresentationScope presentationScope(presentation);
-    owned::ModelDrawScope previewScope(owned::ModelDrawDomain::preview);
+    // This adapter draws the 3D decorations of ESC/options/save-load, not
+    // character dolls. Keep the UI domain but retain their authored lighting.
+    owned::ModelDrawScope previewScope(owned::ModelDrawDomain::interface_decoration);
     m_pMapObject->Draw(pRend);
 
 }

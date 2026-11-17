@@ -20,6 +20,30 @@ inline bool produce_model_preview_lighting(const std::array<float,16>& clip,
     output.points.clear();
     return true;
 }
+// Existing decorative-menu policy before X64GLTF12. Full ambient and FIG
+// colors belong to this UI role; character previews never enumerate these lights.
+template<class Next>
+bool produce_interface_decoration_lighting(const owned::ModelLightingFacts& source,
+    const std::array<float,3>& object, Next&& next, ModelPreviewLighting& output) {
+    for(float v:object)if(!std::isfinite(v))return false;
+    auto world=source;world.ambient=0xffffffffu;
+    output.points.clear();
+    if(!owned::produce_model_lighting(world,output.world))return false;
+    owned::ModelPointLightFacts light;
+    while(next(light)) {
+        if(owned::admit_model_point_light(light)) {
+            float distance=0;
+            for(unsigned i=0;i<3;++i){const float delta=object[i]-light.value.center[i];distance+=delta*delta;}
+            const float reach=light.value.radius+10.f;
+            if(distance<=reach*reach) {
+                if(!light.value.source_id)light.value.source_id=int(output.points.size())+1;
+                output.points.push_back(light.value);
+            }
+        }
+        light={};
+    }
+    return true;
+}
 inline owned::NativeLighting model_preview_tinted_lighting(const std::array<float,16>& world,
     std::uint32_t color) noexcept {
     owned::NativeLighting result;
