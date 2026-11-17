@@ -114,7 +114,13 @@ bool submitImpl(void* context, const owned::NativeGeometryView& view, owned::Nat
             hr = r.set_native_static_terrain(request.key, terrain, terrainState, nullptr, registered, &result);
         } else {
             if (!request.records) { result.failure_operation = "embedded.static_records"; return false; }
-            hr = r.set_native_static_object(request.key, *request.records, sink.state, registered, &result);
+            // Match the author's caster and object-space routes: a successful caster
+            // registration removes the object from the posed shadow store.
+            if (request.caster)
+                return SUCCEEDED(r.set_native_active_caster(request, sink.state));
+            hr = request.object_space
+                ? r.set_native_static_object_space(request, sink.state, registered, &result)
+                : r.set_native_static_object(request.key, *request.records, sink.state, registered, &result);
         }
         request.registered = registered;
         return SUCCEEDED(hr);
