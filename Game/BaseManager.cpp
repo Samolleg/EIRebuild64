@@ -309,9 +309,16 @@ void CBaseManager::Release(LPGAMEBASE lpData)
 {
     if (lpData && lpData->IsUnreferenced())
     {
-        POSITION pos1 = respmap.RemoveAt(lpData->GetID());
-        if (pos1)
-            list.RemoveAt(pos1);
+        // A retired object can outlive RemoveAll (party/preview references).
+        // Its numeric ID may already belong to a new inventory object.
+        // Only the current registration may retire that ID's list entry.
+        LPGAMEBASE registered = nullptr;
+        if (hash.Lookup(lpData->GetID(), registered) && registered == lpData)
+        {
+            POSITION pos1 = respmap.RemoveAt(lpData->GetID());
+            if (pos1)
+                list.RemoveAt(pos1);
+        }
         lpData->Destroy();
         lpData->SetManager(NULL);
         MoveToTrash(lpData);
@@ -352,6 +359,11 @@ LPGAMEBASE CBaseManager::RegisterInstantAs(int id, LPGAMEBASE lpData)
         pValue = NULL;
         list.AddTail(lpData);
         respmap[id] = list.GetTailPosition();
+    }
+    else
+    {
+        // Keep enumeration consistent with lookup when a live ID is replaced.
+        list.SetAt(respmap[id], lpData);
     }
     // set new one in this place
     hash.SetAt(id, lpData);
