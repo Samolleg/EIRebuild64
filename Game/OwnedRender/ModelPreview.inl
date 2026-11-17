@@ -113,33 +113,9 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
             }
         }
     }
-    // Source selects preview lights; c74 prepares shared ambient/sun and admission.
-    owned::ModelLightingFacts worldLight;
-    worldLight.ambient = presentation && presentation->full_ambient ? 0xffffffffu : renderer->GetAmbientColor();
-    const auto* sun = renderer->GetSunlight();
-    if (sun) {
-        const auto& color = sun->GetDiffuse(); const auto& direction = sun->GetDirection();
-        worldLight.sunlight = true;
-        worldLight.diffuse = {color.r, color.g, color.b};
-        worldLight.direction = {direction.x, direction.y, direction.z};
-    }
-    const auto& cp = placement.position;
     OwnedRender::ModelPreviewLighting illumination;
-    CManagerIterator iterator;
-    auto* light = static_cast<CLight*>(iterator.GetFirst(theWorld.GetLightManager()));
-    if (!OwnedRender::produce_model_preview_lighting(worldLight, cp,
-        [&](owned::ModelPointLightFacts& facts) {
-            if (!light) return false;
-            const auto* current = light;
-            light = static_cast<CLight*>(iterator.GetNext());
-            const auto& center = current->GetCP(); const auto& color = current->GetDiffuse();
-            facts.sunlight = current == sun;
-            facts.inactive = current->CheckFlag(LIT_INACTIVE) != 0;
-            facts.value.center = {center.x, center.y, center.z};
-            facts.value.color = {color.r, color.g, color.b};
-            facts.value.radius = current->GetRange();
-            return true;
-        }, illumination)) return reject("preview.lighting");
+    if(!OwnedRender::produce_model_preview_lighting(worldToClip,placement.position,illumination))
+        return reject("preview.studio_lighting");
     const BYTE fog = (presentation && presentation->default_fog) || lpObject->CheckFlag(OBJ_USE_DEFAULT_FOG) ? 255 :
         static_cast<CWorldClient*>(GetWorld())->GetTerrain()->GetObjectFogAlpha(lpObject->GetCP());
     const double textureTime = theWorld.GetPreciseTime();
@@ -189,7 +165,9 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
                 if (!owned::make_native_figure_lighting(&material.diffuse.r, &material.emissive.r,
                         &material.specular.r, objectToWorld, lighting)) return false;
             }
-            output.material = {defaults,
+            if(defaults)lighting=OwnedRender::model_preview_tinted_lighting(objectToWorld,
+                overrideColors ? presentation->diffuse : part.figure->GetDefaultColor());
+            output.material = {false,
                 part.material && part.material->CheckFlag(MAT_USE_SPECULAR),
                 overrideColors ? presentation->diffuse : defaults ? part.figure->GetDefaultColor() : 0xffffffffu,
                 overrideColors ? presentation->specular : defaults ? part.figure->GetDefaultSpecular() : (std::uint32_t(fog) << 24),
@@ -198,11 +176,11 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
         },
         [&](const owned::NativeGeometryView& view, const owned::ModelPreviewPart& part) {
             return renderer->GetD3D()->SubmitC74Figure(view,
-                view.skn_material.identity || !part.material.default_colors ? &illumination.world : nullptr,
+                &illumination.world,
                 illumination.points);
         },
         [](std::size_t, const owned::ModelPreviewPart&) { return true; }, result);
-    // Unlit camp submissions may be queued. Finish before this UI pose owner
+    // Interface submissions may be queued. Finish before this UI pose owner
     // can be reused by another view of the same object.
     const bool flushed = renderer->GetD3D()->FlushC56CampFigures();
     finish.finished = true;
