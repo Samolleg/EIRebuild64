@@ -1161,9 +1161,11 @@ void build_active_statics(const std::shared_ptr<ActiveStaticsJob>& job) noexcept
         failure=upload.decorations.empty()?"no_candidates":(!device && !builder.d3d12)?"no_device":"prebuild";
         if(!upload.decorations.empty() && (device || builder.d3d12)) {
             prebuild_decorations(upload,builder,1.f);
-            // No textures: every draw binds its posed record's texture, and
-            // the impostor bake reads the archive textures those made
-            // resident under the same cache keys.
+            // GLB opaque textures may not have had a colour draw yet. Prepare
+            // them before catalog adoption; compressed pieces retain no mips.
+            // Existing surface-backed FIG parts still use their live texture.
+            std::unordered_set<std::string> seen;
+            prebuild_decoration_textures(upload,builder,seen);
             if(finish_native_prebuilt_pages(builder) && !builder.failed) {
                 upload.prebuilt_pages=std::move(builder.pages);
                 failure="piece";

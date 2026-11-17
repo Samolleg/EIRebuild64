@@ -652,6 +652,9 @@ void Renderer::adopt_active_statics(std::shared_ptr<NeighbourPiece> piece,const 
     auto& p=*a.pieces.back();
     const auto old_mesh=native_mesh_resident_bytes_;
     adopt_prebuilt_pages(p);
+    adopt_prebuilt_textures(p);
+    // The resident cache owns adopted textures; drop temporary duplicates and uploads.
+    p.prebuilt_textures.clear();
     const UINT baked_before=impostors_.baked;
     if(!d3d12_)bake_neighbour_impostors(p);else bake_neighbour_impostors_d3d12(p);
     const auto baked=impostors_.baked-baked_before;
