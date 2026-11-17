@@ -72,7 +72,10 @@ int main(int argc,char** argv)try{
     check(a.Statistics().gpuDynamics&&a.Statistics().gpuBroadPhase,"GPU dynamics and GPU broadphase enabled");
     std::cout<<"GPU_DEVICE "<<a.Device()<<'\n';
     check(a.AddPatch(1,{0,0,0},plane())&&b.AddPatch(1,{0,0,0},plane()),"PhysX GPU terrain created");
-    check(a.Burst(1,{0,0,0},{0,0,1},1,123)==12&&b.Burst(1,{0,0,0},{0,0,1},1,123)==12,"12 convex stones");
+    check(a.Burst(1,{0,0,0},{0,0,1},1,123)==64&&b.Burst(1,{0,0,0},{0,0,1},1,123)==64,"64 convex stones per full impact");
+    const auto burst=a.Sample(1);
+    check(std::count_if(burst.begin(),burst.end(),[](const Stone& s){return s.radius>=.08f;})==8,"eight large readable chunks");
+    check(std::all_of(burst.begin(),burst.end(),[](const Stone& s){return s.radius>=.025f&&s.radius<=.13f;}),"bounded chip and chunk size");
     auto paused=a.Sample(1);for(int i=0;i<20;++i)a.Tick(true);auto after=a.Sample(1);
     check(after.size()==paused.size()&&after[0].pose.position.z==paused[0].pose.position.z,"pause freezes pose and lifetime");
     float highest=0,lowest=100;bool gpuContacts=false,gpuMemory=false;std::ofstream trajectory;

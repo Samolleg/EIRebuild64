@@ -17,7 +17,7 @@ This first stage is intended for open terrain; walls/trees/boulders are not coll
 Physics owns up to 128 bodies and 16 local terrain patches. Adjacent effects may
 have overlapping patches; per-patch collision layers prevent duplicate contacts.
 Shapes have six vertices and eight facets, shared by the physical and render shapes.
-Eight to twelve fragments, 3.6–12 cm across, live for 3–5 game seconds, fading in
+Forty-eight to sixty-four fragments: 5–12 cm chips and 6–8 larger 16–26 cm chunks, live for 3–5 game seconds, fading in
 their last 0.6 seconds. A patch extends 12 m from its centre; outlying fragments
 retire before its boundary. Shapes and patches are released when no longer needed.
 

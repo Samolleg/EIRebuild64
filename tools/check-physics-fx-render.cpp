@@ -43,7 +43,7 @@ int wmain(int argc,wchar_t** argv)try{
     auto renderer=std::make_unique<owned::Renderer>();
     hr(dx12?renderer->ensure(window,640,480):renderer->ensure_for_test_warp(window,640,480),"renderer initialize");
     PhysicsFx::World physics;std::vector<PhysicsFx::Triangle> terrain={{{-14,-14,0},{14,-14,0},{14,14,0}},{{-14,-14,0},{14,14,0},{-14,14,0}}};
-    require(physics.AddPatch(1,{0,0,0},terrain)&&physics.Burst(1,{0,0,0},{0,0,1},1,42)==12,"PhysX GPU burst");
+    require(physics.AddPatch(1,{0,0,0},terrain)&&physics.Burst(1,{0,0,0},{0,0,1},1,42)==64,"PhysX GPU burst");
     OwnedRender::E1VisualInputs frame;frame.lightingValid=true;frame.ambient={.08f,.08f,.08f,1};frame.sunDiffuse={.9f,.9f,.9f,1};frame.sunDirection={.4f,-.4f,.82f,0};
     // An orthographic close view, +Z up, the ground recedes with +Y.
     frame.worldToClip={.55f,0,0,0, 0,.35f,.8f,-.25f, 0,.04f,-.03f,.5f, 0,0,0,1};
