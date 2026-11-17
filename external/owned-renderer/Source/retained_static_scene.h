@@ -340,6 +340,8 @@ struct VisualPreparedResources {
         std::shared_ptr<const skn::RuntimeAsset> skn_asset;
         // Strong ownership keeps selected texture pixels valid through queued draws.
         std::shared_ptr<const skn::Dds> skn_base_color_override;
+        std::shared_ptr<const skn::Dds> skn_metallic_roughness_override;
+        std::shared_ptr<const std::uint8_t> skn_material_identity;
         std::uint32_t skn_material = 0;
         bool skn_casts_shadow = true;
         bool gltf_weapon = false, gltf_arrow = false;

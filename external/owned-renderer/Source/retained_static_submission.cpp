@@ -3641,7 +3641,8 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
          nodes.push_back(static_cast<unsigned>(assembly.skeleton->nodes.size()+
              (found-body.geometry.joints.begin())));
         }
-        build_skn_groups(sample,skn::from_gltf(item.asset),&nodes,item.weapon,item.arrow,&item.base_color_overrides);
+        build_skn_groups(sample,skn::from_gltf(item.asset),&nodes,item.weapon,item.arrow,
+            &item.base_color_overrides,&item.metallic_roughness_overrides,&item.material_identities);
        }
       }
       if(built)prepared.merged_assembly=sample.assembly;
@@ -3790,7 +3791,9 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
          }
          auto& skn_material=view.skn_material;
          // The immutable asset and material index are stable across poses.
-         skn_material.identity=static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(&material));
+         skn_material.identity=static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(
+             group.skn_material_identity ? static_cast<const void*>(group.skn_material_identity.get()) :
+                                           static_cast<const void*>(&material)));
          skn_material.factors[0]=material.roughness;skn_material.factors[1]=material.metallic;
          skn_material.factors[2]=material.ao;skn_material.factors[3]=material.two_sided?2.f:1.f;
          std::copy_n(material.emission,3,skn_material.emission);
@@ -3799,7 +3802,8 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
          skn_material.base[3]=static_cast<float>(material.alpha);
          if(material.alpha==0)view.owned_texture.opaque_mips=UINT_MAX;
          for(unsigned k=0;k<3;++k){
-          const auto& src=group.skn_asset->textures[group.skn_material][k+1];
+          const auto& src=k==1 && group.skn_metallic_roughness_override ?
+              *group.skn_metallic_roughness_override : group.skn_asset->textures[group.skn_material][k+1];
           auto& dst=skn_material.maps[k];if(src.mips.empty())continue;
           dst.identity=1;dst.generation=1;dst.value_source=1;
           dst.resource=&src.blob.identity;dst.format=src.format;
