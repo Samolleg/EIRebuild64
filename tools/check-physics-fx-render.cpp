@@ -5,6 +5,7 @@
 #include "embedded_host.h"
 #include "retained_static_scene.h"
 #include "renderer.h"
+#include "gltf_breast.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -30,6 +31,7 @@ static void save(const fs::path& path,const Image& image){
     f.bfType=0x4d42;f.bfOffBits=sizeof(f)+sizeof(h);f.bfSize=f.bfOffBits+h.biSizeImage;
     std::ofstream out(path,std::ios::binary);out.write(reinterpret_cast<const char*>(&f),sizeof(f));out.write(reinterpret_cast<const char*>(&h),sizeof(h));out.write(reinterpret_cast<const char*>(image.pixels.data()),image.pixels.size());require(bool(out),"save image");
 }
+#include "check-nala-physics.inl"
 int wmain(int argc,wchar_t** argv)try{
     require(argc==4,"usage: check game-root output backend(11|12)");const fs::path game=fs::absolute(argv[1]),out=fs::absolute(argv[2]);const bool dx12=std::wstring(argv[3])==L"12";
     fs::create_directories(out);const auto config=out/L"renderer.ini";
@@ -40,6 +42,7 @@ int wmain(int argc,wchar_t** argv)try{
     WNDCLASSW cls{};cls.lpfnWndProc=DefWindowProcW;cls.hInstance=GetModuleHandleW(nullptr);cls.lpszClassName=L"PhysicsFxRenderCheck";RegisterClassW(&cls);
     // Deliberately never show the diagnostic window.
     HWND window=CreateWindowExW(0,cls.lpszClassName,L"Physics FX check",WS_OVERLAPPEDWINDOW,0,0,640,480,nullptr,nullptr,cls.hInstance,nullptr);require(window!=nullptr,"hidden window");
+    check_nala_physics(game,out);
     auto renderer=std::make_unique<owned::Renderer>();
     hr(dx12?renderer->ensure(window,640,480):renderer->ensure_for_test_warp(window,640,480),"renderer initialize");
     PhysicsFx::World physics;std::vector<PhysicsFx::Triangle> terrain={{{-14,-14,0},{14,-14,0},{14,14,0}},{{-14,-14,0},{14,14,0},{-14,14,0}}};
