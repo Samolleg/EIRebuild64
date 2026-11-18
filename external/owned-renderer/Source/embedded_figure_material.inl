@@ -175,17 +175,25 @@ HRESULT Renderer::queue_embedded_figure(const NativeGeometryView& view,
  if (FAILED(hr)) return hr;
  const auto savedLighting=native_world_lighting_;
  const bool savedValid=native_world_lighting_valid_;
- const auto savedLights=lighting?native_point_light_inputs_:std::vector<RetainedWorldPointLight>{};
+ const bool softFigure = view.interface_preview && lighting && lighting->sunlight_direction[3] == 1.f;
+ const auto savedLights=lighting && !softFigure?native_point_light_inputs_:std::vector<RetainedWorldPointLight>{};
  double worldTime=0; bridge_current_world_time(worldTime);
  const auto restoreLighting=[&]{
   if (lighting) {
-   set_native_world_lighting(savedLighting);
-   set_native_point_lights(savedLights,worldTime);
+   if (softFigure) apply_native_lighting(savedLighting);
+   else {
+    set_native_world_lighting(savedLighting);
+    set_native_point_lights(savedLights,worldTime);
+   }
    native_world_lighting_valid_=savedValid;
   }
  };
  struct Restore { decltype(restoreLighting)& run; ~Restore(){run();} } restore{restoreLighting};
- if (lighting && (!set_native_world_lighting(*lighting) ||
+ // Studio figures skip scene lamps in the pixel shader. Bind their camera light
+ // directly so the cave profile and fractional sun cannot reshape it.
+ if (softFigure) {
+  if (!apply_native_lighting(*lighting)) return E_FAIL;
+ } else if (lighting && (!set_native_world_lighting(*lighting) ||
      !set_native_point_lights(lights, worldTime))) return E_INVALIDARG;
  ComPtr<ID3D11ShaderResourceView> combined;
  if (!d3d12_ && primary && secondary) {

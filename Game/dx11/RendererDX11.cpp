@@ -356,6 +356,7 @@ bool CDX11::SubmitC74Figure(const owned::NativeGeometryView& view,
     auto state = CaptureC56MaterialState();
     const bool camp = OwnedRender::E4::OwnsDraw();
     auto model = view;
+    if (lighting && lighting->sunlight_direction[3] == 1.f) model.interface_preview = true;
     if (camp && itemColorSum && state.render[D3DRENDERSTATE_SPECULARENABLE]) model.flags |= 8u;
     if (OwnedRender::E4::OwnsDraw() || owned::model_draw_is_preview() ||
         (ownedRenderer.FigureActive() && ownedRenderer.FigureValues().object_id == 0))

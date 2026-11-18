@@ -3,6 +3,7 @@
 #include <cmath>
 
 namespace owned {
+enum class PreviewStudioStyle { portrait, soft_figure };
 struct PreviewStudioLighting {
     // Native lighting uses max(ambient, directional), not an additive fill.
     std::array<float,4> ambient{.30f,.30f,.30f,1.f};
@@ -14,7 +15,8 @@ struct PreviewStudioLighting {
 // lighting inputs, extra GPU work, or model-specific policy. The complete clip
 // includes the pane's projection/HUD placement; matrices use row-major order.
 inline bool make_preview_studio_lighting(const std::array<float,16>& clip,
-    const std::array<float,3>& center, PreviewStudioLighting& result) noexcept {
+    const std::array<float,3>& center, PreviewStudioLighting& result,
+    PreviewStudioStyle style = PreviewStudioStyle::portrait) noexcept {
     using Vec = std::array<double,3>;
     const auto dot=[](const Vec& a,const Vec& b) {
         return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
@@ -66,13 +68,20 @@ inline bool make_preview_studio_lighting(const std::array<float,16>& clip,
     const double upAlong=dot(up,front),upRight=dot(up,right);
     for(unsigned a=0;a<3;++a)up[a]-=upAlong*front[a]+upRight*right[a];
     if(!normalize(up)) return false;
-    // Elevation 35 degrees; azimuth 30 degrees toward screen left.
-    constexpr double left=.4095760443,above=.5735764364,towardEye=.7094064799;
+    // Soft figures: 22 degrees up, 24 degrees left. Standalone heads retain 35/30.
+    const bool soft = style == PreviewStudioStyle::soft_figure;
+    const double left = soft ? .377111244 : .4095760443;
+    const double above = soft ? .374606593 : .5735764364;
+    const double towardEye = soft ? .847031 : .7094064799;
     Vec key{};
     for(unsigned a=0;a<3;++a)key[a]=towardEye*front[a]-left*right[a]+above*up[a];
     if(!normalize(key)) return false;
     PreviewStudioLighting value;
     for(unsigned a=0;a<3;++a)value.direction[a]=static_cast<float>(key[a]);
+    if (soft) {
+        value.ambient = {.36f,.36f,.36f,1.f};
+        value.direction[3] = 1.f; // NativeWorldLighting: soft figure response in the interface pass.
+    }
     result=value;
     return true;
 }

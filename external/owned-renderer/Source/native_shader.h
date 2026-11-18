@@ -4248,6 +4248,12 @@ float4 nativeAstralSample(NativeOutput i,float2 uvDx,float2 uvDy){
  return t;
 }
 #endif
+#if !defined(NATIVE_TERRAIN_PS)&&!defined(NATIVE_UNLIT)
+float3 previewSoftDiffuse(float cosine){
+ float h=saturate(.5+.5*cosine);
+ return lerp(nativeWorldAmbient.rgb,nativeWorldSunDiffuse.rgb,h*(.65+.35*h));
+}
+#endif
 #if defined(NATIVE_TERRAIN_SLIM)||(defined(NATIVE_TERRAIN_PS)&&defined(NATIVE_SHADOW_MASK))
 NativePixelResult nativePS(NativeOutput i,uint primitive:SV_PrimitiveID,bool frontFace:SV_IsFrontFace NATIVE_GUIDE_OUT){
 #else
@@ -4527,7 +4533,12 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace NATIVE_G
  // lit receivers take the lamps, packed (pre-lit) receivers the emissive
  // glow only (none without glow lights).
  // The bounce light volume lights them too, with or without lamps.
- bool pointLit=i.shadowMode==1&&(nativePointLightCount!=0||caveVolumeStrength>0);
+#ifdef NATIVE_TERRAIN_PS
+ const bool softFigure=false;
+#else
+ bool softFigure=NATIVE_INTERFACE&&nativeWorldSunDirection.w==1&&i.shadowMode==1;
+#endif
+ bool pointLit=!softFigure&&i.shadowMode==1&&(nativePointLightCount!=0||caveVolumeStrength>0);
 #if !defined(NATIVE_TERRAIN_PS)
  // Material pixels: lit figures drawn with a bound profile (nativeCombinerTail bit 1).
 #ifdef NATIVE_GLTF
@@ -4711,6 +4722,15 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace NATIVE_G
   unlit=saturate(i.directional+local+i.emissive);
  }
  else if(i.shadowMode==1)unlit=saturate(i.directional+i.emissive);
+#ifndef NATIVE_TERRAIN_PS
+ // Posed FIG and glTF meshes carry pixel normals, including authored normal maps.
+ if(softFigure){
+  float cosine=dot(normalize(i.worldNormal),nativeWorldSunDirection.xyz);
+  float3 diffuse=previewSoftDiffuse(cosine)*i.pointMaterial.rgb;
+  i.d.rgb=saturate(diffuse+i.emissive);
+  unlit=saturate(diffuse-nativeWorldAmbient.rgb*i.pointMaterial.rgb+i.emissive);
+ }
+#endif
 #endif
 #ifdef NATIVE_SNOW_TRAILS
  // Snow trails (snow_trails.h) on the active map's opaque base tiles; the
@@ -5415,6 +5435,12 @@ NativePixelResult nativePS(NativeOutput i,bool frontFace:SV_IsFrontFace NATIVE_G
      relief=(after-before)*t.rgb*keep;
     }
 #endif
+    if(softFigure){
+     relief=(previewSoftDiffuse(dot(n,l))-previewSoftDiffuse(dot(normalize(i.worldNormal),l)))*i.pointMaterial.rgb*t.rgb*keep;
+#ifdef NATIVE_GLTF
+     unlitRelief=relief;
+#endif
+    }
 #ifdef NATIVE_GLTF
     c.rgb=max(c.rgb+relief,0);c0=max(c0+unlitRelief,0);
 #else

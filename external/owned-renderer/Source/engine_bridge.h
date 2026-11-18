@@ -579,6 +579,7 @@ inline constexpr NativeOrdering kNativePlacedOrdering = NativeOrdering::preserve
 // are not inputs. The GPU constant layout remains exactly 48 bytes.
 struct NativeWorldLighting {
     std::array<float, 4> ambient{0.2f, 0.2f, 0.2f, 1.0f};
+    // xyz points towards the source. w=1 selects soft lighting for a posed UI figure.
     std::array<float, 4> sunlight_direction{0.0f, 0.0f, -1.0f, 0.0f};
     std::array<float, 4> sunlight_diffuse{0.6f, 0.6f, 0.6f, 1.0f};
 };
