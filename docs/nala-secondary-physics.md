@@ -11,8 +11,9 @@ allow settling and inertial lag. The 8.5 cm travel budget includes the static
 load. The spring preload sets the static drop to 4.1 cm. Initialization and teleports seed the gravity-loaded equilibrium.
 
 The actor owns a separate GPU scene sharing the existing PhysX foundation,
-CUDA context and dispatcher with debris. Fixed 1/120 s steps interpolate the
-animated targets. World time is supplied by the native completed-visual seam;
+CUDA context and dispatcher with debris. The solver advances at 60 Hz in game
+time. It interpolates animated targets at each step and interpolates the two
+latest solved offsets for presentation. World time is supplied by the native completed-visual seam;
 combat pause and duplicate samples do not advance simulation. Rewind, explicit
 seek, gaps over 0.25 s and attachment jumps over 0.5 m reset momentum. Destruction
 of the retained actor releases its scene. Missing CUDA/runtime errors emit
