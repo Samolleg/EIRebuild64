@@ -212,15 +212,18 @@ void World::Tick(bool paused){
     const auto begin=std::chrono::steady_clock::now();for(auto& b:w.stones)b.poses[0]=b.poses[4];
     const bool awake=std::any_of(w.stones.begin(),w.stones.end(),
         [](const auto& stone){return !stone.actor->isSleeping();});
+    w.stats.substeps=awake?4:0;
     if(!awake)for(auto& stone:w.stones)stone.poses.fill(stone.poses[4]);
     if(awake)for(unsigned step=1;step<=4;++step){
         w.scene->simulate(StepSeconds);PxU32 error=0;bool complete=w.scene->fetchResults(true,&error);
         if(!complete||error||w.sdk->errors.count){failure="PhysX GPU step failed: "+w.sdk->errors.Message();++w.stats.errors;w.stats.gpuDynamics=w.stats.gpuBroadPhase=false;w.stones.clear();w.patches.clear();return;}
         for(auto& b:w.stones)b.poses[step]=pose(*b.actor);
     }
-    PxSimulationStatistics values{};w.scene->getSimulationStatistics(values);
-    w.stats.gpuHeapBytes=values.gpuMemHeap;w.stats.gpuBroadPhaseBytes=values.gpuMemHeapBroadPhase;w.stats.gpuSolverBytes=values.gpuMemHeapSolver;
-    w.stats.gpuContacts=values.gpuDynamicsMemoryConfigStatistics.rigidContactCount;
+    if(awake){
+        PxSimulationStatistics values{};w.scene->getSimulationStatistics(values);
+        w.stats.gpuHeapBytes=values.gpuMemHeap;w.stats.gpuBroadPhaseBytes=values.gpuMemHeapBroadPhase;w.stats.gpuSolverBytes=values.gpuMemHeapSolver;
+        w.stats.gpuContacts=values.gpuDynamicsMemoryConfigStatistics.rigidContactCount;
+    }else w.stats.gpuContacts=0;
     for(auto b=w.stones.begin();b!=w.stones.end();){
         b->age+=TickSeconds;const auto p=b->poses[4].position,c=w.patches.at(b->patch).center;
         if(b->age>=b->life||!finite(p)||std::abs(p.x-c.x)>PatchRadius-1||std::abs(p.y-c.y)>PatchRadius-1||p.z<c.z-20){--w.patches.at(b->patch).users;b=w.stones.erase(b);}else ++b;

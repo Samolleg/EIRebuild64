@@ -33,10 +33,11 @@ void check_breast_physics(bool missing=false) {
     sim.reset();sim=CreateCharacterPhysics();
     check(sim->advance(0,targets,false)==SecondaryPoints{}&&sim->error().empty(),"breast actor lifetime recreates GPU scene");
     auto worker=secondary_factory();
-    float asyncPeak=0;
+    float asyncPeak=0;double lastSample=0;
     for(unsigned frame=0;frame<360;++frame) {
         targets[0][2]=1.4f+.04f*std::sin(float(frame)*.16f);
-        const auto visible=worker->advance(frame/120.,targets,false);
+        lastSample=frame/120.;
+        const auto visible=worker->advance(lastSample,targets,false);
         check(visible==worker->advance(frame/120.,targets,false),"async duplicate sample is stable");
         asyncPeak=(std::max)(asyncPeak,magnitude(visible[0]));
         if(!worker->error().empty())throw std::runtime_error(worker->error());
@@ -44,6 +45,8 @@ void check_breast_physics(bool missing=false) {
         if(worker->ready()&&asyncPeak>.003f)break;
     }
     check(worker->ready()&&asyncPeak>.003f&&asyncPeak<=secondary_limit+1e-6f,"asynchronous GPU pose reaches renderer");
+    targets[0][0]+=2;targets[1][0]+=2;
+    check(worker->advance(lastSample,targets,false)==SecondaryPoints{},"paused teleport drops previous async result");
     check(worker->advance(0,targets,true)==SecondaryPoints{},"async stale result suppressed after reset");
     std::cout<<"BREAST peak_m="<<peak<<" GPU spring and reset checks passed\n";
 }

@@ -15,7 +15,7 @@ inline constexpr unsigned MaxStones=128;
 inline constexpr float TickSeconds=.055f, StepSeconds=TickSeconds/4;
 inline constexpr float PatchRadius=12.f;
 struct Stats {
-    unsigned bodies=0,active=0,patches=0; double stepMs=0; unsigned errors=0;
+    unsigned bodies=0,active=0,patches=0,substeps=0; double stepMs=0; unsigned errors=0;
     bool gpuDynamics=false,gpuBroadPhase=false;
     std::uint64_t gpuHeapBytes=0,gpuBroadPhaseBytes=0,gpuSolverBytes=0;
     unsigned gpuContacts=0;

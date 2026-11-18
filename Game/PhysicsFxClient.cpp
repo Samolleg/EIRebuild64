@@ -168,8 +168,8 @@ void DebrisWorker::step(const DebrisTick& job) {
     if(!world.Error().empty()){reportFailure();return;}
     const auto stats=world.Statistics();
     if(spawned||stats.errors||(stats.bodies&&job.tick-lastReport>=18)){
-        GameJournal::Event("PHYSICS_FX","stone_debris","backend=PhysX-5.6.1 spawned=%u bodies=%u active=%u patches=%u prepare_ms=%.3f step_ms=%.3f errors=%u gpu_dynamics=%d gpu_broadphase=%d gpu_heap=%llu gpu_solver=%llu gpu_contacts=%u",
-            spawned,stats.bodies,stats.active,stats.patches,prepareMs,stats.stepMs,stats.errors,int(stats.gpuDynamics),int(stats.gpuBroadPhase),stats.gpuHeapBytes,stats.gpuSolverBytes,stats.gpuContacts);
+        GameJournal::Event("PHYSICS_FX","stone_debris","backend=PhysX-5.6.1 spawned=%u bodies=%u active=%u patches=%u prepare_ms=%.3f step_ms=%.3f substeps=%u errors=%u gpu_dynamics=%d gpu_broadphase=%d gpu_heap=%llu gpu_solver=%llu gpu_contacts=%u",
+            spawned,stats.bodies,stats.active,stats.patches,prepareMs,stats.stepMs,stats.substeps,stats.errors,int(stats.gpuDynamics),int(stats.gpuBroadPhase),stats.gpuHeapBytes,stats.gpuSolverBytes,stats.gpuContacts);
         lastReport=job.tick;
     }
 }

@@ -145,13 +145,13 @@ public:
         std::lock_guard lock(mutex);
         visibleFailure=failure;
         if(!failure.empty())return {};
-        if(submitted && !reset && clock==latest.clock)return visible;
         reset|=!submitted||clock<latest.clock||clock-latest.clock>.25;
         for(unsigned i=0;i<2;++i){
             float distance=0;
             for(unsigned k=0;k<3;++k){const float delta=targets[i][k]-latest.targets[i][k];distance+=delta*delta;}
             reset|=distance>.25f;
         }
+        if(!reset && clock==latest.clock)return visible;
         if(reset){++latest.epoch;published={};initialized=false;}
         latest.clock=clock;latest.targets=targets;submitted=pending=true;
         visible=published;visibleReady=initialized;
