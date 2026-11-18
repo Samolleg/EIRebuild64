@@ -1,6 +1,6 @@
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
-    <FidelityFxRoot Condition="'$(FidelityFxRoot)'==''">$(MSBuildThisFileDirectory)..\dependencies\fidelityfx\2.3.0\</FidelityFxRoot>
+    <FidelityFxRoot Condition="'$(FidelityFxRoot)'==''">$(MSBuildThisFileDirectory)..\dependencies\fidelityfx\2.4.0\</FidelityFxRoot>
     <NvapiRoot Condition="'$(NvapiRoot)'==''">$(MSBuildThisFileDirectory)..\dependencies\nvapi\70d337db\</NvapiRoot>
     <DxcRoot Condition="'$(DxcRoot)'==''">$(MSBuildThisFileDirectory)..\dependencies\dxc\1.9.2609\</DxcRoot>
     <RtxdiRoot Condition="'$(RtxdiRoot)'==''">$(MSBuildThisFileDirectory)..\dependencies\rtxdi\3.2.0\</RtxdiRoot>

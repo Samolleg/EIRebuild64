@@ -1,5 +1,5 @@
 #pragma once
-// FSR 3.1 frame generation (frame_generation 2; FidelityFX SDK 2.3.0, the
+// FSR 3.1 frame generation (frame_generation 2; FidelityFX SDK 2.4.0, the
 // signed amd_fidelityfx_loader_dx12.dll and amd_fidelityfx_framegeneration_dx12.dll
 // beside the host exe, delay-loaded). The FidelityFX proxy swap chain
 // (Presenter::move_to_proxy) interpolates and paces the presents on its own

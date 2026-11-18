@@ -1,6 +1,6 @@
 # Nala breast secondary motion
 
-The world adapter enables presentation-only PhysX 5.6.1 GPU motion for the main
+The world adapter enables presentation-only PhysX 5.13.0 GPU motion for the main
 hero when the selected GLB contains the existing `PHYSICS_Pecho.L/R` branches
 (including `.001` and `.002`). No model, weights, animation clips, save format or
 combat state are changed. Private model previews retain the authored animation.

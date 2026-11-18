@@ -19,9 +19,9 @@
   },
   {
     "File": "amd_fidelityfx_upscaler_dx12.dll",
-    "URL": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/v2.3.0/Kits/FidelityFX/signedbin/amd_fidelityfx_upscaler_dx12.dll",
-    "Bytes": 28761864,
-    "SHA256": "D0DCCCC74A43C44BA435B7A369B456E0970D8A4464E4BD683119B374F2C9FB46"
+    "URL": "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/v2.4.0/Kits/FidelityFX/signedbin/amd_fidelityfx_upscaler_dx12.dll",
+    "Bytes": 57664272,
+    "SHA256": "AAD4FCCCCB29084A655F9A4F9F613BD22C8C03FB4A0F8840148CC6543B4CCACE"
   },
   {
     "File": "nvsdk_ngx_defs_dlssd.h",

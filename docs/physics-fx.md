@@ -1,6 +1,6 @@
 # Decorative stone debris (PhysX 5 GPU)
 
-PhysX 5.6.1 GPU handles client-only stone chips from fresh `PTID_FIREBLAST` events.
+PhysX 5.13.0 GPU handles client-only stone chips from fresh `PTID_FIREBLAST` events.
 Fireball and explosive shot already share this effect. Damage, projectile travel,
 navigation and network/save formats are unchanged.
 

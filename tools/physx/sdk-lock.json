@@ -1,0 +1,76 @@
+{
+  "cmake": {
+    "version": "4.5.0",
+    "archive": "cmake-4.5.0.zip",
+    "url": "https://github.com/Kitware/CMake/releases/download/v4.5.0/cmake-4.5.0-windows-x86_64.zip",
+    "sha256": "301b1728317ccd84e984b02e366a8293735bc5ac618757d3d8f58b578f062411"
+  },
+  "ninja": {
+    "version": "1.13.2",
+    "archive": "ninja-1.13.2.zip",
+    "url": "https://github.com/ninja-build/ninja/releases/download/v1.13.2/ninja-win.zip",
+    "sha256": "07fc8261b42b20e71d1720b39068c2e14ffcee6396b76fb7a795fb460b78dc65"
+  },
+  "physx": {
+    "version": "5.13.0",
+    "archive": "physx-5.13.0.zip",
+    "url": "https://codeload.github.com/NVIDIA-Omniverse/PhysX/zip/7d6f6ac8b83e1610bdf715f1f2f1d6b718aee586",
+    "sha256": "96bceacc0171af106f63f19c7e5e2baa6f318e27e83a76d67fdead5b59cb9720",
+    "commit": "7d6f6ac8b83e1610bdf715f1f2f1d6b718aee586"
+  },
+  "fidelityfx": {
+    "version": "2.4.0",
+    "archive": "fidelityfx-2.4.0.zip",
+    "url": "https://codeload.github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/zip/7539ae8b6568ad29ed78a753404351daf3b5cca7",
+    "sha256": "c9e2f4e9cdf73d89e06df3c846930e5bd1fdaa59cc13ea0953e21ea45c960d1c",
+    "commit": "7539ae8b6568ad29ed78a753404351daf3b5cca7"
+  },
+  "cuda": {
+    "version": "13.5.0",
+    "manifest": "https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.5.0.json",
+    "packages": [
+      {
+        "name": "cccl",
+        "archive": "cccl-windows-x86_64-13.3.5.0.6-archive.zip",
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cccl/windows-x86_64/cccl-windows-x86_64-13.3.5.0.6-archive.zip",
+        "sha256": "33b31a28db58aff9bd0a60a53e8424086b65da0684dade8f3c81ff2ff6f6a563"
+      },
+      {
+        "name": "cuda_nvcc",
+        "archive": "cuda_nvcc-windows-x86_64-13.5.37-archive.zip",
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/windows-x86_64/cuda_nvcc-windows-x86_64-13.5.37-archive.zip",
+        "sha256": "daf9ea2304917ea6426be5fbe0e86c34cccc07c4f593cbc9070da54a8f7f4b27"
+      },
+      {
+        "name": "cuda_crt",
+        "archive": "cuda_crt-windows-x86_64-13.5.37-archive.zip",
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_crt/windows-x86_64/cuda_crt-windows-x86_64-13.5.37-archive.zip",
+        "sha256": "acf9730a9731f08fab5719684ed3e64f16cb592571c700bfa342fe32d3ca2047"
+      },
+      {
+        "name": "cuda_cudart",
+        "archive": "cuda_cudart-windows-x86_64-13.5.37-archive.zip",
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_cudart/windows-x86_64/cuda_cudart-windows-x86_64-13.5.37-archive.zip",
+        "sha256": "ef9747b13bd2c2c199a5f2756b56c94d0b5acf04556ce95ef4649122ee9b752a"
+      },
+      {
+        "name": "libnvvm",
+        "archive": "libnvvm-windows-x86_64-13.5.37-archive.zip",
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/libnvvm/windows-x86_64/libnvvm-windows-x86_64-13.5.37-archive.zip",
+        "sha256": "0cb16fa041acd156b3654b66f182f65373a4ebfd4c2353ce7303f4d1b1eb88b2"
+      },
+      {
+        "name": "cuda_nvtx",
+        "archive": "cuda_nvtx-windows-x86_64-13.5.25-archive.zip",
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvtx/windows-x86_64/cuda_nvtx-windows-x86_64-13.5.25-archive.zip",
+        "sha256": "99240a67356b4a237146e740be5e77cbed978546844e1046a0e1c9290e937419"
+      },
+      {
+        "name": "cuda_tileiras",
+        "archive": "cuda_tileiras-windows-x86_64-13.5.37-archive.zip",
+        "url": "https://developer.download.nvidia.com/compute/cuda/redist/cuda_tileiras/windows-x86_64/cuda_tileiras-windows-x86_64-13.5.37-archive.zip",
+        "sha256": "518dd84c9ee760d9a4b0e3ea9cdbf0570ada11bd8764ac64ba20dd109e25a043"
+      }
+    ]
+  }
+}
