@@ -12,6 +12,7 @@
 #include "figure_service_nodes.h"
 #include "skn_runtime.h"
 #include "gltf_asset.h"
+#include "gltf_breast.h"
 #include "world_scene_algorithms.h"
 
 #include <algorithm>
@@ -1165,6 +1166,7 @@ const gltf::EquipmentSelection& prepare_gltf_equipment(const RetainedVisualSampl
   if(!std::isfinite(radius)||radius>FLT_MAX/4)throw std::runtime_error("glTF equipment bounds overflow");
   selected->radius=(std::max)(selected->radius,static_cast<float>(radius)*(1+1e-5f));
  }
+ selected->radius+=gltf::secondary_limit; // include the same possible displacement for wearables
  prepared.gltf_equipment=std::move(selected);prepared.gltf_equipment_assembly=sample.assembly;
  return *prepared.gltf_equipment;
 }

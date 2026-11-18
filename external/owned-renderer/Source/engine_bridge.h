@@ -831,6 +831,9 @@ struct NativeWorldGeometry {
             float morph_fraction=0;
             std::array<UINT,2> generation{};
         };
+        struct Override { UINT node=0; Node value; };
+        // Sparse final WORLD matrices, uploaded after GPU animation on both backends.
+        std::shared_ptr<const std::vector<Override>> overrides;
         std::shared_ptr<const std::vector<Node>> baked;
         std::uint32_t gltf_clip = UINT32_MAX, gltf_previous = UINT32_MAX;
         float gltf_time = 0, gltf_previous_time = 0, gltf_blend = 1;
