@@ -12,7 +12,7 @@ static void check_nala_physics(const fs::path& game,const fs::path& out) {
         [](const std::string&,const void* p,std::uint32_t n){owned::ResourceBlob b;
             const auto* first=static_cast<const std::uint8_t*>(p);
             b.bytes=std::make_shared<std::vector<std::uint8_t>>(first,first+n);return b;});
-    PhysicsFx::InstallCharacterPhysics();BreastState state;require(state.bind(body),"Nala existing physics branches");
+    PhysicsFx::InstallCharacterPhysics();BreastState state;state.physics=PhysicsFx::CreateCharacterPhysics();require(state.bind(body),"Nala existing physics branches");
     Affine root{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
     unsigned moved=0;
     float peak=0;

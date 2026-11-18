@@ -308,6 +308,11 @@ void Renderer::activate_world_map_preview(
     scene_post_command(std::move(command));
     return;
   }
+#ifdef EID3D11_EMBEDDED
+  if (generation && failure.empty() && !sections.empty() &&
+      !world_map_preview_.contains(WorldMapPreviewSpace::section_fitted,sections))
+    precache_world_map_preview(generation,sections,{});
+#endif
   world_map_preview_.deactivate();
   world_map_preview_generation_ = generation;
   world_map_preview_reasons_.assign(sections.size(), {});

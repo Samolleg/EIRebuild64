@@ -99,6 +99,7 @@ public:
   void release() noexcept;
   WorldMapPreviewStatus status(std::size_t section) const;
   WorldMapPreviewCacheStats cache_stats() const noexcept;
+  bool contains(WorldMapPreviewSpace,const std::vector<WorldMapPreviewSection>&) const;
   // Immutable prepared-memory incarnation; UI reopen generations do not
   // change this value. Zero means no prepared section is bound.
   std::uint64_t section_revision(std::size_t section) const noexcept;

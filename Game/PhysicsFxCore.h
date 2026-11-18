@@ -15,7 +15,7 @@ inline constexpr unsigned MaxStones=128;
 inline constexpr float TickSeconds=.055f, StepSeconds=TickSeconds/4;
 inline constexpr float PatchRadius=12.f;
 struct Stats {
-    unsigned bodies=0,active=0,patches=0; double stepMs=0; unsigned errors=0;
+    unsigned bodies=0,active=0,patches=0,substeps=0; double stepMs=0; unsigned errors=0;
     bool gpuDynamics=false,gpuBroadPhase=false;
     std::uint64_t gpuHeapBytes=0,gpuBroadPhaseBytes=0,gpuSolverBytes=0;
     unsigned gpuContacts=0;
@@ -23,6 +23,14 @@ struct Stats {
 // The same six vertices describe each convex physics shape and render mesh.
 std::array<Vec,6> StoneVertices(unsigned shape,float radius);
 void InstallCharacterPhysics();
+struct StoneTrack {
+    std::array<Pose,5> poses;
+    float radius, age, life;
+    unsigned shape;
+    std::uint32_t color;
+};
+using StoneTracks=std::vector<StoneTrack>;
+std::vector<Stone> SampleTracks(const StoneTracks&,float fraction);
 class World {
     struct Impl;
     std::unique_ptr<Impl> impl;
@@ -41,6 +49,7 @@ public:
     unsigned Burst(std::uint64_t key,Vec point,Vec normal,float power,std::uint32_t seed);
     void Tick(bool paused);
     std::vector<Stone> Sample(float fraction) const;
+    StoneTracks Snapshot() const;
     Stats Statistics() const;
 };
 // Reject initial sync, stale events and duplicates without consuming combat RNG.

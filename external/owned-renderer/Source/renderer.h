@@ -1193,6 +1193,14 @@ public:
                                   const FixedState& state,
                                   SurfaceImage* texture,
                                   NativeGeometryResult* result = nullptr);
+    struct FigureInstance {
+        std::array<float,16> world, clip;
+        std::array<float,3> diffuse;
+        float alpha;
+        std::uint8_t fog;
+    };
+    HRESULT queue_native_figure_instances(const NativeGeometryView&,const FixedState&,
+        const FigureInstance*,size_t,NativeGeometryResult*);
     HRESULT queue_native_owned(const NativeGeometryView& view,
                                const FixedState& state,
                                NativeGeometryResult* result = nullptr);
@@ -2807,7 +2815,8 @@ private:
                               UINT* registered = nullptr,
                               const D3D12TextureRef* d3d12_texture = nullptr);
     HRESULT queue_native_owned_impl(const NativeGeometryView& view,const FixedState& state,
-                                    NativeGeometryResult* result,UINT* registered);
+                                    NativeGeometryResult* result,UINT* registered,
+                                    const FigureInstance* instances=nullptr,size_t count=0);
     // Invalidates every active slot of the meshes marked retiring in one slot
     // pass, then erases those meshes.
     void erase_retiring_native_meshes() noexcept;
