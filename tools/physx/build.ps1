@@ -27,8 +27,8 @@ try {
     # Apply exact edits only to the private build copy of the pinned source.
     $encoding=[Text.Encoding]::GetEncoding(28591)
     $edits=@(
-        @('physx/source/compiler/cmake/windows/CMakeLists.txt','IF(PX_COPY_EXTERNAL_DLL OR PUBLIC_RELEASE)','IF((PX_COPY_EXTERNAL_DLL OR PUBLIC_RELEASE) AND PX_BUILDSNIPPETS)')
-        @('physx/source/compiler/cmakegpu/CMakeLists.txt',' -t0 -D_CONSOLE',' -t2 -D_CONSOLE')
+        @('physx/source/compiler/cmake/windows/CMakeLists.txt','IF(PX_COPY_EXTERNAL_DLL OR PUBLIC_RELEASE)','IF((PX_COPY_EXTERNAL_DLL OR PUBLIC_RELEASE) AND PX_BUILDSNIPPETS)'),
+        @('physx/source/compiler/cmakegpu/CMakeLists.txt',' -t0 -D_CONSOLE',' -t2 -D_CONSOLE'),
         @('physx/source/cudamanager/src/CudaContextManager.cpp','cuCtxCreate(&mCtx, (unsigned int)flags, mDevHandle)','cuCtxCreate(&mCtx, nullptr, (unsigned int)flags, mDevHandle) /* EIRebuild64: regular CUDA 13 context */')
     )
     foreach($edit in $edits){
