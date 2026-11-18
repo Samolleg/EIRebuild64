@@ -275,6 +275,7 @@ CObject3DClientSpecific::~CObject3DClientSpecific()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CObject3DClientSpecific::Create()
 {
+    neutralPose.lease.reset();
     ownedAppearanceAttempted = false;
     ownedAppearanceRevision = 0;
     pos = -1;
@@ -299,6 +300,7 @@ BOOL CObject3DClientSpecific::Create()
 // destroy all internal data structures
 void CObject3DClientSpecific::Destroy()
 {
+    neutralPose.lease.reset();
     ownedAppearanceAttempted = false;
     ownedPreviewVisualRole = {};
     ownedPreviewViews.reset();
@@ -701,6 +703,7 @@ void CObject3DClientSpecific::InvalidateOwnedAppearance() noexcept
 {
     ownedPreviewAssembly.reset();
     const bool hadAttempt = ownedAppearanceAttempted;
+    neutralPose.lease.reset();
     ownedAppearanceAttempted = false;
     if (!hadAttempt)
         return;
@@ -894,10 +897,23 @@ catch (...)
 }
 bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
 {
+    auto* object = static_cast<CObject3D*>(lpObject);
+    const auto* animationSource = object ? object->GetAnimationSystem2() : nullptr;
+    const bool cacheable = object && object->WhoAmI() != HPC_UNIT &&
+        (object->GetEnvironment() || (animationSource && !animationSource->GetCurrentAnimation()));
+    const auto source = cacheable && object->GetEnvironment() ?
+        object->GetEnvironment()->identity.container_incarnation : 0;
+    if (cacheable && !neutralPose.lease.expired() &&
+        neutralPose.source == source && neutralPose.placement == object->GetPlacementRevision() &&
+        neutralPose.flags == object->GetFlags()) {
+        const auto& shape = object->GetComplection();
+        if (shape.strength == neutralPose.shape.strength && shape.grace == neutralPose.shape.grace &&
+            shape.tall == neutralPose.shape.tall) return true;
+    }
+    neutralPose.lease.reset();
     CorePerf::Scope coreTiming(CorePerf::PosePublish);
     static OwnedRender::E1PerfCounter counter{"host_pose_publish"};
     OwnedRender::E1PerfScope timing(counter);
-    CObject3D* object = static_cast<CObject3D*>(lpObject);
     const auto resource = OwnedRender::E1Scene().Resource(lpObject);
     auto& hostScene = OwnedRender::E1Scene();
     auto& scene = hostScene.Scene();
@@ -956,11 +972,18 @@ bool CObject3DClientSpecific::PublishOwnedPose() noexcept try
     pose.phase = selected.visual.neutral ? 0.0 : animation->GetTime();
     pose.source_generation = selected.source_generation;
     pose.appearance_revision = assembly->revision;
-    if (scene.visual_object_pose_current(resource, pose))
-        return true;
-    if (!hostScene.PublishObjectPose(resource, pose))
-        return reject("object_pose.publish");
-    CorePerf::VisualCount(2);
+    if (!scene.visual_object_pose_current(resource, pose)) {
+        if (!hostScene.PublishObjectPose(resource, pose))
+            return reject("object_pose.publish");
+        CorePerf::VisualCount(2);
+    }
+    if (cacheable) {
+        neutralPose.placement = object->GetPlacementRevision();
+        neutralPose.source = source;
+        neutralPose.flags = pose.object_flags;
+        neutralPose.shape = shape;
+        neutralPose.lease = scene.visual_neutral_pose_lease(resource);
+    }
     return true;
 }
 catch (...) {
