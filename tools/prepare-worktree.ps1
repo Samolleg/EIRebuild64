@@ -14,7 +14,7 @@ while (!(Test-Path -LiteralPath (Join-Path $projectRoot 'RULES.md') -PathType Le
     if (!$parent -or $parent -eq $projectRoot) { throw 'Project RULES.md not found above worktree.' }
     $projectRoot = $parent
 }
-if (!$FFmpegSource) { $FFmpegSource = Join-Path $projectRoot 'deps/ffmpeg/8.1.3/x64' }
+if (!$FFmpegSource) { $FFmpegSource = Join-Path $projectRoot 'deps/ffmpeg/9.0.2/x64' }
 & (Join-Path $PSScriptRoot 'physx/build.ps1') -ProjectRoot $projectRoot
 $physxDestination = Join-Path $repo 'dependencies/physx/5.6.1'
 Copy-BuildTree (Join-Path $projectRoot 'deps/physx/5.6.1/sdk') $physxDestination
@@ -94,10 +94,10 @@ if (!(Test-Path -LiteralPath (Join-Path $jsonSource 'json.hpp') -PathType Leaf))
     throw "Missing repository JSON headers: $jsonSource"
 }
 
-$ffmpegDestination = Join-Path $repo 'dependencies/ffmpeg/8.1.3/x64'
+$ffmpegDestination = Join-Path $repo 'dependencies/ffmpeg/9.0.2/x64'
 $ffmpegMissing = !(Test-Path -LiteralPath $ffmpegDestination)
 if ($ffmpegMissing -and !(Test-Path -LiteralPath $FFmpegSource -PathType Container)) {
-    throw "Missing FFmpeg 8.1.3 x64 dependency at $FFmpegSource. Build it using tools/ffmpeg/README.md or pass -FFmpegSource. Nothing will be downloaded."
+    throw "Missing FFmpeg 9.0.2 x64 dependency at $FFmpegSource. Build it using tools/ffmpeg/README.md or pass -FFmpegSource. Nothing will be downloaded."
 }
 
 # Only ignored packages/, out/ and dependencies/ receive generated/copied files.
@@ -116,7 +116,7 @@ Write-Output "Prepared DLSS SDK v310.9.16 x64 /MT and release runtime from $Dlss
 if ($ffmpegMissing) {
     New-Item -ItemType Directory -Force -Path (Split-Path $ffmpegDestination) | Out-Null
     Copy-Item -LiteralPath $FFmpegSource -Destination $ffmpegDestination -Recurse
-    Write-Output "Prepared FFmpeg 8.1.3 x64 from $FFmpegSource."
+    Write-Output "Prepared FFmpeg 9.0.2 x64 from $FFmpegSource."
 }
 foreach ($package in $packages) {
     $destination = Join-Path $repo ('packages/' + $package.Id + '.' + $package.Version)

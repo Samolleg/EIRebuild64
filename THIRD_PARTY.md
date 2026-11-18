@@ -27,19 +27,16 @@ NuGet DirectXTex/DirectXTK и XAudio2.Redist не используются.
 
 ## Закреплённый source и рецепт FFmpeg (P19)
 
-FFmpeg 8.1.3 получен из https://ffmpeg.org/releases/ffmpeg-8.1.3.tar.xz;
-SHA-256 `7138d28c96d9d3e3af4ee3d8cad72741f8ffb40da90c1112235dea3ecd3178a3`.
+FFmpeg 9.0.2 получен из https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz;
+SHA-256 `8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e`.
 [Pin/provenance](third_party/ffmpeg/PROVENANCE.md),
 [состав](third_party/ffmpeg/COMPONENTS.md),
 [рецепт](tools/ffmpeg/README.md). LGPL v2.1-or-later, shared x64 MSVC;
 GPL/nonfree/version3 и внешняя autodetection отключены. Включаются avformat/bink,
 avcodec/bink/binkaudio_rdft/binkaudio_dct, avutil, swscale, swresample.
 Полные `COPYING.LGPLv2.1` и upstream `LICENSE.md` сохранены рядом с lock/config.
-Архив/полный source и выход `dependencies/ffmpeg/8.1.3/x64/{bin,include,lib}`
-вне Git. Подпись архива не проверена: её загрузка завершалась таймаутами.
-Сборка остаётся открытой: не найдены MSYS2 make и NASM; DLL/import libs/headers
-ещё не получены. Это фактический source pin и рецепт, не готовая x64 dependency.
-Подключение к хосту, AVIO и удаление Bink SDK — P20/P21.
+Архив/полный source и выход `dependencies/ffmpeg/9.0.2/x64/{bin,include,lib}`
+вне Git. Подпись проверена ключом FFmpeg. В комплект входят DLL, исходный архив и рецепт сборки в sources/ffmpeg/9.0.2/.
 
 ## Планируемые зависимости
 

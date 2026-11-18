@@ -1,7 +1,6 @@
-# Выбранные компоненты FFmpeg 8.1.3
+# Выбранные компоненты FFmpeg 9.0.2
 
-Это состав рецепта [configure.args](configure.args). Фактический configure
-ещё не выполнялся, итоговая замкнутая конфигурация будет в его generated files.
+Это состав рецепта [configure.args](configure.args). Фактические параметры сборки сохранены в share/ffmpeg/config_components.h локального SDK.
 
 | Компонент | Назначение / исходник |
 |---|---|
@@ -13,7 +12,7 @@
 | `swscale` | Преобразование video frames для входов рендера P20 |
 | `swresample` | Преобразование sample format/rate/layout в PCM для miniaudio P20 |
 
-`configure` 8.1.3 выбирает для `bink` внутренние `blockdsp` и `hpeldsp`,
+`configure` 9.0.2 выбирает для `bink` внутренние `blockdsp` и `hpeldsp`,
 для обоих Bink audio — `wma_freqs`. Это helpers, а не включение WMA-декодера.
 Необходимые внутренние зависимости и допустимые x64 SIMD реализации выбирает
 сам upstream configure. Внешние codec libraries не подключаются.
@@ -25,7 +24,7 @@ AVIO, как предусмотрено планом x64; P19 не добавл�
 
 Сборка только DLL и MSVC import libraries: avformat, avcodec, avutil, swscale,
 swresample; статические библиотеки FFmpeg отключены. Имена DLL с ABI-суффиксами
-задаются pinned source; готовых бинарников пока нет.
+задаются pinned source; хост использует ABI 63/63/61/10/7.
 
 Лицензия выбранной конфигурации — LGPL v2.1-or-later, тексты
 [COPYING.LGPLv2.1](COPYING.LGPLv2.1) и upstream [LICENSE.md](LICENSE.md).
