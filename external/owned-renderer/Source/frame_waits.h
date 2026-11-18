@@ -30,14 +30,15 @@ inline double milliseconds(LONGLONG ticks) noexcept {
 // before the prior frame has finished encoding/submitting its command list.
 struct PipelineTiming {
     std::atomic<unsigned long long> frame{0};
-    std::atomic<LONGLONG> start{0},submitted{0},finish{0};
-    unsigned long long frames=0,overlapped=0,encoding=0;
-    double overlapMs=0,encodingMs=0;
+    std::atomic<LONGLONG> start{0},submitted{0},finish{0},layersDone{0};
+    std::atomic<bool> drawingLayers{false};
+    unsigned long long frames=0,overlapped=0,encoding=0,drawing=0;
+    double overlapMs=0,encodingMs=0,drawMs=0;
 };
 inline PipelineTiming pipeline;
 inline void pipeline_post() noexcept {
     if(!RuntimeDiagnostics::Enabled())return;
-    pipeline.start=0; pipeline.submitted=0; pipeline.finish=0; ++pipeline.frame;
+    pipeline.layersDone=0; pipeline.drawingLayers=false; pipeline.start=0; pipeline.submitted=0; pipeline.finish=0; ++pipeline.frame;
 }
 class PreparationInterval {
     const bool enabled=RuntimeDiagnostics::Enabled();
@@ -55,6 +56,10 @@ public:
         const auto elapsed=intersection(pipeline.finish.load());
         const auto encoding=intersection(pipeline.submitted.load());
         if(elapsed){++pipeline.overlapped;pipeline.overlapMs+=milliseconds(elapsed);}
+        if(pipeline.drawingLayers){
+            const auto layers=intersection(pipeline.layersDone.load());
+            if(layers){++pipeline.drawing;pipeline.drawMs+=milliseconds(layers);}
+        }
         if(encoding){++pipeline.encoding;pipeline.encodingMs+=milliseconds(encoding);}
     }
 };

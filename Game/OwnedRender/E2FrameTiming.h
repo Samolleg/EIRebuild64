@@ -38,6 +38,7 @@ class E2FrameTiming {
     using Query = Microsoft::WRL::ComPtr<ID3D11Query>;
     struct Slot { Query disjoint, begin, end; bool pending = false;
         std::uint64_t nativeBegin = 0, nativeEnd = 0; unsigned polls = 0; };
+    bool nativeSealed=false;
     std::array<Slot, 8> slots;
     Microsoft::WRL::ComPtr<ID3D11DeviceContext> context;
     FrameSamples cpu, gpu;
@@ -154,7 +155,7 @@ public:
         if (!RuntimeDiagnostics::Enabled()) return;
         // A failed/abandoned frame is not a successful frame sample.
         if (open) { CloseQuery(); if (active >= 0) slots[active].pending = false; ++aborted; }
-        active = -1; open = true; cpuBegin = Now();
+        active = -1; open = true; nativeSealed=false; cpuBegin = Now();
         Poll();
         if (!gpuEnabled) return;
         for (unsigned i = 0; i < slots.size(); ++i) if (!slots[i].pending) {
@@ -172,12 +173,18 @@ public:
     // Called after the backend's Present: its final composition/UI commands
     // belong to this range too. This is GPU timeline elapsed time, including
     // idle/presentation gaps, not GPU busy time or CPU submission cost.
+    void SealNativeQuery() noexcept {
+        if(open && active>=0 && native && !nativeSealed) {
+            nativeSealed=true;
+            slots[active].nativeEnd=native->stamp();
+        }
+    }
     void End(bool presented) noexcept {
         if (!open) return;
         CloseQuery();
         if (active >= 0) {
             if (native) {
-                slots[active].nativeEnd = native->stamp();
+                SealNativeQuery();
                 slots[active].pending = presented && slots[active].nativeEnd != 0;
                 if (presented && !slots[active].nativeEnd) ++dropped;
             } else slots[active].pending = presented;

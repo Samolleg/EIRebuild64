@@ -1006,6 +1006,7 @@ void CDX11::EndFrame(bool present)
     IfFailedThrowHR(rendererFacade->Visit([](owned::Renderer& renderer) {
         return OwnedRender::E3QueueCursor(renderer, renderer.cursor_scale_percent(), renderer.load_cursor_wanted());
     }));
+    frameTiming.SealNativeQuery();
     const HRESULT presented = rendererFacade->EndFrame();
     frameTiming.End(SUCCEEDED(presented));
     if (SUCCEEDED(presented)) owned::frame_waits::frame.presented = true;
@@ -1042,10 +1043,10 @@ void CDX11::EndFrame(bool present)
             "backend=%s fg_active_at_report=%u scene_thread_at_report=%u window_ms=%llu %s %s", D3D12Selected() ? "d3d12" : "d3d11", unsigned(fgActive), unsigned(sceneThread),
             now - lastGpuPassReport, cpuWaits.c_str(), gpuWaits.c_str());
         auto& pipeline = owned::frame_waits::pipeline;
-        GameJournal::Event("RENDER","pipeline_overlap","samples=%llu overlap=%llu encode=%llu overlap_ms=%.3f encode_ms=%.3f",
-            pipeline.frames,pipeline.overlapped,pipeline.encoding,pipeline.overlapMs,pipeline.encodingMs);
-        pipeline.frames=pipeline.overlapped=pipeline.encoding=0;
-        pipeline.overlapMs=pipeline.encodingMs=0;
+        GameJournal::Event("RENDER","pipeline_overlap","samples=%llu overlap=%llu encode=%llu overlap_ms=%.3f encode_ms=%.3f draw=%llu draw_ms=%.3f",
+            pipeline.frames,pipeline.overlapped,pipeline.encoding,pipeline.overlapMs,pipeline.encodingMs,pipeline.drawing,pipeline.drawMs);
+        pipeline.frames=pipeline.overlapped=pipeline.encoding=pipeline.drawing=0;
+        pipeline.overlapMs=pipeline.encodingMs=pipeline.drawMs=0;
         lastGpuPassReport = now;
     }
     IfFailedThrowHR(presented);
