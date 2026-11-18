@@ -27,7 +27,7 @@ def fingerprint(args):
     digest = hashlib.sha256()
 
     def field(*values):
-        digest.update(json.dumps(values, ensure_ascii=True).encode() + b'\n')
+        digest.update(json.dumps(values, ensure_ascii=True, sort_keys=True).encode() + b'\n')
 
     def record(label, path):
         if path.is_symlink() or path.is_junction():

@@ -66,6 +66,9 @@ if ($CheckKitReuse) {
     $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
     if ($receipt.version -ne 1 -or $receipt.inputs -cnotmatch '^[0-9a-f]{64}$' -or
         $receipt.manifest -cne (Hash-File (Join-Path $task 'kit/SHA256SUMS'))) { exit 3 }
+    if (!$ShaderResourceManifest -and $receipt.shaderManifest) {
+        $ShaderResourceManifest = [string]$receipt.shaderManifest
+    }
     if ($receipt.inputs -cne (Get-KitInputIdentity)) { exit 3 }
     exit 0
 }
@@ -357,7 +360,7 @@ try {
     $clock.Stop()
     Write-Utf8 (Join-Path $task 'build-result.txt') @("Seconds=$($clock.Elapsed.TotalSeconds)","MSBuildWorkers=$cores","CacheBytes=$bytes","CacheRoot=$CacheRoot")
     if ($inputIdentity -and $inputIdentity -ceq (Get-KitInputIdentity)) {
-        $receipt = @{version=1; inputs=$inputIdentity; manifest=(Hash-File (Join-Path $kit 'SHA256SUMS'))}
+        $receipt = @{version=1; inputs=$inputIdentity; manifest=(Hash-File (Join-Path $kit 'SHA256SUMS')); shaderManifest=$ShaderResourceManifest}
         $tempReceipt = $receiptPath + '.tmp'
         [IO.File]::WriteAllText($tempReceipt, ($receipt | ConvertTo-Json -Compress))
         [IO.File]::Move($tempReceipt,$receiptPath,$true)

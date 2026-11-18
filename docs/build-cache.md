@@ -1,5 +1,14 @@
 # Selecting a build cache
 
+Successful Release x64 task builds can produce `build-kit-receipt.json` beside the kit.
+It pins SHA256SUMS and the pre/post input identity, including materialized sources,
+packaged assets, SDK payloads, compiler/Windows SDK inputs, tracked external reads,
+build properties and shader reuse inputs. The original shader manifest is recorded
+for verification when acceptance has no explicit override. Keep it and
+`build-kit-external.json` with the task until acceptance. If evidence is missing
+or changed the normal merged-main build is used. The separate ScriptCheck version
+identifies its own source commit; ScriptCheck.exe is outside the runtime kit.
+
 `tools/build-task.ps1 -CacheRoot <path>` selects an isolated cache explicitly.
 For callers that start this script in a child PowerShell process, including
 `task accept`, the process environment variable `EIREBUILD64_BUILD_CACHE` supplies
