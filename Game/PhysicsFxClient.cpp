@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 #include "PhysicsFxClient.h"
 #include "PhysicsFxTerrain.h"
+#include "PhysicsFxPlayback.h"
 #include "WorldClient.h"
 #include "Terrain.h"
 #include "TextureManager.h"
@@ -18,6 +19,7 @@ namespace {
 struct Impact {int id,start;Vec position;float power,radius,base=0;};
 struct DebrisTick {
     int tick=0;
+    std::uint64_t sequence=0;
     std::shared_ptr<const owned::TerrainCpuAsset> terrain;
     std::vector<Impact> impacts;
 };
@@ -27,7 +29,7 @@ class DebrisWorker {
     std::condition_variable wake;
     std::deque<DebrisTick> queue;
     bool stopping=false, discard=false;
-    std::shared_ptr<const StoneTracks> completed;
+    DebrisHistory history;
     bool reported=false;
     int lastReport=0;
     std::string reportedError;
@@ -49,11 +51,11 @@ class DebrisWorker {
                 step(job);
                 auto snapshot=std::make_shared<StoneTracks>(world.Snapshot());
                 std::lock_guard lock(mutex);
-                completed=std::move(snapshot);
+                history.publish(job.sequence,std::move(snapshot));
             }
         } catch(const std::exception& error) {
             GameJournal::Event("PHYSICS_FX","worker_failed","reason=%s",error.what());
-            std::lock_guard lock(mutex);completed.reset();stopping=true;queue.clear();
+            std::lock_guard lock(mutex);history={};stopping=true;queue.clear();
         }
     }
 public:
@@ -62,7 +64,7 @@ public:
         {std::lock_guard lock(mutex);stopping=true;}
         wake.notify_one();thread.join();
     }
-    std::shared_ptr<const StoneTracks> submit(DebrisTick job) {
+    bool submit(DebrisTick job) {
         std::lock_guard lock(mutex);
         if(!stopping) {
             // Beyond five seconds all bodies from the discarded ticks have expired.
@@ -70,7 +72,11 @@ public:
             queue.push_back(std::move(job));
             wake.notify_one();
         }
-        return completed;
+        return history.hasStones();
+    }
+    void sample(double clock,DebrisPlayback& cursor){
+        std::lock_guard lock(mutex);
+        history.sample(clock,cursor);
     }
 };
 }
@@ -79,8 +85,11 @@ struct Client::Impl {
     ITexturePtr stoneTexture;bool textureAttempted=false;
     std::vector<Impact> pending;
     std::unique_ptr<DebrisWorker> worker;
-    std::shared_ptr<const StoneTracks> visible;
-    bool held=false;
+    DebrisPlayback playback;
+    std::uint64_t sequence=0;
+    unsigned sampledFrames=0,advancedFrames=0;
+    double reportedPosition=-1;
+    std::chrono::steady_clock::time_point reportStart{};
     unsigned remaining=0;
     std::uint64_t generation=0,revision=0;
 };
@@ -99,10 +108,10 @@ void Client::Tick(CWorldClient& host,bool paused){
     auto& s=*impl;
     owned::RetainedTerrainSourceSnapshot source;
     if(!OwnedRender::E1PhysicsTerrainSource(source)) {
-        s.pending.clear();s.worker.reset();s.visible.reset();return;
+        s.pending.clear();s.worker.reset();s.playback={};return;
     }
     if(s.generation!=source.source_generation||s.revision!=source.source_revision) {
-        s.worker.reset();s.visible.reset();s.generation=source.source_generation;s.revision=source.source_revision;
+        s.worker.reset();s.playback={};s.generation=source.source_generation;s.revision=source.source_revision;
     }
     for(auto it=s.pending.begin();it!=s.pending.end();) {
         const auto p=it->position;
@@ -119,12 +128,15 @@ void Client::Tick(CWorldClient& host,bool paused){
     }
     // A fragment lives at most five game seconds. Leave the worker asleep
     // between bursts once the final immutable frame has aged out.
-    if(!s.pending.empty())s.remaining=94;
-    if(!s.remaining){s.visible.reset();return;}
+    if(!s.pending.empty()) {
+        if(!s.remaining)s.playback={};
+        s.remaining=95;
+    }
+    if(!s.remaining){s.playback={};return;}
     --s.remaining;
-    auto next=s.worker->submit({host.GetSegmentTimeCounter(),source.terrain,std::move(s.pending)});
-    s.pending.clear();s.held=(s.visible==next);s.visible=std::move(next);
-    if(s.visible&&!s.visible->empty()&&!s.textureAttempted){
+    const bool stones=s.worker->submit({host.GetSegmentTimeCounter(),++s.sequence,source.terrain,std::move(s.pending)});
+    s.pending.clear();
+    if(stones&&!s.textureAttempted){
         s.textureAttempted=true;
         auto* manager=host.GetTextureManager();
         s.stoneTexture=manager->CreateTexture(TTID_STONE_MAIN,"stones00");
@@ -173,7 +185,29 @@ void DebrisWorker::step(const DebrisTick& job) {
         lastReport=job.tick;
     }
 }
-std::vector<Stone> Client::Sample(float fraction) const{return impl->visible?SampleTracks(*impl->visible,impl->held?1.f:fraction):std::vector<Stone>{};}
+std::vector<Stone> Client::Sample(float fraction,bool paused) const {
+    auto& s=*impl;
+    if(!s.worker || !s.remaining || s.stoneTexture.IsEmpty())return {};
+    if(!paused)s.worker->sample(double(s.sequence)+std::clamp(fraction,0.f,1.f),s.playback);
+    if(!s.playback.visible || s.playback.visible->empty()){
+        s.sampledFrames=s.advancedFrames=0;
+        return {};
+    }
+    if(!paused && RuntimeDiagnostics::Enabled()){
+        const auto now=std::chrono::steady_clock::now();
+        if(!s.sampledFrames)s.reportStart=now;
+        ++s.sampledFrames;
+        if(s.playback.position>s.reportedPosition)++s.advancedFrames;
+        s.reportedPosition=s.playback.position;
+        const double elapsed=std::chrono::duration<double>(now-s.reportStart).count();
+        if(elapsed>=.5){
+            GameJournal::Event("PHYSICS_FX","debris_presentation","frames=%u advanced=%u elapsed_s=%.3f lag_ticks=%.2f",
+                s.sampledFrames,s.advancedFrames,elapsed,double(s.sequence)-s.playback.position);
+            s.sampledFrames=s.advancedFrames=0;
+        }
+    }
+    return SampleTracks(*s.playback.visible,s.playback.fraction);
+}
 std::uint64_t Client::TextureSurface() const{
     const auto* texture=impl->stoneTexture.GetPtr();
     auto* surface=texture?texture->GetSurface():nullptr;

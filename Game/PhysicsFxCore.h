@@ -12,7 +12,7 @@ struct Triangle { Vec a,b,c; };
 struct Pose { Vec position; std::array<float,4> rotation{0,0,0,1}; };
 struct Stone { Pose pose; float radius=0,alpha=1; unsigned shape=0; std::uint32_t color=0xff8b887f; };
 inline constexpr unsigned MaxStones=128;
-inline constexpr float TickSeconds=.055f, StepSeconds=TickSeconds/4;
+inline constexpr float TickSeconds=.055f;
 inline constexpr float PatchRadius=12.f;
 struct Stats {
     unsigned bodies=0,active=0,patches=0,substeps=0; double stepMs=0; unsigned errors=0;
@@ -24,7 +24,7 @@ struct Stats {
 std::array<Vec,6> StoneVertices(unsigned shape,float radius);
 void InstallCharacterPhysics();
 struct StoneTrack {
-    std::array<Pose,5> poses;
+    std::array<Pose,2> poses;
     float radius, age, life;
     unsigned shape;
     std::uint32_t color;

@@ -3120,7 +3120,7 @@ BOOL CWorldClient::Draw()
         };
         visuals.fogContext = pTerrain;
         if (CheckFlag(WC_RENDER_EFFECTS)) {
-            visuals.debris = stoneEffects.Sample(float(GetRenderTimeSegments()-GetSegmentTimeCounter()));
+            visuals.debris = stoneEffects.Sample(float(GetRenderTimeSegments()-GetSegmentTimeCounter()), IsCombatPause() || IWorld.IsMissionCombatPause());
             visuals.debrisSurface = OwnedRender::E1SurfaceValue(stoneEffects.TextureSurface());
             if(visuals.debrisSurface){
                 visuals.debrisTexture.identity=visuals.debrisSurface->id;
