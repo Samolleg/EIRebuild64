@@ -7905,6 +7905,7 @@ void Renderer::apply_upscaler_mode_d3d12(){
  // then let the usual current-config comparison resize/reset the next frame.
  // Retry the capability checks which may have observed the pending state,
  // once only; later evaluate failures remain session failures.
+ bool dlss_became_available=false;
  if(dlss_initializing_){
   x64remote::DlssCaps caps{};
 #ifdef EID3D11_EMBEDDED
@@ -7915,6 +7916,7 @@ void Renderer::apply_upscaler_mode_d3d12(){
   dlss_initializing_=caps.initializing;
   if(!dlss_initializing_){
    set_dlss_unavailable_reason(caps.available?nullptr:caps.reason);
+   dlss_became_available=caps.available;
    rr_available_=-1;
    fg_caps_checked_=false;fg_dlssg_unavailable_[0]=0;fg_reason_mode_=-1;
   }
@@ -7977,11 +7979,11 @@ void Renderer::apply_upscaler_mode_d3d12(){
   if(on!=rt_ao_enabled_){rt_ao_enabled_=on;if(!on)release_rt_ambient_occlusion_d3d12();}}
  // rt_emissive: with either of the two (particle lamps, lava at bounce hits).
  rt_emissive_enabled_=(rt_direct_enabled_||rt_indirect_enabled_)&&configured_boolean(debug_overlay_.config(),"rt_emissive",true);
- if(percent==render_scale_percent_&&dlss==dlss_mode_&&fsr==fsr_mode_&&rr==rr_enabled_)return;
+ if(!(dlss_became_available&&dlss>=0)&&percent==render_scale_percent_&&dlss==dlss_mode_&&fsr==fsr_mode_&&rr==rr_enabled_)return;
  render_scale_percent_=percent;
  const bool mode_changed=dlss!=dlss_mode_||fsr!=fsr_mode_;
  const int old_dlss=dlss_mode_;
- if(rr!=rr_enabled_)dlss_reset_=true;
+ if(rr!=rr_enabled_||dlss_became_available)dlss_reset_=true;
  dlss_mode_=dlss;fsr_mode_=fsr;rr_enabled_=rr;set_world_size();
  if(!mode_changed)return; // a render scale change alone: the targets follow the size
  dlss_reset_=true;dlss_previous_valid_=false;
