@@ -106,6 +106,7 @@ bool completeVisualFrame(owned::RetainedVisualFrame& frame, bool combat) noexcep
         auto* unit=static_cast<CUnit*>(object);
         if (combat) E3CombatPublishUnit(unit);
         sample.completed_pose=true;
+        if (sample.assembly->main_hero_visual) sample.physique = unit->VisualPhysiqueInput();
         sample.secondary_physics=true;
         sample.secondary_frozen=theWorld.IsCombatPause();
         sample.secondary_clock=theWorld.GetRenderTimeSegments()*PhysicsFx::TickSeconds;

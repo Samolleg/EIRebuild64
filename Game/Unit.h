@@ -272,6 +272,7 @@ public:
     void BindNalaSknBody();
     void UnbindSknBody();
     const BodyShape::State* GetBodyShape();
+    std::array<float,5> VisualPhysiqueInput() const;
     CUnit();
     virtual ~CUnit();
     // create/destroy

@@ -1,4 +1,4 @@
-#include "gltf_animation.h"
+#include "gltf_physique_pose.h"
 #include "native_shader.h"
 #include "gltf_playback.h"
 #include "model_preview_clock.h"
@@ -8,6 +8,7 @@
 #include <dxgi1_4.h>
 #include <wrl/client.h>
 #include <iostream>
+#include <chrono>
 #include <functional>
 #ifdef CHECK_GLTF_ASSET
 #include "gltf_asset.h"
@@ -27,7 +28,7 @@ struct PoseGpu {
 };
 struct NodeGpu {Float4 rotation,translation,rows[3];unsigned first,second,count;float fraction;unsigned generation[2];};
 static_assert(sizeof(PoseGpu)==140&&sizeof(NodeGpu)==104);
-static std::vector<NodeGpu> gpu12(const Animation& a,const Playback& playback){
+static std::vector<NodeGpu> gpu12(const Animation& a,const Playback& playback,const PhysiquePose* physique=nullptr){
 #ifdef EI_TEST_NO_SHADER_COMPILE
     (void)a;(void)playback;
     throw std::runtime_error("GPU test disabled: shader compilation is prohibited");
@@ -39,6 +40,13 @@ static std::vector<NodeGpu> gpu12(const Animation& a,const Playback& playback){
     std::vector<unsigned char> bytes(skeleton+64);unsigned header[8]{0,0,0,0,0,0,0u-skeleton,base};
     std::memcpy(bytes.data(),packed->bytes.data(),packed->bytes.size());
     std::memcpy(bytes.data()+skeleton,header,32);header[6]=0u-(skeleton+32);std::memcpy(bytes.data()+skeleton+32,header,32);
+    if(physique){
+        header[7]|=0x80000000u;
+        bytes.resize(skeleton+80+sizeof(PhysiqueLocal)*physique->locals.size());
+        std::memcpy(bytes.data()+skeleton+32,header,32);
+        const unsigned relative=48;std::memcpy(bytes.data()+skeleton+64,&relative,4);
+        std::memcpy(bytes.data()+skeleton+80,physique->locals.data(),physique->locals.size()*sizeof(PhysiqueLocal));
+    }
     ComPtr<IDXGIFactory4> factory;hr(CreateDXGIFactory1(IID_PPV_ARGS(&factory)));ComPtr<IDXGIAdapter> adapter;
     hr(factory->EnumWarpAdapter(IID_PPV_ARGS(&adapter)));ComPtr<ID3D12Device> device;
     hr(D3D12CreateDevice(adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device)));
@@ -51,7 +59,7 @@ static std::vector<NodeGpu> gpu12(const Animation& a,const Playback& playback){
     ComPtr<ID3DBlob> rootBytes,error;hr(D3D12SerializeRootSignature(&rootDesc,D3D_ROOT_SIGNATURE_VERSION_1,&rootBytes,&error));
     ComPtr<ID3D12RootSignature> root;hr(device->CreateRootSignature(0,rootBytes->GetBufferPointer(),rootBytes->GetBufferSize(),IID_PPV_ARGS(&root)));
     static ComPtr<ID3DBlob> code;
-    if(!code){auto source=owned::compose_native_shader_source();hr(D3DCompile(source.data(),source.size(),nullptr,nullptr,nullptr,"nativePoseCS","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,&error));}
+    if(!code){auto source=owned::compose_native_shader_source({},true);hr(D3DCompile(source.data(),source.size(),nullptr,nullptr,nullptr,"nativePoseCS","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,&error));}
     D3D12_COMPUTE_PIPELINE_STATE_DESC pipelineDesc{};pipelineDesc.pRootSignature=root.Get();pipelineDesc.CS={code->GetBufferPointer(),code->GetBufferSize()};
     ComPtr<ID3D12PipelineState> pipeline;hr(device->CreateComputePipelineState(&pipelineDesc,IID_PPV_ARGS(&pipeline)));
     const auto buffer=[&](UINT64 size,D3D12_HEAP_TYPE type,D3D12_RESOURCE_STATES state,D3D12_RESOURCE_FLAGS flags,const void* data){
@@ -83,7 +91,7 @@ static std::vector<NodeGpu> gpu12(const Animation& a,const Playback& playback){
     std::vector<NodeGpu> result(first,first+total-base);D3D12_RANGE empty{0,0};read->Unmap(0,&empty);return result;
 #endif
 }
-static std::vector<NodeGpu> gpu(const Animation& a,const Playback& playback){
+static std::vector<NodeGpu> gpu(const Animation& a,const Playback& playback,const PhysiquePose* physique=nullptr){
 #ifdef EI_TEST_NO_SHADER_COMPILE
     (void)a;(void)playback;
     throw std::runtime_error("GPU test disabled: shader compilation is prohibited");
@@ -93,10 +101,17 @@ static std::vector<NodeGpu> gpu(const Animation& a,const Playback& playback){
     std::vector<unsigned char> bytes(skeleton+64);
     unsigned header[8]{0,0,0,0,0,0,0u-skeleton,base};std::memcpy(bytes.data(),packed->bytes.data(),packed->bytes.size());
     std::memcpy(bytes.data()+skeleton,header,32);header[6]=0u-(skeleton+32);std::memcpy(bytes.data()+skeleton+32,header,32);
+    if(physique){
+        header[7]|=0x80000000u;
+        bytes.resize(skeleton+80+sizeof(PhysiqueLocal)*physique->locals.size());
+        std::memcpy(bytes.data()+skeleton+32,header,32);
+        const unsigned relative=48;std::memcpy(bytes.data()+skeleton+64,&relative,4);
+        std::memcpy(bytes.data()+skeleton+80,physique->locals.data(),physique->locals.size()*sizeof(PhysiqueLocal));
+    }
     ComPtr<ID3D11Device> device;ComPtr<ID3D11DeviceContext> context;D3D_FEATURE_LEVEL level;
     hr(D3D11CreateDevice(nullptr,D3D_DRIVER_TYPE_WARP,nullptr,0,nullptr,0,D3D11_SDK_VERSION,&device,&level,&context));
     static ComPtr<ID3DBlob> code;
-    if(!code){const auto source=owned::compose_native_shader_source();ComPtr<ID3DBlob> error;
+    if(!code){const auto source=owned::compose_native_shader_source({},true);ComPtr<ID3DBlob> error;
         const auto result=D3DCompile(source.data(),source.size(),nullptr,nullptr,nullptr,"nativePoseCS","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,&error);
         if(error)std::cerr<<static_cast<const char*>(error->GetBufferPointer());hr(result);}
     ComPtr<ID3D11ComputeShader> shader;hr(device->CreateComputeShader(code->GetBufferPointer(),code->GetBufferSize(),nullptr,&shader));
@@ -106,7 +121,7 @@ static std::vector<NodeGpu> gpu(const Animation& a,const Playback& playback){
     D3D11_SHADER_RESOURCE_VIEW_DESC sd{};sd.Format=DXGI_FORMAT_R32_TYPELESS;sd.ViewDimension=D3D11_SRV_DIMENSION_BUFFEREX;
     sd.BufferEx.Flags=D3D11_BUFFEREX_SRV_FLAG_RAW;sd.BufferEx.NumElements=desc.ByteWidth/4;
     ComPtr<ID3D11ShaderResourceView> rawView;hr(device->CreateShaderResourceView(raw.Get(),&sd,&rawView));
-    PoseGpu input;input.asset=skeleton;input.clip=playback.clip;input.previous=playback.previous;input.time=playback.time;input.previousTime=playback.previous_time;input.blend=playback.blend;
+    PoseGpu input;input.asset=physique?skeleton+32:skeleton;input.clip=playback.clip;input.previous=playback.previous;input.time=playback.time;input.previousTime=playback.previous_time;input.blend=playback.blend;
     desc.ByteWidth=sizeof(input);desc.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;desc.StructureByteStride=sizeof(input);
     init.pSysMem=&input;ComPtr<ID3D11Buffer> poses;hr(device->CreateBuffer(&desc,&init,&poses));
     ComPtr<ID3D11ShaderResourceView> poseView;hr(device->CreateShaderResourceView(poses.Get(),nullptr,&poseView));
@@ -279,6 +294,43 @@ int wmain(int argc,wchar_t** argv)try{
                 maxError=(std::max)(maxError,std::abs(actual[i].rows[r][c]-expected[i][r*4+c]));
                 check_near(actual[i].rows[r][c],expected[i][r*4+c],"real GLB CPU/GPU matrix");
                 check_near(actual12[i].rows[r][c],expected[i][r*4+c],"real GLB CPU/D3D12 matrix");}}
+        if(!asset->physique.targets.empty()){
+            check(!asset->physique.resolve(neutral_physique,unsigned(animation.nodes.size()),asset->cache_key),"neutral allocated physique");
+            const auto shape=asset->physique.resolve({19,31,.55f,.23f,.94f},unsigned(animation.nodes.size()),asset->cache_key);
+            check(shape && animation.morphs.empty() && asset->gpu_animation->morphs==0,"per-frame persistent morph pass");
+            PhysiqueSurface surface;surface.build(asset->physique,*shape,asset->rest_vertices,asset->geometry.joints);
+            std::vector<double> timings;
+            for(unsigned iteration=0;iteration<9;++iteration){
+                const auto start=std::chrono::steady_clock::now();
+                auto changed=asset->physique.resolve({float(16+iteration*2),31,.55f,.23f,.94f},unsigned(animation.nodes.size()),asset->cache_key);
+                PhysiqueSurface variant;variant.build(asset->physique,*changed,asset->rest_vertices,asset->geometry.joints);
+                timings.push_back(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
+            }
+            std::sort(timings.begin(),timings.end());
+            std::cout<<"Physique change (rig + body + clothing transfer field), median "<<timings[4]<<" ms, max "<<timings.back()
+                     <<" ms; GPU palette "<<shape->gpu->bytes.size()<<" bytes, CPU mesh basis "<<asset->physique.deltas.size()*sizeof(PhysiqueDelta)<<" bytes\n";
+            float moved=0;
+            for(size_t i=0;i<surface.body.size();++i)for(unsigned c=0;c<3;++c)
+                moved=(std::max)(moved,std::abs(surface.body[i].position[c]-asset->rest_vertices[i].position[c]));
+            check(moved>.01f,"physique surface remained neutral");
+            const auto step=named_clip(animation,"walk");check(step!=UINT32_MAX,"walk missing");
+            const Playback p{step,index,.25f*animation.clips[step].duration,0.f,.75f};
+            const auto d11=gpu(animation,p,shape.get()),d12=gpu12(animation,p,shape.get());
+            const auto neutral=evaluate(animation,p).joints;
+            const Affine basis{1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1};
+            std::vector<Affine> expected(animation.nodes.size());
+            for(unsigned i=0;i<expected.size();++i){
+                const int parent=animation.nodes[i].parent;
+                const Affine previous=parent<0?basis:neutral[parent];
+                const auto local=multiply(physique_inverse(previous),neutral[i]);
+                expected[i]=multiply(parent<0?basis:expected[parent],shape->apply(i,local));
+                for(unsigned r=0;r<3;++r)for(unsigned c=0;c<4;++c){
+                    check_near(d11[i].rows[r][c],expected[i][4*r+c],"physique D3D11 palette");
+                    check_near(d12[i].rows[r][c],expected[i][4*r+c],"physique D3D12 palette");
+                }
+            }
+            std::cout<<"PASS physique: "<<surface.body.size()<<" cached vertices, GPU per-frame morphs 0, D3D11/12 crossfade joint readback, max component displacement "<<moved<<" m\n";
+        }
         std::cout<<"PASS actual GLB: "<<animation.nodes.size()<<" nodes, 3 idle samples, max matrix error "<<maxError<<'\n';
     }
 #endif

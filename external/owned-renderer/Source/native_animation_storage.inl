@@ -36,6 +36,10 @@ HRESULT Renderer::get_native_skeleton_asset(
   key.push_back(binding->rigid?1:(binding->neutral?2:3));if(binding->clip)add(binding->clip->identity);
   key.append("|nodes="+std::to_string(binding->tracks.size()));
   if(binding->gltf_animation)key.append("|gltf="+binding->gltf_animation->key+"|base="+std::to_string(binding->gltf_node_base));
+  if(binding->physique){
+   key.append("|physique|");
+   key.append(reinterpret_cast<const char*>(binding->physique->input.data()),sizeof(binding->physique->input));
+  }
   const auto found=native_skeleton_assets_.find(key);
   if(found!=native_skeleton_assets_.end()){
    found->second.model=binding->model;found->second.clip=binding->clip;
@@ -45,7 +49,7 @@ HRESULT Renderer::get_native_skeleton_asset(
    UINT morphs,morph_frames,morph_points,tail;};
   const auto count=static_cast<UINT>(binding->tracks.size());
   std::vector<Node> nodes(count);
-  std::vector<std::uint8_t> bytes(32);
+  std::vector<std::uint8_t> bytes(binding->physique?48:32);
   const auto append=[&](const void* data,std::uint64_t length,UINT& target){
    const std::uint64_t start=(bytes.size()+15ull)&~15ull;
    if(start>UINT_MAX||length>UINT_MAX-start)return false;
@@ -77,13 +81,24 @@ HRESULT Renderer::get_native_skeleton_asset(
   if(binding->gltf_animation){
    HRESULT hr=get_native_gltf_library(binding->gltf_animation,gltf_offset,gltf_allocation);if(FAILED(hr))return hr;
   }
+  UINT shapeOffset=0,shapeAllocation=UINT_MAX;
+  if(binding->physique){
+   if(!binding->gltf_animation || !binding->physique->gpu ||
+      binding->physique->gpu->nodes!=binding->gltf_animation->nodes)return E_INVALIDARG;
+   HRESULT got=get_native_gltf_library(binding->physique->gpu,shapeOffset,shapeAllocation);
+   if(FAILED(got))return got;
+  }
   const UINT header[8]={count,static_cast<UINT>(binding->level_offsets.size()-1),node_offset,
-   level_offsets,level_nodes,binding->rigid?1u:0u,gltf_offset,binding->gltf_node_base};std::memcpy(bytes.data(),header,sizeof(header));
+   level_offsets,level_nodes,binding->rigid?1u:0u,gltf_offset,binding->gltf_node_base|(binding->physique?0x80000000u:0u)};std::memcpy(bytes.data(),header,sizeof(header));
   if(bytes.size()>UINT_MAX-15u)return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
   const UINT aligned=static_cast<UINT>((bytes.size()+15ull)&~15ull);
   HRESULT hr=allocate_native_range(native_animation_ranges_,aligned,NativeRangeBuffer::animation,allocation);
   if(FAILED(hr))return hr;
   const UINT start=native_animation_ranges_[allocation].base;
+  if(shapeAllocation!=UINT_MAX){
+   const UINT relative=shapeOffset+16-start;
+   std::memcpy(bytes.data()+32,&relative,4);
+  }
   if(gltf_allocation!=UINT_MAX){
    // Keep the existing shader ABI: base = pose.asset + relative (uint32).
    // A shared library can precede this header. Unsigned subtraction encodes
@@ -92,7 +107,7 @@ HRESULT Renderer::get_native_skeleton_asset(
    const UINT relative=gltf_offset-start;
    std::memcpy(bytes.data()+24,&relative,sizeof(relative));
   }
-  NativeSkeletonAsset asset{start,static_cast<UINT>(bytes.size()),allocation,binding->model,binding->clip,bool(binding->clip),gltf_allocation};
+  NativeSkeletonAsset asset{start,static_cast<UINT>(bytes.size()),allocation,binding->model,binding->clip,bool(binding->clip),gltf_allocation,shapeAllocation};
   D3D11_BOX box{};box.left=start;box.right=start+static_cast<UINT>(bytes.size());box.bottom=box.back=1;
   if(d3d12_){ // D3D12 backend: the skeleton asset into the executor's animation buffer
    const HRESULT written=d3d12_->write_buffer(*native12_.animation,start,bytes.data(),bytes.size());
@@ -101,6 +116,7 @@ HRESULT Renderer::get_native_skeleton_asset(
   try{native_skeleton_assets_.emplace(std::move(key),std::move(asset));}
   catch(...){native_animation_ranges_[allocation].owned=false;native_range_freed(native_animation_ranges_,allocation);throw;}
   if(gltf_allocation!=UINT_MAX)++native_animation_ranges_[gltf_allocation].owners;
+  if(shapeAllocation!=UINT_MAX)++native_animation_ranges_[shapeAllocation].owners;
   profiler_.add_upload(bytes.size());
   offset=start;
   return S_OK;
@@ -112,6 +128,7 @@ void Renderer::retire_native_animation_assets(){
   const auto& asset=iterator->second;auto& range=native_animation_ranges_[asset.allocation];
   if(!range.owners&&!range.references&&(asset.model.expired()||(asset.animated&&asset.clip.expired()))){
    if(asset.gltf_allocation!=UINT_MAX)--native_animation_ranges_[asset.gltf_allocation].owners;
+   if(asset.physique_allocation!=UINT_MAX)--native_animation_ranges_[asset.physique_allocation].owners;
    range.owned=false;native_range_freed(native_animation_ranges_,asset.allocation);
    iterator=native_skeleton_assets_.erase(iterator);
   }else ++iterator;

@@ -23,7 +23,7 @@
 namespace owned {
 namespace skn {struct RuntimeAsset; struct Dds;}
 namespace skm {struct Clip;}
-namespace gltf {struct PlaybackState; struct BreastState;}
+namespace gltf {struct PlaybackState; struct BreastState; struct PhysiqueSurface;}
 
 struct RetainedStaticSourceCandidate;
 struct FurProfile;
@@ -341,6 +341,7 @@ struct VisualPreparedResources {
     PoseKey skn_bounds_key{};
     NativeWorldBounds skn_bounds{};
     bool skn_bounds_valid = false;
+    std::array<float,5> skn_bounds_physique{25,25,.3f,.3f,.85f};
     std::shared_ptr<const VisualAssemblyAsset> gltf_equipment_assembly;
     std::shared_ptr<const gltf::EquipmentSelection> gltf_equipment;
     struct MergedGroup {
@@ -374,6 +375,7 @@ struct VisualPreparedResources {
     std::vector<MergedGroup> merged_groups;           // never resized after build: records borrow its identities
     std::vector<std::int32_t> merged_part_group;      // part index -> group, or -1 (drawn per part)
     std::shared_ptr<const VisualAssemblyAsset> merged_assembly;
+    std::array<float,5> merged_physique{25,25,.3f,.3f,.85f};
     bool merged_fur_hair = false;                    // built with hair parts kept apart (fur_mode 2)
     // Fur prototype (fur.h): the profile of fur_assembly, built once per assembly.
     std::shared_ptr<const FurProfile> fur_profile;
@@ -453,6 +455,14 @@ struct VisualPreparedResources {
     std::shared_ptr<const skn::RuntimeAsset> motion_asset;
     std::shared_ptr<const VisualAssemblyAsset> motion_assembly;
     std::shared_ptr<const VisualSkeletonBinding> motion_source_binding,motion_binding;
+    std::array<float,5> motion_physique_input{25,25,.3f,.3f,.85f};
+    std::shared_ptr<const gltf::PhysiquePose> motion_physique;
+    std::shared_ptr<const gltf::GpuProgram> physique_source;
+    std::shared_ptr<const gltf::PhysiqueSurface> physique_surface;
+    std::shared_ptr<const gltf::PhysiquePose> equipment_physique;
+    std::array<float,5> sole_playback{};
+    std::array<float,3> sole_offset{};
+    bool sole_valid=false;
     std::vector<unsigned> motion_nodes,motion_mounts;
     unsigned motion_context=UINT_MAX,motion_root=UINT_MAX;
     PoseKey motion_pose_key;
@@ -477,6 +487,7 @@ struct VisualPreparedResources {
 };
 
 struct RetainedVisualSample {
+    std::array<float,5> physique{25,25,.3f,.3f,.85f};
     // Embedded units use the host's completed pose/materials, not the retail
     // route/intent evaluator. Their rendering still follows unit policy.
     bool completed_pose = false;

@@ -6210,7 +6210,7 @@ struct NativeShaderFeatures {
 
 // Generate literal SM5 resource indices from the actual binding contract. This
 // avoids both dynamic resource indexing and MSVC's individual literal limit.
-inline std::string compose_native_shader_source(const NativeShaderFeatures& features = {}) {
+inline std::string compose_native_shader_source(const NativeShaderFeatures& features = {},bool poseProgram=false) {
   std::string text=kNativeShader;
   const std::string astral_marker="@TERRAIN_ASTRAL_SHADER@";
   text.replace(text.find(astral_marker),astral_marker.size(),kTerrainAstralShader);
@@ -6253,6 +6253,13 @@ inline std::string compose_native_shader_source(const NativeShaderFeatures& feat
   const std::string frames_marker="@IMPOSTOR_FRAMES@";
   const std::string gltf_marker="@GLTF_ANIMATION@";
   text.replace(text.find(gltf_marker),gltf_marker.size(),gltf::kAnimationShader);
+  // Keep the source (and the compiler cache key) of every material and shadow
+  // program identical when extending the skeleton compute stage.
+  for(const auto& fragment : {std::pair<const char*,const char*>{"@PHYSIQUE_TABLE@",gltf::kPhysiqueTable},
+                              {"@PHYSIQUE_LOCAL@",gltf::kPhysiqueLocal}}){
+   const auto start=text.find(fragment.first);
+   text.replace(start,std::char_traits<char>::length(fragment.first),poseProgram?fragment.second:"");
+  }
   text.replace(text.find(frames_marker),frames_marker.size(),std::string(kImpostorFrameHlsl)+
    "static const uint kImpostorMips="+std::to_string(kImpostorMips)+";\n");
   const std::string plane_marker="@SHADOW_PLANE_COMPARE@";

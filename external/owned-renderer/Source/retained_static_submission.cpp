@@ -1167,29 +1167,101 @@ const std::array<float,3>& retained_visual_shape(const RetainedVisualSample& sam
 }
 
 namespace {
+void prepare_physique(const RetainedVisualSample& sample,const gltf::Asset& body){
+ auto& p=*sample.prepared;
+ if(p.physique_source==body.gpu_animation && p.motion_physique_input==sample.physique)return;
+ auto pose=body.physique.resolve(sample.physique,unsigned(body.animation->nodes.size()),body.cache_key);
+ std::shared_ptr<gltf::PhysiqueSurface> surface;
+ if(pose){
+  surface=std::make_shared<gltf::PhysiqueSurface>();
+  surface->build(body.physique,*pose,body.rest_vertices,body.geometry.joints);
+ }
+ p.motion_physique=std::move(pose);p.physique_surface=std::move(surface);
+ p.motion_physique_input=sample.physique;p.physique_source=body.gpu_animation;
+ p.sole_valid=false;p.breast_physics.reset();
+}
 const gltf::EquipmentSelection& prepare_gltf_equipment(const RetainedVisualSample& sample,
     const gltf::Asset& body) {
  auto& prepared=*sample.prepared;
- if(prepared.gltf_equipment_assembly==sample.assembly && prepared.gltf_equipment)
-  return *prepared.gltf_equipment;
+ prepare_physique(sample,body);
+ const bool same=prepared.gltf_equipment_assembly==sample.assembly && prepared.gltf_equipment;
+ if(same && prepared.equipment_physique==prepared.motion_physique)return *prepared.gltf_equipment;
  auto selected=std::make_shared<gltf::EquipmentSelection>();
- selected->items=gltf::select_equipment(sample.assembly->equipment,body.resource_key);
+ selected->items=same?prepared.gltf_equipment->items:gltf::select_equipment(sample.assembly->equipment,body.resource_key);
+ auto limits=body.node_envelopes;
+ if(prepared.motion_physique){
+  for(unsigned i=0;i<limits.size();++i){
+   auto& v=limits[i];v.translation=v.local_translation;v.scale=v.local_scale;
+   const auto& change=prepared.motion_physique->locals[i];
+   if(change.mode){
+    double ns=0,inf=0;
+    for(unsigned r=0;r<3;++r){
+     double a=0,b=0;for(unsigned c=0;c<3;++c){a+=std::abs(change.rows[r*4+c]);b+=std::abs(change.rows[c*4+r]);}
+     inf=(std::max)(inf,a);ns=(std::max)(ns,b);
+    }
+    v.scale*=std::sqrt(ns*inf);
+    v.translation+=std::hypot(change.rows[3],change.rows[7],change.rows[11]);
+   }
+   const int parent=body.animation->nodes[i].parent;
+   if(parent>=0){v.translation=limits[parent].translation+limits[parent].scale*v.translation;v.scale*=limits[parent].scale;}
+  }
+ }
+ const auto shapedRadius=[&](const std::vector<skn::Vertex>& vertices,const auto& inverse,const auto& joint,
+                            const std::vector<gltf::GarmentAnchor>* anchors){
+  double radius=0;
+  for(size_t i=0;i<vertices.size();++i){
+   auto v=vertices[i];
+   if(anchors)prepared.physique_surface->apply_garment((*anchors)[i],v);
+   double bound=0;
+   for(unsigned k=0;k<4;++k)if(v.weights[k]){
+    const auto p=skn::point(inverse(v.joints[k]),v.position);
+    const auto& lim=limits.at(joint(v.joints[k]));
+    bound+=v.weights[k]/65535.*(lim.translation+lim.scale*std::hypot(p[0],p[1],p[2]));
+   }
+   radius=(std::max)(radius,bound);
+  }
+  return float(radius*(1+1e-5));
+ };
  selected->radius=body.animation_radius;
+ if(prepared.physique_surface){
+  const auto& surface=*prepared.physique_surface;
+  selected->radius=shapedRadius(surface.body,[&](unsigned j)->const auto&{return surface.inverse_skin[j];},
+      [](unsigned j){return j;},nullptr);
+ }
  for(auto& item:selected->items) {
   if(item.asset->wearable) {
-   item.body_nodes=gltf::wearable_nodes(*item.asset,body);
-   selected->radius=(std::max)(selected->radius,gltf::wearable_radius(*item.asset,body,item.body_nodes));
+   if(!same)item.body_nodes=gltf::wearable_nodes(*item.asset,body);
+   float radius=0;
+   if(prepared.physique_surface){
+    if(!item.physique_anchors)item.physique_anchors=std::make_shared<const std::vector<gltf::GarmentAnchor>>(
+        body.physique_tree.map(body.rest_vertices,item.asset->rest_vertices));
+    radius=shapedRadius(item.asset->rest_vertices,[&](unsigned j)->const auto&{return item.asset->geometry.joints[j].inverse;},
+        [&](unsigned j){return item.body_nodes[j];},item.physique_anchors.get());
+   }else radius=gltf::wearable_radius(*item.asset,body,item.body_nodes);
+   selected->radius=(std::max)(selected->radius,radius);
    continue;
   }
   auto found=std::find_if(body.geometry.joints.begin(),body.geometry.joints.end(),
       [&](const skn::Joint& j){return j.name==item.socket;});
   if(found==body.geometry.joints.end())throw std::runtime_error("glTF equipment socket missing in body");
-  const auto& limit=body.node_envelopes.at(found-body.geometry.joints.begin());
+  const auto& limit=limits.at(found-body.geometry.joints.begin());
   const double radius=limit.translation+limit.scale*item.asset->radius;
   if(!std::isfinite(radius)||radius>FLT_MAX/4)throw std::runtime_error("glTF equipment bounds overflow");
   selected->radius=(std::max)(selected->radius,static_cast<float>(radius)*(1+1e-5f));
  }
  selected->radius+=2*gltf::secondary_limit; // rotated outer skin can travel farther than its driver
+ // A translated root keeps the original sole midpoint. Its shift is bounded
+ // by both feet's old and shaped envelopes, including their local sole points.
+ if(prepared.motion_physique){
+  double shift=0;
+  for(unsigned k=0;k<2;++k){
+   const auto j=body.sole_nodes[k];const auto& p=body.sole_points[k];
+   const auto& a=limits[j];const auto& b=body.node_envelopes[j];
+   shift+=.5*(a.translation+b.translation+(a.scale+b.scale)*std::hypot(p[0],p[1],p[2]));
+  }
+  selected->radius+=float(shift);
+ }
+ prepared.equipment_physique=prepared.motion_physique;
  prepared.gltf_equipment=std::move(selected);prepared.gltf_equipment_assembly=sample.assembly;
  return *prepared.gltf_equipment;
 }
@@ -1204,7 +1276,7 @@ bool skn_pose_bounds(const RetainedVisualSample& sample,NativeWorldBounds& bound
  if(prepared.skn_bounds_asset&&prepared.skn_bounds_key.assembly==sample.assembly){asset=prepared.skn_bounds_asset;present=true;}
  else asset=skn::select_visual(sample.assembly->skeleton->visual_reference,sample.assembly->main_hero_visual,present);
  if(!present){prepared.skn_bounds_asset.reset();prepared.skn_bounds_valid=false;return true;}
- if(prepared.skn_bounds_valid&&asset==prepared.skn_bounds_asset&&owned_visual_pose_key_matches(prepared.skn_bounds_key,sample)){
+ if(prepared.skn_bounds_valid&&prepared.skn_bounds_physique==sample.physique&&asset==prepared.skn_bounds_asset&&owned_visual_pose_key_matches(prepared.skn_bounds_key,sample)){
   bounds=prepared.skn_bounds;return true;
  }
  if(asset->gltf_asset) {
@@ -1216,7 +1288,7 @@ bool skn_pose_bounds(const RetainedVisualSample& sample,NativeWorldBounds& bound
   bounds.valid=true;
   if(!finite_world_bounds(bounds))return false;
   prepared.skn_bounds_asset=asset;prepared.skn_bounds_key=owned_visual_pose_key(sample);
-  prepared.skn_bounds=bounds;prepared.skn_bounds_valid=true;return true;
+  prepared.skn_bounds_physique=sample.physique;prepared.skn_bounds=bounds;prepared.skn_bounds_valid=true;return true;
  }
  std::vector<VisualNodeSample> pose;
  if(!sample_visual_skeleton(*sample.assembly->skeleton,sample.selection,retained_visual_shape(sample),
@@ -2448,7 +2520,7 @@ bool retained_visual_gpu_pose(const RetainedVisualSample& sample,
     current.owner=sample.prepared;
     current.root_to_world=root;current.shape=retained_visual_shape(sample);current.center_shift=assembly.center_shift;
     current.frame=phase.frame;current.fraction=phase.fraction;current.height_scale=static_cast<float>(height);
-    current.contact_world_height=0;
+    current.contact_world_height=0;current.physique_sole={};
     // A glTF body owns its contact envelope and GPU pose. Attachment queries
     // need only socket ancestors; do not evaluate every legacy FIG node here.
     if(sample.values.unit) try {
@@ -2514,7 +2586,8 @@ int retained_visual_equipment_point(const RetainedVisualSample& sample,const cha
     const gltf::Playback playback{pose->gltf_clip,pose->gltf_previous,pose->gltf_time,
         pose->gltf_previous_time,pose->gltf_blend};
     const auto matrix=gltf::multiply(pose->root_to_world,
-        gltf::socket_pose(*body.animation,body.attachment_chain(socket),playback));
+        gltf::socket_pose(*body.animation,body.attachment_chain(socket),playback,
+            {1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1},sample.prepared->motion_physique.get()));
     for(unsigned r=0;r<3;++r) {
         point[r]=matrix[r*4+3];
         for(unsigned c=0;c<3;++c)point[r]+=matrix[r*4+c]*local[c];
@@ -3660,7 +3733,9 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
     if (!sample.assembly || !sample.prepared || !sample.values.unit) return false;
     auto& prepared=*sample.prepared;const auto& assembly=*sample.assembly;
     const bool fur_hair=fur_hair_strands(g_fur_mode);
-    if (prepared.merged_assembly==sample.assembly && prepared.merged_fur_hair==fur_hair) return true;
+    if (prepared.merged_assembly==sample.assembly && prepared.merged_fur_hair==fur_hair &&
+        prepared.merged_physique==sample.physique) return true;
+    prepared.merged_physique=sample.physique;
     prepared.merged_fur_hair=fur_hair;prepared.merged_assembly=nullptr;
     if (!prepared.gpu_pose.binding) return false;
     prepared.merged_groups.clear();prepared.merged_part_group.assign(assembly.parts.size(),-1);
@@ -3687,7 +3762,7 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
              (found-body.geometry.joints.begin())));
         }
         build_skn_groups(sample,skn::from_gltf(item.asset),&nodes,item.weapon,item.arrow,
-            &item.base_color_overrides,&item.metallic_roughness_overrides,&item.material_identities);
+            &item.base_color_overrides,&item.metallic_roughness_overrides,&item.material_identities,item.physique_anchors.get());
        }
       }
       if(built)prepared.merged_assembly=sample.assembly;

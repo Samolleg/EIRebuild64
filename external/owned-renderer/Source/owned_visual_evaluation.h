@@ -9,7 +9,7 @@
 #include <vector>
 
 namespace owned {
-namespace gltf { struct GpuProgram; }
+namespace gltf { struct GpuProgram; struct PhysiquePose; }
 
 constexpr std::size_t kVisualRoutePointLimit = 4096;
 constexpr std::size_t kVisualPartLimit = 4096;
@@ -197,6 +197,7 @@ struct VisualNodeSample {
 struct VisualSkeletonBinding {
     std::shared_ptr<const gltf::GpuProgram> gltf_animation;
     std::uint32_t gltf_node_base = 0;
+    std::shared_ptr<const gltf::PhysiquePose> physique;
     std::shared_ptr<const ModelCpuAsset> model;
     std::shared_ptr<const AnimationDatabaseAsset> database;
     std::shared_ptr<const AnimationClipAsset> clip;
