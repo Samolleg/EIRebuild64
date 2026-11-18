@@ -1,3 +1,5 @@
+#requires -Version 7.6.10
+#requires -PSEdition Core
 # Content-based build receipts: output timestamps survive unchanged work.
 $script:ShaderBuildHelperPath=$MyInvocation.MyCommand.Path
 function Get-ShaderFileHash([string]$Path) {

@@ -1,3 +1,5 @@
+#requires -Version 7.6.10
+#requires -PSEdition Core
 # EID3D11_SHADER_STORE persists DXBC across worktrees in CacheRoot/ShaderStore.
 # Compiler-keyed entries share the cache size limit (20 GB by default).
 param(
@@ -126,15 +128,20 @@ try {
         # libraries, unknown payloads or a moving main instead of recompiling.
         $shaderReuse = Get-Content -LiteralPath $ShaderResourceManifest -Raw | ConvertFrom-Json
         if ($shaderReuse.version -ne 1 -or $shaderReuse.base_commit -notmatch '^[0-9a-f]{40}$') { throw 'Invalid shader reuse manifest.' }
-        $accepted = [IO.Path]::GetFullPath((Join-Path $project 'builds/rebuild64/current/EIRebuild64.exe'))
-        if ([IO.Path]::GetFullPath([string]$shaderReuse.accepted_exe) -ine $accepted -or
+        $accepted = [IO.Path]::GetFullPath([string]$shaderReuse.accepted_exe)
+        $acceptedPaths = @('current','previous' | ForEach-Object {
+            [IO.Path]::GetFullPath((Join-Path $project "builds/rebuild64/$_/EIRebuild64.exe"))
+        })
+        if ($acceptedPaths -notcontains $accepted -or
             (Hash-File $accepted) -cne [string]$shaderReuse.accepted_exe_sha256) { throw 'Accepted shader source EXE changed.' }
         $base = [string]$shaderReuse.base_commit
         $main = (& git -C $sourceRepo rev-parse main).Trim()
         if ($LASTEXITCODE -ne 0) { throw 'Cannot determine current main.' }
         $head = (& git -C $sourceRepo rev-parse HEAD).Trim()
-        if ($LASTEXITCODE -ne 0 -or ($main -cne $base -and $main -cne $head)) {
-            throw 'Shader reuse requires the pinned main or the exact merged-main checkout.'
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot determine build HEAD.' }
+        & git -C $sourceRepo merge-base --is-ancestor $main HEAD
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Shader reuse requires all current main changes in the build checkout.'
         }
         $receipt = @(Get-Content -LiteralPath (Join-Path $project 'docs/tasks.log') | Where-Object {
             $v = $_ -split "`t"; $v.Count -ge 7 -and $v[3] -ceq $base -and $v[5] -ceq [string]$shaderReuse.accepted_exe_sha256 -and $v[6] -eq 'accepted'
@@ -148,11 +155,18 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Cannot list shader reuse changes.' }
         $expected = @($shaderReuse.changes | ForEach-Object { [string]$_.path } | Sort-Object)
         if (($actual -join "`n") -cne ($expected -join "`n")) { throw 'Shader reuse changed-file list differs.' }
+        $deleted = @(& git -C $sourceRepo diff --name-only --diff-filter=D "$base...HEAD")
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot verify deleted shader-reuse inputs.' }
         foreach ($change in $shaderReuse.changes) {
             $relative = [string]$change.path
             if ($relative -match '(?i)(^|/)(shader[^/]*|[^/]*\.(hlsl|fx|fxh|dxil|dxbc))$' -or
                 $relative -match '(?i)^OwnedRenderer/RendererShaders\.vcxproj$') { throw "Shader input changed: $relative" }
-            if ((Hash-File (Join-Path $sourceRepo $relative)) -cne [string]$change.sha256) { throw "Changed-file SHA mismatch: $relative" }
+            $removed = $change.PSObject.Properties.Name -contains 'deleted' -and [bool]$change.deleted
+            if ($removed) {
+                if ($relative -cnotin $deleted -or (Test-Path -LiteralPath (Join-Path $sourceRepo $relative))) {
+                    throw "Deleted shader-reuse input is still present: $relative"
+                }
+            } elseif ((Hash-File (Join-Path $sourceRepo $relative)) -cne [string]$change.sha256) { throw "Changed-file SHA mismatch: $relative" }
         }
         $librarySources = @($tracked | Where-Object { $_ -match '^external/(DirectXTex|DirectXTK)/' })
         if (!$librarySources.Count) { throw 'DirectX library source inventory missing.' }
@@ -199,13 +213,12 @@ try {
     & (Join-Path $repo 'tools/prepare-worktree.ps1') -VSInstallDir $vs
     if (!$?) { throw 'Preparation failed.' }
     Write-Host "MSBuild workers: $cores; compiler /MP; isolated endpoint $env:_MSPDBSRV_ENDPOINT_"
-    Add-Type -Path (Join-Path $PSScriptRoot 'BuildProcess.cs')
     $arguments += "/flp:logfile=$task/build.log;verbosity=normal"
-    # Quote Windows argv, doubling trailing backslashes before the closing quote.
-    $commandLine = ($arguments | ForEach-Object {
-        '"' + ([regex]::Replace(([regex]::Replace($_, '(\\*)"', '$1$1\"')), '(\\+)$', '$1$1')) + '"'
-    }) -join ' '
-    $buildExit = [EIBuildProcess]::Run($msbuild, $commandLine, $repo)
+    Push-Location $repo
+    try {
+        & (Join-Path $PSScriptRoot 'invoke-build.ps1') $msbuild @arguments
+        $buildExit = $LASTEXITCODE
+    } finally { Pop-Location }
     if ($buildExit -ne 0) { throw "MSBuild failed ($buildExit); no serial retry." }
     if ($shaderReuse) {
         $log = Get-Content -LiteralPath (Join-Path $task 'build.log') -Raw
@@ -236,7 +249,7 @@ try {
         # Keep the shared work tree locked through this dependent native check build.
         $checkArgs = @($arguments | Where-Object { $_ -notlike '*.sln' -and $_ -notlike '/flp:*' })
         $checkArgs = @($checkArgs | Where-Object { $_ -notlike '/t:*' })
-        & $msbuild (Join-Path $repo 'PhysicsFxRenderCheck.vcxproj') @checkArgs /p:BuildProjectReferences=false *> (Join-Path $task 'physics-render-build.txt')
+        & (Join-Path $PSScriptRoot 'invoke-build.ps1') $msbuild (Join-Path $repo 'PhysicsFxRenderCheck.vcxproj') @checkArgs /p:BuildProjectReferences=false *> (Join-Path $task 'physics-render-build.txt')
         if ($LASTEXITCODE -ne 0) { throw 'Physics render check build failed.' }
     }
     foreach ($name in 'DirectXTex','DirectXTK') {

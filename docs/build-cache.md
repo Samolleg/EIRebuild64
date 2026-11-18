@@ -53,3 +53,9 @@ On first use, missing receipts must be established; they are never inferred sole
 from timestamps. ShaderResourceManifest retains its strict accepted-resource checks.
 Tests: tools/test-shader-build.ps1 and tools/test-build-io.ps1, each with a fresh
 -FixtureRoot under the task. The shader test uses a tiny real RC resource, no DXC.
+
+A pinned accepted shader source may be `current` or `previous`; both still require
+the exact EXE hash and acceptance receipt. The build HEAD must include current
+main, and the manifest covers the complete diff from the accepted source commit,
+including explicit deleted non-shader files verified against Git. This permits
+CPU-only intervening acceptances without silently recompiling shaders.

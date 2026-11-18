@@ -1,3 +1,5 @@
+#requires -Version 7.6.10
+#requires -PSEdition Core
 param([string]$ProjectRoot,[switch]$Force)
 $ErrorActionPreference='Stop'
 if(!$ProjectRoot){$ProjectRoot=$PSScriptRoot;while(!(Test-Path -LiteralPath (Join-Path $ProjectRoot 'RULES.md'))){$ProjectRoot=Split-Path $ProjectRoot;if(!$ProjectRoot){throw 'Project root missing'}}}
@@ -45,7 +47,7 @@ try {
     $cuda=$cuda.Replace('\','/');$sdk=$sdk.Replace('\','/');$install=$install.Replace('\','/');$ninja=$ninja.Replace('\','/')
     & $cmake -S "$px/compiler/public" -B $build -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninja" -DCMAKE_BUILD_TYPE=release "-DCMAKE_CUDA_COMPILER=$cuda/bin/nvcc.exe" "-DCUDAToolkit_ROOT=$cuda" "-DPHYSX_ROOT_DIR=$px" -DTARGET_BUILD_PLATFORM=windows -DPX_GENERATE_GPU_PROJECTS=ON -DPX_GENERATE_STATIC_LIBRARIES=ON -DPX_BUILDSNIPPETS=OFF -DPX_BUILDPVDRUNTIME=OFF -DNV_USE_STATIC_WINCRT=ON "-DPX_OUTPUT_LIB_DIR=$sdk/output" "-DPX_OUTPUT_BIN_DIR=$sdk/output" "-DCMAKE_INSTALL_PREFIX=$install" -DPX_CMAKE_SUPPRESS_REGENERATION=ON
     if($LASTEXITCODE -ne 0){throw 'PhysX CMake configure failed'}
-    & $cmake --build $build --config release --target PhysX PhysXCommon PhysXFoundation PhysXCooking PhysXExtensions PhysXPvdSDK PhysXGpu --parallel 2
+    & (Join-Path $PSScriptRoot '../invoke-build.ps1') $cmake --build $build --config release --target PhysX PhysXCommon PhysXFoundation PhysXCooking PhysXExtensions PhysXPvdSDK PhysXGpu --parallel 2
     if($LASTEXITCODE -ne 0){throw 'PhysX source build failed'}
     New-Item -ItemType Directory -Force -Path "$install/lib","$install/bin","$install/licenses" | Out-Null
     Copy-Item -LiteralPath "$px/include" -Destination $install -Recurse -Force

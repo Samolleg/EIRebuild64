@@ -12,6 +12,7 @@
 static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "WorldClient.h"
+#include "OwnedRender/E1Surface.h"
 #include "ModPackage.h"
 #include "EngineDiagnostics.h"
 #include "ModRuntime.h"
@@ -3118,8 +3119,15 @@ BOOL CWorldClient::Draw()
             return static_cast<CTerrain*>(terrain)->GetObjectFogAlpha(CPlot3D(p[0], p[1], p[2]));
         };
         visuals.fogContext = pTerrain;
-        if (CheckFlag(WC_RENDER_EFFECTS))
+        if (CheckFlag(WC_RENDER_EFFECTS)) {
             visuals.debris = stoneEffects.Sample(float(GetRenderTimeSegments()-GetSegmentTimeCounter()));
+            visuals.debrisSurface = OwnedRender::E1SurfaceValue(stoneEffects.TextureSurface());
+            if(visuals.debrisSurface){
+                visuals.debrisTexture.identity=visuals.debrisSurface->id;
+                visuals.debrisTexture.generation=visuals.debrisSurface->generation;
+                visuals.debrisTexture.surface=visuals.debrisSurface.get();
+            }
+        }
         OwnedRender::E3CombatBeginFrame(IsCombatPause() || IWorld.IsMissionCombatPause());
         coreParts.Stage(CorePerf::WorldRender);
         pRend->GetD3D()->RunC56WorldPass(&visuals);

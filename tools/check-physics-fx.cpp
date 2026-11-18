@@ -36,13 +36,46 @@ int main(int argc,char** argv)try{
     ground.astral_slots={1};ExtractTerrain(ground,{1,1,0},{1,1,1},triangles);check(triangles.empty(),"astral excluded");
     ground=fixture(2);ground.sectors[0].tiles[0].object_id=0;ExtractTerrain(ground,{1,1,0},{1,1,1},triangles);check(triangles.empty(),"upper layer excluded");
     check(StoneTerrain(2)&&StoneTerrain(4)&&StoneTerrain(15)&&!StoneTerrain(0)&&!StoneTerrain(6),"stone emission classification");
+    for(unsigned material:{0u,1u,9u,11u}){
+        auto terrain=fixture(material);
+        auto gentle=ExtractTerrain(terrain,{1,1,0},{.25f,.7f,1},triangles);
+        check(!StoneSurface(gentle),"gentle natural cover does not emit stones");
+        for(auto& v:terrain.sectors[0].vertices)v.z=2.f*v.x;
+        auto cliff=ExtractTerrain(terrain,{1,1,0},{.25f,.7f,1},triangles);
+        check(StoneSurface(cliff),"steep covered cliff emits stones");
+    }
+    for(unsigned material:{3u,6u,8u,10u,12u,13u,14u}){
+        GroundHit excluded;excluded.found=true;excluded.material=material;excluded.normal={.9f,0,.3f};
+        check(!StoneSurface(excluded),"sand ice snowballs liquids unknown are not rock cliffs");
+    }
+    GroundHit boundary;boundary.found=true;boundary.material=9;boundary.normal={0,0,.76604444f};
+    check(!StoneSurface(boundary),"walk limit itself is not a cliff");
+    boundary.normal.z=.765f;check(StoneSurface(boundary),"beyond walk limit is cliff");
+    boundary.found=false;check(!StoneSurface(boundary),"missing ground never emits stones");
+    // Optional private source cases: query XY, expected emission and nine actual
+    // source vertices. Run the production terrain extraction, not a copied rule.
+    if(argc>2){
+        std::ifstream cases(argv[2]);if(!cases)throw std::runtime_error("source cases missing");
+        unsigned count=0,material,expected;float x,y;
+        while(cases>>material>>x>>y>>expected){
+            auto terrain=fixture(material);
+            for(auto& v:terrain.sectors[0].vertices)if(!(cases>>v.x>>v.y>>v.z))throw std::runtime_error("truncated source case");
+            terrain.sectors[0].bounds.minimum={x-3,y-3,-100};terrain.sectors[0].bounds.maximum={x+3,y+3,100};
+            auto actual=ExtractTerrain(terrain,{x,y,0},{x,y,0},triangles);
+            check(actual.found&&StoneSurface(actual)==bool(expected),"actual terrain impact source classification");++count;
+        }
+        check(count==8,"all eight owner impact coordinates checked");
+    }
     // Two worlds with the same events must match despite different render sample counts.
     const auto controlBefore=_mm_getcsr()&~0x3fu;
     World a,b;if(!a.Initialize())throw std::runtime_error(a.Error());
     check(a.Statistics().gpuDynamics&&a.Statistics().gpuBroadPhase,"GPU dynamics and GPU broadphase enabled");
     std::cout<<"GPU_DEVICE "<<a.Device()<<'\n';
     check(a.AddPatch(1,{0,0,0},plane())&&b.AddPatch(1,{0,0,0},plane()),"PhysX GPU terrain created");
-    check(a.Burst(1,{0,0,0},{0,0,1},1,123)==12&&b.Burst(1,{0,0,0},{0,0,1},1,123)==12,"12 convex stones");
+    check(a.Burst(1,{0,0,0},{0,0,1},1,123)==64&&b.Burst(1,{0,0,0},{0,0,1},1,123)==64,"64 convex stones per full impact");
+    const auto burst=a.Sample(1);
+    check(std::count_if(burst.begin(),burst.end(),[](const Stone& s){return s.radius>=.08f;})==8,"eight large readable chunks");
+    check(std::all_of(burst.begin(),burst.end(),[](const Stone& s){return s.radius>=.025f&&s.radius<=.13f;}),"bounded chip and chunk size");
     auto paused=a.Sample(1);for(int i=0;i<20;++i)a.Tick(true);auto after=a.Sample(1);
     check(after.size()==paused.size()&&after[0].pose.position.z==paused[0].pose.position.z,"pause freezes pose and lifetime");
     float highest=0,lowest=100;bool gpuContacts=false,gpuMemory=false;std::ofstream trajectory;
@@ -76,6 +109,11 @@ int main(int argc,char** argv)try{
     for(unsigned kind=0;kind<4;++kind){OwnedRender::DebrisMesh mesh(kind);auto points=StoneVertices(kind,1);
         for(unsigned i=0;i<6;++i)check(mesh.positions[i/4].x[i%4]==points[i].x,"render/physics shape agreement");
         for(auto index:mesh.indices)if(index>=mesh.components.size())throw std::runtime_error("invalid triangle index");
+        for(unsigned face=0;face<8;++face){
+            const auto& a=mesh.uv[face*3];const auto& b=mesh.uv[face*3+1];const auto& c=mesh.uv[face*3+2];
+            check(std::abs((b.u-a.u)*(c.v-a.v)-(b.v-a.v)*(c.u-a.u))>.05f,"nondegenerate texture facet");
+            for(unsigned j=0;j<3;++j){const unsigned index=face*3+j;check(mesh.components[index].texture==index,"facet UV component binding");}
+        }
     }
     Stone stone;stone.radius=.1f;stone.pose.position={1,2,3};stone.pose.rotation={0,0,.70710678f,.70710678f};
     const auto m=OwnedRender::DebrisMatrix(stone);check(std::abs(m[4]-.1f)<1e-6f&&m[3]==1&&m[7]==2&&m[11]==3,"quaternion/scale/translation render matrix");

@@ -1,3 +1,5 @@
+#requires -Version 7.6.10
+#requires -PSEdition Core
 param([Parameter(Mandatory=$true)][string]$OutputDirectory,[string]$GameRoot='C:\GOG Games\PZ',[switch]$Prepared,[switch]$SkipBuild,[string]$KitDirectory)
 $ErrorActionPreference='Stop'
 $built=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
@@ -13,7 +15,7 @@ try {
         if(!$?){throw 'Check dependency preparation failed'}
     }
     if(!$SkipBuild){
-        & "$vs/MSBuild/Current/Bin/MSBuild.exe" "$built/PhysicsFxRenderCheck.vcxproj" /nologo /v:minimal /m:4 /nr:false /p:Configuration=Release /p:Platform=x64 *> "$out/build.txt"
+        & (Join-Path $PSScriptRoot 'invoke-build.ps1') "$vs/MSBuild/Current/Bin/MSBuild.exe" "$built/PhysicsFxRenderCheck.vcxproj" /nologo /v:minimal /m:4 /nr:false /p:Configuration=Release /p:Platform=x64 *> "$out/build.txt"
         if($LASTEXITCODE -ne 0){Get-Content "$out/build.txt" -Tail 30;throw 'Native render check build failed'}
     }
     $builtBin=Join-Path $built 'out/x64/Release/PhysicsFxRenderCheck'

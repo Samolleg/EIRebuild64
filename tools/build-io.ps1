@@ -1,3 +1,5 @@
+#requires -Version 7.6.10
+#requires -PSEdition Core
 # Local build IO. Compare bytes, preserve unchanged timestamps, reject links.
 function Hash-File([string]$path) {
     $stream=[IO.File]::OpenRead($path);$sha=[Security.Cryptography.SHA256]::Create()

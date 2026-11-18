@@ -7,6 +7,12 @@ import shutil
 import urllib.request
 
 root = pathlib.Path(__file__).resolve().parent
+workspace = next((p for p in root.parents if (p / 'RULES.md').is_file()), None)
+if workspace is None:
+    sys.exit('Evil Islands workspace not found.')
+build_supervisor = workspace / 'tools/project/build_process.py'
+if not build_supervisor.is_file():
+    sys.exit('Project build supervisor is missing; update tools first.')
 # Restore the bundled JSON library's expected nlohmann include layout.
 shutil.copytree(root / "SDKs" / "JSON", root / "out" / "include" / "nlohmann", dirs_exist_ok=True)
 label = sys.argv[1] if len(sys.argv) > 1 else "build"
@@ -45,7 +51,7 @@ evidence = root / "evidence"
 evidence.mkdir(exist_ok=True)
 print(f'Building Release x86. Log: {evidence / (label + "-console.log")}', flush=True)
 with (evidence / f"{label}-console.log").open("wb") as log:
-    result = subprocess.run([str(msbuild), str(root / "EI_Rebuild.sln"), "/t:Build",
+    result = subprocess.run([sys.executable, str(build_supervisor), "--parent-pid", str(os.getpid()), "--", str(msbuild), str(root / "EI_Rebuild.sln"), "/t:Build",
         "/p:Configuration=Release", "/p:Platform=x86", "/m:1", "/nr:false", "/v:minimal", "/nologo",
         "/fl", f"/flp:logfile={evidence / (label + '.log')};verbosity=normal"],
         cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT)

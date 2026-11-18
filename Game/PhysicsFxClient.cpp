@@ -3,6 +3,7 @@
 #include "PhysicsFxTerrain.h"
 #include "WorldClient.h"
 #include "Terrain.h"
+#include "TextureManager.h"
 #include "OwnedRender/E1Terrain.h"
 #include "GameJournal.h"
 #include "retained_static_scene.h"
@@ -11,6 +12,7 @@
 namespace PhysicsFx {
 struct Client::Impl {
     World world;Events events;
+    ITexturePtr stoneTexture;bool textureAttempted=false;
     struct Request {int id,start;Vec position;float power,radius;};
     std::vector<Request> pending;
     std::uint64_t generation=0,revision=0;
@@ -54,11 +56,26 @@ void Client::Tick(CWorldClient& host,bool paused){
         const auto begin=std::chrono::steady_clock::now();
         const auto hit=ExtractTerrain(*source.terrain,center,p,triangles);
         const float distance=p.z-hit.point.z;
-        if(!hit.found||!StoneTerrain(hit.material)||distance<-.15f||distance>std::clamp(request.radius,.35f,2.f))continue;
+        if(!StoneSurface(hit)||distance<-.15f||distance>std::clamp(request.radius,.35f,2.f)){
+            GameJournal::Event("PHYSICS_FX","impact_rejected","id=%d x=%.3f y=%.3f material=%u normal_z=%.4f height_delta=%.3f reason=%s",
+                request.id,p.x,p.y,hit.material,hit.normal.z,distance,
+                !hit.found?"no_ground":!StoneSurface(hit)?"surface":"height");
+            continue;
+        }
+        GameJournal::Event("PHYSICS_FX","stone_surface","id=%d x=%.3f y=%.3f material=%u normal_z=%.4f source=%s",
+            request.id,p.x,p.y,hit.material,hit.normal.z,StoneTerrain(hit.material)?"material":"cliff");
         if(!s.world.HasPatch(key)&&!s.world.AddPatch(key,center,triangles))continue;
         prepareMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();
         const std::uint32_t seed=std::uint32_t(request.id)*0x9e3779b9u^std::uint32_t(request.start)*0x85ebca6bu;
         spawned+=s.world.Burst(key,hit.point,hit.normal,request.power,seed);
+    }
+    if(spawned&&!s.textureAttempted){
+        s.textureAttempted=true;
+        auto* manager=host.GetTextureManager();
+        s.stoneTexture=manager->CreateTexture(TTID_STONE_MAIN,"stones00");
+        const bool loaded=!s.stoneTexture.IsEmpty()&&manager->LoadTexture(s.stoneTexture);
+        if(!loaded)s.stoneTexture=nullptr;
+        GameJournal::Event("PHYSICS_FX",loaded?"texture_ready":"texture_unavailable","name=stones00");
     }
     s.pending.clear();s.world.Tick(false);
     if(!s.world.Error().empty()){reportFailure();return;}
@@ -70,4 +87,9 @@ void Client::Tick(CWorldClient& host,bool paused){
     }
 }
 std::vector<Stone> Client::Sample(float fraction) const{return impl->world.Sample(fraction);}
+std::uint64_t Client::TextureSurface() const{
+    const auto* texture=impl->stoneTexture.GetPtr();
+    auto* surface=texture?texture->GetSurface():nullptr;
+    return surface&&surface->EnsureOwnedSurfacePublished()?surface->OwnedSurfaceId():0;
+}
 }

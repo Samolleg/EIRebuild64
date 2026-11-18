@@ -1,3 +1,5 @@
+#requires -Version 7.6.10
+#requires -PSEdition Core
 # Writes an nmake dependency file for incremental builds (build-local-x86.cmd,
 # Host\build.cmd): one "object: header" line per header each object included
 # at its last compile (cl /sourceDependencies JSON next to the object),

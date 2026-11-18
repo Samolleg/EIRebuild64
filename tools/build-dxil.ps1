@@ -1,3 +1,5 @@
+#requires -Version 7.6.10
+#requires -PSEdition Core
 param(
     [Parameter(Mandatory=$true)][string]$NMake,
     [Parameter(Mandatory=$true)][string]$Makefile,
