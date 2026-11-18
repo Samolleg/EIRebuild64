@@ -1,4 +1,5 @@
 #include "../external/owned-renderer/Source/gltf_asset.h"
+#include "../external/owned-renderer/Source/environment_asset.h"
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -20,6 +21,14 @@ owned::ResourceBlob read(const std::filesystem::path &path) {
 }
 }
 int wmain(int argc, wchar_t **argv) {
+    if(argc==3&&std::wstring(argv[1])==L"--environment") {
+        try {
+            const auto asset=owned::environment::decode(read(argv[2]),"environment-check");
+            std::size_t triangles=0;for(const auto& p:asset->parts)triangles+=p.geometry->indices.size()/3;
+            std::cout<<"ACCEPTED environment.v1: "<<asset->parts.size()<<" parts, "<<triangles<<" triangles, "<<asset->geometry_bytes<<" geometry bytes, wind="<<asset->plant<<"\n";
+            return 0;
+        }catch(const std::exception& e){std::cerr<<"REJECTED: "<<e.what()<<'\n';return 1;}
+    }
     if (argc != 4 || std::wstring(argv[2]) != L"--profile") {
         std::cerr << "Usage: EIRebuild64ModelCheck.exe <glb> --profile <human.v1.json>\n";
         return 2;

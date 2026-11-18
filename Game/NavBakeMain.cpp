@@ -3,6 +3,8 @@
 #include "ModRuntime.h"
 #include "ModPackage.h"
 #include "ModCliTool.h"
+#include "OwnedRender/StartupPaths.h"
+#include <owned_resource_runtime.h>
 #include "GeneralSettings.h"
 #include "PerkDatabase.h"
 #include "QuestDatabase.h"
@@ -52,11 +54,22 @@ nlohmann::json ReadImportCache(const std::filesystem::path& path) {
 // contents, the complete base archive/config inventory (including additions),
 // selected scene/authoring and executable. No timestamps decide cache reuse.
 Navigation::Bytes ImportKey(const std::filesystem::path& base,const CModPackage& package,
-    const std::string& map,const std::string& mob,const std::filesystem::path& settings) {
+    const std::string& map,const std::string& mob,const std::filesystem::path& settings,
+    const owned::ResourceStoreConfig& graphics) {
     std::set<std::filesystem::path> paths;
     for(const auto& path:package.NavigationInputs())if(!path.empty())paths.insert(std::filesystem::absolute(path));
     for(const auto& folder:{base/"Res",base/"config"})if(std::filesystem::exists(folder))
         for(const auto& entry:std::filesystem::recursive_directory_iterator(folder))if(entry.is_regular_file())paths.insert(entry.path());
+    // GLB geometry and explicit collision volumes are navigation inputs too.
+    // Archives are covered above; include additions/removals in loose roots.
+    for(const auto& root:graphics.loose_roots) {
+        const auto models=std::filesystem::path(root)/"models";
+        paths.insert(models/"registry.v1.json");
+        const auto environment=models/"environment";
+        if(std::filesystem::is_directory(environment))
+            for(const auto& entry:std::filesystem::recursive_directory_iterator(environment))
+                if(entry.is_regular_file())paths.insert(entry.path());
+    }
     paths.insert(settings);
     for(const auto& name:{map,mob})paths.insert(std::filesystem::absolute(ModRuntime::MapPath(name.c_str())));
     auto authoring=std::filesystem::path(ModRuntime::MapPath(map.c_str()));authoring.replace_extension(".navsrc");paths.insert(std::filesystem::absolute(authoring));
@@ -187,6 +200,10 @@ int wmain(int argc,wchar_t** argv) {
         theSettings.szWorkPath=(base.string()+"\\").c_str();
         theSettings.szResourcePath=((base/"Res").string()+"\\").c_str();
         theSettings.szCDPath=theSettings.szWorkPath;
+        // Offline import loads the same static assets before any object is
+        // created. Adopting mounts needs neither a GPU nor renderer workers.
+        const auto graphics=OwnedRender::CaptureStartupPaths(root/"Engine64",base,base/"Res",&package);
+        owned::owned_resource_runtime_adopt_mounts(graphics.mounts,graphics.text_mounts,graphics.data_mounts);
         C2DScreenWait::Ignore(true);
         const auto* res=static_cast<LPCSTR>(theSettings.szResourcePath);
         if(!thePerkDatabase.LoadDatabase(res,"database.res")||!theQuestDatabase.Load(res)||
@@ -269,7 +286,7 @@ int wmain(int argc,wchar_t** argv) {
                 Navigation::Bytes importKey;
                 // Model-filtered admission must still inspect the actual MOB.
                 if(!options.count(L"--model"))try {
-                    importKey=ImportKey(base,package,map.first,map.second,settings);
+                    importKey=ImportKey(base,package,map.first,map.second,settings,graphics.mounts);
                     auto cache=ReadImportCache(importCachePath);
                     const auto checksum=cache.at("checksum").get<Navigation::Bytes>();cache.erase("checksum");const auto text=cache.dump();
                     if(checksum!=Navigation::Digest(Navigation::Bytes(text.begin(),text.end())))throw std::runtime_error("Damaged navigation cache");

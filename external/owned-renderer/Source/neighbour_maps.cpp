@@ -1,4 +1,5 @@
 #include "neighbour_maps.h"
+#include "environment_material.h"
 #include "neighbour_profile.h"
 #ifdef EID3D11_EMBEDDED
 #include "embedded_host.h"
@@ -197,7 +198,7 @@ std::unique_ptr<NeighbourMapUpload> decode_neighbour(OwnedResourceLoader& loader
     upload->decoded_bytes=map->metrics.peak_owned_bytes;
     std::map<std::string,std::uint32_t> omitted;std::map<std::uint32_t,std::uint32_t> drawn;
     for(const auto& object:map->objects) {
-        if(!neighbour_decoration_family(object.family))continue;
+        if(!neighbour_decoration_family(object.family,object.environment_profile))continue;
         std::shared_ptr<RetainedStaticSourceCandidate> candidate;
         const char* why=neighbour_decoration_omission(object,*map);
         RetainedStaticPrepareDiagnostic prepared;
@@ -215,7 +216,7 @@ std::unique_ptr<NeighbourMapUpload> decode_neighbour(OwnedResourceLoader& loader
         upload->decorations.push_back(std::move(candidate));
     }
     upload->decoration_summary="decorations=53:"+std::to_string(drawn[53])+",54:"+std::to_string(drawn[54])+
-        ",55:"+std::to_string(drawn[55])+",60:"+std::to_string(drawn[60])+" omitted_reasons=";
+        ",55:"+std::to_string(drawn[55])+",56:"+std::to_string(drawn[56])+",60:"+std::to_string(drawn[60])+" omitted_reasons=";
     for(const auto& [reason,count]:omitted)upload->decoration_summary+=reason+":"+std::to_string(count)+",";
     if(omitted.empty())upload->decoration_summary+="none";else upload->decoration_summary.pop_back();
     // Emit the complete bounded list once per decoded map. Keep details out
@@ -255,6 +256,12 @@ bool neighbour_impostor_plan(const RetainedStaticSourceCandidate& candidate,Neig
     plan={};
     // Astral rift models keep their triangles: a bake would freeze the veils.
     if(candidate.assembly&&astral_model(*candidate.assembly))return false;
+    // A single coverage atlas cannot represent blended or independently
+    // emissive layers. Those objects retain their ordinary material-aware LODs.
+    for(const auto& node:candidate.nodes)if(node.environment_material) {
+        const auto& m=*node.environment_material;
+        if(m.alpha==2||m.unlit||m.textures[3])return false;
+    }
     const auto part=[](const RetainedPreparedNode& node){
         const auto& m=node.object_local;
         // Node placements are translations (retained_static_submission.cpp).
@@ -266,6 +273,7 @@ bool neighbour_impostor_plan(const RetainedStaticSourceCandidate& candidate,Neig
     // surface's own alpha scan (zone13 after travel: per-object surfaces
     // classed houses cut-out, 1112 crown impostors).
     const auto cut_out=[](const RetainedPreparedNode& node){
+        if(node.environment_material)return node.environment_material->alpha==1;
         return node.texture?(node.texture->opaque_mips&1u)==0:node.archive_cut_out==1;
     };
     std::size_t triangles=0;bool led=false;
@@ -307,7 +315,9 @@ bool neighbour_impostor_plan(const RetainedStaticSourceCandidate& candidate,Neig
         const auto& node=candidate.nodes[i];
         if(!part(node))continue;
         plan.spheres[i]={centre[0]-node.object_local[3],centre[1]-node.object_local[7],centre[2]-node.object_local[11],radius};
-        plan.key+=node.figure->identity.key()+"|"+std::to_string(node.texture_identity)+(i==plan.lead?"*;":";");
+        const auto source=candidate.assembly&&i<candidate.assembly->parts.size()?candidate.assembly->parts[i].environment_geometry:nullptr;
+        plan.key+=(source?source->identity:node.figure->identity).key()+"|"+std::to_string(node.texture_identity)+(i==plan.lead?"*;":";");
+        plan.morphs=plan.morphs||(source&&source->shape_count==8);
     }
     // A decoration whose parts morph (eight shapes) keeps its vertices in
     // the sphere's unit frame, where the bake image lives: prebuild_decorations
@@ -500,6 +510,8 @@ void prebuild_texture(NativePrebuiltBuilder& builder,NeighbourMapUpload& upload,
 }
 void prebuild_decoration_textures(NeighbourMapUpload& upload,NativePrebuiltBuilder& builder,
     std::unordered_set<std::string>& seen) {
+    for(const auto& candidate:upload.decorations)if(candidate->assembly)for(const auto& part:candidate->assembly->parts)
+        if(part.environment_material)for(const auto& texture:part.environment_material->textures)if(texture)prebuild_texture(builder,upload,seen,texture->view());
     for(const auto& candidate:upload.decorations)for(const auto& node:candidate->nodes) {
         if(!node.texture || node.texture_mips.empty())continue;
         NativeOwnedTextureView view{};
@@ -746,7 +758,7 @@ void run(Stream& s,std::string active,std::uint64_t epoch,ResourceStoreConfig mo
 }
 const char* neighbour_decoration_omission(const StaticObjectSource& object,
     const OwnedMapSnapshot& map) noexcept {
-    if(!neighbour_decoration_family(object.family))return "family";
+    if(!neighbour_decoration_family(object.family,object.environment_profile))return "family";
     if(object.rejection!=StaticObjectRejection::none)return static_object_rejection_name(object.rejection);
     if(!object.nid || object.nid>0x7fffffffu)return "source_values";
     return retained_static_structure_omission(object,map);
@@ -1149,9 +1161,11 @@ void build_active_statics(const std::shared_ptr<ActiveStaticsJob>& job) noexcept
         failure=upload.decorations.empty()?"no_candidates":(!device && !builder.d3d12)?"no_device":"prebuild";
         if(!upload.decorations.empty() && (device || builder.d3d12)) {
             prebuild_decorations(upload,builder,1.f);
-            // No textures: every draw binds its posed record's texture, and
-            // the impostor bake reads the archive textures those made
-            // resident under the same cache keys.
+            // GLB opaque textures may not have had a colour draw yet. Prepare
+            // them before catalog adoption; compressed pieces retain no mips.
+            // Existing surface-backed FIG parts still use their live texture.
+            std::unordered_set<std::string> seen;
+            prebuild_decoration_textures(upload,builder,seen);
             if(finish_native_prebuilt_pages(builder) && !builder.failed) {
                 upload.prebuilt_pages=std::move(builder.pages);
                 failure="piece";

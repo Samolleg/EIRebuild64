@@ -68,8 +68,13 @@ enum class RetainedVisualStatus : std::uint8_t {
 const char* retained_visual_status_name(std::uint32_t status) noexcept;
 
 namespace gltf { struct EquipmentSelection; }
+namespace environment { struct Material; struct Asset; }
 
 struct VisualPartAsset {
+    std::shared_ptr<const environment::Material> environment_material;
+    std::shared_ptr<const FigureCpuAsset> environment_geometry; // immutable source endpoints; GPU sees resolved geometry
+    // Explicit vegetation role, independent of the image's alpha heuristic.
+    bool environment_foliage = false;
     std::string name;
     std::shared_ptr<const FigureCpuAsset> geometry;
     std::uint32_t skeleton_node = UINT_MAX;
@@ -114,6 +119,7 @@ struct MaterialComposition {
 // Immutable semantic appearance, built from cold named parts. The skeleton
 // is shared even when an attachment's FIG comes from a different model.
 struct VisualAssemblyAsset {
+    std::shared_ptr<const environment::Asset> environment_source; // local cache lifetime; not part of wire format
     bool main_hero_visual=false;
     std::uint64_t revision = 0;
     std::shared_ptr<const ModelCpuAsset> skeleton;
@@ -131,6 +137,7 @@ struct VisualAssemblyAsset {
     bool sways = false;
     std::uint32_t sway_shape = 0;
     std::uint32_t sway_root = 0;
+    std::vector<std::array<float,3>> environment_wind; // radius/top/height endpoints
     // Diagnostic only (F10 critter_labels marker): the published part count
     // when the game loaded every part of the model (a unit created with an
     // empty body-part list holds several armour variants of one body part

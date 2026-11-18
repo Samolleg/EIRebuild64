@@ -104,7 +104,7 @@ struct NeighbourFigureShape {
 inline NeighbourFigureShape neighbour_figure_shape(const FigureCpuAsset* figure, const std::array<float, 3>& shape,
     const std::array<float, 4>* sphere = nullptr) noexcept {
     NeighbourFigureShape key{figure, {}, {}};
-    std::memcpy(key.shape.data(), shape.data(), sizeof(key.shape));
+    if(figure&&figure->shape_count!=1)std::memcpy(key.shape.data(), shape.data(), sizeof(key.shape));
     if (sphere) std::memcpy(key.sphere.data(), sphere->data(), sizeof(key.sphere));
     return key;
 }
@@ -204,8 +204,8 @@ struct NeighbourMapUpload {
 // (53), structures such as buildings, walls and bridges (54), stones (55) and
 // levers (60: doors, gates, chests, panels) in their authored state. Nothing
 // there is interactive. Units, torches and traps are not drawn.
-inline bool neighbour_decoration_family(std::uint32_t family) noexcept {
-    return (family>=53 && family<=55) || family==60;
+inline bool neighbour_decoration_family(std::uint32_t family, bool environment = false) noexcept {
+    return (family>=53 && family<=55) || family==60 || (family==56 && environment);
 }
 // Why one neighbour MOB object is not drawn as a decoration; nullptr when it
 // is structurally drawable (immutable preparation may still reject it).

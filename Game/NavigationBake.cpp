@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "NavigationBake.h"
+#include "environment_asset.h"
 #include "NavigationCanopy.h"
 #include "TextureManager.h"
 #include "NavigationObject.h"
@@ -272,7 +273,7 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
         }
         return;
     }
-    const bool staticKind=kind==HPC_TREE||kind==HPC_STONE||kind==HPC_BUILDING;
+    const bool staticKind=object->GetEnvironment()||kind==HPC_TREE||kind==HPC_STONE||kind==HPC_BUILDING;
     const bool fixed=authored.fixed.count(idValue)||(!authored.dynamic.count(idValue)&&staticKind&&!object->IsDynamic());
     if(!fixed)return;
     if(remove)staticIds.erase(idValue);else staticIds.insert(idValue);
@@ -282,7 +283,13 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
     if(remove){objects.erase(id);return;}
     object->CreateCurrentPlacement();
     auto* specific=static_cast<CMapObjectServer*>(object->GetMapObjectSpecific());
-    const CStringArray& parts=specific->szNames.GetSize()?specific->szNames:object->GetBodyPartNames();
+    CStringArray environmentParts;
+    if(object->GetEnvironment()) {
+        std::vector<std::string> selected;
+        for(INT_PTR i=0;i<specific->szNames.GetSize();++i)selected.push_back((LPCSTR)specific->szNames[i]);
+        for(const auto& part:object->GetEnvironment()->parts)if(owned::environment::selected(part,selected))environmentParts.Add(part.name.c_str());
+    }
+    const CStringArray& parts=object->GetEnvironment()?environmentParts:(specific->szNames.GetSize()?specific->szNames:object->GetBodyPartNames());
     Navigation::Geometry input;
     bool hasTrunk=false;
     for(INT_PTR i=0;i<object->fbvs.GetSize();++i) {
@@ -293,6 +300,7 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
     // Failure is reported by the original labelled per-part path below.
     for(INT_PTR n=0;n<parts.GetSize();++n) {
         const int i=object->GetFigureIndexByName(parts[n]);if(i<0||object->fbvs[i].IsIgnored())continue;
+        if(object->GetEnvironment())continue;
         try {QueueFigure(*static_cast<CFigureManager*>(object->GetWorld()->GetFigureManager()),object->GetMaskName(),parts[n]);}catch(const std::exception&) {}
     }
     constexpr float canopyCell=.3f;
@@ -308,7 +316,7 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
         {
             std::ostringstream label;label<<"object NID="<<id<<" model="<<object->GetMaskName()<<" part="<<parts[n].GetString();
             try {
-                const auto figure=Figure(*static_cast<CFigureManager*>(object->GetWorld()->GetFigureManager()),object->GetMaskName(),parts[n]);const auto& c=object->GetComplection();
+                const auto figure=object->GetEnvironment()?object->GetEnvironment()->parts.at(i).geometry:Figure(*static_cast<CFigureManager*>(object->GetWorld()->GetFigureManager()),object->GetMaskName(),parts[n]);const auto& c=object->GetComplection();
                 const float shape[3]={c.strength,c.grace,c.tall};float weights[8]{};
                 for(unsigned s=0;s<figure->shape_count;++s) {
                     weights[s]=1;
@@ -324,6 +332,7 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
                     }
                     // FIG vertices are origin-relative; ptCenter belongs only
                     // to the collision BV. BON already contains linked offsets.
+                    if(object->GetEnvironment()) {const auto& root=object->GetEnvironment()->wind_root;p+=CPlot3D(root[0],root[1],root[2]);}
                     p=object->RotateVector(p+bv.ptBone)+base;vertices[j]=GamePoint(p);
                     if(!Navigation::Finite(vertices[j]))throw std::runtime_error("non-finite transformed triangle vertex");
                 }
@@ -341,7 +350,14 @@ void NavigationBake::Object(CMapObject* object,bool remove,CAIMap& map) {
                 }
                 if(!vertices.empty())input.flightBoxes.push_back(top);
                 if(!groundPart||!groundFoliage)continue;
-                const auto* alpha=foliage?&Canopy(*specific,*figure):nullptr;
+                const NavigationCanopy* alpha=nullptr;
+                if(foliage) {
+                    if(object->GetEnvironment()) {
+                        const auto& texture=*object->GetEnvironment()->parts.at(i).texture;
+                        const auto key=texture.identity.key();auto& cached=canopyTextures[key];
+                        if(!cached)cached=std::make_shared<NavigationCanopy>(texture);alpha=cached.get();
+                    } else alpha=&Canopy(*specific,*figure);
+                }
                 const size_t first=input.ground.size();input.groundSources.emplace(first,label.str());
                 for(size_t j=0;j<figure->indices.size();j+=3) {
                     Triangle t{vertices[figure->indices[j]],vertices[figure->indices[j+1]],vertices[figure->indices[j+2]],walkable?map.NavigationBridgeArea():BYTE(0)};
