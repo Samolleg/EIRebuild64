@@ -81,7 +81,7 @@ public:
             stop_ = true;
         }
         wake_.notify_all();
-        WaitForSingleObject(thread_, 30000);
+        WaitForSingleObject(thread_, INFINITE);
         CloseHandle(thread_);
         CloseHandle(exited_);
         thread_ = nullptr;
@@ -109,7 +109,7 @@ public:
         bool wake = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            queue_.push_back(command);
+            try { queue_.push_back(command); } catch (...) { delete command; return false; }
             if (present) ++presents_pending_;
             wake = waiting_;
         }
