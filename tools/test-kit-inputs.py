@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -46,6 +47,8 @@ def main():
             file=root/name
             file.parent.mkdir(parents=True,exist_ok=True)
             file.write_bytes(b'abc')
+        project = next(p for p in Path(__file__).resolve().parents if (p/'RULES.md').is_file())
+        shutil.copy2(project/'tools/pz_deploy_preview.py', root/'tools/pz_deploy_preview.py')
         (root/'cache/work/out/obj/CL.read.1.tlog').write_text(str(root/'external.h'),encoding='utf-16')
         args = SimpleNamespace(repo=repo, project=root, vc=root/'vc', vs=root/'vs', sdk=root/'sdk',
                                sdk_version='1', pwsh=Path(sys.executable), cache=root/'cache', manifest=None,
@@ -53,6 +56,15 @@ def main():
                                check_external=None)
         (repo/'author.cpp').write_text('source')
         clean_input = implementation.fingerprint(args)
+        warm = implementation.InputHashes(root, args.cache)
+        probe = repo/'author.cpp'
+        warm.sha(probe)
+        with warm.io.open_snapshot(probe) as handle:
+            reliable = warm.io.file_token(handle) is not None
+        assert warm.reused == int(reliable)
+        with patch.object(warm.io, 'file_token', return_value=None):
+            assert warm.sha(probe) == hashlib.sha256(probe.read_bytes()).hexdigest()
+            assert warm.hashed == 2 - int(reliable)
         git('add','author.cpp')
         git('commit','-m','commit the checked candidate')
         args.check_external=args.save_external
@@ -67,6 +79,21 @@ def main():
             os.utime(file,ns=(stamp.st_atime_ns,stamp.st_mtime_ns))
             assert implementation.fingerprint(args)!=clean_input,name
             file.write_bytes(b'abc')
+        # Replacement at the same path, timestamp and size must miss the cache.
+        file = root/'external.h'
+        old = file.stat()
+        replacement = root/'replacement'
+        replacement.write_bytes(b'xyz')
+        os.utime(replacement, ns=(old.st_atime_ns, old.st_mtime_ns))
+        replacement.replace(file)
+        assert implementation.fingerprint(args) != clean_input
+        file.write_bytes(b'abc')
+        (root/'cache/kit-input-sha-v1.cache').write_bytes(b'partial write')
+        assert implementation.fingerprint(args) == clean_input
+        (repo/'untracked.h').write_bytes(b'new')
+        assert implementation.fingerprint(args) != clean_input
+        (repo/'untracked.h').unlink()
+        assert implementation.fingerprint(args) == clean_input
         (repo/'author.cpp').write_text('other')
         assert implementation.fingerprint(args)!=clean_input
         donor = root/'accepted.exe'
