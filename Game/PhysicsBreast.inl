@@ -1,5 +1,6 @@
 // Same PhysX foundation/CUDA context as debris, separate per-actor GPU scene.
 // Included inside namespace PhysicsFx after the shared runtime helpers.
+static constexpr float breastRestingDrop=.041f;
 class BreastPhysics final : public owned::gltf::SecondaryPhysics {
     std::shared_ptr<Runtime> sdk;
     Owned<PxScene> scene;
@@ -10,10 +11,11 @@ class BreastPhysics final : public owned::gltf::SecondaryPhysics {
     bool started = false;
     std::string failure;
     static PxVec3 point(const std::array<float,3>& p) { return {p[0],p[1],p[2]}; }
+    static constexpr float mass=.45f, stiffness=55.f, damping=3.6f, gravity=9.81f;
     void initialize() {
         sdk=runtime();
         PxSceneDesc desc(sdk->physics->getTolerancesScale());
-        desc.gravity=PxVec3(0); // authored rest shape already includes gravity
+        desc.gravity=PxVec3(0,0,-gravity);
         desc.cpuDispatcher=sdk->dispatcher.get();desc.filterShader=filter;
         desc.cudaContextManager=sdk->cuda.get();desc.broadPhaseType=PxBroadPhaseType::eGPU;
         desc.flags|=PxSceneFlag::eENABLE_GPU_DYNAMICS|PxSceneFlag::eENABLE_PCM;
@@ -35,7 +37,7 @@ class BreastPhysics final : public owned::gltf::SecondaryPhysics {
             bodies[i].reset(sdk->physics->createRigidDynamic(PxTransform(PxIdentity)));
             if(!anchors[i]||!bodies[i])throw std::runtime_error("Breast actor allocation failed");
             anchors[i]->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC,true);
-            bodies[i]->setMass(.35f);bodies[i]->setMassSpaceInertiaTensor(PxVec3(.003f));
+            bodies[i]->setMass(mass);bodies[i]->setMassSpaceInertiaTensor(PxVec3(.003f));
             bodies[i]->setSolverIterationCounts(8,2);
             bodies[i]->setSleepThreshold(0);
             scene->addActor(*anchors[i]);scene->addActor(*bodies[i]);
@@ -44,8 +46,11 @@ class BreastPhysics final : public owned::gltf::SecondaryPhysics {
             if(!joints[i])throw std::runtime_error("Breast spring allocation failed");
             for(auto axis:{PxD6Axis::eX,PxD6Axis::eY,PxD6Axis::eZ})joints[i]->setMotion(axis,PxD6Motion::eLIMITED);
             joints[i]->setDistanceLimit(PxJointLinearLimit(owned::gltf::secondary_limit));
+            // Static support sets the resting silhouette independently of gait compliance.
+            const float supportHeight=mass*gravity/stiffness-breastRestingDrop;
+            joints[i]->setDrivePosition(PxTransform(PxVec3(0,0,supportHeight)));
             for(auto axis:{PxD6Drive::eX,PxD6Drive::eY,PxD6Drive::eZ})
-                joints[i]->setDrive(axis,PxD6JointDrive(160.f,6.f,PX_MAX_F32));
+                joints[i]->setDrive(axis,PxD6JointDrive(stiffness,damping,PX_MAX_F32));
         }
         if(sdk->errors.count)throw std::runtime_error(sdk->errors.Message());
     }
@@ -66,10 +71,12 @@ public:
             if(!started||reset||elapsed<0||elapsed>.25) {
                 for(unsigned i=0;i<2;++i) {
                     const PxTransform pose(point(targets[i]));
-                    anchors[i]->setGlobalPose(pose);bodies[i]->setGlobalPose(pose);
+                    anchors[i]->setGlobalPose(pose);
+                    bodies[i]->setGlobalPose(PxTransform(pose.p-PxVec3(0,0,breastRestingDrop)));
+                    offsets[i]={0,0,-breastRestingDrop};
                     bodies[i]->setLinearVelocity(PxVec3(0));bodies[i]->setAngularVelocity(PxVec3(0));
                 }
-                started=true;last=clock;previous=targets;accumulated=0;offsets={};return offsets;
+                started=true;last=clock;previous=targets;accumulated=0;return offsets;
             }
             if(elapsed==0)return offsets; // pause, shadow pass, attachment query
             constexpr double step=1./120.;
@@ -152,7 +159,11 @@ public:
             reset|=distance>.25f;
         }
         if(!reset && clock==latest.clock)return visible;
-        if(reset){++latest.epoch;published={};initialized=false;}
+        if(reset){
+            ++latest.epoch;
+            for(auto& side:published)side={0,0,-breastRestingDrop};
+            initialized=false;
+        }
         latest.clock=clock;latest.targets=targets;submitted=pending=true;
         visible=published;visibleReady=initialized;
         wake.notify_one();

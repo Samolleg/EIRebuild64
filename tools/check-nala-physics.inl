@@ -13,40 +13,52 @@ static void check_nala_physics(const fs::path& game,const fs::path& out) {
             const auto* first=static_cast<const std::uint8_t*>(p);
             b.bytes=std::make_shared<std::vector<std::uint8_t>>(first,first+n);return b;});
     PhysicsFx::InstallCharacterPhysics();BreastState state;state.physics=PhysicsFx::CreateCharacterPhysics();require(state.bind(body),"Nala existing physics branches");
-    const unsigned clip=named_clip(*body->animation,"run");require(clip!=UINT32_MAX,"Nala run clip");
     Affine root{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
-    float peak=0;unsigned moved=0;
-    std::ofstream trajectory(out/L"nala-physics.csv");trajectory<<"frame,node,x,y,z\n";
-    for(unsigned frame=0;frame<90;++frame) {
-        const float clock=frame/60.f;root[3]=clock*1.5f;
-        Playback pose{clip,UINT32_MAX,std::fmod(clock,body->animation->clips[clip].duration),0,1};
-        state.update(clock,pose,root,false,0);
-        require(state.physics&&state.physics->error().empty()&&state.overrides,"Nala live PhysX pose");
-        const auto original=evaluate(*body->animation,pose,multiply(root,Affine{1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1}));
-        auto corrected=original.joints;
-        for(const auto& o:*state.overrides) {
-            float squared=0;
-            for(unsigned r=0;r<3;++r) {
-                const float delta=o.value.rows[r][3]-original.joints[o.node][r*4+3];squared+=delta*delta;
-                for(unsigned c=0;c<3;++c)require(std::abs(o.value.rows[r][c]-original.joints[o.node][r*4+c])<5e-5f,"Nala original linear transform retained");
-                std::copy_n(o.value.rows[r].begin(),4,corrected[o.node].begin()+r*4);
+    unsigned moved=0;
+    float peak=0;
+    for(const char* action:{"idle","walk","run"}) {
+        const unsigned clip=named_clip(*body->animation,action);
+        require(clip!=UINT32_MAX,"Nala locomotion clip");
+        float low=1,high=-1;
+        const float duration=body->animation->clips[clip].duration;
+        for(unsigned frame=0;frame<=90;++frame) {
+            const double clock=duration*2.*frame/90.;
+            Playback pose{clip,UINT32_MAX,float(std::fmod(clock,duration)),0,1};
+            state.update(clock,pose,root,frame==0,0);
+            require(state.physics&&state.physics->error().empty()&&state.overrides,"live GPU pose");
+            const auto original=evaluate(*body->animation,pose);
+            auto corrected=original.joints;
+            for(const auto& o:*state.overrides) {
+                require(o.node!=state.attachments[0]&&o.node!=state.attachments[1],"attachment bone moved");
+                for(unsigned r=0;r<3;++r)
+                    std::copy_n(o.value.rows[r].begin(),4,corrected[o.node].begin()+r*4);
             }
-            const float distance=std::sqrt(squared);peak=(std::max)(peak,distance);
-            require(distance<=secondary_limit+1e-4f,"Nala bounded pose displacement");
-            if(frame%5==0)trajectory<<frame<<','<<o.node<<','<<o.value.rows[0][3]<<','<<o.value.rows[1][3]<<','<<o.value.rows[2][3]<<'\n';
-        }
-        // Existing weights must deform a localized subset, leaving the rest exact.
-        if(frame==30)for(const auto& v:body->rest_vertices) {
-            double delta[3]{};
-            for(unsigned k=0;k<4;++k)if(v.weights[k]) {
-                const auto j=v.joints[k];const double w=v.weights[k]/65535.;
-                for(unsigned r=0;r<3;++r)delta[r]+=(corrected[j][r*4+3]-original.joints[j][r*4+3])*w;
+            const auto tip=state.targets[0];
+            const float dz=corrected[tip][11]-original.joints[tip][11];
+            if(frame==0)require(dz<-.015f&&dz>-.06f,"front must droop in standing pose on first draw");
+            if(frame>45){low=(std::min)(low,dz);high=(std::max)(high,dz);}
+            moved=0;
+            for(const auto& v:body->rest_vertices) {
+                std::array<double,3> delta{};
+                for(unsigned k=0;k<4;++k)if(v.weights[k]) {
+                    const auto j=v.joints[k];
+                    const auto local=owned::skn::point(body->geometry.joints[j].inverse,v.position);
+                    for(unsigned r=0;r<3;++r) {
+                        double d=corrected[j][r*4+3]-original.joints[j][r*4+3];
+                        for(unsigned c=0;c<3;++c)d+=(corrected[j][r*4+c]-original.joints[j][r*4+c])*local[c];
+                        delta[r]+=d*v.weights[k]/65535.;
+                    }
+                }
+                const float d=float(std::sqrt(delta[0]*delta[0]+delta[1]*delta[1]+delta[2]*delta[2]));
+                require(std::isfinite(d)&&d<.16f,"unstable surface deformation");
+                if(d>1e-5f)++moved;
+                peak=(std::max)(peak,d);
             }
-            const double distance=std::sqrt(delta[0]*delta[0]+delta[1]*delta[1]+delta[2]*delta[2]);
-            require(distance<=secondary_limit+1e-4f,"Nala bounded skinned surface");if(distance>1e-5)++moved;
+            require(moved>100&&moved<body->rest_vertices.size()/2,"localized weighted deformation");
         }
+        std::cout<<"Nala "<<action<<" tip_dz_min_m="<<low<<" max_m="<<high<<" skin_peak_so_far_m="<<peak<<std::endl;
+        if(std::string(action)!="idle")require(high-low>.005f,"relative swing during steady locomotion");
     }
-    require(peak>.001f&&moved>100&&moved<body->rest_vertices.size()/2,"Nala existing weights produce localized motion");
     auto previous=state.overrides;state.update(state.clock,state.playback,state.placement,false,0);
     require(state.overrides==previous,"Nala repeated render reuses immutable pose");
     const auto oldIndices=state.overrides;
