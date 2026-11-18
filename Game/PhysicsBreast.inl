@@ -10,10 +10,12 @@ class BreastPhysics final : public owned::gltf::SecondaryPhysics {
     bool started = false;
     std::string failure;
     static PxVec3 point(const std::array<float,3>& p) { return {p[0],p[1],p[2]}; }
+    static constexpr float mass=.45f, stiffness=105.f, damping=4.6f, gravity=9.81f;
+    static constexpr float restingDrop=mass*gravity/stiffness;
     void initialize() {
         sdk=runtime();
         PxSceneDesc desc(sdk->physics->getTolerancesScale());
-        desc.gravity=PxVec3(0); // authored rest shape already includes gravity
+        desc.gravity=PxVec3(0,0,-gravity);
         desc.cpuDispatcher=sdk->dispatcher.get();desc.filterShader=filter;
         desc.cudaContextManager=sdk->cuda.get();desc.broadPhaseType=PxBroadPhaseType::eGPU;
         desc.flags|=PxSceneFlag::eENABLE_GPU_DYNAMICS|PxSceneFlag::eENABLE_PCM;
@@ -35,7 +37,7 @@ class BreastPhysics final : public owned::gltf::SecondaryPhysics {
             bodies[i].reset(sdk->physics->createRigidDynamic(PxTransform(PxIdentity)));
             if(!anchors[i]||!bodies[i])throw std::runtime_error("Breast actor allocation failed");
             anchors[i]->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC,true);
-            bodies[i]->setMass(.35f);bodies[i]->setMassSpaceInertiaTensor(PxVec3(.003f));
+            bodies[i]->setMass(mass);bodies[i]->setMassSpaceInertiaTensor(PxVec3(.003f));
             bodies[i]->setSolverIterationCounts(8,2);
             bodies[i]->setSleepThreshold(0);
             scene->addActor(*anchors[i]);scene->addActor(*bodies[i]);
@@ -45,7 +47,7 @@ class BreastPhysics final : public owned::gltf::SecondaryPhysics {
             for(auto axis:{PxD6Axis::eX,PxD6Axis::eY,PxD6Axis::eZ})joints[i]->setMotion(axis,PxD6Motion::eLIMITED);
             joints[i]->setDistanceLimit(PxJointLinearLimit(owned::gltf::secondary_limit));
             for(auto axis:{PxD6Drive::eX,PxD6Drive::eY,PxD6Drive::eZ})
-                joints[i]->setDrive(axis,PxD6JointDrive(160.f,6.f,PX_MAX_F32));
+                joints[i]->setDrive(axis,PxD6JointDrive(stiffness,damping,PX_MAX_F32));
         }
         if(sdk->errors.count)throw std::runtime_error(sdk->errors.Message());
     }
@@ -66,10 +68,12 @@ public:
             if(!started||reset||elapsed<0||elapsed>.25) {
                 for(unsigned i=0;i<2;++i) {
                     const PxTransform pose(point(targets[i]));
-                    anchors[i]->setGlobalPose(pose);bodies[i]->setGlobalPose(pose);
+                    anchors[i]->setGlobalPose(pose);
+                    bodies[i]->setGlobalPose(PxTransform(pose.p-PxVec3(0,0,restingDrop)));
+                    offsets[i]={0,0,-restingDrop};
                     bodies[i]->setLinearVelocity(PxVec3(0));bodies[i]->setAngularVelocity(PxVec3(0));
                 }
-                started=true;last=clock;previous=targets;accumulated=0;offsets={};return offsets;
+                started=true;last=clock;previous=targets;accumulated=0;return offsets;
             }
             if(elapsed==0)return offsets; // pause, shadow pass, attachment query
             constexpr double step=1./120.;
