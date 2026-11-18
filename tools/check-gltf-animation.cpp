@@ -28,6 +28,10 @@ struct PoseGpu {
 struct NodeGpu {Float4 rotation,translation,rows[3];unsigned first,second,count;float fraction;unsigned generation[2];};
 static_assert(sizeof(PoseGpu)==140&&sizeof(NodeGpu)==104);
 static std::vector<NodeGpu> gpu12(const Animation& a,const Playback& playback){
+#ifdef EI_TEST_NO_SHADER_COMPILE
+    (void)a;(void)playback;
+    throw std::runtime_error("GPU test disabled: shader compilation is prohibited");
+#else
     auto packed=pack(a,"test12");const unsigned base=2,total=base+packed->nodes+packed->morphs;
     // Library precedes two independent headers. Exercise uint32-relative
     // addressing across the wrap boundary without changing the shader ABI.
@@ -77,8 +81,13 @@ static std::vector<NodeGpu> gpu12(const Animation& a,const Playback& playback){
     const auto waited=WaitForSingleObject(event,60000);CloseHandle(event);check(waited==WAIT_OBJECT_0,"D3D12 readback timeout");hr(device->GetDeviceRemovedReason());
     void* mapped=nullptr;hr(read->Map(0,nullptr,&mapped));auto* first=static_cast<const NodeGpu*>(mapped)+base;
     std::vector<NodeGpu> result(first,first+total-base);D3D12_RANGE empty{0,0};read->Unmap(0,&empty);return result;
+#endif
 }
 static std::vector<NodeGpu> gpu(const Animation& a,const Playback& playback){
+#ifdef EI_TEST_NO_SHADER_COMPILE
+    (void)a;(void)playback;
+    throw std::runtime_error("GPU test disabled: shader compilation is prohibited");
+#else
     auto packed=pack(a,"test");const unsigned base=2,total=base+packed->nodes+packed->morphs;
     const unsigned skeleton=unsigned((packed->bytes.size()+15)&~std::size_t(15));
     std::vector<unsigned char> bytes(skeleton+64);
@@ -156,6 +165,7 @@ static std::vector<NodeGpu> gpu(const Animation& a,const Playback& playback){
         for(unsigned r=0;r<3;++r)for(unsigned c=0;c<3;++c)check(std::isfinite(skin.rows[r][c]),"nonfinite skinned basis");
     }
     return values;
+#endif
 }
 int wmain(int argc,wchar_t** argv)try{
     {

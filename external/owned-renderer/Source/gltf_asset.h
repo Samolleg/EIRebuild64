@@ -89,6 +89,9 @@ struct EquipmentAsset {
     bool weapon=false, arrow=false;
     std::vector<unsigned> body_nodes;
     std::map<unsigned,std::shared_ptr<const skn::Dds>> base_color_overrides;
+    std::map<unsigned,std::shared_ptr<const skn::Dds>> metallic_roughness_overrides;
+    // Shared by the same GLB material and ORM resource, including across actors.
+    std::map<unsigned,std::shared_ptr<const std::uint8_t>> material_identities;
 };
 struct EquipmentSelection { std::vector<EquipmentAsset> items; float radius=0; };
 std::vector<EquipmentAsset> select_equipment(const std::vector<VisualEquipmentItem>& equipment, const std::string& body_resource);
@@ -97,6 +100,7 @@ using PublishPixels = std::function<ResourceBlob(const std::string &, const void
 // Decode one selected external PNG using the same color/mipmap path as GLB images.
 skn::Dds decode_base_color(const ResourceBlob &blob, const PublishPixels &publish,
                            const std::array<float,4>& factor);
+skn::Dds decode_metallic_roughness(const ResourceBlob &blob, const PublishPixels &publish);
 std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &profile,
                               const PublishPixels &publish);
 // Absence permits the established resource lookup. A selected invalid entry throws.

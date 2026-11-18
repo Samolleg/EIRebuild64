@@ -17,7 +17,8 @@ For a common model with different base-color textures, add `defaults` for the sl
       "materials": {
         "wolf hide": {
           "armor_0": {"textures": [
-            {"binding":0, "material":0, "baseColor":"models/items/textures/hood-wolf.png"}
+            {"binding":0, "material":0, "baseColor":"models/items/textures/hood-wolf.png",
+             "metallicRoughness":"models/items/textures/hood-wolf-orm.png"}
           ]}
         },
         "special hide": {
@@ -32,8 +33,8 @@ For a common model with different base-color textures, add `defaults` for the sl
 }
 ```
 
-`binding` indexes the original default slot's attachment array, before any outfit conditions filter it; `material` is the glTF material index in that GLB. `baseColor` names a PNG below `models/items/textures/`; it replaces only that material's base-color map. Other PBR maps, alpha mode, cutoff, culling and factors come from the selected GLB. The original linear base-color factor is applied to the replacement during decoding, matching embedded glTF images. Texture overrides require a material already used by a submesh with a base-color texture and UVs. Duplicate targets, unknown fields, missing variants, invalid paths, unsupported formats and out-of-range indices are errors; they do not select a different material silently.
+`binding` indexes the original default slot's attachment array, before any outfit conditions filter it; `material` is the glTF material index in that GLB. `baseColor` names a PNG below `models/items/textures/`; optional `metallicRoughness` names another PNG under the same directory and replaces the material's existing combined map. Its red, green and blue channels are linear occlusion, roughness and metalness. Material factors still come from the GLB. Other PBR maps, alpha mode, cutoff and culling also come from the GLB. The original linear base-color factor is applied to the replacement during decoding, matching embedded glTF images. Overrides require a material already used by a submesh with the corresponding base-color or metallic/roughness map and UVs. Duplicate targets, unknown fields, missing variants, invalid paths, unsupported formats and out-of-range indices are errors; they do not select a different material silently.
 
-The common GLB is decoded and cached by resource identity, independently of the selected texture. Selected PNGs are decoded on appearance changes and weak-cached by source identity and color factor; retained draw groups hold their pixel data while needed. Thus material changes do not create another CPU/GPU geometry identity, and actors using the same material share the selected texture. The same prepared groups feed world and character preview. This mechanism adds no per-frame mesh deformation and changes no shader ABI.
+The common GLB is decoded and cached by resource identity, independently of the selected textures. Selected PNGs are decoded on appearance changes and weak-cached by source identity and color factor; retained draw groups hold their pixel data while needed. A shared material identity distinguishes different metallic/roughness maps for D3D11 batching. Thus material changes do not create another CPU/GPU geometry identity, and actors using the same material share the selected texture. The same prepared groups feed world and character preview. This mechanism adds no per-frame mesh deformation and changes no shader ABI.
 
-The format changes the color texture only; it does not supply separate normal, metallic/roughness or emissive maps. These and renderer-specific effects require separate work if a particular item needs them. A rigid item follows its named socket and has no runtime FIG8 shape interpolation. Authoring sources and their shapes should be kept separately.
+The format does not supply separate normal or emissive overrides. These and renderer-specific effects require separate work if a particular item needs them. A rigid item follows its named socket and has no runtime FIG8 shape interpolation. Authoring sources and their shapes should be kept separately.
