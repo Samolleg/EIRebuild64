@@ -48,7 +48,7 @@ struct PhysiqueTree {
     std::vector<GarmentAnchor> map(const std::vector<skn::Vertex>& body,const std::vector<skn::Vertex>& item) const {
         std::vector<GarmentAnchor> result(item.size());
         for(size_t i=0;i<item.size();++i){
-            std::array<float,4> ds;ds.fill(std::numeric_limits<float>::max());
+            std::array<float,4> ds;ds.fill((std::numeric_limits<float>::max)());
             auto& a=result[i];nearest(body,item[i].position,0,order.size(),0,ds,a.vertex);
             float sum=0;for(unsigned j=0;j<4;++j){a.weights[j]=1.f/(ds[j]+1e-8f);sum+=a.weights[j];}
             for(float& w:a.weights)w/=sum;
