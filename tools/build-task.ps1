@@ -44,6 +44,15 @@ if (!$sdkversion) { throw 'Windows SDK not found.' }
 $dumpbin = Join-Path $vc 'bin/Hostx64/x64/dumpbin.exe'
 . (Join-Path $PSScriptRoot 'build-io.ps1')
 Assert-BuildCacheRoot $CacheRoot (Join-Path $project 'builds/rebuild64/cache')
+function Assert-ShaderProjectReuse([string]$Before,[string]$After) {
+    [xml]$left=$Before;[xml]$right=$After
+    foreach($document in @($left,$right)){
+        foreach($node in @($document.SelectNodes('//*[local-name()="Target"]|//comment()'))){
+            $null=$node.ParentNode.RemoveChild($node)
+        }
+    }
+    if($left.OuterXml -cne $right.OuterXml){throw 'Shader compiler project inputs/properties changed; accepted resources cannot be reused.'}
+}
 function Manifest([string]$directory) {
     @(Get-ChildItem -LiteralPath $directory -File -Recurse | Where-Object { $_.Name -ne 'SHA256SUMS' } | Sort-Object FullName | ForEach-Object {
         (Hash-File $_.FullName) + '  ' + $_.FullName.Substring($directory.Length+1).Replace('\','/')
@@ -159,8 +168,14 @@ try {
         if ($LASTEXITCODE -ne 0) { throw 'Cannot verify deleted shader-reuse inputs.' }
         foreach ($change in $shaderReuse.changes) {
             $relative = [string]$change.path
-            if ($relative -match '(?i)(^|/)(shader[^/]*|[^/]*\.(hlsl|fx|fxh|dxil|dxbc))$' -or
-                $relative -match '(?i)^OwnedRenderer/RendererShaders\.vcxproj$') { throw "Shader input changed: $relative" }
+            # Packaging orchestration is not a shader producer. For its project,
+            # require every compile/link input and property to match the accepted base.
+            if ($relative -ceq 'OwnedRenderer/RendererShaders.vcxproj') {
+                $oldProject=(& git -C $sourceRepo show "${base}:$relative") -join "`n"
+                if($LASTEXITCODE -ne 0){throw 'Accepted shader project is unavailable.'}
+                Assert-ShaderProjectReuse $oldProject ([IO.File]::ReadAllText((Join-Path $sourceRepo $relative)))
+            } elseif ($relative -cnotin @('tools/shader-build.ps1','tools/test-shader-build.ps1') -and
+                $relative -match '(?i)(^|/)(shader[^/]*|[^/]*\.(hlsl|fx|fxh|dxil|dxbc))$') { throw "Shader input changed: $relative" }
             $removed = $change.PSObject.Properties.Name -contains 'deleted' -and [bool]$change.deleted
             if ($removed) {
                 if ($relative -cnotin $deleted -or (Test-Path -LiteralPath (Join-Path $sourceRepo $relative))) {

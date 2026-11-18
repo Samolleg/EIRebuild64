@@ -59,3 +59,8 @@ the exact EXE hash and acceptance receipt. The build HEAD must include current
 main, and the manifest covers the complete diff from the accepted source commit,
 including explicit deleted non-shader files verified against Git. This permits
 CPU-only intervening acceptances without silently recompiling shaders.
+
+Accepted resource reuse permits packaging-only RendererShaders project changes only
+when all XML outside Target nodes/comments still matches the accepted commit.
+The two shader-build helper/test scripts do not compile into shader producers.
+HLSL/FX/DXIL/DXBC source changes remain rejected; final EXE resources are verified.
