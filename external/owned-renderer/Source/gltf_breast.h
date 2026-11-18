@@ -47,7 +47,7 @@ struct BreastState {
     bool frozen=false;
     unsigned node_base=UINT32_MAX;
     Playback playback;
-    Affine placement{};
+    Affine placement{}, display_mapping{};
     bool initialized=false, reported=false;
     double motion_window=-1;
     unsigned motion_clip=UINT32_MAX, motion_samples=0;
@@ -111,8 +111,9 @@ struct BreastState {
         matrices.resize(joints.size());
         return true;
     }
-    void update(double now,const Playback& pose,const Affine& root,bool reset,unsigned base,bool paused=false) {
-        if(initialized&&!reset&&base==node_base&&now==clock&&paused==frozen&&root==placement&&pose.clip==playback.clip&&
+    void update(double now,const Playback& pose,const Affine& root,bool reset,unsigned base,bool paused=false,
+                const RetainedVisualSample::PreviewPhysicsSpace* ui=nullptr) {
+        if(initialized&&!reset&&(!ui||display_mapping==ui->to_display)&&base==node_base&&now==clock&&paused==frozen&&root==placement&&pose.clip==playback.clip&&
            pose.previous==playback.previous&&pose.time==playback.time&&
            pose.previous_time==playback.previous_time&&pose.blend==playback.blend)return;
         if(!initialized)physics_clock=now;
@@ -120,6 +121,7 @@ struct BreastState {
             reset|=now<clock;
             if(!paused&&!frozen)physics_clock+=(std::max)(0.,now-clock);
         }
+        if(ui)display_mapping=ui->to_display;
         clock=now;frozen=paused;node_base=base;placement=root;playback=pose;initialized=true;
         if(!physics&&secondary_factory)physics=secondary_factory();
         if(!physics)return;
@@ -158,8 +160,8 @@ struct BreastState {
             ++motion_samples;
             if(physics_clock-motion_window>=1.) {
                 char detail[200]{};
-                std::snprintf(detail,sizeof(detail),"clip=%s samples=%u left_tip_dz_min_m=%.5f left_tip_dz_max_m=%.5f",
-                    asset->animation->clips.at(pose.clip).name.c_str(),motion_samples,min_tip_z,max_tip_z);
+                std::snprintf(detail,sizeof(detail),"view=%s clip=%s samples=%u left_tip_dz_min_m=%.5f left_tip_dz_max_m=%.5f",
+                    ui?ui->view:"world",asset->animation->clips.at(pose.clip).name.c_str(),motion_samples,min_tip_z,max_tip_z);
                 bridge_append_probe_event("nala_physx_motion",detail);
                 motion_samples=0;
             }
@@ -167,7 +169,8 @@ struct BreastState {
         auto result=std::make_shared<std::vector<NativeWorldGeometry::Pose::Override>>();
         result->reserve(affected.size());
         for(const auto entry:affected) {
-            const auto matrix=multiply(bend[entry.side],jointMatrix(entry.node));
+            auto matrix=multiply(bend[entry.side],jointMatrix(entry.node));
+            if(ui)matrix=multiply(ui->to_display,matrix);
             NativeWorldGeometry::Pose::Override out{};out.node=base+entry.node;
             for(unsigned r=0;r<3;++r) {
                 std::copy_n(matrix.data()+r*4,4,out.value.rows[r].begin());

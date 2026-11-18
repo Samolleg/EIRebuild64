@@ -3,7 +3,7 @@
 The world adapter enables presentation-only PhysX 5.13.0 GPU motion for the main
 hero when the selected GLB contains the existing `PHYSICS_Pecho.L/R` branches
 (including `.001` and `.002`). No model, weights, animation clips, save format or
-combat state are changed. Private model previews retain the authored animation.
+combat state are changed. The info panel and inventory/camp each own a separate simulation on their animation clock. Their final joint matrices use the same UI placement as the body. Inventory yaw, and actor movement in the info panel, drive inertia in metre units.
 
 Two 0.45 kg dynamic bodies track the animated outer breast points in world
 space under gravity (9.81 m/s²). The 55 N/m springs and 3.6 Ns/m damping

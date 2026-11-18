@@ -68,6 +68,24 @@ static void check_nala_physics(const fs::path& game,const fs::path& out) {
         require((*state.overrides)[i].node==(*oldIndices)[i].node+17,"Nala equipment remaps sparse node index");
         for(unsigned r=0;r<3;++r)require((*state.overrides)[i].value.rows[r]==(*oldIndices)[i].value.rows[r],"Nala equipment preserves physical pose");
     }
+    // Identical sampled pose, two UI arrangements. Late changes to scale,
+    // rotation or centring must re-place every override even on the same tick.
+    const auto metric=state.overrides;
+    for(const auto& view:std::array<owned::RetainedVisualSample::PreviewPhysicsSpace,2>{{
+        {root,{.25f,0,0,1,0,0,-.25f,2,0,.25f,0,6,0,0,0,1},"info"},
+        {root,{0,-1.2f,0,-2,0,0,-1.2f,1,1.2f,0,0,6,0,0,0,1},"inventory"}}}) {
+        state.update(state.clock,state.playback,root,false,17,false,&view);
+        require(state.overrides!=metric,"UI placement cache must include this view");
+        for(unsigned i=0;i<metric->size();++i) {
+            Affine original{0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
+            for(unsigned row=0;row<3;++row)
+                std::copy_n((*metric)[i].value.rows[row].begin(),4,original.begin()+4*row);
+            const auto expected=multiply(view.to_display,original);
+            for(unsigned row=0;row<3;++row)for(unsigned col=0;col<4;++col)
+                require(std::abs((*state.overrides)[i].value.rows[row][col]-expected[row*4+col])<1e-5f,
+                    "info/inventory corrected joints must follow their model placement");
+        }
+    }
     const auto before=state.physics_clock;
     state.update(state.clock+1,state.playback,state.placement,false,0,true);
     require(state.physics_clock==before,"Nala host combat pause freezes physics time");

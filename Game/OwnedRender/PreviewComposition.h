@@ -18,6 +18,7 @@ inline ObjectPreviewComposition inventory_model_preview(std::int32_t id,float x,
     ObjectPreviewComposition c;
     auto& p=c.presentation;p.id=id;
     p.placed=p.default_fog=true;
+    p.physics_yaw=-angle; // the following +90 degree X rotation maps model Z to display -Y
     p.placement.position={(x/400.f-1.f)*viewing_tangent*6.f,
         (440/400.f-.75f)*viewing_tangent*6.f,6.f};
     p.placement.scale={1.2f,1.2f,1.2f};

@@ -85,7 +85,9 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
             if(!secondary->bind(asset->gltf_asset))secondary.reset();
         }
         if(secondary) {
-            secondary->update(sample.secondary_clock,playback,current.root_to_world,seek,unsigned(base),sample.secondary_frozen);
+            const auto* ui=sample.preview_physics;
+            secondary->update(sample.secondary_clock,playback,ui?ui->simulation:current.root_to_world,
+                seek,unsigned(base),sample.secondary_frozen,ui);
             current.overrides=secondary->overrides;
         }
     }
