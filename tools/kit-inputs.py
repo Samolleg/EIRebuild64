@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -21,10 +22,8 @@ def git(repo, *args):
 
 def fingerprint(args):
     repo, project = args.repo, args.project
-    if git(repo, 'status', '--porcelain', '--untracked-files=all'):
-        raise ValueError('working tree contains local changes')
-    names = git(repo, '-c', 'core.quotepath=false', 'ls-files', '-z').decode().split('\0')
-    tree = git(repo, 'rev-parse', 'HEAD^{tree}').decode().strip()
+    names = git(repo, '-c', 'core.quotepath=false', 'ls-files', '--cached', '--others',
+                '--exclude-standard', '-z').decode().split('\0')
     digest = hashlib.sha256()
 
     def field(*values):
@@ -39,10 +38,17 @@ def fingerprint(args):
         else:
             field(label, sha(path))
 
-    field('schema', 1, tree, 'Release', 'x64', str(args.vc), str(args.sdk), args.sdk_version)
-    for name in names:
+    # The producer builds these exact files even if the author commits them
+    # afterwards. Accept independently requires clean HEAD and identical trees.
+    field('schema', 2, 'Release', 'x64', str(args.vc), str(args.sdk), args.sdk_version)
+    properties = set()
+    for name in sorted(set(names)):
         if name:
             record('source/' + name, repo / name)
+            if name.endswith(('.vcxproj', '.props', '.targets', '.ps1', '.mak', '.cmd', '.bat')):
+                text = (repo / name).read_bytes()
+                for prop in re.findall(rb'\$\(([A-Za-z_][A-Za-z0-9_]*)\)|\$env:([A-Za-z_][A-Za-z0-9_]*)|%([A-Za-z_][A-Za-z0-9_]*)%', text, re.I):
+                    properties.add(next(p for p in prop if p).decode().upper())
     # Include the actual materialized bytes (including LFS), not just Git IDs.
     deps = project / 'deps'
     roots = {
@@ -67,13 +73,52 @@ def fingerprint(args):
     for pkg in ET.parse(repo / 'packages.config').getroot():
         key = pkg.attrib['id'].lower() + '/' + pkg.attrib['version'].lower()
         roots['nuget/' + key] = deps / 'nuget' / key
+    for variable in ('INCLUDE', 'LIB', 'LIBPATH', 'VCTargetsPath', 'DirectoryBuildPropsPath',
+                     'DirectoryBuildTargetsPath', 'ForceImportBeforeCppTargets', 'ForceImportAfterCppTargets'):
+        for i, value in enumerate(filter(None, os.environ.get(variable, '').split(';'))):
+            path = Path(value)
+            if not path.is_absolute():
+                raise ValueError(f'cannot certify relative {variable}')
+            if path.exists():
+                roots[f'override/{variable}/{i}'] = path
+    # MSBuild also discovers directory-wide imports up the persistent build tree.
+    for directory in (args.cache / 'work', *(args.cache / 'work').parents):
+        for name in ('Directory.Build.props', 'Directory.Build.targets', 'Directory.Build.rsp', 'MSBuild.rsp'):
+            path = directory / name
+            if path.is_file() and not (directory == args.cache / 'work' and name in names):
+                roots['ancestor/' + str(path)] = path
     for label, path in sorted(roots.items()):
         record(label, path)
+    # Track reads outside the recipe (e.g. an additional imported SDK or a
+    # system resource used by the linker). Keep the successful build's list:
+    # a later task is allowed to replace the shared work tree and its tlogs.
+    if args.check_external:
+        external = json.loads(args.check_external.read_text('utf8'))
+    else:
+        work = args.cache / 'work'
+        known = {os.path.normcase(str(path)) for path in [work, *roots.values()]}
+        prefixes = tuple(path.rstrip('\\') + '\\' for path in known)
+        seen = set()
+        for log in (work / 'out').rglob('*.read.*.tlog'):
+            lines = log.read_text('utf-16').splitlines()
+            for line in set(lines):
+                if line.startswith('^'):
+                    continue
+                name = os.path.normcase(line.removeprefix('\\\\?\\'))
+                if os.path.isabs(name) and name not in known and not name.startswith(prefixes):
+                    seen.add(name)
+        external = sorted(seen)
+        args.save_external.write_text(json.dumps(external), encoding='utf8')
+    for path in external:
+        record('tracked/' + path, Path(path))
     # MSBuild imports environment properties; store only the resulting digest.
     overwritten = {'TMP', 'TEMP', 'CL', '_CL_', 'LINK', '_LINK_', '_MSPDBSRV_ENDPOINT_',
                    'MSBUILDDISABLENODEREUSE', 'EID3D11_SHADER_STORE', 'EIREBUILD64_SHADER_RESOURCE_MANIFEST'}
+    properties.update(('PATH','PATHEXT','INCLUDE','LIB','LIBPATH','COMSPEC','SYSTEMROOT',
+                       'PLATFORM','CONFIGURATION','PROCESSOR_ARCHITECTURE','EI_PYTHON'))
     for key, value in sorted(os.environ.items()):
-        if key not in overwritten and not key.startswith(('CODEX_', 'OTEL_')):
+        if key not in overwritten and (key in properties or key.startswith(
+                ('MSBUILD','VCTOOLS','WINDOWSSDK','EIREBUILD64_', 'EICACHE', 'EID3D', 'VSCMD_', 'UCRT'))):
             field('env', key, value)
     if args.manifest:
         manifest = json.loads(args.manifest.read_text('utf-8-sig'))
@@ -99,6 +144,9 @@ if __name__ == '__main__':
         parser.add_argument('--' + arg, type=Path, required=True)
     parser.add_argument('--sdk-version', required=True)
     parser.add_argument('--manifest', type=Path)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument('--save-external', type=Path)
+    mode.add_argument('--check-external', type=Path)
     try:
         print(fingerprint(parser.parse_args()))
     except (ValueError, OSError, subprocess.CalledProcessError) as error:

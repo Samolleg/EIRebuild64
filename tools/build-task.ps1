@@ -55,7 +55,8 @@ function Get-KitInputIdentity {
         '--sdk',$sdk,'--sdk-version',$sdkversion,'--assets',$RendererAssetsSource,
         '--materials',$RendererMaterialsSource,'--pwsh',(Join-Path $PSHOME 'pwsh.exe'),'--cache',$CacheRoot)
     if ($ShaderResourceManifest) { $options += '--manifest',$ShaderResourceManifest }
-    $identity = & $python -B (Join-Path $PSScriptRoot 'kit-inputs.py') @options
+    $mode = if ($CheckKitReuse) { '--check-external' } else { '--save-external' }
+    $identity = & $python -B (Join-Path $PSScriptRoot 'kit-inputs.py') @options $mode (Join-Path $task 'build-kit-external.json')
     if ($LASTEXITCODE -eq 0 -and $identity -cmatch '^[a-f0-9]{64}$') { return $identity }
 }
 $sourceRepo = $repo
