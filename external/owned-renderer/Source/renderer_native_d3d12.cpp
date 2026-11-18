@@ -3319,6 +3319,19 @@ HRESULT Renderer::prepare_native_poses_d3d12(){
   hr=d3d12_->dispatch(*pose_cs,width,height,1);
   if(FAILED(hr))return hr;
   if(d3d12_not_done(hr)){if(hr==S_FALSE)d3d12_->omit("poses (pipeline not ready)",false);return S_OK;}
+  for(const auto& job:native_pose_work_) {
+   if(!job.overrides || job.allocation>=native_pose_ranges_.size() ||
+      !native_pose_ranges_[job.allocation].references ||
+      native_pose_ranges_[job.allocation].generation!=job.allocation_generation)continue;
+   for(const auto& entry:*job.overrides) {
+    if(entry.node>=job.count)return E_INVALIDARG;
+    auto value=entry.value;value.generation=job.value.generation;
+    const HRESULT written=d3d12_->write_buffer(*native12_.pose_nodes,
+        UINT64(job.value.output+entry.node)*sizeof(NativePoseNodeGpu),&value,sizeof(value));
+    if(FAILED(written))return written;
+    profiler_.add_upload(sizeof(value));
+   }
+  }
   for(const auto& job:native_pose_work_){auto& slot=native_pose_slots_[job.slot];
    if(job.allocation<native_pose_ranges_.size()&&native_pose_ranges_[job.allocation].references&&
       native_pose_ranges_[job.allocation].generation==job.allocation_generation&&

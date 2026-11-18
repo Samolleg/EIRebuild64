@@ -22,6 +22,7 @@ struct Stats {
 };
 // The same six vertices describe each convex physics shape and render mesh.
 std::array<Vec,6> StoneVertices(unsigned shape,float radius);
+void InstallCharacterPhysics();
 class World {
     struct Impl;
     std::unique_ptr<Impl> impl;
