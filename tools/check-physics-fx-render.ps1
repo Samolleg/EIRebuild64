@@ -29,10 +29,9 @@ try {
         if(!(Test-Path -LiteralPath (Join-Path $bin $name))){Copy-Item -LiteralPath (Join-Path $kit $name) -Destination $bin -Recurse}
     }
     foreach($name in 'nvngx_dlss.dll','nvngx_dlssg.dll','nvngx_dlssd.dll','amd_fidelityfx_loader_dx12.dll','amd_fidelityfx_framegeneration_dx12.dll','amd_fidelityfx_upscaler_dx12.dll') {
-        $source=Get-ChildItem "$built/dependencies" -Filter $name -Recurse -File | Select-Object -First 1
-        if($source){Copy-Item -LiteralPath $source.FullName -Destination $bin -Force}
+        if (!(Test-Path -LiteralPath (Join-Path $kit $name) -PathType Leaf)) { throw "Missing render-check kit DLL: $name" }
     }
-    $agility="$built/dependencies/agility/1.620.2/build/native/bin/x64/D3D12Core.dll"
+    $agility=Join-Path $kit 'D3D12/D3D12Core.dll'
     New-Item -ItemType Directory -Force "$bin/D3D12" | Out-Null
     Copy-Item -LiteralPath $agility -Destination "$bin/D3D12" -Force
     # Test is a renderer harness, never the game executable; no game writes.
