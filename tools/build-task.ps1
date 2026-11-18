@@ -279,7 +279,19 @@ try {
         Copy-Item -LiteralPath (Join-Path $repo "out/x64/Release/$($target[0])/$($target[1]).exe") -Destination $kit
         Copy-Item -LiteralPath (Join-Path $repo "out/x64/Release/$($target[0])/$($target[0]).pdb") -Destination (Join-Path $kit ($target[1] + '.pdb'))
     }
-    foreach ($name in 'avcodec-62.dll','avformat-62.dll','avutil-60.dll','swscale-9.dll','swresample-6.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/ffmpeg/8.1.3/x64/bin/' + $name)) -Destination $kit }
+    $ffmpegSource = Join-Path $kit 'sources/ffmpeg/9.0.2'
+    $null = New-Item -ItemType Directory -Path $ffmpegSource
+    $archive = Join-Path $project 'deps/ffmpeg/9.0.2/downloads/ffmpeg-9.0.2.tar.xz'
+    $sourceLock = Get-Content (Join-Path $repo 'third_party/ffmpeg/source.lock') -Raw | ConvertFrom-StringData
+    if ((Hash-File $archive) -cne $sourceLock.sha256) { throw 'Unexpected FFmpeg source archive.' }
+    Copy-Item -LiteralPath $archive -Destination $ffmpegSource
+    foreach ($directory in 'third_party/ffmpeg','tools/ffmpeg') {
+        $target = Join-Path $ffmpegSource $directory
+        $null = New-Item -ItemType Directory -Path $target -Force
+        Get-ChildItem -LiteralPath (Join-Path $repo $directory) -File |
+            Where-Object Name -ne '.gitattributes' | Copy-Item -Destination $target
+    }
+    foreach ($name in 'avcodec-63.dll','avformat-63.dll','avutil-61.dll','swscale-10.dll','swresample-7.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/ffmpeg/9.0.2/x64/bin/' + $name)) -Destination $kit }
     Copy-Item -LiteralPath (Join-Path $repo 'dependencies/physx/5.6.1/bin/PhysXGpu_64.dll') -Destination $kit
     Copy-Item -LiteralPath (Join-Path $repo 'dependencies/physx/5.6.1/bin/PhysXGpu_64.pdb') -Destination $kit
     foreach ($name in 'nvngx_dlss.dll','nvngx_dlssg.dll','nvngx_dlssd.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/dlss/v310.9.16/lib/Windows_x86_64/rel/' + $name)) -Destination $kit }

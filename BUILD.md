@@ -1,13 +1,13 @@
 # Сборка задания EIRebuild64 (Release x64)
 
-Из `tasks/<ID>/wt` выполните одну команду в Windows PowerShell 5.1:
+Из `tasks/<ID>/wt` выполните одну команду в проектном PowerShell 7.6.10:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tools/build-task.ps1
+& ./tools/build-task.ps1
 ```
 
 Нужны локальные Visual Studio Build Tools 2022 с v143, MFC, Windows SDK,
-`deps/ffmpeg/8.1.3/x64`, `deps/dlss-sdk/v310.9.16`, пакеты `deps/nuget`.
+`deps/ffmpeg/9.0.2/x64`, `deps/dlss-sdk/v310.9.16`, пакеты `deps/nuget`.
 Скрипт находит RULES.md выше рабочей копии. Загрузок и NuGet restore нет.
 Исходники DirectXTex/TK, Recast и LuaJIT уже находятся в репозитории.
 Подробности лицензий — THIRD_PARTY.md, сборки FFmpeg — tools/ffmpeg/README.md.
