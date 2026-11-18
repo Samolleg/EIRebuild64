@@ -12,7 +12,9 @@ $source=Join-Path $sdk 'build-source'
 $build=Join-Path $sdk 'build-v143'
 $install=Join-Path $sdk 'sdk'
 if(!(Test-Path -LiteralPath "$pristine/physx/include/PxPhysicsAPI.h") -or !(Test-Path -LiteralPath "$cuda/bin/nvcc.exe")){throw 'Run tools/physx/fetch-dependencies.ps1 explicitly first; normal build is offline.'}
-$recipe=(Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$recipeInputs=@($PSCommandPath,(Join-Path $PSScriptRoot 'cuda13-host-stubs.inl'),(Join-Path $PSScriptRoot 'PhysX-CHANGES.md'))
+$inputHashes=($recipeInputs | ForEach-Object { (Get-FileHash -LiteralPath $_ -Algorithm SHA256).Hash }) -join ''
+$recipe=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::ASCII.GetBytes($inputHashes))).ToLowerInvariant()
 $manifest=Join-Path $install 'SHA256SUMS'
 if(!$Force -and (Test-Path -LiteralPath "$install/recipe.sha256") -and (Get-Content "$install/recipe.sha256" -Raw).Trim() -eq $recipe -and (Test-Path -LiteralPath $manifest)){
     foreach($line in Get-Content -LiteralPath $manifest){$hash,$relative=$line -split '  ',2;$path=Join-Path $install $relative;if(!(Test-Path -LiteralPath $path) -or (Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant() -ne $hash){throw "PhysX SDK payload changed: $relative"}}
@@ -35,6 +37,17 @@ try {
         $path=Join-Path $source $edit[0];$text=$encoding.GetString([IO.File]::ReadAllBytes($path));
         if($text.Contains($edit[1])){[IO.File]::WriteAllBytes($path,$encoding.GetBytes($text.Replace($edit[1],$edit[2])))}elseif(!$text.Contains($edit[2])){throw "Unexpected PhysX recipe source: $path"}
     }
+    # PhysX owns the fat-binary registry and launches kernels through the driver.
+    # Compile the two additional CUDA 13 host-stub ABI symbols with its registry.
+    $wrangler=Join-Path $source 'physx/source/cudamanager/src/CudaKernelWrangler.cpp'
+    $shim=Join-Path $PSScriptRoot 'cuda13-host-stubs.inl'
+    $wranglerDir=Split-Path $wrangler
+    Copy-Item -LiteralPath $shim -Destination $wranglerDir -Force
+    $wranglerSource=$encoding.GetString([IO.File]::ReadAllBytes($wrangler))
+    $include='#include "cuda13-host-stubs.inl"'
+    if (!$wranglerSource.Contains($include)) {
+        [IO.File]::AppendAllText($wrangler,[Environment]::NewLine+$include+[Environment]::NewLine,$encoding)
+    }
     $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
     $vs=& $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
     $version=(Get-Content "$vs/VC/Auxiliary/Build/Microsoft.VCToolsVersion.default.txt" -Raw).Trim()
@@ -50,7 +63,7 @@ try {
     foreach($name in 'CL','_CL_','LINK','_LINK_'){[Environment]::SetEnvironmentVariable($name,$null,'Process')}
     $px=($source+'/physx').Replace('\','/')
     $cuda=$cuda.Replace('\','/');$sdk=$sdk.Replace('\','/');$install=$install.Replace('\','/');$ninja=$ninja.Replace('\','/')
-    & $cmake -S "$px/compiler/public" -B $build -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninja" -DCMAKE_BUILD_TYPE=release "-DCMAKE_CUDA_COMPILER=$cuda/bin/nvcc.exe" "-DCUDAToolkit_ROOT=$cuda" "-DPHYSX_ROOT_DIR=$px" -DTARGET_BUILD_PLATFORM=windows -DPX_GENERATE_GPU_PROJECTS=ON -DPX_GENERATE_GPU_REDUCED_ARCHITECTURES=ON -DCMAKE_CUDA_ARCHITECTURES=75 -DPX_GENERATE_STATIC_LIBRARIES=ON -DPX_BUILDSNIPPETS=OFF -DPX_BUILDPVDRUNTIME=OFF -DNV_USE_STATIC_WINCRT=ON "-DPX_OUTPUT_LIB_DIR=$sdk/output" "-DPX_OUTPUT_BIN_DIR=$sdk/output" "-DCMAKE_INSTALL_PREFIX=$install" -DPX_CMAKE_SUPPRESS_REGENERATION=ON
+    & $cmake -S "$px/compiler/public" -B $build -G Ninja "-DCMAKE_MAKE_PROGRAM=$ninja" -DCMAKE_BUILD_TYPE=release "-DCMAKE_CUDA_COMPILER=$cuda/bin/nvcc.exe" "-DCUDAToolkit_ROOT=$cuda" "-DPHYSX_ROOT_DIR=$px" -DTARGET_BUILD_PLATFORM=windows -DPX_GENERATE_GPU_PROJECTS=ON -DPX_GENERATE_GPU_REDUCED_ARCHITECTURES=ON -DCMAKE_CUDA_ARCHITECTURES=75 '-DCMAKE_CUDA_FLAGS=' -DPX_GENERATE_STATIC_LIBRARIES=ON -DPX_BUILDSNIPPETS=OFF -DPX_BUILDPVDRUNTIME=OFF -DNV_USE_STATIC_WINCRT=ON "-DPX_OUTPUT_LIB_DIR=$sdk/output" "-DPX_OUTPUT_BIN_DIR=$sdk/output" "-DCMAKE_INSTALL_PREFIX=$install" -DPX_CMAKE_SUPPRESS_REGENERATION=ON
     if($LASTEXITCODE -ne 0){throw 'PhysX CMake configure failed'}
     & (Join-Path $PSScriptRoot '../invoke-build.ps1') $cmake --build $build --config release --target PhysX PhysXCommon PhysXFoundation PhysXExtensions PhysXPvdSDK PhysXGpu --parallel 2
     if($LASTEXITCODE -ne 0){throw 'PhysX source build failed'}
