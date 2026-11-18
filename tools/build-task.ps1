@@ -5,6 +5,7 @@
 param(
     [string]$CacheRoot = $env:EIREBUILD64_BUILD_CACHE,
     [switch]$PhysicsFxCheck,
+    [switch]$CheckKitReuse,
     [string]$ShaderResourceManifest = $env:EIREBUILD64_SHADER_RESOURCE_MANIFEST,
     [string]$RendererAssetsSource,
     [string]$RendererMaterialsSource,
@@ -44,6 +45,33 @@ if (!$sdkversion) { throw 'Windows SDK not found.' }
 $dumpbin = Join-Path $vc 'bin/Hostx64/x64/dumpbin.exe'
 . (Join-Path $PSScriptRoot 'build-io.ps1')
 Assert-BuildCacheRoot $CacheRoot (Join-Path $project 'builds/rebuild64/cache')
+function Get-KitInputIdentity {
+    $python = $env:EI_PYTHON
+    if (!$python) {
+        $python = Get-ChildItem (Join-Path $env:ProgramFiles 'Blender Foundation') -Filter python.exe -Recurse -File |
+            Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+    }
+    $options = @('--repo',$sourceRepo,'--project',$project,'--vs',$vs,'--vc',$vc,
+        '--sdk',$sdk,'--sdk-version',$sdkversion,'--assets',$RendererAssetsSource,
+        '--materials',$RendererMaterialsSource,'--pwsh',(Join-Path $PSHOME 'pwsh.exe'),'--cache',$CacheRoot)
+    if ($ShaderResourceManifest) { $options += '--manifest',$ShaderResourceManifest }
+    $mode = if ($CheckKitReuse) { '--check-external' } else { '--save-external' }
+    $identity = & $python -B (Join-Path $PSScriptRoot 'kit-inputs.py') @options $mode (Join-Path $task 'build-kit-external.json')
+    if ($LASTEXITCODE -eq 0 -and $identity -cmatch '^[a-f0-9]{64}$') { return $identity }
+}
+$sourceRepo = $repo
+$receiptPath = Join-Path $task 'build-kit-receipt.json'
+if ($CheckKitReuse) {
+    if (![IO.File]::Exists($receiptPath)) { exit 3 }
+    $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
+    if ($receipt.version -ne 1 -or $receipt.inputs -cnotmatch '^[0-9a-f]{64}$' -or
+        $receipt.manifest -cne (Hash-File (Join-Path $task 'kit/SHA256SUMS'))) { exit 3 }
+    if (!$ShaderResourceManifest -and $receipt.shaderManifest) {
+        $ShaderResourceManifest = [string]$receipt.shaderManifest
+    }
+    if ($receipt.inputs -cne (Get-KitInputIdentity)) { exit 3 }
+    exit 0
+}
 function Assert-ShaderProjectReuse([string]$Before,[string]$After) {
     [xml]$left=$Before;[xml]$right=$After
     foreach($document in @($left,$right)){
@@ -110,11 +138,13 @@ try {
         $ancestor = Split-Path $ancestor
     }
     if (Test-Path -LiteralPath (Join-Path $task 'kit')) { throw 'Kit already exists; preserve it before an authorized new build.' }
+    [IO.File]::Delete($receiptPath)
     New-Item -ItemType Directory -Force -Path $privateTemp,$CacheRoot | Out-Null
     # Hold a filesystem lock through restore, publication and pruning. No shared entry
     # can be removed or partially restored by another task using this script.
     $lock = Enter-BuildLock (Join-Path $CacheRoot '.build.lock')
     $null = Trim-Cache
+    $inputIdentity = Get-KitInputIdentity
     $env:MSBUILDDISABLENODEREUSE = '1'
     $env:TMP = $privateTemp; $env:TEMP = $privateTemp
     $env:_MSPDBSRV_ENDPOINT_ = 'EI-' + [guid]::NewGuid().ToString('N')
@@ -329,6 +359,13 @@ try {
     }
     $clock.Stop()
     Write-Utf8 (Join-Path $task 'build-result.txt') @("Seconds=$($clock.Elapsed.TotalSeconds)","MSBuildWorkers=$cores","CacheBytes=$bytes","CacheRoot=$CacheRoot")
+    if ($inputIdentity -and $inputIdentity -ceq (Get-KitInputIdentity)) {
+        $receipt = @{version=1; inputs=$inputIdentity; manifest=(Hash-File (Join-Path $kit 'SHA256SUMS')); shaderManifest=$ShaderResourceManifest}
+        $tempReceipt = $receiptPath + '.tmp'
+        [IO.File]::WriteAllText($tempReceipt, ($receipt | ConvertTo-Json -Compress))
+        [IO.File]::Move($tempReceipt,$receiptPath,$true)
+        Write-Host 'Recorded verified kit inputs and manifest.'
+    }
     Write-Host "Built kit in $($clock.Elapsed.TotalSeconds) seconds; cache $bytes bytes."
 } catch {
     $clock.Stop()
