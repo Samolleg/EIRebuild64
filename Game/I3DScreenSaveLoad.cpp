@@ -54,6 +54,7 @@ SSaveSlotDesc &SSaveSlotDesc::operator=(const SSaveSlotDesc &a)
     szName = a.szName;
     szPath = a.szPath;
     time = a.time;
+    generation = a.generation;
 
     fGameTime = a.fGameTime;
 
@@ -662,53 +663,54 @@ void CI3DScreenSaveLoad::Delete()
     ReloadPicture();
 }
 /////////////////////////////////////////////////////////////////////////////////////
-class CSaveSlotTimeLessThenFunctional
+static int ReadSaveSlots(std::vector<SSaveSlotDesc> &slots)
 {
-public:
-    bool operator()(const SSaveSlotDesc &pSlot1, const SSaveSlotDesc &pSlot2) const
+    CFileFind find;
+    BOOL found = find.FindFile(SaveSchema::Slot::Directory() + "save*");
+    int maxNumber = 0;
+    while (found)
     {
-        if (pSlot1.time < pSlot2.time)
-            return false;
-        else
-            return true;
+        found = find.FindNextFile();
+        if (find.IsDots() || !find.IsDirectory())
+            continue;
+        auto &slot = slots.emplace_back();
+        slot.szPath = find.GetFileName();
+        slot.bNoInfo = !SaveSchema::Slot::Presentation(slot.szPath, slot);
+        if (slot.szPath.GetLength() > 4)
+            maxNumber = Max(maxNumber, atoi(slot.szPath.Mid(4)));
     }
-};
-////////////////////////////////////////////////////////////////////////////////
+    std::sort(slots.begin(), slots.end(), [](const SSaveSlotDesc &a, const SSaveSlotDesc &b) {
+        if (a.bNoInfo != b.bNoInfo)
+            return !a.bNoInfo;
+        if (a.time != b.time)
+            return a.time > b.time;
+        if (a.generation != b.generation)
+            return a.generation > b.generation;
+        return a.szPath.CompareNoCase(b.szPath) < 0;
+    });
+    return maxNumber;
+}
+
+CString CI3DScreenSaveLoad::LatestSlot()
+{
+    std::vector<SSaveSlotDesc> available;
+    ReadSaveSlots(available);
+    if (available.empty() || available.front().bNoInfo)
+        return {};
+    return available.front().szPath;
+}
+
 void CI3DScreenSaveLoad::FormSlotsList()
 {
-    CString szWildcard;
-    szWildcard.Format("%sSaves64\\save*", ModRuntime::SaveRoot(IWorld.GetWorkPath()).c_str());
-    CFileFind find;
-
     slots.clear();
-    int nMax = 0;
-    BOOL bFound = find.FindFile(szWildcard);
-    while (bFound)
+    const int nMax = ReadSaveSlots(slots);
+    for (auto &slot : slots)
     {
-        bFound = find.FindNextFile();
-        if (find.IsDots())
-            continue;
-        if (find.IsDirectory())
-        {
-            SSaveSlotDesc slot;
-            slots.push_back(slot);
-            SSaveSlotDesc *pSlot = &slots.back();
-            pSlot->szPath = find.GetFileName();
-
-            pSlot->bNoInfo=!SaveSchema::Slot::Presentation(pSlot->szPath,*pSlot);
-            if(pSlot->bNoInfo)pSlot->szName="Несовместимое сохранение";
-            else if(pSlot->szName.IsEmpty())pSlot->FormName();
-
-            if (pSlot->szPath.GetLength() > 4)
-            {
-                nMax = Max(nMax, atoi(pSlot->szPath.Mid(4)));
-            }
-        }
+        if (slot.bNoInfo)
+            slot.szName = "Несовместимое сохранение";
+        else if (slot.szName.IsEmpty())
+            slot.FormName();
     }
-    find.Close();
-    // sort slots by time
-    CSaveSlotTimeLessThenFunctional less_func;
-    std::sort(slots.begin(), slots.end(), less_func);
     // add new slot for save screen
     if (bIsSaveScreen)
     {
