@@ -237,6 +237,25 @@ void matrix_equal(const skn::Matrix &a, const skn::Matrix &b, const std::string 
         require(std::isfinite(a[k]) && std::abs(a[k] - b[k]) <= 1e-4, "bind " + name);
 }
 } // namespace
+skn::Dds decode_base_color(const ResourceBlob &blob, const PublishPixels &publish,
+                           const std::array<float,4>& factor)
+{
+    require(blob.bytes && !blob.bytes->empty() && blob.bytes->size() <= UINT_MAX,
+            "external base color PNG size");
+    const std::uint8_t signature[] = {137,80,78,71,13,10,26,10};
+    require(blob.bytes->size()>=sizeof(signature) &&
+            std::equal(std::begin(signature),std::end(signature),blob.bytes->begin()),
+            "external base color requires PNG");
+    cgltf_buffer buffer{};
+    buffer.data = const_cast<std::uint8_t*>(blob.bytes->data());
+    cgltf_buffer_view view{};
+    view.buffer = &buffer;
+    view.size = blob.bytes->size();
+    cgltf_image input{};
+    input.buffer_view = &view;
+    input.mime_type = const_cast<char*>("image/png");
+    return image(publish, blob, input, true, factor.data());
+}
 std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &profile,
                               const PublishPixels &publish)
 {
@@ -588,6 +607,9 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
         const auto &input = m < data.materials_count ? data.materials[m] : defaultMaterial;
 
         const auto &pbr = input.pbr_metallic_roughness;
+        std::array<float,4> baseFactor{};
+        std::copy_n(pbr.base_color_factor, 4, baseFactor.begin());
+        output->base_color_factors.push_back(baseFactor);
         skn::Material material{};
         std::copy_n(pbr.base_color_factor, 4, material.base);
         std::copy_n(input.emissive_factor, 3, material.emission);

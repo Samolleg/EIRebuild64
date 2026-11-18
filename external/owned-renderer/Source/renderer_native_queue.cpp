@@ -1682,7 +1682,7 @@ HRESULT Renderer::resolve_native_pose(NativeWorldGeometry::Pose* pose,const Nati
   const auto extra=source.binding->gltf_animation?source.binding->gltf_animation->morphs:0u;
   if(source.binding->tracks.size()>UINT_MAX-extra)return E_OUTOFMEMORY;
   const UINT count=static_cast<UINT>(source.baked?source.baked->size():source.binding->tracks.size()+extra);
-  const bool changed=slot.count!=count||std::memcmp(&slot.value,&value,sizeof(value))!=0||slot.binding!=source.binding||slot.baked!=source.baked;
+  const bool changed=slot.count!=count||std::memcmp(&slot.value,&value,sizeof(value))!=0||slot.binding!=source.binding||slot.baked!=source.baked||slot.overrides!=source.overrides;
   if(changed){
    if(slot.allocation>=native_pose_ranges_.size()||slot.count!=count||native_pose_ranges_[slot.allocation].references){
     UINT allocation=UINT_MAX;
@@ -1699,11 +1699,11 @@ HRESULT Renderer::resolve_native_pose(NativeWorldGeometry::Pose* pose,const Nati
    if(++native_pose_ranges_[slot.allocation].generation==0)++native_pose_ranges_[slot.allocation].generation;
    if(++slot.revision==0)++slot.revision;
    value.generation={static_cast<UINT>(slot.revision),static_cast<UINT>(slot.revision>>32)};
-   slot.value=value;slot.count=count;slot.binding=source.binding;slot.baked=source.baked;slot.valid=false;
+   slot.value=value;slot.count=count;slot.binding=source.binding;slot.baked=source.baked;slot.overrides=source.overrides;slot.valid=false;
   }
   if(!slot.valid&&slot.scheduled!=slot.revision){
    native_pose_work_.push_back({slot.value,index,slot.count,slot.allocation,slot.revision,
-                               native_pose_ranges_[slot.allocation].generation,slot.baked});slot.scheduled=slot.revision;
+                               native_pose_ranges_[slot.allocation].generation,slot.baked,slot.overrides});slot.scheduled=slot.revision;
   }
   draw.pose_slot=index;draw.pose_allocation=slot.allocation;
   draw.animation_allocation=slot.animation_allocation;
@@ -1765,6 +1765,19 @@ HRESULT Renderer::prepare_native_poses(){
   transition_profile_pass("compute_pose");context_->Dispatch(width,height,1);++perf_native_compute_dispatches_;++native_frame_stats_.native_compute_dispatches;
   ID3D11UnorderedAccessView* empty_uav=nullptr;context_->CSSetUnorderedAccessViews(4,1,&empty_uav,nullptr);
   ID3D11ShaderResourceView* empty[3]{};context_->CSSetShaderResources(10,3,empty);context_->CSSetShader(nullptr,nullptr,0);
+  for(const auto& job:native_pose_work_) {
+   if(!job.overrides || job.allocation>=native_pose_ranges_.size() ||
+      !native_pose_ranges_[job.allocation].references ||
+      native_pose_ranges_[job.allocation].generation!=job.allocation_generation)continue;
+   for(const auto& entry:*job.overrides) {
+    if(entry.node>=job.count)return E_INVALIDARG;
+    auto value=entry.value;value.generation=job.value.generation;
+    D3D11_BOX box{};box.left=(job.value.output+entry.node)*sizeof(NativePoseNodeGpu);
+    box.right=box.left+sizeof(NativePoseNodeGpu);box.bottom=box.back=1;
+    context_->UpdateSubresource(native_pose_nodes_.Get(),0,&box,&value,0,0);
+    profiler_.add_upload(sizeof(value));
+   }
+  }
   for(const auto& job:native_pose_work_){auto& slot=native_pose_slots_[job.slot];
 #ifdef EID3D11_TESTING
    if(job.allocation<native_pose_ranges_.size()&&native_pose_ranges_[job.allocation].references&&
@@ -2601,7 +2614,7 @@ void Renderer::retire_native_source_values() noexcept{
   if(slot.animation_allocation<native_animation_ranges_.size()&&native_animation_ranges_[slot.animation_allocation].owners)
    --native_animation_ranges_[slot.animation_allocation].owners;
   slot.animation_allocation=UINT_MAX;
-  slot.active=false;slot.valid=false;slot.count=0;slot.allocation=UINT_MAX;slot.binding.reset();slot.baked.reset();
+  slot.active=false;slot.valid=false;slot.count=0;slot.allocation=UINT_MAX;slot.binding.reset();slot.baked.reset();slot.overrides.reset();
   if(++slot.generation==0)++slot.generation;
  }
  for(UINT index=0;index<native_terrain_phases_.size();++index){

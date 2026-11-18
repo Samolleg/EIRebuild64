@@ -14,6 +14,7 @@
 #include "gltf_asset.h"
 #include "environment_material.h"
 #include "environment_asset.h"
+#include "gltf_breast.h"
 #include "world_scene_algorithms.h"
 
 #include <algorithm>
@@ -1173,7 +1174,7 @@ const gltf::EquipmentSelection& prepare_gltf_equipment(const RetainedVisualSampl
  if(prepared.gltf_equipment_assembly==sample.assembly && prepared.gltf_equipment)
   return *prepared.gltf_equipment;
  auto selected=std::make_shared<gltf::EquipmentSelection>();
- selected->items=gltf::select_equipment(sample.assembly->equipment);
+ selected->items=gltf::select_equipment(sample.assembly->equipment,body.resource_key);
  selected->radius=body.animation_radius;
  for(auto& item:selected->items) {
   if(item.asset->wearable) {
@@ -1189,6 +1190,7 @@ const gltf::EquipmentSelection& prepare_gltf_equipment(const RetainedVisualSampl
   if(!std::isfinite(radius)||radius>FLT_MAX/4)throw std::runtime_error("glTF equipment bounds overflow");
   selected->radius=(std::max)(selected->radius,static_cast<float>(radius)*(1+1e-5f));
  }
+ selected->radius+=gltf::secondary_limit; // include the same possible displacement for wearables
  prepared.gltf_equipment=std::move(selected);prepared.gltf_equipment_assembly=sample.assembly;
  return *prepared.gltf_equipment;
 }
@@ -3685,7 +3687,7 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
          nodes.push_back(static_cast<unsigned>(assembly.skeleton->nodes.size()+
              (found-body.geometry.joints.begin())));
         }
-        build_skn_groups(sample,skn::from_gltf(item.asset),&nodes,item.weapon,item.arrow);
+        build_skn_groups(sample,skn::from_gltf(item.asset),&nodes,item.weapon,item.arrow,&item.base_color_overrides);
        }
       }
       if(built)prepared.merged_assembly=sample.assembly;
@@ -3820,7 +3822,8 @@ bool retained_visual_group_submission(const RetainedVisualSample& sample,std::si
          view.owned_texture.surface=part.surface.get();
         }else{
          const auto& material=group.skn_asset->asset.materials[group.skn_material];
-         const auto& texture=group.skn_asset->textures[group.skn_material][0];
+         const auto& texture=group.skn_base_color_override ? *group.skn_base_color_override :
+             group.skn_asset->textures[group.skn_material][0];
          view.owned_texture.identity=1;view.owned_texture.generation=1;view.owned_texture.value_source=1;
          if(!texture.mips.empty()){
           view.owned_texture.resource=&texture.blob.identity;view.owned_texture.format=texture.format;

@@ -3135,7 +3135,7 @@ HRESULT Renderer::draw_game_effect_d3d12(const GameEffectDraw& draw,const FixedS
  if(!scene_composited_)scene_updated_=true;
  // The transparent effects start (FSR reactive mask); the game's terrain
  // prints draw inline before the water and belong to the opaque world.
- const bool world_print=draw.vertex_program==WorldSupportShader::game_mesh_vs&&!drawing_ground_marks_;
+ const bool world_print=(draw.terrain_print||draw.vertex_program==WorldSupportShader::game_mesh_vs)&&!drawing_ground_marks_;
  if(!scene_composited_&&!world_print)capture_opaque_world_d3d12();
  transition_profile_pass(draw.profile_pass);
  const UINT64 bytes=UINT64(count)*sizeof(GameParticleGpu);
@@ -3144,8 +3144,8 @@ HRESULT Renderer::draw_game_effect_d3d12(const GameEffectDraw& draw,const FixedS
  if(FAILED(hr))return hr;
  GameParticleConstants c{};game_effect_constants(draw,st,texture!=nullptr,c);
  // Soft particles read the world depth they are tested against (read-only view).
- const bool soft=c.soft[3]!=0&&world_d3d12_bound_&&world_d3d12_&&!drawing_ground_marks_;
- if(!soft)c.soft[3]=0;
+ const bool soft=draw.soft&&c.soft[3]!=0&&world_d3d12_bound_&&world_d3d12_&&!drawing_ground_marks_;
+ if(!soft&&!draw.terrain_print)c.soft[3]=0;
  const D3D12Texture* texture12=nullptr;
  if(texture){
   texture->world_mip_use=!scene_composited_;if(scene_composited_)texture->static_mip_hint=false;
@@ -3209,8 +3209,14 @@ HRESULT Renderer::draw_game_effect_d3d12(const GameEffectDraw& draw,const FixedS
  }
  const WorldSupportShader pixel=configured_boolean(debug_overlay_.config(),"soft_particles_debug",false)?
   WorldSupportShader::game_particle_debug_ps:WorldSupportShader::game_particle_ps;
- hr=d3d12_->draw(world_support_shader_program(draw.vertex_program),world_support_shader_program(pixel),
-                 state,nullptr,draw.vertex_count);
+ if(draw.terrain_print){
+  const UINT args[]={draw.vertex_count,1,0,0};hr=native_d3d12_buffer(native12_.terrain_print_args,sizeof(args),0,0);
+  if(SUCCEEDED(hr))hr=d3d12_->write_buffer(*native12_.terrain_print_args,0,args,sizeof(args));
+  if(SUCCEEDED(hr)){
+   const auto hs=world_support_shader_program(WorldSupportShader::terrain_print_hs),ds=world_support_shader_program(WorldSupportShader::terrain_print_ds);
+   hr=d3d12_->draw_indirect(world_support_shader_program(draw.vertex_program),world_support_shader_program(pixel),state,nullptr,*native12_.terrain_print_args,0,&hs,&ds);
+  }
+ }else hr=d3d12_->draw(world_support_shader_program(draw.vertex_program),world_support_shader_program(pixel),state,nullptr,draw.vertex_count);
  if(soft){d3d12_->set_depth_read_only(false);d3d12_->set_depth_resource(2,nullptr);}
  // The particle's depth for the water reflections: the second draw of the
  // same call, as D3D11 draw_game_particle_depth follows it.
@@ -3313,6 +3319,19 @@ HRESULT Renderer::prepare_native_poses_d3d12(){
   hr=d3d12_->dispatch(*pose_cs,width,height,1);
   if(FAILED(hr))return hr;
   if(d3d12_not_done(hr)){if(hr==S_FALSE)d3d12_->omit("poses (pipeline not ready)",false);return S_OK;}
+  for(const auto& job:native_pose_work_) {
+   if(!job.overrides || job.allocation>=native_pose_ranges_.size() ||
+      !native_pose_ranges_[job.allocation].references ||
+      native_pose_ranges_[job.allocation].generation!=job.allocation_generation)continue;
+   for(const auto& entry:*job.overrides) {
+    if(entry.node>=job.count)return E_INVALIDARG;
+    auto value=entry.value;value.generation=job.value.generation;
+    const HRESULT written=d3d12_->write_buffer(*native12_.pose_nodes,
+        UINT64(job.value.output+entry.node)*sizeof(NativePoseNodeGpu),&value,sizeof(value));
+    if(FAILED(written))return written;
+    profiler_.add_upload(sizeof(value));
+   }
+  }
   for(const auto& job:native_pose_work_){auto& slot=native_pose_slots_[job.slot];
    if(job.allocation<native_pose_ranges_.size()&&native_pose_ranges_[job.allocation].references&&
       native_pose_ranges_[job.allocation].generation==job.allocation_generation&&

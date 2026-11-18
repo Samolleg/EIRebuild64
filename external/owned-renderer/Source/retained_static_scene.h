@@ -21,9 +21,9 @@
 #include <vector>
 
 namespace owned {
-namespace skn {struct RuntimeAsset;}
+namespace skn {struct RuntimeAsset; struct Dds;}
 namespace skm {struct Clip;}
-namespace gltf {struct PlaybackState;}
+namespace gltf {struct PlaybackState; struct BreastState;}
 
 struct RetainedStaticSourceCandidate;
 struct FurProfile;
@@ -345,6 +345,8 @@ struct VisualPreparedResources {
     std::shared_ptr<const gltf::EquipmentSelection> gltf_equipment;
     struct MergedGroup {
         std::shared_ptr<const skn::RuntimeAsset> skn_asset;
+        // Strong ownership keeps selected texture pixels valid through queued draws.
+        std::shared_ptr<const skn::Dds> skn_base_color_override;
         std::uint32_t skn_material = 0;
         bool skn_casts_shadow = true;
         bool gltf_weapon = false, gltf_arrow = false;
@@ -444,6 +446,7 @@ struct VisualPreparedResources {
     std::shared_ptr<const VisualSkeletonBinding> skeleton_binding;
     NativeWorldGeometry::Pose gpu_pose;
     std::shared_ptr<gltf::PlaybackState> gltf_playback;
+    std::shared_ptr<gltf::BreastState> breast_physics;
     std::shared_ptr<const skm::Clip> motion_clip;
     std::shared_ptr<const skn::RuntimeAsset> motion_asset;
     std::shared_ptr<const VisualAssemblyAsset> motion_assembly;
@@ -475,6 +478,9 @@ struct RetainedVisualSample {
     // Embedded units use the host's completed pose/materials, not the retail
     // route/intent evaluator. Their rendering still follows unit policy.
     bool completed_pose = false;
+    // Only the synchronous world adapter enables secondary physics; previews are isolated.
+    bool secondary_physics = false, secondary_frozen = false;
+    double secondary_clock = 0;
     VisualResourceIncarnation resource{};
     LifecycleIdentity lifecycle{};
     RetainedVisualStatus status = RetainedVisualStatus::awaiting_values;

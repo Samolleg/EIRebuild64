@@ -1,10 +1,13 @@
+#requires -Version 7.6.10
+#requires -PSEdition Core
 # EID3D11_SHADER_STORE persists DXBC across worktrees in CacheRoot/ShaderStore.
 # Compiler-keyed entries share the cache size limit (20 GB by default).
 param(
-    [string]$CacheRoot,
+    [string]$CacheRoot = $env:EIREBUILD64_BUILD_CACHE,
+    [switch]$PhysicsFxCheck,
+    [string]$ShaderResourceManifest = $env:EIREBUILD64_SHADER_RESOURCE_MANIFEST,
     [string]$RendererAssetsSource,
     [string]$RendererMaterialsSource,
-    [string]$RendererShaderSource,
     [ValidateRange(1,1024)][int]$CacheLimitGB = 20,
     [ValidateRange(1,100)][int]$CacheVersions = 2
 )
@@ -20,10 +23,10 @@ while (!(Test-Path -LiteralPath (Join-Path $project 'RULES.md'))) {
 if (!$CacheRoot) { $CacheRoot = Join-Path $project 'builds/rebuild64/cache' }
 if (!$RendererAssetsSource) { $RendererAssetsSource = Join-Path $project 'content/renderer-assets/Engine64' }
 if (!$RendererMaterialsSource) { $RendererMaterialsSource = Join-Path $project 'content/renderer-materials/Engine64' }
-if ($RendererShaderSource) { $RendererShaderSource = [IO.Path]::GetFullPath($RendererShaderSource) }
 if (!(Test-Path -LiteralPath (Join-Path $RendererAssetsSource 'eid3d_hosted/hosted_plants.bin'))) { throw 'Renderer 1126 hosted assets are missing from the selected content source.' }
 if (!(Test-Path -LiteralPath (Join-Path $RendererMaterialsSource 'classes.json'))) { throw 'Renderer materials are missing from the selected content source.' }
 $CacheRoot = [IO.Path]::GetFullPath($CacheRoot).TrimEnd('\','/')
+if ($ShaderResourceManifest) { $ShaderResourceManifest = [IO.Path]::GetFullPath($ShaderResourceManifest) }
 if ($CacheRoot.StartsWith($task + '\',[StringComparison]::OrdinalIgnoreCase) -or
     $CacheRoot -eq $project -or $CacheRoot -eq $repo) { throw 'Cache must be outside task worktrees.' }
 if ((Split-Path $repo -Leaf) -ne 'wt' -or !(Test-Path (Join-Path $task 'BRIEF.md'))) { throw 'Run from a task worktree.' }
@@ -39,7 +42,17 @@ $sdk = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10'
 $sdkversion = (Get-ChildItem (Join-Path $sdk 'Include') -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'um/Windows.h') } | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1).Name
 if (!$sdkversion) { throw 'Windows SDK not found.' }
 $dumpbin = Join-Path $vc 'bin/Hostx64/x64/dumpbin.exe'
-function Hash-File([string]$path) { (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() }
+. (Join-Path $PSScriptRoot 'build-io.ps1')
+Assert-BuildCacheRoot $CacheRoot (Join-Path $project 'builds/rebuild64/cache')
+function Assert-ShaderProjectReuse([string]$Before,[string]$After) {
+    [xml]$left=$Before;[xml]$right=$After
+    foreach($document in @($left,$right)){
+        foreach($node in @($document.SelectNodes('//*[local-name()="Target"]|//comment()'))){
+            $null=$node.ParentNode.RemoveChild($node)
+        }
+    }
+    if($left.OuterXml -cne $right.OuterXml){throw 'Shader compiler project inputs/properties changed; accepted resources cannot be reused.'}
+}
 function Manifest([string]$directory) {
     @(Get-ChildItem -LiteralPath $directory -File -Recurse | Where-Object { $_.Name -ne 'SHA256SUMS' } | Sort-Object FullName | ForEach-Object {
         (Hash-File $_.FullName) + '  ' + $_.FullName.Substring($directory.Length+1).Replace('\','/')
@@ -53,48 +66,37 @@ function Remove-CacheEntry([string]$path) {
     if ((Get-Item -LiteralPath $full).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Cache entry is a link: $full" }
     Remove-Item -LiteralPath $full -Recurse -Force
 }
-function Sync-Tree([string]$source,[string]$destination,[string[]]$files) {
-    # Incremental builds need one stable source path. Copy only files whose bytes
-    # differ and stamp them now, so MSBuild rebuilds exactly what changed.
-    New-Item -ItemType Directory -Force -Path $destination | Out-Null
-    $listPath = Join-Path $destination '.ei-sources'
-    $previous = @(); if (Test-Path -LiteralPath $listPath) { $previous = @(Get-Content -LiteralPath $listPath) }
-    $now = [datetime]::UtcNow; $copied = 0
-    foreach ($relative in $files) {
-        $from = Join-Path $source $relative; $to = Join-Path $destination $relative
-        if (!(Test-Path -LiteralPath $from -PathType Leaf)) { continue }
-        $same = (Test-Path -LiteralPath $to -PathType Leaf) -and ((Get-Item -LiteralPath $from).Length -eq (Get-Item -LiteralPath $to).Length) -and ((Hash-File $from) -eq (Hash-File $to))
-        if (!$same) {
-            New-Item -ItemType Directory -Force -Path (Split-Path $to) | Out-Null
-            Copy-Item -LiteralPath $from -Destination $to -Force
-            (Get-Item -LiteralPath $to).LastWriteTimeUtc = $now
-            $copied++
+function Trim-Cache {
+    $files=@(Get-BuildFiles $CacheRoot)
+    [long]$size=0; $sizes=@{}
+    foreach($file in $files){
+        $size+=$file.Length
+        $relative=$file.FullName.Substring($CacheRoot.Length+1).Split('\')
+        if($relative.Count -ge 3 -and $relative[0] -ne 'work'){
+            $entry=Join-Path $CacheRoot ($relative[0]+'\'+$relative[1])
+            if(!$sizes.ContainsKey($entry)){$sizes[$entry]=[long]0};$sizes[$entry]+=$file.Length
         }
     }
-    $current = [Collections.Generic.HashSet[string]]::new([string[]]$files,[StringComparer]::OrdinalIgnoreCase)
-    $removed = 0
-    foreach ($relative in $previous) {
-        if (!$current.Contains($relative)) { $gone = Join-Path $destination $relative; if (Test-Path -LiteralPath $gone -PathType Leaf) { Remove-Item -LiteralPath $gone -Force; $removed++ } }
+    $entries=@()
+    foreach($group in [IO.DirectoryInfo]::new($CacheRoot).EnumerateDirectories()){
+        if($group.Name -eq 'work'){continue}
+        if($group.Name -notin @('LuaJIT','DirectXTex','DirectXTK','RendererShaders','Recast','ShaderStore')){throw "Unknown cache directory: $($group.FullName)"}
+        $versions=@($group.EnumerateDirectories() | Sort-Object LastWriteTimeUtc -Descending)
+        foreach($entry in $versions){if($entry.Name -notmatch '^[0-9a-f]{64}$'){throw "Unknown cache entry: $($entry.FullName)"}}
+        for($i=0;$i -lt $versions.Count;$i++){
+            $entry=$versions[$i]
+            if($i -ge $CacheVersions){Remove-CacheEntry $entry.FullName;$size-=$sizes[$entry.FullName]}
+            else{$entries+=$entry}
+        }
     }
-    Write-Utf8 $listPath $files
-    Write-Host "Persistent build tree: $copied changed, $removed removed, $($files.Count) sources."
-}
-function Trim-Cache {
-    foreach ($group in Get-ChildItem -LiteralPath $CacheRoot -Directory) {
-        if ($group.Name -eq 'work') { continue }
-        if ($group.Name -notin @('LuaJIT','DirectXTex','DirectXTK','RendererShaders','Recast','ShaderStore')) { throw "Unknown cache directory: $($group.FullName)" }
-        $entries = @(Get-ChildItem -LiteralPath $group.FullName -Directory | Sort-Object LastWriteTimeUtc -Descending)
-        foreach ($entry in $entries) { if ($entry.Name -notmatch '^[0-9a-f]{64}$') { throw "Unknown cache entry: $($entry.FullName)" } }
-        $entries | Select-Object -Skip $CacheVersions | ForEach-Object { Remove-CacheEntry $_.FullName }
+    foreach($entry in ($entries | Sort-Object LastWriteTimeUtc)){
+        if($size -le $CacheLimitGB*1GB){break}
+        Remove-CacheEntry $entry.FullName;$size-=$sizes[$entry.FullName]
     }
-    $entries = @(Get-ChildItem -LiteralPath $CacheRoot -Directory | Where-Object Name -ne 'work' | Get-ChildItem -Directory | Sort-Object LastWriteTimeUtc)
-    [long]$size = (Get-ChildItem -LiteralPath $CacheRoot -File -Recurse | Measure-Object Length -Sum).Sum
-    foreach ($entry in $entries) {
-        if ($size -le $CacheLimitGB * 1GB) { break }
-        $bytes = (Get-ChildItem -LiteralPath $entry.FullName -File -Recurse | Measure-Object Length -Sum).Sum
-        Remove-CacheEntry $entry.FullName
-        $size -= $bytes
+    if($size -gt $CacheLimitGB*1GB){
+        throw "Persistent work exceeds cache limit ($size bytes); relocate nested/independent builds or increase CacheLimitGB. Work is never deleted by pruning."
     }
+    return $size
 }
 $saved = @{}
 foreach ($name in 'TMP','TEMP','_MSPDBSRV_ENDPOINT_','CL','_CL_','LINK','_LINK_','EID3D11_SHADER_STORE','MSBUILDDISABLENODEREUSE') { $saved[$name] = [Environment]::GetEnvironmentVariable($name,'Process') }
@@ -111,12 +113,8 @@ try {
     New-Item -ItemType Directory -Force -Path $privateTemp,$CacheRoot | Out-Null
     # Hold a filesystem lock through restore, publication and pruning. No shared entry
     # can be removed or partially restored by another task using this script.
-    $lock = [IO.File]::Open((Join-Path $CacheRoot '.build.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)
-    foreach ($item in Get-ChildItem -LiteralPath $CacheRoot -Recurse -Force) {
-        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Cache link rejected: $($item.FullName)" }
-    }
-    if ((Get-Item -LiteralPath $CacheRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Cache root is a link.' }
-    Trim-Cache
+    $lock = Enter-BuildLock (Join-Path $CacheRoot '.build.lock')
+    $null = Trim-Cache
     $env:MSBUILDDISABLENODEREUSE = '1'
     $env:TMP = $privateTemp; $env:TEMP = $privateTemp
     $env:_MSPDBSRV_ENDPOINT_ = 'EI-' + [guid]::NewGuid().ToString('N')
@@ -126,133 +124,154 @@ try {
     New-Item -ItemType Directory -Force -Path $env:EID3D11_SHADER_STORE | Out-Null
     (Get-Item -LiteralPath $env:EID3D11_SHADER_STORE).LastWriteTimeUtc = [datetime]::UtcNow
     # Shared build metadata and toolchain; source payloads are keyed per library.
-    $inventory = [Collections.Generic.List[string]]::new()
     $tracked = @(& git -C $repo -c core.quotepath=false ls-files --cached --others --exclude-standard | Sort-Object -Unique)
     if ($LASTEXITCODE -ne 0) { throw 'Cannot enumerate sources.' }
     # Build in one persistent tree so unchanged objects, PCH and incremental LTCG
     # survive between tasks; the task worktree keeps only sources and the kit.
     $sourceRepo = $repo
     $repo = Join-Path $CacheRoot 'work'
+    $shaderReuse = $null
+    if ($ShaderResourceManifest) {
+        # Only a clean task, an accepted current EXE and a pinned change list may
+        # borrow the shader bytes. Refuse changes to shader inputs, stale cache
+        # libraries, unknown payloads or a moving main instead of recompiling.
+        $shaderReuse = Get-Content -LiteralPath $ShaderResourceManifest -Raw | ConvertFrom-Json
+        if ($shaderReuse.version -ne 1 -or $shaderReuse.base_commit -notmatch '^[0-9a-f]{40}$') { throw 'Invalid shader reuse manifest.' }
+        $accepted = [IO.Path]::GetFullPath([string]$shaderReuse.accepted_exe)
+        $acceptedPaths = @('current','previous' | ForEach-Object {
+            [IO.Path]::GetFullPath((Join-Path $project "builds/rebuild64/$_/EIRebuild64.exe"))
+        })
+        if ($acceptedPaths -notcontains $accepted -or
+            (Hash-File $accepted) -cne [string]$shaderReuse.accepted_exe_sha256) { throw 'Accepted shader source EXE changed.' }
+        $base = [string]$shaderReuse.base_commit
+        $main = (& git -C $sourceRepo rev-parse main).Trim()
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot determine current main.' }
+        $head = (& git -C $sourceRepo rev-parse HEAD).Trim()
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot determine build HEAD.' }
+        & git -C $sourceRepo merge-base --is-ancestor $main HEAD
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Shader reuse requires all current main changes in the build checkout.'
+        }
+        $receipt = @(Get-Content -LiteralPath (Join-Path $project 'docs/tasks.log') | Where-Object {
+            $v = $_ -split "`t"; $v.Count -ge 7 -and $v[3] -ceq $base -and $v[5] -ceq [string]$shaderReuse.accepted_exe_sha256 -and $v[6] -eq 'accepted'
+        })
+        if (!$receipt.Count) { throw 'Accepted EXE and base commit lack a task receipt.' }
+        & git -C $sourceRepo merge-base --is-ancestor $base HEAD
+        if ($LASTEXITCODE -ne 0) { throw 'Shader reuse base is not an ancestor.' }
+        $status = @(& git -C $sourceRepo status --porcelain --untracked-files=all)
+        if ($LASTEXITCODE -ne 0 -or $status.Count) { throw 'Shader reuse requires a clean task worktree.' }
+        $actual = @(& git -C $sourceRepo -c core.quotepath=false diff --name-only "$base...HEAD" | Sort-Object)
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot list shader reuse changes.' }
+        $expected = @($shaderReuse.changes | ForEach-Object { [string]$_.path } | Sort-Object)
+        if (($actual -join "`n") -cne ($expected -join "`n")) { throw 'Shader reuse changed-file list differs.' }
+        $deleted = @(& git -C $sourceRepo diff --name-only --diff-filter=D "$base...HEAD")
+        if ($LASTEXITCODE -ne 0) { throw 'Cannot verify deleted shader-reuse inputs.' }
+        foreach ($change in $shaderReuse.changes) {
+            $relative = [string]$change.path
+            # Packaging orchestration is not a shader producer. For its project,
+            # require every compile/link input and property to match the accepted base.
+            if ($relative -ceq 'OwnedRenderer/RendererShaders.vcxproj') {
+                $oldProject=(& git -C $sourceRepo show "${base}:$relative") -join "`n"
+                if($LASTEXITCODE -ne 0){throw 'Accepted shader project is unavailable.'}
+                Assert-ShaderProjectReuse $oldProject ([IO.File]::ReadAllText((Join-Path $sourceRepo $relative)))
+            } elseif ($relative -cnotin @('tools/shader-build.ps1','tools/test-shader-build.ps1') -and
+                $relative -match '(?i)(^|/)(shader[^/]*|[^/]*\.(hlsl|fx|fxh|dxil|dxbc))$') { throw "Shader input changed: $relative" }
+            $removed = $change.PSObject.Properties.Name -contains 'deleted' -and [bool]$change.deleted
+            if ($removed) {
+                if ($relative -cnotin $deleted -or (Test-Path -LiteralPath (Join-Path $sourceRepo $relative))) {
+                    throw "Deleted shader-reuse input is still present: $relative"
+                }
+            } elseif ((Hash-File (Join-Path $sourceRepo $relative)) -cne [string]$change.sha256) { throw "Changed-file SHA mismatch: $relative" }
+        }
+        $librarySources = @($tracked | Where-Object { $_ -match '^external/(DirectXTex|DirectXTK)/' })
+        if (!$librarySources.Count) { throw 'DirectX library source inventory missing.' }
+        foreach ($relative in $librarySources) {
+            $cached = Join-Path $repo $relative
+            if (!(Test-Path -LiteralPath $cached -PathType Leaf) -or
+                (Hash-File $cached) -cne (Hash-File (Join-Path $sourceRepo $relative))) { throw "Cached library source differs: $relative" }
+        }
+        foreach ($name in 'DirectXTex','DirectXTK') {
+            $entry = @($shaderReuse.libraries | Where-Object { $_.name -ceq $name })
+            if ($entry.Count -ne 1) { throw "Missing library receipt: $name" }
+            $folder = Join-Path $repo "out/x64/Release/$name"
+            foreach ($pair in @(@('.lib','sha256'),@('.pdb','pdb_sha256'))) {
+                $payload = Join-Path $folder ($name+$pair[0])
+                if (!(Test-Path -LiteralPath $payload -PathType Leaf) -or
+                    (Hash-File $payload) -cne [string]$entry[0].($pair[1])) { throw "Cached library payload changed: $payload" }
+            }
+        }
+    }
     Sync-Tree $sourceRepo $repo $tracked
-    # NavBake links host objects by glob. Switching between physics-enabled
-    # and older task sources must not link orphan objects from the other tree.
-    # Keep them as task evidence; the shared cache lock is held throughout.
-    $sourceNames=@{}
-    foreach($relative in $tracked){if($relative -match '\.(cpp|c|cc|cxx)$'){$sourceNames[[IO.Path]::GetFileNameWithoutExtension($relative).ToLowerInvariant()]=$true}}
-    $hostObjects=[IO.Path]::GetFullPath((Join-Path $repo 'out/obj/x64/Release/EI_Rebuild'))
-    if(!$hostObjects.StartsWith($CacheRoot+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'Host object directory outside cache.'}
-    foreach($objectFile in @(Get-ChildItem -LiteralPath $hostObjects -File -Filter '*.obj' -ErrorAction SilentlyContinue)) {
-        if($objectFile.Name -notmatch '^(PhysicsFx.*|E1PhysicsDebris)\.obj$' -or $sourceNames.ContainsKey($objectFile.BaseName.ToLowerInvariant())){continue}
-        $orphanRoot=Join-Path $task 'cache-orphans';New-Item -ItemType Directory -Force -Path $orphanRoot | Out-Null
-        $objectHash=Hash-File $objectFile.FullName
-        $backup=Join-Path $orphanRoot ($objectHash+'-'+$objectFile.Name)
-        if(Test-Path -LiteralPath $backup){throw ('Orphan backup already exists: '+$backup)}
-        Move-Item -LiteralPath $objectFile.FullName -Destination $backup
-        Write-Host ('Quarantined source-less cached object: '+$objectFile.Name+' SHA256='+$objectHash)
-    }
     Set-Location $repo
-    foreach ($relative in $tracked | Where-Object { $_ -match '\.(vcxproj|props|targets|ps1|cs)$' }) { $inventory.Add($relative + '=' + (Hash-File (Join-Path $repo $relative))) }
-    foreach ($directory in @((Join-Path $vc 'include'),(Join-Path $vc 'atlmfc/include'),(Join-Path $sdk "Include/$sdkversion"))) {
-        foreach ($file in Get-ChildItem -LiteralPath $directory -File -Recurse | Sort-Object FullName) { $inventory.Add($file.FullName + '=' + (Hash-File $file.FullName)) }
-    }
-    foreach ($file in @($msbuild,(Join-Path $vc 'bin/Hostx64/x64/cl.exe'),(Join-Path $vc 'bin/Hostx64/x64/c1xx.dll'),(Join-Path $vc 'bin/Hostx64/x64/c2.dll'),(Join-Path $vc 'bin/Hostx64/x64/link.exe'),(Join-Path $vc 'bin/Hostx64/x64/lib.exe'),(Join-Path $vc 'bin/Hostx64/x64/mspdbsrv.exe'),(Join-Path $sdk "bin/$sdkversion/x64/rc.exe"),(Join-Path $sdk "bin/$sdkversion/x64/fxc.exe"),"$env:SystemRoot/System32/d3dcompiler_47.dll")) { $inventory.Add($file + '=' + (Hash-File $file)) }
-    $inventory.Add("Release|x64|v143|$vcversion|$sdkversion|MT|MP|FS")
-    $keyBytes = [Text.Encoding]::UTF8.GetBytes(($inventory -join "`n"))
-    $sha = [Security.Cryptography.SHA256]::Create()
-    try { $key = ([BitConverter]::ToString($sha.ComputeHash($keyBytes))).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose() }
-    $groups = @(
-        @{ Name='LuaJIT'; Sources='^third_party/luajit/'; Patterns=@('out/x64/Release/luajit/*') },
-        @{ Name='DirectXTex'; Sources='^external/DirectXTex/'; Patterns=@('out/x64/Release/DirectXTex/*.lib','out/x64/Release/DirectXTex/*.pdb') },
-        @{ Name='DirectXTK'; Sources='^external/DirectXTK/'; Patterns=@('out/x64/Release/DirectXTK/*.lib','out/x64/Release/DirectXTK/*.pdb') },
-        @{ Name='RendererShaders'; Sources='^(external/owned-renderer/|OwnedRenderer/|Game/OwnedRender/)'; Patterns=@('out/x64/Release/RendererShaders/eid3d11_*') },
-        @{ Name='Recast'; Sources='^external/recastnavigation/'; Patterns=@('out/obj/x64/Release/EI_Rebuild/Recast*.obj','out/obj/x64/Release/EI_Rebuild/Detour*.obj','out/obj/x64/Release/EI_Rebuild/Recast.compiler.pdb') }
-    )
-    # The persistent tree already keeps every library output; per-library payload
-    # restores would restamp files and force relinks, so they are not used here.
-    $groups = @()
+    # MSBuild tracks the persistent tree. Disabled archive-cache fingerprints
+    # are not dependencies and must not scan the entire Windows SDK.
     $sourceCommit = (& git -C $sourceRepo -c "safe.directory=$sourceRepo" describe --always --abbrev=12 --dirty --exclude=*).Trim()
     if ($LASTEXITCODE -ne 0 -or !$sourceCommit) { throw 'Cannot identify source commit.' }
     $arguments = @("/p:ScriptCheckCommit=$sourceCommit",'EI_Rebuild.sln',"/m:$cores",'/nr:false','/t:Build','/p:Configuration=Release','/p:Platform=x64','/p:PreferredToolArchitecture=x64',"/p:VCToolsVersion=$vcversion","/p:WindowsTargetPlatformVersion=$sdkversion","/p:UserRootDir=$privateTemp\",'/nologo','/v:minimal')
-    foreach ($group in $groups) {
-        $sourceInventory = @($key)
-        foreach ($relative in $tracked | Where-Object { $_ -match $group.Sources }) { $sourceInventory += ($relative + '=' + (Hash-File (Join-Path $repo $relative))) }
-        $sourceSha = [Security.Cryptography.SHA256]::Create()
-        try { $group.Key = ([BitConverter]::ToString($sourceSha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($sourceInventory -join "`n"))))).Replace('-','').ToLowerInvariant() } finally { $sourceSha.Dispose() }
-        $entry = Join-Path $CacheRoot ($group.Name + '/' + $group.Key)
-        $group.Entry = $entry; $group.Hit = $false
-        $manifest = Join-Path $entry 'SHA256SUMS'
-        if (Test-Path -LiteralPath $manifest) {
-            $expected = @(Get-Content -LiteralPath $manifest)
-            $actual = @(Manifest $entry)
-            if ($expected.Count -gt 0 -and (($expected -join "`n") -ceq ($actual -join "`n"))) {
-                foreach ($file in Get-ChildItem -LiteralPath $entry -File -Recurse | Where-Object Name -ne 'SHA256SUMS') {
-                    $destination = Join-Path $repo $file.FullName.Substring($entry.Length+1)
-                    New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
-                    Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
-                    (Get-Item -LiteralPath $destination).LastWriteTimeUtc = [datetime]::UtcNow
-                }
-                $group.Hit = $true
-                (Get-Item -LiteralPath $entry).LastWriteTimeUtc = [datetime]::UtcNow
-                if ($group.Name -eq 'Recast') { $arguments += '/p:EIRecastCacheHit=true' }
-                elseif ($group.Name -ne 'LuaJIT') { $arguments += ('/p:EICache' + $group.Name + '=true') }
-            } else { Remove-CacheEntry $entry }
+    if ($shaderReuse) {
+        $reuseFolder = Split-Path -Parent $ShaderResourceManifest
+        $destination = Join-Path $repo 'out/x64/Release/RendererShaders'
+        New-Item -ItemType Directory -Force -Path $destination | Out-Null
+        $expectedNames = @('eid3d11_shaders.res','eid3d11_dxil.res','eid3d11_d3d12_shaders.res','eid3d11_camp_art.res')
+        if (@($shaderReuse.files).Count -ne $expectedNames.Count) { throw 'Shader reuse payload count.' }
+        foreach ($name in $expectedNames) {
+            $entry = @($shaderReuse.files | Where-Object { $_.name -ceq $name })
+            if ($entry.Count -ne 1 -or [string]$entry[0].sha256 -notmatch '^[0-9a-f]{64}$') { throw "Shader reuse entry: $name" }
+            $source = Join-Path $reuseFolder $name
+            if ((Hash-File $source) -cne [string]$entry[0].sha256) { throw "Shader resource SHA mismatch: $name" }
+            $null = Copy-BuildFile $source (Join-Path $destination $name)
+            if ((Hash-File (Join-Path $destination $name)) -cne [string]$entry[0].sha256) { throw "Shader resource copy mismatch: $name" }
         }
-        Write-Host "$($group.Name): cache hit=$($group.Hit) key=$($group.Key)"
-    }
-    if($RendererShaderSource) {
-        $donorRoot=[IO.Path]::GetFullPath($RendererShaderSource)
-        $receipt=Get-Content -LiteralPath (Join-Path $donorRoot 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-        if($receipt.format -ne 'renderer-bytecode-reuse.v1' -or @($receipt.sources).Count -lt 36){throw 'Invalid shader reuse receipt.'}
-        foreach($shaderInput in $receipt.sources) {
-            $path=[IO.Path]::GetFullPath((Join-Path $sourceRepo $shaderInput.path))
-            if(!$path.StartsWith($sourceRepo+'\',[StringComparison]::OrdinalIgnoreCase) -or
-               (Hash-File $path) -ne $shaderInput.sha256){throw ('Shader source differs from donor: '+$shaderInput.path)}
-        }
-        $shaderTarget=Join-Path $repo 'out/x64/Release/RendererShaders'
-        New-Item -ItemType Directory -Force -Path $shaderTarget | Out-Null
-        $required=@('eid3d11_shaders.res','eid3d11_dxil.res','eid3d11_d3d12_shaders.res','eid3d11_camp_art.res','eid3d11_shaders.bin')
-        foreach($name in $required) {
-            $entry=@($receipt.files | Where-Object path -eq $name)
-            $shaderFile=Join-Path $donorRoot $name
-            if($entry.Count -ne 1 -or (Hash-File $shaderFile) -ne $entry[0].sha256){throw ('Shader resource hash mismatch: '+$name)}
-            Copy-Item -LiteralPath $shaderFile -Destination (Join-Path $shaderTarget $name) -Force
-        }
-        $arguments+='/p:EICacheRendererShaders=true'
-        Copy-Item -LiteralPath (Join-Path $donorRoot 'manifest.json') -Destination (Join-Path $task 'shader-reuse.json')
-        Write-Host 'Verified existing D3D11/D3D12 resources; shader compilation disabled.'
+        $arguments += '/p:EICacheRendererShaders=true','/p:EICacheDirectXTex=true','/p:EICacheDirectXTK=true'
+        Write-Host 'Verified accepted shader resources and existing DirectX libraries; shader generation is disabled.'
     }
     & (Join-Path $repo 'tools/prepare-worktree.ps1') -VSInstallDir $vs
     if (!$?) { throw 'Preparation failed.' }
     Write-Host "MSBuild workers: $cores; compiler /MP; isolated endpoint $env:_MSPDBSRV_ENDPOINT_"
-    Add-Type -Path (Join-Path $PSScriptRoot 'BuildProcess.cs')
     $arguments += "/flp:logfile=$task/build.log;verbosity=normal"
-    # Quote Windows argv, doubling trailing backslashes before the closing quote.
-    $commandLine = ($arguments | ForEach-Object {
-        '"' + ([regex]::Replace(([regex]::Replace($_, '(\\*)"', '$1$1\"')), '(\\+)$', '$1$1')) + '"'
-    }) -join ' '
-    $buildExit = [EIBuildProcess]::Run($msbuild, $commandLine, $repo)
+    Push-Location $repo
+    try {
+        & (Join-Path $PSScriptRoot 'invoke-build.ps1') $msbuild @arguments
+        $buildExit = $LASTEXITCODE
+    } finally { Pop-Location }
     if ($buildExit -ne 0) { throw "MSBuild failed ($buildExit); no serial retry." }
+    if ($shaderReuse) {
+        $log = Get-Content -LiteralPath (Join-Path $task 'build.log') -Raw
+        if ($log -match '(?im)^\s*(?:\d+>\s*)?(?:"[^"\r\n]*[\\/])?(?:fxc|dxc|RendererShaderEmbed)\.exe(?:"|\s)' -or
+            $log -match '(?im)shader_embed:|DXIL:\s*\d+ programs|CompileShaders\.cmd') {
+            throw 'Shader compiler or shader generation appeared in build log.'
+        }
+        foreach ($entry in $shaderReuse.files) {
+            $file = Join-Path $repo ('out/x64/Release/RendererShaders/' + [string]$entry.name)
+            if ((Hash-File $file) -cne [string]$entry.sha256) { throw "Shader resource changed during build: $($entry.name)" }
+        }
+        $records = @($shaderReuse.resources)
+        if (!$records.Count) { throw 'Compiled-resource comparison list is empty.' }
+        Add-Type -Path (Join-Path $sourceRepo 'tools/VerifyShaderResources.cs')
+        $names = [string[]]@($records | ForEach-Object { [string]$_.name })
+        $languages = [int[]]@($records | ForEach-Object { [int]$_.language })
+        $sizes = [long[]]@($records | ForEach-Object { [long]$_.size })
+        $hashes = [string[]]@($records | ForEach-Object { [string]$_.sha256 })
+        foreach ($image in @('out/x64/Release/EI_Rebuild/EIRebuild64.exe',
+                              'out/x64/Release/EIRebuild64NavBake/EIRebuild64NavBake.exe')) {
+            $count = [EIShaderResourceVerifier]::Verify((Join-Path $repo $image),$names,$languages,$sizes,$hashes)
+            if ($count -ne $records.Count) { throw "Compiled-resource comparison incomplete: $image" }
+            Write-Host "Verified $count accepted resources in $image."
+        }
+        Write-Host 'Shader reuse confirmed: no shader compilation or resource regeneration in build log.'
+    }
+    if ($PhysicsFxCheck) {
+        # Keep the shared work tree locked through this dependent native check build.
+        $checkArgs = @($arguments | Where-Object { $_ -notlike '*.sln' -and $_ -notlike '/flp:*' })
+        $checkArgs = @($checkArgs | Where-Object { $_ -notlike '/t:*' })
+        & (Join-Path $PSScriptRoot 'invoke-build.ps1') $msbuild (Join-Path $repo 'PhysicsFxRenderCheck.vcxproj') @checkArgs /p:BuildProjectReferences=false *> (Join-Path $task 'physics-render-build.txt')
+        if ($LASTEXITCODE -ne 0) { throw 'Physics render check build failed.' }
+    }
     foreach ($name in 'DirectXTex','DirectXTK') {
         $compilerPdb = Join-Path $repo "out/obj/x64/Release/$name/$name.compiler.pdb"
         if (Test-Path -LiteralPath $compilerPdb) { Copy-Item -LiteralPath $compilerPdb -Destination (Join-Path $repo "out/x64/Release/$name/") -Force }
     }
-    foreach ($group in $groups | Where-Object { !$_.Hit }) {
-        $entry = $group.Entry
-        if (Test-Path -LiteralPath $entry) { Remove-CacheEntry $entry }
-        New-Item -ItemType Directory -Force -Path $entry | Out-Null
-        foreach ($pattern in $group.Patterns) {
-            $files = @(Get-ChildItem -Path (Join-Path $repo $pattern) -File -Recurse)
-            foreach ($file in $files) {
-                $destination = Join-Path $entry $file.FullName.Substring($repo.Length+1)
-                New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
-                Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
-            }
-        }
-        $lines = @(Manifest $entry)
-        if (!$lines.Count) { throw "Empty cache payload: $($group.Name)" }
-        Write-Utf8 (Join-Path $entry 'SHA256SUMS') $lines
-    }
-    Trim-Cache
+    $bytes = Trim-Cache
     $kit = Join-Path $task 'kit'
     if (Test-Path -LiteralPath $kit) { throw "Kit already exists: $kit; retain evidence and use a fresh task for timing." }
     New-Item -ItemType Directory -Path $kit | Out-Null
@@ -261,6 +280,8 @@ try {
         Copy-Item -LiteralPath (Join-Path $repo "out/x64/Release/$($target[0])/$($target[0]).pdb") -Destination (Join-Path $kit ($target[1] + '.pdb'))
     }
     foreach ($name in 'avcodec-62.dll','avformat-62.dll','avutil-60.dll','swscale-9.dll','swresample-6.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/ffmpeg/8.1.3/x64/bin/' + $name)) -Destination $kit }
+    Copy-Item -LiteralPath (Join-Path $repo 'dependencies/physx/5.6.1/bin/PhysXGpu_64.dll') -Destination $kit
+    Copy-Item -LiteralPath (Join-Path $repo 'dependencies/physx/5.6.1/bin/PhysXGpu_64.pdb') -Destination $kit
     foreach ($name in 'nvngx_dlss.dll','nvngx_dlssg.dll','nvngx_dlssd.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/dlss/v310.9.16/lib/Windows_x86_64/rel/' + $name)) -Destination $kit }
     foreach ($name in 'amd_fidelityfx_loader_dx12.dll','amd_fidelityfx_framegeneration_dx12.dll','amd_fidelityfx_upscaler_dx12.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/fidelityfx/2.3.0/signedbin/' + $name)) -Destination $kit }
     New-Item -ItemType Directory -Path (Join-Path $kit 'D3D12') | Out-Null
@@ -291,14 +312,16 @@ try {
         }
     }
     Write-Utf8 (Join-Path $kit 'SHA256SUMS') (Manifest $kit)
+    if ($PhysicsFxCheck) {
+        & (Join-Path $repo 'tools/check-physics-fx-render.ps1') -OutputDirectory (Join-Path $task 'checks/render') -Prepared -SkipBuild -KitDirectory $kit
+    }
     $clock.Stop()
-    $bytes = (Get-ChildItem -LiteralPath $CacheRoot -File -Recurse | Measure-Object Length -Sum).Sum
-    Write-Utf8 (Join-Path $task 'build-result.txt') @("Seconds=$($clock.Elapsed.TotalSeconds)","MSBuildWorkers=$cores","CacheBytes=$bytes","CacheKey=$key","CacheRoot=$CacheRoot",("Hits=" + (($groups | Where-Object Hit | ForEach-Object Name) -join ',')))
+    Write-Utf8 (Join-Path $task 'build-result.txt') @("Seconds=$($clock.Elapsed.TotalSeconds)","MSBuildWorkers=$cores","CacheBytes=$bytes","CacheRoot=$CacheRoot")
     Write-Host "Built kit in $($clock.Elapsed.TotalSeconds) seconds; cache $bytes bytes."
 } catch {
     $clock.Stop()
     $bytes = 0
-    if (Test-Path -LiteralPath $CacheRoot) { $bytes = (Get-ChildItem -LiteralPath $CacheRoot -File -Recurse | Measure-Object Length -Sum).Sum }
+    # Failure reporting does not rescan a moving/unlocked cache.
     Write-Utf8 (Join-Path $task 'build-failure.txt') @("Seconds=$($clock.Elapsed.TotalSeconds)","MSBuildWorkers=$cores","CacheBytes=$bytes",$_.Exception.Message)
     throw
 } finally {

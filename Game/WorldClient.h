@@ -1,6 +1,7 @@
 #pragma once
 /////////////////////////////////////////////////////////////////////////////////////
 #include "World.h"
+#include "PhysicsFxClient.h"
 
 #include "Weather.h"
 #include "ZoneExit.h"
@@ -133,6 +134,7 @@ private:
     CAreaMap<CMapObject> areaObjects; // area map of the all objects on the map
     CAreaMap<CBase3D> areaLights;     // area map of the all lights on the map
     //
+    PhysicsFx::Client stoneEffects;
     CTerrain *pTerrain; // all the terrain data
     CString szCurrentAllodName;
     // different data managers...
@@ -259,7 +261,7 @@ public:
     void CastShadowToTerrain(const CPlot3D &ptSunDir, const CPlot3D &ptCenter, float fpRadius,
                              CXYZW4Array &srcRect, CXYZW4Array &dstGeoms, CPlot2DArray &dstMaps,
                              CWORDArray &dstIndices, bool bSmallPrint = false,
-                             bool bCastOnBridges = true);
+                             bool bCastOnBridges = true, bool bCastOnTerrain = true);
     CPlot3D GetTerrainXYZFromScreenXY(int sx, int sy);
     CPlot3D GetTerrainXYZFromScreenXYWithBridge(int sx, int sy);
     CPlot3D GetTerrainXYZFromScreen(CPoint ptOnScreen)
@@ -267,6 +269,7 @@ public:
         return GetTerrainXYZFromScreenXY(ptOnScreen.x, ptOnScreen.y);
     }
     const CString& GetBackgroundAllod() const { return szCurrentAllodName; }
+    PhysicsFx::Client& StoneEffects() { return stoneEffects; }
     CTerrain *GetTerrain() { return pTerrain; }
     CSkyObject *GetSky() { return pSky; }
     //

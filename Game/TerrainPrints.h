@@ -1,10 +1,13 @@
 #pragma once
+#include "game_particles.h"
 /////////////////////////////////////////////////////////////////////////////////////
 
 /////////////////////////////////////////////////////////////////////////////////////
 class CTerrainPrints
 {
 private:
+    bool terrainSurface=false;
+    std::vector<owned::GameParticleGpu> terrainPatches;
     bool bProjected; // is mesh created from terrain projection ?
     bool bVisible;   // visible, если мы этот след уже видели...
     // geometry-relative data
@@ -30,6 +33,7 @@ private:
     CPlot2DArray maps;    // result mapping vertices
     CWORDArray indices;   // result mesh indices
 protected:
+    void UseTerrainSurface() { terrainSurface=true; }
     void SetGeometryPlacement(float _fX, float _fY, float _fSizeX, float _fSizeY);
     void SetTexturePlacement(float _fdx, float _fdy, float _fsx, float _fsy)
     {

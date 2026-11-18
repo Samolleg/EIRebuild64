@@ -7,6 +7,9 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "WorldClient.h"
 #include "TextureManager.h"
 #include "Terrain.h"
+#include "OwnedRender/E1Terrain.h"
+#include "OwnedRender/E1TerrainPrint.h"
+#include "retained_static_scene.h"
 #include "dx11/RendererDX11.h"
 /////////////////////////////////////////////////////////////////////////////////////
 int CTerrainPrints::Segment()
@@ -34,6 +37,12 @@ int CTerrainPrints::Draw()
     if (!bVisible)
         return 1;
 
+    if (!bProjected && terrainSurface) {
+        owned::RetainedTerrainSourceSnapshot source;
+        if(!OwnedRender::E1PhysicsTerrainSource(source))return 1;
+        terrainPatches.clear();
+        if(!theWorld.IsBridge(fX,fY))OwnedRender::BuildTerrainPrint(*source.terrain,fX,fY,fSizeX,fSizeY,fGeomRotate,fMapRotate,fdx,fdy,fsx,fsy,theWorld.GetBridgeZValue(fX,fY)+1,terrainPatches);
+    }
     if (!bProjected) // project...
     {
         CXYZW4Array srcRect;
@@ -73,7 +82,7 @@ int CTerrainPrints::Draw()
         srcRect[0].w[3] = 1;
 
         theWorld.CastShadowToTerrain(CPlot3D(0, 0, -1), CPlot3D(fX, fY, fZ + 1), 0, srcRect,
-                                     vertices, maps, indices, true);
+                                     vertices, maps, indices, true, true, !terrainSurface);
         fCos = cos(fMapRotate);
         fSin = sin(fMapRotate);
         for (int i = 0; i < vertices.GetSize() * 4; ++i)
@@ -131,6 +140,10 @@ int CTerrainPrints::Draw()
     input.projection.clip_half_width = float(clip.right - clip.left) * .5f;
     input.projection.clip_half_height = float(clip.bottom - clip.top) * .5f;
     // c74 applies terrain world fog; the cached centre fog byte is not a vertex fog input.
+    if(!terrainPatches.empty()){
+        auto terrainInput=input;terrainInput.terrain_vertices=terrainPatches.data();terrainInput.index_count=static_cast<std::uint32_t>(terrainPatches.size());
+        theRenderer.GetD3D()->SubmitC74Print(terrainInput);
+    }
     theRenderer.GetD3D()->SubmitC74Print(input);
     return TRV_VISIBLE_NOCLIP;
 }
@@ -312,6 +325,7 @@ CFirePrints::CFirePrints(float fX, float fY, float fSizeX, float fSizeY, float f
                          float fPower, int nLifetime, int nFadeoutTime)
     : CTerrainPrints(0xFFFFFFFF, fPower, nLifetime, nFadeoutTime, true)
 {
+    UseTerrainSurface();
     SetGeometryPlacement(fX, fY, fSizeX, fSizeY);
     DWORD dwType = Random(4);
     // setup texture placement

@@ -354,6 +354,9 @@
     <ClCompile Include="Game\WorldServer.cpp" />
     <ClCompile Include="Game\ZoneExit.cpp" />
     <ClCompile Include="shared\Common.cpp" />
+    <ClCompile Include="Game\PhysicsFxPhysX.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
+    <ClCompile Include="Game\PhysicsFxClient.cpp" />
+    <ClCompile Include="Game\OwnedRender\E1PhysicsDebris.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader></ClCompile>
     <ClCompile Include="stdafx.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">Create</PrecompiledHeader>
     </ClCompile>
@@ -635,4 +638,6 @@
   <Import Project="OwnedRenderer\E1RendererFacadeWarpCheck.host.targets" Condition="'$(E1RendererFacadeWarpCheck)'=='true'" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
-<Import Project="tools/TaskCache.targets" /></Project>
+<Import Project="tools/TaskCache.targets" />
+  <Import Project="tools/physx/PhysX.targets" />
+</Project>

@@ -7,11 +7,36 @@
 #include "figure_service_nodes.h"
 namespace owned {
 void bridge_append_probe_event(const char*,const char*) noexcept {}
-// Resource IO/cache is outside this group-packing fixture.
+// Test-only resource boundary. Selection, decoding and both production caches
+// are compiled unchanged from gltf_asset.cpp; files are immutable fixture blobs.
+static std::map<std::string,ResourceBlob> fixture_files;
+static std::map<std::string,unsigned> fixture_reads;
+static std::uint64_t fixture_generation=1,fixture_incarnation=100;
+struct ResourceStore::Impl {};
+ResourceStore::ResourceStore(std::uint64_t):impl_(new Impl) {}
+ResourceStore::~ResourceStore() = default;
+bool ResourceStore::open(const ResourceStoreConfig&,ResourceFailure& failure) { failure={};return true; }
+void ResourceStore::close() noexcept {}
+bool ResourceStore::resolve(const std::string& name,ResourceBlob& out,ResourceFailure& failure) const {
+    ++fixture_reads[name];auto it=fixture_files.find(name);
+    if(it==fixture_files.end()){failure.code=ResourceFailureCode::not_found;failure.message="fixture missing: "+name;return false;}
+    out=it->second;failure={};return true;
+}
+bool ResourceStore::copy_selected_memory(const std::string& name,const void* data,std::uint32_t size,
+                                         ResourceBlob& out,ResourceFailure& failure) const {
+    const auto* bytes=static_cast<const std::uint8_t*>(data);
+    out.identity.canonical_name=name;out.identity.container_incarnation=++fixture_incarnation;
+    out.bytes=std::make_shared<std::vector<std::uint8_t>>(bytes,bytes+size);failure={};return true;
+}
+bool owned_resource_runtime_mounts(ResourceStoreConfig&,std::uint64_t* generation) noexcept {
+    if(generation)*generation=fixture_generation;return true;
+}
 std::string ResourceIdentity::key() const { return canonical_name; }
 namespace {
+std::vector<std::string> geometry_keys;
 template<class Build>
-std::shared_ptr<const VisualPreparedResources::MergedGeometry> merged_geometry(const std::string&,Build&& build) {
+std::shared_ptr<const VisualPreparedResources::MergedGeometry> merged_geometry(const std::string& key,Build&& build) {
+    geometry_keys.push_back(key);
     auto geometry=std::make_shared<VisualPreparedResources::MergedGeometry>();build(*geometry);return geometry;
 }
 }
@@ -56,7 +81,7 @@ static void must_reject(const std::function<void()>& action) {
     check(rejected,"invalid equipment accepted");
 }
 int wmain(int argc,wchar_t** argv)try {
-    check(argc==3 || argc==4,"usage: check-gltf-equipment body.glb profile.json [clothing-directory]");
+    check(argc==3 || argc==4 || argc==6 || argc==7,"usage: check-gltf-equipment body.glb profile.json [clothing-directory [wolf.png leopard.png [models-directory]]]");
     using W=OwnedRender::EquipmentWeapon;
     const W sword{true,false,false,false},shield{true,false,true,false},staff{true,false,false,true},two{true,true,false,false};
     std::array<W,4> slots{sword,shield,{},two};
@@ -80,6 +105,88 @@ int wmain(int argc,wchar_t** argv)try {
     broken=registry;broken["items"]["sword01"]["materials"]["iron"]["hand_r"].push_back(entry);
     must_reject([&]{item_bindings(broken,selected);});
     selected.shape="unregistered";check(item_bindings(registry,selected).empty(),"unregistered item");
+    const auto shared=Json::parse(R"({"items":{"vlfh":{
+      "defaults":{"armor_0":[{"profile":"human.v1","resource":"models/items/vlfh.glb","socket":"socket_head"}]},
+      "materials":{
+        "wolf hide":{"armor_0":{"textures":[{"binding":0,"material":0,"baseColor":"models/items/textures/wolf.png"}]}},
+        "leopard hide":{"armor_0":{"textures":[{"binding":0,"material":0,"baseColor":"models/items/textures/leopard.png"}]}},
+        "special":{"armor_0":[{"profile":"human.v1","resource":"models/items/vlfh-special.glb","socket":"socket_head"}]},
+        "hidden":{"armor_0":[]}
+      }}}})");
+    owned::VisualEquipmentItem hood;hood.kind=owned::VisualEquipmentItem::Kind::armor;
+    hood.shape="vlfh";hood.slot="armor_0";hood.material="wolf hide";
+    const auto wolf=item_bindings(shared,hood);
+    hood.material="leopard hide";const auto leopard=item_bindings(shared,hood);
+    check(wolf.size()==1 && leopard.size()==1 && wolf[0].resource==leopard[0].resource &&
+          wolf[0].textures.size()==1 && leopard[0].textures.size()==1 &&
+          wolf[0].textures[0].resource!=leopard[0].textures[0].resource,"common model with distinct textures");
+    hood.material="special";const auto special=item_bindings(shared,hood);
+    check(special.size()==1 && special[0].resource=="models/items/vlfh-special.glb" &&
+          special[0].textures.empty(),"material-specific model takes priority");
+    hood.material="hidden";check(item_bindings(shared,hood).empty(),"explicit empty overrides common model");
+    {
+     // Conditions remove different source entries depending on the outfit.
+     // Texture binding indices still identify the original default list.
+     auto conditional=shared;
+     auto& entries=conditional["items"]["vlfh"]["defaults"]["armor_0"];
+     auto second=entries[0];second["resource"]="models/items/vlfh-alt.glb";
+     const Json condition={{"slot","armor_4"},{"shape","pants"}};
+     entries[0]["requiresEquipment"]=condition;second["unlessEquipment"]=condition;
+     entries.push_back(second);
+     auto& maps=conditional["items"]["vlfh"]["materials"]["wolf hide"]["armor_0"]["textures"];
+     auto secondMap=maps[0];secondMap["binding"]=1u;secondMap["baseColor"]="models/items/textures/leopard.png";
+     maps.push_back(secondMap);
+     hood.material="wolf hide";
+     owned::VisualEquipmentItem pants;pants.kind=owned::VisualEquipmentItem::Kind::armor;
+     pants.slot="armor_4";pants.shape="pants";
+     const std::vector<owned::VisualEquipmentItem> without{hood},with{hood,pants};
+     const auto absent=item_bindings(conditional,hood,&without),present=item_bindings(conditional,hood,&with);
+     check(absent.size()==1 && absent[0].resource=="models/items/vlfh-alt.glb" &&
+           absent[0].textures.size()==1 && absent[0].textures[0].resource=="models/items/textures/leopard.png",
+           "conditional common binding lost its texture");
+     check(present.size()==1 && present[0].resource=="models/items/vlfh.glb" &&
+           present[0].textures.size()==1 && present[0].textures[0].resource=="models/items/textures/wolf.png",
+           "conditional common binding selected wrong texture");
+    }
+    hood.material="missing";must_reject([&]{item_bindings(shared,hood);});
+    hood.material="wolf hide";
+    auto wrong=shared;wrong["items"]["vlfh"]["materials"]["wolf hide"]["armor_0"]["textures"][0]["baseColor"]="models/items/textures/../secret.png";
+    must_reject([&]{item_bindings(wrong,hood);});
+    wrong=shared;wrong["items"]["vlfh"]["materials"]["wolf hide"]["armor_0"]["textures"][0]["binding"]=2u;
+    must_reject([&]{item_bindings(wrong,hood);});
+    wrong=shared;wrong["items"]["vlfh"]["materials"]["wolf hide"]["armor_0"]["textures"].push_back(wrong["items"]["vlfh"]["materials"]["wolf hide"]["armor_0"]["textures"][0]);
+    must_reject([&]{item_bindings(wrong,hood);});
+    wrong=shared;wrong["items"]["vlfh"]["materials"]["wolf hide"]["armor_0"]["resource"]="models/items/ignored.glb";
+    must_reject([&]{item_bindings(wrong,hood);});
+    wrong=shared;wrong["items"]["vlfh"]["materials"]["wolf hide"]["armor_0"]["textures"][0]["material"]=std::uint64_t(UINT32_MAX)+1;
+    must_reject([&]{item_bindings(wrong,hood);});
+    {
+     const std::string bodyKey="models/characters/control.glb";
+     auto skin=[](const char* file){return Json{{"profile","human.v1"},{"resource",std::string("models/items/")+file+".glb"},{"binding","skin"},{"visibility","always"}};};
+     Json layers;auto free=skin("shirt-free"),tucked=skin("shirt-tucked");
+     const Json condition={{"slot","armor_4"},{"shape","pants"}};
+     free["unlessEquipment"]=condition;tucked["requiresEquipment"]=condition;
+     layers["items"]["shirt"]["materials"]["wool"]["armor_3"]=Json::array({free,tucked});
+     layers["items"]["pants"]["materials"]["wool"]["armor_4"]=Json::array({skin("pants")});
+     layers["items"]["pants"]["materials"]["missing"]["armor_4"]=Json::array();
+     auto upper=skin("base-upper"),lower=skin("base-lower");
+     upper["slot"]="base_upper";upper["hiddenBySlots"]=Json::array({"armor_3"});
+     lower["slot"]="base_lower";lower["hiddenBySlots"]=Json::array({"armor_4"});
+     layers["baseLayers"][bodyKey]=Json::array({upper,lower});
+     owned::VisualEquipmentItem shirt,pants;shirt.kind=pants.kind=owned::VisualEquipmentItem::Kind::armor;
+     shirt.shape="shirt";pants.shape="pants";shirt.slot="armor_3";pants.slot="armor_4";shirt.material=pants.material="wool";
+     for(unsigned mask=0;mask<4;++mask){
+      std::vector<owned::VisualEquipmentItem> outfit;if(mask&1)outfit.push_back(shirt);if(mask&2)outfit.push_back(pants);
+      const auto selected=outfit_bindings(layers,outfit,bodyKey);check(selected.size()==2,"base layer equip/remove atomic selection");
+      if(mask&1)check(selected[0].resource==(mask&2?"models/items/shirt-tucked.glb":"models/items/shirt-free.glb"),"whole-outfit condition");
+     }
+     pants.material="missing";auto empty=outfit_bindings(layers,{pants},bodyKey);check(empty.size()==2 && empty[0].slot=="base_upper" && empty[1].slot=="base_lower","empty registered visual must not hide base layer");
+     check(outfit_bindings(layers,{},"models/characters/other.glb").empty(),"base layer body identity isolation");
+     auto broken=layers;broken["baseLayers"][bodyKey].push_back(upper);must_reject([&]{outfit_bindings(broken,{},bodyKey);});
+     broken=layers;broken["items"]["shirt"]["materials"]["wool"]["armor_3"][0]["unlessEquipment"]=nullptr;
+     must_reject([&]{outfit_bindings(broken,{shirt},bodyKey);});
+     std::cout<<"PASS conditional outfit variants, base layer equip/remove, empty visual and body isolation\n";
+    }
     const auto profile=read_file(argv[2]);Json doc;
     const auto itemBytes=fixture(doc);const auto item=decode(itemBytes,profile,publish);
     check(item->rigid && !item->gpu_animation && !item->animation,"item must not allocate animation");
@@ -116,6 +223,17 @@ int wmain(int argc,wchar_t** argv)try {
     check(vertex.joints[0]==31&&vertex.weights[0]==1&&vertex.correction_node==UINT32_MAX,"attachment GPU socket index");
     for(unsigned r=0;r<3;++r)for(unsigned c=0;c<4;++c)
         check_near(vertex.inverse[0][r*4+c],r==c?1.f:0.f,"attachment inverse bind");
+    auto textureA=std::make_shared<const owned::skn::Dds>();
+    auto textureB=std::make_shared<const owned::skn::Dds>();
+    std::map<unsigned,std::shared_ptr<const owned::skn::Dds>> overridesA{{0,textureA}},overridesB{{0,textureB}};
+    owned::build_skn_groups(visual,runtime,&socketNodes,true,false,&overridesA);
+    const auto firstKey=owned::geometry_keys.back();
+    owned::build_skn_groups(visual,runtime,&socketNodes,true,false,&overridesB);
+    check(owned::geometry_keys.back()==firstKey,"texture variant changed geometry cache key");
+    const auto& firstVariant=visual.prepared->merged_groups[2];
+    const auto& secondVariant=visual.prepared->merged_groups[3];
+    check(firstVariant.skn_asset==secondVariant.skn_asset && firstVariant.skn_base_color_override==textureA &&
+          secondVariant.skn_base_color_override==textureB,"texture variants failed to share geometry or remain distinct");
     auto changed=doc;changed["asset"]["extras"]["ei"]["socket"]="wrong";
     must_reject([&]{decode(fixture(changed),profile,publish);});
     changed=doc;changed["asset"]["extras"]["ei"]["grip"]["scale"]={1,0,1};
@@ -139,7 +257,7 @@ int wmain(int argc,wchar_t** argv)try {
     check(&forearmChain==&body->attachment_chain("CC_Base_Forearm.L") && body->sockets.size()==6,
         "bone attachment chain must be cached once");
     std::vector<std::shared_ptr<owned::gltf::Asset>> garments;
-    if(argc==4) {
+    if(argc>=4) {
      Json wardrobe=Json::parse(R"({"items":{"shirt":{"materials":{"wool":{"armor_3":[{"profile":"human.v1","resource":"models/items/shirt.glb","binding":"skin"}]}}}}})");
      owned::VisualEquipmentItem shirt;shirt.kind=owned::VisualEquipmentItem::Kind::armor;shirt.shape="shirt";shirt.material="wool";shirt.slot="armor_3";
      auto binding=item_bindings(wardrobe,shirt);check(binding.size()==1 && binding[0].skinned && binding[0].socket.empty(),"wardrobe skin selection");
@@ -147,8 +265,15 @@ int wmain(int argc,wchar_t** argv)try {
      shirt.kind=owned::VisualEquipmentItem::Kind::armor;
      wardrobe["items"]["shirt"]["materials"]["wool"]["armor_3"][0]["socket"]="socket_head";
      must_reject([&]{item_bindings(wardrobe,shirt);});
-     for(const wchar_t* name:{L"vlcsh-wool.glb",L"vlcpt-wool.glb",L"vlcgl-wool.glb",L"vlcbt-wool.glb"}) {
-      auto garment=decode(read_file((std::filesystem::path(argv[3])/name).c_str()),profile,publish);
+     const auto registryBlob=read_file((std::filesystem::path(argv[3]).parent_path()/"registry.v1.json").c_str());
+     const auto actualRegistry=Json::parse(registryBlob.bytes->begin(),registryBlob.bytes->end());
+     std::set<std::string> resources;
+     for(const auto& shape:actualRegistry.at("items"))for(const auto& material:shape.at("materials"))for(const auto& slot:material)for(const auto& entry:slot)
+      if(entry.value("binding","")=="skin")resources.insert(entry.at("resource").get<std::string>());
+     for(const auto& layers:actualRegistry.at("baseLayers"))for(const auto& entry:layers)resources.insert(entry.at("resource").get<std::string>());
+     check(resources.size()==66,"complete author wardrobe resources");
+     for(const auto& name:resources) {
+      auto garment=decode(read_file((std::filesystem::path(argv[3])/std::filesystem::path(name).filename()).c_str()),profile,publish);
       check(garment->wearable && !garment->rigid && !garment->animation && !garment->gpu_animation,"garment allocated animation");
       auto nodes=wearable_nodes(*garment,*body);
       check(wearable_radius(*garment,*body,nodes)>0,"garment bounds");
@@ -171,24 +296,120 @@ int wmain(int argc,wchar_t** argv)try {
       must_reject([&]{wearable_nodes(*garment,*body);});garment->geometry.joints[used].name=oldName;
       garments.push_back(std::move(garment));
      }
-     const auto registryBlob=read_file((std::filesystem::path(argv[3]).parent_path()/"registry.v1.json").c_str());
-     const auto actualRegistry=Json::parse(registryBlob.bytes->begin(),registryBlob.bytes->end());
      const char* shapes[]={"vlcsh","vlcpt","vlcgl","vlcbt"};
      const char* armorSlots[]={"armor_3","armor_4","armor_6","armor_5"};
-     for(unsigned mask=0;mask<16;++mask) {
-      unsigned count=0;
+     unsigned variants=0;
+     for(unsigned family=0;family<3;++family)for(const char* material:{"wool","cotton","silk red","silk blue","astral thread"})for(unsigned i=0;i<4;++i){
+      owned::VisualEquipmentItem selected;selected.kind=owned::VisualEquipmentItem::Kind::armor;
+      selected.shape=std::string(shapes[i])+(family?std::to_string(family):"");selected.material=material;selected.slot=armorSlots[i];
+      const std::vector<owned::VisualEquipmentItem> outfit{selected};const auto list=item_bindings(actualRegistry,selected,&outfit);
+      if(family==2 && selected.material!="wool")check(list.empty(),"unauthored simple material substituted");
+      else {check(!list.empty(),"authored variant absent");++variants;}
+     }
+     check(variants==44,"complete selectable wardrobe");
+     for(unsigned family=0;family<3;++family)for(unsigned mask=0;mask<16;++mask) {
+      std::vector<owned::VisualEquipmentItem> outfit;
       for(unsigned i=0;i<4;++i)if(mask&(1u<<i)) {
        owned::VisualEquipmentItem selected;selected.kind=owned::VisualEquipmentItem::Kind::armor;
-       selected.shape=shapes[i];selected.material="wool";selected.slot=armorSlots[i];
-       auto list=item_bindings(actualRegistry,selected);check(list.size()==1 && list[0].skinned,"actual wool binding");count+=unsigned(list.size());
-       for(const char* material:{"cotton","silk red","silk blue","astral thread"}) {
-        selected.material=material;check(item_bindings(actualRegistry,selected).empty(),"unconverted cloth material substituted");
-       }
+       selected.shape=std::string(shapes[i])+(family?std::to_string(family):"");selected.material=family==2?"wool":(i%2?"silk red":"cotton");selected.slot=armorSlots[i];outfit.push_back(selected);
       }
+      const auto list=outfit_bindings(actualRegistry,outfit,"models/characters/nala.glb");
       unsigned expected=0;for(unsigned i=0;i<4;++i)expected+=(mask>>i)&1;
-      check(count==expected,"partial/removed outfit selection");
+      expected+=!(mask&1);expected+=!(mask&2);if(family==0 && (mask&2))++expected;if(family==1 && (mask&1))++expected;
+      check(list.size()==expected,"partial/removed outfit layer count");
+      bool upper=false,lower=false;
+      for(const auto& binding:list){
+       check(resources.count(binding.resource)==1 && binding.skinned,"unknown wardrobe layer");
+       upper|=binding.slot=="base_upper";lower|=binding.slot=="base_lower";
+       if(family==0 && binding.slot=="armor_3")check((binding.resource.find("-tucked")!=std::string::npos)==bool(mask&2),"starter shirt tuck condition");
+       if(family==0 && binding.resource.find("-wrap-")!=std::string::npos)check((binding.resource.find("-wrap-over")!=std::string::npos)==bool(mask&1),"starter wrap condition");
+      }
+      check(upper==!(mask&1) && lower==!(mask&2),"underwear equip/remove");
      }
-     std::cout<<"PASS four clip-free garments, shared palette, bind rejection, actual registry 16 equip/remove combinations and body/weapon group preservation\n";
+     std::cout<<"PASS 66 clip-free layers, 44 variants, 48 equip/remove combinations with mixed materials, shared palette, bind rejection and body/weapon preservation\n";
+    }
+    if(argc>=6) {
+     const std::array<float,4> factor{{1,1,1,1}};
+     auto a=decode_base_color(read_file(argv[4]),publish,factor);
+     auto b=decode_base_color(read_file(argv[5]),publish,factor);
+     check(a.mips.size()>1 && b.mips.size()>1 && a.mips[0].width==1024 && a.mips[0].height==1024 &&
+           b.mips[0].width==1024 && b.mips[0].height==1024,"real hood texture dimensions/mips");
+     check(*a.blob.bytes!=*b.blob.bytes,"different source textures decoded identically");
+     must_reject([&]{auto invalid=blob("not a PNG",9);decode_base_color(invalid,publish,factor);});
+     // Call the actual registry -> Asset cache -> external texture selection.
+     // The virtual filesystem is the only stub, so changing a material cannot
+     // quietly reload a GLB or alias two different texture byte owners.
+     auto put=[](const std::string& name,owned::ResourceBlob value) {
+       value.identity.canonical_name=name;owned::fixture_files[name]=std::move(value);
+     };
+     // Selection always requires the characters object, even for an item.
+     auto productionRegistry=shared;productionRegistry["version"]=1;productionRegistry["characters"]=Json::object();
+     productionRegistry["items"]["vlfh"]["defaults"]["armor_0"][0]["binding"]="skin";
+     productionRegistry["items"]["vlfh"]["defaults"]["armor_0"][0].erase("socket");
+     productionRegistry["items"]["vlfh"]["materials"]["special"]["armor_0"][0]["binding"]="skin";
+     productionRegistry["items"]["vlfh"]["materials"]["special"]["armor_0"][0].erase("socket");
+     productionRegistry["items"]["vlfh"]["materials"]["bad"]["armor_0"]=Json::parse(R"({"textures":[{"binding":0,"material":0,"baseColor":"models/items/textures/bad.png"}]})");
+     productionRegistry["items"]["vlfh"]["materials"]["bad-index"]["armor_0"]=Json::parse(R"({"textures":[{"binding":0,"material":999,"baseColor":"models/items/textures/wolf.png"}]})");
+     const auto registryText=productionRegistry.dump();put("models/registry.v1.json",blob(registryText.data(),registryText.size()));
+     put("profiles/human.v1.json",profile);
+     put("models/items/vlfh.glb",read_file((std::filesystem::path(argv[3])/L"vlcsh-wool.glb").c_str()));
+     put("models/items/vlfh-special.glb",read_file((std::filesystem::path(argv[3])/L"vlcpt-wool.glb").c_str()));
+     put("models/items/textures/wolf.png",read_file(argv[4]));
+     put("models/items/textures/leopard.png",read_file(argv[5]));
+     put("models/items/textures/bad.png",blob("not a PNG",9));
+     hood.material="wolf hide";const auto first=select_equipment({hood}, "");
+     hood.material="leopard hide";const auto second=select_equipment({hood}, "");
+     check(first.size()==1 && second.size()==1 && first[0].asset==second[0].asset,
+           "production asset cache duplicated common GLB");
+     check(owned::fixture_reads["models/items/vlfh.glb"]==1,"common GLB loaded more than once");
+     check(first[0].base_color_overrides.at(0)!=second[0].base_color_overrides.at(0),
+           "production texture cache aliased different materials");
+     check(owned::skn::from_gltf(first[0].asset)==owned::skn::from_gltf(second[0].asset),
+           "GPU geometry runtime asset not shared");
+     hood.material="wolf hide";const auto again=select_equipment({hood}, "");
+     check(again[0].base_color_overrides.at(0)==first[0].base_color_overrides.at(0),
+           "selected PNG was decoded more than once while referenced");
+     hood.material="special";const auto alternative=select_equipment({hood}, "");
+     check(alternative.size()==1 && alternative[0].asset!=first[0].asset &&
+           alternative[0].base_color_overrides.empty(),"production alternative model priority");
+     hood.material="bad";must_reject([&]{select_equipment({hood}, "");});
+     hood.material="bad-index";must_reject([&]{select_equipment({hood}, "");});
+     hood.material="wolf hide";check(select_equipment({hood}, "")[0].asset==first[0].asset,
+           "bad texture poisoned common model cache");
+     std::cout<<"PASS common geometry identity, separate hood textures, model override priority and external PNG decode\n";
+     std::cout<<"PASS production equipment selection, shared GLB and texture caches, bad texture isolation\n";
+     if(argc==7) {
+      const auto dir=std::filesystem::path(argv[6]);++owned::fixture_generation;owned::fixture_reads.clear();
+      put("models/registry.v1.json",read_file((dir/L"registry.v1.json").c_str()));
+      put("models/items/vlfh.glb",read_file((dir/L"items/vlfh.glb").c_str()));
+      for(const char* code:{"uq","uw","wh","ww","ub","wo","lh","pt"}) {
+       const std::string resource=std::string("models/items/textures/vlfh-")+code+".png";
+       put(resource,read_file((dir/"items/textures"/(std::string("vlfh-")+code+".png")).c_str()));
+      }
+      const char* names[]={"tiger hide","tiger hide white","wolf hide","white wolf hide", "black wolf hide","warg hide","leopard hide","black panter hide"};
+      std::vector<std::vector<owned::gltf::EquipmentAsset>> actual;
+      for(const char* name:names){hood.material=name;actual.push_back(select_equipment({hood}, ""));
+       check(actual.back().size()==1 && actual.back()[0].asset->rigid &&
+             actual.back()[0].socket=="socket_head" && actual.back()[0].base_color_overrides.count(0)==1,
+             "real vlfh registry selection");
+       check(actual.back()[0].asset==actual.front()[0].asset,"real vlfh geometry not shared");
+      }
+      check(owned::fixture_reads["models/items/vlfh.glb"]==1,"real vlfh GLB loaded more than once");
+      check(actual.front()[0].asset->rest_vertices.size()==233 &&
+            actual.front()[0].asset->geometry.materials[0].alpha==1,"real hood geometry or shadow coverage");
+      const unsigned realIdle=named_clip(animation,"idle");
+      Playback realPose{realIdle,realIdle,animation.clips[realIdle].duration*.37f,0,1.f};
+      const auto realReference=evaluate(animation,realPose).joints;
+      const auto realGpu11=gpu(animation,realPose),realGpu12=gpu12(animation,realPose);
+      const auto& head=body->attachment_chain("socket_head");const auto index=head.back().node;
+      for(const auto& v:actual.front()[0].asset->rest_vertices)for(unsigned row=0;row<3;++row) {
+       float expected=realReference[index][row*4+3],d11=realGpu11[index].rows[row][3],d12=realGpu12[index].rows[row][3];
+       for(unsigned c=0;c<3;++c){expected+=realReference[index][row*4+c]*v.position[c];
+        d11+=realGpu11[index].rows[row][c]*v.position[c];d12+=realGpu12[index].rows[row][c]*v.position[c];}
+       check_near(expected,d11,"real hood D3D11 socket");check_near(expected,d12,"real hood D3D12 socket");
+      }
+      std::cout<<"PASS actual vlfh registry: 8 materials, one rigid GLB, separate PNGs, D3D11/D3D12 head attachment\n";
+     }
     }
     const unsigned idle=named_clip(animation,"idle");check(idle!=UINT32_MAX,"body idle");
     unsigned moving=idle;
