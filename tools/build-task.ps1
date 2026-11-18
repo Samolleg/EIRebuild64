@@ -1,14 +1,14 @@
 #requires -Version 7.6.10
 #requires -PSEdition Core
 # EID3D11_SHADER_STORE persists DXBC across worktrees in CacheRoot/ShaderStore.
-# Compiler-keyed entries share the cache size limit (20 GB by default).
+# Compiler-keyed entries share the cache size limit (40 GiB by default).
 param(
     [string]$CacheRoot = $env:EIREBUILD64_BUILD_CACHE,
     [switch]$PhysicsFxCheck,
     [string]$ShaderResourceManifest = $env:EIREBUILD64_SHADER_RESOURCE_MANIFEST,
     [string]$RendererAssetsSource,
     [string]$RendererMaterialsSource,
-    [ValidateRange(1,1024)][int]$CacheLimitGB = 20,
+    [ValidateRange(1,1024)][int]$CacheLimitGB = 40,
     [ValidateRange(1,100)][int]$CacheVersions = 2
 )
 $ErrorActionPreference = 'Stop'

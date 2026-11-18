@@ -4,7 +4,9 @@
 For callers that start this script in a child PowerShell process, including
 `task accept`, the process environment variable `EIREBUILD64_BUILD_CACHE` supplies
 the same parameter's default. An explicit `-CacheRoot` takes precedence; without
-either value the standard `builds/rebuild64/cache` is used.
+either value the standard `builds/rebuild64/cache` is used. The default limit
+is 40 GiB (42,949,672,960 bytes) including the persistent work tree. Each
+library or shader group retains at most two versions by default.
 
 This changes only build storage. Existing path/reparse checks, exclusive locking,
 cache hash validation and size limits remain in force. Do not reuse another

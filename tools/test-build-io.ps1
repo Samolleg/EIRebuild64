@@ -55,4 +55,17 @@ $large=[IO.File]::Create((Join-Path $CacheRoot 'work/large'));$large.SetLength(1
 Reject {Trim-Cache}
 Verify ([IO.File]::Exists((Join-Path $CacheRoot 'work/large'))) 'Prune deleted persistent work.'
 [IO.File]::Delete((Join-Path $CacheRoot 'work/large'))
+# Exercise the real default and trim arithmetic without allocating 40 GiB.
+& {
+    $limitParameter = $ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'CacheLimitGB' }
+    $CacheLimitGB = $limitParameter.DefaultValue.SafeGetValue()
+    Verify ($CacheLimitGB -eq 40) 'Default cache limit is not 40 GiB.'
+    $logicalSize = 40GB
+    function Get-BuildFiles([string]$Root) {
+        [pscustomobject]@{ FullName = Join-Path $Root 'work/logical-file'; Length = $logicalSize }
+    }
+    Verify ((Trim-Cache) -eq 40GB) 'Work at the default limit was rejected.'
+    $logicalSize++
+    Reject { Trim-Cache }
+}
 Write-Host "PASS: $script:checks build IO checks."
