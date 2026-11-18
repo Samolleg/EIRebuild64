@@ -1606,6 +1606,10 @@ public:
     // points that touch renderer state begin with SCENE_ENTRY, so an
     // unconverted caller stays correct, only synchronous (each such reason is
     // logged once as render_thread_sync and counted in the summary).
+    HRESULT finish_embedded_scene_commands() noexcept;
+    enum class EmbeddedBatch { geometry, composite, end_scene };
+    HRESULT queue_embedded_batch(EmbeddedBatch batch);
+    bool embedded_render_thread_active() const noexcept { return scene_thread_ && scene_thread_->running(); }
     bool scene_mode() const noexcept { return scene_mode_.load(std::memory_order_acquire); }
     bool on_scene_thread() const noexcept { return scene_thread_ && scene_thread_->on_thread(); }
     bool scene_queue() const noexcept { return scene_mode() && !on_scene_thread() && !scene_inline_; }
@@ -3277,6 +3281,8 @@ private:
     // at a frame boundary, with the scene thread drained.
     std::unique_ptr<SceneThread> scene_thread_;
     std::atomic<bool> scene_mode_{false};
+    bool embedded_scene_pending_ = false; // written by the frame producer only
+    HRESULT embedded_scene_result_ = S_OK; // worker writes; producer reads after sync
     // ---- Core mode state (x86 game process; renderer_game.cpp) ----------------
     bool core_mode_ = false;
     std::uint64_t core_present_serial_ = 0;      // presents sent (the host publishes presents_done)

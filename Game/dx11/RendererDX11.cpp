@@ -84,15 +84,7 @@ bool CDX11::SetRenderStates()
 {
     // Native packets capture fake_dx7 state at submission. D3D12 creates its
     // PSOs from those values; no D3D11 immediate state belongs to this path.
-    if (rendererFacade) {
-        bool nativeD3D12 = false;
-        const HRESULT hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
-            nativeD3D12 = renderer.d3d12_backend();
-            return S_OK;
-        });
-        IfFailedThrowHR(hr);
-        if (nativeD3D12) return true;
-    }
+    if (D3D12Selected()) return true;
     D3D11_RENDER_TARGET_BLEND_DESC rtbd = { 0 };
     auto &rs = fake_dx7.render_state;
     // true/false
@@ -768,7 +760,7 @@ void CDX11::RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals)
     frame.render[D3DRENDERSTATE_FOGENABLE] = fogState.render[D3DRENDERSTATE_FOGENABLE];
     frame.render[D3DRENDERSTATE_FOGCOLOR] = fogState.render[D3DRENDERSTATE_FOGCOLOR];
     bool owned = false;
-    const HRESULT pass = rendererFacade->Visit([&](owned::Renderer& renderer) {
+    HRESULT pass = rendererFacade->Visit([&](owned::Renderer& renderer) {
         // The owned-visual frame draws shadows, point lights and every claimed
         // visual, and flushes the static set itself; without it (or when it
         // was rejected before the flush) the static set is flushed here.
@@ -780,10 +772,10 @@ void CDX11::RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals)
         if (SUCCEEDED(hr) && visuals && owned)
             OwnedRender::E1DrawPhysicsDebris(renderer, frame, *visuals);
         // Complete queued colour before the host draws remaining overlays.
-        if (SUCCEEDED(hr)) hr = renderer.flush_native();
         if (FAILED(hr)) renderer.discard_native();
         return hr;
     });
+    if (SUCCEEDED(pass)) pass = rendererFacade->SubmitWorldBatch(owned::Renderer::EmbeddedBatch::geometry);
     if (FAILED(pass)) OwnedRender::E1OwnedVisualFrameNewDraw();
     c56WorldPassRan = true;
     RefreshOwnedTargets();
@@ -913,9 +905,7 @@ void CDX11::EndWorld()
     // Finish the same c56 world pass before the caller starts drawing the
     // interface. composite_world drains queued native geometry and performs
     // the renderer-owned world composition; Present remains the frame owner.
-    const HRESULT composite = rendererFacade->Visit([](owned::Renderer& renderer) {
-        return renderer.composite_world();
-    });
+    const HRESULT composite = rendererFacade->SubmitWorldBatch(owned::Renderer::EmbeddedBatch::composite);
     if (FAILED(composite))
         GameJournal::Event("ERROR", "world_composite", "operation=composite_world hr=%08lx",
             static_cast<unsigned long>(composite));
@@ -935,15 +925,16 @@ void CDX11::EndWorld()
 void CDX11::BeginInterface()
 {
     // Interface-only 3D must follow world composition, just like the mission HUD.
-    IfFailedThrowHR(rendererFacade->Visit([](owned::Renderer& renderer) {
-        return renderer.composite_world();
-    }));
+    IfFailedThrowHR(rendererFacade->SubmitWorldBatch(owned::Renderer::EmbeddedBatch::composite));
     RefreshOwnedTargets();
     SetRenderStates();
 }
 
 void CDX11::RefreshOwnedTargets()
 {
+    // D3D12 packets bind their own targets. Do not wait on a submitted
+    // world batch just to execute the D3D11 immediate-context rebind.
+    if (D3D12Selected()) return;
     IfFailedThrowHR(rendererFacade->Visit([](owned::Renderer& renderer) {
         return renderer.bind_embedded_targets();
     }));
@@ -997,7 +988,7 @@ void CDX11::EndFrame(bool present)
         rendererFacade->Visit([&](owned::Renderer& renderer) {
             passes = renderer.take_gpu_pass_report(&gpuWaits);
             fgActive = renderer.frame_generation_stats().active;
-            sceneThread = renderer.scene_mode();
+            sceneThread = renderer.embedded_render_thread_active();
             return S_OK;
         });
         const auto sample = frameTiming.Read();

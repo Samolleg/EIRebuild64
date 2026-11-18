@@ -496,6 +496,7 @@ void RetainedStaticScene::lifecycle_removed_unlocked(std::int32_t signed_id) noe
         visual->second.effects = {};
         visual->second.effects_anchored = false;
         visual->second.route.reset();
+        visual->second.neutral_pose_lease.reset();
         visual->second.has_object_pose = false;
         bridge_index_dirty_ |= !visual->second.bridge_planes.empty();
         visual->second.bridge_planes.clear();
@@ -695,6 +696,7 @@ bool RetainedStaticScene::visual_seed(std::int32_t signed_id,
         auto& entity = seed.entity;
         if (++next_visual_incarnation_ == 0) ++next_visual_incarnation_;
         entity.resource = {signed_id, next_visual_incarnation_};
+        entity.neutral_pose_lease.reset();
         entity.assembly = std::move(assembly);
         entity.prepared = std::make_shared<VisualPreparedResources>();
         entity.mesh_declared = true;
@@ -820,6 +822,7 @@ void RetainedStaticScene::positive_lifecycle_reset(
             item.second.effects = {};
             item.second.effects_anchored = false;
             item.second.route.reset();
+            item.second.neutral_pose_lease.reset();
             item.second.has_object_pose = false;
             item.second.bridge_planes.clear();
             item.second.last_idle_event = 0;
@@ -1504,6 +1507,7 @@ bool RetainedStaticScene::visual_declare_mesh(VisualResourceIncarnation resource
     if (entity->mesh_declared == present) return true;
     entity->mesh_declared = present;
     if (!present) {
+        entity->neutral_pose_lease.reset();
         entity->assembly.reset();
         entity->prepared.reset();
         entity->envelope_radius = 0;
@@ -1659,6 +1663,7 @@ bool RetainedStaticScene::visual_publish_assembly(VisualResourceIncarnation reso
             !part.material || (bool(part.texture) == bool(part.surface)) ||
             !part.source_available ||
             (part.surface && !part.surface->id)) return false;
+    entity->neutral_pose_lease.reset();
     entity->assembly = std::move(assembly);
     entity->mesh_declared = true;
     try {
@@ -1816,6 +1821,7 @@ bool RetainedStaticScene::visual_replace_surface(std::uint64_t id,
                 entity.surface_lost = true;surface_lost_any_ = true;
                 entity.surface_rebind_attempts = 0;entity.surface_rebind_frame = 0;
             }
+            entity.neutral_pose_lease.reset();
             entity.assembly = std::move(next);
             shadow_source_changed_unlocked(entity.resource.signed_id);
             // Topology, pose and its deformation envelope have not changed.
@@ -1878,6 +1884,7 @@ bool RetainedStaticScene::visual_replace_generated_texture(const std::string& so
                 visual_frame_changed_unlocked();
                 values_changed = true;
             }
+            entity.neutral_pose_lease.reset();
             entity.assembly = std::move(next);
             shadow_source_changed_unlocked(entity.resource.signed_id);
             // Texture/alpha changed; geometry and conservative pose envelope did not.
@@ -2341,6 +2348,7 @@ bool RetainedStaticScene::visual_publish_object_pose_unlocked(
     if (!retained_object_matrix(values.position,values.quaternion,matrix)) return false;
     changed_output=true;
     if (pose_changed && ++entity->pose_revision == 0) ++entity->pose_revision;
+    entity->neutral_pose_lease.reset();
     entity->object_pose = values;
     entity->has_object_pose = true;
     entity->tick.object_flags = values.object_flags;
@@ -2385,6 +2393,16 @@ bool RetainedStaticScene::visual_object_pose(VisualResourceIncarnation resource,
     if (!entity || !entity->has_object_pose) return false;
     values = entity->object_pose;
     return true;
+}
+
+std::weak_ptr<const char> RetainedStaticScene::visual_neutral_pose_lease(VisualResourceIncarnation resource) {
+    ExclusiveLock guard(lock_);
+    auto* entity = visual_find_unlocked(resource);
+    if (!entity || !entity->assembly || entity->tick.unit || !entity->has_object_pose ||
+        !entity->object_pose.selection.neutral ||
+        entity->assembly->revision != entity->object_pose.appearance_revision) return {};
+    if (!entity->neutral_pose_lease) entity->neutral_pose_lease = std::make_shared<const char>(0);
+    return entity->neutral_pose_lease;
 }
 
 bool RetainedStaticScene::visual_object_pose_current(VisualResourceIncarnation resource,
@@ -2616,6 +2634,7 @@ bool RetainedStaticScene::visual_publish_forced_weapon_ids(
 void RetainedStaticScene::visual_record_failure_unlocked(VisualEntity& entity,
     const char* predicate, const char* scope, bool invalidate) noexcept {
     if(invalidate)visual_values_changed_unlocked(entity.resource.signed_id);
+    entity.neutral_pose_lease.reset();
     entity.readiness_reason = predicate;
     entity.failure_scope = predicate ? scope : nullptr;
     if (!predicate || visual_first_failure_.stage) return;
@@ -2642,6 +2661,7 @@ void RetainedStaticScene::visual_reject_unlocked(VisualEntity& entity,
         entity.anchor = {};
         entity.effects = {};
         entity.effects_anchored = false;
+        entity.neutral_pose_lease.reset();
         entity.has_object_pose = false;
     }
     entity.status = reason;
@@ -2679,6 +2699,7 @@ void RetainedStaticScene::visual_reject_all(RetainedVisualStatus reason,
             entity.anchor = {};
             entity.effects = {};
             entity.effects_anchored = false;
+            entity.neutral_pose_lease.reset();
             entity.has_object_pose = false;
         }
         entity.status = reason;

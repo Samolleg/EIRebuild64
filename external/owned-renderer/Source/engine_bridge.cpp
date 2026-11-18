@@ -31693,20 +31693,23 @@ bool hud_embedded_submit_portrait(const EmbeddedHudPortraitInput& input,
         HudPublishedVisual texture;
         if (input.texture_name) {
             bool found = false;
-            if (!g_hud_visuals.resolve_texture(input.texture_name, input.placement, texture, found)) return false;
+            const auto* placement = input.whole_atlas ? nullptr : &input.placement;
+            if (!g_hud_visuals.resolve_texture(input.texture_name, placement, texture, found)) return false;
             if (!found && input.base_texture_name &&
-                !g_hud_visuals.resolve_texture(input.base_texture_name, input.placement, texture, found)) return false;
-            const auto& p = input.placement;
-            if (!texture.texture || !texture.texture->source || !p.atlas_width ||
-                !p.source_width || !p.source_height || texture.texture->width != p.source_width ||
-                texture.texture->height != p.source_height ||
-                std::uint64_t(p.destination_x)+p.copy_width>p.atlas_width ||
-                std::uint64_t(p.destination_y)+p.copy_height>p.atlas_width ||
-                std::uint64_t(p.source_x)+p.copy_width>p.source_width ||
-                std::uint64_t(p.source_y)+p.copy_height>p.source_height) return false;
-            if (!remap_hud_coordinates(view.texture_coordinates,view.texture_coordinate_count,
-                    p,view.u_shift,view.v_shift,coordinates)) return false;
-            view.texture_coordinates = coordinates.data(); view.u_shift=view.v_shift=0;
+                !g_hud_visuals.resolve_texture(input.base_texture_name, placement, texture, found)) return false;
+            if (!texture.texture || !texture.texture->source) return false;
+            if (placement) {
+                const auto& p = *placement;
+                if (!p.atlas_width || !p.source_width || !p.source_height ||
+                    texture.texture->width != p.source_width || texture.texture->height != p.source_height ||
+                    std::uint64_t(p.destination_x)+p.copy_width>p.atlas_width ||
+                    std::uint64_t(p.destination_y)+p.copy_height>p.atlas_width ||
+                    std::uint64_t(p.source_x)+p.copy_width>p.source_width ||
+                    std::uint64_t(p.source_y)+p.copy_height>p.source_height) return false;
+                if (!remap_hud_coordinates(view.texture_coordinates,view.texture_coordinate_count,
+                        p,view.u_shift,view.v_shift,coordinates)) return false;
+                view.texture_coordinates = coordinates.data(); view.u_shift=view.v_shift=0;
+            }
             for (const auto& mip:texture.texture->mips) {
                 if (std::uint64_t(mip.byte_offset)+mip.bytes>texture.texture->source->size()) return false;
                 mips.push_back({texture.texture->source->data()+mip.byte_offset,mip.width,mip.height,mip.bytes});

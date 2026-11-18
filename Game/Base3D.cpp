@@ -5,6 +5,7 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 const CBase3D &CBase3D::operator=(const CBase3D &base)
 {
+    ++placementRevision;
     cp = base.cp;
     respectCP = base.respectCP;
     rotation = base.rotation;
@@ -25,6 +26,7 @@ void CBase3D::Save(CFile &file) const
 // just load
 void CBase3D::Load(CFile &file)
 {
+    ++placementRevision;
     file.Read(&cp, sizeof(cp));
     rotation.Load(file);
 }

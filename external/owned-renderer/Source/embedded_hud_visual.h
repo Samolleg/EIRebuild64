@@ -20,6 +20,7 @@ struct EmbeddedHudPortraitInput {
     EmbeddedHudVisualInput state{};
     const char* texture_name = nullptr;
     const char* base_texture_name = nullptr;
+    bool whole_atlas = false;
     HudIconPlacement placement{};
     std::int32_t unit_id = 0;
     std::uint32_t slot = 0;

@@ -78,6 +78,12 @@ private:
     //
     float fpTime;
     DWORD dwLastLightTime; // time, then this object was relighted (in milliseconds)
+    struct NeutralPose {
+        std::weak_ptr<const char> lease;
+        std::uint64_t placement = 0, source = 0;
+        DWORD flags = 0;
+        SComplection shape{};
+    } neutralPose;
     bool ownedAppearanceAttempted = false;
     std::uint64_t ownedAppearanceRevision = 0;
     //

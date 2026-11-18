@@ -194,6 +194,7 @@ struct E3HudVisualAccess {
             view.specular=reinterpret_cast<const std::uint32_t*>(figure->speculars.GetData());
         }
         input.slot=slot;input.unit_id=unitId;
+        input.whole_atlas = !model;
         const bool hd=ModRuntime::Current() && ModRuntime::Current()->CombatSetting("JMVGraphics2");
         std::string selected,original;
         if(texture) {

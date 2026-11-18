@@ -33,8 +33,9 @@ inline std::wstring Wide(const std::string& text){
     if(n<=0)throw E_INVALIDARG;std::wstring out(size_t(n),L'\0');
     MultiByteToWideChar(CP_ACP,0,text.data(),int(text.size()),&out[0],n);return out;
 }
-inline void Terrain(OwnedRendererClient& renderer,CTerrain& terrain,CTextureManager* textures,uint64_t generation,
-                    const CModPackage* package,const CString& workRoot,const CString& resourceRoot){
+inline void SubmitHostTerrain(OwnedRendererClient& renderer,CTerrain& terrain,CTextureManager* textures,uint64_t generation,
+                    const CModPackage* package,const CString& workRoot,const CString& resourceRoot,
+                    const std::string& project,const std::string& header){
     std::vector<std::wstring> roots,archives,bases;
     // Completed override groups precede base resources (ResourceManager policy).
     if(package){
@@ -51,7 +52,6 @@ inline void Terrain(OwnedRendererClient& renderer,CTerrain& terrain,CTextureMana
     std::vector<const wchar_t*> rootPointers,archivePointers;
     for(const auto& path:roots)rootPointers.push_back(path.c_str());for(const auto& path:archives)archivePointers.push_back(path.c_str());
     std::vector<float> shifts;for(int i=0;i<terrain.GetObjectsNumber();++i)shifts.push_back(terrain.GetObject(i)->fGlobalShift);
-    const std::string base=(LPCSTR)terrain.GetBaseName(),header=base+".mp",project=base+".mpr";
     EIRenderTerrainSourceV5 source={};source.source_revision=terrain.GetRendererRevision();
     source.read_base_vertices=[](void* owner,uint32_t sector,float* rows,uint32_t count)->HRESULT {
         return static_cast<CTerrain*>(owner)->CopyRendererBaseVertices(sector,rows,count);
@@ -62,8 +62,14 @@ inline void Terrain(OwnedRendererClient& renderer,CTerrain& terrain,CTextureMana
     input.loose_roots=rootPointers.data();input.loose_count=uint32_t(rootPointers.size());
     input.archives=archivePointers.data();input.archive_count=uint32_t(archivePointers.size());
     input.layer_shifts=shifts.data();input.layer_count=uint32_t(shifts.size());Check(renderer.SetTerrain(source));
+}
+inline void Terrain(OwnedRendererClient& renderer,CTerrain& terrain,CTextureManager* textures,uint64_t generation,
+                    const CModPackage* package,const CString& workRoot,const CString& resourceRoot){
+    const std::string base=(LPCSTR)terrain.GetBaseName(),header=base+".mp",project=base+".mpr";
+    if (renderer.HasSourceHost())
+        SubmitHostTerrain(renderer, terrain, textures, generation, package, workRoot, resourceRoot, project, header);
     std::string failure;
-    if (!OwnedRender::E1PublishTerrainSource(&terrain, generation, source.source_revision,
+    if (!OwnedRender::E1PublishTerrainSource(&terrain, generation, terrain.GetRendererRevision(),
         project.c_str(), header.c_str(), ReadMap, &terrain, failure, ReadTexture, textures)) {
         GameJournal::Event("RENDER", "terrain_publication_failed", "%s", failure.c_str());
         throw E_FAIL;
@@ -118,13 +124,15 @@ struct Scene {
         }
         units.push_back(row);
     }
-    void Lights(CBaseManager* manager){
+    void Lights(CBaseManager* manager, bool includeHostLights){
         if(!manager)return;CManagerIterator it;
         for(auto* value=it.GetFirst(manager);value;value=it.GetNext()){
             const auto* light=dynamic_cast<CLight*>(value);if(!light||light->CheckFlag(LIT_INACTIVE))continue;
             const auto& v=light->GetLight();if(v.dltType!=D3DLIGHT_POINT||!(v.dvRange>0))continue;
-            EIRenderPointLightV3 row={{v.dvPosition.x,v.dvPosition.y,v.dvPosition.z},
-                                     {v.dcvDiffuse.r,v.dcvDiffuse.g,v.dcvDiffuse.b},v.dvRange};lights.push_back(row);
+            if (includeHostLights) {
+                lights.push_back({{v.dvPosition.x,v.dvPosition.y,v.dvPosition.z},
+                                  {v.dcvDiffuse.r,v.dcvDiffuse.g,v.dcvDiffuse.b},v.dvRange});
+            }
             owned::RetainedWorldPointLight c56{};
             c56.source_id = light->GetID();
             c56.center = {v.dvPosition.x, v.dvPosition.y, v.dvPosition.z};

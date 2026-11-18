@@ -20,6 +20,11 @@ namespace OwnedRender {
 template<class Backend>
 class RendererFacadeCore {
     Backend renderer;
+    HRESULT FinishSceneWork() noexcept {
+        if constexpr (std::is_same_v<Backend, owned::Renderer>)
+            return renderer.finish_embedded_scene_commands();
+        return S_OK;
+    }
     HWND window = nullptr;
     UINT outputWidth = 0;
     UINT outputHeight = 0;
@@ -54,6 +59,8 @@ public:
         if (frameActive) return DXGI_ERROR_INVALID_CALL;
         if (width == outputWidth && height == outputHeight) return S_FALSE;
         try {
+            const HRESULT work = FinishSceneWork();
+            if (FAILED(work)) return work;
             const HRESULT result = renderer.resize(width, height);
             if (SUCCEEDED(result)) {
                 outputWidth = width;
@@ -70,6 +77,8 @@ public:
         if (frameActive) return DXGI_ERROR_INVALID_CALL;
         try {
             const owned::frame_waits::Scope record(owned::frame_waits::record);
+            const HRESULT work = FinishSceneWork();
+            if (FAILED(work)) return work;
             renderer.begin_scene();
             frameActive = true;
             return S_OK;
@@ -83,7 +92,10 @@ public:
         frameActive = false;
         try {
             const owned::frame_waits::Scope record(owned::frame_waits::record);
-            renderer.end_scene();
+            if constexpr (std::is_same_v<Backend, owned::Renderer>) {
+                const HRESULT hr = renderer.queue_embedded_batch(owned::Renderer::EmbeddedBatch::end_scene);
+                if (FAILED(hr)) return hr;
+            } else renderer.end_scene();
             return renderer.present();
         } catch (...) {
             return E_FAIL;
@@ -97,11 +109,17 @@ public:
         frameActive = false;
         try {
             const owned::frame_waits::Scope record(owned::frame_waits::record);
+            const HRESULT work = FinishSceneWork();
             renderer.end_scene();
-            return S_OK;
+            return work;
         } catch (...) {
             return E_FAIL;
         }
+    }
+
+    HRESULT SubmitWorldBatch(owned::Renderer::EmbeddedBatch batch) {
+        if (!initialized || !frameActive) return E_UNEXPECTED;
+        return renderer.queue_embedded_batch(batch);
     }
 
     bool Ready() const noexcept { return initialized; }
@@ -115,6 +133,8 @@ public:
         if (!initialized) return E_UNEXPECTED;
         try {
             const owned::frame_waits::Scope record(owned::frame_waits::record);
+            const HRESULT work = FinishSceneWork();
+            if (FAILED(work)) return work;
             return visitor(renderer);
         } catch (...) {
             return E_FAIL;
