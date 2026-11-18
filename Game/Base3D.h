@@ -10,6 +10,7 @@ const DWORD B3D_LAST_BIT = MAKE_LAST_BIT(CGB_LAST_BIT, -1);
 class CBase3D : public CGameBase
 {
 protected:
+    unsigned long long placementRevision = 1; // Host-only transform version.
     CPlot3D cp, respectCP;           // position (general and respect)
     CQuaternion rotation, rotation1; // rotation (general and respect)
     SHMatrix placement;              // matrix, which position and rotation will be recalculated to
@@ -30,6 +31,7 @@ public:
     void OrientInYDirection(const CPlot3D &direction, BOOL bSlow);
     void SetOrientationXY(const CPlot3D &direction);
     void SetPlacement(const CPlot3D &cp, const CQuaternion &q);
+    unsigned long long GetPlacementRevision() const { return placementRevision; }
     const CPlot3D &GetCP() const;
     float GetCPX() const { return cp.x; }
     float GetCPY() const { return cp.y; }
@@ -88,6 +90,7 @@ inline CBase3D::~CBase3D()
 /////////////////////////////////////////////////////////////////////////////////////
 inline void CBase3D::SetCP(const CPlot3D &cp)
 {
+    if (this->cp.x != cp.x || this->cp.y != cp.y || this->cp.z != cp.z) ++placementRevision;
     this->cp = cp;
 }
 inline void CBase3D::SetRespectCP(const CPlot3D &respectCP)
@@ -96,6 +99,7 @@ inline void CBase3D::SetRespectCP(const CPlot3D &respectCP)
 }
 inline void CBase3D::SetOrientation(const CQuaternion &q)
 {
+    ++placementRevision;
     rotation = q;
 }
 inline void CBase3D::SetPlacement(const CPlot3D &cp, const CQuaternion &q)
@@ -122,18 +126,22 @@ inline const CQuaternion &CBase3D::GetRespectOrientation() const
 /////////////////////////////////////////////////////////////////////////////////////
 inline void CBase3D::Move(const CPlot3D &velocity)
 {
+    ++placementRevision;
     cp += velocity;
 }
 inline void CBase3D::Rotate(const CPlot3D &axis, const D3DVALUE angle)
 {
+    ++placementRevision;
     rotation *= CQuaternion(angle, axis);
 }
 inline void CBase3D::Rotate(const D3DVALUE angle, const CPlot3D &axis)
 {
+    ++placementRevision;
     rotation *= CQuaternion(angle, axis);
 }
 inline void CBase3D::Rotate(const CQuaternion &q)
 {
+    ++placementRevision;
     rotation *= q;
 }
 /////////////////////////////////////////////////////////////////////////////////////

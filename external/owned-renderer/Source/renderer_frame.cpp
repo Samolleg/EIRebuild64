@@ -1252,6 +1252,9 @@ HRESULT Renderer::begin_engine_frame_at(std::uint64_t world_epoch){
 }
 void Renderer::begin_scene(){
  if(!ready())return;
+#ifdef EID3D11_EMBEDDED
+ set_scene_mode(configured_boolean(debug_overlay_.config(),"render_thread",true));
+#endif
  begin_scene_game();
  if(scene_queue()){scene_post_command(scene_cmd::BeginScene{});return;}
  begin_scene_renderer();

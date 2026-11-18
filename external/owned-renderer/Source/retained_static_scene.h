@@ -1020,6 +1020,7 @@ public:
     bool visual_reject_object_pose_if_current(
         const VisualObjectPublicationSnapshot& snapshot, RetainedVisualStatus reason,
         const char* predicate, const char* scope = "local_keep.object_pose") noexcept;
+    std::weak_ptr<const char> visual_neutral_pose_lease(VisualResourceIncarnation resource);
     bool visual_object_pose_current(VisualResourceIncarnation resource,
         const VisualObjectPose& values) const noexcept;
     bool visual_object_pose(VisualResourceIncarnation resource,
@@ -1117,6 +1118,7 @@ private:
         bool detection_unavailable = false;
         VisualObjectPose object_pose{};
         bool has_object_pose = false;
+        std::shared_ptr<const char> neutral_pose_lease;
         bool mesh_declared = false;
         std::vector<VisualBridgePlane> bridge_planes;
         std::uint64_t last_idle_event = 0;
