@@ -324,8 +324,12 @@ int wmain(int argc,wchar_t** argv)try {
      }
      std::cout<<"PASS Nala physics target and affected bones preserved; three hair skins share the body palette\n";
     }
+    // Physique-enabled bodies may already cache additional sole chains.
+    const auto previousChains=body->sockets.size();
+    const bool forearmPresent=body->sockets.count("CC_Base_Forearm.L")!=0;
     const auto& forearmChain=body->attachment_chain("CC_Base_Forearm.L");
-    check(&forearmChain==&body->attachment_chain("CC_Base_Forearm.L") && body->sockets.size()==6,
+    check(&forearmChain==&body->attachment_chain("CC_Base_Forearm.L") &&
+        body->sockets.size()==previousChains+(forearmPresent ? 0u : 1u),
         "bone attachment chain must be cached once");
     std::vector<std::shared_ptr<owned::gltf::Asset>> garments;
     if(argc>=4) {
