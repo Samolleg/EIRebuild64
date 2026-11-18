@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include "../PhysicsFxCore.h"
+#include "E1AmbientEffects.h"
 #include "engine_bridge.h"
 #include <cstdint>
 #include <memory>
@@ -24,6 +25,8 @@ struct E1VisualInputs {
     std::vector<PhysicsFx::Stone> debris; // copied values, no game/physics pointers
     std::shared_ptr<const owned::OwnedVisualSurface> debrisSurface; // owns the publication through submission
     owned::NativeOwnedTextureView debrisTexture;
+    std::vector<E1GroundCoverFootprintFact> footprints;
+    bool footprintsEnabled = false;
     double time = 0; // segment ticks + fraction
     std::uint32_t sceneFlags = 0;           // CWorldClient flags (WC_RENDER_*)
     bool drawUndetected = true;

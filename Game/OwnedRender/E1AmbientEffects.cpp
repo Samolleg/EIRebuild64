@@ -91,7 +91,7 @@ struct CreatedGroundFootprint {
 std::map<const void*, CreatedGroundFootprint> created_ground_footprints;
 std::vector<owned::ground_cover::FootprintSplat> published_ground_footprints;
 std::vector<owned::FootprintTrailPoint> published_ground_trails;
-std::uint64_t published_ground_world = 0;
+std::uint64_t published_ground_world = 0, published_ground_serial = 0;
 bool published_ground_valid = false;
 
 const owned::TextureCpuAsset* tree_atlas(const owned::RetainedTerrainSourceSnapshot& terrain) noexcept {
@@ -127,14 +127,21 @@ void E1RegisterGroundCoverFootprint(const void* host_marker, const void* owner,
     published_ground_valid = false;
 }
 
-bool E1PublishGroundCoverFootprints(const std::vector<E1GroundCoverFootprintFact>& facts,
+bool E1PublishGroundCoverFootprints(std::shared_ptr<const owned::RetainedVisualFrame> visuals,
+    const std::vector<E1GroundCoverFootprintFact>& facts,
     bool enabled) noexcept try {
     published_ground_footprints.clear();
     published_ground_trails.clear();
     published_ground_valid = false;
-    CurrentAmbientFrame frame;
-    if (!current_ambient_frame(frame)) return false;
-    published_ground_world = frame.world;
+    published_ground_world = E1WorldGeneration();
+    published_ground_serial = owned::bridge_scene_world_to_clip_snapshot().scene_frame_serial;
+    if (!visuals || !published_ground_world || !published_ground_serial) return false;
+    // The committed frame already contains the completed host unit facts.
+    // Shadows, colour and ambient effects can share its immutable sample.
+    auto& frame = ambient_visual_frame();
+    frame.world = published_ground_world;
+    frame.serial = published_ground_serial;
+    frame.visuals = std::move(visuals);
     std::set<const void*> current_markers;
     for (const auto& fact : facts) if (fact.host_marker) current_markers.insert(fact.host_marker);
     for (auto item = created_ground_footprints.begin(); item != created_ground_footprints.end();) {
@@ -189,7 +196,8 @@ bool bridge_ground_cover_footprints(std::vector<ground_cover::FootprintSplat>& o
     std::vector<FootprintTrailPoint>* trail_points) noexcept {
     output.clear();
     if (trail_points) trail_points->clear();
-    if (!published_ground_valid || published_ground_world != OwnedRender::E1WorldGeneration()) return false;
+    if (!published_ground_valid || published_ground_world != OwnedRender::E1WorldGeneration() ||
+        published_ground_serial != bridge_scene_world_to_clip_snapshot().scene_frame_serial) return false;
     try {
         output = published_ground_footprints;
         if (trail_points) *trail_points = published_ground_trails;

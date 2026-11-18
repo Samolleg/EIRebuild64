@@ -2223,7 +2223,9 @@ struct RetainedTerrainSourceSnapshot;
 struct OwnedTerrainFramePacket;
 struct OwnedTerrainDynamicSector;
 struct EmbeddedVisualFrameInputs {
-    bool (*complete_visuals)(RetainedVisualFrame& frame) = nullptr;
+    bool (*complete_visuals)(const std::shared_ptr<RetainedVisualFrame>& frame,
+        const void* context) = nullptr;
+    const void* visual_context = nullptr;
     // Synchronous completed host terrain, owned by the caller for this draw.
     const RetainedTerrainSourceSnapshot* terrain_source = nullptr;
     const OwnedTerrainFramePacket* terrain_frame = nullptr;

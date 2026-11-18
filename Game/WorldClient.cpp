@@ -3099,6 +3099,19 @@ BOOL CWorldClient::Draw()
         retained.visual_publish_world_point_lights(ownedPointLights);
         retained.visual_commit_tick(double(GetSegmentTimeCounter()));
         OwnedRender::E1VisualInputs visuals;
+        {
+            CorePerf::Scope footprintTiming(CorePerf::FootprintInputs);
+            visuals.footprintsEnabled = theSettings.nTerrainEnableFootprints != 0;
+            try {
+                visuals.footprints.reserve(footprints.size());
+                for (const auto& print : footprints)
+                    visuals.footprints.push_back({&print, print.GetRemainingSegments(),
+                        print.GetFadeoutSegments(), !print.IsInvisible()});
+            } catch (const std::bad_alloc&) {
+                visuals.footprints.clear();
+                visuals.footprintsEnabled = false;
+            }
+        }
         visuals.time = GetPreciseTime();
         visuals.sceneFlags = GetFlags();
         visuals.drawUndetected = ownedDrawUndetected;
@@ -3488,21 +3501,6 @@ BOOL CWorldClient::Prepare3DScene()
             }
             GameJournal::Event("RENDER", "world_visual_unclaimed_stages", "%s", details);
         }
-    }
-    coreParts.Stage(CorePerf::FootprintInputs);
-    // Publish only footprints with a known creator and current native lifetime.
-    try
-    {
-        std::vector<OwnedRender::E1GroundCoverFootprintFact> facts;
-        facts.reserve(footprints.size());
-        for (const auto &print : footprints)
-            facts.push_back({&print, print.GetRemainingSegments(), print.GetFadeoutSegments(),
-                             !print.IsInvisible()});
-        OwnedRender::E1PublishGroundCoverFootprints(facts, theSettings.nTerrainEnableFootprints != 0);
-    }
-    catch (...)
-    {
-        OwnedRender::E1PublishGroundCoverFootprints({}, false);
     }
     return TRUE;
 }

@@ -267,9 +267,25 @@ bool CMapObjectManager::GetSelectedAnimationDatabase(const CString& maskName,
     bytes = nullptr;
     size = 0;
     if (!selected || maskName.IsEmpty()) return false;
-    const CString resourceName = maskName + ".adb";
-    LPBYTE data = GetFile(resourceName, &size);
-    if (!data || size < sizeof(SADBFileHeader)) return false;
+    if (databaseGeneration != resourceGeneration) {
+        selectedDatabases.clear();
+        databaseGeneration = resourceGeneration;
+    }
+    const auto belongs = [selected](const AnimationDatabaseSpan& span) {
+        const auto begin = reinterpret_cast<std::uintptr_t>(span.data) + sizeof(SADBFileHeader);
+        const auto address = reinterpret_cast<std::uintptr_t>(selected);
+        return address >= begin && address - begin < span.size - sizeof(SADBFileHeader);
+    };
+    const std::string mask(static_cast<LPCSTR>(maskName));
+    const auto known = selectedDatabases.find(mask);
+    LPBYTE data = nullptr;
+    if (known != selectedDatabases.end() && belongs(known->second)) {
+        data = known->second.data;
+        size = known->second.size;
+    } else {
+        data = GetFile(maskName + ".adb", &size);
+        if (!data || size < sizeof(SADBFileHeader)) return false;
+    }
 
     const auto* header = reinterpret_cast<const SADBFileHeader*>(data);
     if (header->dwSignature != ADB_SIGNATURE) return false;
@@ -288,6 +304,8 @@ bool CMapObjectManager::GetSelectedAnimationDatabase(const CString& maskName,
     const auto* entry = reinterpret_cast<const SADEntry*>(data + sizeof(SADBFileHeader) +
         static_cast<unsigned long long>(index) * sizeof(SADEntry));
     if (entry != selected) return false;
+    if (known == selectedDatabases.end() || known->second.data != data)
+        selectedDatabases[mask] = {data, size};
     bytes = data;
     return true;
 }

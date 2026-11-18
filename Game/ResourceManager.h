@@ -1,6 +1,7 @@
 #pragma once
 #include "CMappedResource.h"
 #include "BaseManager.h"
+#include <cstdint>
 /////////////////////////////////////////////////////////////////////////////////////
 // struct SResourceEntry
 // resource system and resource file name, which handled by this resource system
@@ -22,6 +23,8 @@ public:
 
 protected:
     CResourceList resources;
+    // Borrowed member spans are valid only for this generation of the manager.
+    std::uint64_t resourceGeneration = 1;
 
 public:
     CResourceManager();

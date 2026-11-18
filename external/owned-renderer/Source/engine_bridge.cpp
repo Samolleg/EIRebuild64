@@ -18432,7 +18432,7 @@ void capture_owned_world_shadow_inputs(void* scene,void* renderer,OwnedShadowInp
             if(!in.values || !g_embedded_visual_inputs->complete_visuals)
                 throw "embedded_visual_values_unavailable";
             auto completed=std::make_shared<RetainedVisualFrame>(*in.values);
-            if(!g_embedded_visual_inputs->complete_visuals(*completed))
+            if(!g_embedded_visual_inputs->complete_visuals(completed, g_embedded_visual_inputs->visual_context))
                 throw "embedded_visual_values_rejected";
             in.values=std::move(completed);
         }

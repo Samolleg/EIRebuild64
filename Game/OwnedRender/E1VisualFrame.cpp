@@ -270,7 +270,14 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     static E1PerfCounter counter{"scene_total"};
     E1PerfScope timing(counter);
     owned::EmbeddedVisualFrameInputs inputs;
-    inputs.complete_visuals = &E1CompleteVisualFrame;
+    inputs.visual_context = &host;
+    inputs.complete_visuals = [](const std::shared_ptr<owned::RetainedVisualFrame>& frame,
+        const void* context) {
+        if (!E1CompleteVisualFrame(*frame)) return false;
+        const auto& host = *static_cast<const E1VisualInputs*>(context);
+        E1PublishGroundCoverFootprints(frame, host.footprints, host.footprintsEnabled);
+        return true;
+    };
     inputs.time = host.time;
     inputs.scene_flags = host.sceneFlags;
     inputs.draw_undetected = host.drawUndetected;

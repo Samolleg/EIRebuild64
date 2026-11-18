@@ -1,6 +1,8 @@
 #pragma once
 #include "engine_bridge.h"
 
+namespace owned { struct RetainedVisualFrame; }
+
 namespace OwnedRender {
 struct E1GroundCoverFootprintFact {
     const void* host_marker = nullptr; // Synchronous host token; never copied to c56.
@@ -12,6 +14,7 @@ struct E1GroundCoverFootprintFact {
 void E1ResetGroundCoverFootprints() noexcept;
 void E1RegisterGroundCoverFootprint(const void* host_marker, const void* owner,
     std::uint64_t world, std::int32_t tick, float center_x, float center_y) noexcept;
-bool E1PublishGroundCoverFootprints(const std::vector<E1GroundCoverFootprintFact>& facts,
+bool E1PublishGroundCoverFootprints(std::shared_ptr<const owned::RetainedVisualFrame> visuals,
+    const std::vector<E1GroundCoverFootprintFact>& facts,
     bool enabled) noexcept;
 }
