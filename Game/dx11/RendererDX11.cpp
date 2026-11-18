@@ -1003,7 +1003,7 @@ void CDX11::EndFrame(bool present)
         MakeScreenShot();
         m_bMakeScreenShot = false;
     }
-    IfFailedThrowHR(rendererFacade->Visit([](owned::Renderer& renderer) {
+    IfFailedThrowHR(rendererFacade->VisitKeepingBlits([](owned::Renderer& renderer) {
         return OwnedRender::E3QueueCursor(renderer, renderer.cursor_scale_percent(), renderer.load_cursor_wanted());
     }));
     frameTiming.SealNativeQuery();

@@ -170,9 +170,8 @@ public:
         }
         ++dropped;
     }
-    // Called after the backend's Present: its final composition/UI commands
-    // belong to this range too. This is GPU timeline elapsed time, including
-    // idle/presentation gaps, not GPU busy time or CPU submission cost.
+    // Stamp the producer list before it changes thread. CPU timing closes
+    // separately at End(); GPU pass statistics cover the submitted output.
     void SealNativeQuery() noexcept {
         if(open && active>=0 && native && !nativeSealed) {
             nativeSealed=true;

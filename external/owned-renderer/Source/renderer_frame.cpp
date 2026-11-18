@@ -2177,7 +2177,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  if(deferOutput){
   // One submitted frame may outlive EndFrame. Reconcile its HRESULT and
   // renderer bookkeeping before the next device access, including resize.
-  embedded_present_completion_=[this,complete=std::move(complete)](HRESULT hr){
+  embedded_present_completion_=[this,complete=std::move(complete),overlayLease=overlayPacket.replay](HRESULT hr){
    struct ResetPlan{FramePlan& plan;~ResetPlan(){plan.begin_frame();}} reset{frame_plan_};
    return complete(hr);
   };

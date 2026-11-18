@@ -109,7 +109,10 @@ public:
         frameActive = false;
         try {
             const owned::frame_waits::Scope record(owned::frame_waits::record);
-            const HRESULT work = FinishSceneWork();
+            HRESULT work = FinishSceneWork();
+            if constexpr (std::is_same_v<Backend, owned::Renderer>) {
+                if (SUCCEEDED(work)) work=renderer.finish_embedded_blit_run();
+            }
             renderer.end_scene();
             return work;
         } catch (...) {
@@ -139,7 +142,7 @@ public:
     UINT Height() const noexcept { return outputHeight; }
 
     template<class Visitor>
-    HRESULT Visit(Visitor&& visitor) {
+    HRESULT VisitKeepingBlits(Visitor&& visitor) {
         if (!initialized) return E_UNEXPECTED;
         try {
             const owned::frame_waits::Scope record(owned::frame_waits::record);
@@ -149,6 +152,17 @@ public:
         } catch (...) {
             return E_FAIL;
         }
+    }
+
+    template<class Visitor>
+    HRESULT Visit(Visitor&& visitor) {
+        return VisitKeepingBlits([&](Backend& backend) -> HRESULT {
+            if constexpr (std::is_same_v<Backend, owned::Renderer>) {
+                const HRESULT flushed=backend.finish_embedded_blit_run();
+                if (FAILED(flushed)) return flushed;
+            }
+            return visitor(backend);
+        });
     }
 
     HRESULT VisitDevice(void* user, owned::EmbeddedDeviceVisitor visitor) {

@@ -1571,6 +1571,8 @@ public:
     void invalidate_camp_popup() noexcept;
     void reset_camp_popup() noexcept;
     HRESULT flush_ui();
+    HRESULT blit_embedded_snapshot(const SurfaceImage&,const RECT&,const RECT*,const DDCOLORKEY*,bool interfaceSpace,bool nativeCanvas);
+    HRESULT finish_embedded_blit_run() { return embedded_blit_run_ ? flush_ui() : S_OK; }
     // Scene mode, game thread: whether UI work the game thread queued may still
     // be pending on the scene thread (it cannot read the scene's queues).
     bool has_pending_ui() const noexcept { return scene_queue() ? scene_ui_pending_ : (!pending_blits_.empty() || cursor_pending_); }
@@ -4753,6 +4755,7 @@ private:
     std::string sky_status_state_;
     bool ao_ambient_written_=false,ao_pipeline_failed_=false; // a world batch wrote the ambient share this frame
     std::vector<PendingBlit> pending_blits_;
+    bool embedded_blit_run_=false;
     PendingBlit pending_cursor_;
     bool cursor_pending_ = false;
     ComPtr<ID3D11Texture2D> camp_art_texture_;

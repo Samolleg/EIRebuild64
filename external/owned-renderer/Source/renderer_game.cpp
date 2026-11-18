@@ -220,7 +220,8 @@ HRESULT Renderer::queue_embedded_draw(EmbeddedDraw draw,bool startWorld) {
   if(FAILED(embedded_scene_result_))return;
   try {
    if(values)bridge_install_frame_values(*values);
-   embedded_scene_result_=draw(*this);
+   embedded_scene_result_=finish_embedded_blit_run();
+   if(SUCCEEDED(embedded_scene_result_))embedded_scene_result_=draw(*this);
   } catch(const std::bad_alloc&){embedded_scene_result_=E_OUTOFMEMORY;}
     catch(...){embedded_scene_result_=E_FAIL;}
   if(FAILED(embedded_scene_result_))discard_native();
@@ -234,6 +235,9 @@ HRESULT Renderer::queue_embedded_draw(EmbeddedDraw draw,bool startWorld) {
 // used to build it have already been resolved; no caller stack is captured.
 HRESULT Renderer::queue_embedded_batch(EmbeddedBatch batch){
  const auto record=[this,batch]() -> HRESULT {
+  if(batch!=EmbeddedBatch::end_scene){
+   const HRESULT flushed=finish_embedded_blit_run();if(FAILED(flushed))return flushed;
+  }
   switch(batch){
    case EmbeddedBatch::geometry: return flush_native();
    case EmbeddedBatch::composite: return composite_world();
