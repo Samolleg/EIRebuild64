@@ -4,7 +4,9 @@ bool build_skn_groups(const RetainedVisualSample &sample,
                       const std::shared_ptr<const skn::RuntimeAsset> &asset,
                       const std::vector<unsigned>* attachmentNodes=nullptr,
                       bool weapon=false, bool arrow=false,
-                      const std::map<unsigned,std::shared_ptr<const skn::Dds>>* overrides=nullptr) {
+                      const std::map<unsigned,std::shared_ptr<const skn::Dds>>* overrides=nullptr,
+                      const std::map<unsigned,std::shared_ptr<const skn::Dds>>* orm_overrides=nullptr,
+                      const std::map<unsigned,std::shared_ptr<const std::uint8_t>>* material_ids=nullptr) {
   auto &prepared = *sample.prepared;
   const auto &data = asset->asset;
   if (data.semantic_joints.size() != data.submeshes.size())
@@ -123,6 +125,14 @@ bool build_skn_groups(const RetainedVisualSample &sample,
     if(overrides) {
       auto replacement=overrides->find(mesh.material);
       if(replacement!=overrides->end())group.skn_base_color_override=replacement->second;
+    }
+    if(orm_overrides) {
+      auto replacement=orm_overrides->find(mesh.material);
+      if(replacement!=orm_overrides->end())group.skn_metallic_roughness_override=replacement->second;
+    }
+    if(material_ids) {
+      auto identity=material_ids->find(mesh.material);
+      if(identity!=material_ids->end())group.skn_material_identity=identity->second;
     }
     group.gltf_weapon=weapon;group.gltf_arrow=arrow;
     group.skn_material = mesh.material;
