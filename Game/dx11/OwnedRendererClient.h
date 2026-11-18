@@ -404,6 +404,10 @@ public:
         if (SUCCEEDED(hr)) CollectFigureResources();
         PublishPackets(); JournalRendererState(); return hr;
     }
+    bool HasSourceHost() const {
+        const auto access = renderGate.Lock();
+        return host != nullptr;
+    }
     HRESULT SetTerrain(const EIRenderTerrainSourceV5& input){
         const auto access = renderGate.Lock();
         if (!host || !terrainApi.set_terrain_source) return S_FALSE;

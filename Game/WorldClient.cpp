@@ -109,6 +109,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include <list>
 #include <vector>
 #include <iterator>
+#include <memory_resource>
+#include <unordered_set>
 using std::copy_if;
 using std::find_if;
 using std::for_each;
@@ -3066,18 +3068,20 @@ BOOL CWorldClient::Draw()
         // Visibility and interpolated positions have just been prepared by
         // Prepare3DScene. Source rows are copied before the liquid/effect passes.
         OwnedWorldInputs::Scene scene;
-        const bool drawUndetected=!theSettings.nDrawVisibleOnly || (pPlayer && pPlayer->curInterface!=IFACE_MISSION);
-        const float night=GetNightPowerSlow();
-        {
+        auto& renderer = pRend->GetD3D()->GetOwnedRenderer();
+        const bool hasSourceHost = renderer.HasSourceHost();
+        if (hasSourceHost) {
+            const float night = GetNightPowerSlow();
             CorePerf::Scope coreWalk(CorePerf::SceneObjectWalk);
-            for(auto* object:objects)scene.Add(object,drawUndetected,GetPlayer(),night);
-            for(const auto& hero:heroes)scene.Add(hero,drawUndetected,GetPlayer(),night);
+            for(auto* object:objects)scene.Add(object,ownedDrawUndetected,GetPlayer(),night);
+            for(const auto& hero:heroes)scene.Add(hero,ownedDrawUndetected,GetPlayer(),night);
         }
         CorePerf::Scope coreSubmit(CorePerf::SceneSubmit);
-        scene.Lights(GetLightManager());scene.Submit(pRend->GetD3D()->GetOwnedRenderer(),ownedRenderGeneration);
+        scene.Lights(GetLightManager(), hasSourceHost);
+        if (hasSourceHost) scene.Submit(renderer, ownedRenderGeneration);
         pRend->GetD3D()->SubmitC56PointLights(scene.c56Lights, ownedWorld.world_time);
-        ownedPointLights=scene.c56Lights;
-        if(CheckFlag(WC_RENDER_TERRAIN))OwnedWorldInputs::Check(pRend->GetD3D()->GetOwnedRenderer().TerrainDrawn());
+        ownedPointLights = std::move(scene.c56Lights);
+        if (hasSourceHost && CheckFlag(WC_RENDER_TERRAIN)) OwnedWorldInputs::Check(renderer.TerrainDrawn());
     }
     coreParts.Stage(CorePerf::WorldVisualInputs);
     // Publish this draw's visibility and interpolated scene facts before c56
@@ -3426,7 +3430,9 @@ BOOL CWorldClient::Prepare3DScene()
     coreParts.Stage(CorePerf::PoseWalk);
     // Interaction lists are camera-local. Renderer shadow coverage consumes
     // every positive object below, independently of stock shadow lists.
-    std::set<int> prepared;
+    std::pmr::monotonic_buffer_resource poseScratch;
+    std::pmr::unordered_set<int> prepared(&poseScratch);
+    prepared.reserve(objects.size() + heroes.size());
     static std::uint64_t lastPublicationEpoch = 0;
     const auto publicationEpoch = OwnedRender::E1Scene().Epoch();
     const bool capturePublication = publicationEpoch && publicationEpoch != lastPublicationEpoch;
