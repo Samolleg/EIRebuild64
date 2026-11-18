@@ -480,7 +480,13 @@ struct RetainedVisualSample {
     // Embedded units use the host's completed pose/materials, not the retail
     // route/intent evaluator. Their rendering still follows unit policy.
     bool completed_pose = false;
-    // Only the synchronous world adapter enables secondary physics; previews are isolated.
+    // UI adapters supply a rigid simulation frame in metres and a separate drawing
+    // transform. Both are borrowed only during the synchronous private preview draw.
+    struct PreviewPhysicsSpace {
+        std::array<float,16> simulation, to_display;
+        const char* view;
+    };
+    const PreviewPhysicsSpace* preview_physics = nullptr;
     bool secondary_physics = false, secondary_frozen = false;
     double secondary_clock = 0;
     VisualResourceIncarnation resource{};
