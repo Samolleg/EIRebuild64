@@ -213,23 +213,22 @@ NativeWorldLighting shadow_projection_lighting(const NativeWorldLighting& lighti
     for(unsigned axis=0;axis<3;++axis)
         length_squared+=double(lighting.sunlight_direction[axis])*
             lighting.sunlight_direction[axis];
-    // Direct sunlight keeps the game's exact direction. The sun-map
-    // projections hold one direction until the sun has turned 0.25 degrees
-    // from it, then take the current one. Every change of direction redraws
-    // every sun map in full (nothing can be scrolled across it); the previous
-    // per-axis 1/512 snap changed every ~12 frames with the game clock running
-    // (L-077), while 0.5-degree steps were visibly stepped. The hold follows
-    // the game sun, so it advances with game time and freezes on pause.
+    // Direct sunlight keeps the game's exact direction. Shadow projections
+    // remain fixed through the smaller rotations between adjacent world ticks.
     if (!(length_squared>1e-12) || !finite_value(length_squared)) return result;
-    const double length=std::sqrt(length_squared);
-    std::array<double,3> current{};
-    for(unsigned axis=0;axis<3;++axis)current[axis]=lighting.sunlight_direction[axis]/length;
-    static std::array<double,3> held{};static bool held_valid=false;
-    constexpr double cos_quarter_degree=0.9999904807207345;
-    const double dot=held[0]*current[0]+held[1]*current[1]+held[2]*current[2];
-    if(!held_valid || !(dot>=cos_quarter_degree)){held=current;held_valid=true;}
+    // The 0.5-degree step visibly stepped time-of-day shadows without buying
+    // reuse; keep the original fine per-axis snap (~0.1 degree).
+    constexpr double steps=512;
+    const double scale=steps/std::sqrt(length_squared);
+    std::array<double,3> snapped{};
+    double snapped_length_squared=0;
+    for(unsigned axis=0;axis<3;++axis) {
+        snapped[axis]=std::round(double(lighting.sunlight_direction[axis])*scale)/steps;
+        snapped_length_squared+=snapped[axis]*snapped[axis];
+    }
+    const double snapped_length=std::sqrt(snapped_length_squared);
     for(unsigned axis=0;axis<3;++axis)
-        result.sunlight_direction[axis]=static_cast<float>(held[axis]);
+        result.sunlight_direction[axis]=static_cast<float>(snapped[axis]/snapped_length);
     return result;
 }
 

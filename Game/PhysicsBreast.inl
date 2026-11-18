@@ -7,8 +7,7 @@ class BreastPhysics final : public owned::gltf::SecondaryPhysics {
     std::array<Owned<PxRigidDynamic>,2> anchors, bodies;
     std::array<Owned<PxD6Joint>,2> joints;
     owned::gltf::SecondaryPoints previous{}, offsets{};
-    owned::gltf::SecondaryPoints stepStart{}, stepEnd{};
-    double last = 0, accumulated = 0;
+    double last = 0;
     bool started = false;
     std::string failure;
     static PxVec3 point(const std::array<float,3>& p) { return {p[0],p[1],p[2]}; }
@@ -61,6 +60,7 @@ public:
         for(auto& b:bodies)b.reset();for(auto& a:anchors)a.reset();scene.reset();
     }
     const std::string& error() const override {return failure;}
+    double solvedClock() const {return last;}
     owned::gltf::SecondaryPoints advance(double clock,const owned::gltf::SecondaryPoints& targets,bool reset) override {
         if(!failure.empty())return {};
         try {
@@ -77,35 +77,24 @@ public:
                     offsets[i]={0,0,-breastRestingDrop};
                     bodies[i]->setLinearVelocity(PxVec3(0));bodies[i]->setAngularVelocity(PxVec3(0));
                 }
-                stepStart=stepEnd=offsets;
-                started=true;last=clock;previous=targets;accumulated=0;return offsets;
+                started=true;last=clock;previous=targets;return offsets;
             }
-            if(elapsed==0)return offsets; // pause, shadow pass, attachment query
-            constexpr double step=1./60.;
-            accumulated+=elapsed;
-            while(accumulated+1e-10>=step) {
-                const float fraction=float(std::clamp((elapsed-accumulated+step)/elapsed,0.,1.));
-                for(unsigned i=0;i<2;++i) {
-                    const auto p=point(previous[i])+(point(targets[i])-point(previous[i]))*fraction;
-                    anchors[i]->setKinematicTarget(PxTransform(p));
-                }
-                scene->simulate(float(step));
-                PxU32 error=0;
-                if(!scene->fetchResults(true,&error)||error)throw std::runtime_error("Breast PhysX GPU step failed");
-                accumulated-=step;
-                if(sdk->errors.count)throw std::runtime_error(sdk->errors.Message());
-                stepStart=stepEnd;
-                for(unsigned i=0;i<2;++i) {
-                    auto delta=bodies[i]->getGlobalPose().p-anchors[i]->getGlobalPose().p;
-                    if(!delta.isFinite())throw std::runtime_error("Nonfinite breast simulation");
-                    const float length=delta.magnitude();
-                    if(length>owned::gltf::secondary_limit)delta*=owned::gltf::secondary_limit/length;
-                    stepEnd[i]={delta.x,delta.y,delta.z};
-                }
+            // Consume the entire elapsed interval once. Waiting for a series of
+            // 60 Hz GPU submissions can leave the worker chasing old poses.
+            if(elapsed+1e-10<1./60.)return offsets;
+            for(unsigned i=0;i<2;++i)
+                anchors[i]->setKinematicTarget(PxTransform(point(targets[i])));
+            scene->simulate(float(elapsed));
+            PxU32 error=0;
+            if(!scene->fetchResults(true,&error)||error)throw std::runtime_error("Breast PhysX GPU step failed");
+            if(sdk->errors.count)throw std::runtime_error(sdk->errors.Message());
+            for(unsigned i=0;i<2;++i) {
+                auto delta=bodies[i]->getGlobalPose().p-anchors[i]->getGlobalPose().p;
+                if(!delta.isFinite())throw std::runtime_error("Nonfinite breast simulation");
+                const float length=delta.magnitude();
+                if(length>owned::gltf::secondary_limit)delta*=owned::gltf::secondary_limit/length;
+                offsets[i]={delta.x,delta.y,delta.z};
             }
-            const float blend=float(std::clamp(accumulated/step,0.,1.));
-            for(unsigned i=0;i<2;++i)for(unsigned k=0;k<3;++k)
-                offsets[i][k]=stepStart[i][k]+(stepEnd[i][k]-stepStart[i][k])*blend;
             last=clock;previous=targets;return offsets;
         }catch(const std::exception& e){failure=e.what();offsets={};return {};}
     }
@@ -119,7 +108,9 @@ class CharacterPhysicsWorker final : public owned::gltf::SecondaryPhysics {
     using Points=owned::gltf::SecondaryPoints;
     struct Input {double clock=0;Points targets{};std::uint64_t epoch=0;};
     Input latest;
-    Points published{},visible{};
+    struct Sample {double clock=0;Points offsets{};};
+    Sample older{},newer{};
+    Points visible{};
     std::string failure,visibleFailure;
     bool stopping=false,pending=false,submitted=false,initialized=false,visibleReady=false;
     std::mutex mutex;
@@ -141,7 +132,11 @@ class CharacterPhysicsWorker final : public owned::gltf::SecondaryPhysics {
                 epoch=input.epoch;
                 std::lock_guard lock(mutex);
                 failure=solver.error();
-                if(input.epoch==latest.epoch){published=result;initialized=failure.empty();}
+                if(input.epoch==latest.epoch&&failure.empty()) {
+                    Sample solved{solver.solvedClock(),result};
+                    if(!initialized){older=newer=solved;initialized=true;}
+                    else if(solved.clock>newer.clock){older=newer;newer=solved;}
+                }
             }
         } catch(const std::exception& error) {
             std::lock_guard lock(mutex);failure=error.what();initialized=false;
@@ -167,11 +162,30 @@ public:
         if(!reset && clock==latest.clock)return visible;
         if(reset){
             ++latest.epoch;
-            for(auto& side:published)side={0,0,-breastRestingDrop};
+            for(auto& side:visible)side={0,0,-breastRestingDrop};
             initialized=false;
         }
         latest.clock=clock;latest.targets=targets;submitted=pending=true;
-        visible=published;visibleReady=initialized;
+        visibleReady=initialized;
+        if(initialized) {
+            visible=newer.offsets;
+            const double span=newer.clock-older.clock;
+            if(span>0) {
+                // Sample one 60 Hz frame behind the render clock. Bridge at
+                // most one 60 Hz frame when the next GPU result is still pending.
+                const double ahead=std::clamp(clock-1./60.-newer.clock,-span,(std::min)(span,1./60.));
+                const float weight=float(ahead/span);
+                for(unsigned i=0;i<2;++i) {
+                    float squared=0;
+                    for(unsigned k=0;k<3;++k) {
+                        visible[i][k]+=weight*(newer.offsets[i][k]-older.offsets[i][k]);
+                        squared+=visible[i][k]*visible[i][k];
+                    }
+                    if(squared>owned::gltf::secondary_limit*owned::gltf::secondary_limit)
+                        for(auto& value:visible[i])value*=owned::gltf::secondary_limit/std::sqrt(squared);
+                }
+            }
+        }
         wake.notify_one();
         return visible;
     }
