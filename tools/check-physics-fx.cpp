@@ -1,4 +1,5 @@
 #include "../Game/PhysicsFxCore.h"
+#include "../Game/PhysicsFxPlayback.h"
 #include "../Game/PhysicsFxTerrain.h"
 #include "../Game/OwnedRender/E1PhysicsDebris.h"
 #include "../external/owned-renderer/Source/secondary_physics.h"
@@ -13,6 +14,30 @@
 using namespace PhysicsFx;
 unsigned checks=0;
 void check(bool ok,const char* name){++checks;if(!ok)throw std::runtime_error(name);std::cout<<"PASS "<<name<<'\n';}
+void check_debris_playback(){
+    DebrisHistory history;DebrisPlayback cursor;
+    auto publish=[&](unsigned tick){
+        auto tracks=std::make_shared<StoneTracks>(1);auto& stone=tracks->front();
+        stone.poses[0].position.x=float(tick-1);stone.poses[1].position.x=float(tick);
+        stone.life=5;history.publish(tick,tracks);
+    };
+    publish(1);publish(2);publish(3);
+    history.sample(3.,cursor);
+    float x=SampleTracks(*cursor.visible,cursor.fraction)[0].pose.position.x;
+    for(unsigned i=1;i<=8;++i){
+        double now=3.+i*.25;
+        if(i==6){publish(4);publish(5);}
+        history.sample(now,cursor);
+        const float next=SampleTracks(*cursor.visible,cursor.fraction)[0].pose.position.x;
+        check(next>x && next-x<=.313f,"late publications interpolate at every draw");
+        const auto previous=cursor.position;
+        history.sample(now,cursor);
+        check(cursor.position==previous,"identical render clock preserves pose");
+        x=next;
+    }
+    publish(25);history.sample(25.,cursor);
+    check(cursor.position==24.,"discarded simulation interval resets history");
+}
 std::vector<Triangle> plane(float slope=0){return {{{-14,-14,-14*slope},{14,-14,14*slope},{14,14,14*slope}},{{-14,-14,-14*slope},{14,14,14*slope},{-14,14,-14*slope}}};}
 owned::TerrainCpuAsset fixture(unsigned material){
     owned::TerrainCpuAsset t;t.tile_types={material};t.sector_count_x=t.sector_count_y=1;t.sectors.resize(1);
@@ -28,6 +53,7 @@ int main(int argc,char** argv)try{
         check(!missing.AddPatch(1,{0,0,0},plane())&&missing.Burst(1,{0,0,0},{0,0,1},1,1)==0,"no CPU fallback");
         std::cout<<missing.Error()<<'\n';return 0;
     }
+    check_debris_playback();
     check_breast_physics();
     Events e;e.Reset(100);
     check(!e.Admit(1,100,100,false),"initial sync suppressed");

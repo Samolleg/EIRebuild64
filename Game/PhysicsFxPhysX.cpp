@@ -122,7 +122,7 @@ struct World::Impl {
     Owned<PxScene> scene;Owned<PxMaterial> material;
     std::array<Owned<PxConvexMesh>,4> hulls;
     struct Patch {Owned<PxRigidStatic> actor;Owned<PxTriangleMesh> mesh;Vec center;unsigned users=0,slot=0;};
-    struct Body {Owned<PxRigidDynamic> actor;std::uint64_t patch;unsigned shape;float radius,age=0,life;std::uint32_t color;std::array<Pose,5> poses;};
+    struct Body {Owned<PxRigidDynamic> actor;std::uint64_t patch;unsigned shape;float radius,age=0,life;std::uint32_t color;std::array<Pose,2> poses;};
     std::map<std::uint64_t,Patch> patches;std::vector<Body> stones;Stats stats;
     Impl(){
         PxSceneDesc desc(sdk->physics->getTolerancesScale());
@@ -209,15 +209,14 @@ unsigned World::Burst(std::uint64_t key,Vec point,Vec normal,float power,std::ui
 }
 void World::Tick(bool paused){
     if(paused||!impl||!failure.empty())return;auto& w=*impl;
-    const auto begin=std::chrono::steady_clock::now();for(auto& b:w.stones)b.poses[0]=b.poses[4];
+    const auto begin=std::chrono::steady_clock::now();for(auto& b:w.stones)b.poses.front()=b.poses.back();
     const bool awake=std::any_of(w.stones.begin(),w.stones.end(),
         [](const auto& stone){return !stone.actor->isSleeping();});
-    w.stats.substeps=awake?4:0;
-    if(!awake)for(auto& stone:w.stones)stone.poses.fill(stone.poses[4]);
-    if(awake)for(unsigned step=1;step<=4;++step){
-        w.scene->simulate(StepSeconds);PxU32 error=0;bool complete=w.scene->fetchResults(true,&error);
+    w.stats.substeps=awake?1:0;
+    if(awake){
+        w.scene->simulate(TickSeconds);PxU32 error=0;bool complete=w.scene->fetchResults(true,&error);
         if(!complete||error||w.sdk->errors.count){failure="PhysX GPU step failed: "+w.sdk->errors.Message();++w.stats.errors;w.stats.gpuDynamics=w.stats.gpuBroadPhase=false;w.stones.clear();w.patches.clear();return;}
-        for(auto& b:w.stones)b.poses[step]=pose(*b.actor);
+        for(auto& b:w.stones)b.poses.back()=pose(*b.actor);
     }
     if(awake){
         PxSimulationStatistics values{};w.scene->getSimulationStatistics(values);
@@ -225,7 +224,7 @@ void World::Tick(bool paused){
         w.stats.gpuContacts=values.gpuDynamicsMemoryConfigStatistics.rigidContactCount;
     }else w.stats.gpuContacts=0;
     for(auto b=w.stones.begin();b!=w.stones.end();){
-        b->age+=TickSeconds;const auto p=b->poses[4].position,c=w.patches.at(b->patch).center;
+        b->age+=TickSeconds;const auto p=b->poses.back().position,c=w.patches.at(b->patch).center;
         if(b->age>=b->life||!finite(p)||std::abs(p.x-c.x)>PatchRadius-1||std::abs(p.y-c.y)>PatchRadius-1||p.z<c.z-20){--w.patches.at(b->patch).users;b=w.stones.erase(b);}else ++b;
     }
     w.retireUnused();w.stats.stepMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();
@@ -240,12 +239,12 @@ StoneTracks World::Snapshot() const {
 std::vector<Stone> World::Sample(float fraction) const { return SampleTracks(Snapshot(),fraction); }
 std::vector<Stone> SampleTracks(const StoneTracks& tracks,float fraction) {
     std::vector<Stone> result;
-    fraction=std::clamp(fraction,0.f,1.f)*4;const unsigned at=std::min(unsigned(fraction),3u);const float t=fraction-at;
+    const float t=std::clamp(fraction,0.f,1.f);
     result.reserve(tracks.size());for(const auto& b:tracks){
-        const auto& a=b.poses[at];const auto& z=b.poses[at+1];Stone s;
+        const auto& a=b.poses.front();const auto& z=b.poses.back();Stone s;
         s.pose.position={a.position.x+(z.position.x-a.position.x)*t,a.position.y+(z.position.y-a.position.y)*t,a.position.z+(z.position.z-a.position.z)*t};
         s.pose.rotation=interpolate(a.rotation,z.rotation,t);s.radius=b.radius;s.shape=b.shape;s.color=b.color;
-        s.alpha=std::clamp((b.life-b.age+(1-fraction/4)*TickSeconds)/.6f,0.f,1.f);result.push_back(s);
+        s.alpha=std::clamp((b.life-b.age+(1-t)*TickSeconds)/.6f,0.f,1.f);result.push_back(s);
     }return result;
 }
 Stats World::Statistics() const{

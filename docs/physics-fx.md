@@ -21,8 +21,10 @@ Forty-eight to sixty-four fragments: 5–12 cm chips and 6–8 larger 16–26 cm
 their last 0.6 seconds. A patch extends 12 m from its centre; outlying fragments
 retire before its boundary. Shapes and patches are released when no longer needed.
 
-Each 55 ms client tick advances four 13.75 ms physics steps. Samples interpolate
-all four steps; drawing never advances simulation. Combat pause freezes age and
+Each 55 ms of game time advances the GPU debris scene once. The worker publishes
+both solved endpoints. Drawing interpolates a short history of completed results
+on the render clock, including when the worker finishes between client ticks.
+Combat pause freezes age and
 poses. No wall-clock catch-up exists. Zone reset destroys all physical state.
 Events are keyed by effect ID/start tick, consumed during initial sync, and stale
 or repeated visible incarnations are ignored. Cosmetic randomness is private.
