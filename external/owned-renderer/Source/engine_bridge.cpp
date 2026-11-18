@@ -31539,6 +31539,10 @@ const BridgeFrameValues* bridge_embedded_installed_frame() noexcept {
 #endif
 
 void bridge_install_frame_values(const BridgeFrameValues& values) noexcept {
+#ifdef EID3D11_EMBEDDED
+    if (g_scene_frame_values_installed && g_scene_frame_values.world_epoch != values.world_epoch)
+        bridge_release_embedded_world_locals();
+#endif
     g_scene_frame_values = values;
     g_scene_frame_values_installed = true;
     g_bridge_frame_serial = values.frame_serial;
@@ -31728,6 +31732,14 @@ bool hud_embedded_submit_portrait(const EmbeddedHudPortraitInput& input,
         }
         return sink(context,view);
     } catch (...) { return false; }
+}
+
+void bridge_release_embedded_world_locals() noexcept {
+    reset_owned_visual_draw(nullptr);
+    decltype(g_owned_visual_prepared_spare)().swap(g_owned_visual_prepared_spare);
+    g_owned_terrain_frame = {};
+    g_scene_frame_values = {};
+    g_scene_frame_values_installed = false;
 }
 
 void bridge_sample_embedded_visuals(double time, bool briefing, std::int32_t hover_id,

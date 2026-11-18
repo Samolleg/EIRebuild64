@@ -285,7 +285,7 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     inputs.lighting_valid = host.lightingValid;
     inputs.fog = [](const void* context, const float* position) -> BYTE {
         const auto& frame = *static_cast<const E1VisualInputs*>(context);
-        return frame.fog(frame.fogInputs, position);
+        return frame.fog ? frame.fog(frame.fogInputs, position) : 0;
     };
     inputs.fog_context = &host;
     Sink sink;

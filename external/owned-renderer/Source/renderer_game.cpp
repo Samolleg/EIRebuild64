@@ -251,7 +251,7 @@ void Renderer::set_scene_mode(bool active) noexcept{
  if(active==embedded_render_thread_active())return;
  if(active){
   if(!scene_thread_){try{scene_thread_=std::make_unique<SceneThread>();}catch(...){return;}}
-  if(!scene_thread_->start()){
+  if(!scene_thread_->start(&bridge_release_embedded_world_locals)){
    bridge_report_event("render_thread_unavailable","cannot create embedded scene worker");
    return;
   }

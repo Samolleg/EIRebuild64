@@ -2259,6 +2259,7 @@ struct EmbeddedVisualOmission {
 // the retained scene claims, for the current world draw.
 // drawn receives the IDs of the visuals this frame drew (colour submitted).
 const EmbeddedVisualFrameInputs* bridge_embedded_visual_inputs() noexcept;
+void bridge_release_embedded_world_locals() noexcept;
 void bridge_sample_embedded_visuals(double time, bool briefing, std::int32_t hover_id,
     std::uint64_t hover_serial, RetainedVisualFrame& output);
 bool bridge_embedded_owned_visual_frame(const EmbeddedVisualFrameInputs& inputs,
