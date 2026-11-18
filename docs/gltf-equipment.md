@@ -137,10 +137,19 @@ successful decoding. No shader/pose ABI change is needed for this path.
 ## Outfit conditions and default layers (X64GLTF14)
 
 An attachment may specify `requiresEquipment` or `unlessEquipment`, each an object
-with an exact `slot`, `shape`, and optional `material`. These conditions read the
+with an exact `slot`, a `shape`, and optional `material`. These conditions read the
 immutable inventory snapshot, not the results of other conditions. Mutual shirt
 and pants conditions therefore cannot recurse. The garment cut and fabric remain
 data; no character-specific names are present in the renderer.
+
+The shape may also be `"*"` to match any armor shape in the specified slot.
+With `"hasSelection": true`, it matches only when that item's selected material
+has a nonempty explicit attachment array, or a texture override with a nonempty
+common attachment array. Empty selections and unknown items do not match. This
+checks the configured selection without recursively evaluating its attachment
+conditions; use it for unconditional slot visuals. For example, a closed
+helmet can select a different braid for an equipped upper armor and restore the
+original braid on removal. Exact-shape conditions retain their earlier behavior.
 
 Optional `baseLayers` is keyed by the selected body's exact resource key. Each
 entry is an ordinary skinned attachment plus a unique `base_*` slot and a

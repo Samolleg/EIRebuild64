@@ -46,9 +46,31 @@ inline std::vector<ItemBinding> item_bindings(const nlohmann::json& registry,
             const auto slot=condition.at("slot").get<std::string>();
             const auto shape=condition.at("shape").get<std::string>();
             require(slot.rfind("armor_",0)==0 && !shape.empty() && shape.size()<=128,"equipment condition target");
+            const bool hasSelection=condition.contains("hasSelection");
+            require(!hasSelection || (shape=="*" && condition.at("hasSelection").is_boolean() &&
+                condition.at("hasSelection").get<bool>()),"equipment selection condition");
             const auto match=[&](const VisualEquipmentItem& other) {
-                return other.kind==VisualEquipmentItem::Kind::armor && other.slot==slot && other.shape==shape &&
-                    (!condition.contains("material") || condition.at("material")==other.material);
+                if(other.kind!=VisualEquipmentItem::Kind::armor || other.slot!=slot ||
+                   (shape!="*" && other.shape!=shape) ||
+                   (condition.contains("material") && condition.at("material")!=other.material))return false;
+                if(!hasSelection)return true;
+                // Check the material's complete explicit selection, or the
+                // common selection when it supplies texture overrides. This
+                // deliberately does not recursively evaluate other conditions.
+                const auto candidate=items.find(other.shape);
+                if(candidate==items.end() || !candidate->is_object())return false;
+                const auto materials=candidate->find("materials");
+                if(materials==candidate->end() || !materials->is_object())return false;
+                const auto material=materials->find(other.material);
+                if(material==materials->end() || !material->is_object())return false;
+                const auto selectedSlot=material->find(other.slot);
+                if(selectedSlot==material->end())return false;
+                if(selectedSlot->is_array())return !selectedSlot->empty();
+                if(!selectedSlot->is_object())return false;
+                const auto defaults=candidate->find("defaults");
+                if(defaults==candidate->end() || !defaults->is_object())return false;
+                const auto common=defaults->find(other.slot);
+                return common!=defaults->end() && common->is_array() && !common->empty();
             };
             // Conditions read the immutable inventory, never other conditions.
             return outfit ? std::any_of(outfit->begin(),outfit->end(),match) : match(item);
