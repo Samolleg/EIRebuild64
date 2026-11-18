@@ -1,3 +1,5 @@
+#requires -Version 7.6.10
+#requires -PSEdition Core
 param([Parameter(Mandatory=$true)][string]$OutputDirectory,[string]$GameRoot='C:\GOG Games\PZ',[switch]$Prepared,[switch]$SkipBuild,[string]$KitDirectory)
 $ErrorActionPreference='Stop'
 $built=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))

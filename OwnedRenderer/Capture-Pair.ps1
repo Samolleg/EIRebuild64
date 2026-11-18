@@ -1,3 +1,5 @@
+#requires -Version 7.6.10
+#requires -PSEdition Core
 param(
     [Parameter(Mandatory=$true)][ValidateSet('Reference','Candidate')][string]$Role,
     [Parameter(Mandatory=$true)][ValidateSet('ZoneMainMenuNew','zone7')][string]$Scene,

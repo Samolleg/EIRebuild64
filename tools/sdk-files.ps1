@@ -1,10 +1,11 @@
+#requires -Version 7.6.10
+#requires -PSEdition Core
 function Get-LocalSdkFiles([string]$Source, [string]$Pattern) {
     $path = Join-Path $Source $Pattern
     $leaf = Split-Path -Leaf $path
     if ([Management.Automation.WildcardPattern]::ContainsWildcardCharacters($leaf)) {
-        # PS 5.1 combines a wildcard Path with -File before descending into
-        # child directories. An Include tree with no root files becomes empty.
-        # Keep the directory literal and apply the filename filter separately.
+        # Keep the directory literal; match leaf filenames throughout the tree,
+        # including directories that contain no files at their root.
         $directory = Split-Path -Parent $path
         if (![IO.Directory]::Exists($directory)) { throw "Missing SDK directory: $directory" }
         Get-ChildItem -LiteralPath $directory -Filter $leaf -File -Recurse -ErrorAction Stop
