@@ -9,6 +9,7 @@ namespace owned::gltf {
 struct ItemTexture {
     unsigned material = 0;
     std::string resource;
+    std::string metallic_roughness;
 };
 struct ItemBinding {
     std::string resource, socket, slot;
@@ -91,24 +92,29 @@ inline std::vector<ItemBinding> item_bindings(const nlohmann::json& registry,
         require(textures.is_array() && textures.size()<=64,"texture override array limit");
         std::set<std::pair<unsigned,unsigned>> textureTargets;
         for(const auto& texture:textures) {
-            require(texture.is_object() && texture.size()==3 && texture.contains("binding") &&
-                texture.contains("material") && texture.contains("baseColor"),"texture override fields");
+            require(texture.is_object() && texture.contains("binding") && texture.contains("material") &&
+                texture.contains("baseColor") && texture.size()==(texture.contains("metallicRoughness") ? 4u : 3u),
+                "texture override fields");
             require(texture.at("binding").is_number_unsigned() && texture.at("material").is_number_unsigned(),"texture indices");
             require(texture.at("binding").get<std::uint64_t>()<=UINT32_MAX &&
                 texture.at("material").get<std::uint64_t>()<=UINT32_MAX,"texture index overflow");
             const auto index=texture.at("binding").get<unsigned>();
             const auto material=texture.at("material").get<unsigned>();
             const auto path=texture.at("baseColor").get<std::string>();
+            const auto orm=texture.value("metallicRoughness",std::string());
             require(index<list.size(),"texture binding index");
             require(textureTargets.emplace(index,material).second,"duplicate material texture");
-            require(path.rfind("models/items/textures/",0)==0 && path.size()>27 &&
-                path.substr(path.size()-4)==".png" && path.find("..") == std::string::npos &&
-                path.find(':')==std::string::npos && path.find('\\')==std::string::npos,
+            const auto valid_path=[](const std::string& value) {
+                return value.rfind("models/items/textures/",0)==0 && value.size()>27 &&
+                    value.substr(value.size()-4)==".png" && value.find("..") == std::string::npos &&
+                    value.find(':')==std::string::npos && value.find('\\')==std::string::npos;
+            };
+            require(valid_path(path) && (!texture.contains("metallicRoughness") || valid_path(orm)),
                 "texture resource key");
             // Texture binding indices address the original list, even when an
             // outfit condition omits an earlier attachment from this selection.
             if(selected[index]!=std::size_t(-1))
-                result[selected[index]].textures.push_back({material,path});
+                result[selected[index]].textures.push_back({material,path,orm});
         }
     }
     return result;
