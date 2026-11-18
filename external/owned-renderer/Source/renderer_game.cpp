@@ -190,6 +190,32 @@ HRESULT Renderer::finish_embedded_scene_commands() noexcept {
  return result;
 }
 
+// The scene worker exclusively owns the renderer and the current terrain view
+// until this pass finishes. Only the independent host picking list is built in
+// parallel. Join even if its allocation throws: the frame's borrows end here.
+HRESULT Renderer::run_embedded_world_pass(const std::function<HRESULT()>& draw,
+                                          const std::function<void()>& preparePicking) {
+ if(!embedded_render_thread_active()){
+  const HRESULT result=draw();
+  preparePicking();
+  return result;
+ }
+ BridgeFrameValues values;
+ if(!bridge_capture_frame_values(values))return E_FAIL;
+ if(!scene_thread_->post([this,&draw,values=std::move(values)]() noexcept {
+  try {
+   bridge_install_frame_values(values);
+   embedded_scene_result_=draw();
+  } catch(const std::bad_alloc&){embedded_scene_result_=E_OUTOFMEMORY;}
+    catch(...){embedded_scene_result_=E_FAIL;}
+  if(FAILED(embedded_scene_result_))discard_native();
+ },false,"embedded_world_pass"))return E_OUTOFMEMORY;
+ embedded_scene_pending_=true;
+ try { preparePicking(); }
+ catch(...) { (void)finish_embedded_scene_commands(); throw; }
+ return finish_embedded_scene_commands();
+}
+
 // These operations consume the renderer-owned native batch. Host pointers
 // used to build it have already been resolved; no caller stack is captured.
 HRESULT Renderer::queue_embedded_batch(EmbeddedBatch batch){

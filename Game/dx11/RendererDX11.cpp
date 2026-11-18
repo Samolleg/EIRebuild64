@@ -745,10 +745,9 @@ void CDX11::SetC56HitTestFrame(bool begin)
             begin ? "begin" : "end", static_cast<unsigned long>(result));
 }
 
-void CDX11::RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals)
+void CDX11::RunC56WorldPass(const OwnedRender::E1VisualInputs& visuals, const std::function<void()>& preparePicking)
 {
-    if (!ownedWorldActive || c56WorldPassRan || !rendererFacade)
-        return;
+    if (!ownedWorldActive || c56WorldPassRan || !rendererFacade) { preparePicking(); return; }
     owned::FixedState frame;
     for (const auto& value : fake_dx7.render_state)
         if (value.first >= 0 && static_cast<std::size_t>(value.first) < frame.render.size())
@@ -759,24 +758,26 @@ void CDX11::RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals)
     const auto fogState = CaptureC56MaterialState();
     frame.render[D3DRENDERSTATE_FOGENABLE] = fogState.render[D3DRENDERSTATE_FOGENABLE];
     frame.render[D3DRENDERSTATE_FOGCOLOR] = fogState.render[D3DRENDERSTATE_FOGCOLOR];
-    bool owned = false;
-    HRESULT pass = rendererFacade->Visit([&](owned::Renderer& renderer) {
-        // The owned-visual frame draws shadows, point lights and every claimed
-        // visual, and flushes the static set itself; without it (or when it
-        // was rejected before the flush) the static set is flushed here.
-        if (visuals)
-            owned = OwnedRender::E1RunOwnedVisualFrame(renderer, frame, *visuals);
-        HRESULT hr = S_OK;
-        if (!visuals || !OwnedRender::E1OwnedVisualFrameFlushedStatics())
-            hr = renderer.flush_native_static(frame, ownedWorldToClip);
-        if (SUCCEEDED(hr) && visuals && owned)
-            OwnedRender::E1DrawPhysicsDebris(renderer, frame, *visuals);
-        // Complete queued colour before the host draws remaining overlays.
-        if (FAILED(hr)) renderer.discard_native();
-        return hr;
+    bool drawn = false;
+    DWORD executor = 0;
+    const DWORD producer = GetCurrentThreadId();
+    const HRESULT pass = rendererFacade->Visit([&](owned::Renderer& renderer) {
+        return renderer.run_embedded_world_pass([&]() -> HRESULT {
+            executor = GetCurrentThreadId();
+            drawn = OwnedRender::E1RunOwnedVisualFrame(renderer, frame, visuals);
+            HRESULT hr = S_OK;
+            if (!OwnedRender::E1OwnedVisualFrameFlushedStatics())
+                hr = renderer.flush_native_static(frame, ownedWorldToClip);
+            if (SUCCEEDED(hr) && drawn) OwnedRender::E1DrawPhysicsDebris(renderer, frame, visuals);
+            if (SUCCEEDED(hr)) hr = renderer.flush_native();
+            if (FAILED(hr)) renderer.discard_native();
+            return hr;
+        }, preparePicking);
     });
-    if (SUCCEEDED(pass)) pass = rendererFacade->SubmitWorldBatch(owned::Renderer::EmbeddedBatch::geometry);
-    if (FAILED(pass)) OwnedRender::E1OwnedVisualFrameNewDraw();
+    if (FAILED(pass)) {
+        OwnedRender::E1OwnedVisualFrameNewDraw();
+        IfFailedThrowHR(pass);
+    }
     c56WorldPassRan = true;
     RefreshOwnedTargets();
     SetRenderStates();
@@ -788,11 +789,12 @@ void CDX11::RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals)
             deviceContext->PSSetShaderResources(stage, 1, &resource);
         }
     }
-    const int state = FAILED(pass) ? 3 : visuals ? (owned ? 2 : 1) : 0;
+    const int state = (executor != producer ? 4 : 0) | (drawn ? 2 : 1);
     if (state != c56WorldPassState) {
         c56WorldPassState = state;
         GameJournal::Event("RENDER", "world_pass",
-            "owner=c56 owned_visual_frame=%s hr=%08lx", state == 2 ? "drawn" : state == 0 ? "not_requested" : "rejected", static_cast<unsigned long>(pass));
+            "owner=c56 owned_visual_frame=%s hr=%08lx producer_tid=%lu executor_tid=%lu",
+            drawn ? "drawn" : "rejected", static_cast<unsigned long>(pass), producer, executor);
     }
 }
 

@@ -3132,10 +3132,8 @@ BOOL CWorldClient::Draw()
         visuals.sunDiffuse = frameValues.lighting.sunlight_diffuse;
         visuals.sunDirection = frameValues.lighting.sunlight_direction;
         visuals.lightingValid = frameValues.lightingValid;
-        visuals.fog = [](void* terrain, const float* p) -> unsigned char {
-            return static_cast<CTerrain*>(terrain)->GetObjectFogAlpha(CPlot3D(p[0], p[1], p[2]));
-        };
-        visuals.fogContext = pTerrain;
+        visuals.fog = &CTerrain::SampleObjectFog;
+        visuals.fogInputs = pTerrain->GetObjectFogInputs();
         if (CheckFlag(WC_RENDER_EFFECTS)) {
             visuals.debris = stoneEffects.Sample(float(GetRenderTimeSegments()-GetSegmentTimeCounter()), IsCombatPause() || IWorld.IsMissionCombatPause());
             visuals.debrisSurface = OwnedRender::E1SurfaceValue(stoneEffects.TextureSurface());
@@ -3147,8 +3145,15 @@ BOOL CWorldClient::Draw()
         }
         OwnedRender::E3CombatBeginFrame(IsCombatPause() || IWorld.IsMissionCombatPause());
         coreParts.Stage(CorePerf::WorldRender);
-        pRend->GetD3D()->RunC56WorldPass(&visuals);
-    }
+        auto completed = std::make_shared<owned::RetainedVisualFrame>();
+        owned::bridge_sample_embedded_visuals(visuals.time, visuals.briefingScreen,
+            visuals.hoverId, visuals.hoverSerial, *completed);
+        if (OwnedRender::E1CompleteVisualFrame(*completed)) {
+            OwnedRender::E1PublishGroundCoverFootprints(completed, visuals.footprints, visuals.footprintsEnabled);
+            visuals.completed = std::move(completed);
+        }
+        pRend->GetD3D()->RunC56WorldPass(visuals, [this] { PrepareScreenPicking(); });
+    } else InvalidatePicking();
     coreParts.Stage(CorePerf::WorldOverlays);
     // Remaining overlays run after this draw's owned shadows and colour.
     Draw3DScene();
@@ -3504,26 +3509,33 @@ BOOL CWorldClient::Prepare3DScene()
     }
     return TRUE;
 }
+// CPU picking only consumes screen rectangles already published by Prepare3DScene.
+void CWorldClient::PrepareScreenPicking()
+{
+    InvalidatePicking();
+    if (CheckFlag(WC_RENDER_OBJECTS))
+        for (auto* object : visibleLevers) AddScreenRects(object, &lstScreenObjects);
+    if (CheckFlag(WC_RENDER_UNITS))
+        for (auto* object : visibleUnits) AddScreenRects(object, &lstScreenObjects);
+}
 // Only remaining overlays: world object colour and shadows have no OpenEI draw.
 BOOL CWorldClient::Draw3DScene()
 {
-    InvalidatePicking();
     if (!pTerrain || !pTerrain->IsLoaded()) return FALSE;
     CRenderer *pRend = &theRenderer;
     CDXGeometryProcessor *pGPU = pRend->GetGPU();
-    auto record = [this](CMapObject* object, bool selectable) {
+    auto record = [](CMapObject* object) {
         if (object->CheckFlag(OBJ_HIDDEN) || !object->CheckFlag(OBJ_VISIBLE)) return;
         OwnedRender::E1ReportOwnedVisual(object->GetID());
-        if (selectable) AddScreenRects(object, &lstScreenObjects);
     };
     if (CheckFlag(WC_RENDER_OBJECTS)) {
-        for (auto* object : visibleObjects) record(object, false);
-        for (auto* object : visibleBuildings) record(object, false);
-        for (auto* object : visibleTrees) record(object, false);
-        for (auto* object : visibleLevers) record(object, true);
+        for (auto* object : visibleObjects) record(object);
+        for (auto* object : visibleBuildings) record(object);
+        for (auto* object : visibleTrees) record(object);
+        for (auto* object : visibleLevers) record(object);
     }
     if (CheckFlag(WC_RENDER_UNITS))
-        for (auto* object : visibleUnits) record(object, true);
+        for (auto* object : visibleUnits) record(object);
 
     // draw terrain prints (footprints, blood and fireprints)
     if (!bloodprints.empty() || !footprints.empty() || !fireprints.empty())

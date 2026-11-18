@@ -3,6 +3,7 @@
 #include "../PhysicsFxCore.h"
 #include "E1AmbientEffects.h"
 #include "engine_bridge.h"
+#include "neighbour_maps.h"
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -22,6 +23,7 @@ bool E1CompleteVisualFrame(owned::RetainedVisualFrame& frame) noexcept;
 bool E1CompleteAmbientFrame(owned::RetainedVisualFrame& frame) noexcept;
 // Host values of one world draw, without renderer headers (WorldClient).
 struct E1VisualInputs {
+    std::shared_ptr<const owned::RetainedVisualFrame> completed;
     std::vector<PhysicsFx::Stone> debris; // copied values, no game/physics pointers
     std::shared_ptr<const owned::OwnedVisualSurface> debrisSurface; // owns the publication through submission
     owned::NativeOwnedTextureView debrisTexture;
@@ -37,8 +39,8 @@ struct E1VisualInputs {
     float cameraAnchorZ = 0; // CCamera anchor height for the close shadow band
     std::array<float, 4> ambient{}, sunDiffuse{}, sunDirection{};
     bool lightingValid = false;
-    unsigned char (*fog)(void* context, const float* position) = nullptr;
-    void* fogContext = nullptr;
+    unsigned char (*fog)(const owned::ObjectBorderFogInputs& inputs, const float* position) = nullptr;
+    owned::ObjectBorderFogInputs fogInputs{};
 };
 // Runs the renderer's owned-visual world frame for this draw (sun and point
 // shadows, point lights, colour of every visual the retained scene claims,

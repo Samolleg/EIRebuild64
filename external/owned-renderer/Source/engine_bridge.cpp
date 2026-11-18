@@ -5459,7 +5459,11 @@ FigureFallbackReason publish_retained_world_lighting(
 FigureFallbackReason publish_native_world_lighting(void* renderer) noexcept {
     // Scene thread: the game thread sampled and published the world light
     // when it queued this command; never read the game's renderer here.
-    if (g_scene_frame_values_installed)
+    if (g_scene_frame_values_installed
+#ifdef EID3D11_EMBEDDED
+        && !g_embedded_visual_inputs // this pass has captured light and its own native sink
+#endif
+    )
         return g_native_world_lighting_frame.sampled ? g_native_world_lighting_frame.result
                                                      : FigureFallbackReason::unavailable;
     if (!g_native_sink_context || !g_native_sink_world_lighting)
@@ -18421,7 +18425,9 @@ void capture_owned_world_shadow_inputs(void* scene,void* renderer,OwnedShadowInp
     in.shadow_source_revision=shadow_scene.shadow_source_revision();
     in.draw_undetected=!visible_only || interface_kind!=1;
     lighting_timing.finish();
+#ifndef EID3D11_EMBEDDED
     publish_highlight_state();
+#endif
     {
         CityRetainedOwnerGuard values_timing(CityRetainedOwner::visual_frame_values);
         const bool traced=startup_begin(StartupStage::visual_sample);
@@ -18429,13 +18435,8 @@ void capture_owned_world_shadow_inputs(void* scene,void* renderer,OwnedShadowInp
         const bool diagnose = g_bridge_sample.active && bridge_profile_enabled();
 #ifdef EID3D11_EMBEDDED
         if (g_embedded_visual_inputs) {
-            if (!g_embedded_visual_inputs->complete_visuals)
-                throw "embedded_visual_values_unavailable";
-            auto completed = std::make_shared<RetainedVisualFrame>();
-            shadow_scene.evaluate_visual_frame(in.time, diagnose, *completed);
-            if (!g_embedded_visual_inputs->complete_visuals(completed, g_embedded_visual_inputs->visual_context))
-                throw "embedded_visual_values_rejected";
-            in.values = std::move(completed);
+            in.values = g_embedded_visual_inputs->completed_visuals;
+            if (!in.values) throw "embedded_visual_values_unavailable";
         } else
 #endif
         {
@@ -31727,6 +31728,19 @@ bool hud_embedded_submit_portrait(const EmbeddedHudPortraitInput& input,
         }
         return sink(context,view);
     } catch (...) { return false; }
+}
+
+void bridge_sample_embedded_visuals(double time, bool briefing, std::int32_t hover_id,
+    std::uint64_t hover_serial, RetainedVisualFrame& output) {
+    RetainedHighlightState state;
+    state.show_selected = g_highlight_selected;
+    state.hover_characters = g_highlight_hover_characters;
+    state.hover_objects = g_highlight_hover_objects;
+    state.strip_preselected = briefing && !g_highlight_briefing;
+    state.hover = {hover_id, hover_serial};
+    auto& scene = retained_visual_scene();
+    scene.visual_publish_highlight(state);
+    scene.evaluate_visual_frame(time, g_bridge_sample.active && bridge_profile_enabled(), output);
 }
 
 const EmbeddedVisualFrameInputs* bridge_embedded_visual_inputs() noexcept { return g_embedded_visual_inputs; }

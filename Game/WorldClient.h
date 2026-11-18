@@ -392,6 +392,7 @@ public:
     void SetCameraScroll(CPoint point, int nFlags);
     //
     BOOL Prepare3DScene();
+    void PrepareScreenPicking();
     BOOL Draw3DScene();
     BOOL Draw();
     // idle function (call from CWinApp::OnIdle)

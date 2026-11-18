@@ -270,14 +270,7 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     static E1PerfCounter counter{"scene_total"};
     E1PerfScope timing(counter);
     owned::EmbeddedVisualFrameInputs inputs;
-    inputs.visual_context = &host;
-    inputs.complete_visuals = [](const std::shared_ptr<owned::RetainedVisualFrame>& frame,
-        const void* context) {
-        if (!E1CompleteVisualFrame(*frame)) return false;
-        const auto& host = *static_cast<const E1VisualInputs*>(context);
-        E1PublishGroundCoverFootprints(frame, host.footprints, host.footprintsEnabled);
-        return true;
-    };
+    inputs.completed_visuals = host.completed;
     inputs.time = host.time;
     inputs.scene_flags = host.sceneFlags;
     inputs.draw_undetected = host.drawUndetected;
@@ -290,8 +283,11 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     inputs.lighting.sunlight_diffuse = host.sunDiffuse;
     inputs.lighting.sunlight_direction = host.sunDirection;
     inputs.lighting_valid = host.lightingValid;
-    inputs.fog = host.fog;
-    inputs.fog_context = host.fogContext;
+    inputs.fog = [](const void* context, const float* position) -> BYTE {
+        const auto& frame = *static_cast<const E1VisualInputs*>(context);
+        return frame.fog(frame.fogInputs, position);
+    };
+    inputs.fog_context = &host;
     Sink sink;
     sink.renderer = &renderer;
     sink.state = state;

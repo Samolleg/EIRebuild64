@@ -1638,24 +1638,17 @@ void CTerrain::UpdateLight(CLight *pLight, CPlot3D *pMoveVector, SSectorRect *pR
 
 // Fog
 
-BYTE CTerrain::GetObjectFogAlpha(const CPlot3D &plot) const
-{
-    const float position[2] = {plot.x, plot.y};
-    return owned::neighbour_continued_border_fog(
-        owned::ObjectBorderFogInputs{{GetMaxX(), GetMaxY()}, theSettings.fpTerrainBorderFogDistance,
-            IsHaveRenderState(ETRS_BORDER_FOG) != FALSE}, position, GetFogAlpha(plot));
-}
-
-BYTE CTerrain::GetFogAlpha(const CPlot3D &plot) const
+namespace {
+BYTE terrainFogAlpha(const owned::ObjectBorderFogInputs& inputs, float x, float y)
 {
     BYTE cRet = 0xFF;
 
-    if (IsHaveRenderState(CTerrain::ETRS_BORDER_FOG))
+    if (inputs.enabled)
     {
-        float fpMMinX = plot.x - theSettings.fpTerrainBorderFogDistance - FP_CL_MP_SIZE;
-        float fpMMinY = plot.y - theSettings.fpTerrainBorderFogDistance - FP_CL_MP_SIZE;
-        float fpMMaxX = GetMaxX() - theSettings.fpTerrainBorderFogDistance - plot.x - FP_CL_MP_SIZE;
-        float fpMMaxY = GetMaxY() - theSettings.fpTerrainBorderFogDistance - plot.y - FP_CL_MP_SIZE;
+        float fpMMinX = x - inputs.distance - FP_CL_MP_SIZE;
+        float fpMMinY = y - inputs.distance - FP_CL_MP_SIZE;
+        float fpMMaxX = inputs.extent[0] - inputs.distance - x - FP_CL_MP_SIZE;
+        float fpMMaxY = inputs.extent[1] - inputs.distance - y - FP_CL_MP_SIZE;
 
         BOOL bMarginned = (Float2DW(fpMMinX) & 0x80000000) | (Float2DW(fpMMinY) & 0x80000000) |
                           (Float2DW(fpMMaxX) & 0x80000000) | (Float2DW(fpMMaxY) & 0x80000000);
@@ -1667,12 +1660,36 @@ BYTE CTerrain::GetFogAlpha(const CPlot3D &plot) const
             fpMMaxY = Min(fpMMaxY, 0.0f);
             float fpMarginLen = FSqrt(fpMMinX * fpMMinX + fpMMinY * fpMMinY + fpMMaxX * fpMMaxX +
                                       fpMMaxY * fpMMaxY);
-            fpMarginLen = Min(fpMarginLen, theSettings.fpTerrainBorderFogDistance);
-            float fpAlpha = fpMarginLen / theSettings.fpTerrainBorderFogDistance * 255;
+            fpMarginLen = Min(fpMarginLen, inputs.distance);
+            float fpAlpha = fpMarginLen / inputs.distance * 255;
             cRet = 255 - Float2Int(fpAlpha);
         }
     }
     return cRet;
+}
+}
+
+owned::ObjectBorderFogInputs CTerrain::GetObjectFogInputs() const
+{
+    return {{GetMaxX(), GetMaxY()}, theSettings.fpTerrainBorderFogDistance,
+            IsHaveRenderState(ETRS_BORDER_FOG) != FALSE};
+}
+
+BYTE CTerrain::SampleObjectFog(const owned::ObjectBorderFogInputs& inputs, const float* position)
+{
+    return owned::neighbour_continued_border_fog(inputs, position,
+        terrainFogAlpha(inputs, position[0], position[1]));
+}
+
+BYTE CTerrain::GetObjectFogAlpha(const CPlot3D &plot) const
+{
+    const float position[] = {plot.x, plot.y};
+    return SampleObjectFog(GetObjectFogInputs(), position);
+}
+
+BYTE CTerrain::GetFogAlpha(const CPlot3D &plot) const
+{
+    return terrainFogAlpha(GetObjectFogInputs(), plot.x, plot.y);
 }
 
 /////////////////////////////////////////////////////////////////////////////////////

@@ -1609,6 +1609,8 @@ public:
     HRESULT finish_embedded_scene_commands() noexcept;
     enum class EmbeddedBatch { geometry, composite, end_scene };
     HRESULT queue_embedded_batch(EmbeddedBatch batch);
+    HRESULT run_embedded_world_pass(const std::function<HRESULT()>& draw,
+                                    const std::function<void()>& preparePicking);
     bool embedded_render_thread_active() const noexcept { return scene_thread_ && scene_thread_->running(); }
     bool scene_mode() const noexcept { return scene_mode_.load(std::memory_order_acquire); }
     bool on_scene_thread() const noexcept { return scene_thread_ && scene_thread_->on_thread(); }
