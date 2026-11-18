@@ -716,7 +716,12 @@ bool Slot::Presentation(const char *name,SSaveSlotDesc &desc,Bytes *shot)
         CMemorySave f;Buffer(f,bytes);Registry reg;Bytes info,image;
         auto graph=SaveSchema::Load(f,reg,[&](Reader &r){
             if(!SaveModIdentity::CurrentEnvelope(r.String()))Invalid("unsupported slot root");
-            r.UInt64();r.String();r.String();r.UInt64();r.Blob();info=r.Blob();image=r.Blob();
+            desc.generation = r.UInt64();
+            const auto mod = r.String();
+            if (!desc.generation || !ModRuntime::Current() ||
+                !SaveModIdentity::BelongsTo(mod, ModRuntime::Current()->SaveIdentity()))
+                Invalid("incompatible slot");
+            r.String();r.UInt64();r.Blob();info=r.Blob();image=r.Blob();
         },SlotLimits());
         CMemorySave metadata;Buffer(metadata,info);auto g=SaveSchema::Load(metadata,reg,[&](Reader &r){
             Field(r,desc.szName);Field(r,desc.szAllodName);Field(r,desc.szZoneName);desc.fGameTime=r.Float32();

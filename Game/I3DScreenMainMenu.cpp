@@ -49,7 +49,8 @@ enum
     MMBT_LOAD,
     MMBT_EXIT,
     MMBT_OPTIONS,
-    MMBT_CREDITS
+    MMBT_CREDITS,
+    MMBT_CONTINUE
 };
 /////////////////////////////////////////////////////////////////////////////////////
 SI3DMenuRects theMenuRects;
@@ -79,6 +80,7 @@ void CI3DScreenMainMenu::OnActivate()
     pArea->MakeRect(theMenuRects.rcMMOptions);
     pArea = AddArea();
     pArea->MakeRect(theMenuRects.rcMMCredits);
+    AddArea()->MakeRect(theMenuRects.rcMMMultiplayer);
 
 #ifdef _DEBUG
     // AlexK - draw rects to debug texture loading
@@ -214,7 +216,7 @@ void CI3DScreenMainMenu::OnLButtonDown(UINT nFlags, CPoint point)
     CI3DScreen *pVideoScr = NULL;
     int nHit = HitTest(point);
     JournalHit(nHit);
-    if ((nHit == MMBT_NEWGAME || nHit == MMBT_LOAD) && !ModRuntime::SinglePlayerAllowed())
+    if ((nHit == MMBT_NEWGAME || nHit == MMBT_LOAD || nHit == MMBT_CONTINUE) && !ModRuntime::SinglePlayerAllowed())
         return;
 
     switch (nHit)
@@ -235,6 +237,16 @@ void CI3DScreenMainMenu::OnLButtonDown(UINT nFlags, CPoint point)
     }
     break;
 
+    case MMBT_CONTINUE: {
+        const CString slot = CI3DScreenSaveLoad::LatestSlot();
+        if (slot.IsEmpty()) {
+            pI3D->BeginFX("buttons\\menu\\no.wav");
+            break;
+        }
+        pI3D->BeginFX("buttons\\menu\\ok.wav");
+        CI3DScreenSaveLoad::QuickLoad(slot);
+        break;
+    }
     case MMBT_EXIT:
         // CRAP{
         Video::Movie::Play(IWorld.GetCDPath() + "Movies\\Exit1.bik", 0, true, false);
@@ -272,7 +284,7 @@ void CI3DScreenMainMenu::OnMouseMove(UINT nFlags, CPoint point)
     if (lpUnit)
     {
         int nHitTest = HitTest(point);
-        if ((nHitTest == MMBT_NEWGAME || nHitTest == MMBT_LOAD) && !ModRuntime::SinglePlayerAllowed())
+        if ((nHitTest == MMBT_NEWGAME || nHitTest == MMBT_LOAD || nHitTest == MMBT_CONTINUE) && !ModRuntime::SinglePlayerAllowed())
             nHitTest = -1;
         CString szUnitMaskName = lpUnit->GetMaskName();
         if (nHitTest != m_nPrevHitTest)
@@ -292,6 +304,12 @@ void CI3DScreenMainMenu::OnMouseMove(UINT nFlags, CPoint point)
                 break;
             case MMBT_EXIT: {
                 const SADEntry *pEntry = lpUnit->GetSpecialAnimationEntry(5);
+                lpUnit->SetNextAnimation(pEntry, TRUE);
+            }
+                pI3D->BeginFX("buttons\\menu\\stone.wav");
+                break;
+            case MMBT_CONTINUE: {
+                const SADEntry *pEntry = lpUnit->GetSpecialAnimationEntry(9);
                 lpUnit->SetNextAnimation(pEntry, TRUE);
             }
                 pI3D->BeginFX("buttons\\menu\\stone.wav");

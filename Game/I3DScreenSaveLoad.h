@@ -19,15 +19,16 @@ struct SSaveSlotDesc
 public:
     CString szName;  // name of entry ( localized )
     CString szPath;  // path from saves directory, eg "save25"
-    __time32_t time; // time when it was made
+    __time32_t time = 0; // time when it was made
 
-    float fGameTime;
+    uint64_t generation = 0; // precise write time from the Saves64 envelope
+    float fGameTime = 0;
     CString szAllodName;       // current allod ( internal name )
     CString szZoneName;        // current zone ( internal name )
     CStringArray szPersonages; // personages in the party
     CStringArray szQuests;     // available quests
 
-    bool bNoInfo; // if old save format or new slot in save screen
+    bool bNoInfo = true; // if old save format or new slot in save screen
 
 public:
     SSaveSlotDesc() {}
@@ -87,6 +88,7 @@ public:
     virtual LPCTSTR GetTutorialScreenName();
 
     static void QuickSave(LPCTSTR pszSlotName, bool bIsAuto = false);
+    static CString LatestSlot();
     static void QuickLoad(LPCTSTR pszSlotName);
 
     void SetParams(bool bIsSave, bool bIntroAnim)
