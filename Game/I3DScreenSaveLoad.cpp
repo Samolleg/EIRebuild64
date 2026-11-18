@@ -1,6 +1,7 @@
 #include "StdAfx.h"
 #include "ModEncounter.h"
 #include "SaveSlot.h"
+#include "SaveHistory.h"
 #include "CorePerf.h"
 #include "OwnedRender/E2Gdi.h"
 #include "GameJournal.h"
@@ -112,18 +113,17 @@ void SSaveSlotDesc::Store(CSave &file)
 ////////////////////////////////////////////////////////////////////////////////
 void SSaveSlotDesc::FormName(bool bDate)
 {
-    CString szQSaveStr, szASaveStr, szBSaveStr;
-    IWorld.GetTextManager()->GetSystemString("save_quick", szQSaveStr);
-    IWorld.GetTextManager()->GetSystemString("save_auto_enter", szASaveStr);
-    IWorld.GetTextManager()->GetSystemString("save_auto_exit", szBSaveStr);
-    if (szPath.CompareNoCase("saveq") == 0)
-        szName.Format("%s", static_cast<LPCSTR>(szQSaveStr));
-    else if (szPath.CompareNoCase("savea") == 0)
-        szName.Format("%s", static_cast<LPCSTR>(szASaveStr));
-    else if (szPath.CompareNoCase("saveb") == 0)
-        szName.Format("%s", static_cast<LPCSTR>(szBSaveStr));
-    else
-        szName.Format("%s", static_cast<LPCSTR>(GetZoneLocalName()));
+    const auto slot = SaveHistory::Identify(szPath);
+    if (slot.label) {
+        CString label;
+        IWorld.GetTextManager()->GetSystemString(slot.label, label);
+        if (slot.age)
+            szName.Format("%d. %s", slot.age, static_cast<LPCSTR>(label));
+        else
+            szName = label;
+    } else {
+        szName = GetZoneLocalName();
+    }
     /*
     if ( bDate )
     {
@@ -663,8 +663,15 @@ void CI3DScreenSaveLoad::Delete()
     ReloadPicture();
 }
 /////////////////////////////////////////////////////////////////////////////////////
-static int ReadSaveSlots(std::vector<SSaveSlotDesc> &slots)
+static int ReadSaveSlots(std::vector<SSaveSlotDesc> &slots, bool forSaving = false)
 {
+    for (const char *name : {"savea", "saveb", "saveq"}) {
+        try {
+            SaveSchema::Slot::RecoverHistory(name);
+        } catch (const std::exception &e) {
+            ReportError("Save64: %s", e.what());
+        }
+    }
     CFileFind find;
     BOOL found = find.FindFile(SaveSchema::Slot::Directory() + "save*");
     int maxNumber = 0;
@@ -673,8 +680,11 @@ static int ReadSaveSlots(std::vector<SSaveSlotDesc> &slots)
         found = find.FindNextFile();
         if (find.IsDots() || !find.IsDirectory())
             continue;
+        const CString name = find.GetFileName();
+        if (forSaving && SaveHistory::Identify(name).age)
+            continue;
         auto &slot = slots.emplace_back();
-        slot.szPath = find.GetFileName();
+        slot.szPath = name;
         slot.bNoInfo = !SaveSchema::Slot::Presentation(slot.szPath, slot);
         if (slot.szPath.GetLength() > 4)
             maxNumber = Max(maxNumber, atoi(slot.szPath.Mid(4)));
@@ -703,12 +713,12 @@ CString CI3DScreenSaveLoad::LatestSlot()
 void CI3DScreenSaveLoad::FormSlotsList()
 {
     slots.clear();
-    const int nMax = ReadSaveSlots(slots);
+    const int nMax = ReadSaveSlots(slots, bIsSaveScreen);
     for (auto &slot : slots)
     {
         if (slot.bNoInfo)
             slot.szName = "Несовместимое сохранение";
-        else if (slot.szName.IsEmpty())
+        else if (slot.szName.IsEmpty() || SaveHistory::Identify(slot.szPath).age)
             slot.FormName();
     }
     // add new slot for save screen
@@ -972,13 +982,7 @@ void CI3DScreenSaveLoad::ResetEdit()
 ////////////////////////////////////////////////////////////////////////////////
 bool CI3DScreenSaveLoad::IsSystemSlot(int nSlot)
 {
-    if (slots[nSlot].szPath.CompareNoCase("saveq") == 0)
-        return true;
-    if (slots[nSlot].szPath.CompareNoCase("savea") == 0)
-        return true;
-    if (slots[nSlot].szPath.CompareNoCase("saveb") == 0)
-        return true;
-    return false;
+    return SaveHistory::Identify(slots[nSlot].szPath).label != nullptr;
 }
 ////////////////////////////////////////////////////////////////////////////////
 bool CI3DScreenSaveLoad::IsEnoughSpace()
