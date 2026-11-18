@@ -29,7 +29,7 @@ Verify ([IO.File]::ReadAllText($out) -ceq 'two') 'Cannot repopulate an empty sou
 Reject {Resolve-BuildChild $dest '../outside'}
 $junction=Join-Path $FixtureRoot 'junction'
 $null=New-Item -ItemType Junction -Path $junction -Target $source
-Reject {Resolve-BuildChild $FixtureRoot 'junction/a.txt'}
+try{Reject {Resolve-BuildChild $FixtureRoot 'junction/a.txt'}}finally{[IO.Directory]::Delete($junction)}
 [IO.File]::WriteAllText((Join-Path $dest '.ei-sources'),"../unowned.txt`r`n")
 Reject {Sync-Tree $source $dest @()}
 Reject {Assert-BuildCacheRoot (Join-Path $FixtureRoot 'cache/work/nested') (Join-Path $FixtureRoot 'cache')}
