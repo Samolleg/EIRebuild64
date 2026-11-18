@@ -1,16 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
-  <PropertyGroup><PhysXSdkRoot>$(MSBuildThisFileDirectory)..\..\dependencies\physx\5.6.1\</PhysXSdkRoot></PropertyGroup>
+  <PropertyGroup><PhysXSdkRoot>$(MSBuildThisFileDirectory)..\..\dependencies\physx\5.13.0\</PhysXSdkRoot></PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile><PreprocessorDefinitions>PX_PHYSX_STATIC_LIB;%(PreprocessorDefinitions)</PreprocessorDefinitions><AdditionalIncludeDirectories>$(PhysXSdkRoot)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
-    <Link><AdditionalLibraryDirectories>$(PhysXSdkRoot)lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories><AdditionalDependencies>PhysX_static.lib;PhysXCommon_static.lib;PhysXFoundation_static.lib;PhysXCooking_static.lib;PhysXExtensions_static.lib;PhysXPvdSDK_static.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
+    <Link><AdditionalLibraryDirectories>$(PhysXSdkRoot)lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories><AdditionalDependencies>PhysX_static.lib;PhysXCommon_static.lib;PhysXFoundation_static.lib;PhysXExtensions_static.lib;PhysXPvdSDK_static.lib;%(AdditionalDependencies)</AdditionalDependencies></Link>
   </ItemDefinitionGroup>
   <Target Name="PhysXRuntime" AfterTargets="Build">
-    <ItemGroup><PhysXLicense Include="$(PhysXSdkRoot)licenses\PhysX-LICENSE.md" /></ItemGroup>
+    <ItemGroup><PhysXLicense Include="$(PhysXSdkRoot)licenses\PhysX-*.md;$(PhysXSdkRoot)licenses\CUDA-*-LICENSE.txt" /></ItemGroup>
     <MakeDir Directories="$(OutDir)licenses" />
     <Copy SourceFiles="$(PhysXSdkRoot)bin\PhysXGpu_64.dll" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
     <Copy SourceFiles="@(PhysXLicense)" DestinationFolder="$(OutDir)licenses" SkipUnchangedFiles="true" />
-    <Copy SourceFiles="$(PhysXSdkRoot)licenses\cuda_cccl\LICENSE;$(PhysXSdkRoot)licenses\cuda_cudart\LICENSE;$(PhysXSdkRoot)licenses\cuda_nvcc\LICENSE;$(PhysXSdkRoot)licenses\cuda_nvtx\LICENSE" DestinationFiles="$(OutDir)licenses\CUDA-cccl-LICENSE.txt;$(OutDir)licenses\CUDA-cudart-LICENSE.txt;$(OutDir)licenses\CUDA-nvcc-LICENSE.txt;$(OutDir)licenses\CUDA-nvtx-LICENSE.txt" SkipUnchangedFiles="true" />
     <Delete Files="$(OutDir)licenses\Jolt-LICENSE.txt" />
   </Target>
 </Project>

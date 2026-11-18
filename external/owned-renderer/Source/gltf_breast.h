@@ -175,7 +175,7 @@ struct BreastState {
             result->push_back(out);
         }
         overrides=std::move(result);
-        if(!reported&&physics->ready()){bridge_append_probe_event("nala_physx_ready","backend=PhysX-5.6.1 dynamics=GPU joints=D6 gravity=world_z anchored_swing=1 limit_m=0.085");reported=true;}
+        if(!reported&&physics->ready()){bridge_append_probe_event("nala_physx_ready","backend=PhysX-5.13.0 dynamics=GPU joints=D6 gravity=world_z anchored_swing=1 limit_m=0.085");reported=true;}
     }
 };
 }

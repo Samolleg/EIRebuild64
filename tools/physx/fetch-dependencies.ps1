@@ -3,41 +3,83 @@
 param([Parameter(Mandatory=$true)][string]$ProjectRoot)
 $ErrorActionPreference='Stop'
 $project=[IO.Path]::GetFullPath($ProjectRoot)
-if(!(Test-Path -LiteralPath (Join-Path $project 'RULES.md'))){throw 'Project RULES.md missing'}
-$sdk=Join-Path $project 'deps/physx/5.6.1'
-$cuda=Join-Path $project 'deps/cuda/12.8.1'
-New-Item -ItemType Directory -Force -Path $sdk,$cuda | Out-Null
-function Fetch([string]$url,[string]$file,[string]$sha){
-    if(!(Test-Path -LiteralPath $file)){
-        & curl.exe -fL --connect-timeout 30 --retry 2 $url -o $file
-        if($LASTEXITCODE -ne 0){throw "Download failed: $url"}
+if (!(Test-Path (Join-Path $project 'RULES.md'))) { throw 'Project RULES.md missing' }
+$deps=Join-Path $project 'deps'
+$cache=Join-Path $deps 'sdk-downloads'
+$null=[IO.Directory]::CreateDirectory($cache)
+$lock=Get-Content (Join-Path $PSScriptRoot 'sdk-lock.json') -Raw | ConvertFrom-Json
+
+function Get-Archive($package) {
+    $file=Join-Path $cache $package.archive
+    if (!(Test-Path -LiteralPath $file)) {
+        $temp=$file+'.'+[guid]::NewGuid().ToString('N')+'.part'
+        try {
+            & curl.exe --fail --location --silent --show-error --retry 2 --connect-timeout 30 $package.url -o $temp
+            if ($LASTEXITCODE) { throw "Cannot fetch $($package.url)" }
+            if ((Get-FileHash $temp).Hash -ne $package.sha256) { throw "SHA256 mismatch: $temp" }
+            if (!(Test-Path -LiteralPath $file)) { [IO.File]::Move($temp,$file) }
+        } finally { if ([IO.File]::Exists($temp)) { [IO.File]::Delete($temp) } }
     }
-    if((Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant() -ne $sha){throw "SHA256 mismatch: $file"}
+    if ((Get-FileHash $file).Hash -ne $package.sha256) { throw "SHA256 mismatch: $file" }
+    return $file
 }
-$commit='5ca9f472105a90d70d957c243cb0ef36fe251a9f'
-$archive=Join-Path $sdk 'source.zip'
-Fetch "https://codeload.github.com/NVIDIA-Omniverse/PhysX/zip/$commit" $archive 'b20b5c497ae51e6556519323a999447adf1c24a8b6265ecaee23ac40fb62be12'
-if(!(Test-Path -LiteralPath "$sdk/source/PhysX-$commit/physx/include/PxPhysicsAPI.h")){
-    Expand-Archive -LiteralPath $archive -DestinationPath "$sdk/source" -Force
+function Expand-Checked([string]$zip,[string]$stage,[int]$strip,[string[]]$members) {
+    & tar.exe -xf $zip -C $stage --strip-components $strip @members
+    if ($LASTEXITCODE) { throw "Cannot extract $zip" }
 }
-$packages=@(
-    @('cuda_nvcc','12.8.93','9fdc70b4271ed9aad4d64cd7076a7d96ec36512d074b9995fe638de669197391'),
-    @('cuda_cudart','12.8.90','4a39058fd8519444a81cfc7ae055d136f48d1a31ffa41ae255b35b2edd61e13b'),
-    @('cuda_cccl','12.8.90','bd8548fa1ae82f92910bebc3079e14bd58c5a92aa64596d46bd610a478cb39d7'),
-    @('cuda_nvtx','12.8.90','38dbd5941537fcb359137f26fe31b4e3528c504cc2a55fa10a9baaf0ff006187')
-)
-foreach($p in $packages){
-    $name=$p[0]+'-windows-x86_64-'+$p[1]+'-archive'
-    $zip=Join-Path $cuda ($name+'.zip')
-    Fetch ('https://developer.download.nvidia.com/compute/cuda/redist/'+$p[0]+'/windows-x86_64/'+$name+'.zip') $zip $p[2]
-    $unpacked=Join-Path "$cuda/packages" $name
-    if(!(Test-Path -LiteralPath $unpacked)){Expand-Archive -LiteralPath $zip -DestinationPath "$cuda/packages"}
-    foreach($item in Get-ChildItem -LiteralPath $unpacked){
-        if($item.Name -match '^(LICENSE|EULA)'){
-            New-Item -ItemType Directory -Force -Path "$cuda/licenses/$($p[0])" | Out-Null
-            Copy-Item -LiteralPath $item.FullName -Destination "$cuda/licenses/$($p[0])" -Force
-        }else{Copy-Item -LiteralPath $item.FullName -Destination $cuda -Recurse -Force}
+function Install-Directory([string]$relative,[scriptblock]$populate) {
+    $target=[IO.Path]::GetFullPath((Join-Path $deps $relative))
+    if ([IO.Directory]::Exists($target)) { return }
+    $parent=[IO.Path]::GetDirectoryName($target)
+    $stage=Join-Path $parent ('.extract-'+[guid]::NewGuid().ToString('N'))
+    $null=[IO.Directory]::CreateDirectory($stage)
+    try {
+        & $populate $stage
+        [IO.Directory]::Move($stage,$target)
+    } finally {
+        if ([IO.Directory]::Exists($stage) -and [IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($stage)) -eq $parent) {
+            Remove-Item -LiteralPath $stage -Recurse -Force
+        }
     }
 }
-Write-Host "Pinned PhysX source: $sdk/source/PhysX-$commit"
-Write-Host "Local CUDA compiler: $cuda/bin/nvcc.exe (no driver or system installation)"
+
+Install-Directory "cmake/$($lock.cmake.version)" { param($stage)
+    Expand-Checked (Get-Archive $lock.cmake) $stage 1 @()
+}
+Install-Directory "ninja/$($lock.ninja.version)" { param($stage)
+    Expand-Checked (Get-Archive $lock.ninja) $stage 0 @()
+}
+$source="PhysX-$($lock.physx.commit)"
+Install-Directory "physx/$($lock.physx.version)/source/$source" { param($stage)
+    Expand-Checked (Get-Archive $lock.physx) $stage 1 @("$source/physx","$source/LICENSE.md")
+}
+Install-Directory "fidelityfx-sdk/$($lock.fidelityfx.version)" { param($stage)
+    $prefix="FidelityFX-SDK-$($lock.fidelityfx.commit)/Kits/FidelityFX"
+    $paths='api/include','upscalers/include','framegeneration/include','docs/license.md','signedbin/amd_fidelityfx_loader_dx12.lib','signedbin/amd_fidelityfx_loader_dx12.dll','signedbin/amd_fidelityfx_framegeneration_dx12.dll','signedbin/amd_fidelityfx_upscaler_dx12.dll'
+    Expand-Checked (Get-Archive $lock.fidelityfx) $stage 3 @($paths | ForEach-Object {"$prefix/$_"})
+    [IO.File]::Move("$stage/docs/license.md","$stage/license.md")
+    foreach ($dll in Get-ChildItem "$stage/signedbin/*.dll") {
+        if ((Get-AuthenticodeSignature $dll.FullName).Status -ne 'Valid') { throw "Invalid AMD signature: $($dll.Name)" }
+    }
+}
+
+Install-Directory "cuda/$($lock.cuda.version)" { param($stage)
+    foreach ($package in $lock.cuda.packages) {
+        $zip=Get-Archive $package
+        $temp=Join-Path $stage '.package'
+        $null=[IO.Directory]::CreateDirectory($temp)
+        Expand-Checked $zip $temp 1 @()
+        foreach ($entry in Get-ChildItem -LiteralPath $temp) {
+            if ($entry.Name -match '^(LICENSE|EULA)') {
+                $license=Join-Path $stage "licenses/$($package.name)"
+                $null=[IO.Directory]::CreateDirectory($license)
+                Copy-Item -LiteralPath $entry.FullName -Destination $license -Force
+            } else {
+                Copy-Item -LiteralPath $entry.FullName -Destination $stage -Recurse -Force
+            }
+        }
+        if ([IO.Path]::GetFullPath($temp) -ne [IO.Path]::GetFullPath([IO.Path]::Combine($stage,'.package'))) { throw 'Unexpected package root' }
+        Remove-Item -LiteralPath $temp -Recurse -Force
+    }
+}
+Write-Output 'Project SDK archives verified on extraction. Normal engine builds are offline.'

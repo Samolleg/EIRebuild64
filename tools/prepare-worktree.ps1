@@ -16,8 +16,8 @@ while (!(Test-Path -LiteralPath (Join-Path $projectRoot 'RULES.md') -PathType Le
 }
 if (!$FFmpegSource) { $FFmpegSource = Join-Path $projectRoot 'deps/ffmpeg/9.0.2/x64' }
 & (Join-Path $PSScriptRoot 'physx/build.ps1') -ProjectRoot $projectRoot
-$physxDestination = Join-Path $repo 'dependencies/physx/5.6.1'
-Copy-BuildTree (Join-Path $projectRoot 'deps/physx/5.6.1/sdk') $physxDestination
+$physxDestination = Join-Path $repo 'dependencies/physx/5.13.0'
+Copy-BuildTree (Join-Path $projectRoot 'deps/physx/5.13.0/sdk') $physxDestination
 if (!$DlssSdkSource) { $DlssSdkSource = Join-Path $projectRoot 'deps/dlss-sdk/v310.9.16' }
 $dlssFiles = @('include/nvsdk_ngx.h', 'include/nvsdk_ngx_defs.h', 'include/nvsdk_ngx_params.h',
     'include/nvsdk_ngx_helpers.h', 'include/nvsdk_ngx_helpers_d3d.h', 'include/nvsdk_ngx_helpers_cuda.h',
@@ -35,7 +35,7 @@ foreach ($file in $dlssFiles) {
 . (Join-Path $PSScriptRoot 'sdk-files.ps1')
 # Resolve pinned local D3D12 inputs before copying any dependencies.
 $d3d12Packages = @(
-    @{ Source='deps/fidelityfx-sdk/2.3.0'; Destination='dependencies/fidelityfx/2.3.0'; Files=@(
+    @{ Source='deps/fidelityfx-sdk/2.4.0'; Destination='dependencies/fidelityfx/2.4.0'; Files=@(
         'api/include/*','framegeneration/include/*','upscalers/include/*',
         'signedbin/amd_fidelityfx_loader_dx12.lib','signedbin/amd_fidelityfx_loader_dx12.dll',
         'signedbin/amd_fidelityfx_framegeneration_dx12.dll','signedbin/amd_fidelityfx_upscaler_dx12.dll','license.md') },
@@ -105,7 +105,7 @@ foreach ($file in $d3d12Files) {
     New-Item -ItemType Directory -Force -Path (Split-Path $file.Destination) | Out-Null
     $null=Copy-BuildFile $file.Source $file.Destination
 }
-Write-Output 'Prepared FidelityFX 2.3.0, NVAPI 70d337db and DXC 1.9.2609 from local deps.'
+Write-Output 'Prepared FidelityFX 2.4.0, NVAPI 70d337db and DXC 1.9.2609 from local deps.'
 $dlssDestination = Join-Path $repo 'dependencies/dlss/v310.9.16'
 foreach ($file in $dlssFiles) {
     $destination = Join-Path $dlssDestination $file

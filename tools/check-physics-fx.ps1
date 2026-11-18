@@ -15,7 +15,7 @@ $savedInclude=$env:INCLUDE;$savedLib=$env:LIB
 try {
     $project=$repo;while(!(Test-Path "$project/RULES.md")){$project=Split-Path $project;if(!$project){throw 'Project root missing'}}
     & "$repo/tools/physx/build.ps1" -ProjectRoot $project
-    $physx="$project/deps/physx/5.6.1/sdk"
+    $physx="$project/deps/physx/5.13.0/sdk"
     $env:INCLUDE="$physx/include;$repo/external/owned-renderer/Source;$vc/include;$sdk/Include/$sv/ucrt;$sdk/Include/$sv/um;$sdk/Include/$sv/shared;$sdk/Include/$sv/winrt"
     $env:LIB="$vc/lib/x64;$sdk/Lib/$sv/ucrt/x64;$sdk/Lib/$sv/um/x64"
     $exe=Join-Path $out 'check-physics-fx.exe'

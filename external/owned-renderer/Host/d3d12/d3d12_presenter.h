@@ -36,7 +36,7 @@ public:
     // The GPU and the pacer must be idle; plain/DLSS-G toggles keep it.
     bool move_to_queue(Core& core, ID3D12CommandQueue* queue, std::string& reason);
     // FSR frame generation: the swap chain recreated as the FidelityFX proxy
-    // (FOR_HWND, on the core queue; SDK 2.3.0 frame-interpolation-swap-chain.md),
+    // (FOR_HWND, on the core queue; SDK 2.4.0 frame-interpolation-swap-chain.md),
     // which interpolates and paces the presents on its own threads. Leave it
     // with move_to_queue (the frame generation context destroyed first). The
     // main queue's tail is waited before its buffers are released.

@@ -147,10 +147,10 @@ void Client::Tick(CWorldClient& host,bool paused){
 }
 void DebrisWorker::step(const DebrisTick& job) {
     const auto reportFailure=[&](){if(reportedError!=world.Error()){
-        reportedError=world.Error();GameJournal::Event("PHYSICS_FX","gpu_unavailable","backend=PhysX-5.6.1 fallback=none reason=%s",reportedError.c_str());
+        reportedError=world.Error();GameJournal::Event("PHYSICS_FX","gpu_unavailable","backend=PhysX-5.13.0 fallback=none reason=%s",reportedError.c_str());
     }};
     if(!world.Initialize()){reportFailure();return;}
-    if(!reported){reported=true;GameJournal::Event("PHYSICS_FX","gpu_ready","backend=PhysX-5.6.1 dynamics=GPU broadphase=GPU device=%s",world.Device().c_str());}
+    if(!reported){reported=true;GameJournal::Event("PHYSICS_FX","gpu_ready","backend=PhysX-5.13.0 dynamics=GPU broadphase=GPU device=%s",world.Device().c_str());}
     unsigned spawned=0;double prepareMs=0;
     for(const auto& request:job.impacts){
         if(world.Statistics().bodies>=MaxStones)break;
@@ -180,7 +180,7 @@ void DebrisWorker::step(const DebrisTick& job) {
     if(!world.Error().empty()){reportFailure();return;}
     const auto stats=world.Statistics();
     if(spawned||stats.errors||(stats.bodies&&job.tick-lastReport>=18)){
-        GameJournal::Event("PHYSICS_FX","stone_debris","backend=PhysX-5.6.1 spawned=%u bodies=%u active=%u patches=%u prepare_ms=%.3f step_ms=%.3f substeps=%u errors=%u gpu_dynamics=%d gpu_broadphase=%d gpu_heap=%llu gpu_solver=%llu gpu_contacts=%u",
+        GameJournal::Event("PHYSICS_FX","stone_debris","backend=PhysX-5.13.0 spawned=%u bodies=%u active=%u patches=%u prepare_ms=%.3f step_ms=%.3f substeps=%u errors=%u gpu_dynamics=%d gpu_broadphase=%d gpu_heap=%llu gpu_solver=%llu gpu_contacts=%u",
             spawned,stats.bodies,stats.active,stats.patches,prepareMs,stats.stepMs,stats.substeps,stats.errors,int(stats.gpuDynamics),int(stats.gpuBroadPhase),stats.gpuHeapBytes,stats.gpuSolverBytes,stats.gpuContacts);
         lastReport=job.tick;
     }

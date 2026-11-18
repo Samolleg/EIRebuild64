@@ -101,11 +101,11 @@ They were copied into project deps. tools/prepare-worktree.ps1 materializes
 only the needed files under ignored dependencies/ for the build. No network
 restore is used. OwnedRenderer/D3D12Sdk.props defines the build paths.
 
-- AMD FidelityFX SDK 2.3.0, Kits/FidelityFX, from
-  https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/tree/v2.3.0 .
-  Local deps/fidelityfx-sdk/2.3.0. API, framegeneration and upscalers headers;
+- AMD FidelityFX SDK 2.4.0, Kits/FidelityFX, from
+  https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/tree/v2.4.0 .
+  Local deps/fidelityfx-sdk/2.4.0. API, framegeneration and upscalers headers;
   signedbin/amd_fidelityfx_loader_dx12.lib. Runtime files are
-  amd_fidelityfx_loader_dx12.dll and amd_fidelityfx_framegeneration_dx12.dll.
+  amd_fidelityfx_loader_dx12.dll, amd_fidelityfx_framegeneration_dx12.dll and amd_fidelityfx_upscaler_dx12.dll.
   Complete supplied license.md is third_party/d3d12/AMD-FidelityFX-LICENSE.md
   and is copied to application output licenses/AMD-FidelityFX-LICENSE.md.
   Preserve this combined license and its component notices on distribution.
@@ -132,7 +132,7 @@ restore is used. OwnedRenderer/D3D12Sdk.props defines the build paths.
   LICENSE.txt and the existing NVIDIA attribution/distribution obligations
   apply to both. The author calls NGX directly, with no Streamline dependency.
 
-The build-task runtime DLL list includes both FidelityFX DLLs and DLSS-G.
+The build-task runtime DLL list includes all three FidelityFX DLLs and DLSS-G.
 Application output contains SDK licenses. A distributed kit must also carry
 the complete licenses above, including the existing NVIDIA DLSS license.
 Source/build integration is staged. Host executor and NGX transport adaptation
@@ -192,7 +192,7 @@ The complete MIT text is copied alongside the header as `LICENSE` by
 
 The current x64 kit additionally ships NVIDIA DLSS Ray Reconstruction
 nvngx_dlssd.dll from the existing v310.9.16 SDK, AMD FSR 3.1 upscaler runtime
-amd_fidelityfx_upscaler_dx12.dll from FidelityFX SDK 2.3.0, and Microsoft
+amd_fidelityfx_upscaler_dx12.dll from FidelityFX SDK 2.4.0, and Microsoft
 Direct3D Agility SDK 1.620.2 D3D12/D3D12Core.dll (SDK version 620).
 RTXDI-Library 3.2.0, commit b67f61cd0bfa6792acbf5429bb29a68ee5cdd808,
 is a build-time shader dependency. Its MIT license and the Agility SDK's
@@ -206,9 +206,9 @@ Sources: https://github.com/NVIDIA-RTX/RTXDI-Library/tree/b67f61cd0bfa6792acbf54
 and https://www.nuget.org/packages/Microsoft.Direct3D.D3D12/1.620.2 .
 ## NVIDIA PhysX 5 GPU
 
-PhysX 5.6.1, tag 107.3-physx-5.6.1, commit 5ca9f472105a90d70d957c243cb0ef36fe251a9f.
-BSD-3-Clause. Official source: https://github.com/NVIDIA-Omniverse/PhysX/tree/5ca9f472105a90d70d957c243cb0ef36fe251a9f
-Pinned source and CUDA 12.8.1 download hashes: tools/physx/fetch-dependencies.ps1.
+PhysX 5.13.0 (physx/), tag ovphysx-0.8.0, commit 7d6f6ac8b83e1610bdf715f1f2f1d6b718aee586.
+Apache-2.0; see physx/LICENSE.md and physx/THIRD_PARTY_NOTICES.md. Official source: https://github.com/NVIDIA-Omniverse/PhysX/tree/7d6f6ac8b83e1610bdf715f1f2f1d6b718aee586
+Pinned source and CUDA 13.5.0 download hashes: tools/physx/sdk-lock.json.
 Offline build and packaging: tools/physx/build.ps1; details: tools/physx/README.md.
 Static x64 /MT host libraries and PhysXGpu_64.dll, built together from source.
 CUDA libraries retain NVIDIA license terms; kit licenses include original SDK notices.

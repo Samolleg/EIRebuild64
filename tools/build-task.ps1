@@ -292,10 +292,10 @@ try {
             Where-Object Name -ne '.gitattributes' | Copy-Item -Destination $target
     }
     foreach ($name in 'avcodec-63.dll','avformat-63.dll','avutil-61.dll','swscale-10.dll','swresample-7.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/ffmpeg/9.0.2/x64/bin/' + $name)) -Destination $kit }
-    Copy-Item -LiteralPath (Join-Path $repo 'dependencies/physx/5.6.1/bin/PhysXGpu_64.dll') -Destination $kit
-    Copy-Item -LiteralPath (Join-Path $repo 'dependencies/physx/5.6.1/bin/PhysXGpu_64.pdb') -Destination $kit
+    Copy-Item -LiteralPath (Join-Path $repo 'dependencies/physx/5.13.0/bin/PhysXGpu_64.dll') -Destination $kit
+    Copy-Item -LiteralPath (Join-Path $repo 'dependencies/physx/5.13.0/bin/PhysXGpu_64.pdb') -Destination $kit
     foreach ($name in 'nvngx_dlss.dll','nvngx_dlssg.dll','nvngx_dlssd.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/dlss/v310.9.16/lib/Windows_x86_64/rel/' + $name)) -Destination $kit }
-    foreach ($name in 'amd_fidelityfx_loader_dx12.dll','amd_fidelityfx_framegeneration_dx12.dll','amd_fidelityfx_upscaler_dx12.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/fidelityfx/2.3.0/signedbin/' + $name)) -Destination $kit }
+    foreach ($name in 'amd_fidelityfx_loader_dx12.dll','amd_fidelityfx_framegeneration_dx12.dll','amd_fidelityfx_upscaler_dx12.dll') { Copy-Item -LiteralPath (Join-Path $repo ('dependencies/fidelityfx/2.4.0/signedbin/' + $name)) -Destination $kit }
     New-Item -ItemType Directory -Path (Join-Path $kit 'D3D12') | Out-Null
     Copy-Item -LiteralPath (Join-Path $repo 'dependencies/agility/1.620.2/build/native/bin/x64/D3D12Core.dll') -Destination (Join-Path $kit 'D3D12')
     Copy-Item -LiteralPath (Join-Path $repo 'out/x64/Release/EI_Rebuild/licenses') -Destination (Join-Path $kit 'licenses') -Recurse
