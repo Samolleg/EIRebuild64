@@ -1,6 +1,7 @@
 #pragma once
 #include "skn_runtime.h"
 #include "gltf_equipment.h"
+#include "gltf_physique_surface.h"
 #include "gltf_playback.h"
 #include "gltf_socket.h"
 #include <functional>
@@ -30,6 +31,10 @@ struct Asset
     std::vector<skn::Matrix> idle;
     std::shared_ptr<Animation> animation;
     std::shared_ptr<GpuProgram> gpu_animation;
+    Physique physique;
+    PhysiqueTree physique_tree;
+    std::array<unsigned,2> sole_nodes{};
+    std::array<std::array<float,3>,2> sole_points{};
     std::vector<skn::Vertex> rest_vertices;
     std::vector<std::uint32_t> vertex_morphs;
     std::string cache_key, resource_key;
@@ -88,6 +93,7 @@ struct EquipmentAsset {
     std::string socket, slot;
     bool weapon=false, arrow=false;
     std::vector<unsigned> body_nodes;
+    std::shared_ptr<const std::vector<GarmentAnchor>> physique_anchors;
     std::map<unsigned,std::shared_ptr<const skn::Dds>> base_color_overrides;
     std::map<unsigned,std::shared_ptr<const skn::Dds>> metallic_roughness_overrides;
     // Shared by the same GLB material and ORM resource, including across actors.

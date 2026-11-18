@@ -2,7 +2,7 @@
 // This checks allocation/upload and ownership, separately from shader readback.
 #include <Windows.h>
 #include <d3d11.h>
-#include "gltf_animation.h"
+#include "gltf_physique_pose.h"
 #include "owned_visual_evaluation.h"
 #include <unordered_map>
 #include <iostream>
@@ -14,7 +14,7 @@ static UINT align_up(UINT n,UINT a){return (n+a-1)&~(a-1);}
 struct Renderer {
  struct Range {UINT base=0,count=0,owners=0,references=0;bool owned=true;};
  struct NativeSkeletonAsset {UINT offset=0,bytes=0,allocation=UINT_MAX;std::weak_ptr<const ModelCpuAsset> model;
-  std::weak_ptr<const AnimationClipAsset> clip;bool animated=false;UINT gltf_allocation=UINT_MAX;};
+  std::weak_ptr<const AnimationClipAsset> clip;bool animated=false;UINT gltf_allocation=UINT_MAX,physique_allocation=UINT_MAX;};
  struct NativeGltfLibrary {UINT allocation=UINT_MAX;std::weak_ptr<const gltf::GpuProgram> program;};
  enum class NativeRangeBuffer{animation};
  struct Buffer {void* Get(){return this;}} native_animation_;
@@ -69,6 +69,32 @@ int main(){try{
   check(r.native_skeleton_assets_.empty()&&r.native_gltf_libraries_.empty(),"expired library retained");
   check(r.native_animation_ranges_[library].count==0,"library range not freed");
  }
+ for(bool dx12:{false,true}){
+  Renderer r;if(dx12)r.d3d12_=&r.d12;
+  auto animation=std::make_shared<gltf::GpuProgram>();animation->key="clips";animation->nodes=1;animation->bytes.resize(128);
+  auto shape=std::make_shared<gltf::PhysiquePose>();shape->input={18,33,.3f,.4f,.75f};shape->locals.resize(1);
+  auto palette=std::make_shared<gltf::GpuProgram>();palette->key="shape1";palette->nodes=1;palette->bytes.resize(68);
+  shape->gpu=palette;
+  auto model=std::make_shared<ModelCpuAsset>();model->nodes.resize(1);model->links.resize(1);
+  std::vector<std::shared_ptr<VisualSkeletonBinding>> held;
+  UINT pinned=UINT_MAX;
+  for(unsigned i=0;i<253;++i){
+   auto b=std::make_shared<VisualSkeletonBinding>();b->model=model;b->physique=shape;b->gltf_animation=animation;
+   auto clip=std::make_shared<AnimationClipAsset>();clip->identity.canonical_name=std::to_string(i);b->clip=clip;
+   b->tracks.resize(1);b->level_offsets={0,1};b->level_nodes={0};UINT at,slot;
+   check(SUCCEEDED(r.get_native_skeleton_asset(b,at,slot)),"physique header upload");
+   UINT disp=0,tag=0;std::memcpy(&disp,r.memory.data()+at+32,4);std::memcpy(&tag,r.memory.data()+at+28,4);
+   const auto alloc=r.native_gltf_libraries_.at("shape1").allocation;
+   check(tag==0x80000000u && at+disp==r.native_animation_ranges_[alloc].base+16,"shared physique address");
+   pinned=slot;held.push_back(b);
+  }
+  check(r.native_gltf_libraries_.size()==2 && r.native_animation_ranges_[r.native_gltf_libraries_.at("shape1").allocation].owners==253,"physique duplicated per action");
+  r.native_animation_ranges_[pinned].references=1;held.clear();model.reset();shape.reset();palette.reset();animation.reset();
+  r.retire_native_animation_assets();check(r.native_gltf_libraries_.size()==2,"queued shaped draw lost data");
+  r.native_animation_ranges_[pinned].references=0;r.retire_native_animation_assets();
+  check(r.native_gltf_libraries_.empty(),"shape allocation leaked");
+ }
+ std::cout<<"PASS one physique palette for 253 actions, both backends, queued draws and retirement\n";
  Renderer r;r.d3d12_=&r.d12;r.d12.fail=true;
  auto p=std::make_shared<gltf::GpuProgram>();p->key="failure";p->bytes.resize(256);UINT offset,allocation;
  check(FAILED(r.get_native_gltf_library(p,offset,allocation)),"upload failure ignored");

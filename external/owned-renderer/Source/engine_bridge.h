@@ -835,6 +835,11 @@ struct NativeWorldGeometry {
         // Sparse final WORLD matrices, uploaded after GPU animation on both backends.
         std::shared_ptr<const std::vector<Override>> overrides;
         std::shared_ptr<const std::vector<Node>> baked;
+        std::array<float,3> physique_sole{};
+        std::array<float,16> placed_with_sole(std::array<float,16> matrix) const {
+            for(unsigned r=0;r<3;++r)for(unsigned c=0;c<3;++c)matrix[r*4+3]+=matrix[r*4+c]*physique_sole[c];
+            return matrix;
+        }
         std::uint32_t gltf_clip = UINT32_MAX, gltf_previous = UINT32_MAX;
         float gltf_time = 0, gltf_previous_time = 0, gltf_blend = 1;
         static std::vector<Node> place_baked(const std::vector<Node>& source,

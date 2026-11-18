@@ -6,9 +6,12 @@ bool build_skn_groups(const RetainedVisualSample &sample,
                       bool weapon=false, bool arrow=false,
                       const std::map<unsigned,std::shared_ptr<const skn::Dds>>* overrides=nullptr,
                       const std::map<unsigned,std::shared_ptr<const skn::Dds>>* orm_overrides=nullptr,
-                      const std::map<unsigned,std::shared_ptr<const std::uint8_t>>* material_ids=nullptr) {
+                      const std::map<unsigned,std::shared_ptr<const std::uint8_t>>* material_ids=nullptr,
+                      const std::vector<gltf::GarmentAnchor>* garment=nullptr) {
   auto &prepared = *sample.prepared;
   const auto &data = asset->asset;
+  const auto* physique=prepared.motion_physique.get();
+  const bool shaped=physique && asset->gltf_asset && !attachmentNodes;
   if (data.semantic_joints.size() != data.submeshes.size())
     throw std::runtime_error(
         "SKN gameplay reference required for unit visibility");
@@ -33,6 +36,11 @@ bool build_skn_groups(const RetainedVisualSample &sample,
   // One SKN can bind to host skeletons with different unrelated nodes. The
   // uploaded indices (including corrective records) are part of mesh identity.
   std::string binding_layout;
+  if(shaped || (physique && garment)){
+    binding_layout.append("|physique|");
+    if(garment)binding_layout.append(prepared.motion_asset->gltf_asset->cache_key);
+    binding_layout.append(reinterpret_cast<const char*>(physique->input.data()),sizeof(physique->input));
+  }
   for(unsigned node:nodes)binding_layout.append(reinterpret_cast<const char*>(&node),sizeof(node));
   // One draw per gameplay part/material/region, with a union vertex buffer
   // and independently authored index lists. LODs need not share vertices.
@@ -150,7 +158,9 @@ bool build_skn_groups(const RetainedVisualSample &sample,
           g.normals.resize(group.normal_groups);
           g.skin_vertices.resize(vertices.size() * sizeof(skn::GpuVertex));
           for (unsigned i = 0; i < vertices.size(); ++i) {
-            const auto &v = data.vertices[vertices[i]];
+            auto v = data.vertices[vertices[i]];
+            if(shaped)v=prepared.physique_surface->body[vertices[i]];
+            else if(physique && garment)prepared.physique_surface->apply_garment(garment->at(vertices[i]),v);
             unsigned block = i / 4, lane = i % 4;
             g.positions[block].x[lane] = v.position[0];
             g.positions[block].y[lane] = v.position[1];
@@ -177,7 +187,7 @@ bool build_skn_groups(const RetainedVisualSample &sample,
             for (unsigned k = 0; k < 4; ++k) {
               skin.joints[k] = nodes[v.joints[k]];
               skin.weights[k] = v.weights[k] / 65535.f;
-              const auto &m = data.joints[v.joints[k]].inverse;
+              const auto& m=shaped?prepared.physique_surface->inverse_skin[v.joints[k]]:data.joints[v.joints[k]].inverse;
               for (unsigned row = 0; row < 3; ++row)
                 for (unsigned col = 0; col < 4; ++col)
                   skin.inverse[k][row * 4 + col] = m[col * 4 + row];

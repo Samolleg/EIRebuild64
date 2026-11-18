@@ -2965,9 +2965,10 @@ void append_native_shader_programs(std::vector<ShaderProgram>& out){
  const std::string& source=native_shader_source();
  out.push_back({source,nullptr,nullptr,"nativeVS","vs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
  out.push_back({source,nullptr,nullptr,"nativePS","ps_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3});
+ static const std::string poseSource=compose_native_shader_source({},true);
  for(const char* entry:{"nativeBuildCS","nativeTerrainPhaseCS","nativeInstanceUpdateCS","nativePoseCS","nativeShadowPrepareCS",
                         "nativeShadowCommitCS","nativeShadowBuildCS","nativeShadowVS","nativeShadowPS","nativeTerrainMissCompactCS"})
-  out.push_back({source,nullptr,defines,entry,std::strstr(entry,"CS")?"cs_5_0":(std::strstr(entry,"VS")?"vs_5_0":"ps_5_0"),
+  out.push_back({std::strcmp(entry,"nativePoseCS")==0?poseSource:source,nullptr,defines,entry,std::strstr(entry,"CS")?"cs_5_0":(std::strstr(entry,"VS")?"vs_5_0":"ps_5_0"),
                  D3DCOMPILE_OPTIMIZATION_LEVEL3});
  // Then the terrain pixel variant (NATIVE_TERRAIN_PS: tile blend, terrain
  // material, cliffs), bound to terrain batches; then the same

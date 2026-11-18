@@ -225,7 +225,7 @@ inline void validate(const Animation& a) {
     for(const auto& b:a.bindings)animation_require(b.clip<a.clips.size(),"binding clip");
 }
 
-struct NodeEnvelope { double translation=0,scale=1;std::vector<double> weights; };
+struct NodeEnvelope { double translation=0,scale=1;std::vector<double> weights;double local_translation=0,local_scale=1; };
 inline std::vector<NodeEnvelope> envelope(const Animation& a) {
     std::vector<NodeEnvelope> out(a.nodes.size());
     for(unsigned i=0;i<a.nodes.size();++i){const auto& n=a.nodes[i];std::array<double,3> t{},s{};
@@ -237,6 +237,7 @@ inline std::vector<NodeEnvelope> envelope(const Animation& a) {
                 else if(track.path==Path::scale)s[c]=(std::max)(s[c],bound);
                 else e.weights[c]=(std::max)(e.weights[c],bound);}
         e.translation=std::sqrt(t[0]*t[0]+t[1]*t[1]+t[2]*t[2]);e.scale=(std::max)({s[0],s[1],s[2]});
+        e.local_translation=e.translation;e.local_scale=e.scale;
         if(n.parent>=0){e.translation=out[n.parent].translation+out[n.parent].scale*e.translation;e.scale*=out[n.parent].scale;}
         animation_require(std::isfinite(e.translation)&&std::isfinite(e.scale),"animation envelope overflow");
     }

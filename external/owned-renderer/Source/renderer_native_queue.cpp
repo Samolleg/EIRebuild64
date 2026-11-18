@@ -1,6 +1,7 @@
 // Renderer native queue (record building): owned textures, meshes, materials, poses, instance records, world ranges, queue_native*, checkpoints and discards.
 #include <intrin.h>
 #include "gltf_animation.h"
+#include "gltf_physique_pose.h"
 #include "point_shadow_policy.h"
 #include "cursor_image.h"
 #include "shadow_softness.h"
