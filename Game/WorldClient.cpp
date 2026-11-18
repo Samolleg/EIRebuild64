@@ -3034,6 +3034,12 @@ BOOL CWorldClient::Draw()
     fog.fog = {ownedWorld.fog_range[0], ownedWorld.fog_range[1], ownedWorld.fog_range[2],
         ownedWorld.fog_projection[2], ownedWorld.fog_projection[1], ownedWorld.fog_projection[0]};
     OwnedRender::E1WorldDraw worldDraw(this, ownedRenderGeneration, frameValues);
+    // On an exceptional exit the scene must release its borrowed terrain
+    // before worldDraw retires that generation.
+    struct WorldLease {
+        CDX11* device;
+        ~WorldLease() { device->FinishWorldDraw(); }
+    } worldLease{pRend->GetD3D()};
     OwnedRender::E2LoadRevealFrame(owned::bridge_current_world_epoch(),
         theWorldServer.GetServerMode() == SERV_MODE_LOCAL && theWorldServer.IsMapLoaded() &&
         theWorldServer.curInterface == IFACE_MISSION,
@@ -3152,7 +3158,8 @@ BOOL CWorldClient::Draw()
             OwnedRender::E1PublishGroundCoverFootprints(completed, visuals.footprints, visuals.footprintsEnabled);
             visuals.completed = std::move(completed);
         }
-        pRend->GetD3D()->RunC56WorldPass(visuals, [this] { PrepareScreenPicking(); });
+        pRend->GetD3D()->RunC56WorldPass(std::move(visuals));
+        PrepareScreenPicking();
     } else InvalidatePicking();
     coreParts.Stage(CorePerf::WorldOverlays);
     // Remaining overlays run after this draw's owned shadows and colour.
@@ -3524,9 +3531,10 @@ BOOL CWorldClient::Draw3DScene()
     if (!pTerrain || !pTerrain->IsLoaded()) return FALSE;
     CRenderer *pRend = &theRenderer;
     CDXGeometryProcessor *pGPU = pRend->GetGPU();
-    auto record = [](CMapObject* object) {
+    std::vector<std::int32_t> visibleIds;
+    auto record = [&](CMapObject* object) {
         if (object->CheckFlag(OBJ_HIDDEN) || !object->CheckFlag(OBJ_VISIBLE)) return;
-        OwnedRender::E1ReportOwnedVisual(object->GetID());
+        visibleIds.push_back(object->GetID());
     };
     if (CheckFlag(WC_RENDER_OBJECTS)) {
         for (auto* object : visibleObjects) record(object);
@@ -3536,6 +3544,8 @@ BOOL CWorldClient::Draw3DScene()
     }
     if (CheckFlag(WC_RENDER_UNITS))
         for (auto* object : visibleUnits) record(object);
+
+    pRend->GetD3D()->ReportC56Visible(std::move(visibleIds));
 
     // draw terrain prints (footprints, blood and fireprints)
     if (!bloodprints.empty() || !footprints.empty() || !fireprints.empty())

@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -25,6 +26,39 @@ inline double milliseconds(LONGLONG ticks) noexcept {
     }();
     return ticks * 1000.0 / frequency;
 }
+// Native output is bounded to one in flight. The next logic step can start
+// before the prior frame has finished encoding/submitting its command list.
+struct PipelineTiming {
+    std::atomic<unsigned long long> frame{0};
+    std::atomic<LONGLONG> start{0},submitted{0},finish{0};
+    unsigned long long frames=0,overlapped=0,encoding=0;
+    double overlapMs=0,encodingMs=0;
+};
+inline PipelineTiming pipeline;
+inline void pipeline_post() noexcept {
+    if(!RuntimeDiagnostics::Enabled())return;
+    pipeline.start=0; pipeline.submitted=0; pipeline.finish=0; ++pipeline.frame;
+}
+class PreparationInterval {
+    const bool enabled=RuntimeDiagnostics::Enabled();
+    unsigned long long frame=enabled?pipeline.frame.load():0;
+    LONGLONG begin=frame?now():0;
+public:
+    ~PreparationInterval() {
+        if(!frame || pipeline.frame!=frame)return;
+        const auto end=now(), start=pipeline.start.load();
+        ++pipeline.frames;
+        if(!start)return;
+        const auto intersection=[&](LONGLONG stop) {
+            return (std::max)(0LL,(std::min)(end,stop?stop:end)-(std::max)(start,begin));
+        };
+        const auto elapsed=intersection(pipeline.finish.load());
+        const auto encoding=intersection(pipeline.submitted.load());
+        if(elapsed){++pipeline.overlapped;pipeline.overlapMs+=milliseconds(elapsed);}
+        if(encoding){++pipeline.encoding;pipeline.encodingMs+=milliseconds(encoding);}
+    }
+};
+
 struct Frame {
     bool active = false, presented = false;
     Category category = logic;

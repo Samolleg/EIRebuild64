@@ -117,6 +117,16 @@ public:
         }
     }
 
+    HRESULT QueueWorldDraw(owned::Renderer::EmbeddedDraw draw, bool startWorld = false) {
+        if (!initialized || !frameActive) return E_UNEXPECTED;
+        return renderer.queue_embedded_draw(std::move(draw), startWorld);
+    }
+    bool OutputPending() const noexcept { return renderer.embedded_output_pending(); }
+    bool OutputExecuting() const noexcept { return OutputPending() && !renderer.embedded_worker_idle(); }
+    HRESULT BeginOverlapSimulation() { return renderer.begin_embedded_simulation(); }
+    void FinishOverlapSimulation() { renderer.finish_embedded_frame(); }
+    HRESULT FinishWorldDraw() noexcept { return FinishSceneWork(); }
+
     HRESULT SubmitWorldBatch(owned::Renderer::EmbeddedBatch batch) {
         if (!initialized || !frameActive) return E_UNEXPECTED;
         return renderer.queue_embedded_batch(batch);

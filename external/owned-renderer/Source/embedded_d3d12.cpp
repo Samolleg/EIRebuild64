@@ -58,8 +58,8 @@ struct EmbeddedD3D12::State {
     remote::Dlss ngx;
     x64remote::Capabilities caps{};
     enum class Phase { idle, simulation, rendering } phase = Phase::idle;
-    std::uint64_t serial = 0;
-    std::int64_t simulation_start = 0;
+    std::uint64_t serial = 0, last_serial = 0, next_serial = 0;
+    std::int64_t simulation_start = 0, next_simulation_start = 0;
 };
 
 EmbeddedD3D12::EmbeddedD3D12() = default;
@@ -115,10 +115,28 @@ HRESULT EmbeddedD3D12::begin_simulation(int reflex_mode) noexcept {
     LARGE_INTEGER now{};
     QueryPerformanceCounter(&now);
     state_->simulation_start = now.QuadPart;
-    ++state_->serial;
+    state_->serial=++state_->last_serial;
     reflex::marker(reflex::Marker::simulation_start, state_->serial);
     state_->phase = State::Phase::simulation;
     return S_OK;
+}
+HRESULT EmbeddedD3D12::prepare_next_simulation() noexcept {
+    if (!state_ || state_->phase != State::Phase::rendering) return S_FALSE;
+    if (!state_->next_simulation_start) {
+        { const frame_waits::Scope wait(frame_waits::reflex); reflex::sleep(); }
+        LARGE_INTEGER now{}; QueryPerformanceCounter(&now);
+        state_->next_simulation_start=now.QuadPart;
+        // Explicit ID. The present worker still uses the preceding frame ID.
+        state_->next_serial=++state_->last_serial;
+        reflex::marker(reflex::Marker::simulation_start,state_->next_serial);
+    }
+    return S_OK;
+}
+void EmbeddedD3D12::cancel_next_simulation() noexcept {
+    if(state_ && state_->next_simulation_start){
+        reflex::marker(reflex::Marker::simulation_end,state_->next_serial);
+        state_->next_simulation_start=0;
+    }
 }
 HRESULT EmbeddedD3D12::begin_render(int reflex_mode) noexcept {
     if (!state_) return E_UNEXPECTED;
@@ -152,6 +170,12 @@ void EmbeddedD3D12::finish_render() noexcept {
     // Also close frames that never reached Present, as core_host does.
     reflex::marker(reflex::Marker::render_end, state_->serial);
     state_->phase = State::Phase::idle;
+    if (state_->next_simulation_start) {
+        state_->simulation_start = state_->next_simulation_start;
+        state_->next_simulation_start = 0;
+        state_->serial=state_->next_serial;
+        state_->phase = State::Phase::simulation;
+    }
 }
 bool EmbeddedD3D12::dlss_caps(x64remote::DlssCaps& out) const noexcept {
     out = {};

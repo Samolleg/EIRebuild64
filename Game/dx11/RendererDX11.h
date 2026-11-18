@@ -84,6 +84,7 @@ private:
     bool campPopupActive = false, campPopupFailed = false;
     std::array<float, 16> ownedWorldToClip{};
     bool c56WorldPassRan = false;
+    D3DVIEWPORT7 c56WorldViewport{};
     int c56WorldPassState = -1;
     std::unique_ptr<OwnedSpriteBatch> spriteBatch;
     std::unique_ptr<DirectX::CommonStates> m_states;
@@ -111,7 +112,9 @@ public:
     bool BeginWorld(const EIRenderWorldFrameV2& frame);
     void EndWorld();
     void BeginInterface();
-    void RunC56WorldPass(const OwnedRender::E1VisualInputs& visuals, const std::function<void()>& preparePicking);
+    void RunC56WorldPass(OwnedRender::E1VisualInputs visuals);
+    void FinishWorldDraw() noexcept;
+    void ReportC56Visible(std::vector<std::int32_t> ids);
     void SetC56HitTestFrame(bool begin);
     void SubmitC56PointLights(const std::vector<owned::RetainedWorldPointLight>& lights,
                               double worldTime);

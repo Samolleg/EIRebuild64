@@ -1,3 +1,4 @@
+#include "../../Source/frame_waits.h"
 // The D3D12 frame executor of the x64 host (renderer_backend=d3d12, DX12
 // plan M1a): the shared Renderer's UI records, the F10 overlay and present
 // on the native D3D12 core (d3d12_core.h and its neighbours), in the core-mode
@@ -3267,6 +3268,9 @@ public:
             const std::uint64_t value = core_.end_frame(reason);
             list_ = nullptr;
             if (!value) return fail(E_FAIL, reason);
+#ifdef EID3D11_EMBEDDED
+            if(RuntimeDiagnostics::Enabled())owned::frame_waits::pipeline.submitted=owned::frame_waits::now();
+#endif
             upload_end_frame(value);
             submitted = value;
         }

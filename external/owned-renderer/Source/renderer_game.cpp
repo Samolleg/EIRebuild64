@@ -185,35 +185,45 @@ HRESULT Renderer::finish_embedded_scene_commands() noexcept {
  const frame_waits::Scope wait(frame_waits::scene_sync);
  scene_thread_->sync();
  embedded_scene_pending_=false;
- const HRESULT result=embedded_scene_result_;
+ HRESULT result=embedded_scene_result_;
  embedded_scene_result_=S_OK;
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ if(embedded_present_completion_){
+  auto complete=std::move(embedded_present_completion_);
+  embedded_present_completion_={};
+  embedded_d3d12_.finish_render();
+  try {
+   result=complete(result);
+   const HRESULT removed=embedded_d3d12_.device_removed_reason();
+   if(FAILED(removed)||FAILED(result))
+    return fail_embedded_d3d12("deferred frame output",FAILED(removed)?removed:result,embedded_d3d12_.failure());
+  }catch(const std::bad_alloc&){return E_OUTOFMEMORY;}catch(...){return E_FAIL;}
+ }
+#endif
  return result;
 }
 
-// The scene worker exclusively owns the renderer and the current terrain view
-// until this pass finishes. Only the independent host picking list is built in
-// parallel. Join even if its allocation throws: the frame's borrows end here.
-HRESULT Renderer::run_embedded_world_pass(const std::function<HRESULT()>& draw,
-                                          const std::function<void()>& preparePicking) {
- if(!embedded_render_thread_active()){
-  const HRESULT result=draw();
-  preparePicking();
-  return result;
+// Captured world and effect payloads stay in FIFO order. Frame values are
+// installed once before the opaque pass; effect commands inherit that context.
+HRESULT Renderer::queue_embedded_draw(EmbeddedDraw draw,bool startWorld) {
+ if(!embedded_render_thread_active() || !d3d12_)return draw(*this);
+ std::shared_ptr<BridgeFrameValues> values;
+ if(startWorld) {
+  values=std::make_shared<BridgeFrameValues>();
+  if(!bridge_capture_frame_values(*values))return E_FAIL;
  }
- BridgeFrameValues values;
- if(!bridge_capture_frame_values(values))return E_FAIL;
- if(!scene_thread_->post([this,&draw,values=std::move(values)]() noexcept {
+ const bool posted=scene_thread_->post([this,draw=std::move(draw),values=std::move(values)]() noexcept {
+  if(FAILED(embedded_scene_result_))return;
   try {
-   bridge_install_frame_values(values);
-   embedded_scene_result_=draw();
+   if(values)bridge_install_frame_values(*values);
+   embedded_scene_result_=draw(*this);
   } catch(const std::bad_alloc&){embedded_scene_result_=E_OUTOFMEMORY;}
     catch(...){embedded_scene_result_=E_FAIL;}
   if(FAILED(embedded_scene_result_))discard_native();
- },false,"embedded_world_pass"))return E_OUTOFMEMORY;
+ },false,startWorld?"embedded_world_pass":"embedded_effects");
+ if(!posted)return E_OUTOFMEMORY;
  embedded_scene_pending_=true;
- try { preparePicking(); }
- catch(...) { (void)finish_embedded_scene_commands(); throw; }
- return finish_embedded_scene_commands();
+ return S_OK;
 }
 
 // These operations consume the renderer-owned native batch. Host pointers

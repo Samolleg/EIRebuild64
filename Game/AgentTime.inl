@@ -78,7 +78,7 @@ static bool AgentProcessMessages()
         GameJournal::MemoryFrame(GetTickCount());C2DScreenWait::Update();
         NGame::UpdateRenderEnable();
         const bool diagnostic=FrameDiagnostics::Begin(ModShadowSchedule::generationTicks);
-        {FrameDiagnostics::Scope timing(FrameDiagnostics::Simulation);active=CountAgentTime();}
+        {FrameDiagnostics::Scope timing(FrameDiagnostics::Simulation);owned::frame_waits::PreparationInterval measuringPreparation;active=CountAgentTime();}
         if(active) {
             const bool behind=AgentTime::debtMilliseconds>=DW_SEGMENT_TIME||
                 (AgentTime::clientDebtMilliseconds>=DW_SEGMENT_TIME&&(theWorld.HasPacket()||!theWorld.IsConnected()));

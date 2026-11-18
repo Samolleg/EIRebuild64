@@ -1152,6 +1152,7 @@ HRESULT Renderer::begin_embedded_simulation(){
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
  if(!d3d12_)return S_FALSE;
  if(embedded_d3d12_failed_)return E_FAIL;
+ if(embedded_output_pending())return embedded_d3d12_.prepare_next_simulation();
  return embedded_d3d12_.begin_simulation(configured_integer(debug_overlay_.config(),"reflex",0));
 #else
  return S_FALSE;
@@ -1159,7 +1160,8 @@ HRESULT Renderer::begin_embedded_simulation(){
 }
 void Renderer::finish_embedded_frame(){
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
- if(d3d12_)embedded_d3d12_.finish_render();
+ if(embedded_output_pending())embedded_d3d12_.cancel_next_simulation();
+ else if(d3d12_)embedded_d3d12_.finish_render();
 #endif
 }
 
@@ -2031,7 +2033,13 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  apply_load_reveal();
  // The game's gamma ramp over the finished frame, cursor included (after the
  // load reveal, as apply_gamma_ramp on D3D11).
- if(FAILED(apply_gamma_ramp_d3d12()))d3d12_->omit("gamma_ramp (D3D12 pass failed)",false);
+ bool deferOutput=false;
+#ifdef EID3D11_EMBEDDED
+ deferOutput=embedded_render_thread_active() && !frame_generation_mode_ && !generated &&
+     !inputs && !bridge_live_wants_capture() && !placed_hitch_profile_.active() &&
+     !profiler_.capture_active();
+#endif
+ if(!deferOutput && FAILED(apply_gamma_ramp_d3d12()))d3d12_->omit("gamma_ramp (D3D12 pass failed)",false);
 #ifdef EID3D11_EMBEDDED
  if(bridge_live_wants_capture())bridge_live_capture_d3d12(*d3d12_,native_frame_index_);
 #endif
@@ -2054,14 +2062,14 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  if(frame_generation_mode_==2)d3d12_->set_fsr_hudless(fsr_prepared_?fsr_hudless_d3d12():nullptr);
  fsr_prepared_=false;
  update_frame_generation_rates();
- profiler_.end_frame(presentation.sync_interval,0);
- // The final presentation owner applies the output cap (both images with FG).
- hr=d3d12_->present(presentation.sync_interval,frame_limit);
+ const auto syncInterval=presentation.sync_interval;
+ const auto gameFrame=inputs?inputs->game_frame:fa_game_frame_;
+ auto complete=[this,syncInterval,gameFrame,recorder_armed_this_present,recorder_present_entry,outer_timing](HRESULT hr) -> HRESULT {
  const std::int64_t recorder_present_return=placed_hitch_profile_.active()?perf_now():0;
 #ifdef EID3D11_EMBEDDED
  if(SUCCEEDED(hr))embedded_d3d12_presented_=true;
 #endif
- profiler_.present_return(output_width_,output_height_,presentation.sync_interval,0,hr);
+ profiler_.present_return(output_width_,output_height_,syncInterval,0,hr);
  if(placed_hitch_profile_.active()){
   if(FAILED(hr)){
    finish_placed_hitch_profile(PlacedHitchFinishReason::present_failed);
@@ -2108,9 +2116,34 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  frame_acct::g_presentation_frame.store(presentation_frame_index_,std::memory_order_relaxed);
  // Render scale and upscaler option changes take effect between frames (apply_render_scale).
  apply_upscaler_mode_d3d12();
- finish_harness_path_row(inputs?inputs->game_frame:fa_game_frame_,nullptr);
+ finish_harness_path_row(gameFrame,nullptr);
  pending_screen_rectangles_.clear();
  return FAILED(trim_hr)?trim_hr:hr;
+ };
+#ifdef EID3D11_EMBEDDED
+ if(deferOutput){
+  // One submitted frame may outlive EndFrame. Reconcile its HRESULT and
+  // renderer bookkeeping before the next device access, including resize.
+  embedded_present_completion_=std::move(complete);
+  frame_waits::pipeline_post();
+  const bool posted=scene_thread_->post([this,syncInterval,frame_limit] {
+   if(RuntimeDiagnostics::Enabled())frame_waits::pipeline.start=frame_waits::now();
+   HRESULT result=E_FAIL;
+   try {
+    if(FAILED(apply_gamma_ramp_d3d12()))d3d12_->omit("gamma_ramp (D3D12 pass failed)",false);
+    profiler_.end_frame(syncInterval,0);
+    result=d3d12_->present(syncInterval,frame_limit);
+   }catch(const std::bad_alloc&){result=E_OUTOFMEMORY;}catch(...){result=E_FAIL;}
+   if(RuntimeDiagnostics::Enabled())frame_waits::pipeline.finish=frame_waits::now();
+   embedded_scene_result_=result;
+  },true,"embedded_frame_output");
+  if(!posted){embedded_present_completion_={};return E_OUTOFMEMORY;}
+  embedded_scene_pending_=true;
+  return S_OK;
+ }
+#endif
+ profiler_.end_frame(syncInterval,0);
+ return complete(d3d12_->present(syncInterval,frame_limit));
 }
 
 #endif // !EID3D11_SHADER_EMBED
@@ -2119,13 +2152,15 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
  if(d3d12_){
   struct FinishPhase {
    EmbeddedD3D12& owner;
-   ~FinishPhase(){owner.finish_render();}
-  } finish_phase{embedded_d3d12_};
+   Renderer& renderer;
+   ~FinishPhase(){if(!renderer.embedded_present_completion_)owner.finish_render();}
+  } finish_phase{embedded_d3d12_,*this};
   if(embedded_d3d12_failed_)return E_FAIL;
   HRESULT hr;
   try{hr=present_frame_d3d12(inputs);}
   catch(const std::bad_alloc&){hr=E_OUTOFMEMORY;}
   catch(...){hr=E_FAIL;}
+  if(embedded_present_completion_)return hr;
   const HRESULT removed=embedded_d3d12_.device_removed_reason();
   const char* reason=embedded_d3d12_.failure();
   if(FAILED(removed))return fail_embedded_d3d12("device removed during frame",removed,reason);

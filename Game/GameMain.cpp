@@ -726,6 +726,7 @@ static bool NGame::ProcessMessages()
         bool diagnosticFrameOwner = FrameDiagnostics::Begin(ModShadowSchedule::generationTicks);
         {
             FrameDiagnostics::Scope timing(FrameDiagnostics::Simulation);
+            owned::frame_waits::PreparationInterval measuringPreparation;
             bActive = CountTime();
         }
         if (bActive)
