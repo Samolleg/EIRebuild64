@@ -1814,6 +1814,14 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
   !bridge_live_wants_capture() && !profiler_.capture_active() && !placed_hitch_profile_.active() &&
   !harness_enabled() && !debug_overlay_.first_run_pending() && !load_picture_this_frame_ &&
   !load_reveal_holding_ && !load_reveal_tracking_ && load_reveal_epoch_==bridge_current_world_epoch();
+ if(RuntimeDiagnostics::Enabled()){
+  const unsigned reason=(!embedded_render_thread_active()?1u:0u)|(inputs?2u:0u)|
+   (frame_generation_mode_||fg_frame_image_?4u:0u)|(bridge_live_wants_capture()||profiler_.capture_active()?8u:0u)|
+   (placed_hitch_profile_.active()||harness_enabled()?16u:0u)|(debug_overlay_.first_run_pending()?32u:0u)|
+   (load_picture_this_frame_||load_reveal_holding_||load_reveal_tracking_?64u:0u)|(load_reveal_epoch_!=bridge_current_world_epoch()?128u:0u);
+  static unsigned previous=~0u;
+  if(reason!=previous){previous=reason;char msg[72];std::snprintf(msg,sizeof(msg),"hold=%u reason_mask=%u",unsigned(holdHud),reason);bridge_report_event("pipeline_layout",msg);}
+ }
 #endif
  if(!holdHud && FAILED(hr=flushHud()))return hr;
  if(debug_overlay_.initialized())debug_overlay_.maintain();
@@ -1892,6 +1900,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  if(debug_overlay_.graphics_reset_notice_pending()){AmbientWorldSource world;
   reset_notice=debug_overlay_.graphics_reset_notice(bridge_ambient_world_source(world)&&world.terrain);}
  update_status_notice(reset_notice);
+ OverlayDrawPacket overlayPacket;
  const bool overlay_visible=debug_overlay_.initialized()&&debug_overlay_.visible();
  const bool telemetry_wanted=debug_overlay_.initialized()&&debug_overlay_.mode()!=DebugOverlayMode::hidden;
  if(telemetry_wanted!=system_telemetry_active_){system_telemetry_.set_active(telemetry_wanted);system_telemetry_active_=telemetry_wanted;}
@@ -1906,15 +1915,18 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  }
  if(debug_overlay_.initialized()&&debug_overlay_pass_needed(overlay_visible||combat_ui_has_output(),
     debug_overlay_.has_status_notice()||debug_overlay_.has_harness_banner()||widescreen_hud_hovered(HudPanel::game_speed),!critters_summary_.labels.empty()||native_impostor_debug_)){
-  if(FAILED(hr=flushHud()))return hr;
-  transition_profile_pass("debug_overlay");
+  if(!hudPending)transition_profile_pass("debug_overlay");
   RendererResourceSnapshot presented{};presented.present_interval_ms=present_interval_ms_;presented.present_smoothed_ms=present_smoothed_ms_;
   presented.fg_presented_fps=frame_generation_mode_?fg_presented_fps_:0.0;presented.fg_real_fps=frame_generation_mode_?fg_real_fps_:0.0;
   presented.fg_mode=frame_generation_mode_;
   impostor_debug_labels(presented.impostor_labels);
   presented.fg_auto_off_fps=frame_generation_mode_&&fg_low_rate_?std::max(1,configured_integer(debug_overlay_.config(),"frame_generation_min_fps",30)):0;
   debug_overlay_.render(profiler_.latest_snapshot(),bridge_latest_profile(),presented,
-                        debug_view_availability,&profiler_,debug_shadow_info());
+                        debug_view_availability,&profiler_,debug_shadow_info(),hudPending?&overlayPacket:nullptr);
+  if(overlayPacket.requiresHost){
+   if(FAILED(hr=flushHud()))return hr;
+   transition_profile_pass("debug_overlay");overlayPacket.replay();overlayPacket.replay={};
+  }
  }
  PendingBlit generated_cursor{},lastCursor{};bool generated_cursor_wanted=false,lateCursor=false;
  if(cursor_pending_){
@@ -1938,7 +1950,9 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  }
  auto flushLayers=[&]() -> HRESULT {
   const HRESULT ui=flushHud();
-  if(FAILED(ui)||!lateCursor)return ui;
+  if(FAILED(ui))return ui;
+  if(overlayPacket.replay){transition_profile_pass("debug_overlay");overlayPacket.replay();overlayPacket.replay={};}
+  if(!lateCursor)return S_OK;
   pending_blits_.push_back(std::move(lastCursor));lateCursor=false;
   return render_pending_blits();
  };
@@ -2168,13 +2182,17 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
    return complete(hr);
   };
   frame_waits::pipeline_post();
-  if(RuntimeDiagnostics::Enabled())frame_waits::pipeline.drawingLayers=hudPending;
+  if(RuntimeDiagnostics::Enabled()){
+   frame_waits::pipeline.drawingLayers=hudPending;
+   if(hudPending)++frame_waits::pipeline.layerPackets;
+  }
   const bool posted=scene_thread_->post([this,syncInterval,frame_limit,hudPending,drawHud=std::move(drawHud),
-                                          lateCursor,cursor=std::move(lastCursor)]() mutable {
+                                          lateCursor,cursor=std::move(lastCursor),overlay=std::move(overlayPacket.replay)]() mutable {
    if(RuntimeDiagnostics::Enabled())frame_waits::pipeline.start=frame_waits::now();
    HRESULT result=E_FAIL;
    try {
     result=hudPending?drawHud():S_OK;
+    if(SUCCEEDED(result)&&overlay){transition_profile_pass("debug_overlay");overlay();}
     if(SUCCEEDED(result)&&lateCursor){pending_blits_.push_back(std::move(cursor));result=render_pending_blits();}
     if (RuntimeDiagnostics::Enabled() && hudPending)
      frame_waits::pipeline.layersDone=frame_waits::now();

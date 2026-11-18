@@ -32,7 +32,7 @@ struct PipelineTiming {
     std::atomic<unsigned long long> frame{0};
     std::atomic<LONGLONG> start{0},submitted{0},finish{0},layersDone{0};
     std::atomic<bool> drawingLayers{false};
-    unsigned long long frames=0,overlapped=0,encoding=0,drawing=0;
+    unsigned long long frames=0,overlapped=0,encoding=0,drawing=0,layerPackets=0;
     double overlapMs=0,encodingMs=0,drawMs=0;
 };
 inline PipelineTiming pipeline;

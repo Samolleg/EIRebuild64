@@ -206,7 +206,11 @@ HRESULT Renderer::finish_embedded_scene_commands() noexcept {
 // Captured world and effect payloads stay in FIFO order. Frame values are
 // installed once before the opaque pass; effect commands inherit that context.
 HRESULT Renderer::queue_embedded_draw(EmbeddedDraw draw,bool startWorld) {
- if(!embedded_render_thread_active() || !d3d12_)return draw(*this);
+ if(!embedded_render_thread_active())return draw(*this);
+ if(!d3d12_ && !startWorld){
+  const HRESULT prior=finish_embedded_scene_commands();
+  return FAILED(prior)?prior:draw(*this);
+ }
  std::shared_ptr<BridgeFrameValues> values;
  if(startWorld) {
   values=std::make_shared<BridgeFrameValues>();
@@ -223,7 +227,7 @@ HRESULT Renderer::queue_embedded_draw(EmbeddedDraw draw,bool startWorld) {
  },false,startWorld?"embedded_world_pass":"embedded_effects");
  if(!posted)return E_OUTOFMEMORY;
  embedded_scene_pending_=true;
- return S_OK;
+ return d3d12_?S_OK:finish_embedded_scene_commands();
 }
 
 // These operations consume the renderer-owned native batch. Host pointers
