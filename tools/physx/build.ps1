@@ -24,9 +24,14 @@ $names='INCLUDE','LIB','PATH','CUDA_PATH','_MSPDBSRV_ENDPOINT_','CL','_CL_','LIN
 $saved=@{};foreach($name in $names){$saved[$name]=[Environment]::GetEnvironmentVariable($name,'Process')}
 try {
     if(!(Test-Path -LiteralPath $source)){Copy-Item -LiteralPath $pristine -Destination $source -Recurse}
-    # Build-only patches: no unused GLUT binary copy; bounded CUDA compiler workers.
+    # Apply exact edits only to the private build copy of the pinned source.
     $encoding=[Text.Encoding]::GetEncoding(28591)
-    foreach($edit in @(@('physx/source/compiler/cmake/windows/CMakeLists.txt','IF(PX_COPY_EXTERNAL_DLL OR PUBLIC_RELEASE)','IF((PX_COPY_EXTERNAL_DLL OR PUBLIC_RELEASE) AND PX_BUILDSNIPPETS)'),@('physx/source/compiler/cmakegpu/CMakeLists.txt',' -t0 -D_CONSOLE',' -t2 -D_CONSOLE'))){
+    $edits=@(
+        @('physx/source/compiler/cmake/windows/CMakeLists.txt','IF(PX_COPY_EXTERNAL_DLL OR PUBLIC_RELEASE)','IF((PX_COPY_EXTERNAL_DLL OR PUBLIC_RELEASE) AND PX_BUILDSNIPPETS)')
+        @('physx/source/compiler/cmakegpu/CMakeLists.txt',' -t0 -D_CONSOLE',' -t2 -D_CONSOLE')
+        @('physx/source/cudamanager/src/CudaContextManager.cpp','cuCtxCreate(&mCtx, (unsigned int)flags, mDevHandle)','cuCtxCreate(&mCtx, nullptr, (unsigned int)flags, mDevHandle) /* EIRebuild64: regular CUDA 13 context */')
+    )
+    foreach($edit in $edits){
         $path=Join-Path $source $edit[0];$text=$encoding.GetString([IO.File]::ReadAllBytes($path));
         if($text.Contains($edit[1])){[IO.File]::WriteAllBytes($path,$encoding.GetBytes($text.Replace($edit[1],$edit[2])))}elseif(!$text.Contains($edit[2])){throw "Unexpected PhysX recipe source: $path"}
     }
@@ -62,6 +67,7 @@ try {
     }
     Copy-Item -LiteralPath "$pristine/physx/LICENSE.md" -Destination "$install/licenses/PhysX-LICENSE.md" -Force
     Copy-Item -LiteralPath "$pristine/physx/THIRD_PARTY_NOTICES.md" -Destination "$install/licenses/PhysX-NOTICES.md" -Force
+    Copy-Item -LiteralPath "$PSScriptRoot/PhysX-CHANGES.md" -Destination "$install/licenses" -Force
     foreach ($component in Get-ChildItem "$cuda/licenses" -Directory) {
         $label=$component.Name -replace '^cuda_',''
         Copy-Item -LiteralPath (Join-Path $component.FullName 'LICENSE') -Destination "$install/licenses/CUDA-$label-LICENSE.txt" -Force
