@@ -37,17 +37,12 @@
   </ItemGroup>
   <!-- Compile only shared shader producers and preset data, with the runtime embedded contract. -->
   <ItemDefinitionGroup><ClCompile><PreprocessorDefinitions>EID3D11_SHADER_EMBED;EID3D11_EMBEDDED;%(PreprocessorDefinitions)</PreprocessorDefinitions><FunctionLevelLinking>true</FunctionLevelLinking></ClCompile><Link><OptimizeReferences>true</OptimizeReferences><EnableCOMDATFolding>true</EnableCOMDATFolding><LargeAddressAware>true</LargeAddressAware><AdditionalDependencies>d3d11.lib;dxgi.lib;d3dcompiler.lib;dxguid.lib;user32.lib;gdi32.lib;comctl32.lib;bcrypt.lib;pdh.lib;psapi.lib;ole32.lib;%(AdditionalDependencies)</AdditionalDependencies></Link></ItemDefinitionGroup>
-  <Target Condition="'$(EICacheRendererShaders)'!='true'" Name="GenerateRendererResources" AfterTargets="Build" Inputs="$(TargetPath);$(OwnedRendererRoot)Source\camp_art.rc;$(OwnedRendererRoot)Assets\arena\fragments-v1.bin;$(OwnedRendererRoot)Assets\camp\stone-bronze-frame.png;$(OwnedRendererRoot)Assets\camp\ui-art-atlas-v4.png;$(OwnedRendererRoot)Assets\camp\hammer-anvil-empty.png" Outputs="$(OutDir)eid3d11_shaders.bin;$(OutDir)eid3d11_shaders.res;$(OutDir)eid3d11_camp_art.res">
-    <Exec Command="&quot;$(TargetPath)&quot; eid3d11_shaders.bin --dxil-sources dxil" WorkingDirectory="$(OutDir)" />
-    <Exec Command="&quot;$([System.String]::Copy('$(WindowsSDK_ExecutablePath_x64)').Split(';').GetValue(0))\rc.exe&quot; /nologo /fo eid3d11_shaders.res eid3d11_shaders.rc" WorkingDirectory="$(OutDir)" />
-    <Exec Command="&quot;$([System.String]::Copy('$(WindowsSDK_ExecutablePath_x64)').Split(';').GetValue(0))\rc.exe&quot; /nologo /fo &quot;$(OutDir)eid3d11_camp_art.res&quot; Source\camp_art.rc" WorkingDirectory="$(OwnedRendererRoot)" />
+  <!-- Content receipts keep unchanged binary resources stable even when the
+       embedder itself was relinked. Missing/corrupt outputs are revalidated. -->
+  <Target Name="GenerateRendererResources" AfterTargets="Build" Condition="'$(EICacheRendererShaders)'!='true'">
+    <Exec Command="&quot;$(USERPROFILE)\AppData\Local\Programs\PowerShell\7.6.10\pwsh.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\tools\build-renderer-resources.ps1&quot; -Embedder &quot;$(TargetPath)&quot; -OutputDirectory &quot;$(OutDir).&quot; -RendererRoot &quot;$(OwnedRendererRoot).&quot; -Rc &quot;$([System.String]::Copy('$(WindowsSDK_ExecutablePath_x64)').Split(';').GetValue(0))\rc.exe&quot; -NMake &quot;$(VCToolsInstallDir)bin\Hostx64\x64\nmake.exe&quot; -Makefile &quot;$(MSBuildThisFileDirectory)D3D12Shaders.mak&quot; -Dxc &quot;$(DxcRoot)bin\x64\dxc.exe&quot; -Rtxdi &quot;$(RtxdiRoot).&quot; -HostD3D12 &quot;$(OwnedRendererRoot)Host\d3d12&quot;" />
   </Target>
-  <Target Name="GenerateDxilResources" AfterTargets="GenerateRendererResources" Condition="'$(EICacheRendererShaders)'!='true'">
-    <!-- nmake uses the author's generated per-program rules and incremental outputs. -->
-    <Exec Command="&quot;$(USERPROFILE)\AppData\Local\Programs\PowerShell\7.6.10\pwsh.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)..\tools\build-dxil.ps1&quot; -NMake &quot;$(VCToolsInstallDir)bin\Hostx64\x64\nmake.exe&quot; -Makefile &quot;$(MSBuildThisFileDirectory)D3D12Shaders.mak&quot; -OutputDirectory &quot;$(OutDir).&quot; -Dxc &quot;$(DxcRoot)bin\x64\dxc.exe&quot; -Rtxdi &quot;$(RtxdiRoot).&quot; -HostD3D12 &quot;$(OwnedRendererRoot)Host\d3d12&quot;" WorkingDirectory="$(OutDir)" />
-    <Exec Command="&quot;$([System.String]::Copy('$(WindowsSDK_ExecutablePath_x64)').Split(';').GetValue(0))\rc.exe&quot; /nologo /fo ..\eid3d11_dxil.res dxil.rc" WorkingDirectory="$(OutDir)dxil" />
-    <Exec Command="&quot;$([System.String]::Copy('$(WindowsSDK_ExecutablePath_x64)').Split(';').GetValue(0))\rc.exe&quot; /nologo /fo ..\eid3d11_d3d12_shaders.res d3d12_shaders.rc" WorkingDirectory="$(OutDir)dxil" />
-  </Target>
+  <Target Name="GenerateDxilResources" DependsOnTargets="GenerateRendererResources" Condition="'$(EICacheRendererShaders)'!='true'" />
   <Import Project="RendererPch.targets" /><Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 <PropertyGroup><EITaskCacheHit>$(EICacheRendererShaders)</EITaskCacheHit></PropertyGroup><Import Project="../tools/TaskCache.targets" />
 </Project>

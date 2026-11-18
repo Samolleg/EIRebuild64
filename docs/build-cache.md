@@ -35,8 +35,32 @@ build, the checked-out main may be the merge of the pinned base and the exact
 manifest changes. Both resulting EXEs are checked against every manifest
 resource before the build can complete or installation can start.
 
+## Incremental preparation and resources
+
+Unchanged source and SDK files retain their timestamps; comparison uses SHA-256.
+The unused archive-cache SDK fingerprint has been removed. Pruning uses one
+validated inventory per phase, includes work in its size accounting and refuses
+to silently exceed the limit when only persistent work remains. It never deletes
+work. Independent caches must be outside other cache roots (including cache/work).
+Existing nested caches need a separate owner-approved relocation or removal.
+A busy cache lock waits up to 120 seconds, with progress, without stealing it.
+
+Shader generation and RC packing have content receipts for their producer,
+compiler, inputs and outputs. Identical RC output keeps its timestamp even when
+an input change required verification. DXIL native RC/list files are written only
+when different; native shaders now depend on the DXC toolchain stamp too.
+On first use, missing receipts must be established; they are never inferred solely
+from timestamps. ShaderResourceManifest retains its strict accepted-resource checks.
+Tests: tools/test-shader-build.ps1 and tools/test-build-io.ps1, each with a fresh
+-FixtureRoot under the task. The shader test uses a tiny real RC resource, no DXC.
+
 A pinned accepted shader source may be `current` or `previous`; both still require
 the exact EXE hash and acceptance receipt. The build HEAD must include current
 main, and the manifest covers the complete diff from the accepted source commit,
 including explicit deleted non-shader files verified against Git. This permits
 CPU-only intervening acceptances without silently recompiling shaders.
+
+Accepted resource reuse permits packaging-only RendererShaders project changes only
+when all XML outside Target nodes/comments still matches the accepted commit.
+The two shader-build helper/test scripts do not compile into shader producers.
+HLSL/FX/DXIL/DXBC source changes remain rejected; final EXE resources are verified.
