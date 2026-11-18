@@ -65,6 +65,10 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
         neutral ? UINT32_MAX : sample.selection.ordinal};
     const bool seek = state.active && (clock < state.last_clock ||
         (state.events.active && token == state.events.action && absolute < state.events.absolute));
+    if(!state.active || seek || !(token==state.action) || clip!=state.value.clip) {
+        prepared.previous_attachment_action=std::move(prepared.attachment_action);
+        prepared.attachment_action=request.legacy;
+    }
     const auto playback = state.Update(clip, gltf::clip_time(animation.clips[clip], request, sample.pose.phase),
         token, clock, seek, (request.flags & 0x3c0000u) == 0x1c0000u);
     current.baked.reset();
@@ -121,6 +125,133 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
         }
     }
     current.height_scale = 1;
+    const auto& outfit=prepare_gltf_equipment(sample,*asset->gltf_asset);
+    current.attachment_nodes=outfit.mechanism_nodes;
+    if(outfit.mechanism_nodes || outfit.support_arm) {
+        const auto& body=*asset->gltf_asset;
+        using Overrides=std::vector<NativeWorldGeometry::Pose::Override>;
+        auto rows=std::make_shared<Overrides>();
+        if(current.overrides)*rows=*current.overrides;
+        const auto previous_override_count=rows->size();
+        rows->reserve(rows->size()+outfit.mechanism_nodes+(outfit.support_arm?outfit.support_arm->nodes.size():0));
+        const auto start=unsigned(base+body.geometry.joints.size())+body.gpu_animation->morphs;
+        const gltf::Affine basis{1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1};
+        const auto root=gltf::multiply(current.root_to_world,basis);
+        const gltf::WeaponBowConstraint* bow=nullptr;
+        for(const auto& item:outfit.items)if(item.asset->bow_constraint) {
+            // Ambiguous pairings leave both items on their ordinary tracks.
+            if(bow){bow=nullptr;break;}
+            bow=item.asset->bow_constraint.get();
+        }
+        float draw=0;
+        if(bow && !neutral && (request.flags&0x20u) && (request.event_flags&1u))
+            draw=gltf::weapon_draw_weight(sample.pose.phase,request.frames,request.hides[0],request.hides[1])*playback.blend;
+        gltf::Point3 drawing{},grip{};
+        if(draw>0) {
+            const auto hand=[&](const std::array<std::string,4>& markers) {
+                gltf::Point3 value{};
+                for(const auto& marker:markers) {
+                    const auto pose=gltf::socket_pose(animation,body.attachment_chain(marker),playback,root,
+                                                       prepared.motion_physique.get());
+                    for(unsigned r=0;r<3;++r)value[r]+=pose[r*4+3]*.25f;
+                }
+                return value;
+            };
+            drawing=hand(bow->drawing_bones);grip=hand(bow->grip_bones);
+        }
+        for(const auto& item:outfit.items) {
+            if(item.asset->mechanism.empty() && !item.asset->projectile_aim)continue;
+            auto socket=gltf::socket_pose(animation,body.attachment_chain(item.socket),playback,root,
+                                          prepared.motion_physique.get());
+            for(unsigned r=0;r<3;++r)for(unsigned c=0;c<3;++c)socket[r*4+3]+=socket[r*4+c]*item.offset[c];
+            if(item.asset->projectile_aim) {
+                auto value=socket;
+                if(bow && draw>0)gltf::weapon_projectile(value,socket,*item.asset->projectile_aim,drawing,grip,draw);
+                NativeWorldGeometry::Pose::Override out{};
+                out.node=start+item.mechanism_offset;
+                for(unsigned r=0;r<3;++r)std::copy_n(value.data()+r*4,4,out.value.rows[r].begin());
+                rows->push_back(out);
+                continue;
+            }
+            const auto& mechanism=*item.asset->mechanism_animation;
+            const auto local=[&](unsigned c,float t,const std::string& action) {
+                const auto m=c==UINT32_MAX?UINT32_MAX:gltf::named_clip(mechanism,action);
+                const float d=c==UINT32_MAX?0:animation.clips.at(c).duration;
+                return std::make_pair(m,m!=UINT32_MAX && d>0?t/d*mechanism.clips.at(m).duration:0.f);
+            };
+            const auto now=local(playback.clip,playback.time,prepared.attachment_action);
+            const auto before=local(playback.previous,playback.previous_time,prepared.previous_attachment_action);
+            const gltf::Playback motion{now.first,before.first,now.second,before.second,playback.blend};
+            std::array<gltf::Affine,16> values{};
+            for(const auto& joint:item.asset->mechanism) {
+                values.at(joint.node)=gltf::multiply(socket,gltf::socket_local(mechanism,joint,motion));
+            }
+            if(item.asset->bow_constraint && item.asset->bow_constraint.get()==bow && draw>0) {
+                gltf::weapon_bow(values,*bow,drawing,draw);
+            }
+            for(const auto& joint:item.asset->mechanism) {
+                const auto& value=values.at(joint.node);
+                NativeWorldGeometry::Pose::Override out{};
+                out.node=start+item.mechanism_offset+joint.node;
+                for(unsigned r=0;r<3;++r)std::copy_n(value.data()+r*4,4,out.value.rows[r].begin());
+                rows->push_back(out);
+            }
+        }
+        if(outfit.support_arm && !sample.visibility.hide_weapons) {
+            const gltf::EquipmentAsset* held=nullptr;
+            for(const auto& item:outfit.items)if(item.asset->two_hand_support && item.slot=="hand_r") {
+                if(held){held=nullptr;break;}
+                held=&item;
+            }
+            if(held) {
+                const auto& support=*held->asset->two_hand_support;
+                const auto weight=[&](const std::string& action,unsigned clip,float time) {
+                    return clip==UINT32_MAX ? 0.f : gltf::weapon_support_weight(
+                        support,action,time,animation.clips.at(clip).duration);
+                };
+                const float now=weight(prepared.attachment_action,playback.clip,playback.time);
+                const float before=weight(prepared.previous_attachment_action,playback.previous,playback.previous_time);
+                const float strength=before+(now-before)*playback.blend;
+                if(strength>0) {
+                    const auto& plan=*outfit.support_arm;
+                    std::array<gltf::Affine,256> arm{};
+                    const auto upper=body.geometry.joints[plan.nodes[plan.upper].joint.node].name;
+                    for(unsigned i=0;i<plan.nodes.size();++i) {
+                        const auto& node=plan.nodes[i];
+                        arm[i]=node.parent<0 ? gltf::socket_pose(animation,body.attachment_chain(upper),playback,
+                                                                 root,prepared.motion_physique.get()) :
+                            gltf::multiply(arm[unsigned(node.parent)],gltf::socket_local(animation,node.joint,playback,
+                                                                                        prepared.motion_physique.get()));
+                    }
+                    const auto origin=[](const gltf::Affine& a){return gltf::Point3{a[3],a[7],a[11]};};
+                    const auto shoulder=origin(arm[plan.upper]),elbow=origin(arm[plan.forearm]),wrist=origin(arm[plan.hand]);
+                    gltf::Point3 palm{};
+                    for(unsigned marker:plan.markers)for(unsigned c=0;c<3;++c)palm[c]+=.25f*arm[marker][c*4+3];
+                    auto weapon=gltf::socket_pose(animation,body.attachment_chain(held->socket),playback,root,
+                                                  prepared.motion_physique.get());
+                    for(unsigned r=0;r<3;++r)for(unsigned c=0;c<3;++c)weapon[r*4+3]+=weapon[r*4+c]*held->offset[c];
+                    gltf::WeaponArmSolution solution;
+                    if(gltf::weapon_support_ik(solution,weapon,support,shoulder,elbow,wrist,palm,strength)) {
+                        for(unsigned i=0;i<plan.nodes.size();++i)if(plan.nodes[i].output) {
+                            const bool forearm=plan.nodes[i].forearm;
+                            const auto value=gltf::weapon_rotate_around(arm[i],
+                                forearm?solution.forearm_rotation:solution.upper_rotation,
+                                forearm?solution.elbow:solution.shoulder,
+                                forearm?solution.new_elbow:solution.shoulder);
+                            NativeWorldGeometry::Pose::Override out{};
+                            out.node=unsigned(base)+plan.nodes[i].joint.node;
+                            for(unsigned r=0;r<3;++r)std::copy_n(value.data()+r*4,4,out.value.rows[r].begin());
+                            rows->push_back(out);
+                        }
+                    }
+                }
+            }
+        }
+        if(rows->size()!=previous_override_count) {
+            std::stable_sort(rows->begin(),rows->end(),[](const auto& a,const auto& b){return a.node<b.node;});
+            current.overrides=std::move(rows);
+        }
+    }
     current.contact_world_height = asset->gltf_asset->radius * 2;
     return true;
 }

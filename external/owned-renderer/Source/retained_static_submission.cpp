@@ -1228,6 +1228,7 @@ const gltf::EquipmentSelection& prepare_gltf_equipment(const RetainedVisualSampl
   selected->radius=shapedRadius(surface.body,[&](unsigned j)->const auto&{return surface.inverse_skin[j];},
       [](unsigned j){return j;},nullptr);
  }
+ const double bodyRadius=selected->radius;
  for(auto& item:selected->items) {
   if(item.asset->wearable) {
    if(!same)item.body_nodes=gltf::wearable_nodes(*item.asset,body);
@@ -1244,11 +1245,30 @@ const gltf::EquipmentSelection& prepare_gltf_equipment(const RetainedVisualSampl
   auto found=std::find_if(body.geometry.joints.begin(),body.geometry.joints.end(),
       [&](const skn::Joint& j){return j.name==item.socket;});
   if(found==body.geometry.joints.end())throw std::runtime_error("glTF equipment socket missing in body");
+  if(!item.asset->mechanism.empty() || item.asset->projectile_aim) {
+   item.mechanism_offset=selected->mechanism_nodes;
+   selected->mechanism_nodes+=item.asset->projectile_aim ? 1u : unsigned(item.asset->mechanism.size());
+  }
   const auto& limit=limits.at(found-body.geometry.joints.begin());
-  const double radius=limit.translation+limit.scale*item.asset->radius;
+  const double radius=limit.translation+limit.scale*(item.asset->radius+
+      std::hypot(item.offset[0],item.offset[1],item.offset[2]));
   if(!std::isfinite(radius)||radius>FLT_MAX/4)throw std::runtime_error("glTF equipment bounds overflow");
   selected->radius=(std::max)(selected->radius,static_cast<float>(radius)*(1+1e-5f));
+  if(item.asset->bow_constraint || item.asset->projectile_aim) {
+   // Constrained endpoints can travel with either hand, beyond the original
+   // item's local animation envelope. Keep a conservative common body bound.
+   const double expanded=bodyRadius+radius+2*limit.scale*item.asset->radius;
+   if(!std::isfinite(expanded)||expanded>FLT_MAX/4)throw std::runtime_error("weapon constraint bounds overflow");
+   selected->radius=(std::max)(selected->radius,float(expanded)*(1+1e-5f));
+  }
  }
+ const gltf::WeaponTwoHandSupport* support=nullptr;
+ for(const auto& item:selected->items)if(item.asset->two_hand_support && item.slot=="hand_r") {
+  if(support){support=nullptr;break;}
+  support=item.asset->two_hand_support.get();
+ }
+ if(support)selected->support_arm=same && prepared.gltf_equipment->support_arm ?
+     prepared.gltf_equipment->support_arm:gltf::weapon_arm_plan(body,*support);
  selected->radius+=2*gltf::secondary_limit; // rotated outer skin can travel farther than its driver
  // A translated root keeps the original sole midpoint. Its shift is bounded
  // by both feet's old and shaped envelopes, including their local sole points.
@@ -2581,7 +2601,11 @@ int retained_visual_equipment_point(const RetainedVisualSample& sample,const cha
     std::array<float,3> local{};
     for(const auto& item:prepare_gltf_equipment(sample,body).items) if(item.slot==slot) {
         const auto found=item.asset->anchors.find(anchor);
-        if(found!=item.asset->anchors.end()) {socket=item.socket;local=found->second;break;}
+        if(found!=item.asset->anchors.end()) {
+            socket=item.socket;local=found->second;
+            for(unsigned c=0;c<3;++c)local[c]+=item.offset[c];
+            break;
+        }
     }
     const gltf::Playback playback{pose->gltf_clip,pose->gltf_previous,pose->gltf_time,
         pose->gltf_previous_time,pose->gltf_blend};
@@ -3758,11 +3782,19 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
         } else {
          const auto found=std::find_if(body.geometry.joints.begin(),body.geometry.joints.end(),
              [&](const skn::Joint& j){return j.name==item.socket;});
-         nodes.push_back(static_cast<unsigned>(assembly.skeleton->nodes.size()+
-             (found-body.geometry.joints.begin())));
+         if(item.asset->mechanism.empty() && !item.asset->projectile_aim) {
+          nodes.push_back(static_cast<unsigned>(assembly.skeleton->nodes.size()+
+              (found-body.geometry.joints.begin())));
+         } else {
+          const auto start=unsigned(assembly.skeleton->nodes.size()+body.geometry.joints.size())+
+              body.gpu_animation->morphs+item.mechanism_offset;
+          const auto count=item.asset->projectile_aim ? 1u : unsigned(item.asset->mechanism.size());
+          for(unsigned j=0;j<count;++j)nodes.push_back(start+j);
+         }
         }
         build_skn_groups(sample,skn::from_gltf(item.asset),&nodes,item.weapon,item.arrow,
-            &item.base_color_overrides,&item.metallic_roughness_overrides,&item.material_identities,item.physique_anchors.get());
+            &item.base_color_overrides,&item.metallic_roughness_overrides,&item.material_identities,item.physique_anchors.get(),
+            item.asset->mechanism.empty() && !item.asset->projectile_aim && item.offset!=std::array<float,3>{} ? &item.offset : nullptr);
        }
       }
       if(built)prepared.merged_assembly=sample.assembly;

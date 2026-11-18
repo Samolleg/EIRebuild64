@@ -4,6 +4,7 @@
 #include "gltf_physique_surface.h"
 #include "gltf_playback.h"
 #include "gltf_socket.h"
+#include "gltf_weapon_constraints.h"
 #include <functional>
 
 struct cgltf_data;
@@ -15,13 +16,21 @@ struct Document
     std::shared_ptr<const std::vector<std::uint8_t>> bytes;
     std::shared_ptr<cgltf_data> parsed;
 };
+struct WeaponArmPlan;
 struct Asset
 {
     bool rigid = false;
     bool wearable = false;
+    // Local tracks for the few moving mesh nodes of an articulated item.
+    std::vector<SocketJoint> mechanism;
+    std::shared_ptr<const Animation> mechanism_animation;
+    std::unique_ptr<WeaponBowConstraint> bow_constraint;
+    std::unique_ptr<WeaponProjectileAim> projectile_aim;
+    std::unique_ptr<WeaponTwoHandSupport> two_hand_support;
     std::string socket;
     std::map<std::string,std::array<float,3>> anchors;
     mutable std::map<std::string,SocketChain> sockets;
+    mutable std::map<std::string,std::shared_ptr<const WeaponArmPlan>> support_arm_plans;
     mutable std::mutex socket_mutex;
     Document document;
     skn::Asset geometry;
@@ -98,8 +107,81 @@ struct EquipmentAsset {
     std::map<unsigned,std::shared_ptr<const skn::Dds>> metallic_roughness_overrides;
     // Shared by the same GLB material and ORM resource, including across actors.
     std::map<unsigned,std::shared_ptr<const std::uint8_t>> material_identities;
+    unsigned mechanism_offset=0;
+    std::array<float,3> offset{};
 };
-struct EquipmentSelection { std::vector<EquipmentAsset> items; float radius=0; };
+struct WeaponArmNodePlan {
+    SocketJoint joint;
+    int parent=-1;
+    bool forearm=false,output=false;
+};
+struct WeaponArmPlan {
+    std::vector<WeaponArmNodePlan> nodes;
+    unsigned upper=0,forearm=0,hand=0;
+    std::array<unsigned,4> markers{};
+};
+struct EquipmentSelection {
+    std::vector<EquipmentAsset> items;
+    unsigned mechanism_nodes=0;
+    float radius=0;
+    std::shared_ptr<const WeaponArmPlan> support_arm;
+};
+inline std::shared_ptr<const WeaponArmPlan> weapon_arm_plan(const Asset& body,const WeaponTwoHandSupport& support) {
+    std::string key=support.upper+"|"+support.forearm+"|"+support.hand;
+    for(const auto& name:support.markers)key+="|"+name;
+    std::lock_guard<std::mutex> guard(body.socket_mutex);
+    const auto cached=body.support_arm_plans.find(key);
+    if(cached!=body.support_arm_plans.end())return cached->second;
+    const auto& animation=*body.animation;
+    animation_require(animation.nodes.size()==body.geometry.joints.size(),"two-hand body node count");
+    const auto index=[&](const std::string& name) {
+        const auto found=std::find_if(body.geometry.joints.begin(),body.geometry.joints.end(),
+            [&](const skn::Joint& joint){return joint.name==name;});
+        animation_require(found!=body.geometry.joints.end(),"two-hand body joint missing");
+        return unsigned(found-body.geometry.joints.begin());
+    };
+    const auto upper=index(support.upper),forearm=index(support.forearm),hand=index(support.hand);
+    std::array<unsigned,4> markers{};
+    for(unsigned i=0;i<4;++i)markers[i]=index(support.markers[i]);
+    std::vector<std::vector<unsigned>> children(animation.nodes.size());
+    for(unsigned i=0;i<animation.nodes.size();++i)if(animation.nodes[i].parent>=0)
+        children.at(unsigned(animation.nodes[i].parent)).push_back(i);
+    std::set<unsigned> used{upper,forearm,hand};
+    used.insert(markers.begin(),markers.end());
+    for(const auto& v:body.rest_vertices)for(unsigned k=0;k<4;++k)if(v.weights[k])used.insert(v.joints[k]);
+    auto plan=std::make_shared<WeaponArmPlan>();
+    std::vector<int> lookup(animation.nodes.size(),-1);
+    std::function<void(unsigned,int,bool)> visit=[&](unsigned node,int parent,bool lower) {
+        animation_require(lookup[node]<0 && plan->nodes.size()<animation.nodes.size() && plan->nodes.size()<256,
+                          "two-hand arm hierarchy");
+        const unsigned position=unsigned(plan->nodes.size());lookup[node]=int(position);
+        WeaponArmNodePlan part;part.joint.node=node;part.parent=parent;part.forearm=lower||node==forearm;
+        const auto& name=body.geometry.joints[node].name;
+        part.output=used.count(node)!=0 || (!name.empty() && name[0]!='#');
+        part.joint.tracks.resize(animation.clips.size(),{UINT32_MAX,UINT32_MAX,UINT32_MAX});
+        plan->nodes.push_back(std::move(part));
+        for(unsigned child:children[node])visit(child,int(position),lower||node==forearm);
+    };
+    visit(upper,-1,false);
+    animation_require(lookup[forearm]>=0 && lookup[hand]>=0 && plan->nodes[lookup[hand]].forearm,
+                      "two-hand arm ancestry");
+    plan->upper=unsigned(lookup[upper]);plan->forearm=unsigned(lookup[forearm]);plan->hand=unsigned(lookup[hand]);
+    for(unsigned i=0;i<4;++i) {
+        animation_require(lookup[markers[i]]>=0 && plan->nodes[lookup[markers[i]]].forearm,"two-hand marker ancestry");
+        plan->markers[i]=unsigned(lookup[markers[i]]);
+    }
+    for(unsigned clip=0;clip<animation.clips.size();++clip) {
+        const auto& tracks=animation.clips[clip].tracks;
+        for(unsigned t=0;t<tracks.size();++t) {
+            const auto& track=tracks[t];
+            if(track.node>=lookup.size() || lookup[track.node]<0 || track.path==Path::weights)continue;
+            const unsigned path=track.path==Path::translation?0:track.path==Path::rotation?1:2;
+            plan->nodes[lookup[track.node]].joint.tracks[clip][path]=t;
+        }
+    }
+    body.support_arm_plans.emplace(key,plan);
+    return plan;
+}
 std::vector<EquipmentAsset> select_equipment(const std::vector<VisualEquipmentItem>& equipment, const std::string& body_resource);
 // CPU decoding/acceptance shared by the game and ModelCheck; no device required.
 using PublishPixels = std::function<ResourceBlob(const std::string &, const void *, std::uint32_t)>;

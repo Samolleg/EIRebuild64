@@ -6,6 +6,28 @@ same selection. The camp copy never reads the world character's inventory.
 `ResolveVisualLeftHand` continues to govern shields, paired weapons, staves and
 two-handed exclusion. Changing/removing an item invalidates the appearance.
 
+## Weapon candidate (GLTFWEAP03R)
+
+The candidate adds an optional three-component socket-space `offset` to a rigid
+registry binding and an `articulated-item` GLB kind for rigid weapon mechanisms.
+Mechanism tracks use the body's selected clip, normalized time and transition;
+they do not duplicate the body's animation library. The resulting node poses
+share the existing palette for world and private previews. Bounds include the
+equipment; cast and particle anchors retain their item-space meaning.
+
+Optional item metadata describes a bow string and projectile alignment, or a
+two-handed support line and named arm bones. The support-arm plan is cached on
+the shared body, preserves arm segment lengths, fades by distance, and applies
+only to listed actions. Optional per-action phase windows let a crossbow hand
+follow the original reload before blending toward its stock around release.
+The mechanism and support adjustments use the same body playback and physique.
+Malformed metadata is rejected; unrelated weapons keep their existing pose.
+
+The companion content candidate records the conversion recipes and source
+checksums. It requires this runtime and has not been established as accepted or
+installed by this document. Rendering tests do not replace game-path checks of
+fit, effects, interaction and frame cost.
+
 ## Resource table
 
 `models/registry.v1.json` retains version 1. `items` is keyed by the exact item
@@ -89,14 +111,11 @@ ordering. Changing equipment only rebuilds the cold appearance/group binding.
 
 ## Boundaries and verification
 
-This stage adds the common rigid attachment runtime. The installed content
-registry currently has no item mappings. X64GLTF10A prepares a control saber
-and strapped shield as separate resources; the rest of the item catalog still
-requires explicit assets/mappings. Do not install an EXE alone and
-claim that every existing weapon has been converted. Clothing surface binding,
-body coverage and shared garment morphs belong to the following stage; the
-author's ready starter wool set is its source. Animated bow/crossbow mechanics
-are not representable as a single rigid item and require authored separate data.
+The original X64GLTF10 stage added the common rigid attachment runtime and
+X64GLTF10A prepared a control saber and shield. The later GLTFWEAP03R candidate
+adds the distinct articulated-item contract described above; it does not change
+the requirements for ordinary rigid items. Resource mappings and the compatible
+runtime need to be delivered together.
 
 Checks:
 

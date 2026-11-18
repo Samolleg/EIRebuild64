@@ -450,6 +450,7 @@ struct VisualPreparedResources {
     std::shared_ptr<const VisualSkeletonBinding> skeleton_binding;
     NativeWorldGeometry::Pose gpu_pose;
     std::shared_ptr<gltf::PlaybackState> gltf_playback;
+    std::string attachment_action, previous_attachment_action;
     std::shared_ptr<gltf::BreastState> breast_physics;
     std::shared_ptr<const skm::Clip> motion_clip;
     std::shared_ptr<const skn::RuntimeAsset> motion_asset;

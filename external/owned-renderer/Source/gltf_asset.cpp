@@ -230,6 +230,7 @@ std::vector<EquipmentAsset> select_equipment(const std::vector<VisualEquipmentIt
         auto asset=select_resource(binding.resource,false,present,&binding);
         require(present && asset && (binding.skinned ? asset->wearable : asset->rigid),"item not available");
         result.push_back({asset,binding.socket,binding.slot,binding.weapon,binding.arrow});
+        result.back().offset=binding.offset;
         auto textures=select_textures(binding,*asset);
         result.back().base_color_overrides=std::move(textures.color);
         result.back().metallic_roughness_overrides=std::move(textures.orm);
