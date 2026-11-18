@@ -1,6 +1,8 @@
 #pragma once
 #include "gltf_asset.h"
 #include "secondary_physics.h"
+#include "runtime_diagnostics.h"
+#include <cstdio>
 
 namespace owned::gltf {
 // Rotation around the animated chest attachment. Only a small axial stretch
@@ -47,6 +49,9 @@ struct BreastState {
     Playback playback;
     Affine placement{};
     bool initialized=false, reported=false;
+    double motion_window=-1;
+    unsigned motion_clip=UINT32_MAX, motion_samples=0;
+    float min_tip_z=0,max_tip_z=0;
     std::shared_ptr<const std::vector<NativeWorldGeometry::Pose::Override>> overrides;
 
     bool bind(const std::shared_ptr<const Asset>& body) {
@@ -141,6 +146,24 @@ struct BreastState {
         std::array<Affine,2> bend;
         for(unsigned side=0;side<2;++side)
             bend[side]=breast_bend(bases[side],points[side],offsets[side]);
+        if(RuntimeDiagnostics::Enabled() && physics->ready() && !paused) {
+            // Final displaced tip minus its authored pose, in world metres.
+            const auto& p=points[0];const auto& m=bend[0];
+            const float dz=m[8]*p[0]+m[9]*p[1]+m[10]*p[2]+m[11]-p[2];
+            if(!motion_samples || reset || physics_clock<motion_window || motion_clip!=pose.clip){
+                motion_window=physics_clock;motion_clip=pose.clip;motion_samples=0;
+                min_tip_z=max_tip_z=dz;
+            }
+            min_tip_z=(std::min)(min_tip_z,dz);max_tip_z=(std::max)(max_tip_z,dz);
+            ++motion_samples;
+            if(physics_clock-motion_window>=1.) {
+                char detail[200]{};
+                std::snprintf(detail,sizeof(detail),"clip=%s samples=%u left_tip_dz_min_m=%.5f left_tip_dz_max_m=%.5f",
+                    asset->animation->clips.at(pose.clip).name.c_str(),motion_samples,min_tip_z,max_tip_z);
+                bridge_append_probe_event("nala_physx_motion",detail);
+                motion_samples=0;
+            }
+        }
         auto result=std::make_shared<std::vector<NativeWorldGeometry::Pose::Override>>();
         result->reserve(affected.size());
         for(const auto entry:affected) {

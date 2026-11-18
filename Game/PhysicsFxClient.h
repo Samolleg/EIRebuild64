@@ -11,7 +11,7 @@ public:
     void Reset(int tick=0);
     void Fireblast(CWorldClient&,int id,int start,const CPlot3D& point,float power,float radius);
     void Tick(CWorldClient&,bool paused);
-    std::vector<Stone> Sample(float fraction) const;
+    std::vector<Stone> Sample(float fraction,bool paused) const;
     std::uint64_t TextureSurface() const;
 };
 }

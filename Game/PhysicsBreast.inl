@@ -7,6 +7,7 @@ class BreastPhysics final : public owned::gltf::SecondaryPhysics {
     std::array<Owned<PxRigidDynamic>,2> anchors, bodies;
     std::array<Owned<PxD6Joint>,2> joints;
     owned::gltf::SecondaryPoints previous{}, offsets{};
+    owned::gltf::SecondaryPoints stepStart{}, stepEnd{};
     double last = 0, accumulated = 0;
     bool started = false;
     std::string failure;
@@ -76,10 +77,11 @@ public:
                     offsets[i]={0,0,-breastRestingDrop};
                     bodies[i]->setLinearVelocity(PxVec3(0));bodies[i]->setAngularVelocity(PxVec3(0));
                 }
+                stepStart=stepEnd=offsets;
                 started=true;last=clock;previous=targets;accumulated=0;return offsets;
             }
             if(elapsed==0)return offsets; // pause, shadow pass, attachment query
-            constexpr double step=1./120.;
+            constexpr double step=1./60.;
             accumulated+=elapsed;
             while(accumulated+1e-10>=step) {
                 const float fraction=float(std::clamp((elapsed-accumulated+step)/elapsed,0.,1.));
@@ -92,14 +94,18 @@ public:
                 if(!scene->fetchResults(true,&error)||error)throw std::runtime_error("Breast PhysX GPU step failed");
                 accumulated-=step;
                 if(sdk->errors.count)throw std::runtime_error(sdk->errors.Message());
+                stepStart=stepEnd;
                 for(unsigned i=0;i<2;++i) {
                     auto delta=bodies[i]->getGlobalPose().p-anchors[i]->getGlobalPose().p;
                     if(!delta.isFinite())throw std::runtime_error("Nonfinite breast simulation");
                     const float length=delta.magnitude();
                     if(length>owned::gltf::secondary_limit)delta*=owned::gltf::secondary_limit/length;
-                    offsets[i]={delta.x,delta.y,delta.z};
+                    stepEnd[i]={delta.x,delta.y,delta.z};
                 }
             }
+            const float blend=float(std::clamp(accumulated/step,0.,1.));
+            for(unsigned i=0;i<2;++i)for(unsigned k=0;k<3;++k)
+                offsets[i][k]=stepStart[i][k]+(stepEnd[i][k]-stepStart[i][k])*blend;
             last=clock;previous=targets;return offsets;
         }catch(const std::exception& e){failure=e.what();offsets={};return {};}
     }
