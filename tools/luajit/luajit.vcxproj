@@ -21,7 +21,7 @@
     <TargetName>luajit</TargetName>
     <TargetExt>.lib</TargetExt>
     <NMakeOutput>$(OutDir)luajit.lib</NMakeOutput>
-    <NMakeBuildCommandLine>powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)build.ps1&quot; -VSInstallDir &quot;$(VSInstallDir).&quot;</NMakeBuildCommandLine>
+    <NMakeBuildCommandLine>&quot;$(USERPROFILE)\AppData\Local\Programs\PowerShell\7.6.10\pwsh.exe&quot; -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)build.ps1&quot; -VSInstallDir &quot;$(VSInstallDir).&quot;</NMakeBuildCommandLine>
     <NMakeReBuildCommandLine>$(NMakeBuildCommandLine) -Force</NMakeReBuildCommandLine>
     <!-- No destructive cleanup; the recipe refreshes its private source copy. -->
     <NMakeCleanCommandLine>echo LuaJIT private build outputs retained.</NMakeCleanCommandLine>

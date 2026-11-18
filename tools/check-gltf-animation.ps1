@@ -1,3 +1,5 @@
+#requires -Version 7.6.10
+#requires -PSEdition Core
 param([Parameter(Mandatory=$true)][string]$OutputDirectory,[string]$Glb,[string]$Profile,[switch]$Equipment,[string]$ClothingDirectory,[string]$TextureA,[string]$TextureB,[string]$ModelsDirectory)
 if($Equipment -and (!$Glb -or !$Profile)){throw "Equipment checks require -Glb and -Profile"}
 if(($TextureA -or $TextureB) -and (!$TextureA -or !$TextureB -or !$Equipment -or !$ClothingDirectory)){throw 'Texture checks require both PNGs and the equipment/clothing fixture'}
