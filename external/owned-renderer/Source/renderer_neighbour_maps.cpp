@@ -371,6 +371,25 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     view.terrain.fog_max[0]=map_placement[3]+float(upload->fog_edges.x1);
                     view.terrain.fog_max[1]=map_placement[7]+float(upload->fog_edges.y1);
                     view.owned_texture=neighbour_piece_texture_view(texture,texture_mips);
+                    std::array<std::vector<NativeOwnedTextureMip>,3> environmentMips;
+                    if(node.environment_material) {
+                        view.skn_material.identity=node.environment_material;
+                        std::copy_n(node.environment_factors.begin(),4,view.skn_material.factors);
+                        std::copy_n(node.environment_base.begin(),4,view.skn_material.base);
+                        std::copy_n(node.environment_emission.begin(),4,view.skn_material.emission);
+                        for(unsigned k=0;k<3;++k)if(node.environment_maps[k]<upload->textures.size())
+                            view.skn_material.maps[k]=neighbour_piece_texture_view(upload->textures[node.environment_maps[k]],environmentMips[k]);
+                        retained_visual_part_fixed_state(RetainedVisualSample{},view.owned_fixed_state);
+                        view.owned_fixed_state.z_write_enable=node.environment_alpha!=2;
+                        view.owned_fixed_state.alpha_blend_enable=node.environment_alpha==2;
+                        view.owned_fixed_state.alpha_test_enable=node.environment_alpha==1;
+                        view.owned_fixed_state.alpha_func=D3DCMP_GREATER;
+                        view.owned_fixed_state.alpha_ref=UINT(node.environment_cutoff*255);
+                        view.owned_fixed_state.address_u=node.environment_address_u;view.owned_fixed_state.address_v=node.environment_address_v;
+                        view.owned_fixed_state.cull_mode=node.environment_factors[3]>1?D3DCULL_NONE:D3DCULL_CW;
+                        if(node.environment_alpha==0)view.owned_texture.opaque_mips=UINT_MAX;
+                        else view.lighting.material_alpha*=node.environment_alpha_factor;
+                    }
                     view.semantic_kind=SemanticKind::figure;view.flags=native_neighbour_flag|native_ground_contact_flag|8u;
                     // Sway and foliage by the main map's rule (the stream read
                     // them from the assembly): a tree's parts sway around its
@@ -386,6 +405,7 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     const auto& span=contact[node.candidate];
                     view.contact_world_height=span[1]-span[0];view.contact_map=first_part+1;
                     view.ordering=NativeOrdering::reorderable;view.contribution={true,true,0};
+                    if(node.environment_material&&node.environment_alpha==2)view.ordering=NativeOrdering::preserve;
                     if(native_astral_record(node.flags)) {
                         // Astral rift veils and clumps (astral_rift.h): blended in
                         // order without depth writes, no ground contact; the clumps
@@ -573,7 +593,7 @@ void Renderer::update_active_statics(const FixedState& frame,const std::array<fl
         auto index=std::make_shared<ActiveStaticsIndex>();
         index->catalog=++catalogs;
         for(const auto& object:source.map->objects)
-            if((object.family==53 || object.family==55) && object.quest==0 &&
+            if((object.family==53 || object.family==55 || (object.environment_profile&&object.family>=53&&object.family<=56)) && object.quest==0 &&
                object.rejection==StaticObjectRejection::none && object.nid && object.nid<=0x7fffffffu)
                 index->eligible.insert(static_cast<std::int32_t>(object.nid));
         a.generation=generation;a.catalog=index->catalog;a.index=index;
@@ -632,6 +652,9 @@ void Renderer::adopt_active_statics(std::shared_ptr<NeighbourPiece> piece,const 
     auto& p=*a.pieces.back();
     const auto old_mesh=native_mesh_resident_bytes_;
     adopt_prebuilt_pages(p);
+    adopt_prebuilt_textures(p);
+    // The resident cache owns adopted textures; drop temporary duplicates and uploads.
+    p.prebuilt_textures.clear();
     const UINT baked_before=impostors_.baked;
     if(!d3d12_)bake_neighbour_impostors(p);else bake_neighbour_impostors_d3d12(p);
     const auto baked=impostors_.baked-baked_before;
@@ -650,13 +673,27 @@ void Renderer::adopt_active_statics(std::shared_ptr<NeighbourPiece> piece,const 
     const FixedState state=neighbour_submission_state(frame,SemanticKind::figure,NativeOrdering::reorderable);
     std::vector<NativeOwnedTextureMip> mips;
     std::uint64_t nodes_total=0,parked=0;
+    unsigned environment_examples=0;
     for(const auto key:batch)for(auto& node:a.models[key].nodes) {
         ++nodes_total;
         const auto first=native_pending_draws_.size();
         auto view=active_static_view(p,node,world_to_clip,mips);
+        if(p.decorations[node.decoration].environment_material && environment_examples++<16) {
+            const auto& draw=p.decorations[node.decoration];
+            const auto& figure=p.figures[draw.figure];
+            bridge_neighbour_diagnostic(("main_map_glb model="+p.identities[figure.identity].canonical_name+
+                " planned_impostor="+std::to_string(draw.impostor)+" atlas="+std::to_string(view.world.impostor)+
+                " lead="+std::to_string(draw.impostor_lead)).c_str());
+        }
         NativeGeometryResult result;
         const HRESULT hr=queue_native_terrain(view,state,nullptr,&result);
         if(FAILED(hr) || native_pending_draws_.size()!=first+1) {
+            if(p.decorations[node.decoration].environment_material) {
+                const auto& figure=p.figures[p.decorations[node.decoration].figure];
+                const auto detail=p.identities[figure.identity].canonical_name+" hr="+std::to_string(hr)+
+                    " step="+(result.failure_operation?result.failure_operation:"enqueue_count");
+                active_statics_note_refusal(ObjectSpaceRefusal::adopt,detail.c_str());
+            }
             for(std::size_t k=first;k<native_pending_draws_.size();++k)release_native_queued_draw(native_pending_draws_[k].record,true);
             native_pending_draws_.resize(first);continue;
         }
@@ -787,6 +824,7 @@ HRESULT Renderer::queue_active_static_parts(const NativeStaticSubmission& reques
         view.bounds_minimum=part.bounds.minimum;view.bounds_maximum=part.bounds.maximum;
         // The posed record's texture (archive member or game surface).
         view.owned_texture=part.source->owned_texture;
+        view.skn_material=part.source->skn_material;
         // The posed sway bits name the root pose node; object space carries
         // the anchor instead (retained_object_space_sway_flags).
         view.flags=((values.flags&native_sway_flag)?(values.flags&(native_sway_flag-1u)):values.flags)|request.sway_flags[i];

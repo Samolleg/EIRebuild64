@@ -1,4 +1,5 @@
 #include "owned_asset_loader.h"
+#include "environment_asset.h"
 #include "debug_output_paths.h"
 #include "owned_terrain_front_end.h"
 #include "owned_terrain_decode.h"
@@ -929,6 +930,7 @@ std::uint64_t snapshot_fingerprint(const OwnedMapSnapshot& snapshot) noexcept {
                           sizeof(snapshot.terrain->sector_count_y));
     }
     for (const StaticObjectSource& object : snapshot.objects) {
+        hash = hash_bytes(hash,&object.environment_profile,sizeof(object.environment_profile));
         hash = hash_bytes(hash, &object.nid, sizeof(object.nid));
         hash = hash_bytes(hash, &object.family, sizeof(object.family));
         hash = hash_bytes(hash, &object.prototype_nid,
@@ -951,6 +953,10 @@ std::uint64_t snapshot_fingerprint(const OwnedMapSnapshot& snapshot) noexcept {
             hash = hash_bytes(hash, &node.figure.material_group,
                               sizeof(node.figure.material_group));
         }
+    }
+    for(const auto& item:snapshot.environment) {
+        hash=hash_string(hash,item.first);
+        if(item.second&&item.second->skeleton)hash=resource_description(hash,item.second->skeleton->model_container);
     }
     for (const auto& item : snapshot.textures) {
         hash = hash_string(hash, item.first);
@@ -3278,6 +3284,7 @@ struct GenerationState {
     std::shared_ptr<TerrainCpuAsset> terrain;
     std::vector<StaticObjectSource> objects;
     std::map<std::string, std::shared_ptr<const ModelCpuAsset>> models;
+    std::map<std::string, std::shared_ptr<const VisualAssemblyAsset>> environment;
     std::map<std::string, std::shared_ptr<const TextureCpuAsset>> textures;
     std::map<std::string, ResourceFailure> model_failures;
     std::map<std::string, ResourceFailure> texture_failures;
@@ -3377,6 +3384,7 @@ struct OwnedResourceLoader::Impl {
             snapshot->terrain = state->terrain;
             snapshot->objects = state->objects;
             snapshot->models = state->models;
+            snapshot->environment = state->environment;
             snapshot->textures = state->textures;
             snapshot->failures = state->failures;
             for (const auto& failure : state->model_failures)
@@ -3390,6 +3398,7 @@ struct OwnedResourceLoader::Impl {
             if (!state->request.load_object_assets || !accepted_source(object)) continue;
             const std::string model_key = fold_ascii(object.visual_reference);
             const std::string texture_key = fold_ascii(object.primary_texture);
+            if(snapshot->environment.count(model_key))continue;
             const auto model = snapshot->models.find(model_key);
             const auto texture = snapshot->textures.find(texture_key);
             if (model == snapshot->models.end()) {
@@ -3433,6 +3442,18 @@ struct OwnedResourceLoader::Impl {
             owned_bytes += owned_model_bytes(*model.second);
         for (const auto& texture : snapshot->textures)
             if (texture.second->source) owned_bytes += texture.second->source->size();
+        std::set<const FigureCpuAsset*> environmentGeometry;
+        std::set<const std::vector<std::uint8_t>*> environmentTextures;
+        for(const auto& entry:snapshot->environment)for(const auto& part:entry.second->parts) {
+            for(const auto& geometry:{part.geometry,part.environment_geometry})if(geometry&&environmentGeometry.insert(geometry.get()).second) {
+                const auto& g=*geometry;
+                owned_bytes+=g.positions.size()*sizeof(NativePackedGroup)+g.normals.size()*sizeof(NativePackedGroup)+
+                    g.components.size()*sizeof(NativeVertexComponent)+g.indices.size()*sizeof(std::uint16_t)+g.texture_coordinates.size()*sizeof(NativeTextureCoordinate);
+            }
+            if(part.environment_material)for(const auto& texture:part.environment_material->textures)
+                if(texture&&texture->asset->source&&environmentTextures.insert(texture->asset->source.get()).second)
+                    owned_bytes+=texture->asset->source->size();
+        }
         snapshot->metrics.peak_owned_bytes = owned_bytes;
         std::sort(snapshot->failures.begin(), snapshot->failures.end());
         snapshot->deterministic_fingerprint = snapshot_fingerprint(*snapshot);
@@ -3610,8 +3631,24 @@ struct OwnedResourceLoader::Impl {
             state->request.family_allowlist.begin(),
             state->request.family_allowlist.end());
         std::uint64_t candidate_references = 0;
+        std::set<std::string> environmentChecked;
+        std::map<std::string,bool> environmentAssignments;
         for (StaticObjectSource& object : objects) {
+            const auto modelKey=fold_ascii(object.visual_reference);
+            if(!environmentAssignments.count(modelKey))environmentAssignments[modelKey]=environment::assigned(*state->store,modelKey);
+            object.environment_profile=environmentAssignments[modelKey];
             if (!state->request.load_object_assets) continue;
+            const auto visual=fold_ascii(object.visual_reference);
+            if(environmentChecked.insert(visual).second) {
+                if(auto asset=environment::select(*state->store,visual)) {
+                    state->environment[visual]=environment::assembly(asset,{},1);
+                    state->decoded_source_bytes.fetch_add(asset->identity.bytes,std::memory_order_relaxed);
+                }
+            }
+            if(state->environment.count(visual)) {
+                if(object.rejection==StaticObjectRejection::multipart)object.rejection=StaticObjectRejection::none;
+                continue; // self-contained materials, never request legacy model/MMP resources
+            }
             if (state->request.backdrop_objects &&
                 (object.rejection == StaticObjectRejection::script_mutable ||
                  object.rejection == StaticObjectRejection::multipart))

@@ -16,7 +16,7 @@ using Microsoft::WRL::ComPtr;
 namespace {
 
 constexpr std::uint32_t kWireMagic = 0x5045494eu; // 'NIEP'
-constexpr std::uint32_t kWireVersion = 9; // Embedded 1126 layout, separate from earlier local cache 8. // 7: texture opaque_mips; 6: per-object crown impostors; 5: authored-family policy plus retained name provenance; 4: family-name provenance
+constexpr std::uint32_t kWireVersion = 10; // environment PBR decoration descriptors
 
 // Plain record types travel as bytes; both builds must agree on their sizes.
 template<class T> constexpr bool plain = std::is_trivially_copyable_v<T> && !std::is_pointer_v<T>;

@@ -2,6 +2,7 @@
 // the neighbour stream's worker after the weld and the prebuild, in the
 // renderer DLL or the x64 render host; no renderer state, no game memory.
 #include "neighbour_piece.h"
+#include "environment_material.h"
 
 #include "d3d12_frame.h"
 
@@ -201,6 +202,20 @@ void piece_decorations(PieceBuilder& builder, const NeighbourMapUpload& upload) 
                 draw.flags |= astral_record_flags(*candidate.assembly, candidate.assembly->parts[node_index]);
             if (candidate.source) retained_object_matrix(candidate.world_position, candidate.source->quaternion, draw.object_placement);
             draw.object_to_world = node.object_to_world;
+            if(candidate.assembly&&node_index<candidate.assembly->parts.size()) {
+                const auto& part=candidate.assembly->parts[node_index];
+                if(part.environment_material) {
+                    const auto& m=*part.environment_material;const auto native=m.native();
+                    std::uint64_t key=1469598103934665603ull;for(char c:part.geometry->identity.key()){key^=std::uint8_t(c);key*=1099511628211ull;}
+                    draw.environment_material=key?key:1;
+                    std::copy_n(native.factors,4,draw.environment_factors.begin());std::copy_n(native.base,4,draw.environment_base.begin());std::copy_n(native.emission,4,draw.environment_emission.begin());
+                    draw.environment_cutoff=m.cutoff;draw.environment_alpha=m.alpha;draw.environment_alpha_factor=m.alpha_factor;
+                    draw.environment_address_u=m.address_u;draw.environment_address_v=m.address_v;
+                    for(unsigned k=0;k<3;++k)if(m.textures[k+1]) {
+                        const auto v=m.textures[k+1]->view();draw.environment_maps[k]=builder.texture(*v.resource,1,v.format,v.mips,v.mip_count,v.opaque_mips);
+                    }
+                }
+            }
             draw.bounds_center = node.bounds.center;
             draw.bounds_minimum = node.bounds.minimum; draw.bounds_maximum = node.bounds.maximum;
             // Sway and foliage by the main map's rule (retained_visual_part_values).

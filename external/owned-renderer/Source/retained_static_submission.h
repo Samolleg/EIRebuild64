@@ -12,6 +12,7 @@
 namespace owned {
 
 struct RetainedPreparedNode {
+    std::shared_ptr<const environment::Material> environment_material;
     const FigureCpuAsset* figure = nullptr;
     const TextureCpuAsset* texture = nullptr;
     // Item 5 live-sourced models: the part's game surface instead of an
@@ -400,6 +401,8 @@ bool retained_visual_group_depth_revision(const RetainedVisualSample& sample,
 bool retained_visual_group_submission(const RetainedVisualSample& sample,
     std::size_t group_index,const NativeWorldBounds& bounds,NativeContribution contribution,
     double time,std::uint8_t fog,NativePreparedPartSubmission*& record);
+
+void retained_visual_part_fixed_state(const RetainedVisualSample& sample,NativeOwnedFixedState& state) noexcept;
 
 // Shared material/animation values for active and streamed astral parts.
 bool retained_visual_part_values(const RetainedVisualSample& sample,

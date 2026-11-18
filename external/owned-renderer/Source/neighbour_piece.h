@@ -68,6 +68,12 @@ struct NeighbourPieceFigure {
 
 // One drawn decoration node.
 struct NeighbourPieceDecoration {
+    std::uint64_t environment_material = 0;
+    std::array<std::uint32_t,3> environment_maps{UINT32_MAX,UINT32_MAX,UINT32_MAX};
+    std::array<float,4> environment_factors{},environment_base{},environment_emission{};
+    float environment_cutoff=.5f,environment_alpha_factor=1;
+    std::uint32_t environment_alpha=0;
+    std::uint32_t environment_address_u=1,environment_address_v=1;
     std::uint32_t candidate = 0;         // nodes of one MOB object share it (contact span)
     std::uint32_t figure = 0;            // NeighbourPiece::figures
     std::uint32_t texture = 0;           // NeighbourPiece::textures (UINT32_MAX: none, item 5 surface part)

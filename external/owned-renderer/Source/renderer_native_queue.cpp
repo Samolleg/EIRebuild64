@@ -771,6 +771,9 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
  key.shape_count=shape_count;
  key.static_lods=view.lod_figure!=nullptr || view.lods!=nullptr;
  if(view.world.enabled){key.resource_key=view.world.identity->key();key.world_part=view.world.part;key.selector={};}
+ // Keep prebuilt object-space LOD/sphere payload separate from posed input.
+ // Shape zero otherwise hits the earlier posed mesh without its impostor.
+ if(view.world.enabled&&view.world.object_space)key.resource_key+="|object-space";
  // An object-space record's shape-resolved mesh is shared by every record
  // of that figure with exactly this shape.
  if(view.world.enabled&&shape_count==1&&view.world.object_space)
