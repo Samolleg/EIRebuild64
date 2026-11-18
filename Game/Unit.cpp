@@ -2290,19 +2290,23 @@ const BodyShape::State* CUnit::GetBodyShape()
     RefreshBodyShape();
     return hasNalaSknBody ? &bodyShape : nullptr;
 }
+std::array<float,5> CUnit::VisualPhysiqueInput() const
+{
+    const auto* prototype = GetPrototype();
+    if (!prototype) return {25,25,.3f,.3f,.85f};
+    std::array<float,5> input{float(rpgUserUnitStats.cStrength),float(rpgUserUnitStats.cDexterity),
+        prototype->fStrength,prototype->fGrace,prototype->fTall};
+    if (lpUnitSpecific && lpUnitSpecific->WhoAmI() == HPC_UNITSERVERSPECIFIC) {
+        const auto* stats = static_cast<CUnitServer*>(lpUnitSpecific)->GetRPGStats();
+        input[0] = stats->psStrength.fpEffectiveValue;
+        input[1] = stats->psDexterity.fpEffectiveValue;
+    }
+    return input;
+}
 void CUnit::RefreshBodyShape()
 {
     if (!hasNalaSknBody) return;
-    const auto* prototype = GetPrototype();
-    if (!prototype) { bodyShape = {}; return; }
-    BodyShape::Input input;
-    input.strength = rpgUserUnitStats.cStrength;
-    input.dexterity = rpgUserUnitStats.cDexterity;
-    if (lpUnitSpecific && lpUnitSpecific->WhoAmI() == HPC_UNITSERVERSPECIFIC) {
-        const auto* stats = static_cast<CUnitServer*>(lpUnitSpecific)->GetRPGStats();
-        input.strength = stats->psStrength.fpEffectiveValue;
-        input.dexterity = stats->psDexterity.fpEffectiveValue;
-    }
-    input.db = {prototype->fStrength, prototype->fGrace, prototype->fTall};
-    bodyShape.Update(input);
+    if (!GetPrototype()) { bodyShape = {}; return; }
+    const auto input = VisualPhysiqueInput();
+    bodyShape.Update({input[0],input[1],{input[2],input[3],input[4]}});
 }

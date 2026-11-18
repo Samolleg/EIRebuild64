@@ -2396,7 +2396,7 @@ private:
         std::weak_ptr<const ModelCpuAsset> model;
         std::weak_ptr<const AnimationClipAsset> clip;
         bool animated = false;
-        UINT gltf_allocation = UINT_MAX;
+        UINT gltf_allocation = UINT_MAX,physique_allocation = UINT_MAX;
     };
     struct NativeGltfLibrary {
         UINT allocation = UINT_MAX;

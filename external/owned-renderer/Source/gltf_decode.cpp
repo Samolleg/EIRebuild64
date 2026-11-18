@@ -329,6 +329,46 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
     require(metadata.at("profile") == "human.v1" &&
         (rigid || wearable || metadata.at("kind") == "body"), "asset profile/kind");
     output->rigid = rigid; output->wearable = wearable;
+    const bool physique = metadata.contains("physique");
+    if(physique) {
+        const auto& schema=metadata.at("physique");
+        require(!rigid && !wearable && schema.at("version")==1,"physique version/kind");
+        auto& model=output->physique;
+        model.targets=schema.at("targets").get<std::vector<std::string>>();
+        require(!model.targets.empty() && model.targets.size()<=64 &&
+            std::set<std::string>(model.targets.begin(),model.targets.end()).size()==model.targets.size(),"physique names");
+        model.axes=schema.at("axes").get<std::array<std::vector<float>,5>>();
+        size_t samples=1,neutralRow=0;
+        for(unsigned i=0;i<5;++i){
+            const auto& axis=model.axes[i];
+            require(axis.size()>=2 && axis.size()<=16 && samples*axis.size()<=8192,"physique grid size");
+            for(size_t j=0;j<axis.size();++j)require(std::isfinite(axis[j]) && (!j || axis[j-1]<axis[j]),"physique knots");
+            const auto neutral=std::find(axis.begin(),axis.end(),neutral_physique[i]);
+            require(neutral!=axis.end(),"physique neutral knot");
+            neutralRow=neutralRow*axis.size()+size_t(neutral-axis.begin());samples*=axis.size();
+        }
+        model.rig_rank=schema.at("rigRank").get<unsigned>();
+        const auto joints=schema.at("joints").size();
+        require(model.rig_rank>0 && model.rig_rank<=64 && joints>0 && joints<=2048,"physique rig dimensions");
+        const auto read=[&](const char* name,size_t count) {
+            const auto i=schema.at(name).get<unsigned>();
+            require(i<data.buffer_views_count,"physique buffer view");
+            const auto& view=data.buffer_views[i];
+            require(view.size==count*sizeof(float) && view.buffer && view.buffer->data &&
+                view.offset<=view.buffer->size && view.size<=view.buffer->size-view.offset,"physique buffer range");
+            std::vector<float> result(count);
+            std::memcpy(result.data(),static_cast<const char*>(view.buffer->data)+view.offset,view.size);
+            for(float v:result)require(std::isfinite(v),"physique finite coefficient");
+            return result;
+        };
+        model.mesh_coefficients=read("meshCoefficients",samples*model.targets.size());
+        model.rig_coefficients=read("rigCoefficients",samples*model.rig_rank);
+        model.rig_basis=read("rigBasis",model.rig_rank*(joints*24+1));
+        for(float v:model.mesh_coefficients)require(std::abs(v)<=1.00001f,"physique coefficient range");
+        for(size_t i=0;i<model.targets.size();++i)require(model.mesh_coefficients[neutralRow*model.targets.size()+i]==0,"physique neutral mesh");
+        for(unsigned i=0;i<model.rig_rank;++i)require(model.rig_coefficients[neutralRow*model.rig_rank+i]==0,"physique neutral rig");
+        model.offsets.push_back(0);
+    }
     require(!wearable || (data.animations_count == 0 && !metadata.contains("bindings") &&
         !metadata.contains("socket")), "skinned item shares body pose; no clips/socket");
     require(!rigid || (data.skins_count == 0 && data.animations_count == 0 &&
@@ -491,13 +531,40 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
             require(nodes[i]->mesh->primitives_count > 0, "empty evaluation mesh");
             const auto count = nodes[i]->mesh->primitives[0].targets_count;
             require(count <= 256, "morph target limit");
-            require(!wearable || count == 0, "skinned item cannot own unbound morph weights");
+            require(!wearable || count == 0 || physique, "skinned item cannot own unbound morph weights");
             const auto *w = nodes[i]->weights ? nodes[i]->weights : nodes[i]->mesh->weights;
             const auto size = nodes[i]->weights ? nodes[i]->weights_count : nodes[i]->mesh->weights_count;
             require(!w || size == count, "morph defaults");
             n.weights.resize(count, 0); if (w) std::copy_n(w, count, n.weights.begin());
+            if(physique){
+                const auto names=nodes[i]->mesh->target_names;
+                require(count==output->physique.targets.size() && names && nodes[i]->mesh->target_names_count==count,"physique target count");
+                for(unsigned j=0;j<count;++j)
+                    require(names[j] && names[j]==output->physique.targets[j] && n.weights[j]==0,"physique name/default");
+            }
         }
         runtime.nodes.push_back(std::move(n));
+    }
+    if(physique) {
+        auto& model=output->physique;
+        const auto& schema=metadata.at("physique");
+        std::map<std::string,unsigned> named;
+        for(unsigned i=0;i<nodes.size();++i)if(nodes[i]->name)require(named.emplace(nodes[i]->name,i).second,"ambiguous physique node name");
+        model.root=named.at(schema.at("root").get<std::string>());
+        const auto& soles=schema.at("soles");require(soles.size()==2,"physique soles");
+        for(unsigned i=0;i<2;++i){
+            output->sole_nodes[i]=named.at(soles.at(i).at("joint").get<std::string>());
+            output->sole_points[i]=soles.at(i).at("point").get<std::array<float,3>>();
+            for(float v:output->sole_points[i])require(std::isfinite(v),"physique sole point");
+        }
+        std::set<unsigned> visited{model.root};
+        for(const auto& row:schema.at("joints")){
+            require(row.is_array() && row.size()==3,"physique joint record");
+            Physique::Joint j{named.at(row.at(0).get<std::string>()),named.at(row.at(1).get<std::string>()),row.at(2).get<int>()};
+            require(j.parent>=-1 && j.parent<int(schema.at("joints").size()) && visited.insert(j.node).second &&
+                visited.insert(j.carrier).second && runtime.nodes[j.node].parent==int(j.carrier),"physique joint binding");
+            model.joints.push_back(j);
+        }
     }
     auto pose = output->geometry.joints;
     std::set<std::string> clips;
@@ -543,6 +610,7 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
                 components = 4;
                 break;
             case cgltf_animation_path_type_weights:
+                require(!physique,"physique weights controlled by appearance");
                 require(channel.target_node->mesh &&
                             channel.target_node->mesh->primitives_count &&
                             sampler.output->type == cgltf_type_scalar,
@@ -1006,7 +1074,22 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
                 if (!restTan.empty()) for (unsigned c=0;c<4;++c) rest.tangent[c]=static_cast<std::int16_t>(std::lround(
                     (std::clamp)(restTan[v*4+c],-1.f,1.f)*32767));
                 output->rest_vertices.push_back(rest);
-                if (primitive.targets_count) {
+                if (physique) {
+                    for(unsigned t=0;t<primitive.targets_count;++t){
+                        PhysiqueDelta entry{};
+                        entry.target=static_cast<std::uint16_t>(t);
+                        bool nonzero=false;
+                        for(unsigned c=0;c<9;++c){
+                            const float value=morphDeltas[v][t][c];
+                            require(std::abs(value)<=65504.f,"physique delta overflow");
+                            entry.half[c]=DirectX::PackedVector::XMConvertFloatToHalf(value);
+                            nonzero|=(entry.half[c]&0x7fffu)!=0;
+                        }
+                        if(nonzero)output->physique.deltas.push_back(entry);
+                    }
+                    output->physique.offsets.push_back(static_cast<unsigned>(output->physique.deltas.size()));
+                    output->vertex_morphs.push_back(UINT32_MAX);
+                } else if (primitive.targets_count) {
                     output->vertex_morphs.push_back(static_cast<unsigned>(runtime.morphs.size()));
                     runtime.morphs.push_back({indices.at(&node), std::move(morphDeltas[v])});
                 } else output->vertex_morphs.push_back(UINT32_MAX);
@@ -1107,12 +1190,17 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
         }
         runtime.bindings.push_back(std::move(b));
     }
+    if(physique)for(auto& n:runtime.nodes)n.weights.clear();
     output->gpu_animation=pack(runtime,{});
     for(const auto& socket:contract.at("sockets")) {
         const auto name=socket.at("name").get<std::string>();
         const auto found=std::find_if(output->geometry.joints.begin(),output->geometry.joints.end(),
             [&](const skn::Joint& j){return j.name==name;});
         output->sockets.emplace(name,socket_chain(runtime,unsigned(found-output->geometry.joints.begin())));
+    }
+    if(physique){
+        output->physique_tree.initialize(output->rest_vertices);
+        for(auto node:output->sole_nodes)output->attachment_chain(output->geometry.joints[node].name);
     }
     output->node_envelopes=envelope(runtime);
     const auto& limits=output->node_envelopes;
@@ -1121,6 +1209,8 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
         double p[3]{std::abs(v.position[0]),std::abs(v.position[1]),std::abs(v.position[2])};
         if(output->vertex_morphs[i]!=UINT32_MAX){const auto& m=runtime.morphs[output->vertex_morphs[i]];
             for(unsigned t=0;t<m.deltas.size();++t)for(unsigned c=0;c<3;++c)p[c]+=std::abs(m.deltas[t][c])*limits[m.node].weights[t];}
+        if(physique)for(unsigned k=output->physique.offsets[i];k<output->physique.offsets[i+1];++k)
+            for(unsigned c=0;c<3;++c)p[c]+=std::abs(skn::half_float(output->physique.deltas[k].half[c]));
         const double meshRadius=std::sqrt(p[0]*p[0]+p[1]*p[1]+p[2]*p[2]);double bound=0;
         for(unsigned k=0;k<4;++k)if(v.weights[k]){const auto j=v.joints[k];const auto& inverse=output->geometry.joints[j].inverse;
             double linear=0,offset=0;for(unsigned r=0;r<3;++r){offset+=double(inverse[12+r])*inverse[12+r];

@@ -7,7 +7,10 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
     auto &current = prepared.gpu_pose;
     const auto base = current.binding->model->nodes.size();
     if (prepared.motion_asset != asset) prepared.gltf_playback.reset();
-    if (prepared.motion_asset != asset || prepared.motion_source_binding != current.binding)
+    prepare_physique(sample,*asset->gltf_asset);
+    const bool shapeChanged=prepared.motion_asset!=asset || !prepared.motion_binding ||
+        prepared.motion_binding->physique!=prepared.motion_physique;
+    if (shapeChanged || prepared.motion_source_binding != current.binding)
     {
         prepared.motion_source_binding = current.binding;
         auto model = std::make_shared<ModelCpuAsset>(*current.binding->model);
@@ -29,6 +32,7 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
         binding->model = std::move(model);
         binding->tracks.resize(binding->model->nodes.size(), nullptr);
         binding->gltf_animation = asset->gltf_asset->gpu_animation;
+        binding->physique=prepared.motion_physique;
         binding->gltf_node_base = static_cast<unsigned>(base);
         prepared.motion_binding = std::move(binding);
         prepared.motion_asset = asset;
@@ -77,6 +81,31 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
                     " clip=" + animation.clips[clip].name + " event=" + event.id + " name=" + event.name;
                 bridge_append_probe_event("gltf_visual_event", detail.c_str());
             });
+    if(prepared.motion_physique){
+        const std::array<float,5> key{float(playback.clip),float(playback.previous),playback.time,playback.previous_time,playback.blend};
+        if(!prepared.sole_valid || prepared.sole_playback!=key){
+            prepared.sole_offset={};
+            const auto& body=*asset->gltf_asset;
+            for(unsigned i=0;i<2;++i){
+                const auto& chain=body.attachment_chain(body.geometry.joints[body.sole_nodes[i]].name);
+                gltf::Affine neutral{1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1},shaped=neutral;
+                for(const auto& joint:chain){
+                    const auto local=gltf::socket_local(animation,joint,playback);
+                    neutral=gltf::multiply(neutral,local);
+                    shaped=gltf::multiply(shaped,prepared.motion_physique->apply(joint.node,local));
+                }
+                const auto& point=body.sole_points[i];
+                for(unsigned r=0;r<3;++r){
+                    float delta=neutral[r*4+3]-shaped[r*4+3];
+                    for(unsigned c=0;c<3;++c)delta+=(neutral[r*4+c]-shaped[r*4+c])*point[c];
+                    prepared.sole_offset[r]+=.5f*delta;
+                }
+            }
+            prepared.sole_playback=key;prepared.sole_valid=true;
+        }
+        current.physique_sole=prepared.sole_offset;
+        current.root_to_world=current.placed_with_sole(current.root_to_world);
+    }
     current.overrides.reset();
     if (sample.assembly->main_hero_visual && sample.secondary_physics) {
         auto& secondary=prepared.breast_physics;
@@ -86,8 +115,8 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
         }
         if(secondary) {
             const auto* ui=sample.preview_physics;
-            secondary->update(sample.secondary_clock,playback,ui?ui->simulation:current.root_to_world,
-                seek,unsigned(base),sample.secondary_frozen,ui);
+            secondary->update(sample.secondary_clock,playback,ui?current.placed_with_sole(ui->simulation):current.root_to_world,
+                seek,unsigned(base),sample.secondary_frozen,ui,prepared.motion_physique.get());
             current.overrides=secondary->overrides;
         }
     }

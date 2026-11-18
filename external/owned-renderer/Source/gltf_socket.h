@@ -1,5 +1,6 @@
 #pragma once
 #include "gltf_animation.h"
+#include "gltf_physique_pose.h"
 
 namespace owned::gltf {
 struct SocketJoint {
@@ -26,7 +27,7 @@ inline SocketChain socket_chain(const Animation& animation,unsigned node) {
     std::reverse(chain.begin(),chain.end());
     return chain;
 }
-inline Affine socket_local(const Animation& animation,const SocketJoint& joint,const Playback& playback) {
+inline Affine socket_local(const Animation& animation,const SocketJoint& joint,const Playback& playback,const PhysiquePose* shape=nullptr) {
     const auto local=[&](unsigned clip,float time) {
         const auto& bind=animation.nodes[joint.node];
         Node node;node.translation=bind.translation;node.rotation=bind.rotation;node.scale=bind.scale;
@@ -47,13 +48,14 @@ inline Affine socket_local(const Animation& animation,const SocketJoint& joint,c
             node.scale[c]=prior.scale[c]+playback.blend*(node.scale[c]-prior.scale[c]);
         }
     }
-    return trs(node);
+    auto matrix=trs(node);
+    return shape?shape->apply(joint.node,matrix):matrix;
 }
 inline Affine socket_pose(const Animation& animation,const SocketChain& chain,const Playback& playback,
-    const Affine& root={1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1}) {
+    const Affine& root={1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1},const PhysiquePose* shape=nullptr) {
     auto result=root;
     for(const auto& joint:chain) {
-        result=multiply(result,socket_local(animation,joint,playback));
+        result=multiply(result,socket_local(animation,joint,playback,shape));
     }
     return result;
 }

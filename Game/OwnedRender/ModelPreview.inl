@@ -55,6 +55,8 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
     // needs unit group admission and a completed, privately placed pose.
     sample.values.unit = registrySelected;
     sample.completed_pose = registrySelected;
+    if (registrySelected && sample.assembly->main_hero_visual)
+        sample.physique = static_cast<const CUnit*>(lpObject)->VisualPhysiqueInput();
     sample.object_pose.shape = sample.assembly->shape;
     if (++ownedPreviewSerial == 0) ++ownedPreviewSerial;
     OwnedRender::E1AnimationSelection selected;

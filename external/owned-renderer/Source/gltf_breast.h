@@ -112,7 +112,7 @@ struct BreastState {
         return true;
     }
     void update(double now,const Playback& pose,const Affine& root,bool reset,unsigned base,bool paused=false,
-                const RetainedVisualSample::PreviewPhysicsSpace* ui=nullptr) {
+                const RetainedVisualSample::PreviewPhysicsSpace* ui=nullptr,const PhysiquePose* shape=nullptr) {
         if(initialized&&!reset&&(!ui||display_mapping==ui->to_display)&&base==node_base&&now==clock&&paused==frozen&&root==placement&&pose.clip==playback.clip&&
            pose.previous==playback.previous&&pose.time==playback.time&&
            pose.previous_time==playback.previous_time&&pose.blend==playback.blend)return;
@@ -129,7 +129,7 @@ struct BreastState {
         for(unsigned i=0;i<joints.size();++i) {
             const auto parent=parent_slots[i];
             matrices[i]=multiply(parent==UINT32_MAX?basis:matrices[parent],
-                socket_local(*asset->animation,joints[i],pose));
+                socket_local(*asset->animation,joints[i],pose,shape));
         }
         const auto jointMatrix=[&](unsigned node){return multiply(root,matrices[slots[node]]);};
         SecondaryPoints points{},bases{};

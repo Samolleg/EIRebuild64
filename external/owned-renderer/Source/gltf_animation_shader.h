@@ -1,5 +1,20 @@
 #pragma once
 namespace owned::gltf {
+inline constexpr char kPhysiqueTable[] = R"(
+ uint shapeTable=(nodeBase&0x80000000u)?pose.asset+nativeAnimation.Load(pose.asset+32):0;
+ nodeBase&=0x7fffffffu;
+)";
+inline constexpr char kPhysiqueLocal[] = R"(
+   if(shapeTable!=0){
+    uint record=shapeTable+node*52,mode=nativeAnimation.Load(record+48);
+    if(mode!=0){
+     float4 a=asfloat(nativeAnimation.Load4(record)),b=asfloat(nativeAnimation.Load4(record+16)),c=asfloat(nativeAnimation.Load4(record+32));
+     float3x3 adjust=float3x3(a.xyz,b.xyz,c.xyz),lin=(float3x3)local;
+     float3x3 shaped=mode==1?mul(adjust,lin):mul(lin,adjust);
+     local=float4x4(float4(shaped[0],t.x+a.w),float4(shaped[1],t.y+b.w),float4(shaped[2],t.z+c.w),float4(0,0,0,1));
+    }
+   }
+)";
 inline constexpr char kAnimationShader[] = R"(
 // glTF quaternions are x,y,z,w. Legacy ANM helpers use w,x,y,z.
 float4 gltfNormalize(float4 q){return q*rsqrt(max(dot(q,q),1e-16));}
@@ -67,7 +82,7 @@ float4x4 gltfTrs(float3 t,float4 q,float3 s){
 void gltfPose(NativePose pose,uint lane){
  uint relative=nativeAnimation.Load(pose.asset+24);if(relative==0)return;
  uint base=pose.asset+relative,nodeBase=nativeAnimation.Load(pose.asset+28);
- uint nodes=nativeAnimation.Load(base),nodeTable=base+nativeAnimation.Load(base+8);
+@PHYSIQUE_TABLE@ uint nodes=nativeAnimation.Load(base),nodeTable=base+nativeAnimation.Load(base+8);
  uint levels=nativeAnimation.Load(base+24),ranges=base+nativeAnimation.Load(base+28),order=base+nativeAnimation.Load(base+32);
  const float4x4 yToZ=float4x4(1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1);
  for(uint level=0;level<levels;++level){
@@ -85,7 +100,7 @@ void gltfPose(NativePose pose,uint lane){
     s=lerp(gltfSample(base,pose.gltfPrevious,node,2,pose.gltfPreviousTime,restS),s,pose.gltfBlend);
    }
    float4x4 local=gltfTrs(t.xyz,r,s.xyz),world;
-   if(parent==0xffffffffu)world=mul(mul(pose.rootToWorld,yToZ),local);
+@PHYSIQUE_LOCAL@   if(parent==0xffffffffu)world=mul(mul(pose.rootToWorld,yToZ),local);
    else{NativePoseNode p=nativePoseOutput[pose.outputBase+nodeBase+parent];
     world=mul(float4x4(p.row0,p.row1,p.row2,float4(0,0,0,1)),local);}
    NativePoseNode result=(NativePoseNode)0;

@@ -42,7 +42,7 @@ bool produce_model_preview(const ModelPreviewInput& input, std::size_t count,
     result = {};
     NativeWorldGeometry::Pose* pose = nullptr;
     if (!retained_visual_gpu_pose(input.sample, pose) || !pose) return false;
-    pose->root_to_world = input.object_to_world;
+    pose->root_to_world = pose->placed_with_sole(input.object_to_world);
     // Registry models own their geometry and materials in every view. Do not
     // enumerate FIG visibility or bind a legacy equipment atlas for this path.
     const auto replacement = input.sample.prepared->motion_asset;
