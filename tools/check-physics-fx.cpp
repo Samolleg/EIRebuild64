@@ -4,6 +4,8 @@
 #include "../external/owned-renderer/Source/secondary_physics.h"
 #include <xmmintrin.h>
 #include <algorithm>
+#include <chrono>
+#include <thread>
 #include <cmath>
 #include <fstream>
 #include <iostream>

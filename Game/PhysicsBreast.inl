@@ -80,7 +80,10 @@ public:
                     const auto p=point(previous[i])+(point(targets[i])-point(previous[i]))*fraction;
                     anchors[i]->setKinematicTarget(PxTransform(p));
                 }
-                scene->simulate(float(step));scene->fetchResults(true);accumulated-=step;
+                scene->simulate(float(step));
+                PxU32 error=0;
+                if(!scene->fetchResults(true,&error)||error)throw std::runtime_error("Breast PhysX GPU step failed");
+                accumulated-=step;
                 if(sdk->errors.count)throw std::runtime_error(sdk->errors.Message());
                 for(unsigned i=0;i<2;++i) {
                     auto delta=bodies[i]->getGlobalPose().p-anchors[i]->getGlobalPose().p;
@@ -94,6 +97,70 @@ public:
         }catch(const std::exception& e){failure=e.what();offsets={};return {};}
     }
 };
+std::shared_ptr<owned::gltf::SecondaryPhysics> CreateCharacterPhysics() {
+    return std::make_shared<BreastPhysics>();
+}
+// Only immutable target samples cross the render/physics boundary. Under
+// backpressure interpolate to the newest target using the solver's game clock.
+class CharacterPhysicsWorker final : public owned::gltf::SecondaryPhysics {
+    using Points=owned::gltf::SecondaryPoints;
+    struct Input {double clock=0;Points targets{};std::uint64_t epoch=0;};
+    Input latest;
+    Points published{},visible{};
+    std::string failure,visibleFailure;
+    bool stopping=false,pending=false,submitted=false,initialized=false,visibleReady=false;
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::thread worker;
+    void run() noexcept {
+        try {
+            BreastPhysics solver;
+            std::uint64_t epoch=0;
+            for(;;) {
+                Input input;
+                {
+                    std::unique_lock lock(mutex);
+                    wake.wait(lock,[&]{return pending||stopping;});
+                    if(stopping)return;
+                    input=latest;pending=false;
+                }
+                auto result=solver.advance(input.clock,input.targets,input.epoch!=epoch);
+                epoch=input.epoch;
+                std::lock_guard lock(mutex);
+                failure=solver.error();
+                if(input.epoch==latest.epoch){published=result;initialized=failure.empty();}
+            }
+        } catch(const std::exception& error) {
+            std::lock_guard lock(mutex);failure=error.what();initialized=false;
+        }
+    }
+public:
+    CharacterPhysicsWorker():worker([this]{run();}){}
+    ~CharacterPhysicsWorker() override {
+        {std::lock_guard lock(mutex);stopping=true;}wake.notify_one();worker.join();
+    }
+    const std::string& error() const override{return visibleFailure;}
+    bool ready() const override{return visibleReady;}
+    Points advance(double clock,const Points& targets,bool reset) override {
+        std::lock_guard lock(mutex);
+        visibleFailure=failure;
+        if(!failure.empty())return {};
+        if(submitted && !reset && clock==latest.clock)return visible;
+        reset|=!submitted||clock<latest.clock||clock-latest.clock>.25;
+        for(unsigned i=0;i<2;++i){
+            float distance=0;
+            for(unsigned k=0;k<3;++k){const float delta=targets[i][k]-latest.targets[i][k];distance+=delta*delta;}
+            reset|=distance>.25f;
+        }
+        if(reset){++latest.epoch;published={};initialized=false;}
+        latest.clock=clock;latest.targets=targets;submitted=pending=true;
+        visible=published;visibleReady=initialized;
+        wake.notify_one();
+        return visible;
+    }
+};
 void InstallCharacterPhysics() {
-    owned::gltf::secondary_factory=[]()->std::shared_ptr<owned::gltf::SecondaryPhysics>{return std::make_shared<BreastPhysics>();};
+    owned::gltf::secondary_factory=[]()->std::shared_ptr<owned::gltf::SecondaryPhysics>{
+        return std::make_shared<CharacterPhysicsWorker>();
+    };
 }

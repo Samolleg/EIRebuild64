@@ -32,11 +32,13 @@ inline bool PlaneHit(const Triangle& t,Vec point,GroundHit& out){
     const float len=std::sqrt(n.x*n.x+n.y*n.y+n.z*n.z);
     out.point={point.x,point.y,z};out.normal={n.x/len,n.y/len,n.z/len};out.found=true;return true;
 }
-inline GroundHit ExtractTerrain(const owned::TerrainCpuAsset& terrain,Vec center,Vec query,std::vector<Triangle>& triangles){
+inline GroundHit ExtractTerrain(const owned::TerrainCpuAsset& terrain,Vec center,Vec query,std::vector<Triangle>& triangles,bool collectPatch=true){
     GroundHit hit;triangles.clear();
+    const auto radius=collectPatch?PatchRadius:.001f;
+    if(!collectPatch)center=query;
     for(const auto& sector:terrain.sectors){
-        if(sector.bounds.maximum[0]<center.x-PatchRadius||sector.bounds.minimum[0]>center.x+PatchRadius||
-           sector.bounds.maximum[1]<center.y-PatchRadius||sector.bounds.minimum[1]>center.y+PatchRadius)continue;
+        if(sector.bounds.maximum[0]<center.x-radius||sector.bounds.minimum[0]>center.x+radius||
+           sector.bounds.maximum[1]<center.y-radius||sector.bounds.minimum[1]>center.y+radius)continue;
         for(const auto& tile:sector.tiles){
             if(tile.transparent||tile.object_id!=UINT16_MAX||tile.vertex_indices[0]>=1089||tile.tile_index>=terrain.tile_types.size())continue;
             const unsigned material=terrain.tile_types[tile.tile_index];
@@ -46,9 +48,10 @@ inline GroundHit ExtractTerrain(const owned::TerrainCpuAsset& terrain,Vec center
                 for(unsigned j=0;j<3;++j){const auto index=tile.vertex_indices[TerrainIndices[face+j]];
                     if(index>=sector.vertices.size()){valid=false;break;}const auto& p=sector.vertices[index];*vertices[j]={p.x,p.y,p.z};}
                 if(!valid)continue;
-                if((std::max)({t.a.x,t.b.x,t.c.x})<center.x-PatchRadius||(std::min)({t.a.x,t.b.x,t.c.x})>center.x+PatchRadius||
-                   (std::max)({t.a.y,t.b.y,t.c.y})<center.y-PatchRadius||(std::min)({t.a.y,t.b.y,t.c.y})>center.y+PatchRadius)continue;
+                if((std::max)({t.a.x,t.b.x,t.c.x})<center.x-radius||(std::min)({t.a.x,t.b.x,t.c.x})>center.x+radius||
+                   (std::max)({t.a.y,t.b.y,t.c.y})<center.y-radius||(std::min)({t.a.y,t.b.y,t.c.y})>center.y+radius)continue;
                 if(PlaneHit(t,query,hit))hit.material=material;
+                if(!collectPatch)continue;
                 triangles.push_back(t);
                 if(triangles.size()>16384){triangles.clear();return {};}
             }

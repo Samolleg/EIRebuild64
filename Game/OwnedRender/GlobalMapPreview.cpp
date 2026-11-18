@@ -77,6 +77,10 @@ bool Bind(CI3DScreenGlobalMap* screen, owned::Renderer& renderer) {
 }
 void Precache(CRenderer* renderer) noexcept {
     if (!renderer || !renderer->GetD3D()) { Failure("World map preview: loading renderer unavailable"); return; }
+    const auto* zone = theMap.GetZoneByName(IWorldClient.GetCurrentZoneName());
+    if (!zone || zone->szAllodName.IsEmpty()) return;
+    const auto* allod = theMap.GetAllodByName(zone->szAllodName);
+    if (!allod) return;
     auto* dx = renderer->GetD3D();
     const auto lease = dx->GetOwnedRenderer().LockFrame();
     published = false; binding = 0;
@@ -92,9 +96,9 @@ void Precache(CRenderer* renderer) noexcept {
         std::vector<owned::WorldMapPreviewSection> sections;
         std::string failure;
         try {
-            // Retail prepares every UI-reachable allod. Screen activation binds its own order.
-            for (int i = 0; i < theMap.GetZoneNum(); ++i) {
-                const auto& zone = *theMap.GetZone(i);
+            // Match the native global-map screen: only this allod can be opened here.
+            for (int i = 0; i < allod->zones.GetSize(); ++i) {
+                const auto& zone = *theMap.GetZone(allod->zones[i]);
                 if (zone.eType == GM_REALZONE && !zone.szFigureName.IsEmpty())
                     sections.push_back(Section(zone));
             }
@@ -105,7 +109,6 @@ void Precache(CRenderer* renderer) noexcept {
         elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
         return S_OK;
     });
-    const auto* zone = theMap.GetZoneByName(IWorldClient.GetCurrentZoneName());
     GameJournal::Event("RENDER", "world_map_preview_precache",
         "generation=%llu allod=%s enabled=%u sections=%u ready=%u failed=%u reused=%u retained_mb=%.3f source_peak_mb=%.3f precache_ms=%.3f hr=%08lx",
         static_cast<unsigned long long>(generation), zone ? LPCSTR(zone->szAllodName) : "",

@@ -9,6 +9,9 @@ struct BreastState {
     std::array<unsigned,2> targets{};
     struct Affected {unsigned node,side;};
     std::vector<Affected> affected;
+    std::vector<SocketJoint> joints;
+    std::vector<unsigned> parent_slots, slots;
+    std::vector<Affine> matrices;
     double clock=-1, physics_clock=0;
     bool frozen=false;
     unsigned node_base=UINT32_MAX;
@@ -36,6 +39,33 @@ struct BreastState {
                 if(root!=roots.end()) {affected.push_back({n,unsigned(root-roots.begin())/3});break;}
             }
         }
+        const auto& animation=*body->animation;
+        slots.assign(animation.nodes.size(),UINT32_MAX);
+        for(const auto entry:affected) {
+            std::vector<unsigned> path;
+            int n=int(entry.node);
+            while(n>=0 && slots[n]==UINT32_MAX) {
+                path.push_back(unsigned(n));n=animation.nodes[n].parent;
+                animation_require(path.size()<=slots.size(),"secondary hierarchy cycle");
+            }
+            for(auto it=path.rbegin();it!=path.rend();++it) {
+                const int parent=animation.nodes[*it].parent;
+                parent_slots.push_back(parent<0?UINT32_MAX:slots[parent]);
+                slots[*it]=unsigned(joints.size());
+                SocketJoint joint; joint.node=*it;
+                joint.tracks.resize(animation.clips.size(),{UINT32_MAX,UINT32_MAX,UINT32_MAX});
+                joints.push_back(std::move(joint));
+            }
+        }
+        for(unsigned c=0;c<animation.clips.size();++c) {
+            const auto& tracks=animation.clips[c].tracks;
+            for(unsigned t=0;t<tracks.size();++t) {
+                const auto& track=tracks[t];
+                if(track.path==Path::weights || slots.at(track.node)==UINT32_MAX)continue;
+                joints[slots[track.node]].tracks[c][unsigned(track.path)]=t;
+            }
+        }
+        matrices.resize(joints.size());
         return true;
     }
     void update(double now,const Playback& pose,const Affine& root,bool reset,unsigned base,bool paused=false) {
@@ -50,10 +80,15 @@ struct BreastState {
         clock=now;frozen=paused;node_base=base;placement=root;playback=pose;initialized=true;
         if(!physics&&secondary_factory)physics=secondary_factory();
         if(!physics)return;
+        const Affine basis={1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1};
+        for(unsigned i=0;i<joints.size();++i) {
+            const auto parent=parent_slots[i];
+            matrices[i]=multiply(parent==UINT32_MAX?basis:matrices[parent],
+                socket_local(*asset->animation,joints[i],pose));
+        }
         SecondaryPoints points{};
         for(unsigned i=0;i<2;++i) {
-            const auto matrix=multiply(root,socket_pose(*asset->animation,
-                asset->attachment_chain(asset->geometry.joints[targets[i]].name),pose));
+            const auto matrix=multiply(root,matrices[slots[targets[i]]]);
             points[i]={matrix[3],matrix[7],matrix[11]};
         }
         const auto offsets=physics->advance(physics_clock,points,reset);
@@ -65,8 +100,7 @@ struct BreastState {
         auto result=std::make_shared<std::vector<NativeWorldGeometry::Pose::Override>>();
         result->reserve(affected.size());
         for(const auto entry:affected) {
-            auto matrix=multiply(root,socket_pose(*asset->animation,
-                asset->attachment_chain(asset->geometry.joints[entry.node].name),pose));
+            auto matrix=multiply(root,matrices[slots[entry.node]]);
             NativeWorldGeometry::Pose::Override out{};out.node=base+entry.node;
             for(unsigned r=0;r<3;++r) {
                 matrix[r*4+3]+=offsets[entry.side][r];
@@ -75,7 +109,7 @@ struct BreastState {
             result->push_back(out);
         }
         overrides=std::move(result);
-        if(!reported){bridge_append_probe_event("nala_physx_ready","backend=PhysX-5.6.1 dynamics=GPU joints=D6 limit_m=0.025");reported=true;}
+        if(!reported&&physics->ready()){bridge_append_probe_event("nala_physx_ready","backend=PhysX-5.6.1 dynamics=GPU joints=D6 limit_m=0.025");reported=true;}
     }
 };
 }

@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <thread>
 #include <cmath>
 #include <filesystem>
 #include <map>
@@ -61,8 +63,25 @@ struct Runtime {
     }
 };
 std::shared_ptr<Runtime> runtime(){
-    static std::weak_ptr<Runtime> current;
-    auto value=current.lock();if(!value){value=std::make_shared<Runtime>();value->Initialize();current=value;}return value;
+    // One process-wide SDK. Shared leases serialize the final teardown with
+    // acquisition on a different physics worker.
+    struct Pool {std::mutex lock;std::unique_ptr<Runtime> sdk;unsigned users=0;};
+    static const auto pool=std::make_shared<Pool>();
+    struct Lease {
+        std::shared_ptr<Pool> owner;
+        explicit Lease(std::shared_ptr<Pool> value):owner(std::move(value)) {
+            auto& pool=*owner;
+            std::lock_guard guard(pool.lock);
+            if(!pool.sdk) {
+                auto value=std::make_unique<Runtime>();value->Initialize();
+                pool.sdk=std::move(value);
+            }
+            ++pool.users;
+        }
+        ~Lease(){std::lock_guard guard(owner->lock);if(!--owner->users)owner->sdk.reset();}
+    };
+    auto lease=std::make_shared<Lease>(pool);
+    return std::shared_ptr<Runtime>(lease,pool->sdk.get());
 }
 PxVec3 px(Vec p){return {p.x,p.y,p.z};}
 Vec vec(const PxVec3& p){return {p.x,p.y,p.z};}
@@ -191,7 +210,10 @@ unsigned World::Burst(std::uint64_t key,Vec point,Vec normal,float power,std::ui
 void World::Tick(bool paused){
     if(paused||!impl||!failure.empty())return;auto& w=*impl;
     const auto begin=std::chrono::steady_clock::now();for(auto& b:w.stones)b.poses[0]=b.poses[4];
-    if(!w.stones.empty())for(unsigned step=1;step<=4;++step){
+    const bool awake=std::any_of(w.stones.begin(),w.stones.end(),
+        [](const auto& stone){return !stone.actor->isSleeping();});
+    if(!awake)for(auto& stone:w.stones)stone.poses.fill(stone.poses[4]);
+    if(awake)for(unsigned step=1;step<=4;++step){
         w.scene->simulate(StepSeconds);PxU32 error=0;bool complete=w.scene->fetchResults(true,&error);
         if(!complete||error||w.sdk->errors.count){failure="PhysX GPU step failed: "+w.sdk->errors.Message();++w.stats.errors;w.stats.gpuDynamics=w.stats.gpuBroadPhase=false;w.stones.clear();w.patches.clear();return;}
         for(auto& b:w.stones)b.poses[step]=pose(*b.actor);
@@ -205,10 +227,18 @@ void World::Tick(bool paused){
     }
     w.retireUnused();w.stats.stepMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();
 }
-std::vector<Stone> World::Sample(float fraction) const{
-    std::vector<Stone> result;if(!impl||!failure.empty())return result;
+StoneTracks World::Snapshot() const {
+    StoneTracks result;
+    if(!impl || !failure.empty())return result;
+    result.reserve(impl->stones.size());
+    for(const auto& b:impl->stones)result.push_back({b.poses,b.radius,b.age,b.life,b.shape,b.color});
+    return result;
+}
+std::vector<Stone> World::Sample(float fraction) const { return SampleTracks(Snapshot(),fraction); }
+std::vector<Stone> SampleTracks(const StoneTracks& tracks,float fraction) {
+    std::vector<Stone> result;
     fraction=std::clamp(fraction,0.f,1.f)*4;const unsigned at=std::min(unsigned(fraction),3u);const float t=fraction-at;
-    result.reserve(impl->stones.size());for(const auto& b:impl->stones){
+    result.reserve(tracks.size());for(const auto& b:tracks){
         const auto& a=b.poses[at];const auto& z=b.poses[at+1];Stone s;
         s.pose.position={a.position.x+(z.position.x-a.position.x)*t,a.position.y+(z.position.y-a.position.y)*t,a.position.z+(z.position.z-a.position.z)*t};
         s.pose.rotation=interpolate(a.rotation,z.rotation,t);s.radius=b.radius;s.shape=b.shape;s.color=b.color;

@@ -23,6 +23,14 @@ struct Stats {
 // The same six vertices describe each convex physics shape and render mesh.
 std::array<Vec,6> StoneVertices(unsigned shape,float radius);
 void InstallCharacterPhysics();
+struct StoneTrack {
+    std::array<Pose,5> poses;
+    float radius, age, life;
+    unsigned shape;
+    std::uint32_t color;
+};
+using StoneTracks=std::vector<StoneTrack>;
+std::vector<Stone> SampleTracks(const StoneTracks&,float fraction);
 class World {
     struct Impl;
     std::unique_ptr<Impl> impl;
@@ -41,6 +49,7 @@ public:
     unsigned Burst(std::uint64_t key,Vec point,Vec normal,float power,std::uint32_t seed);
     void Tick(bool paused);
     std::vector<Stone> Sample(float fraction) const;
+    StoneTracks Snapshot() const;
     Stats Statistics() const;
 };
 // Reject initial sync, stale events and duplicates without consuming combat RNG.

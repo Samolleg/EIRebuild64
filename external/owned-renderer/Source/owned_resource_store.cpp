@@ -14,6 +14,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <cstdio>
 #include <filesystem>
@@ -241,7 +242,7 @@ public:
             counters_->archive_owner_count.fetch_sub(1, std::memory_order_relaxed);
     }
 
-    bool open(ResourceFailure& failure) {
+    bool open(ResourceFailure& failure, bool optional_override = false) {
         handle_ = CreateFileW(path_.c_str(), GENERIC_READ,
                               FILE_SHARE_READ | FILE_SHARE_DELETE,
                               nullptr, OPEN_EXISTING,
@@ -249,6 +250,10 @@ public:
                               nullptr);
         if (handle_ == INVALID_HANDLE_VALUE) {
             const auto error = GetLastError();
+            if (optional_override && (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)) {
+                failure.code = ResourceFailureCode::not_found;
+                return false;
+            }
             fail(failure, error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND
                     ? ResourceFailureCode::not_found : ResourceFailureCode::file_open,
                  "resource container open failed path=\"" + std::filesystem::path(path_).u8string() +
@@ -551,6 +556,25 @@ struct ResourceStore::Impl {
     std::map<std::wstring, ArchiveMount> selected_files;
     mutable std::mutex cache_lock;
     mutable std::unordered_map<std::string, ResourceLocation> cache;
+    // The archive/loose selection belongs to this open mount generation.
+    mutable std::unordered_set<std::string> missing;
+    std::vector<HANDLE> directory_watches;
+    bool track_missing = false;
+
+    bool refresh_missing() {
+        if (!track_missing) return false;
+        for (const auto watch : directory_watches) {
+            const auto state = WaitForSingleObject(watch, 0);
+            if (state == WAIT_TIMEOUT) continue;
+            missing.clear();
+            if (state != WAIT_OBJECT_0 || !FindNextChangeNotification(watch)) {
+                track_missing = false;
+                return false;
+            }
+        }
+        return true;
+    }
+    ~Impl() {for (const auto watch : directory_watches) FindCloseChangeNotification(watch);}
     struct MemoryCopy {
         ResourceIdentity identity;
         std::weak_ptr<const std::vector<std::uint8_t>> bytes;
@@ -714,6 +738,14 @@ bool ResourceStore::open(const ResourceStoreConfig& config,
         return false;
     }
     impl_->loose_roots = config.loose_roots;
+    impl_->directory_watches.reserve(config.loose_roots.size());
+    impl_->track_missing = true;
+    for (const auto& root : config.loose_roots) {
+        const auto watch = FindFirstChangeNotificationW(root.c_str(), TRUE,
+            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME);
+        if (watch == INVALID_HANDLE_VALUE) {impl_->track_missing = false; break;}
+        impl_->directory_watches.push_back(watch);
+    }
     for (std::size_t index = 0; index < config.archives.size(); ++index) {
         auto file = std::make_shared<FileOwner>(ei::pak::ResolveArchivePath(config.archives[index]).wstring(),
                                                 impl_->counters, true);
@@ -799,6 +831,10 @@ void ResourceStore::close() noexcept {
     if (!impl_) return;
     std::lock_guard<std::mutex> cache_guard(impl_->cache_lock);
     impl_->cache.clear();
+    impl_->missing.clear();
+    for (const auto watch : impl_->directory_watches) FindCloseChangeNotification(watch);
+    impl_->directory_watches.clear();
+    impl_->track_missing = false;
     impl_->memory_copies.clear();
     impl_->archives.clear();
     impl_->selected_files.clear();
@@ -825,6 +861,10 @@ bool ResourceStore::locate(const std::string& resource_name,
             return true;
         }
     }
+    if (impl_->missing.count(canonical) && impl_->refresh_missing() && impl_->missing.count(canonical)) {
+        fail(failure, ResourceFailureCode::not_found, "resource identity was not present in the configured mount set");
+        return false;
+    }
     const std::wstring relative(canonical.begin(), canonical.end());
     for (std::size_t index = 0; index < impl_->loose_roots.size(); ++index) {
         std::wstring path = impl_->loose_roots[index];
@@ -833,7 +873,7 @@ bool ResourceStore::locate(const std::string& resource_name,
         path += relative;
         auto file = std::make_shared<FileOwner>(path, impl_->counters, false);
         ResourceFailure open_failure{};
-        if (!file->open(open_failure)) {
+        if (!file->open(open_failure, true)) {
             if (open_failure.code == ResourceFailureCode::not_found) continue;
             failure = std::move(open_failure);
             return false; // An unavailable override cannot select a lower mount.
@@ -909,6 +949,7 @@ bool ResourceStore::locate(const std::string& resource_name,
         failure = {};
         return true;
     }
+    if (impl_->track_missing) impl_->missing.insert(canonical);
     fail(failure, ResourceFailureCode::not_found,
          "resource identity was not present in the configured mount set");
     return false;

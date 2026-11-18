@@ -84,6 +84,10 @@ inline std::shared_ptr<const RuntimeAsset> select(const std::string &name,
   static std::map<std::string, std::weak_ptr<const RuntimeAsset>> cache;
   std::lock_guard<std::mutex> guard(mutex);
   present = false;
+  // Nala and the ordinary female humanoid use the GLB registry or native FIG.
+  // Skip both model and hero SKN variants before consulting any mount.
+  if (!_stricmp(name.c_str(), "unhufe") || !_stricmp(name.c_str(), "unhufe.hero"))
+    return {};
   ResourceStoreConfig config;
   std::uint64_t current = 0;
   ResourceFailure failure;
