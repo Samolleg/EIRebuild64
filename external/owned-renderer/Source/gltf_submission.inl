@@ -78,7 +78,7 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
                 bridge_append_probe_event("gltf_visual_event", detail.c_str());
             });
     current.overrides.reset();
-    if (sample.assembly->main_hero_visual && sample.secondary_physics && !neutral) {
+    if (sample.assembly->main_hero_visual && sample.secondary_physics) {
         auto& secondary=prepared.breast_physics;
         if(!secondary || secondary->asset!=asset->gltf_asset) {
             secondary=std::make_shared<gltf::BreastState>();

@@ -5,12 +5,10 @@ hero when the selected GLB contains the existing `PHYSICS_Pecho.L/R` branches
 (including `.001` and `.002`). No model, weights, animation clips, save format or
 combat state are changed. Private model previews retain the authored animation.
 
-Two 0.35 kg dynamic bodies follow kinematic animated targets through D6 joints.
-Each translation drive uses stiffness 160 N/m and damping 6 Ns/m; rotation is
-locked and the combined translation limit is 0.025 m. Rest gravity is zero:
-the authored shape already supplies the resting appearance. This is bounded
-secondary motion, not a soft-body tissue or cloth simulation. There are no
-body/arm/armor collision shapes and no material-specific armor stiffness.
+Two 0.45 kg dynamic bodies track the animated outer breast points in world
+space under gravity (9.81 m/s²). The 55 N/m springs and 3.6 Ns/m damping
+allow settling and inertial lag. The 8.5 cm travel budget includes the static
+load. The spring preload sets the static drop to 4.1 cm. Initialization and teleports seed the gravity-loaded equilibrium.
 
 The actor owns a separate GPU scene sharing the existing PhysX foundation,
 CUDA context and dispatcher with debris. Fixed 1/120 s steps interpolate the
@@ -21,10 +19,11 @@ of the retained actor releases its scene. Missing CUDA/runtime errors emit
 `nala_physx_unavailable` and leave the ordinary animated pose; no CPU simulator
 is substituted. Successful initialization emits `nala_physx_ready`.
 
-`gltf_breast.h` samples only the required ancestor chains. It offsets the six
-existing physics roots and their descendants, retaining all animated linear
-transforms. In the installed Nala export these are 24 nodes, including affine
-helper nodes; the base and tracker branches remain unchanged. The sparse
+`gltf_breast.h` samples only the required ancestor chains. It rotates each side around its animated
+PeChoBase attachment towards the displaced outer point. Axial compression and
+extension are limited to 15%. The same affine bend applies to the three branches
+and their descendants. Skin weights blend the anchored torso into the moving
+surface. Base and tracker bones keep the authored pose. The sparse
 snapshot is keyed by animation, placement, game time and the legacy palette
 base, so changing equipment on pause cannot reuse obsolete joint indices.
 

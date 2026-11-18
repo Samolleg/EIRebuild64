@@ -5,7 +5,7 @@
 
 namespace owned::gltf {
 using SecondaryPoints = std::array<std::array<float,3>,2>;
-inline constexpr float secondary_limit = .025f;
+inline constexpr float secondary_limit = .085f;
 // Host-owned PhysX implementation. No renderer device or game-object pointers.
 // A retained actor owns one instance; destroying it releases its physics scene.
 struct SecondaryPhysics {
