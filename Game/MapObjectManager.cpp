@@ -278,34 +278,29 @@ bool CMapObjectManager::GetSelectedAnimationDatabase(const CString& maskName,
     };
     const std::string mask(static_cast<LPCSTR>(maskName));
     const auto known = selectedDatabases.find(mask);
-    LPBYTE data = nullptr;
-    if (known != selectedDatabases.end() && belongs(known->second)) {
-        data = known->second.data;
-        size = known->second.size;
-    } else {
-        data = GetFile(maskName + ".adb", &size);
-        if (!data || size < sizeof(SADBFileHeader)) return false;
-    }
+    const bool cached = known != selectedDatabases.end() && belongs(known->second);
+    LPBYTE data = cached ? known->second.data : GetFile(maskName + ".adb", &size);
+    if (!data) return false;
+    if (cached) size = known->second.size;
 
-    const auto* header = reinterpret_cast<const SADBFileHeader*>(data);
-    if (header->dwSignature != ADB_SIGNATURE) return false;
-    const unsigned long long count = header->dwCount;
-    const unsigned long long required = sizeof(SADBFileHeader) + count * sizeof(SADEntry);
-    if (required > size) return false;
-
-    const auto begin = reinterpret_cast<std::uintptr_t>(data + sizeof(SADBFileHeader));
-    const auto selectedAddress = reinterpret_cast<std::uintptr_t>(selected);
-    const auto entriesBytes = count * sizeof(SADEntry);
-    if (selectedAddress < begin || selectedAddress - begin >= entriesBytes ||
-        (selectedAddress - begin) % sizeof(SADEntry) != 0) return false;
-    const auto index = static_cast<DWORD>((selectedAddress - begin) / sizeof(SADEntry));
-    if (selected->dwEntryIndex != index) return false;
-
-    const auto* entry = reinterpret_cast<const SADEntry*>(data + sizeof(SADBFileHeader) +
-        static_cast<unsigned long long>(index) * sizeof(SADEntry));
-    if (entry != selected) return false;
-    if (known == selectedDatabases.end() || known->second.data != data)
-        selectedDatabases[mask] = {data, size};
+    const auto matches = [&]() noexcept {
+        if (size < sizeof(SADBFileHeader)) return false;
+        const auto* header = reinterpret_cast<const SADBFileHeader*>(data);
+        const auto entriesBytes = static_cast<std::uint64_t>(header->dwCount) * sizeof(SADEntry);
+        if (header->dwSignature != ADB_SIGNATURE || entriesBytes > size - sizeof(SADBFileHeader))
+            return false;
+        const auto begin = reinterpret_cast<std::uintptr_t>(data + sizeof(SADBFileHeader));
+        const auto address = reinterpret_cast<std::uintptr_t>(selected);
+        if (address < begin || address - begin >= entriesBytes) return false;
+        const auto offset = address - begin;
+        return offset % sizeof(SADEntry) == 0 && selected->dwEntryIndex == offset / sizeof(SADEntry);
+    };
+    const bool valid = matches();
+    // The controller already holds the selected entry. Balance the extra
+    // lookup reference; the span is borrowed until a manager release.
+    if (!cached) ReleaseFileReference(data);
+    if (!valid) return false;
+    if (!cached) selectedDatabases[mask] = {data, size};
     bytes = data;
     return true;
 }

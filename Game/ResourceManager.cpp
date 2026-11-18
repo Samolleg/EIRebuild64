@@ -118,12 +118,15 @@ LPBYTE CResourceManager::GetFile(LPCSTR pszFileName, LPDWORD pnDataSize)
 /////////////////////////////////////////////////////////////////////////////////////
 bool CResourceManager::CloseFile(LPBYTE pFileImage)
 {
+    if (!ReleaseFileReference(pFileImage)) return false;
+    ++resourceGeneration;
+    return true;
+}
+bool CResourceManager::ReleaseFileReference(LPBYTE pFileImage)
+{
     for (auto pos = resources.begin(); pos != resources.end(); ++pos)
     {
-        if (pos->second->CloseFile(pFileImage) == true) {
-            ++resourceGeneration;
-            return true;
-        }
+        if (pos->second->CloseFile(pFileImage)) return true;
     }
     return false;
 }

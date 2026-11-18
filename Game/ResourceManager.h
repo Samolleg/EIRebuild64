@@ -25,6 +25,7 @@ protected:
     CResourceList resources;
     // Borrowed member spans are valid only for this generation of the manager.
     std::uint64_t resourceGeneration = 1;
+    bool ReleaseFileReference(LPBYTE data);
 
 public:
     CResourceManager();
