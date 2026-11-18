@@ -1,6 +1,7 @@
 """Content identity for the Release x64 kit built by build-task.ps1."""
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -8,12 +9,65 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import xml.etree.ElementTree as ET
 
 
-def sha(path):
-    with path.open('rb') as stream:
-        return hashlib.file_digest(stream, 'sha256').hexdigest()
+class InputHashes:
+    """Disposable snapshot. Concurrent writers can lose hits, never half-publish a snapshot."""
+    def __init__(self, project, cache):
+        self.path = cache / 'kit-input-sha-v1.cache'
+        self.previous = {}
+        self.current = {}
+        self.hashed = self.reused = self.bytes_read = 0
+        spec = importlib.util.spec_from_file_location('pz_deploy_preview', project / 'tools/pz_deploy_preview.py')
+        self.io = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.io)
+        try:
+            with self.path.open('rb') as stream:
+                checksum = stream.readline(66).strip()
+                body = stream.read()
+            if hashlib.sha256(body).hexdigest().encode() == checksum:
+                parsed = json.loads(body)
+                if isinstance(parsed, dict):
+                    self.previous = parsed
+        except (OSError, ValueError):
+            pass
+
+    def sha(self, path):
+        key = str(path)
+        with self.io.open_snapshot(path) as stream:
+            token = self.io.file_token(stream)
+            cached = self.current.get(key) or self.previous.get(key)
+            if token and isinstance(cached, list) and len(cached) == 2 and cached[0] == token and re.fullmatch('[a-f0-9]{64}', str(cached[1])):
+                self.current[key] = cached
+                self.reused += 1
+                return cached[1]
+            value = hashlib.file_digest(stream, 'sha256').hexdigest()
+            self.hashed += 1
+            self.bytes_read += os.fstat(stream.fileno()).st_size
+            if token:
+                if self.io.file_token(stream) != token:
+                    raise ValueError(f'Input changed while hashing: {path}')
+                self.current[key] = [token, value]
+            return value
+
+    def save(self):
+        temp = None
+        try:
+            body = json.dumps(self.current, separators=(',', ':')).encode()
+            with tempfile.NamedTemporaryFile(dir=self.path.parent, prefix='kit-input-sha-', suffix='.tmp', delete=False) as stream:
+                temp = Path(stream.name)
+                stream.write(hashlib.sha256(body).hexdigest().encode() + b'\n' + body)
+            temp.replace(self.path)
+        except OSError:
+            pass  # A read-only or busy cache cannot invalidate a verified fingerprint.
+        finally:
+            if temp is not None:
+                try:
+                    temp.unlink(missing_ok=True)
+                except OSError:
+                    pass
 
 
 def git(repo, *args):
@@ -22,6 +76,8 @@ def git(repo, *args):
 
 def fingerprint(args):
     repo, project = args.repo, args.project
+    hashes = InputHashes(project, args.cache)
+    sha = hashes.sha
     names = git(repo, '-c', 'core.quotepath=false', 'ls-files', '--cached', '--others',
                 '--exclude-standard', '-z').decode().split('\0')
     digest = hashlib.sha256()
@@ -135,6 +191,8 @@ def fingerprint(args):
             for ext, key in (('.lib', 'sha256'), ('.pdb', 'pdb_sha256')):
                 if sha(folder / (name + ext)) != row[key]:
                     raise ValueError('shader reuse library changed')
+    hashes.save()
+    print(f'Build inputs: {hashes.reused} reused, {hashes.hashed} hashed ({hashes.bytes_read} bytes).', file=sys.stderr)
     return digest.hexdigest()
 
 
