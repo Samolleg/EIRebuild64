@@ -157,6 +157,40 @@ int wmain(int argc,wchar_t** argv)try {
            present[0].textures.size()==1 && present[0].textures[0].resource=="models/items/textures/wolf.png",
            "conditional common binding selected wrong texture");
     }
+    {
+     auto conditional=shared;
+     auto& entries=conditional["items"]["vlfh"]["defaults"]["armor_0"];
+     const Json condition={{"slot","armor_1"},{"shape","*"},{"hasSelection",true}};
+     auto armorHair=entries[0];armorHair["resource"]="models/items/braid-armor.glb";
+     armorHair["requiresEquipment"]=condition;
+     entries[0]["unlessEquipment"]=condition;entries.push_back(armorHair);
+     const Json plate={{"profile","human.v1"},{"resource","models/items/plate.glb"},{"binding","skin"}};
+     conditional["items"]["plate"]["defaults"]["armor_1"]=Json::array({plate});
+     conditional["items"]["plate"]["materials"]["common"]["armor_1"]={{"textures",Json::array()}};
+     conditional["items"]["plate"]["materials"]["hidden"]["armor_1"]=Json::array();
+     conditional["items"]["plate"]["materials"]["explicit"]["armor_1"]=Json::array({plate});
+     owned::VisualEquipmentItem armor;armor.kind=owned::VisualEquipmentItem::Kind::armor;
+     armor.slot="armor_1";armor.shape="plate";armor.material="common";
+     hood.material="wolf hide";
+     const auto selectedHair=[&](const owned::VisualEquipmentItem& value) {
+       const std::vector<owned::VisualEquipmentItem> outfit{hood,value};
+       return item_bindings(conditional,hood,&outfit).at(0).resource;
+     };
+     check(selectedHair(armor)=="models/items/braid-armor.glb","common armor selection");
+     armor.material="explicit";check(selectedHair(armor)=="models/items/braid-armor.glb","explicit armor selection");
+     armor.material="hidden";check(selectedHair(armor)=="models/items/vlfh.glb","empty armor selection");
+     armor.material="unknown";check(selectedHair(armor)=="models/items/vlfh.glb","unknown armor material");
+     armor.shape="unregistered";check(selectedHair(armor)=="models/items/vlfh.glb","unregistered armor");
+     armor.shape="plate";armor.material="common";armor.slot="armor_2";
+     check(selectedHair(armor)=="models/items/vlfh.glb","other armor slot");
+     const std::vector<owned::VisualEquipmentItem> none{hood};
+     check(item_bindings(conditional,hood,&none).at(0).resource=="models/items/vlfh.glb","removed armor");
+     auto invalid=conditional;invalid["items"]["vlfh"]["defaults"]["armor_0"][0]["unlessEquipment"]["hasSelection"]=false;
+     must_reject([&]{item_bindings(invalid,hood,&none);});
+     invalid=conditional;invalid["items"]["vlfh"]["defaults"]["armor_0"][0]["unlessEquipment"]["shape"]="plate";
+     must_reject([&]{item_bindings(invalid,hood,&none);});
+     std::cout<<"PASS any armor slot with configured visual and empty/removed variants\n";
+    }
     hood.material="missing";must_reject([&]{item_bindings(shared,hood);});
     hood.material="wolf hide";
     auto wrong=shared;wrong["items"]["vlfh"]["materials"]["wolf hide"]["armor_0"]["textures"][0]["baseColor"]="models/items/textures/../secret.png";
