@@ -737,10 +737,17 @@ bool ResourceStore::open(const ResourceStoreConfig& config,
         fail(failure, ResourceFailureCode::parse, "archive kinds do not match the archive list");
         return false;
     }
-    impl_->loose_roots = config.loose_roots;
-    impl_->directory_watches.reserve(config.loose_roots.size());
-    impl_->track_missing = true;
+    // Several manager categories nominate the same mod root.
+    // Keep the first occurrence in lookup order.
     for (const auto& root : config.loose_roots) {
+        const auto canonical=std::filesystem::path(root).lexically_normal().wstring();
+        if(std::none_of(impl_->loose_roots.begin(),impl_->loose_roots.end(),
+            [&](const auto& entry){return !_wcsicmp(entry.c_str(),canonical.c_str());}))
+            impl_->loose_roots.push_back(canonical);
+    }
+    impl_->directory_watches.reserve(impl_->loose_roots.size());
+    impl_->track_missing = true;
+    for (const auto& root : impl_->loose_roots) {
         const auto watch = FindFirstChangeNotificationW(root.c_str(), TRUE,
             FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME);
         if (watch == INVALID_HANDLE_VALUE) {impl_->track_missing = false; break;}
