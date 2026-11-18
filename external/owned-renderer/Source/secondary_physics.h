@@ -11,8 +11,11 @@ inline constexpr float secondary_limit = .085f;
 struct SecondaryPhysics {
     virtual ~SecondaryPhysics() = default;
     virtual SecondaryPoints advance(double clock, const SecondaryPoints& targets, bool reset) = 0;
+    virtual bool ready() const {return true;}
     virtual const std::string& error() const = 0;
 };
 using SecondaryFactory = std::shared_ptr<SecondaryPhysics>(*)();
 inline SecondaryFactory secondary_factory = nullptr;
 }
+
+namespace PhysicsFx {std::shared_ptr<owned::gltf::SecondaryPhysics> CreateCharacterPhysics();}

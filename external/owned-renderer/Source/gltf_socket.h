@@ -26,31 +26,34 @@ inline SocketChain socket_chain(const Animation& animation,unsigned node) {
     std::reverse(chain.begin(),chain.end());
     return chain;
 }
+inline Affine socket_local(const Animation& animation,const SocketJoint& joint,const Playback& playback) {
+    const auto local=[&](unsigned clip,float time) {
+        const auto& bind=animation.nodes[joint.node];
+        Node node;node.translation=bind.translation;node.rotation=bind.rotation;node.scale=bind.scale;
+        if(clip!=UINT32_MAX) {
+            const auto& indices=joint.tracks.at(clip);
+            if(indices[0]!=UINT32_MAX)node.translation=sample(animation.clips[clip].tracks[indices[0]],time);
+            if(indices[1]!=UINT32_MAX)node.rotation=sample(animation.clips[clip].tracks[indices[1]],time);
+            if(indices[2]!=UINT32_MAX)node.scale=sample(animation.clips[clip].tracks[indices[2]],time);
+        }
+        return node;
+    };
+    auto node=local(playback.clip,playback.time);
+    if(playback.blend<1) {
+        const auto prior=local(playback.previous,playback.previous_time);
+        node.rotation=slerp(prior.rotation,node.rotation,playback.blend);
+        for(unsigned c=0;c<3;++c) {
+            node.translation[c]=prior.translation[c]+playback.blend*(node.translation[c]-prior.translation[c]);
+            node.scale[c]=prior.scale[c]+playback.blend*(node.scale[c]-prior.scale[c]);
+        }
+    }
+    return trs(node);
+}
 inline Affine socket_pose(const Animation& animation,const SocketChain& chain,const Playback& playback,
     const Affine& root={1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1}) {
     auto result=root;
     for(const auto& joint:chain) {
-        const auto local=[&](unsigned clip,float time) {
-            const auto& bind=animation.nodes[joint.node];
-            Node node;node.translation=bind.translation;node.rotation=bind.rotation;node.scale=bind.scale;
-            if(clip!=UINT32_MAX) {
-                const auto& indices=joint.tracks.at(clip);
-                if(indices[0]!=UINT32_MAX)node.translation=sample(animation.clips[clip].tracks[indices[0]],time);
-                if(indices[1]!=UINT32_MAX)node.rotation=sample(animation.clips[clip].tracks[indices[1]],time);
-                if(indices[2]!=UINT32_MAX)node.scale=sample(animation.clips[clip].tracks[indices[2]],time);
-            }
-            return node;
-        };
-        auto node=local(playback.clip,playback.time);
-        if(playback.blend<1) {
-            const auto prior=local(playback.previous,playback.previous_time);
-            node.rotation=slerp(prior.rotation,node.rotation,playback.blend);
-            for(unsigned c=0;c<3;++c) {
-                node.translation[c]=prior.translation[c]+playback.blend*(node.translation[c]-prior.translation[c]);
-                node.scale[c]=prior.scale[c]+playback.blend*(node.scale[c]-prior.scale[c]);
-            }
-        }
-        result=multiply(result,trs(node));
+        result=multiply(result,socket_local(animation,joint,playback));
     }
     return result;
 }

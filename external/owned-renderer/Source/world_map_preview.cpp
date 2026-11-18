@@ -1958,6 +1958,13 @@ bool WorldMapPreview::precache_loading(
     return false;
   }
 }
+bool WorldMapPreview::contains(WorldMapPreviewSpace space,const std::vector<WorldMapPreviewSection>& sections) const {
+  if(!impl_->cache || impl_->cache->space!=space)return false;
+  const auto& cached=impl_->cache->descriptions;
+  return std::all_of(sections.begin(),sections.end(),[&](const auto& section) {
+    return std::any_of(cached.begin(),cached.end(),[&](const auto& d){return same_section(section,d);});
+  });
+}
 bool WorldMapPreview::activate(std::uint64_t generation,
                                WorldMapPreviewSpace space,
                                std::vector<WorldMapPreviewSection> sections,

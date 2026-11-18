@@ -38,6 +38,9 @@ struct BreastState {
     std::array<unsigned,2> targets{}, attachments{};
     struct Affected {unsigned node,side;};
     std::vector<Affected> affected;
+    std::vector<SocketJoint> joints;
+    std::vector<unsigned> parent_slots, slots;
+    std::vector<Affine> matrices;
     double clock=-1, physics_clock=0;
     bool frozen=false;
     unsigned node_base=UINT32_MAX;
@@ -72,6 +75,35 @@ struct BreastState {
                 if(root!=roots.end()) {affected.push_back({n,unsigned(root-roots.begin())/3});break;}
             }
         }
+        const auto& animation=*body->animation;
+        slots.assign(animation.nodes.size(),UINT32_MAX);
+        const auto include_chain=[&](unsigned node) {
+            std::vector<unsigned> path;
+            int n=int(node);
+            while(n>=0 && slots[n]==UINT32_MAX) {
+                path.push_back(unsigned(n));n=animation.nodes[n].parent;
+                animation_require(path.size()<=slots.size(),"secondary hierarchy cycle");
+            }
+            for(auto it=path.rbegin();it!=path.rend();++it) {
+                const int parent=animation.nodes[*it].parent;
+                parent_slots.push_back(parent<0?UINT32_MAX:slots[parent]);
+                slots[*it]=unsigned(joints.size());
+                SocketJoint joint; joint.node=*it;
+                joint.tracks.resize(animation.clips.size(),{UINT32_MAX,UINT32_MAX,UINT32_MAX});
+                joints.push_back(std::move(joint));
+            }
+        };
+        for(const auto entry:affected)include_chain(entry.node);
+        for(const auto anchor:attachments)include_chain(anchor);
+        for(unsigned c=0;c<animation.clips.size();++c) {
+            const auto& tracks=animation.clips[c].tracks;
+            for(unsigned t=0;t<tracks.size();++t) {
+                const auto& track=tracks[t];
+                if(track.path==Path::weights || slots.at(track.node)==UINT32_MAX)continue;
+                joints[slots[track.node]].tracks[c][unsigned(track.path)]=t;
+            }
+        }
+        matrices.resize(joints.size());
         return true;
     }
     void update(double now,const Playback& pose,const Affine& root,bool reset,unsigned base,bool paused=false) {
@@ -86,11 +118,14 @@ struct BreastState {
         clock=now;frozen=paused;node_base=base;placement=root;playback=pose;initialized=true;
         if(!physics&&secondary_factory)physics=secondary_factory();
         if(!physics)return;
-        const auto jointMatrix=[&](unsigned node) {
-            return multiply(root,socket_pose(*asset->animation,
-                asset->attachment_chain(asset->geometry.joints[node].name),pose));
-        };
-        SecondaryPoints points{}, bases{};
+        const Affine basis={1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1};
+        for(unsigned i=0;i<joints.size();++i) {
+            const auto parent=parent_slots[i];
+            matrices[i]=multiply(parent==UINT32_MAX?basis:matrices[parent],
+                socket_local(*asset->animation,joints[i],pose));
+        }
+        const auto jointMatrix=[&](unsigned node){return multiply(root,matrices[slots[node]]);};
+        SecondaryPoints points{},bases{};
         for(unsigned i=0;i<2;++i) {
             const auto matrix=jointMatrix(targets[i]);
             const auto anchor=jointMatrix(attachments[i]);
@@ -117,7 +152,7 @@ struct BreastState {
             result->push_back(out);
         }
         overrides=std::move(result);
-        if(!reported){bridge_append_probe_event("nala_physx_ready","backend=PhysX-5.6.1 dynamics=GPU joints=D6 gravity=world_z anchored_swing=1 limit_m=0.085");reported=true;}
+        if(!reported&&physics->ready()){bridge_append_probe_event("nala_physx_ready","backend=PhysX-5.6.1 dynamics=GPU joints=D6 gravity=world_z anchored_swing=1 limit_m=0.085");reported=true;}
     }
 };
 }

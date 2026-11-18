@@ -8,6 +8,7 @@
 // and draw sets its slots on the executor, which copies them into ring
 // tables (a thin per-flush translation, not a D3D11 emulation layer).
 #include "renderer.h"
+#include "pose_override_runs.h"
 #include "gamma_shader_programs.h"
 #include "embedded_figure_shader.h"
 #include "graphics_settings.h"
@@ -3323,14 +3324,14 @@ HRESULT Renderer::prepare_native_poses_d3d12(){
    if(!job.overrides || job.allocation>=native_pose_ranges_.size() ||
       !native_pose_ranges_[job.allocation].references ||
       native_pose_ranges_[job.allocation].generation!=job.allocation_generation)continue;
-   for(const auto& entry:*job.overrides) {
-    if(entry.node>=job.count)return E_INVALIDARG;
-    auto value=entry.value;value.generation=job.value.generation;
-    const HRESULT written=d3d12_->write_buffer(*native12_.pose_nodes,
-        UINT64(job.value.output+entry.node)*sizeof(NativePoseNodeGpu),&value,sizeof(value));
-    if(FAILED(written))return written;
-    profiler_.add_upload(sizeof(value));
-   }
+   const HRESULT uploaded=write_pose_overrides(*job.overrides,job.count,job.value.generation,
+    [&](UINT first,const NativePoseNodeGpu* nodes,UINT length)->HRESULT {
+      const HRESULT written=d3d12_->write_buffer(*native12_.pose_nodes,
+          UINT64(job.value.output+first)*sizeof(*nodes),nodes,UINT64(length)*sizeof(*nodes));
+      if(FAILED(written))return written;
+      profiler_.add_upload(length*sizeof(*nodes));return S_OK;
+    });
+   if(FAILED(uploaded))return uploaded;
   }
   for(const auto& job:native_pose_work_){auto& slot=native_pose_slots_[job.slot];
    if(job.allocation<native_pose_ranges_.size()&&native_pose_ranges_[job.allocation].references&&

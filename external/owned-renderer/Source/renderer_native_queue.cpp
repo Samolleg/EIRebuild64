@@ -20,6 +20,7 @@
 #include "native_shader.h"
 #include "owned_terrain_decode.h"
 #include "renderer.h"
+#include "pose_override_runs.h"
 #include "graphics_settings.h"
 #include "ui_language.h"
 #include "game_focus.h"
@@ -1769,14 +1770,14 @@ HRESULT Renderer::prepare_native_poses(){
    if(!job.overrides || job.allocation>=native_pose_ranges_.size() ||
       !native_pose_ranges_[job.allocation].references ||
       native_pose_ranges_[job.allocation].generation!=job.allocation_generation)continue;
-   for(const auto& entry:*job.overrides) {
-    if(entry.node>=job.count)return E_INVALIDARG;
-    auto value=entry.value;value.generation=job.value.generation;
-    D3D11_BOX box{};box.left=(job.value.output+entry.node)*sizeof(NativePoseNodeGpu);
-    box.right=box.left+sizeof(NativePoseNodeGpu);box.bottom=box.back=1;
-    context_->UpdateSubresource(native_pose_nodes_.Get(),0,&box,&value,0,0);
-    profiler_.add_upload(sizeof(value));
-   }
+   const HRESULT uploaded=write_pose_overrides(*job.overrides,job.count,job.value.generation,
+    [&](UINT first,const NativePoseNodeGpu* nodes,UINT length)->HRESULT {
+      D3D11_BOX box{};box.left=(job.value.output+first)*sizeof(*nodes);
+      box.right=box.left+length*sizeof(*nodes);box.bottom=box.back=1;
+      context_->UpdateSubresource(native_pose_nodes_.Get(),0,&box,nodes,0,0);
+      profiler_.add_upload(length*sizeof(*nodes));return S_OK;
+    });
+   if(FAILED(uploaded))return uploaded;
   }
   for(const auto& job:native_pose_work_){auto& slot=native_pose_slots_[job.slot];
 #ifdef EID3D11_TESTING
@@ -2783,8 +2784,16 @@ HRESULT Renderer::native_packet_extents(const NativeGeometryView& view,const Fix
  return calculate_native_aabb_screen_extents(minimum,maximum,object_to_clip,st.viewport,extents);
 }
 
+HRESULT Renderer::queue_native_figure_instances(const NativeGeometryView& view,const FixedState& state,
+ const FigureInstance* instances,size_t count,NativeGeometryResult* result) {
+ SCENE_ENTRY("queue_native_figure_instances");
+ if(!count)return S_OK;
+ if(!instances||view.semantic_kind!=SemanticKind::figure||native_shadow_collecting_)return E_INVALIDARG;
+ return queue_native_owned_impl(view,state,result,nullptr,instances,count);
+}
+
 HRESULT Renderer::queue_native_owned_impl(const NativeGeometryView& view,const FixedState& st,
- NativeGeometryResult* result,UINT* registered){
+ NativeGeometryResult* result,UINT* registered,const FigureInstance* instances,size_t count){
  if(result)*result={};
  if(reject_native_contribution(view,result))return S_OK;
  if(native_shadow_collecting_&&(!view.contribution.light_mask||
@@ -2797,6 +2806,24 @@ HRESULT Renderer::queue_native_owned_impl(const NativeGeometryView& view,const F
     (!view.owned_texture.surface&&(!view.owned_texture.mip_count||(!view.owned_texture.mips&&
      (view.owned_texture.value_source!=1||!view.owned_texture.resource)))))
   return native_geometry_failure(result,E_INVALIDARG,"texture.descriptor",true);
+ const auto submit=[&](ID3D11ShaderResourceView* texture,std::uint64_t backing,const D3D12TextureRef* texture12){
+  const auto record=[&](const NativeGeometryView& geometry) {
+   return queue_native_impl(geometry,st,nullptr,result,false,texture,backing,
+    view.owned_texture.generation,false,0,registered,texture12);
+  };
+  if(!instances)return record(view);
+  auto geometry=view;
+  for(size_t i=0;i<count;++i) {
+   const auto& instance=instances[i];
+   geometry.object_to_clip=instance.clip;
+   geometry.lighting.object_to_world=instance.world;
+   geometry.lighting.material_alpha=instance.alpha;
+   geometry.lighting.material_diffuse=instance.diffuse;
+   geometry.fog=instance.fog;geometry.default_specular=std::uint32_t(instance.fog)<<24;
+   const HRESULT hr=record(geometry);if(FAILED(hr))return hr;
+  }
+  return S_OK;
+ };
  if(d3d12_){
   // D3D12 backend: the owned texture as a D3D12 texture on the same key.
   D3D12TextureRef d3d12_texture;std::uint64_t d3d12_backing=0;
@@ -2813,7 +2840,7 @@ HRESULT Renderer::queue_native_owned_impl(const NativeGeometryView& view,const F
   if(!native_shadow_collecting_&&view.owned_texture.material_name)
    note_material_texture(*view.owned_texture.material_name,d3d12_backing,(view.flags&native_unit_flag)!=0,
     view.owned_texture.surface&&(d3d12_backing==((2ull<<62)|view.owned_texture.identity)||authored_surface_backing_value(d3d12_backing)));
-  return queue_native_impl(view,st,nullptr,result,false,nullptr,d3d12_backing,view.owned_texture.generation,false,0,registered,&d3d12_texture);
+  return submit(nullptr,d3d12_backing,&d3d12_texture);
  }
  ComPtr<ID3D11ShaderResourceView> texture;
  std::uint64_t backing=0;
@@ -2830,8 +2857,7 @@ HRESULT Renderer::queue_native_owned_impl(const NativeGeometryView& view,const F
  // A surface drawing its authored chain: its own backing, retired with it.
  if(!native_shadow_collecting_&&view.owned_texture.material_name)note_material_texture(*view.owned_texture.material_name,backing,(view.flags&native_unit_flag)!=0,
   authored_surface_backing_value(backing));
- return queue_native_impl(view,st,nullptr,result,false,texture.Get(),
-  backing,view.owned_texture.generation,false,0,registered);
+ return submit(texture.Get(),backing,nullptr);
 }
 
 HRESULT Renderer::queue_native_prepared(const NativeGeometryView& view,const FixedState& st,SurfaceImage* texture,NativeGeometryResult* result){SCENE_ENTRY("queue_native_prepared");

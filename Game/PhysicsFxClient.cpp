@@ -8,15 +8,81 @@
 #include "GameJournal.h"
 #include "retained_static_scene.h"
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
 
 namespace PhysicsFx {
+namespace {
+struct Impact {int id,start;Vec position;float power,radius,base=0;};
+struct DebrisTick {
+    int tick=0;
+    std::shared_ptr<const owned::TerrainCpuAsset> terrain;
+    std::vector<Impact> impacts;
+};
+class DebrisWorker {
+    World world;
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::deque<DebrisTick> queue;
+    bool stopping=false, discard=false;
+    std::shared_ptr<const StoneTracks> completed;
+    bool reported=false;
+    int lastReport=0;
+    std::string reportedError;
+    std::thread thread;
+    void step(const DebrisTick& job);
+    void run() noexcept {
+        try {
+            for(;;) {
+                DebrisTick job;
+                bool clear=false;
+                {
+                    std::unique_lock lock(mutex);
+                    wake.wait(lock,[&]{return stopping||!queue.empty();});
+                    if(stopping)return;
+                    clear=discard;discard=false;
+                    job=std::move(queue.front());queue.pop_front();
+                }
+                if(clear){world.Clear();reported=false;reportedError.clear();}
+                step(job);
+                auto snapshot=std::make_shared<StoneTracks>(world.Snapshot());
+                std::lock_guard lock(mutex);
+                completed=std::move(snapshot);
+            }
+        } catch(const std::exception& error) {
+            GameJournal::Event("PHYSICS_FX","worker_failed","reason=%s",error.what());
+            std::lock_guard lock(mutex);completed.reset();stopping=true;queue.clear();
+        }
+    }
+public:
+    DebrisWorker():thread([this]{run();}){}
+    ~DebrisWorker(){
+        {std::lock_guard lock(mutex);stopping=true;}
+        wake.notify_one();thread.join();
+    }
+    std::shared_ptr<const StoneTracks> submit(DebrisTick job) {
+        std::lock_guard lock(mutex);
+        if(!stopping) {
+            // Beyond five seconds all bodies from the discarded ticks have expired.
+            if(queue.size()>=92){queue.pop_front();discard=true;}
+            queue.push_back(std::move(job));
+            wake.notify_one();
+        }
+        return completed;
+    }
+};
+}
 struct Client::Impl {
-    World world;Events events;
+    Events events;
     ITexturePtr stoneTexture;bool textureAttempted=false;
-    struct Request {int id,start;Vec position;float power,radius;};
-    std::vector<Request> pending;
+    std::vector<Impact> pending;
+    std::unique_ptr<DebrisWorker> worker;
+    std::shared_ptr<const StoneTracks> visible;
+    bool held=false;
+    unsigned remaining=0;
     std::uint64_t generation=0,revision=0;
-    int lastReport=0;bool reported=false;std::string reportedError;
 };
 Client::Client():impl(std::make_unique<Impl>()){InstallCharacterPhysics();}
 Client::~Client()=default;
@@ -32,29 +98,58 @@ void Client::Tick(CWorldClient& host,bool paused){
     if(paused)return;
     auto& s=*impl;
     owned::RetainedTerrainSourceSnapshot source;
-    if(!OwnedRender::E1PhysicsTerrainSource(source)) {s.pending.clear();s.world.Clear();s.reported=false;s.reportedError.clear();return;}
-    if(s.generation!=source.source_generation||s.revision!=source.source_revision){
-        s.world.Clear();s.reported=false;s.reportedError.clear();s.generation=source.source_generation;s.revision=source.source_revision;
+    if(!OwnedRender::E1PhysicsTerrainSource(source)) {
+        s.pending.clear();s.worker.reset();s.visible.reset();return;
     }
-    const auto reportFailure=[&](){if(s.reportedError!=s.world.Error()){
-        s.reportedError=s.world.Error();GameJournal::Event("PHYSICS_FX","gpu_unavailable","backend=PhysX-5.6.1 fallback=none reason=%s",s.reportedError.c_str());
+    if(s.generation!=source.source_generation||s.revision!=source.source_revision) {
+        s.worker.reset();s.visible.reset();s.generation=source.source_generation;s.revision=source.source_revision;
+    }
+    for(auto it=s.pending.begin();it!=s.pending.end();) {
+        const auto p=it->position;
+        if(p.x<0||p.y<0||host.IsBridge(p.x,p.y)){it=s.pending.erase(it);continue;}
+        it->base=host.GetTerrain()->GetZValue(p.x,p.y,FALSE);
+        if(host.GetSurfaceValue(p.x,p.y)>it->base+.025f||host.GetBridgeSurfaceZValue(p.x,p.y)>it->base+.025f){
+            it=s.pending.erase(it);continue;
+        }
+        ++it;
+    }
+    if(!s.worker) {
+        if(s.pending.empty())return;
+        s.worker=std::make_unique<DebrisWorker>();
+    }
+    // A fragment lives at most five game seconds. Leave the worker asleep
+    // between bursts once the final immutable frame has aged out.
+    if(!s.pending.empty())s.remaining=94;
+    if(!s.remaining){s.visible.reset();return;}
+    --s.remaining;
+    auto next=s.worker->submit({host.GetSegmentTimeCounter(),source.terrain,std::move(s.pending)});
+    s.pending.clear();s.held=(s.visible==next);s.visible=std::move(next);
+    if(s.visible&&!s.visible->empty()&&!s.textureAttempted){
+        s.textureAttempted=true;
+        auto* manager=host.GetTextureManager();
+        s.stoneTexture=manager->CreateTexture(TTID_STONE_MAIN,"stones00");
+        const bool loaded=!s.stoneTexture.IsEmpty()&&manager->LoadTexture(s.stoneTexture);
+        if(!loaded)s.stoneTexture=nullptr;
+        GameJournal::Event("PHYSICS_FX",loaded?"texture_ready":"texture_unavailable","name=stones00");
+    }
+}
+void DebrisWorker::step(const DebrisTick& job) {
+    const auto reportFailure=[&](){if(reportedError!=world.Error()){
+        reportedError=world.Error();GameJournal::Event("PHYSICS_FX","gpu_unavailable","backend=PhysX-5.6.1 fallback=none reason=%s",reportedError.c_str());
     }};
-    if(!s.world.Initialize()){s.pending.clear();reportFailure();return;}
-    if(!s.reported){s.reported=true;GameJournal::Event("PHYSICS_FX","gpu_ready","backend=PhysX-5.6.1 dynamics=GPU broadphase=GPU device=%s",s.world.Device().c_str());}
+    if(!world.Initialize()){reportFailure();return;}
+    if(!reported){reported=true;GameJournal::Event("PHYSICS_FX","gpu_ready","backend=PhysX-5.6.1 dynamics=GPU broadphase=GPU device=%s",world.Device().c_str());}
     unsigned spawned=0;double prepareMs=0;
-    for(const auto& request:s.pending){
-        if(s.world.Statistics().bodies>=MaxStones)break;
-        const auto p=request.position;
-        if(p.x<0||p.y<0||host.IsBridge(p.x,p.y))continue;
-        // Reject an upper SEC layer or a bridge; never use the stone underneath it.
-        const float base=host.GetTerrain()->GetZValue(p.x,p.y,FALSE);
-        if(host.GetSurfaceValue(p.x,p.y)>base+.025f||host.GetBridgeSurfaceZValue(p.x,p.y)>base+.025f)continue;
+    for(const auto& request:job.impacts){
+        if(world.Statistics().bodies>=MaxStones)break;
+        const auto p=request.position;const float base=request.base;
         const int x=int(std::floor(p.x/8)),y=int(std::floor(p.y/8));
         const auto key=(std::uint64_t(std::uint32_t(x))<<32)|std::uint32_t(y);
         Vec center{float(x*8+4),float(y*8+4),base};
         std::vector<Triangle> triangles;
         const auto begin=std::chrono::steady_clock::now();
-        const auto hit=ExtractTerrain(*source.terrain,center,p,triangles);
+        const bool hasPatch=world.HasPatch(key);
+        const auto hit=ExtractTerrain(*job.terrain,center,p,triangles,!hasPatch);
         const float distance=p.z-hit.point.z;
         if(!StoneSurface(hit)||distance<-.15f||distance>std::clamp(request.radius,.35f,2.f)){
             GameJournal::Event("PHYSICS_FX","impact_rejected","id=%d x=%.3f y=%.3f material=%u normal_z=%.4f height_delta=%.3f reason=%s",
@@ -64,29 +159,21 @@ void Client::Tick(CWorldClient& host,bool paused){
         }
         GameJournal::Event("PHYSICS_FX","stone_surface","id=%d x=%.3f y=%.3f material=%u normal_z=%.4f source=%s",
             request.id,p.x,p.y,hit.material,hit.normal.z,StoneTerrain(hit.material)?"material":"cliff");
-        if(!s.world.HasPatch(key)&&!s.world.AddPatch(key,center,triangles))continue;
+        if(!hasPatch&&!world.AddPatch(key,center,triangles))continue;
         prepareMs+=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-begin).count();
         const std::uint32_t seed=std::uint32_t(request.id)*0x9e3779b9u^std::uint32_t(request.start)*0x85ebca6bu;
-        spawned+=s.world.Burst(key,hit.point,hit.normal,request.power,seed);
+        spawned+=world.Burst(key,hit.point,hit.normal,request.power,seed);
     }
-    if(spawned&&!s.textureAttempted){
-        s.textureAttempted=true;
-        auto* manager=host.GetTextureManager();
-        s.stoneTexture=manager->CreateTexture(TTID_STONE_MAIN,"stones00");
-        const bool loaded=!s.stoneTexture.IsEmpty()&&manager->LoadTexture(s.stoneTexture);
-        if(!loaded)s.stoneTexture=nullptr;
-        GameJournal::Event("PHYSICS_FX",loaded?"texture_ready":"texture_unavailable","name=stones00");
-    }
-    s.pending.clear();s.world.Tick(false);
-    if(!s.world.Error().empty()){reportFailure();return;}
-    const auto stats=s.world.Statistics();
-    if(spawned||stats.errors||(stats.bodies&&host.GetSegmentTimeCounter()-s.lastReport>=18)){
-        GameJournal::Event("PHYSICS_FX","stone_debris","backend=PhysX-5.6.1 spawned=%u bodies=%u active=%u patches=%u prepare_ms=%.3f step_ms=%.3f errors=%u gpu_dynamics=%d gpu_broadphase=%d gpu_heap=%llu gpu_solver=%llu gpu_contacts=%u",
-            spawned,stats.bodies,stats.active,stats.patches,prepareMs,stats.stepMs,stats.errors,int(stats.gpuDynamics),int(stats.gpuBroadPhase),stats.gpuHeapBytes,stats.gpuSolverBytes,stats.gpuContacts);
-        s.lastReport=host.GetSegmentTimeCounter();
+    world.Tick(false);
+    if(!world.Error().empty()){reportFailure();return;}
+    const auto stats=world.Statistics();
+    if(spawned||stats.errors||(stats.bodies&&job.tick-lastReport>=18)){
+        GameJournal::Event("PHYSICS_FX","stone_debris","backend=PhysX-5.6.1 spawned=%u bodies=%u active=%u patches=%u prepare_ms=%.3f step_ms=%.3f substeps=%u errors=%u gpu_dynamics=%d gpu_broadphase=%d gpu_heap=%llu gpu_solver=%llu gpu_contacts=%u",
+            spawned,stats.bodies,stats.active,stats.patches,prepareMs,stats.stepMs,stats.substeps,stats.errors,int(stats.gpuDynamics),int(stats.gpuBroadPhase),stats.gpuHeapBytes,stats.gpuSolverBytes,stats.gpuContacts);
+        lastReport=job.tick;
     }
 }
-std::vector<Stone> Client::Sample(float fraction) const{return impl->world.Sample(fraction);}
+std::vector<Stone> Client::Sample(float fraction) const{return impl->visible?SampleTracks(*impl->visible,impl->held?1.f:fraction):std::vector<Stone>{};}
 std::uint64_t Client::TextureSurface() const{
     const auto* texture=impl->stoneTexture.GetPtr();
     auto* surface=texture?texture->GetSurface():nullptr;
