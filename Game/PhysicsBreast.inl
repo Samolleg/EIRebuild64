@@ -10,8 +10,8 @@ class BreastPhysics final : public owned::gltf::SecondaryPhysics {
     bool started = false;
     std::string failure;
     static PxVec3 point(const std::array<float,3>& p) { return {p[0],p[1],p[2]}; }
-    static constexpr float mass=.45f, stiffness=105.f, damping=4.6f, gravity=9.81f;
-    static constexpr float restingDrop=mass*gravity/stiffness;
+    static constexpr float mass=.45f, stiffness=55.f, damping=3.6f, gravity=9.81f;
+    static constexpr float restingDrop=.041f;
     void initialize() {
         sdk=runtime();
         PxSceneDesc desc(sdk->physics->getTolerancesScale());
@@ -46,6 +46,9 @@ class BreastPhysics final : public owned::gltf::SecondaryPhysics {
             if(!joints[i])throw std::runtime_error("Breast spring allocation failed");
             for(auto axis:{PxD6Axis::eX,PxD6Axis::eY,PxD6Axis::eZ})joints[i]->setMotion(axis,PxD6Motion::eLIMITED);
             joints[i]->setDistanceLimit(PxJointLinearLimit(owned::gltf::secondary_limit));
+            // Static support sets the resting silhouette independently of gait compliance.
+            const float supportHeight=mass*gravity/stiffness-restingDrop;
+            joints[i]->setDrivePosition(PxTransform(PxVec3(0,0,supportHeight)));
             for(auto axis:{PxD6Drive::eX,PxD6Drive::eY,PxD6Drive::eZ})
                 joints[i]->setDrive(axis,PxD6JointDrive(stiffness,damping,PX_MAX_F32));
         }
