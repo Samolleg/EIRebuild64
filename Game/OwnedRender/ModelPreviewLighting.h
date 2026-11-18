@@ -19,6 +19,16 @@ inline bool produce_model_preview_lighting(const std::array<float,16>& clip,
     output.world.sunlight_diffuse=studio.diffuse;
     output.world.sunlight_direction=studio.direction;
     output.points.clear();
+    if (style == owned::PreviewStudioStyle::soft_figure) {
+        constexpr float strength[] = {.32f,.235f};
+        for (unsigned i=0; i<studio.fill_centers.size(); ++i) {
+            owned::RetainedWorldPointLight fill{};
+            fill.center=studio.fill_centers[i];
+            fill.radius=36.f;
+            fill.color={strength[i],strength[i],strength[i]};
+            output.points.push_back(fill);
+        }
+    }
     return true;
 }
 // Existing decorative-menu policy before X64GLTF12. Full ambient and FIG

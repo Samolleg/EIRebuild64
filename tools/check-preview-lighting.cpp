@@ -43,7 +43,7 @@ int main(int argc,char** argv)try {
                 near(soft.direction[i],softDirection[i],"soft figure camera frame");
                 near(soft.ambient[i],.36f,"neutral soft fill");
             }
-            near(soft.direction[3],1,"soft figure shader selector");
+            near(soft.direction[3],1,"soft figure lighting scope");
             ++cases;
         }
     }

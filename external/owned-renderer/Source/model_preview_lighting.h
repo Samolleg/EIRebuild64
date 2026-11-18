@@ -9,6 +9,7 @@ struct PreviewStudioLighting {
     std::array<float,4> ambient{.30f,.30f,.30f,1.f};
     std::array<float,4> diffuse{1.f,.98f,.95f,1.f};
     std::array<float,4> direction{};
+    std::array<std::array<float,3>,2> fill_centers{};
 };
 
 // One existing directional light, in the preview camera's frame. No scene
@@ -70,9 +71,9 @@ inline bool make_preview_studio_lighting(const std::array<float,16>& clip,
     if(!normalize(up)) return false;
     // Soft figures: 22 degrees up, 24 degrees left. Standalone heads retain 35/30.
     const bool soft = style == PreviewStudioStyle::soft_figure;
-    const double left = soft ? .377111244 : .4095760443;
+    const double left = soft ? .377119649 : .4095760443;
     const double above = soft ? .374606593 : .5735764364;
-    const double towardEye = soft ? .847031 : .7094064799;
+    const double towardEye = soft ? .847024599 : .7094064799;
     Vec key{};
     for(unsigned a=0;a<3;++a)key[a]=towardEye*front[a]-left*right[a]+above*up[a];
     if(!normalize(key)) return false;
@@ -80,7 +81,15 @@ inline bool make_preview_studio_lighting(const std::array<float,16>& clip,
     for(unsigned a=0;a<3;++a)value.direction[a]=static_cast<float>(key[a]);
     if (soft) {
         value.ambient = {.36f,.36f,.36f,1.f};
-        value.direction[3] = 1.f; // NativeWorldLighting: soft figure response in the interface pass.
+        value.diffuse = {.84f,.825f,.81f,1.f};
+        value.direction[3] = 1.f; // Host binds the studio's own lights for this submission.
+        // Broad neutral fills to either side. Both lights are far relative to a figure,
+        // so the model can turn and animate without a small bright spot on the face.
+        constexpr double distance = 12.;
+        for (unsigned a=0; a<3; ++a) {
+            value.fill_centers[0][a] = float(point[a]+distance*(-.78*right[a]+.42*up[a]+.46*front[a]));
+            value.fill_centers[1][a] = float(point[a]+distance*( .78*right[a]-.18*up[a]+.60*front[a]));
+        }
     }
     result=value;
     return true;

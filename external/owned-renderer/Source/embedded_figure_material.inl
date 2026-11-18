@@ -175,12 +175,22 @@ HRESULT Renderer::queue_embedded_figure(const NativeGeometryView& view,
  if (FAILED(hr)) return hr;
  const auto savedLighting=native_world_lighting_;
  const bool savedValid=native_world_lighting_valid_;
- const bool softFigure = view.interface_preview && lighting && lighting->sunlight_direction[3] == 1.f;
+ const bool softFigure = view.interface_preview && lighting && lighting->soft_figure();
+ std::vector<NativePointLightGpu> studioLights;
+ const auto savedGlowCount=emissive_published_;
+ bool usingStudioLights=false;
  const auto savedLights=lighting && !softFigure?native_point_light_inputs_:std::vector<RetainedWorldPointLight>{};
  double worldTime=0; bridge_current_world_time(worldTime);
  const auto restoreLighting=[&]{
   if (lighting) {
-   if (softFigure) apply_native_lighting(savedLighting);
+   if (softFigure) {
+    if (usingStudioLights) {
+     native_point_lights_.swap(studioLights);
+     native_point_lights_dirty_=true;
+     emissive_published_=savedGlowCount;
+    }
+    apply_native_lighting(savedLighting);
+   }
    else {
     set_native_world_lighting(savedLighting);
     set_native_point_lights(savedLights,worldTime);
@@ -189,10 +199,21 @@ HRESULT Renderer::queue_embedded_figure(const NativeGeometryView& view,
   }
  };
  struct Restore { decltype(restoreLighting)& run; ~Restore(){run();} } restore{restoreLighting};
- // Studio figures skip scene lamps in the pixel shader. Bind their camera light
- // directly so the cave profile and fractional sun cannot reshape it.
+ // Studio fills use the existing native lamp loop. Swap only rendered lamp values;
+ // particle sources, shadow slots and the world's logical lights stay with the map.
  if (softFigure) {
   if (!apply_native_lighting(*lighting)) return E_FAIL;
+  studioLights.reserve(lights.size());
+  for (const auto& fill : lights) {
+   NativePointLightGpu gpu{};
+   gpu.center_inverse_radius_squared={fill.center[0],fill.center[1],fill.center[2],1.f/(fill.radius*fill.radius)};
+   gpu.color={fill.color[0],fill.color[1],fill.color[2],0.f};
+   studioLights.push_back(gpu);
+  }
+  native_point_lights_.swap(studioLights);
+  emissive_published_=0;
+  native_point_lights_dirty_=true;
+  usingStudioLights=true;
  } else if (lighting && (!set_native_world_lighting(*lighting) ||
      !set_native_point_lights(lights, worldTime))) return E_INVALIDARG;
  ComPtr<ID3D11ShaderResourceView> combined;
