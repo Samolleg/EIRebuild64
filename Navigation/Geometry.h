@@ -56,6 +56,14 @@ struct Geometry {
     std::map<std::pair<int,int>,std::vector<std::uint32_t>> tileTriangles,surfaceTriangles,tileCeilings;
     std::map<int,std::set<std::pair<int,int>>> objectTiles;
     void Bounds();
+    void IndexSurfaceCells();
+    const std::vector<std::uint32_t>* SurfaceCandidates(Point navPoint) const;
+
+private:
+    static constexpr int surfaceDivisions = 4;
+    using SurfaceCells = std::array<std::vector<std::uint32_t>, surfaceDivisions * surfaceDivisions>;
+    std::map<std::pair<int,int>, SurfaceCells> surfaceCells;
+    int SurfaceCell(float coordinate, float origin, int tile) const;
 };
 // Convex XZ footprint of an actual transformed solid BV, not its world AABB.
 std::vector<float> Footprint(const Solid& solid, float& low, float& high);

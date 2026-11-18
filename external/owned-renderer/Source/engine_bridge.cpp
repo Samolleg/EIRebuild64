@@ -18426,17 +18426,21 @@ void capture_owned_world_shadow_inputs(void* scene,void* renderer,OwnedShadowInp
         CityRetainedOwnerGuard values_timing(CityRetainedOwner::visual_frame_values);
         const bool traced=startup_begin(StartupStage::visual_sample);
         g_owned_visual_world_frame.values.reset();
-        in.values=shadow_scene.visual_frame_value(in.time,g_bridge_sample.active && bridge_profile_enabled());
+        const bool diagnose = g_bridge_sample.active && bridge_profile_enabled();
 #ifdef EID3D11_EMBEDDED
-        if(g_embedded_visual_inputs) {
-            if(!in.values || !g_embedded_visual_inputs->complete_visuals)
+        if (g_embedded_visual_inputs) {
+            if (!g_embedded_visual_inputs->complete_visuals)
                 throw "embedded_visual_values_unavailable";
-            auto completed=std::make_shared<RetainedVisualFrame>(*in.values);
-            if(!g_embedded_visual_inputs->complete_visuals(completed, g_embedded_visual_inputs->visual_context))
+            auto completed = std::make_shared<RetainedVisualFrame>();
+            shadow_scene.evaluate_visual_frame(in.time, diagnose, *completed);
+            if (!g_embedded_visual_inputs->complete_visuals(completed, g_embedded_visual_inputs->visual_context))
                 throw "embedded_visual_values_rejected";
-            in.values=std::move(completed);
-        }
+            in.values = std::move(completed);
+        } else
 #endif
+        {
+            in.values = shadow_scene.visual_frame_value(in.time, diagnose);
+        }
         startup_end(StartupStage::visual_sample,traced,"completed");
     }
 }

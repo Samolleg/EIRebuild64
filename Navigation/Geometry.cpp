@@ -3,6 +3,48 @@
 #include <stdexcept>
 
 namespace Navigation {
+int Geometry::SurfaceCell(float coordinate, float origin, int tile) const {
+    const float local = std::clamp((coordinate - origin) / tileWidth - tile, 0.f, 1.f);
+    return std::min(int(local * surfaceDivisions), surfaceDivisions - 1);
+}
+
+void Geometry::IndexSurfaceCells() {
+    surfaceCells.clear();
+    for (const auto& [tile, candidates] : surfaceTriangles) {
+        if (candidates.size() < 64) continue;
+        SurfaceCells cells;
+        std::size_t references = 0;
+        for (const auto index : candidates) {
+            const auto& t = ground[index];
+            // Largest quarter-cell tolerance in the supported ground profiles.
+            // Pad in the same XY space as Address, then convert Y to nav Z.
+            constexpr float margin = .3f * .25f;
+            const auto x0 = SurfaceCell(std::min({t.a.x,t.b.x,t.c.x}) - margin, minimum.x, tile.first);
+            const auto x1 = SurfaceCell(std::max({t.a.x,t.b.x,t.c.x}) + margin, minimum.x, tile.first);
+            const auto z0 = SurfaceCell(-(std::max({t.a.y,t.b.y,t.c.y}) + margin), minimum.z, tile.second);
+            const auto z1 = SurfaceCell(-(std::min({t.a.y,t.b.y,t.c.y}) - margin), minimum.z, tile.second);
+            references += (x1 - x0 + 1) * (z1 - z0 + 1);
+            // Very large overlapping faces benefit little from subdivision.
+            if (references > 4 * candidates.size()) break;
+            for (int z = z0; z <= z1; ++z)
+                for (int x = x0; x <= x1; ++x)
+                    cells[z * surfaceDivisions + x].push_back(index);
+        }
+        if (references <= 4 * candidates.size()) surfaceCells.emplace(tile, std::move(cells));
+    }
+}
+
+const std::vector<std::uint32_t>* Geometry::SurfaceCandidates(Point navPoint) const {
+    const int x = int(std::floor((navPoint.x - minimum.x) / tileWidth));
+    const int z = int(std::floor((navPoint.z - minimum.z) / tileWidth));
+    const auto fine = surfaceCells.find({x,z});
+    if (fine != surfaceCells.end())
+        return &fine->second[SurfaceCell(navPoint.z, minimum.z, z) * surfaceDivisions +
+                             SurfaceCell(navPoint.x, minimum.x, x)];
+    const auto coarse = surfaceTriangles.find({x,z});
+    return coarse == surfaceTriangles.end() ? nullptr : &coarse->second;
+}
+
 void Geometry::Bounds() {
     if(ground.empty()) throw std::runtime_error("Nav64: MPR contains no ground triangles");
     minimum=maximum=ToNav(ground.front().a);

@@ -1064,6 +1064,9 @@ public:
         std::uint64_t* committed_entities = nullptr) noexcept;
     RetainedVisualFrame visual_frame(double time, bool diagnose = false) const;
     std::shared_ptr<const RetainedVisualFrame> visual_frame_value(double time, bool diagnose = false) const;
+    // A host completes units on its own mutable frame before publishing it.
+    // Populate that destination directly; the shared raw frame stays immutable.
+    void evaluate_visual_frame(double time, bool diagnose, RetainedVisualFrame& destination) const;
     void release_visual_frame_scratch() noexcept;
     RetainedShadowSourceChanges shadow_source_changes(std::uint64_t since) const;
     RetainedShadowSourceChanges shadow_source_changes(RetainedShadowConsumer consumer);

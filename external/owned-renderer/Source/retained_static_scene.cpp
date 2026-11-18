@@ -3117,6 +3117,11 @@ void RetainedStaticScene::release_visual_frame_scratch() noexcept {
     std::vector<std::uint8_t>().swap(visual_frame_visited_);
 }
 
+void RetainedStaticScene::evaluate_visual_frame(double time, bool diagnose, RetainedVisualFrame& destination) const {
+    ExclusiveLock guard(lock_);
+    visual_frame_unlocked(time, diagnose, destination);
+}
+
 std::shared_ptr<const RetainedVisualFrame> RetainedStaticScene::visual_frame_value(double time,bool diagnose) const {
     ExclusiveLock guard(lock_);
     return visual_frame_value_unlocked(time,diagnose);
