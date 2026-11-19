@@ -1039,7 +1039,7 @@ void Renderer::bind_cave_irradiance_d3d12() noexcept {
 // (outdoors).
 CaveSampleConstants Renderer::cave_sample_constants() const noexcept {
  CaveSampleConstants values{};
- if(!cave_volume_active_||!(cave_volume_cell_>0)||hit_test_active_)return values;
+ if(!cave_volume_active_||!(cave_volume_cell_>0)||hit_test_active_||native_world_lighting_.soft_figure())return values;
  for(int k=0;k<3;++k){
   values.origin[k]=cave_volume_origin_[k];values.fine_size[k]=float(cave_volume_size_[k]);
   values.texel_scale[k]=cave_volume_texture_[k]?1.f/float(cave_volume_texture_[k]):0.f;
