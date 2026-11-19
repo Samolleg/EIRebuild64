@@ -2028,7 +2028,7 @@ bool prepare_owned_terrain_render_commands(OwnedTerrainFramePacket& packet) noex
     } catch (...) { packet.base_commands.clear();packet.transparent_commands.clear();return false; }
 }
 
-bool owned_terrain_spatial_bounds(OwnedTerrainFramePacket& packet,
+bool owned_terrain_spatial_bounds(const OwnedTerrainFramePacket& packet,
     const OwnedTerrainCommand& command,NativeWorldBounds& local,
     NativeWorldBounds& world) noexcept {
     local={};world={};
@@ -2039,7 +2039,7 @@ bool owned_terrain_spatial_bounds(OwnedTerrainFramePacket& packet,
         const auto& value=packet.spatial_parts[command.spatial_index];
         if(value.source_sector!=command.source_sector || value.material!=command.material ||
            value.subpart_mask!=command.subpart_mask)return false;
-        local=value.local_bounds;world=value.world_bounds;++packet.spatial_bounds_reuses;
+        local=value.local_bounds;world=value.world_bounds;
         return true;
     }
     if(command.spatial_index>=packet.spatial_parts.size())return false;
@@ -2054,7 +2054,6 @@ bool owned_terrain_spatial_bounds(OwnedTerrainFramePacket& packet,
     }
     if(found_mask!=command.subpart_mask)return false;
     if(!local.valid || !transform_terrain_bounds(local,packet.spatial_object_to_world,world))return false;
-    ++packet.spatial_bounds_reuses;
     return true;
 }
 

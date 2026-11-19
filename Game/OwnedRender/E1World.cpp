@@ -55,12 +55,21 @@ bool E1ReadWorldFrame(E1WorldFrame& output) noexcept {
 }
 bool E1ReadWorldLighting(owned::NativeWorldLighting& output) noexcept {
     output = {};
+    if (const auto* frame = owned::bridge_embedded_installed_frame()) {
+        if (frame->host_lighting_valid) output = frame->host_lighting;
+        return frame->host_lighting_valid;
+    }
     if (!values.camera.valid || !values.lightingValid) return false;
     output = values.lighting;
     return true;
 }
 bool E1ReadWorldEnvironment(owned::WorldEnvironment& output) noexcept {
     output = {};
+    if (const auto* frame = owned::bridge_embedded_installed_frame()) {
+        if (!frame->world_draw_active || !frame->environment.valid) return false;
+        output = frame->environment;
+        return true;
+    }
     if (!activeDraw || !values.camera.valid || !values.environment.valid) return false;
     output = values.environment;
     return true;
@@ -71,7 +80,10 @@ bool E1ClaimSky(bool requested) noexcept {
     skyRevision = claim ? owned::embedded_sky().revision() : 0;
     return claim;
 }
-std::uint64_t E1WorldGeneration() noexcept { return values.camera.valid ? worldGeneration : 0; }
+std::uint64_t E1WorldGeneration() noexcept {
+    if (const auto* frame = owned::bridge_embedded_installed_frame()) return frame->host_world_generation;
+    return values.camera.valid ? worldGeneration : 0;
+}
 void E1RetireWorld(const void* owner) noexcept {
     if (owner != worldOwner) return;
     worldOwner = nullptr; worldGeneration = epoch = 0;
@@ -146,6 +158,8 @@ bool bridge_capture_embedded_frame_values(BridgeFrameValues& output) noexcept tr
     snapshot.frame_serial = frame;
     snapshot.world_draw_active = activeDraw != 0;
     snapshot.environment = values.environment;
+    snapshot.host_world_generation = OwnedRender::E1WorldGeneration();
+    snapshot.host_lighting_valid = OwnedRender::E1ReadWorldLighting(snapshot.host_lighting);
     snapshot.world_time = values.environment.world_time;
     snapshot.world_time_valid = values.environment.valid;
     snapshot.local_single_player = bridge_local_single_player_mission();

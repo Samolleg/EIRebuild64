@@ -35,7 +35,7 @@ static void save(const fs::path& path,const Image& image){
 int wmain(int argc,wchar_t** argv)try{
     require(argc==4,"usage: check game-root output backend(11|12)");const fs::path game=fs::absolute(argv[1]),out=fs::absolute(argv[2]);const bool dx12=std::wstring(argv[3])==L"12";
     fs::create_directories(out);const auto config=out/L"renderer.ini";
-    {std::ofstream ini(config);ini<<"[setup]\nfirst_run_done=1\n[graphics]\nrenderer_backend="<<(dx12?1:0)<<"\nrender_thread=0\nframe_generation=0\n";}
+    {std::ofstream ini(config);ini<<"[setup]\nfirst_run_done=1\n[graphics]\nrenderer_backend="<<(dx12?1:0)<<"\nrender_thread=1\nframe_generation=0\n";}
     owned::EmbeddedHostPaths paths;paths.renderer_config=config.wstring();paths.world_map_layouts=(game/L"MODS/Dejavu/world-map-layouts.json").wstring();
     paths.mounts.archives={(game/L"Base/Res/figures.res").wstring(),(game/L"Base/Res/textures.res").wstring(),(game/L"Base/Res/menus.res").wstring()};
     owned::embedded_host_configuration().configure(std::move(paths));
@@ -69,7 +69,11 @@ int wmain(int argc,wchar_t** argv)try{
         renderer->begin_scene();hr(renderer->bind_embedded_targets(),"bind targets");const float color[]={.025f,.035f,.055f,1},depth=1;
         hr(renderer->clear_embedded_targets(color,&depth),"clear targets");require(renderer->set_native_world_lighting(light),"lighting");
         frame.debris=physics.Sample(1);require(OwnedRender::E1DrawPhysicsDebris(*renderer,state,frame),"native debris submission");
-        hr(renderer->flush_native(),"native flush");hr(renderer->composite_world(),"world composition");renderer->end_scene();
+        require(renderer->embedded_render_thread_active(),"embedded scene worker active");
+        hr(renderer->queue_embedded_batch(owned::Renderer::EmbeddedBatch::geometry),"native worker flush");
+        hr(renderer->queue_embedded_batch(owned::Renderer::EmbeddedBatch::composite),"worker composition");
+        hr(renderer->queue_embedded_batch(owned::Renderer::EmbeddedBatch::end_scene),"worker frame end");
+        hr(renderer->finish_embedded_scene_commands(),"worker result before readback");
         Image image;
         if(dx12)hr(renderer->read_embedded_d3d12_output(image.pixels,image.width,image.height),"read D3D12 pixels");
         else hr(renderer->visit_embedded_output(&image,&Read11),"read D3D11 pixels");

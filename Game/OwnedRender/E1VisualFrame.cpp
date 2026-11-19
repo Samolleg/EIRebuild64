@@ -33,7 +33,7 @@ struct Sink {
 Sink* self(void* context) noexcept { return static_cast<Sink*>(context); }
 bool lastFlushed = false;
 std::vector<std::int32_t> currentDrawn;   // sorted, this world draw only
-std::map<std::int32_t, const char*> currentOmissions;
+std::vector<owned::EmbeddedVisualOmission> currentOmissions;
 std::uint64_t batchRollbackReportEpoch = 0;
 void reportBatchFailure(const owned::NativeGeometryResult& result, const char* fallback) noexcept {
     const auto epoch = owned::bridge_current_world_epoch();
@@ -270,7 +270,7 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     static E1PerfCounter counter{"scene_total"};
     E1PerfScope timing(counter);
     owned::EmbeddedVisualFrameInputs inputs;
-    inputs.complete_visuals = &E1CompleteVisualFrame;
+    inputs.completed_visuals = host.completed;
     inputs.time = host.time;
     inputs.scene_flags = host.sceneFlags;
     inputs.draw_undetected = host.drawUndetected;
@@ -283,8 +283,11 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
     inputs.lighting.sunlight_diffuse = host.sunDiffuse;
     inputs.lighting.sunlight_direction = host.sunDirection;
     inputs.lighting_valid = host.lightingValid;
-    inputs.fog = host.fog;
-    inputs.fog_context = host.fogContext;
+    inputs.fog = [](const void* context, const float* position) -> BYTE {
+        const auto& frame = *static_cast<const E1VisualInputs*>(context);
+        return frame.fog ? frame.fog(frame.fogInputs, position) : 0;
+    };
+    inputs.fog_context = &host;
     Sink sink;
     sink.renderer = &renderer;
     sink.state = state;
@@ -323,20 +326,15 @@ bool E1RunOwnedVisualFrame(owned::Renderer& renderer, const owned::FixedState& s
         [](void* context, bool commit) {
             return self(context)->renderer->end_native_rain_occlusion(commit);
         });
-    std::vector<std::int32_t> drawn;
-    std::vector<owned::EmbeddedVisualOmission> omitted;
-    const bool ok = owned::bridge_embedded_owned_visual_frame(inputs, &drawn, &omitted);
-    LiveObserver::ObserveVisualResult(ok,drawn.size(),omitted.size());
-    std::sort(drawn.begin(), drawn.end());
-    currentDrawn.swap(drawn);
-    currentOmissions.clear();
-    for (const auto& item : omitted)
-        if (item.id > 0 && item.reason) currentOmissions.emplace(item.id, item.reason);
+    const bool ok = owned::bridge_embedded_owned_visual_frame(inputs, &currentDrawn, &currentOmissions);
+    LiveObserver::ObserveVisualResult(ok, currentDrawn.size(), currentOmissions.size());
+    if (!std::is_sorted(currentDrawn.begin(), currentDrawn.end()))
+        std::sort(currentDrawn.begin(), currentDrawn.end());
     const auto epoch = owned::bridge_current_world_epoch();
-    if (!omitted.empty() && epoch && omissionReportEpoch != epoch) {
+    if (!currentOmissions.empty() && epoch && omissionReportEpoch != epoch) {
         omissionReportEpoch = epoch;
         std::map<std::string, std::pair<std::size_t, std::vector<std::int32_t>>> summary;
-        for (const auto& item : omitted) {
+        for (const auto& item : currentOmissions) {
             if (item.id <= 0 || !item.reason) continue;
             auto& reason = summary[item.reason];
             ++reason.first;
@@ -399,6 +397,7 @@ void E1ReportOwnedVisual(std::int32_t id) noexcept try {
         reportedVisuals.clear();
         reportEpoch = epoch;
     }
+    if (!RuntimeDiagnostics::Enabled() && (!epoch || omissionReportEpoch == epoch)) return;
     const bool drawn = E1OwnedVisualDrawn(id);
     if (!drawn && epoch && omissionReportEpoch != epoch) {
         omissionReportEpoch = epoch;
@@ -419,7 +418,8 @@ bool E1OwnedVisualDrawn(std::int32_t id) noexcept {
 }
 const char* E1OwnedVisualOmission(std::int32_t id) noexcept {
     if (!ranThisDraw || id <= 0) return nullptr;
-    const auto found = currentOmissions.find(id);
-    return found == currentOmissions.end() ? nullptr : found->second;
+    for (const auto& omission : currentOmissions)
+        if (omission.id == id && omission.reason) return omission.reason;
+    return nullptr;
 }
 }

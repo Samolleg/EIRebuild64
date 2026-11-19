@@ -501,16 +501,17 @@ bool HudVisualPublication::begin_lane(HudVisualLane lane) noexcept {
 }
 
 bool HudVisualPublication::resolve_texture(const char* name,
-    const HudIconPlacement& placement, HudPublishedVisual& output, bool& source_found) {
+    const HudIconPlacement* placement, HudPublishedVisual& output, bool& source_found) {
     output = {}; source_found = false;
     if (!owns_active_screen() || !name) return false;
     CachedAsset asset; AssetLoadFailure failure;
-    if (!load(HudResourceRole::texture, name, &placement, asset, failure)) return false;
+    if (!load(HudResourceRole::texture, name, placement, asset, failure)) return false;
     output.screen_generation = active_screen_generation_;
     output.texture_generation = texture_generation_;
     output.overlay_generation = overlay_generation_;
     output.texture = asset.texture; output.texture_identity = asset.identity;
-    output.placement = placement; output.complete = true;
+    if (placement) output.placement = *placement;
+    output.complete = true;
     source_found = asset.native_source_found;
     return true;
 }
@@ -616,7 +617,7 @@ bool HudVisualPublication::load(HudResourceRole role,
     }
     try {
         ResourceFailure parse_failure{};
-        if (source_found && role == HudResourceRole::texture &&
+        if (source_found && role == HudResourceRole::texture && placement &&
             blob.identity.container_file_key) {
             value.source = {blob.identity.container_file_key,
                             blob.identity.absolute_offset, blob.identity.bytes};
@@ -637,7 +638,11 @@ bool HudVisualPublication::load(HudResourceRole role,
                 failure.resource_failure = parse_failure.code;
                 return false;
             }
-            if (!convert_hud_icon_to_argb1555(decoded, *asset)) {
+            // A complete HUD sheet already has normalized UVs and its own
+            // native format and mip chain. Only copied icon cells use 1555.
+            if (!placement) {
+                *asset = std::move(decoded);
+            } else if (!convert_hud_icon_to_argb1555(decoded, *asset)) {
                 failure.stage = HudPublicationFailureStage::texture_1555;
                 failure.resource_failure = ResourceFailureCode::parse;
                 return false;

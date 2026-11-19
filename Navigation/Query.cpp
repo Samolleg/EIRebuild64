@@ -33,18 +33,14 @@ Location Address(const Mesh& m,Point p,dtPolyRef ref,float height,float referenc
     if(!m.sources||dtStatusFailed(m.data->getTileAndPolyByRef(ref,&tile,&poly)))return l;
     const auto key=std::make_pair(tile->header->x,tile->header->y);
     const auto identities=m.polygonSurfaces.find(key);
-    const auto sourceKey=std::make_pair(int(std::floor((p.x-m.sources->minimum.x)/m.sources->tileWidth)),
-        int(std::floor((p.z-m.sources->minimum.z)/m.sources->tileWidth)));
-    const auto triangles=m.sources->surfaceTriangles.find(sourceKey);
+    const auto* triangles = m.sources->SurfaceCandidates(p);
     const size_t index=size_t(poly-tile->polys);
-    if(identities==m.polygonSurfaces.end()||index>=identities->second.size()||triangles==m.sources->surfaceTriangles.end())return l;
+    if(identities==m.polygonSurfaces.end()||index>=identities->second.size()||!triangles)return l;
     const auto& surfaces=identities->second[index];
     float best=1.e30f,terrainZ=-1.e30f;
     std::vector<std::pair<float,std::uint64_t>> heights;std::vector<float> ceilings;
-    for(size_t i:triangles->second) {
+    for(size_t i:*triangles) {
         const auto& original=m.sources->ground[i];
-        const bool admitted=std::find(surfaces.begin(),surfaces.end(),original.surface)!=surfaces.end();
-        if(m.excludedObjects.count(original.object))continue;
         const auto surface=original.surface;
         // Recast can join a sub-cell seam between imported BASE faces. Only
         // declared connected BASE planes may cover it, never solid BV tops.
@@ -54,6 +50,7 @@ Location Address(const Mesh& m,Point p,dtPolyRef ref,float height,float referenc
             l.position.x>std::max({original.a.x,original.b.x,original.c.x})+tolerance||
             l.position.y<std::min({original.a.y,original.b.y,original.c.y})-tolerance||
             l.position.y>std::max({original.a.y,original.b.y,original.c.y})+tolerance)continue;
+        if(m.excludedObjects.count(original.object))continue;
         const auto t=Surface(original,m.profile);if(!t.area)continue;
         const float ax=t.b.x-t.a.x,ay=t.b.y-t.a.y,bx=t.c.x-t.a.x,by=t.c.y-t.a.y,det=ax*by-ay*bx;
         // Walkability is owned by the baked mesh. This function evaluates
@@ -71,7 +68,8 @@ Location Address(const Mesh& m,Point p,dtPolyRef ref,float height,float referenc
             terrainZ=std::max(terrainZ,z);
         }
         if(!t.terrain)ceilings.push_back(z);
-        if(admitted)heights.emplace_back(z,surface);
+        if(std::find(surfaces.begin(),surfaces.end(),surface)!=surfaces.end())
+            heights.emplace_back(z,surface);
     }
     // Remove physically unavailable supports before choosing a floor.
     heights.erase(std::remove_if(heights.begin(),heights.end(),[&](const auto& at) {

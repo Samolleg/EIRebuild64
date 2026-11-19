@@ -84,15 +84,7 @@ bool CDX11::SetRenderStates()
 {
     // Native packets capture fake_dx7 state at submission. D3D12 creates its
     // PSOs from those values; no D3D11 immediate state belongs to this path.
-    if (rendererFacade) {
-        bool nativeD3D12 = false;
-        const HRESULT hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
-            nativeD3D12 = renderer.d3d12_backend();
-            return S_OK;
-        });
-        IfFailedThrowHR(hr);
-        if (nativeD3D12) return true;
-    }
+    if (D3D12Selected()) return true;
     D3D11_RENDER_TARGET_BLEND_DESC rtbd = { 0 };
     auto &rs = fake_dx7.render_state;
     // true/false
@@ -143,9 +135,11 @@ owned::NativeOwnedFixedState CDX11::CaptureOwnedTerrainMaterial()
     auto state = OwnedRender::E1TerrainMaterialState(fake_dx7.render_state,
         GetConstantBuffers()->cb_ps_pixelshader.data.alphaMode);
     D3DVIEWPORT7 viewport{};
-    if (!rendererFacade || FAILED(rendererFacade->Visit([&](owned::Renderer& renderer) {
+    if (D3D12Selected() && ownedWorldActive && c56WorldPassRan) viewport = c56WorldViewport;
+    else if (!rendererFacade || FAILED(rendererFacade->Visit([&](owned::Renderer& renderer) {
         return renderer.read_embedded_viewport(viewport);
-    })) || !viewport.dwWidth || !viewport.dwHeight) return {};
+    }))) return {};
+    if (!viewport.dwWidth || !viewport.dwHeight) return {};
     state.replay_frame_state = true;
     state.captured_viewport = {UINT(viewport.dwX), UINT(viewport.dwY),
         UINT(viewport.dwWidth), UINT(viewport.dwHeight)};
@@ -186,6 +180,17 @@ CDX11::OwnedTerrainPassResult CDX11::SubmitC56TerrainPass(bool transparent)
     if (!OwnedRender::E1PrepareTerrainPass(transparent, pass))
         return OwnedTerrainPassResult::unavailable;
 
+    if (transparent && D3D12Selected() && c56WorldPassRan) {
+        auto terrain = OwnedRender::E1CaptureTerrainDraw(true);
+        const HRESULT queued = rendererFacade->QueueWorldDraw([terrain = std::move(terrain)](owned::Renderer& renderer) {
+            OwnedRender::E1TerrainDrawScope scope(terrain);
+            OwnedRender::E1TerrainSubmission water;
+            const HRESULT hr = OwnedRender::E1SubmitTerrainPass(renderer,true,water);
+            return SUCCEEDED(hr) && !water.completed ? E_FAIL : hr;
+        });
+        IfFailedThrowHR(queued);
+        return OwnedTerrainPassResult::submitted;
+    }
     OwnedRender::E1TerrainSubmission submission;
     const HRESULT hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
         return OwnedRender::E1SubmitTerrainPass(renderer, transparent, submission);
@@ -201,13 +206,15 @@ CDX11::OwnedTerrainPassResult CDX11::SubmitC56TerrainPass(bool transparent)
     return OwnedTerrainPassResult::failed;
 }
 
-owned::FixedState CDX11::CaptureC56MaterialState()
+owned::FixedState CDX11::CaptureC56MaterialState(const D3DVIEWPORT7* viewport)
 {
     owned::FixedState state;
     for (const auto& item : fake_dx7.render_state)
         if (item.first >= 0 && std::size_t(item.first) < state.render.size())
             state.render[item.first] = item.second;
-    IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
+    if (viewport) state.viewport = *viewport;
+    else if (D3D12Selected() && ownedWorldActive && c56WorldPassRan) state.viewport = c56WorldViewport;
+    else IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
         return renderer.read_embedded_viewport(state.viewport);
     }));
     const auto& pixel = GetConstantBuffers()->cb_ps_pixelshader.data;
@@ -248,7 +255,16 @@ bool CDX11::SubmitC74FixedFunction(D3DPRIMITIVETYPE type, const owned::FixedFunc
         std::shared_ptr<owned::SurfaceImage> surface;
         hr = !untextured && !device && boundParticleSurface ? OwnedRender::E1ParticleSurfaceImage(device.Get(),
             deviceContext.Get(), boundParticleSurface, surface) : S_OK;
-        if (SUCCEEDED(hr)) hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+        if (SUCCEEDED(hr) && c56WorldPassRan && ownedWorldActive && D3D12Selected()) {
+            if (!vertices || !count || (indexCount && !indices)) return false;
+            std::vector<owned::FixedFunctionVertex> verts(vertices, vertices+count);
+            std::vector<WORD> elements;
+            if (indexCount) elements.assign(indices,indices+indexCount);
+            hr=rendererFacade->QueueWorldDraw([type, verts=std::move(verts), elements=std::move(elements), state, surface](owned::Renderer& renderer) {
+                return renderer.draw_embedded_fixed_function(type,verts.data(),DWORD(verts.size()),
+                    elements.empty()?nullptr:elements.data(),DWORD(elements.size()),state,nullptr,surface.get());
+            });
+        } else if (SUCCEEDED(hr)) hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
             return renderer.draw_embedded_fixed_function(type, vertices, count,
                 indices, indexCount, state, texture, surface.get());
         });
@@ -506,14 +522,16 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
         hr = (boundFigureTextures[0] || boundParticleSurface) ? OwnedRender::E1ParticleSurfaceImage(device.Get(),
             deviceContext.Get(), boundParticleSurface, texture) : S_OK;
         if (SUCCEEDED(hr)) {
-            hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
-                // Drain the host's queued UI/native geometry before this
-                // immediate pass, preserving the proxy's submission order.
+            if (!view.particles || !view.count) return false;
+            std::vector<owned::GameParticle> particles(view.particles, view.particles + view.count);
+            auto packet = view;
+            packet.particles = nullptr;
+            hr = rendererFacade->QueueWorldDraw([packet, particles = std::move(particles), state, texture]
+                (owned::Renderer& renderer) mutable {
+                packet.particles = particles.data();
                 HRESULT flushed = renderer.has_pending_ui() ? renderer.flush_ui() : S_OK;
                 if (SUCCEEDED(flushed)) flushed = renderer.flush_native();
-                if (FAILED(flushed)) return flushed;
-                return renderer.draw_game_particles(view, state,
-                    texture.get());
+                return FAILED(flushed) ? flushed : renderer.draw_game_particles(packet, state, texture.get());
             });
             // c56 uses the same device, but its shaders/targets/state differ.
             // Restore the host bindings for subsequent figure draws.
@@ -532,7 +550,8 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
 
 owned::FixedState CDX11::CaptureC74EffectState()
 {
-    auto state = CaptureC56MaterialState();
+    const D3DVIEWPORT7 logical{0, 0, m_width, m_height, 0.f, 1.f};
+    auto state = CaptureC56MaterialState(D3D12Selected() ? &logical : nullptr);
     // c74 effect coordinates use logical host pixels, independent of render scale.
     state.viewport.dwX = state.viewport.dwY = 0;
     state.viewport.dwWidth = m_width; state.viewport.dwHeight = m_height;
@@ -544,7 +563,7 @@ HRESULT CDX11::PrepareC74Effect(bool requireWorld, bool useTexture, owned::Fixed
     if (!rendererFacade || !rendererFacade->FrameActive() || (requireWorld && !ownedWorldActive))
         return E_UNEXPECTED;
     state = CaptureC74EffectState();
-    HRESULT hr = rendererFacade->Visit([](owned::Renderer& renderer) {
+    HRESULT hr = rendererFacade->QueueWorldDraw([](owned::Renderer& renderer) {
         HRESULT flushed = renderer.has_pending_ui() ? renderer.flush_ui() : S_OK;
         return FAILED(flushed) ? flushed : renderer.flush_native();
     });
@@ -629,16 +648,24 @@ bool CDX11::SubmitC74Ribbon(const owned::EmbeddedRibbonInput& input)
 {
     owned::FixedState state; std::shared_ptr<owned::SurfaceImage> texture;
     HRESULT hr = PrepareC74Effect(!input.interface_pass, true, state, texture);
-    if (SUCCEEDED(hr)) hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
-        return renderer.draw_embedded_ribbon(input, state, texture.get());
-    });
+    if (SUCCEEDED(hr)) {
+        if (input.count && !input.points) return false;
+        std::vector<owned::GameRibbonPoint> points;
+        if (input.count) points.assign(input.points,input.points+input.count);
+        auto packet=input;
+        packet.points=nullptr;
+        hr=rendererFacade->QueueWorldDraw([packet,points=std::move(points),state,texture](owned::Renderer& renderer) mutable {
+            packet.points=points.data();
+            return renderer.draw_embedded_ribbon(packet,state,texture.get());
+        });
+    }
     return FinishC74Effect(hr, "ribbon_skipped");
 }
 bool CDX11::SubmitC74Selection(const owned::GameSelectionView& view)
 {
     owned::FixedState state; std::shared_ptr<owned::SurfaceImage> texture;
     HRESULT hr = PrepareC74Effect(true, false, state, texture);
-    if (SUCCEEDED(hr)) hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
+    if (SUCCEEDED(hr)) hr = rendererFacade->QueueWorldDraw([view, state](owned::Renderer& renderer) {
         return renderer.draw_game_selection(view, state, nullptr);
     });
     return FinishC74Effect(hr, "selection_skipped");
@@ -665,17 +692,29 @@ bool CDX11::FlushC74Prints()
     if (c74Prints.runs.empty()) return true;
     HRESULT hr = E_UNEXPECTED;
     if (ownedWorldActive && rendererFacade && rendererFacade->FrameActive())
-        hr = rendererFacade->Visit([&](owned::Renderer& renderer) { return renderer.draw_embedded_prints(c74Prints); });
+        hr = rendererFacade->QueueWorldDraw([batch = std::move(c74Prints)](owned::Renderer& renderer) mutable {
+            return renderer.draw_embedded_prints(batch);
+        });
     c74Prints.clear();
     return FinishC74Effect(hr, "terrain_print_run_skipped");
 }
 bool CDX11::SubmitC74CombatText(const owned::EmbeddedCombatTextInput& input)
 {
-    owned::FixedState state; std::shared_ptr<owned::SurfaceImage> texture;
+    if (!input.enabled || !input.count) return true;
+    if (!input.events) return FinishC74Effect(E_INVALIDARG, "combat_text_skipped");
+    owned::FixedState state;
+    std::shared_ptr<owned::SurfaceImage> texture;
     HRESULT hr = PrepareC74Effect(false, true, state, texture);
-    if (SUCCEEDED(hr)) hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
-        return renderer.draw_embedded_combat_text(input, state, texture.get());
-    });
+    if (SUCCEEDED(hr)) {
+        auto packet = input;
+        packet.events = nullptr;
+        std::vector<owned::EmbeddedCombatTextEvent> events(input.events, input.events + input.count);
+        hr = rendererFacade->QueueWorldDraw(
+            [packet, events = std::move(events), state, texture](owned::Renderer& renderer) mutable {
+                packet.events = events.data();
+                return renderer.draw_embedded_combat_text(packet, state, texture.get());
+            });
+    }
     return FinishC74Effect(hr, "combat_text_skipped");
 }
 
@@ -683,7 +722,7 @@ bool CDX11::BeginSimulation()
 {
     if (!rendererFacade || !rendererFacade->Ready()) return false;
     const auto access = ownedRenderer.LockFrame();
-    const HRESULT hr = rendererFacade->Visit([](owned::Renderer& renderer) {
+    const HRESULT hr = rendererFacade->OutputPending() ? rendererFacade->BeginOverlapSimulation() : rendererFacade->Visit([](owned::Renderer& renderer) {
         return renderer.begin_embedded_simulation();
     });
     IfFailedThrowHR(hr);
@@ -693,6 +732,7 @@ void CDX11::FinishSimulation() noexcept
 {
     if (!rendererFacade || !rendererFacade->Ready()) return;
     const auto access = ownedRenderer.LockFrame();
+    if (rendererFacade->OutputPending()) { rendererFacade->FinishOverlapSimulation(); return; }
     (void)rendererFacade->Visit([](owned::Renderer& renderer) {
         renderer.finish_embedded_frame();
         return S_OK;
@@ -701,6 +741,7 @@ void CDX11::FinishSimulation() noexcept
 
 void CDX11::BeginFrame()
 {
+    postWorldViewport = false;
     struct FailedPhase {
         CDX11& owner;
         bool complete = false;
@@ -728,6 +769,7 @@ void CDX11::BeginFrame()
 
 bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
 {
+    postWorldViewport = false;
     uint32_t skyConsumed = 0;
     c56WorldFigurePrimitives = 0;
     c56WorldFigureQueueFailed = 0;
@@ -754,10 +796,9 @@ void CDX11::SetC56HitTestFrame(bool begin)
             begin ? "begin" : "end", static_cast<unsigned long>(result));
 }
 
-void CDX11::RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals)
+void CDX11::RunC56WorldPass(OwnedRender::E1VisualInputs visuals)
 {
-    if (!ownedWorldActive || c56WorldPassRan || !rendererFacade)
-        return;
+    if (!ownedWorldActive || c56WorldPassRan || !rendererFacade) return;
     owned::FixedState frame;
     for (const auto& value : fake_dx7.render_state)
         if (value.first >= 0 && static_cast<std::size_t>(value.first) < frame.render.size())
@@ -768,41 +809,57 @@ void CDX11::RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals)
     const auto fogState = CaptureC56MaterialState();
     frame.render[D3DRENDERSTATE_FOGENABLE] = fogState.render[D3DRENDERSTATE_FOGENABLE];
     frame.render[D3DRENDERSTATE_FOGCOLOR] = fogState.render[D3DRENDERSTATE_FOGCOLOR];
-    bool owned = false;
-    const HRESULT pass = rendererFacade->Visit([&](owned::Renderer& renderer) {
-        // The owned-visual frame draws shadows, point lights and every claimed
-        // visual, and flushes the static set itself; without it (or when it
-        // was rejected before the flush) the static set is flushed here.
-        if (visuals)
-            owned = OwnedRender::E1RunOwnedVisualFrame(renderer, frame, *visuals);
-        HRESULT hr = S_OK;
-        if (!visuals || !OwnedRender::E1OwnedVisualFrameFlushedStatics())
-            hr = renderer.flush_native_static(frame, ownedWorldToClip);
-        if (SUCCEEDED(hr) && visuals && owned)
-            OwnedRender::E1DrawPhysicsDebris(renderer, frame, *visuals);
-        // Complete queued colour before the host draws remaining overlays.
-        if (SUCCEEDED(hr)) hr = renderer.flush_native();
-        if (FAILED(hr)) renderer.discard_native();
-        return hr;
-    });
-    if (FAILED(pass)) OwnedRender::E1OwnedVisualFrameNewDraw();
+    c56WorldViewport = fogState.viewport;
+    if (RuntimeDiagnostics::Enabled()) {
+        auto& timing = owned::frame_waits::worldPipeline;
+        timing.collect();
+        timing.begin = 0; timing.end = 0;
+    }
+    auto terrain = OwnedRender::E1CaptureTerrainDraw(false);
+    const DWORD producer = GetCurrentThreadId();
+    IfFailedThrowHR(rendererFacade->QueueWorldDraw(
+        [this, visuals = std::move(visuals), frame, clip = ownedWorldToClip, producer,
+         terrain = std::move(terrain)](owned::Renderer& renderer) {
+            OwnedRender::E1TerrainDrawScope scope(terrain);
+            if (RuntimeDiagnostics::Enabled()) owned::frame_waits::worldPipeline.begin = owned::frame_waits::now();
+            const bool drawn = OwnedRender::E1RunOwnedVisualFrame(renderer, frame, visuals);
+            HRESULT hr = S_OK;
+            if (!OwnedRender::E1OwnedVisualFrameFlushedStatics())
+                hr = renderer.flush_native_static(frame, clip);
+            if (SUCCEEDED(hr) && drawn) OwnedRender::E1DrawPhysicsDebris(renderer, frame, visuals);
+            if (SUCCEEDED(hr)) hr = renderer.flush_native();
+            if (RuntimeDiagnostics::Enabled()) owned::frame_waits::worldPipeline.end = owned::frame_waits::now();
+            const DWORD executor = GetCurrentThreadId();
+            const int state = (executor != producer ? 4 : 0) | (drawn ? 2 : 1);
+            if (state != c56WorldPassState) {
+                c56WorldPassState = state;
+                GameJournal::Event("RENDER","world_pass","owner=c56 owned_visual_frame=%s hr=%08lx producer_tid=%lu executor_tid=%lu",
+                    drawn ? "drawn":"rejected",static_cast<unsigned long>(hr),producer,executor);
+            }
+            return hr;
+        }, true));
     c56WorldPassRan = true;
     RefreshOwnedTargets();
     SetRenderStates();
-    // The native pass already captured surface identities in its packets.
-    // Only D3D11 restores immediate SRV bindings after the owned world pass.
     if (!D3D12Selected()) {
         for (UINT stage = 0; stage < boundFigureTextures.size(); ++stage) {
             ID3D11ShaderResourceView* resource = boundFigureTextures[stage].Get();
             deviceContext->PSSetShaderResources(stage, 1, &resource);
         }
     }
-    const int state = FAILED(pass) ? 3 : visuals ? (owned ? 2 : 1) : 0;
-    if (state != c56WorldPassState) {
-        c56WorldPassState = state;
-        GameJournal::Event("RENDER", "world_pass",
-            "owner=c56 owned_visual_frame=%s hr=%08lx", state == 2 ? "drawn" : state == 0 ? "not_requested" : "rejected", static_cast<unsigned long>(pass));
-    }
+}
+
+void CDX11::FinishWorldDraw() noexcept
+{
+    if (rendererFacade && ownedWorldActive) (void)rendererFacade->FinishWorldDraw();
+}
+
+void CDX11::ReportC56Visible(std::vector<std::int32_t> ids)
+{
+    IfFailedThrowHR(rendererFacade->QueueWorldDraw([ids = std::move(ids)](owned::Renderer&) {
+        for (auto id : ids) OwnedRender::E1ReportOwnedVisual(id);
+        return S_OK;
+    }));
 }
 
 bool CDX11::SubmitMovie(const void* owner, std::shared_ptr<const Video::Frame> frame,
@@ -911,12 +968,12 @@ void CDX11::SubmitC56PointLights(
 void CDX11::EndWorld()
 {
     FlushC74Prints();
+    // Each queued terrain pass owns its frame. FIFO orders world composition
+    // before interface rendering without blocking the producer at EndWorld.
     // Finish the same c56 world pass before the caller starts drawing the
     // interface. composite_world drains queued native geometry and performs
     // the renderer-owned world composition; Present remains the frame owner.
-    const HRESULT composite = rendererFacade->Visit([](owned::Renderer& renderer) {
-        return renderer.composite_world();
-    });
+    const HRESULT composite = rendererFacade->SubmitWorldBatch(owned::Renderer::EmbeddedBatch::composite);
     if (FAILED(composite))
         GameJournal::Event("ERROR", "world_composite", "operation=composite_world hr=%08lx",
             static_cast<unsigned long>(composite));
@@ -929,6 +986,7 @@ void CDX11::EndWorld()
     c56WorldFigurePrimitives = 0;
     c56WorldFigureQueueFailed = 0;
     ownedWorldActive = false;
+    postWorldViewport = D3D12Selected();
     RefreshOwnedTargets();
     SetRenderStates();
 }
@@ -936,15 +994,17 @@ void CDX11::EndWorld()
 void CDX11::BeginInterface()
 {
     // Interface-only 3D must follow world composition, just like the mission HUD.
-    IfFailedThrowHR(rendererFacade->Visit([](owned::Renderer& renderer) {
-        return renderer.composite_world();
-    }));
+    IfFailedThrowHR(rendererFacade->SubmitWorldBatch(owned::Renderer::EmbeddedBatch::composite));
+    postWorldViewport = D3D12Selected();
     RefreshOwnedTargets();
     SetRenderStates();
 }
 
 void CDX11::RefreshOwnedTargets()
 {
+    // D3D12 packets bind their own targets. Do not wait on a submitted
+    // world batch just to execute the D3D11 immediate-context rebind.
+    if (D3D12Selected()) return;
     IfFailedThrowHR(rendererFacade->Visit([](owned::Renderer& renderer) {
         return renderer.bind_embedded_targets();
     }));
@@ -971,9 +1031,10 @@ void CDX11::EndFrame(bool present)
         MakeScreenShot();
         m_bMakeScreenShot = false;
     }
-    IfFailedThrowHR(rendererFacade->Visit([](owned::Renderer& renderer) {
+    IfFailedThrowHR(rendererFacade->VisitKeepingBlits([](owned::Renderer& renderer) {
         return OwnedRender::E3QueueCursor(renderer, renderer.cursor_scale_percent(), renderer.load_cursor_wanted());
     }));
+    frameTiming.SealNativeQuery();
     const HRESULT presented = rendererFacade->EndFrame();
     frameTiming.End(SUCCEEDED(presented));
     if (SUCCEEDED(presented)) owned::frame_waits::frame.presented = true;
@@ -998,7 +1059,7 @@ void CDX11::EndFrame(bool present)
         rendererFacade->Visit([&](owned::Renderer& renderer) {
             passes = renderer.take_gpu_pass_report(&gpuWaits);
             fgActive = renderer.frame_generation_stats().active;
-            sceneThread = renderer.scene_mode();
+            sceneThread = renderer.embedded_render_thread_active();
             return S_OK;
         });
         const auto sample = frameTiming.Read();
@@ -1009,6 +1070,18 @@ void CDX11::EndFrame(bool present)
         if (RuntimeDiagnostics::Enabled()) GameJournal::Event("RENDER", "frame_waits",
             "backend=%s fg_active_at_report=%u scene_thread_at_report=%u window_ms=%llu %s %s", D3D12Selected() ? "d3d12" : "d3d11", unsigned(fgActive), unsigned(sceneThread),
             now - lastGpuPassReport, cpuWaits.c_str(), gpuWaits.c_str());
+        auto& pipeline = owned::frame_waits::pipeline;
+        auto& worldTiming = owned::frame_waits::worldPipeline;
+        worldTiming.collect();
+        GameJournal::Event("RENDER","world_pipeline","samples=%llu next_terrain_overlap=%llu overlap_ms=%.3f terrain_layout_reused=%llu next_sector_rows=%llu",
+            worldTiming.samples, worldTiming.overlapped, worldTiming.overlapMs, worldTiming.reused, worldTiming.sectorRows);
+        worldTiming.sectorRows = 0;
+        worldTiming.samples = worldTiming.overlapped = worldTiming.reused = 0;
+        worldTiming.overlapMs = 0;
+        GameJournal::Event("RENDER","pipeline_overlap","samples=%llu overlap=%llu encode=%llu overlap_ms=%.3f encode_ms=%.3f draw=%llu draw_ms=%.3f layer_packets=%llu",
+            pipeline.frames,pipeline.overlapped,pipeline.encoding,pipeline.overlapMs,pipeline.encodingMs,pipeline.drawing,pipeline.drawMs,pipeline.layerPackets);
+        pipeline.frames=pipeline.overlapped=pipeline.encoding=pipeline.drawing=pipeline.layerPackets=0;
+        pipeline.overlapMs=pipeline.encodingMs=pipeline.drawMs=0;
         lastGpuPassReport = now;
     }
     IfFailedThrowHR(presented);
@@ -1045,7 +1118,13 @@ void CDX11::ClearColorBuffer(DWORD value)
 
 void CDX11::ClearZBuffer(DWORD dwValue)
 {
-    float depth = float(dwValue);
+    const float depth = float(dwValue);
+    if (postWorldViewport && rendererFacade->FrameActive()) {
+        IfFailedThrowHR(rendererFacade->QueueWorldDraw([depth](owned::Renderer& renderer) {
+            return renderer.clear_embedded_targets(nullptr, &depth);
+        }));
+        return;
+    }
     IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
         return renderer.clear_embedded_targets(nullptr, &depth);
     }));
@@ -1054,11 +1133,7 @@ void CDX11::ClearZBuffer(DWORD dwValue)
 BOOL CDX11::BindTexture(DWORD dwIndex, ID3D11ShaderResourceView *pTexture,
                           std::uint64_t surfaceId)
 {
-    bool nativeD3D12 = false;
-    if (!rendererFacade || FAILED(rendererFacade->Visit([&](owned::Renderer& renderer) {
-        nativeD3D12 = renderer.d3d12_backend();
-        return S_OK;
-    }))) return FALSE;
+    const bool nativeD3D12 = D3D12Selected();
     if (nativeD3D12) {
         // Completed CPU surfaces have an identity without a D3D11 SRV.
         // Reject raw SRVs before changing the previously bound texture.
@@ -1109,6 +1184,7 @@ HRESULT CDX11::BlitPublishedSurface(std::uint64_t surfaceId,
 
 CDX11::~CDX11()
 {
+    if (rendererFacade) (void)rendererFacade->FinishWorldDraw();
     Video::SetMovieRenderer(nullptr); // Clear all movie sources before the device.
     owned::camp_inventory_shutdown_icons();
     owned::camp_inventory_set_popup_sink(nullptr,nullptr);

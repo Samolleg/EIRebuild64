@@ -84,6 +84,8 @@ private:
     bool campPopupActive = false, campPopupFailed = false;
     std::array<float, 16> ownedWorldToClip{};
     bool c56WorldPassRan = false;
+    bool postWorldViewport = false;
+    D3DVIEWPORT7 c56WorldViewport{};
     int c56WorldPassState = -1;
     std::unique_ptr<OwnedSpriteBatch> spriteBatch;
     std::unique_ptr<DirectX::CommonStates> m_states;
@@ -111,7 +113,9 @@ public:
     bool BeginWorld(const EIRenderWorldFrameV2& frame);
     void EndWorld();
     void BeginInterface();
-    void RunC56WorldPass(const OwnedRender::E1VisualInputs* visuals = nullptr);
+    void RunC56WorldPass(OwnedRender::E1VisualInputs visuals);
+    void FinishWorldDraw() noexcept;
+    void ReportC56Visible(std::vector<std::int32_t> ids);
     void SetC56HitTestFrame(bool begin);
     void SubmitC56PointLights(const std::vector<owned::RetainedWorldPointLight>& lights,
                               double worldTime);
@@ -120,7 +124,7 @@ public:
     bool FrameGenerationFps(double& output, double& real);
     void ClearColorBuffer(DWORD value);
     void ClearZBuffer(DWORD value);
-    owned::FixedState CaptureC56MaterialState();
+    owned::FixedState CaptureC56MaterialState(const D3DVIEWPORT7* viewport = nullptr);
     bool SubmitC74FixedFunction(D3DPRIMITIVETYPE type, const owned::FixedFunctionVertex* vertices, DWORD count,
         const WORD* indices, DWORD indexCount, const SHMatrix& projection, bool untextured = false);
     bool SubmitC56ScreenRectangle(const owned::ScreenRectangleRequest& request);

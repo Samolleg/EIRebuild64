@@ -1152,6 +1152,7 @@ HRESULT Renderer::begin_embedded_simulation(){
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
  if(!d3d12_)return S_FALSE;
  if(embedded_d3d12_failed_)return E_FAIL;
+ if(embedded_output_pending())return embedded_d3d12_.prepare_next_simulation();
  return embedded_d3d12_.begin_simulation(configured_integer(debug_overlay_.config(),"reflex",0));
 #else
  return S_FALSE;
@@ -1159,7 +1160,8 @@ HRESULT Renderer::begin_embedded_simulation(){
 }
 void Renderer::finish_embedded_frame(){
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
- if(d3d12_)embedded_d3d12_.finish_render();
+ if(embedded_output_pending())embedded_d3d12_.cancel_next_simulation();
+ else if(d3d12_)embedded_d3d12_.finish_render();
 #endif
 }
 
@@ -1252,6 +1254,9 @@ HRESULT Renderer::begin_engine_frame_at(std::uint64_t world_epoch){
 }
 void Renderer::begin_scene(){
  if(!ready())return;
+#ifdef EID3D11_EMBEDDED
+ set_scene_mode(configured_boolean(debug_overlay_.config(),"render_thread",true));
+#endif
  begin_scene_game();
  if(scene_queue()){scene_post_command(scene_cmd::BeginScene{});return;}
  begin_scene_renderer();
@@ -1723,7 +1728,7 @@ void Renderer::update_status_notice(const char* reset_notice){
 // publications are taken here when no remote frame snapshot was supplied.
 #if !defined(EID3D11_SHADER_EMBED)
 HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
- struct PlanFrameEnd{FramePlan& plan;~PlanFrameEnd(){plan.begin_frame();}} plan_frame_end{frame_plan_};
+ struct PlanFrameEnd{FramePlan& plan;bool transferred=false;~PlanFrameEnd(){if(!transferred)plan.begin_frame();}} plan_frame_end{frame_plan_};
  const std::int64_t recorder_present_entry=inputs?inputs->recorder_present_entry:
   placed_hitch_profile_.active()?perf_now():0;
  OuterFrameTimingSnapshot outer_timing{};
@@ -1784,10 +1789,41 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  CampDecoration camp_frame;
  if(camp_inventory_take_decoration(camp_frame))queue_camp_decoration(camp_frame);
 #endif
- if(SUCCEEDED(hr)){transition_profile_pass("ui_composition");hr=render_pending_blits();}
- if(FAILED(hr)){bridge_report_event("present_step_failed","step=render_pending_blits (D3D12)");return hr;}
- if(FAILED(hr=draw_hud_asset_frames(inputs?&inputs->hud_frames:nullptr))){bridge_report_event("present_step_failed","step=hud_asset_frames (D3D12)");return hr;}
- transition_profile_pass("present_bookkeeping");
+ if(FAILED(hr))return hr;
+ // These two layers normally need no host answer before submission. Own the
+ // panel measurements now. Any intervening screen reader or overlay consumes
+ // this packet before it draws; the ordinary frame replays it on the worker.
+ std::vector<HudAssetFrame> panelFrames;
+ if(inputs)panelFrames=inputs->hud_frames;else widescreen_hud_asset_frames(panelFrames);
+ auto drawHud=[this,panels=std::move(panelFrames)]() -> HRESULT {
+  transition_profile_pass("ui_composition");
+  auto result=render_pending_blits();
+  if(SUCCEEDED(result))result=draw_hud_asset_frames(&panels);
+  transition_profile_pass("present_bookkeeping");
+  return result;
+ };
+ bool hudPending=true;
+ auto flushHud=[&]() -> HRESULT {
+  if(!hudPending)return S_OK;
+  hudPending=false;
+  return drawHud();
+ };
+ bool holdHud=false;
+#ifdef EID3D11_EMBEDDED
+ holdHud=embedded_render_thread_active() && !inputs && !frame_generation_mode_ && !fg_frame_image_ &&
+  !bridge_live_wants_capture() && !profiler_.capture_active() && !placed_hitch_profile_.active() &&
+  !harness_enabled() && !debug_overlay_.first_run_pending() && !load_picture_this_frame_ &&
+  !load_reveal_holding_ && !load_reveal_tracking_ && load_reveal_epoch_==bridge_current_world_epoch();
+ if(RuntimeDiagnostics::Enabled()){
+  const unsigned reason=(!embedded_render_thread_active()?1u:0u)|(inputs?2u:0u)|
+   (frame_generation_mode_||fg_frame_image_?4u:0u)|(bridge_live_wants_capture()||profiler_.capture_active()?8u:0u)|
+   (placed_hitch_profile_.active()||harness_enabled()?16u:0u)|(debug_overlay_.first_run_pending()?32u:0u)|
+   (load_picture_this_frame_||load_reveal_holding_||load_reveal_tracking_?64u:0u)|(load_reveal_epoch_!=bridge_current_world_epoch()?128u:0u);
+  static unsigned previous=~0u;
+  if(reason!=previous){previous=reason;char msg[72];std::snprintf(msg,sizeof(msg),"hold=%u reason_mask=%u",unsigned(holdHud),reason);bridge_report_event("pipeline_layout",msg);}
+ }
+#endif
+ if(!holdHud && FAILED(hr=flushHud()))return hr;
  if(debug_overlay_.initialized())debug_overlay_.maintain();
  if(debug_overlay_.first_run_pending()){AmbientWorldSource world;if(bridge_ambient_world_source(world)&&world.terrain)debug_overlay_.open_first_run_settings();}
  // Before the overlay, so a harness screenshot is the game's image (as on D3D11).
@@ -1803,6 +1839,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  // back buffer. The captured frame already stalls for its diagnostics; its
  // normal_frame.json is the frame before.
  if(profiler_.capture_active()&&!profiler_.capture_directory().empty()){
+  if(FAILED(hr=flushHud()))return hr;
   std::string detail;
   if(!write_harness_screenshot(profiler_.capture_directory()+"\\ui_composition.bmp",detail))
    bridge_report_event("d3d12_capture",("F11 image not written: "+detail).c_str());
@@ -1863,6 +1900,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  if(debug_overlay_.graphics_reset_notice_pending()){AmbientWorldSource world;
   reset_notice=debug_overlay_.graphics_reset_notice(bridge_ambient_world_source(world)&&world.terrain);}
  update_status_notice(reset_notice);
+ OverlayDrawPacket overlayPacket;
  const bool overlay_visible=debug_overlay_.initialized()&&debug_overlay_.visible();
  const bool telemetry_wanted=debug_overlay_.initialized()&&debug_overlay_.mode()!=DebugOverlayMode::hidden;
  if(telemetry_wanted!=system_telemetry_active_){system_telemetry_.set_active(telemetry_wanted);system_telemetry_active_=telemetry_wanted;}
@@ -1871,21 +1909,26 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  const auto requested_debug_view=debug_overlay_.config().debug_resource_view();
  if(debug_overlay_.mode()==DebugOverlayMode::full&&debug_view_availability.available(requested_debug_view)){
   transition_profile_pass("debug_resource_view");
+  if(FAILED(hr=flushHud()))return hr;
   const HRESULT debug_hr=render_debug_resource_view(requested_debug_view,debug_overlay_.mode());
   if(FAILED(debug_hr)||debug_hr==kD3D12Dropped)d3d12_->omit("debug_resource_view (draw failed)",false);
  }
  if(debug_overlay_.initialized()&&debug_overlay_pass_needed(overlay_visible||combat_ui_has_output(),
     debug_overlay_.has_status_notice()||debug_overlay_.has_harness_banner()||widescreen_hud_hovered(HudPanel::game_speed),!critters_summary_.labels.empty()||native_impostor_debug_)){
-  transition_profile_pass("debug_overlay");
+  if(!hudPending)transition_profile_pass("debug_overlay");
   RendererResourceSnapshot presented{};presented.present_interval_ms=present_interval_ms_;presented.present_smoothed_ms=present_smoothed_ms_;
   presented.fg_presented_fps=frame_generation_mode_?fg_presented_fps_:0.0;presented.fg_real_fps=frame_generation_mode_?fg_real_fps_:0.0;
   presented.fg_mode=frame_generation_mode_;
   impostor_debug_labels(presented.impostor_labels);
   presented.fg_auto_off_fps=frame_generation_mode_&&fg_low_rate_?std::max(1,configured_integer(debug_overlay_.config(),"frame_generation_min_fps",30)):0;
   debug_overlay_.render(profiler_.latest_snapshot(),bridge_latest_profile(),presented,
-                        debug_view_availability,&profiler_,debug_shadow_info());
+                        debug_view_availability,&profiler_,debug_shadow_info(),hudPending?&overlayPacket:nullptr);
+  if(overlayPacket.requiresHost){
+   if(FAILED(hr=flushHud()))return hr;
+   transition_profile_pass("debug_overlay");overlayPacket.replay();overlayPacket.replay={};
+  }
  }
- PendingBlit generated_cursor{};bool generated_cursor_wanted=false;
+ PendingBlit generated_cursor{},lastCursor{};bool generated_cursor_wanted=false,lateCursor=false;
  if(cursor_pending_){
   cursor_pending_=false;
   if(!debug_overlay_.captures_input()){
@@ -1897,12 +1940,24 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
    // report cursor lag with frame generation. FSR takes generated-frame UI
    // from the real back buffer, so its cursor is the real frame's either way.
    if(generated){try{generated_cursor=pending_cursor_;generated_cursor_wanted=true;}catch(const std::bad_alloc&){}}
+   if(hudPending){lastCursor=std::move(pending_cursor_);lateCursor=true;}
+   else {
    try{pending_blits_.push_back(std::move(pending_cursor_));}catch(const std::bad_alloc&){return E_OUTOFMEMORY;}
    if(FAILED(hr=render_pending_blits())){bridge_report_event("present_step_failed","step=cursor_composition (D3D12)");return hr;}
+   }
   }
   pending_cursor_={};
  }
+ auto flushLayers=[&]() -> HRESULT {
+  const HRESULT ui=flushHud();
+  if(FAILED(ui))return ui;
+  if(overlayPacket.replay){transition_profile_pass("debug_overlay");overlayPacket.replay();overlayPacket.replay={};}
+  if(!lateCursor)return S_OK;
+  pending_blits_.push_back(std::move(lastCursor));lateCursor=false;
+  return render_pending_blits();
+ };
  if(!harness_overlay_shot_.empty()){
+  if(FAILED(hr=flushLayers()))return hr;
   std::string detail;const bool ok=write_harness_screenshot(harness_overlay_shot_,detail);
   if(inputs){harness_complete_entry(inputs->harness_entry_id,ok,detail+" (after the overlay: critter labels on)");harness_completed_entry_=inputs->harness_entry_id;}
   else harness_complete(ok,detail+" (after the overlay: critter labels on)");
@@ -1925,6 +1980,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  }
  const bool temporal_request=(f11_capture||harness_request==HarnessRequest::capture)&&shadow_temporal_diagnostic_enabled();
  if(temporal_request){
+  if(FAILED(hr=flushLayers()))return hr;
   UINT sw=0,sh=0,levels=0;DXGI_FORMAT format=DXGI_FORMAT_UNKNOWN;
   const bool armed=world_d3d12_&&shadow12_.maps&&
    d3d12_->texture_info(*shadow12_.maps,sw,sh,levels,format)&&
@@ -1937,6 +1993,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
   frame_statistics_.reset();
  }
  if(!temporal_request&&(f11_capture||harness_request==HarnessRequest::profile)){
+  if(FAILED(hr=flushLayers()))return hr;
    const bool recorder_requested=f11_capture?placed_hitch_profile_enabled():
     harness_request==HarnessRequest::profile;
   const bool timing_supported=bridge_outer_frame_timing_supported();
@@ -2028,7 +2085,14 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  apply_load_reveal();
  // The game's gamma ramp over the finished frame, cursor included (after the
  // load reveal, as apply_gamma_ramp on D3D11).
- if(FAILED(apply_gamma_ramp_d3d12()))d3d12_->omit("gamma_ramp (D3D12 pass failed)",false);
+ bool deferOutput=false;
+#ifdef EID3D11_EMBEDDED
+ deferOutput=embedded_render_thread_active() && !frame_generation_mode_ && !generated &&
+     !inputs && !bridge_live_wants_capture() && !placed_hitch_profile_.active() &&
+     !profiler_.capture_active();
+#endif
+ if(!deferOutput && FAILED(hr=flushLayers()))return hr;
+ if(!deferOutput && FAILED(apply_gamma_ramp_d3d12()))d3d12_->omit("gamma_ramp (D3D12 pass failed)",false);
 #ifdef EID3D11_EMBEDDED
  if(bridge_live_wants_capture())bridge_live_capture_d3d12(*d3d12_,native_frame_index_);
 #endif
@@ -2051,14 +2115,14 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  if(frame_generation_mode_==2)d3d12_->set_fsr_hudless(fsr_prepared_?fsr_hudless_d3d12():nullptr);
  fsr_prepared_=false;
  update_frame_generation_rates();
- profiler_.end_frame(presentation.sync_interval,0);
- // The final presentation owner applies the output cap (both images with FG).
- hr=d3d12_->present(presentation.sync_interval,frame_limit);
+ const auto syncInterval=presentation.sync_interval;
+ const auto gameFrame=inputs?inputs->game_frame:fa_game_frame_;
+ auto complete=[this,syncInterval,gameFrame,recorder_armed_this_present,recorder_present_entry,outer_timing](HRESULT hr) -> HRESULT {
  const std::int64_t recorder_present_return=placed_hitch_profile_.active()?perf_now():0;
 #ifdef EID3D11_EMBEDDED
  if(SUCCEEDED(hr))embedded_d3d12_presented_=true;
 #endif
- profiler_.present_return(output_width_,output_height_,presentation.sync_interval,0,hr);
+ profiler_.present_return(output_width_,output_height_,syncInterval,0,hr);
  if(placed_hitch_profile_.active()){
   if(FAILED(hr)){
    finish_placed_hitch_profile(PlacedHitchFinishReason::present_failed);
@@ -2105,9 +2169,50 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  frame_acct::g_presentation_frame.store(presentation_frame_index_,std::memory_order_relaxed);
  // Render scale and upscaler option changes take effect between frames (apply_render_scale).
  apply_upscaler_mode_d3d12();
- finish_harness_path_row(inputs?inputs->game_frame:fa_game_frame_,nullptr);
+ finish_harness_path_row(gameFrame,nullptr);
  pending_screen_rectangles_.clear();
  return FAILED(trim_hr)?trim_hr:hr;
+ };
+#ifdef EID3D11_EMBEDDED
+ if(deferOutput){
+  // One submitted frame may outlive EndFrame. Reconcile its HRESULT and
+  // renderer bookkeeping before the next device access, including resize.
+  embedded_present_completion_=[this,complete=std::move(complete),overlayLease=overlayPacket.replay](HRESULT hr){
+   struct ResetPlan{FramePlan& plan;~ResetPlan(){plan.begin_frame();}} reset{frame_plan_};
+   return complete(hr);
+  };
+  frame_waits::pipeline_post();
+  if(RuntimeDiagnostics::Enabled()){
+   frame_waits::pipeline.drawingLayers=hudPending;
+   if(hudPending)++frame_waits::pipeline.layerPackets;
+  }
+  const bool posted=scene_thread_->post([this,syncInterval,frame_limit,hudPending,drawHud=std::move(drawHud),
+                                          lateCursor,cursor=std::move(lastCursor),overlay=std::move(overlayPacket.replay)]() mutable {
+   if(RuntimeDiagnostics::Enabled())frame_waits::pipeline.start=frame_waits::now();
+   HRESULT result=E_FAIL;
+   try {
+    result=hudPending?drawHud():S_OK;
+    if(SUCCEEDED(result)&&overlay){transition_profile_pass("debug_overlay");overlay();}
+    if(SUCCEEDED(result)&&lateCursor){pending_blits_.push_back(std::move(cursor));result=render_pending_blits();}
+    if (RuntimeDiagnostics::Enabled() && hudPending)
+     frame_waits::pipeline.layersDone=frame_waits::now();
+    if(SUCCEEDED(result)){
+     if(FAILED(apply_gamma_ramp_d3d12()))d3d12_->omit("gamma_ramp (D3D12 pass failed)",false);
+     profiler_.end_frame(syncInterval,0);
+     result=d3d12_->present(syncInterval,frame_limit);
+    }
+   }catch(const std::bad_alloc&){result=E_OUTOFMEMORY;}catch(...){result=E_FAIL;}
+   if(RuntimeDiagnostics::Enabled())frame_waits::pipeline.finish=frame_waits::now();
+   embedded_scene_result_=result;
+  },true,"embedded_frame_output");
+  if(!posted){embedded_present_completion_={};return E_OUTOFMEMORY;}
+  plan_frame_end.transferred=true;
+  embedded_scene_pending_=true;
+  return S_OK;
+ }
+#endif
+ profiler_.end_frame(syncInterval,0);
+ return complete(d3d12_->present(syncInterval,frame_limit));
 }
 
 #endif // !EID3D11_SHADER_EMBED
@@ -2116,13 +2221,15 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
  if(d3d12_){
   struct FinishPhase {
    EmbeddedD3D12& owner;
-   ~FinishPhase(){owner.finish_render();}
-  } finish_phase{embedded_d3d12_};
+   Renderer& renderer;
+   ~FinishPhase(){if(!renderer.embedded_present_completion_)owner.finish_render();}
+  } finish_phase{embedded_d3d12_,*this};
   if(embedded_d3d12_failed_)return E_FAIL;
   HRESULT hr;
   try{hr=present_frame_d3d12(inputs);}
   catch(const std::bad_alloc&){hr=E_OUTOFMEMORY;}
   catch(...){hr=E_FAIL;}
+  if(embedded_present_completion_)return hr;
   const HRESULT removed=embedded_d3d12_.device_removed_reason();
   const char* reason=embedded_d3d12_.failure();
   if(FAILED(removed))return fail_embedded_d3d12("device removed during frame",removed,reason);

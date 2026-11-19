@@ -347,8 +347,7 @@ HRESULT E1BlitPublishedSurface(owned::Renderer& renderer, ID3D11Device* device,
         owned::SurfaceImage image;
         const HRESULT copied = E1CopyCpuSurface(id, image);
         if (copied != S_OK) return copied == S_FALSE ? E_PENDING : copied;
-        const HRESULT hr = renderer.blit(image, destination, source, color_key, interface_space, native_canvas);
-        return FAILED(hr) ? hr : renderer.flush_ui();
+        return renderer.blit_embedded_snapshot(image, destination, source, color_key, interface_space, native_canvas);
     }
     if (!device || !context || !id) return E_INVALIDARG;
     Microsoft::WRL::ComPtr<ID3D11Device> contextDevice;

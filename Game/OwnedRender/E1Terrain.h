@@ -1,5 +1,6 @@
 #pragma once
 #include "engine_bridge.h"
+#include "retained_static_scene.h"
 #include "owned_terrain_front_end.h"
 #include "owned_terrain_decode.h"
 
@@ -14,6 +15,25 @@ bool E1CurrentTerrainSource(owned::RetainedTerrainSourceSnapshot& output) noexce
 // Simulation reads the current world source outside render-frame admission.
 bool E1PhysicsTerrainSource(owned::RetainedTerrainSourceSnapshot& output) noexcept;
 std::shared_ptr<const owned::TerrainAtlasSnapshot> E1CaptureTerrainAtlases();
+// A posted terrain pass holds the camera packet, wind/phase values and material
+// that were published for it. The native decoder cache belongs to the renderer.
+struct E1TerrainDrawInputs {
+    owned::RetainedTerrainSourceSnapshot source;
+    std::shared_ptr<const owned::OwnedTerrainFramePacket> view;
+    std::shared_ptr<const std::vector<std::shared_ptr<const owned::OwnedTerrainDynamicSector>>> sectors;
+    std::array<float,16> transform{};
+    owned::NativeOwnedFixedState material{};
+    bool transparent = false;
+};
+E1TerrainDrawInputs E1CaptureTerrainDraw(bool transparent) noexcept;
+class E1TerrainDrawScope {
+    const E1TerrainDrawInputs* previous;
+public:
+    explicit E1TerrainDrawScope(const E1TerrainDrawInputs& inputs) noexcept;
+    ~E1TerrainDrawScope();
+    E1TerrainDrawScope(const E1TerrainDrawScope&) = delete;
+};
+void E1StageNextTerrainView() noexcept;
 bool E1ShadowTerrain(owned::EmbeddedVisualFrameInputs& inputs,
     owned::RetainedTerrainSourceSnapshot& pinned) noexcept;
 void E1PublishTerrainAtlases(const void* owner, const std::vector<std::uint64_t>& surfaces) noexcept;

@@ -1138,6 +1138,7 @@ public:
     // S_FALSE borrows active rendering (or selects D3D11). S_OK gives
     // the caller ownership of the corresponding finish boundary.
     HRESULT begin_embedded_simulation();
+    bool embedded_output_pending() const noexcept { return bool(embedded_present_completion_); }
     void finish_embedded_frame();
     HRESULT begin_engine_frame();
     HRESULT retire_embedded_world();
@@ -1570,6 +1571,8 @@ public:
     void invalidate_camp_popup() noexcept;
     void reset_camp_popup() noexcept;
     HRESULT flush_ui();
+    HRESULT blit_embedded_snapshot(const SurfaceImage&,const RECT&,const RECT*,const DDCOLORKEY*,bool interfaceSpace,bool nativeCanvas);
+    HRESULT finish_embedded_blit_run() { return embedded_blit_run_ ? flush_ui() : S_OK; }
     // Scene mode, game thread: whether UI work the game thread queued may still
     // be pending on the scene thread (it cannot read the scene's queues).
     bool has_pending_ui() const noexcept { return scene_queue() ? scene_ui_pending_ : (!pending_blits_.empty() || cursor_pending_); }
@@ -1606,7 +1609,14 @@ public:
     // points that touch renderer state begin with SCENE_ENTRY, so an
     // unconverted caller stays correct, only synchronous (each such reason is
     // logged once as render_thread_sync and counted in the summary).
+    HRESULT finish_embedded_scene_commands() noexcept;
+    enum class EmbeddedBatch { geometry, composite, end_scene };
+    HRESULT queue_embedded_batch(EmbeddedBatch batch);
+    using EmbeddedDraw = std::function<HRESULT(Renderer&)>;
+    HRESULT queue_embedded_draw(EmbeddedDraw draw, bool startWorld = false);
+    bool embedded_render_thread_active() const noexcept { return scene_thread_ && scene_thread_->running(); }
     bool scene_mode() const noexcept { return scene_mode_.load(std::memory_order_acquire); }
+    bool embedded_worker_idle() const noexcept { return !scene_thread_ || scene_thread_->idle(); }
     bool on_scene_thread() const noexcept { return scene_thread_ && scene_thread_->on_thread(); }
     bool scene_queue() const noexcept { return scene_mode() && !on_scene_thread() && !scene_inline_; }
     // Game thread: drains the scene thread (reason non-null and queuing) and
@@ -3277,6 +3287,9 @@ private:
     // at a frame boundary, with the scene thread drained.
     std::unique_ptr<SceneThread> scene_thread_;
     std::atomic<bool> scene_mode_{false};
+    std::function<HRESULT(HRESULT)> embedded_present_completion_;
+    bool embedded_scene_pending_ = false; // written by the frame producer only
+    HRESULT embedded_scene_result_ = S_OK; // worker writes; producer reads after sync
     // ---- Core mode state (x86 game process; renderer_game.cpp) ----------------
     bool core_mode_ = false;
     std::uint64_t core_present_serial_ = 0;      // presents sent (the host publishes presents_done)
@@ -4742,6 +4755,7 @@ private:
     std::string sky_status_state_;
     bool ao_ambient_written_=false,ao_pipeline_failed_=false; // a world batch wrote the ambient share this frame
     std::vector<PendingBlit> pending_blits_;
+    bool embedded_blit_run_=false;
     PendingBlit pending_cursor_;
     bool cursor_pending_ = false;
     ComPtr<ID3D11Texture2D> camp_art_texture_;

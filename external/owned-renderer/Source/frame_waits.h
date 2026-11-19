@@ -3,6 +3,7 @@
 #include <windows.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdio>
 #include <mutex>
 #include <string>
@@ -25,6 +26,63 @@ inline double milliseconds(LONGLONG ticks) noexcept {
     }();
     return ticks * 1000.0 / frequency;
 }
+// Native output is bounded to one in flight. The next logic step can start
+// before the prior frame has finished encoding/submitting its command list.
+struct PipelineTiming {
+    std::atomic<unsigned long long> frame{0};
+    std::atomic<LONGLONG> start{0},submitted{0},finish{0},layersDone{0};
+    std::atomic<bool> drawingLayers{false};
+    unsigned long long frames=0,overlapped=0,encoding=0,drawing=0,layerPackets=0;
+    double overlapMs=0,encodingMs=0,drawMs=0;
+};
+// QPC intervals use a common clock across both threads. World and staging
+// are paired before publishing another opaque pass; never count FIFO wait as draw.
+struct WorldPipelineTiming {
+    std::atomic<LONGLONG> begin{0}, end{0};
+    LONGLONG stageBegin=0, stageEnd=0;
+    unsigned long long samples=0, overlapped=0, reused=0, sectorRows=0;
+    double overlapMs=0;
+    void collect() noexcept {
+        if (!stageBegin) return;
+        const auto first=begin.load(), last=end.load();
+        if (first && last) {
+            ++samples;
+            const auto ticks=(std::min)(last,stageEnd)-(std::max)(first,stageBegin);
+            if (ticks>0) { ++overlapped; overlapMs+=milliseconds(ticks); }
+        }
+        stageBegin=stageEnd=0;
+    }
+};
+inline WorldPipelineTiming worldPipeline;
+inline PipelineTiming pipeline;
+inline void pipeline_post() noexcept {
+    if(!RuntimeDiagnostics::Enabled())return;
+    pipeline.layersDone=0; pipeline.drawingLayers=false; pipeline.start=0; pipeline.submitted=0; pipeline.finish=0; ++pipeline.frame;
+}
+class PreparationInterval {
+    const bool enabled=RuntimeDiagnostics::Enabled();
+    unsigned long long frame=enabled?pipeline.frame.load():0;
+    LONGLONG begin=frame?now():0;
+public:
+    ~PreparationInterval() {
+        if(!frame || pipeline.frame!=frame)return;
+        const auto end=now(), start=pipeline.start.load();
+        ++pipeline.frames;
+        if(!start)return;
+        const auto intersection=[&](LONGLONG stop) {
+            return (std::max)(0LL,(std::min)(end,stop?stop:end)-(std::max)(start,begin));
+        };
+        const auto elapsed=intersection(pipeline.finish.load());
+        const auto encoding=intersection(pipeline.submitted.load());
+        if(elapsed){++pipeline.overlapped;pipeline.overlapMs+=milliseconds(elapsed);}
+        if(pipeline.drawingLayers){
+            const auto layers=intersection(pipeline.layersDone.load());
+            if(layers){++pipeline.drawing;pipeline.drawMs+=milliseconds(layers);}
+        }
+        if(encoding){++pipeline.encoding;pipeline.encodingMs+=milliseconds(encoding);}
+    }
+};
+
 struct Frame {
     bool active = false, presented = false;
     Category category = logic;

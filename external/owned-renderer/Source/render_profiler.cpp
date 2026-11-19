@@ -1552,24 +1552,29 @@ std::string RenderProfiler::take_gpu_pass_report(std::string* frame_waits) {
         if (p95) return values[(95 * n + 99) / 100 - 1];
         return n % 2 ? values[n / 2] : (values[n / 2 - 1] + values[n / 2]) * 0.5;
     };
-    struct Row { std::string name; double median, p95; JournalPass* pass; };
+    const auto frameMean = [&](const std::vector<double>& times) {
+        double sum = 0;
+        for (double ms : times) sum += ms;
+        return journal_totals_.empty() ? 0.0 : sum / double(journal_totals_.size());
+    };
+    struct Row { std::string name; double median, p95, frameMean; JournalPass* pass; };
     std::vector<Row> rows;
     for (auto& pass : journal_passes_)
         rows.push_back({pass.first, percentile(pass.second.ms, false),
-                        percentile(pass.second.ms, true), &pass.second});
+                        percentile(pass.second.ms, true), frameMean(pass.second.ms), &pass.second});
     std::sort(rows.begin(), rows.end(), [](const Row& a, const Row& b) {
-        return a.median != b.median ? a.median > b.median : a.name < b.name;
+        return a.frameMean != b.frameMean ? a.frameMean > b.frameMean : a.name < b.name;
     });
     char text[256];
-    std::snprintf(text, sizeof(text), "valid_n=%zu invalid_n=%llu sum_gpu_ms_median=%.3f sum_gpu_ms_p95=%.3f passes=%zu top=[",
+    std::snprintf(text, sizeof(text), "valid_n=%zu invalid_n=%llu sum_gpu_ms_median=%.3f sum_gpu_ms_p95=%.3f sum_gpu_ms_mean=%.3f passes=%zu top=[",
         journal_totals_.size(), static_cast<unsigned long long>(journal_invalid_),
-        percentile(journal_totals_, false), percentile(journal_totals_, true), rows.size());
+        percentile(journal_totals_, false), percentile(journal_totals_, true), frameMean(journal_totals_), rows.size());
     std::string result(text);
     for (size_t i = 0; i < (std::min)(size_t(20), rows.size()); ++i) {
         const auto& row = rows[i];
-        std::snprintf(text, sizeof(text), "%s{name=\"%s\",median_ms=%.3f,p95_ms=%.3f,n=%zu,draws=%llu,triangles=%llu}",
+        std::snprintf(text, sizeof(text), "%s{name=\"%s\",median_ms=%.3f,p95_ms=%.3f,n=%zu,draws=%llu,triangles=%llu,mean_frame_ms=%.4f}",
             i ? "," : "", row.name.c_str(), row.median, row.p95, row.pass->ms.size(),
-            static_cast<unsigned long long>(row.pass->draws), static_cast<unsigned long long>(row.pass->triangles));
+            static_cast<unsigned long long>(row.pass->draws), static_cast<unsigned long long>(row.pass->triangles), row.frameMean);
         result += text;
     }
     result += "]";

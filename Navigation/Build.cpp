@@ -1305,6 +1305,7 @@ std::shared_ptr<Geometry> LoadSources(Bytes bytes,std::array<double,3>* stages) 
         auto& tiles=g->objectTiles[id];for(unsigned j=0;j<count;++j){const int x=int(w.U()),z=int(w.U());tiles.emplace(x,z);}
     }
     Require(w.at==w.bytes.size(),"Nav64: trailing source bytes");
+    g->IndexSurfaceCells();
     if(stages)*stages={unpackMs,arrayMs,ms(unpacked)-arrayMs};return g;
 }
 void IndexSources(Geometry& g,float width) {
@@ -1330,6 +1331,7 @@ void IndexSources(Geometry& g,float width) {
             z1=std::min(nz-1,int(std::floor((-c.y*.3f+border-g.minimum.z)/width)));
         for(int z=z0;z<=z1;++z)for(int x=x0;x<=x1;++x){g.tileCeilings[{x,z}].push_back(std::uint32_t(i));g.objectTiles[c.object].emplace(x,z);}
     }
+    g.IndexSurfaceCells();
 }
 void IndexConnectivity(Mesh& mesh) {
     auto& parents=mesh.components;parents.clear();

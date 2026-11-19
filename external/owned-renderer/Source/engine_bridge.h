@@ -1784,6 +1784,11 @@ struct BridgeFrameValues {
     bool world_draw_active = false;  // queued inside the outer World::Draw
     std::uint64_t world_epoch = 0;   // lifecycle positive world epoch when queued
     std::shared_ptr<const TerrainAtlasSnapshot> terrain_atlases;
+#ifdef EID3D11_EMBEDDED
+    std::uint64_t host_world_generation = 0;
+    NativeWorldLighting host_lighting{};
+    bool host_lighting_valid = false;
+#endif
 };
 // False means the host has not published a complete queue snapshot.
 bool bridge_capture_frame_values(BridgeFrameValues& values) noexcept;
@@ -2232,7 +2237,7 @@ struct RetainedTerrainSourceSnapshot;
 struct OwnedTerrainFramePacket;
 struct OwnedTerrainDynamicSector;
 struct EmbeddedVisualFrameInputs {
-    bool (*complete_visuals)(RetainedVisualFrame& frame) = nullptr;
+    std::shared_ptr<const RetainedVisualFrame> completed_visuals;
     // Synchronous completed host terrain, owned by the caller for this draw.
     const RetainedTerrainSourceSnapshot* terrain_source = nullptr;
     const OwnedTerrainFramePacket* terrain_frame = nullptr;
@@ -2252,8 +2257,8 @@ struct EmbeddedVisualFrameInputs {
     NativeWorldLighting lighting{};
     bool lighting_valid = false;
     // Terrain fog alpha at a world position (0 fogged, 255 clear).
-    BYTE (*fog)(void* context, const float* position) = nullptr;
-    void* fog_context = nullptr;
+    BYTE (*fog)(const void* context, const float* position) = nullptr;
+    const void* fog_context = nullptr;
 };
 struct EmbeddedVisualOmission {
     std::int32_t id = 0;
@@ -2263,6 +2268,9 @@ struct EmbeddedVisualOmission {
 // the retained scene claims, for the current world draw.
 // drawn receives the IDs of the visuals this frame drew (colour submitted).
 const EmbeddedVisualFrameInputs* bridge_embedded_visual_inputs() noexcept;
+void bridge_release_embedded_world_locals() noexcept;
+void bridge_sample_embedded_visuals(double time, bool briefing, std::int32_t hover_id,
+    std::uint64_t hover_serial, RetainedVisualFrame& output);
 bool bridge_embedded_owned_visual_frame(const EmbeddedVisualFrameInputs& inputs,
                                         std::vector<std::int32_t>* drawn = nullptr,
                                         std::vector<EmbeddedVisualOmission>* omitted = nullptr) noexcept;

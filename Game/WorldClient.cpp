@@ -79,6 +79,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "dx11/RendererDX11.h"
 #include "dx11/OwnedWorldInputs.h"
 #include "OwnedRender/E1World.h"
+#include "OwnedRender/E1Terrain.h"
 #include "OwnedRender/E1Scene.h"
 #include "OwnedRender/E1VisualFrame.h"
 #include "OwnedRender/E3Combat.h"
@@ -109,6 +110,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include <list>
 #include <vector>
 #include <iterator>
+#include <memory_resource>
+#include <unordered_set>
 using std::copy_if;
 using std::find_if;
 using std::for_each;
@@ -3032,6 +3035,12 @@ BOOL CWorldClient::Draw()
     fog.fog = {ownedWorld.fog_range[0], ownedWorld.fog_range[1], ownedWorld.fog_range[2],
         ownedWorld.fog_projection[2], ownedWorld.fog_projection[1], ownedWorld.fog_projection[0]};
     OwnedRender::E1WorldDraw worldDraw(this, ownedRenderGeneration, frameValues);
+    // On an exceptional exit the scene must release its borrowed terrain
+    // before worldDraw retires that generation.
+    struct WorldLease {
+        CDX11* device;
+        ~WorldLease() { device->FinishWorldDraw(); }
+    } worldLease{pRend->GetD3D()};
     OwnedRender::E2LoadRevealFrame(owned::bridge_current_world_epoch(),
         theWorldServer.GetServerMode() == SERV_MODE_LOCAL && theWorldServer.IsMapLoaded() &&
         theWorldServer.curInterface == IFACE_MISSION,
@@ -3066,18 +3075,20 @@ BOOL CWorldClient::Draw()
         // Visibility and interpolated positions have just been prepared by
         // Prepare3DScene. Source rows are copied before the liquid/effect passes.
         OwnedWorldInputs::Scene scene;
-        const bool drawUndetected=!theSettings.nDrawVisibleOnly || (pPlayer && pPlayer->curInterface!=IFACE_MISSION);
-        const float night=GetNightPowerSlow();
-        {
+        auto& renderer = pRend->GetD3D()->GetOwnedRenderer();
+        const bool hasSourceHost = renderer.HasSourceHost();
+        if (hasSourceHost) {
+            const float night = GetNightPowerSlow();
             CorePerf::Scope coreWalk(CorePerf::SceneObjectWalk);
-            for(auto* object:objects)scene.Add(object,drawUndetected,GetPlayer(),night);
-            for(const auto& hero:heroes)scene.Add(hero,drawUndetected,GetPlayer(),night);
+            for(auto* object:objects)scene.Add(object,ownedDrawUndetected,GetPlayer(),night);
+            for(const auto& hero:heroes)scene.Add(hero,ownedDrawUndetected,GetPlayer(),night);
         }
         CorePerf::Scope coreSubmit(CorePerf::SceneSubmit);
-        scene.Lights(GetLightManager());scene.Submit(pRend->GetD3D()->GetOwnedRenderer(),ownedRenderGeneration);
+        scene.Lights(GetLightManager(), hasSourceHost);
+        if (hasSourceHost) scene.Submit(renderer, ownedRenderGeneration);
         pRend->GetD3D()->SubmitC56PointLights(scene.c56Lights, ownedWorld.world_time);
-        ownedPointLights=scene.c56Lights;
-        if(CheckFlag(WC_RENDER_TERRAIN))OwnedWorldInputs::Check(pRend->GetD3D()->GetOwnedRenderer().TerrainDrawn());
+        ownedPointLights = std::move(scene.c56Lights);
+        if (hasSourceHost && CheckFlag(WC_RENDER_TERRAIN)) OwnedWorldInputs::Check(renderer.TerrainDrawn());
     }
     coreParts.Stage(CorePerf::WorldVisualInputs);
     // Publish this draw's visibility and interpolated scene facts before c56
@@ -3095,6 +3106,19 @@ BOOL CWorldClient::Draw()
         retained.visual_publish_world_point_lights(ownedPointLights);
         retained.visual_commit_tick(double(GetSegmentTimeCounter()));
         OwnedRender::E1VisualInputs visuals;
+        {
+            CorePerf::Scope footprintTiming(CorePerf::FootprintInputs);
+            visuals.footprintsEnabled = theSettings.nTerrainEnableFootprints != 0;
+            try {
+                visuals.footprints.reserve(footprints.size());
+                for (const auto& print : footprints)
+                    visuals.footprints.push_back({&print, print.GetRemainingSegments(),
+                        print.GetFadeoutSegments(), !print.IsInvisible()});
+            } catch (const std::bad_alloc&) {
+                visuals.footprints.clear();
+                visuals.footprintsEnabled = false;
+            }
+        }
         visuals.time = GetPreciseTime();
         visuals.sceneFlags = GetFlags();
         visuals.drawUndetected = ownedDrawUndetected;
@@ -3115,10 +3139,8 @@ BOOL CWorldClient::Draw()
         visuals.sunDiffuse = frameValues.lighting.sunlight_diffuse;
         visuals.sunDirection = frameValues.lighting.sunlight_direction;
         visuals.lightingValid = frameValues.lightingValid;
-        visuals.fog = [](void* terrain, const float* p) -> unsigned char {
-            return static_cast<CTerrain*>(terrain)->GetObjectFogAlpha(CPlot3D(p[0], p[1], p[2]));
-        };
-        visuals.fogContext = pTerrain;
+        visuals.fog = &CTerrain::SampleObjectFog;
+        visuals.fogInputs = pTerrain->GetObjectFogInputs();
         if (CheckFlag(WC_RENDER_EFFECTS)) {
             visuals.debris = stoneEffects.Sample(float(GetRenderTimeSegments()-GetSegmentTimeCounter()), IsCombatPause() || IWorld.IsMissionCombatPause());
             visuals.debrisSurface = OwnedRender::E1SurfaceValue(stoneEffects.TextureSurface());
@@ -3130,8 +3152,16 @@ BOOL CWorldClient::Draw()
         }
         OwnedRender::E3CombatBeginFrame(IsCombatPause() || IWorld.IsMissionCombatPause());
         coreParts.Stage(CorePerf::WorldRender);
-        pRend->GetD3D()->RunC56WorldPass(&visuals);
-    }
+        auto completed = std::make_shared<owned::RetainedVisualFrame>();
+        owned::bridge_sample_embedded_visuals(visuals.time, visuals.briefingScreen,
+            visuals.hoverId, visuals.hoverSerial, *completed);
+        if (OwnedRender::E1CompleteVisualFrame(*completed)) {
+            OwnedRender::E1PublishGroundCoverFootprints(completed, visuals.footprints, visuals.footprintsEnabled);
+            visuals.completed = std::move(completed);
+        }
+        pRend->GetD3D()->RunC56WorldPass(std::move(visuals));
+        PrepareScreenPicking();
+    } else InvalidatePicking();
     coreParts.Stage(CorePerf::WorldOverlays);
     // Remaining overlays run after this draw's owned shadows and colour.
     Draw3DScene();
@@ -3180,6 +3210,7 @@ BOOL CWorldClient::Draw()
     ModCurseEncounter::Draw();
     coreParts.Stage(CorePerf::WorldFinish);
     DrawPolyLines();
+    OwnedRender::E1StageNextTerrainView();
     pRend->GetD3D()->EndWorld(); // compose world before flying HP and other UI
     // pop main and camera matrix
     pGPU->PopMatrix(MAT_STACK_VIEW2CLIP);
@@ -3426,7 +3457,9 @@ BOOL CWorldClient::Prepare3DScene()
     coreParts.Stage(CorePerf::PoseWalk);
     // Interaction lists are camera-local. Renderer shadow coverage consumes
     // every positive object below, independently of stock shadow lists.
-    std::set<int> prepared;
+    std::pmr::monotonic_buffer_resource poseScratch;
+    std::pmr::unordered_set<int> prepared(&poseScratch);
+    prepared.reserve(objects.size() + heroes.size());
     static std::uint64_t lastPublicationEpoch = 0;
     const auto publicationEpoch = OwnedRender::E1Scene().Epoch();
     const bool capturePublication = publicationEpoch && publicationEpoch != lastPublicationEpoch;
@@ -3483,43 +3516,38 @@ BOOL CWorldClient::Prepare3DScene()
             GameJournal::Event("RENDER", "world_visual_unclaimed_stages", "%s", details);
         }
     }
-    coreParts.Stage(CorePerf::FootprintInputs);
-    // Publish only footprints with a known creator and current native lifetime.
-    try
-    {
-        std::vector<OwnedRender::E1GroundCoverFootprintFact> facts;
-        facts.reserve(footprints.size());
-        for (const auto &print : footprints)
-            facts.push_back({&print, print.GetRemainingSegments(), print.GetFadeoutSegments(),
-                             !print.IsInvisible()});
-        OwnedRender::E1PublishGroundCoverFootprints(facts, theSettings.nTerrainEnableFootprints != 0);
-    }
-    catch (...)
-    {
-        OwnedRender::E1PublishGroundCoverFootprints({}, false);
-    }
     return TRUE;
+}
+// CPU picking only consumes screen rectangles already published by Prepare3DScene.
+void CWorldClient::PrepareScreenPicking()
+{
+    InvalidatePicking();
+    if (CheckFlag(WC_RENDER_OBJECTS))
+        for (auto* object : visibleLevers) AddScreenRects(object, &lstScreenObjects);
+    if (CheckFlag(WC_RENDER_UNITS))
+        for (auto* object : visibleUnits) AddScreenRects(object, &lstScreenObjects);
 }
 // Only remaining overlays: world object colour and shadows have no OpenEI draw.
 BOOL CWorldClient::Draw3DScene()
 {
-    InvalidatePicking();
     if (!pTerrain || !pTerrain->IsLoaded()) return FALSE;
     CRenderer *pRend = &theRenderer;
     CDXGeometryProcessor *pGPU = pRend->GetGPU();
-    auto record = [this](CMapObject* object, bool selectable) {
+    std::vector<std::int32_t> visibleIds;
+    auto record = [&](CMapObject* object) {
         if (object->CheckFlag(OBJ_HIDDEN) || !object->CheckFlag(OBJ_VISIBLE)) return;
-        OwnedRender::E1ReportOwnedVisual(object->GetID());
-        if (selectable) AddScreenRects(object, &lstScreenObjects);
+        visibleIds.push_back(object->GetID());
     };
     if (CheckFlag(WC_RENDER_OBJECTS)) {
-        for (auto* object : visibleObjects) record(object, false);
-        for (auto* object : visibleBuildings) record(object, false);
-        for (auto* object : visibleTrees) record(object, false);
-        for (auto* object : visibleLevers) record(object, true);
+        for (auto* object : visibleObjects) record(object);
+        for (auto* object : visibleBuildings) record(object);
+        for (auto* object : visibleTrees) record(object);
+        for (auto* object : visibleLevers) record(object);
     }
     if (CheckFlag(WC_RENDER_UNITS))
-        for (auto* object : visibleUnits) record(object, true);
+        for (auto* object : visibleUnits) record(object);
+
+    pRend->GetD3D()->ReportC56Visible(std::move(visibleIds));
 
     // draw terrain prints (footprints, blood and fireprints)
     if (!bloodprints.empty() || !footprints.empty() || !fireprints.empty())

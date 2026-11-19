@@ -5459,7 +5459,11 @@ FigureFallbackReason publish_retained_world_lighting(
 FigureFallbackReason publish_native_world_lighting(void* renderer) noexcept {
     // Scene thread: the game thread sampled and published the world light
     // when it queued this command; never read the game's renderer here.
-    if (g_scene_frame_values_installed)
+    if (g_scene_frame_values_installed
+#ifdef EID3D11_EMBEDDED
+        && !g_embedded_visual_inputs // this pass has captured light and its own native sink
+#endif
+    )
         return g_native_world_lighting_frame.sampled ? g_native_world_lighting_frame.result
                                                      : FigureFallbackReason::unavailable;
     if (!g_native_sink_context || !g_native_sink_world_lighting)
@@ -18421,22 +18425,23 @@ void capture_owned_world_shadow_inputs(void* scene,void* renderer,OwnedShadowInp
     in.shadow_source_revision=shadow_scene.shadow_source_revision();
     in.draw_undetected=!visible_only || interface_kind!=1;
     lighting_timing.finish();
+#ifndef EID3D11_EMBEDDED
     publish_highlight_state();
+#endif
     {
         CityRetainedOwnerGuard values_timing(CityRetainedOwner::visual_frame_values);
         const bool traced=startup_begin(StartupStage::visual_sample);
         g_owned_visual_world_frame.values.reset();
-        in.values=shadow_scene.visual_frame_value(in.time,g_bridge_sample.active && bridge_profile_enabled());
+        const bool diagnose = g_bridge_sample.active && bridge_profile_enabled();
 #ifdef EID3D11_EMBEDDED
-        if(g_embedded_visual_inputs) {
-            if(!in.values || !g_embedded_visual_inputs->complete_visuals)
-                throw "embedded_visual_values_unavailable";
-            auto completed=std::make_shared<RetainedVisualFrame>(*in.values);
-            if(!g_embedded_visual_inputs->complete_visuals(*completed))
-                throw "embedded_visual_values_rejected";
-            in.values=std::move(completed);
-        }
+        if (g_embedded_visual_inputs) {
+            in.values = g_embedded_visual_inputs->completed_visuals;
+            if (!in.values) throw "embedded_visual_values_unavailable";
+        } else
 #endif
+        {
+            in.values = shadow_scene.visual_frame_value(in.time, diagnose);
+        }
         startup_end(StartupStage::visual_sample,traced,"completed");
     }
 }
@@ -31534,6 +31539,10 @@ const BridgeFrameValues* bridge_embedded_installed_frame() noexcept {
 #endif
 
 void bridge_install_frame_values(const BridgeFrameValues& values) noexcept {
+#ifdef EID3D11_EMBEDDED
+    if (g_scene_frame_values_installed && g_scene_frame_values.world_epoch != values.world_epoch)
+        bridge_release_embedded_world_locals();
+#endif
     g_scene_frame_values = values;
     g_scene_frame_values_installed = true;
     g_bridge_frame_serial = values.frame_serial;
@@ -31693,20 +31702,23 @@ bool hud_embedded_submit_portrait(const EmbeddedHudPortraitInput& input,
         HudPublishedVisual texture;
         if (input.texture_name) {
             bool found = false;
-            if (!g_hud_visuals.resolve_texture(input.texture_name, input.placement, texture, found)) return false;
+            const auto* placement = input.whole_atlas ? nullptr : &input.placement;
+            if (!g_hud_visuals.resolve_texture(input.texture_name, placement, texture, found)) return false;
             if (!found && input.base_texture_name &&
-                !g_hud_visuals.resolve_texture(input.base_texture_name, input.placement, texture, found)) return false;
-            const auto& p = input.placement;
-            if (!texture.texture || !texture.texture->source || !p.atlas_width ||
-                !p.source_width || !p.source_height || texture.texture->width != p.source_width ||
-                texture.texture->height != p.source_height ||
-                std::uint64_t(p.destination_x)+p.copy_width>p.atlas_width ||
-                std::uint64_t(p.destination_y)+p.copy_height>p.atlas_width ||
-                std::uint64_t(p.source_x)+p.copy_width>p.source_width ||
-                std::uint64_t(p.source_y)+p.copy_height>p.source_height) return false;
-            if (!remap_hud_coordinates(view.texture_coordinates,view.texture_coordinate_count,
-                    p,view.u_shift,view.v_shift,coordinates)) return false;
-            view.texture_coordinates = coordinates.data(); view.u_shift=view.v_shift=0;
+                !g_hud_visuals.resolve_texture(input.base_texture_name, placement, texture, found)) return false;
+            if (!texture.texture || !texture.texture->source) return false;
+            if (placement) {
+                const auto& p = *placement;
+                if (!p.atlas_width || !p.source_width || !p.source_height ||
+                    texture.texture->width != p.source_width || texture.texture->height != p.source_height ||
+                    std::uint64_t(p.destination_x)+p.copy_width>p.atlas_width ||
+                    std::uint64_t(p.destination_y)+p.copy_height>p.atlas_width ||
+                    std::uint64_t(p.source_x)+p.copy_width>p.source_width ||
+                    std::uint64_t(p.source_y)+p.copy_height>p.source_height) return false;
+                if (!remap_hud_coordinates(view.texture_coordinates,view.texture_coordinate_count,
+                        p,view.u_shift,view.v_shift,coordinates)) return false;
+                view.texture_coordinates = coordinates.data(); view.u_shift=view.v_shift=0;
+            }
             for (const auto& mip:texture.texture->mips) {
                 if (std::uint64_t(mip.byte_offset)+mip.bytes>texture.texture->source->size()) return false;
                 mips.push_back({texture.texture->source->data()+mip.byte_offset,mip.width,mip.height,mip.bytes});
@@ -31720,6 +31732,27 @@ bool hud_embedded_submit_portrait(const EmbeddedHudPortraitInput& input,
         }
         return sink(context,view);
     } catch (...) { return false; }
+}
+
+void bridge_release_embedded_world_locals() noexcept {
+    reset_owned_visual_draw(nullptr);
+    decltype(g_owned_visual_prepared_spare)().swap(g_owned_visual_prepared_spare);
+    g_owned_terrain_frame = {};
+    g_scene_frame_values = {};
+    g_scene_frame_values_installed = false;
+}
+
+void bridge_sample_embedded_visuals(double time, bool briefing, std::int32_t hover_id,
+    std::uint64_t hover_serial, RetainedVisualFrame& output) {
+    RetainedHighlightState state;
+    state.show_selected = g_highlight_selected;
+    state.hover_characters = g_highlight_hover_characters;
+    state.hover_objects = g_highlight_hover_objects;
+    state.strip_preselected = briefing && !g_highlight_briefing;
+    state.hover = {hover_id, hover_serial};
+    auto& scene = retained_visual_scene();
+    scene.visual_publish_highlight(state);
+    scene.evaluate_visual_frame(time, g_bridge_sample.active && bridge_profile_enabled(), output);
 }
 
 const EmbeddedVisualFrameInputs* bridge_embedded_visual_inputs() noexcept { return g_embedded_visual_inputs; }

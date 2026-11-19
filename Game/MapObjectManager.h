@@ -6,6 +6,7 @@
 #include "adFormat.h"
 #include "UnitDatabase.h"
 
+#include <map>
 #include <vector>
 
 class CResourceBase;
@@ -15,6 +16,13 @@ class CMapObjectManager : public CResourceManager
 private:
     virtual LPGAMEBASE CreateInstant(ETypeIDs tidTypeID);
     BOOL ReadUnitsDatabase();
+
+    struct AnimationDatabaseSpan {
+        LPBYTE data = nullptr;
+        DWORD size = 0;
+    };
+    std::uint64_t databaseGeneration = 0;
+    std::map<std::string, AnimationDatabaseSpan> selectedDatabases;
 
 public:
     CMapObjectManager();

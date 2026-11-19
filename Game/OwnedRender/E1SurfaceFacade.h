@@ -15,7 +15,7 @@ inline HRESULT E1BlitPublishedSurface(RendererFacadeCore<Backend>& facade,
     std::uint64_t surfaceId, const RECT& destination, const RECT* source,
     const DDCOLORKEY* colorKey, bool interfaceSpace, bool nativeCanvas = true) noexcept {
     if (!facade.FrameActive()) return E_UNEXPECTED;
-    return facade.Visit([&](Backend& backend) {
+    return facade.VisitKeepingBlits([&](Backend& backend) {
         if constexpr (std::is_same_v<Backend, owned::Renderer>) {
             return E1BlitPublishedSurface(backend, sourceDevice, sourceContext,
                 surfaceId, destination, source, colorKey, interfaceSpace, nativeCanvas);

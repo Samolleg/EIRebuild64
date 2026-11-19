@@ -140,10 +140,10 @@ bool prepare_owned_terrain_source_view(const OwnedTerrainFramePacket& packet,
 }
 
 bool prepare_owned_terrain_world_record(const RetainedTerrainSourceSnapshot& source,
-    OwnedTerrainFramePacket& packet, const OwnedTerrainCommand& command,
+    const OwnedTerrainFramePacket& packet, const OwnedTerrainCommand& command,
     const OwnedTerrainDynamicSector* color, const NativeContribution& contribution,
     OwnedTerrainSourceDecodeContext& context, NativeGeometryView*& output,
-    bool alpha_coverage) {
+    bool alpha_coverage, OwnedTerrainFramePacket* counters) {
     output=nullptr;
     if (!contribution.known) return false;
     if (!contribution.color && !contribution.light_mask) return true;
@@ -154,9 +154,10 @@ bool prepare_owned_terrain_world_record(const RetainedTerrainSourceSnapshot& sou
     const auto& sector=source.terrain->sectors[command.source_sector];
     if (command.material>=sector.materials.size()) return false;
     NativeWorldBounds bounds{},world_bounds{};
-    if (!owned_terrain_spatial_bounds(packet,command,bounds,world_bounds) || !bounds.valid)
-        return false;
-    ++packet.spatial_record_reuses;
+    if (!owned_terrain_spatial_bounds(packet,command,bounds,world_bounds)) return false;
+    if (counters) ++counters->spatial_bounds_reuses;
+    if (!bounds.valid) return false;
+    if (counters) ++counters->spatial_record_reuses;
     OwnedTerrainDynamicSector geometry_only{};
     geometry_only.captured=true;
     geometry_only.animation=source.geometry->animation;

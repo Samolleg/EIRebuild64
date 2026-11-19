@@ -1276,6 +1276,24 @@ void Renderer::invalidate_camp_popup() noexcept{
  camp_popup_ready_=false;
 }
 
+// CPU-published surfaces are copied into PendingBlit or name a resident
+// generation. Never batch two versions of one source through the same GPU
+// cache entry: all views of a D3D12 UI batch are resolved before its draws.
+HRESULT Renderer::blit_embedded_snapshot(const SurfaceImage& source,const RECT& destination,
+    const RECT* rect,const DDCOLORKEY* key,bool interfaceSpace,bool nativeCanvas) {
+ const bool batch=d3d12_ && embedded_render_thread_active() && interfaceSpace;
+ if(batch && embedded_blit_run_ && std::any_of(pending_blits_.begin(),pending_blits_.end(),[&](const PendingBlit& prior){
+  return prior.source_is_surface && prior.source_id==source.id && prior.generation!=source.generation;
+ })){
+  const HRESULT hr=flush_ui();if(FAILED(hr))return hr;
+ }
+ const HRESULT result=blit(source,destination,rect,key,interfaceSpace,nativeCanvas);
+ if(FAILED(result))return result;
+ if(!batch)return flush_ui();
+ embedded_blit_run_=!pending_blits_.empty();
+ return result;
+}
+
 HRESULT Renderer::flush_ui(){
  if(scene_queue()){scene_ui_pending_=false;if(core_mode_){core_post_command(scene_ui::FlushUi{},"flush_ui");return S_OK;}scene_post_frame([this,command=scene_ui::FlushUi{}]{(void)command;report_scene_failure("flush_ui",flush_ui());});return S_OK;}
  SceneRendererTimingScope scene_timing(SceneRendererTimingKind::ui_flush);
@@ -1302,6 +1320,7 @@ void Renderer::write_ui_vertices(void* destination,const std::vector<UINT>& vert
 }
 
 HRESULT Renderer::render_pending_blits(){
+ embedded_blit_run_=false;
 #ifdef EID3D11_TESTING
  test_last_character_pane_draw_calls_=0;
 #endif

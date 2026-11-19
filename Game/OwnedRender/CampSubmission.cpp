@@ -6,13 +6,7 @@
 
 void CDX11::RestoreHostBindings()
 {
-    bool nativeD3D12 = false;
-    IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
-        nativeD3D12 = renderer.d3d12_backend();
-        return S_OK;
-    }));
-    // Native passes own their target, PSO and texture bindings.
-    if (nativeD3D12) return;
+    if (D3D12Selected()) return;
     RefreshOwnedTargets();
     SetRenderStates();
     for (UINT stage=0;stage<boundFigureTextures.size();++stage) {

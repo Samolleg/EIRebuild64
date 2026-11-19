@@ -2533,11 +2533,45 @@ bool DebugOverlay::process_combat_input(UINT message,WPARAM wparam,LPARAM lparam
     return implementation_ && implementation_->combat_ui.process_input(message,wparam,lparam);
 }
 
+namespace {
+struct OverlayLists {
+    ImDrawData data;
+    ~OverlayLists() { for (auto* list : data.CmdLists) IM_DELETE(list); }
+};
+bool captureOverlayDraw(ImDrawData& current, OverlayRenderer& renderer, OverlayDrawPacket& packet) {
+    // Texture changes and custom callbacks can refer back to the host. Flush
+    // preceding layers and execute those uncommon draws in their source call.
+    if (current.Textures) for (const auto* texture : *current.Textures)
+        if (texture->Status != ImTextureStatus_OK) return false;
+    for (const auto* list : current.CmdLists) for (const auto& command : list->CmdBuffer)
+        if (command.UserCallback && command.UserCallback != ImDrawCallback_ResetRenderState) return false;
+    auto copy=std::shared_ptr<OverlayLists>(new OverlayLists,[](OverlayLists* lists) {
+        std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
+        delete lists;
+    });
+    auto& data=copy->data;
+    data.Valid=current.Valid;
+    data.DisplayPos=current.DisplayPos; data.DisplaySize=current.DisplaySize;
+    data.FramebufferScale=current.FramebufferScale;
+    data.TotalVtxCount=current.TotalVtxCount; data.TotalIdxCount=current.TotalIdxCount;
+    data.CmdLists.reserve(current.CmdLists.Size);
+    for (const auto* list : current.CmdLists) {
+        auto* clone=list->CloneOutput();
+        data.CmdLists.push_back(clone);
+        for (auto& command : clone->CmdBuffer) command.TexRef=ImTextureRef(command.GetTexID());
+    }
+#ifndef IMGUI_DISABLE_OBSOLETE_FUNCTIONS
+    data.CmdListsCount=data.CmdLists.Size;
+#endif
+    packet.replay=[copy=std::move(copy),&renderer] { renderer.render(&copy->data); };
+    return true;
+}
+}
 HRESULT DebugOverlay::render(const RenderProfileSnapshot* profile,
                              const BridgeProfileSnapshot* bridge,
                              const RendererResourceSnapshot& resources,
                              const DebugResourceViewAvailability& debug_views,
-                             RenderProfiler* profiler, const DebugShadowInfo& shadows) {
+                             RenderProfiler* profiler, const DebugShadowInfo& shadows, OverlayDrawPacket* packet) {
     std::lock_guard<std::recursive_mutex> guard(debug_overlay_lock());
     if (!implementation_ || !implementation_->imgui) return E_UNEXPECTED;
     ImGui::SetCurrentContext(implementation_->imgui);
@@ -2655,7 +2689,14 @@ HRESULT DebugOverlay::render(const RenderProfileSnapshot* profile,
     }
     ImGui::Render();
 
-    if (renderer_) renderer_->render(ImGui::GetDrawData()); else ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+    if (packet && renderer_) {
+        auto* data=ImGui::GetDrawData();
+        if (data && !captureOverlayDraw(*data,*renderer_,*packet)) {
+            packet->requiresHost=true;
+            packet->replay=[this] { render_again(); };
+        }
+    } else if (renderer_) renderer_->render(ImGui::GetDrawData());
+    else ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
     rendered_frame_ = true;
     return S_OK;
 }

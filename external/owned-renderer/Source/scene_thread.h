@@ -48,7 +48,7 @@ public:
     SceneThread& operator=(const SceneThread&) = delete;
     ~SceneThread() { stop(); }
 
-    bool start() noexcept {
+    bool start(void (*releaseLocals)() noexcept = nullptr) noexcept {
         if (thread_) return true;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -57,6 +57,7 @@ public:
             presents_pending_ = 0;
             last_present_ = S_OK;
         }
+        release_locals_ = releaseLocals;
         exited_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (!exited_) return false;
         thread_ = CreateThread(nullptr, 0, &SceneThread::entry, this, 0, &thread_id_);
@@ -81,7 +82,7 @@ public:
             stop_ = true;
         }
         wake_.notify_all();
-        WaitForSingleObject(thread_, 30000);
+        WaitForSingleObject(thread_, INFINITE);
         CloseHandle(thread_);
         CloseHandle(exited_);
         thread_ = nullptr;
@@ -109,7 +110,7 @@ public:
         bool wake = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            queue_.push_back(command);
+            try { queue_.push_back(command); } catch (...) { delete command; return false; }
             if (present) ++presents_pending_;
             wake = waiting_;
         }
@@ -224,9 +225,14 @@ private:
             busy_ = false;
         }
         done_.notify_all();
+        // A world snapshot can own the last reference to a character physics
+        // worker. Its destructor joins another thread. Retire it here before
+        // Windows calls TLS destructors under the loader lock.
+        if (release_locals_) release_locals_();
         SetEvent(exited_);
     }
 
+    void (*release_locals_)() noexcept = nullptr;
     HANDLE thread_ = nullptr;
     HANDLE exited_ = nullptr;
     DWORD thread_id_ = 0;

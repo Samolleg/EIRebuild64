@@ -16,7 +16,7 @@ bool E1DrawPhysicsDebris(owned::Renderer& renderer,const owned::FixedState& inpu
     size_t count=0;
     for(const auto& stone:frame.debris) {
         const auto& p=stone.pose.position;const float position[]={p.x,p.y,p.z};
-        const unsigned char fog=frame.fog?frame.fog(frame.fogContext,position):0;
+        const unsigned char fog=frame.fog?frame.fog(frame.fogInputs,position):0;
         if(!fog||stone.alpha<=0)continue;
         const auto& m=frame.worldToClip;
         visible[count++]={&stone,m[12]*p.x+m[13]*p.y+m[14]*p.z+m[15],fog};

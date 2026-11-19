@@ -443,9 +443,17 @@ bool owned_terrain_render_command(const OwnedTerrainFramePacket& packet,
 bool owned_terrain_far_shadow_command(const OwnedTerrainFramePacket& packet,
     std::uint32_t sector,std::uint32_t material,std::uint8_t subparts,
     OwnedTerrainCommand& command) noexcept;
-bool owned_terrain_spatial_bounds(OwnedTerrainFramePacket& packet,
+bool owned_terrain_spatial_bounds(const OwnedTerrainFramePacket& packet,
     const OwnedTerrainCommand& command,NativeWorldBounds& local,
     NativeWorldBounds& world) noexcept;
+inline bool owned_terrain_spatial_bounds(OwnedTerrainFramePacket& packet,
+    const OwnedTerrainCommand& command,NativeWorldBounds& local,
+    NativeWorldBounds& world) noexcept {
+    const bool found = owned_terrain_spatial_bounds(static_cast<const OwnedTerrainFramePacket&>(packet),
+        command, local, world);
+    if (found) ++packet.spatial_bounds_reuses;
+    return found;
+}
 
 OwnedTerrainRangeAction decide_owned_terrain_range(
     OwnedTerrainFramePacket& packet,

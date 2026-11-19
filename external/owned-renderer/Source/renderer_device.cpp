@@ -3851,6 +3851,7 @@ Renderer::~Renderer() {
 
 void Renderer::release() {
 #ifdef EID3D11_EMBEDDED
+ (void)finish_embedded_scene_commands();
  embedded_sky().detach(this);
 #endif
  // Scene thread: run and present what is queued, end it; the game thread

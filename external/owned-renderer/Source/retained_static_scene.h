@@ -1038,6 +1038,7 @@ public:
     bool visual_reject_object_pose_if_current(
         const VisualObjectPublicationSnapshot& snapshot, RetainedVisualStatus reason,
         const char* predicate, const char* scope = "local_keep.object_pose") noexcept;
+    std::weak_ptr<const char> visual_neutral_pose_lease(VisualResourceIncarnation resource);
     bool visual_object_pose_current(VisualResourceIncarnation resource,
         const VisualObjectPose& values) const noexcept;
     bool visual_object_pose(VisualResourceIncarnation resource,
@@ -1064,6 +1065,9 @@ public:
         std::uint64_t* committed_entities = nullptr) noexcept;
     RetainedVisualFrame visual_frame(double time, bool diagnose = false) const;
     std::shared_ptr<const RetainedVisualFrame> visual_frame_value(double time, bool diagnose = false) const;
+    // A host completes units on its own mutable frame before publishing it.
+    // Populate that destination directly; the shared raw frame stays immutable.
+    void evaluate_visual_frame(double time, bool diagnose, RetainedVisualFrame& destination) const;
     void release_visual_frame_scratch() noexcept;
     RetainedShadowSourceChanges shadow_source_changes(std::uint64_t since) const;
     RetainedShadowSourceChanges shadow_source_changes(RetainedShadowConsumer consumer);
@@ -1135,6 +1139,7 @@ private:
         bool detection_unavailable = false;
         VisualObjectPose object_pose{};
         bool has_object_pose = false;
+        std::shared_ptr<const char> neutral_pose_lease;
         bool mesh_declared = false;
         std::vector<VisualBridgePlane> bridge_planes;
         std::uint64_t last_idle_event = 0;

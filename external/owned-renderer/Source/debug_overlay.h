@@ -10,6 +10,7 @@
 #include <d3d11.h>
 
 #include <cstddef>
+#include <functional>
 #include <cstdint>
 #include <array>
 #include <memory>
@@ -270,6 +271,11 @@ public:
     virtual void render(ImDrawData* data) = 0;
 };
 
+// Host input and layout are complete; only the native draw remains.
+struct OverlayDrawPacket {
+    std::function<void()> replay;
+    bool requiresHost = false;
+};
 class DebugOverlay {
 public:
     DebugOverlay();
@@ -329,7 +335,7 @@ public:
                    const RendererResourceSnapshot& resources,
                    const DebugResourceViewAvailability& debug_views = {},
                    RenderProfiler* profiler = nullptr,
-                   const DebugShadowInfo& shadows = {});
+                   const DebugShadowInfo& shadows = {}, OverlayDrawPacket* packet = nullptr);
     void maintain() noexcept;
     void release_confinement() noexcept;
     // Shared by HWND notifications and the game's direct active-message call.

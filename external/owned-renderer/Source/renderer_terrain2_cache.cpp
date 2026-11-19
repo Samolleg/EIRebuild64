@@ -338,7 +338,7 @@ void Renderer::update_terrain2_cache() noexcept try{
  const auto& config=debug_overlay_.config();
  const int mode=std::clamp(configured_integer(config,"terrain2_cache",1),0,2);
  const bool on=mode>0&&terrain2_table_count_>0&&native_world_clip_valid_&&
-  !terrain2_cache_failed_&&feature_level_>=D3D_FEATURE_LEVEL_11_0;
+  !terrain2_cache_failed_&&(d3d12_||feature_level_>=D3D_FEATURE_LEVEL_11_0);
  if(!on){
   if(terrain2_cache_fine_||terrain2_cache_coarse_||terrain2_cache_fine12_||terrain2_cache_coarse12_||terrain2_cache_on_)release_terrain2_cache();
   bind_terrain2_cache();return;

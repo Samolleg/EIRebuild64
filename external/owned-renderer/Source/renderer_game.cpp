@@ -180,7 +180,106 @@ void window_sampler_present(); // TEMPORARY (proxy.cpp)
 // Game thread, at a frame boundary only. On: the scene thread starts and
 // owns the renderer from the next queued command. Off: it drains, ends, and
 // the game thread owns the renderer again.
+HRESULT Renderer::finish_embedded_scene_commands() noexcept {
+ if(!embedded_scene_pending_)return S_OK;
+ const frame_waits::Scope wait(frame_waits::scene_sync);
+ scene_thread_->sync();
+ embedded_scene_pending_=false;
+ HRESULT result=embedded_scene_result_;
+ embedded_scene_result_=S_OK;
+#if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
+ if(embedded_present_completion_){
+  auto complete=std::move(embedded_present_completion_);
+  embedded_present_completion_={};
+  embedded_d3d12_.finish_render();
+  try {
+   result=complete(result);
+   const HRESULT removed=embedded_d3d12_.device_removed_reason();
+   if(FAILED(removed)||FAILED(result))
+    return fail_embedded_d3d12("deferred frame output",FAILED(removed)?removed:result,embedded_d3d12_.failure());
+  }catch(const std::bad_alloc&){return E_OUTOFMEMORY;}catch(...){return E_FAIL;}
+ }
+#endif
+ return result;
+}
+
+// Captured world and effect payloads stay in FIFO order. Frame values are
+// installed once before the opaque pass; effect commands inherit that context.
+HRESULT Renderer::queue_embedded_draw(EmbeddedDraw draw,bool startWorld) {
+ if(!embedded_render_thread_active())return draw(*this);
+ if(!d3d12_ && !startWorld){
+  const HRESULT prior=finish_embedded_scene_commands();
+  return FAILED(prior)?prior:draw(*this);
+ }
+ std::shared_ptr<BridgeFrameValues> values;
+ if(startWorld) {
+  values=std::make_shared<BridgeFrameValues>();
+  if(!bridge_capture_frame_values(*values))return E_FAIL;
+ }
+ const bool posted=scene_thread_->post([this,draw=std::move(draw),values=std::move(values)]() noexcept {
+  if(FAILED(embedded_scene_result_))return;
+  try {
+   if(values)bridge_install_frame_values(*values);
+   embedded_scene_result_=finish_embedded_blit_run();
+   if(SUCCEEDED(embedded_scene_result_))embedded_scene_result_=draw(*this);
+  } catch(const std::bad_alloc&){embedded_scene_result_=E_OUTOFMEMORY;}
+    catch(...){embedded_scene_result_=E_FAIL;}
+  if(FAILED(embedded_scene_result_))discard_native();
+ },false,startWorld?"embedded_world_pass":"embedded_effects");
+ if(!posted)return E_OUTOFMEMORY;
+ embedded_scene_pending_=true;
+ return d3d12_?S_OK:finish_embedded_scene_commands();
+}
+
+// These operations consume the renderer-owned native batch. Host pointers
+// used to build it have already been resolved; no caller stack is captured.
+HRESULT Renderer::queue_embedded_batch(EmbeddedBatch batch){
+ const auto record=[this,batch]() -> HRESULT {
+  if(batch!=EmbeddedBatch::end_scene){
+   const HRESULT flushed=finish_embedded_blit_run();if(FAILED(flushed))return flushed;
+  }
+  switch(batch){
+   case EmbeddedBatch::geometry: return flush_native();
+   case EmbeddedBatch::composite: return composite_world();
+   case EmbeddedBatch::end_scene: end_scene();return S_OK;
+  }
+  return E_INVALIDARG;
+ };
+ if(!embedded_render_thread_active())return record();
+ BridgeFrameValues values;
+ if(!bridge_capture_frame_values(values))return E_FAIL;
+ const bool posted=scene_thread_->post([this,record,values=std::move(values)]() noexcept {
+  if(FAILED(embedded_scene_result_))return;
+  try {
+   bridge_install_frame_values(values);
+   embedded_scene_result_=record();
+  } catch(const std::bad_alloc&){embedded_scene_result_=E_OUTOFMEMORY;}
+    catch(...){embedded_scene_result_=E_FAIL;}
+  if(FAILED(embedded_scene_result_))discard_native();
+ },batch==EmbeddedBatch::end_scene,"embedded_frame_batch");
+ if(!posted)return E_OUTOFMEMORY;
+ embedded_scene_pending_=true;
+ return S_OK;
+}
+
 void Renderer::set_scene_mode(bool active) noexcept{
+#ifdef EID3D11_EMBEDDED
+ // Embedded visitors pass live engine and UI pointers. Only captured,
+ // renderer-owned batches go to the worker, not the retail proxy protocol.
+ if(active==embedded_render_thread_active())return;
+ if(active){
+  if(!scene_thread_){try{scene_thread_=std::make_unique<SceneThread>();}catch(...){return;}}
+  if(!scene_thread_->start(&bridge_release_embedded_world_locals)){
+   bridge_report_event("render_thread_unavailable","cannot create embedded scene worker");
+   return;
+  }
+ }else{
+  (void)finish_embedded_scene_commands();
+  scene_thread_->stop();
+ }
+ bridge_report_event("render_thread",active?"active=1 owner=embedded":"active=0 owner=embedded");
+ return;
+#else
  if(active==scene_mode()||!device_)return;
  if(active){
   if(!swap_)return;
@@ -210,6 +309,7 @@ void Renderer::set_scene_mode(bool active) noexcept{
  }
  char detail[96];std::snprintf(detail,sizeof(detail),"active=%d frame=%llu",active?1:0,static_cast<unsigned long long>(presentation_frame_index_));
  bridge_report_event("render_thread",detail);
+#endif
 }
 
 // owned_exceptions.log beside this module (as proxy.cpp's exception lines);
@@ -310,6 +410,10 @@ void check(const frame_acct::Record& frame) noexcept {
 // queues this frame's present; it returns the previous Present result.
 HRESULT Renderer::present(){
  PERF06_SCOPE("present_total");
+#ifdef EID3D11_EMBEDDED
+ const HRESULT scene_result=finish_embedded_scene_commands();
+ if(FAILED(scene_result))return scene_result;
+#endif
  // The game thread's frame ends here (frame accounting); the present path
  // is charged to the next frame, outside its named steps as pf_other
  // (present_entry while the scene thread presents).
@@ -320,17 +424,18 @@ HRESULT Renderer::present(){
  frame_acct::set_root(frame_acct::game_other);
  const frame_acct::Scope frame_acct_scope(scene_mode()?frame_acct::present_entry:frame_acct::pf_other);
  #ifdef EID3D11_EMBEDDED
- const bool wanted=false;
+ // DXGI Present and the native window/overlay belong to the host thread.
+ return present_frame(nullptr);
  #else
  window_sampler_present();
  if(core_mode_)return core_present();
  const bool wanted=device_&&swap_&&configured_boolean(debug_overlay_.config(),"render_thread",true);
-#endif
  if(scene_mode()&&!wanted)set_scene_mode(false);
  if(scene_mode())return queue_present();
  const HRESULT hr=present_frame(nullptr);
  if(SUCCEEDED(hr)&&wanted)set_scene_mode(true);
  return hr;
+#endif
 }
 
 // Game thread, every queued present: the waits of the last 600 frames per

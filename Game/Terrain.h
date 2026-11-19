@@ -18,6 +18,7 @@ float SectorBackgroundInverseDepth();
 #include "SoundTypes.h"
 #include "ServerConsts.h"
 
+namespace owned { struct ObjectBorderFogInputs; }
 class CMaterial;
 class CTexture;
 class CShadowBuilder;
@@ -413,6 +414,8 @@ public:
 
     // Fog
     BYTE GetFogAlpha(const CPlot3D &plot) const;
+    owned::ObjectBorderFogInputs GetObjectFogInputs() const;
+    static BYTE SampleObjectFog(const owned::ObjectBorderFogInputs& inputs, const float* position);
     BYTE GetObjectFogAlpha(const CPlot3D &plot) const;
 
 private:

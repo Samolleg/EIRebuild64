@@ -20,6 +20,11 @@ namespace OwnedRender {
 template<class Backend>
 class RendererFacadeCore {
     Backend renderer;
+    HRESULT FinishSceneWork() noexcept {
+        if constexpr (std::is_same_v<Backend, owned::Renderer>)
+            return renderer.finish_embedded_scene_commands();
+        return S_OK;
+    }
     HWND window = nullptr;
     UINT outputWidth = 0;
     UINT outputHeight = 0;
@@ -54,6 +59,8 @@ public:
         if (frameActive) return DXGI_ERROR_INVALID_CALL;
         if (width == outputWidth && height == outputHeight) return S_FALSE;
         try {
+            const HRESULT work = FinishSceneWork();
+            if (FAILED(work)) return work;
             const HRESULT result = renderer.resize(width, height);
             if (SUCCEEDED(result)) {
                 outputWidth = width;
@@ -70,6 +77,8 @@ public:
         if (frameActive) return DXGI_ERROR_INVALID_CALL;
         try {
             const owned::frame_waits::Scope record(owned::frame_waits::record);
+            const HRESULT work = FinishSceneWork();
+            if (FAILED(work)) return work;
             renderer.begin_scene();
             frameActive = true;
             return S_OK;
@@ -83,7 +92,10 @@ public:
         frameActive = false;
         try {
             const owned::frame_waits::Scope record(owned::frame_waits::record);
-            renderer.end_scene();
+            if constexpr (std::is_same_v<Backend, owned::Renderer>) {
+                const HRESULT hr = renderer.queue_embedded_batch(owned::Renderer::EmbeddedBatch::end_scene);
+                if (FAILED(hr)) return hr;
+            } else renderer.end_scene();
             return renderer.present();
         } catch (...) {
             return E_FAIL;
@@ -97,11 +109,30 @@ public:
         frameActive = false;
         try {
             const owned::frame_waits::Scope record(owned::frame_waits::record);
+            HRESULT work = FinishSceneWork();
+            if constexpr (std::is_same_v<Backend, owned::Renderer>) {
+                if (SUCCEEDED(work)) work=renderer.finish_embedded_blit_run();
+            }
             renderer.end_scene();
-            return S_OK;
+            return work;
         } catch (...) {
             return E_FAIL;
         }
+    }
+
+    HRESULT QueueWorldDraw(owned::Renderer::EmbeddedDraw draw, bool startWorld = false) {
+        if (!initialized || !frameActive) return E_UNEXPECTED;
+        return renderer.queue_embedded_draw(std::move(draw), startWorld);
+    }
+    bool OutputPending() const noexcept { return renderer.embedded_output_pending(); }
+    bool OutputExecuting() const noexcept { return OutputPending() && !renderer.embedded_worker_idle(); }
+    HRESULT BeginOverlapSimulation() { return renderer.begin_embedded_simulation(); }
+    void FinishOverlapSimulation() { renderer.finish_embedded_frame(); }
+    HRESULT FinishWorldDraw() noexcept { return FinishSceneWork(); }
+
+    HRESULT SubmitWorldBatch(owned::Renderer::EmbeddedBatch batch) {
+        if (!initialized || !frameActive) return E_UNEXPECTED;
+        return renderer.queue_embedded_batch(batch);
     }
 
     bool Ready() const noexcept { return initialized; }
@@ -111,14 +142,27 @@ public:
     UINT Height() const noexcept { return outputHeight; }
 
     template<class Visitor>
-    HRESULT Visit(Visitor&& visitor) {
+    HRESULT VisitKeepingBlits(Visitor&& visitor) {
         if (!initialized) return E_UNEXPECTED;
         try {
             const owned::frame_waits::Scope record(owned::frame_waits::record);
+            const HRESULT work = FinishSceneWork();
+            if (FAILED(work)) return work;
             return visitor(renderer);
         } catch (...) {
             return E_FAIL;
         }
+    }
+
+    template<class Visitor>
+    HRESULT Visit(Visitor&& visitor) {
+        return VisitKeepingBlits([&](Backend& backend) -> HRESULT {
+            if constexpr (std::is_same_v<Backend, owned::Renderer>) {
+                const HRESULT flushed=backend.finish_embedded_blit_run();
+                if (FAILED(flushed)) return flushed;
+            }
+            return visitor(backend);
+        });
     }
 
     HRESULT VisitDevice(void* user, owned::EmbeddedDeviceVisitor visitor) {

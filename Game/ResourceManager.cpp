@@ -25,6 +25,7 @@ CResourceManager::~CResourceManager()
 // close all managed resources
 void CResourceManager::Destroy()
 {
+    ++resourceGeneration;
     OwnedRender::E3HudResourceChanged(this,true);
     // close all opened resources
     for (auto pos = resources.begin(); pos != resources.end(); ++pos)
@@ -41,6 +42,7 @@ void CResourceManager::Destroy()
 // add new resource file and open it
 BOOL CResourceManager::AddNewResource(LPCSTR pszResourceFileName)
 {
+    ++resourceGeneration;
     OwnedRender::E3HudResourceChanged(this);
     if (_access(ei::pak::ResolveArchivePath(pszResourceFileName).string().c_str(), 4) == -1) {
         std::vector<std::string> paths;bool ignore=false;
@@ -67,6 +69,7 @@ BOOL CResourceManager::AddNewResource(LPCSTR pszResourceFileName)
 // searching for resource and close it
 BOOL CResourceManager::CloseResource(LPCSTR pszResourceFileName)
 {
+    ++resourceGeneration;
     OwnedRender::E3HudResourceChanged(this);
     for (auto pos = resources.begin(); pos != resources.end(); ++pos)
     {
@@ -85,6 +88,7 @@ BOOL CResourceManager::CloseResource(LPCSTR pszResourceFileName)
 // close all opened resources
 BOOL CResourceManager::CloseResources()
 {
+    ++resourceGeneration;
     OwnedRender::E3HudResourceChanged(this);
     for (auto pos = resources.begin(); pos != resources.end(); ++pos)
     {
@@ -114,10 +118,15 @@ LPBYTE CResourceManager::GetFile(LPCSTR pszFileName, LPDWORD pnDataSize)
 /////////////////////////////////////////////////////////////////////////////////////
 bool CResourceManager::CloseFile(LPBYTE pFileImage)
 {
+    if (!ReleaseFileReference(pFileImage)) return false;
+    ++resourceGeneration;
+    return true;
+}
+bool CResourceManager::ReleaseFileReference(LPBYTE pFileImage)
+{
     for (auto pos = resources.begin(); pos != resources.end(); ++pos)
     {
-        if (pos->second->CloseFile(pFileImage) == true)
-            return true;
+        if (pos->second->CloseFile(pFileImage)) return true;
     }
     return false;
 }
@@ -136,6 +145,7 @@ BOOL CResourceManager::CheckFileExist(LPCSTR pszFileName)
 /////////////////////////////////////////////////////////////////////////////////////
 void CResourceManager::CloseAllFiles()
 {
+    ++resourceGeneration;
     for (auto pos = resources.begin(); pos != resources.end(); ++pos)
         pos->second->CloseAllFiles();
 }
@@ -172,6 +182,7 @@ BOOL CResourceManager::AddGraphicsResources(LPCSTR category)
                 return ReportError("Cannot open graphics archive %s", path.c_str());
             }
             OwnedRender::E3HudResourceChanged(this);
+            ++resourceGeneration;
             resources.push_back(CResourcePair(path, archive));
         }
         return TRUE;

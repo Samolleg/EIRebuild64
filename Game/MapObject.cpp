@@ -297,7 +297,7 @@ BOOL CMapObject::UpdateFrom(EUpdateType tip)
 /////////////////////////////////////////////////////////////////////////////////////
 void CMapObject::NewVerticalPos(float fpZ)
 {
-    cp.z = fpZ + GetWorldBase()->GetZValue(cp.x, cp.y);
+    SetCP(CPlot3D(cp.x, cp.y, fpZ + GetWorldBase()->GetZValue(cp.x, cp.y)));
 }
 /////////////////////////////////////////////////////////////////////////////////////
 // void CMapObject::SetRPGStats( SRPGCommonStats* lpRPGNewCommonStats )
