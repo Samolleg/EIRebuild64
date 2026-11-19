@@ -314,6 +314,8 @@ try {
         Copy-Item -LiteralPath (Join-Path $repo "out/x64/Release/$($target[0])/$($target[0]).pdb") -Destination (Join-Path $kit ($target[1] + '.pdb'))
     }
     Copy-Item -LiteralPath (Join-Path $repo 'out/x64/Release/EI_Rebuild/EI.RenderResources.dll') -Destination $kit
+    Copy-Item -LiteralPath (Join-Path $repo 'out/x64/Release/RenderModule/EI.Renderer.dll') -Destination $kit
+    Copy-Item -LiteralPath (Join-Path $repo 'out/x64/Release/RenderModule/RenderModule.pdb') -Destination (Join-Path $kit 'EI.Renderer.pdb')
     $ffmpegSource = Join-Path $kit 'sources/ffmpeg/9.0.2'
     $null = New-Item -ItemType Directory -Path $ffmpegSource
     $archive = Join-Path $project 'deps/ffmpeg/9.0.2/downloads/ffmpeg-9.0.2.tar.xz'

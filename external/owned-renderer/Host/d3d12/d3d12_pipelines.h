@@ -7,13 +7,10 @@
 #include "d3d12_core.h"
 
 #include <atomic>
-#include <condition_variable>
+#include "../../../../OwnedRenderer/Module/GraphicsApi.h"
 #include <cstdint>
-#include <deque>
 #include <memory>
-#include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace d3d12 {
@@ -59,50 +56,23 @@ public:
     bool save(std::string& reason, bool* written = nullptr);
     // The last write: session pipelines in the file, how many the new library
     // refused (non-zero: the loaded library was written instead), file bytes.
-    std::uint32_t saved_count() const noexcept { return saved_count_; }
-    std::uint32_t save_refused() const noexcept { return save_refused_; }
-    std::size_t saved_bytes() const noexcept { return saved_bytes_; }
-    std::vector<DWORD> thread_ids() {
-        std::vector<DWORD> ids;
-        for (auto& worker : workers_) ids.push_back(GetThreadId(worker.native_handle()));
-        return ids;
-    }
-    std::uint32_t loaded() const noexcept { return loaded_; }
-    std::uint32_t created() const noexcept { return created_; }
+    std::uint32_t saved_count() const noexcept { return stats().saved; }
+    std::uint32_t save_refused() const noexcept { return stats().refused; }
+    std::size_t saved_bytes() const noexcept { return stats().savedBytes; }
+    std::vector<DWORD> thread_ids();
+    std::uint32_t loaded() const noexcept { return stats().loaded; }
+    std::uint32_t created() const noexcept { return stats().created; }
 
 private:
-    struct Entry {
-        std::wstring name;
-        bool compute = false;
-        D3D12_GRAPHICS_PIPELINE_STATE_DESC graphics{};
-        D3D12_COMPUTE_PIPELINE_STATE_DESC compute_desc{};
-        ComPtr<ID3D12PipelineState> pipeline;
-        std::string error;
-        bool done = false;
-        double milliseconds = 0.0;
-    };
-    std::uint32_t enqueue(std::unique_ptr<Entry> entry);
-    void work();
-    void build(Entry& entry);
-    void publish_startup_progress();  // mutex_ held
-
-    ID3D12Device* device_ = nullptr;
-    ComPtr<ID3D12Device1> device1_;
-    std::uint32_t saved_count_ = 0, save_refused_ = 0;
-    std::size_t saved_bytes_ = 0;
-    std::vector<char> library_bytes_;  // the library reads from this for its lifetime: declared first, freed last
-    ComPtr<ID3D12PipelineLibrary> library_;
-    std::wstring path_;
-    std::mutex library_mutex_;
-    mutable std::mutex mutex_;
-    std::condition_variable work_ready_, work_done_;
-    std::vector<std::unique_ptr<Entry>> entries_;
-    std::deque<std::uint32_t> queue_;
-    std::uint32_t outstanding_ = 0;
-    std::atomic<std::uint64_t>* startup_progress_ = nullptr;
-    bool stop_ = false, dirty_ = false;
-    std::atomic<std::uint32_t> loaded_{0}, created_{0};
-    std::vector<std::thread> workers_;
+    EiPipelineSetV1* set_ = nullptr;
+    EiPipelineStatsV1 stats() const noexcept {
+        EiPipelineStatsV1 value{};
+        if (set_) set_->stats(&value);
+        return value;
+    }
+    Pipelines(const Pipelines&) = delete;
+    Pipelines& operator=(const Pipelines&) = delete;
+public:
+    Pipelines() = default;
 };
-
 } // namespace d3d12

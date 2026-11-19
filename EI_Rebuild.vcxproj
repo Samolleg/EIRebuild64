@@ -622,6 +622,7 @@
     <ProjectReference Include="ScriptCompilerCore\ScriptCompilerCore.vcxproj">
       <Project>{B09F21A4-D437-47E6-BB47-19806B3886C1}</Project>
     </ProjectReference>
+    <ProjectReference Include="OwnedRenderer\RenderModule.vcxproj"><Project>{19668E93-69B7-4CC4-A03E-84732BD06925}</Project></ProjectReference>
     <ProjectReference Include="OwnedRenderer\RendererShaders.vcxproj">
       <Project>{F9F236B9-5E99-4BD6-B032-D727834B2329}</Project>
       <LinkLibraryDependencies>false</LinkLibraryDependencies>
