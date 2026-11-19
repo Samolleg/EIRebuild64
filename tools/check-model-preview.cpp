@@ -147,6 +147,23 @@ int main() try {
     require(draws == 1 && binds == 1 && partCalls == 1 && !groupCalls, "FIG hidden part/set handling changed");
     std::cout << "PASS FIG preview color/material and hidden-part regression\n";
     OwnedRender::ModelPreviewLighting studio;
+    require(OwnedRender::produce_model_preview_lighting(clip,{0,0,5},studio,PreviewStudioStyle::soft_figure),
+        "soft pane lighting rejected");
+    require(studio.world.soft_figure() && studio.points.size()==2,"missing pane fills");
+    auto shade=[&](std::array<float,3> n) {
+        const auto dot=[&](const auto& v){return n[0]*v[0]+n[1]*v[1]+n[2]*v[2];};
+        float result=(std::max)(studio.world.ambient[0],studio.world.sunlight_diffuse[0]*dot(studio.world.sunlight_direction));
+        for(const auto& lamp:studio.points){
+            auto delta=lamp.center;delta[2]-=5;
+            const float square=delta[0]*delta[0]+delta[1]*delta[1]+delta[2]*delta[2];
+            const float reach=1-square/(lamp.radius*lamp.radius);
+            result+=lamp.color[0]*reach*reach*(std::max)(0.f,dot(delta)/std::sqrt(square));
+        }
+        return result;
+    };
+    const float front=shade({0,0,-1}),left=shade({-1,0,0}),right=shade({1,0,0});
+    require(front>.85f && front<1 && left>right && right>.48f && shade({0,0,1})<right,
+        "soft pane front or shadow-side gradient");
     studio.world.ambient={1,1,1,1};studio.points.resize(3);
     require(OwnedRender::produce_model_preview_lighting(clip,{0,0,5},studio),"embedded studio policy rejected");
     require(studio.points.empty() && studio.world.ambient[0]==.3f &&
