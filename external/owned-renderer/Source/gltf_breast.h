@@ -58,7 +58,7 @@ struct BreastState {
     std::vector<Affine> matrices;
     double clock=-1, physics_clock=0;
     bool frozen=false, resting_pose=false;
-    static constexpr float idle_gain=.40f, active_gain=2.25f;
+    static constexpr float idle_gain=.60f, active_gain=3.375f;
     float tissue_gain=active_gain;
     unsigned node_base=UINT32_MAX;
     Playback playback;
