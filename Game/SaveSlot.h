@@ -31,6 +31,7 @@ public:
     static bool LoadZone(const char *name, CParty& arriving);
     static bool HasZone(const char *name);
     static CString Directory();
+    static void RecoverHistory(const char *name);
     static void SetPresentation(const SSaveSlotDesc &, CDXGISurface *);
     static bool Presentation(const char *name, SSaveSlotDesc &, Bytes *shot = nullptr);
     static void ApplyCamera();
