@@ -2,7 +2,7 @@
 
 ## Soft light for the outfitting and information panes
 
-The two posed character panes select a camera-relative key 22 degrees above and 24 degrees towards screen left. The existing native lighting pass shades FIG and glTF with a neutral ambient floor of 0.36 and an RGB (.84,.825,.81) key. Two broad, neutral fill lights sit in front of the figure on opposite sides, the stronger one above and to screen left and the weaker one below and to screen right. Their reach is 36 preview units at a distance of about 12 units. The host uses the direction constant's w lane to bind these fills for the individual submission, then restores the previous lights. Standalone heads use the original portrait policy below. World time, cave shaping and scene lamps do not supply the diffuse light for either pane.
+The two posed character panes select a camera-relative key 22 degrees above and 24 degrees towards screen left. The existing native lighting pass shades FIG and glTF with a neutral ambient floor of 0.56 and an RGB (.84,.825,.81) key. Two broad, neutral fill lights sit in front of the figure on opposite sides, the stronger one above and to screen left and the weaker one below and to screen right. Their reach is 36 preview units at a distance of about 12 units. The host uses the direction constant's w lane to bind these fills for the individual submission, then restores the previous lights. Standalone heads use the original portrait policy below. World time, cave shaping and scene lamps do not supply the diffuse light for either pane.
 
 ## Original portrait policy and implementation history
 

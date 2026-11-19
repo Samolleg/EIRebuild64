@@ -41,7 +41,7 @@ int main(int argc,char** argv)try {
             const auto softDirection=to_world(view,{-.37711f,.37461f,-.84703f},true);
             for(unsigned i=0;i<3;++i){
                 near(soft.direction[i],softDirection[i],"soft figure camera frame");
-                near(soft.ambient[i],.36f,"neutral soft fill");
+                near(soft.ambient[i],.56f,"neutral soft fill");
             }
             near(soft.direction[3],1,"soft figure lighting scope");
             ++cases;
