@@ -61,7 +61,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>$(ProjectDir)dependencies\ffmpeg\9.0.2\x64\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>avformat.lib;avcodec.lib;avutil.lib;swscale.lib;swresample.lib;dxgi.lib;$(ProjectDir)out\x64\Release\RendererShaders\eid3d11_shaders.res;$(ProjectDir)out\x64\Release\RendererShaders\eid3d11_dxil.res;$(ProjectDir)out\x64\Release\RendererShaders\eid3d11_d3d12_shaders.res;$(ProjectDir)out\x64\Release\RendererShaders\eid3d11_camp_art.res;$(ProjectDir)out\x64\Release\luajit\luajit.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;imagehlp.lib;pdh.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>avformat.lib;avcodec.lib;avutil.lib;swscale.lib;swresample.lib;dxgi.lib;$(ProjectDir)out\x64\Release\luajit\luajit.lib;version.lib;Winmm.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;comdlg32.lib;advapi32.lib;shell32.lib;ole32.lib;oleaut32.lib;uuid.lib;odbc32.lib;odbccp32.lib;imagehlp.lib;pdh.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -632,6 +632,7 @@
   </ItemGroup>
   <PropertyGroup><OwnedRendererRoot Condition="'$(OwnedRendererRoot)'==''">$(ProjectDir)external\owned-renderer\</OwnedRendererRoot></PropertyGroup>
   <ItemDefinitionGroup><ClCompile><AdditionalIncludeDirectories>$(OwnedRendererRoot)\Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile></ItemDefinitionGroup>
+  <Import Project="OwnedRenderer\RenderResources.targets" />
   <Import Project="tools\DirectXStatic.props" />
   <Import Project="Pak\Zstd.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

@@ -1,5 +1,6 @@
 // Renderer UI: legacy draw frames and HUD asset frames, camp popup, cursor, blits, present_image, character pane text, capture, surface retirement and pending blits.
 #include <intrin.h>
+#include "render_resources.h"
 #include "embedded_figure_shader.h"
 #include "point_shadow_policy.h"
 #include "cursor_image.h"
@@ -269,9 +270,8 @@ HRESULT Renderer::draw_frame(const std::vector<LegacyDrawPacket>& packets,const 
 
 // Fixed embedded camp artwork, independent of native resource caches.
 HRESULT Renderer::load_camp_art(){
- HMODULE module=nullptr;
- if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-     reinterpret_cast<LPCWSTR>(&append_shader_groups),&module))return E_FAIL;
+ const HMODULE module=owned::render_resource_module();
+ if(!module)return E_FAIL;
  const HRESULT apartment=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
  if(FAILED(apartment)&&apartment!=RPC_E_CHANGED_MODE)return apartment;
  struct Apartment { bool release; ~Apartment(){if(release)CoUninitialize();} } scope{SUCCEEDED(apartment)};

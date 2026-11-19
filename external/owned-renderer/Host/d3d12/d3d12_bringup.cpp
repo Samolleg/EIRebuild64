@@ -19,6 +19,7 @@
 //                                            (checks the device-removed path)
 //   EI_RENDERER_X64_D3D12_DEBUG=1            D3D12 debug layer
 #include "d3d12_barriers.h"
+#include "../../Source/render_resources.h"
 #include "d3d12_core.h"
 #include "d3d12_pipelines.h"
 #include "d3d12_presenter.h"
@@ -81,10 +82,12 @@ bool env_flag(const char* name) {
 
 // A host-only program from the host's resources (Host\d3d12\d3d12_shaders.rc).
 D3D12_SHADER_BYTECODE embedded_program(const wchar_t* name) {
-    const HRSRC found = FindResourceW(nullptr, name, MAKEINTRESOURCEW(10));  // RT_RCDATA
-    const HGLOBAL loaded = found ? LoadResource(nullptr, found) : nullptr;
+    const HMODULE module = owned::render_resource_module();
+    if (!module) return {};
+    const HRSRC found = FindResourceW(module, name, MAKEINTRESOURCEW(10));  // RT_RCDATA
+    const HGLOBAL loaded = found ? LoadResource(module, found) : nullptr;
     if (!loaded) return {};
-    return {LockResource(loaded), SizeofResource(nullptr, found)};
+    return {LockResource(loaded), SizeofResource(module, found)};
 }
 
 // Frame constants (b1), laid out as d3d12_diagnostic.hlsl's Frame.

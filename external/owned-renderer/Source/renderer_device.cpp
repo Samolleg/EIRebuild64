@@ -1,5 +1,6 @@
 // Renderer device: swap chain, device creation and settings (ensure), targets, shader preparation and specialisation, pipelines, the native geometry arena, and teardown (release).
 #include <intrin.h>
+#include "render_resources.h"
 #include "point_shadow_policy.h"
 #include "cursor_image.h"
 #include "shadow_softness.h"
@@ -2621,9 +2622,8 @@ void Renderer::recover_shader_crash() noexcept try{
 
 // The DLL's EID3D11_SHADERS resource; test executables have none and compile.
 void Renderer::register_embedded_shaders() noexcept{
- HMODULE module=nullptr;
- if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-     reinterpret_cast<LPCWSTR>(&append_shader_groups),&module))return;
+ const HMODULE module=owned::render_resource_module();
+ if(!module)return;
  const HRSRC resource=FindResourceW(module,L"EID3D11_SHADERS",MAKEINTRESOURCEW(10)/*RT_RCDATA*/);
  const HGLOBAL loaded=resource?LoadResource(module,resource):nullptr;
  const void* data=loaded?LockResource(loaded):nullptr;

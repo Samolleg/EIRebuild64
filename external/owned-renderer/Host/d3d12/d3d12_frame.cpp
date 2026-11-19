@@ -1,4 +1,5 @@
 #include "../../Source/frame_waits.h"
+#include "../../Source/render_resources.h"
 // The D3D12 frame executor of the x64 host (renderer_backend=d3d12, DX12
 // plan M1a): the shared Renderer's UI records, the F10 overlay and present
 // on the native D3D12 core (d3d12_core.h and its neighbours), in the core-mode
@@ -464,10 +465,12 @@ private:
 };
 
 D3D12_SHADER_BYTECODE resource_program(const char* name) {
-    const HRSRC found = FindResourceA(nullptr, name, MAKEINTRESOURCEA(10));  // RT_RCDATA
-    const HGLOBAL loaded = found ? LoadResource(nullptr, found) : nullptr;
+    const HMODULE module = owned::render_resource_module();
+    if (!module) return {};
+    const HRSRC found = FindResourceA(module, name, MAKEINTRESOURCEA(10));  // RT_RCDATA
+    const HGLOBAL loaded = found ? LoadResource(module, found) : nullptr;
     if (!loaded) return {};
-    return {LockResource(loaded), SizeofResource(nullptr, found)};
+    return {LockResource(loaded), SizeofResource(module, found)};
 }
 
 // A program's identity across builds: its source name, entry, profile and
@@ -824,7 +827,8 @@ Hazards* g_hazards = nullptr;  // the executor's checker while EI_RENDERER_D3D12
 std::string program_dxil_name(const owned::ShaderProgram& program) {
     if (g_hazards) {
         std::string hazards = owned::dxil_name(program, true);
-        if (FindResourceA(nullptr, hazards.c_str(), MAKEINTRESOURCEA(10))) return hazards;  // RT_RCDATA
+        const HMODULE module = owned::render_resource_module();
+        if (module && FindResourceA(module, hazards.c_str(), MAKEINTRESOURCEA(10))) return hazards;  // RT_RCDATA
     }
     return owned::dxil_name(program);
 }

@@ -1,4 +1,5 @@
 #include "renderer.h"
+#include "render_resources.h"
 #include "embedded_arena.h"
 #include <cstring>
 #include <limits>
@@ -18,7 +19,8 @@ struct Fragments {
     std::array<FracturePart,8> parts{};
     bool valid=false;
     Fragments() {
-        const auto module=GetModuleHandleW(nullptr);
+        const auto module=owned::render_resource_module();
+        if(!module)return;
         const auto resource=FindResourceW(module,L"EID3D11_ARENA_FRAGMENTS_V1",MAKEINTRESOURCEW(10));
         if(!resource)return;
         const auto handle=LoadResource(module,resource);
