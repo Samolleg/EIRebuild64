@@ -149,7 +149,9 @@ BOOL CObject3DClientSpecific::DrawModelPreview(CRenderer* renderer) try
     const bool studioPreview=owned::model_draw_is_character_preview();
     OwnedRender::ModelPreviewLighting illumination;
     if(studioPreview) {
-        if(!OwnedRender::produce_model_preview_lighting(worldToClip,placement.position,illumination))
+        const bool paneFigure = presentation && clock.clock != owned::ModelPreviewClock::display;
+        const auto style = paneFigure ? owned::PreviewStudioStyle::soft_figure : owned::PreviewStudioStyle::portrait;
+        if(!OwnedRender::produce_model_preview_lighting(worldToClip,placement.position,illumination,style))
             return reject("preview.studio_lighting");
     } else {
         // CI3DMapObjTranslation marks decorative menus explicitly. Restore

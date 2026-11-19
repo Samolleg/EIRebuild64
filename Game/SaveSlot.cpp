@@ -1,5 +1,6 @@
 #include "StdAfx.h"
 #include "SaveSlot.h"
+#include "SaveHistory.h"
 #include "SaveModIdentity.h"
 #include "ModEncounter.h"
 #include "ModArena.h"
@@ -716,7 +717,12 @@ bool Slot::Presentation(const char *name,SSaveSlotDesc &desc,Bytes *shot)
         CMemorySave f;Buffer(f,bytes);Registry reg;Bytes info,image;
         auto graph=SaveSchema::Load(f,reg,[&](Reader &r){
             if(!SaveModIdentity::CurrentEnvelope(r.String()))Invalid("unsupported slot root");
-            r.UInt64();r.String();r.String();r.UInt64();r.Blob();info=r.Blob();image=r.Blob();
+            desc.generation = r.UInt64();
+            const auto mod = r.String();
+            if (!desc.generation || !ModRuntime::Current() ||
+                !SaveModIdentity::BelongsTo(mod, ModRuntime::Current()->SaveIdentity()))
+                Invalid("incompatible slot");
+            r.String();r.UInt64();r.Blob();info=r.Blob();image=r.Blob();
         },SlotLimits());
         CMemorySave metadata;Buffer(metadata,info);auto g=SaveSchema::Load(metadata,reg,[&](Reader &r){
             Field(r,desc.szName);Field(r,desc.szAllodName);Field(r,desc.szZoneName);desc.fGameTime=r.Float32();
@@ -724,6 +730,17 @@ bool Slot::Presentation(const char *name,SSaveSlotDesc &desc,Bytes *shot)
         });
         desc.szPath=name;desc.bNoInfo=false;if(shot)*shot=std::move(image);return true;
     }catch(...){return false;}
+}
+void Slot::RecoverHistory(const char *name)
+{
+    const auto slot = SaveHistory::Identify(name);
+    if (!slot.label || LiveObserver::ProtectedSaveSlot(slot.head.c_str()) != slot.head)
+        return;
+    const std::filesystem::path root(static_cast<LPCSTR>(Directory()));
+    if (std::filesystem::exists(root / slot.head / "slot.pending")) {
+        SaveHistory::FamilyLock lock(slot.head);
+        SaveHistory::FinishPending(root, slot.head);
+    }
 }
 bool Slot::Save(const char *name)
 {
@@ -770,7 +787,17 @@ bool Slot::Save(const char *name)
             w.UInt64(Content(payload));w.Blob(payload);w.Blob(presentation);w.Blob(screenshot);
         },SlotLimits());
         std::filesystem::create_directories(std::filesystem::path((LPCSTR)Directory())/name);
-        AtomicFile(Directory()+name+CString("\\slot.sav"),Snapshot(envelope));
+        const auto slot = SaveHistory::Identify(name);
+        const CString folder = Directory() + name;
+        if (slot.label && !slot.age) {
+            const std::filesystem::path root(static_cast<LPCSTR>(Directory()));
+            SaveHistory::FamilyLock lock(slot.head);
+            SaveHistory::FinishPending(root, slot.head);
+            AtomicFile(folder + "\\slot.pending", Snapshot(envelope));
+            SaveHistory::FinishPending(root, slot.head);
+        } else {
+            AtomicFile(folder + "\\slot.sav", Snapshot(envelope));
+        }
         presentation.clear();screenshot.clear();
         GameJournal::Event("SAVE","complete","slot=%s source=%s",GameJournal::Quote(name).c_str(),GameJournal::Quote(GameJournal::CurrentSource()).c_str());
         return true;
@@ -780,7 +807,7 @@ bool Slot::Save(const char *name)
 bool Slot::Load(const char *name)
 {
     try{
-        CheckedName(name);const auto bytes=ReadFile(Directory()+name+CString("\\slot.sav"));
+        CheckedName(name);RecoverHistory(name);const auto bytes=ReadFile(Directory()+name+CString("\\slot.sav"));
         auto state=std::make_unique<State>();state->fullSlot=true;Bytes payload;Registry meta;CMemorySave f;Buffer(f,bytes);
         auto envelope=SaveSchema::Load(f,meta,[&](Reader &r){
             if(!SaveModIdentity::CurrentEnvelope(r.String()))throw Error(ErrorCode::Incompatible,"Incompatible save");
