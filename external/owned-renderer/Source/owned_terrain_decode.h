@@ -75,14 +75,14 @@ bool prepare_owned_terrain_world_record(const RetainedTerrainSourceSnapshot& sou
     const OwnedTerrainFramePacket& packet, const OwnedTerrainCommand& command,
     const OwnedTerrainDynamicSector* color, const NativeContribution& contribution,
     OwnedTerrainSourceDecodeContext& context, NativeGeometryView*& output,
-    bool alpha_coverage, std::uint64_t* record_reuses);
+    bool alpha_coverage, OwnedTerrainFramePacket* counters);
 inline bool prepare_owned_terrain_world_record(const RetainedTerrainSourceSnapshot& source,
     OwnedTerrainFramePacket& packet, const OwnedTerrainCommand& command,
     const OwnedTerrainDynamicSector* color, const NativeContribution& contribution,
     OwnedTerrainSourceDecodeContext& context, NativeGeometryView*& output,
     bool alpha_coverage = false) {
     return prepare_owned_terrain_world_record(source, packet, command, color, contribution,
-        context, output, alpha_coverage, &packet.spatial_record_reuses);
+        context, output, alpha_coverage, &packet);
 }
 TerrainIndexTemplate terrain_index_template(std::uint32_t lod, std::uint8_t mask,
                                              bool lu_higher, bool rd_higher);
