@@ -206,13 +206,14 @@ CDX11::OwnedTerrainPassResult CDX11::SubmitC56TerrainPass(bool transparent)
     return OwnedTerrainPassResult::failed;
 }
 
-owned::FixedState CDX11::CaptureC56MaterialState()
+owned::FixedState CDX11::CaptureC56MaterialState(const D3DVIEWPORT7* viewport)
 {
     owned::FixedState state;
     for (const auto& item : fake_dx7.render_state)
         if (item.first >= 0 && std::size_t(item.first) < state.render.size())
             state.render[item.first] = item.second;
-    if (D3D12Selected() && ownedWorldActive && c56WorldPassRan) state.viewport = c56WorldViewport;
+    if (viewport) state.viewport = *viewport;
+    else if (D3D12Selected() && ownedWorldActive && c56WorldPassRan) state.viewport = c56WorldViewport;
     else IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
         return renderer.read_embedded_viewport(state.viewport);
     }));
@@ -549,7 +550,8 @@ bool CDX11::SubmitC56GameParticles(const owned::GameParticleView& view)
 
 owned::FixedState CDX11::CaptureC74EffectState()
 {
-    auto state = CaptureC56MaterialState();
+    const D3DVIEWPORT7 logical{0, 0, m_width, m_height, 0.f, 1.f};
+    auto state = CaptureC56MaterialState(D3D12Selected() ? &logical : nullptr);
     // c74 effect coordinates use logical host pixels, independent of render scale.
     state.viewport.dwX = state.viewport.dwY = 0;
     state.viewport.dwWidth = m_width; state.viewport.dwHeight = m_height;
@@ -698,11 +700,21 @@ bool CDX11::FlushC74Prints()
 }
 bool CDX11::SubmitC74CombatText(const owned::EmbeddedCombatTextInput& input)
 {
-    owned::FixedState state; std::shared_ptr<owned::SurfaceImage> texture;
+    if (!input.enabled || !input.count) return true;
+    if (!input.events) return FinishC74Effect(E_INVALIDARG, "combat_text_skipped");
+    owned::FixedState state;
+    std::shared_ptr<owned::SurfaceImage> texture;
     HRESULT hr = PrepareC74Effect(false, true, state, texture);
-    if (SUCCEEDED(hr)) hr = rendererFacade->Visit([&](owned::Renderer& renderer) {
-        return renderer.draw_embedded_combat_text(input, state, texture.get());
-    });
+    if (SUCCEEDED(hr)) {
+        auto packet = input;
+        packet.events = nullptr;
+        std::vector<owned::EmbeddedCombatTextEvent> events(input.events, input.events + input.count);
+        hr = rendererFacade->QueueWorldDraw(
+            [packet, events = std::move(events), state, texture](owned::Renderer& renderer) mutable {
+                packet.events = events.data();
+                return renderer.draw_embedded_combat_text(packet, state, texture.get());
+            });
+    }
     return FinishC74Effect(hr, "combat_text_skipped");
 }
 
@@ -729,6 +741,7 @@ void CDX11::FinishSimulation() noexcept
 
 void CDX11::BeginFrame()
 {
+    postWorldViewport = false;
     struct FailedPhase {
         CDX11& owner;
         bool complete = false;
@@ -756,6 +769,7 @@ void CDX11::BeginFrame()
 
 bool CDX11::BeginWorld(const EIRenderWorldFrameV2& frame)
 {
+    postWorldViewport = false;
     uint32_t skyConsumed = 0;
     c56WorldFigurePrimitives = 0;
     c56WorldFigureQueueFailed = 0;
@@ -972,6 +986,7 @@ void CDX11::EndWorld()
     c56WorldFigurePrimitives = 0;
     c56WorldFigureQueueFailed = 0;
     ownedWorldActive = false;
+    postWorldViewport = D3D12Selected();
     RefreshOwnedTargets();
     SetRenderStates();
 }
@@ -980,6 +995,7 @@ void CDX11::BeginInterface()
 {
     // Interface-only 3D must follow world composition, just like the mission HUD.
     IfFailedThrowHR(rendererFacade->SubmitWorldBatch(owned::Renderer::EmbeddedBatch::composite));
+    postWorldViewport = D3D12Selected();
     RefreshOwnedTargets();
     SetRenderStates();
 }
@@ -1057,8 +1073,9 @@ void CDX11::EndFrame(bool present)
         auto& pipeline = owned::frame_waits::pipeline;
         auto& worldTiming = owned::frame_waits::worldPipeline;
         worldTiming.collect();
-        GameJournal::Event("RENDER","world_pipeline","samples=%llu next_terrain_overlap=%llu overlap_ms=%.3f terrain_layout_reused=%llu",
-            worldTiming.samples, worldTiming.overlapped, worldTiming.overlapMs, worldTiming.reused);
+        GameJournal::Event("RENDER","world_pipeline","samples=%llu next_terrain_overlap=%llu overlap_ms=%.3f terrain_layout_reused=%llu next_sector_rows=%llu",
+            worldTiming.samples, worldTiming.overlapped, worldTiming.overlapMs, worldTiming.reused, worldTiming.sectorRows);
+        worldTiming.sectorRows = 0;
         worldTiming.samples = worldTiming.overlapped = worldTiming.reused = 0;
         worldTiming.overlapMs = 0;
         GameJournal::Event("RENDER","pipeline_overlap","samples=%llu overlap=%llu encode=%llu overlap_ms=%.3f encode_ms=%.3f draw=%llu draw_ms=%.3f layer_packets=%llu",
@@ -1101,7 +1118,13 @@ void CDX11::ClearColorBuffer(DWORD value)
 
 void CDX11::ClearZBuffer(DWORD dwValue)
 {
-    float depth = float(dwValue);
+    const float depth = float(dwValue);
+    if (postWorldViewport && rendererFacade->FrameActive()) {
+        IfFailedThrowHR(rendererFacade->QueueWorldDraw([depth](owned::Renderer& renderer) {
+            return renderer.clear_embedded_targets(nullptr, &depth);
+        }));
+        return;
+    }
     IfFailedThrowHR(rendererFacade->Visit([&](owned::Renderer& renderer) {
         return renderer.clear_embedded_targets(nullptr, &depth);
     }));

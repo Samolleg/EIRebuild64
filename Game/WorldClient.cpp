@@ -3161,7 +3161,6 @@ BOOL CWorldClient::Draw()
         }
         pRend->GetD3D()->RunC56WorldPass(std::move(visuals));
         PrepareScreenPicking();
-        OwnedRender::E1StageNextTerrainView();
     } else InvalidatePicking();
     coreParts.Stage(CorePerf::WorldOverlays);
     // Remaining overlays run after this draw's owned shadows and colour.
@@ -3211,6 +3210,7 @@ BOOL CWorldClient::Draw()
     ModCurseEncounter::Draw();
     coreParts.Stage(CorePerf::WorldFinish);
     DrawPolyLines();
+    OwnedRender::E1StageNextTerrainView();
     pRend->GetD3D()->EndWorld(); // compose world before flying HP and other UI
     // pop main and camera matrix
     pGPU->PopMatrix(MAT_STACK_VIEW2CLIP);

@@ -47,14 +47,14 @@ void CFlyingHitPoints::ReceiveDamage(int nUnitID, int nAmount, DWORD dwDamageFla
 BOOL CFlyingHitPoints::Draw(CRenderer *pRend)
 {
     if (!pTexture) return FALSE;
-    if (!pRend->BindTexture(0, pTexture))
-        return ReportError("CFlyingHitPoints::Draw.\n SetTexture failed.\n");
     const double gameTime = theWorld.GetRenderTimeSegments();
     const DWORD now = owned::embedded_combat_text_clock_ms(gameTime);
     damages.remove_if([now](const SFlyingHPDesc& event) {
         return owned::embedded_combat_text_expired(now, event.dwTime);
     });
-    if (!theSettings.nDrawFlyingHP) return TRUE;
+    if (!theSettings.nDrawFlyingHP || damages.empty()) return TRUE;
+    if (!pRend->BindTexture(0, pTexture))
+        return ReportError("CFlyingHitPoints::Draw.\n SetTexture failed.\n");
     std::vector<owned::EmbeddedCombatTextEvent> events;
     events.reserve(damages.size());
     for (const auto& source : damages)

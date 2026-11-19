@@ -40,7 +40,7 @@ struct PipelineTiming {
 struct WorldPipelineTiming {
     std::atomic<LONGLONG> begin{0}, end{0};
     LONGLONG stageBegin=0, stageEnd=0;
-    unsigned long long samples=0, overlapped=0, reused=0;
+    unsigned long long samples=0, overlapped=0, reused=0, sectorRows=0;
     double overlapMs=0;
     void collect() noexcept {
         if (!stageBegin) return;

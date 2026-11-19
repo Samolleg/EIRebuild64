@@ -40,11 +40,14 @@ float terrainHiddenDistance = 0.f;
 std::array<owned::NativeOwnedFixedState,2> materials{};
 std::array<std::uint64_t,2> materialGeometry{};
 std::shared_ptr<const TerrainSectors> sectors;
+// Builders are private to the producer. Once published, each row remains
+// immutable until the last terrain/shadow submission releases it.
+std::vector<std::shared_ptr<owned::OwnedTerrainDynamicSector>> nextSectors;
 std::uint64_t sectorFrame = 0, phaseSerial = 0;
 void clear() noexcept {
     sourceOwner = nullptr; worldIdentity = sourceRevision = terrainFrame = 0;
     source = {}; transform = {}; mist.retire(); atlasIds.clear(); view.reset(); nextView.reset(); prepared = {}; viewReady = false;
-    sectors.reset(); sectorFrame = 0; materials = {}; materialGeometry = {};
+    sectors.reset(); nextSectors.clear(); sectorFrame = 0; materials = {}; materialGeometry = {};
 }
 bool current() noexcept {
     const auto frame = owned::bridge_scene_world_to_clip_snapshot();
@@ -204,13 +207,17 @@ bool E1PublishTerrainSectors(const void* owner,
                     row.phases[tile.animation_ordinal] >= tile.animation_phases) return false;
             }
         }
-        auto value = std::make_shared<owned::OwnedTerrainDynamicSector>();
+        auto value = row.sector < nextSectors.size() ? std::move(nextSectors[row.sector]) : nullptr;
+        const bool staged = value && previous && samePhases &&
+            value->phase_values.revision == previous->phase_values.revision;
+        if (!value) value = std::make_shared<owned::OwnedTerrainDynamicSector>();
+        if (!staged) value->animation_phases = row.phases;
+        else if (RuntimeDiagnostics::Enabled()) ++owned::frame_waits::worldPipeline.sectorRows;
         value->captured = true;
         value->source_revision = source.source_revision;
         value->animation = source.geometry->animation;
         value->animation.waves_enabled = value->animation.waves_enabled && authored.has_layers;
         value->animation.animation_phase_count = static_cast<std::uint32_t>(row.phases.size());
-        value->animation_phases = row.phases;
         // Revisions describe actual phase bytes, not a host address or frame.
         // Reuse the renderer's upload cache only when the completed bytes agree.
         if (samePhases)
@@ -221,6 +228,7 @@ bool E1PublishTerrainSectors(const void* owner,
         }
         (*next)[row.sector] = std::move(value);
     }
+    nextSectors.clear();
     sectors = std::move(next);
     sectorFrame = terrainFrame;
     return true;
@@ -259,6 +267,20 @@ void E1StageNextTerrainView() noexcept try {
         bool enabled;
         ~FinishStage() { if (enabled) owned::frame_waits::worldPipeline.stageEnd = owned::frame_waits::now(); }
     } finish{measure};
+    // Build the writable rows needed by the next frame while the renderer
+    // owns this frame's rows. Recheck against the game's actual phases at
+    // publication, and always install the new time, waves and wind there.
+    nextSectors.clear();
+    if (sectors && sectorFrame == terrainFrame) {
+        nextSectors.resize(sectors->size());
+        for (std::size_t i = 0; i < sectors->size(); ++i) {
+            if (!(*sectors)[i]) continue;
+            auto row = std::make_shared<owned::OwnedTerrainDynamicSector>();
+            row->animation_phases = (*sectors)[i]->animation_phases;
+            row->phase_values = (*sectors)[i]->phase_values;
+            nextSectors[i] = std::move(row);
+        }
+    }
     if (!nextView || !nextView.unique()) nextView = std::make_shared<TerrainView>();
     auto& staged = *nextView;
     const bool sameSource = staged.source == source.terrain &&
