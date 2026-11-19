@@ -16,4 +16,8 @@
   <Target Name="CopyRenderResources" AfterTargets="Build" Condition="'$(MSBuildProjectName)'=='EIRebuild64NavBake' Or '$(E1RendererFacadeWarpCheck)'=='true'">
     <Copy SourceFiles="$(SharedRenderResources)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
   </Target>
+  <Target Name="CopyRendererModule" AfterTargets="Build">
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\out\x64\Release\RenderModule\EI.Renderer.dll"
+          DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
 </Project>

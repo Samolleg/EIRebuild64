@@ -1,6 +1,7 @@
 // Renderer device: swap chain, device creation and settings (ensure), targets, shader preparation and specialisation, pipelines, the native geometry arena, and teardown (release).
 #include <intrin.h>
 #include "render_resources.h"
+#include "../../../OwnedRenderer/Module/GraphicsApi.h"
 #include "point_shadow_policy.h"
 #include "cursor_image.h"
 #include "shadow_softness.h"
@@ -292,36 +293,12 @@ constexpr UINT kNativeGeneralPageBytes=64u<<20;
 // copy), and with tearing allowed an uncapped Present is not held to vblank.
 // Older systems without flip support keep the legacy blit model.
 HRESULT Renderer::create_swap_chain(){
- set_test_initialization_stage("swap-chain-entry");
- swap_.Reset();swap_flags_=0;tearing_supported_=false;
- ComPtr<IDXGIDevice> dxgi_device;ComPtr<IDXGIAdapter> adapter;ComPtr<IDXGIFactory2> factory;
- HRESULT hr=device_.As(&dxgi_device);
- if(SUCCEEDED(hr))hr=dxgi_device->GetAdapter(&adapter);
- if(SUCCEEDED(hr))hr=adapter->GetParent(IID_PPV_ARGS(&factory));
- if(FAILED(hr))return hr;
- ComPtr<IDXGIFactory5> factory5;BOOL tearing=FALSE;
- if(SUCCEEDED(factory.As(&factory5))&&
-    SUCCEEDED(factory5->CheckFeatureSupport(DXGI_FEATURE_PRESENT_ALLOW_TEARING,&tearing,sizeof(tearing))))
-  tearing_supported_=tearing!=FALSE;
- DXGI_SWAP_CHAIN_DESC1 desc{};desc.Width=output_width_;desc.Height=output_height_;desc.Format=DXGI_FORMAT_B8G8R8A8_UNORM;
- desc.SampleDesc.Count=1;desc.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;desc.BufferCount=3;
- desc.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;desc.Scaling=DXGI_SCALING_STRETCH;desc.AlphaMode=DXGI_ALPHA_MODE_IGNORE;
- desc.Flags=tearing_supported_?DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING:0u;
- ComPtr<IDXGISwapChain1> chain;
- set_test_initialization_stage("create-swap-chain-for-hwnd");
- hr=factory->CreateSwapChainForHwnd(device_.Get(),hwnd_,&desc,nullptr,nullptr,&chain);
- if(FAILED(hr)){
-  OutputDebugStringA("EID3D11: flip-model swap chain unavailable; using the blit presentation model.\n");
-  tearing_supported_=false;desc.Flags=0;desc.BufferCount=2;desc.SwapEffect=DXGI_SWAP_EFFECT_DISCARD;
-   set_test_initialization_stage("create-fallback-swap-chain-for-hwnd");
-   if(FAILED(hr=factory->CreateSwapChainForHwnd(device_.Get(),hwnd_,&desc,nullptr,nullptr,&chain)))return hr;
- }
-  set_test_initialization_stage("swap-chain-created");
-  swap_flags_=desc.Flags;
- // The game owns its window mode; DXGI must not switch to exclusive fullscreen.
-  factory->MakeWindowAssociation(hwnd_,DXGI_MWA_NO_ALT_ENTER);
-  set_test_initialization_stage("swap-chain-complete");
- return chain.As(&swap_);
+ BOOL tearing=FALSE;
+ const HRESULT hr=EiCreateSwapChain11V1(device_.Get(),hwnd_,output_width_,output_height_,
+    [](void* user,const char* stage) noexcept { static_cast<Renderer*>(user)->set_test_initialization_stage(stage); },
+    this,swap_.ReleaseAndGetAddressOf(),&swap_flags_,&tearing);
+ tearing_supported_=tearing!=FALSE;
+ return hr;
 }
 namespace {
 
@@ -564,12 +541,7 @@ HRESULT Renderer::ensure_with_driver(HWND hwnd,UINT w,UINT h,D3D_DRIVER_TYPE dri
  if(core_mode_)return x64remote::core_active()?S_OK:E_FAIL;
  if(x64remote::core_wanted())return core_ensure();
 #endif
- // NVIDIA's threaded optimisation retires shader variants on its worker while
- // their background compiles finish on its pool: an ABBA deadlock inside
- // nvwgf2um (dumps of 2026-10-11..13). Ask the driver to keep its internal
- // threads off this device.
- UINT flags=D3D11_CREATE_DEVICE_BGRA_SUPPORT|D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;D3D_FEATURE_LEVEL levels[]={D3D_FEATURE_LEVEL_11_0,D3D_FEATURE_LEVEL_10_1,D3D_FEATURE_LEVEL_10_0,D3D_FEATURE_LEVEL_9_3};HRESULT hr;
- hr=D3D11CreateDevice(nullptr,driver,nullptr,flags,levels,ARRAYSIZE(levels),D3D11_SDK_VERSION,&device_,&feature_level_,&context_);
+ HRESULT hr=EiCreateDevice11V1(driver,device_.ReleaseAndGetAddressOf(),&feature_level_,context_.ReleaseAndGetAddressOf());
  if(FAILED(hr))return hr;
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
  debug_overlay_set_running_renderer("64-bit embedded",false);

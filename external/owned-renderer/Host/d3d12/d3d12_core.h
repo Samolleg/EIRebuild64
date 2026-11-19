@@ -27,12 +27,14 @@
 #include <string>
 #include <vector>
 
+#include "../../../../OwnedRenderer/Module/DeviceError.h"
+
 namespace d3d12 {
 
 using Microsoft::WRL::ComPtr;
 
 // "call failed (0x887A0005 DXGI_ERROR_DEVICE_REMOVED)": a readable HRESULT.
-std::string hresult_text(const char* call, HRESULT hr);
+
 
 // One shader-visible descriptor heap read by index from shaders
 // (ResourceDescriptorHeap[] / SamplerDescriptorHeap[]). Indices
