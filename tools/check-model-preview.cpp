@@ -162,7 +162,7 @@ int main() try {
         return result;
     };
     const float front=shade({0,0,-1}),left=shade({-1,0,0}),right=shade({1,0,0});
-    require(front>.85f && front<1 && left>right && right>.48f && shade({0,0,1})<right,
+    require(front>.98f && front<1 && left>.78f && left>right && right>.72f && shade({0,0,1})<right,
         "soft pane front or shadow-side gradient");
     studio.world.ambient={1,1,1,1};studio.points.resize(3);
     require(OwnedRender::produce_model_preview_lighting(clip,{0,0,5},studio),"embedded studio policy rejected");
