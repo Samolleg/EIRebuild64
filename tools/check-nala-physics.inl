@@ -16,13 +16,14 @@ static void check_nala_physics(const fs::path& game,const fs::path& out) {
     Affine root{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
     unsigned moved=0;
     float peak=0;
-    for(const char* action:{"idle","walk","run"}) {
+    for(const char* action:{"idle","cidle09","cidle10","cidle11","walk","run"}) {
         const unsigned clip=named_clip(*body->animation,action);
         require(clip!=UINT32_MAX,"Nala locomotion clip");
-        float low=1,high=-1;
+        float low=1,high=-1,breastPeak=0,glutePeak=0;
         const float duration=body->animation->clips[clip].duration;
-        for(unsigned frame=0;frame<=90;++frame) {
-            const double clock=duration*2.*frame/90.;
+        const unsigned frames=unsigned(std::ceil(duration*60));
+        for(unsigned frame=0;frame<=frames;++frame) {
+            const double clock=duration*2.*frame/frames;
             Playback pose{clip,UINT32_MAX,float(std::fmod(clock,duration)),0,1};
             state.update(clock,pose,root,frame==0,0);
             require(state.physics&&state.physics->error().empty()&&state.overrides,"live GPU pose");
@@ -36,6 +37,18 @@ static void check_nala_physics(const fs::path& game,const fs::path& out) {
             const auto tip=state.targets[0];
             const float dz=corrected[tip][11]-original.joints[tip][11];
             for(unsigned side=0;side<2;++side) {
+                const unsigned tipNode=state.targets[side], glute=4*side+3;
+                const auto& marker=original.joints[state.ends[glute]];
+                const SecondaryPoint rest{marker[3],marker[7],marker[11]};
+                const auto pivot=state.starts[glute];
+                const auto displaced=mapped_point(multiply(corrected[pivot],physique_inverse(original.joints[pivot])),rest);
+                float breast2=0,glute2=0;
+                for(unsigned r=0;r<3;++r){
+                    const float delta=corrected[tipNode][4*r+3]-original.joints[tipNode][4*r+3];
+                    breast2+=delta*delta;glute2+=(displaced[r]-rest[r])*(displaced[r]-rest[r]);
+                }
+                breastPeak=(std::max)(breastPeak,std::sqrt(breast2));
+                glutePeak=(std::max)(glutePeak,std::sqrt(glute2));
                 auto previous=original.joints[state.attachments[side]];
                 auto correctedPrevious=previous;
                 for(unsigned k=0;k<3;++k){
@@ -51,7 +64,7 @@ static void check_nala_physics(const fs::path& game,const fs::path& out) {
                 }
             }
             if(frame==0)require(std::abs(dz)<1e-5f,"reset starts at authored pose");
-            if(frame>45){low=(std::min)(low,dz);high=(std::max)(high,dz);}
+            if(frame>frames/2){low=(std::min)(low,dz);high=(std::max)(high,dz);}
             moved=0;
             for(const auto& v:body->rest_vertices) {
                 std::array<double,3> delta{};
@@ -69,10 +82,13 @@ static void check_nala_physics(const fs::path& game,const fs::path& out) {
                 if(d>1e-5f)++moved;
                 peak=(std::max)(peak,d);
             }
-            if(frame>0)require(moved>100&&moved<body->rest_vertices.size()/2,"localized weighted deformation");
+            require(moved<body->rest_vertices.size()/2,"localized weighted deformation");
         }
-        std::cout<<"Nala "<<action<<" tip_dz_min_m="<<low<<" max_m="<<high<<" skin_peak_so_far_m="<<peak<<std::endl;
-        if(std::string(action)!="idle")require(high-low>.001f,"relative swing during steady locomotion");
+        std::cout<<"Nala "<<action<<" tip_dz_min_m="<<low<<" max_m="<<high<<" breast_peak_mm="<<1000*breastPeak<<" glute_peak_mm="<<1000*glutePeak<<" skin_peak_so_far_m="<<peak<<std::endl;
+        const bool locomotion=std::string(action)=="walk"||std::string(action)=="run";
+        require(breastPeak<.018f&&glutePeak<.005f,"Tissue travel on the actual rig");
+        if(locomotion)require(high-low>.0005f&&glutePeak>.0002f,"Inertia during locomotion");
+        else require(breastPeak<.005f&&glutePeak<.002f,"Quiet breathing on the actual rig");
     }
     auto previous=state.overrides;state.update(state.clock,state.playback,state.placement,false,0);
     require(state.overrides==previous,"Nala repeated render reuses immutable pose");

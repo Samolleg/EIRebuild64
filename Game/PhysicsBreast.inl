@@ -3,27 +3,28 @@ using namespace owned::gltf;
 namespace {
 PxVec3 pv(const SecondaryPoint& p){return {p[0],p[1],p[2]};}
 SecondaryPoint point3(const PxVec3& p){return {p.x,p.y,p.z};}
-constexpr float radians=PxPi/180.f;
-struct Drive {float spring,massBlend,dampingPercent;};
-struct JointPreset {
-    float density,low,high,swingY,swingZ,targetAngle,travel;
-    Drive x,z,twist,swing;
+// One inertial point per breast and per glute. The model already describes its
+// gravity-loaded rest shape. Frequencies and damping ratios are mass-normalized.
+struct TissueResponse {
+    PxVec3 frequencyHz;     // lateral, vertical tangent, outward
+    float dampingRatio;
+    PxVec3 travelFraction;  // ellipsoid radii relative to the local lever length
 };
-constexpr JointPreset presets[]={
-    {.66f,-14,18,25,25,2,.85f,{350,.6f,.41250002f},{335,.575f,.41250002f},{4.3500004f,.9f,.41250002f},{4.3500004f,.9f,.41250002f}},
-    {.1446192f,-18,18,18,18,3,.40f,{},{500,.98f,2.5f},{.5f,.98f,1.5f},{.5f,.98f,1.5f}},
-    {.0041712f,0,0,0,0,0,.55f,{},{500,.98f,4.5f},{},{}},
-    {4.5f,-27.5f,45,23,9,12,0,{},{},{2.6f,.9f,.075f},{2.9f,.9f,.075f}}
-};
-PxTransform segmentFrame(const SecondarySegment& s){
-    auto z=pv(s.end)-pv(s.pivot);
-    auto y=z.cross(pv(s.lateral));
-    if(z.normalize()<1e-6f || y.normalize()<1e-6f)throw std::runtime_error("Degenerate Nala joint frame");
-    return PxTransform(pv(s.pivot),PxQuat(PxMat33(y.cross(z),y,z)).getNormalized());
-}
-PxD6JointDrive drive(Drive d,float mass){
-    const float k=d.spring*(1+d.massBlend*(mass-1));
-    return PxD6JointDrive(k,k*d.dampingPercent*.01f,PX_MAX_F32);
+const TissueResponse breastResponse{{5.f,4.f,6.f},.95f,{.065f,.095f,.045f}};
+const TissueResponse gluteResponse{{7.f,6.f,8.f},1.f,{.035f,.055f,.025f}};
+constexpr unsigned tissueCount=4;
+struct TissueFrame {PxTransform rest;float length;};
+TissueFrame tissueFrame(const SecondaryTargets& targets,unsigned tissue){
+    const bool glute=tissue%2!=0;
+    const unsigned side=4*(tissue/2);
+    const auto& first=targets.body[side+(glute?3:0)];
+    const auto tip=pv(targets.body[side+(glute?3:2)].end);
+    auto outward=tip-pv(first.pivot);
+    const float length=outward.normalize();
+    auto vertical=outward.cross(pv(first.lateral));
+    if(length<1e-6f||vertical.normalize()<1e-6f)
+        throw std::runtime_error("Degenerate Nala tissue frame");
+    return {PxTransform(tip,PxQuat(PxMat33(vertical.cross(outward),vertical,outward)).getNormalized()),length};
 }
 bool jump(const SecondaryTargets& a,const SecondaryTargets& b){
     for(unsigned i=0;i<body_parts;++i)
@@ -33,18 +34,14 @@ bool jump(const SecondaryTargets& a,const SecondaryTargets& b){
 class CharacterSolver final: public SecondaryPhysics {
     std::shared_ptr<Runtime> sdk;
     Owned<PxScene> scene;
-    std::array<Owned<PxRigidDynamic>,4> anchors;
-    std::array<Owned<PxRigidDynamic>,body_parts> bodies;
-    std::array<Owned<PxD6Joint>,body_parts> joints;
+    std::array<Owned<PxRigidDynamic>,tissueCount> anchors,bodies;
+    std::array<Owned<PxD6Joint>,tissueCount> joints;
     std::array<PxVec3,hair_groups*hair_points> particles{},oldParticles{};
     SecondaryTargets previous{};
     SecondaryPose result{};
-    std::array<float,body_parts> travel{};
     double last=0;
     std::string failure;
     bool started=false;
-    static unsigned anchorIndex(unsigned i){return 2*(i/4)+(i%4==3);}
-    static bool anchored(unsigned i){return i%4==0||i%4==3;}
     void initialize(){
         sdk=runtime();
         PxSceneDesc desc(sdk->physics->getTolerancesScale());
@@ -63,91 +60,61 @@ class CharacterSolver final: public SecondaryPhysics {
         scene.reset(sdk->physics->createScene(desc));
         if(!scene || !scene->getFlags().isSet(PxSceneFlag::eENABLE_GPU_DYNAMICS))
             throw std::runtime_error("Nala GPU scene unavailable");
-        for(auto& a:anchors){
+        for(unsigned i=0;i<tissueCount;++i){
+            auto& a=anchors[i];auto& b=bodies[i];
             a.reset(sdk->physics->createRigidDynamic(PxTransform(PxIdentity)));
-            if(!a)throw std::runtime_error("Nala anchor allocation");
-            a->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC,true);scene->addActor(*a);
-        }
-        for(unsigned i=0;i<body_parts;++i){
-            auto& b=bodies[i];b.reset(sdk->physics->createRigidDynamic(PxTransform(PxIdentity)));
-            if(!b)throw std::runtime_error("Nala body allocation");
-            b->setAngularDamping(.05f);b->setSolverIterationCounts(21,1);b->setSleepThreshold(0);
-            if(i%4!=3)b->setMaxDepenetrationVelocity(3.f);
-            scene->addActor(*b);
-            auto* parent=anchored(i)?anchors[anchorIndex(i)].get():bodies[i-1].get();
-            joints[i].reset(PxD6JointCreate(*sdk->physics,parent,PxTransform(PxIdentity),b.get(),PxTransform(PxIdentity)));
-            if(!joints[i])throw std::runtime_error("Nala joint allocation");
-        }
-    }
-    void configure(const SecondaryTargets& targets){
-        // Density coefficients scale Nala's reference volumes. The old 450 g
-        // per side calibrates the neutral three-part breast, not each segment.
-        constexpr float referenceLength[]={.0545f,.0457f,.0423f,.0636f};
-        std::array<float,body_parts> masses{},lengths{};
-        for(unsigned i=0;i<body_parts;++i){
-            unsigned k=i%4;
-            float length=(pv(targets.body[i].end)-pv(targets.body[i].pivot)).magnitude();
-            lengths[i]=length;
-            float scale=std::clamp(length/referenceLength[k],.5f,2.f);
-            masses[i]=.45f*presets[k].density/(.66f+.1446192f+.0041712f)*scale*scale*scale;
-        }
-        for(unsigned i=0;i<body_parts;++i){
-            const unsigned k=i%4;
-            const auto& preset=presets[k];auto& b=*bodies[i];auto& j=*joints[i];
-            const float length=lengths[i],mass=masses[i];
-            float effectiveMass=mass;
-            if(k<2)for(unsigned n=i+1;n<=i+(2-k);++n)effectiveMass+=masses[n];
-            b.setMass(mass);b.setCMassLocalPose(PxTransform(PxVec3(0,0,length*.5f)));
-            b.setMassSpaceInertiaTensor(PxVec3((std::max)(1e-7f,mass*length*length/6.f)));
-            const float limit=travel[i]=length*preset.travel;
-            for(auto axis:{PxD6Axis::eX,PxD6Axis::eZ}){
-                if(k<3&&(axis==PxD6Axis::eZ||k==0)){
-                    j.setMotion(axis,PxD6Motion::eLIMITED);
-                    j.setLinearLimit(axis,PxJointLinearLimitPair(sdk->physics->getTolerancesScale(),-limit*1.25f,limit*2.f));
-                }
+            b.reset(sdk->physics->createRigidDynamic(PxTransform(PxIdentity)));
+            if(!a||!b)throw std::runtime_error("Nala tissue actor allocation");
+            a->setRigidBodyFlag(PxRigidBodyFlag::eKINEMATIC,true);
+            b->setActorFlag(PxActorFlag::eDISABLE_GRAVITY,true);
+            b->setSleepThreshold(0);
+            scene->addActor(*a);scene->addActor(*b);
+            auto& joint=joints[i];
+            joint.reset(PxD6JointCreate(*sdk->physics,a.get(),PxTransform(PxIdentity),b.get(),PxTransform(PxIdentity)));
+            if(!joint)throw std::runtime_error("Nala tissue joint allocation");
+            const auto& response=i%2?gluteResponse:breastResponse;
+            for(unsigned axis=0;axis<3;++axis){
+                const float omega=PxTwoPi*response.frequencyHz[axis];
+                joint->setMotion(PxD6Axis::Enum(axis),PxD6Motion::eFREE);
+                joint->setDrive(PxD6Drive::Enum(axis),PxD6JointDrive(omega*omega,
+                    2*response.dampingRatio*omega,PX_MAX_F32,true));
             }
-            if(k!=2){
-                for(auto axis:{PxD6Axis::eTWIST,PxD6Axis::eSWING1,PxD6Axis::eSWING2})j.setMotion(axis,PxD6Motion::eLIMITED);
-                j.setTwistLimit(PxJointAngularLimitPair(preset.low*radians,preset.high*radians));
-                j.setSwingLimit(PxJointLimitCone(preset.swingY*radians,preset.swingZ*radians));
-            }
-            j.setDrive(PxD6Drive::eX,drive(preset.x,effectiveMass));j.setDrive(PxD6Drive::eZ,drive(preset.z,effectiveMass));
-            j.setDrive(PxD6Drive::eTWIST,drive(preset.twist,effectiveMass));
-            j.setDrive(PxD6Drive::eSWING1,drive(preset.swing,effectiveMass)); j.setDrive(PxD6Drive::eSWING2,drive(preset.swing,effectiveMass));
-            j.setDrivePosition(PxTransform(PxVec3(0,0,k==0?-.45f*length:0.f),PxQuat(preset.targetAngle*radians,PxVec3(1,0,0))));
         }
     }
     void resetAt(double now,const SecondaryTargets& target){
-        configure(target);
-        for(unsigned i=0;i<body_parts;++i){
-            auto frame=segmentFrame(target.body[i]);
-            if(anchored(i))anchors[anchorIndex(i)]->setGlobalPose(frame);
-            bodies[i]->setGlobalPose(frame);bodies[i]->setLinearVelocity(PxVec3(0));bodies[i]->setAngularVelocity(PxVec3(0));
+        for(unsigned i=0;i<tissueCount;++i){
+            const auto frame=tissueFrame(target,i).rest;
+            anchors[i]->setGlobalPose(frame);bodies[i]->setGlobalPose(frame);
+            bodies[i]->setLinearVelocity(PxVec3(0));bodies[i]->setAngularVelocity(PxVec3(0));
         }
         for(unsigned i=0;i<particles.size();++i)oldParticles[i]=particles[i]=pv(target.hair[i]);
         previous=target;started=true;last=now;result={};
     }
-    void constrainBreastTravel(){
-        // The reference adds four position-only passes after the D6 solve.
-        // Work in the current parent joint frame, including locked axes.
-        for(unsigned pass=0;pass<4;++pass){
-            bool corrected=false;
-            for(unsigned i=0;i<body_parts;++i){
-                const unsigned k=i%4;
-                if(k==3)continue;
-                const auto parent=anchored(i)?anchors[anchorIndex(i)]->getGlobalPose():
-                    bodies[i-1]->getGlobalPose()*joints[i]->getLocalPose(PxJointActorIndex::eACTOR0);
-                auto pose=bodies[i]->getGlobalPose();
-                auto local=parent.transformInv(pose.p);
-                auto next=local;
-                for(unsigned axis=0;axis<3;++axis){
-                    const float limit=(axis==2||(axis==0&&k==0))?travel[i]:0.f;
-                    const float clipped=std::clamp(local[axis],-limit*1.25f,limit*2.f);
-                    if(std::abs(clipped-local[axis])>1e-5f)next[axis]=clipped*.988f;
-                }
-                if(next!=local){pose.p=parent.transform(next);bodies[i]->setGlobalPose(pose);corrected=true;}
-            }
-            if(!corrected)break;
+    void publishTissue(unsigned i,const PxTransform& rest,float length){
+        const bool glute=i%2!=0;
+        const unsigned first=4*(i/2);
+        // Project the visible offset onto an anatomical envelope in the current
+        // anchor frame. Do not teleport the solver body or feed the projection back.
+        auto local=rest.transformInv(bodies[i]->getGlobalPose().p);
+        if(!local.isFinite())throw std::runtime_error("Nonfinite Nala tissue displacement");
+        const auto radii=(glute?gluteResponse:breastResponse).travelFraction*length;
+        const PxVec3 normalized(local.x/radii.x,local.y/radii.y,local.z/radii.z);
+        const float norm=normalized.magnitude();
+        if(norm>1.f)local/=norm;
+        if(glute){
+            // The pelvis is the pivot. Preserve volume and the distance to the
+            // marker: only the tangential component produces a small rotation.
+            const auto axis=rest.q.rotate(PxVec3(0,0,1));
+            const auto direction=rest.q.rotate((PxVec3(0,0,length)+local).getNormalized());
+            // atan2/cross keeps small rotations below 1 degree continuous.
+            auto cross=axis.cross(direction);
+            const float sine=cross.normalize();
+            const PxQuat q=sine>1e-7f?PxQuat(std::atan2(sine,axis.dot(direction)),cross):PxQuat(PxIdentity);
+            result.body[first+3].rotation={q.x,q.y,q.z,q.w};
+        }else{
+            const auto shift=rest.q.rotate(local);
+            constexpr float influence[]={.20f,.55f,1.f};
+            for(unsigned k=0;k<3;++k)result.body[first+k].shift=point3(shift*influence[k]);
         }
     }
     void hairStep(const SecondaryTargets& target,float alpha){
@@ -183,28 +150,26 @@ public:
             const double elapsed=now-last;
             if(!started||reset||elapsed < -1e-9||elapsed>.25||jump(target,previous))resetAt(now,target);
             else if(elapsed+1e-9>=secondary_step){
-                std::array<PxTransform,body_parts> from,to,frame;
-                for(unsigned i=0;i<body_parts;++i){from[i]=segmentFrame(previous.body[i]);to[i]=segmentFrame(target.body[i]);}
+                std::array<TissueFrame,tissueCount> from,to;
+                std::array<PxTransform,tissueCount> frame;
+                for(unsigned i=0;i<tissueCount;++i){
+                    from[i]=tissueFrame(previous,i);to[i]=tissueFrame(target,i);
+                }
                 const int steps=int(std::floor((elapsed+1e-9)/secondary_step));
                 float alpha=0;
                 for(int step=1;step<=steps;++step){
                     alpha=float((std::min)(1.,step*secondary_step/elapsed));
-                    for(unsigned i=0;i<body_parts;++i){
-                        frame[i]=PxTransform(from[i].p*(1-alpha)+to[i].p*alpha,PxSlerp(alpha,from[i].q,to[i].q));
-                        if(anchored(i))anchors[anchorIndex(i)]->setKinematicTarget(frame[i]);
-                        else joints[i]->setLocalPose(PxJointActorIndex::eACTOR0,frame[i-1].transformInv(frame[i]));
+                    for(unsigned i=0;i<tissueCount;++i){
+                        const auto& a=from[i].rest;const auto& b=to[i].rest;
+                        frame[i]=PxTransform(a.p*(1-alpha)+b.p*alpha,PxSlerp(alpha,a.q,b.q));
+                        anchors[i]->setKinematicTarget(frame[i]);
                     }
                     scene->simulate(float(secondary_step));PxU32 error=0;
                     if(!scene->fetchResults(true,&error)||error)throw std::runtime_error("Nala GPU step failed");
-                    constrainBreastTravel();
                     if(target.has_hair)hairStep(target,alpha);
                 }
-                for(unsigned i=0;i<body_parts;++i){
-                    auto pose=bodies[i]->getGlobalPose();
-                    if(!pose.isValid())throw std::runtime_error("Invalid Nala physics pose");
-                    auto q=(pose.q*frame[i].q.getConjugate()).getNormalized();
-                    result.body[i]={point3(pose.p-frame[i].p),{q.x,q.y,q.z,q.w}};
-                }
+                for(unsigned i=0;i<tissueCount;++i)
+                    publishTissue(i,frame[i],from[i].length*(1-alpha)+to[i].length*alpha);
                 // Retain the sample at the last completed fixed tick.
                 auto lerp=[&](SecondaryPoint& a,const SecondaryPoint& b){a=point3(pv(a)*(1-alpha)+pv(b)*alpha);};
                 for(unsigned i=0;i<body_parts;++i){lerp(previous.body[i].pivot,target.body[i].pivot);

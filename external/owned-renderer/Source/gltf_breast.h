@@ -5,7 +5,7 @@
 #include <cstdio>
 
 namespace owned::gltf {
-// Retarget the three serial D6 joints to Nala's three parallel weighted
+// Retarget the tapered breast displacement to Nala's three parallel weighted
 // branches. Keep consecutive endpoints joined in skin space. Applying the
 // individual translations directly can tear the surface during a running stop.
 inline SecondaryPoint mapped_point(const Affine& m,const SecondaryPoint& p){
@@ -185,7 +185,7 @@ struct BreastState {
             for(unsigned k=0;k<3;++k){
                 unsigned i=first+k;
                 auto goal=mapped_point(bend[i],input.body[i].end);
-                // The locked tip follows the angular range of the middle joint.
+                // Preserve the connected surface across the three weighted branches.
                 constexpr float degreesToRadians=.01745329252f;
                 bend[i]=breast_segment_skin(input.body[i],start,goal,(k?43.f:25.f)*degreesToRadians);
                 start=mapped_point(bend[i],input.body[i].end);
@@ -223,7 +223,7 @@ struct BreastState {
             result->push_back(out);
         }
         overrides=std::move(result);
-        if(!reported&&physics->ready()){bridge_append_probe_event("nala_physx_ready",has_hair?"backend=PhysX GPU D6=8 fixed_hz=120 hair_guides=4":"backend=PhysX GPU D6=8 fixed_hz=120 hair_guides=0");reported=true;}
+        if(!reported&&physics->ready()){bridge_append_probe_event("nala_physx_ready",has_hair?"backend=PhysX GPU D6=4 fixed_hz=120 hair_guides=4":"backend=PhysX GPU D6=4 fixed_hz=120 hair_guides=0");reported=true;}
     }
 };
 }

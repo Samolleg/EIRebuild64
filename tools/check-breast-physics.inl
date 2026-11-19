@@ -15,6 +15,41 @@ void check_breast_physics(bool missing=false) {
     sim->advance(0,rest,true);
     if(missing){check(!sim->error().empty(),"Missing GPU reported");return;}
     auto test=[&](bool ok,const char* label){if(!sim->error().empty())throw std::runtime_error(sim->error());check(ok,label);};
+// Relative displacement of a marker on the synthetic Y-directed segment.
+    // The glute uses rotation about a pinned pivot; measuring shift alone misses it.
+    auto excursion=[&](const SecondaryPose& p,unsigned i){
+        const auto& d=p.body[i];const auto& q=d.rotation;
+        const float arm=rest.body[i].end[1]-rest.body[i].pivot[1];
+        float x=d.shift[0]+2*arm*(q[0]*q[1]-q[2]*q[3]);
+        float y=d.shift[1]-2*arm*(q[0]*q[0]+q[2]*q[2]);
+        float z=d.shift[2]+2*arm*(q[1]*q[2]+q[0]*q[3]);
+        return std::sqrt(x*x+y*y+z*z);
+    };
+    // Begin at rest, breathe for two cycles, then run and stop in the same simulation.
+    float peak[3][2]{};
+    for(unsigned phase=0;phase<3;++phase){
+        const unsigned frames=phase==0?240:60;
+        for(unsigned f=0;f<frames;++f){
+            auto pose=rest;
+            const float t=f/30.f;
+            const float dz=phase==0?.004f*std::sin(t*1.5707963f):
+                           phase==1?.045f*std::sin(t*15.707963f):0;
+            for(auto& s:pose.body){s.pivot[2]+=dz;s.end[2]+=dz;}
+            const auto value=sim->advance((phase==0?0.:phase==1?8.:10.)+t,pose,phase==0&&f==0);
+            if(!sim->error().empty())throw std::runtime_error(sim->error());
+            if(phase==2&&t<.30f)continue;
+            for(unsigned part=0;part<2;++part)for(unsigned side=0;side<2;++side)
+                peak[phase][part]=(std::max)(peak[phase][part],excursion(value,4*side+2+part));
+        }
+    }
+    for(unsigned phase=0;phase<3;++phase)
+        std::cout<<"NALA response "<<(phase==0?"breathing":phase==1?"running":"settled")
+            <<" breast_mm="<<1000*peak[phase][0]<<" glute_mm="<<1000*peak[phase][1]<<std::endl;
+    test(peak[0][0]<.001f&&peak[0][1]<.0006f,"Breathing follows authored support");
+    test(peak[1][0]>.002f&&peak[1][0]<.016f,"Bounded breast inertia on footfalls");
+    test(peak[1][1]>.0005f&&peak[1][1]<.0041f,"Small glute response on footfalls");
+    test(peak[2][0]<.0005f&&peak[2][1]<.0003f,"Both regions settle after stopping");
+    sim->advance(0,rest,true);
     float swing=0,glute=0,hair=0;
     double clock=0;
     SecondaryPose sample;auto input=rest;

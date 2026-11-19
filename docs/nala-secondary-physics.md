@@ -4,11 +4,14 @@ The world, character information panel and inventory sample the same sparse skin
 
 ## Body
 
-The SMA 0.10.4e base, middle and tip D6 presets form a three-link chain on each side. The frames run from PeChoBase through the three PHYSICS_Pecho points. Each joint drives its corresponding weighted subtree. Each glute rotates DEF_Glute about its own origin with its mass towards CENTER_OF_MASS_Glute, with the inverted lateral frame. World gravity is 9.81 m/s². Use 21 position iterations, one velocity iteration and angular drag 0.05. The tip locks all rotation. Glutes lock all linear axes and use twist limits −27.5°/+45° and swings of 23°/9°. The drive targets (2°, 3°, 0°, 12°) and axis-specific spring, mass blending and damping percentages are in Game/PhysicsBreast.inl.
+Four PhysX D6 acceleration drives track the moving end of each breast and the centre-of-mass marker of each glute. The authored skin is the loaded resting shape. Gravity on these four tracking bodies is disabled and the drive target is zero. An acceleration drive uses angular frequency squared for stiffness and twice the damping ratio times angular frequency for damping. This makes tuning independent of the mass assigned to the tracking body.
 
-The supplied density coefficients are relative. SMA's final runtime masses, character scale modifiers, exact collider volumes and playback trajectories are unavailable in the reference. At neutral size the three breast masses share Nala's previous 0.45 kg per side in proportion to 0.66, 0.1446192 and 0.0041712. Glutes use coefficient 4.5 on the same scale. Each part scales by the cube of its measured segment length ratio. Drive effective mass includes descendants. Travel is based on animated segment lengths at reset. The base target is −45% of its segment length, its travel 85%, middle 40%, tip 55%. Four positional passes enforce the asymmetric travel and locked axes after the D6 solve.
+| Region | Lateral / vertical tangent / outward frequency | Damping ratio | Visible displacement radii as fractions of the local lever length |
+|---|---|---|---|
+| Breast | 5 / 4 / 6 Hz | 0.95 | 0.065 / 0.095 / 0.045 |
+| Glute | 7 / 6 / 8 Hz | 1.0 | 0.035 / 0.055 / 0.025 |
 
-Nala's weighted breast branches are parallel in the authored skeleton. The rendering step retargets the serial solver endpoints into a continuous skin curve rooted at PeChoBase. Each segment can stretch or compress by 10%. The base swing is bounded by 25 degrees, and the middle and locked tip share the cumulative 43 degree envelope. This prevents isolated pointed deformations during running.
+The support frame follows the animated torso or pelvis, including the current physique. Displacements are bounded in a local ellipsoid when mapped to the skin. The breast base stays attached; the three weighted endpoints receive 20%, 55% and 100% displacement. The pelvis attachment remains pinned and the glute only rotates towards its displaced marker, preserving volume. There are no idle-specific switches. Quiet breathing, sudden acceleration and stopping feed the same solver.
 
 ## Hair
 
