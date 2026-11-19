@@ -10,14 +10,25 @@ struct ModelPreviewLighting {
 // The embedded x64 host owns this path. No world ambient, sun, point-light
 // manager, or legacy full-ambient flag can override the interface studio.
 inline bool produce_model_preview_lighting(const std::array<float,16>& clip,
-    const std::array<float,3>& object, ModelPreviewLighting& output) {
+    const std::array<float,3>& object, ModelPreviewLighting& output,
+    owned::PreviewStudioStyle style = owned::PreviewStudioStyle::portrait) {
     owned::PreviewStudioLighting studio;
-    if(!owned::make_preview_studio_lighting(clip,object,studio))return false;
+    if(!owned::make_preview_studio_lighting(clip,object,studio,style))return false;
     output.world={};
     output.world.ambient=studio.ambient;
     output.world.sunlight_diffuse=studio.diffuse;
     output.world.sunlight_direction=studio.direction;
     output.points.clear();
+    if (style == owned::PreviewStudioStyle::soft_figure) {
+        constexpr float strength[] = {.32f,.235f};
+        for (unsigned i=0; i<studio.fill_centers.size(); ++i) {
+            owned::RetainedWorldPointLight fill{};
+            fill.center=studio.fill_centers[i];
+            fill.radius=36.f;
+            fill.color={strength[i],strength[i],strength[i]};
+            output.points.push_back(fill);
+        }
+    }
     return true;
 }
 // Existing decorative-menu policy before X64GLTF12. Full ambient and FIG

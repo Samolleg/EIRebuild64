@@ -36,6 +36,14 @@ int main(int argc,char** argv)try {
             float norm=0;for(unsigned i=0;i<3;++i){near(light.direction[i],expected[i],"light moved with HUD/projection/view");norm+=light.direction[i]*light.direction[i];}
             near(norm,1,"direction not normalized");near(light.direction[3],0,"direction w");
             for(unsigned i=0;i<3;++i){near(light.ambient[i],.3f,"ambient floor");check(light.diffuse[i]>=.95f&&light.diffuse[i]<=1,"neutral key energy");}
+            owned::PreviewStudioLighting soft;
+            check(owned::make_preview_studio_lighting(clip,center,soft,owned::PreviewStudioStyle::soft_figure),"soft figure projection");
+            const auto softDirection=to_world(view,{-.37711f,.37461f,-.84703f},true);
+            for(unsigned i=0;i<3;++i){
+                near(soft.direction[i],softDirection[i],"soft figure camera frame");
+                near(soft.ambient[i],.36f,"neutral soft fill");
+            }
+            near(soft.direction[3],1,"soft figure lighting scope");
             ++cases;
         }
     }

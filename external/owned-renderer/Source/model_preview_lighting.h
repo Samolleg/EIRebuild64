@@ -3,18 +3,21 @@
 #include <cmath>
 
 namespace owned {
+enum class PreviewStudioStyle { portrait, soft_figure };
 struct PreviewStudioLighting {
     // Native lighting uses max(ambient, directional), not an additive fill.
     std::array<float,4> ambient{.30f,.30f,.30f,1.f};
     std::array<float,4> diffuse{1.f,.98f,.95f,1.f};
     std::array<float,4> direction{};
+    std::array<std::array<float,3>,2> fill_centers{};
 };
 
 // One existing directional light, in the preview camera's frame. No scene
 // lighting inputs, extra GPU work, or model-specific policy. The complete clip
 // includes the pane's projection/HUD placement; matrices use row-major order.
 inline bool make_preview_studio_lighting(const std::array<float,16>& clip,
-    const std::array<float,3>& center, PreviewStudioLighting& result) noexcept {
+    const std::array<float,3>& center, PreviewStudioLighting& result,
+    PreviewStudioStyle style = PreviewStudioStyle::portrait) noexcept {
     using Vec = std::array<double,3>;
     const auto dot=[](const Vec& a,const Vec& b) {
         return a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
@@ -66,13 +69,28 @@ inline bool make_preview_studio_lighting(const std::array<float,16>& clip,
     const double upAlong=dot(up,front),upRight=dot(up,right);
     for(unsigned a=0;a<3;++a)up[a]-=upAlong*front[a]+upRight*right[a];
     if(!normalize(up)) return false;
-    // Elevation 35 degrees; azimuth 30 degrees toward screen left.
-    constexpr double left=.4095760443,above=.5735764364,towardEye=.7094064799;
+    // Soft figures: 22 degrees up, 24 degrees left. Standalone heads retain 35/30.
+    const bool soft = style == PreviewStudioStyle::soft_figure;
+    const double left = soft ? .377119649 : .4095760443;
+    const double above = soft ? .374606593 : .5735764364;
+    const double towardEye = soft ? .847024599 : .7094064799;
     Vec key{};
     for(unsigned a=0;a<3;++a)key[a]=towardEye*front[a]-left*right[a]+above*up[a];
     if(!normalize(key)) return false;
     PreviewStudioLighting value;
     for(unsigned a=0;a<3;++a)value.direction[a]=static_cast<float>(key[a]);
+    if (soft) {
+        value.ambient = {.36f,.36f,.36f,1.f};
+        value.diffuse = {.84f,.825f,.81f,1.f};
+        value.direction[3] = 1.f; // Host binds the studio's own lights for this submission.
+        // Broad neutral fills to either side. Both lights are far relative to a figure,
+        // so the model can turn and animate without a small bright spot on the face.
+        constexpr double distance = 12.;
+        for (unsigned a=0; a<3; ++a) {
+            value.fill_centers[0][a] = float(point[a]+distance*(-.78*right[a]+.42*up[a]+.46*front[a]));
+            value.fill_centers[1][a] = float(point[a]+distance*( .78*right[a]-.18*up[a]+.60*front[a]));
+        }
+    }
     result=value;
     return true;
 }
