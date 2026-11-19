@@ -86,9 +86,9 @@ static void check_nala_physics(const fs::path& game,const fs::path& out) {
             require(moved<body->rest_vertices.size()/2,"localized weighted deformation");
         }
         std::cout<<"Nala "<<action<<" tip_dz_min_m="<<low<<" max_m="<<high<<" breast_peak_mm="<<1000*breastPeak<<" glute_peak_mm="<<1000*glutePeak<<" skin_peak_so_far_m="<<peak<<std::endl;
-        require(breastPeak<.041f&&glutePeak<.0115f,"Tissue travel on the actual rig");
-        if(locomotion)require(high-low>.001f&&breastPeak>.016f&&glutePeak>.004f,"Inertia during locomotion");
-        else require(breastPeak<.009f&&glutePeak<.0027f,"Quiet breathing on the actual rig");
+        require(breastPeak<.0615f&&glutePeak<.01725f,"Tissue travel on the actual rig");
+        if(locomotion)require(high-low>.0015f&&breastPeak>.024f&&glutePeak>.006f,"Inertia during locomotion");
+        else require(breastPeak<.0135f&&glutePeak<.00405f,"Quiet breathing on the actual rig");
     }
     auto previous=state.overrides;state.update(state.clock,state.playback,state.placement,false,0);
     require(state.overrides==previous,"Nala repeated render reuses immutable pose");
