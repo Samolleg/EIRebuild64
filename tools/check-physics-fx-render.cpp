@@ -50,7 +50,7 @@ int wmain(int argc,wchar_t** argv)try{
     OwnedRender::E1VisualInputs frame;frame.lightingValid=true;frame.ambient={.08f,.08f,.08f,1};frame.sunDiffuse={.9f,.9f,.9f,1};frame.sunDirection={.4f,-.4f,.82f,0};
     // An orthographic close view, +Z up, the ground recedes with +Y.
     frame.worldToClip={.55f,0,0,0, 0,.35f,.8f,-.25f, 0,.04f,-.03f,.5f, 0,0,0,1};
-    frame.fog=[](void*,const float*)->unsigned char{return 255;};
+    frame.fog=[](const owned::ObjectBorderFogInputs&,const float*)->unsigned char{return 255;};
     // Deliberately varied texels exercise native UV sampling on both backends.
     const std::uint32_t texels[]={0xffc6bca4,0xff615d52,0xff8d8778,0xffe0d8c6};
     const owned::NativeOwnedTextureMip mip{reinterpret_cast<const std::uint8_t*>(texels),2,2,sizeof(texels)};
