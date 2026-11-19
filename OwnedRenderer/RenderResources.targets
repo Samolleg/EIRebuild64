@@ -1,0 +1,19 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <RenderResourceDir>$(MSBuildThisFileDirectory)..\out\x64\Release\RendererShaders\</RenderResourceDir>
+    <SharedRenderResources>$(MSBuildThisFileDirectory)..\out\x64\Release\EI_Rebuild\EI.RenderResources.dll</SharedRenderResources>
+  </PropertyGroup>
+  <ItemGroup>
+    <RenderResource Include="$(RenderResourceDir)eid3d11_shaders.res;$(RenderResourceDir)eid3d11_dxil.res;$(RenderResourceDir)eid3d11_d3d12_shaders.res;$(RenderResourceDir)eid3d11_camp_art.res" />
+  </ItemGroup>
+  <!-- The game is the single producer. NavBake already references the game project. -->
+  <Target Name="LinkRenderResources" BeforeTargets="Link" Condition="'$(MSBuildProjectName)'=='EI_Rebuild'"
+          DependsOnTargets="ResolveProjectReferences" Inputs="@(RenderResource);$(MSBuildThisFileFullPath)" Outputs="$(SharedRenderResources)">
+    <MakeDir Directories="$([System.IO.Path]::GetDirectoryName('$(SharedRenderResources)'))" />
+    <Exec Command="&quot;$(VCToolsInstallDir)bin\Hostx64\x64\link.exe&quot; /NOLOGO /DLL /NOENTRY /NODEFAULTLIB /MACHINE:X64 /Brepro /OUT:&quot;$(SharedRenderResources)&quot; @(RenderResource->'&quot;%(FullPath)&quot;', ' ')" />
+    <ItemGroup><FileWrites Include="$(SharedRenderResources)" /></ItemGroup>
+  </Target>
+  <Target Name="CopyRenderResources" AfterTargets="Build" Condition="'$(MSBuildProjectName)'=='EIRebuild64NavBake' Or '$(E1RendererFacadeWarpCheck)'=='true'">
+    <Copy SourceFiles="$(SharedRenderResources)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+  </Target>
+</Project>

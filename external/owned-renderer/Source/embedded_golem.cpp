@@ -1,4 +1,5 @@
 #include "renderer.h"
+#include "render_resources.h"
 #include "embedded_golem.h"
 #include <functional>
 #include <stdexcept>

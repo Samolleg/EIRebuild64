@@ -1,4 +1,5 @@
 #include "../../stdafx.h"
+#include "../../external/owned-renderer/Source/render_resources.h"
 #ifdef min
 #undef min
 #endif
@@ -162,7 +163,8 @@ LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wparam, LPARAM lp
 
 int RunE1RendererFacadeWarpCheck() {
     mark("start");
-    const bool shaderResourcePresent = FindResourceW(GetModuleHandleW(nullptr),
+    const HMODULE resourcesDll = owned::render_resource_module();
+    const bool shaderResourcePresent = resourcesDll && FindResourceW(resourcesDll,
         L"EID3D11_SHADERS", MAKEINTRESOURCEW(10)) != nullptr;
     std::printf("WARP shader resource: %s\n", shaderResourcePresent ? "present" : "missing");
     const HINSTANCE instance = GetModuleHandleW(nullptr);

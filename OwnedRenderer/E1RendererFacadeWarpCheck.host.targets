@@ -15,7 +15,6 @@
     <Link>
       <SubSystem>Console</SubSystem>
       <EntryPointSymbol>mainCRTStartup</EntryPointSymbol>
-      <AdditionalDependencies>$(MSBuildThisFileDirectory)..\out\Win32\Release\OwnedRenderer\eid3d11_shaders.res;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 </Project>

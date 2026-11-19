@@ -1,5 +1,6 @@
 // Renderer terrain: contact tiles and atlas, terrain tile families and blend, terrain frame and tessellation.
 #include <intrin.h>
+#include "render_resources.h"
 #include "point_shadow_policy.h"
 #include "cursor_image.h"
 #include "shadow_softness.h"
@@ -624,9 +625,8 @@ void Renderer::load_terrain2_masks() noexcept try{
   char text[200];std::snprintf(text,sizeof(text),"%s (0x%08lx); terrain 2.0 tiles use bilinear shapes and height only",what,static_cast<unsigned long>(hr));
   bridge_append_probe_event("terrain2_masks_omitted",text);
  };
- HMODULE module=nullptr;
- if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-     reinterpret_cast<LPCWSTR>(&append_terrain2_shader_programs),&module))return hr=E_FAIL,fail("module lookup");
+ const HMODULE module=owned::render_resource_module();
+ if(!module)return hr=E_FAIL,fail("module lookup");
  const HRESULT apartment=CoInitializeEx(nullptr,COINIT_MULTITHREADED);
  if(FAILED(apartment)&&apartment!=RPC_E_CHANGED_MODE)return hr=apartment,fail("COM");
  struct Apartment{bool release;~Apartment(){if(release)CoUninitialize();}}scope{SUCCEEDED(apartment)};

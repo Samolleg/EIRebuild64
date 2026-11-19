@@ -173,6 +173,12 @@ try {
         })
         if ($acceptedPaths -notcontains $accepted -or
             (Hash-File $accepted) -cne [string]$shaderReuse.accepted_exe_sha256) { throw 'Accepted shader source EXE changed.' }
+        if ($shaderReuse.resource_dll_sha256) {
+            $resourceDll = Join-Path (Split-Path -Parent $accepted) 'EI.RenderResources.dll'
+            if ((Hash-File $resourceDll) -cne $shaderReuse.resource_dll_sha256) {
+                throw 'Accepted shader resource DLL changed.'
+            }
+        }
         $base = [string]$shaderReuse.base_commit
         $main = (& git -C $sourceRepo rev-parse main).Trim()
         if ($LASTEXITCODE -ne 0) { throw 'Cannot determine current main.' }
@@ -282,12 +288,10 @@ try {
         $languages = [int[]]@($records | ForEach-Object { [int]$_.language })
         $sizes = [long[]]@($records | ForEach-Object { [long]$_.size })
         $hashes = [string[]]@($records | ForEach-Object { [string]$_.sha256 })
-        foreach ($image in @('out/x64/Release/EI_Rebuild/EIRebuild64.exe',
-                              'out/x64/Release/EIRebuild64NavBake/EIRebuild64NavBake.exe')) {
-            $count = [EIShaderResourceVerifier]::Verify((Join-Path $repo $image),$names,$languages,$sizes,$hashes)
-            if ($count -ne $records.Count) { throw "Compiled-resource comparison incomplete: $image" }
-            Write-Host "Verified $count accepted resources in $image."
-        }
+        $image = Join-Path $repo 'out/x64/Release/EI_Rebuild/EI.RenderResources.dll'
+        $count = [EIShaderResourceVerifier]::Verify($image,$names,$languages,$sizes,$hashes)
+        if ($count -ne $records.Count) { throw "Compiled-resource comparison incomplete: $image" }
+        Write-Host "Verified $count accepted resources in $image."
         Write-Host 'Shader reuse confirmed: no shader compilation or resource regeneration in build log.'
     }
     if ($PhysicsFxCheck) {
@@ -309,6 +313,7 @@ try {
         Copy-Item -LiteralPath (Join-Path $repo "out/x64/Release/$($target[0])/$($target[1]).exe") -Destination $kit
         Copy-Item -LiteralPath (Join-Path $repo "out/x64/Release/$($target[0])/$($target[0]).pdb") -Destination (Join-Path $kit ($target[1] + '.pdb'))
     }
+    Copy-Item -LiteralPath (Join-Path $repo 'out/x64/Release/EI_Rebuild/EI.RenderResources.dll') -Destination $kit
     $ffmpegSource = Join-Path $kit 'sources/ffmpeg/9.0.2'
     $null = New-Item -ItemType Directory -Path $ffmpegSource
     $archive = Join-Path $project 'deps/ffmpeg/9.0.2/downloads/ffmpeg-9.0.2.tar.xz'

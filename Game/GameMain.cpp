@@ -1,4 +1,5 @@
 #include "StdAfx.h"
+#include "../external/owned-renderer/Source/render_resources.h"
 #include "RuntimePaths64.h"
 #include "SaveSlot.h"
 #include "CorePerf.h"
@@ -1043,6 +1044,13 @@ int RunGame(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
         ASanReporting64::Finish();
 #endif
         LiveObserver::Stop(); CorePerf::Flush(); GameJournal::Stop(); } } journalEnd;
+    if (!owned::render_resource_module()) {
+        const char* message = "Cannot open EI.RenderResources.dll next to EIRebuild64.exe";
+        GameJournal::Event("SESSION", "render_resources_missing", "%s", message);
+        if (AgentBackground::Enabled()) AgentBackground::DialogError(message, "EIRebuild64");
+        else ErrorDialog::ShowA(nullptr, message, "EIRebuild64", MB_OK | MB_ICONERROR);
+        return BAD_RESULT;
+    }
     try { SettingsProfile::Initialize();
         GameJournal::Event("SESSION","settings_source","%s",SettingsProfile::Summary().c_str());
         if (!legacyRun) modHost=ModRuntime::Host::FromCommandLine(); }

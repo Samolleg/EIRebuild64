@@ -9,7 +9,9 @@ using GolemSpellPart=GolemPart;
 struct GolemResource {
  std::vector<GolemPart> parts;bool valid=false;
  explicit GolemResource(const wchar_t* name,unsigned expected) {
-  auto module=GetModuleHandleW(nullptr);auto r=FindResourceW(module,name,MAKEINTRESOURCEW(10));if(!r)return;
+  auto module=owned::render_resource_module();
+  if(!module)return;
+  auto r=FindResourceW(module,name,MAKEINTRESOURCEW(10));if(!r)return;
   const auto handle=LoadResource(module,r);const auto* bytes=static_cast<const unsigned char*>(LockResource(handle));size_t left=SizeofResource(module,r);
   auto take=[&](void* out,size_t size){if(!bytes||size>left)return false;std::memcpy(out,bytes,size);bytes+=size;left-=size;return true;};
   char magic[4];unsigned version=0,count=0;if(!take(magic,4)||std::memcmp(magic,"GAV1",4)||!take(&version,4)||version!=1||!take(&count,4)||count!=expected)return;
