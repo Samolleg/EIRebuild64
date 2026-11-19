@@ -181,9 +181,9 @@ CDX11::OwnedTerrainPassResult CDX11::SubmitC56TerrainPass(bool transparent)
         return OwnedTerrainPassResult::unavailable;
 
     if (transparent && D3D12Selected() && c56WorldPassRan) {
-        // Both terrain passes consume the same world view. The water material
-        // is a separate slot; EndWorld releases the borrow after replay.
-        const HRESULT queued = rendererFacade->QueueWorldDraw([](owned::Renderer& renderer) {
+        auto terrain = OwnedRender::E1CaptureTerrainDraw(true);
+        const HRESULT queued = rendererFacade->QueueWorldDraw([terrain = std::move(terrain)](owned::Renderer& renderer) {
+            OwnedRender::E1TerrainDrawScope scope(terrain);
             OwnedRender::E1TerrainSubmission water;
             const HRESULT hr = OwnedRender::E1SubmitTerrainPass(renderer,true,water);
             return SUCCEEDED(hr) && !water.completed ? E_FAIL : hr;
@@ -796,15 +796,25 @@ void CDX11::RunC56WorldPass(OwnedRender::E1VisualInputs visuals)
     frame.render[D3DRENDERSTATE_FOGENABLE] = fogState.render[D3DRENDERSTATE_FOGENABLE];
     frame.render[D3DRENDERSTATE_FOGCOLOR] = fogState.render[D3DRENDERSTATE_FOGCOLOR];
     c56WorldViewport = fogState.viewport;
+    if (RuntimeDiagnostics::Enabled()) {
+        auto& timing = owned::frame_waits::worldPipeline;
+        timing.collect();
+        timing.begin = 0; timing.end = 0;
+    }
+    auto terrain = OwnedRender::E1CaptureTerrainDraw(false);
     const DWORD producer = GetCurrentThreadId();
     IfFailedThrowHR(rendererFacade->QueueWorldDraw(
-        [this, visuals = std::move(visuals), frame, clip = ownedWorldToClip, producer](owned::Renderer& renderer) {
+        [this, visuals = std::move(visuals), frame, clip = ownedWorldToClip, producer,
+         terrain = std::move(terrain)](owned::Renderer& renderer) {
+            OwnedRender::E1TerrainDrawScope scope(terrain);
+            if (RuntimeDiagnostics::Enabled()) owned::frame_waits::worldPipeline.begin = owned::frame_waits::now();
             const bool drawn = OwnedRender::E1RunOwnedVisualFrame(renderer, frame, visuals);
             HRESULT hr = S_OK;
             if (!OwnedRender::E1OwnedVisualFrameFlushedStatics())
                 hr = renderer.flush_native_static(frame, clip);
             if (SUCCEEDED(hr) && drawn) OwnedRender::E1DrawPhysicsDebris(renderer, frame, visuals);
             if (SUCCEEDED(hr)) hr = renderer.flush_native();
+            if (RuntimeDiagnostics::Enabled()) owned::frame_waits::worldPipeline.end = owned::frame_waits::now();
             const DWORD executor = GetCurrentThreadId();
             const int state = (executor != producer ? 4 : 0) | (drawn ? 2 : 1);
             if (state != c56WorldPassState) {
@@ -944,7 +954,8 @@ void CDX11::SubmitC56PointLights(
 void CDX11::EndWorld()
 {
     FlushC74Prints();
-    IfFailedThrowHR(rendererFacade->FinishWorldDraw());
+    // Each queued terrain pass owns its frame. FIFO orders world composition
+    // before interface rendering without blocking the producer at EndWorld.
     // Finish the same c56 world pass before the caller starts drawing the
     // interface. composite_world drains queued native geometry and performs
     // the renderer-owned world composition; Present remains the frame owner.
@@ -1044,6 +1055,12 @@ void CDX11::EndFrame(bool present)
             "backend=%s fg_active_at_report=%u scene_thread_at_report=%u window_ms=%llu %s %s", D3D12Selected() ? "d3d12" : "d3d11", unsigned(fgActive), unsigned(sceneThread),
             now - lastGpuPassReport, cpuWaits.c_str(), gpuWaits.c_str());
         auto& pipeline = owned::frame_waits::pipeline;
+        auto& worldTiming = owned::frame_waits::worldPipeline;
+        worldTiming.collect();
+        GameJournal::Event("RENDER","world_pipeline","samples=%llu next_terrain_overlap=%llu overlap_ms=%.3f terrain_layout_reused=%llu",
+            worldTiming.samples, worldTiming.overlapped, worldTiming.overlapMs, worldTiming.reused);
+        worldTiming.samples = worldTiming.overlapped = worldTiming.reused = 0;
+        worldTiming.overlapMs = 0;
         GameJournal::Event("RENDER","pipeline_overlap","samples=%llu overlap=%llu encode=%llu overlap_ms=%.3f encode_ms=%.3f draw=%llu draw_ms=%.3f layer_packets=%llu",
             pipeline.frames,pipeline.overlapped,pipeline.encoding,pipeline.overlapMs,pipeline.encodingMs,pipeline.drawing,pipeline.drawMs,pipeline.layerPackets);
         pipeline.frames=pipeline.overlapped=pipeline.encoding=pipeline.drawing=pipeline.layerPackets=0;

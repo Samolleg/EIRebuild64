@@ -79,6 +79,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "dx11/RendererDX11.h"
 #include "dx11/OwnedWorldInputs.h"
 #include "OwnedRender/E1World.h"
+#include "OwnedRender/E1Terrain.h"
 #include "OwnedRender/E1Scene.h"
 #include "OwnedRender/E1VisualFrame.h"
 #include "OwnedRender/E3Combat.h"
@@ -3160,6 +3161,7 @@ BOOL CWorldClient::Draw()
         }
         pRend->GetD3D()->RunC56WorldPass(std::move(visuals));
         PrepareScreenPicking();
+        OwnedRender::E1StageNextTerrainView();
     } else InvalidatePicking();
     coreParts.Stage(CorePerf::WorldOverlays);
     // Remaining overlays run after this draw's owned shadows and colour.

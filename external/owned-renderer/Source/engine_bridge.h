@@ -1782,6 +1782,11 @@ struct BridgeFrameValues {
     bool world_draw_active = false;  // queued inside the outer World::Draw
     std::uint64_t world_epoch = 0;   // lifecycle positive world epoch when queued
     std::shared_ptr<const TerrainAtlasSnapshot> terrain_atlases;
+#ifdef EID3D11_EMBEDDED
+    std::uint64_t host_world_generation = 0;
+    NativeWorldLighting host_lighting{};
+    bool host_lighting_valid = false;
+#endif
 };
 // False means the host has not published a complete queue snapshot.
 bool bridge_capture_frame_values(BridgeFrameValues& values) noexcept;

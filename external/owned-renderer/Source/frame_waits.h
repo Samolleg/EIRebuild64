@@ -35,6 +35,25 @@ struct PipelineTiming {
     unsigned long long frames=0,overlapped=0,encoding=0,drawing=0,layerPackets=0;
     double overlapMs=0,encodingMs=0,drawMs=0;
 };
+// QPC intervals use a common clock across both threads. World and staging
+// are paired before publishing another opaque pass; never count FIFO wait as draw.
+struct WorldPipelineTiming {
+    std::atomic<LONGLONG> begin{0}, end{0};
+    LONGLONG stageBegin=0, stageEnd=0;
+    unsigned long long samples=0, overlapped=0, reused=0;
+    double overlapMs=0;
+    void collect() noexcept {
+        if (!stageBegin) return;
+        const auto first=begin.load(), last=end.load();
+        if (first && last) {
+            ++samples;
+            const auto ticks=(std::min)(last,stageEnd)-(std::max)(first,stageBegin);
+            if (ticks>0) { ++overlapped; overlapMs+=milliseconds(ticks); }
+        }
+        stageBegin=stageEnd=0;
+    }
+};
+inline WorldPipelineTiming worldPipeline;
 inline PipelineTiming pipeline;
 inline void pipeline_post() noexcept {
     if(!RuntimeDiagnostics::Enabled())return;
