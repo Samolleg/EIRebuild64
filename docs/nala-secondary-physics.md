@@ -1,53 +1,19 @@
-# Nala breast secondary motion
+# Nala secondary motion
 
-The world adapter enables presentation-only PhysX 5.13.0 GPU motion for the main
-hero when the selected GLB contains the existing `PHYSICS_Pecho.L/R` branches
-(including `.001` and `.002`). No model, weights, animation clips, save format or
-combat state are changed. The info panel and inventory/camp each own a separate simulation on their animation clock. Their final joint matrices use the same UI placement as the body. Inventory yaw, and actor movement in the info panel, drive inertia in metre units.
+The world, character information panel and inventory sample the same sparse skin overrides in metre space. Each view owns a separate simulation. Pause freezes its clock, and seeks, teleports over half a metre or gaps over 250 ms reset it to the authored pose. A worker advances fixed 1/120 s ticks between the latest animation samples. Body joints use the shared PhysX 5.13 GPU runtime and a private TGS scene. An unavailable CUDA runtime leaves the animated pose and reports an error.
 
-Two 0.45 kg dynamic bodies track the animated outer breast points in world
-space under gravity (9.81 m/s²). The 55 N/m springs and 3.6 Ns/m damping
-allow settling and inertial lag. The 8.5 cm travel budget includes the static
-load. The spring preload sets the static drop to 4.1 cm. Initialization and teleports seed the gravity-loaded equilibrium.
+## Body
 
-The actor owns a separate GPU scene sharing the existing PhysX foundation,
-CUDA context and dispatcher with debris. At up to 60 Hz it advances to the latest
-animated targets in one GPU submission using the elapsed game time. The renderer
-samples two timestamped results one 60 Hz frame behind its clock and may project
-their motion forward by at most one such frame, within the travel limit.
-World time is supplied by the native completed-visual seam;
-combat pause and duplicate samples do not advance simulation. Rewind, explicit
-seek, gaps over 0.25 s and attachment jumps over 0.5 m reset momentum. Destruction
-of the retained actor releases its scene. Missing CUDA/runtime errors emit
-`nala_physx_unavailable` and leave the ordinary animated pose; no CPU simulator
-is substituted. Successful initialization emits `nala_physx_ready`.
+The SMA 0.10.4e base, middle and tip D6 presets form a three-link chain on each side. The frames run from PeChoBase through the three PHYSICS_Pecho points. Each joint drives its corresponding weighted subtree. Each glute rotates DEF_Glute about its own origin with its mass towards CENTER_OF_MASS_Glute, with the inverted lateral frame. World gravity is 9.81 m/s². Use 21 position iterations, one velocity iteration and angular drag 0.05. The tip locks all rotation. Glutes lock all linear axes and use twist limits −27.5°/+45° and swings of 23°/9°. The drive targets (2°, 3°, 0°, 12°) and axis-specific spring, mass blending and damping percentages are in Game/PhysicsBreast.inl.
 
-`gltf_breast.h` samples only the required ancestor chains. It rotates each side around its animated
-PeChoBase attachment towards the displaced outer point. Axial compression and
-extension are limited to 15%. The same affine bend applies to the three branches
-and their descendants. Skin weights blend the anchored torso into the moving
-surface. Base and tracker bones keep the authored pose. The sparse
-snapshot is keyed by animation, placement, game time and the legacy palette
-base, so changing equipment on pause cannot reuse obsolete joint indices.
+The supplied density coefficients are relative. SMA's final runtime masses, character scale modifiers, exact collider volumes and playback trajectories are unavailable in the reference. At neutral size the three breast masses share Nala's previous 0.45 kg per side in proportion to 0.66, 0.1446192 and 0.0041712. Glutes use coefficient 4.5 on the same scale. Each part scales by the cube of its measured segment length ratio. Drive effective mass includes descendants. Travel is based on animated segment lengths at reset. The base target is −45% of its segment length, its travel 85%, middle 40%, tip 55%. Four positional passes enforce the asymmetric travel and locked axes after the D6 solve.
 
-D3D11 and D3D12 upload these final world matrices after `nativePoseCS` and before
-surface preparation. GPU animation remains shared and unchanged. Body,
-weighted clothing, depth/shadows and ray geometry consume the same pose palette.
-The overall equipment envelope includes the displacement allowance. Rigid
-weapons and other joints are unaffected. No shader code or GPU record layout
-changes are required.
+## Hair
 
-Validation entry points:
+The body and four wearable hair meshes use 20 optional guide joints defined in the mod's human.v1 profile. They follow four guides with five samples each for the loose left and right sections, ordinary braid and armour braid. Authored vertices above the guide root stay attached to their original bones. Each guide follows its animated scalp/neck/spine rest frames and the skin blends neighbouring samples. The older 378-joint model still runs body simulation with no hair guides.
 
-- `tools/check-physics-fx.ps1 -OutputDirectory <task/check>`: actual GPU spring
-  response, independent sides, limit, settling, pause, reset/lifetime, missing
-  GPU DLL, and the existing debris regressions.
-- `tools/build-task.ps1 -PhysicsFxCheck -ShaderResourceManifest <manifest>`:
-  builds the runtime and native render harness with pinned accepted shaders.
-  `check-nala-physics.inl` decodes the installed GLB, checks animated sparse
-  matrices, localized weighted deformation, duplicate samples, pause/resume
-  and equipment palette remapping. The existing render harness exercises
-  native D3D11/D3D12 debris rendering; it does not by itself prove the Nala
-  world-render integration or artistic acceptance.
-- A background game run is required to inspect the actual Nala world path.
-  Gameplay logs and screenshots belong to task evidence, never this repository.
+Hair runs on the character worker with a Verlet chain and one distance pass per fixed tick. World gravity is 40 m/s² down, velocity retention 0.8666667044. Root mobility is zero. Four other mobilities are sampled with cubic Hermite interpolation from Stilo_Q_Corto for loose hair and Stilo_Q for both braids. These are adaptations to Nala's two hair lengths. The source uses GPU strand particles. Nala uses bone guides, without strand-level contacts, external wind or dynamic joint-area providers. The source radius (0.00666 m) and wind multiplier (1) do not produce collisions or wind by themselves.
+
+## Checks
+
+Run tools/check-physics-fx.ps1 for the actual GPU solver, asymmetric motion, pinned hair, duplicate frames, reset and missing runtime. The native render harness decodes the selected game's GLB, exercises idle/walk/run and verifies that UI placement, equipment palette indices and pause stay consistent. Its D3D11/12 images exercise the debris path. An actual game session is required for visual evaluation of Nala and her equipment.

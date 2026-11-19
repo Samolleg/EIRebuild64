@@ -5,40 +5,14 @@
 #include <cstdio>
 
 namespace owned::gltf {
-// Rotation around the animated chest attachment. Only a small axial stretch
-// is allowed, so a forward stop cannot pull the tissue away from the chest.
-inline Affine breast_bend(const std::array<float,3>& base,const std::array<float,3>& tip,
-                          const std::array<float,3>& displacement) {
-    Affine out{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
-    std::array<float,3> u{},v{};
-    float a=0,b=0;
-    for(unsigned i=0;i<3;++i) {
-        u[i]=tip[i]-base[i]; v[i]=u[i]+displacement[i];
-        a+=u[i]*u[i]; b+=v[i]*v[i];
-    }
-    a=std::sqrt(a); b=std::sqrt(b);
-    if(a<1e-5f||b<1e-5f)return out;
-    for(unsigned i=0;i<3;++i){u[i]/=a;v[i]/=b;}
-    const float cosine=std::clamp(u[0]*v[0]+u[1]*v[1]+u[2]*v[2],-1.f,1.f);
-    if(cosine<-.99f)return out;
-    const float axial=std::clamp(b/a,.85f,1.15f)-1.f;
-    // Shortest arc R = I + K + K*K/(1+cos), K = v*u' - u*v'.
-    for(unsigned i=0;i<3;++i)for(unsigned j=0;j<3;++j) {
-        const float k=v[i]*u[j]-u[i]*v[j];
-        const float kk=cosine*(v[i]*u[j]+u[i]*v[j])-v[i]*v[j]-u[i]*u[j];
-        out[i*4+j]+=k+kk/(1+cosine)+axial*v[i]*u[j];
-    }
-    for(unsigned i=0;i<3;++i) {
-        out[i*4+3]=base[i];
-        for(unsigned j=0;j<3;++j)out[i*4+3]-=out[i*4+j]*base[j];
-    }
-    return out;
-}
 struct BreastState {
     std::shared_ptr<const Asset> asset;
     std::shared_ptr<SecondaryPhysics> physics;
     std::array<unsigned,2> targets{}, attachments{};
-    struct Affected {unsigned node,side;};
+    std::array<unsigned,body_parts> roots{}, starts{}, ends{};
+    std::array<unsigned,hair_groups*hair_points> hair_nodes{};
+    bool has_hair=false;
+    struct Affected {unsigned node,part;};
     std::vector<Affected> affected;
     std::vector<SocketJoint> joints;
     std::vector<unsigned> parent_slots, slots;
@@ -56,28 +30,34 @@ struct BreastState {
 
     bool bind(const std::shared_ptr<const Asset>& body) {
         asset=body;
-        // Exact existing Nala branch names; no changes to skins or vertex weights.
-        std::array<unsigned,6> roots{};
-        for(unsigned side=0;side<2;++side)for(unsigned part=0;part<3;++part) {
-            const std::string name=std::string("PHYSICS_Pecho.")+(side?"R":"L")+
-                (part==0?"":part==1?".001":".002");
-            const auto found=std::find_if(body->geometry.joints.begin(),body->geometry.joints.end(),
-                [&](const auto& joint){return joint.name==name;});
-            if(found==body->geometry.joints.end())return false;
-            roots[side*3+part]=unsigned(found-body->geometry.joints.begin());
-            if(part==2)targets[side]=roots[side*3+2];
-            if(part==0) {
-                const std::string baseName=std::string("PeChoBase.")+(side?"R":"L");
-                const auto anchor=std::find_if(body->geometry.joints.begin(),body->geometry.joints.end(),
-                    [&](const auto& joint){return joint.name==baseName;});
-                if(anchor==body->geometry.joints.end())return false;
-                attachments[side]=unsigned(anchor-body->geometry.joints.begin());
+        const auto lookup=[&](const std::string& name){
+            const auto& joints=body->geometry.joints;
+            auto it=std::find_if(joints.begin(),joints.end(),[&](const auto& j){return j.name==name;});
+            return it==joints.end()?UINT32_MAX:unsigned(it-joints.begin());
+        };
+        for(unsigned side=0;side<2;++side){
+            const std::string suffix=side?".R":".L";
+            const unsigned first=side*4;
+            attachments[side]=lookup("PeChoBase"+suffix);
+            for(unsigned k=0;k<3;++k){
+                roots[first+k]=ends[first+k]=lookup("PHYSICS_Pecho"+suffix+(k==0?"":k==1?".001":".002"));
+                starts[first+k]=k?ends[first+k-1]:attachments[side];
             }
+            targets[side]=ends[first+2];
+            roots[first+3]=starts[first+3]=lookup("DEF_Glute"+suffix);
+            ends[first+3]=lookup("CENTER_OF_MASS_Glute"+suffix);
+        }
+        for(unsigned i=0;i<body_parts;++i)if(starts[i]==UINT32_MAX||ends[i]==UINT32_MAX)return false;
+        const char* groups[]={"LooseL","LooseR","Braid","Armor"};
+        has_hair=true;
+        for(unsigned i=0;i<hair_nodes.size();++i){
+            hair_nodes[i]=lookup(std::string("NalaHair_")+groups[i/hair_points]+"_"+std::to_string(i%hair_points));
+            has_hair &= hair_nodes[i]!=UINT32_MAX;
         }
         for(unsigned n=0;n<body->animation->nodes.size();++n) {
             for(int p=int(n);p>=0;p=body->animation->nodes[p].parent) {
                 const auto root=std::find(roots.begin(),roots.end(),unsigned(p));
-                if(root!=roots.end()) {affected.push_back({n,unsigned(root-roots.begin())/3});break;}
+                if(root!=roots.end()) {affected.push_back({n,unsigned(root-roots.begin())});break;}
             }
         }
         const auto& animation=*body->animation;
@@ -98,7 +78,9 @@ struct BreastState {
                 joints.push_back(std::move(joint));
             }
         };
+        if(has_hair)for(unsigned i=0;i<hair_nodes.size();++i)affected.push_back({hair_nodes[i],body_parts+i});
         for(const auto entry:affected)include_chain(entry.node);
+        for(const auto n:ends)include_chain(n);
         for(const auto anchor:attachments)include_chain(anchor);
         for(unsigned c=0;c<animation.clips.size();++c) {
             const auto& tracks=animation.clips[c].tracks;
@@ -132,25 +114,35 @@ struct BreastState {
                 socket_local(*asset->animation,joints[i],pose,shape));
         }
         const auto jointMatrix=[&](unsigned node){return multiply(root,matrices[slots[node]]);};
-        SecondaryPoints points{},bases{};
-        for(unsigned i=0;i<2;++i) {
-            const auto matrix=jointMatrix(targets[i]);
-            const auto anchor=jointMatrix(attachments[i]);
-            bases[i]={anchor[3],anchor[7],anchor[11]};
-            points[i]={matrix[3],matrix[7],matrix[11]};
+        const auto origin=[&](unsigned node){
+            const auto m=jointMatrix(node);return SecondaryPoint{m[3],m[7],m[11]};
+        };
+        SecondaryTargets input;
+        for(unsigned i=0;i<body_parts;++i){
+            auto& segment=input.body[i];segment.pivot=origin(starts[i]);segment.end=origin(ends[i]);
+            const unsigned k=i%4;
+            const auto left=origin(starts[k]),right=origin(starts[4+k]);
+            for(unsigned axis=0;axis<3;++axis)segment.lateral[axis]=(left[axis]-right[axis])*(k==3?-1.f:1.f);
         }
-        const auto offsets=physics->advance(physics_clock,points,reset);
+        input.has_hair=has_hair;
+        if(has_hair)for(unsigned i=0;i<hair_nodes.size();++i)input.hair[i]=origin(hair_nodes[i]);
+        const auto offsets=physics->advance(physics_clock,input,reset);
         if(!physics->error().empty()) {
             overrides.reset();
             if(!reported){bridge_append_probe_event("nala_physx_unavailable",physics->error().c_str());reported=true;}
             return;
         }
-        std::array<Affine,2> bend;
-        for(unsigned side=0;side<2;++side)
-            bend[side]=breast_bend(bases[side],points[side],offsets[side]);
+        std::array<Affine,body_parts> bend;
+        for(unsigned i=0;i<body_parts;++i){
+            Node node;node.rotation=offsets.body[i].rotation;
+            auto& m=bend[i];m=trs(node);
+            const auto& p=input.body[i].pivot;
+            for(unsigned r=0;r<3;++r)
+                m[r*4+3]=offsets.body[i].shift[r]+p[r]-(m[r*4]*p[0]+m[r*4+1]*p[1]+m[r*4+2]*p[2]);
+        }
         if(RuntimeDiagnostics::Enabled() && physics->ready() && !paused) {
             // Final displaced tip minus its authored pose, in world metres.
-            const auto& p=points[0];const auto& m=bend[0];
+            const auto& p=input.body[2].end;const auto& m=bend[2];
             const float dz=m[8]*p[0]+m[9]*p[1]+m[10]*p[2]+m[11]-p[2];
             if(!motion_samples || reset || physics_clock<motion_window || motion_clip!=pose.clip){
                 motion_window=physics_clock;motion_clip=pose.clip;motion_samples=0;
@@ -169,7 +161,9 @@ struct BreastState {
         auto result=std::make_shared<std::vector<NativeWorldGeometry::Pose::Override>>();
         result->reserve(affected.size());
         for(const auto entry:affected) {
-            auto matrix=multiply(bend[entry.side],jointMatrix(entry.node));
+            auto matrix=jointMatrix(entry.node);
+            if(entry.part<body_parts)matrix=multiply(bend[entry.part],matrix);
+            else for(unsigned r=0;r<3;++r)matrix[r*4+3]+=offsets.hair[entry.part-body_parts][r];
             if(ui)matrix=multiply(ui->to_display,matrix);
             NativeWorldGeometry::Pose::Override out{};out.node=base+entry.node;
             for(unsigned r=0;r<3;++r) {
@@ -178,7 +172,7 @@ struct BreastState {
             result->push_back(out);
         }
         overrides=std::move(result);
-        if(!reported&&physics->ready()){bridge_append_probe_event("nala_physx_ready","backend=PhysX-5.13.0 dynamics=GPU joints=D6 gravity=world_z anchored_swing=1 limit_m=0.085");reported=true;}
+        if(!reported&&physics->ready()){bridge_append_probe_event("nala_physx_ready",has_hair?"backend=PhysX GPU D6=8 fixed_hz=120 hair_guides=4":"backend=PhysX GPU D6=8 fixed_hz=120 hair_guides=0");reported=true;}
     }
 };
 }
