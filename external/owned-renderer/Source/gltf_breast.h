@@ -5,6 +5,45 @@
 #include <cstdio>
 
 namespace owned::gltf {
+// Retarget the three serial D6 joints to Nala's three parallel weighted
+// branches. Keep consecutive endpoints joined in skin space. Applying the
+// individual translations directly can tear the surface during a running stop.
+inline SecondaryPoint mapped_point(const Affine& m,const SecondaryPoint& p){
+    SecondaryPoint out{};
+    for(unsigned r=0;r<3;++r)out[r]=m[4*r+3]+m[4*r]*p[0]+m[4*r+1]*p[1]+m[4*r+2]*p[2];
+    return out;
+}
+inline Affine breast_segment_skin(const SecondarySegment& segment,const SecondaryPoint& start,
+                                  const SecondaryPoint& solved,float maxAngle){
+    SecondaryPoint u{},v{};float rest2=0,goal2=0,dot=0;
+    for(unsigned k=0;k<3;++k){
+        u[k]=segment.end[k]-segment.pivot[k];v[k]=solved[k]-start[k];
+        rest2+=u[k]*u[k];goal2+=v[k]*v[k];dot+=u[k]*v[k];
+    }
+    const float rest=std::sqrt(rest2),goal=std::sqrt(goal2);
+    Node node;
+    float stretch=1;
+    if(rest>1e-6f&&goal>1e-6f){
+        const float cosine=std::clamp(dot/(rest*goal),-1.f,1.f);
+        const float half=.5f*(std::min)(maxAngle,std::acos(cosine));
+        SecondaryPoint axis{u[1]*v[2]-u[2]*v[1],u[2]*v[0]-u[0]*v[2],u[0]*v[1]-u[1]*v[0]};
+        float norm=std::sqrt(axis[0]*axis[0]+axis[1]*axis[1]+axis[2]*axis[2]);
+        if(norm>1e-8f){
+            for(unsigned k=0;k<3;++k)node.rotation[k]=axis[k]*std::sin(half)/norm;
+            node.rotation[3]=std::cos(half);
+        }
+        stretch=std::clamp(goal/rest,.90f,1.10f);
+    }
+    auto m=trs(node);
+    if(rest2>1e-12f){
+        auto direction=mapped_point(m,u);
+        for(unsigned r=0;r<3;++r)for(unsigned c=0;c<3;++c)
+            m[r*4+c]+=(stretch-1)*direction[r]*u[c]/rest2;
+    }
+    const auto pivot=mapped_point(m,segment.pivot);
+    for(unsigned r=0;r<3;++r)m[r*4+3]=start[r]-pivot[r];
+    return m;
+}
 struct BreastState {
     std::shared_ptr<const Asset> asset;
     std::shared_ptr<SecondaryPhysics> physics;
@@ -139,6 +178,18 @@ struct BreastState {
             const auto& p=input.body[i].pivot;
             for(unsigned r=0;r<3;++r)
                 m[r*4+3]=offsets.body[i].shift[r]+p[r]-(m[r*4]*p[0]+m[r*4+1]*p[1]+m[r*4+2]*p[2]);
+        }
+        for(unsigned side=0;side<2;++side){
+            const unsigned first=4*side;
+            auto start=input.body[first].pivot;
+            for(unsigned k=0;k<3;++k){
+                unsigned i=first+k;
+                auto goal=mapped_point(bend[i],input.body[i].end);
+                // The locked tip follows the angular range of the middle joint.
+                constexpr float degreesToRadians=.01745329252f;
+                bend[i]=breast_segment_skin(input.body[i],start,goal,(k?43.f:25.f)*degreesToRadians);
+                start=mapped_point(bend[i],input.body[i].end);
+            }
         }
         if(RuntimeDiagnostics::Enabled() && physics->ready() && !paused) {
             // Final displaced tip minus its authored pose, in world metres.

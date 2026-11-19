@@ -8,6 +8,8 @@ The SMA 0.10.4e base, middle and tip D6 presets form a three-link chain on each 
 
 The supplied density coefficients are relative. SMA's final runtime masses, character scale modifiers, exact collider volumes and playback trajectories are unavailable in the reference. At neutral size the three breast masses share Nala's previous 0.45 kg per side in proportion to 0.66, 0.1446192 and 0.0041712. Glutes use coefficient 4.5 on the same scale. Each part scales by the cube of its measured segment length ratio. Drive effective mass includes descendants. Travel is based on animated segment lengths at reset. The base target is −45% of its segment length, its travel 85%, middle 40%, tip 55%. Four positional passes enforce the asymmetric travel and locked axes after the D6 solve.
 
+Nala's weighted breast branches are parallel in the authored skeleton. The rendering step retargets the serial solver endpoints into a continuous skin curve rooted at PeChoBase. Each segment can stretch or compress by 10%. The base swing is bounded by 25 degrees, and the middle and locked tip share the cumulative 43 degree envelope. This prevents isolated pointed deformations during running.
+
 ## Hair
 
 The body and four wearable hair meshes use 20 optional guide joints defined in the mod's human.v1 profile. They follow four guides with five samples each for the loose left and right sections, ordinary braid and armour braid. Authored vertices above the guide root stay attached to their original bones. Each guide follows its animated scalp/neck/spine rest frames and the skin blends neighbouring samples. The older 378-joint model still runs body simulation with no hair guides.
