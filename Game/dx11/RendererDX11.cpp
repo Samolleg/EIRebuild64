@@ -965,7 +965,7 @@ void CDX11::SubmitC56PointLights(
     IfFailedThrowHR(hr);
 }
 
-void CDX11::EndWorld()
+void CDX11::EndWorld(bool briefing)
 {
     FlushC74Prints();
     // Each queued terrain pass owns its frame. FIFO orders world composition
@@ -973,7 +973,12 @@ void CDX11::EndWorld()
     // Finish the same c56 world pass before the caller starts drawing the
     // interface. composite_world drains queued native geometry and performs
     // the renderer-owned world composition; Present remains the frame owner.
-    const HRESULT composite = rendererFacade->SubmitWorldBatch(owned::Renderer::EmbeddedBatch::composite);
+    // The briefing can present a bare world with no interface draws. Finish
+    // the world on the frame owner before the base screen clears depth, even
+    // on frames with no name surface. Opaque geometry and effects stay FIFO.
+    const HRESULT composite = briefing
+        ? rendererFacade->Visit([](owned::Renderer& renderer) { return renderer.composite_world(); })
+        : rendererFacade->SubmitWorldBatch(owned::Renderer::EmbeddedBatch::composite);
     if (FAILED(composite))
         GameJournal::Event("ERROR", "world_composite", "operation=composite_world hr=%08lx",
             static_cast<unsigned long>(composite));
