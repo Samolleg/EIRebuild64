@@ -2175,6 +2175,10 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  };
 #ifdef EID3D11_EMBEDDED
  if(deferOutput){
+  // UI quads are live frame data. Finish their command recording on the
+  // frame owner before simulation resumes. Present, pacing and the captured
+  // debug-overlay/cursor packets may still execute on the scene worker.
+  if(FAILED(hr=flushHud()))return hr;
   // One submitted frame may outlive EndFrame. Reconcile its HRESULT and
   // renderer bookkeeping before the next device access, including resize.
   embedded_present_completion_=[this,complete=std::move(complete),overlayLease=overlayPacket.replay](HRESULT hr){
@@ -2183,18 +2187,18 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
   };
   frame_waits::pipeline_post();
   if(RuntimeDiagnostics::Enabled()){
-   frame_waits::pipeline.drawingLayers=hudPending;
-   if(hudPending)++frame_waits::pipeline.layerPackets;
+   frame_waits::pipeline.drawingLayers=bool(overlayPacket.replay)||lateCursor;
+   if(frame_waits::pipeline.drawingLayers)++frame_waits::pipeline.layerPackets;
   }
-  const bool posted=scene_thread_->post([this,syncInterval,frame_limit,hudPending,drawHud=std::move(drawHud),
+  const bool posted=scene_thread_->post([this,syncInterval,frame_limit,
                                           lateCursor,cursor=std::move(lastCursor),overlay=std::move(overlayPacket.replay)]() mutable {
    if(RuntimeDiagnostics::Enabled())frame_waits::pipeline.start=frame_waits::now();
    HRESULT result=E_FAIL;
    try {
-    result=hudPending?drawHud():S_OK;
+    result=S_OK;
     if(SUCCEEDED(result)&&overlay){transition_profile_pass("debug_overlay");overlay();}
     if(SUCCEEDED(result)&&lateCursor){pending_blits_.push_back(std::move(cursor));result=render_pending_blits();}
-    if (RuntimeDiagnostics::Enabled() && hudPending)
+    if (RuntimeDiagnostics::Enabled() && (overlay || lateCursor))
      frame_waits::pipeline.layersDone=frame_waits::now();
     if(SUCCEEDED(result)){
      if(FAILED(apply_gamma_ramp_d3d12()))d3d12_->omit("gamma_ramp (D3D12 pass failed)",false);
