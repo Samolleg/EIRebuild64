@@ -3211,7 +3211,7 @@ BOOL CWorldClient::Draw()
     coreParts.Stage(CorePerf::WorldFinish);
     DrawPolyLines();
     OwnedRender::E1StageNextTerrainView();
-    pRend->GetD3D()->EndWorld(); // compose world before flying HP and other UI
+    pRend->GetD3D()->EndWorld(pPlayer && pPlayer->curInterface == IFACE_BASE); // before flying HP and UI
     // pop main and camera matrix
     pGPU->PopMatrix(MAT_STACK_VIEW2CLIP);
     pGPU->PopMainMatrix();

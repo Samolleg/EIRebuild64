@@ -111,7 +111,7 @@ public:
     void FinishSimulation() noexcept;
     void BeginFrame();
     bool BeginWorld(const EIRenderWorldFrameV2& frame);
-    void EndWorld();
+    void EndWorld(bool briefing);
     void BeginInterface();
     void RunC56WorldPass(OwnedRender::E1VisualInputs visuals);
     void FinishWorldDraw() noexcept;
