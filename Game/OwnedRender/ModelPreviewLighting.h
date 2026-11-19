@@ -20,7 +20,7 @@ inline bool produce_model_preview_lighting(const std::array<float,16>& clip,
     output.world.sunlight_direction=studio.direction;
     output.points.clear();
     if (style == owned::PreviewStudioStyle::soft_figure) {
-        constexpr float strength[] = {.32f,.235f};
+        constexpr float strength[] = {.38f,.29f};
         for (unsigned i=0; i<studio.fill_centers.size(); ++i) {
             owned::RetainedWorldPointLight fill{};
             fill.center=studio.fill_centers[i];

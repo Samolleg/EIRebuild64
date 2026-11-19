@@ -80,7 +80,7 @@ inline bool make_preview_studio_lighting(const std::array<float,16>& clip,
     PreviewStudioLighting value;
     for(unsigned a=0;a<3;++a)value.direction[a]=static_cast<float>(key[a]);
     if (soft) {
-        value.ambient = {.36f,.36f,.36f,1.f};
+        value.ambient = {.56f,.56f,.56f,1.f};
         value.diffuse = {.84f,.825f,.81f,1.f};
         value.direction[3] = 1.f; // Host binds the studio's own lights for this submission.
         // Broad neutral fills to either side. Both lights are far relative to a figure,
