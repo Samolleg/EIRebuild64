@@ -86,9 +86,9 @@ static void check_nala_physics(const fs::path& game,const fs::path& out) {
             require(moved<body->rest_vertices.size()/2,"localized weighted deformation");
         }
         std::cout<<"Nala "<<action<<" tip_dz_min_m="<<low<<" max_m="<<high<<" breast_peak_mm="<<1000*breastPeak<<" glute_peak_mm="<<1000*glutePeak<<" skin_peak_so_far_m="<<peak<<std::endl;
-        require(breastPeak<.018f&&glutePeak<.005f,"Tissue travel on the actual rig");
-        if(locomotion)require(high-low>.0005f&&glutePeak>.0002f,"Inertia during locomotion");
-        else require(breastPeak<.0017f&&glutePeak<.0005f,"Quiet breathing on the actual rig");
+        require(breastPeak<.041f&&glutePeak<.0115f,"Tissue travel on the actual rig");
+        if(locomotion)require(high-low>.001f&&breastPeak>.016f&&glutePeak>.004f,"Inertia during locomotion");
+        else require(breastPeak<.009f&&glutePeak<.0027f,"Quiet breathing on the actual rig");
     }
     auto previous=state.overrides;state.update(state.clock,state.playback,state.placement,false,0);
     require(state.overrides==previous,"Nala repeated render reuses immutable pose");
@@ -119,13 +119,13 @@ static void check_nala_physics(const fs::path& game,const fs::path& out) {
     }
     // Stop, pause mid-blend, and settle on the info-panel clock.
     state.update(state.clock+.03,state.playback,root,false,17,false,nullptr,nullptr,true);
-    require(state.tissue_gain>.075f&&state.tissue_gain<1.f,"smooth entry into rest");
+    require(state.tissue_gain>BreastState::idle_gain&&state.tissue_gain<BreastState::active_gain,"smooth entry into rest");
     const float partialGain=state.tissue_gain;
     state.update(state.clock+.2,state.playback,root,false,17,true,nullptr,nullptr,true);
     require(state.tissue_gain==partialGain,"paused transition stays frozen");
     state.update(state.clock+.1,state.playback,root,false,17,false,nullptr,nullptr,true);
     for(unsigned f=0;f<20;++f)state.update(state.clock+1./30.,state.playback,root,false,17,false,nullptr,nullptr,true);
-    require(std::abs(state.tissue_gain-.075f)<.001f,"stop settles to idle response");
+    require(std::abs(state.tissue_gain-BreastState::idle_gain)<.001f,"stop settles to idle response");
     const auto before=state.physics_clock;
     state.update(state.clock+1,state.playback,state.placement,false,0,true);
     require(state.physics_clock==before,"Nala host combat pause freezes physics time");

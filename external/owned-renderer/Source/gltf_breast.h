@@ -58,7 +58,8 @@ struct BreastState {
     std::vector<Affine> matrices;
     double clock=-1, physics_clock=0;
     bool frozen=false, resting_pose=false;
-    float tissue_gain=1.f;
+    static constexpr float idle_gain=.40f, active_gain=2.25f;
+    float tissue_gain=active_gain;
     unsigned node_base=UINT32_MAX;
     Playback playback;
     Affine placement{}, display_mapping{};
@@ -148,7 +149,7 @@ struct BreastState {
         // changes of facing. The authored pose carries that movement. Give
         // secondary inertia a small residual there, easing on simulation time
         // when a footfall or stop crosses the locomotion/idle boundary.
-        const float targetGain=resting?.075f:1.f;
+        const float targetGain=resting?idle_gain:active_gain;
         if(!initialized||reset)tissue_gain=targetGain;
         else{
             const float dt=float(physics_clock-previousPhysicsClock);
