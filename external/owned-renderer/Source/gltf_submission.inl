@@ -120,7 +120,7 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
         if(secondary) {
             const auto* ui=sample.preview_physics;
             secondary->update(sample.secondary_clock,playback,ui?current.placed_with_sole(ui->simulation):current.root_to_world,
-                seek,unsigned(base),sample.secondary_frozen,ui,prepared.motion_physique.get());
+                seek,unsigned(base),sample.secondary_frozen,ui,prepared.motion_physique.get(),(request.flags&0x3c0000u)==0x180000u);
             current.overrides=secondary->overrides;
         }
     }
