@@ -836,6 +836,8 @@ struct NativeWorldGeometry {
         struct Override { UINT node=0; Node value; };
         // Sparse final WORLD matrices, uploaded after GPU animation on both backends.
         std::shared_ptr<const std::vector<Override>> overrides;
+        // Appended after body joints and morph records; only the equipped mechanism uses these.
+        UINT attachment_nodes=0;
         std::shared_ptr<const std::vector<Node>> baked;
         std::array<float,3> physique_sole{};
         std::array<float,16> placed_with_sole(std::array<float,16> matrix) const {

@@ -1681,7 +1681,9 @@ HRESULT Renderer::resolve_native_pose(NativeWorldGeometry::Pose* pose,const Nati
   value.output=slot.value.output;
   value.generation=slot.value.generation;
   if(source.baked&&(source.baked->size()<source.binding->tracks.size()||source.baked->size()>UINT_MAX))return E_INVALIDARG;
-  const auto extra=source.binding->gltf_animation?source.binding->gltf_animation->morphs:0u;
+  const auto morphs=source.binding->gltf_animation?source.binding->gltf_animation->morphs:0u;
+  if(source.attachment_nodes>UINT_MAX-morphs)return E_OUTOFMEMORY;
+  const auto extra=morphs+source.attachment_nodes;
   if(source.binding->tracks.size()>UINT_MAX-extra)return E_OUTOFMEMORY;
   const UINT count=static_cast<UINT>(source.baked?source.baked->size():source.binding->tracks.size()+extra);
   const bool changed=slot.count!=count||std::memcmp(&slot.value,&value,sizeof(value))!=0||slot.binding!=source.binding||slot.baked!=source.baked||slot.overrides!=source.overrides;

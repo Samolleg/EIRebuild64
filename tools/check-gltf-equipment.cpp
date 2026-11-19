@@ -3,6 +3,8 @@
 #undef wmain
 #include "../Game/OwnedRender/EquipmentSelection.h"
 #include "gltf_equipment_registry.h"
+#include "gltf_weapon_constraints.h"
+#include "gltf_weapon_grip.h"
 #include "gltf_breast.h"
 #include "retained_static_scene.h"
 #include "figure_service_nodes.h"
@@ -84,6 +86,38 @@ static void must_reject(const std::function<void()>& action) {
 int wmain(int argc,wchar_t** argv)try {
     check(argc==3 || argc==4 || argc==6 || argc==7 || argc==8 || argc==10,"usage: check-gltf-equipment body.glb profile.json [clothing-directory [wolf.png leopard.png [models-directory [helmet-models-directory [original-body.glb hair-directory]]]]]");
     using W=OwnedRender::EquipmentWeapon;
+    {
+        using namespace owned::gltf;
+        const Affine initial{0,-2,0,3, 2,0,0,4, 0,0,2,5, 0,0,0,1};
+        const Point3 outside{0,0,0},inside{1,0,0},tip{1,2,3},nock{-1,3,4};
+        Affine corrected{};
+        const auto close=[](const Point3& a,const Point3& b){return weapon_length(weapon_subtract(a,b))<1e-4f;};
+        WeaponTwoHandSupport timed;timed.clip_prefixes={"uattack14"};
+        timed.clip_windows["uattack14"]={.4f,.5f,.7f,.8f};
+        check(weapon_support_weight(timed,"uattack14",.2f,1.f)==0 &&
+              weapon_support_weight(timed,"uattack14",.6f,1.f)==1 &&
+              weapon_support_weight(timed,"uattack14",.9f,1.f)==0 &&
+              weapon_support_weight(timed,"other",.6f,1.f)==0,"timed support keeps reload free");
+        check_near(weapon_support_weight(timed,"uattack14",.45f,1.f),.5f,"support fade in");
+        check_near(weapon_support_weight(timed,"uattack14",.75f,1.f),.5f,"support fade out");
+        check(weapon_segment(corrected,initial,outside,inside,tip,nock),"bow string correction");
+        check(close(weapon_point(corrected,outside),tip) && close(weapon_point(corrected,inside),nock),
+              "bow string joins actual limb and drawing hand");
+        const Point3 hand{2,3,4},grip{-3,4,6},forward{1,0,0};
+        check(weapon_aim(corrected,initial,outside,forward,hand,grip),"projectile aim");
+        check(close(weapon_point(corrected,outside),hand),"projectile nock follows drawing hand");
+        const auto direction=weapon_direction(corrected,forward),target=weapon_subtract(grip,hand);
+        const auto factor=weapon_length(direction)/weapon_length(target);
+        check(close(direction,{target[0]*factor,target[1]*factor,target[2]*factor}) &&
+              std::abs(weapon_length(direction)-2.f)<1e-4f,"projectile aims at bow without rescaling");
+        check(weapon_aim(corrected,initial,outside,forward,hand,{2,-2,4}),"antiparallel aim remains finite");
+        check(!weapon_aim(corrected,initial,outside,forward,hand,hand),"degenerate aim is rejected");
+        check(weapon_draw_weight(20,59,20,45)==0 && weapon_draw_weight(25,59,20,45)==1 &&
+              weapon_draw_weight(44,59,20,45)==1 && weapon_draw_weight(49,59,20,45)==0 &&
+              weapon_draw_weight(24,59,20,45)==.5f,"arrow pickup, draw and smooth release");
+        check(weapon_draw_weight(58,59,55,5)==0 && weapon_draw_weight(2,59,55,5)==1 &&
+              weapon_draw_weight(20,59,55,5)==0,"wrapped arrow visibility");
+    }
     const W sword{true,false,false,false},shield{true,false,true,false},staff{true,false,false,true},two{true,true,false,false};
     std::array<W,4> slots{sword,shield,{},two};
     check(OwnedRender::EquipmentLeftHand(slots,0)==1,"sword/shield");
@@ -98,6 +132,13 @@ int wmain(int argc,wchar_t** argv)try {
     Json registry={{"items",{{"sword01",{{"materials",{{"iron",{{"hand_r",Json::array({entry})},{"hand_l",Json::array()}}}}}}}}}};
     owned::VisualEquipmentItem selected;selected.shape="sword01";selected.material="iron";selected.slot="hand_r";
     check(item_bindings(registry,selected).size()==1,"selected attachment");
+    auto offhand=registry;
+    offhand["items"]["sword01"]["materials"]["iron"]["hand_r"][0]["offset"]={.19,-.002,0};
+    const auto offsetBinding=item_bindings(offhand,selected);
+    check(offsetBinding.size()==1 && std::abs(offsetBinding[0].offset[0]-.19f)<1e-6f,
+          "hand-specific offset retained with common resource");
+    offhand["items"]["sword01"]["materials"]["iron"]["hand_r"][0]["offset"]={0,0};
+    must_reject([&]{item_bindings(offhand,selected);});
     selected.slot="hand_l";check(item_bindings(registry,selected).empty(),"explicit empty visual");
     selected.slot="hand_r";selected.material="missing";must_reject([&]{item_bindings(registry,selected);});
     selected.material="iron";auto broken=registry;
@@ -295,6 +336,13 @@ int wmain(int argc,wchar_t** argv)try {
     check(forearm->socket=="CC_Base_Forearm.L" && !forearm->gpu_animation,"profile bone attachment");
     changed["asset"]["extras"]["ei"]["socket"]="CC_Base_Absent";
     must_reject([&]{decode(fixture(changed),profile,publish);});
+    changed=doc;
+    changed["nodes"]=Json::array({{{"mesh",0}}});changed["scenes"][0]["nodes"]=Json::array({0});
+    changed["asset"]["extras"]["ei"]["grip"]["translation"]={0,0,0};
+    changed["asset"]["extras"]["ei"]["projectileAim"]={{"version",1},{"nock",{0,0,0}},{"forward",{1,0,0}}};
+    check(bool(decode(fixture(changed),profile,publish)->projectile_aim),"valid projectile metadata");
+    changed["asset"]["extras"]["ei"]["projectileAim"]["forward"]={0,0,0};
+    must_reject([&]{decode(fixture(changed),profile,publish);});
     changed=doc;changed["nodes"][0]["scale"]={-1,1,1};
     must_reject([&]{decode(fixture(changed),profile,publish);});
     changed=doc;changed["nodes"][0]["scale"]={2,3,4};
@@ -303,6 +351,268 @@ int wmain(int argc,wchar_t** argv)try {
     check_near(scaled->rest_vertices[0].position[1],9,"scaled hierarchy y");
     std::cout<<"PASS host selection/removal/private preview, registry rejection, rigid GLB hierarchy/grip/material/anchors\n";
     const auto body=decode(read_file(argv[1]),profile,publish);const auto& animation=*body->animation;
+    if(const auto bowPath=_wgetenv(L"EI_TEST_WEAPON_BOW")) {
+     const auto arrowPath=_wgetenv(L"EI_TEST_WEAPON_ARROW");check(arrowPath,"weapon arrow fixture missing");
+     const auto bow=decode(read_file(bowPath),profile,publish);
+     const auto arrow=decode(read_file(arrowPath),profile,publish);
+     check(bow->rigid && bow->bow_constraint && bow->mechanism.size()==4 && bow->mechanism_animation &&
+           bow->mechanism_animation->clips.size()==3 && !bow->gpu_animation,"saved bow mechanism contract");
+     check(arrow->rigid && arrow->projectile_aim && !arrow->animation && !arrow->gpu_animation,
+           "saved projectile aim contract");
+     for(const auto& name:bow->bow_constraint->drawing_bones)check(!body->attachment_chain(name).empty(),"drawing hand marker");
+     for(const auto& name:bow->bow_constraint->grip_bones)check(!body->attachment_chain(name).empty(),"bow hand marker");
+     const std::array<owned::gltf::PhysiqueInput,3> shapes{{owned::gltf::neutral_physique,
+          {19,31,.55f,.23f,.94f},{45,5,.9f,.1f,.6f}}};
+     struct Shot { const char* clip;float frames;std::array<float,3> samples; };
+     const Shot shots[]={{"uattack01",59,{25,35,44}},{"uattack02",55,{22,32,40}},
+                         {"uattack03",76,{27,37,48}}};
+     const owned::gltf::Affine root{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+     for(const auto& input:shapes) {
+      const auto shape=body->physique.resolve(input,unsigned(animation.nodes.size()),body->cache_key);
+      for(const auto& shot:shots) {
+       const auto b=owned::gltf::named_clip(animation,shot.clip);
+       const auto w=owned::gltf::named_clip(*bow->mechanism_animation,shot.clip);
+       check(b!=UINT32_MAX && w!=UINT32_MAX,"saved shooting clip");
+       for(float frame:shot.samples) {
+        owned::gltf::Playback bp{b,UINT32_MAX,animation.clips[b].duration*frame/shot.frames,0,1};
+        owned::gltf::Playback wp{w,UINT32_MAX,bow->mechanism_animation->clips[w].duration*frame/shot.frames,0,1};
+        const auto socket=owned::gltf::socket_pose(animation,body->attachment_chain(bow->socket),bp,root,shape.get());
+        const auto arrowSocket=owned::gltf::socket_pose(animation,body->attachment_chain(arrow->socket),bp,root,shape.get());
+        const auto palm=[&](const std::array<std::string,4>& markers) {
+         owned::gltf::Point3 result{};
+         for(const auto& name:markers){const auto p=owned::gltf::socket_pose(animation,body->attachment_chain(name),bp,root,shape.get());
+          for(unsigned i=0;i<3;++i)result[i]+=.25f*p[i*4+3];}
+         return result;
+        };
+        const auto drawing=palm(bow->bow_constraint->drawing_bones),grip=palm(bow->bow_constraint->grip_bones);
+        std::array<owned::gltf::Affine,16> parts{};
+        for(const auto& node:bow->mechanism)
+         parts[node.node]=owned::gltf::multiply(socket,owned::gltf::socket_local(*bow->mechanism_animation,node,wp));
+        check(owned::gltf::weapon_bow(parts,*bow->bow_constraint,drawing,1),"real bow string solver");
+        for(const auto& string:bow->bow_constraint->strings) {
+         check(owned::gltf::weapon_length(owned::gltf::weapon_subtract(
+             owned::gltf::weapon_point(parts[string.cord],string.inside),drawing))<.001f,
+             "real bow nock follows drawing hand");
+         check(owned::gltf::weapon_length(owned::gltf::weapon_subtract(
+             owned::gltf::weapon_point(parts[string.cord],string.outside),
+             owned::gltf::weapon_point(parts[string.limb],string.tip)))<.001f,"real bow string follows limb");
+        }
+        auto aimed=arrowSocket;
+        check(owned::gltf::weapon_projectile(aimed,arrowSocket,*arrow->projectile_aim,drawing,grip,1),"real projectile solver");
+        check(owned::gltf::weapon_length(owned::gltf::weapon_subtract(
+            owned::gltf::weapon_point(aimed,arrow->projectile_aim->nock),drawing))<.001f,"real arrow nock follows hand");
+       }
+      }
+     }
+     std::cout<<"PASS saved bow/projectile metadata, shared hand markers and mechanism clips\n";
+     std::cout<<"PASS three physique variants and three shooting actions: both string ends and arrow follow hands\n";
+    }
+    if(const auto weaponPath=_wgetenv(L"EI_TEST_TWO_HAND")) {
+     using namespace owned::gltf;
+     const auto weapon=decode(read_file(weaponPath),profile,publish);
+     check(weapon->rigid && weapon->two_hand_support,"saved two-hand support metadata");
+     const auto& support=*weapon->two_hand_support;
+     const auto plan=weapon_arm_plan(*body,support);
+     check(plan==weapon_arm_plan(*body,support) && !plan->nodes.empty() && plan->nodes.size()<=256,
+           "support arm plan must be cached on the shared body");
+     const Affine root{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+     const std::array<PhysiqueInput,3> shapes{{neutral_physique,{19,31,.55f,.23f,.94f},{45,5,.9f,.1f,.6f}}};
+     unsigned corrected=0,mirrored=0,mirror_misses=0,primary_moved=0;float maximum_finger_gap=0;
+     for(const auto& input:shapes) {
+      const auto shape=body->physique.resolve(input,unsigned(animation.nodes.size()),body->cache_key);
+      for(const char* clip:{"2hscidle01","2hsuattack04","2hacidle01","2hauattack04"}) {
+       const auto c=named_clip(animation,clip);check(c!=UINT32_MAX,"two-hand action exists");
+       for(float fraction:{.1f,.35f,.37f,.7f}) {
+        Playback pose{c,UINT32_MAX,animation.clips[c].duration*fraction,0,1};
+        std::array<Affine,256> arm{};
+        for(unsigned i=0;i<plan->nodes.size();++i) {
+         const auto& node=plan->nodes[i];
+         arm[i]=node.parent<0 ? socket_pose(animation,body->attachment_chain(body->geometry.joints[node.joint.node].name),pose,root,shape.get()) :
+             multiply(arm[unsigned(node.parent)],socket_local(animation,node.joint,pose,shape.get()));
+        }
+        for(unsigned marker:plan->markers) {
+         const auto index=plan->nodes[marker].joint.node;
+         const auto sparse=socket_pose(animation,body->attachment_chain(body->geometry.joints[index].name),pose,root,shape.get());
+         for(unsigned k=0;k<12;++k)check_near(arm[marker][k],sparse[k],"cached arm plan and sparse pose");
+        }
+        const auto origin=[](const Affine& x){return Point3{x[3],x[7],x[11]};};
+        const auto shoulder=origin(arm[plan->upper]),elbow=origin(arm[plan->forearm]),wrist=origin(arm[plan->hand]);
+        Point3 palm{};for(unsigned marker:plan->markers)for(unsigned k=0;k<3;++k)palm[k]+=.25f*arm[marker][k*4+3];
+        const auto socket=socket_pose(animation,body->attachment_chain(weapon->socket),pose,root,shape.get());
+        if(support.mirror) {
+         auto revised=arm;bool primary_changed=false;
+         if(!weapon_mirrored_grip(revised,primary_changed,*plan,support,socket,1)) {++mirror_misses;continue;}
+         ++mirrored;
+         primary_moved+=primary_changed;
+         const auto point=[&](unsigned n){return grip_origin(revised[n]);};
+         check_near(weapon_length(weapon_subtract(point(plan->forearm),shoulder)),
+                    weapon_length(weapon_subtract(elbow,shoulder)),"mirrored grip upper length");
+         check_near(weapon_length(weapon_subtract(point(plan->hand),point(plan->forearm))),
+                    weapon_length(weapon_subtract(wrist,elbow)),"mirrored grip forearm length");
+         const auto primary_shift=weapon_subtract(point(plan->primary_hand),origin(arm[plan->primary_hand]));
+         if(!primary_changed)check(weapon_length(primary_shift)<1e-6f,"unused primary arm unchanged");
+         auto placed=socket;for(unsigned k=0;k<3;++k)placed[k*4+3]+=primary_shift[k];
+         const auto grip=weapon_point(placed,support.grip);auto axis=weapon_direction(placed,support.axis);
+         check(grip_normalize(axis),"saved handle axis");
+         const auto radius=[&](unsigned n) {auto v=weapon_subtract(point(n),grip);const auto along=grip_dot(v,axis);
+          for(unsigned k=0;k<3;++k)v[k]-=along*axis[k];return weapon_length(v);};
+         for(unsigned i=0;i<plan->primary_begin;++i)if(plan->nodes[i].mirror>=0) {
+          const auto other=unsigned(plan->nodes[i].mirror);
+          maximum_finger_gap=(std::max)(maximum_finger_gap,std::abs(radius(i)-radius(other)));
+         }
+         if(input==neutral_physique && std::string(clip)=="2hscidle01" && fraction==.37f &&
+            std::wstring(weaponPath).find(L"dsword-00")!=std::wstring::npos) {
+          // Independently sampled saved GLB / review replay, before any image rendering.
+          const Point3 reference{.00762963f,.89973378f,.31423215f};
+          for(unsigned k=0;k<3;++k)check_near(point(plan->hand)[k],reference[k],"runtime and saved-GLB review pose agree");
+         }
+         if(input==neutral_physique && std::string(clip)=="2hauattack04" && fraction==.35f &&
+            std::wstring(weaponPath).find(L"dsword-00")!=std::wstring::npos) {
+          const Point3 left{-.21105991f,1.08288166f,-.04897128f},right{-.16864074f,1.14125925f,-.37331602f};
+          for(unsigned k=0;k<3;++k) {
+           check_near(point(plan->hand)[k],left[k],"runtime and review secondary attack hand agree");
+           check_near(point(plan->primary_hand)[k],right[k],"runtime and review primary attack hand agree");
+          }
+         }
+         for(float blend:{.1f,.5f,.9f}) {
+          auto partial=arm;bool moving=false;
+          check(weapon_mirrored_grip(partial,moving,*plan,support,socket,blend),"grip transition remains valid");
+          for(unsigned i=0;i<plan->nodes.size();++i)for(float v:partial[i])
+           check(std::isfinite(v),"grip transition remains finite");
+          const auto& h=partial[plan->hand];
+          const float det=h[0]*(h[5]*h[10]-h[6]*h[9])-h[1]*(h[4]*h[10]-h[6]*h[8])+h[2]*(h[4]*h[9]-h[5]*h[8]);
+          check(det>1e-5f,"grip transition does not collapse or reverse hand");
+          if(input==neutral_physique && std::string(clip)=="2hscidle01" && fraction==.37f && blend==.5f &&
+             std::wstring(weaponPath).find(L"dsword-00")!=std::wstring::npos) {
+           const std::array<float,12> reference{-.28168721f,-.59551588f,.75233827f,.02133323f,
+               -.81081120f,.56700285f,.14523251f,.89534345f,-.51306625f,-.56909436f,-.64256840f,.30590563f};
+           for(unsigned k=0;k<12;++k)check_near(h[k],reference[k],"runtime and review blended grip agree");
+          }
+         }
+        }
+        WeaponArmSolution solved;
+        if(!weapon_support_ik(solved,socket,support,shoulder,elbow,wrist,palm,1))continue;
+        ++corrected;
+        check_near(weapon_length(weapon_subtract(solved.new_elbow,shoulder)),weapon_length(weapon_subtract(elbow,shoulder)),
+                   "two-hand upper arm length");
+        check_near(weapon_length(weapon_subtract(solved.new_wrist,solved.new_elbow)),weapon_length(weapon_subtract(wrist,elbow)),
+                   "two-hand forearm length");
+        auto palmMatrix=root;palmMatrix[3]=palm[0];palmMatrix[7]=palm[1];palmMatrix[11]=palm[2];
+        const auto moved=weapon_rotate_around(palmMatrix,solved.forearm_rotation,elbow,solved.new_elbow);
+        const auto newPalm=origin(moved),grip=weapon_point(socket,support.grip),axis=weapon_direction(socket,support.axis);
+        const auto gap=[&](const Point3& p) {const auto d=weapon_subtract(p,grip);const auto len=weapon_length(axis);
+         const float dot=(d[0]*axis[0]+d[1]*axis[1]+d[2]*axis[2])/(len*len);
+         return weapon_length({d[0]-dot*axis[0],d[1]-dot*axis[1],d[2]-dot*axis[2]});};
+        check(gap(newPalm)<=gap(palm)+1e-4f,"two-hand solver must move the palm toward the grip");
+       }
+      }
+     }
+     check(corrected>=20,"two-hand support exercised across clips and body shapes");
+     if(support.mirror) {
+      std::cout<<"mirror samples="<<mirrored<<" misses="<<mirror_misses<<" primary adjustments="<<primary_moved
+               <<" maximum finger radial gap="<<maximum_finger_gap<<" m\n";
+      check(mirrored>=30 && mirror_misses==0,"mirrored grip fits selected actions and physiques");
+      check(primary_moved>0,"reach-limited attack also exercises primary-arm adjustment");
+      check(maximum_finger_gap<.015f,"mirrored fingers remain at the same handle radius as the primary hand");
+     }
+     std::cout<<"PASS cached arm plan, two-hand contact and arm lengths across three physique variants\n";
+    }
+    if(const auto weaponPath=_wgetenv(L"EI_TEST_CROSSBOW")) {
+     using namespace owned::gltf;
+     const auto weapon=decode(read_file(weaponPath),profile,publish);
+     check(weapon->two_hand_support && !weapon->mechanism.empty(),"crossbow mechanism and support metadata");
+     const auto& support=*weapon->two_hand_support;
+     const auto plan=weapon_arm_plan(*body,support);
+     check(plan && support.clip_windows.size()==3,"crossbow cached arm plan and timed clips");
+     const Affine root{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+     const std::array<PhysiqueInput,3> shapes{{neutral_physique,{19,31,.55f,.23f,.94f},{45,5,.9f,.1f,.6f}}};
+     unsigned corrected=0;
+     for(const auto& input:shapes) {
+      const auto shape=body->physique.resolve(input,unsigned(animation.nodes.size()),body->cache_key);
+      for(const char* clip:{"uattack14","uattack15","uattack16"}) {
+       const auto c=named_clip(animation,clip);check(c!=UINT32_MAX,"crossbow action exists");
+       const auto window=support.clip_windows.at(clip);
+       check(weapon_support_weight(support,clip,window[0]*.5f,1)==0 &&
+             weapon_support_weight(support,clip,(window[1]+window[2])*.5f,1)==1 &&
+             weapon_support_weight(support,clip,(window[3]+1)*.5f,1)==0,
+             "crossbow support releases hand during reloading");
+       const float fraction=(window[1]+window[2])*.5f;
+       Playback pose{c,UINT32_MAX,animation.clips[c].duration*fraction,0,1};
+       const auto origin=[](const Affine& x){return Point3{x[3],x[7],x[11]};};
+       const auto bone=[&](const std::string& name){return origin(socket_pose(animation,body->attachment_chain(name),pose,root,shape.get()));};
+       const auto shoulder=bone(support.upper),elbow=bone(support.forearm),wrist=bone(support.hand);
+       Point3 palm{};for(const auto& marker:support.markers) {const auto point=bone(marker);for(unsigned k=0;k<3;++k)palm[k]+=.25f*point[k];}
+       const auto socket=socket_pose(animation,body->attachment_chain(weapon->socket),pose,root,shape.get());
+       WeaponArmSolution solved;
+       if(weapon_support_ik(solved,socket,support,shoulder,elbow,wrist,palm,1)) {
+        ++corrected;
+        check_near(weapon_length(weapon_subtract(solved.new_elbow,shoulder)),weapon_length(weapon_subtract(elbow,shoulder)),"crossbow upper arm length");
+        check_near(weapon_length(weapon_subtract(solved.new_wrist,solved.new_elbow)),weapon_length(weapon_subtract(wrist,elbow)),"crossbow forearm length");
+       }
+      }
+     }
+     check(corrected>=5,"crossbow support exercised in firing poses across physiques");
+     std::cout<<"PASS timed crossbow firing support and unmodified reload across three actions and physiques\n";
+    }
+    if(const auto directory=_wgetenv(L"EI_TEST_WEAPON_DIRECTORY")) {
+     unsigned count=0,animated=0,bows=0,projectiles=0,twohand=0,crossbow_support=0;
+     for(const auto& file:std::filesystem::directory_iterator(directory)) {
+      if(!file.is_regular_file() || file.path().extension()!=L".glb")continue;
+      const auto weapon=decode(read_file(file.path().c_str()),profile,publish);
+      check(weapon->rigid && !weapon->gpu_animation && std::isfinite(weapon->radius) && weapon->radius>0,
+            "saved weapon geometry contract");
+      ++count;animated+=!weapon->mechanism.empty();bows+=bool(weapon->bow_constraint);
+      projectiles+=bool(weapon->projectile_aim);twohand+=bool(weapon->two_hand_support);
+      if(!weapon->mechanism.empty() && weapon->two_hand_support) {
+       ++crossbow_support;check(weapon->two_hand_support->clip_windows.size()==3,"crossbow support windows");
+      }
+     }
+     check(count==90 && animated==11 && bows==6 && projectiles==1 && twohand==24 && crossbow_support==5,"saved weapon catalog coverage");
+     std::cout<<"PASS 90 GLBs, 11 mechanisms, 6 constrained bows, one projectile and 24 supported two-hand weapons\n";
+    }
+    if(const auto catalogPath=_wgetenv(L"EI_TEST_WEAPON_CATALOG")) {
+     const auto modelsPath=_wgetenv(L"EI_TEST_WEAPON_MODELS");check(modelsPath,"weapon models path missing");
+     const std::filesystem::path root=modelsPath;
+     const auto data=read_file(catalogPath);const auto catalog=Json::parse(data.bytes->begin(),data.bytes->end());
+     ++owned::fixture_generation;owned::fixture_files.clear();owned::fixture_reads.clear();
+     const auto put=[&](const std::string& key) {
+      if(owned::fixture_files.count(key))return;
+      check(key.rfind("models/",0)==0,"weapon resource prefix");
+      auto value=read_file((root/std::filesystem::path(key.substr(7))).c_str());
+      value.identity.canonical_name=key;owned::fixture_files.emplace(key,std::move(value));
+     };
+     put("models/registry.v1.json");auto profileFixture=profile;profileFixture.identity.canonical_name="profiles/human.v1.json";
+     owned::fixture_files.emplace("profiles/human.v1.json",std::move(profileFixture));
+     const auto& bytes=*owned::fixture_files.at("models/registry.v1.json").bytes;
+     const auto catalogRegistry=Json::parse(bytes.begin(),bytes.end());
+     std::map<std::string,std::shared_ptr<const owned::gltf::Asset>> shared;
+     unsigned selections=0,visible=0,empty=0;
+     for(const auto& form:catalog.at("items").items()) {
+      const auto family=form.value().at("family").get<std::string>();
+      for(const auto& material:form.value().at("materials").items())for(const char* hand:{"hand_r","hand_l"}) {
+       owned::VisualEquipmentItem value;value.kind=owned::VisualEquipmentItem::Kind::weapon;
+       value.shape=form.key();value.material=material.key();value.slot=hand;
+       const auto bindings=item_bindings(catalogRegistry,value);
+       for(const auto& binding:bindings) {
+        put(binding.resource);
+        for(const auto& texture:binding.textures){put(texture.resource);if(!texture.metallic_roughness.empty())put(texture.metallic_roughness);}
+       }
+       const auto selected=select_equipment({value},"models/characters/profile-test.glb");
+       const bool expected=!material.value().is_null() && !(value.slot=="hand_l" && (family=="bow" || family=="crossbow"));
+       check(selected.size()==bindings.size() && expected==!selected.empty(),"weapon material/slot selection");
+       for(const auto& part:selected) {
+        check(part.asset->rigid && !part.asset->gpu_animation && !part.asset->animation,"weapon shares body program");
+        const auto existing=shared.emplace(part.asset->resource_key,part.asset).first;
+        check(existing->second==part.asset,"weapon geometry must be shared across materials and hands");
+       }
+       ++selections;if(selected.empty())++empty;else ++visible;
+      }
+     }
+     check(select_equipment({},"models/characters/profile-test.glb").empty(),"weapon unequip");
+     check(selections==1710 && visible==1194 && empty==516 && shared.size()==90,"weapon selection coverage");
+     std::cout<<"PASS "<<selections<<" real weapon selections, "<<visible<<" visible, "<<empty
+              <<" empty, "<<shared.size()<<" shared geometry resources and unequip\n";
+    }
     if(argc==10) {
      const auto originalBody=decode(read_file(argv[8]),profile,publish);
      owned::gltf::BreastState originalPhysics,updatedPhysics;

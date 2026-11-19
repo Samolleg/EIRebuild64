@@ -7,7 +7,8 @@ bool build_skn_groups(const RetainedVisualSample &sample,
                       const std::map<unsigned,std::shared_ptr<const skn::Dds>>* overrides=nullptr,
                       const std::map<unsigned,std::shared_ptr<const skn::Dds>>* orm_overrides=nullptr,
                       const std::map<unsigned,std::shared_ptr<const std::uint8_t>>* material_ids=nullptr,
-                      const std::vector<gltf::GarmentAnchor>* garment=nullptr) {
+                      const std::vector<gltf::GarmentAnchor>* garment=nullptr,
+                      const std::array<float,3>* offset=nullptr) {
   auto &prepared = *sample.prepared;
   const auto &data = asset->asset;
   const auto* physique=prepared.motion_physique.get();
@@ -36,6 +37,10 @@ bool build_skn_groups(const RetainedVisualSample &sample,
   // One SKN can bind to host skeletons with different unrelated nodes. The
   // uploaded indices (including corrective records) are part of mesh identity.
   std::string binding_layout;
+  if(offset) {
+    binding_layout.append("|mount-offset|");
+    binding_layout.append(reinterpret_cast<const char*>(offset->data()),sizeof(float)*3);
+  }
   if(shaped || (physique && garment)){
     binding_layout.append("|physique|");
     if(garment)binding_layout.append(prepared.motion_asset->gltf_asset->cache_key);
@@ -159,6 +164,7 @@ bool build_skn_groups(const RetainedVisualSample &sample,
           g.skin_vertices.resize(vertices.size() * sizeof(skn::GpuVertex));
           for (unsigned i = 0; i < vertices.size(); ++i) {
             auto v = data.vertices[vertices[i]];
+            if(offset)for(unsigned c=0;c<3;++c)v.position[c]+=(*offset)[c];
             if(shaped)v=prepared.physique_surface->body[vertices[i]];
             else if(physique && garment)prepared.physique_surface->apply_garment(garment->at(vertices[i]),v);
             unsigned block = i / 4, lane = i % 4;

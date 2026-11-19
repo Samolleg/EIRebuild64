@@ -324,7 +324,8 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
             pendingNodes.push_back(node->children[i]);
     }
     const auto metadata = extras(data.asset.extras).at("ei");
-    const bool rigid = metadata.at("kind") == "rigid-item";
+    const bool articulated = metadata.at("kind") == "articulated-item";
+    const bool rigid = articulated || metadata.at("kind") == "rigid-item";
     const bool wearable = metadata.at("kind") == "skinned-item";
     require(metadata.at("profile") == "human.v1" &&
         (rigid || wearable || metadata.at("kind") == "body"), "asset profile/kind");
@@ -371,7 +372,7 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
     }
     require(!wearable || (data.animations_count == 0 && !metadata.contains("bindings") &&
         !metadata.contains("socket")), "skinned item shares body pose; no clips/socket");
-    require(!rigid || (data.skins_count == 0 && data.animations_count == 0 &&
+    require(!rigid || (data.skins_count == 0 && (articulated || data.animations_count == 0) &&
         !metadata.contains("bindings")), "rigid item cannot own skin/animation bindings");
     std::set<const cgltf_skin *> activeSkins;
     for (const auto *node : activeNodes)
@@ -417,10 +418,142 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
         }
         skn::Joint socket{}; socket.name=output->socket; socket.parent=-1;
         socket.scale={1,1,1}; socket.rotation={0,0,0,1}; socket.inverse=skn::identity();
-        output->geometry.joints.push_back(socket);
-        output->idle.push_back(skn::identity());
-        runtime.nodes.emplace_back();
-        for (const auto* node : activeNodes) if (node->mesh) indices.emplace(node,0);
+        if (articulated) {
+            require(activeNodes.size()==data.nodes_count && data.nodes_count<=16 &&
+                    data.animations_count>0 && data.animations_count<=256,"mechanism dimensions");
+            matrix_equal(inverseGrip,skn::identity(),"mechanism grip frame");
+            for (size_t i=0;i<data.nodes_count;++i) {
+                const auto& node=data.nodes[i];
+                require(node.mesh && !node.parent && node.name,"mechanism mesh node");
+                matrix_equal(skn::trs(joint(node)),skn::identity(),"mechanism neutral transform");
+                socket.name=node.name;
+                output->geometry.joints.push_back(socket);
+                runtime.nodes.emplace_back();
+                indices.emplace(&node,unsigned(i));
+            }
+        } else {
+            output->geometry.joints.push_back(socket);
+            output->idle.push_back(skn::identity());
+            runtime.nodes.emplace_back();
+            for (const auto* node : activeNodes) if (node->mesh) indices.emplace(node,0);
+        }
+        const auto read_point=[&](const Json& value) {
+            const auto p=value.get<Point3>();
+            for(float v:p)require(std::isfinite(v) && std::abs(v)<100.f,"weapon constraint point");
+            return p;
+        };
+        if(metadata.contains("stringConstraint")) {
+            require(articulated,"string constraint requires articulated item");
+            const auto& value=metadata.at("stringConstraint");
+            require(value.at("version")==1 && value.at("strings").is_array() &&
+                    value.at("strings").size()==2,"string constraint schema");
+            auto constraint=std::make_unique<WeaponBowConstraint>();
+            constraint->drawing_bones=value.at("drawingBones").get<std::array<std::string,4>>();
+            constraint->grip_bones=value.at("gripBones").get<std::array<std::string,4>>();
+            for(const auto& group:{constraint->drawing_bones,constraint->grip_bones}) {
+                require(std::set<std::string>(group.begin(),group.end()).size()==group.size(),"weapon hand markers unique");
+                for(const auto& name:group) {
+                    bool found=false;
+                    for(const auto& bone:contract.at("skeleton").at("bones"))found|=bone.at("name")==name;
+                    require(found,"weapon hand marker missing in profile");
+                }
+            }
+            std::set<unsigned> cords;
+            for(unsigned i=0;i<2;++i) {
+                const auto& row=value.at("strings").at(i);auto& out=constraint->strings[i];
+                out.cord=row.at("cord").get<unsigned>();out.limb=row.at("limb").get<unsigned>();
+                require(out.cord<data.nodes_count && out.limb<data.nodes_count && out.cord!=out.limb &&
+                        cords.insert(out.cord).second,"weapon string node");
+                out.outside=read_point(row.at("outside"));out.inside=read_point(row.at("inside"));
+                out.tip=read_point(row.at("tip"));
+                require(weapon_length(weapon_subtract(out.outside,out.inside))>1e-5f,"weapon string length");
+            }
+            output->bow_constraint=std::move(constraint);
+        }
+        if(metadata.contains("projectileAim")) {
+            require(!articulated && data.nodes_count==1,"projectile aim requires one rigid node");
+            matrix_equal(inverseGrip,skn::identity(),"projectile aim grip frame");
+            const auto& value=metadata.at("projectileAim");
+            require(value.at("version")==1,"projectile aim schema");
+            auto aim=std::make_unique<WeaponProjectileAim>();
+            aim->nock=read_point(value.at("nock"));aim->forward=read_point(value.at("forward"));
+            require(std::abs(weapon_length(aim->forward)-1.f)<1e-3f,"projectile direction must be unit length");
+            output->projectile_aim=std::move(aim);
+        }
+        if(metadata.contains("twoHandSupport")) {
+            require(!output->projectile_aim && !output->bow_constraint && (articulated || data.nodes_count==1),
+                    "two-hand support requires a compatible rigid or articulated item");
+            matrix_equal(inverseGrip,skn::identity(),"two-hand support grip frame");
+            const auto& value=metadata.at("twoHandSupport");
+            require(value.at("version")==1,"two-hand support schema");
+            auto support=std::make_unique<WeaponTwoHandSupport>();
+            support->grip=read_point(value.at("grip"));support->axis=read_point(value.at("axis"));
+            require(std::abs(weapon_length(support->axis)-1.f)<1e-3f,"two-hand support axis");
+            support->upper=value.at("upper").get<std::string>();
+            support->forearm=value.at("forearm").get<std::string>();
+            support->hand=value.at("hand").get<std::string>();
+            support->markers=value.at("markers").get<std::array<std::string,4>>();
+            support->clip_prefixes=value.at("clipPrefixes").get<std::vector<std::string>>();
+            support->full_correction=value.at("fullCorrection").get<float>();
+            support->max_correction=value.at("maxCorrection").get<float>();
+            require(std::isfinite(support->full_correction)&&std::isfinite(support->max_correction)&&
+                    support->full_correction>0 && support->full_correction<support->max_correction &&
+                    support->max_correction<=1.f,"two-hand support correction limits");
+            require(!support->clip_prefixes.empty() && support->clip_prefixes.size()<=8,"two-hand support clips");
+            for(const auto& prefix:support->clip_prefixes)
+                require(!prefix.empty() && prefix.size()<=32,"two-hand support clip prefix");
+            if(value.contains("clipWindows")) {
+                support->clip_windows=value.at("clipWindows").get<std::map<std::string,std::array<float,4>>>();
+                require(support->clip_windows.size()==support->clip_prefixes.size(),"two-hand support window count");
+                for(const auto& prefix:support->clip_prefixes) {
+                    const auto it=support->clip_windows.find(prefix);
+                    require(it!=support->clip_windows.end(),"two-hand support window clip");
+                    const auto& w=it->second;
+                    require(std::isfinite(w[0]) && std::isfinite(w[1]) && std::isfinite(w[2]) && std::isfinite(w[3]) &&
+                            w[0]>=0 && w[0]<w[1] && w[1]<w[2] && w[2]<w[3] && w[3]<=1,
+                            "invalid two-hand support window");
+                }
+            }
+            auto bones=support->markers;
+            require(std::set<std::string>(bones.begin(),bones.end()).size()==bones.size(),"two-hand markers unique");
+            for(const auto& name:{support->upper,support->forearm,support->hand,bones[0],bones[1],bones[2],bones[3]}) {
+                bool found=false;
+                for(const auto& bone:contract.at("skeleton").at("bones"))found|=bone.at("name")==name;
+                require(found,"two-hand support bone missing in profile");
+            }
+            if(value.contains("gripMirror")) {
+                const auto& mirror=value.at("gripMirror");
+                require(mirror.at("version")==1,"two-hand mirrored grip schema");
+                auto grip=std::make_unique<WeaponGripMirror>();
+                grip->primary_upper=mirror.at("primaryUpper").get<std::string>();
+                grip->primary_forearm=mirror.at("primaryForearm").get<std::string>();
+                grip->primary_hand=mirror.at("primaryHand").get<std::string>();
+                grip->primary_markers=mirror.at("primaryMarkers").get<std::array<std::string,4>>();
+                grip->width_bones=mirror.at("widthBones").get<std::array<std::string,2>>();
+                grip->bind_normal=read_point(mirror.at("bindNormal"));
+                require(std::abs(weapon_length(grip->bind_normal)-1.f)<1e-3f,"grip mirror normal");
+                grip->pairs=mirror.at("pairs").get<std::vector<std::array<std::string,2>>>();
+                require(!grip->pairs.empty() && grip->pairs.size()<=64,"grip mirror pair count");
+                std::set<std::string> left,right;
+                std::vector<std::string> names{grip->primary_upper,grip->primary_forearm,grip->primary_hand,
+                    grip->width_bones[0],grip->width_bones[1]};
+                names.insert(names.end(),grip->primary_markers.begin(),grip->primary_markers.end());
+                for(const auto& pair:grip->pairs) {
+                    require(left.insert(pair[0]).second && right.insert(pair[1]).second,"duplicate grip mirror pair");
+                    names.insert(names.end(),pair.begin(),pair.end());
+                }
+                require(std::find(grip->pairs.begin(),grip->pairs.end(),
+                    std::array<std::string,2>{support->hand,grip->primary_hand})!=grip->pairs.end(),
+                    "grip mirror hand pair");
+                for(const auto& name:names) {
+                    bool found=false;
+                    for(const auto& bone:contract.at("skeleton").at("bones"))found|=bone.at("name")==name;
+                    require(found,"grip mirror bone missing in profile");
+                }
+                support->mirror=std::move(grip);
+            }
+            output->two_hand_support=std::move(support);
+        }
     } else {
     std::map<std::string, const Json *> reference;
     for (const auto &bone : contract.at("skeleton").at("bones"))
@@ -566,6 +699,8 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
             model.joints.push_back(j);
         }
     }
+    }
+    if (!rigid || articulated) {
     auto pose = output->geometry.joints;
     std::set<std::string> clips;
     for (std::size_t a = 0; a < data.animations_count; ++a)
@@ -584,6 +719,9 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
         for (std::size_t c = 0; c < animation.channels_count; ++c)
         {
             const auto &channel = animation.channels[c];
+            if(articulated) require(channel.target_path!=cgltf_animation_path_type_weights &&
+                channel.sampler && channel.sampler->interpolation==cgltf_interpolation_type_linear,
+                "mechanism requires local linear TRS");
             require(channel.target_node && channel.sampler, "animation channel");
             require(targets.emplace(channel.target_node, channel.target_path).second,
                     "duplicate animation node/path");
@@ -1048,7 +1186,7 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
                                 index == std::floor(index),
                             "joint index");
                     vertex.joints[k] = static_cast<std::uint16_t>(
-                        rigid ? 0 : indices.at(node.skin->joints[static_cast<unsigned>(index)]));
+                        rigid ? indices.at(&node) : indices.at(node.skin->joints[static_cast<unsigned>(index)]));
                     vertex.weights[k] = static_cast<std::uint16_t>(
                         std::floor(ws[v * 4 + k] / sum * 65535));
                     total += vertex.weights[k];
@@ -1157,6 +1295,20 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
     lod.submesh_count = static_cast<unsigned>(output->geometry.submeshes.size());
     output->geometry.lods.push_back(lod);
     if (rigid || wearable) {
+        if(articulated) {
+            const auto limits=envelope(runtime);
+            const auto restRadius=output->radius;
+            for(unsigned n=0;n<runtime.nodes.size();++n) {
+                const auto chain=socket_chain(runtime,n);
+                output->mechanism.push_back(chain.back());
+                const double bound=limits[n].translation+limits[n].scale*restRadius;
+                require(std::isfinite(bound) && bound<FLT_MAX/4,"mechanism bounds");
+                output->radius=(std::max)(output->radius,float(bound));
+            }
+            output->animation_radius=output->radius;
+            output->mechanism_animation=std::move(output->animation);
+            return output;
+        }
         output->animation.reset();
         output->animation_radius=output->radius;
         return output;

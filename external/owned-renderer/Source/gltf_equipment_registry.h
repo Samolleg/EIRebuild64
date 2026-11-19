@@ -3,6 +3,8 @@
 #include "../../../SDKs/JSON/json.hpp"
 #include <stdexcept>
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <set>
 
 namespace owned::gltf {
@@ -15,6 +17,7 @@ struct ItemBinding {
     std::string resource, socket, slot;
     bool weapon = false, arrow = false, skinned = false;
     std::vector<ItemTexture> textures;
+    std::array<float,3> offset{};
 };
 // Pure cold selection, also used by tests. A missing shape is not registered;
 // a registered shape must describe every selected material and inventory slot.
@@ -89,6 +92,12 @@ inline std::vector<ItemBinding> item_bindings(const nlohmann::json& registry,
         const auto mode=entry.value("binding", "socket");
         require(mode=="socket" || mode=="skin","binding mode");
         binding.skinned=mode=="skin";
+        if(entry.contains("offset")) {
+            const auto& value=entry.at("offset");
+            require(!binding.skinned && value.is_array() && value.size()==3,"rigid socket offset");
+            binding.offset=value.get<std::array<float,3>>();
+            for(float v:binding.offset)require(std::isfinite(v),"finite socket offset");
+        }
         require(!binding.skinned || (item.kind==VisualEquipmentItem::Kind::armor &&
             !entry.contains("socket")),"skin binding requires armor without socket");
         binding.socket=binding.skinned ? "" : entry.at("socket").get<std::string>();
