@@ -356,7 +356,7 @@ bool E1PrepareTerrainCommand(bool transparent, std::size_t index, E1TerrainComma
         return false;
     owned::NativeGeometryView* record = nullptr;
     if (!owned::prepare_owned_terrain_world_record(data, *packet, command, dynamic.get(),
-        {true, true, 0}, output.context, record) || !record) {
+        {true, true, 0}, output.context, record, false, nullptr) || !record) {
         // A rejected color record may already have borrowed the cache slot.
         // Release that borrow without exposing a partially prepared command.
         if (record) {

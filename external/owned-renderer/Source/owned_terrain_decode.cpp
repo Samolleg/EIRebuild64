@@ -140,10 +140,10 @@ bool prepare_owned_terrain_source_view(const OwnedTerrainFramePacket& packet,
 }
 
 bool prepare_owned_terrain_world_record(const RetainedTerrainSourceSnapshot& source,
-    OwnedTerrainFramePacket& packet, const OwnedTerrainCommand& command,
+    const OwnedTerrainFramePacket& packet, const OwnedTerrainCommand& command,
     const OwnedTerrainDynamicSector* color, const NativeContribution& contribution,
     OwnedTerrainSourceDecodeContext& context, NativeGeometryView*& output,
-    bool alpha_coverage) {
+    bool alpha_coverage, std::uint64_t* record_reuses) {
     output=nullptr;
     if (!contribution.known) return false;
     if (!contribution.color && !contribution.light_mask) return true;
@@ -156,7 +156,7 @@ bool prepare_owned_terrain_world_record(const RetainedTerrainSourceSnapshot& sou
     NativeWorldBounds bounds{},world_bounds{};
     if (!owned_terrain_spatial_bounds(packet,command,bounds,world_bounds) || !bounds.valid)
         return false;
-    ++packet.spatial_record_reuses;
+    if (record_reuses) ++*record_reuses;
     OwnedTerrainDynamicSector geometry_only{};
     geometry_only.captured=true;
     geometry_only.animation=source.geometry->animation;

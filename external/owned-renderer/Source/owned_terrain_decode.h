@@ -72,10 +72,18 @@ struct RetainedTerrainSourceSnapshot;
 // Color may be absent only when selected subparts require no animation phases.
 // The returned cached view borrows context until synchronous submission ends.
 bool prepare_owned_terrain_world_record(const RetainedTerrainSourceSnapshot& source,
+    const OwnedTerrainFramePacket& packet, const OwnedTerrainCommand& command,
+    const OwnedTerrainDynamicSector* color, const NativeContribution& contribution,
+    OwnedTerrainSourceDecodeContext& context, NativeGeometryView*& output,
+    bool alpha_coverage, std::uint64_t* record_reuses);
+inline bool prepare_owned_terrain_world_record(const RetainedTerrainSourceSnapshot& source,
     OwnedTerrainFramePacket& packet, const OwnedTerrainCommand& command,
     const OwnedTerrainDynamicSector* color, const NativeContribution& contribution,
     OwnedTerrainSourceDecodeContext& context, NativeGeometryView*& output,
-    bool alpha_coverage = false);
+    bool alpha_coverage = false) {
+    return prepare_owned_terrain_world_record(source, packet, command, color, contribution,
+        context, output, alpha_coverage, &packet.spatial_record_reuses);
+}
 TerrainIndexTemplate terrain_index_template(std::uint32_t lod, std::uint8_t mask,
                                              bool lu_higher, bool rd_higher);
 std::uint32_t terrain_vertices_per_tile(std::uint32_t lod);
