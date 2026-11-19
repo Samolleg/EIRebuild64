@@ -4,6 +4,7 @@
 #include "../Game/OwnedRender/EquipmentSelection.h"
 #include "gltf_equipment_registry.h"
 #include "gltf_weapon_constraints.h"
+#include "gltf_weapon_grip.h"
 #include "gltf_breast.h"
 #include "retained_static_scene.h"
 #include "figure_service_nodes.h"
@@ -416,17 +417,17 @@ int wmain(int argc,wchar_t** argv)try {
            "support arm plan must be cached on the shared body");
      const Affine root{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
      const std::array<PhysiqueInput,3> shapes{{neutral_physique,{19,31,.55f,.23f,.94f},{45,5,.9f,.1f,.6f}}};
-     unsigned corrected=0;
+     unsigned corrected=0,mirrored=0,mirror_misses=0,primary_moved=0;float maximum_finger_gap=0;
      for(const auto& input:shapes) {
       const auto shape=body->physique.resolve(input,unsigned(animation.nodes.size()),body->cache_key);
       for(const char* clip:{"2hscidle01","2hsuattack04","2hacidle01","2hauattack04"}) {
        const auto c=named_clip(animation,clip);check(c!=UINT32_MAX,"two-hand action exists");
-       for(float fraction:{.1f,.37f,.7f}) {
+       for(float fraction:{.1f,.35f,.37f,.7f}) {
         Playback pose{c,UINT32_MAX,animation.clips[c].duration*fraction,0,1};
         std::array<Affine,256> arm{};
         for(unsigned i=0;i<plan->nodes.size();++i) {
          const auto& node=plan->nodes[i];
-         arm[i]=node.parent<0 ? socket_pose(animation,body->attachment_chain(support.upper),pose,root,shape.get()) :
+         arm[i]=node.parent<0 ? socket_pose(animation,body->attachment_chain(body->geometry.joints[node.joint.node].name),pose,root,shape.get()) :
              multiply(arm[unsigned(node.parent)],socket_local(animation,node.joint,pose,shape.get()));
         }
         for(unsigned marker:plan->markers) {
@@ -438,6 +439,57 @@ int wmain(int argc,wchar_t** argv)try {
         const auto shoulder=origin(arm[plan->upper]),elbow=origin(arm[plan->forearm]),wrist=origin(arm[plan->hand]);
         Point3 palm{};for(unsigned marker:plan->markers)for(unsigned k=0;k<3;++k)palm[k]+=.25f*arm[marker][k*4+3];
         const auto socket=socket_pose(animation,body->attachment_chain(weapon->socket),pose,root,shape.get());
+        if(support.mirror) {
+         auto revised=arm;bool primary_changed=false;
+         if(!weapon_mirrored_grip(revised,primary_changed,*plan,support,socket,1)) {++mirror_misses;continue;}
+         ++mirrored;
+         primary_moved+=primary_changed;
+         const auto point=[&](unsigned n){return grip_origin(revised[n]);};
+         check_near(weapon_length(weapon_subtract(point(plan->forearm),shoulder)),
+                    weapon_length(weapon_subtract(elbow,shoulder)),"mirrored grip upper length");
+         check_near(weapon_length(weapon_subtract(point(plan->hand),point(plan->forearm))),
+                    weapon_length(weapon_subtract(wrist,elbow)),"mirrored grip forearm length");
+         const auto primary_shift=weapon_subtract(point(plan->primary_hand),origin(arm[plan->primary_hand]));
+         if(!primary_changed)check(weapon_length(primary_shift)<1e-6f,"unused primary arm unchanged");
+         auto placed=socket;for(unsigned k=0;k<3;++k)placed[k*4+3]+=primary_shift[k];
+         const auto grip=weapon_point(placed,support.grip);auto axis=weapon_direction(placed,support.axis);
+         check(grip_normalize(axis),"saved handle axis");
+         const auto radius=[&](unsigned n) {auto v=weapon_subtract(point(n),grip);const auto along=grip_dot(v,axis);
+          for(unsigned k=0;k<3;++k)v[k]-=along*axis[k];return weapon_length(v);};
+         for(unsigned i=0;i<plan->primary_begin;++i)if(plan->nodes[i].mirror>=0) {
+          const auto other=unsigned(plan->nodes[i].mirror);
+          maximum_finger_gap=(std::max)(maximum_finger_gap,std::abs(radius(i)-radius(other)));
+         }
+         if(input==neutral_physique && std::string(clip)=="2hscidle01" && fraction==.37f &&
+            std::wstring(weaponPath).find(L"dsword-00")!=std::wstring::npos) {
+          // Independently sampled saved GLB / review replay, before any image rendering.
+          const Point3 reference{.00762963f,.89973378f,.31423215f};
+          for(unsigned k=0;k<3;++k)check_near(point(plan->hand)[k],reference[k],"runtime and saved-GLB review pose agree");
+         }
+         if(input==neutral_physique && std::string(clip)=="2hauattack04" && fraction==.35f &&
+            std::wstring(weaponPath).find(L"dsword-00")!=std::wstring::npos) {
+          const Point3 left{-.21105991f,1.08288166f,-.04897128f},right{-.16864074f,1.14125925f,-.37331602f};
+          for(unsigned k=0;k<3;++k) {
+           check_near(point(plan->hand)[k],left[k],"runtime and review secondary attack hand agree");
+           check_near(point(plan->primary_hand)[k],right[k],"runtime and review primary attack hand agree");
+          }
+         }
+         for(float blend:{.1f,.5f,.9f}) {
+          auto partial=arm;bool moving=false;
+          check(weapon_mirrored_grip(partial,moving,*plan,support,socket,blend),"grip transition remains valid");
+          for(unsigned i=0;i<plan->nodes.size();++i)for(float v:partial[i])
+           check(std::isfinite(v),"grip transition remains finite");
+          const auto& h=partial[plan->hand];
+          const float det=h[0]*(h[5]*h[10]-h[6]*h[9])-h[1]*(h[4]*h[10]-h[6]*h[8])+h[2]*(h[4]*h[9]-h[5]*h[8]);
+          check(det>1e-5f,"grip transition does not collapse or reverse hand");
+          if(input==neutral_physique && std::string(clip)=="2hscidle01" && fraction==.37f && blend==.5f &&
+             std::wstring(weaponPath).find(L"dsword-00")!=std::wstring::npos) {
+           const std::array<float,12> reference{-.28168721f,-.59551588f,.75233827f,.02133323f,
+               -.81081120f,.56700285f,.14523251f,.89534345f,-.51306625f,-.56909436f,-.64256840f,.30590563f};
+           for(unsigned k=0;k<12;++k)check_near(h[k],reference[k],"runtime and review blended grip agree");
+          }
+         }
+        }
         WeaponArmSolution solved;
         if(!weapon_support_ik(solved,socket,support,shoulder,elbow,wrist,palm,1))continue;
         ++corrected;
@@ -456,6 +508,13 @@ int wmain(int argc,wchar_t** argv)try {
       }
      }
      check(corrected>=20,"two-hand support exercised across clips and body shapes");
+     if(support.mirror) {
+      std::cout<<"mirror samples="<<mirrored<<" misses="<<mirror_misses<<" primary adjustments="<<primary_moved
+               <<" maximum finger radial gap="<<maximum_finger_gap<<" m\n";
+      check(mirrored>=30 && mirror_misses==0,"mirrored grip fits selected actions and physiques");
+      check(primary_moved>0,"reach-limited attack also exercises primary-arm adjustment");
+      check(maximum_finger_gap<.015f,"mirrored fingers remain at the same handle radius as the primary hand");
+     }
      std::cout<<"PASS cached arm plan, two-hand contact and arm lengths across three physique variants\n";
     }
     if(const auto weaponPath=_wgetenv(L"EI_TEST_CROSSBOW")) {

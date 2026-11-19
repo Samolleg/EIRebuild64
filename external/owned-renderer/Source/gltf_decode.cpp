@@ -521,6 +521,37 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
                 for(const auto& bone:contract.at("skeleton").at("bones"))found|=bone.at("name")==name;
                 require(found,"two-hand support bone missing in profile");
             }
+            if(value.contains("gripMirror")) {
+                const auto& mirror=value.at("gripMirror");
+                require(mirror.at("version")==1,"two-hand mirrored grip schema");
+                auto grip=std::make_unique<WeaponGripMirror>();
+                grip->primary_upper=mirror.at("primaryUpper").get<std::string>();
+                grip->primary_forearm=mirror.at("primaryForearm").get<std::string>();
+                grip->primary_hand=mirror.at("primaryHand").get<std::string>();
+                grip->primary_markers=mirror.at("primaryMarkers").get<std::array<std::string,4>>();
+                grip->width_bones=mirror.at("widthBones").get<std::array<std::string,2>>();
+                grip->bind_normal=read_point(mirror.at("bindNormal"));
+                require(std::abs(weapon_length(grip->bind_normal)-1.f)<1e-3f,"grip mirror normal");
+                grip->pairs=mirror.at("pairs").get<std::vector<std::array<std::string,2>>>();
+                require(!grip->pairs.empty() && grip->pairs.size()<=64,"grip mirror pair count");
+                std::set<std::string> left,right;
+                std::vector<std::string> names{grip->primary_upper,grip->primary_forearm,grip->primary_hand,
+                    grip->width_bones[0],grip->width_bones[1]};
+                names.insert(names.end(),grip->primary_markers.begin(),grip->primary_markers.end());
+                for(const auto& pair:grip->pairs) {
+                    require(left.insert(pair[0]).second && right.insert(pair[1]).second,"duplicate grip mirror pair");
+                    names.insert(names.end(),pair.begin(),pair.end());
+                }
+                require(std::find(grip->pairs.begin(),grip->pairs.end(),
+                    std::array<std::string,2>{support->hand,grip->primary_hand})!=grip->pairs.end(),
+                    "grip mirror hand pair");
+                for(const auto& name:names) {
+                    bool found=false;
+                    for(const auto& bone:contract.at("skeleton").at("bones"))found|=bone.at("name")==name;
+                    require(found,"grip mirror bone missing in profile");
+                }
+                support->mirror=std::move(grip);
+            }
             output->two_hand_support=std::move(support);
         }
     } else {

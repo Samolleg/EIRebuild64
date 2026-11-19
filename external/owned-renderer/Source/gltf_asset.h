@@ -113,12 +113,17 @@ struct EquipmentAsset {
 struct WeaponArmNodePlan {
     SocketJoint joint;
     int parent=-1;
-    bool forearm=false,output=false;
+    bool forearm=false,hand=false,primary=false,output=false;
+    int mirror=-1;
+    Affine mirror_bind{};
 };
 struct WeaponArmPlan {
     std::vector<WeaponArmNodePlan> nodes;
     unsigned upper=0,forearm=0,hand=0;
     std::array<unsigned,4> markers{};
+    unsigned primary_begin=256,primary_upper=0,primary_forearm=0,primary_hand=0;
+    std::array<unsigned,4> primary_markers{};
+    std::array<unsigned,2> width_bones{};
 };
 struct EquipmentSelection {
     std::vector<EquipmentAsset> items;
@@ -129,6 +134,14 @@ struct EquipmentSelection {
 inline std::shared_ptr<const WeaponArmPlan> weapon_arm_plan(const Asset& body,const WeaponTwoHandSupport& support) {
     std::string key=support.upper+"|"+support.forearm+"|"+support.hand;
     for(const auto& name:support.markers)key+="|"+name;
+    if(support.mirror) {
+        const auto& m=*support.mirror;
+        key+="|mirror|"+m.primary_upper+"|"+m.primary_forearm+"|"+m.primary_hand;
+        for(const auto& name:m.primary_markers)key+="|"+name;
+        for(const auto& name:m.width_bones)key+="|"+name;
+        for(const auto& pair:m.pairs)key+="|"+pair[0]+"|"+pair[1];
+        key.append(reinterpret_cast<const char*>(m.bind_normal.data()),sizeof(m.bind_normal));
+    }
     std::lock_guard<std::mutex> guard(body.socket_mutex);
     const auto cached=body.support_arm_plans.find(key);
     if(cached!=body.support_arm_plans.end())return cached->second;
@@ -151,24 +164,69 @@ inline std::shared_ptr<const WeaponArmPlan> weapon_arm_plan(const Asset& body,co
     for(const auto& v:body.rest_vertices)for(unsigned k=0;k<4;++k)if(v.weights[k])used.insert(v.joints[k]);
     auto plan=std::make_shared<WeaponArmPlan>();
     std::vector<int> lookup(animation.nodes.size(),-1);
-    std::function<void(unsigned,int,bool)> visit=[&](unsigned node,int parent,bool lower) {
+    std::function<void(unsigned,int,bool,bool,bool,unsigned,unsigned)> visit=
+      [&](unsigned node,int parent,bool lower,bool is_hand,bool primary,unsigned lower_node,unsigned hand_node) {
         animation_require(lookup[node]<0 && plan->nodes.size()<animation.nodes.size() && plan->nodes.size()<256,
                           "two-hand arm hierarchy");
         const unsigned position=unsigned(plan->nodes.size());lookup[node]=int(position);
-        WeaponArmNodePlan part;part.joint.node=node;part.parent=parent;part.forearm=lower||node==forearm;
+        WeaponArmNodePlan part;part.joint.node=node;part.parent=parent;part.forearm=lower||node==lower_node;
+        part.hand=is_hand||node==hand_node;part.primary=primary;
         const auto& name=body.geometry.joints[node].name;
         part.output=used.count(node)!=0 || (!name.empty() && name[0]!='#');
         part.joint.tracks.resize(animation.clips.size(),{UINT32_MAX,UINT32_MAX,UINT32_MAX});
         plan->nodes.push_back(std::move(part));
-        for(unsigned child:children[node])visit(child,int(position),lower||node==forearm);
+        for(unsigned child:children[node])visit(child,int(position),lower||node==lower_node,
+                                                is_hand||node==hand_node,primary,lower_node,hand_node);
     };
-    visit(upper,-1,false);
+    visit(upper,-1,false,false,false,forearm,hand);
     animation_require(lookup[forearm]>=0 && lookup[hand]>=0 && plan->nodes[lookup[hand]].forearm,
                       "two-hand arm ancestry");
     plan->upper=unsigned(lookup[upper]);plan->forearm=unsigned(lookup[forearm]);plan->hand=unsigned(lookup[hand]);
     for(unsigned i=0;i<4;++i) {
         animation_require(lookup[markers[i]]>=0 && plan->nodes[lookup[markers[i]]].forearm,"two-hand marker ancestry");
         plan->markers[i]=unsigned(lookup[markers[i]]);
+    }
+    if(support.mirror) {
+        const auto& mirror=*support.mirror;
+        const auto pu=index(mirror.primary_upper),pf=index(mirror.primary_forearm),ph=index(mirror.primary_hand);
+        plan->primary_begin=unsigned(plan->nodes.size());
+        visit(pu,-1,false,false,true,pf,ph);
+        animation_require(lookup[pf]>=0 && lookup[ph]>=0 && plan->nodes[lookup[ph]].forearm &&
+                          plan->nodes[lookup[ph]].primary,"primary arm ancestry");
+        plan->primary_upper=unsigned(lookup[pu]);plan->primary_forearm=unsigned(lookup[pf]);
+        plan->primary_hand=unsigned(lookup[ph]);
+        for(unsigned i=0;i<4;++i) {
+            const auto node=index(mirror.primary_markers[i]);
+            animation_require(lookup[node]>=0 && plan->nodes[lookup[node]].hand &&
+                              plan->nodes[lookup[node]].primary,"primary marker ancestry");
+            plan->primary_markers[i]=unsigned(lookup[node]);
+        }
+        for(unsigned i=0;i<2;++i) {
+            const auto node=index(mirror.width_bones[i]);
+            animation_require(lookup[node]>=0 && plan->nodes[lookup[node]].hand &&
+                              plan->nodes[lookup[node]].primary,"primary width ancestry");
+            plan->width_bones[i]=unsigned(lookup[node]);
+        }
+        std::vector<Affine> bind(animation.nodes.size());
+        for(unsigned i=0;i<bind.size();++i) {
+            bind[i]=trs(animation.nodes[i]);
+            if(animation.nodes[i].parent>=0)bind[i]=multiply(bind[unsigned(animation.nodes[i].parent)],bind[i]);
+        }
+        Affine reflection{1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};
+        for(unsigned r=0;r<3;++r)for(unsigned c=0;c<3;++c)
+            reflection[r*4+c]-=2*mirror.bind_normal[r]*mirror.bind_normal[c];
+        for(const auto& pair:mirror.pairs) {
+            const auto l=index(pair[0]),r=index(pair[1]);
+            animation_require(lookup[l]>=0 && lookup[r]>=0 && plan->nodes[lookup[l]].hand &&
+                              !plan->nodes[lookup[l]].primary && plan->nodes[lookup[r]].hand &&
+                              plan->nodes[lookup[r]].primary,"grip mirror pair ancestry");
+            Affine inverse{};
+            for(unsigned i=0;i<4;++i)for(unsigned j=0;j<4;++j)
+                inverse[i*4+j]=body.geometry.joints[r].inverse[j*4+i];
+            auto& part=plan->nodes[lookup[l]];
+            part.mirror=lookup[r];
+            part.mirror_bind=multiply(multiply(inverse,reflection),bind[l]);
+        }
     }
     for(unsigned clip=0;clip<animation.clips.size();++clip) {
         const auto& tracks=animation.clips[clip].tracks;

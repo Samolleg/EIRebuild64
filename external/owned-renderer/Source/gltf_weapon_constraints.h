@@ -14,12 +14,20 @@ struct WeaponBowConstraint {
     std::array<std::string,4> drawing_bones,grip_bones;
 };
 struct WeaponProjectileAim { Point3 nock{},forward{}; };
+struct WeaponGripMirror {
+    std::string primary_upper,primary_forearm,primary_hand;
+    std::array<std::string,4> primary_markers;
+    std::array<std::string,2> width_bones;
+    Point3 bind_normal{};
+    std::vector<std::array<std::string,2>> pairs; // support, primary
+};
 struct WeaponTwoHandSupport {
     Point3 grip{},axis{};
     std::string upper,forearm,hand;
     std::array<std::string,4> markers;
     std::vector<std::string> clip_prefixes;
     std::map<std::string,std::array<float,4>> clip_windows;
+    std::unique_ptr<WeaponGripMirror> mirror;
     float full_correction=.1f,max_correction=.22f;
 };
 struct WeaponArmSolution {
@@ -151,23 +159,8 @@ inline bool weapon_projectile(Affine& result,const Affine& socket,const WeaponPr
     return weapon_aim(result,socket,aim.nock,aim.forward,drawing,target);
 }
 
-inline bool weapon_support_ik(WeaponArmSolution& result,const Affine& weapon,const WeaponTwoHandSupport& support,
-                              const Point3& shoulder,const Point3& elbow,const Point3& wrist,
-                              const Point3& palm,float transition) {
-    if(!std::isfinite(transition)||transition<=0||transition>1)return false;
-    const auto grip=weapon_point(weapon,support.grip);
-    auto axis=weapon_direction(weapon,support.axis);
-    const float axis_length=weapon_length(axis);
-    if(!std::isfinite(axis_length)||axis_length<1e-6f)return false;
-    for(auto& v:axis)v/=axis_length;
-    const auto relative=weapon_subtract(palm,grip);
-    const float along=relative[0]*axis[0]+relative[1]*axis[1]+relative[2]*axis[2];
-    Point3 delta{};for(unsigned i=0;i<3;++i)delta[i]=grip[i]+along*axis[i]-palm[i];
-    const float distance=weapon_length(delta);
-    if(!std::isfinite(distance)||distance>=support.max_correction||distance<1e-6f)return false;
-    const float fade=distance<=support.full_correction?1.f:
-        (support.max_correction-distance)/(support.max_correction-support.full_correction);
-    Point3 target{};for(unsigned i=0;i<3;++i)target[i]=wrist[i]+delta[i]*fade*transition;
+inline bool weapon_arm_target(WeaponArmSolution& result,const Point3& shoulder,const Point3& elbow,
+                              const Point3& wrist,const Point3& target) {
     const auto upper=weapon_subtract(elbow,shoulder),lower=weapon_subtract(wrist,elbow);
     const float first=weapon_length(upper),second=weapon_length(lower);
     auto direction=weapon_subtract(target,shoulder);const float requested=weapon_length(direction);
@@ -195,6 +188,26 @@ inline bool weapon_support_ik(WeaponArmSolution& result,const Affine& weapon,con
     }
     return weapon_rotate(upper,weapon_subtract(result.new_elbow,shoulder),result.upper_rotation) &&
            weapon_rotate(lower,weapon_subtract(result.new_wrist,result.new_elbow),result.forearm_rotation);
+}
+
+inline bool weapon_support_ik(WeaponArmSolution& result,const Affine& weapon,const WeaponTwoHandSupport& support,
+                              const Point3& shoulder,const Point3& elbow,const Point3& wrist,
+                              const Point3& palm,float transition) {
+    if(!std::isfinite(transition)||transition<=0||transition>1)return false;
+    const auto grip=weapon_point(weapon,support.grip);
+    auto axis=weapon_direction(weapon,support.axis);
+    const float axis_length=weapon_length(axis);
+    if(!std::isfinite(axis_length)||axis_length<1e-6f)return false;
+    for(auto& v:axis)v/=axis_length;
+    const auto relative=weapon_subtract(palm,grip);
+    const float along=relative[0]*axis[0]+relative[1]*axis[1]+relative[2]*axis[2];
+    Point3 delta{};for(unsigned i=0;i<3;++i)delta[i]=grip[i]+along*axis[i]-palm[i];
+    const float distance=weapon_length(delta);
+    if(!std::isfinite(distance)||distance>=support.max_correction||distance<1e-6f)return false;
+    const float fade=distance<=support.full_correction?1.f:
+        (support.max_correction-distance)/(support.max_correction-support.full_correction);
+    Point3 target{};for(unsigned i=0;i<3;++i)target[i]=wrist[i]+delta[i]*fade*transition;
+    return weapon_arm_target(result,shoulder,elbow,wrist,target);
 }
 
 inline Affine weapon_rotate_around(const Affine& original,const std::array<float,9>& rotation,

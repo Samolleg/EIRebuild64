@@ -215,10 +215,10 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
                 if(strength>0) {
                     const auto& plan=*outfit.support_arm;
                     std::array<gltf::Affine,256> arm{};
-                    const auto upper=body.geometry.joints[plan.nodes[plan.upper].joint.node].name;
                     for(unsigned i=0;i<plan.nodes.size();++i) {
                         const auto& node=plan.nodes[i];
-                        arm[i]=node.parent<0 ? gltf::socket_pose(animation,body.attachment_chain(upper),playback,
+                        arm[i]=node.parent<0 ? gltf::socket_pose(animation,
+                                                                 body.attachment_chain(body.geometry.joints[node.joint.node].name),playback,
                                                                  root,prepared.motion_physique.get()) :
                             gltf::multiply(arm[unsigned(node.parent)],gltf::socket_local(animation,node.joint,playback,
                                                                                         prepared.motion_physique.get()));
@@ -230,6 +230,18 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
                     auto weapon=gltf::socket_pose(animation,body.attachment_chain(held->socket),playback,root,
                                                   prepared.motion_physique.get());
                     for(unsigned r=0;r<3;++r)for(unsigned c=0;c<3;++c)weapon[r*4+3]+=weapon[r*4+c]*held->offset[c];
+                    if(support.mirror) {
+                        bool primary_changed=false;
+                        if(gltf::weapon_mirrored_grip(arm,primary_changed,plan,support,weapon,strength)) {
+                            for(unsigned i=0;i<plan.nodes.size();++i)
+                              if(plan.nodes[i].output && (!plan.nodes[i].primary || primary_changed)) {
+                                NativeWorldGeometry::Pose::Override out{};
+                                out.node=unsigned(base)+plan.nodes[i].joint.node;
+                                for(unsigned r=0;r<3;++r)std::copy_n(arm[i].data()+r*4,4,out.value.rows[r].begin());
+                                rows->push_back(out);
+                            }
+                        }
+                    } else {
                     gltf::WeaponArmSolution solution;
                     if(gltf::weapon_support_ik(solution,weapon,support,shoulder,elbow,wrist,palm,strength)) {
                         for(unsigned i=0;i<plan.nodes.size();++i)if(plan.nodes[i].output) {
@@ -243,6 +255,7 @@ bool prepare_gltf_pose(const RetainedVisualSample &sample,
                             for(unsigned r=0;r<3;++r)std::copy_n(value.data()+r*4,4,out.value.rows[r].begin());
                             rows->push_back(out);
                         }
+                    }
                     }
                 }
             }

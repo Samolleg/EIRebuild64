@@ -12,6 +12,7 @@
 #include "figure_service_nodes.h"
 #include "skn_runtime.h"
 #include "gltf_asset.h"
+#include "gltf_weapon_grip.h"
 #include "environment_material.h"
 #include "environment_asset.h"
 #include "gltf_breast.h"
@@ -2609,9 +2610,22 @@ int retained_visual_equipment_point(const RetainedVisualSample& sample,const cha
     }
     const gltf::Playback playback{pose->gltf_clip,pose->gltf_previous,pose->gltf_time,
         pose->gltf_previous_time,pose->gltf_blend};
-    const auto matrix=gltf::multiply(pose->root_to_world,
+    auto matrix=gltf::multiply(pose->root_to_world,
         gltf::socket_pose(*body.animation,body.attachment_chain(socket),playback,
             {1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1},sample.prepared->motion_physique.get()));
+    // The grip solver may move the primary socket while retaining the weapon
+    // in its hand. Effects must use the same final world matrix as skinning.
+    if(pose->overrides && pose->binding) {
+        const auto joint=std::find_if(body.geometry.joints.begin(),body.geometry.joints.end(),
+            [&](const skn::Joint& item){return item.name==socket;});
+        if(joint!=body.geometry.joints.end()) {
+            const auto index=pose->binding->gltf_node_base+unsigned(joint-body.geometry.joints.begin());
+            const auto found=std::find_if(pose->overrides->begin(),pose->overrides->end(),
+                [&](const auto& item){return item.node==index;});
+            if(found!=pose->overrides->end())
+                for(unsigned r=0;r<3;++r)std::copy_n(found->value.rows[r].begin(),4,matrix.data()+r*4);
+        }
+    }
     for(unsigned r=0;r<3;++r) {
         point[r]=matrix[r*4+3];
         for(unsigned c=0;c<3;++c)point[r]+=matrix[r*4+c]*local[c];

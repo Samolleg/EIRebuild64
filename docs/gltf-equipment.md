@@ -23,6 +23,20 @@ follow the original reload before blending toward its stock around release.
 The mechanism and support adjustments use the same body playback and physique.
 Malformed metadata is rejected; unrelated weapons keep their existing pose.
 
+For a two-handed melee item, optional `twoHandSupport.gripMirror` version 1
+declares the primary upper arm, forearm, hand, four palm markers, two width
+bones, bind-space mirror normal, and corresponding support/primary finger
+joint pairs. The loader validates all names against the selected profile and
+caches the arm hierarchies and bind conversions once per shared body/contract.
+At a supported action the secondary hand follows a reflected primary-hand
+grasp on the item's support axis, retaining the animated separation along the
+shaft. Only if that grip is out of reach is the primary arm and its attached
+weapon moved toward it; segment lengths remain fixed. Rotation and translation
+blend during action transitions. The weapon socket's final pose also drives its
+cast and particle anchors. An unreachable or degenerate correction leaves the
+original pose intact. Items without this contract, including the crossbow,
+keep their existing support and reload behavior.
+
 The companion content candidate records the conversion recipes and source
 checksums. It requires this runtime and has not been established as accepted or
 installed by this document. Rendering tests do not replace game-path checks of
