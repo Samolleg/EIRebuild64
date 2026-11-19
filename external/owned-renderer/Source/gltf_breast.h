@@ -57,7 +57,8 @@ struct BreastState {
     std::vector<unsigned> parent_slots, slots;
     std::vector<Affine> matrices;
     double clock=-1, physics_clock=0;
-    bool frozen=false;
+    bool frozen=false, resting_pose=false;
+    float tissue_gain=1.f;
     unsigned node_base=UINT32_MAX;
     Playback playback;
     Affine placement{}, display_mapping{};
@@ -133,15 +134,27 @@ struct BreastState {
         return true;
     }
     void update(double now,const Playback& pose,const Affine& root,bool reset,unsigned base,bool paused=false,
-                const RetainedVisualSample::PreviewPhysicsSpace* ui=nullptr,const PhysiquePose* shape=nullptr) {
-        if(initialized&&!reset&&(!ui||display_mapping==ui->to_display)&&base==node_base&&now==clock&&paused==frozen&&root==placement&&pose.clip==playback.clip&&
+                const RetainedVisualSample::PreviewPhysicsSpace* ui=nullptr,const PhysiquePose* shape=nullptr,bool resting=false) {
+        if(initialized&&!reset&&resting==resting_pose&&(!ui||display_mapping==ui->to_display)&&base==node_base&&now==clock&&paused==frozen&&root==placement&&pose.clip==playback.clip&&
            pose.previous==playback.previous&&pose.time==playback.time&&
            pose.previous_time==playback.previous_time&&pose.blend==playback.blend)return;
+        const double previousPhysicsClock=physics_clock;
         if(!initialized)physics_clock=now;
         else {
             reset|=now<clock;
             if(!paused&&!frozen)physics_clock+=(std::max)(0.,now-clock);
         }
+        // Standing idle clips also contain keyframed weight shifts and abrupt
+        // changes of facing. The authored pose carries that movement. Give
+        // secondary inertia a small residual there, easing on simulation time
+        // when a footfall or stop crosses the locomotion/idle boundary.
+        const float targetGain=resting?.075f:1.f;
+        if(!initialized||reset)tissue_gain=targetGain;
+        else{
+            const float dt=float(physics_clock-previousPhysicsClock);
+            tissue_gain+=(targetGain-tissue_gain)*(-std::expm1(-dt/.075f));
+        }
+        resting_pose=resting;
         if(ui)display_mapping=ui->to_display;
         clock=now;frozen=paused;node_base=base;placement=root;playback=pose;initialized=true;
         if(!physics&&secondary_factory)physics=secondary_factory();
@@ -173,11 +186,12 @@ struct BreastState {
         }
         std::array<Affine,body_parts> bend;
         for(unsigned i=0;i<body_parts;++i){
-            Node node;node.rotation=offsets.body[i].rotation;
+            Node node;
+            if(i%4==3)node.rotation=slerp({0,0,0,1},offsets.body[i].rotation,tissue_gain);
             auto& m=bend[i];m=trs(node);
             const auto& p=input.body[i].pivot;
             for(unsigned r=0;r<3;++r)
-                m[r*4+3]=offsets.body[i].shift[r]+p[r]-(m[r*4]*p[0]+m[r*4+1]*p[1]+m[r*4+2]*p[2]);
+                m[r*4+3]=tissue_gain*offsets.body[i].shift[r]+p[r]-(m[r*4]*p[0]+m[r*4+1]*p[1]+m[r*4+2]*p[2]);
         }
         for(unsigned side=0;side<2;++side){
             const unsigned first=4*side;

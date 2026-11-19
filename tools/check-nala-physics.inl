@@ -17,6 +17,7 @@ static void check_nala_physics(const fs::path& game,const fs::path& out) {
     unsigned moved=0;
     float peak=0;
     for(const char* action:{"idle","cidle09","cidle10","cidle11","walk","run"}) {
+        const bool locomotion=std::string(action)=="walk"||std::string(action)=="run";
         const unsigned clip=named_clip(*body->animation,action);
         require(clip!=UINT32_MAX,"Nala locomotion clip");
         float low=1,high=-1,breastPeak=0,glutePeak=0;
@@ -25,7 +26,7 @@ static void check_nala_physics(const fs::path& game,const fs::path& out) {
         for(unsigned frame=0;frame<=frames;++frame) {
             const double clock=duration*2.*frame/frames;
             Playback pose{clip,UINT32_MAX,float(std::fmod(clock,duration)),0,1};
-            state.update(clock,pose,root,frame==0,0);
+            state.update(clock,pose,root,frame==0,0,false,nullptr,nullptr,!locomotion);
             require(state.physics&&state.physics->error().empty()&&state.overrides,"live GPU pose");
             const auto original=evaluate(*body->animation,pose);
             auto corrected=original.joints;
@@ -85,10 +86,9 @@ static void check_nala_physics(const fs::path& game,const fs::path& out) {
             require(moved<body->rest_vertices.size()/2,"localized weighted deformation");
         }
         std::cout<<"Nala "<<action<<" tip_dz_min_m="<<low<<" max_m="<<high<<" breast_peak_mm="<<1000*breastPeak<<" glute_peak_mm="<<1000*glutePeak<<" skin_peak_so_far_m="<<peak<<std::endl;
-        const bool locomotion=std::string(action)=="walk"||std::string(action)=="run";
         require(breastPeak<.018f&&glutePeak<.005f,"Tissue travel on the actual rig");
         if(locomotion)require(high-low>.0005f&&glutePeak>.0002f,"Inertia during locomotion");
-        else require(breastPeak<.005f&&glutePeak<.002f,"Quiet breathing on the actual rig");
+        else require(breastPeak<.0017f&&glutePeak<.0005f,"Quiet breathing on the actual rig");
     }
     auto previous=state.overrides;state.update(state.clock,state.playback,state.placement,false,0);
     require(state.overrides==previous,"Nala repeated render reuses immutable pose");
@@ -117,6 +117,15 @@ static void check_nala_physics(const fs::path& game,const fs::path& out) {
                     "info/inventory corrected joints must follow their model placement");
         }
     }
+    // Stop, pause mid-blend, and settle on the info-panel clock.
+    state.update(state.clock+.03,state.playback,root,false,17,false,nullptr,nullptr,true);
+    require(state.tissue_gain>.075f&&state.tissue_gain<1.f,"smooth entry into rest");
+    const float partialGain=state.tissue_gain;
+    state.update(state.clock+.2,state.playback,root,false,17,true,nullptr,nullptr,true);
+    require(state.tissue_gain==partialGain,"paused transition stays frozen");
+    state.update(state.clock+.1,state.playback,root,false,17,false,nullptr,nullptr,true);
+    for(unsigned f=0;f<20;++f)state.update(state.clock+1./30.,state.playback,root,false,17,false,nullptr,nullptr,true);
+    require(std::abs(state.tissue_gain-.075f)<.001f,"stop settles to idle response");
     const auto before=state.physics_clock;
     state.update(state.clock+1,state.playback,state.placement,false,0,true);
     require(state.physics_clock==before,"Nala host combat pause freezes physics time");
