@@ -213,7 +213,7 @@
     <ClCompile Include="Game\I3DInventory.cpp" />
     <ClCompile Include="Game\I3DMain.cpp" />
     <ClCompile Include="Game\I3DMapObjTranslation.cpp" />
-    <ClCompile Include="Game\I3DObject.cpp" />
+    <ClCompile Include="Game\I3DObject.cpp"><WholeProgramOptimization>false</WholeProgramOptimization></ClCompile>
     <ClCompile Include="Game\I3DScreen.cpp" />
     <ClCompile Include="Game\I3DScreenBase.cpp" />
     <ClCompile Include="Game\I3DScreenCamp.cpp" />
