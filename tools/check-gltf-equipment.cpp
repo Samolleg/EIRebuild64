@@ -619,9 +619,9 @@ int wmain(int argc,wchar_t** argv)try {
      check(originalPhysics.bind(originalBody) && updatedPhysics.bind(body),"Nala physics bones missing after hair separation");
      std::set<std::pair<std::string,unsigned>> originalNodes,updatedNodes;
      for(const auto& value:originalPhysics.affected)
-      originalNodes.emplace(originalBody->geometry.joints.at(value.node).name,value.side);
+      originalNodes.emplace(originalBody->geometry.joints.at(value.node).name,value.part);
      for(const auto& value:updatedPhysics.affected)
-      updatedNodes.emplace(body->geometry.joints.at(value.node).name,value.side);
+      updatedNodes.emplace(body->geometry.joints.at(value.node).name,value.part);
      check(!originalNodes.empty() && originalNodes==updatedNodes,"Nala physics affected-bone set changed");
      for(unsigned side=0;side<2;++side)
       check(originalBody->geometry.joints.at(originalPhysics.targets[side]).name==
