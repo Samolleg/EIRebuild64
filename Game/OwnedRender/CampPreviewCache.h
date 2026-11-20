@@ -6,25 +6,25 @@
 #include <mutex>
 #include <thread>
 
-// A null result is final: the worker resolved the item and found no GLB.
 template<class Model> struct CampPreviewSelection {
     std::shared_ptr<Model> model;
     bool useFigure=false;
 };
 
+// The UI snapshots the actual stock, and the worker prepares each distinct
+// key once. Seal the batch before presenting the shop. Ready entries from the
+// previous visit remain available while the new assortment is being prepared.
 template<class Key,class Request,class Model,class Loader>
 class CampPreviewCache {
-    enum class State { queued, loading, ready };
     struct Entry {
         Request request;
-        bool anticipated=false;
         std::shared_ptr<Model> model;
-        State state=State::queued;
+        bool ready=false,used=true;
     };
     Loader loader;
     std::map<Key,Entry> entries;
-    std::deque<Entry*> stock,nearby;
-    Entry* visible=nullptr;
+    std::deque<Entry*> queue;
+    std::size_t pending=0;
     std::mutex mutex;
     std::condition_variable work,finished;
     bool stop=false;
@@ -34,20 +34,15 @@ class CampPreviewCache {
         SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);
         std::unique_lock<std::mutex> lock(mutex);
         for (;;) {
-            work.wait(lock,[&]{return stop || visible || !nearby.empty() || !stock.empty();});
+            work.wait(lock,[&]{return stop || !queue.empty();});
             if(stop) return;
-            auto* entry=visible;
-            if(entry) visible=nullptr;
-            else if(!nearby.empty()) {entry=nearby.front();nearby.pop_front();}
-            else {entry=stock.front();stock.pop_front();}
-            if(entry->state!=State::queued) continue;
-            entry->state=State::loading;
+            auto* entry=queue.front();queue.pop_front();
             lock.unlock();
             auto model=loader(entry->request);
             lock.lock();
             entry->model=std::move(model);
-            entry->state=State::ready;
-            finished.notify_one();
+            entry->ready=true;
+            --pending;finished.notify_all();
         }
     }
 public:
@@ -57,29 +52,34 @@ public:
         work.notify_one();
         worker.join();
     }
-    // All calls originate on the game's UI thread. No item or party pointer
-    // leaves it. Map nodes stay put for the lifetime of this camp visit.
+    void begin() {
+        std::lock_guard<std::mutex> guard(mutex);
+        for(auto& pair:entries) pair.second.used=false;
+    }
+    std::size_t finish() {
+        std::unique_lock<std::mutex> lock(mutex);
+        finished.wait(lock,[&]{return !pending;});
+        for(auto it=entries.begin();it!=entries.end();) {
+            if(!it->second.used) it=entries.erase(it);else ++it;
+        }
+        loader.idle();
+        return entries.size();
+    }
     template<class Describe>
-    CampPreviewSelection<Model> get(Key key,bool preload,bool upcoming,Describe describe) {
+    CampPreviewSelection<Model> get(Key key,bool preload,Describe describe) {
         std::unique_lock<std::mutex> lock(mutex);
         auto found=entries.find(key);
         if(found==entries.end()) {
             Entry entry;
             entry.request=describe();
             found=entries.emplace(key,std::move(entry)).first;
-            if(preload) {stock.push_back(&found->second);work.notify_one();}
+            queue.push_back(&found->second);++pending;work.notify_one();
         }
         auto& entry=found->second;
-        if(preload) {
-            if(upcoming && entry.state==State::queued && !entry.anticipated) {
-                entry.anticipated=true;nearby.push_back(&entry);work.notify_one();
-            }
-            return {};
-        }
-        if(entry.state!=State::ready) {
-            if(entry.state==State::queued) {visible=&entry;work.notify_one();}
-            finished.wait(lock,[&]{return entry.state==State::ready;});
-        }
+        entry.used=true;
+        if(preload) return {};
+        // Also cover an item just created in an already-open constructor.
+        finished.wait(lock,[&]{return entry.ready;});
         return {entry.model,!entry.model};
     }
 };

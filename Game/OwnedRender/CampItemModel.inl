@@ -46,7 +46,8 @@ struct CampItemMesh {
         if(!backing) return;
         const auto* cursor=backing.get();
         const auto moveStream=[&](auto& values,auto& target,const CampPreviewStorage::Span& span) {
-            target=reinterpret_cast<decltype(values.data())>(const_cast<std::uint8_t*>(cursor));
+            using Value=typename std::decay_t<decltype(values)>::value_type;
+            target=reinterpret_cast<const Value*>(cursor);
             cursor+=span.bytes;
             std::decay_t<decltype(values)>{}.swap(values);
         };
@@ -67,7 +68,7 @@ struct CampItemMesh {
 struct CampItemSurface {
     owned::skn::Material material;
     std::array<owned::skn::Dds,4> maps;
-    std::array<CampPreviewStorage::View,4> backing;
+    std::array<std::shared_ptr<const CampPreviewStorage::Image>,4> backing;
 };
 struct CampItemPart {
     std::string resource;
@@ -275,6 +276,7 @@ struct CampItemLoader {
     // source while preparing stock; the published models own only draw data.
     std::shared_ptr<const owned::gltf::Asset> recentSource;
     owned::ResourceStore store;
+    void idle() {recentSource.reset();storage.prune();}
     bool opened=false;
     std::map<std::string,CampFigureReference> references;
 
@@ -434,12 +436,12 @@ struct CampItemModelCache {
         const auto type=loot.GetInstructionType();
         return type==IDBINS_ARMOR || type==IDBINS_WEAPON ? &loot : nullptr;
     }
-    CampPreviewSelection<CampItemModel> find(const CItem& item,bool preload=false,bool upcoming=false) {
+    CampPreviewSelection<CampItemModel> find(const CItem& item,bool preload=false) {
         const auto* instruction=blueprint(item);
         if(!instruction && item.GetTypeID()!=ITID_ITEM_ARMOR && item.GetTypeID()!=ITID_ITEM_WEAPON) return {nullptr,true};
         const Key key=instruction?Key{ITID_ITEM_LOOT,instruction->GetInstructionType(),instruction->GetInstructionItemIndex()}:
                                   Key{item.GetTypeID(),item.GetSubtypeID(),0};
-        return cache.get(key,preload,upcoming,[&] {
+        return cache.get(key,preload,[&] {
             CampItemRequest request;
             const auto* shape=instruction?instruction->GetInstructionShape():item.GetShapeEntry();
             if(!shape) return request;

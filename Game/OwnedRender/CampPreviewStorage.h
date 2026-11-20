@@ -44,20 +44,27 @@ public:
         owned::skn::Dds map;
         View backing;
     };
-    void retain(owned::skn::Dds& map,View& backing) {
+    void retain(owned::skn::Dds& map,std::shared_ptr<const Image>& owner) {
         if(!map.blob.bytes || map.mips.empty()) return;
         const auto key=map.blob.identity.key();
-        auto found=images.find(key);
-        if(found!=images.end()) {map=found->second.map;backing=found->second.backing;return;}
+        auto& cached=images[key];
+        owner=cached.lock();
+        if(owner) {map=owner->map;return;}
         const auto* start=map.blob.bytes->data();
         const Span span{start,map.blob.bytes->size()};
-        backing=back(&span,1);
+        auto backing=back(&span,1);
         if(backing) {
             for(auto& mip:map.mips) mip.data=backing.get()+(mip.data-start);
             map.blob.bytes.reset();
         }
-        images.emplace(key,Image{map,backing});
+        owner=std::make_shared<const Image>(Image{map,std::move(backing)});
+        cached=owner;
+    }
+    void prune() {
+        for(auto it=images.begin();it!=images.end();) {
+            if(it->second.expired()) it=images.erase(it);else ++it;
+        }
     }
 private:
-    std::map<std::string,Image> images;
+    std::map<std::string,std::weak_ptr<const Image>> images;
 };

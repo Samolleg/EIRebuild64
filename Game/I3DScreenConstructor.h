@@ -60,8 +60,6 @@ private:
     CArray<CItem *, CItem *> pSortedItems; // sorted items
     CSimplyArray<CItem *, CItem *> *pAllItems;
 
-    int previewFirst=-1, previewCount=-1, previewMode=-1, previewPage=0;
-    void AnticipatePage(int first,int page);
     EItemScreenKoeffs ePriceType;
 
 private:

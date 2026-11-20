@@ -672,17 +672,6 @@ int CI3DObjectInventoryItems::SortFunction2(CItem *pItem)
     return 5;
 }
 /////////////////////////////////////////////////////////////////////////////////////
-void CI3DObjectInventoryItems::AnticipatePage(int first,int page)
-{
-    const int count=pSortedItems.GetSize();
-    if(first==previewFirst && count==previewCount && nSortMode==previewMode && page==previewPage) return;
-    previewFirst=first;previewCount=count;previewMode=nSortMode;previewPage=page;
-    auto queue=[&](int index) {
-        if(index>=0 && index<count && pSortedItems[index]) pScreen->AnticipateCampItem(*pSortedItems[index]);
-    };
-    for(int i=0;i<page;++i) queue(first+i);
-    for(int i=0;i<page;++i) {queue(first+page+i);queue(first-1-i);}
-}
 BOOL CI3DObjectInventoryItems::Draw(CRenderer *pRend)
 {
     if (E4CampAccess::DrawGrid(this, pRend)) return TRUE;
@@ -691,7 +680,6 @@ BOOL CI3DObjectInventoryItems::Draw(CRenderer *pRend)
     int i;
 
     int nCurPos = (int)fCurPos[nSortMode];
-    AnticipatePage(nCurPos,NUM_VISIBLE_ITEMS);
     float shift = fCurPos[nSortMode] - (float)nCurPos;
 
     if (fCurPos[nSortMode] > 0)

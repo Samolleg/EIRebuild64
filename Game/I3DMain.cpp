@@ -224,6 +224,7 @@ void CInterface3D::Init(CRenderer *pNewRend)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::Fini()
 {
+    lastCampModels.reset();
     OwnedRender::E1TextInterfaceEnd();
     OwnedRender::E3RetireInterface();
     DestroyScreens();
@@ -664,6 +665,7 @@ void CInterface3D::ExitFromModal(DWORD dwRetValue)
 /////////////////////////////////////////////////////////////////////////////////////
 void CInterface3D::RetireSavedScreens() noexcept
 {
+    lastCampModels.reset();
     // Acceptance has already succeeded. Each detached screen must be deleted
     // while its former world/party still exist, even if its deactivation fails.
     try {OwnedRender::E1TextRetire(OwnedRender::E1TextKind::pane);OwnedRender::E1TextRetire(OwnedRender::E1TextKind::chat);theCursor.SetMode(CT_WAIT);}

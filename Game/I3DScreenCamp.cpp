@@ -98,6 +98,7 @@ void CI3DScreenCamp::OnActivate()
 
     // Saved assortment is already final on most visits; regenerated stock
     // is published below only after the shop has built the new lists.
+    BeginCampPreviews(nShop);
     if(pItemsAssort && bIsItemConstr && !pShop->bNeedUpdate) PreloadCampParty(*pItemsAssort);
     PreloadCampParty(IWorldClient.GetParty());
     AddTexture("campinfo");
@@ -472,6 +473,7 @@ void CI3DScreenCamp::OnActivate()
     wideRight->SetAmbient(sideAmbient, sideAmbient, sideAmbient);
     wideLeft->SetTexture(wideTexture);
     wideRight->SetTexture(wideTexture);
+    FinishCampPreviews();
     E4CampAccess::Activate(this);
 }
 

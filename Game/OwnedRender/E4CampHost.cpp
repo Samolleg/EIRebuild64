@@ -342,7 +342,6 @@ bool E4CampAccess::DrawGrid(CI3DObjectInventoryItems* p,CRenderer* renderer){
     if(!Active()||!inventory(p))return false;
     PrepareGrid(p);const auto& l=Layout();const bool v=vendor(p);const int first=First(p),count=p->pSortedItems.GetSize();
     const int cols=l.grid_columns(v),rows=l.grid_rows(v);ObserveGrid(v,first,count,p->nSortMode,cols,rows);
-    p->AnticipatePage(first,cols*rows);
     Scope scope(v?Role::vendor:Role::wagon);
     auto& cache=grids[p];cache.visible.clear();
     const Rect native{50,float(p->nTopHeight),150,float(p->nTopHeight+100)};

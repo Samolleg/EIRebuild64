@@ -271,9 +271,23 @@ static const D3DCOLORVALUE dcvMagicColors[] = { { 1, 0, 0, 1 }, { 0, 1, 1, 1 }, 
                                                 { 1, 0, 1, 1 }, { 0, 0, 1, 1 } };
 #include "OwnedRender/CampItemModel.inl"
 #include "OwnedRender/SinglePreview.inl"
-void CI3DItemScreen::AnticipateCampItem(const CItem& item)
+void CI3DItemScreen::BeginCampPreviews(int shop)
 {
-    if(campItemModels) campItemModels->find(item,true,true);
+    owned::ResourceStoreConfig mounts;
+    std::uint64_t generation=0;
+    const bool available=owned::owned_resource_runtime_mounts(mounts,&generation);
+    if(!available || !pI3D->lastCampModels || shop!=pI3D->campModelShop || generation!=pI3D->campModelGeneration) {
+        pI3D->lastCampModels=std::make_shared<CampItemModelCache>();
+        pI3D->campModelShop=shop;pI3D->campModelGeneration=generation;
+    }
+    campItemModels=pI3D->lastCampModels;
+    campItemModels->cache.begin();
+}
+void CI3DItemScreen::FinishCampPreviews()
+{
+    const auto started=GetTickCount64();
+    const auto count=campItemModels->cache.finish();
+    GameJournal::Event("SHOP","preview_stock_ready","keys=%zu final_wait_ms=%llu",count,GetTickCount64()-started);
 }
 void CI3DItemScreen::PreloadCampParty(const CParty& party)
 {
