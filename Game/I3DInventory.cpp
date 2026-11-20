@@ -278,7 +278,7 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
     const bool campPlaced = E4CampAccess::ItemPlacement(this, item, campPlacement);
     owned::camp::VisualScope campVisual(campPlaced ? campPlacement : owned::camp::visual, campPlaced || owned::camp::composing);
     const CampItemModel* model = nullptr;
-    if (item.eFrom != ISP_UNKNOWN && dynamic_cast<CI3DScreenCamp*>(this) &&
+    if (dynamic_cast<CI3DScreenCamp*>(this) &&
         (item.pItem->GetTypeID()==ITID_ITEM_ARMOR || item.pItem->GetTypeID()==ITID_ITEM_WEAPON)) {
         if (!campItemModels) campItemModels=std::make_shared<CampItemModelCache>();
         model=campItemModels->find(*item.pItem,pRend->GetD3D()->ModelPreviewFrame());
@@ -343,7 +343,9 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
             }
         }
     }
-    if (!facts.slot) {
+    if (!facts.slot && model) {
+        facts.bounds_max={1,1}; // Centered, unit-radius model in the camp detail card.
+    } else if (!facts.slot) {
         const auto* bounds=pFig->GetBoundingVolume();
         facts.bounds_max={bounds->ptMax.x,bounds->ptMax.y};
         facts.bounds_center={bounds->ptCenter.x,bounds->ptCenter.y};

@@ -7,6 +7,7 @@
 namespace {
 struct CampItemMesh {
     unsigned material;
+    std::uint64_t fingerprint=0;
     std::vector<owned::NativePackedGroup> positions, normals;
     std::vector<owned::NativeTextureCoordinate> uv;
     std::vector<owned::NativeVertexComponent> components;
@@ -42,10 +43,11 @@ struct CampItemModel {
     std::vector<CampItemPart> parts;
     std::array<float,3> center{};
     float radius=0;
+    CQuaternion displayRotation=QNULL;
     std::string name;
     mutable bool reported=false;
 
-    explicit CampItemModel(std::vector<owned::gltf::EquipmentAsset> bindings) {
+    CampItemModel(std::vector<owned::gltf::EquipmentAsset> bindings, bool weapon) {
         std::array<float,3> low{FLT_MAX,FLT_MAX,FLT_MAX},high{-FLT_MAX,-FLT_MAX,-FLT_MAX};
         for (auto& binding:bindings) {
             auto& part=parts.emplace_back();
@@ -79,6 +81,17 @@ struct CampItemModel {
                 }
             }
         }
+        for (auto& part:parts) for (auto& mesh:part.meshes) {
+            owned::NativeGeometryView geometry{};
+            mesh.streams(geometry);
+            mesh.fingerprint=OwnedRender::E4::ItemMeshFingerprint(geometry);
+        }
+        const float width=high[0]-low[0], height=high[1]-low[1], depth=high[2]-low[2];
+        // A weapon authored along its grip's depth axis would otherwise point at the camera.
+        if (weapon && depth>(std::max)(width,height))
+            displayRotation=CQuaternion(CPlot3D(0,0,1),.62f)*CQuaternion(CPlot3D(1,0,0),1.36f);
+        else
+            displayRotation=CQuaternion(CPlot3D(0,1,0),.35f)*CQuaternion(CPlot3D(1,0,0),.18f);
         for (unsigned j=0;j<3;++j) center[j]=(low[j]+high[j])*.5f;
         for (const auto& part:parts) for (const auto& mesh:part.meshes)
             for (unsigned i=0;i<mesh.components.size();++i) {
@@ -100,8 +113,7 @@ struct CampItemModel {
             const auto& r=p.rotations[i];
             rotation=rotation*CQuaternion(CPlot3D(r.axis[0],r.axis[1],r.axis[2]),r.angle);
         }
-        // Slight three-quarter turn in the idle cell, followed by the stock hover rotation.
-        rotation=rotation*CQuaternion(CPlot3D(0,1,0),.35f)*CQuaternion(CPlot3D(1,0,0),.18f);
+        rotation=rotation*displayRotation;
         SHMatrix transform; Identity(transform); rotation.DecompEulerMatrix(transform);
         SHMatrix fit; Identity(fit);
         const float scale=p.scale/radius;
@@ -114,6 +126,7 @@ struct CampItemModel {
         std::memcpy(clip.data(),&projection,sizeof(projection));
         OwnedRender::ModelPreviewLighting light;
         if (!OwnedRender::produce_model_preview_lighting(clip,{at.x,at.y,at.z},light,owned::PreviewStudioStyle::soft_figure)) return;
+        light.world.ambient={.78f,.78f,.78f,1.f};
         for (const auto& part:parts) for (const auto& mesh:part.meshes) {
             const auto& b=part.binding;
             const auto& maps=b.asset->textures.at(mesh.material);
@@ -122,6 +135,8 @@ struct CampItemModel {
             const auto identity=b.material_identities.find(mesh.material);
             owned::NativeGeometryView view{};
             mesh.streams(view);
+            view.content_fingerprint=mesh.fingerprint;
+            view.content_fingerprint_valid=true;
             view.semantic_kind=owned::SemanticKind::figure;
             view.ordering=owned::NativeOrdering::preserve;
             view.default_diffuse=0xffffffffu; view.default_specular=p.specular;
@@ -175,7 +190,7 @@ struct CampItemModelCache {
             try {
                 auto bindings=owned::gltf::select_inventory_item(selected);
                 if (!bindings.empty()) {
-                    entry.model=std::make_unique<CampItemModel>(std::move(bindings));
+                    entry.model=std::make_unique<CampItemModel>(std::move(bindings),item.GetTypeID()==ITID_ITEM_WEAPON);
                     entry.model->name=selected.shape+"/"+selected.material;
                 }
             } catch (const std::exception& error) {

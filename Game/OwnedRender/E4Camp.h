@@ -126,6 +126,7 @@ struct E4CampAccess {
 
 namespace OwnedRender::E4 {
 bool OwnsDraw() noexcept;
+std::uint64_t ItemMeshFingerprint(const owned::NativeGeometryView& geometry);
 void RegisterTextures(bool high_resolution) noexcept;
 struct Icon {
     Icon* previous;
