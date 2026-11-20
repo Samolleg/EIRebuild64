@@ -272,11 +272,20 @@ struct CampItemRequest {
 };
 struct CampItemLoader {
     CampPreviewStorage storage;
-    // Neighboring variants often share the same GLB. Keep only the last
-    // source while preparing stock; the published models own only draw data.
-    std::shared_ptr<const owned::gltf::Asset> recentSource;
+    // Neighboring variants often share the same GLB. Keep a small import window
+    // of sources while preparing stock; the published models own only draw data.
+    std::deque<std::shared_ptr<const owned::gltf::Asset>> recentSources;
+    std::deque<std::shared_ptr<const owned::skn::Dds>> recentTextures;
+    std::size_t recentPixels=0;
+    void remember(const std::shared_ptr<const owned::skn::Dds>& texture) {
+        if(std::find(recentTextures.begin(),recentTextures.end(),texture)!=recentTextures.end()) return;
+        recentTextures.push_back(texture);recentPixels+=texture->blob.bytes->size();
+        while(recentPixels>(96ull<<20) && !recentTextures.empty()) {
+            recentPixels-=recentTextures.front()->blob.bytes->size();recentTextures.pop_front();
+        }
+    }
     owned::ResourceStore store;
-    void idle() {recentSource.reset();storage.prune();}
+    void idle() {recentSources.clear();recentTextures.clear();recentPixels=0;storage.prune();}
     bool opened=false;
     std::map<std::string,CampFigureReference> references;
 
@@ -406,7 +415,14 @@ struct CampItemLoader {
         try {
             auto bindings=owned::gltf::select_inventory_item(request.item);
             if(bindings.empty()) return {};
-            recentSource=bindings.front().asset;
+            for(const auto& binding:bindings) {
+                const auto known=std::find(recentSources.begin(),recentSources.end(),binding.asset);
+                if(known!=recentSources.end()) recentSources.erase(known);
+                recentSources.push_back(binding.asset);
+                if(recentSources.size()>4) recentSources.pop_front();
+                for(const auto& color:binding.base_color_overrides) remember(color.second);
+                for(const auto& orm:binding.metallic_roughness_overrides) remember(orm.second);
+            }
             if(request.blueprint) for(auto& part:bindings) blueprintTextures(part);
             const auto* pose=inventoryPose(request,bindings.front().asset->resource_key);
             const CampFigureReference noFigure{};

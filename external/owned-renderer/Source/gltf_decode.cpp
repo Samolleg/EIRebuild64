@@ -141,6 +141,19 @@ skn::Dds image(const PublishPixels &publish, const ResourceBlob &source, const c
                     std::lround((1 - occlusion->scale + occlusion->scale * value) * 255));
             }
     }
+    // Map a linear channel to the identical rounded sRGB byte. Only bins
+    // crossing an 8-bit rounding boundary need the original transfer function.
+    static const auto encodedByte=[] {
+        std::array<std::uint8_t,65537> values{};
+        for(unsigned i=0;i<values.size();++i)
+            values[i]=static_cast<std::uint8_t>(std::lround(encoded(i/65536.f)*255));
+        return values;
+    }();
+    const auto colorByte=[](float v) {
+        const auto i=static_cast<unsigned>(v*65536.f);
+        if(i>=65536 || encodedByte[i]==encodedByte[i+1]) return encodedByte[i];
+        return static_cast<std::uint8_t>(std::lround(encoded(v)*255));
+    };
     std::vector<std::array<unsigned, 4>> levels;
     unsigned w = width, h = height;
     for (;;)
@@ -153,6 +166,28 @@ skn::Dds image(const PublishPixels &publish, const ResourceBlob &source, const c
         const unsigned nw = (std::max)(1u, w / 2), nh = (std::max)(1u, h / 2);
         const auto offset = pixels.size();
         pixels.resize(offset + std::size_t(nw) * nh * 4);
+        if(w==2*nw && h==2*nh) {
+            // Stock PNGs are predominantly power-of-two. Keep the source
+            // addition order and rounding, without per-sample axis divisions.
+            for(unsigned y=0;y<nh;++y) for(unsigned x=0;x<nw;++x) {
+                const auto* top=pixels.data()+previous[0]+(2*y*w+2*x)*4;
+                const auto* bottom=top+w*4;
+                auto* dst=pixels.data()+offset+(y*nw+x)*4;
+                for(unsigned c=0;c<4;++c) {
+                    if(color && c<3) {
+                        const float avg=(linearByte[top[c]]+linearByte[top[4+c]]+
+                                         linearByte[bottom[c]]+linearByte[bottom[4+c]])*.25f;
+                        dst[c]=colorByte(avg);
+                    } else {
+                        const float avg=(top[c]/255.f+top[4+c]/255.f+
+                                         bottom[c]/255.f+bottom[4+c]/255.f)*.25f;
+                        dst[c]=static_cast<std::uint8_t>(std::lround(avg*255));
+                    }
+                }
+            }
+            w=nw;h=nh;
+            continue;
+        }
         for (unsigned y = 0; y < nh; ++y)
             for (unsigned x = 0; x < nw; ++x)
                 for (unsigned c = 0; c < 4; ++c)
