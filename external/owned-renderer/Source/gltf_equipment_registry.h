@@ -151,6 +151,29 @@ inline std::vector<ItemBinding> item_bindings(const nlohmann::json& registry,
     return result;
 }
 
+// The inventory has no character, alternate hand, projectile or outfit layers.
+inline std::vector<ItemBinding> inventory_item_bindings(const nlohmann::json& registry,
+                                                        VisualEquipmentItem item) {
+    if (!registry.contains("items")) return {};
+    const auto& items=registry.at("items");
+    const auto shape=items.find(item.shape);
+    if (shape==items.end()) return {};
+    const auto& materials=shape->at("materials");
+    const auto variant=materials.find(item.material);
+    if (variant==materials.end()) return {};
+    if (item.kind==VisualEquipmentItem::Kind::weapon && !variant->contains(item.slot))
+        item.slot="hand_l";
+    if (!variant->contains(item.slot)) return {};
+    auto parts=item_bindings(registry,item);
+    // A socket-mounted helmet may additionally replace the character's skinned hair.
+    const bool mountedHelmet=item.slot=="armor_0" && std::any_of(parts.begin(),parts.end(),
+        [](const ItemBinding& part){return part.socket=="socket_head";});
+    parts.erase(std::remove_if(parts.begin(),parts.end(),[&](const ItemBinding& part){
+        return part.arrow || (mountedHelmet && part.skinned);
+    }),parts.end());
+    return parts;
+}
+
 inline std::vector<ItemBinding> outfit_bindings(const nlohmann::json& registry,
     const std::vector<VisualEquipmentItem>& equipment,const std::string& body_resource)
 {

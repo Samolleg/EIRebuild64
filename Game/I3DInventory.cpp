@@ -269,6 +269,7 @@ void CI3DItemScreen::DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle, 
 static const D3DCOLORVALUE dcvMagicColors[] = { { 1, 0, 0, 1 }, { 0, 1, 1, 1 }, { 0, 1, 0, 1 },
                                                 { 1, 1, 0, 1 }, { 1, 1, 0, 1 }, { 1, 0, 1, 1 },
                                                 { 1, 0, 1, 1 }, { 0, 0, 1, 1 } };
+#include "OwnedRender/CampItemModel.inl"
 #include "OwnedRender/SinglePreview.inl"
 void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
 {
@@ -276,25 +277,34 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
     owned::camp::Composition campPlacement;
     const bool campPlaced = E4CampAccess::ItemPlacement(this, item, campPlacement);
     owned::camp::VisualScope campVisual(campPlaced ? campPlacement : owned::camp::visual, campPlaced || owned::camp::composing);
-    if (!figuresLRU.Contains(item.pItem->GetI3DFigureName())) OwnedRender::E4::FigureMiss();
-    owned::ModelDrawReference figureLifetime;
-    CI3DFigure *pFig = figuresLRU.GetObject(item.pItem->GetI3DFigureName(), [&](CI3DFigure* figure) {
-        figureLifetime.hold(figure,
-            [](void* value) noexcept { static_cast<CI3DFigure*>(value)->AddRef(); },
-            [](void* value) noexcept { static_cast<CI3DFigure*>(value)->Release(); });
-    });
-    CTexture *pTex = nullptr;
-    std::shared_ptr<const owned::PreparedCampIcon> campIcon;
-    if (OwnedRender::E4::OwnsDraw()) {
-        campIcon = owned::camp_inventory_request_icon(item.pItem->GetI3DTextureName(),pRend->GetD3D()->GetDevice().Get());
-        if (!pFig || !campIcon) return; // Pending or rejected icons are omitted; never use OpenEI.
-    } else {
-        OwnedRender::E4::MissCost textureMiss(!texturesLRU.Contains(item.pItem->GetI3DTextureName()));
-        pTex = texturesLRU.GetObject(item.pItem->GetI3DTextureName());
-        if (!pFig || !CTextureLRUAllocator::EnsureReady(pTex)) return;
+    const CampItemModel* model = nullptr;
+    if (item.eFrom != ISP_UNKNOWN && dynamic_cast<CI3DScreenCamp*>(this) &&
+        (item.pItem->GetTypeID()==ITID_ITEM_ARMOR || item.pItem->GetTypeID()==ITID_ITEM_WEAPON)) {
+        if (!campItemModels) campItemModels=std::make_shared<CampItemModelCache>();
+        model=campItemModels->find(*item.pItem,pRend->GetD3D()->ModelPreviewFrame());
     }
-    pFig->SetTexture(pTex);
-    pFig->SetMaterial(pMat1);
+    owned::ModelDrawReference figureLifetime;
+    CI3DFigure* pFig=nullptr;
+    std::shared_ptr<const owned::PreparedCampIcon> campIcon;
+    if (!model) {
+        if (!figuresLRU.Contains(item.pItem->GetI3DFigureName())) OwnedRender::E4::FigureMiss();
+        pFig = figuresLRU.GetObject(item.pItem->GetI3DFigureName(), [&](CI3DFigure* figure) {
+            figureLifetime.hold(figure,
+                [](void* value) noexcept { static_cast<CI3DFigure*>(value)->AddRef(); },
+                [](void* value) noexcept { static_cast<CI3DFigure*>(value)->Release(); });
+        });
+        CTexture *pTex = nullptr;
+        if (OwnedRender::E4::OwnsDraw()) {
+            campIcon = owned::camp_inventory_request_icon(item.pItem->GetI3DTextureName(),pRend->GetD3D()->GetDevice().Get());
+            if (!pFig || !campIcon) return; // Pending or rejected icons are omitted; never use OpenEI.
+        } else {
+            OwnedRender::E4::MissCost textureMiss(!texturesLRU.Contains(item.pItem->GetI3DTextureName()));
+            pTex = texturesLRU.GetObject(item.pItem->GetI3DTextureName());
+            if (!pFig || !CTextureLRUAllocator::EnsureReady(pTex)) return;
+        }
+        pFig->SetTexture(pTex);
+        pFig->SetMaterial(pMat1);
+    }
     if (item.pItem->GetUserData() == 0)
     {
         CRotateItem *pInfo = dbgnew CRotateItem;
@@ -344,7 +354,7 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
     auto* info=static_cast<CRotateItem*>(item.pItem->GetUserData());
     OwnedRender::SinglePreviewRotationState rotation{info->fAngle,info->fSpeed,info->fFlashVal};
     SourceSinglePreview adapter{this,pRend,pFig,textures[2],textures[1]};
-    adapter.item=&item;adapter.state=info;adapter.campPlaced=campPlaced;adapter.icon=campIcon;
+    adapter.item=&item;adapter.model=model;adapter.state=info;adapter.campPlaced=campPlaced;adapter.icon=campIcon;
     OwnedRender::produce_single_item_preview(facts,rotation,adapter);
 }
 /////////////////////////////////////////////////////////////////////////////////////
