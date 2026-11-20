@@ -3,6 +3,8 @@
 #include "retained_static_submission.h"
 #include "ModelPreviewLighting.h"
 #include "../WideScreen.h"
+#include "CampItemFit.h"
+#include "CampPreviewCache.h"
 
 namespace {
 struct CampItemMesh {
@@ -39,21 +41,37 @@ struct CampItemPart {
     std::vector<CampItemMesh> meshes;
 };
 
+struct CampFigureReference {
+    CampItemFit::Cloud cloud;
+    owned::FigureBounds bounds;
+    bool valid=false;
+};
+
 struct CampItemModel {
     std::vector<CampItemPart> parts;
     std::array<float,3> center{};
     float radius=0;
-    CQuaternion displayRotation=QNULL;
+    CampItemFit::Placement placement;
+    std::array<float,2> cardMax{1,1},cardCenter{};
+    std::size_t bytes=sizeof(CampItemModel);
     std::string name;
     mutable bool reported=false;
 
-    CampItemModel(std::vector<owned::gltf::EquipmentAsset> bindings, bool weapon) {
+    CampItemModel(std::vector<owned::gltf::EquipmentAsset> bindings, bool weapon,const CampFigureReference& reference) {
+        std::vector<CampItemFit::Triangle> triangles;
         std::array<float,3> low{FLT_MAX,FLT_MAX,FLT_MAX},high{-FLT_MAX,-FLT_MAX,-FLT_MAX};
         for (auto& binding:bindings) {
             auto& part=parts.emplace_back();
             part.binding=std::move(binding);
             const auto& asset=*part.binding.asset;
             const auto& geometry=asset.geometry;
+            // A conservative charge counts shared textures in each variant. Visible rows stay pinned.
+            bytes+=asset.document.bytes->size()+asset.rest_vertices.capacity()*sizeof(owned::skn::Vertex)
+                 +geometry.vertices.capacity()*sizeof(owned::skn::Vertex)+geometry.indices.capacity()*sizeof(unsigned);
+            const auto textureBytes=[](const owned::skn::Dds& d) {return d.blob.bytes?d.blob.bytes->size():0;};
+            for(const auto& material:asset.textures) for(const auto& map:material) bytes+=textureBytes(map);
+            for(const auto& map:part.binding.base_color_overrides) bytes+=textureBytes(*map.second);
+            for(const auto& map:part.binding.metallic_roughness_overrides) bytes+=textureBytes(*map.second);
             const auto& lod=geometry.lods.at(0);
             for (unsigned s=lod.first_submesh;s<lod.first_submesh+lod.submesh_count;++s) {
                 const auto& sub=geometry.submeshes.at(s);
@@ -65,11 +83,16 @@ struct CampItemModel {
                         mesh->material=sub.material;
                         local.clear();
                     }
+                    CampItemFit::Triangle triangle;
                     for (unsigned k=0;k<3;++k) {
                         const auto index=geometry.indices.at(sub.first+i+k);
+                        const auto& vertex=asset.rest_vertices.at(index);
+                        if(reference.valid) {
+                            auto& point=k==0?triangle.a:k==1?triangle.b:triangle.c;
+                            std::copy_n(vertex.position,3,point.begin());
+                        }
                         const auto insert=local.emplace(index,static_cast<std::uint16_t>(mesh->components.size()));
                         if (insert.second) {
-                            const auto& vertex=asset.rest_vertices.at(index);
                             mesh->append(vertex);
                             for (unsigned j=0;j<3;++j) {
                                 low[j]=(std::min)(low[j],vertex.position[j]);
@@ -78,6 +101,7 @@ struct CampItemModel {
                         }
                         mesh->indices.push_back(insert.first->second);
                     }
+                    if(reference.valid) triangles.push_back(triangle);
                 }
             }
         }
@@ -85,13 +109,19 @@ struct CampItemModel {
             owned::NativeGeometryView geometry{};
             mesh.streams(geometry);
             mesh.fingerprint=OwnedRender::E4::ItemMeshFingerprint(geometry);
+            bytes+=(mesh.positions.capacity()+mesh.normals.capacity())*sizeof(owned::NativePackedGroup)
+                 +mesh.uv.capacity()*sizeof(owned::NativeTextureCoordinate)
+                 +mesh.components.capacity()*sizeof(owned::NativeVertexComponent)+mesh.indices.capacity()*sizeof(std::uint16_t);
         }
-        const float width=high[0]-low[0], height=high[1]-low[1], depth=high[2]-low[2];
-        // A weapon authored along its grip's depth axis would otherwise point at the camera.
-        if (weapon && depth>(std::max)(width,height))
-            displayRotation=CQuaternion(CPlot3D(0,0,1),.62f)*CQuaternion(CPlot3D(1,0,0),1.36f);
-        else
-            displayRotation=CQuaternion(CPlot3D(0,1,0),.35f)*CQuaternion(CPlot3D(1,0,0),.18f);
+        CampItemFit::Cloud source;
+        if(reference.valid && source.prepare(triangles)) {
+            placement=CampItemFit::fit(source,reference.cloud,weapon);
+            cardMax={reference.bounds.maximum[0],reference.bounds.maximum[1]};
+            cardCenter={reference.bounds.center[0],reference.bounds.center[1]};
+            if ((std::max)(cardMax[0],cardMax[1])<=1.e-6f) cardMax={1,1};
+            return;
+        }
+        // A GLB can exist before a legacy FIG is supplied. Preserve the authored upright model.
         for (unsigned j=0;j<3;++j) center[j]=(low[j]+high[j])*.5f;
         for (const auto& part:parts) for (const auto& mesh:part.meshes)
             for (unsigned i=0;i<mesh.components.size();++i) {
@@ -101,6 +131,8 @@ struct CampItemModel {
             }
         radius=std::sqrt(radius);
         if (!std::isfinite(radius) || radius<=0) throw std::runtime_error("empty inventory item bounds");
+        placement.sourceCenter=center;
+        placement.scale=1.f/radius;
     }
 
     void draw(CRenderer* renderer,const OwnedRender::SinglePreviewPlacement& p) const {
@@ -113,12 +145,17 @@ struct CampItemModel {
             const auto& r=p.rotations[i];
             rotation=rotation*CQuaternion(CPlot3D(r.axis[0],r.axis[1],r.axis[2]),r.angle);
         }
-        rotation=rotation*displayRotation;
         SHMatrix transform; Identity(transform); rotation.DecompEulerMatrix(transform);
         SHMatrix fit; Identity(fit);
-        const float scale=p.scale/radius;
-        fit._11=fit._22=fit._33=scale;
-        fit._14=-scale*center[0]; fit._24=-scale*center[1]; fit._34=-scale*center[2];
+        const auto& basis=placement.basis;
+        const auto offset=CampItemFit::rotate(basis,placement.sourceCenter);
+        const float scale=p.scale*placement.scale;
+        fit._11=scale*basis[0][0];fit._12=scale*basis[0][1];fit._13=scale*basis[0][2];
+        fit._21=scale*basis[1][0];fit._22=scale*basis[1][1];fit._23=scale*basis[1][2];
+        fit._31=scale*basis[2][0];fit._32=scale*basis[2][1];fit._33=scale*basis[2][2];
+        fit._14=p.scale*placement.targetCenter[0]-scale*offset[0];
+        fit._24=p.scale*placement.targetCenter[1]-scale*offset[1];
+        fit._34=p.scale*placement.targetCenter[2]-scale*offset[2];
         transform._14=at.x; transform._24=at.y; transform._34=at.z;
         transform=transform*fit;
         const auto combined=projection*transform;
@@ -160,44 +197,77 @@ struct CampItemModel {
         reported=true;
     }
 };
+
+struct CampItemRequest {
+    owned::VisualEquipmentItem item;
+    std::string figure;
+};
+struct CampItemLoader {
+    owned::ResourceStore store;
+    bool opened=false;
+    std::map<std::string,CampFigureReference> references;
+
+    const CampFigureReference& reference(const std::string& name) {
+        auto inserted=references.try_emplace(name);
+        auto& result=inserted.first->second;
+        if(!inserted.second || name.empty()) return result;
+        owned::ResourceFailure failure;
+        if(!opened) {
+            owned::ResourceStoreConfig mounts;
+            opened=owned::owned_resource_runtime_mounts(mounts) && store.open(mounts,failure);
+        }
+        owned::ResourceBlob blob;
+        owned::FigureCpuAsset figure;
+        if(!opened || !store.resolve(name+".fig",blob,failure) ||
+           !owned::parse_figure_asset(blob,figure,failure) || figure.bounds.empty()) return result;
+        std::vector<CampItemFit::Triangle> triangles;
+        const auto point=[&](unsigned i) -> CampItemFit::Point {
+            const auto index=figure.components.at(figure.indices.at(i)).position;
+            const auto& p=figure.positions.at(index/4);
+            return {p.x[index%4],p.y[index%4],p.z[index%4]};
+        };
+        for(unsigned i=0;i+2<figure.indices.size();i+=3)
+            triangles.push_back({point(i),point(i+1),point(i+2)});
+        result.valid=result.cloud.prepare(triangles);
+        result.bounds=figure.bounds.front();
+        return result;
+    }
+
+    std::shared_ptr<CampItemModel> operator()(const CampItemRequest& request) {
+        if(request.item.shape.empty()) return {};
+        try {
+            auto bindings=owned::gltf::select_inventory_item(request.item);
+            if(bindings.empty()) return {};
+            const auto& ref=reference(request.figure);
+            auto model=std::make_shared<CampItemModel>(std::move(bindings),
+                request.item.kind==owned::VisualEquipmentItem::Kind::weapon,ref);
+            model->name=request.item.shape+"/"+request.item.material;
+            GameJournal::Event("RENDER","camp_item_prepared","item=%s fig=%s aligned=%d bytes=%zu",
+                model->name.c_str(),request.figure.c_str(),int(ref.valid),model->bytes);
+            return model;
+        } catch(const std::exception& e) {
+            GameJournal::Event("RENDER","camp_item_glb_unavailable","item=%s reason=%s",request.item.shape.c_str(),e.what());
+            return {};
+        }
+    }
+};
 }
 
 struct CampItemModelCache {
-    struct Entry { std::unique_ptr<CampItemModel> model; std::uint64_t lastFrame=0; };
-    std::map<std::pair<DWORD,DWORD>,Entry> entries;
-    std::uint64_t frame=0;
-    const CampItemModel* find(const CItem& item, std::uint64_t now) {
-        if (frame!=now) {
-            frame=now;
-            for (auto it=entries.begin();it!=entries.end();) {
-                if (it->second.model && now-it->second.lastFrame>120) it=entries.erase(it);
-                else ++it;
-            }
-        }
-        auto result=entries.try_emplace({item.GetTypeID(),item.GetSubtypeID()});
-        auto& entry=result.first->second;
-        entry.lastFrame=frame;
-        if (result.second) {
+    CampPreviewCache<std::pair<DWORD,DWORD>,CampItemRequest,CampItemModel,CampItemLoader> cache{384ull<<20};
+    std::shared_ptr<CampItemModel> find(const CItem& item,std::uint64_t now) {
+        return cache.find({item.GetTypeID(),item.GetSubtypeID()},now,[&] {
+            CampItemRequest request;
             const auto* shape=item.GetShapeEntry();
             const auto* material=theItemDatabase.materials[item.GetMaterial()];
-            if (!shape || !material) return nullptr;
-            owned::VisualEquipmentItem selected;
-            selected.shape=shape->GetCode(); selected.material=material->GetCode();
-            if (item.GetTypeID()==ITID_ITEM_ARMOR) {
-                selected.kind=owned::VisualEquipmentItem::Kind::armor;
-                selected.slot="armor_"+std::to_string(static_cast<const CItemArmor&>(item).GetArmorType());
-            } else selected.slot="hand_r";
-            try {
-                auto bindings=owned::gltf::select_inventory_item(selected);
-                if (!bindings.empty()) {
-                    entry.model=std::make_unique<CampItemModel>(std::move(bindings),item.GetTypeID()==ITID_ITEM_WEAPON);
-                    entry.model->name=selected.shape+"/"+selected.material;
-                }
-            } catch (const std::exception& error) {
-                GameJournal::Event("RENDER","camp_item_glb_unavailable","item=%s material=%s reason=%s",
-                    selected.shape.c_str(),selected.material.c_str(),error.what());
-            }
-        }
-        return entry.model.get();
+            if (!shape || !material) return request;
+            request.figure=LPCSTR(item.GetI3DFigureName());
+            request.item.shape=shape->GetCode(); request.item.material=material->GetCode();
+            if(item.GetTypeID()==ITID_ITEM_ARMOR) {
+                request.item.kind=owned::VisualEquipmentItem::Kind::armor;
+                request.item.slot="armor_"+std::to_string(static_cast<const CItemArmor&>(item).GetArmorType());
+            } else request.item.slot="hand_r";
+            return request;
+        });
     }
 };

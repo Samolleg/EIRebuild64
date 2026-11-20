@@ -169,7 +169,8 @@ inline std::vector<ItemBinding> inventory_item_bindings(const nlohmann::json& re
     const bool mountedHelmet=item.slot=="armor_0" && std::any_of(parts.begin(),parts.end(),
         [](const ItemBinding& part){return part.socket=="socket_head";});
     parts.erase(std::remove_if(parts.begin(),parts.end(),[&](const ItemBinding& part){
-        return part.arrow || (mountedHelmet && part.skinned);
+        return part.arrow || (mountedHelmet && part.skinned) ||
+               (item.kind==VisualEquipmentItem::Kind::weapon && part.socket=="socket_back" && parts.size()>1);
     }),parts.end());
     return parts;
 }

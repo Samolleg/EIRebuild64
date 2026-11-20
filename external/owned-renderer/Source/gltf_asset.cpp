@@ -18,6 +18,8 @@ Json json(const ResourceBlob &blob) {
     return Json::parse(blob.bytes->begin(), blob.bytes->end());
 }
 } // namespace
+// Cold inventory decoding must never take the mutex of a live character preview.
+template<bool Inventory=false>
 static std::shared_ptr<const Asset> select_resource(const std::string &visual, bool hero, bool &present,
     const ItemBinding* itemBinding = nullptr, std::vector<ItemBinding>* selected = nullptr,
     const std::vector<VisualEquipmentItem>* equipment = nullptr, const VisualEquipmentItem* preview = nullptr)
@@ -149,6 +151,7 @@ struct SelectedItemTextures {
     std::map<unsigned,std::shared_ptr<const skn::Dds>> color, orm;
     std::map<unsigned,std::shared_ptr<const std::uint8_t>> material_ids;
 };
+template<bool Inventory>
 static SelectedItemTextures select_textures(
     const ItemBinding& binding, const Asset& asset)
 {
@@ -225,15 +228,16 @@ static SelectedItemTextures select_textures(
     }
     return result;
 }
+template<bool Inventory>
 static std::vector<EquipmentAsset> load_equipment(const std::vector<ItemBinding>& bindings) {
     std::vector<EquipmentAsset> result;
     bool present=false;
     for(const auto& binding:bindings) {
-        auto asset=select_resource(binding.resource,false,present,&binding);
+        auto asset=select_resource<Inventory>(binding.resource,false,present,&binding);
         require(present && asset && (binding.skinned ? asset->wearable : asset->rigid),"item not available");
         result.push_back({asset,binding.socket,binding.slot,binding.weapon,binding.arrow});
         result.back().offset=binding.offset;
-        auto textures=select_textures(binding,*asset);
+        auto textures=select_textures<Inventory>(binding,*asset);
         result.back().base_color_overrides=std::move(textures.color);
         result.back().metallic_roughness_overrides=std::move(textures.orm);
         result.back().material_identities=std::move(textures.material_ids);
@@ -244,14 +248,14 @@ std::vector<EquipmentAsset> select_equipment(const std::vector<VisualEquipmentIt
     std::vector<ItemBinding> bindings;
     bool present=false;
     select_resource(body_resource,false,present,nullptr,&bindings,&equipment);
-    return load_equipment(bindings);
+    return load_equipment<false>(bindings);
 }
 
 std::vector<EquipmentAsset> select_inventory_item(const VisualEquipmentItem& item) {
     std::vector<ItemBinding> bindings;
     bool present=false;
-    select_resource({},false,present,nullptr,&bindings,nullptr,&item);
-    return load_equipment(bindings);
+    select_resource<true>({},false,present,nullptr,&bindings,nullptr,&item);
+    return load_equipment<true>(bindings);
 }
 } // namespace owned::gltf
 
