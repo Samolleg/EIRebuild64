@@ -434,12 +434,12 @@ struct CampItemModelCache {
         const auto type=loot.GetInstructionType();
         return type==IDBINS_ARMOR || type==IDBINS_WEAPON ? &loot : nullptr;
     }
-    CampPreviewSelection<CampItemModel> find(const CItem& item,bool preload=false,bool near=false) {
+    CampPreviewSelection<CampItemModel> find(const CItem& item,bool preload=false,bool upcoming=false) {
         const auto* instruction=blueprint(item);
         if(!instruction && item.GetTypeID()!=ITID_ITEM_ARMOR && item.GetTypeID()!=ITID_ITEM_WEAPON) return {nullptr,true};
         const Key key=instruction?Key{ITID_ITEM_LOOT,instruction->GetInstructionType(),instruction->GetInstructionItemIndex()}:
                                   Key{item.GetTypeID(),item.GetSubtypeID(),0};
-        return cache.get(key,preload,near,[&] {
+        return cache.get(key,preload,upcoming,[&] {
             CampItemRequest request;
             const auto* shape=instruction?instruction->GetInstructionShape():item.GetShapeEntry();
             if(!shape) return request;

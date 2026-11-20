@@ -60,7 +60,7 @@ public:
     // All calls originate on the game's UI thread. No item or party pointer
     // leaves it. Map nodes stay put for the lifetime of this camp visit.
     template<class Describe>
-    CampPreviewSelection<Model> get(Key key,bool preload,bool near,Describe describe) {
+    CampPreviewSelection<Model> get(Key key,bool preload,bool upcoming,Describe describe) {
         std::unique_lock<std::mutex> lock(mutex);
         auto found=entries.find(key);
         if(found==entries.end()) {
@@ -71,7 +71,7 @@ public:
         }
         auto& entry=found->second;
         if(preload) {
-            if(near && entry.state==State::queued && !entry.anticipated) {
+            if(upcoming && entry.state==State::queued && !entry.anticipated) {
                 entry.anticipated=true;nearby.push_back(&entry);work.notify_one();
             }
             return {};
