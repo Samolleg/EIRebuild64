@@ -44,12 +44,23 @@ inline Affine breast_segment_skin(const SecondarySegment& segment,const Secondar
     for(unsigned r=0;r<3;++r)m[r*4+3]=start[r]-pivot[r];
     return m;
 }
+inline SecondaryPoint tissue_axis(const SecondaryPoint& start,const SecondaryPoint& end) {
+    auto axis=weapon_subtract(end,start);
+    const float length=weapon_length(axis);
+    if(length<1e-6f)return {};
+    for(auto& v:axis)v/=length;
+    return axis;
+}
 struct BreastState {
     std::shared_ptr<const Asset> asset;
     std::shared_ptr<SecondaryPhysics> physics;
     std::array<unsigned,2> targets{}, attachments{};
     std::array<unsigned,body_parts> roots{}, starts{}, ends{};
     std::array<unsigned,hair_groups*hair_points> hair_nodes{};
+    static constexpr unsigned rib_part=body_parts+hair_groups*hair_points;
+    unsigned chest_spine=0;
+    std::array<unsigned,2> ribs{},hips{},knees{};
+    double breath_origin=0;
     bool has_hair=false;
     struct Affected {unsigned node,part;};
     std::vector<Affected> affected;
@@ -89,6 +100,22 @@ struct BreastState {
             ends[first+3]=lookup("CENTER_OF_MASS_Glute"+suffix);
         }
         for(unsigned i=0;i<body_parts;++i)if(starts[i]==UINT32_MAX||ends[i]==UINT32_MAX)return false;
+        chest_spine=lookup("CC_Base_Spine02");
+        if(chest_spine==UINT32_MAX)return false;
+        for(unsigned side=0;side<2;++side){
+            const std::string suffix=side?".R":".L";
+            ribs[side]=lookup("CC_Base_Ribs"+suffix);
+            hips[side]=lookup("CC_Base_Thigh"+suffix);
+            knees[side]=lookup("CC_Base_Calf"+suffix);
+            if(ribs[side]==UINT32_MAX||hips[side]==UINT32_MAX||knees[side]==UINT32_MAX)return false;
+        }
+        // Chest-only weights shared by the body and its fitted clothes. Keep
+        // the shoulders, head, hands and equipped weapon sockets on their clip.
+        for(const char* name:{"DEF_Spine02","CC_Base_Ribs.L","CC_Base_Ribs.R",
+                "PeChoBase.L","PeChoBase.R","DEF_PechoBase.L","DEF_PechoBase.R"}){
+            const auto node=lookup(name);
+            if(node!=UINT32_MAX)affected.push_back({node,rib_part});
+        }
         const char* groups[]={"LooseL","LooseR","Braid","Armor"};
         has_hair=true;
         for(unsigned i=0;i<hair_nodes.size();++i){
@@ -121,6 +148,9 @@ struct BreastState {
         };
         if(has_hair)for(unsigned i=0;i<hair_nodes.size();++i)affected.push_back({hair_nodes[i],body_parts+i});
         for(const auto entry:affected)include_chain(entry.node);
+        include_chain(chest_spine);
+        for(const auto n:hips)include_chain(n);
+        for(const auto n:knees)include_chain(n);
         for(const auto n:ends)include_chain(n);
         for(const auto anchor:attachments)include_chain(anchor);
         for(unsigned c=0;c<animation.clips.size();++c) {
@@ -155,11 +185,12 @@ struct BreastState {
             const float dt=float(physics_clock-previousPhysicsClock);
             tissue_gain+=(targetGain-tissue_gain)*(-std::expm1(-dt/.075f));
         }
+        if(!initialized||reset)breath_origin=physics_clock;
         resting_pose=resting;
         if(ui)display_mapping=ui->to_display;
         clock=now;frozen=paused;node_base=base;placement=root;playback=pose;initialized=true;
         if(!physics&&secondary_factory)physics=secondary_factory();
-        if(!physics)return;
+
         const Affine basis={1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1};
         for(unsigned i=0;i<joints.size();++i) {
             const auto parent=parent_slots[i];
@@ -170,21 +201,55 @@ struct BreastState {
         const auto origin=[&](unsigned node){
             const auto m=jointMatrix(node);return SecondaryPoint{m[3],m[7],m[11]};
         };
+        const auto mid=[](const SecondaryPoint& a,const SecondaryPoint& b){
+            return SecondaryPoint{.5f*(a[0]+b[0]),.5f*(a[1]+b[1]),.5f*(a[2]+b[2])};
+        };
+        const auto ribMid=mid(origin(ribs[0]),origin(ribs[1]));
+        const auto rise=weapon_subtract(ribMid,origin(chest_spine));
+        const auto chestMid=mid(origin(attachments[0]),origin(attachments[1]));
+        const auto depth=weapon_subtract(mid(origin(targets[0]),origin(targets[1])),chestMid);
+        const auto across=tissue_axis(origin(ribs[1]),origin(ribs[0]));
+        // One slow inhalation for the rib cage and both attachments. Apply it
+        // before simulation so both breasts respond to the same moving support.
+        const float idleWeight=std::clamp((active_gain-tissue_gain)/(active_gain-idle_gain),0.f,1.f);
+        const float inhale=idleWeight*float(.5-.5*std::cos(std::fmod(physics_clock-breath_origin,4.4)*6.283185307179586/4.4));
+        auto chestPose=physique_identity;
+        for(unsigned r=0;r<3;++r){
+            chestPose[4*r+3]=inhale*(.13f*rise[r]+.16f*depth[r]);
+            for(unsigned c=0;c<3;++c){
+                const float expand=inhale*.055f*across[r]*across[c];
+                chestPose[4*r+c]+=expand;
+                chestPose[4*r+3]-=expand*chestMid[c];
+            }
+        }
         SecondaryTargets input;
         for(unsigned i=0;i<body_parts;++i){
             auto& segment=input.body[i];segment.pivot=origin(starts[i]);segment.end=origin(ends[i]);
             const unsigned k=i%4;
+            if(k!=3){segment.pivot=mapped_point(chestPose,segment.pivot);segment.end=mapped_point(chestPose,segment.end);}
             const auto left=origin(starts[k]),right=origin(starts[4+k]);
             for(unsigned axis=0;axis<3;++axis)segment.lateral[axis]=(left[axis]-right[axis])*(k==3?-1.f:1.f);
         }
         input.has_hair=has_hair;
         if(has_hair)for(unsigned i=0;i<hair_nodes.size();++i)input.hair[i]=origin(hair_nodes[i]);
-        const auto offsets=physics->advance(physics_clock,input,reset);
-        if(!physics->error().empty()) {
-            overrides.reset();
-            if(!reported){bridge_append_probe_event("nala_physx_unavailable",physics->error().c_str());reported=true;}
-            return;
+        SecondaryPose offsets{};
+        if(physics){
+            offsets=physics->advance(physics_clock,input,reset);
+            if(!physics->error().empty()&&!reported){
+                bridge_append_probe_event("nala_physx_unavailable",physics->error().c_str());reported=true;
+            }
         }
+        // Hip extension changes the shape of the loaded side of the seat. Use
+        // the signed difference in femur directions; common crouch/translation
+        // cancels, and reversing the stride swaps the effect between the sides.
+        const auto legDifference=weapon_subtract(tissue_axis(origin(hips[0]),origin(knees[0])),
+                                                 tissue_axis(origin(hips[1]),origin(knees[1])));
+        const auto back=tissue_axis(mid(input.body[3].pivot,input.body[7].pivot),
+                                    mid(input.body[3].end,input.body[7].end));
+        float stride=0;
+        for(unsigned r=0;r<3;++r)stride+=.5f*legDifference[r]*back[r];
+        stride=std::clamp(stride,-1.f,1.f)*(1.f-idleWeight);
+
         std::array<Affine,body_parts> bend;
         for(unsigned i=0;i<body_parts;++i){
             Node node;
@@ -196,6 +261,9 @@ struct BreastState {
         }
         for(unsigned side=0;side<2;++side){
             const unsigned first=4*side;
+            const auto& seat=input.body[first+3];
+            const float load=(side?-stride:stride)*.45f;
+            for(unsigned r=0;r<3;++r)bend[first+3][r*4+3]+=load*(seat.end[r]-seat.pivot[r]);
             auto start=input.body[first].pivot;
             for(unsigned k=0;k<3;++k){
                 unsigned i=first+k;
@@ -206,7 +274,7 @@ struct BreastState {
                 start=mapped_point(bend[i],input.body[i].end);
             }
         }
-        if(RuntimeDiagnostics::Enabled() && physics->ready() && !paused) {
+        if(RuntimeDiagnostics::Enabled() && physics && physics->ready() && !paused) {
             // Final displaced tip minus its authored pose, in world metres.
             const auto& p=input.body[2].end;const auto& m=bend[2];
             const float dz=m[8]*p[0]+m[9]*p[1]+m[10]*p[2]+m[11]-p[2];
@@ -228,8 +296,10 @@ struct BreastState {
         result->reserve(affected.size());
         for(const auto entry:affected) {
             auto matrix=jointMatrix(entry.node);
+            if(entry.part==rib_part || (entry.part<body_parts && entry.part%4!=3))
+                matrix=multiply(chestPose,matrix);
             if(entry.part<body_parts)matrix=multiply(bend[entry.part],matrix);
-            else for(unsigned r=0;r<3;++r)matrix[r*4+3]+=offsets.hair[entry.part-body_parts][r];
+            else if(entry.part!=rib_part)for(unsigned r=0;r<3;++r)matrix[r*4+3]+=offsets.hair[entry.part-body_parts][r];
             if(ui)matrix=multiply(ui->to_display,matrix);
             NativeWorldGeometry::Pose::Override out{};out.node=base+entry.node;
             for(unsigned r=0;r<3;++r) {
@@ -238,7 +308,7 @@ struct BreastState {
             result->push_back(out);
         }
         overrides=std::move(result);
-        if(!reported&&physics->ready()){bridge_append_probe_event("nala_physx_ready",has_hair?"backend=PhysX GPU D6=4 fixed_hz=120 hair_guides=4":"backend=PhysX GPU D6=4 fixed_hz=120 hair_guides=0");reported=true;}
+        if(!reported&&physics&&physics->ready()){bridge_append_probe_event("nala_physx_ready",has_hair?"backend=PhysX GPU D6=4 fixed_hz=120 hair_guides=4":"backend=PhysX GPU D6=4 fixed_hz=120 hair_guides=0");reported=true;}
     }
 };
 }

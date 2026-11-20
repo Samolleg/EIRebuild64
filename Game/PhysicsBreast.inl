@@ -11,7 +11,7 @@ struct TissueResponse {
     PxVec3 travelFraction;  // ellipsoid radii relative to the local lever length
 };
 const TissueResponse breastResponse{{5.f,4.f,6.f},.95f,{.065f,.095f,.045f}};
-const TissueResponse gluteResponse{{7.f,6.f,8.f},1.f,{.035f,.055f,.025f}};
+const TissueResponse gluteResponse{{5.f,4.5f,5.f},.90f,{.11f,.14f,.12f}};
 constexpr unsigned tissueCount=4;
 struct TissueFrame {PxTransform rest;float length;};
 TissueFrame tissueFrame(const SecondaryTargets& targets,unsigned tissue){
@@ -97,15 +97,18 @@ class CharacterSolver final: public SecondaryPhysics {
         // anchor frame. Do not teleport the solver body or feed the projection back.
         auto local=rest.transformInv(bodies[i]->getGlobalPose().p);
         if(!local.isFinite())throw std::runtime_error("Nonfinite Nala tissue displacement");
+        // Lateral and vertical inertia should read in the silhouette during a step.
+        if(!glute){local.x*=1.30f;local.y*=1.15f;local.z*=.80f;}
         const auto radii=(glute?gluteResponse:breastResponse).travelFraction*length;
         const PxVec3 normalized(local.x/radii.x,local.y/radii.y,local.z/radii.z);
         const float norm=normalized.magnitude();
         if(norm>1.f)local/=norm;
         if(glute){
-            // The pelvis is the pivot. Preserve volume and the distance to the
-            // marker: only the tangential component produces a small rotation.
+            // Split tangential lag between translation of the weighted surface
+            // and rotation around its attachment. The radial component translates.
+            result.body[first+3].shift=point3(rest.q.rotate(PxVec3(.70f*local.x,.70f*local.y,local.z)));
             const auto axis=rest.q.rotate(PxVec3(0,0,1));
-            const auto direction=rest.q.rotate((PxVec3(0,0,length)+local).getNormalized());
+            const auto direction=rest.q.rotate(PxVec3(.40f*local.x,.40f*local.y,length).getNormalized());
             // atan2/cross keeps small rotations below 1 degree continuous.
             auto cross=axis.cross(direction);
             const float sine=cross.normalize();
