@@ -163,12 +163,14 @@ class CPersonage;
 class CParty;
 /////////////////////////////////////////////////////////////////////////////////////
 // all inventory screens ( camp, constructors ) are derived from this screen
+struct CampItemModelCache;
 class CI3DItemScreen : public CI3DScreen
 {
     friend struct E4CampAccess;
 protected:
     CI3DObjectItemInfo *pItemInfo;
     CItem *pMouseItem;
+    std::shared_ptr<CampItemModelCache> campItemModels;
     CI3DObjectCampBG *pCampBG;
 
     CLRUStorage<CI3DFigure, CI3DFigureLRUAllocator> figuresLRU;

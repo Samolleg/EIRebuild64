@@ -240,6 +240,7 @@ inline std::shared_ptr<const WeaponArmPlan> weapon_arm_plan(const Asset& body,co
     body.support_arm_plans.emplace(key,plan);
     return plan;
 }
+std::vector<EquipmentAsset> select_inventory_item(const VisualEquipmentItem& item);
 std::vector<EquipmentAsset> select_equipment(const std::vector<VisualEquipmentItem>& equipment, const std::string& body_resource);
 // CPU decoding/acceptance shared by the game and ModelCheck; no device required.
 using PublishPixels = std::function<ResourceBlob(const std::string &, const void *, std::uint32_t)>;

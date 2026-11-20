@@ -11,8 +11,11 @@ struct SourceSinglePreview {
     bool campPlaced = false;
     std::shared_ptr<const owned::PreparedCampIcon> icon;
     CI3DFigure* runeFigure = nullptr;
+    const CampItemModel* model = nullptr;
+    OwnedRender::SinglePreviewPlacement placement;
     ~SourceSinglePreview() { end_runes(); }
     void place(const OwnedRender::SinglePreviewPlacement& p) {
+        if (model) { placement=p; return; }
         figure->SetDefaultSpecular(p.specular);
         figure->SetRelativeToScreen(p.x,p.y,p.z);
         figure->SetScale(p.scale);
@@ -44,6 +47,7 @@ struct SourceSinglePreview {
         p->Draw(renderer);
     }
     void draw_item() {
+        if (model) { model->draw(renderer,placement); return; }
         const bool preview=item->eFrom==ISP_UNKNOWN&&campPlaced;
         const auto rgb=preview?E4CampAccess::PreviewRGB(screen,item->pItem):0u;
         OwnedRender::E4::Preview scope(rgb,preview);

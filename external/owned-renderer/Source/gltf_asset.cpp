@@ -20,7 +20,7 @@ Json json(const ResourceBlob &blob) {
 } // namespace
 static std::shared_ptr<const Asset> select_resource(const std::string &visual, bool hero, bool &present,
     const ItemBinding* itemBinding = nullptr, std::vector<ItemBinding>* selected = nullptr,
-    const std::vector<VisualEquipmentItem>* equipment = nullptr)
+    const std::vector<VisualEquipmentItem>* equipment = nullptr, const VisualEquipmentItem* preview = nullptr)
 {
     static std::mutex mutex;
     static ResourceStore store;
@@ -67,7 +67,10 @@ static std::shared_ptr<const Asset> select_resource(const std::string &visual, b
     }
     if (entries.is_null())
         return {};
-    if (selected) { *selected=outfit_bindings(entries,*equipment,visual); return {}; }
+    if (selected) {
+        *selected = preview ? inventory_item_bindings(entries,*preview) : outfit_bindings(entries,*equipment,visual);
+        return {};
+    }
     const auto &characters = entries.at("characters");
     require(characters.is_object(), "registry characters");
     std::string key = visual;
@@ -222,10 +225,9 @@ static SelectedItemTextures select_textures(
     }
     return result;
 }
-std::vector<EquipmentAsset> select_equipment(const std::vector<VisualEquipmentItem>& equipment,const std::string& body_resource) {
+static std::vector<EquipmentAsset> load_equipment(const std::vector<ItemBinding>& bindings) {
     std::vector<EquipmentAsset> result;
-    std::vector<ItemBinding> bindings;bool present=false;
-    select_resource(body_resource,false,present,nullptr,&bindings,&equipment);
+    bool present=false;
     for(const auto& binding:bindings) {
         auto asset=select_resource(binding.resource,false,present,&binding);
         require(present && asset && (binding.skinned ? asset->wearable : asset->rigid),"item not available");
@@ -237,6 +239,19 @@ std::vector<EquipmentAsset> select_equipment(const std::vector<VisualEquipmentIt
         result.back().material_identities=std::move(textures.material_ids);
     }
     return result;
+}
+std::vector<EquipmentAsset> select_equipment(const std::vector<VisualEquipmentItem>& equipment,const std::string& body_resource) {
+    std::vector<ItemBinding> bindings;
+    bool present=false;
+    select_resource(body_resource,false,present,nullptr,&bindings,&equipment);
+    return load_equipment(bindings);
+}
+
+std::vector<EquipmentAsset> select_inventory_item(const VisualEquipmentItem& item) {
+    std::vector<ItemBinding> bindings;
+    bool present=false;
+    select_resource({},false,present,nullptr,&bindings,nullptr,&item);
+    return load_equipment(bindings);
 }
 } // namespace owned::gltf
 

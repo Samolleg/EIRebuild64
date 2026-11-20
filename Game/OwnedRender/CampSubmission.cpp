@@ -3,6 +3,14 @@
 #include "../dx11/ConstantBuffer.h"
 #include "../GameJournal.h"
 #include "E1SurfaceBridge.h"
+#include "E4Camp.h"
+
+std::uint64_t OwnedRender::E4::ItemMeshFingerprint(const owned::NativeGeometryView& geometry)
+{
+    const auto key=owned::native_mesh_content_key(geometry);
+    if (!key.valid) throw std::runtime_error("invalid inventory model geometry");
+    return key.fingerprint;
+}
 
 void CDX11::RestoreHostBindings()
 {
