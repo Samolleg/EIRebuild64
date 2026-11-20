@@ -75,6 +75,7 @@ struct AuthoredClothingPiece {
     float height=0, yawDegrees=0, rollDegrees=0, pitchDegrees=0;
 };
 struct AuthoredClothingPose {
+    float sleeveRoll=0;
     std::vector<AuthoredClothingPiece> pieces;
     std::array<float,2> cardMax{},cardCenter{};
 };

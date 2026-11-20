@@ -6,6 +6,7 @@
 #include "small_json.h"
 #include "CampClothingFit.h"
 #include "CampPreviewCache.h"
+#include "CampSleevePose.h"
 
 namespace {
 struct CampItemMesh {
@@ -69,6 +70,8 @@ struct CampItemModel {
             part.binding=std::move(binding);
             const auto& asset=*part.binding.asset;
             const auto& geometry=asset.geometry;
+            const auto sleeved=authored?camp_sleeves(asset,authored->sleeveRoll):std::vector<owned::skn::Vertex>{};
+            const auto& vertices=sleeved.empty()?asset.rest_vertices:sleeved;
             if(blueprint) {
                 part.blueprintMaterials=geometry.materials;
                 for(auto& mat:part.blueprintMaterials) {
@@ -98,7 +101,7 @@ struct CampItemModel {
                     CampItemFit::Triangle triangle;
                     for (unsigned k=0;k<3;++k) {
                         const auto index=geometry.indices.at(sub.first+i+k);
-                        const auto& vertex=asset.rest_vertices.at(index);
+                        const auto& vertex=vertices.at(index);
                         if(reference.valid || authored) {
                             auto& point=k==0?triangle.a:k==1?triangle.b:triangle.c;
                             std::copy_n(vertex.position,3,point.begin());
@@ -262,6 +265,8 @@ struct CampItemLoader {
                     };
                     for(const auto& entry:poses.members) {
                         CampItemFit::AuthoredClothingPose pose;
+                        const auto sleeves=entry.second.members.find("sleeveRoll");
+                        if(sleeves!=entry.second.members.end()) pose.sleeveRoll=float(sleeves->second.num());
                         loadVector(pose.cardMax,entry.second.field("cardMax"));
                         loadVector(pose.cardCenter,entry.second.field("cardCenter"));
                         const auto& parts=entry.second.field("pieces").list();
