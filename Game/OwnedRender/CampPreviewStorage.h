@@ -11,7 +11,7 @@
 // reclaimed by Windows without rerunning the GLB decoder on the next scroll.
 class CampPreviewStorage {
     std::size_t resident=0;
-    static constexpr std::size_t residentBudget=128ull<<20;
+    static constexpr std::size_t residentBudget=32ull<<20;
 public:
     struct Span {const void* data; std::size_t bytes;};
     using View=std::shared_ptr<const std::uint8_t>;

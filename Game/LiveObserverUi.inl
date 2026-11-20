@@ -174,6 +174,14 @@ bool UiInput(Job& job,Clock::time_point deadline) {
         syntheticCursorActive=true;WriteUiCursor(job.uiX,job.uiY);LiveUiAccess::Cursor(CPoint(job.uiX,job.uiY));
         E4CampAccess::BeginInput();theInterface.OnMouseMove(0,CPoint(job.uiX,job.uiY));
         job.response["point"]={job.uiX,job.uiY};
+        if(method=="camp_wheel") {
+            const auto& steps=params.at("steps");
+            if(!steps.is_number_integer() || steps==0 || steps < -16 || steps > 16)
+                throw std::runtime_error("camp_wheel steps must be between -16 and 16 and nonzero");
+            if(!owned::camp_inventory_wheel(POINT{job.uiX,job.uiY},static_cast<short>(-WHEEL_DELTA*steps.get<int>()),0))
+                throw std::runtime_error("no scrollable camp list at native point");
+            job.response["status"]="done";return true;
+        }
         if(method=="ui_hover"){job.response["status"]="done";return true;}
         job.phase=11;return false;
     }

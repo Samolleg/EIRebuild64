@@ -33,6 +33,7 @@
 #include "GameMain.h"
 #include "OwnedRender/E2Host.h"
 #include "OwnedRender/E3Input.h"
+#include "../external/owned-renderer/Source/camp_inventory.h"
 #include "OwnedRender/E1World.h"
 #include "OwnedRender/E1Scene.h"
 #include "Particle.h"
@@ -217,7 +218,7 @@ bool syntheticCursorActive=false;
 POINT syntheticCursor{};
 bool saveIsolated=false; // game thread only; deliberately survives load/new game
 bool IsCommand(const std::string& method) {
-    return method=="save_delete"||method=="screenshot_clear"||method=="arena_stage"||method=="ui_click"||method=="ui_hover"||method=="ui_key"||method=="cutscene_skip"||method=="time_scale"||
+    return method=="save_delete"||method=="screenshot_clear"||method=="arena_stage"||method=="ui_click"||method=="ui_hover"||method=="camp_wheel"||method=="ui_key"||method=="cutscene_skip"||method=="time_scale"||
            method=="load_save"||method=="new_game"||method=="enter_zone"||method=="save_game"||
            method=="unit_move"||method=="unit_attack"||method=="unit_cast"||method=="unit_use_item"||method=="unit_equip"||method=="unit_order"||method=="unit_teleport"||method=="pause"||method=="quit"||
            method=="set_global"||method=="object_transform"||method=="god_mode"||method=="script_run"||method=="camera"||method=="global_map";
@@ -1356,7 +1357,7 @@ bool Command(Job& job,Clock::time_point deadline) {
         job.response={{"ok",true},{"status","accepted"},{"truncated",false}};
         return true;
     }
-    if(method=="ui_click"||method=="ui_hover"||method=="ui_key"||method=="cutscene_skip")return UiInput(job,deadline);
+    if(method=="ui_click"||method=="ui_hover"||method=="camp_wheel"||method=="ui_key"||method=="cutscene_skip")return UiInput(job,deadline);
     if(method=="time_scale")return TimeScale(job);
     if(method=="save_delete"||method=="screenshot_clear")return PrepareFileJob(job);
     if(method=="arena_stage")return ArenaStage(job,deadline);

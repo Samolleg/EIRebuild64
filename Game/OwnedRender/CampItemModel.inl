@@ -271,6 +271,9 @@ struct CampItemRequest {
     bool blueprint=false;
 };
 struct CampItemLoader {
+    static std::size_t affinity(const CampItemRequest& request) {
+        return std::hash<std::string>{}(request.figure);
+    }
     CampPreviewStorage storage;
     // Neighboring variants often share the same GLB. Keep a small import window
     // of sources while preparing stock; the published models own only draw data.
@@ -280,7 +283,7 @@ struct CampItemLoader {
     void remember(const std::shared_ptr<const owned::skn::Dds>& texture) {
         if(std::find(recentTextures.begin(),recentTextures.end(),texture)!=recentTextures.end()) return;
         recentTextures.push_back(texture);recentPixels+=texture->blob.bytes->size();
-        while(recentPixels>(96ull<<20) && !recentTextures.empty()) {
+        while(recentPixels>(48ull<<20) && !recentTextures.empty()) {
             recentPixels-=recentTextures.front()->blob.bytes->size();recentTextures.pop_front();
         }
     }

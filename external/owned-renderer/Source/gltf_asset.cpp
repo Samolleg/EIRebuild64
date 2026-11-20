@@ -18,20 +18,33 @@ Json json(const ResourceBlob &blob) {
     return Json::parse(blob.bytes->begin(), blob.bytes->end());
 }
 } // namespace
+// Inventory lanes have independent resource stores and import tables. World
+// previews retain their process cache and its original lock.
+template<bool Inventory,class State>
+static State& lookupState() {
+    if constexpr(Inventory) {static thread_local State local;return local;}
+    else {static State shared;return shared;}
+}
 // Cold inventory decoding must never take the mutex of a live character preview.
 template<bool Inventory=false>
 static std::shared_ptr<const Asset> select_resource(const std::string &visual, bool hero, bool &present,
     const ItemBinding* itemBinding = nullptr, std::vector<ItemBinding>* selected = nullptr,
     const std::vector<VisualEquipmentItem>* equipment = nullptr, const VisualEquipmentItem* preview = nullptr)
 {
-    static std::mutex mutex;
-    static ResourceStore store;
-    static std::uint64_t generation = 0;
-    static std::map<std::string, std::weak_ptr<const Asset>> cache;
-    static Json entries;
-    static bool registryLoaded = false;
-    static std::string registryIdentity;
-    static std::map<std::string, std::string> failures;
+    struct State {
+        std::mutex mutex;
+        ResourceStore store;
+        std::uint64_t generation=0;
+        std::map<std::string,std::weak_ptr<const Asset>> cache;
+        Json entries;
+        bool registryLoaded=false;
+        std::string registryIdentity;
+        std::map<std::string,std::string> failures;
+    };
+    auto& state=lookupState<Inventory,State>();
+    auto& mutex=state.mutex;auto& store=state.store;auto& generation=state.generation;
+    auto& cache=state.cache;auto& entries=state.entries;auto& registryLoaded=state.registryLoaded;
+    auto& registryIdentity=state.registryIdentity;auto& failures=state.failures;
     std::lock_guard<std::mutex> lock(mutex);
     present = false;
     ResourceStoreConfig mounts;
@@ -159,13 +172,18 @@ static SelectedItemTextures select_textures(
     if(binding.textures.empty())return result;
     // Decode only selected materials, on appearance changes. Geometry remains
     // in the normal GLB cache and is never copied for a texture variant.
-    static std::mutex mutex;
-    static ResourceStore store;
-    static std::uint64_t generation=0;
-    static std::map<std::string,std::weak_ptr<const skn::Dds>> cache;
     using MaterialKey=std::pair<std::uintptr_t,std::uintptr_t>;
-    static std::map<MaterialKey,std::weak_ptr<const std::uint8_t>> material_cache;
-    static unsigned insertions=0;
+    struct State {
+        std::mutex mutex;
+        ResourceStore store;
+        std::uint64_t generation=0;
+        std::map<std::string,std::weak_ptr<const skn::Dds>> cache;
+        std::map<MaterialKey,std::weak_ptr<const std::uint8_t>> material_cache;
+        unsigned insertions=0;
+    };
+    auto& state=lookupState<Inventory,State>();
+    auto& mutex=state.mutex;auto& store=state.store;auto& generation=state.generation;
+    auto& cache=state.cache;auto& material_cache=state.material_cache;auto& insertions=state.insertions;
     std::lock_guard<std::mutex> lock(mutex);
     ResourceStoreConfig mounts;std::uint64_t current=0;ResourceFailure failure;
     require(owned_resource_runtime_mounts(mounts,&current),"texture mounts unavailable");
