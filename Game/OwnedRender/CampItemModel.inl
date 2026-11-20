@@ -3,6 +3,7 @@
 #include "retained_static_submission.h"
 #include "ModelPreviewLighting.h"
 #include "../WideScreen.h"
+#include "small_json.h"
 #include "CampClothingFit.h"
 #include "CampPreviewCache.h"
 
@@ -60,7 +61,7 @@ struct CampItemModel {
     mutable bool reported=false;
     bool clothing=false;
 
-    CampItemModel(std::vector<owned::gltf::EquipmentAsset> bindings, const std::string& slot,bool blueprint,const CampFigureReference& reference):clothing(slot.rfind("armor_",0)==0) {
+    CampItemModel(std::vector<owned::gltf::EquipmentAsset> bindings, const std::string& slot,bool blueprint,const CampFigureReference& reference,const CampItemFit::AuthoredClothingPose* authored):clothing(slot.rfind("armor_",0)==0) {
         std::vector<CampItemFit::Triangle> triangles;
         std::array<float,3> low{FLT_MAX,FLT_MAX,FLT_MAX},high{-FLT_MAX,-FLT_MAX,-FLT_MAX};
         for (auto& binding:bindings) {
@@ -98,7 +99,7 @@ struct CampItemModel {
                     for (unsigned k=0;k<3;++k) {
                         const auto index=geometry.indices.at(sub.first+i+k);
                         const auto& vertex=asset.rest_vertices.at(index);
-                        if(reference.valid) {
+                        if(reference.valid || authored) {
                             auto& point=k==0?triangle.a:k==1?triangle.b:triangle.c;
                             std::copy_n(vertex.position,3,point.begin());
                         }
@@ -112,12 +113,12 @@ struct CampItemModel {
                         }
                         mesh->indices.push_back(insert.first->second);
                     }
-                    if(reference.valid) triangles.push_back(triangle);
+                    if(reference.valid || authored) triangles.push_back(triangle);
                 }
             }
         }
-        if(clothing && reference.valid) {
-            const CampItemFit::ClothingPose pose(triangles,reference.clothing,slot=="armor_6",slot=="armor_5");
+        if(clothing && (reference.valid || authored)) {
+            const CampItemFit::ClothingPose pose(triangles,reference.clothing,slot=="armor_6",slot=="armor_5",authored);
             for(auto& part:parts) for(auto& mesh:part.meshes)
                 for(unsigned i=0;i<mesh.components.size();++i) {
                     const unsigned lane=i%4;
@@ -135,6 +136,10 @@ struct CampItemModel {
             bytes+=(mesh.positions.capacity()+mesh.normals.capacity())*sizeof(owned::NativePackedGroup)
                  +mesh.uv.capacity()*sizeof(owned::NativeTextureCoordinate)
                  +mesh.components.capacity()*sizeof(owned::NativeVertexComponent)+mesh.indices.capacity()*sizeof(std::uint16_t);
+        }
+        if(authored) {
+            cardMax=authored->cardMax;cardCenter=authored->cardCenter;
+            return;
         }
         CampItemFit::Cloud source;
         if(reference.valid && (clothing || source.prepare(triangles))) {
@@ -187,7 +192,7 @@ struct CampItemModel {
         OwnedRender::ModelPreviewLighting light;
         if (!OwnedRender::produce_model_preview_lighting(clip,{at.x,at.y,at.z},light,owned::PreviewStudioStyle::soft_figure)) return;
         if(clothing) {
-            light.world.ambient={.40f,.40f,.40f,1.f};
+            light.world.ambient={.55f,.55f,.55f,1.f};
             light.world.sunlight_diffuse={1.f,.98f,.96f,1.f};
         } else light.world.ambient={.78f,.78f,.78f,1.f};
         for (const auto& part:parts) for (const auto& mesh:part.meshes) {
@@ -238,6 +243,47 @@ struct CampItemLoader {
     owned::ResourceStore store;
     bool opened=false;
     std::map<std::string,CampFigureReference> references;
+
+    bool posesRead=false;
+    std::map<std::string,CampItemFit::AuthoredClothingPose> clothingPoses;
+
+    const CampItemFit::AuthoredClothingPose* clothingPose(const std::string& resource) {
+        if(!posesRead && open()) {
+            posesRead=true;
+            owned::ResourceBlob blob; owned::ResourceFailure why;
+            if(store.resolve("models/inventory-poses.v1.json",blob,why)) {
+                try {
+                    const std::string text(blob.bytes->begin(),blob.bytes->end());
+                    const auto poses=owned::small_json::Reader(text).root();
+                    const auto loadVector=[](auto& target,const owned::small_json::Value& value) {
+                        const auto& values=value.list();
+                        owned::small_json::require(values.size()==target.size(),"invalid inventory pose vector");
+                        for(unsigned i=0;i<target.size();++i) target[i]=float(values[i].num());
+                    };
+                    for(const auto& entry:poses.members) {
+                        CampItemFit::AuthoredClothingPose pose;
+                        loadVector(pose.cardMax,entry.second.field("cardMax"));
+                        loadVector(pose.cardCenter,entry.second.field("cardCenter"));
+                        const auto& parts=entry.second.field("pieces").list();
+                        owned::small_json::require(!parts.empty() && parts.size()<=2,"invalid inventory pose pieces");
+                        for(const auto& part:parts) {
+                            auto& spec=pose.pieces.emplace_back();
+                            loadVector(spec.center,part.field("center"));
+                            spec.height=float(part.field("height").num());
+                            spec.yawDegrees=float(part.field("yaw").num());
+                            spec.rollDegrees=float(part.field("roll").num());
+                            owned::small_json::require(spec.height>0 && spec.height<100,"invalid inventory pose height");
+                        }
+                        clothingPoses.emplace(entry.first,std::move(pose));
+                    }
+                } catch(const std::exception& e) {
+                    GameJournal::Event("RENDER","camp_inventory_poses_invalid","reason=%s",e.what());
+                }
+            }
+        }
+        const auto it=clothingPoses.find(resource);
+        return it==clothingPoses.end()?nullptr:&it->second;
+    }
 
     bool open() {
         if(!opened) {
@@ -317,12 +363,15 @@ struct CampItemLoader {
             auto bindings=owned::gltf::select_inventory_item(request.item);
             if(bindings.empty()) return {};
             if(request.blueprint) for(auto& part:bindings) blueprintTextures(part);
-            const auto& ref=reference(request.figure,request.item.slot);
+            const auto* pose=request.item.kind==owned::VisualEquipmentItem::Kind::armor
+                ? clothingPose(bindings.front().asset->resource_key) : nullptr;
+            const CampFigureReference noFigure{};
+            const auto& ref=pose?noFigure:reference(request.figure,request.item.slot);
             auto model=std::make_shared<CampItemModel>(std::move(bindings),
-                request.item.slot,request.blueprint,ref);
+                request.item.slot,request.blueprint,ref,pose);
             model->name=request.item.shape+"/"+(request.blueprint?"blueprint":request.item.material);
-            GameJournal::Event("RENDER","camp_item_prepared","item=%s fig=%s aligned=%d bytes=%zu",
-                model->name.c_str(),request.figure.c_str(),int(ref.valid),model->bytes);
+            GameJournal::Event("RENDER","camp_item_prepared","item=%s fig=%s aligned=%d authored_pose=%d bytes=%zu",
+                model->name.c_str(),request.figure.c_str(),int(ref.valid || pose),int(pose!=nullptr),model->bytes);
             return model;
         } catch(const std::exception& e) {
             GameJournal::Event("RENDER","camp_item_glb_unavailable","item=%s reason=%s",request.item.shape.c_str(),e.what());

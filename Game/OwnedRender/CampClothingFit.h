@@ -64,12 +64,46 @@ struct ClothingLayout {
         return layout;
     }
 };
+// Optional asset presentation. Centers and heights are in inventory units;
+// angles are degrees about the standing model's vertical and forward axes.
+struct AuthoredClothingPiece {
+    Point center{};
+    float height=0, yawDegrees=0, rollDegrees=0;
+};
+struct AuthoredClothingPose {
+    std::vector<AuthoredClothingPiece> pieces;
+    std::array<float,2> cardMax{},cardCenter{};
+};
 struct ClothingPose {
     Placement piece[2];
     float split=0;
     bool paired=false;
 
-    ClothingPose(const std::vector<Triangle>& triangles,const ClothingLayout& ref,bool gloves,bool boots) {
+    ClothingPose(const std::vector<Triangle>& triangles,const ClothingLayout& ref,bool gloves,bool boots,
+                 const AuthoredClothingPose* authored=nullptr) {
+        if(authored) {
+            const bool pair=authored->pieces.size()==2;
+            const auto layout=ClothingLayout::measure(triangles,pair,false);
+            if(pair && !layout.paired) throw std::runtime_error("inventory pose requires two separate pieces");
+            paired=pair; split=layout.split;
+            constexpr float radians=3.14159265359f/180.f;
+            Box bounds[2];
+            for(unsigned i=0;i<authored->pieces.size();++i) {
+                const auto& spec=authored->pieces[i];
+                piece[i].basis=compose(yaw(spec.yawDegrees*radians),roll(spec.rollDegrees*radians));
+            }
+            for(const auto& tri:triangles) for(const auto& p:{tri.a,tri.b,tri.c}) {
+                const auto i=side(p);bounds[i].add(rotate(piece[i].basis,p));
+            }
+            for(unsigned i=0;i<authored->pieces.size();++i) {
+                if(!bounds[i].valid() || bounds[i].size()[1]<=1.e-6f)
+                    throw std::runtime_error("inventory pose has no height");
+                piece[i].sourceCenter=bounds[i].middle();
+                piece[i].targetCenter=authored->pieces[i].center;
+                piece[i].scale=authored->pieces[i].height/bounds[i].size()[1];
+            }
+            return;
+        }
         auto source=ClothingLayout::measure(triangles,ref.paired,gloves);
         paired=source.paired && ref.paired; split=source.split;
         // When a mod supplies a one-piece variant of a paired reference, fit
