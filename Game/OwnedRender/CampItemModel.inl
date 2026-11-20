@@ -272,6 +272,8 @@ struct CampItemLoader {
                             spec.height=float(part.field("height").num());
                             spec.yawDegrees=float(part.field("yaw").num());
                             spec.rollDegrees=float(part.field("roll").num());
+                            const auto pitch=part.members.find("pitch");
+                            if(pitch!=part.members.end()) spec.pitchDegrees=float(pitch->second.num());
                             owned::small_json::require(spec.height>0 && spec.height<100,"invalid inventory pose height");
                         }
                         clothingPoses.emplace(entry.first,std::move(pose));

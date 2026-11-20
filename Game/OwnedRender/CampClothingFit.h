@@ -18,6 +18,10 @@ inline Basis yaw(float angle) {
     const float c=std::cos(angle),s=std::sin(angle);
     return {Point{c,0,s},Point{0,1,0},Point{-s,0,c}};
 }
+inline Basis pitch(float angle) {
+    const float c=std::cos(angle),s=std::sin(angle);
+    return {Point{1,0,0},Point{0,c,-s},Point{0,s,c}};
+}
 inline Basis roll(float angle) {
     const float c=std::cos(angle),s=std::sin(angle);
     return {Point{c,-s,0},Point{s,c,0},Point{0,0,1}};
@@ -65,10 +69,10 @@ struct ClothingLayout {
     }
 };
 // Optional asset presentation. Centers and heights are in inventory units;
-// angles are degrees about the standing model's vertical and forward axes.
+// rotations are in degrees, applied in roll, yaw, pitch order.
 struct AuthoredClothingPiece {
     Point center{};
-    float height=0, yawDegrees=0, rollDegrees=0;
+    float height=0, yawDegrees=0, rollDegrees=0, pitchDegrees=0;
 };
 struct AuthoredClothingPose {
     std::vector<AuthoredClothingPiece> pieces;
@@ -90,7 +94,8 @@ struct ClothingPose {
             Box bounds[2];
             for(unsigned i=0;i<authored->pieces.size();++i) {
                 const auto& spec=authored->pieces[i];
-                piece[i].basis=compose(yaw(spec.yawDegrees*radians),roll(spec.rollDegrees*radians));
+                const auto facing=compose(yaw(spec.yawDegrees*radians),roll(spec.rollDegrees*radians));
+                piece[i].basis=compose(pitch(spec.pitchDegrees*radians),facing);
             }
             for(const auto& tri:triangles) for(const auto& p:{tri.a,tri.b,tri.c}) {
                 const auto i=side(p);bounds[i].add(rotate(piece[i].basis,p));
