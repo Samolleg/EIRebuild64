@@ -271,21 +271,22 @@ static const D3DCOLORVALUE dcvMagicColors[] = { { 1, 0, 0, 1 }, { 0, 1, 1, 1 }, 
                                                 { 1, 0, 1, 1 }, { 0, 0, 1, 1 } };
 #include "OwnedRender/CampItemModel.inl"
 #include "OwnedRender/SinglePreview.inl"
-void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
+void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item, std::vector<std::string>* visibleLegacyIcons)
 {
     if (!item.pItem) return;
     owned::camp::Composition campPlacement;
     const bool campPlaced = E4CampAccess::ItemPlacement(this, item, campPlacement);
     owned::camp::VisualScope campVisual(campPlaced ? campPlacement : owned::camp::visual, campPlaced || owned::camp::composing);
-    std::shared_ptr<CampItemModel> model;
+    CampPreviewSelection<CampItemModel> selection{nullptr,true};
     if (dynamic_cast<CI3DScreenCamp*>(this)) {
         if (!campItemModels) campItemModels=std::make_shared<CampItemModelCache>();
-        model=campItemModels->find(*item.pItem,pRend->GetD3D()->ModelPreviewFrame());
+        selection=campItemModels->find(*item.pItem,pRend->GetD3D()->ModelPreviewFrame());
     }
     owned::ModelDrawReference figureLifetime;
     CI3DFigure* pFig=nullptr;
     std::shared_ptr<const owned::PreparedCampIcon> campIcon;
-    if (!model) {
+    const auto& model=selection.model;
+    if (selection.useFigure) {
         if (!figuresLRU.Contains(item.pItem->GetI3DFigureName())) OwnedRender::E4::FigureMiss();
         pFig = figuresLRU.GetObject(item.pItem->GetI3DFigureName(), [&](CI3DFigure* figure) {
             figureLifetime.hold(figure,
@@ -294,7 +295,9 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
         });
         CTexture *pTex = nullptr;
         if (OwnedRender::E4::OwnsDraw()) {
-            campIcon = owned::camp_inventory_request_icon(item.pItem->GetI3DTextureName(),pRend->GetD3D()->GetDevice().Get());
+            const auto textureName=item.pItem->GetI3DTextureName();
+            if(visibleLegacyIcons) visibleLegacyIcons->emplace_back(LPCSTR(textureName));
+            campIcon = owned::camp_inventory_request_icon(textureName,pRend->GetD3D()->GetDevice().Get());
             if (!pFig || !campIcon) return; // Pending or rejected icons are omitted; never use OpenEI.
         } else {
             OwnedRender::E4::MissCost textureMiss(!texturesLRU.Contains(item.pItem->GetI3DTextureName()));
@@ -344,11 +347,12 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
     }
     if (!facts.slot && model) {
         facts.bounds_max=model->cardMax;facts.bounds_center=model->cardCenter;
-    } else if (!facts.slot) {
+    } else if (!facts.slot && pFig) {
         const auto* bounds=pFig->GetBoundingVolume();
         facts.bounds_max={bounds->ptMax.x,bounds->ptMax.y};
         facts.bounds_center={bounds->ptCenter.x,bounds->ptCenter.y};
     }
+    if (!pFig && !model) facts.bounds_max={1,1};
     if (IsItemSpell(item.pItem)) {
         if (const auto* spell=item.pItem->GetSpell(0)) facts.rune_count=spell->GetRunesCount();
     }

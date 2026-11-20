@@ -187,7 +187,7 @@ public:
     {
     }
 
-    void DrawItem(CRenderer *pRend, SDrawItem &item);
+    void DrawItem(CRenderer *pRend, SDrawItem &item, std::vector<std::string>* visibleLegacyIcons=nullptr);
     void DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle = 0, float fX = 400,
                   bool bArmors = false);
     void DrawHead(CRenderer *pRend, SDrawHead &head);
