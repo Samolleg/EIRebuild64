@@ -159,6 +159,21 @@ inline std::vector<ItemBinding> inventory_item_bindings(const nlohmann::json& re
     const auto shape=items.find(item.shape);
     if (shape==items.end()) return {};
     const auto& materials=shape->at("materials");
+    // A blueprint names a shape, without an instance material. Prefer a
+    // declared common geometry where available, otherwise the first drawable variant.
+    if(item.material.empty()) {
+        std::vector<ItemBinding> first;
+        for(const auto& variant:materials.items()) {
+            if(variant.key().empty()) continue;
+            item.material=variant.key();
+            auto parts=inventory_item_bindings(registry,item);
+            if(parts.empty()) continue;
+            const auto slot=variant.value().find(item.slot);
+            if(slot!=variant.value().end() && slot->is_object()) return parts;
+            if(first.empty()) first=std::move(parts);
+        }
+        return first;
+    }
     const auto variant=materials.find(item.material);
     if (variant==materials.end()) return {};
     if (item.kind==VisualEquipmentItem::Kind::weapon && !variant->contains(item.slot))
@@ -169,7 +184,8 @@ inline std::vector<ItemBinding> inventory_item_bindings(const nlohmann::json& re
     const bool mountedHelmet=item.slot=="armor_0" && std::any_of(parts.begin(),parts.end(),
         [](const ItemBinding& part){return part.socket=="socket_head";});
     parts.erase(std::remove_if(parts.begin(),parts.end(),[&](const ItemBinding& part){
-        return part.arrow || (mountedHelmet && part.skinned);
+        return part.arrow || (mountedHelmet && part.skinned) ||
+               (item.kind==VisualEquipmentItem::Kind::weapon && part.socket=="socket_back" && parts.size()>1);
     }),parts.end());
     return parts;
 }

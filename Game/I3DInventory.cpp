@@ -277,9 +277,8 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
     owned::camp::Composition campPlacement;
     const bool campPlaced = E4CampAccess::ItemPlacement(this, item, campPlacement);
     owned::camp::VisualScope campVisual(campPlaced ? campPlacement : owned::camp::visual, campPlaced || owned::camp::composing);
-    const CampItemModel* model = nullptr;
-    if (dynamic_cast<CI3DScreenCamp*>(this) &&
-        (item.pItem->GetTypeID()==ITID_ITEM_ARMOR || item.pItem->GetTypeID()==ITID_ITEM_WEAPON)) {
+    std::shared_ptr<CampItemModel> model;
+    if (dynamic_cast<CI3DScreenCamp*>(this)) {
         if (!campItemModels) campItemModels=std::make_shared<CampItemModelCache>();
         model=campItemModels->find(*item.pItem,pRend->GetD3D()->ModelPreviewFrame());
     }
@@ -344,7 +343,7 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
         }
     }
     if (!facts.slot && model) {
-        facts.bounds_max={1,1}; // Centered, unit-radius model in the camp detail card.
+        facts.bounds_max=model->cardMax;facts.bounds_center=model->cardCenter;
     } else if (!facts.slot) {
         const auto* bounds=pFig->GetBoundingVolume();
         facts.bounds_max={bounds->ptMax.x,bounds->ptMax.y};
@@ -356,7 +355,7 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
     auto* info=static_cast<CRotateItem*>(item.pItem->GetUserData());
     OwnedRender::SinglePreviewRotationState rotation{info->fAngle,info->fSpeed,info->fFlashVal};
     SourceSinglePreview adapter{this,pRend,pFig,textures[2],textures[1]};
-    adapter.item=&item;adapter.model=model;adapter.state=info;adapter.campPlaced=campPlaced;adapter.icon=campIcon;
+    adapter.item=&item;adapter.model=model.get();adapter.state=info;adapter.campPlaced=campPlaced;adapter.icon=campIcon;
     OwnedRender::produce_single_item_preview(facts,rotation,adapter);
 }
 /////////////////////////////////////////////////////////////////////////////////////
