@@ -96,6 +96,10 @@ void CI3DScreenCamp::OnActivate()
         bIsItemConstr = true;
     // CRAP}
 
+    // Saved assortment is already final on most visits; regenerated stock
+    // is published below only after the shop has built the new lists.
+    if(pItemsAssort && bIsItemConstr && !pShop->bNeedUpdate) PreloadCampParty(*pItemsAssort);
+    PreloadCampParty(IWorldClient.GetParty());
     AddTexture("campinfo");
 
     CI3DPolyArea *pArea;
@@ -398,6 +402,7 @@ void CI3DScreenCamp::OnActivate()
         pShop->SetAssortmentParameters(fMinLevels, fMaxLevels);
         pShop->GenerateSpells();
         pShop->GenerateItems();
+        if(pItemsAssort && bIsItemConstr) PreloadCampParty(*pItemsAssort);
 #ifndef __DEMO__
         pShop->bNeedUpdate = false;
 #endif // __DEMO__
@@ -474,6 +479,7 @@ void CI3DScreenCamp::OnActivate()
 void CI3DScreenCamp::OnDeactivate()
 {
     E4CampAccess::Deactivate(this);
+    campItemModels.reset();
     IWorld.CombatPause(false);
     // remove antializasing
     theRenderer.SetRenderState(D3DRENDERSTATE_ANTIALIAS, D3DANTIALIAS_NONE);

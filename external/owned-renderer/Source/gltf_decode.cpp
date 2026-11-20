@@ -93,14 +93,22 @@ skn::Dds image(const PublishPixels &publish, const ResourceBlob &source, const c
     check(converter->CopyPixels(nullptr, width * 4, static_cast<UINT>(pixels.size()),
                                 pixels.data()),
           "image pixels");
-    if (color && factor)
-        for (std::size_t p = 0; p < pixels.size(); p += 4)
-            for (unsigned c = 0; c < 3; ++c)
-            {
-                const float value = encoded(linear(pixels[p + c] / 255.f) * factor[2 - c]);
-                pixels[p + c] = static_cast<std::uint8_t>(
-                    std::lround((std::clamp)(value, 0.f, 1.f) * 255));
-            }
+    // All input channels are bytes. Reuse the exact sRGB transfer results
+    // rather than running pow for every pixel in every stock material.
+    static const auto linearByte=[] {
+        std::array<float,256> values{};
+        for(unsigned i=0;i<values.size();++i) values[i]=linear(i/255.f);
+        return values;
+    }();
+    if (color && factor && (factor[0]!=1 || factor[1]!=1 || factor[2]!=1)) {
+        std::array<std::array<std::uint8_t,256>,3> tint{};
+        for(unsigned c=0;c<3;++c) for(unsigned i=0;i<256;++i) {
+            const float value=encoded(linearByte[i]*factor[2-c]);
+            tint[c][i]=static_cast<std::uint8_t>(std::lround((std::clamp)(value,0.f,1.f)*255));
+        }
+        for(std::size_t p=0;p<pixels.size();p+=4)
+            for(unsigned c=0;c<3;++c) pixels[p+c]=tint[c][pixels[p+c]];
+    }
     if (normalScale != 1)
         for (std::size_t p = 0; p < pixels.size(); p += 4)
         {
@@ -155,8 +163,8 @@ skn::Dds image(const PublishPixels &publish, const ResourceBlob &source, const c
                     for (unsigned sy = y * h / nh; sy < (y + 1) * h / nh; ++sy)
                         for (unsigned sx = x * w / nw; sx < (x + 1) * w / nw; ++sx)
                         {
-                            float v = pixels[previous[0] + (sy * w + sx) * 4 + c] / 255.f;
-                            sum += color && c < 3 ? linear(v) : v;
+                            const auto v=pixels[previous[0]+(sy*w+sx)*4+c];
+                            sum += color && c < 3 ? linearByte[v] : v/255.f;
                             ++count;
                         }
                     float value = sum / count;

@@ -176,6 +176,7 @@ protected:
     CLRUStorage<CI3DFigure, CI3DFigureLRUAllocator> figuresLRU;
     CLRUStorage<CTexture, CTextureLRUAllocator> texturesLRU;
 
+    void PreloadCampParty(const CParty& party);
     CItem *MoveItem(CItem *pItem, CParty *pDst, CParty *pSrc, int nDstLimit = 0, bool bStack = true,
                     bool bIncludePrice = false);
     CItem *MoveAllItems(CParty *pDst, CParty *pSrc);
@@ -187,6 +188,7 @@ public:
     {
     }
 
+    void AnticipateCampItem(const CItem& item);
     void DrawItem(CRenderer *pRend, SDrawItem &item, std::vector<std::string>* visibleLegacyIcons=nullptr);
     void DrawUnit(CRenderer *pRend, CUnit *pDrawUnit, float fAngle = 0, float fX = 400,
                   bool bArmors = false);

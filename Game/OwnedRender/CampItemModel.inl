@@ -6,6 +6,7 @@
 #include "small_json.h"
 #include "CampClothingFit.h"
 #include "CampPreviewCache.h"
+#include "CampPreviewStorage.h"
 #include "CampSleevePose.h"
 
 namespace {
@@ -29,7 +30,32 @@ struct CampItemMesh {
         components.push_back({i,i,i});
     }
 
+    CampPreviewStorage::View backing;
+    owned::NativeGeometryView savedStreams{};
+    void seal(CampPreviewStorage& storage) {
+        const CampPreviewStorage::Span spans[]={
+            {positions.data(),positions.size()*sizeof(positions[0])},
+            {normals.data(),normals.size()*sizeof(normals[0])},
+            {uv.data(),uv.size()*sizeof(uv[0])},
+            {components.data(),components.size()*sizeof(components[0])},
+            {indices.data(),indices.size()*sizeof(indices[0])}
+        };
+        owned::NativeGeometryView saved{};
+        streams(saved);
+        backing=storage.back(spans,5);
+        if(!backing) return;
+        const auto* cursor=backing.get();
+        const auto moveStream=[&](auto& values,auto& target,const CampPreviewStorage::Span& span) {
+            target=reinterpret_cast<decltype(values.data())>(const_cast<std::uint8_t*>(cursor));
+            cursor+=span.bytes;
+            std::decay_t<decltype(values)>{}.swap(values);
+        };
+        moveStream(positions,saved.positions,spans[0]);moveStream(normals,saved.normals,spans[1]);
+        moveStream(uv,saved.texture_coordinates,spans[2]);moveStream(components,saved.components,spans[3]);
+        moveStream(indices,saved.indices,spans[4]);savedStreams=saved;
+    }
     void streams(owned::NativeGeometryView& view) const {
+        if(backing) {view=savedStreams;return;}
         view.positions=positions.data(); view.position_groups=static_cast<UINT>(positions.size());
         view.normals=normals.data(); view.normal_groups=static_cast<UINT>(normals.size());
         view.texture_coordinates=uv.data(); view.texture_coordinate_count=static_cast<UINT>(uv.size());
@@ -38,10 +64,15 @@ struct CampItemMesh {
     }
 };
 
+struct CampItemSurface {
+    owned::skn::Material material;
+    std::array<owned::skn::Dds,4> maps;
+    std::array<CampPreviewStorage::View,4> backing;
+};
 struct CampItemPart {
-    owned::gltf::EquipmentAsset binding;
+    std::string resource;
+    std::vector<CampItemSurface> surfaces;
     std::vector<CampItemMesh> meshes;
-    std::vector<owned::skn::Material> blueprintMaterials;
 };
 
 struct CampFigureReference {
@@ -62,31 +93,36 @@ struct CampItemModel {
     mutable bool reported=false;
     bool clothing=false;
 
-    CampItemModel(std::vector<owned::gltf::EquipmentAsset> bindings, const std::string& slot,bool blueprint,const CampFigureReference& reference,const CampItemFit::AuthoredClothingPose* authored):clothing(slot.rfind("armor_",0)==0) {
+    CampItemModel(std::vector<owned::gltf::EquipmentAsset> bindings, const std::string& slot,bool blueprint,const CampFigureReference& reference,const CampItemFit::AuthoredClothingPose* authored,CampPreviewStorage& storage):clothing(slot.rfind("armor_",0)==0) {
         std::vector<CampItemFit::Triangle> triangles;
         std::array<float,3> low{FLT_MAX,FLT_MAX,FLT_MAX},high{-FLT_MAX,-FLT_MAX,-FLT_MAX};
         for (auto& binding:bindings) {
             auto& part=parts.emplace_back();
-            part.binding=std::move(binding);
-            const auto& asset=*part.binding.asset;
+            const auto& asset=*binding.asset;
+            part.resource=asset.resource_key;
             const auto& geometry=asset.geometry;
             const auto sleeved=authored?camp_sleeves(asset,authored->sleeveRoll):std::vector<owned::skn::Vertex>{};
             const auto& vertices=sleeved.empty()?asset.rest_vertices:sleeved;
-            if(blueprint) {
-                part.blueprintMaterials=geometry.materials;
-                for(auto& mat:part.blueprintMaterials) {
+            for(unsigned i=0;i<geometry.materials.size();++i) {
+                auto& surface=part.surfaces.emplace_back();
+                auto& mat=surface.material;
+                mat=geometry.materials[i];
+                if(blueprint) {
                     const float gray=.2126f*mat.base[0]+.7152f*mat.base[1]+.0722f*mat.base[2];
                     std::fill_n(mat.base,3,gray);
                     std::fill_n(mat.emission,3,0.f);
                 }
+                surface.maps=asset.textures.at(i);
+                const auto color=binding.base_color_overrides.find(i);
+                const auto orm=binding.metallic_roughness_overrides.find(i);
+                if(color!=binding.base_color_overrides.end()) surface.maps[0]=*color->second;
+                if(orm!=binding.metallic_roughness_overrides.end()) surface.maps[2]=*orm->second;
+                for(unsigned k=0;k<surface.maps.size();++k) {
+                    const auto& pixels=surface.maps[k].blob.bytes;
+                    if(pixels) bytes+=pixels->size();
+                    storage.retain(surface.maps[k],surface.backing[k]);
+                }
             }
-            // A conservative charge counts shared textures in each variant. Visible rows stay pinned.
-            bytes+=asset.document.bytes->size()+asset.rest_vertices.capacity()*sizeof(owned::skn::Vertex)
-                 +geometry.vertices.capacity()*sizeof(owned::skn::Vertex)+geometry.indices.capacity()*sizeof(unsigned);
-            const auto textureBytes=[](const owned::skn::Dds& d) {return d.blob.bytes?d.blob.bytes->size():0;};
-            for(const auto& material:asset.textures) for(const auto& map:material) bytes+=textureBytes(map);
-            for(const auto& map:part.binding.base_color_overrides) bytes+=textureBytes(*map.second);
-            for(const auto& map:part.binding.metallic_roughness_overrides) bytes+=textureBytes(*map.second);
             const auto& lod=geometry.lods.at(0);
             for (unsigned s=lod.first_submesh;s<lod.first_submesh+lod.submesh_count;++s) {
                 const auto& sub=geometry.submeshes.at(s);
@@ -199,11 +235,7 @@ struct CampItemModel {
             light.world.sunlight_diffuse={1.f,.98f,.96f,1.f};
         } else light.world.ambient={.78f,.78f,.78f,1.f};
         for (const auto& part:parts) for (const auto& mesh:part.meshes) {
-            const auto& b=part.binding;
-            const auto& maps=b.asset->textures.at(mesh.material);
-            const auto color=b.base_color_overrides.find(mesh.material);
-            const auto orm=b.metallic_roughness_overrides.find(mesh.material);
-            const auto identity=b.material_identities.find(mesh.material);
+            const auto& surface=part.surfaces.at(mesh.material);
             owned::NativeGeometryView view{};
             mesh.streams(view);
             view.content_fingerprint=mesh.fingerprint;
@@ -216,12 +248,7 @@ struct CampItemModel {
             std::memcpy(view.lighting.object_to_world.data(),&transform,sizeof(transform));
             std::memcpy(view.object_to_clip.data(),&combined,sizeof(combined));
             owned::retained_visual_part_fixed_state({},view.owned_fixed_state);
-            const bool blueprint=!part.blueprintMaterials.empty();
-            const auto& material=blueprint?part.blueprintMaterials.at(mesh.material):b.asset->geometry.materials.at(mesh.material);
-            owned::skn::apply_material_view(view,material,maps,
-                color==b.base_color_overrides.end()?maps[0]:*color->second,
-                orm==b.metallic_roughness_overrides.end()?nullptr:orm->second.get(),
-                blueprint || identity==b.material_identities.end()?nullptr:identity->second.get());
+            owned::skn::apply_material_view(view,surface.material,surface.maps,surface.maps[0],nullptr,nullptr);
             // A head or torso normally occludes the inside of a worn shell.
             // In the inventory keep the outward faces, including the open front of a cap.
             if(clothing) view.owned_fixed_state.cull_mode=D3DCULL_CW;
@@ -232,7 +259,7 @@ struct CampItemModel {
             }
         }
         if (!reported) GameJournal::Event("RENDER","camp_item_glb_draw","item=%s model=%s parts=%zu",
-            name.c_str(),parts.front().binding.asset->resource_key.c_str(),parts.size());
+            name.c_str(),parts.front().resource.c_str(),parts.size());
         reported=true;
     }
 };
@@ -243,6 +270,10 @@ struct CampItemRequest {
     bool blueprint=false;
 };
 struct CampItemLoader {
+    CampPreviewStorage storage;
+    // Neighboring variants often share the same GLB. Keep only the last
+    // source while preparing stock; the published models own only draw data.
+    std::shared_ptr<const owned::gltf::Asset> recentSource;
     owned::ResourceStore store;
     bool opened=false;
     std::map<std::string,CampFigureReference> references;
@@ -373,12 +404,14 @@ struct CampItemLoader {
         try {
             auto bindings=owned::gltf::select_inventory_item(request.item);
             if(bindings.empty()) return {};
+            recentSource=bindings.front().asset;
             if(request.blueprint) for(auto& part:bindings) blueprintTextures(part);
             const auto* pose=inventoryPose(request,bindings.front().asset->resource_key);
             const CampFigureReference noFigure{};
             const auto& ref=pose?noFigure:reference(request.figure,request.item.slot);
             auto model=std::make_shared<CampItemModel>(std::move(bindings),
-                request.item.slot,request.blueprint,ref,pose);
+                request.item.slot,request.blueprint,ref,pose,storage);
+            for(auto& part:model->parts) for(auto& mesh:part.meshes) mesh.seal(storage);
             model->name=request.item.shape+"/"+(request.blueprint?"blueprint":request.item.material);
             GameJournal::Event("RENDER","camp_item_prepared","item=%s fig=%s aligned=%d authored_pose=%d bytes=%zu",
                 model->name.c_str(),request.figure.c_str(),int(ref.valid || pose),int(pose!=nullptr),model->bytes);
@@ -393,7 +426,7 @@ struct CampItemLoader {
 
 struct CampItemModelCache {
     using Key=std::tuple<DWORD,DWORD,DWORD>;
-    CampPreviewCache<Key,CampItemRequest,CampItemModel,CampItemLoader> cache{384ull<<20};
+    CampPreviewCache<Key,CampItemRequest,CampItemModel,CampItemLoader> cache;
     static const CItemLoot* blueprint(const CItem& item) {
         if(item.GetTypeID()!=ITID_ITEM_LOOT) return nullptr;
         const auto& loot=static_cast<const CItemLoot&>(item);
@@ -401,12 +434,12 @@ struct CampItemModelCache {
         const auto type=loot.GetInstructionType();
         return type==IDBINS_ARMOR || type==IDBINS_WEAPON ? &loot : nullptr;
     }
-    CampPreviewSelection<CampItemModel> find(const CItem& item,std::uint64_t now) {
+    CampPreviewSelection<CampItemModel> find(const CItem& item,bool preload=false,bool near=false) {
         const auto* instruction=blueprint(item);
         if(!instruction && item.GetTypeID()!=ITID_ITEM_ARMOR && item.GetTypeID()!=ITID_ITEM_WEAPON) return {nullptr,true};
         const Key key=instruction?Key{ITID_ITEM_LOOT,instruction->GetInstructionType(),instruction->GetInstructionItemIndex()}:
                                   Key{item.GetTypeID(),item.GetSubtypeID(),0};
-        return cache.find(key,now,[&] {
+        return cache.get(key,preload,near,[&] {
             CampItemRequest request;
             const auto* shape=instruction?instruction->GetInstructionShape():item.GetShapeEntry();
             if(!shape) return request;

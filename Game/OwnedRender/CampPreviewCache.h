@@ -1,95 +1,85 @@
 #pragma once
 #include <condition_variable>
-#include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <thread>
 
-// A null model is not permission to draw a FIG. Only a completed lookup
-// can establish that the legacy resource is the item's final presentation.
+// A null result is final: the worker resolved the item and found no GLB.
 template<class Model> struct CampPreviewSelection {
     std::shared_ptr<Model> model;
     bool useFigure=false;
 };
 
-// One CPU loader per open camp screen. Only copied resource names cross the
-// thread boundary; rendering and the first GPU submission stay on the UI thread.
 template<class Key,class Request,class Model,class Loader>
 class CampPreviewCache {
-    enum class State { pending, loading, done };
+    enum class State { queued, loading, ready };
     struct Entry {
         Request request;
+        bool anticipated=false;
         std::shared_ptr<Model> model;
-        std::uint64_t frame=0, order=0;
-        State state=State::pending;
-        bool shown=false;
+        State state=State::queued;
     };
     Loader loader;
-    const std::size_t budget;
     std::map<Key,Entry> entries;
-    std::size_t bytes=0;
-    std::uint64_t frame=0,order=0,publishedFrame=UINT64_MAX;
+    std::deque<Entry*> stock,nearby;
+    Entry* visible=nullptr;
+    std::mutex mutex;
+    std::condition_variable work,finished;
     bool stop=false;
-    std::mutex lock;
-    std::condition_variable wake;
     std::thread worker;
 
     void run() {
         SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);
-        std::unique_lock<std::mutex> guard(lock);
-        while (!stop) {
-            auto next=entries.end(), oldest=entries.end();
-            for(auto it=entries.begin();it!=entries.end();++it) {
-                const auto& entry=it->second;
-                const bool recent=frame-entry.frame<=1;
-                if(recent && entry.state==State::pending && (next==entries.end() ||
-                   entry.frame>next->second.frame || (entry.frame==next->second.frame && entry.order<next->second.order)))
-                    next=it;
-                if(!recent && entry.model && (oldest==entries.end() || entry.frame<oldest->second.frame))
-                    oldest=it;
-            }
-            if(bytes>budget && oldest!=entries.end()) {
-                auto retired=std::move(oldest->second.model);
-                bytes-=retired->bytes;
-                entries.erase(oldest);
-                guard.unlock(); retired.reset(); guard.lock();
-                continue;
-            }
-            if(next==entries.end()) {wake.wait(guard);continue;}
-            auto& entry=next->second;
-            entry.state=State::loading;
-            guard.unlock();
-            auto model=loader(entry.request);
-            guard.lock();
-            entry.model=std::move(model);
-            if(entry.model) bytes+=entry.model->bytes;
-            entry.state=State::done;
+        std::unique_lock<std::mutex> lock(mutex);
+        for (;;) {
+            work.wait(lock,[&]{return stop || visible || !nearby.empty() || !stock.empty();});
+            if(stop) return;
+            auto* entry=visible;
+            if(entry) visible=nullptr;
+            else if(!nearby.empty()) {entry=nearby.front();nearby.pop_front();}
+            else {entry=stock.front();stock.pop_front();}
+            if(entry->state!=State::queued) continue;
+            entry->state=State::loading;
+            lock.unlock();
+            auto model=loader(entry->request);
+            lock.lock();
+            entry->model=std::move(model);
+            entry->state=State::ready;
+            finished.notify_one();
         }
     }
 public:
-    explicit CampPreviewCache(std::size_t byteBudget):budget(byteBudget),worker([this]{run();}) {}
+    CampPreviewCache():worker([this]{run();}) {}
     ~CampPreviewCache() {
-        {std::lock_guard<std::mutex> guard(lock);stop=true;}
-        wake.notify_one();
+        {std::lock_guard<std::mutex> guard(mutex);stop=true;}
+        work.notify_one();
         worker.join();
     }
+    // All calls originate on the game's UI thread. No item or party pointer
+    // leaves it. Map nodes stay put for the lifetime of this camp visit.
     template<class Describe>
-    CampPreviewSelection<Model> find(Key key,std::uint64_t now,Describe describe) {
-        std::lock_guard<std::mutex> guard(lock);
-        const bool newFrame=now!=frame;
-        frame=now;
-        auto inserted=entries.try_emplace(key);
-        auto& entry=inserted.first->second;
-        if(inserted.second) {entry.request=describe();entry.order=++order;}
-        const bool revisit=now-entry.frame>1;
-        entry.frame=now;
-        if(inserted.second || (entry.state==State::pending && revisit) || (newFrame && bytes>budget)) wake.notify_one();
-        if(entry.state!=State::done) return {};
-        if(!entry.model) return {nullptr,true};
-        if(entry.shown) return {entry.model,false};
-        if(publishedFrame==now) return {}; // Amortize cold GPU uploads across frames.
-        publishedFrame=now;entry.shown=true;
-        return {entry.model,false};
+    CampPreviewSelection<Model> get(Key key,bool preload,bool near,Describe describe) {
+        std::unique_lock<std::mutex> lock(mutex);
+        auto found=entries.find(key);
+        if(found==entries.end()) {
+            Entry entry;
+            entry.request=describe();
+            found=entries.emplace(key,std::move(entry)).first;
+            if(preload) {stock.push_back(&found->second);work.notify_one();}
+        }
+        auto& entry=found->second;
+        if(preload) {
+            if(near && entry.state==State::queued && !entry.anticipated) {
+                entry.anticipated=true;nearby.push_back(&entry);work.notify_one();
+            }
+            return {};
+        }
+        if(entry.state!=State::ready) {
+            if(entry.state==State::queued) {visible=&entry;work.notify_one();}
+            finished.wait(lock,[&]{return entry.state==State::ready;});
+        }
+        return {entry.model,!entry.model};
     }
 };

@@ -271,6 +271,22 @@ static const D3DCOLORVALUE dcvMagicColors[] = { { 1, 0, 0, 1 }, { 0, 1, 1, 1 }, 
                                                 { 1, 0, 1, 1 }, { 0, 0, 1, 1 } };
 #include "OwnedRender/CampItemModel.inl"
 #include "OwnedRender/SinglePreview.inl"
+void CI3DItemScreen::AnticipateCampItem(const CItem& item)
+{
+    if(campItemModels) campItemModels->find(item,true,true);
+}
+void CI3DItemScreen::PreloadCampParty(const CParty& party)
+{
+    if(!campItemModels) campItemModels=std::make_shared<CampItemModelCache>();
+    const auto queue=[&](const auto& items) {
+        for(int i=0;i<items.GetSize();++i) if(items[i]) campItemModels->find(*items[i],true);
+    };
+    for(int i=0;i<party.people.GetSize();++i) {
+        queue(party.people[i].weapons);
+        queue(party.people[i].armors);
+    }
+    queue(party.allWagonItems);
+}
 void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item, std::vector<std::string>* visibleLegacyIcons)
 {
     if (!item.pItem) return;
@@ -280,7 +296,7 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item, std::vector<std
     CampPreviewSelection<CampItemModel> selection{nullptr,true};
     if (dynamic_cast<CI3DScreenCamp*>(this)) {
         if (!campItemModels) campItemModels=std::make_shared<CampItemModelCache>();
-        selection=campItemModels->find(*item.pItem,pRend->GetD3D()->ModelPreviewFrame());
+        selection=campItemModels->find(*item.pItem);
     }
     owned::ModelDrawReference figureLifetime;
     CI3DFigure* pFig=nullptr;
