@@ -67,7 +67,26 @@ struct CampItemMesh {
 
 struct CampItemSurface {
     owned::skn::Material material;
-    std::array<owned::skn::Dds,4> maps;
+    std::array<owned::skn::Dds,4> maps,cellMaps;
+    void prepareCell(unsigned pixels,float uSpan,float vSpan) {
+        cellMaps=maps;
+        for(auto& map:cellMaps) {
+            std::size_t first=0,skipped=0;
+            while(pixels && first+1<map.mips.size()) {
+                const auto& next=map.mips[first+1];
+                // Keep at least two atlas texels per displayed cell pixel in
+                // both directions. A small UV island keeps its finer levels.
+                if(next.width*uSpan<2*pixels || next.height*vSpan<2*pixels) break;
+                skipped+=map.mips[first++].bytes;
+            }
+            if(!first) continue;
+            map.mips.erase(map.mips.begin(),map.mips.begin()+first);
+            auto& identity=map.blob.identity;
+            identity.canonical_name+="#camp-mip"+std::to_string(first);
+            identity.absolute_offset+=skipped;
+            identity.bytes-=skipped;
+        }
+    }
     std::array<std::shared_ptr<const CampPreviewStorage::Image>,4> backing;
 };
 struct CampItemPart {
@@ -203,7 +222,7 @@ struct CampItemModel {
         placement.scale=1.f/radius;
     }
 
-    void draw(CRenderer* renderer,const OwnedRender::SinglePreviewPlacement& p) const {
+    void draw(CRenderer* renderer,const OwnedRender::SinglePreviewPlacement& p,bool cell) const {
         auto* gpu=renderer->GetGPU();
         if (!gpu->IsHaveMatrix(MAT_STACK_PROJSPACE)) return;
         const auto& projection=gpu->GetMatrix(MAT_STACK_PROJSPACE);
@@ -249,7 +268,8 @@ struct CampItemModel {
             std::memcpy(view.lighting.object_to_world.data(),&transform,sizeof(transform));
             std::memcpy(view.object_to_clip.data(),&combined,sizeof(combined));
             owned::retained_visual_part_fixed_state({},view.owned_fixed_state);
-            owned::skn::apply_material_view(view,surface.material,surface.maps,surface.maps[0],nullptr,nullptr);
+            const auto& maps=cell?surface.cellMaps:surface.maps;
+            owned::skn::apply_material_view(view,surface.material,maps,maps[0],nullptr,&maps);
             // A head or torso normally occludes the inside of a worn shell.
             // In the inventory keep the outward faces, including the open front of a cap.
             if(clothing) view.owned_fixed_state.cull_mode=D3DCULL_CW;
@@ -269,6 +289,7 @@ struct CampItemRequest {
     owned::VisualEquipmentItem item;
     std::string figure;
     bool blueprint=false;
+    unsigned cellPixels=0;
 };
 struct CampItemLoader {
     static std::size_t affinity(const CampItemRequest& request) {
@@ -432,7 +453,21 @@ struct CampItemLoader {
             const auto& ref=pose?noFigure:reference(request.figure,request.item.slot);
             auto model=std::make_shared<CampItemModel>(std::move(bindings),
                 request.item.slot,request.blueprint,ref,pose,storage);
-            for(auto& part:model->parts) for(auto& mesh:part.meshes) mesh.seal(storage);
+            for(auto& part:model->parts) {
+                for(unsigned i=0;i<part.surfaces.size();++i) {
+                    float uSpan=1.f,vSpan=1.f;
+                    for(const auto& mesh:part.meshes) if(mesh.material==i && !mesh.uv.empty()) {
+                        float u0=FLT_MAX,u1=-FLT_MAX,v0=FLT_MAX,v1=-FLT_MAX;
+                        for(const auto& uv:mesh.uv) {
+                            u0=(std::min)(u0,uv.u);u1=(std::max)(u1,uv.u);
+                            v0=(std::min)(v0,uv.v);v1=(std::max)(v1,uv.v);
+                        }
+                        uSpan=(std::min)(uSpan,u1-u0);vSpan=(std::min)(vSpan,v1-v0);
+                    }
+                    part.surfaces[i].prepareCell(request.cellPixels,uSpan,vSpan);
+                }
+                for(auto& mesh:part.meshes) mesh.seal(storage);
+            }
             model->name=request.item.shape+"/"+(request.blueprint?"blueprint":request.item.material);
             GameJournal::Event("RENDER","camp_item_prepared","item=%s fig=%s aligned=%d authored_pose=%d bytes=%zu",
                 model->name.c_str(),request.figure.c_str(),int(ref.valid || pose),int(pose!=nullptr),model->bytes);
@@ -446,6 +481,7 @@ struct CampItemLoader {
 }
 
 struct CampItemModelCache {
+    unsigned cellPixels=0;
     using Key=std::tuple<DWORD,DWORD,DWORD>;
     CampPreviewCache<Key,CampItemRequest,CampItemModel,CampItemLoader> cache;
     static const CItemLoot* blueprint(const CItem& item) {
@@ -465,6 +501,7 @@ struct CampItemModelCache {
             const auto* shape=instruction?instruction->GetInstructionShape():item.GetShapeEntry();
             if(!shape) return request;
             request.blueprint=instruction!=nullptr;
+            request.cellPixels=cellPixels;
             if(!instruction) {
                 const auto* material=theItemDatabase.materials[item.GetMaterial()];
                 if(!material) return request;

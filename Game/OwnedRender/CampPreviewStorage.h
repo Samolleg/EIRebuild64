@@ -1,5 +1,6 @@
 #pragma once
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -10,7 +11,7 @@
 // Retain the active shop's exact draw streams. Large cold blocks can be
 // reclaimed by Windows without rerunning the GLB decoder on the next scroll.
 class CampPreviewStorage {
-    std::size_t resident=0;
+    std::shared_ptr<std::atomic<std::size_t>> resident=std::make_shared<std::atomic<std::size_t>>(0);
     static constexpr std::size_t residentBudget=32ull<<20;
 public:
     struct Span {const void* data; std::size_t bytes;};
@@ -19,7 +20,14 @@ public:
         std::size_t total=0;
         for(std::size_t i=0;i<count;++i) total+=spans[i].bytes;
         if(!total) return {};
-        if(total<=residentBudget-resident) {resident+=total;return {};}
+        if(total<=residentBudget-resident->load(std::memory_order_relaxed)) {
+            // The null view keeps the original vectors; its shared control
+            // block returns their reservation when that item leaves the stock.
+            resident->fetch_add(total,std::memory_order_relaxed);
+            return View(nullptr,[counter=resident,total](const std::uint8_t*) {
+                counter->fetch_sub(total,std::memory_order_relaxed);
+            });
+        }
         wchar_t dir[MAX_PATH],path[MAX_PATH];
         const DWORD length=GetTempPathW(MAX_PATH,dir);
         if(!length || length>=MAX_PATH || !GetTempFileNameW(dir,L"EIC",0,path)) return {};

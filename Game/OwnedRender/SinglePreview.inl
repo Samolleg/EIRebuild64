@@ -47,7 +47,7 @@ struct SourceSinglePreview {
         p->Draw(renderer);
     }
     void draw_item() {
-        if (model) { model->draw(renderer,placement); return; }
+        if (model) { model->draw(renderer,placement,item->eFrom!=ISP_UNKNOWN); return; }
         if (!figure) return;
         const bool preview=item->eFrom==ISP_UNKNOWN&&campPlaced;
         const auto rgb=preview?E4CampAccess::PreviewRGB(screen,item->pItem):0u;

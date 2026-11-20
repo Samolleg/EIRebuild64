@@ -276,8 +276,11 @@ void CI3DItemScreen::BeginCampPreviews(int shop)
     owned::ResourceStoreConfig mounts;
     std::uint64_t generation=0;
     const bool available=owned::owned_resource_runtime_mounts(mounts,&generation);
-    if(!available || !pI3D->lastCampModels || shop!=pI3D->campModelShop || generation!=pI3D->campModelGeneration) {
+    const unsigned cellPixels=static_cast<unsigned>((pI3D->GetHeight()+5)/6);
+    if(!available || !pI3D->lastCampModels || shop!=pI3D->campModelShop ||
+       generation!=pI3D->campModelGeneration || pI3D->lastCampModels->cellPixels!=cellPixels) {
         pI3D->lastCampModels=std::make_shared<CampItemModelCache>();
+        pI3D->lastCampModels->cellPixels=cellPixels;
         pI3D->campModelShop=shop;pI3D->campModelGeneration=generation;
     }
     campItemModels=pI3D->lastCampModels;
