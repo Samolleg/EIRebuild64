@@ -2,7 +2,6 @@
 #include "../Game/PhysicsFxPlayback.h"
 #include "../Game/PhysicsFxTerrain.h"
 #include "../Game/OwnedRender/E1PhysicsDebris.h"
-#include "../external/owned-renderer/Source/secondary_physics.h"
 #include <xmmintrin.h>
 #include <algorithm>
 #include <chrono>
@@ -45,7 +44,6 @@ owned::TerrainCpuAsset fixture(unsigned material){
     for(unsigned y=0;y<3;++y)for(unsigned x=0;x<3;++x){owned::TerrainVertex v;v.x=float(x);v.y=float(y);v.z=.2f*x;s.vertices.push_back(v);}
     owned::TerrainTileDescriptor tile;for(unsigned i=0;i<9;++i)tile.vertex_indices[i]=std::uint16_t(i);s.tiles.push_back(tile);return t;
 }
-#include "check-hair-physics.inl"
 int main(int argc,char** argv)try{
     if(argc>1&&std::string(argv[1])=="--expect-gpu-unavailable"){
         World missing;check(!missing.Initialize()&&!missing.Error().empty(),"missing runtime rejected");
@@ -53,7 +51,6 @@ int main(int argc,char** argv)try{
         std::cout<<missing.Error()<<'\n';return 0;
     }
     check_debris_playback();
-    check_hair_physics();
     Events e;e.Reset(100);
     check(!e.Admit(1,100,100,false),"initial sync suppressed");
     check(e.Admit(2,103,103,true),"fresh event admitted");

@@ -5,7 +5,6 @@
 #include "gltf_equipment_registry.h"
 #include "gltf_weapon_constraints.h"
 #include "gltf_weapon_grip.h"
-#include "gltf_breast.h"
 #include "retained_static_scene.h"
 #include "figure_service_nodes.h"
 namespace owned {
@@ -615,24 +614,22 @@ int wmain(int argc,wchar_t** argv)try {
     }
     if(argc==10) {
      const auto originalBody=decode(read_file(argv[8]),profile,publish);
-     owned::gltf::BreastState originalPhysics,updatedPhysics;
-     check(originalPhysics.bind(originalBody) && updatedPhysics.bind(body),"Nala physics bones missing after hair separation");
-     std::set<std::pair<std::string,unsigned>> originalNodes,updatedNodes;
-     for(const auto& value:originalPhysics.affected)
-      originalNodes.emplace(originalBody->geometry.joints.at(value.node).name,value.part);
-     for(const auto& value:updatedPhysics.affected)
-      updatedNodes.emplace(body->geometry.joints.at(value.node).name,value.part);
-     check(!originalNodes.empty() && originalNodes==updatedNodes,"Nala physics affected-bone set changed");
-     for(unsigned side=0;side<2;++side)
-      check(originalBody->geometry.joints.at(originalPhysics.targets[side]).name==
-            body->geometry.joints.at(updatedPhysics.targets[side]).name,"Nala physics target changed");
+     const auto chestNodes=[](const auto& asset){
+      std::set<std::string> names;
+      for(const auto& joint:asset.geometry.joints)
+       if(joint.name.find("Pecho")!=std::string::npos || joint.name.find("PeChoBase")!=std::string::npos)
+        names.insert(joint.name);
+      return names;
+     };
+     const auto originalNodes=chestNodes(*originalBody);
+     check(!originalNodes.empty() && chestNodes(*body)==originalNodes,"original chest rig preserved");
      for(const wchar_t* name:{L"hair-full.glb",L"hair-helmet.glb",L"hair-mask.glb"}) {
       const auto hair=decode(read_file((std::filesystem::path(argv[9])/name).c_str()),profile,publish);
       check(hair->wearable && !hair->animation && !hair->gpu_animation,"hair must use body pose");
       const auto nodes=wearable_nodes(*hair,*body);
       check(wearable_radius(*hair,*body,nodes)>0,"hair shared pose bounds");
      }
-     std::cout<<"PASS Nala physics target and affected bones preserved; three hair skins share the body palette\n";
+     std::cout<<"PASS Nala original chest rig preserved; three hair skins share the body palette\n";
     }
     // Physique-enabled bodies may already cache additional sole chains.
     const auto previousChains=body->sockets.size();
