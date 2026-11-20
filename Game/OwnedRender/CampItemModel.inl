@@ -117,7 +117,7 @@ struct CampItemModel {
                 }
             }
         }
-        if(clothing && (reference.valid || authored)) {
+        if(authored || (clothing && reference.valid)) {
             const CampItemFit::ClothingPose pose(triangles,reference.clothing,slot=="armor_6",slot=="armor_5",authored);
             for(auto& part:parts) for(auto& mesh:part.meshes)
                 for(unsigned i=0;i<mesh.components.size();++i) {
@@ -247,7 +247,7 @@ struct CampItemLoader {
     bool posesRead=false;
     std::map<std::string,CampItemFit::AuthoredClothingPose> clothingPoses;
 
-    const CampItemFit::AuthoredClothingPose* clothingPose(const std::string& resource) {
+    const CampItemFit::AuthoredClothingPose* inventoryPose(const CampItemRequest& request,const std::string& resource) {
         if(!posesRead && open()) {
             posesRead=true;
             owned::ResourceBlob blob; owned::ResourceFailure why;
@@ -283,6 +283,10 @@ struct CampItemLoader {
                 }
             }
         }
+        // Some meshes serve different shapes or material cutouts. Use their
+        // measured inventory pose before the resource-wide presentation.
+        const auto variant=clothingPoses.find(request.item.shape+"|"+request.item.material+"|"+resource);
+        if(variant!=clothingPoses.end()) return &variant->second;
         const auto it=clothingPoses.find(resource);
         return it==clothingPoses.end()?nullptr:&it->second;
     }
@@ -365,8 +369,7 @@ struct CampItemLoader {
             auto bindings=owned::gltf::select_inventory_item(request.item);
             if(bindings.empty()) return {};
             if(request.blueprint) for(auto& part:bindings) blueprintTextures(part);
-            const auto* pose=request.item.kind==owned::VisualEquipmentItem::Kind::armor
-                ? clothingPose(bindings.front().asset->resource_key) : nullptr;
+            const auto* pose=inventoryPose(request,bindings.front().asset->resource_key);
             const CampFigureReference noFigure{};
             const auto& ref=pose?noFigure:reference(request.figure,request.item.slot);
             auto model=std::make_shared<CampItemModel>(std::move(bindings),
