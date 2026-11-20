@@ -259,7 +259,7 @@ struct CampItemLoader {
                     pixels[k]=pixels[k+1]=pixels[k+2]=gray;
                 }
                 map=color;
-                map.blob=publish(path+"#"+color.blob.identity.key(),pixels.data(),static_cast<UINT>(pixels.size()));
+                map.blob=publish(path+"#gray",pixels.data(),static_cast<UINT>(pixels.size()));
                 for(auto& mip:map.mips) mip.data=map.blob.bytes->data()+(mip.data-color.blob.bytes->data());
             }
             binding.base_color_overrides[i]=std::make_shared<const owned::skn::Dds>(std::move(map));
