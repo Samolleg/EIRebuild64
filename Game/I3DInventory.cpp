@@ -278,8 +278,7 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item)
     const bool campPlaced = E4CampAccess::ItemPlacement(this, item, campPlacement);
     owned::camp::VisualScope campVisual(campPlaced ? campPlacement : owned::camp::visual, campPlaced || owned::camp::composing);
     std::shared_ptr<CampItemModel> model;
-    if (dynamic_cast<CI3DScreenCamp*>(this) &&
-        (item.pItem->GetTypeID()==ITID_ITEM_ARMOR || item.pItem->GetTypeID()==ITID_ITEM_WEAPON)) {
+    if (dynamic_cast<CI3DScreenCamp*>(this)) {
         if (!campItemModels) campItemModels=std::make_shared<CampItemModelCache>();
         model=campItemModels->find(*item.pItem,pRend->GetD3D()->ModelPreviewFrame());
     }

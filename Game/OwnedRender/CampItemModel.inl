@@ -39,6 +39,7 @@ struct CampItemMesh {
 struct CampItemPart {
     owned::gltf::EquipmentAsset binding;
     std::vector<CampItemMesh> meshes;
+    std::vector<owned::skn::Material> blueprintMaterials;
 };
 
 struct CampFigureReference {
@@ -57,7 +58,7 @@ struct CampItemModel {
     std::string name;
     mutable bool reported=false;
 
-    CampItemModel(std::vector<owned::gltf::EquipmentAsset> bindings, bool weapon,const CampFigureReference& reference) {
+    CampItemModel(std::vector<owned::gltf::EquipmentAsset> bindings, bool weapon,bool blueprint,const CampFigureReference& reference) {
         std::vector<CampItemFit::Triangle> triangles;
         std::array<float,3> low{FLT_MAX,FLT_MAX,FLT_MAX},high{-FLT_MAX,-FLT_MAX,-FLT_MAX};
         for (auto& binding:bindings) {
@@ -65,6 +66,14 @@ struct CampItemModel {
             part.binding=std::move(binding);
             const auto& asset=*part.binding.asset;
             const auto& geometry=asset.geometry;
+            if(blueprint) {
+                part.blueprintMaterials=geometry.materials;
+                for(auto& mat:part.blueprintMaterials) {
+                    const float gray=.2126f*mat.base[0]+.7152f*mat.base[1]+.0722f*mat.base[2];
+                    std::fill_n(mat.base,3,gray);
+                    std::fill_n(mat.emission,3,0.f);
+                }
+            }
             // A conservative charge counts shared textures in each variant. Visible rows stay pinned.
             bytes+=asset.document.bytes->size()+asset.rest_vertices.capacity()*sizeof(owned::skn::Vertex)
                  +geometry.vertices.capacity()*sizeof(owned::skn::Vertex)+geometry.indices.capacity()*sizeof(unsigned);
@@ -182,10 +191,12 @@ struct CampItemModel {
             std::memcpy(view.lighting.object_to_world.data(),&transform,sizeof(transform));
             std::memcpy(view.object_to_clip.data(),&combined,sizeof(combined));
             owned::retained_visual_part_fixed_state({},view.owned_fixed_state);
-            owned::skn::apply_material_view(view,b.asset->geometry.materials.at(mesh.material),maps,
+            const bool blueprint=!part.blueprintMaterials.empty();
+            const auto& material=blueprint?part.blueprintMaterials.at(mesh.material):b.asset->geometry.materials.at(mesh.material);
+            owned::skn::apply_material_view(view,material,maps,
                 color==b.base_color_overrides.end()?maps[0]:*color->second,
                 orm==b.metallic_roughness_overrides.end()?nullptr:orm->second.get(),
-                identity==b.material_identities.end()?nullptr:identity->second.get());
+                blueprint || identity==b.material_identities.end()?nullptr:identity->second.get());
             if (!renderer->GetD3D()->SubmitC74Figure(view,&light.world,light.points)) {
                 if (!reported) GameJournal::Event("RENDER","camp_item_glb_failed","item=%s",name.c_str());
                 reported=true;
@@ -201,24 +212,68 @@ struct CampItemModel {
 struct CampItemRequest {
     owned::VisualEquipmentItem item;
     std::string figure;
+    bool blueprint=false;
 };
 struct CampItemLoader {
     owned::ResourceStore store;
     bool opened=false;
     std::map<std::string,CampFigureReference> references;
 
+    bool open() {
+        if(!opened) {
+            owned::ResourceStoreConfig mounts;
+            owned::ResourceFailure failure;
+            opened=owned::owned_resource_runtime_mounts(mounts) && store.open(mounts,failure);
+        }
+        return opened;
+    }
+
+    // Same UVs and geometry as the item. The optional authored atlas sits
+    // alongside its material maps; otherwise keep alpha and desaturate all mips.
+    void blueprintTextures(owned::gltf::EquipmentAsset& binding) {
+        if(!open()) throw std::runtime_error("inventory resource mounts unavailable");
+        const auto& asset=*binding.asset;
+        const std::string prefix="models/items/";
+        const auto stem=asset.resource_key.substr(prefix.size(),asset.resource_key.size()-prefix.size()-4);
+        const auto publish=[&](const std::string& name,const void* data,std::uint32_t size) {
+            owned::ResourceBlob result; owned::ResourceFailure failure;
+            if(!store.copy_selected_memory(name,data,size,result,failure)) throw std::runtime_error(failure.message);
+            return result;
+        };
+        for(unsigned i=0;i<asset.textures.size();++i) {
+            const auto path=prefix+"textures/"+stem+"-blueprint"+(i?"-"+std::to_string(i):std::string())+".png";
+            owned::ResourceBlob authored; owned::ResourceFailure failure;
+            owned::skn::Dds map;
+            if(store.resolve(path,authored,failure)) {
+                map=owned::gltf::decode_base_color(authored,publish,{1,1,1,1});
+            } else {
+                if(failure.code!=owned::ResourceFailureCode::not_found) throw std::runtime_error(failure.message);
+                const auto found=binding.base_color_overrides.find(i);
+                const auto& color=found!=binding.base_color_overrides.end()?*found->second:asset.textures[i][0];
+                if(color.mips.empty()) continue;
+                if(color.format!=owned::NativeOwnedTextureFormat::argb8888 || !color.blob.bytes)
+                    throw std::runtime_error("unexpected decoded inventory color format");
+                auto pixels=*color.blob.bytes;
+                for(size_t k=0;k+3<pixels.size();k+=4) {
+                    const auto gray=static_cast<std::uint8_t>((19*pixels[k]+183*pixels[k+1]+54*pixels[k+2]+128)>>8);
+                    pixels[k]=pixels[k+1]=pixels[k+2]=gray;
+                }
+                map=color;
+                map.blob=publish(path+"#"+color.blob.identity.key(),pixels.data(),static_cast<UINT>(pixels.size()));
+                for(auto& mip:map.mips) mip.data=map.blob.bytes->data()+(mip.data-color.blob.bytes->data());
+            }
+            binding.base_color_overrides[i]=std::make_shared<const owned::skn::Dds>(std::move(map));
+        }
+    }
+
     const CampFigureReference& reference(const std::string& name) {
         auto inserted=references.try_emplace(name);
         auto& result=inserted.first->second;
         if(!inserted.second || name.empty()) return result;
         owned::ResourceFailure failure;
-        if(!opened) {
-            owned::ResourceStoreConfig mounts;
-            opened=owned::owned_resource_runtime_mounts(mounts) && store.open(mounts,failure);
-        }
         owned::ResourceBlob blob;
         owned::FigureCpuAsset figure;
-        if(!opened || !store.resolve(name+".fig",blob,failure) ||
+        if(!open() || !store.resolve(name+".fig",blob,failure) ||
            !owned::parse_figure_asset(blob,figure,failure) || figure.bounds.empty()) return result;
         std::vector<CampItemFit::Triangle> triangles;
         const auto point=[&](unsigned i) -> CampItemFit::Point {
@@ -238,10 +293,11 @@ struct CampItemLoader {
         try {
             auto bindings=owned::gltf::select_inventory_item(request.item);
             if(bindings.empty()) return {};
+            if(request.blueprint) for(auto& part:bindings) blueprintTextures(part);
             const auto& ref=reference(request.figure);
             auto model=std::make_shared<CampItemModel>(std::move(bindings),
-                request.item.kind==owned::VisualEquipmentItem::Kind::weapon,ref);
-            model->name=request.item.shape+"/"+request.item.material;
+                request.item.kind==owned::VisualEquipmentItem::Kind::weapon,request.blueprint,ref);
+            model->name=request.item.shape+"/"+(request.blueprint?"blueprint":request.item.material);
             GameJournal::Event("RENDER","camp_item_prepared","item=%s fig=%s aligned=%d bytes=%zu",
                 model->name.c_str(),request.figure.c_str(),int(ref.valid),model->bytes);
             return model;
@@ -254,18 +310,35 @@ struct CampItemLoader {
 }
 
 struct CampItemModelCache {
-    CampPreviewCache<std::pair<DWORD,DWORD>,CampItemRequest,CampItemModel,CampItemLoader> cache{384ull<<20};
+    using Key=std::tuple<DWORD,DWORD,DWORD>;
+    CampPreviewCache<Key,CampItemRequest,CampItemModel,CampItemLoader> cache{384ull<<20};
+    static const CItemLoot* blueprint(const CItem& item) {
+        if(item.GetTypeID()!=ITID_ITEM_LOOT) return nullptr;
+        const auto& loot=static_cast<const CItemLoot&>(item);
+        if(loot.GetLootType()!=IDBLIT_INSTRUCTION) return nullptr;
+        const auto type=loot.GetInstructionType();
+        return type==IDBINS_ARMOR || type==IDBINS_WEAPON ? &loot : nullptr;
+    }
     std::shared_ptr<CampItemModel> find(const CItem& item,std::uint64_t now) {
-        return cache.find({item.GetTypeID(),item.GetSubtypeID()},now,[&] {
+        const auto* instruction=blueprint(item);
+        if(!instruction && item.GetTypeID()!=ITID_ITEM_ARMOR && item.GetTypeID()!=ITID_ITEM_WEAPON) return {};
+        const Key key=instruction?Key{ITID_ITEM_LOOT,instruction->GetInstructionType(),instruction->GetInstructionItemIndex()}:
+                                  Key{item.GetTypeID(),item.GetSubtypeID(),0};
+        return cache.find(key,now,[&] {
             CampItemRequest request;
-            const auto* shape=item.GetShapeEntry();
-            const auto* material=theItemDatabase.materials[item.GetMaterial()];
-            if (!shape || !material) return request;
+            const auto* shape=instruction?instruction->GetInstructionShape():item.GetShapeEntry();
+            if(!shape) return request;
+            request.blueprint=instruction!=nullptr;
+            if(!instruction) {
+                const auto* material=theItemDatabase.materials[item.GetMaterial()];
+                if(!material) return request;
+                request.item.material=material->GetCode();
+            }
             request.figure=LPCSTR(item.GetI3DFigureName());
-            request.item.shape=shape->GetCode(); request.item.material=material->GetCode();
-            if(item.GetTypeID()==ITID_ITEM_ARMOR) {
+            request.item.shape=shape->GetCode();
+            if(shape->GetTypeID()==ITID_ITEM_ARMOR) {
                 request.item.kind=owned::VisualEquipmentItem::Kind::armor;
-                request.item.slot="armor_"+std::to_string(static_cast<const CItemArmor&>(item).GetArmorType());
+                request.item.slot="armor_"+std::to_string(static_cast<const SIDBArmorShape*>(shape)->dwTypeID);
             } else request.item.slot="hand_r";
             return request;
         });

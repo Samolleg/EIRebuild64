@@ -69,7 +69,7 @@ inline Placement fit(const Cloud& source,const Cloud& target,bool weapon) {
     Placement result;
     result.sourceCenter=source.center; result.targetCenter=target.center;
     result.scale=target.rms/source.rms;
-    float best=std::numeric_limits<float>::max();
+    float best=(std::numeric_limits<float>::max)();
     std::array<unsigned,3> order{0,1,2};
     do {
         const int parity=((order[0]>order[1])+(order[0]>order[2])+(order[1]>order[2]))%2?-1:1;
@@ -83,7 +83,7 @@ inline Placement fit(const Cloud& source,const Cloud& target,bool weapon) {
             float error=(weapon?.0001f:.035f)*(1-rotation[1][1])*Cloud::count;
             for(const auto& p:source.samples) {
                 const auto v=rotate(rotation,p);
-                float nearest=std::numeric_limits<float>::max();
+                float nearest=(std::numeric_limits<float>::max)();
                 for(const auto& q:target.samples) {
                     const auto d=delta(v,q); nearest=(std::min)(nearest,dot(d,d));
                 }
