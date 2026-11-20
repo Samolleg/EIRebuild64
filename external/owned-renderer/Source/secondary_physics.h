@@ -8,19 +8,10 @@ using SecondaryPoint = std::array<float,3>;
 constexpr unsigned body_parts=8, hair_groups=4, hair_points=5;
 inline constexpr float secondary_limit=.25f;
 inline constexpr double secondary_step=1./120.;
-struct SecondarySegment { SecondaryPoint pivot{}, end{}, lateral{}; };
 struct SecondaryTargets {
-    // Four joints on each side, ordered base, middle, tip, glute.
-    std::array<SecondarySegment,body_parts> body{};
     std::array<SecondaryPoint,hair_groups*hair_points> hair{};
-    bool has_hair=false;
-};
-struct SecondaryDelta {
-    SecondaryPoint shift{};
-    std::array<float,4> rotation{0,0,0,1};
 };
 struct SecondaryPose {
-    std::array<SecondaryDelta,body_parts> body{};
     std::array<SecondaryPoint,hair_groups*hair_points> hair{};
 };
 struct SecondaryPhysics {
