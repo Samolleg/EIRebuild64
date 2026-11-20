@@ -344,10 +344,6 @@ bool E4CampAccess::DrawGrid(CI3DObjectInventoryItems* p,CRenderer* renderer){
     const int cols=l.grid_columns(v),rows=l.grid_rows(v);ObserveGrid(v,first,count,p->nSortMode,cols,rows);
     Scope scope(v?Role::vendor:Role::wagon);
     auto& cache=grids[p];cache.visible.clear();
-    for(int i=first;i<count&&i<first+cols*rows;++i)
-        if(cache.items[i])cache.visible.emplace_back(cache.items[i]->GetI3DTextureName());
-    if(!cache.visible.empty())owned::camp_inventory_request_icon(cache.visible.front().c_str(),renderer->GetD3D()->GetDevice().Get());
-    owned::camp_inventory_prioritize_icons(!v?0:screen->bIsSpellConstr&&p==screen->pAssortSpells?1:2,cache.visible,{});
     const Rect native{50,float(p->nTopHeight),150,float(p->nTopHeight+100)};
     auto* cell=art(p);
     if(!cell->figures.GetSize()){
@@ -361,10 +357,11 @@ bool E4CampAccess::DrawGrid(CI3DObjectInventoryItems* p,CRenderer* renderer){
         if(entry.index>=count||!p->pSortedItems[entry.index])return;
         SDrawItem item;item.pItem=p->pSortedItems[entry.index];item.fX=100;item.fY=float(p->nTopHeight+50);item.fZ=p->fDepth*1.5f;item.fPixSize=100;item.eFrom=p->ePartType;
         VisualScope clip(owned::camp::clipped_composition(l,entry.placement,entry.icon_clip),true);
-        ItemCost timer(true);BoolScope grid_scope(in_grid);p->pScreen->DrawItem(renderer,item);
+        ItemCost timer(true);BoolScope grid_scope(in_grid);p->pScreen->DrawItem(renderer,item,&cache.visible);
     },[&](int i,Rect target){
         auto transform=placed({rect(p->areas[i+2]->rect),target});p->figures[i+2]->Draw(renderer);
     },[&]{rail_draw(!v?List::stash:screen->bIsSpellConstr&&p==screen->pAssortSpells?List::spell_vendor:List::item_vendor,renderer);});
+    owned::camp_inventory_prioritize_icons(!v?0:screen->bIsSpellConstr&&p==screen->pAssortSpells?1:2,cache.visible,{});
     auto& text=grid_text[p];const auto r=l.grid(v);
     if(!text)text=std::make_unique<CI3DSurface>(p->GetI3D(),int(r.left),int(r.top),int(r.right),int(r.bottom));
     std::vector<std::pair<int,int>> labels(cols*rows,{1,-1});

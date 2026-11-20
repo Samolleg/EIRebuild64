@@ -6,6 +6,13 @@
 #include <mutex>
 #include <thread>
 
+// A null model is not permission to draw a FIG. Only a completed lookup
+// can establish that the legacy resource is the item's final presentation.
+template<class Model> struct CampPreviewSelection {
+    std::shared_ptr<Model> model;
+    bool useFigure=false;
+};
+
 // One CPU loader per open camp screen. Only copied resource names cross the
 // thread boundary; rendering and the first GPU submission stay on the UI thread.
 template<class Key,class Request,class Model,class Loader>
@@ -68,7 +75,7 @@ public:
         worker.join();
     }
     template<class Describe>
-    std::shared_ptr<Model> find(Key key,std::uint64_t now,Describe describe) {
+    CampPreviewSelection<Model> find(Key key,std::uint64_t now,Describe describe) {
         std::lock_guard<std::mutex> guard(lock);
         const bool newFrame=now!=frame;
         frame=now;
@@ -78,9 +85,11 @@ public:
         const bool revisit=now-entry.frame>1;
         entry.frame=now;
         if(inserted.second || (entry.state==State::pending && revisit) || (newFrame && bytes>budget)) wake.notify_one();
-        if(!entry.model || entry.shown) return entry.model;
+        if(entry.state!=State::done) return {};
+        if(!entry.model) return {nullptr,true};
+        if(entry.shown) return {entry.model,false};
         if(publishedFrame==now) return {}; // Amortize cold GPU uploads across frames.
         publishedFrame=now;entry.shown=true;
-        return entry.model;
+        return {entry.model,false};
     }
 };

@@ -3,7 +3,7 @@
 #include "retained_static_submission.h"
 #include "ModelPreviewLighting.h"
 #include "../WideScreen.h"
-#include "CampItemFit.h"
+#include "CampClothingFit.h"
 #include "CampPreviewCache.h"
 
 namespace {
@@ -45,6 +45,7 @@ struct CampItemPart {
 struct CampFigureReference {
     CampItemFit::Cloud cloud;
     owned::FigureBounds bounds;
+    CampItemFit::ClothingLayout clothing;
     bool valid=false;
 };
 
@@ -57,8 +58,9 @@ struct CampItemModel {
     std::size_t bytes=sizeof(CampItemModel);
     std::string name;
     mutable bool reported=false;
+    bool clothing=false;
 
-    CampItemModel(std::vector<owned::gltf::EquipmentAsset> bindings, bool weapon,bool blueprint,const CampFigureReference& reference) {
+    CampItemModel(std::vector<owned::gltf::EquipmentAsset> bindings, const std::string& slot,bool blueprint,const CampFigureReference& reference):clothing(slot.rfind("armor_",0)==0) {
         std::vector<CampItemFit::Triangle> triangles;
         std::array<float,3> low{FLT_MAX,FLT_MAX,FLT_MAX},high{-FLT_MAX,-FLT_MAX,-FLT_MAX};
         for (auto& binding:bindings) {
@@ -114,6 +116,18 @@ struct CampItemModel {
                 }
             }
         }
+        if(clothing && reference.valid) {
+            const CampItemFit::ClothingPose pose(triangles,reference.clothing,slot=="armor_6",slot=="armor_5");
+            for(auto& part:parts) for(auto& mesh:part.meshes)
+                for(unsigned i=0;i<mesh.components.size();++i) {
+                    const unsigned lane=i%4;
+                    auto& p=mesh.positions[i/4];auto& n=mesh.normals[i/4];
+                    CampItemFit::Point point{p.x[lane],p.y[lane],p.z[lane]},normal{n.x[lane],n.y[lane],n.z[lane]};
+                    pose.apply(point,normal);
+                    p.x[lane]=point[0];p.y[lane]=point[1];p.z[lane]=point[2];
+                    n.x[lane]=normal[0];n.y[lane]=normal[1];n.z[lane]=normal[2];
+                }
+        }
         for (auto& part:parts) for (auto& mesh:part.meshes) {
             owned::NativeGeometryView geometry{};
             mesh.streams(geometry);
@@ -123,8 +137,8 @@ struct CampItemModel {
                  +mesh.components.capacity()*sizeof(owned::NativeVertexComponent)+mesh.indices.capacity()*sizeof(std::uint16_t);
         }
         CampItemFit::Cloud source;
-        if(reference.valid && source.prepare(triangles)) {
-            placement=CampItemFit::fit(source,reference.cloud,weapon);
+        if(reference.valid && (clothing || source.prepare(triangles))) {
+            if(!clothing) placement=CampItemFit::fit(source,reference.cloud,true);
             cardMax={reference.bounds.maximum[0],reference.bounds.maximum[1]};
             cardCenter={reference.bounds.center[0],reference.bounds.center[1]};
             if ((std::max)(cardMax[0],cardMax[1])<=1.e-6f) cardMax={1,1};
@@ -172,7 +186,10 @@ struct CampItemModel {
         std::memcpy(clip.data(),&projection,sizeof(projection));
         OwnedRender::ModelPreviewLighting light;
         if (!OwnedRender::produce_model_preview_lighting(clip,{at.x,at.y,at.z},light,owned::PreviewStudioStyle::soft_figure)) return;
-        light.world.ambient={.78f,.78f,.78f,1.f};
+        if(clothing) {
+            light.world.ambient={.40f,.40f,.40f,1.f};
+            light.world.sunlight_diffuse={1.f,.98f,.96f,1.f};
+        } else light.world.ambient={.78f,.78f,.78f,1.f};
         for (const auto& part:parts) for (const auto& mesh:part.meshes) {
             const auto& b=part.binding;
             const auto& maps=b.asset->textures.at(mesh.material);
@@ -197,6 +214,9 @@ struct CampItemModel {
                 color==b.base_color_overrides.end()?maps[0]:*color->second,
                 orm==b.metallic_roughness_overrides.end()?nullptr:orm->second.get(),
                 blueprint || identity==b.material_identities.end()?nullptr:identity->second.get());
+            // A head or torso normally occludes the inside of a worn shell.
+            // In the inventory keep the outward faces, including the open front of a cap.
+            if(clothing) view.owned_fixed_state.cull_mode=D3DCULL_CW;
             if (!renderer->GetD3D()->SubmitC74Figure(view,&light.world,light.points)) {
                 if (!reported) GameJournal::Event("RENDER","camp_item_glb_failed","item=%s",name.c_str());
                 reported=true;
@@ -266,7 +286,7 @@ struct CampItemLoader {
         }
     }
 
-    const CampFigureReference& reference(const std::string& name) {
+    const CampFigureReference& reference(const std::string& name,const std::string& slot) {
         auto inserted=references.try_emplace(name);
         auto& result=inserted.first->second;
         if(!inserted.second || name.empty()) return result;
@@ -283,7 +303,10 @@ struct CampItemLoader {
         };
         for(unsigned i=0;i+2<figure.indices.size();i+=3)
             triangles.push_back({point(i),point(i+1),point(i+2)});
-        result.valid=result.cloud.prepare(triangles);
+        if(slot.rfind("armor_",0)==0) {
+            result.clothing=CampItemFit::ClothingLayout::measure(triangles,slot=="armor_5" || slot=="armor_6",false);
+            result.valid=result.clothing.piece[0].box.valid();
+        } else result.valid=result.cloud.prepare(triangles);
         result.bounds=figure.bounds.front();
         return result;
     }
@@ -294,9 +317,9 @@ struct CampItemLoader {
             auto bindings=owned::gltf::select_inventory_item(request.item);
             if(bindings.empty()) return {};
             if(request.blueprint) for(auto& part:bindings) blueprintTextures(part);
-            const auto& ref=reference(request.figure);
+            const auto& ref=reference(request.figure,request.item.slot);
             auto model=std::make_shared<CampItemModel>(std::move(bindings),
-                request.item.kind==owned::VisualEquipmentItem::Kind::weapon,request.blueprint,ref);
+                request.item.slot,request.blueprint,ref);
             model->name=request.item.shape+"/"+(request.blueprint?"blueprint":request.item.material);
             GameJournal::Event("RENDER","camp_item_prepared","item=%s fig=%s aligned=%d bytes=%zu",
                 model->name.c_str(),request.figure.c_str(),int(ref.valid),model->bytes);
@@ -319,9 +342,9 @@ struct CampItemModelCache {
         const auto type=loot.GetInstructionType();
         return type==IDBINS_ARMOR || type==IDBINS_WEAPON ? &loot : nullptr;
     }
-    std::shared_ptr<CampItemModel> find(const CItem& item,std::uint64_t now) {
+    CampPreviewSelection<CampItemModel> find(const CItem& item,std::uint64_t now) {
         const auto* instruction=blueprint(item);
-        if(!instruction && item.GetTypeID()!=ITID_ITEM_ARMOR && item.GetTypeID()!=ITID_ITEM_WEAPON) return {};
+        if(!instruction && item.GetTypeID()!=ITID_ITEM_ARMOR && item.GetTypeID()!=ITID_ITEM_WEAPON) return {nullptr,true};
         const Key key=instruction?Key{ITID_ITEM_LOOT,instruction->GetInstructionType(),instruction->GetInstructionItemIndex()}:
                                   Key{item.GetTypeID(),item.GetSubtypeID(),0};
         return cache.find(key,now,[&] {
