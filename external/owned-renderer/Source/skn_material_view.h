@@ -1,4 +1,5 @@
 #pragma once
+#include <d3d.h>
 #include "skn_runtime.h"
 
 namespace owned::skn {
