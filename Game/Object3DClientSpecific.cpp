@@ -44,6 +44,7 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #ifndef _A4
 #include "UnitClientSpecific.h"
+#include "WorldServer.h"
 #include "PlayerClient.h"
 #include "WorldInterface.h"
 #include "Terrain.h"
@@ -1044,6 +1045,26 @@ bool CObject3DClientSpecific::PrepareOwnedResources(bool publishAppearance)
                 clip=name;seconds=named->second*(std::clamp)(animation->GetTime()/float(action->dwAnimationLength),0.f,1.f);
             }
         }
+#ifndef _A4
+        if (object->WhoAmI()==HPC_UNIT && GetWorld()==&theWorld && theWorldServer.GetMapObjectManager()) {
+            const auto* horse=theWorldServer.GetUnit(object->GetID());
+            const auto* rider=horse && horse->ridingPassenger>=0 ? theWorldServer.GetUnit(horse->ridingPassenger) : nullptr;
+            const double tick=theWorld.GetRenderTimeSegments();
+            const bool held=rider && rider->ridingHorse==horse->GetID() && !rider->RidingTransition(tick);
+            const bool calm=held && !horse->IsMoving() && !horse->IsDead() &&
+                (clip=="idle" || clip.rfind("cidle",0)==0);
+            const auto idle=nativeRidingIdle.Update(calm,tick*(DW_SEGMENT_TIME/1000.),false);
+            if (held) {
+                const auto heldClip="tack_held_"+clip;
+                if (base->clip_lengths.count(heldClip)) clip=heldClip;
+            }
+            if (calm) {
+                const char* rest=idle.variant==1 ? "tack_held_riding_idle_perk_soft" :
+                    idle.variant==2 ? "tack_held_riding_idle_nod_soft" : "tack_held_idle";
+                if (base->clip_lengths.count(rest)) { clip=rest; seconds=idle.time; }
+            }
+        }
+#endif
         const auto duration=base->clip_lengths.find(clip);
         if(duration!=base->clip_lengths.end() && duration->second>0){
             if(!action || !action->IsUnique())seconds=std::fmod(seconds,duration->second);
