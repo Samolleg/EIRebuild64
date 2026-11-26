@@ -21,6 +21,7 @@ struct Part {
 struct ModelView {
     std::string primary,secondary,clip;
     float seconds=0;
+    std::array<float,3> shape{.5f,.5f,.5f}; // strength, grace and stature
 };
 struct ModelMotion;
 struct Asset {

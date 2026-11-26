@@ -53,6 +53,7 @@ struct ModelMotion {
     ResourceBlob blob;
     std::shared_ptr<cgltf_data> document;
     ScenePose::Clips clips;
+    std::unique_ptr<SceneForm> form;
     std::vector<Primitive> parts;
 };
 
@@ -87,7 +88,8 @@ std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& 
                 for(const auto& b:extra.at("ei").at("bindings"))if(b.contains("legacyClip")&&b.contains("clip"))
                     out->clip_bindings[lower(b.at("legacyClip").get<std::string>())]=lower(b.at("clip").get<std::string>());
         }
-        pose=std::make_unique<ScenePose>(d,motion->clips,view->clip,view->seconds);
+        motion->form=std::make_unique<SceneForm>(d,view->shape);
+        pose=std::make_unique<ScenePose>(d,motion->clips,view->clip,view->seconds,*motion->form);
         if(!motion->clips.empty())out->motion=motion;
     }
     if(meta.contains("wind")){
@@ -166,6 +168,8 @@ std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& 
                 auto legacy=std::make_shared<MaterialCpuAsset>();legacy->source=MaterialValueSource::completed_native;
                 legacy->diffuse=legacy->ambient={1,1,1,1};legacy->specular={0,0,0,1};legacy->emissive={0,0,0,1};part.material=legacy;
                 auto mesh=std::make_shared<FigureCpuAsset>();mesh->identity=blob.identity;mesh->identity.canonical_name+="#environment/"+part.name;
+                if(view && view->shape!=std::array<float,3>{.5f,.5f,.5f})
+                    mesh->identity.canonical_name+="/form/"+Json(view->shape).dump();
                 mesh->signature=shapes==1?0x31474946u:0x38474946u;mesh->shape_count=shapes;
                 const unsigned count=unsigned(pos->count);mesh->position_groups=mesh->normal_groups=(count+3)/4;
                 mesh->positions.resize(shapes*mesh->position_groups);mesh->normals.resize(shapes*mesh->normal_groups);
@@ -264,7 +268,7 @@ std::shared_ptr<const Asset> decode(const ResourceBlob& blob,const std::string& 
 std::shared_ptr<const Asset> sample_model(const std::shared_ptr<const Asset>& base,const std::string& clip,float seconds){
     if(!base || !base->motion || clip.empty())return base;
     const auto& motion=*base->motion;const auto& d=*motion.document;
-    ScenePose pose(d,motion.clips,clip,seconds);
+    ScenePose pose(d,motion.clips,clip,seconds,*motion.form);
     auto out=std::make_shared<Asset>(*base);out->view.clip=clip;out->view.seconds=seconds;
     std::map<const cgltf_skin*,std::vector<ScenePose::Matrix>> palettes;
     for(size_t pi=0;pi<out->parts.size();++pi){
@@ -361,7 +365,7 @@ std::shared_ptr<const Asset> select(ResourceStore& store,const std::string& visu
     ResourceLocation location;ResourceFailure failure;require(store.locate(path,location,failure),"resource "+path+": "+failure.message);
     auto identity=location.identity();const bool physical=identity.container_file_key!=0;
     if(physical)identity.container_incarnation=identity.container_file_key;
-    const auto key=std::string(physical?"file:":"scope:")+identity.key()+"|"+lower(visual)+"|"+Json::array({view.primary,view.secondary,view.clip,view.seconds}).dump();
+    const auto key=std::string(physical?"file:":"scope:")+identity.key()+"|"+lower(visual)+"|"+Json::array({view.primary,view.secondary,view.clip,view.seconds,view.shape}).dump();
     static std::mutex lock;static std::map<std::string,std::weak_ptr<const Asset>> cache;
     std::lock_guard<std::mutex> guard(lock);if(auto found=cache[key].lock())return found;
     ResourceBlob blob;require(store.read(location,blob,failure),"resource read: "+failure.message);
@@ -375,7 +379,7 @@ std::shared_ptr<const Asset> select(const std::string& visual,const ModelView& v
     std::lock_guard<std::mutex> guard(lock);ResourceStoreConfig mounts;std::uint64_t current=0;ResourceFailure failure;
     if(!owned_resource_runtime_mounts(mounts,&current))return {};
     if(current!=generation){store.close();require(store.open(mounts,failure),"mounts");generation=current;cache.clear();absent.clear();}
-    const auto key=lower(visual)+"|"+Json::array({view.primary,view.secondary,view.clip,view.seconds}).dump();if(absent.count(key))return {};if(auto found=cache[key].lock())return found;
+    const auto key=lower(visual)+"|"+Json::array({view.primary,view.secondary,view.clip,view.seconds,view.shape}).dump();if(absent.count(key))return {};if(auto found=cache[key].lock())return found;
     auto result=select(store,visual,view);if(result)cache[key]=result;else absent.insert(key);return result;
 }
 #endif

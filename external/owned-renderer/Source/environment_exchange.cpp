@@ -63,12 +63,16 @@ extern "C" __declspec(dllexport) int32_t EI_ENV_CALL ataman_model_decode(const v
     return decodeView(data,bytes,name,&v,sink,context,error,capacity);
 }catch(...){return -1;}
 
-extern "C" __declspec(dllexport) int32_t EI_ENV_CALL ataman_model_open(const void* data,uint64_t bytes,const char* name,const char* primary,const char* secondary,const char* clip,EiEnvironmentSink sink,void* context,char* error,uint32_t capacity,void** handle) noexcept try {
+extern "C" __declspec(dllexport) int32_t EI_ENV_CALL ataman_model_open_form(const void* data,uint64_t bytes,const char* name,const char* primary,const char* secondary,const char* clip,const float* shape,EiEnvironmentSink sink,void* context,char* error,uint32_t capacity,void** handle) noexcept try {
     if(!handle)return -1;
     *handle=nullptr;
     owned::environment::ModelView view{primary?primary:"",secondary?secondary:"",clip?clip:"",0};
+    if(shape)std::copy_n(shape,3,view.shape.begin());
     return decodeView(data,bytes,name,&view,sink,context,error,capacity,handle);
 }catch(...){return -1;}
+extern "C" __declspec(dllexport) int32_t EI_ENV_CALL ataman_model_open(const void* data,uint64_t bytes,const char* name,const char* primary,const char* secondary,const char* clip,EiEnvironmentSink sink,void* context,char* error,uint32_t capacity,void** handle) noexcept {
+    return ataman_model_open_form(data,bytes,name,primary,secondary,clip,nullptr,sink,context,error,capacity,handle);
+}
 extern "C" __declspec(dllexport) void EI_ENV_CALL ataman_model_close(void* handle) noexcept {
     delete static_cast<ModelHandle*>(handle);
 }
