@@ -574,7 +574,7 @@ void CAnimationSystem2::SetAnimation(const SADEntry *lpNewADEntry)
         pNode->SetMainAsCurrent();
     }
     // load in the new format
-    BOOL bRetVal = static_cast<CFigureManager *>(GetWorld()->GetFigureManager())
+    BOOL bRetVal = lpObject3D->GetEnvironment() || static_cast<CFigureManager *>(GetWorld()->GetFigureManager())
                        ->LoadAnimation(this, lpObject3D->GetMaskName(), lpNewADEntry);
     // load in the old format
     if (bRetVal == FALSE)
@@ -1011,7 +1011,7 @@ void CAnimationSystem2::SetTime(float fpNewTime)
     // set animation entry for all nodes if animation was changed
     if (pOldEntry != lpADEntry)
     {
-        BOOL bRetVal = static_cast<CFigureManager *>(GetWorld()->GetFigureManager())
+        BOOL bRetVal = lpObject3D->GetEnvironment() || static_cast<CFigureManager *>(GetWorld()->GetFigureManager())
                            ->LoadAnimation(this, lpObject3D->GetMaskName(), lpADEntry);
         if (bRetVal == FALSE)
         {

@@ -84,6 +84,7 @@ private:
         DWORD flags = 0;
         SComplection shape{};
     } neutralPose;
+    std::shared_ptr<const owned::environment::Asset> nativePose;
     bool ownedAppearanceAttempted = false;
     std::uint64_t ownedAppearanceRevision = 0;
     //
