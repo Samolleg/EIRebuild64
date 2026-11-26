@@ -271,6 +271,39 @@ static const D3DCOLORVALUE dcvMagicColors[] = { { 1, 0, 0, 1 }, { 0, 1, 1, 1 }, 
                                                 { 1, 0, 1, 1 }, { 0, 0, 1, 1 } };
 #include "OwnedRender/CampItemModel.inl"
 #include "OwnedRender/SinglePreview.inl"
+void CI3DItemScreen::BeginCampPreviews(int shop)
+{
+    owned::ResourceStoreConfig mounts;
+    std::uint64_t generation=0;
+    const bool available=owned::owned_resource_runtime_mounts(mounts,&generation);
+    const unsigned cellPixels=static_cast<unsigned>((pI3D->GetHeight()+5)/6);
+    if(!available || !pI3D->lastCampModels || shop!=pI3D->campModelShop ||
+       generation!=pI3D->campModelGeneration || pI3D->lastCampModels->cellPixels!=cellPixels) {
+        pI3D->lastCampModels=std::make_shared<CampItemModelCache>();
+        pI3D->lastCampModels->cellPixels=cellPixels;
+        pI3D->campModelShop=shop;pI3D->campModelGeneration=generation;
+    }
+    campItemModels=pI3D->lastCampModels;
+    campItemModels->cache.begin();
+}
+void CI3DItemScreen::FinishCampPreviews()
+{
+    const auto started=GetTickCount64();
+    const auto count=campItemModels->cache.finish();
+    GameJournal::Event("SHOP","preview_stock_ready","keys=%zu final_wait_ms=%llu",count,GetTickCount64()-started);
+}
+void CI3DItemScreen::PreloadCampParty(const CParty& party)
+{
+    if(!campItemModels) campItemModels=std::make_shared<CampItemModelCache>();
+    const auto queue=[&](const auto& items) {
+        for(int i=0;i<items.GetSize();++i) if(items[i]) campItemModels->find(*items[i],true);
+    };
+    for(int i=0;i<party.people.GetSize();++i) {
+        queue(party.people[i].weapons);
+        queue(party.people[i].armors);
+    }
+    queue(party.allWagonItems);
+}
 void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item, std::vector<std::string>* visibleLegacyIcons)
 {
     if (!item.pItem) return;
@@ -280,7 +313,7 @@ void CI3DItemScreen::DrawItem(CRenderer *pRend, SDrawItem &item, std::vector<std
     CampPreviewSelection<CampItemModel> selection{nullptr,true};
     if (dynamic_cast<CI3DScreenCamp*>(this)) {
         if (!campItemModels) campItemModels=std::make_shared<CampItemModelCache>();
-        selection=campItemModels->find(*item.pItem,pRend->GetD3D()->ModelPreviewFrame());
+        selection=campItemModels->find(*item.pItem);
     }
     owned::ModelDrawReference figureLifetime;
     CI3DFigure* pFig=nullptr;

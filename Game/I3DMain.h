@@ -32,8 +32,13 @@ class CRenderer;
 class CI3DEffects;
 class CDXGISurface;
 /////////////////////////////////////////////////////////////////////////////////////
+struct CampItemModelCache;
 class CInterface3D
 {
+    friend class CI3DItemScreen;
+    std::shared_ptr<CampItemModelCache> lastCampModels;
+    std::uint64_t campModelGeneration=0;
+    int campModelShop=-1;
     friend struct LiveUiAccess;
 private:
     int nScreenWidth, nScreenHeight; // screen size ( for area initialization )

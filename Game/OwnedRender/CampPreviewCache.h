@@ -1,95 +1,100 @@
 #pragma once
+#include <algorithm>
+#include <array>
 #include <condition_variable>
-#include <cstdint>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <thread>
 
-// A null model is not permission to draw a FIG. Only a completed lookup
-// can establish that the legacy resource is the item's final presentation.
 template<class Model> struct CampPreviewSelection {
     std::shared_ptr<Model> model;
     bool useFigure=false;
 };
 
-// One CPU loader per open camp screen. Only copied resource names cross the
-// thread boundary; rendering and the first GPU submission stay on the UI thread.
+// The UI snapshots the actual stock, and the worker prepares each distinct
+// key once. Seal the batch before presenting the shop. Ready entries from the
+// previous visit remain available while the new assortment is being prepared.
 template<class Key,class Request,class Model,class Loader>
 class CampPreviewCache {
-    enum class State { pending, loading, done };
     struct Entry {
         Request request;
         std::shared_ptr<Model> model;
-        std::uint64_t frame=0, order=0;
-        State state=State::pending;
-        bool shown=false;
+        bool ready=false,used=true;
     };
-    Loader loader;
-    const std::size_t budget;
+    struct Lane {
+        Loader loader;
+        std::deque<Entry*> queue;
+        std::condition_variable work;
+        std::thread thread;
+    };
+    std::array<Lane,4> lanes;
+    const unsigned laneCount=(std::clamp)(std::thread::hardware_concurrency()/2,1u,4u);
     std::map<Key,Entry> entries;
-    std::size_t bytes=0;
-    std::uint64_t frame=0,order=0,publishedFrame=UINT64_MAX;
+    std::size_t pending=0;
+    std::mutex mutex;
+    std::condition_variable finished;
     bool stop=false;
-    std::mutex lock;
-    std::condition_variable wake;
-    std::thread worker;
 
-    void run() {
+
+    void run(Lane& lane) {
         SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);
-        std::unique_lock<std::mutex> guard(lock);
-        while (!stop) {
-            auto next=entries.end(), oldest=entries.end();
-            for(auto it=entries.begin();it!=entries.end();++it) {
-                const auto& entry=it->second;
-                const bool recent=frame-entry.frame<=1;
-                if(recent && entry.state==State::pending && (next==entries.end() ||
-                   entry.frame>next->second.frame || (entry.frame==next->second.frame && entry.order<next->second.order)))
-                    next=it;
-                if(!recent && entry.model && (oldest==entries.end() || entry.frame<oldest->second.frame))
-                    oldest=it;
-            }
-            if(bytes>budget && oldest!=entries.end()) {
-                auto retired=std::move(oldest->second.model);
-                bytes-=retired->bytes;
-                entries.erase(oldest);
-                guard.unlock(); retired.reset(); guard.lock();
-                continue;
-            }
-            if(next==entries.end()) {wake.wait(guard);continue;}
-            auto& entry=next->second;
-            entry.state=State::loading;
-            guard.unlock();
-            auto model=loader(entry.request);
-            guard.lock();
-            entry.model=std::move(model);
-            if(entry.model) bytes+=entry.model->bytes;
-            entry.state=State::done;
+        std::unique_lock<std::mutex> lock(mutex);
+        for (;;) {
+            lane.work.wait(lock,[&]{return stop || !lane.queue.empty();});
+            if(stop) return;
+            auto* entry=lane.queue.front();lane.queue.pop_front();
+            lock.unlock();
+            auto model=lane.loader(entry->request);
+            lock.lock();
+            entry->model=std::move(model);
+            entry->ready=true;
+            --pending;finished.notify_all();
         }
     }
+    void stopWorkers() {
+        {std::lock_guard<std::mutex> guard(mutex);stop=true;}
+        for(auto& lane:lanes) lane.work.notify_one();
+        for(auto& lane:lanes) if(lane.thread.joinable()) lane.thread.join();
+    }
 public:
-    explicit CampPreviewCache(std::size_t byteBudget):budget(byteBudget),worker([this]{run();}) {}
-    ~CampPreviewCache() {
-        {std::lock_guard<std::mutex> guard(lock);stop=true;}
-        wake.notify_one();
-        worker.join();
+    CampPreviewCache() {
+        try {
+            for(unsigned i=0;i<laneCount;++i)
+                lanes[i].thread=std::thread([this,i]{run(lanes[i]);});
+        } catch(...) {stopWorkers();throw;}
+    }
+    ~CampPreviewCache() {stopWorkers();}
+    void begin() {
+        std::lock_guard<std::mutex> guard(mutex);
+        for(auto& pair:entries) pair.second.used=false;
+    }
+    std::size_t finish() {
+        std::unique_lock<std::mutex> lock(mutex);
+        finished.wait(lock,[&]{return !pending;});
+        for(auto it=entries.begin();it!=entries.end();) {
+            if(!it->second.used) it=entries.erase(it);else ++it;
+        }
+        for(unsigned i=0;i<laneCount;++i) lanes[i].loader.idle();
+        return entries.size();
     }
     template<class Describe>
-    CampPreviewSelection<Model> find(Key key,std::uint64_t now,Describe describe) {
-        std::lock_guard<std::mutex> guard(lock);
-        const bool newFrame=now!=frame;
-        frame=now;
-        auto inserted=entries.try_emplace(key);
-        auto& entry=inserted.first->second;
-        if(inserted.second) {entry.request=describe();entry.order=++order;}
-        const bool revisit=now-entry.frame>1;
-        entry.frame=now;
-        if(inserted.second || (entry.state==State::pending && revisit) || (newFrame && bytes>budget)) wake.notify_one();
-        if(entry.state!=State::done) return {};
-        if(!entry.model) return {nullptr,true};
-        if(entry.shown) return {entry.model,false};
-        if(publishedFrame==now) return {}; // Amortize cold GPU uploads across frames.
-        publishedFrame=now;entry.shown=true;
-        return {entry.model,false};
+    CampPreviewSelection<Model> get(Key key,bool preload,Describe describe) {
+        std::unique_lock<std::mutex> lock(mutex);
+        auto found=entries.find(key);
+        if(found==entries.end()) {
+            Entry entry;
+            entry.request=describe();
+            found=entries.emplace(key,std::move(entry)).first;
+            auto& lane=lanes[Loader::affinity(found->second.request)%laneCount];
+            lane.queue.push_back(&found->second);++pending;lane.work.notify_one();
+        }
+        auto& entry=found->second;
+        entry.used=true;
+        if(preload) return {};
+        // Also cover an item just created in an already-open constructor.
+        finished.wait(lock,[&]{return entry.ready;});
+        return {entry.model,!entry.model};
     }
 };
