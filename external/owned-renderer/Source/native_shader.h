@@ -1258,6 +1258,7 @@ NativeWorldVertex prepareNativeWorldVertex(NativeInstance instance,uint componen
  float3 normal=loadPacked(instance.geometryOffsets.y,component.y).xyz;
  output.normal.xyz=normalize(mul(transpose(inverseObjectLinear(instance.objectToWorld)),normal));
  if(skinned){
+  component.w+=componentAddress; // skin data is relative to this component in the movable mesh
   uint4 joints=nativeGeometry.Load4(component.w);
   float4 weights=asfloat(nativeGeometry.Load4(component.w+16));
   float3 world=0,worldNormal=0,worldTangent=0;
@@ -1484,7 +1485,7 @@ void nativeStaticLodSelect(NativeDraw draw,NativeInstance instance,inout uint fi
  uint levels=min(nativeGeometry.Load(table),3u);
  if(instance.sknFactors.w>0){
   firstCount=nativeGeometry.Load(table+4);firstLevel=sknSelectedLevel;
-  if(firstLevel>0){uint2 entry=nativeGeometry.Load2(table+firstLevel*16);firstOffset=entry.x;firstCount=entry.y;}
+  if(firstLevel>0){uint2 entry=nativeGeometry.Load2(table+firstLevel*16);firstOffset=table+entry.x;firstCount=entry.y;}
   return;
  }
  float3 center=(draw.boundsMin.xyz+draw.boundsMax.xyz)*.5;
@@ -1505,10 +1506,10 @@ void nativeStaticLodSelect(NativeDraw draw,NativeInstance instance,inout uint fi
   chosen=level;
  }
  firstLevel=chosen;
- if(chosen!=0){uint2 entry=nativeGeometry.Load2(table+chosen*16);firstOffset=entry.x;firstCount=entry.y;}
+ if(chosen!=0){uint2 entry=nativeGeometry.Load2(table+chosen*16);firstOffset=table+entry.x;firstCount=entry.y;}
  if(chosen<levels&&next<fadeEnd){
   uint coverage=(uint)round(saturate((fadeEnd-next)/max(fadeEnd-limit,1e-6))*255);
-  if(coverage!=0){uint2 entry=nativeGeometry.Load2(table+(chosen+1)*16);secondOffset=entry.x;secondCount=entry.y;fade=512u|coverage;secondLevel=chosen+1;}
+  if(coverage!=0){uint2 entry=nativeGeometry.Load2(table+(chosen+1)*16);secondOffset=table+entry.x;secondCount=entry.y;fade=512u|coverage;secondLevel=chosen+1;}
  }
 }
 void nativeCurrentBounds(inout NativeDraw draw,NativeInstance instance){
@@ -2011,7 +2012,7 @@ void nativeShadowLodSelect(NativeDraw draw,NativeInstance instance,uint slice,in
  float texel=shadowBias[slice].x;
  [loop]for(uint level=1;level<=levels;++level){NATIVE_LOOP_GUARD(3u,level-1u,levels)
   if(asfloat(nativeGeometry.Load(table+level*16+8))*scale>texel)break;
-  uint2 entry=nativeGeometry.Load2(table+level*16);offset=entry.x;triangles=entry.y;
+  uint2 entry=nativeGeometry.Load2(table+level*16);offset=table+entry.x;triangles=entry.y;
  }
 }
 [numthreads(64,1,1)]void nativeShadowBuildCS(uint3 groupId:SV_GroupID,uint3 threadId:SV_GroupThreadID){
@@ -2036,7 +2037,7 @@ void nativeShadowLodSelect(NativeDraw draw,NativeInstance instance,uint slice,in
  if(instance.sknFactors.w>0&&(instance.worldGeometry&@WORLD_LOD@)!=0){
   uint table=draw.indexOffset-64,level=nativeWorldStates[draw.worldState].sknLod;
   allTriangles=nativeGeometry.Load(table+4);
-  if(level>0){uint2 entry=nativeGeometry.Load2(table+level*16);indexOffset=entry.x;allTriangles=entry.y;}
+  if(level>0){uint2 entry=nativeGeometry.Load2(table+level*16);indexOffset=table+entry.x;allTriangles=entry.y;}
   if(firstTriangle>=allTriangles)return;
  }
  uint triangleCount=min(kNativeShadowChunk,allTriangles-firstTriangle);

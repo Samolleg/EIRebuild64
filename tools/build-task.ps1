@@ -248,7 +248,7 @@ try {
         $reuseFolder = Split-Path -Parent $ShaderResourceManifest
         $destination = Join-Path $repo 'out/x64/Release/RendererShaders'
         New-Item -ItemType Directory -Force -Path $destination | Out-Null
-        $expectedNames = @('eid3d11_shaders.res','eid3d11_dxil.res','eid3d11_d3d12_shaders.res','eid3d11_camp_art.res')
+        $expectedNames = @('eid3d11_dxil.res','eid3d11_d3d12_shaders.res','eid3d11_camp_art.res')
         if (@($shaderReuse.files).Count -ne $expectedNames.Count) { throw 'Shader reuse payload count.' }
         foreach ($name in $expectedNames) {
             $entry = @($shaderReuse.files | Where-Object { $_.name -ceq $name })

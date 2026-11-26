@@ -13,8 +13,8 @@
     <ClCompile><PreprocessorDefinitions>EI_RENDER_MODULE_BUILD;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)..\dependencies\agility\1.620.2\build\native\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
-    <Link><AdditionalDependencies>d3d11.lib;d3d12.lib;dxgi.lib;dxguid.lib;%(AdditionalDependencies)</AdditionalDependencies><GenerateDebugInformation>true</GenerateDebugInformation></Link>
+    <Link><AdditionalDependencies>d3d12.lib;dxgi.lib;dxguid.lib;%(AdditionalDependencies)</AdditionalDependencies><GenerateDebugInformation>true</GenerateDebugInformation></Link>
   </ItemDefinitionGroup>
-  <ItemGroup><ClCompile Include="Module\GraphicsDevice.cpp" /><ClCompile Include="Module\Device12.cpp" /><ClCompile Include="Module\PipelineCache.cpp" /><ClCompile Include="Module\PipelineApi.cpp" /></ItemGroup>
+  <ItemGroup><ClCompile Include="Module\Device12.cpp" /><ClCompile Include="Module\PipelineCache.cpp" /><ClCompile Include="Module\PipelineApi.cpp" /></ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

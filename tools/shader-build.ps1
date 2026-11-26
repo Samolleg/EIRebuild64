@@ -72,7 +72,7 @@ function Invoke-ShaderRc([string]$Rc,[string]$ResourceFile,[string]$Output,[stri
     }finally{if([IO.File]::Exists($temp)){[IO.File]::Delete($temp)}}
 }
 function Get-ShaderGeneratedFiles([string]$Directory) {
-    $files=@('eid3d11_shaders.bin','eid3d11_shaders.rc','dxil/dxil.rc','dxil/dxil.mak')|ForEach-Object{Join-Path $Directory $_}
+    $files=@('dxil/dxil.rc','dxil/dxil.mak')|ForEach-Object{Join-Path $Directory $_}
     $sources=Join-Path $Directory 'dxil/src'
     if([IO.Directory]::Exists($sources)){$files+=@([IO.Directory]::EnumerateFiles($sources,'*.hlsl')|Sort-Object)}
     return $files
@@ -86,11 +86,11 @@ function Invoke-ShaderGeneration([string]$Embedder,[string]$Compiler,[string]$Di
     $null=[IO.Directory]::CreateDirectory($Directory)
     if($Run){& $Run $Embedder $Directory}else{
         Push-Location $Directory
-        try{& $Embedder eid3d11_shaders.bin --dxil-sources dxil;if($LASTEXITCODE -ne 0){throw 'Shader generation failed.'}}
+        try{& $Embedder --dxil-sources dxil;if($LASTEXITCODE -ne 0){throw 'Shader generation failed.'}}
         finally{Pop-Location}
     }
     $outputs=@(Get-ShaderGeneratedFiles $Directory)
-    if($outputs.Count -le 4){throw 'Shader generator produced no HLSL sources.'}
+    if($outputs.Count -le 2){throw 'Shader generator produced no HLSL sources.'}
     foreach($file in $outputs){if(![IO.File]::Exists($file) -or ([IO.FileInfo]::new($file)).Length -eq 0){throw "Missing shader generation output: $file"}}
     Save-ShaderReceipt $receipt $inputHash $outputs
     return $true

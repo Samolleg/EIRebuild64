@@ -47,12 +47,12 @@ $embedder=Join-Path $root 'embedder.exe';Write-ShaderText $embedder 'embedder-on
 $directory=Join-Path $root 'generated'
 $generate={param($exe,$dir)
     $script:generatorCalls++
-    foreach($name in @('eid3d11_shaders.bin','eid3d11_shaders.rc','dxil/dxil.rc','dxil/dxil.mak','dxil/src/one.hlsl')){
+    foreach($name in @('dxil/dxil.rc','dxil/dxil.mak','dxil/src/one.hlsl')){
         Write-ShaderText (Join-Path $dir $name) ('stable '+$name)
     }
 }
 $null=Invoke-ShaderGeneration $embedder $compiler $directory $generate
-$binary=Join-Path $directory 'eid3d11_shaders.bin';$stamp=[IO.File]::GetLastWriteTimeUtc($binary)
+$binary=Join-Path $directory 'dxil/dxil.rc';$stamp=[IO.File]::GetLastWriteTimeUtc($binary)
 Check (!(Invoke-ShaderGeneration $embedder $compiler $directory $generate)) 'no-op generation executed'
 Write-ShaderText $embedder 'embedder-two'
 $null=Invoke-ShaderGeneration $embedder $compiler $directory $generate

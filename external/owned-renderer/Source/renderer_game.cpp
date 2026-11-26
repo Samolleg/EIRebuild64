@@ -172,7 +172,7 @@ void Renderer::begin_scene_game(){
  bridge_set_change_driven_poses(configured_boolean(config,"change_driven_object_poses",true));
  bridge_set_terrain_lod_enabled(configured_boolean(config,"terrain_lod",false));
  bridge_set_owned_sky(configured_integer(config,"sky_clouds",2)>0);
- bridge_set_fire_burn(configured_boolean(config,"fire_burn",false)&&configured_integer(config,"renderer_backend",0)==1);
+ bridge_set_fire_burn(configured_boolean(config,"fire_burn",false));
 }
 
 void window_sampler_present(); // TEMPORARY (proxy.cpp)

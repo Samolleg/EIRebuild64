@@ -37,14 +37,12 @@ try {
     # Test is a renderer harness, never the game executable; no game writes.
     Push-Location $bin
     try {
-        foreach($api in 11,12){
-            $destination=Join-Path $out "d3d$api"
-            $ErrorActionPreference='Continue'
-            & "$bin/PhysicsFxRenderCheck.exe" $GameRoot $destination $api *> "$out/d3d$api-result.txt"
-            $nativeExit=$LASTEXITCODE
-            $ErrorActionPreference='Stop'
-            Get-Content "$out/d3d$api-result.txt"
-            if($nativeExit -ne 0){throw "D3D$api native debris check failed ($nativeExit)"}
-        }
+        $destination=Join-Path $out "d3d12"
+        $ErrorActionPreference='Continue'
+        & "$bin/PhysicsFxRenderCheck.exe" $GameRoot $destination *> "$out/d3d12-result.txt"
+        $nativeExit=$LASTEXITCODE
+        $ErrorActionPreference='Stop'
+        Get-Content "$out/d3d12-result.txt"
+        if($nativeExit -ne 0){throw "D3D12 native debris check failed ($nativeExit)"}
     } finally {Pop-Location}
 } finally {$lock.Dispose();$env:_MSPDBSRV_ENDPOINT_=$savedEndpoint}

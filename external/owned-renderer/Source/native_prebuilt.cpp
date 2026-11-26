@@ -200,7 +200,7 @@ bool build_native_prebuilt_mesh(NativePrebuiltBuilder& builder,const NativeGeome
    const auto& list=lods->indices[level];
    std::memcpy(out+lod_at[level],list.data(),list.size()*sizeof(std::uint32_t));
    std::uint32_t* entry=table+4*(level+1);
-   entry[0]=at(lod_at[level]);entry[1]=static_cast<std::uint32_t>(list.size()/3);
+   entry[0]=static_cast<std::uint32_t>(lod_at[level]-lod_table_at);entry[1]=static_cast<std::uint32_t>(list.size()/3);
    std::memcpy(&entry[2],&lods->error[level],sizeof(float));
   }
   output.lod_levels=lods->levels;output.lod_extra_triangles=static_cast<std::uint32_t>(lods->indices[0].size()/3);

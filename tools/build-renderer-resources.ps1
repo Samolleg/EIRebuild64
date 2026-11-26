@@ -17,7 +17,6 @@ $out=[IO.Path]::GetFullPath($OutputDirectory)
 $renderer=[IO.Path]::GetFullPath($RendererRoot)
 $compiler=Join-Path ([Environment]::GetFolderPath('System')) 'd3dcompiler_47.dll'
 $null=Invoke-ShaderGeneration $Embedder $compiler $out
-$null=Invoke-ShaderRc $Rc (Join-Path $out 'eid3d11_shaders.rc') (Join-Path $out 'eid3d11_shaders.res') $out
 $null=Invoke-ShaderRc $Rc (Join-Path $renderer 'Source/camp_art.rc') (Join-Path $out 'eid3d11_camp_art.res') $renderer
 & (Join-Path $PSScriptRoot 'build-dxil.ps1') -NMake $NMake -Makefile $Makefile -OutputDirectory $out -Dxc $Dxc -Rtxdi $Rtxdi -HostD3D12 $HostD3D12
 $dxil=Join-Path $out 'dxil'

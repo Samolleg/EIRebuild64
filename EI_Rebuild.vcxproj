@@ -175,7 +175,6 @@
     <ClCompile Include="Game\OwnedRender\E1AmbientEffects.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
     <ClCompile Include="Game\OwnedRender\E1World.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
     <ClCompile Include="Game\OwnedRender\E1RendererFacade.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
-    <ClCompile Include="Game\OwnedRender\E1RendererFacadeCheck.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
     <ClCompile Include="Game\OwnedRender\E1MobSource.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
     <ClCompile Include="Game\OwnedRender\E1Scene.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
     <ClCompile Include="Game\OwnedRender\E2LoadReveal.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><AdditionalIncludeDirectories>$(OwnedRendererRoot)Source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ClCompile>
@@ -637,7 +636,6 @@
   <Import Project="tools\DirectXStatic.props" />
   <Import Project="Pak\Zstd.props" />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
-  <Import Project="OwnedRenderer\E1RendererFacadeWarpCheck.host.targets" Condition="'$(E1RendererFacadeWarpCheck)'=='true'" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 <Import Project="tools/TaskCache.targets" />

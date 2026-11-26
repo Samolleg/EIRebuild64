@@ -98,9 +98,6 @@ constexpr PlayerGraphicsSetting kSettings[] = {
      "(fewer out-of-memory crashes on big maps); DLSS needs it. Applies after restarting the game. "
      "If the host does not start, the option turns itself off.",
      nullptr, false, {1, 1, 1, 1, 1}},
-    {"renderer_backend", kCategories[0], "Renderer",
-     "Direct3D 12 runs in the 64-bit render host and is needed for frame generation and NVIDIA Reflex. Applies after restarting the game. A graphics card that cannot start Direct3D 12 uses Direct3D 11 and the option turns itself off (the reason shows on screen and in host.log).",
-     "Direct3D 11\0" "Direct3D 12\0", false, {1, 1, 1, 1, 1}},
     {"background_frame_limit", kCategories[0], "Background frame rate limit",
      "Caps the frame rate while another window is in front, so a game left running idles quietly. Off is uncapped.",
      nullptr, false, {0, 0, 0, 0, 0}},

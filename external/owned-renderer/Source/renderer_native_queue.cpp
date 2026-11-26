@@ -1294,7 +1294,8 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
    put(skin_at,source.skin_vertices,std::uint64_t(source.component_count)*244);
    for(UINT i=0;i<components.size();++i){
     components[i].normal|=0x80000000u;
-    components[i].padding=mesh.allocation.offset+skin_at+i*244;
+    // Keep the stream relocatable across save loads. HLSL adds the current component address.
+    components[i].padding=skin_at+i*244-(mesh.component_offset+i*UINT(sizeof(NativeGpuComponent)));
    }
   }
   put(mesh.position_offset,source.positions,position_bytes);
@@ -1312,7 +1313,7 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
     const auto& list=lods->indices[level];
     put(lod_at[level],list.data(),list.size()*sizeof(std::uint32_t));
     auto* entry=table+4*(level+1);
-    entry[0]=mesh.allocation.offset+lod_at[level];entry[1]=static_cast<UINT>(list.size()/3);
+    entry[0]=lod_at[level]-lod_table_at;entry[1]=static_cast<UINT>(list.size()/3);
     std::memcpy(&entry[2],&lods->error[level],sizeof(float));
     std::memcpy(&entry[3],&lods->hysteresis[level],sizeof(float));
    }

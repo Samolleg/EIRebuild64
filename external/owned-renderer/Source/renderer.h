@@ -1124,9 +1124,6 @@ public:
         std::uint64_t scene_token = 0; // scene mode: the scene thread holds the real checkpoint
     };
     HRESULT ensure(HWND hwnd, UINT width, UINT height);
-    // Explicit test entry point for headless WARP lifecycle checks. Production
-    // initialization continues to use ensure(), which selects hardware.
-    HRESULT ensure_for_test_warp(HWND hwnd, UINT width, UINT height);
     using TestInitializationObserver = void (*)(void*, const char*) noexcept;
     void set_test_initialization_observer(TestInitializationObserver observer,
         void* context) noexcept {
@@ -1136,7 +1133,6 @@ public:
     const char* test_initialization_failure_stage() const noexcept {
         return test_initialization_failure_stage_;
     }
-    HRESULT ensure_with_driver(HWND hwnd, UINT width, UINT height, D3D_DRIVER_TYPE driver);
     HRESULT resize(UINT width, UINT height);
     // Core mode: the Apply comes from the host overlay (Control) and its result goes back.
     bool consume_display_apply(DisplaySettings& settings) noexcept {
@@ -1758,7 +1754,6 @@ public:
     void core_refuse(const char* site) noexcept;
     // Host: core mode's frame start on its own device and swap chain (the
     // game window's child the host created). ensure() minus device creation.
-    HRESULT ensure_host(HWND window, UINT width, UINT height);
     // Host, before ensure_host: the F10 overlay on `window` from the game's
     // ini (the host command line names it), so the start's "Preparing
     // shaders" window can draw; the game's config command later finds it
@@ -2790,7 +2785,6 @@ private:
     // while that takes more than 150 ms. Called before the pipelines are
     // created and after every present (settings may have changed).
     void prepare_shaders() noexcept;
-    void register_embedded_shaders() noexcept;
     // Shader crash breadcrumb (eid3d11_shader_crash.txt beside the ini): a
     // preparation names the last program group it handed to the driver until
     // the next completed present closes it. Still there at startup, the last
@@ -3352,7 +3346,6 @@ private:
     // shader preparation runs on one worker, like after a parallel crash.
     bool driver_concurrent_creates_ = false;
     std::atomic<bool> shader_marker_open_{false};  // a preparation's breadcrumb awaits a completed present
-    HRESULT create_swap_chain();
     ComPtr<ID3D11Device> device_;
 #if defined(EID3D11_EMBEDDED) && !defined(EID3D11_SHADER_EMBED)
     DlssBackend dlss_backend_; // destroyed before device_, also explicitly shut down by release()
