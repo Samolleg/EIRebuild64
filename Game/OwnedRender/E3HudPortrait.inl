@@ -192,6 +192,18 @@ bool livePortrait(CI3DFigure* figure,CRenderer* game,unsigned slot,int unitId,co
     command.portrait_clip={l,t,rr,bb};
     command.base_world=base_world;
     command.world_to_clip=clip;
+    if (!registryModel) {
+        // Each retail face carrier has its own projection and animation. Frame
+        // the live FIG geometry in this slot directly, independent of that carrier.
+        const float width=hi[0]-lo[0];
+        if (!(width>0) || !(layout.width>0 && layout.height>0))return result("portrait_extent");
+        const float pixels=std::min((rr-l)*.92f/width,(bb-t)*.8f/head_height);
+        const float cx=(lo[0]+hi[0])*.5f, cy=(lo[1]+hi[1])*.5f, cz=(lo[2]+hi[2])*.5f;
+        command.base_world={1,0,0,-cx, 0,0,1,-cz, 0,-1,0,cy, 0,0,0,1};
+        command.world_to_clip={2*pixels/layout.width,0,0,(l+rr)/layout.width-1,
+            0,2*pixels/layout.height,0,1-(t+bb-(bb-t)*.08f)/layout.height,
+            0,0,-.25f/std::max(head_height,hi[1]-lo[1]),.5f, 0,0,0,1};
+    }
     command.presentation_serial=game->GetD3D()->ModelPreviewFrame();
     command.texture_time=theWorld.GetPreciseTime();
     command.fog=255;
@@ -219,7 +231,7 @@ bool livePortrait(CI3DFigure* figure,CRenderer* game,unsigned slot,int unitId,co
             std::copy_n(source.material->diffuse.begin(), 3, part.lighting.material_diffuse.begin());
             part.lighting.emissive = source.material->emissive;
             part.lighting.specular = source.material->specular; part.lighting.specular[3] = 1;
-            part.lighting.object_to_world = base_world;
+            part.lighting.object_to_world = command.base_world;
             command.parts.push_back(std::move(part));
         }
 
