@@ -678,24 +678,29 @@ bool HudLayoutContext::widescreen_hud_asset_frame(HudPanel panel,HudAssetFrame& 
     if(dock && fraction>=1.f)edges=dock;
     frame={b,5.f*g_layout.unit*g_layout.scale,edges,false,hud_opacity(panel)};return true;
 }
+bool HudLayoutContext::portrait_frame(unsigned slot, HudAssetFrame& frame) {
+    const auto* object=current_panel(unsigned(HudPanel::portraits));
+    if (!object || slot>=object->native_count || slot>=object->slots.size()) return false;
+    const auto& native=object->slots[slot];
+    const auto& r=native.rect;
+    auto h=panel_composition(unsigned(HudPanel::portraits),object);
+    if (!portrait_slot_composition(slot,object,h)) return false;
+    HudPanelBounds b{widescreen::compose_x(widescreen::placed_to_screen_x(g_layout,float(r.left+native.shift.x)),h),
+        widescreen::compose_y(widescreen::placed_to_screen_y(g_layout,float(r.top+native.shift.y)),h),
+        float(r.right-r.left)*g_layout.unit*h.scale,float(r.bottom-r.top)*g_layout.unit*h.scale};
+    frame={b,5.f*g_layout.unit*g_layout.scale,15,true,hud_opacity(HudPanel::portraits)};
+    return true;
+}
 void HudLayoutContext::widescreen_hud_asset_frames(std::vector<HudAssetFrame>& frames) {
     frames.clear();
     for(const auto panel:{HudPanel::minimap,HudPanel::character_info,HudPanel::messages}) {
         HudAssetFrame frame;if(widescreen_hud_asset_frame(panel,frame))frames.push_back(frame);
     }
     const auto* object=current_panel(unsigned(HudPanel::portraits));
-    if(!object)return;
-    const unsigned count=(std::min)(object->native_count,unsigned(object->slots.size()));
-    for(unsigned i=0;i<count;++i) {
-        const auto& native=object->slots[i];
-        if(!native.selection_frame)continue;
-        const auto r=native.rect;const auto* shift=&native.shift.x;
-        auto h=panel_composition(unsigned(HudPanel::portraits),object);
-        if(!portrait_slot_composition(i,object,h))continue;
-        HudPanelBounds b{widescreen::compose_x(widescreen::placed_to_screen_x(g_layout,float(r.left+shift[0])),h),
-            widescreen::compose_y(widescreen::placed_to_screen_y(g_layout,float(r.top+shift[1])),h),
-            float(r.right-r.left)*g_layout.unit*h.scale,float(r.bottom-r.top)*g_layout.unit*h.scale};
-        frames.push_back({b,5.f*g_layout.unit*g_layout.scale,15,true,hud_opacity(HudPanel::portraits)});
+    if (!object) return;
+    for (unsigned i=0; i<object->native_count && i<object->slots.size(); ++i) {
+        HudAssetFrame frame;
+        if (object->slots[i].selection_frame && portrait_frame(i,frame)) frames.push_back(frame);
     }
 }
 void HudLayoutContext::reset_fades(std::uint64_t now) noexcept {

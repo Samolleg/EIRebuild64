@@ -1394,6 +1394,36 @@ std::shared_ptr<const FigureCpuAsset> retained_visual_figure_asset(
         diagnostic);
 }
 
+// What the game's draw shows for a texture with no surface (SetTexture NULL):
+// the material colour alone. One white 4x4 ARGB8888 MMP, one mip, held once.
+std::shared_ptr<const TextureCpuAsset> visual_untextured_asset(ResourceFailure& failure) {
+    static SRWLOCK lock = SRWLOCK_INIT;
+    // Held for the process (never destroyed at exit, after the stores).
+    static auto* held = new std::shared_ptr<const TextureCpuAsset>();
+    auto& value = *held;
+    struct Guard {
+        Guard() noexcept { AcquireSRWLockExclusive(&lock); }
+        ~Guard() { ReleaseSRWLockExclusive(&lock); }
+    } guard;
+    if (value) return value;
+    std::array<std::uint32_t, 19 + 16> mmp{};
+    mmp[0] = 0x00504d4du;              // "MMP"
+    mmp[1] = 4; mmp[2] = 4; mmp[3] = 1; // width, height, mips
+    mmp[4] = 0x00008888u; mmp[5] = 32;  // ARGB8888, bits
+    mmp[6] = 0xff000000u; mmp[7] = 24; mmp[8] = 8;   // alpha mask, shift, bits
+    mmp[9] = 0x00ff0000u; mmp[10] = 16; mmp[11] = 8; // red
+    mmp[12] = 0x0000ff00u; mmp[13] = 8; mmp[14] = 8; // green
+    mmp[15] = 0x000000ffu; mmp[16] = 0; mmp[17] = 8; // blue
+    mmp[18] = 0;                       // no user data
+    for (std::size_t i = 19; i < mmp.size(); ++i) mmp[i] = 0xffffffffu;
+    ResourceBlob blob;
+    std::uint64_t generation = 0;
+    if (!retained_visual_copy_selected_memory("eid3d11_untextured.mmp", mmp.data(),
+            static_cast<std::uint32_t>(mmp.size()*4), blob, generation, failure)) return nullptr;
+    value = retained_visual_texture_asset(blob, failure);
+    return value;
+}
+
 std::shared_ptr<const TextureCpuAsset> retained_visual_texture_asset(
     const ResourceBlob& blob, ResourceFailure& failure) {
     auto& state=runtime();

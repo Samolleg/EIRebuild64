@@ -9,10 +9,24 @@
 #include "../dx11/RendererDX11.h"
 #include "../GameJournal.h"
 #include "../WorldClient.h"
+#include "../WorldInterface.h"
+#include "../Unit.h"
 #include "../ModRuntime.h"
 #include "../ModPackage.h"
 #include "../FigureClientSpecific.h"
 #include "embedded_hud_visual.h"
+#include "E1Scene.h"
+#include "ModelPreviewLighting.h"
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#undef min
+#undef max
+#include "owned_world_frame.h"
+#include "hud_layout_context.h"
+#include "scene_sinks.h"
+#include "fur.h"
+#include "skn_runtime.h"
 #include <exception>
 
 namespace {
@@ -154,6 +168,8 @@ bool E3HudAttachFigure(CI3DObject* owner, const char* name) noexcept {
 
 // Access only placement/scale and completed color values. No host mesh or
 // atlas texture is consumed for the four renderer-owned icon lanes.
+#include "E3HudPortrait.inl"
+
 struct E3HudVisualAccess {
     static bool Portrait(CI3DFigure* figure, CRenderer* renderer,
         unsigned slot, int unitId, const char* texture, const char* base, bool model) {
@@ -167,6 +183,11 @@ struct E3HudVisualAccess {
         owned::EmbeddedHudPortraitInput input;
         const auto& clip=gpu->GetMatrix(MAT_STACK_PROJSPACE);
         memcpy(input.state.object_to_clip.data(),&clip,sizeof(clip));
+        if (model && owned::g_owned_portraits) {
+            if (!livePortrait(figure,renderer,slot,unitId,base,texture,input.state.object_to_clip,input.expression_mask))
+                return false;
+            if (!input.expression_mask) return true;
+        }
         input.state.u_shift=figure->GetUShift();input.state.v_shift=figure->GetVShift();
         input.state.diffuse=figure->CheckFlag(FIG_USE_DEFAULT_COLORS)?figure->GetDefaultColor():
             RGBA_MAKE(int(figure->ambientLight.x*255),int(figure->ambientLight.y*255),int(figure->ambientLight.z*255),255);

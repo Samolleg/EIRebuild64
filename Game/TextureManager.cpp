@@ -4,6 +4,8 @@ static const char LOCAL_FILE[] = __FILE__;
 /////////////////////////////////////////////////////////////////////////////////////
 #include "TextureManager.h"
 #include "camp_inventory.h"
+#include "owned_resource_runtime.h"
+#include "retained_static_scene.h"
 #include "OwnedRender/E3HudVisual.h"
 #include "ModHDEquipmentLayer.h"
 #include "GameJournal.h"
@@ -999,6 +1001,17 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
                               dwNumMipLevels, dwBGColor, MMP_FORMAT_8888);
     }
 
+    const auto publish = [&](BOOL ready) -> BOOL {
+        if (!ready || dwResultFormat == MMP_FORMAT_4444) return ready;
+        owned::MaterialComposition value;
+        value.dimension = set.dwTextureDimention;
+        for (int i=0; i<set.szTextures.GetSize(); ++i) value.layers.emplace_back((LPCSTR)set.szTextures[i]);
+        if (set.data.GetSize()) value.user_data.assign(set.data.GetData(),set.data.GetData()+set.data.GetSize());
+        if (set.characterAtlas==4)
+            std::copy_n(set.equipmentSlots,4,value.slots.begin());
+        owned::retained_visual_scene().material_publish_composition((LPCSTR)szResultName,std::move(value));
+        return TRUE;
+    };
     CString desiredName=szDesiredName,alternateName=szAlternateName;
     if((set.characterAtlas==3 || set.characterAtlas==4) && ShareSecondaryCharacterAtlas()) {
         const bool primary=set.characterAtlas==3;
@@ -1021,11 +1034,11 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
                 },
                 [](CTexture* provider){provider->AddRef();},
                 [](CTexture* provider){provider->Release();})) {
-                szResultName=desiredName;return TRUE;
+                szResultName=desiredName;return publish(TRUE);
             }
         }
     }
-    if(ComposeTexturesInMemory())return ComposeTextureMemory(szResultName,set,desiredName,dwNumMipLevels,dwResultFormat);
+    if(ComposeTexturesInMemory())return publish(ComposeTextureMemory(szResultName,set,desiredName,dwNumMipLevels,dwResultFormat));
     CString szResultFileName(CString(RuntimePaths64::Textures().c_str()) + desiredName + ".mmp");
     SMMPFileHeader hdr;
     CBYTEArray data;
@@ -1047,7 +1060,7 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
             (hdr.dwFormat == dwResultFormat) &&
             (data.GetSize() == set.data.GetSize()) &&
             (memcmp(data.GetData(), set.data.GetData(), data.GetSize()) == 0))
-            return TRUE;
+            return publish(TRUE);
     }
     else if (desiredName != alternateName)
     {
@@ -1068,7 +1081,7 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
             (hdr.dwFormat == dwResultFormat) &&
             (data.GetSize() == set.data.GetSize()) &&
                 (memcmp(data.GetData(), set.data.GetData(), data.GetSize()) == 0))
-                return TRUE;
+                return publish(TRUE);
             szResultName = desiredName;
             szResultFileName = CString(RuntimePaths64::Textures().c_str()) + desiredName + ".mmp";
         }
@@ -1243,7 +1256,7 @@ BOOL CTextureManager::ComposeTexture(CString &szResultName, const STextureSetDes
     file.Close();
     outputFile.complete = true;
 
-    return TRUE;
+    return publish(TRUE);
 }
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CTextureManager::ComposeLayer(const STextureSetDescription &set, const CString &szFileName,

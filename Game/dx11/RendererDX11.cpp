@@ -337,10 +337,18 @@ bool CDX11::SubmitHudVisual(const owned::HudPublishedVisual& visual,
 bool CDX11::SubmitHudPortrait(const owned::EmbeddedHudPortraitInput& input)
 {
     if(!rendererFacade || !rendererFacade->FrameActive())return false;
-    return owned::hud_embedded_submit_portrait(input,this,
+    struct PortraitDraw { CDX11* device; bool mask; } draw{this, bool(input.expression_mask)};
+    return owned::hud_embedded_submit_portrait(input,&draw,
         [](void* context,const owned::NativeGeometryView& view) {
-            auto* self=static_cast<CDX11*>(context);
+            const auto& draw=*static_cast<PortraitDraw*>(context);
+            auto* self=draw.device;
             auto state=self->CaptureC56MaterialState();
+            if(draw.mask) {
+                state.render[D3DRENDERSTATE_ALPHABLENDENABLE]=TRUE;
+                state.render[D3DRENDERSTATE_SRCBLEND]=D3DBLEND_SRCALPHA;
+                state.render[D3DRENDERSTATE_DESTBLEND]=D3DBLEND_INVSRCALPHA;
+                state.render[D3DRENDERSTATE_ZWRITEENABLE]=FALSE;
+            }
             state.render[D3DRENDERSTATE_FOGENABLE]=FALSE;
             state.render[D3DRENDERSTATE_SPECULARENABLE]=(view.flags&8u)?TRUE:FALSE;
             const bool textured=view.owned_texture.identity!=0;

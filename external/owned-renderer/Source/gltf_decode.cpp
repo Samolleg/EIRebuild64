@@ -1328,6 +1328,10 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
                   primitive.material ? static_cast<unsigned>(primitive.material - data.materials)
                                      : static_cast<unsigned>(data.materials_count),
                   0, 0 });
+            const auto primitiveExtras = extras(primitive.extras);
+            const auto region = primitiveExtras.find("ei");
+            output->portrait_head_submeshes.push_back(region != primitiveExtras.end() &&
+                region->is_object() && region->value("zone", std::string{}) == "head");
             output->geometry.semantic_joints.push_back(0);
         }
     }

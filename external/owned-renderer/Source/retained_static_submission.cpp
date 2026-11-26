@@ -3824,7 +3824,8 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
         }
         build_skn_groups(sample,skn::from_gltf(item.asset),&nodes,item.weapon,item.arrow,
             &item.base_color_overrides,&item.metallic_roughness_overrides,&item.material_identities,item.physique_anchors.get(),
-            item.asset->mechanism.empty() && !item.asset->projectile_aim && item.offset!=std::array<float,3>{} ? &item.offset : nullptr);
+            item.asset->mechanism.empty() && !item.asset->projectile_aim && item.offset!=std::array<float,3>{} ? &item.offset : nullptr,
+            item.slot=="armor_0" || item.slot=="base_hair");
        }
       }
       if(built)prepared.merged_assembly=sample.assembly;

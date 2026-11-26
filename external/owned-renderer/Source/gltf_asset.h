@@ -45,6 +45,7 @@ struct Asset
     std::array<unsigned,2> sole_nodes{};
     std::array<std::array<float,3>,2> sole_points{};
     std::vector<skn::Vertex> rest_vertices;
+    std::vector<bool> portrait_head_submeshes;
     std::vector<std::uint32_t> vertex_morphs;
     std::string cache_key, resource_key;
     float radius = 0;

@@ -2703,7 +2703,7 @@ void RetainedStaticScene::visual_reject(VisualResourceIncarnation resource,
     visual_reject_unlocked(*entity,reason,predicate,scope,true);
     if (!entity->resync_pending && !visual_resync_suppressed_) {
         try {
-            visual_resync_pending_.push_back({resource.signed_id, reason, predicate, scope});
+            visual_resync_pending_.push_back({resource.signed_id, resource.serial, reason, predicate, scope});
             entity->resync_pending = true;
         } catch (...) {}
     }

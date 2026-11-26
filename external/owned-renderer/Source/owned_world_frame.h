@@ -640,7 +640,7 @@ struct OwnedPreviewCommand {
     // right, bottom), where the portrait's depth is its own (run_owned_preview_command).
     std::array<float,4> portrait_clip{};
 };
-void run_owned_preview_command(OwnedPreviewCommand& command) noexcept;
+bool run_owned_preview_command(OwnedPreviewCommand& command) noexcept;
 // One object's wound layer (owned_world_state.cpp): the parts and wound
 // surface interface a game-thread request names.
 struct OwnedWoundRequest {

@@ -31,6 +31,7 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "OwnedRender/E1VisualFrame.h"
 #include "OwnedRender/E1Surface.h"
 #include "owned_asset_loader.h"
+#include "owned_resource_runtime.h"
 #include "engine_bridge.h"
 #include "retained_static_submission.h"
 #include "contact_blend.h"
@@ -721,6 +722,35 @@ void CObject3DClientSpecific::InvalidateOwnedAppearance() noexcept
 }
 // Immutable source snapshot, shared by world publication and a private UI view.
 // Reading a negative-id preview never requires registering it in the world.
+// Script-created units can omit a material slot's name. Use the prototype's
+// skin at the same index as the map loader, before falling back to material colour.
+static std::shared_ptr<const owned::TextureCpuAsset> unitSkinAsset(
+    const CUnit& unit, bool secondary, CTextureManager& textures, std::string& name)
+{
+    owned::ResourceFailure failure;
+    const auto* prototype = unit.GetPrototype();
+    const auto* race = prototype ? unit.GetRaceModel() : nullptr;
+    if (race && unit.GetMaskName() && race->szMaskName.CompareNoCase(unit.GetMaskName()) == 0) {
+        const auto& skins = secondary ? race->szSecondaryTextures : race->szPrimaryTextures;
+        if (prototype->dwSkinIndex < skins.size()) {
+            name = (LPCSTR)skins[prototype->dwSkinIndex];
+            if (!name.empty() && _stricmp(name.c_str(), "none")) {
+                const std::string file = name + ".mmp";
+                DWORD size = 0;
+                if (BYTE* bytes = textures.GetFile(file.c_str(), &size)) {
+                    struct Guard { CTextureManager& manager; BYTE* bytes; ~Guard(){ manager.CloseFile(bytes); } } close{textures, bytes};
+                    owned::ResourceBlob blob;
+                    std::uint64_t generation = 0;
+                    if (owned::retained_visual_copy_selected_memory(file, bytes, size, blob, generation, failure))
+                        if (auto asset = owned::retained_visual_texture_asset(blob, failure)) return asset;
+                }
+            }
+        }
+    }
+    name.clear();
+    return owned::visual_untextured_asset(failure);
+}
+
 std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::BuildOwnedAssembly(
     std::uint64_t& revision, const char** failedStage) noexcept try
 {
@@ -777,6 +807,7 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
             return reject("appearance.figure_node");
 
         CTexture* texture = nullptr;
+        bool secondarySlot = false;
         CMaterial* material = nullptr;
         for (int setIndex = 0; setIndex < 2 && !material; ++setIndex)
         {
@@ -795,16 +826,24 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
                     if (group->figures[figureIndex] == figure)
                     {
                         texture = set->lpTexture;
+                        secondarySlot = setIndex != 0;
                         material = group->lpMaterial;
                         break;
                     }
             }
         }
-        if (!texture || !material || !texture->GetSurface())
-            return reject("appearance.selected_material_texture");
-        auto surface = OwnedRender::E1SurfaceValue(texture->GetSurface()->OwnedSurfaceId());
-        if (!surface)
-            return reject("appearance.completed_surface");
+        if (!texture || !material) return reject("appearance.selected_material_texture");
+        auto surface = texture->GetSurface() ? OwnedRender::E1SurfaceValue(texture->GetSurface()->OwnedSurfaceId()) : nullptr;
+        std::shared_ptr<const owned::TextureCpuAsset> skin;
+        std::string textureName = texture->GetName() ? texture->GetName() : "";
+        if (!surface) {
+            const auto* unit = dynamic_cast<const CUnit*>(object);
+            if (!unit || (!textureName.empty() && _stricmp(textureName.c_str(), "none")))
+                return reject("appearance.completed_surface");
+            auto* textures = static_cast<CWorldClient*>(GetWorld())->GetTextureManager();
+            if (!textures || !(skin = unitSkinAsset(*unit, secondarySlot, *textures, textureName)))
+                return reject("appearance.unit_skin");
+        }
 
         const D3DMATERIAL7& sourceMaterial = material->GetMaterial();
         auto materialAsset = std::make_shared<owned::MaterialCpuAsset>();
@@ -838,7 +877,9 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
         part.geometry = std::move(figureAsset);
         part.skeleton_node = static_cast<std::uint32_t>(node - skeleton->links.begin());
         part.surface = std::move(surface);
-        part.texture_source_name = texture->GetName() ? texture->GetName() : "";
+        part.texture = std::move(skin);
+        part.texture_source_name = textureName;
+        part.material_name = textureName;
         part.assembled_character_texture = object->GetTypeID() == MOTID_HUMAN;
         part.material = std::move(materialAsset);
         part.texture_type = static_cast<std::uint32_t>(texture->GetTypeID());

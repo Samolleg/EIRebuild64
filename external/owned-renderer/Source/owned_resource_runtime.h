@@ -54,6 +54,7 @@ std::shared_ptr<const ModelCpuAsset> retained_visual_skeleton_asset(
 std::shared_ptr<const FigureCpuAsset> retained_visual_figure_asset(
     const ResourceBlob& blob, ResourceFailure& failure,
     VisualAssetLookupDiagnostic* diagnostic = nullptr);
+std::shared_ptr<const TextureCpuAsset> visual_untextured_asset(ResourceFailure& failure);
 std::shared_ptr<const TextureCpuAsset> retained_visual_texture_asset(
     const ResourceBlob& blob, ResourceFailure& failure);
 // Synchronous read of a completed generated-MMP source. Applies count/byte
