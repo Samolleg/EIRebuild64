@@ -61,6 +61,7 @@ static_assert(sizeof(HostedFileHeader) == 40 && sizeof(HostedHostRecord) == 72 &
 // A model id of kCaveColony kind is a terrain-placed cave lichen colony
 // (ground cover meshes gm_cave_lichen_*), not a hosted model.
 constexpr std::uint32_t kCaveColonyKind = 0xffu, kNoHost = 0xffffffffu;
+constexpr std::uint32_t kHostedPadIndex = 0xffffffffu; // padding in a kind's index run (gcHostedPad)
 struct HostedPlantData {
     std::wstring path;
     std::vector<HostedHostRecord> hosts;
@@ -97,16 +98,19 @@ struct HostedPlantFrame {
     std::uint64_t revision = 0;
 };
 
-// One host as gcHostedCS reads it (GcHosted, 96 bytes).
+// One host as gcHostedCS reads it (GcHosted, 112 bytes).
 struct HostedPlantGpu {
     float root[4];
     float frame[4];
     float up[3];
     std::uint32_t index_base;    // 1 + the model's first index in the map's hosted index buffer
     float bounds[4];
-    std::uint32_t kind_mesh, hash, lod_near, lod_far;  // lod as float bits (metres)
+    std::uint32_t kind_mesh, hash, mid_mesh, far_mesh; // the kind's pool and its tier pools (#275)
     std::uint32_t vertex_delta, pad[3]; // a rebound copy's offset from its model's vertices (mod 2^32)
+    // LOD tiers (issue #275): 1 + the mid and far levels' first index (0: none)
+    // and their largest deviation in mesh units (float bits).
+    std::uint32_t mid_base, far_base, mid_error, far_error;
 };
-static_assert(sizeof(HostedPlantGpu) == 96, "HostedPlantGpu mirrors GcHosted");
+static_assert(sizeof(HostedPlantGpu) == 112, "HostedPlantGpu mirrors GcHosted");
 
 } // namespace owned::ground_cover

@@ -20,6 +20,7 @@
 // lights, receives the sun cascades, writes the AO ambient share, fogged with
 // the border fog and world atmosphere. Casts sun shadows into the close maps
 // by ground_cover_shadows (draw_ground_cover_shadows).
+#include "graphics_settings.h"
 #include "ground_cover.h"
 #include "contact_blend.h"
 #include "ground_cover_surface.h"
@@ -43,6 +44,8 @@
 #include "engine_bridge.h"
 #include "world_fog.h"
 #include "world_texture_sampler.h"
+#include "static_lod.h"
+#include "../ThirdParty/meshoptimizer/src/meshoptimizer.h"
 #include <unordered_map>
 #include <d3dcompiler.h>
 #include <algorithm>
@@ -103,7 +106,7 @@ struct GcInstance{float4 root;uint4 shape;uint4 color;uint4 extra;};
 struct GcFootprint{float4 rectangle;float4 effect;};
 cbuffer GcFrame:register(b11){
  row_major float4x4 gcClip;float4 gcPlanes[6];
- float4 gcEye;float4 gcWindow;float4 gcGrid;float4 gcQuality;float4 gcWind;float4 gcSwitches; // switches.z: zone18 clumps
+ float4 gcEye;float4 gcWindow;float4 gcGrid;float4 gcQuality;float4 gcWind;float4 gcSwitches;
  float4 gcFogRange;float4 gcFogControl;float4 gcFogColor;float4 gcBarkRect;float4 gcEndRect;float4 gcStoneRect;
  float4 gcView;   // x farthest visible ground (cover limit)
  float4 gcWind2;  // x gust intensity, y gust pulse, z terrain full-sun comparison, w last frame's sway clock (gcEye.w then)
@@ -139,7 +142,9 @@ cbuffer GcFrame:register(b11){
  float4 gcShelterRow[3];
  // Screen-size thinning of the far LOD (issue #230, gcFarPixelKeep): x the
  // inverse of the target height in pixels (0: off), y the smallest share of
- // the far LOD density it keeps.
+ // the far LOD density it keeps. z: the reach of the large Suslanger plants
+ // (desert shrubs and cacti, lod_near >= 70) beyond the cover limit, to full
+ // fog (0: none; the active desert map at Ultra, issue #265).
  float4 gcFarThin;
 };
 // gcDrawTraced (D3D12 guide twins): 1 while rt_direct_lights or rt_indirect_light lights this frame's cover.
@@ -790,6 +795,18 @@ float gcTuftShadowShare(float gap){return gcSunSoft()?smoothstep(.08,.2,gap*shad
 #define GC_F_BEACH 1
 #define GC_F_PILE 1
 #endif
+// GC_DESERT: the Suslanger clump programs (cells, debris placement and build,
+// neighbour), run only on maps whose cell masks hold clump rules; every other
+// map runs the programs compiled without it.
+#ifdef GC_DESERT
+#define GC_F_DESERT 1
+#if defined(GC_PLACE_DEBRIS)&&!defined(GC_F_TRAIL)
+#define GC_F_TRAIL 1 // the desert grass tufts part round units like every tuft
+#endif
+#endif
+#ifndef GC_F_DESERT
+#define GC_F_DESERT 0
+#endif
 #ifndef GC_F_EDGE
 #define GC_F_EDGE 0
 #endif
@@ -903,7 +920,7 @@ bool gcCellTest(int2 cell,out float near,out uint zones){
  float3 nearest=clamp(gcEye.xyz,bmin,bmax);
  near=length(nearest-gcEye.xyz);
  zones=0;
- if(!(visible&&near<gcView.x&&all(hi>0)&&all(lo<gcMapMetres())))return false;
+ if(!(visible&&near<max(gcView.x,gcFarThin.z)&&all(hi>0)&&all(lo<gcMapMetres())))return false;
  uint count,stride;gcZonePieces.GetDimensions(count,stride);
  [loop]for(uint i=0;i<count;++i){
   GcZonePiece piece=gcZonePieces[i];
@@ -911,69 +928,157 @@ bool gcCellTest(int2 cell,out float near,out uint zones){
  }
  return true;
 }
-// Zone18 clumps (#265), finished from claude/susl-clumps-2. The cell owns
-// one species, not a mixture of independent plant rules. Other maps keep
-// the original table, rule indices, habitat tests and random sequences.
-GcRule gcPlacementRule(GcRule r){
- if(r.cluster>=3){
-  if(gcSwitches.z!=0){
-   r.density=r.cluster==4?0:float(kGcDesertClumpPlants[r.mesh-GC_MESH_DESERT])/16;
-   r.areas=15u;r.field=0u;r.clumpLo=r.clumpHi=0;
-  }else r.cluster=0;
- }
- return r;
-}
-bool gcDesertBlocked(uint type){return type==2u||type==4u||type==7u||type==15u||type==0xffu;}
-// One selected 4 m cell per 12 m block. The patch stays inside that cell,
-// including its lumpy outline, so cell culling bounds remain valid.
-// zone18's greener art is olive sand, not grass ETERRTYPE (07-9f/07-9r
-// shipped-map joins and the redo's olive_a crop). Retain that colour rule.
-// High bits of the job's zone word carry mesh offset + 1; 0 means no clump.
+// Suslanger plant clumps (rf_desert_clump; ground_cover.h kDesertSpecies,
+// issue #265). Each placement cell can hold one clump on the patch lattice,
+// 0.6-1.55 m in radius (small ones commonest), its lumpy outline inside the
+// cell. Baked once per map (gcClumpCS, gcClumpMap) as one word: species + 1
+// (bits 0-4, 0 none), plants (5-9), the patch centre in the cell (10-15,
+// 16-21: 1/63 of the cell), radius (22-26: radius rounded down, so the
+// outline keeps inside the cell) and outline seed (27-31). The cell passes
+// carry bits 0-9 in the job's zone word above bit 15; placement reads the
+// patch from the baked word, never recomputing it per candidate. A clump stands nowhere near road (Suslanger paving) or cliffs: every
+// tile of the 3x3 square round its centre's tile (at least 2 m beyond the
+// centre each way, the outline reaches at most 1.94 m) is free of them.
+// Presence: stands of clumps with open sand between (a ~30 m noise field),
+// raised on greener ground (zone18's olive sand: its painted colour, as
+// measured in 07-9f; green/red .87-.93 at red .58-.70, pale sand below .87)
+// and beside the map's own trees and bushes; near lakes and rivers (never the
+// sea) oasis clumps of their own species.
 static const uint kGcClumpShift=16;
-uint gcDesertClumpKind(int2 cell){
- const int2 block=int2(floor(float2(cell)/3));
- const uint h=gcPatchHash(uint(block.x)*73856093u^uint(block.y)*19349663u^0x2d51c0d3u);
- if(any(cell-block*3!=int2(h%3u,(h>>2)%3u)))return 0;
- const float chance=((h>>8)&255u)/256.0;
- if(chance>=.9)return 0;
- const float4 shape=gcClusterShape(3u);
- const GcPatch pc=gcClusterPatch((float2(cell)+.5)*shape.x,3u);
- // Every tile in the 3x3 square, rather than points on a ring that can
- // miss a road tile. This encloses the entire <=1.313 m patch with margin.
- const int2 centreTile=int2(floor(pc.centre*.5));
- uint sandTiles=0;
+Texture2D<uint> gcClumpMap:register(t85);
+GcPatch gcDesertPatch(int2 cell){
+ const float size=gcWindow.w;
+ GcPatch pc=gcPatchAt((float2(cell)+.5)*size,size,float2(.6,1.55),0x2d51c0d3u);
+ const float t=(pc.radius-.6)/.95;pc.radius=.6+.95*t*sqrt(t); // never larger: still inside its margin
+ return pc;
+}
+// Road (Suslanger's paving is road), high rock (cliffs) and no tile; stone
+// and rock are natural ground there (thinner, gcDesertClump).
+bool gcDesertBlocked(uint type){return type==7u||type==15u||type==0xffu;}
+uint gcDesertClump(int2 cell){
+ GcPatch pc=gcDesertPatch(cell);
+ const int2 t0=int2(floor(pc.centre*.5));
+ float stony=0;
  [loop]for(int y=-1;y<=1;++y)[loop]for(int x=-1;x<=1;++x){
-  const uint type=gcBaseTypeAt(centreTile+int2(x,y));
+  const uint type=gcBaseTypeAt(t0+int2(x,y));
   if(gcDesertBlocked(type))return 0;
-  sandTiles+=type==3u?1u:0u;
+  stony+=type==2u||type==4u?1:0;
  }
  const float4 fields=gcFieldsAt(pc.centre);
- const float shore=fields.r*8;const bool sea=fields.g>.5,sand=sandTiles>=5u;
- const bool oasis=!sea&&shore<6;
- if(sand&&shore<7.5)return 0; // the field saturates at 8 m: never compare to 10
- float green=0;
- [loop]for(uint k=0;k<9;++k){
-  const float2 at=pc.centre+(k?5*float2(cos(k*.785398),sin(k*.785398)):0);
-  const float4 c=gcColor.SampleLevel(gcClamp,at/gcMapMetres(),2);
-  if(c.a>=.5)green+=smoothstep(.85,.87,c.g/max(c.r,1e-3))*smoothstep(.70,.66,c.r);
+ // Within 7.5 m of lakes and rivers (the shore field ends at 8 m; the sea
+ // mask's bays stay out): lush, larger clumps (user 2026-11-20).
+ const bool oasis=fields.g<=.5&&fields.r*8<7.5;
+ if(oasis)pc.radius=.6+.95*pow(saturate((pc.radius-.6)/.95),1.0/3); // t^1.5 back to t^.5: never larger than 1.55
+ float presence=.95;
+ if(!oasis){
+  const float2 world=pc.centre+gcOrigin.xy;
+  const float stand=smoothstep(.38,.6,gcFbm(world*(1.0/30)+float2(7.1,-3.3),0x51a7du));
+  float green=0;
+  [loop]for(uint k=0;k<9;++k){
+   const float2 at=pc.centre+(k?4*float2(cos(k*.785398),sin(k*.785398)):0);
+   const float4 c=gcColor.SampleLevel(gcClamp,at/gcMapMetres(),2);
+   if(c.a>=.5)green+=smoothstep(.85,.87,c.g/max(c.r,1e-3))*smoothstep(.70,.66,c.r);
+  }
+  const float trees=saturate(dot(gcTreeInfluence(pc.centre),1));
+  presence=min(lerp(.1,.85,stand)*(.75+.5*smoothstep(.5,3,green))+.35*trees,.95);
  }
- if(chance>=.9*smoothstep(1,3.5,green))return 0;
- // 11 open-ground species, 6 oasis species, each chosen alone. Oasis
- // clumps need greenery too; proximity to water alone cannot seed them.
- return oasis?12u+(h>>16)%6u:1u+(h>>16)%11u;
+ // Rocky ground keeps a steady scatter of clumps wherever the stand field is
+ // (user 2026-11-19: more on stone ground; its shrubs and cacti, see below).
+ presence=max(presence,.35*stony/9);
+ const float stoneShare=stony/9;
+ const uint2 centre=uint2(round(saturate(pc.centre/gcWindow.w-float2(cell))*63));
+ // Away from water a clump stands alone (user 2026-11-20: far fewer, spaced
+ // well apart): each 3x3 block of cells offers one cell of its corner 2x2,
+ // so two clumps stand at least two cells (8 m) apart; by water every cell.
+ bool spaced=oasis;
+ if(!oasis){
+  const int2 b=int2(floor(float2(cell)/3));
+  const uint h=gcPatchHash(uint(b.x)*0x8da6b343u^uint(b.y)*0xd8163841u);
+  spaced=all(cell-b*3==int2(h&1u,(h>>1)&1u));
+ }
+ // The offered cell holds its clump half as often again (user 2026-11-20:
+ // a little denser), most on thin ground; stands were near the cap already.
+ const float clumps=spaced?min(presence*(oasis?1:1.5),.95)*gcSwitches.z:0; // gcSwitches.z: the map's clump presence (desert_clump_presence)
+ if(pc.chance>=clumps){
+  // Between the clumps, most cells hold three to six loose grass tufts,
+  // fewer on stone and in the Necromancer's Desert (user 2026-11-20: more
+  // basic grass between clumps): a clump with no dominant plant, only the
+  // two grasses of its host (needle grass, drinn or seed heads).
+  if(pc.chance-clumps>=(1-clumps)*.9*(1-.5*stoneShare)*gcSwitches.z)return 0;
+  const uint g=pc.id&255u;
+  return (g<128u?6u:g<205u?2u:7u)|((3u+((pc.id>>16)&255u)%4u)<<12)|(centre.x<<15)|(centre.y<<21)|(31u<<27);
+ }
+ // Stony ground: as many clumps, more of the woody shrubs and cacti.
+ float total=0;
+ [loop]for(uint s=0;s<GC_DESERT_SPECIES;++s)total+=(oasis?kGcDesertSpecies[s].y:kGcDesertSpecies[s].x)*lerp(1,kGcDesertSpecies[s].w,stoneShare);
+ float pick=(pc.id&0xffffu)/65536.0*total;
+ uint species=0;
+ [loop]for(uint s=0;s<GC_DESERT_SPECIES;++s){
+  const float w=(oasis?kGcDesertSpecies[s].y:kGcDesertSpecies[s].x)*lerp(1,kGcDesertSpecies[s].w,stoneShare);
+  if(w>0){species=s;if(pick<w)break;pick-=w;}
+ }
+ const float plants=3.14159*pc.radius*pc.radius*kGcDesertSpecies[species].z*lerp(.55,1.45,((pc.id>>16)&255u)/255.0);
+ const uint4 community=kGcDesertCommunity[species];
+ const uint most=GC_DESERT_MAX_PLANTS-(community.y>>8)-7u; // its companions and grass (at most 7) fit too
+ const uint seed=pc.id>>27;
+ const uint companions=min((community.y&255u)+(seed&3u),community.y>>8);
+ // Every clump carries one more grass tuft, by water three (of at most 7).
+ const uint grass=min(min((community.w&255u)+((seed>>2)&7u),community.w>>8)+(oasis?3u:1u),7u);
+ return (species+1u)|(clamp(uint(round(plants*(oasis?1.04:.8))),1u,most)<<5)|(companions<<10)|(grass<<12)|(centre.x<<15)|(centre.y<<21)|
+        (uint(floor((pc.radius-.6)*(31/.95)))<<27);
 }
+// A cell's clump patch from its baked word (gcDesertClump).
+GcPatch gcDesertBakedPatch(int2 cell){
+ const uint w=gcClumpMap.Load(int3(cell,0));
+ GcPatch pc;pc.centre=(float2(cell)+float2((w>>15)&63u,(w>>21)&63u)/63)*gcWindow.w;
+ pc.radius=.6+(w>>27)*(.95/31);pc.id=gcPatchHash(uint(cell.x)*73856093u^uint(cell.y)*19349663u);pc.chance=0;
+ return pc;
+}
+// The clump of every cell depends only on the map (its tiles, painted
+// colour, fields and trees), never on the camera: gcClumpCS bakes it once per
+// map (again when its masks or paint change) and the per-frame cell passes
+// read the baked word.
+RWTexture2D<uint> gcClumpOut:register(u5);
+[numthreads(8,8,1)]void gcClumpCS(uint3 id:SV_DispatchThreadID){
+ uint w,h;gcClumpOut.GetDimensions(w,h);
+ if(id.x<w&&id.y<h)gcClumpOut[id.xy]=gcDesertClump(int2(id.xy));
+}
+// The cell's zone word with its clump, where Suslanger plants can grow.
 uint gcCellClump(int2 cell,uint zones){
- return gcSwitches.z!=0&&(zones&(1u<<5))!=0?zones|(gcDesertClumpKind(cell)<<kGcClumpShift):zones;
+ return (zones&(1u<<GC_ZONE_DESERT))!=0?zones|((gcClumpMap.Load(int3(cell,0))&0x7fffu)<<kGcClumpShift):zones;
 }
-float gcRuleDensity(GcRule r,uint zones){
- return r.cluster==3&&((zones>>kGcClumpShift)!=r.mesh-GC_MESH_DESERT+1u)?0:r.density;
+// A clump rule's expected candidates in a cell: its clump's plants (none
+// unless the clump is its species).
+// A desert rule's part of its cell's clump community: x its plants, y the
+// clump's plants before them (dominant, then companion, then grass), z all
+// the clump's plants (at the cover density).
+float gcDesertPlants(uint zones){
+ const uint clump=zones>>kGcClumpShift;
+ return (clump&31u)!=0?float(((clump>>5)&31u)+((clump>>10)&3u)+((clump>>12)&7u))*gcQuality.y:0;
+}
+// Plant k of a clump's n: a jittered sunflower spiral (even spacing, no two
+// plants on top of each other) inside the clump's lumpy outline; the first
+// plants nearest the centre, so distance thinning keeps a clump's core.
+float2 gcDesertPlantPoint(GcPatch pc,float k,float n,float2 u){
+ const float a=k*2.3999632+((pc.id>>8)&1023u)*.00614+(u.x-.5)*.6;
+ float2 d;sincos(a,d.y,d.x);
+ const float lump=1+kGcPatchLump*sin(2*a+(pc.id&255u)*.0246);
+ const float rn=rsqrt(max(n,1));
+ return pc.centre+d*pc.radius*lump*saturate((sqrt(k+.5)+(u.y-.5)*.35)*rn);
 }
 // Candidate slots of a rule in a cell: stratified by their thinning value,
 // so a cell walks only the slots its nearest point can keep.
 uint gcCellSlots(GcRule r,float near,uint zones){
- r=gcPlacementRule(r);
  const float size=gcWindow.w;
- return (r.zones&zones)!=0?(uint)ceil(ceil(gcRuleDensity(r,zones)*gcQuality.y*size*size)*gcKeep(r,near)):0u;
+ // Beyond the cover limit only the clump driver walks (its large plants).
+ if(near>=gcView.x&&(r.flags&256u)==0)return 0u;
+#if GC_F_DESERT
+ if((r.zones&zones)==0)return 0u;
+ const float expected=(r.flags&128u)!=0?((r.flags&256u)!=0?gcDesertPlants(zones):0):r.density*gcQuality.y*size*size;
+ return (uint)ceil(ceil(expected)*gcKeep(r,near));
+#else
+ return (r.zones&zones)!=0?(uint)ceil(ceil(r.density*gcQuality.y*size*size)*gcKeep(r,near)):0u;
+#endif
 }
 // Slots of rule ri walked in a cell: none where the rule can never place.
 uint gcCellRuleSlots(int2 cell,uint ri,float near,uint zones){
@@ -985,23 +1090,50 @@ bool gcCandidateAt(int2 cell,uint ri,uint k,uint zones,out GcCandidate c){
  c=(GcCandidate)0;
  const float size=gcWindow.w;const float2 lo=cell*size;
  const float2 mapSize=gcMapMetres();
- const GcRule rule=gcPlacementRule(gcRules[ri]);
+ GcRule rule=gcRules[ri];
  uint seed=gcHash(uint(cell.x)*73856093u^uint(cell.y)*19349663u^gcHash(ri*83492791u+k*2654435761u+1u));
- const float expected=gcRuleDensity(rule,zones)*gcQuality.y*size*size,slots=ceil(expected);
+#if GC_F_DESERT
+ const bool desert=(rule.flags&128u)!=0;
+#else
+ const bool desert=false;
+#endif
+ const float expected=desert?gcDesertPlants(zones):rule.density*gcQuality.y*size*size,slots=ceil(expected);
  if(float(k)>=floor(expected)&&gcRand(seed)>=frac(expected))return false;
  const float thin=(k+gcRand(seed))/slots;
- float2 p=lo+float2(gcRand(seed),gcRand(seed))*size;
+ const float2 u=float2(gcRand(seed),gcRand(seed));
+ float2 p=lo+u*size;
+#if GC_F_DESERT
+ if(desert){
+  // The driver's k-th clump plant: the dominant first (at the centre), but
+  // only two in five of its plants; the rest and the companions are each one
+  // of its two companions, the grass each one of two grasses (user
+  // 2026-11-20: mixed clumps). It takes that species' rule (the desert rules
+  // follow the driver in species order) and the same random pair.
+  const uint clump=zones>>kGcClumpShift,dominant=(clump&31u)-1u;
+  const float n=float((clump>>5)&31u)*gcQuality.y,companions=float((clump>>10)&3u)*gcQuality.y;
+  const uint4 partners=kGcDesertPartners[dominant];
+  // Grass spreads loose over a 1.9 m disc round the clump's centre (its
+  // tiles are clear of road for 2 m), filling the ground between clumps
+  // (user 2026-11-20); the dominant and companions keep the clump outline.
+  const GcPatch pc=gcDesertBakedPatch(cell);
+  const bool grass=k>=n+companions;
+  const uint mix=seed>>16; // this plant's own bits
+  ri+=grass?(mix&1u?partners.w:partners.y):k<max(ceil(n*.4),1.0)?dominant:(mix&2u?partners.z:partners.x);
+  rule=gcRules[ri];
+  float2 d;sincos(u.y*6.2831853,d.y,d.x);
+  p=grass?pc.centre+d*1.9*sqrt(u.x):gcDesertPlantPoint(pc,k,max(ceil(n+companions),1.0),u);
+ }
+#endif
  // Clustered rules: into the patch of the candidate's lattice cell, or none.
 #if GC_F_CLUSTER
  const uint cluster=(uint)rule.cluster;
 #else
- // Desert plants retain their original placement classes on other maps.
- const uint cluster=rule.cluster==3?3u:0u;
+ const uint cluster=0;
 #endif
  uint patchId=0;
  if(cluster!=0){
   const float4 shape=gcClusterShape(cluster);
-  const GcPatch pc=gcClusterPatch(p,cluster);
+  const GcPatch pc=gcPatchAt(p,shape.x,shape.yz,cluster*0x9e3779b9u);
   float presence=shape.w;
   if(cluster==1u){ // flowers: open sunny meadow and wood edges, few under trees or beside roads
    const float trees=dot(gcTreeInfluence(pc.centre).rg,1);
@@ -1015,16 +1147,28 @@ bool gcCandidateAt(int2 cell,uint ri,uint k,uint zones,out GcCandidate c){
   }
   if(pc.chance>=presence)return false;
   p=gcPatchPoint(pc,float2(gcRand(seed),gcRand(seed)));patchId=pc.id;
-  if(cluster==3u&&gcDesertBlocked(gcBaseTypeAt(int2(floor(p*.5)))))return false;
  }
  if(!gcOwnsPoint(p,mapSize))return false;
  const float zoneWeight=gcZoneWeight(p+gcOrigin.xy,rule.zones);
  if(zoneWeight<=0||(zoneWeight<1&&gcRand(seed)>=zoneWeight))return false;
- const float blocked=gcObjectMask.SampleLevel(gcClamp,(p-gcObjectWindow.xy)*gcObjectWindow.zw,0);
+ // The object window covers the cover limit; the large Suslanger plants
+ // beyond it (gcFarThin.z) read none (clamped, its edge would streak).
+ const float2 objectUv=(p-gcObjectWindow.xy)*gcObjectWindow.zw;
+#if GC_F_DESERT
+ const float blocked=all(saturate(objectUv)==objectUv)?gcObjectMask.SampleLevel(gcClamp,objectUv,0):0;
+#else
+ const float blocked=gcObjectMask.SampleLevel(gcClamp,objectUv,0);
+#endif
  if(blocked>=1||gcRand(seed)<blocked)return false;
  const float ground=gcHeight(gcGround,p),surface=gcHeight(gcSurface,p);
  const float dist=length(float3(p,ground)+gcOrigin.xyz-gcEye.xyz);
+ // The large Suslanger plants reach on to gcFarThin.z (to full fog), the
+ // rest end at the cover limit.
+#if GC_F_DESERT
+ if(dist>=gcView.x&&(dist>=gcFarThin.z||(rule.flags&128u)==0||rule.lodNear<70))return false;
+#else
  if(dist>=gcView.x)return false;
+#endif
  const float keep=gcKeep(rule,dist);
  if(thin>=keep)return false;
  const float depth=max(surface-ground,0);
@@ -1036,7 +1180,6 @@ bool gcCandidateAt(int2 cell,uint ri,uint k,uint zones,out GcCandidate c){
  const bool beach=rule.field==2; // kelp, shells, conches: ETERRTYPE sand or a sand-family tile
  const uint here=gcSurfaceArea(tile,underwater,beach);
  if(here==0xffu)return false;
- if(cluster==3u&&(zones>>kGcClumpShift)>=12u&&here==kGcSand)return false;
  // Terrain 2.0: land cover in proportion to its classes' blended share there.
  if(gcT2On()&&!underwater){if(gcRand(seed)>=gcT2Coverage(rule.areas,p))return false;}
  else{
@@ -1050,7 +1193,7 @@ bool gcCandidateAt(int2 cell,uint ri,uint k,uint zones,out GcCandidate c){
 // Stage 2: the habitat of a candidate.
 bool gcHabitatOf(GcCandidate c,out GcSurvivor o){
  o=(GcSurvivor)0;
- const uint ri=c.rule;const GcRule rule=gcPlacementRule(gcRules[ri]);
+ const uint ri=c.rule;const GcRule rule=gcRules[ri];
  uint seed=c.seed;const float2 p=c.p;const float ground=c.ground,depth=c.depth;const uint here=c.here;
  const float2 mapSize=gcMapMetres();
 #if GC_F_CLUSTER
@@ -1218,19 +1361,21 @@ void gcAppendInstance(uint mesh,GcInstance o,uint4 shade,float order){
 #ifdef GC_HOSTED_CS
 // Hosted plants (issue #251 3c, hosted_plants.h HostedPlantGpu): one record
 // per host object, appended to its mesh pool while in view and nearer than
-// the cover limit, dither-faded over its LOD band (scaled like a rule's). The
+// the cover limit (no LOD band: it stays as long as its host, issue #275). The
 // instance is the host's frame: tilt (align 1), yaw, scale and stretch; own
 // colour mixed fully, no contact, no sway (the meshes carry no bend).
-struct GcHosted{float4 root;float4 frame;float3 up;uint indexBase;float4 bounds;uint4 info;uint4 vertexDelta;};
+struct GcHosted{float4 root;float4 frame;float3 up;uint indexBase;float4 bounds;uint4 info;uint4 vertexDelta;uint4 tier;};
 StructuredBuffer<GcHosted> gcHosted:register(t65);
 [numthreads(64,1,1)]void gcHostedCS(uint3 id:SV_DispatchThreadID){
  uint count,stride;gcHosted.GetDimensions(count,stride);
  if(id.x>=count)return;
  const GcHosted h=gcHosted[id.x];
  const float d=max(length(h.bounds.xyz-gcEye.xyz)-h.bounds.w,0);
- if(d>=gcView.x||gcOutside(h.bounds.xyz,h.bounds.w))return;
- const float fade=1-smoothstep(asfloat(h.info.z)*gcQuality.x,asfloat(h.info.w)*gcQuality.x,d);
- if(fade<=0)return;
+ // It ends with its host: at the cover limit or where the camera pass culls
+ // the host (gcFogControl.z: the draw distance or full fog, whichever is
+ // nearer; 0 when no fog frame ran), never in clear view.
+ const float far=gcFogControl.z>0?min(gcView.x,gcFogControl.z):gcView.x;
+ if(d>=far||gcOutside(h.bounds.xyz,h.bounds.w))return;
  // Green vines (vertexDelta.y): only where green ground is near, never out of
  // sand (user 2026-11-15): grass tiles in the 5x5 tiles (10 m) round the host.
  if(h.vertexDelta.y!=0u){
@@ -1244,9 +1389,42 @@ StructuredBuffer<GcHosted> gcHosted:register(t65);
  o.color=uint4(gcPackColor(float4(1,1,1,0)),gcPackColor(float4(1,1,1,1)),h.indexBase,0u);
  o.shape.w=h.vertexDelta.x; // GC_HOSTED_VS: a rebound placement's own vertices
  o.extra=uint4(asuint(h.root.z),0u,9u|(15u<<8)|(1u<<17),h.info.y); // mat_plant, align 1, hard surface class
- if(fade<1)o.extra.z|=kGcFadeOn|(uint(round(fade*255))<<20);
  const float2 slope=-h.up.xy/max(h.up.z,.2);
- gcAppendInstance(h.info.x,o,uint4(asuint(h.bounds.z),asuint(slope.x),asuint(slope.y),gcHash(h.info.y^0x9e3779b9u)),0);
+ const uint4 shade=uint4(asuint(h.bounds.z),asuint(slope.x),asuint(slope.y),gcHash(h.info.y^0x9e3779b9u));
+ // LOD tiers (issue #275; build_hosted_upload): the coarsest level whose
+ // deviation projects within the pixel limit (gcFogControl.w: lod_pixel_error,
+ // 0 with static LOD off), the next coarser one dithered in while its own
+ // projects between the limit and twice it, as the static objects do
+ // (nativeStaticLodSelect): stateless and continuous with distance, no pop.
+ // A negative gcFogControl.w forces tier -w-1 (hosted_lod, diagnostic). Each
+ // tier's vertices lift by its deviation (color.w, mesh units: GC_HOSTED_VS)
+ // so a reduced card layer never sinks into its host.
+ const uint base[3]={h.indexBase,h.tier.x,h.tier.y},mesh[3]={h.info.x,h.info.z,h.info.w};
+ const float error[3]={0,asfloat(h.tier.z),asfloat(h.tier.w)};
+ const float pixels=length(gcClip[1].xyz)/length(gcClip[3].xyz)*.5*gcGrid.w*h.root.w/max(length(h.bounds.xyz-gcEye.xyz),1e-3); // per mesh unit
+ uint tier=0,next=0;float share=0;
+ if(gcFogControl.w<0){
+  const uint forced=uint(-gcFogControl.w)-1u;
+  tier=forced>=2u&&base[2]!=0u?2u:forced>=1u&&base[1]!=0u?1u:0u;
+ }else if(gcFogControl.w>0){
+  const float limit=gcFogControl.w;
+  [unroll]for(uint t=1;t<3;++t)if(base[t]!=0u&&error[t]*pixels<=limit)tier=t;
+  [unroll]for(uint n=2;n>tier;--n)if(base[n]!=0u)next=n; // the nearest coarser level
+  if(next!=0u)share=saturate((2*limit-error[next]*pixels)/limit);
+ }
+ // A level draws as its chunks (vertexDelta.zw: chunks a level), one
+ // instance each, so its pool's run is a chunk, not its kind's largest model.
+ const uint chunks[3]={h.vertexDelta.z,h.vertexDelta.w&0xffffu,h.vertexDelta.w>>16};
+ if(share>0&&share<1){
+  // Crossfade: the finer level keeps the dither values below the cut, the
+  // coarser the rest (gcCoverClip), so each pixel shows exactly one of them.
+  const uint cut=uint(round((1-share)*255));
+  GcInstance nearSide=o;nearSide.color.w=tier!=0u?asuint(error[tier]):0u;nearSide.extra.z|=kGcFadeOn|(cut<<20);
+  [loop]for(uint k=0;k<chunks[tier];++k){nearSide.color.z=base[tier]+k*3072u;gcAppendInstance(mesh[tier],nearSide,shade,0);}
+  tier=next;o.extra.z|=kGcFadeOn|kGcFadeFar|(cut<<20);
+ }
+ o.color.w=tier!=0u?asuint(error[tier]):0u;
+ [loop]for(uint k=0;k<chunks[tier];++k){o.color.z=base[tier]+k*3072u;gcAppendInstance(mesh[tier],o,shade,0);}
 }
 #endif
 // The material class an element takes (S3 terrain roughness index,
@@ -1260,7 +1438,7 @@ uint gcSurfaceClass(uint area,uint mesh){
 }
 // Stage 3: the instance of a survivor, appended to its mesh pool.
 void gcBuildOf(GcSurvivor c){
- const uint ri=c.rule;const GcRule rule=gcPlacementRule(gcRules[ri]);
+ const uint ri=c.rule;const GcRule rule=gcRules[ri];
  uint seed=c.seed;const float2 p=c.p;const float ground=c.ground,depth=c.depth,thin=c.thin,keep=c.keep;
  const uint here=c.here,patchId=c.patch;const float canopy=c.canopy,swamp=c.swamp;const float3 n=c.n,terrain=c.terrain;
 #if GC_F_CLUSTER
@@ -1272,6 +1450,15 @@ void gcBuildOf(GcSurvivor c){
  uint mesh=rule.mesh;
  float s=lerp(rule.scaleMin,rule.scaleMax,gcRand(seed));
  float yaw=gcRand(seed)*6.2831853;
+#if GC_F_DESERT
+ const bool desert=(rule.flags&128u)!=0;
+ // A clump's plants by age: the first (central) ones older and larger, the
+ // edge ones younger, each its own: from 0.6 of the species' smallest grown
+ // size to 1.12 of its largest. thin: the plant's order in its clump.
+ if(desert)s=lerp(rule.scaleMin*.6,rule.scaleMax*1.12,saturate(1-.8*sqrt(thin)+(gcRand(seed)-.5)*.7));
+#else
+ const bool desert=false;
+#endif
 #if GC_F_WALL
  if(rule.mesh==22u)yaw=atan2(c.wall.y,c.wall.x);
 #endif
@@ -1289,7 +1476,13 @@ void gcBuildOf(GcSurvivor c){
  // Growth never passes grow_max.
  const float eyeDistance=length(float3(p,ground)+gcOrigin.xyz-gcEye.xyz);
  s*=min(rsqrt(max(keep,.01)),rule.growMax)*gcThinGrow(rule,thin,eyeDistance);
- const float farFade=gcFarPixelFade(rule,thin,eyeDistance);
+ float farFade=gcFarPixelFade(rule,thin,eyeDistance);
+ // Large Suslanger plants past the cover limit dither out over the last
+ // fifth of their reach (in full fog there), never a pop (user 2026-11-20).
+#if GC_F_DESERT
+ if(gcFarThin.z>gcView.x&&(rule.flags&128u)!=0&&rule.lodNear>=70)
+  farFade=min(farFade,1-smoothstep(.8*gcFarThin.z,gcFarThin.z,eyeDistance));
+#endif
  if(farFade<=0)return;
  if((rule.flags&8u)!=0)s=min(s,.85*depth/szs); // stays below the water surface
  if(rule.bury>0)sink=s*szs*(rule.bury-.2*gcRand(seed)); // of the drawn (grown) height: tips above snow
@@ -1308,6 +1501,7 @@ void gcBuildOf(GcSurvivor c){
 #endif
  const float j=1+(gcRand(seed)*2-1)*rule.jitter;
  float3 own=rule.own;
+ if(desert)own*=lerp(.86,1.08,gcRand(seed)); // each clump plant a little lighter or darker
  const uint palette=(uint)rule.palette;
  if(false){}
 #if GC_F_PAL1
@@ -1354,7 +1548,12 @@ void gcBuildOf(GcSurvivor c){
  const bool parting=tuft&&rule.scaleMax*rule.szMax>=.8;
  float2 push=0;float flatten=0;
 #if GC_F_TRAIL&&GC_BUILD_TRAILS
- if(tuft||rule.mesh==10u){
+ // Suslanger bushes and drinn grass lean slightly away from passing units,
+ // never laid flat (user 2026-11-20); the succulents carry no authored bend
+ // (desert_plants_mesh.h), so they stay rigid.
+ const bool desertLean=GC_F_DESERT&&(rule.flags&128u)!=0&&!tuft;
+ if(tuft||rule.mesh==10u||desertLean){
+  // Visible game tracks and visible live bodies share the recovering mask.
   const float pressed=parting?gcBodyCoverage(p+gcOrigin.xy):gcTrailCoverage(p+gcOrigin.xy);
   // Snow trails lay tufts down along the trough, away from its centre line.
   const float2 snowRaw=snowTrailRaw(gcSnowTrail,gcSnowWindow,gcSnowTiles,p+gcOrigin.xy);
@@ -1377,6 +1576,7 @@ void gcBuildOf(GcSurvivor c){
    push+=away*pressed;flatten=max(flatten,pressed);
   }
   float l=length(push);if(l>1)push/=l;
+  if(desertLean){push*=.4;flatten=0;}
  }
 #endif
  float blend=rule.blendHeight*s*szs,contact=rule.contact,normalBlend=rule.normalBlend;
@@ -1395,7 +1595,7 @@ void gcBuildOf(GcSurvivor c){
  const uint4 shade=uint4(asuint(shadeAt.z),asuint(shadeSlope),gcHash(seed^0x9e3779b9u));
  o.extra=uint4(asuint(ground+gcOrigin.z),gcPack2(blend,contact),
   (uint(rule.material)&15u)|(uint(saturate(rule.frost)*15+.5)<<4)|(uint(saturate(rule.align)*15+.5)<<8)|(uint(saturate(normalBlend)*15+.5)<<12)|(tuft?0x10000u:0u)|
-  (gcSurfaceClass(here,rule.mesh)<<17),
+  (gcSurfaceClass(here,rule.mesh)<<17)|((rule.flags&512u)!=0?0x40000000u:0u), // bit 30: chars in the fire (rf_chars)
   gcHash(seed));
  const float order=thin/max(keep,1e-6);
  // The screen-size floor's fade-out: a dither (gcCoverClip's near side); a
@@ -1426,7 +1626,9 @@ void gcBuildOf(GcSurvivor c){
  const int2 cell=int2(gcWindow.xy)+int2(index%width,index/width);
  float near;uint zones;
  if(!gcCellTest(cell,near,zones))return;
+#if GC_F_DESERT
  zones=gcCellClump(cell,zones);
+#endif
  uint rules,stride;gcRules.GetDimensions(rules,stride);
  // One walk over the rules (the mask read once), slots summed per class.
  const GcRuleMask mask=gcCellMasks.Load(int3(cell,0));
@@ -1516,7 +1718,13 @@ groupshared uint gcRoundFirst[kGcMaxRounds],gcRoundJobs[kGcMaxRounds];
 // far-mesh candidates do not pay for classes and rounds.
 [numthreads(64,1,1)]void gcNeighbourCS(uint3 group:SV_GroupID,uint lane:SV_GroupIndex){
  const int2 cell=int2(gcWindow.xy)+int2(group.xy);
- if(lane==0){float near;uint zones;gcCellVisible=gcCellTest(cell,near,zones)?1u:0u;gcCellNear=near;gcCellZones=gcCellVisible!=0?gcCellClump(cell,zones):0u;}
+ if(lane==0){float near;uint zones;gcCellVisible=gcCellTest(cell,near,zones)?1u:0u;gcCellNear=near;
+#if GC_F_DESERT
+ gcCellZones=gcCellVisible!=0?gcCellClump(cell,zones):0u;
+#else
+ gcCellZones=zones;
+#endif
+ }
  GroupMemoryBarrierWithGroupSync();
  if(gcCellVisible==0)return;
  uint rules,stride;gcRules.GetDimensions(rules,stride);
@@ -1889,8 +2097,8 @@ struct GcOut{float4 p:SV_Position;float3 wp:TEXCOORD0;float3 n:TEXCOORD1;float3 
  // Near/far crossfade (gcFadeWord); 0 none.
  nointerpolation uint fade:TEXCOORD18;
 #ifdef NATIVE_FIRE_BURN
- // Fire burn at the tuft's root (nativeBurnAt, whole tuft): x 1 burnt, y game seconds since the front.
- nointerpolation float2 burn:TEXCOORD21;
+ // Fire burn at the tuft's root (nativeBurnAt, whole tuft): x 0..1 how burnt, y game seconds since the front.
+ nointerpolation float2 burn:TEXCOORD21;float burnH:TEXCOORD22; // height over its root (gcBurnCut)
 #endif
  // Point lamps and emissive glow at the vertex (cover; the snow pile shades
  // per pixel as terrain).
@@ -1941,11 +2149,15 @@ uint gcFadeWord(GcInstance inst){
 // shifted to a rebound placement's own copy by shape.w.
 StructuredBuffer<GcVertex> gcHostedVertices:register(t69);
 StructuredBuffer<uint> gcHostedIndices:register(t113);
+// Padding past a model's own triangles (kHostedPadIndex, whole triangles):
+// the vertex stages emit it outside the clip volume without pulling a vertex.
+bool gcHostedPad(uint vertexId,uint slot){return gcHostedIndices[gcInstances[slot].color.z-1u+(vertexId-gcDrawPadding.x)]==0xffffffffu;}
 #endif
 GcVertexFrame gcVertexFrameAt(uint vertexId,uint slot,bool frozenSway=false){
 #ifdef GC_HOSTED_VS
  GcInstance inst=gcInstances[slot];
  GcVertex v=gcHostedVertices[gcHostedIndices[inst.color.z-1u+(vertexId-gcDrawPadding.x)]+inst.shape.w];
+ v.p+=v.n*asfloat(inst.color.w); // a reduced tier's lift by its deviation (gcHostedCS; 0 at full detail)
 #else
  GcVertex v=gcVertices[vertexId];GcInstance inst=gcInstances[slot];
 #endif
@@ -1985,10 +2197,14 @@ GcVertexFrame gcVertexFrameAt(uint vertexId,uint slot,bool frozenSway=false){
  #ifdef NATIVE_FIRE_BURN
  float2 burnRoot=float2(0,-1);
 #if !GC_VS_SNOW
- // Fire burn (nativeBurnAt at the root: the whole tuft or none): burnt grass
+ // Fire burn (nativeBurnAt at the root, for the whole tuft): burnt grass
  // and plants shrink to short stubble as they char (every pass: the
  // prepass, shadows and colour).
- [branch]if(nativeBurnRow(1).w>0&&(tuft||mat==0u||mat==9u)){
+ // Every kind that can burn: tufts, plain cover, bark (twigs, logs, cones,
+ // roots, dead bushes), mushrooms, strands and wrack, plant cards; stones,
+ // slabs, puddles and snow do not (user, cand-1128: every ground-cover kind
+ // must burn).
+ [branch]if(nativeBurnRow(1).w>0&&(tuft||mat==0u||mat==1u||(mat>=6u&&mat<=9u))){
 #ifdef GC_HOSTED_VS
   // The mesh kind comes from the hosted table: 1 dead vines, 2 living
   // attachments. Keep their host-relative shape; shrinking detaches vines
@@ -1997,12 +2213,19 @@ GcVertexFrame gcVertexFrameAt(uint vertexId,uint slot,bool frozenSway=false){
    burnRoot=nativeBurnAt(root.xy);
    const float2 crown=nativeBurnCrownAt(root.xy);
    if(crown.x>0&&(burnRoot.x<=0||crown.y>burnRoot.y))burnRoot=crown;
-   burnRoot.x=burnRoot.x>=.5?1:0;
+   burnRoot.x=-saturate((burnRoot.x-.1)/.8); // chars in place on its host (negative: no dissolve)
   }
 #else
-  burnRoot=nativeBurnAt(root.xy);burnRoot.x=burnRoot.x>=.5?1:0;
-  const float charred=nativeBurnPhase(burnRoot).y;
-  offset.z*=1-.68*charred;offset.xy*=1-.25*charred;
+  // The ground's own soft edge (nativeBurnAt x 0..1), so the cover chars
+  // with the soil under it instead of standing green on black ground. Every
+  // kind takes the full burn, on sand too, at full size (user, cand-1128:
+  // the shrinking is not cool): it chars from the tip down, then grass,
+  // bushes and leafy cover dissolve to a short charred stub (gcBurnCut);
+  // deadwood, mushrooms and succulents (rf_chars, bit 30: a negative burn
+  // amount) only char (user: shrooms, succulents and deadwood can char).
+  const bool chars=(bits&0x40000000u)!=0;
+  burnRoot=nativeBurnAt(root.xy);burnRoot.x=saturate((burnRoot.x-.1)/.8);
+  if(chars)burnRoot.x=-burnRoot.x;
 #endif
  }
 #endif
@@ -2017,7 +2240,18 @@ GcVertexFrame gcVertexFrameAt(uint vertexId,uint slot,bool frozenSway=false){
 #else
   float2 trail=0; // snowTrailRaw without a field
 #endif
-  float3 world=gcSnowPosition(gcGround,p-gcOrigin.xy,r.z*scale,ground-root.z,trail)+gcOrigin.xyz;
+  float pileRise=r.z*scale;
+  // A fire melts the pile down smoothly (nativeBurnSnowMelt: in over 1.5 s,
+  // back on the refill law): its height over the ground scales away and it
+  // sinks just under the ground when fully melted, where the buried test
+  // hides it. A dithered cut showed a screen-door crosshatch over a part
+  // melt (c8 shot c_15s_yaw45).
+  {
+   const float melt=nativeBurnSnowMelt(p);
+   const float burial=ground-root.z;
+   pileRise=burial+(pileRise-burial)*(1-melt)-.03*melt;
+  }
+  float3 world=gcSnowPosition(gcGround,p-gcOrigin.xy,pileRise,ground-root.z,trail)+gcOrigin.xyz;
   offset=world-root;
   tn=gcGroundNormalLoop(gcGround,world.xy-gcOrigin.xy);
   // Smooth shading normal: the ground slope plus the pile's own analytic
@@ -2039,21 +2273,21 @@ GcVertexFrame gcVertexFrameAt(uint vertexId,uint slot,bool frozenSway=false){
 #endif
  f.v=v;f.inst=inst;f.drawInput=drawInput;f.root=root;f.scale=scale;f.yaw=yaw;f.stretch=stretch;f.tn=tn;f.nn=nn;
  precise float3 wp=root+offset;precise float4 clip=mul(gcClip,float4(wp,1));
-#if defined(NATIVE_FIRE_BURN)&&defined(GC_HOSTED_VS)
- // Whole attached plants disappear together: no floating residual patches.
- if(gcDrawPadding.y==2u&&nativeBurnPhase(burnRoot).y>=.95)clip=float4(0,0,-1,1);
-#endif
  f.wp=wp;f.p=clip;
  return f;
 }
 #ifdef EID3D12
 // D3D12 draws each mesh's visible list (gcCullCS), in the pool's layout.
 StructuredBuffer<uint> gcVisible:register(t68);
-GcVertexFrame gcVertexFrame(uint vertexId,uint instanceId){return gcVertexFrameAt(vertexId,gcVisible[gcDrawBase+instanceId]);}
+uint gcDrawSlot(uint instanceId){return gcVisible[gcDrawBase+instanceId];}
 #else
-GcVertexFrame gcVertexFrame(uint vertexId,uint instanceId){return gcVertexFrameAt(vertexId,gcDrawBase+instanceId);}
+uint gcDrawSlot(uint instanceId){return gcDrawBase+instanceId;}
 #endif
+GcVertexFrame gcVertexFrame(uint vertexId,uint instanceId){return gcVertexFrameAt(vertexId,gcDrawSlot(instanceId));}
 GcOut gcVS(uint vertexId:SV_VertexID,uint instanceId:SV_InstanceID){
+#ifdef GC_HOSTED_VS
+ [branch]if(gcHostedPad(vertexId,gcDrawSlot(instanceId))){GcOut gone=(GcOut)0;gone.p=float4(0,0,-1,1);return gone;}
+#endif
  const GcVertexFrame f=gcVertexFrame(vertexId,instanceId);
  const GcVertex v=f.v;const GcInstance inst=f.inst;const GcDrawInput drawInput=f.drawInput;
  const float3 root=f.root,tn=f.tn,nn=f.nn;const float scale=f.scale;const float2 stretch=f.stretch;
@@ -2097,7 +2331,7 @@ GcOut gcVS(uint vertexId:SV_VertexID,uint instanceId:SV_InstanceID){
  o.own=float4(own.rgb,v.ex.x);o.mat=mat|(bits&0xf0000u);o.uv=v.uv;o.frost=frost;
  o.fog=drawInput.fog;o.cloud=drawInput.extra.x;o.wet=drawInput.extra.z;
 #ifdef NATIVE_FIRE_BURN
- o.burn=f.burn;
+ o.burn=f.burn;o.burnH=f.wp.z-f.root.z;
 #endif
 
  // Point lamps per vertex: the pixel loop's terms at the vertex normal.
@@ -2142,6 +2376,9 @@ GcOut gcVS(uint vertexId:SV_VertexID,uint instanceId:SV_InstanceID){
 // Depth prepass: the same placement, only what the alpha test reads.
 struct GcDepthOut{float4 p:SV_Position;float3 wp:TEXCOORD0;nointerpolation float snowHeightScale:TEXCOORD10;
  nointerpolation uint fade:TEXCOORD18;
+#ifdef NATIVE_FIRE_BURN
+ nointerpolation float2 burn:TEXCOORD19;float burnH:TEXCOORD22; // the burn dissolve (gcBurnCut), as the colour pass
+#endif
 #if GC_PS_KIND==4||GC_PS_KIND==5
  float2 uv:TEXCOORD3; // strands: their alpha-cut edge (gcStrandClip); plant cards: their art's alpha
 #endif
@@ -2150,8 +2387,14 @@ struct GcDepthOut{float4 p:SV_Position;float3 wp:TEXCOORD0;nointerpolation float
 #endif
 };
 GcDepthOut gcDepthVS(uint vertexId:SV_VertexID,uint instanceId:SV_InstanceID){
+#ifdef GC_HOSTED_VS
+ [branch]if(gcHostedPad(vertexId,gcDrawSlot(instanceId))){GcDepthOut gone=(GcDepthOut)0;gone.p=float4(0,0,-1,1);return gone;}
+#endif
  const GcVertexFrame f=gcVertexFrame(vertexId,instanceId);
  GcDepthOut o;o.p=f.p;o.wp=f.wp;o.snowHeightScale=f.scale*f.stretch.y;o.fade=gcFadeWord(f.inst);
+#ifdef NATIVE_FIRE_BURN
+ o.burn=f.burn;o.burnH=f.wp.z-f.root.z;
+#endif
 #if GC_PS_KIND==4||GC_PS_KIND==5
  o.uv=f.v.uv;
 #endif
@@ -2177,17 +2420,22 @@ GcShadowOut gcShadowVS(uint vertexId:SV_VertexID,uint instanceId:SV_InstanceID){
 float4 gcShadowVS(uint vertexId:SV_VertexID,uint instanceId:SV_InstanceID):SV_Position{
 #endif
  const uint entry=gcCasterSlots[gcDrawBase+instanceId];
- GcVertexFrame f=gcVertexFrameAt(vertexId,entry&0x0fffffffu,shadowControl.y>0);
- // A thinned map's survivor grows across about its root (gcCasterListCS).
- f.wp.xy=f.root.xy+(f.wp.xy-f.root.xy)*(1+(entry>>28)/15.0);
-#if defined(NATIVE_FIRE_BURN)&&defined(GC_HOSTED_VS)
- if(gcDrawPadding.y==2u&&nativeBurnPhase(f.burn).y>=.95){
+#ifdef GC_HOSTED_VS
+ [branch]if(gcHostedPad(vertexId,entry&0x0fffffffu)){
 #ifdef GC_SHADOW_ALPHA
   GcShadowOut gone=(GcShadowOut)0;gone.p=float4(0,0,-1,1);return gone;
 #else
   return float4(0,0,-1,1);
 #endif
  }
+#endif
+ GcVertexFrame f=gcVertexFrameAt(vertexId,entry&0x0fffffffu,shadowControl.y>0);
+ // A thinned map's survivor grows across about its root (gcCasterListCS).
+ f.wp.xy=f.root.xy+(f.wp.xy-f.root.xy)*(1+(entry>>28)/15.0);
+#ifdef NATIVE_FIRE_BURN
+ // A plant the burn dissolved (gcBurnCut, done 4 game s in) casts only its
+ // stub's shadow.
+ [branch]if(nativeBurnRow(1).w>0&&f.burn.x>0&&f.burn.y>=4)f.wp.z=min(f.wp.z,f.root.z+.06);
 #endif
 #ifdef GC_SHADOW_ALPHA
  GcShadowOut o;o.p=mul(shadowLight[shadowControl.y],float4(f.wp,1));o.uv=f.v.uv;
@@ -2312,6 +2560,21 @@ float gcPixelSunVisibility(GcOut i,float3 sun,float3 positionDx,float3 positionD
 // The cover's alpha test, shared by the depth prepass and the material pass:
 // fragments over a prop's current footprint (dithered over its margin) and,
 // for the snow pile, buried fragments.
+#ifdef NATIVE_FIRE_BURN
+// The burn's dissolve of grass, bushes and leafy cover (user, cand-1128: no
+// shrinking): after their char (1.5 game s from the tip down) a per-plant
+// noise eats them over 2.5 s down to a short charred stub (6 cm: grass keeps
+// some texture, no flat spots). Shared by the depth prepass and the colour
+// pass (the alpha-test path), so both cut the same pixels. Returns the cut's
+// margin (negative: gone); deadwood, mushrooms and succulents (a negative
+// burn amount) never dissolve.
+float gcBurnCut(float3 wp,float2 raw,float h){
+ [branch]if(nativeBurnRow(1).w<=0||raw.x<=0||raw.y<1.5)return 1;
+ const float d=raw.x*saturate((raw.y-1.5)/2.5)*smoothstep(.06,.1,h);
+ const float n=nativeSnowNoise(wp.xy*6.1+wp.z*4.3)*.7+nativeSnowNoise(wp.xy*17.3+wp.z*11.1)*.3;
+ return n+.02-d*1.05;
+}
+#endif
 void gcCoverClip(float3 wp,float2 pixel,float snowHeightScale,uint fade){
  // Near/far mesh crossfade: one screen-space dither (interleaved gradient
  // noise, offset per tuft) split at the cut, so the two meshes of a tuft
@@ -2407,6 +2670,9 @@ GcDepthResult gcDepthPS(GcDepthOut i){
  const float plantAlpha=gcPlantTexel(i.uv).a;
 #endif
  gcCoverClip(i.wp,i.p.xy,i.snowHeightScale,i.fade);
+#if defined(NATIVE_FIRE_BURN)&&(GC_PS_KIND==0||GC_PS_KIND==1||GC_PS_KIND==4||GC_PS_KIND==5)
+ clip(gcBurnCut(i.wp,i.burn,i.burnH));
+#endif
 #if GC_PS_KIND==4
  gcStrandClip(i.uv,gcStrandPixels(i.uv));
 #elif GC_PS_KIND==5
@@ -2434,6 +2700,9 @@ GcPixel gcPS(GcOut i){
  const float4 plantTexel=gcPlantTexel(i.uv); // before any clip, as the derivatives above
 #endif
  gcCoverClip(i.wp,i.p.xy,i.snowHeightScale,i.fade);
+#if defined(NATIVE_FIRE_BURN)&&(GC_PS_KIND==0||GC_PS_KIND==1||GC_PS_KIND==4||GC_PS_KIND==5)
+ const float burnCut=gcBurnCut(i.wp,i.burn,i.burnH);clip(burnCut);
+#endif
 #if GC_PS_KIND==4
  const float strandPixels=gcStrandPixels(i.uv);gcStrandClip(i.uv,strandPixels);
 #elif GC_PS_KIND==5 && !GC_SUN_MASK
@@ -2595,14 +2864,22 @@ GcPixel gcPS(GcOut i){
 #ifdef NATIVE_FIRE_BURN
  float3 burnGlow=0;
 #endif
-#if defined(NATIVE_FIRE_BURN)&&(GC_PS_KIND==0||GC_PS_KIND==5)
- [branch]if(nativeBurnRow(1).w>0&&(thin||i.mat==0u||i.mat==9u)){
-  const float2 raw=i.burn,burn=nativeBurnPhase(raw);
-  // Charred stubble: sooty brown-black, lighter ash on some tips.
+#if defined(NATIVE_FIRE_BURN)&&(GC_PS_KIND==0||GC_PS_KIND==1||GC_PS_KIND==4||GC_PS_KIND==5)
+ // The vertex stage decides what burns (i.burn.x 1: its root burns; the
+ // hosted living moss, lichen and vines too, which char in place).
+ [branch]if(nativeBurnRow(1).w>0&&i.burn.x!=0&&i.burn.y>=0){
+  const float2 raw=float2(abs(i.burn.x),i.burn.y),burn=nativeBurnPhase(raw);
+  // The char runs from the tip down over 1.5 game s: its front falls from
+  // 1.2 m to the root, a little ragged (user, cand-1128).
+  const float front=1.2*(1-raw.x*saturate(raw.y/1.5));
+  const float charred=raw.x*smoothstep(front-.12,front+.04,i.burnH+(nativeSnowNoise(i.wp.xy*9.7)-.5)*.12);
+  // Charred: sooty brown-black, lighter ash on some tips.
   const float tip=nativeSnowNoise(i.wp.xy*5.3);
-  alb=lerp(alb,lerp(float3(.07,.05,.035),float3(.3,.29,.27),smoothstep(.65,.9,tip)*(1-i.gnd.w)),burn.y*.9);
-  // Embers on the blades just behind the fire front.
+  alb=lerp(alb,lerp(float3(.07,.05,.035),float3(.3,.29,.27),smoothstep(.65,.9,tip)*(1-i.gnd.w)),charred*.9);
+  // Embers just behind the fire front, and a thin glowing rim on the
+  // dissolve's edge while it eats the plant.
   burnGlow=nativeBurnEmber(i.wp,max(nativeBurnFront(raw),burn.x*.35))*(1-.6*i.gnd.w);
+  [branch]if(i.burn.x>0&&raw.y>1.5&&raw.y<4.2)burnGlow+=float3(1.,.35,.06)*(1-smoothstep(0,.06,burnCut))*1.5;
  }
 #endif
 )" R"(
@@ -2645,6 +2922,10 @@ GcPixel gcPS(GcOut i){
  float3 c=alb*(saturate(max(nativeWorldAmbient.rgb,directional)+local)+glow);
 #ifdef NATIVE_FIRE_BURN
  c+=burnGlow;
+ // fire_burn_debug_view: 1 yellow where the vertex stage evaluated the
+ // burn (burnable), cyan not; 2 red the flame, green the char.
+ [branch]if(nativeBurnRow(1).w>0&&nativeBurnRow(1).y>0)
+  c=nativeBurnRow(1).y<1.5?(i.burn.y>=0?float3(1,1,0):float3(0,1,1)):float3(nativeBurnPhase(float2(abs(i.burn.x),i.burn.y)),0);
 #endif
  #if GC_PS_KIND==0
  if(i.mat==6u)c+=i.alb*float3(.08,.24,.17);
@@ -3049,14 +3330,13 @@ GcVertex desert_plant_vertex(const std::uint32_t* w) {
     else { v.uv[0] = std::min(u, .9995f) + float(art); v.uv[1] = std::min(t, .9995f) + float(saturation); }
     return v;
 }
-// Per hosted kind, the index count of its largest model (its identity run).
-std::array<std::uint32_t, std::size(kHostedKinds)> hosted_runs() noexcept {
-    std::array<std::uint32_t, std::size(kHostedKinds)> runs{};
-    if (const HostedPlantData* data = hosted_plant_data())
-        for (const auto& model : data->models)
-            if (model.kind < runs.size()) runs[model.kind] = std::max(runs[model.kind], model.indices);
-    return runs;
-}
+// Hosted pools draw chunks (issue #275): every hosted pool's mesh is a run
+// of kHostedChunk identity indices, and gcHostedCS appends one instance a
+// chunk of the placement's level (its index base advanced a chunk each), so
+// a placement costs its own model's indices rounded up to a chunk, not its
+// kind's largest model (dead vines: up to 433k indices a placement).
+constexpr std::uint32_t kHostedChunk = 3072;
+std::uint32_t hosted_chunks(std::size_t indices) noexcept { return std::uint32_t((indices + kHostedChunk - 1) / kHostedChunk); }
 // A hosted kind's farthest vertex from its models' origins (mesh units).
 float hosted_kind_radius(unsigned kind) noexcept {
     float radius = 0;
@@ -3071,12 +3351,20 @@ float hosted_kind_radius(unsigned kind) noexcept {
         }
     return radius;
 }
-// The hosted kinds' meshes: no vertices, a run of identity indices each
-// (GC_HOSTED_VS pulls the model's index and vertex).
+// A hosted pool's farthest vertex (mesh units): its kind's, or a tier pool's kinds' largest.
+float hosted_mesh_radius(unsigned mesh) noexcept {
+    if (mesh < gm_hosted_kinds_end) return hosted_kind_radius(mesh - gm_first_hosted);
+    if (mesh == gm_hosted_dead_lod) return hosted_kind_radius(0);
+    float radius = 0;
+    for (unsigned k = 1; k < std::size(kHostedKinds); ++k) radius = std::max(radius, hosted_kind_radius(k));
+    return radius;
+}
+// The hosted pools' meshes: no vertices, a run of identity indices each
+// (GC_HOSTED_VS pulls the model's index and vertex): the kinds' and the tiers'.
 void add_hosted_plants(std::array<GcMesh, gm_count>& meshes) {
-    const auto runs = hosted_runs();
-    for (unsigned k = 0; k < runs.size(); ++k)
-        for (std::uint32_t i = 0; i < runs[k]; ++i) meshes[gm_first_hosted + k].i.push_back(i);
+    if (!hosted_plant_data()) return;
+    for (unsigned mesh = gm_first_hosted; mesh < gm_count; ++mesh)
+        for (std::uint32_t i = 0; i < kHostedChunk; ++i) meshes[mesh].i.push_back(i);
 }
 // The map's hosted buffers from a frame's records: each used model's vertices
 // (the desert plants' vertex words), then each rebound placement's own copy;
@@ -3086,6 +3374,7 @@ struct HostedUpload {
     std::vector<GcVertex> vertices; std::vector<std::uint32_t> indices; std::vector<HostedPlantGpu> records;
     std::vector<std::uint32_t> textures; // the used models' textures (HostedTextureRecord index), stacked top to bottom
     std::uint32_t rebound_records = 0, rebound_copies = 0; // placements with a rebound shape, and the vertex copies they share
+    std::uint32_t mid_models = 0, far_models = 0; // models with a mid and a far LOD tier (issue #275)
 };
 // The map's hosted textures as one DXT1 texture: the textures share a width
 // and mip count, each keeps its own height (moss atlases of large hosts are
@@ -3135,6 +3424,77 @@ bool stack_hosted_textures(const std::vector<std::uint32_t>& used, std::vector<s
     }
     return true;
 }
+// Hosted plant LOD tiers (issue #275): per model its mid and far reduced
+// levels (simplify_mesh_levels, the static objects' simplifier core) as the
+// model's local vertex indices, and their largest deviation in mesh units.
+// Built once per model when a map first uploads it (the upload repeats while
+// hosts stream in), released with the map's hosted buffers.
+struct HostedTiers { std::vector<std::uint32_t> level[2]; float error[2]{}; };
+std::unordered_map<std::uint32_t, HostedTiers> g_hosted_tiers;
+struct HostedTierCost { double ms = 0; std::uint64_t bytes = 0; unsigned models = 0; };
+HostedTierCost g_hosted_tier_cost;
+void release_hosted_tiers() noexcept { g_hosted_tiers.clear(); g_hosted_tier_cost = {}; }
+const HostedTiers& hosted_tiers(std::uint32_t m, const HostedModelRecord& model, const GcVertex* vertices,
+                                const std::vector<std::uint32_t>& local) {
+    auto [found, fresh] = g_hosted_tiers.try_emplace(m);
+    HostedTiers& tiers = found->second;
+    if (!fresh) return tiers;
+    const auto started = std::chrono::steady_clock::now();
+    // Alpha-tested cards (art 5: the moss and lichen cards' own atlases) keep
+    // every triangle in every tier: their coverage lives in the texture, which
+    // the simplifier's error does not see (the laptop preview of 2af8157d lost
+    // most of the pedestal's moss in the mid tier). Only the solid geometry
+    // (cushions, rosettes, vine stems, leaves) is reduced.
+    std::vector<std::uint32_t> cards, rest;
+    for (std::size_t t = 0; t + 2 < local.size(); t += 3) {
+        bool card = false;
+        for (unsigned c = 0; c < 3; ++c) card |= (std::uint32_t(vertices[local[t + c]].uv[0]) & 7u) == 5u;
+        (card ? cards : rest).insert((card ? cards : rest).end(), local.begin() + std::ptrdiff_t(t), local.begin() + std::ptrdiff_t(t + 3));
+    }
+    // Weld equal vertices so the simplifier sees connected surfaces; UV seams
+    // and open edges stay locked.
+    std::vector<float> stream(std::size_t(model.vertices) * 8);
+    for (std::uint32_t v = 0; v < model.vertices; ++v) {
+        float* x = &stream[std::size_t(v) * 8];
+        std::copy(vertices[v].p, vertices[v].p + 3, x); std::copy(vertices[v].n, vertices[v].n + 3, x + 3);
+        x[6] = vertices[v].uv[0]; x[7] = vertices[v].uv[1];
+    }
+    std::vector<unsigned> remap(model.vertices);
+    std::unordered_map<std::string, unsigned> same;   // a vertex's exact bytes -> its welded id
+    same.reserve(model.vertices);
+    for (std::uint32_t v = 0; v < model.vertices; ++v)
+        remap[v] = same.try_emplace(std::string(reinterpret_cast<const char*>(&stream[std::size_t(v) * 8]), sizeof(float) * 8),
+                                    unsigned(same.size())).first->second;
+    const std::size_t unique = same.size();
+    std::vector<float> positions(unique * 3), attributes(unique * 5);
+    std::vector<std::uint32_t> original(unique, UINT32_MAX), welded(local.size());
+    for (std::uint32_t v = 0; v < model.vertices; ++v) {
+        const unsigned u = remap[v];
+        if (u >= unique || original[u] != UINT32_MAX) continue;
+        original[u] = v;
+        const float* x = &stream[std::size_t(v) * 8];
+        std::copy(x, x + 3, &positions[std::size_t(u) * 3]); std::copy(x + 3, x + 8, &attributes[std::size_t(u) * 5]);
+    }
+    welded.resize(rest.size());
+    for (std::size_t i = 0; i < rest.size(); ++i) welded[i] = remap[rest[i]];
+    NativeMeshLods lods;
+    if (unique && !welded.empty() && simplify_mesh_levels(positions.data(), unique, attributes.data(), welded.data(), welded.size(),
+                                                          meshopt_simplifyScale(positions.data(), unique, 12), lods,
+                                                          false)) { // vine ribbons lie wholly on open borders
+        // mid: the first reduced level; far: the coarsest one (when it is another)
+        const int chosen[2] = {0, lods.levels > 1 ? int(lods.levels) - 1 : -1};
+        for (unsigned t = 0; t < 2; ++t) {
+            if (chosen[t] < 0) continue;
+            tiers.level[t] = cards;
+            for (const std::uint32_t u : lods.indices[chosen[t]]) tiers.level[t].push_back(original[u]);
+            tiers.error[t] = lods.error[chosen[t]];
+            g_hosted_tier_cost.bytes += tiers.level[t].size() * sizeof(std::uint32_t);
+        }
+    }
+    g_hosted_tier_cost.ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    ++g_hosted_tier_cost.models;
+    return tiers;
+}
 // Hosted plants report each stage once a change (host.log): what the upload
 // carries per kind, and per hosted mesh the instances the GPU kept in view
 // (the demand readback), so a missing kind names its first empty stage.
@@ -3144,8 +3504,17 @@ void log_hosted_upload(const HostedUpload& up) {
     std::string text = std::to_string(up.records.size()) + " records, " + std::to_string(up.vertices.size()) + " vertices, " +
         std::to_string(up.textures.size()) + " texture rows, " + std::to_string(up.rebound_records) + " rebound placements in " +
         std::to_string(up.rebound_copies) + " shared copies; per kind";
-    for (unsigned k = 0; k < kinds.size(); ++k) text += ' ' + std::to_string(kinds[k]);
+    for (unsigned k = 0; k < std::size(kHostedKinds); ++k) text += ' ' + std::to_string(kinds[k]);
     bridge_append_probe_event("hosted_plants_uploaded", text.c_str());
+    // LOD tiers (issue #275): what building them cost this map so far (CPU
+    // time, the kept tier lists) and this upload's index buffer (every level
+    // in whole chunks).
+    char lod[256];
+    std::snprintf(lod, sizeof(lod), "tiers built for %u models in %.1f ms, %llu KB kept; this upload: %u models with a mid tier, "
+                  "%u with a far tier, index buffer %llu KB",
+                  g_hosted_tier_cost.models, g_hosted_tier_cost.ms, (unsigned long long)(g_hosted_tier_cost.bytes / 1024),
+                  up.mid_models, up.far_models, (unsigned long long)(up.indices.size() * 4 / 1024));
+    bridge_append_probe_event("hosted_plants_lod", lod);
 }
 void log_hosted_demand(const std::uint32_t* demand) {
     static std::array<std::uint32_t, gm_count - gm_first_hosted> logged{};
@@ -3187,8 +3556,9 @@ bool build_hosted_upload(const HostedPlantFrame& frame, HostedUpload& out) {
             bridge_append_probe_event("hosted_plants_hosts", line.c_str());
         }
     }
-    const auto runs = hosted_runs();
     std::vector<std::uint32_t> first_vertex(data->models.size(), UINT32_MAX), first_index(data->models.size(), 0);
+    std::vector<std::array<std::uint32_t, 2>> tier_base(data->models.size(), std::array<std::uint32_t, 2>{});
+    std::vector<std::array<std::uint32_t, 3>> chunks(data->models.size(), std::array<std::uint32_t, 3>{}); // per level
     // The textures these hosts' models use: the stack's rows (models may share one:
     // the Gipat light moss draws its full moss's cards).
     std::uint32_t rows = 0;
@@ -3230,9 +3600,24 @@ bool build_hosted_upload(const HostedPlantFrame& frame, HostedUpload& out) {
             }
             out.vertices.push_back(vertex);
         }
-        const std::uint32_t run = runs[model.kind];
-        for (std::uint32_t i = 0; i < run; ++i)
-            out.indices.push_back(first_vertex[m] + local[i < model.indices ? i : 0]);
+        // Each level fills whole chunks (kHostedChunk); the last chunk's rest is
+        // padding: whole triangles of kHostedPadIndex, which the vertex stages
+        // drop at once (gcHostedPad).
+        const auto put = [&](const std::uint32_t* list, std::size_t count) {
+            const std::uint32_t n = hosted_chunks(count);
+            for (std::size_t i = 0; i < std::size_t(n) * kHostedChunk; ++i)
+                out.indices.push_back(i < count ? first_vertex[m] + list[i] : kHostedPadIndex);
+            return n;
+        };
+        chunks[m][0] = put(local.data(), model.indices);
+        // Its LOD tiers.
+        const HostedTiers& tiers = hosted_tiers(m, model, &out.vertices[first_vertex[m]], local);
+        for (unsigned t = 0; t < 2; ++t) {
+            if (tiers.level[t].empty()) continue;
+            tier_base[m][t] = 1 + std::uint32_t(out.indices.size());
+            chunks[m][t + 1] = put(tiers.level[t].data(), tiers.level[t].size());
+            ++(t ? out.far_models : out.mid_models);
+        }
     }
     std::unordered_map<std::uint32_t, std::uint32_t> rebound_copy; // frame.rebound offset -> its vertex copy
     for (const auto& record : frame.records) {
@@ -3245,7 +3630,12 @@ bool build_hosted_upload(const HostedPlantFrame& frame, HostedUpload& out) {
         g.index_base = 1 + first_index[record.model];
         g.kind_mesh = gm_first_hosted + model.kind; g.hash = record.hash;
         g.pad[0] = kHostedKinds[model.kind].shade == hs_vines ? 1u : 0u; // green vines: only beside grass (gcHostedCS)
-        std::memcpy(&g.lod_near, &kHostedKinds[model.kind].lod_near, 4); std::memcpy(&g.lod_far, &kHostedKinds[model.kind].lod_far, 4);
+        g.mid_mesh = hosted_tier_mesh(model.kind, 1); g.far_mesh = hosted_tier_mesh(model.kind, 2);
+        g.pad[1] = chunks[record.model][0]; g.pad[2] = chunks[record.model][1] | chunks[record.model][2] << 16; // chunks a level
+        if (const auto t = g_hosted_tiers.find(record.model); t != g_hosted_tiers.end()) {
+            g.mid_base = tier_base[record.model][0]; g.far_base = tier_base[record.model][1];
+            std::memcpy(&g.mid_error, &t->second.error[0], 4); std::memcpy(&g.far_error, &t->second.error[1], 4);
+        }
         if (record.rebound) {
             // The rebound shape's copy: the model's vertices with the rebound positions and
             // normals, one copy for every record sharing that rebind (the same posed shape).
@@ -3384,11 +3774,13 @@ HRESULT make_texture(ID3D11Device* device, UINT width, UINT height, DXGI_FORMAT 
 UINT dispatch_groups(UINT count, UINT size) { return (count + size - 1) / size; }
 
 // The sea mask (ground_cover_sea_mask) lives in liquid_surf.h, shared with the sea surf field.
+// A map whose open water is a lake (water_lake_maps: Suslanger's bay, user
+// 2026-11-20) has no sea for ground cover either: lake-shore cover, no sea habitat.
 
-HRESULT make_sea_srv(ID3D11Device* device, const std::vector<std::uint8_t>& area, UINT tiles_x, UINT tiles_y,
+HRESULT make_sea_srv(ID3D11Device* device, const std::vector<std::uint8_t>& area, UINT tiles_x, UINT tiles_y, bool takes_sea,
                      ComPtr<ID3D11ShaderResourceView>& srv) {
     try {
-        const std::vector<std::uint8_t> mask = ground_cover_sea_mask(area, tiles_x, tiles_y);
+        const std::vector<std::uint8_t> mask = takes_sea ? ground_cover_sea_mask(area, tiles_x, tiles_y) : std::vector<std::uint8_t>(std::size_t(tiles_x) * tiles_y, 0);
         D3D11_TEXTURE2D_DESC d{}; d.Width = tiles_x; d.Height = tiles_y; d.MipLevels = d.ArraySize = 1;
         d.Format = DXGI_FORMAT_R8_UNORM; d.SampleDesc.Count = 1; d.Usage = D3D11_USAGE_IMMUTABLE; d.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         D3D11_SUBRESOURCE_DATA initial{mask.data(), tiles_x, 0};
@@ -3429,12 +3821,31 @@ std::string ground_cover_mesh_defines() {
         {"GC_MESH_BLADES", gm_blades}, {"GC_MESH_FLOWER", gm_flower}, {"GC_MESH_REED", gm_reed},
         {"GC_MESH_CATTAIL", gm_cattail}, {"GC_MESH_SEAGRASS", gm_seagrass},
         {"GC_MESH_BLADES_FAR", gm_blades_far}, {"GC_MESH_FLOWER_FAR", gm_flower_far}, {"GC_MESH_REED_FAR", gm_reed_far},
-        {"GC_MESH_CATTAIL_FAR", gm_cattail_far}, {"GC_MESH_SEAGRASS_FAR", gm_seagrass_far}, {"GC_MESH_DESERT", gm_thorn_bush}};
+        {"GC_MESH_CATTAIL_FAR", gm_cattail_far}, {"GC_MESH_SEAGRASS_FAR", gm_seagrass_far},
+        {"GC_MESH_DESERT", gm_thorn_bush}, {"GC_DESERT_SPECIES", unsigned(std::size(kDesertSpecies))},
+        {"GC_DESERT_MAX_PLANTS", kDesertClumpMaxPlants}, {"GC_ZONE_DESERT", ambient::zone_desert}};
     std::string text = "\n";
     for (const auto& [name, value] : sizes) text += "#define " + std::string(name) + " " + std::to_string(value) + "\n";
     for (const auto& [name, value] : meshes) text += "#define " + std::string(name) + " " + std::to_string(value) + "u\n";
-    text += "static const uint kGcDesertClumpPlants[]={";
-    for (const unsigned count : kDesertClumpPlants) text += std::to_string(count) + "u,";
+    // Suslanger clump species (ground_cover.h kDesertSpecies): open-ground
+    // weight, oasis weight, plants per m2 inside a clump, stony-ground factor.
+    text += "static const float4 kGcDesertSpecies[GC_DESERT_SPECIES]={";
+    for (const auto& s : kDesertSpecies)
+        text += "float4(" + std::to_string(s.open) + "," + std::to_string(s.oasis) + "," + std::to_string(s.per_m2) + "," + std::to_string(s.stony) + "),";
+    text += "};\n";
+    // Each species' community (ground_cover.h kDesertCommunity): companion, its
+    // count range (min | max << 8), grass, its count range.
+    text += "static const uint4 kGcDesertCommunity[GC_DESERT_SPECIES]={";
+    for (const auto& c : kDesertCommunity)
+        text += "uint4(" + std::to_string(c.companion) + "u," + std::to_string(c.cmin | c.cmax << 8) + "u," + std::to_string(c.grass) + "u," +
+                std::to_string(c.gmin | c.gmax << 8) + "u),";
+    text += "};\n";
+    // Each species' companions and grasses (placement reads only these):
+    // companion, grass, second companion, second grass.
+    text += "static const uint4 kGcDesertPartners[GC_DESERT_SPECIES]={";
+    for (const auto& c : kDesertCommunity)
+        text += "uint4(" + std::to_string(c.companion) + "u," + std::to_string(c.grass) + "u," + std::to_string(c.companion2) + "u," +
+                std::to_string(c.grass2) + "u),";
     text += "};\n";
     return text;
 }
@@ -3490,6 +3901,7 @@ namespace {
 // Program order of append_ground_cover_shader_programs (the blob order).
 enum GcProgram : unsigned {
     gp_cells, gp_scan, gp_place, gp_place_grass, gp_place_neighbour,
+    gp_clump, gp_cells_desert, gp_place_desert, gp_build_desert, gp_neighbour_desert, gp_build_all_desert, gp_build_desert_still, // GC_DESERT (Suslanger maps)
     gp_habitat, gp_habitat_grass, gp_habitat_wall, gp_habitat_beach, gp_habitat_pile, gp_habitat_all,
     gp_build_grass, gp_build_grass_still, gp_build_tall, gp_build_tall_still, gp_build_debris, gp_build_wall, gp_build_beach,
     gp_build_pile, gp_build_all,  // _still: without unit tracks and snow trails
@@ -3523,7 +3935,7 @@ enum GcProgram : unsigned {
     gp_count};
 // The placement shader's per-rule features (its GC_F_* guards).
 enum PlaceFeature : unsigned { pf_edge = 1, pf_cluster = 2, pf_far = 4, pf_trail = 8, pf_pal1 = 16, pf_pal23 = 32,
-                               pf_wall = 64, pf_beach = 128, pf_pile = 256 };
+                               pf_wall = 64, pf_beach = 128, pf_pile = 256, pf_desert = 512 };
 // Placement classes, smallest first: a rule takes the first class whose
 // features cover the ones it reaches. Programs per stage (cells, habitat,
 // build with trails, build without); classes whose stage needs no feature of
@@ -3531,7 +3943,7 @@ enum PlaceFeature : unsigned { pf_edge = 1, pf_cluster = 2, pf_far = 4, pf_trail
 struct PlaceClass { const char* name; unsigned features; unsigned program[4]; };
 constexpr unsigned kPlaceClassCount = 6;
 constexpr PlaceClass kPlaceClasses[kPlaceClassCount] = {
-    {"debris", pf_pal23, {gp_place, gp_habitat, gp_build_debris, gp_build_debris}},
+    {"debris", pf_pal23 | pf_desert, {gp_place, gp_habitat, gp_build_debris, gp_build_debris}}, // Suslanger maps: gp_place_desert, gp_build_desert
     {"tall tufts", pf_far | pf_trail, {gp_place, gp_habitat, gp_build_tall, gp_build_tall_still}},
     {"grass", pf_edge | pf_cluster | pf_far | pf_trail | pf_pal1, {gp_place_grass, gp_habitat_grass, gp_build_grass, gp_build_grass_still}},
     {"cave walls", pf_wall, {gp_place, gp_habitat_wall, gp_build_wall, gp_build_wall}},
@@ -3543,7 +3955,7 @@ unsigned gc_sun_state(bool on, bool soft, bool far_maps) { return on ? 1u + (sof
 unsigned place_features(const GroundCoverRule& r) {
     unsigned f = 0;
     const auto cluster = std::uint32_t(r.cluster), palette = std::uint32_t(r.palette);
-    if (cluster != 0 && cluster < cl_desert_clump) f |= pf_cluster;
+    if (cluster != 0) f |= pf_cluster;
     if (r.mesh == gm_blades || cluster == cl_flower_patch) f |= pf_edge;
     if (r.mesh == gm_blades || r.mesh == gm_flower || r.mesh == gm_reed || r.mesh == gm_cattail || r.mesh == gm_seagrass) f |= pf_far;
     if ((r.flags & rf_tuft) || r.mesh == gm_dead_bush) f |= pf_trail;
@@ -3552,6 +3964,9 @@ unsigned place_features(const GroundCoverRule& r) {
     if (r.field == fd_damp || r.field == fd_wall || r.field == fd_corner || r.mesh == gm_roots) f |= pf_wall;
     if (r.field == fd_beach || (r.flags & (rf_shore_tangent | rf_shore_clumps))) f |= pf_beach;
     if ((r.flags & rf_snow_pile) || r.mesh == gm_mound) f |= pf_pile;
+    // Suslanger clump rules: the debris class's GC_DESERT programs serve them
+    // whole (their build compiles the tuft trails itself).
+    if (r.flags & rf_desert_clump) return pf_desert;
     return f;
 }
 // Pixel material kinds (GC_PS_KIND): procedural colour (plain, ground, wet,
@@ -3580,6 +3995,12 @@ void append_ground_cover_shader_programs(std::vector<ShaderProgram>& out){
     };
     add("gcCellsCS", "cs_5_0", nullptr); add("gcScanCS", "cs_5_0", nullptr);
     add("gcPlaceCS", "cs_5_0", nullptr); add("gcPlaceCS", "cs_5_0", grass); add("gcNeighbourCS", "cs_5_0", neighbour);
+    static const M desert[]{{"GC_DESERT", "1"}, {}}, debris_desert[]{{"GC_PLACE_DEBRIS", "1"}, {"GC_DESERT", "1"}, {}},
+        neighbour_desert[]{{"GC_PLACE_NEIGHBOUR", "1"}, {"GC_DESERT", "1"}, {}};
+    add("gcClumpCS", "cs_5_0", nullptr); add("gcCellsCS", "cs_5_0", desert); add("gcPlaceCS", "cs_5_0", debris_desert);
+    add("gcBuildCS", "cs_5_0", debris_desert); add("gcNeighbourCS", "cs_5_0", neighbour_desert); add("gcBuildCS", "cs_5_0", neighbour_desert);
+    static const M debris_desert_still[]{{"GC_PLACE_DEBRIS", "1"}, {"GC_DESERT", "1"}, {"GC_BUILD_TRAILS", "0"}, {}};
+    add("gcBuildCS", "cs_5_0", debris_desert_still);
     add("gcHabitatCS", "cs_5_0", nullptr); add("gcHabitatCS", "cs_5_0", grass); add("gcHabitatCS", "cs_5_0", wall);
     add("gcHabitatCS", "cs_5_0", beach); add("gcHabitatCS", "cs_5_0", pile); add("gcHabitatCS", "cs_5_0", neighbour);
     add("gcBuildCS", "cs_5_0", grass); add("gcBuildCS", "cs_5_0", grass_still); add("gcBuildCS", "cs_5_0", tall);
@@ -3684,14 +4105,15 @@ void append_ground_cover_shader_programs(std::vector<ShaderProgram>& out){
 
 #if !defined(EID3D11_SHADER_EMBED)
 void Renderer::release_ground_cover() noexcept {
-    gc12_={};
+    gc12_={};++world_programs_generation_; // its program lists (update_fire_burn_substitutes)
     gc_place_cs_.Reset(); gc_finalize_cs_.Reset(); gc_paint_cs_.Reset(); gc_fields_cs_.Reset();
     for (auto& value : gc_shade_cs_) value.Reset(); gc_caster_list_cs_.Reset();
-    gc_cells_cs_.Reset(); gc_scan_cs_.Reset(); gc_neighbour_cs_.Reset(); gc_habitat_all_cs_.Reset(); gc_build_all_cs_.Reset();
+    gc_cells_cs_.Reset(); gc_clump_cs_.Reset(); gc_cells_desert_cs_.Reset(); gc_place_desert_cs_.Reset(); gc_build_desert_cs_.Reset();
+    gc_neighbour_desert_cs_.Reset(); gc_build_all_desert_cs_.Reset(); gc_build_desert_still_cs_.Reset(); gc_scan_cs_.Reset(); gc_neighbour_cs_.Reset(); gc_habitat_all_cs_.Reset(); gc_build_all_cs_.Reset();
     gc_cell_jobs_.Reset(); gc_cell_job_uav_.Reset(); gc_cell_job_srv_.Reset(); gc_cell_job_capacity_ = 0;
     gc_cell_counts_.Reset(); gc_cell_count_uav_.Reset(); gc_cell_count_srv_.Reset();
     gc_rounds_.Reset(); gc_round_uav_.Reset(); gc_round_srv_.Reset(); gc_rule_class_.Reset(); gc_rule_class_srv_.Reset();
-    std::vector<GcRuleMask>().swap(gc_cell_masks_); gc_cell_masks_key_ = UINT64_MAX; gc_cell_mask_srv_.Reset();
+    std::vector<GcRuleMask>().swap(gc_cell_masks_); gc_cell_masks_key_ = UINT64_MAX; gc_cell_mask_srv_.Reset(); gc_clump_ = {}; gc_cell_masks_desert_ = false;
     for (auto& stage : gc_stage_cs_) for (auto& value : stage) value.Reset();
     for (auto& value : gc_class_constants_) value.Reset();
     gc_class_rule_count_.fill(0);
@@ -3751,7 +4173,7 @@ void Renderer::release_ground_cover() noexcept {
     gc_map_generation_ = 0; gc_failed_ = false; gc_grow_ = false;
     gc_hosted_.Reset(); gc_hosted_srv_.Reset(); gc_hosted_vertices_.Reset(); gc_hosted_vertex_srv_.Reset();
     gc_hosted_indices_.Reset(); gc_hosted_index_srv_.Reset(); gc_hosted_art_srv_.Reset();
-    gc_hosted_frame_ = {}; gc_hosted_uploaded_ = UINT64_MAX; gc_hosted_count_ = 0;
+    gc_hosted_frame_ = {}; gc_hosted_uploaded_ = UINT64_MAX; gc_hosted_count_ = 0; release_hosted_tiers();
     if (gc_compile_.valid()) gc_compile_ = {}; // waits for a running compile
 }
 
@@ -3768,16 +4190,17 @@ void Renderer::release_ground_cover_world() noexcept {
     auto cave_art=std::move(gc12_.cave_art); // with the immutable meshes
     const auto classes=gc12_.classes;
     const auto cull_mesh=gc12_.cull_mesh; // bounds share the immutable meshes' lifetime
-    gc12_={};gc12_.programs=std::move(programs);gc12_.vertices=std::move(vertices);gc12_.indices=std::move(indices);
+    gc12_={};++world_programs_generation_; // its guide list goes (update_fire_burn_substitutes)
+    gc12_.programs=std::move(programs);gc12_.vertices=std::move(vertices);gc12_.indices=std::move(indices);
     gc12_.rules=std::move(rules);gc12_.rule_class=std::move(rule_class);gc12_.classes=classes;gc12_.cave_art=std::move(cave_art);
     gc12_.cull_mesh=cull_mesh;
     gc_shadow_ready_ = false; // the pool holds the previous world's cover
     bridge_release_ground_contacts();
     gc_hosted_.Reset(); gc_hosted_srv_.Reset(); gc_hosted_vertices_.Reset(); gc_hosted_vertex_srv_.Reset();
     gc_hosted_indices_.Reset(); gc_hosted_index_srv_.Reset(); gc_hosted_art_srv_.Reset();
-    gc_hosted_frame_ = {}; gc_hosted_uploaded_ = UINT64_MAX; gc_hosted_count_ = 0;
+    gc_hosted_frame_ = {}; gc_hosted_uploaded_ = UINT64_MAX; gc_hosted_count_ = 0; release_hosted_tiers();
     gc_cell_jobs_.Reset(); gc_cell_job_uav_.Reset(); gc_cell_job_srv_.Reset(); gc_cell_job_capacity_ = 0;
-    std::vector<GcRuleMask>().swap(gc_cell_masks_); gc_cell_masks_key_ = UINT64_MAX; gc_cell_mask_srv_.Reset();
+    std::vector<GcRuleMask>().swap(gc_cell_masks_); gc_cell_masks_key_ = UINT64_MAX; gc_cell_mask_srv_.Reset(); gc_clump_ = {}; gc_cell_masks_desert_ = false;
     gc_candidates_.Reset(); gc_survivors_.Reset(); gc_candidate_uav_.Reset(); gc_survivor_uav_.Reset();
     gc_candidate_capacity_ = gc_survivor_capacity_ = 0;
     gc_instances_.Reset(); gc_instance_srv_.Reset(); gc_instance_uav_.Reset();
@@ -3881,7 +4304,10 @@ HRESULT Renderer::ensure_ground_cover_pipeline() noexcept {
         if (FAILED(hr = blob_ps(gp_ps + k, gc_ps_[k]))) return hr;
     for (unsigned k = 0; k < gc_prep_cs_.size(); ++k)
         if (FAILED(hr = blob_cs(gp_prep + k, gc_prep_cs_[k]))) return hr;
-    if (FAILED(hr = blob_cs(gp_cells, gc_cells_cs_)) || FAILED(hr = blob_cs(gp_scan, gc_scan_cs_)) ||
+    if (FAILED(hr = blob_cs(gp_cells, gc_cells_cs_)) || FAILED(hr = blob_cs(gp_clump, gc_clump_cs_)) || FAILED(hr = blob_cs(gp_scan, gc_scan_cs_)) ||
+        FAILED(hr = blob_cs(gp_cells_desert, gc_cells_desert_cs_)) || FAILED(hr = blob_cs(gp_place_desert, gc_place_desert_cs_)) ||
+        FAILED(hr = blob_cs(gp_build_desert, gc_build_desert_cs_)) || FAILED(hr = blob_cs(gp_neighbour_desert, gc_neighbour_desert_cs_)) ||
+        FAILED(hr = blob_cs(gp_build_all_desert, gc_build_all_desert_cs_)) || FAILED(hr = blob_cs(gp_build_desert_still, gc_build_desert_still_cs_)) ||
         FAILED(hr = blob_cs(gp_place_neighbour, gc_neighbour_cs_)) || FAILED(hr = blob_cs(gp_habitat_all, gc_habitat_all_cs_)) ||
         FAILED(hr = blob_cs(gp_build_all, gc_build_all_cs_))) return hr;
     for (unsigned k = 0; k < gc_depth_vs_.size(); ++k)
@@ -4168,7 +4594,8 @@ HRESULT Renderer::update_ground_cover_maps(const AmbientWorldSource& inputs) noe
         // water connected to the map edge and large (a lake or river is not
         // the sea). Built from the shared area classes' CPU grid; temporary.
         ComPtr<ID3D11ShaderResourceView> sea_srv;
-        if (FAILED(hr = make_sea_srv(device_.Get(), ambient_area_, tiles_x, tiles_y, sea_srv))) return hr;
+        if (FAILED(hr = make_sea_srv(device_.Get(), ambient_area_, tiles_x, tiles_y,
+                liquid_surf_map_takes_sea(ambient_map_name_, liquid_lake_maps()), sea_srv))) return hr;
         std::vector<std::uint8_t> used;
         try {
             const auto tiles = ground_cover_tiles(terrain, tiles_x, tiles_y, used);
@@ -4350,7 +4777,7 @@ void Renderer::add_ground_cover_neighbour(const NeighbourPiece& upload,
             FAILED(make_grid_srv(device_.Get(), vx, vy, DXGI_FORMAT_R32_FLOAT, grids.height.data(), vx * 4, n.height)) ||
             FAILED(make_grid_srv(device_.Get(), vx, vy, DXGI_FORMAT_R32_FLOAT, grids.ground.data(), vx * 4, n.ground)) ||
             FAILED(make_grid_srv(device_.Get(), tx, ty, DXGI_FORMAT_R8G8B8A8_UNORM, trees.data(), tx * 4, n.trees)) ||
-            FAILED(make_sea_srv(device_.Get(), grids.area, tx, ty, n.sea)) ||
+            FAILED(make_sea_srv(device_.Get(), grids.area, tx, ty, liquid_surf_map_takes_sea(n.name, liquid_lake_maps()), n.sea)) ||
             FAILED(make_buffer(device_.Get(), UINT(tiles.size() * sizeof(GcTileGpu)), D3D11_BIND_SHADER_RESOURCE,
                 D3D11_RESOURCE_MISC_BUFFER_STRUCTURED, sizeof(GcTileGpu), tiles.data(), tile_buffer, D3D11_USAGE_IMMUTABLE)) ||
             FAILED(make_structured_srv(device_.Get(), tile_buffer.Get(), UINT(tiles.size()), n.tiles)))
@@ -4721,15 +5148,14 @@ UINT gc_slot_count(const GroundCoverRule& r, float density, float distance, floa
 }
 // Slots of one cell at full density over every rule: a round passes its
 // split by at most this.
-UINT gc_cell_slot_bound(float density, bool desert_clumps) {
+UINT gc_cell_slot_bound(float density) {
     UINT total = 0, clump = 0;
     for (const auto& r : rule_table()) {
-        const auto placed = placement_rule(r, desert_clumps);
-        const UINT slots = UINT(std::ceil(placed.density * density * kCellSize * kCellSize));
-        if (placed.cluster == cl_desert_clump) clump = std::max(clump, slots);
+        const UINT slots = UINT(std::ceil(r.density * density * kCellSize * kCellSize));
+        if (r.flags & rf_desert_clump) clump = std::max(clump, slots); // a cell holds one clump, of one species
         else total += slots;
     }
-    return total + clump; // only one desert species can occupy a cell
+    return total + clump; // the clump driver rule
 }
 // Summed-area table of one tile flag, for radius queries.
 struct GcTileSums {
@@ -4756,7 +5182,7 @@ std::uint64_t gc_hash(std::uint64_t h, std::uint64_t v) { h ^= v + 0x9e3779b97f4
 // texels, tree influence within its bilinear texel). Bounds the stage
 // buffers: a rule left out could never have placed there.
 std::vector<GcRuleMask> gc_cell_rule_masks(const std::vector<std::uint32_t>& tiles, UINT tiles_x, UINT tiles_y,
-                                              const std::vector<std::array<float, 5>>& zones, const float origin[3], bool desert_clumps) {
+                                              const std::vector<std::array<float, 5>>& zones, const float origin[3]) {
     const auto& rules = rule_table();
     const UINT cells_x = (tiles_x + 1) / 2, cells_y = (tiles_y + 1) / 2;
     std::vector<GcRuleMask> masks(std::size_t(cells_x) * cells_y, GcRuleMask{});
@@ -4772,17 +5198,10 @@ std::vector<GcRuleMask> gc_cell_rule_masks(const std::vector<std::uint32_t>& til
             // The shader's 8 m, a hair wider against float rounding (a superset stays exact).
             if (hi[0] > z[0] - 8.01f && hi[1] > z[1] - 8.01f && lo[0] < z[2] + 8.01f && lo[1] < z[3] + 8.01f) cell_zones |= 1u << std::uint32_t(z[4]);
         const int tx0 = int(cx) * 2, ty0 = int(cy) * 2;
-        // The integer-only part of gcDesertClumpKind: empty cells need no
-        // plant slots or allocation budget. The GPU alone reads colour and
-        // shoreline; keep both its possible species (open ground or oasis).
-        const auto clump_hash = desert_clumps ? patch_hash((cx / 3) * 73856093u ^ (cy / 3) * 19349663u ^ 0x2d51c0d3u) : 0u;
-        const bool clump_cell = cx % 3 == clump_hash % 3 && cy % 3 == (clump_hash >> 2) % 3 && ((clump_hash >> 8) & 255u) < .9f * 256;
         GcRuleMask mask{};
         for (std::uint32_t index = 0; index < rules.size(); ++index) {
-            const auto r = placement_rule(rules[index], desert_clumps);
-            if (r.density == 0 || (r.zones & cell_zones) == 0) continue;
-            if (r.cluster == cl_desert_clump && (!clump_cell ||
-                (r.mesh != gm_thorn_bush + (clump_hash >> 16) % 11 && r.mesh != gm_oasis_scrub_a + (clump_hash >> 16) % 6))) continue;
+            const auto& r = rules[index];
+            if ((r.zones & cell_zones) == 0) continue;
             const bool underwater = ((r.areas >> 6) & 1u) != 0, beach = r.field == fd_beach;
             bool ok = false;
             for (int dy = 0; dy < 2 && !ok; ++dy) for (int dx = 0; dx < 2 && !ok; ++dx) {
@@ -4800,14 +5219,14 @@ std::vector<GcRuleMask> gc_cell_rule_masks(const std::vector<std::uint32_t>& til
                 }
                 if ((r.flags & rf_rock) && base != 2 && base != 4 && base != 7 && base != 15) tile = false;
                 if (r.mesh == gm_dead_bush && base != 1 && base != 5 && base != 11) tile = false;
-                if (r.cluster == cl_desert_clump && (base == 2 || base == 4 || base == 7 || base == 15)) tile = false;
                 if ((r.flags & rf_snow_pile) && !(r.flags & rf_sand_pile) && base != 9 && base != 12) tile = false;
+                if ((r.flags & rf_desert_clump) && (base == 7 || base == 15)) tile = false; // gcDesertBlocked
                 ok = tile;
             }
             if (!ok) continue;
             const auto reaches = [&](const GcTileSums& sums, int radius) { return sums.any(tx0 - radius, ty0 - radius, tx0 + 1 + radius, ty0 + 1 + radius); };
             if (r.field == fd_swamp_edge && !reaches(swamp, 4)) continue;
-            if ((r.field == fd_beach || r.field == fd_river || (r.cluster == cl_desert_clump && desert_oasis_mesh(r.mesh))) && !reaches(water, 5)) continue;
+            if ((r.field == fd_beach || r.field == fd_river) && !reaches(water, 5)) continue;
             if (r.field == fd_lava_edge && !reaches(lava, 5)) continue;
             if (r.field == fd_undead && !reaches(tree[3], 2)) continue;
             const float trees = r.near_trees;
@@ -4822,6 +5241,20 @@ std::vector<GcRuleMask> gc_cell_rule_masks(const std::vector<std::uint32_t>& til
     return masks;
 }
 
+// Whether a map's cell masks hold any Suslanger clump rule: it then runs the
+// GC_DESERT programs (gcClumpCS bake, desert cells, debris and neighbour
+// variants); every other map the plain programs.
+bool gc_masks_hold_desert(const std::vector<GcRuleMask>& masks) {
+    static const GcRuleMask clump = [] {
+        GcRuleMask bits{};
+        for (std::uint32_t r = 0; r < rule_table().size(); ++r)
+            if (rule_table()[r].flags & rf_desert_clump) bits[r >> 5] |= 1u << (r & 31u);
+        return bits;
+    }();
+    for (const auto& mask : masks) for (unsigned w = 0; w < kGcRuleWords; ++w) if (mask[w] & clump[w]) return true;
+    return false;
+}
+
 // This frame's candidate bound per class over a placement window: every cell
 // whose box (the map's lowest and highest ground, the shader's margins) can
 // touch the frustum, each rule of its mask at the cell's horizontal distance
@@ -4829,7 +5262,7 @@ std::vector<GcRuleMask> gc_cell_rule_masks(const std::vector<std::uint32_t>& til
 // distance, so never fewer slots).
 std::array<UINT, 6> gc_window_bounds(const std::vector<GcRuleMask>& masks, UINT cells_x, const float eye[3], int x0, int y0, int x1, int y1,
                                      float low, float high, const float (*planes)[4], const float origin[3], float density, float distance,
-                                     const std::array<std::vector<std::uint32_t>, 6>& class_rules, bool desert_clumps) {
+                                     const std::array<std::vector<std::uint32_t>, 6>& class_rules) {
     const auto& rules = rule_table();
     std::array<UINT, 6> bounds{};
     if (masks.empty()) return bounds;
@@ -4839,18 +5272,26 @@ std::array<UINT, 6> gc_window_bounds(const std::vector<GcRuleMask>& masks, UINT 
     std::array<GcRuleMask, 6> class_bits{};
     for (unsigned c = 0; c < 6; ++c)
         for (const std::uint32_t r : class_rules[c]) class_bits[c][r >> 5] |= 1u << (r & 31u);
+    // Suslanger clump rules: a cell holds one clump of one species, so its
+    // bound is their largest slot count, not their sum.
+    static const GcRuleMask clump_bits = [] {
+        GcRuleMask bits{};
+        for (std::uint32_t r = 0; r < rule_table().size(); ++r)
+            if (rule_table()[r].flags & rf_desert_clump) bits[r >> 5] |= 1u << (r & 31u);
+        return bits;
+    }();
     // [band][rule] slot counts depend only on density and distance (the rule
     // table is constant): kept per pair across calls, grown by band on demand.
     // The active map and its neighbours use different densities.
-    struct BandTable { float density = -1, distance = -1; std::vector<UINT> table; UINT bands = 0; bool desert_clumps = false; };
+    struct BandTable { float density = -1, distance = -1; std::vector<UINT> table; UINT bands = 0; };
     static thread_local std::array<BandTable, 4> band_tables;
     static thread_local unsigned band_table_next = 0;
     BandTable* cached = nullptr;
     for (auto& entry : band_tables)
-        if (entry.desert_clumps == desert_clumps && std::memcmp(&entry.density, &density, sizeof(float)) == 0 && std::memcmp(&entry.distance, &distance, sizeof(float)) == 0) { cached = &entry; break; }
+        if (std::memcmp(&entry.density, &density, sizeof(float)) == 0 && std::memcmp(&entry.distance, &distance, sizeof(float)) == 0) { cached = &entry; break; }
     if (!cached) {
         cached = &band_tables[band_table_next++ % band_tables.size()];
-        cached->density = density; cached->distance = distance; cached->table.clear(); cached->bands = 0; cached->desert_clumps = desert_clumps;
+        cached->density = density; cached->distance = distance; cached->table.clear(); cached->bands = 0;
     }
     std::vector<UINT>& table = cached->table;
     UINT& bands = cached->bands;
@@ -4860,7 +5301,7 @@ std::array<UINT, 6> gc_window_bounds(const std::vector<GcRuleMask>& masks, UINT 
             // cannot leave a partial cached band.
             const auto required=(std::size_t(bands)+1)*rules.size();
             if(required>table.capacity())table.reserve((std::max)(required,table.capacity()*2));
-            for (std::uint32_t k = 0; k < rules.size(); ++k) table.push_back(gc_slot_count(placement_rule(rules[k], desert_clumps), density, distance, bands * 4.f));
+            for (std::uint32_t k = 0; k < rules.size(); ++k) table.push_back(gc_slot_count(rules[k], density, distance, bands * 4.f));
             ++bands;
         }
         return table[std::size_t(band) * rules.size() + r];
@@ -4881,16 +5322,26 @@ std::array<UINT, 6> gc_window_bounds(const std::vector<GcRuleMask>& masks, UINT 
         if (!visible) continue;
         const float dx = std::max({lo[0] - eye[0], 0.f, eye[0] - hi[0]}), dy = std::max({lo[1] - eye[1], 0.f, eye[1] - hi[1]});
         const UINT band = UINT(std::sqrt(dx * dx + dy * dy) / 4.f);
-        for (unsigned c = 0; c < 6; ++c)
+        for (unsigned c = 0; c < 6; ++c) {
+            UINT clump = 0;
             for (unsigned w = 0; w < kGcRuleWords; ++w) {
-                std::uint32_t bits = mask[w] & class_bits[c][w];
+                std::uint32_t bits = mask[w] & class_bits[c][w], clumps = bits & clump_bits[w];
+                bits &= ~clumps;
                 while (bits) {
                     unsigned long r = 0;
                     _BitScanForward(&r, bits);
                     bits &= bits - 1;
                     bounds[c] += count(band, r + w * 32);
                 }
+                while (clumps) { // Suslanger cells only
+                    unsigned long r = 0;
+                    _BitScanForward(&r, clumps);
+                    clumps &= clumps - 1;
+                    clump = std::max(clump, count(band, r + w * 32));
+                }
             }
+            bounds[c] += clump; // the clump driver rule
+        }
     }
     return bounds;
 }
@@ -5115,9 +5566,19 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     const float cover_limit = float(configured_integer(debug_overlay_.config(), "ground_cover_distance", 200));
     const float reach = std::min(visible_ground_reach(inverse, eye, lowest, highest, map_x, map_y), cover_limit);
     if (!(reach > 0)) return skip("camera shows no ground");
+    // Large Suslanger plants (issue #265, user 2026-11-20): at Ultra on a desert
+    // map they reach on past the cover limit to where the camera pass culls
+    // terrain and objects (full fog or the draw distance); only the clump
+    // driver walks the cells beyond (gcCellSlots), dithering out (gcBuildOf).
+    float large_reach = 0;
+    if (level >= 3 && gc_cell_masks_desert_ && fog_cull_frame_ + 1 >= native_frame_index_) {
+        large_reach = std::min(visible_ground_reach(inverse, eye, lowest, highest, map_x, map_y), terrain_lod_hidden_distance_);
+        if (!(large_reach > reach)) large_reach = 0;
+    }
+    const float window_reach = std::max(reach, large_reach);
     const int cells_x = int(std::ceil(map_x / kCellSize)), cells_y = int(std::ceil(map_y / kCellSize));
-    const int x0 = std::max(0, int(std::floor((eye[0] - reach) / kCellSize))), y0 = std::max(0, int(std::floor((eye[1] - reach) / kCellSize)));
-    const int x1 = std::min(cells_x, int(std::ceil((eye[0] + reach) / kCellSize))), y1 = std::min(cells_y, int(std::ceil((eye[1] + reach) / kCellSize)));
+    const int x0 = std::max(0, int(std::floor((eye[0] - window_reach) / kCellSize))), y0 = std::max(0, int(std::floor((eye[1] - window_reach) / kCellSize)));
+    const int x1 = std::min(cells_x, int(std::ceil((eye[0] + window_reach) / kCellSize))), y1 = std::min(cells_y, int(std::ceil((eye[1] + window_reach) / kCellSize)));
     if (x1 <= x0 || y1 <= y0) return skip("camera window outside the map");
 
     // Pools: sized from the counts of an earlier frame (non-blocking readback).
@@ -5213,7 +5674,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     if (!gc_instances_ || gc_grow_ || placement_passes != gc_pass_count_) {
         if (!gc_instances_) for (const auto& rule : rule_table()) { // first estimate (densest rule); demand corrects it
             const float band = .5f * (rule.lod_near + rule.lod_far) * quality.distance;
-            gc_capacity_[0][rule.mesh] = std::max(gc_capacity_[0][rule.mesh], UINT(rule.density * quality.density * 3.14159f * band * band * .3f) + 64);
+            gc_capacity_[0][rule.mesh] = std::max(gc_capacity_[0][rule.mesh], UINT(rule_mean_density(rule) * quality.density * 3.14159f * band * band * .3f) + 64);
         }
         // A neighbour pass without a region yet starts from the active map's (its
         // tufts go to the far meshes, so a far mesh takes its near mesh's share
@@ -5446,7 +5907,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     c.quality[0] = quality.distance; c.quality[1] = quality.density; c.quality[2] = configured_terrain_blend(debug_overlay_.config()) ? 1.f : 0.f; c.quality[3] = float(ambient_zone_);
     // Far LOD screen-size thinning (gcFarThin) is off: the far LOD keeps its
     // far_keep density, survivors grown at most grow_max (as before #230).
-    c.far_thin[0] = 0.f; c.far_thin[1] = .25f;
+    c.far_thin[0] = 0.f; c.far_thin[1] = .25f; c.far_thin[2] = large_reach;
     {   // The caster mesh mask of the ground_cover_shadows level (gcCasterListCS).
         const std::uint64_t casters = gc_shadow_caster_mask(configured_integer(debug_overlay_.config(), "ground_cover_shadows", 1));
         c.pass[1] = std::uint32_t(casters); c.pass[2] = std::uint32_t(casters >> 32);
@@ -5465,7 +5926,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     // gcCoverClip's crossfade dither walks the upscaler jitter per frame (as nativeLodDiscard).
     c.switches[0] = temporal_upscaler() ? dlss_jitter_[0] + .5f : 0.f;
     c.switches[1] = frame.render[D3DRENDERSTATE_FOGENABLE] != 0 ? 1.f : 0.f;
-    c.switches[2] = desert_clump_map(ambient_map_name_) ? 1.f : 0.f;
+    c.switches[2] = desert_clump_presence(ambient_map_name_); // the clump bake's presence scale
     // Art present: bark (tree02), stone, then the plant atlases (gcPlantArtMissing).
     std::uint32_t art = (gc_bark_srv_ ? 1u : 0u) | (gc_stone_srv_ ? 2u : 0u);
     for (unsigned k = 0; k < gc_plant_srv_.size(); ++k) if (gc_plant_srv_[k]) art |= 4u << k;
@@ -5500,7 +5961,8 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
         const std::uint64_t key = gc_hash(tiles_key, zones_key);
         if (key != gc_cell_masks_key_) {
             const float origin[3]{};
-            gc_cell_masks_ = gc_cell_rule_masks(gc_tile_classes_, ambient_tiles_x_, ambient_tiles_y_, zones, origin, c.switches[2] != 0);
+            gc_cell_masks_ = gc_cell_rule_masks(gc_tile_classes_, ambient_tiles_x_, ambient_tiles_y_, zones, origin);
+            gc_cell_masks_desert_ = gc_masks_hold_desert(gc_cell_masks_);
             gc_cell_mask_srv_.Reset();
             if (FAILED(make_grid_srv(device_.Get(), (ambient_tiles_x_ + 1) / 2, (ambient_tiles_y_ + 1) / 2, kGcRuleMaskFormat,
                     gc_cell_masks_.data(), UINT((ambient_tiles_x_ + 1) / 2 * sizeof(GcRuleMask)), gc_cell_mask_srv_)))
@@ -5511,6 +5973,9 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     const auto& fog = ambient_terrain_state_;
     c.fog_range[0] = fog.fog_min[0]; c.fog_range[1] = fog.fog_min[1]; c.fog_range[2] = fog.fog_max[0]; c.fog_range[3] = fog.fog_max[1];
     c.fog_control[0] = fog.fog_distance; c.fog_control[1] = fog.fog_enabled ? 1.f : 0.f;
+    // Hosted plants end where the camera pass culls their hosts: the nearer of
+    // the draw distance and full fog (fogStock.w of this or the last frame).
+    hosted_plant_constants(c.fog_control);
     neighbour_fog_constants(neighbour_fog_, c.fog_seam, c.fog_curve, c.fog_span_lo, c.fog_span_hi);
     neighbour_fog_piece_constants(neighbour_fog_, c.fog_piece_info, c.fog_pieces);
     c.fog_color[0] = ((ambient_fog_color_ >> 16) & 255) / 255.f; c.fog_color[1] = ((ambient_fog_color_ >> 8) & 255) / 255.f;
@@ -5580,13 +6045,13 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     // rule's slots at the cell's distance rounded down): rounds of a capacity
     // that holds the largest class in at most 60 rounds, the stage buffers
     // sized to it before the constants carry it. Nothing can overflow.
-    const UINT max_cell = gc_cell_slot_bound(quality.density, c.switches[2] != 0);
+    const UINT max_cell = gc_cell_slot_bound(quality.density);
     std::array<UINT, kPlaceClassCount> class_rounds{};
     UINT round_capacity = 0;
     {
         const float origin[3]{};
         const auto bounds = gc_window_bounds(gc_cell_masks_, UINT((ambient_tiles_x_ + 1) / 2), eye, x0, y0, x1, y1, lowest, highest, c.planes, origin,
-            quality.density, quality.distance, gc_class_rules_, c.switches[2] != 0);
+            quality.density, quality.distance, gc_class_rules_);
         UINT most = 0;
         for (const UINT bound : bounds) most = std::max(most, bound);
         // At most about eight rounds per class: each round is three dispatches.
@@ -5837,11 +6302,37 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
         context_->CSSetUnorderedAccessViews(0, 8, no_uavs, nullptr);
         return dispatches;
     };
+    // A map's per-cell clumps (gcClumpCS): baked only when its key changes,
+    // with that map's inputs and frame constants bound. False: no texture.
+    const auto bake_clumps = [&](GcClumpGrid& grid, UINT cells_x, UINT cells_y, std::uint64_t key) {
+        if (grid.key == key && grid.w == cells_x && grid.h == cells_y) return true;
+        if (!grid.srv || grid.w != cells_x || grid.h != cells_y) {
+            grid = {};
+            D3D11_TEXTURE2D_DESC td{}; td.Width = cells_x; td.Height = cells_y; td.MipLevels = td.ArraySize = 1;
+            td.Format = DXGI_FORMAT_R32_UINT; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+            ComPtr<ID3D11Texture2D> texture;
+            if (FAILED(device_->CreateTexture2D(&td, nullptr, &texture)) ||
+                FAILED(device_->CreateShaderResourceView(texture.Get(), nullptr, &grid.srv)) ||
+                FAILED(device_->CreateUnorderedAccessView(texture.Get(), nullptr, &grid.uav))) { grid = {}; return false; }
+            grid.w = cells_x; grid.h = cells_y;
+        }
+        ID3D11ShaderResourceView* no_clumps = nullptr;
+        context_->CSSetShaderResources(85, 1, &no_clumps);
+        context_->CSSetUnorderedAccessViews(5, 1, grid.uav.GetAddressOf(), nullptr);
+        context_->CSSetShader(gc_clump_cs_.Get(), nullptr, 0);
+        context_->Dispatch((cells_x + 7) / 8, (cells_y + 7) / 8, 1);
+        ID3D11UnorderedAccessView* no_uav = nullptr;
+        context_->CSSetUnorderedAccessViews(5, 1, &no_uav, nullptr);
+        grid.key = key;
+        return true;
+    };
     // The active map: each window cell tested once (gcCellsCS) into per-class
     // job lists, split into rounds (gcScanCS); per class and round its three
     // stages. Returns the dispatches issued.
     const auto active_pass = [&]() {
         UINT dispatches = 0;
+        context_->CSSetShaderResources(85, 1, gc_clump_.srv.GetAddressOf());
         context_->CSSetUnorderedAccessViews(0, 5, uavs, nullptr);
         const UINT zero[4]{};
         context_->ClearUnorderedAccessViewUint(gc_cell_count_uav_.Get(), zero);
@@ -5850,7 +6341,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
         context_->CSSetShaderResources(61, 1, gc_cell_mask_srv_.GetAddressOf());
         ID3D11UnorderedAccessView* cells_out[4]{gc_cell_count_uav_.Get(), uavs[4], nullptr, gc_cell_job_uav_.Get()};
         context_->CSSetUnorderedAccessViews(3, 4, cells_out, nullptr);
-        context_->CSSetShader(gc_cells_cs_.Get(), nullptr, 0);
+        context_->CSSetShader((gc_cell_masks_desert_ ? gc_cells_desert_cs_ : gc_cells_cs_).Get(), nullptr, 0);
         context_->Dispatch((UINT((x1 - x0) * (y1 - y0)) + 63) / 64, 1, 1);
         ID3D11UnorderedAccessView* scan_out[5]{nullptr, uavs[4], nullptr, nullptr, gc_round_uav_.Get()};
         context_->CSSetUnorderedAccessViews(3, 5, scan_out, nullptr);
@@ -5872,9 +6363,10 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
                 // Cell jobs -> candidates (counts in gc_stage_counts_[0]).
                 ID3D11UnorderedAccessView* place_out[5]{gc_stage_count_uav_[0].Get(), uavs[4], nullptr, nullptr, gc_candidate_uav_.Get()};
                 context_->CSSetUnorderedAccessViews(3, 5, place_out, nullptr);
-                context_->CSSetShader(gc_stage_cs_[0][c].Get(), nullptr, 0);
+                const bool desert = c == 0 && gc_cell_masks_desert_; // Suslanger: the debris class's GC_DESERT programs
+                context_->CSSetShader((desert ? gc_place_desert_cs_ : gc_stage_cs_[0][c]).Get(), nullptr, 0);
                 context_->DispatchIndirect(gc_rounds_.Get(), (c * kGcMaxRounds + round) * 16);
-                stages_23((c * kGcMaxRounds + round) * 16, gc_stage_cs_[1][c].Get(), gc_stage_cs_[active_trails ? 2 : 3][c].Get());
+                stages_23((c * kGcMaxRounds + round) * 16, gc_stage_cs_[1][c].Get(), (desert ? (active_trails ? gc_build_desert_cs_ : gc_build_desert_still_cs_) : gc_stage_cs_[active_trails ? 2 : 3][c]).Get());
                 dispatches += 3;
             }
         }
@@ -5893,8 +6385,9 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
     };
     // A neighbour map: its cells and stage 1 over every rule in one dispatch,
     // then the all-rules habitat and build (no trails on neighbour maps).
-    const auto neighbour_pass = [&](UINT groups_x, UINT groups_y, ID3D11ShaderResourceView* masks) {
+    const auto neighbour_pass = [&](UINT groups_x, UINT groups_y, ID3D11ShaderResourceView* masks, ID3D11ShaderResourceView* clumps, bool desert) {
         context_->CSSetShaderResources(61, 1, &masks);
+        context_->CSSetShaderResources(85, 1, &clumps);
         context_->CSSetUnorderedAccessViews(0, 5, uavs, nullptr);
         context_->CSSetConstantBuffers(12, 1, gc_class_constants_[0].GetAddressOf()); // stage counters of class 0, round 0
         context_->CSSetConstantBuffers(13, 1, gc_round_constants_[0].GetAddressOf());
@@ -5904,15 +6397,22 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
         }
         ID3D11UnorderedAccessView* place_out[5]{gc_stage_count_uav_[0].Get(), uavs[4], nullptr, nullptr, gc_candidate_uav_.Get()};
         context_->CSSetUnorderedAccessViews(3, 5, place_out, nullptr);
-        context_->CSSetShader(gc_neighbour_cs_.Get(), nullptr, 0);
+        context_->CSSetShader((desert ? gc_neighbour_desert_cs_ : gc_neighbour_cs_).Get(), nullptr, 0);
         context_->Dispatch(groups_x, groups_y, 1);
-        stages_23(0, gc_habitat_all_cs_.Get(), gc_build_all_cs_.Get());
+        stages_23(0, gc_habitat_all_cs_.Get(), (desert ? gc_build_all_desert_cs_ : gc_build_all_cs_).Get());
         ID3D11ShaderResourceView* no_masks = nullptr;
         context_->CSSetShaderResources(61, 1, &no_masks);
+        context_->CSSetShaderResources(85, 1, &no_masks);
         return 3 + finish_pass();
     };
+    // The active map's clumps: baked again only when its masks, paint or
+    // colour source (terrain 2.0) change.
+    if (gc_cell_masks_desert_ && !bake_clumps(gc_clump_, (ambient_tiles_x_ + 1) / 2, (ambient_tiles_y_ + 1) / 2,
+            gc_hash(gc_hash(gc_cell_masks_key_, gc_painted_frame_), c.quality[2] != 0 ? gc_hash(gc_t2_key_, gc_t2_valid_ ? 1u : 0u) : 0u)))
+        return fail("EID3D11 ground cover: clump map unavailable; ground cover omitted.");
     const UINT place_dispatches = active_pass();
     ID3D11ShaderResourceView* no_srvs[18]{};
+    context_->CSSetShaderResources(85, 1, no_srvs);
     context_->CSSetShaderResources(27, 18, no_srvs);
     context_->CSSetShaderResources(47, 1, no_srvs);
     context_->CSSetShaderResources(48, 1, no_srvs);
@@ -6164,7 +6664,6 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
             // Nothing where the neighbour seam fog is full (neighbour_fog_hides).
             if (!neighbour_cover_fog_window(n.origin, kCellSize, neighbour_fog_world(), w)) continue;
             GroundCoverConstants nc = c;
-            nc.switches[2] = desert_clump_map(n.name) ? 1.f : 0.f;
             for (unsigned k = 0; k < gm_count; ++k) { nc.capacity[k] = gc_capacity_[index][k]; nc.base[k] = gc_base_[index][k]; }
             nc.snow_materials[0]=std::uint32_t(n.contact.ready);
             nc.snow_materials[1]=std::uint32_t(n.contact.ready>>32);
@@ -6175,9 +6674,10 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
             nc.quality[2] = 0.f; // Terrain 2.0 is the active map's (its class shares are not the neighbour's)
             // Outdoor neighbours of the same allod: its region's zone, never a cave.
             nc.quality[3] = float(ambient::classify_zone(n.name.c_str(), false, environment.region));
+            nc.switches[2] = desert_clump_presence(n.name);
             // The piece's raw edges, as its terrain and decorations fog (fog_edges).
             std::memcpy(nc.fog_range, n.fog_band.data(), sizeof(nc.fog_range));
-            nc.view[0] = neighbour_reach; nc.view[3] = 0;
+            nc.view[0] = neighbour_reach; nc.view[3] = 0; nc.far_thin[2] = 0;
             std::memset(nc.trail_step, 0, sizeof(nc.trail_step));
             nc.snow_window[3] = 0; // no snow trails on neighbour maps
             nc.origin[0] = n.origin[0]; nc.origin[1] = n.origin[1]; nc.origin[2] = n.origin[2]; nc.origin[3] = 1;
@@ -6186,7 +6686,8 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
             {
                 const std::uint64_t key = gc_hash(gc_hash(n.type_epoch, zones_key), n.tile_classes.size());
                 if (key != n.masks_key) {
-                    n.masks = gc_cell_rule_masks(n.tile_classes, n.tiles_x, n.tiles_y, zones, n.origin.data(), nc.switches[2] != 0);
+                    n.masks = gc_cell_rule_masks(n.tile_classes, n.tiles_x, n.tiles_y, zones, n.origin.data());
+                    n.masks_desert = gc_masks_hold_desert(n.masks);
                     n.mask_srv.Reset();
                     if (FAILED(make_grid_srv(device_.Get(), (n.tiles_x + 1) / 2, (n.tiles_y + 1) / 2, kGcRuleMaskFormat, n.masks.data(),
                             UINT((n.tiles_x + 1) / 2 * sizeof(GcRuleMask)), n.mask_srv)))
@@ -6203,7 +6704,7 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
                     return rules;
                 }();
                 neighbour_bound = gc_window_bounds(n.masks, (n.tiles_x + 1) / 2, eye, w.x0, w.y0, w.x1, w.y1, n.lowest, n.highest, c.planes,
-                    n.origin.data(), quality.density * kNeighbourCoverDensity, quality.distance, all_rules, nc.switches[2] != 0)[0];
+                    n.origin.data(), quality.density * kNeighbourCoverDensity, quality.distance, all_rules)[0];
             }
             if (!neighbour_bound) continue; // nothing can place in its visible cells: no pass, no draws
             if (FAILED(gc_ensure_stage_buffers(neighbour_bound)))
@@ -6228,7 +6729,11 @@ HRESULT Renderer::render_ground_cover(const FixedState& frame, const std::array<
             context_->CSSetConstantBuffers(11, 1, gc_frame_constants_.GetAddressOf());
             context_->CSSetSamplers(8, 1, gc_clamp_.GetAddressOf());
             if (profiler_.pass_active()) profiler_.sub_scope("neighbour_placement");
-            const UINT neighbour_dispatches = neighbour_pass(UINT(w.x1 - w.x0), UINT(w.y1 - w.y0), n.mask_srv.Get());
+            // Its clumps: baked once (its paint is complete once prepared).
+            if (n.masks_desert && !bake_clumps(n.clump, (n.tiles_x + 1) / 2, (n.tiles_y + 1) / 2, n.masks_key))
+                return fail("EID3D11 ground cover: neighbour clump map unavailable; ground cover omitted.");
+            const UINT neighbour_dispatches = neighbour_pass(UINT(w.x1 - w.x0), UINT(w.y1 - w.y0), n.mask_srv.Get(),
+                n.masks_desert ? n.clump.srv.Get() : nullptr, n.masks_desert);
             context_->CSSetShaderResources(27, 18, no_srvs);
             context_->CSSetShaderResources(47, 1, no_srvs);
             context_->CSSetShaderResources(9, 1, no_srvs);
@@ -6328,7 +6833,9 @@ Renderer::SnowTrailFrame Renderer::advance_snow_trails(double seconds, const flo
     gc_snow_seconds_ = seconds;
     gc_snow_segment_input_.clear();
     // Trail ground: snow, or soft sand families once the map's families load.
-    const bool trail_map = gc_snow_map_ || snow_cover_ > .02f || (gc_soft_sand_ && gc_sand_generation_ == ambient_map_generation_);
+    // precipitation_surface off (the Lowest preset): no tracks in snow or sand.
+    const bool trail_map = configured_boolean(debug_overlay_.config(), "precipitation_surface", true) &&
+        (gc_snow_map_ || snow_cover_ > .02f || (gc_soft_sand_ && gc_sand_generation_ == ambient_map_generation_));
     if (trail_map && gc_unit_trails_.size() == gc_unit_input_.size()) {
         for (std::size_t k = 0; k < gc_unit_input_.size(); ++k) {
             const auto& unit = gc_unit_input_[k];
@@ -6387,12 +6894,39 @@ Renderer::SnowTrailFrame Renderer::advance_snow_trails(double seconds, const flo
         const double now = fire_burn_values_[0];
         for (auto& b : fire_burns_) {
             if (now - b.start > fire_burn_values_[6]) continue;
+            if (b.kind == 4) continue;   // the lightning wall runs over the snow
             const float hw = b.kind != 2 ? .8f * b.radius : 1.2f;
-            const snow_trails::Segment melt{{b.x - b.wx, b.y - b.wy}, {b.x + b.wx, b.y + b.wy}, hw, .3f, .03f, 1.2f * hw, 0x5eed1u, {}};
+            // The trough deepens over the fire's first 1.5 game seconds (the
+            // field keeps the deepest stamp), as the snow cover melts in
+            // (native_shader.h): a full-depth stamp at once snapped the ground
+            // snow away (user, cand-1128: the melt still looked instant on the
+            // ground). Remembered once it is full.
+            const float melt_in = float(std::clamp((now - b.start) / 1.5, 0.0, 1.0));
+            const float ramp = melt_in * melt_in * (3 - 2 * melt_in);
+            if (ramp <= 0) continue;
+            const snow_trails::Segment melt{{b.x - b.wx, b.y - b.wy}, {b.x + b.wx, b.y + b.wy}, hw, .3f * ramp, .03f * ramp, 1.2f * hw, 0x5eed1u, {}};
             gc_snow_segment_input_.push_back(melt);
-            if (!b.melted) { b.melted = true; gc_snow_history_.push_back({melt, seconds}); }
+            if (!b.melted && ramp >= 1) { b.melted = true; gc_snow_history_.push_back({melt, seconds}); }
+        }
+        // A burning tree melts the snow around its trunk while its crown
+        // burns, deepening over 1.5 game seconds as above.
+        for (const auto& tree : fire_trees_) {
+            if (tree.ignite < 0 || now < tree.ignite || now - tree.ignite > 2.0 * fire_burn_values_[2]) continue;
+            const float melt_in = float(std::clamp((now - tree.ignite) / 1.5, 0.0, 1.0)), ramp = melt_in * melt_in * (3 - 2 * melt_in);
+            gc_snow_segment_input_.push_back({{tree.x, tree.y}, {tree.x, tree.y}, 1.4f, .3f * ramp, .03f * ramp, 1.7f, 0x5eed2u, {}});
         }
     }
+    // The game's campfires and fires (fire_campfires_, last frame's draws):
+    // a soft, shallow dip in the snow round them for as long as they burn,
+    // campfires always - three nested discs 3-7 cm deep, no berm (the trail
+    // field keeps the deepest), so the snow is just a little lower near the
+    // fire with no ring edge and the logs keep standing in it (user,
+    // cand-1128: the melt ring round campfires was too pronounced).
+    if (trail_map && !fire_campfires_.empty())
+        for (const auto& c : fire_campfires_)
+            for (const auto& [radius, depth] : {std::pair{2.4f, .03f}, std::pair{1.8f, .05f}, std::pair{1.2f, .07f}})
+                gc_snow_segment_input_.push_back({{c[0], c[1]}, {c[0], c[1]}, radius, depth, 0.f, radius, 0x5eed3u, {}});
+    fire_campfires_.clear();
     // A unit not seen this frame starts a new trail where it reappears.
     gc_snow_tracks_.erase(std::remove_if(gc_snow_tracks_.begin(), gc_snow_tracks_.end(),
         [&](const SnowTrack& t) { return t.frame != native_frame_index_; }), gc_snow_tracks_.end());
@@ -6501,16 +7035,47 @@ void Renderer::gc_shelter_rows(float (&rows)[3][4]) const noexcept {
 // Hosted plants (issue #251 3c): this frame's host records of the zone's
 // hosting rules (bridge_hosted_plants), and each hosted mesh's active-map pool
 // grown to hold every host of it (the demand readback keeps it right after).
+// gcHostedCS's limits, both backends (issue #275): fog_control[2] where the
+// camera pass culls the hosts (the nearer of the draw distance and full fog,
+// 0 when no fog frame ran), fog_control[3] the static objects' LOD pixel
+// limit or hosted_lod's forced level as -(level + 1) (diagnostic).
+void Renderer::hosted_plant_constants(float* fog_control) const noexcept {
+    fog_control[2] = fog_cull_frame_ + 1 >= native_frame_index_ ? terrain_lod_hidden_distance_ : 0.f;
+    const int forced = configured_integer(debug_overlay_.config(), "hosted_lod", 0);
+    fog_control[3] = forced > 0 ? -float(forced) : native_lod_error_px_;
+}
 bool Renderer::gc_prepare_hosted() noexcept {
+    // Player switch (#318; Low and Lowest off): no host walk, upload, pool or
+    // draw. Their buffers go and their pools empty (a pool without capacity
+    // is never drawn or cast); turning it on uploads them again.
+    if (!configured_boolean(debug_overlay_.config(), "hosted_plants", true)) {
+        if (gc_hosted_uploaded_ != UINT64_MAX || gc_hosted_count_) {
+            gc_hosted_.Reset(); gc_hosted_srv_.Reset(); gc_hosted_vertices_.Reset(); gc_hosted_vertex_srv_.Reset();
+            gc_hosted_indices_.Reset(); gc_hosted_index_srv_.Reset(); gc_hosted_art_srv_.Reset();
+            gc12_.hosted.reset(); gc12_.hosted_vertices.reset(); gc12_.hosted_indices.reset(); gc12_.hosted_art.reset();
+            gc_hosted_frame_ = {}; gc_hosted_uploaded_ = UINT64_MAX; gc_hosted_count_ = 0; release_hosted_tiers();
+        }
+        for (auto& pass : gc_capacity_)
+            for (unsigned mesh = gm_first_hosted; mesh < gm_count; ++mesh)
+                if (pass[mesh]) { pass[mesh] = 0; gc_grow_ = true; }
+        return false;
+    }
     bool zone = false;
     for (const auto& kind : kHostedKinds) zone |= ((kind.zones >> ambient_zone_) & 1u) != 0;
     if (!zone) return false;
     {const frame_acct::Scope accounted(frame_acct::ours_gc_hosted);
      if (!bridge_hosted_plants(int(ambient_zone_), gc_hosted_frame_)) return false;}
     if (gc_capacity_.empty()) { gc_capacity_.resize(1); gc_base_.resize(1); }
+    // Instances a pool may take: per record its level's chunks in each pool
+    // it can draw (a reduced level is never larger than its model; issue #275).
     std::array<UINT, gm_count - gm_first_hosted> hosts{};
     if (const HostedPlantData* data = hosted_plant_data())
-        for (const auto& record : gc_hosted_frame_.records) ++hosts[data->models[record.model].kind];
+        for (const auto& record : gc_hosted_frame_.records) {
+            const auto& model = data->models[record.model];
+            hosts[model.kind] += hosted_chunks(model.indices);
+            for (unsigned t = 1; t <= 2; ++t)
+                hosts[hosted_tier_mesh(model.kind, t) - gm_first_hosted] += hosted_chunks(model.indices); // a tier is never larger
+        }
     for (unsigned k = 0; k < hosts.size(); ++k) {
         auto& capacity = gc_capacity_[0][gm_first_hosted + k];
         if (hosts[k] && capacity < hosts[k] + 16) { capacity = hosts[k] + 16; gc_grow_ = true; }
@@ -6523,7 +7088,7 @@ std::uint64_t Renderer::gc_shadow_caster_mask(int level) const noexcept {
     std::uint64_t meshes = 0;
     for (unsigned mesh = 0; mesh < gm_count; ++mesh) {
         const bool large = ((gc_large_mesh_mask_ >> mesh) & 1u) != 0;
-        if (hosted_mesh(mesh) && !kHostedKinds[mesh - gm_first_hosted].casts) continue;
+        if (hosted_mesh(mesh) && !hosted_casts(mesh)) continue;
         if (gc_mesh_kind_[mesh] != 3 && gc_mesh_kind_[mesh] != 4 && (level >= 2 || large))
             meshes |= std::uint64_t(1) << mesh;
     }

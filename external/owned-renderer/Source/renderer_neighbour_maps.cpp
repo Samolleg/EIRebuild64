@@ -123,7 +123,7 @@ void Renderer::release_neighbour_maps() noexcept {
     // The impostor slices go below: the active map's statics name them.
     release_active_statics();
     impostor_probe_.clear();
-    for(const auto& [key,draws]:neighbours_.opaque.objects) {
+    for(const auto& chunk:neighbours_.opaque)for(const auto& [key,draws]:chunk.objects) {
         (void)key;for(const auto& draw:draws)release_native_queued_draw(draw.record,false);
     }
     for(const auto& draw:neighbours_.ordered)release_native_queued_draw(draw.record,false);
@@ -198,9 +198,14 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                 neighbours_.peak_decoded_bytes=(std::max)(neighbours_.peak_decoded_bytes,upload->decoded_bytes);
                 // Receiver cells of this piece, kept only if it is accepted.
                 std::map<std::pair<int,int>,NativeWorldBounds> piece_cells;
+                static_assert(kNeighbourChunks==3,"the neighbour line below names three chunk totals");
+                // Its opaque draws register in the first chunk with room (they
+                // move below once their triangles are known).
+                unsigned staging=0;
+                while(staging+1<kNeighbourChunks&&neighbours_.opaque_triangles[staging]>=kNeighbourChunkTriangles)++staging;
                 struct Submission {Renderer* self;const FixedState* frame;const char* failure;
-                    std::map<std::pair<int,int>,NativeWorldBounds>* cells;};
-                Submission submission{this,&frame,nullptr,&piece_cells};
+                    std::map<std::pair<int,int>,NativeWorldBounds>* cells;unsigned chunk;};
+                Submission submission{this,&frame,nullptr,&piece_cells,staging};
                 const auto submit=[](void* opaque,const NativeGeometryView& input,NativeGeometryResult& result)->bool {
                     auto& context=*static_cast<Submission*>(opaque);auto& self=*context.self;
                     {
@@ -236,7 +241,7 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     }
                     if(input.ordering!=NativeOrdering::preserve) {
                         bool registered=false;
-                        if(FAILED(self.adopt_native_static_draws(self.neighbours_.opaque,input.prepared_identity.part_index,first,registered)) ||
+                        if(FAILED(self.adopt_native_static_draws(self.neighbours_.opaque[context.chunk],input.prepared_identity.part_index,first,registered)) ||
                             !registered) {context.failure="adopt_native_static_draws";return false;}
                     } else {
                         self.neighbours_.ordered.reserve(self.neighbours_.ordered.size()+self.native_pending_draws_.size()-first);
@@ -417,6 +422,30 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     NativeGeometryResult result;if(!submit(&submission,view,result)){accepted=false;step="decoration.submit";break;}
                     }
                 }
+                // Its chunk: the first that keeps room for its layout triangles;
+                // else the first empty one, whatever its size (a layout past the
+                // slot limit then names itself in static_flush_failed); else
+                // the map is omitted whole.
+                auto& staged=neighbours_.opaque[staging];
+                std::uint64_t map_triangles=0;int chunk=-1;
+                if(accepted) {
+                    for(const auto& [key,draws]:staged.objects)if(key>=first_part)
+                        for(const auto& selected:draws)map_triangles+=native_layout_triangles(native_instance_records_[selected.record].command);
+                    for(unsigned c=0;c<kNeighbourChunks&&chunk<0;++c)
+                        if(neighbours_.opaque_triangles[c]+map_triangles<=kNeighbourChunkTriangles)chunk=int(c);
+                    for(unsigned c=0;c<kNeighbourChunks&&chunk<0;++c)
+                        if(!neighbours_.opaque_triangles[c])chunk=int(c);
+                    if(chunk<0){accepted=false;step="neighbour_chunks.full";}
+                    else if(unsigned(chunk)!=staging) {
+                        auto& target=neighbours_.opaque[chunk];
+                        for(auto i=staged.objects.begin();i!=staged.objects.end();) {
+                            if(i->first<first_part){++i;continue;}
+                            target.objects[i->first]=std::move(i->second);i=staged.objects.erase(i);
+                        }
+                        staged.dirty=target.dirty=true;
+                    }
+                    if(chunk>=0)neighbours_.opaque_triangles[chunk]+=map_triangles;
+                }
                 if(accepted) {
                     ++neighbour_caster_revision_; // its decorations cast from the next sun redraw
                     for(const auto& [key,box]:piece_cells) {
@@ -436,10 +465,10 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                 }
                 if(!accepted) {
                     dedicated_geometry_stale_=true; // its registered prebuilt meshes go once unreferenced
-                    for(auto i=neighbours_.opaque.objects.begin();i!=neighbours_.opaque.objects.end();) {
+                    for(auto i=staged.objects.begin();i!=staged.objects.end();) {
                         if(i->first<first_part){++i;continue;}
                         for(const auto& draw:i->second)release_native_queued_draw(draw.record,false);
-                        i=neighbours_.opaque.objects.erase(i);neighbours_.opaque.dirty=true;
+                        i=staged.objects.erase(i);staged.dirty=true;
                     }
                     for(std::size_t i=first_ordered;i<neighbours_.ordered.size();++i) {
                         const auto record=neighbours_.ordered[i].record;
@@ -458,7 +487,7 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                 char impostor_split[160]{};
                 if(impostors_.failed)std::snprintf(impostor_split,sizeof(impostor_split)," impostors_failed");
                 char text[1536];std::snprintf(text,sizeof(text),
-                    "map=%s accepted=%d failed_step=%s%s%s gpu_geometry=%llu gpu_textures=%llu textures_shared=%llu/%llu decoded_payload_peak=%llu cpu_geometry_retained=0 omitted_decorations=%zu unbuilt_decorations=%u fog_culled=%u impostors=%u/%zu bake_ms=%.1f atlas_slices=%u%s lod=%s figures:%u/%u triangles:%llu>%llu/%llu/%llu lod_ms=%.1f prebuild_ms=%.1f lod_indices_mb=%.3f load_ms=%.1f %s",
+                    "map=%s accepted=%d failed_step=%s%s%s gpu_geometry=%llu gpu_textures=%llu textures_shared=%llu/%llu decoded_payload_peak=%llu cpu_geometry_retained=0 omitted_decorations=%zu unbuilt_decorations=%u fog_culled=%u impostors=%u/%zu bake_ms=%.1f atlas_slices=%u%s lod=%s figures:%u/%u triangles:%llu>%llu/%llu/%llu lod_ms=%.1f prebuild_ms=%.1f lod_indices_mb=%.3f load_ms=%.1f chunk=%d layout_triangles=%llu chunk_triangles=%llu/%llu/%llu %s",
                     upload->selection.placement.mpr.c_str(),accepted?1:0,accepted?"none":step?step:"unknown",
                     submission.failure?"/":"",submission.failure?submission.failure:"",
                     neighbours_.geometry_bytes,neighbours_.texture_bytes,native_texture_shared_,native_texture_shared_bytes_,neighbours_.peak_decoded_bytes,upload->omitted_decorations,upload->unbuilt_decorations,upload->fog_culled,
@@ -471,6 +500,8 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     upload->lod_stats.milliseconds,upload->lod_stats.prebuild_milliseconds,
                     12.0*double(upload->lod_stats.level_triangles[0]+upload->lod_stats.level_triangles[1]+
                         upload->lod_stats.level_triangles[2])/1048576.0,upload->lod_stats.load_milliseconds,
+                    accepted?chunk:-1,(unsigned long long)map_triangles,(unsigned long long)neighbours_.opaque_triangles[0],
+                    (unsigned long long)neighbours_.opaque_triangles[1],(unsigned long long)neighbours_.opaque_triangles[2],
                     upload->decoration_summary.c_str());
                 bridge_neighbour_diagnostic(text);
                 unused_prebuilt.release();
@@ -490,7 +521,25 @@ HRESULT Renderer::render_neighbour_maps(const FixedState& frame,
                     bridge_neighbour_diagnostic("neighbour contact colour unavailable; contact blend omitted");
                 }
             }
-            return flush_native_static_set(neighbours_.opaque,frame);
+            // Every chunk draws even when another failed (its failure is
+            // reported by the caller); an empty chunk costs a membership check.
+            // The first failure's layout refusal is the one reported.
+            HRESULT chunks_hr=S_OK;
+            const char* refusal=nullptr;std::uint64_t refusal_count=0,refusal_limit=0;
+            // Each chunk keeps its material like the one set did (deferred world
+            // material: flush_native_d3d12 takes the phase on entry).
+            const int phase=native_flush_phase_;
+            for(auto& chunk_set:neighbours_.opaque) {
+                if(chunk_set.objects.empty()&&chunk_set.draws.empty())continue;
+                native_flush_phase_=phase;
+                const HRESULT hr=flush_native_static_set(chunk_set,frame);
+                if(FAILED(hr)&&SUCCEEDED(chunks_hr)) {
+                    chunks_hr=hr;refusal=native_layout_refusal_;
+                    refusal_count=native_layout_refusal_count_;refusal_limit=native_layout_refusal_limit_;
+                }
+            }
+            native_layout_refusal_=refusal;native_layout_refusal_count_=refusal_count;native_layout_refusal_limit_=refusal_limit;
+            return chunks_hr;
         }
         if(neighbours_.ordered.empty())return S_OK;
         // The neighbours' liquid sectors keep their order, so the build never
@@ -577,7 +626,9 @@ NativeGeometryView Renderer::active_static_view(const NeighbourPiece& piece,Acti
 }
 
 // Per frame, before objects register: a new world source generation
-// publishes the eligible MOB ids (trees 53 and stones 55, no quest object);
+// publishes the eligible MOB ids (trees 53, structures 54 and stones 55, no
+// quest object; #289: structures drew posed, ~3.2M world vertices of their
+// own in zone3obr, while the neighbour maps draw all three in object space);
 // the models the bridge requested since go to the worker as one batch, and a
 // finished batch is adopted.
 void Renderer::update_active_statics(const FixedState& frame,const std::array<float,16>& world_to_clip) noexcept try {
@@ -591,9 +642,9 @@ void Renderer::update_active_statics(const FixedState& frame,const std::array<fl
         if(source.source_generation!=generation || !source.map)return; // again next frame
         static std::uint64_t catalogs=0;
         auto index=std::make_shared<ActiveStaticsIndex>();
-        index->catalog=++catalogs;
+        index->catalog=++catalogs;index->source_generation=generation;
         for(const auto& object:source.map->objects)
-            if((object.family==53 || object.family==55 || (object.environment_profile&&object.family>=53&&object.family<=56)) && object.quest==0 &&
+            if((object.family==53 || object.family==54 || object.family==55 || (object.environment_profile&&object.family>=53&&object.family<=56)) && object.quest==0 &&
                object.rejection==StaticObjectRejection::none && object.nid && object.nid<=0x7fffffffu)
                 index->eligible.insert(static_cast<std::int32_t>(object.nid));
         a.generation=generation;a.catalog=index->catalog;a.index=index;
@@ -748,7 +799,7 @@ void Renderer::release_active_statics() noexcept {
     for(auto& [key,model]:a.models){(void)key;for(auto& node:model.nodes)
         if(node.record<native_instance_records_.size())release_native_queued_draw(node.record,false);}
     for(const auto& piece:a.pieces)if(piece)release_unused_prebuilt(*piece);
-    release_native_shadow_bake(native_active_shadow_bake_);
+    release_native_shadow_bake(native_active_shadow_bake_);release_native_shadow_bake(native_fire_shadow_bake_);
     native_active_casters_=native_active_doubled_casters_=0;
     const auto revision=a.caster_revision+1;
     a=ActiveStatics{};a.caster_revision=revision;

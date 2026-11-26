@@ -1,4 +1,5 @@
 #include "GraphicsApi.h"
+#include "../../external/owned-renderer/Source/gpu_adapter.h"
 #include <wrl/client.h>
 
 using Microsoft::WRL::ComPtr;
@@ -10,7 +11,8 @@ HRESULT EiCreateDevice11V1(D3D_DRIVER_TYPE driver, ID3D11Device** device,
                                             D3D_FEATURE_LEVEL_10_0, D3D_FEATURE_LEVEL_9_3};
     // Avoid the driver lock inversion during background shader preparation.
     constexpr UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;
-    return D3D11CreateDevice(nullptr, driver, nullptr, flags, levels, ARRAYSIZE(levels),
+    auto gpu = driver == D3D_DRIVER_TYPE_HARDWARE ? gpu_adapter::choose() : gpu_adapter::Choice{};
+    return D3D11CreateDevice(gpu.adapter.Get(), gpu.adapter ? D3D_DRIVER_TYPE_UNKNOWN : driver, nullptr, flags, levels, ARRAYSIZE(levels),
                              D3D11_SDK_VERSION, device, level, context);
 }
 

@@ -1,3 +1,4 @@
+#include "graphics_settings.h"
 #include "neighbour_maps.h"
 #include "environment_material.h"
 #include "neighbour_profile.h"
@@ -35,6 +36,7 @@
 
 namespace owned {
 void bridge_append_probe_event(const char* event,const char* detail) noexcept;
+void address_space_mb(std::uint64_t& used,std::uint64_t& largest_free,bool walk) noexcept; // renderer_diagnostics.cpp
 namespace {
 std::atomic<bool> enabled{false}; // default awaits the director's GPU-budget route
 std::atomic<double> fog_state[17]{};
@@ -59,6 +61,10 @@ std::mutex active_layout_lock;
 std::string active_layout_name;
 double active_layout_x=0,active_layout_y=0;
 std::unordered_set<std::string> resident_textures;
+// What each neighbour of the current stream prebuilt, by model part and
+// index count (#289: geometry held more than once): bytes per neighbour map.
+std::mutex prebuilt_record_lock;
+std::unordered_map<std::string,std::map<std::string,std::uint64_t>> prebuilt_record;
 // Up to kDecoders neighbours decode at once, each on its own loader; at most
 // kDecoders decoded maps exist at a time (in decode, waiting, or in upload),
 // so the CPU working set stays bounded (about 50-70 MB per decoded map).
@@ -183,6 +189,7 @@ std::unique_ptr<NeighbourMapUpload> decode_neighbour(OwnedResourceLoader& loader
     if(!request.terrain_only)request.selected_map_file=selected_path(root,n.placement.mob_path,".mob");
     request.family_allowlist={53,54,55,60};
     request.backdrop_objects=true;
+    request.normalise_terrain_pages=true;
     OwnedResourceRequestToken token;
     if(!loader.request(request,failure,&token))throw std::runtime_error(failure.message);
     std::shared_ptr<const OwnedMapSnapshot> map;
@@ -409,6 +416,10 @@ void prebuild_neighbour(NeighbourMapUpload& upload) noexcept {
         upload.prebuilt_terrain.clear();upload.prebuilt_figures.clear();
     };
     try {
+        // The largest free address block before and after (one line a load:
+        // the 32-bit renderer's page reserves need it contiguous, #272).
+        std::uint64_t used_before=0,free_before=0,used_after=0,free_after=0;
+        address_space_mb(used_before,free_before,true);
         struct Terrain {NativePrebuiltBuilder* builder;NeighbourMapUpload* upload;} terrain{&builder,&upload};
         bridge_prepare_neighbour_terrain(upload,[](void* opaque,std::uint32_t sector,std::uint32_t material,const NativeGeometryView& view) {
             auto& t=*static_cast<Terrain*>(opaque);
@@ -421,6 +432,16 @@ void prebuild_neighbour(NeighbourMapUpload& upload) noexcept {
         // under a pixel: their shape groups allow 3 texels (the active map 1).
         prebuild_decorations(upload,builder,3.f);
         if(!finish_native_prebuilt_pages(builder) || builder.failed){drop();return;}
+        address_space_mb(used_after,free_after,true);
+        {
+            std::uint64_t bytes=0;for(const auto& page:builder.pages)bytes+=page.bytes;
+            char text[224];
+            std::snprintf(text,sizeof(text),"map=%s pages=%zu (%.1f MB; %u MB pages) largest free %llu MB before, %llu MB after; used %llu -> %llu MB",
+                upload.selection.placement.mpr.c_str(),builder.pages.size(),double(bytes)/1048576.0,unsigned(native_prebuilt_page_bytes()>>20),
+                static_cast<unsigned long long>(free_before),static_cast<unsigned long long>(free_after),
+                static_cast<unsigned long long>(used_before),static_cast<unsigned long long>(used_after));
+            bridge_append_probe_event("neighbour_prebuild",text);
+        }
         upload.prebuilt_pages=std::move(builder.pages);
         // Its atlas pages and decoration textures, once each. Always created:
         // its piece carries no mips, so adoption must find every texture it binds
@@ -445,6 +466,7 @@ void prebuild_neighbour(NeighbourMapUpload& upload) noexcept {
 // impostor plan and bake input once per model.
 void prebuild_decorations(NeighbourMapUpload& upload,NativePrebuiltBuilder& builder,float shape_texels) {
         std::map<const FigureCpuAsset*,NativeMeshLods> lods;
+        std::map<const FigureCpuAsset*,NativePrebuiltMesh> shared_meshes; // each figure's complete mesh in the open page
         const auto lod_start=std::chrono::steady_clock::now();
         double lod_seconds=0;
         upload.impostor_plans.assign(upload.decorations.size(),{});
@@ -468,6 +490,10 @@ void prebuild_decorations(NeighbourMapUpload& upload,NativePrebuiltBuilder& buil
             for(std::size_t n=0;n<candidate.nodes.size();++n) {
                 const auto& node=candidate.nodes[n];
                 if(builder.failed)break;
+                // A node whose model could not be read has no figure (piece_decorations
+                // skips it too): the render host crashed reading its indices (#289,
+                // zone3obr -> zone1 on the PC, access violation at 0xf0).
+                if(!node.figure)continue;
                 const auto* sphere=!plan.key.empty()&&plan.spheres[n][3]>0?&plan.spheres[n]:nullptr;
                 const auto inserted=upload.prebuilt_figures.try_emplace(neighbour_figure_shape(node.figure,candidate.source->shape,sphere));
                 if(!inserted.second)continue;
@@ -489,7 +515,23 @@ void prebuild_decorations(NeighbourMapUpload& upload,NativePrebuiltBuilder& buil
                 auto view=neighbour_figure_view(*node.figure,node.positions.data(),candidate.source->shape);
                 view.lods=&level->second;
                 if(sphere)view.world.impostor_sphere=*sphere;
-                if(!build_native_prebuilt_mesh(builder,view,inserted.first->second))inserted.first->second=NativePrebuiltMesh{};
+                // Every further shape of a figure stores only its sphere and
+                // positions and reads the rest from the figure's first mesh
+                // in the open page (#289: tree crowns were stored 24-94 times).
+                auto& shared=shared_meshes[node.figure];
+                const bool sharing=shared.bytes&&shared.page_slot==builder.pages.size();
+                auto& made=inserted.first->second;
+                if(!build_native_prebuilt_mesh(builder,view,made,sharing?&shared:nullptr))made=NativePrebuiltMesh{};
+                else {
+                    static const bool developer=renderer_developer_mode();
+                    if(developer)try{
+                        std::lock_guard<std::mutex> guard(prebuilt_record_lock);
+                        prebuilt_record[node.figure->identity.canonical_name+"|"+std::to_string(node.figure->indices.size())]
+                            [upload.selection.placement.mpr]+=made.bytes;
+                    }catch(...){}
+                    made.shape_invariant=node.figure->shape_count==1&&!(sphere&&plan.morphs);
+                    if(made.normal_offset>=made.offset&&made.normal_offset<made.offset+made.bytes)shared=made; // a complete mesh
+                }
             }
         }
         upload.lod_stats.milliseconds=lod_seconds*1000.0;
@@ -1032,6 +1074,7 @@ static void start_stream(const std::string& mpr,std::uint64_t epoch,const Resour
     neighbour_maps_stop();if(!enabled.load(std::memory_order_acquire))return;
     std::uint64_t id=0;
     try {
+        {std::lock_guard<std::mutex> guard(prebuilt_record_lock);prebuilt_record.clear();}
         {std::lock_guard<std::mutex> guard(s.lock);s.epoch=epoch;s.held=restart;s.stop=false;s.finished=false;
             s.ready.clear();s.next_take=0;s.total=0;s.resident=0;s.in_upload=false;id=++s.run;}
         s.cancel.store(false,std::memory_order_relaxed);
@@ -1041,6 +1084,17 @@ static void start_stream(const std::string& mpr,std::uint64_t epoch,const Resour
         s.error="Neighbour map worker creation failed";s.finished=true;s.exited=(std::max)(s.exited,id);
     }
 }
+void neighbour_prebuilt_duplicates(const std::function<bool(const std::string&)>& main_has,
+    std::uint64_t& total,std::uint64_t& across,std::uint64_t& with_main) noexcept try {
+    total=across=with_main=0;
+    std::lock_guard<std::mutex> guard(prebuilt_record_lock);
+    for(const auto& [key,maps]:prebuilt_record) {
+        std::uint64_t sum=0,largest=0;
+        for(const auto& [map,bytes]:maps){(void)map;sum+=bytes;largest=(std::max)(largest,bytes);}
+        total+=sum;
+        if(main_has(key))with_main+=sum;else if(maps.size()>1)across+=sum-largest;
+    }
+} catch(...) {}
 void neighbour_maps_begin(const std::string& mpr,std::uint64_t epoch,const ResourceStoreConfig& mounts,
     NeighbourStreamSource source) noexcept {
     start_stream(mpr,epoch,mounts,std::move(source),false);

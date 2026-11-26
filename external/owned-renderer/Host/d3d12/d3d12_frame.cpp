@@ -15,6 +15,7 @@
 // Threading: the replay thread only (the Renderer's), except the pipeline
 // workers inside Pipelines.
 #include "d3d12_core.h"
+#include "d3d12_memory.h"
 #include "d3d12_pipelines.h"
 #include "d3d12_pacer.h"
 #include "d3d12_fsr_fg.h"
@@ -46,6 +47,7 @@
 namespace remote {
 void host_log(const char* format, ...);
 extern std::atomic<std::uint64_t> g_startup_pipeline_progress;
+extern std::atomic<std::int64_t> g_host_idle_ticks;  // remote_host.cpp: the stream thread asleep for game records
 }
 extern "C" { extern const UINT D3D12SDKVersion; }  // Host/host.cpp: the Agility SDK the host asks for
 
@@ -201,6 +203,8 @@ struct D3D12Buffer {
     // scratch memory and, for a top level, its instance descriptions.
     d3d12::ComPtr<ID3D12Resource> rt_scratch;
     std::shared_ptr<D3D12Buffer> rt_input;
+    bool rt_updatable = false;  // built with ALLOW_UPDATE; rt_scratch holds an update's scratch too
+    UINT rt_instances = 0;      // a top level: the instance descriptions rt_input holds
     // A static bottom-level structure: its place in the pool page `resource` is.
     UINT64 rt_offset = 0;
     D3D12Buffer() = default;
@@ -271,6 +275,7 @@ public:
         HRESULT hr = device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COMMON, nullptr,
                                                       IID_PPV_ARGS(&prepared->resource));
         if (FAILED(hr)) return hr;
+        track_memory(device_.Get(), prepared->resource.Get(), MemoryKind::buffer);
         std::uint8_t* cpu = nullptr;
         if (FAILED(hr = create_upload(size, prepared->upload, cpu))) return hr;
         if (bytes) std::memcpy(cpu, data, static_cast<std::size_t>(bytes));
@@ -309,6 +314,7 @@ public:
         HRESULT hr = device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
                                                       IID_PPV_ARGS(&prepared->resource));
         if (FAILED(hr)) return hr;
+        track_memory(device_.Get(), prepared->resource.Get(), MemoryKind::texture);
         std::uint8_t* cpu = nullptr;
         if (FAILED(hr = create_upload(total, prepared->upload, cpu))) return hr;
         for (UINT level = 0; level < mips; ++level) {
@@ -385,6 +391,7 @@ public:
         ComPtr<ID3D12Heap> heap;
         HRESULT hr = device_->CreateHeap(&heap_desc, IID_PPV_ARGS(&heap));
         if (FAILED(hr)) return hr;
+        track_memory(device_.Get(), heap.Get(), MemoryKind::texture_heap);
         ComPtr<ID3D12Resource> upload;
         std::uint8_t* cpu = nullptr;
         if (FAILED(hr = create_upload(upload_bytes, upload, cpu))) return hr;
@@ -454,6 +461,7 @@ private:
         HRESULT hr = device_->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_GENERIC_READ, nullptr,
                                                       IID_PPV_ARGS(&upload));
         if (FAILED(hr)) return hr;
+        track_memory(device_.Get(), upload.Get(), MemoryKind::upload);
         const D3D12_RANGE none{0, 0};  // the CPU never reads it
         void* mapped = nullptr;
         if (FAILED(hr = upload->Map(0, &none, &mapped))) return hr;
@@ -839,6 +847,11 @@ class Executor final : public owned::D3D12Frame, public owned::OverlayRenderer, 
 
 public:
     ~Executor() override {
+        if (library_save_.joinable()) library_save_.join();  // the saver thread's last write (#325)
+        {
+            std::lock_guard<std::mutex> lock(save_list_mutex_);
+            if (!save_list_.empty()) records_dirty_ = true;  // a list request it never took: the exit save writes the records
+        }
         // Presenter teardown can retire textures on this same frame thread.
         std::lock_guard<std::recursive_mutex> lock(resource_owner_->mutex);
         if (core_.device()) {
@@ -989,14 +1002,13 @@ public:
         if (!pipelines_.open(core_.device(), records_directory + L"eid3d11_d3d12_pipelines.bin", workers, note, reason,
                              &remote::g_startup_pipeline_progress)) return false;
         if (!note.empty()) remote::host_log("d3d12: %s", note.c_str());
-        // Build-ahead cost of this backend's whole pipeline set: the fixed
-        // ones and every pipeline earlier sessions recorded (loaded from the
-        // library, or created when the driver or a program changed), waited
-        // for (start_warming) before the first real frame so their first use
-        // draws.
+        // Build-ahead cost of this backend's pipeline set: the fixed ones now,
+        // and the recorded ones the start's settings use once the renderer has
+        // read them (request_pipelines, #325), waited for (start_warming)
+        // before the first real frame so their first use draws.
         QueryPerformanceCounter(&warm_begin_);
         if (!request_programs(reason)) return false;
-        request_recorded(records_directory, warm_recorded_, warm_dropped_, warm_shipped_);
+        load_recorded(records_directory);
         warm_workers_ = workers;
         // The GPU report buffer every native program binds (u0 space3).
         if (!create_gpu_reports()) {
@@ -1052,6 +1064,7 @@ public:
         if (FAILED(hr)) {
             return resource_failure(hr, "CreateCommittedResource (UI texture)", desc);
         }
+        track_memory(core_.device(), texture->resource.Get(), MemoryKind::texture);
         texture->owner = resource_owner_;
         texture->width = width;
         texture->height = height;
@@ -1100,6 +1113,7 @@ public:
         if (FAILED(hr)) {
             return resource_failure(hr, "CreateCommittedResource (texture array)", desc);
         }
+        track_memory(core_.device(), texture->resource.Get(), MemoryKind::texture_array);
         texture->owner = resource_owner_;
         texture->width = width;
         texture->height = height;
@@ -1149,6 +1163,7 @@ public:
         if (FAILED(hr)) {
             return resource_failure(hr, "CreateCommittedResource (storage texture)", desc);
         }
+        track_memory(core_.device(), texture->resource.Get(), MemoryKind::storage_texture);
         texture->owner = resource_owner_;
         texture->state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
         texture->width = width;
@@ -1345,6 +1360,7 @@ public:
         if (FAILED(hr)) {
             return resource_failure(hr, "CreateCommittedResource (native buffer)", desc);
         }
+        track_memory(core_.device(), resource.Get(), MemoryKind::buffer);
         return adopt_buffer(std::move(resource), bytes, stride, flags, out);
     }
 
@@ -1476,6 +1492,7 @@ public:
         if (!ring.push(core_, data, bytes, 16, upload, reason)) return fail(E_OUTOFMEMORY, reason);
         if (g_hazards) g_hazards->taken(Hazards::kUploadRing, upload.gpu, bytes, core_.recording_value(), core_.completed());
         if (&ring == &upload_) upload_buffer_bytes_ += bytes;
+        uploaded_total_ += bytes;
         copy_into(list, buffer, offset, bytes);
         if (g_hazards) { g_hazards->command("write_buffer"); g_hazards->access(buffer.resource.Get(), D3D12_RESOURCE_STATE_COPY_DEST, true, "copy destination"); }
         list->CopyBufferRegion(buffer.resource.Get(), offset, upload.resource, upload.offset, bytes);
@@ -1801,8 +1818,10 @@ public:
         desc.MipLevels = 1;
         desc.SampleDesc.Count = 1;
         desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
-        return core_.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
-                                                       IID_PPV_ARGS(&out));
+        const HRESULT hr = core_.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                                   IID_PPV_ARGS(&out));
+        if (SUCCEEDED(hr)) track_memory(core_.device(), out.Get(), MemoryKind::readback);
+        return hr;
     }
 
     // ---- Ray tracing (DXR 1.1 inline ray queries; the rt_* options) -------
@@ -1852,7 +1871,11 @@ public:
         D3D12_HEAP_PROPERTIES heap{};
         heap.Type = D3D12_HEAP_TYPE_DEFAULT;
         const HRESULT created = core_.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, state, nullptr, IID_PPV_ARGS(&resource));
-        if (SUCCEEDED(created)) resource->SetName(name);
+        if (SUCCEEDED(created)) {
+            resource->SetName(name);
+            track_memory(core_.device(), resource.Get(),
+                         state == D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE ? MemoryKind::rt_structure : MemoryKind::rt_scratch);
+        }
         return created;
     }
     // A built structure as an executor buffer. An acceleration structure
@@ -1869,7 +1892,11 @@ public:
 
     HRESULT build_raytracing_bottom(owned::D3D12Buffer& vertices, UINT vertex_stride, owned::D3D12Buffer& indices,
                                     const owned::D3D12RaytracingGeometry* geometries, UINT count, owned::D3D12BufferRef& out,
-                                    bool dynamic) override {
+                                    bool dynamic, UINT refit) override {
+        // A refit needs the updatable dynamic structure out holds (its update
+        // scratch was sized when it was built); otherwise the caller asked wrongly.
+        const bool updatable = dynamic && refit != 0, update = dynamic && refit == owned::kD3D12BottomRefit;
+        if (update && !(out && out->rt_updatable && out->rt_scratch)) return E_INVALIDARG;
         owned::D3D12BufferRef previous = std::move(out);
         out.reset();
         if (!rt_device_) return E_NOINTERFACE;
@@ -1912,6 +1939,40 @@ public:
         bottom.Inputs.Flags = dynamic ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_BUILD
                                       : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE |
                                             D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_COMPACTION;
+        if (updatable) bottom.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE;
+        if (update) {
+            // In place: the structure is its own source (the queue runs the frames in order).
+            bottom.Inputs.Flags |= D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO need{};
+            bottom.Inputs.NumDescs = count;
+            bottom.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+            bottom.Inputs.pGeometryDescs = descs.data();
+            rt_device_->GetRaytracingAccelerationStructurePrebuildInfo(&bottom.Inputs, &need);
+            if (previous->rt_scratch->GetDesc().Width < need.UpdateScratchDataSizeInBytes || previous->bytes < need.ResultDataMaxSizeInBytes) {
+                out = std::move(previous);
+                return E_INVALIDARG;
+            }
+            transition(list, vertices, kShaderRead);
+            for (UINT n = 0; n < count; ++n)
+                if (geometries[n].index_buffer) transition(list, *geometries[n].index_buffer, kShaderRead);
+            if (g_hazards) {
+                g_hazards->command("raytracing bottom-level refit");
+                g_hazards->access(vertices.resource.Get(), kShaderRead, false, "acceleration structure input");
+            }
+            const D3D12_GPU_VIRTUAL_ADDRESS address = previous->resource->GetGPUVirtualAddress();
+            bottom.DestAccelerationStructureData = address;
+            bottom.SourceAccelerationStructureData = address;
+            bottom.ScratchAccelerationStructureData = previous->rt_scratch->GetGPUVirtualAddress();
+            list4->BuildRaytracingAccelerationStructure(&bottom, 0, nullptr);
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            barrier.UAV.pResource = previous->resource.Get();
+            list->ResourceBarrier(1, &barrier);
+            barrier.UAV.pResource = previous->rt_scratch.Get();
+            list->ResourceBarrier(1, &barrier);
+            out = std::move(previous);
+            return S_OK;
+        }
         bottom.Inputs.NumDescs = count;
         bottom.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
         bottom.Inputs.pGeometryDescs = descs.data();
@@ -1925,8 +1986,10 @@ public:
         std::shared_ptr<owned::D3D12Buffer> built;
         // A dynamic structure with room is built again in place (the queue
         // runs the frames in order); a new one takes half as much again.
+        // An updatable structure's scratch also holds a later refit's.
+        const UINT64 scratch_need = updatable ? (std::max)(size.ScratchDataSizeInBytes, size.UpdateScratchDataSizeInBytes) : size.ScratchDataSizeInBytes;
         const bool reuse = dynamic && previous && previous->rt_scratch && previous->bytes >= size.ResultDataMaxSizeInBytes &&
-                           previous->rt_scratch->GetDesc().Width >= size.ScratchDataSizeInBytes;
+                           previous->rt_scratch->GetDesc().Width >= scratch_need;
         UINT64 offset = 0;
         if (reuse) {
             built = std::move(previous);
@@ -1936,7 +1999,7 @@ public:
             if (FAILED(hr = raytracing_memory(size.ResultDataMaxSizeInBytes + size.ResultDataMaxSizeInBytes / 2,
                                               D3D12_RESOURCE_STATE_RAYTRACING_ACCELERATION_STRUCTURE, L"eid3d11 ray tracing bottom level",
                                               structure)) ||
-                FAILED(hr = raytracing_memory(size.ScratchDataSizeInBytes + size.ScratchDataSizeInBytes / 2,
+                FAILED(hr = raytracing_memory(scratch_need + scratch_need / 2,
                                               D3D12_RESOURCE_STATE_UNORDERED_ACCESS, L"eid3d11 ray tracing scratch", scratch))) {
                 raytracing_failed(hresult_text("bottom-level structure memory", hr));
                 return hr;
@@ -1988,6 +2051,7 @@ public:
             g_hazards->access(vertices.resource.Get(), kShaderRead, false, "acceleration structure input");
             g_hazards->access(indices.resource.Get(), kShaderRead, false, "acceleration structure input");
         }
+        built->rt_updatable = updatable;
         bottom.DestAccelerationStructureData = structure->GetGPUVirtualAddress() + offset;
         bottom.ScratchAccelerationStructureData = scratch->GetGPUVirtualAddress();
         // A static structure's compacted size goes to the batch's info buffer
@@ -2095,7 +2159,46 @@ public:
     }
 
     HRESULT build_raytracing_top(const owned::D3D12RaytracingInstance* instances, UINT count, owned::D3D12BufferRef& out,
-                                 bool dynamic) override {
+                                 bool dynamic, UINT refit) override {
+        const bool updatable = dynamic && refit != 0;
+        if (dynamic && refit == owned::kD3D12BottomRefit) {
+            // In place from the descriptions the last build uploaded (the queue runs the frames in order).
+            if (!rt_device_ || !out || !out->rt_updatable || !out->rt_scratch || !out->rt_input || out->rt_instances != count || !count)
+                return E_INVALIDARG;
+            ID3D12GraphicsCommandList* list = open_list();
+            if (!list) return E_FAIL;
+            ComPtr<ID3D12GraphicsCommandList4> list4;
+            HRESULT hr = list->QueryInterface(IID_PPV_ARGS(&list4));
+            if (FAILED(hr)) return hr;
+            D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC top{};
+            top.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
+            top.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE |
+                               D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE |
+                               D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PERFORM_UPDATE;
+            top.Inputs.NumDescs = count;
+            top.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
+            top.Inputs.InstanceDescs = out->rt_input->resource->GetGPUVirtualAddress();
+            D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO size{};
+            rt_device_->GetRaytracingAccelerationStructurePrebuildInfo(&top.Inputs, &size);
+            if (out->rt_scratch->GetDesc().Width < size.UpdateScratchDataSizeInBytes) return E_INVALIDARG;
+            transition(list, *out->rt_input, kShaderRead);
+            if (g_hazards) {
+                g_hazards->command("raytracing top-level refit");
+                g_hazards->access(out->rt_input->resource.Get(), kShaderRead, false, "acceleration structure input");
+            }
+            const D3D12_GPU_VIRTUAL_ADDRESS address = out->resource->GetGPUVirtualAddress();
+            top.DestAccelerationStructureData = address;
+            top.SourceAccelerationStructureData = address;
+            top.ScratchAccelerationStructureData = out->rt_scratch->GetGPUVirtualAddress();
+            list4->BuildRaytracingAccelerationStructure(&top, 0, nullptr);
+            D3D12_RESOURCE_BARRIER barrier{};
+            barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+            barrier.UAV.pResource = out->resource.Get();
+            list->ResourceBarrier(1, &barrier);
+            barrier.UAV.pResource = out->rt_scratch.Get();
+            list->ResourceBarrier(1, &barrier);
+            return S_OK;
+        }
         owned::D3D12BufferRef previous = std::move(out);
         out.reset();
         if (!rt_device_) return E_NOINTERFACE;
@@ -2133,7 +2236,8 @@ public:
         if (!list) return E_FAIL;
         D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_DESC top{};
         top.Inputs.Type = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL;
-        top.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE;
+        top.Inputs.Flags = D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_PREFER_FAST_TRACE |
+                           (updatable ? D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_ALLOW_UPDATE : D3D12_RAYTRACING_ACCELERATION_STRUCTURE_BUILD_FLAG_NONE);
         top.Inputs.NumDescs = count;
         top.Inputs.DescsLayout = D3D12_ELEMENTS_LAYOUT_ARRAY;
         top.Inputs.InstanceDescs = input->resource->GetGPUVirtualAddress();
@@ -2143,6 +2247,8 @@ public:
             raytracing_failed("the driver gave no top-level structure size");
             return E_FAIL;
         }
+        // An updatable structure's scratch also holds a later refit's.
+        if (updatable) size.ScratchDataSizeInBytes = (std::max)(size.ScratchDataSizeInBytes, size.UpdateScratchDataSizeInBytes);
         ComPtr<ID3D12Resource> structure, scratch;
         std::shared_ptr<owned::D3D12Buffer> scene;
         const bool reuse = dynamic && previous && previous->rt_scratch && previous->rt_input == input && previous->srv.ptr &&
@@ -2176,6 +2282,8 @@ public:
             if (dynamic) { scene->rt_scratch = scratch; scene->rt_input = input; }
             hazard_created(*scene);
         }
+        scene->rt_updatable = updatable;
+        scene->rt_instances = count;
         transition(list, *input, kShaderRead);
         if (g_hazards) {
             g_hazards->command("raytracing top-level build");
@@ -2237,6 +2345,13 @@ public:
     HRESULT draw(const owned::ShaderProgram& vertex, const owned::ShaderProgram& pixel, const owned::D3D12NativeState& state,
                  const RECT* scissor, UINT vertex_count) override {
         return draw_instanced(vertex, pixel, state, scissor, vertex_count, 1, false);
+    }
+
+    void request_instanced(const owned::ShaderProgram& vertex, const owned::ShaderProgram& pixel,
+                           const owned::D3D12NativeState& state) noexcept override {
+        request_only_ = true;  // ready_pipeline returns what is built, never waits
+        try { (void)native_pipeline(vertex, pixel, state); } catch (...) {}
+        request_only_ = false;
     }
 
     HRESULT draw_instanced(const owned::ShaderProgram& vertex, const owned::ShaderProgram& pixel, const owned::D3D12NativeState& state,
@@ -2315,11 +2430,17 @@ public:
     }
 
     const std::unordered_map<const owned::ShaderProgram*, const owned::ShaderProgram*>* substitutes_ = nullptr;
+    bool substitute_draws_ = true;   // set_substitute_draws
     const std::unordered_map<const owned::ShaderProgram*, const owned::ShaderProgram*>* warm_map_ = nullptr;
     std::size_t warm_size_ = 0;
     std::unordered_map<const ProgramCode*, const owned::ShaderProgram*> warm_codes_;  // base program code -> its twin
+    // native_pipeline's twins per program set (direct-mapped; cleared with the map).
+    struct TwinMemo { const owned::ShaderProgram* stages[4]{}; const owned::ShaderProgram* twins[4]{};
+                      const owned::ShaderProgram* missing = nullptr; bool twinned = false; };
+    std::array<TwinMemo, 256> twin_memo_{};
     std::unordered_map<std::uint32_t, UINT> pipeline_targets_;  // native pipeline id -> its colour target count
     std::uint32_t burn_twin_requests_ = 0, burn_twin_fallbacks_ = 0;
+    std::set<const owned::ShaderProgram*> burn_twin_missing_;  // reported once each
     void native_pipeline_stats(UINT& count, double& milliseconds) const noexcept override {
         count = 0;
         milliseconds = 0.0;
@@ -2364,6 +2485,7 @@ public:
         if (!upload_allocate(std::uint64_t(row_pitch) * rows, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, upload, reason))
             return fail(E_OUTOFMEMORY, reason);
         upload_texture_bytes_ += std::uint64_t(row_pitch) * rows;
+        uploaded_total_ += std::uint64_t(row_pitch) * rows;
         for (UINT row = 0; row < rows; ++row)
             std::memcpy(upload.cpu + std::size_t(row) * row_pitch, static_cast<const std::uint8_t*>(data) + std::size_t(row) * pitch, row_bytes);
         transition(list, texture, D3D12_RESOURCE_STATE_COPY_DEST);
@@ -2461,6 +2583,7 @@ public:
             hr = core_.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_RENDER_TARGET, &clear,
                                                          IID_PPV_ARGS(&texture->resource));
             if (FAILED(hr)) return failed(hr, "CreateCommittedResource (offscreen colour)");
+            track_memory(core_.device(), texture->resource.Get(), MemoryKind::target);
             texture->format = desc.Format;
             texture->state = D3D12_RESOURCE_STATE_RENDER_TARGET;
             texture->srv = core_.staging().allocate();
@@ -2488,6 +2611,7 @@ public:
             if (FAILED(hr = core_.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_DEPTH_WRITE, &clear,
                                                                     IID_PPV_ARGS(&texture->depth))))
                 return failed(hr, "CreateCommittedResource (offscreen depth)");
+            track_memory(core_.device(), texture->depth.Get(), MemoryKind::depth);
             texture->depth_format = depth_format;
             texture->depth_state = D3D12_RESOURCE_STATE_DEPTH_WRITE;
             D3D12_DEPTH_STENCIL_VIEW_DESC dsv{};
@@ -2712,6 +2836,7 @@ public:
         HRESULT hr = core_.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_DEPTH_WRITE, &clear,
                                                              IID_PPV_ARGS(&texture->resource));
         if (FAILED(hr)) return failed(hr, "CreateCommittedResource (depth array)");
+        track_memory(core_.device(), texture->resource.Get(), MemoryKind::depth);
         texture->owner = resource_owner_;
         texture->width = texture->height = side;
         texture->slices = slices;
@@ -3075,15 +3200,35 @@ public:
                          pixels, width, height, nullptr, true, subresource);
     }
 
+    HRESULT read_scaled(D3D12Texture& texture, const owned::ShaderProgram& stretch, UINT scaled_width, UINT scaled_height,
+                        std::vector<std::uint8_t>& pixels, UINT& width, UINT& height) override {
+        width = height = 0;
+        if (!scaled_width || !scaled_height) return E_INVALIDARG;
+        // R8G8B8A8 takes typed stores everywhere; the program writes the
+        // channels swapped, so its bytes are B, G, R, A.
+        owned::D3D12TextureRef scaled;
+        HRESULT hr = create_storage_texture(scaled_width, scaled_height, 1, DXGI_FORMAT_R8G8B8A8_UNORM, scaled);
+        if (FAILED(hr)) return hr;
+        clear_slots();
+        set_resource(0, &texture);
+        set_unordered(0, scaled.get());
+        hr = dispatch(stretch, (scaled_width + 7) / 8, (scaled_height + 7) / 8, 1);
+        clear_slots();
+        if (hr != S_OK) return hr == S_FALSE ? E_PENDING : hr;  // S_FALSE: its pipeline is not ready
+        return read_bgra(scaled->resource.Get(), scaled->state, pixels, width, height, nullptr, false, 0, true);
+    }
+
+    // bgra_in_rgba: an R8G8B8A8 texture whose bytes are already B, G, R, A.
     HRESULT read_bgra(ID3D12Resource* source_resource, D3D12_RESOURCE_STATES source_state,
                       std::vector<std::uint8_t>& pixels, UINT& width, UINT& height, DXGI_FORMAT* format = nullptr,
-                      bool native_plane = false, UINT subresource = 0) {
+                      bool native_plane = false, UINT subresource = 0, bool bgra_in_rgba = false) {
         pixels.clear();
         width = height = 0;
         if (format) *format = DXGI_FORMAT_UNKNOWN;
         const D3D12_RESOURCE_DESC desc = source_resource->GetDesc();
+        const DXGI_FORMAT expected = bgra_in_rgba ? DXGI_FORMAT_R8G8B8A8_UNORM : DXGI_FORMAT_B8G8R8A8_UNORM;
         const bool hdr = format && desc.Format == DXGI_FORMAT_R11G11B10_FLOAT;
-        if ((!native_plane && !hdr && desc.Format != DXGI_FORMAT_B8G8R8A8_UNORM) ||
+        if ((!native_plane && !hdr && desc.Format != expected) ||
             desc.SampleDesc.Count != 1 || (!native_plane && desc.DepthOrArraySize != 1))
             return E_NOTIMPL;
         if (format) *format = desc.Format;
@@ -3153,7 +3298,10 @@ public:
     }
 
     void omit(const char* name, bool world) noexcept override try {
-        if (world) {
+        // A world object's per-figure packets (#302): that object is absent,
+        // the rest of the world draws as usual. No marker on screen; the
+        // renderer names the object in host.log (note_omitted_world_object).
+        if (world && std::strncmp(name, "scene_packet (world", 19) != 0) {
             world_omitted_ = true;
             // Taken but untouched this frame: show the marker right away (in the
             // world target while it is bound and nothing was drawn there yet).
@@ -3185,7 +3333,15 @@ public:
     // serial once the work before it has finished (MARKER_OUT). After a
     // device removal the pair names the pass the GPU was inside (fail()).
     // DRED kept no marker text on this driver, so the names stay on the CPU.
+    std::vector<std::string> memory_report(std::uint64_t process_local_bytes) override {
+        return d3d12::memory_report(process_local_bytes);
+    }
+    std::uint64_t uploaded_bytes() const noexcept override { return uploaded_total_; }
+    std::vector<std::string> host_memory_report() override {
+        return d3d12::host_memory_report();
+    }
     void marker(const char* name) noexcept override {
+        if (name && name != slow_.pass) slow_pass(name);
         if (g_hazards && name) g_hazards->pass(name);
         if (!name || name == last_marker_ || !list_ || breadcrumbs_failed_) return;
         if (!breadcrumb_buffer_) {
@@ -3269,7 +3425,10 @@ public:
             if (g_hazards && gpu_reports_) gpu_report_frame_end();
             std::string reason;
             resolve_stamps();
+            slow_pass(nullptr);  // the last pass ends here
+            const std::int64_t submit_start = slow_now();
             const std::uint64_t value = core_.end_frame(reason);
+            slow_.submit = slow_now() - submit_start;
             list_ = nullptr;
             if (!value) return fail(E_FAIL, reason);
 #ifdef EID3D11_EMBEDDED
@@ -3298,8 +3457,9 @@ public:
         // Reflex: the frame's render submission ends before its PRESENT
         // markers (nvapi.h: RENDERSUBMIT_END comes before Present).
         reflex::marker(reflex::Marker::render_end, reflex::frame());
+        const std::int64_t present_start = slow_now();
         if (shown && fg_on_) {
-            presentation_limiter_.wait(0, nullptr, &remote::host_log);  // the pacer owns both output presents
+            slow_limit(0);  // the pacer owns both output presents
             // Reflex's per-rendered-frame PRESENT markers bracket the
             // hand-over after render submission. Rendering and final copies
             // use the same normal queue, with no out-of-band queue/markers.
@@ -3320,8 +3480,8 @@ public:
             }
             // The AMD proxy owns its final presents: its documented producer
             // limit is half the desired output rate while interpolating.
-            presentation_limiter_.wait(frame_limit > 0 && fsr_on_ && fsr_.generating()
-                ? (std::max)(1, frame_limit / 2) : frame_limit, nullptr, &remote::host_log);
+            slow_limit(frame_limit > 0 && fsr_on_ && fsr_.generating()
+                ? (std::max)(1, frame_limit / 2) : frame_limit);
             reflex::marker(reflex::Marker::present_start, reflex::frame());
             hr = presenter_.present(sync_interval);
             if (fsr_on_) fsr_.submitted();
@@ -3342,10 +3502,12 @@ public:
         // wait either. The frame limit (with the background limit the renderer
         // puts into it) still applies, or the hidden frames ran as fast as the
         // CPU and GPU allowed for as long as the game stayed minimized.
-        if (!shown) presentation_limiter_.wait(frame_limit);
+        if (!shown) slow_limit(frame_limit);
         fsr_hudless_ = nullptr;
         screen_ = nullptr;
         generated_drawn_ = false;
+        slow_.present = slow_now() - present_start - slow_.limiter;
+        slow_frame_end();
         // Pipelines first used in play are written at the next load's reveal
         // (save_new_pipelines) and at the session end, never on this path.
         return hr;
@@ -3550,7 +3712,9 @@ private:
         if (list_) return list_;
         if (!failure_.empty()) return nullptr;
         std::string reason;
-        list_ = core_.begin_frame(reason);
+        const std::int64_t fence_start = slow_now();
+        list_ = core_.begin_frame(reason);  // waits for the GPU to finish this slot's earlier frame
+        slow_wait(slow_.fence, fence_start);
         if (!list_) {
             const std::string removal = core_.removal_report();
             fail(E_FAIL, removal.empty() ? reason : reason + "; " + removal);
@@ -3713,7 +3877,9 @@ private:
         }
         if (switching && !switch_frame_generation(fg_wanted_)) return nullptr;
         const double prepare_start = switching ? now_ms() : 0.0;
-        const Presenter::State state = presenter_.prepare(core_, reason, !fg_on_);
+        const std::int64_t swap_start = slow_now();
+        const Presenter::State state = presenter_.prepare(core_, reason, !fg_on_);  // the frame latency wait
+        slow_wait(slow_.swap, swap_start);
         if (switching)
             remote::host_log("d3d12: frame generation switch to mode %d took %.1f ms (%s), then the first prepare %.1f ms",
                              frame_generation_mode(), prepare_start - switch_start, switch_steps_.c_str(), now_ms() - prepare_start);
@@ -4809,7 +4975,7 @@ private:
         if (map && map->empty()) map = nullptr;
         if (map != warm_map_ || (map && map->size() != warm_size_)) {
             warm_map_ = map; warm_size_ = map ? map->size() : 0;
-            warm_codes_.clear();
+            warm_codes_.clear(); twin_memo_.fill({});
             try {
                 if (map) {
                     for (const auto& [base, twin] : *map) {
@@ -4825,21 +4991,49 @@ private:
         }
         substitutes_ = draw ? map : nullptr;
     }
+    void set_substitute_draws(bool allowed) noexcept override { substitute_draws_ = allowed; }
     // The pipeline of a draw: its programs' twins while substitutes are set
     // (set_program_substitutes), else (or while a twin's pipeline is not
     // ready) the programs themselves.
     ID3D12PipelineState* native_pipeline(const owned::ShaderProgram& vertex, const owned::ShaderProgram& pixel,
                                          const owned::D3D12NativeState& state, const owned::ShaderProgram* hull = nullptr,
                                          const owned::ShaderProgram* domain = nullptr, const ProgramCode** codes = nullptr) {
-        if (substitutes_) {
-            const auto v = substitutes_->find(&vertex), p = substitutes_->find(&pixel);
-            if (v != substitutes_->end() || p != substitutes_->end()) {
-                ID3D12PipelineState* twin = native_pipeline_of(v != substitutes_->end() ? *v->second : vertex,
-                                                               p != substitutes_->end() ? *p->second : pixel, state, hull, domain, codes);
-                if (twin) return twin;
-                if (burn_twin_fallbacks_++ == 0)
-                    remote::host_log("d3d12: fire burn twin pipeline unavailable, its original drawn (first: %s)",
-                                     p != substitutes_->end() ? p->second->entry : v->second->entry);
+        if (substitutes_ && substitute_draws_) {
+            // The stages' twins, memoised per program set: four hash lookups
+            // on every draw cost ~4 ms a frame (#254 laptop, 43k draws).
+            const std::uintptr_t mix = reinterpret_cast<std::uintptr_t>(&vertex) ^ (reinterpret_cast<std::uintptr_t>(&pixel) >> 3) ^
+                (reinterpret_cast<std::uintptr_t>(hull) >> 5) ^ (reinterpret_cast<std::uintptr_t>(domain) >> 7);
+            TwinMemo& memo = twin_memo_[(mix ^ (mix >> 9) ^ (mix >> 17)) % twin_memo_.size()];
+            if (memo.stages[0] != &vertex || memo.stages[1] != &pixel || memo.stages[2] != hull || memo.stages[3] != domain) {
+                const owned::ShaderProgram* const stages[4] = {&vertex, &pixel, hull, domain};
+                memo = {};
+                for (int k = 0; k < 4; ++k) {
+                    memo.stages[k] = stages[k];
+                    if (!stages[k]) continue;
+                    const auto found = substitutes_->find(stages[k]);
+                    if (found != substitutes_->end()) { memo.twins[k] = found->second; memo.twinned = true; }
+                }
+                // All stages or none: a burn stage reads interpolants (burnRoot)
+                // only its burn neighbours write, and a mixed pair fails
+                // pipeline creation (E_INVALIDARG). A depth-only draw has no pixel stage.
+                const bool no_pixel = !pixel.entry || !pixel.entry[0];
+                memo.missing = !memo.twins[0] ? &vertex : (!no_pixel && !memo.twins[1]) ? &pixel :
+                    (hull && !memo.twins[2]) ? hull : (domain && !memo.twins[3]) ? domain : nullptr;
+                if (no_pixel) memo.twins[1] = &pixel;
+            }
+            if (memo.twinned) {
+                const owned::ShaderProgram* const missing = memo.missing;
+                if (!missing) {
+                    ID3D12PipelineState* twin = native_pipeline_of(*memo.twins[0], *memo.twins[1], state, memo.twins[2], memo.twins[3], codes);
+                    if (twin) return twin;
+                } else if (burn_twin_missing_.insert(missing).second) {
+                    remote::host_log("d3d12: fire burn: no burn twin for %s beside the twinned stages of a draw; it draws without the burn",
+                                     missing->entry ? missing->entry : "?");
+                }
+                // Every 1024th (#254 diagnostic): when, and whether it lasts.
+                if ((burn_twin_fallbacks_++ & 1023u) == 0)
+                    remote::host_log("d3d12: fire burn twin pipeline unavailable, its original drawn (%u so far, this: %s)",
+                                     burn_twin_fallbacks_, missing ? (missing->entry ? missing->entry : "?") : pixel.entry ? pixel.entry : "?");
             }
         }
         return native_pipeline_of(vertex, pixel, state, hull, domain, codes);
@@ -4902,7 +5096,7 @@ private:
                 const D3D12_SHADER_BYTECODE* twin_codes[4] = {vs, twin_ps, hs, ds};
                 const std::string* twin_names[4] = {names[0], &twin_code->name, names[2], names[3]};
                 const std::wstring twin_name = native_name(twin_names, state, key.formats);
-                if (records_.count(twin_name) || !precached_.insert(twin_name).second) continue;
+                if ((records_.count(twin_name) && !deferred_names_.count(twin_name)) || !precached_.insert(twin_name).second) continue;
                 pipelines_.request(twin_name, native_desc(twin_codes, state, key.formats, targets));
                 ++twin_requests_;
             }
@@ -4979,6 +5173,30 @@ private:
                 }
             }
         }
+        if (state.custom_blend.custom & owned::D3D12NativeState::kCustomGuideLiquid) {
+            desc.BlendState.IndependentBlendEnable = TRUE;
+            for (UINT index = 1; index < 8; ++index) {
+                auto& target = desc.BlendState.RenderTarget[index];
+                target = desc.BlendState.RenderTarget[0];
+                if (index < 5) continue;
+                target.BlendEnable = TRUE;
+                target.LogicOpEnable = FALSE;
+                target.LogicOp = D3D12_LOGIC_OP_NOOP;
+                target.BlendOp = target.BlendOpAlpha = D3D12_BLEND_OP_ADD;
+                if (index == 5) {        // roughness: a' = a_out + a (1 - a_out)
+                    target.SrcBlend = D3D12_BLEND_ZERO; target.DestBlend = D3D12_BLEND_ONE;
+                    target.SrcBlendAlpha = D3D12_BLEND_ONE; target.DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
+                    target.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALPHA;
+                } else if (index == 6) { // diffuse albedo: rgb' = rgb * rgb_out
+                    target.SrcBlend = D3D12_BLEND_ZERO; target.DestBlend = D3D12_BLEND_SRC_COLOR;
+                    target.SrcBlendAlpha = D3D12_BLEND_ZERO; target.DestBlendAlpha = D3D12_BLEND_ONE;
+                    target.RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_RED | D3D12_COLOR_WRITE_ENABLE_GREEN | D3D12_COLOR_WRITE_ENABLE_BLUE;
+                } else {
+                    target.BlendEnable = FALSE;
+                    target.RenderTargetWriteMask = 0;
+                }
+            }
+        }
         if (state.custom_blend.custom & owned::D3D12NativeState::kCustomTarget1Off) {
             desc.BlendState.IndependentBlendEnable = TRUE;
             desc.BlendState.RenderTarget[1] = desc.BlendState.RenderTarget[0];
@@ -5021,8 +5239,13 @@ private:
     void save_new_pipelines() noexcept override {
         if (!records_dirty_) return;
         try {
-            pipelines_.wait_all();  // the loading picture is still up: finish what was queued, then write it
-            save_pipelines("before a reveal");
+            pipelines_.wait_all();  // the loading picture is still up: what was queued is built before the reveal
+            // The files are written on the save thread (#325: the write took
+            // 0.4-0.7 s under the hold of every load whose list changed). The
+            // list is copied here, where records_ lives.
+            records_dirty_ = false;
+            records_saved_tick_ = GetTickCount64();
+            queue_save(record_list_bytes(), "before a reveal");
         } catch (...) {}
     }
     void set_pixel_twins(const owned::ShaderProgram* const* twins, UINT count) noexcept override {
@@ -5041,9 +5264,13 @@ private:
     // stays visible. A failure is named once (its draw is omitted).
     ID3D12PipelineState* ready_pipeline(std::uint32_t id) {
         ID3D12PipelineState* pipeline = pipelines_.get(id);
+        if (request_only_) return pipeline;  // request_instanced: queued on the workers, no wait
         if (!pipeline && pipelines_.failure(id).empty()) {
             const auto begin = std::chrono::steady_clock::now();
+            const std::int64_t miss_start = slow_now();
             pipeline = pipelines_.wait(id);
+            slow_wait(slow_.pipelines, miss_start);
+            ++slow_.pipeline_misses;
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
             const auto label = pipeline_labels_.find(id);
             remote::host_log("d3d12: pipeline miss: %s created synchronously in %.1f ms (pass %s)%s",
@@ -5130,6 +5357,7 @@ private:
         const HRESULT hr = core_.device()->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_DEPTH_WRITE,
                                                                    &clear, IID_PPV_ARGS(&depth_));
         if (FAILED(hr)) { reason = hresult_text("CreateCommittedResource (interface depth)", hr); return false; }
+        track_memory(core_.device(), depth_.Get(), MemoryKind::depth);
         core_.device()->CreateDepthStencilView(depth_.Get(), nullptr, depth_dsv_);
         return true;
     }
@@ -5309,8 +5537,12 @@ private:
         DXGI_FORMAT formats[9];       // colour targets, [8] depth
         std::uint32_t idle_starts;    // starts since a session last used it
         DXGI_FORMAT ui_format;        // interface: the format its name carries
+        std::uint32_t flags;          // kRecordMenu: first used while the main menu was the scene (#325;
+                                      // the former padding: lists written before read 0, untagged)
         PipelineRecord() noexcept { std::memset(static_cast<void*>(this), 0, sizeof(*this)); }
     };
+    static_assert(sizeof(PipelineRecord) == 256, "the list layout (kRecordVersion 2) is 256 bytes a record");
+    static constexpr std::uint32_t kRecordMenu = 1;
     struct RecordHeader {
         std::uint32_t magic, version, record_bytes, count;
     };
@@ -5330,9 +5562,15 @@ private:
                 found->second.idle_starts = 0;
                 records_dirty_ = true;
             }
+            if (menu_scene_ && !(found->second.flags & kRecordMenu)) {
+                found->second.flags |= kRecordMenu;
+                records_dirty_ = true;
+            }
             return false;
         }
-        records_.emplace(name, record);
+        PipelineRecord used = record;
+        if (menu_scene_) used.flags |= kRecordMenu;
+        records_.emplace(name, used);
         records_dirty_ = true;
         if (!warmed_ || precached_.count(name)) return false;  // a precached sibling was warm
         ++unwarmed_;
@@ -5363,136 +5601,299 @@ private:
         return parse_records(bytes.data(), bytes.size(), "recorded");
     }
 
-    // At start: requests every recorded pipeline this build can still make.
-    void request_recorded(const std::wstring& directory, std::uint32_t& requested, std::uint32_t& dropped, std::uint32_t& shipped) {
-        requested = dropped = shipped = 0;
+    // At executor creation (the settings are not read yet): the shipped and
+    // this machine's recorded lists, requested by request_pipelines.
+    void load_recorded(const std::wstring& directory) {
         records_path_ = directory + L"eid3d11_d3d12_pipelines.list";
         records_dirty_ = true;  // idle counts change; a damaged list is replaced
         const D3D12_SHADER_BYTECODE shipped_list = resource_program("D3D12_SHIPPED_PIPELINES");
-        std::vector<PipelineRecord> records =
+        pending_records_ =
             parse_records(static_cast<const char*>(shipped_list.pShaderBytecode), shipped_list.BytecodeLength, "shipped");
-        for (PipelineRecord& record : records) record.idle_starts = 0;  // shipped: never idle
-        const std::size_t shipped_count = records.size();
-        {
-            std::vector<PipelineRecord> own = read_records(records_path_);
-            records.insert(records.end(), own.begin(), own.end());
-        }
-        if (records.empty()) return;  // nothing recorded yet
-        // This build's programs (the DXIL table's program list), by exact
-        // DXIL name and by identity (ambiguous when it names several).
+        for (PipelineRecord& record : pending_records_) record.idle_starts = 0;  // shipped: never idle
+        pending_shipped_ = pending_records_.size();
+        std::vector<PipelineRecord> own = read_records(records_path_);
+        pending_records_.insert(pending_records_.end(), own.begin(), own.end());
+        // The program tables now, while the start's other work runs (the
+        // requests later only filter: #325, laptop job 148 L6 +2.7 s).
+        build_program_tables();
+    }
+
+    // This build's programs (the DXIL table's program list) with everything
+    // request_pipelines looks up, built once at executor creation (#325: built
+    // on every request, about 3 s on a laptop CPU each, twice before the first
+    // frame). By exact DXIL name and by identity (ambiguous when it names
+    // several); each program's features (owned::append_d3d12_program_features,
+    // matched by its static fields, never named twice).
+    struct ProgramTables {
         struct Found {
             const std::string* name = nullptr;
             D3D12_SHADER_BYTECODE code{};
             bool ambiguous = false;
         };
         std::vector<owned::ShaderProgram> programs;
+        std::vector<std::string> names;
+        std::unordered_map<std::uint64_t, Found> by_identity, by_exact;
+        std::vector<D3D12_SHADER_BYTECODE> codes;
+        std::vector<std::uint64_t> features;  // per program; 0: every setting
+        std::unordered_map<std::uint64_t, std::vector<std::size_t>> families, vertex_families, general_vertex;
+    };
+    std::unique_ptr<ProgramTables> program_tables_;
+    // A pixel program's tier family: its identity without the defines a
+    // session switches between (NATIVE_OFF_MATERIALS: material quality
+    // Off and the others), so every recorded material pipeline is also
+    // precached for the tiers the player did not use last time (UE5's
+    // precaching: the first launch at material quality 0 from a list
+    // recorded at quality 2 drew no world). NATIVE_TERRAIN_LEAN too: the
+    // slim terrain pass's lean programs (option terrain_slim_cuts) pair
+    // with the same vertex and tessellation stages, so a list recorded
+    // with the other setting still warms them (a slim pass draw waits for
+    // its pipeline: 570-670 ms on the 3070 laptop when cuts changed).
+    // NATIVE_FRAME_DRY and NATIVE_OFF_CONTACT too: the material instance
+    // programs of dry frames and of batches out of contact reach (option
+    // object_program_cuts) are the drawn program's pixel twins
+    // (set_pixel_twins), so they are warm at start, not only after the
+    // first draw of their recorded twin.
+    static std::uint64_t family_of(const owned::ShaderProgram& program) {
+        std::uint64_t hash = 1469598103934665603ull;
+        const auto text = [&hash](const char* value) {
+            for (; value && *value; ++value) hash = (hash ^ std::uint8_t(*value)) * 1099511628211ull;
+            hash = (hash ^ 0xffu) * 1099511628211ull;
+        };
+        text(program.name);
+        text(program.entry);
+        text(program.profile);
+        for (const D3D_SHADER_MACRO* define = program.defines; define && define->Name; ++define) {
+            if (std::strcmp(define->Name, "NATIVE_OFF_MATERIALS") == 0 || std::strcmp(define->Name, "NATIVE_TERRAIN_LEAN") == 0 ||
+                std::strcmp(define->Name, "NATIVE_FRAME_DRY") == 0 || std::strcmp(define->Name, "NATIVE_OFF_CONTACT") == 0)
+                continue;
+            text(define->Name);
+            text(define->Definition);
+        }
+        return hash;
+    }
+    // A vertex program's family: its identity without NATIVE_INDEXED (the
+    // material instance classes' indexed twins, option
+    // indexed_object_draws: the same stage reading its vertex by
+    // SV_VertexID, the same pipeline state). With general (a pipeline
+    // whose pixel program is a general one, no NATIVE_DOMAIN) also
+    // without NATIVE_DOMAIN and NATIVE_DOMAIN_CHECK, and only general
+    // vertex programs join it: a general batch's object motion drew the
+    // crown impostor class's motion vertex program before 018ced48 and
+    // the general one since, so a list recorded before still warms it.
+    static bool has_define(const owned::ShaderProgram& program, const char* name) {
+        for (const D3D_SHADER_MACRO* define = program.defines; define && define->Name; ++define)
+            if (std::strcmp(define->Name, name) == 0) return true;
+        return false;
+    }
+    static std::uint64_t vertex_family_of(const owned::ShaderProgram& program, bool general) {
+        std::uint64_t hash = 1469598103934665603ull;
+        const auto text = [&hash](const char* value) {
+            for (; value && *value; ++value) hash = (hash ^ std::uint8_t(*value)) * 1099511628211ull;
+            hash = (hash ^ 0xffu) * 1099511628211ull;
+        };
+        text(program.name);
+        text(program.entry);
+        text(program.profile);
+        for (const D3D_SHADER_MACRO* define = program.defines; define && define->Name; ++define) {
+            if (std::strcmp(define->Name, "NATIVE_INDEXED") == 0) continue;
+            if (general && (std::strcmp(define->Name, "NATIVE_DOMAIN") == 0 || std::strcmp(define->Name, "NATIVE_DOMAIN_CHECK") == 0))
+                continue;
+            text(define->Name);
+            text(define->Definition);
+        }
+        return hash;
+    }
+
+    void build_program_tables() {
+        if (program_tables_) return;
+        auto t = std::make_unique<ProgramTables>();
+        auto& programs = t->programs;
         owned::append_shader_groups(0xFFFFFFFFu, programs);
         owned::append_d3d12_shader_programs(programs);
-        std::vector<std::string> names(programs.size());
-        std::unordered_map<std::uint64_t, Found> by_identity, by_exact;
+        t->names.resize(programs.size());
+        t->codes.resize(programs.size());
+        t->features.assign(programs.size(), 0);
         for (std::size_t index = 0; index < programs.size(); ++index) {
-            names[index] = program_dxil_name(programs[index]);
-            const D3D12_SHADER_BYTECODE code = resource_program(names[index].c_str());
-            by_exact.emplace(name_hash(names[index]), Found{&names[index], code, false});
-            auto added = by_identity.emplace(program_identity(programs[index]), Found{&names[index], code, false});
-            if (!added.second && *added.first->second.name != names[index]) added.first->second.ambiguous = true;
+            t->names[index] = program_dxil_name(programs[index]);
+            const D3D12_SHADER_BYTECODE code = resource_program(t->names[index].c_str());
+            t->codes[index] = code;
+            t->by_exact.emplace(name_hash(t->names[index]), ProgramTables::Found{&t->names[index], code, false});
+            auto added = t->by_identity.emplace(program_identity(programs[index]), ProgramTables::Found{&t->names[index], code, false});
+            if (!added.second && *added.first->second.name != t->names[index]) added.first->second.ambiguous = true;
         }
+        // The features: the feature list holds the same static programs, so
+        // they are matched by their fields (source, entry, profile, defines).
+        {
+            const auto field_key = [](const owned::ShaderProgram& program) {
+                std::uint64_t hash = 1469598103934665603ull;
+                for (const std::uintptr_t value : {std::uintptr_t(program.source.data()), std::uintptr_t(program.source.size()),
+                                                   std::uintptr_t(program.entry), std::uintptr_t(program.profile), std::uintptr_t(program.defines),
+                                                   std::uintptr_t(program.name), std::uintptr_t(program.flags)})
+                    hash = (hash ^ value) * 1099511628211ull;
+                return hash;
+            };
+            std::unordered_map<std::uint64_t, std::vector<std::size_t>> by_fields;
+            for (std::size_t index = 0; index < programs.size(); ++index) by_fields[field_key(programs[index])].push_back(index);
+            std::unordered_map<std::string, std::vector<std::size_t>> by_name;  // only if some entry is not matched
+            std::vector<std::pair<owned::ShaderProgram, std::uint64_t>> list;
+            owned::append_d3d12_program_features(list);
+            for (const auto& entry : list) {
+                const auto found = by_fields.find(field_key(entry.first));
+                if (found != by_fields.end())
+                    for (const std::size_t index : found->second) t->features[index] |= entry.second;
+                else {  // not the same static program: by its name, as before
+                    if (by_name.empty())
+                        for (std::size_t index = 0; index < programs.size(); ++index) by_name[t->names[index]].push_back(index);
+                    const auto named = by_name.find(program_dxil_name(entry.first));
+                    if (named != by_name.end())
+                        for (const std::size_t index : named->second) t->features[index] |= entry.second;
+                }
+            }
+            // One name, one feature set (they were keyed by name): programs
+            // sharing a DXIL name share their bits.
+            std::unordered_map<std::string, std::uint64_t> by_dxil;
+            for (std::size_t index = 0; index < programs.size(); ++index) by_dxil[t->names[index]] |= t->features[index];
+            for (std::size_t index = 0; index < programs.size(); ++index) t->features[index] = by_dxil[t->names[index]];
+        }
+        for (std::size_t index = 0; index < programs.size(); ++index) {
+            if (!t->codes[index].BytecodeLength || !programs[index].entry || !programs[index].profile) continue;
+            if (std::strcmp(programs[index].entry, "nativePS") == 0) t->families[family_of(programs[index])].push_back(index);
+            if (std::strncmp(programs[index].profile, "vs_", 3) == 0) {
+                t->vertex_families[vertex_family_of(programs[index], false)].push_back(index);
+                if (!has_define(programs[index], "NATIVE_DOMAIN")) t->general_vertex[vertex_family_of(programs[index], true)].push_back(index);
+            }
+        }
+        program_tables_ = std::move(t);
+    }
+
+    // The recorded pipelines whose every program a feature in `features`
+    // (owned::d3d12_features_for_settings) uses, from the lists load_recorded
+    // read. The others stay pending and on the saved list, unaged, for the
+    // setting that turns them on; one the adapter can never run (ray tracing
+    // without a tier 1.1 adapter) is not kept. Returns the pipelines newly
+    // requested (siblings included).
+    // #325: the library (and, before a reveal, the recorded list) written on
+    // the saver thread, never on the render thread: the write took 0.4-0.7 s
+    // on a GTX 1070 Ti. The render thread never joins a running saver; a
+    // request while it runs is taken by its loop. One that lands just as it
+    // stops waits for the next save (the next reveal, a settings build, exit).
+    void queue_save(std::vector<char> list, const char* when) noexcept {
+        try {
+            {
+                std::lock_guard<std::mutex> lock(save_list_mutex_);
+                if (!list.empty()) save_list_ = std::move(list);
+                save_when_ = when;
+            }
+            save_again_ = true;
+            if (saver_running_.load()) return;
+            if (library_save_.joinable()) library_save_.join();  // it has finished: returns at once
+            saver_running_ = true;
+            library_save_ = std::thread([this] {
+                while (save_again_.exchange(false)) {
+                    std::vector<char> list;
+                    const char* when = "";
+                    {
+                        std::lock_guard<std::mutex> lock(save_list_mutex_);
+                        list.swap(save_list_);
+                        when = save_when_;
+                    }
+                    std::string reason;
+                    bool written = false;
+                    if (!pipelines_.save(reason, &written)) remote::host_log("d3d12: pipeline library not saved (%s): %s", when, reason.c_str());
+                    const bool list_written = !list.empty() && write_record_list(list, when);
+                    if (written || list_written)
+                        remote::host_log("d3d12: pipelines saved (%s, on the saver thread): library %s, %zu KB; list %s",
+                                         when, written ? "written" : "unchanged", pipelines_.saved_bytes() >> 10,
+                                         list.empty() ? "unchanged" : list_written ? "written" : "NOT written");
+                }
+                saver_running_ = false;
+            });
+        } catch (...) {}
+    }
+    void save_library_soon() noexcept override { queue_save({}, "after a settings change"); }
+
+    bool pipelines_building(std::size_t& done, std::size_t& total) override {
+        done = pipelines_.loaded() + pipelines_.created();
+        total = pipelines_.requested();
+        return !pipelines_.idle();
+    }
+
+    void set_menu_scene(bool menu) noexcept override { menu_scene_ = menu; }
+
+    std::uint32_t request_pipelines(std::uint64_t features, bool menu_only) override {
+        std::uint32_t requested = 0, dropped = 0, shipped = 0, deferred = 0, unsupported = 0, after_menu = 0;
+        const std::uint32_t before = pipelines_.requested();
+        std::vector<PipelineRecord> records;
+        records.swap(pending_records_);
+        const std::size_t shipped_count = pending_shipped_;
+        pending_shipped_ = 0;
+        if (records.empty()) return 0;
+        // The menu's records first (the start waits only for them; the rest
+        // follows behind the menu). A list without any menu tag (written before
+        // the tags) is requested whole, as before.
+        if (menu_only && std::none_of(records.begin(), records.end(), [](const PipelineRecord& r) { return (r.flags & kRecordMenu) != 0; }))
+            menu_only = false;
+        build_program_tables();  // once (load_recorded builds it at executor creation)
+        ProgramTables& tables = *program_tables_;
+        const auto& programs = tables.programs;
+        const auto& names = tables.names;
+        const auto& codes = tables.codes;
+        const auto& families = tables.families;
+        const auto& vertex_families = tables.vertex_families;
+        const auto& general_vertex = tables.general_vertex;
+        constexpr std::uint64_t kRtOnly = owned::kD3D12FeatureRayTracing | owned::kD3D12FeatureRtGuides;
+        // 1: built now; 0: pending for a setting; -1: the adapter can never run it.
+        const auto wanted = [&](const std::string* const* stage_names, int stages) {
+            int result = 1;
+            for (int stage = 0; stage < stages; ++stage) {
+                if (!stage_names[stage]) continue;
+                const std::uint64_t bits = tables.features[std::size_t(stage_names[stage] - names.data())];
+                if (!bits || (bits & features)) continue;
+                if (!rt_unavailable_.empty() && !(bits & ~kRtOnly)) return -1;
+                result = 0;
+            }
+            return result;
+        };
         const auto resolve = [&](std::uint64_t identity, std::uint64_t exact, const D3D12_SHADER_BYTECODE*& code, const std::string*& name) {
             code = nullptr;
             name = nullptr;
             if (!identity) return true;
-            auto found = by_exact.find(exact);
-            if (found == by_exact.end()) {
-                found = by_identity.find(identity);
-                if (found == by_identity.end() || found->second.ambiguous) return false;
+            auto found = tables.by_exact.find(exact);
+            if (found == tables.by_exact.end()) {
+                found = tables.by_identity.find(identity);
+                if (found == tables.by_identity.end() || found->second.ambiguous) return false;
             }
             if (!found->second.code.BytecodeLength) return false;
             code = &found->second.code;
             name = found->second.name;
             return true;
         };
-        // A pixel program's tier family: its identity without the defines a
-        // session switches between (NATIVE_OFF_MATERIALS: material quality
-        // Off and the others), so every recorded material pipeline is also
-        // precached for the tiers the player did not use last time (UE5's
-        // precaching: the first launch at material quality 0 from a list
-        // recorded at quality 2 drew no world). NATIVE_TERRAIN_LEAN too: the
-        // slim terrain pass's lean programs (option terrain_slim_cuts) pair
-        // with the same vertex and tessellation stages, so a list recorded
-        // with the other setting still warms them (a slim pass draw waits for
-        // its pipeline: 570-670 ms on the 3070 laptop when cuts changed).
-        // NATIVE_FRAME_DRY and NATIVE_OFF_CONTACT too: the material instance
-        // programs of dry frames and of batches out of contact reach (option
-        // object_program_cuts) are the drawn program's pixel twins
-        // (set_pixel_twins), so they are warm at start, not only after the
-        // first draw of their recorded twin.
-        const auto family_of = [](const owned::ShaderProgram& program) {
-            std::uint64_t hash = 1469598103934665603ull;
-            const auto text = [&hash](const char* value) {
-                for (; value && *value; ++value) hash = (hash ^ std::uint8_t(*value)) * 1099511628211ull;
-                hash = (hash ^ 0xffu) * 1099511628211ull;
-            };
-            text(program.name);
-            text(program.entry);
-            text(program.profile);
-            for (const D3D_SHADER_MACRO* define = program.defines; define && define->Name; ++define) {
-                if (std::strcmp(define->Name, "NATIVE_OFF_MATERIALS") == 0 || std::strcmp(define->Name, "NATIVE_TERRAIN_LEAN") == 0 ||
-                    std::strcmp(define->Name, "NATIVE_FRAME_DRY") == 0 || std::strcmp(define->Name, "NATIVE_OFF_CONTACT") == 0)
-                    continue;
-                text(define->Name);
-                text(define->Definition);
-            }
-            return hash;
-        };
-        // A vertex program's family: its identity without NATIVE_INDEXED (the
-        // material instance classes' indexed twins, option
-        // indexed_object_draws: the same stage reading its vertex by
-        // SV_VertexID, the same pipeline state). With general (a pipeline
-        // whose pixel program is a general one, no NATIVE_DOMAIN) also
-        // without NATIVE_DOMAIN and NATIVE_DOMAIN_CHECK, and only general
-        // vertex programs join it: a general batch's object motion drew the
-        // crown impostor class's motion vertex program before 018ced48 and
-        // the general one since, so a list recorded before still warms it.
-        const auto has_define = [](const owned::ShaderProgram& program, const char* name) {
-            for (const D3D_SHADER_MACRO* define = program.defines; define && define->Name; ++define)
-                if (std::strcmp(define->Name, name) == 0) return true;
-            return false;
-        };
-        const auto vertex_family_of = [](const owned::ShaderProgram& program, bool general) {
-            std::uint64_t hash = 1469598103934665603ull;
-            const auto text = [&hash](const char* value) {
-                for (; value && *value; ++value) hash = (hash ^ std::uint8_t(*value)) * 1099511628211ull;
-                hash = (hash ^ 0xffu) * 1099511628211ull;
-            };
-            text(program.name);
-            text(program.entry);
-            text(program.profile);
-            for (const D3D_SHADER_MACRO* define = program.defines; define && define->Name; ++define) {
-                if (std::strcmp(define->Name, "NATIVE_INDEXED") == 0) continue;
-                if (general && (std::strcmp(define->Name, "NATIVE_DOMAIN") == 0 || std::strcmp(define->Name, "NATIVE_DOMAIN_CHECK") == 0))
-                    continue;
-                text(define->Name);
-                text(define->Definition);
-            }
-            return hash;
-        };
-        std::unordered_map<std::uint64_t, std::vector<std::size_t>> families, vertex_families, general_vertex;
-        std::vector<D3D12_SHADER_BYTECODE> codes(programs.size());
-        for (std::size_t index = 0; index < programs.size(); ++index) {
-            codes[index] = by_exact[name_hash(names[index])].code;
-            if (!codes[index].BytecodeLength || !programs[index].entry || !programs[index].profile) continue;
-            if (std::strcmp(programs[index].entry, "nativePS") == 0) families[family_of(programs[index])].push_back(index);
-            if (std::strncmp(programs[index].profile, "vs_", 3) == 0) {
-                vertex_families[vertex_family_of(programs[index], false)].push_back(index);
-                if (!has_define(programs[index], "NATIVE_DOMAIN")) general_vertex[vertex_family_of(programs[index], true)].push_back(index);
-            }
-        }
         std::uint32_t siblings = 0;
+        std::vector<PipelineRecord> shipped_pending, own_pending;
+        // The features (shader groups and D3D12 classes) the menu-tagged
+        // records use: the main menu's set, which the D3D11 start prepares
+        // first (kShaderGroups menu, #325).
+        std::uint64_t menu_features = 0;
+        const auto note_menu = [&](const PipelineRecord& record, const std::string* const* stage_names, int stages) {
+            if (!(record.flags & kRecordMenu)) return;
+            for (int stage = 0; stage < stages; ++stage)
+                if (stage_names[stage])
+                    menu_features |= tables.features[std::size_t(stage_names[stage] - names.data())];
+        };
         for (std::size_t index = 0; index < records.size(); ++index) {
             PipelineRecord record = records[index];
             if (record.idle_starts >= kRecordIdleStarts) { ++dropped; continue; }
-            if (index >= shipped_count) ++record.idle_starts;  // reset when a session uses it
+            const bool own = index >= shipped_count;
             std::wstring name;
+            // Not wanted by these settings: kept on the list (unaged) and
+            // pending for the setting that turns its feature on.
+            const auto defer = [&](int want) {
+                if (want < 0) { ++unsupported; return; }
+                if (want == 2) ++after_menu; else ++deferred;
+                records_.emplace(name, record);
+                deferred_names_.insert(name);
+                (own ? own_pending : shipped_pending).push_back(record);
+            };
             if (record.kind == PipelineRecord::kNative) {
                 const D3D12_SHADER_BYTECODE* code[4]{};
                 const std::string* program_names[4]{};
@@ -5501,7 +5902,11 @@ private:
                     ok = resolve(record.programs[stage], record.exact[stage], code[stage], program_names[stage]);
                 if (!ok || record.targets > 8) { ++dropped; continue; }
                 name = native_name(program_names, record.state, record.formats);
-                if (!records_.count(name)) pipelines_.request(name, native_desc(code, record.state, record.formats, record.targets));
+                note_menu(record, program_names, 4);
+                if (const int want = wanted(program_names, 4); want != 1) { defer(want); continue; }
+                if (menu_only && !(record.flags & kRecordMenu)) { defer(2); continue; }
+                if (own) ++record.idle_starts;  // reset when a session uses it
+                pipelines_.request(name, native_desc(code, record.state, record.formats, record.targets));
                 // Siblings: every vertex family member with every pixel family member.
                 const std::size_t vertex = std::size_t(program_names[0] - names.data());
                 std::vector<std::size_t> vertices{vertex}, pixels;
@@ -5526,7 +5931,7 @@ private:
                         const std::string* sibling_names[4] = {&names[v], pixel_name, program_names[2], program_names[3]};
                         const D3D12_SHADER_BYTECODE* sibling_code[4] = {&codes[v], pixels.empty() ? nullptr : &codes[pixels[p]], code[2], code[3]};
                         const std::wstring sibling = native_name(sibling_names, record.state, record.formats);
-                        if (records_.count(sibling) || !precached_.insert(sibling).second) continue;
+                        if ((records_.count(sibling) && !deferred_names_.count(sibling)) || !precached_.insert(sibling).second) continue;
                         pipelines_.request(sibling, native_desc(sibling_code, record.state, record.formats, record.targets));
                         ++siblings;
                     }
@@ -5535,22 +5940,76 @@ private:
                 const std::string* program_name = nullptr;
                 if (!record.programs[0] || !resolve(record.programs[0], record.exact[0], code, program_name)) { ++dropped; continue; }
                 name = compute_name(*program_name);
-                if (!records_.count(name)) pipelines_.request(name, compute_desc(*code));
+                note_menu(record, &program_name, 1);
+                if (const int want = wanted(&program_name, 1); want != 1) { defer(want); continue; }
+                if (menu_only && !(record.flags & kRecordMenu)) { defer(2); continue; }
+                if (own) ++record.idle_starts;
+                pipelines_.request(name, compute_desc(*code));
             } else if (record.kind == PipelineRecord::kInterface && record.programs[0] < std::uint64_t(D3D12UiProgram::count) &&
                        record.targets <= 8) {
                 const D3D12UiProgram program = D3D12UiProgram(record.programs[0]);
                 name = ui_name(program, record.state.blend, record.ui_format);
-                if (!records_.count(name)) pipelines_.request(name, ui_desc(program, record.state.blend, record.targets, record.formats));
+                if (menu_only && !(record.flags & kRecordMenu)) { defer(2); continue; }
+                if (own) ++record.idle_starts;
+                pipelines_.request(name, ui_desc(program, record.state.blend, record.targets, record.formats));
             } else {
                 ++dropped;
                 continue;
             }
-            if (records_.emplace(name, record).second) {
-                ++requested;
-                if (index < shipped_count) ++shipped;
+            deferred_names_.erase(name);
+            // An entry kept while it waited (defer) may since have been used
+            // (note_pipeline: menu tag, idle count reset): merged, not replaced.
+            if (auto found = records_.find(name); found == records_.end()) records_.emplace(name, record);
+            else {
+                found->second.flags |= record.flags;
+                found->second.idle_starts = (std::min)(found->second.idle_starts, record.idle_starts);
             }
+            ++requested;
+            if (!own) ++shipped;
         }
-        if (siblings) remote::host_log("d3d12: %u material pipelines precached as siblings (material quality, slim cuts, dry-frame and no-contact, indexed and general motion vertex programs)", siblings);
+        pending_shipped_ = shipped_pending.size();
+        pending_records_ = std::move(shipped_pending);
+        pending_records_.insert(pending_records_.end(), own_pending.begin(), own_pending.end());
+        warm_recorded_ += requested;
+        warm_shipped_ += shipped;
+        warm_dropped_ += dropped;
+        const std::uint32_t added = pipelines_.requested() - before;
+        remote::host_log("d3d12: pipelines for these settings%s: %u recorded requested (%u shipped, %u siblings; %u new to build), "
+                         "%u after the menu, %u pending for settings that are off, %u never (the adapter cannot run them), %u dropped",
+                         menu_only ? " (the menu's first)" : "", requested, shipped, siblings, added, after_menu, deferred, unsupported, dropped);
+        if (menu_features && menu_features != logged_menu_features_) {
+            logged_menu_features_ = menu_features;
+            remote::host_log("d3d12: the menu-tagged records use features 0x%llx (shader groups and D3D12 classes)",
+                             static_cast<unsigned long long>(menu_features));
+        }
+        return added;
+    }
+
+    // The recorded list as its file holds it (render thread: records_ is its own).
+    std::vector<char> record_list_bytes() const {
+        std::vector<char> bytes(sizeof(RecordHeader) + records_.size() * sizeof(PipelineRecord));
+        const RecordHeader header{kRecordMagic, kRecordVersion, std::uint32_t(sizeof(PipelineRecord)), std::uint32_t(records_.size())};
+        std::memcpy(bytes.data(), &header, sizeof(header));
+        std::size_t at = sizeof(header);
+        for (const auto& record : records_) {
+            std::memcpy(bytes.data() + at, &record.second, sizeof(PipelineRecord));
+            at += sizeof(PipelineRecord);
+        }
+        return bytes;
+    }
+    // Writes the list file (any thread: records_path_ is fixed after load_recorded).
+    bool write_record_list(const std::vector<char>& bytes, const char* when) const {
+        if (records_path_.empty()) return false;
+        const std::wstring temporary = records_path_ + L".tmp";
+        bool written = false;
+        {
+            std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+            out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            written = bool(out);
+        }
+        written = written && MoveFileExW(temporary.c_str(), records_path_.c_str(), MOVEFILE_REPLACE_EXISTING);
+        if (!written) remote::host_log("d3d12: the recorded pipeline list could not be written (%s; error %lu)", when, GetLastError());
+        return written;
     }
 
     // Writes the pipeline library and the recorded list (when either changed).
@@ -5563,23 +6022,8 @@ private:
         if (!pipelines_.save(reason, &library_written)) remote::host_log("d3d12: pipeline library not saved (%s): %s", when, reason.c_str());
         bool list_written = false;
         if (records_dirty_ && !records_path_.empty()) {
-            std::vector<char> bytes(sizeof(RecordHeader) + records_.size() * sizeof(PipelineRecord));
-            const RecordHeader header{kRecordMagic, kRecordVersion, std::uint32_t(sizeof(PipelineRecord)), std::uint32_t(records_.size())};
-            std::memcpy(bytes.data(), &header, sizeof(header));
-            std::size_t at = sizeof(header);
-            for (const auto& record : records_) {
-                std::memcpy(bytes.data() + at, &record.second, sizeof(PipelineRecord));
-                at += sizeof(PipelineRecord);
-            }
-            const std::wstring temporary = records_path_ + L".tmp";
-            {
-                std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-                out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-                list_written = bool(out);
-            }
-            list_written = list_written && MoveFileExW(temporary.c_str(), records_path_.c_str(), MOVEFILE_REPLACE_EXISTING);
+            list_written = write_record_list(record_list_bytes(), when);
             if (list_written) records_dirty_ = false;
-            else remote::host_log("d3d12: the recorded pipeline list could not be written (%s; error %lu)", when, GetLastError());
         }
         records_saved_tick_ = GetTickCount64();
         QueryPerformanceCounter(&end);
@@ -5704,6 +6148,7 @@ private:
         std::make_shared<owned::D3D12ResourceOwner>(&core_);
     UploadRing upload_;
     UploadRing bulk_;  // one-off load data (write_buffer_bulk): never grows the per-frame blocks
+    std::uint64_t uploaded_total_ = 0;  // every write_buffer / write_texture byte since the device began (#289 map switch uploads)
     std::uint64_t upload_buffer_bytes_ = 0, upload_texture_bytes_ = 0;  // this frame's write_buffer / write_texture bytes (upload_end_frame)
     std::shared_ptr<Preparer> preparer_;  // off-render-thread uploads (finish_buffer / finish_texture)
     Presenter presenter_;
@@ -5822,6 +6267,113 @@ private:
     std::uint32_t imgui_pipeline_ = UINT32_MAX;
     std::unordered_map<std::string, std::uint32_t> samplers_;
     std::unordered_map<ImTextureID, owned::D3D12TextureRef> imgui_textures_;
+    // Slow host frames (#344, always on): a host frame (the end of one
+    // present() to the end of the next) that kept the host busy for
+    // kSlowFrameMs or more is named in host.log: the waits (GPU frame fence,
+    // swap chain latency, pipeline misses, submit, Present; the frame limiter
+    // apart), the passes' own CPU time (marker to marker, waits taken out),
+    // the uploads, and the time the host slept waiting for the game. A few
+    // QPC reads per pass; at most one line a second, 600 a session.
+    static constexpr double kSlowFrameMs = 40.0;
+    struct SlowPass { const char* name; std::int64_t ticks; };
+    struct SlowFrame {
+        std::int64_t start = 0, pass_start = 0, segment_waits = 0, segment_idle = 0;
+        const char* pass = nullptr;  // the pass being timed (nullptr: before the first)
+        std::int64_t before_passes = 0, fence = 0, swap = 0, pipelines = 0, submit = 0, present = 0, limiter = 0, idle_mark = 0;
+        std::int64_t past_table = 0;
+        unsigned pipeline_misses = 0, pass_count = 0;
+        std::uint64_t uploaded_mark = 0;
+        SlowPass passes[160]{};  // a world frame marks over 48 passes (the first table filled up)
+    } slow_;
+    std::int64_t slow_last_line_ = 0;
+    unsigned slow_lines_ = 0, slow_suppressed_ = 0;
+    static std::int64_t slow_now() noexcept { LARGE_INTEGER t{}; QueryPerformanceCounter(&t); return t.QuadPart; }
+    static double slow_ms(std::int64_t ticks) noexcept {
+        static const double scale = [] { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return 1000.0 / double(f.QuadPart); }();
+        return double(ticks) * scale;
+    }
+    // A named wait inside the current pass: charged to the wait, not the pass.
+    void slow_wait(std::int64_t& total, std::int64_t start) noexcept {
+        const std::int64_t ticks = slow_now() - start;
+        total += ticks;
+        slow_.segment_waits += ticks;
+    }
+    void slow_limit(int frame_limit) {
+        const std::int64_t start = slow_now();
+        presentation_limiter_.wait(frame_limit, nullptr, &remote::host_log);
+        slow_.limiter += slow_now() - start;
+    }
+    // Closes the running pass's segment and opens `next` (nullptr: none).
+    void slow_pass(const char* next) noexcept {
+        const std::int64_t now = slow_now();
+        const std::int64_t idle = remote::g_host_idle_ticks.load(std::memory_order_relaxed);
+        if (!slow_.start) { slow_.start = slow_.pass_start = now; slow_.segment_idle = slow_.idle_mark = idle; }
+        // Sleeping for the game's next records is not the pass's time either.
+        const std::int64_t own = (std::max)(std::int64_t(0), now - slow_.pass_start - slow_.segment_waits - (idle - slow_.segment_idle));
+        slow_.segment_idle = idle;
+        if (!slow_.pass) {
+            slow_.before_passes += own;
+        } else {
+            unsigned i = 0;
+            while (i < slow_.pass_count && slow_.passes[i].name != slow_.pass) ++i;
+            if (i == slow_.pass_count && slow_.pass_count < std::size(slow_.passes)) slow_.passes[slow_.pass_count++] = {slow_.pass, 0};
+            if (i < slow_.pass_count) slow_.passes[i].ticks += own;
+            else slow_.past_table += own;  // more passes than the table: named apart
+        }
+        slow_.pass = next;
+        slow_.pass_start = now;
+        slow_.segment_waits = 0;
+    }
+    void slow_frame_end() noexcept {
+        const std::int64_t now = slow_now();
+        const std::int64_t idle_mark = remote::g_host_idle_ticks.load(std::memory_order_relaxed);
+        if (slow_.start) {
+            const double total = slow_ms(now - slow_.start), idle = slow_ms(idle_mark - slow_.idle_mark);
+            const double busy = total - idle - slow_ms(slow_.limiter);
+            if (busy >= kSlowFrameMs) {
+                if (slow_lines_ < 600 && (!slow_last_line_ || slow_ms(now - slow_last_line_) >= 1000.0)) {
+                    ++slow_lines_;
+                    slow_last_line_ = now;
+                    unsigned order[3] = {UINT_MAX, UINT_MAX, UINT_MAX};
+                    for (unsigned i = 0; i < slow_.pass_count; ++i)
+                        for (unsigned k = 0; k < 3; ++k)
+                            if (order[k] == UINT_MAX || slow_.passes[i].ticks > slow_.passes[order[k]].ticks) {
+                                for (unsigned m = 2; m > k; --m) order[m] = order[m - 1];
+                                order[k] = i;
+                                break;
+                            }
+                    // Busy time no bucket holds: a frame whose present had no
+                    // list open (the last pass not closed), or work after it.
+                    std::int64_t named = slow_.fence + slow_.swap + slow_.pipelines + slow_.submit + slow_.present +
+                                         slow_.before_passes + slow_.past_table;
+                    for (unsigned i = 0; i < slow_.pass_count; ++i) named += slow_.passes[i].ticks;
+                    const double outside = (std::max)(0.0, busy - slow_ms(named));
+                    char passes[256] = "none";
+                    int n = 0;
+                    for (unsigned k = 0; k < 3 && order[k] != UINT_MAX; ++k)
+                        n += std::snprintf(passes + n, sizeof(passes) - std::size_t(n), "%s%s %.1f", k ? ", " : "",
+                                           slow_.passes[order[k]].name, slow_ms(slow_.passes[order[k]].ticks));
+                    remote::host_log("d3d12: slow host frame %llu: busy %.1f ms (slept %.1f ms waiting for the game, limiter %.1f) | "
+                                     "waits: gpu frame fence %.1f, swap chain %.1f, pipeline misses %u %.1f, submit %.1f, present %.1f | "
+                                     "unmarked cpu %.1f, passes past the table %.1f, outside any pass %.1f (last pass %s) | top passes (cpu): %s | uploads %.1f MiB | %u passes%s",
+                                     static_cast<unsigned long long>(frame_serial_), busy, idle, slow_ms(slow_.limiter), slow_ms(slow_.fence),
+                                     slow_ms(slow_.swap), slow_.pipeline_misses, slow_ms(slow_.pipelines), slow_ms(slow_.submit),
+                                     slow_ms(slow_.present), slow_ms(slow_.before_passes), slow_ms(slow_.past_table), outside,
+                                     slow_.pass ? slow_.pass : "closed", passes,
+                                     double(uploaded_total_ - slow_.uploaded_mark) / (1024.0 * 1024.0), slow_.pass_count,
+                                     slow_suppressed_ ? (" | " + std::to_string(slow_suppressed_) + " more slow frames since the last line").c_str() : "");
+                    slow_suppressed_ = 0;
+                } else {
+                    ++slow_suppressed_;
+                }
+            }
+        }
+        slow_ = SlowFrame{};
+        slow_.start = slow_.pass_start = now;
+        slow_.idle_mark = slow_.segment_idle = idle_mark;
+        slow_.uploaded_mark = uploaded_total_;
+    }
+    bool request_only_ = false;  // request_instanced: ready_pipeline neither waits nor builds
     const char* last_marker_ = nullptr;  // marker(): the pass last marked in this list
     d3d12::ComPtr<ID3D12Resource> breadcrumb_buffer_;  // [0] last pass reached, [1] last finished (readback, mapped)
     const volatile std::uint32_t* breadcrumb_values_ = nullptr;
@@ -5936,10 +6488,10 @@ private:
         if (warm_codes_.empty()) return;
         const ProgramCode* codes[4] = {key.programs[0], key.programs[1], key.programs[2], key.programs[3]};
         bool twinned = false;
-        for (int stage = 0; stage < 2; ++stage) {
+        for (int stage = 0; stage < 4; ++stage) {
             if (!codes[stage]) continue;
             const auto found = warm_codes_.find(codes[stage]);
-            if (found == warm_codes_.end()) continue;
+            if (found == warm_codes_.end()) return;  // all stages or none (native_pipeline)
             const ProgramCode* twin = nullptr;
             if (!program_code(*found->second, nullptr, &twin) || !twin) return;
             codes[stage] = twin; twinned = true;
@@ -5950,7 +6502,7 @@ private:
         for (int stage = 0; stage < 4; ++stage)
             if (codes[stage]) { code[stage] = &codes[stage]->bytecode; names[stage] = &codes[stage]->name; }
         const std::wstring name = native_name(names, key.state, key.formats);
-        if (records_.count(name) || !precached_.insert(name).second) return;
+        if ((records_.count(name) && !deferred_names_.count(name)) || !precached_.insert(name).second) return;
         pipelines_.request(name, native_desc(code, key.state, key.formats, targets));
         ++burn_twin_requests_;
     }
@@ -6045,6 +6597,16 @@ private:
     bool buffer_failures_ = false, program_failures_ = false, native_pipeline_failures_ = false;
     // The recorded pipelines (request_recorded), by library name.
     std::map<std::wstring, PipelineRecord> records_;
+    bool menu_scene_ = false;
+    std::uint64_t logged_menu_features_ = 0;   // the main menu is the scene: pipelines first used now get kRecordMenu (#325)
+    std::thread library_save_;  // the saver thread (queue_save; joined only once finished, and at exit)
+    std::atomic<bool> saver_running_{false}, save_again_{false};
+    std::mutex save_list_mutex_;
+    std::vector<char> save_list_;  // the recorded list waiting for the saver
+    const char* save_when_ = "";
+    std::vector<PipelineRecord> pending_records_;  // recorded, not requested yet: shipped ones first (load_recorded, request_pipelines)
+    std::size_t pending_shipped_ = 0;
+    std::set<std::wstring> deferred_names_;        // on the list, pending for a setting that is off (#325)
     std::set<std::wstring> precached_;  // tier siblings requested at start (request_recorded) and pixel twins, recorded when used
     const owned::ShaderProgram* pixel_twins_[4]{};  // set_pixel_twins
     UINT pixel_twin_count_ = 0;

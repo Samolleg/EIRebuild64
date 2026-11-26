@@ -79,6 +79,15 @@ void bridge_live_capture_d3d12(D3D12Frame&,unsigned long long) noexcept;
 #endif
 namespace {
 bool shadow_temporal_diagnostic_enabled(){static const bool enabled=[](){char value[8]{};return GetEnvironmentVariableA("EI_RENDERER_SHADOW_TEMPORAL_CAPTURE",value,sizeof(value))&&value[0]=='1';}();return enabled;}
+// Crown impostor switch distance scale (#238): the player's tree_detail_distance
+// level (Near, Normal, Far; in the graphics presets) times the tuning slider.
+// The impostor size limits divide by it and the far distance multiplies, so
+// every switch distance scales by it (a crown's on-screen size falls as 1/distance).
+float impostor_distance_scale(const RendererConfig& config){
+ static constexpr float kLevel[3]={.7f,1.f,1.5f};
+ return kLevel[std::clamp(configured_integer(config,"tree_detail_distance",1),0,2)]*
+  std::clamp(configured_floating_point(config,"impostor_distance_scale",1.f),.25f,4.f);
+}
 }  // namespace
 
 // One sub-pixel jitter per world frame (Halton 2,3), the same for every world
@@ -91,6 +100,21 @@ void Renderer::advance_dlss_jitter() noexcept {
  dlss_jitter_index_=(dlss_jitter_index_+1)%phases;
  dlss_jitter_[0]=dlss_halton(dlss_jitter_index_+1,2)-.5f;
  dlss_jitter_[1]=dlss_halton(dlss_jitter_index_+1,3)-.5f;
+}
+
+// Between frames (apply_render_scale, apply_upscaler_mode_d3d12): suspend the
+// temporal upscalers while the world frames have no world camera (the global
+// map screen), resume them, history reset, once one has it again. True: the
+// state changed (the caller sets the world size).
+bool Renderer::update_upscaler_suspension(bool upscaler_configured) noexcept{
+ // #268: the map screen's preview report (hit_test_frame_apply) once per stretch without the camera.
+ if(world_camera_last_)world_map_open_reported_=false;
+ const bool suspend=upscaler_configured&&!world_camera_last_;
+ if(suspend==upscaler_suspended_)return false;
+ upscaler_suspended_=suspend;dlss_reset_=true;dlss_previous_valid_=false;
+ bridge_append_probe_event("upscaler_suspension",suspend?"world frames without a world camera (global map screen): output size, no temporal upscaler":
+                                                         "world camera again: the temporal upscaler resumes, history reset");
+ return true;
 }
 
 // The shared start of a temporal upscaler frame in place of upscale():
@@ -369,9 +393,10 @@ ID3D11UnorderedAccessView* Renderer::dlss_previous_world_uav() noexcept{
  if(!dlss_motion_stamp_||!context_||!scene_composite_.dlss()||!native_world_vertices_)return nullptr;
  D3D11_BUFFER_DESC desc{},have{};native_world_vertices_->GetDesc(&desc);
  if(dlss_previous_world_)dlss_previous_world_->GetDesc(&have);
- if(!dlss_previous_world_||have.ByteWidth!=desc.ByteWidth){
+ const UINT slots=desc.ByteWidth/UINT(sizeof(NativeWorldVertexGpu)),bytes=slots*UINT(sizeof(NativeMotionVertexGpu));
+ if(!dlss_previous_world_||have.ByteWidth!=bytes){
   ComPtr<ID3D11Buffer> buffer;ComPtr<ID3D11ShaderResourceView> srv;ComPtr<ID3D11UnorderedAccessView> uav;
-  if(FAILED(create_native_world_resource(desc.ByteWidth/UINT(sizeof(NativeWorldVertexGpu)),buffer,srv,uav))){
+  if(FAILED(create_native_world_resource(slots,buffer,srv,uav,UINT(sizeof(NativeMotionVertexGpu))))){
    dlss_previous_world_.Reset();dlss_previous_world_srv_.Reset();dlss_previous_world_uav_.Reset();
    static bool reported=false;
    if(!reported){reported=true;bridge_append_probe_event("dlss_object_motion_omitted","previous world vertex copy could not be created; figures use camera motion");}
@@ -379,7 +404,7 @@ ID3D11UnorderedAccessView* Renderer::dlss_previous_world_uav() noexcept{
   }
   const UINT zero[4]{};context_->ClearUnorderedAccessViewUint(uav.Get(),zero);
   // Growth only (the same slots, more of them); a smaller buffer is a new world's.
-  if(dlss_previous_world_&&have.ByteWidth<desc.ByteWidth){
+  if(dlss_previous_world_&&have.ByteWidth<bytes){
    const D3D11_BOX box{0,0,0,have.ByteWidth,1,1};
    context_->CopySubresourceRegion(buffer.Get(),0,0,0,0,dlss_previous_world_.Get(),0,&box);
   }
@@ -554,8 +579,10 @@ HRESULT Renderer::composite_world(){
   }
   if(scene_updated_)render_ambient_particles();
   if(scene_updated_)render_wind_trails();
+  if(scene_updated_)render_dune_wisps();
   if(scene_updated_)render_precipitation();
   capture_water_history();
+  if(!hit_test_active_)world_camera_last_=bridge_scene_world_to_clip_snapshot().valid;
   // DLSS and FSR anti-alias themselves: their colour input is the plain copy.
   const bool smaa=!scene_composite_.dlss()&&configured_boolean(debug_overlay_.config(),"smaa",true);
   transition_profile_pass(smaa?"scene_smaa":"scene_copy");
@@ -600,7 +627,10 @@ HRESULT Renderer::composite_world(){
    }
   }else if(scene_composite_.dlss()&&render_fsr()){}
 #else
-  if(scene_composite_.dlss()&&(fsr_mode_>=0?render_fsr():render_dlss())){}
+  // The first frame of the global map screen (no world camera; the suspension
+  // between frames takes the next ones to the output size): the plain upscale.
+  if(scene_composite_.dlss()&&!world_camera_last_){dlss_reset_=true;dlss_previous_valid_=false;}
+  if(scene_composite_.dlss()&&world_camera_last_&&(fsr_mode_>=0?render_fsr():render_dlss())){}
 #endif
   else if(scene_composite_.scaled()){
    transition_profile_pass("scene_upscale");
@@ -610,8 +640,11 @@ HRESULT Renderer::composite_world(){
    scene_composite_.upscale(context_.Get(),backbuffer_rtv_.Get(),separate_depth?depth_srv_.Get():nullptr,separate_depth?interface_dsv_.Get():nullptr);
    profiler_.add_draw(1,1);profiler_.add_batch();
   }
+  // Alt interact overlay (#315): over the finished world, before any interface.
+  composite_interact_overlay();
   // Do not capture again while ending this pass: the backbuffer now contains the scene.
   scene_composited_=true;scene_updated_=false;end_profile_pass();
+  take_harness_world_shot(); // harness_hide_hud: the world before any interface
  }
  // AO settings take effect on whole world frames.
  ao_ambient_written_=false;update_ambient_occlusion_targets();
@@ -1220,6 +1253,7 @@ HRESULT Renderer::begin_engine_frame_at(std::uint64_t world_epoch){
   // D3D12 backend: the previous invocation's UI, then a new frame index for
   // the UI's per-frame bookkeeping and the world target bound (as rtv_/dsv_
   // are on D3D11) until the composite.
+  d3d12_->marker("engine_frame_begin"); // #344: the slow host frame line names the frame start
   HRESULT hr=flush_native();
   if(SUCCEEDED(hr))hr=render_pending_blits();
   // The first engine frame of a new world: a clean slate (as on D3D11).
@@ -1272,8 +1306,8 @@ void Renderer::begin_scene_renderer(){
   const auto& config=debug_overlay_.config();
   native_draw_distance_=float(configured_integer(config,"draw_distance",300));
   native_lod_error_px_=configured_boolean(config,"lod",true)?configured_floating_point(config,"lod_pixel_error",1.f):0.f;
-  native_impostor_pixels_=configured_boolean(config,"impostors",true)&&!impostors_.failed?configured_floating_point(config,"impostor_pixels",64.f):0.f;
-  native_impostor_debug_=configured_boolean(config,"impostor_debug",false);debug_no_fog_=configured_boolean(config,"debug_no_fog",false);terrain_relief_derivfree_=configured_boolean(config,"terrain_relief_derivfree",true);fur_debug_=std::clamp(configured_integer(config,"fur_debug",0),0,4);impostor_atlas_dump();native_impostor_frames_=configured_boolean(config,"impostor_debug_frames",false);native_impostor_raw_=configured_boolean(config,"impostor_debug_raw",false);native_temp_far_px_=float(configured_integer(config,"impostor_far_pixels",160));native_temp_far_m_=float(configured_integer(config,"impostor_far_distance",150));
+  native_impostor_pixels_=configured_boolean(config,"impostors",true)&&!impostors_.failed?configured_floating_point(config,"impostor_pixels",64.f)/impostor_distance_scale(config):0.f;
+  native_impostor_debug_=configured_boolean(config,"impostor_debug",false);debug_no_fog_=configured_boolean(config,"debug_no_fog",false);terrain_relief_derivfree_=configured_boolean(config,"terrain_relief_derivfree",true);fur_debug_=std::clamp(configured_integer(config,"fur_debug",0),0,4);impostor_atlas_dump();native_impostor_frames_=configured_boolean(config,"impostor_debug_frames",false);native_impostor_raw_=configured_boolean(config,"impostor_debug_raw",false);native_temp_far_px_=float(configured_integer(config,"impostor_far_pixels",160))/impostor_distance_scale(config);native_temp_far_m_=float(configured_integer(config,"impostor_far_distance",150))*impostor_distance_scale(config);
   // rt_sun_shadows: the traced mask takes the sun shadow of every prepassed
   // receiver, so the sun maps only serve what is left (blended surfaces,
   // fog shafts, grass and fur shading) and feed the scene's caster bakes:
@@ -1289,7 +1323,10 @@ void Renderer::begin_scene_renderer(){
   // grass casts through its own layer of it (rt_sun_cover_shadows with
   // ground_cover_shadows 2): blade shadows need the texels of the chosen quality.
   const bool traced_cover=traced_sun&&configured_boolean(config,"rt_sun_cover_shadows",true)&&configured_integer(config,"ground_cover_shadows",1)>=2;
-  const UINT shadow_side=(traced_sun&&!traced_cover?1024u:1024u<<configured_integer(config,"shadow_cascade_quality",1))>>vram_shadow_shift();
+  // The VRAM budget halves only maps above 1024: the sun coverage refuses a
+  // smaller one (build_retained_directional_coverage), and a refused coverage
+  // left no world at all (#287: traced sun 1024 -> 512 at budget level 2).
+  const UINT shadow_side=(std::max)(1024u,(traced_sun&&!traced_cover?1024u:1024u<<configured_integer(config,"shadow_cascade_quality",1))>>vram_shadow_shift());
   const UINT point_side=(128u<<configured_integer(config,"point_shadow_quality",2))>>vram_shadow_shift();
   const auto close_cascades=static_cast<std::uint8_t>(traced_sun?1:configured_integer(config,"shadow_close_cascades",3));
   const bool far_shadows=configured_boolean(config,"shadow_far",true);
@@ -1346,14 +1383,15 @@ void Renderer::begin_scene_renderer(){
  // The last authoritative list/publication survives a skipped world pass.
  point_pass_seen_=point_publication_seen_=false;shadow_renderer_seen_.fill(false);
  const auto epoch=bridge_current_world_epoch();
- if(point_shadow_epoch_!=epoch){report_shadow_diagnostics("world_change");point_shadow_epoch_=epoch;point_shadows_cumulative_={};
+ if(point_shadow_epoch_!=epoch){point_shadow_epoch_=epoch;point_shadows_cumulative_={};
   point_pass_skipped_frames_=point_publication_missing_frames_=0;
   shadow_renderer_cumulative_={};shadow_renderer_cumulative_.epoch=epoch;}
  const auto& config=debug_overlay_.config();
  combat_ui_set_options(config);
  const bool shadows=configured_boolean(config,"shadows",true);
- // The VRAM budget may halve both map sizes (renderer_vram_budget.cpp).
- const UINT shadow_side=(1024u<<configured_integer(config,"shadow_cascade_quality",1))>>vram_shadow_shift();
+ // The VRAM budget may halve both map sizes (renderer_vram_budget.cpp); a
+ // sun map never below 1024, the smallest the sun coverage accepts (#287).
+ const UINT shadow_side=(std::max)(1024u,(1024u<<configured_integer(config,"shadow_cascade_quality",1))>>vram_shadow_shift());
  const UINT point_side=(128u<<configured_integer(config,"point_shadow_quality",2))>>vram_shadow_shift();
  const auto close_cascades=static_cast<std::uint8_t>(configured_integer(config,"shadow_close_cascades",3));
  const bool far_shadows=configured_boolean(config,"shadow_far",true);
@@ -1383,8 +1421,8 @@ void Renderer::begin_scene_renderer(){
  }
  native_draw_distance_=float(configured_integer(config,"draw_distance",300));
  native_lod_error_px_=configured_boolean(config,"lod",true)?configured_floating_point(config,"lod_pixel_error",1.f):0.f;
- native_impostor_pixels_=configured_boolean(config,"impostors",true)&&!impostors_.failed?configured_floating_point(config,"impostor_pixels",64.f):0.f;
- native_impostor_debug_=configured_boolean(config,"impostor_debug",false);debug_no_fog_=configured_boolean(config,"debug_no_fog",false);terrain_relief_derivfree_=configured_boolean(config,"terrain_relief_derivfree",true);fur_debug_=std::clamp(configured_integer(config,"fur_debug",0),0,4);impostor_atlas_dump();native_impostor_frames_=configured_boolean(config,"impostor_debug_frames",false);native_impostor_raw_=configured_boolean(config,"impostor_debug_raw",false);native_temp_far_px_=float(configured_integer(config,"impostor_far_pixels",160));native_temp_far_m_=float(configured_integer(config,"impostor_far_distance",150));
+ native_impostor_pixels_=configured_boolean(config,"impostors",true)&&!impostors_.failed?configured_floating_point(config,"impostor_pixels",64.f)/impostor_distance_scale(config):0.f;
+ native_impostor_debug_=configured_boolean(config,"impostor_debug",false);debug_no_fog_=configured_boolean(config,"debug_no_fog",false);terrain_relief_derivfree_=configured_boolean(config,"terrain_relief_derivfree",true);fur_debug_=std::clamp(configured_integer(config,"fur_debug",0),0,4);impostor_atlas_dump();native_impostor_frames_=configured_boolean(config,"impostor_debug_frames",false);native_impostor_raw_=configured_boolean(config,"impostor_debug_raw",false);native_temp_far_px_=float(configured_integer(config,"impostor_far_pixels",160))/impostor_distance_scale(config);native_temp_far_m_=float(configured_integer(config,"impostor_far_distance",150))*impostor_distance_scale(config);
 
  const bool changed=shadows!=native_shadows_enabled_||shadow_side!=native_shadow_side_||
   point_side!=native_point_shadow_side_||close_cascades!=native_close_shadow_cascades_||
@@ -1465,6 +1503,9 @@ void Renderer::hit_test_frame(bool begin){
 // named once and the mask capture is refused.
 void Renderer::hit_test_frame_apply(bool begin) noexcept{
  if(!begin)hit_test_failed_=false;
+ // #268: the global map screen makes its zone mask here (camp screens have
+ // no world camera either, so the camera alone does not name the map).
+ if(begin&&!hit_test_active_&&!world_map_open_reported_){world_map_open_reported_=true;report_world_map_previews();}
  if(d3d12_){
   // D3D12: the same frame into hit_test12_, which stands in for the world
   // target (every world pass binds world_d3d12_, bind_world_targets_d3d12
@@ -1692,10 +1733,91 @@ void Renderer::set_d3d12_runtime_notice(bool refused,const char* why){
  // One short sentence; host.log keeps the full reason. 0x887E0003
  // (D3D12_ERROR_INVALID_REDIST): the Agility SDK runtime beside the host is missing or does not match.
  const bool redist=why&&std::strstr(why,"887E0003")!=nullptr;
- d3d12_refused_notice_=std::string(refused?"EID3D11: Direct3D 12 could not start, the game uses Direct3D 11 (":
+ d3d12_refused_notice_=std::string(refused?"EID3D11: Direct3D 12 could not start and was turned off, the game uses Direct3D 11 (":
   "EID3D11: Direct3D 12 is using Windows' own runtime (")+
   (redist?"D3D12\\D3D12Core.dll missing or mismatched":"see host.log")+")";
  d3d12_refused_notice_until_=0;
+}
+
+// #325: settings changed in play are drawn once their D3D12 pipelines are
+// built on the workers; until then the world keeps the previous look (never
+// an omitted object, never a synchronous compile in a frame).
+void Renderer::pipeline_gate_in() noexcept try{
+ if(!d3d12_)return;
+ RendererConfig& config=debug_overlay_.config();
+ std::size_t done=0,total=0;
+ bool building=d3d12_->pipelines_building(done,total);
+ if(!building)pipeline_in_flight_=0;
+ if(config.revision()!=pipeline_seen_revision_){
+  pipeline_seen_revision_=config.revision();
+  const std::uint64_t wanted=d3d12_features_for_settings(config,!d3d12_->raytracing_unavailable());
+  // Features never requested: their pipelines go to the workers now.
+  if(const std::uint64_t needed=wanted&~d3d12_pipeline_features_){
+   if(!pipeline_in_flight_)pipeline_pending_base_=total;
+   // First run (its graphics check times menu frames and may raise the
+   // preset to its ceiling): only the new features' menu pipelines now; the
+   // rest goes to the first world load with the preset the check keeps.
+   const bool menu_only=pipeline_rest_pending_||first_run_settings_due(config.first_run_done(),renderer_developer_mode());
+   if(menu_only)pipeline_rest_pending_=true;
+   const std::uint32_t added=d3d12_->request_pipelines(wanted|d3d12_pipeline_features_,menu_only);
+   d3d12_pipeline_features_|=wanted;
+   if(added){
+    pipeline_in_flight_|=needed;building=true;
+    // In the F10 settings window the preview switches near instantly (user,
+    // 2026-11-21: a hitch on an option change is fine there): the next
+    // present waits for them, with this frame's notice on screen.
+    pipeline_wait_frame_=debug_overlay_.captures_input();
+   }
+  }
+  // The settings now chosen wait only for their own features still building.
+  // Another level needing further pipelines joins the same wait (the previous
+  // look stays until every one is built); changed back to settings that need
+  // nothing outstanding, they apply at once and what the workers already
+  // have finishes there, ready for the next time.
+  const bool waiting=(wanted&pipeline_in_flight_)!=0;
+  if(waiting&&!pipeline_pending_&&!pipeline_applied_config_.options().empty()){ // nothing applied yet: nothing to hold
+   pipeline_pending_=true;pipeline_held_config_=pipeline_applied_config_;
+   char text[96];std::snprintf(text,sizeof(text),"features=0x%llx",static_cast<unsigned long long>(wanted&pipeline_in_flight_));
+   bridge_report_event("settings_pipelines_pending",text);
+  }else if(!waiting&&pipeline_pending_){
+   pipeline_pending_=false;pipeline_notice_.clear();pipeline_held_config_=RendererConfig{};
+   bridge_report_event("settings_pipelines_pending","released: the settings changed to ones that need nothing still building");
+  }
+  if(!pipeline_pending_)pipeline_applied_config_=config;
+ }
+ if(!pipeline_pending_)return;
+ // The F10 wait (above): at most kWaitMs of the workers building while the
+ // last frame (previous look, notice) stays on screen; a library hit takes
+ // milliseconds. Past it the previous look holds, as for any other change.
+ // Never outside the settings window (first-run preset, hotkeys, harness).
+ if(pipeline_wait_frame_){
+  pipeline_wait_frame_=false;
+  if(building&&debug_overlay_.captures_input()){
+   constexpr ULONGLONG kWaitMs=2000;
+   const ULONGLONG begin=GetTickCount64();
+   while((building=d3d12_->pipelines_building(done,total))&&GetTickCount64()-begin<kWaitMs)Sleep(1);
+   char text[96];std::snprintf(text,sizeof(text),"waited_ms=%llu %s",static_cast<unsigned long long>(GetTickCount64()-begin),
+    building?"still building: previous look held":"ready");
+   bridge_report_event("settings_pipelines_wait",text);
+  }
+ }
+ if(!building){
+  pipeline_pending_=false;pipeline_notice_.clear();
+  pipeline_applied_config_=config;pipeline_held_config_=RendererConfig{};
+  char text[64];std::snprintf(text,sizeof(text),"pipelines=%zu",total>pipeline_pending_base_?total-pipeline_pending_base_:0);
+  bridge_report_event("settings_pipelines_ready",text);
+  d3d12_->save_library_soon();
+  return;
+ }
+ const std::size_t batch=total>pipeline_pending_base_?total-pipeline_pending_base_:0,outstanding=total>done?total-done:0;
+ char text[128];std::snprintf(text,sizeof(text),ui_text("Preparing graphics: %zu / %zu"),batch>outstanding?batch-outstanding:0,batch);
+ pipeline_notice_=text;
+ std::swap(config,pipeline_held_config_);pipeline_config_swapped_=true;
+}catch(...){}
+
+void Renderer::pipeline_gate_out() noexcept{
+ if(!pipeline_config_swapped_)return;
+ std::swap(debug_overlay_.config(),pipeline_held_config_);pipeline_config_swapped_=false;
 }
 
 void Renderer::update_status_notice(const char* reset_notice){
@@ -1716,10 +1838,60 @@ void Renderer::update_status_notice(const char* reset_notice){
   !bridge_game_sites_all_verified()?"EID3D11: some game.exe sites differ - those features are off (see bridge.jsonl)":
   bridge_addon_notice()?bridge_addon_notice():reset_notice?reset_notice:camp_inventory_notice()?camp_inventory_notice():
   widescreen::notice?widescreen::notice:bridge_save_id_clash_notice()?bridge_save_id_clash_notice():
-  material_notice_.empty()?nullptr:material_notice_.c_str());
+  !material_notice_.empty()?material_notice_.c_str():
+  !pipeline_notice_.empty()?pipeline_notice_.c_str():
+  omitted_world_notice_.empty()?nullptr:omitted_world_notice_.c_str());
+ if(!omitted_world_notice_.empty()&&GetTickCount64()>omitted_world_notice_until_)omitted_world_notice_.clear();
+}
+
+// D3D12 (#302): a world object the owned frame does not hold reaches the
+// backend as per-figure packets, which it omits (no vanilla fallback). Each
+// object is named once per world epoch in host.log; developers (and harness
+// runs) see a 20 s notice. Players see nothing: the object is simply absent.
+void Renderer::note_omitted_world_object(std::int32_t id,const char* kind){
+ const std::uint64_t epoch=bridge_current_world_epoch();
+ if(epoch!=omitted_world_objects_epoch_){omitted_world_objects_epoch_=epoch;omitted_world_objects_.clear();}
+ if(std::find(omitted_world_objects_.begin(),omitted_world_objects_.end(),id)!=omitted_world_objects_.end())return;
+ if(omitted_world_objects_.size()>=256)return;
+ omitted_world_objects_.push_back(id);
+ char detail[192];
+ std::snprintf(detail,sizeof(detail),"world_epoch=%llu id=%d kind=%s (D3D12 omits it; bridge.jsonl owned_object_per_figure names why)",
+  static_cast<unsigned long long>(epoch),static_cast<int>(id),kind?kind:"?");
+ bridge_report_event("world_object_omitted",detail);
+ static const bool developer=renderer_developer_mode();
+ if(!developer)return;
+ char text[160];
+ std::snprintf(text,sizeof(text),"EID3D11: %u world object%s not drawn (D3D12) - see host.log",
+  static_cast<unsigned>(omitted_world_objects_.size()),omitted_world_objects_.size()==1?"":"s");
+ omitted_world_notice_=text;omitted_world_notice_until_=GetTickCount64()+20000;
 #else
  debug_overlay_.set_status_notice(reset_notice?reset_notice:camp_inventory_notice()?camp_inventory_notice():
-  material_notice_.empty()?nullptr:material_notice_.c_str());
+  !material_notice_.empty()?material_notice_.c_str():
+  !pipeline_notice_.empty()?pipeline_notice_.c_str():
+  omitted_world_notice_.empty()?nullptr:omitted_world_notice_.c_str());
+ if(!omitted_world_notice_.empty()&&GetTickCount64()>omitted_world_notice_until_)omitted_world_notice_.clear();
+}
+
+// D3D12 (#302): a world object the owned frame does not hold reaches the
+// backend as per-figure packets, which it omits (no vanilla fallback). Each
+// object is named once per world epoch in host.log; developers (and harness
+// runs) see a 20 s notice. Players see nothing: the object is simply absent.
+void Renderer::note_omitted_world_object(std::int32_t id,const char* kind){
+ const std::uint64_t epoch=bridge_current_world_epoch();
+ if(epoch!=omitted_world_objects_epoch_){omitted_world_objects_epoch_=epoch;omitted_world_objects_.clear();}
+ if(std::find(omitted_world_objects_.begin(),omitted_world_objects_.end(),id)!=omitted_world_objects_.end())return;
+ if(omitted_world_objects_.size()>=256)return;
+ omitted_world_objects_.push_back(id);
+ char detail[192];
+ std::snprintf(detail,sizeof(detail),"world_epoch=%llu id=%d kind=%s (D3D12 omits it; bridge.jsonl owned_object_per_figure names why)",
+  static_cast<unsigned long long>(epoch),static_cast<int>(id),kind?kind:"?");
+ bridge_report_event("world_object_omitted",detail);
+ static const bool developer=renderer_developer_mode();
+ if(!developer)return;
+ char text[160];
+ std::snprintf(text,sizeof(text),"EID3D11: %u world object%s not drawn (D3D12) - see host.log",
+  static_cast<unsigned>(omitted_world_objects_.size()),omitted_world_objects_.size()==1?"":"s");
+ omitted_world_notice_=text;omitted_world_notice_until_=GetTickCount64()+20000;
 #endif
 }
 
@@ -1747,6 +1919,13 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
   if(std::isfinite(sample)&&sample>0.0&&sample<10000.0){present_interval_ms_=sample;present_smoothed_ms_=present_smoothed_ms_>0.0?present_smoothed_ms_*0.9+sample*0.1:sample;}
  }
  last_present_tick_=present_tick;
+ // Until the first world that is not the main menu, the pipelines first
+ // used are tagged as the menu's (#325; loading screens included).
+ if(pipeline_menu_phase_){
+  std::string map=retained_static_scene_identity_snapshot().main_outer_resource;
+  for(char& c:map)if(c>='A'&&c<='Z')c=static_cast<char>(c-'A'+'a');
+  if(!map.empty()&&map.find("mainmenu")==std::string::npos){pipeline_menu_phase_=false;d3d12_->set_menu_scene(false);}
+ }
  // The profiler's frame and passes, named as on D3D11 so captures line up.
  const bool overlay_profile=capture_profiling_wanted();profiler_.set_enabled(overlay_profile||profiler_.gpu_journal_enabled(),capture_statistics_wanted());
  bridge_set_profile_enabled(overlay_profile||placed_hitch_profile_.active());
@@ -1899,10 +2078,12 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  const char* reset_notice=nullptr;
  if(debug_overlay_.graphics_reset_notice_pending()){AmbientWorldSource world;
   reset_notice=debug_overlay_.graphics_reset_notice(bridge_ambient_world_source(world)&&world.terrain);}
+ pipeline_gate_out(); // #325: the overlay and the ini see the new settings
  update_status_notice(reset_notice);
  OverlayDrawPacket overlayPacket;
  const bool overlay_visible=debug_overlay_.initialized()&&debug_overlay_.visible();
- const bool telemetry_wanted=debug_overlay_.initialized()&&debug_overlay_.mode()!=DebugOverlayMode::hidden;
+ // The settings window's video memory line reads the telemetry too (players open it without F10's overlay).
+ const bool telemetry_wanted=debug_overlay_.initialized()&&(debug_overlay_.mode()!=DebugOverlayMode::hidden||debug_overlay_.settings_open());
  if(telemetry_wanted!=system_telemetry_active_){system_telemetry_.set_active(telemetry_wanted);system_telemetry_active_=telemetry_wanted;}
  system_telemetry_.try_get_snapshot(system_telemetry_snapshot_);
  const auto debug_view_availability=debug_resource_view_availability();
@@ -1916,9 +2097,10 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  if(debug_overlay_.initialized()&&debug_overlay_pass_needed(overlay_visible||combat_ui_has_output(),
     debug_overlay_.has_status_notice()||debug_overlay_.has_harness_banner()||widescreen_hud_hovered(HudPanel::game_speed),!critters_summary_.labels.empty()||native_impostor_debug_)){
   if(!hudPending)transition_profile_pass("debug_overlay");
-  RendererResourceSnapshot presented{};presented.present_interval_ms=present_interval_ms_;presented.present_smoothed_ms=present_smoothed_ms_;
+  RendererResourceSnapshot presented{};fill_live_statistics(presented); // FPS, VRAM, VRAM budget: already-sampled values, no resource walk
   presented.fg_presented_fps=frame_generation_mode_?fg_presented_fps_:0.0;presented.fg_real_fps=frame_generation_mode_?fg_real_fps_:0.0;
   presented.fg_mode=frame_generation_mode_;
+  {std::size_t done=0,total=0;presented.graphics_preparing=d3d12_->pipelines_building(done,total);}
   impostor_debug_labels(presented.impostor_labels);
   presented.fg_auto_off_fps=frame_generation_mode_&&fg_low_rate_?std::max(1,configured_integer(debug_overlay_.config(),"frame_generation_min_fps",30)):0;
   debug_overlay_.render(profiler_.latest_snapshot(),bridge_latest_profile(),presented,
@@ -1963,6 +2145,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
   else harness_complete(ok,detail+" (after the overlay: critter labels on)");
   harness_stage_=0;harness_wait_=0;harness_overlay_shot_.clear();
  }
+ finish_harness_world_shot(inputs);
  // Capture and outer-frame recording use the same lifecycle on both backends.
  const bool f11_capture=debug_overlay_.consume_capture_request()||take_core_capture();
  bool recorder_armed_this_present=false;
@@ -2148,6 +2331,7 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
   d3d12_->clear_slots();
   const frame_acct::Scope scope(frame_acct::pf_trim);
   trim_hr=trim_native_mesh_cache();
+  d3d12_->marker("tail_after_trim"); // #344: the rest of the record and the host until the next frame
   if(FAILED(trim_hr))bridge_report_event("present_step_failed","step=trim_native_mesh_cache (D3D12)");
  }
  const std::int64_t trim_end=trim_begin?perf_now():0;
@@ -2168,6 +2352,9 @@ HRESULT Renderer::present_frame_d3d12(const ScenePresentInputs* inputs){
  native_frame_stats_={};++presentation_frame_index_;
  frame_acct::g_presentation_frame.store(presentation_frame_index_,std::memory_order_relaxed);
  // Render scale and upscaler option changes take effect between frames (apply_render_scale).
+ // #325: from here to the next overlay, a settings change whose pipelines
+ // are still building is drawn with the previous settings (upscaler mode too).
+ pipeline_gate_in();
  apply_upscaler_mode_d3d12();
  finish_harness_path_row(gameFrame,nullptr);
  pending_screen_rectangles_.clear();
@@ -2321,7 +2508,8 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
  update_status_notice(reset_notice);
  const bool overlay_visible=debug_overlay_.initialized()&&debug_overlay_.visible();
  // Telemetry feeds the developer windows only.
- const bool telemetry_wanted=debug_overlay_.initialized()&&debug_overlay_.mode()!=DebugOverlayMode::hidden;
+ // The settings window's video memory line reads the telemetry too (players open it without F10's overlay).
+ const bool telemetry_wanted=debug_overlay_.initialized()&&(debug_overlay_.mode()!=DebugOverlayMode::hidden||debug_overlay_.settings_open());
  if(telemetry_wanted!=system_telemetry_active_){system_telemetry_.set_active(telemetry_wanted);system_telemetry_active_=telemetry_wanted;}
  system_telemetry_.try_get_snapshot(system_telemetry_snapshot_);
  const bool focused=window_in_front();
@@ -2345,7 +2533,8 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
   // The overlay (Dear ImGui) draws into the bound target: bind it here.
   bind_plan_targets(plan_pass("debug_overlay",rtv_.Get(),nullptr));
   // HUD borders use the owned UI pass without collecting developer diagnostics.
-  const auto overlay_resources=overlay_visible||capture_profiling_wanted()||!critters_summary_.labels.empty()||native_impostor_debug_?resource_snapshot():RendererResourceSnapshot{};
+  auto overlay_resources=overlay_visible||capture_profiling_wanted()||!critters_summary_.labels.empty()||native_impostor_debug_?resource_snapshot():RendererResourceSnapshot{};
+  overlay_resources.graphics_preparing=!native_specialisation_settled();
   debug_overlay_.render(profiler_.latest_snapshot(),bridge_latest_profile(),overlay_resources,
                         debug_view_availability,&profiler_,shadows);
  }
@@ -2369,6 +2558,7 @@ HRESULT Renderer::present_frame(const ScenePresentInputs* inputs){
    harness_complete(ok,detail+" (after the overlay: critter labels on)");
   harness_stage_=0;harness_wait_=0;harness_overlay_shot_.clear();
  }
+ finish_harness_world_shot(inputs);
   ComPtr<ID3D11Texture2D> profiledBack;if(profiler_.capture_active())swap_->GetBuffer(0,IID_PPV_ARGS(&profiledBack));profiler_.end_pass(profiledBack.Get());
   // The call always consumes the camp scroll cost; the snapshot is read only while attribution is on.
   profiler_.record_attribution_workload(bridge_latest_profile(),profiler_.attribution_enabled()?resource_snapshot():RendererResourceSnapshot{});

@@ -125,6 +125,11 @@ struct RendererResourceSnapshot {
     // renderer_backend=d3d12: surface GPU homes are D3D12 textures that the
     // surface accounting (D3D11 texture bytes) does not count.
     bool d3d12_backend = false;
+    // Shaders or pipelines for the current settings are still being prepared
+    // (D3D12: pipelines building; D3D11: the specialisation key's set not
+    // resident, or a shader group preparing). Filled by the load-speed work
+    // (#325); the graphics self-check (#326) does not measure while it is set.
+    bool graphics_preparing = false;
     // GPU-primary surfaces whose CPU bytes are dropped, and the counted
     // staging readbacks that restored them (cumulative since start).
     std::uint64_t released_surface_bytes = 0;
@@ -361,10 +366,14 @@ public:
     bool initialized() const noexcept;
 
     // Player Graphics Settings window (graphics_settings.h). Players toggle it
-    // with F10 and reach the developer modes with Shift+F10; in developer mode
+    // with F10 and cycle the developer modes with Shift+F10 (they start
+    // hidden unless [overlay] developer_views=true). In developer mode
     // (EI_RENDERER_DEVELOPER=1) F10 keeps the developer cycle and Shift+F10
     // toggles this window. Not persisted.
     bool settings_open() const noexcept;
+    // The F10 key (shift: Shift+F10); the harness presses it with
+    // config f10 plain|shift.
+    void press_f10(bool shift) noexcept;
     // Any ImGui window is drawn this frame (developer mode or settings).
     bool visible() const noexcept;
     // Full window or settings window: the overlay owns keyboard and mouse.
@@ -373,10 +382,20 @@ public:
     bool process_combat_input(UINT message, WPARAM wparam, LPARAM lparam) noexcept;
     bool hud_editing() const noexcept;
     float hud_grid_step() const noexcept;
-    // First-run setup is still owed: no [setup] first_run_done and not developer mode.
+    // First-run setup or the one-time introduction is still owed: no [setup]
+    // first_run_done or intro_shown, and not developer mode.
     bool first_run_pending() const noexcept;
-    // The renderer calls this once a world (the main menu) is on screen.
+    // The renderer calls this once a world (the main menu) is on screen: the
+    // introduction first when owed (#274), then the settings window.
     void open_first_run_settings() noexcept;
+    // Core mode, host: the game process loaded its options before the host
+    // knew the adapter, and its first config command replaces the suggestion
+    // that initialize applied. Re-applies it once per session while first-run
+    // setup is owed; true when that changed the options (the host saves, so
+    // the game process reloads them).
+    bool reapply_first_run_suggestion() noexcept;
+    // Test harness (config intro continue): the introduction's Continue.
+    bool continue_intro() noexcept;
     // A one-line notice drawn over every frame in every mode (null clears),
     // for a state the player must not mistake for normal rendering.
     void set_status_notice(const char* text) noexcept { notice_ = text; }

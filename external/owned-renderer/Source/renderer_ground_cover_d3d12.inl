@@ -7,7 +7,9 @@
 
 HRESULT Renderer::ensure_ground_cover_d3d12() {
     auto& g=gc12_;
-    if(g.programs.empty())append_ground_cover_shader_programs(g.programs);
+    // Each failure names its step (render_ground_cover_d3d12's omission).
+    gc12_unready_="ground cover pipeline/resources: program list";
+    if(g.programs.empty()){append_ground_cover_shader_programs(g.programs);++world_programs_generation_;}
     if(g.programs.size()!=gp_count)return E_FAIL;
     HRESULT hr=S_OK;
     const auto upload=[&](D3D12BufferRef& buffer,const void* data,UINT bytes,UINT stride,UINT flags=0)->HRESULT {
@@ -34,9 +36,10 @@ HRESULT Renderer::ensure_ground_cover_d3d12() {
             }
             // A hosted kind has no vertices of its own: twice its models' farthest
             // vertex (a rebound copy follows its host's complection).
-            if(hosted_mesh(m))radius=2*hosted_kind_radius(m-gm_first_hosted);
+            if(hosted_mesh(m))radius=2*hosted_mesh_radius(m);
             g.cull_mesh[m*2]=radius;g.cull_mesh[m*2+1]=bend;
         }
+        gc12_unready_="ground cover pipeline/resources: mesh buffers";
         if(FAILED(hr=upload(g.vertices,vertices.data(),UINT(vertices.size()*sizeof(GcVertex)),sizeof(GcVertex)))||
            FAILED(hr=upload(g.indices,indices.data(),UINT(indices.size()*4),0)))return hr;
         // The cave lichen colonies' art, with the meshes.
@@ -54,6 +57,7 @@ HRESULT Renderer::ensure_ground_cover_d3d12() {
         }
     }
     const auto& rules=rule_table();
+    gc12_unready_="ground cover pipeline/resources: rule buffer";
     if(FAILED(hr=upload(g.rules,rules.data(),UINT(sizeof(rules)),sizeof(GroundCoverRule))))return hr;
     if(!g.rule_class){
         g.classes={};for(auto& list:gc_class_rules_)list.clear();
@@ -62,7 +66,7 @@ HRESULT Renderer::ensure_ground_cover_d3d12() {
         for(UINT r=0;r<rules.size();++r){
             const unsigned needs=place_features(rules[r]);unsigned c=0;
             while(c<kPlaceClassCount&&(needs&~kPlaceClasses[c].features))++c;
-            if(c==kPlaceClassCount)return E_FAIL; // a rule no placement program serves
+            if(c==kPlaceClassCount){gc12_unready_="ground cover pipeline/resources: a rule no placement class serves";return E_FAIL;}
             auto& values=g.classes[c];values[4+values[0]++]=r;values[1]=c;
             gc_class_rules_[c].push_back(r);rule_class[r]=c;
             const unsigned bit=1u<<(UINT(rules[r].material)&15u);
@@ -70,12 +74,14 @@ HRESULT Renderer::ensure_ground_cover_d3d12() {
         }
         for(UINT m=0;m<gm_count;++m){
             unsigned kind=0;while(kind<kGcPixelKinds&&(materials[m]&~kPixelKindMaterials[kind]))++kind;
-            if(kind==kGcPixelKinds)return E_FAIL;
+            if(kind==kGcPixelKinds){gc12_unready_="ground cover pipeline/resources: a mesh no pixel kind serves";return E_FAIL;}
             gc_mesh_kind_[m]=std::uint8_t(hosted_mesh(m)?5u:kind); // hosted plants: plant cards, no rules
         }
+        gc12_unready_="ground cover pipeline/resources: rule class buffer";
         if(FAILED(hr=upload(g.rule_class,rule_class.data(),UINT(rule_class.size()*4),4)))return hr;
     }
     constexpr UINT writable=kD3D12BufferUnordered,indirect=writable|kD3D12BufferIndirect;
+    gc12_unready_="ground cover pipeline/resources: count and argument buffers";
     // The counts and overflow buffers hold one region per map (render_ground_cover_d3d12).
     if(FAILED(hr=upload(g.cell_counts,nullptr,kPlaceClassCount*4+8,0,writable))||
        FAILED(hr=upload(g.rounds,nullptr,kPlaceClassCount*kGcMaxRounds*16,0,indirect))||
@@ -93,7 +99,7 @@ HRESULT Renderer::ensure_ground_cover_d3d12() {
 HRESULT Renderer::build_ground_cover_map_d3d12(GcMapD3D12& map,UINT tx,UINT ty,UINT color_texels,
     const std::vector<std::uint8_t>& area,const std::vector<float>& height,const std::vector<float>& ground,
     const std::vector<std::uint16_t>& types,const std::vector<std::uint8_t>& base_types,const std::vector<GcTileGpu>& tiles,
-    const std::vector<std::uint8_t>& used,const std::vector<std::array<std::uint8_t,4>>& trees) {
+    const std::vector<std::uint8_t>& used,const std::vector<std::array<std::uint8_t,4>>& trees,bool takes_sea) {
     const std::size_t t=std::size_t(tx)*ty,v=std::size_t(tx*2+1)*(ty*2+1);
     if(!t||area.size()!=t||types.size()!=t||base_types.size()!=t||trees.size()!=t||height.size()!=v||ground.size()!=v||tiles.empty())
         return E_INVALIDARG;
@@ -102,7 +108,7 @@ HRESULT Renderer::build_ground_cover_map_d3d12(GcMapD3D12& map,UINT tx,UINT ty,U
         HRESULT result=d3d12_->create_texture(w,h,format,out);
         return FAILED(result)?result:d3d12_->write_texture(*out,RECT{0,0,LONG(w),LONG(h)},data,pitch);
     };
-    const auto sea=ground_cover_sea_mask(area,tx,ty);
+    const auto sea=takes_sea?ground_cover_sea_mask(area,tx,ty):std::vector<std::uint8_t>(t,0); // make_sea_srv: lake maps have none
     map.width=tx;map.height_tiles=ty;map.color_texels=color_texels;map.paint=used;
     HRESULT hr=S_OK;
     if(FAILED(hr=texture(map.area,tx,ty,DXGI_FORMAT_R8_UINT,area.data(),tx))||
@@ -211,7 +217,7 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
     };
     HRESULT hr=bind_world_d3d12();if(FAILED(hr))return hr;
     transition_profile_pass("ground_cover");
-    if((hr=ensure_ground_cover_d3d12())!=S_OK)return fail("ground cover pipeline/resources",hr);
+    if((hr=ensure_ground_cover_d3d12())!=S_OK)return fail(gc12_unready_,hr);
     AmbientWorldSource inputs;
     if(!bridge_ambient_world_source(inputs)||!inputs.terrain||!inputs.map)return fail("ground cover terrain source",S_FALSE);
     const auto environment=bridge_world_fog_snapshot().environment;
@@ -247,7 +253,8 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
             std::vector<std::uint16_t>(base.begin(),base.end());
         if(types.size()!=std::size_t(tx)*ty||ambient_liquid_level_.ground.size()!=std::size_t(vx)*vy)return fail("ground cover grid dimensions",E_FAIL);
         GcMapD3D12 map;
-        if(FAILED(hr=build_ground_cover_map_d3d12(map,tx,ty,4,ambient_area_,ambient_height_,ambient_liquid_level_.ground,types,base,tiles,used,trees)))
+        if(FAILED(hr=build_ground_cover_map_d3d12(map,tx,ty,4,ambient_area_,ambient_height_,ambient_liquid_level_.ground,types,base,tiles,used,trees,
+           liquid_surf_map_takes_sea(ambient_map_name_,liquid_lake_maps()))))
             return fail("ground cover grid upload",hr);
         map.generation=ambient_map_generation_;
         // Atlas identity and format conversion follow the existing owned
@@ -297,6 +304,7 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
     struct MapPass {
         UINT region=0;GcMapD3D12* map=nullptr;const GcNeighbour* neighbour=nullptr;
         std::array<float,3> origin{};float lowest=0,highest=0,reach=0,density=1;
+        float large=0; // the large Suslanger plants' reach past the cover limit (gcFarThin.z), 0 none
         CellWindow window;std::array<UINT,kPlaceClassCount> bounds{};
     };
     const auto within_reach=[&](MapPass& m)->bool {
@@ -309,7 +317,15 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
             corner_reach=std::max(corner_reach,std::sqrt(dx*dx+dy*dy+dz*dz));
         }
         m.reach=std::min({visible_ground_reach(inverse,eye,low,high,INFINITY,INFINITY),corner_reach,cover_limit});
-        return neighbour_cover_window(eye,m.origin,m.reach,nx,ny,kCellSize,m.window);
+        // Large Suslanger plants (issue #265, user 2026-11-20): at Ultra on the
+        // active desert map they reach on to where the camera pass culls
+        // terrain and objects (full fog or the draw distance); only the clump
+        // driver walks the cells beyond (gcCellSlots), dithering out (gcBuildOf).
+        if(!m.neighbour&&level>=3&&m.map->masks_desert&&fog_cull_frame_+1>=native_frame_index_){
+            m.large=std::min({visible_ground_reach(inverse,eye,low,high,INFINITY,INFINITY),corner_reach,terrain_lod_hidden_distance_});
+            if(!(m.large>m.reach))m.large=0;
+        }
+        return neighbour_cover_window(eye,m.origin,std::max(m.reach,m.large),nx,ny,kCellSize,m.window);
     };
     std::vector<MapPass> maps;
     {
@@ -333,6 +349,15 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
     const UINT passes=UINT(1+gc_neighbours_.size());
     if(gc_capacity_.size()<passes){gc_capacity_.resize(passes);gc_base_.resize(passes);}
     if(level!=gc_level_){gc_level_=level;for(auto& capacity:gc_capacity_)capacity.fill(0);g.instances.reset();g.pool_capacity=0;g.readbacks={};g.read_head=g.read_pending=0;g.demand_state=0;}
+    // A new map: the neighbour regions belong to other maps now; they start
+    // over from the estimate and their own demand (#289: a region kept the
+    // previous map's neighbour's size).
+    if(gc_pool_map_!=ambient_map_generation_){
+        gc_pool_map_=ambient_map_generation_;
+        for(std::size_t p=1;p<gc_capacity_.size();++p)gc_capacity_[p].fill(0);
+        for(auto& idle:gc_region_idle_)idle.fill(0);
+        gc_grow_=true;
+    }
     // Hosted plants: this frame's host records; their meshes' pools hold every host.
     const bool hosted=gc_prepare_hosted();
     if(hosted&&gc_hosted_uploaded_!=gc_hosted_frame_.revision){
@@ -387,10 +412,25 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
         }
         {std::array<std::uint32_t,gm_count> active{};std::memcpy(active.data(),bytes.data(),gm_count*4);log_hosted_demand(active.data());}
         std::uint64_t total_demand=0;
+        // Grow at 70% of a region to one and a half times the demand. A
+        // region never shrinks because its demand fell: demand follows the
+        // view window, and a zoom in and out shrank the active map's region,
+        // then dropped every tuft past it until the next readback grew it
+        // again (the grass vanished and filled back in). The active map's
+        // regions keep their size until the map changes (gc_pool_map_). A
+        // neighbour's region goes back to its minimum only when that map
+        // has placed nothing for kGcIdleReads readbacks in a row (out of
+        // reach for about half a minute: #289, the pool no longer keeps the
+        // regions of maps the camera left).
+        constexpr std::uint16_t kGcIdleReads=1800;
+        if(gc_region_idle_.size()<passes)gc_region_idle_.resize(passes);
         for(UINT p=0;p<passes;++p)for(UINT m=0;m<gm_count;++m){
             UINT demand;std::memcpy(&demand,bytes.data()+(p*gm_count+m)*4,4);auto& capacity=gc_capacity_[p][m];
             total_demand+=demand;
             if(demand>capacity-capacity*3/10){capacity=demand+demand/2+64;gc_grow_=true;}
+            auto& idle=gc_region_idle_[p][m];
+            if(demand||!p){idle=0;continue;}
+            if(idle<kGcIdleReads&&++idle==kGcIdleReads&&capacity>1024){capacity=64;gc_grow_=true;}
         }
         // Demand is GPU placement output, not a count of submitted indirect draws.
         // Log transitions and one reminder per 600 frames, bounded per renderer.
@@ -404,17 +444,24 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
         g.read_head=(g.read_head+1)%UINT(g.readbacks.size());--g.read_pending;
     }
     if(!g.instances||gc_grow_){
+        // The first size of the active map's regions: 5% of the rule's disc
+        // (#289: 30% made 1.46M slots, 178 MiB, against a measured demand of
+        // 0.2-0.3M for every region together, and each neighbour region
+        // starts from it); the demand readbacks grow it within a few frames,
+        // under the load hold.
         if(!g.instances)for(const auto& rule:rule_table()){
             const float band=.5f*(rule.lod_near+rule.lod_far)*quality.distance;
-            gc_capacity_[0][rule.mesh]=std::max(gc_capacity_[0][rule.mesh],UINT(rule.density*quality.density*3.14159f*band*band*.3f)+64);
+            gc_capacity_[0][rule.mesh]=std::max(gc_capacity_[0][rule.mesh],UINT(rule_mean_density(rule)*quality.density*3.14159f*band*band*.05f)+64);
         }
-        // A neighbour region without a size yet starts from the active map's
-        // (its tufts go to the far meshes, so a far mesh takes its near mesh's
-        // share too); its own demand corrects it within a few frames.
+        // A neighbour region without a size yet starts from half the active
+        // map's (its tufts go to the far meshes, so a far mesh takes its near
+        // mesh's share too; only its fog window places, #289: a full share
+        // per neighbour made the switch peak); its own demand corrects it
+        // within a few frames, while the load is held.
         for(UINT p=1;p<passes;++p)for(UINT m=0;m<gm_count;++m){
             if(gc_capacity_[p][m]||(kGcKeptByNeighbours>>m)&1u)continue;
             const UINT near_mesh=gc_shadow_near_mesh(m);
-            gc_capacity_[p][m]=gc_capacity_[0][m]+(near_mesh!=m?gc_capacity_[0][near_mesh]:0)+64;
+            gc_capacity_[p][m]=(gc_capacity_[0][m]+(near_mesh!=m?gc_capacity_[0][near_mesh]:0))/2+64;
         }
         UINT total=0;
         for(UINT p=0;p<passes;++p){
@@ -424,8 +471,27 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
             if(pass_total>kGcStageLimit)return fail("ground cover pool exceeds one dispatch",E_INVALIDARG);
             total+=pass_total;
         }
-        if(!g.instances||total>g.pool_capacity){
-            const UINT capacity=total+total/4;
+        // Each region already holds one and a half times its demand. The pool
+        // is generous (user 2026-11-22: tens of MiB do not matter, the cuts
+        // were gigabytes): it doubles the sum, in steps of 64K slots, when the
+        // sum outgrows it, and never shrinks while the map stays; a new map
+        // sizes it again (down too, when it holds over twice the sum). Sized
+        // to the exact sum, every region growth remade all five buffers
+        // (~100 MiB): zooming out and panning grew the neighbour regions a
+        // little at a time, 12-17 reallocations a second, each a hitch (#344).
+        // One line a reallocation: 128 bytes a slot (instance, shade, draw,
+        // casters, visible).
+        constexpr UINT kPoolStep=65536;
+        const UINT capacity=UINT((std::max)(UINT64(total),(std::min)((UINT64(total)*2+kPoolStep-1)/kPoolStep*kPoolStep,UINT64(UINT_MAX/128))));
+        if(!g.instances||total>g.pool_capacity||(g.pool_map!=ambient_map_generation_&&total*2<g.pool_capacity&&capacity<g.pool_capacity)){
+            if(renderer_developer_mode()){
+            char detail[192];
+            UINT active=0;for(UINT m=0;m<gm_count;++m)active+=gc_capacity_[0][m];
+            std::snprintf(detail,sizeof(detail),"%u -> %u slots for %u in regions (%.0f -> %.0f MiB), %u regions, map %llu; active map's region %u slots (%.1f MiB)",
+                g.pool_capacity,capacity,total,g.pool_capacity*128.0/1048576.0,capacity*128.0/1048576.0,passes,
+                static_cast<unsigned long long>(ambient_map_generation_),active,active*128.0/1048576.0);
+            bridge_append_probe_event("ground_cover_pool",detail);
+            }
             D3D12BufferRef instances,shade,draw,casters,visible;
             // Sun caster lists (gcCasterListCS): 4 bytes per pool slot and close map.
             // Visible draw lists (gcCullCS): 4 bytes per pool slot.
@@ -435,7 +501,7 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
                FAILED(hr=d3d12_->create_buffer(UINT64(capacity)*12,4,kD3D12BufferUnordered,casters))||
                FAILED(hr=d3d12_->create_buffer(UINT64(capacity)*4,4,kD3D12BufferUnordered,visible)))return fail("ground cover pool allocation",hr);
             g.instances=std::move(instances);g.shade=std::move(shade);g.draw_inputs=std::move(draw);g.caster_slots=std::move(casters);
-            g.visible=std::move(visible);g.pool_capacity=capacity;++g.pool_generation;
+            g.visible=std::move(visible);g.pool_capacity=capacity;g.pool_map=ambient_map_generation_;++g.pool_generation;
         }
         gc_grow_=false;
     }
@@ -481,12 +547,13 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
     }
     c.wind2[3]=gc_motion_clock_[0];
     c.switches[0]=temporal_upscaler()?dlss_jitter_[0]+.5f:0.f; // gcCoverClip's dither frame offset (as nativeLodDiscard)
-    c.switches[1]=frame.render[D3DRENDERSTATE_FOGENABLE]?1.f:0.f;c.switches[2]=desert_clump_map(ambient_map_name_)?1.f:0.f;c.switches[3]=float([&]{UINT art=(g.map.bark?1u:0u)|(g.map.stone?2u:0u);for(UINT k=0;k<4;++k)if(g.map.plant[k])art|=4u<<k;return art;}());
+    c.switches[1]=frame.render[D3DRENDERSTATE_FOGENABLE]?1.f:0.f;c.switches[2]=desert_clump_presence(ambient_map_name_);c.switches[3]=float([&]{UINT art=(g.map.bark?1u:0u)|(g.map.stone?2u:0u);for(UINT k=0;k<4;++k)if(g.map.plant[k])art|=4u<<k;return art;}());
     c.view[1]=c.view[2]=kCellSize/float(kTrailTexelsPerCell);
     c.snow_step[3]=snow_cover_;
     const auto& fog=ambient_terrain_state_;
     c.fog_range[0]=fog.fog_min[0];c.fog_range[1]=fog.fog_min[1];c.fog_range[2]=fog.fog_max[0];c.fog_range[3]=fog.fog_max[1];
     c.fog_control[0]=fog.fog_distance;c.fog_control[1]=fog.fog_enabled?1.f:0.f;
+    hosted_plant_constants(c.fog_control); // hosted plants' end and LOD limit (as D3D11)
     neighbour_fog_constants(neighbour_fog_,c.fog_seam,c.fog_curve,c.fog_span_lo,c.fog_span_hi);
     neighbour_fog_piece_constants(neighbour_fog_,c.fog_piece_info,c.fog_pieces);
     c.fog_color[0]=((ambient_fog_color_>>16)&255)/255.f;c.fog_color[1]=((ambient_fog_color_>>8)&255)/255.f;c.fog_color[2]=(ambient_fog_color_&255)/255.f;
@@ -652,13 +719,10 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
     }
     // Each map's per-cell rule masks bound its candidates per class; the
     // stage and cell buffers hold the largest map's round.
-    UINT max_cell=gc_cell_slot_bound(quality.density,false);
-    for(const auto& m:maps)if(desert_clump_map(m.neighbour?m.neighbour->name:ambient_map_name_))
-        max_cell=std::max(max_cell,gc_cell_slot_bound(quality.density,true));
+    const UINT max_cell=gc_cell_slot_bound(quality.density);
     UINT required=0,cells_needed=0;
     for(auto& m:maps){
         auto& map=*m.map;const UINT cells_x=(map.width+1)/2,cells_y=(map.height_tiles+1)/2;
-        const bool desert_clumps=desert_clump_map(m.neighbour?m.neighbour->name:ambient_map_name_);
         // Terrain 2.0 adds the classes its field reaches per tile (bits 24-31),
         // the active map only (as on D3D11).
         const bool t2_tiles=!m.neighbour&&configured_terrain_blend(debug_overlay_.config())&&gc_t2_tile_classes_.size()==map.tile_classes.size();
@@ -667,13 +731,13 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
             if(t2_tiles){
                 std::vector<std::uint32_t> classes(map.tile_classes);
                 for(std::size_t t=0;t<classes.size();++t)classes[t]|=std::uint32_t(gc_t2_tile_classes_[t])<<24;
-                map.cell_masks=gc_cell_rule_masks(classes,map.width,map.height_tiles,zones,m.origin.data(),desert_clumps);
-            }else map.cell_masks=gc_cell_rule_masks(map.tile_classes,map.width,map.height_tiles,zones,m.origin.data(),desert_clumps);
+                map.cell_masks=gc_cell_rule_masks(classes,map.width,map.height_tiles,zones,m.origin.data());
+            }else map.cell_masks=gc_cell_rule_masks(map.tile_classes,map.width,map.height_tiles,zones,m.origin.data());
             if(FAILED(hr=texture(map.masks,cells_x,cells_y,kGcRuleMaskFormat,map.cell_masks.data(),UINT(cells_x*sizeof(GcRuleMask)))))return fail("ground cover cell masks",hr);
-            map.masks_key=masks_key;
+            map.masks_key=masks_key;map.masks_desert=gc_masks_hold_desert(map.cell_masks);
         }
         m.bounds=gc_window_bounds(map.cell_masks,cells_x,eye,m.window.x0,m.window.y0,m.window.x1,m.window.y1,m.lowest,m.highest,c.planes,
-            m.origin.data(),quality.density*m.density,quality.distance,gc_class_rules_,desert_clumps);
+            m.origin.data(),quality.density*m.density,quality.distance,gc_class_rules_);
         const UINT most=*std::max_element(m.bounds.begin(),m.bounds.end());
         if(!most)continue;
         required=std::max(required,std::max(kGcRoundSlots,most/8+max_cell+1));
@@ -757,7 +821,6 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
         // This map's frame constants: its grids, origin (w 1: far meshes
         // only), window, density, zone, fog band and pool region.
         GroundCoverConstants mc=c;
-        mc.switches[2]=desert_clump_map(m.neighbour?m.neighbour->name:ambient_map_name_)?1.f:0.f;
         std::copy(gc_capacity_[p].begin(),gc_capacity_[p].end(),mc.capacity);std::copy(gc_base_[p].begin(),gc_base_[p].end(),mc.base);
         const ContactBlendMaps& contact=m.neighbour?m.neighbour->contact:contact_maps_;
         mc.snow_materials[0]=UINT(contact.ready);mc.snow_materials[1]=UINT(contact.ready>>32);
@@ -773,9 +836,10 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
         const D3D12Texture* const cover_classes=t2_cover?gc_t2_classes12_.get():nullptr;
         // Outdoor neighbours of the same allod: its region's zone, never a cave.
         mc.quality[3]=m.neighbour?float(ambient::classify_zone(m.neighbour->name.c_str(),false,environment.region)):float(ambient_zone_);
+        mc.switches[2]=desert_clump_presence(m.neighbour?m.neighbour->name:ambient_map_name_); // the clump bake's presence scale
         // A neighbour fogs by its piece's raw edges, as its terrain and decorations do.
         if(m.neighbour)std::memcpy(mc.fog_range,m.neighbour->fog_band.data(),sizeof(mc.fog_range));
-        mc.view[0]=m.reach;
+        mc.view[0]=m.reach;mc.far_thin[2]=m.large;
         const bool trails=!m.neighbour&&trail_active;
         if(!trails){mc.view[3]=0;std::memset(mc.trail_step,0,sizeof(mc.trail_step));}
         const bool snow_pressed=!m.neighbour&&snow_field; // no snow trails on neighbour maps
@@ -792,7 +856,7 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
             d3d12_->set_resource(43,map.type.get());d3d12_->set_resource(47,map.trees.get());d3d12_->set_resource(50,g.zones.get());
             d3d12_->set_resource(44,trails?g.trail[gc_trail_index_].get():nullptr);d3d12_->set_resource(48,m.neighbour?nullptr:g.object_mask.get());
             d3d12_->set_resource(51,snow_pressed?snow_field:nullptr);d3d12_->set_resource(127,terrain_frame);d3d12_->set_resource(72,fire_burn_mask12());
-            d3d12_->set_resource(59,g.rule_class.get());d3d12_->set_resource(61,map.masks.get());
+            d3d12_->set_resource(59,g.rule_class.get());d3d12_->set_resource(61,map.masks.get());d3d12_->set_resource(85,map.clump.get());
             d3d12_->set_resource(9,shadow12_.maps.get());d3d12_->set_sampler(8,clamp);d3d12_->set_sampler(10,gather);
             d3d12_->set_unordered(0,g.instances.get());d3d12_->set_unordered(1,g.args.get());d3d12_->set_unordered(2,g.counts.get());d3d12_->set_unordered(4,g.overflow.get());
         };
@@ -821,20 +885,37 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
             for(UINT cl=0;cl<kPlaceClassCount;++cl)key=gc_hash(key,rounds[cl]);
             if(g.reuse.size()<passes)g.reuse.resize(passes);
             auto& reuse=g.reuse[p];
-            if(reuse.valid&&reuse.key==key&&reuse.pool==g.pool_generation){
+            if(reuse.valid&&reuse.key==key&&reuse.pool==g.pool_generation&&reuse.counts){
+                // Its demand counts too (#289: without them a still camera read
+                // 0 for the region, which then shrank and grew every 20 readbacks).
                 if(FAILED(hr=d3d12_->copy_buffer(*g.args,*reuse.args,sizeof(gc_args_template_)))||
-                   FAILED(hr=d3d12_->copy_buffer(*g.work,*reuse.work,d3d12_->buffer_bytes(*g.work))))return fail("ground cover neighbour reuse",hr);
+                   FAILED(hr=d3d12_->copy_buffer(*g.work,*reuse.work,d3d12_->buffer_bytes(*g.work)))||
+                   FAILED(hr=d3d12_->copy_buffer(*g.counts,*reuse.counts,UINT64(gm_count)*4,UINT64(p)*gm_count*4,0)))return fail("ground cover neighbour reuse",hr);
                 reused=true;
             }else{
                 reuse.valid=false;reuse.key=key;
             }
         }
         if(!reused){
+        // This map's clumps (gcClumpCS): baked again only when its masks,
+        // paint or colour source (terrain 2.0) change.
+        const std::uint64_t clump_key=gc_hash(gc_hash(map.masks_key,gc_painted_frame_),t2_cover?gc_hash(gc_t2_key_,gc_t2_valid_?1u:0u):0u); // the colour read: terrain 2.0's revision when on
+        const UINT clump_w=(map.width+1)/2,clump_h=(map.height_tiles+1)/2;
+        if(map.masks_desert&&(map.clump_key!=clump_key||map.clump_w!=clump_w||map.clump_h!=clump_h)){
+            if(!map.clump||map.clump_w!=clump_w||map.clump_h!=clump_h){
+                map.clump.reset();map.clump_w=map.clump_h=0;
+                if(FAILED(hr=d3d12_->create_storage_texture(clump_w,clump_h,0,DXGI_FORMAT_R32_UINT,map.clump)))return fail("ground cover clump map",hr);
+                map.clump_w=clump_w;map.clump_h=clump_h;
+            }
+            placement();d3d12_->set_resource(85,static_cast<const D3D12Texture*>(nullptr));d3d12_->set_unordered(5,map.clump.get());
+            if((hr=dispatch(gp_clump,dispatch_groups(clump_w,8),dispatch_groups(clump_h,8)))!=S_OK)return fail("ground cover clump pipeline not ready",hr);
+            map.clump_key=clump_key;
+        }
         if(FAILED(hr=d3d12_->write_buffer(*g.args,0,gc_args_template_.data(),sizeof(gc_args_template_))))return fail("ground cover draw arguments",hr);
         d3d12_->clear_buffer_uint(*g.cell_counts,0);
         placement();
         d3d12_->set_unordered(3,g.cell_counts.get());d3d12_->set_unordered(6,g.cell_jobs.get());
-        if((hr=dispatch(gp_cells,dispatch_groups(UINT((m.window.x1-m.window.x0)*(m.window.y1-m.window.y0)),64)))!=S_OK)return fail("ground cover cell pipeline not ready",hr);
+        if((hr=dispatch(map.masks_desert?gp_cells_desert:gp_cells,dispatch_groups(UINT((m.window.x1-m.window.x0)*(m.window.y1-m.window.y0)),64)))!=S_OK)return fail("ground cover cell pipeline not ready",hr);
         placement();d3d12_->set_resource(56,g.cell_jobs.get());d3d12_->set_resource(58,g.cell_counts.get());d3d12_->set_unordered(7,g.rounds.get());
         if((hr=dispatch(gp_scan,kPlaceClassCount))!=S_OK)return fail("ground cover scan pipeline not ready",hr);
         for(auto& counts:g.stage_counts)if(FAILED(hr=d3d12_->write_buffer(*counts,0,stage_reset.data(),stage_reset.size()*4)))return fail("ground cover stage counters",hr);
@@ -846,7 +927,8 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
                 if(stage==0){d3d12_->set_resource(56,g.cell_jobs.get());d3d12_->set_resource(57,g.rounds.get());d3d12_->set_unordered(3,g.stage_counts[0].get());d3d12_->set_unordered(7,g.candidates.get());arguments=g.rounds.get();}
                 else if(stage==1){d3d12_->set_resource(54,g.stage_counts[0].get());d3d12_->set_unordered(3,g.stage_counts[1].get());d3d12_->set_unordered(6,g.candidates.get());d3d12_->set_unordered(7,g.survivors.get());arguments=g.stage_counts[0].get();}
                 else{d3d12_->set_resource(54,g.stage_counts[1].get());d3d12_->set_unordered(5,g.shade.get());d3d12_->set_unordered(6,g.survivors.get());arguments=g.stage_counts[1].get();}
-                const UINT program=kPlaceClasses[cl].program[stage==2?(trails||snow_pressed?2:3):stage];
+                UINT program=kPlaceClasses[cl].program[stage==2?(trails||snow_pressed?2:3):stage];
+                if(cl==0&&map.masks_desert&&stage!=1)program=stage==0?gp_place_desert:trails||snow_pressed?gp_build_desert:gp_build_desert_still; // Suslanger: the debris class's GC_DESERT programs
                 hr=d3d12_->dispatch_indirect(g.programs[program],*arguments,offset);
                 if(hr!=S_OK)return fail("ground cover placement pipeline not ready",hr);
                 ++perf_native_compute_dispatches_;++native_frame_stats_.native_compute_dispatches;
@@ -863,9 +945,11 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
             auto& reuse=g.reuse[p];
             const UINT64 work_bytes=d3d12_->buffer_bytes(*g.work);
             if(!reuse.args&&FAILED(hr=d3d12_->create_buffer(sizeof(gc_args_template_),0,0,reuse.args)))return fail("ground cover neighbour reuse",hr);
+            if(!reuse.counts&&FAILED(hr=d3d12_->create_buffer(UINT64(gm_count)*4,0,0,reuse.counts)))return fail("ground cover neighbour reuse",hr);
             if((!reuse.work||d3d12_->buffer_bytes(*reuse.work)!=work_bytes)&&FAILED(hr=d3d12_->create_buffer(work_bytes,0,0,reuse.work)))return fail("ground cover neighbour reuse",hr);
             if(FAILED(hr=d3d12_->copy_buffer(*reuse.args,*g.args,sizeof(gc_args_template_)))||
-               FAILED(hr=d3d12_->copy_buffer(*reuse.work,*g.work,work_bytes)))return fail("ground cover neighbour reuse",hr);
+               FAILED(hr=d3d12_->copy_buffer(*reuse.work,*g.work,work_bytes))||
+               FAILED(hr=d3d12_->copy_buffer(*reuse.counts,*g.counts,UINT64(gm_count)*4,0,UINT64(p)*gm_count*4)))return fail("ground cover neighbour reuse",hr);
             reuse.pool=g.pool_generation;reuse.valid=true;
         }
         } // !reused
@@ -1011,8 +1095,11 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
             if(FAILED(mask)&&mask!=E_FAIL)return fail("ground cover shadow mask",mask);
             masked=mask==S_OK; // else the unmasked variants below
             // The traced sun mask (rt_sun_shadows) borrows t113 for its records and
-            // leaves it empty: the hosted plants' indices go back for the material pass.
+            // t121 for the units' penumbra filter, and leaves both empty: the hosted
+            // plants' indices and art go back for the material pass (#319: unbound
+            // art reads 0, so hosted moss shaded black wherever units were in view).
             d3d12_->set_resource(69,g.hosted_vertices.get());d3d12_->set_resource(113,g.hosted_indices.get());
+            d3d12_->set_resource(121,g.hosted_art.get());
             bind_world_targets_d3d12(history);
             if(!p)transition_profile_pass("ground_cover_draw");
         }
@@ -1026,7 +1113,7 @@ HRESULT Renderer::render_ground_cover_d3d12(const FixedState& frame,const std::a
         bool motion_bound=false;
         // rt_ray_reconstruction: the cover draws its guide twins (GC_RR_GUIDES,
         // one a gcPS program in the list's order: gc_guide_twins) with the guide targets at 5-7.
-        if(guide_frame_d3d12()&&g.guides.empty())append_ground_cover_guide_programs(g.guides);
+        if(guide_frame_d3d12()&&g.guides.empty()){append_ground_cover_guide_programs(g.guides);++world_programs_generation_;}
         const GcGuideTwins& twins=gc_guide_twins();
         const bool cover_guides=guide_frame_d3d12()&&g.guides.size()==twins.count;
         if(cover_guides)bind_world_targets_d3d12(history,false,true);

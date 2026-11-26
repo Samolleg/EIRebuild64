@@ -20,6 +20,15 @@ using Microsoft::WRL::ComPtr;
 // diffuse and specular storage, terrain vertices, indices, each 16-aligned;
 // pages keep their first 16 bytes unused like arena pages.
 namespace {
+// The page is reserved once (build_native_prebuilt_mesh) and must be found
+// contiguous. 64 MB: each page is its own geometry buffer, so smaller pages
+// cost frame time (#272: 16 MB pages drew the terrain in 32 more passes on
+// D3D12 and made the D3D11 compute_build +0.2 to +0.8 ms slower, one build
+// dispatch per page range). The 32-bit renderer's 64 MB reserve once failed
+// on Ingos only while the startup pools set filled its address space; since
+// a09af55c the largest free block stays above 300 MB through every
+// neighbour prebuild there. A mesh larger than a page gets its own
+// exact-size page.
 constexpr std::size_t kNativePrebuiltPageBytes=64u<<20;
 bool finish_native_prebuilt_page(NativePrebuiltBuilder& builder) noexcept {
  if(builder.blob.size()<=16)return true;
@@ -45,6 +54,8 @@ bool finish_native_prebuilt_page(NativePrebuiltBuilder& builder) noexcept {
 }
 }
 
+std::size_t native_prebuilt_page_bytes() noexcept{return kNativePrebuiltPageBytes;}
+
 bool finish_native_prebuilt_pages(NativePrebuiltBuilder& builder) noexcept {
  const bool ok=!builder.failed&&finish_native_prebuilt_page(builder);
  std::vector<std::uint8_t>().swap(builder.blob);
@@ -64,7 +75,7 @@ std::uint8_t native_liquid_vertex_types(const NativeTerrainVertex& vertex) noexc
 }
 
 bool build_native_prebuilt_mesh(NativePrebuiltBuilder& builder,const NativeGeometryView& view,
- NativePrebuiltMesh& output) noexcept try{
+ NativePrebuiltMesh& output,const NativePrebuiltMesh* shared) noexcept try{
  output={};
  if(builder.failed||(!builder.device&&!builder.d3d12)||!view.position_groups||!view.normal_groups||!view.component_count||
     !view.texture_coordinate_count||!view.index_count||view.diffuse||view.specular||view.decode_colors||
@@ -120,18 +131,29 @@ bool build_native_prebuilt_mesh(NativePrebuiltBuilder& builder,const NativeGeome
  std::uint64_t cursor=0;
  const auto reserve=[&](std::uint64_t bytes){cursor=(cursor+15u)&~std::uint64_t{15};const auto at=cursor;cursor+=bytes;return at;};
  // Object-space meshes: their bounding sphere (centre, radius; object units)
- // in the 64 bytes before the components (nativeImpostorSelect/-Vertex).
+ // in the 64 bytes before the positions (nativeImpostorSelect/-Frame), so a
+ // mesh sharing another's channels still carries its own sphere.
  const bool sphere_block=view.world.enabled&&view.world.object_space&&shape_count==1&&!has_terrain;
- const auto position_at=reserve(position_bytes),normal_at=reserve(normal_bytes),sphere_at=sphere_block?reserve(64):0,
-  component_at=reserve(component_bytes),
-  texture_at=reserve(texture_bytes),diffuse_at=reserve(color_bytes),specular_at=reserve(color_bytes),
+ // A shape variant of a figure already in the open page: only its sphere and
+ // positions are new. Everything else (and the LOD levels) is the shared
+ // mesh's, which the figure's every shape reads unchanged.
+ if(shared&&(shared->page_slot!=builder.pages.size()||builder.blob.size()<=16||!sphere_block||!shared->sphere_block||
+    shared->shape_count!=1||shared->position_groups!=view.position_groups||shared->normal_groups!=view.normal_groups||
+    shared->component_count!=view.component_count||shared->texture_coordinate_count!=view.texture_coordinate_count||
+    shared->index_count!=view.index_count||shared->decoded_channels!=view.decoded_channels||view.decode||
+    builder.blob.size()+64u+position_bytes+32u>kNativePrebuiltPageBytes))shared=nullptr; // it must fit the open page
+ const auto sphere_at=sphere_block?reserve(64):0;
+ const auto position_at=reserve(position_bytes);
+ const auto normal_at=shared?0:reserve(normal_bytes),
+  component_at=shared?0:reserve(component_bytes),
+  texture_at=shared?0:reserve(texture_bytes),diffuse_at=shared?0:reserve(color_bytes),specular_at=shared?0:reserve(color_bytes),
   terrain_at=has_terrain?reserve(terrain_bytes):0;
  // Static LOD levels: a 64-byte table directly before the full index list
  // ({levels}, then per level {index offset, triangles, error}), the reduced
  // index lists after it.
- const NativeMeshLods* lods=view.lods&&view.lods->levels&&!has_terrain?view.lods:nullptr;
+ const NativeMeshLods* lods=!shared&&view.lods&&view.lods->levels&&!has_terrain?view.lods:nullptr;
  const auto lod_table_at=lods?reserve(64):0;
- const auto index_at=reserve(index_bytes);
+ const auto index_at=shared?0:reserve(index_bytes);
  std::array<std::uint64_t,kStaticLodMaxLevels> lod_at{};
  for(std::uint32_t level=0;lods&&level<lods->levels;++level){
   for(const std::uint32_t index:lods->indices[level])if(index>=view.component_count)return false;
@@ -140,24 +162,33 @@ bool build_native_prebuilt_mesh(NativePrebuiltBuilder& builder,const NativeGeome
  const std::uint64_t total=(cursor+15u)&~std::uint64_t{15};
  if(16u+total>kNativeRawBufferLimit)return false;
  if(builder.blob.size()>16&&builder.blob.size()+total>kNativePrebuiltPageBytes&&!finish_native_prebuilt_page(builder))return false;
- if(builder.blob.empty())builder.blob.assign(16,0);
+ // A page reserves its final size once (kNativePrebuiltPageBytes, or one
+ // mesh larger than that): appended meshes never grow it, and the next page reuses the
+ // capacity (finish_native_prebuilt_page clears it). Growing it with the
+ // appends asked the 32-bit process for one contiguous block of up to
+ // ~96 MB with a copy each time (vector growth 1.5x); on Ingos with its
+ // neighbours those requests failed (#272, memory_failures.log).
+ if(builder.blob.empty()){
+  builder.blob.reserve((std::max)(kNativePrebuiltPageBytes,static_cast<std::size_t>(16u+total)));
+  builder.blob.assign(16,0);
+ }
  const std::size_t base=builder.blob.size();
  if(base+total>kNativeRawBufferLimit)return false;
  builder.blob.resize(base+static_cast<std::size_t>(total));
  std::uint8_t* const out=builder.blob.data()+base;
  std::memcpy(out+position_at,positions,static_cast<std::size_t>(position_bytes));
- std::memcpy(out+normal_at,normals,static_cast<std::size_t>(normal_bytes));
+ if(!shared)std::memcpy(out+normal_at,normals,static_cast<std::size_t>(normal_bytes));
  auto* components=reinterpret_cast<NativeGpuComponent*>(out+component_at);
- for(std::uint32_t index=0;index<view.component_count;++index){
+ for(std::uint32_t index=0;!shared&&index<view.component_count;++index){
   const auto& component=source_components[index];
   if(component.position>=position_count||component.normal>=normal_count||
      component.texture>=view.texture_coordinate_count){builder.blob.resize(base);return false;}
   components[index]={component.position,component.normal,component.texture,0u};
  }
- std::memcpy(out+texture_at,texture_coordinates,static_cast<std::size_t>(texture_bytes));
+ if(!shared)std::memcpy(out+texture_at,texture_coordinates,static_cast<std::size_t>(texture_bytes));
  if(has_terrain)std::memcpy(out+terrain_at,terrain,static_cast<std::size_t>(terrain_bytes));
  auto* indices=reinterpret_cast<std::uint32_t*>(out+index_at);
- for(std::uint32_t index=0;index<view.index_count;++index){
+ for(std::uint32_t index=0;!shared&&index<view.index_count;++index){
   if(source_indices[index]>=view.component_count){builder.blob.resize(base);return false;}
   indices[index]=source_indices[index];
  }
@@ -201,6 +232,12 @@ bool build_native_prebuilt_mesh(NativePrebuiltBuilder& builder,const NativeGeome
  output.texture_coordinate_offset=at(texture_at);output.diffuse_storage_offset=at(diffuse_at);
  output.specular_storage_offset=at(specular_at);output.terrain_vertex_offset=has_terrain?at(terrain_at):UINT32_MAX;
  output.index_offset=at(index_at);
+ if(shared){
+  output.normal_offset=shared->normal_offset;output.component_offset=shared->component_offset;
+  output.texture_coordinate_offset=shared->texture_coordinate_offset;output.diffuse_storage_offset=shared->diffuse_storage_offset;
+  output.specular_storage_offset=shared->specular_storage_offset;output.index_offset=shared->index_offset;
+  output.lod_levels=shared->lod_levels;output.lod_extra_triangles=shared->lod_extra_triangles;
+ }
  output.position_groups=view.position_groups;output.normal_groups=view.normal_groups;output.shape_count=shape_count;
  output.component_count=view.component_count;output.texture_coordinate_count=view.texture_coordinate_count;
  output.index_count=view.index_count;output.decoded_channels=view.decoded_channels;
@@ -241,10 +278,10 @@ std::string native_owned_archive_texture_key(const ResourceIdentity& resource,
 }
 
 std::string native_owned_mip_texture_key(const NativeOwnedTextureView& source,bool generated){
- // Archive/decoded images are identified by their resource, not the local
- // view ID (all glTF material maps may use 1). Match D3D11 and the stream.
- if(source.value_source==1&&source.resource)
-  return native_owned_archive_texture_key(*source.resource,source.generation,generated);
+ // An archive member carries identity 1 (retained_static_submission.cpp):
+ // its archive entry is the identity, as on the D3D11 path, or every
+ // uncompressed member shares "1:1" and draws the first one's pixels (#285).
+ if(source.value_source==1&&source.resource)return native_owned_archive_texture_key(*source.resource,source.generation,generated);
  return std::to_string(source.value_source)+":"+std::to_string(source.identity)+"|generation="+std::to_string(source.generation)+
   (generated?"|mips=full":"|mips=authored");
 }

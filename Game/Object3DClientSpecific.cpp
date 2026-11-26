@@ -33,6 +33,8 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "owned_asset_loader.h"
 #include "engine_bridge.h"
 #include "retained_static_submission.h"
+#include "contact_blend.h"
+#include "StuffMapObjects.h"
 #include "astral_rift.h"
 #include "model_draw.h"
 #include "widescreen_layout.h"
@@ -741,6 +743,9 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
         return reject("appearance.selected_skeleton");
     auto assembly = std::make_shared<owned::VisualAssemblyAsset>();
     assembly->skeleton = skeleton;
+    const char* mask = object->GetMaskName();
+    assembly->ground_contact = !dynamic_cast<CTorchObject*>(object) &&
+        !(dynamic_cast<CLeverObject*>(object) && mask && owned::loot_lever_model(mask));
 #ifndef _A4
     if (auto* unit = dynamic_cast<CUnit*>(object)) {
         auto* client = IWorldClient.GetPlayer();

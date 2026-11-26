@@ -306,11 +306,18 @@ struct ActiveStaticsIndex {
     // Changes only when the catalog is released or replaced: object-space
     // registrations made under another catalog are stale.
     std::uint64_t catalog = 0;
+    // The terrain source generation the catalog was built for: at a map
+    // change the previous map's index stays published for a few frames (#289:
+    // zone3obr's statics read as not eligible against zone18's index and drew
+    // posed while the reveal held; active_statics_index_current).
+    std::uint64_t source_generation = 0;
     std::unordered_set<std::int32_t> eligible;   // MOB object ids
     std::unordered_set<std::uint64_t> models;    // ready catalog models
     std::unordered_set<std::uint64_t> failed;    // models the catalog could not build
 };
 void active_statics_index_publish(std::shared_ptr<ActiveStaticsIndex> index) noexcept;
+// Whether the index belongs to the current terrain source (not the previous map's).
+bool active_statics_index_current(const ActiveStaticsIndex* index) noexcept;
 std::shared_ptr<const ActiveStaticsIndex> active_statics_index() noexcept;
 // The catalog model of a sample, by content: its model resource, complection,
 // scale and centre shift, and per part FIG resource, model node, texture name

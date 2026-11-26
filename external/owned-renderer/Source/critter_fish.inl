@@ -101,7 +101,7 @@ std::vector<CrVertex> fish_mesh(Fish f, bool far_lod) {
     const float L = fish_rule(f).length, H = s.H * L / 2, W = s.W * L / 2;
     int rings = far_lod ? 6 : 12;
     const int around = far_lod ? 6 : 8, fr = far_lod ? 0 : 1;
-    if (L > .3f) rings += far_lod ? 2 : 4;   // the large pike and wels are seen at twice the size: more stations for their wave
+    if (L > kFishShow * .3f) rings += far_lod ? 2 : 4;   // the large pike and wels are seen at twice the size: more stations for their wave
     struct Vert { V3 p; float uv[2]; float u; int kind; float ft; };
     std::vector<Vert> verts;
     std::vector<std::array<int, 3>> tris;
@@ -306,7 +306,7 @@ Image paint_fish(Fish f, const FishGrain& grain) {
     default: break;
     }
     const float girth = PI * (s.H + s.W) / 2;   // x body length: the hull's circumference
-    const float kx = 4 * L / .2f * grain.scale * 256.f / float(T), ky = kx * girth * float(T) / float(rows);
+    const float kx = 4 * (L / kFishShow) / .2f * grain.scale * 256.f / float(T), ky = kx * girth * float(T) / float(rows);
     const float eye_aspect = (float(T) / float(rows)) / girth, eye_u = f == fish_pike ? .085f : .075f;
     for (unsigned y = 0; y < rows; ++y)
         for (unsigned x = 0; x < T; ++x) {

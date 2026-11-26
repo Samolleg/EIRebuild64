@@ -12,6 +12,11 @@ enum : std::uint8_t {
     kHighlightStripPreselect = 2,   // a preselected (briefing) unit drops its white push
     kHighlightHover = 4,            // the game's current cursor target gets the hover lift
 };
+// Bits 3-4 of the same byte: the Alt interact overlay class (#315; 0 none,
+// 1 usable object, 2 corpse or ground loot), drawn as a flat fill through
+// walls (native_instance_flags.h native_overlay_shift). Never an emissive change.
+constexpr unsigned kHighlightOverlayShift = 3;
+enum : std::uint8_t { kOverlayNone = 0, kOverlayUsable = 1, kOverlayCorpse = 2 };
 
 // Hover lifts emissive this far toward white: brighter but still lit and
 // shadowed, so it reads as softer than the flat native selection white.

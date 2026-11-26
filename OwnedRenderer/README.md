@@ -11,7 +11,7 @@ EIRebuild64 линкует код рендера статически. Игра 
 v143. Входная команда задания — `tools/build-task.ps1`; она готовит локальные
 зависимости, компилирует DXBC/DXIL и формирует проверяемый комплект.
 
-Текущая база автора: candidate-1126, `6bdebfa9be990b717b8dc667bbbb9405494f6be4`.
+Текущая база автора: release/20261123-212c831, `212c831d5129e1425ec622fa7bdb482e37097d84`.
 Астрал и растительность используют алгоритмы этой версии. Адаптеры x64,
 PAK, glTF/SKN и MCP остаются частью EIRebuild64. Материалы и hosted plants
 берутся из content/renderer-materials/Engine64 и content/renderer-assets/Engine64.

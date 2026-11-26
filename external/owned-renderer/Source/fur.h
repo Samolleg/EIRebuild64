@@ -88,6 +88,10 @@ inline constexpr FurModelCoat kFurModels[] = {
     {"unanwibo", .080f},   // boar: bristle
     {"unanwihy", .080f},   // hyena
     {"unanhodo", .075f},   // dog
+    // Dejavu fox: one mesh for the whole animal, so the length is a fraction of the
+    // whole body (1.1 m), not of one part: .03 = about 3 cm, between dog and wolf.
+    // Its region maps keep face, ears and legs short (hide_sleek). User review 2026-11-21.
+    {"unmofo", .030f},
     {"unanwira", .065f},   // rat
     {"unanhoha", .075f},   // hare
     {"unanwide", .040f},   // deer: short coat

@@ -1,5 +1,6 @@
 // Upload and readback rings; see d3d12_rings.h.
 #include "d3d12_rings.h"
+#include "d3d12_memory.h"
 
 #include <chrono>
 #include <cstring>
@@ -31,6 +32,7 @@ ComPtr<ID3D12Resource> create_buffer(ID3D12Device* device, D3D12_HEAP_TYPE heap,
         return nullptr;
     }
     buffer->SetName(name);
+    track_memory(device, buffer.Get(), MemoryKind::upload);  // or readback, by its heap
     return buffer;
 }
 

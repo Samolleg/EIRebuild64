@@ -29,6 +29,8 @@ SCENE_WIRE_POD_NAMED(owned::SceneWorldToClipSnapshot, scene_world_to_clip)
 SCENE_WIRE_POD_NAMED(owned::StockDistanceFog, stock_distance_fog)
 SCENE_WIRE_POD_NAMED(owned::WorldEnvironment, world_environment)
 SCENE_WIRE_POD_NAMED(owned::HudPanelBounds, hud_panel_bounds)
+SCENE_WIRE_POD_NAMED(owned::HudEditorPanel, hud_editor_panel)
+SCENE_WIRE_POD_NAMED(owned::HudPreviewSlot, hud_preview_slot)
 SCENE_WIRE_POD_NAMED(owned::HudAssetFrame, hud_asset_frame)
 SCENE_WIRE_POD_NAMED(owned::widescreen::HudComposition, hud_composition)
 SCENE_WIRE_POD_NAMED(frame_acct::Record, frame_acct_record)
@@ -121,7 +123,7 @@ template <class A> void fields(A& a, BridgeFrameValues& v) {
 }
 
 template <class A> void fields(A& a, HarnessCommand& v) {
-    scene_wire::fields_of(a, v.verb, v.number, v.frames, v.name, v.value, v.error);
+    scene_wire::fields_of(a, v.verb, v.number, v.frames, v.name, v.value, v.error, v.expected);
 }
 
 // profile and outer timing are not sent yet (F10 and the hitch recorder).
@@ -498,6 +500,7 @@ struct GameStatus {
     const char* owned_weather_problem = nullptr;  // static text
     const char* camera_pan_unavailable = nullptr; // game-owned static reason, nullptr: available
     const char* addon_notice = nullptr;          // game-owned startup/required-publication notice
+    const char* save_id_clash_notice = nullptr;  // game-owned; sent again as nullptr when it times out
     bool semantic_slots_installed = false;
     bool game_sites_all_verified = false;
     void run(Renderer& renderer);  // host (core_host.cpp)
@@ -505,7 +508,8 @@ struct GameStatus {
         return owned_sky_installed == other.owned_sky_installed && owned_weather_problem == other.owned_weather_problem &&
                semantic_slots_installed == other.semantic_slots_installed &&
                game_sites_all_verified == other.game_sites_all_verified &&
-               camera_pan_unavailable == other.camera_pan_unavailable && addon_notice == other.addon_notice;
+               camera_pan_unavailable == other.camera_pan_unavailable && addon_notice == other.addon_notice &&
+               save_id_clash_notice == other.save_id_clash_notice;
     }
 };
 template <class A> void fields(A& a, GameStatus& v) {
@@ -514,6 +518,7 @@ template <class A> void fields(A& a, GameStatus& v) {
     scene_wire::fields_of(a, v.semantic_slots_installed, v.game_sites_all_verified);
     scene_wire::static_text(a, v.camera_pan_unavailable);
     scene_wire::static_text(a, v.addon_notice);
+    scene_wire::static_text(a, v.save_id_clash_notice);
 }
 
 // The game window's client size changed (display Apply, mode change): the
@@ -542,11 +547,15 @@ struct Readback {
     // 1: the surface's bytes as last written (the host table's copy), not its
     // GPU home; a host that no longer holds them answers E_PENDING.
     std::uint8_t raw = 0;
+    // Non-zero (a surface, not raw): the whole surface scaled on the GPU to
+    // scaled_width x scaled_height (nearest texel, as the game's stretched
+    // Blt), and only that read back: a save picture never reads the full frame.
+    std::uint32_t scaled_width = 0, scaled_height = 0;
     void run(Renderer& renderer);  // host (core_host.cpp)
 };
 template <class A> void fields(A& a, Readback& v) {
     scene_wire::fields_of(a, v.reply, v.back_buffer, v.id, v.generation, v.left, v.top, v.right, v.bottom, v.first_byte,
-                          v.bytes, v.raw);
+                          v.bytes, v.raw, v.scaled_width, v.scaled_height);
 }
 
 // F11 in core mode (the overlay that handles it is off in the game process):
@@ -577,13 +586,25 @@ template <class A> void fields(A& a, ProgressFrames& v) {
 // interface is owned (HUD composition, fades and placement apply) and its
 // canvas layout. Sent when it changes; the host's widescreen answers and
 // widescreen::interface_owned follow it.
+// The HUD layout editor (game_focus.cpp, widescreen.cpp) runs in the game
+// process; the host's F10 overlay draws its controls from: whether the editor
+// hooks are in, whether it is unlocked, the message panel's bounds (unlocking
+// needs the mission's), and, while unlocked, every panel's bounds, header,
+// position terms and preview slots. Lock and unlock go back through
+// Control::hud_editing_request, the edited values through Control::option_edits.
 struct WidescreenState {
     static constexpr bool frame_values = false;
     bool interface_owned = false;
     widescreen::Layout layout{};
+    bool hud_editor_available = false;
+    bool hud_editing = false;
+    std::vector<HudEditorPanel> hud_panels;                // kHudPanels order while available; only messages unless editing
+    std::vector<std::vector<HudPreviewSlot>> hud_previews; // per panel; empty unless editing
     void run(Renderer& renderer);  // host (core_host.cpp)
 };
-template <class A> void fields(A& a, WidescreenState& v) { scene_wire::fields_of(a, v.interface_owned, v.layout); }
+template <class A> void fields(A& a, WidescreenState& v) {
+    scene_wire::fields_of(a, v.interface_owned, v.layout, v.hud_editor_available, v.hud_editing, v.hud_panels, v.hud_previews);
+}
 
 struct Config {
     static constexpr bool frame_values = false;

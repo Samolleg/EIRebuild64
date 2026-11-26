@@ -1104,6 +1104,58 @@ HRESULT Renderer::read_thumbnail(ID3D11Texture2D* staging,std::uint16_t* pixels,
  return S_OK;
 }
 
+// The whole of source scaled to width x height (stretchPS, nearest texel)
+// into a small target, copied to staging and read as tight BGRA rows: the
+// only pixels that leave the GPU (#342). Immediate context; the caller is
+// in stream order (game thread after SCENE_ENTRY, or a host command).
+HRESULT Renderer::scaled_bgra(ID3D11ShaderResourceView* source,UINT width,UINT height,std::vector<std::uint8_t>& bgra){
+ if(!source||!device_||!context_||!width||!height)return E_FAIL;
+ D3D11_TEXTURE2D_DESC td{};td.Width=width;td.Height=height;td.MipLevels=td.ArraySize=td.SampleDesc.Count=1;
+ td.Format=DXGI_FORMAT_B8G8R8A8_UNORM;td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_RENDER_TARGET;
+ ComPtr<ID3D11Texture2D> scaled,copy;ComPtr<ID3D11RenderTargetView> output;
+ HRESULT hr=device_->CreateTexture2D(&td,nullptr,&scaled);
+ if(SUCCEEDED(hr)){td.Usage=D3D11_USAGE_STAGING;td.BindFlags=0;td.CPUAccessFlags=D3D11_CPU_ACCESS_READ;hr=device_->CreateTexture2D(&td,nullptr,&copy);}
+ if(SUCCEEDED(hr))hr=device_->CreateRenderTargetView(scaled.Get(),nullptr,&output);
+ if(FAILED(hr))return hr;
+ {
+  const DebugViewStateGuard guard(context_.Get());  // restores what the stream had bound
+  const D3D11_VIEWPORT viewport{0.f,0.f,float(width),float(height),0.f,1.f};
+  if(!scene_composite_.stretch(context_.Get(),output.Get(),source,viewport))return E_NOT_VALID_STATE;
+ }
+ context_->CopyResource(copy.Get(),scaled.Get());
+ D3D11_MAPPED_SUBRESOURCE mapped{};hr=context_->Map(copy.Get(),0,D3D11_MAP_READ,0,&mapped);if(FAILED(hr))return hr;
+ try{
+  bgra.resize(std::size_t(width)*height*4u);
+  for(UINT y=0;y<height;++y)std::memcpy(bgra.data()+std::size_t(y)*width*4u,static_cast<const std::uint8_t*>(mapped.pData)+std::size_t(y)*mapped.RowPitch,std::size_t(width)*4u);
+ }catch(...){hr=E_OUTOFMEMORY;}
+ context_->Unmap(copy.Get(),0);
+ return hr;
+}
+
+HRESULT Renderer::read_scaled_capture(const SurfaceImage& source,SurfaceImage& destination,const RECT& destination_rect){
+ const LONG width=destination_rect.right-destination_rect.left,height=destination_rect.bottom-destination_rect.top;
+ if(!source.gpu_captured||source.cpu_released)return S_FALSE;
+ if(width<=0||height<=0||destination_rect.left<0||destination_rect.top<0||destination_rect.right>LONG(destination.width)||
+    destination_rect.bottom>LONG(destination.height)||(destination.format.dwFlags&DDPF_FOURCC)||!(destination.format.dwFlags&DDPF_RGB)||
+    destination.pixels.size()<std::size_t(destination.pitch)*destination.height)return E_INVALIDARG;
+ std::vector<std::uint8_t> bgra;
+ HRESULT hr=S_OK;
+ if(core_mode_)hr=core_readback(false,source.id,source.generation,RECT{0,0,LONG(source.width),LONG(source.height)},bgra,UINT(width),UINT(height));
+ else{
+  SCENE_ENTRY("scaled_capture");
+  if(!source.srv)return S_FALSE;
+  hr=scaled_bgra(source.srv.Get(),UINT(width),UINT(height),bgra);
+ }
+ if(FAILED(hr))return hr;
+ if(bgra.size()<std::size_t(width)*height*4u)return E_FAIL;
+ const UINT bytes=std::min<UINT>(std::max<UINT>(1,destination.format.dwRGBBitCount/8),4);
+ const PackedChannelTables tables(destination.format);
+ for(LONG y=0;y<height;++y)
+  pack_bgra_row(destination.pixels.data()+std::size_t(destination_rect.top+y)*destination.pitch+std::size_t(destination_rect.left)*bytes,
+   reinterpret_cast<const std::uint32_t*>(bgra.data()+std::size_t(y)*width*4u),UINT(width),bytes,tables);
+ return S_OK;
+}
+
 HRESULT Renderer::readback(SurfaceImage& image){if(core_mode_)return core_readback_surface(image);SCENE_ENTRY("readback");
  if(!image.gpu_captured||!image.texture)return S_OK;if(!device_||!context_)return E_FAIL;
  D3D11_TEXTURE2D_DESC sourceDesc{};image.texture->GetDesc(&sourceDesc);if(sourceDesc.Format!=DXGI_FORMAT_B8G8R8A8_UNORM)return E_NOTIMPL;
@@ -2142,6 +2194,7 @@ void Packet::run(Renderer& renderer){
     camp_surface_present?(interface_time?"scene_packet (interface: camp surface)":"scene_packet (world: camp surface)"):
     (interface_time?"scene_packet (interface: surface-owned texture)":"scene_packet (world: surface-owned texture)");
    renderer.d3d12_->omit(name,!interface_time);
+   if(!interface_time)renderer.note_omitted_world_object(view.prepared_identity.valid?view.prepared_identity.signed_id:0,name);
    return;
   }
   if(!interface_time){

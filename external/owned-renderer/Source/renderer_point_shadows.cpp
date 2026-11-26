@@ -17,6 +17,7 @@
 #include <iterator>
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <cstdio>
 #include <vector>
 
@@ -237,6 +238,7 @@ bool Renderer::begin_native_point_shadow_faces(UINT slot,UINT light_index,
   D3D11_RASTERIZER_DESC raster{};raster.FillMode=D3D11_FILL_SOLID;raster.CullMode=D3D11_CULL_NONE;raster.DepthClipEnable=TRUE;
   if(FAILED(device_->CreateRasterizerState(&raster,&native_point_clear_raster_)))return false;
  }
+ read_point_shadow_args_report(); // #298
  native_point_shadow_frame_=faces;native_point_shadow_slot_=slot;
  native_shadow_dirty_mask_=63;native_shadow_cleared_mask_=0;
  native_shadow_failed_=false;native_shadow_collecting_=true;native_point_shadow_active_=true;
@@ -264,6 +266,94 @@ bool Renderer::end_native_point_shadow_faces(bool commit) noexcept {
 // the per-EndScene sink teardown in scene mode.
 void scene_cmd::AbortPointShadowFaces::run(Renderer& r){(void)r.end_native_point_shadow_faces(false);}
 void scene_cmd::AbortDirectionalShadows::run(Renderer& r){(void)r.end_native_shadows(false);}
+
+// ---- Point-shadow argument guard (#298) ------------------------------------
+// One report on the 2080 Ti: a D3D12 TDR inside an owned_point_shadow indirect
+// draw right after the face's build (no page fault). The draw counts come from
+// the GPU, so each point face checks them against the CPU's queue before any
+// draw reads them (nativeShadowArgsGuardCS): a slot outside its bound draws
+// nothing that face and is logged, instead of an unbounded draw.
+
+// The guard's upload for one face: the seeded slots (layout.arguments), then,
+// from the next 16-byte boundary, one expected slot per batch: the vertex
+// limit (seed + 3 x the slice's triangles) and the seeded instance count,
+// start vertex and start instance. Returns that boundary in bytes, or
+// UINT_MAX when the layout has fewer seeded slots than batches.
+UINT Renderer::point_shadow_args_expected(const NativeSubmissionLayout& layout,UINT batches,UINT slice){
+ const std::size_t seeded=layout.arguments.size();
+ if(std::size_t(batches)*4u>seeded||batches>layout.batches.size()||slice>=6u)return UINT_MAX;
+ const UINT expected=static_cast<UINT>((seeded*sizeof(UINT)+15u)&~std::size_t(15));
+ shadow_args_upload_.assign(expected/4u+std::size_t(batches)*4u,0u);
+ std::copy(layout.arguments.begin(),layout.arguments.end(),shadow_args_upload_.begin());
+ for(UINT batch=0;batch<batches;++batch){
+  const UINT* const seed=layout.arguments.data()+std::size_t(batch)*4u;
+  UINT* const out=shadow_args_upload_.data()+expected/4u+std::size_t(batch)*4u;
+  const std::uint64_t limit=std::uint64_t(seed[0])+std::uint64_t(layout.batches[batch].slice_triangles[slice])*3u;
+  out[0]=static_cast<UINT>((std::min<std::uint64_t>)(limit,UINT_MAX));out[1]=seed[1];out[2]=seed[2];out[3]=seed[3];
+ }
+ return expected;
+}
+
+// The session report (16 bytes, zeroed at creation).
+HRESULT Renderer::ensure_point_shadow_args_report(){
+ const UINT zero[4]{};
+ if(d3d12_){
+  if(native12_.shadow_args_report)return S_OK;
+  D3D12BufferRef created;HRESULT hr=d3d12_->create_buffer(16,0,kD3D12BufferUnordered,created);
+  if(SUCCEEDED(hr))hr=d3d12_->write_buffer(*created,0,zero,sizeof(zero));
+  if(SUCCEEDED(hr))native12_.shadow_args_report=std::move(created);
+  return hr;
+ }
+ if(shadow_args_report_uav_&&shadow_args_report_copy_)return S_OK;
+ shadow_args_report_.Reset();shadow_args_report_uav_.Reset();shadow_args_report_copy_.Reset();
+ D3D11_BUFFER_DESC desc{};desc.ByteWidth=sizeof(zero);desc.Usage=D3D11_USAGE_DEFAULT;
+ desc.BindFlags=D3D11_BIND_UNORDERED_ACCESS;desc.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_ALLOW_RAW_VIEWS;
+ const D3D11_SUBRESOURCE_DATA initial{zero,0,0};
+ HRESULT hr=device_->CreateBuffer(&desc,&initial,&shadow_args_report_);if(FAILED(hr))return hr;
+ D3D11_UNORDERED_ACCESS_VIEW_DESC view{};view.Format=DXGI_FORMAT_R32_TYPELESS;view.ViewDimension=D3D11_UAV_DIMENSION_BUFFER;
+ view.Buffer.NumElements=4;view.Buffer.Flags=D3D11_BUFFER_UAV_FLAG_RAW;
+ if(FAILED(hr=device_->CreateUnorderedAccessView(shadow_args_report_.Get(),&view,&shadow_args_report_uav_)))return hr;
+ D3D11_BUFFER_DESC copy{};copy.ByteWidth=sizeof(zero);copy.Usage=D3D11_USAGE_STAGING;copy.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+ return device_->CreateBuffer(&copy,nullptr,&shadow_args_report_copy_);
+}
+
+// Polled at each point face: a non-blocking read of the report every 600
+// frames; a grown count is logged once with the first refused slot.
+void Renderer::read_point_shadow_args_report() noexcept {
+ std::uint32_t report[4]{};bool have=false;
+ if(d3d12_){
+  if(!native12_.shadow_args_report)return;
+  if(shadow_args_ticket_){
+   std::vector<std::uint8_t> bytes;const HRESULT hr=d3d12_->poll_readback(shadow_args_ticket_,bytes);
+   if(hr==S_FALSE)return;
+   shadow_args_ticket_=0;
+   if(hr!=S_OK||bytes.size()<sizeof(report))return;
+   std::memcpy(report,bytes.data(),sizeof(report));have=true;
+  }else if(native_frame_index_>=shadow_args_next_read_){
+   shadow_args_next_read_=native_frame_index_+600;
+   if(FAILED(d3d12_->request_readback(*native12_.shadow_args_report,sizeof(report),shadow_args_ticket_,"point shadow argument guard")))shadow_args_ticket_=0;
+  }
+ }else{
+  if(!shadow_args_report_||!shadow_args_report_copy_||!context_)return;
+  if(shadow_args_copy_pending_){
+   D3D11_MAPPED_SUBRESOURCE mapped{};
+   const HRESULT hr=context_->Map(shadow_args_report_copy_.Get(),0,D3D11_MAP_READ,D3D11_MAP_FLAG_DO_NOT_WAIT,&mapped);
+   if(hr==DXGI_ERROR_WAS_STILL_DRAWING)return;
+   shadow_args_copy_pending_=false;
+   if(FAILED(hr))return;
+   std::memcpy(report,mapped.pData,sizeof(report));context_->Unmap(shadow_args_report_copy_.Get(),0);have=true;
+  }else if(native_frame_index_>=shadow_args_next_read_){
+   shadow_args_next_read_=native_frame_index_+600;
+   context_->CopyResource(shadow_args_report_copy_.Get(),shadow_args_report_.Get());shadow_args_copy_pending_=true;
+  }
+ }
+ if(!have||report[0]<=shadow_args_logged_)return;
+ char text[192];
+ std::snprintf(text,sizeof(text),"refused_slots=%u (session) first: raw_vertices=%u slot=%u cube=%u face=%u backend=%s",
+  report[0],report[1],report[2],report[3]/6u,report[3]%6u,d3d12_?"D3D12":"D3D11");
+ bridge_report_event("point_shadow_args_clamped",text);
+ shadow_args_logged_=report[0];
+}
 
 // ---- Bounce light volume (cave_irradiance.h) ------------------------------
 

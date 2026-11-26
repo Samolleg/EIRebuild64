@@ -66,12 +66,14 @@ bool read_unit_blood(const void* image, const void* unit, std::uint32_t& blood,
 // AddUnitToServer: CreatePersonage fills no texture for non-humans). Same
 // verified prototype/race rows as above; prototype +0Ch is the skin index,
 // race +E8h the model mask (CString) and +ECh the primary texture list
-// (vector<CString> begin/end). The mask must equal the unit's own figure
-// mask, which confirms the record layout on every read.
+// (vector<CString> begin/end), +F8h the secondary texture list
+// (SUDBRaceModel::Serialize 52DC70: fields 30/31/32 at +E8h/+ECh/+F8h).
+// The mask must equal the unit's own figure mask, which confirms the record
+// layout on every read.
 template<class Read>
 bool read_unit_race_skin(const void* image, const void* unit, const char* figure_mask,
                          char (&texture)[64], Read read,
-                         const UnitBloodIdentity& identity = {}) noexcept {
+                         const UnitBloodIdentity& identity = {}, bool secondary = false) noexcept {
     static_assert(sizeof(void*) == 4, "supported game ABI is x86");
     texture[0] = 0;
     const auto get = [&](const void* base, std::size_t offset, auto& value) {
@@ -109,7 +111,8 @@ bool read_unit_race_skin(const void* image, const void* unit, const char* figure
         if (!a) break;
     }
     const char* name = nullptr;
-    if (!get(model, 0xec, first) || !get(model, 0xf0, last) || !first || last < first ||
+    const std::size_t list = secondary ? 0xf8 : 0xec;
+    if (!get(model, list, first) || !get(model, list + 4, last) || !first || last < first ||
         (last - first) % 4 || skin >= (last - first) / 4 ||
         !get(reinterpret_cast<const void*>(first), skin * 4, name) ||
         !text(name, texture, sizeof(texture)) || !texture[0]) {

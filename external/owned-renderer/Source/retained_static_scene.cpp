@@ -1740,6 +1740,12 @@ std::shared_ptr<const VisualAssemblyAsset> RetainedStaticScene::visual_assembly(
     return entity ? entity->assembly : nullptr;
 }
 
+bool RetainedStaticScene::visual_has_intent(VisualResourceIncarnation resource) const noexcept {
+    SharedLock guard(lock_);
+    const auto* entity = visual_find_unlocked(resource);
+    return entity && entity->intent.revision;
+}
+
 std::shared_ptr<const VisualAssemblyAsset> RetainedStaticScene::visual_standing_assembly(
     VisualResourceIncarnation resource) const noexcept {
     SharedLock guard(lock_);
@@ -2537,7 +2543,8 @@ void RetainedStaticScene::visual_publish_highlight(const RetainedHighlightState&
     const auto& old=highlight_;
     const bool same_hover=old.hover.signed_id==state.hover.signed_id &&
         old.hover.serial==state.hover.serial;
-    if (same_hover && old.show_selected==state.show_selected &&
+    const bool same_alt=old.alt==state.alt && old.alt_objects==state.alt_objects;
+    if (same_hover && same_alt && old.show_selected==state.show_selected &&
         old.strip_preselected==state.strip_preselected &&
         old.hover_characters==state.hover_characters &&
         old.hover_objects==state.hover_objects) return;
@@ -2550,7 +2557,21 @@ void RetainedStaticScene::visual_publish_highlight(const RetainedHighlightState&
                 old.hover_objects!=state.hover_objects) && state.hover.signed_id) {
         shadow_source_changed_unlocked(state.hover.signed_id);
     }
-    highlight_=state;
+    if (!same_alt) {
+        // Both lists are sorted: only ids entering or leaving change colour.
+        auto a=old.alt_objects.begin(), b=state.alt_objects.begin();
+        while (a!=old.alt_objects.end() || b!=state.alt_objects.end()) {
+            if (b==state.alt_objects.end() || (a!=old.alt_objects.end() && *a<*b))
+                shadow_source_changed_unlocked(*a++);
+            else if (a==old.alt_objects.end() || *b<*a) shadow_source_changed_unlocked(*b++);
+            else { ++a; ++b; }
+        }
+        if (old.alt!=state.alt)
+            for (const auto& item:visuals_)
+                if (item.second.tick.unit && item.second.tick.dead) shadow_source_changed_unlocked(item.first);
+    }
+    try { highlight_=state; }
+    catch (...) { highlight_.alt_objects.clear(); highlight_.alt=false; }
     visual_frame_changed_unlocked();
 }
 
@@ -2680,6 +2701,29 @@ void RetainedStaticScene::visual_reject(VisualResourceIncarnation resource,
     // tuple waiting to become ready after one unrelated field changes.
     // A later complete intent, route and appearance must establish it anew.
     visual_reject_unlocked(*entity,reason,predicate,scope,true);
+    if (!entity->resync_pending && !visual_resync_suppressed_) {
+        try {
+            visual_resync_pending_.push_back({resource.signed_id, reason, predicate, scope});
+            entity->resync_pending = true;
+        } catch (...) {}
+    }
+}
+
+void RetainedStaticScene::visual_suppress_resync_queue(bool suppress) noexcept {
+    ExclusiveLock guard(lock_);
+    visual_resync_suppressed_ = suppress;
+}
+
+bool RetainedStaticScene::visual_take_resync_candidates(std::vector<VisualResyncCandidate>& out) noexcept {
+    out.clear();
+    ExclusiveLock guard(lock_);
+    if (visual_resync_pending_.empty()) return false;
+    out.swap(visual_resync_pending_);
+    for (const auto& candidate : out) {
+        const auto found = visuals_.find(candidate.signed_id);
+        if (found != visuals_.end()) found->second.resync_pending = false;
+    }
+    return true;
 }
 
 void RetainedStaticScene::visual_reject_all(RetainedVisualStatus reason,
@@ -2721,6 +2765,7 @@ void RetainedStaticScene::visual_frame_unlocked(double time, bool diagnose,Retai
     result.quest_lights=quest_lights_;
     result.world_point_lights=world_point_lights_;
     result.fire_spells=fire_spells_;
+    result.alt_overlay=highlight_.alt;
     result.time = time;
     // Diagnostics are part of the immutable evaluated value. The public flag
     // controls recorder exposure, not whether a same-time reader gets a second
@@ -2839,7 +2884,10 @@ void RetainedStaticScene::visual_frame_unlocked(double time, bool diagnose,Retai
             (highlight_.hover.signed_id && highlight_.hover.signed_id==entity.resource.signed_id &&
              highlight_.hover.serial==entity.resource.serial &&
              hover_highlight_enabled(entity.tick.unit,entity.tick.dead,
-                 highlight_.hover_characters,highlight_.hover_objects) ? kHighlightHover : 0));
+                 highlight_.hover_characters,highlight_.hover_objects) ? kHighlightHover : 0) |
+            (!highlight_.alt ? 0 : (entity.tick.unit ? (entity.tick.dead ? kOverlayCorpse : 0) :
+                std::binary_search(highlight_.alt_objects.begin(),highlight_.alt_objects.end(),
+                    entity.resource.signed_id) ? kOverlayUsable : 0) << kHighlightOverlayShift));
         sample.pose_revision = entity.pose_revision;
         sample.height_valid = entity.height_valid;
         sample.envelope_radius = entity.envelope_radius;

@@ -27,6 +27,7 @@
 #include <vector>
 
 namespace owned {
+void bridge_async_flush(unsigned timeout_ms) noexcept;  // engine_bridge.cpp; a no-op stub in the x64 host
 namespace {
 
 using Microsoft::WRL::ComPtr;
@@ -328,7 +329,7 @@ std::wstring write_report(const char* reason, const std::wstring& chosen, const 
     if (!CreateDirectoryW(folder.c_str(), nullptr)) return {};
     std::string listed;
     const std::wstring dll_folder = folder_of(dll_path());
-    for (const wchar_t* name : {L"host.log", L"x86_remote.log", L"d3d12_core.log", L"owned_renderer.log", L"owned_exceptions.log"})
+    for (const wchar_t* name : {L"host.log", L"host.prev.log", L"x86_remote.log", L"d3d12_core.log", L"owned_renderer.log", L"owned_exceptions.log"})
         copy_text(dll_folder + name, folder, listed);
     copy_text(renderer_config_path(), folder, listed);
     // The in-process renderer's events (memory_status lines among them): the last 8 MB.
@@ -482,6 +483,8 @@ std::mutex g_package_lock;
 std::string g_package_result;
 bool g_package_ready = false;
 volatile LONG g_package_running = 0;
+volatile LONG g_host_memory_report_requested = 0;
+volatile LONG g_host_memory_report_pending = 0;  // set with the request, cleared when the report is queued
 
 // The capture folder the request makes (newer than its start), once nothing in
 // it changed for 2 s; 60 s at most (a hidden overlay first runs its timing).
@@ -504,6 +507,10 @@ DWORD WINAPI diagnostics_package(LPVOID) {
         quiet = bytes && bytes == last_bytes ? quiet + 1 : 0;
         last_bytes = bytes;
     }
+    // The renderer's host memory report (Shift+F11) goes to bridge.jsonl through the
+    // async event writer: wait for it (at most 5 s), then for the writer to write it.
+    for (int tick = 0; tick < 100 && InterlockedCompareExchange(&g_host_memory_report_pending, 0, 0); ++tick) Sleep(50);
+    owned::bridge_async_flush(1000);
     std::wstring path;
     try { path = write_report("manual diagnostics package (Shift+F11)", newest_dump(seconds_ago(24 * 3600)), L"-manual", capture, false); } catch (...) {}
     std::string text = path.empty() ? "Diagnostics package failed: neither the game's \"EID3D11 reports\" folder nor %LOCALAPPDATA%\\EID3D11\\reports could be written."
@@ -520,8 +527,18 @@ DWORD WINAPI diagnostics_package(LPVOID) {
 
 void start_diagnostics_package() noexcept {
     if (InterlockedCompareExchange(&g_package_running, 1, 0) != 0) return;  // one at a time
+    InterlockedExchange(&g_host_memory_report_pending, 1);
+    InterlockedExchange(&g_host_memory_report_requested, 1);
     if (const HANDLE thread = CreateThread(nullptr, 0, &diagnostics_package, nullptr, 0, nullptr)) CloseHandle(thread);
     else InterlockedExchange(&g_package_running, 0);
+}
+
+void host_memory_report_done() noexcept {
+    InterlockedExchange(&g_host_memory_report_pending, 0);
+}
+
+bool take_host_memory_report_request() noexcept {
+    return InterlockedExchange(&g_host_memory_report_requested, 0) != 0;
 }
 
 void set_error_report_status(const char* line) noexcept try {

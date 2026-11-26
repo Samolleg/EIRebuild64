@@ -1,5 +1,6 @@
 #include "retained_static_submission.h"
 #include "astral_rift.h"
+#include "owned_resource_runtime.h"
 #include <atomic>
 #include <map>
 #include <mutex>
@@ -528,6 +529,10 @@ bool prepare_retained_static_candidate(
         assembly->revision = 1; // Constant within this immutable source value.
         assembly->skeleton = model_found->second;
         assembly->shape = object.shape;
+        // Map-file ground loot (a lever with a loot model) is drawn from here
+        // until a game copy exists: it takes no contact blend either (#324).
+        assembly->ground_contact = !(object.family == lever_object_type &&
+                                     loot_lever_model(object.visual_reference));
         assembly->parts.reserve(model.nodes.size());
         auto material = std::make_shared<MaterialCpuAsset>();
         // Preserve the established rigid source material used by both spans.
@@ -2805,13 +2810,23 @@ bool retained_visual_part_values(const RetainedVisualSample& sample,const Visual
     if (astral) values.flags|=astral_record_flags(*sample.assembly,part);
     if (astral==2) { values.lighting_enabled=0; values.default_diffuse=0xffffffffu; values.flags|=4u; }
     // Rigid world objects meet the terrain with its colour; units never do
-    // (nor the floating astral veils and clumps).
-    if (!sample.values.unit) { if (!astral) values.flags |= native_ground_contact_flag; }
+    // (nor the floating astral veils and clumps, nor textures listed in
+    // scenery.json "no_ground_contact", such as cloth tents, nor campfires
+    // and ground loot: VisualAssemblyAsset::ground_contact).
+    if (!sample.values.unit) {
+        if (!astral && sample.assembly && sample.assembly->ground_contact &&
+            !ground_contact_excluded(part.material_name)) values.flags |= native_ground_contact_flag;
+    }
     // Units carry the unit flag: snow build-up gives them a sheen only.
     else if(sample.values.unit) values.flags |= native_unit_flag;
     if (sample.assembly && sample.assembly->sways && !sample.values.unit &&
         retained_visual_part_sway(part).foliage)
         values.flags |= native_foliage_part_flag;
+    // Alt interact overlay class (#315): the overlay pass draws only these
+    // records. Swaying and astral records own those bits and never take it.
+    if (!(values.flags & native_sway_flag) && !astral)
+        values.flags |= static_cast<std::uint32_t>((sample.values.highlight >> kHighlightOverlayShift) & 3u)
+            << native_overlay_shift;
     // Fur prototype, strands: a unit's hair part keeps its alpha here (its sun
     // shadow); only its colour record is hidden (fur_strand_hair_record).
     return retained_visual_texture_shift(part.texture_type,time,values.u_shift,values.v_shift);
@@ -2963,6 +2978,9 @@ namespace {
 std::mutex g_active_statics_request_lock;
 std::vector<ActiveStaticsModelRequest> g_active_statics_requests;
 std::unordered_set<std::uint64_t> g_active_statics_requested;
+}
+bool active_statics_index_current(const ActiveStaticsIndex* index) noexcept {
+    return index && index->source_generation == retained_static_terrain_source_identity().source_generation;
 }
 void active_statics_index_publish(std::shared_ptr<ActiveStaticsIndex> index) noexcept try {
     if (!index) {

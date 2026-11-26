@@ -317,16 +317,20 @@ void pack_bgra_row(std::uint8_t* destination,const std::uint32_t* source,UINT co
 }
 }  // namespace
 
-// One set being built: its prebuilt program files and the shader objects the
-// workers create (the driver translates the bytecode in CreatePixelShader).
+// One set being built: its program files and the shader objects the workers
+// create (the driver translates the bytecode in CreatePixelShader). In the
+// x64 host a key that was not prebuilt carries its programs: a missing file
+// is compiled and written to the cache (empty everywhere else).
 struct Renderer::NativeSpecialisationJob{
  std::uint32_t key=0;
- std::vector<std::wstring> files; // the prebuilt programs (native_spec_files_)
+ std::vector<std::wstring> files; // the programs' cache files (native_spec_files_ when prebuilt)
+ NativeSpecialisedPrograms compile; // x64 host, a key not prebuilt only
  std::vector<ShaderKey> keys;
  std::vector<ComPtr<ID3D11PixelShader>> shaders;
  std::atomic<std::size_t> finished{0};
- std::atomic<unsigned> cached{0},compiled{0},failed{0};
+ std::atomic<unsigned> cached{0},compiled{0},failed{0},compile_ms{0}; // compile_ms: the longest compile
  std::int64_t begin=0;
+ std::uint64_t va_used_before=0,va_free_before=0; // a pools key (bit 13): address space when it started
 };
 
 }  // namespace owned

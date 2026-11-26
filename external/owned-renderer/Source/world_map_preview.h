@@ -52,10 +52,10 @@ struct WorldMapPreviewCacheStats {
 };
 
 // Renderer-owned, render-only catalog of map sections. Default OFF. A
-// loading-screen command prepares sections sequentially with one existing
-// loader worker. The render host holds the loading picture until that command
-// finishes. Sections share a retained-data budget per native allod (192MiB
-// retail, 512MiB embedded);
+// loading-screen command starts preparing the sections sequentially on a
+// background thread (with one existing loader worker); the render host keeps
+// serving commands meanwhile (#309: 25-40 s on a 4-thread CPU). Until the
+// cache lands, bound sections read as loading. Sections share one per-allod (192MiB retail, 512MiB embedded) retained-data budget per native allod;
 // a section admission failure preserves already valid entries.
 // CPU output is retained across map close/reopen and for GPU
 // reset/re-upload; decoded maps and assemblies die after their section has been
@@ -80,14 +80,19 @@ public:
 
   void set_enabled(bool enabled) noexcept;
   bool enabled() const noexcept;
-  // Serial render-host loading command. Reuses an unchanged completed cache,
-  // including its sections that failed to prepare.
-  // A nonempty source failure invalidates the old cache visibly.
+  // Render-host loading command: starts the background preparation (or
+  // reuses an unchanged completed or running one, including sections that
+  // failed to prepare). A nonempty source failure invalidates the old cache
+  // visibly. Returns false only for a failure known at once.
   bool precache_loading(std::uint64_t generation, WorldMapPreviewSpace space,
                         ResourceStoreConfig mounts,
                         std::vector<WorldMapPreviewSection> sections,
                         std::string &failure) noexcept;
-  // Binds already prepared descriptions without I/O or background streaming.
+  // Adopts a finished background preparation (and binds an activation that
+  // arrived before it); every frame the preview may draw, and in activate.
+  void poll() noexcept;
+  // Binds prepared descriptions without I/O; while the preparation still
+  // runs, binds them when it lands (status: loading meanwhile).
   // generation is an owned UI binding generation, never an engine address.
   bool activate(std::uint64_t generation, WorldMapPreviewSpace space,
                 std::vector<WorldMapPreviewSection> sections,

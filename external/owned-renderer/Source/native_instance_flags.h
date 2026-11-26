@@ -31,6 +31,8 @@ namespace owned {
 //   16-20   0x001f0000  without the sway flag: astral rift part (astral_rift.h;
 //                       16-17 kind: 1 veil, 2 clumps; 18-20 veil index). Such
 //                       records draw only with the astral programs (NATIVE_ASTRAL).
+//   13-14   0x00006000  without the sway flag: Alt interact overlay class (#315;
+//                       1 usable object, 2 corpse or ground loot; nativeOverlayClass)
 //
 // The shader reads the sway fields with the literal shifts above and gets the
 // neighbour, contact and preview masks substituted from these constants.
@@ -56,6 +58,11 @@ constexpr std::uint32_t native_astral_flags(std::uint32_t kind, std::uint32_t ve
 constexpr bool native_astral_record(std::uint32_t flags) noexcept {
     return (flags & native_sway_flag) == 0 && (flags & (3u << native_astral_shift)) != 0;
 }
+
+constexpr unsigned native_overlay_shift = 13;
+constexpr std::uint32_t native_overlay_mask = 3u << native_overlay_shift;
+static_assert((native_overlay_mask & (0x7u << native_fur_debug_shift)) == 0, "overlay class overlaps fur_debug");
+static_assert((native_overlay_mask & native_astral_mask) == 0, "overlay class overlaps the astral field");
 
 constexpr std::uint32_t native_sway_root_bits(std::uint32_t offset) noexcept {
     return (offset & native_sway_root_max) << native_sway_root_shift;

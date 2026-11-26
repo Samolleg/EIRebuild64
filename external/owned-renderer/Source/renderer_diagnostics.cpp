@@ -105,41 +105,6 @@ void report_placed_hitch_export(const PlacedHitchExportResult& result,
 }
 }  // namespace
 
-// Temporary per-world summary of shadow reuse/stability witnesses, appended to
-// bridge.jsonl at world change and teardown. Removed once both questions settle.
-#ifndef EID3D11_EMBEDDED
-void Renderer::report_shadow_diagnostics(const char* reason) noexcept {
- if(!point_shadow_epoch_)return;
- try{
-  std::ostringstream out;out.imbue(std::locale::classic());
-  const auto& p=point_shadows_cumulative_;
-  out<<"reason="<<(reason?reason:"")<<" epoch="<<point_shadow_epoch_
-     <<" point{list="<<p.list<<",reorder="<<p.reorder_only<<",reset="<<p.reset
-     <<",reset_epoch="<<p.reset_epoch<<",reset_full="<<p.reset_journal_full
-     <<",reset_flags="<<p.reset_class_flags<<",reset_undetected="<<p.reset_undetected
-     <<",reset_pool="<<p.reset_pool<<",light="<<p.light<<",radius_dirty="<<p.radius_dirty
-     <<",terrain="<<p.terrain<<",eligibility_lost="<<p.eligibility_lost
-     <<",strength_zeroed="<<p.strength_zeroed<<",rebaked="<<p.rebaked<<",static_to_dynamic="<<p.static_to_dynamic<<",budget_deferred="<<p.budget<<",overlays="<<p.overlays
-     <<",merged_lights="<<p.merged_lights<<",casting_lights="<<p.casting_lights
-     <<",pass_skipped="<<point_pass_skipped_frames_<<",publication_missing="<<point_publication_missing_frames_<<"}";
-  const auto input=bridge_shadow_reuse_diagnostics();
-  out<<" input{attempts="<<input.attempts;
-  for(unsigned i=0;i<input.counts.size();++i)if(input.counts[i])out<<','<<shadow_input_difference_names[i]<<'='<<input.counts[i];
-  out<<",only_clip="<<input.only_world_to_clip_frames<<",only_clip_max_delta="<<input.only_world_to_clip_max_abs_delta<<"}";
-  out<<" water{liquid_batches="<<water_liquid_batches_<<",reflection_batches="<<water_reflection_batches_
-     <<",resource_failures="<<water_reflection_resource_failures_<<",clip_valid="<<native_world_clip_valid_<<"}";
-  water_liquid_batches_=water_reflection_batches_=water_reflection_resource_failures_=0;
-  out<<" renderer{";
-  for(unsigned i=0;i<shadow_renderer_cumulative_.counts.size();++i)if(shadow_renderer_cumulative_.counts[i])
-   out<<shadow_renderer_difference_names[i]<<'='<<shadow_renderer_cumulative_.counts[i]<<',';
-  out<<"}";
-  bridge_report_event("shadow_diagnostics",out.str().c_str());
- }catch(...){}
-}
-#else
-void Renderer::report_shadow_diagnostics(const char* reason) noexcept {  }
-#endif
-
 Microsoft::WRL::ComPtr<IDXGIAdapter> Renderer::graphics_adapter() noexcept {
  Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
  if(d3d12_)adapter=d3d12_->adapter();
@@ -241,29 +206,7 @@ RendererResourceSnapshot Renderer::resource_snapshot() const {
  snapshot.res_cache_override_gets=cache.override_gets;
  snapshot.res_cache_override_releases=cache.override_releases;
  snapshot.res_cache_icon_releases=cache.icon_releases;
- snapshot.presentation_frame=presentation_frame_index_;snapshot.present_interval_ms=present_interval_ms_;snapshot.present_smoothed_ms=present_smoothed_ms_;
- const FrameStatisticsSnapshot rolling=frame_statistics_.snapshot();
- snapshot.rolling_frame_samples=static_cast<std::uint64_t>(rolling.sample_count);
- snapshot.rolling_frame_seconds=rolling.covered_seconds;
- snapshot.rolling_average_fps=rolling.average_fps;
- snapshot.rolling_lowest_fps=rolling.lowest_fps;
- snapshot.rolling_frame_warming_up=rolling.warming_up;
- snapshot.rolling_frame_complete=rolling.complete;
- snapshot.rolling_frame_capacity_truncated=rolling.capacity_truncated;
- snapshot.system_telemetry_stale=system_telemetry_snapshot_.stale;
- snapshot.system_telemetry_age_ms=system_telemetry_snapshot_.age_ms;
- if(!system_telemetry_snapshot_.stale){
-  const auto valid_percent=[](const TelemetryValue& value){return value.valid&&std::isfinite(value.value)&&value.value>=0.0;};
-  snapshot.process_cpu_valid=valid_percent(system_telemetry_snapshot_.cpu_percent);
-  if(snapshot.process_cpu_valid)snapshot.process_cpu_percent=system_telemetry_snapshot_.cpu_percent.value;
-  snapshot.gpu_3d_percent_valid=valid_percent(system_telemetry_snapshot_.gpu_3d_percent);
-  if(snapshot.gpu_3d_percent_valid)snapshot.gpu_3d_percent=system_telemetry_snapshot_.gpu_3d_percent.value;
-  const auto valid_bytes=[](const TelemetryValue& value){return value.valid&&std::isfinite(value.value)&&value.value>=0.0&&value.value<=static_cast<double>((std::numeric_limits<std::uint64_t>::max)());};
-  snapshot.process_private_bytes_valid=valid_bytes(system_telemetry_snapshot_.ram_private_bytes);
-  if(snapshot.process_private_bytes_valid)snapshot.process_private_bytes=static_cast<std::uint64_t>(system_telemetry_snapshot_.ram_private_bytes.value);
-  snapshot.gpu_memory_valid=valid_bytes(system_telemetry_snapshot_.vram_usage_bytes)&&valid_bytes(system_telemetry_snapshot_.vram_budget_bytes);
-  if(snapshot.gpu_memory_valid){snapshot.gpu_usage_bytes=static_cast<std::uint64_t>(system_telemetry_snapshot_.vram_usage_bytes.value);snapshot.gpu_budget_bytes=static_cast<std::uint64_t>(system_telemetry_snapshot_.vram_budget_bytes.value);}
- }
+ fill_live_statistics(snapshot);
  snapshot.cpu_surface_bytes=g_cpu_surface_bytes.load(std::memory_order_relaxed);
  snapshot.gpu_texture_bytes=g_gpu_surface_bytes.load(std::memory_order_relaxed);
  snapshot.double_resident_bytes=g_double_resident_bytes.load(std::memory_order_relaxed);
@@ -300,8 +243,38 @@ RendererResourceSnapshot Renderer::resource_snapshot() const {
   std::uint64_t(native_pose_input_capacity_)*sizeof(NativePoseGpu)+std::uint64_t(native_persistent_instance_capacity_)*(sizeof(NativeInstanceGpu)+sizeof(NativeDrawGpu))+
   std::uint64_t(native_instance_update_capacity_)*sizeof(NativeInstanceUpdate)+(native_world_clip_constants_?sizeof(native_world_clip_):0u);
  if(debug_overlay_.settings_open())snapshot.video_memory=video_memory_breakdown();
- snapshot.vram_budget=vram_budget_snapshot();
  return snapshot;
+}
+
+// The overlay's live numbers (5 s FPS, telemetry CPU/GPU/VRAM, the VRAM
+// budget): copies of values the present path, the telemetry thread (500 ms)
+// and update_vram_budget already sampled. The D3D12 overlay uses this alone,
+// without the resource walk of resource_snapshot().
+void Renderer::fill_live_statistics(RendererResourceSnapshot& snapshot) const {
+ snapshot.presentation_frame=presentation_frame_index_;snapshot.present_interval_ms=present_interval_ms_;snapshot.present_smoothed_ms=present_smoothed_ms_;
+ const FrameStatisticsSnapshot rolling=frame_statistics_.snapshot();
+ snapshot.rolling_frame_samples=static_cast<std::uint64_t>(rolling.sample_count);
+ snapshot.rolling_frame_seconds=rolling.covered_seconds;
+ snapshot.rolling_average_fps=rolling.average_fps;
+ snapshot.rolling_lowest_fps=rolling.lowest_fps;
+ snapshot.rolling_frame_warming_up=rolling.warming_up;
+ snapshot.rolling_frame_complete=rolling.complete;
+ snapshot.rolling_frame_capacity_truncated=rolling.capacity_truncated;
+ snapshot.system_telemetry_stale=system_telemetry_snapshot_.stale;
+ snapshot.system_telemetry_age_ms=system_telemetry_snapshot_.age_ms;
+ if(!system_telemetry_snapshot_.stale){
+  const auto valid_percent=[](const TelemetryValue& value){return value.valid&&std::isfinite(value.value)&&value.value>=0.0;};
+  snapshot.process_cpu_valid=valid_percent(system_telemetry_snapshot_.cpu_percent);
+  if(snapshot.process_cpu_valid)snapshot.process_cpu_percent=system_telemetry_snapshot_.cpu_percent.value;
+  snapshot.gpu_3d_percent_valid=valid_percent(system_telemetry_snapshot_.gpu_3d_percent);
+  if(snapshot.gpu_3d_percent_valid)snapshot.gpu_3d_percent=system_telemetry_snapshot_.gpu_3d_percent.value;
+  const auto valid_bytes=[](const TelemetryValue& value){return value.valid&&std::isfinite(value.value)&&value.value>=0.0&&value.value<=static_cast<double>((std::numeric_limits<std::uint64_t>::max)());};
+  snapshot.process_private_bytes_valid=valid_bytes(system_telemetry_snapshot_.ram_private_bytes);
+  if(snapshot.process_private_bytes_valid)snapshot.process_private_bytes=static_cast<std::uint64_t>(system_telemetry_snapshot_.ram_private_bytes.value);
+  snapshot.gpu_memory_valid=valid_bytes(system_telemetry_snapshot_.vram_usage_bytes)&&valid_bytes(system_telemetry_snapshot_.vram_budget_bytes);
+  if(snapshot.gpu_memory_valid){snapshot.gpu_usage_bytes=static_cast<std::uint64_t>(system_telemetry_snapshot_.vram_usage_bytes.value);snapshot.gpu_budget_bytes=static_cast<std::uint64_t>(system_telemetry_snapshot_.vram_budget_bytes.value);}
+ }
+ snapshot.vram_budget=vram_budget_snapshot();
 }
 
 VideoMemoryBreakdown Renderer::video_memory_breakdown() const {
@@ -642,6 +615,52 @@ Renderer::HarnessRequest Renderer::step_test_harness(const ScenePresentInputs* i
   harness_stage_=0;harness_wait_=0;harness_capture_lead_=0;};
  std::string detail;
  switch(command->verb){
+ case HarnessVerb::expect_value:{
+  if(d3d12_&&command->name=="native_physical_batches"){
+   finish(false,"value native_physical_batches unavailable: D3D12 does not populate this counter");
+   return HarnessRequest::none;
+  }
+  // Existing diagnostic owners only. No profiler activation or shadow
+  // counter maintained by the harness. Frame counters have not reset yet.
+  const std::pair<const char*,double> values[]={
+   {"native_logical_draws",double(native_frame_stats_.native_logical_draws)},
+   {"native_physical_batches",double(native_frame_stats_.native_physical_batches)},
+   {"native_shadow_draws",double(native_frame_stats_.native_shadow_draws)},
+   {"native_shadow_triangles",double(native_frame_stats_.native_shadow_triangles)},
+   {"native_compute_dispatches",double(native_frame_stats_.native_compute_dispatches)},
+   {"native_terrain_textured_draws",double(native_frame_stats_.native_terrain_textured_draws)},
+   {"native_terrain_untextured_draws",double(native_frame_stats_.native_terrain_untextured_draws)},
+   {"posed_draws",double(native_frame_stats_.native_world_kinds.posed)},
+   {"object_space_draws",double(native_frame_stats_.native_world_kinds.object_space)},
+   {"neighbour_draws",double(native_frame_stats_.native_world_kinds.neighbour)},
+   {"mesh_misses",double(perf_native_mesh_misses_)},
+   {"mesh_evictions",double(perf_native_mesh_evictions_)},
+   {"meshes",double(native_meshes_.size())},
+   {"geometry_live_bytes",double(native_geometry_live_bytes_)},
+   {"present_interval_ms",present_interval_ms_},
+   {"present_smoothed_ms",present_smoothed_ms_}
+  };
+  const auto found=std::find_if(std::begin(values),std::end(values),[&](const auto& v){return command->name==v.first;});
+  if(found==std::end(values)){
+   detail="expect value: unknown counter "+command->name+"; available:";
+   for(const auto& v:values)detail+=" "+std::string(v.first);
+   finish(false,detail);return HarnessRequest::none;
+  }
+  const double actual=found->second;
+  // The parser validated both: value holds the operator, expected the number.
+  const std::string& op=command->value;
+  const double expected=command->expected;
+  const bool ok=std::isfinite(actual)&&(op=="=="?actual==expected:op=="!="?actual!=expected:
+   op=="<"?actual<expected:op=="<="?actual<=expected:op==">"?actual>expected:op==">="&&actual>=expected);
+  char text[256];std::snprintf(text,sizeof(text),"value %s: actual=%.17g; expected %s %.17g",
+   command->name.c_str(),actual,op.c_str(),expected);
+  finish(ok,text);return HarnessRequest::none;
+ }
+ case HarnessVerb::expect_event_absent:
+ case HarnessVerb::expect_event_present:
+  // Acknowledge at this present; the game side then writes the log barrier.
+  finish(true,"event barrier emitted");
+  return HarnessRequest::none;
  case HarnessVerb::capture:
   if(harness_stage_==0){
    // Another capture or the outer frame recorder holds the profiler: wait
@@ -713,6 +732,13 @@ Renderer::HarnessRequest Renderer::step_test_harness(const ScenePresentInputs* i
   // overlay), the shot is written after this present's overlay pass and
   // cursor; otherwise it is the game's image.
   if(harness_stage_==1)return HarnessRequest::none;
+  // harness_hide_hud: the world alone, taken at the next world frame's
+  // world/interface boundary (take_harness_world_shot), written at its present.
+  if(configured_boolean(debug_overlay_.config(),"harness_hide_hud",false)){
+   harness_world_shot_=harness_directory()+command->name+".bmp";harness_world_shot_taken_=false;
+   harness_wait_=0;harness_stage_=1;
+   return HarnessRequest::none;
+  }
   if(configured_integer(debug_overlay_.config(),"critter_labels",0)||
      configured_boolean(debug_overlay_.config(),"harness_shot_after_overlay",false)){
    harness_overlay_shot_=harness_directory()+command->name+".bmp";harness_stage_=1;
@@ -835,6 +861,10 @@ Renderer::HarnessRequest Renderer::step_test_harness(const ScenePresentInputs* i
 // compile, tile families, every atlas painted, neighbour cover prepared), and
 // the neighbour stream has settled. Empty when ready; otherwise each unready
 // part with its reason. ready_detail describes the ready state.
+// D3D12 (#314): the load reveal's own state instead: this world epoch was
+// revealed and nothing load_reveal_waiting_on checks still waits (the
+// D3D11 ground cover/neighbour checks below read state that pass does
+// not keep on D3D12: neighbours there never prepare a cover pass).
 std::string Renderer::harness_unready_parts(std::string& ready_detail) noexcept try{
  std::string parts;
  const auto add=[&](const char* part,const char* why){
@@ -842,6 +872,19 @@ std::string Renderer::harness_unready_parts(std::string& ready_detail) noexcept 
   parts+=part;parts+=": ";parts+=why;};
  const std::uint64_t epoch=bridge_current_world_epoch();
  const auto identity=retained_static_scene_identity_snapshot();
+ if(d3d12_){
+  LoadRevealWait kind=LoadRevealWait::other;
+  const char* waiting=nullptr;
+  if(!epoch)add("world","no world epoch");
+  else if(load_reveal_revealed_epoch_!=epoch)add("load_reveal","this world epoch is not revealed yet");
+  else if((waiting=load_reveal_waiting_on(kind)))add("load_reveal",waiting);
+  char text[320]{};
+  std::snprintf(text,sizeof(text),"backend=d3d12 world_epoch=%llu revealed_epoch=%llu map=%s frame=%llu neighbours=%zu",
+   static_cast<unsigned long long>(epoch),static_cast<unsigned long long>(load_reveal_revealed_epoch_),
+   identity.main_outer_resource.c_str(),static_cast<unsigned long long>(native_frame_index_),neighbours_.accepted.size());
+  ready_detail=text;
+  return parts;
+ }
  if(!epoch)add("statics","no world epoch");
  else if(identity.status!=RetainedSceneIdentityStatus::published)
   add("statics",retained_scene_identity_status_name(identity.status));
@@ -890,14 +933,20 @@ const char* Renderer::load_reveal_world_wait() noexcept{
  const auto source=retained_static_terrain_source_snapshot();
  if(!source.map||!source.terrain)return "terrain source";
  if(ambient_terrain_frame_!=native_frame_index_)return "terrain frame";
+ // Terrain 2.0 draws a material without its atlas slice in the marker colour:
+ // wait while the active map's materials are still being copied (each frame
+ // under the hold; an undrawn page is uploaded, upload_undrawn_terrain_page).
+ // A refused page leaves pending at once; the hold's cap bounds the rest.
+ if(configured_terrain_blend(debug_overlay_.config())&&contact_map_generation_==ambient_map_generation_&&
+    (contact_maps_.pending&contact_used_))return "terrain materials";
  if(d3d12_&&configured_terrain_blend(debug_overlay_.config())){
   // Enabled Terrain 2.0 needs its own material rows even when cover is absent or off.
   if(contact_map_generation_!=ambient_map_generation_||!tile_blend_ready_)return "terrain tile families";
   // The flush can apply the rows after set_native_terrain_frame published
-  // this frame. Its terrain bit 4 still says no rows: that frame shows the
+  // this frame. Its uploaded blend still says no rows: that frame shows the
   // marker. Wait for a frame containing the rows, not just the finished job.
   // A completed attempt without rows remains a visible material failure.
-  if(tile_blend_rows_&&(native_spec_terrain_bits_&16u))return "terrain material frame";
+  if(tile_blend_rows_&&!native_terrain_blend_uploaded_)return "terrain material frame";
  }
  return nullptr;
 }
@@ -945,7 +994,14 @@ const char* Renderer::load_reveal_waiting_on(LoadRevealWait& kind) noexcept try{
  // disk cache off); revealing a mission before that leaves seconds of
  // heavier frames. The general programs are exact, so the menu's 3D
  // background (same key as play) shows at once and the sets keep building.
- if(bridge_local_single_player_mission()&&!native_specialisation_settled())return "shader specialisation";
+ // While every set still building is read from the prebuilt cache, this
+ // wait counts against the shader budget (10 s, shared with the warm-up;
+ // apply_load_reveal, #344). A set the x64 host compiles with FXC (not
+ // prebuilt, minutes) counts against the 3 s cap.
+ if(bridge_local_single_player_mission()&&!native_specialisation_settled()){
+  if(!native_specialisation_compiling())kind=LoadRevealWait::specialisation;
+  return "shader specialisation";
+ }
  if(const char* cover=load_reveal_ground_cover_wait())return cover;
  // Terrain meshes around the camera in every direction, so a turn of the
  // camera after the reveal creates none (laptop j199/j201 pf 618: 393 at once).
@@ -961,6 +1017,28 @@ const char* Renderer::load_reveal_waiting_on(LoadRevealWait& kind) noexcept try{
   if(rt12_.frame!=UINT64_MAX&&(d3d12_->raytracing_compaction_pending()||native_frame_index_<rt12_.statics_busy_frame+kGpuFrames))
    return "ray tracing statics";
  }
+ // D3D12: the pipelines still building behind the menu (#325: the start
+ // waited only for the menu's). Never for the main menu's own reveal. Not
+ // capped: a first draw of one still building would compile in play.
+ if(load_reveal_holding_&&d3d12_){
+  std::string map=retained_static_scene_identity_snapshot().main_outer_resource;
+  for(char& c:map)if(c>='A'&&c<='Z')c=static_cast<char>(c-'A'+'a');
+  const bool world=!map.empty()&&map.find("mainmenu")==std::string::npos;
+  // First run: the pipelines after the menu's, for the preset the graphics
+  // check chose (never during the check, which times menu frames).
+  if(world&&pipeline_rest_pending_){
+   pipeline_rest_pending_=false;
+   d3d12_pipeline_features_|=d3d12_features_for_settings(debug_overlay_.config(),!d3d12_->raytracing_unavailable());
+   (void)d3d12_->request_pipelines(d3d12_pipeline_features_,false);
+  }
+  std::size_t done=0,total=0;
+  if(d3d12_->pipelines_building(done,total)){
+   if(world){
+    char text[128];std::snprintf(text,sizeof(text),ui_text("Preparing graphics: %zu / %zu"),done,total);
+    pipeline_notice_=text;kind=LoadRevealWait::pipelines;return "pipelines";
+   }
+  }
+ }
  // The driver has compiled every combination a later first draw would
  // (pump_pipeline_warmup runs each held frame, alongside the waits above).
  if(load_reveal_holding_&&!warmup_done_)return "pipeline warm-up";
@@ -974,7 +1052,7 @@ const char* Renderer::load_reveal_waiting_on(LoadRevealWait& kind) noexcept try{
 // they wait). Components that never waited during this hold do not count.
 // 1 means every component has finished. Called after load_reveal_waiting_on.
 float Renderer::load_reveal_progress() noexcept try{
- std::array<std::size_t,6> remaining{};
+ std::array<std::size_t,7> remaining{};
  remaining[0]=load_reveal_world_wait()?1:0;
  const auto source=retained_static_terrain_source_snapshot();
  if(configured_boolean(debug_overlay_.config(),"neighbour_maps",true)&&source.map){
@@ -991,6 +1069,7 @@ float Renderer::load_reveal_progress() noexcept try{
   if(!gc_place_cs_&&gc_compile_done_&&gc_compile_total_>gc_compile_done_->load())left+=gc_compile_total_-gc_compile_done_->load();
   remaining[4]=left;
  }
+ if(load_reveal_holding_&&d3d12_){std::size_t done=0,total=0;if(d3d12_->pipelines_building(done,total))remaining[6]=total>done?total-done:1;}
  if(load_reveal_holding_&&!warmup_done_)
   remaining[5]=1+(warmup_items_>warmup_next_?warmup_items_-warmup_next_:0)+(warmup_items_?0:1);
  float sum=0;unsigned counted=0;
@@ -1020,162 +1099,13 @@ void address_space_mb(std::uint64_t& used,std::uint64_t& largest_free,bool walk)
  largest_free>>=20;
 }
 
-// Doll bug (2026-11-06, settled): a line in memory_failures.log for each failed
-// operator new (the first few, then powers of two) with the requested size and the caller.
-namespace {
-std::uint64_t private_bytes_mb() noexcept {
- PROCESS_MEMORY_COUNTERS_EX counters{};counters.cb=sizeof(counters);
- return GetProcessMemoryInfo(GetCurrentProcess(),reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters),sizeof(counters))
-  ?counters.PrivateUsage>>20:0;
-}
-}  // namespace
-
-
-// Called from the failing operator new: no heap use (fixed buffers, Win32 file calls).
-void report_allocation_failure(std::size_t bytes,const void* caller) noexcept {
- static std::atomic<std::uint32_t> failures{0};
- const std::uint32_t count=failures.fetch_add(1,std::memory_order_relaxed)+1;
- if(count>4&&(count&(count-1)))return;
- char folder[MAX_PATH]{};
- DWORD length=GetEnvironmentVariableA("EI_RENDERER_DEBUG_DIR",folder,MAX_PATH);
- char path[MAX_PATH+40]{};
- if(length&&length<MAX_PATH)std::snprintf(path,sizeof(path),"%s\\memory_failures.log",folder);
- else{
-  length=GetEnvironmentVariableA("LOCALAPPDATA",folder,MAX_PATH);
-  if(!length||length>=MAX_PATH)return;
-  std::snprintf(path,sizeof(path),"%s\\EID3D11\\memory_failures.log",folder);
- }
- HMODULE module=nullptr;
- GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-  reinterpret_cast<LPCWSTR>(&report_allocation_failure),&module);
- const auto base=reinterpret_cast<std::uintptr_t>(module);
- const auto at=reinterpret_cast<std::uintptr_t>(caller);
- std::uint64_t used=0,largest=0;address_space_mb(used,largest,true);
- SYSTEMTIME time{};GetLocalTime(&time);
- char line[640];
- int size=std::snprintf(line,sizeof(line),
-  "%02u:%02u:%02u.%03u pid=%lu bits=%u failure=%u bytes=%llu caller=%p rva=%08llX thread=%lu va_used_mb=%llu va_largest_free_mb=%llu private_mb=%llu stack_rva=",
-  time.wHour,time.wMinute,time.wSecond,time.wMilliseconds,GetCurrentProcessId(),
-  static_cast<unsigned>(sizeof(void*)*8),count,static_cast<unsigned long long>(bytes),caller,
-  static_cast<unsigned long long>(at>=base?at-base:0),GetCurrentThreadId(),
-  static_cast<unsigned long long>(used),static_cast<unsigned long long>(largest),
-  static_cast<unsigned long long>(private_bytes_mb()));
- if(size<=0||size>=static_cast<int>(sizeof(line)))return;
- // The direct caller is often a folded allocator helper: the callers above it
- // name the owner (this module's frames as RVAs, others as addresses).
- void* frames[12]{};
- const USHORT captured=RtlCaptureStackBackTrace(1,12,frames,nullptr);
- for(USHORT n=0;n<captured&&size<static_cast<int>(sizeof(line))-24;++n){
-  const auto frame=reinterpret_cast<std::uintptr_t>(frames[n]);
-  HMODULE owner=nullptr;
-  GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-   reinterpret_cast<LPCWSTR>(frames[n]),&owner);
-  const int added=owner==module
-   ?std::snprintf(line+size,sizeof(line)-size,"%08llX,",static_cast<unsigned long long>(frame-base))
-   :std::snprintf(line+size,sizeof(line)-size,"@%p,",frames[n]);
-  if(added<=0)break;
-  size+=added;
- }
- if(size>static_cast<int>(sizeof(line))-3)size=static_cast<int>(sizeof(line))-3;
- line[size++]='\r';line[size++]='\n';
- const HANDLE file=CreateFileA(path,FILE_APPEND_DATA,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
- if(file==INVALID_HANDLE_VALUE)return;
- DWORD written=0;
- WriteFile(file,line,static_cast<DWORD>((std::min)(size,static_cast<int>(sizeof(line)-1))),&written,nullptr);
- CloseHandle(file);
-}
-namespace {
-
-// Temporary (VA diet, 2026-10-12): who holds the address space at a load,
-// one va_regions line per load_reveal. Reserved and committed bytes by
-// region type; mapped files grouped by allocation and named (the NVIDIA
-// disk shader cache .nvph, the game .res archives, others); the largest
-// private allocations (driver and heap reservations). Remove once the VA
-// owners are settled.
-#ifndef EID3D11_EMBEDDED
-void report_address_space_regions() noexcept try{
- struct Allocation{std::uint64_t bytes=0;const void* base=nullptr;wchar_t name[48]{};};
- constexpr std::size_t kListed=4; // lines listed per class (report width only)
- Allocation mapped_top[kListed]{},private_top[kListed]{};
- const auto keep=[](Allocation (&top)[kListed],const Allocation& a){
-  for(std::size_t n=0;n<kListed;++n)if(a.bytes>top[n].bytes){
-   for(std::size_t m=kListed-1;m>n;--m)top[m]=top[m-1];
-   top[n]=a;return;
-  }
- };
- std::uint64_t image=0,mapped=0,nvph=0,res=0,private_commit=0,private_reserve=0,free_bytes=0;
- unsigned mapped_count=0,private_count=0;
- SYSTEM_INFO info{};GetSystemInfo(&info);
- auto* address=static_cast<std::uint8_t*>(info.lpMinimumApplicationAddress);
- MEMORY_BASIC_INFORMATION region{};
- Allocation current{};DWORD current_type=0;
- const auto finish=[&]{
-  if(!current.base)return;
-  if(current_type==MEM_MAPPED){
-   ++mapped_count;
-   wchar_t path[MAX_PATH]{};
-   if(GetMappedFileNameW(GetCurrentProcess(),const_cast<void*>(current.base),path,MAX_PATH)){
-    const wchar_t* slash=std::wcsrchr(path,L'\\');const wchar_t* name=slash?slash+1:path;
-    wcsncpy_s(current.name,name,_TRUNCATE);
-    const std::size_t length=std::wcslen(name);
-    const auto ends=[&](const wchar_t* suffix){const std::size_t s=std::wcslen(suffix);return length>=s&&_wcsicmp(name+length-s,suffix)==0;};
-    if(ends(L".nvph"))nvph+=current.bytes;else if(ends(L".res"))res+=current.bytes;
-   }
-   keep(mapped_top,current);
-  }else if(current_type==MEM_PRIVATE){++private_count;keep(private_top,current);}
-  current={};
- };
- while(address<info.lpMaximumApplicationAddress&&VirtualQuery(address,&region,sizeof(region))==sizeof(region)){
-  const std::uint64_t size=region.RegionSize;
-  if(region.State==MEM_FREE){finish();free_bytes+=size;}
-  else{
-   if(region.AllocationBase!=current.base){finish();current.base=region.AllocationBase;current_type=region.Type;}
-   current.bytes+=size;
-   if(region.Type==MEM_IMAGE)image+=size;
-   else if(region.Type==MEM_MAPPED)mapped+=size;
-   else if(region.State==MEM_COMMIT)private_commit+=size;else private_reserve+=size;
-  }
-  address=static_cast<std::uint8_t*>(region.BaseAddress)+region.RegionSize;
- }
- finish();
- std::string text;char part[160];
- std::snprintf(part,sizeof(part),"image_mb=%llu mapped_mb=%llu (nvph=%llu res=%llu allocations=%u) private_commit_mb=%llu private_reserve_mb=%llu (allocations=%u) free_mb=%llu",
-  static_cast<unsigned long long>(image>>20),static_cast<unsigned long long>(mapped>>20),static_cast<unsigned long long>(nvph>>20),
-  static_cast<unsigned long long>(res>>20),mapped_count,static_cast<unsigned long long>(private_commit>>20),
-  static_cast<unsigned long long>(private_reserve>>20),private_count,static_cast<unsigned long long>(free_bytes>>20));
- text=part;
- text+=" mapped_top=";
- for(const auto& a:mapped_top)if(a.bytes){std::snprintf(part,sizeof(part),"%ls:%llu,",a.name[0]?a.name:L"?",static_cast<unsigned long long>(a.bytes>>20));text+=part;}
- text+=" private_top=";
- for(const auto& a:private_top)if(a.bytes){std::snprintf(part,sizeof(part),"%p:%llu,",a.base,static_cast<unsigned long long>(a.bytes>>20));text+=part;}
- // Whose heap holds the private commit: the process heap is the
- // renderer's (static UCRT) shared with Windows and the driver; the other
- // heap over 4 MB is game.exe's own CRT heap (a heap walk found the game's
- // figure objects there, 2026-10-13). committed/reserved MB per heap.
- {HANDLE heaps[64];const DWORD count=GetProcessHeaps(64,heaps);const HANDLE process_heap=GetProcessHeap();
-  text+=" heaps=";
-  for(DWORD n=0;n<count&&n<64;++n){
-   HEAP_SUMMARY summary{};summary.cb=sizeof(summary);
-   if(!HeapSummary(heaps[n],0,&summary)||summary.cbCommitted<(4u<<20))continue;
-   std::snprintf(part,sizeof(part),"%s%p:%llu/%llu,",heaps[n]==process_heap?"process@":"",heaps[n],
-    static_cast<unsigned long long>(summary.cbCommitted>>20),static_cast<unsigned long long>(summary.cbReserved>>20));
-   text+=part;
-  }}
- bridge_report_event("va_regions",text.c_str());
-}catch(...){}
-#else
-void report_address_space_regions() noexcept {  }
-#endif
-}  // namespace
-
-// Core mode, game process: one core_game_va line (used and largest free) and
-// the same va_regions line per load (renderer_game.cpp core_present).
+// Core mode, game process: one core_game_va line (used and largest free) per load
+// (renderer_game.cpp core_present).
 void report_game_address_space(std::uint64_t world_epoch) noexcept try{
  std::uint64_t used=0,largest=0;address_space_mb(used,largest,true);
  char text[128];std::snprintf(text,sizeof(text),"world_epoch=%llu va_used_mb=%llu va_largest_free_mb=%llu",
   static_cast<unsigned long long>(world_epoch),static_cast<unsigned long long>(used),static_cast<unsigned long long>(largest));
  bridge_report_event("core_game_va",text);
- report_address_space_regions();
 }catch(...){}
 
 // Upload buffers and staging grow to the largest single frame's demand (a
@@ -1210,15 +1140,24 @@ template<class Map> void compact_map(Map& map) {
 }
 }  // namespace
 
-// A world change is a clean slate (user decision 2026-10-13): every
-// world-scoped resource and store of the previous world goes here, at the
-// first engine frame of the new world epoch (begin_engine_frame, after the
-// previous frame's flush: no draw pending). Nothing is kept at the previous
-// world's high-water size; each store regrows through its own ensure step at
-// the new world's demand. Kept: shader programs and specialisation sets,
-// pipeline states, resolution/setting-sized targets (swap chain, post,
-// shadow maps, AO, fog volume, sky), UI caches and live client-surface
-// textures (the game owns those surfaces; they go with retire_surface).
+// A world change keeps what the next world reuses (user decision 2026-11-21,
+// #289, replacing the clean slate of 2026-10-13): the main map's meshes on
+// the general geometry pages and the owned textures stay, keyed by their
+// resource identity (archive, offset, size and name; never a pointer), and
+// a lookup of the same key in the new world adopts them without an upload.
+// What the new world does not use goes in two steps (update_world_reuse):
+// once its main source is published, the previous map's own models it does
+// not place (and its terrain) before they would be uploaded; once it is
+// revealed and its neighbours settled, everything kept and not adopted.
+// Every other world-scoped resource and store of the previous world goes
+// here, at the first engine frame of the new world epoch (begin_engine_frame,
+// after the previous frame's flush: no draw pending), and regrows through its
+// own ensure step at the new world's demand: neighbour pieces and their
+// dedicated pages, world buffers and tables, terrain pages, the impostor
+// atlas. Kept as before: shader programs and specialisation sets, pipeline
+// states, resolution/setting-sized targets (swap chain, post, shadow maps,
+// AO, fog volume, sky), UI caches and live client-surface textures (the game
+// owns those surfaces; they go with retire_surface).
 //
 // Handles held outside (bridge plans, retained scene, terrain front end) are
 // all generation/identity checked; prepared slots restart above their
@@ -1232,6 +1171,7 @@ template<class Map> void compact_map(Map& map) {
 // already restarted it for this new world (held: neighbour_maps_restart,
 // core mode), which this releases instead.
 void Renderer::release_world_state() noexcept try{
+ log_map_pools("at the map change (the map's peak)");
  discard_world_map_markers();
  clear_world_map_preview_gpu();
  // Neighbour draws first: they index the instance records cleared below.
@@ -1243,6 +1183,8 @@ void Renderer::release_world_state() noexcept try{
  for(auto& slot:native_prepared_mesh_slots_){
   native_prepared_mesh_generation_floor_=(std::max)(native_prepared_mesh_generation_floor_,slot.generation);
   slot.mesh=nullptr;slot.active=false;}
+ // Their references to kept meshes go with them (no draw is pending here).
+ for(auto& item:native_meshes_){item.second.owned_references=item.second.pending_references=0;}
  for(auto& slot:native_prepared_material_slots_)
   native_prepared_material_generation_floor_=(std::max)(native_prepared_material_generation_floor_,slot.generation);
  release_storage(native_prepared_mesh_slots_);release_storage(native_prepared_material_slots_);
@@ -1276,6 +1218,13 @@ void Renderer::release_world_state() noexcept try{
  // new range's generation and its record was never prepared (the screen-
  // centre streak: a zero world vertex projects to clip (0,0,0,0)).
  native12_.world_states.reset();native12_.world_vertices.reset();
+ // The world flush's per-frame buffers and the deferred sets' own copies go
+ // with their world too (as D3D11's per-frame buffers do): they only grow in
+ // play (native_d3d12_frame_buffer), so the new map sizes them again to its
+ // own flushes under the load picture (#289 sizing audit).
+ native12_.dynamic.reset();native12_.work.reset();native12_.arguments.reset();native12_.visible.reset();
+ native12_.prepared.reset();native12_.owners.reset();native12_.indices.reset();
+ for(auto& slot:native_slot_buffers12_)slot={};
  native_pose_nodes_.Reset();native_pose_node_srv_.Reset();native_pose_node_uav_.Reset();
  native_pose_node_capacity_=native_pose_node_used_=0;
  native_animation_.Reset();native_animation_srv_.Reset();native_animation_uav_.Reset();
@@ -1292,24 +1241,35 @@ void Renderer::release_world_state() noexcept try{
  native_prepared_vertex_capacity_=0;
  native_indirect_args_.Reset();native_indirect_args_uav_.Reset();native_indirect_args_capacity_=0;
  release_world_upload_peaks();
- // Geometry: every mesh and morph, and every page (general and neighbour
- // prebuilt); the arena restarts at its initial 16 bytes.
- native_meshes_.clear();release_storage(native_meshes_);
- if(FAILED(create_native_geometry_arena())){
-  native_geometry_pages_.clear();
-  bridge_append_probe_event("world_gc_failed","geometry arena could not be recreated; world geometry omitted until the next device");
+ // Geometry: the meshes on the general pages stay for the next world
+ // (update_world_reuse); the neighbours' dedicated pages and every mesh on
+ // them go (their pieces were released above).
+ world_reuse_kept_meshes_=world_reuse_kept_bytes_=0;
+ for(auto& item:native_meshes_){
+  auto& mesh=item.second;const UINT page=mesh.allocation.page;
+  if(page<native_geometry_pages_.size()&&native_geometry_pages_[page].dedicated){mesh.retiring=true;continue;}
+  ++world_reuse_kept_meshes_;world_reuse_kept_bytes_+=mesh.allocation.bytes;
  }
+ erase_retiring_native_meshes();
+ for(std::size_t index=1;index<native_geometry_pages_.size();++index){
+  auto& page=native_geometry_pages_[index];if(!page.dedicated)continue;
+  page.buffer.Reset();page.srv.Reset();page.d3d12.reset();page.capacity=0;page.high_water=16;page.free.clear();page.live=0;
+ }
+ {std::uint64_t live=0;for(const auto& item:native_meshes_)live+=item.second.allocation.bytes;native_geometry_live_bytes_=native_mesh_resident_bytes_=live;}
+ release_empty_native_geometry_pages();
+ // The reuse steps start here (update_world_reuse): when the new map's main
+ // source is already published, the previous map's own models it does not
+ // place go first; then the kept meshes are packed into fresh pages (spread
+ // over the previous world's pages they held nearly every page with its
+ // holes, #289: switch peaks +0.5-0.9 GB).
+ world_reuse_pending_=true;world_reuse_early_done_=false;world_reuse_frame_=native_frame_index_;world_reuse_queue_=native_queue_epoch_;
+ world_reuse_release_generation_=world_reuse_current_.generation;world_reuse_early_meshes_=world_reuse_early_bytes_=0;
+ update_world_reuse();
+ compact_kept_native_geometry();
  dedicated_geometry_stale_=dedicated_geometry_remaining_=false;native_cache_older_owned_meshes_=0;
- // Owned textures: everything but live client-surface copies and camp
- // aliases, with their immutable array slices and pages.
- {std::lock_guard<std::mutex> guard(native_owned_textures_lock_);
- for(auto entry=native_owned_textures_.begin();entry!=native_owned_textures_.end();){
-  const auto& value=entry->second;
-  if(value.camp_surface_alias||(value.surface_id&&!value.detached_copy)){++entry;continue;}
-  drop_native_texture_array_slots(value.backing,true);
-  entry=native_owned_textures_.erase(entry);
- }}
- neighbour_textures_clear();
+ // Owned textures stay for the next world too (the neighbour stream's
+ // resident keys with them); the reuse sweep retires the unadopted ones.
+ world_reuse_kept_textures_=native_owned_textures_.size();
  terrain_textures_d3d12_.clear();terrain_pages_d3d12_={}; // D3D12 backend: the terrain pages of the released world
  {std::lock_guard<std::mutex> guard(native_owned_textures_lock_);compact_map(native_owned_textures_);}compact_map(native_texture_arrays_);
  // Impostor atlas (the bake pipeline and its fixed depth target stay).
@@ -1344,7 +1304,8 @@ void Renderer::release_world_state() noexcept try{
  // and the retained scene's frame scratch.
  bridge_release_world_caches();
  owned_resource_runtime_release_world_bookkeeping();
- // The mesh cache's own epoch bookkeeping: nothing older is left to sweep.
+ // The mesh cache's own epoch bookkeeping: the kept meshes and textures are
+ // swept by the reuse steps (update_world_reuse), not the epoch sweep.
  native_cache_world_epoch_=bridge_current_world_epoch();native_cache_epoch_frame_=native_frame_index_;
  native_cache_epoch_sweep_pending_=native_texture_epoch_sweep_pending_=false;
  native_texture_epoch_queue_=native_queue_epoch_;
@@ -1412,6 +1373,7 @@ void Renderer::apply_load_reveal() noexcept try{
   frame_acct::g_in_play.store(false,std::memory_order_relaxed);
   bridge_set_load_reveal(load_reveal_holding_,load_reveal_revealed_epoch_);
   load_reveal_first_world_=load_reveal_last_world_=0;load_reveal_held_ms_=load_reveal_neighbour_held_ms_=0;
+  load_reveal_shader_held_ms_=0;load_reveal_shader_capped_=false;
   load_reveal_frames_=0;load_reveal_va_peak_=0;load_reveal_waits_={};
   load_reveal_progress_peak_={};load_reveal_perches_ready_=false;
   (void)take_load_cursor_presents(); // counted from this hold on
@@ -1446,21 +1408,47 @@ void Renderer::apply_load_reveal() noexcept try{
  const double ms_per_tick=1000.0/static_cast<double>(perf_frequency());
  const double prepared_ms=static_cast<double>(now-load_reveal_first_world_)*ms_per_tick;
  // The stuck-load caps count held time, each world frame adding at most
- // 250 ms: one slow frame (pipeline creation on a cold driver shader cache,
- // a weak PC) took the whole 3 s and revealed with neighbours still streaming.
- // Frames held for the neighbour stream count against their own 10 s cap
- // (its below-normal decoders lose a contended CPU: lod_ms 1741 against 182
- // for the same map in one run), every other wait against 3 s.
- constexpr double kCapMs=3000.0,kNeighbourCapMs=10000.0,kCapFrameMs=250.0;
- const double frame_ms=(std::min)(kCapFrameMs,static_cast<double>(now-load_reveal_last_world_)*ms_per_tick);
+ // 250 ms for the data it waits on: one slow frame (pipeline creation on a
+ // cold driver shader cache, a weak PC) took the whole 3 s and revealed with
+ // neighbours still streaming. Frames held for the neighbour stream count
+ // against their own 10 s cap (its below-normal decoders lose a contended
+ // CPU: lod_ms 1741 against 182 for the same map in one run), every other
+ // wait against 3 s. The pipeline warm-up is optional work (a pipeline it
+ // misses compiles at its first draw): its own time, and a frame held for it
+ // alone, count in full. Counted at 250 ms a frame, a cold Intel shader cache
+ // (held frames of about 5 s, warm draws compiling) held zone18 for 60 s
+ // against the 3 s cap (#304, laptop j118 B2).
+ // #344 (user decision: "10 s cap"): the shader-set wait and the pipeline
+ // warm-up share their own 10 s budget of held time, apart from the 3 s cap.
+ // Revealed after 3 s with sets still building and the warm-up cut short,
+ // each set was bound the frame it landed and its draws, like the warm-up's
+ // missed ones, compiled on the render thread in play (Iris Xe, D3D11
+ // Lowest: 0.3-2.5 s records for 10 s, 0.5-2 fps). A set the x64 host
+ // compiles with FXC (not prebuilt, minutes) counts against the 3 s cap.
+ constexpr double kCapMs=3000.0,kNeighbourCapMs=10000.0,kCapFrameMs=250.0,kShaderCapMs=10000.0;
+ const double elapsed_ms=static_cast<double>(now-load_reveal_last_world_)*ms_per_tick;
  load_reveal_last_world_=now;
- if(!d3d12_&&load_reveal_holding_&&(load_reveal_held_ms_<kCapMs||load_reveal_neighbour_held_ms_<kNeighbourCapMs))
+ double warm_ms=0.0;
+ if(!d3d12_&&load_reveal_holding_&&(load_reveal_held_ms_<kCapMs||load_reveal_neighbour_held_ms_<kNeighbourCapMs||
+    load_reveal_shader_held_ms_<kShaderCapMs)){
+  const std::int64_t warm_begin=perf_now();
   pump_pipeline_warmup();
+  load_reveal_last_world_=perf_now(); // the next frame's elapsed time excludes this warm-up
+  warm_ms=static_cast<double>(load_reveal_last_world_-warm_begin)*ms_per_tick;
+ }
  LoadRevealWait kind=LoadRevealWait::other;
  const char* waiting=load_reveal_waiting_on(kind);
  const bool neighbour_wait=waiting&&kind==LoadRevealWait::neighbours;
- (neighbour_wait?load_reveal_neighbour_held_ms_:load_reveal_held_ms_)+=frame_ms;
- if(waiting&&(neighbour_wait?load_reveal_neighbour_held_ms_<kNeighbourCapMs:load_reveal_held_ms_<kCapMs)){
+ const bool warmup_only=waiting&&!warmup_done_&&std::strcmp(waiting,"pipeline warm-up")==0;
+ // The shader budget takes all warm-up time and the whole of each frame held
+ // for the sets or the warm-up; the other waits count as before.
+ const bool shader_wait=kind==LoadRevealWait::specialisation||warmup_only;
+ load_reveal_shader_held_ms_+=warm_ms+(shader_wait?elapsed_ms:0.0);
+ if(!shader_wait)(neighbour_wait?load_reveal_neighbour_held_ms_:load_reveal_held_ms_)+=(std::min)(kCapFrameMs,elapsed_ms);
+ const bool within=kind==LoadRevealWait::pipelines||(shader_wait?load_reveal_shader_held_ms_<kShaderCapMs:
+  neighbour_wait?load_reveal_neighbour_held_ms_<kNeighbourCapMs:load_reveal_held_ms_<kCapMs);
+ if(waiting&&shader_wait&&!within)load_reveal_shader_capped_=true;
+ if(waiting&&within){
   for(auto& entry:load_reveal_waits_){
    if(entry.first==waiting){++entry.second;break;}
    if(!entry.first){entry={waiting,1};break;}
@@ -1491,6 +1479,8 @@ void Renderer::apply_load_reveal() noexcept try{
      ui.draws=&draw;ui.draw_count=1;
      (void)d3d12_->draw_ui(ui);
      if(load_progress_movie_valid_)draw_load_progress(load_reveal_progress());
+     // The top-left "Preparing graphics" notice over the held picture (#325).
+     if(kind==LoadRevealWait::pipelines)debug_overlay_.render_again();
     }else{
      const float black[4]={0,0,0,1};
      const RECT whole{0,0,LONG(output_width_),LONG(output_height_)};
@@ -1517,6 +1507,13 @@ void Renderer::apply_load_reveal() noexcept try{
  // still on screen and the game paused: D3D12 pipelines first created since
  // the last save are written now, not in play.
  if(d3d12_&&load_reveal_holding_)d3d12_->save_new_pipelines();
+ // Developer mode (#289): the memory reports of this load, here while the
+ // picture is still up and the game paused, never on a play frame (#344:
+ // run on the first frame after the reveal they were a 600 ms hitch on the
+ // 3070 laptop). The breakdown reads renderer state (this thread); the
+ // host-memory walks go to their worker, as on Shift+F11.
+ if(load_reveal_holding_&&renderer_developer_mode()){report_vram_owners();report_host_memory_async();}
+ if(!pipeline_pending_)pipeline_notice_.clear(); // the hold's "Preparing graphics" (#325)
  address_space_mb(used,largest,true);
  load_reveal_va_peak_=(std::max)(load_reveal_va_peak_,used);
  const MainLoadTiming timing=retained_static_main_load_timing();
@@ -1529,7 +1526,7 @@ void Renderer::apply_load_reveal() noexcept try{
   waits+=entry.first;waits+=':';waits+=std::to_string(entry.second);
  }
  if(waits.empty())waits="none";
- char text[896];
+ char text[1024];
  // The progress movie during the hold: its held frame, frame count and the
  // frames advanced past the held one (none: no progress movie behind the hold).
  char progress[96]="none";
@@ -1537,15 +1534,16 @@ void Renderer::apply_load_reveal() noexcept try{
   std::snprintf(progress,sizeof(progress),"shown=%u/%u advanced=%.2f%s",load_progress_movie_.shown,load_progress_movie_.frames,
    static_cast<double>(load_progress_movie_.position),(!load_progress_movie_.source && load_progress_movie_.after.empty())?" (not decoded)":"");
  std::snprintf(text,sizeof(text),
-  "waited=%s result=%s hold=%s map=%s world_epoch=%llu game_load_ms=%.0f owned_decode_wait_ms=%.0f prepare_ms=%.0f held_ms=%.0f neighbour_held_ms=%.0f held_frames=%u waiting_on=%s neighbours=%zu va_used_mb=%llu va_peak_mb=%llu va_largest_free_mb=%llu spec_sets=%zu spec_resident=%zu spec_building=%d warm_draws=%u load_progress=%s held_present_hz=%.1f load_cursor_presents=%u",
+  "waited=%s result=%s hold=%s map=%s world_epoch=%llu game_load_ms=%.0f owned_decode_wait_ms=%.0f prepare_ms=%.0f held_ms=%.0f neighbour_held_ms=%.0f held_frames=%u waiting_on=%s neighbours=%zu va_used_mb=%llu va_peak_mb=%llu va_largest_free_mb=%llu spec_sets=%zu spec_resident=%zu spec_building=%d warm_draws=%u warm_items=%zu shader_held_ms=%.0f/%.0f shader_cap=%s spec_programs_left=%zu warm_left=%zu load_progress=%s held_present_hz=%.1f load_cursor_presents=%u",
   waits.c_str(),waiting?"capped":"ready",load_reveal_holding_?"on":"off",identity.main_outer_resource.c_str(),
   static_cast<unsigned long long>(epoch),load_ms,static_cast<double>(timing.owned_wait_qpc)*ms_per_tick,prepared_ms,load_reveal_held_ms_,load_reveal_neighbour_held_ms_,
   load_reveal_frames_,waiting?waiting:"none",neighbours_.accepted.size(),
   static_cast<unsigned long long>(used),static_cast<unsigned long long>(load_reveal_va_peak_),static_cast<unsigned long long>(largest),
-  native_spec_sets_.size(),static_cast<std::size_t>(std::count_if(native_spec_sets_.begin(),native_spec_sets_.end(),[](const auto& set){return set.second[0]!=nullptr;})),static_cast<int>(native_spec_jobs_.size()),warmup_draws_,progress,
+  native_spec_sets_.size(),static_cast<std::size_t>(std::count_if(native_spec_sets_.begin(),native_spec_sets_.end(),[](const auto& set){return set.second[0]!=nullptr;})),static_cast<int>(native_spec_jobs_.size()),warmup_draws_,warmup_items_,
+  load_reveal_shader_held_ms_,kShaderCapMs,load_reveal_shader_capped_?"hit":"no",native_specialisation_programs_remaining(),
+  warmup_done_?std::size_t{0}:warmup_items_>warmup_next_?warmup_items_-warmup_next_:std::size_t{0},progress,
   prepared_ms>0.0?1000.0*load_reveal_frames_/prepared_ms:0.0,take_load_cursor_presents());
  bridge_report_event("load_reveal",text);
- report_address_space_regions();
  load_reveal_tracking_=load_reveal_holding_=false;load_picture_.Reset();load_picture12_.reset();
  load_progress_movie_={};load_progress_movie_valid_=false;cancel_load_progress_decode();
  load_reveal_revealed_epoch_=epoch;bridge_set_load_reveal(enabled,epoch);
@@ -1580,6 +1578,18 @@ static std::string rt_preset_summary(const RendererConfig& config){
 // Sets an F10 option for this session only (nothing is saved). Options that
 // the renderer reads once at device creation take effect on the next launch.
 bool Renderer::apply_harness_config(const HarnessCommand& command,std::string& detail) noexcept {
+ // The first-start introduction's Continue (#274): the harness has no clicks.
+ if(command.name=="intro"){
+  if(command.value!="continue"){detail="intro: continue";return false;}
+  const bool ok=debug_overlay_.continue_intro();
+  detail=ok?"intro continued":"no introduction open";return ok;
+ }
+ // The F10 key itself, through the code the key runs (#274).
+ if(command.name=="f10"){
+  if(command.value!="plain"&&command.value!="shift"){detail="f10: plain|shift";return false;}
+  debug_overlay_.press_f10(command.value=="shift");
+  detail=debug_overlay_.settings_open()?"f10 pressed: settings open":"f10 pressed: settings closed";return true;
+ }
  const bool ok=apply_config_value(debug_overlay_.config(),command,detail);
  if(command.name=="graphics_preset"||command.name.compare(0,3,"rt_")==0)detail+=rt_preset_summary(debug_overlay_.config());
  return ok;
@@ -1602,12 +1612,12 @@ static bool apply_config_value(RendererConfig& config,const HarnessCommand& comm
   config.set_overlay_mode(mode);detail="overlay set";return true;
  }
  if(command.name=="graphics_preset"){
-  static constexpr const char* names[]={"low","medium","high","ultra"};
-  for(int p=0;p<4;++p) if(command.value==names[p]){
+  static constexpr const char* names[]={"lowest","low","medium","high","ultra"};
+  for(int p=0;p<kGraphicsPresetCount;++p) if(command.value==names[p]){
    const std::size_t changed=apply_graphics_preset(config,static_cast<GraphicsPreset>(p));
    detail="graphics_preset "+command.value+" applied ("+std::to_string(changed)+" options changed)";return true;
   }
-  detail="graphics_preset: low|medium|high|ultra";return false;
+  detail="graphics_preset: lowest|low|medium|high|ultra";return false;
  }
  if(command.name=="debug_view"){
   DebugResourceView view{};
@@ -1730,6 +1740,65 @@ bool Renderer::write_profile_image_d3d12(const std::string& path,std::string& de
   }
   return write_bgra_bmp(path,bgra.data(),width,height,width*4u,detail);
  }catch(...){detail="allocation failed";return false;}
+}
+
+// harness_hide_hud: at the world/interface boundary (the world composited to
+// the output, no interface drawn yet), a copy of the output for a pending shot.
+void Renderer::take_harness_world_shot() noexcept try{
+ if(harness_world_shot_.empty()||harness_world_shot_taken_)return;
+ if(d3d12_){
+  if(!harness_world_shot12_||!d3d12_->texture_matches(*harness_world_shot12_,output_width_,output_height_,DXGI_FORMAT_B8G8R8A8_UNORM)){
+   harness_world_shot12_.reset();
+   if(FAILED(d3d12_->create_texture(output_width_,output_height_,DXGI_FORMAT_B8G8R8A8_UNORM,harness_world_shot12_))){harness_world_shot12_.reset();return;}
+  }
+  if(d3d12_->capture(*harness_world_shot12_,0,0,RECT{0,0,LONG(output_width_),LONG(output_height_)})!=S_OK)return;
+ }else{
+  ComPtr<ID3D11Texture2D> back;
+  if(!swap_||FAILED(swap_->GetBuffer(0,IID_PPV_ARGS(&back))))return;
+  D3D11_TEXTURE2D_DESC desc{};back->GetDesc(&desc);
+  D3D11_TEXTURE2D_DESC kept{};if(harness_world_shot11_)harness_world_shot11_->GetDesc(&kept);
+  if(!harness_world_shot11_||kept.Width!=desc.Width||kept.Height!=desc.Height||kept.Format!=desc.Format){
+   desc.Usage=D3D11_USAGE_STAGING;desc.BindFlags=0;desc.CPUAccessFlags=D3D11_CPU_ACCESS_READ;
+   desc.MiscFlags=0;desc.MipLevels=1;desc.ArraySize=1;
+   harness_world_shot11_.Reset();
+   if(FAILED(device_->CreateTexture2D(&desc,nullptr,&harness_world_shot11_))){harness_world_shot11_.Reset();return;}
+  }
+  context_->CopyResource(harness_world_shot11_.Get(),back.Get());
+ }
+ harness_world_shot_taken_=true;
+}catch(...){}
+
+// At the present: the pending harness_hide_hud shot written from that copy,
+// or failed after 120 presents without a world frame (menus, loading).
+void Renderer::finish_harness_world_shot(const ScenePresentInputs* inputs) noexcept{
+ if(harness_world_shot_.empty())return;
+ std::string detail;bool ok=false;
+ if(harness_world_shot_taken_){
+  const stall_watch::Exempt disk_export;
+  try{
+   std::vector<std::uint8_t> bgra;UINT width=0,height=0;
+   if(d3d12_){
+    if(d3d12_->read_texture(*harness_world_shot12_,bgra,width,height)==S_OK)ok=true;
+    else detail="world shot readback failed";
+   }else{
+    D3D11_TEXTURE2D_DESC desc{};harness_world_shot11_->GetDesc(&desc);
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if(desc.Format!=DXGI_FORMAT_B8G8R8A8_UNORM||desc.SampleDesc.Count!=1)detail="unexpected back buffer format";
+    else if(SUCCEEDED(gpu_map_read_bounded(context_.Get(),device_.Get(),harness_world_shot11_.Get(),0,mapped,"harness world shot",&detail))){
+     width=desc.Width;height=desc.Height;bgra.resize(std::size_t(width)*4u*height);
+     for(UINT y=0;y<height;++y)
+      std::memcpy(bgra.data()+std::size_t(y)*width*4u,static_cast<const std::uint8_t*>(mapped.pData)+std::size_t(y)*mapped.RowPitch,std::size_t(width)*4u);
+     context_->Unmap(harness_world_shot11_.Get(),0);ok=true;
+    }
+   }
+   if(ok)ok=write_bgra_bmp(harness_world_shot_,bgra.data(),width,height,width*4u,detail);
+   if(ok)detail+=" (world only: harness_hide_hud)";
+  }catch(...){ok=false;detail="allocation failed";}
+ }else if(++harness_wait_>120)detail="no world frame within 120 presents (harness_hide_hud shoots the world before the interface)";
+ else return;
+ if(inputs){harness_complete_entry(inputs->harness_entry_id,ok,detail);harness_completed_entry_=inputs->harness_entry_id;}
+ else harness_complete(ok,detail);
+ harness_stage_=0;harness_wait_=0;harness_world_shot_.clear();harness_world_shot_taken_=false;
 }
 
 // The back buffer as the game composed it this present (before the debug
@@ -2262,14 +2331,20 @@ bool Renderer::test_arm_shadow_temporal_pair() noexcept {
 
 } // namespace owned
 
-// Temporary (doll bug, 2026-11-06): this module's operator new, as the CRT's
-// (malloc, then the new handler, then std::bad_alloc), but a failure is
-// recorded first with its size and caller (owned::report_allocation_failure).
+// This module's operator new, as the CRT's (malloc, then the new handler, then
+// std::bad_alloc), with the large-allocation hook of the x64 host.
+namespace owned {
+// The x64 host's allocation accounting (#289, Host/d3d12/d3d12_memory.cpp)
+// sets this: every block of 64 KiB or more is reported to it.
+void (*g_large_allocation_hook)(void*,std::size_t)=nullptr;
+}
 void* __cdecl operator new(std::size_t size) {
  for(;;){
-  if(void* block=std::malloc(size?size:1))return block;
+  if(void* block=std::malloc(size?size:1)){
+   if(size>=(64u<<10)&&owned::g_large_allocation_hook)owned::g_large_allocation_hook(block,size);
+   return block;
+  }
   if(_callnewh(size))continue;
-  owned::report_allocation_failure(size,_ReturnAddress());
   throw std::bad_alloc();
  }
 }

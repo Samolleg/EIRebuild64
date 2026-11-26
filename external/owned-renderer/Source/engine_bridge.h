@@ -947,6 +947,10 @@ struct NativePrebuiltMesh {
     // Reduced levels after the full index list (NativeMesh::lod_levels).
     std::uint32_t lod_levels = 0, lod_extra_triangles = 0;
     bool sphere_block = false; // NativeMesh::sphere_block
+    // Its positions do not depend on the record's shape (a one-shape figure
+    // outside a morphing impostor object): records of every shape share it
+    // (get_native_mesh keys it without the shape).
+    bool shape_invariant = false;
     float bounds_min[3]{}, bounds_max[3]{};
     bool has_liquid = false, has_ground = true;
     // Liquid vertices by type (NativeMesh::liquid_types): 1 water, 2 lava (self-illuminated), 4 swamp share.
@@ -1502,12 +1506,19 @@ void bridge_combat_hit_stats(std::uint32_t& hits, std::int64_t& last_qpc) noexce
 bool bridge_game_clock_ms(std::uint32_t& ms) noexcept;
 // Harness equip_cycle: one equipment step on the first hero's client appearance.
 bool bridge_harness_equip_step(std::uint32_t step, std::string& detail) noexcept;
+// Harness drawall: the game's DrawVisibleOnly setting (the verified global the
+// owned scene reads each world frame); before gets its value, then value is
+// written unless it is negative. False when the game image is not ready.
+bool bridge_harness_draw_visible_only(std::int32_t value, std::int32_t& before) noexcept;
 // Appends bytes to a log file on the log writer thread (engine_bridge.cpp
 // async_log): never file I/O on the calling thread.
 void bridge_async_append(const wchar_t* path, const char* bytes, std::size_t size) noexcept;
 // Writes the log writer's queued lines now, on the calling thread (process
 // exit, crash and exception paths).
 void bridge_async_drain() noexcept;
+// Waits (at most timeout_ms) until every queued line is written to its file by
+// the log writer thread. For a caller that copies a log it just appended to.
+void bridge_async_flush(unsigned timeout_ms) noexcept;
 bool bridge_consume_hud_atlas_window(
     IDirectDrawSurface7* surface, const void* lock_caller,
     HudAtlasMutationWindow& window) noexcept;
@@ -1570,7 +1581,7 @@ void bridge_set_portrait_options(bool owned, bool helmet) noexcept;
 bool bridge_set_world_map_previews(Renderer* renderer, bool enabled) noexcept;
 void bridge_clear_world_map_previews(Renderer* renderer) noexcept;
 void bridge_set_highlight_options(bool briefing, bool selected, bool hover_characters,
-                                  bool hover_objects) noexcept;
+                                  bool hover_objects, bool alt) noexcept;
 void bridge_set_change_driven_poses(bool enabled) noexcept;
 void bridge_set_terrain_far_shadow_prewarm(bool enabled) noexcept;
 // Ray tracing is wanted: a cave keeps the static caster store and prepares it
@@ -1691,6 +1702,10 @@ bool bridge_progress_movie(ProgressMovie& movie) noexcept;
 // The local single-player server runs a loaded mission (not the menu, the
 // travel map or a remote server); game thread.
 bool bridge_local_single_player_mission() noexcept;
+// The local server's identity fields as read now (game thread): mode +138
+// (1 = single player), map loaded +15C, zone type +12D64 (1 = mission).
+struct LocalServerState { bool readable = false; std::uint32_t mode = 0, loaded = 0, zone_type = 0; };
+LocalServerState bridge_local_server_state() noexcept;
 // Reuse the bridge's content-verified mod addon discovery for harness path patches.
 void* bridge_supported_addon_image() noexcept;
 // Check a selected loaded module with the bridge's existing PE/file contract.
@@ -2269,7 +2284,8 @@ struct EmbeddedVisualOmission {
 // drawn receives the IDs of the visuals this frame drew (colour submitted).
 const EmbeddedVisualFrameInputs* bridge_embedded_visual_inputs() noexcept;
 void bridge_release_embedded_world_locals() noexcept;
-void bridge_sample_embedded_visuals(double time, bool briefing, std::int32_t hover_id,
+bool bridge_embedded_alt_enabled() noexcept;
+void bridge_sample_embedded_visuals(double time, bool briefing, bool alt, std::vector<std::int32_t> usable, std::int32_t hover_id,
     std::uint64_t hover_serial, RetainedVisualFrame& output);
 bool bridge_embedded_owned_visual_frame(const EmbeddedVisualFrameInputs& inputs,
                                         std::vector<std::int32_t>* drawn = nullptr,

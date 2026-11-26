@@ -1437,6 +1437,9 @@ float3 liquidRainRipples(float2 position,float seconds,float rain,float footprin
  return result;
 }
 float3 liquidSafeNormal(float3 v) { return v*rsqrt(max(dot(v,v),1e-12)); }
+#ifdef __cplusplus
+//")hlsl" R"hlsl( //"
+#endif
 // Physical water terms (water_physical; they need the scene snapshot, so the
 // reflection frame carries the switch in liquidReflectionTarget.w).
 static const float liquidRoughness = .12; // GGX alpha of the former Blinn-Phong power 128 @param 0.01 0.6
@@ -1444,6 +1447,7 @@ static const float liquidPhysicalF0 = .02; // water at normal incidence
 static const float liquidRefractionIndex = 1.33;
 static const float liquidRefractionDepth = 3; // world units of bed parallax at most @param 0 10
 static const float liquidRefractionShift = .08; // largest refraction shift on screen (fraction of its height) @param 0 0.15
+static const float liquidRefractionEdgeSlope = .2; // largest share of the room to the screen edge a shift keeps; the edge magnifies the bed at most 1/(1-slope) @param 0.05 0.5
 // Per-channel absorption: the authored tint's strongest channel travels
 // furthest; weaker channels are absorbed up to 1.4x liquidAbsorption.
 static const float2 liquidChannelAbsorption = float2(.6,.8); // base, extra for weak channels
@@ -1672,19 +1676,29 @@ float4 liquidRefraction(LiquidSurfaceInput i,float3 n,float3 v) {
  // keeps this pixel's own bed, and one beside a figure blends toward it
  // (liquidRefractionHit clear), so no figure-shaped seam or ghost shows
  // (user F11s, save1150).
- // Near the screen edge the reach shrinks so the sample lands at most halfway
- // to the edge: rays leaving the screen fell back to this pixel's own bed (or
- // stretched the last rows) in hard bands along the bottom of the screen.
+ // Near the screen edge the shift shrinks smoothly so the sample stays on
+ // screen (the bed it needs past the edge was never drawn): rays leaving the
+ // screen fell back to this pixel's own bed (or stretched the last rows) in
+ // hard bands along the bottom of the screen. A hard "at most halfway to the
+ // edge" limit squeezed the bottom 16% (twice the shift cap) into half its
+ // height: the bed there showed magnified 2x below a crease (#284).
  [branch]if(t.z<0) {
   float2 full;liquidProject(i.position+t*reach,full);
-  float2 shift=full-uv,need=abs(shift),room=shift>0?1-uv:uv;
-  float edge=min(need.x>1e-6?room.x/need.x:1e6,need.y>1e-6?room.y/need.y:1e6);
+  float2 shift=full-uv;
   // The shift on screen stays under liquidRefractionShift of the screen
   // height: the bed behind a figure is hidden from the camera, so the patch a
   // full bed parallax (130-170 px at 4K in deep water) needed there showed as
   // a smeared figure-shaped ghost whatever filled it.
   float shiftHeight=length(shift*float2(liquidReflectionTarget.x/liquidReflectionTarget.y,1));
-  float scale=min(saturate(edge*.5),liquidRefractionShift/max(shiftHeight,1e-6));reach*=scale;
+  float scale=min(1,liquidRefractionShift/max(shiftHeight,1e-6));
+  // Per axis, the shift toward an edge keeps at most liquidRefractionEdgeSlope
+  // of the room left to it, through a smooth minimum (s/(1+(s/limit)^4)^.25):
+  // the shift is untouched well away from the edge, has no crease where the
+  // limit starts, and changes by at most that slope per unit of screen, so
+  // the bed near the edge is magnified by at most 1/(1-slope), smoothly.
+  float2 m=abs(shift)*scale/max(liquidRefractionEdgeSlope*(shift>0?1-uv:uv),1e-6),m2=m*m;
+  float2 keep=rsqrt(sqrt(1+m2*m2));
+  scale*=keep.x*keep.y;reach*=scale;
   // The blend reaches about a third of the shift, so the seam to the own bed
   // stays soft at any shift length.
   float spread=shiftHeight*scale*liquidReflectionTarget.y*.35;
@@ -1893,9 +1907,13 @@ float4 liquidFoamLayer(LiquidSurfaceInput i,float3 ambient,float3 sunColor,float
 // entry fogs only the rest (fogging it again lightened and flattened water
 // toward every map edge, where border and seam fog rise).
 static float4 liquidTransmitted=0;
+// Physical water's per-channel share of the scene behind it (`through`
+// below), for the guide twins (NATIVE_LIQUID_GUIDES); -1: not set (the other
+// liquid paths cover what is behind them by their alpha).
+static float3 liquidThrough=-1;
 float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
  float3 sunDirection,float3 sunColor,float3 skyColor) {
- liquidTransmitted=0;
+ liquidTransmitted=0;liquidThrough=-1;
  liquidBedSmooth=liquidSmoothBedDepth(i.pixel,i.position,i.depth,i.footprint);
  // A lifted pit (impact funnel) lies flat: its authored slope no longer runs.
  float pit=smoothstep(0,.6,i.fill);
@@ -2368,6 +2386,7 @@ float4 shadeLiquidSurface(LiquidSurfaceInput i,float3 ambient,
     through=lerp(through,(1-surfFoam)*(1-fresnel)*T,seaW);
    }
    liquidTransmitted=float4(through*behind.rgb,dot(through,1.0/3));
+   liquidThrough=through;
    return float4(saturate(composite+specular),i.coverage*lerp(1,liquidFallEdge(i),waterfall));
   }
   color+=specular;alpha*=i.coverage;

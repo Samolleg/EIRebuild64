@@ -19,11 +19,12 @@
 namespace x64remote {
 
 constexpr std::uint32_t kMagic = 0x44524945u; // 'EIRD'
-constexpr std::uint32_t kVersion = 41; // 41: TerrainCpuAsset authored Astral corner masks; 40: GameParticleView::source_type for emitter lighting policy; 39: VisualRateValues::action_coefficient in the retained tick values; 38: CampIconBind carries the asset name; 37: owned textures apart in the packet store; 36: core stream deltas (packet store, world/terrain same-field bits); 35: owned unknown-map FIG/MapG cover; 34: same-frame map marker controls and border tint; 33: standalone loading-screen map cache; 32: footstep native-contact removal reserved; 30: owned world-map preview commands; 28: authored-family policy with name provenance (neighbor piece5); 27: GameStatus::addon_notice; 26: terrain family/neighbor policy (separate integration); 25: Preview::portrait_hair; 24: Preview::portrait_lighting; 23: game-owned camera pan availability in GameStatus; 22: host_window_work removed again; 21: Control::host_window_work, release_delay_us; 20: cave flag in NativeWorldLightingFrame (#208); 19: zone-mask HitTestFrame (#200); 18: candidate-1025 (S7 17 + grass-cull WorldScene camera anchor height); 17: S7, the call-stream ops, queries, prefetch and neighbour status removed; 16: game_clean_exit; 15: combined-1
+constexpr std::uint32_t kVersion = 44; // 44: GameStatus::save_id_clash_notice; 43: Control::load_reveal_enabled, load_reveal_revealed_epoch (#305); 42: HUD layout editor in core mode (WidescreenState editor fields, Control::hud_editing_request, option_edits); 41:TerrainCpuAsset authored Astral corner masks; 40: GameParticleView::source_type for emitter lighting policy; 39: VisualRateValues::action_coefficient in the retained tick values; 38: CampIconBind carries the asset name; 37: owned textures apart in the packet store; 36: core stream deltas (packet store, world/terrain same-field bits); 35: owned unknown-map FIG/MapG cover; 34: same-frame map marker controls and border tint; 33: standalone loading-screen map cache; 32: footstep native-contact removal reserved; 30: owned world-map preview commands; 28: authored-family policy with name provenance (neighbor piece5); 27: GameStatus::addon_notice; 26: terrain family/neighbor policy (separate integration); 25: Preview::portrait_hair; 24: Preview::portrait_lighting; 23: game-owned camera pan availability in GameStatus; 22: host_window_work removed again; 21: Control::host_window_work, release_delay_us; 20: cave flag in NativeWorldLightingFrame (#208); 19: zone-mask HitTestFrame (#200); 18: candidate-1025 (S7 17 + grass-cull WorldScene camera anchor height); 17: S7, the call-stream ops, queries, prefetch and neighbour status removed; 16: game_clean_exit; 15: combined-1
 constexpr std::uint32_t kHarnessAcks = 16;              // harness step acks in flight (one step runs at a time)
 constexpr std::uint32_t kSurfaceRequests = 1024;         // surface writes the host asked for, in flight
 constexpr std::uint32_t kOverlayInputs = 64;             // window messages for the host's F10 overlay, in flight
 constexpr std::uint32_t kCampIconAnswers = 1024;         // the host icon worker's answers, in flight
+constexpr std::uint32_t kOptionEdits = 64;               // HUD layout editor option values for the game process, in flight
 
 // Every record starts with this header; size is the whole record, a multiple
 // of 8. Records never wrap: the writer pads to the ring end first.
@@ -125,7 +126,10 @@ struct alignas(64) Control {
     char host_reason[128];                       // why the host failed the device (written before device_removed)
     // video memory (seqlocked, host-written) and the host's presented frames
     alignas(64) volatile long stats_sequence;
-    std::uint32_t reserved2;
+    // Host-written once a second while the thread that runs the stream is
+    // using CPU (a long driver compile inside one record); the game's 20 s
+    // stall rule counts it as progress (x64_remote_link.cpp wait_until).
+    volatile long host_heartbeat;
     MemoryInfo local, non_local;
     std::uint64_t host_frames;
     // core mode: the test harness (test_harness.h). The game process writes
@@ -137,6 +141,12 @@ struct alignas(64) Control {
     alignas(64) volatile long harness_acks_written; // acks published (slot = count % kHarnessAcks)
     volatile long overlay_mirror_resets;         // core mode: the host dropped stale cached UI quads (the game clears its mirror)
     volatile long terrain_lod_hidden_cm;         // core mode: the host's fogStock.w in cm (bridge_set_terrain_lod_hidden_distance)
+    // core mode, host -> game: the host Renderer's load reveal state
+    // (bridge_set_load_reveal), applied by the game process at its next
+    // present, so its world Draw entry pauses the game while the loading
+    // picture is held (#305).
+    volatile long load_reveal_enabled;
+    alignas(8) volatile std::uint64_t load_reveal_revealed_epoch;
     // core mode: completed visual surfaces the host's resolver missed (id,
     // generation). The game process sends their write at its next present.
     // Host-written ring: slot = count % kSurfaceRequests, published by count.
@@ -188,6 +198,24 @@ struct alignas(64) Control {
         std::uint32_t message, wparam;
         std::int32_t lparam, reserved;
     } overlay_inputs[kOverlayInputs];
+
+    // ---- core mode: the HUD layout editor (game_focus.cpp, widescreen.cpp) ----
+    // Host -> game: the host's F10 overlay asks to unlock (2) or lock (1)
+    // the layout; the game process takes the request (exchanges in 0) at its
+    // next present and reports the result in WidescreenState.
+    volatile long hud_editing_request;
+    // Host -> game: the options the host's editor changed while unlocked
+    // (drag, resize, panel options), applied by the game process at its next
+    // present so its HUD follows live; lock saves the ini as before (a lapped
+    // ring only delays the values to that save). Slot = count % kOptionEdits.
+    volatile long option_edits_written;
+    struct OptionEdit {
+        char key[56];      // NUL-terminated option key
+        std::uint32_t type; // RendererOptionType: boolean and integer in integer, floating_point in floating
+        std::int32_t integer;
+        float floating;
+        std::uint32_t reserved;
+    } option_edits[kOptionEdits];
 
     // ---- core mode: camp icons (claude/s3-store) ----
     // The host's icon worker (Host/core_camp.cpp) answers each CampIconRequest:

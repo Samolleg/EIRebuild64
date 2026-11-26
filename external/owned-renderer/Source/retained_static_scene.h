@@ -136,6 +136,10 @@ struct VisualAssemblyAsset {
     // retained_visual_sway_flags); sway_root is the root node index.
     bool sways = false;
     std::uint32_t sway_shape = 0;
+    // False for objects that must read as separate from the ground: torch
+    // objects (campfires, stand torches) and loot levers (item or loot-bag
+    // models). Their parts get no ground contact blend.
+    bool ground_contact = true;
     std::uint32_t sway_root = 0;
     std::vector<std::array<float,3>> environment_wind; // radius/top/height endpoints
     // Diagnostic only (F10 critter_labels marker): the published part count
@@ -531,6 +535,11 @@ struct RetainedHighlightState {
     bool hover_characters = false;
     bool hover_objects = false;
     VisualResourceIncarnation hover{};
+    // Alt held (the game's own force-move key, read, never consumed): dead
+    // units and the map objects the game would let one use (sorted signed
+    // ids, collected only while Alt is held) get the hover lift too.
+    bool alt = false;
+    std::vector<std::int32_t> alt_objects;
 };
 
 // The world light manager owns these IDs and values. The renderer consumes
@@ -556,7 +565,8 @@ struct RetainedWorldPointLight {
 // tick from the server's active spell list, never written): a fireball
 // explosion (kind 1, from the tick its explosion lands) or a fire wall (kind
 // 2: the strip centre +/- wall, about 1 m wide, while it burns), or a
-// ground lightning strike (kind 3, landed cp and spell radius). The renderer
+// ground lightning strike (kind 3, landed cp and spell radius), or a lightning
+// wall (kind 4: its bolt's span centre +/- wall, 1 m over the ground). The renderer
 // starts its own burns from these (renderer_fire_burn.cpp).
 struct RetainedFireSpell {
     std::uint8_t kind = 0;
@@ -584,6 +594,9 @@ struct RetainedVisualFrame {
     std::vector<RetainedQuestLight> quest_lights;
     std::vector<RetainedWorldPointLight> world_point_lights;
     std::vector<RetainedFireSpell> fire_spells;
+    // Alt held: records may carry the interact overlay class (#315); the
+    // renderer draws its overlay pass only on such frames.
+    bool alt_overlay = false;
     OwnedVisualDiagnostic diagnostic{};
     OwnedVisualRejection first_failure{};
 };
@@ -985,6 +998,20 @@ public:
     bool visual_append_idle(VisualResourceIncarnation resource,
         std::uint64_t event, double time, VisualClipSelection selected,
         const char** failure = nullptr) noexcept;
+    // True once any producer published this resource's pose intent.
+    bool visual_has_intent(VisualResourceIncarnation resource) const noexcept;
+    // Resources the scene rejected since the last call, each once, with the
+    // reject's reason. The bridge re-reads units among them from the game's
+    // completed state at its render-time seam instead of leaving them out.
+    struct VisualResyncCandidate {
+        std::int32_t signed_id = 0;
+        RetainedVisualStatus status{};
+        const char* reason = nullptr;
+        const char* scope = nullptr;
+    };
+    bool visual_take_resync_candidates(std::vector<VisualResyncCandidate>& out) noexcept;
+    // While the bridge re-reads a unit, its own rejects do not queue it again.
+    void visual_suppress_resync_queue(bool suppress) noexcept;
     bool visual_publish_tick_values(VisualResourceIncarnation resource,
         const VisualTickValues& values, const char** failure = nullptr) noexcept;
     bool visual_publish_detection(VisualResourceIncarnation resource, bool detected) noexcept;
@@ -1131,6 +1158,7 @@ private:
         bool effects_anchored = false;
         VisualTickValues tick{};
         bool detection_unavailable = false;
+        bool resync_pending = false;  // listed in visual_resync_pending_
         VisualObjectPose object_pose{};
         bool has_object_pose = false;
         std::shared_ptr<const char> neutral_pose_lease;
@@ -1338,6 +1366,8 @@ private:
 #endif
     // Same lifetime as the existing process-capped first-failure event.
     OwnedVisualRejection visual_first_failure_{};
+    std::vector<VisualResyncCandidate> visual_resync_pending_;
+    bool visual_resync_suppressed_ = false;
     std::map<std::pair<std::int32_t, std::int32_t>,
         std::vector<std::pair<std::int32_t,std::uint32_t>>> bridge_cells_;
     // Exact bytes from the last accepted completed bridge publication. Resource

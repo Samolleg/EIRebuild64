@@ -2,7 +2,10 @@
 
 #include "test_harness_command.h"
 
+#include <array>
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace owned {
 
@@ -22,10 +25,11 @@ unsigned harness_camera_path_steps() noexcept;
 std::string harness_banner_text();
 
 // Present step. Runs the harness-owned commands (wait, state, dump_units,
-// quit, load_save with its 120 s limit, main_menu, and the hand-off of camera/clock/
-// pause/godmode/console to the next world frame) and returns the
+// quit, load_save with its 120 s limit, main_menu, immediate party godmode/
+// expect godmode, event-log expectations, and the hand-off of camera/clock/
+// pause/console to the next world frame) and returns the
 // renderer-owned command at the front of the queue (capture, profile,
-// screenshot, config, wait_ready), or nullptr while idle or blocked. The same command is
+// screenshot, config, wait_ready, expect value and event barriers), or nullptr while idle or blocked. The same command is
 // returned on every present until harness_complete() retires it.
 const HarnessCommand* harness_present_step() noexcept;
 void harness_complete(bool ok, const std::string& detail) noexcept;
@@ -41,7 +45,7 @@ bool harness_present_step_copy(HarnessCommand& command, unsigned long& entry_id,
 void harness_complete_entry(unsigned long entry_id, bool ok, const std::string& detail) noexcept;
 
 // CWorldClient::Draw entry, before the original body: applies a pending
-// camera pose, pause or god mode request or console text and keeps a pinned clock
+// camera pose, pause request or console text, maintains camera hero follow and a pinned clock
 // (AdjustLightingWithTime runs inside Draw, after this point). Save completion
 // is observed at present, after a successful Draw in the new world epoch.
 void harness_world_frame(void* world_client) noexcept;
@@ -61,9 +65,22 @@ void debug_lightning_world_frame(void* world_client) noexcept;
 // CWorldClient::Draw entry: while hold is true for a new world epoch of a
 // local single-player mission, pauses the game with the KA_PAUSE setter the
 // harness pause verb uses; when hold ends, resumes only a pause it set itself.
-// A pause the player or the save already had is left alone.
+// A pause the player or the save already had is left alone. reporting false:
+// the renderer stopped reporting its hold, and a pause set here is released.
+// previous_draw_counted: the previous world Draw completed (the hold counts
+// only those); 30 uncounted Draws in a row release a pause set here too.
 void load_pause_world_frame(void* world_client, bool hold, std::uint64_t epoch,
-                            bool single_player_mission) noexcept;
+                            bool single_player_mission, bool reporting,
+                            bool previous_draw_counted) noexcept;
+
+// camera_unit: the units' world positions (dump_units' source, the world's
+// visual frame) and the world-to-clip matrix of one world frame, given on the
+// game thread when that frame's world scene is queued. Wanted only while a
+// camera_unit command runs.
+struct HarnessUnitPosition { std::int32_t id; float position[3]; };
+bool harness_wants_world_view() noexcept;
+void harness_note_world_view(std::vector<HarnessUnitPosition> units,
+                             const std::array<float, 16>& world_to_clip) noexcept;
 
 // True while the server runs the world/travel map interface, which draws no
 // world frames; commands that need the world fail at once there.

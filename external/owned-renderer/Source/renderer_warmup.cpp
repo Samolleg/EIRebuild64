@@ -14,8 +14,11 @@
 // whole list costs a few milliseconds of CPU once per load.
 #include "renderer.h"
 #include "engine_bridge.h"
+#include "owned_resource_runtime.h"
+#include "retained_static_scene.h"
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -98,6 +101,18 @@ void Renderer::pump_pipeline_warmup() noexcept try {
     // sets (load_reveal_waiting_on); the list is built from them once settled.
     if (bridge_local_single_player_mission() && !native_specialisation_settled()) return;
     if (feature_level_ < D3D_FEATURE_LEVEL_11_0) { warmup_done_ = true; return; }
+    // The main menu's backdrop map is not play: it gets no warm-up (#304).
+    // Its specialisation key is no shipped set, so this list is the general
+    // programs, which on an Intel Iris Xe (driver 32.0.101.7092) cost about
+    // 1.5 s of driver compile each, again on every launch: 37 draws held the
+    // menu below 1 fps for a minute. What the menu draws compiles in its own
+    // frames; a mission load warms its own sets.
+    {
+        std::string map = retained_static_scene_identity_snapshot().main_outer_resource;
+        if (map.empty()) return; // the map is not named yet: the next held frame
+        for (char& c : map) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+        if (map.find("mainmenu") != std::string::npos) { warmup_done_ = true; return; }
+    }
 
     const RendererConfig& config = debug_overlay_.config();
     ID3D11RenderTargetView* const scene = scene_composite_.target() ? scene_composite_.target() : rtv_.Get();
@@ -133,6 +148,7 @@ void Renderer::pump_pipeline_warmup() noexcept try {
     const bool two_configs = !(lit == ordered);
 
     const bool low = native_low_ps_ && native_low_liquid_ps_ && native_low_pixel_path(config);
+    const bool surface = configured_boolean(config, "precipitation_surface", true);
     const bool tessellation = configured_integer(config, "terrain_tessellation", 1) > 0 && terrain_tess_vs_ &&
         terrain_hs_ && terrain_ds_ && terrain_hs_plain_ && terrain_ds_plain_;
     const bool masked = configured_boolean(config, "depth_prepass", true) && native_prepass_vs_ && masked_depth_state_ &&
@@ -161,7 +177,11 @@ void Renderer::pump_pipeline_warmup() noexcept try {
         const bool low_member = index == 3 || index == 4 || index == 8 || index == 14;
         const bool snow = index == 2 || index == 6 || index == 10 || index == 12 || index == 16 || index == 18;
         // The Low path binds only the low members (and snow terrain under a
-        // trail field); the full path never binds a low member.
+        // trail field); the full path never binds a low member. Without
+        // precipitation_surface no trail field ever exists, so the snow
+        // members never draw (#325: the Iris paid 6.3-8.9 s for the first
+        // draw of the flat snow terrain program in every first load).
+        if (snow && !surface) return;
         if (low ? !(low_member || snow) : low_member) return;
         if (index == 13 || index == 14) { // the full-screen sun-shadow mask pass
             if (masked)
@@ -282,10 +302,34 @@ void Renderer::pump_pipeline_warmup() noexcept try {
         return view.Get();
     };
 
-    // Runs between the frame's last pass and Present. It binds every state it
-    // reads and restores nothing: the gamma pass and the next frame's passes
-    // bind their own. It leaves the tessellation stages null (the legacy and
-    // interface draws never set them) and its scratch targets unbound.
+    // Runs between the frame's last pass and Present, in its own empty context
+    // state (#296): the draws compile each pipeline but read no resource,
+    // constant buffer or sampler. Under the frame's leftover bindings the world
+    // programs ran real work on stale inputs, seconds per held frame on AMD
+    // until the driver removed the device. Swapping back restores the frame's
+    // state exactly. Without a context state the warm-up is skipped (named once).
+    if (!warmup_state_) {
+        ComPtr<ID3D11Device1> device1;
+        const D3D_FEATURE_LEVEL level = device_->GetFeatureLevel();
+        HRESULT state_hr = context1_ ? device_.As(&device1) : E_NOINTERFACE;
+        if (SUCCEEDED(state_hr))
+            state_hr = device1->CreateDeviceContextState(0, &level, 1, D3D11_SDK_VERSION, __uuidof(ID3D11Device), nullptr,
+                                                         &warmup_state_);
+        if (FAILED(state_hr)) {
+            char text[96];
+            std::snprintf(text, sizeof(text), "skipped: no empty context state for the warm-up draws (hr=%08lx)",
+                          static_cast<unsigned long>(state_hr));
+            bridge_report_event("pipeline_warmup", text);
+            warmup_done_ = true;
+            return;
+        }
+    }
+    struct FrameStateBack {
+        ID3D11DeviceContext1* context;
+        ComPtr<ID3DDeviceContextState> state;
+        ~FrameStateBack() { context->SwapDeviceContextState(state.Get(), nullptr); }
+    } frame_state{context1_.Get(), nullptr};
+    context1_->SwapDeviceContextState(warmup_state_.Get(), &frame_state.state);
     context_->IASetInputLayout(nullptr);
     context_->GSSetShader(nullptr, nullptr, 0);
     const D3D11_VIEWPORT tiny{0, 0, float(kWarmSide), float(kWarmSide), 0, 1};
@@ -313,7 +357,6 @@ void Renderer::pump_pipeline_warmup() noexcept try {
         if (std::chrono::steady_clock::now() - begin >= kWarmSliceTime) break;
     }
 
-    context_->HSSetShader(nullptr, nullptr, 0); context_->DSSetShader(nullptr, nullptr, 0);
     context_->OMSetRenderTargets(0, nullptr, nullptr);
 
     // Every draw issued: the hold waits until the GPU has run them.

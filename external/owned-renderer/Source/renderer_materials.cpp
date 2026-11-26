@@ -14,6 +14,7 @@
 
 #include <wincodec.h>
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -410,6 +411,8 @@ bool MaterialLibrary::load(std::string& error) {
     // Optional: without scenery.json world objects keep the S2 response.
     if (read_file(folder_ + L"scenery.json", bytes, 4u << 20) &&
         !load_units(std::string(bytes.begin(), bytes.end()), error, true)) return false;
+    // Optional: fire burn's whole-texture structures (burn.json).
+    if (read_file(folder_ + L"burn.json", bytes, 1u << 20)) load_burn(std::string(bytes.begin(), bytes.end()));
     ResourceStoreConfig mounts;
     ResourceStore store;
     ResourceFailure failure;
@@ -558,28 +561,64 @@ std::shared_ptr<const MaterialLibrary::RegionMap> MaterialLibrary::read_region_m
     const std::string& type, const std::string& code) const {
     const std::string cache_key = key + '|' + type + '|' + code;
     if (const auto found = region_cache_.find(cache_key); found != region_cache_.end()) return found->second;
+    if (region_misses_.count(cache_key)) return nullptr;
     // Decoded maps are kept (a map is at most its art's size, one byte a texel);
-    // past 256 the oldest go, so the cache stays bounded.
-    if (region_cache_.size() >= 256) region_cache_.erase(region_cache_.begin());
-    auto& slot = region_cache_[cache_key];
-    slot = read_region_map_uncached(key, type, code);
-    return slot;
+    // past 256 the oldest go, so the cache stays bounded. A miss (fire burn
+    // probes burn_<texture> for every texture) is remembered apart, so misses
+    // never evict real maps.
+    auto map = read_region_map_uncached(key, type, code);
+    if (!map) { region_misses_.insert(cache_key); return nullptr; }
+    // In the 32-bit game also at most 16 MB of maps (#20: a 1024 map is 1 MB,
+    // and 256 of them grew the game's address space with every new map).
+    constexpr std::size_t kRegionCacheBytes = sizeof(void*) == 4 ? (16u << 20) : SIZE_MAX;
+    while (!region_cache_.empty() &&
+           (region_cache_.size() >= 256 || region_cache_bytes_ + map->classes.size() > kRegionCacheBytes)) {
+        if (region_cache_.begin()->second) region_cache_bytes_ -= region_cache_.begin()->second->classes.size();
+        region_cache_.erase(region_cache_.begin());
+    }
+    region_cache_bytes_ += map->classes.size();
+    region_cache_[cache_key] = map;
+    return map;
 }
 
 std::shared_ptr<const TextureCpuAsset> MaterialLibrary::cached_layer(const std::string& name) const {
-    if (const auto found = layer_cache_.find(name); found != layer_cache_.end()) return found->second;
+    if (const auto found = layer_cache_.find(name); found != layer_cache_.end()) {
+        // Most recently used last: a hero's layers, used again by every
+        // equip and every map, stay while other maps' layers go.
+        const auto at = std::find(layer_cache_order_.begin(), layer_cache_order_.end(), name);
+        if (at != layer_cache_order_.end()) std::rotate(at, at + 1, layer_cache_order_.end());
+        return found->second;
+    }
     ResourceFailure failure;
     ResourceLocation location;
     ResourceBlob blob;
     auto texture = std::make_shared<TextureCpuAsset>();
     if (!layers_.locate(name, location, failure) || !layers_.read(location, blob, failure) ||
         !parse_texture_asset(blob, *texture, failure) || texture->mips.empty()) return nullptr; // the game skips it too
-    // The most recent 96 layers (an equipment set's art is a handful).
-    if (layer_cache_order_.size() >= 96) {
-        layer_cache_.erase(layer_cache_order_.front());
+    // The 96 most recently used layers (an equipment set's art is a
+    // handful). In the 32-bit game also at most 64 MB: a 1024 layer decodes
+    // to 4-5.3 MB, and 96 of them held ~280 MB of the game's address space
+    // for the whole session (#20: 45 layers + 9 mipped ones after four
+    // maps). Kept across world changes (dropping them there re-decoded the
+    // hero's and the menu's layers at every load: +200 ms menu hold). A
+    // build keeps its own layers alive; the cache only spares re-decoding,
+    // which measured 1 ms a layer (max 6). Replayed lookups (2026-11-21):
+    // five-map route 36 re-decodes at 64 MB, none from 192 MB; 107 camp
+    // equips 39 at 64 MB, 10 even at 256 MB (every item tried). 39 ms over
+    // a session does not buy 128-190 MB of 32-bit address space.
+    constexpr std::size_t kLayerCacheBytes = sizeof(void*) == 4 ? (64u << 20) : SIZE_MAX;
+    const std::size_t bytes = texture->source ? texture->source->size() : 0;
+    while (!layer_cache_order_.empty() &&
+           (layer_cache_order_.size() >= 96 || layer_cache_bytes_ + bytes > kLayerCacheBytes)) {
+        const auto oldest = layer_cache_.find(layer_cache_order_.front());
+        if (oldest != layer_cache_.end()) {
+            if (oldest->second && oldest->second->source) layer_cache_bytes_ -= oldest->second->source->size();
+            layer_cache_.erase(oldest);
+        }
         layer_cache_order_.erase(layer_cache_order_.begin());
     }
     layer_cache_order_.push_back(name);
+    layer_cache_bytes_ += bytes;
     std::shared_ptr<const TextureCpuAsset> value = std::move(texture);
     layer_cache_[name] = value;
     return value;
@@ -617,18 +656,132 @@ std::shared_ptr<const MaterialLibrary::RegionMap> MaterialLibrary::read_region_m
     return map;
 }
 
+// burn.json (fire burn, #254 review): each object texture's fire class,
+// {"textures": {"<name>": "burn" | "char" | "soot" | "none"}}: labels 3, 4,
+// 5 and 0 (native_shader.h). A texture scenery.json lists keeps its regions:
+// its wood regions take the class, its other regions soot.
+void MaterialLibrary::load_burn(const std::string& text) noexcept {
+    using namespace small_json;
+    try {
+        const auto root = Reader(text).root();
+        for (const auto& entry : root.field("textures").members) {
+            const std::string kind = lower(entry.second.str());
+            const std::uint8_t label = kind == "burn" ? 3 : kind == "char" ? 4 : kind == "soot" ? 5 : kind == "none" ? 0 : 255;
+            if (label != 255) burn_class_[lower(entry.first)] = label;
+        }
+    } catch (const std::exception& problem) {
+        burn_class_.clear();
+        const std::string line = std::string("burn.json: ") + problem.what() + "; structure fire classes off";
+        bridge_report_event("materials", line.c_str());
+    }
+}
+
+std::uint8_t MaterialLibrary::fire_burn_class(const std::string& texture) const {
+    const auto found = burn_class_.find(lower(texture));
+    return found == burn_class_.end() ? 255 : found->second;
+}
+
 bool MaterialLibrary::scenery_listed(const std::string& texture) const {
     return scenery_.count(lower(texture)) != 0;
 }
 
+// scenery.json "no_ground_contact": read once, independent of the material
+// level (the blend is a terrain setting, not a material one).
+bool ground_contact_excluded(const std::string& texture) {
+    static const std::vector<std::string> names = [] {
+        std::vector<std::string> result;
+        std::vector<std::uint8_t> bytes;
+        const std::wstring folder = material_folder();
+        if (folder.empty() || !read_file(folder + L"scenery.json", bytes, 4u << 20)) return result;
+        const std::string document(bytes.begin(), bytes.end());
+        try {
+            const auto root = small_json::Reader(document).root();
+            if (root.members.count("no_ground_contact"))
+                for (const auto& name : root.field("no_ground_contact").list()) result.push_back(lower(name.str()));
+        } catch (const std::exception& problem) {
+            result.clear();
+            bridge_report_event("materials", (std::string("scenery.json no_ground_contact ignored: ") + problem.what()).c_str());
+        }
+        return result;
+    }();
+    for (const auto& name : names)
+        if (name.size() == texture.size() && _stricmp(name.c_str(), texture.c_str()) == 0) return true;
+    return false;
+}
+
 bool MaterialLibrary::build_fire_burn_profile(const std::string& texture, std::uint32_t& width,
-    std::uint32_t& height, std::vector<std::uint8_t>& labels) const {
+    std::uint32_t& height, std::vector<std::uint8_t>& labels,
+    const std::vector<std::pair<std::string,int>>* tree_models) const {
     if (const auto map = read_region_map("burn_" + lower(texture), "", "")) {
         if (std::any_of(map->classes.begin(), map->classes.end(), [](auto c) { return c > 3; })) return false;
         width = map->width; height = map->height; labels = map->classes;
         return true;
     }
-    if (!scenery_listed(texture)) return false;
+    // Tree models: their own FIG parts' UV footprints (the crown/trunk split
+    // the ground contacts use, owned_world_consumers.cpp). Crowns first, then
+    // the wood over them, so a texel both share chars and never vanishes.
+    // A texture burn.json classes is not a tree's: the tree family (MOB 53)
+    // also places rocks, walls and fences (stone03, hadoganwall01,
+    // strongfence00), which the tree rule labelled wood (#254 look run).
+    if (tree_models && !tree_models->empty() && fire_burn_class(texture) == 255) {
+        constexpr std::uint32_t side = 256;
+        std::vector<std::uint8_t> out(std::size_t(side) * side, 0);
+        std::string note;
+        bool any = false;
+        if (open_layers(note))
+            for (int pass = 0; pass < 2; ++pass)
+                for (const auto& [model_name, kind] : *tree_models) {
+                    ResourceFailure failure; ResourceBlob model_blob; MemoryResourceArchive model;
+                    if (!layers_.resolve(model_name + ".mod", model_blob, failure) || !model.open(model_blob, failure)) continue;
+                    for (const auto& part_name : model.entry_names()) {
+                        // A crown split into branches and leaves (the big Gipat tree nafltr75:
+                        // crownbr, crownlea) keeps its branches wood: they char, not vanish.
+                        const std::string part = lower(part_name);
+                        const bool crown = part.find("crown") != std::string::npos && part.find("crownbr") == std::string::npos;
+                        if (crown != (pass == 0)) continue;
+                        ResourceBlob blob; FigureCpuAsset figure;
+                        if (!model.resolve(part_name, blob, failure) || !parse_figure_asset(blob, figure, failure)) continue;
+                        if (!figure_primary_texture(figure.texture_number)) continue;
+                        const std::uint8_t label = crown && kind == 2 ? 2 : 1;
+                        for (std::size_t i = 0; i + 2 < figure.indices.size(); i += 3) {
+                            float u[3], v[3];
+                            bool valid = true;
+                            for (int k = 0; k < 3 && valid; ++k) {
+                                const auto c = figure.indices[i + k];
+                                valid = c < figure.components.size() && figure.components[c].texture < figure.texture_coordinates.size();
+                                if (!valid) break;
+                                const auto& uv = figure.texture_coordinates[figure.components[c].texture];
+                                // Wrapped UVs label the texel the shader's frac(uv) reads.
+                                u[k] = uv.u * float(side); v[k] = uv.v * float(side);
+                            }
+                            if (!valid) continue;
+                            const float area = (u[1] - u[0]) * (v[2] - v[0]) - (u[2] - u[0]) * (v[1] - v[0]);
+                            if (!std::isfinite(area) || std::abs(area) < 1e-6f) continue;
+                            const int x0 = int(std::floor(std::min({u[0], u[1], u[2]}))), x1 = int(std::ceil(std::max({u[0], u[1], u[2]})));
+                            const int y0 = int(std::floor(std::min({v[0], v[1], v[2]}))), y1 = int(std::ceil(std::max({v[0], v[1], v[2]})));
+                            if (x1 - x0 > 4 * int(side) || y1 - y0 > 4 * int(side)) continue;
+                            for (int y = y0; y <= y1; ++y) for (int x = x0; x <= x1; ++x) {
+                                const float px = x + .5f, py = y + .5f;
+                                const float w0 = ((u[1] - px) * (v[2] - py) - (u[2] - px) * (v[1] - py)) / area;
+                                const float w1 = ((u[2] - px) * (v[0] - py) - (u[0] - px) * (v[2] - py)) / area;
+                                if (w0 < -.02f || w1 < -.02f || 1 - w0 - w1 < -.02f) continue;
+                                const std::uint32_t tx = std::uint32_t(((x % int(side)) + int(side)) % int(side));
+                                const std::uint32_t ty = std::uint32_t(((y % int(side)) + int(side)) % int(side));
+                                out[std::size_t(ty) * side + tx] = label; any = true;
+                            }
+                        }
+                    }
+                }
+        if (any) { width = height = side; labels = std::move(out); return true; }
+    }
+    const std::uint8_t fire_class = fire_burn_class(texture);
+    if (fire_class == 0) return false;
+    if (!scenery_listed(texture)) {
+        // burn.json: the whole texture takes its class (one texel).
+        if (fire_class == 255) return false;
+        width = height = 1; labels.assign(1, fire_class);
+        return true;
+    }
     std::vector<std::uint8_t> rgba, relief, classes;
     std::string note;
     if (!build_unit_profile(texture, width, rgba, relief, classes, note)) return false;
@@ -637,7 +790,9 @@ bool MaterialLibrary::build_fire_burn_profile(const std::string& texture, std::u
     for (std::size_t i = 0; i < classes.size(); ++i) {
         // Use the same reviewed regions as shading: stone and metal in a
         // mixed wood/stone atlas stay inert, independent of material quality.
-        labels[i] = classes_[classes[i]].name == "scenery_wood" ? 3 : 0;
+        // burn.json: wood regions take its class, the rest soot.
+        const bool wood = classes_[classes[i]].name == "scenery_wood";
+        labels[i] = fire_class == 255 ? (wood ? 3 : 0) : wood ? fire_class : 5;
         combustible = combustible || labels[i] != 0;
     }
     return combustible;
@@ -1038,6 +1193,17 @@ void Renderer::note_material_texture(const std::string& name, std::uint64_t back
     entry.surface = entry.surface || surface;
     if (unit && !entry.unit) { entry.unit = true;material_profiles_dirty_ = true; }
     if (entry.name == name) return;
+    if (!entry.name.empty()) {
+        // One texture noted under two names rebuilds its profile at every
+        // switch (#279's shared skin backing, job 090): the first few, logged.
+        static unsigned renamed = 0;
+        if (++renamed <= 8) {
+            char line[200];
+            std::snprintf(line, sizeof(line), "backing %llx: %s -> %s", static_cast<unsigned long long>(backing),
+                          entry.name.c_str(), name.c_str());
+            bridge_report_event("material_profile_renamed", line);
+        }
+    }
     entry.name = name;entry.serial = 0;entry.pending = {};entry.ticket.cancel();entry.srv.Reset();entry.relief_srv.Reset();entry.class_srv.Reset();entry.profile12.reset();entry.class12.reset();entry.burn12.reset();entry.burn_tried=false;++material_profiles_revision_;entry.strands = false;entry.coat = false;entry.failed = false;
     material_profiles_dirty_ = true;
 } catch (...) {}
@@ -1085,7 +1251,49 @@ private:
 }  // namespace
 
 void Renderer::prepare_fire_burn_materials() noexcept try {
-    if (!d3d12_ || !fire_burn_bound_ || !material_library_) return;
+    // Before the first burn too, once the area's census is in (labels are
+    // built ahead, on the worker), so the first spell does not wait for them.
+    if (!d3d12_ || !(fire_burn_bound_ || fire_census_ready_) || !material_library_) return;
+    // Labels the worker finished: their textures, on this thread.
+    {
+        std::vector<FireLabelResult> done;
+        { std::lock_guard<std::mutex> guard(fire_label_queue_->lock); done.swap(fire_label_queue_->done); }
+        for (auto& r : done) {
+            const auto found = material_profiles_.find(r.backing);
+            if (r.generation != fire_label_generation_ || found == material_profiles_.end() || found->second.name != r.name) continue;
+            auto& entry = found->second;
+            if (r.classified && (FAILED(d3d12_->create_texture(r.width, r.height, DXGI_FORMAT_R8_UINT, entry.burn12)) ||
+                FAILED(d3d12_->write_texture(*entry.burn12, RECT{0,0,LONG(r.width),LONG(r.height)}, r.labels.data(), r.width)))) {
+                entry.burn12.reset();
+                bridge_report_event("fire_burn_material_unavailable", r.name.c_str());
+            }
+            ++fire_labels_adopted_;
+        }
+    }
+    // Called on every native flush: the table is rebuilt only when what it
+    // is made from changed (a full scan per flush cost ~10 ms a frame, #254).
+    const std::array<std::uint64_t,8> inputs{native_owned_texture_serial_, std::uint64_t(native_owned_textures_.size()),
+        native_instance_command_serial_, std::uint64_t(native_instance_records_.size()), std::uint64_t(material_profiles_.size()),
+        material_profiles_revision_, std::uint64_t(fire_tree_textures_.size()), fire_labels_adopted_};
+    if (inputs == fire_material_inputs_ && fire_material_table12_) return;
+    // At most once a frame: a record changed later in the frame is in the next table.
+    if (fire_material_frame_ == native_frame_index_ && fire_material_table12_) return;
+    fire_material_frame_ = native_frame_index_;
+    {   // #254 cost check: a table rebuilt on most frames names the input that churns.
+        static std::uint64_t window = 0, rebuilds = 0; static unsigned changed = 0;
+        for (unsigned k = 0; k < inputs.size(); ++k) if (inputs[k] != fire_material_inputs_[k]) changed |= 1u << k;
+        if (native_frame_index_ / 300 != window) {
+            if (rebuilds > 60) {
+                char line[160];
+                std::snprintf(line, sizeof(line), "burn material table rebuilt %llu times in 300 frames; changed inputs mask 0x%x",
+                    static_cast<unsigned long long>(rebuilds), changed);
+                bridge_report_event("fire_burn_materials", line);
+            }
+            window = native_frame_index_ / 300; rebuilds = 0; changed = 0;
+        }
+        ++rebuilds;
+    }
+    fire_material_inputs_ = inputs;
     // The lookup describes renderer-owned textures, not engine objects or
     // draw history. Backing replacement/retirement owns map lifetime too.
     std::vector<std::uint32_t> table(1024, 0);
@@ -1094,19 +1302,26 @@ void Renderer::prepare_fire_burn_materials() noexcept try {
         if (found == material_profiles_.end() || found->second.unit || descriptor == UINT_MAX) return;
         auto& entry = found->second;
         if (!entry.burn_tried) {
+            // The labels (region map probes, the tree models' UV footprints)
+            // are built on the material worker; the texture comes when its
+            // result is adopted above.
             entry.burn_tried = true;
-            std::uint32_t width = 0, height = 0;
-            std::vector<std::uint8_t> labels;
-            bool classified = false;
-            {
-                std::lock_guard<std::mutex> guard(MaterialProfileWorker::instance().library_lock());
-                classified = material_library_->build_fire_burn_profile(entry.name, width, height, labels);
-            }
-            if (classified && (FAILED(d3d12_->create_texture(width, height, DXGI_FORMAT_R8_UINT, entry.burn12)) ||
-                FAILED(d3d12_->write_texture(*entry.burn12, RECT{0,0,LONG(width),LONG(height)}, labels.data(), width)))) {
-                entry.burn12.reset();
-                bridge_report_event("fire_burn_material_unavailable", entry.name.c_str());
-            }
+            std::string key = entry.name;
+            for (auto& ch : key) ch = char(std::tolower(static_cast<unsigned char>(ch)));
+            if (key.size() > 4 && key.compare(key.size() - 4, 4, ".mmp") == 0) key.resize(key.size() - 4);
+            const auto trees = fire_tree_textures_.find(key);
+            auto models = trees != fire_tree_textures_.end() ? std::make_shared<const std::vector<std::pair<std::string,int>>>(trees->second) : nullptr;
+            const bool posted = MaterialProfileWorker::instance().post(
+                [library = material_library_, queue = fire_label_queue_, models, name = entry.name, backing, generation = fire_label_generation_] {
+                    FireLabelResult r; r.backing = backing; r.generation = generation; r.name = name; r.tree_texture = models != nullptr;
+                    {
+                        std::lock_guard<std::mutex> guard(MaterialProfileWorker::instance().library_lock());
+                        r.classified = library->build_fire_burn_profile(name, r.width, r.height, r.labels, models.get());
+                    }
+                    std::lock_guard<std::mutex> guard(queue->lock);
+                    queue->done.push_back(std::move(r));
+                });
+            if (!posted) entry.burn_tried = false;
         }
         if (!entry.burn12) return;
         const auto index = d3d12_->bindless_index(*entry.burn12);
@@ -1149,7 +1364,25 @@ void Renderer::prepare_material_profiles() noexcept try {
     const bool world = configured_boolean(debug_overlay_.config(), "material_world", true) &&
                        configured_boolean(debug_overlay_.config(), "material_scenery", true);
     if (world != material_world_on_) { material_world_on_ = world;++material_profiles_revision_; }
-    const bool burning = d3d12_ && fire_burn_bound_;
+    const bool burning = d3d12_ && (fire_burn_bound_ || fire_census_ready_);
+    // The library loads once, when materials or fire burn first need it. Fire
+    // burn needs it before the first area's census starts (update_fire_burns
+    // waits for this try), also at material Off: the census reads its tree,
+    // structure and rock classes from it.
+    const bool fire_on = d3d12_ && configured_boolean(debug_overlay_.config(), "fire_burn", false);
+    if (!material_library_tried_ && (level || fire_on)) {
+        // The host adopts the game's mounts after it starts: wait for them.
+        ResourceStoreConfig mounts;
+        if (!owned_data_resource_mounts(mounts)) { material_profiles_dirty_ = true; return; }
+        material_library_tried_ = true;
+        auto library = std::make_shared<MaterialLibrary>();
+        std::string error;
+        if (library->load(error)) material_library_ = std::move(library);
+        else {
+            material_notice_ = "Material shading off: " + error;
+            bridge_report_event("materials", material_notice_.c_str());
+        }
+    }
     if ((!level && !burning) || material_profiles_.empty()) return;
     const std::uint64_t revision = retained_visual_scene().material_composition_revision();
     if (!material_profiles_dirty_ && revision == material_checked_revision_) {
@@ -1157,19 +1390,6 @@ void Renderer::prepare_material_profiles() noexcept try {
         return;
     }
     material_profiles_dirty_ = false;material_checked_revision_ = revision;
-    if (!material_library_tried_) {
-        auto library = std::make_shared<MaterialLibrary>();
-        std::string error;
-        // The host adopts the game's mounts after it starts: wait for them.
-        ResourceStoreConfig mounts;
-        if (!owned_data_resource_mounts(mounts)) { material_profiles_dirty_ = true; return; }
-        material_library_tried_ = true;
-        if (library->load(error)) material_library_ = std::move(library);
-        else {
-            material_notice_ = "Material shading off: " + error;
-            bridge_report_event("materials", material_notice_.c_str());
-        }
-    }
     if (!material_library_) return;
     if (burning) prepare_fire_burn_materials();
     if (!level) return;
@@ -1196,18 +1416,6 @@ void Renderer::prepare_material_profiles() noexcept try {
             }
             auto built = entry.pending.get();
             material_profiles_dirty_ = true;  // a newer layer list may be waiting
-            {
-                // Build times: a running summary every 50 builds.
-                static unsigned builds = 0;
-                static double total_ms = 0, max_ms = 0;
-                ++builds;total_ms += built.build_ms;max_ms = std::max(max_ms, built.build_ms);
-                if (builds % 50 == 0) {
-                    char line[160];
-                    std::snprintf(line, sizeof(line), "build %u: %.1f ms (mean %.1f ms, max %.1f ms over %u builds)", builds,
-                                  built.build_ms, total_ms / builds, max_ms, builds);
-                    bridge_report_event("material_profile_time", line);
-                }
-            }
             if (built.serial != entry.serial) continue;
             if (!built.ok) { entry.failed = true;continue; }
             side = built.side;pixels = std::move(built.pixels);relief = std::move(built.relief);classes = std::move(built.classes);
@@ -1240,10 +1448,8 @@ void Renderer::prepare_material_profiles() noexcept try {
                             promise->set_value(std::move(built));
                             return;
                         }
-                        const auto start = std::chrono::steady_clock::now();
                         built.ok = library->build_profile(composition, side, metal_mask, built.pixels, built.relief,
                                                           built.classes, built.note);
-                        built.build_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
                     } catch (...) { built.ok = false; }
                     promise->set_value(std::move(built));
                 });

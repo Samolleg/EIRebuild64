@@ -85,10 +85,16 @@ public:
     // units.json (class, optional maps\<texture>.png). Unlisted world
     // textures keep the texture-derived world response (S2).
     bool scenery_listed(const std::string& texture) const;
-    // Explicit plant labels (maps/burn_<texture>.png), otherwise the
-    // reviewed scenery classes/regions. Unclassified material is inert.
+    // burn.json's fire label of a texture (3 burn, 4 char, 5 soot, 0 none), 255 when unlisted.
+    std::uint8_t fire_burn_class(const std::string& texture) const;
+    // Explicit plant labels (maps/burn_<texture>.png), otherwise the tree
+    // models drawing this texture (tree_models: model key, 1 bare, 2 leafy;
+    // their "crown" parts' UV footprint foliage, or wood on bare trees, the
+    // other parts wood, wood winning shared texels), otherwise the reviewed
+    // scenery classes/regions. Unclassified material is inert.
     bool build_fire_burn_profile(const std::string& texture, std::uint32_t& width,
-        std::uint32_t& height, std::vector<std::uint8_t>& labels) const;
+        std::uint32_t& height, std::vector<std::uint8_t>& labels,
+        const std::vector<std::pair<std::string,int>>* tree_models = nullptr) const;
     // The classes that grow strands, one bit per class index (256 bits).
     std::array<std::uint32_t, 8> strand_classes() const noexcept;
     // The crystal classes, one bit per class index.
@@ -133,6 +139,7 @@ private:
     };
     std::map<std::string, UnitTexture> units_;       // lower-case texture name (units.json, then scenery.json)
     std::set<std::string> scenery_;                  // the scenery.json names among them
+    std::map<std::string, std::uint8_t> burn_class_; // burn.json: texture -> fire label (3 burn, 4 char, 5 soot, 0 none)
     std::map<std::string, std::uint8_t> unit_skins_;  // model -> class of <model>skin_NN layers
     float diffuse_keep_ = .35f;
     std::vector<Material> materials_;
@@ -148,13 +155,17 @@ private:
     // name. Equips mostly reuse layers: without these each atlas re-read and
     // re-decoded every layer and map (~100 ms an atlas).
     mutable std::map<std::string, std::shared_ptr<const RegionMap>> region_cache_;
+    mutable std::set<std::string> region_misses_;   // keys with no region map (not cached as maps)
+    mutable std::size_t region_cache_bytes_ = 0;
     mutable std::map<std::string, std::shared_ptr<const TextureCpuAsset>> layer_cache_;
     mutable std::vector<std::string> layer_cache_order_;
+    mutable std::size_t layer_cache_bytes_ = 0;
     std::shared_ptr<const TextureCpuAsset> cached_layer(const std::string& name) const;
 
     bool load_classes(const std::string& text, std::string& error);
     bool load_items(const std::vector<std::uint8_t>& bytes);
     bool load_units(const std::string& text, std::string& error, bool scenery = false);
+    void load_burn(const std::string& text) noexcept;
     bool open_layers(std::string& note) const;
     // One metal layer's mip under metal_mask_ and its metal class' tint:
     // per texel 0 (metal) or the leather/cloth class; counts its opaque and

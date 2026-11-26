@@ -7,6 +7,7 @@
 // nativeBuildCS picks one per record by its projected error.
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -19,6 +20,8 @@ struct NativePackedGroup;
 // less than a level's bookkeeping saves.
 inline constexpr std::uint32_t kStaticLodMinTriangles = 96;
 inline constexpr std::uint32_t kStaticLodMaxLevels = 3;
+// Target triangle share of each level against the full mesh.
+inline constexpr float kStaticLodLevelRatio[kStaticLodMaxLevels] = {0.5f, 0.25f, 0.125f};
 // The crossfade band beyond the pixel limit, as a fraction of it: a level's
 // successor fades in while its error projects between limit and
 // limit * (1 + band) (no pop: stateless, continuous with distance).
@@ -110,5 +113,15 @@ struct NativeMeshLods {
 
 // False (and no levels) for a figure too small or not reducible.
 bool build_static_lods(const FigureCpuAsset& figure, NativeMeshLods& output) noexcept;
+// The simplifier core both static objects and the hosted plant tiers use:
+// reduced levels of an indexed mesh from its positions (3 floats a vertex),
+// normal and UV attributes (5 floats a vertex) and triangle list; the error
+// is scaled by scale (meshopt's error is relative to the mesh extent).
+// lock_border keeps every open-border vertex (static objects: walls, planks);
+// without it border vertices may still collapse along their border (the
+// hosted plants' vine ribbons, whose every vertex lies on an open border).
+bool simplify_mesh_levels(const float* positions, std::size_t vertex_count, const float* attributes,
+    const std::uint32_t* indices, std::size_t index_count, float scale, NativeMeshLods& output,
+    bool lock_border = true) noexcept;
 
 } // namespace owned

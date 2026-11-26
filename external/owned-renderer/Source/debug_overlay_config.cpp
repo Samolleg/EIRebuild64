@@ -133,6 +133,10 @@ bool write_text_file(const wchar_t* path, const std::string& text) {
 } // namespace
 
 bool interface_profile_option(const RendererOption& option) noexcept {
+    // hud_width follows the player's display, not a shared layout: every
+    // profile written before settings_version 12 holds its old default (16:9)
+    // and would put that cap back over migrate_settings on load.
+    if (option.key == "hud_width") return false;
     return option.group == "HUD layout" || option.group == "Interface";
 }
 
@@ -460,10 +464,17 @@ bool RendererConfig::load(const wchar_t* path) {
         const std::string value = trim(std::string_view(line).substr(equals + 1));
         if (_stricmp(section.c_str(), "overlay") == 0 && _stricmp(key.c_str(), "mode") == 0) {
             DebugOverlayMode mode{};
-            if (parse_debug_overlay_mode(value.c_str(), mode)) {
-                overlay_mode_ = mode;
-                overlay_mode_loaded_ = true;
-            }
+            if (parse_debug_overlay_mode(value.c_str(), mode)) overlay_mode_ = mode;
+            continue;
+        }
+        if (_stricmp(section.c_str(), "overlay") == 0 && _stricmp(key.c_str(), "developer_views") == 0) {
+            bool allowed = false;
+            if (parse_boolean(value.c_str(), allowed)) developer_views_ = allowed;
+            continue;
+        }
+        if (_stricmp(section.c_str(), "setup") == 0 && _stricmp(key.c_str(), "intro_shown") == 0) {
+            bool shown = false;
+            if (parse_boolean(value.c_str(), shown)) intro_shown_ = shown;
             continue;
         }
         if (_stricmp(section.c_str(), "setup") == 0 && _stricmp(key.c_str(), "first_run_done") == 0) {
@@ -567,8 +578,10 @@ bool RendererConfig::save_text(const wchar_t* path) const {
     text += debug_overlay_mode_name(overlay_mode_);
     text += "\r\ndebug_resource_view=";
     text += debug_resource_view_name(debug_resource_view_);
+    if (developer_views_) text += "\r\ndeveloper_views=true";
     text += "\r\n\r\n[setup]\r\nsettings_version=" + std::to_string(settings_version_);
     if (first_run_done_) text += "\r\nfirst_run_done=true";
+    if (intro_shown_) text += "\r\nintro_shown=true";
     if (over_budget_pending_) text += "\r\nover_budget_pending=1";
     if (serial_shader_preparation_) text += "\r\nserial_shader_preparation=1";
     if (!nvidia_cache_id_.empty()) text += "\r\nnvidia_cache_id=" + nvidia_cache_id_;

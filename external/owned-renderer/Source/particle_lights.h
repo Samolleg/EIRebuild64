@@ -97,6 +97,7 @@ struct Light {
     std::array<float, 3> color{};
     float spread = 0;               // the cluster's size: the sphere its shadow rays aim at
     bool steady_flame = false;
+    bool local_glow = false;        // a buff or sparkle cloud: lit as a sphere of its spread (#263)
 };
 
 constexpr float kJoin = 1.5f;           // a sample joins the nearest cluster within this, metres
@@ -266,7 +267,7 @@ inline void lights(const std::vector<Cluster>& clusters, float strength, std::ve
             peak = (std::min)(peak, kLocalStrength * strength * power / brightest);
         }
         Light light; light.id = c.id; light.centre = c.centre; light.radius = radius;
-        light.steady_flame = c.steady_flame;
+        light.steady_flame = c.steady_flame; light.local_glow = c.local_glow;
         light.spread = c.local_glow ? (std::min)(c.spread, radius) : c.spread;
         for (int a = 0; a < 3; ++a) light.color[a] = (std::max)(c.power[a], 0.f) / power * peak;
         if (!std::isfinite(light.color[0] + light.color[1] + light.color[2] + light.centre[0] + light.centre[1] + light.centre[2])) continue;

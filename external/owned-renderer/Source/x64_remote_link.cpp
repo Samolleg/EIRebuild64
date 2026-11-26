@@ -13,6 +13,7 @@ namespace owned {
 void bridge_report_event(const char* event, const char* detail) noexcept;
 void bridge_async_append(const wchar_t* path, const char* bytes, std::size_t size) noexcept;  // engine_bridge.cpp
 std::wstring renderer_config_path();
+void bridge_set_load_reveal(bool enabled, std::uint64_t revealed_epoch) noexcept;  // owned_world_state.cpp
 }
 
 namespace x64remote {
@@ -20,6 +21,10 @@ namespace {
 
 constexpr std::int64_t kPublishBytes = 256 * 1024;
 constexpr DWORD kHostStallMs = 20000;
+// A host that keeps beating (Control::host_heartbeat: its stream thread is
+// using CPU, a driver compiling inside one record) is waited for up to this
+// long in all; a quiet host is still lost after kHostStallMs.
+constexpr ULONGLONG kHostBusyCapMs = 180000;
 
 struct Link {
     bool started = false;
@@ -51,11 +56,6 @@ struct Link {
     std::int64_t report_qpc = 0;
     std::uint64_t report_records = 0, report_bytes = 0, report_host_frames = 0;
     double qpc_to_ms = 0;
-    // Temporary (doll bug, 2026-11-06): bytes per scene command id and of the
-    // retained publication stream since the last report (scene_mutex /
-    // ring lock), to name what fills the ring on the outfitting screen.
-    std::uint64_t scene_command_bytes[256]{}, scene_command_messages[256]{};
-    std::uint64_t retained_bytes = 0;
 };
 
 Link& link() noexcept {
@@ -83,6 +83,9 @@ void lose(const char* reason) noexcept {
     strncpy_s(l.lost_reason, reason, _TRUNCATE);
     log("render host lost: %s", reason);
     owned::bridge_report_event("x64_host_lost", reason);
+    // The host's load hold ends with it: the load pause lets go at the
+    // game's next world Draw (#305). Nothing reports a hold after a loss.
+    owned::bridge_set_load_reveal(false, 0);
 }
 
 bool host_alive() noexcept {
@@ -103,83 +106,39 @@ bool host_alive() noexcept {
     return true;
 }
 
-// Temporary (doll bug, 2026-11-06): the outfitting-screen hitches carry
-// ~50 ms main-thread waits, the length of this loop's poll. Per call site:
-// waits over 10 and 45 ms, the longest, and how the long ones ended (the
-// host's event, or a 50 ms poll timing out with the condition then true).
-enum WaitSite { kWaitSpace, kWaitReply, kWaitPresent, kWaitSites };
-const char* const kWaitSiteName[kWaitSites] = {"ring_space", "reply", "present"};
-struct WaitSiteStats {
-    std::uint64_t calls = 0, over10 = 0, over45 = 0, timed_out_polls = 0, ended_after_timeout = 0;
-    double max_ms = 0;
-};
-std::mutex g_wait_lock;
-WaitSiteStats g_wait_stats[kWaitSites];
-ULONGLONG g_wait_window = 0, g_wait_second = 0;
-unsigned g_wait_second_lines = 0;
-bool g_wait_window_long = false;
-
-void note_wait(WaitSite site, std::int64_t start, unsigned timeouts, unsigned signals,
-               bool last_wake_timeout, bool ok) noexcept {
-    const double ms = double(now_qpc() - start) * link().qpc_to_ms;
-    std::lock_guard<std::mutex> guard(g_wait_lock);
-    auto& stats = g_wait_stats[site];
-    ++stats.calls;
-    stats.timed_out_polls += timeouts;
-    if (ms >= 10) { ++stats.over10; g_wait_window_long = true; }
-    if (ms > stats.max_ms) stats.max_ms = ms;
-    const ULONGLONG tick = GetTickCount64();
-    if (ms >= 45) {
-        ++stats.over45;
-        if (ok && last_wake_timeout) ++stats.ended_after_timeout;
-        if (tick / 1000 != g_wait_second) { g_wait_second = tick / 1000; g_wait_second_lines = 0; }
-        if (g_wait_second_lines++ < 20)
-            log("long wait %s %.1f ms: %s; %u poll timeouts, %u host signals, last wake %s",
-                kWaitSiteName[site], ms, ok ? "condition true" : "gave up", timeouts, signals,
-                last_wake_timeout ? "poll timeout" : (timeouts || signals ? "host signal" : "spin"));
-    }
-    if (!g_wait_window) g_wait_window = tick;
-    if (tick - g_wait_window >= 5000) {
-        if (g_wait_window_long) {
-            char line[640]; int used = 0;
-            for (int i = 0; i < kWaitSites && used < int(sizeof(line)); ++i) {
-                const auto& w = g_wait_stats[i];
-                const int n = std::snprintf(line + used, sizeof(line) - used,
-                    "%s%s calls=%llu >=10ms=%llu >=45ms=%llu max=%.1fms poll_timeouts=%llu long_ended_by_timeout=%llu",
-                    i ? "; " : "", kWaitSiteName[i], static_cast<unsigned long long>(w.calls),
-                    static_cast<unsigned long long>(w.over10), static_cast<unsigned long long>(w.over45), w.max_ms,
-                    static_cast<unsigned long long>(w.timed_out_polls), static_cast<unsigned long long>(w.ended_after_timeout));
-                if (n > 0) used += n;
-            }
-            log("waits over %.1f s: %s", double(tick - g_wait_window) / 1000.0, line);
-        }
-        for (auto& w : g_wait_stats) w = {};
-        g_wait_window = tick;
-        g_wait_window_long = false;
-    }
-}
-
 // Waits until ready() holds, raising `flag` so the host signals `event`.
-// timeout_ms 0: until the host dies.
-template <class Ready> bool wait_until(Ready ready, volatile long& flag, HANDLE event, WaitSite site,
-                                       DWORD timeout_ms = 0) noexcept {
-    const ULONGLONG deadline = timeout_ms ? GetTickCount64() + timeout_ms : 0;
+// timeout_ms 0: until the host dies. With heartbeat, timeout_ms counts from
+// the host's last heartbeat change (at most kHostBusyCapMs in all).
+template <class Ready> bool wait_until(Ready ready, volatile long& flag, HANDLE event,
+                                       DWORD timeout_ms = 0, bool heartbeat = false) noexcept {
+    const ULONGLONG begun = GetTickCount64();
+    ULONGLONG deadline = timeout_ms ? begun + timeout_ms : 0;
+    long beat = heartbeat ? link().control->host_heartbeat : 0;
+    bool busy_logged = false;
     for (int spin = 0; spin < 64; ++spin) {
         if (ready()) return true;
         YieldProcessor();
     }
-    const std::int64_t start = now_qpc();
-    unsigned timeouts = 0, signals = 0;
-    bool last_timeout = false;
     for (;;) {
-        if (ready()) { note_wait(site, start, timeouts, signals, last_timeout, true); return true; }
-        if (!host_alive()) { note_wait(site, start, timeouts, signals, last_timeout, false); return false; }
-        if (deadline && GetTickCount64() > deadline) { note_wait(site, start, timeouts, signals, last_timeout, false); return false; }
+        if (ready()) return true;
+        if (!host_alive()) return false;
+        if (deadline && heartbeat) {
+            const ULONGLONG tick = GetTickCount64();
+            const long now_beat = link().control->host_heartbeat;
+            if (now_beat != beat && tick - begun < kHostBusyCapMs) {
+                beat = now_beat;
+                deadline = (std::min)(tick + timeout_ms, begun + kHostBusyCapMs);
+                if (!busy_logged && tick - begun >= timeout_ms) {
+                    busy_logged = true;
+                    log("host busy for %.0f s inside one record (its stream thread still uses CPU, e.g. a driver shader compile): still waiting, up to %.0f s",
+                        double(tick - begun) / 1000.0, double(kHostBusyCapMs) / 1000.0);
+                }
+            }
+        }
+        if (deadline && GetTickCount64() > deadline) return false;
         InterlockedExchange(&flag, 1);
-        if (ready()) { InterlockedExchange(&flag, 0); note_wait(site, start, timeouts, signals, last_timeout, true); return true; }
-        const DWORD woke = WaitForSingleObject(event, 50);
-        last_timeout = woke == WAIT_TIMEOUT;
-        if (last_timeout) ++timeouts; else ++signals;
+        if (ready()) { InterlockedExchange(&flag, 0); return true; }
+        WaitForSingleObject(event, 50);
         InterlockedExchange(&flag, 0);
     }
 }
@@ -204,8 +163,8 @@ bool ensure_space(std::uint32_t bytes) noexcept {
     const std::int64_t start = now_qpc();
     // A host that stops consuming (hung, not exited) fails the device
     // visibly instead of hanging the game.
-    if (!wait_until(fits, l.control->space_waiting, l.space, kWaitSpace, kHostStallMs) && !l.removed.load())
-        lose("the host stopped consuming commands for 20 s");
+    if (!wait_until(fits, l.control->space_waiting, l.space, kHostStallMs, true) && !l.removed.load())
+        lose("the host stopped consuming commands for 20 s (or stayed busy in one record for 180 s)");
     ++l.space_waits;
     l.space_wait_ms += (now_qpc() - start) * l.qpc_to_ms;
     return fits();
@@ -330,7 +289,7 @@ bool core_wanted() noexcept try {
             owned::bridge_report_event("x64_host_unavailable", "could not save the first-run setting");
             return false;
         }
-        owned::bridge_report_event("x64_host_first_run", "new configuration: trying the 64-bit render host with Direct3D 11");
+        owned::bridge_report_event("x64_host_first_run", "new configuration: trying the 64-bit render host with Direct3D 12");
     }
     // The marker goes down before the host is launched (core_ensure); the
     // first host frame removes it (note_first_present).
@@ -433,10 +392,11 @@ bool link_start(HWND game_window, UINT device_flags, char* error, std::size_t er
     l.reply = event(L"reply");
     l.present = event(L"present");
     if (!l.work || !l.space || !l.reply || !l.present) return fail("event creation failed");
-    // renderer_backend=d3d12 (opt-in, experimental): the host draws with its
-    // D3D12 backend, or stays on D3D11 naming why (host.log).
+    // renderer_backend=d3d12 (the default since settings_version 11; a new
+    // ini has no key yet): the host draws with its D3D12 backend, or uses
+    // D3D11 naming why (host.log) and turns the option off (Config::run).
     wchar_t backend[16]{};
-    GetPrivateProfileStringW(L"graphics", L"renderer_backend", L"d3d11", backend, 16, owned::renderer_config_path().c_str());
+    GetPrivateProfileStringW(L"graphics", L"renderer_backend", L"1", backend, 16, owned::renderer_config_path().c_str());
     const bool d3d12 = _wcsicmp(backend, L"d3d12") == 0 || _wcsicmp(backend, L"1") == 0;   // F10 Renderer: 1; older ini files: d3d12
     wchar_t arguments[128];
     swprintf_s(arguments, L"--remote --pid %lu --hwnd %llu%s", pid,
@@ -577,8 +537,6 @@ void scene_message(std::uint16_t command, const std::uint8_t* data, std::size_t 
     // Fragments far below a record's limit (a quarter of the ring).
     const std::size_t fragment = (std::min<std::size_t>)(std::size_t(1) << 20, chunk_bytes() - sizeof(SceneFragment));
     std::lock_guard<std::mutex> lock(l.scene_mutex);
-    l.scene_command_bytes[command & 255u] += bytes;
-    ++l.scene_command_messages[command & 255u];
     std::size_t at = 0;
     do {
         const std::size_t part = (std::min)(fragment, bytes - at);
@@ -603,8 +561,6 @@ void scene_message_fill(std::uint16_t command, std::size_t bytes, void (*fill)(v
         return;
     }
     std::lock_guard<std::mutex> lock(l.scene_mutex);
-    l.scene_command_bytes[command & 255u] += bytes;
-    ++l.scene_command_messages[command & 255u];
     const SceneFragment header{static_cast<std::uint32_t>(bytes), command, std::uint16_t(1)};
     Writer w(Op::scene, static_cast<std::uint32_t>(sizeof(header) + bytes));
     w.put(header);
@@ -688,7 +644,6 @@ Writer::Writer(Op op, std::uint32_t payload_bytes) noexcept {
     end_ = l.write_pos;
     ++l.records;
     l.bytes += total;
-    if (op == Op::retained) l.retained_bytes += total;
 }
 
 Writer::~Writer() {
@@ -716,8 +671,8 @@ HRESULT wait_reply(std::uint64_t serial) noexcept {
     auto& l = link();
     publish();
     const std::int64_t start = now_qpc();
-    const bool ok = wait_until([&] { return l.control->reply_serial >= serial; }, l.control->reply_waiting, l.reply, kWaitReply, kHostStallMs);
-    if (!ok && !l.removed.load()) lose("the host did not answer a request for 20 s");
+    const bool ok = wait_until([&] { return l.control->reply_serial >= serial; }, l.control->reply_waiting, l.reply, kHostStallMs, true);
+    if (!ok && !l.removed.load()) lose("the host did not answer a request for 20 s (or stayed busy in one record for 180 s)");
     const HRESULT hr = ok ? static_cast<HRESULT>(l.control->reply_hr) : static_cast<HRESULT>(DXGI_ERROR_DEVICE_REMOVED);
     l.readback_ms += (now_qpc() - start) * l.qpc_to_ms;
     return hr;
@@ -731,7 +686,7 @@ void wait_presents(std::uint64_t serial) noexcept {
     if (ready()) return;
     const std::int64_t start = now_qpc();
     // Bounded: a host present stuck behind this thread must not hang the game.
-    if (!wait_until(ready, l.control->present_waiting, l.present, kWaitPresent, 2000) && !l.removed.load())
+    if (!wait_until(ready, l.control->present_waiting, l.present, 2000) && !l.removed.load())
         log("waited 2 s for host present %llu (host at %llu); continuing", static_cast<unsigned long long>(serial),
             static_cast<unsigned long long>(l.control->presents_done));
     ++l.present_waits;
@@ -759,39 +714,6 @@ void report_frame() noexcept {
         (bytes - l.report_bytes) / frames / 1024.0, static_cast<unsigned long long>(space_waits), space_ms,
         static_cast<unsigned long long>(l.present_waits.exchange(0)), l.present_wait_ms / frames, l.readback_ms / frames,
         static_cast<unsigned long long>(host_frames - l.report_host_frames), static_cast<unsigned long>(l.removed.load()));
-    // Heavy streams (over 2 MB a frame): the largest scene commands by id
-    // (scene_core.h order) and the retained publication stream.
-    if (frames > 0 && (bytes - l.report_bytes) / frames > 2.0 * 1024 * 1024) {
-        std::uint64_t retained = 0;
-        std::uint64_t command_bytes[256], command_messages[256];
-        {
-            std::lock_guard<std::mutex> lock(l.scene_mutex);
-            std::memcpy(command_bytes, l.scene_command_bytes, sizeof(command_bytes));
-            std::memcpy(command_messages, l.scene_command_messages, sizeof(command_messages));
-        }
-        EnterCriticalSection(&l.ring_lock);
-        retained = l.retained_bytes;
-        LeaveCriticalSection(&l.ring_lock);
-        char line[512]; int used = std::snprintf(line, sizeof(line), "retained=%.1f KB/frame;",
-            double(retained) / frames / 1024.0);
-        for (int top = 0; top < 5 && used > 0 && used < int(sizeof(line)); ++top) {
-            int best = -1;
-            for (int i = 0; i < 256; ++i) if (command_bytes[i] && (best < 0 || command_bytes[i] > command_bytes[best])) best = i;
-            if (best < 0) break;
-            used += std::snprintf(line + used, sizeof(line) - used, " cmd%d=%.1f KB/frame (%.1f msgs/frame)", best,
-                double(command_bytes[best]) / frames / 1024.0, double(command_messages[best]) / frames);
-            command_bytes[best] = 0;
-        }
-        log("heavy stream: %s", line);
-    }
-    {
-        std::lock_guard<std::mutex> lock(l.scene_mutex);
-        std::memset(l.scene_command_bytes, 0, sizeof(l.scene_command_bytes));
-        std::memset(l.scene_command_messages, 0, sizeof(l.scene_command_messages));
-    }
-    EnterCriticalSection(&l.ring_lock);
-    l.retained_bytes = 0;
-    LeaveCriticalSection(&l.ring_lock);
     l.report_records = records;
     l.report_bytes = bytes;
     l.report_host_frames = host_frames;

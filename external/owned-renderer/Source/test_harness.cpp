@@ -1,6 +1,7 @@
 #include "test_harness.h"
 #include "engine_bridge.h"
 #include "addon_hook_chain.h"
+#include "x64_remote_link.h"
 
 #include <windows.h>
 #include "game_sites.h"
@@ -15,6 +16,7 @@
 #include <initializer_list>
 #include <memory>
 #include <mutex>
+#include <share.h>
 #include <vector>
 
 namespace owned {
@@ -44,6 +46,15 @@ constexpr std::uintptr_t kSetCameraAsRva = 0x00011470;
 constexpr std::uintptr_t kSetCarrierRva = 0x0000d420;
 constexpr std::uintptr_t kSetAnchorPointRva = 0x0000f5c0;
 constexpr std::uintptr_t kInitRotateRva = 0x000109e0;
+// The current map (#292): CCamera's scroll and follow paths clamp the anchor
+// to [0, width-1] x [0, height-1] of the map at 007AF738, width at +0x10C and
+// height at +0x110 (0040FECC..0040FEDB, 0040FF7D). SetAnchorPoint does not
+// clamp, and the 3D scene draw (0056AFE0) overruns its cell grid when the
+// anchor is more than 100 m off the map, so the harness rejects such stops.
+constexpr std::uintptr_t kCurrentMapRva = 0x003af738;
+constexpr std::uintptr_t kScrollMapWidthSiteRva = 0x0000fecc;
+constexpr std::uintptr_t kScrollMapHeightSiteRva = 0x0000ff7d;
+constexpr std::size_t kMapWidth = 0x10c, kMapHeight = 0x110;
 constexpr std::uintptr_t kQuitProgramRva = 0x00055f20;
 // Binary-confirmed Load dialog call at 00655ADE..00655AEF and quickload at
 // 00657664..0065766C: ECX=007AFE20, stack=(slot char*, false). 005816D0
@@ -153,6 +164,8 @@ constexpr ExpectedEntry kEntries[] = {
     {kSetCarrierRva, {0x8b, 0x44, 0x24, 0x04, 0x83, 0xf8, 0xff, 0x89}},
     {kSetAnchorPointRva, {0x8b, 0x44, 0x24, 0x04, 0x83, 0xec, 0x08, 0x8b}},
     {kInitRotateRva, {0x83, 0xec, 0x0c, 0x8b, 0x44, 0x24, 0x10, 0x56}},
+    {kScrollMapWidthSiteRva, {0x8b, 0x0d, 0x38, 0xf7, 0x7a, 0x00, 0xc7, 0x45}},
+    {kScrollMapHeightSiteRva, {0x8b, 0x88, 0x10, 0x01, 0x00, 0x00, 0x89, 0x4d}},
     {kQuitProgramRva, {0xa0, 0x51, 0x47, 0x78, 0x00, 0x84, 0xc0, 0x74}},
 };
 
@@ -258,6 +271,7 @@ struct Entry {
     unsigned progress = 0;
     bool posted = false;
     bool retried = false;
+    std::uint64_t started_ms = 0;
 };
 
 struct State {
@@ -282,8 +296,29 @@ struct State {
     std::uint64_t load_started_ms = 0, menu_started_ms = 0;
     // Clock pin, re-applied at every Draw entry while active.
     bool clock_pinned = false;
+    bool hero_follow = false;
+    std::uint64_t hero_epoch = 0;
+    // Event expectations read the existing logs, delimited before load and
+    // after the renderer reached the assertion. No logging hot-path hook.
+    std::wstring event_bridge_path;
+    std::string event_load_marker;
+    std::uint64_t event_bridge_start = 0, event_epoch = 0;
     float clock_hour = 0.0f;
     float path_start[5]{}; // camera_path (temporary): the pose it starts from (camera order)
+    // camera_unit: the newest world view (harness_note_world_view), counted;
+    // the pivot being corrected, the view count when it was last applied,
+    // the corrections applied and whether the command has its result.
+    std::vector<HarnessUnitPosition> view_units;
+    std::array<float, 16> view_clip{};
+    std::uint64_t views_noted = 0, unit_applied_view = 0;
+    float unit_anchor[2]{};
+    float unit_distance = 0.0f; // the game camera distance being corrected
+    std::int32_t unit_target_id = 0; // camera_unit @x,y: the unit it picked
+    unsigned unit_step = 0;
+    bool unit_finished = false;
+    // drawall: DrawVisibleOnly as the first drawall on found it.
+    bool drawall_saved = false;
+    std::int32_t drawall_previous = 0;
     unsigned long command_file_error = 0; // the last cmd.txt delete failure named (0: none)
     // Result lines not yet in results.txt (another process held it without
     // write sharing): the driver waits on each line, so none may be dropped.
@@ -485,6 +520,87 @@ std::string text_of(const char* pattern, ...) {
     std::vsnprintf(text, sizeof(text), pattern, arguments);
     va_end(arguments);
     return text;
+}
+
+bool event_expectation(HarnessVerb verb) {
+    return verb == HarnessVerb::expect_event_absent || verb == HarnessVerb::expect_event_present;
+}
+
+void begin_event_window() {
+    State& s = state();
+    wchar_t root[MAX_PATH]{};
+    DWORD n = GetEnvironmentVariableW(L"EI_RENDERER_DEBUG_DIR", root, MAX_PATH);
+    if (n && n < MAX_PATH) s.event_bridge_path = root;
+    else {
+        n = GetEnvironmentVariableW(L"LOCALAPPDATA", root, MAX_PATH);
+        s.event_bridge_path = n && n < MAX_PATH ? std::wstring(root) + L"\\EID3D11" : L".\\EID3D11-debug";
+    }
+    s.event_bridge_path += L"\\bridge.jsonl";
+    // The load marker is appended after this size, so the window reader starts
+    // here instead of rereading the whole session log. No file yet: 0.
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    s.event_bridge_start = GetFileAttributesExW(s.event_bridge_path.c_str(), GetFileExInfoStandard, &info)
+        ? (std::uint64_t(info.nFileSizeHigh) << 32) | info.nFileSizeLow : 0;
+    s.event_load_marker = text_of("%lu:%lu:%llu", GetCurrentProcessId(), s.queue.front().id, GetTickCount64());
+    s.event_epoch = 0; // established only by this load's successful completion
+    bridge_append_probe_event("harness_load_begin", s.event_load_marker.c_str());
+}
+
+// 0: the logger has not reached the barrier; 1: complete; -1: unavailable.
+// Only complete records count. Exact event names, never a substring of detail.
+// Reads bridge.jsonl from the size recorded before the load, in blocks.
+int read_event_window(const std::wstring& path, std::uint64_t offset,
+                      const std::string& load_marker, const std::string& barrier,
+                      const std::string& wanted, unsigned& count, std::string& detail) {
+    FILE* file = _wfsopen(path.c_str(), L"rb", _SH_DENYNO);
+    if (!file) {
+        detail = "bridge.jsonl unavailable";
+        return 0; // async first open / transient sharing conflict: bounded by the command
+    }
+    const auto close = std::unique_ptr<FILE, decltype(&std::fclose)>(file, &std::fclose);
+    if (_fseeki64(file, 0, SEEK_END) || _ftelli64(file) < static_cast<__int64>(offset) ||
+        _fseeki64(file, static_cast<__int64>(offset), SEEK_SET)) {
+        detail = "event log truncated since load"; return -1;
+    }
+    const std::string start = "\"event\":\"harness_load_begin\",\"detail\":\"" + load_marker + "\"";
+    const std::string stop = "\"event\":\"harness_event_barrier\",\"detail\":\"" + barrier + "\"";
+    const std::string key = "{\"event\":\"" + wanted + "\",";
+    bool in_window = false;
+    std::string line;
+    std::vector<char> block(64 * 1024);
+    count = 0;
+    for (std::size_t got; (got = std::fread(block.data(), 1, block.size(), file)) != 0;) {
+        for (std::size_t begin = 0; begin < got;) {
+            const auto* newline = static_cast<const char*>(std::memchr(block.data() + begin, '\n', got - begin));
+            const std::size_t end = newline ? std::size_t(newline - block.data()) : got;
+            line.append(block.data() + begin, end - begin);
+            begin = end + 1;
+            if (!newline) break; // partial record: continued by the next block
+            if (!in_window) in_window = line.find(start) != std::string::npos;
+            else if (line.find(stop) != std::string::npos) return 1;
+            else if (line.compare(0, key.size(), key) == 0) ++count;
+            line.clear();
+        }
+    }
+    detail = std::ferror(file) ? "event log read failed" :
+        !in_window ? "load marker not found in bridge.jsonl" : "event log barrier not written yet";
+    return std::ferror(file) ? -1 : 0;
+}
+
+bool finish_event_expectation(const Entry& entry, bool& ok, std::string& detail) {
+    const State& s = state();
+    const auto& command = entry.command;
+    unsigned count = 0;
+    const int result = read_event_window(s.event_bridge_path, s.event_bridge_start, s.event_load_marker,
+                                         command.value + ":game", command.name, count, detail);
+    if (result == 0 && !harness_timed_out(entry.started_ms, GetTickCount64(), 5)) return false;
+    ok = false;
+    // On timeout the reader's specific reason (marker missing, barrier not written) is kept.
+    if (result != 1) { detail = "expect " + command.name + ": " + detail; return true; }
+    ok = command.verb == HarnessVerb::expect_event_present ? count != 0 : count == 0;
+    detail = text_of("event %s: %u occurrence(s) since load; expected %s", command.name.c_str(), count,
+                     command.verb == HarnessVerb::expect_event_present ? "present" : "absent");
+    return true;
 }
 
 // Game text in this Russian image/info.sav is CP1251. Harness text is UTF-8;
@@ -760,6 +876,14 @@ void write_results() {
 void retire_front(bool ok, const std::string& detail) {
     State& s = state();
     if (s.queue.empty()) return;
+    // The renderer acknowledges its log barrier; only the game-side log
+    // reader produces this expectation's result, once both logs reach it.
+    if (event_expectation(s.queue.front().command.verb) && s.queue.front().progress == 1 &&
+        ok && detail == "event barrier emitted") {
+        bridge_append_probe_event("harness_event_barrier", (s.queue.front().command.value + ":game").c_str());
+        s.queue.front().progress = 2;
+        return;
+    }
     const Entry& entry = s.queue.front();
     s.unwritten_results.push_back(text_of("%lu\t%s\t", entry.id, ok ? "done" : "failed") +
                                   entry.line + "\t" + detail + "\n");
@@ -831,6 +955,273 @@ std::string camera_state() {
                   world_hour(world), s.clock_pinned ? "pinned" : "free");
 }
 
+// state (#317): the client's interface screen stack, bottom to top, by each
+// screen's primary vtable (theInterface 007C7D50, stack begin/end at +34/+38:
+// the outfitting verbs' verified read, GetCurrentScreen 005F7590). Names
+// for the game's own screens; another table (an addon's screen) as its RVA.
+int screen_stack_rvas(std::uint8_t* image, std::uint32_t* rvas, int capacity) noexcept {
+    __try {
+        std::uint8_t* face = image + 0x003c7d50;
+        const auto begin = *reinterpret_cast<std::uintptr_t*>(face + 0x34);
+        const auto end = *reinterpret_cast<std::uintptr_t*>(face + 0x38);
+        if (end < begin || (end - begin) % 4 || end - begin > 64 * 4) return -1;
+        int count = 0;
+        for (auto at = begin; at < end && count < capacity; at += 4) {
+            auto* screen = *reinterpret_cast<std::uint8_t**>(at);
+            rvas[count++] = screen ? static_cast<std::uint32_t>(*reinterpret_cast<std::uintptr_t*>(screen) -
+                                                               reinterpret_cast<std::uintptr_t>(image)) : 0;
+        }
+        return count;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return -1; }
+}
+
+std::uint32_t server_interface();
+
+// spawn (harness only): a unit placed the way the map loader places one.
+// CGameMOBFile::Load hands each mob unit record (a CMEUnit) to
+// CWorldServer::AddMapObject 005927C0, which creates the object, sets its
+// mask, primary/secondary texture and body-part names, SetupStats and
+// WearAll from the prototype, its player and enemy mask, and initialises the
+// unit; the Dejavu addon calls the same entry mid-game for its traps. The
+// script's AddUnitToServer reaches AddMapObject through CreatePersonage and
+// DeployPersonages, which leave both textures empty for non-human races and
+// dereference an unknown prototype (the stock game crashes on "Goblin00").
+// Here the record is built by the game's CMEUnit constructor 0046C010 (its
+// defaults: id -1, shadow, "none" names, complection 0.5), its CString fields
+// assigned by CString::operator=(LPCSTR) 00700AF9 and the body parts by
+// CStringArray::SetAtGrow(int, LPCSTR) 006FEBCE (statically linked MFC),
+// and destroyed by ~CMEUnit 0046C140. Layouts (ei-re structs, exact):
+// CMEBasicObject p_nID +18, p_ptPosition +20, p_qRotation +2C (w x y z);
+// CMEObject p_tidTypeID +50, p_szTemplate +54, p_Complection +60 (strength
+// grace tall), p_nPlayer +6E, p_szPrimTexture +70, p_szSecTexture +74,
+// p_aBodyParts +78; CMEUnit (size 324h) p_szUnitPrototype +20C.
+// The database is theUnitDatabase 007AF358: prototypes (CDatabase, its data
+// vector first) at +0, races at +40; SUDBUnitPrototype (120h) szName +0,
+// dwRaceIndex +8, dwSkinIndex +C, dwHair +10, fStrength/fGrace/fTall +14..;
+// SUDBRaceModel (168h) tidTypeID +4, szMaskName +E8, szPrimaryTextures +EC,
+// szSecondaryTextures +F8 (vectors of CString). The game's own lookup
+// (CDatabase::operator[] by name) is exact and case-sensitive.
+constexpr std::uintptr_t kUnitDatabaseRva = 0x003af358;
+constexpr std::uintptr_t kMEUnitCtorRva = 0x0006c010, kMEUnitDtorRva = 0x0006c140;
+constexpr std::uintptr_t kAddMapObjectRva = 0x001927c0;
+constexpr std::uintptr_t kCStringAssignRva = 0x00300af9, kStringArraySetAtGrowRva = 0x002febce;
+constexpr std::size_t kMEUnitSize = 0x324, kPrototypeSize = 0x120, kRaceSize = 0x168;
+constexpr int kObjectTypeHuman = 50; // MOTID_HUMAN
+using MEUnitCtorFn = void*(__thiscall*)(void*);
+using MEUnitDtorFn = void(__thiscall*)(void*);
+using AddMapObjectFn = int(__thiscall*)(void*, void*);
+using CStringAssignFn = void*(__thiscall*)(void*, const char*);
+using StringArraySetAtGrowFn = void(__thiscall*)(void*, int, const char*);
+
+struct SpawnRecord {
+    std::string prototype, model, prim, sec;
+    std::vector<std::string> parts;
+    int type = 0, player = 0;
+    float position[3]{}, rotation[4]{1, 0, 0, 0}, complection[3]{0.5f, 0.5f, 0.5f};
+};
+
+// The vector [begin, end) of `stride`-byte entries at `vector` (stlport:
+// start, finish, end of storage); false when it does not look like one.
+bool spawn_vector(const std::uint8_t* vector, std::size_t stride, const std::uint8_t*& begin, std::size_t& count) noexcept {
+    __try {
+        begin = *reinterpret_cast<const std::uint8_t* const*>(vector);
+        const auto* end = *reinterpret_cast<const std::uint8_t* const*>(vector + 4);
+        if (!begin || end < begin || std::size_t(end - begin) % stride || std::size_t(end - begin) / stride > 20000) return false;
+        count = std::size_t(end - begin) / stride;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+// A CString's text, or nullptr when unreadable.
+const char* spawn_cstring(const std::uint8_t* field) noexcept {
+    __try {
+        const char* text = *reinterpret_cast<const char* const*>(field);
+        return text && std::memchr(text, 0, 256) ? text : nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+}
+
+// Fills `record` from the unit database; an error, empty when the prototype
+// (and any model override) is in it.
+std::string spawn_from_database(std::uint8_t* image, SpawnRecord& record) {
+    const std::uint8_t* database = image + kUnitDatabaseRva;
+    const std::uint8_t *prototypes = nullptr, *races = nullptr;
+    std::size_t prototype_count = 0, race_count = 0;
+    if (!spawn_vector(database, kPrototypeSize, prototypes, prototype_count) ||
+        !spawn_vector(database + 0x40, kRaceSize, races, race_count))
+        return "spawn: unit database unreadable";
+    const std::uint8_t* prototype = nullptr;
+    for (std::size_t i = 0; i < prototype_count && !prototype; ++i) {
+        const char* name = spawn_cstring(prototypes + i * kPrototypeSize);
+        if (name && record.prototype == name) prototype = prototypes + i * kPrototypeSize;
+    }
+    if (!prototype)
+        return text_of("spawn: no prototype \"%s\" in the unit database (%u prototypes; names are exact and case-sensitive)",
+                       record.prototype.c_str(), static_cast<unsigned>(prototype_count));
+    std::uint32_t race_index = 0, skin = 0, hair = 0;
+    std::memcpy(&race_index, prototype + 0x8, 4);
+    std::memcpy(&skin, prototype + 0xc, 4);
+    std::memcpy(&hair, prototype + 0x10, 4);
+    std::memcpy(record.complection, prototype + 0x14, sizeof(record.complection));
+    if (race_index >= race_count) return text_of("spawn: prototype race index %u outside %u races", race_index, unsigned(race_count));
+    const std::uint8_t* race = races + race_index * kRaceSize;
+    std::memcpy(&record.type, race + 0x4, 4);
+    const char* mask = spawn_cstring(race + 0xe8);
+    if (!mask) return "spawn: race mask unreadable";
+    if (record.model.empty()) record.model = mask;
+    else {
+        bool known = false;
+        for (std::size_t i = 0; i < race_count && !known; ++i) {
+            const char* other = spawn_cstring(races + i * kRaceSize + 0xe8);
+            known = other && record.model == other;
+        }
+        if (!known) return text_of("spawn: model \"%s\" is no race's mask in the unit database", record.model.c_str());
+    }
+    // Defaults: the race's primary texture at the prototype's skin index (its
+    // first when the index is past the list) and its first secondary texture.
+    const auto pick = [](const std::uint8_t* vector, std::size_t index) -> std::string {
+        const std::uint8_t* begin = nullptr;
+        std::size_t count = 0;
+        if (!spawn_vector(vector, 4, begin, count) || !count) return {};
+        const char* text = spawn_cstring(begin + 4 * (index < count ? index : 0));
+        return text ? text : "";
+    };
+    if (record.prim.empty()) record.prim = pick(race + 0xec, skin);
+    if (record.sec.empty()) record.sec = pick(race + 0xf8, 0);
+    // Body parts: the human list CWorldServer::DeployPersonages forms (hair
+    // hr.NN from the prototype, none for -1); other races carry none.
+    if (record.type == kObjectTypeHuman) {
+        for (const char* part : {"hd", "bd", "hp", "hr", "lh1", "lh2", "lh3", "rh1", "rh2", "rh3",
+                                 "ll1", "ll2", "ll3", "rl1", "rl2", "rl3"}) {
+            if (std::strcmp(part, "hr") != 0) record.parts.push_back(part);
+            else if (hair != 0xffffffffu) record.parts.push_back(text_of("hr.%.2u", hair));
+        }
+    }
+    return {};
+}
+
+// The game calls; SEH so a fault inside them fails the command.
+int spawn_call(std::uint8_t* image, const SpawnRecord& record, std::uint8_t* unit, int& id) noexcept {
+    __try {
+        reinterpret_cast<MEUnitCtorFn>(image + kMEUnitCtorRva)(unit);
+        const auto assign = reinterpret_cast<CStringAssignFn>(image + kCStringAssignRva);
+        std::memcpy(unit + 0x20, record.position, sizeof(record.position));
+        std::memcpy(unit + 0x2c, record.rotation, sizeof(record.rotation));
+        std::memcpy(unit + 0x50, &record.type, 4);
+        std::memcpy(unit + 0x60, record.complection, sizeof(record.complection));
+        unit[0x6e] = static_cast<std::uint8_t>(record.player);
+        assign(unit + 0x54, record.model.c_str());
+        if (!record.prim.empty()) assign(unit + 0x70, record.prim.c_str());
+        if (!record.sec.empty()) assign(unit + 0x74, record.sec.c_str());
+        assign(unit + 0x20c, record.prototype.c_str());
+        const auto set = reinterpret_cast<StringArraySetAtGrowFn>(image + kStringArraySetAtGrowRva);
+        for (std::size_t i = 0; i < record.parts.size(); ++i) set(unit + 0x78, int(i), record.parts[i].c_str());
+        id = reinterpret_cast<AddMapObjectFn>(image + kAddMapObjectRva)(image + kServerRva, unit);
+        reinterpret_cast<MEUnitDtorFn>(image + kMEUnitDtorRva)(unit);
+        return 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 1; }
+}
+
+std::string camera_off_map(float x, float y);
+
+// True when `entry` starts with a jmp into the module holding this code.
+bool jump_into_this_module(const std::uint8_t* entry) noexcept {
+    __try {
+        if (entry[0] != 0xe9) return false;
+        std::int32_t offset = 0;
+        std::memcpy(&offset, entry + 1, 4);
+        const std::uint8_t* target = entry + 5 + offset;
+        HMODULE module = nullptr, self = nullptr;
+        constexpr DWORD flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+        return GetModuleHandleExW(flags, reinterpret_cast<LPCWSTR>(target), &module) &&
+               GetModuleHandleExW(flags, reinterpret_cast<LPCWSTR>(&jump_into_this_module), &self) && module == self;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+std::string apply_spawn(const HarnessCommand& command, bool& ok) {
+    ok = false;
+    State& s = state();
+    // Stock entry bytes (static: a nested initializer_list would not outlive its pair).
+    struct SpawnSite { std::uintptr_t rva; std::uint8_t size; std::uint8_t bytes[11]; };
+    static const SpawnSite kSpawnSites[] = {
+        {kMEUnitCtorRva, 9, {0x6a,0xff,0x68,0x84,0x53,0x71,0x00,0x64,0xa1}},
+        {kMEUnitDtorRva, 9, {0x6a,0xff,0x68,0x48,0x54,0x71,0x00,0x64,0xa1}},
+        {kAddMapObjectRva, 10, {0x55,0x8b,0xec,0x6a,0xff,0x68,0x30,0x61,0x72,0x00}},
+        {kCStringAssignRva, 10, {0x56,0x57,0x8b,0x7c,0x24,0x0c,0x8b,0xf1,0x85,0xff}},
+        {kStringArraySetAtGrowRva, 11, {0x56,0x8b,0x74,0x24,0x08,0x57,0x8b,0xf9,0x3b,0x77,0x08}}};
+    for (const auto& site : kSpawnSites)
+        // AddMapObject is the renderer's own retained admission hook
+        // (engine_bridge.cpp kRetainedAdmissionEntryRva): a jump into this
+        // module there is the path every game caller takes.
+        if (std::memcmp(s.image + site.rva, site.bytes, site.size) != 0 &&
+            !(site.rva == kAddMapObjectRva && jump_into_this_module(s.image + site.rva))) {
+            // Name what sits there instead (bytes, and a jump's target module).
+            std::string bytes;
+            for (std::size_t i = 0; i < 12; ++i) bytes += text_of(i ? " %02x" : "%02x", s.image[site.rva + i]);
+            wchar_t module[64]{};
+            const std::uint8_t* target = raw_replacement_target(s.image + site.rva, module, 64);
+            char name[64]{};
+            WideCharToMultiByte(CP_UTF8, 0, module, -1, name, sizeof(name), nullptr, nullptr);
+            return text_of("spawn: game bytes differ at 0x%08lX: %s%s%s", static_cast<unsigned long>(0x00400000 + site.rva),
+                           bytes.c_str(), target ? "; jump into " : "", target ? name : "");
+        }
+    SpawnRecord record;
+    record.prototype = command.name;
+    const auto first = command.value.find('\n'), second = command.value.find('\n', first + 1);
+    record.model = command.value.substr(0, first);
+    record.prim = command.value.substr(first + 1, second - first - 1);
+    record.sec = command.value.substr(second + 1);
+    if (auto error = spawn_from_database(s.image, record); !error.empty()) return error;
+    const std::string off_map = camera_off_map(command.number[0], command.number[1]);
+    if (!off_map.empty()) return "spawn: " + off_map;
+    record.position[0] = command.number[0];
+    record.position[1] = command.number[1];
+    const float half = command.number[2] * kPi / 360.0f;
+    record.rotation[0] = std::cos(half);
+    record.rotation[3] = std::sin(half);
+    record.player = static_cast<int>(command.frames);
+    alignas(8) std::uint8_t unit[kMEUnitSize + 16]{};
+    int id = -1;
+    if (spawn_call(s.image, record, unit, id) != 0) return "spawn: the game faulted placing the unit";
+    if (id < 0) return text_of("spawn: AddMapObject refused the unit (returned %d)", id);
+    ok = true;
+    return text_of("spawned id=%d prototype=\"%s\" model=%s prim=%s sec=%s parts=%u at %.2f %.2f yaw=%g player=%d",
+                   id, record.prototype.c_str(), record.model.c_str(), record.prim.empty() ? "none" : record.prim.c_str(),
+                   record.sec.empty() ? "none" : record.sec.c_str(), static_cast<unsigned>(record.parts.size()),
+                   record.position[0], record.position[1], command.number[2], record.player);
+}
+
+std::string screen_stack_text() {
+    static const struct { std::uint32_t rva; const char* name; } kScreens[] = {
+        {0x003405ac, "base"}, {0x00340688, "main_menu"}, {0x00340764, "mission"}, {0x00340840, "debug"},
+        {0x0034091c, "camp"}, {0x00340b3c, "global_map"}, {0x00340c3c, "end_game"}, {0x00340d18, "exchange"},
+        {0x00340e28, "tutorial"}, {0x003411bc, "objectives"}, {0x003412a4, "escape_menu"},
+        {0x00341388, "save_load"}, {0x00341cd0, "connection"}, {0x00341fac, "options"},
+        {0x0034214c, "choose_pers"}, {0x00342348, "message_box"}, {0x0033f7f8, "autoplay"}};
+    if (lia_harness()) return "screens=not read on LiA";
+    std::uint32_t rvas[16]{};
+    const int count = screen_stack_rvas(state().image, rvas, 16);
+    if (count < 0) return "screens=unreadable";
+    std::string text = "screens=";
+    for (int i = 0; i < count; ++i) {
+        const char* name = nullptr;
+        for (const auto& screen : kScreens) if (screen.rva == rvas[i]) name = screen.name;
+        if (i) text += '>';
+        text += name ? std::string(name) : text_of("%08x", rvas[i]);
+    }
+    return text + text_of(" server_interface=%u", server_interface());
+}
+
+// Empty when (x, y) is a stop the game's own camera can reach; "-" (NaN)
+// keeps the current coordinate and is not checked.
+std::string camera_off_map(float x, float y) {
+    std::uint8_t* map = field<std::uint8_t*>(state().image, kCurrentMapRva);
+    if (!map) return "camera: no current map";
+    const float width = field<float>(map, kMapWidth), height = field<float>(map, kMapHeight);
+    const bool outside = (!std::isnan(x) && !(x >= 0.0f && x <= width - 1.0f)) ||
+                         (!std::isnan(y) && !(y >= 0.0f && y <= height - 1.0f));
+    return outside ? text_of("camera %.3f %.3f outside the map %.0fx%.0f", x, y, width, height) : std::string();
+}
+
 void apply_camera(const HarnessCommand& command) {
     State& s = state();
     std::uint8_t* camera = s.image + kCameraRva;
@@ -849,6 +1240,422 @@ void apply_camera(const HarnessCommand& command) {
     reinterpret_cast<SetCarrierFn>(s.image + kSetCarrierRva)(camera, 0xffffffffu);
     reinterpret_cast<SetAnchorPointFn>(s.image + kSetAnchorPointRva)(camera, anchor);
     reinterpret_cast<InitRotateFn>(s.image + kInitRotateRva)(camera, yaw * radians);
+}
+
+// camera_unit, one step a world frame: the first applies the requested yaw
+// and pitch with the pivot at the unit and the game camera distance at the
+// requested one; each later one, once a world view captured after the last
+// pose is in, reads where the unit projects and how far it is from the eye.
+// Moving the pivot moves the whole camera with it, so the pivot moves by the
+// offset from the unit to the point at the unit's height that projects to the
+// screen centre (clip x = clip y = 0 of that view). The eye is where clip
+// x, y and w are all 0 (independent of the projection's scale); the game
+// camera distance is scaled by requested / eye-to-unit, because the game's
+// pivot sits low on the screen (a centred unit lies well beyond it: save1491
+// wolf 1077 at distance 6 ended 24 m from the pivot, behind a hill). The
+// pivot's height follows the terrain (SetAnchorPoint), so a few corrections
+// settle both.
+void camera_unit_step(const HarnessCommand& command) {
+    State& s = state();
+    s.world_ok = true;
+    if (s.views_noted < s.unit_applied_view + (s.unit_step ? 2u : 1u)) {
+        s.world_detail = text_of("camera_unit: waiting for a world view (correction %u)", s.unit_step);
+        return;
+    }
+    const auto finish = [&](bool ok, const std::string& detail) {
+        s.world_ok = ok; s.world_detail = detail; s.unit_finished = true;
+    };
+    // @x,y: the first view picks the nearest unit within 6 m (horizontal);
+    // the corrections then follow that unit.
+    if (command.name == "@" && s.unit_step == 0) {
+        constexpr float kReach = 6.0f;
+        const HarnessUnitPosition* nearest = nullptr;
+        float best = kReach * kReach;
+        for (const auto& candidate : s.view_units) {
+            const float dx = candidate.position[0] - command.number[3], dy = candidate.position[1] - command.number[4];
+            if (dx * dx + dy * dy <= best) { best = dx * dx + dy * dy; nearest = &candidate; }
+        }
+        if (!nearest) {
+            finish(false, text_of("camera_unit: no unit within %.0f m of %.2f,%.2f among the world's %u units "
+                                  "(drawall on publishes units the party does not see)",
+                                  kReach, command.number[3], command.number[4], static_cast<unsigned>(s.view_units.size())));
+            return;
+        }
+        s.unit_target_id = nearest->id;
+    }
+    const std::int32_t id = command.name == "@" ? s.unit_target_id : static_cast<std::int32_t>(command.frames);
+    const HarnessUnitPosition* unit = nullptr;
+    for (const auto& candidate : s.view_units)
+        if (candidate.id == id) { unit = &candidate; break; }
+    if (!unit) {
+        finish(false, text_of("camera_unit: unit %d is not among the world's %u units (dump_units lists them; "
+                              "drawall on publishes units the party does not see)",
+                              id, static_cast<unsigned>(s.view_units.size())));
+        return;
+    }
+    const float* p = unit->position;
+    const auto& m = s.view_clip;
+    if (s.unit_step == 0) {
+        s.unit_anchor[0] = p[0];
+        s.unit_anchor[1] = p[1];
+        s.unit_distance = command.number[2];
+    } else {
+        const float x = m[0] * p[0] + m[1] * p[1] + m[2] * p[2] + m[3];
+        const float y = m[4] * p[0] + m[5] * p[1] + m[6] * p[2] + m[7];
+        const float w = m[12] * p[0] + m[13] * p[1] + m[14] * p[2] + m[15];
+        const float nx = w > 1e-5f ? x / w : 99.0f, ny = w > 1e-5f ? y / w : 99.0f;
+        const std::string where = (command.name == "@" ? text_of("nearest to %.2f,%.2f: ", command.number[3], command.number[4]) :
+                                   std::string()) +
+                                  text_of("unit %d at %.2f %.2f %.2f, NDC %.3f %.3f after %u correction(s)",
+                                          id, p[0], p[1], p[2], nx, ny, s.unit_step - 1);
+        // The eye: rows 0, 1 and 3 of world-to-clip are 0 there (Cramer).
+        const float r[3][4] = {{m[0], m[1], m[2], m[3]}, {m[4], m[5], m[6], m[7]}, {m[12], m[13], m[14], m[15]}};
+        const auto det3 = [](float a0, float a1, float a2, float b0, float b1, float b2, float c0, float c1, float c2) {
+            return a0 * (b1 * c2 - b2 * c1) - a1 * (b0 * c2 - b2 * c0) + a2 * (b0 * c1 - b1 * c0);
+        };
+        const float dm = det3(r[0][0], r[0][1], r[0][2], r[1][0], r[1][1], r[1][2], r[2][0], r[2][1], r[2][2]);
+        float eye_to_unit = -1.0f;
+        if (std::abs(dm) > 1e-12f) {
+            const float ex = det3(-r[0][3], r[0][1], r[0][2], -r[1][3], r[1][1], r[1][2], -r[2][3], r[2][1], r[2][2]) / dm;
+            const float ey = det3(r[0][0], -r[0][3], r[0][2], r[1][0], -r[1][3], r[1][2], r[2][0], -r[2][3], r[2][2]) / dm;
+            const float ez = det3(r[0][0], r[0][1], -r[0][3], r[1][0], r[1][1], -r[1][3], r[2][0], r[2][1], -r[2][3]) / dm;
+            eye_to_unit = std::sqrt((p[0] - ex) * (p[0] - ex) + (p[1] - ey) * (p[1] - ey) + (p[2] - ez) * (p[2] - ez));
+        }
+        std::uint8_t* camera = s.image + kCameraRva;
+        const float wanted = command.number[2];
+        const std::string distance = text_of("eye to unit %.2f m (requested %.2f); game camera distance %.3f",
+                                             eye_to_unit, wanted, field<float>(camera, kCameraDistance));
+        // Within 0.03 NDC and 5% of the distance is done. A unit that keeps
+        // moving (its idle animation moves the root even while paused:
+        // save1491 unit 37 stayed 0.01-0.02 off after 8 corrections) ends
+        // near the centre (within 0.1 NDC and 15%, said so) after 16;
+        // farther off it fails.
+        const float off = (std::max)(std::abs(nx), std::abs(ny));
+        const float range = eye_to_unit > 0.0f ? std::abs(eye_to_unit - wanted) / wanted : 1.0f;
+        const bool settled = off < 0.03f && range < 0.05f;
+        if (settled || (s.unit_step > 16 && off < 0.1f && range < 0.15f)) {
+            finish(true, (settled ? "" : "near the centre (the unit moves between frames): ") + where + "; " +
+                         distance + "; " + camera_state());
+            return;
+        }
+        if (s.unit_step > 16) {
+            // The pivot rests on the terrain: from higher ground the centre
+            // ray needs room to come down to the unit (save1491 wolf 1077,
+            // 9 m below the hill east of it, stayed 29 m away at distance 0.5).
+            const float above = field<float>(camera, kCameraAnchor + 8) - p[2];
+            finish(false, "camera_unit: not centred: " + where + "; " + distance + "; " + camera_state() +
+                          (eye_to_unit > wanted && above > 2.0f ?
+                           text_of("; the pivot rests on terrain %.1f m above the unit: use a steeper pitch or another yaw", above) : ""));
+            return;
+        }
+        if (eye_to_unit > 0.0f)
+            s.unit_distance = std::clamp(s.unit_distance * std::clamp(wanted / eye_to_unit, 0.25f, 4.0f), 0.5f, 500.0f);
+        const float a = m[0], b = m[1], c = m[4], d = m[5];
+        const float e = -(m[2] * p[2] + m[3]), f = -(m[6] * p[2] + m[7]);
+        const float det = a * d - b * c;
+        const float cx = std::abs(det) > 1e-12f ? (e * d - b * f) / det : 0.0f;
+        const float cy = std::abs(det) > 1e-12f ? (a * f - e * c) / det : 0.0f;
+        if (std::abs(det) <= 1e-12f || m[12] * cx + m[13] * cy + m[14] * p[2] + m[15] <= 0.0f) {
+            finish(false, "camera_unit: the screen centre does not reach the unit's height at this pitch: " + where);
+            return;
+        }
+        s.unit_anchor[0] += p[0] - cx;
+        s.unit_anchor[1] += p[1] - cy;
+    }
+    const std::string off_map = camera_off_map(s.unit_anchor[0], s.unit_anchor[1]);
+    if (!off_map.empty()) {
+        finish(false, "camera_unit: the pivot that centres unit " + std::to_string(id) + " is off the map: " + off_map);
+        return;
+    }
+    HarnessCommand pose;
+    pose.verb = HarnessVerb::camera;
+    pose.number[0] = s.unit_anchor[0];
+    pose.number[1] = s.unit_anchor[1];
+    pose.number[2] = command.number[0];
+    pose.number[3] = command.number[1];
+    pose.number[4] = s.unit_distance;
+    apply_camera(pose);
+    s.unit_applied_view = s.views_noted;
+    ++s.unit_step;
+    s.world_detail = text_of("camera_unit: correction %u applied", s.unit_step);
+}
+
+// BE0FC330...94E2: the portrait double-click at 00638FBA calls the
+// pointer overload of SetCarrier. It loads object+0C and does the same work
+// as our existing ID overload 0040D420. Camera Step (0040FBBA) resolves
+// that ID through the current client manager each frame; it owns smoothing.
+// The party leader is the first party record, not the first visible portrait.
+// 00636206..34 calls 00578BA0, which returns [[[client+20C]+20]+1C]+70
+// (00578BA0..B0); the site then reads count at +34 and records at +30
+// (party +A4/+A0 of that object) and the first record's ID at +1C.
+// 00602D2D uses that ID to centre the base-map camera. No object pointer
+// survives this call.
+std::string hero_contract_error() {
+    const State& s = state();
+    if (!s.game_verified || lia_harness()) return "camera hero: not verified on this game image (LiA unported)";
+    auto error = entry_error(s, 0x001699f0,
+        {0x8b,0x81,0x0c,0x02,0x00,0x00,0x85,0xc0,0x74,0x04,0x8b,0x40,0x20,0xc3,0x33,0xc0,0xc3});
+    if (error.empty()) error = entry_error(s, 0x0000fbba,
+        {0x8b,0x86,0x1c,0x01,0x00,0x00,0x8b,0x0d,0xf8,0xf5,0x7a,0x00,0x50,0xe8,0x74,0x43,0xff,0xff});
+    if (error.empty()) error = entry_error(s, 0x00003f40,
+        {0x53,0x8b,0x59,0x24,0x56,0x8b,0x71,0x20,0x2b,0xde,0x8b,0x74,0x24,0x0c,0xc1,0xfb,0x02,0x8b,0xc6,0x33});
+    if (error.empty()) error = entry_error(s, 0x00178ba0,
+        {0xb9,0xb8,0xf5,0x7a,0x00,0xe8,0x46,0x0e,0xff,0xff,0x8b,0x40,0x1c,0x83,0xc0,0x70,0xc3});
+    if (error.empty()) error = entry_error(s, 0x00236206,
+        {0xb9,0xa5,0xfe,0x7a,0x00,0xe8,0x90,0x29,0xf4,0xff,0x8b,0x50,0x34,0x83,0xc0,0x2c,0x33,0xf6,0x33,0xdb,
+         0x85,0xd2,0x89,0x44,0x24,0x1c,0xc6,0x44,0x24,0x13,0x00,0x89,0x5c,0x24,0x14,0x7e,0x45,0x8b,0x4c,0x24,
+         0x40,0x8b,0x40,0x04,0x83,0xc0,0x1c});
+    if (error.empty()) error = entry_error(s, kSetCarrierRva + 7, {0x89,0x81,0x1c,0x01,0x00,0x00});
+    return error;
+}
+
+const char* follow_party_leader(std::int32_t& id) noexcept {
+    auto* image = state().image;
+    __try {
+        auto* world = image + kWorldClientRva;
+        // The chain 00578BA0 walks (its callee 005699F0 returns 0 without a player).
+        auto* player = field<std::uint8_t*>(world, kWorldPlayer);
+        auto* specific = player ? field<std::uint8_t*>(player, kPlayerSpecific) : nullptr;
+        auto* party = specific ? field<std::uint8_t*>(specific, 0x1c) : nullptr;
+        if (!party) return "camera hero: no local player";
+        const auto count = field<std::int32_t>(party, 0xa4);
+        auto* members = field<std::uint8_t*>(party, 0xa0);
+        if (count <= 0 || !members) return "camera hero: party has no leader";
+        id = field<std::int32_t>(members, 0x1c);
+        auto* manager = field<void*>(world, 0x40);
+        using Find = void*(__thiscall*)(void*, std::int32_t);
+        if (!manager || !reinterpret_cast<Find>(image + 0x00003f40)(manager, id))
+            return "camera hero: leader absent from client world";
+        // 0040D427 stores this carrier field. Avoid clearing native scroll
+        // interpolation again while the camera is already attached.
+        if (field<std::int32_t>(image + kCameraRva, 0x11c) != id)
+            reinterpret_cast<SetCarrierFn>(image + kSetCarrierRva)(image + kCameraRva, static_cast<std::uint32_t>(id));
+        return nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return "camera hero: party or camera read/call faulted"; }
+}
+
+// True when [at, at+bytes) lies in addon.dll (one module, both ends).
+bool addon_span(const std::uint8_t* at, std::size_t bytes) noexcept {
+    return at && addon_module_contains(at) && addon_module_contains(at + bytes - 1);
+}
+
+// The addon's incoming protection, wherever its build places it: the unit's
+// owner (unit+24C, the field party_protection validates) is tested, then
+// `cmp byte [owner+108], 2; jae` skips the hit. Searched in the callback and
+// in the first function it calls; both must lie in addon.dll.
+const char* addon_attack_guard(const std::uint8_t* callback) noexcept {
+    constexpr std::uint8_t guard[] = {0x8b,0x80,0x4c,0x02,0x00,0x00,0x85,0xc0,0x74,0x00,
+                                      0x80,0xb8,0x08,0x01,0x00,0x00,0x02,0x0f,0x83};
+    constexpr std::size_t kWindow = 0x2000, kStub = 0x40;
+    const auto has_guard = [&](const std::uint8_t* body) {
+        for (std::size_t at = 0; at + sizeof(guard) <= kWindow; ++at) {
+            std::size_t i = 0;
+            while (i < sizeof(guard) && (i == 9 || body[at + i] == guard[i])) ++i;
+            if (i == sizeof(guard)) return true;
+        }
+        return false;
+    };
+    if (!addon_span(callback, kWindow)) return "attack callback outside addon.dll";
+    __try {
+        if (has_guard(callback)) return nullptr;
+        for (std::size_t at = 0; at + 5 <= kStub; ++at) {
+            if (callback[at] != 0xe8) continue;
+            std::int32_t relative;
+            std::memcpy(&relative, callback + at + 1, sizeof(relative));
+            const std::uint8_t* callee = callback + at + 5 + relative;
+            if (!addon_span(callee, kWindow)) continue;
+            if (has_guard(callee)) return nullptr;
+            break;  // only the callback's first call is the attack body
+        }
+        return "addon attack callback has no owner+108 >= 2 protection check";
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return "addon attack callback unreadable"; }
+}
+
+// A raw detour by another module (Dejavu plugin.dll) on top of the addon's
+// attack chain: accept it only when its body calls through a pointer that
+// holds the addon's own dispatcher for this entry, so the call still runs the
+// guarded addon code. What the module adds around that call is not verified.
+const std::uint8_t* layered_attack_callback(const std::uint8_t* entry, const std::uint8_t* stock,
+                                            std::size_t stock_bytes, std::string& owner) noexcept {
+    wchar_t module[64]{};
+    const std::uint8_t* detour = raw_replacement_target(entry, module, 64);
+    if (!detour || addon_module_contains(detour)) return nullptr;
+    char name[64]{};
+    for (std::size_t i = 0; i + 1 < sizeof(name) && module[i]; ++i) name[i] = char(module[i] & 0x7f);
+    owner = name;
+    constexpr std::size_t kBody = 0x1000;
+    std::uint8_t body[kBody];
+    __try { std::memcpy(body, detour, kBody); } __except (EXCEPTION_EXECUTE_HANDLER) { return nullptr; }
+    for (std::size_t at = 0; at + 6 <= kBody; ++at) {
+        if (body[at] != 0xff || body[at + 1] != 0x15) continue;
+        std::uint32_t slot;
+        std::memcpy(&slot, body + at + 2, sizeof(slot));
+        const std::uint8_t* callback = nullptr;
+        if (layered_framework_dispatcher(entry, reinterpret_cast<const std::uint8_t* const*>(std::uintptr_t(slot)),
+                                         stock, stock_bytes, &addon_module_contains, &callback))
+            return callback;
+    }
+    return nullptr;
+}
+
+// The addon replaces stock deadly outgoing attacks with an immediate return.
+const char* addon_outgoing_return(const std::uint8_t* callback) noexcept {
+    if (!addon_span(callback, 3)) return "outgoing callback outside addon.dll";
+    __try {
+        if (callback[0] != 0xc2 || callback[1] % 4 || callback[2])
+            return "addon outgoing callback is not an immediate return";
+        return nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return "addon outgoing callback unreadable"; }
+}
+
+// The verified combat replacement uses >=2 for incoming protection, whereas
+// stock Base/LiA use !=0 and reserve >=2 for deadly outgoing attacks. Check
+// the installed chain, not merely the presence of addon.dll or an ini value.
+std::string addon_god_guard(const std::uint8_t* attack_entry, const std::uint8_t* attack_stock,
+                            std::size_t attack_stock_bytes, const EntryResolution& attack,
+                            const EntryResolution& outgoing) {
+    const std::uint8_t* callback = attack.owner == EntryOwner::framework_chain ? attack.callback : nullptr;
+    std::string layered;
+    if (!callback && attack.owner == EntryOwner::rejected) {
+        callback = layered_attack_callback(attack_entry, attack_stock, attack_stock_bytes, layered);
+        if (!callback)
+            return text_of("godmode: attack entry is not the addon chain (%s%s%s)",
+                           attack.reason ? attack.reason : "unknown", layered.empty() ? "" : ", detour by ",
+                           layered.c_str());
+    }
+    if (!callback) return "godmode: attack entry chain has no addon callback";
+    if (const char* error = addon_attack_guard(callback)) return text_of("godmode: %s", error);
+    if (outgoing.owner != EntryOwner::framework_chain || !outgoing.callback)
+        return text_of("godmode: outgoing deadly-attack entry is not the addon chain (%s)",
+                       outgoing.reason ? outgoing.reason : "no callback");
+    if (const char* error = addon_outgoing_return(outgoing.callback)) return text_of("godmode: %s", error);
+    static bool logged = false;
+    if (!layered.empty() && !logged) {
+        logged = true;
+        bridge_report_event("harness_godmode_layered", text_of(
+            "attack entry detour by %s continues into the addon chain; its own code around that call "
+            "is not verified", layered.c_str()).c_str());
+    }
+    return {};
+}
+
+std::string party_contract_error() {
+    const State& s = state();
+    if (!s.god_error.empty()) return s.god_error;
+    const bool lia = lia_harness();
+    auto error = entry_error(s, lia ? 0x000ceb80 : 0x001699f0,
+        {0x8b,0x81,0x0c,0x02,0x00,0x00,0x85,0xc0,0x74,0x04,0x8b,0x40,0x20,0xc3,0x33,0xc0,0xc3});
+    if (error.empty()) error = entry_error(s, lia ? 0x000e6c80 : 0x001941c0, {0x39,0x70,0x24,0x74,0x2c});
+    if (error.empty()) error = entry_error(s, lia ? 0x000e87e7 : 0x00191757, {0x8b,0x86,0xa4,0x00,0x00,0x00});
+    if (error.empty()) error = entry_error(s, lia ? 0x000e8800 : 0x00191768,
+        {0x8b,0x8e,0xa0,0x00,0x00,0x00,0x8b,0x54,0x39,0x1c});
+    if (error.empty()) error = entry_error(s, lia ? 0x000e882f : 0x00191797, {0x81,0xc7,0x84,0x07,0x00,0x00});
+    if (error.empty()) error = entry_error(s, lia ? 0x000cd680 : 0x0015fb00,
+        {0x8b,0x54,0x24,0x04,0x8b,0x01,0x56,0x52,0xff,0x90,0xa0,0x00,0x00,0x00,0x8b,0xf0,0x85,0xf6,0x75,0x04,
+         0x5e,0xc2,0x04,0x00,0x8b,0x06,0x8b,0xce,0xff,0x50,0x30,0x83,0xe8,0x50,0xf7,0xd8,0x1b,0xc0,0xf7,0xd0,
+         0x23,0xc6,0x5e,0xc2,0x04,0x00});
+    return error;
+}
+
+std::string protection_level(std::uint8_t& level) {
+    const State& s = state();
+    level = 1;
+    if (lia_harness()) {
+        auto error = entry_error(s, 0x000c90d0, {0x83,0xec,0x2c,0x53,0x55,0x56,0x57,0x8b,0xf1,0xe8,0x22,0x91,0xf6,0xff});
+        if (error.empty()) error = entry_error(s, 0x000c92c1,
+            {0x8b,0x82,0x4c,0x02,0x00,0x00,0x85,0xc0,0x74,0x28,0x8a,0x88,0x08,0x01,0x00,0x00,0x84,0xc9,0x0f,0x85,0xff,0x01,0x00,0x00});
+        return error;
+    }
+    constexpr std::uint8_t stock[] = {0x55,0x8b,0xec,0x83,0xec,0x2c,0x53,0x56,0x57,0x8b,0xf1,0xe8,0xf0,0x19,0xf0,0xff};
+    const auto attack = resolve_entry_owner(s.image + 0x00153f40, stock, sizeof(stock), 5, &addon_module_contains);
+    if (attack.owner == EntryOwner::stock)
+        return entry_error(s, 0x00154139,
+            {0x8b,0x46,0x1c,0x8b,0x80,0x4c,0x02,0x00,0x00,0x85,0xc0,0x74,0x27,0x8a,0x88,0x08,0x01,0x00,0x00,0x84,0xc9,0x0f,0x85,0x2a,0x02,0x00,0x00});
+    constexpr std::uint8_t deadly[] = {0x55,0x8b,0xec,0x83,0xec,0x0c,0x53,0x56,0x8b,0xf1,0x57,0x89,0x75,0xfc,0x8b,0x46};
+    const auto outgoing = resolve_entry_owner(s.image + 0x0014f630, deadly, sizeof(deadly), 5, &addon_module_contains);
+    auto error = addon_god_guard(s.image + 0x00153f40, stock, sizeof(stock), attack, outgoing);
+    if (error.empty()) level = 2;
+    return error;
+}
+
+struct PartyProtection { int player = -1, units = 0, covered = 0, failed_id = 0; unsigned flag = 0; };
+
+// Base BE0FC330 / LiA C7B085C1: player+A0/A4 is the authoritative party;
+// each 0x784-byte member names its unit at +1C. GetUnit checks the type and
+// returns null for a missing ID. The incoming attack guard reads unit+24C
+// (owner), then owner+108. Validate the entire roster BEFORE a single write.
+const char* party_protection(int requested, std::uint8_t level, PartyProtection& out) noexcept {
+    State& s = state();
+    const bool lia = lia_harness();
+    __try {
+        if (field<std::uint32_t>(s.image + connector_rva(), 0)) return "world transition pending";
+        auto* client = field<std::uint8_t*>(s.image + (lia ? kLiaWorldClientRva : kWorldClientRva), kWorldPlayer);
+        if (!client) return "no local client player";
+        out.player = field<int>(client, 0x24);
+        auto* server = s.image + (lia ? kLiaServerRva : kServerRva);
+        auto* player = reinterpret_cast<GetServerPlayerFn>(s.image + (lia ? kLiaGetServerPlayerRva : kGetServerPlayerRva))(server, out.player);
+        // GetPlayer returns the server player whose +24 equals this number
+        // (cmp [eax+24],esi at 005941C0, checked by party_contract_error).
+        if (!player) return "no server player for the local client player number";
+        auto* members = field<std::uint8_t*>(player, 0xa0);
+        out.units = field<int>(player, 0xa4);
+        // Release the owner flag even when a dead/missing member means the
+        // current roster cannot satisfy an on/expect assertion.
+        if (requested == 0) {
+            field<std::uint8_t>(player, kPlayerGod) = 0;
+            out.flag = field<std::uint8_t>(player, kPlayerGod);
+            if (out.flag) return "could not clear player protection";
+        }
+        if (!members || out.units <= 0 || out.units > 65536) return "party roster is empty or unreadable";
+        using GetUnit = std::uint8_t*(__thiscall*)(void*, int);
+        const auto get_unit = reinterpret_cast<GetUnit>(s.image + (lia ? 0x000cd680 : 0x0015fb00));
+        for (int i = 0; i < out.units; ++i) {
+            out.failed_id = field<int>(members, std::size_t(i) * 0x784 + 0x1c);
+            auto* unit = get_unit(server, out.failed_id);
+            if (requested == 0) {
+                if (unit && field<std::uint8_t*>(unit, 0x24c) == player) ++out.covered;
+                continue;
+            }
+            if (!unit) return "party member absent from server";
+            if (field<std::uint8_t*>(unit, 0x24c) != player) return "party member has a different or cleared owner";
+        }
+        if (requested == 0) { out.failed_id = 0; return nullptr; }
+        if (requested >= 0) field<std::uint8_t>(player, kPlayerGod) = requested ? level : 0;
+        for (int i = 0; i < out.units; ++i) {
+            out.failed_id = field<int>(members, std::size_t(i) * 0x784 + 0x1c);
+            auto* unit = get_unit(server, out.failed_id);
+            if (!unit) return "party member disappeared";
+            auto* owner = field<std::uint8_t*>(unit, 0x24c);
+            if (owner != player) return "party member owner changed";
+            out.flag = field<std::uint8_t>(owner, kPlayerGod);
+            if (requested == 0 ? out.flag != 0 : out.flag < level) return "party member protection flag does not satisfy the active combat path";
+            ++out.covered;
+        }
+        out.failed_id = 0;
+        return nullptr;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return "party protection read/write faulted"; }
+}
+
+bool apply_party_protection(const HarnessCommand& command, std::string& detail) {
+    detail = party_contract_error();
+    std::uint8_t level = 1;
+    if (detail.empty()) detail = protection_level(level);
+    if (!detail.empty()) return false;
+    // Any loaded zone of the local single-player server (missions, and hub
+    // zones whose zone type is not 1); never the menu or a remote server.
+    const LocalServerState server = bridge_local_server_state();
+    if (!server.readable || server.mode != 1 || !server.loaded) {
+        detail = text_of("godmode: no local single-player world (server %s mode=%u loaded=%u zone_type=%u)",
+                         server.readable ? "readable" : "unreadable", server.mode, server.loaded, server.zone_type);
+        return false;
+    }
+    PartyProtection result;
+    const char* error = party_protection(command.verb == HarnessVerb::expect_godmode ? -1 : int(command.frames), level, result);
+    detail = text_of("godmode %s: %s%d/%d units; player=%d flag=%u required=%u%s%s (unit=%d)",
+        command.verb == HarnessVerb::expect_godmode || command.frames ? "on" : "off",
+        command.verb == HarnessVerb::godmode && !command.frames ? "cleared=" : "protected=",
+        result.covered, result.units, result.player, result.flag, unsigned(level), error ? "; " : "", error ? error : "", result.failed_id);
+    return error == nullptr;
 }
 
 void apply_clock(std::uint8_t* world) {
@@ -920,6 +1727,8 @@ bool request_load(const HarnessCommand& command, std::string& detail) {
     // Saved clock values belong to the previous map; do not restore them in
     // the newly loaded client or leave its time scale pinned to zero.
     release_clock(s.image + kWorldClientRva);
+    s.hero_follow = false;
+    begin_event_window();
     s.load_slot = slot.slot;
     s.load_zone = slot.zone;
     s.load_wait = {};
@@ -1000,6 +1809,7 @@ void observe_loaded_frame() {
     // identity or from the mere existence of a CWorldClient.
     const auto zone = current_zone();
     s.world_ok = _stricmp(zone.c_str(), s.load_zone.c_str()) == 0;
+    if (s.world_ok) s.event_epoch = epoch;
     s.loaded_zone_empty = zone.empty();
     s.world_detail = s.world_ok
         ? text_of("slot=%s zone=%s world_epoch=%llu completed_world_frame=%llu",
@@ -1049,6 +1859,21 @@ std::string harness_banner_text() {
 bool harness_enabled() noexcept { return state().enabled; }
 
 bool harness_on_travel_map() noexcept { return on_travel_map(); }
+
+bool harness_wants_world_view() noexcept {
+    std::lock_guard<std::recursive_mutex> guard(harness_lock());
+    const State& s = state();
+    return s.enabled && !s.queue.empty() && s.queue.front().command.verb == HarnessVerb::camera_unit;
+}
+
+void harness_note_world_view(std::vector<HarnessUnitPosition> units,
+                             const std::array<float, 16>& world_to_clip) noexcept {
+    std::lock_guard<std::recursive_mutex> guard(harness_lock());
+    State& s = state();
+    s.view_units = std::move(units);
+    s.view_clip = world_to_clip;
+    ++s.views_noted;
+}
 
 const std::string& harness_directory() noexcept { return state().directory; }
 
@@ -1112,12 +1937,39 @@ const HarnessCommand* harness_present_step() noexcept {
             continue;
         case HarnessVerb::state:
             if (!s.game_verified) { retire_front(false, "unsupported game image"); continue; }
-            retire_front(true, camera_state());
+            retire_front(true, camera_state() + " " + screen_stack_text());
             continue;
         case HarnessVerb::note:
             set_banner(command.name);
             retire_front(true, "banner set");
             continue;
+        case HarnessVerb::expect_event_absent:
+        case HarnessVerb::expect_event_present: {
+            // x64 host renderer events go to its host.log, which this reader
+            // does not see: refuse instead of passing event_absent.
+            if (x64remote::core_active()) {
+                retire_front(false, "expect event unavailable on x64 host: renderer events are not in bridge.jsonl"); continue;
+            }
+            if (!s.event_epoch || s.event_epoch != bridge_current_world_epoch()) {
+                retire_front(false, "expect event: no completed harness load_save boundary for this world"); continue;
+            }
+            if (entry.progress == 0) {
+                entry.started_ms = GetTickCount64();
+                entry.command.value = s.event_load_marker + ":" + std::to_string(entry.id);
+                entry.progress = 1;
+            }
+            if (entry.progress == 1) {
+                // The log reader below owns its own timeout and reason.
+                if (harness_timed_out(entry.started_ms, GetTickCount64(), 5)) {
+                    retire_front(false, "expect event: renderer did not acknowledge within 5 seconds"); continue;
+                }
+                return &command; // the renderer acknowledges at its present
+            }
+            bool ok = false; std::string detail;
+            if (!finish_event_expectation(entry, ok, detail)) return nullptr;
+            retire_front(ok, detail);
+            continue;
+        }
         case HarnessVerb::dump_units: {
             static HANDLE request = CreateEventA(nullptr, FALSE, FALSE, "Local\\EID3D11_DumpUnits");
             const bool ok = request && SetEvent(request);
@@ -1233,7 +2085,7 @@ const HarnessCommand* harness_present_step() noexcept {
             if (on_travel_map()) { s.world_pending = false; retire_front(false, kTravelMapDetail); continue; }
             if (++entry.progress > kWorldCommandTimeoutPresents) {
                 s.world_pending = false;
-                retire_front(false, "no world frame within 600 presents");
+                retire_front(false, "no world frame within 600 presents; " + screen_stack_text());
                 continue;
             }
             return nullptr;
@@ -1251,7 +2103,7 @@ const HarnessCommand* harness_present_step() noexcept {
                 if (++entry.progress > kWorldCommandTimeoutPresents) {
                     s.world_pending = false;
                     retire_front(false, "no world frame within 600 presents (a modal screen such as "
-                                        "the game-over box or a dialog stops world frames)");
+                                        "the game-over box or a dialog stops world frames); " + screen_stack_text());
                     continue;
                 }
                 return nullptr;
@@ -1271,6 +2123,28 @@ const HarnessCommand* harness_present_step() noexcept {
             }
             return nullptr;
         }
+        case HarnessVerb::camera_unit:
+            if (!s.game_verified) { retire_front(false, "unsupported game image"); continue; }
+            if (on_travel_map()) { s.world_pending = false; retire_front(false, kTravelMapDetail); continue; }
+            if (!entry.posted) {
+                entry.posted = true;
+                s.view_units.clear();
+                s.unit_applied_view = s.views_noted;
+                s.unit_step = 0;
+                s.unit_finished = false;
+            } else if (s.world_done && (s.unit_finished || !s.world_ok)) {
+                s.world_done = false;
+                retire_front(s.world_ok, s.world_detail);
+                continue;
+            }
+            if (++entry.progress > kWorldCommandTimeoutPresents) {
+                s.world_pending = s.world_done = false;
+                retire_front(false, "camera_unit: not settled within 600 presents (" + s.world_detail + ")");
+                continue;
+            }
+            s.world_pending = true;
+            s.world_done = false;
+            return nullptr;
         case HarnessVerb::equip_cycle:
         case HarnessVerb::camera_path:
             // Temporary (camera-movement frame cost): one step at each world
@@ -1333,14 +2207,12 @@ const HarnessCommand* harness_present_step() noexcept {
             }
             return nullptr;
         case HarnessVerb::camera:
+        case HarnessVerb::drawall:
+        case HarnessVerb::spawn:
+        case HarnessVerb::camera_hero:
         case HarnessVerb::clock_pin:
         case HarnessVerb::clock_release:
-        case HarnessVerb::godmode:
-            if (command.verb == HarnessVerb::godmode && !s.god_error.empty()) {
-                retire_front(false, s.god_error);
-                continue;
-            }
-            if (!s.game_verified && !(lia_harness() && command.verb == HarnessVerb::godmode)) {
+            if (!s.game_verified) {
                 retire_front(false, "unsupported game image");
                 continue;
             }
@@ -1357,10 +2229,22 @@ const HarnessCommand* harness_present_step() noexcept {
             if (on_travel_map()) { s.world_pending = false; retire_front(false, kTravelMapDetail); continue; }
             if (++entry.progress > kWorldCommandTimeoutPresents) {
                 s.world_pending = false;
-                retire_front(false, "no world frame within 600 presents");
+                retire_front(false, "no world frame within 600 presents; " + screen_stack_text());
                 continue;
             }
             return nullptr;
+        case HarnessVerb::godmode:
+        case HarnessVerb::expect_godmode: {
+            // Present consumes the command on the game thread. Applying now
+            // avoids letting another simulation tick run before the next Draw.
+            std::string detail;
+            const bool ok = apply_party_protection(command, detail);
+            retire_front(ok, detail);
+            continue;
+        }
+        case HarnessVerb::expect_hero_in_view:
+            retire_front(false, "hero_in_view unavailable: no per-leader rendered coverage; world depth may already be cleared at Present");
+            continue;
         default:
             return &command;
         }
@@ -1446,14 +2330,17 @@ void game_back_clip_world_frame(void* world_client) noexcept {
 // entry; same player checks before CWorldClient::CombatPause), driven by the
 // renderer's load reveal instead of cmd.txt. The setter only requests the
 // pause: the server applies it at its next update and the client flag follows.
-// A pause this function set is released when the hold ends, and after 6 s
-// whatever the renderer does, so it can never leave the game paused.
+// A pause this function set lasts exactly as long as the hold: it is released
+// when the hold ends (reveal, or the hold's own caps), when the renderer
+// stops reporting the hold, and when the hold stops counting world frames, so
+// it can never leave the game paused. No wall clock cap: on a slow GPU the
+// capped hold lasts longer than any fixed time (#305).
 void load_pause_world_frame(void* world_client, bool hold, std::uint64_t epoch,
-                            bool single_player_mission) noexcept {
+                            bool single_player_mission, bool reporting,
+                            bool previous_draw_counted) noexcept {
     static int usable = -1;
     static bool ours = false;
     static std::uint64_t decided_epoch = 0;
-    static ULONGLONG paused_at = 0;
     auto* image = reinterpret_cast<std::uint8_t*>(GetModuleHandleA(nullptr));
     if (!image || world_client != image + kWorldClientRva) return;
     if (usable < 0) usable = game_sites_ok(GameSiteGroup::harness) ? 1 : 0;
@@ -1470,11 +2357,20 @@ void load_pause_world_frame(void* world_client, bool hold, std::uint64_t epoch,
         reinterpret_cast<SetPauseFn>(image + kMissionPauseRva)(image + kInterfaceRva, want);
         return true;
     };
+    static ULONGLONG paused_at = 0;  // for the release line only
+    // The hold counts held time and its caps only on world Draws that
+    // complete (the completion counter). Draws that stop completing while our
+    // pause is on would hold the picture and the pause forever (#305, x86 run
+    // of 5abac2d6): after this many such Draws in a row the pause lets go.
+    constexpr unsigned kStalledDrawLimit = 30;
+    static unsigned stalled_draws = 0;
+    stalled_draws = ours && !previous_draw_counted ? stalled_draws + 1 : 0;
+    const bool stalled = stalled_draws >= kStalledDrawLimit;
     const ULONGLONG now = GetTickCount64();
-    if (ours && now - paused_at > 6000) hold = false;
+    if (!reporting || stalled) hold = false;
     if (hold && single_player_mission && epoch && epoch != decided_epoch) {
         if (ours) {               // a new load while still holding: keep our pause
-            decided_epoch = epoch; paused_at = now;
+            decided_epoch = epoch;
             if (!paused()) set(true);
             return;
         }
@@ -1490,9 +2386,19 @@ void load_pause_world_frame(void* world_client, bool hold, std::uint64_t epoch,
         return;
     }
     if (!hold && ours) {
+        // Released only once the game's flags read unpaused. Without a player
+        // (the mission was left for the menu, a failed load) the setter cannot
+        // run: ours stays and is retried at every world Draw, and the next
+        // mission's hold keeps and then releases it.
+        const bool was_paused = paused();
+        if (was_paused && !set(false)) return;
         ours = false;
-        const bool resumed = paused() && set(false);
-        bridge_report_event("load_pause", resumed ? "resumed at reveal" : "already unpaused at reveal");
+        char detail[128];
+        std::snprintf(detail, sizeof(detail), "%s after %llu ms%s", was_paused ? "resumed" : "already unpaused",
+                      static_cast<unsigned long long>(now - paused_at),
+                      !reporting ? ": the renderer stopped reporting the hold" :
+                      stalled ? ": the hold counted no world frame for 30 world Draws" : " at reveal");
+        bridge_report_event("load_pause", detail);
     }
 }
 
@@ -1813,40 +2719,50 @@ void harness_world_frame(void* world_client) noexcept {
     if (s.world_pending && !s.queue.empty()) {
         Entry& entry = s.queue.front();
         const HarnessCommand& command = entry.command;
-        const bool lia_verb = command.verb == HarnessVerb::console || command.verb == HarnessVerb::list_saves ||
-                              command.verb == HarnessVerb::godmode;
+        const bool lia_verb = command.verb == HarnessVerb::console || command.verb == HarnessVerb::list_saves;
         s.world_pending = false;
         s.world_done = true;
         s.world_ok = supported_world || (lia_world && lia_verb);
         s.world_detail = lia_world && !lia_verb ? "not ported on LiA" :
                          "Draw target is not the static CWorldClient";
         if (supported_world && command.verb == HarnessVerb::camera_path) {
+            s.hero_follow = false;
             // Temporary: the start pose at the first step, then the pose
             // interpolated linearly (yaw along the shorter arc).
             std::uint8_t* camera = s.image + kCameraRva;
-            if (entry.progress == 0) {
-                const float* q = &field<float>(camera, kCameraRotation);
-                s.path_start[0] = field<float>(camera, kCameraAnchor);
-                s.path_start[1] = field<float>(camera, kCameraAnchor + 4);
-                s.path_start[2] = 2.0f * std::atan2(q[3], q[0]) * 180.0f / kPi;
-                s.path_start[3] = field<float>(camera, kCameraPitch) * 180.0f / kPi;
-                s.path_start[4] = field<float>(camera, kCameraDistance);
+            const std::string off_map = entry.progress == 0 ?
+                camera_off_map(command.number[0], command.number[1]) : std::string();
+            if (!off_map.empty()) {
+                // The path runs straight from an on-map pose, so an on-map
+                // target keeps every step on the map.
+                entry.progress = command.frames;
+                s.world_ok = false;
+                s.world_detail = off_map;
+            } else {
+                if (entry.progress == 0) {
+                    const float* q = &field<float>(camera, kCameraRotation);
+                    s.path_start[0] = field<float>(camera, kCameraAnchor);
+                    s.path_start[1] = field<float>(camera, kCameraAnchor + 4);
+                    s.path_start[2] = 2.0f * std::atan2(q[3], q[0]) * 180.0f / kPi;
+                    s.path_start[3] = field<float>(camera, kCameraPitch) * 180.0f / kPi;
+                    s.path_start[4] = field<float>(camera, kCameraDistance);
+                }
+                ++entry.progress;
+                const float t = static_cast<float>(entry.progress) / static_cast<float>(command.frames);
+                HarnessCommand step = command;
+                // Yaw along the shorter arc; pitch from its equivalent nearest the
+                // target (a loaded save can hold 45 rad, read as 2578 degrees:
+                // without the wrap the camera turned about seven vertical circles in
+                // 600 frames and brought all ground around it into view).
+                for (int i = 0; i < 5; ++i) {
+                    float delta = command.number[i] - s.path_start[i];
+                    if (i == 2) delta = std::remainder(delta, 360.0f);
+                    if (i == 3) { step.number[i] = command.number[i] - std::remainder(delta, 360.0f) * (1.0f - t); continue; }
+                    step.number[i] = s.path_start[i] + delta * t;
+                }
+                apply_camera(step);
+                s.world_detail = text_of("step %u/%u; ", entry.progress, command.frames) + camera_state();
             }
-            ++entry.progress;
-            const float t = static_cast<float>(entry.progress) / static_cast<float>(command.frames);
-            HarnessCommand step = command;
-            // Yaw along the shorter arc; pitch from its equivalent nearest the
-            // target (a loaded save can hold 45 rad, read as 2578 degrees:
-            // without the wrap the camera turned about seven vertical circles in
-            // 600 frames and brought all ground around it into view).
-            for (int i = 0; i < 5; ++i) {
-                float delta = command.number[i] - s.path_start[i];
-                if (i == 2) delta = std::remainder(delta, 360.0f);
-                if (i == 3) { step.number[i] = command.number[i] - std::remainder(delta, 360.0f) * (1.0f - t); continue; }
-                step.number[i] = s.path_start[i] + delta * t;
-            }
-            apply_camera(step);
-            s.world_detail = text_of("step %u/%u; ", entry.progress, command.frames) + camera_state();
         } else if (supported_world && command.verb == HarnessVerb::equip_cycle) {
             // The last step's result stands until the next step.
             static std::string step_detail;
@@ -1888,18 +2804,6 @@ void harness_world_frame(void* world_client) noexcept {
         } else if (supported_world && command.verb == HarnessVerb::pause) {
             entry.progress = 0;
             request_pause(command.frames != 0);
-        } else if ((supported_world || lia_world) && command.verb == HarnessVerb::godmode) {
-            // Player 0 is the local party's server player (its party
-            // variables are read through GetPlayer(0) as well).
-            std::uint8_t* player = reinterpret_cast<GetServerPlayerFn>(
-                s.image + (lia_world ? kLiaGetServerPlayerRva : kGetServerPlayerRva))(
-                s.image + (lia_world ? kLiaServerRva : kServerRva), 0);
-            s.world_ok = player != nullptr;
-            if (player) {
-                field<std::uint8_t>(player, kPlayerGod) = command.frames != 0 ? 1 : 0;
-                s.world_detail = text_of("godmode=%s (player 0 flag %u)", command.frames ? "on" : "off",
-                                         static_cast<unsigned>(field<std::uint8_t>(player, kPlayerGod)));
-            } else s.world_detail = "server has no player 0";
         } else if ((supported_world || lia_world) && command.verb == HarnessVerb::list_saves) {
             s.world_ok = list_saves(s.world_detail);
         } else if ((supported_world || lia_world) && command.verb == HarnessVerb::console) {
@@ -1912,9 +2816,45 @@ void harness_world_frame(void* world_client) noexcept {
                 // activation are reported by the game's console, not inferred here.
                 s.world_detail = "dispatched to native console parser (no native success return)";
             } else s.world_detail = "console text is not valid UTF-8 or cannot be represented in game CP1251";
+        } else if (supported_world && command.verb == HarnessVerb::spawn) {
+            s.world_detail = apply_spawn(command, s.world_ok);
+        } else if (supported_world && command.verb == HarnessVerb::drawall) {
+            std::int32_t before = 0;
+            const bool on = command.frames != 0;
+            const std::int32_t value = on ? 0 : (s.drawall_saved ? s.drawall_previous : -1);
+            s.world_ok = bridge_harness_draw_visible_only(value, before);
+            if (!s.world_ok) s.world_detail = "DrawVisibleOnly unreadable (no game image)";
+            else {
+                if (on && !s.drawall_saved) { s.drawall_saved = true; s.drawall_previous = before; }
+                std::int32_t now = 0;
+                bridge_harness_draw_visible_only(-1, now);
+                s.world_detail = text_of("DrawVisibleOnly=%d (was %d)%s", now, before,
+                                         !on && value < 0 ? "; drawall on had not changed it" : "");
+                if (!on) s.drawall_saved = false;
+            }
+        } else if (supported_world && command.verb == HarnessVerb::camera_unit) {
+            s.hero_follow = false;
+            camera_unit_step(command);
         } else if (supported_world && command.verb == HarnessVerb::camera) {
-            apply_camera(command);
-            s.world_detail = camera_state();
+            s.hero_follow = false;
+            s.world_detail = camera_off_map(command.number[0], command.number[1]);
+            s.world_ok = s.world_detail.empty();
+            if (s.world_ok) {
+                apply_camera(command);
+                s.world_detail = camera_state();
+            }
+        } else if (supported_world && command.verb == HarnessVerb::camera_hero) {
+            s.world_detail = hero_contract_error();
+            s.world_ok = s.world_detail.empty();
+            if (s.world_ok) {
+                if (!std::isnan(command.number[4])) apply_camera(command);
+                std::int32_t id = 0;
+                const char* error = follow_party_leader(id);
+                s.world_ok = error == nullptr;
+                s.hero_follow = s.world_ok;
+                s.hero_epoch = bridge_current_world_epoch();
+                s.world_detail = error ? error : text_of("following party leader id=%d; ", id) + camera_state();
+            }
         } else if (supported_world && command.verb == HarnessVerb::clock_pin) {
             const float before = world_hour(world);
             s.clock_hour = command.number[0];
@@ -1927,6 +2867,19 @@ void harness_world_frame(void* world_client) noexcept {
             s.world_detail = was_pinned ?
                 text_of("restored scale %.6f modifier %.3f; hour %.3f",
                        s.saved_scale, s.saved_modifier, world_hour(world)) : "clock was not pinned";
+        }
+    }
+    if (s.hero_follow && supported_world) {
+        // Native input scrolling detaches the carrier. While this harness
+        // mode is active, reassert the CURRENT leader through SetCarrier;
+        // camera/path commands or a world change release the mode.
+        if (s.hero_epoch != bridge_current_world_epoch()) s.hero_follow = false;
+        else {
+            std::int32_t id = 0;
+            if (const char* error = follow_party_leader(id)) {
+                s.hero_follow = false;
+                bridge_append_probe_event("harness_camera_hero_failed", error);
+            }
         }
     }
     if (s.clock_pinned && supported_world) apply_clock(world);

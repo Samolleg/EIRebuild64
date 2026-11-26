@@ -114,9 +114,6 @@ enum Emitter : std::uint8_t {
     em_mist,        // soft mist billowing out and up from where a fall lands
     em_fall_foam,   // foam clumps riding down a fall's sheet into the boil
     em_lip_spray,   // droplets thrown off where water goes over a fall's lip
-    em_burn_flame,  // fire burn: the game's own fire frames over burning ground and crowns
-    em_burn_ember,  // fire burn: embers rising from what burns
-    em_burn_ash,    // fire burn: ash drifting down and settling after the flames
     em_count,
 };
 
@@ -239,9 +236,6 @@ inline float environment_scale(Emitter e, ZoneClass zone, int region, float nigh
     // Calm air only: weather snow (precipitation) and rain replace it.
     case em_snow_glitter: return (1.0f - .5f * night) * (1.0f - .9f * w.rain) * (1.0f - .85f * w.snow);
     case em_spray: case em_mist: case em_fall_foam: case em_lip_spray: return 1.0f;
-    // Fire burns (renderer_fire_burn.cpp): rain damps them a little.
-    case em_burn_flame: case em_burn_ember: return 1.0f - .3f * w.rain;
-    case em_burn_ash: return 1.0f - .6f * w.rain;
     default: return 0.0f;
     }
 }
@@ -318,14 +312,6 @@ inline const EmitterStyle& emitter_style(Emitter e, ZoneClass zone = zone_outdoo
         {10.f, .0f, .1f, .35f, .7f, {.82f, .85f, .88f}, {.72f, .76f, .8f}, .6f, .0f, .0f, .0f, .0f, 0.f, 1.f, .0f, .0f},
         // lip spray: small droplets thrown forward off a fall's lip.
         {3.f, .0f, .1f, .025f, .05f, {.95f, .97f, 1.f}, {.88f, .92f, .96f}, .5f, .0f, .0f, .0f, .0f, 0.f, 1.f, .0f, .0f},
-        // burn flames: the game's campfire flame (PTID_FIRE: TendriSmoke
-        // frames 0-7, white, additive), rising 1.6 m over its 0.55 s life and
-        // shrinking as the game's (x0.85 a tick); 0.8 m or 0.4 m at birth.
-        {3.f, .0f, 1.6f, .4f, .8f, {1.f, 1.f, 1.f}, {1.f, 1.f, 1.f}, 1.f, 2.9f, .15f, .08f, 1.5f, 1.f, 1.f, .0f, .0f},
-        // burn embers: the lava embers' sparks, rising off the fire
-        {1.2f, .0f, 6.0f, .06f, .12f, {1.f, .45f, .1f}, {1.f, .8f, .3f}, 1.f, 1.6f, .4f, .5f, 2.2f, 1.f, 1.6f, .0f, .8f},
-        // burn ash: grey-black flakes drifting down and settling, tumbling
-        {.6f, .0f, 5.0f, .07f, .14f, {.32f, .3f, .29f}, {.55f, .53f, .5f}, .8f, -.45f, .5f, .35f, .8f, 0.f, 1.f, 1.2f, .0f},
     };
     return styles[e < em_count ? e : 0];
 }
@@ -365,9 +351,6 @@ inline float sand_gust_density(float gust, float streamer) noexcept {
 
 // Waterfall emitters keep their density at every quality level (the low
 // level's smaller density and radius still scale them).
-// Fire burn emitters fill 8 m tiles over the area's burning burns only.
-inline constexpr float kBurnTileSide = 8.0f;
-inline bool burn_emitter(Emitter e) noexcept { return e == em_burn_flame || e == em_burn_ember || e == em_burn_ash; }
 inline bool waterfall_emitter(Emitter e) noexcept {
     return e == em_spray || e == em_mist || e == em_fall_foam || e == em_lip_spray;
 }
@@ -383,7 +366,6 @@ inline unsigned emitter_pool(Emitter e, const Quality& q, ZoneClass zone = zone_
     // per procedural fall (about 12 m^2 of sheet).
     if (e == em_spray) return static_cast<unsigned>(4.0f * emitter_style(e, zone).column_density * q.density + .5f);
     if (waterfall_emitter(e)) return static_cast<unsigned>(12.0f * emitter_style(e, zone).column_density * q.density + .5f);
-    if (burn_emitter(e)) return static_cast<unsigned>(kBurnTileSide * kBurnTileSide * emitter_style(e, zone).column_density * q.density + .5f);
     return static_cast<unsigned>(side * side * emitter_style(e, zone).column_density * q.density * q.decorative_density + .5f);
 }
 

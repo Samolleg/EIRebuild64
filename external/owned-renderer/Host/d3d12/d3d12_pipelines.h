@@ -50,8 +50,10 @@ public:
     std::uint32_t requested() const;
     // Writes the library when pipelines were added: a new library holding
     // exactly this session's ready pipelines, so entries no run requests any
-    // more (an older build's programs) do not pile up in the file. Call with
-    // no requests outstanding (idle, after wait_all or at teardown).
+    // more (an older build's programs) do not pile up in the file. Safe while
+    // workers build: a pipeline stored after its snapshot is written by the
+    // next save. One save at a time; the file is written without the
+    // library lock (a draw's synchronous build never waits for it).
     // written: the file was replaced (false: unchanged or failed).
     bool save(std::string& reason, bool* written = nullptr);
     // The last write: session pipelines in the file, how many the new library

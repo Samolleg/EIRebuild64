@@ -22,6 +22,8 @@
 #include "owned_terrain_decode.h"
 #include "renderer.h"
 #include "pose_override_runs.h"
+#include "owned_world_frame.h"
+#include "retained_static_submission.h"
 #include "graphics_settings.h"
 #include "ui_language.h"
 #include "game_focus.h"
@@ -35,6 +37,7 @@
 #include "fur.h"
 #include "native_prebuilt.h"
 #include "neighbour_client.h"
+#include "owned_asset_loader.h"
 #include "neighbour_piece.h"
 #include "static_lod.h"
 #include "owned_resource_store.h"
@@ -368,11 +371,22 @@ void Renderer::retire_dedicated_geometry() noexcept{
 // camera-motion churn of issue #57.)
 HRESULT Renderer::trim_native_mesh_cache(){
  if(!native_pending_draws_.empty())return E_UNEXPECTED;
+ if(d3d12_)d3d12_->marker("tail_vram_budget"); // #344: the frame tail by step in the slow host frame line
  update_vram_budget(); // every kPollFrames presents (both backends)
+ if(d3d12_)d3d12_->marker("tail_retire_sources");
  const std::uint64_t released=native_released_mesh_slots_;
  retire_native_source_values();
  trim_native_tables();
  if(native_world_reclaim_pending_)reclaim_native_world_ranges();
+ // A live slot's world range is never retired apart from the slot (#343):
+ // its warm records (queue_native_records' registered path) keep drawing and
+ // preparing the range they were resolved with. The idle sweep of #289
+ // freed ranges of characters hidden by the inventory or shop screen; best
+ // fit gave them to other slots while the old records still drew them
+ // (spikes, missing parts, shadow streaks). A range goes with its slot
+ // (retire_native_source_values, erase_retiring_native_meshes) or on a key
+ // change (resolve_native_world_range).
+ if(d3d12_)d3d12_->marker("tail_dedicated_geometry");
  if(dedicated_geometry_stale_){
   dedicated_geometry_stale_=false;dedicated_geometry_release_frame_=native_frame_index_;
   retire_dedicated_geometry();
@@ -390,6 +404,9 @@ HRESULT Renderer::trim_native_mesh_cache(){
  if(native_texture_epoch_sweep_pending_&&native_frame_index_-native_cache_epoch_frame_>=2){
   native_texture_epoch_sweep_pending_=false;retire_world_textures(native_texture_epoch_queue_);
  }
+ if(d3d12_)d3d12_->marker("tail_world_reuse");
+ update_world_reuse();
+ if(d3d12_)d3d12_->marker("tail_stale_geometry");
  if((!d3d12_&&(!device_||!context_))||native_geometry_pages_.empty())return S_FALSE;
  constexpr std::uint64_t kNativeCacheIdleFrames=1800;
  std::uint64_t before=0;
@@ -410,6 +427,198 @@ HRESULT Renderer::trim_native_mesh_cache(){
  if(hr==E_UNEXPECTED&&before==native_cache_epoch_frame_)native_cache_epoch_sweep_pending_=true;
  return hr;
 }
+
+namespace {
+// A model or map name's lower-case stem: its last path component up to the
+// first dot ("Models\\samt56z1.mod" and "samt56z1" -> "samt56z1").
+std::string world_reuse_stem(const std::string& name){
+ const auto slash=name.find_last_of("/\\");
+ std::string stem=name.substr(slash==std::string::npos?0:slash+1);
+ stem=stem.substr(0,stem.find('.'));
+ for(auto& c:stem)c=static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+ return stem;
+}
+// A mesh key's model stem: "incarnation:offset:bytes:model.ext/part" ->
+// "model" (the resource identity's name, after its third colon).
+std::string world_reuse_mesh_stem(const std::string& key){
+ std::size_t at=std::string::npos;
+ for(int field=0;field<3;++field){at=key.find(':',at==std::string::npos?0:at+1);if(at==std::string::npos)return {};}
+ std::string name=key.substr(at+1);
+ // Canonical names separate directories with '\' (owned_resource_store
+ // canonical_resource_name); a nested member follows its file after '/'.
+ name=name.substr(0,name.find('.'));
+ if(const auto slash=name.find_last_of("/\\");slash!=std::string::npos)name=name.substr(slash+1);
+ for(auto& c:name)c=static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+ return name;
+}
+}
+
+// Reuse across a world change (release_world_state keeps the general
+// pages' meshes and the owned textures; user decision 2026-11-21, #289).
+// Every published main source's models (MOB visual references, decoded
+// models, its map and terrain) are recorded by stem. Step 1, once the new
+// world's retained scene is published for its epoch (its main source is
+// then the new map's): the kept meshes of the previous map's own models
+// that the new map does not place, and its terrain, go before anything
+// would upload them again; units, equipment and items (no map places them)
+// stay. Step 2, once the new world is revealed and its neighbours settled:
+// every kept mesh and texture not used since the change goes (the epoch
+// sweep's rule, at that later frame). One world_reuse line per step.
+void Renderer::update_world_reuse() noexcept try{
+ const auto source=retained_static_terrain_source_snapshot();
+ if(source.map&&source.map->generation!=world_reuse_current_.generation){
+  WorldReuseModels next;next.generation=source.map->generation;
+  next.map=world_reuse_stem(source.map->map_resource);
+  next.stems.insert(next.map);next.stems.insert(world_reuse_stem(source.map->terrain_resource));
+  for(const auto& object:source.map->objects)if(!object.visual_reference.empty())next.stems.insert(world_reuse_stem(object.visual_reference));
+  for(const auto& model:source.map->models)next.stems.insert(world_reuse_stem(model.first));
+  next.stems.erase(std::string{});
+  world_reuse_previous_=std::move(world_reuse_current_);world_reuse_current_=std::move(next);
+ }
+ if(!world_reuse_pending_)return;
+ const double mib=1.0/1048576.0;
+ if(!world_reuse_early_done_){
+  const auto identity=retained_static_scene_identity_snapshot();
+  if(identity.status!=RetainedSceneIdentityStatus::published||identity.positive_world_epoch!=bridge_current_world_epoch()||
+     !native_pending_draws_.empty())return;
+  world_reuse_early_done_=true;
+  const auto& old_models=world_reuse_previous_;const auto& new_models=world_reuse_current_;
+  // Twice: a base goes once its copies went in the first pass.
+  for(int pass=0;pass<2&&old_models.generation&&old_models.map!=new_models.map;++pass){
+   bool retired=false;
+   for(auto& item:native_meshes_){
+    auto& mesh=item.second;
+    if(mesh.retiring||mesh.owned_references||mesh.pending_references||mesh.last_used_frame>=world_reuse_frame_)continue;
+    const UINT page=mesh.allocation.page;
+    if(page>=native_geometry_pages_.size()||native_geometry_pages_[page].dedicated)continue;
+    const auto stem=world_reuse_mesh_stem(item.first.resource_key);
+    if(stem.empty()||!old_models.stems.count(stem)||new_models.stems.count(stem))continue;
+    if(!release_native_geometry_span(mesh.allocation))continue;
+    mesh.retiring=true;retired=true;++world_reuse_early_meshes_;world_reuse_early_bytes_+=mesh.allocation.bytes;
+   }
+   if(retired){erase_retiring_native_meshes();release_empty_native_geometry_pages();}
+   if(!retired)break;
+  }
+  char detail[320];
+  std::snprintf(detail,sizeof(detail),"%s -> %s: kept %llu meshes (%.1f MiB) and %llu textures at the change; freed %llu meshes (%.1f MiB) of the previous map's own models the new map does not place",
+   old_models.map.empty()?"?":old_models.map.c_str(),new_models.map.empty()?"?":new_models.map.c_str(),
+   static_cast<unsigned long long>(world_reuse_kept_meshes_),world_reuse_kept_bytes_*mib,static_cast<unsigned long long>(world_reuse_kept_textures_),
+   static_cast<unsigned long long>(world_reuse_early_meshes_),world_reuse_early_bytes_*mib);
+  bridge_report_event("world_reuse",detail);
+  return;
+ }
+ if(load_reveal_holding_.load())return;
+ if(configured_boolean(debug_overlay_.config(),"neighbour_maps",true)&&!neighbour_client_settled(neighbours_.epoch))return;
+ // Adopted: kept meshes used since the change (what was not uploaded again).
+ std::uint64_t adopted=0,adopted_bytes=0,meshes_before=native_meshes_.size(),bytes_before=native_geometry_live_bytes_;
+ for(const auto& item:native_meshes_)if(item.second.last_used_frame>=world_reuse_frame_){++adopted;adopted_bytes+=item.second.allocation.bytes;}
+ // The stale sweep's rule on both backends (retire_stale_native_geometry
+ // needs the D3D11 context): unowned, not used since the change.
+ if(!native_pending_draws_.empty())return; // again next frame
+ bool retired=false;
+ for(auto& item:native_meshes_){
+  auto& mesh=item.second;
+  if(mesh.retiring||mesh.owned_references||mesh.pending_references||mesh.last_used_frame>=world_reuse_frame_)continue;
+  const UINT page=mesh.allocation.page;
+  if(page>=native_geometry_pages_.size()||native_geometry_pages_[page].dedicated)continue;
+  if(!release_native_geometry_span(mesh.allocation))continue;
+  mesh.retiring=true;retired=true;
+ }
+ if(retired){erase_retiring_native_meshes();release_empty_native_geometry_pages();}
+ world_reuse_pending_=false;
+ const std::size_t textures_before=native_owned_textures_.size();
+ retire_world_textures(world_reuse_queue_);
+ char detail[320];
+ std::snprintf(detail,sizeof(detail),"settled: %llu meshes in use since the change (%.1f MiB, kept ones among them adopted without an upload); swept %llu unused meshes (%.1f MiB) and %llu textures",
+  static_cast<unsigned long long>(adopted),adopted_bytes*mib,
+  static_cast<unsigned long long>(meshes_before>native_meshes_.size()?meshes_before-native_meshes_.size():0),
+  (bytes_before>native_geometry_live_bytes_?bytes_before-native_geometry_live_bytes_:0)*mib,
+  static_cast<unsigned long long>(textures_before>native_owned_textures_.size()?textures_before-native_owned_textures_.size():0));
+ bridge_report_event("world_reuse",detail);
+}catch(...){}
+
+// The kept meshes of a world change moved into fresh, packed pages (#289):
+// only at the change (release_world_state), where the prepared slots are
+// reset and no record or draw references a mesh offset. Page by page: each
+// mesh on the old page gets a span in the new arena, its bytes copied on
+// the GPU and its offsets shifted, and the old page is released as soon as
+// its meshes left it, so the move holds about one page twice, never the
+// whole kept set (D3D12 frees the resource after the GPU's last use of it,
+// core release_later; D3D11 holds it for the queued copy). A mesh moves
+// only when its copy was recorded: a failed allocation or copy (or a page
+// without its buffer) stops the move there, leaves that mesh where it was,
+// and keeps the pages not yet emptied as they are, after the new pages,
+// their moved meshes' old spans returned to their free lists so they can
+// still empty. One world_reuse line.
+void Renderer::compact_kept_native_geometry() noexcept try{
+ if(native_meshes_.empty()||native_geometry_pages_.empty())return;
+ std::uint64_t before_capacity=0;for(const auto& page:native_geometry_pages_)before_capacity+=page.capacity;
+ auto old_pages=std::move(native_geometry_pages_);native_geometry_pages_.clear();
+ auto meshes=std::move(native_meshes_);native_meshes_.clear();
+ const auto recount=[&]{
+  std::uint64_t live=0;for(const auto& item:native_meshes_)live+=item.second.allocation.bytes;
+  native_geometry_live_bytes_=native_mesh_resident_bytes_=live;return live;
+ };
+ if(FAILED(create_native_geometry_arena())){
+  native_geometry_pages_=std::move(old_pages);native_meshes_=std::move(meshes);recount();return;
+ }
+ std::vector<std::vector<NativeMesh*>> on_page(old_pages.size());
+ for(auto& item:meshes)if(item.second.allocation.page<old_pages.size())on_page[item.second.allocation.page].push_back(&item.second);
+ // Old spans of meshes that left a page the move then kept (bug: the page
+ // never emptied).
+ std::vector<NativeGeometrySpan> left_behind;
+ std::size_t moved=0,failed_page=old_pages.size();const char* failure=nullptr;
+ std::unordered_set<const NativeMesh*> moved_meshes;
+ for(std::size_t index=0;index<old_pages.size()&&failed_page==old_pages.size();++index){
+  auto& source=old_pages[index];
+  for(auto* mesh:on_page[index]){
+   const NativeGeometrySpan from=mesh->allocation;
+   NativeGeometrySpan span{};
+   if(FAILED(allocate_native_geometry_span(from.bytes,span))){failed_page=index;failure="allocation";break;}
+   auto& target=native_geometry_pages_[span.page];
+   bool copied=false;
+   if(d3d12_)copied=source.d3d12&&target.d3d12&&SUCCEEDED(d3d12_->copy_buffer(*target.d3d12,*source.d3d12,from.bytes,span.offset,from.offset));
+   else if(context_&&source.buffer&&target.buffer){
+    const D3D11_BOX box{from.offset,0,0,from.offset+from.bytes,1,1};
+    context_->CopySubresourceRegion(target.buffer.Get(),0,span.offset,0,0,source.buffer.Get(),0,&box);copied=true;
+   }
+   if(!copied){release_native_geometry_span(span);failed_page=index;failure="copy";break;}
+   const UINT delta=span.offset-from.offset;
+   const auto shift=[&](UINT& offset){if(offset!=UINT_MAX)offset+=delta;};
+   shift(mesh->position_offset);shift(mesh->normal_offset);shift(mesh->component_offset);shift(mesh->texture_coordinate_offset);
+   shift(mesh->diffuse_storage_offset);shift(mesh->specular_storage_offset);
+   shift(mesh->diffuse_offset);shift(mesh->specular_offset);shift(mesh->terrain_vertex_offset);shift(mesh->index_offset);
+   mesh->allocation={span.page,span.offset,from.bytes};++moved;moved_meshes.insert(mesh);
+   left_behind.push_back(from);
+  }
+  if(failed_page!=index){ // emptied: its buffer goes now
+   source.buffer.Reset();source.srv.Reset();source.d3d12.reset();source.capacity=0;
+   left_behind.clear();
+  }
+ }
+ std::size_t kept_pages=0;
+ if(failed_page!=old_pages.size()){
+  std::vector<UINT> remap(old_pages.size(),UINT_MAX);
+  for(std::size_t index=failed_page;index<old_pages.size();++index){
+   if(old_pages[index].dedicated||(!old_pages[index].buffer&&!old_pages[index].d3d12))continue;
+   remap[index]=static_cast<UINT>(native_geometry_pages_.size());native_geometry_pages_.push_back(std::move(old_pages[index]));++kept_pages;
+  }
+  // Unmoved meshes follow their page; the moved ones' old spans on the
+  // failed page go back to its free list.
+  for(std::size_t index=failed_page;index<on_page.size();++index)for(auto* mesh:on_page[index])
+   if(!moved_meshes.count(mesh)&&remap[index]!=UINT_MAX)mesh->allocation.page=remap[index];
+  if(remap[failed_page]!=UINT_MAX)for(auto span:left_behind){span.page=remap[failed_page];release_native_geometry_span(span);}
+ }
+ native_meshes_=std::move(meshes);
+ const std::uint64_t live=recount();
+ release_empty_native_geometry_pages();
+ std::uint64_t after_capacity=0;for(const auto& page:native_geometry_pages_)after_capacity+=page.capacity;
+ char detail[240];
+ std::snprintf(detail,sizeof(detail),"compacted %zu kept meshes (%.1f MiB): pages %.1f -> %.1f MiB%s%s%s",
+  moved,live/1048576.0,before_capacity/1048576.0,after_capacity/1048576.0,
+  failure?"; the move stopped at a failed ":"",failure?failure:"",failure?", the rest kept on their pages":"");
+ bridge_report_event("world_reuse",detail);
+}catch(...){}
 
 void Renderer::trim_native_tables() noexcept try{
  constexpr std::uint64_t kStaleFrames=600; // the slot reuse rule (prepare/resolve)
@@ -777,7 +986,8 @@ HRESULT Renderer::get_native_mesh(const NativeGeometryView& view,NativeMesh*& ou
  if(view.world.enabled&&view.world.object_space)key.resource_key+="|object-space";
  // An object-space record's shape-resolved mesh is shared by every record
  // of that figure with exactly this shape.
- if(view.world.enabled&&shape_count==1&&view.world.object_space)
+ // A prebuilt one-shape figure's mesh is the same at every shape.
+ if(view.world.enabled&&shape_count==1&&view.world.object_space&&!(view.prebuilt_mesh&&view.prebuilt_mesh->shape_invariant))
   std::memcpy(key.shape_bits.data(),view.world.shape.data(),sizeof(key.shape_bits));
  key.position_groups=view.position_groups;
  key.normal_groups=view.normal_groups;key.component_count=view.component_count;
@@ -1897,6 +2107,17 @@ HRESULT Renderer::store_native_instance(UINT& current,const std::weak_ptr<const 
      native_layout_changed();
    bind_native_material_group(record,draw.state_bucket);
    record.depth_current=false; // A changed command must be accepted by depth selection again.
+   // The fire burn material table reads persistent records' textures, only
+   // those of surface-profiled scenery (prepare_fire_burn_materials): a unit's
+   // or an animated texture's change leaves it as it is.
+   if(record.command.texture12!=draw.texture12||record.command.material_backing!=draw.material_backing||
+      record.command.instance.padding[0]!=draw.instance.padding[0]){
+    const auto table_reads=[&](std::uint64_t backing){
+     const auto found=material_profiles_.find(backing);
+     return found!=material_profiles_.end()&&found->second.surface&&!found->second.unit;
+    };
+    if(table_reads(record.command.material_backing)||table_reads(draw.material_backing))++native_instance_command_serial_;
+   }
    record.command=draw;record.command.persistent_instance=current;
    descriptor.instance_index=current|0x80000000u;record.descriptor=descriptor;
 #ifdef EID3D11_TESTING
@@ -1949,7 +2170,7 @@ Renderer::NativeDrawGpu Renderer::native_draw_descriptor(const NativeQueuedDraw&
 }
 
 // The world-clip constants (b3, NativeWorldClip) both executors upload.
-void Renderer::native_world_clip_values(std::array<std::uint8_t,sizeof(std::array<float,16>)*2+80>& values){
+void Renderer::native_world_clip_values(std::array<std::uint8_t,sizeof(std::array<float,16>)*2+96>& values){
  float distance_cull=native_draw_distance_;
  if(fog_cull_distance_>0&&fog_cull_frame_+1>=native_frame_index_)distance_cull=(std::min)(distance_cull,fog_cull_distance_);
  std::uint8_t* const out=values.data();
@@ -1971,10 +2192,9 @@ void Renderer::native_world_clip_values(std::array<std::uint8_t,sizeof(std::arra
   native_lod_error_px_,kStaticLodBand};
  std::memcpy(out+sizeof(native_world_clip_)*2+32,distance_params,sizeof(distance_params));
  // The crown impostor size (0: off) and crossfade band (nativeImpostorSelect).
- // z: the debug views (1 to 3), or below 0 on a frame whose sun mask traces rays: the impostor's sun
- // receiver is the crown's baked surface (nativePrepassPS).
- const int impostor_receiver=d3d12_&&native_traced_sun_?1:0;
- const float impostor_params[4]={native_impostor_pixels_,kImpostorBand, native_impostor_debug_?(native_impostor_raw_?3.f:native_impostor_frames_?2.f:1.f):-float(impostor_receiver),
+ // z: the debug views (1 to 3; 0 off, where the impostor's sun receiver is
+ // the crown's baked surface, nativeImpostorReceiver).
+ const float impostor_params[4]={native_impostor_pixels_,kImpostorBand, native_impostor_debug_?(native_impostor_raw_?3.f:native_impostor_frames_?2.f:1.f):0.f,
   native_impostor_output_scale()};
  std::memcpy(out+sizeof(native_world_clip_)*2+48,impostor_params,sizeof(impostor_params));
  // The screen-door crossfade's per-frame offset (nativeLodDiscard): under a
@@ -1983,6 +2203,18 @@ void Renderer::native_world_clip_values(std::array<std::uint8_t,sizeof(std::arra
  // LOD transitions under TAA); without one it stays fixed.
  const float dither_params[4]={temporal_upscaler()?dlss_jitter_[0]+.5f:0.f,terrain_relief_derivfree_?1.f:0.f/* #243 */,native_temp_far_px_,native_impostor_far_metres()};
  std::memcpy(out+sizeof(native_world_clip_)*2+64,dither_params,sizeof(dither_params));
+ // The camera eye (world metres; the Alt interact overlay's distance fade):
+ // where the drawn clip's x, y and w rows are all zero, once per frame.
+ {const auto& c=native_world_clip_;
+  const float r0[3]={c[0],c[1],c[2]},r1[3]={c[4],c[5],c[6]},r2[3]={c[12],c[13],c[14]},b[3]={-c[3],-c[7],-c[15]};
+  const auto cross=[](const float* u,const float* v,float* o){o[0]=u[1]*v[2]-u[2]*v[1];o[1]=u[2]*v[0]-u[0]*v[2];o[2]=u[0]*v[1]-u[1]*v[0];};
+  float k0[3],k1[3],k2[3];cross(r1,r2,k0);cross(r2,r0,k1);cross(r0,r1,k2);
+  const float det=r0[0]*k0[0]+r0[1]*k0[1]+r0[2]*k0[2];
+  float eye[4]{};
+  if(std::fabs(det)>1e-12f)for(int i=0;i<3;++i)eye[i]=(b[0]*k0[i]+b[1]*k1[i]+b[2]*k2[i])/det;
+  // w: the Alt interact overlay's full-fill distance (option highlight_alt_distance; 0: no eye, no fade).
+  eye[3]=std::fabs(det)>1e-12f?float((std::max)(1,configured_integer(debug_overlay_.config(),"highlight_alt_distance",120))):0.f;
+  std::memcpy(out+sizeof(native_world_clip_)*2+80,eye,sizeof(eye));}
  native_distance_cull_uploaded_=distance_cull;native_lod_error_uploaded_=native_lod_error_px_;
  // Impostor table (harness runs, impostor_debug turning on): every registered
  // impostor record (screen position at registration, 3840x2160; world centre;
@@ -2015,10 +2247,10 @@ HRESULT Renderer::upload_native_instances(){
     native_impostor_frames_!=native_impostor_frames_uploaded_||native_impostor_raw_!=native_impostor_raw_uploaded_||
     native_impostor_output_scale()!=native_impostor_scale_uploaded_||native_temp_far_px_*4096.f+native_impostor_far_metres()!=native_temp_far_uploaded_)native_world_clip_dirty_=true;
  if(native_world_clip_dirty_){
-  if(!native_world_clip_constants_){D3D11_BUFFER_DESC description{};description.ByteWidth=sizeof(native_world_clip_)*2+80;
+  if(!native_world_clip_constants_){D3D11_BUFFER_DESC description{};description.ByteWidth=sizeof(native_world_clip_)*2+96;
    description.Usage=D3D11_USAGE_DYNAMIC;description.BindFlags=D3D11_BIND_CONSTANT_BUFFER;description.CPUAccessFlags=D3D11_CPU_ACCESS_WRITE;
    HRESULT hr=device_->CreateBuffer(&description,nullptr,&native_world_clip_constants_);if(FAILED(hr))return hr;}
-  std::array<std::uint8_t,sizeof(native_world_clip_)*2+80> values;native_world_clip_values(values);
+  std::array<std::uint8_t,sizeof(native_world_clip_)*2+96> values;native_world_clip_values(values);
   D3D11_MAPPED_SUBRESOURCE mapped{};HRESULT hr=context_->Map(native_world_clip_constants_.Get(),0,D3D11_MAP_WRITE_DISCARD,0,&mapped);
   if(FAILED(hr))return hr;
   std::memcpy(mapped.pData,values.data(),values.size());
@@ -2149,8 +2381,8 @@ void Renderer::retire_native_poses() noexcept{
 }
 
 HRESULT Renderer::create_native_world_resource(UINT capacity,ComPtr<ID3D11Buffer>& buffer,
-    ComPtr<ID3D11ShaderResourceView>& srv,ComPtr<ID3D11UnorderedAccessView>& uav){
- const std::uint64_t bytes=std::uint64_t(capacity)*sizeof(NativeWorldVertexGpu);
+    ComPtr<ID3D11ShaderResourceView>& srv,ComPtr<ID3D11UnorderedAccessView>& uav,UINT stride){
+ const std::uint64_t bytes=std::uint64_t(capacity)*stride;
  if(!capacity||bytes>UINT_MAX)return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
  if(!device_||!context_)return E_FAIL;
  D3D11_BUFFER_DESC description{};
@@ -2158,7 +2390,7 @@ HRESULT Renderer::create_native_world_resource(UINT capacity,ComPtr<ID3D11Buffer
  description.Usage=D3D11_USAGE_DEFAULT;
  description.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_UNORDERED_ACCESS;
  description.MiscFlags=D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
- description.StructureByteStride=sizeof(NativeWorldVertexGpu);
+ description.StructureByteStride=stride;
  #ifdef EID3D11_TESTING
  ++test_native_world_allocation_attempts_;
  if(test_native_world_allocation_failure_)return E_OUTOFMEMORY;
@@ -2173,13 +2405,24 @@ HRESULT Renderer::create_native_world_resource(UINT capacity,ComPtr<ID3D11Buffer
  return device_->CreateUnorderedAccessView(buffer.Get(),&ur,&uav);
 }
 
+// The world vertex buffer doubles as it grows (one copy per doubling: a
+// load's many small regrows at x1.25 kept their old buffers alive to the
+// frame's end, 1.5 GB at once in zone3obr) and never shrinks in play (#289
+// sizing audit: a one-time trim to a quarter over the high water 600 frames
+// after the last growth copied the whole buffer at a random play moment for
+// 76 MiB). It goes with its world (release_world_state): a new map starts it
+// over under the load picture.
+static UINT native_world_capacity(UINT required,UINT maximum) noexcept{
+ return grow_capacity(required,64u*1024u,maximum);
+}
+
 HRESULT Renderer::ensure_native_world_buffer(UINT required){
  constexpr UINT addressable=UINT_MAX/sizeof(NativeWorldVertexGpu);
  if(!required)return S_OK;
  if(required>addressable)return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
  if(d3d12_){ // D3D12 backend: the same growth on the executor's buffer
   if(native12_.world_vertices&&required<=native_world_vertex_capacity_)return S_OK;
-  const UINT capacity=grow_capacity(required,64u*1024u,addressable);
+  const UINT capacity=native_world_capacity(required,addressable);
   const HRESULT hr=native_d3d12_persistent(native12_.world_vertices,UINT64(capacity)*sizeof(NativeWorldVertexGpu),sizeof(NativeWorldVertexGpu),
    UINT64(native_world_vertex_used_)*sizeof(NativeWorldVertexGpu));
   if(SUCCEEDED(hr))native_world_vertex_capacity_=capacity;
@@ -2187,7 +2430,7 @@ HRESULT Renderer::ensure_native_world_buffer(UINT required){
  }
  if(!device_||!context_)return E_FAIL;
  if(native_world_vertices_&&required<=native_world_vertex_capacity_)return S_OK;
- UINT capacity=grow_capacity(required,64u*1024u,addressable);
+ UINT capacity=native_world_capacity(required,addressable);
  ComPtr<ID3D11Buffer> replacement;
  ComPtr<ID3D11ShaderResourceView> srv;
  ComPtr<ID3D11UnorderedAccessView> uav;
@@ -2327,6 +2570,10 @@ void Renderer::count_terrain_slim_flush() noexcept{
 HRESULT Renderer::prepare_native_submission_layout(bool shadows,unsigned slot){
  note_terrain_slim_lists(); // before the layout is reused
  auto& layout=native_submission_layouts_[slot];
+ native_layout_refusal_=nullptr;
+ const auto refuse=[&](const char* what,std::uint64_t count,std::uint64_t limit){
+  native_layout_refusal_=what;native_layout_refusal_count_=count;native_layout_refusal_limit_=limit;return E_OUTOFMEMORY;
+ };
  std::size_t prefix=0;
 #ifdef EID3D11_TESTING
  prefix=test_native_work_prefix_[shadows?1:0];
@@ -2349,7 +2596,7 @@ HRESULT Renderer::prepare_native_submission_layout(bool shadows,unsigned slot){
  layout.source_draws.clear();layout.source_records.clear();
  layout.dispatches.clear();layout.geometry_dispatches.clear();
  layout.batches.clear();layout.arguments.clear();
- std::uint64_t triangles=0,components=0,owners=0;layout.owners=0;
+ std::uint64_t triangles=0,indexed_triangles=0,components=0,owners=0;layout.owners=0;
  try{
   // units: the record's larger of components and emitted triangles (its build chunks).
   struct PendingWork {NativeDrawWorkGpu value{};std::size_t draw=0;
@@ -2359,7 +2606,14 @@ HRESULT Renderer::prepare_native_submission_layout(bool shadows,unsigned slot){
   // The slim terrain pass's lists only while it can draw (terrain_slim_mode):
   // with it off the layout is the one before it.
   const bool slim_lists=!shadows&&terrain_slim_mode(debug_overlay_.config(),d3d12_!=nullptr)>0;
+  // Region slots (every batch's own triangles) are keyed by terrainSlimKey;
+  // the miss lists after all of them are not (a list entry keys by its
+  // region slot, terrainMissOrigin), so they count only against the output
+  // buffer: on D3D11 its 16M-triangle stream buffer, on D3D12 twice that
+  // (the visible buffer at 16 bytes a triangle: 512 MB).
   static_assert(16u*1024u*1024u<=(1u<<24),"terrainSlimKey keeps 24 bits of a triangle slot (the limit below)");
+  const std::uint64_t output_limit=d3d12_?32ull*1024u*1024u:16ull*1024u*1024u;
+  std::uint64_t miss_triangles=0;
   for(std::size_t first=0;first<native_draw_order_.size();){
    constexpr UINT maximum_batches=kNativeRawElementLimit/4u;
    if(layout.batches.size()>=maximum_batches)
@@ -2390,7 +2644,7 @@ HRESULT Renderer::prepare_native_submission_layout(bool shadows,unsigned slot){
         (!shadows&&candidate.material_instance!=draw.material_instance))break;
      ++last;
     }
-   batch.draw_count=last-first;batch.output_triangle_base=static_cast<UINT>(triangles);
+   batch.draw_count=last-first;batch.output_triangle_base=static_cast<UINT>(batch.indexed?indexed_triangles:triangles);
    const UINT group=static_cast<UINT>(layout.batches.size());
    // Terrain tile classes: the batch's steep-class triangles (each mesh's
    // from steep_first_triangle on) take a region after its flat ones and an
@@ -2438,7 +2692,7 @@ HRESULT Renderer::prepare_native_submission_layout(bool shadows,unsigned slot){
     if(shadows&&(!queued.instance.world_geometry||!queued.mesh))return E_INVALIDARG;
     NativeDrawWorkGpu work;work.record=native_pending_draws_[native_draw_order_[i]].record;
     work.output_triangle_base=batch.output_triangle_base;work.indirect_args_byte_offset=group*16u;
-    work.ordered_triangle_offset=static_cast<UINT>(triangles-batch.output_triangle_base);
+    work.ordered_triangle_offset=static_cast<UINT>((batch.indexed?indexed_triangles:triangles)-batch.output_triangle_base);
     work.flags=batch.preserves_order?1u:0u;
     work.prepared_vertex_base=queued.instance.world_geometry?queued.world_base:static_cast<UINT>(components);
     if(batch.steep_args_slot!=UINT_MAX){work.steep_output_triangle_base=batch.steep_triangle_base;work.steep_args_byte_offset=batch.steep_args_slot;}
@@ -2448,20 +2702,19 @@ HRESULT Renderer::prepare_native_submission_layout(bool shadows,unsigned slot){
      work.flags|=4u;work.owner_base=static_cast<UINT>(owners);
      owners+=std::uint64_t(queued.component_count)+(std::max)((queued.instance.world_geometry&native_world_lod)?queued.component_count:0u,
       (queued.instance.world_geometry&native_world_impostor)?4u:0u);
-     if(owners>UINT_MAX)return E_OUTOFMEMORY;
+     if(owners>UINT_MAX)return refuse("owner ids",owners,UINT_MAX);
     }
-    // A static LOD record may emit two levels in its crossfade band (at most
-    // the full list and the first reduced level).
-    const UINT emitted=queued.index_count/3u+((queued.instance.world_geometry&native_world_lod)?queued.mesh->lod_extra_triangles:0u)+
-     ((queued.instance.world_geometry&native_world_impostor)?2u:0u); // a crown's impostor quad
+    const UINT emitted=native_layout_triangles(queued);
     pending.push_back({work,native_draw_order_[i],queued.geometry_page,(std::max)(emitted,static_cast<UINT>(queued.component_count))});
-    triangles+=emitted;
+    (batch.indexed?indexed_triangles:triangles)+=emitted;
     if(!queued.instance.world_geometry)components+=queued.component_count;
-    if(triangles>16u*1024u*1024u||components>8u*1024u*1024u)return E_OUTOFMEMORY;
+    if(triangles+indexed_triangles>16u*1024u*1024u)return refuse("triangle slots (24-bit key)",triangles+indexed_triangles,16u*1024u*1024u);
+    if(components>8u*1024u*1024u)return refuse("prepared vertices",components,8u*1024u*1024u);
    }
    // The slim terrain pass's miss lists (NativeBatch::miss_list_*): a range of
-   // each region's size after the batch's own triangles. Liquid batches draw
-   // their own way; LOD or impostor records could emit more than the region.
+   // each region's size, after every batch's own triangles (based below).
+   // Liquid batches draw their own way; LOD or impostor records could emit
+   // more than the region.
    if(batch_triangles&&slim_lists){
     bool other=false;
     for(std::size_t i=first;i<last&&!other;++i){
@@ -2471,14 +2724,28 @@ HRESULT Renderer::prepare_native_submission_layout(bool shadows,unsigned slot){
     if(!other){
      batch.miss_list_max[0]=batch_triangles-steep_triangles;batch.miss_list_max[1]=steep_triangles;
      for(unsigned region=0;region<2;++region)if(batch.miss_list_max[region]){
-      batch.miss_list_base[region]=static_cast<UINT>(triangles);triangles+=batch.miss_list_max[region];miss_lists=true;
+      batch.miss_list_base[region]=static_cast<UINT>(miss_triangles);miss_triangles+=batch.miss_list_max[region];miss_lists=true;
      }
-     if(triangles>16u*1024u*1024u)return E_OUTOFMEMORY;
     }
    }
    layout.arguments.insert(layout.arguments.end(),
     {batch.preserves_order?static_cast<UINT>((triangles-batch.output_triangle_base)*3u):0u,1u,0u,0u});
    layout.batches.push_back(batch);first=last;
+  }
+  // The miss lists follow the last region.
+  if(triangles+miss_triangles+indexed_triangles>output_limit)return refuse("output triangles with slim miss lists",triangles+miss_triangles+indexed_triangles,output_limit);
+  if(miss_lists)for(auto& batch:layout.batches)for(unsigned region=0;region<2;++region)
+   if(batch.miss_list_max[region])batch.miss_list_base[region]+=static_cast<UINT>(triangles);
+  triangles+=miss_triangles;
+  // The indexed batches' slots after every visible-list slot (#289): with
+  // the indexed build on, the visible list ends at indexed_first and the
+  // index list holds only these (flush_native_d3d12); with it off they write
+  // visible entries at these slots, and the visible list keeps them.
+  const std::uint64_t indexed_first=triangles;
+  if(indexed_triangles){
+   for(auto& batch:layout.batches)if(batch.indexed)batch.output_triangle_base+=static_cast<UINT>(indexed_first);
+   for(auto& item:pending)if(layout.batches[item.value.indirect_args_byte_offset/16u].indexed)item.value.output_triangle_base+=static_cast<UINT>(indexed_first);
+   triangles+=indexed_triangles;
   }
   // The split batches' steep arguments slots follow every batch's own slot
   // (batch_index*16 keeps addressing a batch's first slot).
@@ -2530,6 +2797,7 @@ HRESULT Renderer::prepare_native_submission_layout(bool shadows,unsigned slot){
   for(const auto pending_index:native_draw_order_)
    layout.source_records.push_back(native_pending_draws_[pending_index].record);
   layout.triangles=static_cast<UINT>(triangles);layout.components=static_cast<UINT>(components);layout.owners=static_cast<UINT>(owners);
+  layout.indexed_first=static_cast<UINT>(indexed_first);layout.indexed_triangles=static_cast<UINT>(indexed_triangles);
   layout.source_revision=native_layout_revision_;
 #ifdef EID3D11_TESTING
   ++test_native_layout_rebuilds_;
@@ -2693,6 +2961,7 @@ HRESULT Renderer::resolve_native_world_range(const NativeGeometryView& view,
   if(++native_world_ranges_[slot.world_allocation].generation==0)++native_world_ranges_[slot.world_allocation].generation;
   if(++slot.world_generation==0)++slot.world_generation;
  }
+ slot.world_resolve_frame=native_frame_index_;
  draw.world_slot=slot_index;draw.world_base=slot.world_base;
  draw.world_allocation=slot.world_allocation;
  draw.world_generation=slot.world_generation;draw.geometry_radius=view.world.geometry_radius;
@@ -3751,7 +4020,8 @@ void Renderer::refresh_emissive_lights() noexcept try{
 // every 1800 world frames while particles arrive: what was gathered, what
 // glowed, what was rejected as smoke and how many clusters game lights own.
 void Renderer::update_particle_lights(const std::vector<RetainedWorldPointLight>& lights,double world_time){
- if(!rt_emissive_enabled_){
+ particle_lights_enabled_=configured_boolean(debug_overlay_.config(),"rt_emissive",true);
+ if(!particle_lights_enabled_){
   if(!particle_light_clusters_.empty()||!particle_lights_published_.empty()||!particle_light_samples_.empty()){
    particle_light_clusters_.clear();particle_lights_published_.clear();particle_light_samples_.clear();
   }
@@ -3881,6 +4151,10 @@ bool Renderer::set_native_point_lights(
    NativePointLightGpu gpu{};
    gpu.center_inverse_radius_squared={light.centre[0],light.centre[1],light.centre[2],1.f/(light.radius*light.radius)};
    gpu.color={light.color[0],light.color[1],light.color[2],0.f};
+   // A buff or sparkle cloud lights as a sphere of its own size (#263): the
+   // lamp loop reads -shadow_center.w (game lights keep their positive bake
+   // radius there; particle lamps hold no shadow slot).
+   if(light.local_glow)gpu.shadow_center={light.centre[0],light.centre[1],light.centre[2],-light.spread};
    next.push_back(gpu);
   }
  }catch(const std::bad_alloc&){return false;}
@@ -4267,6 +4541,7 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
   if(record_index==UINT_MAX){
    record_index=allocate_native_instance_record();if(record_index==UINT_MAX)return fail(E_OUTOFMEMORY,"draw_record_capacity");
    auto& record=native_instance_records_[record_index];record.owned=false;bind_native_material_group(record,draw.state_bucket);record.command=draw;
+   if(native_static_registration_)++native_instance_command_serial_; // fire burn material table: a new static
    record.command.persistent_instance=record_index;record.descriptor=native_draw_descriptor(draw,record_index);
    native_instance_dirty_.push_back(record_index);record.scheduled=true;
 #ifdef EID3D11_TESTING
@@ -4283,6 +4558,13 @@ HRESULT Renderer::queue_native_impl(const NativeGeometryView& view,const FixedSt
   native_pending_upload_.resize(upload_start);return fail(E_OUTOFMEMORY,"draw_queue_allocation");
  }
  return S_OK;
+}
+
+UINT Renderer::native_layout_triangles(const NativeQueuedDraw& draw) noexcept{
+ // A static LOD record may emit two levels in its crossfade band (at most
+ // the full list and the first reduced level); a crown adds its impostor quad.
+ return draw.index_count/3u+((draw.instance.world_geometry&native_world_lod)&&draw.mesh?draw.mesh->lod_extra_triangles:0u)+
+  ((draw.instance.world_geometry&native_world_impostor)?2u:0u);
 }
 
 void Renderer::count_native_world_kind(RendererResourceSnapshot::WorldKinds& kinds,

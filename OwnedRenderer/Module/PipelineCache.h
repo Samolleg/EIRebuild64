@@ -81,6 +81,7 @@ private:
         ComPtr<ID3D12PipelineState> pipeline;
         std::string error;
         bool done = false;
+        bool stored = false;
         double milliseconds = 0.0;
     };
     std::uint32_t enqueue(std::unique_ptr<Entry> entry);
@@ -90,12 +91,13 @@ private:
 
     ID3D12Device* device_ = nullptr;
     ComPtr<ID3D12Device1> device1_;
-    std::uint32_t saved_count_ = 0, save_refused_ = 0;
-    std::size_t saved_bytes_ = 0;
+    std::atomic<std::uint32_t> saved_count_ = 0, save_refused_ = 0;
+    std::atomic<std::size_t> saved_bytes_ = 0;
     std::vector<char> library_bytes_;  // the library reads from this for its lifetime: declared first, freed last
     ComPtr<ID3D12PipelineLibrary> library_;
     std::wstring path_;
     std::mutex library_mutex_;
+    std::mutex save_mutex_;
     mutable std::mutex mutex_;
     std::condition_variable work_ready_, work_done_;
     std::vector<std::unique_ptr<Entry>> entries_;

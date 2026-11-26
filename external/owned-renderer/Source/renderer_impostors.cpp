@@ -82,8 +82,48 @@ ImpostorBakeTargets impostorLevelPS(ImpostorLevelOutput i){
 // Slice stamp: texel (0,0) of each slice's level 0 (the empty border)
 // holds ((slice & 255) / 255, 90 / 255), as the D3D11 bake's byte; the
 // impostor debug view checks it at draw time (slice / 255 saturated past 255).
+// The normal image's alpha holds the slice byte too: a BC3 atlas (D3D12)
+// keeps a block's two alpha values exactly, its colours only to 5:6:5.
 ImpostorBakeTargets impostorMarkPS(ImpostorLevelOutput i){
- ImpostorBakeTargets o;o.albedo=float4((bakeFrame.z&255u)/255.0,90.0/255.0,0,1);o.normal=o.albedo;return o;
+ ImpostorBakeTargets o;o.albedo=float4((bakeFrame.z&255u)/255.0,90.0/255.0,0,1);o.normal=float4(0,0,0,(bakeFrame.z&255u)/255.0);return o;
+}
+// D3D12 atlas compression (#289): one BC3 block per thread from a baked
+// level (RGBA8, premultiplied), written as its 16 bytes into a storage
+// texture of a quarter the size that is then copied into the BC3 atlas.
+// Colour: the block's RGB box corners as 5:6:5 endpoints, each texel the
+// nearest of the four palette entries along them. Alpha: the block's
+// lowest and highest byte as the endpoints (exact), eight-value mode.
+Texture2D<float4> compressSource:register(t5);
+RWTexture2D<uint4> compressBlocks:register(u0);
+uint compress565(float3 c){uint3 q=uint3(round(saturate(c)*float3(31,63,31)));return (q.r<<11)|(q.g<<5)|q.b;}
+float3 expand565(uint v){return float3((v>>11)&31u,(v>>5)&63u,v&31u)/float3(31,63,31);}
+[numthreads(8,8,1)]
+void impostorCompressCS(uint3 id:SV_DispatchThreadID){
+ uint w,h;compressSource.GetDimensions(w,h);
+ if(id.x*4>=w||id.y*4>=h)return;
+ float4 t[16];float3 lo=1,hi=0;float alo=1,ahi=0;
+ [unroll]for(uint i=0;i<16;++i){
+  t[i]=saturate(compressSource.Load(int3(id.xy*4+uint2(i&3u,i>>2),0)));
+  lo=min(lo,t[i].rgb);hi=max(hi,t[i].rgb);alo=min(alo,t[i].a);ahi=max(ahi,t[i].a);
+ }
+ const uint c0=compress565(hi),c1=compress565(lo);
+ const float3 e0=expand565(c0),e1=expand565(c1),axis=e1-e0;
+ const float span=dot(axis,axis);
+ uint colours=0;
+ [unroll]for(uint j=0;j<16;++j){
+  const uint s=span>1e-8&&c0!=c1?uint(round(saturate(dot(t[j].rgb-e0,axis)/span)*3)):0u;
+  colours|=(s==0u?0u:s==1u?2u:s==2u?3u:1u)<<(2*j);
+ }
+ const uint a0=uint(round(ahi*255)),a1=uint(round(alo*255));
+ uint alphaLow=0,alphaHigh=0;
+ [unroll]for(uint k=0;k<16;++k){
+  const uint s=a0>a1?uint(round(saturate((float(a0)-t[k].a*255)/float(a0-a1))*7)):0u;
+  const uint code=s==0u?0u:s==7u?1u:s+1u;
+  const uint bit=3*k;
+  if(bit>=32)alphaHigh|=code<<(bit-32);
+  else{alphaLow|=code<<bit;if(bit+3>32)alphaHigh|=code>>(32-bit);}
+ }
+ compressBlocks[id.xy]=uint4(a0|(a1<<8)|(alphaLow<<16),(alphaLow>>16)|(alphaHigh<<16),c0|(c1<<16),colours);
 }
 )";
     return source;
@@ -105,6 +145,7 @@ void append_impostor_shader_programs(std::vector<ShaderProgram>& out) {
     out.push_back({source, "impostor_bake", nullptr, "impostorLevelVS", "vs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
     out.push_back({source, "impostor_bake", nullptr, "impostorLevelPS", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3});
     out.push_back({source, "impostor_bake", nullptr, "impostorMarkPS", "ps_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3}); // the slice stamp
+    out.push_back({source, "impostor_bake", nullptr, "impostorCompressCS", "cs_5_0", D3DCOMPILE_OPTIMIZATION_LEVEL3}); // D3D12 BC3 atlas
 }
 
 #if !defined(EID3D11_SHADER_EMBED)
@@ -117,12 +158,14 @@ void Renderer::impostor_failure(const char* reason) noexcept {
     bridge_append_probe_event("impostors_omitted", text.c_str());
 }
 
-// Grows the atlas to hold at least this many slices (keeping the baked ones).
+// Grows the atlas to hold at least this many slices (keeping the baked ones),
+// doubling (#289 sizing audit: x1.25 meant more regrows and copies in play;
+// the atlas is BC3 on D3D12, a quarter of the RGBA8 bytes, so x2 costs little).
 HRESULT Renderer::ensure_impostor_atlas(UINT slices) noexcept try {
     if (slices <= impostors_.capacity && impostors_.albedo) return S_OK;
     if (slices > D3D11_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION) return E_OUTOFMEMORY;
     const UINT capacity = (std::min)(UINT(D3D11_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION),
-        (std::max)({slices, impostors_.capacity * 2u, 16u}));
+        (std::max)({slices, impostors_.capacity * 2u, 16u})); // x2: fewer regrows (#289 sizing audit)
     const UINT side = kImpostorFrames * kImpostorFrameTexels;
     D3D11_TEXTURE2D_DESC description{};
     description.Width = description.Height = side;
@@ -309,6 +352,8 @@ HRESULT Renderer::bake_neighbour_impostors(const NeighbourPiece& upload) noexcep
                 const std::uint8_t stamp[4] = {std::uint8_t(slice), 90, 0, 255};
                 const D3D11_BOX texel{0, 0, 0, 1, 1, 1};
                 context_->UpdateSubresource(impostors_.albedo.Get(), D3D11CalcSubresource(0, slice, kImpostorMips), &texel, stamp, 4, 4);
+                const std::uint8_t byte[4] = {0, 0, 0, std::uint8_t(slice)}; // and the normal image's alpha (nativeImpostorTexel)
+                context_->UpdateSubresource(impostors_.normal.Get(), D3D11CalcSubresource(0, slice, kImpostorMips), &texel, byte, 4, 4);
             }
             impostors_.slices.emplace(source.key, slice);
             ++impostors_.count;
@@ -337,7 +382,7 @@ HRESULT Renderer::ensure_impostor_atlas_d3d12(UINT slices) noexcept try {
     if (slices <= impostors_.capacity && impostors_.albedo12) return S_OK;
     if (slices > D3D11_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION) return E_OUTOFMEMORY;
     const UINT capacity = (std::min)(UINT(D3D11_REQ_TEXTURE2D_ARRAY_AXIS_DIMENSION),
-        (std::max)({slices, impostors_.capacity * 2u, 16u}));
+        (std::max)({slices, impostors_.capacity * 2u, 16u})); // x2: fewer regrows (#289 sizing audit)
     const UINT side = kImpostorFrames * kImpostorFrameTexels;
     const DXGI_FORMAT format = DXGI_FORMAT_R8G8B8A8_UNORM;
     if (!impostors_.bake_albedo12) {
@@ -354,10 +399,26 @@ HRESULT Renderer::ensure_impostor_atlas_d3d12(UINT slices) noexcept try {
             return hr;
         }
     }
+    // Each level's BC3 blocks (one R32G32B32A32_UINT texel per 4x4 block),
+    // encoded from the bake target and copied into the atlas level.
+    if (!impostors_.compress_albedo12[0]) {
+        HRESULT hr = S_OK;
+        for (UINT level = 0; level < kImpostorMips && SUCCEEDED(hr); ++level) {
+            const UINT blocks = (std::max)(1u, (side >> level) / 4u);
+            hr = d3d12_->create_storage_texture(blocks, blocks, 0, DXGI_FORMAT_R32G32B32A32_UINT, impostors_.compress_albedo12[level], 1, 1, true);
+            if (SUCCEEDED(hr)) hr = d3d12_->create_storage_texture(blocks, blocks, 0, DXGI_FORMAT_R32G32B32A32_UINT, impostors_.compress_normal12[level], 1, 1, true);
+        }
+        if (FAILED(hr)) {
+            for (auto& level : impostors_.compress_albedo12) level.reset();
+            for (auto& level : impostors_.compress_normal12) level.reset();
+            return hr;
+        }
+    }
     D3D12TextureRef albedo, normal;
-    // Plain arrays (zeroed, no unordered access): only ordered copies write them.
-    HRESULT hr = d3d12_->create_texture_array(side, side, format, kImpostorMips, capacity, albedo);
-    if (SUCCEEDED(hr)) hr = d3d12_->create_texture_array(side, side, format, kImpostorMips, capacity, normal);
+    // Plain BC3 arrays (zeroed, no unordered access): only ordered copies
+    // write them. A quarter of RGBA8's 645 MiB in zone3obr (#289).
+    HRESULT hr = d3d12_->create_texture_array(side, side, DXGI_FORMAT_BC3_UNORM, kImpostorMips, capacity, albedo);
+    if (SUCCEEDED(hr)) hr = d3d12_->create_texture_array(side, side, DXGI_FORMAT_BC3_UNORM, kImpostorMips, capacity, normal);
     if (FAILED(hr)) return hr;
     if (impostors_.albedo12)
         for (UINT slice = 0; slice < impostors_.count; ++slice)
@@ -436,6 +497,21 @@ HRESULT Renderer::bake_neighbour_impostors_d3d12(const NeighbourPiece& upload) n
     sampler.AddressU = sampler.AddressV = sampler.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
     sampler.MaxLOD = D3D11_FLOAT32_MAX;
     D3D12Texture* targets[2] = {impostors_.bake_albedo12.get(), impostors_.bake_normal12.get()};
+    // One baked level into the BC3 atlas (#289): its blocks encoded by
+    // impostorCompressCS into the level's block texture, then copied into the
+    // slice's level (BC3 and R32G32B32A32_UINT share a block size). S_FALSE:
+    // the program is still building.
+    const auto encode = [&](D3D12Texture& source, D3D12Texture& blocks, D3D12Texture& atlas, UINT at) -> HRESULT {
+        UINT w = 0, h = 0, levels = 0; DXGI_FORMAT block_format = DXGI_FORMAT_UNKNOWN;
+        if (!d3d12_->texture_info(blocks, w, h, levels, block_format)) return E_FAIL;
+        d3d12_->set_resource(5, &source);
+        d3d12_->set_unordered(0, &blocks);
+        const HRESULT result = d3d12_->dispatch(programs[5], (w + 7) / 8, (h + 7) / 8, 1);
+        d3d12_->set_resource(5, static_cast<const D3D12Texture*>(nullptr));
+        d3d12_->set_unordered(0, static_cast<const D3D12Texture*>(nullptr));
+        if (result != S_OK) return result;
+        return d3d12_->copy_texture(atlas, at, blocks, 0);
+    };
     const float zero[4]{};
     bool not_ready = false;
     // The bake and mip pipelines are waited for when still building (a
@@ -493,11 +569,10 @@ HRESULT Renderer::bake_neighbour_impostors_d3d12(const NeighbourPiece& upload) n
         // the rest would fare the same, so none of them is baked now.
         if (d3d12_not_done(hr)) { not_ready = true; break; }
         UINT at = D3D11CalcSubresource(0, slice, kImpostorMips);
-        if (FAILED(hr = d3d12_->copy_texture(*impostors_.albedo12, at, *impostors_.bake_albedo12, 0, true)) ||
-            FAILED(hr = d3d12_->copy_texture(*impostors_.normal12, at, *impostors_.bake_normal12, 0, true))) {
-            impostor_failure("impostor bake copy failed");
-            break;
-        }
+        hr = encode(*impostors_.bake_albedo12, *impostors_.compress_albedo12[0], *impostors_.albedo12, at);
+        if (hr == S_OK) hr = encode(*impostors_.bake_normal12, *impostors_.compress_normal12[0], *impostors_.normal12, at);
+        if (FAILED(hr)) { impostor_failure("impostor bake compression or copy failed"); break; }
+        if (d3d12_not_done(hr)) { not_ready = true; break; }
         // The smaller levels: each the 2x2 average of the one above, drawn
         // into that level's target pair and copied into the slice.
         D3D12Texture* above_albedo = impostors_.bake_albedo12.get();
@@ -515,12 +590,10 @@ HRESULT Renderer::bake_neighbour_impostors_d3d12(const NeighbourPiece& upload) n
             if (FAILED(hr)) { impostor_failure("impostor level draw failed"); levels_done = false; break; }
             if (d3d12_not_done(hr)) { not_ready = true; levels_done = false; break; }
             at = D3D11CalcSubresource(level, slice, kImpostorMips);
-            if (FAILED(hr = d3d12_->copy_texture(*impostors_.albedo12, at, *level_targets[0], 0, true)) ||
-                FAILED(hr = d3d12_->copy_texture(*impostors_.normal12, at, *level_targets[1], 0, true))) {
-                impostor_failure("impostor level copy failed");
-                levels_done = false;
-                break;
-            }
+            hr = encode(*level_targets[0], *impostors_.compress_albedo12[level], *impostors_.albedo12, at);
+            if (hr == S_OK) hr = encode(*level_targets[1], *impostors_.compress_normal12[level], *impostors_.normal12, at);
+            if (FAILED(hr)) { impostor_failure("impostor level compression or copy failed"); levels_done = false; break; }
+            if (d3d12_not_done(hr)) { not_ready = true; levels_done = false; break; }
             above_albedo = level_targets[0];
             above_normal = level_targets[1];
         }

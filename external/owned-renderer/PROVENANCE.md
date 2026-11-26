@@ -1,3 +1,11 @@
+# Renderer release 20261123 integration
+
+Source: https://github.com/Ilufus/evil-islands-owned-renderer,
+release/20261123-212c831 (212c831d5129e1425ec622fa7bdb482e37097d84).
+Three-way integration against candidate 1126 into the embedded x64 renderer.
+The native game owns the renderer module, resource mounts, glTF/SKN, capture
+and platform services. Renderer data is versioned separately in content.
+
 # Renderer candidate 1126 integration (2026-11-16)
 
 Upstream: https://github.com/Ilufus/evil-islands-owned-renderer

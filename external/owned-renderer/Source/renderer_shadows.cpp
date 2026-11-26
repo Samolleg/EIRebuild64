@@ -124,11 +124,21 @@ HRESULT Renderer::upload_native_shadow_constants(UINT slice){
  // bit 8, its slice, the close map it was drawn with (valid, and still the only one).
  // Its matrix and bias stand at its (otherwise unused) slice of the block; its
  // camera selector stays empty, so no map selection ever picks it.
- if(!native_point_shadow_active_&&native_traced_sun_&&native_rt_cover_layer_<3&&native_rt_cover_source_<3&&
-    !native_shadow_frame_.slices[native_rt_cover_layer_].enabled&&configured_boolean(debug_overlay_.config(),"rt_sun_cover_shadows",true)&&
+ // The coarse layer (bit 15, its slice in bits 16-18) holds the same casters
+ // over the whole close map's fit with that map's own matrix and bias.
+ if(!native_point_shadow_active_&&native_traced_sun_&&native_rt_cover_source_<3&&
+    configured_boolean(debug_overlay_.config(),"rt_sun_cover_shadows",true)&&
     (native_rt_cover_drawing_||(constants.control[0]&7u)==(1u<<native_rt_cover_source_))){
-  constants.light[native_rt_cover_layer_]=native_rt_cover_light_;constants.bias[native_rt_cover_layer_]=native_rt_cover_bias_;
-  constants.control[0]|=256u|(UINT(native_rt_cover_layer_)<<9)|(UINT(native_rt_cover_source_)<<12);
+  if(native_rt_cover_layer_<3&&!native_shadow_frame_.slices[native_rt_cover_layer_].enabled){
+   constants.light[native_rt_cover_layer_]=native_rt_cover_light_;constants.bias[native_rt_cover_layer_]=native_rt_cover_bias_;
+   constants.control[0]|=256u|(UINT(native_rt_cover_layer_)<<9);
+  }
+  if(native_rt_cover_coarse_<3&&!native_shadow_frame_.slices[native_rt_cover_coarse_].enabled){
+   const auto& source=native_shadow_frame_.slices[native_rt_cover_source_];
+   constants.light[native_rt_cover_coarse_]=source.world_to_light;constants.bias[native_rt_cover_coarse_]=source.bias;
+   constants.control[0]|=32768u|(UINT(native_rt_cover_coarse_)<<16);
+  }
+  if(constants.control[0]&(256u|32768u))constants.control[0]|=UINT(native_rt_cover_source_)<<12;
  }
  constants.control[1]=slice;constants.control[2]=native_shadow_side_;constants.control[3]=native_point_shadow_side_;
  if(native_shadow_bake_active_&&!native_point_shadow_active_&&slice<5){
@@ -450,7 +460,7 @@ bool Renderer::begin_native_shadows(const NativeShadowFrame& frame,std::uint8_t&
   const std::uint32_t extras_key=owned_shadow_casters_key();
   const bool extras_changed=extras_key!=native_shadow_extras_key_;
   native_shadow_extras_key_=extras_key;
-  const std::uint8_t animate=extras_changed?std::uint8_t(7):owned_shadow_casters_animate();
+  const std::uint8_t animate=extras_changed?std::uint8_t(7):std::uint8_t(owned_shadow_casters_animate()|fire_shadow_animate());
   if(!animate&&frame.publication_serial &&
      frame.publication_serial==native_shadow_frame_.publication_serial &&
      frame.world_epoch==native_shadow_frame_.world_epoch &&
@@ -718,7 +728,15 @@ bool Renderer::end_native_shadows(bool commit) noexcept {
  SCENE_ENTRY("end_native_shadows");
  if(!native_shadow_collecting_)return false;
  HRESULT hr=E_FAIL;
- try{if(commit&&!native_shadow_failed_)hr=flush_native_shadows();else discard_native();}
+ try{
+  if(commit&&!native_shadow_failed_){
+   hr=flush_native_shadows();
+   // Burning trees join the close maps' per-frame layer (over the cached
+   // static layer the overlay starts from).
+   if(SUCCEEDED(hr)&&native_shadow_phase_==2&&(native_shadow_dirty_mask_&7u)&&!native_point_shadow_active_&&!native_rain_active_)
+    hr=draw_native_fire_shadows();
+  }else discard_native();
+ }
  catch(...){discard_native();}
  auto& rollback=native_shadow_rollback_;
  if(!commit&&rollback.armed&&!native_shadow_cleared_mask_&&!native_shadow_static_cleared_mask_){
@@ -813,7 +831,9 @@ HRESULT Renderer::flush_native_shadows(){
   context_->CSSetUnorderedAccessViews(0,4,empty_uavs,nullptr);
   if(records){
    if(native_pending_upload_.size()>UINT_MAX)return native_flush_failure_line_=__LINE__,finish(E_OUTOFMEMORY);
-   if(FAILED(hr=ensure_native_stream_buffers(bake?0u:static_cast<UINT>(native_pending_upload_.size()),records,static_cast<UINT>(triangles),0,batches)))return native_flush_failure_line_=__LINE__,finish(hr);
+   if(FAILED(hr=ensure_native_stream_buffers(bake?0u:static_cast<UINT>(native_pending_upload_.size()),records,static_cast<UINT>(triangles),0,
+    // A point face also holds the argument guard's expected slots after every seeded one (#298).
+    batches+(native_point_shadow_active_?static_cast<UINT>((native_indirect_args_staging_.size()+3u)/4u):0u))))return native_flush_failure_line_=__LINE__,finish(hr);
    auto upload=[&](ID3D11Buffer* buffer,const void* data,std::size_t bytes){D3D11_MAPPED_SUBRESOURCE mapped{};
     HRESULT result=context_->Map(buffer,0,D3D11_MAP_WRITE_DISCARD,0,&mapped);if(FAILED(result))return result;
     std::memcpy(mapped.pData,data,bytes);context_->Unmap(buffer,0);return S_OK;};
@@ -952,7 +972,23 @@ HRESULT Renderer::flush_native_shadows(){
      const UINT chunks=bake?active->geometry_chunks[dispatch]:native_shadow_chunks(layout,range,true);
      transition_profile_pass("compute_shadow_build");context_->Dispatch(width,height,chunks);++perf_native_compute_dispatches_;++native_frame_stats_.native_compute_dispatches;
     }
-    context_->CSSetUnorderedAccessViews(0,2,empty_uavs,nullptr);context_->VSSetShaderResources(4,1,native_visible_triangle_srv_.GetAddressOf());
+    context_->CSSetUnorderedAccessViews(0,2,empty_uavs,nullptr);
+    if(native_point_shadow_active_&&batches){
+     // #298: the face's GPU-written arguments checked against the CPU's queue
+     // before any draw reads them (renderer_point_shadows.cpp).
+     const UINT expected=point_shadow_args_expected(layout,batches,slice);
+     if(expected==UINT_MAX||!native_shadow_args_guard_cs_)return native_flush_failure_line_=__LINE__,finish(E_FAIL);
+     if(FAILED(hr=ensure_point_shadow_args_report()))return native_flush_failure_line_=__LINE__,finish(hr);
+     const D3D11_BOX expected_box{expected,0,0,expected+batches*16u,1,1};
+     context_->UpdateSubresource(native_indirect_args_.Get(),0,&expected_box,shadow_args_upload_.data()+expected/4u,0,0);
+     NativeDispatchRange guard;guard.first=(native_point_shadow_slot_%PointShadowTextureLayout::cubes_per_atlas)*6u+slice;guard.count=batches;
+     if(FAILED(hr=upload_native_work_range(guard,0,0,expected)))return native_flush_failure_line_=__LINE__,finish(hr);
+     ID3D11UnorderedAccessView* const guard_uavs[3]={nullptr,native_indirect_args_uav_.Get(),shadow_args_report_uav_.Get()};
+     context_->CSSetUnorderedAccessViews(0,3,guard_uavs,nullptr);context_->CSSetShader(native_shadow_args_guard_cs_.Get(),nullptr,0);
+     context_->Dispatch((batches+63u)/64u,1,1);++perf_native_compute_dispatches_;++native_frame_stats_.native_compute_dispatches;
+     context_->CSSetUnorderedAccessViews(0,3,empty_uavs,nullptr);
+    }
+    context_->VSSetShaderResources(4,1,native_visible_triangle_srv_.GetAddressOf());
     for(UINT group=0;group<batches;++group){
      const auto& batch=native_batch_staging_[group];
      const auto group_triangles=batch.slice_triangles[slice];const auto group_draw_count=batch.slice_records[slice];
@@ -1432,7 +1468,7 @@ HRESULT Renderer::draw_native_neighbour_shadows() noexcept try{
     bake.far_foliage_opaque!=native_far_foliage_opaque_){
   release_native_shadow_bake(bake);
   bake.layout_slot=7;bake.slice_mask=neighbour_caster_slices();
-  for(const auto& [part,draws]:neighbours_.opaque.objects){
+  for(const auto& chunk:neighbours_.opaque)for(const auto& [part,draws]:chunk.objects){
    (void)part;
    for(const auto& selected:draws){
     if(selected.record>=native_instance_records_.size())continue;
@@ -1469,7 +1505,9 @@ HRESULT Renderer::draw_native_active_shadows() noexcept try{
   if(bake.built||!bake.records.empty())release_native_shadow_bake(bake);
   native_active_casters_=native_active_doubled_casters_=0;return S_OK;
  }
- const std::uint64_t key=casters->revision^(active_statics_.caster_revision<<40);
+ // Burning trees (fire_shadow_ids_) cast into the far maps only: the close
+ // maps draw them every frame (draw_native_fire_shadows).
+ const std::uint64_t key=casters->revision^(active_statics_.caster_revision<<40)^(fire_shadow_revision_*0x9e3779b97f4a7c15ull);
  if(!bake.built||bake.built_key!=key||bake.built_content_revision!=native_static_content_revision_||
     bake.far_foliage_opaque!=native_far_foliage_opaque_){
   release_native_shadow_bake(bake);
@@ -1482,15 +1520,16 @@ HRESULT Renderer::draw_native_active_shadows() noexcept try{
   for(const auto id:casters->ids){
    const auto found=active_statics_.casters.find(id);
    if(found==active_statics_.casters.end())continue;
+   const bool burning=std::binary_search(fire_shadow_ids_.begin(),fire_shadow_ids_.end(),id);
    for(const auto index:found->second.records){
     if(index>=native_instance_records_.size())continue;
     const auto& record=native_instance_records_[index];
     if(!record.occupied||record.owner.expired())continue;
-    bake.records.push_back({index,bake.slice_mask<<8});
+    bake.records.push_back({index,(burning?0x18u:bake.slice_mask)<<8});
    }
   }
   if(const HRESULT hr=finish_native_shadow_bake(bake);FAILED(hr))return hr;
-  bake.built_key=casters->revision^(active_statics_.caster_revision<<40);
+  bake.built_key=key;
   bake.built_content_revision=native_static_content_revision_;
   bake.far_foliage_opaque=native_far_foliage_opaque_;bake.built=true;
  }
@@ -1504,6 +1543,56 @@ HRESULT Renderer::draw_native_active_shadows() noexcept try{
  }
  return draw_native_shadow_bake(bake);
 }catch(...){release_native_shadow_bake(native_active_shadow_bake_);return E_OUTOFMEMORY;}
+
+// Burning trees (renderer_fire_burn.cpp, fire_shadow_ids_): their caster
+// records cast into the close maps' per-frame layer (layout slot
+// kFireCasterLayout), so their changing coverage costs a few draws a frame
+// instead of a redraw of the cached static layer. Rebuilt when the set or
+// the records change; released when nothing burns.
+HRESULT Renderer::draw_native_fire_shadows() noexcept try{
+ static_assert(kFireCasterLayout==kActiveCasterLayout+1,"fire caster layout slot");
+ auto& bake=native_fire_shadow_bake_;
+ if(fire_shadow_ids_.empty()||active_statics_.casters.empty()){
+  if(bake.built||!bake.records.empty())release_native_shadow_bake(bake);
+  return S_OK;
+ }
+ const std::uint64_t key=fire_shadow_revision_^(active_statics_.caster_revision<<40);
+ if(!bake.built||bake.built_key!=key||bake.built_content_revision!=native_static_content_revision_||
+    bake.far_foliage_opaque!=native_far_foliage_opaque_){
+  release_native_shadow_bake(bake);
+  bake.layout_slot=kFireCasterLayout;bake.slice_mask=0x7u;
+  for(const auto id:fire_shadow_ids_){
+   const auto found=active_statics_.casters.find(id);
+   if(found==active_statics_.casters.end())continue;
+   for(const auto index:found->second.records){
+    if(index>=native_instance_records_.size())continue;
+    const auto& record=native_instance_records_[index];
+    if(!record.occupied||record.owner.expired())continue;
+    bake.records.push_back({index,bake.slice_mask<<8});
+   }
+  }
+  if(const HRESULT hr=finish_native_shadow_bake(bake);FAILED(hr))return hr;
+  bake.built_key=key;bake.built_content_revision=native_static_content_revision_;
+  bake.far_foliage_opaque=native_far_foliage_opaque_;bake.built=true;
+ }
+ // Its own profiler scope: with ray traced sun shadows the close maps' per-frame
+ // layer is redrawn every frame (owned_shadow_casters_animate), so is this.
+ transition_profile_pass("fire_burn_shadow_casters");
+ if(d3d12_)d3d12_->count("fire burn shadow caster bakes drawn");
+ return draw_native_shadow_bake(bake);
+}catch(...){release_native_shadow_bake(native_fire_shadow_bake_);return E_OUTOFMEMORY;}
+
+// While trees burn, the close maps that show them redraw their per-frame
+// layer every 0.1 game seconds (leaf loss is slow; paused: they keep it).
+// Each redraw also redraws that map's cover and critter casters, so not
+// every frame (#254 laptop: +0.68 ms CPU at every frame).
+std::uint8_t Renderer::fire_shadow_animate() noexcept{
+ if(fire_shadow_ids_.empty()||!fire_burn_bound_)return 0;
+ const float now=fire_burn_values_[0];
+ if(now>=fire_shadow_drawn_&&now-fire_shadow_drawn_<.1f)return 0;
+ fire_shadow_drawn_=now;
+ return fire_shadow_close_bands();
+}
 
 // A store change usually touches a few casters: switch their baked work
 // entries off in place (record UINT_MAX is skipped by every pass) and let

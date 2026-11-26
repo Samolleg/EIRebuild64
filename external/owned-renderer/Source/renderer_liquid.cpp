@@ -559,6 +559,16 @@ void Renderer::prepare_liquid_ripples() {
 // map is written last, so it wins where pieces overlap.
 void Renderer::update_liquid_surf() noexcept try {
  neighbour_maps_set_no_sea_maps(liquid_surf_field_no_sea_maps());
+ // Original water (water_simple, the Lowest preset; #318): the game's own
+ // water has no surf. No field job, composite or texture: without them the
+ // shore foam (liquidSurfMode.x 0) and the surf tessellation stay off. The
+ // composite is built again once it is turned off.
+ if(configured_boolean(debug_overlay_.config(),"water_simple",false)){
+  liquid_surf_srv_.Reset();liquid_surf_level_srv_.Reset();liquid_surf_window_={};liquid_surf_swell_={};
+  liquid12_.surf.reset();liquid12_.surf_level.reset();
+  liquid_surf_built_serial_=0;
+  return;
+ }
  if(liquid_surf_job_.valid()&&liquid_surf_job_.wait_for(std::chrono::seconds(0))==std::future_status::ready){
   auto field=liquid_surf_job_.get();
   if(field&&liquid_surf_generation_==ambient_map_generation_){
@@ -972,7 +982,7 @@ bool Renderer::prepare_water_reflections(const FixedState& state) {
   water_capture_frame_=native_frame_index_;water_capture_flush_=native_flush_serial_;water_capture_ready_=false;
   if(!enabled)return false;
   if(!native_world_clip_valid_||FAILED(d3d12_?create_water_reflection_targets_d3d12():create_water_reflection_targets()))
-   {++water_reflection_resource_failures_;return unavailable("EID3D11 water reflections: scene resources unavailable; using analytic sky\n");}
+   {return unavailable("EID3D11 water reflections: scene resources unavailable; using analytic sky\n");}
   WaterReflectionConstants constants{};constants.clip=native_world_clip_;
   // Invert the renderer-owned clip matrix; no camera or engine layout inference.
   double matrix[4][8]{};

@@ -167,7 +167,7 @@ void Renderer::begin_scene_game(){
  bridge_set_merge_character_parts(configured_boolean(config,"merge_character_parts",true));
  bridge_set_highlight_options(configured_boolean(config,"highlight_briefing",true),
   configured_boolean(config,"highlight_selected",false),configured_boolean(config,"highlight_hover_characters",false),
-  configured_boolean(config,"highlight_hover_objects",false));
+  configured_boolean(config,"highlight_hover_objects",false),configured_boolean(config,"highlight_alt",true));
  bridge_set_terrain_far_shadow_prewarm(configured_boolean(config,"terrain_far_shadow_prewarm",true));
  bridge_set_change_driven_poses(configured_boolean(config,"change_driven_object_poses",true));
  bridge_set_terrain_lod_enabled(configured_boolean(config,"terrain_lod",false));
@@ -428,6 +428,7 @@ HRESULT Renderer::present(){
  return present_frame(nullptr);
  #else
  window_sampler_present();
+ note_crash_session_present();
  if(core_mode_)return core_present();
  const bool wanted=device_&&swap_&&configured_boolean(debug_overlay_.config(),"render_thread",true);
  if(scene_mode()&&!wanted)set_scene_mode(false);
@@ -715,8 +716,13 @@ void Renderer::core_packet_store_frame() noexcept try{
 }
 #endif
 
-// Game thread: every option of the loaded ini, when its revision moved or
-// this process's overlay has changes to save (the host writes the ini).
+// Game thread: the options of the loaded ini when its revision moved or this
+// process's overlay has changes to save (the host writes the ini). The first
+// send carries every option, later ones only those whose value changed since
+// the last send. A whole set sent again carried this process's values from
+// before it reloaded the ini the host had just saved: a harness config step
+// at the first present put the defaults back over the host's first-run Lowest,
+// and a cold Intel start drew the menu at High (#304, laptop j118 A1/B1).
 #if defined(EID3D11_EMBEDDED) || defined(EID3D11_SHADER_TOOL)
 void Renderer::core_send_config() noexcept {  }
 #else
@@ -726,8 +732,16 @@ void Renderer::core_send_config() noexcept try{
  if(!save&&config.revision()==core_config_revision_)return;
  core_config_revision_=config.revision();
  scene_core::Config command;
- command.options.reserve(config.options().size());
- for(const auto& option:config.options()){
+ const auto& options=config.options();
+ if(core_config_sent_.size()<options.size())core_config_sent_.resize(options.size());
+ for(std::size_t index=0;index<options.size();++index){
+  const auto& option=options[index];
+  char number[64];
+  std::snprintf(number,sizeof(number),"=%u|%d|%d|%.9g|",static_cast<unsigned>(option.type),option.boolean_value?1:0,
+   static_cast<int>(option.integer_value),static_cast<double>(option.floating_value));
+  std::string sent=std::string(option.key)+number+option.text_value;
+  if(core_config_sent_[index]==sent)continue;
+  core_config_sent_[index]=std::move(sent);
   scene_core::ConfigOption value;
   value.key=option.key;value.type=static_cast<std::uint8_t>(option.type);
   value.boolean_value=option.boolean_value;value.integer_value=option.integer_value;
@@ -799,11 +813,11 @@ HRESULT Renderer::core_resize(UINT w,UINT h){
 // ---- Core mode: captures and readbacks (the host owns every GPU pixel) -----
 #if defined(EID3D11_EMBEDDED) || defined(EID3D11_SHADER_TOOL)
 HRESULT Renderer::core_readback(bool back_buffer,std::uint64_t id,std::uint64_t generation,const RECT& box,
- std::vector<std::uint8_t>& bgra) { return E_NOTIMPL; }
+ std::vector<std::uint8_t>& bgra, UINT, UINT) { return E_NOTIMPL; }
 #else
 HRESULT Renderer::core_readback(bool back_buffer,std::uint64_t id,std::uint64_t generation,const RECT& box,
- std::vector<std::uint8_t>& bgra){
- const LONG w=box.right-box.left,h=box.bottom-box.top;
+ std::vector<std::uint8_t>& bgra,UINT scaled_width,UINT scaled_height){
+ const LONG w=scaled_width?LONG(scaled_width):box.right-box.left,h=scaled_width?LONG(scaled_height):box.bottom-box.top;
  if(w<=0||h<=0)return E_INVALIDARG;
  const std::size_t total=std::size_t(w)*std::size_t(h)*4u;
  try{bgra.resize(total);}catch(...){return E_OUTOFMEMORY;}
@@ -815,6 +829,7 @@ HRESULT Renderer::core_readback(bool back_buffer,std::uint64_t id,std::uint64_t 
   command.back_buffer=back_buffer?1:0;command.id=id;command.generation=generation;
   command.left=std::uint32_t(box.left);command.top=std::uint32_t(box.top);command.right=std::uint32_t(box.right);command.bottom=std::uint32_t(box.bottom);
   command.first_byte=static_cast<std::uint32_t>(first);command.bytes=bytes;
+  command.scaled_width=scaled_width;command.scaled_height=scaled_height;
   command.reply=x64remote::next_reply_serial();
   core_post_command(command,"readback");
   const HRESULT hr=x64remote::wait_reply(command.reply);
@@ -1072,7 +1087,11 @@ HRESULT Renderer::core_present(){
   if(control.overlay_mirror_resets!=core_overlay_resets_seen_){
    core_overlay_resets_seen_=control.overlay_mirror_resets;overlay_mirror_.clear();
   }
-  bridge_set_terrain_lod_hidden_distance(float(control.terrain_lod_hidden_cm)*.01f);}
+  bridge_set_terrain_lod_hidden_distance(float(control.terrain_lod_hidden_cm)*.01f);
+  // The host Renderer's load reveal state: this process's world Draw entry
+  // pauses the game while the host holds the loading picture (#305).
+  bridge_set_load_reveal(control.load_reveal_enabled!=0,static_cast<std::uint64_t>(
+   InterlockedCompareExchange64(reinterpret_cast<volatile LONG64*>(&control.load_reveal_revealed_epoch),0,0)));}
  try{
   scene_core::Present command;
   auto& inputs=command.inputs;
@@ -1081,6 +1100,26 @@ HRESULT Renderer::core_present(){
   // value before core_send_config delivered it to the host.
   {const long saved=x64remote::control().config_saved;
    if(saved!=core_config_saved_seen_){core_config_saved_seen_=saved;debug_overlay_.reload_config();apply_config_settings();}}
+  // The host's HUD layout editor: the values it changed while unlocked (this
+  // HUD follows them at once; they are the host's already, so they are not
+  // sent back) and its unlock or lock request.
+  {auto& control=x64remote::control();auto& config=debug_overlay_.config();
+   const long written=control.option_edits_written;
+   MemoryBarrier();
+   if(written-core_option_edits_read_>static_cast<long>(x64remote::kOptionEdits))core_option_edits_read_=written-x64remote::kOptionEdits;
+   const bool echo_free=config.revision()==core_config_revision_;
+   for(;core_option_edits_read_!=written;++core_option_edits_read_){
+    const auto& edit=control.option_edits[static_cast<std::uint32_t>(core_option_edits_read_)%x64remote::kOptionEdits];
+    char key[sizeof(edit.key)];std::memcpy(key,edit.key,sizeof(key));key[sizeof(key)-1]=0;
+    const RendererOption* option=config.find(key);
+    if(!option||static_cast<std::uint32_t>(option->type)!=edit.type)continue;
+    if(option->type==RendererOptionType::boolean)(void)config.set_boolean(key,edit.integer!=0);
+    else if(option->type==RendererOptionType::integer)(void)config.set_integer(key,edit.integer);
+    else if(option->type==RendererOptionType::floating_point)(void)config.set_floating_point(key,edit.floating);
+   }
+   if(echo_free)core_config_revision_=config.revision();
+   const long request=InterlockedExchange(&control.hud_editing_request,0);
+   if(request)set_game_hud_editing(request==2);}
   inputs.harness_command_valid=harness_present_step_copy(inputs.harness_command,inputs.harness_entry_id,
    inputs.harness_camera_steps,inputs.harness_on_travel_map);
   frame_stall::note_harness_step(inputs.harness_command_valid,inputs.harness_command.verb);
@@ -1125,20 +1164,41 @@ HRESULT Renderer::core_present(){
    status.semantic_slots_installed=bridge_semantic_slots_installed();status.game_sites_all_verified=bridge_game_sites_all_verified();
    status.camera_pan_unavailable=bridge_camera_pan_smoothing_unavailable_reason();
    status.addon_notice=bridge_addon_notice();
+   // A string literal that turns nullptr when it times out; the change sends the status again.
+   status.save_id_clash_notice=bridge_save_id_clash_notice();
    const char* addon_notice=status.addon_notice?status.addon_notice:"";
    const std::uint8_t now[3]={std::uint8_t(status.owned_sky_installed),std::uint8_t(status.semantic_slots_installed),
     std::uint8_t(status.game_sites_all_verified)};
    if(std::memcmp(now,core_game_status_sent_,3)!=0||status.owned_weather_problem!=core_weather_problem_sent_||
-      status.camera_pan_unavailable!=core_camera_pan_unavailable_sent_||core_addon_notice_sent_!=addon_notice){
+      status.camera_pan_unavailable!=core_camera_pan_unavailable_sent_||core_addon_notice_sent_!=addon_notice||
+      status.save_id_clash_notice!=core_save_id_clash_notice_sent_){
     std::memcpy(core_game_status_sent_,now,3);core_weather_problem_sent_=status.owned_weather_problem;
     core_camera_pan_unavailable_sent_=status.camera_pan_unavailable;
-    core_addon_notice_sent_=addon_notice;
+    core_addon_notice_sent_=addon_notice;core_save_id_clash_notice_sent_=status.save_id_clash_notice;
     std::vector<std::uint8_t> status_bytes{0};scene_wire::encode_into(status_bytes,status);
     core_send(static_cast<std::uint16_t>(scene_core::Command::game_status),status_bytes);
    }}
   // The owned interface layout the host composes the HUD with.
   {scene_core::WidescreenState state;state.interface_owned=widescreen_interface_owned();
    if(state.interface_owned)state.layout=widescreen_layout();
+   // The HUD layout editor the host's F10 overlay drives: the message panel
+   // always (the unlock button needs the mission's, draw_hud_layout_control),
+   // every panel while unlocked.
+   state.hud_editor_available=state.interface_owned&&game_hud_editor_available();
+   state.hud_editing=game_hud_editing();
+   if(state.hud_editor_available){
+    state.hud_panels.resize(kHudPanels.size());
+    if(state.hud_editing)state.hud_previews.resize(kHudPanels.size());
+    for(unsigned i=0;i<kHudPanels.size();++i){
+     if(!state.hud_editing&&HudPanel(i)!=HudPanel::messages)continue;
+     auto& panel=state.hud_panels[i];
+     panel.valid=widescreen_hud_panel_bounds(HudPanel(i),panel.bounds)?1:0;
+     if(!panel.valid||!state.hud_editing)continue;
+     panel.header_valid=widescreen_hud_header_bounds(HudPanel(i),panel.header)?1:0;
+     panel.terms=widescreen_hud_position_terms(HudPanel(i));
+     widescreen_hud_preview_slots(HudPanel(i),state.hud_previews[i]);
+    }
+   }
    std::vector<std::uint8_t> encoded=scene_wire::encode(state);
    if(encoded!=core_widescreen_sent_){
     std::vector<std::uint8_t> bytes{0};bytes.insert(bytes.end(),encoded.begin(),encoded.end());

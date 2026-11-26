@@ -485,6 +485,10 @@ struct TerrainTexturePage {
     mutable std::uint32_t mip_count = 0;
     mutable std::shared_ptr<const TextureCpuAsset> texture;
     mutable std::vector<NativeOwnedTextureMip> mips;
+    // OwnedMapLoadRequest::normalise_terrain_pages: every load of this page
+    // (the first and any after release_upload_bytes) gives it the pool layout,
+    // so its levels and identity are the same each time.
+    bool normalise_to_pool = false;
 
     bool ensure_upload_bytes(ResourceFailure& failure, bool require_bc1_chain = true) const;
     void release_upload_bytes() const noexcept;
@@ -719,6 +723,11 @@ struct OwnedMapLoadRequest {
     // Precompute the per-vertex terrain shading inputs on the worker (only for
     // a terrain that is never edited after load: not neighbours, which weld).
     bool prepare_terrain_shading = false;
+    // Neighbour maps: a BC1 terrain page without a shipped chain, or smaller
+    // than the terrain 2.0 pool side, gets a full chain at that layout on this
+    // worker (normalised_bc1_chain), so every map shares the one pool and no
+    // page is refused (#272, the Dejavu Ingos maps' one-level 512 pages).
+    bool normalise_terrain_pages = false;
 };
 
 struct OwnedResourceRequestToken {

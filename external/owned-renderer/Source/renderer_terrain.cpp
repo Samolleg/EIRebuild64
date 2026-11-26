@@ -48,6 +48,7 @@
 #include "stall_watchdog.h"
 #include "terrain2.h"
 #include <optional>
+#include <bitset>
 #include <sstream>
 #include <d3dcompiler.h>
 #include <wincodec.h>
@@ -419,7 +420,7 @@ void Renderer::bake_terrain2_heights(Terrain2Map& map,const ContactBlendMaps& co
  char text[224];std::snprintf(text,sizeof(text),"map=%s cells=%zu baked=%zu ms=%.2f array=%ux%ux%u (%.1f MB) pool=%d base=%u",name,pending.size(),map.baked.size(),ms,
   width,height,contact.slices,mb,contact.pool,contact.base);
  bridge_append_probe_event("terrain2_heights",text);
- ++terrain2_cache_revision_; // the material cache bakes again with the new heights
+ ++terrain2_cache_revision_;++map.revision; // the material cache bakes again with the new heights
 }catch(...){}
 
 #endif // !EID3D11_SHADER_EMBED
@@ -869,6 +870,7 @@ HRESULT Renderer::update_contact_blend_maps() noexcept try{
   const UINT tiles_x=ambient_tiles_x_,tiles_y=ambient_tiles_y_;
   if(!tiles_x||!tiles_y)return S_OK;
   if(FAILED(hr=build_contact_tiles(terrain,tiles_x,tiles_y,contact_maps_,&contact_tile_rows_)))return hr;
+  contact_used_=contact_maps_.pending;contact_map_begin_=perf_now();contact_pending_reports_=0;contact_pending_reason_.fill(nullptr);
   if(!contact_tile_rows_.empty()){contact_tiles_x_=tiles_x;contact_tiles_y_=tiles_y;}
   tile_blend_margin_=terrain.tile_size?8.f/float(terrain.tile_size):0.f;
   if(!contact_sampler_){
@@ -897,14 +899,16 @@ HRESULT Renderer::update_contact_blend_maps() noexcept try{
   bridge_append_probe_event("terrain2_no_materials","the map has no material families (atlas profile or preset); terrain 2.0 ground shows the marker colour");
  }
  // Copy every material whose terrain slice is resident; retry the rest now and then.
+ report_pending_contact_materials();
  if(!contact_maps_.pending||native_frame_index_<contact_retry_frame_)return S_OK;
  contact_retry_frame_=native_frame_index_+(load_reveal_holding_?1:30);
  for(std::uint32_t material=0;material<contact_blend_max_materials;++material){
   const std::uint64_t bit=std::uint64_t{1}<<material;
   if(!(contact_maps_.pending&bit))continue;
   std::shared_ptr<const OwnedVisualSurface> surface;
-  if(!bridge_terrain_atlas(material,surface)||!surface)continue;
-  ID3D11Texture2D* source=nullptr;UINT source_slice=0;
+  const char* failure=nullptr;
+  if(!bridge_terrain_atlas(material,surface,&failure)||!surface){contact_pending_reason_[material]=failure?failure:"no atlas surface";continue;}
+  ID3D11Texture2D* source=nullptr;UINT source_slice=0;bool older=false;
 #ifdef EID3D11_EMBEDDED
   // Terrain 2.0 reads the host's complete atlas, including its authored mips
   // and material pages not drawn by the camera. The native draw cache holds
@@ -922,32 +926,32 @@ HRESULT Renderer::update_contact_blend_maps() noexcept try{
   }
   source=host_atlas.Get();
 #else
-  // Embedded terrain publishes immutable surfaces. Their array slots are
-  // keyed by GPU backing, not by surface id, and carry generation 1. Resolve
-  // the original uploaded texture by the same key as get_native_owned_texture.
-  const std::string surface_key="surface:"+std::to_string(surface->id);
-  for(const char* mips:{"|mips=full","|mips=authored"}){
-   const auto found=native_owned_textures_.find(surface_key+mips);
-   if(found!=native_owned_textures_.end()&&found->second.generation==surface->generation&&found->second.texture){
-    source=found->second.texture.Get();break;
-   }
-  }
-  // Retail surfaces use the mutable array cache. Its id namespace must not
-  // be confused with immutable GPU backing ids, even when numbers coincide.
-  if(!source)for(const auto& entry:native_texture_arrays_){
-   if(entry.first.immutable_values)continue;
-   for(const auto& page:entry.second){
-    const auto found=page.slots.find(surface->id);
-    if(found!=page.slots.end()&&found->second.generation==surface->generation){
-     source=page.texture.Get();source_slice=found->second.slice;break;
+  const auto find_page=[&]{
+   older=false;
+   for(const auto& entry:native_texture_arrays_){
+    for(const auto& page:entry.second){
+     const auto found=page.slots.find(surface->id);
+     if(found!=page.slots.end()&&found->second.generation==surface->generation){
+      source=page.texture.Get();source_slice=found->second.slice;return;
+     }
+     older|=found!=page.slots.end();
     }
    }
-   if(source)break;
-  }
+  };
+  find_page();
 #endif
-  if(!source)continue; // not drawn yet: the band keeps the painted colour meanwhile
   char detail[160]{};
-  hr=copy_contact_atlas(source,source_slice,material,contact_maps_,detail,sizeof(detail));
+  if(!source){
+   // Not drawn by the game since the load (a save loaded on this map draws
+   // only the pages in its first views): the map's own authored page goes
+   // into the slice. The 32-bit scene thread cannot reach the game's surface
+   // (resolve_proxy_surface_texture answers E_PENDING), so the bytes come
+   // from the loader, the same chain the draw would bind.
+   const char* reason=nullptr;
+   hr=copy_undrawn_contact_page(material,detail,sizeof(detail),reason);
+   if(hr!=S_OK&&hr!=S_FALSE){contact_pending_reason_[material]=older?"its page is uploaded from an older surface generation":reason;continue;}
+  }else hr=copy_contact_atlas(source,source_slice,material,contact_maps_,detail,sizeof(detail));
+  contact_pending_reason_[material]=nullptr;
   if(FAILED(hr))return hr;
   if(hr==S_OK){
    char detail[224];std::snprintf(detail,sizeof(detail),
@@ -969,6 +973,103 @@ HRESULT Renderer::update_contact_blend_maps() noexcept try{
  }
  return S_OK;
 }catch(...){return E_OUTOFMEMORY;}
+
+// D3D11: the contact atlas slice of an active-map material whose page the
+// game has not drawn since the load, written from the map's own authored
+// page (TerrainTexturePage, the BC1 chain the draw binds when its level 0
+// is the game's surface), so the slice is ready at once instead of when the
+// player first brings the page into the game's view (#272: a save loaded on
+// zone3obr drew 31 of 54 materials in the marker colour). S_OK copied,
+// S_FALSE refused (named in detail, pending cleared as copy_contact_atlas
+// does), E_PENDING not possible now (reason says why; retried).
+HRESULT Renderer::copy_undrawn_contact_page(UINT material,char* detail,std::size_t detail_size,const char*& reason) noexcept try{
+ auto& maps=contact_maps_;
+ reason="its page was not drawn since the load and the map has no page for it";
+ if(maps.pool_refused)return S_FALSE;
+ AmbientWorldSource inputs;
+ if(!bridge_ambient_world_source(inputs)||!inputs.terrain)return E_PENDING;
+ const auto& terrain=*inputs.terrain;
+ const std::uint32_t index=material%(terrain.texture_count+2u);
+ if(index>=terrain.pages.size())return E_PENDING;
+ const TerrainTexturePage& page=terrain.pages[index];
+ ResourceFailure failure;
+ if(!page.ensure_upload_bytes(failure)||page.mips.empty()){reason="its page was not drawn since the load and its shipped BC1 chain could not be read";return E_PENDING;}
+ const auto& mips=page.mips;const UINT levels=UINT(mips.size());
+ const DXGI_FORMAT format=DXGI_FORMAT_BC1_UNORM; // ensure_upload_bytes takes BC1 chains only
+ if(!maps.texture){
+  UINT skip=0;
+  while((mips[skip].width>contact_blend_atlas_side||mips[skip].height>contact_blend_atlas_side)&&skip+1<levels)++skip;
+  D3D11_TEXTURE2D_DESC a{};a.Width=mips[skip].width;a.Height=mips[skip].height;a.MipLevels=levels-skip;a.ArraySize=0;a.Format=format;
+  for(std::uint32_t m=0;m<contact_blend_max_materials;++m)if((maps.pending>>m)&1u)a.ArraySize=m+1;
+  if(FAILED(terrain2_pool_range(maps,a,"active"))){page.release_upload_bytes();reason="its page was not drawn since the load and the terrain 2.0 pool has no room";return E_PENDING;}
+  if(maps.pool_refused){page.release_upload_bytes();return S_FALSE;}
+ }
+ UINT skip=0;
+ while(skip<levels&&mips[skip].width>maps.width)++skip;
+ maps.pending&=~(std::uint64_t{1}<<material);
+ if(format!=maps.format||skip+maps.mips>levels||mips[skip].width!=maps.width||mips[skip].height!=maps.height){
+  if(detail&&detail_size)
+   std::snprintf(detail,detail_size,"material=%u authored page=%ux%u mips=%u atlas=%ux%u mips=%u format=%u",
+    material,mips[0].width,mips[0].height,levels,maps.width,maps.height,maps.mips,unsigned(maps.format));
+  page.release_upload_bytes();
+  return S_FALSE;
+ }
+ for(UINT mip=0;mip<maps.mips;++mip){
+  const auto& level=mips[mip+skip];
+  context_->UpdateSubresource(maps.texture.Get(),D3D11CalcSubresource(mip,maps.base+material,maps.mips),nullptr,
+   level.data,(std::max)(1u,(level.width+3u)/4u)*8u,0);
+ }
+ maps.ready|=std::uint64_t{1}<<material;
+ page.release_upload_bytes();
+ return S_OK;
+}catch(...){reason="its page was not drawn since the load and copying it failed";return E_PENDING;}
+
+// D3D12: the page of an active-map material the game has not drawn since
+// the load, uploaded the way that draw uploads it (terrain_texture_d3d12,
+// with the map's authored mip chain), so its contact atlas slice is copied
+// at once. The later game draw finds the same texture. S_OK: uploaded.
+HRESULT Renderer::upload_undrawn_terrain_page(std::uint32_t material,const OwnedVisualSurface& surface) noexcept try{
+ if(!surface_texture_resolver_||!d3d12_)return S_FALSE;
+ AmbientWorldSource inputs;
+ if(!bridge_ambient_world_source(inputs)||!inputs.terrain)return S_FALSE;
+ const auto& terrain=*inputs.terrain;
+ const std::uint32_t index=material%(terrain.texture_count+2u);
+ // As owned_terrain_views: only a page with its shipped chain is passed.
+ const TerrainTexturePage* page=index<terrain.pages.size()&&terrain.pages[index].mip_count>1?&terrain.pages[index]:nullptr;
+ ComPtr<ID3D11Texture2D> unused;SurfaceImage* image=nullptr;
+ HRESULT hr=surface_texture_resolver_(surface_texture_resolver_context_,device_.Get(),surface.id,surface.generation,unused,image);
+ if(FAILED(hr)||!image)return S_FALSE;
+ D3D12TextureRef texture;
+ return SUCCEEDED(terrain_texture_d3d12(*image,page,texture))&&texture?S_OK:S_FALSE;
+}catch(...){return S_FALSE;}
+
+// The active map's materials without a copied atlas slice draw their tiles in
+// the terrain 2.0 marker colour (magenta). Named with the reason each waits:
+// at the first shown frame after the load (the moment a player can see it),
+// then again 30 s and 2 min after the map's maps were made while any is
+// still missing. A refused page (its pending bit cleared without a copy)
+// was named by contact_blend_atlas_incompatible and stays missing.
+void Renderer::report_pending_contact_materials() noexcept try{
+ if(!contact_used_||contact_pending_reports_>=3||load_reveal_tracking_)return;
+ const std::uint64_t missing=contact_used_&~contact_maps_.ready;
+ const double seconds=static_cast<double>(perf_now()-contact_map_begin_)/static_cast<double>(perf_frequency());
+ static constexpr double kAt[3]{0.0,30.0,120.0};
+ if(seconds<kAt[contact_pending_reports_])return;
+ ++contact_pending_reports_;
+ if(!missing){contact_pending_reports_=3;return;}
+ std::string text="map="+retained_static_scene_identity_snapshot().main_outer_resource;
+ char head[160];
+ std::snprintf(head,sizeof(head)," after %.1f s: %u of %u materials draw the marker (used=0x%llx ready=0x%llx):",seconds,
+  unsigned(std::bitset<64>(missing).count()),unsigned(std::bitset<64>(contact_used_).count()),
+  static_cast<unsigned long long>(contact_used_),static_cast<unsigned long long>(contact_maps_.ready));
+ text+=head;
+ for(std::uint32_t material=0;material<contact_blend_max_materials;++material){
+  if(!((missing>>material)&1u))continue;
+  const char* reason=(contact_maps_.pending>>material)&1u?contact_pending_reason_[material]:"its page was refused (contact_blend_atlas_incompatible)";
+  text+=" material "+std::to_string(material)+" ("+(reason?reason:"not tried yet")+");";
+ }
+ bridge_append_probe_event("terrain_materials_missing",text.c_str());
+}catch(...){}
 
 // Terrain material blend rows (terrain_tile_blend.h) for the current map:
 // every base tile's world-corner families from its slot and corner lanes, the
@@ -1159,8 +1260,13 @@ HRESULT Renderer::set_native_terrain_frame(const NativeTerrainState& game_terrai
  const bool terrain_blend=configured_terrain_blend(config);
  if(tile_blend_rows_&&(contact_maps_.tiles||contact_maps_.tiles12)&&map_source.terrain){values[46]=terrain_blend?1.f:0.f;values[47]=tile_blend_margin_;}
  // The switched-off terrain features as uploaded (native specialisation key
- // bits 0-4) and the Low terrain path (bit 14, NATIVE_TERRAIN_LOW).
- native_spec_terrain_bits_=(values[17]==0?1u:0u)|(values[18]==0?2u:0u)|(values[32]==0?4u:0u)|(values[44]==0?8u:0u)|(values[46]==0?16u:0u)|
+ // bits 0-4) and the Low terrain path (bit 14, NATIVE_TERRAIN_LOW). Bit 4
+ // (NATIVE_OFF_BLEND) follows the setting only: the blend also uploads 0
+ // while the map's rows are still being built, which the programs with the
+ // blend compiled in draw the same, and naming it there made every first
+ // load hold an unshipped key (0x010) for those frames.
+ native_terrain_blend_uploaded_=values[46]!=0;
+ native_spec_terrain_bits_=(values[17]==0?1u:0u)|(values[18]==0?2u:0u)|(values[32]==0?4u:0u)|(values[44]==0?8u:0u)|(terrain_blend?0u:16u)|
   (values[19]!=0?16384u:0u);
  if(const float factor=terrain_tessellation_max_factor(configured_integer(config,"terrain_tessellation",1));
     factor>0&&map_source.terrain&&(d3d12_?native12_.tessellation.size()>=5:SUCCEEDED(ensure_terrain_tessellation()))){ // D3D12: the executor's hull/domain programs
@@ -1246,7 +1352,10 @@ HRESULT Renderer::set_native_terrain_frame(const NativeTerrainState& game_terrai
  {
   const auto& wet_environment=bridge_world_fog_snapshot().environment;
   const int precipitation=configured_integer(config,"precipitation",3);
-  if(wet_environment.valid&&precipitation>0){
+  // precipitation_surface off (the Lowest preset): no wet sheen and no snow
+  // cover, as with precipitation off; rain and snow still fall (#325).
+  const bool surface=configured_boolean(config,"precipitation_surface",true);
+  if(wet_environment.valid&&precipitation>0&&surface){
    const double elapsed=wet_hours_<0?-1.0:wet_environment.game_hours-wet_hours_;
    const float hours=std::max(configured_floating_point(config,"fog_after_rain_hours",4.f),.1f);
    const float rain=weather_wind_.gpu.rain;
@@ -1271,7 +1380,7 @@ HRESULT Renderer::set_native_terrain_frame(const NativeTerrainState& game_terrai
   // full cover in about 7 minutes at normal game speed, light snow
   // proportionally slower; it melts over about 15 minutes. Pause holds it,
   // game speed scales it; a load or jump settles it to the restored weather.
-  if(wet_environment.valid&&precipitation>0){
+  if(wet_environment.valid&&precipitation>0&&surface){
    const double snow_seconds=wet_environment.world_time*kWeatherSecondsPerSegment;
    const double elapsed=snow_cover_hours_<0?-1.0:snow_seconds-snow_cover_hours_;
    // Only a restored game snowfall settles to full cover; the render-only

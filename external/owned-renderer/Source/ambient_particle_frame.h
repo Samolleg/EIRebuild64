@@ -172,11 +172,10 @@ inline const char* ambient_view(const std::array<float,16>& clip, unsigned width
 }
 
 // Shader kind of an emitter (ambVelocity.w): 0 plain, 1 sand, 2 impact
-// splashes, 3 drips, 4 cave spores, 5 base mist, 6 fall foam, 7 lip spray,
-// 8 burn flames, 9 burn embers, 10 burn ash.
+// splashes, 3 drips, 4 cave spores, 5 base mist, 6 fall foam, 7 lip spray.
 inline float emitter_kind(Emitter e, bool mushroom) noexcept {
     return e == em_dust ? 1.f : e == em_spray ? 2.f : e == em_drips ? 3.f : mushroom ? 4.f : e == em_mist ? 5.f :
-        e == em_fall_foam ? 6.f : e == em_lip_spray ? 7.f : e == em_burn_flame ? 8.f : e == em_burn_ember ? 9.f : e == em_burn_ash ? 10.f : 0.f;
+        e == em_fall_foam ? 6.f : e == em_lip_spray ? 7.f : 0.f;
 }
 // One emitter's constants over the frame's (c). displacement: integrated
 // drift (x, y) and rise (z); velocity: its drift per second.

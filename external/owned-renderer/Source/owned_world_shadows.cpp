@@ -167,6 +167,11 @@ bool append_owned_static_shadow_values(std::vector<RetainedShadowCasterValue>& c
         if(!prepared.bounds.valid || !prepared.casting_parts)return true;
         const auto& sample=frame.values->entities[index];
         if(std::binary_search(time_active_ids.begin(),time_active_ids.end(),sample.lifecycle.id))return true;
+        // While the load reveal holds, non-unit statics cast nothing posed
+        // (#289, as the colour records): before the map's catalog exists,
+        // and below for any not admitted to object space.
+        const bool hold_static=load_reveal_held() && !sample.values.unit;
+        if(hold_static && !active_statics_index_current(object_space_index.get()))return true;
         if(retained_visual_object_space_admitted(sample,object_space_index.get(),time_active_ids)) {
             if(register_object_space_caster(index,retained_visual_object_space_model(sample))) {
                 admitted.insert(std::lower_bound(admitted.begin(),admitted.end(),sample.lifecycle.id),sample.lifecycle.id);
@@ -179,8 +184,12 @@ bool append_owned_static_shadow_values(std::vector<RetainedShadowCasterValue>& c
             // Its model is requested once; the object stays posed until it is ready.
             std::uint64_t model=0;
             if(retained_visual_object_space_wanted(sample,object_space_index.get(),time_active_ids,model) &&
-               !object_space_index->models.count(model))active_statics_request(sample,model);
+               !object_space_index->models.count(model)) {
+                active_statics_request(sample,model);
+            }
         }
+        // Not posed while the load reveal holds (#289, as the colour records).
+        if(hold_static)return true;
         if(!prepare_owned_visual_pose(sample))return false;
         for(std::size_t part=0;part<prepared.parts.size();++part) {
             if(!prepared.parts[part].casts)continue;
@@ -292,6 +301,12 @@ bool collect_owned_visual_depth(std::uint8_t dirty,const ShadowFrame& shadows,
             if(frame.persistent_static_shadows && !point_light &&
                !std::binary_search(frame.shadow_time_active_visuals.begin(),
                    frame.shadow_time_active_visuals.end(),sample.lifecycle.id))continue;
+            // A point light's non-unit statics cast nothing posed while the
+            // load reveal holds (#289, as the colour records and the sun
+            // store: zone3obr's campfires posed 0.73M vertices of trees not
+            // yet in object space in one held frame); they cast from the reveal on.
+            if(point_light && load_reveal_held() && !sample.values.unit &&
+               !retained_visual_object_space_admitted(sample,active_statics_index().get(),frame.shadow_time_active_visuals))continue;
             if(part_index>=kMergedPartBase) {
                 const auto group_index=part_index-kMergedPartBase;
                 auto& group=sample.prepared->merged_groups[group_index];
@@ -1057,7 +1072,8 @@ bool update_owned_static_caster_store(const RetainedShadowSourceChanges* changes
         // published or released, a refused registration): rebuild the store.
         {
             const auto index=active_statics_index();
-            const std::uint64_t key=((index?index->revision:0)<<20)^active_statics_failures();
+            // The load hold too: statics it left out (#289) join at its end.
+            const std::uint64_t key=(((index?index->revision:0)<<20)^active_statics_failures())^(load_reveal_held()?1ull<<63:0ull);
             if(store.object_space_key!=key){store.object_space_key=key;store.valid=false;}
         }
         if(incremental && store.valid) {

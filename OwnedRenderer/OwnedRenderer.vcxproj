@@ -125,6 +125,7 @@
     <ClCompile Include="$(OwnedRendererRoot)Host\reflex.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Host\d3d12\d3d12_barriers.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Host\d3d12\d3d12_core.cpp" />
+    <ClCompile Include="$(OwnedRendererRoot)Host\d3d12\d3d12_memory.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Host\d3d12\d3d12_frame.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Host\d3d12\d3d12_fsr_fg.cpp" />
     <ClCompile Include="$(OwnedRendererRoot)Host\d3d12\d3d12_pacer.cpp" />

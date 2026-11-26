@@ -1,4 +1,5 @@
 #include "GraphicsApi.h"
+#include "../../external/owned-renderer/Source/gpu_adapter.h"
 #include "DeviceError.h"
 #include "../../external/owned-renderer/Host/d3d12/d3d12_core.h"
 
@@ -143,7 +144,8 @@ HRESULT EiCreateDevice12V1(BOOL debug_layer, BOOL gpu_validation, IDXGIFactory4*
     }
     if (FAILED(hr = CreateDXGIFactory2(debug_layer ? DXGI_CREATE_FACTORY_DEBUG : 0, IID_PPV_ARGS(&factory))))
         return fail(hresult_text("CreateDXGIFactory2", hr));
-    if (FAILED(hr = factory->EnumAdapters1(0, &gpu))) return fail(hresult_text("IDXGIFactory::EnumAdapters1(0)", hr));
+    gpu = gpu_adapter::choose().adapter;
+    if (!gpu && FAILED(hr = factory->EnumAdapters1(0, &gpu))) return fail(hresult_text("IDXGIFactory::EnumAdapters1(0)", hr));
     DXGI_ADAPTER_DESC1 adapter{};
     gpu->GetDesc1(&adapter);
     if (adapter.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) return fail("the default adapter is a software adapter; D3D12 mode needs a GPU");

@@ -81,7 +81,27 @@ VisualPreparedResources::AdmissionKey owned_visual_admission_key(
     return key;
 }
 
-
+// #343 (characters losing parts on the 2026-11-22 release): a visible unit
+// whose colour records the frame could not queue is named with its model,
+// visible part count and the failing step, at most once per unit a world and
+// 64 lines a world (player builds too: host.log).
+void report_unit_not_drawn(const RetainedVisualSample& sample,const OwnedVisualFramePartState& prepared,
+    const char* reason) noexcept try {
+    static std::uint64_t epoch=0;static std::size_t lines=0;static std::vector<std::int32_t> named;
+    const std::uint64_t now=bridge_current_world_epoch();
+    if(now!=epoch){epoch=now;lines=0;named.clear();}
+    const std::int32_t id=sample.lifecycle.id;
+    if(lines>=64||std::find(named.begin(),named.end(),id)!=named.end())return;
+    named.push_back(id);++lines;
+    std::size_t visible=0;for(const auto& part:prepared.parts)visible+=part.visible;
+    const char* model=sample.assembly&&sample.assembly->skeleton&&!sample.assembly->skeleton->visual_reference.empty()?
+        sample.assembly->skeleton->visual_reference.c_str():"-";
+    char detail[256];
+    std::snprintf(detail,sizeof(detail),"world_epoch=%llu id=%d model=%s parts=%zu visible=%zu step=%s",
+        static_cast<unsigned long long>(now),id,model,sample.assembly?sample.assembly->parts.size():0u,visible,
+        reason?reason:"unknown");
+    append_bridge_event("owned_unit_not_drawn",detail,true);
+} catch(...) {}
 
 } // namespace
 bool prepare_owned_visual_admission(const RetainedVisualSample& sample,
@@ -393,23 +413,29 @@ bool prepare_owned_visual_values(std::shared_ptr<const RetainedVisualFrame> valu
                 (sample.readiness_reason ? sample.readiness_reason : retained_visual_status_name(static_cast<std::uint32_t>(sample.status))) :
                 !sample.assembly ? "assembly" : "prepared_resources",&sample);
             report_object_plan_failure("owned_scene_value_unavailable");
-            return;
-        }
-        // Temporary (bind-pose report, 2026-10-02): a unit whose game controller
-        // has no current entry is drawn in the bind pose, exactly as the game's
-        // cleared tracks are. Name such units so a capture shows whether a
-        // reported T-pose is that game state. Remove once that report is settled.
-        if (sample.values.unit && sample.selection.neutral && sample.assembly->skeleton) {
-            static std::set<std::int32_t> reported;  // world submission thread only
+            // Only this object is omitted. Name it (each once per world
+            // epoch; world submission thread only) so a run says which
+            // object and why, not just the stage.
+            static std::uint64_t named_epoch=~0ull;static std::vector<std::int32_t> named;
             try {
-                if (reported.size() < 32 && reported.insert(sample.resource.signed_id).second) {
-                    char detail[256]{};
-                    std::snprintf(detail, sizeof(detail), "id=%d model=%s",
-                        static_cast<int>(sample.resource.signed_id),
-                        sample.assembly->skeleton->model_container.canonical_name.c_str());
-                    append_bridge_event("owned_unit_no_current_animation", detail, true);
+                const std::uint64_t epoch=bridge_current_world_epoch();
+                if(epoch!=named_epoch){named_epoch=epoch;named.clear();}
+                const std::int32_t id=sample.resource.signed_id;
+                if(named.size()<4096 && std::find(named.begin(),named.end(),id)==named.end()) {
+                    named.push_back(id);
+                    char detail[384]{};
+                    _snprintf_s(detail,sizeof(detail),_TRUNCATE,
+                        "world_epoch=%llu id=%d serial=%llu unit=%d dead=%d hidden=%d model=%s status=%s reason=%s scope=%s assembly=%d prepared=%d",
+                        static_cast<unsigned long long>(epoch),static_cast<int>(id),
+                        static_cast<unsigned long long>(sample.resource.serial),sample.values.unit?1:0,sample.values.dead?1:0,sample.values.hidden?1:0,
+                        sample.assembly&&sample.assembly->skeleton?sample.assembly->skeleton->visual_reference.c_str():"-",
+                        retained_visual_status_name(static_cast<std::uint32_t>(sample.status)),
+                        sample.readiness_reason?sample.readiness_reason:"-",sample.failure_scope?sample.failure_scope:"-",
+                        sample.assembly?1:0,sample.prepared?1:0);
+                    append_bridge_event("owned_object_omitted",detail,true);
                 }
-            } catch (...) {}
+            } catch(...) {}
+            return;
         }
         if (!(class_flags & (sample.values.unit ? 0x80u : 0x40u))) {
             retire_owned_static_color(sample);
@@ -799,8 +825,28 @@ bool submit_owned_visual_color(void* fog_controller, bool prepare_light_only,
             if (!(sample.values.object_flags & 0x800u) &&
                 !owned_visual_fog(fog_controller,i,sample,fog)) continue;   // per-frame path reports
             auto& packet=sample.prepared->color_packet;
-            const bool object_space=retained_visual_object_space_admitted(sample,object_space_index.get(),
-                frame.shadow_time_active_visuals);
+            std::uint64_t object_space_model=0;
+            const auto object_space_reason=retained_visual_object_space_reason(sample,object_space_index.get(),
+                frame.shadow_time_active_visuals,object_space_model);
+            const bool object_space=object_space_reason==ObjectSpaceReason::admitted;
+            // #336: the colour pass requests its statics' models itself, so
+            // LOD, impostors and the static prepass do not depend on the sun
+            // shadow pass (which returns early with shadows off). Requested
+            // once per model (active_statics_request), built on the worker.
+            if(object_space_reason==ObjectSpaceReason::model_pending)
+                active_statics_request(sample,object_space_model);
+            // While the load reveal holds (the screen is hidden), a static whose
+            // object-space model is still being built is not drawn posed in the
+            // meantime: that posed draw's world vertex copy outlived it (#289,
+            // 2.83M of zone3obr's 3.16M posed world vertices). After the reveal
+            // a pending object draws posed until its model is ready, as before.
+            // The same before the map's catalog exists (its first frames: every
+            // object then reads as not eligible), and for every other reason a
+            // static is not admitted yet (#289: with zone3obr's catalog
+            // published, 0.73M posed vertices of trees that are admitted once
+            // settled were drawn posed in one held frame): every non-unit
+            // static not in object space draws from the reveal on.
+            if(!object_space&&load_reveal_held()&&!sample.values.unit)continue;
             std::size_t parts_drawn=0;
             if (owned_static_color_current(packet,sample,prepared,fog,generation,border_fog_revision) &&
                 packet.object_space==object_space && (!object_space || packet.object_space_index==object_space_catalog) &&
@@ -922,7 +968,7 @@ bool submit_owned_visual_color(void* fog_controller, bool prepare_light_only,
                 batch = true;
             }
             frame.selected.clear();
-            bool commit = true;
+            bool commit = true;const char* drop_reason=nullptr; // #343: a unit not drawn, named below
             std::size_t submitted = 0;
             // A fully visible static object whose record inputs are unchanged
             // resubmits its previous selection without per-part preparation.
@@ -964,7 +1010,7 @@ bool submit_owned_visual_color(void* fog_controller, bool prepare_light_only,
                     NativePreparedPartSubmission* record=nullptr;
                     if(!retained_visual_group_submission(sample,group,prepared.bounds,{true,true,0},
                         frame.values->time,fog,record)) {
-                        reject_owned_visual("submission","merged_record",&sample);commit=false;break;
+                        reject_owned_visual("submission","merged_record",&sample);commit=false;drop_reason="merged_record";break;
                     }
                     frame.selected.push_back(record);++submitted;
                     for(const auto part:groups[group].parts)
@@ -983,7 +1029,7 @@ bool submit_owned_visual_color(void* fog_controller, bool prepare_light_only,
                 if (!contribution.color && !contribution.light_mask) continue;
                 const OwnedVisualPartPreparation* part_value=nullptr;
                 if (!prepare_owned_visual_part(i,part_index,part_value)) {
-                    reject_owned_visual("submission","part_envelope",&sample); commit=false; break;
+                    reject_owned_visual("submission","part_envelope",&sample); commit=false;drop_reason="part_envelope"; break;
                 }
                 const auto& part_bounds=part_value->bounds;
                 contribution=part_value->contribution;
@@ -993,7 +1039,7 @@ bool submit_owned_visual_color(void* fog_controller, bool prepare_light_only,
                 const bool recorded=retained_visual_part_submission(sample,part_index,part_bounds,contribution,
                     frame.values->time,fog,record);
                 if (!recorded) {
-                    reject_owned_visual("submission","part_record",&sample);commit=false;break;
+                    reject_owned_visual("submission","part_record",&sample);commit=false;drop_reason="part_record";break;
                 }
                 frame.selected.push_back(record);
                 prepared.parts[part_index].color_admitted = contribution.color;
@@ -1039,7 +1085,7 @@ bool submit_owned_visual_color(void* fog_controller, bool prepare_light_only,
                 NativeGeometryResult result{};
                 commit=submit_owned_visual_records(sample,frame.selected.data(),static_cast<UINT>(frame.selected.size()),
                     world_to_clip,frame.serial,0,result,true);
-                if(!commit)reject_owned_visual("submission","sink_rejected",&sample);
+                if(!commit){reject_owned_visual("submission","sink_rejected",&sample);drop_reason=result.failure_operation?result.failure_operation:"sink_rejected";}
             }
             prepared.submitted = commit;
             if (commit && submitted && !prepare_light_only && sample.values.unit &&
@@ -1065,7 +1111,11 @@ bool submit_owned_visual_color(void* fog_controller, bool prepare_light_only,
                 } else if (new_appearance) combat_ui_set_status("Combat plate omitted: reference body bounds unavailable.");
             }
             if (commit) frame.submitted_parts += submitted;
-            else { report_object_plan_failure("owned_scene_part_submission"); success = false; }
+            else {
+                report_object_plan_failure("owned_scene_part_submission"); success = false;
+                if(sample.values.unit && !prepare_light_only && prepared.contribution.color)
+                    report_unit_not_drawn(sample,prepared,drop_reason);
+            }
         }
     } catch (...) {
         if (batch) g_native_sink_end_batch(g_native_sink_context,true);

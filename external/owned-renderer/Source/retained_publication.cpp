@@ -105,11 +105,15 @@ void delta_io(RetainedDeltaOut& s, const VisualTickValues& v) { tick_values(s.ou
 void delta_io(RetainedDeltaIn& s, VisualTickValues& v) { tick_values(s.in, v); }
 void delta_io(RetainedDeltaOut& s, const RetainedHighlightState& v) {
     io(s.out, v.show_selected); io(s.out, v.strip_preselected); io(s.out, v.hover_characters);
-    io(s.out, v.hover_objects); io_resource(s, v.hover);
+    io(s.out, v.hover_objects); io_resource(s, v.hover); io(s.out, v.alt);
+    codec::io_count(s.out, v.alt_objects.size());
+    for (const auto id : v.alt_objects) io(s.out, id);
 }
 void delta_io(RetainedDeltaIn& s, RetainedHighlightState& v) {
     io(s.in, v.show_selected); io(s.in, v.strip_preselected); io(s.in, v.hover_characters);
-    io(s.in, v.hover_objects); io_resource(s, v.hover);
+    io(s.in, v.hover_objects); io_resource(s, v.hover); io(s.in, v.alt);
+    v.alt_objects.resize(s.in.count(4));
+    for (auto& id : v.alt_objects) io(s.in, id);
 }
 void delta_io(RetainedDeltaOut& s, const std::vector<RetainedWorldPointLight>& v) {
     codec::io_count(s.out, v.size());

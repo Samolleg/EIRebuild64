@@ -115,6 +115,11 @@ struct D3D12NativeState {
     // targets 0-4 keep the state's blend: a blended opaque draw's guide
     // alpha carries packed words, never a coverage.
     static constexpr UINT kCustomGuideTargetsOpaque = 8;
+    // A liquid body's guide twin (issue 283): targets 0-4 keep the state's
+    // blend; 6's colour (the diffuse guide) is multiplied by the output, 5's
+    // alpha (the roughness) moves toward 1 by the output alpha; the packed
+    // alpha words and target 7 are not written.
+    static constexpr UINT kCustomGuideLiquid = 16;
     struct CustomBlend {
         UINT custom = 0, source = D3D11_BLEND_ONE, destination = D3D11_BLEND_ZERO, op = D3D11_BLEND_OP_ADD;
         UINT source_alpha = D3D11_BLEND_ONE, destination_alpha = D3D11_BLEND_ZERO, op_alpha = D3D11_BLEND_OP_ADD;
@@ -128,6 +133,7 @@ struct ShaderProgram;  // shader_cache.h
 // One triangle geometry of a bottom-level structure: byte offsets into the
 // vertex and index buffers. opaque false: its triangles are candidates the
 // ray query's own alpha test accepts or passes.
+enum : UINT { kD3D12BottomUpdatable = 1, kD3D12BottomRefit = 2 };  // build_raytracing_bottom's refit
 struct D3D12RaytracingGeometry {
     UINT64 vertex_offset = 0, index_offset = 0;
     UINT vertex_count = 0, index_count = 0;
@@ -366,17 +372,28 @@ public:
     // build_raytracing_top, never a slot's resource. dynamic: a structure
     // built again every frame (fast build); out, when it already holds a
     // dynamic structure with room, is built again in place.
+    // refit (dynamic only): kD3D12BottomUpdatable builds a structure that can
+    // later be refitted; kD3D12BottomRefit updates out (an updatable structure
+    // built from geometries with the same count, order, flags, index and
+    // vertex counts and index contents; only vertex positions and buffer
+    // addresses may differ) in place from the new positions, keeping its
+    // tree (DXR PERFORM_UPDATE). The caller owns that sameness.
     virtual HRESULT build_raytracing_bottom(D3D12Buffer& vertices, UINT vertex_stride, D3D12Buffer& indices,
                                             const D3D12RaytracingGeometry* geometries, UINT count, D3D12BufferRef& out,
-                                            bool dynamic = false) = 0;
+                                            bool dynamic = false, UINT refit = 0) = 0;
     // A top-level structure of instances of bottom-level structures (at the
     // identity transform unless placed), built now. out binds at a t slot
     // (set_resource) as a RaytracingAccelerationStructure; the caller keeps
     // every bottom level for as long as it binds out. The executor logs one
     // line a build (instances, and the bottom-level builds since the last).
     // dynamic: as above (built again in place when out has room; no log line).
+    // refit (dynamic only): kD3D12BottomUpdatable builds it updatable;
+    // kD3D12BottomRefit updates out in place from the instance descriptions
+    // its last build uploaded (instances is not read; the same bottom levels,
+    // whose contents a refit or an in-place build changed), refreshing their
+    // bounds and keeping its tree.
     virtual HRESULT build_raytracing_top(const D3D12RaytracingInstance* instances, UINT count, D3D12BufferRef& out,
-                                         bool dynamic = false) = 0;
+                                         bool dynamic = false, UINT refit = 0) = 0;
     // Compaction of the static bottom-level structures whose compacted size
     // the GPU has reported since their build: each is copied compacted into
     // other pool memory, in stream order, and keeps its buffer. True: some
@@ -403,6 +420,10 @@ public:
     // strip is set, else a list (the composite_world effects and critters).
     virtual HRESULT draw_instanced(const ShaderProgram& vertex, const ShaderProgram& pixel, const D3D12NativeState& state,
                                    const RECT* scissor, UINT vertex_count, UINT instance_count, bool strip) = 0;
+    // The pipeline draw_instanced would use with the bound targets, requested
+    // on the pipeline workers: no draw and no wait (warms an effect the
+    // recorded lists may lack because it draws only on some maps or weather, #344).
+    virtual void request_instanced(const ShaderProgram& vertex, const ShaderProgram& pixel, const D3D12NativeState& state) noexcept = 0;
     // The interface depth target: cleared at each frame's start and here.
     virtual void clear_depth(float depth, UINT8 stencil) noexcept = 0;
     // Device::Clear with rectangles (output pixels): the bound target's colour
@@ -417,6 +438,9 @@ public:
     // Null: none. The map stays the caller's. A twin whose pipeline cannot be
     // made draws its original (counted, its first program logged).
     virtual void set_program_substitutes(const std::unordered_map<const ShaderProgram*, const ShaderProgram*>* map, bool draw) noexcept = 0;
+    // Whether the next draws may take the substitutes (fire burn: only a
+    // world batch that touches a burn; true outside the world batches).
+    virtual void set_substitute_draws(bool allowed) noexcept = 0;
     // The game's one-shot picking frame is data: every requested pipeline
     // must finish compiling before its draws/dispatches can be copied out.
     virtual void set_hit_test_frame(bool active) noexcept = 0;
@@ -526,6 +550,11 @@ public:
     // No pixel conversion. The returned rows have no D3D12 alignment padding.
     virtual HRESULT read_texture_plane(D3D12Texture& texture, bool depth, UINT subresource,
                                        std::vector<std::uint8_t>& pixels, UINT& width, UINT& height) = 0;
+    // The whole of a B8G8R8A8 texture scaled to scaled_width x scaled_height on
+    // the GPU (stretch: d3d12_stretch_program, nearest texel), then read back as
+    // read_texture reads (#342: a save picture never reads the full frame).
+    virtual HRESULT read_scaled(D3D12Texture& texture, const ShaderProgram& stretch, UINT scaled_width, UINT scaled_height,
+                                std::vector<std::uint8_t>& pixels, UINT& width, UINT& height) = 0;
     // A pass or command this backend does not draw yet: one log line per
     // name, the F11 list; world: the frame shows the world marker colour.
     virtual void omit(const char* name, bool world) noexcept = 0;
@@ -536,6 +565,13 @@ public:
     // the frame list, so a device removal names the pass of its last
     // unfinished operation (DRED breadcrumb context).
     virtual void marker(const char* name) noexcept = 0;
+    // Live D3D12 memory by kind and creation site (issue #289): report lines
+    // for memory_status, given the process's local video memory use.
+    virtual std::vector<std::string> memory_report(std::uint64_t process_local_bytes) = 0;
+    // Every byte written to a buffer or texture since the device began (#289).
+    virtual std::uint64_t uploaded_bytes() const noexcept = 0;
+    // The host's resident memory by owner and its largest allocation sites (#289).
+    virtual std::vector<std::string> host_memory_report() = 0;
     // Work a library records into the frame's command list itself (NVIDIA
     // NGX for DLSS). Each listed texture (its depth when depth is set) is
     // moved first to the state the library expects (written: unordered
@@ -571,6 +607,22 @@ public:
     // the start (its log line and library save) and returns false. Called
     // until false before the first real frame.
     virtual bool start_warming(std::size_t& done, std::size_t& total) = 0;
+    // The recorded pipelines (shipped list and this machine's list) whose
+    // programs the features in `features` use (d3d12_features_for_settings),
+    // built on the workers; the others wait for a setting that turns their
+    // feature on (#325). Returns how many pipelines it newly requested.
+    // menu_only: only the records tagged as drawn in the main menu (the start
+    // waits for those; a second call without it queues the rest behind the menu).
+    virtual std::uint32_t request_pipelines(std::uint64_t features, bool menu_only = false) = 0;
+    // The main menu is the scene: pipelines first used while it is are tagged
+    // in the recorded list as the menu's (#325).
+    virtual void set_menu_scene(bool menu) noexcept = 0;
+    // True while requested pipelines are still being built on the workers
+    // (done and total of every pipeline requested so far).
+    virtual bool pipelines_building(std::size_t& done, std::size_t& total) = 0;
+    // Writes the pipeline library on a thread of its own (#325: right after a
+    // settings change's pipelines are built, so a crash does not lose them).
+    virtual void save_library_soon() noexcept = 0;
     // The renderer's profiler times its passes with these GPU timestamps.
     virtual ProfileTimestamps& profile_timestamps() noexcept = 0;
 };
