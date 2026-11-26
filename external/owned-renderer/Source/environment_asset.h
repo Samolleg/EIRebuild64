@@ -18,7 +18,17 @@ struct Part {
     std::array<float,3> minimum{}, maximum{}; // explicit model-local, game Z-up collider
     bool solid = false;
 };
+struct ModelView {
+    std::string primary,secondary,clip;
+    float seconds=0;
+};
+struct ModelMotion;
 struct Asset {
+    std::shared_ptr<const ModelMotion> motion;
+    std::map<std::string,float> clip_lengths;
+    std::map<std::string,std::string> clip_bindings;
+    bool native_model=false;
+    ModelView view;
     ResourceIdentity identity;
     std::vector<Part> parts;
     std::shared_ptr<const ModelCpuAsset> transforms; // rigid scene nodes, no joints/skin
@@ -30,10 +40,11 @@ struct Asset {
     // radius, protected trunk height, plant height, per shape endpoint.
     std::vector<std::array<float,3>> wind;
 };
-std::shared_ptr<const Asset> decode(const ResourceBlob& blob, const std::string& visual);
+std::shared_ptr<const Asset> decode(const ResourceBlob& blob, const std::string& visual, const ModelView* view=nullptr);
+std::shared_ptr<const Asset> sample_model(const std::shared_ptr<const Asset>& source,const std::string& clip,float seconds);
 // Missing entry uses the existing format. Invalid selected GLB never falls back.
-std::shared_ptr<const Asset> select(const std::string& visual);
-std::shared_ptr<const Asset> select(ResourceStore& store,const std::string& visual);
+std::shared_ptr<const Asset> select(const std::string& visual,const ModelView& view={});
+std::shared_ptr<const Asset> select(ResourceStore& store,const std::string& visual,const ModelView& view={});
 bool assigned(ResourceStore& store,const std::string& visual);
 FigureBounds collision(const Part& part,const std::array<float,3>& shape);
 bool selected(const Part& part,const std::vector<std::string>& names);

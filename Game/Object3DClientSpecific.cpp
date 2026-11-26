@@ -23,6 +23,7 @@ static const char LOCAL_FILE[] = __FILE__;
 
 #include "Object3DClientSpecific.h"
 #include "environment_asset.h"
+#include "ServerConsts.h"
 #include "FigureClientSpecific.h"
 #include "AnimationSystem2.h"
 #include "OwnedRender/E1Scene.h"
@@ -275,6 +276,7 @@ CObject3DClientSpecific::~CObject3DClientSpecific()
 /////////////////////////////////////////////////////////////////////////////////////
 BOOL CObject3DClientSpecific::Create()
 {
+    nativePose.reset();
     neutralPose.lease.reset();
     ownedAppearanceAttempted = false;
     ownedAppearanceRevision = 0;
@@ -727,7 +729,7 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
     };
     if (object && object->GetEnvironment()) {
         if (++revision==0) ++revision;
-        return owned::environment::assembly(object->GetEnvironment(),object->GetEnvironmentSelection(),revision,
+        return owned::environment::assembly(nativePose && nativePose->motion==object->GetEnvironment()->motion && nativePose->motion ? nativePose : object->GetEnvironment(),object->GetEnvironmentSelection(),revision,
             {object->GetComplection().strength,object->GetComplection().grace,object->GetComplection().tall});
     }
     if (!animation || !geometry || object->GetNumFigures() <= 0)
@@ -1024,12 +1026,40 @@ bool CObject3DClientSpecific::PrepareOwnedResources(bool publishAppearance)
         if(resource.serial)OwnedRender::E1Scene().Scene().visual_reject(resource,owned::RetainedVisualStatus::unsupported_appearance,"golem.authored_stage_material","host.golem");
         return false;
     }
+    auto* object=static_cast<CObject3D*>(lpObject);
+    const auto& base=object->GetEnvironment();
+    if(publishAppearance && base && base->motion){
+        const auto* animation=object->GetAnimationSystem2();
+        const auto* action=animation?animation->GetCurrentAnimation():nullptr;
+        auto clip=base->view.clip;
+        const auto* world=dynamic_cast<const CWorldBase*>(GetWorld());
+        float seconds=world?float(world->GetSegmentTimeCounter())*(DW_SEGMENT_TIME/1000.f):0.f;
+        if(action && action->dwAnimationLength){
+            std::string name=action->pszAnimationName;
+            for(auto& c:name)if(c>='A'&&c<='Z')c+='a'-'A';
+            const auto binding=base->clip_bindings.find(name);
+            if(binding!=base->clip_bindings.end())name=binding->second;
+            const auto named=base->clip_lengths.find(name);
+            if(named!=base->clip_lengths.end()){
+                clip=name;seconds=named->second*(std::clamp)(animation->GetTime()/float(action->dwAnimationLength),0.f,1.f);
+            }
+        }
+        const auto duration=base->clip_lengths.find(clip);
+        if(duration!=base->clip_lengths.end() && duration->second>0){
+            if(!action || !action->IsUnique())seconds=std::fmod(seconds,duration->second);
+            seconds=std::floor(seconds*30.f)/30.f;
+            if(!nativePose || nativePose->motion!=base->motion || nativePose->view.clip!=clip || nativePose->view.seconds!=seconds){
+                nativePose=owned::environment::sample_model(base,clip,seconds);
+                ownedAppearanceAttempted=false;
+            }
+        }
+    }else nativePose.reset();
     if (publishAppearance && !ownedAppearanceAttempted)
     {
         ownedAppearanceAttempted = true;
         PublishOwnedAppearance();
     }
-    if (publishAppearance && lpObject->WhoAmI() == HPC_UNIT) {
+    if (publishAppearance && lpObject->WhoAmI() == HPC_UNIT && !static_cast<CObject3D*>(lpObject)->GetEnvironment()) {
         const auto resource = OwnedRender::E1Scene().Resource(lpObject);
         if (resource.serial && !OwnedRender::E1CompleteVisualAppearance(*this, resource))
             return false;
@@ -1474,6 +1504,18 @@ BOOL CObject3DClientSpecific::LoadTextures(LPCSTR pszPrimaryTextureName,
                                            BOOL bReportMissing)
 {
     if (static_cast<CObject3D*>(lpObject)->GetEnvironment()) {
+        auto* object=static_cast<CObject3D*>(lpObject);
+        if(object->GetEnvironment()->native_model){
+            CString first=pszPrimaryTextureName?pszPrimaryTextureName:"";
+            CString second=pszSecondaryTextureName?pszSecondaryTextureName:"";
+            if(first!=szPrimaryTextureName || second!=szSecondaryTextureName){
+                szPrimaryTextureName=first;szSecondaryTextureName=second;
+                CString model=object->GetMaskName();
+                object->LoadFigureBoundingVolumes(model);
+                InvalidateOwnedAppearance();
+            }
+            return TRUE;
+        }
         const auto assigned=[](LPCSTR name){return name&&*name&&_stricmp(name,"none")!=0;};
         if(assigned(pszPrimaryTextureName)||assigned(pszSecondaryTextureName))
             throw std::runtime_error("environment GLB: legacy texture override requires authored material conversion");
