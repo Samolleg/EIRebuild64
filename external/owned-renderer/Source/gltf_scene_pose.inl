@@ -9,9 +9,11 @@ struct SceneForm {
     SceneForm(const cgltf_data& d,const Vector& shape):
         translations(d.nodes_count),inverseTranslations(d.nodes_count),weights(d.nodes_count) {
         for(float value:shape)require(std::isfinite(value),"nonfinite body form");
-        const auto extras=[](const cgltf_extras& data){
-            if(!data.data)return Json::object();
-            const auto obj=Json::parse(data.data);
+        const auto extras=[&d](const cgltf_extras& data){
+            // cgltf extracts targetNames from mesh.extras and retains the JSON offsets.
+            if(data.end_offset<=data.start_offset)return Json::object();
+            require(data.end_offset<=d.json_size,"form extras outside JSON");
+            const auto obj=Json::parse(d.json+data.start_offset,d.json+data.end_offset);
             return obj.is_object()?obj.value("ei",Json::object()):Json::object();
         };
         for(size_t i=0;i<d.nodes_count;++i){
