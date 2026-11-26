@@ -1,5 +1,49 @@
 // glTF scene-space pose shared by the game and the editor. Column vectors,
 // column-major matrices, glTF axes until publication at the host boundary.
+struct SceneForm {
+    using Vector=std::array<float,3>;
+    struct Weight {unsigned index;int driver;float value;};
+    std::vector<Vector> translations,inverseTranslations;
+    std::vector<std::vector<Weight>> weights;
+
+    SceneForm(const cgltf_data& d,const Vector& shape):
+        translations(d.nodes_count),inverseTranslations(d.nodes_count),weights(d.nodes_count) {
+        for(float value:shape)require(std::isfinite(value),"nonfinite body form");
+        const auto extras=[](const cgltf_extras& data){
+            if(!data.data)return Json::object();
+            const auto obj=Json::parse(data.data);
+            return obj.is_object()?obj.value("ei",Json::object()):Json::object();
+        };
+        for(size_t i=0;i<d.nodes_count;++i){
+            const auto& node=d.nodes[i];const auto props=extras(node.extras);
+            if(props.contains("formJoint")){
+                require(!node.has_matrix,"formJoint requires TRS");
+                const auto& data=props.at("formJoint");
+                for(unsigned a=0;a<3;++a){
+                    const auto local=vector3(data.at("local").at(a));
+                    const auto inverse=vector3(data.at("inverse").at(a));
+                    for(unsigned k=0;k<3;++k){
+                        translations[i][k]+=(shape[a]-.5f)*local[k];
+                        inverseTranslations[i][k]+=(shape[a]-.5f)*inverse[k];
+                    }
+                }
+            }
+            if(!node.mesh)continue;
+            const auto mesh=extras(node.mesh->extras);
+            if(!mesh.contains("formTargets"))continue;
+            require(node.mesh->primitives_count!=0,"missing form primitive");
+            const auto count=node.mesh->primitives[0].targets_count;
+            for(const auto& entry:mesh.at("formTargets")){
+                const auto index=entry.at("target").get<unsigned>();
+                const auto axis=entry.at("axis").get<unsigned>();
+                const int driver=entry.value("driver",-1);
+                require(index<count && axis<3 && driver>=-1 && (driver<0||size_t(driver)<count),"form target binding");
+                weights[i].push_back({index,driver,shape[axis]-.5f});
+            }
+        }
+    }
+};
+
 struct ScenePose {
     using Matrix=std::array<float,16>;
     static Matrix identity(){return {1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1};}
@@ -9,6 +53,7 @@ struct ScenePose {
             for(unsigned k=0;k<4;++k)out[c*4+r]+=a[k*4+r]*b[c*4+k];
         return out;
     }
+    const std::vector<SceneForm::Vector>& inverseTranslations;
     std::vector<Matrix> world;
     std::vector<std::vector<float>> weights;
     using Clips=std::map<std::string,gltf::Clip>;
@@ -49,7 +94,7 @@ struct ScenePose {
         }
         return clips;
     }
-    ScenePose(const cgltf_data& d,const Clips& clips,const std::string& clip,float seconds){
+    ScenePose(const cgltf_data& d,const Clips& clips,const std::string& clip,float seconds,const SceneForm& form):inverseTranslations(form.inverseTranslations){
         std::vector<cgltf_node> nodes(d.nodes,d.nodes+d.nodes_count);
         weights.resize(nodes.size());world.resize(nodes.size());
         for(size_t i=0;i<nodes.size();++i){
@@ -70,6 +115,14 @@ struct ScenePose {
                 }
             }
         }
+        for(size_t i=0;i<nodes.size();++i){
+            for(unsigned k=0;k<3;++k)nodes[i].translation[k]+=form.translations[i][k];
+            if(form.weights[i].empty())continue;
+            auto& w=weights[i];w.resize(nodes[i].mesh->primitives[0].targets_count);
+            const auto animated=w;
+            for(const auto& binding:form.weights[i])
+                w[binding.index]+=binding.value*(binding.driver<0?1.f:animated[binding.driver]);
+        }
         std::vector<bool> done(nodes.size());
         std::function<void(size_t)> visit=[&](size_t i){
             if(done[i])return;
@@ -86,7 +139,9 @@ struct ScenePose {
         std::vector<Matrix> result;
         for(size_t i=0;i<s.joints_count;++i){
             Matrix m=identity();if(!inverse.empty())std::copy_n(inverse.data()+i*16,16,m.begin());
-            result.push_back(product(world.at(s.joints[i]-d.nodes),m));
+            const auto j=size_t(s.joints[i]-d.nodes);
+            for(unsigned k=0;k<3;++k)m[12+k]+=inverseTranslations[j][k];
+            result.push_back(product(world.at(j),m));
         }
         return result;
     }

@@ -28,6 +28,7 @@ typedef int32_t (EI_ENV_CALL *EiEnvironmentSink)(void*,const EiEnvironmentPart*)
 typedef int32_t (EI_ENV_CALL *EiEnvironmentDecode)(const void*,uint64_t,const char*,EiEnvironmentSink,void*,char*,uint32_t);
 typedef int32_t (EI_ENV_CALL *EiModelPoseSink)(void*,const char*,uint32_t,const float*,const float*);
 typedef int32_t (EI_ENV_CALL *EiModelOpen)(const void*,uint64_t,const char*,const char*,const char*,const char*,EiEnvironmentSink,void*,char*,uint32_t,void**);
+typedef int32_t (EI_ENV_CALL *EiModelOpenForm)(const void*,uint64_t,const char*,const char*,const char*,const char*,const float*,EiEnvironmentSink,void*,char*,uint32_t,void**);
 typedef int32_t (EI_ENV_CALL *EiModelPose)(void*,float,EiModelPoseSink,void*);
 typedef void (EI_ENV_CALL *EiModelClose)(void*);
 #ifdef __cplusplus

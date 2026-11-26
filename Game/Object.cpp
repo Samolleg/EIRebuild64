@@ -1114,6 +1114,7 @@ CParticle* CObject3D::FindPowerHitGlow(int hit){for(POSITION pos=particles.GetHe
 bool CObject3D::LoadEnvironment(LPCSTR name, const CStringArray* selected)
 {
     owned::environment::ModelView view;
+    view.shape={complection.strength,complection.grace,complection.tall};
     if(auto* client=dynamic_cast<CObject3DClientSpecific*>(GetObjectSpecific())){
         view.primary=client->GetPrimaryTextureName().GetString();
         view.secondary=client->GetSecondaryTextureName().GetString();
