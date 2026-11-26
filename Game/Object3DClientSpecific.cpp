@@ -54,6 +54,22 @@ static const char LOCAL_FILE[] = __FILE__;
 #include "Light.h"
 // #include "GSVars.h"
 /////////////////////////////////////////////////////////////////////////////////////
+static const char* HorseVisualForTexture(const CString& texture)
+{
+    static const struct { const char* texture; const char* visual; } coats[] = {
+        {"horse00", "mount-horse"},
+        {"horse01", "mount-white-horse"},
+        {"horse02", "mount-chestnut"},
+        {"horse03", "mount-palomino"},
+        {"horse04", "mount-tobiano"},
+        {"zebra00", "mount-zebra"}
+    };
+    for (const auto& coat : coats)
+        if (texture.CompareNoCase(coat.texture) == 0)
+            return coat.visual;
+    return nullptr;
+}
+
 bool IsPrimaryTextureTID(ETypeIDs tid)
 {
     switch (tid)
@@ -742,10 +758,8 @@ std::shared_ptr<const owned::VisualAssemblyAsset> CObject3DClientSpecific::Build
         auto* client = IWorldClient.GetPlayer();
         auto* player = client ? client->GetPlayer() : nullptr;
         if (unit->GetMaskName() && _stricmp(unit->GetMaskName(),"unanhoho")==0) {
-            const auto& skin = GetPrimaryTextureName();
-            if (skin.CompareNoCase("horse00")==0) assembly->gltf_visual="mount-horse";
-            if (skin.CompareNoCase("horse01")==0) assembly->gltf_visual="mount-white-horse";
-            if (skin.CompareNoCase("zebra00")==0) assembly->gltf_visual="mount-zebra";
+            if (const char* visual = HorseVisualForTexture(GetPrimaryTextureName()))
+                assembly->gltf_visual = visual;
             if (!assembly->gltf_visual.empty()) {
                 const auto& saddle = GetSecondaryTextureName();
                 for (const char* region : {"gipat", "ingos", "suslanger"}) {
@@ -1539,7 +1553,7 @@ BOOL CObject3DClientSpecific::LoadTextures(LPCSTR pszPrimaryTextureName,
     // Regional horse skins are embedded in the registered skinned GLB.
     auto* horseObject = static_cast<CObject3D*>(lpObject);
     if (horseObject->GetMaskName() && _stricmp(horseObject->GetMaskName(),"unanhoho")==0 &&
-        (szPrimaryTextureName.CompareNoCase("horse00")==0 || szPrimaryTextureName.CompareNoCase("horse01")==0 || szPrimaryTextureName.CompareNoCase("zebra00")==0) &&
+        HorseVisualForTexture(szPrimaryTextureName) &&
         pszSecondaryTextureName && (_stricmp(pszSecondaryTextureName,"saddle-gipat")==0 ||
         _stricmp(pszSecondaryTextureName,"saddle-ingos")==0 || _stricmp(pszSecondaryTextureName,"saddle-suslanger")==0)) {
         szSecondaryTextureName=pszSecondaryTextureName;
