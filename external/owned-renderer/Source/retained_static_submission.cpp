@@ -2720,6 +2720,9 @@ bool retained_visual_combat_anchor(const RetainedVisualSample& sample,
     return finite_value(anchor[0]) && finite_value(anchor[1]) && finite_value(anchor[2]);
 }
 
+namespace {
+bool fur_figure_box(const FigureCpuAsset&, const std::array<float,3>&, float (&)[3], float (&)[3]) noexcept;
+}
 bool retained_visual_neutral_parts_box(const RetainedVisualSample& sample,
     const std::vector<std::size_t>& parts,std::array<float,3>& minimum,std::array<float,3>& maximum) {
     if (!sample.assembly||!sample.assembly->skeleton) return false;
@@ -2735,14 +2738,14 @@ bool retained_visual_neutral_parts_box(const RetainedVisualSample& sample,
     for (const auto index:parts) {
         if (index>=assembly.parts.size()) return false;
         const auto& part=assembly.parts[index];
-        if (!part.geometry||part.geometry->bounds.empty()||part.skeleton_node>=nodes.size()) continue;
-        const auto box=part.geometry->shape_count==1?part.geometry->bounds.front():selected_bounds(*part.geometry,shape);
+        if (!part.geometry||part.skeleton_node>=nodes.size()) continue;
+        float lo[3],hi[3]; if (!fur_figure_box(*part.geometry,shape,lo,hi)) continue;
         std::array<float,16> local{};
         if (!visual_node_world_matrix(root,nodes[part.skeleton_node],{1,1,1},local)) return false;
         for (unsigned corner=0;corner<8;++corner) {
             std::array<float,3> p{};
             for (unsigned axis=0;axis<3;++axis)
-                p[axis]=(corner>>axis)&1u?box.maximum[axis]:box.minimum[axis];   // FIG boxes are absolute
+                p[axis]=(corner>>axis)&1u?hi[axis]:lo[axis];
             for (unsigned axis=0;axis<3;++axis) {
                 const float value=local[axis*4+3]+local[axis*4]*p[0]+local[axis*4+1]*p[1]+local[axis*4+2]*p[2];
                 minimum[axis]=(std::min)(minimum[axis],value); maximum[axis]=(std::max)(maximum[axis],value);
@@ -3824,7 +3827,8 @@ bool retained_visual_merged_groups(const RetainedVisualSample& sample) {
         }
         build_skn_groups(sample,skn::from_gltf(item.asset),&nodes,item.weapon,item.arrow,
             &item.base_color_overrides,&item.metallic_roughness_overrides,&item.material_identities,item.physique_anchors.get(),
-            item.asset->mechanism.empty() && !item.asset->projectile_aim && item.offset!=std::array<float,3>{} ? &item.offset : nullptr);
+            item.asset->mechanism.empty() && !item.asset->projectile_aim && item.offset!=std::array<float,3>{} ? &item.offset : nullptr,
+            item.slot=="armor_0" || item.slot=="base_hair");
        }
       }
       if(built)prepared.merged_assembly=sample.assembly;

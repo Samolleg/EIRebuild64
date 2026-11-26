@@ -1328,6 +1328,29 @@ std::shared_ptr<Asset> decode(const ResourceBlob &blob, const ResourceBlob &prof
                   primitive.material ? static_cast<unsigned>(primitive.material - data.materials)
                                      : static_cast<unsigned>(data.materials_count),
                   0, 0 });
+            const auto primitiveExtras = extras(primitive.extras);
+            const auto region = primitiveExtras.find("ei");
+            output->portrait_head_submeshes.push_back(region != primitiveExtras.end() &&
+                region->is_object() && region->value("zone", std::string{}) == "head");
+            if(output->portrait_head_submeshes.back()) {
+                std::array<float,3> lo{},hi{};
+                for(unsigned i=0;i<count;++i) {
+                    const auto& p=idlePositions.at(output->geometry.indices[first+i]-base);
+                    const std::array<float,3> game{p[0],-p[2],p[1]};
+                    for(unsigned c=0;c<3;++c) {
+                        lo[c]=i?std::min(lo[c],game[c]):game[c];
+                        hi[c]=i?std::max(hi[c],game[c]):game[c];
+                    }
+                }
+                for(unsigned c=0;c<3;++c) {
+                    output->portrait_min[c]=output->face_indices?std::min(output->portrait_min[c],lo[c]):lo[c];
+                    output->portrait_max[c]=output->face_indices?std::max(output->portrait_max[c],hi[c]):hi[c];
+                }
+                if(count>output->face_indices) {
+                    output->face_indices=static_cast<unsigned>(count);
+                    output->face_min=lo;output->face_max=hi;
+                }
+            }
             output->geometry.semantic_joints.push_back(0);
         }
     }

@@ -36,6 +36,9 @@ int wmain(int argc, wchar_t** argv) {
         check(policy.Update(9, 2, true, true, false, set) == Event::none && commands.size() == 2);
         check(policy.Update(10, 3, true, true, false, set) == Event::paused);
         check(policy.Update(6010, 3, true, true, true, set) == Event::none);
+        check(policy.Update(6011, 3, true, true, true, set) == Event::none);
+        for (unsigned i = 0; i < 29; ++i)
+            check(policy.Update(6011, 3, true, true, true, set) == Event::none);
         check(policy.Update(6011, 3, true, true, true, set) == Event::resumed && !commands.back());
         check(policy.Update(6012, 3, true, true, false, set) == Event::none);
         check(policy.Update(6013, 4, true, true, false, set) == Event::paused);

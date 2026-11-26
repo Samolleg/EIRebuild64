@@ -1623,6 +1623,7 @@ public:
     HRESULT read_embedded_output_size(UINT& width, UINT& height);
     // Native output capture, tightly packed BGRA. S_FALSE means minimized.
     // The caller must consume the returned pixels only on S_OK.
+    HRESULT read_save_thumbnail(UINT width, UINT height, std::vector<std::uint8_t>& pixels);
     HRESULT read_embedded_d3d12_output(std::vector<std::uint8_t>& pixels, UINT& width, UINT& height);
     bool embedded_hit_test_frame() const noexcept { return hit_test_active_; }
     HRESULT visit_embedded_output(void* user, EmbeddedOutputVisitor visitor) const {

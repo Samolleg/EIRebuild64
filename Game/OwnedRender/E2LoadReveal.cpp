@@ -1,14 +1,23 @@
 #include "E2LoadReveal.h"
-#include "engine_bridge.h"
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#undef min
+#undef max
+#include "owned_world_frame.h"
 #include "embedded_sky.h"
 #include "../GameJournal.h"
 #include <mutex>
 
 namespace {
 std::mutex requestLock;
-bool enabled = false, localMissionActive = false;
+bool localMissionActive = false;
 std::uint64_t localMissionEpoch = 0;
-std::uint64_t revealed = 0;
+bool rendererHolds(std::uint64_t epoch) noexcept {
+    return epoch && owned::g_load_reveal_enabled.load(std::memory_order_relaxed) &&
+        epoch != owned::g_load_reveal_revealed_epoch.load(std::memory_order_relaxed) &&
+        owned::embedded_sky().installed();
+}
 OwnedRender::LoadRevealPause pause;
 }
 namespace owned {
@@ -19,13 +28,15 @@ bool bridge_local_single_player_mission() noexcept {
 }
 void bridge_set_load_reveal(bool value, std::uint64_t epoch) noexcept {
     std::lock_guard<std::mutex> lock(requestLock);
-    enabled = value; revealed = epoch;
+    g_load_reveal_revealed_epoch.store(epoch, std::memory_order_relaxed);
+    g_load_reveal_enabled.store(value, std::memory_order_relaxed);
+    g_load_reveal_unreported_draws.store(0, std::memory_order_relaxed);
 }
 }
 namespace OwnedRender {
 bool E2LoadRevealHeld(std::uint64_t epoch) noexcept {
     std::lock_guard<std::mutex> lock(requestLock);
-    return enabled && epoch && epoch != revealed && owned::embedded_sky().installed();
+    return rendererHolds(epoch);
 }
 void E2LoadRevealFrame(std::uint64_t epoch, bool localMission, bool paused,
                       SetLoadPause set, void* context) noexcept {
@@ -33,9 +44,12 @@ void E2LoadRevealFrame(std::uint64_t epoch, bool localMission, bool paused,
     {
         std::lock_guard<std::mutex> lock(requestLock);
         localMissionActive = localMission; localMissionEpoch = epoch;
-        hold = enabled && epoch && epoch != revealed && owned::embedded_sky().installed();
+        const unsigned missed = owned::g_load_reveal_unreported_draws.load(std::memory_order_relaxed);
+        if (missed < 30)
+            owned::g_load_reveal_unreported_draws.store(missed + 1, std::memory_order_relaxed);
+        hold = rendererHolds(epoch) && missed < 30;
     }
-    const auto event = pause.Update(GetTickCount64(), epoch, hold, localMission, paused,
+    const auto event = pause.Update(owned::bridge_world_draw_completion_counter(), epoch, hold, localMission, paused,
         [&](bool value) { return set && set(context, value); });
     const char* detail = nullptr;
     switch (event) {

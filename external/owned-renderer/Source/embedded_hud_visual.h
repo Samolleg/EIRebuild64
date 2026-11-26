@@ -21,6 +21,7 @@ struct EmbeddedHudPortraitInput {
     const char* texture_name = nullptr;
     const char* base_texture_name = nullptr;
     bool whole_atlas = false;
+    std::shared_ptr<const TextureCpuAsset> expression_mask;
     HudIconPlacement placement{};
     std::int32_t unit_id = 0;
     std::uint32_t slot = 0;

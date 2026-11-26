@@ -3475,10 +3475,29 @@ BOOL CWorldClient::Prepare3DScene()
     const auto publicationEpoch = OwnedRender::E1Scene().Epoch();
     const bool capturePublication = publicationEpoch && publicationEpoch != lastPublicationEpoch;
     std::vector<std::pair<int, unsigned>> unclaimedPublicationStages;
+    auto& retainedScene = OwnedRender::E1Scene().Scene();
+    std::vector<owned::RetainedStaticScene::VisualResyncCandidate> rejected;
+    std::pmr::unordered_map<int, std::uint64_t> retryUnits(&poseScratch);
+    if (retainedScene.visual_take_resync_candidates(rejected))
+        for (const auto& candidate : rejected) retryUnits[candidate.signed_id] = candidate.serial;
     auto prepare = [&](CMapObject* object) {
         if (!object || !object->GetObjectSpecific() || !prepared.insert(object->GetID()).second)
             return;
         auto* specific = static_cast<CObject3DClientSpecific*>(object->GetObjectSpecific());
+        // Re-read the current incarnation if a rejected event cleared an assembly
+        // that the game already published. Its own retry must not requeue itself.
+        const auto retry = retryUnits.find(object->GetID());
+        const bool resync = retry != retryUnits.end() && object->WhoAmI() == HPC_UNIT &&
+            retry->second == OwnedRender::E1Scene().Resource(object).serial;
+        struct RetryScope {
+            owned::RetainedStaticScene& scene;
+            bool active;
+            ~RetryScope() { if (active) scene.visual_suppress_resync_queue(false); }
+        } retryScope{retainedScene, resync};
+        if (resync) {
+            retainedScene.visual_suppress_resync_queue(true);
+            specific->InvalidateOwnedAppearance();
+        }
         if (!capturePublication)
         {
             specific->PrepareOwnedVisual(pRend, object->CheckFlag(OBJ_VISIBLE) != 0);

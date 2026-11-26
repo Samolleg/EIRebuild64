@@ -1178,6 +1178,20 @@ HRESULT CDXGISurface::Clear(DWORD dwColorFill)
     return 0;
 }
 /////////////////////////////////////////////////////////////////////////////////////
+HRESULT CDXGISurface::CaptureSaveThumbnail(UINT rows)
+{
+    if (!rows || rows > dwSurfaceHeight) return E_INVALIDARG;
+    std::vector<std::uint8_t> pixels;
+    const HRESULT hr = pDX11->GetRendererFacade().Visit([&](owned::Renderer& renderer) {
+        return renderer.read_save_thumbnail(dwSurfaceWidth, rows, pixels);
+    });
+    if (hr != S_OK) return hr;
+    D3D11_BOX region{0, 0, 0, dwSurfaceWidth, rows, 1};
+    D3D11_SUBRESOURCE_DATA data{pixels.data(), UINT(dwSurfaceWidth * 4), 0};
+    UpdateTexture(0, &region, &data, MMP_FORMAT_8888);
+    return S_OK;
+}
+
 HRESULT CDXGISurface::SaveThumbnailFile(LPCSTR path, UINT rows) noexcept
 {
     if (!path || !rows || rows > dwSurfaceHeight || !dwSurfaceWidth) return E_INVALIDARG;

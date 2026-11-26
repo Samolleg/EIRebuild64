@@ -550,6 +550,8 @@ public:
     // No pixel conversion. The returned rows have no D3D12 alignment padding.
     virtual HRESULT read_texture_plane(D3D12Texture& texture, bool depth, UINT subresource,
                                        std::vector<std::uint8_t>& pixels, UINT& width, UINT& height) = 0;
+    virtual HRESULT read_scaled_back_buffer(const ShaderProgram& stretch, UINT width, UINT height,
+                                            std::vector<std::uint8_t>& pixels) = 0;
     // The whole of a B8G8R8A8 texture scaled to scaled_width x scaled_height on
     // the GPU (stretch: d3d12_stretch_program, nearest texel), then read back as
     // read_texture reads (#342: a save picture never reads the full frame).

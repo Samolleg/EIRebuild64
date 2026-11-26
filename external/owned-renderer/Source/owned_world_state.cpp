@@ -1339,8 +1339,8 @@ std::shared_ptr<OwnedPortraitOverlay> owned_portrait_overlay(const std::string& 
 }
 
 // One object preview through its captured device-state sets.
-void run_owned_preview_command(OwnedPreviewCommand& command) noexcept {
-    if (command.sets.empty()) return;
+bool run_owned_preview_command(OwnedPreviewCommand& command) noexcept {
+    if (command.sets.empty()) return false;
     const auto& handoff = command.handoff;
     void* sinks = command.sets.front().get();
     Renderer& renderer = *SceneSinks::of(sinks).renderer;
@@ -1376,27 +1376,39 @@ void run_owned_preview_command(OwnedPreviewCommand& command) noexcept {
         const bool baked_preview=ok && bool(sample.prepared->motion_asset);
         if(baked_preview){
             ok=retained_visual_merged_groups(sample) && sample.prepared->skn_selected;
+            unsigned drawn=0;
             for(std::size_t index=0;ok && index<sample.prepared->merged_groups.size();++index){
                 const auto& group=sample.prepared->merged_groups[index];
                 const auto captured=std::find_if(command.parts.begin(),command.parts.end(),[&](const auto& part){
                     return std::find(group.parts.begin(),group.parts.end(),part.ordinal)!=group.parts.end();
                 });
-                if(captured==command.parts.end())continue;
-                if(handoff.adopt_sinks)handoff.adopt_sinks(sinks,command.sets[captured->set].get());
+                const bool gltfPortrait=command.portrait && sample.prepared->motion_asset->gltf_asset;
+                if(gltfPortrait ? !group.gltf_portrait : captured==command.parts.end())continue;
+                const auto& source=gltfPortrait?command.parts.front():*captured;
+                if(handoff.adopt_sinks)handoff.adopt_sinks(sinks,command.sets[source.set].get());
                 NativeWorldBounds bounds{};NativePreparedPartSubmission* record=nullptr;
-                if(!retained_visual_part_bounds(sample,captured->ordinal,bounds)||
+                if(!retained_visual_part_bounds(sample,source.ordinal,bounds)||
                    !retained_visual_group_submission(sample,index,bounds,{true,true,0},command.texture_time,command.fog,record)){ok=false;break;}
                 NativeGeometryView view=*record->source;
                 view.world.pose=pose;view.world.owner=&pose->owner;
+                view.world.object_to_world=command.base_world;
                 view.world.world_to_clip=command.world_to_clip;view.object_to_clip=command.world_to_clip;
                 view.prepared_identity.presentation_serial=command.presentation_serial;
-                view.lighting=captured->lighting;view.interface_preview=true;
+                view.lighting=source.lighting;view.interface_preview=true;
+                if(gltfPortrait){
+                    const auto& material=group.skn_asset->asset.materials[group.skn_material];
+                    view.lighting.enabled=true;view.lighting.material_diffuse={1,1,1};
+                    view.lighting.material_alpha=material.alpha==0?1.f:material.base[3];
+                    view.lighting.object_to_world=command.base_world;
+                }
                 view.ordering=NativeOrdering::preserve;view.contribution={true,true,0};
                 view.bounds_minimum=bounds.minimum;view.bounds_maximum=bounds.maximum;
                 view.flags=record->values.flags&native_unit_flag;
                 NativeGeometryResult result{};
                 if(!g_native_sink_submit(g_native_sink_context,view,result)){ok=false;break;}
+                ++drawn;
             }
+            if(!drawn)ok=false;
         }
         for (std::size_t i = 0; ok && !baked_preview && i < command.parts.size(); ++i) {
             const auto& part = command.parts[i];
@@ -1470,6 +1482,7 @@ void run_owned_preview_command(OwnedPreviewCommand& command) noexcept {
     }
     clear_owned_scene_inputs(handoff);
     if (frame_depth) renderer.clear_interface_depth(clip[0], clip[1], clip[2], clip[3]);
+    return ok;
 }
 
 // The footprint snapshot of the world command being prepared (scene thread,

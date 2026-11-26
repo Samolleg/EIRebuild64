@@ -356,7 +356,7 @@ struct VisualPreparedResources {
         std::shared_ptr<const std::uint8_t> skn_material_identity;
         std::uint32_t skn_material = 0;
         bool skn_casts_shadow = true;
-        bool gltf_weapon = false, gltf_arrow = false;
+        bool gltf_weapon = false, gltf_arrow = false, gltf_portrait = false;
         std::vector<std::uint32_t> parts;
         std::uint32_t shape_count = 0, position_groups = 0, normal_groups = 0;
         std::shared_ptr<const MergedGeometry> geometry;
@@ -1005,6 +1005,7 @@ public:
     // completed state at its render-time seam instead of leaving them out.
     struct VisualResyncCandidate {
         std::int32_t signed_id = 0;
+        std::uint64_t serial = 0;
         RetainedVisualStatus status{};
         const char* reason = nullptr;
         const char* scope = nullptr;

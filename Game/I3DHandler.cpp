@@ -314,7 +314,7 @@ void CI3DHandlerNewCamera::OnMouseMove(UINT nFlags, CPoint point)
         float x = point.x / 400.f - 1;
         float y = point.y / 300.f - 1;
 
-        if (pI3D->IsCtrlDown() || pI3D->IsAltDown())
+        if (pI3D->IsCtrlDown())
         {
             CPlot2D pt(static_cast<float>(ptIncrement.x) / 400.0f,
                        static_cast<float>(ptIncrement.y) / 300.0f);

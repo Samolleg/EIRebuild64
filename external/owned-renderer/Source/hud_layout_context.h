@@ -87,6 +87,7 @@ public:
     void widescreen_hud_position_percent(HudPanel panel,float left,float top,float width,float height,float& x,float& y) noexcept;
     bool portrait_slot_composition(unsigned slot,const HudNativePanel* object,widescreen::HudComposition& h) noexcept;
     bool widescreen_hud_asset_frame(HudPanel panel,HudAssetFrame& frame) noexcept;
+    bool portrait_frame(unsigned slot, HudAssetFrame& frame);
     void widescreen_hud_asset_frames(std::vector<HudAssetFrame>& frames);
     void set_hud_fades(const std::array<HudFadeSettings,kHudPanels.size()>& settings,const std::array<float,2>& corner_scales,HudFadeTiming timing,std::uint64_t now) noexcept;
     void update_hud_fades(float mouse_x,float mouse_y,std::uint64_t now) noexcept;

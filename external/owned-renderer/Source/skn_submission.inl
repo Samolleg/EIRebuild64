@@ -8,7 +8,7 @@ bool build_skn_groups(const RetainedVisualSample &sample,
                       const std::map<unsigned,std::shared_ptr<const skn::Dds>>* orm_overrides=nullptr,
                       const std::map<unsigned,std::shared_ptr<const std::uint8_t>>* material_ids=nullptr,
                       const std::vector<gltf::GarmentAnchor>* garment=nullptr,
-                      const std::array<float,3>* offset=nullptr) {
+                      const std::array<float,3>* offset=nullptr, bool headAttachment=false) {
   auto &prepared = *sample.prepared;
   const auto &data = asset->asset;
   const auto* physique=prepared.motion_physique.get();
@@ -49,17 +49,21 @@ bool build_skn_groups(const RetainedVisualSample &sample,
   for(unsigned node:nodes)binding_layout.append(reinterpret_cast<const char*>(&node),sizeof(node));
   // One draw per gameplay part/material/region, with a union vertex buffer
   // and independently authored index lists. LODs need not share vertices.
-  std::set<std::array<unsigned,4>> built;
+  const auto portraitGroup = [&](unsigned sub) {
+    return attachmentNodes ? headAttachment : asset->gltf_asset &&
+        asset->gltf_asset->portrait_head_submeshes.at(sub);
+  };
+  std::set<std::array<unsigned,5>> built;
   for (unsigned sub=0;sub<data.submeshes.size();++sub) {
     const auto &mesh = data.submeshes[sub];
-    const std::array<unsigned,4> key{data.semantic_joints[sub],mesh.material,mesh.zone,mesh.layer};
+    const std::array<unsigned,5> key{data.semantic_joints[sub],mesh.material,mesh.zone,mesh.layer,portraitGroup(sub)};
     if(!built.insert(key).second)continue;
     std::vector<std::vector<unsigned>> lists(data.lods.size());
     for(unsigned level=0;level<data.lods.size();++level){
       const auto& lod=data.lods[level];
       for(unsigned m=lod.first_submesh;m<lod.first_submesh+lod.submesh_count;++m){
         const auto& candidate=data.submeshes[m];
-        if(std::array<unsigned,4>{data.semantic_joints[m],candidate.material,candidate.zone,candidate.layer}!=key)continue;
+        if(std::array<unsigned,5>{data.semantic_joints[m],candidate.material,candidate.zone,candidate.layer,portraitGroup(m)}!=key)continue;
         for(unsigned i=candidate.first;i<candidate.first+candidate.count;++i)lists[level].push_back(data.indices[i]);
       }
     }
@@ -135,6 +139,7 @@ bool build_skn_groups(const RetainedVisualSample &sample,
     auto &group = prepared.merged_groups.back();
     group.parts = {part};
     group.skn_asset = asset;
+    group.gltf_portrait = portraitGroup(sub);
     if(overrides) {
       auto replacement=overrides->find(mesh.material);
       if(replacement!=overrides->end())group.skn_base_color_override=replacement->second;
